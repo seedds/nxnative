@@ -29,6 +29,7 @@ static void message(NSString *title, NSString *detail) {
 @property (nonatomic, copy) NSString *domain;
 @property (nonatomic) BOOL busy;
 @property (nonatomic) NSInteger volume;
+@property (nonatomic, strong) NSTextField *volumeValue;
 @end
 @implementation DmMacMenus
 - (BOOL)fixed:(NSString *)env {
@@ -45,7 +46,6 @@ static void message(NSString *title, NSString *detail) {
     if (!env || !value) return NO;
     NSDictionary *s = self.settings[env];
     if ([s[@"kind"] isEqual:@"choice"]) { for (NSArray *pair in s[@"options"]) if ([pair.firstObject isEqual:value]) return YES; return NO; }
-    if ([s[@"kind"] isEqual:@"toggle"]) return [value isEqual:s[@"on"] ?: @"1"] || [value isEqual:s[@"off"] ?: @"0"];
     if (![s[@"kind"] isEqual:@"range"]) return NO;
     const char *text = value.UTF8String; if (!text || !*text || isspace((unsigned char)*text) || strpbrk(text, "xX")) return NO;
     char *end; double n = strtod(text, &end);
@@ -57,25 +57,15 @@ static void message(NSString *title, NSString *detail) {
 - (NSString *)current:(NSString *)env {
     if (!env) return nil;
     if ([env isEqual:@"DM_OPMODE"]) return dm_opmode() ? @"1" : @"0";
-    if (![env isEqual:@"DM_METAL_HUD"] && dm_fps_state) {
+    if (dm_fps_state) {
         uint32_t bits = __atomic_load_n((uint32_t *)(dm_fps_state + ([env isEqual:@"DM_RENDER_SCALE"] ? 0x10 : 0)), __ATOMIC_RELAXED);
         float n; memcpy(&n, &bits, sizeof n); return [NSString stringWithFormat:@"%.6g", n];
-    }
-    if (![self fixed:env] && self.domain && !self.ignoringSaved) {
-        NSString *key = [@"launcher." stringByAppendingString:env];
-        CFPropertyListRef v = CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)self.domain);
-        NSString *saved = v && CFGetTypeID(v) == CFStringGetTypeID() ? [(__bridge NSString *)v copy] : nil;
-        if (v) CFRelease(v);
-        if (saved && [self accepts:saved setting:env]) return saved;
-        // HUD is a next-launch choice: removing its saved key selects the tested default, not this run's old environment.
-        return self.settings[env][@"default"];
     }
     const char *e = getenv(env.UTF8String);
     return e ? @(e) : self.settings[env][@"default"];
 }
 - (BOOL)canChange:(NSString *)env value:(NSString *)value {
     if (![self accepts:value setting:env] || [self fixed:env]) return NO;
-    if ([env isEqual:@"DM_METAL_HUD"]) return self.domain != nil && !self.ignoringSaved;
     return [env isEqual:@"DM_OPMODE"] || (([env isEqual:@"DM_FPS_TARGET"] || [env isEqual:@"DM_RENDER_SCALE"]) && dm_fps_state);
 }
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
@@ -86,7 +76,6 @@ static void message(NSString *title, NSString *detail) {
         item.state = [self equal:[self current:env] to:value setting:env] ? NSControlStateValueOn : NSControlStateValueOff;
         return [self canChange:env value:value];
     }
-    if (a == @selector(chooseVolume:)) item.state = self.volume == item.tag ? NSControlStateValueOn : NSControlStateValueOff;
     if (a == @selector(mute:)) item.state = g_muted ? NSControlStateValueOn : NSControlStateValueOff;
     if (a == @selector(muteUnfocused:)) item.state = g_mute_unfocused ? NSControlStateValueOn : NSControlStateValueOff;
     if (a == @selector(resize:)) return !(self.window.styleMask & NSWindowStyleMaskFullScreen);
@@ -106,12 +95,16 @@ static void message(NSString *title, NSString *detail) {
         if (!CFPreferencesAppSynchronize(domain)) { message(@"Setting was not saved", @"The app could not write its saved choices. Try again."); return; }
     }
     if ([env isEqual:@"DM_OPMODE"]) dm_set_opmode(value.intValue);
-    else if (![env isEqual:@"DM_METAL_HUD"]) {
+    else {
         float n = value.floatValue; uint32_t bits; memcpy(&bits, &n, sizeof bits);
         __atomic_store_n((uint32_t *)(dm_fps_state + ([env isEqual:@"DM_RENDER_SCALE"] ? 0x10 : 0)), bits, __ATOMIC_RELAXED);
     }
 }
-- (void)chooseVolume:(NSMenuItem *)item { if (item.tag >= 0 && item.tag <= 100) { self.volume = item.tag; dm_audio_volume((int)item.tag); } }
+- (void)chooseVolume:(NSSlider *)slider {
+    self.volume = lround(slider.doubleValue);
+    self.volumeValue.stringValue = [NSString stringWithFormat:@"%ld%%", (long)self.volume];
+    dm_audio_volume((int)self.volume);
+}
 - (void)mute:(id)sender { (void)sender; g_muted = !g_muted; mac_menus_focus(g_active); }
 - (void)muteUnfocused:(id)sender { (void)sender; g_mute_unfocused = !g_mute_unfocused; mac_menus_focus(g_active); }
 - (void)resize:(NSMenuItem *)item {
@@ -215,7 +208,6 @@ static void setting_menu(NSMenu *parent, NSString *env, DmMacMenus *menus) {
     NSDictionary *s = menus.settings[env]; if (!s) return;
     if (([env isEqual:@"DM_FPS_TARGET"] || [env isEqual:@"DM_RENDER_SCALE"]) && !dm_fps_state) return;
     NSArray *options = s[@"options"];
-    if ([s[@"kind"] isEqual:@"toggle"]) options = @[@[s[@"on"] ?: @"1", @"On"], @[s[@"off"] ?: @"0", @"Off"]];
     if ([s[@"kind"] isEqual:@"range"]) {
         double lo = [s[@"min"] doubleValue], hi = [s[@"max"] doubleValue], step = [s[@"step"] doubleValue];
         if (!isfinite(lo) || !isfinite(hi) || !isfinite(step) || step <= 0 || hi < lo || (hi - lo) / step > 100) return;
@@ -228,10 +220,9 @@ static void setting_menu(NSMenu *parent, NSString *env, DmMacMenus *menus) {
         options = values;
     }
     if (![options isKindOfClass:NSArray.class] || !options.count) return;
-    NSString *title = s[@"label"];
+    NSString *title = [s[@"label"] localizedCapitalizedString];   // AppKit menu titles use title case; the shared form uses sentence case.
     if (!title) return;
-    if ([env isEqual:@"DM_METAL_HUD"]) title = [title stringByAppendingString:@" (Next Launch)"];
-    if ([menus fixed:env]) title = [title stringByAppendingString:@" (launch override)"];
+    if ([menus fixed:env]) title = [title stringByAppendingString:@" (Launch Override)"];
     NSMenu *m = submenu(parent, title);
     for (NSArray *pair in options) {
         NSMenuItem *item = action(m, pair[1], @selector(chooseSetting:), @"", menus);
@@ -245,7 +236,7 @@ void mac_menus_install(NSWindow *window, NSMenu *bar) {
     NSData *data = url ? [NSData dataWithContentsOfURL:url] : nil;
     id list = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
     NSMutableDictionary *rows = [NSMutableDictionary new];
-    NSArray *shown = @[@"DM_OPMODE", @"DM_FPS_TARGET", @"DM_RENDER_SCALE", @"DM_METAL_HUD"];
+    NSArray *shown = @[@"DM_OPMODE", @"DM_FPS_TARGET", @"DM_RENDER_SCALE"];
     if ([list isKindOfClass:NSDictionary.class] && [list[@"settings"] isKindOfClass:NSArray.class])
         for (id s in list[@"settings"]) if ([s isKindOfClass:NSDictionary.class]) {
             NSString *env = s[@"env"]; if (env && [shown containsObject:env]) rows[env] = s;
@@ -271,10 +262,18 @@ void mac_menus_install(NSWindow *window, NSMenu *bar) {
     NSMenu *audio = submenu(bar, @"Audio");
     action(audio, @"Mute Audio", @selector(mute:), @"m", menus).keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
     action(audio, @"Mute When Unfocused", @selector(muteUnfocused:), @"", menus);
-    NSMenu *volume = submenu(audio, @"Volume");
-    for (NSNumber *n in @[@100, @75, @50, @25, @0]) action(volume, [NSString stringWithFormat:@"%@%%", n], @selector(chooseVolume:), @"", menus).tag = n.integerValue;
+    [audio addItem:NSMenuItem.separatorItem];
+    NSMenuItem *volume = [audio addItemWithTitle:@"Volume" action:nil keyEquivalent:@""];
+    NSView *controls = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 220, 56)];
+    NSTextField *label = [NSTextField labelWithString:@"Volume"];
+    label.frame = NSMakeRect(16, 32, 140, 17); [controls addSubview:label];
+    menus.volumeValue = [NSTextField labelWithString:@"100%"];
+    menus.volumeValue.frame = NSMakeRect(156, 32, 48, 17); menus.volumeValue.alignment = NSTextAlignmentRight;
+    [controls addSubview:menus.volumeValue];
+    NSSlider *slider = [NSSlider sliderWithValue:100 minValue:0 maxValue:100 target:menus action:@selector(chooseVolume:)];
+    slider.frame = NSMakeRect(16, 8, 188, 20); slider.continuous = YES; slider.accessibilityLabel = @"Game volume";
+    [controls addSubview:slider]; volume.view = controls;
     NSMenu *view = submenu(bar, @"View"), *sizes = submenu(view, @"Window Scale");
     int index = 0;
     for (NSNumber *n in @[@100, @150, @200, @300]) action(sizes, [NSString stringWithFormat:@"%.1f×", n.doubleValue / 100], @selector(resize:), [NSString stringWithFormat:@"%d", ++index], menus).tag = n.integerValue;
-    setting_menu(view, @"DM_METAL_HUD", menus);
 }

@@ -79,7 +79,7 @@ static int test_output_lifetime(void) {
     return 0;
 }
 static int test_mute_output(void) {
-    const int levels[] = {-10, 0, 25, 50, 75, 100, 110};
+    const int levels[] = {-10, 0, 25, 37, 50, 75, 100, 110};
     for (int muted = 0; muted <= 1; muted++) for (size_t level = 0; level < sizeof levels / sizeof levels[0]; level++) {
         int gain = levels[level] < 0 ? 0 : levels[level] > 100 ? 100 : levels[level];
         int16_t pcm[32], out[32];

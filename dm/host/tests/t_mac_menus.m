@@ -31,8 +31,7 @@ int main(void) {
         m.settings = @{
             @"DM_OPMODE": @{@"kind": @"choice", @"label": @"Console mode", @"default": @"1", @"options": @[@[@"1", @"Docked"], @[@"0", @"Handheld"]]},
             @"DM_FPS_TARGET": @{@"kind": @"choice", @"label": @"Frame rate", @"default": @"60", @"options": @[@[@"30", @"30 fps"], @[@"60", @"60 fps"]]},
-            @"DM_RENDER_SCALE": @{@"kind": @"range", @"label": @"Render scale", @"default": @"1.0", @"min": @0.5, @"max": @1.0, @"step": @0.05},
-            @"DM_METAL_HUD": @{@"kind": @"toggle", @"label": @"Performance HUD", @"default": @"0", @"on": @"1", @"off": @"0"}
+            @"DM_RENDER_SCALE": @{@"kind": @"range", @"label": @"Render scale", @"default": @"1.0", @"min": @0.5, @"max": @1.0, @"step": @0.05}
         };
         [m chooseSetting:choice(@"DM_OPMODE", @"0")]; assert(test_mode == 0);
         assert([saved(m.domain, @"DM_OPMODE") isEqual:@"0"]);
@@ -45,15 +44,15 @@ int main(void) {
         [m chooseSetting:choice(@"DM_OPMODE", @"0")];
         setenv("DM_SAVED_CHOICES", "0", 1);
         [m chooseSetting:choice(@"DM_OPMODE", @"1")]; assert(test_mode == 1 && [saved(m.domain, @"DM_OPMODE") isEqual:@"0"]);
-        assert(![m canChange:@"DM_METAL_HUD" value:@"1"]); unsetenv("DM_SAVED_CHOICES");
+        unsetenv("DM_SAVED_CHOICES");
         [m chooseSetting:choice(@"DM_OPMODE", @"1")];
 
         NSMenu *settings = [NSMenu new];
         setting_menu(settings, @"DM_FPS_TARGET", m); assert(settings.numberOfItems == 0); // unsupported runtime capability stays hidden
         _Alignas(8) uint8_t page[64] = {0}; dm_fps_state = page;
         setting_menu(settings, @"DM_FPS_TARGET", m); setting_menu(settings, @"DM_RENDER_SCALE", m);
-        NSMenu *fps = [settings itemWithTitle:@"Frame rate"].submenu;
-        NSMenu *scale = [settings itemWithTitle:@"Render scale"].submenu;
+        NSMenu *fps = [settings itemWithTitle:@"Frame Rate"].submenu;
+        NSMenu *scale = [settings itemWithTitle:@"Render Scale"].submenu;
         assert(fps.numberOfItems == 2 && scale.numberOfItems == 11); // no invented default interval or supersampling options
         NSMenuItem *fps30 = [fps itemWithTitle:@"30 fps"]; assert(fps30);
         [m chooseSetting:fps30]; assert(state_at(0) == 30 && [saved(m.domain, @"DM_FPS_TARGET") isEqual:@"30"]);
@@ -67,30 +66,24 @@ int main(void) {
         [m chooseSetting:scale85]; assert(state_at(0x10) == 1 && ![m validateMenuItem:scale85]); unsetenv("DM_ENV_FILE_KEYS");
         dm_fps_state = NULL; assert(![m canChange:@"DM_FPS_TARGET" value:@"30"]);
 
-        unsetenv("DM_METAL_HUD");
-        NSMenu *view = [NSMenu new]; setting_menu(view, @"DM_METAL_HUD", m);
-        assert([view itemWithTitle:@"Performance HUD (Next Launch)"]);
-        [m chooseSetting:choice(@"DM_METAL_HUD", @"1")]; assert([[m current:@"DM_METAL_HUD"] isEqual:@"1"] && [saved(m.domain, @"DM_METAL_HUD") isEqual:@"1"]);
-        setenv("DM_METAL_HUD", "1", 1); setenv("DM_ENV_LAUNCH_KEYS", "", 1); // saved On applied by the launcher for this run
-        [m chooseSetting:choice(@"DM_METAL_HUD", @"0")]; assert(!saved(m.domain, @"DM_METAL_HUD") && [[m current:@"DM_METAL_HUD"] isEqual:@"0"]);
-        setenv("DM_METAL_HUD", "0", 1); setenv("DM_ENV_LAUNCH_KEYS", "DM_METAL_HUD", 1);
-        [m chooseSetting:choice(@"DM_METAL_HUD", @"1")]; assert(!saved(m.domain, @"DM_METAL_HUD") && [[m current:@"DM_METAL_HUD"] isEqual:@"0"]);
-        unsetenv("DM_METAL_HUD"); unsetenv("DM_ENV_LAUNCH_KEYS");
-
-        NSMenuItem *volume = [NSMenuItem new]; volume.tag = 50; [m chooseVolume:volume]; assert(test_volume == 50);
+        NSMenuItem *volume = [[bar itemWithTitle:@"Audio"].submenu itemWithTitle:@"Volume"];
+        NSSlider *slider = nil;
+        for (NSView *control in volume.view.subviews) if ([control isKindOfClass:NSSlider.class]) slider = (NSSlider *)control;
+        assert(slider && slider.continuous && slider.minValue == 0 && slider.maxValue == 100 && slider.doubleValue == 100);
+        slider.doubleValue = 37; assert([slider sendAction:slider.action to:slider.target]);
+        assert(test_volume == 37 && [m.volumeValue.stringValue isEqual:@"37%"]);
         mac_menus_focus(1); [m mute:nil]; assert(test_muted);
-        mac_menus_focus(0); mac_menus_focus(1); assert(test_muted && test_volume == 50);
-        [m mute:nil]; assert(!test_muted && test_volume == 50);
+        mac_menus_focus(0); mac_menus_focus(1); assert(test_muted && test_volume == 37);
+        [m mute:nil]; assert(!test_muted && test_volume == 37);
         [m muteUnfocused:nil]; assert(!test_muted);
         mac_menus_focus(0); assert(test_muted); mac_menus_focus(1); assert(!test_muted);
-        volume.tag = 101; [m chooseVolume:volume]; assert(test_volume == 50);
         NSMenuItem *export = [file itemWithTitle:@"Export Save Backup…"], *restore = [file itemWithTitle:@"Restore Save from Backup…"]; assert(export && restore);
         assert(export.keyEquivalentModifierMask == (NSEventModifierFlagCommand | NSEventModifierFlagShift));
         m.busy = YES; assert(![m validateMenuItem:export]);
         m.busy = NO; unsetenv("DM_MAC_RESTORE_DIR"); assert(![m validateMenuItem:restore]);
         assert(![bar itemWithTitle:@"Controllers"]); assert(![bar itemWithTitle:@"Metal HUD"]);
         [w close];
-        puts("Mac menus: metadata capabilities, shared choices/defaults/overrides, live state, HUD startup preference, volume and focus pass");
+        puts("Mac menus: metadata capabilities, shared choices/defaults/overrides, live state, volume slider and focus pass");
     }
     return 0;
 }

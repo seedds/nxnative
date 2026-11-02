@@ -491,7 +491,7 @@ static DmCheatsPanel *g_cheats_panel;   // created on the first Show Cheats Wind
     sh.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;   // ⌘⇧C (the plain "c" already maps ZR)
     NSMenuItem *ms = [menu addItemWithTitle:@"Cheats On" action:@selector(toggleMaster:) keyEquivalent:@""];
     ms.target = self; ms.state = dm_cheats_master() ? NSControlStateValueOn : NSControlStateValueOff;
-    if (dm_cheats_safe()) [menu addItemWithTitle:@"Restore Saved Cheats (safe mode)" action:@selector(restoreSafe:) keyEquivalent:@""].target = self;
+    if (dm_cheats_safe()) [menu addItemWithTitle:@"Restore Saved Cheats (Safe Mode)" action:@selector(restoreSafe:) keyEquivalent:@""].target = self;
     [menu addItem:NSMenuItem.separatorItem];
     const char *sec = "";
     for (int i = 0, n = dm_cheats_ncheats(); i < n; i++) {
@@ -515,10 +515,10 @@ static DmCheatsPanel *g_cheats_panel;   // created on the first Show Cheats Wind
     if (!dm_cheats_found())
         [menu addItemWithTitle:[NSString stringWithFormat:@"No cheats for %@", build_label(dm_cheats_build(), dm_cheats_version())] action:nil keyEquivalent:@""].enabled = NO;
     [menu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *re = [menu addItemWithTitle:@"Reload cheats" action:@selector(reloadCheats:) keyEquivalent:@"r"];
+    NSMenuItem *re = [menu addItemWithTitle:@"Reload Cheats" action:@selector(reloadCheats:) keyEquivalent:@"r"];
     re.target = self;
     const char *dir = dm_cheats_dir_path();
-    NSMenuItem *op = [menu addItemWithTitle:@"Open cheats folder" action:dir && *dir ? @selector(openCheatsFolder:) : nil keyEquivalent:@""];
+    NSMenuItem *op = [menu addItemWithTitle:@"Open Cheats Folder" action:dir && *dir ? @selector(openCheatsFolder:) : nil keyEquivalent:@""];
     op.target = self;
     op.enabled = dir && *dir != 0;
 }
@@ -1184,11 +1184,13 @@ void front_run(void (*guest)(void)) {
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        NSWindow.allowsAutomaticWindowTabbing = NO;
         NSRect r = NSMakeRect(0, 0, 1280, 720);
         NSWindow *win = [[NSWindow alloc] initWithContentRect:r
                                                     styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
                                                       backing:NSBackingStoreBuffered defer:NO];
         win.title = @DM_GAME_NAME;   // the game profile's name (game name label)
+        win.tabbingMode = NSWindowTabbingModeDisallowed;
         // Fullscreen: without FullScreenPrimary the green button only zooms the window. The present path already scales
         // the game picture to fit the drawable with black bars around it, so fullscreen keeps the game's aspect ratio.
         win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;

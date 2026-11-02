@@ -126,6 +126,7 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
     init(_ model: LauncherModel) { self.model = model }
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        NSWindow.allowsAutomaticWindowTabbing = false
         let name = info("CFBundleName") ?? "Game"
         let menu = NSMenu(), item = NSMenuItem(), app = NSMenu()
         app.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
@@ -133,6 +134,7 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         item.submenu = app; menu.addItem(item); NSApp.mainMenu = menu
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 660), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = name; w.isReleasedWhenClosed = false; w.delegate = self
+        w.tabbingMode = .disallowed
         w.contentMinSize = NSSize(width: 520, height: 0)
         window = w
         if let screen = w.screen ?? NSScreen.main {

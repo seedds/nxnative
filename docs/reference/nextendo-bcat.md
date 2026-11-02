@@ -24,7 +24,7 @@ The preparation API in `dm/tools/nextendo_bcat.py` writes an exact recipe, invok
 
 ## Checks and limits
 
-I ran the native signed-policy/store, bounded ZIP, SDK lifetime/ABI and real temporary-filesystem fixtures in normal and ASan/UBSan builds. The synthetic downloader exercises 20 new-process scenarios, including changed data before the first open, ETag/304, responses without ETags, shared timeout, interruption, cache preservation, all zero-request gates a separately linked online-provider override and a real background refresh that preserves the session overlay and old open descriptor while advancing delivery opens. These fixtures use original resource bytes, fixture-only signing keys and isolated temporary home directories; they never contact a provider or use the account/cache of the person running them.
+I ran the native signed-policy/store, bounded ZIP, SDK lifetime/ABI and real temporary-filesystem fixtures in normal and ASan/UBSan builds. The synthetic downloader exercises 20 new-process scenarios, including changed data before the first open, ETag/304, responses without ETags, shared timeout, interruption, cache preservation, all zero-request gates, a separately linked online-provider override and a real background refresh that preserves the session overlay and old open descriptor while advancing delivery opens. These fixtures use original resource bytes, fixture-only signing keys and isolated temporary home directories; they never contact a provider or use the account/cache of the person running them.
 
 ```sh
 make -C dm/host/tests GAME=0100152000022000 DM_OPENSSL_ROOT='/reviewed/static/openssl' bcat bcat-sanitize

@@ -1686,11 +1686,15 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
     // MTLBuffer.contents may autorelease its receiver; keep that lifetime inside the completed copy.
     @autoreleasepool {
     int n = r->n; post_op *ops = r->ops; seg_clk *sc = r->sc; uint32_t seg_last = r->seg_last;
+    // DM_NVN_VIS_ALL=1 (diagnostic, read here each time: DM_CTL "env DM_NVN_VIS_ALL=1" turns it on and off while the game runs): every samples-passed report says visible, to tell
+    // a game's occlusion culling from other causes of objects that come and go (Assassin's Creed II's background flicker)
+    const char *va = getenv("DM_NVN_VIS_ALL"); int vis_all = va && atoi(va);
     for (int i = 0; i < n; i++) {
         if (ops[i].kind == 1) { if (ops[i].mode == 1) *ops[i].val += ops[i].v; else *ops[i].val = ops[i].v; }
         else if (ops[i].kind == 3) {   // Samples passed: the sum of all slots since the reset
             vis_list *l = ops[i].vis; uint64_t sum = 0;
             for (int k = 0; k < l->n; k++) { sum += ((const uint64_t *)((__bridge id<MTLBuffer>)l->s[k].buf).contents)[l->s[k].slot]; CFRelease(l->s[k].buf); }
+            if (vis_all && sum < 0x100000) sum = 0x100000;
             free(l); uint64_t rec[2] = {sum, gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec);
         }
         else if (ops[i].kind == 4) mirror_rb_land(ops[i].vis);
@@ -12428,7 +12432,7 @@ void mtl_res_counts(uint32_t tick, const char *why) {
         c.pools, (unsigned long long)c.pool_adds, c.sview_nonnull, dl, (unsigned long long)da, c.c1_bufs, (unsigned long long)c.c1_alloc, (unsigned long long)c.c1_data);
 }
 // Screenshot on request (used by DM_NVN_SHOT_UI): dm_gfx_shot_at(k, path) = take a screenshot at the kth frame after the current present frame; due requests are checked at every frame's present
-#define SHOTQ_MAX 8
+#define SHOTQ_MAX 72   // DM_CTL "shots" queues up to 64 frames in a row
 static struct { uint64_t frame; char path[1024]; } g_shotq[SHOTQ_MAX]; static int g_nshotq;
 static pthread_mutex_t g_shotq_mu = PTHREAD_MUTEX_INITIALIZER;
 static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4]);

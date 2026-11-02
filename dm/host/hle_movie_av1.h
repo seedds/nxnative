@@ -1,4 +1,4 @@
-// AV1 decoding on VideoToolbox (hle_movie_av1.c), for the nn::codec decoders of the Switch 2's SDK (hle_codec_video.c)
+// AV1 decoding on VideoToolbox or dav1d (hle_movie_av1.c), for the nn::codec decoders of the Switch 2's SDK (hle_codec_video.c)
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
@@ -12,6 +12,6 @@ void mav1_free(mav1 *a);
 void mav1_reset(mav1 *a);   // a new stream starts at the next packet with a sequence header
 // One temporal unit (OBUs with their sizes). 1 and *out set: a picture; 0: nothing to show (no sequence header seen yet, a unit without a shown frame); -1: the decoder refused it
 int mav1_decode(mav1 *a, const uint8_t *data, size_t n, mav1_picture *out);
-int mav1_supported(void);   // VideoToolbox decodes AV1 here: its hardware decoder (Apple M3 and A17 Pro on)
+const char *mav1_backend(const mav1 *a);   // "VideoToolbox" (its hardware decoder: Apple M3 and A17 Pro on) or "dav1d"
 // Exposed for its test: fills the 4 + n bytes of an av1C record from a sequence header OBU (with its header and size); 0 when the OBU cannot be read
 int mav1_av1c(const uint8_t *obu, size_t n, uint8_t c[4], int *w, int *h);

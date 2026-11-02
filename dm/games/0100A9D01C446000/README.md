@@ -83,6 +83,10 @@ General host changes first needed here; each applies to every game:
 - **Rewriter:** gates before code that writes the scratch registers first (`scratch_dead`, a rule removed on 2026-10-31: every gate keeps x0–x28): [Observation gates on any relocatable instruction](../../../docs/reference/rewriter.md#observation-gates-on-any-relocatable-instruction).
 - **`DM_CTL` route scripts** (`run/ctl.sh`): [05, Scripted input and thread scheduling](../../../docs/agents/05-debugging.md#scripted-input-and-thread-scheduling).
 
+## Player reports
+
+- **Mac mini, base 1.1.0 on the 1.2.0 profile (player report, 2026-11-02):** Mac mini M4 (24 GB), macOS 27.2, commit `cd859c38a8f8`, shader chain `b7cd656abd7c`, built with `scripts/build_ipa_from_nsp.py --platform mac-app -l es`. "Preparing pipelines" counts 10,114; then the Unreal and Square Enix logos, the title, the new-adventure slot menu and the name entry screen. It was not played past the name entry. The boot log has `[RED] failed to load shader 4c587d2ed1d5f5b0_b` (no `.metallib` in the app).
+
 ## Open
 
 - The engine region's gate (2.81 GB instead of the 2 GB `game_args` gave) has not been run on this game yet: the `[mem] Unreal's engine region` line in a boot's log shows it.

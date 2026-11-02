@@ -77,6 +77,10 @@ General host changes first needed here; each applies to every game:
 - **The audio renderer's update lock read off each SDK's `Update`** (`update_lock`): [The renderer's update lock (`update_lock`)](../../../docs/reference/audio.md#the-renderers-update-lock-update_lock).
 - **The zero cube for a 2D array of fewer than six layers in a cube slot** (`tex_fit`): [A 2D texture in a cube slot binds the zero cube](../../../docs/reference/rendering.md#a-2d-texture-in-a-cube-slot-binds-the-zero-cube).
 
+## Player reports
+
+- **Mac mini, base 3.0.5 on the 4.0.x profile (player report, 2026-11-02):** Mac mini M4 (24 GB), macOS 27.2, commit `cd859c38a8f8`, shader chain `b7cd656abd7c`, built with `scripts/build_ipa_from_nsp.py --platform mac-app -l es`. The Mac app boots, runs the menus, starts a Grand Prix and races. "Smart steering" is switched on or off from the pause menu with L. The only `[RED]` line in that boot was `texture ID 1112 not registered`; nothing looked wrong.
+
 ## Open
 
 - Mii heads draw nothing: the host ships no MiiModel firmware data (the player README notes "no Mii heads").

@@ -219,6 +219,7 @@ struct VkPipeline_T {
     MTLPrimitiveType prim; MTLCullMode cull; MTLWinding wind; MTLTriangleFillMode fill; MTLDepthClipMode clip;
     int bias; float bias_c, bias_s, bias_cl; float blend[4]; uint32_t sref_f, sref_b;
     int dyn_vp, dyn_sc, has_vp, has_sc; MTLViewport vp; VkRect2D sc;
+    int dyn_bias, dyn_blend, dyn_sref;   // depth bias, blend constants and stencil reference from vkCmdSet* (SDL_GPU sets the last two in every render pass)
 };
 struct VkCommandPool_T { struct VkCommandBuffer_T *cbs; };
 struct VkCommandBuffer_T { void *loader; VkCommandPool pool; struct VkCommandBuffer_T *prev, *next; uint8_t *buf; size_t n, cap; };
@@ -506,6 +507,8 @@ VKB(vkCreateImage, VkResult, VkDevice d, const VkImageCreateInfo *ci, const VkAl
         MTLTextureUsage u = MTLTextureUsageShaderRead;
         if (ci->usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT)) u |= MTLTextureUsageRenderTarget;
         if (ci->usage & VK_IMAGE_USAGE_STORAGE_BIT) u |= MTLTextureUsageShaderWrite;
+        // vkCmdBlitImage draws into its destination (blit_draw): a color image it may write to is a render target too
+        if ((ci->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) && (f->kind == K_COLOR || f->kind == K_INT) && f->bw == 1 && samples == 1) u |= MTLTextureUsageRenderTarget;
         // A stencil-aspect view of a depth-stencil image is an X32_Stencil8 view, which Metal allows only with the format-view usage (Vulkan needs no mutable-format flag for it;
         // the API validation layer aborts without it). As in the NVN layer, it costs nothing measured on a depth-stencil texture
         if ((ci->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) || f->pf == MTLPixelFormatDepth32Float_Stencil8) u |= MTLTextureUsagePixelFormatView;
@@ -933,7 +936,9 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
         const VkPipelineDynamicStateCreateInfo *dy = ci->pDynamicState;
         for (uint32_t i = 0; dy && i < dy->dynamicStateCount; i++) {
             VkDynamicState s = dy->pDynamicStates[i];
-            if (s == VK_DYNAMIC_STATE_VIEWPORT) p->dyn_vp = 1; else if (s == VK_DYNAMIC_STATE_SCISSOR) p->dyn_sc = 1; else RED1("dynamic state %d not implemented (the imports have no matching set function)", s);
+            if (s == VK_DYNAMIC_STATE_VIEWPORT) p->dyn_vp = 1; else if (s == VK_DYNAMIC_STATE_SCISSOR) p->dyn_sc = 1;
+            else if (s == VK_DYNAMIC_STATE_DEPTH_BIAS) p->dyn_bias = 1; else if (s == VK_DYNAMIC_STATE_BLEND_CONSTANTS) p->dyn_blend = 1;
+            else if (s == VK_DYNAMIC_STATE_STENCIL_REFERENCE) p->dyn_sref = 1; else RED1("dynamic state %d not implemented (the imports have no matching set function)", s);
         }
         const VkPipelineViewportStateCreateInfo *vs = ci->pViewportState;
         if (!p->dyn_vp && vs && vs->pViewports && vs->viewportCount) { p->vp = vp_of(&vs->pViewports[0]); p->has_vp = 1; }
@@ -953,7 +958,7 @@ VKB(vkCreateGraphicsPipelines, VkResult, VkDevice d, VkPipelineCache c, uint32_t
 VKB(vkDestroyPipeline, void, VkDevice d, VkPipeline p, const VkAllocationCallbacks *a) { (void)d; (void)a; if (p) { p->pso = nil; p->dss = nil; free(p); } }
 
 // ---------- Command buffers: recording ----------
-enum { C_BRP = 1, C_ERP, C_PIPE, C_SETS, C_VB, C_IB, C_VP, C_SC, C_DRAWI, C_COPYB, C_COPYB2I, C_DRAW, C_PUSH, C_COPYI, C_COPYI2B, C_QRESET, C_QTS, C_QBEGIN, C_QEND };
+enum { C_BRP = 1, C_ERP, C_PIPE, C_SETS, C_VB, C_IB, C_VP, C_SC, C_DRAWI, C_COPYB, C_COPYB2I, C_DRAW, C_PUSH, C_COPYI, C_COPYI2B, C_QRESET, C_QTS, C_QBEGIN, C_QEND, C_BLEND, C_SREF, C_BIAS, C_BLIT };
 typedef struct { uint32_t op, size; } chdr;
 typedef struct { VkRenderPass rp; VkFramebuffer fb; VkRect2D area; uint32_t nclear; VkClearValue clear[]; } c_brp;
 typedef struct { VkPipeline p; } c_pipe;
@@ -962,12 +967,16 @@ typedef struct { uint32_t first, n; VkBuffer b[14]; VkDeviceSize o[14]; } c_vb;
 typedef struct { VkBuffer b; VkDeviceSize o; VkIndexType t; } c_ib;
 typedef struct { VkViewport v; } c_vp;
 typedef struct { VkRect2D r; } c_sc;
+typedef struct { float v[4]; } c_blend;
+typedef struct { uint32_t face, ref; } c_sref;
+typedef struct { float c, cl, s; } c_bias;
 typedef struct { uint32_t count, inst, first; int32_t voff; uint32_t first_inst; } c_drawi;
 typedef struct { VkBuffer src, dst; uint32_t n; VkBufferCopy r[]; } c_copyb;
 typedef struct { VkBuffer src; VkImage dst; uint32_t n; VkBufferImageCopy r[]; } c_copyb2i;
 typedef struct { uint32_t count, inst, first, first_inst; } c_draw;
 typedef struct { uint32_t off, size; uint8_t data[]; } c_push;
 typedef struct { VkImage src, dst; uint32_t n; VkImageCopy r[]; } c_copyi;
+typedef struct { VkImage src, dst; VkFilter filter; uint32_t n; VkImageBlit r[]; } c_blit;
 typedef struct { VkImage src; VkBuffer dst; uint32_t n; VkBufferImageCopy r[]; } c_copyi2b;
 typedef struct { VkQueryPool q; uint32_t first, n; } c_query;
 static void *rec(VkCommandBuffer cb, uint32_t op, size_t sz) {
@@ -1027,6 +1036,9 @@ VK(vkCmdBindVertexBuffers, void, VkCommandBuffer cb, uint32_t first, uint32_t n,
 VK(vkCmdBindIndexBuffer, void, VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, VkIndexType t) { c_ib *c = rec(cb, C_IB, sizeof *c); c->b = b; c->o = o; c->t = t; }
 VK(vkCmdSetViewport, void, VkCommandBuffer cb, uint32_t first, uint32_t n, const VkViewport *v) { if (!first && n) ((c_vp *)rec(cb, C_VP, sizeof(c_vp)))->v = v[0]; }
 VK(vkCmdSetScissor, void, VkCommandBuffer cb, uint32_t first, uint32_t n, const VkRect2D *r) { if (!first && n) ((c_sc *)rec(cb, C_SC, sizeof(c_sc)))->r = r[0]; }
+VK(vkCmdSetBlendConstants, void, VkCommandBuffer cb, const float v[4]) { memcpy(((c_blend *)rec(cb, C_BLEND, sizeof(c_blend)))->v, v, 4 * sizeof *v); }
+VK(vkCmdSetStencilReference, void, VkCommandBuffer cb, VkStencilFaceFlags face, uint32_t ref) { *(c_sref *)rec(cb, C_SREF, sizeof(c_sref)) = (c_sref){face, ref}; }
+VK(vkCmdSetDepthBias, void, VkCommandBuffer cb, float c, float cl, float sl) { *(c_bias *)rec(cb, C_BIAS, sizeof(c_bias)) = (c_bias){c, cl, sl}; }
 VK(vkCmdDrawIndexed, void, VkCommandBuffer cb, uint32_t count, uint32_t inst, uint32_t first, int32_t voff, uint32_t first_inst) {
     *(c_drawi *)rec(cb, C_DRAWI, sizeof(c_drawi)) = (c_drawi){count, inst, first, voff, first_inst};
 }
@@ -1046,6 +1058,9 @@ VK(vkCmdPushConstants, void, VkCommandBuffer cb, VkPipelineLayout l, VkShaderSta
 }
 VK(vkCmdCopyImage, void, VkCommandBuffer cb, VkImage src, VkImageLayout sl, VkImage dst, VkImageLayout dl, uint32_t n, const VkImageCopy *r) {
     (void)sl; (void)dl; c_copyi *c = rec(cb, C_COPYI, sizeof *c + n * sizeof *r); c->src = src; c->dst = dst; c->n = n; memcpy(c->r, r, n * sizeof *r);
+}
+VK(vkCmdBlitImage, void, VkCommandBuffer cb, VkImage src, VkImageLayout sl, VkImage dst, VkImageLayout dl, uint32_t n, const VkImageBlit *r, VkFilter filter) {
+    (void)sl; (void)dl; c_blit *c = rec(cb, C_BLIT, sizeof *c + n * sizeof *r); c->src = src; c->dst = dst; c->filter = filter; c->n = n; memcpy(c->r, r, n * sizeof *r);
 }
 VK(vkCmdCopyImageToBuffer, void, VkCommandBuffer cb, VkImage src, VkImageLayout lay, VkBuffer dst, uint32_t n, const VkBufferImageCopy *r) {
     (void)lay; c_copyi2b *c = rec(cb, C_COPYI2B, sizeof *c + n * sizeof *r); c->src = src; c->dst = dst; c->n = n; memcpy(c->r, r, n * sizeof *r);
@@ -1072,6 +1087,7 @@ typedef struct {
     VkBuffer vb[14]; VkDeviceSize vbo[14];
     VkBuffer ib; VkDeviceSize ibo; MTLIndexType it; uint32_t isz;
     VkViewport vp; VkRect2D sc; int have_vp, have_sc, vp_dirty, sc_dirty;
+    float blend[4], bias_c, bias_s, bias_cl; uint32_t sref_f, sref_b;   // dynamic state (vkCmdSetBlendConstants / SetStencilReference / SetDepthBias): kept across passes, as in Vulkan
     uint8_t pc[256];
     subq_t *sq;
     // The current render pass: its descriptor (attachments created with deferred store actions) and the store actions it ends with; cut = its encoder was ended
@@ -1203,9 +1219,11 @@ static int pre_draw(rs_t *s) {
     if (s->applied != p) {
         [re setRenderPipelineState:p->pso]; [re setDepthStencilState:p->dss ? p->dss : g_dss_off];
         [re setCullMode:p->cull]; [re setFrontFacingWinding:p->wind]; [re setTriangleFillMode:p->fill]; [re setDepthClipMode:p->clip];
-        [re setDepthBias:p->bias ? p->bias_c : 0 slopeScale:p->bias ? p->bias_s : 0 clamp:p->bias ? p->bias_cl : 0];
-        [re setBlendColorRed:p->blend[0] green:p->blend[1] blue:p->blend[2] alpha:p->blend[3]];
-        [re setStencilFrontReferenceValue:p->sref_f backReferenceValue:p->sref_b];
+        if (p->dyn_bias) [re setDepthBias:p->bias ? s->bias_c : 0 slopeScale:p->bias ? s->bias_s : 0 clamp:p->bias ? s->bias_cl : 0];
+        else [re setDepthBias:p->bias ? p->bias_c : 0 slopeScale:p->bias ? p->bias_s : 0 clamp:p->bias ? p->bias_cl : 0];
+        const float *bc = p->dyn_blend ? s->blend : p->blend;
+        [re setBlendColorRed:bc[0] green:bc[1] blue:bc[2] alpha:bc[3]];
+        [re setStencilFrontReferenceValue:p->dyn_sref ? s->sref_f : p->sref_f backReferenceValue:p->dyn_sref ? s->sref_b : p->sref_b];
         if (p->has_vp && (!s->applied || !s->applied->has_vp || memcmp(&s->applied->vp, &p->vp, sizeof p->vp))) s->vp_dirty = 1;
         if (p->has_sc) s->sc_dirty = 1;
         s->applied = p;
@@ -1232,6 +1250,67 @@ static int pre_draw(rs_t *s) {
         }
     return 1;
 }
+// vkCmdBlitImage: a scaled (or format-converting) copy is a quad drawn into the destination level and layer, sampling the source's (Metal's blit encoder copies
+// only like to like). FNA3D's SDL_GPU driver presents this way, its backbuffer into the swapchain image (SDL_BlitGPUTexture). Same size and format: a plain copy
+static id<MTLRenderPipelineState> blit_pso(MTLPixelFormat pf) {
+    static id<MTLLibrary> lib; static MTLPixelFormat have[16]; static id<MTLRenderPipelineState> pso[16]; static int n;
+    for (int i = 0; i < n; i++) if (have[i] == pf) return pso[i];
+    if (!lib) {
+        NSString *src = @"#include <metal_stdlib>\nusing namespace metal;\nstruct V { float4 p [[position]]; float2 uv; };\n"
+            "vertex V blit_v(uint id [[vertex_id]], constant float4 *r [[buffer(0)]]) { float2 t = float2(id & 1, id >> 1); V o; o.p = float4(mix(r[0].xy, r[0].zw, t), 0, 1); o.uv = mix(r[1].xy, r[1].zw, t); return o; }\n"
+            "fragment float4 blit_f(V i [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) { return t.sample(s, i.uv, level(0)); }\n";
+        NSError *e = nil; lib = [g_dev newLibraryWithSource:src options:nil error:&e];
+        if (!lib) { RED1("blit shaders do not compile: %s", e.localizedDescription.UTF8String); return nil; }
+    }
+    if (n == 16) return nil;
+    MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
+    d.vertexFunction = [lib newFunctionWithName:@"blit_v"]; d.fragmentFunction = [lib newFunctionWithName:@"blit_f"]; d.colorAttachments[0].pixelFormat = pf;
+    NSError *e = nil; id<MTLRenderPipelineState> p = [g_dev newRenderPipelineStateWithDescriptor:d error:&e];
+    if (!p) RED1("blit pipeline for format %lu: %s", (unsigned long)pf, e.localizedDescription.UTF8String);
+    have[n] = pf; pso[n++] = p; return p;
+}
+static void blit_draw(rs_t *s, const c_blit *x) {
+    VkImage a = x->src, b = x->dst;
+    if (!a->tex || !b->tex) { RED1("a blitted image was not created"); return; }
+    if (a->f->kind != K_COLOR && a->f->kind != K_INT) { RED1("depth / stencil blits not implemented (format %d)", a->fmt); return; }
+    if (s->re) { end_rp(s, 0); s->cut = 1; }
+    for (uint32_t i = 0; i < x->n; i++) {
+        const VkImageBlit *r = &x->r[i];
+        const VkOffset3D *so = r->srcOffsets, *dof = r->dstOffsets;
+        int sw = so[1].x - so[0].x, sh = so[1].y - so[0].y, dw = dof[1].x - dof[0].x, dh = dof[1].y - dof[0].y;
+        uint32_t nl = umin(r->srcSubresource.layerCount, r->dstSubresource.layerCount);
+        if (sw == dw && sh == dh && sw > 0 && sh > 0 && a->tex.pixelFormat == b->tex.pixelFormat && a->type != VK_IMAGE_TYPE_3D && b->type != VK_IMAGE_TYPE_3D) {
+            id<MTLBlitCommandEncoder> be = blit(s, C_BLIT);
+            for (uint32_t l = 0; l < nl; l++)
+                [be copyFromTexture:a->tex sourceSlice:r->srcSubresource.baseArrayLayer + l sourceLevel:r->srcSubresource.mipLevel sourceOrigin:MTLOriginMake(so[0].x, so[0].y, 0)
+                         sourceSize:MTLSizeMake(sw, sh, 1) toTexture:b->tex destinationSlice:r->dstSubresource.baseArrayLayer + l destinationLevel:r->dstSubresource.mipLevel
+                  destinationOrigin:MTLOriginMake(dof[0].x, dof[0].y, 0)];
+            continue;
+        }
+        if (!(b->tex.usage & MTLTextureUsageRenderTarget)) { RED1("blit into an image that cannot be drawn to (format %d, usage %#x)", b->fmt, b->usage); continue; }
+        id<MTLRenderPipelineState> p = blit_pso(b->tex.pixelFormat); if (!p) continue;
+        end_blit(s);
+        uint32_t sl = r->srcSubresource.mipLevel, dl = r->dstSubresource.mipLevel;
+        float aw = (float)umax(1, a->w >> sl), ah = (float)umax(1, a->h >> sl), bw = (float)umax(1, b->w >> dl), bh = (float)umax(1, b->h >> dl);
+        // destination corners in normalized device coordinates (y up), source corners in texture coordinates (y down): reversed offsets flip, as in Vulkan
+        float rect[8] = {dof[0].x / bw * 2 - 1, 1 - dof[0].y / bh * 2, dof[1].x / bw * 2 - 1, 1 - dof[1].y / bh * 2, so[0].x / aw, so[0].y / ah, so[1].x / aw, so[1].y / ah};
+        static id<MTLSamplerState> smp[2];
+        int lin = x->filter == VK_FILTER_LINEAR;
+        if (!smp[lin]) { MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = lin ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
+                         sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToEdge; smp[lin] = [g_dev newSamplerStateWithDescriptor:sd]; }
+        for (uint32_t l = 0; l < nl; l++) {
+            id<MTLTexture> v = [a->tex newTextureViewWithPixelFormat:a->tex.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(sl, 1) slices:NSMakeRange(r->srcSubresource.baseArrayLayer + l, 1)];
+            MTLRenderPassDescriptor *d = [MTLRenderPassDescriptor renderPassDescriptor];
+            d.colorAttachments[0].texture = b->tex; d.colorAttachments[0].level = dl; d.colorAttachments[0].slice = r->dstSubresource.baseArrayLayer + l;
+            d.colorAttachments[0].loadAction = MTLLoadActionLoad; d.colorAttachments[0].storeAction = MTLStoreActionStore;
+            id<MTLRenderCommandEncoder> re = [s->cb renderCommandEncoderWithDescriptor:d];
+            [re setRenderPipelineState:p]; [re setVertexBytes:rect length:sizeof rect atIndex:0]; [re setFragmentTexture:v atIndex:0]; [re setFragmentSamplerState:smp[lin] atIndex:0];
+            [re drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+            [re endEncoding];
+        }
+        g_n_draw++;
+    }
+}
 static void replay(rs_t *s, VkCommandBuffer cb) {
     for (size_t o = 0; o < cb->n;) {
         const chdr *h = (const chdr *)(cb->buf + o); const void *c = h + 1; o += h->size;
@@ -1251,6 +1330,11 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
             case C_IB: { const c_ib *x = c; s->ib = x->b; s->ibo = x->o; s->it = x->t == VK_INDEX_TYPE_UINT32 ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16; s->isz = x->t == VK_INDEX_TYPE_UINT32 ? 4 : 2; break; }
             case C_VP: s->vp = ((const c_vp *)c)->v; s->vp_dirty = 1; s->have_vp = 1; break;
             case C_SC: s->sc = ((const c_sc *)c)->r; s->sc_dirty = 1; s->have_sc = 1; break;
+            // dynamic state: taken by the next pipeline that uses it; one already applied that uses it is applied again
+            case C_BLEND: memcpy(s->blend, ((const c_blend *)c)->v, sizeof s->blend); if (s->applied && s->applied->dyn_blend) s->applied = NULL; break;
+            case C_SREF: { const c_sref *x = c; if (x->face & VK_STENCIL_FACE_FRONT_BIT) s->sref_f = x->ref; if (x->face & VK_STENCIL_FACE_BACK_BIT) s->sref_b = x->ref;
+                           if (s->applied && s->applied->dyn_sref) s->applied = NULL; break; }
+            case C_BIAS: { const c_bias *x = c; s->bias_c = x->c; s->bias_cl = x->cl; s->bias_s = x->s; if (s->applied && s->applied->dyn_bias) s->applied = NULL; break; }
             case C_DRAWI: {
                 const c_drawi *x = c;
                 if (!x->count || !x->inst || !pre_draw(s)) break;
@@ -1295,6 +1379,7 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
                 break;
             }
             case C_PUSH: { const c_push *x = c; memcpy(s->pc + x->off, x->data, x->size); break; }
+            case C_BLIT: blit_draw(s, c); break;
             case C_COPYI: {
                 const c_copyi *x = c; VkImage a = x->src, b = x->dst;
                 if (!a->tex || !b->tex) { RED1("a copied image was not created"); break; }

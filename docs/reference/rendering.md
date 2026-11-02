@@ -986,6 +986,19 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 - **Check:** `dm/tools/tests/test_nro_graphics.py` (`test_fna3d_sdl_gpu_is_vulkan`, `test_bare_version_lines_are_not_sources`).
 - **Found on:** [MARVEL Cosmic Invasion](../../dm/games/010059D020C26000/README.md) (SDK 20.5.15; 5 modules from boot through the menus into a stage).
 
+### Blend constants, stencil reference and depth bias as dynamic state
+
+- **Symptom:** a jump to address 0 right after `vkCmdSetScissor` at the first frame; `lookup vkCmdSetBlendConstants → none (returns null)`.
+- **Cause:** SDL_GPU sets the blend constants and the stencil reference at the start of every render pass, and its pipelines list them as dynamic state; the layer had neither function (nor `vkCmdSetDepthBias`).
+- **Fix:** the three commands are recorded and kept across passes, as Vulkan says; a pipeline that lists the state takes the recorded value, the others keep their own. A set after the pipeline was applied applies it again at the next draw.
+- **Found on:** [MARVEL Cosmic Invasion](../../dm/games/010059D020C26000/README.md).
+
+### Scaled and converting image blits
+
+- **Cause:** FNA3D draws into its own backbuffer and presents with `SDL_BlitGPUTexture`, a `vkCmdBlitImage` into the swapchain image (RGBA into BGRA). Metal's blit encoder copies only between textures of one format and size.
+- **Fix:** `vkCmdBlitImage` draws a quad into the destination level and layer that samples the source (nearest or linear, reversed offsets flip); a region of the same size and format is a plain copy. A color image created with `TRANSFER_DST` usage is also a render target, so it can be drawn into. Depth and stencil blits are a red line.
+- **Found on:** [MARVEL Cosmic Invasion](../../dm/games/010059D020C26000/README.md).
+
 ### Push constants in the next free buffer slot
 
 - **Cause:** SPIRV-Cross binds the push constant block at `buffer(0)`, where the first renumbered uniform buffer goes.

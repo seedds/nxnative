@@ -1689,7 +1689,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[142];
+static int g_red_once[143];
 #define RED_ONCE(k, ...) do { if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -7724,7 +7724,7 @@ static int ds_scan(const uint8_t *p, ds_st *ds, int depth) {
             case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
             case OP_CALL: { uint64_t t; memcpy(&t, a, 8); if (depth >= 8) return DS_USED;
                 int r = ds_scan((const uint8_t *)t, ds, depth + 1); if (r != DS_RET) return r; break; }
-            case OP_SET_RT: case OP_COPY_B2B: case OP_CLEAR_BUF: case OP_UPDATE_UB: case OP_COPY_B2T: case OP_COPY_T2B: case OP_COPY_T2T: case OP_DRAW_TEX: case OP_CLEAR_TEX: case OP_DISPATCH: return DS_FREE;
+            case OP_SET_RT: case OP_COPY_B2B: case OP_CLEAR_BUF: case OP_UPDATE_UB: case OP_COPY_B2T: case OP_COPY_T2B: case OP_COPY_T2T: case OP_DRAW_TEX: case OP_CLEAR_TEX: case OP_DISPATCH: case OP_DLSS: return DS_FREE;
             case OP_CLEAR_COLOR: case OP_CLEAR_DS: g_ds_why = h.op; return DS_USED;
             case OP_BIND_STATE: { const p_bind_state *b = a; if (b->kind == 5) memcpy(ds, b->bytes, sizeof *ds); break; }
             case OP_DRAW: case OP_DRAW_IDX:   // Depth test / write → depth needed; stencil test → stencil needed; can stop once both are needed
@@ -8290,6 +8290,7 @@ static void sdx_walk(const uint8_t *p, int depth) {
                 }
                 break; }
             case OP_COPY_T2T: { const p_copy_t2t *c = a; if (c->src) sdx_ev_add((sdx_ev){seq, 0, c->src->serial, p, 0, 0, SDX_NEED, 0, 0, 3}); if (c->dst) sdx_ev_add((sdx_ev){seq, 0, c->dst->serial, p, 0, 0, SDX_NEED, 0, 0, 3}); break; }
+            case OP_DLSS: { const p_dlss *c = a; const tex_t *t[4] = {c->in, c->depth, c->mv, c->out}; for (int k = 0; k < 4; k++) if (t[k]) sdx_ev_add((sdx_ev){seq, 0, t[k]->serial, p, 0, 0, SDX_NEED, 0, 0, 3}); break; }
             case OP_COPY_T2B: case OP_COPY_B2T: { const p_copy_b2t *c = a; if (c->tex) sdx_ev_add((sdx_ev){seq, 0, c->tex->serial, p, 0, 0, SDX_NEED, 0, 0, 3}); break; }
             case OP_DRAW_TEX: { const p_draw_tex *c = a; uint64_t ss = h_ser(c->h); if (ss) sdx_ev_add((sdx_ev){seq, 0, ss, p, 0, 0, SDX_NEED, 0, 0, 3});   // read as a copy's source, its targets written as a copy's destination
                 const p_set_rt *r = g_pp_rt; if (r) for (int k = 0; k < r->n && k < 8; k++) if (r->color[k]) sdx_ev_add((sdx_ev){seq, 0, r->color[k]->serial, p, 0, 0, SDX_NEED, 0, 0, 3});
@@ -8376,7 +8377,7 @@ static void hoist_try(void) {
     for (int guard = 0; guard < 200000; guard++) {
         op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
         switch (h.op) {
-            case OP_END: case OP_CALL: case OP_COPY_T2T: case OP_DRAW_TEX: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DISPATCH: case OP_RENDER_COND: return;
+            case OP_END: case OP_CALL: case OP_COPY_T2T: case OP_DRAW_TEX: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DISPATCH: case OP_DLSS: case OP_RENDER_COND: return;
             case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
             case OP_DRAW: case OP_DRAW_IDX: if (in_grp) return; break;
             case OP_SCISSOR: sc = *(const p_scissor *)a; has_sc = 1; break;
@@ -8684,7 +8685,7 @@ static void defer_try(const p_draw *dw, const p_draw_idx *di) {
                 for (int k = 0; k < g_defer.nreads && !bad; k++) if (h_ser(g_defer.p_reads[k]) == ds_) bad = 1;
                 if (g_defer.nreads > 512) bad = 1;
                 if (bad) { g_defer.reason = 3; g_defer.reason_op = h.op; goto fail; } break; }
-            case OP_REPORT_COUNTER: case OP_RENDER_COND: case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DISPATCH: case OP_DRAW_TEX: g_defer.reason = 3; g_defer.reason_op = h.op; goto fail;
+            case OP_REPORT_COUNTER: case OP_RENDER_COND: case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DISPATCH: case OP_DRAW_TEX: case OP_DLSS: g_defer.reason = 3; g_defer.reason_op = h.op; goto fail;
             case OP_CLEAR_COLOR: { const p_clear_color *c = a; if (!p_end) { g_defer.reason = 16; goto fail; }   // A clear inside P's continuation segment: do not defer
                 if (c->index >= 0 && c->index < scan_rt.n && (defer_rt_hits_reads(&scan_rt, c->index) || (scan_rt.color[c->index] && defer_rt_hits_reads(&g_defer.p_rt, c->index)))) { g_defer.reason = 5; goto fail; } break; }
             case OP_CLEAR_DS: if (!p_end) { g_defer.reason = 16; goto fail; } break;
@@ -8697,7 +8698,7 @@ static void defer_try(const p_draw *dw, const p_draw_idx *di) {
                         if (he.op == OP_JUMP) { memcpy(&e, e + 8, 8); continue; }
                         if (he.op == OP_END) { const uint8_t *nx = defer_cont(&ec); if (!nx) break; e = nx; continue; }
                         if (he.op == OP_SET_RT) { empty = 1; break; }
-                        if (he.op == OP_DRAW || he.op == OP_DRAW_IDX || he.op == OP_CLEAR_COLOR || he.op == OP_CLEAR_DS || he.op == OP_CALL || he.op == OP_DISPATCH || he.op == OP_CLEAR_TEX || he.op == OP_COPY_T2T || he.op == OP_DRAW_TEX || he.op == OP_COPY_B2T || he.op == OP_COPY_T2B) break;
+                        if (he.op == OP_DRAW || he.op == OP_DRAW_IDX || he.op == OP_CLEAR_COLOR || he.op == OP_CLEAR_DS || he.op == OP_CALL || he.op == OP_DISPATCH || he.op == OP_CLEAR_TEX || he.op == OP_COPY_T2T || he.op == OP_DLSS || he.op == OP_DRAW_TEX || he.op == OP_COPY_B2T || he.op == OP_COPY_T2B) break;
                         e += he.size; }
                     if (empty) break; }
                 if (!shared) break; if (!p_has_draw || !defer_q_superset(r)) { g_defer.reason = 6; goto fail; } q = r; qop = p; goto q_found; }
@@ -8767,7 +8768,7 @@ static void fuse_try(void) {
     for (int guard = 0; guard < 200000 && !r2; guard++) {
         if (!fz_next(&cur, &p, &h, &a)) return;
         switch (h.op) {
-            case OP_COPY_T2T: case OP_DRAW_TEX: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DISPATCH: case OP_RENDER_COND:
+            case OP_COPY_T2T: case OP_DRAW_TEX: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DISPATCH: case OP_DLSS: case OP_RENDER_COND:
             case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: return;
             case OP_SCISSOR: sc = *(const p_scissor *)a; has_sc = 1; break;
             case OP_SET_RT: {
@@ -8788,7 +8789,7 @@ static void fuse_try(void) {
     for (int guard = 0; guard < 200000; guard++) {
         if (h.op == OP_DRAW || h.op == OP_DRAW_IDX) break;
         switch (h.op) {
-            case OP_COPY_T2T: case OP_DRAW_TEX: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DISPATCH: case OP_SET_RT: case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: case OP_RENDER_COND: return;
+            case OP_COPY_T2T: case OP_DRAW_TEX: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DISPATCH: case OP_DLSS: case OP_SET_RT: case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: case OP_RENDER_COND: return;
             case OP_SCISSOR: sc = *(const p_scissor *)a; has_sc = 1; break;
             case OP_CLEAR_COLOR: { const p_clear_color *c = a; if (ncl >= 8 || c->index < 0 || c->index >= r2->n || !r2->color[c->index] || c->mask != 0xf) return;
                 const tex_t *t = r2->color[c->index];
@@ -10770,6 +10771,98 @@ static void copy_t2t(const p_copy_t2t *c) {
       }
     }
 }
+// ---------- NVN2's DLSS evaluation (OP_DLSS, hle_nvn.c nvnCommandBufferEvaluateDlss) ----------
+// Through MetalFX's temporal scaler, which takes what DLSS takes: the jittered colour, depth and motion vectors (current to previous, in input pixels after their scale), the jitter and a
+// history reset. The game moves its projection by a sub-pixel offset each frame for the upscaler to accumulate; a spatial scale of the input shows that offset as a shake of the whole picture
+// (Fire Emblem Fortune's Weave's battle map). The inputs are copied into the scaler's own textures (the usage MetalFX asks for, the input rectangle at the origin) and its output into the
+// game's output rectangle. Without a Metal 4 temporal scaler (or with one refusing the formats), and while recording Metal calls, it is a bilinear scaled copy of the input as before.
+// DM_NVN_DLSS=bilinear keeps the copy (comparison)
+typedef struct { id<MTL4FXTemporalScaler> sc; id<MTLTexture> c, d, m, o; NSUInteger key[8], refused[8]; int made; } dlss_fx;
+static dlss_fx g_dlss_fx;   // one scaler: the game evaluates one network a frame (the replay thread's)
+static id<MTL4Compiler> g_dlss_comp;
+static int dlss_mode(void) {
+    static int v = -1; if (v >= 0) return v;
+    const char *e = getenv("DM_NVN_DLSS"); v = !(e && !strcmp(e, "bilinear"));
+    if (v && !(g_q4 && [MTLFXTemporalScalerDescriptor supportsMetal4FX:g_dev])) { MLOG("DLSS: this GPU has no Metal 4 MetalFX temporal scaler; the evaluation is a bilinear scaled copy"); v = 0; }
+    MLOG("DLSS (DM_NVN_DLSS): %s", v ? "MetalFX's temporal scaler" : "a bilinear scaled copy");
+    return v;
+}
+static void dlss_copy(const p_dlss *q) {   // the input rectangle scaled into the output rectangle
+    p_copy_t2t c = {q->in, q->out, q->iv, q->ov, q->has_iv, q->has_ov, {q->ix, q->iy, 0, q->iw, q->ih, 1}, {q->ox, q->oy, 0, q->ow, q->oh, 1}, NVN_COPY_FLAGS_LINEAR_FILTER_BIT};
+    copy_t2t(&c);
+}
+static unsigned dlss_lv(const view_t *v, uint8_t has) { return has && v->set_levels ? v->base_level : 0; }
+static unsigned dlss_sl(const view_t *v, uint8_t has) { return has && v->set_layers ? v->min_layer : 0; }
+static id<MTLTexture> dlss_tex(MTLPixelFormat f, NSUInteger w, NSUInteger h, MTLTextureUsage u, NSString *label) {
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:f width:w height:h mipmapped:NO];
+    td.storageMode = MTLStorageModePrivate; td.usage = u | MTLTextureUsageShaderRead;
+    id<MTLTexture> t = [g_dev newTextureWithDescriptor:td]; t.label = label; return t;
+}
+static void dlss_eval(const p_dlss *q) {
+    if (!q->in || !q->out || q->iw <= 0 || q->ih <= 0 || q->ow <= 0 || q->oh <= 0) return;
+    if (!dlss_mode() || rec_on() || !q->depth || !q->mv) { dlss_copy(q); return; }
+    xv_check(q->in->serial, dlss_lv(&q->iv, q->has_iv), dlss_sl(&q->iv, q->has_iv), "DLSS input");
+    rp_flush(); zskip_del(q->out->serial);
+    id<MTLTexture> s = tex_mtl(q->in), d = tex_mtl(q->depth), m = tex_mtl(q->mv), o = tex_mtl(q->out);
+    if (!s || !d || !m || !o) return;
+    unsigned sl = dlss_lv(&q->iv, q->has_iv), dl = dlss_lv(&q->dv, q->has_dv), ml = dlss_lv(&q->mv_v, q->has_mv_v), ol = dlss_lv(&q->ov, q->has_ov);
+    unsigned ss = dlss_sl(&q->iv, q->has_iv), ds = dlss_sl(&q->dv, q->has_dv), ms = dlss_sl(&q->mv_v, q->has_mv_v), os = dlss_sl(&q->ov, q->has_ov);
+    // Each rectangle within its level; depth whole (Metal copies a depth-stencil texture's whole level only)
+    if (q->ix < 0 || q->iy < 0 || q->dx < 0 || q->dy < 0 || q->mx < 0 || q->my < 0 || q->ox < 0 || q->oy < 0
+        || q->ix + q->iw > (int)MAX(s.width >> sl, 1ul) || q->iy + q->ih > (int)MAX(s.height >> sl, 1ul) || q->mx + q->iw > (int)MAX(m.width >> ml, 1ul) || q->my + q->ih > (int)MAX(m.height >> ml, 1ul)
+        || q->dx || q->dy || q->iw != (int)MAX(d.width >> dl, 1ul) || q->ih != (int)MAX(d.height >> dl, 1ul)
+        || q->ox + q->ow > (int)MAX(o.width >> ol, 1ul) || q->oy + q->oh > (int)MAX(o.height >> ol, 1ul) || s.sampleCount > 1 || d.sampleCount > 1 || m.sampleCount > 1 || o.sampleCount > 1) {
+        RED_ONCE(142, "DLSS: rectangles the temporal scaler does not take (input %dx%d at %d,%d of %lux%lu, depth at %d,%d of %lux%lu, motion at %d,%d, output %dx%d at %d,%d of %lux%lu); a bilinear copy",
+                 q->iw, q->ih, q->ix, q->iy, (unsigned long)s.width, (unsigned long)s.height, q->dx, q->dy, (unsigned long)d.width, (unsigned long)d.height, q->mx, q->my, q->ow, q->oh, q->ox, q->oy,
+                 (unsigned long)o.width, (unsigned long)o.height);
+        dlss_copy(q); return;
+    }
+    dlss_fx *fx = &g_dlss_fx;
+    NSUInteger key[8] = {(NSUInteger)q->iw, (NSUInteger)q->ih, s.pixelFormat, d.pixelFormat, m.pixelFormat, (NSUInteger)q->ow, (NSUInteger)q->oh, o.pixelFormat};
+    if (!memcmp(key, fx->refused, sizeof key)) { dlss_copy(q); return; }
+    if (!fx->sc || memcmp(key, fx->key, sizeof key)) {
+        defer_obj_release(fx->c); defer_obj_release(fx->d); defer_obj_release(fx->m); defer_obj_release(fx->o); defer_obj_release(fx->sc);
+        fx->sc = nil; fx->c = fx->d = fx->m = fx->o = nil;
+        uint64_t t0 = now_ns(); NSError *e = nil;
+        if (!g_dlss_comp) g_dlss_comp = [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&e];
+        MTLFXTemporalScalerDescriptor *td = [MTLFXTemporalScalerDescriptor new];
+        td.colorTextureFormat = s.pixelFormat; td.depthTextureFormat = d.pixelFormat; td.motionTextureFormat = m.pixelFormat; td.outputTextureFormat = o.pixelFormat;
+        td.inputWidth = (NSUInteger)q->iw; td.inputHeight = (NSUInteger)q->ih; td.outputWidth = (NSUInteger)q->ow; td.outputHeight = (NSUInteger)q->oh;
+        id<MTL4FXTemporalScaler> sc = g_dlss_comp ? [td newTemporalScalerWithDevice:g_dev compiler:g_dlss_comp] : nil;
+        fx->made++;
+        if (sc) {
+            fx->c = dlss_tex(s.pixelFormat, q->iw, q->ih, sc.colorTextureUsage, @"DLSS colour"); fx->d = dlss_tex(d.pixelFormat, q->iw, q->ih, sc.depthTextureUsage, @"DLSS depth");
+            fx->m = dlss_tex(m.pixelFormat, q->iw, q->ih, sc.motionTextureUsage, @"DLSS motion"); fx->o = dlss_tex(o.pixelFormat, q->ow, q->oh, sc.outputTextureUsage, @"DLSS output");
+        }
+        if (!sc || !fx->c || !fx->d || !fx->m || !fx->o) {
+            memcpy(fx->refused, key, sizeof key); fx->c = fx->d = fx->m = fx->o = nil;
+            MLOG("[RED] DLSS: MetalFX makes no temporal scaler for %dx%d (colour %lu, depth %lu, motion %lu) → %dx%d (format %lu)%s; a bilinear copy", q->iw, q->ih, (unsigned long)s.pixelFormat,
+                 (unsigned long)d.pixelFormat, (unsigned long)m.pixelFormat, q->ow, q->oh, (unsigned long)o.pixelFormat, !g_dlss_comp ? " (no Metal 4 compiler)" : sc ? " (no textures)" : "");
+            dlss_copy(q); return;
+        }
+        res_add(fx->c); res_add(fx->d); res_add(fx->m); res_add(fx->o); res_commit();
+        fx->sc = sc; memcpy(fx->key, key, sizeof key);
+        MLOG("DLSS: MetalFX temporal scaler %dx%d → %dx%d (colour %lu, depth %lu, motion %lu, output %lu; depth %s; scaler #%d, made in %.1f ms)", q->iw, q->ih, q->ow, q->oh, (unsigned long)s.pixelFormat,
+             (unsigned long)d.pixelFormat, (unsigned long)m.pixelFormat, (unsigned long)o.pixelFormat, q->flags & 8 ? "inverted" : "not inverted", fx->made, (now_ns() - t0) / 1e6);
+    }
+    rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    MTLSize in = MTLSizeMake(q->iw, q->ih, 1);
+    id<MTL4ComputeCommandEncoder> ce = (id<MTL4ComputeCommandEncoder>)enc_c_begin(NULL);
+    [ce copyFromTexture:s sourceSlice:ss sourceLevel:sl sourceOrigin:MTLOriginMake(q->ix, q->iy, 0) sourceSize:in toTexture:fx->c destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [ce copyFromTexture:d sourceSlice:ds sourceLevel:dl sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:in toTexture:fx->d destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [ce copyFromTexture:m sourceSlice:ms sourceLevel:ml sourceOrigin:MTLOriginMake(q->mx, q->my, 0) sourceSize:in toTexture:fx->m destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+    enc_c_end(ce);   // its end barrier orders the scaler's encoders after the copies
+    id<MTL4FXTemporalScaler> sc = fx->sc;
+    sc.colorTexture = fx->c; sc.depthTexture = fx->d; sc.motionTexture = fx->m; sc.outputTexture = fx->o;
+    sc.inputContentWidth = (NSUInteger)q->iw; sc.inputContentHeight = (NSUInteger)q->ih;
+    sc.jitterOffsetX = q->jx; sc.jitterOffsetY = q->jy; sc.motionVectorScaleX = q->mvx; sc.motionVectorScaleY = q->mvy;
+    sc.preExposure = q->pre > 0 ? q->pre : 1.f; sc.reset = q->reset != 0; sc.depthReversed = (q->flags & 8) != 0;   // NGX's DepthInverted
+    [sc encodeToCommandBuffer:g_cb];
+    ce = (id<MTL4ComputeCommandEncoder>)enc_c_begin(NULL);   // its start barrier waits for the scaler
+    [ce copyFromTexture:fx->o sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(q->ow, q->oh, 1) toTexture:o destinationSlice:os destinationLevel:ol destinationOrigin:MTLOriginMake(q->ox, q->oy, 0)];
+    enc_c_end(ce);
+    args_dirty_all();
+}
 
 // The colour channels a Metal format has, as a channel write mask: a clear whose mask covers them all writes every texel whole (FINAL FANTASY TACTICS - The Ivalice Chronicles clears an
 // R8 render target with mask 0x1)
@@ -11171,6 +11264,7 @@ void mtl_exec(const uint8_t *p) {
             case OP_COPY_B2T: copy_b2t(a); break;
             case OP_COPY_T2B: copy_t2b(a); break;
             case OP_COPY_T2T: copy_t2t(a); break;
+            case OP_DLSS: dlss_eval(a); break;
             case OP_DRAW_TEX: draw_tex(a); break;
             case OP_CLEAR_TEX: clear_tex(a); break;
             case OP_DISPATCH: if (g_csh_n && csh_take(p)) { PD("H %llu dispatch already run ahead of the pass", g_stat_pass); break; }

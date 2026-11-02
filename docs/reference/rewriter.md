@@ -365,6 +365,15 @@ To enroll a cut for any game's own module:
 - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game).
 - **Check:** synthetic tests cover SIGTERM during active pool jobs, invalid counts and explicit worker limits through the packing script. The original speed measurements and module comparisons are in [PR #761](https://github.com/seedds/nxnative/pull/761); their timings are contributor measurements, not local regression results. Local game validation is recorded in Breath of the Wild's note; other games and NROs have no new local runtime validation here.
 
+### A pool's shutdown hangs on a worker that has just started
+
+- **Symptom:** a rewrite never ends, using no CPU: `patch_nso.py` waits in `wait4` and one forked worker of the same command in `sem_wait`, in `multiprocessing/queues.py` `get`, having run no job. It is rare and needs small jobs (about 1 in 6,000 pools of tiny jobs under load). Separately, a SIGTERM could be ignored until the rewrite ended, or leave workers behind.
+- **Cause:** workers inherited the Python SIGTERM handler that lets the parent exit through the pool's context manager. `Pool.terminate` takes the job queue's lock for good, sends each worker one SIGTERM and joins it with no timeout, so it needs that signal to end the worker. A handler only sets a flag, and Python clears flags in a new child, so a worker just forked lost the signal, then waited for that lock forever. Resetting SIGTERM in the pool's initializer alone does not help: the signal can land before the initializer runs. In the parent, the handler's `sys.exit` could also be raised during the pool's teardown, where it stopped a terminate halfway or was discarded in a destructor.
+- **Fix:** `in_parallel` blocks SIGTERM across the fork, which keeps it pending in the kernel, and each worker restores the default action before unblocking it. In the parent SIGTERM acts only while waiting for results. A finished pool leaves by `close` and `join`, so no SIGTERM is sent.
+- **Open:** cancelling a rewrite still ends in `Pool.terminate`, and a worker it kills while sending a result never releases the result queue's lock, so the parent can hang (Python's own limit; 2 in about 25,000 cancellations of a process doing nothing but pools, far rarer in a real rewrite, which spends its time in analysis). A rewrite that finishes never reaches it.
+- **Found on:** the Python tool tests (`discover -s dm/tools/tests`), which hung for 2 hours in a test's small NRO; no game was seen to hang.
+- **Check:** `test_rewrite_parallel.py` checks that SIGTERM is blocked from the fork on and that a worker has the default action unblocked before any job, and sends SIGTERM during pool start and during teardown. The race itself is too rare and too slow to repeat in a test.
+
 ## Checking a rewriter change
 
 Rewrite every extracted module of every title with the old and the new `patch_nso.py` and compare all outputs; only `build_src.sha256` (the rewriter's own hash) may differ for titles the change is not meant for.

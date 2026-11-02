@@ -579,11 +579,28 @@ def x18_words(lo, hi):
 # The x18 scan and the spin wait search only read the original image, so they can run in worker processes.
 def in_parallel(fn, jobs):
     """Returns [fn(*job) for job in jobs], computed in forked worker processes.
-    The workers are forked on each call, so they see the module's state as it is at that point."""
+    The workers are forked on each call, so they see the module's state as it is at that point.
+    Pool.terminate takes the job queue's lock for good, sends each worker one SIGTERM and joins it with no timeout, so that SIGTERM must end a worker wherever it lands. Python's handler
+    only sets a flag, which Python clears in a new child, so a worker just forked could lose the signal, wait for that lock forever and hang the rewrite (jobs too small for every worker to
+    start first). So SIGTERM stays blocked across the fork, which keeps it pending in the kernel, until a worker has the default action back and that action can end it.
+    In this process it acts only while waiting for the results: the handler's sys.exit raised during the pool's teardown could stop a terminate halfway and leave workers behind, or be discarded
+    in a destructor."""
     if WORKERS < 2 or len(jobs) < 2:
         return [fn(*job) for job in jobs]
-    with multiprocessing.get_context('fork').Pool(min(WORKERS, len(jobs))) as pool:
-        return pool.starmap(fn, jobs)
+    def worker_signals():
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})   # the pool's threads inherit it: a worker that replaces a lost one starts the same way
+    try:
+        with multiprocessing.get_context('fork').Pool(min(WORKERS, len(jobs)), initializer=worker_signals) as pool:
+            signal.pthread_sigmask(signal.SIG_SETMASK, mask)   # a SIGTERM that came meanwhile acts here, inside the with, which reaps the workers
+            try: results = pool.starmap(fn, jobs)
+            finally: signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+            pool.close(); pool.join()   # finished: the workers leave by the pool's own sentinels, so a finished rewrite sends no SIGTERM
+            return results
+    finally:
+        pool = None   # its destructors run here, still blocked
+        signal.pthread_sigmask(signal.SIG_SETMASK, mask)
 
 def find_x18_words():
     """x18_words over all the code, in 1 MB pieces"""

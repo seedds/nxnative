@@ -34,8 +34,19 @@
 // VK_EXT_primitive_topology_list_restart's primitiveTopologyListRestart (vk_device.c enables it; patch lists stay converted). The extension lets primitiveRestartEnable apply to
 // lists, where the restart index "restarts the assembly of primitives" (VkPipelineInputAssemblyStateCreateInfo): the vertices gathered for the primitive in progress make none,
 // and the next index starts a new one, the dropping rule above; t_vk_index_convert draws both paths against the same oracle. Native fans keep the triangles, their order and
-// their winding; Vulkan's vertex order within a triangle is (k+1, k+2, 0), so a flat varying takes vertex k+1 where the expanded list's first vertex is 0: the provoking vertex is
-// declared at step P8.
+// their winding; Vulkan's vertex order within a triangle is (k+1, k+2, 0).
+// The provoking vertex (2026-11-02; t_vk_provoking): the vertex a flat varying takes. NVN's is GL's last-vertex convention (OpenGL 4.6 compatibility profile, table 13.2, the
+// "last" column; the frontend records no other: nvnCommandBufferSetProvokingVertexMode is unimplemented), and every pipeline of the backend is made with Vulkan's last-vertex
+// mode where the device has VK_EXT_provoking_vertex (vk_device.c, vk_pipeline.c hvk_raster_next). Per row, primitive k of a segment (j: the quad), GL's vertex / this port's:
+//   points k / k; lines 2k+1 / 2k+1; line loop k+1, the closing line 0 / the same (the converted list's second vertex); line strip k+1 / k+1; triangles 3k+2 / 3k+2;
+//   triangle strip k+2 / k+2; triangle fan k+2 / k+2 (Vulkan's last-vertex mode takes k+2 of a native fan, VK_EXT_provoking_vertex; the expanded list (0, k+1, k+2) ends with it);
+//   lists and strips with adjacency 4k+2, k+2, 6k+4, 2k+4 / the same (Vulkan's last-vertex mode skips the adjacent vertices as GL does).
+// Three rows differ, declared (the conversions keep the Metal backend's triangles; changing them is the shader kernels' and the shared quad list's, not this table's):
+//   quads: GL's quad takes 4j+3 for both its triangles; the split (4j, 4j+1, 4j+2) (4j, 4j+2, 4j+3) gives 4j+2 to the first, and no rotation of a triangle without vertex 4j+3
+//     can give it (the split along (4j+1, 4j+3): (4j, 4j+1, 4j+3) (4j+1, 4j+2, 4j+3) would, with the other diagonal);
+//   quad strips: GL takes 2j+3; the second triangle (2j, 2j+3, 2j+2) gives 2j+2 (its rotation (2j+2, 2j, 2j+3), the same winding, would give 2j+3);
+//   polygons: GL takes vertex 0 in both conventions; the fan gives k+2 (a list (k+1, k+2, 0), the same winding, would give 0).
+// Without the extension (a red line once per device) Vulkan's first-vertex mode is left: lists 3k, strips k, native fans k+1, expanded fans and converted quads 0 / 4j.
 #include "plat/plat.h"
 #include "vk_index.h"
 #include "../nvn/nvn_primitive.h"

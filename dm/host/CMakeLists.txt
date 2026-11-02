@@ -443,7 +443,7 @@ target_compile_options(nvn_front_obj PRIVATE ${HOST_FLAGS})
 target_include_directories(nvn_front_obj PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${GEN} ${PROFILE_DIR} ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include)
 target_link_libraries(nvn_front_obj PUBLIC nxplat)
 target_compile_definitions(nvn_front_obj PRIVATE DM_TEST_GUEST_C)   # these tests call the frontend as C functions and link no execution engine: its guest call (the command-memory callback) takes the plain form
-foreach(t IN ITEMS queue_origin clear_ds clear_tex depth16_clear integer_blend primitive_restart rast_discard vbuf readback view_swizzle queries cond_render copy_alias index_convert)
+foreach(t IN ITEMS queue_origin clear_ds clear_tex depth16_clear integer_blend primitive_restart rast_discard vbuf readback view_swizzle queries cond_render copy_alias index_convert provoking)
     host_test(t_vk_${t} SOURCES ../../gfx/tests/vk/t_vk_${t}.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
     target_link_libraries(t_vk_${t} PRIVATE nvn_front_obj nvn_vk)
 endforeach()

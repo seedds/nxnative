@@ -22,6 +22,8 @@
 // ---------- Log ----------
 static void (*g_log)(const char *line);
 void hostvk_set_log(void (*fn)(const char *line)) { g_log = fn; }
+static int g_test_no_pv;   // hvk_test_no_provoking_vertex: VK_EXT_provoking_vertex taken as absent by the next hostvk_init
+void hvk_test_no_provoking_vertex(int on) { g_test_no_pv = on; }
 void hostvk_log(const char *fmt, ...) {
     char b[4096];
     va_list a; va_start(a, fmt); vsnprintf(b, sizeof b, fmt, a); va_end(a);
@@ -103,6 +105,9 @@ typedef struct {
     VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT fpgq;
     int list_restart;   // VK_EXT_primitive_topology_list_restart (the index conversions)
     VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT flr;
+    int pv;             // VK_EXT_provoking_vertex (the provoking vertex)
+    VkPhysicalDeviceProvokingVertexFeaturesEXT fpv;
+    VkPhysicalDeviceProvokingVertexPropertiesEXT ppv;
     VkPhysicalDeviceTransformFeedbackPropertiesEXT pxfb;
     VkPhysicalDeviceFeatures2 f;
     VkPhysicalDeviceVulkan12Features f12;
@@ -169,6 +174,7 @@ static void devq_query(VkPhysicalDevice p, devq *q) {
     q->present_wait = has_ext(q, VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
     q->display_timing = has_ext(q, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
     q->list_restart = has_ext(q, VK_EXT_PRIMITIVE_TOPOLOGY_LIST_RESTART_EXTENSION_NAME);
+    q->pv = has_ext(q, VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME);
     vkGetPhysicalDeviceProperties(p, &q->p.properties);
     if (q->p.properties.apiVersion < VK_API_VERSION_1_3) return;   // below the baseline: the 1.2 / 1.3 structures may not be chained
     void **next = &q->f.pNext;
@@ -193,6 +199,7 @@ static void devq_query(VkPhysicalDevice p, devq *q) {
     if (q->pgq) { q->fpgq.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVES_GENERATED_QUERY_FEATURES_EXT; *next = &q->fpgq; next = &q->fpgq.pNext; }
     if (q->present_id) { q->fpid.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR; *next = &q->fpid; next = &q->fpid.pNext; }
     if (q->list_restart) { q->flr.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVE_TOPOLOGY_LIST_RESTART_FEATURES_EXT; *next = &q->flr; next = &q->flr.pNext; }
+    if (q->pv) { q->fpv.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT; *next = &q->fpv; next = &q->fpv.pNext; }
     if (q->present_wait) { q->fpw.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR; *next = &q->fpw; next = &q->fpw.pNext; }
     vkGetPhysicalDeviceFeatures2(p, &q->f);
     next = &q->p.pNext;
@@ -202,6 +209,7 @@ static void devq_query(VkPhysicalDevice p, devq *q) {
     if (q->host_mem) { q->phost.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT; *next = &q->phost; next = &q->phost.pNext; }
     if (q->gpl) { q->pgpl.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT; *next = &q->pgpl; next = &q->pgpl.pNext; }
     if (q->eds3) { q->peds3.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_PROPERTIES_EXT; *next = &q->peds3; next = &q->peds3.pNext; }
+    if (q->pv) { q->ppv.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_PROPERTIES_EXT; *next = &q->ppv; next = &q->ppv.pNext; }
     if (q->xfb) { q->pxfb.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_PROPERTIES_EXT; *next = &q->pxfb; next = &q->pxfb.pNext; }
     vkGetPhysicalDeviceProperties2(p, &q->p);
 }
@@ -521,6 +529,13 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     // (the restart index restarts primitive assembly); patch lists keep their conversion (primitiveTopologyPatchListRestart is not enabled)
     d->x.list_restart = q->list_restart && q->flr.primitiveTopologyListRestart;
     if (d->x.list_restart) ext[ne++] = VK_EXT_PRIMITIVE_TOPOLOGY_LIST_RESTART_EXTENSION_NAME;
+    // The provoking vertex (2026-11-02): NVN takes a flat varying from the last vertex of a primitive, GL's convention (nvnCommandBufferSetProvokingVertexMode, the only way to
+    // change it, is not in the NVN 53.105 header and no game was seen calling it: hle_nvn.c answers it with its red unimplemented line), Vulkan from the first. The last-vertex
+    // mode makes strips, fans and lists take NVN's vertex (vk_index.c, the rules table). transformFeedbackPreservesProvokingVertex is not enabled: captures keep Vulkan's
+    // vertex order, as before (t_vk_transform_feedback)
+    d->x.provoking_last = q->pv && q->fpv.provokingVertexLast && !g_test_no_pv;
+    d->x.provoking_per_pipeline = d->x.provoking_last && q->ppv.provokingVertexModePerPipeline;
+    if (d->x.provoking_last) ext[ne++] = VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME;
     d->x.float64 = cf->shaderFloat64 != 0; d->x.int64 = cf->shaderInt64 != 0; d->x.int16 = cf->shaderInt16 != 0;
     d->x.storage_without_format = cf->shaderStorageImageReadWithoutFormat && cf->shaderStorageImageWriteWithoutFormat;
     d->x.multi_viewport = cf->multiViewport != 0; d->x.depth_bounds = cf->depthBounds != 0;
@@ -595,6 +610,8 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     if (d->x.line_raster) { *next = &fline; next = &fline.pNext; }
     if (d->x.prim_gen) { *next = &fpgq; next = &fpgq.pNext; }
     if (d->x.list_restart) { *next = &flr; next = &flr.pNext; }
+    VkPhysicalDeviceProvokingVertexFeaturesEXT fpv = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT, NULL, VK_TRUE, VK_FALSE};
+    if (d->x.provoking_last) { *next = &fpv; next = &fpv.pNext; }
     VkPhysicalDevicePresentIdFeaturesKHR fpid = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR, NULL, VK_TRUE};
     VkPhysicalDevicePresentWaitFeaturesKHR fpw = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR, NULL, VK_TRUE};
     if (d->x.present_wait) { *next = &fpid; next = &fpid.pNext; *next = &fpw; next = &fpw.pNext; }
@@ -673,6 +690,9 @@ int hostvk_init(const hostvk_opts *o, hostvk_dev *d, char *err, size_t n) {
     hostvk_log("[hostvk] device '%s' driver %s (%s: %s) Vulkan %u.%u.%u level %c%s: %s", d->props.deviceName, ver, d->driver_name, d->driver_info,
                VK_API_VERSION_MAJOR(v), VK_API_VERSION_MINOR(v), VK_API_VERSION_PATCH(v), d->caps.level, d->caps.level != d->caps.device_level ? " (forced by DM_VK_LEVEL)" : "",
                d->missing[0] ? d->missing : "no optional extension missing");
+    if (!d->x.provoking_last)
+        hostvk_log("[RED] [hostvk] no VK_EXT_provoking_vertex with provokingVertexLast: flat-interpolated varyings take the first vertex of each primitive (Vulkan's convention), "
+                   "where NVN takes the last (GL's)");
     if (o->force_level && o->force_level != 'A' && o->force_level < d->caps.device_level)
         hostvk_log("[RED] [hostvk] DM_VK_LEVEL=%c is above the device's level %c: the device's level is used (nothing can be added)", o->force_level, d->caps.device_level);
     if (d->caps.level != 'A')

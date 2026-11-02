@@ -31,6 +31,11 @@ void hvk_key_fill(hvk_gfx_key *k, hvk_shader *const sh[6], int klass, const hvk_
 void hvk_blend_of(const blend_st *b, int on, VkFormat f, uint32_t wmask4, uint32_t *en, VkColorBlendEquationEXT *eq, VkColorComponentFlags *wm);
 // The attachment format of NVN format nf as vk_texture.c makes an image of it (the table's, or its substitute where the device lacks the use), and its numeric class (vk_texture.c)
 VkFormat hvk_attach_format(int nf, uint8_t *cls);
+// The rasterization state's chain with the provoking vertex (2026-11-02; vk_pipeline.c): NVN's last-vertex convention where the device has VK_EXT_provoking_vertex
+// (hostvk_dev.x.provoking_last), pv chained before next and returned; next itself otherwise (Vulkan's first vertex, said by vk_device.c's red line). A constant of every pipeline the
+// backend makes (vk_gpl.c's libraries and monolithic pipelines, the clear triangle, the draw-based copies, guest_gl.c's draws and clears), not part of a key: the frontend records no provoking-vertex state
+// (nvnCommandBufferSetProvokingVertexMode is unimplemented), and one mode for all keeps a pass valid where provokingVertexModePerPipeline is 0
+const void *hvk_raster_next(VkPipelineRasterizationProvokingVertexStateCreateInfoEXT *pv, const void *next);
 #define HVK_TOPOLOGY_ANY 0xff   // hvk_gfx_key.topology_class when the device draws every class from one pipeline (dynamicPrimitiveTopologyUnrestricted)
 
 // ---------- The pipeline store (vk_gpl.c, design 3.2, 3.5, 3.6) ----------

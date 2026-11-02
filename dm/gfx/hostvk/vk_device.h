@@ -151,6 +151,10 @@ typedef struct hostvk_dev {
         uint32_t vp_swizzle_nv : 1;           // VK_NV_viewport_swizzle with extendedDynamicState3ViewportSwizzle: NVN's viewport swizzles in fixed function (NVIDIA)
         // The index conversions (2026-11-02, vk_index.c): primitive restart on point, line and triangle lists and their adjacency forms drawn natively (else converted on the GPU)
         uint32_t list_restart : 1;            // VK_EXT_primitive_topology_list_restart with primitiveTopologyListRestart (primitiveTopologyPatchListRestart is not enabled: patch lists with restart stay converted)
+        // The provoking vertex (2026-11-02): NVN's flat-interpolated varyings take the last vertex of a primitive (GL's convention), Vulkan's default is the first
+        uint32_t provoking_last : 1;          // VK_EXT_provoking_vertex with provokingVertexLast: every pipeline of the backend is made with the last-vertex mode (vk_pipeline.c
+                                              // hvk_raster_next); without it a red line once per device, and flat varyings take the first vertex
+        uint32_t provoking_per_pipeline : 1;  // its provokingVertexModePerPipeline (informative: the backend's pipelines all use one mode, so a pass never mixes two)
         // Step P4a (design 7.3): the window presenter's vsync source, enabled only with a surface wanted (want_surface)
         uint32_t present_wait : 1;            // VK_KHR_present_id and VK_KHR_present_wait with presentId and presentWait: when each present reached the screen
         uint32_t display_timing : 1;          // VK_GOOGLE_display_timing: the refresh duration and the actual present times
@@ -181,4 +185,6 @@ void hostvk_destroy(hostvk_dev *d);
 // Log lines of the backend: one line without its newline. Default: stderr with the host's "[dm] " prefix (dm/host/dm.h's LOG, which this layer does not include: dm.h needs the
 // generated game profile header and declares the whole host). The host may route them elsewhere
 void hostvk_set_log(void (*fn)(const char *line));
+// Tests (t_vk_provoking): VK_EXT_provoking_vertex taken as absent by the next hostvk_init (on: 1), so the device is made without it and the red line is said
+void hvk_test_no_provoking_vertex(int on);
 void hostvk_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

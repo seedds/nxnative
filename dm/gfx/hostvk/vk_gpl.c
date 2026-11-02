@@ -353,7 +353,8 @@ static VkPipeline lib_make(int part, const pso_ent *e) {
     VkPipelineViewportDepthClipControlCreateInfoEXT dcc = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_DEPTH_CLIP_CONTROL_CREATE_INFO_EXT, NULL, k->depth_clip_ndc};
     VkPipelineViewportStateCreateInfo vp = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, hvk.dev.x.depth_clip_control ? &dcc : NULL, 0, 0, NULL, 0, NULL};
     VkPipelineRasterizationLineStateCreateInfoEXT ls = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO_EXT, NULL, (VkLineRasterizationModeEXT)k->line_mode, VK_FALSE, 0, 0};
-    VkPipelineRasterizationStateCreateInfo rs = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, (k->baked & HVK_BAKE_LINE) ? &ls : NULL, 0, k->depth_clamp, VK_FALSE,
+    VkPipelineRasterizationProvokingVertexStateCreateInfoEXT pv;   // NVN's last vertex, a constant of every pipeline (vk_pso.h hvk_raster_next): not in the key
+    VkPipelineRasterizationStateCreateInfo rs = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, hvk_raster_next(&pv, (k->baked & HVK_BAKE_LINE) ? &ls : NULL), 0, k->depth_clamp, VK_FALSE,
                                                  (VkPolygonMode)k->poly_mode, VK_CULL_MODE_NONE, VK_FRONT_FACE_COUNTER_CLOCKWISE, VK_FALSE, 0, 0, 0, 1};
     VkPipelineDepthStencilStateCreateInfo ds = {VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
     VkPipelineMultisampleStateCreateInfo ms = {VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, NULL, 0, k->samples ? k->samples : VK_SAMPLE_COUNT_1_BIT, VK_FALSE, 0, NULL, k->a2c, VK_FALSE};
@@ -443,7 +444,8 @@ static VkPipeline mono_make(const pso_ent *e, uint64_t *t) {   // levels C and D
     VkPipelineViewportDepthClipControlCreateInfoEXT dcc = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_DEPTH_CLIP_CONTROL_CREATE_INFO_EXT, NULL, k->depth_clip_ndc};
     VkPipelineViewportStateCreateInfo vp = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, hvk.dev.x.depth_clip_control ? &dcc : NULL, 0, 0, NULL, 0, NULL};
     VkPipelineRasterizationLineStateCreateInfoEXT ls = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO_EXT, NULL, (VkLineRasterizationModeEXT)k->line_mode, VK_FALSE, 0, 0};
-    VkPipelineRasterizationStateCreateInfo rs = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, (k->baked & HVK_BAKE_LINE) ? &ls : NULL, 0, k->depth_clamp, VK_FALSE,
+    VkPipelineRasterizationProvokingVertexStateCreateInfoEXT pv;   // NVN's last vertex, a constant of every pipeline (vk_pso.h hvk_raster_next): not in the key
+    VkPipelineRasterizationStateCreateInfo rs = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, hvk_raster_next(&pv, (k->baked & HVK_BAKE_LINE) ? &ls : NULL), 0, k->depth_clamp, VK_FALSE,
                                                  (VkPolygonMode)k->poly_mode, VK_CULL_MODE_NONE, VK_FRONT_FACE_COUNTER_CLOCKWISE, VK_FALSE, 0, 0, 0, 1};
     VkPipelineMultisampleStateCreateInfo ms = {VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, NULL, 0, k->samples ? k->samples : VK_SAMPLE_COUNT_1_BIT, VK_FALSE, 0, NULL, k->a2c, VK_FALSE};
     VkPipelineDepthStencilStateCreateInfo ds = {VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};

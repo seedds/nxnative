@@ -384,3 +384,17 @@ net-write-sanitize:
 	$(call san_fresh,build/net-write-asan,$(ASAN_FLAGS))
 	$(ASAN_ENV) $(MAKE) B=build/net-write-asan SAN="$(ASAN_FLAGS)" net-write
 run: net-write
+
+# Original synthetic DNSService callbacks exercise ownership/cancellation offline.
+$(B)/t_resolver_cancel: t_resolver_cancel.c t_net_write_stub.c ../hle_net_backend.c ../net_socket.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -Wno-unused-function -o $@ t_resolver_cancel.c t_net_write_stub.c
+.PHONY: resolver
+resolver: $(B)/t_resolver_cancel
+	$(B)/t_resolver_cancel
+run: resolver
+# Optional system API smoke uses only localhost and is not part of CI.
+$(B)/t_resolver_live: t_resolver_live.c t_net_write_stub.c ../hle_net_backend.c ../net_socket.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -o $@ t_resolver_live.c ../hle_net_backend.c t_net_write_stub.c
+.PHONY: resolver-live
+resolver-live: $(B)/t_resolver_live
+	$(B)/t_resolver_live

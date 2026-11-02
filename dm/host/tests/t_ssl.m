@@ -324,8 +324,10 @@ static int check_real_store(const char *directory) {
 int main(int argc, char **argv) { @autoreleasepool {
     if (argc == 3 && !strcmp(argv[1], "--certstore")) return check_real_store(argv[2]);
     if (argc != 6) return 2;
-    caPem = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:argv[1]]]; caDer = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:argv[2]]]; port = (unsigned)strtoul(argv[3], NULL, 10);
-    clientPki = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:argv[4]]];
+    NSString *caPemPath=[NSString stringWithUTF8String:argv[1]], *caDerPath=[NSString stringWithUTF8String:argv[2]], *pkiPath=[NSString stringWithUTF8String:argv[4]];
+    if (!caPemPath || !caDerPath || !pkiPath) return 2;
+    caPem = [NSData dataWithContentsOfFile:caPemPath]; caDer = [NSData dataWithContentsOfFile:caDerPath]; port = (unsigned)strtoul(argv[3], NULL, 10);
+    clientPki = [NSData dataWithContentsOfFile:pkiPath];
     systemRoot = [NSString stringWithUTF8String:argv[5]];
     CHECK(caPem.length && caDer.length && clientPki.length && port, "ephemeral TLS test fixtures loaded");
     setenv("DM_NETWORK", "offline", 1);

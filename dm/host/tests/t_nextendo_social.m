@@ -61,7 +61,8 @@ int main(void){@autoreleasepool{
     int before=requests;uint64_t ids[4]={0,0,0,0xface};
     CHECK(!dm_nextendo_friends_list(&count,ids,NULL,1,1,filter,true)&&count==1&&ids[0]==502&&ids[1]==0&&ids[3]==0xface&&requests==before);
     char profile[]="/tmp/nx-social-profile-XXXXXX";CHECK(mkdtemp(profile)!=NULL);
-    NSString *manifest=[[NSString stringWithUTF8String:profile] stringByAppendingPathComponent:@"manifest.json"];
+    NSString *profilePath=[NSString stringWithUTF8String:profile]; if (!profilePath) return 1;
+    NSString *manifest=[profilePath stringByAppendingPathComponent:@"manifest.json"];
     CHECK([@"{\"identity\":{\"friends\":\"baas\",\"account\":\"baas\"}}" writeToFile:manifest atomically:YES encoding:NSUTF8StringEncoding error:nil]);
     chmod(manifest.fileSystemRepresentation,0600);
     NSString *routes=[[NSString stringWithUTF8String:profile] stringByAppendingPathComponent:@"routes.tsv"];

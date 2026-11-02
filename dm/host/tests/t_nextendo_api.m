@@ -44,19 +44,25 @@ int main(void) { @autoreleasepool {
     linked=NO; CHECK(dm_nextendo_api_request("friends",NULL,0,output,sizeof output,&size)!=0);
     CHECK(before==requests && !size);
     NSURLSession *dummy=[NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.ephemeralSessionConfiguration];
-    NSURLSessionDataTask *dummy_task=[dummy dataTaskWithURL:[NSURL URLWithString:@"https://nextendo.network/api/friends"]]; // never resumed
+    NSURL *fixtureURL=[NSURL URLWithString:@"https://nextendo.network/api/friends"]; if (!fixtureURL) return 1;
+    NSURLSessionDataTask *dummy_task=[dummy dataTaskWithURL:fixtureURL]; // never resumed
     DmNextendoApiTransfer *transfer=[DmNextendoApiTransfer new];
-    NSHTTPURLResponse *response=[[NSHTTPURLResponse alloc] initWithURL:[NSURL URLWithString:@"https://nextendo.network/api/friends"] statusCode:200 HTTPVersion:@"HTTP/1.1" headerFields:@{@"Content-Length":@"1048577"}];
+    NSHTTPURLResponse *response=[[NSHTTPURLResponse alloc] initWithURL:fixtureURL statusCode:200 HTTPVersion:@"HTTP/1.1" headerFields:@{@"Content-Length":@"1048577"}];
+    if (!response || !dummy_task || !transfer) return 1;
     __block BOOL cancelled=NO;
     [transfer URLSession:dummy dataTask:dummy_task didReceiveResponse:response completionHandler:^(NSURLSessionResponseDisposition disposition){cancelled=disposition==NSURLSessionResponseCancel;}];
     CHECK(cancelled&&transfer.failed&&!transfer.data.length);
     transfer=[DmNextendoApiTransfer new];
-    [transfer URLSession:dummy dataTask:dummy_task didReceiveData:[NSMutableData dataWithLength:1024*1024]];
+    NSData *largeChunk=[NSMutableData dataWithLength:1024*1024], *extraChunk=[NSData dataWithBytes:"X" length:1];
+    if (!largeChunk || !extraChunk) return 1;
+    [transfer URLSession:dummy dataTask:dummy_task didReceiveData:largeChunk];
     CHECK(!transfer.failed&&transfer.data.length==1024*1024);
-    [transfer URLSession:dummy dataTask:dummy_task didReceiveData:[NSData dataWithBytes:"X" length:1]];
+    [transfer URLSession:dummy dataTask:dummy_task didReceiveData:extraChunk];
     CHECK(transfer.failed&&transfer.data.length==1024*1024);
     transfer=[DmNextendoApiTransfer new];__block BOOL redirect_refused=NO;
-    [transfer URLSession:dummy task:dummy_task willPerformHTTPRedirection:response newRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:@"https://untrusted.invalid/"]] completionHandler:^(NSURLRequest *request){redirect_refused=request==nil;}];
+    NSURL *redirectURL=[NSURL URLWithString:@"https://untrusted.invalid/"]; if (!redirectURL) return 1;
+    NSURLRequest *redirectRequest=[NSURLRequest requestWithURL:redirectURL]; if (!redirectRequest) return 1;
+    [transfer URLSession:dummy task:dummy_task willPerformHTTPRedirection:response newRequest:redirectRequest completionHandler:^(NSURLRequest *request){redirect_refused=request==nil;}];
     CHECK(redirect_refused&&transfer.failed);
     [transfer URLSession:dummy task:dummy_task didCompleteWithError:[NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil]];
     CHECK(transfer.failed&&dispatch_semaphore_wait(transfer.completed,DISPATCH_TIME_NOW)==0);

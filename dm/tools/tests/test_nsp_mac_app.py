@@ -118,7 +118,7 @@ class PackReuse(unittest.TestCase):
             'pso/prebuilt.tsv': b'prebuilt', 'pso/rest_pairs.tsv': b'rest', 'pso/archive.tsv': b'index',
             'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'source/launcher.c': b'launcher',
             'host/romfs_image.h': b'validator', 'host/input_map.h': b'maps', 'host/dm_input.h': b'buttons', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader',
-            'source/Launcher.swift': b'window', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows',
+            'source/Launcher.swift': b'window', 'source/LauncherControls.swift': b'controls', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows',
         }
         for n in pack_app.TABLES: files['profile/' + n] = n.encode()
         for n, content in files.items(): (t / n).write_bytes(content)
@@ -197,7 +197,7 @@ class PackReuse(unittest.TestCase):
         names = ['dmhost', 'patched/main.patched.bin', 'patched/main.fixups.tsv', 'patched/main.gates.tsv', 'patched/main.cuts.tsv',
                  'patched/main.obs.tsv', 'patched/nro.tsv', 'msl/k.metallib', 'msl/k.json', 'msl/inputs.tsv', 'font/nintendo_ext.ttf',
                  'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/archive.tsv', 'env.txt', 'icon.jpg', 'source/launcher.c',
-                 'source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift',   # the settings window's sources
+                 'source/Launcher.swift', 'source/LauncherControls.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift',   # the settings window's sources
                  'host/input_map.h', 'host/dm_input.h',   # the launcher's headers
                  'host/save_sync.c', 'host/save_sync.h']   # the cloud-save code the launcher links (its send after the host exits)
         names += ['profile/' + n for n in pack_app.TABLES]
@@ -259,7 +259,7 @@ class PackReuse(unittest.TestCase):
         self.assertIn(c[c.index('-o') + 1], s)   # launcher.c's object, with its main
         sync = next(c for c in self.commands if Path(c[0]).name == 'clang' and '-o' in c and c[-1].endswith('save_sync.c'))
         self.assertIn(sync[sync.index('-o') + 1], s)   # save_sync.c's object: the launcher sends the save once the host has exited
-        self.assertEqual([Path(x).name for x in s if x.endswith('.swift')], ['Launcher.swift', 'LauncherSettings.swift', 'LauncherRow.swift'])
+        self.assertEqual([Path(x).name for x in s if x.endswith('.swift')], ['Launcher.swift', 'LauncherControls.swift', 'LauncherSettings.swift', 'LauncherRow.swift'])
 
     def test_selected_file_modes_and_file_additions_and_removals_invalidate(self):
         self.pack()
@@ -316,7 +316,7 @@ class PackReuse(unittest.TestCase):
     def test_missing_selected_inputs_fail_before_reuse_or_partial_creation(self):
         self.pack()
         for name in ('dmhost', 'patched/main.fixups.tsv', 'msl/k.metallib', 'romfs/marker', 'pso/prebuilt.tsv', 'env.txt', 'icon.jpg',
-                     'font', 'aoc', 'profile', 'bin/clang', 'bin/swiftc', 'sdk', 'bin/codesign', 'source/launcher.c', 'source/Launcher.swift', 'ios/Sources/LauncherRow.swift'):
+                     'font', 'aoc', 'profile', 'bin/clang', 'bin/swiftc', 'sdk', 'bin/codesign', 'source/launcher.c', 'source/Launcher.swift', 'source/LauncherControls.swift', 'ios/Sources/LauncherRow.swift'):
             with self.subTest(name=name):
                 p = self.tmp / name; hidden = p.with_name(p.name + '.hidden'); p.rename(hidden)
                 try:
@@ -570,6 +570,58 @@ class App(unittest.TestCase):
             subprocess.run(['defaults', 'delete', domain], capture_output=True)
             Path(os.path.expanduser(f'~/Library/Preferences/{domain}.plist')).unlink(missing_ok=True)
 
+    def test_controls_profile(self):
+        """The controls profile (launcher.c controls_profile; the settings window's Input tab writes it): ~/Library/Application Support/nxnative/controls/<name>.txt,
+        Default unless controls.profile names another; each value checked by the host's parser; the environment, the env files and launcher.<VAR> saved choices win; DM_SAVED_CHOICES=0 ignores it"""
+        domain = f'org.nxnative.test.{uuid.uuid4().hex}'   # never a real game's domain
+        a = types.SimpleNamespace(**vars(self.args)); a.out = str(self.tmp / 'Profile.app'); a.icon = None; a.bundle_id = domain
+        with mock.patch.object(pack_app, 'sign', lambda *x: None), mock.patch('sys.stdout'): pack_app.pack(a)
+        app = Path(a.out); log = self.tmp / f'home/Library/Logs/nxnative/{TID}.log'
+        folder = self.tmp / 'home/Library/Application Support/nxnative/controls'; folder.mkdir(parents=True, exist_ok=True)
+        keys = ('DM_KEYMAP', 'DM_PAD_MAP', 'DM_PAD_STICK_DZ', 'DM_PAD_STICK_SENS', 'DM_PAD_ABXY')
+
+        def run(**env):
+            p = self.launch(app=app, **env); out = p.communicate(timeout=30)[0].decode()
+            self.assertEqual(p.returncode, 7, out)
+            r = self.host_run(); return tuple(r.get(k) for k in keys), log.read_text()
+
+        try:
+            self.assertEqual(run()[0], (None,) * 5)   # no profile: the host's own mapping
+            (folder / 'Default.txt').write_text('# a comment\nDM_KEYMAP=A=40,B=38\nDM_PAD_MAP=A=B,B=A\nDM_PAD_STICK_DZ=0.10\nDM_PAD_STICK_SENS=1.50\nDM_PAD_ABXY=label\nDM_FPS_TARGET=30\n')
+            r, text = run()
+            self.assertEqual(r, ('A=40,B=38', 'A=B,B=A', '0.10', '1.50', 'label'))
+            self.assertIn('launcher: env DM_PAD_STICK_DZ=0.10 (controls profile Default)', text)
+            self.assertIn('DM_FPS_TARGET is not a control, ignored', text)   # a profile holds controls only
+            (folder / 'Racing.txt').write_text('DM_PAD_STICK_SENS=2.00\nDM_PAD_STICK_DZ=0.9\nDM_PAD_ABXY=xbox\n')
+            subprocess.run(['defaults', 'write', domain, 'controls.profile', '-string', 'Racing'], check=True)
+            r, text = run()
+            self.assertEqual(r, (None, None, None, '2.00', None))   # this game's profile, not Default; a dead zone past 0.5 and an unknown face mode are left out
+            self.assertIn('controls profile Racing: DM_PAD_STICK_DZ=0.9 ignored', text); self.assertIn('controls profile Racing: DM_PAD_ABXY=xbox ignored', text)
+            r, text = run(DM_PAD_STICK_SENS='1')   # the launch environment wins
+            self.assertEqual(r[3], '1'); self.assertIn('DM_PAD_STICK_SENS=2.00 not used', text)
+            subprocess.run(['defaults', 'write', domain, 'launcher.DM_KEYMAP', '-string', 'X=7'], check=True)
+            (folder / 'Racing.txt').write_text('DM_KEYMAP=A=40\n')
+            self.assertEqual(run()[0][0], 'X=7')   # a launcher.DM_KEYMAP saved choice wins over the profile
+            subprocess.run(['defaults', 'write', domain, 'controls.profile', '-string', 'Gone'], check=True)
+            r, text = run(); self.assertIn('no controls profile Gone', text)
+            subprocess.run(['defaults', 'write', domain, 'controls.profile', '-string', '../Default'], check=True)
+            r, text = run(); self.assertEqual(r[2], '0.10'); self.assertIn("controls profile name '../Default' ignored, Default used", text)
+            self.assertEqual(run(DM_SAVED_CHOICES='0')[0], (None,) * 5)
+        finally:
+            shutil.rmtree(folder)   # the other tests share this home
+            subprocess.run(['defaults', 'delete', domain], capture_output=True)
+            Path(os.path.expanduser(f'~/Library/Preferences/{domain}.plist')).unlink(missing_ok=True)
+
+    def test_controls_tab_tables_match_the_host(self):   # LauncherControls.swift reads and writes the host's names and default keys (input_map.h)
+        import re
+        h = (REPO / 'dm/host/input_map.h').read_text(); s = (REPO / 'dm/mac/LauncherControls.swift').read_text()
+        names = re.findall(r'"(\w+)"', re.search(r'im_names\[IM_N\] = \{(.*?)\};', h, re.S).group(1))
+        self.assertEqual(re.findall(r'"(\w+)"', re.search(r'static let names = \[(.*?)\]', s, re.S).group(1)), names)
+        fn = {n: i for i, n in enumerate(names)} | {f'IM_{n.upper()}': i for i, n in enumerate(names)}
+        default = [-1] * len(names)
+        for code, f in re.findall(r'\{(\d+), (\w+)\}', re.search(r'key_map_default.*?d\[\] = \{(.*?)\};', h, re.S).group(1)):
+            default[int(f) if f.isdigit() else fn[f]] = int(code)
+        self.assertEqual([int(x) for x in re.search(r'static let defaultKeys: \[Int\] = \[(.*?)\]', s).group(1).split(',')], default)
     def test_signed(self):   # ad-hoc, both the host and the bundle, never the hardened runtime (it refuses the executable memory the host makes for the game's code)
         for target in (self.app, self.app / 'Contents/MacOS/dmhost'):
             subprocess.run(['codesign', '--verify', '--strict', target], check=True, capture_output=True)

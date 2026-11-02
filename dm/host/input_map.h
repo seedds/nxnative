@@ -7,6 +7,7 @@
 // A malformed entry is left out and named in the log; the rest of the list still applies.
 // input_map_valid() is the same parser without a map or a log line: the Mac launcher (dm/mac/launcher.c) checks a saved DM_KEYMAP / DM_PAD_MAP with it, so a saved value is used only when the host takes every entry of it.
 #pragma once
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -87,3 +88,59 @@ static uint64_t pad_map_apply(const pad_map *m, uint64_t btn) {
     return out;
 }
 static int pad_map_is_default(const pad_map *m) { for (int b = 0; b < IM_BUTTONS; b++) if (m->to[b] != b) return 0; return 1; }
+
+// Face buttons: DM_PAD_ABXY=auto|label|position says how a controller's A, B, X and Y are read. GameController names most pads' face buttons by position (Xbox style) and a
+// Nintendo pad's by their labels (pad_apple.h). auto (the default) decides that per controller; label takes every pad's names as its printed letters (an Xbox pad's bottom button,
+// marked A, sends A), position takes them as Xbox positions (the bottom button sends B, as on a Switch). Raw HID pads (pad_hid.h) are read by position; label swaps them too
+enum { IM_ABXY_AUTO, IM_ABXY_LABEL, IM_ABXY_POSITION };
+static int pad_abxy_parse(const char *v) {   // -1: not a value the host takes; unset or empty is auto
+    if (!v || !*v || !strcasecmp(v, "auto")) return IM_ABXY_AUTO;
+    if (!strcasecmp(v, "label")) return IM_ABXY_LABEL;
+    if (!strcasecmp(v, "position")) return IM_ABXY_POSITION;
+    return -1;
+}
+static int pad_abxy_valid(const char *v) { return v && *v && pad_abxy_parse(v) >= 0; }
+// A and B, X and Y trade places (from GameController's position names to labels, or back); other bits pass
+static uint64_t pad_abxy_swap(uint64_t m) {
+    const uint64_t ab = DM_BTN_A | DM_BTN_B, xy = DM_BTN_X | DM_BTN_Y;
+    uint64_t out = m & ~(ab | xy);
+    if (m & DM_BTN_A) out |= DM_BTN_B; if (m & DM_BTN_B) out |= DM_BTN_A;
+    if (m & DM_BTN_X) out |= DM_BTN_Y; if (m & DM_BTN_Y) out |= DM_BTN_X;
+    return out;
+}
+
+// Stick shape for controllers: DM_PAD_STICK_DZ=<0..0.5> is a radial dead zone (a stick resting a little off centre stays at rest), DM_PAD_STICK_SENS=<0.25..3> scales the
+// deflection past it (above 1 a smaller tilt reaches full). The length past the dead zone is rescaled to start at 0 and clamped to the unit circle, so the direction is kept.
+// Both unset (0 and 1): the axes go to the game as GameController gives them, each on its own, as before
+#define IM_DZ_MAX 0.5
+#define IM_SENS_MIN 0.25
+#define IM_SENS_MAX 3.0
+typedef struct { float dz, sens; } stick_shape;
+static void stick_shape_default(stick_shape *s) { s->dz = 0; s->sens = 1; }
+static int stick_shape_is_default(const stick_shape *s) { return s->dz == 0 && s->sens == 1; }
+// 1 when v is a plain decimal number in [lo, hi] (no sign or space before it, no hex, nothing after it), as the launcher's other range checks; *out gets it
+static int im_number(const char *v, double lo, double hi, double *out) {
+    if (!v || !*v || strpbrk(v, "xX") || !(*v == '.' || (*v >= '0' && *v <= '9'))) return 0;
+    char *end; double x = strtod(v, &end);
+    if (*end || x != x || x < lo || x > hi) return 0;
+    if (out) *out = x;
+    return 1;
+}
+static int stick_dz_valid(const char *v) { return im_number(v, 0, IM_DZ_MAX, NULL); }
+static int stick_sens_valid(const char *v) { return im_number(v, IM_SENS_MIN, IM_SENS_MAX, NULL); }
+// Reads DM_PAD_STICK_DZ / DM_PAD_STICK_SENS values (NULL: unset); returns the number of values left out as malformed or out of range
+static int stick_shape_parse(stick_shape *s, const char *dz, const char *sens) {
+    int bad = 0; double x;
+    if (dz && *dz) { if (im_number(dz, 0, IM_DZ_MAX, &x)) s->dz = (float)x; else bad++; }
+    if (sens && *sens) { if (im_number(sens, IM_SENS_MIN, IM_SENS_MAX, &x)) s->sens = (float)x; else bad++; }
+    return bad;
+}
+static void stick_shape_apply(const stick_shape *s, float *x, float *y) {
+    if (stick_shape_is_default(s)) return;
+    float r = sqrtf(*x * *x + *y * *y);
+    if (r <= s->dz) { *x = *y = 0; return; }
+    float n = (r - s->dz) / (1 - s->dz) * s->sens;
+    if (n > 1) n = 1;
+    *x = *x / r * n; *y = *y / r * n;
+}
+

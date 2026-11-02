@@ -13,9 +13,11 @@ static inline int dm_pad_labelled(GCController *c) {
     NSString *k = c.productCategory;
     return [k isEqualToString:@"Switch Pro Controller"] || [k containsString:@"Joy-Con"];
 }
-// DM_BTN_A / B / X / Y of the pad's pressed face buttons
-static inline uint64_t dm_pad_face(GCExtendedGamepad *g) {
+// DM_BTN_A / B / X / Y of the pad's pressed face buttons. by_label: 1 reads GameController's names as printed letters, 0 as Xbox positions, -1 by the pad (dm_pad_labelled)
+static inline uint64_t dm_pad_face_as(GCExtendedGamepad *g, int by_label) {
     GCControllerButtonInput *a = g.buttonA, *b = g.buttonB, *x = g.buttonX, *y = g.buttonY;
-    if (!dm_pad_labelled(g.controller)) { GCControllerButtonInput *t = a; a = b; b = t; t = x; x = y; y = t; }   // by position: right A, bottom B, top X, left Y
+    if (by_label < 0) by_label = dm_pad_labelled(g.controller);
+    if (!by_label) { GCControllerButtonInput *t = a; a = b; b = t; t = x; x = y; y = t; }   // by position: right A, bottom B, top X, left Y
     return (a.isPressed ? DM_BTN_A : 0) | (b.isPressed ? DM_BTN_B : 0) | (x.isPressed ? DM_BTN_X : 0) | (y.isPressed ? DM_BTN_Y : 0);
 }
+static inline uint64_t dm_pad_face(GCExtendedGamepad *g) { return dm_pad_face_as(g, -1); }

@@ -5,7 +5,7 @@
 // Window" (⌘⇧C, or DM_CHEATS_WINDOW=1 at launch) opens a Cheats panel beside the game: sections, search, the master switch,
 // safe mode, values, details and the import of cheat files (see the code below).
 // Key map (Nintendo layout): WASD left stick, arrow keys D-pad (with Shift held: the right stick, for the camera), J=A K=B U=X I=Y, Q=L E=R, Z=ZL C=ZR, F=press left stick G=press right stick, Return=+ Tab=−, Space=shake the controller;
-// DM_KEYMAP moves a function to another key (the right stick too), DM_PAD_MAP changes what a controller's buttons send (input_map.h).
+// DM_KEYMAP moves a function to another key (the right stick too), DM_PAD_MAP changes what a controller's buttons send, DM_PAD_STICK_DZ / DM_PAD_STICK_SENS shape its sticks (input_map.h).
 // Controllers: face buttons as on the iPhone, by position (right A, bottom B, top X, left Y) or on a Nintendo pad by its labels (pad_apple.h), shoulders L R, triggers ZL ZR, Menu + Options −, both sticks and their presses.
 // Each controller is a player of its own (local co-op): the first one connected is player 1, together with the keyboard, the next player 2, and so on up to 8 (pad_slots.h);
 // DM_PAD_MERGE=1 merges every controller into player 1 instead, DM_KBD_PLAYER=own makes the keyboard player 1 on its own, with the controllers from player 2 on.
@@ -145,10 +145,17 @@ static pad_slots g_slots;
 static GCController *g_held[DM_PLAYERS];   // the controller of each slot, kept alive while it holds it (the slot table keys on its pointer)
 static int g_merge, g_kbd_own;
 static pad_map g_padmap;   // DM_PAD_MAP (input_map.h): what each button sends, applied to every controller
+static stick_shape g_stick;   // DM_PAD_STICK_DZ, DM_PAD_STICK_SENS (input_map.h): both sticks of every controller
+static int g_abxy;   // DM_PAD_ABXY (input_map.h): how every controller's face buttons are read, IM_ABXY_AUTO unless set
 static int32_t pad_axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * DM_STICK_MAX); }
-// A controller's state for player p, GameController or raw HID: a pressed button or a stick past 15% hides the pointer (cursor_hide_for_input), a resting stick's drift does not
+// A controller's state for player p, GameController or raw HID: DM_PAD_MAP and the stick shape apply here to both; a pressed button or a stick past 15% hides the pointer (cursor_hide_for_input), a resting stick's drift does not
 static void pad_set(int p, uint64_t m, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     m = pad_map_apply(&g_padmap, m);
+    if (!stick_shape_is_default(&g_stick)) {   // unset: the axes as they came
+        float s[4] = {(float)lx / DM_STICK_MAX, (float)ly / DM_STICK_MAX, (float)rx / DM_STICK_MAX, (float)ry / DM_STICK_MAX};
+        stick_shape_apply(&g_stick, &s[0], &s[1]); stick_shape_apply(&g_stick, &s[2], &s[3]);
+        lx = pad_axis(s[0]); ly = pad_axis(s[1]); rx = pad_axis(s[2]); ry = pad_axis(s[3]);
+    }
     const int32_t dead = DM_STICK_MAX * 15 / 100;
     if (m || abs(lx) > dead || abs(ly) > dead || abs(rx) > dead || abs(ry) > dead) cursor_hide_for_input();
     dm_pad_set_player(p, m, lx, ly, rx, ry);
@@ -157,7 +164,7 @@ static void pad_read(GCExtendedGamepad *g) {
     if (!g_input_on) return;
     int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0) return;
     dm_haptics_apple_controller(p, g.controller);
-    uint64_t m = dm_pad_face(g);   // by position, a Nintendo pad by its labels
+    uint64_t m = dm_pad_face_as(g, g_abxy == IM_ABXY_LABEL ? 1 : g_abxy == IM_ABXY_POSITION ? 0 : -1);   // auto: by position, a Nintendo pad by its labels
     #define K(btn, bit) if (btn.isPressed) m |= bit
     K(g.leftShoulder, DM_BTN_L); K(g.rightShoulder, DM_BTN_R); K(g.leftTrigger, DM_BTN_ZL); K(g.rightTrigger, DM_BTN_ZR);
     K(g.buttonMenu, DM_BTN_PLUS); K(g.buttonOptions, DM_BTN_MINUS); K(g.leftThumbstickButton, DM_BTN_LS); K(g.rightThumbstickButton, DM_BTN_RS);   // nil on pads without them: not pressed
@@ -255,7 +262,8 @@ static void hidpad_read(hid_pad *d) {
     if (!g_input_on) return;
     int p = g_merge ? 0 : pad_slot_of(&g_slots, d); if (p < 0) return;
     int32_t s[4]; pad_hid_sticks(&d->st, s);
-    pad_set(p, pad_hid_buttons(&d->st), s[0], s[1], s[2], s[3]);
+    uint64_t m = pad_hid_buttons(&d->st);   // by position
+    pad_set(p, g_abxy == IM_ABXY_LABEL ? pad_abxy_swap(m) : m, s[0], s[1], s[2], s[3]);
 }
 static void hidpad_attach(hid_pad *d) {
     int p = g_merge ? 0 : pad_slot_take(&g_slots, d, d->name); char nb[16];
@@ -280,6 +288,16 @@ static void pads_start(void) {
     const char *km = getenv("DM_KEYMAP"), *pm = getenv("DM_PAD_MAP");
     if (km && *km) { int bad = key_map_parse(&g_keys, km); LOG("front end: keyboard map from DM_KEYMAP (%s)%s", km, bad ? ", malformed entries left out" : ""); }
     if (pm && *pm) { int bad = pad_map_parse(&g_padmap, pm); LOG("front end: controller buttons from DM_PAD_MAP (%s)%s", pm, bad ? ", malformed entries left out" : ""); }
+    stick_shape_default(&g_stick);
+    const char *dz = getenv("DM_PAD_STICK_DZ"), *sens = getenv("DM_PAD_STICK_SENS");
+    if ((dz && *dz) || (sens && *sens)) {
+        int bad = stick_shape_parse(&g_stick, dz, sens);
+        if (bad) LOG("[RED] front end: a value of DM_PAD_STICK_DZ (0 to 0.5) or DM_PAD_STICK_SENS (0.25 to 3) is malformed or out of range, left out");
+        LOG("front end: controller sticks: dead zone %.2f, sensitivity %.2f", g_stick.dz, g_stick.sens);
+    }
+    const char *ab = getenv("DM_PAD_ABXY"); g_abxy = pad_abxy_parse(ab);
+    if (g_abxy < 0) { LOG("[RED] front end: DM_PAD_ABXY=%s is not auto, label or position, auto used", ab); g_abxy = IM_ABXY_AUTO; }
+    else if (g_abxy) LOG("front end: every controller's face buttons by %s (DM_PAD_ABXY)", g_abxy == IM_ABXY_LABEL ? "label" : "position");
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
     e = getenv("DM_KBD_PLAYER"); g_kbd_own = !g_merge && e && !strcmp(e, "own");
     static const char kbd = 0;

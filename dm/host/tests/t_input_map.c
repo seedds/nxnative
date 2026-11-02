@@ -1,4 +1,4 @@
-// The Mac front end's button assignments (input_map.h): the default key map, DM_KEYMAP moving and swapping functions, DM_PAD_MAP's swaps, and malformed entries left out
+// The Mac front end's button assignments (input_map.h): the default key map, DM_KEYMAP moving and swapping functions, DM_PAD_MAP's swaps, malformed entries left out, DM_PAD_ABXY, and the stick shape (DM_PAD_STICK_DZ, DM_PAD_STICK_SENS)
 #include "../input_map.h"
 
 static int checks, fails;
@@ -47,6 +47,34 @@ int main(void) {
     CHECK(!input_map_valid("A=B", 0) && !input_map_valid("A=40", 1) && !input_map_valid("A=40,B=38", 1), "a value of one map is not valid for the other");
     CHECK(!input_map_valid("", 0) && !input_map_valid("", 1) && !input_map_valid(NULL, 0) && !input_map_valid(NULL, 1), "empty and missing values are invalid (nothing to apply)");
     CHECK(!input_map_valid(",", 0), "a lone comma holds an entry with no name: invalid");
+
+    // DM_PAD_ABXY: how the face buttons are read
+    CHECK(pad_abxy_parse(NULL) == IM_ABXY_AUTO && pad_abxy_parse("") == IM_ABXY_AUTO && pad_abxy_parse("Auto") == IM_ABXY_AUTO, "unset, empty and auto are auto");
+    CHECK(pad_abxy_parse("label") == IM_ABXY_LABEL && pad_abxy_parse("POSITION") == IM_ABXY_POSITION, "label and position, any case");
+    CHECK(pad_abxy_parse("labels") == -1 && pad_abxy_parse("1") == -1, "anything else is not taken");
+    CHECK(pad_abxy_valid("label") && pad_abxy_valid("auto") && !pad_abxy_valid("") && !pad_abxy_valid(NULL) && !pad_abxy_valid("xbox"), "launcher check: a named mode, not empty");
+    CHECK(pad_abxy_swap(DM_BTN_A) == DM_BTN_B && pad_abxy_swap(DM_BTN_B) == DM_BTN_A && pad_abxy_swap(DM_BTN_X) == DM_BTN_Y && pad_abxy_swap(DM_BTN_Y) == DM_BTN_X, "the swap trades A with B and X with Y");
+    CHECK(pad_abxy_swap(DM_BTN_A | DM_BTN_B | DM_BTN_ZR) == (DM_BTN_A | DM_BTN_B | DM_BTN_ZR) && pad_abxy_swap(DM_BTN_SHAKE | DM_BTN_X) == (DM_BTN_SHAKE | DM_BTN_Y), "both held stay held; other bits pass");
+    // Stick shape: DM_PAD_STICK_DZ and DM_PAD_STICK_SENS
+    stick_shape s; stick_shape_default(&s);
+    float x = 0.03f, y = 1.2f; stick_shape_apply(&s, &x, &y);
+    CHECK(x == 0.03f && y == 1.2f, "default: the axes pass as they are");
+    CHECK(stick_shape_parse(&s, "0.1", "2") == 0 && s.dz == 0.1f && s.sens == 2.0f, "a dead zone and a sensitivity parse");
+    x = 0.05f; y = 0.05f; stick_shape_apply(&s, &x, &y);
+    CHECK(x == 0 && y == 0, "inside the dead zone: at rest");
+    x = 0; y = 0.4f; stick_shape_apply(&s, &x, &y);
+    CHECK(x == 0 && fabsf(y - (0.3f / 0.9f * 2)) < 1e-5f, "past the dead zone: rescaled from 0, times the sensitivity");
+    x = 0.8f; y = 0.8f; stick_shape_apply(&s, &x, &y);
+    CHECK(fabsf(sqrtf(x * x + y * y) - 1) < 1e-5f && fabsf(x - y) < 1e-6f, "a long diagonal is clamped to the unit circle, its direction kept");
+    stick_shape_default(&s);
+    CHECK(stick_shape_parse(&s, NULL, "0.5") == 0 && s.dz == 0 && s.sens == 0.5f, "sensitivity alone");
+    x = 1; y = 0; stick_shape_apply(&s, &x, &y);
+    CHECK(fabsf(x - 0.5f) < 1e-6f, "below 1, full tilt reaches only that much");
+    stick_shape_default(&s);
+    CHECK(stick_shape_parse(&s, "0.6", "4") == 2 && stick_shape_is_default(&s), "out of range values are left out");
+    CHECK(stick_shape_parse(&s, "-0.1", "0x2") == 2 && stick_shape_parse(&s, " 0.1", "1a") == 2 && stick_shape_is_default(&s), "a sign, hex, a space, text after the number are left out");
+    CHECK(stick_dz_valid("0") && stick_dz_valid("0.50") && !stick_dz_valid("0.51") && !stick_dz_valid(""), "dead zone check: 0 to 0.5");
+    CHECK(stick_sens_valid("0.25") && stick_sens_valid("3") && !stick_sens_valid("0.2") && !stick_sens_valid(NULL), "sensitivity check: 0.25 to 3");
 
     printf("input map: %d checks, %d failed\n", checks, fails);
     return fails != 0;

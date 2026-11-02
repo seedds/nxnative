@@ -120,6 +120,7 @@ static void empty_stream_contract(void) {
     state_reset();
 }
 enum { DEP_STORAGE, DEP_UNIFORM, RUN_EMPTY_STREAM, NORUN_UNALIGNED_STREAM };
+// NOLINTBEGIN(clang-analyzer-osx.cocoa.RetainCount): serial_put retains pr in g_by_serial through hm_put_id's CFBridgingRetain
 static void dependency(int mode) {
     int uniform=mode==DEP_UNIFORM,independent=mode>=RUN_EMPTY_STREAM;   // independent: the two draws touch different memory
     id<MTLLibrary> l=library(@"#include <metal_stdlib>\nusing namespace metal;\n"
@@ -130,6 +131,7 @@ static void dependency(int mode) {
       "kernel void geometry(constant G&g[[buffer(0)]],uint3 t[[thread_position_in_grid]]){if(t.x||t.y||t.z)return;float x=g.in[0]*.8-.8;g.p[0]=uint(g.in[0])+1;g.out[0]=float4(x,-.5,0,1);g.out[1]=float4(x+.6,-.5,0,1);g.out[2]=float4(x,.5,0,1);g.ix[0]=0;g.ix[1]=1;g.ix[2]=2;g.ix[3]=0xffffffffu;}\n"
       "struct V{device float4*p[[id(0)]];};vertex float4 reader(uint v[[vertex_id]],constant V&a[[buffer(0)]]){return a.p[v];}\nfragment float4 red(){return float4(1,0,0,1);}\n");
     int helpers[]={0,1,2,3,4},rh[]={1};NvProg *pr=[NvProg new];
+    
     pr->sh[0]=shader(l,@"unused",0,NULL,0);NvShader *vs=pr->sh[0];vs->geo_fn=[l newFunctionWithName:@"capture"];
     vs->rf.nb=1;vs->rf.b[0]=(nvn_rbind){.kind=uniform?NVN_RB_CBUF:NVN_RB_SBUFP,.reg=0,.aid=0};
     vs->ae=[vs->geo_fn newArgumentEncoderWithBufferIndex:0];vs->arg_len=vs->ae.encodedLength;
@@ -150,7 +152,7 @@ static void dependency(int mode) {
     EMIT(OP_DRAW,d);op_hdr end={OP_END,8};memcpy(cmd+used,&end,8);
     #undef EMIT
     state_reset();memset(&R,0,sizeof R);mtl_set_frame(100+mode);mtl_sub_begin();uint64_t cuts=g_cuts,h=(uint64_t)cmd;mtl_sub_index(&h,1);mtl_exec(cmd);
-    id<MTLBuffer> rb=[g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared];[blit() copyFromTexture:tex_mtl(&target) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(32,32,1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:128 destinationBytesPerImage:4096];finish();
+    id<MTLBuffer> rb=[g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared];if(!rb)abort();[blit() copyFromTexture:tex_mtl(&target) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(32,32,1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:128 destinationBytesPerImage:4096];finish();
     uint8_t *px=rb.contents;
     if(independent) {
         EXPECT("first draw wrote its own storage",1,*(uint32_t*)(cmd+32768));EXPECT("second draw wrote its own storage",1,*(uint32_t*)(cmd+32768+16));
@@ -164,6 +166,7 @@ static void dependency(int mode) {
     }
     mtl_tex_release(&target);mtl_pool_del(cmd);mtl_drain();free(cmd);
 }
+// NOLINTEND(clang-analyzer-osx.cocoa.RetainCount)
 int main(int argc,char **argv){@autoreleasepool{
     if(argc>1&&!strcmp(argv[1],"--access-bench"))return access_benchmark();
     access_contract();drain_contract();mtl_init();empty_stream_contract();dependency(DEP_STORAGE);dependency(DEP_UNIFORM);dependency(RUN_EMPTY_STREAM);dependency(NORUN_UNALIGNED_STREAM);

@@ -158,6 +158,33 @@ int main(void) { @autoreleasepool {
         init_fill_case(416 + i, packed[i], NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED);
         init_fill_case(420 + i, packed[i], NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS);
     }
+    {   // When g_bc_cpu is active (pre-A17 Pro GPUs with tex_bc_cpu): non-sparse BC1 upload decodes on the CPU, BC sRGB view unpacks to RGBA8Unorm_sRGB, and BC4 render-target attach is skipped
+        int tid = 424, saved_bc_cpu = g_bc_cpu; g_bc_cpu = 1; mtl_set_bc_path(BC_PATH_CPU_STANDARD);
+        tex_t t = {.magic=MAGIC('T','E','X',0), .serial=98000+(unsigned)tid, .has_layout=1};
+        pool_t pool = {.magic=MAGIC('P','O','O','L'), .flags=NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+        t.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=0x41, .width=4, .height=4, .depth=1, .levels=1, .samples=1};
+        nvn_tex_layout(&t.d, &t.L); t.mem = calloc(1, t.L.size); t.pool = &pool; pool.mem = t.mem; pool.size = t.L.size;
+        uint8_t blk[8] = {0x00, 0xf8, 0x1f, 0x00, 0x04, 0x00, 0x00, 0x00};   // c0 = red (0xf800), c1 = blue (0x001f); texel (0,0) = red, texel (1,0) = blue
+        CHECK(nvn_swizzle(&t.d, 0, 0, blk, 8, t.mem) == 0, "BC1 block swizzled into guest storage");
+        g_sub_thread = pthread_self(); atomic_store(&g_sub_thread_set, 1);
+        id<MTLTexture> base = tex_mtl(&t);
+        up_flush(); mtl_finish_gpu();
+        CHECK(base != nil && base.pixelFormat == MTLPixelFormatRGBA8Unorm, "CPU-decoded BC1 texture uploaded as RGBA8Unorm");
+        view_t v = {.set_format=1, .format=0x45};   // RGB_sRGB_DXT1 view on an RGB_DXT1 base texture
+        mtl_reg_tex(tid, &t, &v);
+        os_unfair_lock_lock(&g_rmu); id<MTLTexture> view = tex_by_id(tid); os_unfair_lock_unlock(&g_rmu);
+        CHECK(view != nil && view.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB, "BC sRGB view unpacked to RGBA8Unorm_sRGB under g_bc_cpu");
+        read_check(tid, view, (const float[8]){1,0,0,1, 0,0,1,1}, 0.01f);
+        tex_t bc4 = {.magic=MAGIC('T','E','X',0), .serial=98001+(unsigned)tid, .pool=&pool};
+        bc4.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=0x49, .width=4, .height=4, .depth=1, .levels=1, .samples=1};
+        id<MTLTexture> bc4_base = tex_mtl(&bc4);
+        CHECK(bc4_base != nil && bc4_base.pixelFormat == MTLPixelFormatR8Unorm, "CPU-decoded BC4 texture created as R8Unorm");
+        MTLRenderPassColorAttachmentDescriptor *att = [MTLRenderPassColorAttachmentDescriptor new];
+        view_t rtv = {.set_format=1, .format=0x2c};
+        attach(att, &bc4, &rtv, 1);
+        CHECK(att.texture == nil && !(bc4_base.usage & MTLTextureUsageRenderTarget), "CPU-decoded BC4 texture is not upgraded or attached as a render target");
+        free(t.mem); g_bc_cpu = saved_bc_cpu; mtl_set_bc_path(saved_bc_cpu ? BC_PATH_CPU_STANDARD : BC_PATH_GPU);
+    }
     printf("texture view swizzle: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 } }

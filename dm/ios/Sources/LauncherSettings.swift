@@ -1,6 +1,9 @@
 // Launcher settings, validation and persistence. Shared by the iOS UI, the Mac app's settings window (dm/mac/Launcher.swift) and the native storage regression test.
 import Foundation
 import Combine
+#if canImport(Metal)
+import Metal
+#endif
 
 struct Setting: Decodable, Identifiable {
     let env, kind, label, note, def: String
@@ -65,6 +68,11 @@ final class LauncherModel: ObservableObject {
     // setting that cannot do anything is not offered (an upscaler's detail with the upscaler off, rumble strength
     // with rumble off). A row naming a setting this game does not have stays drawn, as it has nothing to hide behind
     func visible(_ s: Setting) -> Bool {
+        if s.env == "DM_BC6H_RGB9E5" {
+            #if canImport(Metal)
+            if MTLCreateSystemDefaultDevice()?.supportsBCTextureCompression == true { return false }
+            #endif
+        }
         guard let n = s.needs, let eq = n.firstIndex(of: "=") else { return true }
         let key = String(n[n.startIndex..<eq]), want = String(n[n.index(after: eq)...])
         guard let v = values[key] else { return true }

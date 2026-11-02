@@ -978,6 +978,14 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 - **Fix:** `DM_VK_CAPTURE=<dir>` writes the modules; `vk_shaders.py` reads capture folders like a RomFS; `fix_strides` copies the stride onto the type before translating.
 - **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md) (3,089 modules, 4,535 pipelines).
 
+### FNA3D on SDL_GPU: a Vulkan game with no `vk*` imports
+
+- **Symptom:** the provisional profile said OpenGL; `gl_shaders.py` failed on four "shaders" from `main` (`'#version' : bad tokens following profile`, `Missing entry point`), and the boot showed `engine SDLGPU` in `vkCreateInstance`. Once captured, `vk_shaders.py` stopped at `SPIRV-Cross threw an exception: Entry point does not exist`.
+- **Cause:** FNA3D's SDL_GPU driver (`FNA3D_Driver_SDL.c`, which logs `SDL_GPU Driver: Vulkan`) runs on SDL's Vulkan backend, which looks every function up through `vkGetInstanceProcAddr`, so `main` imports no other `vk*` function; SDL's EGL support still names `glShaderSource`. FNA's MOJOSHADER translates the effects' D3D9 bytecode (`Content/Shaders/*.fxb`) to SPIR-V at run time and keeps only bare `#version 110` / `#version 300 es` lines for its GLSL profiles, which the GL rule took for GLSL sources. Its SPIR-V entry points are `ShaderFunction<n>`, not `main`.
+- **Fix:** `profile_guess.py` decides Vulkan, with a run-time capture, when `main` has FNA3D's SDL_GPU driver (`SDL_GPU Driver`) and imports `vkGetInstanceProcAddr` but not `nvnBootstrapLoader` (Absolum's FNA3D on NVN stays NVN, Balatro's LÖVE stays GL). A string in `main` counts as a GLSL source only with source after its `#version` line (`GL_SRC`, and `gl_shaders.py` `nso_strings` alike). `vk_shaders.py` renames the module's own entry point.
+- **Check:** `dm/tools/tests/test_nro_graphics.py` (`test_fna3d_sdl_gpu_is_vulkan`, `test_bare_version_lines_are_not_sources`).
+- **Found on:** [MARVEL Cosmic Invasion](../../dm/games/010059D020C26000/README.md) (SDK 20.5.15; 5 modules from boot through the menus into a stage).
+
 ### Push constants in the next free buffer slot
 
 - **Cause:** SPIRV-Cross binds the push constant block at `buffer(0)`, where the first renumbered uniform buffer goes.

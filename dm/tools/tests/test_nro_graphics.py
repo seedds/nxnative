@@ -34,6 +34,24 @@ class NroGraphics(unittest.TestCase):
         self.assertEqual(s['graphics'][0], 'nvn')
         self.assertFalse(s['glslc_capture'][0])
 
+    def test_bare_version_lines_are_not_sources(self):   # MARVEL Cosmic Invasion: FNA's MOJOSHADER keeps '#version 110' etc. alone, and writes the GLSL at run time
+        img = b'\0#version 300 es\0#version 110\0#version 100\n\0#version 120\r\n \0#version: bad\0'
+        self.assertEqual(len(__import__('re').findall(pg.GL_SRC, img)), 0)
+        self.assertEqual(len(__import__('re').findall(pg.GL_SRC, img + b'#version 320 es\nprecision highp float;\0')), 1)   # Digimon Story Cyber Sleuth's built-in shaders
+        s = pg.shader_sources(SDL_MAIN, 0, [], 0, 0, gl_names=1)
+        self.assertEqual(s['graphics'][0], 'gl')
+        self.assertTrue(s['gl_capture'][0])
+
+    def test_fna3d_sdl_gpu_is_vulkan(self):   # MARVEL Cosmic Invasion: FNA3D's SDL_GPU driver looks up every Vulkan function; its SDL also has EGL and names glShaderSource
+        s = pg.shader_sources(SDL_MAIN | {'vkGetInstanceProcAddr'}, 0, [], 0, 0, gl_names=1, sdl_gpu=True)
+        self.assertEqual(s['graphics'][0], 'vulkan')
+        self.assertTrue(s['vk_capture'][0])
+        self.assertFalse(s['gl_capture'][0])
+        s = pg.shader_sources(SDL_MAIN | {'vkGetInstanceProcAddr', 'nvnBootstrapLoader'}, 0, [], 0, 0, sdl_gpu=True)   # Absolum: FNA3D's NVN driver (names no GL function)
+        self.assertEqual(s['graphics'][0], 'nvn')
+        s = pg.shader_sources(SDL_MAIN | {'vkGetInstanceProcAddr'}, 0, [], 0, 0, gl_names=1)   # Balatro: LÖVE links SDL's Vulkan loader and renders with GL
+        self.assertEqual(s['graphics'][0], 'gl')
+
     def test_load_order(self):
         self.assertEqual(sorted(['sdk', 'subsdk2', 'main', 'subsdk0', 'subsdk10'], key=pg.load_order), ['main', 'subsdk0', 'subsdk2', 'subsdk10', 'sdk'])
 

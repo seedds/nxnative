@@ -38,12 +38,13 @@ def text_of(b):
     return b[:z] if z >= 0 else b
 
 def nso_strings(path):
-    """'#version <number>' strings of an NSO's read-only segment (dm/tools/nso.py); a main that links glslang (Balatro's LÖVE) also has its messages that start with '#version:'.
-    nso.Error (a ValueError) on a damaged file"""
+    """'#version <number>' strings of an NSO's read-only segment (dm/tools/nso.py); a main that links glslang (Balatro's LÖVE) also has its messages that start with '#version:', and
+    MOJOSHADER (FNA: MARVEL Cosmic Invasion) has bare '#version 110' / '#version 300 es' lines it puts in front of the GLSL it writes from D3D bytecode, so the version line must
+    have source after it (profile_guess.py GL_SRC). nso.Error (a ValueError) on a damaged file"""
     import nso
     with open(path, 'rb') as f: m = nso.load(f.read(), path)
     (mo, sz) = m.segments[1]; img = bytes(m.image[mo:mo + sz])
-    return [text_of(img[m.start():m.start() + 0x10000]) for m in re.finditer(rb'(?:^|(?<=\0))#version [0-9]', img)]
+    return [text_of(img[m.start():m.start() + 0x10000]) for m in re.finditer(rb'(?:^|(?<=\0))#version [0-9][^\0\n]*\n\s*[^\s\0]', img)]
 
 def sources(roots):
     """(source bytes, stage or None, where) for every shader in the input paths"""

@@ -563,6 +563,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** with no album they fail: `album::Initialize` (saving to the album now fails, `hle_offline.c`); SDK 7's `album::SaveScreenshot` without an orientation (fails); SDK 20's `SaveAndShareScreenshot` with a share ID and `GetSharePostedLastUrl`; `album::SaveCurrentScreenshot`.
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) (SDK 11: `album::Initialize`); [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) (SDK 7.3.2: `album::SaveScreenshot`); [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) (SDK 20.5.4: the sharing calls); [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md) (19.3.11: `SaveCurrentScreenshot`).
 
+### The display version of a game packed from a dump
+
+- **Symptom:** a title screen shows `Ver. ?` (Fire Emblem Fortune's Weave), or a version such as `v458752`, where the game on a console shows its update's version (`Ver. 1.0.1` in a reference picture).
+- **Cause:** `oe::GetDisplayVersion` answers the display version of the profile's build row for main's build ID (`hle_sdk16.c`). The NSP script fills it from the version's control data (`control.nacp`, the NACP's display version). A dump folder (`scripts/pack_dump.py`: exefs and RomFS only) has no control data, and nothing else in the game files records the version: Fire Emblem Fortune's Weave's `main` has no version string, only the `GetDisplayVersion` import, and an update's number (131072) does not map to a display version. So a provisional profile from a dump writes `?`, which the host returns as it is; Donkey Kong Bananza's profile has its version name in that column.
+- **Left as is:** the game shows what the profile knows. A profile can record the display version by hand in its build row once it is known from the console; inventing one (the host's fallback for an unknown build is 1.0.0) would show a version the files do not have. A dump with control data would need `pack_dump.py` to read it (not done).
+- **Found on:** Fire Emblem Fortune's Weave (Switch 2, update 131072, packed from a dump; no profile yet), [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md).
+
 ## Accounts, network, shop and parental controls
 
 ### Account, friends, play data and Nintendo Account calls

@@ -60,22 +60,22 @@ class Cache:
         os.makedirs(os.path.dirname(p), exist_ok=True); clone(lib, p); self.count((target, 'compiled'))
 
     def _check(self, target, d, stems, mac_dir):
-        """(None, the stems to take) if folder d was built with the current convention and compiler, else (why not, None). A library without a readable reflection is
+        """(None, the stems to take) if folder d was built with the current convention and compiler, else (why not, []). A library without a readable reflection is
         left out, not the folder: a build stopped between writing the two (Pokémon Scarlet: 5 of 11,153) had kept every other library of it out of the cache"""
         rec, picks, ok = self.targets[target][1], collections.defaultdict(list), []
         for stem in stems:
             try: j = json.load(open(os.path.join(d, stem + '.json')))
             except (OSError, ValueError): continue
-            if j.get('chain_metal') != rec: return f'built with "{j.get("chain_metal")}"', None
-            if j.get('chain_compiler') != self.ident[target].hex(): return f'{stem} has a different or unrecorded Metal compiler', None
+            if j.get('chain_metal') != rec: return f'built with "{j.get("chain_metal")}"', []
+            if j.get('chain_compiler') != self.ident[target].hex(): return f'{stem} has a different or unrecorded Metal compiler', []
             if len(picks[j.get('stage')]) < 2: picks[j.get('stage')].append(stem)
             ok.append(stem)
         for stem in (s for v in picks.values() for s in v):
             tmp = os.path.join(self.work, f'mtlcache-check-{target}.metallib')
             try: self._compile(target, os.path.join(mac_dir, stem + '.metal'), tmp)
-            except subprocess.CalledProcessError: return f'{stem}.metal does not compile now', None
+            except subprocess.CalledProcessError: return f'{stem}.metal does not compile now', []
             same = open(tmp, 'rb').read() == open(os.path.join(d, stem + '.metallib'), 'rb').read(); os.unlink(tmp)
-            if not same: return f'a fresh compile of {stem}.metal differs from its library', None
+            if not same: return f'a fresh compile of {stem}.metal differs from its library', []
         return None, ok
 
     def fill(self, mac_dir, ios_dir=None, targets=None):

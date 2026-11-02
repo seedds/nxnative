@@ -789,6 +789,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Absolum](../../dm/games/0100A83022A22000/README.md) (SDK 18.3.2, one boot each); [Hades](../../dm/games/0100535012974000/README.md): it never asks for the module (checked on 1.0.38233: `refused an NRR that registers only online SDKs (1 hashes)`, no `LoadModule`, its frames as before). Hades' `main` imports only EOS Auth, Connect and PlayerDataStorage, Epic-account cross-save the host cannot serve; the real SDK would at best fail its login and at worst wait on time-outs or contact Epic's servers, with an unknown risk to the player's account.
 - **Note:** open question for the maintainer: always load, refuse online SDKs (as now), or decide per profile.
 
+### Epic Online Services offline
+
+- **Symptom:** `UNIMPL EOS_Platform_Create`, then a `NullReferenceException` in the game's EOS start-up (`at Paris.Engine.EpicHelper.Init() + 0x3b0`, a null platform reached through a managed call) and an abort at boot.
+- **Cause:** with the EOS module refused, `main`'s `EOS_*` imports were `UNIMPL` stubs that return 0, so `EOS_Platform_Create` gave a null platform. On a console the SDK is loaded and gives a valid platform even without a network; its requests then fail. Absolum checks the platform and played offline with the null one; MARVEL Cosmic Invasion uses it without checking.
+- **Fix:** `hle_eos.c` answers the imports as the SDK does on a console without a network: the platform and its interfaces (`EOS_Platform_Get*Interface`) are valid handles, `EOS_Platform_GetNetworkStatus` is offline, every request that completes through a callback (logins, queries, lobbies, presence, reports, sanctions) completes with `EOS_NoConnection` on the game's next `EOS_Platform_Tick` (the SDK calls completion callbacks from Tick, on the thread that ticks), copies and new objects fail with no object, no peer-to-peer packet arrives or leaves, and notifications are registered and never fire. Whatever the game does not call stays `UNIMPL`.
+- **Found on:** [MARVEL Cosmic Invasion](../../dm/games/010059D020C26000/README.md) (SDK 20.5.15, 108 `EOS_*` imports). Absolum now gets a platform whose logins fail instead of none, as on a console without a network; not run here since.
+
 ### GPU driver modules that are never loaded
 
 - **Symptom:** `main` imports EGL (SDL3's GL support) and `vkGetInstanceProcAddr` (its Vulkan support), but the game renders with NVN (`FNA3D_Driver_NVN.cpp`).

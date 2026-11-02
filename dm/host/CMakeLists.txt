@@ -678,6 +678,16 @@ if(NXHOST_LAUNCHER)
     endforeach()
     add_dependencies(t_launcher_window nxlauncher)
 endif()
+# The player's second pack end to end (t_second_pack.py): nxlauncher --play starts this build's nxhost-run on the synthetic module packed by nxaot, the host writes the JIT misses,
+# --list says a better pack is possible, --repack runs a packer (tests/second_pack/packer.py: the real packer's pack stage and made rows) that packs with --misses, --list says it
+# no longer is, and the game runs again without the JIT fallback. It needs nxaot: this option, else NXAOT in the environment; without it CTest reports it skipped (exit 77).
+# A Python driver, so not in host_tests.tsv (the runners run the test executables)
+set(NXAOT "" CACHE FILEPATH "nxaot (dm/tools/aot, the nxnative-aot image) for t_second_pack; empty: the environment variable NXAOT")
+if(NXHOST_PROGRAM AND NXHOST_LAUNCHER AND NXHOST_JIT)
+    add_test(NAME t_second_pack COMMAND ${Python3_EXECUTABLE} ${TESTS}/t_second_pack.py --build ${CMAKE_BINARY_DIR} --nxaot "${NXAOT}" WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/tmp)
+    set_tests_properties(t_second_pack PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120 ENVIRONMENT "TMPDIR=${CMAKE_BINARY_DIR}/tmp")
+endif()
 
 # fork() death tests
 host_test(t_heap_size SOURCES t_heap_size.c PROFILE POSIX)

@@ -79,18 +79,20 @@ static int test_output_lifetime(void) {
     return 0;
 }
 static int test_mute_output(void) {
-    for (int muted = 0; muted <= 1; muted++) {
+    const int levels[] = {-10, 0, 25, 50, 75, 100, 110};
+    for (int muted = 0; muted <= 1; muted++) for (size_t level = 0; level < sizeof levels / sizeof levels[0]; level++) {
+        int gain = levels[level] < 0 ? 0 : levels[level] > 100 ? 100 : levels[level];
         int16_t pcm[32], out[32];
-        for (int i = 0; i < 32; i++) pcm[i] = 12345;
+        for (int i = 0; i < 32; i++) pcm[i] = i % 2 ? -12345 : 12345;
         gbuf b = {pcm, sizeof pcm, sizeof pcm}; aout a = {.ch = 2};
         atomic_init(&a.state, STATE_STARTED); atomic_init(&a.vol, 0x3f800000u);
         a.q[0] = &b; atomic_init(&a.q_tail, 1);
         AudioBufferList bl = {.mNumberBuffers = 1, .mBuffers = {{2, sizeof out, out}}};
-        dm_audio_mute(muted); au_render(&a, NULL, NULL, 0, 16, &bl);
-        for (int i = 0; i < 32; i++) if (out[i] != (muted ? 0 : 12345)) { puts("FAIL mute output"); return 1; }
+        dm_audio_volume(levels[level]); dm_audio_mute(muted); au_render(&a, NULL, NULL, 0, 16, &bl);
+        for (int i = 0; i < 32; i++) if (out[i] != (muted ? 0 : pcm[i] * gain / 100)) { puts("FAIL volume/mute output"); return 1; }
         if (atomic_load(&a.q_head) != 1 || atomic_load(&a.rel_tail) != 1 || a.rel[0] != &b) { puts("FAIL muted buffer release"); return 1; }
     }
-    dm_audio_mute(0); puts("mute: device output silenced without changing buffer consumption or release"); return 0;
+    dm_audio_mute(0); dm_audio_volume(100); puts("volume and mute: output gain, bounds and buffer consumption/release verified"); return 0;
 }
 int main(void) {
     if (test_mute_output()) return 1;

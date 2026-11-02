@@ -9,6 +9,7 @@
 #include <limits.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <ctype.h>
 
 static int g_muted, g_mute_unfocused, g_active = 1;
 void mac_menus_focus(int active) { g_active = active; dm_audio_mute(g_muted || (g_mute_unfocused && !g_active)); }
@@ -24,23 +25,68 @@ static void message(NSString *title, NSString *detail) {
 
 @interface DmMacMenus : NSObject <NSMenuItemValidation>
 @property (nonatomic, strong) NSWindow *window;
-@property (nonatomic, strong) NSDictionary *mode;
+@property (nonatomic, copy) NSDictionary<NSString *, NSDictionary *> *settings;
 @property (nonatomic, copy) NSString *domain;
 @property (nonatomic) BOOL busy;
+@property (nonatomic) NSInteger volume;
 @end
 @implementation DmMacMenus
-- (BOOL)modeFixed {
+- (BOOL)fixed:(NSString *)env {
+    if (!env) return YES;
     NSString *keys = [NSString stringWithFormat:@"%s %s", getenv("DM_ENV_LAUNCH_KEYS") ?: "", getenv("DM_ENV_FILE_KEYS") ?: ""];
-    if ([[keys componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceCharacterSet] containsObject:@"DM_OPMODE"]) return YES;
+    if ([[keys componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceCharacterSet] containsObject:env]) return YES;
     // A direct CLI host has no shared app settings; allow a session change only when it has no explicit override.
-    return getenv("DM_ENV_LAUNCH_KEYS") == NULL && getenv("DM_OPMODE") != NULL;
+    return getenv("DM_ENV_LAUNCH_KEYS") == NULL && getenv(env.UTF8String) != NULL;
+}
+- (BOOL)ignoringSaved {
+    const char *off = getenv("DM_SAVED_CHOICES"); return off && !strcmp(off, "0");
+}
+- (BOOL)accepts:(NSString *)value setting:(NSString *)env {
+    if (!env || !value) return NO;
+    NSDictionary *s = self.settings[env];
+    if ([s[@"kind"] isEqual:@"choice"]) { for (NSArray *pair in s[@"options"]) if ([pair.firstObject isEqual:value]) return YES; return NO; }
+    if ([s[@"kind"] isEqual:@"toggle"]) return [value isEqual:s[@"on"] ?: @"1"] || [value isEqual:s[@"off"] ?: @"0"];
+    if (![s[@"kind"] isEqual:@"range"]) return NO;
+    const char *text = value.UTF8String; if (!text || !*text || isspace((unsigned char)*text) || strpbrk(text, "xX")) return NO;
+    char *end; double n = strtod(text, &end);
+    return !*end && isfinite(n) && s[@"min"] && s[@"max"] && n >= [s[@"min"] doubleValue] && n <= [s[@"max"] doubleValue];
+}
+- (BOOL)equal:(NSString *)a to:(NSString *)b setting:(NSString *)env {
+    return [self.settings[env][@"kind"] isEqual:@"range"] ? fabs(a.doubleValue - b.doubleValue) < 1e-6 : [a isEqual:b];
+}
+- (NSString *)current:(NSString *)env {
+    if (!env) return nil;
+    if ([env isEqual:@"DM_OPMODE"]) return dm_opmode() ? @"1" : @"0";
+    if (![env isEqual:@"DM_METAL_HUD"] && dm_fps_state) {
+        uint32_t bits = __atomic_load_n((uint32_t *)(dm_fps_state + ([env isEqual:@"DM_RENDER_SCALE"] ? 0x10 : 0)), __ATOMIC_RELAXED);
+        float n; memcpy(&n, &bits, sizeof n); return [NSString stringWithFormat:@"%.6g", n];
+    }
+    if (![self fixed:env] && self.domain && !self.ignoringSaved) {
+        NSString *key = [@"launcher." stringByAppendingString:env];
+        CFPropertyListRef v = CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)self.domain);
+        NSString *saved = v && CFGetTypeID(v) == CFStringGetTypeID() ? [(__bridge NSString *)v copy] : nil;
+        if (v) CFRelease(v);
+        if (saved && [self accepts:saved setting:env]) return saved;
+        // HUD is a next-launch choice: removing its saved key selects the tested default, not this run's old environment.
+        return self.settings[env][@"default"];
+    }
+    const char *e = getenv(env.UTF8String);
+    return e ? @(e) : self.settings[env][@"default"];
+}
+- (BOOL)canChange:(NSString *)env value:(NSString *)value {
+    if (![self accepts:value setting:env] || [self fixed:env]) return NO;
+    if ([env isEqual:@"DM_METAL_HUD"]) return self.domain != nil && !self.ignoringSaved;
+    return [env isEqual:@"DM_OPMODE"] || (([env isEqual:@"DM_FPS_TARGET"] || [env isEqual:@"DM_RENDER_SCALE"]) && dm_fps_state);
 }
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
     SEL a = item.action;
-    if (a == @selector(chooseMode:)) {
-        item.state = dm_opmode() == item.tag ? NSControlStateValueOn : NSControlStateValueOff;
-        return !self.modeFixed;
+    if (a == @selector(chooseSetting:)) {
+        NSString *env = item.representedObject[@"env"], *value = item.representedObject[@"value"];
+        if (!env || !value) return NO;
+        item.state = [self equal:[self current:env] to:value setting:env] ? NSControlStateValueOn : NSControlStateValueOff;
+        return [self canChange:env value:value];
     }
+    if (a == @selector(chooseVolume:)) item.state = self.volume == item.tag ? NSControlStateValueOn : NSControlStateValueOff;
     if (a == @selector(mute:)) item.state = g_muted ? NSControlStateValueOn : NSControlStateValueOff;
     if (a == @selector(muteUnfocused:)) item.state = g_mute_unfocused ? NSControlStateValueOn : NSControlStateValueOff;
     if (a == @selector(resize:)) return !(self.window.styleMask & NSWindowStyleMaskFullScreen);
@@ -50,17 +96,22 @@ static void message(NSString *title, NSString *detail) {
     if (a == @selector(restoreSave:)) return !self.busy && save_folder() != nil && getenv("DM_MAC_RESTORE_DIR") != NULL;
     return YES;
 }
-- (void)chooseMode:(NSMenuItem *)item {
-    if (self.modeFixed) return;
-    NSString *value = item.tag ? @"1" : @"0";
-    const char *off = getenv("DM_SAVED_CHOICES"); BOOL ignoring = off && !strcmp(off, "0");
-    if (self.domain && !ignoring) {
+- (void)chooseSetting:(NSMenuItem *)item {
+    NSString *env = item.representedObject[@"env"], *value = item.representedObject[@"value"];
+    if (![self canChange:env value:value]) return;
+    if (self.domain && !self.ignoringSaved) {
         CFStringRef domain = (__bridge CFStringRef)self.domain;
-        CFPreferencesSetAppValue(CFSTR("launcher.DM_OPMODE"), [value isEqual:self.mode[@"default"]] ? NULL : (__bridge CFStringRef)value, domain);
-        if (!CFPreferencesAppSynchronize(domain)) { message(@"Console mode was not saved", @"The app could not write its saved choices. Try again."); return; }
+        NSString *key = [@"launcher." stringByAppendingString:env];
+        CFPreferencesSetAppValue((__bridge CFStringRef)key, [self equal:value to:self.settings[env][@"default"] setting:env] ? NULL : (__bridge CFStringRef)value, domain);
+        if (!CFPreferencesAppSynchronize(domain)) { message(@"Setting was not saved", @"The app could not write its saved choices. Try again."); return; }
     }
-    dm_set_opmode((int)item.tag);
+    if ([env isEqual:@"DM_OPMODE"]) dm_set_opmode(value.intValue);
+    else if (![env isEqual:@"DM_METAL_HUD"]) {
+        float n = value.floatValue; uint32_t bits; memcpy(&bits, &n, sizeof bits);
+        __atomic_store_n((uint32_t *)(dm_fps_state + ([env isEqual:@"DM_RENDER_SCALE"] ? 0x10 : 0)), bits, __ATOMIC_RELAXED);
+    }
 }
+- (void)chooseVolume:(NSMenuItem *)item { if (item.tag >= 0 && item.tag <= 100) { self.volume = item.tag; dm_audio_volume((int)item.tag); } }
 - (void)mute:(id)sender { (void)sender; g_muted = !g_muted; mac_menus_focus(g_active); }
 - (void)muteUnfocused:(id)sender { (void)sender; g_mute_unfocused = !g_mute_unfocused; mac_menus_focus(g_active); }
 - (void)resize:(NSMenuItem *)item {
@@ -159,19 +210,54 @@ static NSMenuItem *action(NSMenu *menu, NSString *title, SEL selector, NSString 
 static NSMenu *submenu(NSMenu *bar, NSString *title) {
     NSMenu *m = [[NSMenu alloc] initWithTitle:title]; [[bar addItemWithTitle:title action:nil keyEquivalent:@""] setSubmenu:m]; return m;
 }
+// These are views of existing launch settings. Their names, choices, bounds and defaults come from the bundle.
+static void setting_menu(NSMenu *parent, NSString *env, DmMacMenus *menus) {
+    NSDictionary *s = menus.settings[env]; if (!s) return;
+    if (([env isEqual:@"DM_FPS_TARGET"] || [env isEqual:@"DM_RENDER_SCALE"]) && !dm_fps_state) return;
+    NSArray *options = s[@"options"];
+    if ([s[@"kind"] isEqual:@"toggle"]) options = @[@[s[@"on"] ?: @"1", @"On"], @[s[@"off"] ?: @"0", @"Off"]];
+    if ([s[@"kind"] isEqual:@"range"]) {
+        double lo = [s[@"min"] doubleValue], hi = [s[@"max"] doubleValue], step = [s[@"step"] doubleValue];
+        if (!isfinite(lo) || !isfinite(hi) || !isfinite(step) || step <= 0 || hi < lo || (hi - lo) / step > 100) return;
+        NSMutableArray *values = [NSMutableArray new];
+        int count = (int)floor((hi - lo) / step + 1e-6);
+        for (int i = 0; i <= count; i++) {
+            double n = lo + i * step;
+            [values addObject:@[[NSString stringWithFormat:@"%.6g", n], [NSString stringWithFormat:@"%.0f%%", n * 100]]];
+        }
+        options = values;
+    }
+    if (![options isKindOfClass:NSArray.class] || !options.count) return;
+    NSString *title = s[@"label"];
+    if (!title) return;
+    if ([env isEqual:@"DM_METAL_HUD"]) title = [title stringByAppendingString:@" (Next Launch)"];
+    if ([menus fixed:env]) title = [title stringByAppendingString:@" (launch override)"];
+    NSMenu *m = submenu(parent, title);
+    for (NSArray *pair in options) {
+        NSMenuItem *item = action(m, pair[1], @selector(chooseSetting:), @"", menus);
+        item.representedObject = @{@"env": env, @"value": pair[0]};
+    }
+}
 void mac_menus_install(NSWindow *window, NSMenu *bar) {
-    static DmMacMenus *menus; menus = [DmMacMenus new]; menus.window = window;
+    static DmMacMenus *menus; menus = [DmMacMenus new]; menus.window = window; menus.volume = 100;
     NSBundle *bundle = NSBundle.mainBundle; menus.domain = bundle.bundleIdentifier;
     NSURL *url = [bundle URLForResource:@"launcher" withExtension:@"json" subdirectory:@"dm"];
     NSData *data = url ? [NSData dataWithContentsOfURL:url] : nil;
     id list = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    NSMutableDictionary *rows = [NSMutableDictionary new];
+    NSArray *shown = @[@"DM_OPMODE", @"DM_FPS_TARGET", @"DM_RENDER_SCALE", @"DM_METAL_HUD"];
     if ([list isKindOfClass:NSDictionary.class] && [list[@"settings"] isKindOfClass:NSArray.class])
-        for (id s in list[@"settings"]) if ([s isKindOfClass:NSDictionary.class] && [s[@"env"] isEqual:@"DM_OPMODE"]) menus.mode = s;
+        for (id s in list[@"settings"]) if ([s isKindOfClass:NSDictionary.class]) {
+            NSString *env = s[@"env"]; if (env && [shown containsObject:env]) rows[env] = s;
+        }
+    // A bare development host has no bundle metadata or preferences; retain its session-only console mode action.
+    if (!menus.domain) rows[@"DM_OPMODE"] = @{@"kind": @"choice", @"label": @"Console mode", @"default": DM_GAME_OPMODE ? @"1" : @"0", @"options": @[@[@"1", @"Docked"], @[@"0", @"Handheld"]]};
+    menus.settings = rows;
     NSMenu *file = submenu(bar, @"File");
-    action(file, @"Open Save Folder", @selector(openSave:), @"", menus);
-    action(file, @"Reveal Log in Finder", @selector(openLog:), @"l", menus);
+    action(file, @"Open Save Folder", @selector(openSave:), @"s", menus).keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+    action(file, @"Reveal Log in Finder", @selector(openLog:), @"l", menus).keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
     [file addItem:NSMenuItem.separatorItem];
-    action(file, @"Export Save Backup…", @selector(exportSave:), @"", menus);
+    action(file, @"Export Save Backup…", @selector(exportSave:), @"e", menus).keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
     action(file, @"Restore Save from Backup…", @selector(restoreSave:), @"", menus);
     // The screenshot queue belongs to NVN. Vulkan/GL apps do not carry a shader map.
     if (getenv("DM_NVN_SHMAP")) {
@@ -181,14 +267,14 @@ void mac_menus_install(NSWindow *window, NSMenu *bar) {
         f12.keyEquivalentModifierMask = 0; f12.hidden = YES; f12.allowsKeyEquivalentWhenHidden = YES;
     }
     NSMenu *game = submenu(bar, @"Game");
-    NSMenu *mode = submenu(game, @"Console Mode");
-    NSString *docked = @"Docked", *handheld = @"Handheld";
-    if (menus.modeFixed) { docked = @"Docked (launch override)"; handheld = @"Handheld (launch override)"; }
-    action(mode, docked, @selector(chooseMode:), @"", menus).tag = 1;
-    action(mode, handheld, @selector(chooseMode:), @"", menus).tag = 0;
+    for (NSString *env in @[@"DM_OPMODE", @"DM_FPS_TARGET", @"DM_RENDER_SCALE"]) setting_menu(game, env, menus);
     NSMenu *audio = submenu(bar, @"Audio");
-    action(audio, @"Mute Audio", @selector(mute:), @"", menus);
+    action(audio, @"Mute Audio", @selector(mute:), @"m", menus).keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
     action(audio, @"Mute When Unfocused", @selector(muteUnfocused:), @"", menus);
+    NSMenu *volume = submenu(audio, @"Volume");
+    for (NSNumber *n in @[@100, @75, @50, @25, @0]) action(volume, [NSString stringWithFormat:@"%@%%", n], @selector(chooseVolume:), @"", menus).tag = n.integerValue;
     NSMenu *view = submenu(bar, @"View"), *sizes = submenu(view, @"Window Scale");
-    for (NSNumber *n in @[@100, @150, @200, @300]) action(sizes, [NSString stringWithFormat:@"%.1f×", n.doubleValue / 100], @selector(resize:), @"", menus).tag = n.integerValue;
+    int index = 0;
+    for (NSNumber *n in @[@100, @150, @200, @300]) action(sizes, [NSString stringWithFormat:@"%.1f×", n.doubleValue / 100], @selector(resize:), [NSString stringWithFormat:@"%d", ++index], menus).tag = n.integerValue;
+    setting_menu(view, @"DM_METAL_HUD", menus);
 }

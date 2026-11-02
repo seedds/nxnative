@@ -66,5 +66,6 @@ extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_s
 int dm_movie_playing(void);   // hle_movie.c: a video decoder of the SDK's movie library handed out a picture in the last half second (the frame step then holds 30 fps)
 void dm_audio_suspend(int on);
 void dm_audio_mute(int on);   // silence device output while preserving callback pacing and background/interruption state
+void dm_audio_volume(int percent);   // session output gain, 0..100, independent of the game's own volume and mute
 uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count (the silent sink is not counted)
 void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnits (hle_audio.c)

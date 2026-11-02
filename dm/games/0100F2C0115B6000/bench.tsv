@@ -1,0 +1,5 @@
+# Benchmark routes for scripts/bench.py: name, DM_KEYS, measuring window start/length (seconds), description.
+# Use the preserved cave-baseline manual save: Beneath Hyrule Castle, initial stairs before the first movement trigger.
+cave-stand	20:A*6/4	90	45	initial cave manual save, stationary camera after title/load and first-use pipeline warmup; not an overworld or streaming-stress benchmark
+# Use a preserved manual save on Great Sky Island, outside the Room of Awakening; keep the camera stationary.
+sky-island-stand	20:A*6/4	75	60	Great Sky Island outdoor manual save, stationary one-minute window after title/load and first-use pipeline warmup; not a traversal or streaming-stress benchmark

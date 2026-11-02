@@ -23,6 +23,8 @@ Update 1.4.3 (v720896) over the base game, SDK 20.5.22. Nintendo EPD's engine (s
 - **Render scale:** `DM_RENDER_SCALE=0.5`–`1.0` multiplies the size of the 3D views (1600x896 docked) and fixes it there; the game's own dynamic resolution runs only at 1.0. The HUD keeps its resolution. The stub multiplies in the view size function (`main+0xd5c24`), unlike Breath of the Wild's, which sets the scale at the dynamic-resolution block.
 - **Resolved:** the yield back-off used to start after 200 µs, which caught the main thread waiting for its workers on the frame's critical path: frames ran past 33 ms and the game dropped itself to 20 fps (9 times in 300 s on the Mac; on the iPhone the threads also stayed on efficiency cores). From 2 ms on it never backs off ([development.md, Power](../../../docs/development.md#power)).
 - The spin-wait rewrite finds 843 loops in `main`; 701 of them are one inlined atomic decrement (a compare-and-swap retried after another thread changed the count), which yields only on a second retry in a row.
+- **Outdoor benchmark:** `python3 scripts/bench.py <build> --route sky-island-stand --save <outdoor-save>` loads a preserved manual save on Great Sky Island, leaves the camera stationary and measures a 60-second window from 75–135 seconds after startup. The source save is copied for each run. This is an outdoor steady-state workload, not a traversal/streaming benchmark; `cave-stand` remains available only for cave-specific diagnostics.
+
 
 ## Memory
 

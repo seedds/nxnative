@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "analysis/insn.h"
+#include "analysis/memory.h"
 #include "decode/translate.h"
 #include "dynarmic/frontend/A64/a64_location_descriptor.h"
 #include "dynarmic/ir/basic_block.h"
@@ -481,15 +482,25 @@ Program Compile(const IR::Block& block) {
     return p;
 }
 
+// A program's operations and immediates where they are kept: a Program, or the instruction cache's pools (InsnCache::Impl)
+struct ProgramView {
+    const AOp* ops = nullptr;
+    size_t n_ops = 0;
+    const AImm* imms = nullptr;
+};
+ProgramView View(const Program& p) {
+    return {p.ops.data(), p.ops.size(), p.imms.data()};
+}
+
 // Runs a program on the abstract state, for the instruction at pc
-void Run(State& s, const Program& p, uint64_t pc) {
+void Run(State& s, const ProgramView& p, uint64_t pc) {
     // The operations' values, each written by its operation before a later one reads it: storage left uninitialised (the values are
     // constructed in place below), since filling 24 pairs at every instruction the analysis interprets was a measurable part of it
     alignas(std::pair<Abs, Abs>) unsigned char small[24 * sizeof(std::pair<Abs, Abs>)];
     std::vector<std::pair<Abs, Abs>> big;
     std::pair<Abs, Abs>* val = reinterpret_cast<std::pair<Abs, Abs>*>(small);
-    if (p.ops.size() > 24) {
-        big.resize(p.ops.size());
+    if (p.n_ops > 24) {
+        big.resize(p.n_ops);
         val = big.data();
     }
     const auto get = [&](int32_t r) -> std::pair<Abs, Abs> {
@@ -498,7 +509,7 @@ void Run(State& s, const Program& p, uint64_t pc) {
         const AImm& imm = p.imms[static_cast<size_t>(-2 - r)];
         return {Abs::K(imm.At(pc)), Abs{}};
     };
-    for (size_t i = 0; i < p.ops.size(); ++i) {
+    for (size_t i = 0; i < p.n_ops; ++i) {
         const AOp& op = p.ops[i];
         std::pair<Abs, Abs> r{};
         switch (op.kind) {
@@ -547,16 +558,85 @@ constexpr uint64_t kProbeDelta2 = (1ull << 45) + 0x2004;
 
 }  // namespace
 
+// The distinct words' map of one shard (InsnCache::Impl): open addressing on the word, linear probing, a slot of the word and 1 + its entry
+// (0: empty), grown at half full. A std::unordered_map node per word took 44 bytes with its bucket (README.md, "Memory at scale"); a slot is 8,
+// about 16 per word. Lookups from many threads at once only read it; one thread enters a shard's words
+class WordMap {
+public:
+    // The entry of word w, or -1
+    int64_t Find(uint32_t w) const {
+        if (slots.empty()) return -1;
+        for (size_t i = Home(w);; i = (i + 1) & mask) {
+            if (!slots[i].second) return -1;
+            if (slots[i].first == w) return slots[i].second - 1;
+        }
+    }
+    // Enters w with entry e unless it has one: (its entry, whether it was entered)
+    std::pair<uint32_t, bool> Insert(uint32_t w, uint32_t e) {
+        if (2 * (count + 1) > slots.size()) Grow();
+        for (size_t i = Home(w);; i = (i + 1) & mask) {
+            if (!slots[i].second) {
+                slots[i] = {w, e + 1};
+                ++count;
+                return {e, true};
+            }
+            if (slots[i].first == w) return {slots[i].second - 1, false};
+        }
+    }
+    void Clear() {
+        std::vector<std::pair<uint32_t, uint32_t>>().swap(slots);
+        count = 0;
+        mask = 0;
+        shift = 32;
+    }
+    size_t Bytes() const { return slots.capacity() * sizeof(slots[0]); }
+
+private:
+    size_t Home(uint32_t w) const { return static_cast<uint32_t>(w * 2654435761u) >> shift; }  // Fibonacci hashing: the high bits
+    void Grow() {
+        std::vector<std::pair<uint32_t, uint32_t>> old;
+        old.swap(slots);
+        const size_t n = old.empty() ? 1024 : 2 * old.size();
+        slots.assign(n, {0, 0});
+        mask = n - 1;
+        shift = 32;
+        for (size_t k = n; k > 1; k >>= 1) --shift;
+        for (const auto& [w, e1] : old) {
+            if (!e1) continue;
+            for (size_t i = Home(w);; i = (i + 1) & mask) {
+                if (!slots[i].second) {
+                    slots[i] = {w, e1};
+                    break;
+                }
+            }
+        }
+    }
+    std::vector<std::pair<uint32_t, uint32_t>> slots;
+    size_t count = 0, mask = 0;
+    unsigned shift = 32;
+};
+
 struct InsnCache::Impl {
-    struct Entry {
+    struct Entry {  // a word's facts as Make makes them; kept apart below: the effects, and the program in the pools
         RegFx fx;
         Program program;
         bool relative_ok = true;  // the program holds at every pc (pc-relative immediates added); false: translated at every use
     };
+    // An entry's program in the pools (README.md, "Memory at scale": a Program's two vectors per distinct word were 80 bytes and two
+    // allocations besides its operations, 328 MiB at 31 million instructions)
+    struct Code {
+        uint32_t ops = 0, imms = 0;        // its first operation and immediate in the pools
+        uint16_t n_ops = 0, n_imms = 0;
+        bool relative_ok = false;          // as Entry's; false also for a program too long for the counts (translated at every use)
+    };
     const module::Image& img;
     std::vector<uint32_t> ids;                       // per text word: 1 + its entry, 0 when not seen yet
-    std::vector<std::unordered_map<uint32_t, uint32_t>> by_word;  // word -> entry, in shards (Shard)
-    std::vector<Entry> entries;
+    std::vector<WordMap> by_word;                    // word -> entry, in shards (Shard)
+    std::vector<RegFx> fxs;                          // per entry: its effects
+    std::vector<Code> codes;                         // per entry: its program (empty once effects_only)
+    std::vector<AOp> op_pool;
+    std::vector<AImm> imm_pool;
+    bool effects_only = false;                       // KeepEffects: the programs dropped, the effects kept (the plan reads only those)
     std::unordered_map<uint64_t, RegFx> outside;     // words outside the text (the aux region's): InstructionFx of each
     std::unordered_map<uint64_t, uint64_t> prepared; // function entry -> the walk state Prepare last made its instructions' facts for
     std::atomic<uint64_t> translations{0};
@@ -578,11 +658,7 @@ struct InsnCache::Impl {
     // The word map in shards by the word (a word's shard is fixed, so that Prepare's order is the same on any number of threads)
     static constexpr size_t kShards = 16;
     static size_t Shard(uint32_t w) { return (w ^ (w >> 7) ^ (w >> 17)) % kShards; }
-    const uint32_t* Known(uint32_t w) const {
-        const auto& m = by_word[Shard(w)];
-        const auto it = m.find(w);
-        return it == m.end() ? nullptr : &it->second;
-    }
+    int64_t Known(uint32_t w) const { return by_word[Shard(w)].Find(w); }  // its entry, or -1
 
     // InsnCache::Prepare. The functions whose code changed since they were last prepared are scanned on the pool for instructions without
     // facts (reading the cache only); the distinct new words are found per shard of words, each shard's in function order with the first pc
@@ -597,13 +673,32 @@ struct InsnCache::Impl {
                 for (size_t i = 0; i < n; ++i) body(i);
             }
         };
-        std::vector<const Function*> todo;
+        std::vector<const Function*> all;
         for (const Function* f : fns) {
             const auto [it, inserted] = prepared.try_emplace(f->entry, f->state);
             if (!inserted && f->state != 0 && it->second == f->state) continue;
             it->second = f->state;
-            todo.push_back(f);
+            all.push_back(f);
         }
+        // In batches of functions, in their order: the lists below hold a pair per instruction of the functions being prepared, every
+        // instruction of the module at the first call (README.md, "Memory at scale": 503 MiB at 31 million instructions), and a batch's new
+        // words are the words the earlier batches did not have, first seen where the whole list had them first: the same entries
+        std::vector<const Function*> batch;
+        size_t words = 0;
+        for (const Function* f : all) {
+            batch.push_back(f);
+            words += f->words;
+            if (batch.size() >= kBatch || words >= kBatchWords) {
+                PrepareBatch(batch, each);
+                batch.clear();
+                words = 0;
+            }
+        }
+        if (!batch.empty()) PrepareBatch(batch, each);
+    }
+    static constexpr size_t kBatch = 16384, kBatchWords = size_t{1} << 18;  // a batch of Prepare: functions, their instructions at most
+    template <class Each>
+    void PrepareBatch(const std::vector<const Function*>& todo, const Each& each) {
         // Each function's instructions without facts: those whose word has an entry (known), those whose word has none yet (fresh), and
         // those outside the text
         struct Missing {
@@ -622,7 +717,7 @@ struct InsnCache::Impl {
                     }
                     if (ids[static_cast<size_t>(i)]) continue;
                     const uint32_t w = *img.Word(pc);
-                    if (const uint32_t* e = Known(w)) m.known.emplace_back(static_cast<uint32_t>(i), *e);
+                    if (const int64_t e = Known(w); e >= 0) m.known.emplace_back(static_cast<uint32_t>(i), static_cast<uint32_t>(e));
                     else m.fresh.emplace_back(static_cast<uint32_t>(i), w);
                 }
             }
@@ -640,22 +735,30 @@ struct InsnCache::Impl {
                 }
             }
         });
-        const uint32_t base = static_cast<uint32_t>(entries.size());
+        const uint32_t base = static_cast<uint32_t>(fxs.size());
         std::vector<uint32_t> offset(kShards + 1, base);
         for (size_t sh = 0; sh < kShards; ++sh) offset[sh + 1] = offset[sh] + static_cast<uint32_t>(first[sh].size());
-        entries.resize(offset[kShards]);
         each(kShards, [&](size_t sh) {
-            for (size_t k = 0; k < first[sh].size(); ++k) by_word[sh].emplace(first[sh][k].first, offset[sh] + static_cast<uint32_t>(k));
+            for (size_t k = 0; k < first[sh].size(); ++k) by_word[sh].Insert(first[sh][k].first, offset[sh] + static_cast<uint32_t>(k));
         });
         std::vector<std::pair<size_t, size_t>> made;  // (shard, place) of every new entry
         made.reserve(offset[kShards] - base);
         for (size_t sh = 0; sh < kShards; ++sh) {
             for (size_t k = 0; k < first[sh].size(); ++k) made.emplace_back(sh, k);
         }
+        std::vector<Entry> fresh(made.size());
         each(made.size(), [&](size_t k) {
             const auto& [w, pc] = first[made[k].first][made[k].second];
-            entries[base + k] = Make(pc, w);
+            fresh[k] = Make(pc, w);
         });
+        if (memory::On()) {
+            uint64_t b = memory::Of(missing) + memory::Of(first) + memory::Of(place) + memory::Of(made) + memory::Of(todo) + memory::Of(fresh);
+            for (const Entry& e : fresh) b += memory::Of(e.program.ops) + memory::Of(e.program.imms);
+            for (const Missing& m : missing) b += memory::Of(m.known) + memory::Of(m.fresh) + memory::Of(m.outside);
+            for (size_t sh = 0; sh < kShards; ++sh) b += memory::Of(first[sh]) + memory::Of(place[sh]);
+            memory::Note("insn cache: Prepare's lists (transient)", b, "Prepare of " + std::to_string(todo.size()) + " functions");
+        }
+        for (Entry& e : fresh) Append(std::move(e));  // entry base + k, the pools in that order
         each(missing.size(), [&](size_t k) {
             for (const auto& [i, e] : missing[k].known) ids[i] = e + 1;
             for (const auto& [i, w] : missing[k].fresh) ids[i] = offset[Shard(w)] + place[Shard(w)].at(w) + 1;
@@ -676,16 +779,48 @@ struct InsnCache::Impl {
         for (size_t k = 0; k < fresh_outside.size(); ++k) outside.emplace(fresh_outside[k], fx[k]);
     }
 
-    const Entry* At(uint64_t pc) {
-        if (!img.InText(pc) || (pc & 3) || (pc - img.text_off) / 4 >= ids.size()) return nullptr;
+    // An entry's effects and program kept: the program in the pools, unless its counts do not fit a Code (translated at every use)
+    void Append(Entry&& e) {
+        fxs.push_back(e.fx);
+        if (effects_only) return;
+        Code c;
+        c.ops = static_cast<uint32_t>(op_pool.size());
+        c.imms = static_cast<uint32_t>(imm_pool.size());
+        if (e.relative_ok && e.program.ops.size() <= UINT16_MAX && e.program.imms.size() <= UINT16_MAX) {
+            c.n_ops = static_cast<uint16_t>(e.program.ops.size());
+            c.n_imms = static_cast<uint16_t>(e.program.imms.size());
+            c.relative_ok = true;
+            op_pool.insert(op_pool.end(), e.program.ops.begin(), e.program.ops.end());
+            imm_pool.insert(imm_pool.end(), e.program.imms.begin(), e.program.imms.end());
+        }
+        codes.push_back(c);
+    }
+
+    // 1 + the entry of the word at pc (made at its first use when Prepare did not make it), 0 for an address outside the text
+    uint32_t At(uint64_t pc) {
+        if (!img.InText(pc) || (pc & 3) || (pc - img.text_off) / 4 >= ids.size()) return 0;
         uint32_t& id = ids[(pc - img.text_off) / 4];
         if (!id) {
             const uint32_t w = *img.Word(pc);
-            const auto [it, inserted] = by_word[Shard(w)].try_emplace(w, static_cast<uint32_t>(entries.size()));
-            if (inserted) entries.push_back(Make(pc, w));
-            id = it->second + 1;
+            if (effects_only) {  // no word map any more (KeepEffects): an entry of this pc's own
+                Append(Make(pc, w));
+                id = static_cast<uint32_t>(fxs.size());
+                return id;
+            }
+            const auto [entry, inserted] = by_word[Shard(w)].Insert(w, static_cast<uint32_t>(fxs.size()));
+            if (inserted) Append(Make(pc, w));
+            id = entry + 1;
         }
-        return &entries[id - 1];
+        return id;
+    }
+
+    // The summaries are done (discovery's end): their programs go, the effects stay for the plan; an Interpret after this translates
+    void KeepEffects() {
+        effects_only = true;
+        std::vector<Code>().swap(codes);
+        std::vector<AOp>().swap(op_pool);
+        std::vector<AImm>().swap(imm_pool);
+        for (auto& m : by_word) m.Clear();  // At makes an entry per pc from now on (the same facts)
     }
 
     // The word's facts from its translations at pc and at two other addresses: every immediate the same at all three is a constant, one that
@@ -721,7 +856,7 @@ struct InsnCache::Impl {
     }
 
     const RegFx& Fx(uint64_t pc) {
-        if (const Entry* e = At(pc)) return e->fx;
+        if (const uint32_t id = At(pc)) return fxs[id - 1];
         const auto it = outside.find(pc);
         if (it != outside.end()) return it->second;
         const auto w = img.Word(pc);
@@ -733,12 +868,14 @@ struct InsnCache::Impl {
     // at the first state that differs (the check of this cache's equivalence, README.md "Pack throughput")
     void Interpret(State& s, uint64_t pc) {
         static const bool check = std::getenv("NXAOT_CHECK_PROGRAMS") != nullptr;
-        const Entry* e = At(pc);
-        if (e && e->relative_ok) {
+        const uint32_t id = At(pc);
+        if (id && !effects_only && codes[id - 1].relative_ok) {
+            const Code& c = codes[id - 1];
+            const ProgramView program{op_pool.data() + c.ops, c.n_ops, imm_pool.data() + c.imms};
             if (check) {
                 State ref = s;
                 analysis::Interpret(ref, pc, *img.Word(pc));
-                Run(s, e->program, pc);
+                Run(s, program, pc);
                 if (!(ref == s)) {
                     std::fprintf(stderr, "[RED] nxaot: the cached program of %#llx (word %08x) differs from its IR\n",
                                  static_cast<unsigned long long>(pc), *img.Word(pc));
@@ -747,12 +884,13 @@ struct InsnCache::Impl {
                 ++checked;
                 return;
             }
-            Run(s, e->program, pc);
+            Run(s, program, pc);
             return;
         }
         if (const auto w = img.Word(pc)) {
             ++translations;
-            Run(s, Compile(Translate(pc, *w)), pc);
+            const Program p = Compile(Translate(pc, *w));
+            Run(s, View(p), pc);
         }
     }
 };
@@ -763,13 +901,49 @@ const RegFx& InsnCache::Fx(uint64_t pc) {
     return impl->Fx(pc);
 }
 uint64_t InsnCache::Distinct() const {
-    return impl->entries.size();
+    return impl->fxs.size();
+}
+void InsnCache::KeepEffects() {
+    impl->KeepEffects();
 }
 uint64_t InsnCache::Translations() const {
     return impl->translations.load();
 }
 void InsnCache::Prepare(const std::vector<const Function*>& functions, Pool* pool) {
     impl->Prepare(functions, pool);
+}
+namespace {
+struct InsnCacheBytes {
+    uint64_t ids = 0, words = 0, programs = 0, other = 0;
+};
+InsnCacheBytes BytesOf(const InsnCache::Impl& c) {
+    InsnCacheBytes b;
+    b.ids = memory::Of(c.ids);
+    b.words = memory::Of(c.by_word);
+    for (const auto& m : c.by_word) b.words += memory::Chunk(m.Bytes());
+    b.programs = memory::Of(c.fxs) + memory::Of(c.codes) + memory::Of(c.op_pool) + memory::Of(c.imm_pool);
+    b.other = memory::Of(c.outside) + memory::Of(c.prepared);
+    return b;
+}
+}  // namespace
+
+void InsnCache::NoteMemory(const std::string& at) const {
+    if (!memory::On()) return;
+    const InsnCacheBytes b = BytesOf(*impl);
+    memory::Note("insn cache: per text word ids", b.ids, at);
+    memory::Note("insn cache: distinct words' map", b.words, at);
+    memory::Note("insn cache: distinct words' facts and programs", b.programs, at);
+    memory::Note("insn cache: outside words, prepared states", b.other, at);
+}
+uint64_t InsnCache::Bytes() const {
+    const InsnCacheBytes b = BytesOf(*impl);
+    return b.ids + b.words + b.programs + b.other;
+}
+
+uint64_t BytesOf(const SummaryMemo& memo) {
+    uint64_t b = memory::Of(memo.by_function);
+    for (const auto& [entry, seen] : memo.by_function) b += memory::Of(seen);
+    return b;
 }
 
 namespace {
@@ -895,7 +1069,11 @@ public:
         start.restored = Callee();
         cur.assign(n, start);
         for (size_t i = 0; i < n; ++i) cur[i].exported = order[i]->summary.exported;
-        last.assign(n, {});
+        // The inputs of each function's last computation, back to back: their length is fixed in a run (InputWords), a vector each was 24
+        // bytes and an allocation per function (README.md, "Memory at scale")
+        last_at.assign(n + 1, 0);
+        for (size_t i = 0; i < n; ++i) last_at[i + 1] = last_at[i] + InputWords(i);
+        last.assign(last_at[n], 0);
         evaluated.assign(n, 0);
         outcome.assign(n, 0);
         memo_of.assign(n, nullptr);
@@ -963,27 +1141,18 @@ public:
                         looked_at[i] = now;
                         outcome[i] = kLooked;
                         const Function& f = *order[i];
-                        if (evaluated[i] && SameInputs(i, last[i])) return;
+                        if (evaluated[i] && SameInputs(i, last.data() + last_at[i], InputWords(i))) return;
                         std::vector<uint64_t> inputs = Inputs(i);
                         outcome[i] |= kEvaluated;
                         Summary s;
-                        const Summary* known = nullptr;
-                        if (memo_of[i]) {
-                            for (const auto& [in, out] : *memo_of[i]) {
-                                if (in == inputs) known = &out;
-                            }
-                        }
+                        const uint64_t* known = memo_of[i] ? Recall(*memo_of[i], inputs) : nullptr;
                         if (known) {
-                            s = *known;
+                            s = Unpack(known);
                             outcome[i] |= kHit;
                         } else {
                             outcome[i] |= kComputed;
                             s = Compute(i);
-                            if (memo_of[i]) {
-                                auto& seen = *memo_of[i];
-                                if (seen.size() >= kMemoPerFunction) seen.erase(seen.begin());
-                                seen.emplace_back(inputs, s);
-                            }
+                            if (memo_of[i]) Remember(*memo_of[i], inputs, s);
                         }
                         s.exported = f.summary.exported;
                         if (!SameSummary(s, cur[i])) {
@@ -991,7 +1160,7 @@ public:
                             changed_at[i] = now;
                             if (is_taken[i]) outcome[i] |= kTakenMoved;
                         }
-                        last[i] = std::move(inputs);
+                        std::copy(inputs.begin(), inputs.end(), last.begin() + static_cast<std::ptrdiff_t>(last_at[i]));
                         evaluated[i] = 1;
                     };
                     if (pool) {
@@ -1022,6 +1191,21 @@ public:
         for (size_t i = 0; i < n; ++i) order[i]->summary = cur[i];
         if (computes) *computes += computed;
         if (memo) memo->hits += hits;
+        if (memory::On()) {
+            // At the run's end every function's last inputs are held: the run's peak
+            const std::string at = "a run of the summaries (" + std::to_string(n) + " functions)";
+            uint64_t graph = memory::Of(order) + memory::Of(entries) + memory::Of(deps) + memory::Of(uses_indirect) + memory::Of(taken) +
+                             memory::Of(taken_below) + memory::Of(level) + memory::Of(by_level) + memory::Of(level_indirect) + memory::Of(is_taken);
+            for (const auto& d : deps) graph += memory::Of(d);
+            for (const auto& l : by_level) graph += memory::Of(l);
+            memory::Note("summaries: call graph and levels", graph, at);
+            memory::Note("summaries: per-function states (summaries, epochs)",
+                         memory::Of(prev) + memory::Of(cur) + memory::Of(below) + memory::Of(above) + memory::Of(below_changed) +
+                             memory::Of(above_moved) + memory::Of(changed_at) + memory::Of(moved_at) + memory::Of(looked_at) +
+                             memory::Of(evaluated) + memory::Of(outcome) + memory::Of(todo) + memory::Of(memo_of),
+                         at);
+            memory::Note("summaries: last inputs per function", memory::Of(last) + memory::Of(last_at), at);
+        }
     }
 
 private:
@@ -1051,45 +1235,104 @@ private:
     }
     static CalleeFx AsCallee(const Summary& s) { return {s.reads, s.writes, s.must, s.preserving, s.returns, true}; }
 
-    template <class Out>
-    static void Put(Out& out, const RegSet& r) {
-        out(uint64_t{r.x} | uint64_t{r.v} << 32);
-        out(uint64_t{r.sp} | uint64_t{r.nzcv} << 1);
-    }
+    // A register set's x and v in one word (both 32 bits)
+    static uint64_t Word(const RegSet& r) { return uint64_t{r.x} | uint64_t{r.v} << 32; }
+    // A callee's facts as Compute reads them, in four words (reads, writes and must, then their sp and nzcv bits and the flags): the same
+    // facts as the seven words of phase 5c, which the memo held per callee of every remembered input (README.md, "Memory at scale")
     template <class Out>
     static void Put(Out& out, const CalleeFx& c) {
-        Put(out, c.reads);
-        Put(out, c.writes);
-        Put(out, c.must);
-        out(uint64_t{c.preserving} | uint64_t{c.returns} << 1 | uint64_t{c.known} << 2);
+        out(Word(c.reads));
+        out(Word(c.writes));
+        out(Word(c.must));
+        out(uint64_t{c.reads.sp} | uint64_t{c.reads.nzcv} << 1 | uint64_t{c.writes.sp} << 2 | uint64_t{c.writes.nzcv} << 3 |
+            uint64_t{c.must.sp} << 4 | uint64_t{c.must.nzcv} << 5 | uint64_t{c.preserving} << 6 | uint64_t{c.returns} << 7 |
+            uint64_t{c.known} << 8);
     }
-    // Everything Compute(i) reads besides the instructions: its code's state, its exported flag, its callees' summaries as Of() gives them
-    // (deps: the callees that are functions; any other target is a constant) and the address-taken union when it has blr or unbounded br
+    // Everything Compute(i) reads besides the instructions: its code's state and its exported flag (one word: the state counts the walks
+    // that changed the function, far below 2^63), its callees' summaries as Of() gives them (deps: the callees that are functions; any other
+    // target is a constant) and the address-taken union when it has blr or unbounded br
     template <class Out>
     void EmitInputs(size_t i, Out& out) const {
         const Function& f = *order[i];
-        out(f.state);
-        out(uint64_t{f.summary.exported});
+        out(f.state << 1 | uint64_t{f.summary.exported});
         for (const uint32_t d : deps[i]) Put(out, AsCallee(Value(d, i)));
         if (uses_indirect[i]) Put(out, IndirectOf(i));
     }
+    // A summary in five words, and back (the memo's records)
+    static constexpr size_t kSummaryWords = 5;
+    static void Pack(const Summary& s, uint64_t* w) {
+        w[0] = Word(s.reads);
+        w[1] = Word(s.writes);
+        w[2] = Word(s.must);
+        w[3] = Word(s.restored);
+        w[4] = uint64_t{s.reads.sp} | uint64_t{s.reads.nzcv} << 1 | uint64_t{s.writes.sp} << 2 | uint64_t{s.writes.nzcv} << 3 |
+               uint64_t{s.must.sp} << 4 | uint64_t{s.must.nzcv} << 5 | uint64_t{s.restored.sp} << 6 | uint64_t{s.restored.nzcv} << 7 |
+               uint64_t{s.preserving} << 8 | uint64_t{s.returns} << 9 | uint64_t{s.exported} << 10;
+    }
+    static Summary Unpack(const uint64_t* w) {
+        const auto set = [](uint64_t xv, uint64_t flags, unsigned at) {
+            RegSet r;
+            r.x = static_cast<uint32_t>(xv);
+            r.v = static_cast<uint32_t>(xv >> 32);
+            r.sp = flags >> at & 1;
+            r.nzcv = flags >> (at + 1) & 1;
+            return r;
+        };
+        Summary s;
+        s.reads = set(w[0], w[4], 0);
+        s.writes = set(w[1], w[4], 2);
+        s.must = set(w[2], w[4], 4);
+        s.restored = set(w[3], w[4], 6);
+        s.preserving = w[4] >> 8 & 1;
+        s.returns = w[4] >> 9 & 1;
+        s.exported = w[4] >> 10 & 1;
+        return s;
+    }
+    // A function's memo (SummaryMemo): records back to back, each the length of its inputs, the inputs and the summary, oldest first. The
+    // summary remembered for these inputs, or null
+    static const uint64_t* Recall(const std::vector<uint64_t>& seen, const std::vector<uint64_t>& inputs) {
+        const uint64_t* known = nullptr;
+        for (size_t at = 0; at < seen.size(); at += 1 + seen[at] + kSummaryWords) {
+            const size_t len = seen[at];
+            if (len == inputs.size() && std::equal(inputs.begin(), inputs.end(), seen.begin() + static_cast<std::ptrdiff_t>(at + 1))) {
+                known = seen.data() + at + 1 + len;
+            }
+        }
+        return known;
+    }
+    // Remembers a summary, the oldest record dropped when kMemoPerFunction are kept; the vector sized to its records
+    static void Remember(std::vector<uint64_t>& seen, const std::vector<uint64_t>& inputs, const Summary& s) {
+        size_t records = 0;
+        for (size_t at = 0; at < seen.size(); at += 1 + seen[at] + kSummaryWords) ++records;
+        const size_t drop = records >= kMemoPerFunction ? 1 + seen[0] + kSummaryWords : 0;
+        std::vector<uint64_t> next;
+        next.reserve(seen.size() - drop + 1 + inputs.size() + kSummaryWords);
+        next.insert(next.end(), seen.begin() + static_cast<std::ptrdiff_t>(drop), seen.end());
+        next.push_back(inputs.size());
+        next.insert(next.end(), inputs.begin(), inputs.end());
+        next.resize(next.size() + kSummaryWords);
+        Pack(s, next.data() + next.size() - kSummaryWords);
+        seen.swap(next);
+    }
     std::vector<uint64_t> Inputs(size_t i) const {
         std::vector<uint64_t> v;
-        v.reserve(2 + 7 * (deps[i].size() + 1));
+        v.reserve(1 + 4 * (deps[i].size() + 1));
         auto out = [&](uint64_t w) { v.push_back(w); };
         EmitInputs(i, out);
         return v;
     }
-    // Inputs(i) == v, without building Inputs(i)
-    bool SameInputs(size_t i, const std::vector<uint64_t>& v) const {
+    // The words of Inputs(i): fixed in a run (its callees and whether it reads the union do not change)
+    size_t InputWords(size_t i) const { return 1 + 4 * (deps[i].size() + (uses_indirect[i] ? 1 : 0)); }
+    // Inputs(i) == v[0, n), without building Inputs(i)
+    bool SameInputs(size_t i, const uint64_t* v, size_t n) const {
         size_t at = 0;
         bool same = true;
         auto out = [&](uint64_t w) {
-            same = same && at < v.size() && v[at] == w;
+            same = same && at < n && v[at] == w;
             ++at;
         };
         EmitInputs(i, out);
-        return same && at == v.size();
+        return same && at == n;
     }
 
     CalleeFx Of(uint64_t target, size_t i) const {
@@ -1395,11 +1638,12 @@ private:
     std::vector<uint64_t> changed_at;          // per function: the epoch its summary last changed in this round
     std::vector<uint64_t> moved_at;            // per function: the round's epoch its last round's summary last changed
     std::vector<uint64_t> looked_at;           // per function: the epoch it was last looked at
-    std::vector<std::vector<uint64_t>> last;   // per function: the inputs of its last computation in this run
+    std::vector<uint64_t> last;                // the inputs of each function's last computation in this run, at last_at[i]
+    std::vector<uint64_t> last_at;
     std::vector<uint8_t> evaluated;            // per function: computed in this run
     std::vector<uint8_t> outcome;              // per function: what its last look did (kLooked, ...)
     std::vector<uint32_t> todo;                // a level step's members to look at
-    std::vector<std::vector<std::pair<std::vector<uint64_t>, Summary>>*> memo_of;  // per function: its memo
+    std::vector<std::vector<uint64_t>*> memo_of;  // per function: its memo's records (SummaryMemo)
 };
 
 // ---- Exclusive windows ----

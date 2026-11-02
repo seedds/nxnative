@@ -35,8 +35,9 @@ struct TableResult {
 // is new; the analysis of a region is a function of its key, so the result is the one a lifting would give. One per discovery
 struct RegionMemo {
     struct Outcome;
-    std::map<std::vector<uint64_t>, std::shared_ptr<const Outcome>> regions;
+    std::map<std::vector<uint32_t>, std::shared_ptr<const Outcome>> regions;  // the keys in 32-bit words (jumptable.cpp)
 };
+uint64_t BytesOf(const RegionMemo& memo);  // its bytes, keys and outcomes (src/analysis/memory.h)
 
 // fn: the function with its blocks (its known tables become switches in the regions); valid: whether an address may be a target (a decoded
 // instruction of the function); calls: empty, or the call effects a region may continue past. optimistic: ignore the blocks only the function's

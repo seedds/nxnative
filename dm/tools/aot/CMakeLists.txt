@@ -238,3 +238,8 @@ set_tests_properties(corpus_funcdiff_c PROPERTIES TIMEOUT 900)
 add_test(NAME misses COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_misses.py" --nxaot $<TARGET_FILE:nxaot>
          --nxaot-host $<TARGET_FILE:nxaot_host> --work "${CMAKE_CURRENT_BINARY_DIR}/misses")
 set_tests_properties(misses PROPERTIES TIMEOUT 900)
+# The compile workers bounded by memory (aot-recompiler.md section 10; README.md, "Memory at scale"): --workers 0 counts them by the memory
+# available after the analysis (NXAOT_MEM_AVAILABLE_MIB, a test switch, stands for it), --workers N overrides, and the pack is the same
+add_test(NAME workers COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_workers.py" --nxaot $<TARGET_FILE:nxaot>
+         --work "${CMAKE_CURRENT_BINARY_DIR}/workers")
+set_tests_properties(workers PROPERTIES TIMEOUT 900)

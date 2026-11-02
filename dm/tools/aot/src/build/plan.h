@@ -56,4 +56,6 @@ lift::Regs ToRegs(const analysis::RegSet& r);
 // threads its per-function passes run on (0: one per CPU); the plan is the same with any number (README.md, "Phase 5c")
 Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const lift::Convention& conv, bool all_entries, unsigned threads = 1);
 
+uint64_t BytesOf(const Plan& plan);  // its bytes (src/analysis/memory.h; README.md, "Memory at scale")
+
 }  // namespace nxaot::build

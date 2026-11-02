@@ -13,10 +13,19 @@ pack of it can be checked against dynarmic (nxaot_run) as the corpus is.
       writes <out dir>/bench.c, bench.elf, bench.nro (in the nxnative-aot image: clang-18, ld.lld-18); with --data-rows also the behaviour
       image <out dir>/rows/bench.image.bin (`nxaot image`) with R more data rows in its manifest bench.aot.tsv: one word each, evenly spaced
       over the text (they cut the code they cover: a stress case of the loader's data blocks, Image::InData, not a program that runs)
+  gen_bench.py --direct --functions N [--instructions M] [--seed S] [--profile-percent P] <out dir>
+      writes the words of the same kinds of statements directly, without clang, at any size (README.md, "Memory at scale"): the behaviour image
+      <out dir>/main.image.bin and its manifest main.aot.tsv, as patch_nso.py --aot writes them for a game's NSO, about M instructions in all
+      (default 52 per function: Monster Hunter Rise's `main` is about 31 million in about 600,000 functions); with --profile-percent also
+      main.profile, one sample at the entry of P % of the functions (nxaot build --profile). Not a program that runs (below, "--direct")
 """
 import argparse
+import array
+import ast
+import hashlib
 import os
 import random
+import struct
 import subprocess
 import sys
 
@@ -131,6 +140,438 @@ class Gen:
         return ''.join(out)
 
 
+# ---------- --direct: the module's words written directly, at any size (README.md, "Memory at scale") ----------
+# clang takes minutes for the 16,000-function program and would take hours, and gigabytes, for a module of Monster Hunter Rise's size (about
+# 31 million instructions in about 600,000 functions). --direct writes the A64 words of what clang makes of Gen's statements instead, the same
+# kinds in the same proportions (arithmetic with 64-bit constants, rotates, if / else, loads and stores, struct fields and copies, loops,
+# switches through byte jump tables, scalar floating point, NEON vectors, byte loops, direct calls, calls through a table of function pointers),
+# plus exclusive read-modify-write loops (ldaxr / stlxr), which game code has and the C program has not; some switches start their own block
+# (discovery bounds their tables) and the others compute their index from two values in the block before (discovery leaves most of their brs
+# to the dispatcher, "the entry address depends on more than one value", as it does for half of the C program's switches). Functions are 16-byte
+# aligned (nop padding) with an FDE each; a non-leaf function saves x19 to x22 and x29 / x30 and keeps its arguments there, as clang's do;
+# drivers call every function, 64 per driver, and main every driver of the level below. The image is what patch_nso.py --aot writes for an NSO:
+# <out>/main.image.bin (text with the entry branch and the MOD0 offset word, read-only data with MOD0, the dynamic section, the symbol `main`,
+# DT_RELR, .eh_frame_hdr, .eh_frame and the jump tables, data with the table of function pointers; bss after it) and its manifest
+# <out>/main.aot.tsv, written by patch_nso.py's own aot_data_rows and aot_manifest. The program is not run (no run time, no checksum): it is
+# the analysis's and the pack stage's input at scale. Every encoding below was checked with llvm-mc-18 (nxnative-aot image).
+
+def _rel(off, bits):
+    return (off >> 2) & ((1 << bits) - 1)
+
+
+def a_b(off): return 0x14000000 | _rel(off, 26)                                       # b
+def a_bcond(cond, off): return 0x54000000 | _rel(off, 19) << 5 | cond                 # b.<cond>: 1 ne, 3 lo, 8 hi
+def a_cbz_w(rt, off): return 0x34000000 | _rel(off, 19) << 5 | rt
+def a_cbnz_w(rt, off): return 0x35000000 | _rel(off, 19) << 5 | rt
+def a_tbz(rt, bit, off): return 0x36000000 | (bit >> 5) << 31 | (bit & 31) << 19 | _rel(off, 14) << 5 | rt
+def a_tbnz(rt, bit, off): return 0x37000000 | (bit >> 5) << 31 | (bit & 31) << 19 | _rel(off, 14) << 5 | rt
+def a_adr(rd, off): return 0x10000000 | (off & 3) << 29 | ((off >> 2) & 0x7FFFF) << 5 | rd
+def a_movz(rd, imm, hw=0): return 0xD2800000 | hw << 21 | imm << 5 | rd                # movz xd, #imm, lsl #(16 hw)
+def a_movk(rd, imm, hw): return 0xF2800000 | hw << 21 | imm << 5 | rd
+def a_mov(rd, rm): return 0xAA0003E0 | rm << 16 | rd                                  # mov xd, xm
+def a_mov_w(rd, rm): return 0x2A0003E0 | rm << 16 | rd
+def a_add(rd, rn, rm, sh=0, kind=0): return 0x8B000000 | kind << 22 | rm << 16 | sh << 10 | rn << 5 | rd   # kind 0 lsl, 1 lsr
+def a_sub(rd, rn, rm, sh=0, kind=0): return 0xCB000000 | kind << 22 | rm << 16 | sh << 10 | rn << 5 | rd
+def a_eor(rd, rn, rm, sh=0, kind=0): return 0xCA000000 | kind << 22 | rm << 16 | sh << 10 | rn << 5 | rd
+def a_add_w(rd, rn, rm): return 0x0B000000 | rm << 16 | rn << 5 | rd
+def a_eor_w(rd, rn, rm): return 0x4A000000 | rm << 16 | rn << 5 | rd
+def a_orr_w(rd, rn, rm): return 0x2A000000 | rm << 16 | rn << 5 | rd
+def a_lsl_w(rd, rn, rm): return 0x1AC02000 | rm << 16 | rn << 5 | rd                  # lslv wd, wn, wm
+def a_addi(rd, rn, imm): return 0x91000000 | imm << 10 | rn << 5 | rd                 # add xd, xn, #imm (imm < 4096)
+def a_subi_w(rd, rn, imm): return 0x51000000 | imm << 10 | rn << 5 | rd
+def a_madd(rd, rn, rm, ra): return 0x9B000000 | rm << 16 | ra << 10 | rn << 5 | rd
+def a_ror(rd, rn, s): return 0x93C00000 | rn << 16 | s << 10 | rn << 5 | rd            # extr xd, xn, xn, #s
+def a_ubfx(rd, rn, lsb, width): return 0xD3400000 | lsb << 16 | (lsb + width - 1) << 10 | rn << 5 | rd
+def a_and(rd, rn, ones): return 0x92400000 | (ones - 1) << 10 | rn << 5 | rd           # and xd, xn, #(2^ones - 1)
+def a_cmpi(rn, imm): return 0xF100001F | imm << 10 | rn << 5
+def a_cmp(rn, rm): return 0xEB00001F | rm << 16 | rn << 5
+def a_ldr(rt, rn, off): return 0xF9400000 | (off // 8) << 10 | rn << 5 | rt
+def a_str(rt, rn, off): return 0xF9000000 | (off // 8) << 10 | rn << 5 | rt
+def a_ldr_w(rt, rn, off): return 0xB9400000 | (off // 4) << 10 | rn << 5 | rt
+def a_str_w(rt, rn, off): return 0xB9000000 | (off // 4) << 10 | rn << 5 | rt
+def a_ldr_r(rt, rn, rm): return 0xF8607800 | rm << 16 | rn << 5 | rt                  # ldr xt, [xn, xm, lsl #3]
+def a_str_r(rt, rn, rm): return 0xF8207800 | rm << 16 | rn << 5 | rt
+def a_ldrb_r(rt, rn, rm): return 0x38606800 | rm << 16 | rn << 5 | rt                 # ldrb wt, [xn, xm]
+def a_ldp(t1, t2, rn, off): return 0xA9400000 | ((off // 8) & 0x7F) << 15 | t2 << 10 | rn << 5 | t1
+def a_stp_pre(t1, t2, rn, off): return 0xA9800000 | ((off // 8) & 0x7F) << 15 | t2 << 10 | rn << 5 | t1
+def a_stp(t1, t2, rn, off): return 0xA9000000 | ((off // 8) & 0x7F) << 15 | t2 << 10 | rn << 5 | t1
+def a_ldp_post(t1, t2, rn, off): return 0xA8C00000 | ((off // 8) & 0x7F) << 15 | t2 << 10 | rn << 5 | t1
+def a_ldr_q(rt, rn, off): return 0x3DC00000 | (off // 16) << 10 | rn << 5 | rt
+def a_str_q(rt, rn, off): return 0x3D800000 | (off // 16) << 10 | rn << 5 | rt
+def a_ldp_q(t1, t2, rn, off): return 0xAD400000 | ((off // 16) & 0x7F) << 15 | t2 << 10 | rn << 5 | t1
+def a_stp_q(t1, t2, rn, off): return 0xAD000000 | ((off // 16) & 0x7F) << 15 | t2 << 10 | rn << 5 | t1
+def a_ucvtf(sd, xn): return 0x9E230000 | xn << 5 | sd                                 # ucvtf sd, xn
+def a_fmul(d, n, m): return 0x1E200800 | m << 16 | n << 5 | d                         # fmul sd, sn, sm
+def a_fadd(d, n, m): return 0x1E202800 | m << 16 | n << 5 | d
+def a_fmadd(d, n, m, a): return 0x1F000000 | m << 16 | a << 10 | n << 5 | d
+def a_fsqrt(d, n): return 0x1E21C000 | n << 5 | d
+def a_fmov_i(d, imm8): return 0x1E201000 | imm8 << 13 | d                             # fmov sd, #imm (0x50 0.25, 0x60 0.5, 0x30 16.0, 0x00 2.0 ..)
+def a_fcvtzu(xd, sn): return 0x9E390000 | sn << 5 | xd                                # fcvtzu xd, sn
+def a_str_s_r(st, rn, rm): return 0xBC207800 | rm << 16 | rn << 5 | st                # str st, [xn, xm, lsl #2]
+def a_fmla4(d, n, m): return 0x4E20CC00 | m << 16 | n << 5 | d                        # fmla vd.4s, vn.4s, vm.4s
+def a_fsub4(d, n, m): return 0x4EA0D400 | m << 16 | n << 5 | d
+def a_frintz4(d, n): return 0x4EA19800 | n << 5 | d
+def a_fmov4_i(d, imm8): return 0x4F00F400 | (imm8 >> 5) << 16 | (imm8 & 31) << 5 | d   # fmov vd.4s, #imm
+def a_umov_s(wd, vn, lane): return 0x0E003C00 | (lane << 3 | 4) << 16 | vn << 5 | wd  # mov wd, vn.s[lane]
+def a_ldaxr(rt, rn): return 0xC85FFC00 | rn << 5 | rt
+def a_stlxr(rs, rt, rn): return 0xC800FC00 | rs << 16 | rn << 5 | rt
+def a_br(rn): return 0xD61F0000 | rn << 5
+def a_blr(rn): return 0xD63F0000 | rn << 5
+
+
+A_RET, A_NOP, A_MOV_FP_SP = 0xD65F03C0, 0xD503201F, 0x910003FD
+A_HI, A_LO, A_NE = 8, 3, 1
+FIX_BL, FIX_PAGE, FIX_LO12 = 0, 1, 2              # the fixups: bl to a function, adrp of a target, add of its low 12 bits
+SEG_JT, SEG_DATA, SEG_BSS = 1, 2, 3                # a fixup's target: segment << 40 | offset in it
+MEM, OBJS, FBUF, BSS_SIZE = 0, 8192, 8192 + 64 * 80, 0x4000   # bss: mem[1024], obj_t objs[64] (80 bytes), float fbuf[256]
+OBJ = 80                                           # obj_t: id 0, link 8, flags 16, hp 20, pos 32, vel 48, name 64
+# Statement kinds with Gen.stmt's weights (out of 200 here), but for the switches, the calls and the indirect calls, whose weights give the
+# 16,000-function C program's switches (1.42), calls (3.7, the drivers' aside) and blr (1.57) per 1,000 instructions (its statements compile to
+# more instructions than these: 133 per function against 52 here); and the exclusive loop's 2
+KINDS = [('arith', 36), ('rotate', 20), ('ifelse', 20), ('mem', 20), ('obj', 20), ('loop', 12), ('switch', 5), ('float', 12), ('neon', 8),
+         ('copy', 8), ('hash', 6), ('call', 13), ('icall', 5), ('excl', 2)]
+KIND_OF = [k for k, w in KINDS for _ in range(w)]
+
+
+def patch_nso_functions(*names):
+    """Functions of patch_nso.py by name, compiled alone (its top level is a program that rewrites an image), as aot_synth.py takes them"""
+    tools = os.path.join(HERE, '..', '..')
+    with open(os.path.join(tools, 'patch_nso.py')) as f:
+        tree = ast.parse(f.read())
+    body = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
+    assert {n.name for n in body} == set(names), f'patch_nso.py lacks {set(names) - {n.name for n in body}}'
+    scope = {'hashlib': hashlib, 'struct': struct}
+    exec(compile(ast.Module(body=body, type_ignores=[]), os.path.join(tools, 'patch_nso.py'), 'exec'), scope)
+    return [scope[n] for n in names]
+
+
+class Direct:
+    """The words of a module of n statement functions (f0 .. f(n-1)), its drivers and main, about `instructions` instructions in all"""
+
+    def __init__(self, n, instructions, seed):
+        self.n = n
+        self.r = random.Random(seed)
+        self.table = 1 << max(4, (n // 4).bit_length() - 1)   # the table of function pointers, as Gen's
+        self.w = array.array('I', [0, 0])                       # the entry branch and the MOD0 offset word (+4), patched in image()
+        self.fix_at, self.fix_kind, self.fix_arg = array.array('I'), array.array('B'), array.array('q')
+        self.jt = bytearray()
+        self.starts, self.ends = array.array('I'), array.array('I')   # per function (f0 .. f(n-1), the drivers, main): word indices
+        self.fn_words = 0                                       # the statement functions' words so far
+        # Drivers: 64 calls each, over the functions, then over the drivers of the level below, up to main's level
+        self.levels, count = [], n
+        while count > 64:
+            count = (count + 63) // 64
+            self.levels.append(count)
+        driver_words = sum(self.levels) * 8 + sum(5 * c for c in [n] + self.levels) + 8
+        self.budget = max(8.0, (instructions - driver_words) / n)  # the statement functions' words each, on average
+
+    # ---- emission ----
+    def here(self):
+        return len(self.w)
+
+    def fix(self, kind, arg, word):
+        self.fix_at.append(len(self.w))
+        self.fix_kind.append(kind)
+        self.fix_arg.append(arg)
+        self.w.append(word)
+
+    def addr(self, rd, target):
+        """adrp xd, target; add xd, xd, :lo12:target"""
+        self.fix(FIX_PAGE, target, 0x90000000 | rd)
+        self.fix(FIX_LO12, target, 0x91000000 | rd << 5 | rd)
+
+    def const(self, rd):
+        """A random 64-bit constant: movz and three movk, as clang builds one"""
+        g = self.r.getrandbits
+        self.w.extend((a_movz(rd, g(16)), a_movk(rd, g(16), 1), a_movk(rd, g(16), 2), a_movk(rd, g(16), 3)))
+
+    def forward(self):
+        """A branch whose target comes later: its index, for land()"""
+        self.w.append(0)
+        return len(self.w) - 1
+
+    def land(self, at, enc):
+        self.w[at] = enc((len(self.w) - at) * 4)
+
+    # ---- the statements (A, B: the function's a and b; D: its depth argument, in a non-leaf function) ----
+    def s_arith(self, A, B, D):     # a = a * C + (b ^ C)
+        self.const(8)
+        self.const(9)
+        self.w.extend((a_eor(9, B, 9), a_madd(A, A, 8, 9)))
+
+    def s_rotate(self, A, B, D):    # b = b << s | b >> 64 - s; a ^= b + k
+        r = self.r
+        self.w.extend((a_ror(B, B, r.randrange(1, 63)), a_movz(8, r.randrange(1, 1 << 16)), a_add(8, B, 8), a_eor(A, A, 8)))
+
+    def s_ifelse(self, A, B, D):    # if (a & bit) a += b * k; else b -= a >> s
+        r = self.r
+        bit = r.randrange(0, 40)
+        at = self.forward()
+        self.w.extend((a_movz(8, r.randrange(3, 99)), a_madd(A, B, 8, A)))
+        out = self.forward()
+        self.land(at, lambda o: a_tbz(A, bit, o))
+        self.w.append(a_sub(B, B, A, r.randrange(1, 9), 1))
+        self.land(out, a_b)
+
+    def s_mem(self, A, B, D):       # mem[(a + k) & 1023] = b; b += mem[(b + k) & 1023]
+        r = self.r
+        self.addr(8, SEG_BSS << 40 | MEM)
+        self.w.extend((a_addi(9, A, r.randrange(1024)), a_and(9, 9, 10), a_str_r(B, 8, 9),
+                       a_addi(10, B, r.randrange(1024)), a_and(10, 10, 10), a_ldr_r(10, 8, 10), a_add(B, B, 10)))
+
+    def obj(self, rd, src):
+        """rd = &objs[src & 63] (x10, x11 scratch)"""
+        self.addr(10, SEG_BSS << 40 | OBJS)
+        self.w.extend((a_and(rd, src, 6), a_movz(11, OBJ), a_madd(rd, rd, 11, 10)))
+
+    def s_obj(self, A, B, D):       # o = &objs[a & 63]; o->hp += b; o->flags |= 1 << (b & 31); a ^= o->id + o->link; o->link = b + k
+        self.obj(9, A)
+        self.w.extend((a_ldr_w(12, 9, 20), a_add_w(12, 12, B), a_str_w(12, 9, 20), a_ldr_w(13, 9, 16), 0x52800020 | 14,  # mov w14, #1
+                       a_lsl_w(14, 14, B), a_orr_w(13, 13, 14), a_str_w(13, 9, 16), a_ldp(14, 15, 9, 0), a_add(14, 14, 15), a_eor(A, A, 14),
+                       a_addi(15, B, self.r.randrange(1, 1000)), a_str(15, 9, 8)))
+
+    def s_loop(self, A, B, D):      # for (j = 0; j < (b & 15) + k; ++j) a = a * 31 + mem[(j * m + b) & 1023]
+        r = self.r
+        self.w.extend((a_and(8, B, 4), a_addi(8, 8, r.randrange(2, 8))))
+        self.addr(10, SEG_BSS << 40 | MEM)
+        self.w.extend((a_movz(9, 0), a_movz(13, 31), a_movz(14, r.randrange(1, 32))))
+        top = self.here()
+        self.w.extend((a_madd(11, 9, 14, B), a_and(11, 11, 10), a_ldr_r(11, 10, 11), a_madd(A, A, 13, 11), a_addi(9, 9, 1), a_cmp(9, 8)))
+        self.w.append(a_bcond(A_LO, (top - self.here()) * 4))
+
+    def s_switch(self, A, B, D):    # switch ((a >> s) & 31) { case c: b += C; a ^= b >> t; break; ... default: b ^= a; }
+        r = self.r
+        cases = r.randrange(5, 24)
+        skip = None
+        if r.random() < 0.3:          # (0.3: about half of them bounded, as the C program's are; some of the others are bounded past calls)
+            skip = self.forward()     # if (!(a & bit)): the switch starts its own block, with one value live into it (bounded)
+            src = A
+        else:
+            self.w.append(a_eor(8, A, B, r.randrange(1, 21), 1))   # the index of two values in the block (left to the dispatcher)
+            src = 8
+        self.w.extend((a_ubfx(10, src, r.randrange(0, 40), 5), a_cmpi(10, cases - 1)))
+        default = self.forward()
+        jt = len(self.jt)
+        self.jt.extend(bytes(cases))
+        self.addr(11, SEG_JT << 40 | jt)
+        self.w.extend((a_adr(12, 16), a_ldrb_r(13, 11, 10), a_add(12, 12, 13, 2), a_br(12)))
+        base, ends = self.here(), []
+        for c in range(cases):
+            self.jt[jt + c] = self.here() - base
+            self.const(14)
+            self.w.extend((a_add(B, B, 14), a_eor(A, A, B, r.randrange(1, 60), 1)))
+            ends.append(self.forward())
+        self.land(default, lambda o: a_bcond(A_HI, o))
+        self.w.append(a_eor(B, B, A))
+        for e in ends:
+            self.land(e, a_b)
+        if skip is not None:
+            bit = r.randrange(0, 40)
+            self.land(skip, lambda o: a_tbnz(A, bit, o))
+
+    def s_float(self, A, B, D):     # x = (a & 0xffff) * 0.25f, y = (b & 0xffff) * 0.5f; q = sqrtf(x * x + y * y + k); fbuf[a & 255] = q; a += q * 16
+        k = (0x00, 0x08, 0x10, 0x14, 0x18, 0x1C, 0x20, 0x70)[self.r.randrange(8)]   # 2.0 3.0 4.0 5.0 6.0 7.0 8.0 1.0
+        self.w.extend((a_and(8, A, 16), a_ucvtf(0, 8), a_fmov_i(1, 0x50), a_fmul(0, 0, 1), a_and(9, B, 16), a_ucvtf(2, 9), a_fmov_i(3, 0x60),
+                       a_fmul(2, 2, 3), a_fmul(0, 0, 0), a_fmadd(0, 2, 2, 0), a_fmov_i(4, k), a_fadd(0, 0, 4), a_fsqrt(0, 0)))
+        self.addr(10, SEG_BSS << 40 | FBUF)
+        self.w.extend((a_and(11, A, 8), a_str_s_r(0, 10, 11), a_fmov_i(5, 0x30), a_fmul(0, 0, 5), a_fcvtzu(12, 0), a_add(A, A, 12)))
+
+    def s_neon(self, A, B, D):      # p = pos + vel * 0.5f; pos = p - trunc(p); a += u[0] ^ u[3]
+        self.obj(9, B)
+        self.w.extend((a_ldr_q(0, 9, 32), a_ldr_q(1, 9, 48), a_fmov4_i(2, 0x60), a_fmla4(0, 1, 2), a_frintz4(3, 0), a_fsub4(0, 0, 3),
+                       a_str_q(0, 9, 32), a_umov_s(12, 0, 0), a_umov_s(13, 0, 3), a_eor_w(12, 12, 13), a_add(A, A, 12)))
+
+    def s_copy(self, A, B, D):      # t = objs[a & 63]; t.id += k; objs[b & 63] = t
+        self.obj(9, A)
+        self.w.extend((a_and(12, B, 6), a_madd(12, 12, 11, 10), a_ldp_q(0, 1, 9, 0), a_ldp_q(2, 3, 9, 32), a_ldr_q(4, 9, 64),
+                       a_stp_q(0, 1, 12, 0), a_stp_q(2, 3, 12, 32), a_str_q(4, 12, 64), a_ldr(13, 12, 0),
+                       a_addi(13, 13, self.r.randrange(1, 4096)), a_str(13, 12, 0)))
+
+    def s_hash(self, A, B, D):      # h = 5381; for (j = 0; j < 16; ++j) h = h * 33 + name[j]; b ^= h
+        self.obj(9, A)
+        self.w.extend((a_addi(9, 9, 64), a_movz(12, 5381), a_movz(13, 0)))
+        top = self.here()
+        self.w.extend((a_ldrb_r(14, 9, 13), a_add(12, 12, 12, 5), a_add(12, 12, 14), a_addi(13, 13, 1), a_cmpi(13, 16)))
+        self.w.append(a_bcond(A_NE, (top - self.here()) * 4))
+        self.w.append(a_eor(B, B, 12))
+
+    def s_call(self, A, B, D):      # if (d) a += f_j(a ^ C, b + k, d - 1)
+        r = self.r
+        skip = self.forward()
+        self.const(8)
+        self.w.extend((a_eor(0, A, 8), a_addi(1, B, r.randrange(1, 4096)), a_subi_w(2, D, 1)))
+        self.fix(FIX_BL, r.randrange(self.n), 0x94000000)
+        self.w.append(a_add(A, A, 0))
+        self.land(skip, lambda o: a_cbz_w(D, o))
+
+    def s_icall(self, A, B, D):     # if (d) b ^= ftab[(a ^ b) & (T - 1)](a, b + k, d - 1)
+        skip = self.forward()
+        self.addr(8, SEG_DATA << 40)
+        self.w.extend((a_eor(9, A, B), a_and(9, 9, self.table.bit_length() - 1), a_ldr_r(8, 8, 9), a_mov(0, A),
+                       a_addi(1, B, self.r.randrange(1, 4096)), a_subi_w(2, D, 1), a_blr(8), a_eor(B, B, 0)))
+        self.land(skip, lambda o: a_cbz_w(D, o))
+
+    def s_excl(self, A, B, D):      # a += __atomic_fetch_add(&mem[a & 1023], b)
+        self.addr(8, SEG_BSS << 40 | MEM)
+        self.w.extend((a_and(9, A, 10), a_add(8, 8, 9, 3)))
+        top = self.here()
+        self.w.extend((a_ldaxr(10, 8), a_add(11, 10, B), a_stlxr(12, 11, 8)))
+        self.w.append(a_cbnz_w(12, (top - self.here()) * 4))
+        self.w.append(a_add(A, A, 10))
+
+    # ---- functions ----
+    def align(self):
+        while len(self.w) % 4:
+            self.w.append(A_NOP)
+
+    def frame(self, body):
+        """A non-leaf function: x19..x22 and the frame record saved, a in x19, b in x20, d in w21; body(A, B, D); returns a ^ b << 1"""
+        self.w.extend((a_stp_pre(29, 30, 31, -48), a_stp(22, 21, 31, 16), a_stp(20, 19, 31, 32), A_MOV_FP_SP, a_mov(19, 0), a_mov(20, 1),
+                       a_mov_w(21, 2)))
+        body(19, 20, 21)
+        self.w.extend((a_eor(0, 19, 20, 1), a_ldp(20, 19, 31, 32), a_ldp(22, 21, 31, 16), a_ldp_post(29, 30, 31, 48), A_RET))
+
+    def function(self, scale):
+        r = self.r
+        size = r.random()
+        base = r.randrange(1, 3) if size < 0.70 else r.randrange(3, 7) if size < 0.95 else r.randrange(10, 26)
+        count = max(1, int(base * scale + r.random()))
+        kinds = [KIND_OF[r.randrange(len(KIND_OF))] for _ in range(count)]
+        self.align()
+        self.starts.append(len(self.w))
+        if 'call' in kinds or 'icall' in kinds:
+            self.frame(lambda A, B, D: [getattr(self, 's_' + k)(A, B, D) for k in kinds])
+        else:
+            for k in kinds:
+                getattr(self, 's_' + k)(0, 1, 2)
+            self.w.extend((a_eor(0, 0, 1, 1), A_RET))
+        self.ends.append(len(self.w))
+        self.fn_words += self.ends[-1] - self.starts[-1]
+
+    def driver(self, callees):
+        """h = f(h + i, h ^ C, 2) for each callee in turn (h in x19); returns h"""
+        self.align()
+        self.starts.append(len(self.w))
+        self.w.extend((a_stp_pre(29, 30, 31, -32), a_stp(20, 19, 31, 16), A_MOV_FP_SP, a_mov(19, 0)))
+        for c in callees:
+            self.w.extend((a_mov(0, 19), a_eor(1, 19, 19, self.r.randrange(1, 63), 1), 0x52800040 | 2))  # mov w2, #2
+            self.fix(FIX_BL, c, 0x94000000)
+            self.w.append(a_eor(19, 19, 0, 7, 1))
+        self.w.extend((a_mov(0, 19), a_ldp(20, 19, 31, 16), a_ldp_post(29, 30, 31, 32), A_RET))
+        self.ends.append(len(self.w))
+        return len(self.starts) - 1
+
+    def generate(self):
+        self.align()
+        scale, step = 1.0, max(16, min(1024, self.n // 32))
+        for i in range(self.n):
+            self.function(scale)
+            if (i + 1) % step == 0:  # keep the functions' average size at the budget
+                want = self.budget * (i + 1)
+                scale = min(4.0, max(0.25, scale * min(1.25, max(0.8, want / self.fn_words))))
+        level = list(range(self.n))
+        while len(level) > 64:
+            level = [self.driver(level[k:k + 64]) for k in range(0, len(level), 64)]
+        self.main = self.driver(level)
+
+    # ---- the image ----
+    def image(self, profile_percent=0):
+        """(image bytes, layout (text_end, ro_off, data_off, bss), function ranges, profile lines)"""
+        page = lambda v: (v + 0xFFF) & ~0xFFF
+        text_end = len(self.w) * 4
+        ro_off = page(text_end)
+        mod0, dyn = ro_off, ro_off + 0x20
+        symtab = dyn + 8 * 16
+        strtab = symtab + 2 * 24
+        names = b'\0main\0'
+        relr = (strtab + len(names) + 7) & ~7
+        relr_words = 1 + (self.table - 1 + 62) // 63
+        eh_hdr = relr + 8 * relr_words
+        nfn = len(self.starts)
+        eh_frame = eh_hdr + 12 + 8 * nfn
+        jt_off = eh_frame + 20 + 20 * nfn + 4
+        data_off = page(jt_off + len(self.jt))
+        data_size = page(8 * self.table)
+        bss = data_off + data_size
+        img = bytearray(data_off + data_size)
+        # The fixups, then the text
+        seg = {SEG_JT: jt_off, SEG_DATA: data_off, SEG_BSS: bss}
+        w = self.w
+        starts = self.starts
+        for at, kind, arg in zip(self.fix_at, self.fix_kind, self.fix_arg):
+            pc = at * 4
+            if kind == FIX_BL:
+                off = starts[arg] * 4 - pc
+                assert -(1 << 27) <= off < 1 << 27, 'a bl past its range: the text is over 128 MiB'
+                w[at] |= (off >> 2) & 0x3FFFFFF
+                continue
+            target = seg[arg >> 40] + (arg & ((1 << 40) - 1))
+            if kind == FIX_PAGE:
+                d = ((target & ~0xFFF) - (pc & ~0xFFF)) >> 12
+                w[at] |= (d & 3) << 29 | ((d >> 2) & 0x7FFFF) << 5
+            else:
+                w[at] |= (target & 0xFFF) << 10
+        w[0] = a_b(starts[self.main] * 4)
+        w[1] = mod0
+        img[0:text_end] = w.tobytes()
+        # MOD0, the dynamic section, the symbols (the null one and main), DT_RELR over the table of function pointers
+        struct.pack_into('<4s6i', img, mod0, b'MOD0', dyn - mod0, bss - mod0, bss + BSS_SIZE - mod0, eh_hdr - mod0, eh_frame - mod0, 0)
+        dyns = [(6, symtab), (5, strtab), (10, len(names)), (11, 24), (36, relr), (35, 8 * relr_words), (37, 8), (0, 0)]
+        for i, (tag, v) in enumerate(dyns):
+            struct.pack_into('<qQ', img, dyn + 16 * i, tag, v)
+        main_at, main_end = starts[self.main] * 4, self.ends[self.main] * 4
+        struct.pack_into('<IBBHQQ', img, symtab + 24, 1, 0x12, 0, 1, main_at, main_end - main_at)
+        img[strtab:strtab + len(names)] = names
+        struct.pack_into('<Q', img, relr, data_off)
+        for k in range(relr_words - 1):
+            slots = min(63, self.table - 1 - 63 * k)
+            struct.pack_into('<Q', img, relr + 8 * (1 + k), ((1 << slots) - 1) << 1 | 1)
+        r = random.Random(self.r.getrandbits(32))
+        for i in range(self.table):  # the table's members (Gen's ftab), each slot holding its function's offset (RELR: the addend)
+            struct.pack_into('<Q', img, data_off + 8 * i, starts[r.randrange(self.n)] * 4)
+        # .eh_frame_hdr and .eh_frame (aot_synth.py's form: a CIE zR with pc-relative sdata4 pointers, an FDE per function, no instructions)
+        cie = bytes([0, 0, 0, 0, 1]) + b'zR\0' + bytes([1, 0x78, 30, 1, 0x1B, 0x0C, 31, 0])
+        img[eh_frame:eh_frame + 20] = struct.pack('<I', 16) + cie
+        struct.pack_into('<BBBBiI', img, eh_hdr, 1, 0x1B, 0x03, 0x3B, eh_frame - (eh_hdr + 4), nfn)
+        ranges = []
+        for k in range(nfn):
+            at = eh_frame + 20 + 20 * k
+            s, e = starts[k] * 4, self.ends[k] * 4
+            ranges.append((s, e))
+            struct.pack_into('<IIiiB', img, at, 16, at + 4 - eh_frame, s - (at + 8), e - s, 0)
+            struct.pack_into('<ii', img, eh_hdr + 12 + 8 * k, s - eh_hdr, at - eh_hdr)
+        img[jt_off:jt_off + len(self.jt)] = self.jt
+        profile = []
+        if profile_percent:
+            pr = random.Random(self.n ^ 0x5EED)
+            profile = [f'{s:#x} 1' for s, _ in ranges if pr.random() * 100 < profile_percent]
+        return bytes(img), (text_end, ro_off, data_off, BSS_SIZE), ranges, profile
+
+
+def direct(a):
+    """--direct: <out>/main.image.bin and main.aot.tsv (and main.profile with --profile-percent)"""
+    import time
+    t0 = time.monotonic()
+    instructions = a.instructions or 52 * a.functions
+    d = Direct(a.functions, instructions, a.seed)
+    d.generate()
+    img, layout, ranges, profile = d.image(a.profile_percent)
+    words = sum(e - s for s, e in ranges) // 4
+    build_id = hashlib.sha256(f'gen_bench --direct {a.functions} {instructions} {a.seed}'.encode()).hexdigest()[:32]
+    data_rows, manifest = patch_nso_functions('aot_data_rows', 'aot_manifest')
+    with open(os.path.join(a.out, 'main.image.bin'), 'wb') as f:
+        f.write(img)
+    text = manifest('main', build_id, hashlib.sha256(img).hexdigest(), len(img), layout, data_rows(img, layout[0], []), [], [], [], [], {}, {})
+    with open(os.path.join(a.out, 'main.aot.tsv'), 'w') as f:
+        f.write(text)
+    if profile:
+        with open(os.path.join(a.out, 'main.profile'), 'w') as f:
+            f.write(f'# gen_bench.py --direct: one sample at the entry of {a.profile_percent} % of the functions\n' + '\n'.join(profile) + '\n')
+    print(f'gen_bench.py --direct: {len(ranges)} functions ({a.functions} and {len(ranges) - a.functions} drivers), {words} instructions in '
+          f'functions, {layout[0] // 4} text words, {len(d.jt)} jump-table bytes, image {len(img)} bytes, in {time.monotonic() - t0:.1f} s: '
+          f'{os.path.join(a.out, "main.aot.tsv")}' + (f', profile of {len(profile)} functions' if profile else ''))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('out')
@@ -141,8 +582,15 @@ def main():
     ap.add_argument('--nxaot', help='the nxaot that writes the behaviour image (--data-rows)')
     ap.add_argument('--cc', default='clang-18')
     ap.add_argument('--ld', default='ld.lld-18')
+    ap.add_argument('--direct', action='store_true', help='write the words directly: main.image.bin and main.aot.tsv, no clang (any size)')
+    ap.add_argument('--instructions', type=int, default=0,
+                    help='--direct: about this many instructions in all (default 52 per function; followed over thousands of functions)')
+    ap.add_argument('--profile-percent', type=float, default=0, help='--direct: also main.profile, one sample in this share of the functions')
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
+    if a.direct:
+        direct(a)
+        return
     src = os.path.join(a.out, 'bench.c')
     with open(src, 'w') as f:
         f.write(Gen(a.functions, a.seed, a.unbounded_switches).source(a.seed))

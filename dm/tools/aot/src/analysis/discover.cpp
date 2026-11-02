@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -16,6 +17,7 @@
 
 #include "analysis/insn.h"
 #include "analysis/jumptable.h"
+#include "analysis/memory.h"
 #include "analysis/parallel.h"
 #include "analysis/summary.h"
 
@@ -44,19 +46,21 @@ public:
         out.times.threads = pool->Threads();
         const Timer t{out.times.classify};
         const size_t n = img.text_size / 4;
-        insns.resize(n);
-        // Each word alone: in chunks on the pool
+        valid.resize(n);
+        // Each word alone: in chunks on the pool. Only whether it is an instruction is kept (one byte: the decoder table's answer, the costly
+        // part of ClassifyWord); At makes the rest of its Insn from the word again (README.md, "Memory at scale": 24 bytes per text word
+        // were the analysis's largest table)
         constexpr size_t kChunk = 1 << 14;
         pool->For((n + kChunk - 1) / kChunk, [&](size_t c) {
             for (size_t i = c * kChunk; i < std::min(n, (c + 1) * kChunk); ++i) {
                 const uint64_t pc = img.text_off + 4 * i;
-                insns[i] = ClassifyWord(*img.Word(pc), pc);
+                valid[i] = ClassifyWord(*img.Word(pc), pc).kind != Kind::Undefined;
             }
         });
-        aux_insns.resize(img.aux_size / 4);
-        for (size_t i = 0; i < aux_insns.size(); ++i) {
+        aux_valid.resize(img.aux_size / 4);
+        for (size_t i = 0; i < aux_valid.size(); ++i) {
             const uint64_t pc = img.aux_off + 4 * i;
-            aux_insns[i] = ClassifyWord(*img.Word(pc), pc);
+            aux_valid[i] = ClassifyWord(*img.Word(pc), pc).kind != Kind::Undefined;
         }
     }
 
@@ -69,6 +73,7 @@ public:
         };
         timed(tm.sources, [&] { Sources(); return true; });
         for (out.rounds = 1; out.rounds < 10000; ++out.rounds) {
+            if (out.rounds > 1) NoteMemory("discovery round " + std::to_string(out.rounds - 1));
             if (timed(tm.walk, [&] { return WalkDirty(); })) continue;
             if (timed(tm.tables, [&] { return Verify(); })) continue;
             if (timed(tm.sources, [&] { return Pads(); })) continue;
@@ -84,6 +89,14 @@ public:
             if (timed(tm.sources, [&] { return Gaps(); })) continue;
             break;
         }
+        // The jump tables' tries and regions, and the queues of the rounds, are not read again: freed before the last summaries (README.md,
+        // "Memory at scale")
+        NoteMemory("the end of discovery's rounds");
+        std::map<uint64_t, std::map<std::pair<uint64_t, bool>, Tried>>().swap(tried);
+        std::map<uint64_t, RegionMemo>().swap(region_memo);
+        std::map<uint64_t, uint32_t>().swap(pending);
+        std::map<uint64_t, uint64_t>().swap(refs);
+        std::set<uint64_t>().swap(gap_tried);
         timed(tm.summaries, [&] { Taken(); RunSummaries(); return true; });
         timed(tm.windows, [&] {
             // Each function's own windows: on the pool
@@ -93,6 +106,9 @@ public:
             return true;
         });
         timed(tm.finish, [&] { Names(); Cover(); Oracle(); MissReport(); return true; });
+        NoteMemory("the end of discovery");
+        memory::Rss("the end of discovery (before its working tables are freed)");
+        cache->KeepEffects();  // the summaries are done: the plan reads the instructions' effects only
         tm.distinct_words = cache->Distinct();
         tm.translations = cache->Translations();
         tm.regions = out.regions_lifted;
@@ -111,6 +127,32 @@ private:
         ~Timer() { into += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); }
     };
 
+    // Every table of discovery's bytes now (src/analysis/memory.h; --memory): the functions, the words' classes, the jump tables' tries and
+    // their regions' memo, the summaries' memo, the walks' states, the queues, the instruction cache
+    void NoteMemory(const std::string& at) const {
+        if (!memory::On()) return;
+        const FunctionsBytes fb = BytesOf(fns);
+        memory::Note("discover: functions (map, sets, calls, tables)", fb.other, at);
+        memory::Note("discover: functions' blocks and edges", fb.blocks, at);
+        memory::Note("discover: the words' classes (a byte per text word)", memory::Of(valid) + memory::Of(aux_valid), at);
+        uint64_t tries = memory::Of(tried);
+        for (const auto& [entry, m] : tried) {
+            tries += memory::Of(m);
+            for (const auto& [key, t] : m) tries += memory::Of(t.effects) + memory::Of(t.valid);
+        }
+        memory::Note("discover: jump-table tries", tries, at);
+        uint64_t regions = memory::Of(region_memo);
+        for (const auto& [entry, m] : region_memo) regions += BytesOf(m);
+        memory::Note("discover: jump-table regions' memo", regions, at);
+        memory::Note("discover: summaries' memo", BytesOf(summary_memo), at);
+        memory::Note("discover: walk states and counts", memory::Of(walk_state), at);
+        uint64_t queues = memory::Of(dirty) + memory::Of(pending) + memory::Of(refs) + memory::Of(gap_tried) + memory::Of(sym_end) +
+                          memory::Of(fde_start) + memory::Of(miss_std) + memory::Of(miss_resume) + memory::Of(summarised) +
+                          memory::Of(summarised_returns) + (summarised_key ? memory::Of(*summarised_key) : 0);
+        memory::Note("discover: queues and sets (pending, refs, gaps, ...)", queues, at);
+        cache->NoteMemory(at);
+    }
+
     // The summaries are a function of every function's code as its last walk found it (blocks, roots, pads: its walk state), of its
     // address-taken and exported flags and of the set of functions: when none of those changed since the last run (the run after the loop,
     // often), a new run would give the same summaries, and is not made
@@ -127,6 +169,7 @@ private:
                   &out.times.summary_sweeps);
         out.times.summary_reused = summary_memo.hits;
         summarised_key = std::move(key);
+        NoteMemory("run " + std::to_string(out.times.summarise_runs) + " of the summaries");
     }
 
     // ---- Helpers ----
@@ -137,7 +180,15 @@ private:
     bool TextCode(uint64_t pc) const { return img.InText(pc) && !(pc & 3) && !img.InData(pc); }
     bool AuxCode(uint64_t pc) const { return img.InAux(pc) && !(pc & 3); }
     bool Code(uint64_t pc) const { return TextCode(pc) || AuxCode(pc); }
-    const Insn& At(uint64_t pc) const { return AuxCode(pc) ? aux_insns[(pc - img.aux_off) / 4] : insns[(pc - img.text_off) / 4]; }
+    // The instruction at pc (code: TextCode or AuxCode), as ClassifyWord makes it, the decoder table's answer taken from the byte kept for it
+    Insn At(uint64_t pc) const {
+        const uint32_t w = *img.Word(pc);
+        const uint8_t ok = AuxCode(pc) ? aux_valid[(pc - img.aux_off) / 4] : valid[(pc - img.text_off) / 4];
+        return ClassifyWith(w, pc, [ok] { return ok != 0; });
+    }
+    // The text word i and whether it is undefined (ClassifyWord's Kind::Undefined)
+    uint32_t TextWord(size_t i) const { return *img.Word(img.text_off + 4 * i); }
+    bool Undefined(size_t i) const { return !valid[i]; }
     bool Inside(const Function& f, uint64_t pc) const { return (pc >= f.entry && pc < f.limit && TextCode(pc)) || AuxCode(pc); }
     // A jump-table target: a decoded instruction of the function, or the entry of another function (a computed tail call: a table of pointers)
     bool ValidTarget(const Function& f, uint64_t t) const { return Code(t) && At(t).kind != Kind::Undefined && (Inside(f, t) || fns.count(t)); }
@@ -154,7 +205,8 @@ private:
         it->second.prov |= prov;
         if (inserted) {
             limits_stale = true;
-            if (const auto f = fde_start.find(pc); f != fde_start.end()) it->second.fde = f->second;  // an FDE's function a miss brought back
+            const auto f = std::lower_bound(fde_start.begin(), fde_start.end(), std::make_pair(pc, INT_MIN));
+            if (f != fde_start.end() && f->first == pc) it->second.fde = f->second;  // an FDE's function a miss brought back
         }
         return inserted;
     }
@@ -183,7 +235,8 @@ private:
                 out.notes.push_back("[RED] discover: the FDE at " + Hex(fde.offset) + " starts at " + Hex(fde.start) + ", not an instruction of the text");
                 continue;
             }
-            fde_start[fde.start] = static_cast<int>(i);
+            if (!fde_start.empty() && fde_start.back().first == fde.start) fde_start.back().second = static_cast<int>(i);  // the last one
+            else fde_start.emplace_back(fde.start, static_cast<int>(i));                                                  // (fdes are sorted)
             AddEntry(fde.start, kProvFde);
             if (const auto it = fns.find(fde.start); it != fns.end()) it->second.fde = static_cast<int>(i);
         }
@@ -393,9 +446,10 @@ private:
                 }
             }
         }
-        ++version.find(f.entry)->second;
-        const std::array<uint8_t, 32> digest = StateDigest(f);
         WalkState& ws = walk_state.find(f.entry)->second;
+        ++ws.walks;
+        f.blocks.shrink_to_fit();  // the walk built them in address order; their vector at its size (flat.h)
+        const std::array<uint8_t, 32> digest = StateDigest(f);
         if (ws.digest != digest) {
             ws.digest = digest;
             ++ws.changes;
@@ -418,7 +472,7 @@ private:
                                jt.across_calls, jt.writable, jt.targets.size()});
             w.insert(w.end(), jt.targets.begin(), jt.targets.end());
         }
-        for (const std::set<uint64_t>* s : {&f.roots, &f.speculative, &f.spec_live}) {
+        for (const FlatSet<uint64_t>* s : {&f.roots, &f.speculative, &f.spec_live}) {
             w.push_back(~0ull);
             w.insert(w.end(), s->begin(), s->end());
         }
@@ -532,7 +586,6 @@ private:
         for (const uint64_t e : todo) {
             if (const auto it = fns.find(e); it != fns.end()) {
                 walks.push_back(&it->second);
-                version[e];
                 walk_state[e];
             }
         }
@@ -587,6 +640,7 @@ private:
     struct WalkState {
         std::array<uint8_t, 32> digest{};
         uint64_t changes = 0;  // walks that changed the digest
+        uint64_t walks = 0;    // walks of the function
     };
     static bool SameEffect(const std::optional<lift::CallEffect>& a, const std::optional<lift::CallEffect>& b) {
         return a.has_value() == b.has_value() && (!a || (a->x == b->x && a->v == b->v && a->sp == b->sp && a->nzcv == b->nzcv));
@@ -685,7 +739,10 @@ private:
         };
         std::vector<Job> jobs;
         for (auto& [entry, f] : fns) {
-            if (!f.indirect.empty()) jobs.push_back({&f, version[entry], walk_state[entry].changes, &tried[entry], &region_memo[entry]});
+            if (!f.indirect.empty()) {
+                const WalkState& ws = walk_state[entry];
+                jobs.push_back({&f, ws.walks, ws.changes, &tried[entry], &region_memo[entry]});
+            }
         }
         std::vector<TablesOut> outs(jobs.size());
         pool->For(jobs.size(), [&](size_t i) {
@@ -813,21 +870,21 @@ private:
         // The candidates, found in chunks on the pool: they depend only on the covered words and on the words themselves (and gap_tried,
         // which only the loop below changes, for the candidate it takes)
         constexpr size_t kChunk = 1 << 14;
-        const size_t n = insns.size();
+        const size_t n = valid.size();
         std::vector<std::vector<uint64_t>> found((n + kChunk - 1) / kChunk);
         pool->For(found.size(), [&](size_t c) {
             for (size_t i = c * kChunk; i < std::min(n, (c + 1) * kChunk); ++i) {
                 const uint64_t pc = img.text_off + 4 * i;
-                if (covered[i] || !Code(pc) || insns[i].word == kNop || insns[i].word == 0 || insns[i].kind == Kind::Undefined) continue;
+                if (covered[i] || !Code(pc) || TextWord(i) == kNop || TextWord(i) == 0 || Undefined(i)) continue;
                 // One candidate per stretch no function reached, padding included (a nop inside a function, as lld's adrp + add -> nop +
                 // adr relaxation leaves, is no function boundary): the first word that is no padding, after covered code, data or the
                 // text's start. An undefined word ends the stretch: what follows it may be code again
                 size_t j = i;
-                while (j > 0 && !covered[j - 1] && Code(img.text_off + 4 * (j - 1)) && insns[j - 1].kind != Kind::Undefined &&
-                       (insns[j - 1].word == kNop || insns[j - 1].word == 0)) {
+                while (j > 0 && !covered[j - 1] && Code(img.text_off + 4 * (j - 1)) && !Undefined(j - 1) &&
+                       (TextWord(j - 1) == kNop || TextWord(j - 1) == 0)) {
                     --j;
                 }
-                const bool starts = j == 0 || covered[j - 1] || !Code(img.text_off + 4 * (j - 1)) || insns[j - 1].kind == Kind::Undefined;
+                const bool starts = j == 0 || covered[j - 1] || !Code(img.text_off + 4 * (j - 1)) || Undefined(j - 1);
                 if (starts) found[c].push_back(pc);
             }
         });
@@ -856,7 +913,7 @@ private:
     // The text words some function's walk reached (the aux region's blocks are not text). Functions' text blocks lie in their own
     // [entry, limit), which do not overlap: each function's are marked on the pool
     std::vector<uint8_t> Covered() {
-        std::vector<uint8_t> covered(insns.size());
+        std::vector<uint8_t> covered(valid.size());
         std::vector<const Function*> all;
         for (const auto& [entry, f] : fns) all.push_back(&f);
         pool->For(all.size(), [&](size_t k) {
@@ -889,7 +946,7 @@ private:
     void Cover() {
         Coverage& c = out.coverage;
         c = {};
-        std::vector<bool> covered(insns.size());
+        std::vector<bool> covered(valid.size());
         for (const auto& [entry, f] : fns) {
             c.undefined += f.undefined;
             for (const auto& [start, b] : f.blocks) {
@@ -897,14 +954,14 @@ private:
                 for (uint64_t pc = b.start; pc < b.end; pc += 4) covered[(pc - img.text_off) / 4] = true;
             }
         }
-        c.text_words = insns.size();
-        for (size_t i = 0; i < insns.size(); ++i) {
+        c.text_words = valid.size();
+        for (size_t i = 0; i < valid.size(); ++i) {
             const uint64_t pc = img.text_off + 4 * i;
             if (img.InData(pc)) {
                 ++c.data_words;
             } else if (covered[i]) {
                 ++c.covered;
-            } else if (insns[i].word == kNop || insns[i].word == 0) {
+            } else if (TextWord(i) == kNop || TextWord(i) == 0) {
                 ++c.padding;
             } else {
                 ++c.uncovered;
@@ -1003,20 +1060,20 @@ private:
     std::optional<std::vector<std::tuple<uint64_t, uint64_t, bool, bool>>> summarised_key;  // RunSummaries: what the last summaries saw
     Discovery out;
     std::map<uint64_t, Function>& fns = out.functions;
-    std::vector<Insn> insns;
-    std::vector<Insn> aux_insns;           // the aux region's words (Image::aux_off)
+    std::vector<uint8_t> valid;            // per text word: not undefined (ClassifyWord's kind is not Kind::Undefined); At makes the rest
+    std::vector<uint8_t> aux_valid;        // the same of the aux region's words (Image::aux_off)
     std::set<uint64_t> dirty;
     bool limits_stale = false;
     std::map<uint64_t, uint32_t> pending;  // entries code names: bl and tail-call targets, landing pads and table targets outside
     std::map<uint64_t, uint64_t> refs;     // text addresses adr / adrp + add build, and where
-    std::map<uint64_t, uint64_t> version;  // walks of each function
     std::map<uint64_t, std::map<std::pair<uint64_t, bool>, Tried>> tried;  // function -> (br, past calls) -> the last try
     std::map<uint64_t, WalkState> walk_state;                     // per function: its last walk's state (StateDigest)
     std::map<uint64_t, RegionMemo> region_memo;                   // per function: the jump-table regions analysed so far
     SummaryMemo summary_memo;                                     // the summaries computed so far
     std::set<uint64_t> gap_tried;
     std::map<uint64_t, uint64_t> sym_end;  // symbol entries and their ends, when symbols are a source
-    std::map<uint64_t, int> fde_start;     // the FDE that starts at each address (an entry made after Sources, by a miss, gets it)
+    std::vector<std::pair<uint64_t, int>> fde_start;  // the FDE that starts at each address, sorted (an entry made after Sources, by a miss,
+                                                      // gets it)
     std::set<uint64_t> miss_std;           // misses the dispatcher or the host enters by their address: a standard entry (Taken)
     std::set<uint64_t> miss_resume;        // the misses' resume points (MissRoots)
     std::vector<uint64_t> summarised;      // the functions the last summaries cover, in address order: calls to those without a return path
@@ -1085,6 +1142,22 @@ std::vector<std::pair<uint64_t, uint64_t>> CarveMisses(module::Image& image, con
     image.data_blocks = std::move(blocks);
     image.IndexData();
     return runs;
+}
+
+FunctionsBytes BytesOf(const std::map<uint64_t, Function>& functions) {
+    FunctionsBytes b;
+    b.other = memory::Of(functions);
+    for (const auto& [entry, f] : functions) {
+        b.blocks += memory::Of(f.blocks);
+        for (const auto& [start, blk] : f.blocks) b.blocks += memory::Of(blk.succ);
+        b.other += memory::Of(f.name) + memory::Of(f.roots) + memory::Of(f.speculative) + memory::Of(f.spec_live) + memory::Of(f.tentative) +
+                   memory::Of(f.unverified) + memory::Of(f.calls) + memory::Of(f.tables) + memory::Of(f.pads) + memory::Of(f.indirect) +
+                   memory::Of(f.windows);
+        for (const auto& [br, jt] : f.tables) b.other += memory::Of(jt.targets);
+        for (const auto& [br, why] : f.indirect) b.other += memory::Of(why);
+        for (const auto& w : f.windows) b.other += memory::Of(w.kind);
+    }
+    return b;
 }
 
 const char* ProvName(unsigned bit) {

@@ -1106,15 +1106,18 @@ game-shaped benchmark are measured and the rest is extrapolated per instruction.
 
 ```sh
 build/aot/nxaot build <module> --shared <lib.so> [-o <object.o>] [--workers N] [--cache <dir>] [--profile <file>] [--time-passes] [--ir <file.ll>]
-                      [--isel-misses]
+                      [--isel-misses] [--memory]
 python3 dm/tools/aot/tests/gen_bench.py --functions 4000 /tmp/bench          # the game-shaped benchmark, in the nxnative-aot image
+python3 dm/tools/aot/tests/gen_bench.py --direct --functions 600000 /tmp/big # the same statements' words at any size, no clang ("Memory at scale")
 NXAOT_ARGS='--cache /tmp/aot-cache' sh dm/tools/aot/tests/build_packs.sh build/aot /tmp/packs   # the corpus packs, cached
 ```
 
 `nxaot build` logs, besides the module's numbers and sites: `aot: tiers C <n> W <n> H <n> H+ <n>`; `aot: seconds discover .. plan .. lift ..
 verify .. optimise .. codegen .. link ..; compile wall .. with <n> workers; total ..; peak memory .. MiB`, where lifting, verification,
-optimisation and code generation are the units' seconds summed and the others wall-clock seconds; the instructions per second of each
-(per core) and of the compile and the whole pack (wall); `aot: discover seconds: ...`, discovery's steps with their counts (jump-table tries and
+optimisation and code generation are the units' seconds summed and the others wall-clock seconds, and the peak memory is the process's peak
+resident set, the link's included (before "Memory at scale" it was taken before the link); `aot: workers <n> (<m> MiB available, about <k> MiB
+each, <t> MiB for the tables)` or `aot: workers <n> (--workers)`, the compile's workers and why ("Memory at scale"); the instructions per
+second of each (per core) and of the compile and the whole pack (wall); `aot: discover seconds: ...`, discovery's steps with their counts (jump-table tries and
 regions, summary runs, rounds, computed and reused summaries, the distinct words translated); `aot: units <n> (...), workers <n>`; `aot: split
 functions <n> into <p> parts, <t> transfers between parts, joined in <s> s`; with `--profile`, `aot: profile <file>: <s> samples at <o> offsets,
 <x> outside every function`; with `--cache`, `aot: cache <dir>: <h> hits, <m> misses (units; functions <fh> hit, <fm> missed), <r> bytes read,
@@ -1125,7 +1128,8 @@ LLVM's pass timers (one worker);
 unit at tiers C and W, as phase 5a), `--no-split` and `--split-above N` are for measurements and tests. `NXAOT_CHECK_PROGRAMS=1` runs every
 cached abstract program of the summaries beside the interpretation of dynarmic's IR it replaces and stops at the first difference;
 `NXAOT_TRACE=1` prints each unit before it is compiled; `NXAOT_DEBUG_SUMMARIES=1` prints each round of the summaries (its sweeps, the
-functions looked at and computed: "Phase 5c").
+functions looked at and computed: "Phase 5c"). `--memory` (also `nxaot discover` and `nxaot plan`) prints each table's bytes at its peak and the
+resident set at each stage; `NXAOT_MEM_AVAILABLE_MIB` is a test switch that stands for the available memory ("Memory at scale").
 
 **The benchmark** ([tests/gen_bench.py](tests/gen_bench.py)): a C program generated from a seed, built with the corpus's run time and clang
 flags, with unwind tables and no exported symbols but main's: thousands of functions, most of one to three statements (accessors, arithmetic),
@@ -1247,8 +1251,9 @@ the shard. One more object holds what every unit shares: the module's base, the 
 the shared code are hidden symbols, which units declare and lld resolves; lld links the tables' object and the units in entry order into the
 shared object (`--shared`), or into one relocatable object (`-o`, `ld.lld -r`). Workers take the largest units first. A unit's object depends on
 the unit only, so the number of workers changes nothing in the pack; the objects that are not the cache's go to `<output>.parts/`, removed after
-the link. `--workers 0` (the default) takes one worker per CPU this process may run on (`sched_getaffinity`), at most one per 512 MiB of
-`MemAvailable` (the whole pack stays under 240 MiB with 8 workers at tier W on the benchmark, under 600 MiB in the max mode: below).
+the link. `--workers 0` (the default) runs the analysis on one thread per CPU this process may run on (`sched_getaffinity`) and, once it is
+done, counts the compile's workers by the memory then available ("Memory at scale"; before it: one per CPU, at most one per 512 MiB of
+`MemAvailable`).
 
 Packs are deterministic: LLVM 18 writes the `!pcsections` groups of a function in the order of a `DenseMap` keyed by metadata pointers
 (`AsmPrinter::emitPCSections`), so two compilations of the same unit can order its marks' section differently, but that section stays out of the
@@ -2118,6 +2123,327 @@ phase 5c left them.
 - **Code generation at tier W** (85 % of its compile): SelectionDAG and the greedy register allocator, as design 9.3 has it.
 - **The analysis** is a third of a balanced pack with a profile; **gap code at tier C**, **the cache across game updates**, **one process
   per module**, **ThinLTO import, devirtualisation, function ordering, LLVM's sample profile at tier H**: as phase 5c left them.
+
+### Memory at scale
+
+Phases 5a to 5d measured the pack stage on game-shaped benchmarks of 4,000 and 16,000 functions (533,160 and 2,163,759 instructions); the largest
+module the tool must pack is Monster Hunter Rise's `main`, about 31 million instructions in about 600,000 functions, and the reference machine
+has 8 GB (design section 10: "about 4 compile workers of about 1 GB each", "the number of workers bounded by free RAM"). Phase 5c left the
+summaries' memo at that size unmeasured, and nothing had measured the analysis's other tables or the pack's at scale. Here: a benchmark of that
+size, the analysis's and the pack's tables measured per structure, what grew out of proportion contained (every output byte for byte the
+same), the compile's workers counted by the memory left after the analysis, and the reference machine extrapolated. Measured on the same
+machine as phase 5d's tables (8 vCPUs, 11 GiB, Docker image `nxnative-aot`), whose other agents' builds loaded it at times (the one-minute load
+average is given where it mattered); every run's peak resident set taken from outside the process (`ru_maxrss` of its parent) besides its own
+lines, and every run held under 4 GiB (the machine has no room to swap).
+
+```sh
+python3 dm/tools/aot/tests/gen_bench.py --direct --functions 600000 --seed 5 --profile-percent 10 /tmp/d600k   # 15 s: a 147 MB image
+build/aot/nxaot plan /tmp/d600k/main.aot.tsv --memory > /dev/null      # the analysis's tables at their peaks, on standard error
+build/aot/nxaot build /tmp/d150k/main.aot.tsv --shared /tmp/d150k.so --memory
+```
+
+#### 1. A benchmark at scale
+
+clang takes about two and a half minutes for the 16,000-function C program (15.5 MB of C) and would take hours and gigabytes for one of
+600,000; `gen_bench.py --direct` ([tests/gen_bench.py](tests/gen_bench.py)) writes the A64 words of what clang makes of the same statements
+instead (encodings checked with llvm-mc-18): arithmetic on 64-bit constants (movz and three movk), rotates, if / else, loads and stores, struct
+fields and copies (ldp / stp of q registers), loops, switches through byte jump tables, scalar floating point, NEON vectors, byte loops,
+direct calls, calls through the table of function pointers (DT_RELR-relocated: a fifth of the functions address-taken at 150,000 and
+600,000, an eighth at 16,000, as the C program's table makes them), and exclusive read-modify-write loops (ldaxr / stlxr: game code has them,
+the C program has none). Non-leaf functions save x19 to x22 and the frame record as clang's do, drivers call every function, an FDE per
+function, `main` the one exported symbol. The image and its manifest are what `patch_nso.py --aot` writes for an NSO (`main.image.bin`,
+`main.aot.tsv` through patch_nso.py's own `aot_data_rows` and `aot_manifest`); `--profile-percent 10` writes a profile of one sample in a
+tenth of the functions. 600,000 functions take 15 s, 150,000 4 s. The function size follows Monster Hunter Rise's estimate (52 instructions on
+average, against the C program's 133); the statements' weights were set so that the densities per instruction are the C program's, but for
+the drivers' one call per function (`nxaot discover --tsv`'s rows; per 1,000 instructions):
+
+| Module | Functions | Instructions | per function (median) | Distinct words | Blocks | bl | blr | Tables | Unbounded br | Windows |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| C program, 16,000 (seed 2) | 16,276 | 2,163,759 | 133 (40) | 537,702 (24.8 %) | 83.1 | 11.13 | 1.57 | 0.70 | 0.72 | 0 |
+| `--direct`, 16,000 (seed 2) | 16,256 | 828,353 | 51 (26) | 183,201 (22.1 %) | 115.2 | 23.68 | 1.60 | 0.76 | 0.82 | 0.65 |
+| `--direct`, 150,000 (seed 4) | 152,383 | 7,845,818 | 51 (26) | 890,368 (11.3 %) | 114.8 | 23.53 | 1.57 | 0.74 | 0.82 | 0.63 |
+| `--direct`, 600,000 (seed 5) | 609,527 | 31,185,206 | 51 (26) | 1,622,392 (5.2 %) | 114.9 | 23.63 | 1.57 | 0.75 | 0.83 | 0.63 |
+
+The bl column holds the drivers' one call per function (about 19.5 per 1,000 here, 7.4 in the C program): the statements' calls are 4.1 per
+1,000 against the C program's 3.6. Half the switches' brs stay unbounded ("the entry address depends on more than one value"), as half of the C
+program's do. One thing the direct module does not follow: its distinct words grow more slowly than its instructions (random 16-bit
+immediates and few registers repeat at scale), 5.2 % at 600,000 functions against the C program's 24.8 %; the instruction cache's tables grow
+with the distinct words, so section 8 carries them over at both ratios.
+
+#### 2. Where the analysis's memory went
+
+`--memory` (`nxaot discover`, `plan` and `build`; [src/analysis/memory.h](src/analysis/memory.h)) notes each table's bytes where it may be at
+its largest (after each round of discovery and each run of the summaries, at the plan's passes, at the pack's stages) and prints every
+table's peak and where it was reached, and the resident set at each stage (with the pages of mapped files apart: the link's). The bytes are
+estimated from the containers' sizes and capacities with glibc's chunk overhead, not counted by an allocator: cheap, off by default, and their
+sum at the peak within about a twentieth of the resident set less the image and the executable's libraries. Phase 5d's binary with that
+instrumentation alone, `nxaot plan` with 8 threads:
+
+| Table at its peak (MiB) | 150,000 functions | 600,000 functions | bytes per instruction at 600,000 |
+|---|---:|---:|---:|
+| discover: the words' classes (an `Insn` of 24 bytes per text word) | 184.0 | 731.6 | 24.6 |
+| instruction cache: Prepare's lists (transient, the first run of the summaries) | 158.7 | 503.1 | 16.9 |
+| discover: functions' blocks and edges (a std::map per function) | 123.0 | 488.9 | 16.4 |
+| discover: functions (the map, their sets, calls, tables, pads, brs) | 118.8 | 475.0 | 16.0 |
+| instruction cache: the distinct words' facts and programs | 165.9 | 328.4 | 11.0 |
+| discover: the summaries' memo | 65.0 | 260.2 | 8.7 |
+| plan: facts per function | 52.3 | 209.1 | 7.0 |
+| plan: passes (orders, the writes, LIVE_AFTER's additions) | 31.9 | 127.6 | 4.3 |
+| instruction cache: an id per text word | 30.7 | 121.9 | 4.1 |
+| discover: the jump-table regions' memo | 28.3 | 112.2 | 3.8 |
+| summaries: the last inputs per function | 25.1 | 100.5 | 3.4 |
+| discover: walk states and counts | 23.3 | 93.0 | 3.1 |
+| summaries: per-function states (summaries, epochs) | 23.3 | 93.0 | 3.1 |
+| discover: queues and sets (pending entries, addresses, FDE starts, gaps) | 20.4 | 81.6 | 2.7 |
+| instruction cache: the distinct words' map | 37.6 | 70.6 | 2.4 |
+| plan: tail-call components (RV) | 15.7 | 62.8 | 2.1 |
+| summaries: call graph and levels | 11.2 | 44.7 | 1.5 |
+| discover: jump-table tries | 6.3 | 24.9 | 0.8 |
+| instruction cache: words outside the text, prepared states | 6.0 | 24.0 | 0.8 |
+| the process's peak resident set | 985.5 | 3,282.1 | 110.4 |
+
+The peak is the analysis's last rounds (the summaries' runs with every table of discovery alive); 3.2 GiB at 600,000 functions against the
+design's budget of about 2 GiB for the analysis. The largest tables grew with the text and the functions, linearly; none grew faster.
+
+#### 3. The causes, and what was changed
+
+Each change keeps every output (section 6): what was dropped or compacted was a function of what is kept, or no later step reads it.
+
+1. **The words' classes** ([discover.cpp](src/analysis/discover.cpp), [insn.h](src/analysis/insn.h)): discovery kept an `Insn` of 24 bytes per text
+   word for its whole run. Only the decoder table's answer is costly to make again (`Decodes`); discovery keeps that, one byte per word, and
+   makes the rest of an `Insn` from the word at each use (`ClassifyWith`): 731.6 → 30.5 MiB.
+2. **Prepare's lists** ([summary.cpp](src/analysis/summary.cpp), `InsnCache::Prepare`): the first run of the summaries prepared every function at
+   once, a pair of words per instruction in per-function lists (transient, but freed heap stays resident). Prepare works in batches of functions
+   in their order (at most 16,384 functions or 262,144 instructions): a batch's new words are those the earlier batches did not have, first seen
+   where the whole list had them first, so the entries are the same: 503.1 → 14.7 MiB.
+3. **The instruction cache** (summary.cpp, `InsnCache::Impl`): an entry was its effects and a `Program` of two vectors (80 bytes and two
+   allocations besides its operations); now the effects in one vector and the programs in two pools (`Code`, 16 bytes), and the distinct
+   words' map, a std::unordered_map (44 bytes per word with its bucket), is a table of open addressing (`WordMap`, 8 bytes per slot, grown at
+   half full). At discovery's end the programs and the map are dropped (`KeepEffects`: the plan reads the effects only; a later interpretation
+   would translate the word again), and the pack drops the whole cache after the plan (the compile never read it): 328.4 + 70.6 → 125.3 + 32.0
+   MiB at the peak, the effects alone (37 MiB) and the ids in the plan.
+4. **The summaries' memo** (summary.cpp, `SummaryMemo`, `Recall`, `Remember`): a remembered input was a vector of 2 + 7 words per callee and
+   its summary a 52-byte struct beside it; now the same facts in 1 + 4 words per callee (a callee's three register sets as x | v << 32, their
+   sp and nzcv bits and its flags in a fourth word; the walk state and the exported flag in one), the records back to back in one vector per
+   function, the summary in five words: 260.2 → 162.9 MiB. Each function's last inputs (their length is fixed within a run) are one array:
+   100.5 → 33.9 MiB.
+5. **The functions' containers** ([discover.h](src/analysis/discover.h), [flat.h](src/analysis/flat.h)): a function's blocks were a std::map
+   (112 bytes per 56-byte block with malloc's header: 3.6 million blocks), and its five sets of roots and three small maps 384 bytes of empty
+   containers. Now sorted vectors in the same order (`FlatMap`, `FlatSet`), the sets and small maps through one pointer, null while empty; a walk
+   builds its function's blocks in address order and fits their vector to them: 488.9 + 475.0 → 334.3 + 245.3 MiB.
+6. **Discovery's tables no later step reads**: the jump tables' tries, the regions' memo, the pending entries, the addresses and the gap
+   candidates are freed before the last run of the summaries; the walks' counts are kept with their states (one map: 93.0 → 55.8 MiB), the
+   FDEs' starts in a sorted vector, the regions' memo keys in 32-bit words (a key with a larger value is not memoised: none in a module under
+   4 GiB; 112.2 → 96.4 MiB).
+7. **The plan** ([plan.cpp](src/build/plan.cpp)): the tail-call components' union-find nodes and LIVE_AFTER's additions of each round were
+   std::maps of every function; now vectors by the function's position (the same nodes in the same order: the same component numbers):
+   62.8 → 6.9 and 127.6 → 102.1 MiB.
+8. **The pack's compile** ([pack.cpp](src/build/pack.cpp)): it kept discovery's whole view of every function for two things, the gate sites
+   (now taken per function before the compile, `Common::sites`) and the call sites' returns (`Common::returns`); discovery's functions are freed
+   before the workers start, and the heap's free pages returned to the system (`malloc_trim`: every worker's malloc arena keeps its own) then,
+   after the compile and before the link. The line table's rows go per function as each unit's results are taken, instead of into one vector of
+   every row (24 to 48 bytes per row) before them.
+
+Looked at and left: the instruction cache's id per text word (4 bytes: 121.9 MiB), the plan's facts per function (209.1 MiB, kept through the
+compile, which reads them), the summaries' states of a run (93.0 MiB: two summaries per function and their epochs), the per-function `Function`
+itself (about 400 bytes with its scalars, its summary and its name).
+
+#### 4. The analysis after
+
+The same tables with this binary (`nxaot plan --memory`, 8 threads; the rows in section 2's order):
+
+| Table at its peak (MiB) | 150,000: before | after | 600,000: before | after | bytes per instruction at 600,000 |
+|---|---:|---:|---:|---:|---:|
+| discover: the words' classes (a byte per text word now) | 184.0 | 7.7 | 731.6 | 30.5 | 1.0 |
+| instruction cache: Prepare's lists (transient) | 158.7 | 14.7 | 503.1 | 14.7 | 0.5 |
+| discover: functions' blocks and edges | 123.0 | 84.1 | 488.9 | 334.3 | 11.2 |
+| discover: functions (the map, their sets, calls, tables, pads, brs) | 118.8 | 61.4 | 475.0 | 245.3 | 8.2 |
+| instruction cache: the distinct words' facts and programs | 165.9 | 59.2 | 328.4 | 125.3 | 4.2 |
+| discover: the summaries' memo | 65.0 | 40.7 | 260.2 | 162.9 | 5.5 |
+| plan: facts per function | 52.3 | 52.3 | 209.1 | 209.1 | 7.0 |
+| plan: passes | 31.9 | 25.5 | 127.6 | 102.1 | 3.4 |
+| instruction cache: an id per text word | 30.7 | 30.7 | 121.9 | 121.9 | 4.1 |
+| discover: the jump-table regions' memo | 28.3 | 24.3 | 112.2 | 96.4 | 3.2 |
+| summaries: the last inputs per function | 25.1 | 8.5 | 100.5 | 33.9 | 1.1 |
+| discover: walk states and counts | 23.3 | 14.0 | 93.0 | 55.8 | 1.9 |
+| summaries: per-function states | 23.3 | 23.3 | 93.0 | 93.0 | 3.1 |
+| discover: queues and sets | 20.4 | 15.1 | 81.6 | 60.4 | 2.0 |
+| instruction cache: the distinct words' map | 37.6 | 16.0 | 70.6 | 32.0 | 1.1 |
+| plan: tail-call components (RV) | 15.7 | 1.7 | 62.8 | 6.9 | 0.2 |
+| summaries: call graph and levels | 11.2 | 11.2 | 44.7 | 44.7 | 1.5 |
+| discover: jump-table tries | 6.3 | 6.3 | 24.9 | 24.9 | 0.8 |
+| instruction cache: words outside the text, prepared states | 6.0 | 6.0 | 24.0 | 24.0 | 0.8 |
+| the process's peak resident set | 985.5 | 540.8 | 3,282.1 | 1,767.8 | 59.4 |
+
+The analysis alone, `nxaot plan` without `--memory` (whose notes cost about a sixth of its time at 600,000 functions), phase 5d's binary and
+this one, best of one run each; seconds and the peak resident set in MiB:
+
+| `nxaot plan` | 150,000, 8 threads | 4 | 2 | 600,000, 8 threads | 4 | 2 |
+|---|---:|---:|---:|---:|---:|---:|
+| phase 5d: seconds | 22.4 | 27.7 | 40.4 | 96.4 | 122.6 | 175.4 |
+| phase 5d: peak | 984 | 962 | 959 | 3,289 | 3,281 | 3,246 |
+| this one: seconds | 18.3 | 23.2 | 33.9 | 81.1 | 103.1 | 151.0 |
+| this one: peak | 537 | 528 | 519 | 1,767 | 1,762 | 1,759 |
+
+The analysis of 31 million instructions now peaks at 1.73 GiB, under the design's budget of about 2 GiB, and the peak hardly depends on the
+threads (the pool's items are each function's own); it is faster too (fewer allocations: the analysis of 600,000 functions 81 against 96
+seconds with 8 threads). Its parts are linear in the module: about 52 bytes per instruction at 600,000 functions, 56 at 150,000 (the image and
+the executable's libraries aside), of which the functions' blocks and their records about 19, the plan's facts 7, the summaries' memo 5.5, and
+the instruction cache 10 (with this module's 5.2 % of distinct words: section 8).
+
+#### 5. The packs at 150,000 functions
+
+`nxaot build` of the 150,000-function module (7.85 million instructions; with its profile, 15,310 functions at H and the rest at C) with 8, 4,
+2 and 1 workers, phase 5d's binary and this one, one run each (the machine's load 2 to 8); seconds (the analysis is discovery and the plan)
+and MiB. "Peak" is the whole process's resident set, the link included (`ru_maxrss` from outside it: until now the build's own line took it
+before the link), with in parentheses the largest anonymous resident set sampled every 0.1 s; with `--memory`, this binary's stages: the
+analysis's peak, what the compile starts from, the compile's peak, and the resident set after the line table:
+
+| Pack | 5d: analysis | compile | whole | peak | now: analysis | compile | whole | analysis's peak | compile from | compile's peak | after the lines | peak (anonymous) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| tier C, 8 workers | 20.2 | 47.8 | 70.2 | 1,956 | 21.9 | 41.2 | 65.1 | 536 | 195 | 673 | 383 | 1,280 (620) |
+| tier C, 4 workers | 26.6 | 91.8 | 120.9 | 1,915 | 27.0 | 83.3 | 112.7 | 522 | 205 | 663 | 373 | 1,272 (609) |
+| tier C, 2 workers | 39.3 | 189.9 | 231.6 | 1,997 | 37.0 | 169.6 | 209.0 | 524 | 206 | 652 | 384 | 1,274 (571) |
+| tier C, 1 worker | - | - | - | - | 61.6 | 420.0 | 483.9 | 516 | 240 | 589 | 370 | 1,281 (536) |
+| tier W, 8 workers | 20.9 | 123.5 | 146.4 | 1,522 | 22.0 | 113.3 | 137.6 | 540 | 198 | 687 | 441 | 987 (631) |
+| tier W, 4 workers | 26.7 | 242.8 | 271.8 | 1,485 | 26.0 | 222.0 | 250.2 | 529 | 192 | 655 | 406 | 973 (585) |
+| tier W, 2 workers | 39.8 | 481.6 | 523.8 | 1,528 | 36.6 | 449.9 | 488.8 | 522 | 206 | 655 | 410 | 974 (584) |
+| profile of 10 %, 8 workers | 21.3 | 63.9 | 88.3 | 1,798 | 22.8 | 57.6 | 83.7 | 539 | 205 | 709 | 457 | 1,414 (653) |
+| profile of 10 %, 4 workers | 26.8 | 123.3 | 153.1 | 1,836 | 26.1 | 111.6 | 140.9 | 528 | 204 | 672 | 420 | 1,377 (603) |
+| profile of 10 %, 2 workers | 39.6 | 249.9 | 292.8 | 1,878 | 37.1 | 228.1 | 268.4 | 519 | 228 | 680 | 420 | 1,374 (610) |
+| max (H+), 8 workers | 20.8 | 186.1 | 208.3 | 1,814 | 21.5 | 180.1 | 203.0 | 538 | 191 | 1,260 | 377 | 1,260 (1,203) |
+| max (H+), 4 workers | - | - | - | - | 26.4 | 348.5 | 376.1 | 526 | 197 | 1,045 | 353 | 1,045 (988) |
+
+The shared objects are byte for byte phase 5d's (360,449,360 bytes at tier C, 195,120,928 at W, 349,471,624 with the profile, 191,405,680 in
+the max mode); the link takes 0.4 to 1.8 s. The 300,000-function module (15.6 million instructions, seed 6) at tier W with the default
+workers, its pack on a disk: `aot: workers 8 (4236 MiB available, about 64 MiB each, 776 MiB for the tables)`, 281.0 s (the analysis 44.6,
+the compile 231.1, the link 2.5), the analysis's peak 966 MiB, the compile from 318 to 1,218 MiB (at the tables' object's code generation,
+30 MiB of object: about 2,500 bytes per function with the other workers' units beside it), 674 MiB after the line table, the whole process
+1,828 MiB (the link's files; anonymous at most 1,218), a pack of 388,462,248 bytes: every stage about twice the 150,000-function one's.
+
+- **The analysis** peaks at 516 to 540 MiB whatever the workers (section 4); the compile now starts from about 200 MiB (the plan, the image,
+  the libraries), where phase 5d's started from the analysis's whole resident set (about 0.95 GiB here) and peaked at 1.14 to 1.27 GiB (its
+  own line), 1.72 GiB in the max mode.
+- **The compile's peak** (650 to 710 MiB at C, W and with the profile) is the tables' object's, not the workers': with 8, 4 or 2 workers it moves
+  by 20 to 40 MiB. With one worker, which compiles the tables' object alone first: the declarations of every body and standard entry 23 MiB,
+  the function map's and lookup table's rows as LLVM constants 130 MiB, their code generation (the MC layer's fixups and symbols, the 15 MiB
+  object) 197 MiB more at its peak: 349 MiB, 2,401 bytes per function. A worker compiling units of C or W adds about
+  20 MiB to the peak; one compiling H+ shards (up to 64,000 instructions, inlined) about 100 to 160 MiB, its malloc arena's leftovers
+  included: in the max mode the workers are the compile's peak (1,260 MiB with 8, 1,045 with 4, against 1,814 before).
+- **The line table** is built per function as the units' results are taken, and the workers' freed memory is returned first: after it the
+  process holds 350 to 460 MiB (with one vector of every row and the workers' arenas kept, as before, 700 to 850 MiB).
+- **The link** is the whole process's peak at C, W and with the profile: lld maps the units' objects (554, 384 and 594 MB) and writes the
+  shared object through a mapping, here both on tmpfs and so both memory (about 1.3 GiB at C and with the profile, 1.0 GiB at W); its
+  anonymous memory stays near the analysis's. On a disk those pages are the page cache's, which the system can drop (the objects) or write
+  back (the pack).
+
+#### 6. The caches and the pack's tables
+
+The 150,000-function module at tier W with 8 workers into a new cache on a disk (`--cache`), then again warm. Cold: 133.4 s (137.6 without
+the cache), every unit a miss, 352,746,032 bytes of objects written; the cache holds 366,605,782 bytes (16,177 objects, their facts files
+and the analysis), the analysis cache's entry 11,173,940 bytes of it (73 bytes per function; about 45 MB at 600,000 functions, where the
+units' objects would be about 1.5 GB at tier W and 2.2 GB at C). Warm: 6.43 s, every unit a hit (352,746,032 bytes read), the analysis read
+in 0.34 s, the units' keys 3.2 s of CPU on the workers, the tables' object compiled again (about 2.7 s: it is never cached), the line marks
+read back from the cached objects, the link 1.13 s; its peak 943 MiB, 701 MiB of it anonymous (the tables' object and the cached analysis).
+Carried over by four, a warm repack of 600,000 functions would take about 26 s here and 1.0 to 1.4 minutes on the reference machine (phase
+5b's 5 r / 8), against the design's minute: the tables' object and the keys, both linear in the functions, are most of it.
+
+The pack's own tables at 150,000 functions (bytes; `llvm-readelf -S` of the shared objects: the same at every tier but the code and its
+DWARF and unwind tables), each a function of the functions, the standard entries, the call sites or the line marks, so four times as large at
+600,000 functions:
+
+| Section | tier C | tier W | profile of 10 % | per function |
+|---|---:|---:|---:|---:|
+| `.text` | 270,196,004 | 124,710,108 | 255,470,500 | |
+| `.nxaot.lookup` (65,536 slots of 16 bytes for 29,504 standard entries) | 1,048,576 | 1,048,576 | 1,048,576 | 6.9 |
+| `.nxaot.fnmap` (the function map: 16 bytes per function) | 2,438,128 | 2,438,128 | 2,438,128 | 16.0 |
+| `.nxaot.returns` (the call sites' return addresses, 4 bytes each) | 787,760 | 787,760 | 787,760 | 5.2 |
+| `.nxaot.fnlines`, `.nxaot.lines` (the line table: 8 bytes per function, 8 per entry) | 15,445,800 | 15,636,824 | 15,396,720 | 101 |
+| `.data` (the indirect call sites' inline caches) | 196,888 | 196,888 | 196,888 | 1.3 |
+| `.rela.dyn` | 590,880 | 590,880 | 590,880 | 3.9 |
+| `.eh_frame`, `.eh_frame_hdr` | 11,327,480 | 8,739,944 | 11,112,904 | |
+| `.debug_line` | 35,067,524 | 17,580,328 | 34,747,103 | |
+| `.symtab`, `.strtab` | 8,899,237 | 8,899,237 | 9,687,680 | |
+| the shared object | 360,449,360 | 195,120,928 | 349,471,624 | |
+
+The descriptor's tables (lookup table, function map, returns, line table) are 19.7 MB of a 195 to 360 MB pack; the code, its DWARF line table
+and its unwind tables are the rest.
+
+**Identity.** Every output is byte for byte phase 5d's binary's (`test_analysis_threads.py --baseline`, extended to build with the baseline
+too: the shared object, and the analysis cache entry's payload, whose key holds the tool's SHA-256), and the same with 1 and 8 threads: the
+18 corpus NROs and the synthetic game module and host-function module's two (21 modules, 210 outputs), the C program's 4,000- and
+16,000-function benchmarks (20), the 150,000-function module (10: its discovery TSV and lines both ways, its plan, the analysis cache's entry
+and the pack with 1 and 8 workers and phase 5d's), every one identical; and the 600,000-function module's discovery TSV and lines and plan
+with 8 threads, phase 5d's against this binary's: the same (105,132,722, 28,926,269 and 63,397,431 bytes). CTest 25 of 25 (`workers`
+new), and dm/host's `t_aot_host` 44, `t_aot_module` 33 / 34 / 3 + 14, `t_aot_hostfn` 50 + 11, `t_host_program` 17 and `t_garena` 32 with
+the corpus packs of this binary.
+
+#### 7. The workers bounded by memory
+
+`--workers 0` (the default) took one worker per CPU, at most one per 512 MiB of `MemAvailable` read before the analysis, which the analysis
+then filled. Now the analysis runs on one thread per CPU (its memory hardly depends on them: section 4), and the compile's workers are
+counted once it is done, discovery's functions freed and the heap's free pages returned (`CompileWorkers`, [src/build/pack.cpp](src/build/pack.cpp)):
+as many as the memory then available holds (`MemAvailable` on Linux, `GlobalMemoryStatusEx`'s available physical memory on Windows), beside
+the tables' object at the module's size (32 MiB and 2,560 bytes per function: 2,401 measured), at a worker's measured peak at the units'
+tiers (64 MiB at C and W, 192 at H and H+: section 5), at most one per CPU this process may run on and one per unit, at least one;
+`--workers N` takes N. The log says which: `aot: workers 8 (4236 MiB available, about 64 MiB each, 776 MiB for the tables)` (the
+300,000-function pack) or `aot: workers 3 (--workers)`. A build whose module needs more than the memory available for its analysis alone (64
+bytes per text word, the image and 128 MiB besides: section 4) says so in a `[RED]` line, since no number of threads makes the analysis
+smaller.
+`NXAOT_MEM_AVAILABLE_MIB` stands for the available memory (a test switch). CTest `workers` ([tests/test_workers.py](tests/test_workers.py)):
+fnptr-gcc and the synthetic game module with 1 MiB available (one worker), room for three workers and the tables (three), 1 TiB (one per CPU,
+at most one per unit) and `--workers 3`, every pack byte for byte the first one.
+
+#### 8. Extrapolation to the reference machine
+
+Monster Hunter Rise's `main` is about 31 million instructions in about 600,000 functions: the 600,000-function module's size. Its analysis
+was measured whole; its packs were not (their objects and shared object, 3.6 GB at tier C carried over from 150,000 functions, do not fit this
+machine's free disk or memory), so the compile's and the link's parts are the 150,000-function module's, per function and per instruction, by
+four (the 300,000-function pack checks that they are linear: section 5).
+
+**Memory.** The analysis peaks at 1.73 GiB (section 4). Its instruction cache grows with the distinct words, 5.2 % of this module's
+instructions against the C program's 24.8 %: at that ratio (7.7 million distinct words, about 100 bytes each during discovery) it would peak
+at about 2.3 GiB. The compile starts from about 0.5 GiB (the plan's facts 0.2, the image 0.15, the parts, sites and returns, the libraries),
+adds the tables' object (2,401 bytes per function: 1.4 GiB) and its workers (about 20 MiB each at C and W, 100 to 160 at H+: section 5):
+about 2.2 GiB with 8 workers at C or W (1.2 GiB at 300,000 functions, 0.69 at 150,000), 2.9 GiB in the max mode. The line table then
+takes about 1.2 GiB. The link maps the units' objects
+(2.2 GB at tier C, 1.5 at W, 1.3 in the max mode) and writes the shared object (1.4, 0.8 and 0.5 GB) through a mapping: file pages, which on a
+disk the system can drop or write back, besides lld's own few hundred MiB. So on the reference machine's 8 GB both the balanced packs and the
+max pack fit with every one of its 8 threads as a worker, their peak the compile (2.2 GiB, 2.9 in the max mode) or the analysis (1.7 GiB, up
+to 2.3 with more distinct words), 4 to 5 GiB below 8 with a gigabyte for the system; `CompileWorkers` gives them 8 ((available - 1.5 GiB of
+tables) / 64 or 192 MiB is far above 8). The design's "about 4 compile workers of about 1 GB each" was a constraint it assumed, not one the
+measurements show.
+
+**Time.** Phase 5d's model, with this module's own rates: the analysis's serial and parallel parts from the 600,000-function module with 8 and
+2 threads (81.1 and 151.0 s: S = 57.8 s, P = 186.4 s; 103.1 s with 4 threads, the model's 104.4), on the reference machine S / r + P / (5 r);
+the compile at the 150,000-function module's rate with 8 workers (tier C 190,500 instructions per second, W 69,300, a profile of 10 %
+136,300, the max mode 43,600), divided by 5 r / 8 there; the link by four, divided by r. This module compiles more slowly per instruction
+than the 4,000-function C program phase 5d took its rates from (115 blocks per 1,000 instructions against 83, functions of 52 instructions
+against 133: tier W 69,300 against 94,000, the profile 136,300 against 203,500), so the minutes are above phase 5d's:
+
+| Pack | Mode | This machine, 8 workers | Reference machine (r = 0.7 .. 0.5), 8 workers | after phase 5d | Target |
+|---|---|---:|---:|---:|---:|
+| Monster Hunter Rise `main` | balanced, no profile (tier W) | 8.9 min | 19.5 .. 27.3 min | 15.4 .. 21.6 min | at most 10 min |
+| Monster Hunter Rise `main` | balanced with a profile (10 % H, the rest C) | 5.3 min | 11.1 .. 15.6 min | 8.7 .. 12.1 min | at most 10 min |
+| Monster Hunter Rise `main` | every function at tier C | 4.1 min | 8.6 .. 12.0 min | - | - |
+| Monster Hunter Rise `main` | max (H+) | 13.3 min | 29.6 .. 41.4 min | 24.5 .. 34.3 min | at most 30 min |
+
+Memory sets no bound on the workers here, so these are the CPU's times: with a profile the balanced pack misses its 10 minutes by a tenth to a
+half on this module's rates (it met them at r = 0.7 on phase 5d's), and the analysis, 2.3 to 3.2 minutes there, is a fifth of it.
+
+#### 9. What is left
+
+- **The tables' object** (2,401 bytes per function, a whole worker's worth at 150,000 functions and about 1.4 GiB at 600,000): the function map's
+  and lookup table's rows are LLVM constants with a relocation each (a GEP, two ptrtoint, a sub and a trunc per row), then the MC layer's
+  fixups and symbols. Emitting them through MC directly would need the object to come out byte for byte the same; not done.
+- **The instruction cache per distinct word** (about 100 bytes during discovery: the effects 24, the program's `Code` 16 and its operations,
+  the map's slots): a module with the C program's ratio of distinct words would add about 0.6 GiB to the analysis at 31 million
+  instructions (section 8). Operations of 6 bytes instead of 12 and a 12-byte `Code` would take a fifth of it.
+- **The functions' blocks** (11 bytes per instruction: 56 bytes per block and their successors' vectors) and the `Function` records (about 400
+  bytes each, their summary and name included), and the plan's facts (7 bytes per instruction), which the compile keeps.
+- **The link**: lld maps every unit's object and writes the shared object through a mapping; on tmpfs (here) both are memory. Not changed.
+- **The 600,000-function module's packs** were not built here (their objects and shared object would not fit this machine's disk or memory);
+  the 300,000-function one's at tier W was.
 
 ## The lock file
 

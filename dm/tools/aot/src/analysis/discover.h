@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "analysis/flat.h"
 #include "module/image.h"
 
 namespace nxaot::analysis {
@@ -148,18 +149,20 @@ struct Function {
     uint32_t prov = 0;
     std::string name;     // the symbol at the entry, when there is one
     int fde = -1;         // index into Image::fdes of the FDE that starts at the entry
-    std::set<uint64_t> roots;          // block starts entered from outside the function's branches: landing pads, labels (adr targets), and
+    // The sets and maps are sorted vectors (flat.h: README.md, "Memory at scale"), in the order std::set and std::map kept them; the sets and
+    // the small maps sparse (a pointer, null while empty)
+    FlatSet<uint64_t> roots;           // block starts entered from outside the function's branches: landing pads, labels (adr targets), and
                                        // code of its FDE or symbol range that no known edge reaches (speculative)
-    std::set<uint64_t> speculative;    // roots inside the function's own range that the gap sweep or an adr found: the cases of a table not
+    FlatSet<uint64_t> speculative;     // roots inside the function's own range that the gap sweep or an adr found: the cases of a table not
                                        // bounded yet, code after a call that does not return
-    std::set<uint64_t> spec_live;      // the speculative roots the last walk still needed (no known edge reached them)
-    std::set<uint64_t> tentative;      // brs whose table was found by ignoring the speculative code and waits for its verification
-    std::set<uint64_t> unverified;     // brs whose tentative table did not verify: not tried that way again
-    std::map<uint64_t, Block> blocks;  // by start
+    FlatSet<uint64_t> spec_live;       // the speculative roots the last walk still needed (no known edge reached them)
+    FlatSet<uint64_t> tentative;       // brs whose table was found by ignoring the speculative code and waits for its verification
+    FlatSet<uint64_t> unverified;      // brs whose tentative table did not verify: not tried that way again
+    FlatMap<uint64_t, Block> blocks;   // by start
     std::vector<std::pair<uint64_t, uint64_t>> calls;  // (pc, target), target 0 for blr
-    std::map<uint64_t, JumpTable> tables;              // by the br's pc
-    std::map<uint64_t, uint64_t> pads;                 // call pc -> the landing pad of the LSDA call site covering it
-    std::map<uint64_t, std::string> indirect;          // br sites left for the dispatcher, with why
+    FlatMap<uint64_t, JumpTable, true> tables;         // by the br's pc
+    FlatMap<uint64_t, uint64_t, true> pads;            // call pc -> the landing pad of the LSDA call site covering it
+    FlatMap<uint64_t, std::string, true> indirect;     // br sites left for the dispatcher, with why
     std::vector<Window> windows;
     unsigned unpaired_exclusive = 0;
     size_t words = 0;      // instructions the walk reached
@@ -235,6 +238,13 @@ struct Discovery {
 };
 
 Discovery Discover(const module::Image& image, const DiscoverOptions& options = {});
+
+// The bytes the functions' tables hold (README.md, "Memory at scale"; src/analysis/memory.h): the map's nodes with each function's sets, calls,
+// tables, pads, brs and windows (other), and its blocks with their edges (blocks)
+struct FunctionsBytes {
+    uint64_t other = 0, blocks = 0;
+};
+FunctionsBytes BytesOf(const std::map<uint64_t, Function>& functions);
 
 // The times as one line: "threads N; seconds classify .. walk .. tables .. (tries ..) summaries .. (runs .., rounds .., sweeps .., ...) sources ..
 // windows .. finish ..; CPU .." (nxaot discover --times)

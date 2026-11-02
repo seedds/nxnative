@@ -7,6 +7,7 @@
 
 #include <map>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "analysis/discover.h"
@@ -40,6 +41,11 @@ public:
     void Prepare(const std::vector<const Function*>& functions, Pool* pool);
     uint64_t Distinct() const;     // distinct words seen
     uint64_t Translations() const; // dynarmic translations made
+    // Discovery's end: the summaries' programs dropped, the effects kept (the plan reads Fx only); a later use of a program translates the
+    // word again (README.md, "Memory at scale")
+    void KeepEffects();
+    void NoteMemory(const std::string& at) const;  // its tables' bytes (src/analysis/memory.h; --memory)
+    uint64_t Bytes() const;                        // all of them
     struct Impl;                   // summary.cpp
     Impl& Internal() { return *impl; }
 
@@ -52,9 +58,12 @@ private:
 // unbounded br). Each run of the fixed point starts afresh, and its rounds mostly compute what the last run computed in the same order; a
 // function's summary for inputs seen before is taken from here. One per discovery
 struct SummaryMemo {
-    std::map<uint64_t, std::vector<std::pair<std::vector<uint64_t>, Summary>>> by_function;
+    // per function up to 8 records back to back, oldest first: the length of its inputs, the inputs (the words summary.cpp's EmitInputs
+    // makes of them) and the summary computed from them (five words): README.md, "Memory at scale"
+    std::map<uint64_t, std::vector<uint64_t>> by_function;
     uint64_t hits = 0;
 };
+uint64_t BytesOf(const SummaryMemo& memo);  // its bytes (src/analysis/memory.h)
 
 // Fills Function::summary for every function; address_taken must be set already. cache: the module's instruction cache (null: a cache of this
 // call's own); memo: null, or the summaries of earlier runs (Function::state must then name each function's code). rounds and computes, when

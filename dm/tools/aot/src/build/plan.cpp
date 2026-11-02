@@ -5,6 +5,7 @@
 #include <numeric>
 #include <unordered_map>
 
+#include "analysis/memory.h"
 #include "analysis/parallel.h"
 #include "analysis/summary.h"
 
@@ -83,7 +84,7 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
         ff.writes = ToRegs(f.summary.writes);
         ff.returns = f.summary.returns;
         ff.host_callable = all_entries || f.address_taken || f.summary.exported || entry == image.text_off;
-        ff.pads = f.pads;
+        ff.pads = std::map<uint64_t, uint64_t>(f.pads.begin(), f.pads.end());
         for (const auto& [br, jt] : f.tables) {
             ff.tables[br] = jt.targets;
         }
@@ -162,6 +163,13 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
         views.push_back(&fns.at(entry));
     }
     const size_t n = order.size();
+    std::vector<uint64_t> positions;  // the entries in address order: a function's position (node_of; -1 for an address that starts none)
+    positions.reserve(n);
+    for (const FnFacts* ff : order) positions.push_back(ff->entry);
+    const auto node_of = [&](uint64_t entry) -> int64_t {
+        const auto it = std::lower_bound(positions.begin(), positions.end(), entry);
+        return it != positions.end() && *it == entry ? it - positions.begin() : -1;
+    };
 
     // Every register a function or its callees write (raw): the v8..v15 among them have a new high half when it returns. A union over the
     // call graph from each function's own writes: rounds in which every function takes the union of its callees' sets of the last round
@@ -246,6 +254,7 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
         Regs ind;                                   // the same for every standard entry (indirect sites)
     };
     std::vector<Adds> adds(n);
+    std::vector<Regs> add(n);  // a round's additions, by the callee's position
     for (bool changed = true; changed;) {
         changed = false;
         ++p.live_after_rounds;
@@ -316,16 +325,18 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
                 }
             }
         }, 16);
-        std::map<uint64_t, Regs> add;
+        std::fill(add.begin(), add.end(), Regs{});
         Regs add_ind;
         for (const Adds& a : adds) {
-            for (const auto& [t, r] : a.to) add[t] = add[t] | r;
+            for (const auto& [t, r] : a.to) {
+                if (const int64_t d = node_of(t); d >= 0) add[static_cast<size_t>(d)] = add[static_cast<size_t>(d)] | r;  // others: no function
+            }
             add_ind = add_ind | a.ind;
         }
-        for (auto& [t, r] : add) {
-            const auto it = p.fns.find(t);
-            if (it != p.fns.end() && !((it->second.live_after | r) == it->second.live_after)) {
-                it->second.live_after = it->second.live_after | r;
+        for (size_t k = 0; k < n; ++k) {
+            FnFacts& ff = *order[k];
+            if (!((ff.live_after | add[k]) == ff.live_after)) {
+                ff.live_after = ff.live_after | add[k];
                 changed = true;
             }
         }
@@ -336,21 +347,28 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
                 changed = true;
             }
         }
+        if (memory::On()) {
+            const std::string at = "LIVE_AFTER round " + std::to_string(p.live_after_rounds);
+            uint64_t passes = memory::Of(order) + memory::Of(views) + memory::Of(next) + memory::Of(passed_with) + memory::Of(passed) +
+                              memory::Of(adds) + memory::Of(add) + memory::Of(callable) + memory::Of(positions);
+            for (const Adds& a : adds) passes += memory::Of(a.to);
+            memory::Note("plan: passes (orders, the writes, LIVE_AFTER's additions)", passes, at);
+            memory::Note("plan: facts per function", BytesOf(p), at);
+        }
     }
 
     // RV: a tail call returns its callee's return value, so the v0..v3 a function returns in host registers must be the same over every chain
     // of tail calls (a component); the standard entries share one, since an indirect call cannot tell them apart. A component returns the v0..v3
     // every returning member writes; other written v registers reach callers through the block
+    // The union-find's nodes: the functions' positions in address order (node_of), then the standard entries' node
     UnionFind uf;
-    std::map<uint64_t, int> node;
-    for (const auto& [entry, ff] : p.fns) {
-        node[entry] = uf.Add();
-    }
+    for (size_t k = 0; k < n; ++k) uf.Add();
     const int ind_node = uf.Add();
-    for (const auto& [entry, ff] : p.fns) {
-        const analysis::Function& f = fns.at(entry);
+    for (size_t k = 0; k < n; ++k) {
+        const FnFacts& ff = *order[k];
+        const analysis::Function& f = *views[k];
         if (ff.host_callable) {
-            uf.Join(node[entry], ind_node);
+            uf.Join(static_cast<int>(k), ind_node);
         }
         for (const auto& [start, b] : f.blocks) {
             const EndFx e = end_of(f, b);
@@ -358,32 +376,34 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
                 continue;
             }
             if (e.indirect) {
-                uf.Join(node[entry], ind_node);
+                uf.Join(static_cast<int>(k), ind_node);
             }
             for (const uint64_t t : e.targets) {
-                if (node.count(t)) {
-                    uf.Join(node[entry], node[t]);
+                if (const int64_t d = node_of(t); d >= 0) {
+                    uf.Join(static_cast<int>(k), static_cast<int>(d));
                 }
             }
         }
     }
-    std::map<int, uint32_t> rv;
-    for (const auto& [entry, ff] : p.fns) {
-        const int c = uf.Find(node[entry]);
-        if (!rv.count(c)) {
-            rv[c] = 0xFu;
+    std::vector<uint32_t> rv(n + 1);   // per component root
+    std::vector<uint8_t> has_rv(n + 1);
+    for (size_t k = 0; k < n; ++k) {
+        const int c = uf.Find(static_cast<int>(k));
+        if (!has_rv[static_cast<size_t>(c)]) {
+            has_rv[static_cast<size_t>(c)] = 1;
+            rv[static_cast<size_t>(c)] = 0xFu;
         }
-        if (ff.returns) {
-            rv[c] &= ff.writes.v & 0xFu;
+        if (order[k]->returns) {
+            rv[static_cast<size_t>(c)] &= order[k]->writes.v & 0xFu;
         }
     }
     // The standard entries' component returns the fixed signature's v registers in host registers (kStdRv: none), whatever its members write:
     // they store what they write of v0..v3 at their returns instead (it is in LIVE_AFTER for every standard entry: kHostReads), where a caller
     // in any pack reloads it
-    rv[uf.Find(ind_node)] = kStdRv;
-    for (auto& [entry, ff] : p.fns) {
-        ff.component = uf.Find(node[entry]);
-        ff.rv = rv[ff.component];
+    rv[static_cast<size_t>(uf.Find(ind_node))] = kStdRv;
+    for (size_t k = 0; k < n; ++k) {
+        order[k]->component = uf.Find(static_cast<int>(k));
+        order[k]->rv = rv[static_cast<size_t>(order[k]->component)];
     }
     p.indirect_rv = kStdRv;
     // The blocks a function's walk reached outside its own range: the aux region's (the frame step's stubs, design 1.1), lifted as its code
@@ -393,7 +413,23 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
             if (start < f.entry || start >= f.limit) ff.extra.emplace_back(b.start, b.end);
         }
     }
+    if (memory::On()) {
+        memory::Note("plan: tail-call components (RV)", memory::Of(uf.parent) + memory::Of(rv) + memory::Of(has_rv), "the plan's RV");
+        memory::Note("plan: facts per function", BytesOf(p), "the end of the plan");
+        insns->NoteMemory("the end of the plan");
+        memory::Rss("the end of the plan");
+    }
     return p;
+}
+
+uint64_t BytesOf(const Plan& plan) {
+    uint64_t b = memory::Of(plan.fns);
+    for (const auto& [entry, ff] : plan.fns) {
+        b += memory::Of(ff.name) + memory::Of(ff.continuations) + memory::Of(ff.pads) + memory::Of(ff.tables) + memory::Of(ff.roots) +
+             memory::Of(ff.extra);
+        for (const auto& [br, targets] : ff.tables) b += memory::Of(targets);
+    }
+    return b;
 }
 
 }  // namespace nxaot::build

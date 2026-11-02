@@ -15,6 +15,12 @@
 
 #include <sched.h>
 #include <sys/resource.h>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 #include <unistd.h>
 
 #include <lld/Common/Driver.h>
@@ -69,6 +75,8 @@
 #include "analysis/census.h"
 #include "analysis/discover.h"
 #include "analysis/insn.h"
+#include "analysis/memory.h"
+#include "analysis/summary.h"
 #include "build/analysis_cache.h"
 #include "build/coff.h"
 #include "build/plan.h"
@@ -89,11 +97,17 @@ double Since(Clock::time_point t) {
     return std::chrono::duration<double>(Clock::now() - t).count();
 }
 
-// The memory a compile worker is given when --workers picks their number (AutoWorkers). Measured on this repository's development machine
-// (README.md, "Pack throughput"): with 8 workers the whole process peaks at about 250 MiB on the game-shaped benchmark at tier W, 240 MiB on
-// switch-gcc (one function of 44,059 instructions) and 584 MiB on the benchmark at H+ (shards of up to 64,000 instructions); room for larger
-// functions and shards
-constexpr uint64_t kWorkerMemory = 512ull << 20;
+// What --workers 0 sizes the compile's pool by (CompileWorkers; README.md, "Memory at scale"), measured on the game-shaped benchmark of
+// gen_bench.py --direct with 150,000 functions (7.8 million instructions): a worker's share of the compile's peak with 8 and 4 workers, the
+// tables' object and what the compile starts from aside (H+: 98 to 164 MiB with shards of up to 64,000 instructions, its malloc arena's
+// leftovers included, given 192 at H and H+; C and W: about 20 MiB with groups of up to 1,024, given 64 for the parts of split functions of up
+// to 4,096, which that module has none of); and the tables' object, which one worker compiles beside the units and which grows with the
+// module's functions (2,401 bytes per function: its function map's and lookup table's constants, their code, the declarations);
+// the analysis's own peak per text word (52 to 57 bytes at 150,000 and 600,000 functions, the image and 128 MiB of libraries besides), for the
+// warning when the machine has less than that
+constexpr uint64_t kWorkerPeak[4] = {64ull << 20, 64ull << 20, 192ull << 20, 192ull << 20};  // C, W, H, H+
+constexpr uint64_t kTablesFixed = 32ull << 20, kTablesPerFunction = 2560;
+constexpr uint64_t kAnalysisPerWord = 64, kAnalysisFixed = 128ull << 20;
 
 // The cache key's format: changed whenever what a key covers changes (UnitKey), or what a unit's object holds for the same key. 2: the gate
 // sites and the aux region's code, the line marks' section, the standard entries' fixed signature (ABI 3). 3: groups of functions, parts of
@@ -730,8 +744,15 @@ struct Common {
     std::vector<nxaot_gate_site> served;  // the gate sites compiled code calls (some function's code holds them), sorted: the descriptor's table
     std::map<uint64_t, std::vector<Part>> parts;  // the functions split for size (SplitParts), by entry
     std::map<uint64_t, Tier> tiers;               // each function's tier when a profile chose them (TiersFromProfile); else the mode's
+    // What the compile reads of discovery's functions, taken before it starts (BuildObjects), after which they are freed (README.md, "Memory at
+    // scale"): the gate sites of the functions that have some (GateSitesOf), and the return addresses of every call site, sorted, each once
+    std::map<uint64_t, std::vector<nxaot_gate_site>> sites;
+    std::vector<uint32_t> returns;
 
-    std::vector<nxaot_gate_site> SitesOf(uint64_t entry) const { return GateSitesOf(d.functions.at(entry), gates); }
+    std::vector<nxaot_gate_site> SitesOf(uint64_t entry) const {
+        const auto it = sites.find(entry);
+        return it == sites.end() ? std::vector<nxaot_gate_site>{} : it->second;
+    }
     Tier TierOf(uint64_t entry) const {
         const auto it = tiers.find(entry);
         return it == tiers.end() ? o.tier : it->second;
@@ -808,6 +829,14 @@ struct LineRow {
     uint64_t part = kNoPart;      // a part of a split function (<body>.part<lo>): native counts from the part's start until the parts are joined
     static constexpr uint64_t kNoPart = UINT64_MAX;
 };
+
+// Every unit's line rows by the function whose body holds them, {native, offset}, in link order (BuildObjects takes each unit's rows into it and
+// frees them: a vector of every LineRow of the pack beside them was 24 to 48 bytes per row, README.md "Memory at scale"); CompileLines sorts each
+// function's run and consumes them
+using LineRuns = std::map<uint64_t, std::vector<std::pair<uint32_t, uint32_t>>>;
+void AddLineRows(LineRuns& runs, const std::vector<LineRow>& rows) {
+    for (const LineRow& r : rows) runs[r.fn].emplace_back(r.native, r.offset);
+}
 
 // The function symbols of a unit's code that are bodies (<prefix>+0x<offset>), standard entries (<body>.std) or parts of split functions
 // (<body>.part<lo>, *part = lo): the module offset of the body
@@ -1892,6 +1921,7 @@ bool CompileTables(const Common& c, llvm::TargetMachine& tm, std::string* object
         }
     }
     s->standard_entries = std_entries.size();
+    memory::Rss("the tables' object: every body and standard entry declared");
     for (const auto& [entry, ff] : plan.fns) {
         s->tables += ff.tables.size();
         s->resume_sites += ff.continuations.size() + ff.pads.size();
@@ -1951,15 +1981,8 @@ bool CompileTables(const Common& c, llvm::TargetMachine& tm, std::string* object
         fnmap->setInitializer(llvm::ConstantArray::get(fns_ty, rows));
     }
     // The return addresses of every call site (bl, blr) of compiled code, sorted: where a native frame may wait for its callee, which the JIT
-    // fallback stops at besides the compiled entries (src/rt/jit.cpp)
-    std::vector<uint32_t> returns;
-    for (const auto& [entry, f] : c.d.functions) {
-        for (const auto& [pc, target] : f.calls) {
-            returns.push_back(static_cast<uint32_t>(pc + 4));
-        }
-    }
-    std::sort(returns.begin(), returns.end());
-    returns.erase(std::unique(returns.begin(), returns.end()), returns.end());
+    // fallback stops at besides the compiled entries (src/rt/jit.cpp); Common::returns, made by BuildObjects from discovery's calls
+    const std::vector<uint32_t>& returns = c.returns;
     auto* returns_ty = llvm::ArrayType::get(i32, returns.size());
     auto* returns_table = new llvm::GlobalVariable(*m, returns_ty, true, llvm::GlobalValue::InternalLinkage,
                                                    llvm::ConstantDataArray::get(ctx, llvm::ArrayRef<uint32_t>(returns)), "nxaot.returns");
@@ -2078,23 +2101,22 @@ bool CompileTables(const Common& c, llvm::TargetMachine& tm, std::string* object
         llvm::raw_string_ostream out{*ir_text};
         m->print(out, nullptr);
     }
-    return Finish(*m, c, tm, c.o.tier, object, st, asm_text, error, ir_text);
+    memory::Rss("the tables' object: its tables made");
+    const bool ok = Finish(*m, c, tm, c.o.tier, object, st, asm_text, error, ir_text);
+    memory::Rss("the tables' object: code generated (" + std::to_string(object->size() >> 20) + " MiB)");
+    return ok;
 }
 
 // ---- lines.o: the line table, from every unit's line marks (ReadLineMarks), once all are compiled ----
 // nxaot.fn_lines: a {first, count} run per function in the function map's order; nxaot.lines: {native - body, offset} per guest memory access,
 // each run sorted by native address (include/nxaot/aot_module.h)
-bool CompileLines(const Common& c, llvm::TargetMachine& tm, const std::vector<LineRow>& all, std::string* object, UnitStats* st, uint64_t* count,
+bool CompileLines(const Common& c, llvm::TargetMachine& tm, LineRuns& by_fn, std::string* object, UnitStats* st, uint64_t* count,
                   std::string* error) {
     llvm::LLVMContext ctx;
     Diagnose(ctx, st);
     llvm::Module m{c.prefix + ".lines", ctx};
     m.setDataLayout(tm.createDataLayout());
     m.setTargetTriple(tm.getTargetTriple().str());
-    std::map<uint64_t, std::vector<std::pair<uint32_t, uint32_t>>> by_fn;
-    for (const LineRow& r : all) {
-        by_fn[r.fn].emplace_back(r.native, r.offset);
-    }
     std::vector<uint32_t> index, rows;
     for (const auto& [entry, ff] : c.plan.fns) {
         auto it = by_fn.find(entry);
@@ -2112,6 +2134,11 @@ bool CompileLines(const Common& c, llvm::TargetMachine& tm, const std::vector<Li
         }
     }
     *count = rows.size() / 2;
+    if (memory::On()) {
+        uint64_t b = memory::Of(by_fn) + memory::Of(index) + memory::Of(rows);
+        for (const auto& [entry, run] : by_fn) b += memory::Of(run);
+        memory::Note("pack: the line table's words", b, "the line table");
+    }
     const auto table = [&](const char* name, const char* section, const std::vector<uint32_t>& words) {
         auto* init = llvm::ConstantDataArray::get(ctx, llvm::ArrayRef<uint32_t>(words));
         auto* g = new llvm::GlobalVariable(m, init->getType(), true, llvm::GlobalValue::ExternalLinkage, init, name);
@@ -2426,6 +2453,14 @@ bool WriteFile(const std::string& path, const std::string& data, std::string* er
     return true;
 }
 
+// The free pages of the heap returned to the system (glibc's malloc_trim: the analysis's freed tables otherwise stay resident while the workers
+// allocate their own: README.md, "Memory at scale"); nothing elsewhere
+void ReturnFreeMemory() {
+#if defined(__GLIBC__)
+    malloc_trim(0);
+#endif
+}
+
 unsigned CpusAvailable() {
     cpu_set_t set;
     CPU_ZERO(&set);
@@ -2437,7 +2472,17 @@ unsigned CpusAvailable() {
     return h ? h : 1;
 }
 
+// The memory the system can give this process now without swapping, in bytes: Linux's MemAvailable, Windows' available physical memory; 0 when
+// unknown. NXAOT_MEM_AVAILABLE_MIB (a test switch: tests/test_workers.py) stands for it
 uint64_t MemoryAvailable() {
+    if (const char* v = std::getenv("NXAOT_MEM_AVAILABLE_MIB"); v && *v) {
+        return std::strtoull(v, nullptr, 10) << 20;
+    }
+#if defined(_WIN32)
+    MEMORYSTATUSEX st{};
+    st.dwLength = sizeof st;
+    return GlobalMemoryStatusEx(&st) ? static_cast<uint64_t>(st.ullAvailPhys) : 0;
+#else
     std::ifstream in{"/proc/meminfo"};
     std::string key;
     uint64_t kib = 0;
@@ -2446,6 +2491,7 @@ uint64_t MemoryAvailable() {
         if (key == "MemAvailable:") return kib << 10;
     }
     return 0;  // unknown
+#endif
 }
 
 }  // namespace
@@ -2463,12 +2509,37 @@ const char* TierName(Tier t) {
     }
 }
 
-unsigned AutoWorkers() {
-    unsigned n = CpusAvailable();
-    if (const uint64_t free = MemoryAvailable()) {
-        n = std::min<uint64_t>(n, std::max<uint64_t>(1, free / kWorkerMemory));
+unsigned AnalysisThreads() {
+    return CpusAvailable();
+}
+
+unsigned CompileWorkers(const BuildOptions& o, size_t units, const std::set<Tier>& tiers, size_t functions, std::string* line) {
+    const unsigned cpus = CpusAvailable();
+    unsigned n = o.workers;
+    char buf[160];
+    if (n) {
+        std::snprintf(buf, sizeof buf, "aot: workers %u (--workers)", std::max<unsigned>(1, std::min<uint64_t>(n, units + 1)));
+    } else {
+        uint64_t each = 0;
+        for (const Tier t : tiers) each = std::max(each, kWorkerPeak[static_cast<size_t>(t)]);
+        const uint64_t tables = kTablesFixed + kTablesPerFunction * functions;
+        const uint64_t available = MemoryAvailable();
+        n = !available ? cpus : available > tables ? static_cast<unsigned>(std::min<uint64_t>(cpus, (available - tables) / each)) : 0;
+        n = std::max<unsigned>(1, std::min<uint64_t>(n, units + 1));
+        if (available) {
+            std::snprintf(buf, sizeof buf, "aot: workers %u (%llu MiB available, about %llu MiB each, %llu MiB for the tables)", n,
+                          static_cast<unsigned long long>(available >> 20), static_cast<unsigned long long>(each >> 20),
+                          static_cast<unsigned long long>(tables >> 20));
+        } else {
+            std::snprintf(buf, sizeof buf, "aot: workers %u (the available memory unknown: one per CPU)", n);
+        }
     }
-    return std::max(1u, n);
+    *line = buf;
+    return std::max<unsigned>(1, std::min<uint64_t>(n, units + 1));
+}
+
+uint64_t AnalysisPeak(const module::Image& image) {
+    return kAnalysisPerWord * (image.text_size / 4) + image.bytes.size() + kAnalysisFixed;
 }
 
 namespace {
@@ -2660,10 +2731,20 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
     BuildStats& s = *stats;
     s.module = image.name;
 
-    // The workers: the units' compile and discovery's jump tables run on them (neither result depends on how many there are)
-    unsigned workers = o.workers ? o.workers : AutoWorkers();
+    // The analysis's threads (its result does not depend on how many there are): --workers, else one per CPU (its memory hardly depends on
+    // them); the compile's workers are counted once the analysis is done and its units known (CompileWorkers)
+    unsigned workers = o.workers ? o.workers : AnalysisThreads();
     if (llvm::TimePassesIsEnabled) {
         workers = 1;  // LLVM's pass timers are not thread-safe
+    }
+    if (!o.workers) {
+        // The analysis cannot be split among fewer threads to need less: say so when the machine has less than its measured peak
+        const uint64_t available = MemoryAvailable(), need = AnalysisPeak(image);
+        if (available && available < need) {
+            s.notes.push_back("[RED] nxaot build: the analysis of " + std::to_string(image.text_size / 4) + " instructions needs about " +
+                              std::to_string(need >> 20) + " MiB, " + std::to_string(available >> 20) +
+                              " MiB are available: the system may swap (README.md, \"Memory at scale\")");
+        }
     }
 
     // ---- Analysis: discovery, the census's FPSR answer (decision 5), the convention facts; from the analysis cache when it holds this module's
@@ -2726,6 +2807,7 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         };
         const double c0 = cpu();
         fresh_plan = MakePlan(image, d, conv, o.all_entries, workers);
+        fresh_d.insns.reset();  // the instructions' effects: the plan's, not the compile's (README.md, "Memory at scale")
         AddMissResumes(d, &fresh_plan);   // kept with the plan in the analysis cache
         const auto& dt = d.times;
         char line[256];
@@ -2770,29 +2852,19 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
     }
     const std::vector<Unit> units = Units(c);
     s.units = units.size();
-    workers = static_cast<unsigned>(std::max<size_t>(1, std::min<size_t>(workers, units.size() + 1)));
-    s.workers = workers;
+    if (memory::On()) {
+        uint64_t ub = memory::Of(units);
+        for (const Unit& u : units) ub += memory::Of(u.entries);
+        memory::Note("pack: units", ub, "the compile stage");
+    }
     std::set<Tier> used{o.tier};
     for (const Unit& u : units) used.insert(u.tier);
-    std::vector<std::array<std::unique_ptr<llvm::TargetMachine>, 4>> tms(workers);
-    for (unsigned i = 0; i < workers; ++i) {
-        for (const Tier t : used) {
-            std::string cpu, features;
-            if (i == 0 && t == o.tier) {
-                tms[0][static_cast<size_t>(t)] = std::move(tm0);
-                continue;
-            }
-            auto tm = MakeTarget(o.cpu, t, &cpu, &features, error);
-            if (!tm) {
-                return false;
-            }
-            tms[i][static_cast<size_t>(t)] = std::move(tm);
-        }
-    }
     {
         std::map<uint64_t, nxaot_gate_site> served;
         for (const auto& [entry, f] : d.functions) {
-            for (const auto& g : GateSitesOf(f, c.gates)) served[g.offset] = g;
+            std::vector<nxaot_gate_site> sites = GateSitesOf(f, c.gates);
+            for (const auto& g : sites) served[g.offset] = g;
+            if (!sites.empty()) c.sites.emplace(entry, std::move(sites));
         }
         for (const auto& [off, g] : served) c.served.push_back(g);
         for (const auto& [off, arg] : c.gates.obs) {
@@ -2809,8 +2881,56 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         }
         s.gate_sites = c.served.size();
     }
+    for (const auto& [entry, f] : d.functions) {
+        for (const auto& [pc, target] : f.calls) {
+            c.returns.push_back(static_cast<uint32_t>(pc + 4));
+        }
+    }
+    std::sort(c.returns.begin(), c.returns.end());
+    c.returns.erase(std::unique(c.returns.begin(), c.returns.end()), c.returns.end());
+    // The compile reads nothing more of discovery's functions (their blocks were the analysis's largest tables: README.md, "Memory at scale"):
+    // freed, and the pages the analysis's freed tables leave in the heap returned to the system before the workers start
+    if (memory::On()) {
+        const analysis::FunctionsBytes fb = analysis::BytesOf(d.functions);
+        memory::Note("pack: discovery's functions until the compile", fb.other + fb.blocks, "the compile stage's start");
+    }
+    std::map<uint64_t, analysis::Function>().swap((warm ? cached.d : fresh_d).functions);
+    ReturnFreeMemory();
+    memory::Rss("discovery's functions freed");
+
+    // The compile's workers: by the memory available now that the analysis is done (CompileWorkers), or --workers; their target machines
+    std::string workers_line = "aot: workers 1 (--time-passes)";
+    workers = llvm::TimePassesIsEnabled ? 1 : CompileWorkers(o, units.size(), used, plan.fns.size(), &workers_line);
+    s.workers = workers;
+    s.notes.push_back(workers_line);
+    std::vector<std::array<std::unique_ptr<llvm::TargetMachine>, 4>> tms(workers);
+    for (unsigned i = 0; i < workers; ++i) {
+        for (const Tier t : used) {
+            std::string cpu, features;
+            if (i == 0 && t == o.tier) {
+                tms[0][static_cast<size_t>(t)] = std::move(tm0);
+                continue;
+            }
+            auto tm = MakeTarget(o.cpu, t, &cpu, &features, error);
+            if (!tm) {
+                return false;
+            }
+            tms[i][static_cast<size_t>(t)] = std::move(tm);
+        }
+    }
 
     c.tool = tool;
+    if (memory::On()) {
+        // What the compile keeps of the analysis: the plan, the split functions' parts, the gate sites and the returns
+        uint64_t parts = memory::Of(c.parts) + memory::Of(c.sites) + memory::Of(c.returns) + memory::Of(c.tiers);
+        for (const auto& [entry, ps] : c.parts) {
+            parts += memory::Of(ps);
+            for (const Part& part : ps) parts += memory::Of(part.entries);
+        }
+        for (const auto& [entry, ss] : c.sites) parts += memory::Of(ss);
+        memory::Note("pack: the analysis kept for the compile (plan, parts, sites, returns)", BytesOf(plan) + parts, "the compile stage");
+        memory::Rss("before the compile (the analysis kept)");
+    }
     if (const std::error_code ec = llvm::sys::fs::create_directories(work_dir)) {
         *error = "cannot create " + work_dir + ": " + ec.message();
         return false;
@@ -2850,6 +2970,7 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
                     res.path = work_dir + "/tables.o";
                     WriteFile(res.path, object, &res.error);
                 }
+                memory::Rss("the tables' object compiled (the first job: alone with one worker)");
                 continue;
             }
             const Unit& unit = units[r - 1];
@@ -2913,11 +3034,20 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         }
     }
     s.t_compile_wall = Since(t);
+    ReturnFreeMemory();  // the workers' freed memory (each thread's malloc arena keeps its own): README.md, "Memory at scale"
+    if (memory::On()) {
+        uint64_t rb = memory::Of(results);
+        for (const Result& res : results) {
+            rb += memory::Of(res.lines) + memory::Of(res.path) + memory::Of(res.error) + memory::Of(res.ir) + memory::Of(res.asm_text);
+        }
+        memory::Note("pack: the units' results (line rows, paths)", rb, "the end of the compile");
+        memory::Rss("after the compile on " + std::to_string(workers) + " workers");
+    }
 
     // ---- The results, in link order: the tables' object, then the units by entry (a split function's parts joined into one object), then
     // the line table's ----
     std::string ir, asm_text;
-    std::vector<LineRow> lines;
+    LineRuns lines;
     std::vector<std::string> part_objects;
     std::vector<LineRow> part_rows;
     for (size_t r = 0; r < results.size(); ++r) {
@@ -2940,13 +3070,13 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
                 }
                 s.t_join += Since(tj);
                 objects->push_back(joined);
-                lines.insert(lines.end(), part_rows.begin(), part_rows.end());
+                AddLineRows(lines, part_rows);
                 part_objects.clear();
                 part_rows.clear();
             }
         } else {
             objects->push_back(res.path);
-            lines.insert(lines.end(), res.lines.begin(), res.lines.end());
+            AddLineRows(lines, res.lines);
         }
         res.lines.clear();
         res.lines.shrink_to_fit();
@@ -2989,6 +3119,11 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         ir += res.ir;
         asm_text += res.asm_text;
     }
+    if (memory::On()) {
+        uint64_t b = memory::Of(lines) + memory::Of(part_rows);
+        for (const auto& [entry, run] : lines) b += memory::Of(run);
+        memory::Note("pack: the line rows of every unit, by function", b, "the results in link order");
+    }
     if (o.line_table) {
         const auto tl = Clock::now();
         UnitStats ls;
@@ -3003,6 +3138,7 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         objects->push_back(path);
         s.object_bytes += ls.object_bytes;
         s.t_compile_wall += Since(tl);
+        memory::Rss("after the line table");
     }
     if (o.windows) {
         // imports.o: the run-time entries the objects call, their thunks and slots, and the table the host binds ("Windows packs")
@@ -3057,6 +3193,10 @@ bool BuildObject(const module::Image& image, const BuildOptions& o, const std::s
 }
 
 bool LinkShared(const std::vector<std::string>& objects, const std::string& output, const std::string& soname, std::string* error) {
+    // The compile's freed memory (the plan, the units' results, the line rows) returned to the system first: lld's inputs and output take
+    // their place (README.md, "Memory at scale")
+    ReturnFreeMemory();
+    memory::Rss("before the link");
     std::vector<const char*> args{"ld.lld", "-shared", "--hash-style=gnu", "-z", "now", "-z", "relro", "-z", "noexecstack", "--eh-frame-hdr",
                                   "-soname", soname.c_str(), "-o", output.c_str()};
     for (const auto& o : objects) {

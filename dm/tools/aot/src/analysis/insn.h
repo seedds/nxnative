@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string_view>
 
 #include "dynarmic/frontend/A64/decoder/a64.h"
 #include "dynarmic/frontend/A64/translate/impl/impl.h"
@@ -38,7 +39,23 @@ inline int64_t SignExtend(uint64_t v, unsigned bits) {
     return static_cast<int64_t>(v << (64 - bits)) >> (64 - bits);
 }
 
-inline Insn ClassifyWord(uint32_t w, uint64_t pc) {
+// Whether a word is an instruction for discovery: dynarmic's decoder table knows it, or it is one of the valid encodings dynarmic leaves to an
+// interpreter (LSE atomics, ldapr, msr immediate, hvc / smc: census.cpp's masks). The costly part of ClassifyWord, which discovery keeps per text
+// word (one byte: README.md, "Memory at scale") and asks again of nothing else
+inline bool Decodes(uint32_t w) {
+    const bool lse = (w & 0x3FA07C00u) == 0x08A07C00u || (w & 0xBFA07C00u) == 0x08207C00u ||
+                     ((w & 0x3F200C00u) == 0x38200000u && ((w >> 12) & 0xF) <= 0b1100 && ((w >> 12) & 0xF) != 0b1001 &&
+                      ((w >> 12) & 0xF) != 0b1010 && ((w >> 12) & 0xF) != 0b1011);
+    const bool other = (w & 0xFFF8F01Fu) == 0xD500401Fu || (w & 0xFFE0001Fu) == 0xD4000002u || (w & 0xFFE0001Fu) == 0xD4000003u;
+    if (lse || other) return true;
+    const auto matcher = Dynarmic::A64::Decode<Dynarmic::A64::TranslatorVisitor>(w);
+    return matcher && !std::string_view(matcher->get().GetName()).empty();
+}
+
+// ClassifyWord with Decodes(w) given by decodes(), which is asked only for a word that is no branch, svc or trap (discovery answers it from the
+// byte it keeps per word: the same Insn without the decoder table)
+template <class F>
+inline Insn ClassifyWith(uint32_t w, uint64_t pc, F&& decodes) {
     Insn i;
     i.word = w;
     i.rd = w & 31;
@@ -75,13 +92,8 @@ inline Insn ClassifyWord(uint32_t w, uint64_t pc) {
         i.kind = Kind::Trap;
         return i;
     }
-    // Valid words dynarmic does not decode (census.cpp's masks): LSE atomics, ldapr, msr immediate, hvc / smc
-    const bool lse = (w & 0x3FA07C00u) == 0x08A07C00u || (w & 0xBFA07C00u) == 0x08207C00u ||
-                     ((w & 0x3F200C00u) == 0x38200000u && ((w >> 12) & 0xF) <= 0b1100 && ((w >> 12) & 0xF) != 0b1001 &&
-                      ((w >> 12) & 0xF) != 0b1010 && ((w >> 12) & 0xF) != 0b1011);
-    const bool other = (w & 0xFFF8F01Fu) == 0xD500401Fu || (w & 0xFFE0001Fu) == 0xD4000002u || (w & 0xFFE0001Fu) == 0xD4000003u;
-    const auto matcher = Dynarmic::A64::Decode<Dynarmic::A64::TranslatorVisitor>(w);
-    if (!lse && !other && (!matcher || std::string_view(matcher->get().GetName()).empty())) {
+    // Valid words dynarmic does not decode (census.cpp's masks): LSE atomics, ldapr, msr immediate, hvc / smc (Decodes)
+    if (!decodes()) {
         i.kind = Kind::Undefined;
         return i;
     }
@@ -101,6 +113,10 @@ inline Insn ClassifyWord(uint32_t w, uint64_t pc) {
         i.excl_store = !i.excl_load;
     }
     return i;
+}
+
+inline Insn ClassifyWord(uint32_t w, uint64_t pc) {
+    return ClassifyWith(w, pc, [w] { return Decodes(w); });
 }
 
 }  // namespace nxaot::analysis

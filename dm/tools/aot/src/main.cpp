@@ -1,13 +1,16 @@
 // nxaot: the ahead-of-time ARM64 -> x86-64 recompiler (docs/design/aot-recompiler.md). Subcommands today:
 //   nxaot discover <module.nro | name.aot.tsv> [--symbols-as-oracle] [--tsv <out>] [--threads N] [--times] [--misses <file>] [--no-root <hex>]...
+//                  [--memory]
 //                                                     function discovery, CFGs, jump tables, exclusive windows and summaries of a module
 //                                                     (src/analysis/discover.h): one line per function and the summary; --tsv writes every
 //                                                     row kind; --symbols-as-oracle takes no symbol as a source and compares with them;
 //                                                     --threads: the analysis's threads (0 or none: one per CPU; the result is the same);
-//                                                     --times: the seconds of its steps on standard error; --misses and --no-root as for build
-//   nxaot plan <module.nro | name.aot.tsv> [--cc swifttail|ghc] [--all-entries] [--threads N]
+//                                                     --times: the seconds of its steps on standard error; --misses and --no-root as for build;
+//                                                     --memory: each table's bytes at its peak and the resident set at each stage, on standard
+//                                                     error (src/analysis/memory.h; README.md, "Memory at scale")
+//   nxaot plan <module.nro | name.aot.tsv> [--cc swifttail|ghc] [--all-entries] [--threads N] [--memory]
 //                                                     the pack stage's convention facts (src/build/plan.h): the indirect view and per function
-//                                                     PASS, WRITES, LIVE_AFTER, RV, a standard entry, its indirect sites
+//                                                     PASS, WRITES, LIVE_AFTER, RV, a standard entry, its indirect sites; --memory as for discover
 //   nxaot image <module.nro> <out dir> [<name>]       the behaviour-image form of an NRO: <name>.image.bin and its manifest <name>.aot.tsv
 //                                                     (layout and data rows), the input form patch_nso.py --aot will write for NSOs
 //   nxaot manifest <name.aot.tsv>                     parses a manifest and prints it back in canonical form (src/module/manifest.h)
@@ -21,9 +24,13 @@
 //               [--correctness] [--all-entries] [--cpu <llvm cpu>] [--fpsr-flags on|off] [--no-debug-info] [--no-line-table] [--spills] [--asm <file.s>]
 //               [--no-safepoints] [--workers N] [--cache <dir>] [--time-passes] [--ir <file.ll>] [--ir-opt <file.ll>] [--profile <file>]
 //               [--no-groups] [--no-split] [--split-above N] [--target linux|windows] [--isel-misses] [--misses <file>] [--no-root <hex>]...
+//               [--memory]
 //                                                     the pack stage (src/build): every function of the module compiled, in units of
 //                                                     neighbouring functions (a function over the split limit in parts) on --workers threads
-//                                                     (0 or none: as many as the CPUs and the free memory allow), or taken from the cache
+//                                                     (0 or none: the analysis on one per CPU, then as many compile workers as the CPUs and
+//                                                     the memory available after the analysis hold, logged as `aot: workers N (...)`;
+//                                                     NXAOT_MEM_AVAILABLE_MIB, a test switch, stands for the available memory), or taken from
+//                                                     the cache
 //                                                     --cache (compiled units and the module's analysis); --profile gives each function its tier
 //                                                     by the samples it holds; with the tables' object (lookup table, function map, line table,
 //                                                     descriptor: include/nxaot/aot_module.h) linked by lld into the shared object nxaot_host
@@ -34,7 +41,9 @@
 //                                                     --misses: the host's JIT feedback for this module (dm/host/aot.h, "The JIT fallback's misses":
 //                                                     DM_AOT_PROFILE's <module>.misses.tsv), roots of discovery (README.md, "JIT misses"), used when its
 //                                                     image SHA-256 is the module's (else a [RED] line and it is ignored); --no-root (tests): an address
-//                                                     none of discovery's own sources may make an entry, so that a miss naming it brings it back
+//                                                     none of discovery's own sources may make an entry, so that a miss naming it brings it back;
+//                                                     --memory: the tables' peaks and the resident set at each stage (the link's included), as
+//                                                     for discover
 //   nxaot lines <pack.so | pack.dll> <module.nro | name.aot.tsv>
 //                                                     the line table of a pack against its code and its module (design 3.5; CTest lines): every
 //                                                     entry's native address must start an x86 instruction that accesses memory, inside the
@@ -57,6 +66,7 @@
 
 #include "analysis/census.h"
 #include "analysis/discover.h"
+#include "analysis/memory.h"
 #include "analysis/reach.h"
 #include "build/pack.h"
 #include "build/plan.h"
@@ -93,8 +103,8 @@ namespace {
 int Usage() {
     std::fprintf(stderr,
                  "usage: nxaot discover <module.nro | name.aot.tsv> [--symbols-as-oracle] [--tsv <out>] [--threads N] [--times] [--misses <file>]\n"
-                 "                      [--no-root <hex>]...\n"
-                 "       nxaot plan <module.nro | name.aot.tsv> [--cc swifttail|ghc] [--all-entries] [--threads N]\n"
+                 "                      [--no-root <hex>]... [--memory]\n"
+                 "       nxaot plan <module.nro | name.aot.tsv> [--cc swifttail|ghc] [--all-entries] [--threads N] [--memory]\n"
                  "       nxaot image <module.nro> <out dir> [<name>]\n"
                  "       nxaot manifest <name.aot.tsv>\n"
                  "       nxaot module <module.nro | name.aot.tsv>\n"
@@ -106,7 +116,7 @@ int Usage() {
                  "                   [--no-line-table] [--spills] [--asm <file.s>] [--no-safepoints] [--workers N] [--cache <dir>] [--time-passes]\n"
                  "                   [--ir <file.ll>] [--ir-opt <file.ll>] [--profile <file>] [--no-groups] [--no-split] [--split-above N]\n"
                  "                   [--target linux|windows]   (windows: a PE DLL --shared <name>.dll and / or a COFF object -o <object.obj>)\n"
-                 "                   [--isel-misses] [--misses <file>] [--no-root <hex>]...\n"
+                 "                   [--isel-misses] [--misses <file>] [--no-root <hex>]... [--memory]\n"
                  "       nxaot lines <pack.so | pack.dll> <module.nro | name.aot.tsv>\n");
     return 2;
 }
@@ -187,6 +197,8 @@ int Discover(int argc, char** argv) {
         } else if (a == "--no-root" && i + 1 < argc && ParseHex(argv[i + 1], &held)) {
             opts.no_roots.insert(held);
             ++i;
+        } else if (a == "--memory") {
+            nxaot::memory::Registry::Get().Enable();
         } else if (path.empty() && !a.empty() && a[0] != '-') {
             path = a;
         } else {
@@ -197,6 +209,7 @@ int Discover(int argc, char** argv) {
         return Usage();
     }
     auto image = Load(path);
+    nxaot::memory::Rss("the module loaded");
     if (!image) {
         return 1;
     }
@@ -211,6 +224,8 @@ int Discover(int argc, char** argv) {
     if (times) {
         std::fprintf(stderr, "nxaot discover: %s\n", TimesLine(d.times).c_str());
     }
+    nxaot::memory::Rss("after discovery");
+    nxaot::memory::Registry::Get().Print(stderr);
     std::vector<std::string> rows;
     const std::string mode = opts.symbols ? "symbols as a source" : "symbols as the oracle";
     rows.push_back("# nxaot discover\t" + image->name + "\t" + image->Sha256Hex() + "\t" + mode);
@@ -366,6 +381,8 @@ int PlanCmd(int argc, char** argv) {
             else return Usage();
         } else if (a == "--all-entries") {
             all_entries = true;
+        } else if (a == "--memory") {
+            nxaot::memory::Registry::Get().Enable();
         } else if (path.empty() && !a.empty() && a[0] != '-') {
             path = a;
         } else {
@@ -379,6 +396,7 @@ int PlanCmd(int argc, char** argv) {
     if (!image) {
         return 1;
     }
+    nxaot::memory::Rss("the module loaded");
     nxaot::analysis::DiscoverOptions dopts;
     dopts.threads = threads;
     const nxaot::analysis::Discovery d = nxaot::analysis::Discover(*image, dopts);
@@ -393,6 +411,7 @@ int PlanCmd(int argc, char** argv) {
         std::printf("fn\t%s\tpass\t%s\twrites\t%s\tlive_after\t%s\trv\t%u\tstd\t%d\tindirect\t%zu\n", X(entry).c_str(), str(ff.pass).c_str(),
                     str(ff.writes).c_str(), str(ff.live_after).c_str(), ff.rv, ff.host_callable ? 1 : 0, indirect);
     }
+    nxaot::memory::Registry::Get().Print(stderr);
     return 0;
 }
 
@@ -653,6 +672,8 @@ int Build(int argc, char** argv) {
         } else if (a == "--asm" && has) {
             o.asm_path = argv[++i];
             o.count_spills = true;
+        } else if (a == "--memory") {
+            nxaot::memory::Registry::Get().Enable();
         } else if (a == "--workers" && has) {
             o.workers = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
         } else if (a == "--cache" && has) {
@@ -699,6 +720,7 @@ int Build(int argc, char** argv) {
     if (!image) {
         return 1;
     }
+    nxaot::memory::Rss("the module loaded");
     nxaot::build::BuildStats s;
     std::string error;
     if (!misses.empty() && !UseMisses(misses, &*image, &o.misses, &error)) {
@@ -723,6 +745,9 @@ int Build(int argc, char** argv) {
         }
     }
     s.t_link = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_link).count();
+    // The process's peak includes the link (lld runs in this process: its inputs and its output buffer): README.md, "Memory at scale"
+    s.peak_rss_kib = std::max<uint64_t>(s.peak_rss_kib, nxaot::memory::RssPeak() >> 10);
+    nxaot::memory::Rss("after the link");
     llvm::sys::fs::remove_directories(work);
     if (!ok) {
         std::printf("[RED] nxaot build: %s: %s\n", path.c_str(), error.c_str());
@@ -813,6 +838,7 @@ int Build(int argc, char** argv) {
             std::printf("aot: fastisel miss %8llu %9llu  %s\n", static_cast<unsigned long long>(n), static_cast<unsigned long long>(w), kind.c_str());
         }
     }
+    nxaot::memory::Registry::Get().Print(stdout);
     if (o.windows) {
         std::string list;
         for (const auto& i : s.imports) list += " " + i;

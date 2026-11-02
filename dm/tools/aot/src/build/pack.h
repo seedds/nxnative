@@ -125,7 +125,15 @@ bool LinkWindows(const std::vector<std::string>& objects, const std::string& wor
 // The run-time entries a pack may import (include/nxaot/aot_module.h, src/lift/runtime.h): what dm/host and src/rt export to it
 bool IsHostImport(const std::string& name);
 
-// The workers a pack runs with --workers 0: the CPUs this process may run on, at most one per kWorkerMemory of available memory, at least one
-unsigned AutoWorkers();
+// The analysis's threads with --workers 0: one per CPU this process may run on (its result is the same with any number)
+unsigned AnalysisThreads();
+
+// The compile's workers once the analysis is done (README.md, "Memory at scale"): --workers, else as many as the memory available now holds
+// beside the tables' object (which grows with the module's functions), at the measured peak of a worker at the units' tiers, at most one per
+// CPU this process may run on, at least one; never more than the units and the tables' object. *line is the log's `aot: workers N (...)` line
+unsigned CompileWorkers(const BuildOptions& o, size_t units, const std::set<Tier>& tiers, size_t functions, std::string* line);
+
+// What the analysis of the module needs at its peak (README.md, "Memory at scale": measured per text word, the image besides)
+uint64_t AnalysisPeak(const module::Image& image);
 
 }  // namespace nxaot::build

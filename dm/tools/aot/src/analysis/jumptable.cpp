@@ -1,6 +1,7 @@
 #include "analysis/jumptable.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -27,6 +28,7 @@
 #include <llvm/Transforms/Scalar/SROA.h>
 
 #include "analysis/insn.h"
+#include "analysis/memory.h"
 
 namespace nxaot::analysis {
 
@@ -473,6 +475,19 @@ struct RegionMemo::Outcome {
     std::vector<Analysed> markers;
 };
 
+uint64_t BytesOf(const RegionMemo& memo) {
+    // Each key, and each outcome once (a shared_ptr's control block and the object in one allocation: make_shared)
+    uint64_t b = memory::Of(memo.regions);
+    std::set<const RegionMemo::Outcome*> seen;
+    for (const auto& [key, outcome] : memo.regions) {
+        b += memory::Of(key);
+        if (!outcome || !seen.insert(outcome.get()).second) continue;
+        b += memory::Chunk(16 + sizeof(RegionMemo::Outcome)) + memory::Of(outcome->lift_error) + memory::Of(outcome->markers);
+        for (const Analysed& a : outcome->markers) b += memory::Of(a.targets) + memory::Of(a.info.targets) + memory::Of(a.why);
+    }
+    return b;
+}
+
 namespace {
 
 std::shared_ptr<const RegionMemo::Outcome> AnalyseRegion(const module::Image& image, const Function& fn, uint64_t br, uint64_t e,
@@ -678,9 +693,26 @@ TableResult ResolveJumpTable(const module::Image& image, const Function& fn, uin
                 break;
             }
         }
+        // The memo keeps the key in 32-bit words (module offsets, effect bits and counts; no table: all ones), half the bytes (README.md,
+        // "Memory at scale"); a key with a value that does not fit (no module of under 4 GiB has one) is not memoised: the region is lifted
+        std::vector<uint32_t> key32;
+        bool fits = memo != nullptr;
+        if (fits) {
+            key32.reserve(key.size());
+            for (const uint64_t v : key) {
+                if (v == ~0ull) {
+                    key32.push_back(UINT32_MAX);
+                } else if (v >= UINT32_MAX) {
+                    fits = false;
+                    break;
+                } else {
+                    key32.push_back(static_cast<uint32_t>(v));
+                }
+            }
+        }
         std::shared_ptr<const RegionMemo::Outcome> outcome;
-        if (memo) {
-            if (const auto it = memo->regions.find(key); it != memo->regions.end()) {
+        if (fits) {
+            if (const auto it = memo->regions.find(key32); it != memo->regions.end()) {
                 outcome = it->second;
                 ++res.reused;
             }
@@ -688,7 +720,7 @@ TableResult ResolveJumpTable(const module::Image& image, const Function& fn, uin
         if (!outcome) {
             outcome = AnalyseRegion(image, fn, br, e, slice, calls, read, options.max_table);
             ++res.regions;
-            if (memo) memo->regions.emplace(std::move(key), outcome);
+            if (fits) memo->regions.emplace(std::move(key32), outcome);
         }
         if (!outcome->lifted) {
             lifted_why = "the region could not be lifted (" + outcome->lift_error + ")";

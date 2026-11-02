@@ -2,8 +2,8 @@
 # Runs the tests of a CMake build folder of dm/tools/aot (the vector harness, the census test, the vectors-current check, discovery over the corpus,
 # the manifest test, the corpus reference run, the corpus recompiled and run natively, the per-function differential test, the JIT fallback's
 # modes, the threaded programs, the safepoint pause test, the pack caches, the indirect calls' reloads, functions split for size, tiers by profile,
-# Windows packs, the analysis on threads, the host's JIT misses as discovery's input, the benchmark) and records the run
-# in the repository: one log per test and summary.txt in logs/aot/ (logs/README.md).
+# Windows packs, the analysis on threads, the host's JIT misses as discovery's input, the workers bounded by memory, the benchmark) and records
+# the run in the repository: one log per test and summary.txt in logs/aot/ (logs/README.md).
 # In the nxnative-aot Docker image (dm/tools/aot/README.md). From anywhere:
 #   sh dm/tools/aot/tests/run_aot_tests.sh <build folder> [<log folder>]
 # <log folder> defaults to logs/aot at the repository root; its old *.log files and summary.txt are removed first. Each test gets TIMEOUT seconds
@@ -78,6 +78,7 @@ run pack_windows python3 "$aot/tests/test_pack_windows.py" --nxaot "$build/nxaot
 run analysis_threads python3 "$aot/tests/test_analysis_threads.py" --nxaot "$build/nxaot" --work "$build/analysis_threads"
 run corpus_funcdiff_c python3 "$aot/tests/test_funcdiff.py" --nxaot "$build/nxaot" --nxaot-funcdiff "$build/nxaot_funcdiff" --tier C --work "$build/funcdiff_c"
 run misses python3 "$aot/tests/test_misses.py" --nxaot "$build/nxaot" --nxaot-host "$build/nxaot_host" --work "$build/misses"
+run workers python3 "$aot/tests/test_workers.py" --nxaot "$build/nxaot" --work "$build/workers"
 run opcodes "$build/nxaot" opcodes
 run bench "$build/nxaot_bench" --iterations 200000 --work "$build/bench"
 

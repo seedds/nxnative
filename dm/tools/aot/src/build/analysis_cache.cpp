@@ -265,7 +265,9 @@ bool LoadAnalysis(const std::string& path, const std::string& key, CachedAnalysi
             ff.extra.emplace_back(lo, abs());
         }
         const bool edges = r.U() != 0;
-        for (uint64_t k = r.Count(); k-- && r.ok;) {
+        const uint64_t blocks = r.Count();
+        f.blocks.reserve(blocks);  // a sorted vector (src/analysis/flat.h), filled in address order
+        for (uint64_t k = blocks; k-- && r.ok;) {
             analysis::Block b;
             b.start = abs();
             b.end = b.start + r.U();

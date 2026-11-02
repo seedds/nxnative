@@ -10,9 +10,11 @@ given, such as the game-shaped benchmarks of gen_bench.py):
 - `nxaot build --cache` with --workers 1 and --workers N, each into a cache of its own: the analysis cache's entry (discovery's view and the
   plan, under the same key) and the shared object the same bytes.
 
-With --baseline <nxaot> (another build, such as phase 5b's), its `nxaot discover` and `nxaot plan` outputs must be the same too.
+With --baseline <nxaot> (another build, such as phase 5b's), its `nxaot discover` and `nxaot plan` outputs must be the same too, and (unless
+--no-build) its `nxaot build --cache` with --workers N: the same shared object, and the same analysis cache entry but for its key (the key
+holds the tool's SHA-256: the entry's payload is compared, README.md "Memory at scale").
 
-  test_analysis_threads.py --nxaot <nxaot> --work <dir> [--threads N] [--module <path>]... [--baseline <nxaot>] [--no-build]
+  test_analysis_threads.py --nxaot <nxaot> --work <dir> [--threads N] [--module <path>]... [--baseline <nxaot>] [--no-build] [--no-corpus]
 
 Exit 0 when every check holds.
 """
@@ -69,10 +71,29 @@ def check(a, name, path):
             run([a.nxaot, 'build', path, '--shared', so, '--workers', str(workers), '--cache', os.path.join(d, 'cache')])
             entries = sorted(glob.glob(os.path.join(d, 'cache', 'analysis', '*.bin')))
             packs[workers] = (open(so, 'rb').read(), [(os.path.basename(e), open(e, 'rb').read()) for e in entries])
+            shutil.rmtree(d, ignore_errors=True)  # its outputs are read: a large module's cache and pack need not stay on the disk
         (so1, an1), (soN, anN) = packs[1], packs[a.threads]
         out.append(('analysis cache entry', len(an1) == 1 and an1 == anN))
         out.append(('pack', so1 == soN))
+        if a.baseline:
+            d = os.path.join(work, 'base')
+            shutil.rmtree(d, ignore_errors=True)
+            os.makedirs(d)
+            so = os.path.join(d, 'pack.so')
+            run([a.baseline, 'build', path, '--shared', so, '--workers', str(a.threads), '--cache', os.path.join(d, 'cache')])
+            entries = sorted(glob.glob(os.path.join(d, 'cache', 'analysis', '*.bin')))
+            base = [open(e, 'rb').read() for e in entries]
+            out.append(('analysis cache payload = baseline', len(base) == 1 and len(anN) == 1 and Payload(base[0]) == Payload(anN[0][1])))
+            out.append(('pack = baseline', open(so, 'rb').read() == soN))
+            shutil.rmtree(d, ignore_errors=True)
     return out
+
+
+def Payload(entry):
+    """An analysis cache entry without its head (the format line and the key, which holds the tool's SHA-256) and its trailing SHA-256
+    (src/build/analysis_cache.cpp)"""
+    head = len(b'nxaot-analysis 1\n') + 64
+    return entry[head:-32]
 
 
 def main():

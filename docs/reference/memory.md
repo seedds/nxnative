@@ -290,6 +290,13 @@ The guest address space, heaps, pools, virtual address memory and the allocators
   - [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) (Unreal Engine 3 with a binned allocator of this kind, 1.0.5, SDK 14.3.0): the static constructors reserve 1 GB for its tables and 37 GB for its pools (`main+0x192eee8`, `main+0x192fe50`; the region check stops the provisional build there). The object is in the bss (`main+0x51818c0`) and its constructor is inlined into the guarded function behind `GMalloc` (`main+0x192eb30`), so the cut is a branch from the guard's acquisition to its release, not a nop; `hle_uemalloc.c` checks for that word. It has no `Binned3` name for the engine-wide rule, so its cut stays its build's (`patches.py`) with a row of fixed addresses. Its FMalloc interface is UE3's: 25 slots with 32-bit sizes and no `TryMalloc` / `TryRealloc` (layout `UE3`: QuantizeSize 3, Malloc 4, Realloc 5, Free 6, GetAllocationSize 20, which stores a 32-bit size), found by the vtable offsets of `GMalloc`'s 36,800 call sites (`+0x20` / `+0x28` / `+0x30` for 8,090 / 8,423 / 20,308 of them). The host heap held 1.75 GB 45 s into the boot.
 - **Note:** Unreal Engine 4.18 (DRAGON QUEST XI S) needs no allocator cut: the SDK's `NumberLineAllocator` hands its region out in 64 KB units (`main+0x177c4d0`), and the engine maps only what it uses.
 
+### Wwise loses the span header in a virtual block from Unreal's heap
+
+- **Symptom:** Wwise crashes in `AK::MemoryMgr::Init` while reallocating or freeing a block, after Unreal switches to the host heap.
+- **Cause:** Wwise requests page-aligned virtual memory through Unreal and locates a span header by clearing the low 16 bits of an interior pointer. A host allocation aligned to only 4 or 16 KiB can put that address before the block. Unreal's virtual allocator supplies 64 KiB alignment for these spans.
+- **Fix:** the host preserves the 64 KiB boundary for allocations and reallocations of at least 64 KiB, and honors larger requested alignments.
+- **Found on:** [Princess Peach: Showtime! 1.0.0 (#996)](https://github.com/seedds/nxnative/issues/996), whose Wwise integration requests 4 KiB alignment.
+
 ### Thread stacks from the host's Unreal heap
 
 - **Symptom:** an abort right at `nnMain`, under `nn::os::CreateThread` → `ThreadManagerImplByHorizon::MapAliasStack` → `StackGuardManager::MapAtRandomAddress`; with the log line, `[RED] MapMemory refused (0xd401): <stack region> <- <address outside the guest block>`.

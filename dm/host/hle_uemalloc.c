@@ -49,9 +49,15 @@ static void used(int64_t d) {
     while (after > peak && !atomic_compare_exchange_weak(&g_peak, &peak, after)) {}
     if (after > peak && after >> 28 != peak >> 28) LOG("[mem] Unreal heap (host malloc zone) up to %.2f GB in use", after / 1073741824.0);
 }
-static size_t align_of(uint32_t a) { return a > 16 ? a : 16; }   // 0 = DEFAULT_ALIGNMENT, 16 bytes as Binned3 gives
+// Unreal's virtual allocator provides a 64 KiB-aligned base for span-sized blocks. Wwise masks an
+// interior pointer to that boundary to find its header, even though it requests only 4 KiB alignment.
+static size_t align_of(size_t n, uint32_t a) {
+    size_t minimum = n >= 0x10000 ? 0x10000 : 16;
+    return a > minimum ? a : minimum;
+}
 static void *alloc(size_t n, uint32_t a) {
-    void *p = align_of(a) == 16 ? malloc_zone_malloc(g_zone, n ? n : 1) : malloc_zone_memalign(g_zone, align_of(a), n ? n : 1);
+    size_t alignment = align_of(n, a);
+    void *p = alignment == 16 ? malloc_zone_malloc(g_zone, n ? n : 1) : malloc_zone_memalign(g_zone, alignment, n ? n : 1);
     if (p) used((int64_t)malloc_size(p));
     return p;
 }
@@ -59,9 +65,9 @@ static void release(void *p) { if (p) { used(-(int64_t)malloc_size(p)); malloc_z
 static void *realloc_aligned(void *p, size_t n, uint32_t a) {
     if (!p) return alloc(n, a);
     if (!n) { release(p); return NULL; }
-    size_t old = malloc_size(p);
-    if (align_of(a) == 16) { void *q = malloc_zone_realloc(g_zone, p, n); if (q) used((int64_t)malloc_size(q) - (int64_t)old); return q; }
-    if (!((uintptr_t)p & (align_of(a) - 1)) && old >= n) return p;
+    size_t old = malloc_size(p), alignment = align_of(n, a);
+    if (alignment == 16) { void *q = malloc_zone_realloc(g_zone, p, n); if (q) used((int64_t)malloc_size(q) - (int64_t)old); return q; }
+    if (!((uintptr_t)p & (alignment - 1)) && old >= n) return p;
     void *q = alloc(n, a); if (!q) return NULL;
     memcpy(q, p, old < n ? old : n); release(p); return q;
 }

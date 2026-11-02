@@ -2745,3 +2745,89 @@ int nvn_host_signal_sync(void *nvnsync) {
     o->fence = 0; o->fenced = 1; return 0;
 }
 NVN(nvnTextureFlushTexels, void, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r) { (void)t; (void)v; (void)r; }   // unified memory + dirty page tracking: nothing to flush
+
+// ---------- DLSS (NVN2's upscaler, Switch 2; Fire Emblem Fortune's Weave) ----------
+// The game makes a network for its output size (nvnDlssNetworkBuilder…, nvnDlssNetworkInitialize), asks it for the size to render at (GetOptimalSettings), and every frame fills a
+// parameters object (input colour, depth, motion vectors, output colour, sub-rectangles, jitter, motion-vector scale, history reset) and records nvnCommandBufferEvaluateDlss. The host
+// keeps both objects' state beside them (a table of its own: a game makes a few) and records the evaluation as a bilinear scaled copy of the input rectangle into the output (OP_COPY_T2T, drawn by copy_t2t_draw).
+// Fire Emblem Fortune's Weave makes a 3840x2160 network (method 2) and a 1280x720 one (method 0) and evaluates the second, from a 640x360 scene target it sized itself (its width and
+// height read from the texture, main+0xb70fe8), whatever GetOptimalSettings or the graphics scale answer. The jitter, depth and motion vectors a temporal upscale needs are kept, unused:
+// open (MetalFX's temporal scaler takes the same inputs)
+typedef struct { NVNdevice *dev; int ow, oh, method, preset, flags, entries; } dlss_net;
+typedef struct { const NVNtexture *in, *depth, *mv, *out, *exp; int iw, ih, ix, iy, dx, dy, mx, my, ox, oy, reset, index; float jx, jy, mvx, mvy, pre; } dlss_par;
+static struct { const void *g; void *o; } g_dlss[64];   // the game's builder / network / parameters object → its host state (g_dlss_mu)
+static pthread_mutex_t g_dlss_mu = PTHREAD_MUTEX_INITIALIZER;
+static void *dlss_find(const void *g, size_t n) {   // n = 0: look up only
+    void *o = NULL; int free_slot = -1;
+    pthread_mutex_lock(&g_dlss_mu);
+    for (int i = 0; i < 64 && !o; i++) { if (g_dlss[i].g == g) o = g_dlss[i].o; else if (!g_dlss[i].g && free_slot < 0) free_slot = i; }
+    if (!o && n) { if (free_slot < 0) die("DLSS: more than 64 network and parameter objects"); o = g_dlss[free_slot].o = calloc(1, n); g_dlss[free_slot].g = g; }
+    pthread_mutex_unlock(&g_dlss_mu);
+    return o;
+}
+static void dlss_drop(const void *g) {
+    pthread_mutex_lock(&g_dlss_mu);
+    for (int i = 0; i < 64; i++) if (g_dlss[i].g == g) { free(g_dlss[i].o); g_dlss[i].g = NULL; g_dlss[i].o = NULL; }
+    pthread_mutex_unlock(&g_dlss_mu);
+}
+static void *dlss_obj(const void *g, size_t n) { return dlss_find(g, n); }
+#define DNB(b) ((dlss_net *)dlss_obj(b, sizeof(dlss_net)))
+#define DPR(p) ((dlss_par *)dlss_obj(p, sizeof(dlss_par)))
+NVN_NOPROTO(nvnDlssNetworkBuilderSetDefaults, void, void *b) { dlss_net *n = DNB(b); NVNdevice *d = n->dev; *n = (dlss_net){d, 1920, 1080, 0, 0, 0, 1}; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetDevice, void, void *b, NVNdevice *d) { DNB(b)->dev = d; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetOutputResolution, void, void *b, int w, int h) { DNB(b)->ow = w; DNB(b)->oh = h; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetMethod, void, void *b, int m) { DNB(b)->method = m; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetPreset, void, void *b, int m) { DNB(b)->preset = m; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetFlags, void, void *b, int f) { DNB(b)->flags = f; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetMaxEvaluationEntries, void, void *b, int e) { DNB(b)->entries = e; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetTextureIDs, void, void *b) { (void)b; }   // texture and sampler IDs the driver's network would use: none on the host
+NVN_NOPROTO(nvnDlssNetworkBuilderSetStorage, void, void *b, void *m, size_t n) { (void)b; (void)m; (void)n; }
+NVN_NOPROTO(nvnDlssNetworkBuilderGetStorageSize, size_t, const void *b) { (void)b; return 0; }   // the host keeps no network memory
+// The render size for the builder's output, then the largest and the smallest the network takes (six ints, NGX's order: optimal, maximum, minimum). The host's upscale works from any
+// input; it answers DLSS Quality's 2 / 3 of the output, up to the output itself, down to a third
+NVN_NOPROTO(nvnDlssNetworkBuilderGetOptimalSettings, void, const void *b, int *w, int *h, int *maxw, int *maxh, int *minw, int *minh) {
+    dlss_net *n = DNB(b);
+    if (w) *w = n->ow * 2 / 3;
+    if (h) *h = n->oh * 2 / 3;
+    if (maxw) *maxw = n->ow;
+    if (maxh) *maxh = n->oh;
+    if (minw) *minw = n->ow / 3;
+    if (minh) *minh = n->oh / 3;
+}
+NVN_NOPROTO(nvnDlssNetworkInitialize, NVNboolean, void *net, const void *b) {
+    dlss_net *n = DNB(b); *(dlss_net *)dlss_obj(net, sizeof(dlss_net)) = *n;
+    LOG("[nvn] DLSS network: output %dx%d, method %d, preset %d, flags %#x, %d evaluation entries (a bilinear upscale on the host)", n->ow, n->oh, n->method, n->preset, n->flags, n->entries);
+    return 1;
+}
+NVN_NOPROTO(nvnDlssNetworkFinalize, void, void *net) { dlss_drop(net); }
+NVN_NOPROTO(nvnDlssParametersSetDefaults, void, void *p) { *DPR(p) = (dlss_par){0}; DPR(p)->pre = 1.f; }
+NVN_NOPROTO(nvnDlssParametersSetInputColor, void, void *p, const NVNtexture *t, const void *v) { DPR(p)->in = t; (void)v; }
+NVN_NOPROTO(nvnDlssParametersSetDepth, void, void *p, const NVNtexture *t, const void *v) { DPR(p)->depth = t; (void)v; }
+NVN_NOPROTO(nvnDlssParametersSetMotionVectors, void, void *p, const NVNtexture *t, const void *v) { DPR(p)->mv = t; (void)v; }
+NVN_NOPROTO(nvnDlssParametersSetOutputColor, void, void *p, const NVNtexture *t, const void *v) { DPR(p)->out = t; (void)v; }
+NVN_NOPROTO(nvnDlssParametersSetExposureTexture, void, void *p, const NVNtexture *t, const void *v) { DPR(p)->exp = t; (void)v; }
+NVN_NOPROTO(nvnDlssParametersSetInputSubrectangleSize, void, void *p, int w, int h) { DPR(p)->iw = w; DPR(p)->ih = h; }
+NVN_NOPROTO(nvnDlssParametersSetInputColorSubrectangleBase, void, void *p, int x, int y) { DPR(p)->ix = x; DPR(p)->iy = y; }
+NVN_NOPROTO(nvnDlssParametersSetDepthSubrectangleBase, void, void *p, int x, int y) { DPR(p)->dx = x; DPR(p)->dy = y; }
+NVN_NOPROTO(nvnDlssParametersSetMotionVectorSubrectangleBase, void, void *p, int x, int y) { DPR(p)->mx = x; DPR(p)->my = y; }
+NVN_NOPROTO(nvnDlssParametersSetOutputSubrectangleBase, void, void *p, int x, int y) { DPR(p)->ox = x; DPR(p)->oy = y; }
+NVN_NOPROTO(nvnDlssParametersSetJitterOffset, void, void *p, float x, float y) { DPR(p)->jx = x; DPR(p)->jy = y; }
+NVN_NOPROTO(nvnDlssParametersSetMotionVectorScale, void, void *p, float x, float y) { DPR(p)->mvx = x; DPR(p)->mvy = y; }
+NVN_NOPROTO(nvnDlssParametersSetPreExposure, void, void *p, float e) { DPR(p)->pre = e; }
+NVN_NOPROTO(nvnDlssParametersSetHistoryReset, void, void *p, NVNboolean r) { DPR(p)->reset = r & 1; }
+NVN_NOPROTO(nvnDlssParametersSetEvaluationIndex, void, void *p, int i) { DPR(p)->index = i; }
+NVN_NOPROTO(nvnCommandBufferEvaluateDlss, void, NVNcommandBuffer *c, const void *net, const void *par) {
+    const dlss_net *n = dlss_find(net, 0); const dlss_par *p = dlss_find(par, 0);
+    if (!n || !p || !p->in || !p->out) { static int once; if (!once++) LOG("[RED] nvnCommandBufferEvaluateDlss: no network or no input / output texture"); return; }
+    const tex_t *in = (const tex_t *)p->in, *out = (const tex_t *)p->out;
+    static struct { int iw, ih, ow, oh; unsigned n; } seen[8]; int k = 0;   // each new pair of sizes once, then every 2^k-th evaluation of it
+    while (k < 8 && seen[k].n && (seen[k].iw != p->iw || seen[k].ih != p->ih || seen[k].ow != n->ow || seen[k].oh != n->oh)) k++;
+    if (k < 8) { if (!seen[k].n) seen[k] = (typeof(seen[0])){p->iw, p->ih, n->ow, n->oh, 0}; unsigned c = ++seen[k].n;
+        if (!(c & (c - 1))) LOG("[nvn] DLSS evaluation #%u of %dx%d → %dx%d: input at %d,%d of a %ux%u texture (format %#x), output at %d,%d of a %ux%u texture (format %#x)%s", c, p->iw, p->ih, n->ow, n->oh,
+            p->ix, p->iy, in->d.width, in->d.height, in->d.format, p->ox, p->oy, out->d.width, out->d.height, out->d.format, p->reset ? ", history reset" : ""); }
+    int ow = n->ow < (int)out->d.width - p->ox ? n->ow : (int)out->d.width - p->ox, oh = n->oh < (int)out->d.height - p->oy ? n->oh : (int)out->d.height - p->oy;
+    NVNcopyRegion sr = {p->ix, p->iy, 0, p->iw, p->ih, 1}, dr = {p->ox, p->oy, 0, ow, oh, 1};
+    h_nvnCommandBufferCopyTextureToTexture(c, p->in, NULL, &sr, p->out, NULL, &dr, NVN_COPY_FLAGS_LINEAR_FILTER_BIT);
+}
+#undef DNB
+#undef DPR

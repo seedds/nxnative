@@ -515,6 +515,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): each ink stamp's pass, scissored to 1952x2940 at (0, 3460), about 0.95 → 0.32 ms. Metal keeps what lies outside the area (a 6400x6400 target checked texel by texel on an M4 Pro, with API validation on).
 - **Note:** the same stamps sample the map they write, with a game barrier each, so each still takes a whole snapshot of it ([Same-pass feedback read through a snapshot](#same-pass-feedback-read-through-a-snapshot)), about 0.76 ms; a copy of the stamp's rectangle takes 0.09 ms, but nothing proves a stamp samples only inside it. **Open.**
 
+### NVN2's DLSS evaluation as a scaled copy
+
+- **Symptom:** a Switch 2 game's 3D scene stays black while its 2D overlays draw (Fire Emblem Fortune's Weave's first map, after its opening movie); red lines `NVN unimplemented function called: nvnCommandBufferEvaluateDlss` and the `nvnDlssNetworkBuilder…` / `nvnDlssParameters…` calls.
+- **Cause:** NVN2 has DLSS: the game makes a network for an output size (`nvnDlssNetworkBuilder…`, `nvnDlssNetworkInitialize`), asks it for the size to render at (`GetOptimalSettings`), and every frame fills a parameters object (input colour, depth, motion vectors, output colour, their sub-rectangles, jitter, motion-vector scale, history reset, evaluation index) and records `nvnCommandBufferEvaluateDlss(cmdbuf, network, parameters)`, which writes the upscaled picture into the output texture. Unserved, the output is never written.
+- **Fix:** `hle_nvn.c` serves the API: the network's and the parameters' state kept beside the game's objects (a table in `hle_nvn.c`), `GetOptimalSettings` answering six ints in NGX's order (the optimal render size, 2 / 3 of the output, then the largest, the output, and the smallest, a third), and the evaluation recorded as a bilinear scaled copy of the input rectangle into the output (`OP_COPY_T2T`, which `copy_t2t_draw` draws). The arguments, read from the calls: the texture setters take a texture and a view, the sub-rectangle setters two ints, jitter and motion-vector scale two floats (Fortune's Weave: 0, −1/6 and 640, 360).
+- **Found on:** Fire Emblem Fortune's Weave (Switch 2, SDK 22.2.0; no profile yet): it makes a 3840×2160 network (method 2, preset 5) and a 1280×720 one (method 0) and evaluates the second, from a 640×360 scene target it sizes itself (the width and height read from the texture, `main+0xb70fe8`), whatever `GetOptimalSettings` or `oe::GetCurrentGraphicsScale` answer (0, 1 and 2 tried).
+- **Open:** a temporal upscale: the jitter, depth and motion vectors are kept but unused; MetalFX's temporal scaler takes the same inputs.
+
 ## Blend, depth and stencil
 
 ### Ten attachment records for eight colors and depth-stencil

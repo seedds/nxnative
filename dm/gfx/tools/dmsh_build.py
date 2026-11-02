@@ -18,6 +18,7 @@ _bad = tool_lock.check_tools()
 if _bad: sys.exit('\n'.join('[RED] translation chain tools do not match the lock file: ' + b for b in _bad) + '\n(if the tools changed, run tool_lock.py --update-lock and commit the lock file; if the translator just was not rebuilt, rebuild it)')
 CHAIN = dmsh_chain.version(); out = os.path.join(out, 'b-' + CHAIN)
 GAME = dmsh_chain.load_game()   # the current game profile (DM_GAME): the tables come from here
+ZERO_PERIOD_OFF = {key: spec for key, spec in (rule.split(':', 1) for rule in GAME.words('shader_zero_period_off', ''))}
 if f'"{CHAIN}"' not in open(dmsh_chain.HEADER).read(): sys.exit(f'[RED] {dmsh_chain.HEADER} does not hold the current translation chain version {CHAIN}: run dmsh_chain.py --header first and commit it (otherwise the host cannot find these libraries)')
 INPUTS = dmsh_chain.inputs(GAME)   # the digest of the profile's inputs, which a full build stamps on its libraries (b-<V>/inputs.tsv)
 XLATE = os.environ.get('XLATE', os.path.join(dmsh_chain.XLATE_DIR, 'dmsh_xlate'))
@@ -48,6 +49,42 @@ XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-textur
 # and its saturation gives 0, as Metal's precise:: functions (IEEE fmin / fmax) do on every GPU. The M4 Pro's fast ones happen to agree, an A20 Pro's do not: Super Mario Galaxy 2's
 # GX lighting takes max(0, NaN) from light directions left at zero, and the half of Mario its fill light faces came out white on the iPhone (GitHub issue 72; vk_shaders.py PRECISE)
 def precise(msl): return re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', msl)
+
+def zero_period_off(msl, spec):
+    """Opt-in material policy: bank:period-row.component:strength-row.component:color-location.
+    Brilliant Diamond's TV controller explicitly writes a zero blink cycle when inactive. Its pixel shader multiplies
+    RGB by this varying and emits alpha 1: a finite (0,0,0,1) carrier makes that state black, without making it transparent.
+    This is a scoped compatibility choice, not Maxwell arithmetic emulation; original-console nonfinite handling is open.
+    Nonzero periods retain their original expressions and perspective interpolation. Apply before vertex variants."""
+    match = re.fullmatch(r'(\d+):(\d+\.[xyzw]):(\d+\.[xyzw]):(\d+)', spec)
+    if not match: raise ValueError(f'invalid shader_zero_period_off: {spec}')
+    bank, period, strength, location = match.groups()
+    def field(value):
+        row, component = value.split('.')
+        return f'(*spvDescriptorSet0.vp_c{bank})._m0[{row}].{component}'
+    period, strength = field(period), field(strength)
+    reciprocal = list(re.finditer(r'float (\w+) = 1\.0 / ' + re.escape(period) + r';', msl))
+    pulse = list(re.finditer(r'float (\w+) = (\w+) \* ' + re.escape(strength) + r';', msl))
+    color = re.findall(r'float4 (\w+) \[\[user\(locn' + location + r'\)\]\];', msl)
+    if (len(reciprocal) != 1 or len(pulse) != 1 or len(color) != 1
+            or msl.count('return out;') != 1 or 'dm_tv_off' in msl):
+        raise ValueError('zero-period off policy requires one reciprocal, pulse, color output and return')
+    r, p = reciprocal[0], pulse[0]
+    stores = list(re.finditer(r'out\.' + re.escape(color[0]) + r'\.([xyzw]) = (\w+);', msl))
+    if (len(stores) != 4 or {s[1] for s in stores} != set('xyzw')
+            or len(re.findall(r'\bout\.' + re.escape(color[0]) + r'\b', msl)) != 4):
+        raise ValueError('zero-period off policy requires exactly four scalar color stores')
+    for store in stores:
+        expression = r'float ' + re.escape(store[2]) + r' = fma\(' + re.escape(p[1]) + r', (\w+), \1\);'
+        if len(re.findall(expression, msl)) != 1:
+            raise ValueError('zero-period off policy requires the original pulse/color FMA in each channel')
+    msl = msl.replace(r[0], '// Compatibility policy: this material uses a zero blink cycle for TV off.\n'
+                      f'    bool dm_tv_off = (as_type<uint>({period}) & 0x7fffffffu) == 0u;\n'
+                      f'    float {r[1]} = dm_tv_off ? 0.0 : 1.0 / {period};', 1)
+    for store in stores:
+        value = '1.0' if store[1] == 'w' else '0.0'
+        msl = msl.replace(store[0], f'out.{color[0]}.{store[1]} = dm_tv_off ? {value} : {store[2]};', 1)
+    return msl
 
 # Ampere HMMA.16816 with an f16 accumulator (agl's upscaler networks) reaches the MSL as a call of dmsh_hmma16816_f16(lane, block, A0..A3, B0, B1, C0, C1, out D1) → D0, with
 # the subgroup's 256-word block of the scratch shared memory as the last argument (InstEmitAmpereTensor.AHmma, TensorPass, HelperFunctionManager.GenerateHmma16816F16). The
@@ -1332,6 +1369,9 @@ def finish(key, w, j, c1):
     try: src = dmsh_atomic.check_msl(src)
     except ValueError as e: return 'image atomic MSL failed', str(e), None
     src = precise(src)   # min / max / clamp with Maxwell's NaN results (see precise)
+    if key in ZERO_PERIOD_OFF:
+        try: src = zero_period_off(src, ZERO_PERIOD_OFF[key])
+        except ValueError as e: return 'zero-period off policy failed', str(e), None
     try: src = hmma_msl(src)   # Ampere HMMA through simdgroup_matrix (see hmma_msl)
     except ValueError as e: return 'HMMA rewrite failed', str(e)[:160], None
     try: src = pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)

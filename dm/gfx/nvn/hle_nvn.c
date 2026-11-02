@@ -108,6 +108,9 @@ static void *nvn_lookup(const char *name) {
     return NULL;
 }
 
+// The host's own NVN entry points by name, for host code that makes NVN objects for the game (hle_codec_video.c: the textures of decoded pictures, as the SDK's native images do)
+void *nvn_host_proc(const char *name) { return nvn_lookup(name); }
+
 // nvnBootstrapLoader is imported by main (defined in sdk); after it is forcibly taken over, the NVN driver in sdk is no longer referenced
 HLE_FORCE("nvnBootstrapLoader", "the NVN graphics API is replaced wholesale with a host null device (Metal behind it); the SDK's NVN driver does not run",
           void *, h_nvnBootstrapLoader, const char *name) { return nvn_lookup(name); }

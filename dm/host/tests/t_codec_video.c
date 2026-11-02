@@ -1,11 +1,14 @@
 // The Switch 2's video decoder API as the host serves it (hle_codec_video.c), without a guest: the buffer protocol, results, sync handles, sync point events and the
-// readback, on synthetic red key frames: 16x16 VP9 and VP8 (the ones t_movie_vpx.c decodes) and a 64x64 H.264 baseline frame (ffmpeg's libx264, SEI removed); no game data. The SystemEvent functions are stubs that record each event's state.
+// readback, on synthetic red key frames: 16x16 VP9 and VP8 (the ones t_movie_vpx.c decodes), a 64x64 H.264 baseline frame (ffmpeg's libx264, SEI removed) and a 64x64 AV1 frame
+// (SVT-AV1 through PyAV, preset 12, CRF 30); no game data. The SystemEvent functions are stubs that record each event's state, and the NVN entry points native images use are
+// stubs that record what the host made.
 #include "../hle.h"
 #undef HLE_FORCE
 #define HLE_FORCE(mangled, why, ret, cname, ...) static ret cname(__VA_ARGS__)
 #include "../hle_movie.c"
 #include "../hle_codec_video.c"
 #include "../hle_movie_avc.c"
+#include "../hle_movie_av1.c"
 #include <assert.h>
 
 uint64_t now_ns(void) { return 1; }
@@ -30,6 +33,37 @@ static const uint8_t h264[] = {   // Annex B: SPS, PPS, one IDR slice
     0xe0,0x00,0x00,0x00,0x01,0x68,0xce,0x0f,0xc8,0x00,0x00,0x01,0x65,0x88,0x84,0x3a,0x11,0x8a,0x00,0x02,0x18,0xf1,0xc0,0x00,
     0x40,0xf6,0x38,0x00,0x08,0x79,0x49,0xc9,0xc9,0xd7,0x5d,0x75,0xd7,0x5d,0x75,0xd7,0x5d,0x75,0xe0,
 };
+static const uint8_t av1[] = {   // one temporal unit: temporal delimiter, sequence header (profile 0, 64x64), frame
+    0x12,0x00,0x0a,0x0b,0x02,0x00,0x00,0x04,0x95,0x7f,0xfc,0x0a,0xf9,0x00,0x40,0x32,0x15,0x10,0x00,0xbc,0x00,0x49,0x22,0x08,0x08,0x21,0x10,0x00,0xad,0x3b,0x67,0x00,
+    0x1e,0xb5,0xdb,0x79,0x52,0x90,
+};
+// The host NVN entry points native images use (nvn_host_proc), recording what the host made
+static struct { int pool_flags, pool_init, pool_fin, target, fmt, tw, th, tflags, tex_init; void *mem; size_t size; ptrdiff_t stride, off; const void *storage, *dev; } g_nv;
+static void nv_mpdef(NVNmemoryPoolBuilder *b) { (void)b; }
+static void nv_mpdev(NVNmemoryPoolBuilder *b, NVNdevice *d) { (void)b; g_nv.dev = d; }
+static void nv_mpflags(NVNmemoryPoolBuilder *b, int f) { (void)b; g_nv.pool_flags = f; }
+static void nv_mpstorage(NVNmemoryPoolBuilder *b, void *m, size_t n) { (void)b; g_nv.mem = m; g_nv.size = n; }
+static NVNboolean nv_mpinit(NVNmemoryPool *p, const NVNmemoryPoolBuilder *b) { (void)p; (void)b; g_nv.pool_init++; return 1; }
+static void nv_mpfin(NVNmemoryPool *p) { (void)p; g_nv.pool_fin++; }
+static void nv_tbdef(NVNtextureBuilder *b) { (void)b; }
+static void nv_tbdev(NVNtextureBuilder *b, NVNdevice *d) { (void)b; (void)d; }
+static void nv_tbtarget(NVNtextureBuilder *b, NVNtextureTarget t) { (void)b; g_nv.target = t; }
+static void nv_tbfmt(NVNtextureBuilder *b, NVNformat f) { (void)b; g_nv.fmt = f; }
+static void nv_tbsize(NVNtextureBuilder *b, int w, int h) { (void)b; g_nv.tw = w; g_nv.th = h; }
+static void nv_tbflags(NVNtextureBuilder *b, int f) { (void)b; g_nv.tflags = f; }
+static void nv_tbstride(NVNtextureBuilder *b, ptrdiff_t s) { (void)b; g_nv.stride = s; }
+static void nv_tbstorage(NVNtextureBuilder *b, NVNmemoryPool *p, ptrdiff_t o) { (void)b; g_nv.storage = p; g_nv.off = o; }
+static NVNboolean nv_texinit(NVNtexture *t, const NVNtextureBuilder *b) { (void)t; (void)b; g_nv.tex_init++; return 1; }
+void *nvn_host_proc(const char *n) {
+    static const struct { const char *name; void *fn; } k[] = {
+        {"nvnMemoryPoolBuilderSetDefaults", nv_mpdef}, {"nvnMemoryPoolBuilderSetDevice", nv_mpdev}, {"nvnMemoryPoolBuilderSetFlags", nv_mpflags},
+        {"nvnMemoryPoolBuilderSetStorage", nv_mpstorage}, {"nvnMemoryPoolInitialize", nv_mpinit}, {"nvnMemoryPoolFinalize", nv_mpfin},
+        {"nvnTextureBuilderSetDefaults", nv_tbdef}, {"nvnTextureBuilderSetDevice", nv_tbdev}, {"nvnTextureBuilderSetTarget", nv_tbtarget}, {"nvnTextureBuilderSetFormat", nv_tbfmt},
+        {"nvnTextureBuilderSetSize2D", nv_tbsize}, {"nvnTextureBuilderSetFlags", nv_tbflags}, {"nvnTextureBuilderSetStride", nv_tbstride},
+        {"nvnTextureBuilderSetStorage", nv_tbstorage}, {"nvnTextureInitialize", nv_texinit}};
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; i++) if (!strcmp(k[i].name, n)) return k[i].fn;
+    return NULL;
+}
 static const uint8_t vp9[] = {
     0x82,0x49,0x83,0x42,0x00,0x00,0xf0,0x00,0xf6,0x00,0x38,0x24,0x1c,0x18,0x4a,0x00,
     0x00,0x30,0x60,0x00,0x00,0x10,0xbf,0xff,0xf7,0x1d,0xaf,0xff,0xff,0xff,0x5f,0xdf,
@@ -138,8 +172,37 @@ int main(void) {
         for (int i = 4096; i < 6144; i += 2) { assert(abs(yuv[i] - 90) <= 6); assert(abs(yuv[i + 1] - 240) <= 6); }
         assert(!h_cv_h264fin(dh) && !cv_of(dh)); h_cv_poolfin(ph);
     }
-    {   uint8_t da[0x400]; memset(da, 0xab, sizeof da);   // AV1: no decoder on the host, Initialize fails and leaves no host decoder
-        assert(h_cv_av1init(da) != 0 && !cv_of(da) && !h_cv_av1fin(da)); }
+    // AV1 through SDK 22's calls (Initialize…ByTransferMemory, the event it returns, a preference with a tiling mode, a pool without a codec mode), on each backend this Mac has
+    // (VideoToolbox where the chip decodes AV1, and dav1d), read back red; and the GPU route: the pool image as a native image whose host memory pool holds the RGBA picture
+    for (int soft = VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1) ? 0 : 1; soft < 2; soft++) {
+        setenv("DM_AV1_DAV1D", soft ? "1" : "0", 1);
+        _Alignas(16) static uint8_t da[0x400], pa[0x40], ma[64 * 64 * 4], nimg[0x1a0], tex[0x200]; static uint8_t yuv[64 * 64 * 3 / 2], rgb[64 * 64 * 4];
+        cv_pref p64 = h_cv_pref22(64, 64, 2, 1);
+        assert(!h_cv_poolsize(&size, &align, &p64, 1) && !h_cv_pool22(pa, ma, size, &p64, 1) && pool_of(pa));
+        assert(!h_cv_av1tm(da, ma, 0x1000, 0x10000, 64, 64, 1, 3, 2, 0) && cv_of(da) && cv_of(da)->codec == CV_AV1 && cv_of(da)->av1);
+        assert(!strcmp(mav1_backend(cv_of(da)->av1), soft ? "dav1d" : "VideoToolbox"));
+        void *ev = h_cv_av1ev22(da); assert(ev == da + CV_EVENT_OFF && g_ev[ev_slot(ev)].bound && ev_set(ev));
+        // The native image of pool image 0, made before any picture: a handle, a CPU-uncached host pool of RGBA rows, a linear RGBA8 texture over it
+        uint32_t nh = h_cv_native(pa, 0); assert(nh == 0x100);
+        uint8_t nb[0x20] = {0}; *(void **)nb = (void *)0x1234; memcpy(nb + 8, &nh, 4); uint32_t perm = 1, fmt = NVN_FORMAT_RGBA8_SRGB; memcpy(nb + 0xc, &perm, 4); memcpy(nb + 0x10, &fmt, 4);
+        memset(&g_nv, 0, sizeof g_nv);
+        assert(h_nvn_nimg_init(nimg, nb) && g_nv.pool_init == 1 && g_nv.dev == (void *)0x1234 && g_nv.size >= 64 * 64 * 4);
+        assert(g_nv.pool_flags == (NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED));
+        assert(h_nvn_nimg_tex((NVNtexture *)tex, nimg) && g_nv.tex_init == 1 && g_nv.target == NVN_TEXTURE_TARGET_2D && g_nv.fmt == NVN_FORMAT_RGBA8_SRGB);
+        assert(g_nv.tw == 64 && g_nv.th == 64 && g_nv.tflags == NVN_TEXTURE_FLAGS_LINEAR && g_nv.stride == 256 && g_nv.off == 0 && g_nv.storage == &nimg_of(nimg)->pool);
+        assert(!h_cv_av1reg(da, 0, pa, 0) && !h_cv_av1acq(&idx, &sync, da));
+        h_cv_av1rel(da, 0, sync); assert(!h_cv_av1acq(&idx, &sync, da) && !h_gs_trywait(&sync));
+        assert(!h_cv_av1submit(&id, da, av1, sizeof av1, 6000000, true) && h_gs_trywait(&sync));
+        assert(!h_cv_av1props(&w, &h, &cw, &ch, &ts, &eos, da, 0) && w == 64 && h == 64 && ts == 6000000 && eos);
+        assert(!h_cv_nv12(pa, 0, 0, 0, 64, 64, yuv, 64, 4096, yuv + 4096, 64, 2048));
+        for (int i = 0; i < 4096; i++) assert(abs(yuv[i] - 81) <= 4);
+        for (int i = 4096; i < 6144; i += 2) { assert(abs(yuv[i] - 90) <= 6); assert(abs(yuv[i + 1] - 240) <= 6); }
+        assert(!h_cv_rgbahdr(pa, 0, 0, 0, 64, 64, rgb, 256, sizeof rgb));   // SDK 22's HDR readback is its RGBA one
+        for (int i = 0; i < 64 * 64 * 4; i += 4) assert(rgb[i] >= 245 && rgb[i + 1] <= 10 && rgb[i + 2] <= 10 && rgb[i + 3] == 255);
+        assert(!memcmp(g_nv.mem, rgb, sizeof rgb));   // the picture went into the native image's pool too (rows of 256 bytes: tight)
+        h_nvn_nimg_fin(nimg); assert(!nimg_of(nimg) && g_nv.pool_fin == 1 && pool_of(pa) && !pool_of(pa)->nimg[0]);
+        assert(!h_cv_av1fin(da) && !cv_of(da)); h_cv_poolfin(pa);
+    }
     printf("t_codec_video: all passed\n");
     return 0;
 }

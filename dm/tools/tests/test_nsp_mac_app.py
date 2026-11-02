@@ -615,13 +615,18 @@ class App(unittest.TestCase):
     def test_controls_tab_tables_match_the_host(self):   # LauncherControls.swift reads and writes the host's names and default keys (input_map.h)
         import re
         h = (REPO / 'dm/host/input_map.h').read_text(); s = (REPO / 'dm/mac/LauncherControls.swift').read_text()
-        names = re.findall(r'"(\w+)"', re.search(r'im_names\[IM_N\] = \{(.*?)\};', h, re.S).group(1))
-        self.assertEqual(re.findall(r'"(\w+)"', re.search(r'static let names = \[(.*?)\]', s, re.S).group(1)), names)
+        def grab(pattern, text, flags=0):
+            m = re.search(pattern, text, flags)
+            assert m is not None, pattern
+            return m.group(1)
+        names = re.findall(r'"(\w+)"', grab(r'im_names\[IM_N\] = \{(.*?)\};', h, re.S))
+        self.assertEqual(re.findall(r'"(\w+)"', grab(r'static let names = \[(.*?)\]', s, re.S)), names)
         fn = {n: i for i, n in enumerate(names)} | {f'IM_{n.upper()}': i for i, n in enumerate(names)}
         default = [-1] * len(names)
-        for code, f in re.findall(r'\{(\d+), (\w+)\}', re.search(r'key_map_default.*?d\[\] = \{(.*?)\};', h, re.S).group(1)):
+        for code, f in re.findall(r'\{(\d+), (\w+)\}', grab(r'key_map_default.*?d\[\] = \{(.*?)\};', h, re.S)):
             default[int(f) if f.isdigit() else fn[f]] = int(code)
-        self.assertEqual([int(x) for x in re.search(r'static let defaultKeys: \[Int\] = \[(.*?)\]', s).group(1).split(',')], default)
+        self.assertEqual([int(x) for x in grab(r'static let defaultKeys: \[Int\] = \[(.*?)\]', s).split(',')], default)
+
     def test_signed(self):   # ad-hoc, both the host and the bundle, never the hardened runtime (it refuses the executable memory the host makes for the game's code)
         for target in (self.app, self.app / 'Contents/MacOS/dmhost'):
             subprocess.run(['codesign', '--verify', '--strict', target], check=True, capture_output=True)

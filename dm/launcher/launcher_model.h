@@ -2,7 +2,7 @@
 // window (dm/mac/Launcher.swift, dm/mac/launcher.c) and of the iPhone's settings screen (dm/ios/Sources/Launcher.swift) for every game packed on this PC.
 //
 // A game is a pack of scripts/build_ipa_from_nsp.py --platform linux / windows: <NSP folder>/<id>_build/ with its launch file launch-<platform>.tsv, the one source of what starts it,
-// which run.sh / run.cmd read too (build_ipa_from_nsp.py port_launch_file: game, path, pack and env rows), and launcher-<platform>.json, the game's settings (dm/games/settings.py, the
+// which run.sh / run.cmd read too (build_ipa_from_nsp.py port_launch_file: game, path, pack, env, made, samples and misses rows), and launcher-<platform>.json, the game's settings (dm/games/settings.py, the
 // rows of dm/games/settings.tsv listed for the platform, docs/launcher.schema.json). The games folder holds such <id>_build folders, directly or one level down (an NSP folder per game).
 //
 // What starts the game, as run.sh composes it: nxhost-run (the path host row; NXHOST in the environment names another; the bundle's when the row's is gone: find_host) with the pack folder of the chosen mode (a pack row) as its

@@ -1,0 +1,45 @@
+# Fire Emblem Fortune's Weave (Switch 2, update v131072). Plays on the Mac
+# Intelligent Systems' engine on NintendoWare (G3d, Ui2d, Vfx, Atk), SDK 22.2.0 built for the Switch 2 (nnSdk-Generic_22_2_0), NVN2 (Ampere shaders, DLSS); modules main + subsdk2 (movie) + sdk.
+# Packed from a dump folder (updates/131072/ only: the update is the whole game) with scripts/pack_dump.py. Movies: AV1 in WebM.
+
+# ---- Identity ----
+title_id	04007EF01F8AE000
+program_id	04007EF01F8AE000
+
+# ---- App ----
+name	Fire Emblem Fortune's Weave
+ipa	FireEmblemFortunesWeave.ipa
+app_category	public.app-category.strategy-games
+pad_layout	full
+
+# ---- Versions ----
+# The display version is unknown: a dump has no control data (docs/reference/services.md, The display version of a game packed from a dump), so the title shows "Ver. ?"
+build	v131072	?	main=db93b0125f4850601d61c3edde012f8e	subsdk2=7d73f8e808341683306a4425a4989ed5	sdk=5b1602f3a2965f44ab13124cadbdf148
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# Not loaded, main takes nothing from them the host does not supply: subsdk0 (NintendoSDK_DLSS: the host serves DLSS itself), subsdk1 (C / libc)
+modules	main subsdk2 sdk
+romfs_marker	Movie/Product/NR14_00.webm
+zip_store	.bfsar:.webm:.zst:.metallib
+
+# ---- Memory ----
+# The NPDM declares 64 MB of system resource, so virtual address memory is on, and the game sets no heap: its memory comes from StandardAllocator::Initialize(nullptr, 36 GB) in the alias
+# region, which the host fits to the region (9.19 GB here). With the 4.375 GB region of a Switch 1 game it had mapped 4.03 GB by its second movie and that movie's buffers failed
+# (docs/reference/memory.md, Sizing the pool and alias region for virtual address memory). 256 MB in front + 9.5 GB alias region + 256 MB stack region + 256 MB heap region: more than an
+# iPhone's 6 GB reservation without the extended-virtual-addressing entitlement, so the Mac only for now
+mem_reserve	0x290000000
+mem_alias	0x260000000
+mem_stack	0x10000000
+# The Switch 2's 9 GB (Donkey Kong Bananza's figure)
+app_pool	0x240000000
+sys_resource	0x4000000
+
+# ---- Shader split (shader_split.py) ----
+shader_groups	/Sound/=sound /Map/=map /Animation/=animation /Msg/=msg /Layout/=layout /Character/=character /UI/=ui /Graphics/=graphics /Effect/=effect /GameData/=gamedata /Script/=script /Movie/=movie /Font/=font /Shaders/=shaders /Path/=path
+shader_note	Fire Emblem Fortune's Weave shaders
+
+# ---- Graphics ----
+# The game calls nvnDeviceSetDepthMode with near = 0 at startup (the NSP script's address region check saw it): the pipeline bases made before it runs are made for that mode
+depth_mode	zero

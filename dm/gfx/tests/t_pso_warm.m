@@ -213,11 +213,11 @@ static NSString *program_fixture(NSString *dir, prog_t *program, unsigned tag, i
     NSString *pc = [map stringByAppendingString:@"_b"];
     for (NSString *ext in @[@"json", @"metallib"]) {
         NSString *from = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"warm-%@.%@", vertex ? @"vs" : @"fs", ext]];
-        NSString *to = [dir stringByAppendingPathComponent:[pc stringByAppendingPathExtension:ext]];
+        NSString *to = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.%@", pc, ext]];
         EXPECT("program fixture copied", 1, [NSFileManager.defaultManager copyItemAtPath:from toPath:to error:nil]);
     }
     if (vertex) {
-        NSString *json = [dir stringByAppendingPathComponent:[pc stringByAppendingPathExtension:@"json"]];
+        NSString *json = [dir stringByAppendingPathComponent:[pc stringByAppendingString:@".json"]];
         NSMutableDictionary *reflection = [NSJSONSerialization JSONObjectWithData:[NSData dataWithContentsOfFile:json] options:NSJSONReadingMutableContainers error:nil];
         reflection[@"pull"] = @{};
         EXPECT("pulling reflection written", 1, [[NSJSONSerialization dataWithJSONObject:reflection options:0 error:nil] writeToFile:json atomically:YES]);

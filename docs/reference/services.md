@@ -613,6 +613,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** I reproduced the failure with the production backend and real `nvn_dirty.c`, no GPU/game: already protected TCP/UDP destinations fail without preparation; an entry-only control still fails after protection during a readiness wait. `make -C dm/host/tests GAME=010015100B514000 net-write net-write-sanitize` also checks partial stream offsets, dirty generations, preserved guest errno, unrelated read-only/`PROT_NONE`/invalid destinations, flags, closed descriptors and zero-length datagrams. Other ordinary-buffer socket fixtures provide an explicit no-tracker hook; production keeps its required registered dispatcher.
 - **Limits:** this synthetic result does not establish an observed game disconnect's cause. It does not make preparation atomic with a concurrent re-protection between the hook and kernel copyout; that narrow race remains separate from the demonstrated missing preparation and wait boundary.
 
+### Socket option output into tracked write-protected guest pages
+
+- **Symptom:** `GetSockOpt` returns guest `EFAULT` (14) for an otherwise valid result buffer on a graphics-tracked read-only page.
+- **Cause:** `getsockopt` writes its result through kernel copyout, which does not invoke the host's dirty-page fault handler. The adapter passed the guest output directly without the pre-write preparation used by file reads and socket receives.
+- **Fix:** after validating the descriptor, translated option and capacity, I prepare only the option's native result span immediately before `getsockopt`. The output size and errno translation remain unchanged. `SetSockOpt` still reads its input without preparing it as a write; unrelated read-only, inaccessible and invalid destinations retain their real failures. There is no retry or new memory-permission policy.
+- **Check:** the production backend with real `nvn_dirty.c` reproduces the failure for `SO_TYPE`, `SO_ERROR` and an eight-byte `SO_LINGER` result crossing two protected pages. `net-write` and `net-write-sanitize` check exact prepared spans, dirty generations, result lengths, canaries and preserved guest errno; invalid descriptors/options/capacities and unrelated read-only/`PROT_NONE`/invalid destinations remain rejected. A protected TCP option input still succeeds without pre-write preparation. These checks need no GPU, game, account or external network.
+- **Limits:** I reproduced this in a synthetic fixture, not a game. This correction does not establish a game disconnect's cause. Preparation is not atomic with another thread re-protecting the page before kernel copyout, as in the [receive path](#socket-receive-into-write-protected-tracked-guest-pages).
+
 ### Socket `Poll` and `Select` with nothing to wait on
 
 - **Symptom:** one thread at 100% CPU from boot, with one SVC in 99 s (`NexusRevolution Socket`, `main+0x92c7c4`, the game's network thread).

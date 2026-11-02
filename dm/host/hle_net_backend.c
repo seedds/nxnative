@@ -459,6 +459,8 @@ static int net_sockopt_impl(int guest, int level, int option, void *value, unsig
         if ((v[0] != 0 && v[0] != 1) || v[1] < 0) { close(r.fd); return net_error(22); }
     }
     socklen_t n = size;
+    // Kernel copyout does not invoke the tracked guest-page write-fault hook.
+    if (!set) dm_guest_write_prepare(value, n);
     int result = set ? setsockopt(r.fd, hl, ho, hostvalue, n) : getsockopt(r.fd, hl, ho, value, &n), err = errno;
     if (!set && result >= 0) {
         *len = n;

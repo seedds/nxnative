@@ -1,4 +1,4 @@
-// Original loopback receive fixture with the real dirty-page tracker; no GPU, game or external peer.
+// Original socket-copyout fixture with the real dirty-page tracker; no GPU, game or external peer.
 #include <sys/socket.h>
 #include <sys/mman.h>
 #include <arpa/inet.h>
@@ -54,10 +54,11 @@ static void trial(int udp,int delayed,int invalid) {
 }
 static void stream_partial(void);
 static void invalid_and_empty(void);
+static void socket_options(void);
 int main(void) {setenv("DM_NETWORK","auto",1);
  for(int udp=0;udp<=1;++udp){trial(udp,0,0);trial(udp,1,0);trial(udp,0,1);}
- stream_partial();invalid_and_empty();
- printf("recv write prepare: %u checks,%u failed\n",checks,failures);return failures!=0;
+ stream_partial();invalid_and_empty();socket_options();
+ printf("socket write prepare: %u checks,%u failed\n",checks,failures);return failures!=0;
 }
 static void stream_partial(void) {
  size_t page=(size_t)getpagesize();void *dst=mmap(NULL,page,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);assert(dst!=MAP_FAILED);nvn_dirty_add_range(dst,page);nvn_dirty_protect(dst,page);
@@ -77,4 +78,47 @@ static void invalid_and_empty(void) {
  char drain[8];while(dm_net_recv(guest,drain,sizeof drain,0x80,NULL,NULL)>=0){}
  assert(sendto(peer,NULL,0,0,(void*)&back,16)==0);CHECK(dm_net_recv(guest,NULL,0,0,NULL,NULL)==0);
  CHECK(!dm_net_close(guest));close(peer);
+}
+
+// A getsockopt copyout is not a CPU write fault either. Exercise the exact
+// validated option span, including a result crossing two protected pages.
+static void socket_option_output(int kind) {
+ size_t page=(size_t)getpagesize();uint8_t *mem=mmap(NULL,page*2,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);assert(mem!=MAP_FAILED);memset(mem,0xa5,page*2);
+ nvn_dirty_add_range(mem,page*2);nvn_dirty_protect(mem,page*2);uint64_t stamp=nvn_dirty_now();
+ unsigned size=kind==2?8:4,option=kind==0?0x1008:kind==1?0x1007:128;
+ uint8_t *value=kind==2?mem+page-4:mem+32;unsigned len=32,before=preps;
+ int guest=dm_net_socket(2,kind==0?2:1,kind==0?17:6);assert(guest>=0);dm_net_set_errno(77);
+ int result=dm_net_sockopt(guest,0xffff,option,value,&len,0);
+ CHECK(result==0&&dm_net_errno()==77);CHECK(len==size);CHECK(preps==before+1&&last_prep==value&&last_len==size);
+ int expected[2]={kind==0?SOCK_DGRAM:0,0};CHECK(!memcmp(value,expected,size));CHECK(value[-1]==0xa5&&value[size]==0xa5);
+ CHECK(nvn_dirty_since(value,size,stamp));
+ if(kind!=2)CHECK(!nvn_dirty_since(mem+page,page,stamp));
+ else CHECK(nvn_dirty_since(mem,page,stamp)&&nvn_dirty_since(mem+page,page,stamp));
+ printf("getsockopt kind%d: result%d errno%d preps%u\n",kind,result,dm_net_errno(),preps-before);
+ nvn_dirty_remove_range(mem);CHECK(!munmap(mem,page*2));CHECK(!dm_net_close(guest));
+}
+static void socket_option_invalid(void) {
+ size_t page=(size_t)getpagesize();int guest=dm_net_socket(2,1,6);assert(guest>=0);
+ for(int inaccessible=0;inaccessible<2;inaccessible++) {
+  void *mem=mmap(NULL,page,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);assert(mem!=MAP_FAILED);assert(!mprotect(mem,page,inaccessible?PROT_NONE:PROT_READ));
+  unsigned len=4;CHECK(dm_net_sockopt(guest,0xffff,0x1008,mem,&len,0)==-1&&dm_net_errno()==14);
+  CHECK(len==4&&!nvn_dirty_tracked(mem,page));CHECK(!munmap(mem,page));
+ }
+ unsigned len=4;CHECK(dm_net_sockopt(guest,0xffff,0x1008,(void*)1,&len,0)==-1&&dm_net_errno()==14&&!nvn_dirty_tracked((void*)1,4));
+ unsigned before=preps;CHECK(dm_net_sockopt(guest,0xffff,0x1008,NULL,&len,0)==-1&&dm_net_errno()==14&&preps==before);
+ CHECK(dm_net_sockopt(guest,0xffff,0x1008,(void*)1,NULL,0)==-1&&dm_net_errno()==14&&preps==before);
+ CHECK(dm_net_sockopt(-1,0xffff,0x1008,(void*)1,&len,0)==-1&&dm_net_errno()==9&&preps==before);
+ CHECK(dm_net_sockopt(guest,0xffff,0x9999,(void*)1,&len,0)==-1&&dm_net_errno()==92&&preps==before);
+ len=2;CHECK(dm_net_sockopt(guest,0xffff,0x1008,(void*)1,&len,0)==-1&&dm_net_errno()==22&&preps==before);CHECK(!dm_net_close(guest));
+}
+static void socket_option_input(void) {
+ size_t page=(size_t)getpagesize();int *value=mmap(NULL,page,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);assert(value!=MAP_FAILED);*value=1;
+ nvn_dirty_add_range(value,page);nvn_dirty_protect(value,page);uint64_t stamp=nvn_dirty_now();
+ int guest=dm_net_socket(2,1,6);assert(guest>=0);unsigned len=4,before=preps;dm_net_set_errno(77);
+ CHECK(dm_net_sockopt(guest,6,1,value,&len,1)==0&&dm_net_errno()==77);CHECK(preps==before&&!nvn_dirty_since(value,page,stamp)&&*value==1);
+ nvn_dirty_remove_range(value);CHECK(!munmap(value,page));CHECK(!dm_net_close(guest));
+}
+static void socket_options(void) {
+ for(int kind=0;kind<3;kind++)socket_option_output(kind);
+ socket_option_invalid();socket_option_input();
 }

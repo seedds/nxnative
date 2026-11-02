@@ -192,6 +192,13 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Windows:** `DM_ALIAS_WINDOWS=<window MB>` (for example `DM_ALIAS_WINDOWS=512`) logs, every 30 s, the mapped memory of each window of that size in the alias region (`hle_svc.c`); it measured Octopath Traveler 0's allocator pools and Super Smash Bros. Ultimate's battle commits.
 - **Log:** the `[mem]` lines report the alias high-water mark (one line per 256 MB), the total actually mapped (page bitmap) and every heap growth.
 
+### An alias high-water mark near the top is not exhaustion
+
+- **Symptom:** the `[mem]` high-water mark climbs close to the end of the alias region while far less is mapped (SUPER ROBOT WARS Y: +4.27 GB of 4.38 GB with 1.82 GB of live regions), and it looks like the address space is about to run out.
+- **Cause:** none to fix: this is how `VammManager::AllocateAddressRegion` places regions. It walks its tree from the highest region down, takes the first hole that fits and places the region at that hole's low end (read on SDK 18.3.5, `sdk+0x13bfd0`; other implementations not read). So while the top has room, every new region lands just past the highest one and freed holes below stay idle, and the mark rises with address churn, not with use. Only when no hole fits does the function return its failure (`w0 = 2` at `sdk+0x13c11c`).
+- **Fix:** none. To judge the room left, read the live regions and their holes in the `DM_REGIONS` table, not the mark, or run with a smaller alias region (`DM_ALIAS_SIZE`): if the game goes on with the end of the table pinned at the top, the holes are serving it. A real exhaustion is what [Size-aligned regions exhaust the alias address space](#size-aligned-regions-exhaust-the-alias-address-space) and [Size-class alignment doubles Unity's regions](#size-class-alignment-doubles-unitys-regions) describe: a request no hole fits.
+- **Found on:** [SUPER ROBOT WARS Y](../../dm/games/010063301BD50000/README.md#memory): every one of 228 regions placed above the top skipped a hole that would have held it, and with the alias region cut to 3 GB the end stayed at +2.99 GB for about 10 minutes of battle demos with no failure.
+
 ## Engine allocators
 
 ### StandardAllocators over 12 to 62 GB of address space

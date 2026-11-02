@@ -62,7 +62,8 @@ docker build -t nxnative-aot -f docker/Dockerfile.aot docker
 # check, discovery over the corpus, the manifest test, the corpus reference run, the fp cases current, the corpus run natively, the per-function
 # differential test, the JIT fallback's three modes, the threaded programs, the safepoint pause test, the pack caches, the indirect calls'
 # reloads and the standard entries' signature, the line tables, functions split for size, tiers by profile, Windows packs, the analysis on threads,
-# the differential test at tier C, the host's JIT misses as discovery's input, the workers bounded by memory, gap code at tier C); --tmpfs
+# the differential test at tier C, the host's JIT misses as discovery's input, the workers bounded by memory, gap code at tier C, the tables'
+# object through MC); --tmpfs
 # /src/build:exec,uid=$(id -u),gid=$(id -g) keeps the build tree in memory on a machine short of disk
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot sh -c \
   'cmake -S dm/tools/aot -B build/aot -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build/aot && ctest --test-dir build/aot --output-on-failure'
@@ -87,7 +88,8 @@ machine (8 vCPUs) the CTest run takes about 11 minutes (639 s with ABI 3, 18 tes
 profile 7 s; with `ctest -j2` the whole run took 342 s. Phase 5c's `analysis_threads` (21 tests): 42 s; the whole run 681 s on a machine other
 builds were loading (cache 16 s). Phase 5d's `corpus_funcdiff_c` (23 tests): 94 s; the whole run with `ctest -j2` 394 s. "Gap code at tier
 C"'s `gaps` (26 tests): 48 s with the tier rule alone, 84 s since it builds the module both ways (the default and `--gap-tier C`); the whole
-run 811 s, one test at a time, with another agent's builds loading the machine at times.
+run 811 s, one test at a time, with another agent's builds loading the machine at times. "The tables' object through MC"'s `tables` (27
+tests): 33 s; the whole run 948 s, the machine loaded by other builds.
 
 ## Running the harness and the census
 
@@ -2548,7 +2550,8 @@ the corpus packs of this binary.
 then filled. Now the analysis runs on one thread per CPU (its memory hardly depends on them: section 4), and the compile's workers are
 counted once it is done, discovery's functions freed and the heap's free pages returned (`CompileWorkers`, [src/build/pack.cpp](src/build/pack.cpp)):
 as many as the memory then available holds (`MemAvailable` on Linux, `GlobalMemoryStatusEx`'s available physical memory on Windows), beside
-the tables' object at the module's size (32 MiB and 2,560 bytes per function: 2,401 measured), at a worker's measured peak at the units'
+the tables' object at the module's size (32 MiB and 2,560 bytes per function: 2,401 measured; 1,024 since its rows go through MC, "The
+tables' object through MC"), at a worker's measured peak at the units'
 tiers (64 MiB at C and W, 192 at H and H+: section 5), at most one per CPU this process may run on and one per unit, at least one;
 `--workers N` takes N. The log says which: `aot: workers 8 (4236 MiB available, about 64 MiB each, 776 MiB for the tables)` (the
 300,000-function pack) or `aot: workers 3 (--workers)`. A build whose module needs more than the memory available for its analysis alone (64
@@ -2599,7 +2602,8 @@ half on this module's rates (it met them at r = 0.7 on phase 5d's), and the anal
 
 - **The tables' object** (2,401 bytes per function, a whole worker's worth at 150,000 functions and about 1.4 GiB at 600,000): the function map's
   and lookup table's rows are LLVM constants with a relocation each (a GEP, two ptrtoint, a sub and a trunc per row), then the MC layer's
-  fixups and symbols. Emitting them through MC directly would need the object to come out byte for byte the same; not done.
+  fixups and symbols. Done in "The tables' object through MC" below: the rows written by the MC layer directly, the object and the pack byte
+  for byte the same, 750 to 860 bytes per function at its peak and a sixth to an eighth of its time.
 - **The instruction cache per distinct word** (about 100 bytes during discovery: the effects 24, the program's `Code` 16 and its operations,
   the map's slots): a module with the C program's ratio of distinct words would add about 0.6 GiB to the analysis at 31 million
   instructions (section 8). Operations of 6 bytes instead of 12 and a 12-byte `Code` would take a fifth of it.
@@ -2608,6 +2612,160 @@ half on this module's rates (it met them at r = 0.7 on phase 5d's), and the anal
 - **The link**: lld maps every unit's object and writes the shared object through a mapping; on tmpfs (here) both are memory. Not changed.
 - **The 600,000-function module's packs** were not built here (their objects and shared object would not fit this machine's disk or memory);
   the 300,000-function one's at tier W was.
+
+### The tables' object through MC
+
+The tables' object ([src/build/pack.cpp](src/build/pack.cpp), `CompileTables`) is the one object of a pack that every unit shares, compiled
+first on one worker in every pack and every warm repack (it is not cached). It holds code: the NaN chains' helpers the units call
+(`lift::DefineNaNHelpers`), the slow paths' wrappers (`nxaot.dispatch`, `nxaot.cntpct`, `nxaot.safepoint`, and `nxaot.gate` in a module with gate
+sites), `nxaot.jit_entry` and `nxaot.enter`, with their DWARF; and data: the module's base (`nxaot.base`, `.bss`), the empty inline-cache
+descriptor, the lookup table (`.nxaot.lookup`, a 16-byte row per slot, twice the standard entries rounded up to a power of two: {offset, the
+entry's address less the field's, `NXAOT_LOOKUP_SP_KEPT`}), the function map (`.nxaot.fnmap`, a 16-byte row per function: {offset, the body's
+address less the field's, size}), the returns (`.nxaot.returns`, 4 bytes per call site), the gate sites (`.nxaot.gates`, 16 bytes each), the
+tool's string and the descriptor `nxaot_module` (`.data.rel.ro`, ABI 3, with the line table's two symbols, which lines.o defines). Of all its
+rows only the lookup table's and the function map's address fields name a symbol: a body or a standard entry, hidden, defined by another
+unit, so their difference from the field is a relocation (R_X86_64_PC32, addend 0) whatever the layout; keys, sizes, flags, returns and gate
+rows are numbers, and the descriptor's dozen pointers are R_X86_64_64 relocations. Those two tables were LLVM constants, each address field
+`trunc (sub (ptrtoint body), (ptrtoint (gep table, 0, i, 1)))` beside a declaration of every body and standard entry, which code generation
+lowered to an MCExpr tree of five nodes per row: 2,401 bytes per function ("Memory at scale", section 5), 349 MiB at 150,000 functions, about
+1.4 GiB at 600,000 as extrapolated there (1.29 GiB measured below), and 3.2 s at 150,000.
+
+**The emission** ([src/build/tables.cpp](src/build/tables.cpp), [tables.h](src/build/tables.h)). The module keeps the two tables as
+placeholders: the same globals (name, type, internal linkage, constant, section, alignment 16) with a zero initializer, and no declaration of
+the bodies. Code generation is `addPassesToEmitFile`'s (the same TargetPassConfig, AsmPrinter, assembler backend, code emitter and ELF object
+writer), with one difference: the object streamer is `RowStreamer`, an `MCELFStreamer`, which is the streamer LLVM 18 makes for an x86-64
+ELF object (`Target::createMCObjectStreamer`: X86's MC library defines an object streamer of its own for COFF only, `createX86WinCOFFStreamer`,
+and its object target streamer is COFF's). The
+AsmPrinter emits a placeholder as it emitted the table, `.type`, the section, the alignment, the label, then its initializer, which for zeros
+is one `emitZeros(size)`: there, in the table's section and at its size, `RowStreamer::emitFill` writes the rows instead, and the AsmPrinter
+goes on with `.size`. A plain field is the `emitIntValue` the AsmPrinter made of a `ConstantInt`. An address field took `emitValue` of
+`(body - table) + (-offset)`: `MCObjectStreamer::emitValueImpl` registered the symbols, took a data fragment, placed pending labels and a
+`.loc`'s line entry, and added a 4-byte data fixup, which the assembler, finding the subtracted symbol in the fixup's own section, turned into
+R_X86_64_PC32 against the body with addend 0; `RowStreamer::Rel32` takes the same steps with a 4-byte pc-relative fixup of the symbol itself
+(one `MCSymbolRefExpr` per row), which gives the same relocation, and hides the symbol as the AsmPrinter's `.hidden` of the declaration did.
+What had to stay the same for the object to be the same bytes:
+
+- **the order of sections**: a section's place in the object is when it is first entered, and the placeholders are emitted where the tables
+  were (the AsmPrinter's globals, in the module's order);
+- **the order of symbols**: LLVM 18's ELF writer writes them in the order the assembler registered them, not by name (the lookup table's
+  entries in slot order, then the bodies the function map adds, in offset order), so each symbol is registered at its row, where
+  `visitUsedExpr` registered it;
+- **the symbols' attributes**: undefined, global (used in a relocation), hidden (the declarations' `.hidden`, emitted after the globals, by
+  then registered), no type;
+- **the sections' kind**: a constant zero-initialised global with an explicit section is `ReadOnly` (`SHF_ALLOC`, `PROGBITS`, no entry size)
+  as the relocated one was: not BSS (an explicit section), not mergeable (no `unnamed_addr`; at tiers H and H+, whose module pipeline runs
+  GlobalOpt over the tables' object, both keep their address significant, the descriptor holding it);
+- **the relocations**: R_X86_64_PC32, the same offsets and symbols, addend 0, in the order of the fixups.
+
+The object writer writes into the result itself (a `raw_pwrite_stream` over the string, where Finish copied a SmallVector's: 15 MiB at
+150,000 functions). The rows go through MC for x86-64 ELF objects with LLVM 18 (`RowsThroughMC`: another LLVM may give x86 ELF a streamer
+of its own, which `RowStreamer` would then have to derive from; `nxaot.lock` pins 18.1.3), unless `--ir`, `--ir-opt` or `--asm` asks for a listing of the module, whose rows would otherwise be
+zeros; then, and with the test switch `NXAOT_TABLES_IR`, the rows are LLVM constants as before (`TablesThroughMC`), the object the same. A
+Windows pack's tables' object is the same ELF object (its units are compiled for the Linux triple; "Windows packs"), which coff.cpp converts
+with the rest: nothing there changed. The build logs `aot: tables' object: 152383 function map rows and 65536 lookup slots through MC, 0.660 s
+(lift 0.055, optimise 0.004, codegen 0.600), 15756256 bytes` (beside 7 workers; or `as LLVM constants`), and `--memory` notes `pack: the tables' object (its rows in
+MC, the object)`, an estimate from the counts of rows, relocations and symbols (`RowStats::Estimate`: 124.7 MiB at 150,000 functions, where
+122 to 125 were measured below). `--workers 0` reserves 1,024 bytes per
+function for it (2,560 on the IR path: section 7).
+
+**Measured** on the 150,000-function module of section 1 (`gen_bench.py --direct --functions 150000 --seed 4`), the 300,000 (seed 6) and the
+600,000 (seed 5); the tables' object alone (`--workers 1`, the first job, the build stopped once it is compiled), its peak taken inside the
+process (VmHWM reset by `clear_refs` before it and read after it, a measurement build), at a load of 2 to 5 from other agents' builds:
+
+| Module (functions) | as LLVM constants (HEAD's code, `NXAOT_TABLES_IR`): peak growth, seconds | through MC | memory | time |
+|---|---:|---:|---:|---:|
+| 150,000 (152,383), first run | 343.6 MiB (2,364 bytes per function), 3.26 s | 121.8 MiB (838 bytes per function), 0.48 s | 2.8 × less | 6.8 × less |
+| 150,000, second run | 343.4 MiB (2,363), 3.84 s | 124.5 MiB (857), 0.49 s | 2.8 × | 7.8 × |
+| 300,000 (304,766) | 673.9 MiB (2,319), 7.46 s | 218.9 MiB (753), 1.00 s | 3.1 × | 7.5 × |
+| 600,000 (609,527) | 1,323.2 MiB (2,276), 15.52 s | 468.7 MiB (806), 2.35 s | 2.8 × | 6.6 × |
+
+The lines (`TMP` the measurement build's; the 600,000-function module, constants then MC):
+
+```
+  287.60 TMP: tables' object: rss before 837000 KiB, VmHWM during 2191916 KiB, growth 1354916 KiB, 15.519 s
+  276.56 TMP: tables' object: rss before 849316 KiB, VmHWM during 1329292 KiB, growth 479976 KiB, 2.348 s
+```
+
+HEAD's own binary shows the same through its `--memory` lines (150,000 functions, one worker): from `resident 242.9 MiB ... at before the
+compile` through `264.9 MiB ... every body and standard entry declared`, `392.9 MiB ... its tables made` to `peak so far 590.6 MiB, at the
+tables' object: code generated (15 MiB)`, 3.3 s: 348 MiB, as the IR path of this binary; through MC the same stages read `249.2 MiB
+... its kit (no declarations: the rows go through MC)`, `250.4 MiB ... its module made (the rows' placeholders)`, `373.2 MiB ... code
+generated (15 MiB)`, 0.5 s. Of the 122 MiB that remain (a measurement build that noted the resident set at each table's end): the lookup
+table's rows and the code before them 18 MiB, the function map's rows 35 MiB (a symbol per body: the `MCSymbolELF` and its name in the
+MCContext's three string maps, about 200 bytes; a fixup, an `MCSymbolRefExpr`), the ELF object writer 66 MiB (its relocation entries, 48 bytes
+each, its symbol data and string table builder, and the 15 MiB object), all of them what any object with a relocation per row against a
+symbol of its own takes in LLVM's MC layer. At 600,000 functions the tables' object had been the compile's peak and the process's before the
+link (2,141 MiB against the analysis's 1,748); through MC it adds 469 MiB to the 830 MiB the compile starts from.
+
+The whole packs of the 150,000-function module at tier W, HEAD's binary and this one back to back, `--memory` (but the cache's), their
+outputs on tmpfs; seconds (compile wall in parentheses), the process's peak from outside (the link's: lld maps the units' objects and writes
+the pack through a mapping, both memory on tmpfs), the compile stage's peak (`peak so far` at the compile's last line; HEAD's is the tables'
+object's, this one's never passes the analysis's 540 MiB, the tables' object leaving 375 MiB resident), and the largest anonymous resident set
+sampled every 0.1 s. Other agents' builds loaded the machine (the one-minute load at each start), so the whole packs' seconds move by more
+than the tables' object's 3 s of one worker:
+
+| Pack | load | HEAD: seconds | peak | compile's peak | anonymous | load | this one: seconds | peak | compile's peak | anonymous |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 8 workers | 2.0 | 141.4 (117.2) | 949 | 684 | 614 | 7.7 | 217.0 (192.8) | 976 | 538 (the analysis's) | 494 |
+| 8 workers, again | 6.5 | 155.5 (129.8) | 950 | 685 | 629 | 8.8 | 143.7 (118.2) | 947 | 540 (the analysis's) | 495 |
+| 2 workers | 8.7 | 497.3 (456.3) | 934 | 664 | 609 | 2.3 | 503.6 (462.6) | 964 | 522 (the analysis's) | 477 |
+| 8 workers, cold cache | 8.6 | 190.2 (164.1) | 948 | - | 633 | 9.9 | 153.8 (132.1) | 947 | - | 491 |
+| 8 workers, warm cache | 10.4 | 7.21 (4.54) | 948 | - | 694 | 9.4 | 3.92 (1.46) | 947 | - | 376 |
+
+Every one of the ten shared objects is the same 195,120,944 bytes (SHA-256 `b494414c93d2db1f...`). The warm repack, whose units and analysis
+come from the cache, took 7.21 s and 3.92 s:
+
+```
+aot: seconds discover 0.354 plan 0.000 lift 2.226 verify 0.490 optimise 0.020 codegen 0.889 link 1.222; compile wall 4.543 with 8 workers; total 7.207; peak memory 948 MiB
+aot: tables' object: 152383 function map rows and 65536 lookup slots through MC, 0.781 s (lift 0.084, optimise 0.022, codegen 0.675), 15756256 bytes
+aot: seconds discover 0.331 plan 0.000 lift 0.083 verify 0.001 optimise 0.022 codegen 0.675 link 1.043; compile wall 1.460 with 8 workers; total 3.919; peak memory 947 MiB
+```
+
+(its lift, verify, optimise and codegen are the tables' object's alone: 3.6 s of CPU before, 0.8 s now; the units' keys took 3.3 and 3.6 s of
+CPU on the other workers). Carried over by four, a warm repack of 600,000 functions here would take about 16 s, against "Memory at scale"'s 26.
+
+**Identity.** HEAD's binary is 7586d90's, built in the same image. The tables' object itself, through MC and as LLVM constants
+(`NXAOT_TABLES_IR`, `NXAOT_TABLES_OBJECT`): the same bytes in every case of CTest `tables` ([tests/test_tables.py](tests/test_tables.py): fnptr-gcc
+at tiers W, C and H+, with ghccc, as a relocatable object and as a DLL; switch-clang at W and with ghccc at C; the synthetic game module at W
+and H+ and as a DLL; a 3,000-function `--direct` module at W and C, as a relocatable object and as a DLL; and `--ir`, which takes the IR path
+by itself), at 16,000 functions (1,553,688 bytes) and at 150,000 (15,756,256 bytes). The packs against HEAD's binary's:
+
+- the corpus packs of [tests/build_packs.sh](tests/build_packs.sh) (18 NROs, the synthetic game module and the host-function module's two,
+  for Linux and in `win64`): 42 of 42 the same bytes;
+- `test_analysis_threads.py --baseline <HEAD's nxaot> --module <the 16,000-function module>`: `analysis on threads: 22 modules, 220 outputs
+  compared, 0 differ` (each module's discovery both ways, plan, analysis cache entry and pack with 1 and 8 workers, and HEAD's);
+- the 16,000-function module (seed 2): its shared object at tier W (20,230,360 bytes) and at tier C (37,466,832), and its DLL
+  (`--target windows`, 20,095,488 bytes), the same bytes; the 150,000-function module (seed 4): its shared object at tier W the same in the
+  ten builds above (195,120,944 bytes) and at tier C (360,449,376 bytes, `113bb7d6a04f4279...`);
+- the relocatable objects (`-o`) of both modules: every section the same but the units' line marks (`.nxaot_pcs` and `.rela.nxaot_pcs`,
+  the same words in another order), as two runs of HEAD's binary differ from each other (16,000 functions: 300,644 and 376,721 bytes
+  differ against this binary, 300,032 and 376,087 between HEAD's two runs; "What is left").
+
+CTest: `100% tests passed, 0 tests failed out of 27` (`tables` new, 33 s; the run 948 s beside other agents' builds); dm/host's tests with
+this binary's corpus packs (the Linux build, `-DNXAOT_PACKS`): `t_aot_host` 44 checks, `t_aot_module` 33 / 34 / 3 + 14, `t_aot_hostfn` 50 +
+11, `t_host_program` 17 and `t_garena` 32, 5 of 5 passed.
+
+**Not cached.** The tables' object is still compiled in every pack, warm or not: 0.5 to 0.8 s at 150,000 functions on one worker, beside the
+units' keys and reads on the others (the warm repack's compile wall 1.46 s), about 2.3 s alone at 600,000. A cache entry would need a key over
+every input of `CompileTables`: each function's offset, size, standard entry and `writes.sp`, the convention's facts that decide whether a body
+is its own standard entry, the returns, the gate sites, the image's identity, the options and the toolchain; a missed input would give a
+wrong pack with no symptom at pack time. For at most 0.8 s of a 3.9 s warm repack (a fifth, less once the keys and reads are the critical
+path) that risk was not taken: the units' objects and the analysis stay the cache's only entries.
+
+**What is left.**
+
+- **The MC layer's own share** (750 to 860 bytes per function): a symbol per body and per standard entry in the MCContext, a fixup and a
+  relocation entry per row, the ELF writer's symbol table and string table builder, and the object. Less would need the rows' section, its
+  relocations and its symbols written outside LLVM's assembler, an ELF writer of nxaot's own whose object could not be LLVM's byte for byte,
+  or a second object, which would change the pack's layout; not done.
+- **A body that is its own standard entry** (ghccc, a body that takes every passable register and returns the fixed signature's): the
+  lookup table then names the body's symbol, which `HasStdEntry` decides as `StdEntry` did; no input of the tests has one (fnptr-gcc,
+  int_ops-clang and switch-clang, the synthetic game module and the 3,000-function module, with `--cc ghc`, `--correctness` and
+  `--all-entries`: every lookup row names a `.std` symbol), so that branch is not exercised.
+- **The relocatable object (-o) is not deterministic**, before and after this change: two runs of one binary differ in the units' line marks
+  (`.nxaot_pcs`: the same words in another order, and its relocations), because LLVM's `AsmPrinter::emitPCSections` walks a DenseMap keyed by
+  the metadata nodes' addresses. The shared objects and DLLs, which drop that section, and the line table, which nxaot builds from the marks'
+  relocations, are deterministic; CTest `tables` compares a relocatable object's other sections.
 
 ## The lock file
 

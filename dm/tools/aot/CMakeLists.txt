@@ -116,7 +116,9 @@ find_package(LLD REQUIRED CONFIG HINTS "${LLVM_LIBRARY_DIR}/cmake/lld" "${LLVM_D
 find_package(Threads REQUIRED)
 # A Windows pack (--target windows, README.md "Windows packs"): the same ELF objects joined, converted to COFF (src/build/coff.cpp) and linked by lld's
 # COFF driver into a DLL
-add_library(nxaot_build STATIC src/build/plan.cpp src/build/pack.cpp src/build/coff.cpp src/build/analysis_cache.cpp src/cache/cache.cpp)
+# The tables' object's rows go to the MC layer directly (src/build/tables.cpp; README.md, "The tables' object through MC")
+add_library(nxaot_build STATIC src/build/plan.cpp src/build/pack.cpp src/build/tables.cpp src/build/coff.cpp src/build/analysis_cache.cpp
+            src/cache/cache.cpp)
 target_include_directories(nxaot_build SYSTEM PRIVATE ${LLD_INCLUDE_DIRS})
 target_link_libraries(nxaot_build PUBLIC nxaot_analysis nxaot_lift lldELF lldCOFF lldCommon Threads::Threads)
 target_compile_options(nxaot_build PRIVATE ${NXAOT_WARNINGS})
@@ -250,3 +252,9 @@ set_tests_properties(workers PROPERTIES TIMEOUT 900)
 add_test(NAME gaps COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gaps.py" --nxaot $<TARGET_FILE:nxaot>
          --work "${CMAKE_CURRENT_BINARY_DIR}/gaps")
 set_tests_properties(gaps PROPERTIES TIMEOUT 900)
+# The tables' object through MC (aot-recompiler.md 9.4 and 10; README.md, "The tables' object through MC"): the function map's and the lookup
+# table's rows written by the MC layer give the same tables' object and the same pack as the rows as LLVM constants (NXAOT_TABLES_IR, a test
+# switch), over corpus NROs, the synthetic game module and a 3,000-function game-shaped module, at tiers C, W and H+, for Linux and Windows
+add_test(NAME tables COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_tables.py" --nxaot $<TARGET_FILE:nxaot>
+         --work "${CMAKE_CURRENT_BINARY_DIR}/tables")
+set_tests_properties(tables PROPERTIES TIMEOUT 900)

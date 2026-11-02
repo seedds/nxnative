@@ -80,6 +80,7 @@
 #include "build/analysis_cache.h"
 #include "build/coff.h"
 #include "build/plan.h"
+#include "build/tables.h"
 #include "cache/cache.h"
 #include "nxaot/aot_module.h"
 #include "nxaot/guest_state.h"
@@ -102,11 +103,13 @@ double Since(Clock::time_point t) {
 // tables' object and what the compile starts from aside (H+: 98 to 164 MiB with shards of up to 64,000 instructions, its malloc arena's
 // leftovers included, given 192 at H and H+; C and W: about 20 MiB with groups of up to 1,024, given 64 for the parts of split functions of up
 // to 4,096, which that module has none of); and the tables' object, which one worker compiles beside the units and which grows with the
-// module's functions (2,401 bytes per function: its function map's and lookup table's constants, their code, the declarations);
+// module's functions: with its rows through MC (TablesThroughMC) 750 to 860 bytes per function at its peak at 150,000 to 600,000 functions,
+// given 1,024 (the MC layer's symbol, fixup and relocation per row, and the object: README.md, "The tables' object through MC"); as LLVM
+// constants 2,276 to 2,401 (the constants, their code, the declarations), given 2,560;
 // the analysis's own peak per text word (52 to 57 bytes at 150,000 and 600,000 functions, the image and 128 MiB of libraries besides), for the
 // warning when the machine has less than that
 constexpr uint64_t kWorkerPeak[4] = {64ull << 20, 64ull << 20, 192ull << 20, 192ull << 20};  // C, W, H, H+
-constexpr uint64_t kTablesFixed = 32ull << 20, kTablesPerFunction = 2560;
+constexpr uint64_t kTablesFixed = 32ull << 20, kTablesPerFunctionMC = 1024, kTablesPerFunctionIR = 2560;
 constexpr uint64_t kAnalysisPerWord = 64, kAnalysisFixed = 128ull << 20;
 
 // The cache key's format: changed whenever what a key covers changes (UnitKey), or what a unit's object holds for the same key. 2: the gate
@@ -1504,9 +1507,10 @@ void AdaptForWindows(llvm::Module& m) {
     }
 }
 
-// The module's last steps: the verifier, the tier's passes, native code (and assembly for --spills / --asm) into *object
+// The module's last steps: the verifier, the tier's passes, native code (and assembly for --spills / --asm) into *object; with rows, the
+// tables' rows written by the MC layer where the module has their placeholders (tables.h)
 bool Finish(llvm::Module& m, const Common& c, llvm::TargetMachine& tm, Tier tier, std::string* object, UnitStats* st, std::string* asm_text,
-            std::string* error, std::string* ir_text = nullptr) {
+            std::string* error, std::string* ir_text = nullptr, std::vector<RowTable>* rows = nullptr, RowStats* row_stats = nullptr) {
     if (c.o.windows) {
         AdaptForWindows(m);
     }
@@ -1550,18 +1554,24 @@ bool Finish(llvm::Module& m, const Common& c, llvm::TargetMachine& tm, Tier tier
         }
     }
     t = Clock::now();
-    llvm::SmallVector<char, 0> buf;
-    {
-        llvm::raw_svector_ostream out{buf};
-        llvm::legacy::PassManager pm;
-        if (tm.addPassesToEmitFile(pm, out, nullptr, llvm::CodeGenFileType::ObjectFile)) {
-            *error = "the target machine cannot emit an object file";
+    if (rows) {
+        if (!EmitObjectWithRows(m, tm, rows, object, row_stats, error)) {
             return false;
         }
-        pm.run(m);
+    } else {
+        llvm::SmallVector<char, 0> buf;
+        {
+            llvm::raw_svector_ostream out{buf};
+            llvm::legacy::PassManager pm;
+            if (tm.addPassesToEmitFile(pm, out, nullptr, llvm::CodeGenFileType::ObjectFile)) {
+                *error = "the target machine cannot emit an object file";
+                return false;
+            }
+            pm.run(m);
+        }
+        object->assign(buf.data(), buf.size());
     }
     st->t_codegen += Since(t);
-    object->assign(buf.data(), buf.size());
     st->object_bytes = object->size();
     if (auto obj = llvm::object::ObjectFile::createObjectFile(llvm::MemoryBufferRef(llvm::StringRef(*object), m.getName()))) {
         for (const auto& sec : (*obj)->sections()) {
@@ -1878,6 +1888,13 @@ bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const Unit& u, std::s
 
 // ---- The tables' object: the lookup hash, the function map, the returns, the trampoline, the descriptor, and the shared code ----
 
+// Whether the function map's and the lookup table's rows go through the MC layer (tables.h; README.md, "The tables' object through MC"): for
+// x86-64 ELF objects with LLVM 18, unless a listing of the module asks for the rows as IR (--ir, --ir-opt) or assembly (--asm), or the test
+// switch NXAOT_TABLES_IR asks for the IR path; the object is the same either way
+bool TablesThroughMC(const BuildOptions& o, const llvm::Triple& triple) {
+    return RowsThroughMC(triple) && o.ir_path.empty() && o.asm_path.empty() && !std::getenv("NXAOT_TABLES_IR");
+}
+
 bool CompileTables(const Common& c, llvm::TargetMachine& tm, std::string* object, UnitStats* st, BuildStats* s, std::string* ir_text,
                    std::string* asm_text, std::string* error) {
     const BuildOptions& o = c.o;
@@ -1908,21 +1925,33 @@ bool CompileTables(const Common& c, llvm::TargetMachine& tm, std::string* object
         lift::DefineNaNHelpers(*m, lo);
     }
 
-    // Every body and standard entry, declared: the units define them
+    // The function map's and the lookup table's rows (README.md, "The tables' object through MC"): written by the MC layer where the module
+    // has zero-initialised placeholders of their type, section and alignment (tables.h: the same object, with no declaration of the bodies and
+    // no LLVM constants per row), or, on the IR path, LLVM constants against a declaration of every body and standard entry. The IR path
+    // stays for the listings of the module (--ir, --ir-opt, --asm: the rows as text), for other targets than x86-64 ELF with LLVM 18
+    // (RowsThroughMC), and for the test switch NXAOT_TABLES_IR, with which CTest tables compares the two objects (TablesThroughMC)
+    const bool through_mc = TablesThroughMC(o, tm.getTargetTriple());
     std::map<uint64_t, llvm::Function*> bodies, std_entries;
     for (const auto& [entry, ff] : plan.fns) {
-        bodies[entry] = Body(*m, c, entry, ff);
+        if (!through_mc) {
+            bodies[entry] = Body(*m, c, entry, ff);  // every body and standard entry, declared: the units define them
+        }
         s->words += ff.words;
         ++s->tier_functions[static_cast<size_t>(c.TierOf(entry))];
     }
     s->functions = plan.fns.size();
+    uint64_t standard_entries = 0;
     for (const auto& [entry, ff] : plan.fns) {
         if (ff.host_callable) {
-            std_entries[entry] = StdEntry(k, c, entry, ff, bodies[entry], false);
+            ++standard_entries;
+            if (!through_mc) {
+                std_entries[entry] = StdEntry(k, c, entry, ff, bodies[entry], false);
+            }
         }
     }
-    s->standard_entries = std_entries.size();
-    memory::Rss("the tables' object: every body and standard entry declared");
+    s->standard_entries = standard_entries;
+    memory::Rss(through_mc ? "the tables' object: its kit (no declarations: the rows go through MC)"
+                           : "the tables' object: every body and standard entry declared");
     for (const auto& [entry, ff] : plan.fns) {
         s->tables += ff.tables.size();
         s->resume_sites += ff.continuations.size() + ff.pads.size();
@@ -1937,40 +1966,76 @@ bool CompileTables(const Common& c, llvm::TargetMachine& tm, std::string* object
         return llvm::ConstantExpr::getInBoundsGetElementPtr(ty, table, llvm::ArrayRef<llvm::Constant*>{b.getInt64(0), b.getInt64(i), b.getInt32(1)});
     };
     uint32_t slots = 2;
-    while (slots < 2 * std_entries.size()) {
+    while (slots < 2 * standard_entries) {
         slots *= 2;
     }
     s->lookup_slots = slots;
+    // The lookup table's slots (include/nxaot/aot_module.h): every standard entry by nxaot_lookup_hash of its offset and linear probing, in
+    // the order of the offsets; a slot's row {offset, the entry's address less the field's, NXAOT_LOOKUP_SP_KEPT when the function keeps sp}
+    std::vector<uint64_t> keys(slots, NXAOT_LOOKUP_EMPTY);
+    for (const auto& [entry, ff] : plan.fns) {
+        if (!ff.host_callable) {
+            continue;
+        }
+        uint32_t h = nxaot_lookup_hash(entry, slots - 1);
+        while (keys[h] != NXAOT_LOOKUP_EMPTY) {
+            h = (h + 1) & (slots - 1);
+        }
+        keys[h] = entry;
+    }
+    const auto slot_flags = [&](const auto& ff) { return ff != plan.fns.end() && !ff->second.writes.sp ? NXAOT_LOOKUP_SP_KEPT : 0u; };
     auto* entry_ty = llvm::StructType::get(ctx, {i64, i32, i32});
     auto* lookup_ty = llvm::ArrayType::get(entry_ty, slots);
     auto* lookup = new llvm::GlobalVariable(*m, lookup_ty, true, llvm::GlobalValue::InternalLinkage, nullptr, "nxaot.lookup");
     lookup->setSection(".nxaot.lookup");
     lookup->setAlignment(llvm::Align(16));
-    {
-        std::vector<uint64_t> keys(slots, NXAOT_LOOKUP_EMPTY);
-        std::vector<llvm::Function*> targets(slots, nullptr);
-        for (const auto& [entry, fn] : std_entries) {
-            uint32_t h = nxaot_lookup_hash(entry, slots - 1);
-            while (keys[h] != NXAOT_LOOKUP_EMPTY) {
-                h = (h + 1) & (slots - 1);
+    auto* fns_ty = llvm::ArrayType::get(entry_ty, plan.fns.size());
+    std::vector<RowTable> row_tables;
+    RowStats row_stats;
+    if (through_mc) {
+        lookup->setInitializer(llvm::ConstantAggregateZero::get(lookup_ty));
+        row_tables.push_back(RowTable{".nxaot.lookup", 16ull * slots, [&](RowWriter& w) {
+            std::string name;
+            for (uint32_t i = 0; i < slots; ++i) {
+                const auto ff = keys[i] == NXAOT_LOOKUP_EMPTY ? plan.fns.end() : plan.fns.find(keys[i]);
+                w.Int(keys[i], 8);
+                if (ff != plan.fns.end()) {
+                    name = BodyName(c, keys[i]);
+                    if (HasStdEntry(c, ff->second)) {
+                        name += ".std";  // StdEntry's name
+                    }
+                    w.Rel32(name);
+                } else {
+                    w.Int(0, 4);
+                }
+                w.Int(slot_flags(ff), 4);
             }
-            keys[h] = entry;
-            targets[h] = fn;
-        }
+        }});
+        row_tables.push_back(RowTable{".nxaot.fnmap", 16ull * plan.fns.size(), [&](RowWriter& w) {
+            std::string name;
+            for (const auto& [entry, ff] : plan.fns) {
+                w.Int(entry, 8);
+                name = BodyName(c, entry);
+                w.Rel32(name);
+                w.Int(static_cast<uint32_t>(ff.size), 4);
+            }
+        }});
+    } else {
         std::vector<llvm::Constant*> rows;
         for (uint32_t i = 0; i < slots; ++i) {
             llvm::Constant* field = field_of(lookup_ty, lookup, i);
             const auto ff = keys[i] == NXAOT_LOOKUP_EMPTY ? plan.fns.end() : plan.fns.find(keys[i]);
-            const uint32_t flags = ff != plan.fns.end() && !ff->second.writes.sp ? NXAOT_LOOKUP_SP_KEPT : 0u;
-            rows.push_back(llvm::ConstantStruct::get(entry_ty, {b.getInt64(keys[i]), targets[i] ? rel(targets[i], field) : b.getInt32(0), b.getInt32(flags)}));
+            llvm::Function* target = ff != plan.fns.end() ? std_entries[keys[i]] : nullptr;
+            rows.push_back(llvm::ConstantStruct::get(entry_ty, {b.getInt64(keys[i]), target ? rel(target, field) : b.getInt32(0), b.getInt32(slot_flags(ff))}));
         }
         lookup->setInitializer(llvm::ConstantArray::get(lookup_ty, rows));
     }
-    auto* fns_ty = llvm::ArrayType::get(entry_ty, plan.fns.size());
     auto* fnmap = new llvm::GlobalVariable(*m, fns_ty, true, llvm::GlobalValue::InternalLinkage, nullptr, "nxaot.fns");
     fnmap->setSection(".nxaot.fnmap");
     fnmap->setAlignment(llvm::Align(16));
-    {
+    if (through_mc) {
+        fnmap->setInitializer(llvm::ConstantAggregateZero::get(fns_ty));
+    } else {
         std::vector<llvm::Constant*> rows;
         uint64_t i = 0;
         for (const auto& [entry, ff] : plan.fns) {
@@ -2102,9 +2167,24 @@ bool CompileTables(const Common& c, llvm::TargetMachine& tm, std::string* object
         llvm::raw_string_ostream out{*ir_text};
         m->print(out, nullptr);
     }
-    memory::Rss("the tables' object: its tables made");
-    const bool ok = Finish(*m, c, tm, c.o.tier, object, st, asm_text, error, ir_text);
+    memory::Rss(through_mc ? "the tables' object: its module made (the rows' placeholders)" : "the tables' object: its tables made");
+    const bool ok = Finish(*m, c, tm, c.o.tier, object, st, asm_text, error, ir_text, through_mc ? &row_tables : nullptr, &row_stats);
     memory::Rss("the tables' object: code generated (" + std::to_string(object->size() >> 20) + " MiB)");
+    if (ok && through_mc && memory::On()) {
+        // The MC layer's share for the rows at code generation's end (RowStats::Estimate), the slots' keys, and the object
+        memory::Note("pack: the tables' object (its rows in MC, the object)", row_stats.Estimate() + memory::Of(keys) + memory::Of(*object),
+                     "the tables' object's code generation");
+    }
+    if (ok) {
+        char line[320];
+        std::snprintf(line, sizeof line,
+                      "aot: tables' object: %llu function map rows and %llu lookup slots %s, %.3f s (lift %.3f, optimise %.3f, codegen %.3f), "
+                      "%llu bytes",
+                      static_cast<unsigned long long>(plan.fns.size()), static_cast<unsigned long long>(slots),
+                      through_mc ? "through MC" : "as LLVM constants", Since(t0), st->t_lift + st->t_verify, st->t_opt, st->t_codegen,
+                      static_cast<unsigned long long>(object->size()));
+        st->notes.push_back(line);
+    }
     return ok;
 }
 
@@ -2523,7 +2603,8 @@ unsigned CompileWorkers(const BuildOptions& o, size_t units, const std::set<Tier
     } else {
         uint64_t each = 0;
         for (const Tier t : tiers) each = std::max(each, kWorkerPeak[static_cast<size_t>(t)]);
-        const uint64_t tables = kTablesFixed + kTablesPerFunction * functions;
+        const bool mc = TablesThroughMC(o, llvm::Triple(llvm::sys::getProcessTriple()));  // MakeTarget's triple
+        const uint64_t tables = kTablesFixed + (mc ? kTablesPerFunctionMC : kTablesPerFunctionIR) * functions;
         const uint64_t available = MemoryAvailable();
         n = !available ? cpus : available > tables ? static_cast<unsigned>(std::min<uint64_t>(cpus, (available - tables) / each)) : 0;
         n = std::max<unsigned>(1, std::min<uint64_t>(n, units + 1));
@@ -3025,6 +3106,10 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
                                   o.asm_path.empty() ? nullptr : &res.asm_text, &res.error)) {
                     res.path = work_dir + "/tables.o";
                     WriteFile(res.path, object, &res.error);
+                    // A copy of the tables' object for CTest tables, which compares it with the IR path's (NXAOT_TABLES_IR): a test switch
+                    if (const char* copy = std::getenv("NXAOT_TABLES_OBJECT"); copy && *copy && res.error.empty()) {
+                        WriteFile(copy, object, &res.error);
+                    }
                 }
                 memory::Rss("the tables' object compiled (the first job: alone with one worker)");
                 continue;

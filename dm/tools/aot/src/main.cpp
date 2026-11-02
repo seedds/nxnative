@@ -44,7 +44,10 @@
 //                                                     image SHA-256 is the module's (else a [RED] line and it is ignored); --no-root (tests): an address
 //                                                     none of discovery's own sources may make an entry, so that a miss naming it brings it back;
 //                                                     --memory: the tables' peaks and the resident set at each stage (the link's included), as
-//                                                     for discover
+//                                                     for discover. The tables' object's function map and lookup table go to the MC layer
+//                                                     directly (`aot: tables' object: ... through MC`; README.md, "The tables' object through
+//                                                     MC"); NXAOT_TABLES_IR, a test switch, takes them as LLVM constants, as --ir and --asm do,
+//                                                     and NXAOT_TABLES_OBJECT=<file> copies the tables' object there (CTest tables)
 //   nxaot lines <pack.so | pack.dll> <module.nro | name.aot.tsv>
 //                                                     the line table of a pack against its code and its module (design 3.5; CTest lines): every
 //                                                     entry's native address must start an x86 instruction that accesses memory, inside the

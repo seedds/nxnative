@@ -16,7 +16,7 @@
 #   or in a terminal: python3 scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> [options] (values given on the command line override "Settings", -h lists every option;
 #   without keyboard input a missing value is not asked for but reported as an error; exit code 0 on success, 1 on error, 130 when interrupted). Command-line options entered in Spyder's run configuration work the same way.
 # Uses only three things: this repository, a folder holding one game's NSPs (the base game, with or without an update; DLC NSPs, when present, are packed too and unlock the add-on content already in the game), and prod.keys.
-#   Instead of NSPs, the folder may hold the game's files as a dump (base/, updates/<version>/, dlc/; scripts/pack_dump.py lists the layout): that needs no prod.keys, and a game profile, since the survey reads NSPs. A dump has no control data: the name comes from the profile, and the app has no icon.
+#   Instead of NSPs, the folder may hold the game's files as a dump (base/, updates/<version>/, dlc/; scripts/pack_dump.py lists the layout; an update without base/ is the whole game): that needs no prod.keys. A dump has no control data: the name comes from the profile (a provisional one takes the folder's name), and the app has no icon.
 #   The newest version in the folder is packed. A version the profile registers (with every version in its shader_versions in the folder) is built from the profile as it is; any other
 #   version (the base game alone, another update) from a profile derived from it in <build folder>/profile: the same settings, and the version's own shaders (derive_profile).
 # Every intermediate file is under the build folder, <id>_build/ in the NSP folder unless --work-dir / WORK_DIR names another: nsp/ (NSZ / XCZ files converted to NSP / XCI with nsz -D, kept for the next build; pip install nsz, or an nsz 5.0 or later executable on PATH), extract/ (the extracted game files, kept for the next build unless KEEP_EXTRACTED / --no-keep-extracted), aoc/ (one RomFS image per DLC index), tools/ (nx_extract, and the Mac host for a run-time shader capture), patched_*/, shader/ (shader package and caches, kept so the next build is fast), logs/ (each step's full output), tmp/, ipa/. The finished IPA also goes beside the build folder by default (the NSP folder, without --work-dir).
@@ -612,7 +612,7 @@ def vnum(ver):   # 'v655360' → 655360
 def nsp_versions(fam, builds):
     """The versions the folder holds: {version: its update NSP, or None for v0 (the base game alone)}. An update is known by the [v<N>] tag in its file name; a single update without one
     is taken for the newest update the profile registers (its build IDs are checked once extracted), and is left out when the profile registers none or other updates are there"""
-    out = {'v0': None}
+    out = {'v0': None} if fam['base'] else {}   # a dump may hold an update alone (pack_dump.py)
     for v, p in fam['updates']:
         if v is not None: out[f'v{v}'] = p
     loose = [p for v, p in fam['updates'] if v is None]
@@ -624,7 +624,7 @@ def nsp_versions(fam, builds):
 
 def pick_nsps(fam, have, versions):
     """For each version to extract, (base game, update or None): v0 = the base game alone, v<N> = the base game + the update with version number N"""
-    say(f'base: {fam["base"].name}')
+    if fam['base']: say(f'base: {fam["base"].name}')
     out = {}
     for ver in versions:
         if ver not in have: raise BuildError(f'no NSP for update {ver} (the game profile needs these versions: {", ".join(versions)})')
@@ -655,6 +655,10 @@ def same_build(nsp_dir, app, fam, keys, repo, env):
     0100300012F2A000, GitHub issue #114): main's build ID of the base game with its newest update, then of the base game alone, against every profile's build rows (game.py by_build).
     Only the code modules are extracted (a RomFS manifest, no game files written). Returns (profile, version, main build ID) or None"""
     import game as gamemod   # dm/games (main put it on the path)
+    if fam.get('dump'):   # the code modules are files already: the newest version's main
+        src = dump_source(fam)
+        bid = build_id(src / 'exefs/main'); g = gamemod.by_build(bid)
+        return (g, next(ver for ver, b in g.builds().items() if b.get('main') == bid), bid) if g else None
     work = nsp_dir / f'{app:016X}_survey'; logs = work / 'logs'
     PROG.plan(1); PROG.stage('build ID lookup', step='build nx_extract')
     nx = build_nx_extract(repo, work, logs, env)
@@ -692,27 +696,36 @@ def check_versions_aarch64(dirs, logs, g, name):   # every extracted version of 
 def survey(nsp_dir, app, fam, keys, repo, py, env):
     work = nsp_dir / f'{app:016X}_survey'; logs, ex = work / 'logs', work / 'extract'
     say(f'no game profile for {app:016X}: surveying first')
-    PROG.plan(4)   # nx_extract, the manifest, the code modules (reading them, then the rewrite-site census), the imports
-    PROG.stage('survey: build nx_extract')
-    nx = build_nx_extract(repo, work, logs, env)
+    PROG.plan(3 + (not fam.get('dump')))   # nx_extract, the manifest, the code modules (reading them, then the rewrite-site census), the imports; a dump's files are read where they are
     ups = sorted(fam['updates'], key=lambda u: u[0] or 0)
     upd = ups[-1][1] if ups else None
-    tmp = work / 'extract.partial'; rmtree(tmp)
-    def listed():   # files in the manifest so far
-        try: return {'done': (tmp / 'romfs_manifest.tsv').read_bytes().count(b'\n'), 'unit': 'files'}
-        except OSError: return None
-    PROG.stage('survey: RomFS manifest', poll=listed)
-    say(f'extracting the code modules and a RomFS manifest (no game files written) → {ex}')
-    run([nx, keys, fam['base'], upd or '-', tmp, '--manifest', '--app', f'{app:016x}'] + (['--allow-damaged'] if ALLOW_DAMAGED else []), logs / 'extract.log')
-    swap_in(tmp, ex)
-    PROG.stage('survey: code modules', step='reading')
-    xlog = (logs / 'extract.log').read_text(errors='replace')
+    if fam.get('dump'):   # the code modules are copied (clones), the RomFS is read in place: its files take the manifest's place, its NROs the manifest pass's romfs_nro/
+        src = dump_source(fam); rmtree(ex)
+        PROG.stage('survey: code modules', step='copying')
+        pack_dump.exefs(src / 'exefs', ex / 'ExeFS')
+        manifest, nro_dir, xlog, title = src / 'romfs', src / 'romfs', '', nsp_dir.name   # no control data: the folder names the game
+        size = lambda p: tree_size(p)[1]
+    else:
+        PROG.stage('survey: build nx_extract')
+        nx = build_nx_extract(repo, work, logs, env)
+        tmp = work / 'extract.partial'; rmtree(tmp)
+        def listed():   # files in the manifest so far
+            try: return {'done': (tmp / 'romfs_manifest.tsv').read_bytes().count(b'\n'), 'unit': 'files'}
+            except OSError: return None
+        PROG.stage('survey: RomFS manifest', poll=listed)
+        say(f'extracting the code modules and a RomFS manifest (no game files written) → {ex}')
+        run([nx, keys, fam['base'], upd or '-', tmp, '--manifest', '--app', f'{app:016x}'] + (['--allow-damaged'] if ALLOW_DAMAGED else []), logs / 'extract.log')
+        swap_in(tmp, ex)
+        PROG.stage('survey: code modules', step='reading')
+        manifest, nro_dir, xlog, title = ex / 'romfs_manifest.tsv', ex / 'romfs_nro', (logs / 'extract.log').read_text(errors='replace'), nacp.name(ex / 'control.nacp')
+        size = lambda p: p.stat().st_size
     dv = re.search(r'display version (\S+)', xlog)
-    check_aarch64(ex / 'ExeFS', f'{nacp.name(ex / "control.nacp") or "?"} ({app:016X})')
-    F = pg.facts_of(ex / 'ExeFS', ex / 'romfs_manifest.tsv'); mods, rom = F['mods'], F['romfs']   # dm/games/profile_guess.py: what the code modules and the RomFS show
-    R = [f'# Survey: {nacp.name(ex / "control.nacp") or "?"} ({app:016X})', '', f'- display version: {dv.group(1) if dv else "?"}', f'- base: `{fam["base"].name}` ({fam["base"].stat().st_size / 2**30:.2f} GB)']
-    R += [f'- update: `{p.name}` (v{v}, {p.stat().st_size / 2**30:.2f} GB){" (used for this survey)" if p == upd else ""}' for v, p in ups]
-    R += [f'- DLC: `{p.name}` ({p.stat().st_size / 1024:.0f} KB{", licence only, no content" if p.stat().st_size < 1 << 20 else ""})' for _, _, p in fam['dlc']]
+    check_aarch64(ex / 'ExeFS', f'{title or "?"} ({app:016X})')
+    F = pg.facts_of(ex / 'ExeFS', manifest); mods, rom = F['mods'], F['romfs']   # dm/games/profile_guess.py: what the code modules and the RomFS show
+    R = [f'# Survey: {title or "?"} ({app:016X})', '', f'- display version: {dv.group(1) if dv else "?"}']
+    if fam['base']: R.append(f'- base: `{fam["base"].name}` ({size(fam["base"]) / 2**30:.2f} GB)')
+    R += [f'- update: `{p.name}` (v{v}, {size(p) / 2**30:.2f} GB){" (used for this survey)" if p == upd else ""}' for v, p in ups]
+    R += [f'- DLC: `{p.name}` ({size(p) / 1024:.0f} KB{", licence only, no content" if size(p) < 1 << 20 else ""})' for _, _, p in fam['dlc']]
 
     # Code modules
     R += ['', '## Code modules', '', '| module | what | build ID | text / ro / data (MB) | bss (MB) |', '|---|---|---|---|---|']
@@ -747,12 +760,12 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
     # What it means for a port
     G = pg.guess(F)   # the provisional profile's keys (write_profile writes the same)
     keep = G['modules'][0].split()   # how the build will get the shaders (decided again from the extraction at build time; the survey has only a RomFS manifest, so Unreal paks are guessed from main's markers)
-    nros = {p.name: p for p in sorted((ex / 'romfs_nro').rglob('*.nro'))}   # the manifest pass writes the NROs (their imports decide the API and the modules: Portal 2's main is SDL with EGL, its Source engine NROs draw with NVN)
+    nros = {p.name: p for p in sorted(nro_dir.rglob('*.nro'))}   # the manifest pass writes the NROs (their imports decide the API and the modules: Portal 2's main is SDL with EGL, its Source engine NROs draw with NVN)
     nro_add = pg.nro_modules(ex / 'ExeFS', nros, keep) if nros else {}
     S = pg.shader_sources(mods['main']['imports'], F['glsl_src'], [m for m in sorted({*keep, *nro_add}, key=pg.load_order) if 'glslcCompile' in mods[m]['exports']], rom['mags']['SPIR-V'],
                           rom['exts'].get('.pak', 0) if F.get('main_markers', set()) & {'Unreal', 'Unreal 4'} else 0, rom['mags']['Trinity pack'], gl_names=F.get('gl_names', 0),
                           gl_src=F.get('gl_src', 0), gl_files=sum(rom['exts'].get(e, 0) for e in pg.GL_FILES), oodle_pkz=rom['mags']['PlatinumGames PKZ'],   # the manifest has no name tables: every PKZ counts
-                          nro_imports=frozenset(pg.romfs_nro_imports(ex / 'romfs_nro')))
+                          nro_imports=frozenset(pg.romfs_nro_imports(nro_dir)))
     vulkan, gl = S['graphics'][0] == 'vulkan', S['graphics'][0] == 'gl'
     notes = []
     if not vulkan and not gl and 'nvnBootstrapLoader' not in mods['main']['imports']: notes.append('main imports neither nvnBootstrapLoader nor Vulkan functions nor OpenGL through EGL: the host implements only NVN, Vulkan and OpenGL')
@@ -792,7 +805,7 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
     for n in notes: say(n)
     say(f'survey report: {work / "survey.md"}')
     upv = ups[-1][0] if ups else None
-    return {'F': F, 'name': nacp.name(ex / 'control.nacp') or '', 'display': dv.group(1) if dv else '?', 'version': 'v0' if upd is None else f'v{upv or 1}'}
+    return {'F': F, 'name': title or '', 'display': dv.group(1) if dv else '?', 'version': 'v0' if upd is None else f'v{upv or 1}'}
 
 
 # ---- Provisional profile (a game with no profile in dm/games) ----
@@ -1110,7 +1123,11 @@ def scan_dump(dump, want=None):   # a dump folder as scan_nsps gives a folder of
     try: app, vers, dlc = pack_dump.scan(dump)
     except pack_dump.Error as e: raise BuildError(str(e)) from e
     if want is not None and want != app: raise BuildError(f'no game {want:016X} (--title-id / TITLE_ID) in {dump}, which holds {app:016X}')
-    return app, {'base': dump / 'base', 'updates': sorted(vers.items()), 'dlc': [(tid, None, roms) for tid, roms in dlc.items()], 'dump': True}
+    return app, {'base': dump / 'base' if pack_dump.is_version(dump / 'base') else None, 'updates': sorted(vers.items()), 'dlc': [(tid, None, roms) for tid, roms in dlc.items()], 'dump': True}
+
+
+def dump_source(fam):   # the folder a dump's survey and build ID lookup read: the newest update, else the base game
+    return max(fam['updates'], key=lambda u: u[0])[1] if fam['updates'] else fam['base']
 
 
 def extract_dump(ex, name, src, app):   # one version of a dump folder (src: base/ or updates/<version>/) into the layout extract makes; the code modules and the image are kept while unchanged
@@ -2469,7 +2486,6 @@ def main(args=None):
         fam = decompress_nsz(nsp_dir, app, fam, keys, env, work_dir(args))
     force =args.provisional or PROVISIONAL   # a provisional profile even when dm/games has one (testing the guesses)
     g, provisional, shadowed = None if force else gamemod.by_title(app), False, False
-    if dump and (force or g is None): raise BuildError(f'a dump folder packs only a game with a profile, and {app:016X} ' + ('asked for a provisional one (--provisional)' if g else 'has none') + ': the survey that makes a provisional profile reads NSPs')
     alias = None if force or g else same_build(nsp_dir, app, fam, keys, repo, env)   # a known build under another title ID: packed from a profile derived from that build's
     if alias:
         g = alias[0]; say(f'no game profile for {app:016X}, but its main build {alias[2]} is game profile {g.id}\'s {alias[1]} ({g.get("name", "")}) under another title ID')

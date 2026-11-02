@@ -1627,7 +1627,7 @@ def heap_check(repo, d, patched, work, env, logs, g):
         return time.time() - seen.get('nnmain', time.time()) > HEAP_CHECK_NNMAIN_SECS
     rc = boot_mac(host, patched, henv, rd, log, HEAP_CHECK_SECS, done)
     text = log.read_text(errors='replace'); rmtree(rd)
-    sig = {k: v for k, v in pg.heap_signals(text, g).items() if g.get(k, '') != v[0]}
+    sig = {k: v for k, v in pg.heap_signals(text, g).items() if g.get(k, '') != v[0]} | pg.depth_signal(text, g)   # the boot often passes the game's depth mode call too
     for k, (v, why) in sig.items(): say(f'heap check: {k} {v}: {why}')
     m = re.search(r'\[mem\] heap ([0-9.]+ GB)', text)
     how = ('the heap request did not fit' if 'SetHeapSize OOM' in text else f'heap {m.group(1)}' if m else 'no heap set' if '>>> nnMain' in text
@@ -1681,6 +1681,12 @@ def region_check(repo, d, patched, work, env, logs, g):
         return time.time() - seen.get('nnmain', time.time()) > REGION_CHECK_NNMAIN_SECS
     rc = boot_mac(host, patched, henv, rd, log, HEAP_CHECK_SECS + REGION_CHECK_NNMAIN_SECS, done)
     rmtree(rd)
+    try: ran = log.read_text(errors='replace')
+    except OSError: ran = ''
+    depth = pg.depth_signal(ran, g)   # before the shader steps and the prebuild, which take the mode from the profile
+    if depth:
+        g = set_keys(g, depth, 'Address region check')
+        for k, (v, why) in depth.items(): say(f'address regions: {k} {v}: {why}')
     try: rows = table.read_text(errors='replace')
     except OSError: rows = ''
     import nso_syms
@@ -2223,7 +2229,7 @@ def mac_run(work, game, patched, host, font, msl, aoc, gfx, lang, env, logs, g, 
         # 12,755 pairs took about 3 minutes on an M2 Max the first time. It takes the depth mode from the profile's depth_mode key (default gl, NVN's); with a wrong one the game builds its bases again in the app
         PROG.add(1); PROG.stage('Pipeline prebuild', step='building')
         penv = dict(env, **{k: str(v) for k, v in renv.items()}, DM_PSO_PREBUILD='tool')
-        if g.get('depth_mode', 'gl') == 'zero': penv['DM_PSO_PREBUILD_DEPTH'] = 'zero'   # a game that sets the near = 0 depth mode (the profile says so: the host learns it only at run time)
+        if g.get('depth_mode', 'gl') == 'zero': penv['DM_PSO_PREBUILD_DEPTH'] = 'zero'   # a game that sets the near = 0 depth mode (the profile says so: the host learns it only at run time, which for a provisional or derived profile includes its check boots)
         run([host], logs / 'pso_prebuild.log', env=penv, cwd=rd)
         PROG.end()
     q = lambda v: shlex.quote(str(v))

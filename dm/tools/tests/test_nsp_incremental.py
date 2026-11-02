@@ -213,6 +213,32 @@ class DeriveProfile(Base):
                 nsp.heap_check(REPO, self.ex, self.tmp / 'patched', self.tmp / 'work', {}, logs, g)
         self.assertEqual(g.table('game.tsv').read_bytes(), before)
 
+    def check_boot(self, name, log):   # a check on the derived profile, whose boot writes this log; the profile after it
+        logs = self.tmp / 'logs'; logs.mkdir(exist_ok=True); patched = self.tmp / 'work/patched_v65536'
+        def boot(*args): (logs / f'{name}_check.log').write_text(log); return 0
+        with mock.patch.object(nsp, 'build_mac_host'), mock.patch.object(nsp, 'boot_mac', side_effect=boot):
+            if name == 'heap': return nsp.heap_check(REPO, self.ex, patched, self.tmp / 'work', {}, logs, game.Game(self.pdir))
+            return nsp.region_check(REPO, self.ex, patched, self.tmp / 'work', {}, logs, game.Game(self.pdir))
+
+    def test_a_check_boot_sets_the_depth_mode_the_game_calls(self):   # before the prebuild reads it (Super Mario RPG: 0 of 34 lookups hit an archive made at the default mode)
+        with (self.src / 'game.tsv').open('a') as f: f.write('mem_alias\t0x80000000\nmem_reserve\t0x140000000\nmem_stack\t0x10000000\napp_pool\t0x40000000\n')
+        for name in ('heap', 'region'):
+            with self.subTest(check=name):
+                self.derive()
+                self.assertEqual(self.check_boot(name, '>>> nnMain\n').get('depth_mode', 'none'), 'none')   # no call: unknown, not GL
+                g = self.check_boot(name, '>>> nnMain\n[dm] [nvn] depth mode near=0 (as D3D / Metal)\n')
+                self.assertEqual(g.get('depth_mode'), 'zero')
+                self.assertEqual(g.get('mem_alias'), '0x80000000')   # the keys around it stay
+                g = self.check_boot(name, '>>> nnMain\n')   # a later boot that stops earlier keeps what an earlier one saw
+                self.assertEqual(g.get('depth_mode'), 'zero')
+                self.assertEqual([k for k, _ in g.rows].count('depth_mode'), 1)
+                (self.pdir / 'game.tsv').unlink()   # the next check derives afresh
+
+    def test_depth_mode_is_no_shader_input(self):   # a check that sets it must not schedule the game's shaders again
+        self.derive(); before = dmsh_chain.inputs(game.Game(self.pdir))
+        g = nsp.set_keys(game.Game(self.pdir), {'depth_mode': ('zero', 'seen')}, 'Address region check')
+        self.assertEqual(dmsh_chain.inputs(g), before)
+
     def test_a_provisional_profile_moves_to_dm_games_with_its_shader_inputs(self):   # Super Mario RPG: "(provisional profile)" in the note scheduled all 82,032 libraries again for identical shaders
         F = {'romfs': {'dirs': collections.Counter(), 'extb': {}, 'exts': {}, 'extc': {}, 'biggest': (0, 'big.bin')}, 'sdk': '14', 'program': None, 'mods': {'main': {'bid': BID}}}
         pdir = self.tmp / 'provisional' / f'{TID:016X}'

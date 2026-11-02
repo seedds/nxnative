@@ -35,6 +35,7 @@ Update 1.0.1 (v65536) over the base game, SDK 14.3.1. Unity 2021.3.15f1 IL2CPP w
 
 ## Found on this game
 
+- The first NSP script run prebuilt its pipeline archive at the default depth mode: [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree). The check boots now set the key.
 - Calls `nvnCommandBufferSetSubpixelPrecisionBias` and `nvnCommandBufferSetConservativeRasterDilate` repeatedly (thousands of times in six minutes) without turning conservative rasterization on, on the route tested: see [Conservative rasterization remains unimplemented](../../../docs/reference/rendering.md#conservative-rasterization-remains-unimplemented).
 
 ## Open

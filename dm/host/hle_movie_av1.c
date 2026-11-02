@@ -1,10 +1,11 @@
-// AV1 for the nn::codec decoders (hle_codec_video.c), on Apple's VideoToolbox: Fire Emblem Fortune's Weave's 82 movies are AV1 in WebM (2560x1440). VideoToolbox's AV1 decoder is hardware only (Apple M3
-// and A17 Pro on): on an older Mac there is none, mav1_supported says so and the caller gives black pictures with a red line, a platform limit.
+// AV1 for the nn::codec decoders (hle_codec_video.c), on Apple's VideoToolbox: Fire Emblem Fortune's Weave's 82 movies are AV1 in WebM (2560x1440). VideoToolbox's AV1 decoder is hardware (Apple M3
+// and A17 Pro on) or, on an older Mac, Apple's software decoder (av1_sw); where neither exists mav1_supported says so and the caller gives black pictures with a red line, a platform limit.
 // VideoToolbox wants a format description holding the stream's av1C record (ISO-BMFF AV1 binding, 2.3.3): four bytes read from the sequence header, then that header's OBU. The decoder API takes no
 // configuration for AV1, so the sequence header comes from the stream, where every key frame carries one (AV1 5.5); a changed one makes a new session. A temporal unit goes in whole, its OBUs in
 // the low-overhead format WebM and the SDK's demuxer keep them in (each with its size). Decoding is synchronous and a temporal unit shows at most one frame, in presentation order, so no queue
 #include "hle.h"
 #include <VideoToolbox/VideoToolbox.h>
+#include <unistd.h>
 #include "hle_movie_av1.h"
 
 struct mav1 {
@@ -22,7 +23,18 @@ static void av1_close(mav1 *a) {
 }
 void mav1_reset(mav1 *a) { unlock_picture(a); av1_close(a); a->nseq = 0; }
 void mav1_free(mav1 *a) { if (a) { mav1_reset(a); free(a); } }
-int mav1_supported(void) { return VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1); }
+// Without the hardware decoder, macOS ships Apple's own software AV1 decoder (/System/Library/Video/Plug-Ins/AV1DecoderSW.bundle), which VideoToolbox uses only when the decoder
+// specification carries EnableAppleOnlySWAV1 (a key the framework exports but does not document): on an M1 Pro it decodes Fortune's Weave's 2560x1440 movies at about 110 pictures
+// a second (3.7 times real time), the same pictures as dav1d. iOS has no such decoder
+static int av1_hw(void) { static int hw = -1; if (hw < 0) hw = VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1); return hw; }
+static int av1_sw(void) {
+#if TARGET_OS_OSX
+    static int sw = -1; if (sw < 0) sw = access("/System/Library/Video/Plug-Ins/AV1DecoderSW.bundle", F_OK) == 0; return sw;
+#else
+    return 0;
+#endif
+}
+int mav1_supported(void) { return av1_hw() || av1_sw(); }
 
 // ---- The sequence header (AV1 5.5), read as far as the colour config ----
 typedef struct { const uint8_t *p; size_t n, bit; int bad; } av1_bits;
@@ -126,10 +138,15 @@ static int av1_open(mav1 *a, const uint8_t *seq, size_t n) {
     const void *k[] = {kCVPixelBufferPixelFormatTypeKey}, *v[] = {num};
     CFDictionaryRef attrs = CFDictionaryCreate(NULL, k, v, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks); CFRelease(num);
     VTDecompressionOutputCallbackRecord cb = {av1_on_frame, a};
-    st = VTDecompressionSessionCreate(NULL, a->fd, NULL, attrs, &cb, &a->vs); CFRelease(attrs);
+    CFDictionaryRef spec = NULL;
+    if (!av1_hw()) {   // the software decoder (av1_sw)
+        const void *sk[] = {CFSTR("EnableAppleOnlySWAV1")}, *sv[] = {kCFBooleanTrue};
+        spec = CFDictionaryCreate(NULL, sk, sv, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    }
+    st = VTDecompressionSessionCreate(NULL, a->fd, spec, attrs, &cb, &a->vs); CFRelease(attrs); if (spec) CFRelease(spec);
     if (st) { if (!a->red++) LOG("[RED] movie: VideoToolbox cannot create an AV1 session (%d)", (int)st); a->vs = NULL; return 0; }
     memcpy(a->seq, seq, n); a->nseq = n;
-    static int once; if (!once++) LOG("[movie] AV1: VideoToolbox decoding %dx%d, profile %d level %d", w, h, rec[1] >> 5, rec[1] & 31);
+    static int once; if (!once++) LOG("[movie] AV1: VideoToolbox decoding %dx%d, profile %d level %d (%s decoder)", w, h, rec[1] >> 5, rec[1] & 31, av1_hw() ? "hardware" : "software");
     return 1;
 }
 int mav1_decode(mav1 *a, const uint8_t *data, size_t n, mav1_picture *out) {

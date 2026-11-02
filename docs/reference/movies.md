@@ -260,9 +260,9 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 
 - **Symptom:** a crash in `nn::codec::video::InitializeAv1DecoderByTransferMemory` when a movie starts.
 - **Cause:** SDK 22 initializes its decoders by transfer or remote memory, with stack arguments, and the game's movies are AV1 decoded into native images: linear textures it makes over the output pool's memory with `nvnNativeImage*` and `nvnTextureInitializeFromNativeImage`.
-- **Fix:** `hle_codec_video.c` takes the SDK 22 forms and the native images (16 KB aligned, 64-byte stride); `hle_movie_av1.c` decodes on VideoToolbox, building the av1C record from the stream's sequence header. The hardware decoder is on M3 and A17 Pro and later: anywhere else the pictures are black with a red line, a platform limit.
+- **Fix:** `hle_codec_video.c` takes the SDK 22 forms and the native images (16 KB aligned, 64-byte stride); `hle_movie_av1.c` decodes on VideoToolbox, building the av1C record from the stream's sequence header. The hardware decoder is on M3 and A17 Pro and later. An older Mac has Apple's software AV1 decoder (`/System/Library/Video/Plug-Ins/AV1DecoderSW.bundle`), which VideoToolbox uses only when the session's decoder specification carries `EnableAppleOnlySWAV1` (a key the framework exports but does not document): without it, creating the session fails (-12906). `hle_movie_av1.c` passes it when there is no hardware decoder. On an M1 Pro it decodes these 2560x1440 movies at about 110 pictures a second, 3.7 times real time, with the same pictures as dav1d. iOS has no software decoder: there the pictures stay black with a red line, a platform limit.
 - **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_codec_video` (AddressSanitizer and UBSan), which covers the AV1 and SDK 22 forms, native images and the av1C record.
-- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): 82 movies in WebM at 2560x1440; the opening's 3,301 pictures play.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): 82 movies in WebM at 2560x1440; the opening's 3,301 pictures play, on an M1 Pro through the software decoder.
 
 ## Movie players
 

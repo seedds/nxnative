@@ -40,7 +40,7 @@ static const char *const k_cv_name[] = {"VP8", "VP9", "H.264", "AV1"};
 typedef struct {
     uint32_t magic, id; pthread_mutex_t mu; vpx_codec_ctx_t vpx; int vpx_ok; void *event; uint64_t submits, pictures;
     int codec; uint16_t w, h; mavc *avc; uint8_t *csd; size_t csd_n;   // H.264: VideoToolbox and the parameter sets Initialize gave
-    mav1 *av1; int av1_none;   // AV1: VideoToolbox; av1_none: no AV1 decoder on this device, pictures stay black
+    mav1 *av1;   // AV1: VideoToolbox, or dav1d where the chip has no AV1 decoder (hle_movie_av1.c)
     struct { cv_pool *pool; uint32_t pidx; int reg, filled; uint32_t gen, filled_gen; uint16_t w, h; int64_t ts; uint8_t eos; } buf[CV_BUFS];
     uint32_t fifo[8], fhead, fcount;          // acquirable indices
     uint32_t pend[CV_BUFS], phead, pcount;    // released, waiting for a picture
@@ -200,12 +200,11 @@ HLE_FORCE("_ZN2nn5codec26ReadDecoderOutputImageNv12EPKNS0_25VideoDecoderImagePoo
 }
 
 // One host decoder for every codec the SDK has a decoder type for (Vp8 / Vp9 / H264 / Av1DecoderType: the same layout, its event at +8 in the SDK, all calls taken over here):
-// VP8 and VP9 through libvpx, H.264 and AV1 through VideoToolbox (hle_movie_avc.c, hle_movie_av1.c, whose NV12 pictures are copied into the pool as I420)
+// VP8 and VP9 through libvpx, H.264 through VideoToolbox and AV1 through VideoToolbox or dav1d (hle_movie_avc.c, hle_movie_av1.c, whose NV12 pictures are copied into the pool as I420)
 static void cv_open(cv_dec *d) {   // (re)creates the codec state: a new stream starts at the next key frame
     if (d->codec == CV_AV1) {
         if (!d->av1) d->av1 = mav1_new(); else mav1_reset(d->av1);
-        d->av1_none = !mav1_supported(); d->vpx_ok = 1;
-        if (d->av1_none) { static int once; if (!once++) LOG("[RED] nn::codec AV1: this device has no AV1 decoder (VideoToolbox's is hardware only: Apple M3 and A17 Pro on), so the pictures stay black"); }
+        d->vpx_ok = 1;
         return;
     }
     if (d->codec == CV_H264) { if (!d->avc) d->avc = mavc_new(); else mavc_drop(d->avc); if (d->csd_n) mavc_param_sets(d->avc, d->csd, d->csd_n); d->vpx_ok = 1; return; }
@@ -226,7 +225,7 @@ static Result cv_dec_init(void *t, int codec, uint16_t w, uint16_t h, uint32_t i
     d->event = (uint8_t *)t + CV_EVENT_OFF; hle_bind_system_event(d->event, 0); hle_signal_system_event(d->event);
     *(cv_dec **)t = d;
     LOG("[codec] %s decoder %u: %ux%u, input format %u, output format %u%s (%s on the host)", k_cv_name[codec], d->id, w, h, in, out,
-        d->csd_n ? ", with parameter sets" : "", codec == CV_H264 || codec == CV_AV1 ? "VideoToolbox" : "libvpx");
+        d->csd_n ? ", with parameter sets" : "", codec == CV_AV1 ? mav1_backend(d->av1) : codec == CV_H264 ? "VideoToolbox" : "libvpx");
     return 0;
 }
 static Result cv_dec_fin(void *t) {
@@ -290,20 +289,14 @@ static vpx_image_t *nv12_to_i420(const uint8_t *nv12, unsigned w, unsigned h) { 
         c->planes[2][(size_t)y * c->stride[2] + x] = uv[(size_t)y * w + 2 * x + 1]; }
     return c;
 }
-static vpx_image_t *av1_to_i420(const mav1_picture *p) {   // VideoToolbox's NV12, rows at its strides, as the I420 the pool keeps
+static vpx_image_t *av1_to_i420(const mav1_picture *p) {   // the decoder's NV12, rows at its strides, as the I420 the pool keeps
     vpx_image_t *c = vpx_img_alloc(NULL, VPX_IMG_FMT_I420, (unsigned)p->w, (unsigned)p->h, 1); if (!c) return NULL;
-    c->cs = p->matrix == 2 ? VPX_CS_BT_709 : p->matrix == 5 ? VPX_CS_BT_2020 : VPX_CS_BT_601; c->range = VPX_CR_STUDIO_RANGE;
+    c->cs = p->matrix == 2 ? VPX_CS_BT_709 : p->matrix == 5 ? VPX_CS_BT_2020 : VPX_CS_BT_601; c->range = p->full_range ? VPX_CR_FULL_RANGE : VPX_CR_STUDIO_RANGE;
     for (int y = 0; y < p->h; y++) memcpy(c->planes[0] + (size_t)y * c->stride[0], p->y + (size_t)y * p->ystride, (size_t)p->w);
     for (int y = 0; y < (p->h + 1) / 2; y++) {
         const uint8_t *uv = p->uv + (size_t)y * p->uvstride; uint8_t *u = c->planes[1] + (size_t)y * c->stride[1], *v = c->planes[2] + (size_t)y * c->stride[2];
         for (int x = 0; x < (p->w + 1) / 2; x++) { u[x] = uv[2 * x]; v[x] = uv[2 * x + 1]; }
     }
-    return c;
-}
-static vpx_image_t *black_i420(unsigned w, unsigned h) {
-    vpx_image_t *c = vpx_img_alloc(NULL, VPX_IMG_FMT_I420, w, h, 1); if (!c) return NULL;
-    memset(c->planes[0], 16, (size_t)c->stride[0] * h);
-    memset(c->planes[1], 128, (size_t)c->stride[1] * ((h + 1) / 2)); memset(c->planes[2], 128, (size_t)c->stride[2] * ((h + 1) / 2));
     return c;
 }
 // One packet: decoded at once; its pictures wait for released buffers (end of stream marks the last one, or comes as a buffer of its own)
@@ -318,8 +311,7 @@ static Result cv_dec_submit(uint64_t *out, void *t, const void *data, uint64_t s
         while (nv12 && d->nheld < CV_HOLD && mavc_take(d->avc, eos, nv12, d->w, d->h, &pts) == 1) { vpx_image_t *c = nv12_to_i420(nv12, d->w, d->h); if (c) got += cv_hold(d, c, pts * 1000); }
         free(nv12);
     } else if (d->codec == CV_AV1) {
-        if (size && d->av1_none) { vpx_image_t *c = black_i420(d->w, d->h); if (c) got += cv_hold(d, c, ts); }   // the movie plays out silent and black, so the game goes on
-        else if (size) {
+        if (size) {
             mav1_picture pic;
             if (mav1_decode(d->av1, data, (size_t)size, &pic) == 1) { vpx_image_t *c = av1_to_i420(&pic); if (c) got += cv_hold(d, c, ts); }
         }

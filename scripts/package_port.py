@@ -172,8 +172,9 @@ def readme(platform, sha, date, hosts):
               f'  {"licenses/":<25} the licences of nxnative and of the third-party code in it',
               f'  {"VERSION":<25} the commit this bundle was built from',
               '',
-              'Moving or replacing this folder: each pack names the host it runs with (its launch file\'s host row), so pack the games again after unpacking',
-              'a new bundle elsewhere.',
+              'Moving or replacing this folder: each pack names the host it runs with (its launch file\'s host row); the launcher run from the new folder',
+              'takes this folder\'s hosts/<title ID>/ instead, and so do run.sh and run.cmd when the NSP folder is inside it; otherwise set NXHOST or',
+              'pack the game again.',
               f'Game profiles with a host here: {len(hosts)} ({" ".join(hosts)}).']
     return '\r\n'.join(lines) + '\r\n' if win else '\n'.join(lines) + '\n'
 

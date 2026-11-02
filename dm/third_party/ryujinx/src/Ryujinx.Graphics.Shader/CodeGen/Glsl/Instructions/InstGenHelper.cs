@@ -16,6 +16,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl.Instructions
 
 #pragma warning disable IDE0055 // Disable formatting
             Add(Instruction.AtomicAdd,                InstType.AtomicBinary,   "atomicAdd");
+            Add(Instruction.AtomicAddF32,             InstType.AtomicBinary,   "atomicAdd");
             Add(Instruction.AtomicAnd,                InstType.AtomicBinary,   "atomicAnd");
             Add(Instruction.AtomicCompareAndSwap,     InstType.AtomicTernary,  "atomicCompSwap");
             Add(Instruction.AtomicMaxU32,             InstType.AtomicBinary,   "atomicMax");

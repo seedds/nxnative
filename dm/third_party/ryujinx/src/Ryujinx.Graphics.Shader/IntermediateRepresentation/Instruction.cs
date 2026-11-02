@@ -8,6 +8,7 @@ namespace Ryujinx.Graphics.Shader.IntermediateRepresentation
         Absolute = 1,
         Add,
         AtomicAdd,
+        AtomicAddF32,   // nxnative: RED/ATOM.F32 on global memory (SPIR-V OpAtomicFAddEXT, atomic_float in MSL)
         AtomicAnd,
         AtomicCompareAndSwap,
         AtomicMinS32,
@@ -144,6 +145,7 @@ namespace Ryujinx.Graphics.Shader.IntermediateRepresentation
             switch (inst & Instruction.Mask)
             {
                 case Instruction.AtomicAdd:
+                case Instruction.AtomicAddF32:
                 case Instruction.AtomicAnd:
                 case Instruction.AtomicCompareAndSwap:
                 case Instruction.AtomicMaxS32:

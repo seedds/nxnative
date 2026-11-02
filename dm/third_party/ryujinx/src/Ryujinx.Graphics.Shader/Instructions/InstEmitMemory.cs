@@ -218,6 +218,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     {
                         res = context.AtomicAdd(storageKind, e0, e1, value);
                     }
+                    else if (type == AtomSize.F32FtzRn && storageKind == StorageKind.GlobalMemory)
+                    {
+                        // nxnative: RED.F32 / ATOM.F32 (auto-exposure accumulators and the like): a float atomic add on global memory
+                        res = context.AtomicAddF32(storageKind, e0, e1, value);
+                    }
                     else
                     {
                         context.TranslatorContext.GpuAccessor.Log($"Invalid reduction type: {type}.");

@@ -397,6 +397,12 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 return false;
             }
 
+            // nxnative: a float atomic add on a storage buffer's u32 words is a compare-and-swap loop (TryGenerateStorageOp), never inline
+            if (operation.Inst == Instruction.AtomicAddF32)
+            {
+                return false;
+            }
+
             return (operation.Inst != Instruction.AtomicMaxS32 &&
                     operation.Inst != Instruction.AtomicMinS32) || targetLanguage == TargetLanguage.Spirv;
         }
@@ -1060,6 +1066,13 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 {
                     case Instruction.AtomicAdd:
                         resultValue = context.AtomicAdd(StorageKind.StorageBuffer, binding, Const(0), wordOffset, value);
+                        break;
+                    case Instruction.AtomicAddF32:
+                        // nxnative: the storage buffer's words are u32, so the float add goes through a compare-and-swap loop
+                        resultValue = GenerateAtomicCasLoop(context, wordOffset, binding, (memValue) =>
+                        {
+                            return context.FPAdd(memValue, value);
+                        });
                         break;
                     case Instruction.AtomicAnd:
                         resultValue = context.AtomicAnd(StorageKind.StorageBuffer, binding, Const(0), wordOffset, value);

@@ -28,6 +28,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
 #pragma warning disable IDE0055 // Disable formatting
             //  Inst                                  Destination type      Source 1 type          Source 2 type          Source 3 type          Source 4 type
             Add(Instruction.AtomicAdd,                AggregateType.U32,    AggregateType.S32,     AggregateType.S32,     AggregateType.U32);
+            Add(Instruction.AtomicAddF32,             AggregateType.FP32,   AggregateType.S32,     AggregateType.S32,     AggregateType.FP32);
             Add(Instruction.AtomicAnd,                AggregateType.U32,    AggregateType.S32,     AggregateType.S32,     AggregateType.U32);
             Add(Instruction.AtomicCompareAndSwap,     AggregateType.U32,    AggregateType.S32,     AggregateType.S32,     AggregateType.U32,     AggregateType.U32);
             Add(Instruction.AtomicMaxS32,             AggregateType.S32,    AggregateType.S32,     AggregateType.S32,     AggregateType.S32);

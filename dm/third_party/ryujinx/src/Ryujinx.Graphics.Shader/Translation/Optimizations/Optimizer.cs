@@ -415,6 +415,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 switch (operation.Inst & Instruction.Mask)
                 {
                     case Instruction.AtomicAdd:
+                    case Instruction.AtomicAddF32:
                     case Instruction.AtomicAnd:
                     case Instruction.AtomicCompareAndSwap:
                     case Instruction.AtomicMaxS32:

@@ -23,7 +23,7 @@ No `render_cond`: not tried, and nothing has called for it so far.
 
 ## Shaders
 
-All 16,888 translate (current). One shader has 10 texture handles the translator cannot resolve (`Failed to find handle source for bindless access of type "texture2D"`) and one logs `Invalid reduction type: F32FtzRn`; neither has been traced to anything visible (open).
+All 16,888 translate (current). One shader has 10 texture handles the translator cannot resolve (`Failed to find handle source for bindless access of type "texture2D"`) which has not been traced to anything visible (open). The one that logged `Invalid reduction type: F32FtzRn` (compute shader 28, the exposure average) now translates ([Float atomic add](../../../docs/reference/shaders.md#float-atomic-add)).
 
 ## Rendering
 

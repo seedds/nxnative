@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Ampere instructions through the offline translator (dmsh_xlate, arch sm86): SUATOM (0x593), the image atomic Donkey Kong Bananza's agl technique compute shaders (agl_technique_pfx) take an
-append counter with; shared memory's scaled address, IMAD.HI and ATOMS.CAS; and the instructions tested on the atomic's result below. Needs DMSH_TEST_XLATE (the translator) like the other translator tests."""
+append counter with; shared memory's scaled address, IMAD.HI and ATOMS.CAS; RED.F32 (the float atomic add); and the instructions tested on the atomic's result below. Needs DMSH_TEST_XLATE (the translator) like the other translator tests."""
 import json, os, re, struct, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
@@ -359,6 +359,26 @@ class Pokopia(Translated):
 
     def test_membar_orders_memory(self):
         self.assertRegex(self.msl(self.MEMBAR, self.ERRBAR), r'threadgroup_barrier|atomic_thread_fence')
+
+
+# RED.E.ADD.F32.FTZ.RN [UR4], R1 after ULDC.64 UR4, c[0][0x90]: Fire Emblem Fortune's Weave's auto-exposure accumulator (Lighting.bfsha compute shader 28), and the same
+# RED on [R2] with no uniform register (an address traced to no storage buffer). S2R is variable-latency, so it sets scoreboard barrier 0 and the RED waits on it (bit 116),
+# or it would read R2's old value
+ULDC_UR4 = (0x000fc80000000a00, 0x0000240000047ab9)
+RED_F32_UR4 = (0x000fe2000c10e704, 0x00000001ff00798e)
+S2R_TIDX_R2 = (0x000e220000002100, 0x0000000000027919)
+RED_F32_R2 = (0x001fe2000410e73f, 0x000000010200798e)
+
+
+class FloatAtomic(Translated):
+    def test_storage_buffer_add_is_a_cas_loop(self):   # the buffer's words are u32: a compare-and-swap loop adding floats
+        msl = self.translate(inst(*ULDC_UR4) + inst(*RED_F32_UR4) + inst(*EXIT))
+        self.assertIn('atomic_compare_exchange_weak_explicit', msl)
+        self.assertIn('as_type<float>', msl)
+
+    def test_physical_pointer_add_is_a_float_atomic(self):   # OpAtomicFAddEXT through the pool table's physical pointer: a device atomic_float
+        msl = self.translate(inst(*S2R_TIDX_R2) + inst(*RED_F32_R2) + inst(*EXIT))
+        self.assertIn('atomic_fetch_add_explicit((device atomic_float*)', msl)
 
 
 if __name__ == '__main__':

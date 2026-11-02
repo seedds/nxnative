@@ -1044,6 +1044,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): the Lighting compute shaders' division, run line by line from its translated MSL on 208 known inputs, with dividends up to 2^44: 26 wrong with only the pair fixed, none with both. Other Switch 2 games share the decoder and have not been rebuilt with this.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
 
+### Float atomic add
+
+- **Symptom:** a compute shader that adds floats atomically (Fire Emblem Fortune's Weave's `Lighting.bfsha` compute shader 28, which averages a screen-sized image into one float: one thread per texel, a SULD and one `RED.E.ADD.F32.FTZ.RN`) translates to an empty kernel, the translator logging `Invalid reduction type: F32FtzRn`. What reads the average sees 0.
+- **Cause:** `EmitAtomicOp` (`Instructions/InstEmitMemory.cs`, RED / ATOM / ATOMG on Maxwell and Ampere alike) knew integer atomics only: a float add returned 0 and was removed as unused.
+- **Fix:** the IR instruction `AtomicAddF32`, a float add on global memory. An address traced to no storage buffer goes through the pool table's physical pointer (`TryGenerateRawStorageOp`) and SPIR-V `OpAtomicFAddEXT` on a float pointer (`SPV_EXT_shader_atomic_float_add`; spirv-cross writes a device `atomic_float`, which Metal 3 has). An address traced to a storage buffer, whose words are u32, adds through the pass's compare-and-swap loop (`GenerateAtomicCasLoop`, as the GLSL signed min / max do) and is never rewritten inline. Shared-memory and half-pair float atomics still log the line.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md). Its exposure chain was checked with the clear ordering and the IMAD fixes of the game's entry; this shader's own effect on the picture has not been measured apart from them.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (`FloatAtomic`: the compare-and-swap loop on a storage buffer, the `atomic_float` on a physical pointer).
+
 ### NVN2 compute reads its workgroup counts at c0 + 4
 
 - **Symptom:** a scene lit by many small lights comes out too dark, with its clustered light lists empty for most clusters.

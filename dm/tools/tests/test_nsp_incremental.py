@@ -236,6 +236,40 @@ class DeriveProfile(Base):
                     nsp.refine_after_rewrite(g, self.ex, self.tmp / 'patched')
                     self.assertEqual(g.table('game.tsv').read_bytes(), before)
 
+    def test_va_heap_accounts_for_rewritten_modules(self):
+        from dm.tools.tests.test_nso import make_nso
+        import struct
+
+        self.derive()
+        exefs = self.ex / 'ExeFS'
+        meta = bytearray(0x80)
+        meta[:4] = b'META'
+        struct.pack_into('<I', meta, 0x14, 32 << 20)
+        (exefs / 'main.npdm').write_bytes(meta)
+        patched = self.tmp / 'patched'
+        patched.mkdir()
+        (patched / 'main.fixups.tsv').write_text('# PATCH_OFF\t0x4000\n')
+        with (patched / 'main.patched.bin').open('wb') as f:
+            f.truncate(68 << 20)
+
+        # A minimal MOD0 dynamic table with one imported symbol.
+        for symbol, expected in (('nvnBootstrapLoader', 64), (nsp.pg.HEAP_API, 72)):
+            with self.subTest(symbol=symbol):
+                text = bytearray(0x100)
+                struct.pack_into('<I', text, 4, 0x10)
+                struct.pack_into('<4si', text, 0x10, b'MOD0', 0x10)
+                struct.pack_into('<qQqQ', text, 0x20, 6, 0x60, 5, 0x90)
+                struct.pack_into('<IBBHQQ', text, 0x78, 1, 0x12, 0, 0, 0, 0)
+                text[0x91:0x91 + len(symbol)] = symbol.encode()
+                (exefs / 'main').write_bytes(make_nso((bytes(text), b'ro', b'data'), compress=(0, 0, 0)))
+                g = nsp.refine_after_rewrite(game.Game(self.pdir), self.ex, patched)
+                used = int(g.get('mem_used', '0x4000000'), 0)
+                self.assertEqual(used, expected << 20)
+                if symbol == nsp.pg.HEAP_API:
+                    # The reported 0xcd500000 pool must fit the requested heap plus modules.
+                    heap = (0xcd500000 - used) & ~0x1fffff
+                    self.assertLessEqual(heap + (68 << 20), 0xcd500000)
+
     def test_explicit_mem_used_without_registered_profile_is_kept(self):
         self.derive(); p = self.pdir / 'game.tsv'; p.write_text(p.read_text() + 'mem_used\t0x5800000\n')
         g = game.Game(self.pdir)

@@ -401,7 +401,7 @@ static int build_set(set_build *b, const hvk_layout *l, int k, hvk_shader *const
         switch (x->type) {
             case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER: {
                 VkBuffer buf = g_zero; VkDeviceSize off = 0, range = 65536 < ubo_max ? 65536 : ubo_max;
-                if (rt && rt->kind == NVN_RB_C1) { if (sh[st]->c1buf) buf = sh[st]->c1buf; }
+                if (rt && rt->kind == NVN_RB_C1) { if (sh[st]->c1buf) { buf = sh[st]->c1buf; off = sh[st]->c1off; } }   // its own window, or its offset in a shared bank (vk_shader.c c1_make)
                 else if (rt && rt->kind == NVN_RB_SUPPORT) buf = g_support;
                 else if (rt && rt->kind == NVN_RB_CBUF) {
                     const p_bind_buf *u = rt->reg < 16 ? &S.ubo[st][rt->reg] : NULL;

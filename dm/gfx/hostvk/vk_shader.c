@@ -7,6 +7,8 @@
 // set, binding, descriptor type and count, merging a combined image and its sampler into one descriptor (hvk_binding).
 // The module's capabilities are checked against the features the device layer enabled (vk_device.c hostvk_dev.x): a module that needs one the device lacks is refused with a red
 // line, as a draw with it would fail validation. The counter kernels embedded in games' main (nvn_builtin.h) are the backend's own GLSL (shaders/q_*.comp), found by the same key.
+// The shaders' constants (c1): packed into shared banks as the Metal backend packs them, after the profile's c1_full_vk.tsv beside the shader map, read with the same stamp rule
+// as its c1_full.tsv; the shaders it lists, and all of them without a current table (a [RED] line at the first such c1), get 64 KiB each ("The shaders' constants" below; step D2).
 #include "plat/plat.h"
 #include "vk_backend.h"
 #include "../nvn/dmsh_chain_vk.h"
@@ -54,6 +56,7 @@ const char *hvk_shader_dir(void) {
     return g_dir;
 }
 const char *hvk_shader_map_path(void) { const char *p = getenv("DM_NVN_SHMAP"); return p && *p ? p : NULL; }
+static void c1_table_load(const char *map_path, const char *inputs);
 static void map_load_(void);
 static void map_load(void) {
     if (atomic_load(&g_map_loaded)) return;
@@ -82,10 +85,20 @@ static void map_load_(void) {   // under g_sh_mu
     free(txt);
     atomic_store(&g_map_loaded, 1);
     hostvk_log("[hostvk] shader map %s: %d shaders; library %s", path, count, hvk_shader_dir());
+    // The library's stamp (inputs.tsv, written by a full dmsh_build_vk.py run): the game and the digest of the profile inputs it was built from. As on Metal (nvn_mtl.m shmap_load),
+    // it is what ties c1_full_vk.tsv to this library: the table names the inputs of the library it was made from
     char stamp[1100]; snprintf(stamp, sizeof stamp, "%s/inputs.tsv", hvk_shader_dir());
-    size_t sn; char *st = read_file(stamp, &sn);
-    if (!st) hostvk_log("[RED] [hostvk] the shader library %s has no stamp (inputs.tsv): no full dmsh_build_vk.py run made it as it is", hvk_shader_dir());
+    size_t sn; char *st = read_file(stamp, &sn), game[96] = "", inputs[160] = "";
+    for (char *ln = st, *next; ln && *ln; ln = next) {
+        next = strchr(ln, '\n'); if (next) *next++ = 0;
+        size_t l = strlen(ln); if (l && ln[l - 1] == '\r') ln[l - 1] = 0;
+        if (!strncmp(ln, "game\t", 5)) snprintf(game, sizeof game, "%s", ln + 5);
+        else if (!strncmp(ln, "inputs\t", 7)) snprintf(inputs, sizeof inputs, "%s", ln + 7);
+    }
+    if (!st || !inputs[0]) hostvk_log("[RED] [hostvk] the shader library %s has no stamp (inputs.tsv): no full dmsh_build_vk.py run made it as it is, so c1_full_vk.tsv is not taken", hvk_shader_dir());
+    else hostvk_log("[hostvk] shader library stamp: game %s, inputs %s", game[0] ? game : "(none)", inputs);
     free(st);
+    c1_table_load(path, inputs);
 }
 
 // ---------- Modules ----------
@@ -258,15 +271,126 @@ out:
 // ---------- Loading ----------
 static nvn_hmap g_sh;     // 24-byte key → hvk_shader (NULL entries are never stored: a failed key is in g_fail)
 static nvn_hmap g_fail;   // 24-byte key → (void *)1
-// The shader's constants as a uniform buffer: 64 KiB, as the Metal backend gives a c1 whose indices are not proven bounded (c1_full.tsv, phase P4): the reflection's c1 bytes
-// (rf.c1_len: 256 to 768 bytes in the libraries so far, 6 KiB at most), zeros after them. A range of a host-visible block of the allocator (step D2): a game loads thousands of
-// shaders, and one VkDeviceMemory each would pass maxMemoryAllocationCount (4,096 on NVIDIA and AMD under Windows)
+// ---------- The shaders' constants (c1): shared banks, as the Metal backend packs them (nvn_mtl.m c1_store) ----------
+// A shader's c1 is its reflection's bytes (rf.c1_len: 256 to 768 bytes in the libraries so far, 6 KiB at most), bound as a uniform buffer of C1_WINDOW bytes (min with
+// maxUniformBufferRange: the 64 KiB the shader declares, float4[4096]) from its offset (vk_pipeline.c build_set); reads past the bytes must give 0, as on the Switch.
+// - A shader whose c1 indices are proven bounded is packed into a bank shared with others: C1_BANK bytes, a range of a host-visible block of the allocator (step D2), zeroed when
+//   made; its data at an offset aligned to 256 bytes (or minUniformBufferOffsetAlignment if larger), then zeros to the end of its span, the data rounded up to 256 bytes plus 256,
+//   before the next shader's data; a bank takes no shader whose span would leave less than C1_WINDOW bytes after it, so every shader's window lies inside the bank and the bank ends
+//   in at least 64 KiB of zeros. The span is what c1_guard.py proves a shader's reads stay inside.
+// - Proven bounded: the shader's key is not in the profile's c1_full_vk.tsv, which a full dmsh_build_vk.py run writes beside the shader map with dm/gfx/tools/c1_guard.py (the Metal
+//   chain's c1_full.tsv rule: interval arithmetic over every c1 index, 0 <= index and 16 * (index + 1) <= the span) run on the analysis MSL rendering of this library's own SPIR-V,
+//   geometry and tessellation shaders (no rendering) listed as unproven; read as nvn_mtl.m reads c1_full.tsv, and taken only when its first line names this library's chain and
+//   stamp ("# chain vk-<DMSH_CHAIN_VK> inputs <the inputs row of vk-<V>/inputs.tsv> ...", dmsh_chain.py table_head).
+// - Any other shader (listed, or every one when the table is missing or stale) gets C1_WINDOW bytes of its own, a range of a block too. A missing or stale table is said in one
+//   [RED] line, at the first shader with a c1 that takes a window of its own for that reason, not at the map's load as nvn_mtl.m says it: a library whose shaders have no c1 (the
+//   GPU tests', a game's built-in kernels) needs no table, and the line then marks only what the table would have changed.
+// Banks and ranges go back at shutdown (hvk_shader_shutdown); a loaded shader is never unloaded before. The line "[hostvk] c1 banks: ..." gives the counts.
+enum { C1_WINDOW = 65536, C1_BANK = 4u << 20 };   // nvn_mtl.m C1_DECL_SIZE and C1_BANK_SIZE
+typedef struct { VkBuffer buf; hvk_mem *mem; uint8_t *map; } c1_bank;
+static pthread_mutex_t g_c1_mu = PTHREAD_MUTEX_INITIALIZER;   // a leaf: the banks, the table, the counts (the built-in kernels are made outside g_sh_mu)
+static c1_bank *g_banks; static uint32_t g_nbank, g_capbank;
+static VkDeviceSize g_bank_off;   // the next free offset of the last bank
+static nvn_hmap g_c1_full;        // 16-hex-digit key → (void *)1: the shaders c1_full_vk.tsv lists
+static int g_c1_full_valid;       // the table was taken
+static char g_c1_why[1400];       // why not: the [RED] line, said once at the first c1 that falls back to a window of its own (c1_make)
+static int g_c1_said;
+static uint32_t g_c1_packed, g_c1_own;
+static uint64_t g_c1_data;        // the constants' own bytes (packed and own)
+static void c1_table_load(const char *map_path, const char *inputs) {   // under g_sh_mu (map_load_)
+    char p[1100]; size_t dl = 0;
+    for (size_t i = 0; map_path[i]; i++) if (map_path[i] == '/' || map_path[i] == '\\') dl = i + 1;
+    snprintf(p, sizeof p, "%.*sc1_full_vk.tsv", (int)dl, map_path);
+    char want[256]; snprintf(want, sizeof want, "# chain vk-%s inputs %s ", DMSH_CHAIN_VK, inputs[0] ? inputs : "-");   // a library without a stamp matches no table
+    size_t n = 0; char *txt = read_file(p, &n);
+    pthread_mutex_lock(&g_c1_mu);
+    if (!g_c1_full.klen) nvn_hm_init(&g_c1_full, 16);
+    nvn_hm_clear(&g_c1_full, NULL); g_c1_full_valid = 0; g_c1_said = 0; g_c1_why[0] = 0;
+    if (!txt || strncmp(txt, want, strlen(want))) {
+        snprintf(g_c1_why, sizeof g_c1_why, "[RED] [hostvk] c1_full_vk.tsv is stale or missing (%s: its header must name this library's chain vk-%s and inputs %s; a full "
+                 "dmsh_build_vk.py run makes it): every c1 gets its own 64 KiB", p, DMSH_CHAIN_VK, inputs[0] ? inputs : "(no stamp)");
+        pthread_mutex_unlock(&g_c1_mu);
+        free(txt); return;
+    }
+    int listed = 0;
+    for (char *ln = strchr(txt, '\n'), *next; ln && *++ln; ln = next) {   // past the header
+        next = strchr(ln, '\n'); if (next) *next = 0;
+        while (*ln == ' ' || *ln == '\t') ln++;
+        size_t l = strlen(ln); while (l && (ln[l - 1] == '\r' || ln[l - 1] == ' ' || ln[l - 1] == '\t')) ln[--l] = 0;
+        if (l == 16 && *ln != '#' && !nvn_hm_put(&g_c1_full, ln, (void *)1)) listed++;
+        if (!next) break;
+    }
+    g_c1_full_valid = 1;
+    pthread_mutex_unlock(&g_c1_mu);
+    free(txt);
+    hostvk_log("[hostvk] c1_full_vk.tsv: %d shaders whose c1 indices are not proven bounded get 64 KiB of their own; every other c1 is packed into shared banks of %u MiB", listed, (unsigned)(C1_BANK >> 20));
+}
 static int c1_make(hvk_shader *sh) {
     if (!sh->rf.has_c1) return 1;
+    size_t len = sh->rf.c1_len;
     void *map;
-    if (hvk_mem_buffer(65536, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, HVK_MEM_HOST, &sh->c1buf, &sh->c1mem, &map)) return 0;
-    memset(map, 0, 65536); memcpy(map, sh->rf.c1, sh->rf.c1_len);
+    pthread_mutex_lock(&g_c1_mu);
+    int own = !g_c1_full_valid || strlen(sh->key) != 16 || nvn_hm_get(&g_c1_full, sh->key);   // a built-in kernel (no 16-digit key) has no c1
+    if (own) {
+        char say[sizeof g_c1_why]; say[0] = 0;
+        if (!g_c1_full_valid && !g_c1_said) {   // the first c1 the missing or stale table leaves without a bank: the red line, once
+            g_c1_said = 1;
+            snprintf(say, sizeof say, "%s", g_c1_why[0] ? g_c1_why : "[RED] [hostvk] c1_full_vk.tsv was not read (no shader map): every c1 gets its own 64 KiB");
+        }
+        int fail = hvk_mem_buffer(C1_WINDOW, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, HVK_MEM_HOST, &sh->c1buf, &sh->c1mem, &map) != VK_SUCCESS;
+        if (!fail) { memset(map, 0, C1_WINDOW); memcpy(map, sh->rf.c1, len); sh->c1off = 0; g_c1_own++; g_c1_data += len; }
+        pthread_mutex_unlock(&g_c1_mu);
+        if (say[0]) hostvk_log("%s", say);
+        return !fail;
+    }
+    VkDeviceSize align = hvk.lim.minUniformBufferOffsetAlignment > 256 ? hvk.lim.minUniformBufferOffsetAlignment : 256;
+    VkDeviceSize span = ((len + 255) & ~(VkDeviceSize)255) + 256;
+    if (!g_nbank || g_bank_off + span + C1_WINDOW > C1_BANK) {
+        if (g_nbank == g_capbank) {
+            c1_bank *b = realloc(g_banks, sizeof *b * (g_capbank ? 2 * g_capbank : 8));
+            if (!b) { pthread_mutex_unlock(&g_c1_mu); return 0; }
+            g_banks = b; g_capbank = g_capbank ? 2 * g_capbank : 8;
+        }
+        c1_bank *b = &g_banks[g_nbank];
+        if (hvk_mem_buffer(C1_BANK, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, HVK_MEM_HOST, &b->buf, &b->mem, &map)) { pthread_mutex_unlock(&g_c1_mu); return 0; }
+        b->map = map; memset(b->map, 0, C1_BANK);
+        g_nbank++; g_bank_off = 0;
+    }
+    c1_bank *b = &g_banks[g_nbank - 1];
+    VkDeviceSize off = g_bank_off;
+    memcpy(b->map + off, sh->rf.c1, len);
+    g_bank_off = (off + span + align - 1) / align * align;
+    sh->c1buf = b->buf; sh->c1mem = NULL; sh->c1off = off;
+    g_c1_packed++; g_c1_data += len;
+    pthread_mutex_unlock(&g_c1_mu);
     return 1;
+}
+void hvk_c1_get_stats(hvk_c1_stats *s) {
+    pthread_mutex_lock(&g_c1_mu);
+    s->packed = g_c1_packed; s->own = g_c1_own; s->banks = g_nbank; s->table = g_c1_full_valid;
+    s->bank_bytes = (uint64_t)g_nbank * C1_BANK; s->own_bytes = (uint64_t)g_c1_own * C1_WINDOW; s->data_bytes = g_c1_data;
+    s->bank_size = C1_BANK; s->window = C1_WINDOW;
+    s->align = hvk.lim.minUniformBufferOffsetAlignment > 256 ? hvk.lim.minUniformBufferOffsetAlignment : 256;
+    pthread_mutex_unlock(&g_c1_mu);
+}
+const uint8_t *hvk_c1_bank(uint32_t i, VkBuffer *buf, VkDeviceSize *size) {
+    pthread_mutex_lock(&g_c1_mu);
+    const uint8_t *m = i < g_nbank ? g_banks[i].map : NULL;
+    if (buf) *buf = i < g_nbank ? g_banks[i].buf : VK_NULL_HANDLE;
+    if (size) *size = i < g_nbank ? C1_BANK : 0;
+    pthread_mutex_unlock(&g_c1_mu);
+    return m;
+}
+static void c1_shutdown(int map_loaded) {   // after every shader's own range went back: the line, the banks, the table
+    pthread_mutex_lock(&g_c1_mu);
+    if (map_loaded || g_c1_packed || g_c1_own)
+        hostvk_log("[hostvk] c1 banks: %u shaders packed in %u banks (%llu bytes), %u with 64 KiB of their own (%llu bytes); %llu bytes of constants; c1_full_vk.tsv %s",
+                   g_c1_packed, g_nbank, (unsigned long long)g_nbank * C1_BANK, g_c1_own, (unsigned long long)g_c1_own * C1_WINDOW, (unsigned long long)g_c1_data,
+                   g_c1_full_valid ? "taken" : "not taken");
+    for (uint32_t i = 0; i < g_nbank; i++) hvk_mem_buffer_free(g_banks[i].buf, g_banks[i].mem);
+    free(g_banks); g_banks = NULL; g_nbank = g_capbank = 0; g_bank_off = 0;
+    nvn_hm_clear(&g_c1_full, NULL); g_c1_full_valid = 0; g_c1_said = 0; g_c1_why[0] = 0; g_c1_packed = g_c1_own = 0; g_c1_data = 0;
+    pthread_mutex_unlock(&g_c1_mu);
 }
 static hvk_shader *shader_from(const char *key, int stage, const uint32_t *code, size_t bytes, const char *json, size_t jn, char *err, size_t en) {
     hvk_shader *sh = calloc(1, sizeof *sh);
@@ -397,10 +521,11 @@ void hvk_shader_shutdown(void) {
     for (uint32_t i = 0; i < g_sh.cap; i++) if (g_sh.vals && g_sh.vals[i]) {
         hvk_shader *sh = g_sh.vals[i];
         if (sh->module) vkDestroyShaderModule(hvk.d, sh->module, NULL);
-        if (sh->c1buf) hvk_mem_buffer_free(sh->c1buf, sh->c1mem);
+        if (sh->c1mem) hvk_mem_buffer_free(sh->c1buf, sh->c1mem);   // its own 64 KiB; a packed shader's bank goes in c1_shutdown
         free(sh->rf.c1); free(sh);
     }
     nvn_hm_clear(&g_sh, NULL); nvn_hm_clear(&g_fail, NULL);
+    c1_shutdown(atomic_load(&g_map_loaded));
     for (uint32_t i = 0; i < g_prog.cap; i++) if (g_prog.vals && g_prog.vals[i]) free(g_prog.vals[i]);
     nvn_hm_clear(&g_prog, NULL);
     for (uint32_t i = 0; i < g_comp.cap; i++) if (g_comp.vals && g_comp.vals[i]) free(g_comp.vals[i]);

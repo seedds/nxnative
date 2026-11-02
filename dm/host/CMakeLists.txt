@@ -511,6 +511,11 @@ endforeach()
 # their own, a host-visible range written through its pointer and read back through GPU copies, pools moved off a shared import by a decommit beside them
 host_test(t_vk_alloc SOURCES ../../gfx/hostvk/tests/t_vk_alloc.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
 target_link_libraries(t_vk_alloc PRIVATE nvn_front_obj nvn_vk)
+# The shaders' constants packed into shared banks as the Metal backend packs them (dm/gfx/hostvk/vk_shader.c c1_make, after the profile's c1_full_vk.tsv; step D2), likewise:
+# three starts as child processes (t_vk_harness.h hv_spawn), without the table, with a stale one and with one stamped for the library, each loading and dispatching synthetic
+# compute shaders that read their c1 back on the GPU
+host_test(t_vk_c1 SOURCES ../../gfx/hostvk/tests/t_vk_c1.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
+target_link_libraries(t_vk_c1 PRIVATE nvn_front_obj nvn_vk)
 # The guest Vulkan layer (docs/design/vulkan-backend.md 8.1, step P9a): t_vk_guest drives guest_vk.c through the entry points a game gets from its vkGetInstanceProcAddr (found by
 # name in the import table, as the loader binds them) on lavapipe under the validation layer, skipped without a Vulkan device as the GPU tests above: the Tegra shape, memory,
 # buffers and images, render passes, pipelines (the two SPIR-V fix-ups among them), draws read back, queries, and a swapchain presented with a layer crop through the backend's

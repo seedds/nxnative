@@ -132,7 +132,8 @@ typedef struct hvk_shader {
     uint8_t mask_m;            // the colour outputs main_m writes as unsigned integers
     nvn_refl rf;               // the neutral reflection (nvn_refl_from_json_text)
     int nb; hvk_binding b[HVK_MAXB];
-    VkBuffer c1buf; hvk_mem *c1mem;   // the shader's own constants (c1) in a range of the allocator's (vk_alloc.h), VK_NULL_HANDLE / NULL when it has none
+    VkBuffer c1buf; VkDeviceSize c1off;   // the shader's constants (c1): the buffer its uniform buffer descriptor names and its offset there (VK_NULL_HANDLE when it has none)
+    hvk_mem *c1mem;            // c1buf's own range of 64 KiB (vk_alloc.h); NULL for a shader packed into a shared bank (vk_shader.c c1_make), whose range is the bank's
     uint32_t vin_types[32];    // per vertex input location: NVN_CT_* + 1 (0 = not read)
     uint8_t writes_storage;    // a writable storage buffer or image binding
     uint8_t builtin;           // one of the backend's own kernels (nvn_builtin.h's counter kernels)
@@ -155,6 +156,11 @@ const char *hvk_shader_map_path(void);             // DM_NVN_SHMAP: the prewarm 
 int hvk_shader_map_each(void (*fn)(const char *key, int stage, void *u), void *u);   // every shader of the map (the prebuild): how many
 // The backend's own SPIR-V (dm/gfx/hostvk/shaders/gen): a module made from a committed array
 VkShaderModule hvk_module(const uint32_t *code, size_t bytes);
+// The shaders' constants (vk_shader.c c1_make): shaders packed into shared banks and shaders with a window of their own, as the shutdown line "[hostvk] c1 banks: ..." gives them;
+// table: the profile's c1_full_vk.tsv was taken. For tests: bank i's buffer, size and CPU pointer (NULL past the last bank)
+typedef struct { uint32_t packed, own, banks, table; uint64_t bank_bytes, own_bytes, data_bytes; VkDeviceSize bank_size, window, align; } hvk_c1_stats;
+void hvk_c1_get_stats(hvk_c1_stats *s);
+const uint8_t *hvk_c1_bank(uint32_t i, VkBuffer *buf, VkDeviceSize *size);
 
 // ---------- Pipelines and descriptors (vk_pipeline.c; design 2.3, 3.1) ----------
 enum { HVK_LAYOUT_VSFS, HVK_LAYOUT_GS, HVK_LAYOUT_TESS, HVK_LAYOUT_CS, HVK_LAYOUT_N };

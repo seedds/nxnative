@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Ampere memory instructions through the offline translator (dmsh_xlate, arch sm86): SUATOM (0x593), the image atomic Donkey Kong Bananza's agl
-technique compute shaders (agl_technique_pfx) take an append counter with; shared memory's scaled address, IMAD.HI and ATOMS.CAS. Needs DMSH_TEST_XLATE (the translator) like the other translator tests."""
+technique compute shaders (agl_technique_pfx) take an append counter with; SURED (0x59f); ATOMS (0x38c, 0xf8c); shared memory's scaled address ([Ra.X4 / X8 / X16]),
+IMAD.HI and ATOMS.CAS. Needs DMSH_TEST_XLATE (the translator) like the other translator tests."""
 import json, os, re, struct, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
@@ -11,6 +12,8 @@ SUATOM = (0x002ea200001ee000, 0x00000c0c030c7593)
 
 
 def inst(hi, lo): return struct.pack('<QQ', lo, hi)
+def waiting(i): return (i[0] | 0x3f << 52, i[1])   # the instruction waits on every scoreboard (control bits 116..121): it reads what an S2R before it wrote
+def s2r_tid(rd): return (0x000e260000002100, 0x0000000000007919 | rd << 16)   # S2R Rd, SR_TID.X (Mario Kart World's encoding, write barrier 0)
 
 
 @unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
@@ -120,6 +123,57 @@ class Shared(Translated):
         self.assertIn('atomic_compare_exchange', msl)
         self.assertRegex(msl, r'= 5u;')
         self.assertRegex(msl, r', 9u,')
+
+
+class Sured(Translated):
+    """SURED (0x59f): SUATOM without the old value, its fields laid out as SUATOM's. Mario Kart World's ab77eaee44cfef88 counts into a 2D image with it"""
+    SURED = (0x000fe2000010e000, 0x60000c000400759f)   # SURED.ADD.U32 [R4], R0 on the 2D image of word 12 of c0, as the game encodes it
+
+    def test_add_translates(self):
+        msl = self.translate(inst(*s2r_tid(4)) + inst(*waiting(self.SURED)) + inst(*EXIT))
+        self.assertIn('atomic_fetch_add', msl)
+        self.assertIn('cp_i_tcb_4A_r32ui', msl)
+
+
+class SharedScale(Translated):
+    """A shared access scales Ra by the factor in bits 78..79, whatever its size: 1 [Ra.X4], 2 [Ra.X8], 3 [Ra.X16]. Mario Kart World's froxel shaders keep a float4 a thread
+    at [R.X16 + 0x500]; f94552a2a2bff505 stores 8 bytes at [R9.X16] and 4 at [R9.X16 + 8]; Donkey Kong Bananza's upscaler stores 8 bytes at [i.X4 + 0x900]"""
+    X4_64 = (0x0009ee0000004a00, 0x000900182c007388)    # STS.64 [R44.X4 + 0x900], R24 (Donkey Kong Bananza 7629d857a0a93833)
+    X8_64 = (0x0211e40000008a00, 0x0000000600007388)    # STS.64 [R0.X8], R6 (Pokémon Pokopia)
+    X16_32 = (0x000fe8000000c800, 0x0000080609008388)   # STS [R9.X16 + 0x8], R6 (Mario Kart World f94552a2a2bff505)
+    X16_64 = (0x000fe8000000ca00, 0x0000000209008388)   # STS.64 [R9.X16], R2 (the same shader)
+    X16_128 = (0x0001e2000000cc00, 0x000000ff26007388)  # STS.128 [R38.X16], RZ (Pokémon Pokopia 396660089f19fc16)
+
+    def msl(self, sts, ra):
+        return self.translate(inst(*s2r_tid(ra)) + inst(*waiting(sts)) + inst(*EXIT), shared=0x4000)
+
+    def test_x4_on_a_64_bit_store(self):
+        self.assertRegex(self.msl(self.X4_64, 44), r'<< 2\b')
+
+    def test_x8(self):
+        self.assertRegex(self.msl(self.X8_64, 0), r'<< 3\b')
+
+    def test_x16_on_32_and_64_bit_stores(self):   # one 12-byte record a thread: not scaled by the access size
+        self.assertRegex(self.msl(self.X16_32, 9), r'<< 4\b')
+        self.assertRegex(self.msl(self.X16_64, 9), r'<< 4\b')
+
+    def test_x16_on_a_128_bit_store(self):
+        self.assertRegex(self.msl(self.X16_128, 38), r'<< 4\b')
+
+
+class Atoms(Translated):
+    """ATOMS (0x38c): a shared memory atomic, the operation and type as ATOMG's, addressed as STS; 0xf8c ATOMS.POPC.INC adds 1 with no source register"""
+    MAX = (0x0003e80001000000, 0x00100c00ffff738c)   # ATOMS.MAX RZ, [RZ + 0x100c], R0 (Pokémon Pokopia 2a526184ca0aa932, unpredicated)
+    INC = (0x0011e4000d00403f, 0x0000000003ff7f8c)   # ATOMS.POPC.INC RZ, [R3.X4] (Pokopia's 64-bin histogram e4ec13f79f9e0bd4)
+
+    def test_max(self):
+        msl = self.translate(inst(*s2r_tid(0)) + inst(*waiting(self.MAX)) + inst(*EXIT), shared=0x2000)
+        self.assertIn('atomic_fetch_max', msl)
+
+    def test_popc_inc_adds_one_at_the_scaled_index(self):
+        msl = self.translate(inst(*s2r_tid(3)) + inst(*waiting(self.INC)) + inst(*EXIT), shared=0x100)
+        self.assertRegex(msl, r'atomic_fetch_add_explicit\([^;]*, 1u,')
+        self.assertRegex(msl, r'<< 2\b')
 
 
 if __name__ == '__main__':

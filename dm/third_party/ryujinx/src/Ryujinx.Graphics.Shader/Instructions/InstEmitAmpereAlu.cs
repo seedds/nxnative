@@ -83,6 +83,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x804, InstName.R2p, AR2p, N, writesRd: false);
             x(0x204, InstName.R2p, AR2p, N, writesRd: false);
             x(0x803, InstName.P2r, AP2r, N);
+            x(0x883, InstName.P2r, AUp2ur, N, uniform: true);
             x(0x203, InstName.P2r, AP2r, N);
             x(0x81c, InstName.Psetp, APlop3, N, writesRd: false);
             x(0x89c, InstName.Psetp, APlop3, N, uniform: true, writesRd: false);
@@ -242,9 +243,19 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             ASrc s = AOne(context, x);
 
-            if (x.Bits(84, 86) != 2)
+            int srcSize = x.Bits(84, 86);
+
+            if (srcSize is not 1 and not 2)
             {
-                throw AFail(context, "F2I from a float that is not 32-bit");
+                throw AFail(context, "F2I from a float that is not 16- or 32-bit");
+            }
+
+            Operand src = AGet(context, s);
+
+            if (srcSize == 1)
+            {
+                // A 16-bit source (Pokémon Pokopia): the half that bits 60..61 select, as F2F's 16-bit source, widened to f32 first (exact)
+                src = s.Kind is AKind.Reg or AKind.UReg && x.Bits(60, 62) is 1 or 3 ? context.UnpackHalf2x16High(src) : context.UnpackHalf2x16Low(src);
             }
 
             int size = x.Bits(75, 77);
@@ -257,7 +268,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             IDstFmt dst = (IDstFmt)((signed ? 4 : 0) | System.Math.Max(size, 1));
 
-            EmitF2I(context, DstFmt.F32, dst, (RoundMode2)x.Bits(78, 80), AGet(context, s), x.Rd, s.Abs, s.Neg);
+            EmitF2I(context, DstFmt.F32, dst, (RoundMode2)x.Bits(78, 80), src, x.Rd, s.Abs, s.Neg);
 
             if (size == 0 && x.Rd != RegisterConsts.RegisterZeroIndex)
             {
@@ -402,9 +413,21 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             AmpereOp x = new(context.CurrOp);
 
-            if (x.Bit(78) || x.Bit(72))
+            if (x.Bit(72))
             {
-                throw AFail(context, "F2FP.MERGE_C");
+                throw AFail(context, "F2FP with bit 72");
+            }
+
+            if (x.Bit(78))
+            {
+                // F2FP.F16.F32.MERGE_C Rd, -, b, c (Pokémon Pokopia: 0xa3e with A = RZ, b a constant, c = RZ): b converted to the low half, the high half c's low 16 bits
+                // (Mesa NAK's f32 → f16 conversion on SM86 and later emits it this way, with c = RZ: a plain conversion into the low half)
+                (_, ASrc mb, ASrc mc) = AAluSrcs(context, x, abs: false);
+                Operand lo = context.BitwiseAnd(context.PackHalf2x16(AFloat(context, mb), ConstF(0f)), Const(0xffff));
+
+                ASet(context, x, context.BitwiseOr(lo, context.ShiftLeft(AGet(context, mc), Const(16))), AUniform(context));
+
+                return;
             }
 
             (ASrc a, ASrc b) = ASecond(context, x, abs: false);
@@ -482,10 +505,22 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, context.PackHalf2x16(context.FPSaturate(lo, sat), context.FPSaturate(hi, sat)));
         }
 
+        // The second source of a two-source half-pair op (HADD2, HMUL2): the operand in the 32 slot in every form (a register in form 1, the immediate in forms 2 / 4,
+        // the constant in 3 / 5, the uniform register in 6 / 7), as ASecond gives FADD / FMUL theirs. AHalfSrcs orders B and C for HFMA2, whose B is the 64-slot register
+        // in forms 2, 3 and 7; taking that B read the unused 64 field instead of the immediate: Pokémon Pokopia's blur 8025c44e35cc19ca steps its loop with
+        // HADD2 R6, R6, 2.0h (0x430, field 64 = R0) and added R0 instead, so the loop never ended and the GPU hung
+        private static Operand[] AHalfSecond(EmitterContext context, AmpereOp x)
+        {
+            (_, Operand[] b, Operand[] c) = AHalfSrcs(context, x);
+
+            return x.Form is 1 or 4 or 5 or 6 ? b : c;
+        }
+
         public static void AHadd2(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (Operand[] a, Operand[] b, _) = AHalfSrcs(context, x);
+            (Operand[] a, _, _) = AHalfSrcs(context, x);
+            Operand[] b = AHalfSecond(context, x);
 
             AHalfResult(context, x, context.FPAdd(a[0], b[0]), context.FPAdd(a[1], b[1]));
         }
@@ -493,7 +528,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
         public static void AHmul2(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (Operand[] a, Operand[] b, _) = AHalfSrcs(context, x);
+            (Operand[] a, _, _) = AHalfSrcs(context, x);
+            Operand[] b = AHalfSecond(context, x);
 
             AHalfResult(context, x, context.FPMultiply(a[0], b[0]), context.FPMultiply(a[1], b[1]));
         }
@@ -1232,6 +1268,30 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand mask = x.Opcode == 0x803 ? Const((int)x.Imm32) : Register(x.Rb, RegisterType.Gpr);
 
             EmitP2r(context, Register(x.Ra, RegisterType.Gpr), Register(x.Rd, RegisterType.Gpr), mask, (ByteSel)x.Bits(76, 78), false);
+        }
+
+        // UP2UR URd, UPR, URa, mask: the uniform predicates into one byte of URa's value, as P2R on the uniform datapath (mask an immediate). Mario Kart World (28 shaders,
+        // UP2UR UR4, UPR, URZ, 0x1) and Pokémon Pokopia
+        public static void AUp2ur(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            int ra = x.Bits(24, 29), shift = x.Bits(76, 78) * 8;
+            Operand srcA = ra == RegisterConsts.UniformZeroIndex ? Const(0) : Register(ra, RegisterType.Uniform);
+            Operand insert = Const(0);
+
+            for (int i = 0; i < RegisterConsts.UniformPredsCount; i++)
+            {
+                insert = context.BitwiseOr(insert, context.ConditionalSelect(Register(i, RegisterType.UniformPredicate), Const(1 << (i + shift)), Const(0)));
+            }
+
+            Operand mask = context.ShiftLeft(Const((int)x.Imm32 & 0xff), Const(shift));
+            Operand res = context.BitwiseOr(context.BitwiseAnd(srcA, context.BitwiseNot(mask)), context.BitwiseAnd(insert, mask));
+            int rd = ARd(x, true);
+
+            if (rd != RegisterConsts.UniformZeroIndex)
+            {
+                context.Copy(ADestReg(rd, true), res);
+            }
         }
 
         // PLOP3 Pd0, Pd1, a (87..90), b (77..80), c (68..71; uniform with bit 67), lut0 (64..67 | 72..77 << 3), lut1 (16..24)

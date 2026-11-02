@@ -28,13 +28,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x98e, InstName.Red, ARed, N, writesRd: false);
             x(0x9a8, InstName.Atom, AAtomg, N);
             x(0x3a8, InstName.Atom, AAtomg, N);
+            x(0x38c, InstName.Atoms, AAtoms, N);
+            x(0xf8c, InstName.Atoms, AAtoms, N);   // ATOMS.POPC.INC (Pokémon Pokopia's histogram e4ec13f79f9e0bd4)
             x(AmpereOpcodes.Ldl, InstName.Ldl, ALdLocalShared, N);
             x(0x984, InstName.Lds, ALdLocalShared, N);
             x(0x387, InstName.Stl, AStLocalShared, N, writesRd: false);
             x(0x987, InstName.Stl, AStLocalShared, N, writesRd: false);
             x(0x388, InstName.Sts, AStLocalShared, N, writesRd: false);
             x(0x988, InstName.Sts, AStLocalShared, N, writesRd: false);
-            x(0x38c, InstName.Atoms, AAtoms, N);
             x(0x38d, InstName.Atoms, AAtomsCas, N);
             x(0x992, InstName.Membar, AMembar, N, writesRd: false);
             x(0x9ab, InstName.Membar, AErrbar, N, writesRd: false);
@@ -53,6 +54,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0xb9b, InstName.Sust, ASurface, N, writesRd: false);
             x(0xb9d, InstName.Sust, ASurface, N, writesRd: false);
             x(0x593, InstName.Suatom, ASuatom, N);
+            x(0x59f, InstName.Sured, ASured, N, writesRd: false);
             x(0xb1d, InstName.Bar, ABar, N, writesRd: false);
         }
 
@@ -315,14 +317,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, res);
         }
 
-        // ATOMS Rd, [Ra + offset], Rb: as ATOMG (operation 87..91, size 73..76) on shared memory, the byte offset at 40..64 as LDS's. Compute only
+        // ATOMS Rd, [Ra + UR + offset], Rb: as ATOMG (operation 87..91, size 73..76) on shared memory, the byte offset at 40..64 and UR at 64 as STS's. Compute only.
+        // 0xf8c, ATOMS.POPC.INC (Pokémon Pokopia): an increment by 1 with no source register (the hardware sums the warp's lanes on one address; per lane an add of 1)
         public static void AAtoms(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            Operand ra = x.Ra >= RegisterConsts.RegisterZeroIndex ? Const(0) : AStride(context, x, Register(x.Ra, RegisterType.Gpr));
-            Operand offset = context.ShiftRightU32(context.IAdd(ra, Const((int)x.SignedField(40, 64))), Const(2));
-            Operand value = x.Rb >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rb, RegisterType.Gpr);
-            Operand res = EmitAtomicOp(context, StorageKind.SharedMemory, (AtomOp)x.Bits(87, 91), (AtomSize)x.Bits(73, 76), Const(context.ResourceManager.SharedMemoryId), offset, value);
+            Operand offset = context.ShiftRightU32(context.IAdd(ALocalAddress(context, x, 64), Const((int)x.SignedField(40, 64))), Const(2));
+            bool inc = x.Opcode == 0xf8c;
+            Operand value = inc ? Const(1) : x.Rb >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rb, RegisterType.Gpr);
+            Operand res = EmitAtomicOp(context, StorageKind.SharedMemory, inc ? AtomOp.Add : (AtomOp)x.Bits(87, 91), inc ? AtomSize.U32 : (AtomSize)x.Bits(73, 76), Const(context.ResourceManager.SharedMemoryId), offset, value);
 
             ASet(context, x, res);
         }
@@ -355,7 +358,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
         // ---- local and shared memory ----
 
         // A shared or local address register's stride, bits 78..79: it counts elements of 1, 4, 8 or 16 bytes (Fire Emblem Fortune's Weave has 1 on all its 32-bit and 2 on all its 64-bit accesses with a
-        // register, whose code bounds that register by the element count; 3 by the pattern, not seen)
+        // register, whose code bounds that register by the element count; 3 by the pattern). Others, read unscaled, land on the wrong words:
+        // - Pokémon Pokopia's 64-bin histogram (e4ec13f79f9e0bd4) increments [R3.X4] with R3 = 0..63 in 256 bytes of shared memory (1); its 64-bit [Ra.X8] reads at +0 and +8 (2).
+        // - Mario Kart World's froxel shaders (03923de3c507135e and 35 variants) keep a float4 a thread at [R.X16 + 0x500] (3): overlapping, the fog volume came out as 4x4-tile
+        //   garbage and the race picture as rainbow bands by depth slice. f94552a2a2bff505 stores 8 bytes at [R9.X16] and 4 at [R9.X16 + 8] (3, a 12-byte record a thread).
+        // - Donkey Kong Bananza's upscaler (agl_ndsr.pck, 7629d857a0a93833) stores 8 bytes at [i.X4 + 0x900] (1), i = row * 40 + column * 2: a 20 x 32 tile of 8-byte
+        //   elements, 5,120 bytes, in its 9,984 of shared memory (scaled by 8 it would run past them).
         private static Operand AStride(EmitterContext context, AmpereOp x, Operand ra)
         {
             int stride = x.Bits(78, 80);
@@ -436,6 +444,21 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, (SuatomOp)x.Bits(87, 91), (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, 0, x.Rd, false, isBindless: false, compareAndSwap: false);
+        }
+
+        // SURED [Ra], Rb (0x59f): SUATOM without the old value (a reduction), its fields laid out as SUATOM's. Mario Kart World's compute shader ab77eaee44cfef88 counts
+        // into a 2D image with SURED.ADD.U32; untranslated, the shader was missing and its dispatches skipped
+        public static void ASured(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            (int handle, int cbufSlot) = ATexHandle(context, x);
+
+            if (cbufSlot != TextureOperation.DefaultCbufSlot)
+            {
+                throw AFail(context, $"SURED handle in bank {cbufSlot}");
+            }
+
+            EmitSured(context, (SuDim)x.Bits(61, 64), 0, (RedOp)x.Bits(87, 91), (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, 0, false, isBindless: false);
         }
 
         // BAR.SYNC: the workgroup barrier
@@ -784,6 +807,18 @@ namespace Ryujinx.Graphics.Shader.Instructions
                         type = SamplerType.TextureBuffer;
                         sources.RemoveAt(sources.Count - 1);
                         flags &= ~TextureFlags.LodLevel;
+                    }
+                    else if (Sample1DAs2D)
+                    {
+                        // nxnative: as Maxwell's TLDS Texture1DLodZero, the bound descriptor decides between a 1D texture and a texture buffer, and with no type answer
+                        // the fetch is 2D at (x & 0x3FFF, x >> 14): a 1D texture (one row on the host) reads (x, 0) as before, and the host binds a texture buffer in
+                        // the slot as 16384-texel rows (nvn_mtl.m tbuf_as_2d). Pokémon Pokopia's KTGL reads its light and decal lists this way (NVN target 10 in slots
+                        // the shaders declare 1D); bound as is, the 1D slot took a buffer view and the GPU faulted
+                        Operand x0 = sources[0];
+                        sources[0] = context.BitwiseAnd(x0, Const(0x3FFF));
+                        sources.Insert(1, context.ShiftRightU32(x0, Const(14)));
+                        context.TranslatorContext.GpuAccessor.RecordTexelFetch1D(handle);
+                        type = SamplerType.Texture2D;
                     }
                 }
             }

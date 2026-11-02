@@ -10,6 +10,7 @@ Update 1.0.8 (v524288) over the base game, SDK 15.3.2, Unity 2021.3.20f1 IL2CPP 
 | 5 GB guest block, 4.375 GB alias region, 1 GB application pool | `game.tsv` | The initial Mac heap check sets no heap and reaches +4.26 GB of the alias region with the hardware pool. A 1 GB pool leaves room beside StandardAllocator for Unity's own address regions |
 | SDK-wide node-area and size-class alignment patches | `dm/tools/sdk_patches.py` | Applied to this SDK by the shared function matcher; no game-specific cut or host change |
 | `shader_groups /Data/=data` | `game.tsv` | The serialized files and Addressables bundles all live under `Data/` |
+| `depth_mode zero` | `game.tsv` | the game selects near-zero NVN depth (the NSP script's heap check on the registered build); offline pipeline bases must use the matching vertex entry |
 
 ## Files and shaders
 
@@ -37,6 +38,7 @@ Keep the game focused during its opening cinematic. Unity pauses the sequence af
 
 ## Found on this game
 
+- **Offline depth metadata:** [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree). The key was missing until the check boots began reading it; the archive at this mode has not been rebuilt or measured here.
 Existing mechanisms used by this profile:
 
 - [The SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area).

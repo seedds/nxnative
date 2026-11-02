@@ -592,7 +592,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Symptom:** `[nvn] SetConservativeRasterEnable on: ignored by host for now`, followed by `[RED] NVN unimplemented function called: nvnCommandBufferSetConservativeRasterDilate`.
 - **Cause:** `hle_nvn.c` ignores the enable setter and has no implementation for the dilation setter. The requested raster coverage state never reaches Metal.
 - **Fix:** **Open.** Neither setter has been implemented. The opening indoor scene renders and accepts input, but the visual contribution of the missing coverage state has not been isolated. The diagnostic remains visible.
-- **Found on:** [Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md#open) (1.0.0, the first playable bedroom). [Super Mario RPG](../../dm/games/0100BC0018138000/README.md) calls the dilation setter and `nvnCommandBufferSetSubpixelPrecisionBias` repeatedly (the red lines repeat because the once-only counter `g_unimpl_seen` is one byte and wraps at 256) and did not turn the enable on along the route tested, so the dilation has nothing to act on there.
+- **Found on:** [Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md#open) (1.0.0, the first playable bedroom). [Super Mario RPG](../../dm/games/0100BC0018138000/README.md) calls the dilation setter and `nvnCommandBufferSetSubpixelPrecisionBias` repeatedly and did not turn the enable on along the route tested, so the dilation has nothing to act on there.
 
 ## Vertex input and draws
 
@@ -1011,6 +1011,13 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 - **Cause:** target 0 blends with a `SRC1` factor and the pixel shader writes outputs 0 and 1. NVN, as Maxwell, takes output 1 as target 0's second source; the translator declares it `[[color(1)]]`, and Metal reads a second source only from `[[color(0), index(1)]]`. With no such output, Metal 4's blend compiler crashes building the pipeline's colour state ([An unwritten secondary blend source](#an-unwritten-secondary-blend-source) left a written output 1 alone).
 - **Fix:** `dmsh_build.py` `fs_dual` gives a pixel shader listed in the profile's `dual_want.tsv` that writes exactly colours 0 and 1 a second entry point, `main0_d`, the same body with output 1 as `[[color(0), index(1)]]` (`entry_d` in its reflection). `pso_desc` takes it for a pipeline whose output-0 target blends with a `SRC1` factor (`pso_reads_src1`); output 1's attachment, if the pass has one, is then left unwritten, as on Maxwell. A shader without the entry point blends with zero for the second source, as an unwritten one, with a red line naming it, and `DM_NVN_DUAL_WANT=<file>` appends every such key to a file for the profile's list. Only listed shaders get the entry point: 5,474 of Arceus's 6,156 pixel shaders write exactly colours 0 and 1, nearly all for a second render target. `t_missing_src1` checks both Metal pipeline paths with the entry point.
 - **Found on:** [Pokémon Legends: Arceus](../../dm/games/01001F5010DFA000/README.md): `f4f36a03b0c6691d` (`system_resource/gfx2/shader/env/system/ha_post_effects.bnsh`, variation 4: RGBA16Float, destination factor `SRC1_ALPHA`) and `ff45da02e225f961`, in the first minute.
+
+### A shader added to `dual_want.tsv` keeps its cached build
+
+- **Symptom:** adding a pixel shader to the profile's `dual_want.tsv` leaves the build reporting cache hits, the reflection without `entry_d`, and the host logging `[RED] shader ... has no dual-source entry point`.
+- **Cause:** `dmsh_build.py` selects the extra `main0_d` entry point through `DUAL_WANT`, but the per-shader cache key did not include membership in that set. The packing script noticed the table change and reran the builder, which restored the old variant.
+- **Fix:** `shader_key` includes the shader's membership in `DUAL_WANT`. Adding or removing a key invalidates that shader's cached variant; unrelated entries leave its key unchanged. The existing paired-pixel dependency also updates paired vertex keys. No cache deletion is required.
+- **Found on:** [The Legend of Zelda: Skyward Sword HD, issue #928](https://github.com/seedds/nxnative/issues/928), `01002DA013484000`, provisional profile: Link's eye shader and three other dual-source shaders. The reported cinematic fog remains open and has a different, unresolved cause.
 
 ### Dual-source blending from output location 1
 

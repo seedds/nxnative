@@ -57,7 +57,10 @@ static uint8_t g_unimpl_seen[NVN_NFUNC];
 
 uint64_t nvn_unimpl_c(nvn_slot_t *slot, uint64_t x0, uint64_t x1, uint64_t x2) {
     unsigned i = (unsigned)(slot - nvn_slot);
-    if (!g_unimpl_seen[i]++) LOG("[RED] NVN unimplemented function called: %s (x0=%#llx x1=%#llx x2=%#llx)", nvn_names[i], x0, x1, x2);
+    if (!g_unimpl_seen[i]) {   // a flag, not a count (nvn_slot counts the calls): one byte counted up wrapped at 256, and a function called every few frames printed its "once" line again and again (Super Mario RPG: 15 times in six minutes)
+        g_unimpl_seen[i] = 1;
+        LOG("[RED] NVN unimplemented function called: %s (x0=%#llx x1=%#llx x2=%#llx)", nvn_names[i], x0, x1, x2);
+    }
     return 0;
 }
 

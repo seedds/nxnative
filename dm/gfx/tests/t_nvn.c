@@ -913,6 +913,9 @@ int main(void) {
     ((void (*)(void *))proc("nvnBufferBuilderGetDevice"))(NULL); ((void (*)(void *))proc("nvnBufferBuilderGetDevice"))(NULL);
     EXPECT("unimplemented function marked as reported ([RED]) after a call", 1, g_unimpl_seen[ui] > 0);
     EXPECT("unimplemented function count 2", 2, nvn_slot[ui].cnt);
+    for (int i = 0; i < 254; i++) ((void (*)(void *))proc("nvnBufferBuilderGetDevice"))(NULL);   // the 256th call is where a one-byte count wrapped to 0, and the next call reported again
+    EXPECT("unimplemented function count 256", 256, nvn_slot[ui].cnt);
+    EXPECT("unimplemented function stays reported past 256 calls", 1, g_unimpl_seen[ui]);
 
     // 8. A texture buffer as 2D rows for wrapped 1D fetches (x & 0x3FFF, x >> 14; nvn_mtl.m tbuf_as_2d): full rows back to back, one short row rounded to the alignment
     {

@@ -592,7 +592,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Symptom:** `[nvn] SetConservativeRasterEnable on: ignored by host for now`, followed by `[RED] NVN unimplemented function called: nvnCommandBufferSetConservativeRasterDilate`.
 - **Cause:** `hle_nvn.c` ignores the enable setter and has no implementation for the dilation setter. The requested raster coverage state never reaches Metal.
 - **Fix:** **Open.** Neither setter has been implemented. The opening indoor scene renders and accepts input, but the visual contribution of the missing coverage state has not been isolated. The diagnostic remains visible.
-- **Found on:** [Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md#open) (1.0.0, the first playable bedroom). [Super Mario RPG](../../dm/games/0100BC0018138000/README.md) calls the dilation setter and `nvnCommandBufferSetSubpixelPrecisionBias` repeatedly (the red lines repeat because the once-only counter `g_unimpl_seen` is one byte and wraps at 256) and did not turn the enable on along the route tested, so the dilation has nothing to act on there.
+- **Found on:** [Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md#open) (1.0.0, the first playable bedroom). [Super Mario RPG](../../dm/games/0100BC0018138000/README.md) calls the dilation setter and `nvnCommandBufferSetSubpixelPrecisionBias` repeatedly and did not turn the enable on along the route tested, so the dilation has nothing to act on there.
 
 ## Vertex input and draws
 

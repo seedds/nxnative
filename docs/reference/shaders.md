@@ -1289,6 +1289,29 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game) (resolved).
 - **Check:** `test_nsp_mac.py` (`test_prune_stale_chains_after_success`, `test_failed_build_keeps_stale_chains`, `test_prune_ignores_other_names`).
 
+### Alpha test and logic operation variants compiled on first need
+
+- **Symptom:** the shader step of an iPhone build runs for an hour or more (Pokémon Scarlet: about 30,000 shaders, almost none cached after a chain change). Timing every tool it starts over 200 of Scarlet's shaders on an M5 (10 workers, 25 s): the Metal compiler took 182 s and `metallib` 33 s of thread time, the translator 2.9 s and SPIRV-Cross 1.9 s; 549 libraries for 200 shaders.
+- **Cause:** besides its own library every pixel shader got an alpha test library (`<key>_ba`, [The alpha test through a library of its own](rendering.md#the-alpha-test-through-a-library-of-its-own)) and, with integer outputs, a logic operation library (`<key>_bl`, [Logic operations through a library of its own](rendering.md#logic-operations-through-a-library-of-its-own)), each a full compile of the shader's source: 365 of the 549. A draw takes one only when the game sets an alpha function other than ALWAYS or a logic operation other than COPY, which few shaders of a game ever do.
+- **Fix:** `dmsh_build.py` (`ps_side_finish`) writes the variants as MSL, `<key>_ba.metal` and `<key>_bl.metal`, beside the Mac and iOS libraries (the IPA packs the folder) and compiles none of them. The host compiles one when a draw first needs it (`nvn_mtl.m` `side_lib`, called by `at_fn` and `lo_fn` under their locks) with the offline compiles' options: preserved invariance, and relaxed math on the iPhone. The run-time compiler has no `-O1` (the level the chain uses because `-O2` made one Super Mario Odyssey shader take 25 minutes in the GPU backend, see `MAC_METAL`); on Scarlet's 40 largest variants (99 to 383 KB of MSL) its default level took the same 0.3 to 0.5 s as `-O1` with AIR within 1%. The first draw that needs a variant waits for its compile, which the log names (`side library <key>_ba compiled from source in … ms`); the system's Metal shader cache keeps the library, so a later run of the same build takes it back at once (`t_logic`: 18 ms the first time, 0.3 ms after). A variant that does not compile is now found at run time instead of at build time: the draw goes without it, with the red line `at_fn` / `lo_fn` already printed.
+- **Found on:** [Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md#found-on-this-game).
+- **Check:** `make check_t_alpha check_t_logic` in `dm/gfx/tests` (their fixtures now write the variants' MSL, so both replays go through `side_lib`); `test_dmsh_alpha.py` and `test_dmsh_logic.py` still compile each variant for the Mac and the iPhone.
+
+### A library without its reflection kept a whole folder out of the Metal cache
+
+- **Symptom:** a shader build after a stopped one compiles everything again, and its log starts with `Metal cache: not filled from …/b-<chain>: no readable <key>_b.json`. Pokémon Scarlet's iOS build after a stopped one compiled its 3,177 earlier iOS libraries again; an older Mac folder of it was refused for 5 missing reflections of 11,153.
+- **Cause:** `dmsh_mtlcache.py` (`_check`) refused the whole folder when one library had no readable reflection, which is what a build stopped between writing a library and its reflection leaves, and `filled.json` remembered the folder, so it was never read again.
+- **Fix:** such a library is left out and the rest of the folder is taken; a different compile convention or compiler, or a sample that compiles to other bytes, still refuses the folder.
+- **Found on:** [Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md#found-on-this-game).
+- **Check:** `test_shader_toolchain_cache.py` (`test_library_without_reflection_leaves_out_only_itself`).
+
+### xcrun looked up the Metal tools on every compile
+
+- **Symptom:** of a shader's Metal compile, about a quarter on iOS went to `xcrun` itself: 275 ms a library through `xcrun -sdk iphoneos metal` and `metallib`, 202 ms calling the same two tools directly (the Mac: 347 and 297 ms; 60 of Pokémon Scarlet's shaders on an M5).
+- **Cause:** `xcrun` finds the SDK and the tool again on every call; the chain called it twice per library.
+- **Fix:** `ios_metal.run` takes the chain's `xcrun -sdk <sdk> <tool> …` command lines as they are (`METAL`, `METALLIB`, `dmsh_build.py`'s `MAC_METAL`, so the records in the reflection and the cache keys do not change), looks the tool and the SDK path up once and runs the tool with the `SDKROOT` xcrun would set. The 120 libraries of that comparison are byte-identical either way.
+- **Found on:** [Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md#found-on-this-game).
+
 ### Concurrent warm tasks prepare each shader once
 
 - **Symptom:** startup tasks can prepare the same shader more than once, even though only one object enters the warm dictionary. A measured Tears of the Kingdom startup avoided 320 duplicate preparations; this is not a steady-frame-rate claim.

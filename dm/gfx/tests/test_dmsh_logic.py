@@ -106,10 +106,10 @@ class LogicVariant(unittest.TestCase):
                     except subprocess.CalledProcessError as e: self.fail(e.stderr)
 
 
-def fixture(out):   # t_logic.m's shaders: base.metal (the base, compiled by the test) and <key>_bl.metallib (the logic operation library the host loads), for key 1…1
+def fixture(out):   # t_logic.m's shaders: base.metal (the base, compiled by the test) and <key>_bl.metal (the logic operation source the host compiles, as dmsh_build.py writes it), for key 1…1
     out = pathlib.Path(out); out.mkdir(parents=True, exist_ok=True)
     (out / 'base.metal').write_text(BASE + VERTEX)
-    compile_lib(dmsh_logic.variant(BASE)[0] + VERTEX, out, 'l').rename(out / ('1' * 16 + '_bl.metallib'))
+    (out / ('1' * 16 + '_bl.metal')).write_text(dmsh_logic.variant(BASE)[0] + VERTEX)
 
 
 if __name__ == '__main__':

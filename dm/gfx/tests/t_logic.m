@@ -23,7 +23,7 @@ static NvProg *prog(NSString *dir, prog_t *program, NvShader **out) {
     NvShader *ps = [NvShader new]; pr->sh[1] = ps; *out = ps;
     ps->fn = fn4_note([lib newFunctionWithName:@"main0"], lib, @"main0", nil); ps->fn_u = fn4_note([lib newFunctionWithName:@"main0_u"], lib, @"main0_u", nil);
     ps->stage = 1; ps->has_logic = 1; ps->rf.color_known = 1; ps->rf.color_mask = 1;
-    memset(ps->key, '1', 16); memcpy(ps->key + 16, "_b", 3);   // the host loads <dir>/<16 digits>_bl.metallib
+    memset(ps->key, '1', 16); memcpy(ps->key + 16, "_b", 3);   // the host compiles <dir>/<16 digits>_bl.metal
     ps->ae = [ps->fn newArgumentEncoderWithBufferIndex:0]; ps->arg_len = ps->ae.encodedLength; ps->rf.nb = 1; ps->rf.b[0] = (nvn_rbind){.kind = NVN_RB_CBUF, .reg = 0, .aid = 0};
     program->serial = 97000; serial_put(program->serial, pr);
     return pr;

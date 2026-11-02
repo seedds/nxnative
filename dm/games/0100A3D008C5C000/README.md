@@ -250,3 +250,6 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
 - [A capture refused after a change to the reflection structs](../../../docs/reference/nvn-objects.md#a-capture-refused-after-a-change-to-the-reflection-structs).
 - [Conservative rasterization remains unimplemented](../../../docs/reference/rendering.md#conservative-rasterization-remains-unimplemented).
 - [Metal's build folders left by pipeline archive flushes](../../../docs/reference/shaders.md#metals-build-folders-left-by-pipeline-archive-flushes).
+- [Alpha test and logic operation variants compiled on first need](../../../docs/reference/shaders.md#alpha-test-and-logic-operation-variants-compiled-on-first-need): two of every three Metal compiles of its iOS shader step.
+- [A library without its reflection kept a whole folder out of the Metal cache](../../../docs/reference/shaders.md#a-library-without-its-reflection-kept-a-whole-folder-out-of-the-metal-cache).
+- [xcrun looked up the Metal tools on every compile](../../../docs/reference/shaders.md#xcrun-looked-up-the-metal-tools-on-every-compile).

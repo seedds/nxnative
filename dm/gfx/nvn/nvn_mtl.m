@@ -5577,6 +5577,28 @@ static uint32_t atest_key(NvShader *fs, const uint32_t cfmt[8], const uint8_t *l
     if (!fs->has_alpha) { RED_ONCE(128, "shader %s draws with alpha function %u but has no alpha test library (its colour 0 has no float alpha): drawn without the test", fs->key, S.color.alpha_func); return 0; }
     return 1;
 }
+// A pixel shader's alpha test or logic operation library (sfx "ba" / "bl"), compiled here from <key>_<sfx>.metal: the build writes these variants as MSL only (dmsh_build.py
+// ps_side_finish), since few shaders ever draw with either and compiling one for every pixel shader was two of every three Metal compiles of a build. The options follow the
+// chain's offline compiles (dmsh_build.py MAC_METAL, ios_metal.py): preserved invariance, relaxed math on the iPhone; the run-time compiler has no -O1, and its default level
+// compiled Pokémon Scarlet's 40 largest variants in the same time with AIR within 1% of -O1's. The system's Metal shader cache keeps the result for later runs. Called once per
+// shader under its variant's lock; the draw that first needs it waits for the compile (logged)
+static id<MTLLibrary> side_lib(NvShader *fs, const char *sfx, NSError **e) {
+    size_t kl = strlen(fs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_%s.metal", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), fs->key, sfx];
+    NSString *src = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:e];
+    if (!src) return nil;
+    static MTLCompileOptions *opt; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        opt = [MTLCompileOptions new]; opt.preserveInvariance = YES;
+#if TARGET_OS_IPHONE
+        opt.mathMode = MTLMathModeRelaxed;
+#endif
+    });
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    id<MTLLibrary> lib = [g_dev newLibraryWithSource:src options:opt error:e];
+    static _Atomic int n; static _Atomic uint64_t ns; uint64_t dt = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0; int c = ++n; ns += dt;
+    if (lib && (c <= 3 || !(c & (c - 1)))) MLOG("side library %.*s_%s compiled from source in %.1f ms (%d so far, %.1f ms in all)", (int)(kl > 2 ? kl - 2 : kl), fs->key, sfx, dt / 1e6, c, ns / 1e6);
+    return lib;
+}
 static os_unfair_lock g_at_lock = OS_UNFAIR_LOCK_INIT;
 static id<MTLFunction> at_fn(NvShader *fs, id<MTLFunction> base) {   // the alpha test library's entry point named as base (one of fs's own), loaded on first need; a failure is final for the shader
     int w = !base ? -1 : base == fs->fn ? 0 : base == fs->fn_u ? 1 : base == fs->fn_m ? 2 : base == fs->fn_d ? 3 : -1;
@@ -5584,8 +5606,7 @@ static id<MTLFunction> at_fn(NvShader *fs, id<MTLFunction> base) {   // the alph
     os_unfair_lock_lock(&g_at_lock);
     if (!fs->afn_state) {
         fs->afn_state = 2;
-        size_t kl = strlen(fs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_ba.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), fs->key];
-        NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); const char *why = lib ? NULL : "no library";
+        NSError *e = nil; id<MTLLibrary> lib = side_lib(fs, "ba", &e); const char *why = lib ? NULL : "no library";
         id<MTLFunction> own[4] = {fs->fn, fs->fn_u, fs->fn_m, fs->fn_d};
         for (int i = 0; i < 4 && !why; i++) {
             if (!own[i]) continue;
@@ -5638,8 +5659,7 @@ static id<MTLFunction> lo_fn(NvShader *fs, id<MTLFunction> base, uint32_t target
     NSError *e = nil; const char *why = NULL;
     if (!fs->lfn_state) {
         fs->lfn_state = 2;
-        size_t kl = strlen(fs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bl.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), fs->key];
-        if ((fs->llib = lib_from_file(path, &e))) { fs->lfn_state = 1; fs->lfn = [NSMutableDictionary dictionary]; static int n; if (++n <= 3 || !(n & (n - 1))) MLOG("logic operation: library of %s loaded (%d shaders so far)", fs->key, n); }
+        if ((fs->llib = side_lib(fs, "bl", &e))) { fs->lfn_state = 1; fs->lfn = [NSMutableDictionary dictionary]; static int n; if (++n <= 3 || !(n & (n - 1))) MLOG("logic operation: library of %s loaded (%d shaders so far)", fs->key, n); }
         else why = "no library";
     }
     id<MTLFunction> f = nil; NSNumber *k = @(w << 8 | (targets & 0xff));

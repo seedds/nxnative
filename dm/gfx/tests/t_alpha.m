@@ -21,7 +21,7 @@ static void run(NSString *dir, int mode) {   // mode 0: no bindings; 1: an argum
     pr->sh[0] = [NvShader new]; pr->sh[0]->fn = [lib newFunctionWithName:@"vertex_main"]; pr->sh[0]->stage = 0; snprintf(pr->sh[0]->key, sizeof pr->sh[0]->key, "v%d_b", mode);
     NvShader *ps = [NvShader new]; pr->sh[1] = ps;
     ps->fn = fn4_note([lib newFunctionWithName:@"main0"], lib, @"main0", nil); ps->stage = 1; ps->rf.may_discard = 1; ps->has_alpha = 1;
-    memset(ps->key, '0' + mode, 16); memcpy(ps->key + 16, "_b", 3);   // the host loads <dir>/<16 digits>_ba.metallib
+    memset(ps->key, '0' + mode, 16); memcpy(ps->key + 16, "_b", 3);   // the host compiles <dir>/<16 digits>_ba.metal
     if (mode == 1) { ps->ae = [ps->fn newArgumentEncoderWithBufferIndex:0]; ps->arg_len = ps->ae.encodedLength; ps->rf.nb = 1; ps->rf.b[0] = (nvn_rbind){.kind = NVN_RB_CBUF, .reg = 0, .aid = 0}; }
     static prog_t program[2]; int pi = mode; program[pi].serial = 98000 + pi; serial_put(program[pi].serial, pr);
     static NSMutableArray *keep; if (!keep) keep = [NSMutableArray array]; [keep addObject:pr];

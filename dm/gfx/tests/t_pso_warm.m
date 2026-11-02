@@ -218,7 +218,10 @@ static NSString *program_fixture(NSString *dir, prog_t *program, unsigned tag, i
     }
     if (vertex) {
         NSString *json = [dir stringByAppendingPathComponent:[pc stringByAppendingString:@".json"]];
-        NSMutableDictionary *reflection = [NSJSONSerialization JSONObjectWithData:[NSData dataWithContentsOfFile:json] options:NSJSONReadingMutableContainers error:nil];
+        NSData *data = [NSData dataWithContentsOfFile:json];
+        if (!data) { EXPECT("pulling reflection readable", 1, 0); return pc; }
+        NSMutableDictionary *reflection = [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:nil];
+        if (!reflection) { EXPECT("pulling reflection parsed", 1, 0); return pc; }
         reflection[@"pull"] = @{};
         EXPECT("pulling reflection written", 1, [[NSJSONSerialization dataWithJSONObject:reflection options:0 error:nil] writeToFile:json atomically:YES]);
         if (tag != 2) EXPECT("pulling library copied", 1, [NSFileManager.defaultManager copyItemAtPath:[dir stringByAppendingPathComponent:@"warm-vs.metallib"]

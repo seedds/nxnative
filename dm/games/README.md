@@ -154,6 +154,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Super Mario Galaxy 2](0100FD8022DAA000/README.md) | `0100FD8022DAA000` | 1.4.0 | 18.3.5 | NERD's Hagi Wii layer (recompiled PowerPC) | Vulkan |
 | [Super Mario Odyssey](0100000000010000/README.md) | `0100000000010000` | 1.4.1 | 7.3.2 | Nintendo EPD (sead / agl, NintendoWare) | NVN |
 | [Super Mario Party Jamboree](0100965017338000/README.md) | `0100965017338000` | 2.3.0 | 17.5.9 | NintendoWare Bezel Engine 2.9 | NVN |
+| [Super Mario RPG](0100BC0018138000/README.md) | `0100BC0018138000` | 1.0.1 | 14.3.1 | Unity 2021.3.15f1 IL2CPP, CRIWARE | NVN |
 | [Super Mario Sunshine (Super Mario 3D All-Stars)](010049900F546002/README.md) | `010049900F546002` | 1.1.4 | 9.5.1 | NERD's Hagi GameCube layer (recompiled PowerPC) | Vulkan |
 | [Super Monkey Ball Banana Rumble](010031F019294000/README.md) | `010031F019294000` | 2.20 | 17.5.8 | Unity 2022.3.30f1 IL2CPP, CRIWARE, FMOD | NVN |
 | [SUPER ROBOT WARS Y](010063301BD50000/README.md) | `010063301BD50000` | 1.4.1 | 18.3.5 | Unity 2022.3.44f1 IL2CPP, CRIWARE | NVN |

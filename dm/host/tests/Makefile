@@ -456,6 +456,39 @@ nsd-sanitize: $(B)/t_nsd_asan
 	$(B)/t_nsd_asan
 run: ssl nextendo-routes nextendo-x509 nsd
 
+ACCOUNT_SOURCES = t_nextendo_account.m ../hle_account.c ../hle_nextendo_apple.m ../hle_nextendo_api_apple.m ../hle_bigstack.c ../entry.S
+ACCOUNT_DEPS = t_gate_fixture.h $(ACCOUNT_SOURCES) ../nextendo_account.h ../net_socket.h ../hle.h $(GAME_H)
+$(B)/t_nextendo_account: $(ACCOUNT_DEPS) | $(B)
+	$(CLANG) $(SSL_FLAGS) -o $@ $(ACCOUNT_SOURCES) -framework Foundation -framework Security
+$(B)/t_nextendo_account_asan: $(ACCOUNT_DEPS) | $(B)
+	$(CLANG) $(SSL_FLAGS) -fsanitize=address,undefined -mllvm -asan-globals=0 -fno-omit-frame-pointer -o $@ $(ACCOUNT_SOURCES) -framework Foundation -framework Security
+.PHONY: nextendo-account nextendo-account-sanitize
+nextendo-account: $(B)/t_nextendo_account
+	$(B)/t_nextendo_account
+nextendo-account-sanitize: $(B)/t_nextendo_account_asan
+	$(B)/t_nextendo_account_asan
+API_SOURCES = t_nextendo_api.m ../hle_nextendo_api_apple.m
+$(B)/t_nextendo_api: $(API_SOURCES) ../nextendo_api_apple.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Wextra -Werror -DDM_NEXTENDO_API_TEST -o $@ $(API_SOURCES) -framework Foundation
+$(B)/t_nextendo_api_asan: $(API_SOURCES) ../nextendo_api_apple.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Wextra -Werror -DDM_NEXTENDO_API_TEST -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ $(API_SOURCES) -framework Foundation
+.PHONY: nextendo-api nextendo-api-sanitize
+nextendo-api: $(B)/t_nextendo_api
+	$(B)/t_nextendo_api
+nextendo-api-sanitize: $(B)/t_nextendo_api_asan
+	$(B)/t_nextendo_api_asan
+
+SOCIAL_SOURCES = t_nextendo_social.m ../hle_nextendo_social_apple.m ../hle_nextendo_api_apple.m ../hle_nextendo_friends.c
+$(B)/t_nextendo_social: $(SOCIAL_SOURCES) ../nextendo_social.h ../nextendo_api_apple.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Wextra -Werror -DDM_NEXTENDO_API_TEST -Isocial_profile -o $@ $(SOCIAL_SOURCES) -framework Foundation
+$(B)/t_nextendo_social_asan: $(SOCIAL_SOURCES) ../nextendo_social.h ../nextendo_api_apple.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Wextra -Werror -DDM_NEXTENDO_API_TEST -Isocial_profile -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ $(SOCIAL_SOURCES) -framework Foundation
+.PHONY: nextendo-social nextendo-social-sanitize
+nextendo-social: $(B)/t_nextendo_social
+	$(B)/t_nextendo_social
+nextendo-social-sanitize: $(B)/t_nextendo_social_asan
+	$(B)/t_nextendo_social_asan
+run: nextendo-account nextendo-api nextendo-social
 $(B)/t_online_policy: t_online_policy.c ../hle_net_backend.c ../hle_nsd_backend.c ../net_socket.h ../nsd.h | $(B)
 	$(CLANG) -O1 -g -Wall -Wextra -Werror -o $@ t_online_policy.c ../hle_net_backend.c ../hle_nsd_backend.c
 $(B)/t_online_policy_asan: t_online_policy.c ../hle_net_backend.c ../hle_nsd_backend.c ../net_socket.h ../nsd.h | $(B)

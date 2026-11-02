@@ -265,6 +265,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 - an enabled native socket connects, but the SDK's TLS context is still an unavailable-service cut. → [Native client TLS](../reference/online-services.md#native-client-tls)
 - a service template reaches native DNS unchanged, or an IP handoff loses the logical TLS service identity. → [Explicit routing and NSD](../reference/online-services.md#explicit-routing-and-nsd)
+- a service transport works but the SDK has no usable account identity/token or friends snapshot. → [Account and social providers](../reference/online-services.md#account-and-social-providers)
 
 ## Movies
 

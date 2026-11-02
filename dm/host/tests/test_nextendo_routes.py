@@ -157,7 +157,9 @@ def main():
             for path,reject,handoff in pin_configs:
                 result=subprocess.run([str(executable),str(path),'0',str(pin_listener.getsockname()[1]),'reject-pin' if reject else 'handoff' if handoff else 'v2'],text=True,capture_output=True,timeout=15)
                 if result.returncode: raise AssertionError(f'enrolled leaf {path.name}: {result.stdout}\n{result.stderr}')
-                total += int(re.search(r'routes: (\d+) checks, 0 failures',result.stdout)[1])
+                match = re.search(r'routes: (\d+) checks, 0 failures',result.stdout)
+                if match is None: raise AssertionError(result.stdout)
+                total += int(match[1])
             recovery = subprocess.run([str(executable), '-', '1', str(config)], text=True, capture_output=True, timeout=15)
             if recovery.returncode: raise AssertionError(recovery.stdout + recovery.stderr)
             if not {'localhost', 'wrong.invalid', 'api.console.invalid'}.issubset(names):

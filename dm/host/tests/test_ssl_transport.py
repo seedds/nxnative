@@ -70,7 +70,7 @@ def main():
                         raw = stream.detach()  # Intentionally omit close_notify to test authenticated-stream truncation.
                         os.close(raw)
                     elif message == b"MTLS":
-                        certificate = stream.getpeercert()
+                        certificate = stream.getpeercert() or {}
                         common_names = [value for rdn in certificate.get("subject", ()) for name, value in rdn if name == "commonName"]
                         stream.sendall(b"CERT" if common_names == ["nxnative ephemeral TLS client"] else b"FAIL")
                     elif message == b"BULK":

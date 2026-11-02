@@ -741,7 +741,14 @@ per compiler, exact totals, 4 guest threads on hle_thread.c (56 to about 25,000 
 test: 3 seeds of 50 pauses per compiler, 130 to 200 stops at polls and 130 to 140 register-invariant checks per compiler, 0 inconsistent blocks. A
 host call: fnptr's `hidden_ptr` set to a host function's slot, the program's check passes through it. Dirty pages (protected again every 0.5 ms):
 int_ops 1 write fault a run, excl from 4 to 634, all stores of compiled code; with the JIT, fiber's pages also take stores of JIT code (0 to 5 a run
-outside compiled code, none inside the JIT's memory callbacks). `t_aot_host` takes 3 to 5 s.
+outside compiled code, none inside the JIT's memory callbacks). `t_aot_host` takes 3 to 5 s. Found by the pause rows under CPU load (one of excl's 35
+lines missing, status 0, 50 threaded pauses, 0 inconsistent: 11 of 300 runs of the pause child beside a `ctest -j6` of the Vulkan tests): not the pause
+but the host's log. dm.h's `LOG` wrote a line in two calls, `fprintf` and `fputc('\n')`, each a write on unbuffered stderr, and the main thread's
+`[guest]` line landed between them in the tester's `[dm] SetThreadActivity ... (ok)` line (its first four calls are logged), where the capture,
+which takes lines that start with `[guest] `, lost it. `LOG` is now one call on Linux and Windows (0 of 500 under the same load; Apple keeps its two
+calls, the same race, until a Mac test: docs/reference/threads.md, "Log lines of two threads spliced together"); the log-lines row checks it
+(20,000 lines from each of two threads: 19 of 20 runs spliced lines before, 0 of 120 after), and a failing row names its first differing line and a
+spliced one.
 
 ## A game module in the host
 

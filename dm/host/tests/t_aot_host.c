@@ -5,7 +5,10 @@
 // program's output), and the threads of the excl program are hle_thread.c's guest threads (svcCreateThread, ArbitrateLock, WaitForAddress,
 // WaitSynchronization, ...) on host threads with a state block each.
 // Each run is a child process (this program with --run), as a game is a process; the parent compares its lines with corpus/expected/<program>.out and its
-// exit status, and prints a table. The runs:
+// exit status, and prints a table. A row whose lines differ names the first line that differs and any "[guest] " line found inside another line (a log line
+// another thread wrote in two pieces around it: a flake of the pause rows under CPU load, dm.h LOG). The runs:
+//   the log lines first (--log-race): one thread writes LOG lines while another prints svcOutputDebugString lines through svc_dispatch, every line whole
+//     (dm.h LOG writes its line in one call; written in two, a guest line landed inside a log line and the capture below lost it)
 //   every NRO once: its expected lines and exit 0. A host built without the JIT fallback (CMake NXHOST_JIT off) cannot run what has no compiled entry: the
 //     programs listed in JIT_NEEDED below then stop with status 3 (DM_AOT_JIT_NEEDED) and a [RED] line naming the address, after printing the start of
 //     their expected lines; any other NRO stopping so fails
@@ -22,6 +25,7 @@
 //     the packs: --packs, else the environment variable NXAOT_PACKS, else the CMake option NXAOT_PACKS; with none, a note and exit 0 (CTest stays green where
 //     no packs exist: the Windows runner, a build without the aot image)
 //   t_aot_host --run <pack> <nro> [--set <symbol>=<value>]... [--hidden-host] [--dirty] [--pause N --seed S]      one run (the child)
+//   t_aot_host --log-race N      N log lines and N guest lines from two threads (the child of the log-lines row)
 #include "../aot.h"
 #include "../aot_hostfn.h"
 #if NXHOST_JIT
@@ -56,7 +60,7 @@
 // The programs whose runs enter the JIT fallback (dm/tools/aot/README.md, "The JIT fallback": fiber's continuations after a stack switch, fp's code after
 // msr fpcr, except-gcc's opcode switch that discovery leaves unbounded)
 static const char *const JIT_NEEDED[] = {"fp-gcc", "fp-clang", "fiber-gcc", "fiber-clang", "except-gcc"};
-enum { EXCL_RUNS = 5, PAUSES = 50, PAUSE_SEEDS = 3 };
+enum { EXCL_RUNS = 5, PAUSES = 50, PAUSE_SEEDS = 3, LOG_RACE_LINES = 20000 };
 
 void guest_thread_init(void);          // thread.c
 uint32_t svc_thread_main_init(void);   // hle_thread.c
@@ -269,27 +273,55 @@ static int child(int argc, char **argv) {
     _exit(a.status);   // other threads may still be parked (a pause tester, a stuck thread): the process ends here, as a game's
 }
 
+// The log-lines child: a host thread writes n LOG lines while this one prints n lines through svcOutputDebugString (hle_svc.c's "[guest] " lines), both on
+// stderr, which the parent reads together with stdout. The pause test's tester logs its first SetThreadActivity calls while the program prints
+static unsigned g_race_n;
+static void *race_logger(void *p) {
+    (void)p;
+    for (unsigned i = 0; i < g_race_n; i++) LOG("t_aot_host: log race %u", i);
+    return NULL;
+}
+static int log_race(unsigned n) {
+    g_flag.dbg = 1;
+    crash_install();
+    dm_aot_arena_init();
+    g_race_n = n;
+    pthread_t th;
+    if (pthread_create(&th, NULL, race_logger, NULL)) { fprintf(stderr, "t_aot_host: pthread_create failed\n"); return DM_AOT_USAGE; }
+    char s[64];
+    for (unsigned i = 0; i < n; i++) {
+        const int len = snprintf(s, sizeof s, "log race %u", i);
+        uint64_t r[32] = {(uint64_t)(uintptr_t)s, (uint64_t)len};
+        svc_dispatch(0x27, r, 0);   // OutputDebugString
+    }
+    pthread_join(th, NULL);
+    fflush(NULL);
+    return 0;
+}
+
 // ---------- The parent ----------
-typedef struct { int status; char *guest; size_t nguest; char red[400]; double secs; unsigned long long stat[12]; int have_stat; unsigned pt[5]; int have_pt; } result;
+typedef struct {
+    int status; char *guest; size_t nguest; char red[400]; double secs; unsigned long long stat[12]; int have_stat; unsigned pt[5]; int have_pt;
+    unsigned ndm, spliced; char splice[300];   // "[dm] " lines; lines holding a "[guest] " line after their start (the first of them)
+} result;
 
 static void append(char **buf, size_t *n, size_t *cap, const char *s, size_t len) {
     if (*n + len + 1 > *cap) { *cap = (*n + len + 1) * 2; *buf = realloc(*buf, *cap); if (!*buf) abort(); }
     memcpy(*buf + *n, s, len); *n += len; (*buf)[*n] = 0;
 }
 
-static int run_child(const char *self, const char *pack, const char *nro, const char *extra, result *r) {
-    char cmd[4096];
-#if defined(_WIN32)
-    snprintf(cmd, sizeof cmd, "\"\"%s\" --run \"%s\" \"%s\" %s 2>&1\"", self, pack, nro, extra);
-#else
-    snprintf(cmd, sizeof cmd, "'%s' --run '%s' '%s' %s 2>&1", self, pack, nro, extra);
-#endif
+// One child: its stdout and stderr in one pipe, as a game's log is one stream. A guest line is a line that starts with "[guest] "; one found later in a line
+// (another thread's line written in two pieces around it) is counted as spliced and not taken
+static int run_cmd(const char *cmd, result *r) {
     memset(r, 0, sizeof *r);
     FILE *f = popen(cmd, "r");
     if (!f) { snprintf(r->red, sizeof r->red, "popen failed"); r->status = -1; return -1; }
     char line[8192]; size_t cap = 0;
     while (fgets(line, sizeof line, f)) {
-        if (!strncmp(line, "[guest] ", 8)) append(&r->guest, &r->nguest, &cap, line + 8, strlen(line + 8));
+        const char *gp = strstr(line, "[guest] ");
+        if (gp && gp != line && !r->spliced++) { snprintf(r->splice, sizeof r->splice, "%s", line); r->splice[strcspn(r->splice, "\n")] = 0; }
+        r->ndm += !strncmp(line, "[dm] ", 5);
+        if (gp == line) append(&r->guest, &r->nguest, &cap, line + 8, strlen(line + 8));
         else if (strstr(line, "[RED]") && !r->red[0]) { snprintf(r->red, sizeof r->red, "%s", strstr(line, "[RED]")); r->red[strcspn(r->red, "\n")] = 0; }
         if (!strncmp(line, "t_aot_host: status ", 19)) {
             r->have_stat = sscanf(line, "t_aot_host: status %*d after %lf s: %llu threads, %llu SVCs, %llu host calls, %llu dispatcher misses, %llu calls into another pack, "
@@ -308,6 +340,36 @@ static int run_child(const char *self, const char *pack, const char *nro, const 
 #endif
     if (!r->guest) { r->guest = calloc(1, 1); r->nguest = 0; }
     return r->status;
+}
+
+static int run_child(const char *self, const char *pack, const char *nro, const char *extra, result *r) {
+    char cmd[4096];
+#if defined(_WIN32)
+    snprintf(cmd, sizeof cmd, "\"\"%s\" --run \"%s\" \"%s\" %s 2>&1\"", self, pack, nro, extra);
+#else
+    snprintf(cmd, sizeof cmd, "'%s' --run '%s' '%s' %s 2>&1", self, pack, nro, extra);
+#endif
+    return run_cmd(cmd, r);
+}
+
+// A failing row's note: where the run's guest lines leave the expected ones (the first differing line, counted from 1), and a spliced line if one was seen
+static void diff_note(const char *want, const result *r, char *out, size_t n) {
+    const char *w = want, *g = r->guest;
+    size_t line = 1;
+    for (; *w && *g; line++) {
+        const size_t wl = strcspn(w, "\n"), gl = strcspn(g, "\n");
+        if (wl != gl || memcmp(w, g, wl)) break;
+        w += wl + (w[wl] == '\n'); g += gl + (g[gl] == '\n');
+    }
+    size_t o = 0;
+    out[0] = 0;
+    if (*w || *g) {
+        char ws[160] = "no more lines", gs[160] = "no more lines";
+        if (*w) snprintf(ws, sizeof ws, "\"%.*s\"", (int)strcspn(w, "\n"), w);
+        if (*g) snprintf(gs, sizeof gs, "\"%.*s\"", (int)strcspn(g, "\n"), g);
+        o = (size_t)snprintf(out, n, "; line %zu: want %s, got %s", line, ws, gs);
+    }
+    if (r->spliced && o < n) snprintf(out + o, n - o, "; %u guest line(s) inside other lines, first: %s", r->spliced, r->splice);
 }
 
 static char *read_text(const char *path) {
@@ -333,6 +395,7 @@ static void row(const char *name, const char *mode, int ok, const result *r, con
 
 int main(int argc, char **argv) {
     if (argc >= 4 && !strcmp(argv[1], "--run")) return child(argc, argv);
+    if (argc == 3 && !strcmp(argv[1], "--log-race")) return log_race((unsigned)atoi(argv[2]));
     const char *packs = NULL, *corpus = T_AOT_CORPUS;
     const char *only[32]; int nonly = 0;
     for (int i = 1; i < argc; i++) {
@@ -350,6 +413,24 @@ int main(int argc, char **argv) {
     if (!tsv) { printf("FAIL: cannot read %s (the corpus: --corpus)\n", path); return 1; }
     printf("t_aot_host: packs %s, corpus %s, JIT fallback %s\n", packs, corpus, NXHOST_JIT ? "built in (NXHOST_JIT)" : "not built in");
     printf("%-14s %-9s %-4s %3s %9s %6s  %s\n", "nro", "run", "ok", "st", "ms", "lines", "note");
+    {   // 0. The capture's premise: every log line and every guest line whole when two threads write them at once (what the rows below read)
+        char cmd[1200], *want = calloc((size_t)LOG_RACE_LINES, 24), note[700], diff[600];
+        if (!want) abort();
+        size_t o = 0;
+        for (unsigned i = 0; i < LOG_RACE_LINES; i++) o += (size_t)sprintf(want + o, "log race %u\n", i);
+#if defined(_WIN32)
+        snprintf(cmd, sizeof cmd, "\"\"%s\" --log-race %d 2>&1\"", argv[0], LOG_RACE_LINES);
+#else
+        snprintf(cmd, sizeof cmd, "'%s' --log-race %d 2>&1", argv[0], LOG_RACE_LINES);
+#endif
+        result r;
+        run_cmd(cmd, &r);
+        const int ok = r.status == 0 && !strcmp(r.guest, want) && r.ndm >= LOG_RACE_LINES && !r.spliced;
+        diff_note(want, &r, diff, sizeof diff);
+        snprintf(note, sizeof note, "%u log lines from one thread, guest lines from another%s%s%s", r.ndm, ok ? "" : diff, r.red[0] ? "; " : "", r.red);
+        row("log-lines", "race", ok, &r, note);
+        free(r.guest); free(want);
+    }
     for (char *ln = tsv, *next; ln && *ln; ln = next) {
         next = strchr(ln, '\n');
         if (next) *next++ = 0;
@@ -361,7 +442,7 @@ int main(int argc, char **argv) {
         int want = !nonly;
         for (int i = 0; i < nonly; i++) want |= !strcmp(only[i], name) || !strcmp(only[i], nro);
         if (!want) continue;
-        char pack[1024], nrop[1024], exp_path[1024], note[600];
+        char pack[1024], nrop[1024], exp_path[1024], note[1400], diff[700];
         snprintf(pack, sizeof pack, "%s/%s" PACK_EXT, packs, name);
         snprintf(nrop, sizeof nrop, "%s/nro/%s", corpus, nro);
         snprintf(exp_path, sizeof exp_path, "%s/expected/%s.out", corpus, program);
@@ -384,7 +465,8 @@ int main(int argc, char **argv) {
         } else {
             ok = 0;
             size_t k = 0; while (k < r.nguest && r.guest[k] == expected[k]) k++;
-            snprintf(note, sizeof note, "lines differ from byte %zu of %zu (got %zu)%s%s", k, strlen(expected), r.nguest, r.red[0] ? "; " : "", r.red);
+            diff_note(expected, &r, diff, sizeof diff);
+            snprintf(note, sizeof note, "lines differ from byte %zu of %zu (got %zu)%s%s%s", k, strlen(expected), r.nguest, diff, r.red[0] ? "; " : "", r.red);
         }
         row(name, "plain", ok, &r, note);
         free(r.guest);
@@ -393,7 +475,8 @@ int main(int argc, char **argv) {
             for (int i = 0; i < EXCL_RUNS; i++) {
                 run_child(argv[0], pack, nrop, "", &r);
                 ok = r.status == 0 && !strcmp(r.guest, expected) && r.have_stat && r.stat[0] >= 3;
-                snprintf(note, sizeof note, "%llu threads, %llu SVCs%s%s", r.stat[0], r.stat[1], r.red[0] ? "; " : "", r.red);
+                diff_note(expected, &r, diff, sizeof diff);
+                snprintf(note, sizeof note, "%llu threads, %llu SVCs%s%s%s", r.stat[0], r.stat[1], diff, r.red[0] ? "; " : "", r.red);
                 row(name, "threads", ok, &r, note);
                 free(r.guest);
             }
@@ -404,8 +487,9 @@ int main(int argc, char **argv) {
                 run_child(argv[0], pack, nrop, extra, &r);
                 ok = r.status == 0 && !strcmp(r.guest, expected) && r.have_pt && r.pt[1] == PAUSES && r.pt[3] == 0;
                 polls += r.have_stat ? (unsigned)r.stat[5] : 0; invariant += r.have_pt ? r.pt[2] : 0;
-                snprintf(note, sizeof note, "seed %u: %u pauses (%u threaded), %llu at polls, %u invariant checks, %u inconsistent%s%s", seed, r.pt[0], r.pt[1],
-                         r.stat[5], r.pt[2], r.pt[3], r.red[0] ? "; " : "", r.red);
+                diff_note(expected, &r, diff, sizeof diff);
+                snprintf(note, sizeof note, "seed %u: %u pauses (%u threaded), %llu at polls, %u invariant checks, %u inconsistent%s%s%s", seed, r.pt[0], r.pt[1],
+                         r.stat[5], r.pt[2], r.pt[3], diff, r.red[0] ? "; " : "", r.red);
                 row(name, "pause", ok, &r, note);
                 free(r.guest);
             }
@@ -417,7 +501,8 @@ int main(int argc, char **argv) {
             // 4. A guest call into the host-function page
             run_child(argv[0], pack, nrop, "--hidden-host", &r);
             ok = r.status == 0 && !strcmp(r.guest, expected) && r.have_stat && r.stat[7] >= 1 && r.stat[2] >= 1;
-            snprintf(note, sizeof note, "hidden_ptr -> the host: %llu calls of the host function, %llu host calls%s%s", r.stat[7], r.stat[2], r.red[0] ? "; " : "", r.red);
+            diff_note(expected, &r, diff, sizeof diff);
+            snprintf(note, sizeof note, "hidden_ptr -> the host: %llu calls of the host function, %llu host calls%s%s%s", r.stat[7], r.stat[2], diff, r.red[0] ? "; " : "", r.red);
             row(name, "host-call", ok, &r, note);
             free(r.guest);
         }
@@ -426,8 +511,9 @@ int main(int argc, char **argv) {
             // their stacks in its bss; fiber: stores of the JIT fallback too, whose fastmem handler must come after the hook)
             run_child(argv[0], pack, nrop, "--dirty", &r);
             ok = r.status == 0 && !strcmp(r.guest, expected) && r.have_stat && r.stat[8] >= 1 && r.stat[10] == 0 && (r.stat[9] >= 1 || !strcmp(program, "fiber"));
-            snprintf(note, sizeof note, "%llu write faults resumed by the hook: %llu stores of compiled code, %llu elsewhere (the JIT's code, the host), %llu in the JIT's callbacks%s%s",
-                     r.stat[8], r.stat[9], r.stat[8] - r.stat[9], r.stat[10], r.red[0] ? "; " : "", r.red);
+            diff_note(expected, &r, diff, sizeof diff);
+            snprintf(note, sizeof note, "%llu write faults resumed by the hook: %llu stores of compiled code, %llu elsewhere (the JIT's code, the host), %llu in the JIT's callbacks%s%s%s",
+                     r.stat[8], r.stat[9], r.stat[8] - r.stat[9], r.stat[10], diff, r.red[0] ? "; " : "", r.red);
             row(name, "dirty", ok, &r, note);
             free(r.guest);
         }

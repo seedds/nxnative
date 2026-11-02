@@ -81,6 +81,13 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Fix:** `crash.c` lets only the first crashing thread print (`crash_gate`); the others stop in `pause()`, and a 15 s alarm ends the process if the dump itself stalls.
 - **Found on:** Unity titles in general.
 
+### Log lines of two threads spliced together
+
+- **Symptom:** a log line holds another line after its start, followed by an empty line: `[dm] SetThreadActivity 0x1001 → resume (ok)[guest] stack.order cc5f55f1c7c16cd8`. Whatever reads the log by the start of its lines misses the inner one; `t_aot_host`'s pause rows lost one of the program's lines so, under CPU load only.
+- **Cause:** `LOG` (`dm.h`) wrote its line in two stdio calls, `fprintf` and then `fputc('\n')`. stderr is unbuffered, so each is a `write`, and a line another thread wrote between them (`hle_svc.c`'s `[guest]` line of svcOutputDebugString, itself one call) landed inside it.
+- **Fix:** on Linux and Windows `LOG` is one `fprintf` with the newline in its format: one call under stderr's lock, one `write`. `t_aot_host`'s log-lines row checks it (20,000 lines from each of two threads). **Open:** Apple keeps the two calls (`DM_NATIVE_EXEC`) until a Mac test, and `nvn_state.c`'s `SLOG`, `nvn_mtl.m`'s `MLOG` and `PD`, and the lines `crash.c` and `probe.c` print in pieces have the same shape.
+- **Found on:** the host's corpus test on Linux (`t_aot_host`, [dm/tools/aot/README.md](../../dm/tools/aot/README.md#threads-and-safepoints)); any host log.
+
 ## Synchronization and address arbitration
 
 ### `SignalToAddress` type 2 with count ≤ 0

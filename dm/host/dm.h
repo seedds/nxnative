@@ -28,7 +28,14 @@ static inline int dm_host_thread_join(pthread_t thread, void **result) {
     return r;
 }
 
+#if DM_NATIVE_EXEC
 #define LOG(...) do { fprintf(stderr, "[dm] " __VA_ARGS__); fputc('\n', stderr); } while (0)
+#else
+// One log line, one stdio call. stderr is unbuffered: fprintf and then fputc('\n') were two writes, and a line another thread wrote between them (hle_svc.c's
+// "[guest] " lines of svcOutputDebugString) landed inside this one, followed by its lone newline; t_aot_host's pause test lost a guest line so (dm/tools/aot/README.md,
+// "Threads and safepoints"). Apple's form above has the same race; its change waits for a Mac test
+#define LOG(fmt, ...) do { fprintf(stderr, "[dm] " fmt "\n", ##__VA_ARGS__); } while (0)
+#endif
 #define die(...) do { LOG("FATAL " __VA_ARGS__); abort(); } while (0)
 
 typedef struct { uint32_t st_name; uint8_t st_info, st_other; uint16_t st_shndx; uint64_t st_value, st_size; } Elf64_Sym;

@@ -87,6 +87,12 @@ $(B)/t_system_event: t_system_event.c ../hle_thread.c ../hle_sdk16.c ../hle.h ..
 .PHONY: system-event
 system-event: $(B)/t_system_event
 	$(B)/t_system_event
+$(B)/t_network_clock: t_network_clock.c ../hle_network_clock.c ../hle_thread.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_network_clock.c
+.PHONY: network-clock
+network-clock: $(B)/t_network_clock
+	$(B)/t_network_clock
+run: network-clock
 $(B)/t_nro: t_nro.c ../loader.c ../hle_ro.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_nro.c
 .PHONY: nro

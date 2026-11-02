@@ -1,5 +1,5 @@
-# kind: evidence  Réussir : Code de la route shaders (provisional profile) (Unity Shader / GLSLC in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)
-# column 5 records where each key first appears; this game has no PC version to pair with
+# kind: evidence  Réussir : Code de la route shaders (Unity Shader / GLSLC in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)
+# column 5 records where each key first appears; no PC shader pairing supplied
 package	index	stage	dm_ctl_sha16	source
 vs_data.bin	0	vertex	0d39f6731bf119c8	/Data/Resources/unity default resources#GUI/Text Shader#var19.0
 vs_data.bin	1	vertex	21c28adb633e770a	/Data/Resources/unity default resources#GUI/Text Shader#var19.1
@@ -95,6 +95,21 @@ ps_data.bin	43	pixel	9e4d74a207043dde	/Data/Resources/unity default resources#Hi
 ps_data.bin	44	pixel	009163df4a5bf158	/Data/Resources/unity default resources#Hidden/InternalErrorShader#var19.5
 ps_data.bin	45	pixel	fd01abadec408214	/Data/Resources/unity default resources#Hidden/InternalErrorShader#var19.6
 ps_data.bin	46	pixel	923c607368dd733f	/Data/Resources/unity default resources#Hidden/InternalErrorShader#var19.7
+cs_data.bin	0	compute	65ef6cbe6922c0cb	/Data/Resources/unity default resources#Internal-BlendShape#main.0
+cs_data.bin	1	compute	a0ef6cbbef5cacd1	/Data/Resources/unity default resources#Internal-BlendShape#main.0
+cs_data.bin	2	compute	cedbc07f0ebaeb90	/Data/Resources/unity default resources#Internal-BlendShape#main.0
+cs_data.bin	3	compute	00d7de994ad9c976	/Data/Resources/unity default resources#Internal-Skinning#main.0
+cs_data.bin	4	compute	0a6c1652e39c8bd9	/Data/Resources/unity default resources#Internal-Skinning#main.0
+cs_data.bin	5	compute	39479209427cb839	/Data/Resources/unity default resources#Internal-Skinning#main.0
+cs_data.bin	6	compute	b6e65894d8e914be	/Data/Resources/unity default resources#Internal-Skinning#main.0
+cs_data.bin	7	compute	ba391610e01e2f6e	/Data/Resources/unity default resources#Internal-Skinning#main.0
+cs_data.bin	8	compute	bd35c30dddeff297	/Data/Resources/unity default resources#Internal-Skinning#main.0
+cs_data.bin	9	compute	c3a2aef163235319	/Data/Resources/unity default resources#Internal-Skinning#main.0
+cs_data.bin	10	compute	d0958e6b71a01f43	/Data/Resources/unity default resources#Internal-Skinning#main.0
+cs_data.bin	11	compute	dd4976c6e700931d	/Data/Resources/unity default resources#Internal-Skinning#main.0
+cs_data.bin	12	compute	e06bc4380b6dca25	/Data/Resources/unity default resources#Internal-Skinning#main.0
+cs_data.bin	13	compute	e93348af403736da	/Data/Resources/unity default resources#Internal-Skinning#main.0
+cs_data.bin	14	compute	f9d6e70f52e56526	/Data/Resources/unity default resources#Internal-Skinning#main.0
 vs_data.bin	47	vertex	1936fc3f69d3e8bb	/Data/Resources/unity_builtin_extra#Hidden/BlitCopy#var19.0
 ps_data.bin	47	pixel	12bab5f292e4b9b7	/Data/Resources/unity_builtin_extra#Hidden/BlitCopy#var19.1
 vs_data.bin	48	vertex	6b07e1ec81d80cc8	/Data/Resources/unity_builtin_extra#Hidden/BlitCopyDepth#var19.0

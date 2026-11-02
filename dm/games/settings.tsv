@@ -35,3 +35,5 @@ DM_PSO_PREBUILD	toggle	-	1	gfxapi:nvn&platform:ios,mac	Performance	Pipeline preb
 DM_NVN_ENC_THREAD	toggle	-	1|0	gfxapi:nvn&platform:ios,mac	Performance	Encode thread
 DM_FPS_HOLD	toggle	on/off	DM_GAME_FPS_HOLD	DM_GAME_FPS_TARGET!=0	Performance	Hold frames when late
 DM_METAL_HUD	toggle	-	0	platform:ios,mac	Performance	Performance HUD
+DM_VK_PSO_CACHE_LIMIT	toggle	512/0	1	platform:linux,windows	Performance	Pipeline cache size limit	Off: the pipeline cache on disk grows without a limit.
+DM_VK_PSO_CACHE_CLEANUP	toggle	-	1	platform:linux,windows	Performance	Pipeline cache cleanup

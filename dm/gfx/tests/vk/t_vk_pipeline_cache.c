@@ -2,28 +2,39 @@
 // one device list:
 //   write    a first start: 12 draws of 12 pipelines (two shader pairs, six colour formats), each waits once; at the end the cache file is written (its framing, length and
 //            SHA-256 are checked by the parent) and the device's list holds the 12 pipelines as P rows
-//   reload   a second start, after the parent planted a file of the same device under another chain version and a file of another device: the first is deleted at start,
-//            the second kept; the file's driver data is read; the prewarm builds the 12 pipelines from the device's list, so the same 12 draws make no pipeline and wait 0 times;
+//   reload   a second start, after the parent planted a file of the same device under another chain version and two of another device, one of this chain version and one of
+//            another: the cleanup (on by default) deletes the first and the third at start and keeps the second; the file's driver data is read; the prewarm builds the 12 pipelines from the device's list, so the same 12 draws make no pipeline and wait 0 times;
 //            the creations and the creations the driver answered from its cache are counted (lavapipe keeps none: its cache data is the 32-byte header)
 //   corrupt  the file's data changed by the parent: exactly one red line about the cache, the file ignored, the draws still right, and a valid file written at the end
 //   invalid  the file renamed by the parent as a previous version of the backend would have named it (another key): deleted at start, no data read, a new file written
+// Then the folder's upkeep (decision D8; vk_cache.c, index.tsv), each a start that only brings the backend up and shuts it down, over entries the parent plants with their index rows:
+//   stale-off  DM_VK_PSO_CACHE_CLEANUP=0: another device's entry of another chain version, one unused for 100 days and this device's under another driver all kept
+//   stale-on   the cleanup on (the default): the three removed, this game's entry kept
+//   limit      DM_VK_PSO_CACHE_LIMIT=1 (MiB), the cleanup off, four entries of 400 KiB: the one of another chain version goes first, then the least recently used, until it fits
+//   nolimit    DM_VK_PSO_CACHE_LIMIT=0: 1.6 MiB of entries all kept
+//   afterwrite the limit after a write: the folder 40 bytes under 1 MiB at start without this game's file, over it once the shutdown writes it: the least recently used removed
+//   off        DM_VK_PSO_CACHE=off: no cache, the folder and its index untouched
+// After each, the index lists exactly the folder's .bin files, each with its size, and the cleanup and the limit log one line each at most
 #include "t_vk_harness.h"
 #include "vk_pso.h"
 #include "shaders/gen/gpl_vary_vert.h"
 #include "shaders/gen/gpl_mix_frag.h"
 #include "shaders/gen/fullscreen_vert.h"
 #include "shaders/gen/red_frag.h"
+#include <time.h>
 
 enum { NF = 6, NP = 2, NK = NF * NP };
 static const int k_fmt[NF] = {NVN_FORMAT_RGBA8, NVN_FORMAT_RGBA16F, NVN_FORMAT_R32F, NVN_FORMAT_RGB10A2, NVN_FORMAT_RG16F, NVN_FORMAT_RGBA32F};
 typedef struct { float x, y, z, w; } v4;
 static const v4 k_pos[3] = {{-0.9f, -0.9f, 0.3f, 1}, {0.8f, -0.7f, 0.5f, 1}, {-0.6f, 0.9f, 0.7f, 1}};
 static const uint8_t k_col[3][4] = {{255, 0, 0, 200}, {0, 255, 0, 128}, {0, 0, 255, 255}};
-static int g_red_cache, g_lines;
-static void on_log(const char *line) {   // the backend's log lines, counted: the red ones about the pipeline cache
+static int g_red_cache, g_lines, g_limit_lines, g_cleanup_lines;
+static void on_log(const char *line) {   // the backend's log lines, counted: the red ones about the pipeline cache, the size limit's and the cleanup's
     fprintf(stderr, "[dm] %s\n", line);
     g_lines++;
     if (strstr(line, "[RED]") && strstr(line, "pipeline cache")) g_red_cache++;
+    if (strstr(line, "[hostvk] pipeline cache: ") && strstr(line, " MiB over ")) g_limit_lines++;
+    if (strstr(line, "[hostvk] pipeline cache cleanup")) g_cleanup_lines++;
 }
 static uint64_t waits(void) { hvk_pso_stats s; hvk_pso_stats_get(&s); uint64_t n = 0; for (int i = 0; i < HVK_W_N; i++) n += s.wait_n[i]; return n; }
 
@@ -81,6 +92,18 @@ static int child(const char *phase, const char *res) {
     return rc;
 }
 
+// A start that only brings the backend up (the cache read, cleaned and limited) and shuts it down (the cache written)
+static int idle_child(const char *phase, const char *res) {
+    static char name[120]; snprintf(name, sizeof name, "t_vk_pipeline_cache %s", phase);
+    hostvk_set_log(on_log);
+    hv_up(name);
+    hvk_cache_stats cs; hvk_cache_stats_get(&cs);
+    hv_res_put(res, "on", cs.on); hv_res_put(res, "loaded", (double)cs.loaded); hv_res_put(res, "ran", 1);
+    int rc = hv_finish();
+    hv_res_put(res, "red_cache", g_red_cache); hv_res_put(res, "limit_lines", g_limit_lines); hv_res_put(res, "cleanup_lines", g_cleanup_lines);
+    return rc;
+}
+
 // The parent: the cache file's framing, as vk_cache.c writes it (8 bytes "nxvkpc1\0", the length, SHA-256, the driver's data)
 static int file_valid(const char *path, size_t *data_len) {
     FILE *f = fopen(path, "rb"); if (!f) return 0;
@@ -92,10 +115,10 @@ static int file_valid(const char *path, size_t *data_len) {
     if (data_len) *data_len = (size_t)len;
     return !memcmp(sha, b + 16, 32);
 }
-static int find_cache(const char *dir, char *out, size_t n) {   // the one .bin file of the device in dir (not the planted other device's)
+static int find_cache(const char *dir, char *out, size_t n) {   // the one .bin file of the device in dir (not the planted other devices', vendor fff*)
     DIR *d = opendir(dir); if (!d) return 0;
     struct dirent *e; int found = 0;
-    while ((e = readdir(d))) { size_t l = strlen(e->d_name); if (l > 4 && !strcmp(e->d_name + l - 4, ".bin") && strncmp(e->d_name, "ffff-ffff-", 10)) { snprintf(out, n, "%s/%s", dir, e->d_name); found++; } }
+    while ((e = readdir(d))) { size_t l = strlen(e->d_name); if (l > 4 && !strcmp(e->d_name + l - 4, ".bin") && strncmp(e->d_name, "fff", 3)) { snprintf(out, n, "%s/%s", dir, e->d_name); found++; } }
     closedir(d);
     return found == 1;
 }
@@ -105,16 +128,60 @@ static int copy_file(const char *from, const char *to) {
     uint8_t buf[4096]; size_t n; while ((n = fread(buf, 1, sizeof buf, a))) fwrite(buf, 1, n, b);
     fclose(a); fclose(b); return 1;
 }
+// The folder's upkeep: an entry planted (size bytes of zeros) with its index row (used: its last use; 0, no row)
+static void plant(const char *cache, const char *name, size_t size, long long used) {
+    char p[1000]; snprintf(p, sizeof p, "%s/%s", cache, name);
+    FILE *f = fopen(p, "wb"); static const uint8_t z[4096];
+    if (f) { for (size_t n = 0; n < size;) { size_t k = size - n < sizeof z ? size - n : sizeof z; fwrite(z, 1, k, f); n += k; } fclose(f); }
+    snprintf(p, sizeof p, "%s/index.tsv", cache);
+    if (used && (f = fopen(p, "ab"))) { fprintf(f, "%s\t%zu\t%lld\n", name, size, used); fclose(f); }
+}
+static int has(const char *cache, const char *name) { char p[1000]; snprintf(p, sizeof p, "%s/%s", cache, name); return exists(p); }
+static void unplant(const char *cache) {   // the planted entries (vendor fff*) removed
+    DIR *d = opendir(cache); if (!d) return; struct dirent *e; char p[1400];
+    while ((e = readdir(d))) if (!strncmp(e->d_name, "fff", 3)) { snprintf(p, sizeof p, "%s/%s", cache, e->d_name); remove(p); }
+    closedir(d);
+}
+// The index lists exactly the folder's .bin files, each once, with its size; entries: how many
+static int index_consistent(const char *cache, int *entries) {
+    char p[1000], line[400], nm[260][210]; int n = 0, ok = 1; unsigned long long sz[260];
+    snprintf(p, sizeof p, "%s/index.tsv", cache);
+    FILE *f = fopen(p, "rb"); if (!f) return 0;
+    while (fgets(line, sizeof line, f) && n < 260) { long long u; if (line[0] == '#') continue; if (sscanf(line, "%209[^\t]\t%llu\t%lld", nm[n], &sz[n], &u) != 3) ok = 0; else n++; }
+    fclose(f);
+    for (int i = 0; i < n; i++) {
+        struct stat st; snprintf(p, sizeof p, "%s/%s", cache, nm[i]);
+        if (stat(p, &st) || (unsigned long long)st.st_size != sz[i]) ok = 0;
+        for (int j = 0; j < i; j++) if (!strcmp(nm[i], nm[j])) ok = 0;
+    }
+    DIR *d = opendir(cache); struct dirent *e; int bins = 0;
+    while (d && (e = readdir(d))) { size_t l = strlen(e->d_name); if (l > 4 && !strcmp(e->d_name + l - 4, ".bin")) bins++; }
+    if (d) closedir(d);
+    if (entries) *entries = n;
+    return ok && bins == n;
+}
+static char *slurp(const char *path) {
+    FILE *f = fopen(path, "rb"); if (!f) return NULL;
+    char *b = calloc(1, 1 << 16); if (b && !fread(b, 1, (1 << 16) - 1, f)) b[0] = 0;
+    fclose(f); return b;
+}
 int main(int argc, char **argv) {
     char res[800];
-    if (argc > 1) { snprintf(res, sizeof res, "%s/%s.res", getenv("T_VK_PCACHE_DIR") ? getenv("T_VK_PCACHE_DIR") : ".", argv[1]); return child(argv[1], res); }
+    if (argc > 1) {
+        snprintf(res, sizeof res, "%s/%s.res", getenv("T_VK_PCACHE_DIR") ? getenv("T_VK_PCACHE_DIR") : ".", argv[1]);
+        static const char *const idle[] = {"stale-off", "stale-on", "limit", "nolimit", "afterwrite", "off"};
+        for (size_t i = 0; i < sizeof idle / sizeof *idle; i++) if (!strcmp(argv[1], idle[i])) return idle_child(argv[1], res);
+        return child(argv[1], res);
+    }
     setvbuf(stdout, NULL, _IONBF, 0);
     const char *tmp = getenv("TMPDIR");
     char dir[600], cache[700], user[700]; snprintf(dir, sizeof dir, "%s/t_vk_pcache_XXXXXX", tmp && *tmp ? tmp : "/tmp");
     if (!mkdtemp(dir)) { perror("mkdtemp"); return 2; }
     snprintf(cache, sizeof cache, "%s/cache", dir); snprintf(user, sizeof user, "%s/pso_user_vk.tsv", dir);
     setenv("DM_VK_PSO_CACHE", cache, 1); setenv("DM_VK_PSO_USER", user, 1); setenv("DM_PSO_MANIFEST", "", 1); setenv("T_VK_PCACHE_DIR", dir, 1);
-    char name[400], path[900], planted_same[1000] = "", planted_other[1000] = "", r[900];
+    char name[400], path[900], planted_same[1000] = "", planted_other[1000] = "", planted_old[1000] = "", r[900], suffix[64], prefix[64] = "";
+    snprintf(suffix, sizeof suffix, "-%s-v1.bin", DMSH_CHAIN_VK);   // this chain and backend version (vk_cache.c HVK_CACHE_VERSION 1)
+    setenv("DM_VK_PSO_CACHE_LIMIT", "", 1); setenv("DM_VK_PSO_CACHE_CLEANUP", "", 1);   // the defaults: 512 MiB, the cleanup on
     int fail = 0;
 #define START(ph) do { printf("---- start: %s ----\n", ph); int rc_ = hv_spawn(argv[0], ph); snprintf(r, sizeof r, "%s/%s.res", dir, ph); if (rc_) { printf("start %s failed (exit status %d)\n", ph, rc_); fail = 1; } } while (0)
     START("write");
@@ -123,18 +190,22 @@ int main(int argc, char **argv) {
     snprintf(name, sizeof name, "write: one cache file for this device, framed and hashed as written (%s)", have ? path : "none"); t(name, have && file_valid(path, &len));
     FILE *u = fopen(user, "r"); int rows = 0; char line[NVN_PIPE_ROW_MAX + 8]; if (u) { while (fgets(line, sizeof line, u)) rows += line[0] == 'P'; fclose(u); }
     snprintf(name, sizeof name, "write: the device's list holds the %d pipelines the draws built on the spot, as P rows (%d)", NK, rows); t(name, rows == NK);
-    // plant: this device's file under another chain version (deleted at the next start) and another device's (kept)
+    // plant: this device's file under another chain version (deleted at the next start), another device's of this chain version (kept) and of another (deleted)
     if (have) {
         const char *base = strrchr(path, '/') + 1, *d1 = strchr(base, '-'), *d2 = d1 ? strchr(d1 + 1, '-') : NULL;   // "<vendor>-<device>-" (hexadecimal, 4 digits or more)
-        char prefix[64]; snprintf(prefix, sizeof prefix, "%.*s", d2 ? (int)(d2 + 1 - base) : 0, base);
+        snprintf(prefix, sizeof prefix, "%.*s", d2 ? (int)(d2 + 1 - base) : 0, base);
         snprintf(planted_same, sizeof planted_same, "%s/%s00000000-00000000000000000000000000000000-000000000000-v1.bin", cache, prefix);
-        snprintf(planted_other, sizeof planted_other, "%s/ffff-ffff-00000000-00000000000000000000000000000000-000000000000-v1.bin", cache);
-        copy_file(path, planted_same); copy_file(path, planted_other);
+        snprintf(planted_other, sizeof planted_other, "%s/ffff-ffff-00000000-00000000000000000000000000000000%s", cache, suffix);
+        snprintf(planted_old, sizeof planted_old, "%s/fffe-ffff-00000000-00000000000000000000000000000000-000000000000-v1.bin", cache);
+        copy_file(path, planted_same); copy_file(path, planted_other); copy_file(path, planted_old);
     }
     START("reload");
     snprintf(name, sizeof name, "reload: the driver data of the file was read (%.0f bytes, the file holds %zu)", hv_res_get(r, "loaded", -1), len); t(name, hv_res_get(r, "loaded", -1) == (double)len && len > 0);
     t("reload: this device's file of another chain version was deleted at start", planted_same[0] && !exists(planted_same));
-    t("reload: another device's file was kept", planted_other[0] && exists(planted_other));
+    t("reload: another device's file of this chain version was kept", planted_other[0] && exists(planted_other));
+    t("reload: another device's file of another chain version was deleted at start (the cleanup, on by default)", planted_old[0] && !exists(planted_old));
+    int nent = 0; int cons = index_consistent(cache, &nent);
+    snprintf(name, sizeof name, "reload: the index lists the folder's %d entries with their sizes", nent); t(name, cons && nent == 2);
     t("reload: no red line about the cache", hv_res_get(r, "red_cache", -1) == 0);
     double c_reload = hv_res_get(r, "created", 0), h_reload = hv_res_get(r, "hits", 0);
     // corrupt the data: one byte of the driver's header changed (the hash no longer matches)
@@ -151,6 +222,63 @@ int main(int argc, char **argv) {
     t("invalid: the file of the other key was deleted at start", renamed[0] && !exists(renamed));
     t("invalid: no driver data was read", hv_res_get(r, "loaded", -1) == 0);
     t("invalid: a new file was written for the current key", have && file_valid(path, NULL));
+    // ---- the folder's upkeep (decision D8) ----
+    const char *cur = have ? strrchr(path, '/') + 1 : "";
+    long long now = (long long)time(NULL);
+    char n1[200], n2[200], n3[200], na[200], nb[200], nc[200], nd[200], cnt[300];
+    snprintf(n1, sizeof n1, "fff1-0001-00000000-00000000000000000000000000000000-000000000000-v1.bin");   // another device, another chain version
+    snprintf(n2, sizeof n2, "fff1-0002-00000000-00000000000000000000000000000000%s", suffix);            // another device, unused for 100 days
+    snprintf(n3, sizeof n3, "%s00000001-00000000000000000000000000000000%s", prefix, suffix);              // this device, another driver
+    plant(cache, n1, 4096, now); plant(cache, n2, 4096, now - 100 * 86400LL); plant(cache, n3, 4096, now);
+    setenv("DM_VK_PSO_CACHE_CLEANUP", "0", 1);
+    START("stale-off");
+    t("stale-off: another chain version's, the 100-day-old and another driver's entries all kept", has(cache, n1) && has(cache, n2) && has(cache, n3));
+    snprintf(cnt, sizeof cnt, "stale-off: one cleanup line, no limit line, no red line (%.0f, %.0f, %.0f)", hv_res_get(r, "cleanup_lines", -1), hv_res_get(r, "limit_lines", -1), hv_res_get(r, "red_cache", -1));
+    t(cnt, hv_res_get(r, "cleanup_lines", -1) == 1 && hv_res_get(r, "limit_lines", -1) == 0 && hv_res_get(r, "red_cache", -1) == 0);
+    t("stale-off: the index consistent (5 entries)", index_consistent(cache, &nent) && nent == 5);
+    setenv("DM_VK_PSO_CACHE_CLEANUP", "", 1);
+    START("stale-on");
+    t("stale-on: another chain version's, the 100-day-old and another driver's entries removed", !has(cache, n1) && !has(cache, n2) && !has(cache, n3));
+    t("stale-on: this game's entry and another device's current one kept", has(cache, cur) && planted_other[0] && exists(planted_other));
+    snprintf(cnt, sizeof cnt, "stale-on: one cleanup line (%.0f)", hv_res_get(r, "cleanup_lines", -1)); t(cnt, hv_res_get(r, "cleanup_lines", -1) == 1);
+    t("stale-on: the index consistent (2 entries)", index_consistent(cache, &nent) && nent == 2);
+    unplant(cache);
+    snprintf(nd, sizeof nd, "fff2-0001-00000000-00000000000000000000000000000000-000000000000-v1.bin");   // another chain version, the most recently used
+    snprintf(na, sizeof na, "fff2-0002-00000000-00000000000000000000000000000000%s", suffix);
+    snprintf(nb, sizeof nb, "fff2-0003-00000000-00000000000000000000000000000000%s", suffix);
+    snprintf(nc, sizeof nc, "fff2-0004-00000000-00000000000000000000000000000000%s", suffix);
+    plant(cache, nd, 400 << 10, now); plant(cache, na, 400 << 10, now - 3000); plant(cache, nb, 400 << 10, now - 2000); plant(cache, nc, 400 << 10, now - 1000);
+    setenv("DM_VK_PSO_CACHE_CLEANUP", "0", 1); setenv("DM_VK_PSO_CACHE_LIMIT", "1", 1);
+    START("limit");
+    t("limit: 1.6 MiB over 1 MiB: another chain version's entry removed first, then the least recently used", !has(cache, nd) && !has(cache, na));
+    t("limit: the two more recently used and this game's entry kept", has(cache, nb) && has(cache, nc) && has(cache, cur));
+    snprintf(cnt, sizeof cnt, "limit: one limit line (%.0f)", hv_res_get(r, "limit_lines", -1)); t(cnt, hv_res_get(r, "limit_lines", -1) == 1);
+    t("limit: the index consistent (3 entries)", index_consistent(cache, &nent) && nent == 3);
+    unplant(cache);
+    plant(cache, na, 800 << 10, now - 3000); plant(cache, nb, 800 << 10, now - 2000);
+    setenv("DM_VK_PSO_CACHE_LIMIT", "0", 1);
+    START("nolimit");
+    t("nolimit: DM_VK_PSO_CACHE_LIMIT=0: 1.6 MiB of entries all kept", has(cache, na) && has(cache, nb) && has(cache, cur));
+    snprintf(cnt, sizeof cnt, "nolimit: no limit line (%.0f)", hv_res_get(r, "limit_lines", -1)); t(cnt, hv_res_get(r, "limit_lines", -1) == 0);
+    t("nolimit: the index consistent (3 entries)", index_consistent(cache, &nent) && nent == 3);
+    unplant(cache);
+    if (have) remove(path);
+    plant(cache, na, 600000, now - 2000); plant(cache, nb, (1 << 20) - 40 - 600000, now - 1000);   // 40 bytes under 1 MiB without this game's file
+    setenv("DM_VK_PSO_CACHE_CLEANUP", "", 1); setenv("DM_VK_PSO_CACHE_LIMIT", "1", 1);
+    START("afterwrite");
+    t("afterwrite: the shutdown's write took the folder over 1 MiB: the least recently used entry removed, the other kept", !has(cache, na) && has(cache, nb));
+    t("afterwrite: this game's file written", have && file_valid(path, NULL));
+    snprintf(cnt, sizeof cnt, "afterwrite: one limit line, after the write (%.0f)", hv_res_get(r, "limit_lines", -1)); t(cnt, hv_res_get(r, "limit_lines", -1) == 1);
+    t("afterwrite: the index consistent (2 entries)", index_consistent(cache, &nent) && nent == 2);
+    char ip[800]; snprintf(ip, sizeof ip, "%s/index.tsv", cache);
+    char *before = slurp(ip);
+    setenv("DM_VK_PSO_CACHE", "off", 1); setenv("DM_VK_PSO_CACHE_LIMIT", "", 1);
+    START("off");
+    char *after = slurp(ip);
+    t("off: DM_VK_PSO_CACHE=off: no cache, no data read", hv_res_get(r, "ran", 0) == 1 && hv_res_get(r, "on", -1) == 0 && hv_res_get(r, "loaded", -1) == 0);
+    t("off: the folder and its index untouched", before && after && !strcmp(before, after) && has(cache, nb) && have && file_valid(path, NULL));
+    free(before); free(after);
+    setenv("DM_VK_PSO_CACHE", cache, 1);
     printf("---- the starts ----\n%-8s %6s %6s %10s %10s %6s\n", "start", "waits", "made", "creations", "cache hits", "bytes");
     static const char *const ph[] = {"write", "reload", "corrupt", "invalid"};
     for (int i = 0; i < 4; i++) { snprintf(r, sizeof r, "%s/%s.res", dir, ph[i]);
@@ -158,6 +286,8 @@ int main(int argc, char **argv) {
     printf("reload: %.0f creations, %.0f answered from the driver's cache\n", c_reload, h_reload);
     rm_dir(cache); remove(user);
     for (int i = 0; i < 4; i++) { snprintf(r, sizeof r, "%s/%s.res", dir, ph[i]); remove(r); }
+    static const char *const ph2[] = {"stale-off", "stale-on", "limit", "nolimit", "afterwrite", "off"};
+    for (int i = 0; i < 6; i++) { snprintf(r, sizeof r, "%s/%s.res", dir, ph2[i]); remove(r); }
     rm_dir(dir);
     printf("== t_vk_pipeline_cache: %d checks, %d failed%s ==\n", g_total, g_fail + fail, fail ? " (a start failed)" : "");
     return g_fail || fail;

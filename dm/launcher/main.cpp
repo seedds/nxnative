@@ -237,8 +237,8 @@ static void game_pane(App &a) {
     if (st.cache_fixed) ImGui::TextDisabled("Set at launch (DM_VK_PSO_CACHE=%s)", st.cache_value.c_str());
     if (on) ImGui::TextDisabled("Folder: %s. Later starts build fewer pipelines.", cache_folder(*g, st, a.env).c_str());
     else ImGui::TextDisabled("Off (DM_VK_PSO_CACHE=off): every start builds its pipelines again.");
-    ImGui::TextDisabled("The host keeps one file per game, driver and shader chain, and deletes the files of another driver or chain version at start. "
-                        "A size limit and a switch for that cleanup are not in the host yet.");
+    ImGui::TextDisabled("The host keeps one file per game, driver and shader chain. Its size limit and its cleanup of old files are settings of the pack "
+                        "(Pipeline cache size limit, Pipeline cache cleanup: Advanced settings, Performance).");
     ImGui::PopTextWrapPos();
 }
 

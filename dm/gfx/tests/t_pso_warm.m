@@ -381,7 +381,7 @@ static void acquisition(NSString *dir) {
     EXPECT("lookahead reuses completed prefetch/warm identity", 1, shader_get(sequential, 0) == before_lookahead);
     EXPECT("lookahead preserves independent completed identity", 1, shader_get(other, 0) == independent);
 
-    NSString *retry_json = [dir stringByAppendingPathComponent:[retry stringByAppendingPathExtension:@"json"]];
+    NSString *retry_json = [dir stringByAppendingPathComponent:[retry stringByAppendingString:@".json"]];
     NSData *reflection = [NSData dataWithContentsOfFile:retry_json];
     EXPECT("retry fixture reflection removed", 1, [NSFileManager.defaultManager removeItemAtPath:retry_json error:nil]);
     mtl_prog_prefetch(&programs[3]); drain_prefetch(queues);

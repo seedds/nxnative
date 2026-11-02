@@ -8,6 +8,8 @@
 #include <TargetConditionals.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#include <dispatch/dispatch.h>
+#include <dns_sd.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
 #include <limits.h>
@@ -59,6 +61,7 @@ void dm_net_test_set_interface(const dm_net_test_interface *p) {
     atomic_store(&g_net_broadcast_known, 0);
 }
 #endif
+static void net_resolver_finalize(void);
 static __thread int t_net_errno = 100; // Horizon's BSD service and nn::socket expose Linux errno numbers (not Darwin's).
 
 dm_net_mode_t dm_net_mode(void) {
@@ -253,7 +256,7 @@ static int net_close_owned(int guest, int check_generation, uint64_t generation)
 }
 int dm_net_close(int guest) { return net_gate() ? net_close_owned(guest, 0, 0) : -1; }
 int dm_net_close_generation(int guest, uint64_t generation) { return net_close_owned(guest, 1, generation); }
-void dm_net_finalize(void) { for (int i = 0; i < NET_MAX; i++) { pthread_mutex_lock(&g_net_lock); int used = g_sockets[i].used; pthread_mutex_unlock(&g_net_lock); if (used) net_close_owned(i, 0, 0); } }
+void dm_net_finalize(void) { net_resolver_finalize(); for (int i = 0; i < NET_MAX; i++) { pthread_mutex_lock(&g_net_lock); int used = g_sockets[i].used; pthread_mutex_unlock(&g_net_lock); if (used) net_close_owned(i, 0, 0); } }
 int dm_net_bind(int guest, const void *addr, unsigned len) {
     if (!net_gate()) return -1;
     struct sockaddr_in a; if (net_addr_in(addr, len, &a)) return -1;
@@ -613,16 +616,189 @@ void dm_net_freeaddrinfo(void *result) {
     net_ai_allocation *found = *link; if (found) *link = found->next; pthread_mutex_unlock(&g_net_lock);
     if (found) net_ai_destroy(found); else if (dm_net_enabled()) net_error(22);
 }
-void *dm_net_gethostbyname(const char *name) {
+static void *net_hostent(const char *name, const uint32_t *addresses, size_t count) {
     typedef struct { char *name; char **aliases; int32_t family, length; char **addresses; } nx_hostent;
     static __thread struct { nx_hostent entry; char name[NI_MAXHOST]; char *aliases[1], *addresses[65]; uint32_t data[64]; } data;
+    _Static_assert(sizeof(nx_hostent) == 32 && offsetof(nx_hostent, addresses) == 24, "Horizon hostent");
+    memset(&data, 0, sizeof data); snprintf(data.name, sizeof data.name, "%s", name);
+    for (size_t i = 0; i < count; ++i) { data.data[i] = addresses[i]; data.addresses[i] = (char *)&data.data[i]; }
+    data.entry = (nx_hostent){data.name, data.aliases, 2, 4, data.addresses}; return &data.entry;
+}
+void *dm_net_gethostbyname(const char *name) {
     if (!name) { net_error(14); return NULL; }
     void *out = NULL; dm_net_addrinfo hints = {.family = 2, .type = 1};
     if (dm_net_getaddrinfo(name, NULL, &hints, &out)) return NULL;
-    memset(&data, 0, sizeof data); snprintf(data.name, sizeof data.name, "%s", name);
-    int n = 0;
-    for (dm_net_addrinfo *p = out; p && n < 64; p = p->next) { data.data[n] = ((nx_addr *)p->addr)->address; data.addresses[n] = (char *)&data.data[n]; n++; }
-    data.entry = (nx_hostent){data.name, data.aliases, 2, 4, data.addresses}; dm_net_freeaddrinfo(out); return &data.entry;
+    uint32_t addresses[64]; size_t n = 0;
+    for (dm_net_addrinfo *p = out; p && n < 64; p = p->next) addresses[n++] = ((nx_addr *)p->addr)->address;
+    void *entry = net_hostent(name, addresses, n); dm_net_freeaddrinfo(out); return entry;
+}
+
+// A cancel ID is not a socket and is not reused in this process. Only active
+// native queries occupy the bounded registry; requesting an unused ID leaks no
+// slot. Each DNSServiceRef is created, used and destroyed on one serial queue.
+enum { NET_RESOLVER_MAX = 64, NET_RESOLVER_NO_ADDRESS = -1 };
+typedef struct net_resolver_job {
+    pthread_mutex_t lock;
+    pthread_cond_t changed;
+    _Atomic unsigned references;
+    uint32_t id, addresses[64];
+    size_t count;
+    int done, error, finished;
+    DNSServiceRef service;
+    char name[NI_MAXHOST];
+} net_resolver_job;
+static pthread_mutex_t g_resolver_lock = PTHREAD_MUTEX_INITIALIZER;
+static net_resolver_job *g_resolver_jobs[NET_RESOLVER_MAX];
+static unsigned g_resolver_finalizing;
+static _Atomic uint64_t g_resolver_next_id = 1;
+static pthread_once_t g_resolver_once = PTHREAD_ONCE_INIT;
+static dispatch_queue_t g_resolver_queue;
+static void net_resolver_init(void) { g_resolver_queue = dispatch_queue_create("org.nxnative.resolver", DISPATCH_QUEUE_SERIAL); }
+static dispatch_queue_t net_resolver_queue(void) {
+    dm_guest_host_wait_begin(); pthread_once(&g_resolver_once, net_resolver_init); dm_guest_host_wait_end();
+    return g_resolver_queue;
+}
+static void net_resolver_lock(pthread_mutex_t *lock) {
+    if (!pthread_mutex_trylock(lock)) return;
+    dm_guest_host_wait_begin(); pthread_mutex_lock(lock); dm_guest_host_wait_end();
+}
+static void net_resolver_retain(net_resolver_job *job) { atomic_fetch_add(&job->references, 1); }
+static void net_resolver_release(net_resolver_job *job) {
+    if (atomic_fetch_sub(&job->references, 1) == 1) {
+        pthread_cond_destroy(&job->changed); pthread_mutex_destroy(&job->lock); free(job);
+    }
+}
+static void net_resolver_finish(net_resolver_job *job, int error) {
+    // Queue-owned lifetime lasts through deallocation; a waiting caller and any
+    // already queued cancellation each hold a separate reference.
+    if (job->finished) return;
+    job->finished = 1;
+    if (job->service) { DNSServiceRefDeallocate(job->service); job->service = NULL; }
+    pthread_mutex_lock(&g_resolver_lock);
+    for (unsigned i = 0; i < NET_RESOLVER_MAX; ++i) if (g_resolver_jobs[i] == job) {
+        g_resolver_jobs[i] = NULL; net_resolver_release(job); break;
+    }
+    pthread_mutex_unlock(&g_resolver_lock);
+    pthread_mutex_lock(&job->lock); job->error = error; job->done = 1;
+    pthread_cond_broadcast(&job->changed); pthread_mutex_unlock(&job->lock);
+    net_resolver_release(job);
+}
+static int net_resolver_error(DNSServiceErrorType error) {
+    switch (error) {
+        // A negative DNS answer is not a POSIX system errno. As in the
+        // existing GetAddrInfo path, fail without replacing retained errno.
+        case kDNSServiceErr_NoSuchRecord: case kDNSServiceErr_NoSuchName: return NET_RESOLVER_NO_ADDRESS;
+        case kDNSServiceErr_NoMemory: return 12;
+        case kDNSServiceErr_BadParam: case kDNSServiceErr_BadFlags: return 22;
+        case kDNSServiceErr_Unsupported: return 95;
+        case kDNSServiceErr_ServiceNotRunning: return 100;
+        case kDNSServiceErr_Timeout: return 110;
+        case kDNSServiceErr_PolicyDenied: case kDNSServiceErr_NotPermitted: return 13;
+        default: return 5;
+    }
+}
+static void net_resolver_reply(DNSServiceRef service, DNSServiceFlags flags, uint32_t interface,
+                               DNSServiceErrorType error, const char *name,
+                               const struct sockaddr *address, uint32_t ttl, void *context) {
+    (void)service; (void)interface; (void)name; (void)ttl;
+    net_resolver_job *job = context;
+    if (job->finished) return;
+    if (error) { net_resolver_finish(job, net_resolver_error(error)); return; }
+    if (!address || address->sa_family != AF_INET || address->sa_len < sizeof(struct sockaddr_in)) {
+        net_resolver_finish(job, 22); return;
+    }
+    uint32_t value = ((const struct sockaddr_in *)address)->sin_addr.s_addr;
+    size_t i = 0; while (i < job->count && job->addresses[i] != value) ++i;
+    if (flags & kDNSServiceFlagsAdd) {
+        if (i == job->count) {
+            if (job->count == 64) { net_resolver_finish(job, 75); return; }
+            job->addresses[job->count++] = value;
+        }
+    } else if (i < job->count) job->addresses[i] = job->addresses[--job->count];
+    if (!(flags & kDNSServiceFlagsMoreComing)) net_resolver_finish(job, job->count ? 0 : NET_RESOLVER_NO_ADDRESS);
+}
+static void net_resolver_start(void *context) {
+    net_resolver_job *job = context;
+    // Use the system's own finite DNS deadline, not an application retry/sleep
+    // or an unbounded tracking query. A timeout is delivered as a real error.
+    DNSServiceErrorType error = DNSServiceGetAddrInfo(&job->service, kDNSServiceFlagsTimeout, 0, kDNSServiceProtocol_IPv4,
+                                                     job->name, net_resolver_reply, job);
+    // The output reference is owned only on success, never on an API error.
+    if (error) { job->service = NULL; net_resolver_finish(job, net_resolver_error(error)); return; }
+    if (!job->service) { net_resolver_finish(job, 22); return; }
+    error = DNSServiceSetDispatchQueue(job->service, g_resolver_queue);
+    if (error) net_resolver_finish(job, net_resolver_error(error));
+}
+uint32_t dm_net_request_cancel_handle(void) {
+    uint64_t id = atomic_load(&g_resolver_next_id);
+    while (id <= UINT32_MAX) {
+        if (atomic_compare_exchange_weak(&g_resolver_next_id, &id, id + 1)) return (uint32_t)id;
+    }
+    net_error(11); return 0;
+}
+static void net_resolver_cancel_job(void *context) {
+    net_resolver_job *job = context;
+    if (!job->finished) net_resolver_finish(job, 125); // Darwin ECANCELED -> Horizon ECANCELED.
+    net_resolver_release(job);
+}
+int dm_net_cancel(uint32_t id) {
+    if (!id) { net_error(22); return 0; } // Verified SDK Cancel(0) convention.
+    dispatch_queue_t queue = net_resolver_queue();
+    if (!queue) return net_error(11);
+    net_resolver_lock(&g_resolver_lock);
+    for (unsigned i = 0; !g_resolver_finalizing && i < NET_RESOLVER_MAX; ++i) {
+        net_resolver_job *job = g_resolver_jobs[i];
+        if (job && job->id == id) { net_resolver_retain(job); dispatch_async_f(queue, job, net_resolver_cancel_job); }
+    }
+    pthread_mutex_unlock(&g_resolver_lock);
+    return 0;
+}
+void *dm_net_gethostbyname_cancel(const char *name, uint32_t id) {
+    if (!net_gate()) return NULL;
+    if (!name) { net_error(22); return NULL; } // SDK resolver's null-name EINVAL.
+    if (strnlen(name, NI_MAXHOST) == NI_MAXHOST) { net_error(22); return NULL; }
+    const char *lookup = name;
+    struct in_addr literal;
+    if (inet_pton(AF_INET, lookup, &literal) == 1) return net_hostent(name, &literal.s_addr, 1);
+    dispatch_queue_t queue = net_resolver_queue();
+    if (!queue) { net_error(12); return NULL; }
+    net_resolver_job *job = calloc(1, sizeof *job);
+    if (!job) { net_error(12); return NULL; }
+    if (pthread_mutex_init(&job->lock, NULL)) { free(job); net_error(12); return NULL; }
+    if (pthread_cond_init(&job->changed, NULL)) { pthread_mutex_destroy(&job->lock); free(job); net_error(12); return NULL; }
+    atomic_init(&job->references, 1); job->id = id; snprintf(job->name, sizeof job->name, "%s", lookup);
+    net_resolver_lock(&g_resolver_lock); unsigned slot = 0;
+    while (slot < NET_RESOLVER_MAX && g_resolver_jobs[slot]) ++slot;
+    if (g_resolver_finalizing) slot = NET_RESOLVER_MAX;
+    if (slot < NET_RESOLVER_MAX) {
+        g_resolver_jobs[slot] = job; net_resolver_retain(job); net_resolver_retain(job);
+        dispatch_async_f(queue, job, net_resolver_start);
+    }
+    pthread_mutex_unlock(&g_resolver_lock);
+    if (slot == NET_RESOLVER_MAX) { net_resolver_release(job); net_error(11); return NULL; }
+    net_resolver_lock(&job->lock);
+    while (!job->done) { dm_guest_host_wait_begin(); pthread_cond_wait(&job->changed, &job->lock); dm_guest_host_wait_end(); }
+    int error = job->error; void *result = error ? NULL : net_hostent(name, job->addresses, job->count);
+    pthread_mutex_unlock(&job->lock); net_resolver_release(job);
+    if (error > 0) net_error(error);
+    return result;
+}
+static void net_resolver_stop_all(void *unused) {
+    (void)unused;
+    for (unsigned i = 0; i < NET_RESOLVER_MAX; ++i) {
+        pthread_mutex_lock(&g_resolver_lock); net_resolver_job *job = g_resolver_jobs[i];
+        if (job) net_resolver_retain(job);
+        pthread_mutex_unlock(&g_resolver_lock);
+        if (job) net_resolver_cancel_job(job);
+    }
+}
+static void net_resolver_finalize(void) {
+    dispatch_queue_t queue = net_resolver_queue();
+    if (queue) {
+        net_resolver_lock(&g_resolver_lock); ++g_resolver_finalizing; pthread_mutex_unlock(&g_resolver_lock);
+        dm_guest_host_wait_begin(); dispatch_sync_f(queue, NULL, net_resolver_stop_all); dm_guest_host_wait_end();
+        net_resolver_lock(&g_resolver_lock); --g_resolver_finalizing; pthread_mutex_unlock(&g_resolver_lock);
+    }
 }
 
 // Query the actual IPv4 default route, then find that interface's address. DM_NETWORK_INTERFACE

@@ -67,6 +67,10 @@ int dm_net_getaddrinfo(const char *host, const char *service, const void *hints,
 int dm_net_getaddrinfo_legacy(const char *host, const char *service, const void *hints, void **result);
 void dm_net_freeaddrinfo(void *result);
 void *dm_net_gethostbyname(const char *name);
+// The cancellation identity owns no socket or registry slot until a query starts.
+void *dm_net_gethostbyname_cancel(const char *name, uint32_t cancel_id);
+uint32_t dm_net_request_cancel_handle(void);
+int dm_net_cancel(uint32_t cancel_id);
 int dm_net_ipconfig(uint32_t *address, uint32_t *mask, uint32_t *gateway, uint32_t *dns1, uint32_t *dns2);
 int dm_nifm_available(void);
 void dm_nifm_submit_wait(void);

@@ -2067,6 +2067,17 @@ def arh_shaders(path, rel, entries, out):
             monolith_shaders(data, f'/{rel}{name}', out)
 
 
+def ungzip(d, label):
+    """Validate every gzip member and bound decoded bytes before looking for shader containers."""
+    import gzip, io
+    limit = max(1 << 20, NEST * len(d))
+    try:
+        with gzip.GzipFile(fileobj=io.BytesIO(d)) as stream: out = stream.read(limit + 1)
+    except (OSError, EOFError, zlib.error) as e: red(f'{label}: invalid gzip stream ({e})')
+    if len(out) > limit: red(f'{label}: gzip stream expands beyond its {limit:#x} byte budget')
+    return out
+
+
 def yaz0(s, label='Yaz0'):
     """Yaz0 decompression (Super Mario 3D World + Bowser's Fury: almost all of RomFS is .szs = SARC wrapped in Yaz0). Pure Python runs at about 20–45 MB/s per core, under a minute for the whole 4.7 GB RomFS in parallel, and needs no extra dependency.
     Group header bits: 1 = one literal byte; 0 = back-reference, 2 bytes {length high nibble, 12-bit distance} (distance + 1); length 0 reads one more byte + 0x12, else + 2. Overlapping copies are expanded by their period"""
@@ -2590,6 +2601,8 @@ def scan_file_in(args):
     if head[:4] == ZSTD_MAGIC: d = unzs(path)   # by the magic: Paper Mario: The Thousand-Year Door names its zstd files .zst (8,726, its shaders among them)
     else:
         with open(path, 'rb') as f: d = f.read()
+    if d[:3] == b'\x1f\x8b\x08':   # standard gzip: Skyward Sword HD's Shaders.arc.gz wraps paired GLSLC outputs
+        d = ungzip(d, '/' + rel); head = d[:16]   # later format probes inspect decoded bytes, not the gzip timestamp
     if head[4:5] == b'\x78' and path.endswith('.gz') and (z := gust_gz(d)) is not None: d = z   # Gust's chunked zlib (gust_gz)
     # Monolith also ships these containers loose, without an ARH/ARD archive
     # (Xenoblade DE). The generic prefilter below otherwise drops even HCPS.

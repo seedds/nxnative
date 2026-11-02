@@ -107,7 +107,6 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Symptom:** `watchdog: sampling failed` and no thread stacks when `DM_WATCH_SAMPLE` contains an apostrophe, such as `/tmp/John's Mac/hang.txt`; shell syntax in the path can also run commands, and long paths are truncated.
 - **Cause:** `crash.c` interpolated the path into a single-quoted command in a fixed-size buffer, then called `system()`. An apostrophe ends the shell quote.
 - **Fix:** spawn `/usr/bin/sample` directly with the PID, one-second duration, `-f` and the unchanged path as separate arguments. Spawn file actions redirect stdout and stderr to `/dev/null`. Setup, spawn, wait, nonzero exit and signal failures retain the failure log; an interrupted wait resumes. The watchdog still exits with `128 + SIGALRM` after sampling.
-- **Check:** `make -C dm/host/tests GAME=010015100B514000 watch-sample` runs the real watchdog with a synthetic sampler, checking exact path bytes, redirection, setup/launch/wait failures and exit status without attaching to a user process.
 - **Found on:** the [static-analysis audit in issue #313](https://github.com/seedds/nxnative/issues/313#issuecomment-6543080671), reproduced with synthetic paths; no game-specific failure is claimed.
 
 ## Synchronization and address arbitration

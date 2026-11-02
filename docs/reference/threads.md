@@ -95,6 +95,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Found on:** [Kirby and the Forgotten Land](../../dm/games/01004D300C5AE000/README.md): the first guide movie ("A Jump", 480×270 VP9) froze the game on the first walk from the beach, every time. The job worker (priority 46) and the movie threads (priority 44) are all pinned to core 0.
 - **Found on:** [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md), whose 140-second opening VP9 movie stopped at its first output release. A live stack sample identified the input thread in `md_pump` waiting on `dmu`, and the output thread holding it inside `SignalEvent` → `dm_yield_to_core_peers`.
 
+### User exception handlers (`nn::os::SetUserExceptionHandler`)
+
+- **Symptom:** a fault in guest code ended the run with the host's crash report, where the game had set a user exception handler: .NET NativeAOT's null checks are loads through the reference (`ldr wzr, [x0]`), and its `NullReferenceException` starts from the handler.
+- **Cause:** Horizon's kernel delivers a data abort, an instruction abort or an undefined instruction to the process when it has a user exception handler: it writes the faulting `x0`–`x8`, `lr`, `sp`, `pc`, `pstate`, `esr` and `far` to the user exception context area (`svcGetInfo` type 20) and enters the SDK's `nn::os::detail::UserExceptionHandler` with `x0` = the exception type and `x1` = that area, every other register as it was. The SDK saves the rest, builds the `UserExceptionInfo`, calls the SDK handler and then the game's, and ends with `svcReturnFromException` (`0xf801` when nobody handled it). The host had none of this.
+- **Fix:** `hle_userexc.c`: `crash.c` calls it for a fault the fault hooks left (`SIGSEGV`, `SIGBUS`, `SIGILL` in a guest module); with a handler set (`g_UserExceptionHandler` or `g_SdkUserExceptionHandler`), it fills the area and resumes the thread in the SDK's entry, as the kernel does. `svcReturnFromException` (`0x28`) ends the run with the fault it was given, as an unhandled exception, logged as a red line with its backtrace. A fault again at the same `pc` within 10 ms, or in the entry itself, is the crash report.
+- **Check:** NativeAOT-NX's handler logs `Hardware exception thrown: C0000005` and the runtime throws the managed exception with its stack trace (`at Paris.Engine.EpicHelper.Init() + 0x3b0 …`).
+- **Found on:** [MARVEL Cosmic Invasion](../../dm/games/010059D020C26000/README.md) (NativeAOT-NX; its handler warns that a retail console crashes instead, so a shipped game must not rely on it, and the game did not once the EOS platform was valid: [Epic Online Services offline](services.md#epic-online-services-offline)).
+
 ### Simultaneous crashes of several threads
 
 - **Symptom:** several threads crash at once and the dumps interleave, then the process hangs instead of exiting.

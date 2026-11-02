@@ -752,7 +752,7 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
     S = pg.shader_sources(mods['main']['imports'], F['glsl_src'], [m for m in sorted({*keep, *nro_add}, key=pg.load_order) if 'glslcCompile' in mods[m]['exports']], rom['mags']['SPIR-V'],
                           rom['exts'].get('.pak', 0) if F.get('main_markers', set()) & {'Unreal', 'Unreal 4'} else 0, rom['mags']['Trinity pack'], gl_names=F.get('gl_names', 0),
                           gl_src=F.get('gl_src', 0), gl_files=sum(rom['exts'].get(e, 0) for e in pg.GL_FILES), oodle_pkz=rom['mags']['PlatinumGames PKZ'],   # the manifest has no name tables: every PKZ counts
-                          nro_imports=frozenset(pg.romfs_nro_imports(ex / 'romfs_nro')))
+                          nro_imports=frozenset(pg.romfs_nro_imports(ex / 'romfs_nro')), sdl_gpu=F.get('sdl_gpu', False))
     vulkan, gl = S['graphics'][0] == 'vulkan', S['graphics'][0] == 'gl'
     notes = []
     if not vulkan and not gl and 'nvnBootstrapLoader' not in mods['main']['imports']: notes.append('main imports neither nvnBootstrapLoader nor Vulkan functions nor OpenGL through EGL: the host implements only NVN, Vulkan and OpenGL')
@@ -861,7 +861,7 @@ def write_profile(pdir, app, f):
          '# ---- App ----', f'name{T}{name}', f'ipa{T}{ipa_name(name, app)}', f'app_category{T}public.app-category.games', *key('pad_layout'), *key('op_mode'), '',
          '# ---- Versions ----', T.join(['build', f['version'], f['display']] + [f'{m}={F["mods"][m]["bid"]}' for m in mods]), f'package{T}{f["version"]}', f'shader_versions{T}{f["version"]}', '',
          '# ---- Files ----', *key('modules'), f'romfs_marker{T}{R["biggest"][1]}', f'zip_store{T}{":".join(store + [".metallib"])}', '',
-         '# ---- Memory ----', *key('mem_reserve'), *key('mem_alias'), *key('mem_stack'), *key('app_pool'), *key('sys_resource'), '',
+         '# ---- Memory ----', *key('mem_reserve'), *key('mem_alias'), *key('mem_stack'), *key('app_pool'), *key('sys_resource'), *key('game_env'), *key('stdalloc_cap'), '',
          '# ---- Shader split ----', *key('shader_groups', " ".join(groups) or "/=romfs"), f'shader_note{T}{name} shaders (provisional profile)']
     (pdir / 'game.tsv').write_text('\n'.join(L) + '\n', encoding='utf-8')
     for n, text in EMPTY_TABLES.items(): (pdir / n).write_text(text)
@@ -1479,14 +1479,21 @@ def capture_shaders(repo, d, patched, work, env, logs, g, api):
     rmtree(cap); rmtree(rd); cap.mkdir(parents=True)
     for x in ('save', 'temp', 'msl'): (rd / x).mkdir(parents=True)
     # everything the run writes stays in <id>_build (DM_ROOT is already there): a fresh save and temporary storage, an empty shader library folder (pipelines fail, the game still creates every shader)
-    henv = dict(env, DM_ROMFS=str(rfs.source(d)), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_MSL_DIR=str(rd / 'msl'), **{C['env']: str(cap)})
+    # DM_CTL: a capture whose table is not complete yet and that has made no progress for 15 s presses A, as a player would at a title screen: MARVEL Cosmic Invasion
+    # makes the last of its shaders only behind its "press any button" (captures that finish without a stall, Super Mario Galaxy's, Balatro's, Well Dweller's, never press)
+    ctl = rd / 'ctl.txt'; ctl.write_text('')
+    henv = dict(env, DM_ROMFS=str(rfs.source(d)), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_MSL_DIR=str(rd / 'msl'), DM_CTL=str(ctl), **{C['env']: str(cap)})
     PROG.set(step='booting the game', done=0, total=len(want) if want else None, unit='shaders')
     say(f'booting the game in the Mac host to capture the {C["what"]} at run time → {out}')
-    t0 = time.time(); last = {'n': 0, 't': t0}
+    t0 = time.time(); last = {'n': 0, 't': t0, 'press': t0}
     def done():   # every listed key is there; without the table, none has been added for 20 s
         got = capture_done(cap, api); n = len(got & want if want else got); PROG.set(done=n)
-        if n != last['n']: last['n'], last['t'] = n, time.time()
-        return bool((want and got >= want) or (not want and n and time.time() - last['t'] > 20))
+        now = time.time()
+        if n != last['n']: last['n'], last['t'] = n, now
+        if want and n and not got >= want and now - max(last['t'], last['press']) > 15:
+            with open(ctl, 'a') as f: f.write('A~0.2\n')
+            last['press'] = now; say(f'no new shader for 15 s with {n} of {len(want)}: pressing A')
+        return bool((want and got >= want) or (not want and n and now - last['t'] > 20))
     rc = boot_mac(host, patched, henv, rd, log, CAPTURE_SECS, done)
     got = capture_done(cap, api)
     if rc is not None and not (want and got >= want): host_stopped(log, rc, time.time() - t0)

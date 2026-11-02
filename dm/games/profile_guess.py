@@ -25,8 +25,10 @@ MARKERS = [(b'nvnBootstrapLoader', 'NVN'), (b'vkCreateInstance', 'Vulkan'), (b'e
            (b'sead::', 'Nintendo sead'), (b'agl::', 'Nintendo agl'), (b'gsys::', 'Nintendo gsys'), (b'Unreal', 'Unreal'), (b'UE4', 'Unreal 4'), (b'Havok', 'Havok'), (b'CRIWARE', 'CRIWARE'), (b'Wwise', 'Wwise'),
            (b'MonoGame.Framework', 'MonoGame'), (b'FMOD mixer', 'FMOD')]
 GLSLC_MAGIC = b'\x91\x68\x86\x19'   # GLSLC compiler outputs (shader_split.py glslc_shaders)
-GL_SRC = rb'\0#version [0-9]'      # a GLSL source string as dm/gfx/tools/gl_shaders.py takes it from main (Balatro's main has none, only glslang's messages that start with '#version:')
+GL_SRC = rb'\0#version [0-9][^\0\n]*\n\s*[^\s\0]'   # a GLSL source string as dm/gfx/tools/gl_shaders.py takes it from main: a version line with source after it (Balatro's main has none, only glslang's messages that start with '#version:'; MARVEL Cosmic Invasion's FNA has only MOJOSHADER's bare '#version 110' lines)
 GL_FILES = ('.mvgl', '.vert', '.frag')   # the RomFS files gl_shaders.py reads GLSL from
+SDL_GPU = b'SDL_GPU Driver'   # FNA3D's SDL_GPU driver (FNA3D_Driver_SDL.c logs "SDL_GPU Driver: Vulkan"): every Vulkan function through vkGetInstanceProcAddr, so main imports none (MARVEL Cosmic Invasion)
+DOTNET_GC = b'DOTNET_GCRegionRange'   # .NET NativeAOT's GC reads its region range from the environment (Absolum, MARVEL Cosmic Invasion)
 APP_POOL = 0xCD500000               # the application memory pool of a 4 GB Switch (3285 MiB), what every profile but Engage's reports
 MiB = 1 << 20
 
@@ -98,6 +100,7 @@ def facts_of(exefs, romfs):
             F['unity'] = {v.decode() for v in re.findall(rb'20[12][0-9]\.[0-9]+\.[0-9]+f[0-9]', img)}
             F['glslc'], F['glsl_src'], F['gl_names'] = img.count(GLSLC_MAGIC), glsl_sources(img), img.count(b'glShaderSource')
             F['gl_src'] = len(re.findall(GL_SRC, img))
+            F['sdl_gpu'], F['dotnet'] = SDL_GPU in img, DOTNET_GC in img
             F['main_markers'] = {name for pat, name in MARKERS if pat in img}
         m['kind'] = {'main': 'the game', 'sdk': 'nnSdk', 'rtld': 'rtld'}.get(p.name) or kind(m)
     F['sysres'], F['program'] = npdm(exefs / 'main.npdm')
@@ -174,6 +177,11 @@ def guess(F, hooks=None):
         # Leave 128 MB for the initial heap after the 256 MB module and stack regions.
         # The old 64.125 GB alias consumed the entire block (SMT V: Vengeance's 6 MB heap failed).
         G['mem_alias'] = ('0x1000000000', '')
+    # .NET NativeAOT with virtual address memory: the GC reserves 5 × its hard limit, 3.75 GB, after malloc's StandardAllocator, which takes all the alias region has room for; the
+    # runtime then fails to start (exit(1) right in nnMain). Absolum's measured split: the GC's range 1.5 GB through the environment, malloc 2.5 GB (docs/reference/memory.md)
+    if F.get('dotnet') and F['sysres']:
+        G['game_env'] = ('DOTNET_GCRegionRange=60000000', '.NET NativeAOT: the GC\'s region range is 1.5 GB instead of 5 × its hard limit (hle_os.c game_env), as Absolum\'s profile')
+        G['stdalloc_cap'] = ('0xa0000000', 'malloc\'s StandardAllocator gets 2.5 GB, so the GC\'s 1.5 GB fits after it in the alias region (Absolum\'s measured split)')
     G.update(preset)
     return G
 
@@ -211,7 +219,7 @@ def nro_modules(exefs, nros, modules, hooks=None):
 
 
 # ---- Shader sources: decided from the game files at every build, not kept in the profile (scripts/build_ipa_from_nsp.py; shader_split.py reads what those steps write) ----
-def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_packs=0, legacy_paks=0, gl_names=0, gl_src=0, gl_files=0, oodle_pkz=0, nro_imports=frozenset(), oodle_gfpak=0, oodle_ue3=0, frostbite=False, romfs_glsl=0):
+def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_packs=0, legacy_paks=0, gl_names=0, gl_src=0, gl_files=0, oodle_pkz=0, nro_imports=frozenset(), oodle_gfpak=0, oodle_ue3=0, frostbite=False, romfs_glsl=0, sdl_gpu=False):
     """{name: (value, reason)}: graphics (vulkan when main imports Vulkan functions and not nvnBootstrapLoader; gl when it imports eglCreateWindowSurface and names glShaderSource, so it compiles
     GLSL through OpenGL (gl_names: how often main has that name; Absolum imports the same EGL functions for SDL3 but renders with NVN and names no GL function); else nvn; vkGetInstanceProcAddr
     alone is SDL's Vulkan loader, which Balatro's LÖVE links and never uses), vk_capture (a Vulkan game without SPIR-V files generates its shaders at run time), gl_capture (an OpenGL game with no
@@ -226,14 +234,17 @@ def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_pa
     extracted; Hades and both Galaxies import 99 or 100 Vulkan functions, Balatro only vkGetInstanceProcAddr), Balatro alone composing its GLSL.
     nro_imports: what the NROs the game loads at run time import. Portal's main is SDL with its EGL backend (it names glShaderSource for SDL's GL renderer) and renders nothing: its Source engine
     NROs draw with NVN (materialsystem.nro and video_nx.nro import nvnBootstrapLoader) and call glslcCompile; the GLSLC outputs it ships (nxcontent/nvsb in game.zip) are read by the split"""
-    vk = sum(1 for s in imports if re.match(r'vk[A-Z]', s) and s != 'vkGetInstanceProcAddr'); vulkan = bool(vk) and 'nvnBootstrapLoader' not in imports
+    vk = sum(1 for s in imports if re.match(r'vk[A-Z]', s) and s != 'vkGetInstanceProcAddr')
+    sdl_vk = sdl_gpu and 'vkGetInstanceProcAddr' in imports   # FNA3D's SDL_GPU driver: SDL's Vulkan backend looks every function up (sdl_gpu: main has FNA3D's SDL_GPU driver)
+    vulkan = (bool(vk) or sdl_vk) and 'nvnBootstrapLoader' not in imports
     nro_nvn = 'nvnBootstrapLoader' in nro_imports
     gl = not vulkan and not nro_nvn and 'eglCreateWindowSurface' in imports and bool(gl_names)
     nro_glslc = not vulkan and not gl and 'glslcCompile' in nro_imports and bool(glslc_mods)
-    return {'graphics': ('vulkan', f'main imports {vk} Vulkan functions and not nvnBootstrapLoader: the host\'s Vulkan layer (dm/gfx/vk/hle_vk.m)') if vulkan else
+    return {'graphics': ('vulkan', 'FNA3D\'s SDL_GPU driver on SDL\'s Vulkan backend (every function through vkGetInstanceProcAddr) and no nvnBootstrapLoader: the host\'s Vulkan layer (dm/gfx/vk/hle_vk.m)' if sdl_vk and not vk else
+                                   f'main imports {vk} Vulkan functions and not nvnBootstrapLoader: the host\'s Vulkan layer (dm/gfx/vk/hle_vk.m)') if vulkan else
                         ('gl', 'main imports EGL and names glShaderSource: it renders with OpenGL and compiles GLSL, the host\'s GL layer (dm/gfx/gl/hle_gl.m)') if gl else
                         ('nvn', 'the NROs the game loads import nvnBootstrapLoader' if nro_nvn and 'nvnBootstrapLoader' not in imports else 'main imports nvnBootstrapLoader'),
-            'vk_capture': (vulkan and not spirv, 'no SPIR-V file in the RomFS: the game generates its shaders at run time (Super Mario Galaxy), captured by booting it on the Mac'),
+            'vk_capture': (vulkan and not spirv, 'no SPIR-V file in the RomFS: the game generates its shaders at run time (Super Mario Galaxy; FNA\'s MOJOSHADER from the effects\' D3D bytecode), captured by booting it on the Mac'),
             'gl_capture': (gl and not gl_src and not gl_files, 'no GLSL source in the RomFS or main: the game puts its shaders together at run time (LÖVE: Balatro), captured by booting it on the Mac'),
             'glslc_capture': (not vulkan and not gl and bool(glsl_src or romfs_glsl) and 'glslcCompile' in imports and bool(glslc_mods) or nro_glslc,
                               f'the NROs the game loads call glslcCompile in {", ".join(glslc_mods)}: shaders compiled at run time (Portal), captured by booting it on the Mac' if nro_glslc and not ((glsl_src or romfs_glsl) and 'glslcCompile' in imports) else
@@ -265,7 +276,7 @@ UE3_TAG = bytes.fromhex('c1832a9e')   # an Unreal package's tag (shader_split.py
 def build_sources(exefs, romfs, modules):
     """shader_sources from an extraction (its ExeFS and RomFS folders) and the modules the profile loads"""
     exefs = Path(exefs); main = nso(exefs / 'main')[0]
-    imports = {s for s, defined, _ in nso_syms.dynsyms(main) if not defined}; glsl_src = glsl_sources(main); gl_names = main.count(b'glShaderSource'); gl_src = len(re.findall(GL_SRC, main))
+    imports = {s for s, defined, _ in nso_syms.dynsyms(main) if not defined}; glsl_src = glsl_sources(main); gl_names = main.count(b'glShaderSource'); gl_src = len(re.findall(GL_SRC, main)); sdl_gpu = SDL_GPU in main
     nro_imp = romfs_nro_imports(romfs)
     defines = lambda m: (exefs / m).exists() and any(s == 'glslcCompile' and defined for s, defined, _ in nso_syms.dynsyms(nso(exefs / m)[0]))
     # GLSL source files in the RomFS that the game compiles itself with GLSLC (Turrican Anthology Vol. I: shaders/*.vert / *.frag, no GLSL string in main)
@@ -311,7 +322,7 @@ def build_sources(exefs, romfs, modules):
                 oodle_ue3 += h[i + 16 + 8 * nb:i + 17 + 8 * nb] == b'\x8c'
     import frostbite   # Frostbite's superbundles (EA SPORTS FC 27): every item of the cas files is Oodle Leviathan, decoded with the game's own decoder
     return shader_sources(imports, glsl_src, glslc_mods, spirv, len(uepak.unreal_paks(str(romfs), inline=False)), trinity, len(uepak.unreal_paks(str(romfs), inline=True)), gl_names, gl_src, gl_files, oodle_pkz, nro_imp,
-                          oodle_gfpak=oodle_gfpak, oodle_ue3=oodle_ue3, frostbite=frostbite.is_frostbite(str(romfs)), romfs_glsl=romfs_glsl)
+                          oodle_gfpak=oodle_gfpak, oodle_ue3=oodle_ue3, frostbite=frostbite.is_frostbite(str(romfs)), romfs_glsl=romfs_glsl, sdl_gpu=sdl_gpu)
 
 
 def va_heap(sysres, imports):   # virtual address memory (an NPDM system resource) and a heap: the alias / heap split is a starting point the heap check corrects (Wonder, Tears of the Kingdom; Engage's pool is its own measurement)

@@ -1,0 +1,46 @@
+# Game profile of MARVEL Cosmic Invasion (Switch, update 1.0.7 = v393216). Plays on the Mac from the logos through the title screen, the menus and the mission select into a stage, at 60 fps, with sound (see README.md)
+# Format: see dm/games/README.md
+# Tribute Games' engine ("Paris") on FNA, compiled with .NET NativeAOT (NativeAOT-NX), SDK 20.5.15. FNA3D's SDL_GPU driver on SDL's Vulkan backend, which looks every vk* function up
+# through vkGetInstanceProcAddr: the host's Vulkan layer (dm/gfx/vk/hle_vk.m) answers it, so NVIDIA's Vulkan and OpenGL drivers (subsdk0, subsdk1) are not loaded. FMOD for sound,
+# Epic Online Services in an NRO the host does not load (its imports answer offline, hle_eos.c)
+
+# ---- Identity ----
+title_id	010059D020C26000
+program_id	010059D020C26000
+
+# ---- App ----
+name	MARVEL Cosmic Invasion
+ipa	MarvelCosmicInvasion.ipa
+app_category	public.app-category.action-games
+
+# ---- Versions ----
+build	v393216	1.0.7	main=7473b4335a2e83f307afe72220dbecb9	sdk=190030518b5d64e5d87b84bc54661af9
+package	v393216
+shader_versions	v393216
+
+# ---- Graphics ----
+# FNA's MOJOSHADER translates the effects' D3D9 bytecode (Content/Shaders/*.fxb and FNA's own effects) to SPIR-V at run time, and the RomFS has no SPIR-V file, so the NSP script
+# captures them by booting the game on the Mac (vk_capture.tsv lists the keys); vk_shaders.py translates the capture
+
+# ---- Files ----
+# main imports nothing from subsdk0 (NintendoSDK_Vulkan) and subsdk1 (NintendoSDK_OpenGL) the host does not supply: not loaded
+modules	main sdk
+romfs_marker	Content/Videos/MCI_IntroAnimation.ogv
+# FMOD banks, the game's data files, the EOS NRO and the Ogg Theora movies do not compress
+zip_store	.bank:.dat:.nro:.ogv:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource (virtual address memory) and main never sets a heap: Engage's 5 GB block with a 4.375 GB alias region, where the game maps its memory itself.
+# Measured on the Mac: the regions reach alias +4.07 GB in the first 15 s (malloc's 2.5 GB, the GC's 1.5 GB and a few small ones)
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+# .NET NativeAOT: the GC's region range is 1.5 GB instead of 5 × its hard limit, and malloc's StandardAllocator over 40 GB gets 2.5 GB, so both fit (Absolum's split,
+# docs/reference/memory.md); without them the runtime fails to start and the game calls exit(1) in nnMain
+game_env	DOTNET_GCRegionRange=60000000
+stdalloc_cap	0xa0000000
+
+# ---- Shader split ----
+shader_note	MARVEL Cosmic Invasion has no NVN shaders (its SPIR-V shaders go through the Vulkan layer)

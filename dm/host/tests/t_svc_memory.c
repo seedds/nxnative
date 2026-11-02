@@ -41,6 +41,8 @@ void guest_clock_read_wait(void) {}
 uint64_t guest_ns(void) { return 0; }
 uint64_t guest_ticks(void) { return 0; }
 uint64_t dm_entropy64(void) { return 0; }
+void dm_user_exc_return(uint64_t result) { (void)result; }
+uint8_t *dm_user_exc_ctx(void) { static uint8_t ctx[0x1000]; return ctx; }
 int thr_limit_used(void) { return 0; }
 int dm_ue_heap_owns(uint64_t a, uint64_t n) { (void)a; (void)n; return 0; } // No Unreal allocator is installed in this fixture.
 // This fixture calls the SVC dispatcher directly, without rewritten guest gates.

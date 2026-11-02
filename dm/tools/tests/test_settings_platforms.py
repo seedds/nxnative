@@ -57,12 +57,22 @@ class PortPlatforms(unittest.TestCase):
             with self.subTest(platform=platform):
                 self.assertEqual(rows(BOTW, 'nvn', platform)['DM_PRESENT_UPSCALE']['options'], [['off', 'Standard'], ['metalfx', 'MetalFX']])
 
+    def test_low_latency_is_the_vulkan_presenters(self):   # dm/gfx/hostvk/vk_present.c: DM_VK_LATENCY=low (decision D12), off by default, for every graphics API the presenter shows
+        for platform in ('linux', 'windows'):
+            for api, gid in (('nvn', BOTW), ('vulkan', VK), ('gl', GL)):
+                with self.subTest(platform=platform, api=api):
+                    s = rows(gid, api, platform)['DM_VK_LATENCY']
+                    self.assertEqual((s['kind'], s['section'], s['label'], s['on'], s['off'], s['default']), ('toggle', 'Performance', 'Low latency', 'low', 'normal', 'normal'))
+        for platform in (None, 'ios', 'mac'):
+            with self.subTest(platform=platform):
+                self.assertNotIn('DM_VK_LATENCY', rows(BOTW, 'nvn', platform))
+
     def test_metal_switches_stay_on_apple(self):
         for platform in ('linux', 'windows'):
             with self.subTest(platform=platform):
                 port = rows(BOTW, 'nvn', platform)
                 self.assertFalse(APPLE_ONLY & set(port), sorted(APPLE_ONLY & set(port)))
-                self.assertEqual([e for e, s in port.items() if s['section'] == 'Performance'], ['DM_FPS_HOLD', 'DM_VK_PSO_CACHE_LIMIT', 'DM_VK_PSO_CACHE_CLEANUP'])   # the frame step is the NVN frontend's (hle_nvn.c), on every backend; the pipeline cache's upkeep the Vulkan backend's (vk_cache.c, decision D8)
+                self.assertEqual([e for e, s in port.items() if s['section'] == 'Performance'], ['DM_FPS_HOLD', 'DM_VK_LATENCY', 'DM_VK_PSO_CACHE_LIMIT', 'DM_VK_PSO_CACHE_CLEANUP'])   # the frame step is the NVN frontend's (hle_nvn.c), on every backend; the latency mode the Vulkan presenter's (vk_present.c, decision D12); the pipeline cache's upkeep the Vulkan backend's (vk_cache.c, decision D8)
                 for env in ('DM_FPS_TARGET', 'DM_RENDER_SCALE', 'DM_OPMODE', 'DM_FULLSCREEN', 'DM_RUMBLE', 'DM_RUMBLE_GAIN', 'DM_RUMBLE_MIN'):   # front_sdl.c, hle_oe.c, loader.c read them
                     self.assertIn(env, port)
                 self.assertEqual(port['DM_FULLSCREEN']['options'], [['0', 'Window'], ['1', 'Fullscreen']])

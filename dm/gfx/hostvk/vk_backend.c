@@ -202,7 +202,9 @@ void be_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNco
     size_t wb = (size_t)((r->width + bw - 1) / bw) * (size_t)bpb, hb = (size_t)((r->height + bh - 1) / bh), nz = r->depth > 0 ? (size_t)r->depth : 1;
     for (size_t z = 0; z < nz; z++) for (size_t y = 0; y < hb; y++) memset(dst + z * img + y * row, 0, wb);
 }
-void be_xv_window_tex(uint64_t serial) { (void)serial; }   // the Metal backend's cross-check of window textures (a diagnostic): none here
+// The window's textures (nvnWindowInitialize hands each texture of the window builder's SetTextures here; the Metal backend keeps them out of its cross-submit ledger): their
+// count is the one the window presenter's swapchain follows (decision D12, vk_present.c hvk_win_texture)
+void be_xv_window_tex(uint64_t serial) { hvk_win_texture(serial); }
 void be_set_depth_zero(int on) { atomic_store(&hvk.depth_zero, on != 0); }
 void be_set_queue_origin_lower_left(int on) { hvk.queue_origin_ll = on != 0; }
 void be_set_origin_lower_left(int on) { atomic_store(&hvk.origin_ll, on != 0); }
@@ -305,6 +307,7 @@ uint64_t be_ext_tex(void *tex) {
     g_ext[g_n_ext++] = (ext_ent){e->image, e->format, e->width, e->height};
     uint64_t s = g_n_ext;
     pthread_mutex_unlock(&g_ext_mu);
+    hvk_win_texture(s | 1ull << 63);   // a guest layer's swapchain or window surface image: one of its window's textures (decision D12), keyed apart from NVN's serials
     return s;
 }
 void hvk_ext_tex_drop(uint64_t serial) {

@@ -17,7 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { SNAP_N = 3, FRAME_N = 3, IMG_MAX = 8, PRES_RING = 1024, PW_RING = 64 };
+enum { SNAP_N = 3, FRAME_N = 3, IMG_ASK_MAX = 8, IMG_MAX = 16, PRES_RING = 1024, PW_RING = 64 };   // IMG_ASK_MAX: the most images asked for (D12); IMG_MAX: the most a driver may make
 #define TICK_NS (1e9 / 60)                 // the vsync source's tick: the Switch's 60 Hz vsync
 #define SNAP_WAIT_NS 100000000ull          // a present waits this long for a free snapshot before it drops its frame (the present thread is stuck: a hidden window, a dead surface)
 #define ACQUIRE_NS 100000000ull            // an acquire waits this long before the frame is dropped (a window the compositor does not show)
@@ -32,6 +32,7 @@ typedef struct {
     uint64_t copied, read;         // the timeline values of its copy and of the last blit that read it (the image is remade only once that is reached)
     uint64_t n;                    // the present number (be_presented_time's n)
     int flip;
+    uint32_t textures;             // the game's window texture count when it was presented (decision D12)
 } snap_t;
 typedef struct { uint64_t n; double t; } pres_ent;
 
@@ -52,6 +53,11 @@ static struct {
     VkImage img[IMG_MAX]; VkSemaphore done[IMG_MAX];
     VkSemaphore acq[FRAME_N]; VkCommandBuffer fcb[FRAME_N]; uint64_t fval[FRAME_N], frame;
     int recreate, extent_free; uint64_t swapchains, shown;   // extent_free: the surface takes the swapchain's size (no current extent): the front end's size decides
+    // decision D12 ("The image count and the present mode"): the switches (start, or hvk_win_latency under g_sc_mu), what the surface offers, what the swapchain was made for
+    int low, forced, mode_ok, has_mailbox; char modes[96];   // forced: DM_VK_PRESENT_MODE's mode, -1 unset; mode_ok: W.mode is picked for these switches
+    uint32_t sc_textures, sc_asked, min_ic, max_ic, logged_textures, logged_asked; int logged;
+    // the game's window textures (hvk_win_texture, under g_mu): the set being registered and the count of the window presented last
+    uint64_t tex_key[16]; uint32_t tex_n; int tex_open; uint32_t textures;
     // readback (tests)
     int readback; VkBuffer rb; hvk_mem *rb_mem; void *rb_map; VkDeviceSize rb_size;
     hvk_win_info last; uint64_t last_val;
@@ -221,6 +227,80 @@ int be_vsync_wait_vsync(uint64_t *seen, uint64_t timeout_ns) { return hvk_vsync_
 static const char *mode_name(VkPresentModeKHR m) {
     return m == VK_PRESENT_MODE_FIFO_KHR ? "FIFO" : m == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" : m == VK_PRESENT_MODE_IMMEDIATE_KHR ? "IMMEDIATE" : m == VK_PRESENT_MODE_FIFO_RELAXED_KHR ? "FIFO_RELAXED" : "other";
 }
+
+// ---------- The image count and the present mode (decision D12: latency against smoothness) ----------
+// T is the game's window texture count: the textures nvnWindowInitialize hands the backend from the window builder's SetTextures (be_xv_window_tex), or the images of a guest
+// layer's swapchain or window surface (be_ext_tex); the keys registered after a present are the next window's set, and its size counts from that window's first present
+// (hvk_win_texture); 0 before any. The surface allows min..max images (minImageCount, maxImageCount; max 0: no maximum). The rule:
+//   Default (DM_VK_LATENCY unset or `normal`): FIFO with max(T, 3) images. Three is the floor even for a game of two textures. With two images under FIFO one is on the screen
+//     and the other queued, so the present thread's next acquire returns only when a refresh frees the shown one, and its blit then runs on the backend's one queue behind
+//     whatever the game submitted meanwhile (its next frame's work): the frame misses the following refresh whenever that work is longer than the time left, and a compositor
+//     that keeps the last buffer shown for a refresh more makes the acquire wait two. With three the blit is queued as soon as the snapshot is, right behind the frame it shows.
+//     The game's double buffering keeps its meaning without the second image: the snapshot copy frees the game's texture (design 7.2) and the frontend still hands the game its
+//     textures in turn. A game that asks for more (four; a guest swapchain of more) gets them: that many frames ahead of the screen. The Metal presenter leaves CAMetalLayer's
+//     maximumDrawableCount at its default of three whatever the game's count (nvn_mtl.m and front_mac.m never set it), so the two backends agree up to three textures.
+//   Low latency (DM_VK_LATENCY=low): FIFO with two images, one shown and one queued, so a frame waits behind at most one other, where the surface allows two (min <= 2). FIFO
+//     keeps every frame, as the Switch shows every frame a game presents, and keeps the vsync source's FIFO anchor (an acquire that waited marks a refresh where neither present
+//     wait nor display timing exists); MAILBOX drops a frame whenever two snapshots land within one refresh, and its acquires never wait. Where the surface allows no fewer than
+//     three images (Mesa's X11 and headless surfaces; lavapipe's headless one says four) FIFO has nothing to give over the default, so MAILBOX at max(min, 3) images where the
+//     surface offers it (a frame shown at the next refresh at the latest); else FIFO at the surface's minimum, and the log says no lower latency was there to take.
+//   DM_VK_PRESENT_MODE=fifo|mailbox, the diagnostic, forces the mode over the latency's choice (mailbox only where the surface has it); the count stays the latency's, at least
+//     three under MAILBOX, which replaces a queued image only with a third free one. Any other value is ignored (a red line). IMMEDIATE (tearing) is not offered (design 7.3).
+//   Last, the surface's bounds and the presenter's own: at least min, at most max and 8 (IMG_ASK_MAX). A count the game asks for that the surface refuses is clamped, never refused.
+// A window with another texture count (a new window builder) re-creates the swapchain at that window's first frame when the count the rule gives changes, and keeps it otherwise.
+// Logged at the first swapchain and at each one made for another count or another window: `[hostvk] swapchain: N images (the game's window has T textures, the surface allows
+// a..b, mode FIFO)` (b `any` without a maximum; `, DM_VK_LATENCY=low` added in that mode)
+void hvk_win_swap_rule(uint32_t textures, uint32_t min_images, uint32_t max_images, int has_mailbox, int low, int forced, uint32_t *images, VkPresentModeKHR *mode) {
+    VkPresentModeKHR m = VK_PRESENT_MODE_FIFO_KHR;   // every surface has FIFO
+    if (forced == (int)VK_PRESENT_MODE_MAILBOX_KHR) m = has_mailbox ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_FIFO_KHR;
+    else if (forced != (int)VK_PRESENT_MODE_FIFO_KHR && low && min_images >= 3 && has_mailbox) m = VK_PRESENT_MODE_MAILBOX_KHR;
+    uint32_t n = low ? 2 : textures > 3 ? textures : 3;
+    if (m == VK_PRESENT_MODE_MAILBOX_KHR && n < 3) n = 3;
+    if (n < min_images) n = min_images;
+    if (max_images && n > max_images) n = max_images;
+    if (n > IMG_ASK_MAX) n = IMG_ASK_MAX;
+    *images = n; *mode = m;
+}
+void hvk_win_texture(uint64_t key) {
+    pthread_mutex_lock(&g_mu);
+    if (!W.tex_open) { W.tex_open = 1; W.tex_n = 0; }   // the first texture registered since a present: a new window's set
+    int seen = 0;
+    for (uint32_t i = 0; i < W.tex_n && i < 16; i++) seen |= W.tex_key[i] == key;   // the same texture registered again (a window initialized again with it)
+    if (!seen && W.tex_n < 256) { if (W.tex_n < 16) W.tex_key[W.tex_n] = key; W.tex_n++; }
+    pthread_mutex_unlock(&g_mu);
+}
+// The switches (at start, under g_mu; or hvk_win_latency, under g_sc_mu)
+static void latency_parse(const char *lat, const char *pm) {
+    W.low = 0; W.forced = -1; W.mode_ok = 0; W.logged = 0;   // the mode picked again, the count logged again at the next swapchain
+    if (lat && *lat && strcmp(lat, "normal")) {
+        if (!strcmp(lat, "low")) W.low = 1;
+        else hostvk_log("[RED] [hostvk] DM_VK_LATENCY=%s: low or normal: normal (decision D12)", lat);
+    }
+    if (pm && *pm) {
+        if (!strcmp(pm, "fifo")) W.forced = VK_PRESENT_MODE_FIFO_KHR;
+        else if (!strcmp(pm, "mailbox")) W.forced = VK_PRESENT_MODE_MAILBOX_KHR;
+        else hostvk_log("[RED] [hostvk] DM_VK_PRESENT_MODE=%s: fifo or mailbox (IMMEDIATE is not offered, design 7.3): ignored", pm);
+    }
+}
+// The present mode for the switches and what the surface offers (present thread, under g_sc_mu), with one line saying which and why
+static void mode_pick(uint32_t min_ic) {
+    uint32_t n; VkPresentModeKHR m, by_latency;
+    hvk_win_swap_rule(0, min_ic, 0, W.has_mailbox, W.low, -1, &n, &by_latency);
+    hvk_win_swap_rule(0, min_ic, 0, W.has_mailbox, W.low, W.forced, &n, &m);
+    char why[256];
+    if (W.forced == (int)VK_PRESENT_MODE_MAILBOX_KHR && !W.has_mailbox) snprintf(why, sizeof why, "DM_VK_PRESENT_MODE=mailbox, but the surface has no MAILBOX");
+    else if (W.forced >= 0) snprintf(why, sizeof why, "DM_VK_PRESENT_MODE=%s%s%s", W.forced == (int)VK_PRESENT_MODE_FIFO_KHR ? "fifo" : "mailbox",
+                                     by_latency != m ? (W.low ? " over DM_VK_LATENCY=low's " : " over the default's ") : "", by_latency != m ? mode_name(by_latency) : "");
+    else if (!W.low) snprintf(why, sizeof why, "the default, decision D12");
+    else if (min_ic <= 2) snprintf(why, sizeof why, "DM_VK_LATENCY=low: FIFO with the fewest images the surface allows");
+    else if (W.has_mailbox) snprintf(why, sizeof why, "DM_VK_LATENCY=low: FIFO cannot go below %u images on this surface, MAILBOX instead", min_ic);
+    else snprintf(why, sizeof why, "DM_VK_LATENCY=low: FIFO cannot go below %u images on this surface and it has no MAILBOX: no lower latency to take", min_ic);
+    if (W.forced == (int)VK_PRESENT_MODE_MAILBOX_KHR && !W.has_mailbox) hostvk_log("[RED] [hostvk] DM_VK_PRESENT_MODE=mailbox: the surface has no MAILBOX: FIFO");
+    W.mode = m; W.mode_ok = 1;
+    hostvk_log("[hostvk] window presenter: present mode %s (%s; the surface has %s), vsync source %s", mode_name(m), why, W.modes,
+               hvk.dev.x.present_wait ? "VK_KHR_present_wait" : DISPLAY_TIMES ? "VK_GOOGLE_display_timing" : m == VK_PRESENT_MODE_FIFO_KHR ? "the FIFO acquire (no present wait, no display timing)"
+               : "a free-running 60 Hz clock (no present wait, no display timing, and MAILBOX's acquires do not wait for a refresh)");
+}
 static void sc_destroy(void) {   // the swapchain and its semaphores, once nothing uses them (g_sc_mu held)
     if (!W.sc) return;
     pthread_mutex_lock(&hvk.queue_mu); vkDeviceWaitIdle(hvk.d); pthread_mutex_unlock(&hvk.queue_mu);   // the presents still pending wait for these semaphores
@@ -229,8 +309,8 @@ static void sc_destroy(void) {   // the swapchain and its semaphores, once nothi
     vkDestroySwapchainKHR(hvk.d, W.sc, NULL);
     W.sc = VK_NULL_HANDLE; W.nimg = 0;
 }
-// 1 made, 0 not now (the window has no size: minimized), -1 the window presenter cannot go on (logged)
-static int sc_make(void) {
+// 1 made, 0 not now (the window has no size: minimized), -1 the window presenter cannot go on (logged). textures: the game's window texture count of the frame to show
+static int sc_make(uint32_t textures) {
     int pw = 0, ph = 0;
     if (g_pixel_size && g_pixel_size(&pw, &ph)) pw = ph = 0;
     VkSurfaceCapabilitiesKHR c;
@@ -249,10 +329,8 @@ static int sc_make(void) {
     }
     if (!e.width || !e.height) return 0;
     if (!(c.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT)) { hostvk_log("[RED] [hostvk] window presenter: the surface's images take no transfer writes: frames are not shown"); return -1; }
-    uint32_t n = c.minImageCount > 3 ? c.minImageCount : 3;   // three images (design 7.2), minImageCount respected
-    if (c.maxImageCount && n > c.maxImageCount) n = c.maxImageCount;
-    if (n > IMG_MAX) { hostvk_log("[RED] [hostvk] window presenter: the surface needs %u images, more than %d", n, IMG_MAX); return -1; }
-    if (!W.fmt) {   // the format and the present mode, once
+    if (c.minImageCount > IMG_ASK_MAX) { hostvk_log("[RED] [hostvk] window presenter: the surface needs %u images, more than %d", c.minImageCount, IMG_ASK_MAX); return -1; }
+    if (!W.fmt) {   // the format and the present modes the surface has, once
         uint32_t nf = 0; vkGetPhysicalDeviceSurfaceFormatsKHR(hvk.dev.phys, W.surface, &nf, NULL);
         VkSurfaceFormatKHR *f = calloc(nf ? nf : 1, sizeof *f);
         if (!f || vkGetPhysicalDeviceSurfaceFormatsKHR(hvk.dev.phys, W.surface, &nf, f) < 0) nf = 0;
@@ -273,18 +351,17 @@ static int sc_make(void) {
         uint32_t nm = 0; vkGetPhysicalDeviceSurfacePresentModesKHR(hvk.dev.phys, W.surface, &nm, NULL);
         VkPresentModeKHR m[16]; if (nm > 16) nm = 16;
         if (vkGetPhysicalDeviceSurfacePresentModesKHR(hvk.dev.phys, W.surface, &nm, m) < 0) nm = 0;
-        W.mode = VK_PRESENT_MODE_FIFO_KHR;   // every surface has FIFO
-        const char *e2 = getenv("DM_VK_PRESENT_MODE");
-        if (e2 && *e2 && strcmp(e2, "fifo")) {
-            int mailbox = !strcmp(e2, "mailbox"), has = 0;
-            for (uint32_t i = 0; i < nm; i++) has |= m[i] == VK_PRESENT_MODE_MAILBOX_KHR;
-            if (mailbox && has) W.mode = VK_PRESENT_MODE_MAILBOX_KHR;
-            else hostvk_log("[RED] [hostvk] DM_VK_PRESENT_MODE=%s: %s: FIFO", e2, mailbox ? "the surface has no MAILBOX" : "not fifo or mailbox (IMMEDIATE is not offered, design 7.3)");
+        W.has_mailbox = 0; W.modes[0] = 0;
+        for (uint32_t i = 0; i < nm; i++) {
+            W.has_mailbox |= m[i] == VK_PRESENT_MODE_MAILBOX_KHR;
+            snprintf(W.modes + strlen(W.modes), sizeof W.modes - strlen(W.modes), "%s%s", i ? " " : "", mode_name(m[i]));
         }
-        char modes[96] = ""; for (uint32_t i = 0; i < nm; i++) snprintf(modes + strlen(modes), sizeof modes - strlen(modes), "%s%s", i ? " " : "", mode_name(m[i]));
-        hostvk_log("[hostvk] window presenter: format %d colour space %d, present mode %s (the surface has %s), vsync source %s", W.fmt, W.cs, mode_name(W.mode), modes,
-                                  hvk.dev.x.present_wait ? "VK_KHR_present_wait" : DISPLAY_TIMES ? "VK_GOOGLE_display_timing" : "the FIFO acquire (no present wait, no display timing)");
+        hostvk_log("[hostvk] window presenter: format %d colour space %d", W.fmt, W.cs);
     }
+    if (!W.mode_ok) mode_pick(c.minImageCount);   // decision D12: the first swapchain, or new switches (hvk_win_latency)
+    uint32_t n; VkPresentModeKHR rule_mode;
+    hvk_win_swap_rule(textures, c.minImageCount, c.maxImageCount, W.has_mailbox, W.low, W.forced, &n, &rule_mode);
+    (void)rule_mode;   // W.mode, which mode_pick took by the same rule
     VkCompositeAlphaFlagBitsKHR alpha = (c.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
                                        : (VkCompositeAlphaFlagBitsKHR)(c.supportedCompositeAlpha & -c.supportedCompositeAlpha);
     VkImageUsageFlags use = VK_IMAGE_USAGE_TRANSFER_DST_BIT | (c.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT);   // TRANSFER_SRC: the tests' readback
@@ -302,8 +379,12 @@ static int sc_make(void) {
     sc_destroy();   // the old one is retired either way
     if (r) { hostvk_log("[RED] [hostvk] window presenter: vkCreateSwapchainKHR %ux%u failed (VkResult %d): frames are not shown", e.width, e.height, r); return r == VK_ERROR_OUT_OF_DATE_KHR ? 0 : -1; }
     W.sc = sc; W.sc_gen++; W.ext = e; W.recreate = 0; W.swapchains++;
+    W.sc_textures = textures; W.sc_asked = n; W.min_ic = c.minImageCount; W.max_ic = c.maxImageCount;
     uint32_t ni = 0; vkGetSwapchainImagesKHR(hvk.d, sc, &ni, NULL);
-    if (ni > IMG_MAX) ni = IMG_MAX;
+    if (ni > IMG_MAX) {   // a driver may make more than asked; an acquire may then return any of them, so a list cut short would index past it
+        hostvk_log("[RED] [hostvk] window presenter: the driver made %u swapchain images for %u asked, more than %d: frames are not shown", ni, n, IMG_MAX);
+        sc_destroy(); return -1;
+    }
     vkGetSwapchainImagesKHR(hvk.d, sc, &ni, W.img);
     W.nimg = ni;
     for (uint32_t i = 0; W.sc_storage && i < ni; i++)
@@ -311,6 +392,13 @@ static int sc_make(void) {
     VkSemaphoreCreateInfo si = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, NULL, 0};
     for (uint32_t i = 0; i < ni; i++) if (vkCreateSemaphore(hvk.d, &si, NULL, &W.done[i])) { W.done[i] = VK_NULL_HANDLE; hostvk_log("[RED] [hostvk] window presenter: no semaphore"); return -1; }
     if (hvk.dev.x.display_timing) { VkRefreshCycleDurationGOOGLE rc; if (!vkGetRefreshCycleDurationGOOGLE(hvk.d, sc, &rc)) V.refresh_ns = rc.refreshDuration; }
+    if (!W.logged || W.logged_textures != textures || W.logged_asked != n) {   // decision D12's count, once per count, window and switches (latency_parse clears W.logged); a resize keeps it
+        char tex[64], max[16];
+        if (textures) snprintf(tex, sizeof tex, "the game's window has %u texture%s", textures, textures == 1 ? "" : "s"); else snprintf(tex, sizeof tex, "the game registered no window textures");
+        if (c.maxImageCount) snprintf(max, sizeof max, "%u", c.maxImageCount); else snprintf(max, sizeof max, "any");
+        hostvk_log("[hostvk] swapchain: %u images (%s, the surface allows %u..%s, mode %s%s)", n, tex, c.minImageCount, max, mode_name(W.mode), W.low ? ", DM_VK_LATENCY=low" : "");
+        W.logged = 1; W.logged_textures = textures; W.logged_asked = n;
+    }
     hostvk_log("[hostvk] window presenter: swapchain %llu: %ux%u, %u images, %s%s", (unsigned long long)W.swapchains, e.width, e.height, ni, mode_name(W.mode),
                W.up != UP_FSR ? "" : W.sc_storage ? ", storage (FSR's RCAS writes it)" : ", no storage (FSR's RCAS writes a second image, blitted one to one)");
     return 1;
@@ -510,12 +598,22 @@ static int show(snap_t *s) {
     int pw = 0, ph = 0;
     // A surface with a current extent reports a new size itself (OUT_OF_DATE, SUBOPTIMAL); one without (Wayland, a headless surface) takes the front end's: a new one remakes it
     if (W.extent_free && g_pixel_size && !g_pixel_size(&pw, &ph) && W.sc && ((uint32_t)pw != W.ext.width || (uint32_t)ph != W.ext.height)) W.recreate = 1;
+    // Another window (decision D12): a swapchain of another count where the rule gives one; the same count keeps the swapchain
+    if (W.sc && !W.recreate && s->textures != W.sc_textures) {
+        uint32_t n; VkPresentModeKHR m;
+        hvk_win_swap_rule(s->textures, W.min_ic, W.max_ic, W.has_mailbox, W.low, W.forced, &n, &m);
+        if (n != W.sc_asked) W.recreate = 1;
+        else {
+            hostvk_log("[hostvk] swapchain: kept at %u images (the game's window now has %u texture%s, %u before)", n, s->textures, s->textures == 1 ? "" : "s", W.sc_textures);
+            W.sc_textures = W.logged_textures = s->textures;
+        }
+    }
     uint32_t idx = 0; uint32_t f = (uint32_t)(W.frame % FRAME_N);
     tl_wait(W.fval[f]);   // its acquire semaphore and command buffer are free
     VkResult r = VK_ERROR_OUT_OF_DATE_KHR;
     for (int tries = 0; tries < 2; tries++) {
         if (!W.sc || W.recreate) {
-            int k = sc_make();
+            int k = sc_make(s->textures);
             if (k <= 0) { pthread_mutex_unlock(&g_sc_mu); return k; }
         }
         uint64_t t0 = plat_now_ns();
@@ -635,7 +733,7 @@ static int show(snap_t *s) {
     pthread_mutex_lock(&g_mu);
     W.shown++;
     W.last = (hvk_win_info){W.shown, s->copied, W.swapchains, W.dropped, W.ext.width, W.ext.height, W.nimg, W.fmt, W.mode, {rect[0], rect[1], rect[2], rect[3]},
-                            s->w, s->h, s->flip, linear, kind, how};
+                            s->w, s->h, s->flip, linear, kind, how, W.sc_textures, W.sc_asked, W.min_ic, W.max_ic, W.low, s->n};
     W.last_val = v;
     pthread_mutex_unlock(&g_mu);
     pthread_mutex_unlock(&g_sc_mu);
@@ -695,8 +793,9 @@ static void *present_main(void *arg) {
     if (ok) { ai.commandPool = W.fpool; ok = !vkAllocateCommandBuffers(hvk.d, &ai, W.fcb); }
     for (int i = 0; ok && i < FRAME_N; i++) ok = !vkCreateSemaphore(hvk.d, &si, NULL, &W.acq[i]);
     if (!ok) { hostvk_log("[RED] [hostvk] window presenter: its command buffers or semaphores could not be made: frames are not shown in the window"); win_fail(); return NULL; }
+    pthread_mutex_lock(&g_mu); uint32_t textures = W.textures; pthread_mutex_unlock(&g_mu);   // the first frame's window (hvk_win_present set it before starting this thread)
     pthread_mutex_lock(&g_sc_mu);
-    int k = sc_make();
+    int k = sc_make(textures);
     pthread_mutex_unlock(&g_sc_mu);
     if (k < 0) { win_fail(); return NULL; }
     // On: the vsync source starts with the first swapchain, as the display link starts with Metal's layer
@@ -740,6 +839,7 @@ static int start(void) {   // under g_mu: the timeline, the snapshots' pool, the
     if (W.started) return W.tl != VK_NULL_HANDLE;
     W.started = 1;
     up_parse(getenv("DM_PRESENT_UPSCALE"), getenv("DM_PRESENT_SHARPEN"));   // the upscaler (design 7.4, decision D4), on the present thread
+    latency_parse(getenv("DM_VK_LATENCY"), getenv("DM_VK_PRESENT_MODE"));   // the image count and the present mode (decision D12), picked at the first swapchain
     VkSemaphoreTypeCreateInfo ti = {VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO, NULL, VK_SEMAPHORE_TYPE_TIMELINE, 0};
     VkSemaphoreCreateInfo si = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, &ti, 0};
     VkCommandPoolCreateInfo pci = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, NULL, VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, hvk.dev.queue_family};
@@ -758,6 +858,7 @@ uint64_t hvk_win_present(VkImage image, VkFormat fmt, VkImageLayout layout, uint
         x = (uint32_t)crop[0]; y = (uint32_t)crop[1]; cw = (uint32_t)crop[2]; ch = (uint32_t)crop[3];
     }
     pthread_mutex_lock(&g_mu);
+    if (W.tex_open) { W.tex_open = 0; W.textures = W.tex_n; }   // the textures registered since the last present: this window's count (decision D12)
     if (!start()) { pthread_mutex_unlock(&g_mu); win_fail(); hostvk_log("[RED] [hostvk] window presenter: its timeline, command pool or thread could not be made: frames go to the headless presenter"); return 0; }
     uint64_t n = ++W.present_n;
     // A free snapshot: the present thread has taken the oldest; a present thread stuck for SNAP_WAIT_NS (a hidden window, a surface gone) drops this frame instead of holding the game
@@ -815,7 +916,7 @@ uint64_t hvk_win_present(VkImage image, VkFormat fmt, VkImageLayout layout, uint
     VkResult rs;
     uint64_t v = tl_submit(cb, wait ? &wi : NULL, wait ? 1u : 0u, VK_NULL_HANDLE, &rs);
     if (!v) { pthread_mutex_unlock(&g_mu); HVK_RED_ONCE("window presenter: the snapshot copy's submission failed (VkResult %d): the frame is not shown", rs); return 0; }
-    s->copied = v; s->n = n; s->flip = flip;
+    s->copied = v; s->n = n; s->flip = flip; s->textures = W.textures;
     W.wr++; W.last_ticket = v;
     pthread_cond_broadcast(&g_cv);
     pthread_mutex_unlock(&g_mu);
@@ -850,6 +951,12 @@ void hvk_win_upscale(const char *mode, const char *sharpen, int no_direct) {
     pthread_mutex_lock(&g_sc_mu);
     up_parse(mode, sharpen); W.up_no_direct = no_direct;
     W.recreate = 1;   // the swapchain's storage usage follows (sc_make)
+    pthread_mutex_unlock(&g_sc_mu);
+}
+void hvk_win_latency(const char *latency, const char *present_mode) {
+    pthread_mutex_lock(&g_sc_mu);
+    latency_parse(latency, present_mode);   // the mode is picked again at the next swapchain (W.mode_ok 0)
+    W.recreate = 1;
     pthread_mutex_unlock(&g_sc_mu);
 }
 int hvk_win_last(void *texels, size_t n, hvk_win_info *info) {

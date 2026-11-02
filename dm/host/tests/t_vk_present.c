@@ -14,6 +14,11 @@
 //     RCAS's writes into the swapchain image), at two sharpness values (two pictures); at one to one the blit, every texel exact; metalfx selects FSR 1; integer, every texel
 //     replicated at the largest whole multiple, centred, the border black, and the blit for a picture larger than the window;
 //   the vsync source: active once the window presenter runs, its ticks at 60 Hz (be_vsync_wait, be_vsync_wait_vsync), be_has_window, be_display_hz;
+//   decision D12, the image count and the present mode (vk_present.c, "The image count and the present mode"): the rule (hvk_win_swap_rule) over six surfaces' bounds, in every
+//     start (it needs no surface); in a window, the swapchain's count from the window's textures (registered as nvnWindowInitialize registers them, be_xv_window_tex) for 2, 3,
+//     4, 6 and 9 textures against the headless surface's own bounds (read here from a surface of the test's) and the line the presenter logs, the swapchain made again only
+//     when the count changes; DM_VK_LATENCY=low and DM_VK_PRESENT_MODE (hvk_win_latency, as the switches would set them) and their precedence; in each mode, twelve frames of
+//     two pictures shown in order, every one, and the vsync source's ticks at 60 Hz;
 //   no validation message (the layer with synchronization validation).
 //   --mailbox: the same with DM_VK_PRESENT_MODE=mailbox (MAILBOX where the surface has it)
 //   --headless: DM_VK_HEADLESS=1: the device without a swapchain, the frames through the headless presenter (hvk_present_last: the crop's raw bytes), no vsync source.
@@ -24,6 +29,7 @@
 #include "vk_present.h"
 #include "vk_device.h"
 #include <math.h>
+#include <pthread.h>
 #include <stdatomic.h>
 
 // ---------- What the backend and the NVN frontend need of the host (the GPU tests' stubs, dm/gfx/tests/vk/t_vk_harness.h) ----------
@@ -62,6 +68,49 @@ static int make_surface(void *instance, void **out) {
 // ---------- Checks ----------
 static int g_total, g_fail;
 static void t(const char *name, int ok) { g_total++; g_fail += !ok; printf("%-120s %s\n", name, ok ? "ok" : "FAIL"); }
+// The backend's log, as hostvk_log prints it, with the newest swapchain-count and present-mode lines kept for the checks of decision D12 (the present thread logs them)
+static pthread_mutex_t g_log_mu = PTHREAD_MUTEX_INITIALIZER;
+static char g_count_line[512], g_mode_line[512];
+static void on_log(const char *line) {
+    fprintf(stderr, "[dm] %s\n", line);
+    pthread_mutex_lock(&g_log_mu);
+    if (!strncmp(line, "[hostvk] swapchain: ", 20)) snprintf(g_count_line, sizeof g_count_line, "%s", line);
+    if (!strncmp(line, "[hostvk] window presenter: present mode ", 40)) snprintf(g_mode_line, sizeof g_mode_line, "%s", line);
+    pthread_mutex_unlock(&g_log_mu);
+}
+static void log_take(char *count, char *mode) {   // the lines logged since the last call ("" for none)
+    pthread_mutex_lock(&g_log_mu);
+    if (count) snprintf(count, 512, "%s", g_count_line);
+    if (mode) snprintf(mode, 512, "%s", g_mode_line);
+    g_count_line[0] = g_mode_line[0] = 0;
+    pthread_mutex_unlock(&g_log_mu);
+}
+// Decision D12's rule over surfaces other than this one (hvk_win_swap_rule): each row a surface's bounds and modes, and the counts and modes it must give
+static void rule_checks(void) {
+    static const struct { const char *what; uint32_t min, max; int mailbox; } surf[] = {
+        {"2..8 with MAILBOX (as NVIDIA's Windows driver reports, not measured here)", 2, 8, 1}, {"3..any with MAILBOX (Mesa's X11 surfaces)", 3, 0, 1},
+        {"3..any, FIFO only", 3, 0, 0}, {"2..3, FIFO only (a tight maximum)", 2, 3, 0}, {"4..any with MAILBOX (lavapipe's headless surface, read below)", 4, 0, 1},
+        {"1..any with MAILBOX (a surface that allows one)", 1, 0, 1}};
+    // per surface: default for 0 (none registered), 2, 3, 4, 9 textures; low; low with DM_VK_PRESENT_MODE=fifo; low with =mailbox; default with =mailbox for 2 textures
+    static const uint32_t want_n[6][9] = {{3, 3, 3, 4, 8, 2, 2, 3, 3}, {3, 3, 3, 4, 8, 3, 3, 3, 3}, {3, 3, 3, 4, 8, 3, 3, 3, 3}, {3, 3, 3, 3, 3, 2, 2, 2, 3},
+                                          {4, 4, 4, 4, 8, 4, 4, 4, 4}, {3, 3, 3, 4, 8, 2, 2, 3, 3}};
+    static const char want_m[6][9] = {{'F', 'F', 'F', 'F', 'F', 'F', 'F', 'M', 'M'}, {'F', 'F', 'F', 'F', 'F', 'M', 'F', 'M', 'M'}, {'F', 'F', 'F', 'F', 'F', 'F', 'F', 'F', 'F'},
+                                      {'F', 'F', 'F', 'F', 'F', 'F', 'F', 'F', 'F'}, {'F', 'F', 'F', 'F', 'F', 'M', 'F', 'M', 'M'}, {'F', 'F', 'F', 'F', 'F', 'F', 'F', 'M', 'M'}};
+    for (int k = 0; k < 6; k++) {
+        const uint32_t tex[9] = {0, 2, 3, 4, 9, 2, 2, 2, 2};
+        const int low[9] = {0, 0, 0, 0, 0, 1, 1, 1, 0}, forced[9] = {-1, -1, -1, -1, -1, -1, VK_PRESENT_MODE_FIFO_KHR, VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_MAILBOX_KHR};
+        char got[160] = "", name[512]; int ok = 1;
+        for (int i = 0; i < 9; i++) {
+            uint32_t n = 0; VkPresentModeKHR m = VK_PRESENT_MODE_IMMEDIATE_KHR;
+            hvk_win_swap_rule(tex[i], surf[k].min, surf[k].max, surf[k].mailbox, low[i], forced[i], &n, &m);
+            char c = m == VK_PRESENT_MODE_FIFO_KHR ? 'F' : m == VK_PRESENT_MODE_MAILBOX_KHR ? 'M' : '?';
+            ok &= n == want_n[k][i] && c == want_m[k][i];
+            snprintf(got + strlen(got), sizeof got - strlen(got), "%s%u%c", i == 5 ? " | " : i ? " " : "", n, c);
+        }
+        snprintf(name, sizeof name, "D12 rule, surface %s: 0/2/3/4/9 textures, low, low+fifo, low+mailbox, mailbox: %s", surf[k].what, got);
+        t(name, ok);
+    }
+}
 static int env_set(const char *v) { const char *e = getenv(v); return e && *e; }
 static int vk_required(void) { return env_set("VK_ICD_FILENAMES") || env_set("VK_DRIVER_FILES") || env_set("VK_LOADER_DRIVERS_SELECT"); }
 static int validation_required(void) { const char *e = getenv("VK_INSTANCE_LAYERS"); return e && strstr(e, "VK_LAYER_KHRONOS_validation"); }
@@ -195,6 +244,112 @@ static int edge_width(int y, int x0, int x1) {
 }
 static uint64_t present_up(uint64_t serial) { uint64_t tk = be_present_ext(serial, 1.0 / 60, NULL, 0, NULL); be_present_wait(tk); return tk; }
 
+// Decision D12 in the window: the swapchain's count from the window's textures, the switches, the frames of each mode
+static uint32_t expect_images(uint32_t textures, uint32_t min, uint32_t max, int low, int mailbox) {   // the rule as the design states it, written out again here
+    uint32_t n = low ? 2 : textures > 3 ? textures : 3;
+    if (mailbox && n < 3) n = 3;
+    if (n < min) n = min;
+    if (max && n > max) n = max;
+    return n > 8 ? 8 : n;
+}
+// Twelve frames, the two pictures in turn, each read back once shown: every one shown (one more each time), in order (the newest shown is the newest presented), its picture;
+// then six waits of one vsync. One check line for the mode
+static void frames_in_order(const char *mode, uint64_t a, const int *crop_a, uint64_t b) {
+    int ok = 1, shot_ok = 1; uint64_t first = 0, last = 0, drop0 = 0; char name[700], why[512] = "";
+    for (int i = 0; i < 12; i++) {
+        int pic_a = i % 2 == 0;
+        uint64_t tk = be_present_ext(pic_a ? a : b, 1.0 / 60, NULL, 0, pic_a ? crop_a : NULL);
+        be_present_wait(tk);
+        uint64_t before = g_info.shown_n, shown_before = g_info.presents;
+        if (!tk || !shot()) { ok = 0; continue; }
+        if (!i) { first = g_info.shown_n; drop0 = g_info.dropped; }
+        else ok &= g_info.shown_n == before + 1 && g_info.presents == shown_before + 1;
+        last = g_info.shown_n;
+        shot_ok &= at_is(400, 225, pic_a ? TL : UA, 2, why, sizeof why);   // the top-left quadrant of the crop, or the left flat colour of the second picture
+    }
+    ok &= g_info.dropped == drop0 && last == first + 11;
+    be_vsync_wait(1, 100000000ull); be_vsync_wait(1, 100000000ull);   // on a tick: a wait returns at once when a tick passed since the previous one (the first), the second at a tick, so the six timed below are whole ticks
+    uint64_t t0 = plat_now_ns(); int ticks = 0;
+    for (int i = 0; i < 6; i++) ticks += be_vsync_wait(1, 100000000ull);
+    double ms = (plat_now_ns() - t0) / 1e6;
+    snprintf(name, sizeof name, "%s, %u images: 12 frames shown in order, each once (presents %llu to %llu, none dropped), each its picture; 6 vsync ticks in %.1f ms", mode,
+             g_info.images, (unsigned long long)first, (unsigned long long)last, ms);
+    t(name, ok && shot_ok && ticks == 6 && ms / 6 > 12 && ms / 6 < 30);
+    if (why[0]) printf("     %s\n", why);
+}
+static void d12_window(const hostvk_dev *d, uint64_t serial, const int *crop, uint64_t userial, int mailbox) {
+    // The surface's bounds, from a headless surface of the test's own on the backend's instance (the presenter's is the same kind)
+    VkSurfaceCapabilitiesKHR c = {0}; VkSurfaceKHR mine = VK_NULL_HANDLE;
+    VkHeadlessSurfaceCreateInfoEXT hi = {VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT, NULL, 0};
+    int caps = !vkCreateHeadlessSurfaceEXT(d->instance, &hi, NULL, &mine) && !vkGetPhysicalDeviceSurfaceCapabilitiesKHR(d->phys, mine, &c);
+    if (mine) vkDestroySurfaceKHR(d->instance, mine, NULL);
+    char name[1400], line[512], mline[512], want[512], max[16];
+    if (c.maxImageCount) snprintf(max, sizeof max, "%u", c.maxImageCount); else snprintf(max, sizeof max, "any");
+    printf("the headless surface allows %u..%s images\n", c.minImageCount, max);
+    const char *mode = mailbox ? "MAILBOX" : "FIFO";
+    // The window's textures as nvnWindowInitialize registers them (be_xv_window_tex once per texture of the builder), then the window's first frames
+    static const uint32_t counts[6] = {2, 3, 4, 6, 9, 2};
+    uint64_t tk0 = be_present_ext(serial, 1.0 / 60, NULL, 0, crop); be_present_wait(tk0); shot();   // the 1600 x 900 window again (its swapchain), before the counts
+    uint32_t prev_asked = 0; log_take(NULL, NULL);
+    for (int k = 0; k < 6; k++) {
+        uint32_t T = counts[k];
+        for (uint32_t i = 0; i < T; i++) be_xv_window_tex(0x7000 + 16 * (uint64_t)k + i);
+        if (k == 1) be_xv_window_tex(0x7000 + 16 * (uint64_t)k);   // a texture registered twice counts once
+        hvk_win_info before = g_info;
+        uint64_t tk = 0;
+        for (int f = 0; f < 3; f++) { tk = be_present_ext(serial, 1.0 / 60, NULL, 0, crop); be_present_wait(tk); }
+        int got = shot();
+        if (!k) prev_asked = before.asked;
+        log_take(line, NULL);
+        uint32_t n = expect_images(T, c.minImageCount, c.maxImageCount, 0, mailbox);
+        int again = n != prev_asked;
+        if (again) snprintf(want, sizeof want, "[hostvk] swapchain: %u images (the game's window has %u textures, the surface allows %u..%s, mode %s)", n, T, c.minImageCount, max, mode);
+        else snprintf(want, sizeof want, "[hostvk] swapchain: kept at %u images (the game's window now has %u textures, %u before)", n, T, k ? counts[k - 1] : before.textures);
+        int ok = caps && tk && got && g_info.textures == T && g_info.asked == n && g_info.images >= n && g_info.min_images == c.minImageCount && g_info.max_images == c.maxImageCount
+                 && g_info.swapchains == before.swapchains + (again ? 1 : 0) && !strcmp(line, want) && g_info.dropped == before.dropped;
+        snprintf(name, sizeof name, "D12: a window of %u textures%s on the %u..%s surface: %u images asked, %u made, %s; logged \"%s\"", T, k == 1 ? " (one registered twice)" : "",
+                 c.minImageCount, max, g_info.asked, g_info.images, again ? "the swapchain made again" : "the swapchain kept", line);
+        t(name, ok);
+        if (!ok) printf("     want \"%s\", %u images, %llu swapchains (%llu before)\n", want, n, (unsigned long long)g_info.swapchains, (unsigned long long)before.swapchains);
+        prev_asked = n;
+    }
+    // The latency switch and the diagnostic mode, as the switches would set them, each from its next frame
+    const uint32_t T = counts[5];
+    struct { const char *lat, *pm, *label, *why; int low, mbx; } st[] = {
+        {"low", NULL, "DM_VK_LATENCY=low", NULL, 1, -1},
+        {"low", "fifo", "DM_VK_LATENCY=low with DM_VK_PRESENT_MODE=fifo", "DM_VK_PRESENT_MODE=fifo over DM_VK_LATENCY=low's MAILBOX", 1, 0},
+        {"low", "mailbox", "DM_VK_LATENCY=low with DM_VK_PRESENT_MODE=mailbox", "DM_VK_PRESENT_MODE=mailbox", 1, 1},
+        {NULL, "mailbox", "DM_VK_PRESENT_MODE=mailbox", "DM_VK_PRESENT_MODE=mailbox over the default's FIFO", 0, 1},
+        {"fast", NULL, "DM_VK_LATENCY=fast (not a value: normal)", "the default, decision D12", 0, 0},
+        {NULL, mailbox ? "mailbox" : NULL, mailbox ? "back to this start's DM_VK_PRESENT_MODE=mailbox" : "back to the default", NULL, 0, mailbox}};
+    for (size_t k = 0; k < sizeof st / sizeof st[0]; k++) {
+        log_take(NULL, NULL);
+        hvk_win_latency(st[k].lat, st[k].pm);
+        uint64_t tk = be_present_ext(serial, 1.0 / 60, NULL, 0, crop); be_present_wait(tk);
+        int got = shot();
+        log_take(line, mline);
+        // low on a surface that allows no fewer than three images: MAILBOX where it has it (lavapipe's headless one does), else FIFO
+        int mbx = st[k].mbx >= 0 ? st[k].mbx : c.minImageCount >= 3;
+        char why[200];
+        if (st[k].why) snprintf(why, sizeof why, "%s", st[k].why);
+        else if (st[k].low) { if (c.minImageCount >= 3) snprintf(why, sizeof why, "DM_VK_LATENCY=low: FIFO cannot go below %u images on this surface, MAILBOX instead", c.minImageCount);
+                              else snprintf(why, sizeof why, "DM_VK_LATENCY=low: FIFO with the fewest images the surface allows"); }
+        else snprintf(why, sizeof why, mailbox ? "DM_VK_PRESENT_MODE=mailbox over the default's FIFO" : "the default, decision D12");
+        uint32_t n = expect_images(T, c.minImageCount, c.maxImageCount, st[k].low, mbx);
+        const char *mn = mbx ? "MAILBOX" : "FIFO";
+        snprintf(want, sizeof want, "[hostvk] swapchain: %u images (the game's window has %u textures, the surface allows %u..%s, mode %s%s)", n, T, c.minImageCount, max, mn,
+                 st[k].low ? ", DM_VK_LATENCY=low" : "");
+        char wmode[300]; snprintf(wmode, sizeof wmode, "[hostvk] window presenter: present mode %s (%s;", mn, why);
+        int ok = tk && got && g_info.mode == (mbx ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_FIFO_KHR) && g_info.asked == n && g_info.low == st[k].low
+                 && !strncmp(mline, wmode, strlen(wmode)) && (!line[0] || !strcmp(line, want));
+        snprintf(name, sizeof name, "D12: %s: %s, %u images (%s)", st[k].label, mn, g_info.asked, why);
+        t(name, ok);
+        if (!ok) printf("     logged \"%s\" / \"%s\"; want \"%s\" / \"%s ...\"\n", line, mline, want, wmode);
+        if (k < 4) frames_in_order(st[k].label, serial, crop, userial);
+    }
+    frames_in_order(mailbox ? "DM_VK_PRESENT_MODE=mailbox (this start's)" : "the default (FIFO)", serial, crop, userial);
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     const char *phase = argc > 1 ? argv[1] : "";
@@ -216,6 +371,7 @@ int main(int argc, char **argv) {
     int window = surf_ext;
     if (window) { g_exts[0] = VK_KHR_SURFACE_EXTENSION_NAME; g_exts[1] = VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME; g_nexts = 2; hvk_present_set_window(make_surface, pixel_size); }
     else printf("note: the loader has no %s: the window presenter's swapchain parts are not run, only the headless presenter\n", VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME);
+    hostvk_set_log(on_log);
     be_init();
     const hostvk_dev *d = hvk_device();
     if (!d) {
@@ -224,6 +380,7 @@ int main(int argc, char **argv) {
         printf("== t_vk_present: %d checks, %d failed ==\n", g_total, g_fail); return 1;
     }
     printf("device '%s' (%s), validation %s; present wait %u, display timing %u\n", d->props.deviceName, d->driver_name, d->validation ? "on" : "off", d->x.present_wait, d->x.display_timing);
+    rule_checks();   // decision D12's rule needs no surface: every start
     int win = window && !headless;
     t(win ? "the device was made for the window: VK_KHR_swapchain enabled" : "the device was made without a swapchain (no window, or DM_VK_HEADLESS=1)", d->swapchain == win);
     t("the frame: an R8G8B8A8_SRGB image of a known picture on the backend's device", make_image(d, FW, FH, frame_texel, &g_img, &g_img_mem));
@@ -370,6 +527,7 @@ int main(int argc, char **argv) {
         t("integer with a window smaller than the picture (60x40): no whole multiple fits, the blit", got && g_info.upscale == 0 && g_info.width == 60);
         hvk_win_upscale("off", NULL, 0);
         g_win_w = 1600; g_win_h = 900;
+        d12_window(d, serial, crop, userial, mailbox);   // decision D12: the count from the window's textures, the latency switch, the frames of each mode
         be_present_flush();
         if (userial) hvk_ext_tex_drop(userial);
         free(bil); free(fsr); free(sh0);

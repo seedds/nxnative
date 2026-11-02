@@ -483,10 +483,15 @@ void hvk_prog_drop(uint64_t serial) { if (serial && g_prog.klen) free(nvn_hm_del
 static hvk_prog *prog_load(const prog_t *p);
 hvk_prog *hvk_prog_get(const prog_t *p) {
     if (!p) return NULL;
+    // A program bound before its SetShaders has no serial and no stages (hle_nvn.c gives it both there), so it has no shader: the one empty record, read only by the callers.
+    // It got a record of its own here before, which was not cached (no serial to key it) and which no caller frees: one allocation leaked per draw or dispatch with such a
+    // program (found at the look-ahead step)
+    static hvk_prog none;
+    if (!p->serial) return &none;
     if (!g_prog.klen) nvn_hm_init(&g_prog, 8);
-    hvk_prog *o = p->serial ? nvn_hm_get(&g_prog, &p->serial) : NULL;
+    hvk_prog *o = nvn_hm_get(&g_prog, &p->serial);
     if (o) return o;
-    comp_t *c = g_comp.klen && p->serial ? nvn_hm_get(&g_comp, &p->serial) : NULL;
+    comp_t *c = g_comp.klen ? nvn_hm_get(&g_comp, &p->serial) : NULL;
     if (!(o = calloc(1, sizeof *o))) return NULL;
     o->serial = p->serial;
     if (c) {   // a combined program: each stage from the program bound there
@@ -496,7 +501,7 @@ hvk_prog *hvk_prog_get(const prog_t *p) {
         hvk_prog *s = prog_load(p);
         if (s) { memcpy(o->sh, s->sh, sizeof o->sh); free(s); }
     }
-    if (p->serial) nvn_hm_put(&g_prog, &p->serial, o);
+    nvn_hm_put(&g_prog, &p->serial, o);
     return o;
 }
 static hvk_prog *prog_load(const prog_t *p) {   // a program's own stages (by the shader map), not cached here

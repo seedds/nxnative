@@ -128,8 +128,8 @@
 
 - **Symptom:** on an exFAT or FAT drive, shader splitting stops with `ValueError: not a version 2 shader code archive` or `[RED] /glslc_capture/._…: no GLSLC output`.
 - **Cause:** `shader_split.py` selected captured `.glslc` programs and decoded `.ushaderbytecode` archives by extension alone. macOS AppleDouble sidecars retain that extension, but their `._<name>` files contain metadata rather than shader bytes.
-- **Fix:** exclude `._` names when listing both external shader directories, including `DM_GLSLC_CAPTURE` and `DM_UE_SHADERS` overrides. Other dot-prefixed names remain valid inputs, and malformed real inputs still fail their normal validation. The synthetic `test_split_appledouble.py` runs the complete splitter with generated NSO headers and shaders: adding sidecars leaves every output byte unchanged.
-- **Found on:** an external-drive build reported in [issue #229's follow-up](https://github.com/seedds/nxnative/issues/229#issuecomment-6563450365). That commenter used a different, unnamed game; this fixes the sidecar failure, not the original Metroid Prime 4 port. No game rebuild was performed for this change.
+- **Fix:** exclude `._` names when listing both external shader directories, including `DM_GLSLC_CAPTURE` and `DM_UE_SHADERS` overrides. Other dot-prefixed names remain valid inputs, and malformed real inputs still fail their normal validation.
+- **Found on:** an external-drive build reported in [issue #229's follow-up](https://github.com/seedds/nxnative/issues/229#issuecomment-6563450365). That commenter used a different, unnamed game; this fixes the sidecar failure, not the original Metroid Prime 4 port.
 
 ## Compressed inputs
 

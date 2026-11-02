@@ -495,6 +495,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `hle_vi.c` answers with the frames presented so far; `ListFrameHistory` returns no entries.
 - **Found on:** [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md).
 
+### GameShare (streamplay) without guests
+
+- **Symptom:** a crash at boot (SIGSEGV at `sdk+0x151fb0` in a vi service mutex), and later aborts at the SDK's session state checks (`CloseSession`: `AbortImpl` at `sdk+0x6adcc8`).
+- **Cause:** Pokémon Pokopia makes one guest display at boot for GameShare (`streamplay::CreateIndividualDisplays(1)`, then `GetNativeWindowHandle(guest 0)`), and the SDK's version starts vi2 and the guest device resource manager.
+- **Fix:** `hle_misc.c`: the displays are recorded and each guest's native window is a host object that no present shows; a session (a player action from the GameShare menu) is refused (`OpenSessionWithMatchmakeSupport` and `StartStreaming` answer 0x1c87c), `CloseSession` has nothing to close, guest audio is dropped and guest accounts and nicknames are empty.
+- **Found on:** Pokémon Pokopia (`0400A3A01EE4C000`, SDK 20.5.25).
+
 ### Default display panel identifier
 
 - **Symptom:** SIGSEGV in `vi::GetDefaultDisplayPanelIdentifier` (`main+0xa9a4`, before the window).
@@ -830,10 +837,10 @@ Most service calls can be found before they crash, before the first boot or the 
 
 ### The Joy-Con mouse pointer
 
-- **Symptom:** an abort in `nn::hid` at boot, in a Switch 2 game that sets up the Joy-Con's mouse mode.
-- **Cause:** `InitializeNmouse` opens the hid service, and the host has neither the service nor the sensor.
-- **Fix:** `InitializeNmouse`, `GetNmouseHandles` (none) and the button configuration calls are hooked (`hle_hid.c`).
-- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md).
+- **Symptom:** an abort in `nn::hid` at boot, in a Switch 2 game that sets up the Joy-Con's mouse mode (Pokémon Pokopia: Result 0xe15 at `sdk+0x659c14`).
+- **Cause:** `InitializeNmouse` opens the hid service, and the host has neither the service nor the sensor. Nmouse is the SDK's merged pointer: the Joy-Con 2 mouse sensors and a USB mouse.
+- **Fix:** `InitializeNmouse`, `GetNmouseHandles` (none) and the button configuration calls are hooked (`hle_hid.c`). Pokopia also asks for the merged handle (one), its source types (none) and its states (none); those getters return true, as the SDK's do on success. `GetJcmsState`, the single-state form, returns a zero state.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md); [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md) (`InitializeNmouse(work, 0xc000, 1920, 1080)` at `main+0x1035b20`).
 
 ### The display's largest buffer
 

@@ -664,12 +664,26 @@ HLE_FORCE("_ZN2nn3hid9StartJcmsERKNS0_10JcmsHandleE", "Joy-Con mouse sensor: no 
 HLE_FORCE("_ZN2nn3hid8StopJcmsERKNS0_10JcmsHandleE", "Joy-Con mouse sensor: no sensor on the host", void, h_hid_JcmsStop, const uint32_t *h) { (void)h; }
 HLE_FORCE("_ZN2nn3hid13GetJcmsStatesEPNS0_9JcmsStateEiRKNS0_10JcmsHandleE", "Joy-Con mouse sensor states: none (no sensor on the host)",
           int, h_hid_JcmsStates, void *out, int n, const uint32_t *h) { (void)out; (void)n; (void)h; return 0; }
-// The Switch 2's pointer on top of those sensors (Nmouse; Fire Emblem Fortune's Weave initializes it at boot with the 1920x1080 screen it maps the pointer to, main+0x650a24). InitializeNmouse opens the
-// hid service as InitializeJcms does (its Result aborts: sdk+0x6d5340). No controller of the host has the sensor, so there are no handles, and the calls on a handle have nothing to do
-HLE_FORCE("_ZN2nn3hid16InitializeNmouseEPvmii", "Joy-Con mouse pointer: no hid service; no sensor on the host", void, h_hid_NmouseInit, void *work, uint64_t size, int w, int h) { (void)work; (void)size; (void)w; (void)h; }
-HLE_FORCE("_ZN2nn3hid16GetNmouseHandlesEPNS0_12NmouseHandleEij", "Joy-Con mouse pointer handles: none (no sensor on the host)", int, h_hid_NmouseHandles, void *out, int n, uint32_t id) { (void)out; (void)n; (void)id; return 0; }
-HLE_FORCE("_ZN2nn3hid32SetNmouseButtonConfigJoyLeftJcmsERKNS0_29NmouseButtonConfigJoyLeftJcmsE", "Joy-Con mouse pointer: no sensor on the host", void, h_hid_NmouseCfgL, const void *c) { (void)c; }
-HLE_FORCE("_ZN2nn3hid33SetNmouseButtonConfigJoyRightJcmsERKNS0_30NmouseButtonConfigJoyRightJcmsE", "Joy-Con mouse pointer: no sensor on the host", void, h_hid_NmouseCfgR, const void *c) { (void)c; }
+// The single-state form (Pokémon Pokopia); the SDK's version reads the shared memory the hid service would have mapped. A zero state: no sample
+HLE_FORCE("_ZN2nn3hid12GetJcmsStateEPNS0_9JcmsStateERKNS0_10JcmsHandleE", "Joy-Con mouse sensor state: zero (no sensor on the host)",
+          void, h_hid_JcmsState, void *out, const uint32_t *h) { (void)h; memset(out, 0, 32); }
+// Nmouse: the Switch 2 SDK's merged pointer (Joy-Con 2 mouse sensors and a USB mouse; Pokémon Pokopia, main+0x1035b20: InitializeNmouse(work, 0xc000, 1920, 1080); Fire Emblem
+// Fortune's Weave at boot, main+0x650a24). The SDK's
+// InitializeNmouse opens the hid service itself, which the host does not serve (abort with Result 0xe15 at sdk+0x659c14). The host has no pointer source: one merged handle,
+// no source types, no handles of a type and no states. The SDK's getters return true on success (cset eq on the detail call's Result), GetNmouseHandles the count
+HLE_FORCE("_ZN2nn3hid16InitializeNmouseEPvmii", "merged mouse (Nmouse): no hid service; no pointer source on the host", void, h_hid_NmouseInit, void *work, uint64_t size, int w, int h) {
+    (void)work; (void)size; LOG("hid: InitializeNmouse %dx%d (no pointer source on the host)", w, h); }
+HLE_FORCE("_ZN2nn3hid14FinalizeNmouseEv", "merged mouse (Nmouse): nothing to release", void, h_hid_NmouseFini, void) {}
+HLE_FORCE("_ZN2nn3hid21GetMergedNmouseHandleEPNS0_12NmouseHandleE", "merged mouse handle: one host handle", unsigned, h_hid_NmouseMerged, uint32_t *h) { *h = 0x100; return 1; }
+HLE_FORCE("_ZN2nn3hid16GetNmouseHandlesEPNS0_12NmouseHandleEij", "mouse handles of a type: none", int, h_hid_NmouseHandles, uint32_t *h, int n, uint32_t types) {
+    (void)h; (void)n; (void)types; return 0; }
+HLE_FORCE("_ZN2nn3hid16GetNmouseTypeSetEPNS_4util10BitFlagSetILi32ENS0_10NmouseTypeEEENS0_12NmouseHandleE", "mouse source types: none", unsigned, h_hid_NmouseTypes,
+          uint32_t *set, uint32_t h) { (void)h; *set = 0; return 1; }
+HLE_FORCE("_ZN2nn3hid15GetNmouseStatesEPiPNS0_11NmouseStateEiNS0_12NmouseHandleE", "mouse states: none (no pointer source)", unsigned, h_hid_NmouseStates,
+          int *count, void *out, int n, uint32_t h) { (void)out; (void)n; (void)h; *count = 0; return 1; }
+HLE_FORCE("_ZN2nn3hid26SetMergedNmouseSourceTypesENS_4util10BitFlagSetILi32ENS0_10NmouseTypeEEE", "merged mouse sources: kept by nobody (no pointer source)", void, h_hid_NmouseSrc, uint32_t s) { (void)s; }
+HLE_FORCE("_ZN2nn3hid32SetNmouseButtonConfigJoyLeftJcmsERKNS0_29NmouseButtonConfigJoyLeftJcmsE", "Joy-Con mouse button mapping: no sensor", void, h_hid_NmouseCfgL, const void *c) { (void)c; }
+HLE_FORCE("_ZN2nn3hid33SetNmouseButtonConfigJoyRightJcmsERKNS0_30NmouseButtonConfigJoyRightJcmsE", "Joy-Con mouse button mapping: no sensor", void, h_hid_NmouseCfgR, const void *c) { (void)c; }
 HLE_FORCE("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE", "six-axis sensor states: every requested entry, newest first",
           int, h_hid_SixStates, SixAxisState *out, int n, const uint32_t *h) { return six_states(out, n, *h); }
 // Vibration handles: byte 0 = SDK style index (FullKey 3, Handheld 4), byte 1 = npad id, byte 2 = motor.

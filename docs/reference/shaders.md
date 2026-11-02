@@ -147,6 +147,21 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) (the older KTGL).
 - **Note:** nine more shaders exist only at run time ([Built-in shaders compiled with the game's own GLSLC](#built-in-shaders-compiled-with-the-games-own-glslc)).
 
+### KTGL on NVN2: Switch 2 GLSLC outputs and LD_ / LI_ LINKDATA
+
+- **Symptom:** the split finds a few dozen of a KTGL Switch 2 game's shaders; the RDB entries' G2S containers yield nothing, and the language screen's programs name no packaged shader.
+- **Cause:** the Switch 2's GLSLC (output version 0x15.0x22) writes a longer output header: 0x18 bytes more (the output's length at +0x5c, the section count at +0x64), and each section header 8 bytes more (from +0xa8, 0x98 apart); a GPU code section holds an NVN2 control section. Pokémon Pokopia also keeps 618 GLSLC outputs in a LINKDATA pair named `LD_C0_R.BIN` / `LI_C0_R.IDX` (the same 32-byte entries as Three Houses' `DATA1.bin` / `DATA0.bin`), whose larger entries use 0x80000-byte zlib chunks.
+- **Fix:** `glslc_nvn2` reads that layout (`glslc_section(…, nvn2=True)`), a single-stage output labelled as the Switch 1 ones and several stages as one program; `linkdata_index` names the index of either pair; `kt_gz` takes its chunk size from the header (a power of two from 0x10000 to 0x100000).
+- **Found on:** Pokémon Pokopia (`0400A3A01EE4C000`): 99,207 shaders, 95,015 of them from one RDB asset (`0x38f972af`), 430 from `LD_C0_R`.
+- **Check:** `python3 dm/tools/tests/test_split_ktgl_nvn2.py`.
+
+### NVN2 shaders keyed without the bytes KTGL rewrites
+
+- **Symptom:** `[RED] shader … is not in the shader map` for 13 of the language screen's 27 programs, whose code is packaged.
+- **Cause:** KTGL rewrites +0x08 of a shader's NVN2 control section (0x0b → 0x11) and GLSLC's compile hash at +0x20 when it loads it; the code area stays byte for byte. `shader_key_skip` took only ranges past the Switch 1 control header (+0x30 on).
+- **Fix:** an NVN2 section's `shader_key_skip` may lie in its header, within +0x08..+0x2f (`game.py` checks the form; `key_ctl` and `same_shader` in `shader_split.py`, `keys_hash` in `hle_nvn.c`); none of the tools reads those bytes. Pokopia's profile skips `0x8+0x28`.
+- **Found on:** Pokémon Pokopia (`0400A3A01EE4C000`).
+
 ### GLSLC outputs in base64 in Heaps' shader cache
 
 - **Symptom:** the NSP script stops at `the shader split found no shaders in main or the RomFS` on a game whose `main` imports `glslcCompile` and whose RomFS is one or two `.pak` files.

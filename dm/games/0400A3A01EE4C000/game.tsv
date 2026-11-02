@@ -1,0 +1,43 @@
+# Game profile of Pokémon Pokopia (Switch 2, update v327680). Plays on the Mac
+# Koei Tecmo's KTGL engine on NVN2 (the Switch 2's NVN), SDK 20.5.25 built for the Switch 2 (sdk spec Ounce). Modules main + subsdk0 (NintendoSDK_movie: WebM movies) + sdk.
+# Packed from a dump folder (scripts/pack_dump.py). RomFS: the newer RDB (as ROMANCE OF THE THREE KINGDOMS 8 REMAKE's): motor_asset_re/KIDS_PLATFORM_OUNCE/root.rdb and system.rdb
+# (indexes, .rdx beside them) over .fdata files named by KTID; movies in movie_asset/ounce/*.webm.
+
+# ---- Identity ----
+title_id	0400A3A01EE4C000
+program_id	0400A3A01EE4C000
+
+# ---- App ----
+name	Pokémon Pokopia
+ipa	PokemonPokopia.ipa
+app_category	public.app-category.games
+pad_layout	full
+
+# ---- Versions ----
+build	v327680	v327680	main=816c5358e8178d802fcec4a7ce5a741a	subsdk0=9646a69cb1024ba919fddaa4265e6bc5	sdk=cc7da00d672399efe7958790d17fae39
+package	v327680
+shader_versions	v327680
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie)
+modules	main subsdk0 sdk
+romfs_marker	motor_asset_re/KIDS_PLATFORM_OUNCE/root.rdb
+zip_store	.fdata:.file:.rdb:.webm:.metallib:.BIN
+
+# ---- Memory ----
+# The Switch 2 leaves games 9 GB of its 12 GB (Donkey Kong Bananza's layout, not measured here). The NPDM declares no system resource: the game sets a heap.
+# 256 MB in front + 256 MB alias region + 256 MB stack region + 9 GB heap region
+mem_reserve	0x270000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0x240000000
+sys_resource	0x0
+# The rewritten modules take 82 MB (0x5200000), more than the default 64 MB of used memory, which SetHeapSize checks the game's request (pool − used) against
+mem_used	0x6000000
+
+# ---- Shader split (shader_split.py; KTGL G2S and _DOK containers in the RDB entries, GLSLC outputs in main) ----
+shader_groups	/motor_asset_re/=rdb
+shader_note	Pokémon Pokopia shaders
+# KTGL rewrites +0x08 and GLSLC's compile hash at +0x20 of a shader's NVN2 control section when it loads it (0x0b → 0x11, a new hash; the code area stays byte for byte):
+# without the skip, 13 of the language screen's 27 runtime programs named no packaged shader
+shader_key_skip	0x8+0x28

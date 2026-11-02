@@ -213,5 +213,27 @@ HLE_FORCE("_ZN2nn10streamplay30GetGuestVibrationDeviceHandlesEPNS0_26GuestVibrat
 HLE_FORCE("_ZN2nn10streamplay27GetGuestVibrationDeviceInfoEPNS_3hid19VibrationDeviceInfoERKNS0_26GuestVibrationDeviceHandleE", "guest vibration device info: none (no guest)",
           void, h_stpl_VibInfo, uint64_t *info, const void *h) { (void)h; *info = 0; }
 HLE_FORCE("_ZN2nn10streamplay18GetGuestJcmsHandleERKNS0_10GuestPadIdERKNS_3hid8JcmsTypeE", "guest Joy-Con mouse handle: none (no guest)", uint32_t, h_stpl_JcmsHandle, const void *id, const void *type) { (void)id; (void)type; return 0; }
+// Pokémon Pokopia makes one guest display at boot (main+0x10428f8: CreateIndividualDisplays(1), then GetNativeWindowHandle(guest 0) kept at +0xc0 of its streaming object). The SDK's
+// version starts vi2 (nn::vi2::Initialize → vi::sdk::Initialize, which locks a mutex of the vi service objects the host never made: SIGSEGV at sdk+0x151fb0) and the guest device
+// resource manager. The host has no guest screens: the displays are recorded, and each guest's native window is a host object of its own, which no present shows (dm_stpl_guest_native)
+static int g_stpl_displays;
+static uint8_t g_stpl_native[8][0x40] __attribute__((aligned(16)));
+int dm_stpl_guest_native(const void *w) { return w >= (const void *)g_stpl_native && w < (const void *)(g_stpl_native + 8); }
+HLE_FORCE("_ZN2nn10streamplay24CreateIndividualDisplaysEi", "streamplay guest displays: recorded; the host has no guest screens", void, h_stpl_CreateDisp, int n) {
+    g_stpl_displays = n; LOG("streamplay: CreateIndividualDisplays(%d) (no guest screens on the host)", n); }
+HLE_FORCE("_ZN2nn10streamplay25DestroyIndividualDisplaysEv", "streamplay guest displays: nothing to release", void, h_stpl_DestroyDisp, void) { g_stpl_displays = 0; }
+HLE_FORCE("_ZN2nn10streamplay21GetNativeWindowHandleENS0_7GuestIdE", "streamplay guest native window: a host object per guest, never shown", void *, h_stpl_Native, int id) {
+    if (id < 0 || id >= 8) { LOG("[RED] streamplay: GetNativeWindowHandle guest %d", id); id = 0; }
+    return g_stpl_native[id]; }
+// A session is a player action (the GameShare menu); with no session open the SDK's own functions abort at their state check (CloseSession: AbortImpl at sdk+0x6adcc8).
+// OpenSessionWithMatchmakeSupport and StartStreaming answer "not available"; CloseSession has nothing to close
+HLE_FORCE("_ZN2nn10streamplay31OpenSessionWithMatchmakeSupportEPNS0_11SessionInfoERKNS0_15MatchmakeConfigE", "streamplay session: GameShare is not available on the host",
+          Result, h_stpl_Open, void *info, const void *cfg) { (void)info; (void)cfg; LOG("streamplay: OpenSessionWithMatchmakeSupport refused (no GameShare on the host)"); return 0x1c87c; }
+HLE_FORCE("_ZN2nn10streamplay14StartStreamingEv", "streamplay streaming: no session", Result, h_stpl_Start, void) { LOG("streamplay: StartStreaming refused (no session)"); return 0x1c87c; }
+HLE_FORCE("_ZN2nn10streamplay12CloseSessionEv", "streamplay session: none open", void, h_stpl_Close, void) {}
+HLE_FORCE("_ZN2nn10streamplay21WriteGuestAudioStreamENS0_7GuestIdEPKvi", "guest audio: no guest, dropped", int, h_stpl_GuestAudio, int id, const void *p, int n) { (void)id; (void)p; (void)n; return 0; }
+HLE_FORCE("_ZN2nn10streamplay13GetGuestNsaIdEPNS_7account23NetworkServiceAccountIdENS0_7GuestIdE", "guest account: none (no guest)", Result, h_stpl_NsaId, uint64_t *out, int id) {
+    (void)id; if (out) *out = 0; return 0x1c87c; }
+HLE_FORCE("_ZN2nn10streamplay16GetGuestNicknameEPNS_7account8NicknameENS0_7GuestIdE", "guest nickname: none (no guest)", void, h_stpl_Nick, char *out, int id) { (void)id; if (out) out[0] = 0; }
 HLE_FORCE("_ZN2nn10streamplay18GetGuestJcmsStatesEPNS0_14GuestJcmsStateEiRKNS0_15GuestJcmsHandleE", "guest Joy-Con mouse states: none (no guest)",
           int, h_stpl_JcmsStates, void *out, int n, const void *h) { (void)out; (void)n; (void)h; return 0; }

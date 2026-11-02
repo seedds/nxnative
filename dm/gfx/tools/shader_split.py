@@ -115,8 +115,12 @@ def key_ctl(ctl):
     """The control bytes in the key: ctl_len of them, with the profile's shader_key_skip range as zeros (the host's keys_hash does the same). Batman: Arkham Knight's engine shares one control section
     among shaders whose sections differ only in GLSLC's compile information (+0x778..+0x791, +0x7d0..+0x7e7; its shader_key_skip 0x770+0x78): masked, its 24,721 sections are 5,615"""
     c = ctl[:ctl_len(ctl)]
-    if nvn2_ctl(ctl): return c[:0x30] + bytes(4) + c[0x34:]
-    return c[:KEY_SKIP[0]] + bytes(KEY_SKIP[1]) + c[KEY_SKIP[0] + KEY_SKIP[1]:] if KEY_SKIP[1] and KEY_SKIP[0] + KEY_SKIP[1] <= len(c) else c
+    o, ln = KEY_SKIP
+    if nvn2_ctl(ctl):
+        # an NVN2 section's skip lies in its header, +0x08..+0x2f (Pokémon Pokopia's KTGL rewrites +0x08 and GLSLC's compile hash at +0x20 at load time; hle_nvn.c keys_hash)
+        c = c[:0x30] + bytes(4) + c[0x34:]
+        return c[:o] + bytes(ln) + c[o + ln:] if ln and o + ln <= 0x30 else c
+    return c[:o] + bytes(ln) + c[o + ln:] if ln and o >= 0x30 and o + ln <= len(c) else c
 
 def skey(ctl, code):
     return hashlib.sha256(key_ctl(ctl) + code).hexdigest()[:16]
@@ -129,7 +133,7 @@ def same_shader(a, b):
     n = n if 0x760 <= n <= min(len(ca), len(cb)) else max(len(ca), len(cb))
     if nvn2_ctl(ca): return ka == kb and key_ctl(ca) == key_ctl(cb)
     o, ln = KEY_SKIP
-    if ln and o + ln <= n: ca, cb = ca[:o] + ca[o + ln:n], cb[:o] + cb[o + ln:n]; n = n - ln   # shader_key_skip: the bytes the key leaves out may differ
+    if ln and o >= 0x30 and o + ln <= n: ca, cb = ca[:o] + ca[o + ln:n], cb[:o] + cb[o + ln:n]; n = n - ln   # shader_key_skip: the bytes the key leaves out may differ
     return ka == kb and ca[:n] == cb[:n]
 
 def check(where, st, ctl, code):
@@ -289,14 +293,17 @@ def glslc_stage(ctl, code):
     headerless_cs = code[:4] not in (CS_MAGIC, GFX_MAGIC) and len(ctl) >= 0x754 and all(struct.unpack_from('<3I', ctl, 0x748))
     return 'cs' if code[:4] == CS_MAGIC or headerless_cs else sph_stage(code) if code[:4] == GFX_MAGIC and len(code) >= 0x34 else None
 
-def glslc_section(d, h, size):
+def glslc_section(d, h, size, nvn2=False):
     """The GPU code sections of the GLSLC output at h, from its section headers: output +0x4c = section count, section i's header at +0x90 + 0x90 i = {u32 size, u32 data offset (from the
     output), u32 type (0 = GPU code)}; a GPU code header adds +0x30 control offset, +0x34 code offset (both from the section's data), +0x38 code length, +0x3c control length.
+    nvn2: the Switch 2's GLSLC (output version 0x15.0x22, Pokémon Pokopia's KTGL G2S containers): the output header is 0x18 bytes longer (+0x5c = the output's length, +0x64 = section count)
+    and each section header 8 bytes longer (from +0xa8, 0x98 apart); a GPU code header's fields are where they were.
     → [(control, code)] of each GPU code section, or None"""
-    n, secs = struct.unpack_from('<I', d, h + 0x4c)[0], []
-    if not 0 < n <= 16 or h + 0x90 * (n + 1) > len(d): return None
+    base, step = (0xa8, 0x98) if nvn2 else (0x90, 0x90)
+    n, secs = struct.unpack_from('<I', d, h + base - 0x44)[0], []
+    if not 0 < n <= 16 or h + base + step * n > len(d): return None
     for i in range(n):
-        s = h + 0x90 + 0x90 * i
+        s = h + base + step * i
         ssz, soff, typ = struct.unpack_from('<3I', d, s)
         if typ: continue
         co, ko, kn, cn = struct.unpack_from('<4I', d, s + 0x30)
@@ -312,6 +319,19 @@ def glslc_program(d, h, size, label):
     if len(secs) < 2 or len(set(sts)) < len(sts) or any(not st or check(label, st, ctl, code) for st, (ctl, code) in zip(sts, secs)): return []
     return [(f'{label}#GLSLC@{h:#x}#var', st, ctl, code) for st, (ctl, code) in zip(sts, secs)]
 
+def glslc_nvn2(d, h, label):
+    """A Switch 2 GLSLC output (glslc_section's nvn2 layout) at h: its stages, or None when the output is not one (every GPU code section must hold an NVN2 control section).
+    A single-stage output keeps the label of the Switch 1 ones; several stages are one program, which pair with each other (glslc_program). [] when a section fails the triple check"""
+    if h + 0x68 > len(d): return None
+    size = struct.unpack_from('<I', d, h + 0x5c)[0]
+    if not 0xa8 < size <= len(d) - h: return None
+    secs = glslc_section(d, h, size, nvn2=True)
+    if not secs or not all(nvn2_ctl(ctl) for ctl, _ in secs): return None
+    sts = [nvn2_stage(ctl, code) for ctl, code in secs]
+    if any(not st or check(label, st, ctl, code) for st, (ctl, code) in zip(sts, secs)) or len(set(sts)) < len(sts): return []
+    tag = f'{label}#GLSLC@{h:#x}' + ('#var' if len(secs) > 1 else '')
+    return [(tag, st, ctl, code) for st, (ctl, code) in zip(sts, secs)]
+
 def glslc_shaders(d, label, need=True, skip=()):
     """GLSLC compiler outputs (838 in 13 Sentinels' main read-only segment, one stage each): from the magic 0x19866891, +0x44 = the whole output's length; an output of one stage holds exactly one control section with the code area right after it (control +0x20 = control length),
     one of several stages is read by its section headers (glslc_program).
@@ -325,7 +345,9 @@ def glslc_shaders(d, label, need=True, skip=()):
     for m in re.finditer(b'\x91\x68\x86\x19', d):
         if any(a <= m.start() < b for a, b in skip): continue
         if m.start() + 0x48 > len(d): continue
-        h = m.start(); size = struct.unpack_from('<I', d, h + 0x44)[0]
+        h = m.start()
+        if (two := glslc_nvn2(d, h, label)) is not None: out += two; continue
+        size = struct.unpack_from('<I', d, h + 0x44)[0]
         c = d.find(CTL_MAGIC, h, h + size) if 0x760 < size <= len(d) - h else -1
         if c < 0: continue
         if d.find(CTL_MAGIC, c + 4, h + size) >= 0:
@@ -485,11 +507,12 @@ G2S, SPKG = b'_S2G3000', b'SPKG'
 def kt_gz(d):
     """Koei Tecmo's older chunked zlib (Fire Emblem: Three Houses: the compressed entries of DATA1.bin and the patch*/…/*.gz files): u32 chunk size (0x10000), u32 chunk count, u32 inflated length,
     u32 stored length of each chunk, then the chunks at 0x80 alignment, each a u32 length + one zlib stream, or the plain bytes when the stored length equals the chunk's inflated length (a short last
-    chunk, or one that does not compress). → the inflated data, or None when d is not in that form"""
+    chunk, or one that does not compress). Pokémon Pokopia's LD_C0_R.BIN uses 0x80000-byte chunks for its larger entries (among them the four that hold 618 GLSLC outputs, entries
+    5695..5699), so the chunk size is taken from the header: a power of two from 0x10000 to 0x100000. → the inflated data, or None when d is not in that form"""
     import zlib
     if len(d) < 16: return None
     cs, n, tot = struct.unpack_from('<III', d)
-    if cs != 0x10000 or not n or n != (tot + cs - 1) // cs or 12 + 4 * n > len(d): return None
+    if cs not in (0x10000, 0x20000, 0x40000, 0x80000, 0x100000) or not n or n != (tot + cs - 1) // cs or 12 + 4 * n > len(d): return None
     sizes = struct.unpack_from(f'<{n}I', d, 12); o = (12 + 4 * n + 0x7f) & ~0x7f; out = []
     for i, s in enumerate(sizes):
         if o + s > len(d): return None
@@ -527,11 +550,20 @@ def kt_shaders(d, label, out):
     if b'\x91\x68\x86\x19' in d: out.extend(glslc_shaders(d, label, need=False))
     if d[:4] == b'SARC' or b'BNSH\0\0\0\0' in d: scan_blob(d, label, out)
 
+def linkdata_index(path):
+    """The index file of a LINKDATA archive: DATA0.bin beside Three Houses' DATA1.bin, LI_<name>.IDX beside Pokémon Pokopia's LD_<name>.BIN (LI_C0_R.IDX / LD_C0_R.BIN, the same
+    32-byte entries); None for any other file"""
+    base = os.path.basename(path)
+    name = 'DATA0.bin' if base == 'DATA1.bin' else 'LI_' + base[3:-4] + '.IDX' if base.startswith('LD_') and base.endswith('.BIN') else None
+    idx = name and os.path.join(os.path.dirname(path), name)
+    return idx if idx and os.path.exists(idx) else None
+
 def linkdata_jobs(path, rel, parts=64):
     """Three Houses' LINKDATA: DATA0.bin, beside DATA1.bin (6.9 GB), indexes it with 32-byte entries {u64 offset, u64 inflated length, u64 stored length, u64 compressed}. The entries are split into
-    ranges of about equal stored size, one scan job each. → [(path, rel, (first entry, end entry)), …], or None when there is no index beside the file"""
-    idx = os.path.join(os.path.dirname(path), 'DATA0.bin')
-    if os.path.basename(path) != 'DATA1.bin' or not os.path.exists(idx): return None
+    ranges of about equal stored size, one scan job each (linkdata_index names the index: Pokémon Pokopia's LI_C0_R.IDX over LD_C0_R.BIN as well).
+    → [(path, rel, (first entry, end entry)), …], or None when there is no index beside the file"""
+    idx = linkdata_index(path)
+    if not idx: return None
     n = os.path.getsize(idx) // 32; step = os.path.getsize(path) / parts; jobs, lo = [], 0
     with open(idx, 'rb') as f: ents = [struct.unpack('<QQQQ', f.read(32)) for _ in range(n)]
     for i in range(1, n + 1):
@@ -540,7 +572,7 @@ def linkdata_jobs(path, rel, parts=64):
 
 def linkdata_shaders(path, rel, rng, out):
     from romfs import mmap
-    with open(os.path.join(os.path.dirname(path), 'DATA0.bin'), 'rb') as f: idx = f.read()
+    with open(linkdata_index(path), 'rb') as f: idx = f.read()
     with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
         for i in range(*rng):
             off, n, stored, comp = struct.unpack_from('<QQQQ', idx, i * 32)

@@ -17,7 +17,7 @@
 #   <name>.image.bin, and nro.tsv (the NROs the game registers, Apple's rows). Then the shaders for the Vulkan backend: an NVN game's split and dmsh_build_vk.py into <id>_build/shader/cache/vk-<V>/
 #   (V = DMSH_CHAIN_VK; it needs the Vulkan translator built with .NET in the chain image, and is reported as not run without it), an OpenGL game's gl_shaders.py --vk into <id>_build/shader/gl-vk/,
 #   none for a guest Vulkan game (its SPIR-V goes to the driver); then <id>_build/run.sh (run.cmd on Windows) with the nxhost-run command line, its save in <NSP folder>/<id>-work/run/; last the
-#   packs: nxaot build (NXAOT / --nxaot, default build/aot/nxaot) of every module's manifest and every NRO into <name>.aot.so beside them (on Windows <name>.aot.dll, nxaot build --target
+#   packs: nxaot build (NXAOT / --nxaot, default bin/nxaot in the port's bundle, else build/aot/nxaot) of every module's manifest and every NRO into <name>.aot.so beside them (on Windows <name>.aot.dll, nxaot build --target
 #   windows: dm/tools/aot/README.md, "Windows packs"), mode PACK_MODE / --pack-mode (balanced or max), with the per-function cache <NSP folder>/<id>-work/aot-cache/ when this nxaot has --cache,
 #   and a module's sample profile <NSP folder>/<id>-work/profile/<name>.tsv when there is one (nxhost-run writes it with DM_AOT_PROFILE; AOT_PROFILE / --no-profile ignores them), and the
 #   JIT misses beside it, <name>.misses.tsv (nxaot build --misses: the addresses the game ran in the JIT fallback become entries of the next pack). The launch file names the NSP folder, this
@@ -59,7 +59,7 @@ PLATFORM = 'ios'                        # 'ios' = the IPA (or the Xcode project)
                                         #   Xcode project or IPA; keeps the extracted files and prints the command that runs the game (needs Apple silicon);
                                         #   'linux' / 'windows' = a pack for the x86-64 host program nxhost-run, made on that system: the recompiler's input and packs in <id>_build/aot_<version>/,
                                         #   the Vulkan shaders and <id>_build/run.sh (run.cmd); the packs are shared objects on Linux and DLLs on Windows
-NXAOT = ''                              # PLATFORM 'linux' / 'windows': the recompiler nxaot, or a script that runs it (empty = build/aot/nxaot in the repository; dm/tools/aot/README.md builds it)
+NXAOT = ''                              # PLATFORM 'linux' / 'windows': the recompiler nxaot, or a script that runs it (empty = the port's bundle's bin/nxaot, else build/aot/nxaot in the repository; dm/tools/aot/README.md builds it)
 PACK_MODE = 'balanced'                  # PLATFORM 'linux' / 'windows': nxaot's pack mode, 'balanced' (a faster pack) or 'max' (a faster game, a longer pack)
 AOT_WORKERS = 0                         # PLATFORM 'linux' / 'windows': nxaot's compile workers (0 = nxaot decides from the processors and the free memory)
 AOT_PROFILE = True                      # PLATFORM 'linux' / 'windows': pack each module with its sample profile <NSP folder>/<id>-work/profile/<module>.tsv when there is one (nxhost-run records it
@@ -2032,10 +2032,14 @@ def check_prereqs_port(env):   # what a pack for Windows or Linux runs up to the
     if not shutil.which('dotnet', path=env['PATH']): raise BuildError('tools not found: dotnet (.NET SDK 10, which builds nx_extract)')
 
 
+BUNDLE_NXAOT = 'bin/nxaot'   # the recompiler in the port's bundle (scripts/package_port.py; docs/development.md, "The port's bundles"), whose root this script's repo is there
+
+
 def find_nxaot(repo, given=''):
-    """The recompiler that makes the packs (PLATFORM 'linux' / 'windows'): given (NXAOT / --nxaot: the binary, or a script that runs it), else build/aot/nxaot in the repository, where its Docker
-    build puts it"""
-    p = Path(os.path.expanduser(given)).resolve() if given else repo / 'build/aot/nxaot'
+    """The recompiler that makes the packs (PLATFORM 'linux' / 'windows'): given (NXAOT / --nxaot: the binary, or a script that runs it), else the port's bundle's bin/nxaot (bin/nxaot.exe
+    on Windows) when this script runs from a bundle, else build/aot/nxaot in the repository, where its Docker build puts it"""
+    bundled = repo / (BUNDLE_NXAOT + ('.exe' if os.name == 'nt' else ''))
+    p = Path(os.path.expanduser(given)).resolve() if given else bundled if bundled.is_file() else repo / 'build/aot/nxaot'
     if p.is_file(): return p
     if given: raise BuildError(f'--nxaot / NXAOT: no such file: {p}')
     raise BuildError(f'the recompiler nxaot is not built ({p} does not exist). Build it from the repository root in its Docker image (dm/tools/aot/README.md, "Building and testing in Docker"): '
@@ -2411,7 +2415,16 @@ def port_settings(py, repo, work, game, patched, gfx, lang, g, platform, env, lo
     return out
 
 
-def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang, g, name, version, pkg_ver, modes, env_file='', settings=None, repack=None, made=()):
+def port_host(repo, platform, gid, bundled=True):
+    """The nxhost-run a pack names (the launch file's path host row): the port's bundle's hosts/<title ID>/nxhost-run (nxhost-run.exe on Windows; scripts/package_port.py), built for
+    that game profile, when this script runs from a bundle that has it and the profile is the registered one (bundled: not a derived or provisional profile, whose host must be built
+    from the repository with DM_GAMES_DIR); else the repository's build tree, build/linux/nxhost-run or build/win64/nxhost-run.exe. Returns (path, whether it is the bundle's)"""
+    own = repo / 'hosts' / gid / ('nxhost-run.exe' if platform == 'windows' else 'nxhost-run')
+    if bundled and own.is_file(): return own, True
+    return repo / ('build/win64/nxhost-run.exe' if platform == 'windows' else 'build/linux/nxhost-run'), False
+
+
+def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang, g, name, version, pkg_ver, modes, env_file='', settings=None, repack=None, made=(), host=None):
     """<id>_build/launch-<platform>.tsv: what starts this pack, the one source that run.sh (run.cmd) and the launcher nxlauncher (dm/launcher) both read (docs/settings.md, On Windows and Linux).
     Tab-separated rows <kind> <name> <value> under '#' lines: game (title, title_id, version, package, platform, graphics), path (host: the nxhost-run built for the game's profile; cwd: its
     working folder <NSP folder>/<id>-work/run/, kept from run to run; choices: the player's env.txt there, KEY=VALUE lines the launcher writes; log: where the launcher keeps nxhost-run's
@@ -2421,7 +2434,7 @@ def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang,
     the profile folder holds now), pack (one row per mode in modes, whose packs are complete: the folder nxhost-run is given, the first the default) and env (the environment
     nxhost-run gets: an environment file's switches (DM_ENV_FILE / --env-file), then the pack's layout as mac_run gives the Mac host: the recompiler's input, the RomFS image, the save and
     temporary storage, the shader libraries (msl, DM_MSL_DIR), the DLC, an NVN game's shader map, the game language, a window and sound). A reader sets each env row only when the
-    environment and the player's env.txt have not set it, first row first. Returns its path"""
+    environment and the player's env.txt have not set it, first row first. host: the nxhost-run to name (port_host's by default). Returns its path"""
     rd, win = wdir / 'run', platform == 'windows'
     for d in ('save', 'temp'): (rd / d).mkdir(parents=True, exist_ok=True)
     renv = {'DM_ROOT': work, 'DM_ROMFS': rfs.source(game), 'DM_SAVE': rd / 'save', 'DM_TEMP': rd / 'temp', 'DM_MSL_DIR': msl}
@@ -2432,7 +2445,7 @@ def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang,
     for k, v in renv.items(): envs.setdefault(k, v)
     for k in envs:
         if not ENV_NAME.fullmatch(k): raise BuildError(f'the environment file (--env-file / DM_ENV_FILE) sets {k!r}, which is not a variable name a shell can export')
-    host = repo / ('build/win64/nxhost-run.exe' if win else 'build/linux/nxhost-run')
+    host = host or port_host(repo, platform, g.id)[0]
     rows = [('game', 'title', name), ('game', 'title_id', g.id), ('game', 'version', version or pkg_ver), ('game', 'package', pkg_ver), ('game', 'platform', platform), ('game', 'graphics', gfx),
             ('path', 'host', host), ('path', 'cwd', rd), ('path', 'choices', rd / 'env.txt'), ('path', 'log', rd / 'log.txt')]
     if settings: rows.append(('path', 'settings', settings))
@@ -2517,16 +2530,17 @@ if defined DM_TEMP if not exist "%DM_TEMP%" mkdir "%DM_TEMP%"
 cd /d "%NXRUN_cwd%"'''
 
 
-def port_run_script(platform, repo, work, wdir, g, name, launch, profile_dir=None):
+def port_run_script(platform, repo, work, wdir, g, name, launch, profile_dir=None, host=None):
     """<id>_build/run.sh (Linux) or run.cmd (Windows): starts nxhost-run as the launch file says (port_launch_file, read at every start: the pack, then the environment, then the player's
     env.txt, then its env rows, each only where nothing set it before), the command line of docker/README.md ("Running the host program"), as the launcher nxlauncher does. NXHOST in the
     environment names another nxhost-run, NXPACK=<mode> another pack mode; the script's arguments go to nxhost-run ([module...] [-- game arguments]). profile_dir: the folder of a derived or
-    provisional profile, which nxhost-run must be configured with. Returns its path"""
+    provisional profile, which nxhost-run must be configured with. host: the port's bundle's nxhost-run when the launch file names it (port_host), said here. Returns its path"""
     rd, win = wdir / 'run', platform == 'windows'
     tree = 'build/win64' if win else 'build/linux'
-    about = [f'{name} ({g.id}): packed by scripts/build_ipa_from_nsp.py --platform {platform}; runs it in the host program nxhost-run (docker/README.md, "Running the host program").',
-             f'nxhost-run is built for game profile {g.id}: cmake -S dm/host -B {tree} -G Ninja -DGAME={g.id}' + (' -DCMAKE_TOOLCHAIN_FILE=/src/dm/host/cmake/x86_64-w64-mingw32.cmake' if win else '')
-             + f' && cmake --build {tree} (docker/README.md, "From a Linux host"' + (', in the llvm-mingw image)' if win else ')')]
+    about = [f'{name} ({g.id}): packed by scripts/build_ipa_from_nsp.py --platform {platform}; runs it in the host program nxhost-run (docker/README.md, "Running the host program").']
+    if host: about.append(f'nxhost-run is the port\'s bundle\'s host for game profile {g.id}: {host}')
+    else: about.append(f'nxhost-run is built for game profile {g.id}: cmake -S dm/host -B {tree} -G Ninja -DGAME={g.id}' + (' -DCMAKE_TOOLCHAIN_FILE=/src/dm/host/cmake/x86_64-w64-mingw32.cmake' if win else '')
+                       + f' && cmake --build {tree} (docker/README.md, "From a Linux host"' + (', in the llvm-mingw image)' if win else ')'))
     if profile_dir: about.append(f'  with DM_GAMES_DIR={profile_dir} and DM_GAMES_FIRST=1 in its environment: the game profile is a derived or provisional one, outside the repository')
     about += [f'What it starts comes from {launch.name} beside this script, which the launcher nxlauncher (dm/launcher) reads too, so both start the game the same way: the pack (the first',
               'pack row, or NXPACK=balanced / max), and the environment: what is already set stays, then the player\'s saved choices (the choices row: env.txt, KEY=VALUE lines, # comments;',
@@ -2578,7 +2592,7 @@ def parse_args(argv):
                     'the recompiler\'s input and packs in <id>_build/aot_<version>/ (shared objects on linux, DLLs on windows), the Vulkan shaders and <id>_build/run.sh (run.cmd) '
                     '(default: the PLATFORM setting, ios)')
     ap.add_argument('--nxaot', help='--platform linux / windows: the recompiler nxaot, or a script that runs it (a Linux program: on Windows a script that runs it in its Docker image) '
-                    '(default: the NXAOT setting, else build/aot/nxaot in the repository)')
+                    '(default: the NXAOT setting, else bin/nxaot in the port\'s bundle, else build/aot/nxaot in the repository)')
     ap.add_argument('--pack-mode', choices=('balanced', 'max'), help='--platform linux / windows: nxaot\'s pack mode, balanced (a faster pack) or max (a faster game, a longer pack) (default: the PACK_MODE setting, balanced)')
     ap.add_argument('--no-profile', action='store_true', help='--platform linux / windows: ignore the sample profiles of the game\'s modules (<NSP folder>/<id>-work/profile/<module>.tsv, '
                     'recorded by nxhost-run with DM_AOT_PROFILE) and pack every function at the mode\'s one tier (default: the AOT_PROFILE setting, use them); the JIT misses recorded beside them '
@@ -2903,11 +2917,12 @@ def main(args=None):
         # what packs the game again as this run does, for the launcher's "Repack with profile" (dm/launcher): the NSP folder, this script and its Python, the keys' path, the recompiler
         repack = {'package': nsp_dir, 'packer': here, 'python': sys.executable, 'keys': keys, 'nxaot': nxaot}
         made = made_rows(nxaot_opts, aot, mods, profiles, misses, args.no_profile)   # what the packs are made with: the launcher's "a better pack is possible" compares the profile folder with it
+        host, bundled = port_host(repo, platform, g.id, not (provisional or derived))   # the bundle's host for a registered profile, else the repository's build tree
         def launch_file(modes):   # the launch file offering those pack modes
-            return port_launch_file(platform, repo, work, wdir, aot, game, ios, aoc, gfx, lang, g, title, app_version, pkg_ver, modes, env_file, settings, repack, made)
+            return port_launch_file(platform, repo, work, wdir, aot, game, ios, aoc, gfx, lang, g, title, app_version, pkg_ver, modes, env_file, settings, repack, made, host)
         # the mode about to be packed is not offered while its packs are made (an interrupted pack leaves a mix); the other mode's complete packs stay offered
         launch = launch_file([m for m in packs_ready(nxaot, nxaot_opts, aot, nro_dir, mods, platform, profiles, misses) if m != pack_mode])
-        script = port_run_script(platform, repo, work, wdir, g, title, launch, g.dir.parent if provisional or derived else None)
+        script = port_run_script(platform, repo, work, wdir, g, title, launch, g.dir.parent if provisional or derived else None, host if bundled else None)
         nros = [l.split()[0] for l in ((aot / 'nro.tsv').read_text().splitlines() if (aot / 'nro.tsv').is_file() else []) if l.strip() and not l.startswith('#') and l.split()[0] != 'refused']
         say(f'recompiler\'s input: {aot} ({", ".join(mods)}' + (f'; nro.tsv lists {len(nros)} NRO{"" if len(nros) == 1 else "s"}' if nros else '') + f'); shaders: {ios}; run script: {script}; launch file: {launch}')
         aot_packs(nxaot, nxaot_opts, pack_mode, aot_workers, wdir / 'aot-cache', aot, nro_dir, mods, env, logs, work / 'tmp/aot', platform, profiles, misses)

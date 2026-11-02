@@ -413,6 +413,8 @@ class Linux(Pack):
         with self.assertRaisesRegex(nsp.BuildError, r'nxaot is not built .*docker build -t nxnative-aot .*--target nxaot'): nsp.find_nxaot(repo)
         (repo / 'build/aot').mkdir(parents=True); (repo / 'build/aot/nxaot').write_text('')
         self.assertEqual(nsp.find_nxaot(repo), repo / 'build/aot/nxaot')
+        (repo / 'bin').mkdir(); (repo / 'bin/nxaot').write_text('')   # the port's bundle (scripts/package_port.py): its bin/nxaot first
+        self.assertEqual(nsp.find_nxaot(repo), repo / 'bin/nxaot')
         with self.assertRaisesRegex(nsp.BuildError, 'no such file'): nsp.find_nxaot(repo, str(self.tmp / 'none'))
         broken = self.tmp / 'bin/broken'; broken.write_text('#!/bin/sh\necho "error while loading shared libraries: libLLVM-18.so" >&2; exit 127\n'); broken.chmod(0o755)
         with self.assertRaisesRegex(nsp.BuildError, 'libLLVM-18.so.*NXAOT_LLVM_STATIC'): nsp.nxaot_options(broken, dict(os.environ))
@@ -453,6 +455,20 @@ class Linux(Pack):
         self.assertFalse((self.work / 'shader').exists())
         self.assertTrue(any('no shader step on this platform' in m for m in self.said))
         self.assertTrue((self.aot / 'main.aot.so').is_file())
+
+    def test_bundle_host(self):   # packed from the port's bundle (scripts/package_port.py): the launch file names its hosts/<title ID>/nxhost-run, built for the registered profile
+        bundle, real = self.tmp / 'bundle', nsp.port_host
+        host = bundle / 'hosts' / ID / 'nxhost-run'; host.parent.mkdir(parents=True); host.write_text('')
+        self.assertEqual(real(bundle, 'linux', ID), (host, True)); self.assertEqual(real(bundle, 'linux', ID, False), (bundle / 'build/linux/nxhost-run', False))
+        self.assertEqual(real(bundle, 'windows', ID), (bundle / 'build/win64/nxhost-run.exe', False))   # a Windows bundle's is nxhost-run.exe
+        with mock.patch.object(nsp, 'port_host', side_effect=lambda repo, platform, gid, bundled=True: real(bundle, platform, gid, bundled)):
+            self.pack()
+            self.assertIn(('path', 'host', str(host)), launch_rows(self.work / 'launch-linux.tsv'))
+            self.assertIn(f"nxhost-run is the port's bundle's host for game profile {ID}: {host}", (self.work / 'run.sh').read_text())
+            self.check_run_sh()
+            nso(self.game / 'ExeFS/main', BID2); self.pack()   # a derived profile: the bundle's host was built for the registered one, so the repository's build is named
+            self.assertIn(('path', 'host', str(bundle / 'build/linux/nxhost-run')), launch_rows(self.work / 'launch-linux.tsv'))
+            self.assertIn(f'nxhost-run is built for game profile {ID}: cmake', (self.work / 'run.sh').read_text())
 
     def test_derived_profile(self):   # files of another build under the registered tag: packed from a derived profile, which nxhost-run must be configured with
         nso(self.game / 'ExeFS/main', BID2); self.pack()

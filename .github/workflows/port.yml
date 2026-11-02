@@ -1,6 +1,9 @@
 # The portable host on Linux and Windows (x86-64), Phase 0 of the port (docs/design/migration-status.md): dm/host/CMakeLists.txt built and its unit tests run with the
 # commands of docker/README.md, the host program nxhost-run (NXHOST_PROGRAM, main_x86.c) and the launcher nxlauncher (NXHOST_LAUNCHER, dm/launcher) among the targets;
 # t_host_program runs nxhost-run (its usage here: the packs of a module are aot.yml's), t_launcher_window runs nxlauncher on SDL's dummy video driver. No game runs there yet.
+# On a push and on workflow_dispatch (not on pull requests) the port's bundles too (scripts/package_port.py; docs/development.md, "The port's bundles"):
+# nxnative-linux-x86_64.tar.gz (job bundle-linux: the Linux host job's launcher and hosts, the nxaot-bundle job's recompiler) and nxnative-windows-x86_64.zip (the
+# Windows cross-build job), each an artifact of that name, checked by the script's --check.
 # The macOS jobs are in tests.yml and do not change.
 name: port
 
@@ -19,6 +22,10 @@ concurrency:
 
 env:
   GAME: 010015100B514000   # Super Mario Bros. Wonder: the profile the host is built for (any profile does; the tests are about code, not the game)
+  # The bundles carry nxhost-run for GAME and for each profile listed here (space-separated title IDs of dm/games), built after the tests by reconfiguring the same tree:
+  # about 24 s a profile on 8 threads (measured; more on the runners' 4 vCPUs), so every profile of the games table (89) would add more than half an hour to both jobs.
+  # Empty until a game runs on the port: then its profile goes here
+  BUNDLE_GAMES: ''
   # The Windows cross-build image of docker/README.md, pinned by its digest
   MINGW_IMAGE: mstorsjo/llvm-mingw:20261020@sha256:dadd757c364edee190c53d8e71a135892a6986182e873205d3611f85e26f290b
 
@@ -60,6 +67,99 @@ jobs:
           path: logs/linux
           if-no-files-found: ignore
           retention-days: 7
+      # The bundle's hosts, after the tests (which ran on GAME's tree): build/linux/hosts/<title ID>/nxhost-run for GAME and for each profile of BUNDLE_GAMES, the same tree
+      # configured again for it (only the host's own sources compile again: SDL3, dynarmic and libvpx stay built)
+      - name: Hosts of the bundle (build/linux/hosts)
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          mkdir -p "build/linux/hosts/$GAME" && cp build/linux/nxhost-run "build/linux/hosts/$GAME/"
+          for g in $BUNDLE_GAMES; do
+            docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-build sh -c \
+              "cmake -S dm/host -B build/linux -DGAME=$g && cmake --build build/linux --target nxhost-run"
+            mkdir -p "build/linux/hosts/$g" && cp build/linux/nxhost-run "build/linux/hosts/$g/"
+          done
+          ls -l build/linux/hosts/*/nxhost-run
+      # What scripts/package_port.py takes from this tree, for the bundle-linux job: the launcher, the hosts, SDL3's licence (FetchContent's copy). The upload keeps the
+      # paths under build/linux (their common folder), not the executable bits, which the script sets
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ github.event_name != 'pull_request' }}
+        with:
+          name: linux-bundle-input
+          path: |
+            build/linux/nxlauncher
+            build/linux/hosts/
+            build/linux/_deps/sdl3-src/LICENSE.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  # The recompiler for the Linux bundle: nxaot in its image (docker/Dockerfile.aot), linked against that image's shared libLLVM-18 (NXAOT_LLVM_STATIC=ON is not usable
+  # yet: Ubuntu's lld CMake targets link libLLVM too, so that nxaot holds two copies of LLVM and stops at its first start; docs/development.md, "The port's bundles"),
+  # and the licence of the LLVM and lld libraries in it. A job of its own, beside the Linux host job (the image and the build take a few minutes)
+  nxaot-bundle:
+    name: nxaot for the bundle (Docker)
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the image
+        run: docker build -t nxnative-aot -f docker/Dockerfile.aot docker
+      - name: Build nxaot (build/aot) and copy its LLVM licence (build/aot/licenses/LLVM.txt)
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot sh -c \
+            "cmake -S dm/tools/aot -B build/aot -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build/aot --target nxaot && mkdir -p build/aot/licenses && cp /usr/share/doc/libllvm18/copyright build/aot/licenses/LLVM.txt"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nxaot-linux
+          path: |
+            build/aot/nxaot
+            build/aot/licenses/LLVM.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  # The Linux bundle: scripts/package_port.py over the two jobs' outputs, its archive (the same bytes for the same inputs), and its check on this runner, an Ubuntu like
+  # a player's with what README.txt tells a player to install for packing (LLVM 18's shared library, which nxaot loads): no symbolic link, no path of the build trees,
+  # nxlauncher --list on an empty games folder, nxaot version, the packer's --help through the bundle, the shader chain versions of the bundle's sources
+  bundle-linux:
+    name: Linux bundle (nxnative-linux-x86_64.tar.gz)
+    needs: [linux-host, nxaot-bundle]
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: linux-bundle-input
+          path: build/linux
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nxaot-linux
+          path: build/aot
+      - name: LLVM 18's shared library (what a player installs to pack, README.txt)
+        run: |
+          if ! ldconfig -p | grep -q 'libLLVM.so.18.1 '; then sudo apt-get update && sudo apt-get install -y --no-install-recommends libllvm18; fi
+          ldconfig -p | grep 'libLLVM.so.18.1 '
+      - name: Assemble, archive and check the bundle
+        run: python3 scripts/package_port.py --platform linux --build build/linux --aot build/aot --out build/bundle/nxnative-linux-x86_64 --archive --check
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nxnative-linux-x86_64
+          path: build/bundle/nxnative-linux-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+      - name: The bundle (job summary)
+        run: |
+          {
+            echo '### Linux bundle'
+            echo
+            echo "Artifact **\`nxnative-linux-x86_64\`**: \`nxnative-linux-x86_64.tar.gz\`, $(du -h build/bundle/nxnative-linux-x86_64.tar.gz | cut -f1), built from $(head -1 build/bundle/nxnative-linux-x86_64/VERSION)."
+            echo "Hosts for: $(sed -n 's/^hosts //p' build/bundle/nxnative-linux-x86_64/VERSION). Unpack it and read its \`README.txt\` (docs/development.md, \"The port's bundles\")."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # Windows, step 1: the cross-build with llvm-mingw; the test programs and their list (host_tests.tsv) go to the next job
   win64-cross:
@@ -85,6 +185,38 @@ jobs:
             build/win64/host_tests.tsv
           if-no-files-found: error
           retention-days: 7
+      # The Windows bundle, after the tests' upload (whose nxhost-run.exe is GAME's): build/win64/hosts/<title ID>/nxhost-run.exe for GAME and each profile of BUNDLE_GAMES
+      # (the same tree configured again), then scripts/package_port.py with its zip and its check (the .exe files are not run here; nxlauncher.exe opens on Windows). No
+      # nxaot: there is no Windows build of it yet, and README.txt says how to pack
+      - name: Hosts of the bundle (build/win64/hosts)
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          mkdir -p "build/win64/hosts/$GAME" && cp build/win64/nxhost-run.exe "build/win64/hosts/$GAME/"
+          for g in $BUNDLE_GAMES; do
+            docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src "$MINGW_IMAGE" sh -c \
+              "cmake -S dm/host -B build/win64 -DGAME=$g && cmake --build build/win64 --target nxhost-run"
+            mkdir -p "build/win64/hosts/$g" && cp build/win64/nxhost-run.exe "build/win64/hosts/$g/"
+          done
+          ls -l build/win64/hosts/*/nxhost-run.exe
+      - name: Assemble, archive and check the bundle
+        if: ${{ github.event_name != 'pull_request' }}
+        run: python3 scripts/package_port.py --platform windows --build build/win64 --out build/bundle/nxnative-windows-x86_64 --archive --check
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ github.event_name != 'pull_request' }}
+        with:
+          name: nxnative-windows-x86_64
+          path: build/bundle/nxnative-windows-x86_64.zip
+          if-no-files-found: error
+          retention-days: 7
+      - name: The bundle (job summary)
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          {
+            echo '### Windows bundle'
+            echo
+            echo "Artifact **\`nxnative-windows-x86_64\`**: \`nxnative-windows-x86_64.zip\`, $(du -h build/bundle/nxnative-windows-x86_64.zip | cut -f1), built from $(head -1 build/bundle/nxnative-windows-x86_64/VERSION | tr -d '\r')."
+            echo "Hosts for: $(sed -n 's/^hosts //p' build/bundle/nxnative-windows-x86_64/VERSION | tr -d '\r'). Its executables were not run here: unzip it on a Windows PC and open \`nxlauncher.exe\` (docs/development.md, \"The port's bundles\")."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # Windows, step 2: the cross-built tests on a Windows runner with run_win64_tests.ps1, which writes logs/win64/ and exits non-zero when a run fails
   win64-test:

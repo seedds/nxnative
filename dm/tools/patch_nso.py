@@ -908,7 +908,7 @@ def jump_adr_offsets(insl, j):
             # A check of the full xN index bounds the same table (DRAGON QUEST I & II main+0x30ee50c: cmp x9,#4).
             m = re.fullmatch(r'([wx]\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'cmp' else None
             if m and 'w' + m.group(1)[1:] in idx: cmp = p; break
-            if any('w' + p.reg_name(r)[1:] in idx for r in p.regs_access()[1]): return None   # the index changes after the check
+            if any(p.reg_name(r)[0] in 'wx' and 'w' + p.reg_name(r)[1:] in idx for r in p.regs_access()[1]): return None   # the index changes after the check
         if cmp is None: return None
         n, at = int(cmp.op_str.split('#')[1], 0) + 1, wa.operands[1].imm
         def targets(tb): return [at + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)] if 0 <= tb and tb + 4 * n <= len(IMG) else None
@@ -1110,7 +1110,7 @@ def half_count(insl, ld, base):
         if mm and mm.group(1) in idx: idx.add(mm.group(2)); continue
         mm = re.fullmatch(r'(w\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'cmp' else None
         if mm and mm.group(1) in idx: cmp = p; break
-        if any('w' + p.reg_name(r)[1:] in idx for r in p.regs_access()[1]): return None   # the index changes after the check
+        if any(p.reg_name(r)[0] in 'wx' and 'w' + p.reg_name(r)[1:] in idx for r in p.regs_access()[1]): return None   # the index changes after the check
     kc = insl.index(cmp) if cmp is not None else -1
     if kc < 0 or insl[kc + 1].mnemonic not in ('b.hi', 'b.hs', 'b.cs'): return None   # only a compare that guards the dispatch bounds the index (b.hs: one entry more than needed)
     n = int(cmp.op_str.split('#')[1], 0) + 1

@@ -104,6 +104,10 @@ class AdrOffsetBounds(unittest.TestCase):
     def test_a_copy_must_be_bounded_by_its_source(self):
         self.assertEqual(self.run_site(index=0, clobber=mov(9, 0, False)), self.TARGETS)
 
+    def test_a_vector_load_does_not_change_the_index(self):
+        # ldr s9,[sp,#8] between the check and the load, as Tomodachi Life: Living the Dream 1.0.0 main+0x3ce58 loads s0 with the index in w0
+        self.assertEqual(self.run_site(clobber=0xbd400000 | 2 << 10 | 31 << 5 | 9), self.TARGETS)
+
 
 class ForwardBase(unittest.TestCase):
     """Entry jumps over the dispatch to its sole base initialization, then branches backward."""

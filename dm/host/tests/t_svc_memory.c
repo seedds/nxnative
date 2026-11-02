@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 static int memory_mprotect(void *addr, size_t size, int prot);
+static void *memory_mmap(void *addr, size_t size, int prot, int flags, int fd, off_t offset);
 static _Noreturn void memory_abort(void);
 static int memory_getpagesize(void) {
 #ifdef TEST_PAGE_16K
@@ -21,9 +22,11 @@ static int memory_getpagesize(void) {
 }
 #define getpagesize memory_getpagesize
 #define mprotect memory_mprotect
+#define mmap memory_mmap
 #define abort memory_abort
 #include "../hle_svc.c"
 #undef abort
+#undef mmap
 #undef mprotect
 #undef getpagesize
 
@@ -89,6 +92,11 @@ static int memory_mprotect(void *addr, size_t size, int prot) {
     atomic_fetch_add(&protects, 1);
     if (fail_protect) { errno = EACCES; return -1; }
     return mprotect(addr, size, prot);
+}
+// guest_release maps fresh pages first and falls back to mprotect, so its fatal path needs both to fail.
+static void *memory_mmap(void *addr, size_t size, int prot, int flags, int fd, off_t offset) {
+    if (fail_protect) { errno = EACCES; return MAP_FAILED; }
+    return mmap(addr, size, prot, flags, fd, offset);
 }
 static _Noreturn void memory_abort(void) {
     // Only the production fatal path reaches this wrapper; assertion failures

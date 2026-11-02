@@ -8,15 +8,18 @@
 #include <unistd.h>
 
 static int heap_mprotect(void *addr, size_t size, int prot);
+static void *heap_mmap(void *addr, size_t size, int prot, int flags, int fd, off_t offset);
 static _Noreturn void heap_abort(void);
 // Substitution is confined to this translation unit; production needs no test API.
 #define mprotect heap_mprotect
+#define mmap heap_mmap
 #define abort heap_abort
 #ifndef HLE_SVC_SOURCE
 #define HLE_SVC_SOURCE "../hle_svc.c"
 #endif
 #include HLE_SVC_SOURCE
 #undef abort
+#undef mmap
 #undef mprotect
 
 module_t *g_mod;
@@ -44,16 +47,26 @@ static size_t last_size;
 static uint64_t regs[31];
 static const uint64_t sentinel = 0xabcdef1234567890ull;
 
-static int heap_mprotect(void *addr, size_t size, int prot) {
+static void host_call(void *addr, size_t size, int prot) {
     calls++; last_addr = addr; last_size = size; last_prot = prot;
     // The production state must not be published before the host operation.
     assert(g_heap_cur == old_size && regs[0] == sentinel && regs[1] == requested);
+}
+static int heap_mprotect(void *addr, size_t size, int prot) {
+    host_call(addr, size, prot);
     if (injected_error) { errno = injected_error; return -1; }
     return mprotect(addr, size, prot);
 }
+static void *heap_mmap(void *addr, size_t size, int prot, int flags, int fd, off_t offset) {
+    if (!(flags & MAP_FIXED)) return mmap(addr, size, prot, flags, fd, offset);   // mem_init's reservation
+    host_call(addr, size, prot);
+    if (injected_error) { errno = injected_error; return MAP_FAILED; }
+    return mmap(addr, size, prot, flags, fd, offset);
+}
 static int correct_call(void) {
     int grow = requested > old_size;
-    return calls == 1 && last_addr == g_heap + (grow ? old_size : requested) &&
+    // guest_release: a shrink maps fresh pages, and falls back to mprotect when that fails.
+    return calls == (!grow && injected_error ? 2 : 1) && last_addr == g_heap + (grow ? old_size : requested) &&
         last_size == (grow ? requested - old_size : old_size - requested) &&
         last_prot == (grow ? PROT_READ | PROT_WRITE : PROT_NONE);
 }

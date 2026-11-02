@@ -77,6 +77,7 @@ __asm__(
     "    blr x16\n"
     ".globl _dm_bigstack_ret\n"
     ".private_extern _dm_bigstack_ret\n"
+    ".alt_entry _dm_bigstack_ret\n"   // Keep LTO from separating this return path from the entry.
     "_dm_bigstack_ret:\n"
     "    ldr x9, [sp]\n"
     "    mov sp, x9\n"

@@ -202,7 +202,7 @@ namespace Ryujinx.Graphics.Shader.Translation
 
             if (Stage == ShaderStage.Compute)
             {
-                bool usesSharedMemory = _program.UsedFeatures.HasFlag(FeatureFlags.SharedMemory);
+                bool usesSharedMemory = _program.UsedFeatures.HasFlag(FeatureFlags.SharedMemory) || GpuAccessor.QueryAmpereMeshLayout() != null;   // a task / mesh shader keeps its stage memory there (InstEmitAmpereMem.cs AIsberd)
 
                 resourceManager.SetCurrentSharedMemory(GpuAccessor.QueryComputeSharedMemorySize(), usesSharedMemory);
             }

@@ -470,6 +470,70 @@ static int geo_mesh_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     if (!g_geo_mesh_n++) MLOG("geometry mesh: first mesh draw, vertex %s kernel %s, %u triangles", pr->sh[0]->key, g_geo_mesh.lean->key, g_geo_mesh.a.count / 3);
     return 1;
 }
+// ---------- NVN2 task and mesh shaders: nvnCommandBufferDrawMeshTasks (hle_nvn.c records it as a draw of primitive DM_PRIM_MESH_TASKS) ----------
+// The program's task and mesh shaders are Metal object and mesh functions (dmsh_meshstage.py) in the tessellation stages' places (sh[3], sh[4]); they draw through a mesh
+// pipeline with the program's pixel shader, inside the render pass as any draw: draw() takes mtk_pso for its pipeline and mtk_encode for the draw itself. The task shader's
+// arguments go to the object stage's table and the mesh shader's to the mesh stage's (their NVN bindings are stages 3 and 4, hle_nvn.c st_host); the object function reads the
+// draw's first task at buffer 29. Mario Kart World draws its grass so (DrivePassShaderDefault: 7 task and 18 mesh shaders)
+static struct { int on, miss; NvShader *ts, *ms; uint32_t first, count; } g_mtk;
+static uint64_t g_mtk_n, g_mtk_wait;
+static nvn_hmap g_pso_mtk = {.klen = sizeof(pso_key)}; static os_unfair_lock g_pso_mtk_lock = OS_UNFAIR_LOCK_INIT;
+static id<MTLRenderPipelineState> mtk_pso(NvProg *pr) {
+    NvShader *ts = g_mtk.ts, *ms = g_mtk.ms, *fs = pr->sh[1];
+    pso_key k; pso_key_fill(&k, ms, fs, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, 0);
+    memset(k.attr, 0, sizeof k.attr); memset(k.stream, 0, sizeof k.stream);
+    k.fsfn = ts ? (__bridge void *)ts->fn : (__bridge void *)ms->fn;
+    os_unfair_lock_lock(&g_pso_mtk_lock); id ps = hm_get_id(&g_pso_mtk, &k);
+    if (!ps) { if (!g_pso_mesh_building) g_pso_mesh_building = [NSObject new]; hm_put_id(&g_pso_mtk, &k, g_pso_mesh_building); }
+    os_unfair_lock_unlock(&g_pso_mtk_lock);
+    if (!ps) {
+        MTLRenderPipelineDescriptor *d = pso_desc(&k, ms, fs, nil, 0);
+        MTLMeshRenderPipelineDescriptor *m = [MTLMeshRenderPipelineDescriptor new];
+        m.meshFunction = ms->fn; m.fragmentFunction = d.fragmentFunction; m.maxTotalThreadsPerMeshThreadgroup = ms->mesh_threads;
+        if (ts) { m.objectFunction = ts->fn; m.payloadMemoryLength = (ts->mesh_payload + 15u) & ~15u; m.maxTotalThreadsPerObjectThreadgroup = ts->mesh_threads; }
+        m.rasterSampleCount = d.rasterSampleCount; m.alphaToCoverageEnabled = d.alphaToCoverageEnabled;
+        for (int i = 0; i < 8; i++) m.colorAttachments[i] = d.colorAttachments[i];
+        m.depthAttachmentPixelFormat = d.depthAttachmentPixelFormat; m.stencilAttachmentPixelFormat = d.stencilAttachmentPixelFormat;
+        const char *tk = ts ? ts->key : "-", *mk = ms->key, *fk = fs ? fs->key : "-"; pso_key kk = k;
+        dispatch_async(pp_bg_queue(), ^{
+            NSError *e = nil; uint64_t t0 = bp_now();
+            id<MTLRenderPipelineState> p = [g_dev newRenderPipelineStateWithMeshDescriptor:m options:MTLPipelineOptionNone reflection:nil error:&e];
+            MLOG("%stask / mesh pipeline: task %s mesh %s fragment %s, %.1f ms in the background%s%s", p ? "" : "[RED] ", tk, mk, fk, (bp_now() - t0) / 1e6, p ? "" : ": ", p ? "" : e.localizedDescription.UTF8String);
+            os_unfair_lock_lock(&g_pso_mtk_lock); hm_put_id(&g_pso_mtk, &kk, p ?: NSNull.null); os_unfair_lock_unlock(&g_pso_mtk_lock);
+        });
+        return nil;
+    }
+    return ps == NSNull.null || ps == g_pso_mesh_building ? nil : ps;
+}
+static void mtk_encode(id<MTLRenderCommandEncoder> en_) {
+    id<MTL4RenderCommandEncoder> en = (id<MTL4RenderCommandEncoder>)en_;
+    [en setArgumentTable:g_ot atStages:MTLRenderStageObject]; [en setArgumentTable:g_mt atStages:MTLRenderStageMesh];
+    if (g_mtk.ts) { g_args_tab = g_ot; g_args_dirty[3] = 1; encode_args(en, g_mtk.ts, 3, 0); }
+    g_args_tab = g_mt; g_args_dirty[4] = 1; encode_args(en, g_mtk.ms, 4, 0);
+    g_args_tab = nil; g_args_dirty[3] = g_args_dirty[4] = 1;
+    id<MTLBuffer> b; size_t o = arena_alloc(16, &b); memcpy((uint8_t *)b.contents + o, &g_mtk.first, 4);   // the draw's first group, buffer 29 of both stages
+    if (rec_on()) { rec_table_op(RO_T_ADDR, g_ot, b.gpuAddress + o, 29); rec_table_op(RO_T_ADDR, g_mt, b.gpuAddress + o, 29); }
+    else { [g_ot setAddress:b.gpuAddress + o atIndex:29]; [g_mt setAddress:b.gpuAddress + o atIndex:29]; }
+    [en drawMeshThreadgroups:MTLSizeMake(g_mtk.count, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(g_mtk.ts ? g_mtk.ts->mesh_threads : 1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(g_mtk.ms->mesh_threads, 1, 1)];
+}
+static void mesh_tasks_draw(const p_draw *dw) {
+    if (!S.prog || dw->count <= 0) return;
+    NvProg *pr = prog_get(S.prog);
+    NvShader *ts = pr ? pr->sh[3] : nil, *ms = pr ? pr->sh[4] : nil;
+    if (ts && ts->mesh_kind != 1) ts = nil;   // a mesh shader with no task stage draws its groups itself (mesh_notask)
+    if (!ms || ms->mesh_kind != 2 || !ms->fn || (!ts && !ms->mesh_notask) || (ts && !ts->fn)) {
+        RED_ONCE(145, "DrawMeshTasks with a program without a task and a mesh shader (task %s mesh %s): draw skipped", ts ? ts->key : "-", ms ? ms->key : "-"); return; }
+    NvProg *raster = pr->geo_lean_raster;   // the pixel stage alone (draw() binds its arguments; mtk_encode the task and mesh stages')
+    if (!raster || raster->sh[1] != pr->sh[1] || raster->sh[0]) { raster = [NvProg new]; raster->sh[1] = pr->sh[1]; pr->geo_lean_raster = raster; }
+    g_mtk.on = 1; g_mtk.miss = 0; g_mtk.ts = ts; g_mtk.ms = ms; g_mtk.first = (uint32_t)dw->first; g_mtk.count = (uint32_t)dw->count;
+    g_geo_program = raster;
+    p_draw synthetic = {.prim = 4, .count = 3, .instances = 1};
+    draw(&synthetic, NULL);
+    g_geo_program = nil; g_mtk.on = 0; args_dirty_all();
+    if (g_mtk.miss) { g_mtk_wait++; return; }
+    swrite_note(pr); g_wr_epoch++;
+    if (!g_mtk_n++) MLOG("task / mesh: first draw, task %s mesh %s fragment %s, %u task workgroups", ts ? ts->key : "-", ms->key, pr->sh[1] ? pr->sh[1]->key : "-", g_mtk.count);
+}
 typedef struct {
     const uint8_t *op;
     NvProg *pr; NvShader *vs, *gs, *reader;

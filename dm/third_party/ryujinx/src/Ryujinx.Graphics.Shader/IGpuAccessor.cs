@@ -39,6 +39,16 @@ namespace Ryujinx.Graphics.Shader
         }
 
         /// <summary>
+        /// NVN2 (Switch 2) task and mesh shaders translated as compute (dm/gfx/tools/dmsh_build.py job_for): the shared memory byte offsets of their stage memory, for ISBERD and
+        /// the stage output stores (0x927): [the workgroup index word, the input payload, the outputs (task payload / mesh vertex and primitive attributes), the mesh
+        /// primitive bytes (count and indices)]; null for other shaders.
+        /// </summary>
+        int[] QueryAmpereMeshLayout()
+        {
+            return null;
+        }
+
+        /// <summary>
         /// Gets a span of the specified memory location, containing shader code.
         /// </summary>
         /// <param name="address">GPU virtual address of the data</param>

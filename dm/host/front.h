@@ -38,6 +38,9 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
 // Early start of host loading (main.c): reading the NSO / relocation / forced takeover / prefetch start are moved to a background thread, in parallel with the front end (UIKit launch chain, Metal view);
 // the dm_main / main called afterwards waits for it to finish. For call timing and preconditions see the comments in main.c (set DM_ROMFS and the other environment variables and the cwd first; arguments identical item by item to those of the later main).
 void dm_host_preload_start(int argc, char **argv);
+// iOS: names the loaded image that carries the game's embedded module sections (loader.c map_image, nro_pieces), for an app that links them into a framework it dlopens from its signed bundle.
+// Set it before dm_host_preload_start, once: the loader reads it on the preload thread and at every later NRO load. Not set, they are read from the executable
+void dm_set_game_image_header(const void *mh);
 
 // Touchscreen (implemented by the host's hle_touch.c; called by the iOS / Mac front end): whenever the set of touch points changes (down / move / up / cancel) the whole set is pushed once; n = 0 = all lifted.
 // id = finger slot number 0–15 (the lowest free slot on down, unchanged until up; used directly as finger_id); x / y = normalized coordinates [0,1) on the output frame, origin at top left.

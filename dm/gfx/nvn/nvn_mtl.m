@@ -628,7 +628,7 @@ typedef struct seg_clk seg_clk; static seg_clk *g_sclk; static void seg_clk_put(
 static int g_rc_skip;   // a render-enable block evaluated false is active
 // Neither table may drop an entry: a timestamp report forgotten leaves the condition reading the 1 the CPU wrote, so the clear runs again. They held 256 reports a submission of both kinds, and Splatoon Raiders' 285 ink
 // queries a frame came first: every conditional clear after them ran, and the lit scene was wiped before the composite read it (a black screen with only the dialogue on it). Now only timestamps are kept per submission, and both tables grow
-static uint64_t *g_rc_pend; static int g_rc_npend, g_rc_pcap;   // timestamp reports replayed in this submission: their counter is 0, though memory does not show it yet
+static uint64_t *g_rc_pend; static uint32_t g_rc_npend, g_rc_pcap;   // timestamp reports replayed in this submission: their counter is 0, though memory does not show it yet
 static uint64_t *g_rc_occ; static uint32_t g_rc_ocap, g_rc_on;   // addresses ever written by a non-timestamp report (open addressing, a power of two): conditions on them keep drawing
 static int rc_occ_has(uint64_t a) { if (!g_rc_ocap) return 0; for (uint32_t i = (uint32_t)(a >> 4) & (g_rc_ocap - 1);; i = (i + 1) & (g_rc_ocap - 1)) { if (g_rc_occ[i] == a) return 1; if (!g_rc_occ[i]) return 0; } }
 static void rc_occ_add(uint64_t a) {
@@ -641,13 +641,13 @@ static void rc_occ_add(uint64_t a) {
 }
 static void rc_note(uint64_t a, int kind) {
     if (kind == 2) { rc_occ_add(a); return; }   // rc_value asks this table first
-    for (int i = 0; i < g_rc_npend; i++) if (g_rc_pend[i] == a) return;
-    if (g_rc_npend == g_rc_pcap) { g_rc_pcap = g_rc_pcap ? g_rc_pcap * 2 : 256; g_rc_pend = realloc(g_rc_pend, (size_t)g_rc_pcap * 8); if (!g_rc_pend) MDIE("no memory for the timestamp report table"); }
+    for (uint32_t i = 0; i < g_rc_npend; i++) if (g_rc_pend[i] == a) return;
+    if (g_rc_npend == g_rc_pcap) { uint32_t nc = g_rc_pcap ? g_rc_pcap * 2 : 256; uint64_t *t = realloc(g_rc_pend, (size_t)nc * 8); if (!t) MDIE("no memory for the timestamp report table"); g_rc_pend = t; g_rc_pcap = nc; }
     g_rc_pend[g_rc_npend++] = a;
 }
 static int rc_value(uint64_t a, uint64_t *v) {   // 0 = unknown at encode time
     if (rc_occ_has(a)) return 0;
-    for (int i = g_rc_npend - 1; i >= 0; i--) if (g_rc_pend[i] == a) { *v = 0; return 1; }
+    for (uint32_t i = g_rc_npend; i-- > 0;) if (g_rc_pend[i] == a) { *v = 0; return 1; }
     *v = *(const volatile uint64_t *)a; return 1;
 }
 // ---------- Occlusion queries (NVN_COUNTER_TYPE_SAMPLES_PASSED) ----------

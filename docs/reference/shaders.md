@@ -926,6 +926,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
 
+### Barrier moves around warp shuffles
+
+- **Symptom:** `Ampere instruction f55 at 0x… (000fe20000000000000000001a0f7f55) is not implemented` in the shader build; those shaders are left out.
+- **Cause:** `0xf55` and `0xf56` (BMOV) save convergence barrier B15 into R26 before a block of warp shuffles (SHFL) and restore it after. The translator had no entry for either.
+- **Fix:** both are no-ops, as the barriers they save are (BSSY, BSYNC, BREAK, WARPSYNC): per thread they do nothing. In the shaders found, no other instruction reads R26 after them, and the register beside the barrier field (R15) is read live by an FMUL, so neither writes a general register (`InstEmitAmpere.cs`).
+- **Found on:** [Hyrule Warriors: Age of Imprisonment](../../dm/games/04003F40232DE000/README.md#shaders): pixel shaders `02e49c189b769074` and `49241cf469c76830`, 16 pairs each (chain 95ba69b5403e).
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (`BarrierMoves`: the game's encodings leave the translated shader unchanged; it fails on the translator before).
+
 ### IMAD.HI adds a register pair, and IMAD.X its carry
 
 - **Symptom:** 64-bit arithmetic in a shader gives wild results: the 64-bit division behind an exposure average returned 893011 for 218, so the exposure stayed at the end of its range. With only the pair fixed it still gave 2 for 340 / 1.

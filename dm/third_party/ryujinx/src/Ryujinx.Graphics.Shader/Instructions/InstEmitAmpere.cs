@@ -71,6 +71,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 X(op, InstName.Nop, InstEmit.ANop, InstProps.None, writesRd: false);
             }
 
+            // 0xf55 and 0xf56 move convergence barrier B15 to and from R26 around warp shuffles (BMOV): Hyrule Warriors: Age of Imprisonment's pixel shaders
+            // 02e49c189b769074 and 49241cf469c76830 save it before each block of SHFL and restore it after, 16 times each. With the barriers themselves no-ops,
+            // they are too: no other instruction reads R26 after them, and the general register next to the barrier field (R15) is read live by an FMUL.
+            foreach (int op in new[] { 0xf55, 0xf56 })
+            {
+                X(op, InstName.Nop, InstEmit.ANop, InstProps.None, writesRd: false);
+            }
+
             InstEmit.RegisterAmpereAlu(Alu, X);
             InstEmit.RegisterAmpereMemory(X);
             InstEmit.RegisterAmpereTensor(X);

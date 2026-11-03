@@ -63,6 +63,19 @@ class MufuF16(Translated):
         self.assertNotRegex(self.msl(self.LOG2_LOW), r'as_type<half2>\(.*\)\)\.y;')
 
 
+class BarrierMoves(Translated):
+    """BMOV around warp shuffles (Hyrule Warriors: Age of Imprisonment's pixel shaders 02e49c189b769074 and 49241cf469c76830): convergence barrier B15 to and
+    from R26, in the game's encodings. Per thread they do nothing, as the barriers they save do"""
+    SAVE = (0x000fe20000000000, 0x000000001a0f7f55)      # +0x25c0
+    RESTORE = (0x000fe40000100000, 0x000000001a0f7f56)   # +0x25d0
+    RESTORE_PLAIN = (0x000fe40000000000, 0x000000001a0f7f56)
+
+    def test_no_effect_on_the_shader(self):
+        plain = self.translate(inst(*SUATOM) + inst(*EXIT))
+        moved = self.translate(inst(*self.SAVE) + inst(*self.RESTORE) + inst(*SUATOM) + inst(*self.RESTORE_PLAIN) + inst(*EXIT))
+        self.assertEqual(moved, plain)
+
+
 def mov(rd, value):   # MOV Rd, imm32: values the tests can see in the output
     return inst(0x000fc60000000f00, value << 32 | rd << 16 | 0x7802)
 

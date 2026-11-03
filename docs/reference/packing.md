@@ -1,5 +1,14 @@
 # Packing
 
+## Game packages
+
+### PFS0 file-name table missing its final NUL
+
+- **Symptom:** package identification stops with `ValueError: subsection not found` in `pfs0_names`, or LibHac reports `ResultFsPathNotFound` opening the last file of an NSP.
+- **Cause:** older NSZ writers omitted the final NUL in the PFS0 string table. The final name is bounded by the table length, but the Python scanner required a terminator and LibHac reads names as NUL-terminated strings.
+- **Fix:** the scanner accepts the table boundary as the end of the final name. `nx_extract` supplies LibHac with a virtual header containing the missing NUL followed by the original payload storage. File offsets remain relative to that payload, and the source package and encrypted NCA bytes are unchanged. Truncated tables and out-of-table name offsets still fail. Synthetic package tests cover both readers and payload preservation.
+- **Found on:** Moving Out 2 (`010065D018172000`), base 1.1.254 NSP and update 1.3.315 NSZ. Package reading was checked, not gameplay.
+
 ## Build tools
 
 ### Homebrew .NET is on PATH but apphosts cannot find the runtime

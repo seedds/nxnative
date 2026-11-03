@@ -46,6 +46,31 @@ class Scan(unittest.TestCase):
         self.assertEqual(nsp.scan_nsps(self.tmp)[1]['base'], base)
         self.assertEqual(self.said, [])
 
+    def test_missing_final_name_terminator(self):
+        for extension in ('.nsp', '.nsz'):
+            with self.subTest(extension=extension):
+                base = self.tmp / ('base' + extension)
+                names = [f'{APP:016x}0000000000000011.tik', 'last.nca']
+                pfs0(base, names)
+                data = bytearray(base.read_bytes())
+                struct.pack_into('<I', data, 8, struct.unpack_from('<I', data, 8)[0] - 1)
+                base.write_bytes(data[:-1])
+                before = base.read_bytes()
+                self.assertEqual(nsp.pfs0_names(base), names)
+                self.assertEqual(nsp.title_of(base), APP)
+                self.assertEqual(base.read_bytes(), before)
+
+    def test_invalid_name_table_is_rejected(self):
+        base = self.tmp / 'base.nsp'
+        pfs0(base, ['last.nca'])
+        data = bytearray(base.read_bytes())
+        for broken in (data[:12], data[:-2]):
+            base.write_bytes(broken)
+            with self.assertRaises(nsp.BuildError): nsp.pfs0_names(base)
+        struct.pack_into('<I', data, 16 + 16, 0xffffffff)
+        base.write_bytes(data)
+        with self.assertRaises(nsp.BuildError): nsp.pfs0_names(base)
+
 
 class TitleFromPackage(unittest.TestCase):
     """A package with neither a ticket nor a [title ID] in its name (a standard-crypto dump, a repack: LNPANDY/NX2Apple#177) is asked for its title ID. The reader itself (nx_extract --title,

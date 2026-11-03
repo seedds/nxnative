@@ -4,6 +4,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Packing
 
+- package identification stops with `ValueError: subsection not found` in `pfs0_names`, or LibHac reports `ResultFsPathNotFound` opening the last file of an NSP. → [PFS0 file-name table missing its final NUL](../reference/packing.md#pfs0-file-name-table-missing-its-final-nul)
 - the first extraction stops with `nx_extract exit code 131` and `.NET location: Not found`, even though `dotnet` is on `PATH`. The shader translator can fail the same way. → [Homebrew .NET is on PATH but apphosts cannot find the runtime](../reference/packing.md#homebrew-net-is-on-path-but-apphosts-cannot-find-the-runtime)
 - the extraction and captures succeed, then the shader step stops with `translation chain tools do not match the lock file: xlate_source: lock … / actual` and nothing after `actual`, which reads like a stale translator. → [The shader step stops with an empty `xlate_source`](../reference/packing.md#the-shader-step-stops-with-an-empty-xlate_source)
 - on an Intel Mac, the NSP script stops at its translator check with `[RED] the shader translator does not run (Unhandled exception. System.IO.FileLoadException: Could not load file or assembly '…/dmsh_xlate.dll'. The assembly architecture is not compatible with the current process architecture.)`, although the .NET 10 runtime for x86_64 is installed. → [An Intel Mac cannot load the bundled translator's dll](../reference/packing.md#an-intel-mac-cannot-load-the-bundled-translators-dll)

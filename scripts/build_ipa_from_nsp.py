@@ -430,9 +430,19 @@ def pfs0_names(path):   # NSP = PFS0: list the file names inside
     with open(path, 'rb') as f:
         h = f.read(16)
         if h[:4] != b'PFS0': return []
+        if len(h) != 16: raise BuildError(f'truncated PFS0 header: {path.name}')
         n, st = struct.unpack_from('<II', h, 4)
+        if n * 0x18 + st > os.fstat(f.fileno()).st_size - 16:
+            raise BuildError(f'truncated PFS0 file-name table: {path.name}')
         ent, strs = f.read(n * 0x18), f.read(st)
-    return [strs[o:strs.index(b'\0', o)].decode(errors='replace') for o in (struct.unpack_from('<I', ent, i * 0x18 + 0x10)[0] for i in range(n))]
+    names = []
+    for i in range(n):
+        o = struct.unpack_from('<I', ent, i * 0x18 + 0x10)[0]
+        if o >= len(strs): raise BuildError(f'PFS0 file-name offset outside the string table: {path.name}')
+        # Older NSZ writers omitted the final NUL: the string table itself still bounds the name.
+        end = strs.find(b'\0', o)
+        names.append(strs[o:end if end >= 0 else len(strs)].decode(errors='replace'))
+    return names
 
 
 def hfs0_names(f, off):   # an XCI's HFS0 partition at off: [(name, offset of its data from the file's start)]

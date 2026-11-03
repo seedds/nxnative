@@ -10,6 +10,12 @@ HLE_FORCE("_ZN2nn2vi10InitializeEv", "display service init; the host has no vi s
 HLE_FORCE("_ZN2nn2vi18OpenDefaultDisplayEPPNS0_7DisplayE", "open default display; the host returns a static object", Result, h_vi_OpenDisp, void **out) {
     *out = &g_display; return RES_OK;
 }
+// A display returned by ListDisplays can also be opened by name. The SDK's OpenDisplay still reaches the absent vi service even though Initialize is taken over
+// (Alien: Isolation, SDK 8.2.0: null read at sdk+0x3b65e4). Share the default display object with OpenDefaultDisplay.
+HLE_FORCE("_ZN2nn2vi11OpenDisplayEPPNS0_7DisplayEPKc", "open the named Default display; the host has no vi service", Result, h_vi_OpenNamedDisp, void **out, const char *name) {
+    if (!name || strcmp(name, "Default")) return RES_FAIL;
+    return h_vi_OpenDisp(out);
+}
 HLE_FORCE("_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayE", "create layer; the host returns a static object", Result, h_vi_CreateLayer, void **out, void *disp) {
     (void)disp; *out = &g_layer; return RES_OK;
 }

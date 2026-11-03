@@ -161,8 +161,15 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
         if ([scr isKindOfClass:[NSArray class]]) for (NSNumber *k in scr) if (k.intValue >= 0 && k.intValue < 32) o->scr_locn |= 1u << k.intValue;
         NSDictionary *fe = j[@"fetch"];
         if ([fe isKindOfClass:[NSDictionary class]]) {
-            for (NSDictionary *c in fe[@"calls"]) { int i = [c[@"fc"] intValue], r = [c[@"tex_reg"] intValue], l = [c[@"varying_locn"] intValue];
-                if (i != o->nfc || i >= 32 || r < 0 || r >= 256 || l < 0 || l >= 32) FAIL("fetch call table not contiguous or out of range (entry %d)", i);
+            for (NSDictionary *c in fe[@"calls"]) { int i = [c[@"fc"] intValue], r = [c[@"tex_reg"] intValue], l = [c[@"varying_locn"] intValue]; NSArray *fp = c[@"frag_pos"];
+                if ([fp isKindOfClass:[NSArray class]]) {   // a pixel-position sample: two uniform references, no interpolated output
+                    if (fp.count != 2 || i >= 32) FAIL("fetch call %d: frag_pos is not two uniform references", i);
+                    for (int q = 0; q < 2; q++) { NSArray *x = fp[q]; int sl = [x isKindOfClass:[NSArray class]] && x.count == 3 ? [x[0] intValue] : -1, vec = sl >= 0 ? [x[1] intValue] : -1, cmp = sl >= 0 ? [x[2] intValue] : -1;
+                        if (sl < 0 || sl > 15 || vec < 0 || vec > 63 || cmp < 0 || cmp > 3) FAIL("fetch call %d: frag_pos uniform reference out of range", i);
+                        o->fc_scale[i][q] = (uint16_t)(sl << 8 | vec << 2 | cmp); }
+                    o->fc_fpos |= 1u << i; l = 0xff; }
+                else if (l < 0 || l >= 32) l = -1;
+                if (i != o->nfc || i >= 32 || r < 0 || r >= 256 || l < 0) FAIL("fetch call table not contiguous or out of range (entry %d)", i);
                 if ([c[@"proj"] intValue]) o->fc_proj |= 1u << i;
                 o->fc_reg[o->nfc] = (uint8_t)r; o->fc_locn[o->nfc] = (uint8_t)l; o->nfc++; }
             for (NSNumber *r in fe[@"mixed_regs"]) if (r.intValue >= 0 && r.intValue < 256) o->fc_mixed[r.intValue >> 6] |= 1ull << (r.intValue & 63);

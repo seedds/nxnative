@@ -7975,27 +7975,33 @@ static void sd_finish(void) {
 // Coverage proof (holds only if all are satisfied; anything unrecognized is treated as not holding):
 //   Shader: the vertex position xyz is taken as-is from one vertex attribute, w is 1 or the same attribute's .w (dmsh_build raster_facts); the fragment does not discard, does not write sample_mask, and writes this color index
 //   State: this attachment has no blending, a full write mask, no alpha-to-coverage, fill mode, no depth test (or ALWAYS), no stencil test, single sample, not 3D
-//   Vertices: non-indexed or 16 / 32-bit indexed draws, with indices and positions both read from CPU-visible pool memory; the scissor / viewport / geometry / winding / depth clipping decisions are in nvn_cover.h (pure functions, with unit tests)
-// Read out attribute a of all vertices of this draw (non-indexed or 16 / 32-bit indexed; vertex number = first + k or index value + base_vertex), with missing components filled with 0 / 1 per the fetch rules.
+//   Vertices: non-indexed or 8 / 16 / 32-bit indexed draws, with indices and positions both read from CPU-visible pool memory; the scissor / viewport / geometry / winding / depth clipping decisions are in nvn_cover.h (pure functions, with unit tests)
+// Read float2/3/4 or half2/3/4 attribute a of all vertices (non-indexed or 8 / 16 / 32-bit indexed; vertex number = first + k or index value + base_vertex), with missing components filled with 0 / 1 per the fetch rules.
 // Returns 0 on success, a reason code on failure (6 vertex count / index type, 7 attribute index, 8 format / stream, 9 out of bounds, 10 address)
 static int attr_read(int a, const p_draw *dw, const p_draw_idx *di, float P[64][4]) {
     int n = dw ? dw->count : di->count;
-    if (n < 1 || n > 64 || (dw && dw->first < 0) || (di && (di->itype < 1 || di->itype > 2))) return 6;
+    if (n < 1 || n > 64 || (dw && dw->first < 0) || (di && (di->itype < 0 || di->itype > 2))) return 6;
     if (a < 0 || a >= S.nattr || S.attr[a].stream >= 16) return 7;
     va_st at = S.attr[a]; vs_st sm = S.stream[at.stream]; NVNbufferRange vb = S.vbuf[at.stream];
-    MTLVertexFormat vf = vfmt(at.fmt); int nc = vf == MTLVertexFormatFloat2 ? 2 : vf == MTLVertexFormatFloat3 ? 3 : vf == MTLVertexFormatFloat4 ? 4 : 0;
+    MTLVertexFormat vf = vfmt(at.fmt);
+    int hf = vf == MTLVertexFormatHalf2 || vf == MTLVertexFormatHalf3 || vf == MTLVertexFormatHalf4;
+    int nc = vf == MTLVertexFormatFloat2 || vf == MTLVertexFormatHalf2 ? 2 : vf == MTLVertexFormatFloat3 || vf == MTLVertexFormatHalf3 ? 3 : vf == MTLVertexFormatFloat4 || vf == MTLVertexFormatHalf4 ? 4 : 0;
+    int bytes = (hf ? 2 : 4) * nc;
     if (!nc || !sm.stride || sm.divisor || !vb.address) return 8;
-    const uint8_t *ib = NULL; int isz = di ? (di->itype == 1 ? 2 : 4) : 0;
+    const uint8_t *ib = NULL; int isz = di ? 1 << di->itype : 0;
     if (di && pend_hits(di->ibuf, (uint64_t)n * isz)) return 10;   // indices written by a copy / update earlier in this submission: the CPU still sees the old ones
     if (di) { void *m; uint64_t o; if (!mtl_addr(di->ibuf, (uint64_t)n * isz, &m, &o) || !(ib = [(__bridge id<MTLBuffer>)m contents])) return 10; ib += o; }
     for (int k = 0; k < n; k++) {
-        int64_t vid = dw ? (int64_t)dw->first + k : (isz == 2 ? (int64_t)((const uint16_t *)ib)[k] : (int64_t)((const uint32_t *)ib)[k]) + di->base_vertex;
+        int64_t vid = dw ? (int64_t)dw->first + k : (isz == 1 ? (int64_t)ib[k] : isz == 2 ? (int64_t)((const uint16_t *)ib)[k] : (int64_t)((const uint32_t *)ib)[k]) + di->base_vertex;
         uint64_t off = (uint64_t)vid * sm.stride + at.offset;
-        if (vid < 0 || off + 4 * nc > vb.size) return 9;
-        if (pend_hits(vb.address + off, 4 * nc)) return 10;   // position written on the GPU earlier in this submission
+        if (vid < 0 || off + bytes > vb.size) return 9;
+        if (pend_hits(vb.address + off, bytes)) return 10;   // position written on the GPU earlier in this submission
         void *mb; uint64_t mo; const uint8_t *base;
-        if (!mtl_addr(vb.address + off, 4 * nc, &mb, &mo) || !(base = [(__bridge id<MTLBuffer>)mb contents])) return 10;
-        float v[4] = {0, 0, 0, 1}; memcpy(v, base + mo, 4 * nc); memcpy(P[k], v, sizeof v);
+        if (!mtl_addr(vb.address + off, bytes, &mb, &mo) || !(base = [(__bridge id<MTLBuffer>)mb contents])) return 10;
+        float v[4] = {0, 0, 0, 1};
+        if (hf) for (int c = 0; c < nc; c++) { _Float16 h; memcpy(&h, base + mo + 2 * c, 2); v[c] = (float)h; }
+        else memcpy(v, base + mo, bytes);
+        memcpy(P[k], v, sizeof v);
     }
     return 0;
 }

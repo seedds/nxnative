@@ -561,7 +561,9 @@ def linkdata_jobs(path, rel, parts=64):
 
 def linkdata_shaders(path, rel, rng, out):
     from romfs import mmap
-    with open(linkdata_index(path), 'rb') as f: idx = f.read()
+    index = linkdata_index(path)
+    if not index: return red(f'{path}: the LINKDATA index its scan jobs were planned from is gone')
+    with open(index, 'rb') as f: idx = f.read()
     with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
         for i in range(*rng):
             off, n, stored, comp = struct.unpack_from('<QQQQ', idx, i * 32)

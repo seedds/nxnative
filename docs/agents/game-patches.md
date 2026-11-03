@@ -48,6 +48,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | interval controller: the lower bound and the GPU-time path | frame rate | gap | judgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | sead::GameFrameworkNx's interval controller in this build; Tears of the Kingdom shares sead but not this code |
 | `build` → `game` | job pool wake-up | race | gap | judgement | 1 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md) | a lost wake-up in the game's own job pool, not a host or SDK difference |
 | `build` → `game` | malloc region 60 GB → 4 GB and its first arena | address space | gap | judgement | 1 | [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md) | Monolith's own allocator; its constants span two functions (a multi-function rule). The cause, an iPhone's address space, is a platform limit |
+| `build` → `game` | native 1440p swapchain: the NRO swapchain object forced to 2560x1440 | rendering | gap | judgement | 1 | [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) | the swapchain size is a per-build constant in the Frostbite NVN renderer; a future build needs the same instructions verified |
 | `build` → `game` | PhysX completion task release | race | gap | judgement | 1 | [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) | a lifetime race in the game's own completion task (its release slot serves this one vtable) |
 | `build` → `game` | render intervals, the forced-interval flag and the render-wait timeout | frame rate | gap | judgement | 1 | [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) | the game's own tables, flag and timeout |
 | `build` → `game` | task ring push and pop barriers | race | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | a data race in the game's own task ring |
@@ -77,7 +78,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [ASTRAL CHAIN](#astral-chain) | 0 | 0 | 112 | 0 | 0 | `build` → `game` |
 | [Batman: Arkham Knight](#batman-arkham-knight) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
-| [EA SPORTS FC 27](#ea-sports-fc-27) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
+| [EA SPORTS FC 27](#ea-sports-fc-27) | 9 | 0 | 0 | 0 | 2 | `build` → `game`, `build` → `engine` |
 | [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](#final-fantasy-crystal-chronicles-remastered-edition) | 8 | 0 | 0 | 0 | 0 | `build` → `engine` |
 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](#final-fantasy-tactics---the-ivalice-chronicles) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Fire Emblem Engage](#fire-emblem-engage) | 1 | 0 | 0 | 0 | 0 | `build` → `engine` |
@@ -285,10 +286,23 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 ### EA SPORTS FC 27
 
-[EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), `0100C49025D3E000`.
+[EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), `0100C49025D3E000`, [patches.py](../../dm/games/0100C49025D3E000/patches.py).
 
+- **`build` → `game`**, rendering, gap, judgement: native 1440p swapchain: the NRO swapchain object forced to 2560x1440. The swapchain size is a per-build constant in the Frostbite NVN renderer; a future build needs the same instructions verified
 - **`build` → `engine`**, frame rate, blocked: one Frostbite game here, judgement: Frostbite's frame regulator at a fixed pointer. Engine code other Frostbite games ship (the simulation's own rate is already set by name)
 
+- **1.8d.6523 `nro0`** `d924da0d…` ([patches.py:8](../../dm/games/0100C49025D3E000/patches.py#L8))
+  - cut `+0x7a310`: swapchain width 2560: cbz w8 → mov w8, #0xa00
+  - cut `+0x7a314`: swapchain width store: ldr w8,[x19,#0x10] → str w8,[x19,#0xc]
+  - cut `+0x7a318`: swapchain height 1440: cbz w8 → mov w8, #0x5a0
+  - cut `+0x7a31c`: swapchain height store: mov x0,x19 → str w8,[x19,#0x10]
+  - cut `+0x7ad00`: resize: ignore a zero width, the object is always forced to 2560x1440
+  - cut `+0x7ad18`: resize: height 1440 instead of x2
+  - cut `+0x7ad1c`: resize: ignore a zero height
+  - cut `+0x7ad24`: resize: width 2560 instead of x1
+  - cut `+0x7ad3c`: resize: recreate even when the requested size equals the current one
+- **1.8d.6523 `main`** `570dc9f1…`
+  - host [hle_fpslock.c:56](../../dm/host/hle_fpslock.c#L56): engine frame limit set to fps_target: FIFA frame regulator
 - **1.8d.310c `main`** `a48c0de3…`
   - host [hle_fpslock.c:52](../../dm/host/hle_fpslock.c#L52): engine frame limit set to fps_target: FIFA frame regulator
 
@@ -439,7 +453,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x9bf4d4`: dynamic resolution: optimal frame cost 32.01 -> 16.005 ms at 60 fps (second load)
   - cut `+0x9bf4f8`: dynamic resolution: good frame cost 30 -> 15 ms at 60 fps
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:68](../../dm/host/hle_fpslock.c#L68): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:72](../../dm/host/hle_fpslock.c#L72): frame interval and dynamic-resolution floor
 
 ### NieR:Automata The End of YoRHa Edition (0100B8E016F76000)
 
@@ -458,7 +472,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x9c08e8`: dynamic resolution lower bound follows the selected preset
   - cut `+0x9c08f4`: dynamic resolution lower bound follows the selected preset
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:69](../../dm/host/hle_fpslock.c#L69): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:73](../../dm/host/hle_fpslock.c#L73): frame interval and dynamic-resolution floor
 
 ### Paper Mario: The Thousand-Year Door
 

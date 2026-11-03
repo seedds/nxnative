@@ -70,6 +70,10 @@ static void check(int which) {
         strcpy(g_mod[0].build_id, "a48c0de3bc353efa0e4d359bde05ef24");
         *(uintptr_t *)(base + 0xda20e38) = (uintptr_t)object;
         double *d = (double *)(object + 8); d[0] = d[1] = 30;
+    } else if (which == 19) {   // EA SPORTS FC 27 1.8d.6523: the regulator moved, the field and copies are the same
+        strcpy(g_mod[0].build_id, "570dc9f1750fa7ea9df20b95b482d039");
+        *(uintptr_t *)(base + 0xda450d8) = (uintptr_t)object;
+        double *d = (double *)(object + 8); d[0] = d[1] = 30;
     } else if (which == 15 || which == 16) {
         strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
         frostbite(base, object);
@@ -108,6 +112,7 @@ static void check(int which) {
         assert(sync[0] == 1 && sync[1] == 1 && writes == 4);
     } else if (which == 10) assert(sync[0] == 2 && sync[1] == 2 && writes == 2);
     else if (which == 14) { double *d = (double *)(object + 8); assert(d[0] == 60 && d[1] == 60 && writes == 2); }
+    else if (which == 19) { double *d = (double *)(object + 8); assert(d[0] == 60 && d[1] == 60 && writes == 2); }
     else if (which == 15) {
         assert(*(float *)(object + 0x34) == 60 && *(int32_t *)(object + 0x38) == 60 && writes == 2);
         dm_fps_lock_tick(); assert(writes == 2);
@@ -131,7 +136,7 @@ static void check(int which) {
 
 int main(void) {
     // Each process starts the production one-time initialization with a fresh build and target.
-    for (int i = 0; i < 19; i++) {
+    for (int i = 0; i < 20; i++) {
         pid_t p = fork(); assert(p >= 0);
         if (!p) { check(i); _exit(0); }
         int status; assert(waitpid(p, &status, 0) == p); assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);

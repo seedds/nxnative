@@ -653,6 +653,14 @@ HLE_FORCE("_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS
     return k > 0 ? k : 0;
 }
 HLE_FORCE("_ZN2nn3hid18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE", "six-axis sensor; always sampling on the host", void, h_hid_SixStart, const uint32_t *h) { (void)h; }
+// Merged mouse pointer (Nmouse, Switch 2 SDKs; Pokemon Pokopia, main+0x11251dc). The SDK opens the hid service itself in InitializeNmouse, which the host does not serve (abort 0xe15). No device
+// reports here: GetNmouseHandles finds none and the merged handle, which exists without a device on the console, has no states. The game skips its mouse code on those answers (main+0x112638c, +0x11262b4)
+HLE_FORCE("_ZN2nn3hid14FinalizeNmouseEv", "merged mouse: nothing to release", void, h_hid_NmouseFini, void) {}
+HLE_FORCE("_ZN2nn3hid26SetMergedNmouseSourceTypesENS_4util10BitFlagSetILi32ENS0_10NmouseTypeEEE", "merged mouse sources: no device", void, h_hid_NmouseSources, uint32_t types) { (void)types; }
+HLE_FORCE("_ZN2nn3hid21GetMergedNmouseHandleEPNS0_12NmouseHandleE", "merged mouse handle: 0, with no states", int, h_hid_NmouseMerged, uint64_t *out) { *out = 0; return 1; }
+HLE_FORCE("_ZN2nn3hid16GetNmouseTypeSetEPNS_4util10BitFlagSetILi32ENS0_10NmouseTypeEEENS0_12NmouseHandleE", "mouse types: none", int, h_hid_NmouseTypes, uint32_t *out, uint64_t h) { (void)h; *out = 0; return 1; }
+HLE_FORCE("_ZN2nn3hid15GetNmouseStatesEPiPNS0_11NmouseStateEiNS0_12NmouseHandleE", "mouse states: none", int, h_hid_NmouseStates, int *count, void *out, int n, uint64_t h) { (void)out; (void)n; (void)h; *count = 0; return 1; }
+
 // Joy-Con 2 mouse sensor (JCMS, Switch 2 SDKs; Donkey Kong Bananza). The SDK opens the hid service itself in InitializeJcms, which the host does not serve. A handle is the npad id in
 // byte 0 and the JcmsType in byte 1 (sdk hid::utility::MakeJcmsHandle); a JcmsState is 32 bytes, and GetJcmsStates returns 0 while its ring holds no samples, as here: no controller
 // of the host has the sensor
@@ -788,6 +796,7 @@ HLE_FORCE("_ZN2nn3hid22GetNpadControllerColorEPNS0_19NpadControllerColorERKj", "
 HLE_FORCE("_ZN2nn3hid22GetNpadControllerColorEPNS0_19NpadControllerColorES2_RKj", "left and right Joy-Con colors", Result, h_hid_Color2, uint32_t *l, uint32_t *r, const uint32_t *id) { (void)id; ctrl_color(l); ctrl_color(r); return RES_OK; }
 HLE_FORCE("_ZN2nn3hid21ShowControllerSupportERKNS0_20ControllerSupportArgE", "controller applet (no result wanted); the host answers as the overload above", Result, h_hid_ShowCtrl0, const int8_t *arg) { DM_APPLET("controller support"); return ctrl_support(NULL, arg); }
 HLE_FORCE("_ZN2nn3hid24ShowControllerStrapGuideEv", "strap guide applet; not shown by the host", Result, h_hid_Strap, void) { DM_APPLET("controller strap guide"); return RES_OK; }
+HLE_FORCE("_ZN2nn3hid24ShowControllerStrapGuideERKNS0_13StrapGuideArgE", "strap guide applet with its argument (SDK 22); not shown by the host", Result, h_hid_StrapArg, const void *arg) { DM_APPLET("controller strap guide"); (void)arg; return RES_OK; }
 HLE_FORCE("_ZN2nn3hid28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUpdateArgE", "controller firmware update applet; not shown by the host", Result, h_hid_FwUpd, const void *arg) { DM_APPLET("controller firmware update"); (void)arg; return RES_OK; }
 
 // Touch screen: TouchScreenState<N> = { int64 sampling number; int32 count; int32 reserved; TouchState[N] }, filled from the front end's touch points (hle_touch.c touch_fill_n:

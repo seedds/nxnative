@@ -186,6 +186,11 @@ HLE_FORCE("_ZN2nn10streamplay21GetRequiredMemorySizeENS0_14StreamPlayTypeENS0_13
 HLE_FORCE("_ZN2nn10streamplay10InitializeENS0_14StreamPlayTypeENS0_13StreamingModeEPvm", "streamplay (stpl:u): ready, no session", Result, h_stpl_Init, int type, int mode, void *work, size_t size) {
     (void)type; (void)mode; (void)work; (void)size; return RES_OK; }
 HLE_FORCE("_ZN2nn10streamplay8FinalizeEv", "streamplay (stpl:u): nothing to release", void, h_stpl_Fini, void) {}
+// Guest displays are per guest: CreateIndividualDisplays only starts vi2 and the guest device resources for them. Pokemon Pokopia creates one at boot (main+0x11321b8), before any session, and
+// keeps the window handle for the session it may open (main+0x1133660); with no guest there is no display, and the handle stays unused
+HLE_FORCE("_ZN2nn10streamplay24CreateIndividualDisplaysEi", "guest displays: none (no guest)", void, h_stpl_CreateDisplays, int n) { (void)n; }
+HLE_FORCE("_ZN2nn10streamplay25DestroyIndividualDisplaysEv", "guest displays: none (no guest)", void, h_stpl_DestroyDisplays, void) {}
+HLE_FORCE("_ZN2nn10streamplay21GetNativeWindowHandleENS0_7GuestIdE", "guest window: none (no guest)", void *, h_stpl_NativeWindow, int guest) { (void)guest; return NULL; }
 // The connection state change event: a host-owned SystemEvent, bound on first use and never signaled (the state never changes)
 static uint8_t g_stpl_ev[0x80] __attribute__((aligned(16)));
 HLE_FORCE("_ZN2nn10streamplay30GetConnectionStateChangedEventEv", "streamplay connection state event: bound, never signaled", void *, h_stpl_ConnEv, void) {

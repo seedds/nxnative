@@ -43,6 +43,9 @@ The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots i
 
 ## Found on this game
 
+- [Storage words read one by one](../../../docs/reference/shaders.md#storage-words-read-one-by-one): the lit pass on an M1, 70 → 16 ms.
+- [A blocked audio device start freezes the game](../../../docs/reference/audio.md#a-blocked-audio-device-start-freezes-the-game) when the selected HDMI device refuses to play.
+
 - [Goto elimination forcing loops around a whole program](../../../docs/reference/shaders.md#goto-elimination-forcing-loops-around-a-whole-program): the first shader build stalled for 5 h 40.
 - [Ampere jump tables read past their end](../../../docs/reference/shaders.md#ampere-jump-tables-read-past-their-end).
 - [MUFU.F16](../../../docs/reference/shaders.md#mufuf16) and [The NDSR pack's record start](../../../docs/reference/shaders.md#the-ndsr-packs-record-start): the black 3D scene in the opening.

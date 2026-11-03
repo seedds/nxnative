@@ -61,6 +61,27 @@ static int readback_buffer_gone(ReadbackDevice *device) { @autoreleasepool {
     // A weak property's getter can itself autorelease the object; do not prolong a live observation in the test's outer pool.
     return device.lastBuffer == nil;
 } }
+static void readback_pool_drop(void) { @autoreleasepool {   // empties the kept readback buffers (mrbuf_put), as a process that never reads back again would hold them
+    while (g_mrbuf_n) { id<MTLBuffer> b = g_mrbuf[--g_mrbuf_n]; g_mrbuf[g_mrbuf_n] = nil; g_mrbuf_bytes -= b.length; res_remove(b); }
+    res_commit();   // the residency set lets go of what it removed at its commit, which a submission would make
+} }
+static int readback_pool_holds(ReadbackDevice *device) { @autoreleasepool {
+    id<MTLBuffer> b = device.lastBuffer; int r = 0;
+    for (int i = 0; b && i < g_mrbuf_n; i++) r |= g_mrbuf[i] == b;
+    return r;
+} }
+// Readback buffers are reused by power-of-two size (mrbuf_get / mrbuf_put): a landed one serves the next readback of its size, and at most 16 MB is kept (GitHub #931)
+static void readback_pool(void) { @autoreleasepool {
+    readback_pool_drop();
+    id<MTLBuffer> small = mrbuf_get(100); EXPECT("readback buffer of the 4096-byte size", 4096, (int)small.length);
+    mrbuf_put(small); id<MTLBuffer> again = mrbuf_get(4000); EXPECT("a landed buffer serves the next readback of its size", 1, small == again);
+    id<MTLBuffer> next = mrbuf_get(5000); EXPECT("a larger readback takes the next size", 8192, (int)next.length);
+    mrbuf_put(again); mrbuf_put(next);
+    id<MTLBuffer> big[3]; for (int i = 0; i < 3; i++) big[i] = mrbuf_get(8u << 20);
+    for (int i = 0; i < 3; i++) mrbuf_put(big[i]);
+    EXPECT("at most 16 MB of readback buffers kept", 1, g_mrbuf_bytes <= (16u << 20) && g_mrbuf_n == 3);
+    readback_pool_drop();
+} }
 static void *readback_guest_waiter(void *arg) {
     ReadbackCompletion *c = (__bridge ReadbackCompletion *)arg;
     @autoreleasepool {
@@ -213,8 +234,8 @@ static void mirror_completion(void) {
     c->feedbackEntered = dispatch_semaphore_create(0); c->feedbackRelease = dispatch_semaphore_create(0);
     c->waiterStarted = dispatch_semaphore_create(0); c->waiterDone = dispatch_semaphore_create(0);
     c->poolRelease = dispatch_semaphore_create(0); c->waiterExited = dispatch_semaphore_create(0);
-    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
-    ReadbackDevice *device = [ReadbackDevice new]; device.device = g_dev; device.observedLength = 128; g_dev = (id)device;
+    state_reset(); memset(&R, 0, sizeof R); readback_pool_drop(); mtl_sub_begin();
+    ReadbackDevice *device = [ReadbackDevice new]; device.device = g_dev; device.observedLength = 4096; g_dev = (id)device;   // the 128-byte readback's size (mrbuf_get)
     mtl_exec((const uint8_t *)handle);
     g_dev = device.device;
     [g_commit_blocks addObject:^{
@@ -223,7 +244,7 @@ static void mirror_completion(void) {
     }];
     mtl_sub_commit();
     readback_wait_for("real mirror feedback reached its gate", c->feedbackEntered);
-    EXPECT("mirror copy allocated one real 128-byte readback buffer", 1, device.allocations);
+    EXPECT("mirror copy allocated one real readback buffer of its 4096-byte size", 1, device.allocations);
     EXPECT("GPU completion alone does not publish the pending fence", NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED, h_nvnSyncWait(&sync, 0));
     EXPECT("pending fence has not applied its event effect", 0, h_nvnEventGetValue(&event));
     int changed = 0;
@@ -252,7 +273,9 @@ static void mirror_completion(void) {
     EXPECT("mirror retirement submission completed", 1, mtl_wait_at(retirement, 5000000000ull, WS_FINISH));
     readback_feedback_idle();
     EXPECT("mirror retirement GPU success", 0, mtl_last_commit_error());
-    EXPECT("mirror completion releases its readback buffer before the guest caller's pool drains", 1, readback_buffer_gone(device));
+    EXPECT("mirror completion keeps its landed readback buffer for the next readback", 1, readback_pool_holds(device));
+    readback_pool_drop();
+    EXPECT("dropped from the kept buffers, the readback buffer is gone before the guest caller's pool drains", 1, readback_buffer_gone(device));
     dispatch_semaphore_signal(c->poolRelease);
     readback_wait_for("guest waiter drained its outer pool and exited", c->waiterExited); pthread_join(thread, NULL);
     EXPECT("mirror readback buffer is gone after the guest outer pool drains", 1, readback_buffer_gone(device));
@@ -422,5 +445,6 @@ int main(void) { @autoreleasepool {
     stale_pools();
     packed_copies(NVN_FORMAT_RGB565, 500); packed_copies(NVN_FORMAT_RGB5A1, 501); packed_copies(NVN_FORMAT_RGB5, 502);
     mirror_completion();
+    readback_pool();
     printf("READBACK cases=%d failed=%d\n", cases, failed); return failed != 0;
 } }

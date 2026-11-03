@@ -184,6 +184,26 @@ class Merged(unittest.TestCase):
             self.assertEqual(read.contents(self.tmp / 'm.nsp'), self.CONTENTS)
             self.assertEqual(calls, [['nx', keys, '--contents', self.tmp / 'm.nsp']])
 
+    def test_keys_too_old_stop_before_the_packages_are_read(self):   # nx_extract --keys: every package once, a merged one too; its red line becomes the stop, other failures are left to later steps
+        keys, m, upd, calls = self.tmp / 'prod.keys', self.tmp / 'm.nsz', self.tmp / 'u.nsp', []
+        fam = {'base': m, 'updates': [(1507328, m), (1572864, upd)], 'dlc': [(APP + 0x1001, 65536, m)]}
+        old = ('[RED] m.nsz (and 1 more files): prod.keys has no key_area_key_application_10 (master key 10, which came with firmware 17.0.0): the keys are older than the game; '
+               'dump prod.keys again from a console on firmware 17.0.0 or later')
+        def fake_run(cmd, log, env=None, cwd=None, on_line=None, ok=()):
+            calls.append((cmd, ok)); log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text(self.out + '\n')
+            if self.broken: raise nsp.BuildError('nx_extract exit code 134')
+        with mock.patch.object(nsp, 'build_nx_extract', lambda *a: 'nx'), mock.patch.object(nsp, 'run', fake_run), nsp.package_title_reader(REPO, keys, {}) as read:
+            self.out, self.broken = 'the keys open all 2 packages', False
+            read.check_keys(fam)
+            self.assertEqual(calls[0][0], ['nx', keys, '--keys', m, upd]); self.assertIn(6, calls[0][1])
+            self.out = old
+            with self.assertRaisesRegex(nsp.BuildError, r'^m\.nsz \(and 1 more files\): prod\.keys has no key_area_key_application_10 .* firmware 17\.0\.0 or later$'): read.check_keys(fam)
+            self.out, self.broken = 'Unhandled exception. System.IO.IOException', True
+            read.check_keys(fam)
+        with mock.patch.object(nsp.shutil, 'which', lambda *a, **k: None), nsp.package_title_reader(REPO, keys, {}) as read:
+            read.check_keys(fam)   # no dotnet: the steps that need it say so
+
 
 if __name__ == '__main__':
     unittest.main()

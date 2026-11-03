@@ -268,6 +268,7 @@ namespace Ryujinx.Graphics.Shader.Decoders
                     case 0x988:
                     case 0x98c:
                     case 0x38c:
+                    case 0xf8c:
                         context.SetUsedFeature(FeatureFlags.SharedMemory);
                         break;
                     case 0x986:

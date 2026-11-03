@@ -133,6 +133,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** before cutting a game's frame limiter, find what sets its target and whether anything else holds those frames. A limiter that also enforces a slower mode (here N = 2) has to keep it.
 - **Found on:** [Taiko Risshiden V DX](../../dm/games/0100346017304000/README.md), in its menus and town; its movies, paced by their own player, ran at 60.
 
+### A target frame rate the game steps by
+
+- **Symptom:** a Switch 2 game runs its title and menus at 60 fps and its gameplay at 30, asking for present interval 2, with the GPU mostly idle.
+- **Cause:** the game's choice. Its graphics object (a global pointer) holds the display rate, a target frame rate and the longest interval; the present asks for interval min(longest, display / min(display, target)). Three stores set the target, 60 for menus and 30 for gameplay, and 59 readers step the game by 60.0 / target, so a frame advances it 2.0 at 30 and 1.0 at 60.
+- **Fix:** the rewriter finds the field by the code that reads and sets it, in any main and with no build ID (`dm/tools/fps_target.py`, run by `patch_nso.py`), and names it in the fixups (`FPS_TARGET_PTR`, the global pointer; `FPS_TARGET_FIELD`, the field). A reader loads the field into a float register, converts it and divides 60.0 by it (`ldr sN, [xB, #F]`; `scvtf`; `fdiv` by a 60.0 made by `movz` + `fmov`), with `xB` the global's value (`ldr xB, [xA]`, `xA` made by `adrp` + `add` or read from the global's GOT slot); a store sets it to an immediate 30 or 60. A field with at least 8 readers and a store of 30 is the target, and exactly one must be: two give a red line and no write. These are the semantics writing it relies on, the game's step following the target, so the search names no engine. `hle_fpslock.c` writes the profile's `fps_target` there whenever it differs; the game then asks for interval 1 itself, and its step follows. At `DM_FPS_TARGET=30` the host writes 30 everywhere, menus included, where the game itself chose 60.
+- **Check:** `dm/tools/tests/test_fps_target.py` (synthetic code: the global and its GOT slot, too few readers, no store of 30, another dividend, two fields); `fps_target.py <main>...` prints what it finds in each. Before giving a game `fps_target` on this field, check that its readers step the game by it: a target the game only presents by, with logic that counts frames, would run the game fast.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md) v131072 (its gxc graphics object, +0x1dc): gameplay at 60 fps, frame time p50 16.7 ms on an M4 Pro. Checked offline on 100 mains on the drives (2026-11-03), both Paper Marios on Intelligent Systems' older engine among them: the search finds this field (55 of its 59 readers have the form it matches) and, in every other main, not a single reader.
+
 ### Unreal's frame limit and present interval, found by name
 
 - **Symptom:** an Unreal Engine game holds 30 fps with spare CPU and GPU time and asks for present interval 2; `present_interval display` alone does not help, as the engine's game thread sleeps out its own frame limit.
@@ -160,6 +168,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** `make -C dm/gfx/tests GAME=010015100B514000 t_present_rescue` and `dm/gfx/tests/t_present_rescue` exercise the production wait and retry paths with a controlled clock and a silent link double, without a GPU. They cover foreground grace, backoff saturation, runtime mode changes, and layer release only after run-loop invalidation. The test also runs in CPU graphics CI. `make -C dm/gfx/tests GAME=010015100B514000 check_t_present_rescue` adds a paused real Metal display link on an offscreen Mac layer: rescue invalidates it, then `nextDrawable` succeeds (47 checks, zero failures with Metal validation). `DM_TEST_LINK_STALL=<start seconds>,<duration seconds>` pauses a real window's display link for manual verification.
 - **Not checked:** gameplay during stalled-link recovery or the iPhone; the PR's gameplay runs were headless.
 
+### Long frames a test run makes itself
+
+- **Symptom:** `[longframe]` lines of 40–180 ms with no new pipelines, a short submit and normal GPU time, which read like CPU hitches in the game: single frames of 60–100 ms, or bursts of 5–12 frames, one of 140–180 ms and the rest about 40 ms.
+- **Cause:** the run, not the game. Each `shot` line of `DM_CTL` costs the frame it captures 60–100 ms, so a script that takes a shot every few seconds prints a long frame every few seconds. Each retry of a [silent display link](#present-thread-rescues-a-silent-display-link) waits out the silence for about 0.5 s, and those bursts repeat 3, 6, 12, 24, 48 and then every 60 s, with `display link: rescue ended` just before them. The link was silent in runs with no session on the Mac's display and ticked once a remote session had connected (seen across runs, not tested on purpose). Losing focus (`oe focus state → 2`) adds its own long frames and halves the rate.
+- **Fix:** no code change. Shots are diagnostics only, and the retries need a silent link; a link that stops while its picture is visible, as on the iPhone in the entry above, would show the retry as a stutter of about 0.5 s every 60 s. To measure frame times, take no shots, and read a long frame's cause from the log before looking for it in the game: the shot or `rescue ended` line before it, and the focus lines. A stall that repeats on a timer is worth timing first: the doubling gaps gave the retry away.
+- **Found on:** [Princess Peach: Showtime!](../../dm/games/01007A3009184000/README.md#frame-rate): of 491 long frames in one 18-minute run, 315 were link retries and 53 followed a shot; with neither, 112 s of lobby and play had none.
+
 ### A present command allocator is reused only after its own present completes
 
 - **Symptom:** with the display link driving presents, a presented frame comes out black when three presents are on the GPU at once, or two after a dropped frame; on an M6 the same reuse also logs `[RED] display command buffer error` with `kIOGPUCommandBufferCallbackErrorPageFault`.
@@ -179,6 +194,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (1.2.1, iPhone: the display-link hold); [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (iPhone: the acquire).
 - **Check:** `DM_TEST_PRESENT_LAG=90,30` (sleep 30 ms before every 90th present) makes Mario do this on the Mac; run it with `DM_WINDOW=1` to get the display link. `DM_NVN_TSV` writes each frame's interval as `@itv`.
 - **Note:** the windowless Mac host was never affected by the acquire: there the acquire sleeps until the interval's slot.
+
+### Odd present intervals on the 30 Hz display link
+
+- **Symptom:** Donkey Kong Bananza ran its heavy areas at 15 fps where its GPU took about 46 ms a frame: the frames came every 66.7 ms, and the presentation thread spent 85% of its time in `nvnWindowAcquireTexture` waiting for display-link ticks.
+- **Cause:** after a second at interval 2 the display link drops to 30 Hz (`nvn_game_fps`). When the game then stepped to interval 3 (20 fps) the link stayed at 30 Hz, where 3 vsyncs are (3 + 1) / 2 = 2 ticks (`mtl_link_wait_tick`): 66.7 ms for the 50 the game asked for. The comment said such intervals "run at 30"; they ran at 15.
+- **Fix:** only an even interval counts toward the 30 Hz link; an odd one returns to the 60 Hz link at once, as interval 1 does, and takes its own 3 ticks (`present_period` in `hle_nvn.c`). The one-second test no longer wraps: the run's start is stored with `| 1` and could be 1 ns after the next clock read, which made `now - start` huge and asked for 30 Hz at once.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md): the slow area on an M1, frame time p50 66.7 → 50.2 ms at interval 3 (`DM_NVN_TSV` `@frame_ms`, `@itv`, `@link_gap_ms` 33.3 → 16.7).
+- **Check:** `t_nvn` (`interval 3: 60 Hz link`, `back to 2 from 3 waits a second again`).
 
 ### One frame per tick of a 120 Hz display link
 

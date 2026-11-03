@@ -82,6 +82,7 @@ Game-specific findings. The general host changes they led to are listed under [F
 
 ## Found on this game
 
+- [Old per-shader cache entries grew a game's build folder with each chain change](../../../docs/reference/shaders.md#old-per-shader-cache-entries-grew-a-games-build-folder-with-each-chain-change) (2026-11-03, #1033): 12 GB of earlier chains' entries in `cas/shader`.
 - [Same-pass feedback read from the tile](../../../docs/reference/rendering.md#same-pass-feedback-read-from-the-tile) (2026-11-03): the shrine decals of #737.
 - [Benchmark captures perturb the measured frame pacing](../../../docs/reference/frame-rate.md#benchmark-captures-perturb-the-measured-frame-pacing).
 - [Unmapped guest memory stays resident](../../../docs/reference/memory.md#unmapped-guest-memory-stays-resident).

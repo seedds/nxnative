@@ -228,6 +228,7 @@ def pair_keyed(digest, pixel_digests):   # a vertex shader's key with its pixel 
 
 def cache_meta_path(key): return os.path.join(CAS, 'index', key + '.json')
 def cache_path(digest): return os.path.join(CAS, 'shader', digest)
+CAS_USED = '_b_cas.txt'   # in the Mac library directory b-<V>/: the cache_path digests of its last full build, one per line
 
 def cache_outputs(key, digest, cached=False):
     root = cache_path(digest); files = {}
@@ -1286,6 +1287,7 @@ for _d in [out] + ([IOSOUT] if IOSOUT else []):
         _m = OUT_KEY.match(_n)
         if _m and (not want or _m.group(1) in want): os.unlink(os.path.join(_d, _n))
     if (not want or STAMP_BEFORE != INPUTS) and os.path.exists(os.path.join(_d, dmsh_chain.STAMP)): os.unlink(os.path.join(_d, dmsh_chain.STAMP))
+    if not want and os.path.exists(os.path.join(_d, CAS_USED)): os.unlink(os.path.join(_d, CAS_USED))   # written again at the end, with the stamp
 w = tempfile.mkdtemp(prefix='dmsh_', dir=os.environ.get('WORK'))
 MTL = dmsh_mtlcache.Cache(os.path.join(CAS, 'metallib'), {'mac': ('macosx', MAC_RECORD, mac_compile), **({'ios': ('iphoneos', ios_metal.RECORD, ios_metal.compile)} if IOSOUT else {})}, w)
 # first take the libraries earlier chain versions left on disk: the b-*/ beside the output (iOS: the folder of the same name) and the roots DMSH_PREFILL lists
@@ -1390,6 +1392,10 @@ tm = collections.Counter(nn[len('translator: '):] for x in ok for nn in x['notes
 for e, n in tm.most_common(12): print(f'  translator {n:6d} in {sum(e in [nn[len("translator: "):] for nn in x["notes"]] for x in ok):5d} shaders  {e}')
 json.dump([{'key': r[0], 'st': r[1], 'err': r[2]} for r in res], open(os.path.join(out, '_b_build.json'), 'w'), ensure_ascii=False)
 if not want:   # a full build: the stamp, then the c1 guard and uniform read extent tables from these Mac outputs, into the profile folder (the host takes them only beside this stamp)
+    # The per-shader cache entries this build used (cas/shader/<digest>), which the NSP script keeps when it prunes the others (prune_shader_cache). Only beside the Mac outputs:
+    # every full build writes them, and the iOS folder goes whole into the IPA. Before the stamp, so a stamped folder always has its list
+    with open(os.path.join(out, CAS_USED + '.tmp'), 'w') as _f: _f.write(''.join(d + '\n' for d in sorted(set(digests.values()))))
+    os.replace(os.path.join(out, CAS_USED + '.tmp'), os.path.join(out, CAS_USED))
     for _d in [out] + ([IOSOUT] if IOSOUT else []): dmsh_chain.write_stamp(_d, GAME.id, INPUTS)
     print(f'library stamp: game {GAME.id}, inputs {INPUTS}', flush=True)
     for _tool, _table in (('c1_guard.py', 'c1_full.tsv'), ('cb_extent.py', 'cb_extent.tsv')):

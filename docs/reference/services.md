@@ -857,6 +857,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `InitializeNmouse`, `GetNmouseHandles` (none), the button configuration calls and the merged pointer's calls (a handle with no states) are hooked (`hle_hid.c`).
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md), [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md).
 
+### SDK 19's Joy-Con mouse sensor client in main
+
+- **Symptom:** `[RED] sf: the game connects to service hid itself, which the host does not serve`, then a null read in `main` (`main+0x87266c`) on the first click of Play.
+- **Cause:** SDK 19 links the Joy-Con mouse sensor's client into the game's `main` rather than `sdk`, so the host's `hid::InitializeJcms` hook never runs. The client's InitializeJcms, FinalizeJcms, StartJcms and StopJcms take the hid server from `hid::server::CreateHidServerProxy` and call it through its vtable (+0x508 to +0x520) without a null check; sm refuses hid, so the proxy was null. Initialize then activates the SDK's `hid::detail::AppletResourceHolder`, which asks the server for hid's shared memory.
+- **Fix:** `CreateHidServerProxy` returns `RES_OK` and a host object whose every vtable slot returns `RES_OK` and writes nothing; `AppletResourceHolder::Activate` and `Deactivate` succeed and do nothing, since the host serves the hid API itself (`hle_hid.c`). GetJcmsStates, still the game's own, reads an empty ring from its work buffer.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) base game (v0, nnSdk 19.3.2).
+
 ### GameShare guest displays
 
 - **Symptom:** a crash at boot in `nn::vi` under `nn::streamplay::CreateIndividualDisplays`.

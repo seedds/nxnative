@@ -52,6 +52,13 @@ Each step below stopped the boot before its fix:
 5. Switch 2 SDK calls through services the host does not serve: `hid::InitializeJcms` and the Joy-Con mouse sensor (`hle_hid.c`), `oe::GetCurrentGraphicsScale` (`hle_oe.c`), `audio::IsDeviceOutputVolumeAutoTuneModeEnabled` (`hle_audren.c`), `streamplay` (GameShare, `hle_misc.c`), `vi` HDR / VRR / extended swap interval (`dm/gfx/hle_vi.c`).
 6. `nv::InitCheck` (from `main+0xe19d04`, the start of a video decoder, after the first punch) tested the SDK's own flag, which `nv::InitializeGraphics` sets and the host's version of it does not: `hle_nv.c` answers it from the host's record. The same function then starts a video decoder: the Switch 2's `nn::codec` video API and sync point events, served on the host ([`nn::codec` video decoders taken over](../../../docs/reference/movies.md#nncodec-video-decoders-taken-over)).
 
+The base game alone (v0: `main` A1DD7480BCA7B6E8, nnSdk 19.3.2, packed through a derived profile) stopped at two more places, each a crash on the first click of Play before its fix:
+
+1. `[RED] sf: the game connects to service hid itself`, then a null read at `main+0x87266c`: SDK 19 links the Joy-Con mouse sensor's client into `main` (InitializeJcms at `main+0x8725e0`), so the host's `hid::InitializeJcms` never runs, and the client calls the null hid server proxy ([SDK 19's Joy-Con mouse sensor client in main](../../../docs/reference/services.md#sdk-19s-joy-con-mouse-sensor-client-in-main)).
+2. `pc=0` from `main+0xdfdfa0` as the first guide movie began: `syncpt::sdk::TryWaitSyncPointEvent`, an SDK 19 form the VP9 player polls, served by [pull request 982](https://github.com/seedds/nxnative/pull/982) (not on main yet).
+
+With both, the base game played from the title through the opening and its guide movies (200 s on an M3 Max, macOS 26.7.2).
+
 ## Open
 
 - **Video decoding:** the guide movies are VP9 and play (a 180-picture clip on loop in the tutorial's panel, read back as NV12). The player also imports the VP8, H.264 and AV1 decoders: VP8 and H.264 are served too (checked by `t_codec_video` only), AV1 is not ([`nn::codec` video decoders taken over](../../../docs/reference/movies.md#nncodec-video-decoders-taken-over)).
@@ -84,3 +91,4 @@ Each step below stopped the boot before its fix:
 - [Shader libraries loaded when the program is made](../../../docs/reference/shaders.md#shader-libraries-loaded-when-the-program-is-made): a new area's 3 to 7 libraries loaded on the submit thread, up to 4 s with the drive slowed.
 - [Odd present intervals on the 30 Hz display link](../../../docs/reference/frame-rate.md#odd-present-intervals-on-the-30-hz-display-link): interval 3 took 66.7 ms a frame, 15 fps for 20.
 - [GPU timestamps per submission segment](../../../docs/reference/frame-rate.md#gpu-timestamps-per-submission-segment): dynamic resolution read a GPU time of about 0 and kept 2304x1296 while 14 ms over budget; with `gpu_timestamps segment` it steps down to 1152x648 with its upscaler in the heavy areas and holds 30 fps.
+- [SDK 19's Joy-Con mouse sensor client in main](../../../docs/reference/services.md#sdk-19s-joy-con-mouse-sensor-client-in-main): the base game's InitializeJcms, linked into `main`, called the null hid server proxy.

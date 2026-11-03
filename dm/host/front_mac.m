@@ -136,6 +136,11 @@ static int key_bit(unsigned short code) {
     }
     return -1;
 }
+// fn held with a letter: the arrow and function keys carry the same modifier flag, so the key must be a letter for this to be a Globe shortcut
+static int fn_shortcut(NSEvent *e) {
+    NSString *s = e.charactersIgnoringModifiers;
+    return (e.modifierFlags & NSEventModifierFlagFunction) && s.length == 1 && [[NSCharacterSet letterCharacterSet] characterIsMember:[s characterAtIndex:0]];
+}
 static void on_key(NSEvent *e, int down) {
     if (!g_input_on) return;
     unsigned short c = e.keyCode;
@@ -1401,10 +1406,7 @@ void front_run(void (*guest)(void)) {
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual
             if (e.type == NSEventTypeKeyDown && (e.modifierFlags & NSEventModifierFlagCommand)) return e;   // ⌘ shortcuts go to the menu; a key released while ⌘ is held still reaches the game, or it would stay pressed
-            // fn (Globe) + F, macOS's full-screen shortcut (GitHub issue #873): swallowed here, it reached the game as an F press. Arrow and function keys carry the fn flag too, so only
-            // F pressed with fn and no other modifier is taken
-            NSEventModifierFlags mods = e.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask & ~NSEventModifierFlagCapsLock;
-            if (e.type == NSEventTypeKeyDown && e.keyCode == 3 && mods == NSEventModifierFlagFunction) { if (!e.isARepeat) [win toggleFullScreen:nil]; return nil; }   // its release still reaches the game
+            if (e.type == NSEventTypeKeyDown && fn_shortcut(e)) return e;   // fn (Globe) + a letter is the system's (fn+F full screen, GitHub issue #873), not the game's F
             if (!e.isARepeat) on_key(e, e.type == NSEventTypeKeyDown);
             return nil;   // Swallow it to avoid the system beep
         }];

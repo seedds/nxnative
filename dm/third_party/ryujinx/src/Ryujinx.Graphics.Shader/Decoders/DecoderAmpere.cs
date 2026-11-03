@@ -277,6 +277,7 @@ namespace Ryujinx.Graphics.Shader.Decoders
                     case 0x9a8:
                     case 0x3a8:
                     case 0x9a9:
+                    case 0x59f:
                     case 0xb9b:
                     case 0x99b:
                     case 0x99d:

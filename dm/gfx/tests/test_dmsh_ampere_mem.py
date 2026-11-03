@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Ampere instructions through the offline translator (dmsh_xlate, arch sm86): SUATOM (0x593), the image atomic Donkey Kong Bananza's agl technique compute shaders (agl_technique_pfx) take an
-append counter with; shared memory's scaled address, IMAD.HI and ATOMS.CAS; and the instructions tested on the atomic's result below. Needs DMSH_TEST_XLATE (the translator) like the other translator tests."""
+append counter with; SURED (0x59f), its form without a result, in Mario Kart World's compute shaders; shared memory's scaled address, IMAD.HI and ATOMS.CAS; and the instructions tested on the atomic's result below. Needs DMSH_TEST_XLATE (the translator) like the other translator tests."""
 import json, os, re, struct, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
@@ -8,6 +8,8 @@ TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 EXIT = (0x000fea0003800000, 0x000000000000794d)   # hi, lo: EXIT
 # SUATOM.ADD.U32 R12, [R3], R12 on the 1D image whose handle is word 12 of c0 (AMapC0: image slot 1), as the game encodes it but unpredicated (PT)
 SUATOM = (0x002ea200001ee000, 0x00000c0c030c7593)
+# SURED.ADD.U32 [R4], R0 on the 2D image whose handle is word 12 of c0 (image slot 1): Mario Kart World's words (0400759f 60000c00 0010e000 000fe200, its base game's compute shader)
+SURED = (0x000fe2000010e000, 0x60000c000400759f)
 
 
 def inst(hi, lo): return struct.pack('<QQ', lo, hi)
@@ -15,13 +17,24 @@ def inst(hi, lo): return struct.pack('<QQ', lo, hi)
 
 @unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
 class Translated(unittest.TestCase):
+    def xlate(self, d, code, **extra):
+        work = Path(d); (work / 'k.bin').write_bytes(code)
+        # c0 layout (QueryAmpereComputeC0Layout): no uniform or storage buffers, 3 texture handles from 0x10, image handles from 0x28 (word 12 = image slot 1), 0x40 bytes
+        job = [dict(key='k', stage='cs', arch='sm86', code=str(work / 'k.bin'), tex={}, img={}, attr={}, fout={}, local=[32, 1, 1], debug=True, nvn2_cs=[0, 0, 3, 0x40, 0], **extra)]
+        (work / 'jobs.json').write_text(json.dumps(job))
+        return subprocess.run([os.environ['DMSH_TEST_XLATE'], str(work / 'jobs.json'), d], capture_output=True, text=True)
+
+    def refused(self, code):   # the translator's message for a shader it does not translate
+        with tempfile.TemporaryDirectory(prefix='ampere_mem_') as d:
+            r = self.xlate(d, code)
+            self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertFalse((Path(d) / 'k.spv').exists())
+            return r.stdout + r.stderr
+
     def translate(self, code, **extra):
         with tempfile.TemporaryDirectory(prefix='ampere_mem_') as d:
-            work = Path(d); (work / 'k.bin').write_bytes(code)
-            # c0 layout (QueryAmpereComputeC0Layout): no uniform or storage buffers, 3 texture handles from 0x10, image handles from 0x28 (word 12 = image slot 1), 0x40 bytes
-            job = [dict(key='k', stage='cs', arch='sm86', code=str(work / 'k.bin'), tex={}, img={}, attr={}, fout={}, local=[32, 1, 1], debug=True, nvn2_cs=[0, 0, 3, 0x40, 0], **extra)]
-            (work / 'jobs.json').write_text(json.dumps(job))
-            r = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(work / 'jobs.json'), d], capture_output=True, text=True)
+            work = Path(d)
+            r = self.xlate(d, code, **extra)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertTrue((work / 'k.spv').exists(), r.stdout + r.stderr)
             sys.path.insert(0, str(TOOLS)); import dmsh_geometry
@@ -41,6 +54,23 @@ class Suatom(Translated):
     def test_result_kept(self):   # the old value is the shader's (it shuffles it to the warp): the atomic's result is used, not discarded
         msl = self.translate(inst(*SUATOM) + inst(*EXIT))
         self.assertRegex(msl, r'uint \w+ = [^;]*atomic_fetch_add')
+
+
+class Sured(Translated):
+    """SURED (0x59f) as Mario Kart World encodes it: MOV R0, 1, then an add of R0 at the coordinate in R4 (x) and R5 (y), no result"""
+    def code(self, sured=SURED, after=b''):
+        return mov(0, 1) + mov(4, 7) + mov(5, 9) + inst(*sured) + after + inst(*EXIT)
+
+    def test_add_u32_on_a_2d_image(self):
+        msl = self.translate(self.code())
+        self.assertIn('cp_i_tcb_4A_r32ui', msl)   # image slot 1 (c2 0x128), a 32-bit unsigned image
+        self.assertRegex(msl, r'int2 (_\d+) = int2\(7, 9\);[\s\S]*atomic_fetch_add_explicit\([^;]*\(\1, [^;]*, 1u,')   # R0's 1 at (R4, R5)
+
+    def test_r0_is_not_written(self):   # 16..24 (R0 in the game's words) is not a destination: R0 stored after it is still the 1, not the old value
+        self.assertIn('[8] = 1u', self.translate(self.code(after=sts(0x20, 0)), shared=0x800))
+
+    def test_another_form_refused(self):   # word 2 of SUATOM's game encoding (with its predicate result field) is not a form this takes
+        self.assertIn('SURED form 001ee000', self.refused(self.code((0x000fe200001ee000, SURED[1]))))
 
 
 class MufuF16(Translated):

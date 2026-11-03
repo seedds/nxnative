@@ -911,6 +911,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
 
+### SURED (0x59f)
+
+- **Symptom:** `Ampere instruction 59f at 0x… is not implemented` in the shader build; that compute shader is left out and its dispatches skipped.
+- **Cause:** 0x59f is SURED, an image reduction through a handle: SUATOM's layout (0x593, [Ampere shader code](#ampere-shader-code-switch-2)) without a result, so 16..24 is not a destination. No encoder or opcode table gave its fields; they come from Eglantine's lowering of the same instruction to Maxwell `SURED.ADD.U32` (`lower_to_maxwell.h`, [11a110898f](https://github.com/Djihads80/Eglantine/commit/11a110898fcfe16a5b9aee98c4346265825c3178)). Its word 2, `0x0010e000`, is SUATOM's word 2 in Donkey Kong Bananza's encoding (`0x001ee000`) less the predicate result at 81..84.
+- **Fix:** `ASured` in `InstEmitAmpereMem.cs`, through the decoder's `EmitSured`: the handle at 40..59, the dimension at 61..64, the coordinates from Ra and the value from Rb, with IGN bounds ([Bounds of image atomics](#bounds-of-image-atomics)). Only the game's form is taken, ADD (87..91 = 0) of a U32 (73..76 = 0) with the handle in bank 0; another word 2 or bank stops the shader.
+- **Found on:** Mario Kart World: compute shader `ab77eaee44cfef88` (`DrivePassShaderDefault.sharcb`), loaded on the route to the first race, adds 1 (`MOV R0, 1`) at the coordinate in R4 on a 2D image; the same words, `0400759f 60000c00 0010e000 000fe200`, are in the base game. Not run in the game: the translation is checked only by the test below. Donkey Kong Bananza's shader packages have no 0x59f.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
+
 ### IMAD.HI adds a register pair, and IMAD.X its carry
 
 - **Symptom:** 64-bit arithmetic in a shader gives wild results: the 64-bit division behind an exposure average returned 893011 for 218, so the exposure stayed at the end of its range. With only the pair fixed it still gave 2 for 340 / 1.

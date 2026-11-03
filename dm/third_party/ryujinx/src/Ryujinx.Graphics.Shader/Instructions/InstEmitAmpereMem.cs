@@ -54,6 +54,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0xb9b, InstName.Sust, ASurface, N, writesRd: false);
             x(0xb9d, InstName.Sust, ASurface, N, writesRd: false);
             x(0x593, InstName.Suatom, ASuatom, N);
+            x(0x59f, InstName.Sured, ASured, N, writesRd: false);
             x(0xb1d, InstName.Bar, ABar, N, writesRd: false);
         }
 
@@ -456,6 +457,30 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, (SuatomOp)x.Bits(87, 91), (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, 0, x.Rd, false, isBindless: false, compareAndSwap: false);
+        }
+
+        // SURED [Ra], Rb (0x59f): an image reduction through a handle, SUATOM's layout without a result (handle 40..59, dimension 61..64, coordinates from Ra,
+        // the value in Rb; 16..24 is not a destination). No encoder documents it: the fields are Eglantine's lowering of the same instruction to Maxwell
+        // SURED.ADD.U32 (lower_to_maxwell.h, commit 11a110898f). Only that form is taken: word 2 0x0010e000 is SUATOM's word 2 in Donkey Kong Bananza's
+        // encoding less its predicate result (81..84), so ADD (87..91 = 0) of a U32 (73..76 = 0). Mario Kart World's compute shader adds 1 (MOV R0, 1) at the
+        // coordinate in R4 on a 2D image. Another word 2 or handle bank is refused.
+        public static void ASured(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+
+            if (x.Bits(64, 96) != 0x0010e000 || x.Bits(59, 61) != 0)
+            {
+                throw AFail(context, $"SURED form {x.Bits(64, 96):x8}");
+            }
+
+            (int handle, int cbufSlot) = ATexHandle(context, x);
+
+            if (cbufSlot != TextureOperation.DefaultCbufSlot)
+            {
+                throw AFail(context, $"SURED handle in bank {cbufSlot}");
+            }
+
+            EmitSured(context, (SuDim)x.Bits(61, 64), 0, RedOp.Add, SuatomSize.U32, handle, x.Ra, x.Rb, 0, false, isBindless: false);
         }
 
         // BAR.SYNC: the workgroup barrier

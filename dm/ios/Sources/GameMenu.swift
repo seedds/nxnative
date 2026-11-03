@@ -29,6 +29,7 @@ private func gameMenuItems() -> [UIMenuElement] {
     }
     if !placed { items.insert(UIMenu(title: "Controls", options: .displayInline, children: [layout]), at: 0) }
     if gameMenuModel != nil { items.append(UIAction(title: "More settings on the start screen", attributes: .disabled) { _ in }) }
+    items.append(Unmanaged<UIMenu>.fromOpaque(dm_quit_menu()).takeRetainedValue())   // Quit <game>, last and on its own: it opens the quit prompt (front_ios.m)
     return items
 }
 

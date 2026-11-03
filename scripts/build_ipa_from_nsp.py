@@ -490,7 +490,20 @@ def package_title_reader(repo, keys, env):
             except BuildError: return None
             out = [(t, int(i, 16), int(v)) for t, i, v in re.findall(r'^content (\w+) ([0-9a-f]{16}) (\d+)$', log.read_text(errors='replace'), re.M)]
             return out or None
-        read.contents = contents
+        def check_keys(fam):
+            """Stop when the keys cannot open the game's packages (`nx_extract <keys> --keys <package>...`: every NCA's header, an NSZ's too), before nsz -D, the survey and the
+            extraction, which need the same keys and would stop minutes later. Keys older than the game lack its master key: the message names that key and the firmware it came with.
+            Any other failure of the check is left to those steps, which report it themselves"""
+            if not nx:
+                if not shutil.which('dotnet', path=env.get('PATH')): return
+                nx.append(build_nx_extract(repo, work, work / 'logs', env))
+            log = work / 'logs/keys.log'
+            paths = list(dict.fromkeys([fam['base'], *(p for _, p in fam['updates']), *(p for _, _, p in fam['dlc'])]))   # a merged package is the base game, the update and DLC: checked once
+            try: run([nx[0], keys, '--keys', *paths], log, env=env, ok=(6,))
+            except BuildError: return
+            m = re.search(r'^\[RED\] (.*prod\.keys has no .*|.*no title key for rights ID .*)$', log.read_text(errors='replace'), re.M)
+            if m: raise BuildError(m.group(1))
+        read.contents, read.check_keys = contents, check_keys
         yield read
 
 
@@ -2465,7 +2478,9 @@ def main(args=None):
         app, fam = scan_dump(nsp_dir, int(want, 16) if want else None)
         say(f'a dump folder: {app:016X}, {len(fam["updates"])} update(s), {len(fam["dlc"])} DLC')
     else:
-        with package_title_reader(repo, keys, env) as from_package: app, fam = scan_nsps(nsp_dir, from_package, from_package.contents, int(want, 16) if want else None)
+        with package_title_reader(repo, keys, env) as from_package:
+            app, fam = scan_nsps(nsp_dir, from_package, from_package.contents, int(want, 16) if want else None)
+            from_package.check_keys(fam)
         fam = decompress_nsz(nsp_dir, app, fam, keys, env, work_dir(args))
     force =args.provisional or PROVISIONAL   # a provisional profile even when dm/games has one (testing the guesses)
     g, provisional, shadowed = None if force else gamemod.by_title(app), False, False

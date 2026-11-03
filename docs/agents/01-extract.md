@@ -30,6 +30,8 @@ ht -t nca --exefsdir=$W/data/v0/ExeFS --romfsdir=$W/data/v0/RomFS $W/build/nsp/<
 
 **A damaged NSP** (an incomplete copy, a broken download) shows as a hash error while the RomFS is read. `nx_extract` lists every file whose data fails the NCA's hash check and exits with code 3; `--allow-damaged` (the NSP script's `ALLOW_DAMAGED` / `--allow-damaged`) writes them as read and only lists them. A RomFS image marks those files, and the host names them in its log ([A crash from a damaged NSP's file](../reference/packing.md#a-crash-from-a-damaged-nsps-file-looks-like-a-host-bug)). To check a whole NCA, its file name is the first 16 bytes of its SHA-256: Super Mario Galaxy's base program NCA hashed differently, with 12 MB runs of zeros near its end (147 MB of damaged RomFS: the two WebM prologue movies), while its update and the small NCAs matched their names.
 
+**Keys older than the game** (a prod.keys from a console on older firmware): `nx_extract` names the newest key it lacks and the firmware it came with, and exits with code 6 before decrypting anything; `nx_extract <prod.keys> --keys <package>...` runs only that check ([keys](../reference/packing.md#keys-older-than-the-game-stop-the-extraction-with-an-unhandled-missingkeyexception)).
+
 ## Workspace layout used so far
 
 The work folder `$W` sits in the game's NSP folder, beside the NSP script's `<title>_build/`, never in the home folder:

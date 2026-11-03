@@ -191,6 +191,14 @@ To enroll a cut for any game's own module:
 - **Found on:** [Ace Attorney Investigations Collection](../../dm/games/010005501E68C000/README.md) (Unity 2022.3 IL2CPP): `main+0x1d271bc` and `+0x204ebec`.
 - **Check:** every module the rewriter accepted before comes out byte-identical.
 
+### Unframed pointer tail calls followed by zero trap padding
+
+- **Symptom:** `AssertionError: jump table d29e68` while rewriting Moving Out 2 1.3.315.
+- **Cause:** the function loads its method pointer with `ldp x18,x17,[x17,#0x138]`, moves caller stack arguments and ends with `br x18`, followed by one `udf #0` padding word before the next unwind entry. The terminal-tail rule accepted only `ldr` and required the branch to be the last decoded instruction.
+- **Fix:** for a tail followed by zero trap padding, accept a plain paired pointer load as well as a single load, with contiguous decoding, straight-line argument moves and memory transfers, and no writes to SP, FP or LR, including their 32-bit aliases and writeback. The last write to either `x18` or `w18` must be the pointer load. Branches, calls, nonzero traps, decoding gaps and framed thunks do not match this fallback. The terminal-tail rule and other nonterminal-tail checks are unchanged.
+- **Found on:** Moving Out 2 1.3.315, `main` build `c552b6464e7348a7bb261a708b353137`, at `+0xd29e68`. This is a rewrite-stage finding, not gameplay validation or a game profile.
+- **Check:** `dm/tools/tests/test_tail_call.py` covers synthetic paired loads, zero padding, argument stores and rejection of control flow, frame changes, pointer clobbers and missing instructions.
+
 ### Loaded method-pointer tail call before an error block
 
 - **Symptom:** `jump table 53e9c` while rewriting Warm Snow 2.1.4's Unity IL2CPP `main`, or `jump table 108bb70` on Ori and the Blind Forest: Definitive Edition.

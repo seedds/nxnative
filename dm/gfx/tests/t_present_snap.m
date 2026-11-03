@@ -12,23 +12,29 @@ void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(name, ok) do { int pass = !!(ok); checks++; failed += !pass; printf("%s: %s\n", name, pass ? "PASS" : "FAIL"); } while (0)
-static tex_t source_n(unsigned i, int n) {   // n x n texels of 73 + i (n at most 16)
+static tex_t source_tex(uint64_t serial, int n, int v) {   // an n x n RGBA8 texture of texels v, registered under serial
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:n height:n mipmapped:NO];
     d.storageMode = MTLStorageModeShared; d.usage = MTLTextureUsageShaderRead;
-    id<MTLTexture> mt = [g_dev newTextureWithDescriptor:d]; uint8_t bytes[1024]; memset(bytes, 73 + i, sizeof bytes);
-    [mt replaceRegion:MTLRegionMake2D(0, 0, n, n) mipmapLevel:0 withBytes:bytes bytesPerRow:n * 4];
-    tex_t t = {.magic=MAGIC('T','E','X',0), .serial=90001+i};
+    id<MTLTexture> mt = [g_dev newTextureWithDescriptor:d]; uint8_t *bytes = malloc((size_t)n * n * 4); memset(bytes, v, (size_t)n * n * 4);
+    [mt replaceRegion:MTLRegionMake2D(0, 0, n, n) mipmapLevel:0 withBytes:bytes bytesPerRow:n * 4]; free(bytes);
+    tex_t t = {.magic=MAGIC('T','E','X',0), .serial=serial};
     t.d.width = t.d.height = n; t.d.depth = t.d.levels = t.d.samples = 1;
     t.d.target = NVN_TEXTURE_TARGET_2D; t.d.format = NVN_FORMAT_RGBA8;
     serial_put(t.serial, mt); res_add(mt); res_commit(); return t;
 }
+static tex_t source_n(unsigned i, int n) { return source_tex(90001 + i, n, 73 + i); }   // n x n texels of 73 + i
 static tex_t source(unsigned i) { return source_n(i, 8); }
-static void pixels(id<MTLTexture> t, int value) {
-    id<MTLBuffer> out = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared];
+static id need(id o, const char *what) { if (!o) { fprintf(stderr, "t_present_snap: Metal returned no %s\n", what); exit(1); } return o; }   // a Metal object the test cannot go on without
+static id<MTLSharedEvent> new_gate(void) { return need([g_dev newSharedEvent], "shared event"); }
+static id<MTLBuffer> read_block(id<MTLTexture> t, NSUInteger x0, NSUInteger y0) {   // the 8 x 8 texels of t at (x0, y0), 4 bytes each
+    id<MTLBuffer> out = need([g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared], "buffer");
     id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
-    [b copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(8,8,1)
+    [b copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(x0, y0, 0) sourceSize:MTLSizeMake(8, 8, 1)
         toBuffer:out destinationOffset:0 destinationBytesPerRow:32 destinationBytesPerImage:256];
-    [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    [b endEncoding]; [cb commit]; [cb waitUntilCompleted]; return out;
+}
+static void pixels(id<MTLTexture> t, int value) {
+    id<MTLBuffer> out = read_block(t, 0, 0);
     int bad = 0; for (int i = 0; i < 256; i++) bad += ((uint8_t *)out.contents)[i] != value;
     CHECK("snapshot has the expected pixels", bad == 0);
 }
@@ -47,7 +53,7 @@ static void suspend_case(void) {
     tex_t t = source(0);
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
     CHECK("prior submission completed", mtl_wait(mtl_sub_commit(), 2000000000ull));
-    id<MTLSharedEvent> gpu_gate = [g_dev newSharedEvent];
+    id<MTLSharedEvent> gpu_gate = new_gate();
     [g_q4 waitForEvent:gpu_gate value:1];
     gate_encoder();
     // The OS has stopped the display link before notifying the app to suspend.
@@ -97,7 +103,7 @@ static void pacing_case(void) {
 }
 static void pending_copy_case(void) {
     tex_t t = source(0);
-    id<MTLSharedEvent> gpu_gate = [g_dev newSharedEvent]; [g_q4 waitForEvent:gpu_gate value:1];
+    id<MTLSharedEvent> gpu_gate = new_gate(); [g_q4 waitForEvent:gpu_gate value:1];
     pthread_mutex_lock(&g_pq_mu); g_link_owns_layer = 1; pthread_mutex_unlock(&g_pq_mu);
     CHECK("first snapshot queued", present_enqueue(&t, 1. / 60, NULL, 0) == 0);
     CHECK("second snapshot queued", present_enqueue(&t, 1. / 60, NULL, 0) == 0);
@@ -117,7 +123,7 @@ static void resize_case(void) {
     snap_present(&small); snap_present(&small);
     CHECK("both ring slots copied", [g_snap_ev waitUntilSignaledValue:g_snap_v timeoutMS:2000]);
     id<MTLTexture> old0 = g_snap[0].tex, old1 = g_snap[1].tex;
-    id<MTLSharedEvent> gpu_gate = [g_dev newSharedEvent]; [g_q4 waitForEvent:gpu_gate value:1];   // stands for display command buffers still queued
+    id<MTLSharedEvent> gpu_gate = new_gate(); [g_q4 waitForEvent:gpu_gate value:1];   // stands for display command buffers still queued
     snap_present(&big);
     CHECK("slot 0 has a texture of the new size", g_snap[0].tex != old0 && g_snap[0].tex.width == 16);
     CHECK("slot 0's old texture is still resident", [g_snap_res containsAllocation:old0]);
@@ -137,15 +143,69 @@ static void resize_case(void) {
     snap_present(&big);
     CHECK("slot 1's old texture leaves at its next use", ![g_snap_res containsAllocation:old1] && !g_snap[1].old);
 }
+static tex_t source_flat(unsigned i, int n, int v) { return source_tex(90101 + i, n, v); }   // n x n texels of value v (any n), RGBA8
+// The colour channels of an 8 x 8 block in the middle of t (BGRA8), all within tol of value
+static void pixels_near(id<MTLTexture> t, int value, int tol, const char *what) {
+    id<MTLBuffer> out = read_block(t, t.width / 2 - 4, t.height / 2 - 4);
+    int bad = 0, worst = 0; for (int i = 0; i < 256; i++) { if (i % 4 == 3) continue; int d = abs((int)((uint8_t *)out.contents)[i] - value); if (d > worst) worst = d; bad += d > tol; }
+    char b2[160]; snprintf(b2, sizeof b2, "%s (worst channel error %d)", what, worst); CHECK(b2, bad == 0);
+}
+// The MetalFX scaler at the snapshot (DM_PRESENT_FX_AT_SNAP): a 64 x 64 picture presented on a 256 x 256 canvas is scaled into the ring slot's up texture by the snapshot's command
+// buffer, present_now would draw it 1:1 (snap_up_for), a canvas change replaces up (the old one resident until the slot's next use, the scaler remade once the queued snapshots ran),
+// and a present on a canvas other than the snapshot's falls back to the raw copy
+static void fx_snap_case(void) {
+    if (fx_mode() != 1) { printf("present upscaling unavailable on this device: the MetalFX-at-snapshot case is skipped\n"); return; }
+    g_snap_canvas_test[0] = g_snap_canvas_test[1] = 256; g_snap_canvas_test_pf = MTLPixelFormatBGRA8Unorm;
+    tex_t t = source_flat(0, 64, 100);
+    snap_present(&t); snap_present(&t);
+    CHECK("both snapshots completed", [g_snap_ev waitUntilSignaledValue:g_snap_v timeoutMS:4000]);
+    CHECK("the snapshot scaler was made once", g_fx_snap.sc != nil && g_fx_snap.made == 1 && g_fx_snap.out == nil);
+    CHECK("slot 0 has a scaled picture of the canvas rectangle's size", g_snap[0].up_valid && g_snap[0].up.width == 256 && g_snap[0].up.height == 256 && g_snap[0].up.pixelFormat == MTLPixelFormatBGRA8Unorm && g_snap[0].up_gen == 1);
+    CHECK("slot 1 too, and both are resident", g_snap[1].up_valid && g_snap[1].up.width == 256 && [g_snap_res containsAllocation:g_snap[0].up] && [g_snap_res containsAllocation:g_snap[1].up]);
+    pixels(g_snap[0].tex, 100);   // the raw copy stays (the fallback's and the screenshots' source); its 8 x 8 corner
+    pixels_near(g_snap[0].up, 100, 3, "the scaled picture holds the flat colour");
+    id<MTLTexture> up = nil; MTLViewport vp;
+    CHECK("a present on the snapshot's canvas draws the scaled picture 1:1", snap_up_for(0, 1, 256, 256, MTLPixelFormatBGRA8Unorm, &up, &vp) && up == g_snap[0].up && vp.originX == 0 && vp.originY == 0 && vp.width == 256 && vp.height == 256);
+    CHECK("a present on a resized canvas falls back to the raw copy", !snap_up_for(0, 1, 300, 256, MTLPixelFormatBGRA8Unorm, &up, &vp) && !snap_up_for(0, 1, 256, 256, MTLPixelFormatBGRA8Unorm_sRGB, &up, &vp));
+    CHECK("another snapshot count of the slot does not match", !snap_up_for(0, 2, 256, 256, MTLPixelFormatBGRA8Unorm, &up, &vp));
+    uint64_t fb = g_snap_fx_fallback; snap_up_stale(0, 1); snap_up_stale(0, 7); CHECK("a stale picture counts one fallback", g_snap_fx_fallback == fb + 1);
+    // The canvas changes (a window resize): the next snapshots scale for 128 x 96 (a 4:3 canvas: the picture's rectangle is 96 x 96 at x 16), the old up textures stay resident until each slot's next use
+    id<MTLTexture> old0 = g_snap[0].up, old1 = g_snap[1].up;
+    id<MTLSharedEvent> gpu_gate = new_gate(); [g_q4 waitForEvent:gpu_gate value:1];   // stands for display command buffers still queued, which may read old0 / old1
+    g_snap_canvas_test[0] = 128; g_snap_canvas_test[1] = 96;
+    uint64_t t0 = now_ns(); snap_present(&t); double ms = (now_ns() - t0) / 1e6;
+    CHECK("the scaler is remade for the new canvas", g_fx_snap.made == 2 && g_fx_snap.ow == 96 && g_fx_snap.oh == 96);
+    CHECK("slot 0's scaled picture has the new rectangle's size, at its place on the canvas", g_snap[0].up != old0 && g_snap[0].up.width == 96 && g_snap[0].up.height == 96 && g_snap[0].up_vx == 16 && g_snap[0].up_vy == 0 && g_snap[0].up_gen == 2);
+    CHECK("slot 0's old scaled picture is still resident", g_snap[0].old_up == old0 && [g_snap_res containsAllocation:old0]);
+    printf("the first snapshot after the canvas change took %.1f ms (the scaler's remake waits for the queued snapshots: the gate was closed, so it waited for nothing queued after it)\n", ms);
+    snap_present(&t);
+    CHECK("slot 1's old scaled picture is still resident", g_snap[1].old_up == old1 && [g_snap_res containsAllocation:old1]);
+    gpu_gate.signaledValue = 1;
+    CHECK("the replacing snapshots complete", [g_snap_ev waitUntilSignaledValue:g_snap_v timeoutMS:4000]);
+    snap_present(&t);
+    CHECK("slot 0's old scaled picture leaves at the slot's next use", !g_snap[0].old_up && ![g_snap_res containsAllocation:old0] && [g_snap_res containsAllocation:g_snap[0].up]);
+    CHECK("slot 1's old scaled picture waits for its own slot", [g_snap_res containsAllocation:old1]);
+    CHECK("the snapshot completes", [g_snap_ev waitUntilSignaledValue:g_snap_v timeoutMS:4000]);
+    pixels_near(g_snap[0].up, 100, 3, "the picture scaled for the new canvas holds the flat colour");
+    CHECK("a present on the new canvas draws it 1:1 at x 16", snap_up_for(0, 3, 128, 96, MTLPixelFormatBGRA8Unorm, &up, &vp) && vp.originX == 16 && vp.width == 96 && vp.height == 96);
+    // The snapshot's GPU time is recorded by its version, for @snap_gpu_ms
+    CHECK("the snapshot command buffer's GPU time is recorded", g_snap_gpu[g_snap_v % PRING].v == g_snap_v && g_snap_gpu[g_snap_v % PRING].ms > 0);
+    // With the switch off the raw copy alone is taken and the slot's picture is not valid for the present
+    g_snap_canvas_test[0] = 0;   // no canvas: as with no layer
+    snap_present(&t); CHECK("the snapshot completes without a canvas", [g_snap_ev waitUntilSignaledValue:g_snap_v timeoutMS:4000]);
+    CHECK("no canvas: the slot's scaled picture is not offered to the present", !g_snap[1].up_valid && !snap_up_for(1, g_snap[1].up_gen, 128, 96, MTLPixelFormatBGRA8Unorm, &up, &vp));
+}
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(15); setbuf(stdout, NULL);
     if (argc != 2) return 2;
     setenv("DM_PRESENT_SNAP", "1", 1); setenv("DM_PRESENT_HZ", "0", 1);
+    if (!strcmp(argv[1], "fxsnap")) setenv("DM_PRESENT_UPSCALE", "metalfx", 1);
     mtl_init();
     if (!strcmp(argv[1], "suspend")) suspend_case();
     else if (!strcmp(argv[1], "pacing")) pacing_case();
     else if (!strcmp(argv[1], "copy")) pending_copy_case();
     else if (!strcmp(argv[1], "resize")) resize_case();
+    else if (!strcmp(argv[1], "fxsnap")) fx_snap_case();
     else return 2;
     printf("present snapshots: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

@@ -25,10 +25,10 @@ dm/gfx/nvn/nvn_mtl.m	bugprone-misplaced-widening-cast	1
 dm/gfx/nvn/nvn_mtl.m	bugprone-signed-char-misuse	1
 dm/gfx/nvn/nvn_mtl.m	bugprone-suspicious-memory-comparison	8
 dm/gfx/nvn/nvn_mtl.m	bugprone-suspicious-realloc-usage	20
-dm/gfx/nvn/nvn_mtl.m	clang-analyzer-core.NullDereference	11
+dm/gfx/nvn/nvn_mtl.m	clang-analyzer-core.NullDereference	10
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-core.uninitialized.Assign	2
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-nullability.NullableDereferenced	5
-dm/gfx/nvn/nvn_mtl.m	clang-analyzer-nullability.NullablePassedToNonnull	15
+dm/gfx/nvn/nvn_mtl.m	clang-analyzer-nullability.NullablePassedToNonnull	14
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-osx.cocoa.RetainCount	2
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-security.ArrayBound	2
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-unix.cstring.NullArg	4
@@ -63,7 +63,6 @@ dm/gfx/tests/t_present_alloc.m	clang-analyzer-nullability.NullablePassedToNonnul
 dm/gfx/tests/t_present_crop.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_present_rescue.m	bugprone-unsafe-functions	1
 dm/gfx/tests/t_present_snap.m	bugprone-unsafe-functions	1
-dm/gfx/tests/t_present_snap.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_present_snap.m	clang-analyzer-osx.cocoa.RetainCount	1
 dm/gfx/tests/t_primitive_restart.m	clang-analyzer-osx.cocoa.RetainCount	1
 dm/gfx/tests/t_primitive_restart.m	clang-analyzer-unix.cstring.UninitializedRead	1

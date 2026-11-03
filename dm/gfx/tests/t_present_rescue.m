@@ -129,6 +129,32 @@ static void latency(void) {   // Only variable-refresh fullscreen needs the late
     }
     g_present_latency = 0; test_fullscreen = test_variable_refresh = 0; link_sync(); g_link = nil; g_link_started = 0;
 }
+static void handoff(void) {   // The shift judged while a frame waits untaken (link_late_note in the presented handler): the link keeps taking frames until link_sync, on the game's
+    // present thread, sets mode 0 and invalidates it. Setting the mode in the handler stopped the callback while the link still owned the layer, and the waiting game hung
+    reset(); test_fullscreen = 1; test_variable_refresh = 1;
+    SilentDisplayLink *link = [SilentDisplayLink new];
+    g_link = link; g_link_started = 1; g_link_rl = CFRunLoopGetCurrent(); g_link_moved = g_link_leave = 0; g_link_shift = (link_shift_t){0}; g_link_offset = (link_offset_t){0};
+    link_sync();
+    g_pq_in = 2; g_pq_read = 1; g_pq_done = 0;   // frame 1 on its way to the screen, frame 2 queued and not yet taken: what the game waits for at its next acquire
+    int fired = 0;
+    for (uint64_t pn = 1000; pn < 1000 + 4 * LINK_SHIFT_N && !g_link_leave; pn++) {
+        double target = pn / 60.0;
+        g_link_ring[pn % PRING] = (link_ent){.n = pn, .target = target};
+        pthread_mutex_lock(&g_pq_mu); link_late_note(pn, target + 1.0 / 240); fired = g_link_leave; pthread_mutex_unlock(&g_pq_mu);
+    }
+    CHECK("the steady 1/240 s shift asks to leave the link", fired);
+    pthread_mutex_lock(&g_pq_mu); int takes = link_takes(); pthread_mutex_unlock(&g_pq_mu);
+    CHECK("after the request the link still takes the waiting frame", takes && g_dm_present_link == 1 && g_link_owns_layer);
+    link_sync();
+    CHECK("the next present's link_sync moves to mode 0", g_dm_present_link == 0 && g_link_moved && !g_link_leave && !g_link);
+    pthread_mutex_lock(&g_pq_mu); takes = link_takes(); pthread_mutex_unlock(&g_pq_mu);
+    CHECK("the link stops taking frames only once mode 0 is applied", !takes);
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, false);
+    CHECK("its run loop invalidates it and gives the layer to the present thread", link.invalidated && !g_link_owns_layer);
+    g_dm_present_link = 1; link_sync();
+    CHECK("a runtime setting back on the link wins over the move", !g_link_moved && g_dm_present_link == 1);
+    test_fullscreen = test_variable_refresh = 0; g_link = nil; g_link_started = 0; g_link_owns_layer = 0;
+}
 static void metal_lifecycle(void) {
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     CHECK("Metal device available", device != nil); if (!device) return;
@@ -147,7 +173,7 @@ static void metal_lifecycle(void) {
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(10); setbuf(stdout, NULL);
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "--metal"))) return 2;
-    thresholds(); backoff(); settings(); lifecycle(); latency();
+    thresholds(); backoff(); settings(); lifecycle(); latency(); handoff();
     if (argc == 2) metal_lifecycle();
     printf("present rescue: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

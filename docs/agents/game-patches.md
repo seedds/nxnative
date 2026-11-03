@@ -596,7 +596,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
   - render scale stub (the launcher offers DM_RENDER_SCALE)
   - launcher capabilities: CAMERA_ASPECT
-  - host [loader.c:332](../../dm/host/loader.c#L332): build check
+  - host [loader.c:334](../../dm/host/loader.c#L334): build check
 
 ### The Legend of Zelda: Link's Awakening
 
@@ -636,7 +636,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
   - render scale stub (the launcher offers DM_RENDER_SCALE)
   - launcher capabilities: CAMERA_ASPECT
-  - host [loader.c:333](../../dm/host/loader.c#L333): build check
+  - host [loader.c:335](../../dm/host/loader.c#L335): build check
 
 ### Xenoblade Chronicles 3
 

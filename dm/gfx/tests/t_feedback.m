@@ -1,4 +1,4 @@
-// Feedback snapshots and their per-draw argument substitution include separate texture slots; a snapshot is reused until the game's next barrier,
+// Feedback snapshots and their per-draw argument substitution include separate texture slots and read-only fragment images; a snapshot is reused until the game's next barrier,
 // and a draw that only samples an attachment nothing in its pass has written reads it directly. With the directory test_dmsh_fetch.py --fixture writes, a draw that samples the
 // attachment at its own pixel through a projective sample reads it from the tile (fb_tile_plan): a snapshot while its pipeline builds, then none after a barrier, the pass stays
 // open, and the GPU reads what an earlier draw of the pass wrote; not with a viewport smaller than the target.
@@ -11,15 +11,19 @@ uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(c, label) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
 
-static id<MTLTexture> target(tex_t *t, uint64_t serial) {
+static id<MTLTexture> target_format(tex_t *t, uint64_t serial, int format, int levels) {
     *t = (tex_t){.magic=MAGIC('T','E','X',0), .serial=serial};
-    t->d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=NVN_FORMAT_RGBA8,
-        .width=4, .height=4, .depth=1, .levels=1, .samples=1};
+    t->d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=format,
+        .width=4, .height=4, .depth=1, .levels=levels, .samples=1, .flags=format == NVN_FORMAT_R32UI ? NVN_TEXTURE_FLAGS_IMAGE : 0};
     MTLTextureDescriptor *d = tex_desc(t, 0); d.storageMode = MTLStorageModeShared;
+    if (format == NVN_FORMAT_R32UI) d.usage |= MTLTextureUsagePixelFormatView;
     id<MTLTexture> texture = [g_dev newTextureWithDescriptor:d];
     CHECK(texture != nil, "render target created");
     res_add(texture); mtl_tex_init(t); serial_put(serial, texture);
     return texture;
+}
+static id<MTLTexture> target(tex_t *t, uint64_t serial) {
+    return target_format(t, serial, NVN_FORMAT_RGBA8, 1);
 }
 static void clear(MTLClearColor color) {
     R.clear_c[0] = 1; R.cc[0] = color;
@@ -45,14 +49,23 @@ static void pixels(id<MTLBuffer> b, unsigned offset, const uint8_t want[4], cons
 static void slot_case(NvProg *pr, id<MTLRenderPipelineState> pipeline, int slot, int index) {
     int before = failed, tid = 600 + index;
     NvShader *fs = pr->sh[1]; fs->rf.b[0].reg = slot;
+    int image = fs->rf.b[0].kind == NVN_RB_IMG;
     tex_t source, output;
-    id<MTLTexture> original = target(&source, 99700 + index * 2);
+    id<MTLTexture> original = target_format(&source, 99700 + index * 2, image ? NVN_FORMAT_R32UI : NVN_FORMAT_RGBA8, 1);
     id<MTLTexture> destination = target(&output, 99701 + index * 2);
     mtl_reg_tex(tid, &source, NULL);
     id<MTLBuffer> result = [g_dev newBufferWithLength:2048 options:MTLResourceStorageModeShared]; res_add(result);
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
-    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &source; S.tex[1][slot] = tid;
-    clear(MTLClearColorMake(1, 0, 0, 1));
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &source;
+    if (image) S.img[1][slot] = tid; else S.tex[1][slot] = tid;
+    clear(MTLClearColorMake(image ? 17 : 1, 0, 0, 1));
+    if (image) {
+        fs->rf.b[0].rw = 1; fb_prepare(pr);
+        CHECK(!g_fb_n && g_enc, "writes stay on the original attachment");
+        fs->rf.b[0].rw = 0; fs->rf.b[0].atom = 1; fb_prepare(pr);
+        CHECK(!g_fb_n && g_enc, "atomics stay on the original attachment");
+        fs->rf.b[0].atom = 0;
+    }
     fb_prepare(pr);
     CHECK(!g_enc, "snapshot closes the preceding render pass");
     CHECK(g_fb_n == 1, "feedback attachment receives a snapshot");
@@ -62,13 +75,21 @@ static void slot_case(NvProg *pr, id<MTLRenderPipelineState> pipeline, int slot,
     // Overwrite the attachment after the snapshot, then render the sampled value
     // into a distinct target. This makes a missing snapshot fail deterministically
     // even on GPUs that happen to tolerate sampling an attached render target.
-    clear(MTLClearColorMake(0, 1, 0, 1)); rp_end();
+    clear(MTLClearColorMake(image ? 29 : 0, 1, 0, 1)); rp_end();
     R.rt.color[0] = &output;
     sample(fs, pipeline);
     uint64_t bound = *(uint64_t *)((uint8_t *)fs->ab_buf.contents + fs->ab_off);
     CHECK(g_fb_n == 1 && bound == g_fb_rid[0] && bound != original.gpuResourceID._impl,
           "production argument buffer contains the snapshot resource ID");
     readback(destination, result, 0);
+    if (image) {
+        // A different slot can write the same resource: a snapshot already available for a reader must never redirect a writer.
+        fs->rf.b[0].rw = 1; args_dirty_all();
+        sample(fs, pipeline);
+        bound = *(uint64_t *)((uint8_t *)fs->ab_buf.contents + fs->ab_off);
+        CHECK(bound == original.gpuResourceID._impl, "a writable image bypasses an available snapshot");
+        fs->rf.b[0].rw = 0; args_dirty_all();
+    }
     // With a different attachment the following draw restores the original binding.
     fb_prepare(pr);
     CHECK(g_fb_n == 0, "following draw needs no snapshot");
@@ -82,6 +103,38 @@ static void slot_case(NvProg *pr, id<MTLRenderPipelineState> pipeline, int slot,
     pixels(result, 1024, (const uint8_t[]){0, 255, 0, 255}, "following draw reads the green original attachment");
     printf("feedback slot %d: %s\n", slot, before == failed ? "PASS" : "FAIL");
     mtl_tex_release(&source); mtl_tex_release(&output);
+}
+// A registered image view names its own level. A shader that needs a different pixel class keeps its normal image binding.
+static void image_view_case(NvProg *pr) {
+    const int tid = 661;
+    tex_t source;
+    target_format(&source, 99796, NVN_FORMAT_R32UI, 2);
+    view_t level1 = {.set_levels=1, .base_level=1, .nlevels=1};
+    mtl_reg_image(tid, &source, &level1);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    nvn_rbind *b = &pr->sh[1]->rf.b[0];
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &source; S.img[1][b->reg] = tid;
+    clear(MTLClearColorMake(11, 0, 0, 1));
+    fb_prepare(pr);
+    CHECK(g_fb_n == 0 && g_enc, "a level-1 image does not snapshot a level-0 attachment");
+    rp_end();
+    R.rt.has_cview[0] = 1; R.rt.cview[0] = level1;
+    clear(MTLClearColorMake(17, 0, 0, 1));
+    fb_prepare(pr);
+    CHECK(g_fb_n == 1 && !g_enc && g_fb_src[0].parentRelativeLevel == 1 && g_fb_use[0].width == 2,
+          "a level-1 image snapshots its level-1 attachment");
+    rp_end();
+    b->dpf = NVN_DPF_SINT;
+    clear(MTLClearColorMake(29, 0, 0, 1));
+    os_unfair_lock_lock(&g_rmu);
+    int real; uint64_t rid; id<MTLTexture> signed_view = img_binding(tid, b, &rid, &real);
+    os_unfair_lock_unlock(&g_rmu);
+    CHECK(real && signed_view.pixelFormat == MTLPixelFormatR32Sint, "the image binding can reinterpret R32Uint as SINT");
+    fb_prepare(pr);
+    CHECK(g_fb_n == 0 && g_enc, "a SINT-class read of the R32Uint attachment keeps its reinterpreted image binding");
+    rp_end(); b->dpf = NVN_DPF_UINT;
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "image view submission completed without error");
+    mtl_tex_release(&source);
 }
 // The rule without a listed shader: copy once, reuse until a barrier, end the pass when an earlier draw of it read the attachment directly.
 static void reuse_case(NvProg *pr) {
@@ -193,6 +246,13 @@ static void tile_case(const char *dir) {
     if (ps) { enc_r_pso(g_enc, ps); enc_r_scissor(g_enc, (MTLScissorRect){0, 0, 4, 4}); enc_r_args(g_enc, MTLRenderStageFragment, zero.gpuAddress, 0); enc_r_draw(g_enc, MTLPrimitiveTypeTriangle, 0, 3); }
     rp_end();
     enc_b_copy_texture_buffer(blit(), attachment, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(4, 4, 1), result, 0, 256, 1024);
+    // An image and a sampled texture can share a slot number. Only the sampled binding reads the tile.
+    fs->rf.b[1] = (nvn_rbind){.kind=NVN_RB_IMG, .reg=0, .aid=1, .dtt=MTLTextureType2D};
+    fs->rf.nb = 2; S.img[1][0] = tid; g_fb_bar++;
+    clear(MTLClearColorMake(1, 0, 0, 1)); fb_prepare(pr);
+    CHECK(g_fb_tseq == g_draw_seq && g_fb_n == 1 && g_fb_src[0] == attachment && g_fb_count == copies + 2,
+          "sampled slot 0 reads the tile while image slot 0 snapshots the same attachment");
+    rp_end(); fs->rf.nb = 1; S.img[1][0] = 0;
     S.vp[0][2] = 2; g_fb_bar++;
     clear(MTLClearColorMake(1, 0, 0, 1));
     fb_prepare(pr);
@@ -237,6 +297,8 @@ int main(int argc, char **argv) { @autoreleasepool {
         "vertex float4 v(uint i[[vertex_id]]) { return float4(i == 1 ? 3.0 : -1.0, i == 2 ? 3.0 : -1.0, 0, 1); }\n"
         "struct A {texture2d<float, access::read> source[[id(0)]];};\n"
         "fragment float4 f(float4 p[[position]], constant A&a[[buffer(0)]]) {return a.source.read(uint2(p.xy));}\n"
+        "struct I {texture2d<uint, access::read> source[[id(0)]];};\n"
+        "fragment float4 mask(float4 p[[position]], constant I&a[[buffer(0)]]) {uint v = a.source.read(uint2(p.xy)).x; return float4(v==17u, v==29u, 0, 1);}\n"
         options:nil error:&error];
     CHECK(lib != nil, "synthetic shader compiles");
     if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 1; }
@@ -254,6 +316,14 @@ int main(int argc, char **argv) { @autoreleasepool {
     for (int i = 0; i < 3; i++) slot_case(pr, pipeline, slots[i], i);
     reuse_case(pr);
     shape_case();
+    fs->fn = [lib newFunctionWithName:@"mask"];
+    fs->ae = [fs->fn newArgumentEncoderWithBufferIndex:0]; fs->arg_len = fs->ae.encodedLength;
+    fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_IMG, .aid=0, .dtt=MTLTextureType2D, .dpf=NVN_DPF_UINT};
+    d.fragmentFunction = fs->fn;
+    pipeline = [g_dev newRenderPipelineStateWithDescriptor:d error:&error];
+    CHECK(pipeline != nil, "integer image pipeline compiles");
+    if (pipeline) slot_case(pr, pipeline, 3, 3);
+    image_view_case(pr);
     if (argc == 2) tile_case(argv[1]);
     printf("feedback snapshot: %d checks, %d failed\n", checks, failed);
     return failed != 0;

@@ -181,6 +181,8 @@ During a movie, Plus then a held X skips it. The diagnostic watchdog is off when
 
 ## Found on this game
 
+- [Same-pass feedback through a read-only image](../../../docs/reference/rendering.md#same-pass-feedback-read-through-a-snapshot): lighting shader `15816d836842bfb5` reads its R32Uint zone mask between barriers. Reading the previous frame’s mask made the Colony Sigma cutscene alternate in brightness. Taking the extra snapshots costs GPU time in that scene ([#1009](https://github.com/seedds/nxnative/issues/1009)).
+
 - [Monolith ARH1, XBC1 and HCPS/SLCT shader containers](../../../docs/reference/shaders.md#monolith-arh1-xbc1-and-hcpsslct-shader-containers).
 - [Subgroup operations rewritten for a one-lane subgroup](../../../docs/reference/shaders.md#subgroup-operations-rewritten-for-a-one-lane-subgroup).
 - [IMAGE usage does not split texture storage](../../../docs/reference/rendering.md#image-usage-does-not-split-texture-storage).

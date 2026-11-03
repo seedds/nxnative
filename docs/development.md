@@ -304,6 +304,11 @@ python3 dm/tools/lint_c.py tidy -j 8           # the check CI runs; FILE... chec
 python3 dm/tools/lint_c.py tidy --update       # after fixing findings: lowers the counts, never adds one
 ```
 
+Both lint workflows compare a pull request's baseline with the base commit SHA
+recorded in its event, not the branch tip when the runner starts. If `main`
+shrinks its baseline while a job is queued, fetching that newer tip would
+incorrectly count the tested snapshot's older baseline as new findings.
+
 Raising `LLVM_VERSION` takes a new baseline in the same change
 (`tidy --rebaseline`; `dm/tools/tests/test_lint_c.py` checks that the two name
 the same release).

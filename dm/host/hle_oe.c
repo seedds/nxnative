@@ -77,7 +77,12 @@ static void focus_sync(int applets) {   // applets: +1 an applet opens, -1 one c
     pthread_mutex_unlock(&g_seen_lock);
     if (!changed) return;   // pushed outside the lock: 15 only says "query the state again", so pushes from two threads need no order
     LOG("oe focus state → %d%s", s, applets > 0 ? " (library applet open)" : applets < 0 ? " (library applet closed)" : "");
-    if (focus_notifies()) mq_push(MSG_FOCUS);
+    // DM_FOCUS_NOTIFY=0: some games' own out-of-focus handler stalls seconds per switch
+    // (TotK: ~4.3 s per focus cycle, pure guest-side). A desktop single-user session loses nothing
+    // by the guest never learning about focus; the front end still releases its input on blur.
+    static int notify = -1;
+    if (notify < 0) { const char *e = getenv("DM_FOCUS_NOTIFY"); notify = e ? atoi(e) : 1; }
+    if (notify && focus_notifies()) mq_push(MSG_FOCUS);
 }
 void dm_applet_enter(const char *name) { LOG("oe library applet: %s", name); focus_sync(1); }
 void dm_applet_leave(void) { focus_sync(-1); }

@@ -373,7 +373,9 @@ static void thr_free(thr_t *t) {   // Holding G; unlink from the all-threads cha
     pthread_cond_destroy(&t->cv); pthread_cond_destroy(&t->pcv); free(t);
 }
 static void wake_sync_waiters(const void *obj);
+__attribute__((weak)) void dm_frame_wg_leave(void) {}   // hle_nvn.c: a thread that joined the frame workgroup leaves it (one still joined when it exits is a crash in libdispatch)
 static void thread_exit(thr_t *t) {
+    dm_frame_wg_leave();
     t->exit_ns = now_ns(); t->exit_tick = dm_thread_tick_fn ? dm_thread_tick_fn() : 0;
     // No logging here: the exit happens on the guest thread's own stack (some are only a dozen or so KiB), and a printf with floating point would blow the stack (real-device smoke test: SIGBUS when LibcurlResolver exits, backtrace fprintf → __dtoa). Only the time is recorded, and it is printed later in the state dump
     pthread_mutex_lock(&G);

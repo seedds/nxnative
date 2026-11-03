@@ -27,6 +27,9 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <errno.h>
+#include <os/workgroup.h>
+#include <dlfcn.h>
+void dm_frame_wg_join(void);
 #if TARGET_OS_OSX
 #define DM_MEM_CAP_DEFAULT_GB 24
 #else
@@ -1110,6 +1113,7 @@ static uint8_t *cmd_alloc(cmd_t *o, uint32_t size) {
 // 8-byte BEGIN on each of several hundred recordings a model came out a 4 KB page over its resource size table entry
 NVN(nvnCommandBufferBeginRecording, void, NVNcommandBuffer *c) {
     cmd_t *o = CB(c);
+    dm_frame_wg_join();   // a thread that records command buffers works to the frame's deadline (once per thread)
     if (o->recording) LOG("[RED] BeginRecording re-entered");
     o->recording = 2;   // 2: recording, no command yet (cmd_alloc sets begin)
     o->chunk = NULL; o->ctl_list = NULL; o->ctl_q[0] = o->ctl_q[1] = 0;
@@ -1846,6 +1850,41 @@ static uint64_t g_acq_wait_ns, g_pq_wait_ns;   // Accumulated display-link wait 
 static uint64_t g_fs_start, g_fs_wait;   // frame step (fstep_tick): when the first acquire after a present returned (the frame's start, 0 = none yet), and its pacing wait
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
 extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
+// Frame workgroup (DM_FRAME_WG, on by default; 0 off): the threads that make a frame (the acquiring thread, the encode thread, the threads that record command buffers) join one
+// os_workgroup interval, and the acquiring thread marks each frame as an interval with the present period as its deadline. That is how the system's performance controller
+// learns that these threads work to a deadline together: an iPad Pro M4 otherwise ran Breath of the Wild mostly on its efficiency cores whenever many threads were busy
+// (14-55% of its CPU time on performance cores while playing), with the translation thread 60-70% slower and frames dropped, though the device was not hot. Interval workgroups
+// are made by AudioWorkIntervalCreate (AudioToolbox, looked up at run time), the documented way for an app's own real-time threads with a cadence of their own
+static os_workgroup_interval_t g_fwg; static int g_fwg_state;   // 0 not tried, 1 made, -1 off or failed
+static __thread int t_fwg_joined; static __thread os_workgroup_join_token_s t_fwg_tok;
+static uint64_t g_fwg_joins, g_fwg_fail;
+static int fwg_get(void) {
+    if (g_fwg_state) return g_fwg_state > 0;
+    const char *e = getenv("DM_FRAME_WG"); if (e && !strcmp(e, "0")) { g_fwg_state = -1; LOG("[nvn] DM_FRAME_WG=0: no frame workgroup"); return 0; }
+    void *h = dlopen("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox", RTLD_LAZY);
+    os_workgroup_interval_t (*mk)(const char *, os_clockid_t, os_workgroup_attr_t) = h ? (os_workgroup_interval_t (*)(const char *, os_clockid_t, os_workgroup_attr_t))dlsym(h, "AudioWorkIntervalCreate") : NULL;
+    g_fwg = mk ? mk("nxnative frame", OS_CLOCK_MACH_ABSOLUTE_TIME, NULL) : NULL;
+    g_fwg_state = g_fwg ? 1 : -1;
+    LOG("[nvn] frame workgroup: %s", g_fwg ? "made (the frame's threads join it; each frame is an interval with the present period as deadline)" : "[RED] AudioWorkIntervalCreate unavailable, none");
+    return g_fwg_state > 0;
+}
+void dm_frame_wg_join(void) {   // the calling thread works to the frame's deadline (nvn_rec.h's encode thread, the recording threads, the acquiring thread)
+    if (t_fwg_joined || !fwg_get()) return;
+    int r = os_workgroup_join(g_fwg, &t_fwg_tok);
+    t_fwg_joined = r ? -1 : 1;
+    if (r) { if (!g_fwg_fail++) { char nm[64] = ""; pthread_getname_np(pthread_self(), nm, sizeof nm); LOG("[nvn] frame workgroup: [RED] thread '%s' could not join (errno %d)", nm, r); } }
+    else { char nm[64] = ""; pthread_getname_np(pthread_self(), nm, sizeof nm); if (g_fwg_joins++ < 12) LOG("[nvn] frame workgroup: thread '%s' joined", nm); }
+}
+void dm_frame_wg_leave(void) { if (t_fwg_joined == 1) { os_workgroup_leave(g_fwg, &t_fwg_tok); t_fwg_joined = 0; } }   // hle_thread.c thread_exit (no logging: a guest stack may be small)
+static void fwg_frame(uint64_t period_ns) {   // on the acquiring thread, once per frame: the previous interval ends, the next one starts now with its deadline one period away
+    if (!period_ns || !fwg_get()) return;
+    dm_frame_wg_join(); if (t_fwg_joined < 0) return;
+    static int started; static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
+    if (started) (void)os_workgroup_interval_finish(g_fwg, NULL);
+    uint64_t now = mach_absolute_time(), dl = now + period_ns * tb.denom / tb.numer;
+    int r = os_workgroup_interval_start(g_fwg, now, dl, NULL); started = !r;
+    static int said; if (r && !said++) LOG("[nvn] frame workgroup: [RED] interval start failed (errno %d)", r);
+}
 NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
     win_t *o = (win_t *)w;
     int n = window_active(o);
@@ -1855,7 +1894,7 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     if (!dm_detclock_enabled()) {   // Register the acquire thread as a time-constraint thread (no longer registered only when it "arrived early": it must also declare itself when it is constantly behind in the hot state)
         static uint64_t rt_period; uint64_t period = present_period(o), rtp = rt_period_ns(o, period);
         if (rtp && rt_period != rtp) { rt_period = rtp; set_time_constraint(rtp); }
-        rt_comp_tick(rtp);
+        rt_comp_tick(rtp); fwg_frame(rtp);
         uint64_t p0 = now_ns(); int snap = mtl_snap_on();
         if (present_unpaced(o)) {}   // present interval 0: no vsync wait (below); only the free texture the ticket wait below gives
         else if (snap && mtl_link_active() && mtl_link_stalled()) { if (wait) sleep_until_ns(at); }   // present snapshots (nvn_mtl.m) while the display link is silent (the window in the background or covered):

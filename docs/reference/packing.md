@@ -76,6 +76,13 @@
 - **Fix:** `unzs` feeds the command the bytes it read (`input=`). No other tool hands an external command a path inside the image. Test: `test_romfs_read.py` `test_zstd_file_inside_an_image`.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md#shaders): every file of its RomFS is zstd-compressed, 13,744 left out in both versions; the first image-backed build after the folder extraction.
 
+### Reading a RomFS image takes tens of minutes on a slow drive
+
+- **Symptom:** on a drive where each file operation is a round trip (a Windows drive from WSL; a network share), the NSP script spends about half an hour between packing the RomFS and the DLC (the shader sources' checks), and the shader split is slow too; with no red line.
+- **Cause:** `dm/tools/romfs.py` looked the image up on the real file system (a `stat` of the image file, which keeps a replaced image from being read through a stale index) for every path it was given. A walk did it for every entry it listed, to tell directories from files, and the shader sources' checks walk the image several times; each file opened inside the image also opened the image file again.
+- **Fix:** a walk and a listing look the image up once and take each entry's type and size from its index (the image as it was when the walk started); a file opened inside an image duplicates a descriptor the loaded image keeps open. `open` and `stat` of a path still check the image each time. A full walk of Donkey Kong Bananza's image (80,273 files) in WSL: 50.5 s → 0.2 s, the same entries in the same order; an open and a 4 KB read: 0.91 → 0.46 ms. Tests: `test_romfs_read.py`.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md), the first build in WSL ([Packing on Windows](../development.md#packing-on-windows-wsl)): the shader sources' checks took 30 minutes, 27 seconds after the change.
+
 ## Add-on content
 
 ### DLC in Documents is ignored or removed DLC remains installed
@@ -199,3 +206,19 @@
 - **Cause:** the base game's Program NCA is sparse: its code and data sections carry a sparse layer and leave out data that the update supplies, so the base is smaller than its update (1.6 GB against 2.9 GB). Horizon mounts such an NCA only through its patch; read alone, the left-out ranges fail the hash check from the first block of the ExeFS. The lookup (`same_build`) tries main's build ID of the newest update first, then of the base game alone, and `run` stopped the build on the second attempt's failure.
 - **Fix:** `dm/tools/nx_extract/Program.cs` stops with exit code 4 and `[RED] the base game's program is sparse: it can be read only with its update NSP` when it is given a sparse base without an update (any enabled section of the Program NCA with a sparse layer). `scripts/build_ipa_from_nsp.py` `run` takes the exit codes a caller accepts (`ok`), and `same_build` accepts 4: the base game alone then has no main of its own and the lookup goes on. The base game with its update reads as before (LibHac layers the update over the sparse base; the whole 4.2 GB merged RomFS of the game below reads with every hash check on).
 - **Found on:** Minecraft Dungeons II (`0100A7C01B792000`, no profile yet), base v0 (SDK 22.2.0) with update v131072 (1.1.3.0). Applies to any game whose base Program NCA is sparse.
+
+## WSL (Windows)
+
+### The Windows Metal compiler takes a path with spaces as several files
+
+- **Symptom:** packing in WSL ([Packing on Windows](../development.md#packing-on-windows-wsl)) from a game folder whose path has spaces, the iOS shaders step logs, for every shader, `metal: error: no such file or directory: 'E:\[www.example.com]'`, `metal: error: -E or -x required when input is from standard input` and `metal: error: cannot specify -o when generating multiple output files`, and no library is made.
+- **Cause:** `metal.exe` of Metal Developer Tools for Windows 6.2 splits its arguments at spaces, quoted or not: started straight from Windows with a quoted path it reports the same pieces, while another Windows program started from WSL with the same arguments receives them whole, so WSL's interop passes them correctly.
+- **Fix:** `dm/ios/tools/wsl/xcrun`, which gives the Metal tools Windows paths, sends a path with spaces through a directory junction without them: `<drive>:\.nxnative-wsl-links\<hash>`, made once (`mklink /J`, no administrator rights needed) for the last folder in the path whose name has a space. A file name with a space stops with a message. Workaround for a fault of Apple's tool.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md), a dump folder named `[www.…] - DonkeyKongBananza`.
+
+### Some Metal tool runs fail in WSL with UtilAcceptVsock: accept4 failed 110
+
+- **Symptom:** packing in WSL ([Packing on Windows](../development.md#packing-on-windows-wsl)), the iOS shaders step ends with `28,584 of 28,603 shaders ready; 19 failed`, the reasons at the end of `dmsh_build.log` are `[metal failed]` `metal` and `metallib` commands with nothing of the compiler's own, and the log holds WSL's own lines `<3>WSL (…) ERROR: UtilAcceptVsock:281: accept4 failed 110` (33 of them in that build, 21 pulling libraries failed as well). A next run of the same step reuses the failures, as its inputs did not change.
+- **Cause:** WSL's interop, which starts every Windows program run from Linux, timed out connecting to Windows (`accept4`, error 110: `ETIMEDOUT`) while the shader build's workers started `metal.exe` and `metallib.exe` many at a time; the run then failed without compiling. The same commands succeeded when the step ran again.
+- **Fix:** `dm/ios/tools/wsl/xcrun` runs a Metal tool again, up to three times, when it fails with that message of WSL's (`xcrun (WSL): WSL's interop did not start metal.exe, running it again` in the log); a failure of the tool itself is returned as it is. With it, the step that had failed built all 28,603 shaders, running a tool again 44 times. Workaround for a fault of WSL's. To build a step that already ended with such failures again, remove its key, `<build folder>/shader/ios/b-<chain>.key`: the cache gives back every library that built.
+- **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md) 2.0.2 with its DLC, i7-12700K, 20 workers.

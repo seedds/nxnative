@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+# xcrun for building the iOS app in WSL (Linux on Windows) instead of on a Mac: the tools call xcrun as they do on macOS, and this answers the part an iOS build uses.
+#   xcrun [-sdk|--sdk iphoneos|macosx] metal | metallib | metal-tt | metal-<tool> ARGS   runs Apple's Metal Developer Tools for Windows (<tool>.exe through WSL's interop),
+#       with every absolute Linux path in ARGS (alone, after an '=' or after -I) as the Windows path of the same file; without a -m<os>-version-min / -target,
+#       metal and metal-tt get the SDK's default deployment target, as xcrun's SDK selection gives them on a Mac. The Windows tools reach only Windows drives
+#       (/mnt/<drive>): metal and metallib get their files elsewhere (WSL's own disk, where a build is much faster) through a staging folder on a Windows drive (stage)
+#   xcrun [-sdk|--sdk S] --show-sdk-path | --show-sdk-version | --show-sdk-build-version | --show-sdk-platform-path   from the Darwin SDK xtool made from Xcode.xip
+# Environment: DM_WSL_METAL = the Metal Developer Tools' bin folder (Linux path; default: the default install folder), DM_XTOOL_SDK = xtool's darwin.artifactbundle
+# (default ~/.swiftpm/swift-sdks/darwin.artifactbundle), DM_WSL_STAGE = the staging folder (a Linux path on a Windows drive; default /mnt/c/.nxnative-wsl-stage).
+# Anything else (clang, swiftc, devicectl) is a Mac-only step: it exits 72 with a message, as xcrun does for an unknown tool.
+import hashlib, json, os, plistlib, re, shutil, subprocess, sys, tempfile, time
+
+BUNDLE = os.environ.get('DM_XTOOL_SDK') or os.path.expanduser('~/.swiftpm/swift-sdks/darwin.artifactbundle')
+METAL = os.environ.get('DM_WSL_METAL') or '/mnt/c/Program Files/Metal Developer Tools/bin'
+STAGE = os.environ.get('DM_WSL_STAGE') or '/mnt/c/.nxnative-wsl-stage'
+PLATFORMS = {'iphoneos': ('iPhoneOS', 'ios'), 'macosx': ('MacOSX', 'macos')}
+DRIVE = re.compile(r'/mnt/([a-zA-Z])(/.*)?$')
+
+def die(msg, code=72): sys.stderr.write(f'xcrun (WSL): {msg}\n'); sys.exit(code)
+
+def sdk_path(sdk):
+    plat = PLATFORMS[sdk][0]
+    root = os.path.join(BUNDLE, 'Developer/Platforms', f'{plat}.platform', 'Developer/SDKs')
+    try: names = [n for n in os.listdir(root) if re.fullmatch(re.escape(plat) + r'[\d.]+\.sdk', n)]
+    except OSError: die(f'no {plat} SDK in {BUNDLE} (xtool sdk install <Xcode.xip>)')
+    if not names: die(f'no {plat} SDK in {root}')
+    # the fullest version name (MacOSX27.2.sdk, not its alias MacOSX27.sdk), the newest of those
+    return os.path.join(root, max(names, key=lambda n: [int(x) for x in n[len(plat):-4].split('.') if x]))
+
+def sdk_settings(sdk): return json.load(open(os.path.join(sdk_path(sdk), 'SDKSettings.json')))
+
+def win(p):   # a path on a Windows drive (/mnt/<drive>/...) as Windows sees it
+    m = DRIVE.match(os.path.abspath(p))
+    if not m: die(f'not on a Windows drive, which the Metal tools need: {p}', 64)
+    return f'{m[1].upper()}:' + (m[2] or '/').replace('/', '\\')
+
+LINKS = '.nxnative-wsl-links'   # at the root of each drive: directory junctions to the folders whose names have spaces
+
+def spaceless(w):
+    """metal.exe (Metal Developer Tools for Windows 6.2) splits its arguments at spaces, quoted or not, so a path with spaces reaches it through a directory junction made once
+    for its last folder with a space in its name, <drive>:\\.nxnative-wsl-links\\<hash> (mklink /J needs no administrator rights); the rest of the path has none"""
+    parts = w.split('\\')
+    spaced = [i for i, p in enumerate(parts) if ' ' in p]
+    if not spaced: return w
+    last = spaced[-1]
+    if not re.fullmatch(r'[A-Za-z]:', parts[0]) or last == len(parts) - 1: die(f'a path with a space in its file name cannot reach the Metal tools: {w}', 64)
+    target = '\\'.join(parts[:last + 1])
+    name = hashlib.sha1(target.lower().encode()).hexdigest()[:16]
+    link, seen = f'{parts[0]}\\{LINKS}\\{name}', f'/mnt/{parts[0][0].lower()}/{LINKS}/{name}'
+    if not os.path.lexists(seen):
+        os.makedirs(os.path.dirname(seen), exist_ok=True)
+        subprocess.run(['cmd.exe', '/c', 'mklink', '/J', link, target], cwd='/mnt/c', capture_output=True)   # a parallel run may make it first: either way it is there after
+        if not os.path.lexists(seen): die(f'cannot make the junction {link} -> {target} (for the spaces the Metal tools cannot take)')
+    return link + '\\' + '\\'.join(parts[last + 1:])
+
+class Stage:
+    """Files of a metal / metallib run that are not on a Windows drive: inputs are copied into a folder of the run on one, outputs written there and copied back after;
+    a module cache folder keeps one staged folder for every run that names it"""
+    def __init__(self): self.dir, self.back = None, []
+    def run_dir(self):
+        if self.dir is None:
+            try: os.makedirs(STAGE, exist_ok=True); self.dir = tempfile.mkdtemp(prefix='run-', dir=STAGE)
+            except OSError as e: die(f'cannot make a staging folder in {STAGE} ({e}): set DM_WSL_STAGE to a folder on a Windows drive')
+        return self.dir
+    def path(self, p, role):   # the path the tool gets for p: p itself on a Windows drive, else a staged one
+        p = os.path.abspath(p)
+        if DRIVE.match(p): return p
+        if role == 'cache':
+            d = os.path.join(STAGE, 'cache-' + hashlib.sha1(p.encode()).hexdigest()[:16]); os.makedirs(d, exist_ok=True); return d
+        s = os.path.join(self.run_dir(), f'{len(self.back)}-{os.path.basename(p)}')
+        if role == 'in': shutil.copyfile(p, s)
+        else: self.back.append((s, p))
+        return s
+    def finish(self):
+        for s, p in self.back:
+            if os.path.exists(s): shutil.copyfile(s, p)
+        if self.dir: shutil.rmtree(self.dir, ignore_errors=True)
+
+def run(cmd):
+    """The Windows tool, run again when WSL's interop did not start it. With many launches at once (a shader build's workers), the interop's connection to Windows can time out:
+    WSL prints its own error (UtilAcceptVsock: accept4 failed 110) and the run fails, while the same command succeeds when run again. That is WSL's to fix, so the run is
+    repeated, up to three times, only for that error; a failure of the tool itself is returned as it is"""
+    for attempt in range(4):
+        r = subprocess.run(cmd, stderr=subprocess.PIPE)
+        if r.returncode == 0 or b'UtilAcceptVsock' not in r.stderr or attempt == 3: break
+        sys.stderr.write(f'xcrun (WSL): WSL\'s interop did not start {os.path.basename(cmd[0])}, running it again\n')
+        time.sleep(attempt + 1)
+    sys.stderr.buffer.write(r.stderr); sys.stderr.flush()
+    return r.returncode
+
+SEPARATE = {'-o', '-target', '-arch', '-x', '-MF', '-MT', '-include', '-isysroot'}   # options whose value is the next argument
+
+def tool_args(rest, stage):
+    out, i = [], 0
+    while i < len(rest):
+        a = rest[i]
+        if a in SEPARATE and i + 1 < len(rest):
+            v = rest[i + 1]
+            if a == '-o' and v.startswith('/'): v = spaceless(win(stage.path(v, 'out')))
+            elif v.startswith('/'): v = spaceless(win(stage.path(v, 'in')))
+            out += [a, v]; i += 2; continue
+        if m := re.match(r'(-fmodules-cache-path=)(/.*)$', a): a = m[1] + spaceless(win(stage.path(m[2], 'cache')))
+        elif m := re.match(r'(-o)(/.*)$', a): a = m[1] + spaceless(win(stage.path(m[2], 'out')))
+        elif m := re.match(r'(-I|-[A-Za-z][\w-]*=)(/.*)$', a): a = m[1] + spaceless(win(m[2]))   # a folder of headers: it has to be on a Windows drive
+        elif a.startswith('/'): a = spaceless(win(stage.path(a, 'in')))   # an input file
+        out.append(a); i += 1
+    return out
+
+args = sys.argv[1:]
+sdk = 'macosx'   # xcrun's default SDK
+while args and args[0] in ('-sdk', '--sdk'):
+    if len(args) < 2: die('-sdk needs a name', 64)
+    sdk = re.sub(r'[\d.]+$', '', args[1]).lower(); args = args[2:]
+if sdk not in PLATFORMS: die(f'unsupported SDK {sdk} (iphoneos, macosx)', 64)
+if not args: die('no tool given', 64)
+
+show = {'--show-sdk-path': lambda: sdk_path(sdk), '--show-sdk-version': lambda: sdk_settings(sdk)['Version'],
+        '--show-sdk-platform-path': lambda: os.path.dirname(os.path.dirname(os.path.dirname(sdk_path(sdk)))),
+        '--show-sdk-build-version': lambda: plistlib.load(open(os.path.join(sdk_path(sdk), 'System/Library/CoreServices/SystemVersion.plist'), 'rb'))['ProductBuildVersion']}
+if args[0] in show: print(show[args[0]]()); sys.exit(0)
+
+tool, rest = args[0], args[1:]
+if not (tool in ('metal', 'metallib') or tool.startswith('metal-')): die(f'{tool} is not available in WSL: only the Metal tools and the SDK queries are')
+exe = os.path.join(METAL, tool + '.exe')
+if not os.path.exists(exe): die(f'{exe} not found (install Metal Developer Tools for Windows, or set DM_WSL_METAL)')
+osname = PLATFORMS[sdk][1]
+versioned = any(a.startswith(('-target', '-mios-version-min', '-mmacosx-version-min', '-mmacos-version-min', '-ios-version-min', '-macos-version-min')) for a in rest)
+if tool == 'metal' and not versioned and not any(a in ('--version', '-v', '-help', '--help') for a in rest):
+    rest = ['-target', f'air64-apple-{osname}{sdk_settings(sdk)["DefaultDeploymentTarget"]}'] + rest
+stage = Stage()
+if tool not in ('metal', 'metallib'):   # metal-tt reads library paths inside its script: its files stay where they are, on a Windows drive
+    sys.exit(run([exe] + [re.sub(r'^(/.*)$', lambda m: spaceless(win(m[1])), a) if a.startswith('/') else
+                          (lambda m: m[1] + spaceless(win(m[2])) if m else a)(re.match(r'(-I|-[A-Za-z][\w-]*=)(/.*)$', a)) for a in rest]))
+targs = tool_args(rest, stage)
+try: code = run([exe] + targs)   # with every file on a Windows drive, stage has nothing to copy
+finally:
+    try: stage.finish()
+    except OSError as e: die(f'cannot copy back the outputs ({e})')
+sys.exit(code)

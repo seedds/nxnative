@@ -83,6 +83,7 @@ SWITCH_ALIAS = 0x1000000000             # the Switch's alias region (64 GB), whi
 PROGRESS = 'auto'                       # stage lines on the console: 'bar' (one line per stage, redrawn in place), 'lines' (a plain line every BEAT seconds), 'off' (only each stage's start and end); 'auto' = bar in a terminal or Spyder, lines when the output goes to a file; 'json' = one JSON event per line, for a program that shows the build
 BEAT = 30                               # seconds between progress lines in 'lines' mode
 TOOL_PATHS = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/local/share/dotnet', os.path.expanduser('~/.dotnet')]   # GUI apps such as Spyder do not get the shell's PATH
+WSL = sys.platform == 'linux' and bool(os.environ.get('WSL_DISTRO_NAME'))   # packing the iOS app in WSL instead of on a Mac (scripts/setup_wsl.sh once; wsl_env() then finds what it made)
 
 
 class BuildError(Exception):
@@ -1045,17 +1046,25 @@ def check_prereqs(env, xlate, mac=False):   # mac: a Mac-only build (PLATFORM 'm
     missing = [m for m in ('lz4.block', 'capstone', 'fontTools') if not _importable(m)] + ([] if _importable('compression.zstd') or _importable('backports.zstd') else ['backports.zstd'])   # zstd: built in from Python 3.14
     if missing: raise BuildError(f'the current Python ({sys.executable}) is missing modules: {", ".join(missing)} (pip install lz4 "capstone>=5,<6" fonttools backports.zstd; backports.zstd only before Python 3.14)')
     check_capstone()
-    tools = {'xcodebuild': 'Xcode', 'xcodegen': 'brew install xcodegen', 'dotnet': '.NET SDK 10', 'zstd': 'brew install zstd', 'make': 'Xcode', 'glslangValidator': 'brew install glslang'}   # glslang: an OpenGL game's shaders, checked before its capture
+    if WSL:   # dm/ios/tools/wsl: xtool's iOS SDK and the Windows Metal tools behind its xcrun, ldid instead of codesign, PyYAML and Pillow instead of xcodegen and sips (main() refused a Mac build)
+        missing = [m for m, pkg in (('yaml', 'python-yaml'), ('PIL', 'python-pillow')) if not _importable(m)]
+        if missing: raise BuildError(f'the current Python ({sys.executable}) is missing modules: {", ".join(missing)} (pacman -S python-yaml python-pillow)')
+        tools = {'xcrun': 'dm/ios/tools/wsl/xcrun', 'swiftc': 'the Swift 6.4 toolchain (AUR swift-bin)', 'ldid': 'AUR ldid', 'dotnet': '.NET SDK 10', 'zstd': 'pacman -S zstd',
+                 'make': 'pacman -S base-devel', 'glslangValidator': 'pacman -S glslang'}
+    else: tools = {'xcodebuild': 'Xcode', 'xcodegen': 'brew install xcodegen', 'dotnet': '.NET SDK 10', 'zstd': 'brew install zstd', 'make': 'Xcode', 'glslangValidator': 'brew install glslang'}   # glslang: an OpenGL game's shaders, checked before its capture
     if mac: del tools['xcodegen']
     gone = [f'{t} ({how})' for t, how in tools.items() if not shutil.which(t, path=env['PATH'])]
     if gone: raise BuildError('tools not found: ' + ', '.join(gone))
-    if not mac: check_ios_sdk(env)   # before the Metal check, whose message would blame the Metal toolchain
+    if WSL and subprocess.run(['xcrun', '-sdk', 'iphoneos', '--show-sdk-version'], capture_output=True, env=env).returncode:
+        raise BuildError('no iOS SDK: make it from Xcode.xip with xtool sdk install <Xcode.xip> (docs/development.md, Packing on Windows)')
+    elif not mac and not WSL: check_ios_sdk(env)   # before the Metal check, whose message would blame the Metal toolchain
     mtl = subprocess.run(['xcrun', '-sdk', 'macosx' if mac else 'iphoneos', 'metal', '--version'], capture_output=True, text=True, env=env)   # Xcode 26 and later install the Metal toolchain separately
-    if mtl.returncode: raise BuildError(f'the Metal compiler does not run ({(mtl.stderr.strip().splitlines() or ["no output"])[-1]}): install it with xcodebuild -downloadComponent MetalToolchain')
-    if not xlate.exists(): raise BuildError(f'the shader translator is missing from the repository: {xlate}')
+    if mtl.returncode: raise BuildError(f'the Metal compiler does not run ({(mtl.stderr.strip().splitlines() or ["no output"])[-1]}): ' +
+                                        ('install Metal Developer Tools for Windows (DM_WSL_METAL names its bin folder)' if WSL else 'install it with xcodebuild -downloadComponent MetalToolchain'))
+    if not xlate.exists(): raise BuildError(f'the shader translator\'s launcher is missing: {xlate} (run scripts/setup_wsl.sh)' if WSL else f'the shader translator is missing from the repository: {xlate}')
     check_translator(xlate, env)
     sc = env.get('SPIRV_CROSS', str(xlate.parent.parent / 'spirv_cross_bin/spirv-cross'))
-    if not shutil.which(sc, path=env.get('PATH')): raise BuildError(f'spirv-cross is missing or not executable: {sc}')
+    if not shutil.which(sc, path=env.get('PATH')): raise BuildError(f'spirv-cross is missing or not executable: {sc}' + (' (run scripts/setup_wsl.sh)' if WSL else ''))
 
 
 def check_ios_sdk(env):   # the iOS platform is a separate download in Xcode's Components; xcodebuild, the Metal toolchain and the macOS SDK can be there without it
@@ -1063,6 +1072,14 @@ def check_ios_sdk(env):   # the iOS platform is a separate download in Xcode's C
     dev = subprocess.run(['xcode-select', '-p'], capture_output=True, text=True, env=env).stdout.strip()
     if 'CommandLineTools' in dev: raise BuildError(f'the selected developer folder is the Command Line Tools ({dev}), which have no iOS SDK: select Xcode with sudo xcode-select -s /Applications/Xcode.app')
     raise BuildError('the iOS SDK is not installed: install the iOS platform in Xcode → Settings → Components, or with xcodebuild -downloadPlatform iOS')
+
+
+def wsl_env(repo, env):
+    """In WSL: dm/ios/tools/wsl first on PATH (its xcrun runs the Windows Metal tools and answers for xtool's iOS SDK), and the shader translator's launcher and the SPIRV-Cross that
+    scripts/setup_wsl.sh made in DM_WSL_CACHE (default ~/.cache/nxnative-wsl), unless XLATE or SPIRV_CROSS name others"""
+    cache = Path(env.get('DM_WSL_CACHE') or Path.home() / '.cache/nxnative-wsl')
+    env['PATH'] = os.pathsep.join([str(repo / 'dm/ios/tools/wsl'), env['PATH']])
+    env.setdefault('XLATE', str(cache / 'xlate/dmsh_xlate')); env.setdefault('SPIRV_CROSS', str(cache / 'spirv-cross/spirv-cross'))
 
 
 def check_translator(xlate, env):
@@ -1294,7 +1311,7 @@ def glslc_done(d):   # capture files written whole: a GLSLC output (magic 0x1986
 
 
 def apple_silicon():   # hw.optional.arm64 is 1 on Apple silicon (for a Python under Rosetta too); an Intel Mac has no such key
-    return subprocess.run(['sysctl', '-n', 'hw.optional.arm64'], capture_output=True, text=True).stdout.strip() == '1'
+    return sys.platform == 'darwin' and subprocess.run(['sysctl', '-n', 'hw.optional.arm64'], capture_output=True, text=True).stdout.strip() == '1'
 
 
 HOST_DIRS = ('dm/host', 'dm/gfx', 'dm/gfx/nvn', 'dm/gfx/nvn/include', 'dm/gfx/tex', 'dm/gfx/vk', 'dm/gfx/gl')   # the folders the host's compile line takes its sources and headers from (dm/host/Makefile SRC, GFX, GFX_H)
@@ -1311,10 +1328,25 @@ def decoder_host_key(host):
     return None
 
 
+def oodle_decoder(repo, work, env, logs, g, patched):
+    """The decoder the shader split runs for Oodle- or LZ5-compressed game files (shader_split.py, DM_OODLE_HOST / DM_OODLE_MODULES): the Mac host in its tool mode, which runs the game's own
+    decoder (dm/host/hle_oodle.c). In WSL the host cannot run: DM_OODLE_HOST then names a program that answers the same DM_OODLE_SERVE requests on stdin / stdout with a decoder of its own
+    (docs/development.md, Packing on Windows); none is part of the repository, as the game's decoder is not open source"""
+    if WSL:
+        host = env.get('DM_OODLE_HOST')
+        if not host or not shutil.which(host, path=env['PATH']):
+            raise BuildError('this game\'s files are Oodle- or LZ5-compressed, and the shader split decodes them with the game\'s own decoder in the Mac host, which cannot run in WSL: set DM_OODLE_HOST '
+                             'to a program that answers dm/host/hle_oodle.c\'s DM_OODLE_SERVE requests with a decoder of its own (docs/development.md, Packing on Windows)')
+        say(f'Oodle decoder: {host} (DM_OODLE_HOST), not the game\'s own')
+        return {'DM_OODLE_HOST': host, 'DM_OODLE_MODULES': str(patched)}
+    return {'DM_OODLE_HOST': str(build_mac_host(repo, work / 'tools/dmhost', env, logs, g)), 'DM_OODLE_MODULES': str(patched)}
+
+
 def build_mac_host(repo, out, env, logs, g):
     """The Mac host for the profile, built into out: dm/host's own compile line (make -n) with the output moved, since make takes no target path with spaces and dm/host/dmhost may be another build's.
     Reused when the compile line and its inputs (the source files of HOST_DIRS, the chain header dm/gfx/nvn/dmsh_chain.h among them, the profile header make generates, libvpx, dav1d and the third-party headers, the compiler
-    and the macOS SDK) are as at the last build into out. The host runs the game's own arm64 code natively, so an Intel Mac stops here (GitHub issue #54)"""
+    and the macOS SDK) are as at the last build into out. The host runs the game's own arm64 code natively, so an Intel Mac stops here (GitHub issue #54), and so does WSL"""
+    if WSL: raise BuildError('this game needs a step that boots it in the Mac host (a run-time shader capture or an Unreal Engine shader decode), which needs a Mac with Apple silicon: in WSL the script packs only games without one')
     if not apple_silicon(): raise BuildError('this step boots the game in the Mac host, which runs the game\'s own arm64 code natively: it needs a Mac with Apple silicon, and this Mac has an Intel processor')
     host = repo / 'dm/host'
     run(['make', '-s', f'GAME={g.id}', f'gen/{g.id}/game_profile.h', 'gen/vpx/libvpx.a', 'gen/dav1d/libdav1d.a', 'host_msl'], logs / 'mac_host_make.log', env=env, cwd=host)
@@ -1821,7 +1853,7 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
             inputs += [('stat', capture) if provisional else ('files', sorted(capture.glob(pattern)))]   # its files, not where it is: the same build reached through a moved folder or a link keeps its split
     inputs += [item for r in dlc_roms for item in (('dlc', Path(r).name), ('stat', r))]   # DLC has no registered module build to pin its contents: include its index and re-extraction times, even when file sizes stay the same
     if oodle:   # a host or rewriter fix can change what the game's decoder produces
-        PROG.set(step='building the Mac host for the game\'s Oodle decoder'); env = dict(env, **oodle())
+        PROG.set(step='checking the Oodle decoder (DM_OODLE_HOST)' if WSL else 'building the Mac host for the game\'s Oodle decoder'); env = dict(env, **oodle())
         host = Path(env['DM_OODLE_HOST'])
         inputs += [('decoder', decoder_host_key(host) or fingerprint(('files', [host]))), ('modules', package_key(Path(env['DM_OODLE_MODULES'])))]
     key = None if ALLOW_DAMAGED else fingerprint(*inputs, *split_profile_inputs(g))
@@ -1894,6 +1926,11 @@ def shader_keys(g):   # the base shaders dmsh_build.py builds, shared by progres
     return keys
 
 
+def made(path):   # when a folder was made: its birth time; Linux's stat has none (WSL), and there the last change to its entries stands in, which for a folder still being filled is as recent
+    st = path.stat()
+    return getattr(st, 'st_birthtime', st.st_ctime)
+
+
 class ShaderWatch:
     """Progress of dmsh_build.py, read from the files it writes (it prints nothing until it ends). It works in three phases:
     the cache check (a hit restores <key>_b.json into the library directory b-<chain>/: the iOS one, or the Mac's for a Mac-only build; a miss writes <key>.bin into its temporary folder dmsh_* under WORK),
@@ -1921,7 +1958,7 @@ class ShaderWatch:
 
     def __call__(self):
         if not self.w:   # dmsh_build.py's temporary folder: the dmsh_* under WORK made since it started
-            self.w = max((d for d in self.tmp.glob('dmsh_*') if d.stat().st_birthtime >= self.t0 - 2), key=lambda d: d.stat().st_birthtime, default=None)
+            self.w = max((d for d in self.tmp.glob('dmsh_*') if made(d) >= self.t0 - 2), key=made, default=None)
         try: ext = collections.Counter(os.path.splitext(x)[1] for x in os.listdir(self.w)) if self.w else collections.Counter()
         except OSError: ext = collections.Counter()
         if self.t1 is None:
@@ -2162,7 +2199,7 @@ def build_gl_shaders(py, repo, roots, sh, env, logs, g, reuse=True, mac=False, p
 
 class IpaWatch:
     """Progress of build_ipa.sh, from its step lines ("[time] generate Gen/ …", "xcodebuild …", "pack IPA …", then pack_ipa.py's "pack: N entries, X bytes") and the files it writes:
-    the CompileC lines in xcodebuild's build.log (one per source file: Gen/src, Gen/main/main.c, Gen/embed.S and the app's Sources), then the bytes of the archive pack_ipa.py is
+    the CompileC lines in xcodebuild's build.log (one per source file: Gen/src, Gen/main/main.c, Gen/embed.S and the app's Sources; in WSL build_app.py writes the same lines), then the bytes of the archive pack_ipa.py is
     writing (<IPA>.partial, renamed at the end). Its two halves are the stages "app build" and "IPA pack" """
     XCODE = {'CompileC': 'compiling', 'Ld': 'linking', 'CpResource': 'copying resources', 'CompileAssetCatalogVariant': 'asset catalog', 'ProcessInfoPlistFile': 'Info.plist'}
 
@@ -2177,9 +2214,9 @@ class IpaWatch:
         with self.lock:   # a poll sees a step change whole
             if s.startswith('generate Gen/'): self.state = 'gen'; PROG.set(step='generating sources')
             elif s.startswith('pipeline archive for'): PROG.set(step='pipeline archive (metal-tt)')
-            elif s.startswith('xcodebuild'):
+            elif s.startswith(('xcodebuild', 'build_app.py')):
                 units = len(os.listdir(self.ios / 'Gen/src')) + 2 + sum(1 for p in (self.ios / 'Sources').iterdir() if p.suffix in ('.c', '.m'))   # + Gen/main/main.c and Gen/embed.S
-                self.state, self.t = 'xcode', time.time(); PROG.set(step='xcodebuild', done=0, total=units, unit='files', est=True)   # an incremental build compiles fewer
+                self.state, self.t = 'xcode', time.time(); PROG.set(step=s.split(' ', 1)[0], done=0, total=units, unit='files', est=True)   # an incremental build compiles fewer
             elif s.startswith('pack IPA'):
                 try: self._poll()   # the rest of build.log (xcodebuild writes it in big blocks)
                 except OSError: pass
@@ -2404,11 +2441,19 @@ def parse_args(argv):
     return ap.parse_args(argv)
 
 
+def windows_path(path):   # a WSL path as Windows programs reach it: /mnt/<drive>/… is <drive>:\…, the rest WSL's own disk under \\wsl.localhost\<distribution>
+    p = os.path.abspath(str(path))
+    if m := re.match(r'/mnt/([a-z])(/.*)?$', p): return f'{m[1].upper()}:' + (m[2] or '/').replace('/', '\\')
+    return f'\\\\wsl.localhost\\{os.environ.get("WSL_DISTRO_NAME", "")}' + p.replace('/', '\\')
+
+
 def say_push_romfs(image, bundle_id):
     """The command that puts a --romfs separate build's game files on the phone. The image is the extraction's RomFS.img, which stays where it is while the game files are unchanged (the extraction is reused),
     so the command is needed once per game and version, and again only when the image changed: the app compares its identity (size and a hash of the index) with the one it was built for and says so when it differs"""
     say('the game files are not in this build. Copy them to the phone once, with the app installed (it is needed again only when the image changed, a new game version or another extraction):')
-    PROG.say(f'  scripts/push_romfs.sh <device UDID> {bundle_id} "{image}"')
+    if WSL:   # push_romfs.sh runs devicectl, which only a Mac has: on Windows the app's Documents folder is reached through iTunes' or the Apple Devices app's file sharing
+        PROG.say(f'  {windows_path(image)}\n  into the app\'s files in iTunes or the Apple Devices app (the device, Files / File Sharing, the game\'s app); wait for the copy to end before starting the game')
+    else: PROG.say(f'  scripts/push_romfs.sh <device UDID> {bundle_id} "{image}"')
     # the file on disk, as build_ipa.sh's [ -f "$ROMFS" ] decides whether romfs.id is written: rfs.source() is a romfs.Path, whose is_dir() is True for an image's root (GitHub issue #530)
     if not os.path.isfile(image): say('[RED] the extraction holds a RomFS folder, not an image: this build carries no identity for it, and push_romfs.sh packs the folder first (delete extract/ and build again for an image)')
 
@@ -2474,6 +2519,7 @@ def main(args=None):
     mac_pack = platform == 'mac-app'
     if args.mac_sign and not mac_pack: raise BuildError('--mac-sign signs the Mac app: it needs --platform mac-app')
     if mac and prepare_xcode: raise BuildError(f'--prepare-xcode makes an iPhone project: it cannot be combined with --platform {platform}')
+    if (mac or prepare_xcode) and WSL: raise BuildError(f'{"--prepare-xcode makes an Xcode project" if prepare_xcode else f"--platform {platform} runs the game in the Mac host"}: it needs a Mac (in WSL the script packs the iOS app)')
     if mac and not apple_silicon(): raise BuildError(f'--platform {platform} runs the game in the Mac host, which runs the game\'s own arm64 code natively: it needs a Mac with Apple silicon, and this Mac has an Intel processor')
     check_native_python()
     keep = KEEP_EXTRACTED if args.keep_extracted is None else args.keep_extracted
@@ -2498,6 +2544,7 @@ def main(args=None):
     env = dict(os.environ, PATH=os.pathsep.join(TOOL_PATHS + [os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')]))
     env.setdefault('USER', getpass.getuser())   # xcodegen fails without USER (Couldn't find current username)
     configure_dotnet(env)
+    if WSL: wsl_env(repo, env)
     env.setdefault('J', str(os.cpu_count() or 8))   # shader_split.py's and dmsh_build.py's workers (their default is 8)
     py = sys.executable
     want = args.title_id or TITLE_ID
@@ -2572,9 +2619,10 @@ def main(args=None):
         except ValueError as e: raise BuildError(str(e)) from e
     say('Mac app: the Mac shaders and the Mac host, packed into a Mac app; no iOS shaders, Xcode project or IPA' if mac_pack else 'Mac-only build for development: the Mac shaders and the Mac host, no iOS shaders, Xcode project or IPA' if mac else f'Xcode project: {project}' if prepare_xcode else f'output IPA: {out_ipa}')
     say(f'work folder (extracted game files in extract/, {"kept for the next build" if keep else "deleted after the IPA is built"}): {work}')
-    xlate = repo / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate'
+    xlate = Path(env['XLATE']) if WSL else repo / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate'   # in WSL the in-repo assemblies through dotnet (wsl_env): the in-repo launcher is a macOS executable
     # DM_GAME picks the profile; DM_ROOT / WORK point at <id>_build: the tools' default paths and temporary directories all stay inside it
     env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / 'tmp'))
+    if WSL: env['TMPDIR'] = str(work / 'tmp')   # Python's temporary folders too, in the build folder like the tools' (WORK); xcrun stages for the Metal tools the files they cannot reach
     logs = work / 'logs'
     check_prereqs(env, xlate, mac)
     picks = pick_nsps(fam, have, versions)
@@ -2666,7 +2714,7 @@ def main(args=None):
         ios = build_gl_shaders(py, repo, [rfs.source(game), game / 'ExeFS/main'] + dlc_roms + ([cap] if cap else []), sh, env, logs, g, reuse=not ALLOW_DAMAGED, mac=mac, provisional=bool(provisional or derived))
     else:
         # Trinity packs and legacy Unreal paks: the split decodes them with the packed version's own decoder (Oodle, LZ5), in the Mac host built for the profile
-        oodle = (lambda: {'DM_OODLE_HOST': str(build_mac_host(repo, work / 'tools/dmhost', env, logs, g)), 'DM_OODLE_MODULES': str(patched)}) if src['oodle_packs'][0] or src['ue_legacy'][0] else None
+        oodle = (lambda: oodle_decoder(repo, work, env, logs, g, patched)) if src['oodle_packs'][0] or src['ue_legacy'][0] else None
         own = bool(provisional or derived)   # the shader tables come from this build's split (the profile's are checked otherwise)
         def derive_shader_tables(reason):   # called only after the strict DLC-only or additive-compute comparison passed
             nonlocal g, derived

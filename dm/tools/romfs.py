@@ -27,6 +27,7 @@ class Image:
     def __init__(self, path):
         self.path = _os.path.abspath(path)
         self.stat = _os.stat(self.path)
+        self.fd = None
         with builtins.open(self.path, 'rb') as f:
             head = f.read(HEAD.size)
             if len(head) < HEAD.size: raise ValueError(f'invalid RomFS image header: {path}')
@@ -80,6 +81,13 @@ class Image:
         if t: raise NotADirectoryError(self.path)
         return [(_os.fsdecode(self.name(j)), j) for j in range(a, a + b)]
 
+    def descriptor(self):   # one descriptor per loaded image, which every file opened inside it duplicates: opening the image again is a round trip on a network or WSL drive
+        if self.fd is None: self.fd = _os.open(self.path, _os.O_RDONLY)
+        return self.fd
+
+    def __del__(self, _close=_os.close):   # bound here: at interpreter exit the module's globals may already be gone
+        if getattr(self, 'fd', None) is not None: _close(self.fd)
+
 
 @functools.lru_cache(maxsize=8)
 def _image(path, identity): return Image(path) if is_image(path) else None
@@ -115,7 +123,7 @@ _fd_ranges = {}
 
 class _File(io.RawIOBase):
     def __init__(self, image, k):
-        self.fd = _os.open(image.path, _os.O_RDONLY)
+        self.fd = _os.dup(image.descriptor())   # its own descriptor (reads are preads at absolute offsets), on the image file _resolve just checked
         self.start, self.length = image.entry(k)[:2]
         self.pos = 0
         _fd_ranges[self.fd] = (self.start, self.length)
@@ -157,7 +165,11 @@ else:
 def stat(path, **kwargs):
     resolved = _resolve(path)
     if not resolved: return _os.stat(path, **kwargs)
-    image, relative = resolved; k = image.find(relative)
+    image, relative = resolved
+    return _entry_stat(image, image.find(relative))
+
+
+def _entry_stat(image, k):
     a, b, _, _, t, _ = image.entry(k); s = image.stat
     return SimpleNamespace(st_mode=(_stat.S_IFREG | 0o444) if t else (_stat.S_IFDIR | 0o555), st_size=b if t else 0,
                            st_ino=k + 1, st_dev=s.st_dev, st_mtime=s.st_mtime, st_mtime_ns=s.st_mtime_ns,
@@ -175,11 +187,11 @@ def isfile(path):
     except OSError: return False
 
 
-class _Entry:
-    def __init__(self, parent, name): self.name, self.path = name, _os.path.join(parent, name)
-    def stat(self, **kwargs): return stat(self.path)
-    def is_dir(self, **kwargs): return isdir(self.path)
-    def is_file(self, **kwargs): return isfile(self.path)
+class _Entry:   # an entry of a listing: its image and entry number come with it, as a DirEntry's type does (no new lookup of the image, a stat of the real file, per entry)
+    def __init__(self, parent, name, image, k): self.name, self.path, self.image, self.k = name, _os.path.join(parent, name), image, k
+    def stat(self, **kwargs): return _entry_stat(self.image, self.k)
+    def is_dir(self, **kwargs): return not self.image.entry(self.k)[4]
+    def is_file(self, **kwargs): return bool(self.image.entry(self.k)[4])
     def is_symlink(self): return False
     def inode(self): return self.stat().st_ino
     def __fspath__(self): return self.path
@@ -198,24 +210,33 @@ def scandir(path):
     resolved = _resolve(path)
     if not resolved: return _os.scandir(path)
     image, relative = resolved
-    return _Scan(_Entry(path, name) for name, _ in image.children(image.find(relative)))
+    return _Scan(_Entry(path, name, image, k) for name, k in image.children(image.find(relative)))
 
 
 def walk(top, topdown=True, onerror=None, followlinks=False):
-    if not _resolve(top):
+    resolved = _resolve(top)
+    if not resolved:
         yield from _os.walk(top, topdown=topdown, onerror=onerror, followlinks=followlinks); return
-    def visit(path):
+    image, relative = resolved   # the image as it was at the start: the walk reads its index, without a new lookup per directory
+    def visit(path, k):
         try:
-            dirs, files = [], []
-            with scandir(path) as entries:
-                for e in entries: (dirs if e.is_dir() else files).append(e.name)
+            dirs, files, number = [], [], {}
+            for name, j in image.children(k):
+                if image.entry(j)[4]: files.append(name)
+                else: dirs.append(name); number[name] = j
         except OSError as error:
             if onerror: onerror(error)
             return
         if topdown: yield str(path), dirs, files
-        for name in dirs: yield from visit(_os.path.join(path, name))
+        for name in dirs:   # what a topdown caller left in dirs, as os.walk
+            if name in number: yield from visit(_os.path.join(path, name), number[name])
+            elif onerror: onerror(FileNotFoundError(errno.ENOENT, 'not in the RomFS image', _os.path.join(path, name)))
         if not topdown: yield str(path), dirs, files
-    yield from visit(top)
+    try: k = image.find(relative)
+    except OSError as error:
+        if onerror: onerror(error)
+        return
+    yield from visit(top, k)
 
 
 class Path(type(_Path())):

@@ -65,6 +65,10 @@ The IPA appears in the game's folder. The first build takes 30–60 minutes and 
 
 To play on the Mac instead, add `--platform mac-app`: you get a Mac app of the game to open from Finder. All options: [The packing script in detail](docs/development.md#the-packing-script-in-detail).
 
+### Build on Windows
+
+The IPA can also be built on a Windows PC, in WSL, without a Mac: [Packing on Windows (WSL)](docs/development.md#packing-on-windows-wsl). The shaders are then built with Apple's Metal Developer Tools for Windows, a compiler they were not tested with.
+
 ### Install
 
 Install the IPA on your iPhone or iPad with a sideloading tool such as AltStore, Sideloadly or LiveContainer. If your tool offers **Increased Memory Limit**, turn it on: the bigger games need it.

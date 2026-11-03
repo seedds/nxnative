@@ -15,6 +15,7 @@ sys.path.insert(0, str(REPO / 'dm/games')); sys.path.insert(0, str(REPO / 'dm/to
 import dmsh_chain, game, nacp, profile_guess
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
 nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
+nsp.WSL = False   # pyright: ignore[reportAttributeAccessIssue]  # the Mac path, also when the tests run in WSL (test_nsp_wsl.py checks WSL's)
 nsp.pg, nsp.nacp = profile_guess, nacp   # main sets them
 
 TID = 0x0100AAAA00000000

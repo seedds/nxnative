@@ -181,6 +181,7 @@ During a movie, Plus then a held X skips it. The diagnostic watchdog is off when
 
 ## Found on this game
 
+- [Same-pass feedback through a read-only image](../../../docs/reference/rendering.md#same-pass-feedback-read-through-a-snapshot): lighting shader `15816d836842bfb5` reads its R32Uint zone mask between barriers. Reading the previous frame’s mask made the Colony Sigma cutscene alternate in brightness. Resolved ([#1009](https://github.com/seedds/nxnative/issues/1009)): measured on an Apple M2 in Events Theater chapter 1's Colony Sigma battle, 8 of 10 bursts flipped brightness every frame before (sign-flip fraction 0.83–1.00), at most 0.28 of 11 after. The extra snapshots cost GPU time there: p50 50.4 → 53.0 ms, 18.3 → 17.2 fps. Open: if the shader loads the mask at its own pixel, a tile read (as sampled textures have) would avoid that cost; it needs the translator to record image loads' coordinates.
 - [Monolith ARH1, XBC1 and HCPS/SLCT shader containers](../../../docs/reference/shaders.md#monolith-arh1-xbc1-and-hcpsslct-shader-containers).
 - [Subgroup operations rewritten for a one-lane subgroup](../../../docs/reference/shaders.md#subgroup-operations-rewritten-for-a-one-lane-subgroup).
 - [IMAGE usage does not split texture storage](../../../docs/reference/rendering.md#image-usage-does-not-split-texture-storage).

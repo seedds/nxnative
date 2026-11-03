@@ -579,6 +579,39 @@ Why the host is a child process: macOS privacy checks (TCC) cover files on remov
 
 Signing: `pack_app.py` signs the inner host first, then the bundle (`codesign --force --sign <identity>`). It signs ad-hoc by default; `--mac-sign "<identity>"` (`MAC_SIGN` in Spyder) names a Developer ID or another identity. It never uses the hardened runtime: `--options runtime` refuses the executable memory the host maps for the game's code. Notarization needs the hardened runtime, so the app is not notarized. Gatekeeper blocks it on a Mac it was downloaded to until it is allowed in System Settings › Privacy & Security. `dm/tools/tests/test_nsp_mac_app.py` tests the packer and the launcher with a stand-in host, without game files.
 
+## Packing on Windows (WSL)
+
+The NSP script packs the same unsigned IPA in WSL 2 on a Windows PC, without a Mac. The steps are the Mac's; what Xcode does is done by other tools, in `dm/ios/tools/wsl/`:
+
+| On a Mac | In WSL |
+|---|---|
+| Xcode's iOS SDK, clang, swiftc and ld64 | the iOS SDK [xtool](https://github.com/xtool-org/xtool) makes from `Xcode.xip`, the Swift toolchain's clang and swiftc, xtool's `ld64.lld`, and the toolchain's `libclang_rt.ios.a` (`build_app.py`, run where `build_ipa.sh` runs `xcodebuild`) |
+| `xcrun metal` / `metallib` / `metal-tt` | Apple's Metal Developer Tools for Windows through WSL's interop (`xcrun`, first on `PATH`), with every Linux path given as its Windows path |
+| xcodegen's `Info.plist`, PlistBuddy, plutil | `app_plist.py` (PyYAML reads `project.yml`) |
+| sips, actool | Pillow; the icon goes in as loose PNG files, without an asset catalog |
+| codesign (ad-hoc, with the entitlements) | `ldid -S` |
+| the in-repo spirv-cross and translator launcher (macOS binaries) | spirv-cross built for Linux from the tag `spirv_cross_bin/build.sh` pins, and the in-repo translator assemblies started through `dotnet` ([`scripts/setup_wsl.sh`](../scripts/setup_wsl.sh); `own_compilers.py` takes that spirv-cross outside macOS) |
+| `scripts/push_romfs.sh` (`devicectl`) for a `--romfs separate` build's image | iTunes' or the Apple Devices app's file sharing: `RomFS.img` into the game's app, after it is installed |
+
+Setup, once:
+
+1. A WSL 2 distribution with Python 3.12 or newer (capstone 5, lz4, fontTools, PyYAML, Pillow), the .NET 10 SDK, Swift 6.4, git, make, cmake, ninja, a C compiler, zstd, glslang and ldid. On Arch Linux: `sudo pacman -S --needed base-devel git python python-capstone python-lz4 python-fonttools python-pillow python-yaml dotnet-sdk clang cmake ninja zstd fuse2 glslang`, then `swift-bin` and `ldid` from the AUR. xtool 1.24 or later: its AppImage from [its releases](https://github.com/xtool-org/xtool/releases) on `PATH`.
+2. Metal Developer Tools for Windows from [Apple's downloads](https://developer.apple.com/download/all/?q=Metal%20Developer%20Tools%20for%20Windows), in its default folder (otherwise `DM_WSL_METAL` names its `bin` folder as a Linux path).
+3. `Xcode 27.2.xip` from Apple's downloads, then `xtool sdk install Xcode_27.2.xip` (the iOS SDK; no Apple ID login is needed for this).
+4. Clone the repository from inside WSL: a Windows checkout with `core.autocrlf` has CRLF line ends, which bash and make in WSL do not take. Then run `scripts/setup_wsl.sh` (again after a pull that changes the pinned SPIRV-Cross or the translator).
+
+Then pack a game as on a Mac: `python3 scripts/build_ipa_from_nsp.py <game folder> -k <prod.keys> --allow-other-metal`. In WSL the script puts `dm/ios/tools/wsl` first on `PATH` and takes the translator and spirv-cross the setup made (`DM_WSL_CACHE`).
+
+What differs from a Mac:
+
+- The Metal compiler. Metal Developer Tools for Windows 6.2 is Xcode 26.2's compiler (`Apple metal version 32023.850 (metalfe-custom-windows)`), not the one `dmsh_chain.lock` records (Xcode 27.2's, 32023.922), so the shaders build only with `--allow-other-metal`: a compiler the shaders were not tested with ([`own_compilers.py`](../dm/gfx/tools/own_compilers.py), GitHub issue #242). With a version for Xcode 27.2 the lock decides as on a Mac.
+- Only the iOS app: `--platform mac` and `mac-app` and `--prepare-xcode` need a Mac, and so does every step that boots the game in the Mac host. A game whose shaders need a run-time capture or Unreal Engine's shader decode with the game's Oodle cannot be packed in WSL (the script says so); a provisional profile's heap and region checks are skipped, and the profile keeps its guessed keys.
+- Oodle-compressed game files (Trinity packs, PKZ archives, legacy Unreal paks), which the shader split decodes on a Mac with the game's own decoder in the Mac host: in WSL, `DM_OODLE_HOST` names a program that answers the same requests on stdin / stdout (`DM_OODLE_SERVE` in [hle_oodle.c](../dm/host/hle_oodle.c): the compressed and decompressed lengths as two u64, the compressed bytes; back the u64 length decoded, 0 on failure, and the bytes) with a decoder of its own, such as one built on an open-source Kraken decoder. None is part of the repository: the game's decoder is not open source. LZ5 (DRAGON QUEST XI S) needs a decoder that has it.
+- The standard shared font is Windows' Arial (Latin, Greek, Cyrillic: no Chinese, Japanese or Korean glyphs) unless `STD_FONT` names another TTF, and the button icons' letters are Arial Bold (`EXT_LETTER_FONT`), as Windows has no Arial Rounded Bold.
+- The Metal tools split their arguments at spaces, quoted or not: a path with spaces reaches them through a directory junction in `<drive>:\.nxnative-wsl-links` ([The Windows Metal compiler takes a path with spaces as several files](reference/packing.md#the-windows-metal-compiler-takes-a-path-with-spaces-as-several-files)).
+- File access from WSL to a Windows drive (`/mnt/<drive>`) is slow: every operation is a round trip (a `stat`: 1.4 to 2.3 ms there, 0.8 µs on WSL's own disk), and the build makes millions of them; done one after another (the shader cache's restore copies each shader's files in turn) they add up to hours. Keep the build folder on WSL's own disk (`--work-dir ~/<title ID>_build`): the Metal tools, which reach only Windows drives, get their files through a staging folder (`DM_WSL_STAGE`, default `C:\.nxnative-wsl-stage`), and only the game's own files are read from the Windows drive, once, when its RomFS image is packed (Donkey Kong Bananza's 80,273 files: 27 minutes). With the build folder on a Windows drive, a Windows Defender exclusion for it (`Add-MpPreference -ExclusionPath <folder>`, as administrator) made Donkey Kong Bananza's shader cache restore about 1.6 times faster (136–160 → 240 shaders a minute).
+- Installing: a sideloader for Windows (Sideloadly, AltStore) installs the IPA. With the game's image inside, Donkey Kong Bananza's 9.6 GB IPA did not install through Sideloadly on an iPad with 61 GB free (`PackageExtractionFailed`, the device could not extract it); with `--romfs separate`, Pokémon Legends: Z-A's IPA was 1.5 GB and its 4.3 GB image went in through file sharing, as the script's last lines say.
+
 ## Build and run on a device with Xcode
 
 With an Apple developer account, Xcode can sign and install the app itself:

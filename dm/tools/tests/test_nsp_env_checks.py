@@ -14,6 +14,7 @@ REPO = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
 assert spec and spec.loader
 nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
+nsp.WSL = False   # pyright: ignore[reportAttributeAccessIssue]  # the Mac path, also when the tests run in WSL (test_nsp_wsl.py checks WSL's)
 sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
 import dmsh_chain  # noqa: E402
 import tool_lock  # noqa: E402

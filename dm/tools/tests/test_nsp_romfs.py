@@ -9,6 +9,7 @@ REPO = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
 assert spec is not None and spec.loader is not None
 nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
+nsp.WSL = False   # pyright: ignore[reportAttributeAccessIssue]  # the Mac path, also when the tests run in WSL (test_nsp_wsl.py checks WSL's)
 spec = importlib.util.spec_from_file_location('romfs_image', REPO / 'dm/tools/romfs_image.py')
 assert spec is not None and spec.loader is not None
 romfs_image = importlib.util.module_from_spec(spec); spec.loader.exec_module(romfs_image)

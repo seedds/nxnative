@@ -46,6 +46,16 @@ On the Mac (2026-10-29): the accessibility settings, the EA SPORTS and FC 27 log
 
 ## Frame rate
 
+| Mode | Resolution | Frame p50 / p95 | GPU p50 / p95 | Dropped / 300 |
+|---|---:|---:|---:|---:|
+| **4K / 120 — gameplay** | 3840×2160 | 8.42 / 9.77 ms | 6.64 / 7.01 ms | 0 |
+| **4K / 120 — cutscenes** | 3840×2160 | 11.22 / 13.82 ms | 8.38 / 8.73 ms | 27–75 |
+| **4K / 60** | 3840×2160 | 16.6–16.7 / 17.4–18.5 ms | 8.7–11.5 / 9.7–15.3 ms | 0–3 |
+| **1440p / 120** | 2560×1440 | 8.35 / 8.71 ms | 3.85 / 4.46 ms | 1 |
+| **1440p / 100** | 2560×1440 | 8.38–8.54 / 16.44–16.83 ms | 4.1–7.1 / 6.1–7.4 ms | 0–5 |
+
+**Recommended: 4K / 120.** Even its cutscene worst case (about 65–70 fps) is above 4K / 60; 4K / 60 is only for a perfectly even cadence. 100 fps is a measurement, not a recommendation.
+
 - **Current:** 60 fps in the menus and a Classic Match. 1.8d.310c (Mac): frame time p50 16.66 ms, p95 18.2 ms; the match clock went 02:40 → 04:00 → 05:20 at 10.3 s steps, as at 30 fps (01:20 → 02:39). 1.8d.6523 at native 1440p: frame time p50 16.68 / p95 17.29 ms, GPU p50 about 8 / p95 about 12.3 ms in a short match; menus p95 about 8-9 ms. `fps_target 30` runs the game's own 30.
 - **120 fps (`fps_max 120`, launcher Frame rate 120, or `DM_FPS_TARGET=120`):** Frostbite's simulation rate and the regulator follow 120; the regulator's wait rate is 127.66 fps (the 0.5 ms margin) and the rate it reports is 120. The present runs at 120 Hz on the 120 Hz display link, one frame per tick. At native 1440p the menu measured p50 8.33 / p95 8.6 ms and GPU p50 4.1 / p95 5.2 ms; a match measured p50 8.32 / p95 about 9.4 ms, GPU p50 4.7 / p95 about 5.7 ms. The match clock was at 00:35 at the same point where 60 fps showed 00:34, so the game speed is unchanged. Heavier stadiums and MetalFX at 120 can drop below 120.
 - **120 fps, long run (2026-11-04, rebased upstream):** 42,900 frames (about 6 minutes) at native 1440p, no crash; the last 300-frame window p50 8.35 / p95 8.71 ms, GPU p50 3.85 / p95 4.46 ms, 1 dropped frame. The earlier intermittent crash (`CRASH sig=11 addr=0x10 pc=main+0x96bd8d8`, after about 100 s) did not reproduce; it remains open.

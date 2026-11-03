@@ -12,6 +12,7 @@
 //   Touches no control takes (in 3D, those outside the right third) go to the game's touch screen (pushGame; Super Mario Galaxy's pointer in handheld mode).
 //   The virtual gamepad (layout button included) hides while a physical controller is connected and comes back when it is removed; meanwhile every touch goes to the game. Physical controllers keep every button (D-pad and right stick included) and map by position: bottom = B, right = A, left = Y, top = X (same positions as on a Switch controller); a Nintendo pad maps by its labels (pad_apple.h).
 //   Each physical controller is a player of its own (local co-op), as on the Mac: the first one connected is player 1, together with the touch gamepad, the next player 2, and so on up to 8; see "Physical controllers" below.
+//   With DM_TOUCH_PLAYER=own the touch gamepad is player 1 on its own and stays on screen, and the controllers are players 2 on (one phone, two players).
 //   Shaking the phone shakes the controller (DM_BTN_SHAKE: its six-axis sensor, hle_hid.c), whichever controls are in use; see "Shaking the phone" below.
 #import <UIKit/UIKit.h>
 #import <GameController/GameController.h>
@@ -461,7 +462,7 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
 // gyro; the phone's gyro is player 1's. With DM_PAD_MERGE=1 every controller is player 1, as before (the last one moved wins)
 static pad_slots g_slots;
 static GCController *g_held[DM_PLAYERS];   // the controller of each slot, kept alive while it holds it (the slot table keys on its pointer)
-static int g_merge;
+static int g_merge, g_touch_own;
 static int32_t axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * 32767); }
 static void read_pad(GCExtendedGamepad *g) {
     int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0) return;
@@ -480,9 +481,15 @@ static void read_pad(GCExtendedGamepad *g) {
 static void pad_keep_system_buttons(GCController *c) { for (NSString *b in @[GCInputButtonHome, GCInputButtonShare]) c.physicalInputProfile.buttons[b].preferredSystemGestureState = GCSystemGestureStateDisabled; }
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
+// DM_TOUCH_PLAYER=own (the launcher's Touch gamepad as its own player): the touch gamepad holds player 1 for good, as the Mac keyboard does with DM_KBD_PLAYER=own, so two
+// people can play on one phone (one by touch, one with a controller); the controllers take player 2 on, and the touch gamepad stays on screen while they are connected
 static void pads_start(void) {
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
-    LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : "each controller is a player of its own, the touch gamepad plays with player 1");
+    e = getenv("DM_TOUCH_PLAYER"); g_touch_own = !g_merge && e && !strcmp(e, "own");
+    static const char touch = 0;
+    if (g_touch_own) pad_slot_take(&g_slots, &touch, "touch");   // holds player 1 for good
+    LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : g_touch_own ? "the touch gamepad is player 1, each controller a player of its own from player 2 on (DM_TOUCH_PLAYER=own)"
+                                                                           : "each controller is a player of its own, the touch gamepad plays with player 1");
 }
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil otherwise); returns whether a controller is in use
 static BOOL pads_merged(GCController *gone) {
@@ -524,6 +531,7 @@ static BOOL pads_slotted(GCController *gone) {
     GCController *c = note.object, *gone = [note.name isEqual:GCControllerDidDisconnectNotification] ? c : nil;
     if (c && (!c.extendedGamepad || g_merge)) LOG("controller %s: %s%s", gone ? "disconnected" : "connected", pad_name(c), c.extendedGamepad ? "" : " (no extended gamepad profile: not used)");
     BOOL any = g_merge ? pads_merged(gone) : pads_slotted(gone);
+    if (g_touch_own) any = NO;   // the touch gamepad is a player of its own: it stays while controllers are connected
     dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; self->_controls.hidden = any; [self reset]; });   // the touch gamepad hides while any controller is in use
 }
 @end

@@ -43,6 +43,7 @@ No `patches.py`, no `dm/tools/sdk_patches.py` cut for its `sdk` build (`204eaef8
 ## Input and Mac routes
 
 - After the title, a character select with four "L + R to join" slots: the game calls `hid::StartLrAssignmentMode` and waits for L and R pressed together on that screen (`L+R~0.5` while it is up; presses on the title before it are lost), then a character choice with A.
+- Two people on one iPhone: with Touch gamepad as its own player (`DM_TOUCH_PLAYER=own`), the touch gamepad and a controller joined this screen as separate players (1.2.2 on an iPhone 16e, November 2026; [settings](../../../docs/settings.md#touch-gamepad-as-its-own-player)).
 - On the game select, holding the stick right for a second (`7:LRight~1`) switches to Bowser's Fury.
 - Map and level movement read the left stick only (`LLeft` / `LUp` / `LRight` / `LDown`).
 - Into World 1-1 on a fresh save: `DM_KEYS=6:A,10:A,14:L+R~0.5,17:A*3/2,24:Plus*6/3,45:A*6/3,66:LUp~1,70:A,74:LRight~1,78:A,82:LLeft~1,86:A` (World 1-1 by frame ~6000).

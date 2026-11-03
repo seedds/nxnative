@@ -27,7 +27,7 @@ Update 1.4.3 (v720896) over the base game, SDK 20.5.22. Nintendo EPD's engine (s
 
 ### Vertex-conversion submit cost
 
-The general [decode-once i2f loop](../../../docs/reference/rendering.md#repeated-classification-during-integer-to-float-vertex-conversion) reduced submit work in two opposite-order native Mac comparisons:
+The general [decode-once i2f loop](../../../docs/reference/rendering.md#repeated-classification-during-integer-to-float-vertex-conversion) reduced submit work in two opposite-order native Mac comparisons. These measurements are historical, not validation of the current upstream integration:
 
 | Run order | Control → patched submit CPU, median ms | Submit instructions/draw change | Control → patched FPS |
 |---|---:|---:|---:|
@@ -50,6 +50,8 @@ A completed control/native/native/control invocation compares the native-fetch-o
 | Native, control | 7.88 → 7.90 | −12.1% | 26.0 → 26.8 |
 
 All four runs completed with real foreground ownership, accepted outdoor images, normal game speed, positive presentations and no red diagnostics. Instructions/draw fell in both orders; submit CPU and GPU time did not consistently improve. These are same-base `5dd62c7e`, chain `b7cd656abd7c`, scale-1 stationary measurements, not a new whole-upstream runtime, traversal or iPhone benchmark. Do not add these percentages to the earlier conversion-loop result. The measured baseline includes a separate bloom correction that is not part of this native-fetch change.
+
+The source now carries these changes on upstream `4d3a9a5335e6164d15d23393ea9f367401625198`, chain `d123de5979db`, including its same-pass tile feedback and storage-word merging. The earlier successful CI/local GPU checks were on native-fetch head `3b2a69eef073b36cd48c9c80609201b94439d4f1`, base `6136418b`; they are historical too. Checks of the rebased source remain pending. Neither the source rebase nor those old checks establish a new gameplay, phone or performance result.
 
 ## Memory
 

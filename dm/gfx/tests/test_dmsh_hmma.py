@@ -1,6 +1,6 @@
 """Ampere HMMA.16816 with an f16 accumulator through simdgroup_matrix (dmsh_build.py hmma_msl): the rewrite of the translator's helper dmsh_hmma16816_f16 as spirv-cross
 writes it, its arguments and scratch array, the compile with the chain's Metal flags, and on this Mac's GPU the rewritten body against a CPU reference of PTX mma.m16n8k16
-(f16 sources and accumulator) on random fragments, four SIMD-groups a threadgroup."""
+(f16 sources and accumulator) on random fragments in [-1, 1] and on fragments as large as bright HDR texels, four SIMD-groups a threadgroup."""
 import ast
 from pathlib import Path
 import re
@@ -61,8 +61,9 @@ kernel void check(device const uint *in [[buffer(0)]], device uint *out [[buffer
     out[gid * 2] = uint(d0); out[gid * 2 + 1] = uint(d1);
 }
 '''
-# The GPU check: 64 threadgroups of 128 lanes, random halves in [-1, 1]; the reference sums in float and rounds once; the matrix hardware rounds the f16 accumulator as
-# it goes, as Ampere's f16 accumulator does, so the tolerance is 0.01 + 0.4 % of the value
+# The GPU check: 64 threadgroups of 128 lanes, random halves in [-1, 1] ('unit'), or with A scaled by powers of two up to 2048 ('hdr': bright texels into agl's upscaler).
+# The reference sums in double and rounds to half once, as Ampere's tensor cores do; the tolerance is one half ULP of the reference plus what 16 FP32 additions can lose
+# (2^-20 of the summed magnitudes). An f16 accumulator that rounds as it goes misses it by thousands of ULPs on 'hdr' fragments
 RUNNER = r'''#import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 static float h2f(uint16_t h) { __fp16 v; memcpy(&v, &h, 2); return (float)v; }
@@ -78,12 +79,15 @@ int main(int argc, char **argv) {
         if (!ps) { printf("pipeline: %s\n", e.localizedDescription.UTF8String); return 1; }
         const int groups = 64, tg = 128, n = groups * tg;
         id<MTLBuffer> in = [dev newBufferWithLength:n * 32 options:MTLResourceStorageModeShared], out = [dev newBufferWithLength:n * 8 options:MTLResourceStorageModeShared];
-        uint32_t *w = in.contents; srand(11);
-        for (int i = 0; i < n * 8; i++) w[i] = f2h((rand() % 2001 - 1000) / 1000.0f) | (uint32_t)f2h((rand() % 2001 - 1000) / 1000.0f) << 16;
+        uint32_t *w = in.contents; srand(11); const int hdr = argc > 2 && argv[2][0] == 'h';
+        for (int i = 0; i < n * 8; i++) {
+            const float s = hdr && i % 8 < 4 ? (float)(1 << rand() % 12) : 1.0f;
+            w[i] = f2h(s * (rand() % 2001 - 1000) / 1000.0f) | (uint32_t)f2h(s * (rand() % 2001 - 1000) / 1000.0f) << 16;
+        }
         id<MTLCommandQueue> q = [dev newCommandQueue]; id<MTLCommandBuffer> cb = [q commandBuffer]; id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
         [ce setComputePipelineState:ps]; [ce setBuffer:in offset:0 atIndex:0]; [ce setBuffer:out offset:0 atIndex:1];
         [ce dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)]; [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
-        uint32_t *o = out.contents; long bad = 0; double worst = 0;
+        uint32_t *o = out.contents; long bad = 0; double worst = 0, worst_ulp = 0;
         for (int warp = 0; warp < n / 32; warp++) {
             float A[16][16], B[16][8], C[16][8];
             for (int L = 0; L < 32; L++) {
@@ -95,15 +99,17 @@ int main(int argc, char **argv) {
             for (int L = 0; L < 32; L++) {
                 int g = L / 4, t = L % 4; const uint32_t *r = o + (warp * 32 + L) * 2;
                 for (int q2 = 0; q2 < 2; q2++) for (int j = 0; j < 2; j++) {
-                    int row = g + 8 * q2, col = 2 * t + j; float ref = C[row][col];
-                    for (int k = 0; k < 16; k++) ref += A[row][k] * B[k][col];
+                    int row = g + 8 * q2, col = 2 * t + j; double ref = C[row][col], mag = fabs(ref);
+                    for (int k = 0; k < 16; k++) { ref += (double)A[row][k] * B[k][col]; mag += fabs((double)A[row][k] * B[k][col]); }
+                    const double ulp = ldexp(1.0, ilogb(fmax(fabs(ref), 0x1p-14)) - 10);   // a half ULP at the reference (subnormals: 2^-24)
                     double d = fabs(h2f((r[q2] >> (16 * j)) & 0xffff) - ref);
                     if (d > worst) worst = d;
-                    bad += d > 0.01 + fabs(ref) * 0.004;
+                    if (d / ulp > worst_ulp) worst_ulp = d / ulp;
+                    bad += d > ulp + mag * 0x1p-20;
                 }
             }
         }
-        printf("%d SIMD-groups, max abs error %.4g, %ld outputs over tolerance\n", n / 32, worst, bad);
+        printf("%s: %d SIMD-groups, max abs error %.4g (%.2f half ULPs), %ld outputs over tolerance\n", hdr ? "hdr" : "unit", n / 32, worst, worst_ulp, bad);
         return bad != 0;
     }
 }
@@ -118,9 +124,10 @@ class HmmaRewrite(unittest.TestCase):
         self.assertIn('threadgroup uint* s = &_34[uint(_42962)];', body)        # the scratch array at the block offset
         self.assertIn('uint g = uint(_42961) >> 2', body)                        # the lane
         self.assertIn('s[g * 8 + t] = uint(_42963)', body)                       # A0
-        self.assertIn('s[192 + (g + 8) * 4 + t] = uint(_42970)', body)           # C1
-        self.assertIn('_42971 = as_type<int>(d1);', body)                        # the out argument
-        self.assertIn('return as_type<int>(d0);', body)
+        self.assertIn('as_type<half2>(uint(_42970))', body)                      # C1, added to the FP32 products
+        self.assertEqual(body.count('make_filled_simdgroup_matrix<float, 8, 8>(0.0f)'), 2)   # FP32 accumulators
+        self.assertIn('_42971 = as_type<int>(as_type<uint>(half2(e1)));', body)  # the out argument
+        self.assertIn('return as_type<int>(as_type<uint>(half2(e0)));', body)
         self.assertNotIn('_42974', body)                                         # the translator's body is gone, the braces of its blocks too
         self.assertIn(KERNEL.strip(), out)
 
@@ -143,9 +150,10 @@ class HmmaOnGpu(unittest.TestCase):
             subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(d / 'h.air'), '-o', str(d / 'h.metallib')], check=True)
             (d / 'run.m').write_text(RUNNER)
             subprocess.run(['clang', '-fobjc-arc', '-O1', str(d / 'run.m'), '-framework', 'Metal', '-framework', 'Foundation', '-o', str(d / 'run')], check=True)
-            r = subprocess.run([str(d / 'run'), str(d / 'h.metallib')], capture_output=True, text=True)
-            if r.returncode == 2: self.skipTest(r.stdout.strip())
-            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            for mode in ('unit', 'hdr'):
+                r = subprocess.run([str(d / 'run'), str(d / 'h.metallib'), mode], capture_output=True, text=True)
+                if r.returncode == 2: self.skipTest(r.stdout.strip())
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
 if __name__ == '__main__':

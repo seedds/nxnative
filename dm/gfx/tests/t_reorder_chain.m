@@ -228,6 +228,47 @@ static void compare_pair(const char *name,const result *o,const result *r,unsign
     for(int k=0;k<1024;k+=4) bad+=memcmp((const uint8_t *)o+k,(const uint8_t *)r+k,4)!=0;
     EXPECT("full range/state/control flow differing pixels (out of 256)",all_independent?0:different,bad);
 }
+// A submission may inherit its render target. Its first 64 draws must reach the
+// GPU at the next target boundary, including an inline update in that pass.
+static void submission_overlap_case(void) {
+    void *mem=NULL; if(posix_memalign(&mem,getpagesize(),getpagesize())) abort();
+    memset(mem,0,getpagesize()); float red[4]={1,0,0,1}; memcpy(mem,red,16); mtl_pool_add(mem,getpagesize());
+    tex_t a=texture(8,1,0),b=texture(8,1,0); chain setup=make_chain(),c=make_chain();
+    p_bind_ubo_small ub={.stage=1,.index=0,.size=16,.addr=(uint64_t)mem};
+    clear(&setup,&a,0,NULL,0,0,0); stencil(&setup,0,8,1,255,255,0); blending(&setup,0);
+    emit(&setup,OP_BIND_UBO_SMALL,&ub,sizeof ub); draw_prog(&setup,4,0); emit(&setup,OP_END,NULL,0);
+    state_reset(); memset(&R,0,sizeof R); mtl_sub_begin(); mtl_exec(setup.p);
+    EXPECT("target setup completed",1,mtl_wait(mtl_sub_commit(),5000000000ull));
+    uint64_t cuts=mtl_cut_count(),passes=g_stat_pass,reuse=g_stat_args_reuse,updates=g_ubd_deferred;
+    for(int i=0;i<64;i++) {
+        if(i==32) {
+            struct { uint64_t dst,n; float color[4]; } u={(uint64_t)mem,16,{0,1,0,1}};
+            emit(&c,OP_UPDATE_UB,&u,sizeof u);
+        }
+        // Repeated binds must not discard the arguments cached by earlier draws.
+        emit(&c,OP_BIND_UBO_SMALL,&ub,sizeof ub);
+        p_scissor sc={i<32?0:4,0,4,8}; emit(&c,OP_SCISSOR,&sc,sizeof sc);
+        p_draw d={NVN_DRAW_PRIMITIVE_TRIANGLES,0,3}; emit(&c,OP_DRAW,&d,sizeof d);
+    }
+    rt(&c,&b,0,NULL); emit(&c,OP_END,NULL,0);
+    mtl_sub_begin(); mtl_exec(c.p);
+    EXPECT("inherited target: first 64 draws submitted at their boundary",cut_draws()>0&&cut_draws()<=64,mtl_cut_count()-cuts);
+    EXPECT("inline update stays in one render pass",1,g_stat_pass-passes);
+    EXPECT("inline update used the deferred path",1,g_ubd_deferred>updates);
+    EXPECT("duplicate binds reuse encoded arguments",1,g_stat_args_reuse-reuse>=60);
+    id<MTLBuffer> out=[g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared];
+    [blit() copyFromTexture:tex_mtl(&a) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(8,8,1)
+      toBuffer:out destinationOffset:0 destinationBytesPerRow:32 destinationBytesPerImage:256];
+    EXPECT("segmented uniform draws completed",1,mtl_wait(mtl_sub_commit(),5000000000ull));
+    EXPECT("segmented uniform draws have no GPU errors",0,mtl_last_commit_error());
+    unsigned bad=0; const uint8_t *pixels=out.contents;
+    for(int y=0;y<8;y++) for(int x=0;x<8;x++) {
+        const uint8_t want[4]={x<4?255:0,x<4?0:255,0,255}; bad+=memcmp(pixels+4*(y*8+x),want,4)!=0;
+    }
+    EXPECT("pre-update pixels red, post-update pixels green",0,bad);
+    EXPECT("deferred update landed in guest storage",1,((float *)mem)[0]==0&&((float *)mem)[1]==1);
+    mtl_pool_del(setup.p); free(setup.p); mtl_pool_del(c.p); free(c.p); mtl_pool_del(mem); free(mem);
+}
 int main(int argc,char **argv) { @autoreleasepool {
     setvbuf(stdout,NULL,_IONBF,0);
     all_independent=argc>1&&!strcmp(argv[1],"--all-independent"); setenv("DM_NVN_TBDR","0",1); mtl_init();
@@ -245,6 +286,8 @@ int main(int argc,char **argv) { @autoreleasepool {
         p->sh[1]=[NvShader new]; NvShader *f=p->sh[1]; f->fn=[lib newFunctionWithName:fn[i]]; f->stage=1;
         if(i>=2&&i!=7) { f->rf.nb=1; f->rf.b[0]=(nvn_rbind){.kind=i==4?NVN_RB_CBUF:NVN_RB_TEX,.dtt=i==6?3:2}; f->ae=[f->fn newArgumentEncoderWithBufferIndex:0]; }
         pg[i].serial=4000+i; serial_put(pg[i].serial,p); }
+    submission_overlap_case();
+    if(argc>1&&!strcmp(argv[1],"--submission-overlap-only")) { printf("== %d checks, %d failed ==\n",count,fail); return fail!=0; }
     const char *names[]={"independent_mip_copy","same_mip_negative","stencil_disjoint_bits","stencil_shared_bits_negative","copy_reads_source_negative","in_block_order_negative"};
     for(int mode=0;mode<6;mode++) { printf("CASE %s\n",names[mode]); result o=render_case(mode,0),r=render_case(mode,1);
         save_result(names[mode],0,&o); save_result(names[mode],1,&r);

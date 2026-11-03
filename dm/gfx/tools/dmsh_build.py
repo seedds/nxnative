@@ -52,27 +52,32 @@ def precise(msl): return re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', m
 # Ampere HMMA.16816 with an f16 accumulator (agl's upscaler networks) reaches the MSL as a call of dmsh_hmma16816_f16(lane, block, A0..A3, B0, B1, C0, C1, out D1) → D0, with
 # the subgroup's 256-word block of the scratch shared memory as the last argument (InstEmitAmpereTensor.AHmma, TensorPass, HelperFunctionManager.GenerateHmma16816F16). The
 # translator's body computes D lane by lane from the block; here it becomes simdgroup_matrix code over the same block: A row-major (halves 0..255, 16 a row), B transposed
-# (256..383, row n, 16 halves of k, loaded transposed), C / D row-major (384..511, 8 a row). Per HMMA on an M4 Pro: 1.08 ns a SIMD-group against 5.4 for the shuffle emulation
+# (256..383, row n, 16 halves of k, loaded transposed). Per HMMA on an M4 Pro: about 1 ns a SIMD-group against 5.4 for the shuffle emulation.
+# The products accumulate in FP32 (simdgroup_float8x8, stored as floats over A's half of the block, 8 a row), each lane adds its C and rounds to half once, as Ampere's tensor
+# cores and the translator's body do. With simdgroup_half8x8 accumulators the sum rounded to half at every step: on fragments of ±2048 (bright HDR texels) outputs were off by up
+# to 7.6, thousands of half ULPs, against 0.63 ULP here (test_dmsh_hmma.py), and Donkey Kong Bananza's stage intro came out of agl's upscaler with fat, haloed neon letters
 HMMA_BODY = '''{
     threadgroup uint* s = &%(scr)s[uint(%(blk)s)];
     uint g = uint(%(lane)s) >> 2, t = uint(%(lane)s) & 3;
     s[g * 8 + t] = uint(%(a0)s); s[(g + 8) * 8 + t] = uint(%(a1)s); s[g * 8 + 4 + t] = uint(%(a2)s); s[(g + 8) * 8 + 4 + t] = uint(%(a3)s);
     s[128 + g * 8 + t] = uint(%(b0)s); s[128 + g * 8 + 4 + t] = uint(%(b1)s);
-    s[192 + g * 4 + t] = uint(%(acc0)s); s[192 + (g + 8) * 4 + t] = uint(%(acc1)s);
     simdgroup_barrier(mem_flags::mem_threadgroup);
     threadgroup half* h = (threadgroup half*)s;
-    simdgroup_half8x8 a00, a01, a10, a11, b0, b1, c0, c1;
+    simdgroup_half8x8 a00, a01, a10, a11, b0, b1;
+    simdgroup_float8x8 p0 = make_filled_simdgroup_matrix<float, 8, 8>(0.0f), p1 = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
     simdgroup_load(a00, h, 16, ulong2(0, 0)); simdgroup_load(a01, h, 16, ulong2(8, 0)); simdgroup_load(a10, h, 16, ulong2(0, 8)); simdgroup_load(a11, h, 16, ulong2(8, 8));
     simdgroup_load(b0, h + 256, 16, ulong2(0, 0), true); simdgroup_load(b1, h + 256, 16, ulong2(8, 0), true);
-    simdgroup_load(c0, h + 384, 8, ulong2(0, 0)); simdgroup_load(c1, h + 384, 8, ulong2(0, 8));
-    simdgroup_multiply_accumulate(c0, a00, b0, c0); simdgroup_multiply_accumulate(c0, a01, b1, c0);
-    simdgroup_multiply_accumulate(c1, a10, b0, c1); simdgroup_multiply_accumulate(c1, a11, b1, c1);
-    simdgroup_store(c0, h + 384, 8, ulong2(0, 0)); simdgroup_store(c1, h + 384, 8, ulong2(0, 8));
+    simdgroup_multiply_accumulate(p0, a00, b0, p0); simdgroup_multiply_accumulate(p0, a01, b1, p0);
+    simdgroup_multiply_accumulate(p1, a10, b0, p1); simdgroup_multiply_accumulate(p1, a11, b1, p1);
     simdgroup_barrier(mem_flags::mem_threadgroup);
-    uint d0 = s[192 + g * 4 + t], d1 = s[192 + (g + 8) * 4 + t];
+    threadgroup float* f = (threadgroup float*)s;
+    simdgroup_store(p0, f, 8, ulong2(0, 0)); simdgroup_store(p1, f, 8, ulong2(0, 8));
     simdgroup_barrier(mem_flags::mem_threadgroup);
-    %(d1)s = as_type<%(dt)s>(d1);
-    return as_type<%(rt)s>(d0);
+    float2 e0 = float2(as_type<half2>(uint(%(acc0)s))) + float2(f[g * 8 + 2 * t], f[g * 8 + 2 * t + 1]);
+    float2 e1 = float2(as_type<half2>(uint(%(acc1)s))) + float2(f[(g + 8) * 8 + 2 * t], f[(g + 8) * 8 + 2 * t + 1]);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    %(d1)s = as_type<%(dt)s>(as_type<uint>(half2(e1)));
+    return as_type<%(rt)s>(as_type<uint>(half2(e0)));
 }'''
 # A store only the very first invocation of a dispatch makes (a compute shader's preamble: `if (-local.x == workgroup.x << log2(local size)) buffer[k] = value`). Hoian_Proc in Splatoon Raiders resets its append counter
 # that way, with the other invocations adding to the counter at their end, hundreds of instructions later. On the Switch the first workgroup starts ahead of them. Apple's GPUs start workgroups in no order: a workgroup that had appended before
@@ -157,6 +162,29 @@ def border_emu(msl):
         twin = f'spvDescriptorSet0.{m.group(2)}{abi.BORDER_TWIN}'
         msl = msl[:m.start()] + f'dm_bs({msl[m.start():i]}, spvDescriptorSet0.{abi.BORDER_MEMBER}, {bit[m.group(2)]}u, spvDescriptorSet0.{m.group(1)}, {twin}, {args})' + msl[i:]
     return msl.replace('using namespace metal;\n', 'using namespace metal;\n' + BORDER_HELPERS, 1)
+
+def border_plain(msl):
+    """The source without its border corrections (border_emu): every dm_bs(sample, …) back to the sample, the twin samplers and the block still declared, so the argument
+    buffer is the one the host encodes either way. The correction is a branch almost never taken (no draw of Donkey Kong Bananza's heavy areas sets a bit), but the compiler
+    gives its twin sample registers in every pixel: the material shader 6f9fd9cb5fbc873b spilled 336 bytes a thread with it and 160 without on an M1 (upstream PR #1032).
+    A pixel shader's main library is built from this source; <key>_b.metal keeps the correcting source, from which its side libraries are made (border_finish, alpha_finish,
+    logic_finish), on a build and on a cache hit alike"""
+    at = msl.find(BORDER_HELPERS)
+    if at < 0: return msl
+    at += len(BORDER_HELPERS)
+    def strip(text):
+        out, i = [], 0
+        while (j := text.find('dm_bs(', i)) >= 0:
+            depth, k, first = 1, j + 6, None
+            while depth:
+                c = text[k]
+                if c == '(': depth += 1
+                elif c == ')': depth -= 1
+                elif c == ',' and depth == 1 and first is None: first = k
+                k += 1
+            out.append(text[i:j] + '(' + strip(text[j + 6:first]).strip() + ')'); i = k   # a sample inside the first argument is unwrapped too
+        return ''.join(out) + text[i:]
+    return msl[:at] + strip(msl[at:])
 CAS =os.environ.get('DMSH_CAS', os.path.join(cache_root, 'cas'))
 CAS_LOCKS, CAS_LOCKS_GUARD = {}, threading.Lock()
 PRE_STATS = collections.Counter()
@@ -285,7 +313,7 @@ def publish_cache(key, digest, rule_fp, code_fp):
         for name in names:
             if name.endswith('.json'):
                 src = os.path.join(out if label == 'mac' else IOSOUT, name)
-                value = json.load(open(src)); value.pop('fetch', None); value.pop('vin', None); value.pop('pull', None); value.pop('alpha', None); value.pop('logic', None)   # the side libraries are made again from the restored MSL (fetch_finish, vin_finish, pull_finish, alpha_finish, logic_finish)
+                value = json.load(open(src)); value.pop('fetch', None); value.pop('vin', None); value.pop('pull', None); value.pop('alpha', None); value.pop('logic', None); value.pop('border', None)   # the side libraries are made again from the restored MSL (fetch_finish, vin_finish, pull_finish, alpha_finish, logic_finish, border_finish)
                 atomic_json(os.path.join(d, name), value)
     atomic_json(cache_meta_path(key), {'digest': digest, 'rule_fp': rule_fp, 'code_fp': code_fp})
 
@@ -460,6 +488,16 @@ def alpha_finish(key, full, refl):   # the alpha test library <key>_ba (dmsh_alp
 
 def logic_finish(key, full, refl):   # the logic operation library <key>_bl (dmsh_logic.py): none for a shader without colour outputs
     return ps_side_finish(key, full, refl, dmsh_logic, 'bl', 'logic', LOGIC_STATS, 'logic operation')
+
+BORDER_STATS = collections.Counter()
+class border_side:   # ps_side_finish's variant for border_finish: the correcting source as it is, with every fragment entry point
+    @staticmethod
+    def variant(full):
+        if 'dm_bs(' not in full: return None, None
+        return full, re.findall(r'^\s*fragment\s+\S+\s+(\w+)\s*\(', full, re.M)
+
+def border_finish(key, full, refl):   # the border correcting library <key>_bb (border_emu), from <key>_b.metal (the correcting source); none for a shader that samples through no sampler member
+    return ps_side_finish(key, full, refl, border_side, 'bb', 'border', BORDER_STATS, 'border colour')
 
 pc_of, loc = {}, {}
 MAP_ROWS, MAP_CONFLICT_ROWS = {}, {}
@@ -1246,13 +1284,19 @@ def finish(key, w, j, c1):
     fu, fmask = fs_uint(src) if j['stage'] == 'ps' else (None, 0)   # the integer-output entry points (see fs_uint); the analysis below uses the source with only main0
     fd = fs_dual(src) if j['stage'] == 'ps' and key in DUAL_WANT else None   # the dual-source entry point (see fs_dual), from the source with only main0
     if fu or fd: plain = src; open(msl, 'w').write((fu or src) + (fd or ''))
+    def main_source():   # the file the main library is compiled from: for a pixel shader its source without the border corrections (border_plain); msl, which becomes <key>_b.metal, keeps them
+        if j['stage'] != 'ps': return msl
+        full = open(msl).read(); pl = border_plain(full)
+        if pl == full: return msl
+        p = msl[:-len('.metal')] + '_main.metal'; open(p, 'w').write(pl); return p
+    cmsl = main_source()
     def compile_targets():   # the selected targets from the same MSL (MSL identical to one compiled before takes that library, dmsh_mtlcache.py)
-        if 'mac' in TARGETS: MTL.compile('mac', msl, lib)
-        if 'ios' in TARGETS and IOSOUT: MTL.compile('ios', msl, os.path.join(IOSOUT, key + '_b.metallib'))
+        if 'mac' in TARGETS: MTL.compile('mac', cmsl, lib)
+        if 'ios' in TARGETS and IOSOUT: MTL.compile('ios', cmsl, os.path.join(IOSOUT, key + '_b.metallib'))
     try: compile_targets()
     except subprocess.CalledProcessError as e:
         if not lay and not fu and not fd: return 'metal failed', str(e)[:160], None
-        open(msl, 'w').write(plain); lay = fu = fd = None   # the layer, integer-output and dual-source entry points are extras: a library that does not build with them is built without
+        open(msl, 'w').write(plain); lay = fu = fd = None; cmsl = main_source()   # the layer, integer-output and dual-source entry points are extras: a library that does not build with them is built without
         try: compile_targets()
         except subprocess.CalledProcessError as e: return 'metal failed', str(e)[:160], None
     clone(msl, os.path.join(out, key + '_b.metal'))
@@ -1271,7 +1315,7 @@ def finish(key, w, j, c1):
             'vertex_inputs': [{'location': int(m.group(2)), 'msl_type': m.group(1)} for m in re.finditer(r'(\w+)\s+\w+\s*\[\[attribute\((\d+)\)\]\]', src)],
             'raster': raster_facts(j['stage'], src), 'vs_pad': pad}
     if j['stage'] == 'vs': full = open(msl).read(); vin_finish(key, full, refl); pull_finish(key, full, refl)   # the shadow-input and pulling libraries (dmsh_vin.py, dmsh_pull.py), from the source with every entry point
-    if j['stage'] == 'ps': full = open(msl).read(); alpha_finish(key, full, refl); logic_finish(key, full, refl)   # the alpha test and logic operation libraries (dmsh_alpha.py, dmsh_logic.py), from the source with every entry point
+    if j['stage'] == 'ps': full = open(msl).read(); alpha_finish(key, full, refl); logic_finish(key, full, refl); border_finish(key, full, refl)   # the alpha test, logic operation and border correcting libraries (dmsh_alpha.py, dmsh_logic.py, border_finish), from the correcting source with every entry point
     write_refl(key, refl)
     fetch_finish(key, src, refl)
     return 'ok', '', refl
@@ -1334,7 +1378,7 @@ def fin(key):
         refl = json.load(open(os.path.join(out, key + '_b.json')))
         src = open(os.path.join(out, key + '_b.metal')).read() if refl['stage'] in ('ps', 'vs') else ''
         if refl['stage'] == 'vs': write_refl(key, pull_finish(key, src, vin_finish(key, src, refl)))
-        return key, 'ok', '', fetch_finish(key, src, logic_finish(key, src, alpha_finish(key, src, refl)))
+        return key, 'ok', '', fetch_finish(key, src, border_finish(key, src, logic_finish(key, src, alpha_finish(key, src, refl))))   # src: <key>_b.metal, the correcting source (border_plain)
     if key in xerr or not os.path.exists(os.path.join(w, key + '.spv')): return key, 'translation failed', xerr.get(key, 'no spv'), None
     result = (key,) + finish(key, w, jobs[key], c1s[key])
     if result[1] == 'ok': publish_cache(key, digests[key], rule_fps[key], CODE_FP)
@@ -1371,6 +1415,7 @@ print(f'shadow-input libraries (<key>_bv, dmsh_vin.py): {VIN_STATS["generated"]}
       f'{VIN_STATS["inputs"]} integer inputs shadowed, {VIN_STATS["float only"]} of them with no other-sign shadow (attribute indices ran out)')
 print(f'alpha test libraries (<key>_ba, dmsh_alpha.py): {ALPHA_STATS["generated"]} generated, {ALPHA_STATS["failed"]} failed to compile, {ALPHA_STATS["not generated"]} pixel shaders without a float colour 0 alpha')
 print(f'logic operation libraries (<key>_bl, dmsh_logic.py): {LOGIC_STATS["generated"]} generated, {LOGIC_STATS["failed"]} failed to compile, {LOGIC_STATS["not generated"]} pixel shaders without colour outputs')
+print(f'border correcting libraries (<key>_bb, border_plain): {BORDER_STATS["generated"]} generated, {BORDER_STATS["failed"]} failed to compile, {BORDER_STATS["not generated"]} pixel shaders without border corrections', flush=True)
 print(f'pulling libraries (<key>_bp, dmsh_pull.py): {PULL_STATS["generated"]} generated, {PULL_STATS["failed"]} failed to compile, {PULL_STATS["not generated"]} not generated, '
       f'{PULL_STATS["no stage input"]} vertex shaders without stage inputs (none needed)')
 print('mesh libraries (<vertex>_<geometry>_m3, dmsh_mesh.py): ' + (', '.join(f'{k} {v}' for k, v in MESH_STATS.items()) or 'none'))

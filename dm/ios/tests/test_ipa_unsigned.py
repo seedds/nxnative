@@ -1,6 +1,7 @@
 """The unsigned IPA of build_ipa.sh: the game files stay out with DM_COPY_ROMFS=NO, and the executable carries the entitlements in an ad-hoc signature.
 Only the archive step and the signing step run (a stand-in app, no Xcode or game files)."""
 import os
+import plistlib
 from pathlib import Path
 import shutil
 import subprocess
@@ -25,7 +26,8 @@ CAN_SIGN = sys.platform == 'darwin' and shutil.which('codesign') and shutil.whic
 
 def run_step(script, root, **extra):
     env = {k: v for k, v in os.environ.items() if not k.startswith('DM_') and k not in ('IOS_PULL', 'AOC', 'PSO')}
-    env.update(GAME=GAME, DM=str(root / 'dm'), PROFILE_TOOL=str(REPO / 'dm/games/game.py'), **extra)
+    env.update(GAME=GAME, DM=str(root / 'dm'), PROFILE_TOOL=str(REPO / 'dm/games/game.py'), IOS_SOURCE=str(REPO / 'dm/ios'))
+    env.update(extra)
     return subprocess.run(['/bin/bash', '-c', PREAMBLE + script], cwd=root, env=env, capture_output=True, text=True)
 
 
@@ -84,17 +86,27 @@ class UnsignedIpaTests(unittest.TestCase):
 
     @unittest.skipUnless(CAN_SIGN, 'needs macOS codesign and a C compiler')
     def test_executable_carries_the_entitlements(self):
-        cases = [({}, True), ({'DM_ENTITLEMENTS': ''}, False)]
+        ram = 'com.apple.developer.kernel.increased-memory-limit'
+        va = 'com.apple.developer.kernel.extended-virtual-addressing'
+        cases = [({}, {ram: True}), ({'GAME': '040074A01BF12000'}, {ram: True, va: True}),
+                 ({'DM_ENTITLEMENTS': ''}, {}), ({'DM_ENTITLEMENTS': 'custom.plist'}, {va: True})]
         for extra, expected in cases:
             with self.subTest(extra=extra), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 (root / 'DmIOS.app').mkdir(); (root / 'pkg').mkdir()
+                (root / 'custom.plist').write_bytes(plistlib.dumps({va: True}))
                 (root / 'main.c').write_text('int main(void) { return 0; }\n')
                 subprocess.run(['cc', '-o', str(root / 'DmIOS.app/DmIOS'), str(root / 'main.c')], check=True)
                 result = run_step(SIGNING, root, APP=str(root / 'DmIOS.app'), O=str(root / 'pkg'), **extra)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                shown = subprocess.run(['codesign', '-d', '--entitlements', '-', str(root / 'DmIOS.app/DmIOS')], capture_output=True, text=True)
-                self.assertEqual('com.apple.developer.kernel.increased-memory-limit' in shown.stdout + shown.stderr, expected)
+                readback = root / 'readback.plist'
+                shown = subprocess.run(['codesign', '-d', '--xml', '--entitlements', str(readback), str(root / 'DmIOS.app/DmIOS')], capture_output=True, text=True)
+                if expected:
+                    self.assertEqual(shown.returncode, 0, shown.stderr)
+                    self.assertEqual(plistlib.loads(readback.read_bytes()), expected)
+                else:
+                    self.assertNotIn(ram, shown.stdout + shown.stderr)
+                    self.assertNotIn(va, shown.stdout + shown.stderr)
 
 
 if __name__ == '__main__':

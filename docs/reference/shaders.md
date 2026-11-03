@@ -145,6 +145,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Symptom:** 24 shaders before the control-length fix, 1,355 after.
 - **Cause:** its GLSLC (output version 0x1d.2) writes the 0x848 / 0x850-byte controls and headerless compute code described in the RDB entry, which `glslc_shaders` used to drop. A few outputs of version 0x1d.0 keep something else at control +0x20 (odd values such as 0x136b), so a control length must be a multiple of 4; the section-header reading now takes 8 of them ([GLSLC outputs read through their section headers](#glslc-outputs-read-through-their-section-headers)).
 - **Found on:** [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) (the older KTGL).
+
+### KTGL on NVN2: Switch 2 GLSLC outputs and LD_ / LI_ LINKDATA
+
+- **Symptom:** the split finds almost none of a KTGL Switch 2 game's shaders: the G2S containers in its RDB entries yield nothing, and its programs name no packaged shader.
+- **Cause:** the Switch 2's GLSLC writes a longer output header (the output's length at +0x5c, the section count at +0x64, section headers from +0xa8, 0x98 apart; GPU code version 0xc9 at +0x30), its NVN2 control sections are too short for the Switch 1 rule, and the game keeps more outputs in a LINKDATA pair named `LD_<name>.BIN` / `LI_<name>.IDX`, whose larger entries use zlib chunks above 0x10000 bytes.
+- **Fix:** `glslc_layout` reads either header, `linkdata_index` names the index of either pair, and `kt_gz` takes any power of two from 0x10000 as its chunk size (`shader_split.py`).
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md): 131,426 shaders on update v655360.
 - **Note:** nine more shaders exist only at run time ([Built-in shaders compiled with the game's own GLSLC](#built-in-shaders-compiled-with-the-games-own-glslc)).
 
 ### GLSLC outputs in base64 in Heaps' shader cache
@@ -864,9 +871,36 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 ### Scaled shared memory addresses
 
 - **Symptom:** a compute shader's results in shared memory land in the wrong elements, or only part of its memory is cleared. An exposure histogram came back with its bins at about four times their index, the scene several stops too dark.
-- **Cause:** LDS and STS with a register carry a stride at 78..79: 1 on all the game's 32-bit accesses, 2 on all its 64-bit ones, so the register counts elements of 4 or 8 bytes, not bytes. The decoder ignored it. Its ATOMS take byte offsets and have the field at 0.
-- **Fix:** `AStride` in `InstEmitAmpereMem.cs`, for LDL, LDS, STL, STS and ATOMS. A stride of 3, 16 bytes, is inferred from the pattern and does not occur in the game, and neither does a stride on ATOMS.
-- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): 2 LDS and 2 STS with a register in its 16,888 shaders, all in the Lighting compute shaders; `d5bc99ffd183fa20` bounds its register by the element count (0x20) before `[R2 * 8]`. Other Switch 2 games share the decoder and have not been rebuilt with this.
+- **Cause:** LDS and STS with a register carry a stride at 78..79, so the register counts elements of 4, 8 or 16 bytes (stride 1, 2, 3), not bytes. The decoder ignored it. The field is a scale, not the access size: stride 3 occurs on 4, 8 and 16-byte accesses alike.
+- **Fix:** `AStride` in `InstEmitAmpereMem.cs`, for LDL, LDS, STL, STS and ATOMS.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): 2 LDS and 2 STS with a register in its 16,888 shaders, all in the Lighting compute shaders; `d5bc99ffd183fa20` bounds its register by the element count (0x20) before `[R2 * 8]`. [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md): 921 accesses with stride 1, 68 with 2 and 3,312 with 3, among its 131,426 shaders; `2118ab534fac88c6`'s histogram increments `[R3 * 4]`.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
+
+### HADD2 and HMUL2 with an immediate
+
+- **Symptom:** the GPU hangs (`kIOGPUCommandBufferCallbackErrorHang`) from the first 3D scene on, or frames of about 88 ms, in a shader with a half-float loop.
+- **Cause:** the two-source half-pair operations took their second source from the operand order HFMA2 needs: in forms 2, 3 and 7 that is the unused register field at bit 64, not the immediate, constant or uniform register. A blur stepping its loop with `HADD2 Rd, Rd, imm` stepped by whatever R0 held. An immediate also took modifiers from its own bits 62 and 63, flipping the sign of a negative constant.
+- **Fix:** `AHalfSecond` in `InstEmitAmpereAlu.cs` for HADD2, HMUL2, HSETP2, HSET2 and HMNMX2; `AHalfSrcs` leaves an immediate's bits alone.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md): 25,726 of its shaders use those forms; `85446a6753300fc8` is the blur.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
+
+### HFMA2 .H0_NH1
+
+- **Symptom:** wrong shading where a shader needs a cross product or a 2D rotation of half pairs; on Eden-NS2, which first read the mode as a plain negation of the high lane, sun and cloud shadows were lost.
+- **Cause:** bit 86 of HFMA2 rotates B: the name gives the lanes high first, so the high lane reads B's low half and the low lane B's high half negated. The decoder ignored the bit.
+- **Fix:** `AHfma2` in `InstEmitAmpereAlu.cs`. The lane order comes from Eden-NS2's fix (checked there against Switch 2 footage), not from a shader that proves it here.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md): 10,177 instructions in 7,590 programs. The fix made no visible difference in its tutorial area.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
+
+### Ampere instructions new in Pokémon Pokopia
+
+- **Symptom:** `Ampere instruction <op> at 0x… is not implemented`, `F2FP.MERGE_C` or `F2I from a float that is not 32-bit` in the shader build; those shaders are left out and their draws and dispatches skipped.
+- **Fix:**
+  - F2FP.MERGE_C (bit 78): b converted into the low half, c's low half into the high one.
+  - F2I from a half (source size 1): the half that bits 60..61 select.
+  - ATOMS.POPC.INC (0xf8c): an add of 1 with no source register, also counted as using shared memory. The game's one encoding is accepted; any other stops the shader.
+  - UP2UR (0x883): `URd = UP0 ? 1 : 0`. The game's one encoding (URZ, mask 1) is accepted; any other stops the shader.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
 
 ### IMAD.HI adds a register pair, and IMAD.X its carry

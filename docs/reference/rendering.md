@@ -141,6 +141,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md): 16,438 such shaders (98,970 bindings; slots 16–21 hold KTGL's light and decal lists).
 - **Check:** Age of Calamity's 15-minute Mac battle bound 15.7 million of them through 320 row textures, none failed; the scene is darker and more saturated than with the zeros (mean luma 163 against 178 at the start of the battle), GPU time unchanged.
 
+### Integer buffer textures read through float slots
+
+- **Symptom:** none of its own seen here. Pull request #984 reports GPU hangs from huge light counts on its build of the same game.
+- **Cause:** with no type answer the translator declares a fetched texture float. KTGL keeps its light and decal lists in 32-bit integer buffers and takes the fetched bits back with `as_type<int>`. Reading an integer texture through a float declaration is undefined in Metal.
+- **Fix:** `tbuf_as_2d` (`nvn_mtl.m`) views a 32-bit integer buffer in a slot declared float as the float format of the same size (`tbuf_view_format`), so the shader reads the stored bits.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md). No visible change in its tutorial area.
+
 ### Buffer textures at offsets below 16 bytes
 
 - **Symptom:** particle effects drawn at the wrong scale or place, or flickering, where the particle data is a buffer texture at a pool offset that is not a multiple of 16; log line `buffer texture at pool offset …, below Metal's 16-byte alignment`.

@@ -1012,6 +1012,8 @@ NVN(nvnCommandBufferSetRenderTargets, void, NVNcommandBuffer *c, int n, const NV
     p_set_rt *r = REC_SNAP(c, OP_SET_RT, p_set_rt, n + 1); r->n = n;
     for (int i = 0; i < n; i++) { r->color[i] = ct ? tex_snap(r, SNAP_OFF(p_set_rt), i, ct[i], (uint64_t)__builtin_return_address(0)) : NULL; copy_view(&r->cview[i], &r->has_cview[i], cv ? cv[i] : NULL); }
     r->depth = tex_snap(r, SNAP_OFF(p_set_rt), n, dt, (uint64_t)__builtin_return_address(0)); copy_view(&r->dview, &r->has_dview, dv);
+    for (int i = 0; i < n; i++) if (r->color[i]) mtl_pool_gpu_written(r->color[i]->pool);   // the GPU writes these pools (tex_cpu_content in nvn_mtl.m)
+    if (r->depth) mtl_pool_gpu_written(r->depth->pool);
 }
 NVN(nvnCommandBufferClearColor, void, NVNcommandBuffer *c, int index, const float *rgba, int mask) {
     p_clear_color *r = REC(c, OP_CLEAR_COLOR, p_clear_color); r->index = index; r->mask = mask; memcpy(r->rgba, rgba, 16);
@@ -1145,10 +1147,10 @@ NVN(nvnCommandBufferCopyTextureToBuffer, void, NVNcommandBuffer *c, const NVNtex
 }
 // Clear a texture region with the given value (float / unsigned integer versions; mask = channel write mask)
 NVN(nvnCommandBufferClearTexture, void, NVNcommandBuffer *c, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r, const float *rgba, int mask) {
-    p_clear_tex *o = REC_SNAP(c, OP_CLEAR_TEX, p_clear_tex, 1); o->tex = tex_snap(o, SNAP_OFF(p_clear_tex), 0, t, (uint64_t)__builtin_return_address(0)); copy_view(&o->view, &o->has_view, v); o->r = *r; o->mask = mask; o->is_uint = 0; memcpy(o->c.f, rgba, 16);
+    p_clear_tex *o = REC_SNAP(c, OP_CLEAR_TEX, p_clear_tex, 1); o->tex = tex_snap(o, SNAP_OFF(p_clear_tex), 0, t, (uint64_t)__builtin_return_address(0)); if (o->tex) mtl_pool_gpu_written(o->tex->pool); copy_view(&o->view, &o->has_view, v); o->r = *r; o->mask = mask; o->is_uint = 0; memcpy(o->c.f, rgba, 16);
 }
 NVN(nvnCommandBufferClearTextureui, void, NVNcommandBuffer *c, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r, const uint32_t *rgba, int mask) {
-    p_clear_tex *o = REC_SNAP(c, OP_CLEAR_TEX, p_clear_tex, 1); o->tex = tex_snap(o, SNAP_OFF(p_clear_tex), 0, t, (uint64_t)__builtin_return_address(0)); copy_view(&o->view, &o->has_view, v); o->r = *r; o->mask = mask; o->is_uint = 1; memcpy(o->c.u, rgba, 16);
+    p_clear_tex *o = REC_SNAP(c, OP_CLEAR_TEX, p_clear_tex, 1); o->tex = tex_snap(o, SNAP_OFF(p_clear_tex), 0, t, (uint64_t)__builtin_return_address(0)); if (o->tex) mtl_pool_gpu_written(o->tex->pool); copy_view(&o->view, &o->has_view, v); o->r = *r; o->mask = mask; o->is_uint = 1; memcpy(o->c.u, rgba, 16);
 }
 NVN(nvnCommandBufferCopyTextureToTexture, void, NVNcommandBuffer *c, const NVNtexture *s, const NVNtextureView *sv, const NVNcopyRegion *sr,
     const NVNtexture *d, const NVNtextureView *dv, const NVNcopyRegion *dr, int flags) {
@@ -2277,6 +2279,52 @@ NVN(nvnTextureGetStorageClass, NVNstorageClass, const NVNtexture *t) { (void)t; 
 NVN(nvnTextureBuilderGetZCullStorageSize, size_t, const NVNtextureBuilder *b) { return zcull_size(&TB(b)->d); }   // as for the texture (zcull_size)
 // Packaged texture data in CPU memory (not written into the pool by the game): NVN copies it into the texture storage at TextureInitialize (the CPU cannot write a compressible pool; the driver copies). 13 Sentinels creates all its textures this way
 NVN(nvnTextureBuilderSetPackagedTextureData, void, NVNtextureBuilder *b, const void *data) { TB(b)->pkg_data = data; }
+
+// The graphics system (nn::gs) is the host's: the SDK's check that it was booted (gs::sdk::BootGraphicsSystem, which the SDK's NVN driver runs) passes. Mario Kart World checks it before it
+// opens its camera (main+0xcdebf4)
+HLE_FORCE("_ZN2nn2gs3sdk30CheckGraphicsSystemInitializedEPKcm", "graphics system booted: the host's graphics layer stands in for it", void, h_gs_Check, const char *who, size_t n) { (void)who; (void)n; }
+
+// ---------- Native images the host makes (NVN2): the GameChat camera's pictures ----------
+// Mario Kart World makes textures on its GameChat camera images in nnMain (main+0xd322d4: three local camera images, NativeImageInitialize then TextureInitializeFromNativeImage, an abort when
+// either fails). The host makes those handles itself (nvn_native_image_new, hle_misc.c, the chat camera video storage): a size, no picture. The entry points are those of "Native images"
+// below (decoded movie pictures); a host-made handle gets zeroed linear storage of the builder's format at its first texture (no camera picture)
+static struct { uint32_t handle, w, h, stride; uint8_t *mem; uint64_t size; } g_nimg[64];
+static uint32_t g_nimg_next;
+static pthread_mutex_t g_nimg_mu = PTHREAD_MUTEX_INITIALIZER;
+uint32_t nvn_native_image_new(uint32_t w, uint32_t h) {   // a host native image handle of that size; 0 when the table is full
+    uint32_t r = 0;
+    pthread_mutex_lock(&g_nimg_mu);
+    for (size_t i = 0; i < sizeof g_nimg / sizeof *g_nimg; i++)
+        if (!g_nimg[i].handle) { r = 0x4e490000u | (++g_nimg_next & 0xffff); g_nimg[i].handle = r; g_nimg[i].w = w; g_nimg[i].h = h; break; }
+    pthread_mutex_unlock(&g_nimg_mu);
+    if (!r) LOG("[RED] native images: more than %zu at once", sizeof g_nimg / sizeof *g_nimg);
+    return r;
+}
+void nvn_native_image_free(uint32_t handle) {
+    pthread_mutex_lock(&g_nimg_mu);
+    for (size_t i = 0; i < sizeof g_nimg / sizeof *g_nimg; i++)
+        if (handle && g_nimg[i].handle == handle) { if (g_nimg[i].mem) munmap(g_nimg[i].mem, g_nimg[i].size); memset(&g_nimg[i], 0, sizeof g_nimg[i]); }
+    pthread_mutex_unlock(&g_nimg_mu);
+}
+// A host-made handle's picture for nvnTextureInitializeFromNativeImage, as dm_native_image gives a decoder's: 1 and its memory, size and layout; 0 for a handle the host did not make
+static int nvn_native_image_host(uint32_t handle, int format, uint8_t **mem, uint64_t *size, uint32_t *w, uint32_t *h, uint32_t *stride) {
+    int bw = 1, bh = 1, bpb = nvn_fmt_bpb(format, &bw, &bh), ok = 0;
+    if (!handle || bpb <= 0) return 0;
+    pthread_mutex_lock(&g_nimg_mu);
+    for (size_t i = 0; i < sizeof g_nimg / sizeof *g_nimg; i++) {
+        if (g_nimg[i].handle != handle) continue;
+        if (!g_nimg[i].mem) {
+            uint32_t st = ((g_nimg[i].w + bw - 1) / bw * (uint32_t)bpb + 63) & ~63u;
+            uint64_t sz = ((uint64_t)st * ((g_nimg[i].h + bh - 1) / bh) + 0x3fff) & ~0x3fffull;
+            void *m = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+            if (m != MAP_FAILED) { g_nimg[i].mem = m; g_nimg[i].size = sz; g_nimg[i].stride = st; }
+        }
+        if (g_nimg[i].mem) { *mem = g_nimg[i].mem; *size = g_nimg[i].size; *w = g_nimg[i].w; *h = g_nimg[i].h; *stride = g_nimg[i].stride; ok = 1; }
+        break;
+    }
+    pthread_mutex_unlock(&g_nimg_mu);
+    return ok;
+}
 NVN(nvnTextureGetFormat, NVNformat, const NVNtexture *t) { return (NVNformat)CTX(t)->d.format; }
 NVN(nvnTextureGetTarget, NVNtextureTarget, const NVNtexture *t) { return (NVNtextureTarget)CTX(t)->d.target; }
 NVN(nvnTextureSetDebugLabel, void, NVNtexture *t, const char *s) { (void)t; (void)s; }
@@ -2470,7 +2518,9 @@ HLE_FORCE("_Z22nvnNativeImageFinalizeP14NVNnativeImage", "native images are the 
 }
 HLE_FORCE("_Z35nvnTextureInitializeFromNativeImageP10NVNtextureP14NVNnativeImage", "a linear texture over the picture's memory", NVNboolean, h_ni_texture, NVNtexture *t, native_image_t *i) {
     uint8_t *mem; uint64_t size; uint32_t w, h, stride;
-    if (!dm_native_image(i->handle, &mem, &size, &w, &h, &stride)) { LOG("[RED] nvnTextureInitializeFromNativeImage: handle %#x names no picture", i->handle); return 0; }
+    if (!dm_native_image(i->handle, &mem, &size, &w, &h, &stride) && !nvn_native_image_host(i->handle, (int)i->format, &mem, &size, &w, &h, &stride)) {
+        LOG("[RED] nvnTextureInitializeFromNativeImage: handle %#x names no picture", i->handle); return 0;
+    }
     if (!i->has_pool) {
         NVNmemoryPoolBuilder pb; h_nvnMemoryPoolBuilderSetDefaults(&pb); h_nvnMemoryPoolBuilderSetDevice(&pb, i->dev); h_nvnMemoryPoolBuilderSetStorage(&pb, mem, size);
         h_nvnMemoryPoolBuilderSetFlags(&pb, NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
@@ -2685,6 +2735,26 @@ int nvn_sparse_mapped(const void *pool, uint64_t a, uint64_t n) {   // every pag
     pthread_mutex_unlock(&g_vp_mu); return ok;
 }
 void nvn_sparse_protect(const void *pool, uint64_t a, uint64_t n) { vpt_walk(pool, a, n, ~0ull, run_protect, 0); }
+// The state of [a, a+n) in tiles of tile bytes, one page-table walk (a sparse texture's host tiles, nvn_mtl.m): out[i] bit 0 = a page of tile i has memory behind it, bit 1 = a mapping in it
+// newer than gen, or a physical page behind it written since stamp. → tiles with a mapped page
+uint64_t nvn_sparse_tile_state(const void *pool, uint64_t a, uint64_t n, uint32_t tile, uint64_t gen, uint64_t stamp, uint8_t *out) {
+    uint64_t nt = (n + tile - 1) / tile, mapped = 0; memset(out, 0, nt);
+    pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a);
+    if (!v) { pthread_mutex_unlock(&g_vp_mu); return 0; }
+    const uint8_t *rs = NULL, *re = NULL; uint64_t ri = 0, o = a - (uint64_t)(uintptr_t)v->base;
+    for (uint64_t at = o & ~0xFFFull; at < o + n && at < v->size; at += 0x1000) {
+        const vpte *e = vpt_get(v, at); uint64_t i = (at > o ? at - o : 0) / tile;   // the first page may start before a (not 4 KB aligned)
+        if (!e) { at |= (2u << 20) - 1; at -= 0xFFF; continue; }   // a leaf never mapped: skip its 2 MB
+        if (!e->phys) continue;
+        if (!(out[i] & 1)) mapped++;
+        out[i] |= 1; if (e->gen > gen) out[i] |= 2;
+        if (rs && e->phys == re && ri == i) { re += 0x1000; continue; }   // the run of consecutive physical pages behind one tile: one dirty check each
+        if (rs && !(out[ri] & 2) && nvn_dirty_since(rs, (uint64_t)(re - rs), stamp)) out[ri] |= 2;
+        rs = e->phys; re = rs + 0x1000; ri = i;
+    }
+    if (rs && !(out[ri] & 2) && nvn_dirty_since(rs, (uint64_t)(re - rs), stamp)) out[ri] |= 2;
+    pthread_mutex_unlock(&g_vp_mu); return mapped;
+}
 NVN(nvnCommandBufferDrawElementsIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, NVNbufferAddress ib, NVNbufferAddress ind) {
     rec_draw_idx(c, (p_draw_idx){pr, it, 0, 0, 0, 1, ib, ind});
 }

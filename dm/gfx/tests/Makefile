@@ -67,6 +67,13 @@ t_tbuf2d: t_tbuf2d.m ../nvn/nvn_tex.c ../nvn/nvn_tex.h
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_tbuf2d.m ../nvn/nvn_tex.c -framework Metal -framework Foundation
 t_tbuf_align: t_tbuf_align.m
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_tbuf_align.m -framework Metal -framework Foundation
+t_sparse_upgrade: t_sparse_upgrade.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_upgrade.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_sparse_upgrade
+check_t_sparse_upgrade: t_sparse_upgrade
+	MTL_DEBUG_LAYER=1 ./t_sparse_upgrade
+t_sparse_map: t_sparse_map.c ../nvn/nvn_tex.c ../nvn/nvn_tex.h ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle.h
+	clang $(CFLAGS) -o $@ t_sparse_map.c ../nvn/nvn_tex.c ../tex/nvn_deswizzle.c
 t_sparse_layout: t_sparse_layout.c ../nvn/nvn_tex.c ../nvn/nvn_tex.h
 	clang $(CFLAGS) -o $@ t_sparse_layout.c ../nvn/nvn_tex.c
 t_deswz_gpu: t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../tex/nvn_deswizzle.h ../tex/nvn_deswizzle_gpu.h ../nvn/nvn_tex.c ../nvn/nvn_tex.h ../nvn/host_msl.m $(MSL_H)
@@ -394,6 +401,9 @@ check_t_unwritten_store: RUN_ENV = MTL_DEBUG_LAYER=1
 t_upgrade_alias: t_upgrade_alias.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upgrade_alias.m $(MTL_T_SRC) $(FW)
 check_t_upgrade_alias: RUN_ENV = MTL_DEBUG_LAYER=1
+t_srgb_alias: t_srgb_alias.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_srgb_alias.m $(MTL_T_SRC) $(FW)
+check_t_srgb_alias: RUN_ENV = MTL_DEBUG_LAYER=1
 t_image_alias: t_image_alias.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_alias.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_image_alias
@@ -447,3 +457,6 @@ t_logic: t_logic.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_logic.m $(MTL_T_SRC) $(FW)
 check_t_logic: t_logic
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_logic.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_logic "$$work"
+t_uncompressed_storage: t_uncompressed_storage.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_uncompressed_storage.m $(MTL_T_SRC) $(FW)
+check_t_uncompressed_storage: RUN_ENV = MTL_DEBUG_LAYER=1

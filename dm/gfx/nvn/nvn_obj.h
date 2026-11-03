@@ -254,6 +254,7 @@ void mtl_reg_tex_gone(int id);   // the ID stays registered, its memory pool fin
 void mtl_reg_image(int id, const tex_t *t, const view_t *v);   // RegisterImage declares image use even when the builder omitted IMAGE
 // textures written by WriteTexels (recorded by serial): the replay layer treats them like packaged textures, uploaded from guest memory and re-uploaded on dirty pages
 void mtl_tex_cpu_written(const tex_t *t);
+void mtl_pool_gpu_written(const void *pool);                               // a render target, shader image or texture clear recorded in this pool (tex_cpu_content)
 int mtl_tex_gpu_owned(uint64_t serial);                                  // its host texture is a render target or shader-writable: GPU content, never re-uploaded from guest memory
 // hle_nvn.c: a texture tex_flush_upload / tex_dirty_upload registered and has not resolved yet; GPU copies written into the destination texture's storage as well (see there)
 int nvn_ft_tracked(uint64_t serial);

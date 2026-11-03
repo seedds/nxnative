@@ -180,6 +180,7 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
         for (NSDictionary *u in j[@"first_store"]) { if (o->nfirst >= 4) FAIL("more than 4 first-invocation stores");
             int reg = [u[@"reg"] intValue]; if (reg < 0 || reg >= 16) FAIL("first-invocation store to storage slot %d", reg);
             o->first[o->nfirst].reg = (uint8_t)reg; o->first[o->nfirst].word = (uint16_t)[u[@"word"] intValue]; o->first[o->nfirst++].value = (uint32_t)[u[@"value"] unsignedIntValue]; }
+        o->tgmem = (uint32_t)[j[@"tgmem"] unsignedIntValue];
         return 0;
     }
     #undef FAIL

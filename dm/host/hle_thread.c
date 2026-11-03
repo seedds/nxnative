@@ -1180,6 +1180,12 @@ uint32_t hle_dup_readable_handle(uint32_t h) {   // A second read end of the sam
     pthread_mutex_unlock(&G);
     return r;
 }
+// A host service's event that never fires (the camera's, hle_sf.c): only the read end exists, handed to the game in an IPC response
+uint32_t hle_new_idle_event(void) {
+    event_t *e = calloc(1, sizeof *e); if (!e) die("event calloc"); e->refs = 1;
+    pthread_mutex_lock(&G); uint32_t h = h_new(O_EVENT_R, e); pthread_mutex_unlock(&G);
+    return h;
+}
 uint64_t hle_system_event_binding(void *ev) {
     uint64_t id = 0;
     pthread_mutex_lock(&g_se_lock);

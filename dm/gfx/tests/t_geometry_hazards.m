@@ -150,8 +150,8 @@ static void dependency(int mode) {
     EMIT(OP_DRAW,d);op_hdr end={OP_END,8};memcpy(cmd+used,&end,8);
     #undef EMIT
     state_reset();memset(&R,0,sizeof R);mtl_set_frame(100+mode);mtl_sub_begin();uint64_t cuts=g_cuts,h=(uint64_t)cmd;mtl_sub_index(&h,1);mtl_exec(cmd);
-    id<MTLBuffer> rb=[g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared];EXPECT("readback buffer",1,rb!=nil);if(!rb)abort();[blit() copyFromTexture:tex_mtl(&target) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(32,32,1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:128 destinationBytesPerImage:4096];finish();
-    uint8_t *px=rb.contents;
+    id<MTLBuffer> rb=[g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared]; if (!rb) abort(); [blit() copyFromTexture:tex_mtl(&target) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(32,32,1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:128 destinationBytesPerImage:4096];finish();
+    uint8_t *px=rb.contents; if (!px) abort();
     if(independent) {
         EXPECT("first draw wrote its own storage",1,*(uint32_t*)(cmd+32768));EXPECT("second draw wrote its own storage",1,*(uint32_t*)(cmd+32768+16));
         EXPECT("the draws cover their position",1,px[(14*32+5)*4]>200);

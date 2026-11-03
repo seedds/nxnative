@@ -2,6 +2,7 @@
 // On the real device each goes through IPC or a system applet; the host gives results as single-player offline. Pure-computation SDK parts (hash, util, software Opus) are not taken over, the original implementation is used directly.
 #include "hle.h"
 #include <dirent.h>
+#include <stdbool.h>
 
 // ---------- aoc add-on content (the DLC NSPs in the player's folder) / ec shop (excluded) ----------
 // Owned add-on content indices (ascending), fixed at the first query:
@@ -234,6 +235,43 @@ HLE_FORCE("_ZN2nn10streamplay30GetGuestVibrationDeviceHandlesEPNS0_26GuestVibrat
 HLE_FORCE("_ZN2nn10streamplay27GetGuestVibrationDeviceInfoEPNS_3hid19VibrationDeviceInfoERKNS0_26GuestVibrationDeviceHandleE", "guest vibration device info: none (no guest)",
           void, h_stpl_VibInfo, uint64_t *info, const void *h) { (void)h; *info = 0; }
 HLE_FORCE("_ZN2nn10streamplay18GetGuestJcmsHandleERKNS0_10GuestPadIdERKNS_3hid8JcmsTypeE", "guest Joy-Con mouse handle: none (no guest)", uint32_t, h_stpl_JcmsHandle, const void *id, const void *type) { (void)id; (void)type; return 0; }
+
+// ---------- chat: GameChat (Switch 2 SDKs) ----------
+// Mario Kart World initializes it in nnMain (main+0xd321c4); the SDK opens the chat:u service itself, which the host does not serve (sm 0xe15, abort). The host has no GameChat: the
+// library is ready, the player is never in a chat, and the room info event is bound and never signaled. Starting a chat (ShowChatStart, an applet) is a player action and stays unhooked
+HLE_FORCE("_ZN2nn4chat10InitializeEv", "GameChat (chat:u): ready, never chatting", void, h_chat_Init, void) {}
+HLE_FORCE("_ZN2nn4chat10IsChattingEv", "GameChat: not chatting", bool, h_chat_IsChatting, void) { return false; }
+HLE_FORCE("_ZN2nn4chat28AttachToRoomInfoChangedEventEPNS_2os11SystemEventE", "GameChat room info event: bound, never signaled", Result, h_chat_RoomEv, void *ev) {
+    hle_bind_system_event(ev, 0); return RES_OK; }
+// Camera video storage: the pictures of the player's own camera (local) and of the chat members' cameras (remote), each a pool of native images the game makes NVN textures on
+// (Mario Kart World: three 384x216 local images at boot, main+0xd322d4). The SDK's storage asks the chat service; the host makes native images of the size with no picture
+// (hle_nvn.c nvn_native_image_new) and keeps their handles in the storage type (0xe0 bytes, the SDK zeroes them all): the game's buffer stays unused, so it needs only one page
+uint32_t nvn_native_image_new(uint32_t w, uint32_t h);
+void nvn_native_image_free(uint32_t handle);
+typedef struct { uint32_t magic, count, handle[4]; } chat_video;
+#define CHAT_VIDEO_MAGIC 0x56436d44u   // 'DmCV'
+static size_t chat_video_size(int w, int h, int n) { (void)w; (void)h; (void)n; return 0x1000; }
+static void chat_video_init(void *type, int w, int h, int n) {
+    chat_video *v = type; memset(type, 0, 0xe0);
+    v->magic = CHAT_VIDEO_MAGIC; v->count = n < 0 ? 0 : n > 4 ? 4 : (uint32_t)n;
+    for (uint32_t i = 0; i < v->count; i++) v->handle[i] = nvn_native_image_new((uint32_t)w, (uint32_t)h);
+}
+static void chat_video_fini(void *type) {
+    chat_video *v = type; if (v->magic != CHAT_VIDEO_MAGIC) return;
+    for (uint32_t i = 0; i < v->count; i++) nvn_native_image_free(v->handle[i]);
+    memset(type, 0, 0xe0);
+}
+static uint32_t chat_video_handle(const void *type, int i) { const chat_video *v = type; return v->magic == CHAT_VIDEO_MAGIC && i >= 0 && (uint32_t)i < v->count ? v->handle[i] : 0; }
+HLE_FORCE("_ZN2nn4chat35CalculateLocalCameraVideoBufferSizeEiii", "GameChat local camera storage size: one page (the host keeps the images)", size_t, h_chat_LocalSize, int w, int h, int n) { return chat_video_size(w, h, n); }
+HLE_FORCE("_ZN2nn4chat33InitializeLocalCameraVideoStorageEPNS0_20LocalCameraVideoTypeEiiiPvm", "GameChat local camera storage: host native images, no picture", void, h_chat_LocalInit,
+          void *type, int w, int h, int n, void *buf, size_t size) { (void)buf; (void)size; chat_video_init(type, w, h, n); }
+HLE_FORCE("_ZN2nn4chat31FinalizeLocalCameraVideoStorageEPNS0_20LocalCameraVideoTypeE", "GameChat local camera storage: release the native images", void, h_chat_LocalFini, void *type) { chat_video_fini(type); }
+HLE_FORCE("_ZN2nn4chat25GetLocalCameraImageHandleEPKNS0_20LocalCameraVideoTypeEi", "GameChat local camera image: its host native image handle", uint32_t, h_chat_LocalImg, const void *type, int i) { return chat_video_handle(type, i); }
+HLE_FORCE("_ZN2nn4chat36CalculateRemoteCameraVideoBufferSizeEiii", "GameChat remote camera storage size: one page (the host keeps the images)", size_t, h_chat_RemoteSize, int w, int h, int n) { return chat_video_size(w, h, n); }
+HLE_FORCE("_ZN2nn4chat34InitializeRemoteCameraVideoStorageEPNS0_21RemoteCameraVideoTypeEiiiPvm", "GameChat remote camera storage: host native images, no picture", void, h_chat_RemoteInit,
+          void *type, int w, int h, int n, void *buf, size_t size) { (void)buf; (void)size; chat_video_init(type, w, h, n); }
+HLE_FORCE("_ZN2nn4chat32FinalizeRemoteCameraVideoStorageEPNS0_21RemoteCameraVideoTypeE", "GameChat remote camera storage: release the native images", void, h_chat_RemoteFini, void *type) { chat_video_fini(type); }
+HLE_FORCE("_ZN2nn4chat26GetRemoteCameraImageHandleEPKNS0_21RemoteCameraVideoTypeEi", "GameChat remote camera image: its host native image handle", uint32_t, h_chat_RemoteImg, const void *type, int i) { return chat_video_handle(type, i); }
 HLE_FORCE("_ZN2nn10streamplay18GetGuestJcmsStatesEPNS0_14GuestJcmsStateEiRKNS0_15GuestJcmsHandleE", "guest Joy-Con mouse states: none (no guest)",
           int, h_stpl_JcmsStates, void *out, int n, const void *h) { (void)out; (void)n; (void)h; return 0; }
 

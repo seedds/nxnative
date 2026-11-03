@@ -940,6 +940,54 @@ int main(void) {
         EXPECT("several rows whose alignment would break the wrapped address: refused", 0, nvn_tbuf_rows(20000, 4, 3, &w, &h, &row));
     }
 
+    // 9. NVN2 native images on a host-made handle (Mario Kart World's GameChat camera textures aborted the boot): a texture of the image's size and the builder's format on zeroed
+    //    host storage, and a handle neither the host nor a decoder pool made refused
+    {
+        native_builder_t nb; memset(&nb, 0, sizeof nb); h_ni_defaults(&nb); h_ni_device(&nb, &dev);
+        h_ni_handle(&nb, nvn_native_image_new(384, 216)); h_ni_format(&nb, NVN_FORMAT_RGBA8_SRGB);
+        native_image_t img; NVNtexture t;
+        EXPECT("native image: the host's handle initializes", 1, h_ni_init(&img, &nb));
+        EXPECT("texture from a native image succeeds", 1, h_ni_texture(&t, &img));
+        EXPECT("native image texture width", 384, P(nvnTextureGetWidth)(&t));
+        EXPECT("native image texture height", 216, P(nvnTextureGetHeight)(&t));
+        EXPECT("native image texture format", NVN_FORMAT_RGBA8_SRGB, P(nvnTextureGetFormat)(&t));
+        P(nvnTextureFinalize)(&t); h_ni_fini(&img); nvn_native_image_free(nb.handle);
+        h_ni_handle(&nb, 0x1234); h_ni_init(&img, &nb);
+        EXPECT("texture from a handle the host did not make fails", 0, h_ni_texture(&t, &img));
+        h_ni_fini(&img);
+    }
+
+    // 10. A sparse virtual pool's page table in tiles (nvn_sparse_tile_state, the Metal placement sparse textures of nvn_mtl.m): a 256 KB virtual pool (flags 0x2a1) whose first
+    // mapping is not the whole pool becomes sparse; 64 KB of a physical pool mapped at 128 KB marks tile 2 mapped and changed; a mapping of a later generation marks changed; unmapped tiles read 0
+    {
+        static uint8_t phys[0x20000] __attribute__((aligned(16384))); NVNmemoryPoolBuilder vb, phb; NVNmemoryPool vp, ph;
+        P(nvnMemoryPoolBuilderSetDefaults)(&phb); P(nvnMemoryPoolBuilderSetStorage)(&phb, phys, sizeof phys); P(nvnMemoryPoolBuilderSetFlags)(&phb, 0x24);
+        EXPECT("tile state: physical pool", 1, P(nvnMemoryPoolInitialize)(&ph, &phb));
+        P(nvnMemoryPoolBuilderSetDefaults)(&vb); P(nvnMemoryPoolBuilderSetStorage)(&vb, NULL, 0x40000); P(nvnMemoryPoolBuilderSetFlags)(&vb, 0x2a1);
+        EXPECT("tile state: virtual pool", 1, P(nvnMemoryPoolInitialize)(&vp, &vb));
+        const pool_t *vo = (const pool_t *)&vp; uint8_t st[4];
+        EXPECT("tile state: nothing mapped", 0, nvn_sparse_tile_state(&vp, (uint64_t)(uintptr_t)vo->mem, 0x40000, 0x10000, 0, 0, st));
+        map_req rq = {&ph, 0x10000, 0x20000, 0x10000, 0, 0};   // hle_nvn.c's layout of NVNmappingRequest
+        uint64_t g0 = nvn_sparse_gen();
+        EXPECT("tile state: a partial mapping succeeds (sparse)", 1, P(nvnMemoryPoolMapVirtual)(&vp, 1, (const NVNmappingRequest *)&rq));
+        EXPECT("tile state: one tile mapped", 1, nvn_sparse_tile_state(&vp, (uint64_t)(uintptr_t)vo->mem, 0x40000, 0x10000, g0, 0, st));
+        EXPECT("tile state: tile 2 mapped and changed", 3, st[2]); EXPECT("tile state: tile 0 unmapped", 0, st[0]); EXPECT("tile state: tile 3 unmapped", 0, st[3]);
+        uint64_t g1 = nvn_sparse_gen(), now = nvn_dirty_now();
+        nvn_sparse_tile_state(&vp, (uint64_t)(uintptr_t)vo->mem, 0x40000, 0x10000, g1, now, st);
+        EXPECT("tile state: unchanged since its generation", 1, st[2]);
+        map_req rq2 = {&ph, 0, 0x30000, 0x8000, 0, 0};
+        P(nvnMemoryPoolMapVirtual)(&vp, 1, (const NVNmappingRequest *)&rq2);
+        EXPECT("tile state: a later mapping marks its tile", 2, nvn_sparse_tile_state(&vp, (uint64_t)(uintptr_t)vo->mem, 0x40000, 0x10000, g1, now, st));
+        EXPECT("tile state: tile 3 mapped and changed", 3, st[3]); EXPECT("tile state: tile 2 still unchanged", 1, st[2]);
+        EXPECT("tile state: from an address 2 KB into the pool (not 4 KB aligned) the 32 KB mapping spans two tiles", 3, nvn_sparse_tile_state(&vp, (uint64_t)(uintptr_t)vo->mem + 0x800, 0x40000 - 0x800, 0x10000, g1, now, st));
+        EXPECT("tile state: tile 1 (from 2 KB) holds the older mapping's pages, unchanged", 1, st[1]); EXPECT("tile state: tiles 2 and 3 hold the later mapping", 3, st[2] & st[3]);
+        uint8_t got[0x10000]; memset(phys + 0x10000, 0x5a, 0x10000);
+        EXPECT("tile state: a tile's bytes come from the physical pool", 0, nvn_sparse_copy(&vp, got, (uint64_t)(uintptr_t)vo->mem + 0x20000, 0x10000));
+        EXPECT("tile state: the mapped bytes", 0x5a, got[0x1234]);
+        EXPECT("tile state: an unmapped tile reads 0 (all bytes missing)", 0x10000, nvn_sparse_copy(&vp, got, (uint64_t)(uintptr_t)vo->mem, 0x10000));
+        P(nvnMemoryPoolFinalize)(&vp); P(nvnMemoryPoolFinalize)(&ph);
+    }
+
     printf("== %d checks, %d failed ==\n", g_n, g_fail);
     return g_fail != 0;
 }

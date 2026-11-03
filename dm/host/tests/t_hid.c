@@ -487,6 +487,18 @@ static void t_motion_hid(void) {
     dm_pad_players(1); g_phone_mode = -1;
 }
 
+// Mario Kart World's nnMain aborted in the SDK's InitializeNmouse (it opens the hid service): the host has no Nmouse, so set-up succeeds and every query finds none
+static void t_nmouse(void) {
+    h_hid_NmouseInit(NULL, 0xe800, 1920, 1080); h_hid_NmouseSetRange(1920, 1080);
+    int w = 0, h = 0; h_hid_NmouseGetRange(&w, &h);
+    CHECK(w == 1920 && h == 1080, "Nmouse: pointer ranges read back as set");
+    uint64_t handles[4] = {0}; CHECK(h_hid_NmouseHandles(handles, 4, 0) == 0, "Nmouse: no handles");
+    int count = 7; uint8_t st[0x40]; CHECK(!h_hid_NmouseStates(&count, st, 1) && count == 0, "Nmouse: states of an unknown handle: false, 0 entries");
+    uint32_t types = 0xff; CHECK(!h_hid_NmouseTypes(&types) && types == 0, "Nmouse: type set of an unknown handle: false, empty");
+    CHECK(!h_hid_NmouseMerged(handles) && !h_hid_NmouseStd(handles), "Nmouse: no merged or standard mouse handle");
+    h_hid_FinNmouse();
+}
+
 int main(void) {
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
     t_slots();
@@ -498,6 +510,7 @@ int main(void) {
     t_motion_live();
     t_motion_hid();
     t_rec();
+    t_nmouse();
     printf("hid players: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

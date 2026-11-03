@@ -157,6 +157,52 @@ def border_emu(msl):
         twin = f'spvDescriptorSet0.{m.group(2)}{abi.BORDER_TWIN}'
         msl = msl[:m.start()] + f'dm_bs({msl[m.start():i]}, spvDescriptorSet0.{abi.BORDER_MEMBER}, {bit[m.group(2)]}u, spvDescriptorSet0.{m.group(1)}, {twin}, {args})' + msl[i:]
     return msl.replace('using namespace metal;\n', 'using namespace metal;\n' + BORDER_HELPERS, 1)
+# Shared memory past Apple's threadgroup memory: Ampere gives a compute shader up to 99 KB of shared memory, every Apple GPU 32 KB (MTLDevice maxThreadgroupMemoryLength), and Metal
+# refuses the pipeline of a kernel that declares more. Mario Kart World's DrivePassShaderDefault declares 48 KB in 168 compute shaders. The MSL is compiled offline for every device,
+# so the build decides, against abi.TGMEM_LIMIT: the kernel's largest threadgroup array becomes a slice of a device buffer the host binds at compute buffer abi.TGMEM_BUFFER, one slice per
+# threadgroup at its linear position in the grid, so it keeps the semantics of shared memory: its barriers also order device memory, its atomics become device atomics. The buffer
+# starts with abi.TGMEM_HEAD bytes: the bytes of slices it holds, then a word the shader sets when a threadgroup lies past them (an indirect dispatch larger than the host's bound;
+# that threadgroup then wraps onto another's slice). A kernel within the limit is returned unchanged
+TG_ELEM = {'uint': 4, 'int': 4, 'float': 4, 'half': 2, 'ushort': 2, 'short': 2, 'uchar': 1, 'char': 1, 'bool': 1, 'uint2': 8, 'int2': 8, 'float2': 8, 'uint4': 16, 'int4': 16, 'float4': 16}
+def tg_spill(msl):
+    """(msl, slice bytes) with the largest threadgroup array of a kernel whose threadgroup memory exceeds abi.TGMEM_LIMIT moved into the device buffer (see above);
+    (msl, 0) unchanged otherwise. ValueError when the rest still exceeds the limit or the array is of a form this does not rewrite"""
+    k = re.search(r'^kernel void \w+\((.*)\)\n\{\n', msl, re.M)
+    if not k: return msl, 0
+    decl = re.compile(r'^    threadgroup (?:spvUnsafeArray<(\w+), (\d+)>|(\w+)) (\w+)(?:\[(\d+)\])?;\n', re.M)
+    arrays = []   # variables of a type not in TG_ELEM (atomic_uint, uint3, a struct) count as 0 bytes and are never moved: within the limit the kernel stays as it is, past it Metal refuses it as before
+    for m in decl.finditer(msl, k.end()):
+        elem = m.group(1) or m.group(3)
+        arrays.append((TG_ELEM.get(elem, 0) * int(m.group(2) or m.group(5) or 1), m))
+    total = sum(n for n, _ in arrays)
+    if total <= abi.TGMEM_LIMIT: return msl, 0
+    size, m = max(arrays, key=lambda a: a[0])
+    if total - size > abi.TGMEM_LIMIT: raise ValueError(f'{total - size} bytes of threadgroup memory left after moving the largest array')
+    name = m.group(4); elem = m.group(1) or m.group(3)
+    if re.search(r'dmsh_hmma16816_f16\([^;]*\b' + name + r'\)', msl): raise ValueError(f'{name} is the HMMA scratch')
+    slice_ = (size + 15) & ~15
+    pos = re.search(r'(\w+) \[\[threadgroup_position_in_grid\]\]', k.group(1))
+    tgp = pos.group(1) if pos and re.search(r'uint3 ' + pos.group(1) + r' \[\[', k.group(1)) else None
+    params = f', device uchar* dmsh_tgmem [[buffer({abi.TGMEM_BUFFER})]], uint3 dmsh_tgn [[threadgroups_per_grid]]' + ('' if tgp else ', uint3 dmsh_tgp [[threadgroup_position_in_grid]]')
+    tgp = tgp or 'dmsh_tgp'
+    at = f'(dmsh_tgmem + {abi.TGMEM_HEAD} + dmsh_tgl * {slice_}u)'
+    if m.group(1): ty = f'spvUnsafeArray<{elem}, {m.group(2)}>'; ref = f'device {ty}& {name} = *(device {ty}*){at};'
+    elif m.group(5): ty = None; ref = f'device {elem} (&{name})[{m.group(5)}] = *(device {elem} (*)[{m.group(5)}]){at};'
+    else: ty = None; ref = f'device {elem}& {name} = *(device {elem}*){at};'
+    setup = (f'    uint dmsh_tgl = ({tgp}.z * dmsh_tgn.y + {tgp}.y) * dmsh_tgn.x + {tgp}.x, dmsh_tgcap = max(*(device uint*)dmsh_tgmem / {slice_}u, 1u);\n'
+             f'    if (dmsh_tgl >= dmsh_tgcap) {{ atomic_store_explicit((device atomic_uint*)dmsh_tgmem + 1, 1u, memory_order_relaxed); dmsh_tgl %= dmsh_tgcap; }}\n'
+             f'    {ref}\n')
+    msl = msl[:m.start()] + setup + msl[m.end():]
+    msl = msl[:k.end(1)] + params + msl[k.end(1):]
+    names = {name}
+    if ty:   # helpers that take the array by reference (no other threadgroup array of the same type stays)
+        if any(o is not m and (o.group(1), o.group(2)) == (m.group(1), m.group(2)) for _, o in arrays): raise ValueError(f'two threadgroup arrays of type {ty}')
+        msl = msl.replace(f'threadgroup {ty}& ', f'device {ty}& ')
+        names |= set(re.findall(r'device ' + re.escape(ty) + r'& (\w+)[,)]', msl))
+    msl = re.sub(r'\(threadgroup (atomic_\w+)\*\)&(' + '|'.join(sorted(names)) + r')\[', r'(device \1*)&\2[', msl)
+    if re.search(r'\(threadgroup atomic_\w+\*\)&(' + '|'.join(sorted(names)) + r')\b', msl): raise ValueError(f'an atomic on {name} this does not rewrite')
+    msl = re.sub(r'threadgroup_barrier\(([^)]*\bmem_threadgroup\b[^)]*)\)', lambda b: b.group(0) if 'mem_device' in b.group(1) else f'threadgroup_barrier({b.group(1)} | mem_flags::mem_device)', msl)
+    return msl, slice_
 CAS =os.environ.get('DMSH_CAS', os.path.join(cache_root, 'cas'))
 CAS_LOCKS, CAS_LOCKS_GUARD = {}, threading.Lock()
 PRE_STATS = collections.Counter()
@@ -1220,6 +1266,10 @@ def finish(key, w, j, c1):
     except ValueError as e: return 'HMMA rewrite failed', str(e)[:160], None
     try: src = pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)
     except ValueError as e: return 'pool rewrite failed', str(e)[:160], None
+    tgm = 0
+    if j['stage'] == 'cs':
+        try: src, tgm = tg_spill(src)   # shared memory past Apple's threadgroup memory in a device buffer (see tg_spill)
+        except ValueError as e: return 'shared memory rewrite failed', str(e)[:160], None
     src = dmsh_wide.wide_loads(src)   # storage words the translator split, read whole again (see dmsh_wide.py)
     src = border_emu(src); open(msl, 'w').write(src)   # border colours Metal lacks (see border_emu)
     first = []
@@ -1266,7 +1316,7 @@ def finish(key, w, j, c1):
             **({'entry_tf': 'main0_tf', 'tf_strides': [e['stride'] if e else 0 for e in j['tf']]} if j.get('tf') else {}),
             **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u'} if fu else {}), **({'entry_m': 'main0_m', 'uint_mask_m': fmask} if fu and fmask else {}), **({'entry_d': 'main0_d'} if fd else {}),
             **({'first_store': [{'reg': next(b['reg'] for b in binds if b['msl_name'] == n), 'word': w, 'value': v} for n, w, v in first]} if first else {}),
-            'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr, j['stage']),
+            'threadgroup_size': j.get('local'), **({'tgmem': tgm} if tgm else {}), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr, j['stage']),
             'bindings': binds,
             'vertex_inputs': [{'location': int(m.group(2)), 'msl_type': m.group(1)} for m in re.finditer(r'(\w+)\s+\w+\s*\[\[attribute\((\d+)\)\]\]', src)],
             'raster': raster_facts(j['stage'], src), 'vs_pad': pad}

@@ -179,6 +179,19 @@ int main(void) { @autoreleasepool {
     S.stream[0].divisor = 0; vbuf_prepare(&rf, NULL, &ix); EXPECT("indexed draw: per-vertex stream not scanned", 0, g_vbuf_need[0]);
     dw.count = 3; dw.ind = (uint64_t)mem; vbuf_prepare(&rf, &dw, NULL); EXPECT("indirect draw: not known on the CPU", 0, g_vbuf_need[0]);
     S.stream[0].stride = 0; dw.ind = 0; S.vbuf[0].size = 8; vbuf_prepare(&rf, &dw, NULL); EXPECT("stride 0: one element", 12, g_vbuf_need[0]);
+    // A stream bound with size 0 at an unaligned address: no bytes to align, so no copy and no red line while nothing reads it; a draw that reads it gets zeros
+    S.nattr = 0; S.vbuf[0] = (NVNbufferRange){1, 0}; unsigned reds = g_red_once[120];
+    mtl_sub_begin(); copies = g_vbuf_copies; vbuf_prepare(NULL, NULL, NULL);
+    en = encoder_prepared(tail); bind_vbufs(en); enc_r_end(en); finish();
+    EXPECT("an unread empty stream is not copied", 0, g_vbuf_copies - copies);
+    EXPECT("an unread empty stream logs no red line", reds, g_red_once[120]);
+    S.nattr = 1; S.stream[0].stride = 12; S.vbuf[0] = (NVNbufferRange){(uint64_t)tri + 1, 0}; dw.count = 3;
+    mtl_sub_begin(); copies = g_vbuf_copies; vbuf_prepare(&rf, &dw, NULL);
+    EXPECT("a draw reads past an empty stream", 36, g_vbuf_need[0]);
+    en = encoder_prepared(tail); bind_vbufs(en); capture(en, out, 24); enc_r_end(en); finish();
+    EXPECT("the read empty stream is copied once", 1, g_vbuf_copies - copies);
+    for (int i = 0; i < 4; i++) EXPECT("the read empty stream reads zero", 0, ((const uint32_t *)out.contents)[24 * 4 + i]);
+    S.vbuf[0] = (NVNbufferRange){(uint64_t)tri, 8};
     S.nattr = 0; S.stream[0].stride = 0; vbuf_prepare(NULL, NULL, NULL);
     // CPU-only binding microbenchmark, after GPU validation; reports overhead, not game frame time.
     for (int mode = 0; mode < 2; mode++) {

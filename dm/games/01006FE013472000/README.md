@@ -45,6 +45,7 @@ Everything else needed was general: see [Found on this game](#found-on-this-game
 General changes first needed here; each applies to every game:
 
 - **Texture and sampler pools for handles traced to no slot** (`Program.cs`, vendored `BindlessElimination.cs`, `dmsh_build.py` `pool_arrays`, `nvn_mtl.m` `pool_gpu`): [Texture handles from game memory index the pools](../../../docs/reference/shaders.md#texture-handles-from-game-memory-index-the-pools).
+- **A texture read after its memory pool object was freed** (`nvn_mtl.m` `tex_mtl_`, `tex_by_id`; `hle_nvn.c` `nvnMemoryPoolFinalize`): the first pool walk here crashed once in `nvn_sparse_protect`, the same fault FINAL FANTASY RESONANCE met later: [A texture read after its memory pool object was freed](../../../docs/reference/nvn-objects.md#a-texture-read-after-its-memory-pool-object-was-freed).
 - **Argument buffer members with attributes after their id** (`dmsh_build.py` `reflect`): [Argument buffer members with attributes after their id](../../../docs/reference/shaders.md#argument-buffer-members-with-attributes-after-their-id).
 
 ## Open

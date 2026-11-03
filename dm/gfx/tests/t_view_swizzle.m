@@ -59,13 +59,12 @@ static void swizzle_case(int tid, int format, int view_format, int uploaded, con
 static void cleared_case(int tid, int format) {
     tex_t t = {.magic=MAGIC('T','E','X',0), .serial=98000+(unsigned)tid};
     t.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=format, .width=2, .height=1, .depth=1, .levels=1, .samples=1};
-    id<MTLTexture> base = [g_dev newTextureWithDescriptor:tex_desc(&t, 0)];
+    id<MTLTexture> base = tex_mtl(&t);
     CHECK(base != nil && (base.usage & MTLTextureUsageRenderTarget), "render target created");
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = base; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     rp.colorAttachments[0].clearColor = MTLClearColorMake(1, 0, 0, 1);
     id<MTLCommandBuffer> command = q_cb(); [[command renderCommandEncoderWithDescriptor:rp] endEncoding]; [command commit]; [command waitUntilCompleted];
-    serial_put(t.serial, base);
     mtl_reg_tex(tid, &t, NULL);
     os_unfair_lock_lock(&g_rmu); id<MTLTexture> view = tex_by_id(tid); os_unfair_lock_unlock(&g_rmu);
     CHECK(view == base, "a cleared RGB565-family texture needs no view");
@@ -98,7 +97,7 @@ static void image_case(int tid) {
 // leaves the rest as uploaded (GitHub issue #183: Tears of the Kingdom's Depths walls). The guest storage keeps the guest's bits
 static void init_fill_case(int tid, int format, int pool_flags) {
     tex_t t = {.magic=MAGIC('T','E','X',0), .serial=98000+(unsigned)tid};
-    pool_t pool = {.flags=pool_flags | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+    pool_t pool = {.magic=MAGIC('P','O','O','L'), .flags=pool_flags | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
     t.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=format, .width=2, .height=1, .depth=1, .levels=1, .samples=1};
     nvn_tex_layout(&t.d, &t.L); t.mem = calloc(1, t.L.size); t.pool = &pool; pool.mem = t.mem; pool.size = t.L.size;
     int b565 = format == NVN_FORMAT_RGB565 || format == NVN_FORMAT_BGR565;
@@ -128,6 +127,46 @@ static void init_fill_case(int tid, int format, int pool_flags) {
     CHECK(nvn_deswizzle(&t.d, 0, 0, t.mem, kept, 4) == 0 && !memcmp(kept, pixels, 4), "guest storage keeps the guest's bits");
     free(t.mem);
 }
+// Sample an NVN red view of a depth attachment. Level 0 differs from level 1; writes to the selected level must remain visible after the view is cached.
+static void clear_depth_level(id<MTLTexture> depth, NSUInteger level, double value) {
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.depthAttachment.texture = depth; pass.depthAttachment.level = level;
+    pass.depthAttachment.loadAction = MTLLoadActionClear; pass.depthAttachment.storeAction = MTLStoreActionStore;
+    pass.depthAttachment.clearDepth = value;
+    id<MTLCommandBuffer> command = q_cb();
+    [[command renderCommandEncoderWithDescriptor:pass] endEncoding]; [command commit]; [command waitUntilCompleted];
+    CHECK(command.status == MTLCommandBufferStatusCompleted, "depth attachment cleared");
+}
+static void check_depth_red(id<MTLTexture> view, const float want[4]) {
+    static id<MTLComputePipelineState> p;
+    if (!p) p = pipe_of(@"#include <metal_stdlib>\nusing namespace metal;\n"
+        "kernel void read_depth_red(texture2d<float> t [[texture(0)]], device float4 *out [[buffer(0)]], uint i [[thread_position_in_grid]]) {"
+        " out[i] = i == 0 ? t.read(uint2(0, 0)) : t.sample(sampler(coord::pixel, filter::nearest), float2(1.5f, 0.5f)); }", @"read_depth_red");
+    id<MTLBuffer> output = [g_dev newBufferWithLength:8 * sizeof(float) options:MTLResourceStorageModeShared];
+    run2(p, view, output);
+    float *actual = output.contents;
+    for (int i = 0; i < 8; i++) CHECK(fabsf(actual[i] - want[i % 4]) < 0.0001f, "red depth view returns the expected channel for read and sample");
+}
+static void depth_red_case(int tid, int depth_format, int red_format) {
+    tex_t t = {.magic=MAGIC('T','E','X',0), .serial=98000u+(unsigned)tid};
+    t.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=depth_format, .width=4, .height=2, .depth=1, .levels=2, .samples=1};
+    id<MTLTexture> base = tex_mtl(&t);
+    clear_depth_level(base, 0, 0.875);
+    clear_depth_level(base, 1, 0.25);
+    view_t desc = {.set_format=1, .format=red_format, .set_levels=1, .base_level=1, .nlevels=1};
+    mtl_reg_tex(tid, &t, &desc);
+    desc.set_swizzle = 1;
+    memcpy(desc.swz, (uint8_t[]){NVN_SWZ_G, NVN_SWZ_R, NVN_SWZ_A, NVN_SWZ_B}, 4);
+    mtl_reg_tex(tid+1, &t, &desc);
+    os_unfair_lock_lock(&g_rmu);
+    id<MTLTexture> red = tex_by_id(tid), mapped = tex_by_id(tid+1);
+    os_unfair_lock_unlock(&g_rmu);
+    CHECK(red.width == 2 && red.mipmapLevelCount == 1, "red view selects the requested depth mip");
+    check_depth_red(red, (float[4]){.25,0,0,1});
+    clear_depth_level(base, 1, 0.75);
+    check_depth_red(red, (float[4]){.75,0,0,1});
+    check_depth_red(mapped, (float[4]){0,.75,1,0});
+}
 int main(void) { @autoreleasepool {
     mtl_init();
     uint16_t pixels[2] = {0x001f, 0xf800};
@@ -153,6 +192,8 @@ int main(void) { @autoreleasepool {
     cleared_case(413, NVN_FORMAT_RGB565);
     cleared_case(414, NVN_FORMAT_BGR565);
     image_case(415);
+    depth_red_case(424, NVN_FORMAT_DEPTH32F, NVN_FORMAT_R32F);
+    depth_red_case(426, NVN_FORMAT_DEPTH16, NVN_FORMAT_R16);
     int packed[4] = {NVN_FORMAT_RGB565, NVN_FORMAT_RGB5A1, NVN_FORMAT_RGB5, NVN_FORMAT_BGR565};
     for (int i = 0; i < 4; i++) {
         init_fill_case(416 + i, packed[i], NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED);

@@ -81,3 +81,4 @@ Each step below stopped the boot before its fix:
 - [Mesh geometry groups sized to the vertex output](../../../docs/reference/shaders.md#mesh-geometry-groups-sized-to-the-vertex-output): 388-byte vertices, over Metal's mesh limit at 32 triangles a group.
 - [Ampere shader code (Switch 2)](../../../docs/reference/shaders.md#ampere-shader-code-switch-2): SUATOM (0x593) in two agl technique compute shaders, the last two of the package's 22,852 that did not translate.
 - [Shader libraries loaded when the program is made](../../../docs/reference/shaders.md#shader-libraries-loaded-when-the-program-is-made): a new area's 3 to 7 libraries loaded on the submit thread, up to 4 s with the drive slowed.
+- [Odd present intervals on the 30 Hz display link](../../../docs/reference/frame-rate.md#odd-present-intervals-on-the-30-hz-display-link): interval 3 took 66.7 ms a frame, 15 fps for 20.

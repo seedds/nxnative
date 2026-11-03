@@ -556,6 +556,14 @@ HLE_FORCE("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatE", "mov
     h_movie_Decoder(self, type, fmt == 3 ? MD_FMT_NV12 : fmt == 2 ? MD_FMT_ABGR : fmt, 1, 0);
     mdec_t *d = md_of(self); if (d) d->out_align = 0x20;
 }
+// The base-object constructors: a game can reach C2 with no C1 (Mario Tennis Aces, NintendoSDK_movie 4.5.0: C1 is a thunk of 8 bytes, mov w4,#0; b C2, GitHub issue #1131). Left to the SDK, the guest's
+// constructor put a DecoderImpl there, and h_movie_Configure read its vtable as the host's decoder and branched to 0. The class has no virtual bases, so both constructors do the same
+HLE_FORCE("_ZN5movie7DecoderC2ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeEi", "movie decoder (base-object constructor): host implementation", void, h_movie_Decoder_C2,
+          void **self, int type, int fmt, int mode, int prio) { h_movie_Decoder(self, type, fmt, mode, prio); }
+HLE_FORCE("_ZN5movie7DecoderC2ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeE", "movie decoder (SDK 4, base-object constructor): host implementation", void, h_movie_Decoder4_C2,
+          void **self, int type, int fmt, int mode) { h_movie_Decoder4(self, type, fmt, mode); }
+HLE_FORCE("_ZN5movie7DecoderC2ENS_11DecoderTypeENS_19DecoderOutputFormatE", "movie decoder (SDK 3, base-object constructor): host implementation", void, h_movie_Decoder3_C2,
+          void **self, int type, int fmt) { h_movie_Decoder3(self, type, fmt); }
 static void md_free(void **self) {
     mdec_t *d = md_of(self); if (!d) return;
     md_defer_drop(d);

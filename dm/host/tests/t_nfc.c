@@ -1,6 +1,7 @@
 // Public NFC hooks must stop an older SDK from opening nfc:user, while preserving
-// the existing NFP no-tag path. Exercise the real forced registrations, no guest SDK.
+// the NFP search state. Exercise the real forced registrations, no guest SDK.
 #include "../hle_sdk16.c"
+#include "../hle_nfp.c"
 
 static int checks, fails, lookups;
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s\n", msg); } } while (0)
@@ -15,11 +16,15 @@ module_t *module_of(const void *p) { (void)p; return NULL; }
 void dm_backtrace(uint64_t fp) { (void)fp; }
 void hle_bind_system_event(void *ev, int autoclear) { (void)ev; (void)autoclear; }
 void hle_signal_system_event(void *ev) { (void)ev; }
+int hle_signal_bound_system_event(void *ev) { (void)ev; return 1; }
 // The included SDK source also registers vsync hooks; NFC must never enter them.
 uint64_t hle_system_event_binding(void *ev) { (void)ev; abort(); }
 int hle_signal_system_event_binding(uint64_t binding) { (void)binding; abort(); }
 uint32_t hle_hid_connected_npad(void) { return 0; }
 void dm_host_helper_qos(qos_class_t q) { (void)q; }
+uint64_t dm_entropy64(void) { return 0; }
+void dm_mii_default_charinfo(void *out) { memset(out, 0, 0x58); }
+int dm_guest_as_contains(uintptr_t a) { (void)a; return 0; }
 static void *forced(const hle_force_ent *e, const char *name) {
     // ASan places redzones between section globals; inspect the emitted registration
     // objects individually instead of treating the Mach-O section as a packed array.
@@ -29,6 +34,9 @@ static void *forced(const hle_force_ent *e, const char *name) {
 }
 
 int main(void) {
+    char dir[1024]; const char *t = getenv("TMPDIR"); snprintf(dir, sizeof dir, "%s/t_nfc.XXXXXX", t && *t ? t : "/tmp");   // nfp::Initialize makes the amiibo folder
+    if (!mkdtemp(dir)) { perror("mkdtemp"); return 2; }
+    setenv("DM_AMIIBO_DIR", dir, 1);
     void (*init)(void) = forced(&hle_force_h_nfc_Init, "_ZN2nn3nfc10InitializeEv");
     void (*fini)(void) = forced(&hle_force_h_nfc_Fini, "_ZN2nn3nfc8FinalizeEv");
     int (*state)(void) = forced(&hle_force_h_nfc_State, "_ZN2nn3nfc8GetStateEv");
@@ -59,7 +67,7 @@ int main(void) {
         CHECK(enabled() == 0, "initialization cannot fabricate physical NFC support");
         CHECK(device_state(&device.handle) == NFP_STATE_SEARCH, "NFC initialization preserves NFP detection");
         unsigned char output[0x80]; memset(output, 0x5a, sizeof output);
-        CHECK(tag_info(output + 16, &device.handle) == (115u | 97u << 9), "tag access still returns tag-not-found");
+        CHECK(tag_info(output + 16, &device.handle) == NFP_RES_WRONG_STATE, "tag access while searching returns wrong-device-state");
         int unchanged = 1; for (unsigned i = 0; i < sizeof output; i++) if (output[i] != 0x5a) unchanged = 0;
         CHECK(unchanged, "no-tag result neither fabricates tag data nor overwrites guards");
         if (state()) fini();

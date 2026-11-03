@@ -2626,10 +2626,12 @@ static int tex_from_storage(const tex_t *t) {
 // and a new texture object over the same storage with the same description gets it back after the CPU has rewritten the storage. The Great Ace Attorney Chronicles (Japanese release
 // 0100D7F00FB1A000, GitHub issue #568) decodes its court-record pictures (256x256 to 2048x2048 BC1, a CPU_CACHED pool, no flush) into storage it reuses, building a new texture over
 // it for each item: they were black, and once filled once, showed the previous item's picture. Uncompressed textures cannot be told from render targets (NVN has no flag for that,
-// so tex_desc gives them render-target use) and keep the flushed-range fill. DM_NVN_STORAGE_FIRST_USE=0 turns this off (to measure it)
+// so tex_desc gives them render-target use) and keep the flushed-range fill. An uncompressed 3D texture with none of the flags below is taken from its storage as well: Xenoblade
+// Chronicles 3's particle steering fields (10x10x10 RGBA8 and RGBA16F, flags 0) were GPU textures of zeros, so every send-off particle moved along (-1, -1, -1) and sank into the ground;
+// the 3D textures it renders into carry IMAGE | COMPRESSIBLE. DM_NVN_STORAGE_FIRST_USE=0 turns this off (to measure it)
 static int tex_cpu_content(const tex_t *t) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_STORAGE_FIRST_USE"); on = !e || atoi(e) != 0; }
-    if (!on || !t->mem || !t->pool || t->has_layout || !fmt_compressed(t->d.format) || t->d.samples > 1 || t->d.target == NVN_TEXTURE_TARGET_BUFFER) return 0;
+    if (!on || !t->mem || !t->pool || t->has_layout || !(fmt_compressed(t->d.format) || t->d.target == NVN_TEXTURE_TARGET_3D) || t->d.samples > 1 || t->d.target == NVN_TEXTURE_TARGET_BUFFER) return 0;
     if (t->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL)) return 0;   // the CPU cannot write it (tex_init_fill fills it once) / sparse (tex_from_storage)
     if (t->d.flags & (NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE)) return 0;
     if (!mem_any(t->mem, t->L.size)) return 0;

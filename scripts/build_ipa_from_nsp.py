@@ -2504,6 +2504,19 @@ def report_profile_status(g, reg, pkg_ver, derived, provisional, artifact='IPA',
         say(f'  bring-up on the Mac: DM_GAMES_DIR="{g.dir.parent}" make -C dm/host GAME={g.id} dmhost, see docs/agents')
 
 
+def provisional_version(have, builds, requested, profile_root):
+    """Select from actual inputs; a stale survey fails without deleting user data."""
+    version = requested or max(have, key=vnum)
+    if version not in have:
+        raise BuildError(f"requested version {version} is not in the input folder; available: {', '.join(sorted(have, key=vnum))}")
+    if version not in builds:
+        raise BuildError(f"cached provisional profile describes {', '.join(builds)}, but inputs select {version}. "
+                         f"Preserving the existing profile at {profile_root}. Use --profile-out with a new empty folder "
+                         "to survey this update, or explicitly select an available registered version with --package. "
+                         "Refusing to silently pack an older version")
+    return version
+
+
 def main(args=None):
     args = args or parse_args([])
     PROG.mode = progress_mode(args.progress or PROGRESS)
@@ -2590,9 +2603,8 @@ def main(args=None):
     say(f'game profile: {g.id}{" (provisional: " + str(g.dir) + ")" if provisional else ""}')
     builds, need = g.builds(), g.words('shader_versions')
     have, derived = nsp_versions(fam, builds), False
-    if provisional:   # the version the survey saw
-        pkg_ver = args.package or PACKAGE or g.get('package')
-        if pkg_ver not in builds: raise BuildError(f"the version to pack (-p / PACKAGE) must be one the game profile registers: {', '.join(builds)}")
+    if provisional:   # Do not silently pin a cached survey to an older input version.
+        pkg_ver = provisional_version(have, builds, args.package or PACKAGE, g.dir.parent)
     else:   # the newest version in the folder, or the one asked for. The profile is used as it is for a version it registers when every version its shader tables were made from is there;
         # any other version (no update, another update) is packed from a profile derived from it (derive_profile), with its own shaders
         pkg_ver = args.package or PACKAGE or max(have, key=vnum)

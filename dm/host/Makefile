@@ -76,8 +76,25 @@ endif
 endif
 .PHONY: FORCE
 FORCE:
-dmhost: $(SRC) $(GFX) ../third_party/stb_vorbis/stb_vorbis.c dm.h hle.h romfs_image.h save_sync.h dm_input.h pad_slots.h hle_haptics.h haptics_apple.h motion_fusion.h motion_apple.h motion_pro.h motion_pro_mac.h pad_apple.h pad_hid.h pad_hid_mac.h front.h $(GFX_H) $(GAME_H) $(GAME_STAMP) $(VPX_LIB) $(DAV1D_LIB) $(MSL_H)
-	clang $(CFLAGS) -I../gfx/nvn/include -I$(dir $(MSL_H)) -I../third_party/vulkan-headers/include -I$(dir $(GAME_H)) -I$(VPX) -I$(DAV1D)/include -I../third_party/stb_vorbis -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) $(DAV1D_LIB) -framework Cocoa -framework QuartzCore -framework Metal -framework MetalFX -framework GameController -framework CoreHaptics -framework IOKit -framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework ImageIO -framework UniformTypeIdentifiers
+HOST_DEPS = $(SRC) $(GFX) ../third_party/stb_vorbis/stb_vorbis.c dm.h hle.h romfs_image.h save_sync.h dm_input.h pad_slots.h hle_haptics.h haptics_apple.h motion_fusion.h motion_apple.h motion_pro.h motion_pro_mac.h pad_apple.h pad_hid.h pad_hid_mac.h front.h $(GFX_H) $(GAME_H) $(VPX_LIB) $(DAV1D_LIB) $(MSL_H)
+HOST_INC = -I../gfx/nvn/include -I$(dir $(MSL_H)) -I../third_party/vulkan-headers/include -I$(dir $(GAME_H)) -I$(VPX) -I$(DAV1D)/include -I../third_party/stb_vorbis
+HOST_FW = -framework Cocoa -framework QuartzCore -framework Metal -framework MetalFX -framework GameController -framework CoreHaptics -framework IOKit -framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework ImageIO -framework UniformTypeIdentifiers
+dmhost: $(HOST_DEPS) $(GAME_STAMP)
+	clang $(CFLAGS) $(HOST_INC) -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) $(DAV1D_LIB) $(HOST_FW)
+# libdmhost: the same host as a per-game shared library gen/<id>/libdmhost.dylib, for a front end that runs the game in its own process (docs/frontends.md). main.c is
+# compiled with -Dmain=dm_host_main, which the library exports (int dm_host_main(int argc, char **argv), the same arguments as dmhost); the front end sets the environment and
+# the working directory it would give dmhost, then calls it on its main thread. The host reads its own sections (swhle, swforce, the game's modules) through
+# _mh_execute_header, which in a library is the front end's executable: there it is the library's own header (__dso_handle). Exported besides dm_host_main: the front end
+# hooks of front.h and dm_frontend_*. Its path names its game, so it needs no game stamp
+LIBDMHOST = gen/$(GAME)/libdmhost.dylib
+LIB_CFLAGS = -D_mh_execute_header=__dso_handle
+gen/$(GAME)/dm_host_main.o: $(HOST_DEPS)
+	@mkdir -p $(dir $@)
+	clang $(CFLAGS) $(LIB_CFLAGS) $(HOST_INC) -Dmain=dm_host_main -c main.c -o $@
+$(LIBDMHOST): gen/$(GAME)/dm_host_main.o $(HOST_DEPS)
+	clang $(CFLAGS) $(LIB_CFLAGS) $(HOST_INC) -fobjc-arc -dynamiclib -install_name @rpath/libdmhost.dylib -Wl,-exported_symbol,_dm_host_main -Wl,-exported_symbol,_front_progress_hook -Wl,-exported_symbol,'_dm_frontend_*' -o $@ $< $(filter-out main.c,$(SRC)) $(GFX) $(VPX_LIB) $(DAV1D_LIB) $(HOST_FW)
+.PHONY: libdmhost
+libdmhost: $(LIBDMHOST)
 clean:   # the host and everything make generates for it (gen/: the profile headers, the game stamp and the libvpx and dav1d builds; dmhost_* and *.dSYM beside them, as in .gitignore)
 	rm -rf gen dmhost dmhost_* *.dSYM
 .PHONY: clean

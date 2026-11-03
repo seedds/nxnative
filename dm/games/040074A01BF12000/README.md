@@ -54,16 +54,16 @@ Each step below stopped the boot before its fix:
 
 ## Cheats
 
-Atmosphère-format cheats work on this build (`main` build ID `E25C90C1C1366388`, update v458752: the host reads `cheats/E25C90C1C1366388.txt`). The game has no virtual address memory, so cheat memory type 1 (`heap + offset`) is the heap. Its start differs on every launch ("guest AS" in the log), and the offsets below were the same in every launch and save tried. They were found with `DM_CTL` (`memdump <address> <bytes> <path>` over the heap, then `peek <address> <count>`): scan for the number on the HUD, change it in play, check the candidates again.
+Atmosphère-format cheats work on this build (for the gold and the Banandium chips, the two HUD counters) (`main` build ID `E25C90C1C1366388`, update v458752: the host reads `cheats/E25C90C1C1366388.txt`). The game has no virtual address memory, so cheat memory type 1 (`heap + offset`) is the heap. Its start differs on every launch ("guest AS" in the log), and the offsets below were the same in every launch and save tried. They were found with `DM_CTL` (`memdump <address> <bytes> <path>` over the heap, then `peek <address> <count>`): scan for the number on the HUD, change it in play, check the candidates again.
 
 | What | Where (`heap +`) | Type | Notes |
 |---|---|---|---|
 | Gold, the value the game adds to and saves | `0x5a8f4a70`, `+8`, `0x5a8f4ad0`, `+8` | int32, milli-gold: the HUD's number × 1000 (1042.78 is `1042780`) | one write is enough: the game adds to it from there, the amount is saved, and the HUD follows at the next change |
-| The second HUD counter (the hexagon icon) | `0x5a2b964c`, `+4` | int32, a plain count | the same offset in every launch tried |
+| Banandium chips, the second HUD counter (the hexagon icon under the gold) | `0x5a2b964c`, `+4` | int32, a plain count | the same offset in every launch tried |
 | Gold, display copies | near `0x1cb...` (they moved by about 2 MB between launches) | double, the gold rounded down to 0.01 | not the source: the game rewrites them, so a write holds only while a cheat keeps writing |
 
 ```
-[Item 5000]
+[Chips 5000]
 04100000 5A2B964C 00001388
 04100000 5A2B9650 00001388
 [Gold 500000 freeze]

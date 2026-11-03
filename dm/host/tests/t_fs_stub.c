@@ -14,3 +14,6 @@ int dm_main_imports(const char *prefix) { (void)prefix; return 0; }
 int dm_mii_standin(const char *dir) { (void)dir; return 0; }
 // the guest scheduler (hle_thread.c): no guest threads, so no handoff to leave
 void dm_thread_service_request(void) {}
+
+// These tests normally load no SDK. t_fs supplies a mock guest mount table.
+__attribute__((weak)) void *guest_sym(const char *name) { (void)name; return NULL; }

@@ -94,6 +94,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** answer from the host's mount table (`hle_fs.c`).
 - **Note:** the C library's path checks read the same empty table through `IsPathMounted` ([C library path checks ask the file system's limits](#c-library-path-checks-ask-the-file-systems-limits)).
 
+### Unmounting an SDK-owned RAM disk
+
+- **Symptom:** recreating a RAM disk under the same name aborts with `0x7802` (`MountNameAlreadyExists`).
+- **Cause:** `MountRamDisk` registers the mount in the guest SDK, while the host intercepted `Unmount` and left that registration live.
+- **Fix:** keep host-managed mounts in their existing table. For other names, query the SDK's own `IsMounted` and call its original `Unmount` when registered. Neither SDK call holds the host mount-table lock.
+- **Found on:** [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md), recreating the cache RAM disk at the Glitzville arena introduction.
+
 ### File handles with low bits set, and backslash paths
 
 - **Symptom:** a 10-byte read of the wrong RomFS file, then a null pointer at boot; files named `rom:\StartupUI.pak` are not found.

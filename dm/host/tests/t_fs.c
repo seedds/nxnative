@@ -52,6 +52,29 @@ static Result write_save(const char *path, const char *s) {           // open ->
 }
 static int read_fs(const char *path, char *out, size_t n) { uint64_t h; size_t got = 0; if (h_fs_OpenFile(&h, path, MODE_READ)) return 0; Result r = h_fs_ReadFile(&got, h, 0, out, n - 1); h_fs_CloseFile(h); out[got] = 0; return !r; }
 
+// A RAM disk uses the SDK's own mount table. Recreating it at the same name is legal only after Unmount.
+static int sdk_cache_live, sdk_probes, sdk_releases, missing_sdk_unmount;
+static Result mount_sdk_cache(void) {
+    if (sdk_cache_live) return 0x7802;   // MountNameAlreadyExists
+    sdk_cache_live = 1; return RES_OK;
+}
+static bool sdk_is_mounted(const char *name) {
+    sdk_probes++;
+    return sdk_cache_live && !strcmp(name, "cache");
+}
+static void sdk_unmount(const char *name) {
+    CHECK(sdk_is_mounted(name), "only an existing SDK mount is released");
+    int locked = pthread_mutex_trylock(&g_path_lock);
+    CHECK(!locked, "SDK unmount runs outside the host mount-table lock");
+    if (!locked) pthread_mutex_unlock(&g_path_lock);
+    sdk_releases++;
+    sdk_cache_live = 0;
+}
+void *guest_sym(const char *name) {
+    if (!strcmp(name, "_ZN2nn2fs9IsMountedEPKc")) return sdk_is_mounted;
+    if (!strcmp(name, "_ZN2nn2fs7UnmountEPKc") && !missing_sdk_unmount) return sdk_unmount;
+    return NULL;
+}
 int main(void) {
     char root[1024], save[1100], work[1200], p[1200];
     const char *sp = getenv("TMPDIR"); snprintf(root, sizeof root, "%s/t_fs.XXXXXX", sp ? sp : "/private/tmp");
@@ -61,6 +84,20 @@ int main(void) {
     mkdir(rom, 0755); mkdir(overlay, 0755); mkdir(rdata, 0755); mkdir(odata, 0755);
     snprintf(fn, sizeof fn, "%s/same", rdata); put(fn, "base"); snprintf(fn, sizeof fn, "%s/same", odata); put(fn, "overlay"); snprintf(fn, sizeof fn, "%s/base", rdata); put(fn, "only-base"); snprintf(fn, sizeof fn, "%s/over", odata); put(fn, "only-overlay");
     setenv("DM_ROMFS", rom, 1); setenv("DM_ROMFS_OVERLAY", overlay, 1); CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK, "mount RomFS with two layers (base + overlay)");
+    CHECK(mount_sdk_cache() == RES_OK, "SDK RAM disk mounted");
+    h_fs_Unmount("rom");
+    CHECK(!sdk_probes && h_fs_IsMounted("rom"), "host RomFS stays mounted without querying the SDK");
+    h_fs_Unmount("missing");
+    CHECK(!sdk_releases, "unknown name leaves SDK mounts alone");
+    missing_sdk_unmount = 1;
+    h_fs_Unmount("cache");
+    CHECK(sdk_cache_live && !sdk_releases, "SDK without an unmount export keeps its existing mount");
+    missing_sdk_unmount = 0;
+    h_fs_Unmount("cache");
+    CHECK(!sdk_cache_live && sdk_releases == 1, "SDK RAM disk name is free for the next arena mount");
+    h_fs_Unmount("cache");
+    CHECK(sdk_releases == 1, "already released RAM disk is not unmounted twice");
+    CHECK(mount_sdk_cache() == RES_OK, "arena can recreate the RAM disk without MountNameAlreadyExists");
     CHECK(read_fs("rom:/data/same", got, sizeof got) && !strcmp(got, "overlay"), "the overlay file wins"); CHECK(read_fs("rom:/data/base", got, sizeof got) && !strcmp(got, "only-base"), "falls back to the base when the overlay lacks the file");
     uint64_t rh; CHECK(h_fs_OpenFile(&rh, "rom:/data/same", MODE_WRITE) == RES_FAIL, "the two-layer mount refuses writes");
     CHECK(read_fs("rom:\\data\\over", got, sizeof got) && !strcmp(got, "only-overlay") && read_fs("rom:\\data\\base", got, sizeof got) && !strcmp(got, "only-base"), "backslashes separate as slashes do, in both layers");

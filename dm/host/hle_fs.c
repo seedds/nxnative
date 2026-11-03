@@ -522,7 +522,7 @@ HLE_FORCE("_ZN2nn2fs15MountSystemDataEPKcNS_3ncm12SystemDataIdEPvm", "fsp-srv; s
     if (!sysdata_dir(dir, sizeof dir, id)) { LOG("[RED] fs mount system data %s: the host has no %016llx", name, (unsigned long long)id); return RES_TARGET_NOT_FOUND; }
     return mount(name, dir, 1);
 }
-// IsMounted: the original SDK checks its own mount table, which stays empty because the host takes over mounting. Engage (IL2CPP) uses it to check whether "rom:" is mounted before opening a file; a "no" fails with an invalid-parameter error (0x57) and global-metadata.dat cannot be opened
+// IsMounted: the original SDK table does not contain mounts taken over by the host. Engage (IL2CPP) uses it to check whether "rom:" is mounted before opening a file; a "no" fails with an invalid-parameter error (0x57) and global-metadata.dat cannot be opened
 HLE_FORCE("_ZN2nn2fs9IsMountedEPKc", "fsp-srv; looks up the host mount table", int, h_fs_IsMounted, const char *name) {   // bool in w0: 1 / 0
     PATH_LOCK();
     for (int i = 0; name && i < g_nmnt; i++) if (!strcmp(g_mnt[i].name, name)) return 1;
@@ -722,7 +722,14 @@ out:
 HLE_FORCE("_ZN2nn2fs6CommitEPKcRKNS0_12CommitOptionE", "fsp-srv; same as Commit (the option only clears the restore flag)", Result, h_fs_CommitOpt, const char *name, const void *opt) { (void)opt; return h_fs_Commit(name); }
 // SDK 11's old name: CommitSaveData(mount name) is the later Commit (Metroid Dread)
 HLE_FORCE("_ZN2nn2fs14CommitSaveDataEPKc", "fsp-srv; same as Commit (SDK 11's old name)", Result, h_fs_CommitSaveData, const char *name) { return h_fs_Commit(name); }
-HLE_FORCE("_ZN2nn2fs7UnmountEPKc", "fsp-srv; the mount table is permanent, unmounting is a no-op", void, h_fs_Unmount, const char *name) { (void)name; }
+HLE_FORCE("_ZN2nn2fs7UnmountEPKc", "keep host-managed mounts; unmount SDK file systems in their own table", void, h_fs_Unmount, const char *name) {
+    if (!name || !*name || h_fs_IsMounted(name)) return;
+    // MountRamDisk runs in the guest. Its name remains reserved until the original SDK Unmount releases it.
+    // guest_sym returns the guest definition directly. The host mount-table lookup above has released its lock.
+    bool (*is_mounted)(const char *) = guest_sym("_ZN2nn2fs9IsMountedEPKc");
+    void (*unmount)(const char *) = guest_sym("_ZN2nn2fs7UnmountEPKc");
+    if (is_mounted && unmount && is_mounted(name)) unmount(name);
+}
 
 // ---------- Files ----------
 HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Result, h_fs_OpenFile, uint64_t *out, const char *path, int mode) { dm_thread_service_request();

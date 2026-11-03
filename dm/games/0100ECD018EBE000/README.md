@@ -79,6 +79,8 @@ Update 1.0.1 (v65536), SDK 15.3.2. Intelligent Systems' engine on NintendoWare (
 
 ## Found on this game
 
+- [Unmounting an SDK-owned RAM disk](../../../docs/reference/services.md#unmounting-an-sdk-owned-ram-disk): the Chapter 3 arena introduction recreates `cache` in version 1.0.1 ([#1012](https://github.com/seedds/nxnative/issues/1012)).
+
 General host changes first needed here; each applies to every game:
 
 - **Blocking native HLE waits release the guest core:** [Native HLE waits release the guest core](../../../docs/reference/threads.md#native-hle-waits-release-the-guest-core).

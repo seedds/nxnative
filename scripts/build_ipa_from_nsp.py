@@ -490,7 +490,20 @@ def package_title_reader(repo, keys, env):
             except BuildError: return None
             out = [(t, int(i, 16), int(v)) for t, i, v in re.findall(r'^content (\w+) ([0-9a-f]{16}) (\d+)$', log.read_text(errors='replace'), re.M)]
             return out or None
-        read.contents = contents
+        def check_keys(fam):
+            """Stop when the keys cannot open the game's packages (`nx_extract <keys> --keys <package>...`: every NCA's header, an NSZ's too), before nsz -D, the survey and the
+            extraction, which need the same keys and would stop minutes later. Keys older than the game lack its master key: the message names that key and the firmware it came with.
+            Any other failure of the check is left to those steps, which report it themselves"""
+            if not nx:
+                if not shutil.which('dotnet', path=env.get('PATH')): return
+                nx.append(build_nx_extract(repo, work, work / 'logs', env))
+            log = work / 'logs/keys.log'
+            paths = list(dict.fromkeys([fam['base'], *(p for _, p in fam['updates']), *(p for _, _, p in fam['dlc'])]))   # a merged package is the base game, the update and DLC: checked once
+            try: run([nx[0], keys, '--keys', *paths], log, env=env, ok=(6,))
+            except BuildError: return
+            m = re.search(r'^\[RED\] (.*prod\.keys has no .*|.*no title key for rights ID .*)$', log.read_text(errors='replace'), re.M)
+            if m: raise BuildError(m.group(1))
+        read.contents, read.check_keys = contents, check_keys
         yield read
 
 
@@ -1300,19 +1313,19 @@ def decoder_host_key(host):
 
 def build_mac_host(repo, out, env, logs, g):
     """The Mac host for the profile, built into out: dm/host's own compile line (make -n) with the output moved, since make takes no target path with spaces and dm/host/dmhost may be another build's.
-    Reused when the compile line and its inputs (the source files of HOST_DIRS, the chain header dm/gfx/nvn/dmsh_chain.h among them, the profile header make generates, libvpx and the third-party headers, the compiler
+    Reused when the compile line and its inputs (the source files of HOST_DIRS, the chain header dm/gfx/nvn/dmsh_chain.h among them, the profile header make generates, libvpx, dav1d and the third-party headers, the compiler
     and the macOS SDK) are as at the last build into out. The host runs the game's own arm64 code natively, so an Intel Mac stops here (GitHub issue #54)"""
     if not apple_silicon(): raise BuildError('this step boots the game in the Mac host, which runs the game\'s own arm64 code natively: it needs a Mac with Apple silicon, and this Mac has an Intel processor')
     host = repo / 'dm/host'
-    run(['make', '-s', f'GAME={g.id}', f'gen/{g.id}/game_profile.h', 'gen/vpx/libvpx.a', 'host_msl'], logs / 'mac_host_make.log', env=env, cwd=host)
+    run(['make', '-s', f'GAME={g.id}', f'gen/{g.id}/game_profile.h', 'gen/vpx/libvpx.a', 'gen/dav1d/libdav1d.a', 'host_msl'], logs / 'mac_host_make.log', env=env, cwd=host)
     dry = subprocess.run(['make', '-n', '-B', f'GAME={g.id}', 'dmhost'], env=env, cwd=host, capture_output=True, text=True)
     line = next((l for l in dry.stdout.splitlines() if ' -o dmhost ' in l), None)
     if not line: raise BuildError(f'make -n gave no compile line for the Mac host: {dry.stderr.strip()[-500:]}')
     cmd = shlex.split(line); cmd[cmd.index('-o') + 1] = out
     kf, tp = out.with_name(out.name + '.key'), repo / 'dm/third_party'
     srcs = [p for d in HOST_DIRS for p in sorted((repo / d).iterdir()) if p.is_file() and p.suffix in ('.c', '.m', '.h', '.S', '.inc')]
-    common = fingerprint(cmd, ('files', [host / f'gen/{g.id}/game_profile.h', host / 'gen/msl-macosx/host_msl_gen.h', host / 'gen/vpx/libvpx.a', tp / 'stb_vorbis/stb_vorbis.c']),
-                         ('tree', tp / 'vulkan-headers/include'), ('tree', tp / 'libvpx/vpx'), ('cmd', ['clang', '--version']), ('cmd', ['xcrun', '--show-sdk-build-version']), env=env)
+    common = fingerprint(cmd, ('files', [host / f'gen/{g.id}/game_profile.h', host / 'gen/msl-macosx/host_msl_gen.h', host / 'gen/vpx/libvpx.a', host / 'gen/dav1d/libdav1d.a', tp / 'stb_vorbis/stb_vorbis.c']),
+                         ('tree', tp / 'vulkan-headers/include'), ('tree', tp / 'libvpx/vpx'), ('tree', tp / 'dav1d/include'), ('cmd', ['clang', '--version']), ('cmd', ['xcrun', '--show-sdk-build-version']), env=env)
     key = fingerprint(common, ('files', srcs))
     chain = repo / CHAIN_H
     # The decoder serves game bytes before rendering. DMSH_CHAIN selects translated shader libraries and appears in the startup log; it cannot change decompression.
@@ -1957,6 +1970,34 @@ def prune_stale_chains(sh, chain):
     return names
 
 
+def prune_shader_cache(sh, chain):
+    """Remove the per-shader cache entries (sh/cache/cas/shader/<digest>) the current chain's last full build did not use, with prune_stale_chains and under the same conditions (issue #1033).
+    A shader's digest covers the chain's code, so each chain change translated every shader again into a new entry and left the old ones: Tears of the Kingdom's held six sets for 28,669 shaders,
+    11.85 GB of sources and reflection nothing read. The digests in use are listed by dmsh_build.py's full build in b-<chain>/_b_cas.txt beside the Mac outputs (every full build writes them);
+    cas/index cannot tell, since a cache hit does not rewrite it. No list (libraries from before the list): nothing goes. An entry newer than the list stays (regress.py's chain builds share this
+    cache and may publish meanwhile). The digests also cover the iOS compile convention, so a build of the other target translates again, as switching targets did before; the Metal compile cache
+    (cas/metallib) and the fetch variants (cas/variant) are keyed by the MSL and stay. Only names of 64 hex digits go. Removals that fail are one [RED] line, as for the libraries.
+    Logs the space of the sources and reflection: an entry's libraries are clones of the compile cache's. Returns the number removed"""
+    used = sh / 'cache' / f'b-{chain}' / '_b_cas.txt'
+    try: keep, since = set(used.read_text().split()), used.stat().st_mtime
+    except OSError: return 0
+    n = size = 0; failed = []
+    try: it = os.scandir(sh / 'cache' / 'cas' / 'shader')
+    except OSError: return 0
+    with it:
+        for e in it:
+            try:
+                if e.name in keep or not re.fullmatch(r'[0-9a-f]{64}', e.name) or not e.is_dir(follow_symlinks=False) or e.stat(follow_symlinks=False).st_mtime >= since: continue
+                if not n and not failed: say('removing the shader cache of other chain versions (the first time, up to half an hour for a large game on an external drive)')   # Tears of the Kingdom: 906,286 entries scanned in 18 minutes on a T7
+                b = sum(f.stat().st_size for f in Path(e.path).rglob('*') if f.is_file() and f.suffix != '.metallib')
+                rmtree(Path(e.path))
+            except OSError as x: failed.append(f'{e.path}: {x}'); continue
+            n += 1; size += b
+    if failed: say(f'[RED] could not remove {len(failed):,} old shader cache entries, the first {failed[0]}')
+    if n: say(f'removed old shader cache entries: {n:,} ({amount(size, "B")})')
+    return n
+
+
 def stale_shaders(py, repo, env, lib_dirs, chain, g):
     """Why cached shader libraries cannot be reused by the build that starts: (reason, old, new, count) or None. 'chain': library folders b-<V> of another translation chain (lib_dirs: the
     selected targets' cache folders) have libraries without a completed current build; old is those folders' names, new b-<chain>. A full build writes its stamp only at the end,
@@ -1985,7 +2026,7 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False):
     sh/mac-b-<chain>.key (not in sh/cache, whose b-* entries dmsh_build.py reads as library folders). Each target writes only its own key (an iOS build that keeps a Mac build's libraries, both); either is taken only
     while the Mac sources and reflection carry a full build's stamp (inputs.tsv) for c1_full.tsv and cb_extent.tsv to name (chain_tables).
     Switching targets translates again (the per-shader keys include the iOS compile convention); the Metal compile cache (dmsh_mtlcache.py) reuses previously compiled MSL for that target.
-    After success the libraries of other chain versions are removed (prune_stale_chains)"""
+    After success the libraries of other chain versions and the cache entries this chain's build did not use are removed (prune_stale_chains, prune_shader_cache)"""
     ios, log = sh / 'ios', logs / 'dmsh_build.log'
     PROG.stage('Mac shaders' if mac else 'iOS shaders')
     chain = chain_of(repo)
@@ -2000,7 +2041,7 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False):
         note = next((n for k in ((kmac, kf) if mac else (kf,)) if (n := reused(k, key)) is not None), None)
         # the libraries are the last build's, so are tables that name their stamp; a missing or stale one is made from that build's Mac outputs, and without them the step runs again
         if next(libs.glob('*_b.metallib'), None) and note is not None and chain_tables(py, repo, sh, env, logs, g, chain):
-            prune_stale_chains(sh, chain)
+            prune_stale_chains(sh, chain); prune_shader_cache(sh, chain)
             PROG.end(f'{note}, reused (inputs unchanged)'); return out
     else: key = None
     rmtree(kmac)
@@ -2046,7 +2087,7 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False):
     shader_regressions(py, repo, sh / 'cache', chain, logs)   # before the key: a stopped build is checked again on the next run
     if key:
         for k in (kmac,) if mac else (kf, kmac) if keep_mac else (kf,): k.write_text(f'{key}\n{note}\n')
-    prune_stale_chains(sh, chain)   # last: a build that stopped before here keeps the old libraries
+    prune_stale_chains(sh, chain); prune_shader_cache(sh, chain)   # last: a build that stopped before here keeps the old libraries and cache entries
     return out
 
 
@@ -2465,7 +2506,9 @@ def main(args=None):
         app, fam = scan_dump(nsp_dir, int(want, 16) if want else None)
         say(f'a dump folder: {app:016X}, {len(fam["updates"])} update(s), {len(fam["dlc"])} DLC')
     else:
-        with package_title_reader(repo, keys, env) as from_package: app, fam = scan_nsps(nsp_dir, from_package, from_package.contents, int(want, 16) if want else None)
+        with package_title_reader(repo, keys, env) as from_package:
+            app, fam = scan_nsps(nsp_dir, from_package, from_package.contents, int(want, 16) if want else None)
+            from_package.check_keys(fam)
         fam = decompress_nsz(nsp_dir, app, fam, keys, env, work_dir(args))
     force =args.provisional or PROVISIONAL   # a provisional profile even when dm/games has one (testing the guesses)
     g, provisional, shadowed = None if force else gamemod.by_title(app), False, False

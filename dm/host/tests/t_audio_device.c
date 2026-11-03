@@ -12,6 +12,8 @@ static OSStatus mock_set(AudioUnit, AudioUnitPropertyID, AudioUnitScope, AudioUn
 static OSStatus mock_add(AudioUnit, AudioUnitPropertyID, AudioUnitPropertyListenerProc, void *);
 static OSStatus mock_remove(AudioUnit, AudioUnitPropertyID, AudioUnitPropertyListenerProc, void *);
 static OSStatus mock_init(AudioUnit);
+static OSStatus mock_start(AudioUnit);
+static OSStatus mock_stop(AudioUnit);
 static OSStatus mock_uninit(AudioUnit);
 static OSStatus mock_dispose(AudioComponentInstance);
 #define AudioComponentFindNext mock_find
@@ -21,6 +23,8 @@ static OSStatus mock_dispose(AudioComponentInstance);
 #define AudioUnitAddPropertyListener mock_add
 #define AudioUnitRemovePropertyListenerWithUserData mock_remove
 #define AudioUnitInitialize mock_init
+#define AudioOutputUnitStart mock_start
+#define AudioOutputUnitStop mock_stop
 #define AudioUnitUninitialize mock_uninit
 #define AudioComponentInstanceDispose mock_dispose
 #include "../hle_audio.c"
@@ -99,6 +103,17 @@ static OSStatus mock_remove(AudioUnit au, AudioUnitPropertyID id, AudioUnitPrope
     return noErr;
 }
 static OSStatus mock_init(AudioUnit au) { assert(au == fake_au()); return unit.init_error; }
+static dispatch_semaphore_t start_entered, start_allowed, guest_returned, device_stopped, guest_closed, device_disposed;
+static OSStatus start_result;
+static OSStatus mock_start(AudioUnit au) {
+    assert(au == fake_au());
+    dispatch_semaphore_signal(start_entered);
+    dispatch_semaphore_wait(start_allowed, DISPATCH_TIME_FOREVER);
+    return start_result;
+}
+static OSStatus mock_stop(AudioUnit au) {
+    assert(au == fake_au()); dispatch_semaphore_signal(device_stopped); return noErr;
+}
 static OSStatus mock_uninit(AudioUnit au) {
     assert(au == fake_au() && !unit.device_listener && !unit.format_listener); return noErr;
 }
@@ -106,7 +121,7 @@ static OSStatus mock_dispose(AudioComponentInstance au) {
     assert(au == fake_au() && !unit.device_listener && !unit.format_listener);
     unit.device = kAudioObjectUnknown;
     changed(kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0);
-    unit.disposals++; return noErr;
+    unit.disposals++; if (device_disposed) dispatch_semaphore_signal(device_disposed); return noErr;
 }
 
 uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
@@ -119,6 +134,93 @@ void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 int dm_guest_as_contains(uintptr_t a) { (void)a; return 0; }   // hle_svc.c: no guest address space in the unit test, so the big-stack take-overs (Start / Stop / CloseAudioOut, hle_bigstack.c) run on the calling host stack
 void dm_host_helper_qos(qos_class_t q) { (void)q; }
+
+static void *guest_start(void *out) {
+    assert(h_au_Start(out) == RES_OK);
+    dispatch_semaphore_signal(guest_returned);
+    return NULL;
+}
+static void *guest_close(void *out) { h_au_Close(out); dispatch_semaphore_signal(guest_closed); return NULL; }
+static int signaled(dispatch_semaphore_t s, int seconds) {
+    return dispatch_semaphore_wait(s, dispatch_time(DISPATCH_TIME_NOW, seconds * (int64_t)NSEC_PER_SEC)) == 0;
+}
+static void blocked_start(void *out) {
+    start_entered = dispatch_semaphore_create(0);
+    start_allowed = dispatch_semaphore_create(0);
+    guest_returned = dispatch_semaphore_create(0);
+    device_stopped = dispatch_semaphore_create(0);
+    guest_closed = dispatch_semaphore_create(0);
+    static int16_t pcm[480 * 2];
+    gbuf b = {pcm, sizeof pcm, sizeof pcm};
+    assert(h_au_Append(out, &b));
+    pthread_t guest;
+    assert(!pthread_create(&guest, NULL, guest_start, out));
+    assert(signaled(start_entered, 2));
+    int returned = signaled(guest_returned, 1);
+    uint64_t until = now_ns() + NSEC_PER_SEC;
+    gbuf *released;
+    while (!(released = h_au_Released(out)) && now_ns() < until) usleep(1000);
+    until = now_ns() + NSEC_PER_SEC;
+    int lock_free;
+    while (!(lock_free = !pthread_mutex_trylock(&g_aos_lock)) && now_ns() < until) usleep(1000);
+    assert(returned && released == &b && lock_free);
+    pthread_mutex_unlock(&g_aos_lock);
+
+    // A callback may arrive before Start returns. Only the silent sink may touch the PCM then.
+    static int16_t music[RATE * 2];
+    for (unsigned i = 0; i < sizeof music / sizeof *music; i++) music[i] = 1234;
+    gbuf next = {music, sizeof music, sizeof music};
+    assert(h_au_Append(out, &next));
+    int16_t samples[2] = {-1, -1};
+    AudioBufferList bl = {.mNumberBuffers = 1, .mBuffers = {{2, sizeof samples, samples}}};
+    aout *a = ao(out);
+    au_render(a, NULL, NULL, 0, 1, &bl);
+    assert(!samples[0] && !samples[1]);
+    dispatch_semaphore_signal(start_allowed);
+    pthread_join(guest, NULL);
+    until = now_ns() + NSEC_PER_SEC;
+    do { au_render(a, NULL, NULL, 0, 1, &bl); if (samples[0]) break; usleep(1000); } while (now_ns() < until);
+    assert(samples[0] == 1234 && samples[1] == 1234);
+
+    dm_audio_suspend(1);
+    assert(signaled(device_stopped, 1));
+    dm_audio_suspend(0);
+    assert(signaled(start_entered, 2));
+    // A successful start with no callbacks keeps releasing buffers and is retried.
+    dispatch_semaphore_signal(start_allowed);
+    assert(signaled(device_stopped, 3));
+    until = now_ns() + NSEC_PER_SEC;
+    while (!(released = h_au_Released(out)) && now_ns() < until) usleep(1000);
+    assert(released == &next);
+    assert(signaled(start_entered, 3));
+    start_result = kAudioUnitErr_FailedInitialization;
+    dispatch_semaphore_signal(start_allowed);
+    assert(signaled(start_entered, 4));
+    // Reset while the retry blocks. The old unit stays alive until Start returns, then its replacement starts.
+    start_result = noErr;
+    dm_audio_reset(); assert(unit.disposals == 0);
+    dispatch_semaphore_signal(start_allowed);
+    assert(signaled(device_stopped, 1) && signaled(start_entered, 2));
+    assert(unit.disposals == 1);
+    // Close returns while the driver still blocks Start: it unregisters the output and leaves the unit to the start's worker,
+    // which stops and disposes it when Start returns.
+    device_disposed = dispatch_semaphore_create(0);
+    assert(!pthread_create(&guest, NULL, guest_close, out));
+    assert(signaled(guest_closed, 2));
+    pthread_join(guest, NULL);
+    pthread_mutex_lock(&g_aos_lock);
+    for (int i = 0; i < AOMAX; i++) assert(g_aos[i] != a);
+    pthread_mutex_unlock(&g_aos_lock);
+    assert(unit.disposals == 1);
+    dispatch_semaphore_signal(start_allowed);
+    assert(signaled(device_stopped, 1) && signaled(device_disposed, 2) && unit.disposals == 2);
+    dispatch_release(device_disposed); device_disposed = NULL;
+    dispatch_release(guest_closed);
+    dispatch_release(device_stopped);
+    dispatch_release(guest_returned);
+    dispatch_release(start_allowed);
+    dispatch_release(start_entered);
+}
 
 int main(void) {
     setenv("DM_AUDIO", "1", 1); unsetenv("DM_DBG_AU_FRAMES");
@@ -158,12 +260,13 @@ int main(void) {
     unsigned before = unit.writes; unit.device = kAudioObjectUnknown;
     changed(kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0); assert(unit.writes == before);
     unit.device = 1;
-    h_au_Close(out); assert(unit.disposals == 1 && !object.key);
+    blocked_start(out);
+    assert(!object.key);
 
     // Failure after listener registration follows the same cleanup path as Close.
     unit.device = 1; unit.rate = 48000; unit.init_error = kAudioUnitErr_FailedInitialization;
     aout failed = {.ch = 2};
-    assert(au_create(&failed) == kAudioUnitErr_FailedInitialization && !failed.au && unit.disposals == 2);
-    puts("audio device: switching, rate changes, limits, diagnostic override and listener cleanup passed");
+    assert(au_create(&failed) == kAudioUnitErr_FailedInitialization && !failed.au && unit.disposals == 3);
+    puts("audio device: buffer configuration, blocked start, callback handoff, retry and lifecycle passed");
     return 0;
 }

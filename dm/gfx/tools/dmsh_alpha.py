@@ -2,8 +2,8 @@
 # when the comparison fails (Maxwell's fixed-function alpha test, as in OpenGL's compatibility profile). Metal has none. Foliage, hair, fences and dissolve effects draw with it
 # (Dark Souls Remastered, ASTRAL CHAIN, Animal Crossing's island map). This variant is the pixel shader with every fragment entry point (main0 and the main0_u / main0_m / main0_d
 # dmsh_build.py adds) taking the test's function and reference from a constant buffer at fragment buffer DMSH_ALPHA_BUFFER, and testing colour 0's alpha before each return.
-# The function and reference are data, not part of the code: one pipeline serves every function, and a reference that changes every draw (a dissolve) keeps it. Built offline
-# into a library of its own beside <key>_b, with the same argument buffer and entry point names; the host loads it only for pipelines drawn with an alpha function other than
+# The function and reference are data, not part of the code: one pipeline serves every function, and a reference that changes every draw (a dissolve) keeps it. Written as MSL
+# beside <key>_b (<key>_ba.metal), with the same argument buffer and entry point names, and compiled by the host on first need (nvn_mtl.m side_lib), only for pipelines drawn with an alpha function other than
 # ALWAYS (nvn_mtl.m at_fn), so draws without the test keep the base library as it was. [[early_fragment_tests]] stays: a shader that forces early depth tests has its depth written before the alpha test, on Maxwell too.
 # Usage: variant(msl) → (new MSL, the entry point names) or (None, reason)
 import re

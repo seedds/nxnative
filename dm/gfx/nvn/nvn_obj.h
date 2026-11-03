@@ -261,6 +261,7 @@ void nvn_ctl_lens(const void *control, uint32_t *nctl, uint32_t *ncode);   // a 
 void mtl_reg_samp(int id, const samp_par *p);
 void mtl_prog_release(prog_t *p);
 void mtl_prog_prefetch(const prog_t *p);   // loads a new program's shader libraries in the background (nvn_mtl.m)
+void mtl_prog_forget(const prog_t *p);   // program finalize, submit lock held: drop it from every queue's bindings
 // New serial (> 0, globally increasing)
 uint64_t nvn_new_serial(void);
 // Serials handed out from now on are above s (dm/gfx/tests/nvn_replay.m: the objects of a capture keep the live run's serials)

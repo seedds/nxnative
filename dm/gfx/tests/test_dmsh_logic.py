@@ -1,6 +1,6 @@
-"""The logic operation library (dmsh_logic.py): the integer entry points (main0_u, main0_m) read each integer colour output's attachment and combine it with the output before
-each return, the output stays a library that compiles for the Mac and the iPhone, and shaders without integer colour outputs get none. With --fixture <dir>, writes the replay
-test's shaders (t_logic.m): the base source and its logic operation library, compiled"""
+"""The logic operation library (dmsh_logic.py): the entry points (main0, main0_u, main0_m) read each colour output's attachment and combine it with the output before each return,
+integer outputs bit for bit and float outputs through their normalized target's bits, the output stays a library that compiles for the Mac and the iPhone, and shaders without colour
+outputs get none. With --fixture <dir>, writes the replay test's shaders (t_logic.m): the base source and its logic operation library, compiled"""
 import pathlib, shutil, subprocess, sys, tempfile, unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'tools'))
 import dmsh_abi, dmsh_logic
@@ -65,18 +65,24 @@ FB0 = 'uint4 dm_fb0 [[color(0), function_constant(dm_lfb0)]]'
 class LogicVariant(unittest.TestCase):
     def test_integer_entry_points_and_returns(self):
         v, entries = dmsh_logic.variant(BASE)
-        self.assertEqual(entries, ['main0_u', 'main0_m'])
+        self.assertEqual(entries, ['main0', 'main0_u', 'main0_m'])
         self.assertIn('[[buffer(0)]], ' + FB0 + ', uint4 dm_fb1 [[color(1), function_constant(dm_lfb1)]], ' + STATE + ')', v)   # main0_u: both outputs are integers
-        self.assertIn('[[buffer(0)]], ' + FB0 + ', ' + STATE + ')', v)   # main0_m: only colour 0 is
+        self.assertIn('[[buffer(0)]], ' + FB0 + ', float4 dm_fb1 [[color(1), function_constant(dm_lfb1)]], ' + STATE + ')', v)   # main0_m: only colour 0 is
         for n in (0, 1): self.assertEqual(v.count(f'constant bool dm_lfb{n} [[function_constant({dmsh_abi.LOGIC_FC + n})]];'), 1)
         self.assertEqual(v.count('if (dm_lfb0) dm_r.m_0 = uint4(dm_logic(uint4(dm_r.m_0), dm_fb0, dm_lop, 0u));'), 3)   # main0_u's two returns, main0_m's one
         self.assertEqual(v.count('if (dm_lfb1) dm_r.m_1 = uint4(dm_logic(uint4(dm_r.m_1), dm_fb1, dm_lop, 1u));'), 2)
         self.assertIn('if (gl_FragCoord.y < 0.0)\n        { main0_out_u dm_r = main0_out_u{', v)   # a single-statement if keeps its return
 
-    def test_only_the_integer_entry_points(self):   # the host takes nothing else from the library
-        v, _ = dmsh_logic.variant(BASE.replace('fragment main0_out main0(', '[[ early_fragment_tests ]] fragment main0_out main0('))
-        self.assertNotIn('main0_out main0(', v); self.assertNotIn('early_fragment_tests', v)
-        self.assertIn('struct main0_out\n', v)   # the integer entry points still use the shader's own output struct
+    def test_float_outputs_go_through_the_targets_bits(self):
+        v, entries = dmsh_logic.variant(BASE.split('\nstruct main0_out_u')[0])
+        self.assertEqual(entries, ['main0'])
+        self.assertIn('float4 dm_fb0 [[color(0), function_constant(dm_lfb0)]], float4 dm_fb1 [[color(1), function_constant(dm_lfb1)]], ' + STATE + ')', v)
+        self.assertEqual(v.count('if (dm_lfb0) dm_r.m_0 = float4(dm_logic_norm(float4(dm_r.m_0), dm_fb0, dm_lop, 0u));'), 1)
+
+    def test_only_the_entry_points_the_host_takes(self):   # the dual-source entry point stays out: a logic operation takes the place of blending
+        dual = BASE + '\nstruct main0_out_d\n{\n    float4 m_0 [[color(0), index(0)]];\n    float4 m_1 [[color(0), index(1)]];\n};\n\nfragment main0_out_d main0_d(float4 gl_FragCoord [[position]])\n{\n    return main0_out_d{float4(0.0), float4(1.0)};\n}\n'
+        v, entries = dmsh_logic.variant(dual)
+        self.assertEqual(entries, ['main0', 'main0_u', 'main0_m']); self.assertNotIn('main0_d', v)
 
     def test_helper_after_the_shaders_own(self):
         v, _ = dmsh_logic.variant(BASE)
@@ -89,9 +95,14 @@ class LogicVariant(unittest.TestCase):
         self.assertIn('if (dm_lfb0) dm_r.m_0 = uint(dm_logic(uint4(dm_r.m_0, 0u, 0u, 0u), dm_fb0, dm_lop, 0u).x);', v)
         self.assertIn('if (dm_lfb1) dm_r.m_1 = uint2(dm_logic(uint4(dm_r.m_1, 0u, 0u), dm_fb1, dm_lop, 1u).xy);', v)
 
-    def test_no_integer_output_no_library(self):
-        only_float = BASE.split('\nstruct main0_out_u')[0]
-        self.assertEqual(dmsh_logic.variant(only_float), (None, 'no integer colour output'))
+    def test_narrow_float_outputs(self):
+        v, _ = dmsh_logic.variant(BASE.split('\nstruct main0_out_u')[0].replace('float4 m_0 [[color(0)]];\n    float4 m_1', 'float m_0 [[color(0)]];\n    float2 m_1').replace('out.m_0 = helper(as_type<float4>(*spvDescriptorSet0.value));', 'out.m_0 = 0.5;').replace('out.m_1 = float4(0.5);', 'out.m_1 = float2(0.5);'))
+        self.assertIn('if (dm_lfb0) dm_r.m_0 = float(dm_logic_norm(float4(dm_r.m_0, 0.0f, 0.0f, 0.0f), dm_fb0, dm_lop, 0u).x);', v)
+        self.assertIn('if (dm_lfb1) dm_r.m_1 = float2(dm_logic_norm(float4(dm_r.m_1, 0.0f, 0.0f), dm_fb1, dm_lop, 1u).xy);', v)
+
+    def test_no_colour_output_no_library(self):
+        depth_only = BASE.split('\nstruct main0_out_u')[0].replace('float4 m_0 [[color(0)]];\n    float4 m_1 [[color(1)]];', 'float gl_FragDepth [[depth(any)]];').replace('    out.m_0 = helper(as_type<float4>(*spvDescriptorSet0.value));\n    out.m_1 = float4(0.5);\n', '    out.gl_FragDepth = 0.5;\n')
+        self.assertEqual(dmsh_logic.variant(depth_only), (None, 'no colour output'))
 
     def test_taken_buffer_or_fetch_no_library(self):
         self.assertEqual(dmsh_logic.variant(BASE.replace('[[buffer(0)]])\n{\n    main0_out out = {};\n    out.m_0 = helper', f'[[buffer(0)]], constant float& x [[buffer({dmsh_abi.LOGIC_BUFFER})]])\n{{\n    main0_out out = {{}};\n    out.m_0 = helper', 1))[0], None)

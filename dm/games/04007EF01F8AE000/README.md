@@ -17,7 +17,7 @@ No `render_cond`: not tried, and nothing has called for it so far.
 
 - A dump folder holding only `exefs/` and `romfs/`, with no `base/` layout: a RomFS of 28 GB. The NSOs are ZBIC-compressed, so tools that read them need the `zbic` package in the work folder's venv.
 - Shaders: 16,888 in [`shader_map.tsv`](shader_map.tsv), from `Shaders/*.bfsha.zst` and the effect and layout packages.
-- Movies: 82, AV1 in WebM at 2560x1440 ([AV1 movies through SDK 22's decoder](../../../docs/reference/movies.md#av1-movies-through-sdk-22s-decoder)). A Mac without a hardware AV1 decoder shows them black.
+- Movies: 82, AV1 in WebM at 2560x1440 ([AV1 movies through SDK 22's decoder](../../../docs/reference/movies.md#av1-movies-through-sdk-22s-decoder)). A Mac without a hardware AV1 decoder (before M3) decodes them with dav1d.
 
 ## Shaders
 
@@ -55,3 +55,4 @@ Keyboard in a window: J K U I are A B X Y, WASD the left stick, Shift + arrows t
 - [AV1 movies through SDK 22's decoder](../../../docs/reference/movies.md#av1-movies-through-sdk-22s-decoder).
 - [The Joy-Con mouse pointer](../../../docs/reference/services.md#the-joy-con-mouse-pointer) and [The display's largest buffer](../../../docs/reference/services.md#the-displays-largest-buffer).
 - [An SDK 21 Switch 2 game with a 4.5 GB alias region](../../../docs/reference/memory.md#an-sdk-21-switch-2-game-with-a-45-gb-alias-region): SDK 22's node area.
+- The title screen's hand-over to the opening demo finalizes a program its queue still has bound: [Finalized programs leave every queue's bindings](../../../docs/reference/nvn-objects.md#finalized-programs-leave-every-queues-bindings) (resolved).

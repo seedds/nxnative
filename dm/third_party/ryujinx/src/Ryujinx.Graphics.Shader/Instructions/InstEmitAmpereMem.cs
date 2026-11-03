@@ -23,6 +23,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             x(0x981, InstName.Ldg, ALdg, N);
             x(0x381, InstName.Ldg, ALdg, N);
+            x(0xf8c, InstName.Atoms, AAtoms, N);
             x(0x986, InstName.Stg, AStg, N, writesRd: false);
             x(0x386, InstName.Stg, AStg, N, writesRd: false);
             x(0x98e, InstName.Red, ARed, N, writesRd: false);
@@ -315,18 +316,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, res);
         }
 
-        // ATOMS Rd, [Ra + offset], Rb: as ATOMG (operation 87..91, size 73..76) on shared memory, the byte offset at 40..64 as LDS's. Compute only
-        public static void AAtoms(EmitterContext context)
-        {
-            AmpereOp x = new(context.CurrOp);
-            Operand ra = x.Ra >= RegisterConsts.RegisterZeroIndex ? Const(0) : AStride(context, x, Register(x.Ra, RegisterType.Gpr));
-            Operand offset = context.ShiftRightU32(context.IAdd(ra, Const((int)x.SignedField(40, 64))), Const(2));
-            Operand value = x.Rb >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rb, RegisterType.Gpr);
-            Operand res = EmitAtomicOp(context, StorageKind.SharedMemory, (AtomOp)x.Bits(87, 91), (AtomSize)x.Bits(73, 76), Const(context.ResourceManager.SharedMemoryId), offset, value);
-
-            ASet(context, x, res);
-        }
-
         // MEMBAR: the order of this thread's memory operations
         public static void AMembar(EmitterContext context)
         {
@@ -355,7 +344,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         // ---- local and shared memory ----
 
         // A shared or local address register's stride, bits 78..79: it counts elements of 1, 4, 8 or 16 bytes (Fire Emblem Fortune's Weave has 1 on all its 32-bit and 2 on all its 64-bit accesses with a
-        // register, whose code bounds that register by the element count; 3 by the pattern, not seen)
+        // register, whose code bounds that register by the element count). The field is a scale, not the access size: Pokemon Pokopia has 3 on 3,312 shared accesses of 4, 8 and 16 bytes
         private static Operand AStride(EmitterContext context, AmpereOp x, Operand ra)
         {
             int stride = x.Bits(78, 80);
@@ -363,10 +352,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
             return stride == 0 ? ra : context.ShiftLeft(ra, Const(stride + 1));
         }
 
-        // The 32-bit address of a local / shared access: Ra by its stride, plus the uniform register (at urLo in the uniform form, bit 91)
-        private static Operand ALocalAddress(EmitterContext context, AmpereOp x, int urLo)
+        // The 32-bit address of a local / shared access: Ra by its stride, plus the uniform register (at urLo in the uniform form, bit 91). LDSM keeps its mode in the stride's bits, so it passes
+        // stride: false: scaled by that mode, Donkey Kong Bananza's upscaler read its transposed matrices (LDSM.MT88) four times too far along and the picture came out as an 8 x 8 lattice of garbage
+        private static Operand ALocalAddress(EmitterContext context, AmpereOp x, int urLo, bool stride = true)
         {
-            Operand addr = x.Ra == RegisterConsts.RegisterZeroIndex ? Const(0) : AStride(context, x, Register(x.Ra, RegisterType.Gpr));
+            Operand ra = Register(x.Ra, RegisterType.Gpr);
+            Operand addr = x.Ra == RegisterConsts.RegisterZeroIndex ? Const(0) : stride ? AStride(context, x, ra) : ra;
 
             if (x.Bit(91) && x.Bits(urLo, urLo + 6) != RegisterConsts.UniformZeroIndex)
             {
@@ -392,6 +383,35 @@ namespace Ryujinx.Graphics.Shader.Instructions
             StorageKind kind = x.Opcode is 0x387 or 0x987 ? StorageKind.LocalMemory : StorageKind.SharedMemory;
 
             EmitStore(context, kind, (LsSize2)x.Bits(73, 76), ALocalAddress(context, x, 64), x.Rb, (int)x.SignedField(40, 64));
+        }
+
+        // ATOMS Rd, [Ra + offset], Rb: an atomic on shared memory, its operation (87..91) and size (73..76) as ATOMG's, its offset in bytes as STS's (Pokemon Pokopia's 51 compute shaders: ADD on
+        // counters at the end of their shared memory, MAX; Splatoon Raiders has 6)
+        public static void AAtoms(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            bool one = x.Opcode == 0xf8c;
+
+            // 0xf8c, ATOMS.POPC.INC: an increment by 1 with no source register, the operation field 10 (the hardware sums the warp's lanes on one address; per lane an add of 1). Its one user is
+            // Pokemon Pokopia's luminance histogram, hist[bin]++ (2118ab534fac88c6): the field for Rb names a register the shader never wrote on three of its four paths. Other encodings stop here
+            if (one ? x.Bits(87, 91) != 10 || !x.Bit(91) || x.Rd != RegisterConsts.RegisterZeroIndex : x.Bit(91))
+            {
+                throw AFail(context, "ATOMS with a uniform register");
+            }
+
+            Operand offset = context.ShiftRightU32(context.IAdd(ALocalAddress(context, x, 64), Const((int)x.SignedField(40, 64))), Const(2));
+            Operand id = Const(context.ResourceManager.SharedMemoryId);
+
+            if (one)
+            {
+                EmitAtomicOp(context, StorageKind.SharedMemory, AtomOp.Add, (AtomSize)x.Bits(73, 76), id, offset, Const(1));
+                return;
+            }
+
+            Operand value = x.Rb >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rb, RegisterType.Gpr);
+            Operand res = EmitAtomicOp(context, StorageKind.SharedMemory, (AtomOp)x.Bits(87, 91), (AtomSize)x.Bits(73, 76), id, offset, value);
+
+            ASet(context, x, res);
         }
 
         // ---- surfaces ----
@@ -647,6 +667,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             (int handle, int cbufSlot) = bindless ? (0, TextureOperation.DefaultCbufSlot) : ATexHandle(context, x);
             List<Operand> sources = [];
             Operand arrayIndex = null;
+            bool is1DTo2D = false;
 
             if (bindless)
             {
@@ -660,6 +681,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                 sources.AddRange(a.GetRange(0, coords));
 
+                if (Sample1DAs2D && (type & SamplerType.Mask) == SamplerType.Texture1D)
+                {
+                    sources.Add(ConstF(0));
+                    type = SamplerType.Texture2D | (type & SamplerType.Array);
+                    is1DTo2D = true;
+                }
+
                 if (isArray)
                 {
                     arrayIndex = context.BitwiseAnd(a[coords], Const(0xffff));
@@ -672,11 +700,22 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                 sources.AddRange(b);
 
+                if (is1DTo2D)
+                {
+                    sources.Add(ConstF(0));
+                    sources.Add(ConstF(0));
+                }
+
                 if (offset)
                 {
                     for (int i = 0; i < coords; i++)
                     {
                         sources.Add(context.BitfieldExtractS32(a[coords], Const(16 + i * 4), Const(4)));
+                    }
+
+                    if (is1DTo2D)
+                    {
+                        sources.Add(Const(0));
                     }
 
                     flags |= TextureFlags.Offset;
@@ -706,6 +745,32 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 for (int i = 0; i < coords; i++)
                 {
                     sources.Add(a[ia++]);
+                }
+
+                // nxnative: as on Maxwell (InstEmitTexture.cs), the descriptor decides between a 1D texture and a texture buffer, and with no type answer (no game's NVN2 shaders have one)
+                // a plain fetch reads 2D at (x & 0x3FFF, x >> 14): a 1D texture, one row on the host, reads (x, 0) as before, and the host binds a texture buffer as rows of 16384 texels over
+                // the same memory (nvn_mtl.m tbuf_as_2d). Every other 1D form cannot be a texture buffer and reads row 0. Pokemon Pokopia's KTGL light lists read 0 before this, as a dummy
+                if (Sample1DAs2D && (type & SamplerType.Mask) == SamplerType.Texture1D)
+                {
+                    bool plainFetch = opcode == 0xb66 && !isArray && lod == 1 && !offset && !ms;
+
+                    if (!plainFetch || context.TranslatorContext.GpuAccessor.QuerySamplerType(handle) != SamplerType.TextureBuffer)
+                    {
+                        if (plainFetch)
+                        {
+                            Operand fetchX = sources[^1];
+                            sources[^1] = context.BitwiseAnd(fetchX, Const(0x3FFF));
+                            sources.Add(context.ShiftRightU32(fetchX, Const(14)));
+                            context.TranslatorContext.GpuAccessor.RecordTexelFetch1D(handle);
+                        }
+                        else
+                        {
+                            sources.Add(opcode == 0xb66 ? Const(0) : ConstF(0));
+                        }
+
+                        type = SamplerType.Texture2D | (type & SamplerType.Array);
+                        is1DTo2D = true;
+                    }
                 }
 
                 if (isArray)
@@ -743,6 +808,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     for (int i = 0; i < coords; i++)
                     {
                         sources.Add(context.BitfieldExtractS32(off0, Const(i * 4), Const(4)));
+                    }
+
+                    if (is1DTo2D)
+                    {
+                        sources.Add(Const(0));
                     }
 
                     flags |= TextureFlags.Offset;

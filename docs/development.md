@@ -683,6 +683,34 @@ Notes on these steps:
 - The unsigned build pins its build product and intermediate directories inside `$W/build/ios/pkg/dd`, independently of Xcode's Locations preference.
 - hactool cannot read every update (Mario 1.2.1's patch NCA gives "Invalid BKTR layout!"), which is why `nx_extract` uses LibHac.
 
+### Building selected Mac shaders
+
+A full shader build can take a day or more for a game with a large map (Pokopia: 131,426 shaders), while play reaches far fewer. `dmsh_build.py` (and `own_compilers.py`, which the NSP script runs) takes shader keys after its two folders and builds only those, each vertex shader with the pixel shaders paired with it; with no keys it builds the whole map. A key is column 4 of the profile's `shader_map.tsv`. A partial library has no stamp (`inputs.tsv`), so the host takes no `c1_full.tsv` or `cb_extent.tsv` beside it and logs a red line for that at each start; the game runs without them.
+
+The Mac app (`--platform mac-app`) and the Mac-only build (`--platform mac`) always build the whole library before the host, so a partial library runs through steps 4 and 5 of [Build by hand (Mac)](#build-by-hand-mac). Stop the NSP script once it reaches the Mac shaders step: the build folder then holds the extracted RomFS, the rewritten modules (`patched_<version>`) and the shader package (`shader/pkg`). From the repository root, for Pokopia, whose profile lists the keys of its Mac playtest (`shader_seen.tsv`, 8,157 keys):
+
+```sh
+py=python3   # the Python that runs the NSP script (make_ext_font.py needs its fonttools)
+repo="$PWD"; id=0400A3A01EE4C000; ver=v655360; build="<NSP or dump folder>/${id}_build"; out="$build/shader/partial"
+log="$build/run/host.log"   # the log of the last run (below), if there is one
+keys="$build/shader/partial-keys.txt"
+{ grep -hoE '^[0-9a-f]{16}' "dm/games/$id/shader_seen.tsv"
+  [ -f "$log" ] && sed -En -e 's/.*\[RED\] shader ([0-9a-f]{16}) \([^)]*\) failed to load:.*/\1/p' \
+    -e 's/.*\[RED\] failed to load shader ([0-9a-f]{16})_b: cannot open.*/\1/p' "$log"; } | sort -u > "$keys"
+DM_GAME=$id DMSH_TARGETS=mac DMSH_CAS="$build/shader/cache/cas" "$py" dm/gfx/tools/own_compilers.py "$build/shader/pkg" "$out" $(cat "$keys")
+make -C dm/host GAME=$id dmhost
+mkdir -p "$build/font" "$build/run/save" "$build/run/temp"
+"$py" dm/tools/make_ext_font.py "$build/font/nintendo_ext.ttf"
+(cd "$build/run" && DM_ROOT="$build" DM_ROMFS="$build/extract/$ver/RomFS.img" DM_SAVE="$build/run/save" DM_TEMP="$build/run/temp" DM_MSL_DIR="$out" \
+  DM_FONT_DIR="$build/font" DM_NVN_SHMAP="$repo/dm/games/$id/shader_map.tsv" DM_WINDOW=1 DM_AUDIO=1 "$repo/dm/host/dmhost" "$build/patched_$ver" 2>&1 | tee "$log")
+```
+
+- The keys go on the command line, not through `xargs`, which runs a command per 5,000 arguments on macOS.
+- `DMSH_CAS` shares the cache of a stopped full build, so what it compiled is not compiled again.
+- An area the list does not cover logs `[RED] shader <key> (<stage>) failed to load` (or `failed to load shader <key>_b: cannot open`) and draws without that shader; run the block again and it adds the keys from the last log. A key that still fails did not translate: the build's summary names it. Pokopia logs one at every start, vertex shader `cc679c7b4d3e703c` (untranslated, never drawn: [Pokopia's note](../dm/games/0400A3A01EE4C000/README.md#shaders)).
+- For another game, use its `shader_map.tsv` keys from a log alone (drop the `shader_seen.tsv` line); the first run then starts from an empty library.
+- `J` sets the shader workers (the NSP script uses the logical CPU count). Load average alone does not show the fastest setting: compare shaders per minute.
+
 ## Prewarm lists
 
 Metal compiles each combination of shaders and pipeline settings for the GPU the first time it is used. Each takes tens of milliseconds, so a burst of them on entering a level is a visible freeze. The host records what it had to compile and rebuilds those pipelines on a background queue at the next launch:

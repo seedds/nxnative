@@ -2,6 +2,7 @@
 The run stops at the prerequisite check; no game files, keys or Xcode needed."""
 import importlib.util
 from pathlib import Path
+import shutil
 import struct
 import sys
 import tempfile
@@ -55,6 +56,15 @@ class Scan(Base):
     def test_base_alone(self):
         d = self.dump.parent / 'alone'; version(d / 'base')
         self.assertEqual(pack_dump.scan(d), (TID, {}, {}))
+
+    def test_update_romfs_alone(self):   # the update's RomFS is whole, so a dump may leave the base's out; only packing the base itself then fails
+        d = self.dump.parent / 'slim'; version(d / 'base'); version(d / f'updates/{VER}', main=b'new code', marker='new')
+        shutil.rmtree(d / 'base/romfs')
+        self.assertTrue(pack_dump.is_dump(d))
+        self.assertEqual(pack_dump.scan(d), (TID, {VER: d / f'updates/{VER}'}, {}))
+        with self.assertRaisesRegex(pack_dump.Error, 'no exefs/main'): pack_dump.pack_version(d / 'base', TID, d / 'out', say=lambda s: None)
+        shutil.rmtree(d / f'updates/{VER}/romfs')
+        self.assertFalse(pack_dump.is_dump(d))
 
     def test_refuses(self):
         (self.dump / 'dlc/0100000000000000/romfs').mkdir(parents=True)

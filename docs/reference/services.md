@@ -101,6 +101,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the guest gets the host's handle shifted left by 4, 16-byte aligned like an AArch64 heap block (`FH_OUT` / `FH_IN`). Each guest path resolver (`img_path`, `host_path_ex`, `set_guest_name`, `dir_snapshot`) turns backslashes into slashes first, so overlays, `..` and guest names see the same path (`hle_fs.c`; `dm/host/tests/t_fs.c`).
 - **Found on:** Metroid Prime 4: Beyond (SDK 19; bring-up in [issue #229](https://github.com/seedds/nxnative/issues/229), from [PR #513](https://github.com/seedds/nxnative/pull/513)); not in the games table yet.
 
+### An unhooked `fs::ReadFile` overload falls through to the SDK's own
+
+- **Symptom:** a fault inside `sdk` at boot, right after the save data is mounted: `ldr w8, [x0, #0x24]` with `x0` holding a host file handle (SD GUNDAM G GENERATION CROSS RAYS: `sdk+0x62a78`, `x0 = 0x4000000000000390`), while `GetFileSize` on the same handle answered just before.
+- **Cause:** the game imports `nn::fs::ReadFile(FileHandle, s64, void*, size_t, const ReadOption&)`, the overload with read options and no bytes-read output, which the host did not hook, so the call bound to the SDK's own. That one reads the handle as a `FileAccessor*`, and the host's handle is an image-entry id ([as above](#file-handles-with-low-bits-set-and-backslash-paths)). The general case: [SDK calls that open a system service through sm](#sdk-calls-that-open-a-system-service-through-sm); the import list finds such overloads beforehand ([Listing a game's unhooked imports before they are met](#listing-a-games-unhooked-imports-before-they-are-met)).
+- **Fix:** a hook with the contract of the overload without read options (`h_fs_ReadFileExactOpt` calls `h_fs_ReadFileExact`): the options are ignored and a short read is a failure, as on Horizon, since the caller has no byte count to see it by (`hle_fs.c`; `dm/host/tests/t_fs.c`).
+- **Found on:** SD GUNDAM G GENERATION CROSS RAYS (`010055700CEA8000`, SDK 9.4.1, from [PR #947](https://github.com/seedds/nxnative/pull/947)): the fault was all that stood between the boot and its frame loop; not in the games table yet.
+
 ### C library path checks ask the file system's limits
 
 - **Symptom:** Addressables never start (no `StreamingAssets/aa/settings.json` in the `DM_FS=1` output at all), then a null asset crash (`main+0x31100ec`).
@@ -832,8 +839,15 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** an abort in `nn::hid` at boot, in a Switch 2 game that sets up the Joy-Con's mouse mode.
 - **Cause:** `InitializeNmouse` opens the hid service, and the host has neither the service nor the sensor.
-- **Fix:** `InitializeNmouse`, `GetNmouseHandles` (none) and the button configuration calls are hooked (`hle_hid.c`).
-- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md).
+- **Fix:** `InitializeNmouse`, `GetNmouseHandles` (none), the button configuration calls and the merged pointer's calls (a handle with no states) are hooked (`hle_hid.c`).
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md), [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md).
+
+### GameShare guest displays
+
+- **Symptom:** a crash at boot in `nn::vi` under `nn::streamplay::CreateIndividualDisplays`.
+- **Cause:** a game can create its guest displays at boot, before any session, and the call starts a second display service the host does not have.
+- **Fix:** `CreateIndividualDisplays`, `DestroyIndividualDisplays` and `GetNativeWindowHandle` answer that there is no guest (`hle_misc.c`).
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md).
 
 ### The display's largest buffer
 

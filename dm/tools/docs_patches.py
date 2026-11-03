@@ -156,9 +156,13 @@ def games():
 def build_rows(gs):   # {build ID: [(game, display version, module)]}
     out = {}
     for g in gs:
+        disp = list(g.builds().values())[-1].get('display', '') if g.builds() else ''
         for b in g.builds().values():
             for mod, bid in b.items():
                 if mod != 'display': out.setdefault(bid, []).append((g, b['display'], mod))
+        for row in g.values('nro_builds'):
+            for mod, bid in (w.split('=', 1) for w in row[0].split()):
+                out.setdefault(bid, []).append((g, disp, mod))
     return out
 
 

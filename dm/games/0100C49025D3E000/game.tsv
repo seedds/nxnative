@@ -14,7 +14,8 @@ app_category	public.app-category.sports-games
 # 1.8d.6523 is the update this folder holds; the 1.8d.310c row stays so the host still knows that build's frame regulator. The shader tables are made from
 # 1.8d.6523's files (7,875 shaders), and listed versions must all be present in the NSP folder, so only v458752 is listed.
 build	v393216	1.8d.310c	main=a48c0de3bc353efa0e4d359bde05ef24	sdk=fed212d6e0963706f9f4b16ea5d65879
-build	v458752	1.8d.6523	main=570dc9f1750fa7ea9df20b95b482d039	sdk=fed212d6e0963706f9f4b16ea5d65879	nro0=d924da0d0673a87b550159a839f5f807
+build	v458752	1.8d.6523	main=570dc9f1750fa7ea9df20b95b482d039	sdk=fed212d6e0963706f9f4b16ea5d65879
+nro_builds	nro0=d924da0d0673a87b550159a839f5f807
 package	v458752
 shader_versions	v458752
 

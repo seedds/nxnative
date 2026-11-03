@@ -364,6 +364,13 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --
 # keep this game's build folder elsewhere (used as given, not extended with the title ID; WORK_DIR in Spyder); the IPA then defaults to the folder holding it
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --work-dir /Volumes/Builds/MarioWonder
 
+# a folder of the game's files instead of NSPs (a dump: base/, updates/<version>/, dlc/; scripts/pack_dump.py lists the layout): no prod.keys, and only a game with a profile, as the survey reads NSPs; no icon, and the name comes from the profile, as a dump has no control data
+python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza --platform mac-app
+
+# the same game in one NUP container (https://github.com/a55uka/nup; scripts/pack_nup.py): the .nup file, or a folder that holds one; no prod.keys, and only a game with a profile, like a dump.
+# The RomFS images are written straight from the container (each file checked against its SHA-256); the NACP and icon come from the container when it carries them, else the name comes from the profile as for a dump
+python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nup --platform mac-app
+
 # play the game in Japanese (a code or a name: ja, fr, de, es, zh-Hans, zh-Hant, ko, en-GB, ..., Japanese; English by default)
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys -l ja
 
@@ -685,7 +692,7 @@ Notes on these steps:
 
 ### Building selected Mac shaders
 
-A full shader build can take a day or more for a game with a large map (Pokopia: 131,426 shaders), while play reaches far fewer. `dmsh_build.py` (and `own_compilers.py`, which the NSP script runs) takes shader keys after its two folders and builds only those, each vertex shader with the pixel shaders paired with it; with no keys it builds the whole map. A key is column 4 of the profile's `shader_map.tsv`. A partial library has no stamp (`inputs.tsv`), so the host takes no `c1_full.tsv` or `cb_extent.tsv` beside it and logs a red line for that at each start; the game runs without them.
+A full shader build of a large map takes hours (Pokopia: 131,426 shaders, an estimated 9 hours on an M4 Pro), while play reaches far fewer. `dmsh_build.py` (and `own_compilers.py`, which the NSP script runs) takes shader keys after its two folders and builds only those, each vertex shader with the pixel shaders paired with it; with no keys it builds the whole map. A key is column 4 of the profile's `shader_map.tsv`. A partial library has no stamp (`inputs.tsv`), so the host takes no `c1_full.tsv` or `cb_extent.tsv` beside it and logs a red line for that at each start; the game runs without them.
 
 The Mac app (`--platform mac-app`) and the Mac-only build (`--platform mac`) always build the whole library before the host, so a partial library runs through steps 4 and 5 of [Build by hand (Mac)](#build-by-hand-mac). Stop the NSP script once it reaches the Mac shaders step: the build folder then holds the extracted RomFS, the rewritten modules (`patched_<version>`) and the shader package (`shader/pkg`). From the repository root, for Pokopia, whose profile lists the keys of its Mac playtest (`shader_seen.tsv`, 8,157 keys):
 

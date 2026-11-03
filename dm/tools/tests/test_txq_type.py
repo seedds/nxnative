@@ -23,9 +23,9 @@ SAMPLER_1, SAMPLER_6 = 0x570, 0x598                             # and of separat
 
 
 def base(name):
-    m = re.search(r'Add\("([01x]{64})", InstName\.' + name + r'\s*,', TABLE)
-    assert m, name
-    return int(m[1].replace('x', '0'), 2)
+    match = re.search(r'Add\("([01x]{64})", InstName\.' + name + r'\s*,', TABLE)
+    assert match, f'{name} is not in InstTable.cs'
+    return int(match[1].replace('x', '0'), 2)
 
 
 def ldc(rd, offset):                                            # LDC.32 Rd, c[2][offset], RZ

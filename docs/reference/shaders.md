@@ -1415,6 +1415,15 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game) (resolved).
 - **Check:** `test_nsp_mac.py` (`test_prune_shader_cache`, `test_prune_shader_cache_needs_success_and_the_list`).
 
+### A shader build that keeps its packages in memory runs one worker at a time
+
+- **Symptom:** the NSP script's Mac or iOS shader step for a game with very large shader packages runs at one or two shaders a second whatever `J` is. Its Python process sits at one full core, mostly system time, while few `metal` compiles run. Pokémon Pokopia (4.4 GB of packages, 131,426 shaders): players reported ETAs of 20 to 200 hours ([seedds/nxnative#1036](https://github.com/seedds/nxnative/issues/1036)).
+- **Cause:** `dmsh_build.py` read each package whole and kept its records as separate copies for the whole build: 105,118 of them for Pokopia's 4.25 GB `ps_rdb.bin`, leaving the process at 8.7 GB. Every child process (spirv-cross, `metal`, `metallib`, several per shader) starts with a fork of the builder, which then took 75 ms instead of 3, and Python forks with the GIL held, so the `J` workers queued behind each other. The same bytes in one buffer fork in 3 ms: the cost comes from the many separate allocations.
+- **Fix:** `record_index` scans a package for its record markers through a read-only mapping it closes again, and keeps only the offsets; `rec_of` reads one record with `pread` when the build needs it and keeps none. The outputs are byte-identical.
+- **Measurement:** a cold build of 1,001 Pokopia shaders on an M4 Pro (`J=10`): 528 s before, 240 s after (1.9 to 4.2 shaders a second); the builder's Python went from 100% to about 46% of a core, and 8 to 10 Metal compiles ran at once instead of about 3. At that rate the whole map would take about 9 hours on that Mac (not run). The largest packages of the other local games are 241 MB (Splatoon Raiders) and less, where a fork costs a few milliseconds.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md#found-on-this-game) (resolved).
+- **Check:** `test_shader_toolchain_cache.py` (`test_package_records_are_read_from_the_file_at_their_offsets`).
+
 ### Concurrent warm tasks prepare each shader once
 
 - **Symptom:** startup tasks can prepare the same shader more than once, even though only one object enters the warm dictionary. A measured Tears of the Kingdom startup avoided 320 duplicate preparations; this is not a steady-frame-rate claim.

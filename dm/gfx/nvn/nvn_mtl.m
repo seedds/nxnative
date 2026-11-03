@@ -15641,6 +15641,50 @@ static int present_offscreen_wait(id<MTLTexture> src, const int crop[4], id<MTLT
     if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC))) { MLOG("[RED] offscreen present: the GPU did not finish within 10 s"); return 0; }
     return kind;
 }
+// Opt-in screenshot of the actual drawable, copied in its own present command buffer.
+// Unlike shot(), this neither drains the game queue nor renders a second diagnostic canvas.
+// Keep at most eight readbacks/PNG writes alive, including when a long frame list was requested.
+static atomic_int g_drawable_shot_pending;
+static void drawable_shot_encode(id<MTL4CommandBuffer> cb, MTL4CommitOptions *options, id<MTLTexture> tex, const char *path) {
+    MTLPixelFormat pf = tex.pixelFormat;
+    if (tex.framebufferOnly || (pf != MTLPixelFormatBGRA8Unorm && pf != MTLPixelFormatBGRA8Unorm_sRGB &&
+                              pf != MTLPixelFormatRGBA8Unorm && pf != MTLPixelFormatRGBA8Unorm_sRGB)) {
+        MLOG("[RED] drawable screenshot: unreadable format %lu", (unsigned long)pf); return;
+    }
+    if (atomic_fetch_add(&g_drawable_shot_pending, 1) >= 8) {
+        atomic_fetch_sub(&g_drawable_shot_pending, 1); MLOG("[RED] drawable screenshot backlog: dropping %s", path); return;
+    }
+    NSUInteger w = tex.width, h = tex.height, row = w * 4;
+    id<MTLBuffer> buf = [g_dev newBufferWithLength:row * h options:MTLResourceStorageModeShared];
+    id<MTL4ComputeCommandEncoder> en = buf ? [cb computeCommandEncoder] : nil;
+    if (!en) { atomic_fetch_sub(&g_drawable_shot_pending, 1); MLOG("[RED] drawable screenshot: allocation or encoder failed"); return; }
+    res_add(buf); res_commit();
+    [en barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()];
+    [en copyFromTexture:tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1)
+              toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:row * h];
+    m4_end(en);
+    NSString *name = [NSString stringWithUTF8String:path]; uint64_t frame = g_present_n;
+    [options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+        res_remove(buf);
+        if (feedback.error) { MLOG("[RED] drawable screenshot GPU failure: %s", feedback.error.description.UTF8String); atomic_fetch_sub(&g_drawable_shot_pending, 1); return; }
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            @autoreleasepool {
+                int bgra = pf == MTLPixelFormatBGRA8Unorm || pf == MTLPixelFormatBGRA8Unorm_sRGB;
+                CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+                CGBitmapInfo bi = bgra ? (kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little) : (CGBitmapInfo)kCGImageAlphaNoneSkipLast;
+                CGContextRef ctx = CGBitmapContextCreate(buf.contents, w, h, 8, row, cs, bi);
+                CGImageRef img = ctx ? CGBitmapContextCreateImage(ctx) : NULL;
+                NSURL *url = [NSURL fileURLWithPath:name];
+                CGImageDestinationRef dst = img ? CGImageDestinationCreateWithURL((__bridge CFURLRef)url, (__bridge CFStringRef)UTTypePNG.identifier, 1, NULL) : NULL;
+                int ok = 0; if (dst) { CGImageDestinationAddImage(dst, img, NULL); ok = CGImageDestinationFinalize(dst); CFRelease(dst); }
+                CGImageRelease(img); CGContextRelease(ctx); CGColorSpaceRelease(cs);
+                MLOG("%sdrawable screenshot frame %llu %lux%lu format %lu → %s %s", ok ? "" : "[RED] ", (unsigned long long)frame,
+                     (unsigned long)w, (unsigned long)h, (unsigned long)pf, name.UTF8String, ok ? "ok" : "failed");
+                atomic_fetch_sub(&g_drawable_shot_pending, 1);
+            }
+        });
+    }];
+}
 // The present command buffer's GPU time (its commit feedback: from its first to its last command, the MetalFX scaler and the present pass), every 600 presents as p50 / p95, apart
 // for presents through MetalFX and through the bilinear pass. Under g_pq_mu (the feedback handler)
 static void present_gpu_note(double s, int fx) {
@@ -15704,9 +15748,17 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         nshot = 0; const char *e = getenv("DM_NVN_SHOT"), *c = e ? strchr(e, ':') : NULL;
         if (c) { shot_path = c + 1; for (const char *q = e; q < c && nshot < 4096; q = strchr(q, ',') ? strchr(q, ',') + 1 : c) shots[nshot++] = atol(q); }
     }
-    for (int i = 0; i < nshot; i++) if ((long)g_present_n == shots[i]) { char path[1024]; snprintf(path, sizeof path, shot_path, (int)g_present_n); mtl_finish_gpu(); shot(src, path, 1, crop); }
+    static int drawable_shots = -1;
+    if (drawable_shots < 0) { const char *v = getenv("DM_NVN_SHOT_DRAWABLE"); drawable_shots = v && !strcmp(v, "1"); }
+    if (!drawable_shots) for (int i = 0; i < nshot; i++) if ((long)g_present_n == shots[i]) { char path[1024]; snprintf(path, sizeof path, shot_path, (int)g_present_n); mtl_finish_gpu(); shot(src, path, 1, crop); }
     pthread_mutex_lock(&g_shotq_mu);
-    for (int i = 0; i < g_nshotq;) if (g_present_n >= g_shotq[i].frame) { mtl_finish_gpu(); shot(src, g_shotq[i].path, 1, crop); g_shotq[i] = g_shotq[--g_nshotq]; } else i++;
+    if (!drawable_shots) {
+        for (int i = 0; i < g_nshotq;) {
+            if (g_present_n >= g_shotq[i].frame) {
+                mtl_finish_gpu(); shot(src, g_shotq[i].path, 1, crop); g_shotq[i] = g_shotq[--g_nshotq];
+            } else i++;
+        }
+    }
     pthread_mutex_unlock(&g_shotq_mu);
 
     if (atomic_load(&g_gpu_lost)) return 0;   // the display command buffer would be ignored too: take no drawable from the screen the front end is about to close
@@ -15722,6 +15774,19 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     id<CAMetalDrawable> dr = supplied ? supplied : [layer nextDrawable];
     if (!supplied) g_drawable_ns += now_ns() - dt0;
     if (!dr) return 0;
+    // Report the actual display texture, not DM_NVN_SHOT_OUT's diagnostic canvas.
+    // Source/crop changes matter too: a game can keep its window size while changing its valid picture.
+    static NSUInteger display_sizes[4]; static int display_crop[4];
+    NSUInteger sizes[4] = {src.width, src.height, dr.texture.width, dr.texture.height};
+    NSUInteger display_rect[4];
+    if ((memcmp(display_sizes, sizes, sizeof sizes) || memcmp(display_crop, crop, sizeof display_crop)) && present_crop_rect(src, crop, display_rect)) {
+        memcpy(display_sizes, sizes, sizeof sizes); memcpy(display_crop, crop, sizeof display_crop);
+        MTLViewport vp = present_viewport(display_rect[2], display_rect[3], dr.texture.width, dr.texture.height);
+        MLOG("present dimensions: source %lux%lu, crop %d,%d %dx%d, drawable %lux%lu format %lu, layer %.3fx%.3f at scale %.3f, viewport %.0f,%.0f %.0fx%.0f",
+             (unsigned long)src.width, (unsigned long)src.height, crop[0], crop[1], crop[2], crop[3],
+             (unsigned long)dr.texture.width, (unsigned long)dr.texture.height, (unsigned long)dr.texture.pixelFormat,
+             layer.drawableSize.width, layer.drawableSize.height, layer.contentsScale, vp.originX, vp.originY, vp.width, vp.height);
+    }
     int alloc_i = (int)(ticket % 3);
     if (g_present_alloc_fence[alloc_i]) {
         pthread_mutex_lock(&g_pq_mu);
@@ -15735,8 +15800,20 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     int kind = present_encode_m4(cb, src, dr.texture, crop, g_present_uv[alloc_i], &g_fx_present);
     if (!kind) { [cb endCommandBuffer]; [g_q4 signalDrawable:dr]; return 0; }
     int fx_kind = kind == PRESENT_METALFX;
-    [cb endCommandBuffer];
     MTL4CommitOptions *o = [MTL4CommitOptions new];
+    if (drawable_shots) {
+        for (int i = 0; i < nshot; i++) if ((long)g_present_n == shots[i]) {
+            char path[1024]; snprintf(path, sizeof path, shot_path, (int)g_present_n); drawable_shot_encode(cb, o, dr.texture, path);
+        }
+        pthread_mutex_lock(&g_shotq_mu);
+        for (int i = 0; i < g_nshotq;) {
+            if (g_present_n >= g_shotq[i].frame) {
+                drawable_shot_encode(cb, o, dr.texture, g_shotq[i].path); g_shotq[i] = g_shotq[--g_nshotq];
+            } else i++;
+        }
+        pthread_mutex_unlock(&g_shotq_mu);
+    }
+    [cb endCommandBuffer];
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
         if (f.error) { MLOG("[RED] display command buffer error: %s", f.error.description.UTF8String); gpu_lost_check(f.error, "display"); }
         pthread_mutex_lock(&g_pq_mu); if (ticket > g_pq_done) g_pq_done = ticket; if (ticket > g_present_alloc_done[alloc_i]) g_present_alloc_done[alloc_i] = ticket; g_pq_inflight--; pthread_cond_broadcast(&g_pq_cv);

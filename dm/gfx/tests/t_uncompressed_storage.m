@@ -20,6 +20,7 @@ static uint32_t texel(id<MTLTexture> image){   // the centre texel, as RGBA8
         ps=[g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"rd"] error:&error];queue=[g_dev newCommandQueue];}
     CHECK("probe compiles",ps!=nil); if(!ps||!image) return 0xdeadbeef;
     id<MTLBuffer> r=[g_dev newBufferWithLength:4 options:MTLResourceStorageModeShared];
+    if (!r) return 0xdeadbeef;
     id<MTLCommandBuffer> cb=[queue commandBuffer];id<MTLComputeCommandEncoder> ce=[cb computeCommandEncoder];
     [ce setComputePipelineState:ps];[ce setTexture:image atIndex:0];[ce setBuffer:r offset:0 atIndex:0];[ce dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];[ce endEncoding];[cb commit];[cb waitUntilCompleted];
     return *(uint32_t *)r.contents;

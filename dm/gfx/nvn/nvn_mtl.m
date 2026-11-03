@@ -328,12 +328,12 @@ static void want_note(want_list *w, const char *key) {
     if (!w->loaded) {
         FILE *f = fopen(path, "r"); char line[64];
         if (f) { while (fgets(line, sizeof line, f)) { char *e = strpbrk(line, "\r\n"); if (e) *e = 0; if (strlen(line) != 16) continue;
-                if (w->n == w->cap) { w->cap = w->cap ? w->cap * 2 : 64; w->keys = realloc(w->keys, w->cap * sizeof *w->keys); }
+                if (w->n == w->cap) { size_t ncap = w->cap ? w->cap * 2 : 64; void *nk = realloc(w->keys, ncap * sizeof *w->keys); if (!nk) break; w->keys = (char **)nk; w->cap = ncap; }
                 w->keys[w->n++] = strdup(line); } fclose(f); }
         w->loaded = 1;
     }
     for (size_t i = 0; i < w->n; i++) if (!strcmp(w->keys[i], k16)) { pthread_mutex_unlock(&w->mu); return; }
-    if (w->n == w->cap) { w->cap = w->cap ? w->cap * 2 : 64; w->keys = realloc(w->keys, w->cap * sizeof *w->keys); }
+    if (w->n == w->cap) { size_t ncap = w->cap ? w->cap * 2 : 64; void *nk = realloc(w->keys, ncap * sizeof *w->keys); if (!nk) { pthread_mutex_unlock(&w->mu); return; } w->keys = (char **)nk; w->cap = ncap; }
     w->keys[w->n++] = strdup(k16);
     FILE *f = fopen(path, "a"); if (f) { fprintf(f, "%s\n", k16); fclose(f); }
     pthread_mutex_unlock(&w->mu);
@@ -545,7 +545,7 @@ void mtl_pool_add(const void *mem, uint64_t size) {
         MDIE("memory pool %p+%#llx: failed to create the zero-copy buffer over %#lx..%#lx", mem, (unsigned long long)size, (unsigned long)a, (unsigned long)b);
     }
     pthread_mutex_lock(&g_mu);
-    if (g_npool == g_cap) { g_cap = g_cap ? g_cap * 2 : 64; g_pools = realloc(g_pools, g_cap * sizeof *g_pools); }
+    if (g_npool == g_cap) { int ncap = g_cap ? g_cap * 2 : 64; void *nk = realloc(g_pools, (size_t)ncap * sizeof *g_pools); if (!nk) { pthread_mutex_unlock(&g_mu); MDIE("pool array realloc failed"); } g_pools = (pool_ent *)nk; g_cap = ncap; }
     g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1);   // the address index and the per-thread caches are invalid (pool_find, pc_get)
     g_pools[g_npool++] = (pool_ent){lo, hi, a, buf, buf.gpuAddress, mem, 0, clock_gettime_nsec_np(CLOCK_MONOTONIC)};   // not in the residency set yet: put in the first time it is addressed (pool_res)
     g_pool_adds++;
@@ -575,7 +575,7 @@ static int *g_pidx; static int g_pidx_cap;
 static int pidx_cmp(const void *a, const void *b) { uintptr_t x = g_pools[*(const int *)a].lo, y = g_pools[*(const int *)b].lo; return x < y ? -1 : x > y; }
 static void pidx_sort(void) {
     if (g_pidx_ok) return;
-    if (g_pidx_cap < g_npool) { g_pidx_cap = g_npool * 2; g_pidx = realloc(g_pidx, (size_t)g_pidx_cap * sizeof *g_pidx); }
+    if (g_pidx_cap < g_npool) { int ncap = g_npool * 2; void *nk = realloc(g_pidx, (size_t)ncap * sizeof *g_pidx); if (!nk) MDIE("pool index realloc failed"); g_pidx = (int *)nk; g_pidx_cap = ncap; }
     for (int i = 0; i < g_npool; i++) g_pidx[i] = i;
     qsort(g_pidx, (size_t)g_npool, sizeof *g_pidx, pidx_cmp); g_pidx_ok = 1;
 }
@@ -1356,7 +1356,7 @@ void mtl_sub_fill(uint64_t dst, uint64_t n, uint32_t value) {
 }
 
 static void post(post_op o) {
-    if (g_npost == g_postcap) { g_postcap = g_postcap ? g_postcap * 2 : 64; g_post = realloc(g_post, g_postcap * sizeof *g_post); }
+    if (g_npost == g_postcap) { int ncap = g_postcap ? g_postcap * 2 : 64; void *nk = realloc(g_post, (size_t)ncap * sizeof *g_post); if (!nk) MDIE("post realloc failed"); g_post = (post_op *)nk; g_postcap = ncap; }
     g_post[g_npost++] = o;
 }
 void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v) { post((post_op){1, val, mode, v, 0, 0, NULL}); }
@@ -2291,7 +2291,7 @@ static void up_blit_add_at(id<MTLBuffer> src, size_t off, size_t row, size_t ima
                            id<MTLTexture> dst, NSUInteger slice, NSUInteger level, MTLOrigin origin) {
     if (g_nup_blits == g_up_blitcap) {
         g_up_blitcap = g_up_blitcap ? g_up_blitcap * 2 : 256;
-        g_up_blits = realloc(g_up_blits, g_up_blitcap * sizeof *g_up_blits);
+        { void *nk = realloc(g_up_blits, (size_t)g_up_blitcap * sizeof *g_up_blits); if (!nk) MDIE("up_blits realloc failed"); g_up_blits = (up_blit *)nk; }
     }
     g_up_blits[g_nup_blits++] = (up_blit){src, off, row, image, size, dst, slice, level, origin};
 }
@@ -2769,7 +2769,7 @@ static uint32_t sp_tile_alloc_(void) {   // → (chunk << SP_IDX_BITS | tile) + 
         }
         if (!heap) { RED_ONCE(142, "sparse textures: failed to make a %u MB placement heap (%d so far): tiles stay unmapped", SP_CHUNK >> 20, g_nsp_chunks); return 0; }
         res_add(heap);
-        g_sp_chunks = realloc(g_sp_chunks, (size_t)(g_nsp_chunks + 1) * sizeof *g_sp_chunks);
+        { void *nch = realloc(g_sp_chunks, (size_t)(g_nsp_chunks + 1) * sizeof *g_sp_chunks); if (!nch) { RED_ONCE(142, "sparse textures: failed to grow chunks"); return 0; } g_sp_chunks = (sp_chunk *)nch; }
         sp_chunk *k = &g_sp_chunks[g_nsp_chunks++]; *k = (sp_chunk){heap, (uint32_t)(SP_CHUNK / g_sp_tile_bytes), 0, 0, NULL};
         k->nfree = k->ntiles; k->bits = calloc((k->ntiles + 63) / 64, 8);
         MLOG("sparse textures: placement heap %d made (%u tiles)", g_nsp_chunks, k->ntiles);
@@ -2861,7 +2861,7 @@ static void sp_sync(NvPkg *pk, const tex_t *t, int all) {
             uint32_t sl = u / s->uper, r = u % s->uper, l = s->mtail, mx = 0, my = 0;
             for (uint32_t k = 0; k < s->mtail; k++) if (r >= s->ubase[k] && r < s->ubase[k] + s->cols[k] * s->rows[k]) { l = k; mx = (r - s->ubase[k]) % s->cols[k]; my = (r - s->ubase[k]) / s->cols[k]; break; }
             uint32_t h = 0; if (want[u]) { h = sp_tile_alloc(); if (!h) continue; }
-            if (nops == cops) { cops = cops ? 2 * cops : 1024; ops = realloc(ops, cops * sizeof *ops); opc = realloc(opc, cops * sizeof *opc); if (!ops || !opc) MDIE("sparse mapping operations allocation failed"); }
+            if (nops == cops) { uint32_t ncops = cops ? cops * 2 : 1024; void *nops_arr = realloc(ops, (size_t)ncops * sizeof *ops); void *nopc_arr = realloc(opc, (size_t)ncops * sizeof *opc); if (!nops_arr || !nopc_arr) { free(nops_arr); free(nopc_arr); MDIE("sparse mapping operations allocation failed"); } ops = (MTL4UpdateSparseTextureMappingOperation *)nops_arr; opc = (int *)nopc_arr; cops = ncops; }
             ops[nops] = (MTL4UpdateSparseTextureMappingOperation){want[u] ? MTLSparseTextureMappingModeMap : MTLSparseTextureMappingModeUnmap, MTLRegionMake3D(mx, my, 0, 1, 1, 1), l, sl, h ? (h - 1) & ((1u << SP_IDX_BITS) - 1) : 0};
             opc[nops++] = h ? (int)((h - 1) >> SP_IDX_BITS) : -1;
             if (s->map[u]) sp_tile_free(s->map[u]);
@@ -3351,7 +3351,7 @@ static void pg_sub_begin(uint64_t fence) {   // This submission uses block fence
 static pg_pass *pg_new(int kind, int nslot) {
     if (!pg_on() || g_pg_used + nslot > PG_SLOTS) return NULL;
     uint64_t f = atomic_load(&g_cur_frame); if (f != g_pg_frame) { g_pg_frame = f; g_pg_idx = 0; }
-    if (g_pg_np == g_pg_cap) { g_pg_cap = g_pg_cap ? g_pg_cap * 2 : 128; g_pg_pass = realloc(g_pg_pass, g_pg_cap * sizeof *g_pg_pass); }
+    if (g_pg_np == g_pg_cap) { int ncap = g_pg_cap ? g_pg_cap * 2 : 128; void *nk = realloc(g_pg_pass, (size_t)ncap * sizeof *g_pg_pass); if (!nk) MDIE("pg realloc failed"); g_pg_pass = (pg_pass *)nk; g_pg_cap = ncap; }
     pg_pass *p = &g_pg_pass[g_pg_np++]; memset(p, 0, sizeof *p);
     p->frame = f; p->pass = g_stat_pass; p->idx = g_pg_idx++; p->kind = kind; p->slot = (int)g_pg_used; p->draws = -(int)g_stat_draw;
     g_pg_used += nslot;
@@ -4754,7 +4754,7 @@ void mtl_reg_tex_gone(int tid) {
 void mtl_reg_tex(int tid, const tex_t *t, const view_t *v) {
     int id_ = tid; if (id_ < 0) return;
     os_unfair_lock_lock(&g_rmu);
-    if (id_ >= g_ntreg) { int n = id_ + 1024; g_treg = realloc(g_treg, n * sizeof *g_treg); memset(g_treg + g_ntreg, 0, (n - g_ntreg) * sizeof *g_treg); g_ntreg = n; }
+    if (id_ >= g_ntreg) { int n = id_ + 1024; void *nk = realloc(g_treg, (size_t)n * sizeof *g_treg); if (!nk) MDIE("treg realloc failed"); g_treg = (treg_t *)nk; memset(g_treg + g_ntreg, 0, (size_t)(n - g_ntreg) * sizeof *g_treg); g_ntreg = n; }
     // Registering what the ID already holds changes nothing: its view and the registration generation stay (the lookup still checks the base texture). About 1 in 6 of the
     // registrations KTGL (Age of Calamity) makes before every bind repeat the ID's texture; the rest cycle textures through its IDs (the view cache below, vc_get)
     treg_t *rr = &g_treg[id_];
@@ -4799,8 +4799,8 @@ void mtl_reg_image(int tid, const tex_t *t, const view_t *v) {
 void mtl_reg_samp(int sid, const samp_par *sp) {
     int id_ = sid; if (id_ < 0) return;
     os_unfair_lock_lock(&g_rmu);
-    if (id_ >= g_nsreg) { int n = id_ + 256; g_sreg = realloc(g_sreg, n * sizeof *g_sreg); g_sreg_ok = realloc(g_sreg_ok, n); g_sview = realloc(g_sview, n * sizeof *g_sview); g_srid = realloc(g_srid, n * sizeof *g_srid);
-        g_sview_w = realloc(g_sview_w, n * sizeof *g_sview_w); g_srid_w = realloc(g_srid_w, n * sizeof *g_srid_w); g_sbk = realloc(g_sbk, n * sizeof *g_sbk);
+    if (id_ >= g_nsreg) { int n = id_ + 256; void *nk1 = realloc(g_sreg, (size_t)n * sizeof *g_sreg); void *nk2 = realloc(g_sreg_ok, (size_t)n); void *nk3 = realloc(g_sview, (size_t)n * sizeof *g_sview); void *nk4 = realloc(g_srid, (size_t)n * sizeof *g_srid); void *nk5 = realloc(g_sview_w, (size_t)n * sizeof *g_sview_w); void *nk6 = realloc(g_srid_w, (size_t)n * sizeof *g_srid_w); void *nk7 = realloc(g_sbk, (size_t)n * sizeof *g_sbk); if (!nk1 || !nk2 || !nk3 || !nk4 || !nk5 || !nk6 || !nk7) { free(nk1); free(nk2); free(nk3); free(nk4); free(nk5); free(nk6); free(nk7); MDIE("sreg realloc failed"); }
+        g_sreg = (samp_par *)nk1; g_sreg_ok = (uint8_t *)nk2; g_sview = (void **)nk3; g_srid = (uint64_t *)nk4; g_sview_w = (uint16_t *)nk5; g_srid_w = (int *)nk6; g_sbk = (uint32_t *)nk7;
         memset(g_sreg_ok + g_nsreg, 0, n - g_nsreg); memset(g_sview + g_nsreg, 0, (n - g_nsreg) * sizeof *g_sview); memset(g_srid + g_nsreg, 0, (n - g_nsreg) * sizeof *g_srid);
         memset(g_sview_w + g_nsreg, 0, (n - g_nsreg) * sizeof *g_sview_w); memset(g_srid_w + g_nsreg, 0, (n - g_nsreg) * sizeof *g_srid_w); g_nsreg = n; }
     if (g_sview[id_]) { CFRelease(g_sview[id_]); g_sview[id_] = NULL; g_srid[id_] = 0; }
@@ -4917,7 +4917,7 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
     if (rp->retired && rp->transient_sub != g_sub_serial) {
         if (g_ntreg_transient == g_treg_transient_cap) {
             g_treg_transient_cap = g_treg_transient_cap ? g_treg_transient_cap * 2 : 64;
-            g_treg_transient = realloc(g_treg_transient, g_treg_transient_cap * sizeof *g_treg_transient);
+            { void *nk = realloc(g_treg_transient, (size_t)g_treg_transient_cap * sizeof *g_treg_transient); if (!nk) MDIE("treg_transient realloc failed"); g_treg_transient = (int *)nk; }
         }
         g_treg_transient[g_ntreg_transient++] = tid; rp->transient_sub = g_sub_serial;
     }
@@ -8570,14 +8570,14 @@ static const uint8_t **g_sdx_op; static uint32_t g_sdx_nop, g_sdx_opcap;
 static uint32_t g_exec_seq;   // Sequence number of the current operation during replay
 static uint64_t g_pp_slot[6][NTEX + 32]; static const prog_t *g_pp_prog, *g_pp_cprog; static const p_set_rt *g_pp_rt; static uint32_t g_pp_rtseq;   // g_pp_slot: textures, then images
 static uint32_t *g_rtx_seq, *g_drx_seq; static uint32_t g_rtx_n, g_rtx_cap, g_drx_n, g_drx_cap;   // This submit's SET_RT / draw sequence number tables (used by the pre-screen of the readable tile merge)
-static void seq_push(uint32_t **v, uint32_t *n, uint32_t *cap, uint32_t x) { if (*n == *cap) { *cap = *cap ? *cap * 2 : 1024; *v = realloc(*v, *cap * sizeof **v); } (*v)[(*n)++] = x; }
-static void sdx_ev_add(sdx_ev e) { if (sdx_bucket(e.ser, 0) < 0) return; if (g_sdx_n == g_sdx_cap) { g_sdx_cap = g_sdx_cap ? g_sdx_cap * 2 : 4096; g_sdx = realloc(g_sdx, g_sdx_cap * sizeof *g_sdx); g_sdx_tmp = realloc(g_sdx_tmp, g_sdx_cap * sizeof *g_sdx); } g_sdx[g_sdx_n++] = e; }
+static void seq_push(uint32_t **v, uint32_t *n, uint32_t *cap, uint32_t x) { if (*n == *cap) { uint32_t ncap = *cap ? *cap * 2 : 1024; void *nk = realloc(*v, (size_t)ncap * sizeof **v); if (!nk) MDIE("seq_push realloc failed"); *v = (uint32_t *)nk; *cap = ncap; } (*v)[(*n)++] = x; }
+static void sdx_ev_add(sdx_ev e) { if (sdx_bucket(e.ser, 0) < 0) return; if (g_sdx_n == g_sdx_cap) { uint32_t ncap = g_sdx_cap ? g_sdx_cap * 2 : 4096; void *nk1 = realloc(g_sdx, (size_t)ncap * sizeof *g_sdx); void *nk2 = realloc(g_sdx_tmp, (size_t)ncap * sizeof *g_sdx_tmp); if (!nk1 || !nk2) { free(nk1); free(nk2); MDIE("sdx_ev_add realloc failed"); } g_sdx = (sdx_ev *)nk1; g_sdx_tmp = (sdx_ev *)nk2; g_sdx_cap = ncap; } g_sdx[g_sdx_n++] = e; }
 static void sdx_lvsl(const view_t *v, int hv, uint16_t *lv, uint16_t *sl) { *lv = (uint16_t)(hv && v->set_levels ? v->base_level : 0); *sl = (uint16_t)(hv && v->set_layers ? v->min_layer : 0); }
 static void sdx_walk(const uint8_t *p, int depth) {
     if (depth > 64) { g_sdx_ok = 0; return; }
     for (uint32_t guard = 0; guard < 4000000 && p && g_sdx_ok; guard++) {
         op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
-        if (g_sdx_nop == g_sdx_opcap) { g_sdx_opcap = g_sdx_opcap ? g_sdx_opcap * 2 : 16384; g_sdx_op = realloc(g_sdx_op, g_sdx_opcap * sizeof *g_sdx_op); }
+        if (g_sdx_nop == g_sdx_opcap) { uint32_t nocap = g_sdx_opcap ? g_sdx_opcap * 2 : 16384; void *nop = realloc(g_sdx_op, (size_t)nocap * sizeof *g_sdx_op); if (!nop) { g_sdx_ok = 0; return; } g_sdx_op = (const uint8_t **)nop; g_sdx_opcap = nocap; }
         uint32_t seq = g_sdx_nop; g_sdx_op[g_sdx_nop++] = p;
         switch (h.op) {
             case OP_END: return;
@@ -10357,7 +10357,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
             if (g_vis_cur < 0 || g_vis_cur_pass != g_pass.serial) {
                 if (g_vis_n >= VIS_SLOTS) RED_ONCE(35, "visibility slots exhausted");
                 else { g_vis_cur = (int)g_vis_n++; g_vis_cur_pass = g_pass.serial;
-                    if (g_nvs == g_vscap) { g_vscap = g_vscap ? g_vscap * 2 : 64; g_vs = realloc(g_vs, g_vscap * sizeof *g_vs); }
+                    if (g_nvs == g_vscap) { int ncap = g_vscap ? g_vscap * 2 : 64; void *nk = realloc(g_vs, (size_t)ncap * sizeof *g_vs); if (!nk) MDIE("vs realloc failed"); g_vs = (vis_slot *)nk; g_vscap = ncap; }
                     g_vs[g_nvs++] = (vis_slot){(void *)CFBridgingRetain(g_vis), (uint32_t)g_vis_cur}; }
             }
             if (g_vis_cur >= 0 && g_enc_vis != g_vis_cur + 1) { enc_r_visibility(en, MTLVisibilityResultModeCounting, (NSUInteger)g_vis_cur * 8); g_enc_vis = g_vis_cur + 1; }

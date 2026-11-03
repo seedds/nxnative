@@ -25,6 +25,8 @@ static float ms_want(int fps) { return 1000.0f / (float)fps - (fps >= 60 ? MS_MA
 // every 11th frame missed its display-link tick and took 24.6 ms (57.6 fps, GPU 8 ms); 1000 / (16.67 - 0.5) = 61.9 lets the host's present pacing set the pace.
 // The reported rate (the second copy) stays the exact target; at 120 the wait rate is 127.66 fps.
 static double rate_want(int fps) { return 1000.0 / (double)ms_want(fps); }
+// The fps_max mechanism, this margin and the 120 Hz link selection follow the FC 26 120 fps patch by imnotsharingmyname (MIT):
+// https://github.com/imnotsharingmyname/nxnative-fc26-120fps. This branch adds 100 fps and the FC 27 regulator row.
 typedef struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; uint32_t scale; } lock_t;
 static const lock_t k_locks[] = {
     // Pokemon Brilliant Diamond 1.3.0: Unity's Application.targetFrameRate. Its icall registration (main+0xe34e60) resolves to main+0xdc8e70 -> +0x5fa640,

@@ -125,6 +125,7 @@ def header(g):
     if pi not in ('game', 'display'): sys.exit(f'{g.id}: present_interval must be game or display: {pi}')
     ft = g.get('fps_target', '0')   # frame rate cap of the rewriter's frame step (FRAME_STEP in the profile's patches.py: Tears of the Kingdom 1.4.3, Breath of the Wild 1.9.0) or of the engine's own frame limit (hle_fpslock.c): 0 = the game's own step, 30 / 60
     if ft not in ('0', '30', '60'): sys.exit(f'{g.id}: fps_target must be 0, 30 or 60: {ft}')
+    # fps_max follows the FC 26 120 fps patch by imnotsharingmyname (MIT): https://github.com/imnotsharingmyname/nxnative-fc26-120fps
     fm = g.get('fps_max', '60')   # the highest fps_target the player may choose (the launcher's Frame rate): 120 only for a profile whose limits were checked at 120 (hle_fpslock.c)
     if fm not in ('60', '120'): sys.exit(f'{g.id}: fps_max must be 60 or 120: {fm}')
     if fm == '120' and ft == '0': sys.exit(f'{g.id}: fps_max 120 needs an fps_target the host sets')

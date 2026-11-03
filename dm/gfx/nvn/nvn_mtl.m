@@ -413,6 +413,7 @@ static void udc_selftest(void) {
 void mtl_init(void) {
     if (g_dev) return;
     const char *vbc = getenv("DM_NVN_VBUF_CACHE"); g_vbuf_cache = !(vbc && !strcmp(vbc, "0"));
+    // The 120 Hz link selection follows the FC 26 120 fps patch by imnotsharingmyname (MIT); 100 fps uses the link's own rate (mtl_link_rate).
     const char *link = getenv("DM_PRESENT_LINK"), *ft = getenv("DM_FPS_TARGET");
     g_dm_present_link = link ? atoi(link) : (ft ? atoi(ft) : DM_GAME_FPS_TARGET) > 60 ? 2 : 1; if (g_dm_present_link < 0 || g_dm_present_link > 2) g_dm_present_link = 1;   // Default 1 (real-device same-process alternation: when load exceeds one display-link period, long frames 15% → 0 and frame intervals even out; no difference from 0 at a steady 60); DM_PRESENT_LINK=0 turns it off   // 1 = present on every tick of a 60 Hz display link; 2 = 120 Hz display link, the game presents a frame every other display-link tick (when behind, it can present on the next 8.33 ms display-link tick)
     const char *latency = getenv("DM_PRESENT_LATENCY");

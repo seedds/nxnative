@@ -1785,6 +1785,7 @@ static void present_cfg(const win_t *o) {
     if (g_hz >= 0) return;
     // The interval mode comes from the game profile (present_interval, default game): whether frames follow the present interval the game sets depends on whether the game's logic counts frames, which differs per game. Environment variables override it, and can override the fixed 60 Hz.
     int scr = mtl_display_hz();
+    // The 120 Hz selection follows the FC 26 120 fps patch by imnotsharingmyname (MIT); this version also handles 100 fps.
     const char *e = getenv("DM_PRESENT_HZ"), *ft = getenv("DM_FPS_TARGET");
     g_hz = e ? atoi(e) : (ft ? atoi(ft) : DM_GAME_FPS_TARGET) > 60 ? (ft ? atoi(ft) : DM_GAME_FPS_TARGET) : 60;   // a target above 60 presents on the 120 Hz link, one frame per tick at 120 and fractional ticks at 100 (nvn_mtl.m mtl_init)
     if (!g_hz) LOG("[nvn] [WARNING] DM_PRESENT_HZ=0: frame rate uncapped, frame pacing unlike the device, UI logic may drift (for profiling only, not for verdicts / cross-checks)");

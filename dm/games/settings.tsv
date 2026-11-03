@@ -14,6 +14,7 @@
 #   label, note  the setting's name and the line under it (may be empty; only for a setting with a cost: latency, memory, heat)
 #   meta      optional, key=value pairs separated by ; (settings.py META lists the keys; docs/frontends.md, The settings list, describes them):
 #             level=basic  a setting a front end shows first;  needs=<VAR>=<value>  a sub-setting, drawn only while the row that sets <VAR> has that value
+# The 120 fps row follows the FC 26 120 fps patch by imnotsharingmyname (MIT); the 100 fps choice is added here.
 DM_FPS_TARGET	choice	30=30 fps,60=60 fps	DM_GAME_FPS_TARGET	DM_GAME_FPS_CHOICES==60	Game	Frame rate		level=basic
 DM_FPS_TARGET	choice	30=30 fps,60=60 fps,100=100 fps,120=120 fps	DM_GAME_FPS_TARGET	DM_GAME_FPS_CHOICES==120	Game	Frame rate	100 and 120 fps need a display that can show them and use more power.	level=basic
 DM_DISPLAY_SIZE	choice	1280x720=720p,1920x1080=1080p,2560x1440=1440p,3840x2160=4K	DM_GAME_DISPLAY_SIZE	DM_GAME_DISPLAY_SIZE!=	Game	Resolution	4K does not hold 60 fps in a match on this Mac; 720p and 1080p give the most headroom.	level=basic

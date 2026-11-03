@@ -73,6 +73,7 @@ General host changes first needed here; each applies to every game:
 - **16 output slots for video movie decoders** (`MD_NOUT_VIDEO` in `hle_movie.c`): [Video output slots: how far the extractor gets ahead](../../../docs/reference/movies.md#video-output-slots-how-far-the-extractor-gets-ahead).
 - **Functions with function constants specialized by the pipeline** (`fn_spec`): the HUD's `Compiled 2 shaders … Consider adopting MTL4Compiler` during play on the iPhone with Metal 4 pipelines on: [Functions with function constants specialized by the pipeline, not the library](../../../docs/reference/shaders.md#functions-with-function-constants-specialized-by-the-pipeline-not-the-library).
 - [The alpha test through a library of its own](../../../docs/reference/rendering.md#the-alpha-test-through-a-library-of-its-own): the island map's corruption (issue #73) improved with an alpha test in a downstream runtime (PR #430).
+- **The game's view in the shape the game presents** (`front_picture_shape`; with `DM_SCREEN_ASPECT=1.43` the 1920x1344 picture was fitted into a 16:9 view on the phone): [The picture laid out in the shape the game presents](../../../docs/reference/rendering.md#the-picture-laid-out-in-the-shape-the-game-presents).
 
 ## Open
 

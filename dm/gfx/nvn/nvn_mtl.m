@@ -12284,6 +12284,11 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     PD("X ser=%llu", t->serial);
     id<MTLTexture> src = tex_mtl(t);
     if (!src) { RED_ONCE(8, "present texture could not get an MTLTexture"); return 0; }
+    // The picture's shape for the front end's layout (front.h front_picture_shape): reported when its width / height changes by more than 0.1 %, not on a size change of the same
+    // shape (1280x720 handheld, 1920x1080 docked)
+    { static double last; NSUInteger r[4];
+      if (present_crop_rect(src, crop, r) && r[2] && r[3]) { double a = (double)r[2] / r[3];
+          if (fabs(a - last) > last * 0.001) { last = a; MLOG("present: picture shape %lux%lu (%.3f:1) for the front end's layout", (unsigned long)r[2], (unsigned long)r[3], a); front_picture_shape((int)r[2], (int)r[3]); } } }
     // A texture made on first resolution joins the residency set (res_add), which a submission commits; a window texture presented before any submission has used it was still
     // outside the committed set when the display command buffer sampled it. Super Smash Bros. Ultimate presents its window texture in its first frames before drawing into it:
     // the display queue page-faulted (kIOGPUCommandBufferCallbackErrorPageFault) and macOS then ignored every later command buffer of the process, so the window stayed pink
@@ -12489,6 +12494,7 @@ static int link_on(void) { return g_dm_present_link && !atomic_load(&g_rescue_mo
 // In fullscreen the Mac front end switches such a screen to a rate that is a multiple where it has one (front_screen_match), and the range is set again for it (link_sync)
 __attribute__((weak)) int front_screen_max_fps(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
 __attribute__((weak)) void front_screen_match(int fps) { (void)fps; }   // front_mac.m; graphics unit tests and iOS have none
+__attribute__((weak)) void front_picture_shape(int w, int h) { (void)w; (void)h; }   // front_mac.m, front_ios.m; graphics unit tests have none
 static CAFrameRateRange link_range(int mode) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_LINK_VTICK"); on = !(e && !strcmp(e, "0")); }
     int rate = mode == 3 ? 30 : mode == 2 ? 120 : 60, hz = on ? front_screen_max_fps() : 0;

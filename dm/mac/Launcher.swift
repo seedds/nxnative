@@ -19,32 +19,27 @@ struct LauncherView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 64, height: 64).accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(info("CFBundleName") ?? "Game").font(.title2.weight(.semibold))
-                    Text("Version \(info("CFBundleShortVersionString") ?? "1.0")").foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 44, height: 44).accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(info("CFBundleName") ?? "Game").font(.headline)
+                    HStack(spacing: 0) {
+                        Text("Version \(info("CFBundleShortVersionString") ?? "1.0")")
+                        if let c = info("DMCommit"), !c.isEmpty {
+                            Text(" (")
+                            CommitLink(commit: c, url: info("DMCommitURL").flatMap(URL.init(string:)))
+                            Text(")")
+                        }
+                    }
+                    .font(.callout).foregroundStyle(.secondary)
                 }
                 Spacer()
             }
-            .padding([.horizontal, .top], 20)
-            Form {
-                settingSections(basic: true)
-                CloudSavesSection()
-                Section {
-                    DisclosureGroup("Advanced settings", isExpanded: $advanced) {}
-                }
-                if advanced {
-                    settingSections(basic: false)
-                    Section {
-                        Button("Reset to tested defaults") { m.reset() }
-                            .disabled(!m.changed)
-                    } footer: {
-                        Text("Brings back all settings this game was tested with.")
-                    }
-                }
-            }
+            .padding(.horizontal, 20).padding(.top, 2)   // the title bar's safe area already keeps it below the traffic lights
+            Form { settings }
             .formStyle(.grouped)
+            .contentMargins(.top, 6, for: .scrollContent)
+            .background(OverlayScrollers())
             .onScrollGeometryChange(for: CGFloat.self) {
                 $0.contentSize.height + $0.contentInsets.top + $0.contentInsets.bottom - $0.containerSize.height
             } action: { _, extraHeight in
@@ -61,17 +56,109 @@ struct LauncherView: View {
         .frame(minWidth: 520, idealWidth: 560)
     }
 
-    @ViewBuilder private func settingSections(basic: Bool) -> some View {
+    // Basic settings and the Advanced settings row share one card; the advanced ones open in a second card below it
+    @ViewBuilder private var settings: some View {
+        Section {
+            settingRows(basic: true)
+            Button { advanced.toggle() } label: {
+                HStack {
+                    Text("Advanced settings")
+                    Spacer()
+                    Image(systemName: advanced ? "chevron.down" : "chevron.right").foregroundStyle(.secondary).accessibilityHidden(true)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(advanced ? "Shown" : "Hidden")
+        }
+        if advanced {
+            Section { settingRows(basic: false) }
+            Section {
+                Button("Reset to tested defaults") { m.reset() }
+                    .disabled(!m.changed)
+            } footer: {
+                Text("Brings back all settings this game was tested with.")
+            }
+        }
+        CloudSavesSection()
+    }
+
+    /// The rows of each of the list's sections, under the section's name as a small caption inside the card
+    @ViewBuilder private func settingRows(basic: Bool) -> some View {
         ForEach(m.sections(basic: basic), id: \.self) { section in
             let rows = m.rows(in: section, basic: basic)
             if !rows.isEmpty {
-                Section(section) {
-                    ForEach(rows) { SettingRow(s: $0, m: m) }
+                if !section.isEmpty {
+                    Text(section.uppercased()).font(.caption.weight(.semibold)).foregroundStyle(.secondary).padding(.top, 4).accessibilityAddTraits(.isHeader)
                 }
+                ForEach(rows) { SettingRow(s: $0, m: m) }
             }
         }
     }
 }
+
+/// "Version 1.6.0 (d0ab754c)": the commit that packed the app (DMCommit, pack_app.py source_commit) beside the game's version. A link to the commit's page when the packer
+/// found it on GitHub (DMCommitURL; a local commit has no page there): blue under the pointer, a click opens it. Its menu copies the commit ID and the link
+struct CommitLink: View {
+    let commit: String, url: URL?
+    @State private var hover = false
+
+    var body: some View {
+        let id = commit.hasSuffix("+dirty") ? String(commit.dropLast(6)) : commit
+        Button { if let url { NSWorkspace.shared.open(url) } } label: {
+            Text("\(id.prefix(8))\(commit.hasSuffix("+dirty") ? "+dirty" : "")")
+                .foregroundStyle(url != nil && hover ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+        }
+        .buttonStyle(.plain).focusable(false)
+        .onHover { inside in
+            hover = inside
+            guard url != nil else { return }
+            if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+        }
+        .help(url != nil ? "Open this commit on GitHub" : "This commit is not on GitHub")
+        .contextMenu {
+            Button("Copy Commit ID") { Self.copy(id) }
+            if let url { Button("Copy Link") { Self.copy(url.absoluteString) } }
+        }
+    }
+
+    private static func copy(_ s: String) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(s, forType: .string) }
+}
+
+
+/// The Form's scroll bar as an overlay: thin, shown while scrolling or under the pointer, whatever "Show scroll bars" says in System Settings
+/// (with a mouse connected, the default there is a permanent wide bar). AppKit sets the style again when that setting changes, so it is set again then
+struct OverlayScrollers: NSViewRepresentable {
+    final class Probe: NSView {
+        private var token: NSObjectProtocol?
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            apply()
+            if token == nil {
+                token = NotificationCenter.default.addObserver(forName: NSScroller.preferredScrollerStyleDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+                    DispatchQueue.main.async { self?.apply() }
+                }
+            }
+        }
+        deinit { if let t = token { NotificationCenter.default.removeObserver(t) } }
+        func apply() {
+            DispatchQueue.main.async { [weak self] in
+                guard let root = self?.window?.contentView else { return }
+                func walk(_ v: NSView) {
+                    if let s = v as? NSScrollView {
+                        s.scrollerStyle = .overlay; s.autohidesScrollers = true
+                        s.verticalScroller?.controlSize = .small
+                    }
+                    v.subviews.forEach(walk)
+                }
+                walk(root)
+            }
+        }
+    }
+    func makeNSView(context: Context) -> Probe { Probe() }
+    func updateNSView(_ v: Probe, context: Context) { v.apply() }
+}
+
 
 /// Cloud saves: a folder the save is synced through (dm/host/save_sync.h), the one the iPhone app picks in its launcher's Cloud saves section. It is kept in this app's
 /// preferences as cloudSaves.folder, which launcher.c puts into DM_SAVE_SYNC before the host starts; a DM_SAVE_SYNC an env file or the launch environment set wins, and is shown here.
@@ -131,8 +218,9 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         app.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         app.addItem(withTitle: "Quit \(name)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         item.submenu = app; menu.addItem(item); NSApp.mainMenu = menu
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 660), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 660), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         w.title = name; w.isReleasedWhenClosed = false; w.delegate = self
+        w.titlebarAppearsTransparent = true; w.titleVisibility = .hidden; w.titlebarSeparatorStyle = .none   // one surface with the header, which shows the name
         w.contentMinSize = NSSize(width: 520, height: 0)
         window = w
         if let screen = w.screen ?? NSScreen.main {
@@ -146,6 +234,14 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         if NSApp.isActive { w.makeKeyAndOrderFront(nil) } else { w.orderBack(nil) }
     }
     func applicationDidBecomeActive(_ n: Notification) { window?.makeKeyAndOrderFront(nil) }
+    // No control holds the focus when the window first becomes key, so none shows a focus ring until the player presses Tab. AppKit gives the first key view the focus
+    // then (with keyboard navigation on in System Settings, a ring around a button); Return still presses Play, the window's default button
+    private var focusCleared = false
+    func windowDidBecomeKey(_ n: Notification) {
+        guard !focusCleared, let w = window else { return }
+        focusCleared = true
+        DispatchQueue.main.async { w.makeFirstResponder(nil) }
+    }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {   // ⌘Q, or a logout or restart: the app ends without the game (exit 0, as Quit)
         fputs("launcher: quit without starting the game\n", stderr)
         return .terminateNow   // not terminateCancel, which a logout or restart takes as a refusal and stops

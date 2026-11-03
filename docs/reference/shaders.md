@@ -1351,6 +1351,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Mario Party Superstars](../../dm/games/01006FE013472000/README.md) ([GitHub issue #1022](https://github.com/seedds/nxnative/issues/1022), [PR #1024](https://github.com/seedds/nxnative/pull/1024)). Open: why `metal-tt` failed after 76 minutes there, and how its memory grows with the number of bases.
 - **Check:** `dm/tools/tests/test_pso_offline.py` (`test_large_script_memory_and_compatible_archive_key`).
 
+### Bounded groups for the offline pipeline compiler (experimental)
+
+- **Symptom:** the offline archive stops with only `applegpu-nt command failed`; the macOS kernel log reports `no paging space action` and kills `air-nt` as the largest compressed process.
+- **Cause:** Apple's GPU compiler can exhaust memory while compiling the complete pipeline list. Lowering the Python builder's memory does not bound the compiler's. RSS excludes compressed and swapped allocations: use kernel resource-kill diagnostics and physical-footprint measurements to distinguish this failure from a compiler rejection or a full disk.
+- **Fix (experimental):** `pso_offline.py --batch-size N` compiles sequential groups of at most N bases, each script referencing only its libraries, then merges all results with `metal-pack -nthreads 1`. The normal single-file output, full-input archive key and runtime stamp stay compatible. Successful groups are cached by their own descriptors, library bytes, GPU, OS and compiler. A failed group or merge publishes neither a new complete archive key nor coverage stamp. The default remains one compiler invocation. This bounds input count, not compiler memory; an individual pipeline or the final merge may still exhaust resources.
+- **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md#files-and-shaders), which records the resource-kill evidence, before/after measurements and complete archive validation. [Issue #1022](https://github.com/seedds/nxnative/issues/1022) requests archive partitioning for another game's resource-heavy build; that workload remains unverified.
+- **Check:** `dm/tools/tests/test_pso_offline.py` covers pilot reuse, compatible full-archive reuse, partial final batches, changed-group invalidation, compile failure and merge failure. `t_pso_bundle` compiles one base per group, opens the merged result, retrieves a base from each group, rejects an absent depth entry and compares the complete coverage stamp with the ordinary build.
+
 ### Offline pipeline archive on a full disk
 
 - **Symptom:** `[RED] pso_offline: metal-tt failed for applegpu_<gpu> (exit 1)` with only `applegpu-nt command failed` in `metal-tt.<arch>.log`.

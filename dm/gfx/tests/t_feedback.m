@@ -427,7 +427,7 @@ static void shape_case(void) {
 // Keep all eight keys live, with only one 4x4 allocation. The first accepted binding
 // is either a valid hit or a fresh copy; the second key needs that same shape.
 // Shape ranking without draw pins copies green over the first binding's red snapshot.
-// This fixture uses only upstream fields, so its complete file can also run on fa681.
+// This fixture uses only upstream fields, so its complete file also runs on b591.
 static void accepted_case(NvProg *seed_pr, id<MTLRenderPipelineState> seed_pipeline, NvProg *pr, id<MTLRenderPipelineState> pipeline, int cached_first) {
     int before = failed, first = cached_first ? 0 : 8, tid = cached_first ? 720 : 740;
     seed_pr->sh[1]->rf.b[0].reg = 0;

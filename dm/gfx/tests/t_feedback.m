@@ -108,7 +108,7 @@ static void slot_case(NvProg *pr, id<MTLRenderPipelineState> pipeline, int slot,
 static void image_view_case(NvProg *pr) {
     const int tid = 661;
     tex_t source;
-    target_format(&source, 99796, NVN_FORMAT_R32UI, 2);
+    id<MTLTexture> original = target_format(&source, 99796, NVN_FORMAT_R32UI, 2);
     view_t level1 = {.set_levels=1, .base_level=1, .nlevels=1};
     mtl_reg_image(tid, &source, &level1);
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
@@ -121,7 +121,8 @@ static void image_view_case(NvProg *pr) {
     R.rt.has_cview[0] = 1; R.rt.cview[0] = level1;
     clear(MTLClearColorMake(17, 0, 0, 1));
     fb_prepare(pr);
-    CHECK(g_fb_n == 1 && !g_enc && g_fb_src[0].parentRelativeLevel == 1 && g_fb_use[0].width == 2,
+    CHECK(g_fb_n == 1 && !g_enc && g_fb_src[0].parentTexture == original &&
+          g_fb_src[0].parentRelativeLevel == 1 && g_fb_use[0].width == 2,
           "a level-1 image snapshots its level-1 attachment");
     rp_end();
     b->dpf = NVN_DPF_SINT;
@@ -134,7 +135,9 @@ static void image_view_case(NvProg *pr) {
     CHECK(g_fb_n == 0 && g_enc, "a SINT-class read of the R32Uint attachment keeps its reinterpreted image binding");
     rp_end(); b->dpf = NVN_DPF_UINT;
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "image view submission completed without error");
+    CHECK(serial_get(source.serial) == original, "the serial table still holds the image target");
     mtl_tex_release(&source);
+    CHECK(serial_get(source.serial) == nil, "releasing the image target removes its serial entry");
 }
 // The rule without a listed shader: copy once, reuse until a barrier, end the pass when an earlier draw of it read the attachment directly.
 static void reuse_case(NvProg *pr) {

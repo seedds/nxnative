@@ -468,6 +468,46 @@ static void accepted_case(NvProg *seed_pr, id<MTLRenderPipelineState> seed_pipel
     for (int i = 0; i < 10; i++) mtl_tex_release(&sources[i]);
     mtl_tex_release(&output);
 }
+// Keep the original two-texture before/after fixture above unchanged. The new
+// read-only image must also pin its accepted entry, even beside sampled slot 0.
+static void accepted_image_case(NvProg *seed_pr, id<MTLRenderPipelineState> seed_pipeline, NvProg *pr, id<MTLRenderPipelineState> pipeline, int cached_first) {
+    int before = failed, first = cached_first ? 0 : 8, tid = cached_first ? 800 : 820;
+    seed_pr->sh[1]->rf.b[0].reg = 0;
+    tex_t sources[10], output; id<MTLTexture> originals[10];
+    for (int i = 0; i < 10; i++) {
+        originals[i] = sized_target(&sources[i], 100000 + (cached_first ? 0 : 20) + i, i < 8 ? 4 + i + !cached_first : 4);
+        mtl_reg_tex(tid + i, &sources[i], NULL);
+    }
+    id<MTLTexture> destination = target(&output, 100050 + cached_first);
+    id<MTLBuffer> result = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared];
+    CHECK(result != nil, "image accepted-binding readback buffer allocated");
+    if (!result) { for (int i = 0; i < 10; i++) mtl_tex_release(&sources[i]); mtl_tex_release(&output); return; }
+    res_add(result);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); R.has_rt = 1; R.rt.n = 1;
+    for (int i = 0; i < 8; i++) {
+        R.rt.color[0] = &sources[i]; S.tex[1][0] = tid + i;
+        clear(i == 0 ? MTLClearColorMake(1, 0, 0, 1) : MTLClearColorMake(1, 1, 1, 1));
+        fb_prepare(seed_pr);
+        CHECK(g_fb_n == 1 && g_fb_src[0] == originals[i], "seed draw fills a live entry before the image draw");
+        R.rt.color[0] = &output; sample(seed_pr->sh[1], seed_pipeline);
+    }
+    if (!cached_first) { R.rt.color[0] = &sources[first]; clear(MTLClearColorMake(1, 0, 0, 1)); rp_end(); }
+    R.rt.color[0] = &sources[9]; clear(MTLClearColorMake(0, 1, 0, 1)); rp_end();
+    R.rt.n = 2; R.rt.color[0] = &sources[first]; R.rt.color[1] = &sources[9];
+    S.img[1][0] = tid + first; S.tex[1][0] = tid + 9;
+    fb_prepare(pr);
+    CHECK(g_fb_n == 2 && g_fb_src[0] == originals[first] && g_fb_src[1] == originals[9],
+          "image slot 0 and sampled slot 0 accept distinct snapshots under all-live pressure");
+    R.rt.n = 1; R.rt.color[1] = NULL;
+    R.rt.color[0] = &sources[first]; clear(MTLClearColorMake(1, 0, 1, 1)); rp_end();
+    R.rt.color[0] = &sources[9]; clear(MTLClearColorMake(1, 0, 1, 1)); rp_end();
+    R.rt.color[0] = &output; sample(pr->sh[1], pipeline); readback(destination, result, 0);
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "image accepted-binding GPU submission completed without error");
+    pixels(result, 0, (const uint8_t[]){85, 170, 0, 255}, "an accepted image snapshot retains red while sampled slot 0 retains green");
+    printf("feedback accepted image %s first: %s\n", cached_first ? "cached" : "fresh", before == failed ? "PASS" : "FAIL");
+    for (int i = 0; i < 10; i++) mtl_tex_release(&sources[i]);
+    mtl_tex_release(&output);
+}
 int main(int argc, char **argv) { @autoreleasepool {
     setenv("DM_NVN_TBDR", "0", 1);
     mtl_init(); NSError *error = nil;
@@ -505,6 +545,8 @@ int main(int argc, char **argv) { @autoreleasepool {
     id<MTLRenderPipelineState> pipeline2 = [g_dev newRenderPipelineStateWithDescriptor:d error:&error];
     CHECK(pipeline2 != nil, "two-binding consumer pipeline compiles");
     if (pipeline2) { accepted_case(pr, pipeline, pr2, pipeline2, 1); accepted_case(pr, pipeline, pr2, pipeline2, 0); }
+    fs2->rf.b[0].kind = NVN_RB_IMG; fs2->rf.b[1].reg = 0;
+    if (pipeline2) { accepted_image_case(pr, pipeline, pr2, pipeline2, 1); accepted_image_case(pr, pipeline, pr2, pipeline2, 0); }
     fs->fn = [lib newFunctionWithName:@"mask"];
     fs->ae = [fs->fn newArgumentEncoderWithBufferIndex:0]; fs->arg_len = fs->ae.encodedLength;
     fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_IMG, .aid=0, .dtt=MTLTextureType2D, .dpf=NVN_DPF_UINT};

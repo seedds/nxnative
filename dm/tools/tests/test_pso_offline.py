@@ -363,6 +363,82 @@ class Build(unittest.TestCase):
             po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work)])
         self.assertEqual(list(self.out.glob('*.mtl4a')), [])
 
+    def batched_runner(self, fail_compile=None, fail_merge=False):
+        original = self.fake_run
+        observed = []
+        def run(cmd, **kw):
+            cmd = [str(c) for c in cmd]
+            if 'metal-pack' in cmd:
+                pieces = [Path(p) for p in cmd if p.endswith('.mtl4a')]
+                observed.append(('merge', len(pieces)))
+                Path(cmd[cmd.index('-o') + 1]).write_bytes(b''.join(p.read_bytes() for p in pieces))
+                return subprocess.CompletedProcess(cmd, 1 if fail_merge else 0)
+            if 'metal-tt' in cmd and '-o' in cmd:
+                js = next(Path(p) for p in cmd if p.endswith('.mtl4-json'))
+                config = json.loads(js.read_text())
+                names = [f['name'] for f in config['function_descriptors']['library_function_descriptors'] if f['library'] == 'lib:v_bp']
+                observed.append(('compile', names))
+                if fail_compile in names:
+                    Path(cmd[cmd.index('-o') + 1]).write_bytes(b'partial')
+                    return subprocess.CompletedProcess(cmd, 1)
+            return original(cmd, **kw)
+        return run, observed
+
+    def test_batched_archive_reuses_pilot_and_normal_archive_key(self):
+        bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(5)]
+        runner, observed = self.batched_runner()
+        with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})):
+            # An isolated pilot is the exact cache entry the complete build will consume.
+            with mock.patch.object(po.subprocess, 'run', runner), contextlib.redirect_stdout(io.StringIO()):
+                po.compile_batch(self.lib, bases[:2], self.work/'batches.applegpu_g18p/00001', 'applegpu_g18p', 'ios', '27.0', self.compiler)
+            self.main('--batch-size', '2', '--os-min', '27.0')
+            self.assertEqual(observed, [('compile',['vertex0','vertex1']),('compile',['vertex2','vertex3']),('compile',['vertex4']),('merge',3)])
+            before = list(observed)
+            self.main('--os-min', '27.0')
+            self.assertEqual(observed, before, 'the normal packer must reuse the complete merged archive')
+            self.assertIn('bases\t5\n', (self.out/'archive.tsv').read_text())
+
+    def test_batch_failure_preserves_completed_work_and_publishes_nothing(self):
+        bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(5)]
+        runner, observed = self.batched_runner(fail_compile='vertex2')
+        with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})), self.assertRaises(SystemExit):
+            self.main('--batch-size','2','--os-min','27.0')
+        self.assertEqual(observed, [('compile',['vertex0','vertex1']),('compile',['vertex2','vertex3'])])
+        self.assertFalse((self.out/'prebuilt.tsv').exists())
+        self.assertFalse((self.work/'key.applegpu_g18p').exists())
+        self.assertFalse(list(self.out.glob('*.mtl4a')))
+        self.assertFalse(list(self.work.rglob('*.partial')))
+        first = self.work/'batches.applegpu_g18p/00001/applegpu_g18p.mtl4a'
+        self.assertTrue(first.is_file()); identity = first.stat().st_mtime_ns
+        runner, observed = self.batched_runner()
+        with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})):
+            self.main('--batch-size','2','--os-min','27.0')
+        self.assertEqual(first.stat().st_mtime_ns, identity)
+        self.assertEqual(observed, [('compile',['vertex2','vertex3']),('compile',['vertex4']),('merge',3)])
+
+    def test_merge_failure_never_publishes_partial_archive(self):
+        bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(3)]
+        runner, _ = self.batched_runner(fail_merge=True)
+        with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})), self.assertRaises(SystemExit):
+            self.main('--batch-size','2','--os-min','27.0')
+        self.assertFalse(list(self.out.glob('*.mtl4a')))
+        self.assertFalse((self.out/'prebuilt.tsv').exists())
+        self.assertFalse((self.work/'key.applegpu_g18p').exists())
+        self.assertFalse(list(self.work.rglob('*.partial')))
+        runner, observed = self.batched_runner()
+        with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})):
+            self.main('--batch-size','2','--os-min','27.0')
+        self.assertEqual(observed, [('merge',2)])
+
+    def test_only_changed_batch_is_recompiled(self):
+        bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(5)]
+        runner, observed = self.batched_runner()
+        with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})):
+            self.main('--batch-size','2','--os-min','27.0')
+            observed.clear(); bases[0] = ('v_bp','changed','f_b','main0')
+            self.main('--batch-size','2','--os-min','27.0')
+        self.assertEqual(observed, [('compile',['changed','vertex1']),('merge',3)])
+
     def test_low_disk_space_stops_before_metal_tt(self):   # Cruis'n Blast: a full volume made metal-tt fail with only "applegpu-nt command failed"
         self.work.mkdir(parents=True); (self.work / 'translate-0001').write_bytes(b'x'); (self.work / 'a.airp').write_bytes(b'x')
         with mock.patch.object(po.shutil, 'disk_usage', return_value=shutil._ntuple_diskusage(1 << 40, 1 << 40, 300 << 20)), self.assertRaises(SystemExit) as e: self.main()

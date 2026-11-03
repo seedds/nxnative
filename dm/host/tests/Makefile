@@ -69,8 +69,8 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_symbols
 run: $(B)/t_nro
 run: $(B)/t_symbols
-$(B)/t_symbols: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_symbols.c
+$(B)/t_symbols: t_symbols.c ../hle.c ../loader.c ../hle_nro.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_symbols.c ../hle_nro.c
 .PHONY: symbols
 symbols: $(B)/t_symbols
 	$(B)/t_symbols

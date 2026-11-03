@@ -79,7 +79,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [ASTRAL CHAIN](#astral-chain) | 0 | 0 | 112 | 0 | 0 | `build` → `game` |
 | [Batman: Arkham Knight](#batman-arkham-knight) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
-| [EA SPORTS FC 27](#ea-sports-fc-27) | 9 | 0 | 0 | 0 | 6 | `build` → `game` ×2, `build` → `engine` |
+| [EA SPORTS FC 27](#ea-sports-fc-27) | 9 | 0 | 0 | 0 | 15 | `build` → `game` ×2, `build` → `engine` |
 | [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](#final-fantasy-crystal-chronicles-remastered-edition) | 8 | 0 | 0 | 0 | 0 | `build` → `engine` |
 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](#final-fantasy-tactics---the-ivalice-chronicles) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Fire Emblem Engage](#fire-emblem-engage) | 1 | 0 | 0 | 0 | 0 | `build` → `engine` |
@@ -303,10 +303,19 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x7ad1c`: resize: ignore a zero height
   - cut `+0x7ad24`: resize: width 2560 instead of x1
   - cut `+0x7ad3c`: resize: recreate even when the requested size equals the current one
-  - host [hle_nro.c:22](../../dm/host/hle_nro.c#L22): runtime NRO patch
   - host [hle_nro.c:23](../../dm/host/hle_nro.c#L23): runtime NRO patch
   - host [hle_nro.c:24](../../dm/host/hle_nro.c#L24): runtime NRO patch
   - host [hle_nro.c:25](../../dm/host/hle_nro.c#L25): runtime NRO patch
+  - host [hle_nro.c:26](../../dm/host/hle_nro.c#L26): runtime NRO patch
+  - host [hle_nro.c:34](../../dm/host/hle_nro.c#L34): k_nro_restore
+  - host [hle_nro.c:35](../../dm/host/hle_nro.c#L35): k_nro_restore
+  - host [hle_nro.c:36](../../dm/host/hle_nro.c#L36): k_nro_restore
+  - host [hle_nro.c:37](../../dm/host/hle_nro.c#L37): k_nro_restore
+  - host [hle_nro.c:38](../../dm/host/hle_nro.c#L38): k_nro_restore
+  - host [hle_nro.c:39](../../dm/host/hle_nro.c#L39): k_nro_restore
+  - host [hle_nro.c:40](../../dm/host/hle_nro.c#L40): k_nro_restore
+  - host [hle_nro.c:41](../../dm/host/hle_nro.c#L41): k_nro_restore
+  - host [hle_nro.c:42](../../dm/host/hle_nro.c#L42): k_nro_restore
 - **1.8d.6523 `main`** `570dc9f1…`
   - host [hle_fpslock.c:62](../../dm/host/hle_fpslock.c#L62): engine frame limit set to fps_target: FIFA frame regulator
 - **1.8d.310c `main`** `a48c0de3…`

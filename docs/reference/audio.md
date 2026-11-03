@@ -231,6 +231,13 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
   - a watchdog in `hle_audio.c` switches any started output whose device has not called back for 200 ms in focus to the silent sink, retrying the AudioUnit after 1, 2, 4, 8 s. A start that fails (session still held by a call) falls back the same way instead of aborting.
 - **Check:** the log shows `audio session: interrupted`, `the device has not called back for N ms` and `AudioUnit restarted`. `tests/t_audio.c` (in `dm/host`) scenario 3 stops a playing AudioUnit behind the host's back.
 
+### A blocked audio device start freezes the game
+
+- **Symptom:** a game stops advancing while the Mac's selected output refuses to play. A process sample shows `AudioOutputUnitStart` waiting in the HAL, with the game's audio renderer waiting for a released PCM buffer.
+- **Cause:** Start and the watchdog's retries stopped the silent sink and waited for the device while holding the output registry lock. A driver could block there for seconds or return success without delivering any callbacks.
+- **Fix:** the silent sink paces the guest at 48 kHz while a host worker starts the device. Until the watchdog sees a callback after startup and joins the silent sink, the device returns silence. A device that fails to deliver its first callback within one second is stopped and retried with backoff. Each output can start independently. Close waits for its own outstanding start before disposing the unit.
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md), with an unavailable HDMI audio output on the Mac ([issue #1030](https://github.com/seedds/nxnative/issues/1030)).
+
 ### AudioUnit construction before output publication
 
 - **Symptom:** TSan reports `au_create` writing `a->au` while `au_watchdog` reads it under `g_aos_lock` when a second real output opens (issue #410).

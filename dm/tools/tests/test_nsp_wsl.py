@@ -1,5 +1,5 @@
 """NSP script in WSL (scripts/build_ipa_from_nsp.py, WSL = True): the tools it puts first, the prerequisites it checks instead of Xcode's, the Mac steps it refuses, the hint that
-replaces push_romfs.sh, and the progress of build_app.py; and that a Mac (WSL = False) gets none of it. Every input is mocked: no WSL, Xcode or Metal needed, on any system."""
+replaces push_romfs.sh, the progress of build_app.py and xcrun's second run when WSL's interop did not start a tool; and that a Mac (WSL = False) gets none of it. Every input is mocked: no WSL, Xcode or Metal needed, on any system."""
 import importlib.util
 import os
 from pathlib import Path
@@ -117,6 +117,26 @@ class AppBuildProgress(unittest.TestCase):
             self.assertEqual(watch.poll(), {'done': 3, 'note': 'linking'})
             watch.line('[12:00:30] pack IPA')
             prog.end.assert_called_with('3 files compiled')
+
+
+class XcrunRetry(unittest.TestCase):   # dm/ios/tools/wsl/xcrun with a stand-in metal.exe (a shell script) that fails its first runs as given
+    def xcrun(self, fails, message):
+        with tempfile.TemporaryDirectory() as d:
+            exe = Path(d) / 'metal.exe'
+            exe.write_text('#!/bin/sh\nn=$(cat "$0.count" 2>/dev/null || echo 0); n=$((n + 1)); echo $n > "$0.count"\n'
+                           f'if [ $n -le {fails} ]; then echo "{message}" >&2; exit 1; fi\necho "Apple metal version test"\n')
+            exe.chmod(0o755)
+            r = subprocess.run([sys.executable, str(REPO / 'dm/ios/tools/wsl/xcrun'), '-sdk', 'iphoneos', 'metal', '--version'],
+                               capture_output=True, text=True, env=dict(os.environ, DM_WSL_METAL=d))
+            return r, int((Path(d) / 'metal.exe.count').read_text())
+
+    def test_interop_failure_is_run_again(self):
+        r, runs = self.xcrun(1, '<3>WSL (1 - ) ERROR: UtilAcceptVsock:281: accept4 failed 110')
+        self.assertEqual((r.returncode, runs), (0, 2)); self.assertIn('Apple metal version test', r.stdout); self.assertIn('running it again', r.stderr)
+
+    def test_tool_failure_is_returned(self):
+        r, runs = self.xcrun(1, 'error: unknown type name')
+        self.assertEqual((r.returncode, runs), (1, 1)); self.assertIn('error: unknown type name', r.stderr)
 
 
 if __name__ == '__main__':

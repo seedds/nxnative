@@ -8,7 +8,7 @@
 # Environment: DM_WSL_METAL = the Metal Developer Tools' bin folder (Linux path; default: the default install folder), DM_XTOOL_SDK = xtool's darwin.artifactbundle
 # (default ~/.swiftpm/swift-sdks/darwin.artifactbundle), DM_WSL_STAGE = the staging folder (a Linux path on a Windows drive; default /mnt/c/.nxnative-wsl-stage).
 # Anything else (clang, swiftc, devicectl) is a Mac-only step: it exits 72 with a message, as xcrun does for an unknown tool.
-import hashlib, json, os, plistlib, re, shutil, subprocess, sys, tempfile
+import hashlib, json, os, plistlib, re, shutil, subprocess, sys, tempfile, time
 
 BUNDLE = os.environ.get('DM_XTOOL_SDK') or os.path.expanduser('~/.swiftpm/swift-sdks/darwin.artifactbundle')
 METAL = os.environ.get('DM_WSL_METAL') or '/mnt/c/Program Files/Metal Developer Tools/bin'
@@ -76,6 +76,18 @@ class Stage:
             if os.path.exists(s): shutil.copyfile(s, p)
         if self.dir: shutil.rmtree(self.dir, ignore_errors=True)
 
+def run(cmd):
+    """The Windows tool, run again when WSL's interop did not start it. With many launches at once (a shader build's workers), the interop's connection to Windows can time out:
+    WSL prints its own error (UtilAcceptVsock: accept4 failed 110) and the run fails, while the same command succeeds when run again. That is WSL's to fix, so the run is
+    repeated, up to three times, only for that error; a failure of the tool itself is returned as it is"""
+    for attempt in range(4):
+        r = subprocess.run(cmd, stderr=subprocess.PIPE)
+        if r.returncode == 0 or b'UtilAcceptVsock' not in r.stderr or attempt == 3: break
+        sys.stderr.write(f'xcrun (WSL): WSL\'s interop did not start {os.path.basename(cmd[0])}, running it again\n')
+        time.sleep(attempt + 1)
+    sys.stderr.buffer.write(r.stderr); sys.stderr.flush()
+    return r.returncode
+
 SEPARATE = {'-o', '-target', '-arch', '-x', '-MF', '-MT', '-include', '-isysroot'}   # options whose value is the next argument
 
 def tool_args(rest, stage):
@@ -117,11 +129,10 @@ if tool == 'metal' and not versioned and not any(a in ('--version', '-v', '-help
     rest = ['-target', f'air64-apple-{osname}{sdk_settings(sdk)["DefaultDeploymentTarget"]}'] + rest
 stage = Stage()
 if tool not in ('metal', 'metallib'):   # metal-tt reads library paths inside its script: its files stay where they are, on a Windows drive
-    os.execv(exe, [exe] + [re.sub(r'^(/.*)$', lambda m: spaceless(win(m[1])), a) if a.startswith('/') else
-                           (lambda m: m[1] + spaceless(win(m[2])) if m else a)(re.match(r'(-I|-[A-Za-z][\w-]*=)(/.*)$', a)) for a in rest])
+    sys.exit(run([exe] + [re.sub(r'^(/.*)$', lambda m: spaceless(win(m[1])), a) if a.startswith('/') else
+                          (lambda m: m[1] + spaceless(win(m[2])) if m else a)(re.match(r'(-I|-[A-Za-z][\w-]*=)(/.*)$', a)) for a in rest]))
 targs = tool_args(rest, stage)
-if not stage.dir and not stage.back: os.execv(exe, [exe] + targs)   # every file on a Windows drive: nothing to copy
-try: code = subprocess.run([exe] + targs).returncode
+try: code = run([exe] + targs)   # with every file on a Windows drive, stage has nothing to copy
 finally:
     try: stage.finish()
     except OSError as e: die(f'cannot copy back the outputs ({e})')

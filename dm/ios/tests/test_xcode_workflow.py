@@ -21,6 +21,8 @@ import nacp
 import profile_guess
 import xcode_projects
 
+build.WSL = False   # pyright: ignore[reportAttributeAccessIssue]  # the Mac path (--prepare-xcode), also when the tests run in WSL
+
 
 class XcodePipelineTests(unittest.TestCase):
     def test_prepare_preserves_upstream_options_and_graphics_paths(self):

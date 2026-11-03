@@ -110,6 +110,7 @@ General host changes first needed here; each applies to every game:
 - **Bounds checks before image-atomic pointer construction and matched image/buffer admission:** [Bounds of image atomics](../../../docs/reference/shaders.md#bounds-of-image-atomics).
 - **The host's StandardAllocator cap** (`hle_svc.c` "StandardAllocator's address space", the `stdalloc_cap` key): [StandardAllocators over 12 to 62 GB of address space](../../../docs/reference/memory.md#standardallocators-over-12-to-62-gb-of-address-space).
 - **The address region table and the NSP script's region check** (`patch_nso.py` "Address regions", `hle_svc.c`, `DM_REGIONS`): its allocator region, 4 GB through `nn::mem::StandardAllocator::Initialize`, returning to `main+0x1b2e690` in `nninitStartup` (the function at `main+0x1b3e3b0` that sets the size tail-calls the SDK), opened to its end by the startup block, which is why the check judges a region by who lays it out: [Measuring address regions and commits](../../../docs/reference/memory.md#measuring-address-regions-and-commits).
+- **A Metal tool run again when WSL's interop does not start it** (`dm/ios/tools/wsl/xcrun`): [Some Metal tool runs fail in WSL with UtilAcceptVsock: accept4 failed 110](../../../docs/reference/packing.md#some-metal-tool-runs-fail-in-wsl-with-utilacceptvsock-accept4-failed-110).
 
 ## Open
 

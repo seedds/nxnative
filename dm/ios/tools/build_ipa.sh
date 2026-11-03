@@ -193,11 +193,13 @@ if [ -n "${DM_ENTITLEMENTS-default}" ]; then
   if [ -n "${DM_ENTITLEMENTS:-}" ]; then cp "$DM_ENTITLEMENTS" "$ENT" || die "copy DM_ENTITLEMENTS"
   else printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
     '<plist version="1.0"><dict><key>com.apple.developer.kernel.increased-memory-limit</key><true/></dict></plist>' > "$ENT" || die "entitlements"; fi
-  EXE=$APP/DmIOS; [ ! -f "$APP/Info.plist" ] || EXE=$APP/$(plist_get "$APP/Info.plist" CFBundleExecutable) || die "CFBundleExecutable of $APP"
-  if [ $WSL = YES ]; then   # ldid (ProcursusTeam's) makes the same kind of ad-hoc signature with the entitlements
+  # self-contained, as dm/ios/tests/test_ipa_unsigned.py runs this block on its own: there WSL and plist_get are not set, and the Mac's lines run
+  if [ "${WSL:-NO}" = YES ]; then   # ldid (ProcursusTeam's) makes the same kind of ad-hoc signature with the entitlements
+    EXE=$APP/DmIOS; [ ! -f "$APP/Info.plist" ] || EXE=$APP/$(plist_get "$APP/Info.plist" CFBundleExecutable) || die "CFBundleExecutable of $APP"
     ldid -S"$ENT" "$EXE" || die "ad-hoc signature with the entitlements (ldid)"
     [ -n "$(ldid -e "$EXE")" ] || die "the executable's signature has no entitlements"
   else
+  EXE=$APP/DmIOS; [ ! -f "$APP/Info.plist" ] || EXE=$APP/$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Info.plist") || die "CFBundleExecutable of $APP"
   xattr -cr "$EXE" 2> /dev/null   # codesign refuses a file with a resource fork, Finder information or quarantine attributes
   codesign --force --sign - --entitlements "$ENT" "$EXE" || die "ad-hoc signature with the entitlements"
   codesign -d --entitlements - "$EXE" > /dev/null 2>&1 || die "the executable's signature has no entitlements"

@@ -37,6 +37,8 @@ app_pool	0xCD500000
 sys_resource	0x600000
 
 # ---- Graphics ----
+# native swapchain size the launcher offers (720p / 1080p / 1440p / 4K); the NRO patch forces it at run time
+display_size	2560x1440
 # The registered build selects near-zero NVN depth (the NSP script's region check, 2026-10-29: one nvnDeviceSetDepthMode call, near = 0); offline pipeline bases use main0_z.
 depth_mode	zero
 
@@ -51,4 +53,6 @@ shader_key_skip	0x7d0+0x18
 # 60 fps as on the game's other platforms: the host sets Frostbite's simulation rate (SimulationTimeSettings, found by name) and, on 1.8d.310c and 1.8d.6523, the game's frame
 # regulator to the target (hle_fpslock.c); the game asks for present interval 2, which display pacing ignores (README.md, Frame rate). 30 runs the game's own 30
 fps_target	60
+# 120 is offered in the launcher: the regulator and Frostbite's simulation rate follow it; the present runs at 120 Hz on a 120 Hz display link (hle_fpslock.c, hle_nvn.c)
+fps_max	120
 present_interval	display

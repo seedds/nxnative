@@ -76,6 +76,7 @@ HLE_FORCE("_ZN2nn2vi12ListDisplaysEPNS0_11DisplayInfoEi", "list displays; the ho
     uint8_t *p = out; memset(p, 0, 0x60); strcpy((char *)p, "Default");
     uint64_t lim[3] = {1, 1920, 1080};
     const char *e = getenv("DM_DISPLAY_SIZE");
+    if (!e || !*e) e = DM_GAME_DISPLAY_SIZE;
     if (e && *e) {
         int ww = 0, hh = 0;
         if (sscanf(e, "%dx%d", &ww, &hh) == 2 && ww >= 320 && hh >= 240 && ww <= 7680 && hh <= 4320) { lim[1] = (uint64_t)ww; lim[2] = (uint64_t)hh; LOG("vi::ListDisplays %dx%d (DM_DISPLAY_SIZE)", ww, hh); }

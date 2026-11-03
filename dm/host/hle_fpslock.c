@@ -20,7 +20,11 @@
 // switch an engine reads before it takes those fields at all (written 1 at any target)
 enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, TICKS_U32, SECS_F32, MODE_U32, FPS_F64 };
 #define MS_MARGIN 0.5f
-static float ms_want(int fps) { return 1000.0f / (float)fps - (fps == 60 ? MS_MARGIN : 0); }
+static float ms_want(int fps) { return 1000.0f / (float)fps - (fps >= 60 ? MS_MARGIN : 0); }
+// A limiter that holds a rate (FPS_F64's first copy) gets the same margin as a rate: at 60 the FC 26 regulator at exactly 60.0 waited 16.67 ms from each frame's start, so in a match
+// every 11th frame missed its display-link tick and took 24.6 ms (57.6 fps, GPU 8 ms); 1000 / (16.67 - 0.5) = 61.9 lets the host's present pacing set the pace.
+// The reported rate (the second copy) stays the exact target; at 120 the wait rate is 127.66 fps.
+static double rate_want(int fps) { return 1000.0 / (double)ms_want(fps); }
 typedef struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; uint32_t scale; } lock_t;
 static const lock_t k_locks[] = {
     // Pokemon Brilliant Diamond 1.3.0: Unity's Application.targetFrameRate. Its icall registration (main+0xe34e60) resolves to main+0xdc8e70 -> +0x5fa640,
@@ -309,7 +313,7 @@ void dm_fps_lock_tick(void) {
         state = -1; pthread_once(&g_found, lock_find);
         if (!nrow && !nier && !fb.n && !ue_missing) return;
         const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET; src = e ? "DM_FPS_TARGET" : "game profile fps_target";
-        if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; leaving the game's frame limit", e); t = 0; }
+        if (t != 0 && t != 30 && t != 60 && !(t == 100 && DM_GAME_FPS_MAX >= 100) && !(t == 120 && DM_GAME_FPS_MAX >= 120)) { LOG("[RED] frame target %d: must be 0, 30 or 60%s; leaving the game's frame limit", t, DM_GAME_FPS_MAX >= 120 ? ", 100 or 120" : DM_GAME_FPS_MAX >= 100 ? " or 100" : ""); t = 0; }
         if (t && ue_missing) LOG("[RED] main: Unreal %s not found by the rewriter (ue_cvar.py NAMES; game profile ue_fps_cvar): the game's own frame limit stays", DM_GAME_UE_FPS_CVAR);
         if (!nrow && !nier && !fb.n) return;
         if (!t) { for (int r = 0; r < nrow; r++) LOG("main: %s left as the game sets it (%s)", rows[r]->what, src); if (nier) LOG("main: NieR frame interval left as the game sets it (%s)", src);
@@ -344,12 +348,12 @@ void dm_fps_lock_tick(void) {
         if (L->ptr_off && (!rd((uint64_t)(uintptr_t)(base + L->ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
         if (L->kind == FPS_F64) {
             for (int c = 0; c < L->copies; c++) {
-                uint64_t a = obj + L->field + 8 * (uint64_t)c; double cur, want = target;
+                uint64_t a = obj + L->field + 8 * (uint64_t)c; double cur, want = c ? target : rate_want(target);   // the reported rate stays the exact target
                 if (!rd(a, &cur, sizeof cur)) break;
-                if (cur == want || !(cur >= 10 && cur <= 120)) continue;   // already set, or not set yet
+                if (cur == want || !(cur >= 10 && cur <= 130)) continue;   // already set, or not set yet
                 double *p = (double *)(uintptr_t)a;
                 dm_guest_write_prepare(p, sizeof *p); __atomic_store_n((uint64_t *)p, *(uint64_t *)&want, __ATOMIC_RELAXED);
-                if (nlog[r] < 8) { nlog[r]++; LOG("main: %s%s %g → %d fps (%s)", L->what, L->copies > 1 ? (c ? " (reported rate)" : " (target)") : "", cur, target, src); }
+                if (nlog[r] < 8) { nlog[r]++; LOG("main: %s%s %g → %.2f fps (%s)", L->what, L->copies > 1 ? (c ? " (reported rate)" : " (target)") : "", cur, want, src); }
             }
             continue;
         }

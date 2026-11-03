@@ -9,6 +9,7 @@
 #include <limits.h>
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
+#include <libkern/OSCacheControl.h>
 #include "hle.h"
 
 module_t *g_mod;
@@ -300,7 +301,7 @@ static void install_fps_state(module_t *m) {
 void dm_fps_state_apply(void) {
     if (!dm_fps_state) return;
     const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
-    if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; using the game's own frame step", e); t = 0; }
+    if (t != 0 && t != 30 && t != 60 && !(t == 100 && DM_GAME_FPS_MAX >= 100) && !(t == 120 && DM_GAME_FPS_MAX >= 120)) { LOG("[RED] frame target %d: must be 0, 30 or 60%s; using the game's own frame step", t, DM_GAME_FPS_MAX >= 120 ? ", 100 or 120" : DM_GAME_FPS_MAX >= 100 ? " or 100" : ""); t = 0; }
     float f = (float)t; memcpy(dm_fps_state, &f, sizeof f);
     // Render scale of the 3D views (the stubs at Tears of the Kingdom's main+0xd5cc0, Breath of the Wild's main+0x1266880): 1.0 keeps the game's own size and dynamic resolution;
     // another factor fixes the size at that fraction (DM_RENDER_SCALE, 0.5 to 1.0). Independent of the frame step: written at target 0 too
@@ -504,6 +505,35 @@ static void preload_nros(const char *dir, FILE *f) {
     }
     fclose(f);
     LOG("NRO: %d modules mapped (%s), loaded when the game asks; initialized data %.1f MB, snapshotted on first load", g_nmod - n0, path, data / 1048576.0);
+}
+
+
+// EA SPORTS FC 27's native swapchain size: the NRO's SwapChainNvn constructor and resize are patched offline to 2560x1440; this replaces
+// the four size instructions with the launcher's choice before the NRO runs. The build ID and the 1440p bytes are checked first.
+static void patch_fc27_swapchain(void) {
+    const char *e = getenv("DM_DISPLAY_SIZE"); if (!e || !*e) e = DM_GAME_DISPLAY_SIZE;
+    int w = 0, h = 0; if (!e || !*e || sscanf(e, "%dx%d", &w, &h) != 2 || w < 320 || h < 240 || w > 7680 || h > 4320) return;
+    if (w == 2560 && h == 1440) return;   // the offline cuts already hold this
+    for (int i = 0; i < g_nmod; i++) {
+        module_t *m = &g_mod[i];
+        if (!m->nro || strcmp(m->build_id, "d924da0d0673a87b550159a839f5f807") || m->text_end < 0x7ad28) continue;
+        uint8_t *b = m->base;
+        static const struct { uint32_t off, old; } k[] = {
+            {0x7a310, 0x52814008}, {0x7a318, 0x5280b408}, {0x7ad18, 0xd280b414}, {0x7ad24, 0xd2814015},
+        };
+        int ok = 1; for (unsigned kk = 0; kk < sizeof k / sizeof k[0]; kk++) if (*(uint32_t *)(b + k[kk].off) != k[kk].old) ok = 0;
+        if (!ok) { LOG("[RED] NRO swapchain: the 1440p cuts are not where this build expects them; keeping 2560x1440"); return; }
+        uint8_t *page = (uint8_t *)((uintptr_t)(b + 0x7a000) & ~(uintptr_t)0x3fff);
+        if (mprotect(page, 0x4000, PROT_READ | PROT_WRITE)) { LOG("[RED] NRO swapchain: mprotect for %dx%d failed (%s); keeping 2560x1440", w, h, strerror(errno)); return; }
+        *(uint32_t *)(b + 0x7a310) = 0x52800000u | ((uint32_t)w & 0xffff) << 5 | 8;   // mov w8, #w
+        *(uint32_t *)(b + 0x7a318) = 0x52800000u | ((uint32_t)h & 0xffff) << 5 | 8;   // mov w8, #h
+        *(uint32_t *)(b + 0x7ad18) = 0xd2800000u | ((uint32_t)h & 0xffff) << 5 | 20;  // mov x20, #h
+        *(uint32_t *)(b + 0x7ad24) = 0xd2800000u | ((uint32_t)w & 0xffff) << 5 | 21;  // mov x21, #w
+        if (mprotect(page, 0x4000, PROT_READ | PROT_EXEC)) die("NRO swapchain: mprotect back to RX failed");
+        sys_icache_invalidate(page, 0x4000);
+        LOG("main: NRO swapchain %dx%d (DM_DISPLAY_SIZE)", w, h);
+        return;
+    }
 }
 
 module_t *nro_find(const uint8_t sha256[32]) {
@@ -743,6 +773,7 @@ void load_modules(const char *dir, const char **names, int n) {
     t = now_ns(); for (int i = 0; i < g_nmod; i++) relocate(&g_mod[i]); tr = now_ns() - t;
     force_check();
     preload_nros(dir, nros);   // mapped now, relocated when the game loads them (hle_ro.c)
+    patch_fc27_swapchain();
     { void hlecount_seal(void); hlecount_seal(); }   // DM_HLECOUNT: relocation done, seal the counting stub pages as read-only executable
     if (getenv("DM_SYMCHECK")) LOG("DM_SYMCHECK: %lu symbol lookups at load time, hash and linear disagree %lu", g_symchk_n, g_symchk_bad);
     if (g_flag.bootprof) LOG("① breakdown: mapping (read + copy + seal pages) %.1f ms, dynamic section parsing %.1f ms, gate registration %.1f ms, relocation + forced takeover %.1f ms, total %.1f ms",

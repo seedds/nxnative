@@ -1785,7 +1785,8 @@ static void present_cfg(const win_t *o) {
     if (g_hz >= 0) return;
     // The interval mode comes from the game profile (present_interval, default game): whether frames follow the present interval the game sets depends on whether the game's logic counts frames, which differs per game. Environment variables override it, and can override the fixed 60 Hz.
     int scr = mtl_display_hz();
-    const char *e = getenv("DM_PRESENT_HZ"); g_hz = e ? atoi(e) : 60;
+    const char *e = getenv("DM_PRESENT_HZ"), *ft = getenv("DM_FPS_TARGET");
+    g_hz = e ? atoi(e) : (ft ? atoi(ft) : DM_GAME_FPS_TARGET) > 60 ? (ft ? atoi(ft) : DM_GAME_FPS_TARGET) : 60;   // a target above 60 presents on the 120 Hz link, one frame per tick at 120 and fractional ticks at 100 (nvn_mtl.m mtl_init)
     if (!g_hz) LOG("[nvn] [WARNING] DM_PRESENT_HZ=0: frame rate uncapped, frame pacing unlike the device, UI logic may drift (for profiling only, not for verdicts / cross-checks)");
     // Cut (intentional deviation from the original game's behavior): with DM_PRESENT_INTERVAL=display the present interval set by the game is not followed and one frame is presented per display-link tick,
     // with a fixed hard floor of 60 fps; the logic stays at 25 ticks, and the client's frame-counted UI logic is unaffected -
@@ -1793,7 +1794,7 @@ static void present_cfg(const win_t *o) {
     // (the save indicator is exempted as a timing race), and the timing differences of key messages are within game mode's own noise band; proof after entering a run is still missing, pending action script coverage
     const char *m = getenv("DM_PRESENT_INTERVAL"); g_display_mode = m ? !strcmp(m, "display") : DM_GAME_PRESENT_DISPLAY;
     LOG("[nvn] present tick %d Hz, interval mode %s (%s; present interval set by the game %d; %s)", g_hz, g_display_mode ? "display (one frame per tick, a cut)" : "game (original semantics)",
-        m ? "DM_PRESENT_INTERVAL" : "game profile present_interval", o->interval, scr > 0 ? "window, fixed 60 Hz" : "no window, fixed 60 Hz");
+        m ? "DM_PRESENT_INTERVAL" : "game profile present_interval", o->interval, scr > 0 ? "window" : "no window");
 }
 static int present_itv(const win_t *o) { int c = fps_present_cap(), k = atomic_load(&g_fs_k); return c ? (k && fstep_on() ? k : 60 / c) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; }   // vsyncs per frame that presentation follows
 // The acquire's wait for the display link: the present interval's vsyncs (60 Hz units), or with present_interval display above 60 Hz (DM_PRESENT_HZ=120 on a 120 Hz link,

@@ -413,8 +413,8 @@ static void udc_selftest(void) {
 void mtl_init(void) {
     if (g_dev) return;
     const char *vbc = getenv("DM_NVN_VBUF_CACHE"); g_vbuf_cache = !(vbc && !strcmp(vbc, "0"));
-    const char *link = getenv("DM_PRESENT_LINK");
-    g_dm_present_link = link ? atoi(link) : 1; if (g_dm_present_link < 0 || g_dm_present_link > 2) g_dm_present_link = 1;   // Default 1 (real-device same-process alternation: when load exceeds one display-link period, long frames 15% → 0 and frame intervals even out; no difference from 0 at a steady 60); DM_PRESENT_LINK=0 turns it off   // 1 = present on every tick of a 60 Hz display link; 2 = 120 Hz display link, the game presents a frame every other display-link tick (when behind, it can present on the next 8.33 ms display-link tick)
+    const char *link = getenv("DM_PRESENT_LINK"), *ft = getenv("DM_FPS_TARGET");
+    g_dm_present_link = link ? atoi(link) : (ft ? atoi(ft) : DM_GAME_FPS_TARGET) > 60 ? 2 : 1; if (g_dm_present_link < 0 || g_dm_present_link > 2) g_dm_present_link = 1;   // Default 1 (real-device same-process alternation: when load exceeds one display-link period, long frames 15% → 0 and frame intervals even out; no difference from 0 at a steady 60); DM_PRESENT_LINK=0 turns it off   // 1 = present on every tick of a 60 Hz display link; 2 = 120 Hz display link, the game presents a frame every other display-link tick (when behind, it can present on the next 8.33 ms display-link tick)
     const char *latency = getenv("DM_PRESENT_LATENCY");
     if (latency && atoi(latency) > 0) g_present_latency = atoi(latency);
     g_res_check_on = getenv("DM_RES_CHECK") != NULL;
@@ -13431,7 +13431,11 @@ int mtl_link_wait_tick(int vsyncs, uint64_t timeout_ns) {
     return mtl_link_wait_ticks(g_link_mode == 3 ? (vsyncs + 1) / 2 : vsyncs * (g_link_mode == 2 ? 2 : 1), timeout_ns);
 }
 // The display link's rate: 120 Hz (DM_PRESENT_LINK=2), 60, or 30 in power-saving mode
-int mtl_link_rate(void) { return g_link_mode == 3 ? 30 : g_link_mode == 2 ? 120 : 60; }
+int mtl_link_rate(void) {   // the rate the display link actually runs at: the screen's rate in its 60..120 range, so 100 fps on a 100 Hz screen is one tick a frame
+    if (g_link_mode == 3) return 30;
+    if (g_link_mode == 2) { int hz = mtl_display_hz(); return hz > 60 ? (hz > 120 ? 120 : hz) : 120; }
+    return 60;
+}
 // The same wait counted in the display link's own ticks: one per frame for a frame rate as high as the link's (present_interval display at DM_PRESENT_HZ=120 on a 120 Hz link)
 int mtl_link_wait_ticks(int ticks, uint64_t timeout_ns) {
     if (!mtl_link_active()) return 0;

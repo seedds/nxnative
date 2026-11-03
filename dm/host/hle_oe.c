@@ -164,6 +164,7 @@ HLE_FORCE("_ZN2nn2gs3sdk26SetGraphicsFrameLengthModeENS1_23GraphicsFrameLengthMo
 }
 HLE_FORCE("_ZN2nn2oe27GetDefaultDisplayResolutionEPiS1_", "default display resolution: 1920x1080 docked, 1280x720 handheld; DM_DISPLAY_SIZE=WxH overrides", void, h_oe_DefRes, int *w, int *h) {
     const char *e = getenv("DM_DISPLAY_SIZE");
+    if (!e || !*e) e = DM_GAME_DISPLAY_SIZE;
     if (e && *e) {
         int ww = 0, hh = 0;
         if (sscanf(e, "%dx%d", &ww, &hh) == 2 && ww >= 320 && hh >= 240 && ww <= 7680 && hh <= 4320) { if (w) *w = ww; if (h) *h = hh; return; }

@@ -105,3 +105,9 @@ HLE_FORCE("_ZN2nn2vi52SetLayerNextHdrExtendedContentLuminanceRangeMetadataEPNS0_
           void *layer, uint32_t lo, uint32_t hi) { (void)layer; (void)lo; (void)hi; return RES_OK; }
 HLE_FORCE("_ZN2nn2vi52SetLayerNextHdrStandardContentLuminanceRangeMetadataEPNS0_5LayerEtt", "layer HDR metadata: SDR output, nothing to apply", Result, h_vi_HdrStdLum,
           void *layer, uint32_t lo, uint32_t hi) { (void)layer; (void)lo; (void)hi; return RES_OK; }
+// The Bezier tone curve and the clears of the same family (Mario Kart World sets the curve each frame, main+0x959ae4: a call through null in vi2 without this)
+HLE_FORCE("_ZN2nn2vi39SetLayerNextHdrAdjustableBezierMetadataEPNS0_5LayerEfff", "layer HDR metadata: SDR output, nothing to apply", Result, h_vi_HdrBezier,
+          void *layer, float a, float b, float c) { (void)layer; (void)a; (void)b; (void)c; return RES_OK; }
+HLE_FORCE("_ZN2nn2vi41ClearLayerNextHdrAdjustableBezierMetadataEPNS0_5LayerE", "layer HDR metadata cleared: SDR output, nothing to apply", Result, h_vi_HdrBezierClear, void *layer) { (void)layer; return RES_OK; }
+HLE_FORCE("_ZN2nn2vi37ClearLayerNextHdrContentGamutMetadataEPNS0_5LayerE", "layer HDR metadata cleared: SDR output, nothing to apply", Result, h_vi_HdrGamutClear, void *layer) { (void)layer; return RES_OK; }
+HLE_FORCE("_ZN2nn2vi41ClearLayerNextHdrToSdrToneMappingMetadataEPNS0_5LayerE", "layer HDR metadata cleared: SDR output, nothing to apply", Result, h_vi_HdrToneMapClear, void *layer) { (void)layer; return RES_OK; }

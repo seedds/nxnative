@@ -9,6 +9,7 @@
 #include "dm_input.h"
 #include "front.h"
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <unistd.h>
 #include <strings.h>
 #include <pthread.h>
@@ -745,6 +746,22 @@ HLE_FORCE("_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEi", "mouse states: 0 ent
 HLE_FORCE("_ZN2nn3hid13GetMouseStateEPNS0_10MouseStateE", "mouse state: not connected (MouseState 0x28 bytes zeroed)", void, h_hid_MouseState, void *s) {
     memset(s, 0, 0x28); ((int64_t *)s)[0] = atomic_fetch_add(&g_sampling, 1) + 1;
 }
+// Nmouse (SDK 21, the Switch 2's mouse: a Joy-Con 2 on a surface or a USB mouse): none connected. The SDK's own calls open the hid service, which sm refuses (0xe15): Mario Kart World's
+// nnMain aborted in InitializeNmouse (sdk+0x6df504). The setters and Initialize / Finalize succeed (their SDK wrappers abort on an error); no handles, so the queries that take a handle
+// answer false, as the SDK does for an unknown handle (detail result 0xbcca), and the standard mouse handle is not found (0xc0ca). Finalize, the merged handle and its sources, type
+// set and states are the merged mouse pointer's above; InitializeNmouse without a pointer type, GetNmouseHandles and the Joy-Con button configs the Joy-Con mouse pointer's
+static int g_nmouse_range[2];
+HLE_FORCE("_ZN2nn3hid16InitializeNmouseEPvmiiNS0_17NmousePointerTypeE", "Nmouse (pointer type given); none connected on the host", void, h_hid_InitNmouseT, void *buf, size_t n, int w, int h, int t) { (void)buf; (void)n; (void)w; (void)h; (void)t; }
+HLE_FORCE("_ZN2nn3hid22SetNmousePointerRangesEii", "Nmouse pointer ranges; the host only records them", void, h_hid_NmouseSetRange, int w, int h) { g_nmouse_range[0] = w; g_nmouse_range[1] = h; }
+HLE_FORCE("_ZN2nn3hid22GetNmousePointerRangesEPiS1_", "Nmouse pointer ranges: the ones that were set", void, h_hid_NmouseGetRange, int *w, int *h) { *w = g_nmouse_range[0]; *h = g_nmouse_range[1]; }
+HLE_FORCE("_ZN2nn3hid28SetNmousePointerMovementAreaEiiii", "Nmouse pointer area; ignored, none connected", void, h_hid_NmouseArea, int x, int y, int w, int h) { (void)x; (void)y; (void)w; (void)h; }
+HLE_FORCE("_ZN2nn3hid28GetStandardMouseNmouseHandleEPNS0_12NmouseHandleE", "Nmouse standard mouse handle: none connected", bool, h_hid_NmouseStd, void *out) { (void)out; return false; }
+HLE_FORCE("_ZN2nn3hid13GetNpadIdTypeEPjNS0_12NmouseHandleE", "Nmouse controller: unknown handle", bool, h_hid_NmouseNpad, uint32_t *out) { (void)out; return false; }
+HLE_FORCE("_ZN2nn3hid34SetNmouseButtonConfigStandardMouseERKNS0_31NmouseButtonConfigStandardMouseE", "Nmouse button config; ignored, none connected", void, h_hid_NmouseCfgM, const void *c) { (void)c; }
+HLE_FORCE("_ZN2nn3hid19EnableNmousePointerENS0_12NmouseHandleEb", "Nmouse pointer: unknown handle", bool, h_hid_NmouseEnable, void) { return false; }
+HLE_FORCE("_ZN2nn3hid24SetNmousePointerPositionENS0_12NmouseHandleEii", "Nmouse pointer position: unknown handle", bool, h_hid_NmousePos, void) { return false; }
+HLE_FORCE("_ZN2nn3hid14GetNmouseStateEPNS0_11NmouseStateENS0_12NmouseHandleE", "Nmouse state: unknown handle", bool, h_hid_NmouseState, void *s) { (void)s; return false; }
+HLE_FORCE("_ZN2nn3hid21RestrictNmousePointerEffff", "Nmouse pointer restriction; ignored, none connected", void, h_hid_NmouseRestrict, float a, float b, float c, float d) { (void)a; (void)b; (void)c; (void)d; }
 HLE_FORCE("_ZN2nn3hid18InitializeKeyboardEv", "keyboard; not provided by the host", void, h_hid_InitKbd, void) {}
 HLE_FORCE("_ZN2nn3hid16GetKeyboardStateEPNS0_13KeyboardStateE", "keyboard state: not connected (KeyboardState 0x30 bytes zeroed)", void, h_hid_KbdState, void *s) {
     memset(s, 0, 0x30); ((int64_t *)s)[0] = atomic_fetch_add(&g_sampling, 1) + 1;

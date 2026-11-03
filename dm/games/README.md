@@ -116,6 +116,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [NieR:Automata The End of YoRHa Edition, Asian release](0100B8E016F76000/README.md) | `0100B8E016F76000` | 1.0.3 | 12.3.9 | PlatinumGames' engine | NVN |
 | [OCTOPATH TRAVELER](010057D006492000/README.md) | `010057D006492000` | 1.0.5 | 3.5.1 | Unreal Engine 4.18 | NVN |
 | [Octopath Traveler 0](01005270232F2000/README.md) | `01005270232F2000` | 1.0.5 | 19.3.13 | Unreal Engine 5 | NVN |
+| [OCTOPATH TRAVELER 0, ASIA](01001300232F4000/README.md) | `01001300232F4000` | 1.0.5 | 19.3.13 | Unreal Engine | NVN |
 | [OCTOPATH TRAVELER II](0100A3501946E000/README.md) | `0100A3501946E000` | 1.1.1 | 12.3.2 | Unreal Engine 4.27 | NVN |
 | [Paper Mario: The Origami King](0100A3900C3E2000/README.md) | `0100A3900C3E2000` | 1.0.1 | 8.3.1 | Intelligent Systems' engine on NintendoWare | NVN |
 | [Paper Mario: The Thousand-Year Door](0100ECD018EBE000/README.md) | `0100ECD018EBE000` | 1.0.1 | 15.3.2 | Intelligent Systems' engine on NintendoWare | NVN |

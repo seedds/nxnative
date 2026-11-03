@@ -220,9 +220,9 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ### SPK shader package in an MT Framework ARC
 
-- **How it is stored:** the engine's one shader package, `sc\NX_64\root` (`SPK\0`, type hash `0x02358e1a`) in `nativeNXx64/sa/NX_64/root.arc` ([01](../agents/01-extract.md)). After the package's tables every shader is a code area followed directly by its control section, back to back to the end of the file: 230 vertex shaders, then 230 pixel shaders.
-- **Reader:** each control section names its code length (+0x704), so the code is the bytes right before it, and every block must start where the previous one ended (`mtspk_shaders`). The tables that say which vertex and pixel shaders the engine combines are not read: the vertex shaders are paired with the single-stage cover (one pixel shader reads every input any of them reads).
-- **Note:** `CustomShaderPackage.mfx` (`MFX\0`, the effect descriptions) holds no shader code, and neither `main` nor any other ARC entry does.
+- **How it is stored:** The Great Ace Attorney Chronicles keeps its one shader package, `sc\NX_64\root` (`SPK\0`, type hash `0x02358e1a`) in `nativeNXx64/sa/NX_64/root.arc` ([01](../agents/01-extract.md)). After the package's tables every shader is a code area followed directly by its control section, back to back to the end of the file: 230 vertex shaders, then 230 pixel shaders.
+- **Reader:** ARC v7 directory entries use 128-byte paths in Ace Attorney and 64-byte paths in [Ultra Street Fighter II (#960)](https://github.com/seedds/nxnative/issues/960). `mtarc_members` checks each member's offset and stored length against the directory and file bounds. USF II also stores each SPK control section *before* its code. The first control's code length (+0x704) locates the adjacent graphics header; `mtspk_shaders` follows that order through the entire package, checking every boundary. The tables that say which vertex and pixel shaders the engine combines are not read: the vertex shaders are paired with the single-stage cover (one pixel shader reads every input any of them reads).
+- **Note:** in Ace Attorney, `CustomShaderPackage.mfx` (`MFX\0`, the effect descriptions) holds no shader code, and neither `main` nor any other ARC entry does.
 - **Found on:** [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (Capcom's MT Framework): all 460 build, with Mario's binding layout; every binding decodes.
 
 ### PKZ version 1 archives

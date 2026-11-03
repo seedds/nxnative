@@ -2818,6 +2818,24 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     ak.d.flags &= ~NVN_TEXTURE_FLAGS_IMAGE;
     pthread_mutex_lock(&g_smu); __unsafe_unretained id shared = hm_get_id(&g_alias, &ak); if (shared) nvn_hm_put(&g_alias_seen, &ak, (void *)(uintptr_t)(g_fence + 1)); pthread_mutex_unlock(&g_smu);
     if (shared) { tex_put(t->serial, shared); return shared; }
+    // The same storage as a texture of the other colour encoding (RGBA8 and RGBA8_SRGB, RGBX8 and its sRGB): a view of that texture, as both read and write the same bytes. Mario Kart World
+    // draws each frame of its course intros (VP9, NV12 → RGB) into an RGBA8 target and composites the sRGB object over the same memory: as a texture of its own that stayed transparent black,
+    // the scene behind the movie showed for the whole intro
+    { int twin = !t ? 0 : t->d.format == 0x25 ? 0x38 : t->d.format == 0x38 ? 0x25 : t->d.format == 0x6D ? 0x37 : t->d.format == 0x37 ? 0x6D : 0; uint32_t pf = 0; uint8_t swz[4];
+      if (t && twin && nvn_fmt_to_mtl(t->d.format, &pf, swz) && pf) {
+          alias_key k2 = ak; k2.d.format = twin; id<MTLTexture> base = nil;
+          pthread_mutex_lock(&g_smu); base = hm_get_id(&g_alias, &k2); pthread_mutex_unlock(&g_smu);
+          id<MTLTexture> v = base && [(id)base conformsToProtocol:@protocol(MTLTexture)] && base.pixelFormat != (MTLPixelFormat)pf && !tex_need_pfv(base.pixelFormat, (MTLPixelFormat)pf) ? [base newTextureViewWithPixelFormat:(MTLPixelFormat)pf] : nil;
+          if (v) {
+              static int n; if (n++ < 4) MLOG("texture ser=%llu %ux%u format %#x: a view of the same storage's format %#x texture (sRGB twin)", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, twin);
+              pthread_mutex_lock(&g_smu);
+              if (!g_alias_set) g_alias_set = CFSetCreateMutable(NULL, 0, NULL);
+              hm_put_id(&g_alias, &ak, v); CFSetAddValue(g_alias_set, (__bridge const void *)v); nvn_hm_put(&g_alias_seen, &ak, (void *)(uintptr_t)(g_fence + 1));
+              pthread_mutex_unlock(&g_smu);
+              tex_put(t->serial, v);
+              return v;   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): ARC owns the view; the sharing and serial tables hold it
+          }
+      } }
     id<MTLTexture> mt = tex_linear(t);
     if (!mt) {
         MTLTextureDescriptor *d = tex_desc(t, 0);

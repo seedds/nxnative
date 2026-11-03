@@ -607,6 +607,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - in a capture run every program links with no uniforms; the game's first `Shader:send` raises a Lua error and, on the Switch, its error handler quits (Any Lua error quits a LÖVE game). → [GL shaders put together at run time and captured](../reference/rendering.md#gl-shaders-put-together-at-run-time-and-captured)
 - an image-only fragment draw's writes disappear from the subresource also bound as its color attachment when the pass ends; other image layers retain their writes. → [Image stores into an attachment of their own pass](../reference/rendering.md#image-stores-into-an-attachment-of-their-own-pass)
 - read-only depth/stencil attachments are written back after every pass, and the periodic unwritten-store savings counter remains zero with the default configuration. → [Unwritten attachment stores without lookahead](../reference/rendering.md#unwritten-attachment-stores-without-lookahead)
+- Mario Kart World's course intros (the cup openings, 2560x1440 VP9) never appeared. The race scene behind them showed, still, for the whole 24 seconds, while the decoder and the game's YUV-to-RGB draw ran on every frame. → [An sRGB texture object over a linear one's storage](../reference/rendering.md#an-srgb-texture-object-over-a-linear-ones-storage)
 
 ## Shaders
 

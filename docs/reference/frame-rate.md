@@ -180,6 +180,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** `DM_TEST_PRESENT_LAG=90,30` (sleep 30 ms before every 90th present) makes Mario do this on the Mac; run it with `DM_WINDOW=1` to get the display link. `DM_NVN_TSV` writes each frame's interval as `@itv`.
 - **Note:** the windowless Mac host was never affected by the acquire: there the acquire sleeps until the interval's slot.
 
+### Odd present intervals on the 30 Hz display link
+
+- **Symptom:** Donkey Kong Bananza ran its heavy areas at 15 fps where its GPU took about 46 ms a frame: the frames came every 66.7 ms, and the presentation thread spent 85% of its time in `nvnWindowAcquireTexture` waiting for display-link ticks.
+- **Cause:** after a second at interval 2 the display link drops to 30 Hz (`nvn_game_fps`). When the game then stepped to interval 3 (20 fps) the link stayed at 30 Hz, where 3 vsyncs are (3 + 1) / 2 = 2 ticks (`mtl_link_wait_tick`): 66.7 ms for the 50 the game asked for. The comment said such intervals "run at 30"; they ran at 15.
+- **Fix:** only an even interval counts toward the 30 Hz link; an odd one returns to the 60 Hz link at once, as interval 1 does, and takes its own 3 ticks (`present_period` in `hle_nvn.c`). The one-second test no longer wraps: the run's start is stored with `| 1` and could be 1 ns after the next clock read, which made `now - start` huge and asked for 30 Hz at once.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md): the slow area on an M1, frame time p50 66.7 → 50.2 ms at interval 3 (`DM_NVN_TSV` `@frame_ms`, `@itv`, `@link_gap_ms` 33.3 → 16.7).
+- **Check:** `t_nvn` (`interval 3: 60 Hz link`, `back to 2 from 3 waits a second again`).
+
 ### One frame per tick of a 120 Hz display link
 
 - **Symptom:** with `present_interval display`, `DM_PRESENT_HZ=120` and `DM_PRESENT_LINK=2` (a 120 Hz display link) a game stays at 60 fps although its frame takes 8 ms; the display link logs about two ticks per present. With a requested 90 Hz, truncating the tick conversion instead allows 120 fps (reproduced through the real acquire with simulated link ticks).

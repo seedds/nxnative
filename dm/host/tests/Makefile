@@ -169,6 +169,12 @@ $(B)/t_swkbd: t_swkbd.c ../hle_swkbd.c ../hle.h ../dm.h $(GAME_H) | $(B)
 run: $(B)/t_bigstack
 $(B)/t_bigstack: t_bigstack.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_bigstack.c ../hle_bigstack.c
+run: watch-sample
+$(B)/t_watch_sample: t_watch_sample.c ../crash.c ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_watch_sample.c
+.PHONY: watch-sample
+watch-sample: $(B)/t_watch_sample
+	$(B)/t_watch_sample
 $(B)/t_altstack: t_altstack.c t_altstack_stub.c ../crash.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_altstack.c t_altstack_stub.c ../crash.c
 $(B)/t_pctl: t_pctl.c ../hle_misc.c ../hle.h ../dm.h $(GAME_H) | $(B)

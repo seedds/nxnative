@@ -154,6 +154,13 @@ if UE_CVARS: print(f'{NAME}: Unreal console variables (ue_cvar.py): ' + ', '.joi
 for w in ue_cvar_why:
     if w.startswith('[RED] '): print(f'[RED] {NAME}: Unreal console variable {w[6:]}: the host cannot write it')
 
+# ---- A target frame rate the game steps by (main: dm/tools/fps_target.py finds it by the code that reads and sets it, without a build ID) ----
+# The fixups table names the global pointer and the field (FPS_TARGET_PTR, FPS_TARGET_FIELD); the host writes the profile's fps_target there (hle_fpslock.c)
+import fps_target
+FPS_TARGET_PTR, FPS_TARGET_FIELD, fps_target_why = fps_target.find(bytes(IMG), TEXT_END, RO_OFF, DATA_OFF) if NAME == 'main' else (None, None, '')
+if FPS_TARGET_PTR is not None: print(f'{NAME}: {fps_target_why} (fps_target.py)')
+elif fps_target_why.startswith('[RED] '): print(f'[RED] {NAME}: {fps_target_why[6:]}: the host cannot write it')
+
 # ---- Unreal's FMallocBinned3 (any module: dm/tools/ue_malloc.py finds it by the engine's own name string, getter and vtable, without a build ID) ----
 # Its constructor reserves 37 GB of address space for its pools. Its one call is cut, and observation gate OBS_UE_MALLOC goes on it (below), where x0 holds the object: the host gives
 # the object its own allocator's vtable there (dm/host/hle_uemalloc.c), whose place and slot layout the fixups table names (UE_MALLOC_VT, UE_MALLOC_SLOT)
@@ -210,6 +217,9 @@ def written_w(p):
 def writes_reg(p, reg):
     """Whether p changes the general-purpose register reg (xN or wN): a write of wN clears the upper half of xN too, and a compare only sets the flags"""
     return p.mnemonic not in ('cmp', 'cmn', 'tst') and 'w' + reg[1:] in written_w(p)
+def writes_reg_any(p, regs):
+    """writes_reg for a set of wN names"""
+    return p.mnemonic not in ('cmp', 'cmn', 'tst') and bool(written_w(p) & regs)
 def has18(ins): return re.search(r'\b[xw]18\b', ins.op_str) is not None
 def regs_in(ins):
     s = {int(n) for n in re.findall(r'\b[xw](\d+)\b', ins.op_str)}
@@ -700,7 +710,7 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
     # GLSLC subsdk0+0x2f403c checks a masked copy instead: and w16,w18,#0x3f; cmp w16,#0xe; b.hi; ...; and x18,x18,#0x3f; ldrsw x18,[x15,x18,lsl #2]
     idx = {'w' + re.fullmatch(rf'{t}, \[{rb}, x(\d+), lsl #2\]', ld.op_str).group(1)}   # pyright: ignore[reportOptionalMemberAccess]  # ld was chosen by this match
     masked = None   # (source, mask, position) when the index is "source & mask"
-    k0 = ctx.index(ld); cmp = None; copies = set()
+    k0 = ctx.index(ld); cmp = None; copies = set(); changed = False
     def wname(r): return 'w' + r[1:]
     for i in range(k0 - 1, -1, -1):   # walk back from the load: follow register copies into the index, stop at the bounds check
         p = ctx[i]
@@ -711,7 +721,10 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
         # A 64-bit check of the index bounds it as well (OCTOPATH TRAVELER 1.0.5 main+0x1676f30: cmp x22,#0x10; ...; b.hi; adrp x18 + add x18; mov x0,x18; ldrsw x18,[x0,x22,lsl #2];
         # add x18,x18,x0, the base copied, so only far_base reads it); taken only in the last attempt, so sites that rewrote before come out the same
         m = re.fullmatch(r'([wx]\d+), #(0x[0-9a-f]+|\d+)' if far_base else r'(w\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'cmp' else None
-        if not m: continue
+        if not m:
+            # Capstone lists only x30 as a call's write, so a call counts for the caller-saved registers
+            if writes_reg_any(p, idx) or (p.mnemonic in ('bl', 'blr') and any(int(r[1:]) <= 18 for r in idx)): changed = True
+            continue
         if wname(m.group(1)) in idx: cmp = p; break
         if masked:   # the checked register must be "the same source & the same mask", with the source unchanged up to the index's and
             for q in range(i - 1, -1, -1):
@@ -722,6 +735,7 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
                     cmp = p
                 break
             if cmp: break
+    if cmp and changed: return None   # the index changes after the check. Before a check it does not matter, so this waits for the walk to find one
     if not cmp and copy_first: cmp = check_before_copy(insl, ctx, ld, idx | copies)
     if not cmp: return None
     n = int(cmp.op_str.split('#')[1], 0) + 1
@@ -1688,7 +1702,7 @@ else:
     open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
 import hashlib
 with open(os.path.join(outdir, 'build_src.sha256'), 'w') as f:   # the same for every module: the rewriter and every patch file, by path from dm/tools
-    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, ue_cvar.__file__, ue_malloc.__file__, ue_region.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
+    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, ue_cvar.__file__, ue_malloc.__file__, fps_target.__file__, ue_region.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
 with open(P('fixups.tsv'), 'w') as f:
     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
     if FAR: f.write(f'# IMAGE_SIZE\t{IMAGE_SIZE:#x}\n# FILE_IMAGE_LEN\t{FILE_IMAGE_LEN:#x}\n')   # patch area before the base (negative PATCH_OFF): whole image size, length of the image part of the file
@@ -1696,6 +1710,7 @@ with open(P('fixups.tsv'), 'w') as f:
     for k in KEY_INDEX: f.write(f'# KEY_{k}_IDX\t{KEY_INDEX[k]}\n')
     if FS_STATE_OFF: f.write(f'# FPS_STATE_OFF\t{FS_STATE_OFF:#x}\n')   # frame step state page (FRAME_STEP): the loader writes the target fps there
     if UE_CALL is not None: f.write(f'# UE_MALLOC_VT\t{UE_VT:#x}\n# UE_MALLOC_SLOT\t{UE_SLOT:#x}\n')   # Unreal's FMallocBinned3 (ue_malloc.py): its vtable and the slot of its name getter, which names the slot layout
+    if FPS_TARGET_PTR is not None: f.write(f'# FPS_TARGET_PTR\t{FPS_TARGET_PTR:#x}\n# FPS_TARGET_FIELD\t{FPS_TARGET_FIELD:#x}\n')   # a target frame rate the game steps by (fps_target.py)
     for n, o in UE_CVARS.items(): f.write(f'# UE_CVAR:{n}\t{o:#x}\n')   # Unreal console variables (ue_cvar.py): the TAutoConsoleVariable registered under each name
     if RENDER_SCALE: f.write('# RENDER_SCALE\t1\n')   # a render-scale stub reads state +0x10 (the loader ignores the key; dm/games/settings.py offers the setting by it)
     if NAME == 'main':

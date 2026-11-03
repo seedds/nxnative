@@ -262,6 +262,8 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "FPS_STATE_OFF")) m->fps_state_off = v;
         else if (!strcmp(key, "UE_MALLOC_VT")) m->ue_malloc_vt = v;
         else if (!strcmp(key, "UE_MALLOC_SLOT")) m->ue_malloc_slot = (unsigned)v;
+        else if (!strcmp(key, "FPS_TARGET_PTR")) m->fps_target_ptr = v;
+        else if (!strcmp(key, "FPS_TARGET_FIELD")) m->fps_target_field = (uint32_t)v;
         else if (!strncmp(key, "UE_CVAR:", 8)) {
             if (m->n_ue_cvar == (int)(sizeof m->ue_cvar / sizeof *m->ue_cvar) || strlen(key + 8) >= sizeof m->ue_cvar[0].name) die("%s: too many Unreal console variables, or too long a name: %s", path, key);
             strcpy(m->ue_cvar[m->n_ue_cvar].name, key + 8); m->ue_cvar[m->n_ue_cvar++].off = v;
@@ -580,7 +582,11 @@ static void remap_at(module_t *m, vm_address_t to, const void *from, unsigned lo
     if (kr != KERN_SUCCESS || a != to) die("%s vm_remap %p → %#lx (%#lx bytes) failed: %d", m->name, from, (unsigned long)to, size, kr);
     if ((cur & need) != need) die("%s permissions after vm_remap %#x, missing %#x", m->name, cur, need);
 }
-#define IMAGE_MH (&_mh_execute_header)
+// The image the module sections are read from (front.h dm_set_game_image_header). getsectiondata takes any loaded image's header and applies its slide
+#include "front.h"
+static const struct mach_header_64 *g_game_image = &_mh_execute_header;
+void dm_set_game_image_header(const void *mh) { g_game_image = mh; }
+#define IMAGE_MH g_game_image
 // The NRO modules (loader.c "NRO modules") are packed instead of getting sections of their own: a Mach-O file has at most 255 sections, and Super Smash Bros. Ultimate's 98 NROs would
 // take 294. gen_embed.py puts their pieces one after another, each 16K aligned, in __TEXT,__dm_nro_x0 / __DM_NRO_W,__img / __TEXT,__dm_nro_x1, and __DATA,__dm_nro_tab lists them:
 // 32 bytes of name, then the offset and length of its x0, W and x1 pieces in their sections (u64 each). A module name never holds an underscore, so these names meet no module's

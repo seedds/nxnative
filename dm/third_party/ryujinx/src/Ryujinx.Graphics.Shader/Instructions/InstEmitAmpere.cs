@@ -65,7 +65,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             X(AmpereOpcodes.Kill, InstName.Kil, InstEmit.AKill, B, writesRd: false);
             X(AmpereOpcodes.Ret, InstName.Ret, InstEmit.ARet, B, writesRd: false);
             X(AmpereOpcodes.Call, InstName.Cal, InstEmit.ACall, B, writesRd: false);
-            foreach (int op in new[] { 0x918, 0x91a, 0x945, 0x941, 0x942, 0x948 })
+            // ERRBAR 0x9ab, which follows a MEMBAR, only orders error reporting.
+            foreach (int op in new[] { 0x918, 0x91a, 0x945, 0x941, 0x942, 0x948, 0x9ab })
             {
                 X(op, InstName.Nop, InstEmit.ANop, InstProps.None, writesRd: false);
             }

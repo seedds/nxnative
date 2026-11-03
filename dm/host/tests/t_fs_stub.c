@@ -6,6 +6,9 @@ void front_save_failed(int err) { g_nfail++; g_lasterr = err; }
 #include "../dm.h"
 module_t *g_mod;
 int g_nmod;
+// the loader's symbol lookup (loader.c): no modules, so no SDK, unless a test sets its own lookup
+void *(*t_guest_sym)(const char *);
+void *guest_sym(const char *name) { return t_guest_sym ? t_guest_sym(name) : NULL; }
 // the guest address space (hle_svc.c): the unit test has none, so every stack is a host stack and the big-stack takeovers run on it directly (hle_bigstack.c)
 #include <stdint.h>
 int dm_guest_as_contains(uintptr_t a) { (void)a; return 0; }

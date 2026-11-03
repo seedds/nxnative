@@ -6,7 +6,8 @@
 #   · the vertex shader's pulling library <key>_bp (a vertex shader without stage inputs: its own <key>_b), entry `entry`, or `entry_z` for the near = 0 depth mode, from its reflection
 #     <key>_b.json; the pixel shader's <key>_b, entry `entry` (main0); no vertex descriptor, one sample, every colour attachment unspecialized
 #   · left out as the host leaves them out (to the draws): a reflection of another chain version or none, a vertex shader with stage inputs and no pulling library, a vertex library that
-#     writes the layer (render_target_array_index), a missing library or entry point
+#     writes the layer (render_target_array_index), a pixel shader that reads the primitive ID (its reflection's raster.primitive_id: the host builds its pipelines whole, since
+#     through a base every primitive reads 0), a missing library or entry point
 #   · a pair whose functions declare function constants is left to the device (rest_pairs.tsv): the host specializes such functions with an empty set of values, and metal-tt makes
 #     no specialized function from a library (applegpu-nt: "cannot find private metadata"), nor the function unspecialized ("cannot lower module with unresolved function constants")
 # Output folder (what the app bundles as pso/, the host's DM_PSO_BUNDLE):
@@ -25,7 +26,7 @@
 #   --os-min: the archives' system (default: for iOS the SDK's major version, e.g. 27.0; for macOS the major version this Mac runs, since the Mac app is built for the Mac that builds it).
 #   A device opens only an archive of its own major version (macOS 27.2 refused archives made for 26.0 and 26.6 and opened those for 27.0 and 27.2), and builds the bases itself
 #   otherwise: the SDK's version on a Mac whose system is older than its Xcode's SDK (macOS 26.6 with Xcode 27.1) left that Mac without them (GitHub issue #673)
-import argparse, hashlib, json, os, shutil, struct, subprocess, sys, time
+import argparse, filecmp, hashlib, json, os, shutil, struct, subprocess, sys, time
 from pathlib import Path
 
 LAYER = b'render_target_array_index'
@@ -99,13 +100,14 @@ def plan(lib_dir, chain, pairs, zero):
     def writes_layer(lib):
         if lib not in layer: layer[lib] = LAYER in (lib_dir / f'{lib}.metallib').read_bytes()
         return layer[lib]
-    bases, rest, seen, left = [], [], set(), dict.fromkeys(('reflection', 'stage inputs', 'library', 'layer', 'entry'), 0)
+    bases, rest, seen, left = [], [], set(), dict.fromkeys(('reflection', 'stage inputs', 'library', 'layer', 'primitive ID', 'entry'), 0)
     for vk, fk in pairs:
         vj, fj = refl(vk), refl(fk)
         if not vj or not fj or vj.get('chain') != chain or fj.get('chain') != chain: left['reflection'] += 1; continue
         ventry = vj['entry_z'] if zero and vj.get('entry_z') else vj.get('entry'); fentry = fj.get('entry') or 'main0'
         pull = isinstance(vj.get('pull'), dict)
         if not pull and vj.get('vertex_inputs'): left['stage inputs'] += 1; continue
+        if (fj.get('raster') or {}).get('primitive_id'): left['primitive ID'] += 1; continue
         vl, fl = vk + ('_bp' if pull else '_b'), fk + '_b'
         vf, ff = fn(vl), fn(fl)
         if vf is None or ff is None: left['library'] += 1; continue
@@ -130,6 +132,15 @@ def script(lib_dir, bases):
                       'color_attachments': [dict.fromkeys(COLOUR, 'Unspecialized') for _ in range(8)]})
     return {'libraries': list(libs.values()), 'function_descriptors': {'library_function_descriptors': list(fns.values())},
             'pipeline_descriptors': {'render_pipeline_descriptors': pipes}}
+
+
+def write_script(path, configuration):
+    """Stream the script to disk beside the previous one (<name>.partial, written again by the next run if this one is killed), which it replaces only when the two differ: an unchanged file keeps its time"""
+    part = path.with_name(path.name + '.partial')
+    try:
+        with part.open('w', encoding='utf-8', newline='\n') as out: json.dump(configuration, out, indent=1)
+        if not path.is_file() or not filecmp.cmp(path, part, shallow=False): os.replace(part, path)
+    finally: part.unlink(missing_ok=True)
 
 
 def library_digest(lib_dir, bases):
@@ -165,7 +176,10 @@ def archive_key(configuration, libraries, arch, platform, osmin, toolchain):
     config = dict(configuration, libraries=[dict(lib, path=lib['label'] + '.metallib') for lib in configuration['libraries']])
     inputs = {'format': 1, 'configuration': config, 'libraries': libraries,
               'arch': arch, 'platform': platform, 'os_min': osmin, 'toolchain': toolchain}
-    return hashlib.sha256(json.dumps(inputs, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    digest = hashlib.sha256()
+    for chunk in json.JSONEncoder(sort_keys=True, separators=(',', ':')).iterencode(inputs):
+        digest.update(chunk.encode())
+    return digest.hexdigest()
 
 
 def sdk(platform):
@@ -218,8 +232,7 @@ def main(argv=None):
     work.mkdir(parents=True, exist_ok=True); out.mkdir(parents=True, exist_ok=True)
     js = work / 'bases.mtl4-json'   # metal-tt takes the format from the extension: .mtl4-json is Metal 4's (.mtlp-json is the Metal 3 format)
     configuration = script(lib_dir, bases)
-    body = json.dumps(configuration, indent=1).encode()
-    if not js.is_file() or js.read_bytes() != body: js.write_bytes(body)
+    write_script(js, configuration)
     st = stamp(chain, zero, text)
     print(f'pso_offline: {len(pairs)} pairs: {len(bases)} bases, {len(rest)} left to the device (function constants), left out as the host leaves them: '
           + ', '.join(f'{k} {v}' for k, v in left.items()) + f' ({time.time() - t0:.1f} s)')
@@ -229,8 +242,9 @@ def main(argv=None):
     if not bases: archs = []   # no pair, or every eligible pair needs device specialization; clear old archives and still write the stamp and the remainder list
     osmin = a.os_min or os_min_default(a.platform); tv = tool_version(a.platform) if bases else 'not used (function constants only)'
     libraries = library_digest(lib_dir, bases)
-    for arch in archs:
-        key = archive_key(configuration, libraries, arch, a.platform, osmin, tv)
+    keys = {arch: archive_key(configuration, libraries, arch, a.platform, osmin, tv) for arch in archs}
+    del configuration   # the compiler reads the script from disk
+    for arch, key in keys.items():
         dst, kf = out / f'{arch}.mtl4a', work / f'key.{arch}'
         if dst.is_file() and kf.is_file() and kf.read_text().strip() == key: print(f'pso_offline: {arch}: reused ({dst.stat().st_size / 2**20:.0f} MB)'); continue
         kf.unlink(missing_ok=True); dst.unlink(missing_ok=True)

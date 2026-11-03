@@ -166,6 +166,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** `t_fstep` (kmin 1, kmax 2: frames that fit hold 120, late ones step to 60 and stop there, a cap of 60, the return), `t_link_ticks` (the real acquire at each hold on 120 and 60 Hz links, a game without `fps_max`), `t_fpslock` (the target and Unreal's limit following the hold, the interval staying 1, a game without `fps_max` at 60), `test_settings.py` (the option). Before adding `fps_max 120` to a profile, measure the game's speed at 120 against 60 over the same inputs (below): a game whose logic counts frames runs at double speed. Not run: a real screen at 60 or 144 Hz, or an iPhone.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md). Also on, with its speed measured: [Mario & Luigi: Brothership](../../dm/games/01006D0017F7A000/README.md), through Unreal's `t.MaxFPS` and `rhi.SyncInterval` ([found by name](#unreals-frame-limit-and-present-interval-found-by-name)), with no host change.
 
+### A vsync interval of 0: no limit, and a step of the time that passed
+
+- **Symptom:** 30 fps with `fps_target 60`, or no 30 / 60 choice in the settings at all: the game asks for present interval 1, so the host's present cap has nothing to change, and the game holds every frame two vsyncs itself.
+- **Cause:** the game's own code. HAL's engine keeps a vsyncs-per-frame int32 that the game sets to 2 and paces its loop by. The same field accepts 0, for no limit: the frame manager then measures each frame's real duration and steps the game by it, so the game stays at the right speed at any rate up to its ceiling. That ceiling is 60: the frame manager counts a step in whole 60 Hz vsyncs, at least one, so a frame shorter than 16.7 ms would still step 1/60 s and run the game fast.
+- **Fix:** a per-build row of kind `FREE_I32` in `hle_fpslock.c` writes 0 above 30 and leaves the field at 30, where the game keeps its own limit; a field the game has not set yet (0 from its constructor) or holds above 4 is left alone. The host's present cap then sets the rate. A dynamic resolution whose GPU frame-time bounds were chosen for 30 fps gets them scaled by 30 / target, or it keeps full resolution at frame times too long for 60.
+- **Check:** before writing 0, find what the engine steps by when the field is 0. A field read only as a divisor, or a step counted in frames, runs the game fast instead.
+- **Found on:** [Kirby and the Forgotten Land](../../dm/games/01004D300C5AE000/README.md) 1.1.0, from masagrator's FPSLocker config for that build.
+
 ### Unreal's frame limit and present interval, found by name
 
 - **Symptom:** an Unreal Engine game holds 30 fps with spare CPU and GPU time and asks for present interval 2; `present_interval display` alone does not help, as the engine's game thread sleeps out its own frame limit.

@@ -270,6 +270,7 @@ check_t_rt_range: t_rt_range
 	DM_NVN_UNWRITTEN_DC=0 MTL_DEBUG_LAYER=1 ./t_rt_range
 	MTL_DEBUG_LAYER=1 ./t_rt_range   # DontCare on by default: attachment bytes use the closed-form expectation of "one depth-stencil store saved per pass"
 	DM_NVN_UNWRITTEN_DC=0 MTL_DEBUG_LAYER=1 ./t_rt_range --disabled
+	DM_NVN_ENC_THREAD=1 DM_NVN_UNWRITTEN_DC=0 MTL_DEBUG_LAYER=1 ./t_rt_range   # the encode thread (the iOS default) records the depth plane copy's blits with options
 	DM_NVN_UNWRITTEN_DC=0 MTL_DEBUG_LAYER=1 ./t_rt_range --small-depth
 	DM_NVN_UNWRITTEN_DC=0 MTL_DEBUG_LAYER=1 ./t_rt_range --sample-attachment --both-flags
 t_rt_depth_ro: t_rt_depth_ro.m $(MTL_T_DEP)

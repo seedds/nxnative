@@ -834,6 +834,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** such a copy, either way between the two formats, goes through a staging buffer kept from copy to copy: the 32-bit float depth is copied out of the source with `MTLBlitOptionDepthFromDepthStencil` and into the destination's depth plane the same way (`nvn_mtl.m`, the texture copy).
 - **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) (Frostbite): from the title on.
 
+### Depth plane copies on the encode thread
+
+- **Symptom:** `FATAL deferred encoding: DmRecEnc has no stand-in for -copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:options:` with Metal encoding on its own thread (`DM_NVN_ENC_THREAD=1`, the default on iOS), at the first [depth plane copy](#depth-plane-copies-between-depth-formats).
+- **Cause:** that copy is the only one that passes blit options (`MTLBlitOptionDepthFromDepthStencil`, `enc_b_copy_texture_buffer_opt` and `enc_b_copy_buffer_texture_opt` in `nvn_mtl.m`), and the encode thread's recorder (`DmRecEnc` in `nvn_rec.h`) had stand-ins only for the copies without options. A call it has no stand-in for stops the host.
+- **Fix:** `nvn_rec.h` records both copies with their options (`RO_C_COPY_TB_OPT`, `RO_C_COPY_BT_OPT`) and replays them on the Metal 4 compute encoder. Every selector the host's encoder wrappers send now has a stand-in. `check_t_rt_range` also runs with `DM_NVN_ENC_THREAD=1`; `t_rt_range` and `t_unwritten_store` stopped there before.
+- **Found on:** the host's tests. [PR #930](https://github.com/seedds/nxnative/pull/930) added the texture-to-buffer stand-in for [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) on the Mac with the encode thread on (not run here).
+
 ### Inline uniform updates as ordered GPU copies
 
 - **Cause:** reading the uniform buffer from the CPU at encode time gives the frame's *last* value, not the draw's.

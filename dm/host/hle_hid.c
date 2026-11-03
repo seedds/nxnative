@@ -31,6 +31,9 @@ _Static_assert(sizeof(NpadState) == 0x28, "NpadState");
 // their own path because a connected controller publishes its whole state on every change (a DualShock 4's sticks change all the time), which overwrote them on the shared one;
 // the separate paths also keep scripted input out of DM_REC, which records the physical ones (rec_read)
 static _Atomic uint64_t g_btn, g_axes, g_latch, g_sc_btn, g_sc_axes, g_sc_latch, g_pad_btn[DM_PLAYERS], g_pad_axes[DM_PLAYERS], g_pad_latch[DM_PLAYERS];
+// Player 1's front end path (dm_frontend_input_set): a front end that runs the host in its own process (libdmhost) publishes its own input state here, ORed like the scripted path
+// and, like it, not recorded by DM_REC
+static _Atomic uint64_t g_fe_btn, g_fe_axes, g_fe_latch;
 static _Atomic int64_t g_sampling = 1 << 16;   // starts high so the history entries below the newest keep positive sampling numbers
 static uint64_t pack(int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     return (uint64_t)(uint16_t)lx | (uint64_t)(uint16_t)ly << 16 | (uint64_t)(uint16_t)rx << 32 | (uint64_t)(uint16_t)ry << 48;
@@ -58,6 +61,12 @@ void dm_pad_set_player(int p, uint64_t buttons, int32_t lx, int32_t ly, int32_t 
     if (!p) shake_note();
 }
 void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) { dm_pad_set_player(0, buttons, lx, ly, rx, ry); }
+void dm_frontend_input_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
+    static _Atomic int said;
+    if (!atomic_exchange(&said, 1)) LOG("hid: the front end publishes player 1's input (dm_frontend_input_set)");
+    buttons &= 0xffffull;   // NpadButton bits only (no shake)
+    uint64_t old = atomic_exchange(&g_fe_btn, buttons); atomic_fetch_or(&g_fe_latch, buttons & ~old); atomic_store(&g_fe_axes, pack(lx, ly, rx, ry));
+}
 static void script_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     uint64_t old = atomic_exchange(&g_sc_btn, buttons); atomic_fetch_or(&g_sc_latch, buttons & ~old); atomic_store(&g_sc_axes, pack(lx, ly, rx, ry));
     shake_note();
@@ -210,6 +219,8 @@ void hid_keys_init(void) {
 //   Look at a screen, decide, press, look again: menus whose timing moves from run to run (loading) need no blind timed script
 static void *ctl_main(void *arg) {
     const char *path = arg; long off = 0; char line[1100];
+    const char *ck = getenv("DM_CTL_KEYS"); int keys = !(ck && !strcmp(ck, "0"));   // DM_CTL_KEYS=0: key lines belong to a front end that reads the same file and presses them through dm_frontend_input_set
+    if (!keys) LOG("DM_CTL: key lines are left to the front end (DM_CTL_KEYS=0)");
     for (;;) {
         FILE *f = fopen(path, "r");
         if (f && !fseek(f, off, SEEK_SET)) {
@@ -236,6 +247,7 @@ static void *ctl_main(void *arg) {
                     for (int i = 0; i <= n; i++) { dm_touch t = {0, x0 + (x1 - x0) * (float)i / (float)n, y0 + (y1 - y0) * (float)i / (float)n}; dm_touch_script(&t, 1); usleep((useconds_t)(s * 1e6f / (float)n)); }
                     dm_touch_script(NULL, 0); continue;
                 }
+                if (!keys) continue;
                 key_step st = {0, 0.15, 0}; char *h = strchr(line, '~'); if (h) { *h = 0; st.hold = atof(h + 1); }
                 parse_keys(line, &st);
                 LOG("DM_CTL: press %#llx (hold %.2f s)", (unsigned long long)st.btn, st.hold);
@@ -427,6 +439,8 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
         if (atomic_load_explicit(&g_rec_on, memory_order_relaxed)) rec_read((b & 0xffffull) | ((atomic_load(&g_btn) | atomic_load(&g_pad_btn[0])) & DM_BTN_SHAKE), a);
         b |= atomic_load(&g_sc_btn) | atomic_exchange(&g_sc_latch, 0);
         uint64_t c = atomic_load(&g_sc_axes); for (int i = 0; i < 4; i++) a[i] = pick(a[i], ax(c, i));
+        b |= atomic_load(&g_fe_btn) | atomic_exchange(&g_fe_latch, 0);
+        uint64_t f = atomic_load(&g_fe_axes); for (int i = 0; i < 4; i++) a[i] = pick(a[i], ax(f, i));
     }
     s->lx = a[0]; s->ly = a[1]; s->rx = a[2]; s->ry = a[3];
     b &= 0xffffull;

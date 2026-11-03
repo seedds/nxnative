@@ -37,6 +37,13 @@ int main(void) { @autoreleasepool {
     for (NSString *k in @[@"Switch Pro Controller", @"Nintendo Switch Joy-Con (L/R)", @"Nintendo Switch Joy-Con (R)"]) {   // by label
         assert(face(k, 'A') == DM_BTN_A); assert(face(k, 'B') == DM_BTN_B); assert(face(k, 'X') == DM_BTN_X); assert(face(k, 'Y') == DM_BTN_Y);
     }
+    setenv("DM_PAD_LAYOUT", "xbox", 1);   // Xbox labels: an Xbox pad and a DualSense (Cross A, Circle B, Square X, Triangle Y) name for name; a Nintendo pad stays by label
+    for (NSString *k in @[@"Xbox Wireless Controller", @"DualSense Wireless Controller", @"Switch Pro Controller"]) {
+        assert(face(k, 'A') == DM_BTN_A); assert(face(k, 'B') == DM_BTN_B); assert(face(k, 'X') == DM_BTN_X); assert(face(k, 'Y') == DM_BTN_Y);
+    }
+    setenv("DM_PAD_LAYOUT", "position", 1);
+    assert(face(@"DualSense Wireless Controller", 'A') == DM_BTN_B); assert(face(@"DualSense Wireless Controller", 'X') == DM_BTN_Y);
+    unsetenv("DM_PAD_LAYOUT");
     TestPad *g = [TestPad new];   // nothing pressed, buttons nil: none
     assert(dm_pad_face((GCExtendedGamepad *)(id)g) == 0);
     printf("t_pad_apple OK\n");

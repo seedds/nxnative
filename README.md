@@ -92,6 +92,12 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza --platform mac-a
 
 You get a Mac app, with no icon because the folder holds none. iPhone and iPad are untested.
 
+The same files packed into one [NUP](https://github.com/a55uka/nup) container (`nup pack ~/Games/DonkeyKongBananza game.nup`) build the same way: give the `.nup` file, or a folder that holds it. A NUP that carries the game's control data (its NACP) and icon gives the app the game's name and icon; otherwise the name comes from the game's profile, as for a folder of files.
+
+```
+python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nup --platform mac-app
+```
+
 ## Games
 
 Games tested on Mac or iPhone. See the [per-game notes](dm/games/README.md#games) for tested platforms, progress and known issues:

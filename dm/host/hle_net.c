@@ -22,7 +22,7 @@ HLE_FORCE("_ZN2nn4nifm22IsNetworkRequestOnHoldEv", "offline: on hold for the fir
     while (h > 0 && !atomic_compare_exchange_weak(&g_nifm_hold, &h, h - 1)) {}
     return h > 0;
 }
-HLE_FORCE("_ZN2nn4nifm18IsNetworkAvailableEv", "offline: the network is always unavailable", int, h_nifm_Available, void) { return 0; }
+HLE_FORCE("_ZN2nn4nifm18IsNetworkAvailableEv", "offline: unavailable, except for the LAN link of local wireless (DM_LDN_PEER) once the game asked for the local network mode", int, h_nifm_Available, void) { return dm_nifm_available(); }
 // Returns bool (`and w0, w0, #1`, Metroid Dread's sdk+0x336210): whether the system's network screen resolved the error
 HLE_FORCE("_ZN2nn4nifm31HandleNetworkRequestErrorResultEv", "offline: not resolved, shows no system network screen", unsigned, h_nifm_HandleErr, void) { return 0; }
 HLE_FORCE("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEPNS_6socket6InAddrE", "offline: no IP", Result, h_nifm_GetIp, uint32_t *a) { if (a) *a = 0; return RES_FAIL; }
@@ -54,16 +54,16 @@ int dm_sk_select(int nfds, const uint64_t *r, const uint64_t *w, const uint64_t 
     for (int k = 0; k < 3; k++) for (int fd = 0; sets[k] && fd < nfds && fd < 1024; fd++) if (sets[k][fd >> 6] >> (fd & 63) & 1) return sk_fail();
     return sk_idle(tv ? tv[0] * 1000 + tv[1] / 1000 : -1);
 }
-SKF("_ZN2nn6socket6SocketENS0_6FamilyENS0_4TypeENS0_8ProtocolE", h_sk_Socket, int a, int b, int c) { (void)a; (void)b; (void)c; return sk_fail(); }
-SKF("_ZN2nn6socket4BindEiPKNS0_8SockAddrEj", h_sk_Bind, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return sk_fail(); }
-SKF("_ZN2nn6socket7ConnectEiPKNS0_8SockAddrEj", h_sk_Connect, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return sk_fail(); }
-SKF("_ZN2nn6socket6ListenEii", h_sk_Listen, int s, int n) { (void)s; (void)n; return sk_fail(); }
-SKF("_ZN2nn6socket6AcceptEiPNS0_8SockAddrEPj", h_sk_Accept, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
-SKF("_ZN2nn6socket5CloseEi", h_sk_Close, int s) { (void)s; return sk_fail(); }
+SKF("_ZN2nn6socket6SocketENS0_6FamilyENS0_4TypeENS0_8ProtocolE", h_sk_Socket, int a, int b, int c) { if (dm_ldn_enabled()) { dm_bsd_note_lr(__builtin_return_address(0), __builtin_frame_address(1)); return dm_bsd_socket(a, b, c); } (void)a; (void)b; (void)c; return sk_fail(); }
+SKF("_ZN2nn6socket4BindEiPKNS0_8SockAddrEj", h_sk_Bind, int s, const void *a, unsigned n) { if (dm_ldn_enabled()) { dm_bsd_note_lr(__builtin_return_address(0), __builtin_frame_address(1)); return dm_bsd_bind(s, a, n); } (void)s; (void)a; (void)n; return sk_fail(); }
+SKF("_ZN2nn6socket7ConnectEiPKNS0_8SockAddrEj", h_sk_Connect, int s, const void *a, unsigned n) { if (dm_ldn_enabled()) { dm_bsd_note_lr(__builtin_return_address(0), __builtin_frame_address(1)); return dm_bsd_connect(s, a, n); } (void)s; (void)a; (void)n; return sk_fail(); }
+SKF("_ZN2nn6socket6ListenEii", h_sk_Listen, int s, int n) { if (dm_ldn_enabled()) { dm_bsd_note_lr(__builtin_return_address(0), __builtin_frame_address(1)); return dm_bsd_listen(s, n); } (void)s; (void)n; return sk_fail(); }
+SKF("_ZN2nn6socket6AcceptEiPNS0_8SockAddrEPj", h_sk_Accept, int s, void *a, unsigned *n) { if (dm_ldn_enabled()) { dm_bsd_note_lr(__builtin_return_address(0), __builtin_frame_address(1)); return dm_bsd_accept(s, a, n); } (void)s; (void)a; (void)n; return sk_fail(); }
+SKF("_ZN2nn6socket5CloseEi", h_sk_Close, int s) { if (dm_ldn_enabled()) { dm_bsd_note_lr(__builtin_return_address(0), __builtin_frame_address(1)); return dm_bsd_close(s); } (void)s; return sk_fail(); }
 SKF("_ZN2nn6socket11GetPeerNameEiPNS0_8SockAddrEPj", h_sk_GetPeerName, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
-SKF("_ZN2nn6socket11GetSockNameEiPNS0_8SockAddrEPj", h_sk_GetSockName, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
+SKF("_ZN2nn6socket11GetSockNameEiPNS0_8SockAddrEPj", h_sk_GetSockName, int s, void *a, unsigned *n) { if (dm_ldn_enabled()) { dm_bsd_note_lr(__builtin_return_address(0), __builtin_frame_address(1)); return dm_bsd_getsockname(s, a, n); } (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket10GetSockOptEiNS0_5LevelENS0_6OptionEPvPj", h_sk_GetSockOpt, int s, int l, int o, void *v, unsigned *n) { (void)s; (void)l; (void)o; (void)v; (void)n; return sk_fail(); }
-SKF("_ZN2nn6socket10SetSockOptEiNS0_5LevelENS0_6OptionEPKvj", h_sk_SetSockOpt, int s, int l, int o, const void *v, unsigned n) { (void)s; (void)l; (void)o; (void)v; (void)n; return sk_fail(); }
+SKF("_ZN2nn6socket10SetSockOptEiNS0_5LevelENS0_6OptionEPKvj", h_sk_SetSockOpt, int s, int l, int o, const void *v, unsigned n) { if (dm_ldn_enabled()) { dm_bsd_note_lr(__builtin_return_address(0), __builtin_frame_address(1)); return dm_bsd_setsockopt(s, l, o, v, n); } (void)s; (void)l; (void)o; (void)v; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket5FcntlEiNS0_12FcntlCommandEz", h_sk_Fcntl, int s, int c) { (void)s; (void)c; return sk_fail(); }
 SKF("_ZN2nn6socket4PollEPNS0_6PollFdEmi", h_sk_Poll, void *f, unsigned long n, int t) { return dm_sk_poll(f, n, t); }
 SKF("_ZN2nn6socket6SelectEiPNS0_5FdSetES2_S2_PNS0_7TimeValE", h_sk_Select, int n, void *r, void *w, void *e, void *t) { return dm_sk_select(n, r, w, e, t); }
@@ -72,15 +72,15 @@ SKF("_ZN2nn6socket11EventFdReadEiPm", h_sk_EventFdRead, int s, unsigned long *v)
 SKF("_ZN2nn6socket12EventFdWriteEim", h_sk_EventFdWrite, int s, unsigned long v) { (void)s; (void)v; return sk_fail(); }
 SKF("_ZN2nn6socket17ResolverGetOptionEPNS0_14ResolverOptionENS0_17ResolverOptionKeyE", h_sk_ResGet, void *o, int k) { (void)o; (void)k; return sk_fail(); }
 SKF("_ZN2nn6socket17ResolverSetOptionERKNS0_14ResolverOptionE", h_sk_ResSet, const void *o) { (void)o; return sk_fail(); }
-HLE_FORCE("_ZN2nn6socket4RecvEiPvmNS0_7MsgFlagE", "bsd socket service (cut)", long, h_sk_Recv, int s, void *b, unsigned long n, int f) { (void)s; (void)b; (void)n; (void)f; return sk_fail(); }
-HLE_FORCE("_ZN2nn6socket8RecvFromEiPvmNS0_7MsgFlagEPNS0_8SockAddrEPj", "bsd socket service (cut)", long, h_sk_RecvFrom, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { (void)s; (void)b; (void)n; (void)f; (void)a; (void)al; return sk_fail(); }
-HLE_FORCE("_ZN2nn6socket4SendEiPKvmNS0_7MsgFlagE", "bsd socket service (cut)", long, h_sk_Send, int s, const void *b, unsigned long n, int f) { (void)s; (void)b; (void)n; (void)f; return sk_fail(); }
+HLE_FORCE("_ZN2nn6socket4RecvEiPvmNS0_7MsgFlagE", "bsd socket service (cut)", long, h_sk_Recv, int s, void *b, unsigned long n, int f) { if (dm_ldn_enabled()) { dm_bsd_note_lr(__builtin_return_address(0), __builtin_frame_address(1)); return dm_bsd_recvfrom(s, b, n, f, 0, 0); } (void)s; (void)b; (void)n; (void)f; return sk_fail(); }
+HLE_FORCE("_ZN2nn6socket8RecvFromEiPvmNS0_7MsgFlagEPNS0_8SockAddrEPj", "bsd socket service (cut)", long, h_sk_RecvFrom, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { if (dm_ldn_enabled()) { dm_bsd_note_lr(__builtin_return_address(0), __builtin_frame_address(1)); return dm_bsd_recvfrom(s, b, n, f, a, al); } (void)s; (void)b; (void)n; (void)f; (void)a; (void)al; return sk_fail(); }
+HLE_FORCE("_ZN2nn6socket4SendEiPKvmNS0_7MsgFlagE", "bsd socket service (cut)", long, h_sk_Send, int s, const void *b, unsigned long n, int f) { if (dm_ldn_enabled()) { dm_bsd_note_lr(__builtin_return_address(0), __builtin_frame_address(1)); return dm_bsd_sendto(s, b, n, f, 0, 0); } (void)s; (void)b; (void)n; (void)f; return sk_fail(); }
 HLE_FORCE("_ZN2nn6socket11GetAddrInfoEPKcS2_PKNS0_8AddrInfoEPPS3_", "name resolution (cut): EAI_FAIL", int, h_sk_GetAddrInfo, const char *h, const char *s, const void *hint, void **res) {
     (void)h; (void)s; (void)hint; if (res) *res = NULL; return 4;   // EAI_FAIL
 }
 HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEPNS0_8AddrInfoE", "pairs with GetAddrInfo (cut)", void, h_sk_FreeAddrInfo, void *ai) { (void)ai; }
 HLE_FORCE("_ZN2nn6socket16GetHostEntByNameEPKcPKNS0_14ResolverOptionEm", "name resolution (cut): NULL", void *, h_sk_GetHostEnt, const char *n, const void *o, unsigned long c) { (void)n; (void)o; (void)c; t_skerr = SK_ENETDOWN; return NULL; }
-HLE_FORCE("_ZN2nn6socket12GetLastErrorEv", "socket error code kept by the host", int, h_sk_GetLastError, void) { return t_skerr; }
+HLE_FORCE("_ZN2nn6socket12GetLastErrorEv", "socket error code kept by the host", int, h_sk_GetLastError, void) { return dm_ldn_enabled() ? dm_bsd_errno() : t_skerr; }
 // C interface
 SKF("nnsocketSocket", h_nsk_Socket, int a, int b, int c) { (void)a; (void)b; (void)c; return sk_fail(); }
 SKF("nnsocketBind", h_nsk_Bind, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return sk_fail(); }

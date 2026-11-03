@@ -26,10 +26,23 @@ HLE_FORCE("_ZN2nn7friends14GetProfileListEPNS0_12AsyncContextEPNS0_7ProfileERKNS
           Result, h_fr_GetProfileList, void *ctx, void *out, const void *uid, const void *ids, int n) { (void)ctx; (void)out; (void)uid; (void)ids; (void)n; return RES_FAIL; }
 HLE_FORCE("_ZN2nn7friends16UpdateFriendInfoEPNS0_6FriendERKNS_7account3UidEPKNS3_23NetworkServiceAccountIdEi", "friend info update fails (cut)",
           Result, h_fr_UpdateFriendInfo, void *f, const void *uid, const void *ids, int n) { (void)f; (void)uid; (void)ids; (void)n; return RES_FAIL; }
-HLE_FORCE("_ZN2nn7friends14AddPlayHistoryERKNS0_26PlayHistoryRegistrationKeyERKNS0_15InAppScreenNameES6_", "play history is not registered (cut)",
-          Result, h_fr_AddPlayHistory, const void *k, const void *a, const void *b) { (void)k; (void)a; (void)b; return RES_FAIL; }
-HLE_FORCE("_ZN2nn7friends29GetPlayHistoryRegistrationKeyEPNS0_26PlayHistoryRegistrationKeyERKNS_7account3UidEb", "play history key unavailable (cut)",
-          Result, h_fr_GetPHKey, void *k, const void *uid, int local) { (void)k; (void)uid; (void)local; return RES_FAIL; }
+HLE_FORCE("_ZN2nn7friends14AddPlayHistoryERKNS0_26PlayHistoryRegistrationKeyERKNS0_15InAppScreenNameES6_", "play history is not kept; accepted with local wireless over the network (DM_LDN_PEER), else not registered (cut)",
+          Result, h_fr_AddPlayHistory, const void *k, const void *a, const void *b) { (void)k; (void)a; (void)b; return dm_ldn_enabled() ? RES_OK : RES_FAIL; }
+// PlayHistoryRegistrationKey (0x40 bytes): u16 type 0x101, u8 key index (0-7), u8 user-ID flag, u8 local-play flag, 11 reserved, a 16-byte UUID of the user, then a 32-byte HMAC-SHA256 under
+// the friends service's key number <index>. Pia builds one per local player when it joins a session and stops on a failure (Animal Crossing: New Horizons, main+0x16c698 → its error path:
+// the station left a Switch's local session 40 ms after the host's first packet). Ryujinx answers the same layout with a blank HMAC and plays local sessions with a Switch through ldn_mitm
+static uint8_t g_ph_uuid[16]; static int g_ph_uuid_set;
+HLE_FORCE("_ZN2nn7friends29GetPlayHistoryRegistrationKeyEPNS0_26PlayHistoryRegistrationKeyERKNS_7account3UidEb", "play history key: built on the host with local wireless over the network (DM_LDN_PEER), else unavailable (cut)",
+          Result, h_fr_GetPHKey, void *k, const void *uid, int local) {
+    (void)uid;
+    if (!dm_ldn_enabled() || !k) return RES_FAIL;
+    if (!g_ph_uuid_set) { arc4random_buf(g_ph_uuid, sizeof g_ph_uuid); g_ph_uuid_set = 1; }   // one UUID per run, as the friends service keeps one per user
+    uint8_t *o = k; memset(o, 0, 0x40);
+    o[0] = 0x01; o[1] = 0x01; o[2] = (uint8_t)(arc4random() & 7); o[3] = 0; o[4] = (uint8_t)(local & 0xff ? 1 : 0);
+    memcpy(o + 0x10, g_ph_uuid, 16);
+    LOG("[ldn] friends: play history key built (local play %d)", local & 0xff);
+    return RES_OK;
+}
 // Notification queue
 HLE_FORCE("_ZN2nn7friends17NotificationQueueC1Ev", "notification queue creates no session (cut)", void, h_fr_NqCtor, void *self) { (void)self; }
 HLE_FORCE("_ZN2nn7friends17NotificationQueueD1Ev", "notification queue has no session to close (cut)", void, h_fr_NqDtor, void *self) { (void)self; }

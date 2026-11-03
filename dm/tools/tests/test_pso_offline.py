@@ -106,11 +106,13 @@ class Plan(unittest.TestCase):
         self.shader('fs', {}, {'_b': [('main0', False)]})
         self.shader('fsc', {}, {'_b': [('main0', True)]})
         self.shader('fsx', {'entry': 'main1'}, {'_b': [('main0', False)]})
-        pairs = [('pull', 'fs'), ('plain', 'fs'), ('inputs', 'fs'), ('layer', 'fs'), ('other', 'fs'), ('nolib', 'fs'), ('pull', 'fsc'), ('pull', 'fsx'), ('pull', 'gone'), ('pull', 'fs')]
+        self.shader('fsp', {'raster': {'primitive_id': 1}}, {'_b': [('main0', False)]})   # reads the primitive ID: no base
+        pairs = [('pull', 'fs'), ('plain', 'fs'), ('inputs', 'fs'), ('layer', 'fs'), ('other', 'fs'), ('nolib', 'fs'), ('pull', 'fsc'), ('pull', 'fsx'), ('pull', 'gone'), ('pull', 'fs'),
+                 ('plain', 'fsp')]
         bases, rest, left = po.plan(self.d, CHAIN, pairs, False)
         self.assertEqual(bases, [('pull_bp', 'main0', 'fs_b', 'main0'), ('plain_b', 'main0', 'fs_b', 'main0')])
         self.assertEqual(rest, [('pull', 'fsc')])
-        self.assertEqual(left, {'reflection': 2, 'stage inputs': 1, 'library': 1, 'layer': 1, 'entry': 1})
+        self.assertEqual(left, {'reflection': 2, 'stage inputs': 1, 'library': 1, 'layer': 1, 'primitive ID': 1, 'entry': 1})
         bases, _, _ = po.plan(self.d, CHAIN, pairs[:2], True)   # near = 0: the entry_z entries
         self.assertEqual(bases, [('pull_bp', 'main0_z', 'fs_b', 'main0'), ('plain_b', 'main0_z', 'fs_b', 'main0')])
 
@@ -144,10 +146,11 @@ class Build(unittest.TestCase):
         (self.prof / 'game.tsv').write_text('title_id\t0100000000001000\nname\tTest\ndepth_mode\tzero\n')
         (self.prof / 'shader_pairs.tsv').write_text('# pairs\nv\tf\nv\tc\n')
         self.out, self.work, self.calls = self.t / 'out', self.t / 'work', []
+        self.compiler = 'AIR-TT 1.0'
 
     def fake_run(self, cmd, **kw):
         cmd = [str(c) for c in cmd]
-        if '-version' in cmd: return subprocess.CompletedProcess(cmd, 0, 'AIR-TT 1.0\n', '')
+        if '-version' in cmd: return subprocess.CompletedProcess(cmd, 0, self.compiler + '\n', '')
         if '--show-sdk-version' in cmd: return subprocess.CompletedProcess(cmd, 0, '27.1\n', '')
         self.calls.append(cmd); Path(cmd[cmd.index('-o') + 1]).write_bytes(b'archive ' + cmd[cmd.index('-arch') + 1].encode())
         return subprocess.CompletedProcess(cmd, 0)
@@ -176,10 +179,83 @@ class Build(unittest.TestCase):
         self.assertEqual(self.main('--gpu', 'g17p', '--os-min', '26.0'), 0)   # another minimum: built again; g18p no longer asked for: removed
         self.assertEqual(self.calls[-1][7], '26.0')
         self.assertEqual(sorted(p.name for p in self.out.glob('*.mtl4a')), ['applegpu_g17p.mtl4a'])
-        (self.prof / 'shader_pairs.tsv').write_text('v\tf\n')   # other pairs: built again, no pair left to the device
+        (self.prof / 'shader_pairs.tsv').write_text('v\tf\n')   # only a device-specialized pair removed: offline bases unchanged
         self.assertEqual(self.main('--gpu', 'g17p', '--os-min', '26.0'), 0)
-        self.assertEqual(len(self.calls), 4)
+        self.assertEqual(len(self.calls), 3)
         self.assertFalse((self.out / 'rest_pairs.tsv').exists())
+
+    def test_chain_move_reuses_binary_and_refreshes_metadata_for_both_platforms(self):
+        for platform in ('macos', 'ios'):
+            with self.subTest(platform=platform):
+                self.out, self.work = self.t / f'out-{platform}', self.t / f'work-{platform}'
+                args = ('--platform', platform, '--os-min', '27.0')
+                self.main(*args)
+                archive = self.out / 'applegpu_g18p.mtl4a'
+                identity = archive.stat().st_ino, archive.stat().st_mtime_ns, archive.read_bytes()
+                before = len(self.calls)
+                chain = 'fedcba987654' if platform == 'macos' else 'abcdef012345'
+                moved = self.t / platform / f'b-{chain}'
+                shutil.copytree(self.lib, moved)
+                for p in moved.glob('*_b.json'):
+                    j = json.loads(p.read_text()); j['chain'] = chain; p.write_text(json.dumps(j))
+                (moved / 'inputs.tsv').write_text('game\tX\ninputs\tupdated-profile\n')
+                self.lib = moved
+                self.assertEqual(self.main(*args), 0)
+                self.assertEqual(len(self.calls), before, 'chain-only move must not invoke metal-tt')
+                self.assertEqual((archive.stat().st_ino, archive.stat().st_mtime_ns, archive.read_bytes()), identity)
+                self.assertEqual((self.out / 'prebuilt.tsv').read_text(), po.stamp(chain, True, (self.prof / 'shader_pairs.tsv').read_bytes()))
+                self.assertIn(str(moved), (self.work / 'bases.mtl4-json').read_text())
+
+    def test_metadata_only_changes_reuse_but_refresh_runtime_lists(self):
+        self.main()
+        (self.lib / 'inputs.tsv').write_text('game\tX\ninputs\tnew-profile\n')
+        pairs = b'# changed comment\nv\tf\nv\tf\n'
+        (self.prof / 'shader_pairs.tsv').write_bytes(pairs)
+        self.main()
+        self.assertEqual(len(self.calls), 1)
+        self.assertFalse((self.out / 'rest_pairs.tsv').exists())
+        self.assertEqual((self.out / 'prebuilt.tsv').read_text(), po.stamp(CHAIN, True, pairs))
+
+    def test_pipeline_entry_and_descriptor_changes_rebuild(self):
+        self.main()
+        self.main('--depth', 'gl')
+        self.assertEqual(len(self.calls), 2)
+        original = po.script
+        def changed(lib_dir, bases):
+            config = original(lib_dir, bases)
+            config['pipeline_descriptors']['render_pipeline_descriptors'][0]['raster_sample_count'] = 4
+            return config
+        with mock.patch.object(po, 'script', changed):
+            self.main('--depth', 'gl')
+            self.assertEqual(len(self.calls), 3)
+            self.main('--depth', 'gl')
+            self.assertEqual(len(self.calls), 3)
+
+    def test_platform_minimum_and_compiler_changes_rebuild(self):
+        self.main('--platform', 'ios', '--os-min', '27.0')
+        self.main('--platform', 'macos', '--os-min', '27.0')
+        self.assertEqual(len(self.calls), 2)
+        self.main('--platform', 'macos', '--os-min', '26.0')
+        self.assertEqual(len(self.calls), 3)
+        self.compiler = 'AIR-TT 2.0'
+        self.main('--platform', 'macos', '--os-min', '26.0')
+        self.assertEqual(len(self.calls), 4)
+
+    def test_missing_archive_and_legacy_key_rebuild(self):
+        self.main()
+        (self.out / 'applegpu_g18p.mtl4a').unlink()
+        self.main()
+        self.assertEqual(len(self.calls), 2)
+        (self.work / 'key.applegpu_g18p').write_text('legacy-cache-key\n')
+        self.main()
+        self.assertEqual(len(self.calls), 3)
+
+    def test_stale_reflection_cannot_reuse_archive(self):
+        self.main()
+        p = self.lib / 'v_b.json'
+        j = json.loads(p.read_text()); j['chain'] = 'stale'; p.write_text(json.dumps(j))
+        with self.assertRaises(SystemExit): self.main()
+        self.assertEqual(len(self.calls), 1)
 
     def test_macos_takes_this_macs_major_version(self):   # not the SDK's: Xcode 27.1's SDK is 27.0 on macOS 26.6, which cannot open a 27.0 archive (GitHub issue #673)
         def run(cmd, **kw):
@@ -197,10 +273,11 @@ class Build(unittest.TestCase):
         with self.assertRaises(SystemExit): self.main('--script-only')
 
     def test_profile_archives_match_observed_depth(self):
-        # Issue #758 and its seven-game follow-up: these builds' NVN calls select near=0 (evidence in each game note).
+        # Issue #758 and its seven-game follow-up, then four found by reading the NSP script's check boots: these builds' NVN calls select near=0 (evidence in each game note).
         # Exercise the real profiles through the builder with synthetic pairs: an omitted key must not quietly build main0.
         profiles = ('01008CF01BAAC000', '010089C01E9CA000', '010056B015FE8000', '01007BB017812000',
-                    '01003E601E324000', '010020400E1C2000', '0100429011144000', '010014C011146000')
+                    '01003E601E324000', '010020400E1C2000', '0100429011144000', '010014C011146000',
+                    '0100ACD0163D0000', '010040801A4C8000', '0100C49025D3E000', '0100A3900C3E2000')
         for gid in profiles:
             with self.subTest(game=gid):
                 self.main('--game', gid, '--pairs', str(self.prof / 'shader_pairs.tsv'), '--script-only')

@@ -133,7 +133,7 @@ static void packed_copies(int format, int tid) {
     int b565 = format == NVN_FORMAT_RGB565, a1 = format == NVN_FORMAT_RGB5A1;
     uint16_t red = a1 ? 0x801f : 0x001f, blue = b565 ? 0xf800 : 0x7c00, guest[2] = {red, blue};
     void *mem = NULL; if (posix_memalign(&mem, getpagesize(), 262144)) abort(); memset(mem, 0, 262144);
-    pool_t pool = {.mem=mem, .size=262144}; mtl_pool_add(mem, 262144); nvn_dirty_add_range(mem, 262144);
+    pool_t pool = {.magic=MAGIC('P','O','O','L'), .mem=mem, .size=262144}; mtl_pool_add(mem, 262144); nvn_dirty_add_range(mem, 262144);
     NVNtextureBuilder tb; NVNtexture copied, cleared; h_nvnTextureBuilderSetDefaults(&tb); h_nvnTextureBuilderSetWidth(&tb, 2);
     h_nvnTextureBuilderSetHeight(&tb, 1); h_nvnTextureBuilderSetFormat(&tb, format);
     h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&pool, 65536); EXPECT("packed texture init", 1, h_nvnTextureInitialize(&copied, &tb));
@@ -187,7 +187,7 @@ static void mirror_completion(void) {
     printf("mirror completion: %s wins\n", early ? "guest waiter" : "GPU feedback");
     readback_feedback_idle();
     void *mem = NULL; if (posix_memalign(&mem, getpagesize(), 262144)) abort(); memset(mem, 0, 262144);
-    pool_t pool = {.mem=mem, .size=262144}; mtl_pool_add(mem, 262144); nvn_dirty_add_range(mem, 262144);
+    pool_t pool = {.magic=MAGIC('P','O','O','L'), .mem=mem, .size=262144}; mtl_pool_add(mem, 262144); nvn_dirty_add_range(mem, 262144);
     NVNtextureBuilder tb; NVNtexture source, packaged; h_nvnTextureBuilderSetDefaults(&tb);
     h_nvnTextureBuilderSetWidth(&tb, 8); h_nvnTextureBuilderSetHeight(&tb, 4); h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
     h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&pool, 131072);
@@ -261,12 +261,72 @@ static void mirror_completion(void) {
     nvn_dirty_remove_range(mem); mtl_pool_del(mem); free(mem);
 }
 
+// A texture ID outlives the game's memory pool object: the ID stays registered, the object is freed and its memory reused. What was there reads as anything, as x8 = pool->vp =
+// 0x2c33398156a0e722 did in nvn_sparse_protect after 22 minutes of FINAL FANTASY RESONANCE (GitHub issue #934). Nothing may be made or refreshed from such a texture's pool or storage.
+static void pool_object_reused(pool_t *o) { memset(o, 0x22, sizeof(NVNmemoryPool)); o->vp = (struct vpool *)0x2c33398156a0e722ull; }
+static id<MTLTexture> by_id(int tid) { os_unfair_lock_lock(&g_rmu); id<MTLTexture> t = tex_by_id(tid); os_unfair_lock_unlock(&g_rmu); return t; }
+static void stale_pools(void) {
+    size_t len = 4 * (size_t)getpagesize();
+    uint8_t *phys = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (phys == MAP_FAILED) abort();
+    NVNmemoryPool *mp = calloc(1, sizeof *mp), *sp = calloc(1, sizeof *sp), *mp2 = calloc(1, sizeof *mp2);   // the game's objects, on its heap
+    pool_builder_t pb = {.mem=phys, .size=len, .flags=0x24}, vb = {.size=DM_GAME_APP_POOL + 4 * len, .flags=NVN_MEMORY_POOL_FLAGS_VIRTUAL};
+    EXPECT("stale: physical pool init", 1, h_nvnMemoryPoolInitialize(mp, (const NVNmemoryPoolBuilder *)&pb));
+    NVNpackagedTextureLayout lay = {{1, 0, 0, 0, 7, 0, 1, 0}}; NVNtextureBuilder tb; h_nvnTextureBuilderSetDefaults(&tb); h_nvnTextureBuilderSetWidth(&tb, 8);
+    h_nvnTextureBuilderSetHeight(&tb, 4); h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8); h_nvnTextureBuilderSetPackagedTextureLayout(&tb, &lay);
+    h_nvnTextureBuilderSetStorage(&tb, mp, 0);
+
+    // The texture finalized and its ID left registered, its pool then finalized and the object reused; a late read has no host texture to fall back on, so it would upload (the crash)
+    NVNtexture late, live, unfinalized; EXPECT("stale: late texture init", 1, h_nvnTextureInitialize(&late, &tb));
+    EXPECT("stale: live texture init", 1, h_nvnTextureInitialize(&live, &tb));
+    EXPECT("stale: unfinalized texture init", 1, h_nvnTextureInitialize(&unfinalized, &tb));
+    mtl_reg_tex(601, (const tex_t *)&late, NULL); mtl_reg_tex(602, (const tex_t *)&live, NULL);
+    id<MTLTexture> made = by_id(602); EXPECT("stale: a texture of a live pool resolves by ID", 1, made != nil);
+    h_nvnTextureFinalize(&late);
+    h_nvnMemoryPoolFinalize(mp); pool_object_reused((pool_t *)mp);
+    EXPECT("stale: finalized texture and pool, object reused, read by ID -> empty slot", 1, by_id(601) == nil);
+    // A live texture the host already made stays what it was, with no refresh from the dead pool; one it has not made stays unmade, also through its object rather than an ID
+    uint64_t uploads = g_pkg_uploads, reuploads = g_pkg_reuploads;
+    EXPECT("stale: live texture of a finalized pool keeps its host texture", 1, by_id(602) == made);
+    EXPECT("stale: live texture of a finalized pool, through its object", 1, tex_mtl((const tex_t *)&live) == made);
+    EXPECT("stale: a texture never made is not made", 1, tex_mtl((const tex_t *)&unfinalized) == nil);
+    EXPECT("stale: nothing was uploaded", 1, g_pkg_uploads == uploads && g_pkg_reuploads == reuploads);
+
+    // A new pool at the same address (a heap reuses a freed block of this size) does not bring the old pool's IDs back: their storage is still gone, until the game registers them again
+    EXPECT("stale: new pool at the old object's address", 1, h_nvnMemoryPoolInitialize(mp, (const NVNmemoryPoolBuilder *)&pb));
+    EXPECT("stale: the old ID stays empty over the new pool", 1, by_id(601) == nil);
+    h_nvnTextureBuilderSetStorage(&tb, mp, 0); NVNtexture again; EXPECT("stale: new texture init", 1, h_nvnTextureInitialize(&again, &tb));
+    mtl_reg_tex(601, (const tex_t *)&again, NULL); EXPECT("stale: registered again -> resolves", 1, by_id(601) != nil);
+    h_nvnTextureFinalize(&again); h_nvnMemoryPoolFinalize(mp); memset(mp, 0, sizeof *mp);
+
+    // The object overwritten with no Finalize at all: no gone mark can know, and its magic is what is left to tell
+    EXPECT("stale: physical pool init 2", 1, h_nvnMemoryPoolInitialize(mp2, (const NVNmemoryPoolBuilder *)&pb));
+    h_nvnTextureBuilderSetStorage(&tb, mp2, 0); NVNtexture unsaid; EXPECT("stale: texture init 2", 1, h_nvnTextureInitialize(&unsaid, &tb));
+    mtl_reg_tex(603, (const tex_t *)&unsaid, NULL);
+    pool_t saved = *(pool_t *)mp2; pool_object_reused((pool_t *)mp2);
+    EXPECT("stale: pool object overwritten with no Finalize, read by ID -> empty slot", 1, by_id(603) == nil);
+    *(pool_t *)mp2 = saved; h_nvnTextureFinalize(&unsaid); h_nvnMemoryPoolFinalize(mp2);
+
+    // A sparse texture the host uploaded: its next look would go through the dead pool's page table (nvn_sparse_since), not only a first upload's protection
+    EXPECT("stale: physical pool init 3", 1, h_nvnMemoryPoolInitialize(mp2, (const NVNmemoryPoolBuilder *)&pb));
+    EXPECT("stale: sparse pool init", 1, h_nvnMemoryPoolInitialize(sp, (const NVNmemoryPoolBuilder *)&vb));
+    map_req map = {.phys=mp2, .size=len}; EXPECT("stale: sparse mapping", 1, h_nvnMemoryPoolMapVirtual(sp, 1, (const NVNmappingRequest *)&map));
+    NVNtextureBuilder sb; NVNtexture st; h_nvnTextureBuilderSetDefaults(&sb); h_nvnTextureBuilderSetWidth(&sb, 8); h_nvnTextureBuilderSetHeight(&sb, 4);
+    h_nvnTextureBuilderSetFormat(&sb, NVN_FORMAT_RGBA8); h_nvnTextureBuilderSetStorage(&sb, sp, 0); EXPECT("stale: sparse texture init", 1, h_nvnTextureInitialize(&st, &sb));
+    mtl_reg_tex(604, (const tex_t *)&st, NULL);
+    id<MTLTexture> smade = by_id(604); EXPECT("stale: sparse texture resolves", 1, smade != nil);
+    h_nvnMemoryPoolFinalize(sp); pool_object_reused((pool_t *)sp);
+    EXPECT("stale: sparse texture of a finalized pool keeps its host texture", 1, by_id(604) == smade);
+    EXPECT("stale: and through its object", 1, tex_mtl((const tex_t *)&st) == smade);
+    mtl_reg_tex(601, NULL, NULL); mtl_reg_tex(602, NULL, NULL); mtl_reg_tex(603, NULL, NULL); mtl_reg_tex(604, NULL, NULL);
+    h_nvnMemoryPoolFinalize(mp2); munmap(phys, len); free(mp); free(mp2); free(sp);
+}
+
 int main(void) { @autoreleasepool {
     alarm(60); if (setvbuf(stdout, NULL, _IONBF, 0)) abort();   // GPU, callback and pthread failures must not leave the check target hanging.
     mtl_init();
     void *mem = NULL; if (posix_memalign(&mem, getpagesize(), 524288)) abort(); memset(mem, 0, 524288);
     // Registered with the dirty tracker as nvnMemoryPoolInitialize does: a packaged texture in an untracked pool is re-uploaded from its storage at every use, which would discard what the GPU wrote into it
-    pool_t pool = {.mem=mem, .size=524288}; mtl_pool_add(mem, 524288); nvn_dirty_add_range(mem, 524288);
+    pool_t pool = {.magic=MAGIC('P','O','O','L'), .mem=mem, .size=524288}; mtl_pool_add(mem, 524288); nvn_dirty_add_range(mem, 524288);
     NVNtextureBuilder tb; NVNtexture tex; h_nvnTextureBuilderSetDefaults(&tb); h_nvnTextureBuilderSetWidth(&tb, 8);
     h_nvnTextureBuilderSetHeight(&tb, 4); h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
     h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&pool, 131072); EXPECT("texture init", 1, h_nvnTextureInitialize(&tex, &tb));
@@ -359,6 +419,7 @@ int main(void) { @autoreleasepool {
     h_nvnTextureFinalize(&pk6); h_nvnTextureFinalize(&pk5); h_nvnTextureFinalize(&pk3); h_nvnTextureFinalize(&pk7); h_nvnTextureFinalize(&pk4); h_nvnTextureFinalize(&pk2);
     h_nvnTextureFinalize(&pk); h_nvnTextureFinalize(&tex); nvn_dirty_remove_range(mem); mtl_pool_del(mem); free(mem);
     sparse_reads(&region, expected);
+    stale_pools();
     packed_copies(NVN_FORMAT_RGB565, 500); packed_copies(NVN_FORMAT_RGB5A1, 501); packed_copies(NVN_FORMAT_RGB5, 502);
     mirror_completion();
     printf("READBACK cases=%d failed=%d\n", cases, failed); return failed != 0;

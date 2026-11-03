@@ -43,6 +43,7 @@ The [JP routes](../0100606026F12000/README.md#mac-routes) were used in #289: bri
 
 ## Found on this game
 
+- **Fixed, cause partly open, [#934](https://github.com/seedds/nxnative/issues/934):** a contributor's Mac run of 1.0.1 crashed after 22 minutes (frame 79,853) in `nvn_sparse_protect` on a garbage `pool->vp`: [A texture read after its memory pool object was freed](../../../docs/reference/nvn-objects.md#a-texture-read-after-its-memory-pool-object-was-freed). Not reproduced on the game, whose regional build is not local; the report has no backtrace, so the route it took is still unknown. If it returns, the log's `memory pool` lines name the texture.
 - The existing [host Unreal allocator](../../../docs/reference/memory.md#unreals-fmallocbinned3-replaced-by-the-host-allocator) applies to this regional build at the verified offsets above.
 - The [bindless-phi fix](../../../docs/reference/shaders.md#bindless-reads-whose-handle-phi-also-carries-other-values) and [aligned buffer-texture copy](../../../docs/reference/rendering.md#buffer-textures-at-offsets-below-16-bytes) from #168 were confirmed on an iPhone Air in #304's particle-effect test.
 - **Resolved bring-up failures, #304:** the provisional 62 GB engine request failed guest-address-space reservation. A capped region without the regional allocator takeover then faulted at `main+0x1385c` (`sig=11`, address `0x30`) because the allocator vtable remained zero. Registering both the cut and takeover with the capped layout got past both failures.

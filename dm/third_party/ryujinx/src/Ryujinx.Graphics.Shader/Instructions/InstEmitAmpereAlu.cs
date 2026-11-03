@@ -29,6 +29,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             alu(0x108, InstName.Mufu, AMufu);
             alu(0x105, InstName.F2i, AF2i);
             alu(0x106, InstName.I2f, AI2f);
+            alu(0x111, InstName.F2i, AF2i64);
+            alu(0x112, InstName.I2f, AI2f64);
             alu(0x045, InstName.I2f, AI2fp);
             alu(0x107, InstName.F2f, AFrnd);
             alu(0x104, InstName.F2f, AF2f);
@@ -63,10 +65,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
             alu(0x0bf, InstName.Popc, APopc, uniform: true);
             alu(0x100, InstName.Flo, AFlo);
             alu(0x0bd, InstName.Flo, AFlo, uniform: true);
+            alu(0x101, InstName.Flo, ABrev);
+            alu(0x0be, InstName.Flo, ABrev, uniform: true);
             alu(0x01a, InstName.Bfe, ASgxt);
             alu(0x09a, InstName.Bfe, ASgxt, uniform: true);
 
             x(0x882, InstName.Mov, AUMov, N, uniform: true);
+            x(0x883, InstName.P2r, AUp2ur, N, uniform: true);
             x(0xc82, InstName.Mov, AUMov, N, uniform: true);
             x(0x805, InstName.Cs2r, ACs2r, N);
             x(0x919, InstName.S2r, AS2r, N);
@@ -204,12 +209,16 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             AmpereOp x = new(context.CurrOp);
 
-            if (x.Bit(73))
-            {
-                throw AFail(context, "MUFU.F16");
-            }
+            // .F16 (73): the source is the half 60..62 selects, and the result lands in the low 16 bits, as F2F's (the operation itself is computed in 32 bits, and the pack rounds it).
+            // Splatoon Raiders' upscaler network (agl_ndsr.pck) takes powers of its packed halves with LOG2 and EXP2, then joins the results with PRMT 0x5410
+            bool half = x.Bit(73);
+            ASrc s = AOne(context, x);
+            Operand res = half ? AHalfLanes(context, s, x.Bits(60, 62))[0] : AFloat(context, s);
 
-            Operand res = AFloat(context, AOne(context, x));
+            if (half && x.Bits(74, 80) is 6 or 7)
+            {
+                throw AFail(context, "MUFU.F16 RCP64H / RSQ64H");
+            }
 
             res = x.Bits(74, 80) switch
             {
@@ -225,18 +234,20 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 int op => throw AFail(context, $"MUFU op {op}"),
             };
 
-            ASet(context, x, res);
+            ASet(context, x, half ? context.PackHalf2x16(res, ConstF(0f)) : res);
         }
 
-        // F2I: destination signed (72) and size (75..77, log2 bytes), rounding (78..80), source size (84..86)
+        // F2I: destination signed (72) and size (75..77, log2 bytes), rounding (78..80), source size (84..86); a half source is the half 60..62 selects, as F2F's (Pokemon Pokopia: 1,067 shaders)
         public static void AF2i(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
             ASrc s = AOne(context, x);
 
-            if (x.Bits(84, 86) != 2)
+            int srcSize = x.Bits(84, 86);
+
+            if (srcSize is not (1 or 2))
             {
-                throw AFail(context, "F2I from a float that is not 32-bit");
+                throw AFail(context, "F2I from a float that is neither 16-bit nor 32-bit");
             }
 
             int size = x.Bits(75, 77);
@@ -249,7 +260,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             IDstFmt dst = (IDstFmt)((signed ? 4 : 0) | System.Math.Max(size, 1));
 
-            EmitF2I(context, DstFmt.F32, dst, (RoundMode2)x.Bits(78, 80), AGet(context, s), x.Rd, s.Abs, s.Neg);
+            Operand src = AGet(context, s);
+
+            if (srcSize == 1)
+            {
+                src = x.Bits(60, 62) is 1 or 3 ? context.UnpackHalf2x16High(src) : context.UnpackHalf2x16Low(src);
+            }
+
+            EmitF2I(context, DstFmt.F32, dst, (RoundMode2)x.Bits(78, 80), src, x.Rd, s.Abs, s.Neg);
 
             if (size == 0 && x.Rd != RegisterConsts.RegisterZeroIndex)
             {
@@ -281,6 +299,52 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ISrcFmt src = (ISrcFmt)((x.Bit(74) ? 4 : 0) | srcSize);
 
             EmitI2F(context, src, (DstFmt)dstSize, AGet(context, AOne(context, x, neg: false, abs: false)), (ByteSel)(select * (srcSize == 1 ? 2 : 1)), x.Rd, false, false);
+        }
+
+        // F2I.U64 Rd:Rd+1, b (F32): the layout of F2I. The compiler's 32-bit division takes its reciprocal this way: I2F, RCP, IADD 0x1ffffffe (2^64 and two ulps down), F2I.U64, then the high word
+        // (Fire Emblem Fortune's Weave's Lighting compute shaders). The translator has 32-bit integers, so the two words are taken apart in float: a float's value has at most 24 significant
+        // bits, so the high word and the rest are exact, and the result is exact for every value in range
+        public static void AF2i64(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            ASrc s = AOne(context, x);
+
+            if (x.Bits(84, 86) != 2 || x.Bits(75, 77) != 3 || x.Bit(72) || x.Bits(78, 80) != 3)
+            {
+                throw AFail(context, "F2I to 64 bits other than an unsigned truncation of an F32");
+            }
+
+            Operand f = AFloat(context, s);
+            Operand hi = context.FP32ConvertToU32(context.FPMultiply(f, ConstF(1.0f / 4294967296.0f)));
+            Operand lo = context.FP32ConvertToU32(context.FPSubtract(f, context.FPMultiply(context.IConvertU32ToFP32(hi), ConstF(4294967296.0f))));
+
+            if (x.Rd < RegisterConsts.RegisterZeroIndex)
+            {
+                context.Copy(Register(x.Rd, RegisterType.Gpr), lo);
+            }
+
+            if (x.Rd + 1 < RegisterConsts.RegisterZeroIndex)
+            {
+                context.Copy(Register(x.Rd + 1, RegisterType.Gpr), hi);
+            }
+        }
+
+        // I2F.F32 Rd, b:b+1 (source size 3, a 64-bit register pair, low word first): the other half of that division. Signed at 74, as I2F. The two words are converted and added, which can round
+        // twice where the hardware rounds once; the sequence's correction steps take that, and a high word of zero, the case seen, is exact
+        public static void AI2f64(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+
+            if (x.Bits(84, 86) != 3 || x.Bits(75, 77) != 2 || x.Opcode != 0x312)
+            {
+                throw AFail(context, "I2F from 64 bits other than a register pair to an F32");
+            }
+
+            Operand lo = x.Rb >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rb, RegisterType.Gpr);
+            Operand hi = x.Rb + 1 >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rb + 1, RegisterType.Gpr);
+            Operand fh = x.Bit(74) ? context.IConvertS32ToFP32(hi) : context.IConvertU32ToFP32(hi);
+
+            ASet(context, x, context.FPAdd(context.FPMultiply(fh, ConstF(4294967296.0f)), context.IConvertU32ToFP32(lo)));
         }
 
         // I2FP.F32.S32 / .U32: signed at 74
@@ -343,17 +407,28 @@ namespace Ryujinx.Graphics.Shader.Instructions
             EmitF2F(context, (DstFmt)srcSize, (DstFmt)dstSize, IntegerRound.Pass, src, x.Rd, s.Abs, s.Neg, false);
         }
 
-        // F2FP.F16.F32.PACK_AB Rd, a, b: a to the high half, b to the low one
+        // F2FP.F16.F32.PACK_AB Rd, a, b: a to the high half, b to the low one.
+        // .MERGE_C (78): a is not read; b to the low half, the low half of c to the high one. The compiler builds a half pair in two steps, high component first: Pokemon Pokopia's 22,886
+        // shaders have F2FP.MERGE_C Rd, RZ, c[3][word + 1], RZ then F2FP.MERGE_C Rd, RZ, c[3][word], Rd, with RZ in a every time (Mesa's NAK documents the same behaviour for OpF2FP)
         public static void AF2fp(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
 
-            if (x.Bit(78) || x.Bit(72))
+            if (x.Bit(72))
             {
-                throw AFail(context, "F2FP.MERGE_C");
+                throw AFail(context, "F2FP bit 72");
             }
 
             (ASrc a, ASrc b) = ASecond(context, x, abs: false);
+
+            if (x.Bit(78))
+            {
+                Operand low = context.PackHalf2x16(AFloat(context, b), ConstF(0f));
+                Operand high = context.ShiftLeft(Register(x.Rc, RegisterType.Gpr), Const(16));
+
+                ASet(context, x, context.BitwiseOr(high, low), AUniform(context));
+                return;
+            }
 
             ASet(context, x, context.PackHalf2x16(AFloat(context, b), AFloat(context, a)), AUniform(context));
         }
@@ -392,7 +467,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             bool bIn32 = x.Form is 1 or 4 or 5 or 6;
             ASrc slot32 = bIn32 ? b : c;
             ASrc slot64 = bIn32 ? c : b;
-            slot32 = slot32.WithMods(x.Bit(63), x.Bit(62));
+            // An immediate has no modifiers: bits 62 and 63 are its own, and they would flip the sign of a negative constant
+            slot32 = slot32.Kind == AKind.Imm ? slot32 : slot32.WithMods(x.Bit(63), x.Bit(62));
             slot64 = slot64.WithMods(x.Bit(84), x.Bit(83));
 
             Operand[] ha = AHalfLanes(context, a, x.Bits(74, 76));
@@ -400,6 +476,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand[] h64 = AHalfLanes(context, slot64, x.Bits(81, 83));
 
             return bIn32 ? (ha, h32, h64) : (ha, h64, h32);
+        }
+
+        // The sources of a two-source half-pair operation, as ASecond: the second is B in forms 1, 4, 5, 6 and C in forms 2, 3, 7, where B would be the unused register field at 64.
+        // Pokemon Pokopia's bilateral blur steps its loop with HADD2 Rd, Rd, imm: reading that field instead stepped by the bits of whatever R0 held, and hung the GPU
+        private static (Operand[] A, Operand[] B) AHalfSecond(EmitterContext context, AmpereOp x)
+        {
+            (Operand[] a, Operand[] b, Operand[] c) = AHalfSrcs(context, x);
+
+            return (a, x.Form is 1 or 4 or 5 or 6 ? b : c);
         }
 
         // The result: two halves packed, or with .F32 (78) the low lane as one float. HFMA2 / HMUL2 (sm_86): .RELU (79) clamps at zero; .BF16_V2 (85)
@@ -431,7 +516,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         public static void AHadd2(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (Operand[] a, Operand[] b, _) = AHalfSrcs(context, x);
+            (Operand[] a, Operand[] b) = AHalfSecond(context, x);
 
             AHalfResult(context, x, context.FPAdd(a[0], b[0]), context.FPAdd(a[1], b[1]));
         }
@@ -439,7 +524,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         public static void AHmul2(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (Operand[] a, Operand[] b, _) = AHalfSrcs(context, x);
+            (Operand[] a, Operand[] b) = AHalfSecond(context, x);
 
             AHalfResult(context, x, context.FPMultiply(a[0], b[0]), context.FPMultiply(a[1], b[1]));
         }
@@ -448,6 +533,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             AmpereOp x = new(context.CurrOp);
             (Operand[] a, Operand[] b, Operand[] c) = AHalfSrcs(context, x);
+
+            // .H0_NH1 (86), named high lane first: the high lane reads B's low half, the low lane B's high half negated (a rotation by 90 degrees, what cross products and 2D rotations need).
+            // Pokemon Pokopia's sun shadow mask crosses its two lanes without it (the shadow against the cloud map rather than the cascade fade), which lights cave floors and drops cloud shadows
+            if (x.Bit(86))
+            {
+                b = [context.FPNegate(b[1]), b[0]];
+            }
 
             AHalfResult(context, x, context.FPFusedMultiplyAdd(a[0], b[0], c[0]), context.FPFusedMultiplyAdd(a[1], b[1], c[1]));
         }
@@ -707,6 +799,18 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
+        // IMAD's carry in (.X, bit 74, from the predicate at 87..90), 1 or 0; null without one. As IADD3.X: with it a negated addend is its bitwise not, as the compiler subtracts across words
+        // (Fire Emblem Fortune's Weave's 64-bit division: R6 = RZ * RZ + ~R7 + P0. Dropped, the division gave 2 for 340 / 1)
+        private static Operand AImadCarryIn(EmitterContext context, AmpereOp x, bool u = false)
+        {
+            if (!x.Bit(74) || (x.Bits(87, 90) == RegisterConsts.PredicateTrueIndex && x.Bit(90)))
+            {
+                return null;
+            }
+
+            return context.ConditionalSelect(APred(context, x, 87, 90, u), Const(1), Const(0));
+        }
+
         // IMAD Rd, a, b, c: the low word of a * b + c (B and C may be negated)
         public static void AImad(EmitterContext context)
         {
@@ -721,9 +825,20 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             Operand res = context.IMultiply(AGet(context, a), AInt(context, b));
 
-            if (!c.IsZeroReg)
+            if (x.Bit(74) && c.Neg)
+            {
+                res = context.IAdd(res, context.BitwiseNot(AGet(context, c)));
+            }
+            else if (!c.IsZeroReg)
             {
                 res = context.IAdd(res, AInt(context, c));
+            }
+
+            Operand carryIn = AImadCarryIn(context, x, u);
+
+            if (carryIn != null)
+            {
+                res = context.IAdd(res, carryIn);
             }
 
             ASet(context, x, res, u);
@@ -736,9 +851,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
             bool u = AUniform(context);
             (ASrc a, ASrc b, ASrc c) = AAluSrcs(context, x, u, abs: false);
 
-            if (x.Bits(81, 84) != RegisterConsts.PredicateTrueIndex || b.Neg || c.Neg)
+            if (b.Neg || c.Neg)
             {
-                throw AFail(context, "IMAD.WIDE predicate output or negation");
+                throw AFail(context, "IMAD.WIDE negation");
             }
 
             Operand srcA = AGet(context, a);
@@ -747,16 +862,35 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             Operand lo = context.IMultiply(srcA, srcB);
             Operand hi = signed ? context.MultiplyHighS32(srcA, srcB) : context.MultiplyHighU32(srcA, srcB);
+            Operand carryOut = Const(0);
+            Operand carryIn = AImadCarryIn(context, x, u);
 
-            if (!c.IsZeroReg)
+            if (!c.IsZeroReg || carryIn != null)
             {
                 Operand cLo = AGet(context, c);
                 Operand sum = context.IAdd(lo, cLo);
                 Operand carry = context.ConditionalSelect(context.ICompareLessUnsigned(sum, lo), Const(1), Const(0));
 
-                hi = context.IAdd(context.IAdd(hi, AGetHigh(context, c)), carry);
+                if (carryIn != null)
+                {
+                    Operand next = context.IAdd(sum, carryIn);
+
+                    carry = context.BitwiseOr(carry, context.ConditionalSelect(context.ICompareLessUnsigned(next, sum), Const(1), Const(0)));
+                    sum = next;
+                }
+
+                Operand hi1 = context.IAdd(hi, AGetHigh(context, c));
+                Operand hi2 = context.IAdd(hi1, carry);
+
+                carryOut = context.BitwiseOr(
+                    context.ConditionalSelect(context.ICompareLessUnsigned(hi1, hi), Const(1), Const(0)),
+                    context.ConditionalSelect(context.ICompareLessUnsigned(hi2, hi1), Const(1), Const(0)));
+                hi = hi2;
                 lo = sum;
             }
+
+            // The carry out of the 64-bit addition, to the predicate at 81..84: the 64-bit division in Fire Emblem Fortune's Weave's Lighting compute shaders chains it into its next addition
+            ASetPred(context, x.Bits(81, 84), context.ICompareNotEqual(carryOut, Const(0)));
 
             int rd = ARd(x, u);
             int zero = u ? RegisterConsts.UniformZeroIndex : RegisterConsts.RegisterZeroIndex;
@@ -772,26 +906,48 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
-        // IMAD.HI Rd, a, b, c: the high word of a * b (signed 73), plus c
+        // IMAD.HI Rd, a, b, c: the high word of the 64-bit a * b (signed 73) + the pair {c + 1:c}, as IMAD.WIDE without its low word. Not the high word of a * b plus c alone: the compiler's 64-bit multiply
+        // feeds it IMAD.WIDE's whole result, r9:r8 = r6 * r13 + {r9:r8} then r8 = high(r7 * r11 + {r9:r8}), so the upper word and the low word's carry count
         public static void AImadHi(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
             (ASrc a, ASrc b, ASrc c) = AAluSrcs(context, x, abs: false);
 
-            if (x.Bits(81, 84) != RegisterConsts.PredicateTrueIndex)
+            if (c.Neg)
             {
-                throw AFail(context, "IMAD.HI predicate output");
+                throw AFail(context, "IMAD.HI negation");
             }
 
             Operand srcA = AGet(context, a);
             Operand srcB = AInt(context, b);
             Operand res = x.Bit(73) ? context.MultiplyHighS32(srcA, srcB) : context.MultiplyHighU32(srcA, srcB);
+            Operand carryOut = Const(0);
+            Operand carryIn = AImadCarryIn(context, x);
 
-            if (!c.IsZeroReg)
+            if (!c.IsZeroReg || carryIn != null)
             {
-                res = context.IAdd(res, AInt(context, c));
+                Operand lo = context.IMultiply(srcA, srcB);
+                Operand sum = context.IAdd(lo, AGet(context, c));
+                Operand carry = context.ConditionalSelect(context.ICompareLessUnsigned(sum, lo), Const(1), Const(0));
+
+                if (carryIn != null)
+                {
+                    Operand next = context.IAdd(sum, carryIn);
+
+                    carry = context.BitwiseOr(carry, context.ConditionalSelect(context.ICompareLessUnsigned(next, sum), Const(1), Const(0)));
+                    sum = next;
+                }
+
+                Operand hi1 = context.IAdd(res, AGetHigh(context, c));
+                Operand hi2 = context.IAdd(hi1, carry);
+
+                carryOut = context.BitwiseOr(
+                    context.ConditionalSelect(context.ICompareLessUnsigned(hi1, res), Const(1), Const(0)),
+                    context.ConditionalSelect(context.ICompareLessUnsigned(hi2, hi1), Const(1), Const(0)));
+                res = hi2;
             }
 
+            ASetPred(context, x.Bits(81, 84), context.ICompareNotEqual(carryOut, Const(0)));   // the carry out of the 64-bit addition, as IMAD.WIDE's
             ASet(context, x, res);
         }
 
@@ -1070,6 +1226,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, res, u);
         }
 
+        // BREV Rd, b: the bits reversed. The compiler's find-lowest-set-bit is BREV, then FLO.SH, then a compare with -1 (Fire Emblem Fortune's Weave's light loops: 3,057 of them)
+        public static void ABrev(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            bool u = AUniform(context);
+
+            ASet(context, x, context.BitfieldReverse(AGet(context, AOne(context, x, u, neg: false, abs: false))), u);
+        }
+
         // SGXT Rd, a, n: the low n bits of a, sign-extended (73) or zero-extended; .W (75) wraps n, else it is clamped to 32
         public static void ASgxt(EmitterContext context)
         {
@@ -1105,6 +1270,20 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand mask = x.Opcode == 0x803 ? Const((int)x.Imm32) : Register(x.Rb, RegisterType.Gpr);
 
             EmitP2r(context, Register(x.Ra, RegisterType.Gpr), Register(x.Rd, RegisterType.Gpr), mask, (ByteSel)x.Bits(76, 78), false);
+        }
+
+        // UP2UR URd, URZ, 1: the uniform predicate UP0 as 0 or 1 in a uniform register. Pokemon Pokopia's two compute shaders with it use this one encoding (a mask over UP0..UP6 with a merge source
+        // is P2R's form, not seen here)
+        public static void AUp2ur(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+
+            if (x.Bits(24, 30) != RegisterConsts.UniformZeroIndex || x.Imm32 != 1)
+            {
+                throw AFail(context, "UP2UR with a merge source or another mask");
+            }
+
+            ASet(context, x, context.ConditionalSelect(APredReg(0, uniform: true), Const(1), Const(0)), uniform: true);
         }
 
         // PLOP3 Pd0, Pd1, a (87..90), b (77..80), c (68..71; uniform with bit 67), lut0 (64..67 | 72..77 << 3), lut1 (16..24)

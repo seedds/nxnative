@@ -247,6 +247,10 @@ COMPUTE_2021_3 = COMPUTE_2022_3.replace(
     'map<data:pair(string,ComputeShaderKernel)>~ variantMap').replace(
     '; vector<data:string> dynamicKeywords', '').replace(
     'vector<data:unsigned int>~ threadGroupSize', 'staticvector<data:unsigned int>~ threadGroupSize')
+# Unity 2020.3 (type hash d0171b849bb064b2424893e7d4809be5; found on MADiSON, 2020.3.27f1): AssetRipper's StructsDump/release/2020.3.27f1.dump, class 72.
+# The hash is not MADiSON's alone: the release dumps of 2020.3.0f1, 18f1, 27f1, 30f1 and 48f1 all give it.
+# The 2021.3 layout (variantMap, unaligned staticvector threadGroupSize) without the kernel's trailing SInt64 requirements.
+COMPUTE_2020_3 = COMPUTE_2021_3.replace('; SInt64 requirements', '')
 # Unity 2019.4.27f1's release tree (AssetRipper TypeTreeDumps, StructsDump/release/2019.4.27f1.dump): kernels hold code directly, without keyword variants or requirements.
 # Pokemon Brilliant Diamond's stripped built-ins use this hash; their GPU skinning dispatch needs these kernels. Checked against the dump's nodes and alignment flags.
 COMPUTE_2019_4 = '''ComputeShaderResource: string name; string generatedName; int bindPoint; int samplerBindPoint; int texDimension
@@ -262,6 +266,11 @@ ComputeShader: string m_Name; vector<data:ComputeShaderVariant> variants
 # Return of the Obra Dinn's stripped built-ins use this hash; its internalskinning object (12 kernels) reads to its exact end.
 COMPUTE_2017_4 = COMPUTE_2019_4.replace('int samplerBindPoint; int texDimension', 'ComputeBufferCounter counter') + \
     'ComputeBufferCounter: int bindpoint; int offset\n'
+# Unity 6000.3 (Hello Kitty Party Land, 6000.3.11f1: its stripped built-ins, GPU skinning among them, in Data/Resources/unity default resources, and Data/globalgamemanagers.assets carry no type trees):
+# 2022.3's layout with a resource type after each resource's texture dimension and threadGroupSize a staticvector again. All 159 nodes and alignment flags match AssetRipper's
+# StructsDump/release dumps of 6000.3.0b4, 6000.3.0f1, 6000.3.11f1 and 6000.3.20f1.
+COMPUTE_6000_3 = COMPUTE_2022_3.replace('int texDimension', 'int texDimension; int resType').replace(
+    'vector<data:unsigned int>~ threadGroupSize', 'staticvector<data:unsigned int>~ threadGroupSize')
 CLASS_COMPUTE_SHADER = 72
 KNOWN_TREES = {(CLASS_SHADER, bytes.fromhex('ea424a5fc1e48db62144df956f9e1005')): ('Shader', SHADER_2022_3),
                (CLASS_SHADER, bytes.fromhex('d8236c9bd87d85edb203acf352348124')): ('Shader', SHADER_2021_2),
@@ -270,8 +279,10 @@ KNOWN_TREES = {(CLASS_SHADER, bytes.fromhex('ea424a5fc1e48db62144df956f9e1005'))
                (CLASS_SHADER, bytes.fromhex('ed2a06ce7fb8203f6efb5ab5e0ce20d5')): ('Shader', SHADER_2019_4),
                (CLASS_SHADER, bytes.fromhex('8db760073e1392061e4a36995f0735af')): ('Shader', SHADER_2018_3),
                (CLASS_SHADER, bytes.fromhex('266d53113fa30d2b858f2768f92eaa14')): ('Shader', SHADER_2017_4),
+               (CLASS_COMPUTE_SHADER, bytes.fromhex('43a0948a3f403068c0b31bff90ba0c9a')): ('ComputeShader', COMPUTE_6000_3),
                (CLASS_COMPUTE_SHADER, bytes.fromhex('bfdf63ab0ce84d5a2c765ee560d90fe7')): ('ComputeShader', COMPUTE_2022_3),
                (CLASS_COMPUTE_SHADER, bytes.fromhex('abd9135b8ce83d043fef4e9ec7f53366')): ('ComputeShader', COMPUTE_2021_3),
+               (CLASS_COMPUTE_SHADER, bytes.fromhex('d0171b849bb064b2424893e7d4809be5')): ('ComputeShader', COMPUTE_2020_3),
                (CLASS_COMPUTE_SHADER, bytes.fromhex('1a95529ac2eb1a97cd9d2a4356bd722f')): ('ComputeShader', COMPUTE_2019_4),
                (CLASS_COMPUTE_SHADER, bytes.fromhex('20291e020d10074c35d8286f5191593f')): ('ComputeShader', COMPUTE_2017_4)}
 

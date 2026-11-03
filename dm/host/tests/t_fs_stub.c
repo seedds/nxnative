@@ -6,9 +6,14 @@ void front_save_failed(int err) { g_nfail++; g_lasterr = err; }
 #include "../dm.h"
 module_t *g_mod;
 int g_nmod;
+// the loader's symbol lookup (loader.c): no modules, so no SDK, unless a test sets its own lookup
+void *(*t_guest_sym)(const char *);
+void *guest_sym(const char *name) { return t_guest_sym ? t_guest_sym(name) : NULL; }
 // the guest address space (hle_svc.c): the unit test has none, so every stack is a host stack and the big-stack takeovers run on it directly (hle_bigstack.c)
 #include <stdint.h>
 int dm_guest_as_contains(uintptr_t a) { (void)a; return 0; }
 // main's imports (loader.c) and the MiiModel stand-in (hle_mii.c): no main module, no system data
 int dm_main_imports(const char *prefix) { (void)prefix; return 0; }
 int dm_mii_standin(const char *dir) { (void)dir; return 0; }
+// the guest scheduler (hle_thread.c): no guest threads, so no handoff to leave
+void dm_thread_service_request(void) {}

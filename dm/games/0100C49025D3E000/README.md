@@ -15,6 +15,7 @@ On the Mac (2026-10-29): the accessibility settings, the EA SPORTS and FC 27 log
 | [`dual_want.tsv`](dual_want.tsv) | profile | the six pixel shaders a match blends with their output 1 as the second source (dual-source blending), noted with `DM_NVN_DUAL_WANT` |
 | `fps_target 60`, `present_interval display` | `game.tsv` | 60 fps: the host sets Frostbite's simulation rate and the game's frame regulator ([Frame rate](#frame-rate)); the game's present interval 2 is ignored |
 | the node-area cut on `sdk` `fed212d6…` | [`dm/tools/sdk_patches.py`](../../tools/sdk_patches.py) SDK-wide rules | SDK 22's AddressRegionManager takes 1 GB of the alias region as its node area ([The SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area)); the SDK-wide rule's implementation 6 gives this build the cut (its row was removed on 2026-10-30, as the rule gives the same cuts) |
+| `depth_mode zero` | `game.tsv` | the game selects near-zero NVN depth (the NSP script's region check on the registered build); offline pipeline bases must use the matching vertex entry |
 
 ## Files
 
@@ -50,6 +51,7 @@ On the Mac (2026-10-29): the accessibility settings, the EA SPORTS and FC 27 log
 
 ## Found on this game
 
+- **Offline depth metadata:** [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree). The key was missing until the check boots began reading it; the archive at this mode has not been rebuilt or measured here.
 General changes first needed here; each applies to every game on the same path:
 
 - **Resolved: a text longer than a branch reaches** (185.6 MB): the rewriter splits the patch area in two → [Two patch areas for a text longer than a branch reaches](../../../docs/reference/rewriter.md#two-patch-areas-for-a-text-longer-than-a-branch-reaches).

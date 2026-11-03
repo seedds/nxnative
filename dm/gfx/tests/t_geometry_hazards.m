@@ -106,7 +106,22 @@ static int access_benchmark(void) {
     }
     return sink!=0;
 }
-static void dependency(int uniform) {
+// A stream bound with size 0 reads no guest memory, wherever it points: it is in no list of what a draw reads
+static void empty_stream_contract(void) {
+    NvProg *pr=[NvProg new];state_reset();
+    S.vbuf[3]=(NVNbufferRange){1,0};S.vbuf[4]=(NVNbufferRange){0x1000,0};
+    geo_access a=geo_access_of(pr,nil);
+    EXPECT("empty streams are no unknown access",0,a.unknown);EXPECT("empty streams add no range",0,a.n);
+    static csh_rng r[CSH_RN];int n=0;p_draw d={.count=1,.instances=1};
+    EXPECT("a draw with empty streams can move compute past it",1,csh_draw_reads(pr,&d,NULL,r,&n));EXPECT("its list holds no empty stream",0,n);
+    S.vbuf[5]=(NVNbufferRange){0x2000,64};a=geo_access_of(pr,nil);n=0;
+    EXPECT("a stream with data stays a known range",1,a.n==1&&!a.unknown);
+    EXPECT("a stream with data stays listed",1,csh_draw_reads(pr,&d,NULL,r,&n)&&n==1);
+    state_reset();
+}
+enum { DEP_STORAGE, DEP_UNIFORM, RUN_EMPTY_STREAM, NORUN_UNALIGNED_STREAM };
+static void dependency(int mode) {
+    int uniform=mode==DEP_UNIFORM,independent=mode>=RUN_EMPTY_STREAM;   // independent: the two draws touch different memory
     id<MTLLibrary> l=library(@"#include <metal_stdlib>\nusing namespace metal;\n"
       "struct B{device uint*p[[id(0)]];};struct C{device float*dst;uint4 info;};\n"
       "vertex float4 unused(constant B&b[[buffer(0)]]){return float4(float(b.p[0]),0,0,1);}\n"
@@ -122,25 +137,35 @@ static void dependency(int uniform) {
     gs->rf.b[gs->rf.nb++]=(nvn_rbind){.kind=NVN_RB_SBUFP,.reg=0,.aid=5,.rw=1};gs->ae=[gs->fn newArgumentEncoderWithBufferIndex:0];gs->arg_len=gs->ae.encodedLength;
     strcpy(gs->key,"fedcba9876543210_b");gs->geo_vertices=3;gs->geo_invocations=1;gs->geo_output=7;gs->geo_stride=4;gs->geo_index_stride=4;
     g_shcache=[NSMutableDictionary dictionary];g_shcache[@"fedcba9876543210_bg0"]=gs;g_shcache[@"fedcba9876543210_bgv"]=shader(l,@"reader",0,rh,1);
-    prog_t cp={.serial=9700+uniform};serial_put(cp.serial,pr);
-    uint8_t *cmd;posix_memalign((void**)&cmd,getpagesize(),65536);memset(cmd,0,65536);mtl_pool_add(cmd,65536);size_t used=0;
+    prog_t cp={.serial=9700+mode};serial_put(cp.serial,pr);
+    uint8_t *cmd;posix_memalign((void**)&cmd,getpagesize(),65536);memset(cmd,0,65536);mtl_pool_add(cmd,65536);size_t used=0;   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns pr (serial_put's CFBridgingRetain) for the life of the test, not a leak
     #define EMIT(OP,X) do{size_t z=(8+sizeof(X)+7)&~7ull;op_hdr h={OP,(uint32_t)z};memcpy(cmd+used,&h,8);memcpy(cmd+used+8,&(X),sizeof(X));used+=z;}while(0)
-    tex_t target={.magic=MAGIC('T','E','X',0),.serial=9800+uniform,.d={.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8,.width=32,.height=32,.depth=1,.levels=1,.samples=1}};
+    tex_t target={.magic=MAGIC('T','E','X',0),.serial=9800+mode,.d={.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8,.width=32,.height=32,.depth=1,.levels=1,.samples=1}};
     p_set_rt rt={.n=1};rt.color[0]=&target;EMIT(OP_SET_RT,rt);p_viewports vp={.n=1};vp.v[0][2]=vp.v[0][3]=32;EMIT(OP_VIEWPORTS,vp);
     p_clear_color cl={.mask=15,.rgba={0,0,0,1}};EMIT(OP_CLEAR_COLOR,cl);p_bind_program bp={&cp,7};EMIT(OP_BIND_PROGRAM,bp);
     p_bind_buf bind={.stage=0,.index=0,.addr=(uint64_t)(cmd+32768),.size=4};if(uniform){EMIT(OP_BIND_UBO,bind);}else{EMIT(OP_BIND_SSBO,bind);}bind.stage=2;EMIT(OP_BIND_SSBO,bind);
-    p_draw d={.prim=0,.count=1,.instances=1};EMIT(OP_DRAW,d);EMIT(OP_DRAW,d);op_hdr end={OP_END,8};memcpy(cmd+used,&end,8);
+    if(independent){p_bind_vbuf vb={.first=3,.n=1};vb.r[0]=mode==RUN_EMPTY_STREAM?(NVNbufferRange){1,0}:(NVNbufferRange){(uint64_t)(cmd+24577),16};EMIT(OP_BIND_VBUF,vb);}
+    p_draw d={.prim=0,.count=1,.instances=1};EMIT(OP_DRAW,d);
+    if(independent){bind.stage=0;bind.addr+=16;EMIT(OP_BIND_SSBO,bind);bind.stage=2;EMIT(OP_BIND_SSBO,bind);}
+    EMIT(OP_DRAW,d);op_hdr end={OP_END,8};memcpy(cmd+used,&end,8);
     #undef EMIT
-    state_reset();memset(&R,0,sizeof R);mtl_set_frame(100+uniform);mtl_sub_begin();uint64_t cuts=g_cuts,h=(uint64_t)cmd;mtl_sub_index(&h,1);mtl_exec(cmd);
-    id<MTLBuffer> rb=[g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared];[blit() copyFromTexture:tex_mtl(&target) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(32,32,1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:128 destinationBytesPerImage:4096];finish();
-    EXPECT("next capture sees earlier GS write",2,*(uint32_t*)(cmd+32768));
-    uint8_t *px=rb.contents;EXPECT("first draw covers original position",1,px[(14*32+5)*4]>200);EXPECT("dependent draw covers updated position",1,px[(14*32+18)*4]>200);
-    EXPECT("dependent geometry does not join earlier run",1,g_geo_nrun);
-    EXPECT("geometry boundary submits early only when enabled",cut_draws()==1&&geo_cut_on(),g_cuts>cuts);
+    state_reset();memset(&R,0,sizeof R);mtl_set_frame(100+mode);mtl_sub_begin();uint64_t cuts=g_cuts,h=(uint64_t)cmd;mtl_sub_index(&h,1);mtl_exec(cmd);
+    id<MTLBuffer> rb=[g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared];EXPECT("readback buffer",1,rb!=nil);if(!rb)abort();[blit() copyFromTexture:tex_mtl(&target) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(32,32,1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:128 destinationBytesPerImage:4096];finish();
+    uint8_t *px=rb.contents;
+    if(independent) {
+        EXPECT("first draw wrote its own storage",1,*(uint32_t*)(cmd+32768));EXPECT("second draw wrote its own storage",1,*(uint32_t*)(cmd+32768+16));
+        EXPECT("the draws cover their position",1,px[(14*32+5)*4]>200);
+        EXPECT(mode==RUN_EMPTY_STREAM?"an empty stream at an unaligned address does not keep draws out of a run":"a stream with data at an unaligned address stays out of a run",mode==RUN_EMPTY_STREAM?2:1,g_geo_nrun);
+    } else {
+        EXPECT("next capture sees earlier GS write",2,*(uint32_t*)(cmd+32768));
+        EXPECT("first draw covers original position",1,px[(14*32+5)*4]>200);EXPECT("dependent draw covers updated position",1,px[(14*32+18)*4]>200);
+        EXPECT("dependent geometry does not join earlier run",1,g_geo_nrun);
+        EXPECT("geometry boundary submits early only when enabled",cut_draws()==1&&geo_cut_on(),g_cuts>cuts);
+    }
     mtl_tex_release(&target);mtl_pool_del(cmd);mtl_drain();free(cmd);
 }
 int main(int argc,char **argv){@autoreleasepool{
     if(argc>1&&!strcmp(argv[1],"--access-bench"))return access_benchmark();
-    access_contract();drain_contract();mtl_init();dependency(0);dependency(1);
+    access_contract();drain_contract();mtl_init();empty_stream_contract();dependency(DEP_STORAGE);dependency(DEP_UNIFORM);dependency(RUN_EMPTY_STREAM);dependency(NORUN_UNALIGNED_STREAM);
     printf("t_geometry_hazards: %d checks, %d failed\n",checks,failed);return failed!=0;
 }}

@@ -28,6 +28,15 @@ Games whose speed the app controls (Breath of the Wild, Tears of the Kingdom and
 
 The size of the 3D picture, from 50 to 100 %. Below 100 % the size is fixed there and the game's own dynamic resolution is off; 100 % keeps the game's own. Lower can be lighter on the GPU but is blurrier; the HUD and text keep their sharpness. Only games the app can scale offer it.
 
+### Render scale
+
+The size the game renders its 3D views at, as a share of the size it would choose itself. Below 100% is lighter on the GPU; above 100% is extra detail, where the game's profile allows it.
+
+The slider's top is **per game**, because a game sizes its render target pools for its own resolution and runs out above it rather than slowing down. Breath of the Wild stops at 135%. A game whose ceiling is 100% shows the slider only up to 100%.
+
+- **When to change it:** below 100% for a higher frame rate on a phone; above 100% on a device with GPU time to spare.
+- **Cost:** GPU time roughly with the square of the setting, and more of the game's own render target pool.
+
 ### Console mode
 
 **Docked** renders at the Switch's TV resolution, **Handheld** at its lower handheld resolution, which is lighter on the phone and can give a higher frame rate.
@@ -218,7 +227,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Setting | Variable | Values |
 |---|---|---|
 | Frame rate | `DM_FPS_TARGET` | `30`, `60` |
-| Render scale | `DM_RENDER_SCALE` | `0.5` to `1.0` |
+| Render scale | `DM_RENDER_SCALE` | `0.5` to the profile's `render_scale_max` |
 | Console mode | `DM_OPMODE` | `1` docked, `0` handheld |
 | Game language | `DM_LANG` | a language code, such as `ja` |
 | Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen, `0` a window |

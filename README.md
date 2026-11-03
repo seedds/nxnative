@@ -312,6 +312,11 @@ Under a game, "60 fps with 1.2.0" means it runs at 60 fps (30 on the Switch) wit
 <td align="center" valign="top" width="33%"><img src="docs/images/super-mario-rpg.jpg" width="256" alt="Super Mario RPG"><br><small><b><a href="dm/games/0100BC0018138000/README.md">Super Mario RPG</a></b></small></td>
 <td align="center" valign="top" width="33%"><img src="docs/images/zelda-skyward-sword-hd.jpg" width="256" alt="The Legend of Zelda: Skyward Sword HD"><br><small><b><a href="dm/games/01002DA013484000/README.md">The Legend of Zelda: Skyward Sword HD</a></b></small></td>
 </tr>
+<tr>
+<td align="center" valign="top" width="33%"><img src="docs/images/mina-the-hollower.jpg" width="256" alt="Mina the Hollower"><br><small><b><a href="dm/games/0100DCD01F306000/README.md">Mina the Hollower</a></b></small></td>
+<td></td>
+<td></td>
+</tr>
 </table>
 <!-- end of gallery -->
 

@@ -171,6 +171,11 @@ build check first compares the image's Metal compiler with `dmsh_chain.lock`
 keeps the workflow, the image, README and the NSP script naming the same
 Xcode: raising the toolchain changes them together.
 
+The patch-registry tests validate the tables the rewriter consumes and their
+binding metadata. A game's patch module may also define constants and instruction
+helpers with uppercase names; those implementation details are not extra patch
+tables and do not belong in a closed namespace allowlist.
+
 A separate `sanitizers` job builds the same tests again with sanitizers, each
 build in a folder of its own (`build/asan`, `build/tsan`, `asan/`): every host
 unit test and the CPU texture test under AddressSanitizer and

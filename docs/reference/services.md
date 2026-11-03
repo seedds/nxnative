@@ -333,6 +333,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Open:** `nfp` answers as a console with NFC on and no amiibo ([SDK 20 six-axis sensor and amiibo (`nfp`) calls](#sdk-20-six-axis-sensor-and-amiibo-nfp-calls)), so a game that asks both libraries gets two different consoles, and the game's message points to a System Settings switch the host does not have. Answering `IsNfcEnabled` true would match `nfp`, but the game's amiibo path after it has not been run.
 - **Found on:** [Hyrule Warriors: Definitive Edition](../../dm/games/0100AE00096EA000/README.md) 1.0.1 (SDK 3.5.1), entering amiibo from the title screen (GitHub issue #708). With the fix, the message opens, closes and opens again.
 
+### The amiibo library's state before Initialize
+
+- **Symptom:** `game called nn::diag abort: Result 0, call site sdk+0x13ce58` in the middle of play, from `nn::os::TryWaitSystemEvent` on an event that was never set up (backtrace `main+0x1fb9920` in Tears of the Kingdom 1.4.3).
+- **Cause:** `nn::nfp::GetState` answered 1 (initialized) from the start. Breath of the Wild (`main+0x128ec7c`) and Tears of the Kingdom (`main+0xca5200`) call `nfp::Initialize` and `AttachAvailabilityChangeEvent` only when `GetState` is not 1, so they skipped the attach; Tears of the Kingdom's amiibo poll then waits on that event and the SDK aborts on its uninitialized state. Breath of the Wild also checks for 0 after `Finalize` (`main+0x128f964`).
+- **Fix:** `hle_sdk16.c` keeps the library state as on Horizon: 0 until `Initialize`, 1 until `Finalize`, like the `nfc` hooks beside it. `dm/host/tests/t_nfc.c` checks it.
+- **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) 1.4.3 (GitHub issue #613; when the poll first runs was not found; the abort came after about 15 minutes of play, and was not reproduced here).
+
 ### Vibration values flushed by the SDK's vibration graph
 
 - **Symptom:** abort in `nn::sm::Initialize` under `nn::hid::VibrationNode::Update`.

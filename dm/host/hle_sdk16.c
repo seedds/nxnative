@@ -191,17 +191,20 @@ HLE_FORCE("_ZN2nn3nfc12IsNfcEnabledEv", "NFC switched on or off (returns bool): 
 // The host has no NFC reader: it reports one NFC device on the currently connected controller (same as hle_hid.c) whose detection never finds a tag -- the same as real hardware with no amiibo at hand:
 // the game's "touch an amiibo" screen appears as usual and cancelling leaves it. Operations that need a tag (mount, application area read / write, amiibo settings applets) all return "tag not found".
 // The game attaches no activate / deactivate events; it polls GetDeviceState to see whether a tag is there.
+// GetState is the library's own state, as on Horizon: 0 until Initialize, 1 until Finalize. Breath of the Wild (main+0x128ec7c) and Tears of the Kingdom (main+0xca5200) call Initialize and attach their
+// availability change event only when GetState is not 1; answering 1 before Initialize skipped the attach, and TotK's poll of that event (main+0x1fb991c) aborted in TryWaitSystemEvent (#613).
 #define NFP_RES_TAG_NOT_FOUND (115u | 97u << 9)   // module 115 (nfp), description 97
 enum { NFP_STATE_INIT = 0, NFP_STATE_SEARCH = 1 };   // 0 initialized, 1 searching for a tag (2 = tag found, never on the host)
 typedef struct { uint32_t id; uint8_t reserved[4]; } NfpDeviceHandle;
 #define NFP_DEVICE_ID 0x4e465030u   // 'NFP0'
 static _Atomic int g_nfp_state;
+static _Atomic int g_nfp_lib;   // the library state GetState answers: 0 uninitialized, 1 initialized
 uint32_t hle_hid_connected_npad(void);
 static Result nfp_no_tag(const char *what) {
     static _Atomic int logged; if (!atomic_exchange(&logged, 1)) LOG("nfp: %s and other operations that need an amiibo tag → no tag found (the host has no NFC)", what);
     return NFP_RES_TAG_NOT_FOUND;
 }
-HLE_FORCE("_ZN2nn3nfp10InitializeEv", "amiibo library init; the host has one NFC device that never finds a tag", void, h_nfp_Init, void) { LOG("nfp::Initialize: the host has one NFC device and finds no amiibo tag"); }
+HLE_FORCE("_ZN2nn3nfp10InitializeEv", "amiibo library init; the host has one NFC device that never finds a tag", void, h_nfp_Init, void) { atomic_store(&g_nfp_lib, 1); LOG("nfp::Initialize: the host has one NFC device and finds no amiibo tag"); }
 HLE_FORCE("_ZN2nn3nfp29AttachAvailabilityChangeEventEPNS_2os15SystemEventTypeE", "NFC availability change event; bound to a kernel event, never signalled", void, h_nfp_AttachAvail, void *ev) { hle_bind_system_event(ev, 0); }
 HLE_FORCE("_ZN2nn3nfp11ListDevicesEPNS0_12DeviceHandleEPii", "NFC device list: one device", Result, h_nfp_List, NfpDeviceHandle *out, int *n, int max) {
     *n = 0; if (max >= 1) { memset(&out[0], 0, sizeof out[0]); out[0].id = NFP_DEVICE_ID; *n = 1; }
@@ -222,8 +225,8 @@ HLE_FORCE("_ZN2nn3nfp5MountERKNS0_12DeviceHandleENS0_9ModelTypeE", "mount tag (t
 HLE_FORCE("_ZN2nn3nfp7UnmountERKNS0_12DeviceHandleE", "unmount tag: no tag", Result, h_nfp_Unmount, const NfpDeviceHandle *h) { (void)h; return nfp_no_tag("Unmount"); }
 HLE_FORCE("_ZN2nn3nfp13GetCommonInfoEPNS0_10CommonInfoERKNS0_12DeviceHandleE", "common info: no tag", Result, h_nfp_CommonInfo, void *out, const NfpDeviceHandle *h) { (void)out; (void)h; return nfp_no_tag("GetCommonInfo"); }
 HLE_FORCE("_ZN2nn3nfp15GetRegisterInfoEPNS0_12RegisterInfoERKNS0_12DeviceHandleE", "register info: no tag", Result, h_nfp_RegInfo, void *out, const NfpDeviceHandle *h) { (void)out; (void)h; return nfp_no_tag("GetRegisterInfo"); }
-HLE_FORCE("_ZN2nn3nfp8GetStateEv", "amiibo library state: initialized (1)", int, h_nfp_LibState, void) { return 1; }
-HLE_FORCE("_ZN2nn3nfp8FinalizeEv", "amiibo library finalize; the host has no session", void, h_nfp_Fini, void) {}
+HLE_FORCE("_ZN2nn3nfp8GetStateEv", "amiibo library state: uninitialized (0) / initialized (1)", int, h_nfp_LibState, void) { return atomic_load(&g_nfp_lib); }
+HLE_FORCE("_ZN2nn3nfp8FinalizeEv", "amiibo library finalize; the host has no session", void, h_nfp_Fini, void) { atomic_store(&g_nfp_lib, 0); }
 HLE_FORCE("_ZN2nn3nfp5FlushERKNS0_12DeviceHandleE", "flush tag: no tag", Result, h_nfp_Flush, const NfpDeviceHandle *h) { (void)h; return nfp_no_tag("Flush"); }
 HLE_FORCE("_ZN2nn3nfp19OpenApplicationAreaERKNS0_12DeviceHandleEj", "open application area: no tag", Result, h_nfp_OpenArea, const NfpDeviceHandle *h, uint32_t id) { (void)h; (void)id; return nfp_no_tag("OpenApplicationArea"); }
 HLE_FORCE("_ZN2nn3nfp18GetApplicationAreaEPvPmRKNS0_12DeviceHandleEm", "read application area: no tag", Result, h_nfp_GetArea, void *buf, uint64_t *n, const NfpDeviceHandle *h, uint64_t sz) { (void)buf; (void)h; (void)sz; if (n) *n = 0; return nfp_no_tag("GetApplicationArea"); }

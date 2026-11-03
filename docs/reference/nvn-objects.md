@@ -118,6 +118,14 @@ The game may also write into an NVN object directly, without an NVN call, throug
 - **Fix:** index descriptors by texture serial and retire their cached base, compatible-type and image views at `mtl_tex_release`, through deferred release behind the GPU fence. Preserve the descriptor metadata: a late read resolves it through `tex_mtl` and caches its views for that submission, then retires them at commit. `t_cpu_tex` checks multiple descriptors, ID replacement and pixel-correct recorded replay after finalization and API-object reuse.
 - **Found on:** [Xenoblade Chronicles: Definitive Edition](../../dm/games/0100FF500E34A000/README.md#memory).
 
+### Texture ID views revalidated only for the serials that changed
+
+- **Symptom:** the submit thread spends milliseconds a frame in `pool_gpu` → `tex_by_id` → `tex_mtl` / `tex_get` (a `sample` of the process), and the `[nvn-mtl] pool for handles traced to no slot … built in X ms` line shows a rebuild of the texture pool table every frame at about 2 ms. Fire Emblem Fortune's Weave's battle map: 1.9 ms a build, three builds a frame, about 14 % of the main thread.
+- **Cause:** a texture ID's cached view was valid while `g_ser_gen` stood still, and every change to the serial table bumped it. A game that changes a few serials a frame (the per-stage program ring in `bind_stages` does) therefore sent every registered ID down the slow path at the next lookup, and `pool_gpu` walks all of them (about 5,000 in Fortune's Weave). Packaged (CPU-written) IDs took the slow path again on any guest write anywhere.
+- **Fix:** in `nvn_mtl.m`, for every game. A change to one serial's object bumps `g_ser_gen` through `ser_note`, which records the serial; ID views are valid for an epoch (`treg_ep`), and `ser_sync` invalidates only the IDs registered with a noted serial (`g_treg_serial`). A bump without a note (the sharing table, upgrades, a dropped upload), more than 64 notes, or any sparse mapping (`nvn_sparse_gen`) starts a new epoch, which re-checks every ID as before. A packaged ID whose pages nobody wrote since its upload stamp keeps its view (the test `tex_mtl_` makes), and `tex_fast_rid` returns the cached resource ID of a view `tex_by_id` kept. Other users of `g_ser_gen` (argument blocks, `pool_gpu`'s own key) are unchanged.
+- **Check:** `make -C dm/gfx/tests GAME=<id> run` (`t_cpu_tex` among them). Fortune's Weave's battle map (975 draws a frame, MacBook Pro M1 Pro): pool build 1.9 → 1.2 ms, submit 52.5k → 42.8k instructions per draw.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md).
+
 ### Memory-pool tracking table grows in blocks
 
 - **Cause:** the memory-pool tracking table had a fixed 4,096 slots; a pool past the end would have its textures re-uploaded at every use.

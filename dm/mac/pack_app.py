@@ -202,7 +202,7 @@ def selected_inputs(a):
     pairs = Path(a.pso_pairs) if a.pso_pairs and not any(p.name == 'pso_pairs.tsv' for p in tables) else None
     fonts = sorted(p for p in Path(a.font).glob('*.ttf') if not detritus(p.name))
     files = [Path(a.host)] + mods + msls + pso + tables + fonts + ([pairs] if pairs else [])
-    files += [Path(p) for p in (a.env_file, a.settings, a.icon) if p]
+    files += [Path(p) for p in (a.env_file, a.settings, a.icon, a.control_nacp) if p]
     for p in files:
         if not p.is_file(): raise SystemExit(f'no input file at {p}')
     return mods, msls, pso, tables, pairs, fonts, files
@@ -275,6 +275,7 @@ def pack(a):
     if fonts: copy(fonts, dm / 'font', False)
     if a.env_file: shutil.copyfile(a.env_file, dm / 'env.txt')
     if a.settings: shutil.copyfile(a.settings, dm / 'launcher.json')
+    if a.control_nacp: shutil.copyfile(a.control_nacp, res / 'control.nacp')
     step('shader libraries'); msl_dst = res / 'msl' / (a.msl_name or msl.name); msl_dst.mkdir(parents=True); copy(msls, msl_dst, clone['msl'])
     if aoc: step('add-on content'); copy([aoc], res / 'aoc', clone['aoc'])
     if pso: step('pipeline archive'); (res / 'pso').mkdir(); copy(pso, res / 'pso', clone['pso'])
@@ -318,6 +319,7 @@ def parse(argv):
     ap.add_argument('--aoc', help='the DLC RomFS images or folders by index')
     ap.add_argument('--pso', help='the pipeline archive made offline for this Mac (pso_offline.py --platform macos output: <arch>.mtl4a, prebuilt.tsv)')
     ap.add_argument('--pso-pairs', help='pso_pairs.tsv for a profile that has none (the shader split\'s copy)')
+    ap.add_argument('--control-nacp', help='original application control metadata for cache storage limits')
     ap.add_argument('--env-file', help='environment switches baked in (Resources/dm/env.txt)')
     ap.add_argument('--settings', help='the game\'s launcher settings (dm/games/settings.py output; Resources/dm/launcher.json, which the Mac front end reads)')
     ap.add_argument('--title-id', required=True); ap.add_argument('--name', required=True)

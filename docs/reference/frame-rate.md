@@ -20,6 +20,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** probes confirmed the legacy result: the framework presents at interval 1, VFR reports interval 1 with ratio 0.5, and when a frame runs long the game steps back to 2 with ratio 1, so the game speed does not change.
 - **Note:** the zeldaret/botw decompilation (`VFR.cpp`) gave the semantics; 1.9.0's addresses were found by the constants (`60 / interval`, the `fmov s11, #2.0` floor).
 
+### A regress run stops when another app takes the key window
+
+- **Symptom:** `scripts/regress.py` reports a hang (`no frame after … s`, a state dump with every game thread waiting) in some runs of Tears of the Kingdom, baseline and candidate alike; the log's last focus line before it is `oe focus state → 2`, with no `→ 1` after it.
+- **Cause:** the game window resigning key is sent to the game as out of focus, and Tears of the Kingdom stops presenting while out of focus. During an unattended run another app (a build, a notification, another session's window) takes the key window now and then. Every hung TotK run in the harness's folder on 2026-11-03/04 had that focus line without a return; the runs that passed either had none or regained focus within a second.
+- **Fix:** `regress.py` runs the host with `DM_FOCUS_KEEP=1` (`front_mac.m`): the game stays in focus while its window is up, whichever app is active; minimizing still counts.
+- **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game) (the regress route, 2026-11-03 and 04).
+
 ### Benchmark captures perturb the measured frame pacing
 
 - **Symptom:** otherwise stationary gameplay benchmarks show roughly 125–135 ms frame spikes at their verification screenshots; adaptive-cap results vary between runs.

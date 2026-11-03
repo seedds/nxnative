@@ -5148,6 +5148,23 @@ void mtl_queue_forget(uint64_t serial) {   // caller holds the submission lock
     if (g_active_queue == q) { g_active_queue = NULL; state_reset(); memset(&R, 0, sizeof R); args_dirty_all(); }
     free(q);
 }
+// A finalized program leaves the bindings of every queue: NVN reads a program only when it is bound, so a game may finalize one that a queue still has bound and reuse its memory.
+// Fortune's Weave does this when its title screen hands over to the opening demo: the pointer stayed in the active queue's bindings, went into its saved state when another queue submitted,
+// and switching back to that queue combined its stages from the reused memory (keys_hash on float data)
+static int prog_unbind(typeof(S) *s, const prog_t *p) {
+    int n = 0;
+    if (s->prog == p) s->prog = NULL, n++;
+    if (s->cprog == p) s->cprog = NULL, n++;
+    for (int st = 0; st < 5; st++) if (s->bst[st] == p) s->bst[st] = NULL, n++;
+    return n;
+}
+void mtl_prog_forget(const prog_t *p) {   // caller holds the submission lock
+    const prog_t *prog = S.prog, *cprog = S.cprog;
+    int active = prog_unbind(&S, p) > 0, inactive = 0;
+    if (S.prog != prog || S.cprog != cprog) { g_pso_dirty = 1; args_dirty_all(); }
+    for (queue_state *q = g_queue_states; q; q = q->next) if (q != g_active_queue && prog_unbind(&q->s, p)) inactive++;
+    if (active || inactive) { static unsigned n; if (!n++ || !(n & (n - 1))) MLOG("finalized program %p dropped from queue bindings (active queue %d, inactive queues %d; %u times so far)", (const void *)p, active, inactive, n); }
+}
 
 // Correct the vertex format by the shader input's component type: Metal requires integer inputs to get integer formats of the same signedness, and float inputs float / normalized formats.
 // Integer input (inferred at translation time as "only used as an integer", dmsh_build.py int_inputs) with an integer format: on a signedness mismatch switch to the same width with the other sign (bit pattern unchanged for 32-bit components;

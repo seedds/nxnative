@@ -221,6 +221,14 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** [FINAL FANTASY X/X-2 HD Remaster](../../dm/games/0100BC300CB48000/README.md), launcher-to-X-2 handoff.
 - **Check:** `t_queue_origin` tests independent state, switching back, finalization and address reuse with a poisoned old program pointer, alongside its real GPU culling tests.
 
+### Finalized programs leave every queue's bindings
+
+- **Symptom:** about 23 s after launch, when the title screen hands over to the opening demo, a crash in `keys_hash` (`prog_key` ← `prog_get` ← `bind_stages` ← `prog_resolve` ← `mtl_queue_activate`), reading a control address made of float data; the program object now holds other data.
+- **Cause:** NVN reads a program only when it is bound, so a game may finalize a program a queue still has bound and reuse its memory. The host kept the pointer in that queue's bindings (`S.bst`, `S.prog`, `S.cprog`); it went into the queue's saved state when another queue submitted, and switching back combined the stages from the reused memory.
+- **Fix:** `nvnProgramFinalize` drops the program from the active bindings and from every saved queue state under the submission lock (`mtl_prog_forget`), and logs `finalized program … dropped from queue bindings` the first time and at powers of two.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md), left on the title screen until the opening demo: 5 of 5 runs crashed before, 0 of 7 after, each logging one drop from the active queue.
+- **Check:** `t_queue_origin` finalizes a program bound in the active queue and in a saved one, poisons its memory and switches back: both lose it.
+
 ### Fence syncs recorded in command buffers
 
 - **Symptom:** `nvnCommandBufferFenceSync` unimplemented, every `SyncWait` timed out at once.

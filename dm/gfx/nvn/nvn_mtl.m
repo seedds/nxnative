@@ -2326,21 +2326,25 @@ static void zb_report(const tex_t *t, unsigned base, const char *why) {
             free(m); }
         MLOG("[zb] ser=%llu: block height log2 %d (packaged %d), stride %u, depth %u, target %d, samples %d", (unsigned long long)t->serial, (int)t->L.tileH, t->d.pkg_block_h, t->d.stride, t->d.depth, t->d.target, t->d.samples); }
 }
-// A packed 16-bit format that Metal has only with red and blue exchanged (RGB5, RGB5A1, RGB565: nvn_fmt_to_mtl's r/b swap): the bit position of red in Metal's format (blue is at bit 0), else 0.
+// A packed 16-bit format that Metal has only with red and blue exchanged (RGB5, RGB5A1, RGB565: nvn_fmt_to_mtl's r/b swap): the bit position of red in Metal's format (blue is at bit 0); 4 for
+// RGBA4, whose four nibbles Metal's ABGR4 holds in reverse (nvn_fmt_to_mtl's reversed mapping); else 0.
 // Every host texture of these formats holds Metal's order, as Metal renders, clears and copies into it; only guest memory holds the guest's (red at bit 0). Bytes are converted where they cross:
 // uploads (pkg_upload_), buffer ↔ texture copies (rb_swap_gpu), ReadTexels and readbacks into storage (rb_swap_rows). Textures that read guest memory in place (linear and buffer textures, on a
-// pool's buffer) take the swap when sampled instead (tex_by_id). Tears of the Kingdom's Depths: smeared rock with red and blue exchanged (GitHub issue #183)
+// pool's buffer) take the swap when sampled instead (tex_by_id). Tears of the Kingdom's Depths: smeared rock with red and blue exchanged (GitHub issue #183); Super Mario RPG's RGBA4 shadowmask
+// read its channels reversed and took the sunlight off Mushroom Way's battle ground
 static int rb_packed_shift(int f) {
     uint32_t pf = 0; uint8_t sw[4];
-    if (!nvn_fmt_to_mtl(f, &pf, sw) || sw[0] != NVN_SWZ_B) return 0;
-    return pf == MTLPixelFormatB5G6R5Unorm ? 11 : pf == MTLPixelFormatBGR5A1Unorm ? 10 : 0;
+    if (!nvn_fmt_to_mtl(f, &pf, sw) || sw[0] == NVN_SWZ_R) return 0;
+    return pf == MTLPixelFormatB5G6R5Unorm ? 11 : pf == MTLPixelFormatBGR5A1Unorm ? 10 : pf == MTLPixelFormatABGR4Unorm ? 4 : 0;
 }
-// Exchanges the 5-bit red and blue fields of a region's 16-bit texels in place (rows of wb bytes, row / img apart); green and alpha stay. The same exchange both ways
+// Exchanges the 5-bit red and blue fields of a region's 16-bit texels in place (rows of wb bytes, row / img apart); green and alpha stay. Shift 4 (RGBA4) reverses the four nibbles. The same
+// exchange both ways
 static void rb_swap_rows(uint8_t *p, size_t wb, size_t rows, size_t nz, size_t row, size_t img, int shift) {
     uint16_t m = (uint16_t)(31u | 31u << shift);
     for (size_t z = 0; z < nz; z++) for (size_t y = 0; y < rows; y++) {
         uint16_t *q = (uint16_t *)(p + z * img + y * row);
-        for (size_t i = 0; i < wb / 2; i++) q[i] = (uint16_t)((q[i] & ~m) | (q[i] & 31u) << shift | (q[i] >> shift & 31u));
+        if (shift == 4) for (size_t i = 0; i < wb / 2; i++) q[i] = (uint16_t)(q[i] << 12 | (q[i] & 0xf0u) << 4 | (q[i] >> 4 & 0xf0u) | q[i] >> 12);
+        else for (size_t i = 0; i < wb / 2; i++) q[i] = (uint16_t)((q[i] & ~m) | (q[i] & 31u) << shift | (q[i] >> shift & 31u));
     }
 }
 static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture> reuse, MTLTextureUsage keep) {
@@ -4558,13 +4562,13 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
     if (!base) { if (rp->gone) { static uint64_t n; if (n++ < 4) MLOG("texture ID %d read after its memory pool was finalized ser=%llu %ux%u format %#x: treated as an empty slot (%llu so far)", tid, (unsigned long long)rp->t.serial, rp->t.d.width, rp->t.d.height, rp->t.d.format, (unsigned long long)n); } return nil; }
     v = base;
     // Channel swizzle: the view's if set, otherwise the one from texture building; identity builds no view (SMBW's font cache is (1 1 1 R): without the swizzle glyphs become white blocks).
-    // Its channels name components of the NVN format, which the format's own mapping finds in Metal's (nvn_fmt_to_mtl: alpha 1 for RGBX and the like, red and blue swapped for the RGB565 family),
+    // Its channels name components of the NVN format, which the format's own mapping finds in Metal's (nvn_fmt_to_mtl: alpha 1 for RGBX and the like, red and blue swapped for the RGB565 family, all four reversed for RGBA4),
     // the view format's if Metal has it, else the texture's (GitHub PR #66: The Legend of Zelda: Echoes of Wisdom's hearts are an RGB565 mask, drawn as red rectangles without the swap).
     // The swap is for bits in the guest's order, so only for textures that read guest memory in place (linear and buffer textures): every other host texture holds Metal's order, uploads
-    // included (rb_packed_shift)
+    // included (rb_packed_shift): for them only the format's alpha 1 remains
     uint8_t sw[4] = {MTLTextureSwizzleRed, MTLTextureSwizzleGreen, MTLTextureSwizzleBlue, MTLTextureSwizzleAlpha}, fsw[4]; int need_sw = 0; uint32_t view_pf = 0;
     if (!(r.has_v && r.v.set_format && nvn_fmt_to_mtl(r.v.format, &view_pf, fsw) && view_pf)) nvn_fmt_to_mtl(r.t.d.format, NULL, fsw);
-    if (fsw[0] != MTLTextureSwizzleRed && !base.buffer) { fsw[0] = MTLTextureSwizzleRed; fsw[2] = MTLTextureSwizzleBlue; }
+    if (!base.buffer) for (int c = 0; c < 4; c++) if (fsw[c] >= MTLTextureSwizzleRed) fsw[c] = (uint8_t)(MTLTextureSwizzleRed + c);
     // Metal cannot cast a depth texture to its single-channel colour equivalent. Use the same depth storage,
     // but present (R, 0, 0, 1) to the NVN swizzle: a float shader reading Metal depth can see depth in G and B too.
     if ((base.pixelFormat == MTLPixelFormatDepth32Float && view_pf == MTLPixelFormatR32Float) ||

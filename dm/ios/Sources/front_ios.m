@@ -184,10 +184,10 @@ static void launcher_done(void) { [g_root startGame]; }
     UIEdgeInsets gameInsets = dm_game_safe_insets(b, self.view.safeAreaInsets, duoPortrait);
     BOOL onTV = self.game.superview != self.view;   // the TV's view lays the picture out; the phone is all pad
     DmLayout layout = onTV ? dm_layout_pad_only(b) : dm_layout_picture(dm_layout(b, gameInsets, self.partiallyOpen, division, g_picture_aspect), b, self.fill, g_picture_aspect);
-    if (!onTV) self.game.frame = layout.game;
+    if (!onTV) self.game.frame = layout.drawable;
     layout.topSafeOnly = duoPortrait;
-    NSString *line = [NSString stringWithFormat:@"%@, hinge %ld%s, divisions %@, picture %@, controls %@", onTV ? @"pad only (picture on the TV)" : layout.separated ? @"split" : self.fill ? @"overlay, Fill" : @"overlay",
-                      (long)self.hingeStatus, self.partiallyOpen ? " (half open)" : "", regionLog, NSStringFromCGRect(layout.game), NSStringFromCGRect(layout.controls)];
+    NSString *line = [NSString stringWithFormat:@"%@, hinge %ld%s, divisions %@, picture %@, drawable %@, controls %@", onTV ? @"pad only (picture on the TV)" : layout.separated ? @"split" : self.fill ? @"overlay, Fill" : @"overlay",
+                      (long)self.hingeStatus, self.partiallyOpen ? " (half open)" : "", regionLog, NSStringFromCGRect(layout.game), NSStringFromCGRect(layout.drawable), NSStringFromCGRect(layout.controls)];
     if (![line isEqualToString:self.layoutLog]) { self.layoutLog = line; LOG("front end: layout %s", line.UTF8String); }
     self.pad.frame = b;
     dm_gamepad_arrange(self.pad, layout);

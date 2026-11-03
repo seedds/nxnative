@@ -435,6 +435,34 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     XCTAssertTrue(CGRectEqualToRect(dm_layout_picture(tabletop, landscape, YES, DM_PICTURE_16_9).game, tabletop.game), @"Tabletop keeps the picture fitted in its half");
 }
 
+- (void)testNativeWideFitKeepsSafeFramingUntilCameraAcknowledgement {
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    DmLayout fit = dm_layout_picture(dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull), bounds, NO);
+    XCTAssertTrue(CGRectEqualToRect(fit.drawable, bounds), @"Fit offers the actual wide canvas, not a fixed preset");
+    XCTAssertTrue(CGRectEqualToRect(dm_layout_touch_rect(fit, 0), dm_aspect_fit(bounds)), @"Unsupported, disabled and no-ack pictures retain 16:9");
+    XCTAssertTrue(CGRectEqualToRect(dm_layout_touch_rect(fit, 844.0 / 390), bounds), @"Only an acknowledged camera uses the wider picture");
+    CGPoint original = dm_game_touch_point(dm_layout_touch_rect(fit, 0), CGPointMake(300, 150));
+    CGPoint wide = dm_game_touch_point(dm_layout_touch_rect(fit, 844.0 / 390), CGPointMake(300, 150));
+    XCTAssertEqualWithAccuracy(original.x, (300 - fit.game.origin.x) / fit.game.size.width, 0.001);
+    XCTAssertEqualWithAccuracy(wide.x, 300.0 / 844, 0.001);
+
+    DmLayout fill = dm_layout_picture(dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull), bounds, YES);
+    XCTAssertEqualWithAccuracy(fill.drawable.size.width / fill.drawable.size.height, 16.0 / 9.0, 0.0001, @"Fill requests the original camera, not native widening");
+    XCTAssertTrue(CGRectEqualToRect(dm_layout_touch_rect(fill, 0), fill.game), @"After restoration Fill retains its explicit crop");
+    CGRect transitioning = dm_layout_touch_rect(fill, 844.0 / 390);
+    XCTAssertEqualWithAccuracy(transitioning.size.width / transitioning.size.height, 844.0 / 390, 0.002, @"Pending restoration preserves the acknowledged camera proportions");
+
+    const CGRect narrow[] = {CGRectMake(0, 0, 1024, 768), CGRectMake(0, 0, 390, 844)};
+    for (NSUInteger i = 0; i < 2; i++) {
+        DmLayout layout = dm_layout_picture(dm_layout(narrow[i], UIEdgeInsetsZero, NO, CGRectNull), narrow[i], NO);
+        XCTAssertTrue(CGRectEqualToRect(layout.drawable, layout.game), @"Narrow and portrait layouts keep their original fitted drawable");
+    }
+    DmLayout tabletop = dm_layout_picture(dm_layout(bounds, UIEdgeInsetsZero, YES, CGRectMake(0, 180, 844, 24)), bounds, NO);
+    XCTAssertTrue(tabletop.separated);
+    XCTAssertTrue(CGRectEqualToRect(tabletop.drawable, tabletop.game), @"Half-folded Duo keeps upstream's picture above controls");
+    XCTAssertTrue(CGRectIsEmpty(dm_layout_pad_only(bounds).drawable), @"The phone cannot publish a drawable while the TV owns the picture");
+}
+
 - (void)testPictureFillTouchesFollowTheCroppedPicture {
     CGRect bounds = CGRectMake(0, 0, 844, 390);
     DmLayout layout = dm_layout_picture(dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9), bounds, YES, DM_PICTURE_16_9);
@@ -703,10 +731,14 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     CGRect b = root.view.bounds;
     BOOL duo = [[root valueForKey:@"hingeStatus"] integerValue] != 0;
     DmLayout fit = dm_layout(b, dm_game_safe_insets(b, root.view.safeAreaInsets, duo), [[root valueForKey:@"partiallyOpen"] boolValue], CGRectNull, DM_PICTURE_16_9);
-    dm_setting_live("DM_PICTURE_FIT", "fill"); [root.view layoutIfNeeded];
-    XCTAssertTrue(CGRectEqualToRect(game.frame, dm_layout_picture(fit, b, YES, DM_PICTURE_16_9).game), @"Fill applies at once: %@", NSStringFromCGRect(game.frame));
-    dm_setting_live("DM_PICTURE_FIT", "fit"); [root.view layoutIfNeeded];
-    XCTAssertTrue(CGRectEqualToRect(game.frame, fit.game), @"and Fit brings the bars back: %@", NSStringFromCGRect(game.frame));
+    dm_setting_live("DM_PICTURE_FIT", "fill"); [root.view layoutIfNeeded]; [game layoutIfNeeded];
+    DmLayout fill = dm_layout_picture(fit, b, YES, DM_PICTURE_16_9);
+    XCTAssertTrue(CGRectEqualToRect(game.frame, fill.drawable), @"Fill applies at once: %@", NSStringFromCGRect(game.frame));
+    XCTAssertEqualWithAccuracy(duo_harness_drawable_ratio(), fill.drawable.size.width / fill.drawable.size.height, 0.0001);
+    dm_setting_live("DM_PICTURE_FIT", "fit"); [root.view layoutIfNeeded]; [game layoutIfNeeded];
+    fit = dm_layout_picture(fit, b, NO, DM_PICTURE_16_9);
+    XCTAssertTrue(CGRectEqualToRect(game.frame, fit.drawable), @"Fit restores the native canvas; without a guest acknowledgement the renderer retains the bars");
+    XCTAssertEqualWithAccuracy(duo_harness_drawable_ratio(), fit.drawable.size.width / fit.drawable.size.height, 0.0001);
 
     dm_setting_live("DM_RUMBLE", "0"); XCTAssertEqual(duo_harness_rumble(), 0);
     dm_setting_live("DM_RUMBLE", "1"); XCTAssertEqual(duo_harness_rumble(), 1);

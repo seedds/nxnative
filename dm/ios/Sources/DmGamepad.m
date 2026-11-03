@@ -256,7 +256,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
 
 // ---- Layout (points; computed inside the safe area) ----
 - (void)arrange:(DmLayout)layout {
-    if (CGRectEqualToRect(_layout.controls, layout.controls) && CGRectEqualToRect(_layout.game, layout.game) && _layout.separated == layout.separated && _layout.topSafeOnly == layout.topSafeOnly) return;
+    if (CGRectEqualToRect(_layout.controls, layout.controls) && CGRectEqualToRect(_layout.game, layout.game) && CGRectEqualToRect(_layout.drawable, layout.drawable) && _layout.separated == layout.separated && _layout.topSafeOnly == layout.topSafeOnly) return;
     [self reset];   // A finger held across a pose change must not leave a key or game touch stuck.
     _layout = layout;
     [self setNeedsLayout];
@@ -396,9 +396,9 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     if (changed || stick || _stickShown) [self refresh];   // also refresh on the stick release so the knob returns to the centre
     _stickShown = stick;
 }
-// Touches no control takes go to the game's touch screen, normalized on front_ios.m's actual 16:9 viewport (including portrait and tabletop splits, and the cropped Fill picture): Super Mario Galaxy's pointer in handheld mode (profile op_mode). The host reports them only in handheld mode, as on the Switch (hle_hid.c touch_read)
+// Touch follows the actual presented rectangle, including an acknowledged native camera or the cropped Fill picture.
 - (void)pushGame {
-    CGRect b = _layout.game;
+    CGRect b = dm_layout_touch_rect(_layout, dm_game_aspect());
     if (b.size.width <= 0 || b.size.height <= 0) { dm_touch_set(NULL, 0); return; }
     dm_touch t[16]; int n = 0;
     for (int i = 0; i < 16; i++) if (_game[i]) {
@@ -408,7 +408,8 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     dm_touch_set(t, n);
 }
 - (BOOL)gameBegin:(UITouch *)t {
-    if (CGRectIsEmpty(_layout.game) || (_layout.separated && !CGRectContainsPoint(_layout.game, [t locationInView:self]))) return NO;
+    CGRect game = dm_layout_touch_rect(_layout, dm_game_aspect());
+    if (CGRectIsEmpty(game) || (_layout.separated && !CGRectContainsPoint(game, [t locationInView:self]))) return NO;
     for (int i = 0; i < 16; i++) if (!_game[i]) { _game[i] = t; [_owner setObject:@(C_GAME | (uint64_t)i << 8) forKey:t]; return YES; }
     return NO;
 }

@@ -33,6 +33,8 @@ The size of the 3D picture, from 50 to 100 %. Below 100 % the size is fixed ther
 
 Breath of the Wild 1.9.0 and Tears of the Kingdom 1.4.3 automatically widen their gameplay cameras to a screen or window wider than 16:9. More world is visible at the sides; the scene and HUD retain their proportions. Existing internal render-target sizes are kept, so horizontal detail is spread across the wider view. Other builds and narrower screens keep their original framing.
 
+On iPhone and iPad this applies to **Picture: Fit** in landscape. **Fill** remains a cropped 16:9 picture, not a wider camera. Portrait and half-folded layouts keep the original fitted picture above the controls; a TV keeps its fitted picture too. Changing Picture in the in-game menu updates the camera request from the new drawable; presentation follows only when the game acknowledges the camera change.
+
 Set `DM_WIDESCREEN=0` in `env.txt` and restart to restore 16:9 gameplay. There is no launcher row for this switch. Maps, cinematic framing and other game-specific layouts are not guaranteed to fill every screen.
 
 ### Console mode
@@ -86,6 +88,8 @@ iPhone and iPad. **Fit**, the default, shows the game's picture (16:9, or the ta
 ### Picture shape
 
 Games whose profile supports it (Breath of the Wild, Animal Crossing: New Horizons). **iPhone Duo screen (1.43:1)** renders a taller picture of the Duo's own shape: the sides of 16:9 with more above and below, and the HUD at the screen's edges. **16:9** is the Switch's picture. The taller picture has about a quarter more pixels, so it runs a little slower and warmer.
+
+With **Fit**, the supported [Widescreen](#widescreen) camera patches can show more world across a wider landscape screen without cropping. Until the camera acknowledges that change, the original picture keeps its bars. **Fill** always means cropping, not native widening.
 
 ### Frame-rate counter
 

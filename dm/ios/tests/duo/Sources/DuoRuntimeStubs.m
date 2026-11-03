@@ -111,6 +111,10 @@ bool dm_show_launcher(void *viewController, void (*done)(void)) { (void)viewCont
 uint64_t g_t0_ns;
 uint64_t now_ns(void) { return 1; }
 uint64_t mtl_present_count(void) { return 0; }
+static double g_drawable_ratio;
+void dm_game_aspect_drawable(double width, double height) { g_drawable_ratio = height > 0 ? width / height : 0; }
+double duo_harness_drawable_ratio(void) { return g_drawable_ratio; }
+float dm_game_aspect(void) { return 0; }   // The harness has no guest camera; pure layout tests supply acknowledgements explicitly.
 __thread _Atomic int dm_host_work;
 void dm_gfx_suspend(int on) { (void)on; }
 void dm_audio_suspend(int on) { (void)on; }

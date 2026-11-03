@@ -5,7 +5,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-typedef struct { CGRect game, controls; BOOL separated, topSafeOnly; } DmLayout;
+typedef struct { CGRect game, controls; BOOL separated, topSafeOnly; CGRect drawable; } DmLayout;
 
 static inline UIEdgeInsets dm_game_safe_insets(CGRect bounds, UIEdgeInsets insets, BOOL duo) {
     return duo && bounds.size.height > bounds.size.width ? UIEdgeInsetsMake(insets.top, 0, 0, 0) : insets;
@@ -46,7 +46,8 @@ static inline CGRect dm_horizontal_division(CGRect b, CGRect division) {
 }
 
 static inline DmLayout dm_layout(CGRect b, UIEdgeInsets insets, BOOL partiallyOpen, CGRect division, CGFloat aspect) {
-    DmLayout l = { dm_aspect_fit(b, aspect), b, NO, NO };
+    CGRect game = dm_aspect_fit(b, aspect);
+    DmLayout l = { game, b, NO, NO, game };
     if (CGRectIsEmpty(b)) return l;
     division = dm_horizontal_division(b, division);
     BOOL portrait = b.size.height > b.size.width;
@@ -58,18 +59,31 @@ static inline DmLayout dm_layout(CGRect b, UIEdgeInsets insets, BOOL partiallyOp
     CGRect lower = CGRectMake(CGRectGetMinX(b), CGRectGetMaxY(division), b.size.width,
                              CGRectGetMaxY(b) - CGRectGetMaxY(division));
     if (upper.size.height <= 0 || CGRectGetMaxY(safe) <= CGRectGetMinY(lower)) return l;
-    l.game = dm_aspect_fit(upper, aspect); l.controls = lower; l.separated = YES;
+    l.game = dm_aspect_fit(upper, aspect); l.drawable = l.game; l.controls = lower; l.separated = YES;
     return l;
 }
 
 // The picture is on a TV (front_ios.m DmTVSceneDelegate): the controls take the whole view and no touch goes to the game's touch screen (the game is docked there).
-static inline DmLayout dm_layout_pad_only(CGRect b) { return (DmLayout){ CGRectZero, b, NO, NO }; }
+static inline DmLayout dm_layout_pad_only(CGRect b) { return (DmLayout){ CGRectZero, b, NO, NO, CGRectZero }; }
 
 // Fill covers the full view only in the overlay layout (landscape). A portrait or tabletop split keeps the picture fitted in its
 // area above the controls, where cropping a small picture would cost more than the bars.
+// Fit on a wider overlay reserves the full canvas for native widening. Until the guest acknowledges a camera change,
+// the renderer fits the original picture inside it; game remains that safe touch rectangle.
 static inline DmLayout dm_layout_picture(DmLayout l, CGRect b, BOOL fill, CGFloat aspect) {
     if (fill && !l.separated && !CGRectIsEmpty(b)) l.game = dm_aspect_fill(b, aspect);
+    l.drawable = !fill && !l.separated && b.size.height > 0 && b.size.width / b.size.height > 16.0 / 9.0 ? b : l.game;
     return l;
+}
+
+// Touch follows the acknowledged camera, not the request. During live Fill/rotation transitions the old camera
+// can still be active for a frame: fit that ratio into the actual drawable just as the renderer does.
+static inline CGRect dm_layout_touch_rect(DmLayout l, double effective) {
+    if (!(effective > 0) || !isfinite(effective) || CGRectIsEmpty(l.drawable)) return l.game;
+    CGRect b = l.drawable;
+    if (fabs((b.size.width / b.size.height) / effective - 1) < 0.01) return b;
+    CGFloat w = MIN(b.size.width, b.size.height * effective), h = w / effective;
+    return CGRectMake(floor(CGRectGetMidX(b) - w / 2), floor(CGRectGetMidY(b) - h / 2), round(w), round(h));
 }
 
 // A point in the view as the game's touch screen sees it: normalized on the game rectangle, which with Fill is larger than the view,

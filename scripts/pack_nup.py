@@ -202,7 +202,14 @@ def scan(n):
 
 
 def exefs(n, k, dst):   # the package's ExeFS into dst, kept as it is when every file there has the same content
-    files = [(name, i) for name, isdir, i in n.children(k.exefs) if not isdir and not name.startswith(b'.')]
+    files = []
+    for name, isdir, i in n.children(k.exefs):
+        if isdir: continue
+        # NUP names are labels (§6.1). Validate them before using them as host paths.
+        filename = os.fsdecode(name)
+        if filename in ('', '.', '..') or '\0' in filename or Path(filename).name != filename:
+            raise Error(f'{n.path}: invalid ExeFS name {name!r}')
+        if not name.startswith(b'.'): files.append((name, i))
     def same():
         if not dst.is_dir() or {os.fsencode(p.name) for p in dst.iterdir()} != {name for name, _ in files}: return False
         def sha(f):

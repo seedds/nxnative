@@ -57,7 +57,7 @@ def write_nup(path, packages):
         return t
     recs = []
     for kind, tid, ver, tree, meta in packages:
-        t = {k: nest(v) for k, v in tree.items()}
+        t = {k: v if k == 'exefs' else nest(v) for k, v in tree.items()}
         root = walk('', t)
         sub = {n: s[1] for n, s in zip(sorted(t), slots[dirs[root][1]:dirs[root][1] + dirs[root][2]])}
         recs.append([tid, root, sub.get('exefs', 0xFFFFFFFF), sub.get('romfs', 0xFFFFFFFF), ver, kind, meta])
@@ -118,6 +118,27 @@ class Base(unittest.TestCase):
 
     def open(self):
         n = pack_nup.Nup(self.path); self.addCleanup(n.close); return n
+
+
+class ExeFSNames(unittest.TestCase):
+    def test_rejects_names_that_are_not_path_components(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            target = root / 'sentinel'
+            target.write_bytes(b'original')
+            archive = root / 'game.nup'
+            dst = root / 'build' / 'ExeFS'
+            for name in (str(target), '../sentinel', 'nested/file', '', '.', '..', 'bad\0name'):
+                with self.subTest(name=name):
+                    tree = {'exefs': {name: b'overwritten'}}
+                    write_nup(archive, [(0, TID, 0, tree, b'')])
+                    try:
+                        with pack_nup.Nup(archive) as n:
+                            with self.assertRaisesRegex(pack_nup.Error, 'invalid ExeFS name'):
+                                pack_nup.exefs(n, n.packages[0], dst)
+                    finally:
+                        self.assertEqual(target.read_bytes(), b'original')
+                    self.assertFalse(dst.with_name('ExeFS.partial').exists())
 
 
 class Read(Base):

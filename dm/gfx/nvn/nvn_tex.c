@@ -206,6 +206,23 @@ int nvn_tex_sparse_tiles(const nvn_texdesc *d, uint32_t *tw, uint32_t *th, uint3
     return (int)n;
 }
 
+// The 64 KB tiles of one tiled level: tile (tx, ty) is the ty-th block row's tx-th run of gw GOB columns, at (ty * cols + tx) * 64 KB from the level's start (level_walk pads
+// the level to whole tiles, so the rows are cols tiles long); its texels are the tile of nvn_tex_sparse_tiles at (tx * tw, ty * th)
+int nvn_tex_tile_grid(const nvn_texdesc *d, unsigned level, uint32_t *cols, uint32_t *rows) {
+    uint32_t tw, th, td; *cols = *rows = 0;
+    if ((unsigned)nvn_tex_sparse_tiles(d, &tw, &th, &td) <= level) return 0;
+    fmt_t t = fmt_of(d->format);
+    unsigned dpl; int layered; uint32_t w, h, z;
+    shape(d, &dpl, &layered, &w, &h, &z);
+    uint32_t sx, sy; samples_xy(d->samples, &sx, &sy);
+    nvn_texlayout L; nvn_tex_layout(d, &L);
+    unsigned sh = tile_shape_h(d, dpl, t, L.tileH);
+    uint32_t gw = 128u >> (sh + L.tileD); if (!gw) gw = 1;
+    *cols = nvn_tex_level_gobs(d, level) / gw;
+    *rows = (blk(mip(h * sy, level), t.bh) + (8u << sh) - 1) >> (3 + sh);
+    return 1;
+}
+
 void nvn_tex_level_tiles(const nvn_texdesc *d, unsigned level, unsigned *tileH, unsigned *tileD) {
     fmt_t t = fmt_of(d->format);
     unsigned dpl; int layered; uint32_t w, h, z;

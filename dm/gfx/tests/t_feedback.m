@@ -110,7 +110,10 @@ static void slot_case(NvProg *pr, id<MTLRenderPipelineState> pipeline, int slot,
 static void image_view_case(NvProg *pr) {
     const int tid = 661;
     tex_t source;
-    id<MTLTexture> original = target_format(&source, 99796, NVN_FORMAT_R32UI, 2);
+    // An explicit ARC owner complements the serial registry's opaque CF retain.
+    // Keep the base alive through image-view retirement, not just the last draw.
+    static id<MTLTexture> original;
+    original = target_format(&source, 99796, NVN_FORMAT_R32UI, 2);
     view_t level1 = {.set_levels=1, .base_level=1, .nlevels=1};
     mtl_reg_image(tid, &source, &level1);
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
@@ -140,43 +143,80 @@ static void image_view_case(NvProg *pr) {
     CHECK(serial_get(source.serial) == original, "the serial table still holds the image target");   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns original (serial_put's CFBridgingRetain) until mtl_tex_release below, not a leak
     mtl_tex_release(&source);
     CHECK(serial_get(source.serial) == nil, "releasing the image target removes its serial entry");
+    CHECK(g_treg[tid].retired && !g_treg[tid].view && !g_treg[tid].im, "releasing the image target retires its cached image views");
+    S.img[1][b->reg] = 0; memset(&R, 0, sizeof R);
+    mtl_reg_image(tid, NULL, NULL);
+    // Finalize queues retirement at g_fence + 1, even after the last draw.
+    mtl_sub_begin();
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "image view retirement submission completed without error");
+    mtl_drain(); defer_drain();
+    pthread_mutex_lock(&g_res_mu); int resident = [g_res_objects containsObject:original]; pthread_mutex_unlock(&g_res_mu);
+    CHECK(!resident, "the retired image target leaves the residency set");
+    original = nil;
 }
-// Mip-chain passes: a draw rendering one level of a texture whose view it samples reads a view without the attached level. Downsampling (the level below) keeps the view of the
-// levels below; a sampler whose LOD clamp pins one level (fb_pinned_level) reads that level alone, also above the attachment's (an upsample: level n from n + 1) and while
-// rendering the view's base level, which the levels below could not reach (the view clamped the read to n - 1, or none was made)
-static void mip_chain_case(NvProg *pr) {
-    const int tid = 671, sid = 672; NvShader *fs = pr->sh[1]; nvn_rbind keep[2] = {fs->rf.b[0], fs->rf.b[1]}; int keep_nb = fs->rf.nb;
-    fs->rf.nb = 2; fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEX, .reg=0, .aid=0, .dtt=MTLTextureType2D}; fs->rf.b[1] = (nvn_rbind){.kind=NVN_RB_SAMPT, .reg=0, .aid=1};
-    tex_t chain; id<MTLTexture> original = target_format(&chain, 99800, NVN_FORMAT_RGBA8, 3);   // 4x4, 2x2, 1x1
+// Registered sampler clamps must select the right pixels without copying a disjoint level.
+// A clamp at the attachment, or one spanning levels, must still read the pre-overwrite content.
+static void mip_chain_case(id<MTLLibrary> lib) {
+    const int tid = 671, sid = 672;
+    NvProg *pr = [NvProg new]; NvShader *fs = [NvShader new]; pr->sh[1] = fs;
+    fs->stage = 1; strcpy(fs->key, "1122334455667788"); fs->fn = [lib newFunctionWithName:@"fmp"];
+    fs->ae = [fs->fn newArgumentEncoderWithBufferIndex:0]; fs->arg_len = fs->ae.encodedLength;
+    fs->rf.nb = 2; fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEX, .reg=0, .aid=0, .dtt=MTLTextureType2D};
+    fs->rf.b[1] = (nvn_rbind){.kind=NVN_RB_SAMPT, .reg=0, .aid=1};
+    MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+    pd.vertexFunction = [lib newFunctionWithName:@"v"]; pd.fragmentFunction = fs->fn;
+    pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    NSError *error = nil; id<MTLRenderPipelineState> pipeline = [g_dev newRenderPipelineStateWithDescriptor:pd error:&error];
+    CHECK(pipeline != nil, "registered-sampler feedback consumer compiles"); if (!pipeline) return;
+    tex_t chain, output;
+    static id<MTLTexture> original;
+    original = target_format(&chain, 99800, NVN_FORMAT_RGBA8, 3);
+    id<MTLTexture> destination = target(&output, 99801);
+    id<MTLBuffer> result = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared]; res_add(result);
     mtl_reg_tex(tid, &chain, NULL);
-    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
-    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &chain; R.rt.has_cview[0] = 1; S.tex[1][0] = tid | (uint64_t)sid << 20;
-    struct { int level, lod_min, lod_max, minf, want_n, want_level, want_levels; const char *label; } c[] = {
-        {1, 2, 2, 5, 1, 2, 1, "an upsample's sampler pins the level above: that level alone"},
-        {1, 0, 0, 5, 1, 0, 1, "a sampler pinning the level below: that level alone"},
-        {1, -1000, 1000, 5, 1, 0, 1, "a sampler that pins no level: the levels below"},
-        {1, 2, 2, 1, 1, 0, 1, "no mip filter: the levels below"},
-        {0, 1, 1, 5, 1, 1, 1, "rendering the base level, the sampler pins level 1: that level alone"},
-        {0, -1000, 1000, 5, 0, 0, 0, "rendering the base level, no level pinned: left as is"},
+    const uint8_t colors[3][4] = {{255,0,0,255}, {0,255,0,255}, {0,0,255,255}};
+    struct { int level; float lo, hi; int direct; uint8_t want[4]; const char *label; } c[] = {
+        {1, 2, 2, 1, {0,0,255,255}, "pinned higher level reads blue without a snapshot"},
+        {1, 0, 0, 1, {255,0,0,255}, "pinned lower level reads red without a snapshot"},
+        {0, 1, 1, 1, {0,255,0,255}, "pin above the base attachment reads green without a snapshot"},
+        {1, 1, 1, 0, {0,255,0,255}, "pin at the attachment reads its pre-overwrite green"},
+        {1, 1, 2, 0, {0,0,255,255}, "ranged clamp retains the requested higher mip"},
+        {1, 1.5f, 1.5f, 0, {0,128,128,255}, "fractional clamp blends both pre-overwrite mip levels"},
     };
     for (unsigned i = 0; i < sizeof c / sizeof *c; i++) {
-        samp_par sp = {.minf = (uint8_t)c[i].minf, .magf = 1, .ws = 2, .wt = 2, .wr = 2, .lod_min = c[i].lod_min, .lod_max = c[i].lod_max, .aniso = 1}; mtl_reg_samp(sid, &sp);
+        for (int m = 0; m < 3; m++) {
+            uint8_t data[4 * 4 * 4]; int width = 4 >> m;
+            for (int p = 0; p < width * width; p++) memcpy(data + p * 4, colors[m], 4);
+            [original replaceRegion:MTLRegionMake2D(0, 0, width, width) mipmapLevel:m withBytes:data bytesPerRow:width * 4];
+        }
+        samp_par sp = {.minf=5, .magf=1, .ws=2, .wt=2, .wr=2, .lod_min=c[i].lo, .lod_max=c[i].hi, .aniso=1};
+        mtl_reg_samp(sid, &sp); state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+        R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &chain; R.rt.has_cview[0] = 1;
         R.rt.cview[0] = (view_t){.set_levels=1, .base_level=c[i].level, .nlevels=1};
-        clear(MTLClearColorMake(0, 0, 0, 1)); fb_prepare(pr);
-        id<MTLTexture> use = g_fb_n ? g_fb_use[0] : nil;
-        printf("%s: %d views, level %lu+%lu\n", c[i].label, g_fb_n, (unsigned long)use.parentRelativeLevel, (unsigned long)use.mipmapLevelCount);
-        CHECK(g_fb_n == c[i].want_n && (!c[i].want_n || (use.parentTexture == original && (int)use.parentRelativeLevel == c[i].want_level && (int)use.mipmapLevelCount == c[i].want_levels)), c[i].label);
-        rp_end();
+        S.tex[1][0] = tid | (uint64_t)sid << 20;
+        clear(MTLClearColorMake(colors[c[i].level][0]/255., colors[c[i].level][1]/255., colors[c[i].level][2]/255., 1));
+        uint64_t copies = g_fb_count;
+        fb_prepare(pr); rp_end();
+        clear(MTLClearColorMake(1, 0, 1, 1)); rp_end();
+        R.rt.color[0] = &output; R.rt.has_cview[0] = 0;
+        sample(fs, pipeline); readback(destination, result, 0);
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "registered-sampler submission completes without error");
+        int valid = 1;
+        for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) for (int k = 0; k < 4; k++)
+            valid &= abs((int)((const uint8_t *)result.contents)[y * 256 + x * 4 + k] - c[i].want[k]) <= 1;
+        CHECK(valid, c[i].label);
+        if (c[i].direct) CHECK(g_fb_count == copies, "a sampler pinned away from the attachment avoids a snapshot");
     }
-    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "mip-chain submission completed without error");
-    fs->rf.nb = keep_nb; fs->rf.b[0] = keep[0]; fs->rf.b[1] = keep[1];
-    mtl_tex_release(&chain);
+    mtl_tex_release(&chain); mtl_tex_release(&output); mtl_reg_tex(tid, NULL, NULL);
+    memset(&R, 0, sizeof R); S.tex[1][0] = 0; mtl_sub_begin();
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "registered-sampler retirement completes");
+    mtl_drain(); defer_drain(); res_remove(result); original = nil;
 }
 // The rule without a listed shader: copy once, reuse until a barrier, end the pass when an earlier draw of it read the attachment directly.
 static void reuse_case(NvProg *pr) {
     int before = failed, tid = 650; NvShader *fs = pr->sh[1]; fs->rf.b[0].reg = 0;
-    tex_t source; target(&source, 99790);
-    mtl_reg_tex(tid, &source, NULL);   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns the texture (serial_put's CFBridgingRetain) until mtl_tex_release below, not a leak
+    tex_t source; id<MTLTexture> original = target(&source, 99790);
+    mtl_reg_tex(tid, &source, NULL);
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
     R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &source; S.tex[1][0] = tid;
     S.chmask.mask = 0; clear(MTLClearColorMake(1, 0, 0, 1));
@@ -185,7 +225,7 @@ static void reuse_case(NvProg *pr) {
     CHECK(g_fb_n == 0 && g_enc, "a draw that writes nothing reads an unwritten attachment directly");
     S.chmask.mask = 0xffffffffu;
     fb_prepare(pr);
-    CHECK(g_fb_n == 1 && !g_enc && g_fb_count == copies + 1, "a writing draw takes a snapshot");
+    CHECK(g_fb_n == 1 && g_fb_use[0] != original && !g_enc && g_fb_count == copies + 1, "a writing draw takes a distinct snapshot");
     id<MTLTexture> first = g_fb_use[0];
     clear(MTLClearColorMake(0, 1, 0, 1));
     fb_prepare(pr);
@@ -254,10 +294,14 @@ static void tile_case(const char *dir) {
     gd.vertexFunction = [gl newFunctionWithName:@"v"]; gd.fragmentFunction = [gl newFunctionWithName:@"f"]; gd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
     id<MTLRenderPipelineState> green = gl ? [g_dev newRenderPipelineStateWithDescriptor:gd error:&e] : nil;
     CHECK(green != nil, "the green pipeline compiles");
+    tex_t ranged; id<MTLTexture> chain = target_format(&ranged, 99796, NVN_FORMAT_RGBA8, 2);
+    if (!chain) return;
     tex_t source; id<MTLTexture> attachment = target(&source, 99795);
-    mtl_reg_tex(tid, &source, NULL);
+    mtl_reg_tex(tid, &source, NULL); mtl_reg_tex(661, &ranged, NULL);
     id<MTLBuffer> zero = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared]; res_add(zero);   // the variant's argument buffer: the tile read leaves its texture and sampler unread
-    id<MTLBuffer> result = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared]; res_add(result);
+    id<MTLBuffer> result = [g_dev newBufferWithLength:3072 options:MTLResourceStorageModeShared]; res_add(result);
+    const uint8_t green_mip[] = {0,255,0,255, 0,255,0,255, 0,255,0,255, 0,255,0,255};
+    [chain replaceRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:1 withBytes:green_mip bytesPerRow:8];
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
     R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &source; S.tex[1][0] = tid; S.chmask.mask = 0xffffffffu;
     S.has_vp = 1; S.vp[0][0] = 0; S.vp[0][1] = 0; S.vp[0][2] = 4; S.vp[0][3] = 4;
@@ -294,6 +338,26 @@ static void tile_case(const char *dir) {
     fb_prepare(pr);
     CHECK(g_fb_n == 1 && !g_enc && g_fb_tseq != g_draw_seq, "with a viewport smaller than the target the draw takes a snapshot");
     rp_end();
+    // A ready tile PSO does not make a multi-level view eligible. Its fallback
+    // must preserve both levels, then a single-level view may read the tile again.
+    S.vp[0][2] = 4; R.rt.color[0] = &ranged; S.tex[1][0] = 661; g_fb_bar++;
+    clear(MTLClearColorMake(0, 0, 1, 1));
+    uint64_t range_copies = g_fb_count;
+    fb_prepare(pr);
+    CHECK(g_fb_n == 1 && !g_enc && g_fb_tseq != g_draw_seq && g_fb_count == range_copies + 1 && g_fb_use[0].mipmapLevelCount == 2 && g_fb_use[0] != chain,
+          "a multi-level view falls back to a distinct full-range snapshot despite a ready tile PSO");
+    id<MTLTexture> range_snap = g_fb_n == 1 ? g_fb_use[0] : nil;
+    clear(MTLClearColorMake(1, 0, 0, 1)); rp_end();
+    if (range_snap) {
+        readback(range_snap, result, 1024);
+        enc_b_copy_texture_buffer(blit(), range_snap, 0, 1, MTLOriginMake(0, 0, 0), MTLSizeMake(2, 2, 1), result, 2048, 256, 512);
+    }
+    view_t single = {.set_levels=1, .base_level=0, .nlevels=1}; mtl_reg_tex(661, &ranged, &single);
+    g_fb_bar++; clear(MTLClearColorMake(0, 0, 1, 1)); id resumed = g_enc;
+    fb_prepare(pr);
+    CHECK(g_enc == resumed && g_fb_n == 0 && g_fb_tseq == g_draw_seq && g_fb_count == range_copies + 1,
+          "returning to a single-level view resumes the ready tile path without a snapshot");
+    rp_end();
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "GPU submission completed");
     CHECK(!mtl_last_commit_error(), "GPU submission has no error");
     int left = 1, right = 1;
@@ -301,8 +365,15 @@ static void tile_case(const char *dir) {
         if (x < 2) left &= p[0] == 255 && p[1] == 0 && p[2] == 0; else right &= p[0] == 0 && p[1] == 0 && p[2] == 255; }
     CHECK(left, "where the earlier draw of the pass wrote green, the tile read gives green");
     CHECK(right, "elsewhere it gives the cleared red");
+    if (range_snap) {
+        pixels(result, 1024, (const uint8_t[]){0, 0, 255, 255}, "tile-ineligible full view retains its blue base mip after the original is overwritten");
+        int higher = 1;
+        for (int y = 0; y < 2; y++) for (int x = 0; x < 2; x++)
+            higher &= !memcmp((const uint8_t *)result.contents + 2048 + y * 256 + x * 4, (const uint8_t[]){0, 255, 0, 255}, 4);
+        CHECK(higher, "tile-ineligible full view retains its green higher mip");
+    }
     printf("feedback tile read: %s\n", before == failed ? "PASS" : "FAIL");
-    mtl_tex_release(&source);
+    mtl_tex_release(&source); mtl_tex_release(&ranged);
 }
 // The channel mappings a tile read can stand for: the format's channels in place, the missing ones as they are or as the 0, 0, 1 a sample fills in
 static void swizzle_case(void) {
@@ -394,23 +465,92 @@ static void fpos_case(const char *dir) {
 static void shape_case(void) {
     for (int i = 0; i < 8; i++) { g_fbc[i] = (fb_cache_t){0}; } g_fbc_use = 0;
     static const NSUInteger size[5][2] = {{64, 32}, {32, 16}, {16, 8}, {64, 32}, {8, 4}};
+    id<MTLTexture> shape[5];
+    for (int k = 0; k < 5; k++) {
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:size[k][0] height:size[k][1] mipmapped:NO];
+        shape[k] = [g_dev newTextureWithDescriptor:d];
+        CHECK(shape[k] != nil, "shape fixture texture created"); if (!shape[k]) return;
+    }
     NSMutableSet *made = [NSMutableSet set]; int fresh, bad = 0;
     for (int frame = 0; frame < 6; frame++) {
         g_fb_bar++;   // the game's barrier before each snapshot draw, as in Tears of the Kingdom's shrines
         for (int k = 0; k < 5; k++, g_fb_bar++) {
-            fb_cache_t *e = fb_snap(1000 + frame * 5 + k, 0, 0, MTLPixelFormatRGBA8Unorm, size[k][0], size[k][1], 0, &fresh);
+            fb_cache_t *e = fb_snap(1000 + frame * 5 + k, 0, 0, MTLPixelFormatRGBA8Unorm, shape[k], 0, &fresh);
             bad += !e || !fresh || e->snap.width != size[k][0] || e->snap.height != size[k][1];
             if (e) [made addObject:[NSValue valueWithPointer:(__bridge void *)e->snap]];
         }
     }
     CHECK(!bad, "every new key gets a texture of its size");
     CHECK(made.count == 4, "30 snapshots of 4 sizes over 6 frames make one texture per size, not one each");
-    fb_cache_t *a = fb_snap(1, 0, 0, MTLPixelFormatRGBA8Unorm, 64, 32, 0, &fresh), *b = fb_snap(2, 0, 0, MTLPixelFormatRGBA8Unorm, 64, 32, 0, &fresh);
+    fb_cache_t *a = fb_snap(1, 0, 0, MTLPixelFormatRGBA8Unorm, shape[0], 0, &fresh), *b = fb_snap(2, 0, 0, MTLPixelFormatRGBA8Unorm, shape[0], 0, &fresh);
     CHECK(a != b, "a live snapshot is not taken for another key while a stale entry is free");
-    fb_cache_t *a2 = fb_snap(1, 0, 0, MTLPixelFormatRGBA8Unorm, 64, 32, 0, &fresh);
+    fb_cache_t *a2 = fb_snap(1, 0, 0, MTLPixelFormatRGBA8Unorm, shape[0], 0, &fresh);
     CHECK(a2 == a && !fresh, "the live snapshot is reused until the next barrier");
     for (int i = 0; i < 8; i++) { g_fbc[i] = (fb_cache_t){0}; } g_fbc_use = 0;
 }
+// A feedback view must retain its mip numbers in both directions, including a
+// nonzero-base view. Poisoning the original chain makes a missing copy fail
+// deterministically rather than depending on undefined attachment reads.
+static void mip_case(id<MTLLibrary> lib, int attached, int first, int sampled, int index, int shape) {
+    int before = failed, tid = 780 + index, layers = shape == 2 ? 6 : shape == 1 ? 3 : 1, layer = shape == 2 ? 4 : shape == 1 ? 2 : 0;
+    tex_t source = {.magic=MAGIC('T','E','X',0), .serial=99900 + index}, output;
+    source.d = (nvn_texdesc){.target=shape == 2 ? NVN_TEXTURE_TARGET_CUBEMAP : shape == 1 ? NVN_TEXTURE_TARGET_2D_ARRAY : NVN_TEXTURE_TARGET_2D, .format=NVN_FORMAT_RGBA8,
+        .width=16, .height=16, .depth=layers, .levels=4, .samples=1};
+    MTLTextureDescriptor *td = tex_desc(&source, 0); td.storageMode = MTLStorageModeShared;
+    id<MTLTexture> texture = [g_dev newTextureWithDescriptor:td];
+    CHECK(texture != nil, "mip feedback fixture allocated"); if (!texture) return;
+    res_add(texture); mtl_tex_init(&source); serial_put(source.serial, texture);
+    const uint8_t colors[4][4] = {{255,0,0,255}, {0,255,0,255}, {0,0,255,255}, {255,255,0,255}};
+    for (int m = 0; m < 4; m++) {
+        uint8_t data[16 * 16 * 4]; int width = 16 >> m;
+        for (int s = 0; s < layers; s++) {
+            for (int p = 0; p < width * width; p++) memcpy(data + p * 4, s == layer ? colors[m] : (const uint8_t[]){0,0,0,255}, 4);
+            [texture replaceRegion:MTLRegionMake2D(0, 0, width, width) mipmapLevel:m slice:s withBytes:data bytesPerRow:width * 4 bytesPerImage:width * width * 4];
+        }
+    }
+    view_t view = {.set_levels=1, .base_level=first, .nlevels=4-first};
+    if (shape == 1) { view.set_layers = 1; view.min_layer = 1; view.nlayers = 2; }
+    mtl_reg_tex(tid, &source, &view);
+    id<MTLTexture> destination = target(&output, 99910 + index);
+    id<MTLBuffer> result = [g_dev newBufferWithLength:2048 options:MTLResourceStorageModeShared]; res_add(result);
+    NvProg *pr = [NvProg new]; NvShader *fs = [NvShader new]; pr->sh[1] = fs;
+    fs->stage = 1; strcpy(fs->key, "aabbccddeeff0011");
+    fs->fn = [lib newFunctionWithName:shape == 2 ? @"fmc2" : shape == 1 ? @"fma2" : sampled == 1 ? @"fm1" : @"fm2"];
+    fs->ae = [fs->fn newArgumentEncoderWithBufferIndex:0]; fs->arg_len = fs->ae.encodedLength;
+    fs->rf.nb = 1; fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEX, .aid=0, .dtt=shape == 2 ? MTLTextureTypeCube : shape == 1 ? MTLTextureType2DArray : MTLTextureType2D};
+    MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+    pd.vertexFunction = [lib newFunctionWithName:@"v"]; pd.fragmentFunction = fs->fn;
+    pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    NSError *error = nil; id<MTLRenderPipelineState> pipeline = [g_dev newRenderPipelineStateWithDescriptor:pd error:&error];
+    CHECK(pipeline != nil, "mip feedback consumer compiled"); if (!pipeline) return;
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &source; S.tex[1][0] = tid;
+    R.rt.has_cview[0] = 1; R.rt.cview[0] = (view_t){.set_levels=1, .base_level=attached, .nlevels=1, .set_layers=1, .min_layer=layer, .nlayers=1};
+    clear(MTLClearColorMake(colors[attached][0] / 255., colors[attached][1] / 255., colors[attached][2] / 255., 1));
+    fb_prepare(pr); rp_end();
+    // Same serial and base level/layer, but a different mip count: neither shape
+    // may reuse the other's valid contents within this barrier and submission.
+    view_t prefix = view; prefix.nlevels = attached - first + 1;
+    mtl_reg_tex(tid, &source, &prefix); fb_prepare(pr); rp_end();
+    R.rt.color[0] = &output; R.rt.has_cview[0] = 0;
+    sample(fs, pipeline); readback(destination, result, 0);
+    R.rt.color[0] = &source; R.rt.has_cview[0] = 1;
+    R.rt.cview[0] = (view_t){.set_levels=1, .base_level=attached, .nlevels=1, .set_layers=1, .min_layer=layer, .nlayers=1};
+    mtl_reg_tex(tid, &source, &view); fb_prepare(pr); rp_end();
+    for (int m = 0; m < 4; m++) for (int s = 0; s < layers; s++) {
+        R.rt.cview[0].base_level = m; R.rt.cview[0].min_layer = s;
+        clear(MTLClearColorMake(1, 0, 1, 1)); rp_end();
+    }
+    R.rt.color[0] = &output; R.rt.has_cview[0] = 0;
+    sample(fs, pipeline); readback(destination, result, 1024);
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "mip feedback GPU submission completed");
+    CHECK(!mtl_last_commit_error(), "mip feedback GPU submission has no error");
+    pixels(result, 0, colors[MIN(first + sampled, attached)], "a contracted view clamps the requested mip to its own range");
+    pixels(result, 1024, colors[first + sampled], "restoring the view preserves the requested mip's pre-overwrite pixels");
+    printf("feedback mip shape=%d attachment=%d view-base=%d sampled=%d: %s\n", shape, attached, first, sampled, before == failed ? "PASS" : "FAIL");
+    mtl_tex_release(&source); mtl_tex_release(&output);
+}
+
 int main(int argc, char **argv) { @autoreleasepool {
     setenv("DM_NVN_TBDR", "0", 1);
     mtl_init(); NSError *error = nil;
@@ -420,6 +560,15 @@ int main(int argc, char **argv) { @autoreleasepool {
         "fragment float4 f(float4 p[[position]], constant A&a[[buffer(0)]]) {return a.source.read(uint2(p.xy));}\n"
         "struct I {texture2d<uint, access::read> source[[id(0)]];};\n"
         "fragment float4 mask(float4 p[[position]], constant I&a[[buffer(0)]]) {uint v = a.source.read(uint2(p.xy)).x; return float4(v==17u, v==29u, 0, 1);}\n"
+        "struct AM {texture2d<float> source[[id(0)]];};\n"
+        "fragment float4 fm1(constant AM&a[[buffer(0)]]) {constexpr sampler s(coord::normalized,filter::linear,mip_filter::linear); return a.source.sample(s,float2(.5),level(1));}\n"
+        "fragment float4 fm2(constant AM&a[[buffer(0)]]) {constexpr sampler s(coord::normalized,filter::linear,mip_filter::linear); return a.source.sample(s,float2(.5),level(2));}\n"
+        "struct AMP {texture2d<float> source[[id(0)]]; sampler filter[[id(1)]];};\n"
+        "fragment float4 fmp(constant AMP&a[[buffer(0)]]) {return a.source.sample(a.filter,float2(.5),level(2));}\n"
+        "struct AMA {texture2d_array<float> source[[id(0)]];};\n"
+        "fragment float4 fma2(constant AMA&a[[buffer(0)]]) {constexpr sampler s(coord::normalized,filter::linear,mip_filter::linear); return a.source.sample(s,float2(.5),1,level(2));}\n"
+        "struct AMC {texturecube<float> source[[id(0)]];};\n"
+        "fragment float4 fmc2(constant AMC&a[[buffer(0)]]) {constexpr sampler s(coord::normalized,filter::linear,mip_filter::linear); return a.source.sample(s,float3(0,0,1),level(2));}\n"
         options:nil error:&error];
     CHECK(lib != nil, "synthetic shader compiles");
     if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 1; }
@@ -437,7 +586,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     for (int i = 0; i < 3; i++) slot_case(pr, pipeline, slots[i], i);
     reuse_case(pr);
     shape_case();
-    mip_chain_case(pr);
+    mip_chain_case(lib);
     fs->fn = [lib newFunctionWithName:@"mask"];
     fs->ae = [fs->fn newArgumentEncoderWithBufferIndex:0]; fs->arg_len = fs->ae.encodedLength;
     fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_IMG, .aid=0, .dtt=MTLTextureType2D, .dpf=NVN_DPF_UINT};
@@ -448,6 +597,11 @@ int main(int argc, char **argv) { @autoreleasepool {
     image_view_case(pr);
     swizzle_case();
     if (argc == 2) { tile_case(argv[1]); fpos_case(argv[1]); }
+    mip_case(lib, 2, 0, 1, 0, 0);
+    mip_case(lib, 1, 0, 2, 1, 0);
+    mip_case(lib, 2, 1, 2, 2, 0);
+    mip_case(lib, 1, 0, 2, 3, 1);
+    mip_case(lib, 1, 0, 2, 4, 2);
     printf("feedback snapshot: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

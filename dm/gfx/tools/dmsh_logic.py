@@ -74,12 +74,12 @@ def variant(msl):
         scalar = lambda ty: 'uint' if ty.startswith('uint') else 'float'
         fetch = ''.join(f'{", " if (i or not empty) else ""}{scalar(ty)}4 dm_fb{n} [[color({n}), function_constant(dm_lfb{n})]]' for i, (ty, _, n) in enumerate(outs))
         params = fetch + f', constant dm_logic_state& dm_lop [[buffer({dmsh_abi.LOGIC_BUFFER})]]'
-        apply = []
+        assignments = []
         for ty, nm, n in outs:
             s = scalar(ty); width = int(ty[len(s):] or 1); zero = '0u' if s == 'uint' else '0.0f'
             pad = f', {zero}' * (4 - width); sw = '.' + 'xyzw'[:width] if width < 4 else ''
-            apply.append(f'if (dm_lfb{n}) dm_r.{nm} = {ty}({"dm_logic" if s == "uint" else "dm_logic_norm"}({s}4(dm_r.{nm}{pad}), dm_fb{n}, dm_lop, {n}u){sw});')
-        apply = ' '.join(apply)
+            assignments.append(f'if (dm_lfb{n}) dm_r.{nm} = {ty}({"dm_logic" if s == "uint" else "dm_logic_norm"}({s}4(dm_r.{nm}{pad}), dm_fb{n}, dm_lop, {n}u){sw});')
+        apply = ' '.join(assignments)
         body, n = re.subn(r'\breturn\s+([^;]+);', lambda r: '{ ' + struct + ' dm_r = ' + r.group(1) + '; ' + apply + ' return dm_r; }', msl[body_start:body_end])   # noqa: B023  # subn calls it in this iteration
         if not n: return None, f'no return in {name}'
         pieces += [msl[at:params_end - 1], params, msl[params_end - 1:body_start], body]; at = body_end

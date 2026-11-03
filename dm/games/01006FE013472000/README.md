@@ -52,3 +52,25 @@ General changes first needed here; each applies to every game:
 - Only one board (Yoshi's Tropical Island) and two minigames (Speed Hockey, Tube It or Lose It) were played; the other boards, the other modes and most minigame NROs were not loaded.
 - Only the 1.1.1 build (`v131072`) is registered.
 - iPhone: not built, not installed, not tested.
+
+## Apple M4 Mac packaging and performance follow-up (2026-11-02)
+
+Independent local build: update 1.1.1, upstream `f108343ac5c0291776f4fc7b271c0b34aebdb7a1`, Apple M4 MacBook Air with 16 GB, macOS 27.2, Xcode 27.2 / Metal 32023.922.4. All 82,790 base shader entries compiled; 140,036 shader pairs were discovered. Packed with `--gpu none` and `DM_PSO_PREBUILD=0`, retaining the runtime pipeline cache. No shader-chain change was needed for this follow-up.
+
+The player tested several minigames and boards. A player card was created, the isolated app was quit and reopened, and the player confirmed the card remained. Those observations are not an exhaustive board or full-game test. The finalized self-contained Mac bundle passed signature verification and launched from Applications with the normal save directory. Both prior working saves and the latest test saves were backed up before promoting the latest committed test save.
+
+**Partial performance workaround, not locked 60:** What Goes Up… originally showed roughly 16–20 FPS. A process sample found the guest submission thread spending most samples waiting at the eight-command-allocator cap. GPU profiling also showed large gaps between encoders; aggregate GPU span should not be interpreted as pure shader execution cost. The [bounded allocator/visibility experiment](../../../docs/reference/nvn-objects.md#bounded-allocator-and-visibility-recycling-experiment) raised both lazily allocated pools to 64 and enabled `DM_NVN_ALLOC_FAST_WAKE=1`. Observed gameplay improved to roughly 40–43 FPS. Only raising the allocator cap moved the bottleneck to the eight-slot visibility ring. This remains a local stopgap with cross-game validation open; it is not a complete root-cause fix.
+
+Subsequent candidates were rejected: changing pipeline-construction API (no speedup and transient facial corruption), polling completed fences before allocation, reclaiming batches of eight or sixteen allocators, reusing command-buffer objects, a more optimized host build, the separate encoding thread, and direct presentation. Some practice samples approached 49 FPS, but actual rounds stayed around 23–25 ms. No reliable additional gameplay gain was established. Do not carry those discarded candidates into the recipe.
+
+**Measurement controls:** keep the game active and visible. Losing focus can pause most scene rendering while a counter still reports 60 FPS; sampled paused windows had about 16 draws versus roughly 330–400 in active gameplay. End-of-round transitions are also not steady gameplay. Disable the Metal HUD and detailed GPU profiler for timing runs, and qualify comparisons across workload and clock changes. The failed experiments do not support small percentage claims.
+
+For a local reproduction using the source-only recipe and separately supplied game files:
+
+```sh
+python3 scripts/build_ipa_from_nsp.py /path/to/game-inputs -k /path/to/prod.keys \
+  --platform mac-app --gpu none --work-dir /path/to/internal-work \
+  --app-name "Mario Party Superstars" --out "/path/to/Mario Party Superstars.app"
+```
+
+For the experimental host in this draft, add `DM_NVN_ALLOC_FAST_WAKE=1` and `DM_PSO_PREBUILD=0` to the packaged `Contents/Resources/dm/env.txt`. Leave the fast-wake variable **unset** to disable this experiment: this initial gate checks presence, so `=0` is not an off switch. The local delivered app keeps the direct Metal 4 path. No iPhone version was built or tested. Four-view minigames remain the principal performance limitation.

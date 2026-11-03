@@ -175,8 +175,8 @@ static void mip_chain_case(NvProg *pr) {
 // The rule without a listed shader: copy once, reuse until a barrier, end the pass when an earlier draw of it read the attachment directly.
 static void reuse_case(NvProg *pr) {
     int before = failed, tid = 650; NvShader *fs = pr->sh[1]; fs->rf.b[0].reg = 0;
-    tex_t source; target(&source, 99790);
-    mtl_reg_tex(tid, &source, NULL);   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns the texture (serial_put's CFBridgingRetain) until mtl_tex_release below, not a leak
+    tex_t source; id<MTLTexture> original = target(&source, 99790);
+    mtl_reg_tex(tid, &source, NULL);
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
     R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &source; S.tex[1][0] = tid;
     S.chmask.mask = 0; clear(MTLClearColorMake(1, 0, 0, 1));
@@ -185,7 +185,7 @@ static void reuse_case(NvProg *pr) {
     CHECK(g_fb_n == 0 && g_enc, "a draw that writes nothing reads an unwritten attachment directly");
     S.chmask.mask = 0xffffffffu;
     fb_prepare(pr);
-    CHECK(g_fb_n == 1 && !g_enc && g_fb_count == copies + 1, "a writing draw takes a snapshot");
+    CHECK(g_fb_n == 1 && g_fb_use[0] != original && !g_enc && g_fb_count == copies + 1, "a writing draw takes a distinct snapshot");
     id<MTLTexture> first = g_fb_use[0];
     clear(MTLClearColorMake(0, 1, 0, 1));
     fb_prepare(pr);

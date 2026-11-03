@@ -147,6 +147,38 @@ class Read(Base):
 class Pack(Base):
     def out(self): return self.dir / 'out'
 
+    def test_empty_base_with_complete_update(self):
+        for tree in ({'exefs': {}}, {}):
+            write_nup(self.path, [(0, 0, 0, tree, b''), (1, TID, VER, version(), META)])
+            with pack_nup.Nup(self.path) as n:
+                app, base, vers, _ = pack_nup.scan(n)
+                self.assertEqual(app, TID)
+                pack_nup.pack_version(n, vers[VER], base, app, self.out(), say=lambda s: None)
+                self.assertIn('dir/marker', romfs_image.read_index(self.out() / 'RomFS.img'))
+                self.assertEqual((self.out() / 'ExeFS/main').read_bytes(), b'code')
+                with self.assertRaisesRegex(pack_nup.Error, 'no exefs/main'):
+                    pack_nup.pack_version(n, base, base, app, self.out() / 'base')
+
+    def test_selected_version_needs_romfs(self):
+        tree = {'exefs': version()['exefs']}
+        write_nup(self.path, [(0, TID, 0, tree, b''), (1, TID, VER, tree, b'')])
+        n = self.open(); app, base, vers, _ = pack_nup.scan(n)
+        with self.assertRaisesRegex(pack_nup.Error, 'no romfs/'):
+            pack_nup.pack_version(n, vers[VER], base, app, self.out())
+        self.assertFalse(self.out().exists())
+
+    def test_update_without_romfs_uses_base(self):
+        write_nup(self.path, [(0, TID, 0, version(marker='base'), b''),
+                              (1, TID, VER, {'exefs': version(main=b'updated')['exefs']}, b'')])
+        n = self.open(); app, base, vers, _ = pack_nup.scan(n)
+        pack_nup.pack_version(n, vers[VER], base, app, self.out(), say=lambda s: None)
+        self.assertIn('dir/base', romfs_image.read_index(self.out() / 'RomFS.img'))
+        self.assertEqual((self.out() / 'ExeFS/main').read_bytes(), b'updated')
+
+    def test_mismatched_program_ids_refused(self):
+        write_nup(self.path, [(0, TID, 0, version(), b''), (1, TID, VER, version(tid=TID + 0x2000), b'')])
+        with self.assertRaisesRegex(pack_nup.Error, 'different program IDs'): pack_nup.scan(self.open())
+
     def test_update_packed_on_its_own_with_control_data(self):
         n = self.open(); app, base, vers, _ = pack_nup.scan(n)
         pack_nup.pack_version(n, vers[VER], base, app, self.out() / 'u', say=lambda s: None)

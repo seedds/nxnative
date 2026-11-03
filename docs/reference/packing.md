@@ -2,6 +2,13 @@
 
 ## Build tools
 
+### A NUP with a complete update is rejected for an empty base
+
+- **Symptom:** NUP scanning stops with `the base package has no exefs/ or romfs/`, although an update holds the game's code and full RomFS.
+- **Cause:** the reader required the base to be independently runnable. A dump can leave a base placeholder with an empty ExeFS and no RomFS, while the complete update carries both. Its base record can also have title ID zero.
+- **Fix:** identify the application from the available base and update `main.npdm` files, requiring their program IDs to agree. Validate code and RomFS for the selected version: use its own RomFS or fall back to the base's, and report a missing RomFS before writing extraction outputs. Selecting an empty base still fails. Synthetic tests cover placeholders, missing RomFS, fallback and mismatching program IDs.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md#files), NUP update v655360. Container scanning and its update NPDM were checked; a full NUP build remains untested.
+
 ### Homebrew .NET is on PATH but apphosts cannot find the runtime
 
 - **Symptom:** the first extraction stops with `nx_extract exit code 131` and `.NET location: Not found`, even though `dotnet` is on `PATH`. The shader translator can fail the same way.

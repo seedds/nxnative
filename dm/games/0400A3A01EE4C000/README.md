@@ -12,6 +12,7 @@ A Switch 2 game: update v655360 (the title screen says Ver. 2.0.1), SDK 20.5.25 
 
 ## Files
 
+- Resolved: the NUP for update v655360 has an empty base ExeFS and no base RomFS; the update contains both. [NUP base placeholders](../../../docs/reference/packing.md#a-nup-with-a-complete-update-is-rejected-for-an-empty-base) explains the reader fix. Scanning and the update NPDM were checked; a full build from this NUP remains open. Despite its filename mentioning DLC, this container has no add-on package.
 - A dump folder whose `updates/<version>/` holds the whole RomFS; [`pack_dump.py`](../../../scripts/pack_dump.py) packs it without a base RomFS. RomFS: the newer RDB (as ROMANCE OF THE THREE KINGDOMS 8 REMAKE's) under `motor_asset_re/KIDS_PLATFORM_OUNCE`, and a `LD_C0_R.BIN` / `LI_C0_R.IDX` LINKDATA pair.
 - Shaders: 131,426 in [`shader_map.tsv`](shader_map.tsv) ([KTGL on NVN2](../../../docs/reference/shaders.md#ktgl-on-nvn2-switch-2-glslc-outputs-and-ld_--li_-linkdata)). Runs so far asked for about 8,158 of them. This Mac build holds only those, so its library has no stamp and no `c1_full.tsv`, and each start logs that in red. A full build is estimated at 11 hours.
 - No `pso_manifest.tsv` yet, so each start also logs a red line for the missing seed list. In the runs here no draw waited on it.

@@ -178,10 +178,13 @@ def scan(n):
         raise Error(f'{n.path}: no base game, only ' + (', '.join(sorted({KINDS[k.kind] for k in n.packages}))) + ' packages: pack the base game and its update into one NUP')
     base = bases[0]
     if len(bases) > 1: raise Error(f'{n.path}: {len(bases)} base packages')
-    if base.exefs == NO_DIR or base.romfs == NO_DIR: raise Error(f'{n.path}: the base package has no exefs/ or romfs/')
-    i = n.child(base.exefs, b'main.npdm')
-    if i is None: raise Error(f'{n.path}: the base package has no exefs/main.npdm')
-    app = program_id(n.read(i), f'{n.path}: base exefs/main.npdm')
+    # Dumps can leave an empty base placeholder and put the complete game in an update.
+    # Identify it from the code actually present; each selected version is checked by pack_version.
+    ids = {program_id(n.read(i), f'{k.name} exefs/main.npdm') for k in n.packages if k.kind in (BASE, UPDATE) and k.exefs != NO_DIR
+           if (i := n.child(k.exefs, b'main.npdm')) is not None}
+    if not ids: raise Error(f'{n.path}: no exefs/main.npdm in the base or updates')
+    if len(ids) != 1: raise Error(f'{n.path}: base and updates have different program IDs: ' + ', '.join(f'{pid:016X}' for pid in sorted(ids)))
+    app = ids.pop()
     if app & 0xFFF: raise Error(f'{n.path}: base program ID {app:016X} is not a base title ID')
     vers, dlc = {}, {}
     for k in n.packages:
@@ -286,15 +289,18 @@ def control(k, out):   # the package's control data beside its ExeFS, as nx_extr
 
 
 def romfs_of(k, base):   # the RomFS folder a version runs with: its own, or the base game's for an update without one
-    return k.romfs if k.romfs != NO_DIR else base.romfs
+    d = k.romfs if k.romfs != NO_DIR else base.romfs
+    if d == NO_DIR: raise Error(f'{k.name}: no romfs/ in this package or the base game')
+    return d
 
 
 def pack_version(n, k, base, app, out, say=print):   # one version (the base package, or an update package) → out/ExeFS, out/RomFS.img and its control data
     if k.exefs == NO_DIR or n.child(k.exefs, b'main') is None or n.child(k.exefs, b'main.npdm') is None: raise Error(f'{k.name}: no exefs/main and exefs/main.npdm')
     if (pid := program_id(n.read(n.child(k.exefs, b'main.npdm')), f'{k.name} exefs/main.npdm')) != app: raise Error(f'{k.name}: program ID {pid:016X}, the base is {app:016X}')
+    d = romfs_of(k, base)
     out.mkdir(parents=True, exist_ok=True)
     exefs(n, k, out / 'ExeFS')
-    pack(n, romfs_of(k, base), out / 'RomFS.img', say)
+    pack(n, d, out / 'RomFS.img', say)
     control(k, out)
 
 

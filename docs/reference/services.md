@@ -427,6 +427,20 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the IR camera (`irsensor`) answers every camera unconnected, and processors cannot run.
 - **Found on:** [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3, NintendoWare Bezel Engine).
 
+### Switch 2 mouse, GameChat camera storage and camera with nothing connected
+
+- **Symptom:** `[RED] sf: the game connects to service hid itself`, then `nn::diag abort: Result 0xe15` in `hid::InitializeNmouse` (`sdk+0x6df504`); an abort in the GameChat camera video storage calls after `chat::Initialize`; `nn::diag abort: Result 0` in `gs::sdk::CheckGraphicsSystemInitialized` (`sdk+0x46e8b8`), before `camera::sdk::CreateCameraContext`.
+- **Cause:** Switch 2 SDK calls that open a service the host does not serve: the Nmouse API (a Joy-Con 2 used as a mouse, or a USB mouse), GameChat (`chat:u`, [GameChat at boot](#gamechat-at-boot)) and the camera (a session through the graphics system's user session, `gsv`). The chat library's camera calls also check its initialization count, which only the SDK's `Initialize` sets, and the camera context checks that the SDK booted the graphics system, which its NVN driver does and the host's does not.
+- **Fix:** none is connected. Nmouse (`hle_hid.c`): besides the calls of [The Joy-Con mouse pointer](#the-joy-con-mouse-pointer), `InitializeNmouse` with a pointer type and the setters succeed, the standard mouse handle is not found, and queries on a handle answer false. GameChat (`hle_misc.c`): besides the calls of [GameChat at boot](#gamechat-at-boot), the room info event bound and never signaled, and the camera video storage (local and remote) holds one host native image per picture, with no picture ([NVN2 native images](nvn-objects.md#nvn2-native-images)). The camera (`hle_sf.c`): `CreateCameraContext` gives a host session; opening a camera (command 3) fails with 0xdc4, which the game takes as "no camera" (any other error aborts), the camera event (command 21) is an event that never fires, every other command fails the same way. `CheckGraphicsSystemInitialized` passes (`hle_nvn.c`).
+- **Found on:** Mario Kart World (`0400C3F00006E000`; its profile is a separate pull request) (SDK 21.4.0), at boot in `nnMain`.
+
+### Switch 2 HDR metadata on a layer the host never made
+
+- **Symptom:** `CRASH sig=11 addr=0 pc=0`, the link register just after a call to `vi::SetLayerNextHdrAdjustableBezierMetadata`.
+- **Cause:** the SDK forwards the layer's HDR metadata to vi2 through a table its graphics system fills; on the host it is null.
+- **Fix:** the Bezier tone curve and the clears of the HDR metadata (`ClearLayerNextHdr…`) answer success with nothing to apply, as the other HDR metadata calls already did (`dm/gfx/hle_vi.c`): the host presents SDR.
+- **Found on:** Mario Kart World (`0400C3F00006E000`; its profile is a separate pull request) (sets the curve every frame, `main+0x959ae4`); the other HDR calls on [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md).
+
 ## Software keyboard and applets
 
 ### System applets opened by `Show…` calls

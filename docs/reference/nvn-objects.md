@@ -96,6 +96,13 @@ The game may also write into an NVN object directly, without an NVN call, throug
 - **Note:** requests beyond the reserved range (iOS reserves 1 GB: the buffers stay under 0x20100000 through the opening) are kept in the table only, like unaligned ones: textures can read them, the GPU cannot address them.
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md).
 
+### NVN2 native images
+
+- **Symptom:** `nn::diag abort` right after `nvnNativeImageInitialize` or `nvnTextureInitializeFromNativeImage` (the game checks both results).
+- **Cause:** NVN2 makes a texture on an image the system allocated (an `nn::gs` NativeImageHandle, here a GameChat camera picture). The sdk's own functions need its NVN driver, which the host replaces.
+- **Fix:** the host makes the handles itself (`nvn_native_image_new`, for the chat camera storage) with a size and no picture. The native image entry points are those of the decoded movie pictures ([AV1 movies through SDK 22's decoder](movies.md#av1-movies-through-sdk-22s-decoder)); a handle the host made is their second source: `nvnTextureInitializeFromNativeImage` gives it zeroed linear storage of the builder's format, a 2D texture on it. A handle neither the host nor a decoder pool made fails.
+- **Found on:** Mario Kart World (`0400C3F00006E000`; its profile is a separate pull request) (three 384x216 local camera images at boot, `main+0xd322d4`).
+
 ### Finalized pools kept alive by residency and the sharing table
 
 - **Symptom:** GPU memory grows with every scene change (Engage's idle title demo reached 5.4 GB of GPU memory and 3.6 GB resident in 850 s).

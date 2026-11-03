@@ -257,7 +257,14 @@ static void tile_case(const char *dir) {
     tex_t source; id<MTLTexture> attachment = target(&source, 99795);
     mtl_reg_tex(tid, &source, NULL);
     id<MTLBuffer> zero = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared]; res_add(zero);   // the variant's argument buffer: the tile read leaves its texture and sampler unread
-    id<MTLBuffer> result = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared]; res_add(result);
+    id<MTLBuffer> result = [g_dev newBufferWithLength:3072 options:MTLResourceStorageModeShared]; res_add(result);
+    tex_t ranged = {.magic=MAGIC('T','E','X',0), .serial=99796, .d=source.d}; ranged.d.levels = 2;
+    MTLTextureDescriptor *rd = tex_desc(&ranged, 0); rd.storageMode = MTLStorageModeShared;
+    id<MTLTexture> chain = [g_dev newTextureWithDescriptor:rd];
+    CHECK(chain != nil, "tile fallback mip chain allocated"); if (!chain) { mtl_tex_release(&source); return; }
+    res_add(chain); mtl_tex_init(&ranged); serial_put(ranged.serial, chain); mtl_reg_tex(661, &ranged, NULL);
+    const uint8_t green_mip[] = {0,255,0,255, 0,255,0,255, 0,255,0,255, 0,255,0,255};
+    [chain replaceRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:1 withBytes:green_mip bytesPerRow:8];
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
     R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &source; S.tex[1][0] = tid; S.chmask.mask = 0xffffffffu;
     S.has_vp = 1; S.vp[0][0] = 0; S.vp[0][1] = 0; S.vp[0][2] = 4; S.vp[0][3] = 4;
@@ -294,6 +301,26 @@ static void tile_case(const char *dir) {
     fb_prepare(pr);
     CHECK(g_fb_n == 1 && !g_enc && g_fb_tseq != g_draw_seq, "with a viewport smaller than the target the draw takes a snapshot");
     rp_end();
+    // A ready tile PSO does not make a multi-level view eligible. Its fallback
+    // must preserve both levels, then a single-level view may read the tile again.
+    S.vp[0][2] = 4; R.rt.color[0] = &ranged; S.tex[1][0] = 661; g_fb_bar++;
+    clear(MTLClearColorMake(0, 0, 1, 1));
+    uint64_t range_copies = g_fb_count;
+    fb_prepare(pr);
+    CHECK(g_fb_n == 1 && !g_enc && g_fb_tseq != g_draw_seq && g_fb_count == range_copies + 1 && g_fb_use[0].mipmapLevelCount == 2 && g_fb_use[0] != chain,
+          "a multi-level view falls back to a distinct full-range snapshot despite a ready tile PSO");
+    id<MTLTexture> range_snap = g_fb_n == 1 ? g_fb_use[0] : nil;
+    clear(MTLClearColorMake(1, 0, 0, 1)); rp_end();
+    if (range_snap) {
+        readback(range_snap, result, 1024);
+        enc_b_copy_texture_buffer(blit(), range_snap, 0, 1, MTLOriginMake(0, 0, 0), MTLSizeMake(2, 2, 1), result, 2048, 256, 512);
+    }
+    view_t single = {.set_levels=1, .base_level=0, .nlevels=1}; mtl_reg_tex(661, &ranged, &single);
+    g_fb_bar++; clear(MTLClearColorMake(0, 0, 1, 1)); id resumed = g_enc;
+    fb_prepare(pr);
+    CHECK(g_enc == resumed && g_fb_n == 0 && g_fb_tseq == g_draw_seq && g_fb_count == range_copies + 1,
+          "returning to a single-level view resumes the ready tile path without a snapshot");
+    rp_end();
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "GPU submission completed");
     CHECK(!mtl_last_commit_error(), "GPU submission has no error");
     int left = 1, right = 1;
@@ -301,8 +328,15 @@ static void tile_case(const char *dir) {
         if (x < 2) left &= p[0] == 255 && p[1] == 0 && p[2] == 0; else right &= p[0] == 0 && p[1] == 0 && p[2] == 255; }
     CHECK(left, "where the earlier draw of the pass wrote green, the tile read gives green");
     CHECK(right, "elsewhere it gives the cleared red");
+    if (range_snap) {
+        pixels(result, 1024, (const uint8_t[]){0, 0, 255, 255}, "tile-ineligible full view retains its blue base mip after the original is overwritten");
+        int higher = 1;
+        for (int y = 0; y < 2; y++) for (int x = 0; x < 2; x++)
+            higher &= !memcmp((const uint8_t *)result.contents + 2048 + y * 256 + x * 4, (const uint8_t[]){0, 255, 0, 255}, 4);
+        CHECK(higher, "tile-ineligible full view retains its green higher mip");
+    }
     printf("feedback tile read: %s\n", before == failed ? "PASS" : "FAIL");
-    mtl_tex_release(&source);
+    mtl_tex_release(&source); mtl_tex_release(&ranged);
 }
 // The channel mappings a tile read can stand for: the format's channels in place, the missing ones as they are or as the 0, 0, 1 a sample fills in
 static void swizzle_case(void) {

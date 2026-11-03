@@ -74,6 +74,17 @@ class DeriveProfile(Base):
         self.assertEqual(game.Game(self.pdir).builds()['v65536']['main'], BID2)
         self.assertEqual(self.derive(), '1.1.0'); self.assert_kept()   # still kept on a third run
 
+    def test_a_module_the_version_does_not_ship_is_left_out(self):   # Mario Kart World 1.0.0 has no subsdk1, which the 1.8.0 profile loads
+        (self.src / 'game.tsv').write_text((self.src / 'game.tsv').read_text().replace('modules\tmain\n', 'modules\tmain subsdk1 sdk\n'))
+        nso(self.ex / 'ExeFS/sdk', BID)
+        self.derive(mods=('main', 'subsdk1', 'sdk'))
+        g = game.Game(self.pdir)
+        self.assertEqual(g.words('modules'), ['main', 'sdk'])
+        self.assertIn('# this version ships no subsdk1', (self.pdir / 'game.tsv').read_text())
+        self.assertNotIn('subsdk1', g.builds()['v65536'])
+        nso(self.ex / 'ExeFS/subsdk1', BID2); self.derive(mods=('main', 'subsdk1', 'sdk'))   # a version that ships it keeps the profile's list
+        self.assertEqual(game.Game(self.pdir).words('modules'), ['main', 'subsdk1', 'sdk'])
+
     def test_changed_inputs_derive_again(self):
         changes = {
             'source game.tsv': lambda: (self.src / 'game.tsv').write_text((self.src / 'game.tsv').read_text() + 'pad_layout\tfull\n'),

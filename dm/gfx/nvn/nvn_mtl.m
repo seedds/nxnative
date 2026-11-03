@@ -1618,8 +1618,8 @@ static void blit_note(void);   // Per-pass dump: a copy / buffer update ended th
 // Buffer operations check conflicts by guest address range: a barrier when an operation reads a range written earlier, or writes a range read or written earlier; texture operations get
 // one whenever the encoder already holds an operation. Reads were not tracked at first, so a copy writing bytes an earlier copy reads could run first (seen in Cuphead while its pool
 // allocator gave out overlapping blocks, see hle_nvn.c zcull_size; NVN runs copies in order for any game)
-enum { BW_MAX = 64 };
-static uint64_t g_bw_lo[BW_MAX], g_bw_hi[BW_MAX], g_br_lo[BW_MAX], g_br_hi[BW_MAX]; static int g_bw_n, g_br_n, g_blit_ops; static uint64_t g_blit_barriers;
+enum { BW_MAX = 64, BW_CAP = 256 };   // BW_MAX: entries a copy adds to before it takes a barrier; BW_CAP: the arrays (dispatch_enc with DM_NVN_DISPATCH_DEPS=1 fills them further)
+static uint64_t g_bw_lo[BW_CAP], g_bw_hi[BW_CAP], g_br_lo[BW_CAP], g_br_hi[BW_CAP]; static int g_bw_n, g_br_n, g_blit_ops; static uint64_t g_blit_barriers;
 static uint64_t g_blit_splits;   // copies / buffer updates / fills that ended an open draw pass (the residency set line; a pass ended this way stores and the next one reloads its attachments)
 uint64_t mtl_blit_splits(void) { return g_blit_splits; }
 static int enc_open(void);
@@ -1677,7 +1677,7 @@ static id<MTL4ComputeCommandEncoder> blit_buf(uint64_t rlo, uint64_t rhi, uint64
     // their operations with everything before and after. Ordinary pools keep the
     // range-based batching, including separate Metal buffers over one CPU range.
     if (nvn_sparse_alias(rlo, rhi) || nvn_sparse_alias(wlo, whi)) { wlo = 0; whi = ~0ull; }
-    if (g_blit_ops && (g_bw_n == BW_MAX || g_br_n == BW_MAX || (rhi > rlo && bw_hit(rlo, rhi)) || bw_hit(wlo, whi) || br_hit(wlo, whi))) blit_barrier();
+    if (g_blit_ops && (g_bw_n >= BW_MAX || g_br_n >= BW_MAX || (rhi > rlo && bw_hit(rlo, rhi)) || bw_hit(wlo, whi) || br_hit(wlo, whi))) blit_barrier();
     g_bw_lo[g_bw_n] = wlo; g_bw_hi[g_bw_n++] = whi; g_blit_ops++; g_gp_copies++;
     if (rhi > rlo) { g_br_lo[g_br_n] = rlo; g_br_hi[g_br_n++] = rhi; }
     return e;
@@ -13950,10 +13950,94 @@ static int dispatch_own(void) {
     if (v < 0) { const char *e = getenv("DM_NVN_DISPATCH_OWN"); v = (e && !strcmp(e, "1")) || pg_on(); if (v) MLOG("compute dispatches: each in an encoder of its own (DM_NVN_DISPATCH_OWN=1 or DM_NVN_PASSGPU)"); }
     return v;
 }
-static id<MTL4ComputeCommandEncoder> dispatch_enc(void) {
+// DM_NVN_DISPATCH_DEPS=1: a dispatch of a translated shader is ordered by the memory it touches instead of by "everything written". Its reads and writes are taken from its reflection
+// and the bindings at the dispatch: storage and uniform buffers by their bound ranges, textures and images by their storage in guest memory (one level of one layer for a single-level,
+// single-layer view of a block-linear texture the host keeps in a texture of its own, else the whole texture), the indirect arguments. It gets a barrier only when those meet what the
+// copy encoder's operations since the last barrier wrote (or, for its writes, read), as copies do (blit_buf); copies and dispatches after it check against its ranges the same way.
+// A binding whose memory cannot be bounded (global memory, bindless or pool handles, buffer textures, a storage buffer in a sparse pool, more than DR_MAX ranges) keeps the old rule.
+// Fire Emblem Fortune's Weave's battle map runs 345 dispatches a frame (cube map faces and mip levels, 285 small storage-buffer dispatches between INVALIDATE_SHADER barriers),
+// each behind a barrier: 4.2 ms of GPU a frame, 0.9 ms with no barriers at all (DM_NVN_BLIT_ORDER=0)
+static int dispatch_deps(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_DISPATCH_DEPS"); v = e && !strcmp(e, "1"); if (v) MLOG("DM_NVN_DISPATCH_DEPS=1: dispatches in the copy encoder are ordered by the memory their bindings touch"); } return v; }
+enum { DR_MAX = 48 };
+typedef struct { int n[2]; uint64_t lo[2][DR_MAX], hi[2][DR_MAX]; } dr_t;   // [0] read, [1] written
+static uint64_t g_dr_disp, g_dr_free, g_dr_full;   // dispatches with known memory, of them without a barrier; dispatches that kept the old rule
+static int dr_add(dr_t *d, int w, uint64_t lo, uint64_t hi) {
+    if (hi <= lo) return 1;
+    if (d->n[w] == DR_MAX || nvn_sparse_alias(lo, hi)) return 0;
+    d->lo[w][d->n[w]] = lo; d->hi[w][d->n[w]++] = hi; return 1;
+}
+static int dr_buf(dr_t *d, int w, const p_bind_buf *u, uint64_t len) {   // as encode_args binds it: an address in no pool reads the dummy buffer
+    void *mb; uint64_t mo;
+    if (!u->addr || !mtl_addr(u->addr, 1, &mb, &mo)) return 1;
+    uint64_t n = sbw_len(len, mb, mo); return n && dr_add(d, w, u->addr, u->addr + n);
+}
+static int dr_tex(dr_t *d, int w, int tid) {
+    // g_treg is grown and rewritten by the game thread under g_rmu (encode_args, csh_cs): take a copy
+    os_unfair_lock_lock(&g_rmu);
+    int ok = tid > 0 && tid < g_ntreg && g_treg[tid].ok; tex_t tc = ok ? g_treg[tid].t : (tex_t){0}; view_t vc = ok ? g_treg[tid].v : (view_t){0}; int has_v = ok && g_treg[tid].has_v, gone = ok && g_treg[tid].gone;
+    os_unfair_lock_unlock(&g_rmu);
+    if (!ok) return 1;   // bound to a dummy (encode_args)
+    const tex_t *t = &tc; const view_t *v = has_v ? &vc : NULL;
+    if (gone || t->d.target == NVN_TEXTURE_TARGET_BUFFER || !t->mem || !t->L.size || !t->L.layer_size) return 0;
+    uint64_t base = (uint64_t)(uintptr_t)t->mem, lo = base, hi = base + t->L.size;
+    unsigned nl = t->d.levels ? t->d.levels : 1, lv = v && v->set_levels ? v->base_level : 0, sl = v && v->set_layers ? v->min_layer : 0;
+    int one = (v && v->set_levels ? v->nlevels == 1 : nl == 1) && (v && v->set_layers ? v->nlayers == 1 : t->L.layers <= 1);
+    // Level offsets follow the guest's block-linear layout, which says where the host's level / layer is only for a texture of its own: not a linear one, not a 3D one (a "layer" of its
+    // view is a depth slice), not one placed in a heap with aliases of other sizes (image_heap) or made on a pool buffer
+    if (one && lv < nl && sl < t->L.layers && !(t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) && t->d.target != NVN_TEXTURE_TARGET_3D) {
+        __unsafe_unretained id<MTLTexture> mt = tex_get(t->serial);
+        if (mt && !mt.heap && !mt.buffer && lv < mt.mipmapLevelCount) {   // a level the host texture lacks may share a host level with another
+            uint64_t l0 = base + (uint64_t)sl * t->L.layer_size;
+            lo = l0 + nvn_tex_level_offset(&t->d, lv); hi = lv + 1 < nl ? l0 + nvn_tex_level_offset(&t->d, lv + 1) : l0 + t->L.layer_size;
+            if (hi <= lo || hi > base + t->L.size) { lo = base; hi = base + t->L.size; }
+        }
+    }
+    return dr_add(d, w, lo, hi);
+}
+// The memory a dispatch of cs touches with the current bindings; 0 when some binding cannot be bounded
+static int dr_collect(dr_t *d, NvShader *cs, uint64_t ind) {
+    d->n[0] = d->n[1] = 0;
+    if (ind && !dr_add(d, 0, ind, ind + 12)) return 0;
+    for (int i = 0; i < cs->rf.nb; i++) {
+        const nvn_rbind *b = &cs->rf.b[i]; int reg = b->reg, ok = 1;
+        switch (b->kind) {
+        case NVN_RB_SAMP: case NVN_RB_SAMPT: case NVN_RB_SAMPU: case NVN_RB_SAMPI: case NVN_RB_SAMPD: case NVN_RB_SAMPA: case NVN_RB_SAMPP:   // samplers: no memory
+        case NVN_RB_SUPPORT: case NVN_RB_C1: case NVN_RB_DRV0: case NVN_RB_DRV2: case NVN_RB_BORDER: case NVN_RB_PUSH: break;   // filled by the host on the CPU for this dispatch
+        case NVN_RB_CBUF: if (reg < 16) ok = dr_buf(d, 0, &S.ubo[5][reg], cb_len(cs, reg, S.ubo[5][reg].size)); break;
+        case NVN_RB_UBOP: if (reg < 16) ok = dr_buf(d, 0, &S.ubo[5][reg], S.ubo[5][reg].size); break;
+        case NVN_RB_SBUFP: if (reg < 16) ok = dr_buf(d, b->rw && !(reg < 32 && (cs->sb_ro >> reg & 1)), &S.ssbo[5][reg], S.ssbo[5][reg].size); break;
+        case NVN_RB_TEX: ok = dr_tex(d, 0, (int)(tex_slot_h(S.tex[5], S.img[5], reg) & 0xfffff)); break;
+        case NVN_RB_IMG: ok = reg >= 32 || dr_tex(d, 1, (int)(S.img[5][reg] & 0xfffff)); break;   // written, whatever the shader does with it
+        default: ok = 0;   // global memory, bindless and pool handles, buffer textures: not bounded here
+        }
+        if (!ok) return 0;
+    }
+    return 1;
+}
+static int rng_in(uint64_t lo, uint64_t hi, const uint64_t *l, const uint64_t *h, int n) { for (int i = 0; i < n; i++) if (l[i] <= lo && hi <= h[i]) return 1; return 0; }
+static int dr_hits(const dr_t *d) {
+    for (int i = 0; i < d->n[0]; i++) if (bw_hit(d->lo[0][i], d->hi[0][i])) return 1;
+    for (int i = 0; i < d->n[1]; i++) if (bw_hit(d->lo[1][i], d->hi[1][i]) || br_hit(d->lo[1][i], d->hi[1][i])) return 1;
+    return 0;
+}
+// cs: the dispatched shader (NULL for a host kernel: ordered after everything, and everything after it); ind: its indirect arguments, 0 for none
+static id<MTL4ComputeCommandEncoder> dispatch_enc(NvShader *cs, uint64_t ind) {
     id<MTL4ComputeCommandEncoder> e = blit_open(); g_gp_disp++;
+    static dr_t d;
+    int known = 0;   // (cs is externally retained under ARC: not reassigned)
+    if (cs && dispatch_deps()) { if ((known = dr_collect(&d, cs, ind))) g_dr_disp++; else { PD("X %llu dispatch %s deps unknown: old rule", g_stat_pass, cs->key); g_dr_full++; } }
+    if (known) {
+        int hit = g_blit_ops && (g_bw_n + d.n[1] > BW_CAP || g_br_n + d.n[0] > BW_CAP || dr_hits(&d));
+        if (hit) blit_barrier(); else if (g_blit_ops) g_dr_free++;
+        PD("X %llu dispatch %s deps r%d w%d: %s", g_stat_pass, cs->key, d.n[0], d.n[1], hit ? "barrier" : g_blit_ops ? "free" : "first");
+        for (int i = 0; i < d.n[0]; i++) if (!rng_in(d.lo[0][i], d.hi[0][i], g_br_lo, g_br_hi, g_br_n)) { g_br_lo[g_br_n] = d.lo[0][i]; g_br_hi[g_br_n++] = d.hi[0][i]; }   // the same uniform block read by each one is kept once
+        for (int i = 0; i < d.n[1]; i++) if (!rng_in(d.lo[1][i], d.hi[1][i], g_bw_lo, g_bw_hi, g_bw_n)) { g_bw_lo[g_bw_n] = d.lo[1][i]; g_bw_hi[g_bw_n++] = d.hi[1][i]; }
+        g_blit_ops++;
+        if (!(g_dr_disp & 0xffff)) MLOG("DM_NVN_DISPATCH_DEPS: %llu dispatches with known memory, %llu of them without a barrier; %llu kept the old rule", (unsigned long long)g_dr_disp, (unsigned long long)g_dr_free, (unsigned long long)g_dr_full);
+    } else {
     if (g_blit_ops) blit_barrier();
     g_bw_lo[0] = 0; g_bw_hi[0] = ~0ull; g_bw_n = 1; g_br_n = 0; g_blit_ops = 1;   // recorded as "everything written": the next copy or dispatch gets a barrier
+    }
     if (!g_blit_ct) { [e setArgumentTable:g_ct]; g_blit_ct = 1; }
     args_dirty_all();
     return e;
@@ -14026,7 +14110,7 @@ static void dispatch(const p_dispatch *dp) {
     // or before dispatch_enc's copy-to-dispatch barrier: otherwise the upgrade opens a second encoder, or its copy races the dispatch (#1743).
     encode_args(nil, cs, 5, 0);
     if (own && g_blit) { enc_b_end(g_blit); g_blit = nil; }
-    id<MTLComputeCommandEncoder> ce = own ? pg_compute() : (id<MTLComputeCommandEncoder>)dispatch_enc();
+    id<MTLComputeCommandEncoder> ce = own ? pg_compute() : (id<MTLComputeCommandEncoder>)dispatch_enc(cs, dp->ind);
     enc_c_pso(ce, ps);
     if (tg_groups) {
         __strong id<MTLBuffer> tb = nil; size_t to = arena_alloc((size_t)(tg_groups * cs->rf.tg_spill), &tb);
@@ -14063,7 +14147,7 @@ static int rb_swap_gpu(uint64_t src, size_t row, size_t img, uint64_t dst, size_
     id<MTLBuffer> pb; size_t po = arena_alloc(48, &pb);
     struct { uint64_t s, d; uint32_t w, h, row, img, drow, dimg, shift; } *p = (void *)((uint8_t *)pb.contents + po);
     *p = (typeof(*p)){src, dst, (uint32_t)(wb / 2), (uint32_t)rows, (uint32_t)row, (uint32_t)img, (uint32_t)drow, (uint32_t)dimg, (uint32_t)shift};
-    id<MTL4ComputeCommandEncoder> e = dispatch_enc();
+    id<MTL4ComputeCommandEncoder> e = dispatch_enc(NULL, 0);
     [g_ct setAddress:pb.gpuAddress + po atIndex:0]; enc_c_pso(e, ps);
     enc_c_dispatch(e, MTLSizeMake((wb / 2 + 63) / 64, rows, nz), MTLSizeMake(64, 1, 1));
     static int once; if (!once++) MLOG("RGB565-family copy between guest memory and a host texture: red and blue exchanged on the GPU (first case %zux%zux%zu texels)", wb / 2, rows, nz);

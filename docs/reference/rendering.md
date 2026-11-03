@@ -1109,6 +1109,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** `make -C dm/gfx/tests GAME=<id> run`. Fortune's Weave's battle map (MacBook Pro M1 Pro): submit 42.8k → 39.2k instructions per draw.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md).
 
+### Compute dispatches ordered by the memory they touch (opt-in)
+
+- **Symptom:** a frame with hundreds of small compute dispatches spends milliseconds of GPU time on them, far more than the dispatches' work: `DM_NVN_GPUPROF` shows one compute encoder with hundreds of dispatches taking 4 ms, and the same frame with `DM_NVN_BLIT_ORDER=0` (a diagnostic that drops the barriers) under 1 ms. Fire Emblem Fortune's Weave's battle map: 345 dispatches a frame (cube map faces and mip levels, then about 285 small particle dispatches), 4.2 ms of GPU.
+- **Cause:** `dispatch_enc` records every dispatch as having written all memory, so each one waits for everything before it in the copy encoder: about 9.7 µs of GPU per barrier on an M1 Pro. The game's own barriers between them (`INVALIDATE_SHADER`, `ORDER_PRIMITIVES`) do not say which dispatches depend on which.
+- **Fix:** `dispatch_enc` / `dr_collect` in `nvn_mtl.m`, behind `DM_NVN_DISPATCH_DEPS=1` (off by default). A translated shader's dispatch is ordered by the memory its bindings touch: storage and uniform buffers by their bound ranges, textures and images by their storage in guest memory (one level of one layer for a single-level, single-layer view of a block-linear texture the host keeps in a texture of its own, else the whole texture), and the indirect arguments. It takes a barrier only when those meet what the encoder's operations since the last barrier wrote (or, for its writes, read), as copies do (`blit_buf`). A binding the host cannot bound (global memory, bindless or pool handles, buffer textures, a storage buffer in a sparse pool, more than 48 ranges) keeps the old rule, and so do host kernels.
+- **Check:** `make -C dm/gfx/tests GAME=<id> run`, with and without `DM_NVN_DISPATCH_DEPS=1`. The log's `DM_NVN_DISPATCH_DEPS: N dispatches with known memory, M of them without a barrier; K kept the old rule` line and the pass dump's `X` lines show what each dispatch got.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md). On an M1 Pro, the battle map's compute encoder went from 4,185 to 931 µs and the frame's GPU span from 17.0 to 14.6 ms; 1,144,535 of 1,179,648 dispatches ran without a barrier, 3,315 kept the old rule. Screenshots of the same frames match apart from animation. It is off by default until more games are checked: it relies on the reflection naming every byte a shader reads or writes.
+
 ### Depth plane copies between depth formats
 
 - **Symptom:** `[RED] texture→texture copy case not implemented: 1920x1080x1→1920x1080x1 flags 0 format 260→252 3D 0→0`.

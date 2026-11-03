@@ -50,3 +50,6 @@ shader_note	Animal Crossing: New Horizons shaders
 # The game wraps its clears in render conditions that skip a target nothing drew into since its last clear: without the key, four clear-only passes wiped the composite before
 # the window copy at frame 900, and every frame came out black (the island probe and the loading icon were drawn into render targets)
 render_cond	on
+# Screen shape (patches.py, duo_anchor.c): DM_SCREEN_ASPECT renders a screen taller than 16:9 in its own shape, the iPhone Duo's 1.43:1 as 1920x1344 with the layouts in
+# their own shape, centred, their edge widgets at the taller screen's edges and 16:9's sides in view (more above and below); the iOS launcher offers it
+screen_aspect	on

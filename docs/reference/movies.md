@@ -10,6 +10,13 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Cause:** the SDK movie library's hardware decoder opens nvdrv directly.
 - **Fix:** the host takes over `movie::Decoder` (`hle_movie.c`, [`movie::Decoder` taken over as a MediaCodec-style protocol](#moviedecoder-taken-over-as-a-mediacodec-style-protocol)); nvdrv opens fail (`hle_nvdrv.c`).
 
+### SDK 1 movie buffer getters
+
+- **Symptom:** constructing a movie decoder aborts with `FATAL movie: missing SDK symbol _ZNK5movie6Buffer4DataEv`.
+- **Cause:** SDK 1.3.1 exports `movie::Buffer::Data()`, `Capacity()` and `Size()` as non-const methods. Looking up only the const overloads misses the symbols in `subsdk0`.
+- **Fix:** resolve each getter by the const name first, then by its non-const name. The decoder still requires all three; it uses the guest's methods to read the buffer without assuming its layout.
+- **Found on:** [Ultra Street Fighter II: The Final Challengers (#960)](https://github.com/seedds/nxnative/issues/960).
+
 ### `movie::Decoder` taken over as a MediaCodec-style protocol
 
 - **Symptom:** the game waits forever at a movie (Engage's 94 s opening `S01F.webm`; frames keep presenting, nothing happens).

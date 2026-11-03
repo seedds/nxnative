@@ -1,0 +1,38 @@
+# Hyrule Warriors: Age of Imprisonment (Switch 2, update v196608)
+# Koei Tecmo's KTGL, SDK 20.5.15 built for the Switch 2 (Ounce), NVN2. Modules main + subsdk0 (NintendoSDK_movie) + sdk.
+# Packed from a NUP container (scripts/pack_nup.py). RomFS: KTGL's RDB under b6e28c40 (root.rdb, system.rdb, .fdata, data/*.file), and .bin archives under ebc8c781
+
+# ---- Identity ----
+title_id	04003F40232DE000
+program_id	04003F40232DE000
+
+# ---- App ----
+name	Hyrule Warriors: Age of Imprisonment
+ipa	HyruleWarriorsAgeOfImprisonment.ipa
+app_category	public.app-category.action-games
+# camera on the right stick
+pad_layout	full
+
+# ---- Versions ----
+# v196608 is the update's title version; the NUP carries no control data to name a display version
+build	v196608	v196608	main=659cb288b5c5b2b49853add616c0d5bf	subsdk0=2f1ad4154aecbb0c128030906af67685	sdk=820cd7d096aac448693f504400cc2375
+package	v196608
+shader_versions	v196608
+
+# ---- Files ----
+modules	main subsdk0 sdk
+romfs_marker	b6e28c40/root.rdb
+zip_store	.fdata:.file:.rdb:.bin:.webm:.metallib
+
+# ---- Memory ----
+# The Switch 2 leaves games 9 GB of its 12 GB (Donkey Kong Bananza's figure, not measured here). The NPDM declares no system resource (META +0x14 = 0): no virtual address memory.
+# 256 MB in front + 256 MB alias region + 256 MB stack region + 9 GB heap region
+mem_reserve	0x270000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0x240000000
+sys_resource	0x0
+
+# ---- Shader split (shader_split.py) ----
+shader_groups	/b6e28c40/=rdb
+shader_note	Hyrule Warriors: Age of Imprisonment shaders

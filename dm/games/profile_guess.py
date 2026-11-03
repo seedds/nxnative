@@ -37,6 +37,12 @@ def glsl_sources(img):
     return sum(bool(re.search(rb'\bvoid\s+main\s*\(', s)) for s in re.findall(rb'#version [^\0]*', img))
 
 
+def glsl_text(head):
+    """Whether a file's first bytes can be GLSL source: text, with no control byte. Turrican Anthology Vol. I's shaders/*.vert and *.frag are, and it hands them to glslcCompile. Skyward Sword HD's
+    Shaders/Dummy.vert and Dummy.frag are AES-CTR ciphertext (7.99 bits per byte) that its main decrypts and compiles only when Shaders.arc.gz lacks a program, so their extension says nothing."""
+    return bool(head) and not re.search(rb'[\x00-\x08\x0b\x0e-\x1f\x7f]', head)
+
+
 def nso(path):
     """An NSO module: its three segments decompressed (the image without bss, dm/tools/nso.py), build ID, segment sizes and bss size; nso.Error (a ValueError) on a damaged file"""
     import nso
@@ -262,6 +268,16 @@ def romfs_nro_imports(romfs):   # the names the loose NROs in a RomFS import (th
 UE3_TAG = bytes.fromhex('c1832a9e')   # an Unreal package's tag (shader_split.py ue3_package)
 
 
+def romfs_glsl_files(romfs):
+    """The RomFS's .vert / .frag files that hold GLSL as text (glsl_text)"""
+    n = 0
+    for d, _, names in os.walk(romfs):
+        for name in names:
+            if name.lower().endswith(('.vert', '.frag')):
+                with open(Path(d) / name, 'rb') as f: n += glsl_text(f.read(4096))
+    return n
+
+
 def build_sources(exefs, romfs, modules):
     """shader_sources from an extraction (its ExeFS and RomFS folders) and the modules the profile loads"""
     exefs = Path(exefs); main = nso(exefs / 'main')[0]
@@ -269,7 +285,7 @@ def build_sources(exefs, romfs, modules):
     nro_imp = romfs_nro_imports(romfs)
     defines = lambda m: (exefs / m).exists() and any(s == 'glslcCompile' and defined for s, defined, _ in nso_syms.dynsyms(nso(exefs / m)[0]))
     # GLSL source files in the RomFS that the game compiles itself with GLSLC (Turrican Anthology Vol. I: shaders/*.vert / *.frag, no GLSL string in main)
-    romfs_glsl = sum(1 for _, _, names in os.walk(romfs) for n in names if n.lower().endswith(('.vert', '.frag'))) if 'glslcCompile' in imports and not glsl_src else 0
+    romfs_glsl = romfs_glsl_files(romfs) if 'glslcCompile' in imports and not glsl_src else 0
     glslc_mods = [m for m in modules if m != 'main' and (glsl_src or romfs_glsl) and 'glslcCompile' in imports and defines(m)]
     if 'glslcCompile' in nro_imp:   # an NRO compiles (Portal's materialsystem.nro): the GLSLC module is one nro_modules adds to a provisional profile, so any of the ExeFS's counts
         glslc_mods = sorted({*glslc_mods, *(p.name for p in exefs.iterdir() if p.name.startswith('subsdk') and defines(p.name))}, key=load_order)

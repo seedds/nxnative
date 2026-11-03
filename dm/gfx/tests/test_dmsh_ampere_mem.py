@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Ampere memory instructions through the offline translator (dmsh_xlate, arch sm86): SUATOM (0x593), the image atomic Donkey Kong Bananza's agl
-technique compute shaders (agl_technique_pfx) take an append counter with; shared memory's scaled address, IMAD.HI and ATOMS.CAS. Needs DMSH_TEST_XLATE (the translator) like the other translator tests."""
+"""Ampere instructions through the offline translator (dmsh_xlate, arch sm86): SUATOM (0x593), the image atomic Donkey Kong Bananza's agl technique compute shaders (agl_technique_pfx) take an
+append counter with; shared memory's scaled address, IMAD.HI and ATOMS.CAS; and the instructions tested on the atomic's result below. Needs DMSH_TEST_XLATE (the translator) like the other translator tests."""
 import json, os, re, struct, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
@@ -63,6 +63,33 @@ class MufuF16(Translated):
         self.assertNotRegex(self.msl(self.LOG2_LOW), r'as_type<half2>\(.*\)\)\.y;')
 
 
+class BarrierMoves(Translated):
+    """BMOV around warp shuffles (Hyrule Warriors: Age of Imprisonment's pixel shaders 02e49c189b769074 and 49241cf469c76830): convergence barrier B15 to and
+    from R26, in the game's encodings. Per thread they do nothing, as the barriers they save do"""
+    SAVE = (0x000fe20000000000, 0x000000001a0f7f55)      # +0x25c0
+    RESTORE = (0x000fe40000100000, 0x000000001a0f7f56)   # +0x25d0
+    RESTORE_PLAIN = (0x000fe40000000000, 0x000000001a0f7f56)
+
+    def test_no_effect_on_the_shader(self):
+        plain = self.translate(inst(*SUATOM) + inst(*EXIT))
+        moved = self.translate(inst(*self.SAVE) + inst(*self.RESTORE) + inst(*SUATOM) + inst(*self.RESTORE_PLAIN) + inst(*EXIT))
+        self.assertEqual(moved, plain)
+
+
+class LdcIndexedBank(Translated):
+    """LDC.64 .IS (address mode 2): the bank is the instruction's plus Ra's upper half, the offset Ra's lower half (Hyrule Warriors: Age of Imprisonment's
+    vertex shader cc679c7b4d3e703c reads its c1 quad corners at (vertex index % 5) * 8 + 0x10000 this way). Here LDC.64.IS R12, c[0][R3] feeds the atomic"""
+    LDC_IS = (0x000e620000008a00, 0x00000000030c7b82)   # the game's control bits, size and mode; Rd R12, Ra R3
+
+    def test_reads_the_bank_chosen_at_run_time(self):
+        msl = self.translate(inst(*self.LDC_IS) + inst(*SUATOM) + inst(*EXIT))
+        self.assertIn('cp_c1)._m0[', msl)   # the shader's own constant segment is one of the banks it may name
+        self.assertRegex(msl, r'>> 16u|>> uint\(16\)|>> 16')   # the bank from Ra's upper half
+        self.assertRegex(msl, r'& 65535\b')                     # the offset from its lower half
+        self.assertRegex(msl, r'== 1;')                          # selected among the banks by its value
+        self.assertNotIn('cp_c0)._m0[', msl)   # never the driver segment at a run-time index, which the host cannot fill (here the instruction's own bank)
+
+
 def mov(rd, value):   # MOV Rd, imm32: values the tests can see in the output
     return inst(0x000fc60000000f00, value << 32 | rd << 16 | 0x7802)
 
@@ -120,6 +147,134 @@ class Shared(Translated):
         self.assertIn('atomic_compare_exchange', msl)
         self.assertRegex(msl, r'= 5u;')
         self.assertRegex(msl, r', 9u,')
+
+    # 3,312 of Pokemon Pokopia's shared accesses have stride 3, on 4, 8 and 16 bytes alike (cs_rdb 990's STS.U32 [R2 * 16]): the field is a scale, not the access size
+    STS_SCALED_16 = 0x0001e4000000c800, 0x0000000302027388
+
+    def test_stride_3_scales_its_register_by_16(self):   # Element 3 of 16 bytes, word 12
+        self.assertIn('[12] = 77u', self.msl(mov(2, 3), mov(3, 77), inst(*self.STS_SCALED_16)))
+
+    # LDSM keeps its mode at 78..79, where LDS has its stride: 1 is a transposed read (MT88), not a scale. Donkey Kong Bananza's upscaler 7629d857a0a93833 +0x1ce0, on R3: scaled, its picture was garbage
+    LDSM_MT88 = 0x000fe20000004200, 0x000000000314783b   # LDSM.16.MT88.4 R20, [R3], with no write barrier for the store to wait on
+
+    def test_ldsm_mode_is_not_a_scale(self):
+        msl = self.msl(mov(3, 0x40), inst(*self.LDSM_MT88), sts(0x20, 20))
+        self.assertIn('spvSubgroupShuffle(8.96831', msl)   # the address 0x40 as a float's bits; scaled, it would be 0x100 (3.5873e-43)
+
+
+class Pokopia(Translated):
+    """Pokemon Pokopia's encodings, on the register the atomic reads: F2FP.MERGE_C (22,886 shaders), F2I from a half (1,067), MEMBAR with ERRBAR (144)"""
+    MERGE_FIRST = (0x000fe200000040ff, 0x00c00600ff0c7a3e)   # F2FP.MERGE_C R12, RZ, c[3][word 6], RZ
+    MERGE_SECOND = (0x000fe4000000400c, 0x00c00500ff0c7a3e)   # F2FP.MERGE_C R12, RZ, c[3][word 5], R12
+    F2I_LOW = (0x000fe2000010f100, 0x0000000c000c7305)   # F2I.S32.F16.TRUNC R12, R12.H0
+    F2I_HIGH = (0x000fe2000010f100, 0x1000000c000c7305)   # F2I.S32.F16.TRUNC R12, R12.H1
+    # TLD.1D.LZ R12, R12, texture slot 0 (c0 word 4): 80,220 shaders, KTGL's light and decal lists in texture buffers. The game's words set a write barrier its next instructions wait on;
+    # this one sets none, so the atomic sees its result
+    TLD_1D = (0x000fe200009e01ff, 0x100004ff0c0c7b66)
+    ATOMS_ADD = (0x004e680000000000, 0x0007fc0cff0c738c)   # ATOMS.ADD.U32 R12, [RZ + 0x7fc], R12, under PT
+    MEMBAR = (0x000fec0000005000, 0x0000000000007992)
+    ERRBAR = (0x000fc00000000000, 0x00000000000079ab)
+
+    def msl(self, *code):
+        return self.translate(b''.join(inst(*c) for c in code) + inst(*SUATOM) + inst(*EXIT))
+
+    def test_merge_shifts_c_into_the_high_half(self):   # word 6, converted first, ends in the high half; word 5 in the low one
+        msl = self.msl(self.MERGE_FIRST, self.MERGE_SECOND)
+        high = re.search(r'uint (_\d+) = as_type<uint>\(half2\(float2\(\(\*spvDescriptorSet0\.cp_c3\)\._m0\[1\]\.z, 0\.0\)\)\);', msl)
+        low = re.search(r'uint (_\d+) = as_type<uint>\(half2\(float2\(\(\*spvDescriptorSet0\.cp_c3\)\._m0\[1\]\.y, 0\.0\)\)\);', msl)
+        self.assertTrue(high and low, msl)
+        shifted = re.search(rf'int (_\d+) = int\({high.group(1)}\) << 16;', msl)
+        self.assertTrue(shifted, msl)
+        self.assertRegex(msl, rf'{shifted.group(1)} \| int\({low.group(1)}\)')
+
+    def test_merge_with_rz_in_c_is_the_low_half_alone(self):
+        msl = self.msl(self.MERGE_FIRST)
+        self.assertRegex(msl, r'as_type<uint>\(half2\(float2\(\(\*spvDescriptorSet0\.cp_c3\)\._m0\[1\]\.z, 0\.0\)\)\)')
+        self.assertNotIn('<< 16', msl)
+
+    def test_f2i_reads_the_selected_half(self):   # the merge left its float in the low half and zero in the high one; the translator folds the pack and unpack
+        self.assertIn('trunc(0.0)', self.msl(self.MERGE_FIRST, self.F2I_HIGH))
+        self.assertRegex(self.msl(self.MERGE_FIRST, self.F2I_LOW), r'trunc\(\(\*spvDescriptorSet0\.cp_c3\)\._m0\[1\]\.z\)')
+
+    def test_1d_fetch_wraps_into_rows(self):   # a texture buffer in the slot is bound as rows of 16384 texels (nvn_mtl.m tbuf_as_2d); a 1D texture, one row, reads the same texel
+        msl = self.msl(self.MERGE_FIRST, self.TLD_1D)
+        self.assertRegex(msl, r'& 16383')
+        self.assertRegex(msl, r'>> uint\(14\)')
+        self.assertRegex(msl, r'cp_t_tcb_8\.read\(uint2\(')   # slot 0's handle, c2 word 8, as a 2D texture
+        self.assertNotIn('texture1d', msl)
+
+    def test_atoms_add_on_shared_memory(self):   # the offset is in bytes: 0x7fc is word 511 of the workgroup's 0x800 bytes
+        msl = self.translate(inst(*self.ATOMS_ADD) + inst(*SUATOM) + inst(*EXIT), shared=0x800)
+        self.assertRegex(msl, r'atomic_fetch_add_explicit\(\(threadgroup atomic_uint\*\)&_\d+\[511\]')
+
+    # HADD2 / HMUL2 with an immediate (form 2): the second source is the immediate, not the unused register field at 64 (R0, the blur's texture coordinate, in the shader that hung the GPU)
+    HADD2_IMM = (0x000fe20000000900, 0x3e003e00ff0c7430)   # HADD2 R12, RZ, (1.5, 1.5)
+    HADD2_NEG_IMM = (0x000fe20000000900, 0xb800b800ff0c7430)   # HADD2 R12, RZ, (-0.5, -0.5): bits 63 and 62 belong to the constant, they are not modifiers
+    HMUL2_IMM = (0x000fe2000000080c, 0x400040000c0c7432)   # HMUL2 R12, R12, (2.0, 2.0)
+
+    def test_half_add_takes_the_immediate(self):
+        msl = self.msl(self.HADD2_IMM)
+        self.assertIn('1.5', msl)
+        self.assertNotRegex(msl, r'as_type<half2>\(\s*_?\w*r0')
+
+    def test_half_immediate_keeps_its_sign(self):
+        self.assertIn('-0.5', self.msl(self.HADD2_NEG_IMM))
+
+    def test_half_multiply_takes_the_immediate(self):
+        self.assertIn('2.0', self.msl(self.MERGE_FIRST, self.HMUL2_IMM))
+
+    # HFMA2 .H0_NH1 (bit 86): the low lane multiplies by B's high half negated, the high lane by B's low half. R12 holds (c3[5], c3[6]) from the two merges
+    HFMA2_NH1 = (0x000fe200004000ff, 0x0000000c0c0c7231)   # HFMA2 R12, R12, R12.H0_NH1, RZ
+    HFMA2_PLAIN = (0x000fe200000000ff, 0x0000000c0c0c7231)   # HFMA2 R12, R12, R12, RZ
+
+    def hfma2_lanes(self, hfma2):   # the generated code, and the names of A.lo, A.hi, B.lo, B.hi, unpacked in that order
+        msl = self.msl(self.MERGE_FIRST, self.MERGE_SECOND, hfma2)
+        lanes = re.findall(r'float (_\d+) = float2\(as_type<half2>\(uint\(_\d+\)\)\)\.[xy];', msl)
+        self.assertEqual(len(lanes), 4, msl)
+        return (msl, *lanes)
+
+    def test_hfma2_nh1_rotates_b(self):
+        msl, a_lo, a_hi, b_lo, b_hi = self.hfma2_lanes(self.HFMA2_NH1)
+        negated = re.search(rf'float (_\d+) = -{b_hi};', msl)
+        self.assertTrue(negated, msl)
+        self.assertIn(f'fma({a_lo}, {negated.group(1)}, 0.0)', msl)   # low lane: A.lo * -B.hi
+        self.assertIn(f'fma({a_hi}, {b_lo}, 0.0)', msl)               # high lane: A.hi * B.lo
+
+    def test_hfma2_without_nh1_keeps_the_lanes(self):
+        msl, a_lo, a_hi, b_lo, b_hi = self.hfma2_lanes(self.HFMA2_PLAIN)
+        self.assertIn(f'fma({a_lo}, {b_lo}, 0.0)', msl)
+        self.assertIn(f'fma({a_hi}, {b_hi}, 0.0)', msl)
+
+    # FSEL keeps each operand's modifiers (161,748 of the game's register forms negate B): "x or -x" from one register is how its character and prop lighting picks a sign
+    FSEL_NEG_B = (0x000fe40000000000, 0x8000000c0c0c7208)   # FSEL R12, P0, R12, -R12
+
+    def test_fsel_negates_b(self):
+        msl = self.msl(self.MERGE_FIRST, self.MERGE_SECOND, self.FSEL_NEG_B)
+        self.assertRegex(msl, r'float _\d+ = -')
+
+    def test_up2ur_reads_up0(self):   # cs_main's encoding: UR6 = UP0 ? 1 : 0
+        self.msl((0x000fc60008000000, 0x000000013f067883))
+
+    # Shared memory with a stride of 1: the address is Ra * 4 + offset. RZ would fold the scale away, so the index comes from F2I
+    F2I_R3 = (0x000e24000021f000, 0x0000000c00037305)   # F2I.S32 R3, R12
+    HIST_INC = (0x0011e4000d00403f, 0x0000000003ff7f8c)   # 0xf8c: the luminance histogram's hist[R3]++
+    LDS_SCALED = (0x000fe20000004800, 0x00000000030c7984)   # LDS R12, [R3 * 4]
+    LDS_PLAIN = (0x000fe20000000800, 0x00000000030c7984)   # LDS R12, [R3]
+
+    def shared_msl(self, *code):
+        return self.translate(b''.join(inst(*c) for c in (self.MERGE_FIRST, self.F2I_R3) + code) + inst(*SUATOM) + inst(*EXIT), shared=0x800)
+
+    def test_histogram_increment_adds_one_at_the_scaled_index(self):
+        msl = self.shared_msl(self.HIST_INC)
+        self.assertRegex(msl, r'atomic_fetch_add_explicit\(\(threadgroup atomic_uint\*\)&_\d+\[[^\]]*\], 1u')
+        self.assertRegex(msl, r'<< 2')
+
+    def test_shared_load_scales_only_with_bit_78(self):
+        self.assertRegex(self.shared_msl(self.LDS_SCALED), r'<< 2')
+        self.assertNotRegex(self.shared_msl(self.LDS_PLAIN), r'<< 2')
+
+    def test_membar_orders_memory(self):
+        self.assertRegex(self.msl(self.MEMBAR, self.ERRBAR), r'threadgroup_barrier|atomic_thread_fence')
 
 
 if __name__ == '__main__':

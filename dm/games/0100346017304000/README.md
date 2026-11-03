@@ -22,7 +22,7 @@ Update 1.1.1 (v131072) over the base game, SDK 12.3.3 (no other game's `sdk` bui
 
 ## Input
 
-- **Current:** handheld (`op_mode handheld`, `pad_layout touch`), the game plays by touch: tap the cards and buttons, drag or flick the map. On the iPhone those are all the touches in the Tap layout, on the Mac the mouse. The layout button brings back the gamepad (the map scrolls with the right stick in the 3D layout; L / R and ZL / ZR switch tabs and lists). It draws 1920x1080 in both modes.
+- **Current:** handheld (`op_mode handheld`, `pad_layout touch`), the game plays by touch: tap the cards and buttons, drag or flick the map. On the iPhone those are all the touches in the Tap layout, on the Mac the mouse. The in-game menu's Controller layout (the gear at the top centre) brings back the gamepad (the map scrolls with the right stick in the 3D layout; L / R and ZL / ZR switch tabs and lists). It draws 1920x1080 in both modes.
 - **Resolved: taps in handheld mode did nothing, though the game reads the touch screen** (the title's PRESS ANY BUTTON, the menus' cards). Its touch handler (`main+0x42f1ac`) uses `GetTouchScreenState` only to track the finger and takes its taps, pans and swipes from `hid::GetGestureStates` (it acts on types 5–9), which the host answered with no entries. The host now recognizes gestures from the same touch points (`hle_touch.c` `gesture_sample`, unit test `t_gesture`). Every menu, the cards, the map's drag and flick worked by touch with it. `DM_TOUCH_LOG=1` logs each gesture entry, and a `DM_CTL` line `drag <x0> <y0> <x1> <y1> [seconds]` moves a finger for testing pans and swipes on the Mac.
 
 ## Services

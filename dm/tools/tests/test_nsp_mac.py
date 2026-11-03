@@ -16,12 +16,14 @@ SCRIPT = REPO / 'scripts/build_ipa_from_nsp.py'
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', SCRIPT)
 nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
 CHAIN, INPUTS = '0123456789ab', 'aaaaaaaaaaaa'
+LIVE, OLD, NEW = 'a' * 64, 'b' * 64, 'c' * 64
 
 
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp)
         self.sh, self.logs, self.ran = self.tmp / 'shader', self.tmp / 'logs', []
+        self.cas_used = [LIVE]   # the cache entries a full dmsh_build.py run lists as used
         self.logs.mkdir()
         for cm in (mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'say', lambda m: None), mock.patch.object(nsp, 'run', self.fake_run)):
             cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
@@ -41,7 +43,7 @@ class Base(unittest.TestCase):
                 d = o / f'b-{CHAIN}'; shutil.rmtree(d, ignore_errors=True); d.mkdir(parents=True)
                 target = 'mac' if o == self.sh / 'cache' else 'ios'
                 if target in targets: (d / 'k_b.metallib').write_bytes(b'lib')
-                if target == 'mac': (d / 'k_b.metal').write_text('MSL'); (d / 'k_b.json').write_text('{}')
+                if target == 'mac': (d / 'k_b.metal').write_text('MSL'); (d / 'k_b.json').write_text('{}'); (d / '_b_cas.txt').write_text(''.join(x + '\n' for x in self.cas_used))
                 (o / f'b-{CHAIN}' / 'inputs.tsv').write_text(f'# stamp\ngame\t0100535012974000\ninputs\t{INPUTS}\n')
             for n in ('c1_full.tsv', 'cb_extent.tsv'): (self.tmp / n).write_text(f'# chain b-{CHAIN} inputs {INPUTS} 2026-10-23T00:00:00+00:00\n')
             log.write_text('shaders 1: ok 1\n')
@@ -168,6 +170,34 @@ class Nvn(Base):
         (self.sh / 'cache' / 'b-ffffffffffff').write_text('a file, not a library folder')
         self.build(False)
         self.assertEqual(sorted(p.name for p in (self.sh / 'cache').iterdir()), sorted(['b-0123456789abcd', 'b-ffffffffffff', 'b-notahexchain', f'b-{CHAIN}', 'cas', 'mine']))
+
+    def cas(self, *names, when=0):   # cache entries with a source and a library (a clone of the compile cache's), last changed at when
+        for n in names:
+            d = self.sh / 'cache/cas/shader' / n / 'mac'; d.mkdir(parents=True)
+            (d / 'k_b.metal').write_bytes(b'm' * 100); (d / 'k_b.metallib').write_bytes(b'l' * 1000)
+            nsp.os.utime(d.parent, (when, when))
+
+    def test_prune_shader_cache(self):   # entries the build did not list go once it succeeded; a listed one, one newer than the list and other names stay; only the sources count
+        self.cas(LIVE, OLD, 'notadigest')
+        said = []
+        with mock.patch.object(nsp, 'say', said.append): self.build(False)
+        self.cas(NEW, when=nsp.time.time() + 3600)   # published by another build sharing the cache after this one's list
+        self.assertEqual(sorted(p.name for p in (self.sh / 'cache/cas/shader').iterdir()), sorted([LIVE, NEW, 'notadigest']))
+        self.assertEqual([m for m in said if 'shader cache entries' in m], ['removed old shader cache entries: 1 (0.1 KB)'])
+        self.cas(OLD); said.clear()   # a reused build prunes too
+        with mock.patch.object(nsp, 'say', said.append): self.build(False)
+        self.assertEqual(self.ran, []); self.assertFalse((self.sh / 'cache/cas/shader' / OLD).exists()); self.assertTrue((self.sh / 'cache/cas/shader' / NEW).exists())
+
+    def test_prune_shader_cache_needs_success_and_the_list(self):   # a failed build, or libraries from before the list, keep every entry
+        self.build(False); self.cas(OLD)
+        (self.sh / 'ios' / f'b-{CHAIN}.key').unlink()   # not reused: the step runs, and fails
+        def failing(cmd, log, env=None, cwd=None, on_line=None): raise nsp.BuildError('translator failed')
+        with mock.patch.object(nsp, 'run', failing), self.assertRaises(nsp.BuildError): self.build(False)
+        self.assertTrue((self.sh / 'cache/cas/shader' / OLD).exists())
+        self.build(False); self.assertFalse((self.sh / 'cache/cas/shader' / OLD).exists())
+        (self.sh / 'cache' / f'b-{CHAIN}' / '_b_cas.txt').unlink(); self.cas(OLD)
+        self.build(False)
+        self.assertEqual(self.ran, []); self.assertTrue((self.sh / 'cache/cas/shader' / OLD).exists())
 
     def test_no_stamp(self):   # Mac libraries no full build stamped (an interrupted one): no table can name them, so neither key reuses them
         self.build(False)

@@ -61,6 +61,7 @@ Keyboard in a window: J K U I are A B X Y, WASD the left stick, Shift + arrows t
 - [A table of handles past the array's length](../../../docs/reference/shaders.md#a-table-of-handles-past-the-arrays-length): black characters.
 - [`[[primitive_id]]` in a specialized Metal 4 pipeline](../../../docs/reference/rendering.md#primitive_id-in-a-specialized-metal-4-pipeline): the dot lattice over the ground.
 - [NVN2's DLSS on MetalFX](../../../docs/reference/rendering.md#nvn2s-dlss-on-metalfx).
+- [Bindless shaders taken as depth readers](../../../docs/reference/rendering.md#bindless-shaders-taken-as-depth-readers): the battle maps' decals split the G-buffer pass about 31 times a frame.
 - [System applets opened by `Show…` calls](../../../docs/reference/services.md#system-applets-opened-by-show-calls): a null read in `nn::applet::CreateLibraryApplet` at the title about 100 s in, the strap guide overload with a `StrapGuideArg`.
 - [A target frame rate the game steps by](../../../docs/reference/frame-rate.md#a-target-frame-rate-the-game-steps-by): gameplay at 60 fps.
 - [AV1 movies through SDK 22's decoder](../../../docs/reference/movies.md#av1-movies-through-sdk-22s-decoder).

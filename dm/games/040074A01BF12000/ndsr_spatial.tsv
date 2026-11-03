@@ -1,0 +1,4 @@
+# NDSR_SPATIAL_2X_V1
+# Reviewed spatial kernel: c24 origins/relative inclusive bounds, t0 -> i1,
+# one 24x30 input tile per workgroup, 48x60 output tile, no other writes.
+14a8aaf3e0a9edbd

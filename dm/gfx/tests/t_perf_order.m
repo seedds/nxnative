@@ -244,12 +244,24 @@ static void wait_budgets(void) {
     CHECK("public zero-time poll returns false", !mtl_wait(1, 0));
     CHECK("public zero-time poll skips event and has zero deadline", !test_budget.event_calls
         && test_budget.cond_calls == 1 && test_budget.cond_remaining == 0);
+    // The submit worker advertises a fence before replay reaches mtl_sub_commit.
+    // A guest waiting now must still use the GPU signal, not a later feedback
+    // callback. Future shared-event values are valid wait targets.
+    g_fence = 0;
+    for (unsigned si = 0; si < sizeof sites / sizeof *sites; si++) {
+        test_budget = (typeof(test_budget)){.now = 1999750000, .event_elapsed = 20000000};
+        CHECK("queued future fence times out if GPU never signals", !mtl_wait_at(1, 20000000, sites[si]));
+        CHECK("queued future fence uses the GPU event at every guest wait site", test_budget.event_calls == fast
+            && (!fast || test_budget.event_fence == 1));
+        CHECK("future fence preserves one finite timeout budget", test_budget.cond_calls == !fast
+            && (fast || test_budget.cond_remaining == 20000000));
+    }
     if (fast) {
         volatile uint32_t event = 0;
         g_postr[1] = (post_rec){.fence = 1, .n = 1, .ops = calloc(1, sizeof(post_op))};
         g_postr[1].ops[0] = (post_op){.kind = 1, .val = &event, .v = 47};
         test_budget = (typeof(test_budget)){.now = 1999750000, .event_elapsed = 7000000, .event_success = 1};
-        CHECK("signaled event succeeds through real post_early", mtl_wait_at(1, 20000000, WS_ACQ));
+        CHECK("queued future fence succeeds through real post_early", mtl_wait_at(1, 20000000, WS_ACQ));
         CHECK("CPU event is visible before successful return", event == 47 && g_done == 1
             && g_postr[1].claimed && !g_postr[1].ops);
         CHECK("successful early wait skips feedback wait", test_budget.event_calls == 1 && !test_budget.cond_calls);

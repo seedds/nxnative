@@ -181,6 +181,12 @@ check_t_present_snap: t_present_snap
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_present_snap resize
 t_reorder_chain: t_reorder_chain.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_reorder_chain.m $(MTL_T_SRC) $(FW)
+t_ndsr: t_ndsr.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_ndsr.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_ndsr
+check_t_ndsr: t_ndsr
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_ndsr
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_ndsr
 check_t_reorder_chain: RUN_ENV = MTL_DEBUG_LAYER=1
 t_defer_chain: t_defer_chain.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_defer_chain.m $(MTL_T_SRC) $(FW)

@@ -73,6 +73,22 @@ int main(int argc, char **argv) { @autoreleasepool {
     choice((float[4]){0.5f, 0.5f, 0.5f, 0.5f}, 0, 0, 0, 0);   // the border is never read
     choice((float[4]){0.5f, 0.5f, 0.5f, 0.5f}, 5, 1, 0, 0);   // a min reduction is not linear in it
     mtl_init();
+    {   // the pipeline's choice of library (border_key): the border correcting library <key>_bb only while a sampler member of the pixel shader has a twin
+        samp_par sp = {0}; sp.magf = sp.minf = 1; sp.ws = sp.wt = sp.wr = 5;
+        memcpy(sp.border, (float[4]){0.5f, 0.5f, 0.5f, 0.5f}, 16); mtl_reg_samp(21, &sp);   // a colour Metal lacks: a twin
+        memcpy(sp.border, (float[4]){0, 0, 0, 1}, 16); mtl_reg_samp(22, &sp);              // Metal's own: none
+        NvShader *ps = [NvShader new]; ps->stage = 1; ps->has_border = 1; ps->rf.nb = 2;
+        ps->rf.b[0] = (nvn_rbind){.kind = NVN_RB_TEX, .reg = 0, .aid = 0};
+        ps->rf.b[1] = (nvn_rbind){.kind = NVN_RB_SAMP, .reg = 0, .aid = 1, .bw = 1};
+        state_reset();
+        S.samp[1][0] = 21ull << 20; CHECK(border_key(ps) == 2, "a sampler with a twin takes the correcting library");
+        S.samp[1][0] = 22ull << 20; CHECK(border_key(ps) == 0, "Metal's own colour keeps the plain library");
+        S.samp[1][0] = 0;            CHECK(border_key(ps) == 0, "no sampler bound");
+        S.samp[1][0] = 21ull << 20; ps->rf.b[1].bw = 0; CHECK(border_key(ps) == 0, "a member border_emu gave no bit");
+        ps->rf.b[1] = (nvn_rbind){.kind = NVN_RB_SAMPI, .reg = 21, .aid = 1, .bw = 1}; CHECK(border_key(ps) == 2, "a sampler the shader names as a constant");
+        ps->has_border = 0; CHECK(border_key(ps) == 0, "a shader without a correcting library");
+        state_reset();
+    }
     if (argc > 1) {   // the rewritten shader
         NSError *error = nil; NSString *src = [NSString stringWithContentsOfFile:@(argv[1]) encoding:NSUTF8StringEncoding error:&error];
         id<MTLLibrary> lib = src ? [g_dev newLibraryWithSource:src options:nil error:&error] : nil;

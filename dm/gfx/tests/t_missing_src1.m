@@ -69,6 +69,10 @@ int main(void) { @autoreleasepool {
     id<MTLRenderPipelineState> legacy = [g_dev newRenderPipelineStateWithDescriptor:d error:&error], m4 = pso_build(d, &error);
     CHECK(legacy != nil && m4 != nil, "the dual-source pipeline compiles on both paths");
     if (legacy && m4) { __fp16 a[4], b[4]; pixels(legacy, a); pixels(m4, b); CHECK(!memcmp(a, b, sizeof a), "both paths blend the same"); }
+    k.logic = 2;   // pso_key.logic bit 1 is the border bit (border_key), not a logic operation: blending and the dual-source entry point stay
+    d = pso_desc(&k, vs, fs, nil, 0);
+    CHECK(d.fragmentFunction == fs->fn_d && d.colorAttachments[0].blendingEnabled, "the border bit keeps dual-source blending");
+    k.logic = 0;
     k.cfmt[1] = MTLPixelFormatRGBA16Float; k.blend_en = 3; k.blend[1] = k.blend[0];
     d = pso_desc(&k, vs, fs, nil, 0);
     CHECK(d.fragmentFunction == fs->fn_d && d.colorAttachments[1].writeMask == MTLColorWriteMaskNone && !d.colorAttachments[1].blendingEnabled, "output 1's attachment is left as it was");

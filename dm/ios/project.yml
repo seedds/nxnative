@@ -30,6 +30,7 @@ targets:
       path: Gen/Info.plist
       properties:
         CFBundleDisplayName: ${DM_DISPLAY_NAME}   # the game name in the base NSP (set by build_ipa.sh)
+        CFBundleName: ${DM_DISPLAY_NAME}
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleShortVersionString: $(MARKETING_VERSION)
         UILaunchStoryboardName: ""
@@ -76,7 +77,8 @@ targets:
       TARGETED_DEVICE_FAMILY: "1,2"
       ENABLE_BITCODE: NO
       GCC_C_LANGUAGE_STANDARD: gnu11
-      OTHER_CFLAGS: $(inherited) -mcpu=apple-a18   # The host assembly contains LSE atomic instructions, which the default baseline does not accept
+      DM_CPU: ${DM_CPU}
+      OTHER_CFLAGS: $(inherited) -mcpu=$(DM_CPU)   # The host assembly needs LSE; DM_CPU=apple-a17 targets iPhone 15 Pro explicitly
       CLANG_ENABLE_OBJC_ARC: YES
       SWIFT_VERSION: "5.0"                         # Launcher.swift (SwiftUI)
       SWIFT_OBJC_BRIDGING_HEADER: Sources/DmIOS-Bridging-Header.h   # CloudSaves.h (the cloud-save folder pick)

@@ -4,6 +4,14 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 
 ## Guest layout
 
+### Large guest reservation refused on iOS
+
+- **Symptom:** pressing Play closes the app during `nnosInitialize`, with `FATAL reserve guest AS` from `mem_init_once`, before graphics starts.
+- **Cause:** the profile's `mem_reserve` exceeds the ordinary iOS address space. Donkey Kong Bananza reserves `0x270000000` (9.75 GiB); its IPA requested Increased Memory Limit but omitted Extended Virtual Addressing. The former raises the physical-memory limit on supported devices; it does not enlarge the address space.
+- **Fix:** `build_ipa.sh` uses `gen_entitlements.py` for both unsigned IPA and prepared Xcode project defaults: Increased Memory Limit, plus Extended Virtual Addressing when the profile reserves more than 6 GiB (a device test allowed 6 GiB and refused 7 GiB without it). A custom `DM_ENTITLEMENTS` still replaces the defaults, and an empty value disables them. The user's provisioning and sideload signature must grant the requested capabilities; merely placing them in an IPA does not grant them. Do not shrink the game's heap to hide the reservation failure.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) on iPhone 15 Pro Max, iOS 27. Packaging checks verify both requests in the executable's signature, but a second Sideloadly installation still aborted at the same reservation. The installed entitlements were not available to inspect; its UI confirmed a paid team with custom entitlements unchecked. Direct Xcode provisioning with both capabilities subsequently reached the mining area's gameplay: the reservation succeeds and the heap opens 8.94 GiB (address space, not resident RAM). The gameplay log's footprint was about 4.7 GiB; long-session memory headroom remains open.
+- **Reference:** [Apple's Extended Virtual Addressing entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.kernel.extended-virtual-addressing).
+
 ### Partitioning the guest block between alias region, stacks and heap
 
 - **Symptom:** large resources silently skipped, later a null deref where the resource is used; also visible as `SetHeapSize` asking for much less than the pool.

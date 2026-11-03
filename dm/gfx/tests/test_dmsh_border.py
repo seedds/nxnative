@@ -17,12 +17,12 @@ import dmsh_fetch   # noqa: E402
 import dmsh_geometry   # noqa: E402
 
 tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-names = {'border_emu', 'reflect', 'decode_tex', 'decode_ubo_tex', 'const_sampler', 'c2_array'}
+names = {'border_emu', 'border_plain', 'reflect', 'decode_tex', 'decode_ubo_tex', 'const_sampler', 'c2_array'}
 selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in names)
             or (isinstance(n, ast.Assign) and any(getattr(e, 'id', None) in ('BORDER_HELPERS', 'SSBO', 'TEX_BASE') for t in n.targets for e in (t.elts if isinstance(t, ast.Tuple) else [t])))]
 scope = {'re': re, 'abi': abi, 'dmsh_geometry': dmsh_geometry}
 exec(compile(ast.Module(body=selected, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), scope)
-border_emu, reflect = scope['border_emu'], scope['reflect']
+border_emu, border_plain, reflect = scope['border_emu'], scope['border_plain'], scope['reflect']
 
 HEAD = '#include <metal_stdlib>\n#include <simd/simd.h>\n\nusing namespace metal;\n\n'
 # Tears of the Kingdom's ff9def5b3c418851 as spirv-cross writes it, cut down: a uniform segment, the bend map and its sampler
@@ -153,6 +153,30 @@ class Rewrite(unittest.TestCase):
         self.assertEqual(len(meta['calls']), 1)
         self.assertEqual(meta['mixed_regs'], [])
         self.assertRegex(fv, r'\(FX_0 == 0 \? fb0 : [^;]*FX_0 == 7 \? fb7 : dm_bs\(spvDescriptorSet0\.fp_t_tcb_8\.sample\(', 'a tile read replaces the corrected sample')
+
+    def test_plain_takes_every_sample_back(self):
+        out = border_plain(border_emu(GRASS))
+        self.assertEqual(out.count('dm_bs('), 1, 'only the helper is left: no sample is corrected, the inner one inside another neither')
+        self.assertIn('(spvDescriptorSet0.fp_t_tcb_8.sample(spvDescriptorSet0.fp_t_tcb_8Smplr, select(_182, float2(0.0), isnan(_182)))).xy', out)
+        self.assertNotIn('_w, ', out.split('V dm_bs(')[1].split('}\n', 1)[1], 'no twin is sampled after the helper')
+
+    def test_plain_keeps_the_argument_buffer(self):
+        src = border_emu(GRASS)
+        self.assertEqual(members(border_plain(src)), members(src), 'the twins and the block stay: the host encodes one argument buffer for both libraries')
+        self.assertEqual(reflect('k', 'ps', border_plain(src), {'sbufs': []}), reflect('k', 'ps', src, {'sbufs': []}))
+
+    def test_plain_unchanged_without_corrections(self):
+        src = HEAD + 'struct spvDescriptorSetBuffer0\n{\n    texture2d<float> fp_t_tcb_8 [[id(0)]];\n};\n\nfragment void main0() {}\n'
+        self.assertEqual(border_plain(src), src)
+
+    @unittest.skipUnless(shutil.which('xcrun'), 'requires Metal compilers')
+    def test_plain_compiles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, src in (('grass', GRASS), ('kernel', KERNEL), ('integer', INTEGER)):
+                msl = root / (name + '.metal'); msl.write_text(border_plain(border_emu(src)))
+                r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-fmodules-cache-path=' + str(root / 'm'), str(msl), '-o', str(root / f'{name}.air')], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
 
     @unittest.skipUnless(shutil.which('xcrun'), 'requires Metal compilers')
     def test_compiles(self):

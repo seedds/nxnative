@@ -922,7 +922,7 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
   - F2FP.MERGE_C (bit 78): b converted into the low half, c's low half into the high one.
   - F2I from a half (source size 1): the half that bits 60..61 select.
   - ATOMS.POPC.INC (0xf8c): an add of 1 with no source register, also counted as using shared memory. The game's one encoding is accepted; any other stops the shader.
-  - UP2UR (0x883): `URd = UP0 ? 1 : 0`. The game's one encoding (URZ, mask 1) is accepted; any other stops the shader.
+  - UP2UR (0x883): bit k of URd is UPk where bit k of the mask (32..64) is set, the other bits zero (`URd = UP0 ? 1 : 0` for this game's mask 1). Mario Kart World's DrivePass shaders also encode masks 0x08 and 0x40 (7 shaders). A merge source in place of URZ, or a mask past UP6, stops the shader.
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
 

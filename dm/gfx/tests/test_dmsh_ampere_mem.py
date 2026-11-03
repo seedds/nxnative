@@ -241,6 +241,10 @@ class Pokopia(Translated):
     def test_up2ur_reads_up0(self):   # cs_main's encoding: UR6 = UP0 ? 1 : 0
         self.msl((0x000fc60008000000, 0x000000013f067883))
 
+    def test_up2ur_masks_up3_and_up6(self):   # Mario Kart World's DrivePass encodings: UR6 = UP3 ? 8 : 0, UR6 = UP6 ? 64 : 0
+        self.msl((0x000fe20008000000, 0x000000083f067883))
+        self.msl((0x000fe20008000000, 0x000000403f067883))
+
     # Shared memory with a stride of 1: the address is Ra * 4 + offset. RZ would fold the scale away, so the index comes from F2I
     F2I_R3 = (0x000e24000021f000, 0x0000000c00037305)   # F2I.S32 R3, R12
     HIST_INC = (0x0011e4000d00403f, 0x0000000003ff7f8c)   # 0xf8c: the luminance histogram's hist[R3]++

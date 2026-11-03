@@ -23,7 +23,9 @@ SAMPLER_1, SAMPLER_6 = 0x570, 0x598                             # and of separat
 
 
 def base(name):
-    return int(re.search(r'Add\("([01x]{64})", InstName\.' + name + r'\s*,', TABLE)[1].replace('x', '0'), 2)
+    m = re.search(r'Add\("([01x]{64})", InstName\.' + name + r'\s*,', TABLE)
+    assert m, f'{name} is not in the decoder table'
+    return int(m[1].replace('x', '0'), 2)
 
 
 def ldc(rd, offset):                                            # LDC.32 Rd, c[2][offset], RZ

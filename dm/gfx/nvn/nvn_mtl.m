@@ -2267,6 +2267,24 @@ uint64_t mtl_upload_gpu_ns_take(void) { return atomic_exchange(&g_upload_gpu_ns,
 void mtl_create_stats(uint64_t *lib, uint64_t *pso) { *lib = g_bp_lib_n; *pso = g_bp_pso_n; }
 void mtl_create_ns(uint64_t *lib_ns, uint64_t *pso_ns) { *lib_ns = g_bp_lib_ns; *pso_ns = g_bp_pso_ns; }   // Cumulative time spent synchronously creating shader libraries / pipelines on the spot (the long-frame log takes the per-frame difference)
 uint64_t mtl_upload_bytes(void) { return g_bp_up_bytes; }   // Cumulative texture upload bytes
+// Apple Silicon hardware ASTC decoder decodes 16-byte all-zero blocks (reserved void-extent mode) as magenta (1.0, 0.0, 1.0, 1.0).
+// In contrast, the valid ASTC void-extent constant-color encoding:
+//   word0 = 0xFFFFFFFFFFFFFDFCULL (void-extent LDR, full extent coordinates)
+//   word1 = 0x0000000000000000ULL (RGBA = 0, 0, 0, 0)
+// decodes across all ASTC formats (UNORM and sRGB) to clean transparent black (0.0, 0.0, 0.0, 0.0).
+static inline size_t astc_zero_sanitize(void *buf, size_t bytes) {
+    uint64_t *q = (uint64_t *)buf;
+    size_t nb = bytes / 16;
+    size_t replaced = 0;
+    for (size_t i = 0; i < nb; i++) {
+        if (!(q[2 * i] | q[2 * i + 1])) {
+            q[2 * i] = 0xFFFFFFFFFFFFFDFCULL;
+            q[2 * i + 1] = 0ULL;
+            replaced++;
+        }
+    }
+    return replaced;
+}
 // Diagnostic DM_NVN_ZBLOCK=1: all-zero 16-byte blocks of each ASTC texture uploaded on the CPU, per level (an all-zero ASTC block decodes as the error colour, magenta). tex_mtl_ logs
 // a texture whose bound levels hold any (zb_report), with each level's zero blocks, its total and whether all its pages are mapped (sparse pools)
 static int zblock_on(void) { static int v = -1; if (v < 0) { v = getenv("DM_NVN_ZBLOCK") != NULL; if (v) MLOG("DM_NVN_ZBLOCK: counting all-zero blocks of ASTC textures at upload (diagnostic)"); } return v; }
@@ -2334,7 +2352,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     }
     g_bp_up_bytes += total;
     void *mb; uint64_t mo;
-    int use_gpu = !rb_shift && !sparse && g_nvn_deswz_gpu && mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo);   // a sparse pool's texture is gathered through its page table on the CPU
+    int use_gpu = !rb_shift && !sparse && g_nvn_deswz_gpu && mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo) && !(t->d.format >= 0x79 && t->d.format <= 0x94);   // a sparse pool's texture is gathered through its page table on the CPU
     if (g_nvn_deswz_gpu && !use_gpu && !sparse && !rb_shift) RED_ONCE(40, "swizzled texture storage is not in a memory pool; falling back to the CPU");
     if (use_gpu) {
         // The GPU reads the memory pool at execution time, which is closer to a real Switch than a snapshot at CPU upload time; the dirty-page stamp is still taken before encoding, and later writes still trigger a re-upload.
@@ -2395,7 +2413,10 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         for (unsigned y = 0; y < layers; y++) {
             if (nvn_deswizzle(&t->d, l, y, src, (uint8_t *)stg.contents + off, pitch)) { RED_ONCE(9, "deswizzle failed format %#x target %d", t->d.format, t->d.target); break; }
             if (rb_shift) rb_swap_rows((uint8_t *)stg.contents + off, pitch, rows, z, pitch, pitch * rows, rb_shift);
-            if (zb && l < 16) { const uint64_t *q = (const uint64_t *)((const uint8_t *)stg.contents + off); size_t nb = pitch * rows * z / 16;
+            if (t->d.format >= 0x79 && t->d.format <= 0x94) {
+                size_t rep = astc_zero_sanitize((uint8_t *)stg.contents + off, pitch * rows * z);
+                if (zb && l < 16) { g_zb[l] += (uint32_t)rep; g_zb_tot[l] += (uint32_t)(pitch * rows * z / 16); }
+            } else if (zb && l < 16) { const uint64_t *q = (const uint64_t *)((const uint8_t *)stg.contents + off); size_t nb = pitch * rows * z / 16;
                 for (size_t i = 0; i < nb; i++) g_zb[l] += !(q[2 * i] | q[2 * i + 1]);
                 g_zb_tot[l] += (uint32_t)nb; }
             up_blit_add(stg, off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l);
@@ -2590,11 +2611,13 @@ static int tex_from_storage(const tex_t *t) {
 // it is made CPU-written, uploaded now and re-uploaded when its pages change. A one-time fill (tex_init_fill) is not enough: that GPU texture goes into the sharing table (g_alias),
 // and a new texture object over the same storage with the same description gets it back after the CPU has rewritten the storage. The Great Ace Attorney Chronicles (Japanese release
 // 0100D7F00FB1A000, GitHub issue #568) decodes its court-record pictures (256x256 to 2048x2048 BC1, a CPU_CACHED pool, no flush) into storage it reuses, building a new texture over
-// it for each item: they were black, and once filled once, showed the previous item's picture. Uncompressed textures cannot be told from render targets (NVN has no flag for that,
-// so tex_desc gives them render-target use) and keep the flushed-range fill. DM_NVN_STORAGE_FIRST_USE=0 turns this off (to measure it)
+// it for each item: they were black, and once filled once, showed the previous item's picture. Uncompressed textures use this path only when the profile opts into CPU-write tracking:
+// tex_dirty_upload stamps at registration, so it misses data already there (Mario Kart World's RGBA16 water-height tiles, copied before Initialize with no NVN flush).
+// Keep the same image/target exclusions; other profiles retain the flushed-range fill. DM_NVN_STORAGE_FIRST_USE=0 turns this off (to measure it)
 static int tex_cpu_content(const tex_t *t) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_STORAGE_FIRST_USE"); on = !e || atoi(e) != 0; }
-    if (!on || !t->mem || !t->pool || t->has_layout || !fmt_compressed(t->d.format) || t->d.samples > 1 || t->d.target == NVN_TEXTURE_TARGET_BUFFER) return 0;
+    if (!on || !t->mem || !t->pool || t->has_layout || t->d.samples > 1 || t->d.target == NVN_TEXTURE_TARGET_BUFFER) return 0;
+    if (!fmt_compressed(t->d.format) && (!DM_GAME_TEX_DIRTY_UPLOAD || fmt_depth(t->d.format))) return 0;
     if (t->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL)) return 0;   // the CPU cannot write it (tex_init_fill fills it once) / sparse (tex_from_storage)
     if (t->d.flags & (NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE)) return 0;
     if (!mem_any(t->mem, t->L.size)) return 0;
@@ -2652,6 +2675,37 @@ static int sp_on(void) {
     else MLOG("[RED] sparse textures: this host has no Metal placement sparse textures (Metal 4 queue %d): a sparse texture in a sparse virtual pool is made whole, with its whole memory", g_q4 != nil);
     return g_sp_on;
 }
+static id<MTLComputePipelineState> g_sp_void_pso;
+static void sp_heap_prefill(id<MTLHeap> heap) {
+    if (!heap) return;
+    if (!g_sp_void_pso) {
+        NSString *src = @"#include <metal_stdlib>\n"
+                        "using namespace metal;\n"
+                        "kernel void sp_void_fill(device ulong2 *buf [[buffer(0)]], uint id [[thread_position_in_grid]]) {\n"
+                        "    buf[id] = ulong2(0xFFFFFFFFFFFFFDFCULL, 0ULL);\n"
+                        "}\n";
+        NSError *err = nil;
+        id<MTLLibrary> lib = [g_dev newLibraryWithSource:src options:nil error:&err];
+        if (!lib) { RED_ONCE(145, "sp_heap_prefill: library compilation failed: %s", err.localizedDescription.UTF8String); return; }
+        id<MTLFunction> fn = [lib newFunctionWithName:@"sp_void_fill"];
+        g_sp_void_pso = [g_dev newComputePipelineStateWithFunction:fn error:&err];
+        if (!g_sp_void_pso) { RED_ONCE(146, "sp_heap_prefill: pso creation failed: %s", err.localizedDescription.UTF8String); return; }
+    }
+    id<MTLBuffer> hbuf = [heap newBufferWithLength:SP_CHUNK options:MTLResourceStorageModePrivate offset:0];
+    if (!hbuf) { RED_ONCE(147, "sp_heap_prefill: failed to place buffer on heap"); return; }
+    res_add(hbuf);
+    id<MTLCommandBuffer> cb = [g_q commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:g_sp_void_pso];
+    [enc setBuffer:hbuf offset:0 atIndex:0];
+    NSUInteger totalBlocks = SP_CHUNK / 16;
+    NSUInteger tpg = MIN((NSUInteger)256, g_sp_void_pso.maxTotalThreadsPerThreadgroup);
+    [enc dispatchThreads:MTLSizeMake(totalBlocks, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg, 1, 1)];
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    res_remove(hbuf);
+}
 static uint32_t sp_tile_alloc_(void);
 static uint32_t sp_tile_alloc(void) { pthread_mutex_lock(&g_sp_mu); uint32_t h = sp_tile_alloc_(); if (h) g_sp_tiles_mapped++; pthread_mutex_unlock(&g_sp_mu); return h; }
 static uint32_t sp_tile_alloc_(void) {   // → (chunk << SP_IDX_BITS | tile) + 1, or 0 when no heap can be made
@@ -2667,14 +2721,29 @@ static uint32_t sp_tile_alloc_(void) {   // → (chunk << SP_IDX_BITS | tile) + 
         }
         if (!heap) { RED_ONCE(142, "sparse textures: failed to make a %u MB placement heap (%d so far): tiles stay unmapped", SP_CHUNK >> 20, g_nsp_chunks); return 0; }
         res_add(heap);
+        sp_heap_prefill(heap);
         g_sp_chunks = realloc(g_sp_chunks, (size_t)(g_nsp_chunks + 1) * sizeof *g_sp_chunks);
         sp_chunk *k = &g_sp_chunks[g_nsp_chunks++]; *k = (sp_chunk){heap, (uint32_t)(SP_CHUNK / g_sp_tile_bytes), 0, 0, NULL};
         k->nfree = k->ntiles; k->bits = calloc((k->ntiles + 63) / 64, 8);
-        MLOG("sparse textures: placement heap %d made (%u tiles)", g_nsp_chunks, k->ntiles);
+        MLOG("sparse textures: placement heap %d made (%u tiles, prefilled with void-extent ASTC blocks)", g_nsp_chunks, k->ntiles);
     }
     return 0;
 }
+static uint32_t g_sp_dummy_tile;
+static uint32_t sp_dummy_tile(void) {
+    pthread_mutex_lock(&g_sp_mu);
+    if (!g_sp_dummy_tile) {
+        g_sp_dummy_tile = sp_tile_alloc_();
+        if (g_sp_dummy_tile) {
+            MLOG("sparse textures: reserved dummy void-extent ASTC tile h=%u (chunk %u, tile %u)",
+                 g_sp_dummy_tile, (g_sp_dummy_tile - 1) >> SP_IDX_BITS, (g_sp_dummy_tile - 1) & ((1u << SP_IDX_BITS) - 1));
+        }
+    }
+    pthread_mutex_unlock(&g_sp_mu);
+    return g_sp_dummy_tile;
+}
 static void sp_tile_free(uint32_t h) {
+    if (!h || h == g_sp_dummy_tile) return;
     pthread_mutex_lock(&g_sp_mu); h--; sp_chunk *k = &g_sp_chunks[h >> SP_IDX_BITS]; uint32_t i = h & ((1u << SP_IDX_BITS) - 1);
     k->bits[i >> 6] &= ~(1ull << (i & 63)); k->nfree++; if (i < k->hint) k->hint = i; g_sp_tiles_mapped--; pthread_mutex_unlock(&g_sp_mu);
 }
@@ -2682,7 +2751,7 @@ static void sp_tile_free(uint32_t h) {
 // tile whether its content is uploaded; per (slice, level) of a mip-tail level the same
 @interface NvSparse : NSObject { @public uint32_t *map; uint8_t *up, *lup; uint32_t nunit, ngt, slices, levels, tiled, mtail, tw, th, mw, mh, uper; uint32_t cols[16], rows[16], ubase[16]; uint64_t layer_size, size; } @end
 @implementation NvSparse
-- (void)dealloc { for (uint32_t u = 0; u < nunit; u++) if (map[u]) sp_tile_free(map[u]); free(map); free(up); free(lup); }
+- (void)dealloc { for (uint32_t u = 0; u < nunit; u++) if (map[u] && map[u] != g_sp_dummy_tile) sp_tile_free(map[u]); free(map); free(up); free(lup); }
 @end
 static NvSparse *sp_make(const tex_t *t, MTLTextureDescriptor *d, id<MTLTexture> *out) {
     if (!sp_on() || t->d.samples > 1 || (d.textureType != MTLTextureType2D && d.textureType != MTLTextureType2DArray)) return nil;
@@ -2708,6 +2777,38 @@ static NvSparse *sp_make(const tex_t *t, MTLTextureDescriptor *d, id<MTLTexture>
     s->uper = u; s->nunit = u * s->slices;
     s->map = calloc(s->nunit, sizeof *s->map); s->up = calloc(s->ngt, 1); s->lup = calloc((size_t)s->slices * s->levels, 1);
     if (!s->map || !s->up || !s->lup) MDIE("sparse texture record allocation failed");
+    int is_astc = (t->d.format >= 0x79 && t->d.format <= 0x94);
+    uint32_t dummy = is_astc ? sp_dummy_tile() : 0;
+    if (dummy) {
+        if (@available(macOS 26.0, *)) {
+            MTL4UpdateSparseTextureMappingOperation *init_ops = malloc(s->nunit * sizeof *init_ops);
+        if (init_ops) {
+            uint32_t h_idx = (dummy - 1) & ((1u << SP_IDX_BITS) - 1);
+            for (uint32_t ui = 0; ui < s->nunit; ui++) {
+                uint32_t sl = ui / s->uper, r = ui % s->uper, l = s->mtail, mx = 0, my = 0;
+                for (uint32_t k = 0; k < s->mtail; k++) if (r >= s->ubase[k] && r < s->ubase[k] + s->cols[k] * s->rows[k]) {
+                    l = k; mx = (r - s->ubase[k]) % s->cols[k]; my = (r - s->ubase[k]) / s->cols[k]; break;
+                }
+                init_ops[ui] = (MTL4UpdateSparseTextureMappingOperation){
+                    MTLSparseTextureMappingModeMap,
+                    MTLRegionMake3D(mx, my, 0, 1, 1, 1),
+                    l, sl,
+                    h_idx
+                };
+                s->map[ui] = dummy;
+            }
+            pthread_mutex_lock(&g_res_mu);
+            uint32_t c_idx = (dummy - 1) >> SP_IDX_BITS;
+            for (uint32_t off = 0; off < s->nunit; off += 4096) {
+                uint32_t chunk_n = MIN(4096u, s->nunit - off);
+                [g_q4 updateTextureMappings:mt heap:g_sp_chunks[c_idx].heap operations:init_ops + off count:chunk_n];
+            }
+            pthread_mutex_unlock(&g_res_mu);
+            free(init_ops);
+            MLOG("sparse texture ser=%llu: pre-mapped all %u units to void-extent ASTC dummy tile", (unsigned long long)t->serial, s->nunit);
+        }
+    }
+}
     static int nl; if (nl++ < 12) MLOG("sparse texture ser=%llu %ux%ux%u levels %u format %#x: Metal placement sparse, tile %ux%u texels (guest 64 KB tile %ux%u), %u tiled levels, Metal mip tail from level %u, %u units per slice",
                                     (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, s->levels, t->d.format, s->mw, s->mh, tw, th, s->tiled, s->mtail, s->uper);
     *out = mt; return s;
@@ -2754,15 +2855,24 @@ static void sp_sync(NvPkg *pk, const tex_t *t, int all) {
     // 2. the mapping operations: the difference against what is placed now, one call per heap (unmaps with no heap)
     if (@available(macOS 26.0, *)) {
         MTL4UpdateSparseTextureMappingOperation *ops = NULL; int *opc = NULL; uint32_t nops = 0, cops = 0;
+        int is_astc = (d->format >= 0x79 && d->format <= 0x94);
+        uint32_t dummy = is_astc ? sp_dummy_tile() : 0;
         for (uint32_t u = 0; u < s->nunit; u++) {
-            if (!want[u] == !s->map[u]) continue;
+            int cur_real = s->map[u] && s->map[u] != dummy;
+            if (!want[u] == !cur_real) continue;
             uint32_t sl = u / s->uper, r = u % s->uper, l = s->mtail, mx = 0, my = 0;
             for (uint32_t k = 0; k < s->mtail; k++) if (r >= s->ubase[k] && r < s->ubase[k] + s->cols[k] * s->rows[k]) { l = k; mx = (r - s->ubase[k]) % s->cols[k]; my = (r - s->ubase[k]) / s->cols[k]; break; }
-            uint32_t h = 0; if (want[u]) { h = sp_tile_alloc(); if (!h) continue; }
+            uint32_t h = 0;
+            if (want[u]) {
+                h = sp_tile_alloc();
+                if (!h) continue;
+            } else if (dummy) {
+                h = dummy;
+            }
             if (nops == cops) { cops = cops ? 2 * cops : 1024; ops = realloc(ops, cops * sizeof *ops); opc = realloc(opc, cops * sizeof *opc); if (!ops || !opc) MDIE("sparse mapping operations allocation failed"); }
-            ops[nops] = (MTL4UpdateSparseTextureMappingOperation){want[u] ? MTLSparseTextureMappingModeMap : MTLSparseTextureMappingModeUnmap, MTLRegionMake3D(mx, my, 0, 1, 1, 1), l, sl, h ? (h - 1) & ((1u << SP_IDX_BITS) - 1) : 0};
+            ops[nops] = (MTL4UpdateSparseTextureMappingOperation){h ? MTLSparseTextureMappingModeMap : MTLSparseTextureMappingModeUnmap, MTLRegionMake3D(mx, my, 0, 1, 1, 1), l, sl, h ? (h - 1) & ((1u << SP_IDX_BITS) - 1) : 0};
             opc[nops++] = h ? (int)((h - 1) >> SP_IDX_BITS) : -1;
-            if (s->map[u]) sp_tile_free(s->map[u]);
+            if (s->map[u] && s->map[u] != dummy) sp_tile_free(s->map[u]);
             s->map[u] = h;
         }
         if (nops) {
@@ -2770,7 +2880,12 @@ static void sp_sync(NvPkg *pk, const tex_t *t, int all) {
             pthread_mutex_lock(&g_res_mu);
             for (int c = -1; c < g_nsp_chunks; c++) {
                 uint32_t n = 0; for (uint32_t i = 0; i < nops; i++) if (opc[i] == c) grp[n++] = ops[i];
-                if (n) [g_q4 updateTextureMappings:mt heap:c < 0 ? nil : g_sp_chunks[c].heap operations:grp count:n];
+                if (n) {
+                    for (uint32_t off = 0; off < n; off += 4096) {
+                        uint32_t chunk_n = MIN(4096u, n - off);
+                        [g_q4 updateTextureMappings:mt heap:c < 0 ? nil : g_sp_chunks[c].heap operations:grp + off count:chunk_n];
+                    }
+                }
             }
             pthread_mutex_unlock(&g_res_mu);
             g_sp_ops += nops; free(grp);
@@ -2797,6 +2912,7 @@ static void sp_sync(NvPkg *pk, const tex_t *t, int all) {
                     nvn_sparse_copy(t->pool, tile, mem + (gi << 16), 0x10000);
                     stg = sp_stage(stg, (size_t)wb * rows, &soff);
                     nvn_deswizzle_tile(lth, gobs, wb, rows, tile, (uint8_t *)stg.contents + soff, wb);
+                    if (d->format >= 0x79 && d->format <= 0x94) astc_zero_sanitize((uint8_t *)stg.contents + soff, (size_t)wb * rows);
                     up_blit_add_at(stg, soff, wb, (size_t)wb * rows, MTLSizeMake(w, h, 1), mt, sl, l, MTLOriginMake(x, y, 0));
                     soff += ((size_t)wb * rows + 255) & ~(size_t)255; bytes += (size_t)wb * rows; ntiles++; s->up[gi] = 1;
                 }
@@ -2810,7 +2926,10 @@ static void sp_sync(NvPkg *pk, const tex_t *t, int all) {
                 uint32_t wb = (lw + bw - 1) / bw * bpb, rows = (lh + bh - 1) / bh;
                 stg = sp_stage(stg, (size_t)wb * rows, &soff);
                 if (nvn_deswizzle_level(d, l, sl, part, (uint8_t *)stg.contents + soff, wb)) RED_ONCE(9, "deswizzle failed format %#x target %d", d->format, d->target);
-                else up_blit_add_at(stg, soff, wb, (size_t)wb * rows, MTLSizeMake(lw, lh, 1), mt, sl, l, MTLOriginMake(0, 0, 0));
+                else {
+                    if (d->format >= 0x79 && d->format <= 0x94) astc_zero_sanitize((uint8_t *)stg.contents + soff, (size_t)wb * rows);
+                    up_blit_add_at(stg, soff, wb, (size_t)wb * rows, MTLSizeMake(lw, lh, 1), mt, sl, l, MTLOriginMake(0, 0, 0));
+                }
                 soff += ((size_t)wb * rows + 255) & ~(size_t)255; bytes += (size_t)wb * rows; free(part); *lu = 1;
             }
         }
@@ -4808,26 +4927,129 @@ static id<MTLTexture> tex_fit(int tid, id<MTLTexture> t, MTLTextureType want, ui
     else if (want == MTLTextureTypeCube && have == MTLTextureType2DArray && t.arrayLength >= 6) ns = 6;
     else if (want == MTLTextureTypeCubeArray && have == MTLTextureType2DArray && t.arrayLength >= 6) ns = t.arrayLength / 6 * 6;
     else if (want == MTLTextureTypeCube && have == MTLTextureTypeCubeArray) ns = 6;   // a cube array read as a cube: the first cube
+    else if (want == MTLTextureTypeCubeArray && have == MTLTextureTypeCube) ns = 6;   // a cube read as a cube array: one cube
     // A cube read as 2D: Maxwell keeps a cube's faces as six layers, and a non-array sample reads layer 0, as for a 2D array. Atelier Ryza DX leaves cube textures in slots that
     // its draws read as 2D (a compute shader of CLC.g1s, the PBB materials' pixel shaders, the river's vertex shader), a different texture from run to run: the face-0 view makes
     // those reads defined instead of a type mismatch
     else if (want == MTLTextureType2D && have == MTLTextureTypeCube) ns = 1;
+    else if (want == MTLTextureType2D && have == MTLTextureTypeCubeArray) ns = 1;
+    else if (want == MTLTextureType2DArray && have == MTLTextureTypeCube) ns = 6;
+    else if (want == MTLTextureType2DArray && have == MTLTextureTypeCubeArray) ns = t.arrayLength * 6;
     // A one-layer 2D texture in a cube slot has no cube view (Pokémon Legends: Z-A binds one to a cube sampler on its character creation screen, a placeholder for an environment map): the zero cube,
     // a defined read, instead of a type mismatch whose reads are undefined. The same for a 2D array of fewer than 6 layers, which is how the host holds some 2D textures (Mario Kart 8 Deluxe binds
     // an NVN 2D texture, format 0x44, at slot 10 of two pixel shaders that declare a cube there, as a race loads)
+    // Bridge 2D / 2D array into a Cube / CubeArray texture: Mario Kart World water and reflection shaders declare
+    // slot 12 (fp_t_tcb_20) as texturecube_array<float>, but bind a 2D environment reflection map (texture ID 258).
+    // Blitting the 2D texture across all 6 cube slices (0..5) per cube layer provides valid cubemap samples instead of zero.
     if (!ns && (want == MTLTextureTypeCube || want == MTLTextureTypeCubeArray) && (have == MTLTextureType2D || (have == MTLTextureType2DArray && t.arrayLength < 6))) {
-        // Uniform-controlled branches can leave unused cube inputs holding 2D descriptors (Echoes of Wisdom).
-        // Binding alone cannot establish that a mismatched input is sampled; this supported fallback is informational.
+        if (tid > 0 && tid < g_ntreg) {
+            treg_t *r = &g_treg[tid];
+            if (r->alt && r->alt_of == (__bridge void *)t && r->alt_type == (uint8_t)want) { *rid = r->alt_rid; return (__bridge id<MTLTexture>)r->alt; }
+            if (r->alt) { defer_obj_unref((__bridge id)r->alt); CFRelease(r->alt); r->alt = r->alt_of = NULL; r->alt_rid = 0; }
+            NSUInteger sz = MIN(t.width, t.height);
+            NSUInteger max_mips = 1; NSUInteger temp_sz = sz; while (temp_sz > 1) { temp_sz >>= 1; max_mips++; }
+            NSUInteger mips = MIN(t.mipmapLevelCount, max_mips);
+            MTLTextureDescriptor *d = [MTLTextureDescriptor new];
+            d.textureType = want; d.pixelFormat = t.pixelFormat; d.width = sz; d.height = sz; d.depth = 1;
+            d.arrayLength = want == MTLTextureTypeCubeArray ? 6 : 1;
+            d.mipmapLevelCount = mips; d.usage = MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate; d.swizzle = t.swizzle;
+            id<MTLTexture> v = [g_dev newTextureWithDescriptor:d];
+            if (v) {
+                id<MTLCommandBuffer> cb = [g_q commandBuffer];
+                id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+                NSUInteger total_slices = want == MTLTextureTypeCubeArray ? 36 : 6;
+                for (NSUInteger l = 0; l < mips; l++) {
+                    NSUInteger w = MAX(sz >> l, 1u);
+                    NSUInteger sw = MAX(t.width >> l, 1u);
+                    NSUInteger sh = MAX(t.height >> l, 1u);
+                    NSUInteger cw = MIN(w, MIN(sw, sh));
+                    for (NSUInteger s = 0; s < total_slices; s++) {
+                        NSUInteger src_s = have == MTLTextureType2DArray ? ((s / 6) % t.arrayLength) : 0;
+                        [b copyFromTexture:t sourceSlice:src_s sourceLevel:l sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(cw, cw, 1)
+                                 toTexture:v destinationSlice:s destinationLevel:l destinationOrigin:MTLOriginMake(0, 0, 0)];
+                    }
+                }
+                [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
+                res_add(v); res_commit();
+                r->alt = (void *)CFBridgingRetain(v); r->alt_of = (__bridge void *)t; r->alt_type = (uint8_t)want; r->alt_rid = v.gpuResourceID._impl;
+                *rid = r->alt_rid;
+                static int noted; if (!noted++) MLOG("bridged 2D texture ID %d (%lux%lu format %lu) to %s texture (size %lu)", tid, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat, want == MTLTextureTypeCube ? "Cube" : "CubeArray", (unsigned long)sz);
+                return v;
+            }
+        }
         static int noted; if (!noted++) MLOG("cube binding fallback: texture ID %d has a 2D descriptor; zero cube bound (the shader may leave this input unused)", tid);
         id<MTLTexture> z = dummy_tex((int)want, NVN_DPF_FLOAT); *rid = g_dummy_tex_rid[want % DMY_NT][NVN_DPF_FLOAT]; return z; }
-    // The same for a 2D texture or 2D array in a 3D slot: Metal makes a 3D view only of a 3D texture. Batman: Arkham Knight's shaders sample a volume through separate texture slots where
-    // the game has left 2D render targets bound (553c51835a24a36a samples separate slot 2 as 3D at world coordinates, the slot holding a 720x406 RGBA16F target), from the first frames of
-    // New Story on; the zero volume instead of a type mismatch whose reads are undefined. What the Switch's texture unit reads there is not known
-    if (!ns && want == MTLTextureType3D && (have == MTLTextureType2D || have == MTLTextureType2DArray)) {
+    // Bridge 2D / 1-layer 2D array into a 3D depth-1 texture: Mario Kart World's water and procedural shaders declare slot 13 (fp_t_tcb_22) as
+    // texture3d<float>, but bind CmnTex_Tera_Water_Wat (a 2048x512 2D texture). Sampling a depth-1 3D texture provides real texels without type mismatch.
+    if (!ns && want == MTLTextureType3D && (have == MTLTextureType2D || (have == MTLTextureType2DArray && t.arrayLength == 1))) {
+        if (tid > 0 && tid < g_ntreg) {
+            treg_t *r = &g_treg[tid];
+            if (r->alt && r->alt_of == (__bridge void *)t && r->alt_type == (uint8_t)want) { *rid = r->alt_rid; return (__bridge id<MTLTexture>)r->alt; }
+            if (r->alt) { defer_obj_unref((__bridge id)r->alt); CFRelease(r->alt); r->alt = r->alt_of = NULL; r->alt_rid = 0; }
+            MTLTextureDescriptor *d = [MTLTextureDescriptor new];
+            d.textureType = MTLTextureType3D; d.pixelFormat = t.pixelFormat; d.width = t.width; d.height = t.height; d.depth = 1;
+            d.mipmapLevelCount = t.mipmapLevelCount; d.usage = MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate; d.swizzle = t.swizzle;
+            id<MTLTexture> v = [g_dev newTextureWithDescriptor:d];
+            if (v) {
+                id<MTLCommandBuffer> cb = [g_q commandBuffer];
+                id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+                for (NSUInteger l = 0; l < t.mipmapLevelCount; l++) {
+                    NSUInteger w = MAX(t.width >> l, 1u), h = MAX(t.height >> l, 1u);
+                    [b copyFromTexture:t sourceSlice:0 sourceLevel:l sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1)
+                             toTexture:v destinationSlice:0 destinationLevel:l destinationOrigin:MTLOriginMake(0, 0, 0)];
+                }
+                [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
+                res_add(v); res_commit();
+                r->alt = (void *)CFBridgingRetain(v); r->alt_of = (__bridge void *)t; r->alt_type = (uint8_t)want; r->alt_rid = v.gpuResourceID._impl;
+                *rid = r->alt_rid;
+                static int noted; if (!noted++) MLOG("bridged 2D texture ID %d (%lux%lu format %lu) to 3D depth-1 texture", tid, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat);
+                return v;
+            }
+        }
         static int noted; if (!noted++) MLOG("3D binding fallback: texture ID %d is %s %lux%lu (Metal format %lu); zero 3D texture bound", tid, have == MTLTextureType2D ? "2D" : "a 2D array",
                                              (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat);
         id<MTLTexture> z = dummy_tex((int)want, NVN_DPF_FLOAT); *rid = g_dummy_tex_rid[want % DMY_NT][NVN_DPF_FLOAT]; return z; }
-    if (!ns || tid <= 0 || tid >= g_ntreg) return nil;   // no view bridges it: the caller reports it (tex_mis_note)
+    // Bridge 3D into 2D / 2D array (slice 0): Mario Kart World binds a 3D texture (ser=337, NVN target 3D, format 0x49) to slot 0 of
+    // DrivePassShaderDefault which declares slot 0 as 2D for TMML LOD calculation; sampling slice 0 of the volume avoids NaN and provides real texels.
+    if (!ns && (want == MTLTextureType2D || want == MTLTextureType2DArray) && have == MTLTextureType3D) {
+        if (tid > 0 && tid < g_ntreg) {
+            treg_t *r = &g_treg[tid];
+            if (r->alt && r->alt_of == (__bridge void *)t && r->alt_type == (uint8_t)want) { *rid = r->alt_rid; return (__bridge id<MTLTexture>)r->alt; }
+            if (r->alt) { defer_obj_unref((__bridge id)r->alt); CFRelease(r->alt); r->alt = r->alt_of = NULL; r->alt_rid = 0; }
+            MTLTextureDescriptor *d = [MTLTextureDescriptor new];
+            d.textureType = want; d.pixelFormat = t.pixelFormat; d.width = t.width; d.height = t.height; d.depth = 1; d.arrayLength = 1;
+            d.mipmapLevelCount = t.mipmapLevelCount; d.usage = MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate; d.swizzle = t.swizzle;
+            id<MTLTexture> v = [g_dev newTextureWithDescriptor:d];
+            if (v) {
+                id<MTLCommandBuffer> cb = [g_q commandBuffer];
+                id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+                for (NSUInteger l = 0; l < t.mipmapLevelCount; l++) {
+                    NSUInteger w = MAX(t.width >> l, 1u), h = MAX(t.height >> l, 1u);
+                    [b copyFromTexture:t sourceSlice:0 sourceLevel:l sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1)
+                             toTexture:v destinationSlice:0 destinationLevel:l destinationOrigin:MTLOriginMake(0, 0, 0)];
+                }
+                [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
+                res_add(v); res_commit();
+                r->alt = (void *)CFBridgingRetain(v); r->alt_of = (__bridge void *)t; r->alt_type = (uint8_t)want; r->alt_rid = v.gpuResourceID._impl;
+                *rid = r->alt_rid;
+                static int noted; if (!noted++) MLOG("bridged 3D texture ID %d (%lux%lux%lu format %lu) to 2D slice 0 texture", tid, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.depth, (unsigned long)t.pixelFormat);
+                return v;
+            }
+        }
+        static int noted; if (!noted++) MLOG("2D binding fallback: texture ID %d is 3D %lux%lux%lu (Metal format %lu); zero 2D texture bound", tid,
+                                             (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.depth, (unsigned long)t.pixelFormat);
+        id<MTLTexture> z = dummy_tex((int)want, NVN_DPF_FLOAT); *rid = g_dummy_tex_rid[want % DMY_NT][NVN_DPF_FLOAT]; return z; }
+    if (!ns && (want == MTLTextureTypeCube || want == MTLTextureTypeCubeArray) && have == MTLTextureType3D) {
+        static int noted; if (!noted++) MLOG("cube binding fallback: texture ID %d is 3D %lux%lux%lu; zero cube bound", tid,
+                                             (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.depth);
+        id<MTLTexture> z = dummy_tex((int)want, NVN_DPF_FLOAT); *rid = g_dummy_tex_rid[want % DMY_NT][NVN_DPF_FLOAT]; return z; }
+    if (!ns && want == MTLTextureType3D && (have == MTLTextureTypeCube || have == MTLTextureTypeCubeArray)) {
+        static int noted; if (!noted++) MLOG("3D binding fallback: texture ID %d is a cube; zero 3D texture bound", tid);
+        id<MTLTexture> z = dummy_tex((int)want, NVN_DPF_FLOAT); *rid = g_dummy_tex_rid[want % DMY_NT][NVN_DPF_FLOAT]; return z; }
+    if (!ns) {
+        static int noted; if (!noted++) MLOG("universal binding fallback: texture ID %d is type %lu; zero type %lu bound", tid, (unsigned long)have, (unsigned long)want);
+        id<MTLTexture> z = dummy_tex((int)want, NVN_DPF_FLOAT); *rid = g_dummy_tex_rid[want % DMY_NT][NVN_DPF_FLOAT]; return z; }
+    if (tid <= 0 || tid >= g_ntreg) return nil;   // no view bridges it: the caller reports it (tex_mis_note)
     treg_t *r = &g_treg[tid];
     if (r->alt && r->alt_of == (__bridge void *)t && r->alt_type == (uint8_t)want) { *rid = r->alt_rid; return (__bridge id<MTLTexture>)r->alt; }
     if (r->alt) { defer_obj_unref((__bridge id)r->alt); CFRelease(r->alt); r->alt = r->alt_of = NULL; r->alt_rid = 0; }
@@ -4837,7 +5059,12 @@ static id<MTLTexture> tex_fit(int tid, id<MTLTexture> t, MTLTextureType want, ui
     id<MTLTexture> base = t; NSUInteger l0 = 0, s0 = 0;
     while (base.parentTexture) { l0 += base.parentRelativeLevel; s0 += base.parentRelativeSlice; base = base.parentTexture; }
     id<MTLTexture> v = [base newTextureViewWithPixelFormat:t.pixelFormat textureType:want levels:NSMakeRange(l0, t.mipmapLevelCount) slices:NSMakeRange(s0, ns) swizzle:t.swizzle];
-    if (!v) { RED_ONCE(77, "cannot create a type-compatible texture view: %lu → %lu (texture ID %d)", (unsigned long)have, (unsigned long)want, tid); return nil; }
+    if (!v) {
+        RED_ONCE(77, "cannot create a type-compatible texture view: %lu → %lu (texture ID %d)", (unsigned long)have, (unsigned long)want, tid);
+        id<MTLTexture> z = dummy_tex((int)want, NVN_DPF_FLOAT);
+        *rid = g_dummy_tex_rid[want % DMY_NT][NVN_DPF_FLOAT];
+        return z;
+    }
     r->alt = (void *)CFBridgingRetain(v); r->alt_of = (__bridge void *)t; r->alt_type = (uint8_t)want; r->alt_rid = v.gpuResourceID._impl;
     *rid = r->alt_rid; return v;
 }
@@ -7607,7 +7834,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             if (t && t.textureType != (MTLTextureType)b->dtt) { uint64_t r2 = 0; id<MTLTexture> v = tex_fit(tid, t, (MTLTextureType)b->dtt, &r2); if (v) { t = v; trid = r2; }
                 // no view fits, and one side is a buffer texture (Octopath Traveler 0: a buffer texture left in a slot a shader reads as a cube): reads of it are undefined, so the slot reads 0
                 else if (t.textureType == MTLTextureTypeTextureBuffer || (MTLTextureType)b->dtt == MTLTextureTypeTextureBuffer) { tex_mis_note(sh, nvn_stage, b->kind == NVN_RB_TEX ? reg : -1, tid, t, (MTLTextureType)b->dtt, "a buffer texture: the slot reads 0 (dummy)"); t = nil; }
-                else tex_mis_note(sh, nvn_stage, b->kind == NVN_RB_TEX ? reg : -1, tid, t, (MTLTextureType)b->dtt, "bound as is"); }
+                else { tex_mis_note(sh, nvn_stage, b->kind == NVN_RB_TEX ? reg : -1, tid, t, (MTLTextureType)b->dtt, "unbridged mismatch: zero bound"); t = nil; } }
             if (!t) { t = dummy_tex(b->dtt, b->dpf); trid = g_dummy_tex_rid[b->dtt % DMY_NT][b->dpf & 3]; }
             else if (b->dtt == (uint8_t)MTLTextureTypeTextureBuffer) t = tbuf_shadow(t, &trid);   // see tbuf_shadow
             slots[aid] = trid;
@@ -10475,6 +10702,7 @@ static void dispatch(const p_dispatch *dp) {
     if (own && g_blit) { enc_b_end(g_blit); g_blit = nil; }
     id<MTLComputeCommandEncoder> ce = own ? pg_compute() : (id<MTLComputeCommandEncoder>)dispatch_enc();
     enc_c_pso(ce, ps);
+    if (passdump()) PD("H %llu dispatch cs=%s groups=%ux%ux%u tg=%ux%ux%u", g_stat_pass, cs->key, (unsigned)dp->x, (unsigned)dp->y, (unsigned)dp->z, (unsigned)tg[0], (unsigned)tg[1], (unsigned)tg[2]);
     g_dispatch_dim[0] = (uint32_t)dp->x; g_dispatch_dim[1] = (uint32_t)dp->y; g_dispatch_dim[2] = (uint32_t)dp->z;   // read back by the driver segment c0 (encode_args_)
     g_c0_dim_buf = nil;
     encode_args(ce, cs, 5, 0);

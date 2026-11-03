@@ -251,6 +251,19 @@ namespace Ryujinx.Graphics.Shader.Decoders
                     case AmpereOpcodes.Ast:
                         SetUserAttributeUses(definitions, context, a.Bits(40, 50), a.Bits(74, 76) + 1, true, a.Ra != RegisterConsts.RegisterZeroIndex, a.Bit(76));
                         break;
+                    case 0x927:
+                        {
+                            int access = a.Bits(76, 78);
+                            if (access == 3 || a.Bit(79))
+                            {
+                                int imm = a.Bits(40, 56);
+                                int attrIndex = imm / 0x200;
+                                int elemIndex = (imm % 0x200) / 0x80;
+                                int offset = (attrIndex == 0) ? (0x70 + elemIndex * 4) : (0x80 + (attrIndex - 1) * 16 + elemIndex * 4);
+                                SetUserAttributeUses(definitions, context, offset, 1, true, false, false);
+                            }
+                        }
+                        break;
                     case 0x389:
                     case 0x589:
                     case 0x989:
@@ -275,6 +288,8 @@ namespace Ryujinx.Graphics.Shader.Decoders
                     case 0x9a8:
                     case 0x3a8:
                     case 0x9a9:
+                    case 0x593:
+                    case 0x59f:
                     case 0xb9b:
                     case 0x99b:
                     case 0x99d:

@@ -46,6 +46,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0xb9b, InstName.Sust, ASurface, N, writesRd: false);
             x(0xb9d, InstName.Sust, ASurface, N, writesRd: false);
             x(0x593, InstName.Suatom, ASuatom, N);
+            x(0x59f, InstName.Suatom, ASured, N, writesRd: false);
             x(0xb1d, InstName.Bar, ABar, N, writesRd: false);
             x(0x992, InstName.Membar, AMembar, N, writesRd: false);
             x(0x9ab, InstName.Membar, AErrbar, N, writesRd: false);
@@ -89,6 +90,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             alu(0x124, InstName.Out, AOut);
             x(0x923, InstName.Isberd, AIsberd, N);
+            x(0x927, InstName.Nop, AIsbewr, N, writesRd: false);
             x(0x34e, InstName.Lepc, ALepc, N);
             x(0x357, InstName.Nop, ANop, N, writesRd: false);
             x(0x957, InstName.Nop, ANop, N, writesRd: false);
@@ -117,6 +119,21 @@ namespace Ryujinx.Graphics.Shader.Instructions
             if (x.Rd < RegisterConsts.RegisterZeroIndex)
             {
                 context.Copy(Register(x.Rd, RegisterType.Gpr), AGpr(x.Ra));
+            }
+        }
+
+        public static void AIsbewr(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            int access = x.Bits(76, 78);
+            if (access == 3 || x.Bit(79))
+            {
+                int imm = x.Bits(40, 56);
+                int attrIndex = imm / 0x200;
+                int elemIndex = (imm % 0x200) / 0x80;
+                int offset = (attrIndex == 0) ? (0x70 + elemIndex * 4) : (0x80 + (attrIndex - 1) * 16 + elemIndex * 4);
+
+                AttributeMap.GenerateAttributeStore(context, offset, isPerPatch: false, AGpr(x.Rb));
             }
         }
 
@@ -393,6 +410,19 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, (SuatomOp)x.Bits(87, 91), (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, 0, x.Rd, false, isBindless: false, compareAndSwap: false);
+        }
+
+        public static void ASured(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            (int handle, int cbufSlot) = ATexHandle(context, x);
+
+            if (cbufSlot != TextureOperation.DefaultCbufSlot)
+            {
+                throw AFail(context, $"SURED handle in bank {cbufSlot}");
+            }
+
+            EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, (SuatomOp)x.Bits(87, 91), (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, 0, RegisterConsts.RegisterZeroIndex, false, isBindless: false, compareAndSwap: false);
         }
 
         // BAR.SYNC: the workgroup barrier

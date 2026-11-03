@@ -836,7 +836,15 @@ def reflect(key, stage, msl, res):
                 e.update(kind=abi.KIND_UBO_PTR, reg=(off - abi.C0_CS_UBO) // abi.C0_ROW)   # compute-stage uniform slot r: address at c0[C0_CS_UBO + 0x10 r], read through global memory (checked against cs_lut_combine_c reading cb10[66])
             elif b and b['cb_slot'] >= 3:   # the address is in the game's own uniform buffer c[n] = uniform slot n - 3 (Monster Hunter Rise's compute shaders: c3 + 0x38); the replay reads it there
                 e.update(kind=abi.KIND_SBUF_UBO, reg=b['cb_slot'] - 3, off=b['cb_offset'] * 4)
-            else: e['reg'] = (off - base) // abi.C0_ROW if off is not None and base is not None and 0 <= off - base < abi.C0_ROW * abi.C0_SSBO_SLOTS and (off - base) % abi.C0_ROW == 0 else None
+            else:
+                reg = (off - base) // abi.C0_ROW if off is not None and base is not None and 0 <= off - base < abi.C0_ROW * abi.C0_SSBO_SLOTS and (off - base) % abi.C0_ROW == 0 else None
+                if reg is None and off is not None:
+                    for cand in (0x670, 0x770):
+                        if 0 <= off - cand < abi.C0_ROW * abi.C0_SSBO_SLOTS and (off - cand) % abi.C0_ROW == 0:
+                            reg = (off - cand) // abi.C0_ROW; break
+                if reg is None and b and b.get('slot') is not None and 0 <= b['slot'] < abi.C0_SSBO_SLOTS:
+                    reg = b['slot']
+                e['reg'] = reg
             e['rw'] = bool(b and b['flags'] & 1)   # BufferUsageFlags.Write; Program.cs serializes the translator enum unchanged (atomics count as writes too)
     return binds
 
@@ -1224,7 +1232,7 @@ def finish(key, w, j, c1):
             return 'ok', '', refl
         try: return geometry_finish(key, w, j, c1)
         except (ValueError, subprocess.CalledProcessError) as e: return 'geometry failed', str(e)[:160], None
-    if j['stage'] == 'vs': spv_single_lane(os.path.join(w, key + '.spv'))   # one-lane subgroups (see spv_single_lane)
+    if j['stage'] in ('vs', 'ds'): spv_single_lane(os.path.join(w, key + '.spv'))   # one-lane subgroups (see spv_single_lane)
     r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, os.path.join(w, key + '.spv')), os.path.join(w, key + '.spv'), '--output', msl], capture_output=True, text=True)
     if r.returncode: return 'MSL failed', r.stderr.strip()[:160], None
     src = open(msl).read()

@@ -12,6 +12,7 @@ A Switch 2 game: update 1.8.0 (v917504) over the base game, SDK 21.4.0 built for
 | `romfs_marker Movie/StaffRoll_00.webm` | `game.tsv` | a file of the 1.8.0 RomFS |
 | `render_cond on` | `game.tsv` | agl's render buffer binding wraps its clears in render conditions, as in Donkey Kong Bananza: `SetRenderEnableConditional(RENDER_IF_NOT_EQUAL)` at `main+0x49e194`, then `ClearColor` at `main+0x49e1c0`. Without the key every clear ran, and the title's 3D scene was black but for a few specks under the 2D layout |
 | NVN2 API 231.39 | `hle_nvn.c` `nvn_api` | the game requires major 231 and minor ≥ 39 (`main+0xdd0890`, after `nvnDeviceGetInteger` items 0 and 1); its own `sdk` answers 231.39 (`DeviceGetInteger` at `sdk+0x65b680`; Donkey Kong Bananza's sdk answers 231.30). The host gives 231.39 to every Switch 2 SDK, which also meets Donkey Kong Bananza's minor ≥ 30 |
+| `tex_flush_upload on`, `tex_dirty_upload on` | `game.tsv` | CPU-written water-height tiles have no packaged layout or NVN mapped-range flush; some already hold data at `nvnTextureInitialize`. The first-use storage upload and later-write tracking are both needed ([Water height tiles](#water-height-tiles)) |
 
 ## Files
 
@@ -58,6 +59,16 @@ The title and the main menu match the game as it is known: the title drives Mari
 
 The first race matches the game as it is known: after "Start Grand Prix?" the map of the cup's courses, the Mushroom Cup movie (Mario Bros. Circuit, Crown City, Whistlestop Summit, DK Spaceport, the cup's emblem), the course flyover, the grid at the Mario Kart arch with Lakitu's lights, 3, 2, 1, GO!, the HUD (coins, lap 1/3, place, the course map, the item box). The rainbow bands of the sky, the water and the lit floors are resolved (item 2 above).
 
+### Water height tiles
+
+Resolved input-upload defect (Mac, 2026-11-03): the water surface could be missing or below the kart even while collision remained correct. The water vertex shaders sample per-patch 68×68 RGBA16 unorm height/mask textures (`vp_t_tcb_8`, vertex texture slot 0), as well as a populated 128×128×5 RGBA16F displacement array (slot 1). The height tiles use `MINIMAL_LAYOUT` (`0x200`), have no packaged layout, and live in a `CPU_CACHED | GPU_CACHED` pool (`0x24`). A targeted probe in `nvnTextureInitialize` (`hle_nvn.c`, removed after diagnosis) observed 122 height textures with nonzero storage already present at initialization and no recorded NVN mapped-range flush. `tex_init_fill` (`nvn_mtl.m`) therefore left them zero; `nvn_ft_written` could not detect writes made before registration, and `tex_cpu_content` admitted only block-compressed formats. See [Uncompressed storage before registration](../../../docs/reference/nvn-objects.md#uncompressed-storage-before-registration-with-cpu-write-tracking) for the fix.
+
+The profile now enables the existing `tex_flush_upload` / `tex_dirty_upload` path. `tex_cpu_content` also admits uncompressed colour textures for profiles with `tex_dirty_upload`, under its existing storage, pool and flag exclusions. The textures are uploaded and remain tracked, including when a new texture object reuses rewritten storage; a one-time fill would leave that reuse stale. No water shader or draw count is changed.
+
+Validation: at frame 600 before the fix, all 33 sampled water-height textures read back as zero despite populated CPU storage. With the fix, all 29 sampled tiles in a second run contained data; every one of the 23 with matching CPU dumps agreed byte-for-byte with `nvn_deswizzle` of that storage. The wave-displacement array already contained finite, varying values before this change. The `t_initial_uncached` GPU fixture adds RGBA16 sampling before registration, later CPU writes, and object reuse: 20 failures before the helper change, 232 checks / zero failures after it. The title selects different courses between runs, so these are texture-content checks, not a pixel-matched screenshot comparison or a claim that every water effect is correct.
+
+A prior handoff misidentified grass as water. In `DriveRefreshUber.Procedural.Nin_Ounce_NVN2.bfsha.zs`, the model at BNSH `0xf1000` is `DriveRefreshTerrainWater`; `0x121000` is `DriveRefreshGrass`. The water pairs are `90a9a728715fd08b` / `e8292db899c6d8dc` (depth) and `f010d7e3d5d63ad8` / `ff6ddbc333e4e2f0` (colour). The recorded water draws are direct indexed triangle strips with one instance, for example 702 indices. The zero-instance indirect buffer and compute shader `0823b08c2027a38d` in that handoff belong to grass; forcing their instance count does not repair these water-height inputs. The unsupported mesh draws below remain a separate issue.
+
 ## Boot (Mac)
 
 Each step below stopped the boot before its fix:
@@ -86,7 +97,7 @@ Memory after 60 s (`run11.log`): GPU allocated 14.2 GB, footprint 12.6 GiB, 7 pl
 - The 0x59f instruction of `ab77eaee44cfef88` is named SURED (immediate form) in Mel's nvdisasm opcode list, <https://gitlab.freedesktop.org/mhenning/re/-/tree/main/opclass>, `opclass86`); its fields are not known.
 - Program `078997bf631992c5` (0x481 above) is labelled compute by the split but starts with a vertex-type SPH: the split's stage label is wrong for it.
 - The intro flyover (the attract movie before the title) shows the ground without its texture (user's report, 2026-11-01; also before the shader fixes of chain bcd4adc6f52c). On the snow course behind the title the ground is one flat bluish colour without texture detail, while the rocks, the kart and the sky look right (user's screenshot, 2026-11-01, kept in the work folder). The cause is not known. A candidate, not checked: the terrain virtual texture (the sparse 8192x8192x68 arrays, served as Metal placement sparse textures) has no data in its tiles. #834 reports that array layers past 768 MB stayed zero, and Eden-NS2's `NX2_NOTES.md` (row 87) reports the same texture unbacked, with the ground black.
-- In the Shell Cup run (`user_race2.log`) some ground textures were missing; the cause is not known, and the terrain candidate of the item above may be the same. The water's textures were missing too; not analysed.
+- In the Shell Cup run (`user_race2.log`) some ground textures were missing; the cause is not known, and the terrain candidate of the item above may be the same. The water-height input upload defect is resolved ([Water height tiles](#water-height-tiles)); that exact race and every water effect have not been rechecked.
 - Under `DM_DETCLOCK` the game stops after frame 3 (`user_7d.log`; inferred from comparing logs, not proven): runs and recordings go without it.
 - Not done: the prewarm seed list (`pso_manifest.tsv`), so each pipeline compiles at its first use.
 - The display link stalled 7 times in the first 50 s (`display link recovered: stalled … ms`), with 253 dropped frames up to frame 600; after that 2 dropped in 300 frames.
@@ -94,6 +105,8 @@ Memory after 60 s (`run11.log`): GPU allocated 14.2 GB, footprint 12.6 GiB, 7 pl
 - `pad_layout` and `app_category` are judgement, not measured.
 
 ## Found on this game
+
+- [Uncompressed storage before registration with CPU-write tracking](../../../docs/reference/nvn-objects.md#uncompressed-storage-before-registration-with-cpu-write-tracking)
 
 - [Sparse textures in sparse virtual pools as Metal placement sparse textures](../../../docs/reference/nvn-objects.md#sparse-textures-in-sparse-virtual-pools-as-metal-placement-sparse-textures)
 - [Switch 2 mouse, GameChat and camera with nothing connected](../../../docs/reference/services.md#switch-2-mouse-gamechat-and-camera-with-nothing-connected)

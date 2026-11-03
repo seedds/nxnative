@@ -52,3 +52,8 @@ shader_note	Mario Kart World shaders
 # agl's render buffer binding wraps its clears in render conditions, as in Donkey Kong Bananza: SetRenderEnableConditional(RENDER_IF_NOT_EQUAL) at main+0x49e194 (1.8.0), then
 # ClearColor(index 0, mask 0xf) at main+0x49e1c0. Without the key every clear ran: the title's 3D scene came out black but for a few specks, with only the 2D layout drawn on it
 render_cond	on
+
+# CPU-written terrain/water tiles have no packaged layout or NVN mapped-range flush (68x68 RGBA16 heights, MINIMAL_LAYOUT, pool 0x24).
+# Track later CPU writes and admit nonzero storage already present at first use (tex_cpu_content); registration alone misses pre-existing data.
+tex_flush_upload	on
+tex_dirty_upload	on

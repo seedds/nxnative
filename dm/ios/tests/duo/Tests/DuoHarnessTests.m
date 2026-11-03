@@ -393,6 +393,70 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     XCTAssertEqual(input.touch_count, 0);
 }
 
+- (void)testPictureFillCoversTheLandscapeViewWithoutStretching {
+    XCTAssertTrue(dm_picture_fill("fill"));
+    XCTAssertFalse(dm_picture_fill("fit"));
+    XCTAssertFalse(dm_picture_fill(NULL), @"Unset keeps Fit, today's picture");
+    XCTAssertFalse(dm_picture_fill(""));
+    const CGRect sizes[] = {CGRectMake(0, 0, 844, 390), CGRectMake(0, 0, 932, 430), CGRectMake(0, 0, 1024, 768), CGRectMake(0, 0, 1280, 720)};
+    for (NSUInteger i = 0; i < 4; i++) {
+        CGRect bounds = sizes[i];
+        DmLayout fit = dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull);
+        DmLayout fill = dm_layout_picture(fit, bounds, YES);
+        XCTAssertTrue(CGRectEqualToRect(dm_layout_picture(fit, bounds, NO).game, fit.game), @"Fit leaves the layout as it was");
+        XCTAssertFalse(fill.separated);
+        XCTAssertTrue(CGRectEqualToRect(fill.controls, bounds), @"The touch controls keep the full view");
+        XCTAssertEqualWithAccuracy(fill.game.size.width / fill.game.size.height, 16.0 / 9.0, 0.0001, @"Fill scales, never stretches");
+        XCTAssertTrue(CGRectContainsRect(CGRectInset(fill.game, -0.001, -0.001), bounds), @"Fill covers the whole view");
+        XCTAssertEqualWithAccuracy(CGRectGetMidX(fill.game), CGRectGetMidX(bounds), 0.001);
+        XCTAssertEqualWithAccuracy(CGRectGetMidY(fill.game), CGRectGetMidY(bounds), 0.001);
+        XCTAssertTrue(fill.game.size.width == bounds.size.width || fill.game.size.height == bounds.size.height,
+                      @"The smallest cover: one side matches the view");
+    }
+    CGRect wide = dm_aspect_fill(CGRectMake(0, 0, 844, 390));
+    XCTAssertEqualWithAccuracy(wide.size.height, 474.75, 0.001);
+    XCTAssertEqualWithAccuracy(CGRectGetMinY(wide), -42.375, 0.001, @"A wide iPhone crops the top and the bottom");
+    CGRect pad = dm_aspect_fill(CGRectMake(0, 0, 1024, 768));
+    XCTAssertEqualWithAccuracy(CGRectGetMinX(pad), -170.667, 0.001, @"A 4:3 iPad crops the sides");
+    XCTAssertTrue(CGRectIsEmpty(dm_aspect_fill(CGRectZero)));
+}
+
+- (void)testPictureFillKeepsPortraitAndTabletopSplitsFitted {
+    CGRect portrait = CGRectMake(0, 0, 390, 844);
+    DmLayout split = dm_layout(portrait, UIEdgeInsetsMake(59, 0, 34, 0), NO, CGRectNull);
+    DmLayout filled = dm_layout_picture(split, portrait, YES);
+    XCTAssertTrue(filled.separated);
+    XCTAssertTrue(CGRectEqualToRect(filled.game, split.game), @"Portrait keeps the picture fitted above the controls");
+    CGRect landscape = CGRectMake(0, 0, 844, 390);
+    DmLayout tabletop = dm_layout(landscape, UIEdgeInsetsZero, YES, CGRectMake(0, 180, 844, 24));
+    XCTAssertTrue(tabletop.separated);
+    XCTAssertTrue(CGRectEqualToRect(dm_layout_picture(tabletop, landscape, YES).game, tabletop.game), @"Tabletop keeps the picture fitted in its half");
+}
+
+- (void)testPictureFillTouchesFollowTheCroppedPicture {
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    DmLayout layout = dm_layout_picture(dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull), bounds, YES);
+    CGPoint top = dm_game_touch_point(layout.game, CGPointMake(422, 0));
+    XCTAssertEqualWithAccuracy(top.x, 0.5, 0.001);
+    XCTAssertEqualWithAccuracy(top.y, 42.375 / 474.75, 0.001, @"The view's top edge is below the cropped top of the picture");
+    CGPoint bottom = dm_game_touch_point(layout.game, CGPointMake(0, 390));
+    XCTAssertEqualWithAccuracy(bottom.x, 0, 0.001);
+    XCTAssertEqualWithAccuracy(bottom.y, (390 + 42.375) / 474.75, 0.001);
+    CGPoint outside = dm_game_touch_point(layout.game, CGPointMake(-50, 900));
+    XCTAssertEqualWithAccuracy(outside.x, 0, 0.0001);
+    XCTAssertEqualWithAccuracy(outside.y, 0.999, 0.0001);
+
+    UIView *pad = [self padForLayout:layout bounds:bounds];
+    DuoFakeTouch *game = [self touchAt:CGPointMake(300, 150) time:1];
+    [self beginTouches:@[game] onPad:pad];
+    DuoHarnessInput input = duo_harness_input();
+    XCTAssertEqual(input.touch_count, 1, @"A touch on no control goes to the game");
+    XCTAssertEqualWithAccuracy(input.touches[0].x, 300 / 844.0, 0.001);
+    XCTAssertEqualWithAccuracy(input.touches[0].y, (150 + 42.375) / 474.75, 0.001, @"Normalized on the scaled picture, not the view");
+    [self endTouches:@[game] onPad:pad cancelled:NO];
+    XCTAssertEqual(duo_harness_input().touch_count, 0);
+}
+
 - (void)testSmallSeparatedHitTargetsMeetMinimumsWithoutGrowingArtwork {
     CGRect bounds = CGRectMake(0, 0, 390, 844);
     DmLayout layout = [self separatedLayout:bounds];

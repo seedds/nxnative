@@ -17,6 +17,17 @@ static inline CGRect dm_aspect_fit(CGRect b) {
     return CGRectMake(floor(CGRectGetMidX(b) - w / 2), floor(CGRectGetMidY(b) - h / 2), w, h);
 }
 
+// Picture "Fill" (DM_PICTURE_FIT=fill, a launcher setting): the smallest centered 16:9 rectangle that covers b. The game still renders 16:9,
+// so what lies outside b is cropped, never stretched. Not rounded, so it covers b exactly.
+static inline CGRect dm_aspect_fill(CGRect b) {
+    CGFloat w = b.size.width, h = b.size.height;
+    if (w <= 0 || h <= 0) return CGRectZero;
+    if (w / h > 16.0 / 9.0) h = w * 9.0 / 16.0; else w = h * 16.0 / 9.0;
+    return CGRectMake(CGRectGetMidX(b) - w / 2, CGRectGetMidY(b) - h / 2, w, h);
+}
+
+static inline BOOL dm_picture_fill(const char *_Nullable value) { return value && !strcmp(value, "fill"); }   // DM_PICTURE_FIT: fit (default) or fill
+
 static inline CGRect dm_horizontal_division(CGRect b, CGRect division) {
     if (CGRectIsNull(division) || division.size.width <= division.size.height) return CGRectNull;
     // Preserve zero-height inactive folds and clip regions during display handoff.
@@ -44,6 +55,21 @@ static inline DmLayout dm_layout(CGRect b, UIEdgeInsets insets, BOOL partiallyOp
     if (upper.size.height <= 0 || CGRectGetMaxY(safe) <= CGRectGetMinY(lower)) return l;
     l.game = dm_aspect_fit(upper); l.controls = lower; l.separated = YES;
     return l;
+}
+
+// Fill covers the full view only in the overlay layout (landscape). A portrait or tabletop split keeps the picture fitted in its
+// area above the controls, where cropping a small picture would cost more than the bars.
+static inline DmLayout dm_layout_picture(DmLayout l, CGRect b, BOOL fill) {
+    if (fill && !l.separated && !CGRectIsEmpty(b)) l.game = dm_aspect_fill(b);
+    return l;
+}
+
+// A point in the view as the game's touch screen sees it: normalized on the game rectangle, which with Fill is larger than the view,
+// so a touch on the visible part lands where that part of the picture is. Clamped to [0, 0.999].
+static inline CGPoint dm_game_touch_point(CGRect game, CGPoint p) {
+    CGFloat w = game.size.width, h = game.size.height;
+    if (w <= 0 || h <= 0) return CGPointZero;
+    return CGPointMake(fmin(fmax((p.x - CGRectGetMinX(game)) / w, 0), 0.999), fmin(fmax((p.y - CGRectGetMinY(game)) / h, 0), 0.999));
 }
 
 UIView *dm_gamepad_view(CGRect frame);

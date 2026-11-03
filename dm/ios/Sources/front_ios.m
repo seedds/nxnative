@@ -75,6 +75,7 @@ static UILabel *front_ios_fps_label(void);
 @property (nonatomic, strong) UILabel *fps;
 @property (nonatomic) BOOL launched;
 @property (nonatomic) BOOL partiallyOpen;
+@property (nonatomic) BOOL fill;   // DM_PICTURE_FIT=fill: the 16:9 picture covers the screen in landscape, cropped (DmLayout.h dm_layout_picture)
 @property (nonatomic) NSInteger hingeStatus;
 @property (nonatomic) BOOL separated;
 @property (nonatomic, copy) NSString *layoutLog;
@@ -126,6 +127,9 @@ static void launcher_done(void) { [g_root startGame]; }
     if (self.game) return;
     dm_cloud_saves_env();   // Read the launcher cloud-save selection before the first save mount.
     front_hud_env();   // before the game view makes its device (an env file's DM_METAL_HUD sets it in main.m already)
+    self.fill = dm_picture_fill(getenv("DM_PICTURE_FIT"));
+    if (self.fill) LOG("front end: picture Fill (DM_PICTURE_FIT=fill), the 16:9 picture covers the screen in landscape and its edges are cropped");
+    self.view.clipsToBounds = YES;   // with Fill the game view is larger than the screen
     self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
     [self.view addSubview:self.game];
     g_layer = (CAMetalLayer *)self.game.layer;
@@ -156,7 +160,7 @@ static void launcher_done(void) { [g_root startGame]; }
 #endif
     BOOL duoPortrait = b.size.height > b.size.width && (self.hingeStatus != 0 || !CGRectIsNull(division));
     UIEdgeInsets gameInsets = dm_game_safe_insets(b, self.view.safeAreaInsets, duoPortrait);
-    DmLayout layout = dm_layout(b, gameInsets, self.partiallyOpen, division);
+    DmLayout layout = dm_layout_picture(dm_layout(b, gameInsets, self.partiallyOpen, division), b, self.fill);
     self.game.frame = layout.game;
     layout.topSafeOnly = duoPortrait;
     UIInterfaceOrientationMask appMask = [UIApplication.sharedApplication supportedInterfaceOrientationsForWindow:self.view.window];

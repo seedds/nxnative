@@ -46,6 +46,7 @@ enum { STB_LOCAL = 0, STB_WEAK = 2, STV_DEFAULT = 0 };
 // Run-time state of one NSO module
 typedef struct {
     char name[16];
+    uint8_t code_mods;         // loaded from the modules' codemods/ copy, the one rewritten with the mods' code patches (hle_mods.c; sections __dm<name>V… on iOS)
     uint8_t *base;             // Start address of the image (including the patch area) in the host address space
     size_t size;
     uint64_t text_end, ro_off, data_off, key_page_off, key_page_size;   // From the rewriter fixups header

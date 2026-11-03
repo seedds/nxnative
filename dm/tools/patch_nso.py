@@ -142,6 +142,29 @@ for off, ob, nb, why in cuts:
     ob, nb = bytes.fromhex(ob), bytes.fromhex(nb)
     assert len(ob) == len(nb) and IMG[off:off + len(ob)] == ob, f'cut original bytes mismatch {off:#x}: {bytes(IMG[off:off + len(ob)]).hex()}'
     IMG[off:off + len(nb)] = nb
+# Mods' code patches: DM_EXEFS_PATCHES=<file>[:<file>…] names .pchtxt and .ips files (exefs_mods.py; build_ipa_from_nsp.py --mods collects them from mod folders). A file applies to
+# the module its build ID names and is passed over by the others; its bytes go in after the registered cuts, before the rewrite, so the rewriter handles the mod's code like
+# the game's own. A patch that lands on a cut, or outside the image, stops the rewrite. What was applied: <name>.mods.tsv (offset, bytes before, bytes after, file)
+mod_applied, mod_owner, cut_spans = [], {}, [(off, off + len(bytes.fromhex(nb))) for off, _, nb, _ in cuts]
+for path in filter(None, os.environ.get('DM_EXEFS_PATCHES', '').split(':')):
+    import exefs_mods
+    try: bid, entries = exefs_mods.parse(path)
+    except exefs_mods.ModError as e: sys.exit(f'[RED] mod code patch: {e}')
+    if not exefs_mods.matches(bid, BUILD_ID): continue
+    for off, nb in entries:
+        if off + len(nb) > len(IMG): sys.exit(f'[RED] mod code patch {path}: {off:#x}+{len(nb)} lies outside {NAME} ({len(IMG):#x} bytes)')
+        hit = next(((a, b) for a, b in cut_spans if off < b and a < off + len(nb)), None)
+        if hit: sys.exit(f'[RED] mod code patch {path}: {off:#x}+{len(nb)} overlaps the registered cut at {hit[0]:#x} of {NAME}, which the host needs')
+        other = next((mod_owner[k] for k in range(off, off + len(nb)) if mod_owner.get(k, path) != path), None)
+        mod_owner.update((k, path) for k in range(off, off + len(nb)))
+        if other: sys.exit(f'[RED] mod code patches {other} and {path} both patch {NAME} at {off:#x}: two mods (or two versions of one) that cannot go together')
+        mod_applied.append((off, bytes(IMG[off:off + len(nb)]).hex(), nb.hex(), path)); IMG[off:off + len(nb)] = nb
+    print(f'{NAME}: mod code patch {path}: {len(entries)} entries applied')
+if mod_applied:
+    os.makedirs(outdir, exist_ok=True)
+    with open(os.path.join(outdir, NAME + '.mods.tsv'), 'w') as f:
+        f.write(f'# {NAME} {BUILD_ID}: mod code patches applied before the rewrite. offset, bytes before, bytes after, file\n')
+        for off, ob, nb, path in mod_applied: f.write(f'{off:#x}\t{ob}\t{nb}\t{path}\n')
 # Key page indices are fixed; the key page content is written by the loader as "actual key number × 8".
 KEYS = {'K18': 508, 'KTLS': 509, 'KTLR': 510, 'KGATE': 511}
 KEY_INDEX = {k: i for i, k in enumerate(('K18', 'KTLS', 'KTLR', 'KGATE'))}

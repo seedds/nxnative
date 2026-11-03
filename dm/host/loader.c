@@ -1,6 +1,7 @@
 // Multi-module loading (playing the role of Horizon's rtld): mapping, claiming thread slots, gate registration, cross-module relocation, take-over by name, segment permissions.
 // The code area (original text and patch area) is set to read-only+execute as soon as it is copied in, and from then on the loader only writes data: on iOS these two blocks must be embedded as is as signed code segments.
 #include "dm.h"
+#include "mods.h"
 #include <TargetConditionals.h>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -604,7 +605,8 @@ static int nro_pieces(const char *name, const uint8_t **x0, unsigned long *z0, c
 }
 static void map_image(module_t *m, const char *dir) {
     (void)dir;
-    char sx0[17], sx1[17], dm[17]; snprintf(sx0, sizeof sx0, "__dm%sx0", m->name); snprintf(sx1, sizeof sx1, "__dm%sx1", m->name); snprintf(dm, sizeof dm, "__DM%sW", m->name);
+    const char *v = m->code_mods ? "V" : "";   // the code-mods copy: its own sections (gen_embed.py)
+    char sx0[17], sx1[17], dm[17]; snprintf(sx0, sizeof sx0, "__dm%s%sx0", m->name, v); snprintf(sx1, sizeof sx1, "__dm%s%sx1", m->name, v); snprintf(dm, sizeof dm, "__DM%s%sW", m->name, v);
     unsigned long z0 = 0, zw = 0, z1 = 0;
     const uint8_t *x0 = NULL, *w = NULL, *x1 = NULL;
     if (m->nro) { if (!nro_pieces(m->name, &x0, &z0, &w, &zw, &x1, &z1)) die("NRO %s: not in the embedded NRO table (__DATA,__dm_nro_tab)", m->name); }
@@ -613,7 +615,7 @@ static void map_image(module_t *m, const char *dir) {
     // The back patch area (patch_nso.py TWO) is a fourth section, __dm<name>x2; NROs never have one (nro_pieces holds three pieces)
     unsigned long z2 = 0; const uint8_t *x2 = NULL;
     if (m->back_len) {
-        char sx2[17]; snprintf(sx2, sizeof sx2, "__dm%sx2", m->name);
+        char sx2[17]; snprintf(sx2, sizeof sx2, "__dm%s%sx2", m->name, v);
         if (m->nro || !(x2 = getsectiondata(IMAGE_MH, "__TEXT", sx2, &z2)) || z2 != m->back_len || ((uintptr_t)x2 & 0x3FFF)) die("embedded back patch area %s missing or wrong", sx2);
     }
     // Patch area before the base (patch_off < 0): W ends at the end of data (FILE_IMAGE_LEN); bss and the key page are zero pages from vm_allocate and are not in the executable
@@ -682,25 +684,34 @@ static void map_image(module_t *m, const char *dir) {
 static char g_module_dir[1024];   // the folder the modules were loaded from (dm_module_dir)
 const char *dm_module_dir(void) { return g_module_dir; }
 
+// Mods' code patches (hle_mods.c): the NSP script rewrites the modules they change a second time, with the patches, into <dir>/codemods (tables there; the code in its own
+// sections on iOS). When the mods with code patches are on, those modules load from there; switched off, the game runs its own code
+int dm_code_mods_loaded = 0;
 void load_modules(const char *dir, const char **names, int n) {
     strlcpy(g_module_dir, dir, sizeof g_module_dir);
+    int want = dm_mods_code_wanted(); char cdir[1100]; snprintf(cdir, sizeof cdir, "%s/codemods", dir);
     // Map everything and parse the symbol tables first, then relocate all at once (cross-module symbols must all be in place first)
     // DM_BOOTPROF: breakdown of ① host loading (milliseconds), to set the upper bound for ③ pre-relocation / mmap
     uint64_t t0 = now_ns(), tm = 0, tp = 0, tg = 0, tr = 0, t;
     FILE *nros = open_nros(dir);
     allocate_modules(n, nros);
+    const char *mdir[n];
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
         strlcpy(m->name, names[i], sizeof m->name);
-        read_layout(m, dir);
+        char t[1200]; snprintf(t, sizeof t, "%s/%s.fixups.tsv", cdir, m->name);
+        m->code_mods = want && !access(t, F_OK); mdir[i] = m->code_mods ? cdir : dir;
+        if (m->code_mods) { dm_code_mods_loaded = 1; LOG("%s: the copy with the mods' code patches (%s)", m->name, cdir); if (!strcmp(m->name, "main")) strlcpy(g_module_dir, cdir, sizeof g_module_dir); }
+        read_layout(m, mdir[i]);
     }
+    if (want && !dm_code_mods_loaded) LOG("[RED] mods: code patches are switched on, but this build has no copy of the modules with them (%s): the game runs its own code", cdir);
     create_keys();
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
-        t = now_ns(); map_image(m, dir); tm += now_ns() - t;   // On return the code area is already read-only+execute; from here on the loader only writes data
+        t = now_ns(); map_image(m, mdir[i]); tm += now_ns() - t;   // On return the code area is already read-only+execute; from here on the loader only writes data
         if (!i) tsd_check();
         t = now_ns(); parse_dynamic(m); tp += now_ns() - t;
-        t = now_ns(); register_gates(m, dir); tg += now_ns() - t;
+        t = now_ns(); register_gates(m, mdir[i]); tg += now_ns() - t;
         LOG("%s: base %p size %#zx", names[i], m->base, m->size);
         m->loaded = 1; g_loaded[g_nloaded++] = m; g_nmod++;
     }

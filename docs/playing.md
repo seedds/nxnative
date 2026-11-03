@@ -32,6 +32,17 @@ Switch Pro Controller gyro on the Mac still needs the HID support being develope
 
 English by default. Pick another when packing with `--language` (`-l`), by code or by name: `-l ja`, `-l zh-Hans`, `-l French` (`LANGUAGE` in Spyder). It must be one the game has; the script prints the game's languages and stops on one it lacks. To change it without rebuilding, pick another on the settings screen.
 
+## Mods
+
+Mods come in the folders emulators and Atmosphère use: a mod is a folder with `romfs/` (files that replace or add to the game's: textures, models, text, parameters) and/or `exefs/` (code patches, `.pchtxt` or `.ips`). The settings screen lists them under **Mods**, with a switch for each; the game reads the ones that are on when you tap **Play**.
+
+- **When packing:** `--mods <folder>` (`MODS` in Spyder), repeated or comma-separated, builds mods into the app. A folder can be a mod, a folder of mods, or a download as it comes: `atmosphere/contents/<title ID>/`, `atmosphere/exefs_patches/<mod>/` (Atmosphère), `mods/contents/<title ID>/<mod>/` (Ryujinx) or `load/<title ID>/<mod>/` (yuzu). A mod's code patches for your version of the game go in (files for other versions are passed over; a mod with none for your version stops the build): the app carries the game's code twice, as it is and with the patches, and switching such a mod off runs the game's own code, as if it had never been there. Mods with code patches switch on and off together.
+- **Without a rebuild:** put a mod's folder in the game's `mods` folder in the Files app (on the Mac, `~/Library/Application Support/nxnative/<title ID>/mods`). Replacement files work this way. Code patches do not: the game's code is rewritten and signed when the app is built, so a mod with an `exefs/` of patches shows as **Off** until you pack it with `--mods`.
+
+A mod can carry `env.txt`: lines like `DM_PRESENT_INTERVAL=display` (one frame per screen refresh, which a 60 fps mod needs here, as nxnative paces the frames itself) that apply while the mod is on. A line in `Documents/env.txt` wins over it.
+
+Two mods with the same file: the first by name wins (mods built in come before the `mods` folder's). Not supported: mods that bring their own code modules (exlaunch, `subsdk` files, CTGP-style loaders), and replacement shader files, since the shaders are translated when the app is built. `DM_MODS_OFF=<name>/<name>` in `Documents/env.txt` switches mods off by folder name and fixes the switches on the screen.
+
 ## Settings in a file
 
 Lines like `DM_OPMODE=0` (handheld mode: lower resolution, higher frame rate) in `Documents/env.txt` win over the settings screen, which then shows them greyed out ([the full list](settings.md#settings-in-a-file)). `DM_FPS_TARGET=30` keeps Breath of the Wild, Tears of the Kingdom, Octopath Traveler 0 and Octopath Traveler II at their original 30 fps, which saves battery; `DM_PRESENT_INTERVAL=game` does the same for Monster Train 2. `DM_SHOW_FPS=1` shows the frame rate at the top left (`--show-fps` when packing turns it on from the start). `DM_LAUNCHER=0` skips the settings screen.

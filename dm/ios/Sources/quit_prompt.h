@@ -124,12 +124,27 @@ static inline CGColorRef qp_color(CGFloat r, CGFloat g, CGFloat b, CGFloat a) { 
 #define QP_SURFACE qp_color(0.10, 0.10, 0.11, 1)
 #define QP_CREAM qp_color(1, 0.94, 0.84, 1)
 
+// Text broken into the lines Core Text lays it out in at this width, joined by line breaks: CATextLayer's own wrapping breaks at spaces only, so Chinese
+// stayed one line and was cut (qp_wrapped_height measured two)
+static inline NSString *qp_lines(NSString *s, CGFloat size, CGFloat weight, CGFloat width) {
+    CTFontRef f = qp_font(size, weight);
+    CTFramesetterRef fs = CTFramesetterCreateWithAttributedString((__bridge CFAttributedStringRef)qp_text(s, f));
+    CGPathRef path = CGPathCreateWithRect(CGRectMake(0, 0, width, 100000), NULL);
+    CTFrameRef frame = CTFramesetterCreateFrame(fs, CFRangeMake(0, 0), path, NULL);
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    for (id line in (__bridge NSArray *)CTFrameGetLines(frame)) {
+        CFRange r = CTLineGetStringRange((__bridge CTLineRef)line);
+        [out addObject:[[s substringWithRange:NSMakeRange((NSUInteger)r.location, (NSUInteger)r.length)] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]];
+    }
+    CFRelease(frame); CGPathRelease(path); CFRelease(fs); CFRelease(f);
+    return [out componentsJoinedByString:@"\n"];
+}
 static inline CATextLayer *qp_text_layer(NSString *s, CGFloat size, CGFloat weight, CGColorRef color, CGRect frame, int wrap, CGFloat scale) {
     CATextLayer *t = [CATextLayer layer];
     CTFontRef f = qp_font(size, weight);
     t.font = f; t.fontSize = size; CFRelease(f);
-    t.string = s; t.foregroundColor = color; t.alignmentMode = kCAAlignmentCenter; t.contentsScale = scale;
-    t.wrapped = wrap; t.truncationMode = wrap ? kCATruncationNone : kCATruncationEnd;
+    t.string = wrap ? qp_lines(s, size, weight, frame.size.width) : s; t.foregroundColor = color; t.alignmentMode = kCAAlignmentCenter; t.contentsScale = scale;
+    t.wrapped = NO; t.truncationMode = wrap ? kCATruncationNone : kCATruncationEnd;
     t.frame = frame;
     return t;
 }

@@ -305,6 +305,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** `DM_NVN_PASSDUMP` prints these views as `V <pass> c<i> view format …`; Mario uses only this one (1 of 80 passes in a course frame).
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md).
 
+### Textures of an sRGB / linear pair over the same storage
+
+- **Symptom:** a movie (or another picture the game converts each frame) does not show: the screen keeps the last 3D frame while the decoder delivers every picture. A pass dump shows a pass writing one serial and the composite sampling another serial of the same size, the two Metal formats `RGBA8Unorm` (70) and `RGBA8Unorm_sRGB` (71).
+- **Cause:** the game makes two NVN texture objects over the same pool and offset with the same description but for the format, `RGBA8` (0x25) and `RGBA8_SRGB` (0x38): it renders into the linear one and samples the sRGB one, which on NVN share their bytes. The storage-sharing table is keyed by pool, offset and the whole description ([Transient render targets shared by storage](#transient-render-targets-shared-by-storage)), so each got its own Metal texture and the sampled one never changed.
+- **Fix:** `tex_mtl_` (`nvn_mtl.m`): a texture that misses the table, but whose description differs from a shared texture's only by the other format of an sRGB / linear pair (`g_pfv_srgb`, the pairs Metal views without `PixelFormatView` usage), is a Metal view of that texture in its own format (2D and 2D array, single-sample). Other format changes keep their own texture. A usage upgrade (`tex_upgrade`) asked through the view upgrades its parent and makes the view again on it; a view whose parent left the sharing table (upgraded through its own serial, taken over, evicted) is dropped at its next lookup and made again on what holds the storage now (log line `stale sRGB / linear view dropped`).
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_srgb_alias` (Metal validation): the sRGB texture is a view of the linear one, pixels written through the linear texture read back through the sRGB one, an `R32F` texture over the same storage keeps its own; after the linear texture is upgraded the view reads the upgraded storage, and an upgrade through the view upgrades the parent.
+- **Found on:** Mario Kart World (`0400C3F00006E000`; its profile is a separate pull request): the Grand Prix's cup opening movie (2560x1440: the YUV pass writes ser 31381 `RGBA8`, the composite samples ser 31382 `RGBA8_SRGB`, both at offset 0 of a 15 MB pool).
+
 ### Render-target use added on demand
 
 - **Symptom:** a clear of, or a format-converting copy into, a texture made without render-target use is declined.
@@ -872,6 +880,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Absolum](../../dm/games/0100A83022A22000/README.md) (FNA3D's NVN driver, `FNA3D_Driver_NVN.cpp`).
 
 ## Uniforms, copies and ordering
+
+### Bindless handles read from guest memory directly
+
+- **Symptom:** a `sample` of the submit thread shows `ubo_read` calling `-[MTLBuffer contents]` with `objc_retainAutorelease` at every handle read, and `objc_autoreleasePoolPop` at commit draining those buffers. Fire Emblem Fortune's Weave: about 4 % of the submit thread in the reads and as much again in the drain.
+- **Cause:** `contents` is an inner-pointer method, so under ARC each call retains and autoreleases the buffer; a bindless shader reads dozens of handles a draw. The argument writes in `encode_args_` asked the arena's buffer for its contents the same way.
+- **Fix:** `ubo_read` in `nvn_mtl.m`, for every game. A pool's buffer wraps guest memory without a copy at its own address (`mtl_pool_add` is the only place pools are made), so once `mtl_addr` finds the pool, the bytes are read at the guest address itself; `mtl_addr` still runs, so the pool check and its residency are unchanged. An arena keeps its buffer's `contents` (`NvArena.cpu`), and the argument, push-constant, driver-segment and border writes go through it. If pools ever stop being no-copy wrappers, this read would need the buffer again.
+- **Check:** `make -C dm/gfx/tests GAME=<id> run`. Fortune's Weave's battle map (MacBook Pro M1 Pro): submit 42.8k → 39.2k instructions per draw.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md).
 
 ### Depth plane copies between depth formats
 

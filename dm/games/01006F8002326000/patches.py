@@ -11,7 +11,7 @@ from nso_asm import ADRP, B
 #   main+0x5cdce0 (slot 7) a static display size main+0x4b87524 (the same choice), main+0x5cdd88 (slot 8) a static 1280.0 x 720.0 (main+0x4b87538)
 #   main+0x5cdcb8 (slot 3) another arg's +0x14: 1920x1080
 # Each stub is one bit of the conversion site mask (+0x54, DM_SCREEN_ASPECT_SITES, all on by default); a height of 0 (16:9) leaves the original value. x16 / x17 are free at every site
-SIZE_SITES = [
+_size_sites = [
     # (site, the stub's words after ADRP x16 (state), the last one the site's original instruction, reason)
     (0x5c9b80, [
         0xb9405611,   # ldr w17, [x16, #0x54]   sites
@@ -61,22 +61,22 @@ SIZE_SITES = [
 ]
 
 # The HUD at the taller screen's edges: duo_anchor.c, compiled by clang to position-independent code without data (-O2 -ffreestanding -fno-builtin -fno-stack-protector
-# -fno-jump-tables -fno-asynchronous-unwind-tables; the words of its __text, duo_calc at DUO_CALC). nn::ui2d::Pane::Calculate (main+0x27d4c0, vtable main+0x474d1f8 slot 19)
+# -fno-jump-tables -fno-asynchronous-unwind-tables; the words of its __text, duo_calc at _duo_calc). nn::ui2d::Pane::Calculate (main+0x27d4c0, vtable main+0x474d1f8 slot 19)
 # calls CalculateGlobalMatrix (main+0x27d74c) when the pane or a parent changed and returns to main+0x27d570, before the children's Calculate (vtable +0x98): the stub there
 # calls duo_calc(pane, state + 0x80, nn::ui2d::Pane::DrawSelf) while the output's height is set (bit 9 of the sites). x0..x18 and x30 are dead there (the function reloads
 # x30 from its frame), d8 is callee-saved
-DUO_ANCHOR = 'bd4000211e20202854000041d65f03c0f9400c08b4ffffc852800609aa0803eaf9400d4bb400008baa0b03ea7100052954ffff81bd40554052a88f491e2701221e2220001e2e10001e2f10021e20ac40bd4070022d4a14031e2208641e2288621e2020881e244c44bd4084031e2308a21e2388a51e2020481e224ca5f94014099100800abd4010221e2208021e222080540003cbbd4014261e2608061e2620a05400034bbd4018261e2608061e2620a0540002c8bd407c061e20c0c652a8440b1e2701671e2708071e2720c0540001e5bd408c061e20c0d01e27220054000165eb0a013f54fff941f9400008f9405508eb02011f54fff8c0bd400420bd4080011e2108001400001ceb0a013f540004c1bd4014261e2608061e2620a05400044b52a886891e2701261e260806bd4004271e3010101f0740c61e2620a054000345bd408c061e20c0d052a844091e2701311e3108111e31220054000265f9400009f9405529eb02013f540001e0bd4080001e2008e0bd008000bd4004201e200860bd008400bd400420bd4088011e210800bd008800bd4004201e2008c0bd008c00d65f03c01e222080540000abbd4014231e2308031e2320a054fff2aaf9400009f940552952a8500a1e2701431e230803eb02013f540000811e2320801e2354a854fff1641e2008215280060914000004aa0a03e87100052954000440f9400d0ab400034abd4071042d4a19051e2408a71e2488a41e2020e81e274c84bd4085051e2508c71e2588c51e2020e81e274ca51e222080540000abbd4014261e2608061e2620a054fffd6af9400108f9405508eb02011f54ffedc11e2320801e2354a854fffc8417ffff6a2d460d021e2308631f020c421e2a10031e23204054ffec8cbd407c021e20c04252a879081e2701031e2308031e23204052a870e81e27010252a86cc81e2701031e22ac621e220802bd408c001e20c0031e22206054ffea8b1e2140221e2020081e22cc211e212800bd008c00d65f03c0'
-DUO_CALC = 0x0
-PANE_DRAW_SELF = 0x27e2c8   # nn::ui2d::Pane::DrawSelf (vtable main+0x474d1f8 slot 21, empty): the game's null panes, alignments, captures and parts keep it
-TANF, ATANF = 0x3f03330, 0x3f03360   # main's PLT stubs of the SDK's tanf, atanf
+_duo_anchor = 'bd4000211e20202854000041d65f03c0f9400c08b4ffffc852800609aa0803eaf9400d4bb400008baa0b03ea7100052954ffff81bd40554052a88f491e2701221e2220001e2e10001e2f10021e20ac40bd4070022d4a14031e2208641e2288621e2020881e244c44bd4084031e2308a21e2388a51e2020481e224ca5f94014099100800abd4010221e2208021e222080540003cbbd4014261e2608061e2620a05400034bbd4018261e2608061e2620a0540002c8bd407c061e20c0c652a8440b1e2701671e2708071e2720c0540001e5bd408c061e20c0d01e27220054000165eb0a013f54fff941f9400008f9405508eb02011f54fff8c0bd400420bd4080011e2108001400001ceb0a013f540004c1bd4014261e2608061e2620a05400044b52a886891e2701261e260806bd4004271e3010101f0740c61e2620a054000345bd408c061e20c0d052a844091e2701311e3108111e31220054000265f9400009f9405529eb02013f540001e0bd4080001e2008e0bd008000bd4004201e200860bd008400bd400420bd4088011e210800bd008800bd4004201e2008c0bd008c00d65f03c01e222080540000abbd4014231e2308031e2320a054fff2aaf9400009f940552952a8500a1e2701431e230803eb02013f540000811e2320801e2354a854fff1641e2008215280060914000004aa0a03e87100052954000440f9400d0ab400034abd4071042d4a19051e2408a71e2488a41e2020e81e274c84bd4085051e2508c71e2588c51e2020e81e274ca51e222080540000abbd4014261e2608061e2620a054fffd6af9400108f9405508eb02011f54ffedc11e2320801e2354a854fffc8417ffff6a2d460d021e2308631f020c421e2a10031e23204054ffec8cbd407c021e20c04252a879081e2701031e2308031e23204052a870e81e27010252a86cc81e2701031e22ac621e220802bd408c001e20c0031e22206054ffea8b1e2140221e2020081e22cc211e212800bd008c00d65f03c0'
+_duo_calc = 0x0
+_pane_draw_self = 0x27e2c8   # nn::ui2d::Pane::DrawSelf (vtable main+0x474d1f8 slot 21, empty): the game's null panes, alignments, captures and parts keep it
+_tanf_plt, _atanf_plt = 0x3f03330, 0x3f03360   # main's PLT stubs of the SDK's tanf, atanf
 
 
-def BL(frm, to): return 0x94000000 | (((to - frm) >> 2) & 0x3FFFFFF)
+def _bl(frm, to): return 0x94000000 | (((to - frm) >> 2) & 0x3FFFFFF)
 
 
 def screen_shape(ctx):
     here, emit, site, put, STATE = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
-    for at, words, why in SIZE_SITES:
+    for at, words, why in _size_sites:
         site(at, struct.pack('<I', words[-1]).hex())
         start = here(); emit(ADRP(16, here(), STATE))
         for w in words: emit(w)
@@ -137,17 +137,17 @@ def screen_shape(ctx):
         emit(0xf81f0fe0)   # str x0, [sp, #-16]!
         emit(0x1e2c1001)   # fmov s1, #0.5
         emit(0x1e210800)   # fmul s0, s0, s1
-        emit(BL(here(), TANF))
+        emit(_bl(here(), _tanf_plt))
         emit(ADRP(16, here(), STATE))
         emit(0xbd405e01)   # ldr s1, [x16, #0x5c]   k
         emit(0x1e210800)   # fmul s0, s0, s1
-        emit(BL(here(), ATANF))
+        emit(_bl(here(), _atanf_plt))
         emit(0x1e202800)   # fadd s0, s0, s0        the widened angle
         emit(0xf84107e0)   # ldr x0, [sp], #16
         emit(B(here(), at + 4))
         put(at, [B(at, start)], 'field camera: its vertical angle widened so the taller screen keeps 16:9\'s sides (bit 5)')
     code = here()
-    for i in range(0, len(DUO_ANCHOR), 8): emit(int(DUO_ANCHOR[i:i + 8], 16))
+    for i in range(0, len(_duo_anchor), 8): emit(int(_duo_anchor[i:i + 8], 16))
     site(0x27d570, '68624139')
     start = here(); emit(ADRP(16, here(), STATE))
     emit(0xb9405611)   # ldr w17, [x16, #0x54]   sites
@@ -156,8 +156,8 @@ def screen_shape(ctx):
     emit(0x340000d1)   # cbz w17, orig (+6)
     emit(0xaa1303e0)   # mov x0, x19             the pane
     emit(0x91020201)   # add x1, x16, #0x80      the parameters
-    emit(ADRP(2, here(), PANE_DRAW_SELF)); emit(0x91000042 | ((PANE_DRAW_SELF & 0xFFF) << 10))   # add x2, x2, #lo12: nn::ui2d::Pane::DrawSelf
-    emit(BL(here(), code + DUO_CALC))
+    emit(ADRP(2, here(), _pane_draw_self)); emit(0x91000042 | ((_pane_draw_self & 0xFFF) << 10))   # add x2, x2, #lo12: nn::ui2d::Pane::DrawSelf
+    emit(_bl(here(), code + _duo_calc))
     emit(0x39416268)   # orig: ldrb w8, [x19, #0x58]
     emit(B(here(), 0x27d574))
     put(0x27d570, [B(0x27d570, start)], 'nn::ui2d::Pane::Calculate after the global matrix: duo_calc (the HUD at the taller screen\'s edges, full-screen backgrounds stretched)')
@@ -176,11 +176,11 @@ def screen_shape(ctx):
     emit(0x36280131)   # tbz w17, #5, orig (+9)
     emit(0x1e2c1002)   # fmov s2, #0.5
     emit(0x1e220800)   # fmul s0, s0, s2
-    emit(BL(here(), TANF))
+    emit(_bl(here(), _tanf_plt))
     emit(ADRP(16, here(), STATE))
     emit(0xbd405e01)   # ldr s1, [x16, #0x5c]   k
     emit(0x1e210800)   # fmul s0, s0, s1
-    emit(BL(here(), ATANF))
+    emit(_bl(here(), _atanf_plt))
     emit(0x1e202800)   # fadd s0, s0, s0        the widened angle
     emit(0x1e290808)   # orig: fmul s8, s0, s9
     emit(B(here(), 0x386a7a4))

@@ -23,6 +23,13 @@
 - **Fix:** `dmsh_xlate.csproj` pins `<PlatformTarget>AnyCPU</PlatformTarget>`, so a build with any `-r`, or none, gives an AnyCPU dll (`PE32`, machine `0x14C`, IL only). `dm/tools/tests/test_xlate_anycpu.py` reads the PE/CLI headers of every dll in `dmsh_xlate_bin` and the launcher's Mach-O header, and fails when a dll is tied to an architecture or the launcher lacks x86_64 or arm64; it needs no .NET. The rebuilt translator writes the same SPIR-V and reflection files as the arm64-only one (9,556 shaders compared byte for byte).
 - **Found on:** an Intel MacBook Pro building any game ([GitHub issue #803](https://github.com/seedds/nxnative/issues/803), which bisected the flips). Applies to every game.
 
+### The Vulkan shader step fails with `Argument list too long: 'xcrun'`
+
+- **Symptom:** `vk_shaders.py` stops with `OSError: [Errno 7] Argument list too long: 'xcrun'` after the Metal compiles, in the `metallib` link.
+- **Cause:** `metallib()` passed every `.air` file as an absolute path in one command. The NSP script runs it with `TMPDIR` set to the work folder, so each path holds that folder's name; a game with thousands of generated modules (Super Mario Galaxy: 3,083 captured shaders, more with the dual-source variants) under a long NSP folder name exceeds macOS's 1 MB `ARG_MAX`.
+- **Fix:** `metallib()` runs from the files' common folder with relative paths and an absolute output path, so the command length no longer depends on the work folder's name.
+- **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md), with its dump in a folder named after both games of the cartridge. Applies to every Vulkan game's shader step.
+
 ## IPA archives
 
 ### A streamed file changes size and the IPA fails its CRC check

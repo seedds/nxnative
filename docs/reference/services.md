@@ -832,8 +832,15 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** an abort in `nn::hid` at boot, in a Switch 2 game that sets up the Joy-Con's mouse mode.
 - **Cause:** `InitializeNmouse` opens the hid service, and the host has neither the service nor the sensor.
-- **Fix:** `InitializeNmouse`, `GetNmouseHandles` (none) and the button configuration calls are hooked (`hle_hid.c`).
-- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md).
+- **Fix:** `InitializeNmouse`, `GetNmouseHandles` (none), the button configuration calls and the merged pointer's calls (a handle with no states) are hooked (`hle_hid.c`).
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md), [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md).
+
+### GameShare guest displays
+
+- **Symptom:** a crash at boot in `nn::vi` under `nn::streamplay::CreateIndividualDisplays`.
+- **Cause:** a game can create its guest displays at boot, before any session, and the call starts a second display service the host does not have.
+- **Fix:** `CreateIndividualDisplays`, `DestroyIndividualDisplays` and `GetNativeWindowHandle` answer that there is no guest (`hle_misc.c`).
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md).
 
 ### The display's largest buffer
 

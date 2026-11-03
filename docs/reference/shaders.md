@@ -1241,6 +1241,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** the capture run presses A every 4 s from 5 s on (`GLSLC_KEYS` in `build_ipa_from_nsp.py`, through `DM_KEYS`). The run keeps its own save and temporary storage, so whatever the presses choose is thrown away with them; a game that compiles at boot (Three Houses) is done before the first press.
 - **Found on:** Crash Team Racing Nitro-Fueled (`0100F9F00C696000`, update 1.0.15, no profile yet): both outputs within the 30 s run.
 
+### Offline coverage after an empty GLSLC capture
+
+- **Symptom:** The Mac capture boot submits shader programs but writes no GLSLC capture files.
+- **Cause:** The source/import heuristic finds a compiler that the game can call. A cache hit lets the game submit a precompiled output without calling it.
+- **Fix:** If the profile requires no capture files, use an empty shader map for the capture boot to observe submitted shader keys. An empty capture can continue only after the offline split supplies every observed key. A stopped host, failed capture, missing key or no observations fails the check. This verifies coverage of the observed boot.
+- **Found on:** Alien: Isolation (SDK 8.2.0).
+
 ### GLSLC GPU code version against the driver's range
 
 - **Symptom:** a null read at `main+0x3316dc` in `nnMain`, right after the window setup (the program object's interface pointers at +0xd0 / +0xd8 both null).

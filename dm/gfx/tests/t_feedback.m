@@ -154,36 +154,63 @@ static void image_view_case(NvProg *pr) {
     CHECK(!resident, "the retired image target leaves the residency set");
     original = nil;
 }
-// Mip-chain passes: a draw rendering one level of a texture whose view it samples reads a view without the attached level. Downsampling (the level below) keeps the view of the
-// levels below; a sampler whose LOD clamp pins one level (fb_pinned_level) reads that level alone, also above the attachment's (an upsample: level n from n + 1) and while
-// rendering the view's base level, which the levels below could not reach (the view clamped the read to n - 1, or none was made)
-static void mip_chain_case(NvProg *pr) {
-    const int tid = 671, sid = 672; NvShader *fs = pr->sh[1]; nvn_rbind keep[2] = {fs->rf.b[0], fs->rf.b[1]}; int keep_nb = fs->rf.nb;
-    fs->rf.nb = 2; fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEX, .reg=0, .aid=0, .dtt=MTLTextureType2D}; fs->rf.b[1] = (nvn_rbind){.kind=NVN_RB_SAMPT, .reg=0, .aid=1};
-    tex_t chain; id<MTLTexture> original = target_format(&chain, 99800, NVN_FORMAT_RGBA8, 3);   // 4x4, 2x2, 1x1
+// Registered sampler clamps must select the right pixels without copying a disjoint level.
+// A clamp at the attachment, or one spanning levels, must still read the pre-overwrite content.
+static void mip_chain_case(id<MTLLibrary> lib) {
+    const int tid = 671, sid = 672;
+    tex_t chain, output;
+    static id<MTLTexture> original;
+    original = target_format(&chain, 99800, NVN_FORMAT_RGBA8, 3);
+    id<MTLTexture> destination = target(&output, 99801);
+    id<MTLBuffer> result = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared]; res_add(result);
     mtl_reg_tex(tid, &chain, NULL);
-    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
-    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &chain; R.rt.has_cview[0] = 1; S.tex[1][0] = tid | (uint64_t)sid << 20;
-    struct { int level, lod_min, lod_max, minf, want_n, want_level, want_levels; const char *label; } c[] = {
-        {1, 2, 2, 5, 1, 2, 1, "an upsample's sampler pins the level above: that level alone"},
-        {1, 0, 0, 5, 1, 0, 1, "a sampler pinning the level below: that level alone"},
-        {1, -1000, 1000, 5, 1, 0, 1, "a sampler that pins no level: the levels below"},
-        {1, 2, 2, 1, 1, 0, 1, "no mip filter: the levels below"},
-        {0, 1, 1, 5, 1, 1, 1, "rendering the base level, the sampler pins level 1: that level alone"},
-        {0, -1000, 1000, 5, 0, 0, 0, "rendering the base level, no level pinned: left as is"},
+    NvProg *pr = [NvProg new]; NvShader *fs = [NvShader new]; pr->sh[1] = fs;
+    fs->stage = 1; strcpy(fs->key, "1122334455667788"); fs->fn = [lib newFunctionWithName:@"fmp"];
+    fs->ae = [fs->fn newArgumentEncoderWithBufferIndex:0]; fs->arg_len = fs->ae.encodedLength;
+    fs->rf.nb = 2; fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEX, .reg=0, .aid=0, .dtt=MTLTextureType2D};
+    fs->rf.b[1] = (nvn_rbind){.kind=NVN_RB_SAMPT, .reg=0, .aid=1};
+    MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+    pd.vertexFunction = [lib newFunctionWithName:@"v"]; pd.fragmentFunction = fs->fn;
+    pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    NSError *error = nil; id<MTLRenderPipelineState> pipeline = [g_dev newRenderPipelineStateWithDescriptor:pd error:&error];
+    CHECK(pipeline != nil, "registered-sampler feedback consumer compiles"); if (!pipeline) return;
+    const uint8_t colors[3][4] = {{255,0,0,255}, {0,255,0,255}, {0,0,255,255}};
+    struct { int level; float lo, hi; int direct; uint8_t want[4]; const char *label; } c[] = {
+        {1, 2, 2, 1, {0,0,255,255}, "pinned higher level reads blue without a snapshot"},
+        {1, 0, 0, 1, {255,0,0,255}, "pinned lower level reads red without a snapshot"},
+        {0, 1, 1, 1, {0,255,0,255}, "pin above the base attachment reads green without a snapshot"},
+        {1, 1, 1, 0, {0,255,0,255}, "pin at the attachment reads its pre-overwrite green"},
+        {1, 1, 2, 0, {0,0,255,255}, "ranged clamp retains the requested higher mip"},
+        {1, 1.5f, 1.5f, 0, {0,128,128,255}, "fractional clamp blends both pre-overwrite mip levels"},
     };
     for (unsigned i = 0; i < sizeof c / sizeof *c; i++) {
-        samp_par sp = {.minf = (uint8_t)c[i].minf, .magf = 1, .ws = 2, .wt = 2, .wr = 2, .lod_min = c[i].lod_min, .lod_max = c[i].lod_max, .aniso = 1}; mtl_reg_samp(sid, &sp);
+        for (int m = 0; m < 3; m++) {
+            uint8_t data[4 * 4 * 4]; int width = 4 >> m;
+            for (int p = 0; p < width * width; p++) memcpy(data + p * 4, colors[m], 4);
+            [original replaceRegion:MTLRegionMake2D(0, 0, width, width) mipmapLevel:m withBytes:data bytesPerRow:width * 4];
+        }
+        samp_par sp = {.minf=5, .magf=1, .ws=2, .wt=2, .wr=2, .lod_min=c[i].lo, .lod_max=c[i].hi, .aniso=1};
+        mtl_reg_samp(sid, &sp); state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+        R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &chain; R.rt.has_cview[0] = 1;
         R.rt.cview[0] = (view_t){.set_levels=1, .base_level=c[i].level, .nlevels=1};
-        clear(MTLClearColorMake(0, 0, 0, 1)); fb_prepare(pr);
-        id<MTLTexture> use = g_fb_n ? g_fb_use[0] : nil;
-        printf("%s: %d views, level %lu+%lu\n", c[i].label, g_fb_n, (unsigned long)use.parentRelativeLevel, (unsigned long)use.mipmapLevelCount);
-        CHECK(g_fb_n == c[i].want_n && (!c[i].want_n || (use.parentTexture == original && (int)use.parentRelativeLevel == c[i].want_level && (int)use.mipmapLevelCount == c[i].want_levels)), c[i].label);
-        rp_end();
+        S.tex[1][0] = tid | (uint64_t)sid << 20;
+        clear(MTLClearColorMake(colors[c[i].level][0]/255., colors[c[i].level][1]/255., colors[c[i].level][2]/255., 1));
+        uint64_t copies = g_fb_count;
+        fb_prepare(pr); rp_end();
+        clear(MTLClearColorMake(1, 0, 1, 1)); rp_end();
+        R.rt.color[0] = &output; R.rt.has_cview[0] = 0;
+        sample(fs, pipeline); readback(destination, result, 0);
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "registered-sampler submission completes without error");
+        int valid = 1;
+        for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) for (int k = 0; k < 4; k++)
+            valid &= abs((int)((const uint8_t *)result.contents)[y * 256 + x * 4 + k] - c[i].want[k]) <= 1;
+        CHECK(valid, c[i].label);
+        if (c[i].direct) CHECK(g_fb_count == copies, "a sampler pinned away from the attachment avoids a snapshot");
     }
-    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "mip-chain submission completed without error");
-    fs->rf.nb = keep_nb; fs->rf.b[0] = keep[0]; fs->rf.b[1] = keep[1];
-    mtl_tex_release(&chain);
+    mtl_tex_release(&chain); mtl_tex_release(&output); mtl_reg_tex(tid, NULL, NULL);
+    memset(&R, 0, sizeof R); S.tex[1][0] = 0; mtl_sub_begin();
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "registered-sampler retirement completes");
+    mtl_drain(); defer_drain(); res_remove(result); original = nil;
 }
 // The rule without a listed shader: copy once, reuse until a barrier, end the pass when an earlier draw of it read the attachment directly.
 static void reuse_case(NvProg *pr) {
@@ -488,7 +515,7 @@ static void mip_case(id<MTLLibrary> lib, int attached, int first, int sampled, i
     if (shape == 1) { view.set_layers = 1; view.min_layer = 1; view.nlayers = 2; }
     mtl_reg_tex(tid, &source, &view);
     id<MTLTexture> destination = target(&output, 99910 + index);
-    id<MTLBuffer> result = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared]; res_add(result);
+    id<MTLBuffer> result = [g_dev newBufferWithLength:2048 options:MTLResourceStorageModeShared]; res_add(result);
     NvProg *pr = [NvProg new]; NvShader *fs = [NvShader new]; pr->sh[1] = fs;
     fs->stage = 1; strcpy(fs->key, "aabbccddeeff0011");
     fs->fn = [lib newFunctionWithName:shape == 2 ? @"fmc2" : shape == 1 ? @"fma2" : sampled == 1 ? @"fm1" : @"fm2"];
@@ -503,24 +530,26 @@ static void mip_case(id<MTLLibrary> lib, int attached, int first, int sampled, i
     R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &source; S.tex[1][0] = tid;
     R.rt.has_cview[0] = 1; R.rt.cview[0] = (view_t){.set_levels=1, .base_level=attached, .nlevels=1, .set_layers=1, .min_layer=layer, .nlayers=1};
     clear(MTLClearColorMake(colors[attached][0] / 255., colors[attached][1] / 255., colors[attached][2] / 255., 1));
-    uint64_t copies = g_fb_count;
     fb_prepare(pr); rp_end();
     // Same serial and base level/layer, but a different mip count: neither shape
     // may reuse the other's valid contents within this barrier and submission.
     view_t prefix = view; prefix.nlevels = attached - first + 1;
     mtl_reg_tex(tid, &source, &prefix); fb_prepare(pr); rp_end();
+    R.rt.color[0] = &output; R.rt.has_cview[0] = 0;
+    sample(fs, pipeline); readback(destination, result, 0);
+    R.rt.color[0] = &source; R.rt.has_cview[0] = 1;
+    R.rt.cview[0] = (view_t){.set_levels=1, .base_level=attached, .nlevels=1, .set_layers=1, .min_layer=layer, .nlayers=1};
     mtl_reg_tex(tid, &source, &view); fb_prepare(pr); rp_end();
-    CHECK(g_fb_n == 1 && g_fb_use[0].mipmapLevelCount == (NSUInteger)(4 - first) && g_fb_count == copies + 3,
-          "same-key range changes refresh the snapshot and restore the full sampled shape");
     for (int m = 0; m < 4; m++) for (int s = 0; s < layers; s++) {
         R.rt.cview[0].base_level = m; R.rt.cview[0].min_layer = s;
         clear(MTLClearColorMake(1, 0, 1, 1)); rp_end();
     }
     R.rt.color[0] = &output; R.rt.has_cview[0] = 0;
-    sample(fs, pipeline); readback(destination, result, 0);
+    sample(fs, pipeline); readback(destination, result, 1024);
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "mip feedback GPU submission completed");
     CHECK(!mtl_last_commit_error(), "mip feedback GPU submission has no error");
-    pixels(result, 0, colors[first + sampled], "feedback preserves the requested mip's pre-overwrite pixels");
+    pixels(result, 0, colors[MIN(first + sampled, attached)], "a contracted view clamps the requested mip to its own range");
+    pixels(result, 1024, colors[first + sampled], "restoring the view preserves the requested mip's pre-overwrite pixels");
     printf("feedback mip shape=%d attachment=%d view-base=%d sampled=%d: %s\n", shape, attached, first, sampled, before == failed ? "PASS" : "FAIL");
     mtl_tex_release(&source); mtl_tex_release(&output);
 }
@@ -537,6 +566,8 @@ int main(int argc, char **argv) { @autoreleasepool {
         "struct AM {texture2d<float> source[[id(0)]];};\n"
         "fragment float4 fm1(constant AM&a[[buffer(0)]]) {constexpr sampler s(coord::normalized,filter::linear,mip_filter::linear); return a.source.sample(s,float2(.5),level(1));}\n"
         "fragment float4 fm2(constant AM&a[[buffer(0)]]) {constexpr sampler s(coord::normalized,filter::linear,mip_filter::linear); return a.source.sample(s,float2(.5),level(2));}\n"
+        "struct AMP {texture2d<float> source[[id(0)]]; sampler filter[[id(1)]];};\n"
+        "fragment float4 fmp(constant AMP&a[[buffer(0)]]) {return a.source.sample(a.filter,float2(.5),level(2));}\n"
         "struct AMA {texture2d_array<float> source[[id(0)]];};\n"
         "fragment float4 fma2(constant AMA&a[[buffer(0)]]) {constexpr sampler s(coord::normalized,filter::linear,mip_filter::linear); return a.source.sample(s,float2(.5),1,level(2));}\n"
         "struct AMC {texturecube<float> source[[id(0)]];};\n"
@@ -558,7 +589,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     for (int i = 0; i < 3; i++) slot_case(pr, pipeline, slots[i], i);
     reuse_case(pr);
     shape_case();
-    mip_chain_case(pr);
+    mip_chain_case(lib);
     fs->fn = [lib newFunctionWithName:@"mask"];
     fs->ae = [fs->fn newArgumentEncoderWithBufferIndex:0]; fs->arg_len = fs->ae.encodedLength;
     fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_IMG, .aid=0, .dtt=MTLTextureType2D, .dpf=NVN_DPF_UINT};

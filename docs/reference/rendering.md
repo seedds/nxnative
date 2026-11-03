@@ -540,6 +540,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `present_now` commits the residency set after resolving the presented texture (`res_commit`, free when nothing changed), for every game.
 - **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (13.0.5, `DM_WINDOW=1`).
 - **Check:** Breath of the Wild windowed with the change: its title, 60 fps, no GPU error.
+- **Enqueue contract:** the texture descriptor is required, while the crop may be null (the whole image). NVN reads the descriptor's dimensions before calling `mtl_present`; Vulkan and GL use `mtl_present_ext`, which constructs a descriptor on its stack. The queue copies the descriptor and crop before returning a ticket. Redundant nullable-texture checks in `present_enqueue` contradicted that contract and led the analyzer to follow a null path into the mandatory value copy; they are removed rather than inventing a no-texture present. Valid presentation behavior is unchanged; the existing presentation fixtures exercise that path.
 
 ### A present snapshot's copy needs the same residency commit
 

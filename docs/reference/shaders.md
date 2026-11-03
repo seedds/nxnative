@@ -665,6 +665,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
   - `geometry_finish` in `dmsh_build.py` takes the output vertex count and primitive class of such a shader from the input topology (the header declares one vertex of a triangle strip).
 - **Found on:** [NieR:Automata The End of YoRHa Edition](../../dm/games/010056B015FE8000/README.md): `IndexBuildIndependent_{b,x}{cw,ccw}.gso` are the depth prepass, one draw per mesh, and each also writes the mesh's culled index list and its count for the shading pass's indexed indirect draws.
 
+### Viewport indices in geometry compute records
+
+- **Symptom:** Metal rejects a translated geometry shader with `invalid return type 'main0_out' for kernel function`. The generated compute entry writes `out.gl_ViewportIndex` instead of placing that output in its emitted vertex records.
+- **Cause:** `ResourceReservations.FillIoOffsetMap` reserves a geometry output slot for `VertexIndex` when `UsesViewportIndex` is set. The geometry-to-compute transform therefore cannot find the viewport-index slot, leaves a raster output on the compute kernel, and builds its raster reader for the wrong builtin.
+- **Fix:** reserve the slot as `ViewportIndex`. Both the geometry store and the raster reader then use the same emitted vertex field. The value is preserved, including a dynamic index. The source participates in the chain fingerprint, the translator and lock must be rebuilt, and all shader libraries and the host must use the new chain. The synthetic compiler regression checks all five input topologies and compiles both their compute kernels and raster readers for macOS and iOS. It fails against the previous translator.
+- **Found on:** Alien: Isolation, both geometry shaders.
+
 ### Geometry passthrough and viewport masks in compute
 
 - **Symptom:** geometry reader compilation fails with undeclared `gl_BuiltIn_5253` and a scalar `.elements` access. Compiling only the compute kernel also leaves native passthrough geometry without emitted vertices.

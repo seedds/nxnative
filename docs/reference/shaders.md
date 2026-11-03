@@ -1202,6 +1202,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
   - [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md): `subsdk0` is NVN's runtime GLSL compiler and `main` imports `glslcCompile*`, but up to the house, the beach and the menus every shader the game loaded was in the offline tables.
   - [Captain Toad: Treasure Tracker](../../dm/games/01009BF0072D4000/README.md) (the rule that a module must define `glslcCompile`): `main` imports `glslcCompile` and holds agl's GLSL sources, but no module defines it, so nothing is compiled at run time.
 
+### A run-time compile that waits for a button press
+
+- **Symptom:** the NSP script stops with `captured only 0 run-time shaders` while the capture run reaches the game's frame loop and runs to the end of its 30 s.
+- **Cause:** the game compiles its run-time programs only after its title screen has had a button press, and the capture run had no input: 0 outputs in 200 s without a press, both of them 3 s after the first A.
+- **Fix:** the capture run presses A every 4 s from 5 s on (`GLSLC_KEYS` in `build_ipa_from_nsp.py`, through `DM_KEYS`). The run keeps its own save and temporary storage, so whatever the presses choose is thrown away with them; a game that compiles at boot (Three Houses) is done before the first press.
+- **Found on:** Crash Team Racing Nitro-Fueled (`0100F9F00C696000`, update 1.0.15, no profile yet): both outputs within the 30 s run.
+
 ### GLSLC GPU code version against the driver's range
 
 - **Symptom:** a null read at `main+0x3316dc` in `nnMain`, right after the window setup (the program object's interface pointers at +0xd0 / +0xd8 both null).

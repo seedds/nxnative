@@ -171,6 +171,11 @@ build check first compares the image's Metal compiler with `dmsh_chain.lock`
 keeps the workflow, the image, README and the NSP script naming the same
 Xcode: raising the toolchain changes them together.
 
+The patch-registry tests validate the tables the rewriter consumes and their
+binding metadata. A game's patch module may also define constants and instruction
+helpers with uppercase names; those implementation details are not extra patch
+tables and do not belong in a closed namespace allowlist.
+
 A separate `sanitizers` job builds the same tests again with sanitizers, each
 build in a folder of its own (`build/asan`, `build/tsan`, `asan/`): every host
 unit test and the CPU texture test under AddressSanitizer and
@@ -303,6 +308,11 @@ python3 dm/tools/lint_c.py compdb              # dm/host/gen/compile_commands.js
 python3 dm/tools/lint_c.py tidy -j 8           # the check CI runs; FILE... checks only those sources
 python3 dm/tools/lint_c.py tidy --update       # after fixing findings: lowers the counts, never adds one
 ```
+
+Both lint workflows compare a pull request's baseline with the base commit SHA
+recorded in its event, not the branch tip when the runner starts. If `main`
+shrinks its baseline while a job is queued, fetching that newer tip would
+incorrectly count the tested snapshot's older baseline as new findings.
 
 Raising `LLVM_VERSION` takes a new baseline in the same change
 (`tidy --rebaseline`; `dm/tools/tests/test_lint_c.py` checks that the two name

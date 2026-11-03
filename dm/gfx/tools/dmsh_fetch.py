@@ -3,12 +3,155 @@
 # Built offline; at runtime only function-constant specialization is done (no source compilation). Usage: variant(msl, bindings, om_only_ok=False) → (new MSL, metadata) or (None, reason)
 # Function constant numbering: FX_i (which color index the i-th rewritable sample reads, -1 = sample as usual) = i; FB_k (enable color input k) = 32 + k;
 #               OM_j_k (the j-th output writes to attachment k) = 64 + 8 j + k
-# Rewritable samples: .sample(sampler, select(_N, float2(0.0), isnan(_N))) on a 2D float texture, where _N = float2(in.m_X.x, in.m_X.y) (interpolated output unchanged);
-# whether the texel is really fetched at this pixel is proven at runtime (correspondence between vertex uv and position, texture size = target size); if it cannot be proven, the original version is used
+# Rewritable samples: .sample(sampler, select(_N, float2(0.0), isnan(_N))) on a 2D float texture, where _N = float2(in.m_X.x, in.m_X.y) (interpolated output unchanged),
+# or _N = float2(in.m_X.x / in.m_X.w, in.m_X.y / in.m_X.w) (projective: 'proj', the screen position deferred decals sample their G-buffer at; screen_varyings gives the vertex side);
+# whether the texel is really fetched at this pixel is proven at runtime (correspondence between vertex uv and position, or a screen varying with the viewport over the whole target;
+# texture size = target size); if it cannot be proven, the original version is used
+import collections
 import re
 import dmsh_abi as abi
 
 NFB = 8
+
+def _once(msl, name):   # name is assigned exactly once in the source (its declaration): spirv-cross also declares variables first and assigns them in branches
+    return len(re.findall(r'(?<![\w.])%s = ' % re.escape(name), msl)) == 1
+
+def _proj(msl, var, comp, locn):
+    """var = in.m_X.<comp> / in.m_X.w, written as a product with 1.0 / w or as a quotient (each name assigned once) → m_X, or None"""
+    def src(n, c):   # float n = in.m_X.c; → m_X
+        m = re.search(r'float %s = in\.(m_\d+)\.%s;' % (re.escape(n), c), msl)
+        return m.group(1) if m and _once(msl, n) and m.group(1) in locn else None
+    if not _once(msl, var): return None
+    m = re.search(r'float %s = (_\d+) \* (_\d+);' % re.escape(var), msl)
+    if m:
+        for x, r in ((m.group(1), m.group(2)), (m.group(2), m.group(1))):
+            d = re.search(r'float %s = 1\.0 / (_\d+);' % re.escape(r), msl)
+            if d and _once(msl, r) and src(x, comp) and src(x, comp) == src(d.group(1), 'w'): return src(x, comp)
+        return None
+    m = re.search(r'float %s = (_\d+) / (_\d+);' % re.escape(var), msl)
+    return src(m.group(1), comp) if m and src(m.group(1), comp) == src(m.group(2), 'w') else None
+
+# ---- Screen varyings (vertex side of a projective sample) ----
+# Interpolated output locn K is the clip → screen varying when, in every vertex entry point (main0, main0_z, ...), its .x = (P.x + P.w) / 2, .y = (P.w − P.y) / 2 and .w = P.w,
+# P being the final gl_Position: in.m_K.xy / in.m_K.w is then this fragment's position over the viewport (u from the left, v from the top, the convention of nvn_mtl.m uv_proof).
+# Proven on the source: the final assignments of those components are at the function's top level after any branch, the main function returns only at its end, and every
+# variable they read is assigned once, as a linear form of P's components with constant coefficients (+, -, *, / by a constant, fma). Breath of the Wild's and Tears of the
+# Kingdom's G-buffer decals (095cd6ad97fd779a, bb19fab2f950e587)
+_TOK = re.compile(r'\s*(?:(out\.gl_Position\.[xyzw])|(_\d+)|(\d+\.\d*(?:e[+-]?\d+)?|\d+)f?|(fma)|([-+*/(),]))')
+
+def _lin(expr, env):
+    """expr as {symbol: coefficient} ('1' the constant), or None: env(name) gives a variable's form"""
+    toks, pos = [], 0
+    while pos < len(expr):
+        m = _TOK.match(expr, pos)
+        if not m or m.end() == pos: return None
+        toks.append(m.group(1) or m.group(2) or ('#' + m.group(3) if m.group(3) else None) or m.group(4) or m.group(5)); pos = m.end()
+    toks = [t for t in toks if t]; i = [0]
+    def add(a, b, s=1.0):
+        r = dict(a)
+        for k_, v in b.items(): r[k_] = r.get(k_, 0.0) + s * v
+        return {k_: v for k_, v in r.items() if v}
+    def const(a): return set(a) <= {'1'}
+    def scale(a, c): return {k_: v * c for k_, v in a.items() if v * c}
+    def peek(): return toks[i[0]] if i[0] < len(toks) else None
+    def take(t=None):
+        x = peek()
+        if x is None or (t and x != t): raise ValueError
+        i[0] += 1; return x
+    def atom():
+        t = take()
+        if t == '-': return scale(unary(), -1.0)
+        if t == '(': v = add_(); take(')'); return v
+        if t == 'fma':
+            take('('); a = add_(); take(','); b = add_(); take(','); c = add_(); take(')')
+            return add(mul(a, b), c)
+        if t.startswith('#'): return {'1': float(t[1:])} if float(t[1:]) else {}
+        v = env(t)
+        if v is None: raise ValueError
+        return v
+    def unary(): return atom()
+    def mul(a, b):
+        if const(a): return scale(b, a.get('1', 0.0))
+        if const(b): return scale(a, b.get('1', 0.0))
+        raise ValueError
+    def mul_():
+        v = unary()
+        while peek() in ('*', '/'):
+            op = take(); w = unary()
+            if op == '*': v = mul(v, w)
+            elif const(w) and w.get('1'): v = scale(v, 1.0 / w['1'])
+            else: raise ValueError
+        return v
+    def add_():
+        v = mul_()
+        while peek() in ('+', '-'):
+            op = take(); v = add(v, mul_(), 1.0 if op == '+' else -1.0)
+        return v
+    try:
+        v = add_()
+        return v if peek() is None else None
+    except (ValueError, ZeroDivisionError):
+        return None
+
+def _entry_screen(body, locn):
+    """The locns (out struct members → K) that are screen varyings in one entry point's body (the text between its braces)"""
+    if len(re.findall(r'\breturn\b', body)) != 1 or not re.search(r'\n    return out;\n$', body + '\n'): return set()
+    depth, stmts = 0, []   # (depth, text) of each statement line
+    lines = [ln.strip() for ln in body.split('\n')]
+    for n, s in enumerate(lines):   # spirv-cross braces every block on lines of their own: a control statement without one is not read
+        if re.match(r'(if|else|for|while|do|switch)\b', s) and (n + 1 >= len(lines) or lines[n + 1] != '{'): return set()
+    for s in lines:
+        if s == '{': depth += 1; continue
+        if s == '}': depth -= 1; continue
+        if s: stmts.append((depth, s))
+    decl, last = {}, {}   # variable → (statement index, expression); output component → (statement index, depth, expression)
+    nassign = collections.Counter(re.findall(r'(?<![\w.])(_\d+) = ', body))
+    for n, (dp, s) in enumerate(stmts):
+        m = re.fullmatch(r'(?:float|int|uint|bool|half) (_\d+) = (.+);', s)
+        if m: decl[m.group(1)] = (n, dp, m.group(2)); continue
+        m = re.fullmatch(r'out\.(gl_Position|m_\d+)\.([xyzw]) = (.+);', s)
+        if m: last[(m.group(1), m.group(2))] = (n, dp, m.group(3)); continue
+        m = re.fullmatch(r'out\.(gl_Position|m_\d+) = float4\((.+)\);', s)
+        if m:
+            parts = [p.strip() for p in m.group(2).split(',')]
+            for c, p in zip('xyzw', parts if len(parts) == 4 else [None] * 4): last[(m.group(1), c)] = (n, dp, p)
+    pos = {}
+    for c in 'xyw':
+        p = last.get(('gl_Position', c))
+        if p is None or p[1] != 0 or p[2] is None: return set()
+        pos[c] = p
+    sym = {p[2]: 'P' + c for c, p in pos.items() if re.fullmatch(r'_\d+', p[2])}   # a final position component that is a variable: that variable is the symbol
+    def env_at(at):
+        memo = {}
+        def env(name):
+            if name.startswith('out.gl_Position.'):
+                c = name[-1]; p = pos.get(c)
+                return {'P' + c: 1.0} if p and p[0] < at else None   # read after its final assignment
+            if name in sym: return {sym[name]: 1.0}
+            if name in memo: return memo[name]
+            d = decl.get(name)
+            if not d or d[0] >= at or nassign[name] != 1: return None
+            memo[name] = None; memo[name] = _lin(d[2], env_at(d[0])); return memo[name]
+        return env
+    want = {'x': {'Px': 0.5, 'Pw': 0.5}, 'y': {'Py': -0.5, 'Pw': 0.5}, 'w': {'Pw': 1.0}}
+    got = set()
+    for mem, k in locn.items():
+        ok = True
+        for c, w in want.items():
+            a = last.get((mem, c))
+            if not a or a[1] != 0 or a[2] is None or _lin(a[2], env_at(a[0])) != w: ok = False; break
+        if ok: got.add(k)
+    return got
+
+def screen_varyings(msl):
+    """The interpolated outputs (locn numbers, sorted) of a vertex shader that are its clip → screen varying in every entry point that returns the output struct"""
+    ost = re.search(r'struct main0_out\s*\{(.*?)\};', msl, re.S)
+    locn = {m.group(1): int(m.group(2)) for m in re.finditer(r'float4 (m_\d+) \[\[user\(locn(\d+)\)\]\]', ost.group(1) if ost else '')}
+    entries = list(re.finditer(r'\nvertex main0_out \w+\(.*?\)\n\{\n(.*?)\n\}\n', msl, re.S))
+    if not locn or not entries: return []
+    got = set(locn.values())
+    for e in entries: got &= _entry_screen(e.group(1), locn)
+    return sorted(got)
 
 def variant(msl, bindings, om_only_ok=False):
     # main0_u (dmsh_build.py int_outputs: integer colour targets) is appended to the source after main0; the host takes it from the shader's own library, never from this variant.
@@ -28,12 +171,17 @@ def variant(msl, bindings, om_only_ok=False):
         if member not in tex or member != m.group(3) or member not in reg: continue
         d = re.search(r'float2 %s = float2\((_\d+), (_\d+)\);' % var, msl)
         a = d and re.search(r'float %s = in\.(m_\d+)\.x;' % d.group(1), msl); b = d and re.search(r'float %s = in\.(m_\d+)\.y;' % d.group(2), msl)
-        if not (a and b) or a.group(1) != b.group(1) or a.group(1) not in locn: continue
+        proj = 0
+        if not (a and b) or a.group(1) != b.group(1) or a.group(1) not in locn:
+            pa, pb = (_proj(msl, d.group(1), 'x', locn), _proj(msl, d.group(2), 'y', locn)) if d else (None, None)
+            if not pa or pa != pb: continue
+            mem, proj = pa, 1
+        else: mem = a.group(1)
         i = len(calls)
         if i >= 32: break
         sel = ''.join(f'FX_{i} == {k} ? fb{k} : ' for k in range(NFB))
         out_parts.append(msl[pos:m.start()]); out_parts.append(f'({sel}{m.group(0)})'); pos = m.end()
-        calls.append({'fc': i, 'tex_reg': reg[member], 'varying_locn': locn[a.group(1)]})
+        calls.append({'fc': i, 'tex_reg': reg[member], 'varying_locn': locn[mem], **({'proj': 1} if proj else {})})
     if not calls and not om_only_ok:
         return None, 'no rewritable sample'
     # Mixed-use slots: the same texture also has other (non-rewritable) uses - at runtime this texture must not be switched to tile reads (the rewritten reads and the unrewritten ones would not see the same data)

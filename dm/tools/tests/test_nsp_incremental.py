@@ -29,6 +29,22 @@ def control(path, disp):   # control.nacp with the display version at 0x3060
     path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(bytes(0x3060) + disp.encode().ljust(0x10, b'\0') + bytes(0xa0))
 
 
+class ProvisionalVersionSelection(unittest.TestCase):
+    def test_stale_base_profile_never_silently_ignores_update(self):
+        with self.assertRaisesRegex(nsp.BuildError, "profile-out.*Refusing to silently"):
+            nsp.provisional_version({"v0": None, "v983040": None}, {"v0": {}}, "", Path("cached-profile"))
+
+    def test_explicit_base_selection_is_preserved(self):
+        self.assertEqual(nsp.provisional_version({"v0": None, "v983040": None}, {"v0": {}}, "v0", Path("cached-profile")), "v0")
+
+    def test_selected_update_must_be_available(self):
+        with self.assertRaisesRegex(nsp.BuildError, "not in the input folder"):
+            nsp.provisional_version({"v0": None}, {"v0": {}, "v983040": {}}, "v983040", Path("cached-profile"))
+
+    def test_current_profile_uses_numeric_newest_input(self):
+        self.assertEqual(nsp.provisional_version({"v0": None, "v9": None, "v10": None}, {"v0": {}, "v9": {}, "v10": {}}, "", Path("cached-profile")), "v10")
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()).resolve(); self.addCleanup(shutil.rmtree, self.tmp)

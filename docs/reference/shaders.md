@@ -423,6 +423,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Reader:** `uepak.py` `inline_shaders` tells such a pak from one with archives by its directory index (cooked packages and no `.ushaderbytecode`; an encrypted index is taken for one with archives), and `shader_split.py` `ue_legacy_jobs` reads it file by file, Zlib and LZ4 blocks decoded in Python (`Pak.read`), so no host runs. `ue_inline_shaders` finds each LZ4 block by its first literals, the record's `LSLG`, with the token and literal length bytes in front of it, and takes it when it decodes to exactly the raw size after the block.
 - **Found on:** [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md): 13,980 unique shaders (1,910 vertex, 11,346 pixel, 694 compute, 30 geometry) from the 3.3 GB pak in 13 s.
 
+### Unreal Engine 4.22 to 4.25 paks (version 8)
+
+- **Symptom:** `[RED] the shader split found no shaders in main or the RomFS`; the survey counts the game's Unreal paks, but no `UE shader decode` step runs and the split reads none of them.
+- **Cause:** the paks are version 8, which `uepak.py` did not read (only 4 and 11): `footer` raised, and `unreal_paks` skipped both paks as no Unreal paks. Version 8 keeps version 4's per-file index, but its footer is version 11's (key GUID, encrypted flag, magic 0xcc from the end, five 32-byte compression method names after the SHA-1), and an FPakEntry's compression method is an index (from 1) into those names instead of version 4's flags.
+- **Fix:** `uepak.py` reads version 8 as a legacy pak: its footer as version 11's, its index as version 4's, each file's method named from the footer (`Zlib`, decoded in Python by `Pak.read`). The shaders are inline in the cooked packages and `Engine/GlobalShaderCache-GLSL_SWITCH.bin`, as in [Unreal Engine 4.18](#unreal-engine-418-shaders-inline-in-cooked-packages), so `shader_split.py` `ue_legacy_jobs` reads them unchanged. `dm/tools/tests/test_uepak_v8.py` builds a version 8 pak with a Zlib file and a stored one.
+- **Found on:** DRAGON BALL Z: KAKAROT + A NEW POWER AWAKENS SET (`010051C0134F8000`, 1.00, SDK 9.3.1): 43,113 shaders from 3,776 files in 38 s; it plays from the title through the opening fight.
+
 ### Unreal Engine 3 shader caches (Oodle packages)
 
 - **Symptom:** `the shader split found no shaders in main or the RomFS`; the survey lists the RomFS as cooked packages (`.xxx`) and `.usm` movies only.

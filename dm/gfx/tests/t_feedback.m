@@ -114,7 +114,10 @@ static void slot_case(NvProg *pr, id<MTLRenderPipelineState> pipeline, int slot,
 static void image_view_case(NvProg *pr) {
     const int tid = 661;
     tex_t source;
-    id<MTLTexture> original = target_format(&source, 99796, NVN_FORMAT_R32UI, 2);
+    // An explicit ARC owner complements the serial registry's opaque CF retain.
+    // Keep the base alive through image-view retirement, not just the last draw.
+    static id<MTLTexture> original;
+    original = target_format(&source, 99796, NVN_FORMAT_R32UI, 2);
     view_t level1 = {.set_levels=1, .base_level=1, .nlevels=1};
     mtl_reg_image(tid, &source, &level1);
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
@@ -144,6 +147,16 @@ static void image_view_case(NvProg *pr) {
     CHECK(serial_get(source.serial) == original, "the serial table still holds the image target");   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns original (serial_put's CFBridgingRetain) until mtl_tex_release below, not a leak
     mtl_tex_release(&source);
     CHECK(serial_get(source.serial) == nil, "releasing the image target removes its serial entry");
+    CHECK(g_treg[tid].retired && !g_treg[tid].view && !g_treg[tid].im, "releasing the image target retires its cached image views");
+    S.img[1][b->reg] = 0; memset(&R, 0, sizeof R);
+    mtl_reg_image(tid, NULL, NULL);
+    // Finalize queues retirement at g_fence + 1, even after the last draw.
+    mtl_sub_begin();
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "image view retirement submission completed without error");
+    mtl_drain(); defer_drain();
+    pthread_mutex_lock(&g_res_mu); int resident = [g_res_objects containsObject:original]; pthread_mutex_unlock(&g_res_mu);
+    CHECK(!resident, "the retired image target leaves the residency set");
+    original = nil;
 }
 // Mip-chain passes: a draw rendering one level of a texture whose view it samples reads a view without the attached level. Downsampling (the level below) keeps the view of the
 // levels below; a sampler whose LOD clamp pins one level (fb_pinned_level) reads that level alone, also above the attachment's (an upsample: level n from n + 1) and while

@@ -24,7 +24,7 @@ typedef struct {
     uint32_t view_nonnull, view_slots, live_tex, sview_nonnull;
     uint32_t pools;
     uint64_t pool_adds;
-    uint32_t c1_bufs; uint64_t c1_alloc, c1_data;   // Shader c1 constant segment: buffer count (4 MiB blocks + dedicated 64 KiB), allocated bytes, actual bytes
+    uint32_t c1_bufs; uint64_t c1_alloc, c1_data;   // Shader c1 constant segment: buffer count (4 MiB banks, dedicated 64 KiB slices inside them), allocated bytes, actual bytes
 } mtl_res_count;
 void mtl_res_counts(uint32_t tick, const char *why);   // Print one line of resource counts (the host calls it per tick / event, see dm_res_report_register in dm.h)
 void mtl_res_snapshot(mtl_res_count *out);

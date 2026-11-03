@@ -353,7 +353,7 @@ static int g_pool_res_n;   // registered pools already in the residency set (for
 #define C1_DECL_SIZE (64u << 10)
 static NSMutableArray *g_c1_banks;
 static size_t g_c1_bank_off, g_c1_alloc_bytes, g_c1_data_bytes;
-static uint64_t g_c1_count, g_c1_exclusive;
+static uint64_t g_c1_count;
 static NSMutableSet<NSString *> *g_c1_full;
 static int g_c1_full_valid;
 static NSDictionary<NSString *, NSString *> *g_cb_ext;   // cb_extent.tsv: shader key → "reg:bytes ..." (how far into each uniform slot the shader can read); nil when stale or missing
@@ -3850,35 +3850,37 @@ static void shmap_read(void) {
 @implementation WarmItem @end
 static NSMutableDictionary<NSString *, NvShader *> *g_shcache;
 
-static void c1_store(NvShader *o) {
-    size_t len = o->rf.c1_len;
-    NSString *guardKey = [NSString stringWithUTF8String:o->key];
-    if ([guardKey hasSuffix:@"_b"]) guardKey = [guardKey substringToIndex:guardKey.length - 2];
-    os_unfair_lock_lock(&g_c1_lock);   // Both the warm-up thread and the submit thread load shaders
-    if (o->geo_vertices || !g_c1_full_valid || [g_c1_full containsObject:guardKey]) {   // Geometry topology variants have independent control flow; only the base shader is in the guard table.
-        o->c1buf = [g_dev newBufferWithLength:C1_DECL_SIZE options:MTLResourceStorageModeShared]; o->c1_gpu = o->c1buf.gpuAddress;
-        if (!o->c1buf) { os_unfair_lock_unlock(&g_c1_lock); MDIE("c1 dedicated buffer allocation failed"); }
-        res_add(o->c1buf);
-        memset(o->c1buf.contents, 0, C1_DECL_SIZE); memcpy(o->c1buf.contents, o->rf.c1, len);
-        g_c1_alloc_bytes += C1_DECL_SIZE; g_c1_data_bytes += len; g_c1_count++; g_c1_exclusive++;
-        os_unfair_lock_unlock(&g_c1_lock);
-        return;
-    }
-    size_t need = (len + 255u) & ~((size_t)255u);
+// A bank with room for `room` more bytes past the current offset (a new zeroed one when the last has none); under g_c1_lock. NULL when it cannot be allocated
+static id<MTLBuffer> c1_bank(size_t room) {
     if (!g_c1_banks) g_c1_banks = [NSMutableArray array];
-    if (!g_c1_banks.count || g_c1_bank_off + need + 256u + C1_DECL_SIZE > C1_BANK_SIZE) {
+    if (!g_c1_banks.count || g_c1_bank_off + room > C1_BANK_SIZE) {
         id<MTLBuffer> b = [g_dev newBufferWithLength:C1_BANK_SIZE options:MTLResourceStorageModeShared];
-        if (!b) { os_unfair_lock_unlock(&g_c1_lock); MDIE("c1 buffer block allocation failed"); }
+        if (!b) return nil;
         res_add(b);
         memset(b.contents, 0, C1_BANK_SIZE);
         [g_c1_banks addObject:b];
         g_c1_bank_off = 0;
         g_c1_alloc_bytes += C1_BANK_SIZE;
     }
-    id<MTLBuffer> b = g_c1_banks.lastObject;
+    return g_c1_banks.lastObject;
+}
+
+static void c1_store(NvShader *o) {
+    size_t len = o->rf.c1_len;
+    NSString *guardKey = [NSString stringWithUTF8String:o->key];
+    if ([guardKey hasSuffix:@"_b"]) guardKey = [guardKey substringToIndex:guardKey.length - 2];
+    os_unfair_lock_lock(&g_c1_lock);   // Both the warm-up thread and the submit thread load shaders
+    // A dedicated c1 is 64 KiB of its own, zero past its data: a slice of a bank (zeroed when made), not an MTLBuffer of its own. Without c1_full.tsv (a partial library) every
+    // shader gets one, and one buffer each put about 10,000 allocations into the queue's residency set on Hyrule Warriors: Age of Imprisonment's way to its first field; every
+    // commit then spent its time in the kernel (the Metal 4 submission queue busy about 75% of the time, almost all system time), command allocators stayed in flight while the
+    // GPU sat idle, and the game ran at about 10 fps. Slices of 4 MiB banks are 64 to a buffer
+    int dedicated = o->geo_vertices || !g_c1_full_valid || [g_c1_full containsObject:guardKey];   // Geometry topology variants have independent control flow; only the base shader is in the guard table.
+    size_t need = (len + 255u) & ~((size_t)255u);
+    id<MTLBuffer> b = c1_bank(dedicated ? C1_DECL_SIZE : need + 256u + C1_DECL_SIZE);
+    if (!b) { os_unfair_lock_unlock(&g_c1_lock); MDIE("c1 buffer block allocation failed"); }
     size_t off = g_c1_bank_off;
     memcpy((uint8_t *)b.contents + off, o->rf.c1, len);
-    g_c1_bank_off += need + 256u;
+    g_c1_bank_off += dedicated ? C1_DECL_SIZE : need + 256u;
     g_c1_data_bytes += len;
     g_c1_count++;
     o->c1buf = b;
@@ -11495,7 +11497,7 @@ void mtl_res_snapshot(mtl_res_count *out) {
     out->dss = g_dss.n;
     out->shaders = (uint32_t)(g_shcache ? g_shcache.count : 0);
     os_unfair_lock_lock(&g_c1_lock);
-    out->c1_bufs = (uint32_t)(g_c1_banks.count + g_c1_exclusive); out->c1_alloc = g_c1_alloc_bytes; out->c1_data = g_c1_data_bytes;
+    out->c1_bufs = (uint32_t)g_c1_banks.count; out->c1_alloc = g_c1_alloc_bytes; out->c1_data = g_c1_data_bytes;
     os_unfair_lock_unlock(&g_c1_lock);
     pthread_mutex_lock(&g_smu);
     out->live_tex = g_by_serial.n;

@@ -1,6 +1,6 @@
 # Hyrule Warriors: Age of Imprisonment (`04003F40232DE000`)
 
-A Switch 2 game: update v196608, SDK 20.5.15 built for the Switch 2 (`Ounce`). Koei Tecmo's KTGL engine on NVN2, modules `main`, `subsdk0` (NintendoSDK_movie: VP9 movies) and `sdk`. **Plays on the Mac** from a new save through the first-run settings, the opening movies and cutscenes into the first field, where Zelda walks, but at about 10 fps there ([Performance](#performance)). Battles have not been reached. No IPA has been built.
+A Switch 2 game: update v196608, SDK 20.5.15 built for the Switch 2 (`Ounce`). Koei Tecmo's KTGL engine on NVN2, modules `main`, `subsdk0` (NintendoSDK_movie: VP9 movies) and `sdk`. **Plays on the Mac** from a new save through the first-run settings, the opening movies and cutscenes into the first field, where Zelda walks; the frame time's median is 16.6 ms there, with long frames every few frames on a 16 GB Mac ([Performance](#performance)). Battles have not been reached. No IPA has been built.
 
 ## What it needs
 
@@ -24,7 +24,9 @@ The rewritten modules take 62.5 MB, so the default `mem_used` (64 MB) covers the
 
 ## Performance
 
-- Current (open): the first field runs at about 10 fps (frame time p50 about 100 ms, p99 400–580 ms) on an M6 Mac with 16 GB, with 3–6 ms of GPU time a frame. The submit thread waits for a command allocator while the GPU idles between encoders, and Metal's submission queue spends nearly all its time in the kernel. The residency set holds 16,118 objects, 9,854 of them the partial library's dedicated c1 buffers.
+- The first field, from boot: frame time p50 16.6 ms, p95 about 18 ms, p99 100–114 ms on an M6 Mac with 16 GB. Each frame takes 3–6 ms of GPU time; the long frames wait for Metal's submission queue.
+- Resolved: about 10 fps (p50 100 ms) in the field. Each dedicated c1 constant block of the partial library was a Metal buffer of its own, and the residency set's 16,118 objects made every commit slow ([Dedicated c1 constants as slices of a bank](../../../docs/reference/frame-rate.md#dedicated-c1-constants-as-slices-of-a-bank)).
+- Current (open): the Metal driver wires and unwires memory for each submission, 2.8 s of every 4 s in a Metal System Trace. The game's own GPU memory pool is a constant 4,655 MB (`main+0x19eb098`), with a second pool of 350 MB, and its GPU allocations total 7 GB; the 16 GB Mac had 9.7 GB wired system-wide and about 160 MB free. With fewer commits per frame (`DM_NVN_CUT=0`) p99 was 52–69 ms. A Mac with more memory has not been tried.
 
 ## Driving it on the Mac
 
@@ -32,7 +34,7 @@ Run headless: `DM_WINDOW` set to anything, `0` too, opens a window, and a covere
 
 ## Open
 
-- The slow frames ([Performance](#performance)).
+- The long frames ([Performance](#performance)).
 - The game writes its save (`DATA.BIN`), but every boot starts at the first-run settings again; not looked into.
 - Battles, the picture against a Switch 2, an IPA (a full iOS shader build first).
 
@@ -41,3 +43,4 @@ Run headless: `DM_WINDOW` set to anything, `0` too, opens a window, and a covere
 - [GameChat at boot](../../../docs/reference/services.md#gamechat-at-boot): boot aborts.
 - [Whether the language selection is limited](../../../docs/reference/services.md#whether-the-language-selection-is-limited).
 - [The target frame rate (graphics frame length)](../../../docs/reference/services.md#the-target-frame-rate-graphics-frame-length).
+- [Dedicated c1 constants as slices of a bank](../../../docs/reference/frame-rate.md#dedicated-c1-constants-as-slices-of-a-bank): about 10 fps in the first field.

@@ -138,7 +138,7 @@ class DeriveProfile(Base):
         self.assertEqual(game.Game(self.pdir).get('fps_target'), '60')
 
     def test_modules_this_version_lacks_are_left_out(self):   # Mario Kart World 1.0 has no subsdk1, the profile's 1.8.0 does
-        source = self.src / 'game.tsv'; source.write_text(source.read_text() + 'modules\tmain subsdk1\n')
+        source = self.src / 'game.tsv'; source.write_text(source.read_text().replace('modules\tmain\n', 'modules\tmain subsdk1\n'))
         self.derive(mods=('main', 'subsdk1'))
         self.assertEqual(game.Game(self.pdir).get('modules'), 'main')
 

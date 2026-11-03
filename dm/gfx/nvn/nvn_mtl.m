@@ -413,7 +413,7 @@ static void udc_selftest(void) {
 void mtl_init(void) {
     if (g_dev) return;
     const char *vbc = getenv("DM_NVN_VBUF_CACHE"); g_vbuf_cache = !(vbc && !strcmp(vbc, "0"));
-    // The 120 Hz link selection follows the FC 26 120 fps patch by imnotsharingmyname (MIT); 100 fps uses the link's own rate (mtl_link_rate).
+    // The 120 Hz link selection follows the FC 26 120 fps patch by @imnotsharingmyname (MIT); 100 fps uses the link's own rate (mtl_link_rate).
     const char *link = getenv("DM_PRESENT_LINK"), *ft = getenv("DM_FPS_TARGET");
     g_dm_present_link = link ? atoi(link) : (ft ? atoi(ft) : DM_GAME_FPS_TARGET) > 60 ? 2 : 1; if (g_dm_present_link < 0 || g_dm_present_link > 2) g_dm_present_link = 1;   // Default 1 (real-device same-process alternation: when load exceeds one display-link period, long frames 15% → 0 and frame intervals even out; no difference from 0 at a steady 60); DM_PRESENT_LINK=0 turns it off   // 1 = present on every tick of a 60 Hz display link; 2 = 120 Hz display link, the game presents a frame every other display-link tick (when behind, it can present on the next 8.33 ms display-link tick)
     const char *latency = getenv("DM_PRESENT_LATENCY");
@@ -12567,7 +12567,7 @@ static id<MTLTexture> present_raw_src(id<MTLTexture> src) {
 // The rectangle of the canvas (dw x dh) the picture (cw x ch) is drawn into: the picture's aspect ratio kept and centred, black bars in the rest (no stretching when the screen's ratio
 // differs from the game's, e.g. iPhone about 19.5:9 against the game's 16:9); when the ratios differ by under 1 % (the remainder from a game width that is a multiple of 8 in the
 // full-screen setup, e.g. 1952x900 against 2868x1320 differs by 0.17 %) the whole canvas, leaving no border of a few pixels. DM_PRESENT_FILL=stretch always uses the whole canvas
-// (no black bars, the picture stretched to the screen's ratio, e.g. 16:9 on a 16:10 MacBook screen); fit (the default) keeps the ratio. From the FC 26 120 fps patch by imnotsharingmyname (MIT)
+// (no black bars, the picture stretched to the screen's ratio, e.g. 16:9 on a 16:10 MacBook screen); fit (the default) keeps the ratio. From the FC 26 120 fps patch by @imnotsharingmyname (MIT)
 static int g_fill_mode = -1;   // 1 = stretch, 0 = fit
 static int fill_mode(void) {
     if (g_fill_mode >= 0) return g_fill_mode;

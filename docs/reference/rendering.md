@@ -873,6 +873,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 ## Uniforms, copies and ordering
 
+### Bindless handles read from guest memory directly
+
+- **Symptom:** a `sample` of the submit thread shows `ubo_read` calling `-[MTLBuffer contents]` with `objc_retainAutorelease` at every handle read, and `objc_autoreleasePoolPop` at commit draining those buffers. Fire Emblem Fortune's Weave: about 4 % of the submit thread in the reads and as much again in the drain.
+- **Cause:** `contents` is an inner-pointer method, so under ARC each call retains and autoreleases the buffer; a bindless shader reads dozens of handles a draw. The argument writes in `encode_args_` asked the arena's buffer for its contents the same way.
+- **Fix:** `ubo_read` in `nvn_mtl.m`, for every game. A pool's buffer wraps guest memory without a copy at its own address (`mtl_pool_add` is the only place pools are made), so once `mtl_addr` finds the pool, the bytes are read at the guest address itself; `mtl_addr` still runs, so the pool check and its residency are unchanged. An arena keeps its buffer's `contents` (`NvArena.cpu`), and the argument, push-constant, driver-segment and border writes go through it. If pools ever stop being no-copy wrappers, this read would need the buffer again.
+- **Check:** `make -C dm/gfx/tests GAME=<id> run`. Fortune's Weave's battle map (MacBook Pro M1 Pro): submit 42.8k → 39.2k instructions per draw.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md).
+
 ### Depth plane copies between depth formats
 
 - **Symptom:** `[RED] texture→texture copy case not implemented: 1920x1080x1→1920x1080x1 flags 0 format 260→252 3D 0→0`.

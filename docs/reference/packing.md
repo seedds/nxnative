@@ -1,5 +1,14 @@
 # Packing
 
+## Game packages
+
+### PFS0 file-name table missing its final NUL
+
+- **Symptom:** package identification stops with `ValueError: subsection not found` in `pfs0_names`, or LibHac reports `ResultFsPathNotFound` opening the last file of an NSP.
+- **Cause:** older NSZ writers omitted the final NUL in the PFS0 string table. The final name is bounded by the table length, but the Python scanner required a terminator and LibHac reads names as NUL-terminated strings.
+- **Fix:** the scanner accepts the table boundary as the end of the final name. `nx_extract` supplies LibHac with a virtual header containing the missing NUL followed by the original payload storage. File offsets remain relative to that payload, and the source package and encrypted NCA bytes are unchanged. Truncated tables and out-of-table name offsets still fail. Synthetic package tests cover both readers and payload preservation.
+- **Found on:** Moving Out 2 (`010065D018172000`), base 1.1.254 NSP and update 1.3.315 NSZ. Package reading was checked, not gameplay.
+
 ## Build tools
 
 ### Homebrew .NET is on PATH but apphosts cannot find the runtime
@@ -130,6 +139,13 @@
 - **Cause:** the same AppleDouble files as above. The module, shader, pipeline and font globs of `selected_inputs` took `._<name>` for a module or a library, and a `._x.patched.bin` has no `x.fixups.tsv` beside it. `shutil.copy2` of the host tried to set the copy's flags on a file system without extended attributes (`chflags: Operation not permitted`), and `cp -R` carried a folder's sidecars into the bundle, where `DMModuleFiles` listed them. `codesign` then read the `._nxnative` beside the launcher as a nested code object that is not signed and refused the whole bundle. Signing also sets an attribute on what it signs, so the sidecar comes back after a successful signature.
 - **Fix:** `dm/mac/pack_app.py` `detritus()` drops those names from `selected_inputs`, so neither the pack nor `DMModuleFiles` sees them. `copy()` passes `-X` where it copies and not where it clones (`cp` refuses the two together), and the host goes through `shutil.copy` instead of `copy2`, so a copy creates none of them. `strip_detritus()` runs before `codesign` reads the staged bundle, runs again after `xattr -cr` when `codesign` still refuses one, and runs once more after signing. On APFS nothing changes: no sidecar exists there, and the two passes are a stat walk. `dm/tools/tests/test_nsp_mac_app.py` puts a `._` file in every input folder and checks that it is not selected, does not reach the bundle, and is not in `DMModuleFiles`.
 - **Found on:** the NX2Apple fork's users, packing Mac apps on an external drive ([LNPANDY/NX2Apple#486](https://github.com/LNPANDY/NX2Apple/issues/486)); reproduced on an exFAT disk image made with `hdiutil create -fs ExFAT`, where the same inputs pack, sign and pass `codesign --verify --strict` with the change and stop three ways without it. Applies to every game's Mac app.
+
+### External shader directories contain AppleDouble metadata
+
+- **Symptom:** on an exFAT or FAT drive, shader splitting stops with `ValueError: not a version 2 shader code archive` or `[RED] /glslc_capture/._…: no GLSLC output`.
+- **Cause:** `shader_split.py` selected captured `.glslc` programs and decoded `.ushaderbytecode` archives by extension alone. macOS AppleDouble sidecars retain that extension, but their `._<name>` files contain metadata rather than shader bytes.
+- **Fix:** exclude `._` names when listing both external shader directories, including `DM_GLSLC_CAPTURE` and `DM_UE_SHADERS` overrides. Other dot-prefixed names remain valid inputs, and malformed real inputs still fail their normal validation.
+- **Found on:** an external-drive build reported in [issue #229's follow-up](https://github.com/seedds/nxnative/issues/229#issuecomment-6563450365). That commenter used a different, unnamed game; this fixes the sidecar failure, not the original Metroid Prime 4 port.
 
 ## Compressed inputs
 

@@ -423,6 +423,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Reader:** `uepak.py` `inline_shaders` tells such a pak from one with archives by its directory index (cooked packages and no `.ushaderbytecode`; an encrypted index is taken for one with archives), and `shader_split.py` `ue_legacy_jobs` reads it file by file, Zlib and LZ4 blocks decoded in Python (`Pak.read`), so no host runs. `ue_inline_shaders` finds each LZ4 block by its first literals, the record's `LSLG`, with the token and literal length bytes in front of it, and takes it when it decodes to exactly the raw size after the block.
 - **Found on:** [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md): 13,980 unique shaders (1,910 vertex, 11,346 pixel, 694 compute, 30 geometry) from the 3.3 GB pak in 13 s.
 
+### Unreal Engine 4.22 to 4.25 paks (version 8)
+
+- **Symptom:** `[RED] the shader split found no shaders in main or the RomFS`; the survey counts the game's Unreal paks, but no `UE shader decode` step runs and the split reads none of them.
+- **Cause:** the paks are version 8, which `uepak.py` did not read (only 4 and 11): `footer` raised, and `unreal_paks` skipped both paks as no Unreal paks. Version 8 keeps version 4's per-file index, but its footer is version 11's (key GUID, encrypted flag, magic 0xcc from the end, five 32-byte compression method names after the SHA-1), and an FPakEntry's compression method is an index (from 1) into those names instead of version 4's flags.
+- **Fix:** `uepak.py` reads version 8 as a legacy pak: its footer as version 11's, its index as version 4's, each file's method named from the footer (`Zlib`, decoded in Python by `Pak.read`). The shaders are inline in the cooked packages and `Engine/GlobalShaderCache-GLSL_SWITCH.bin`, as in [Unreal Engine 4.18](#unreal-engine-418-shaders-inline-in-cooked-packages), so `shader_split.py` `ue_legacy_jobs` reads them unchanged. `dm/tools/tests/test_uepak_v8.py` builds a version 8 pak with a Zlib file and a stored one.
+- **Found on:** DRAGON BALL Z: KAKAROT + A NEW POWER AWAKENS SET (`010051C0134F8000`, 1.00, SDK 9.3.1): 43,113 shaders from 3,776 files in 38 s; it plays from the title through the opening fight.
+
 ### Unreal Engine 3 shader caches (Oodle packages)
 
 - **Symptom:** `the shader split found no shaders in main or the RomFS`; the survey lists the RomFS as cooked packages (`.xxx`) and `.usm` movies only.
@@ -1343,6 +1350,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `write_script` streams the script to `bases.mtl4-json.partial` and replaces the previous script only when the two differ; `archive_key` hashes the same JSON as it is encoded (the keys of earlier builds still match); the descriptors are released before `metal-tt` starts. Measured with 140,036 synthetic bases: peak 1.83 → 0.45 GB, 1.81 → 0.06 GB held while `metal-tt` runs, about 11 s more encoding (Python 3.15), byte-identical script and key.
 - **Found on:** [Mario Party Superstars](../../dm/games/01006FE013472000/README.md) ([GitHub issue #1022](https://github.com/seedds/nxnative/issues/1022), [PR #1024](https://github.com/seedds/nxnative/pull/1024)). Open: why `metal-tt` failed after 76 minutes there, and how its memory grows with the number of bases.
 - **Check:** `dm/tools/tests/test_pso_offline.py` (`test_large_script_memory_and_compatible_archive_key`).
+
+### Bounded groups for the offline pipeline compiler (experimental)
+
+- **Symptom:** the offline archive stops with only `applegpu-nt command failed`; the macOS kernel log reports `no paging space action` and kills `air-nt` as the largest compressed process.
+- **Cause:** Apple's GPU compiler can exhaust memory while compiling the complete pipeline list. Lowering the Python builder's memory does not bound the compiler's. RSS excludes compressed and swapped allocations: use kernel resource-kill diagnostics and physical-footprint measurements to distinguish this failure from a compiler rejection or a full disk.
+- **Fix (experimental):** `pso_offline.py --batch-size N` compiles sequential groups of at most N bases, each script referencing only its libraries, then merges all results with `metal-pack -nthreads 1`. The normal single-file output, full-input archive key and runtime stamp stay compatible. Successful groups are cached by their own descriptors, library bytes, GPU, OS and compiler. A failed group or merge publishes neither a new complete archive key nor coverage stamp. The default remains one compiler invocation. This bounds input count, not compiler memory; an individual pipeline or the final merge may still exhaust resources.
+- **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md#files-and-shaders), which records the resource-kill evidence, before/after measurements and complete archive validation. [Issue #1022](https://github.com/seedds/nxnative/issues/1022) requests archive partitioning for another game's resource-heavy build; that workload remains unverified.
+- **Check:** `dm/tools/tests/test_pso_offline.py` covers pilot reuse, compatible full-archive reuse, partial final batches, changed-group invalidation, compile failure and merge failure. `t_pso_bundle` compiles one base per group, opens the merged result, retrieves a base from each group, rejects an absent depth entry and compares the complete coverage stamp with the ordinary build.
 
 ### Offline pipeline archive on a full disk
 

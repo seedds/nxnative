@@ -1020,13 +1020,25 @@ def tail_call_at_end(insl, j):
         if 'x18' not in [p.reg_name(r) for r in p.regs_access()[1]]: continue
         return p.mnemonic == 'ldr' and bool(re.fullmatch(r'x18, \[(x\d+|sp)(, #(0x[0-9a-f]+|\d+))?\]', p.op_str))
     return False
+def tail_call_padded(insl, j):
+    """An unframed, straight-line pointer thunk ending in br x18 and zero trap padding."""
+    if j + 1 >= len(insl) or any(p.mnemonic != 'udf' or p.op_str != '#0' for p in insl[j + 1:]): return False
+    if any(b.address != a.address + 4 for a, b in zip(insl, insl[1:])): return False
+    for p in insl[:j]:
+        if p.mnemonic not in ('mov', 'ldr', 'ldrh', 'ldp', 'add', 'str', 'stp'): return False
+        if {p.reg_name(r) for r in p.regs_access()[1]} & {'sp', 'wsp', 'fp', 'lr', 'x29', 'w29', 'x30', 'w30'}: return False
+    for p in reversed(insl[:j]):
+        if not {'x18', 'w18'} & {p.reg_name(r) for r in p.regs_access()[1]}: continue
+        return p.mnemonic in ('ldr', 'ldp') and bool(re.fullmatch(r'x18, (x\d+, )?\[(x\d+|sp)(, #(0x[0-9a-f]+|\d+))?\]', p.op_str))
+    return False
 def tail_call(insl, j):
-    """Keep the terminal rule, which proves no frame. A br x18 with code after it is a tail call only when the frame is provably gone: a jump inside a function needs that function's frame.
+    """After terminal or padded unframed tails, a br x18 with other code after it is a tail call only when the frame is provably gone: a jump inside a function needs that function's frame.
     A wrong accept is silent, where a rejection stops at `jump table <addr>`, so anything not proven here is rejected. Two forms (Warm Snow and Ori and the Blind Forest, Unity IL2CPP):
     a 16-byte thunk, stp x29,x30,[sp,#-0x10]!; mov x29,sp, only guards and argument moves, its error blocks after the br; or an ordinary function, sub sp,sp,#N first and add sp,sp,#N right
     before the br, the pair saved to and restored from one slot, whose body may branch and call (lazy init, loops) and whose other paths may follow the br. Either way nothing writes sp, x29
     or x30 on the way, no stack store touches the pair, and from the restore to the br every path runs straight"""
     if j + 1 == len(insl): return tail_call_at_end(insl, j)
+    if tail_call_padded(insl, j): return True
     if j < 4 or any(b.address != a.address + 4 for a, b in zip(insl, insl[1:])): return False
     writes = lambda p: {p.reg_name(r) for r in p.regs_access()[1]}
     cond = lambda p: p.mnemonic in ('cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.')

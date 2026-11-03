@@ -156,6 +156,7 @@ static int g_any;              // DM_CHEATS_ANY_BUILD
 static module_t *g_main_mod;   // the "main" module of the profile (not an NRO), found at init; its loaded fields come from loader.c
 int dm_guest_as_contains(uintptr_t a);              // hle_svc.c: the address lies in the reserved guest address block
 void svc_guest_range(uint8_t **base, size_t *size); // hle_svc.c: that block (the aslr region of GetInfo), NULL before mem_init
+void svc_alias_range(uint8_t **base, size_t *size); // hle_svc.c: the alias region in it (the profile's size, or DM_ALIAS_SIZE's), NULL before mem_init
 
 // A second mapping of main's memory (same physical pages, mach_vm_remap with copy = false), protected read+write for the
 // whole process: a cheat's write to a code page goes through it while the game's own mapping stays executable. Toggling
@@ -619,7 +620,8 @@ static void addr_name(uint64_t addr, char *out, size_t n) {
     where_t w;
     uint64_t ab = region_base(2);
     if (where_get(addr, 1, &w) || w.kind == WH_GUEST) {
-        if (ab && addr >= ab && addr - ab < (uint64_t)DM_GAME_MEM_ALIAS) snprintf(out, n, "alias+0x%llX", (unsigned long long)(addr - ab));
+        uint8_t *ap = NULL; size_t an = 0; svc_alias_range(&ap, &an);
+        if (ab && addr >= ab && addr - ab < (uint64_t)an) snprintf(out, n, "alias+0x%llX", (unsigned long long)(addr - ab));
         else snprintf(out, n, "0x%llX", (unsigned long long)addr);
     } else snprintf(out, n, "%s+0x%llX", w.kind == WH_MAIN ? "main" : w.kind == WH_HEAP ? "heap" : w.mod->name, (unsigned long long)(addr - w.base));
 }
@@ -719,7 +721,7 @@ static uint64_t region_base(int m) {
     uint64_t hb; size_t hopen;
     switch (m) {
         case 1: dm_guest_heap_range(&hb, &hopen); return hb && hopen ? hb : 0;
-        case 2: dm_guest_heap_range(&hb, &hopen); return hb ? hb - (uint64_t)DM_GAME_MEM_STACK - (uint64_t)DM_GAME_MEM_ALIAS : 0;
+        case 2: { uint8_t *ap = NULL; size_t an = 0; svc_alias_range(&ap, &an); return (uint64_t)(uintptr_t)ap; }   // DM_ALIAS_SIZE changes its size, so not computed from the profile's
         case 3: { uint8_t *as = NULL; size_t n = 0; svc_guest_range(&as, &n); return (uint64_t)(uintptr_t)as; }
         case 4: return 0;
         default: return g_main_mod ? (uint64_t)(uintptr_t)g_main_mod->base : 0;

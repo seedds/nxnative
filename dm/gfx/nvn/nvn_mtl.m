@@ -2738,7 +2738,10 @@ static int tex_cpu_content(const tex_t *t) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_STORAGE_FIRST_USE"); on = !e || atoi(e) != 0; }
     if (!on || !t->mem || !t->pool || t->has_layout || !(fmt_compressed(t->d.format) || t->d.target == NVN_TEXTURE_TARGET_3D) || t->d.samples > 1 || t->d.target == NVN_TEXTURE_TARGET_BUFFER) return 0;
     if (t->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL)) return 0;   // the CPU cannot write it (tex_init_fill fills it once) / sparse (tex_from_storage)
-    if (t->d.flags & (NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE)) return 0;
+    // IMAGE only matters for an uncompressed texture: shaders cannot write a block-compressed one. Pokopia gives nearly every texture IMAGE (flags 0x4), its icons BC1 / BC7 in a
+    // CPU_UNCACHED pool; left to the one-time fill, a new icon over reused storage got the previous icon's picture from the sharing table (xFractals/pokopia-native issue #1)
+    if ((t->d.flags & (NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE))
+        || ((t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && !fmt_compressed(t->d.format))) return 0;
     if (!mem_any(t->mem, t->L.size)) return 0;
     static uint64_t n; if (n++ < 4) MLOG("texture written by the CPU before its first use ser=%llu %ux%ux%u format %#x pool flags %#x: uploaded from its storage, re-uploaded when it changes (%llu so far)",
                                          (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->pool->flags, (unsigned long long)n);
@@ -3970,7 +3973,7 @@ static void shmap_read(void) {
 @interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, discard_fn, fn_u, fn_m, fn_d, geo_fn; uint8_t mask_m;   // fn_u: the integer-output entry point (dmsh_build.py fs_uint), for pipelines whose colour attachments are all unsigned integer (pso_desc); fn_m: the mixed one, its outputs in mask_m unsigned integer; fn_d: the dual-source one (dmsh_build.py fs_dual)
     uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, layer_out; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
     uint32_t geo_vertices, geo_invocations, geo_output, geo_stride, geo_index_stride;
-    id<MTLComputePipelineState> geo_pso; int geo_pso_failed;
+    id<MTLComputePipelineState> geo_pso; int geo_pso_failed, cps_failed;   // cps_failed: Metal refused this compute shader's pipeline (dispatch): its dispatches are skipped without asking again
     int16_t *geo_slot; uint32_t geo_words;   // a lean passthrough kernel (dmsh_geometry.lean): capture word -> record slot (-1: not read), record words
     NvShader *geo_lean_v[5]; uint8_t geo_lean_tried;   // a geometry shader's lean kernels by input topology (looked up once)
     NvShader *geo_bg_v[5], *geo_bgv_v; uint8_t geo_bg_tried;   // its kernels by input topology (_bg<n>) and its reader (_bgv), looked up once (bit 7: the reader)
@@ -8062,27 +8065,33 @@ static void sd_finish(void) {
 // Coverage proof (holds only if all are satisfied; anything unrecognized is treated as not holding):
 //   Shader: the vertex position xyz is taken as-is from one vertex attribute, w is 1 or the same attribute's .w (dmsh_build raster_facts); the fragment does not discard, does not write sample_mask, and writes this color index
 //   State: this attachment has no blending, a full write mask, no alpha-to-coverage, fill mode, no depth test (or ALWAYS), no stencil test, single sample, not 3D
-//   Vertices: non-indexed or 16 / 32-bit indexed draws, with indices and positions both read from CPU-visible pool memory; the scissor / viewport / geometry / winding / depth clipping decisions are in nvn_cover.h (pure functions, with unit tests)
-// Read out attribute a of all vertices of this draw (non-indexed or 16 / 32-bit indexed; vertex number = first + k or index value + base_vertex), with missing components filled with 0 / 1 per the fetch rules.
+//   Vertices: non-indexed or 8 / 16 / 32-bit indexed draws, with indices and positions both read from CPU-visible pool memory; the scissor / viewport / geometry / winding / depth clipping decisions are in nvn_cover.h (pure functions, with unit tests)
+// Read float2/3/4 or half2/3/4 attribute a of all vertices (non-indexed or 8 / 16 / 32-bit indexed; vertex number = first + k or index value + base_vertex), with missing components filled with 0 / 1 per the fetch rules.
 // Returns 0 on success, a reason code on failure (6 vertex count / index type, 7 attribute index, 8 format / stream, 9 out of bounds, 10 address)
 static int attr_read(int a, const p_draw *dw, const p_draw_idx *di, float P[64][4]) {
     int n = dw ? dw->count : di->count;
-    if (n < 1 || n > 64 || (dw && dw->first < 0) || (di && (di->itype < 1 || di->itype > 2))) return 6;
+    if (n < 1 || n > 64 || (dw && dw->first < 0) || (di && (di->itype < 0 || di->itype > 2))) return 6;
     if (a < 0 || a >= S.nattr || S.attr[a].stream >= 16) return 7;
     va_st at = S.attr[a]; vs_st sm = S.stream[at.stream]; NVNbufferRange vb = S.vbuf[at.stream];
-    MTLVertexFormat vf = vfmt(at.fmt); int nc = vf == MTLVertexFormatFloat2 ? 2 : vf == MTLVertexFormatFloat3 ? 3 : vf == MTLVertexFormatFloat4 ? 4 : 0;
+    MTLVertexFormat vf = vfmt(at.fmt);
+    int hf = vf == MTLVertexFormatHalf2 || vf == MTLVertexFormatHalf3 || vf == MTLVertexFormatHalf4;
+    int nc = vf == MTLVertexFormatFloat2 || vf == MTLVertexFormatHalf2 ? 2 : vf == MTLVertexFormatFloat3 || vf == MTLVertexFormatHalf3 ? 3 : vf == MTLVertexFormatFloat4 || vf == MTLVertexFormatHalf4 ? 4 : 0;
+    int bytes = (hf ? 2 : 4) * nc;
     if (!nc || !sm.stride || sm.divisor || !vb.address) return 8;
-    const uint8_t *ib = NULL; int isz = di ? (di->itype == 1 ? 2 : 4) : 0;
+    const uint8_t *ib = NULL; int isz = di ? 1 << di->itype : 0;
     if (di && pend_hits(di->ibuf, (uint64_t)n * isz)) return 10;   // indices written by a copy / update earlier in this submission: the CPU still sees the old ones
     if (di) { void *m; uint64_t o; if (!mtl_addr(di->ibuf, (uint64_t)n * isz, &m, &o) || !(ib = [(__bridge id<MTLBuffer>)m contents])) return 10; ib += o; }
     for (int k = 0; k < n; k++) {
-        int64_t vid = dw ? (int64_t)dw->first + k : (isz == 2 ? (int64_t)((const uint16_t *)ib)[k] : (int64_t)((const uint32_t *)ib)[k]) + di->base_vertex;
+        int64_t vid = dw ? (int64_t)dw->first + k : (isz == 1 ? (int64_t)ib[k] : isz == 2 ? (int64_t)((const uint16_t *)ib)[k] : (int64_t)((const uint32_t *)ib)[k]) + di->base_vertex;
         uint64_t off = (uint64_t)vid * sm.stride + at.offset;
-        if (vid < 0 || off + 4 * nc > vb.size) return 9;
-        if (pend_hits(vb.address + off, 4 * nc)) return 10;   // position written on the GPU earlier in this submission
+        if (vid < 0 || off + bytes > vb.size) return 9;
+        if (pend_hits(vb.address + off, bytes)) return 10;   // position written on the GPU earlier in this submission
         void *mb; uint64_t mo; const uint8_t *base;
-        if (!mtl_addr(vb.address + off, 4 * nc, &mb, &mo) || !(base = [(__bridge id<MTLBuffer>)mb contents])) return 10;
-        float v[4] = {0, 0, 0, 1}; memcpy(v, base + mo, 4 * nc); memcpy(P[k], v, sizeof v);
+        if (!mtl_addr(vb.address + off, bytes, &mb, &mo) || !(base = [(__bridge id<MTLBuffer>)mb contents])) return 10;
+        float v[4] = {0, 0, 0, 1};
+        if (hf) for (int c = 0; c < nc; c++) { _Float16 h; memcpy(&h, base + mo + 2 * c, 2); v[c] = (float)h; }
+        else memcpy(v, base + mo, bytes);
+        memcpy(P[k], v, sizeof v);
     }
     return 0;
 }
@@ -10222,9 +10231,33 @@ static int csh_cs(NvShader *cs, const p_dispatch *dp, csh_rng *w, int *nw, int *
             default: break; } }
     return 1;
 }
+// Whether a dispatch comes before the first op that would stop cs_hoist_try's scan, looking at op codes only. Most passes have none: the scan then saved and restored the
+// whole replay state (S, R) and marked every argument table dirty at each pass's first draw for nothing (BotW: 2.5% of the submit thread in those copies alone).
+// Ops it cannot rule out (draws whose reads may stop the full scan) count as passable, so a 1 here only means the full scan may move something
+static int csh_dispatch_ahead(void) {
+    fz_cursor cur = {.p = g_exec_next}; for (int k = 0; k < g_ret_n; k++) cur.ret[cur.ret_n++] = g_ret[k];
+    for (int guard = 0; guard < 4096; guard++) {
+        const uint8_t *q; op_hdr hq; const void *aq;
+        if (!fz_next(&cur, &q, &hq, &aq)) return 0;
+        switch (hq.op) {
+            case OP_DISPATCH: return 1;
+            case OP_BARRIER: { uint32_t bits; memcpy(&bits, aq, sizeof bits); if (bits) return 0; continue; }
+            case OP_DRAW: case OP_DRAW_IDX:
+            case OP_ALPHA_REF: case OP_BIND_IMG: case OP_BIND_PROGRAM: case OP_BIND_SAMP: case OP_BIND_SSBO: case OP_BIND_STATE: case OP_BIND_TEX: case OP_BIND_TEX1:
+            case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_VATTR: case OP_BIND_VBUF: case OP_BIND_VBUF1: case OP_BIND_VSTREAM: case OP_BLEND_COLOR: case OP_COPY_STRIDE:
+            case OP_DEPTH_CLAMP: case OP_DEPTH_RANGE: case OP_POLY_OFFSET: case OP_PRIM_RESTART: case OP_PUSH_CONST: case OP_RAST_DISCARD: case OP_SCISSOR: case OP_SET_SAMP_POOL:
+            case OP_SET_TEX_POOL: case OP_STENCIL: case OP_TF_BIND: case OP_VIEWPORTS: case OP_VP_SWIZZLE:
+                continue;
+            default: return 0;   // OP_TF_STATE and everything state_op does not take stop the full scan too
+        }
+    }
+    return 1;
+}
 static void cs_hoist_try(NvProg *pr0, const p_draw *dw0, const p_draw_idx *di0) {
     if (!g_exec_next || g_ret_n > 8 || g_fz_checking || g_defer_replaying || g_nlc || R.clear_d || R.clear_s) return;
     for (int i = 0; i < 8; i++) if (R.clear_c[i]) return;   // a clear this pass takes as its load action comes before anything a moved dispatch could read
+    { static int pre = -1; if (pre < 0) { const char *e = getenv("DM_NVN_CSH_PRESCAN"); pre = !(e && !strcmp(e, "0")); }
+      if (pre && !csh_dispatch_ahead()) { g_csh_stop[5]++; return; } }
     static csh_rng rd[CSH_RN]; int nrd = 0;
     if (!csh_draw_reads(pr0, dw0, di0, rd, &nrd)) { g_csh_stop[0]++; return; }
     fz_cursor cur = {.p = g_exec_next}; for (int k = 0; k < g_ret_n; k++) cur.ret[cur.ret_n++] = g_ret[k];
@@ -10737,9 +10770,10 @@ static void dispatch(const p_dispatch *dp) {
     const void *k = (__bridge const void *)cs;
     id<MTLComputePipelineState> ps = hm_get_id(&g_cps, &k);
     if (!ps) {
+        if (cs->cps_failed) return;   // the same function fails the same way: asked again at every dispatch, Mario Kart World's refused shaders took 3,138 pipeline builds in 60 s
         NSError *e = nil; uint64_t bt = bp_now(); ps = [g_dev newComputePipelineStateWithFunction:cs->fn error:&e];
         g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
-        if (!ps) { MLOG("[RED] failed to create compute pipeline: %s", e.localizedDescription.UTF8String); return; }
+        if (!ps) { cs->cps_failed = 1; MLOG("[RED] failed to create compute pipeline for %s: %s (its dispatches are skipped)", cs->key, e.localizedDescription.UTF8String); return; }
         pso_record("C\t%s\n", cs->key);
         if (cs->key[0]) pso_user_record("C\t%s\n", cs->key);
         hm_put_id(&g_cps, &k, ps);

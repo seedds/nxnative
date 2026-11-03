@@ -73,6 +73,8 @@ t_deswz_gpu: t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../
 	clang $(CFLAGS) -fobjc-arc -o $@ t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../nvn/nvn_tex.c ../nvn/host_msl.m -framework Metal -framework Foundation
 t_tex_layout: t_tex_layout.c ../nvn/nvn_tex.c ../nvn/nvn_tex.h
 	clang -O1 -Wall -o $@ t_tex_layout.c ../nvn/nvn_tex.c
+t_compute_group: t_compute_group.m ../nvn/nvn_compute.h
+	clang -O1 -g -Wall -fobjc-arc -o $@ t_compute_group.m -framework Metal -framework Foundation
 t_refl: t_refl.m ../nvn/nvn_refl.m ../nvn/nvn_refl.h ../nvn/dmsh_chain.h
 	clang -O1 -g -Wall -I../nvn -fobjc-arc -o $@ t_refl.m ../nvn/nvn_refl.m -framework Metal -framework Foundation
 t_hmap: t_hmap.c ../nvn/nvn_hmap.h
@@ -394,6 +396,9 @@ check_t_image_alias: t_image_alias
 t_image_usage: t_image_usage.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_usage.m $(MTL_T_SRC) $(FW)
 check_t_image_usage: RUN_ENV = MTL_DEBUG_LAYER=1
+t_image_cube: t_image_cube.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_image_cube.m $(MTL_T_SRC) $(FW)
+check_t_image_cube: RUN_ENV = MTL_DEBUG_LAYER=1
 t_stencil_view: t_stencil_view.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_stencil_view.m $(MTL_T_SRC) $(FW)
 check_t_stencil_view: RUN_ENV = MTL_DEBUG_LAYER=1

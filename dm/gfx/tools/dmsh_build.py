@@ -9,7 +9,7 @@
 # Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately)
 import inspect, os, re, sys, json, struct, hashlib, shutil, subprocess, tempfile, collections, threading, concurrent.futures as cf
-import dmsh_geometry, dmsh_atomic, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
+import dmsh_geometry, dmsh_atomic, dmsh_private_shared, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
@@ -844,7 +844,7 @@ RULES = []   # MSL rewrite rules attached by shader name (function, applicabilit
 # CODE_FP hashes the code form of this file and its helper modules (dmsh_chain.code_form): editing a comment, a docstring or the layout does not change any shader's key.
 # The library ABI enters as its values (dmsh_abi.VALUES), so a comment in dmsh_abi.h does not change a key either.
 # The first-stage code fingerprint does not include dmsh_fetch.py; readable-tile variants get a separate second-stage cache keyed on the generated MSL.
-CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_atomic, abi) + ((ios_metal,) if IOSOUT else ()))
+CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_atomic, dmsh_private_shared, abi) + ((ios_metal,) if IOSOUT else ()))
                          + b'\0abi\0' + repr(sorted(abi.VALUES.items())).encode()).hexdigest()
 TOOL_FP = tool_fingerprint().encode()
 
@@ -1032,8 +1032,9 @@ def fs_uint(src):
     # The hardware writes an output's bits to an integer target whatever the shader computed, so main0_u is right for any pixel shader; only those that look like integer writers get one
     # (the library stays small): an output from integer bits, or nothing but constants (a clear drawn into an integer target, 35e1865e313f0553 writes 0 into Luigi's Mansion 3's R32Uint target)
     from_int = {nm for nm in cols if re.search(r'\bout\.%s(?:\.\w+)? = as_type<float\d?>\(' % nm, src)}
-    writes = [m.group(1) for nm in cols for m in re.finditer(r'\bout\.%s(?:\.\w+)? = ([^;]+);' % nm, src)]
-    if not from_int and not (writes and all(re.fullmatch(r'-?[0-9.]+f?|float\d\([-0-9., ]*\)', w.strip()) for w in writes)): return None, 0
+    writes = {nm: re.findall(r'\bout\.%s(?:\.\w+)? = ([^;]+);' % nm, src) for nm in cols}
+    constant = {nm for nm, values in writes.items() if values and all(re.fullmatch(r'[-0-9.eE+]+f?|float\d\([-0-9.eE+, ]*\)', w.strip()) for w in values)}
+    if not from_int and set(cols) != constant: return None, 0
     uty = lambda ty: 'u' + ty.replace('float', 'int')   # float4 → uint4, float → uint
     def entry(sfx, as_uint):   # main0 again as main0_<sfx>, returning the outputs in as_uint as the unsigned integer vectors of their bits (dmsh_fetch.py cuts the source at main0_out_u)
         struct = f'struct main0_out_{sfx}\n{{\n' + ''.join(f'    {uty(cols[nm]) if nm in as_uint else ty} {nm} {at};\n' for ty, nm, at in mem) + '};\n\n'
@@ -1043,6 +1044,15 @@ def fs_uint(src):
     if from_int and set(cols) - from_int:   # some outputs from integer bits, some not: the mixed entry point
         out += entry('m', from_int)
         mask = sum(1 << int(re.search(r'color\((\d+)\)', at).group(1)) for _, nm, at in mem if nm in from_int)
+    # A constant has no evidence of its output class after SPIRV-Cross folds bitcasts. Keep the original mixed entry, and give each combination of constant outputs an integer
+    # alternative: the actual attachment formats choose it at run time. Trails in the Sky writes packed 5-bit material colour as constant bits 0x7bde to its RG16Uint fourth MRT;
+    # leaving that output float prevents the mixed entry from matching, and Metal 4 silently leaves stale material data that the SSAO combine then reads as a red iris.
+    optional = sorted(constant - from_int)
+    for bits in range(1 << len(optional)):
+        ints = from_int | {nm for i, nm in enumerate(optional) if bits >> i & 1}
+        if not ints or ints == set(cols) or ints == from_int: continue
+        cmask = sum(1 << int(re.search(r'color\((\d+)\)', at).group(1)) for _, nm, at in mem if nm in ints)   # pyright: ignore[reportOptionalMemberAccess]  # ints contains only fields whose color attribute was matched above
+        out += entry(f'mc{cmask:02x}', ints)
     return out, mask
 
 def fs_dual(src):
@@ -1209,6 +1219,7 @@ def finish(key, w, j, c1):
             src = open(msl).read()
     try: src = dmsh_atomic.check_msl(src)
     except ValueError as e: return 'image atomic MSL failed', str(e), None
+    if j['stage'] == 'cs': src = dmsh_private_shared.privatize(src, j.get('local'))
     src = precise(src)   # min / max / clamp with Maxwell's NaN results (see precise)
     try: src = hmma_msl(src)   # Ampere HMMA through simdgroup_matrix (see hmma_msl)
     except ValueError as e: return 'HMMA rewrite failed', str(e)[:160], None
@@ -1257,7 +1268,8 @@ def finish(key, w, j, c1):
             'entry': entry.group(2) if entry else 'main0', 'msl_entry_kind': entry.group(1) if entry else None, **({'entry_z': 'main0_z', 'entry_geometry_capture': 'main0_gs'} if j['stage'] == 'vs' else {}),
             **({'entry_discard': 'main0_discard'} if discard else {}),
             **({'entry_tf': 'main0_tf', 'tf_strides': [e['stride'] if e else 0 for e in j['tf']]} if j.get('tf') else {}),
-            **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u'} if fu else {}), **({'entry_m': 'main0_m', 'uint_mask_m': fmask} if fu and fmask else {}), **({'entry_d': 'main0_d'} if fd else {}),
+            **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u'} if fu else {}), **({'entry_m': 'main0_m', 'uint_mask_m': fmask} if fu and fmask else {}),
+            **({'entries_m': [{'entry': 'main0_mc' + m, 'uint_mask': int(m, 16)} for m in re.findall(r'fragment main0_out_mc([0-9a-f]{2}) main0_mc', fu)]} if fu else {}), **({'entry_d': 'main0_d'} if fd else {}),
             **({'first_store': [{'reg': next(b['reg'] for b in binds if b['msl_name'] == n), 'word': w, 'value': v} for n, w, v in first]} if first else {}),
             'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr, j['stage']),
             'bindings': binds,

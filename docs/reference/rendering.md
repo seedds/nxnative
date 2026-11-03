@@ -108,6 +108,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** a cube view whose layer count is not a multiple of 6 now takes its layers as cubes when the texture has that many faces (`tex_by_id`; else it is read as a 2D array with a red line).
 - **Found on:** [Pokémon Sword](../../dm/games/0100ABF008968000/README.md) (as the player first walks out of the house).
 
+### Cube image stores use face-array views
+
+- **Symptom:** glass and metal show coloured, oily reflections; an environment cube retains the bytes it was initially filled from although compute shaders write its faces.
+- **Cause:** an image descriptor requests a cube view, while the shader's surface stores declare `texture2d_array`. `img_binding` fitted the pixel class and removed read-only swizzles but kept the cube type, so the Metal image argument had the wrong dimension. These stores are undefined; the observed cube retained its initial pool content, which could contain unrelated data after storage reuse.
+- **Fix:** when an array image instruction uses a cube or cube-array descriptor, `img_fit` creates an unswizzled 2D-array view of the same backing, with six layers per selected cube and the descriptor's mip and face offsets. The image-view cache includes the resulting type as well as pixel format. Sampling continues through the cube view; no reflection pass is disabled.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_image_cube` runs GPU stores under Metal API validation through production image bindings. Float and integer views, a cube, two cubes, a selected second cube, cached bindings, and writes visible through the sampled backing are covered; unselected faces and other mip levels retain their data. The pre-fix test fails 12 of 48 checks; the correction passes all 294 checks.
+- **Found on:** [Trails in the Sky 1st Chapter](../../dm/games/01002C9022770000/README.md#mac-observations), whose cube-copy and cube-blend compute shaders write all six faces of each mip through cube image views. The owner confirms corrected glass and armour reflections on the Mac.
+
 ### A 2D texture in a cube slot binds the zero cube
 
 - **Symptom:** `texture type mismatch … declares slot 10 as Metal type 5, texture … is type 3` (undefined reads); the later `[RED] texture type mismatch: shader declares a cube, texture is 2D` could also report an unused conditional input as an error.

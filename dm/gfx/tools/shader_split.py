@@ -347,6 +347,14 @@ def glslc_shaders(d, label, need=True, skip=()):
         nctl, ncode = (struct.unpack_from('<I', d, c + 0x20)[0], struct.unpack_from('<I', d, c + 0x704)[0]) if c + 0x708 <= h + size else (0, 0)   # 0: a control section the output does not hold
         ctl, code = d[c:c + nctl], d[c + nctl:c + nctl + ncode]
         st = glslc_stage(ctl, code) if nctl >= 0x760 and not nctl & 3 and c + nctl + ncode <= h + size else None
+        # Some single-stage compute outputs put constants after the control section's reported length and before the GPU code.
+        # Their populated thread-group fields also make those constants look like headerless compute instructions. When the
+        # output's section header locates a headered compute shader, use its explicit offsets instead.
+        if st == 'cs' and code[:4] != CS_MAGIC:
+            sec = glslc_section(d, h, size)
+            if sec and len(sec) == 1 and sec[0][1][:4] == CS_MAGIC:
+                ctl, code = sec[0]
+                st = glslc_stage(ctl, code)
         if not st or check(label, st, ctl, code):
             # SDK 4's GLSLC (output version 0x20.4, Dark Souls Remastered: 44 of main's 72 outputs and the pixel shaders in its archives) writes control sections whose +0x20 is
             # 12 bytes short of their length, so the code area is not right after it; the output's own section header says where both are (glslc_section). Only outputs the rule

@@ -457,12 +457,13 @@ def site_window(seg):
         w = struct.unpack('<I', x.bytes)[0]
         if has18(x): w = subst(x, S)
         m = x.mnemonic
-        if m in ('cbz', 'cbnz', 'tbz', 'tbnz') or m.startswith('b.'):
+        if m in ('b', 'cbz', 'cbnz', 'tbz', 'tbnz') or m.startswith('b.'):
             tgt = x.operands[-1].imm
             if lo <= tgt < hi: newt = copy0 + (tgt - lo)
             else: ex_targets.append(tgt); newt = exits + 16 * (len(ex_targets) - 1)
             pc = copy0 + 4 * k; off = (newt - pc) >> 2
-            if m in ('tbz', 'tbnz'): w = (w & 0xFFF8001F) | ((off & 0x3FFF) << 5)
+            if m == 'b': w = B(pc, newt)
+            elif m in ('tbz', 'tbnz'): w = (w & 0xFFF8001F) | ((off & 0x3FFF) << 5)
             else: w = (w & 0xFF00001F) | ((off & 0x7FFFF) << 5)
             dd = dis(w, pc); assert dd.operands[-1].imm == newt and dd.mnemonic == m
         elif m == 'adrp': w = window_adrp(x, S, copy0 + 4 * k)
@@ -509,12 +510,13 @@ def site_retry_window(parts):
             w = struct.unpack('<I', x.bytes)[0]
             if has18(x): w = subst(x, S)
             m, pc = x.mnemonic, here()
-            if m in ('cbz', 'cbnz', 'tbz', 'tbnz') or m.startswith('b.'):
+            if m in ('b', 'cbz', 'cbnz', 'tbz', 'tbnz') or m.startswith('b.'):
                 tgt = x.operands[-1].imm
                 if tgt not in pos and tgt not in ex_targets: ex_targets.append(tgt)
                 newt = pos[tgt] if tgt in pos else exits + 16 * ex_targets.index(tgt)
                 off = (newt - pc) >> 2
-                if m in ('tbz', 'tbnz'): w = (w & 0xFFF8001F) | ((off & 0x3FFF) << 5)
+                if m == 'b': w = B(pc, newt)
+                elif m in ('tbz', 'tbnz'): w = (w & 0xFFF8001F) | ((off & 0x3FFF) << 5)
                 else: w = (w & 0xFF00001F) | ((off & 0x7FFFF) << 5)
                 dd = dis(w, pc); assert dd.operands[-1].imm == newt and dd.mnemonic == m
             elif m == 'adrp': w = window_adrp(x, S, pc)
@@ -1229,6 +1231,8 @@ for fa, fb in funcs:
             t = x.operands[-1].imm
             if t in inwin and t not in heads:
                 wseg = next(w for w in ws if any(y.address == t for y in w))
+                # A branch within its own exclusive window is copied by site_window; only an outside branch needs a retry copy.
+                if wseg[0].address <= x.address <= wseg[-1].address: continue
                 rb = retry_block(insl, k, wseg) if x.mnemonic not in ('b', 'bl') else None
                 assert rb, f'branch into window {x.address:x}'
                 assert not any(y.address in done for y in rb[0]), f'retry block overlaps a window {rb[0][0].address:x}'

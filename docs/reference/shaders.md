@@ -487,6 +487,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) (SDK 4.5.0).
 - **Check:** on every output the old rule keeps (1,073 in 13 Sentinels, Three Houses, FINAL FANTASY TACTICS, Engage and Age of Calamity) both give the same key; the new reading also takes 8 outputs of [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) and 3 of [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) (GLSLC version 0x1d.0, whose control +0x20 holds odd values) that used to be dropped, so those two profiles' tables gained them.
 
+### GLSLC compute code after control constants
+
+- **Symptom:** a single-stage GLSLC compute output is accepted as headerless code, but the split hashes bytes of constants before the GPU code; its key does not match the shader the game requests.
+- **Cause:** control +0x20 reports a length shorter than the code area's offset by 0x180 bytes. The control's thread-group fields are populated, so the bytes at the reported length pass the headerless-compute stage check even though the real code starts with `0x12345679` later.
+- **Fix:** for a would-be headerless compute output whose one section header identifies a headered compute code area, `glslc_shaders` takes the section's explicit control and code offsets. Genuine headerless outputs still use the original path.
+- **Check:** the output in `main` at +0x544364 yields key `a370ad7eceb0897a`, matching the packaged shader map. A synthetic output with the same gap checks the code magic and length in `test_unity_text_glslc.py`.
+- **Found on:** [Trails in the Sky 1st Chapter](../../dm/games/01002C9022770000/README.md#found-on-this-game) (update 1.0.4).
+
 ### VertexA and VertexB parts merged into one vertex shader
 
 - **Symptom:** `shader_split.py` finds no stage for vertex shaders and stops at the first captured output (`no GLSLC output`). Translated, every post pass and the window draw one texel's colour (a black screen with sound); every varying at (0, 0, 0, 1).
@@ -495,6 +503,32 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md): in all 1,244 vertex shaders A writes no generic output, A ends in an `EXIT` predicated on CC FCSM_TR (which Ryujinx never takes; left as it is), an unconditional `EXIT` and a `BRA` to itself, and neither part has an absolute or table jump, so moving B keeps every branch; c1 (what follows part B) is zero padding in all of them. A census of the other games' packages and of every `main` on hand found no other type-0 vertex shader.
 
 ## Translation
+
+### Constant outputs in a mixed integer G-buffer
+
+**Symptom.** Menu-model irises turn red depending on view direction; the owner also reports red lighting on bestiary models.
+
+**Cause.** Maxwell writes fragment register bits into integer render targets. The mixed-output entry point inferred integer outputs from `as_type<float>` assignments, but SPIRV-Cross folds constant bitcasts to float literals. A constant packed material output therefore remained float, preventing selection of the mixed entry matching the attachments. On the measured M1 Metal 4 path the frame continued with incorrect material data; the subsequent SSAO combine exposed it as a red tint. The Metal 3 path rejects the mismatched output types.
+
+**Fix.** Preserve the original mixed entry and emit additional mixed entries for the independent integer/float choices of constant-only outputs. Select the entry by the actual attachment formats. Alpha-test and logic-operation libraries retain these entry points too. No colour override or SSAO disable is needed.
+
+**Found on.** [Trails in the Sky 1st Chapter](../../dm/games/01002C9022770000/README.md#mac-observations): opaque iris output 3 contains packed `0x7bde`; matching mask `0x0e` instead of `0x06` restores two gold irises in the captured frame. The owner subsequently confirmed correct menu eyes and bestiary models in the rebuilt Mac app.
+
+### Invocation-private shared arrays exceed Metal's threadgroup limit
+
+- **Symptom:** scene objects are missing, with repeated `failed to create compute pipeline: Threadgroup memory size (45056) exceeds the maximum threadgroup memory allowed (32768)` on an Apple M1.
+- **Cause:** the compute program allocates 44 bytes per invocation in shared memory for a 1,024-invocation group. Every access stays inside its own invocation's 11-word slice, but the translated array retains the full 44 KB allocation. The M1 rejects the pipeline, so its dispatch never executes.
+- **Fix:** `dmsh_private_shared.py` proves disjoint per-invocation addressing for one-dimensional groups and replaces those arrays with private storage and constant indices. It leaves cross-invocation, unknown, mutable and escaping accesses unchanged. The rule has no game or shader-key gate.
+- **Check:** synthetic tests exercise isolation and conservative refusals. For shader `43c2b838b11bc19c`, the resulting source exactly matches the private-array correction recovered from the working 1.0.4 build. The 6,602-shader regression comparison has no new failure and changes only this shader and `adc43567131a8e59`. The rebuilt 1.0.7 run no longer reports the shared-memory error, but scene objects remain absent: the [fixed group-size requirement](#fixed-compute-group-sizes-guide-register-allocation) also needs to be honored.
+- **Found on:** [Trails in the Sky 1st Chapter](../../dm/games/01002C9022770000/README.md#mac-observations), updates 1.0.4 and 1.0.7.
+
+### Fixed compute group sizes guide register allocation
+
+- **Symptom:** scene objects remain absent after their culling shader's shared-memory allocation has been fixed; the pipeline now builds without a red line.
+- **Cause:** Metal's unconstrained compute compilation chooses a register allocation whose maximum group size is smaller than the fixed group in the guest shader's reflection. On M1, the corrected culling shader builds for at most 768 threads, while its dispatch uses 1,024.
+- **Fix:** both the background warmer and the demanded compute pipeline use `nvn_compute_pipeline` with `MTLComputePipelineDescriptor.maxTotalThreadsPerThreadgroup` set to the product of the reflected dimensions. Kernels without a reflected fixed size keep the default path. The dispatch is not split or reduced.
+- **Check:** the same real shader supports 1,024 threads when compiled with that descriptor. `t_compute_group` executes every invocation of register-heavy kernels in two groups of 1,024×1×1, 32×8×2 and 64×1×1 with Metal validation. The owner confirms that the rebuilt 1.0.7 renders the missing furniture.
+- **Found on:** [Trails in the Sky 1st Chapter](../../dm/games/01002C9022770000/README.md#mac-observations), updates 1.0.4 and 1.0.7; the old Mac app lists this among its local changes.
 
 ### Tested tools and compiler-specific shader caches
 

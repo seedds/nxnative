@@ -70,6 +70,7 @@ dm/gfx/tools/dmsh_pull.*	shader:pulling_vertex_inputs	pulling vertex inputs
 dm/gfx/tools/dmsh_fetch.py	shader:readable_tile	readable tiles
 dm/gfx/tools/dmsh_alpha.py	nvn:nvnColorStateSetAlphaTest	the alpha test libraries
 dm/gfx/tools/dmsh_logic.py	nvn:nvnColorStateSetLogicOp	the logic operation libraries
+dm/gfx/tools/dmsh_private_shared.py	shader:stage:cs	invocation-private compute scratch lowering
 dm/gfx/tools/dmsh_geometry.py	shader:stage:gs	geometry shaders
 dm/gfx/tools/dmsh_facts.py	shader:stage:*	the translator's answer table
 dm/gfx/tools/dmsh_chain.*	shader:stage:*	the chain version: every NVN game's libraries are rebuilt

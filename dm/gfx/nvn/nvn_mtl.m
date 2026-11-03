@@ -12566,8 +12566,19 @@ static id<MTLTexture> present_raw_src(id<MTLTexture> src) {
 }
 // The rectangle of the canvas (dw x dh) the picture (cw x ch) is drawn into: the picture's aspect ratio kept and centred, black bars in the rest (no stretching when the screen's ratio
 // differs from the game's, e.g. iPhone about 19.5:9 against the game's 16:9); when the ratios differ by under 1 % (the remainder from a game width that is a multiple of 8 in the
-// full-screen setup, e.g. 1952x900 against 2868x1320 differs by 0.17 %) the whole canvas, leaving no border of a few pixels
+// full-screen setup, e.g. 1952x900 against 2868x1320 differs by 0.17 %) the whole canvas, leaving no border of a few pixels. DM_PRESENT_FILL=stretch always uses the whole canvas
+// (no black bars, the picture stretched to the screen's ratio, e.g. 16:9 on a 16:10 MacBook screen); fit (the default) keeps the ratio. From the FC 26 120 fps patch by imnotsharingmyname (MIT)
+static int g_fill_mode = -1;   // 1 = stretch, 0 = fit
+static int fill_mode(void) {
+    if (g_fill_mode >= 0) return g_fill_mode;
+    const char *e = getenv("DM_PRESENT_FILL"); int v = 0;
+    if (e && !strcmp(e, "stretch")) v = 1;
+    else if (e && *e && strcmp(e, "fit")) MLOG("[RED] DM_PRESENT_FILL=%s: fit or stretch; keeping fit", e);
+    if (v) MLOG("present fill (DM_PRESENT_FILL): stretch, the picture fills the whole canvas");
+    return g_fill_mode = v;
+}
 static MTLViewport present_viewport(double cw, double ch, double dw, double dh) {
+    if (fill_mode()) return (MTLViewport){0, 0, dw, dh, 0, 1};
     double s = fmin(dw / cw, dh / ch);
     MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
     if (fabs((dw / dh) / (cw / ch) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};

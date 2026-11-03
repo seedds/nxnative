@@ -29,7 +29,7 @@ DM_PRESENT_FILL	choice	fit=Keep aspect ratio,stretch=Fill screen	fit	platform:ma
 DM_PICTURE_FIT	choice	fit=Fit,fill=Fill	fit	platform:ios	Game	Picture	Fill crops the game's 16:9 picture to cover the screen. Health bars, subtitles or maps near the edges can be cut off. A full-screen picture without cropping needs a patch for each game.
 DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	platform:ios	Game	Frame-rate counter
 DM_TOUCH_HAPTICS	toggle	-	1	platform:ios	Controls	Touch feedback
-DM_PAD_LAYOUT	choice	position=Switch positions,xbox=Xbox labels,playstation=PlayStation labels	position	platform:mac	Controls	Button layout	Xbox labels: an Xbox pad's A, B, X, Y presses the game's A, B, X, Y. PlayStation labels: Cross, Circle, Square, Triangle press A, B, X, Y.	level=basic
+DM_PAD_LAYOUT	choice	position=Switch positions,xbox=Xbox / PlayStation labels	position	platform:mac	Controls	Button layout	An Xbox pad's A, B, X, Y or a PlayStation pad's Cross, Circle, Square, Triangle presses the game's A, B, X, Y.	level=basic
 DM_RUMBLE	toggle	-	1	always	Controls	Game rumble		level=basic
 DM_RUMBLE_GAIN	range	0:3:0.1	1.0	always	Controls	Rumble strength		needs=DM_RUMBLE=1
 DM_RUMBLE_MIN	range	0:0.9:0.05	0	always	Controls	Rumble cutoff

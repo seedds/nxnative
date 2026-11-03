@@ -70,7 +70,7 @@ class LauncherSettingsTests(unittest.TestCase):
         s = mac['DM_PRESENT_FILL']
         self.assertEqual((s['kind'], s['default'], s['options'], s['level']), ('choice', 'fit', [['fit', 'Keep aspect ratio'], ['stretch', 'Fill screen']], 'basic'))
         s = mac['DM_PAD_LAYOUT']
-        self.assertEqual((s['kind'], s['default'], s['options'], s['level']), ('choice', 'position', [['position', 'Switch positions'], ['xbox', 'Xbox labels'], ['playstation', 'PlayStation labels']], 'basic'))
+        self.assertEqual((s['kind'], s['default'], s['options'], s['level']), ('choice', 'position', [['position', 'Switch positions'], ['xbox', 'Xbox / PlayStation labels']], 'basic'))
 
     def test_defaults_follow_each_platform_host(self):
         # nvn_mtl.m pso4_on: Mac defaults on, iOS follows the profile. nvn_rec.h rec_on: iOS on, Mac off.

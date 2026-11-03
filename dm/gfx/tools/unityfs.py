@@ -220,6 +220,21 @@ Shader: string m_Name; SerializedShader m_ParsedForm; vector<data:unsigned int> 
 SHADER_2017_4 = SHADER_2018_3.replace('bool m_HasInstancingVariant; bool! m_HasProceduralInstancingVariant',
                                       'bool! m_HasInstancingVariant').replace(
     '; map<data:pair(string,PPtr<Texture>)>~ m_NonModifiableTextures', '')
+# Unity 5.5.0 (Snipperclips Plus, 5.5.0p1: every serialized file stripped, hash 4496e93f…): the 2017.4 layout without zClip, TextureParameter.m_MultiSampled, ConstantBuffer.m_StructParams,
+# SerializedSubProgram.m_Samplers / m_ShaderRequirements, with an unsigned m_SourceMap, and with 5.5's vectors of primitive elements unaligned (the dump's MetaFlag 0 where 2017.4 has 4000;
+# the misalignment of m_KeywordIndices alone deranges every subprogram that follows a keyword). Matches all 669 nodes and alignment flags of AssetRipper's StructsDump/release/5.5.0f3.dump;
+# every Shader object of the game's three stripped files (unity default resources, unity_builtin_extra, globalgamemanagers.assets) reads to its exact end, its 397 shaders building fine.
+SHADER_5_5 = SHADER_2017_4.replace('SerializedShaderFloatValue zClip; ', '').replace('int m_SourceMap', 'unsigned int m_SourceMap').replace('bool m_MultiSampled; ', '').replace(
+    '; vector<data:StructParameter> m_StructParams', '').replace('; vector<data:SamplerParameter> m_Samplers; int m_ShaderRequirements', '').replace(
+    'vector<data:UInt16> m_KeywordIndices', 'vector<data:UInt16>~ m_KeywordIndices').replace(
+    'vector<data:BufferBinding> m_BufferParams', 'vector<data:BufferBinding>~ m_BufferParams').replace(
+    'vector<data:BufferBinding> m_ConstantBufferBindings', 'vector<data:BufferBinding>~ m_ConstantBufferBindings').replace(
+    'vector<data:UAVParameter> m_UAVParams', 'vector<data:UAVParameter>~ m_UAVParams').replace(
+    'vector<data:unsigned int> platforms', 'vector<data:unsigned int>~ platforms').replace(
+    'vector<data:unsigned int> offsets', 'vector<data:unsigned int>~ offsets').replace(
+    'vector<data:unsigned int> compressedLengths', 'vector<data:unsigned int>~ compressedLengths').replace(
+    'vector<data:unsigned int> decompressedLengths', 'vector<data:unsigned int>~ decompressedLengths').replace(
+    'vector<data:PPtr<Shader>> m_Dependencies', 'vector<data:PPtr<Shader>>~ m_Dependencies')
 # The Unity 2019.4 Shader (Dodgeball Academia, Unity 2019.4.21f1: every serialized file is stripped and no bundle carries a tree), from Unity 2019.4.21f1's type tree as AssetRipper's
 # TypeTreeDumps records it (StructsDump/release/2019.4.21f1.dump): the 2018.3 layout with global and local keyword indices per subprogram, a ray tracing program in each pass, and 2019.3's
 # segments (offsets, compressedLengths and decompressedLengths hold one list per platform). Checked node for node with the flags (1,481 nodes), and equal to the tree Subnautica's 2019.4.36f1
@@ -279,6 +294,7 @@ KNOWN_TREES = {(CLASS_SHADER, bytes.fromhex('ea424a5fc1e48db62144df956f9e1005'))
                (CLASS_SHADER, bytes.fromhex('ed2a06ce7fb8203f6efb5ab5e0ce20d5')): ('Shader', SHADER_2019_4),
                (CLASS_SHADER, bytes.fromhex('8db760073e1392061e4a36995f0735af')): ('Shader', SHADER_2018_3),
                (CLASS_SHADER, bytes.fromhex('266d53113fa30d2b858f2768f92eaa14')): ('Shader', SHADER_2017_4),
+               (CLASS_SHADER, bytes.fromhex('4496e93f2179252104401c8dda0a1751')): ('Shader', SHADER_5_5),
                (CLASS_COMPUTE_SHADER, bytes.fromhex('43a0948a3f403068c0b31bff90ba0c9a')): ('ComputeShader', COMPUTE_6000_3),
                (CLASS_COMPUTE_SHADER, bytes.fromhex('bfdf63ab0ce84d5a2c765ee560d90fe7')): ('ComputeShader', COMPUTE_2022_3),
                (CLASS_COMPUTE_SHADER, bytes.fromhex('abd9135b8ce83d043fef4e9ec7f53366')): ('ComputeShader', COMPUTE_2021_3),

@@ -806,8 +806,10 @@ static uint64_t g_sub_serial;   // Submission index (used by the parallel precom
 void mtl_prepare(void) {
     if (!g_warm_started && prepare_on()) { mtl_init(); shmap_load(); }
 }
+static void sub_cut_begin(void);
 void mtl_sub_begin(void) {
     mtl_init(); g_sub_serial++; g_seg = 0; seg_clk_put(g_sclk); g_sclk = NULL; g_rc_npend = 0; g_rc_skip = 0;
+    sub_cut_begin();
     defer_drain();
     defer_reset();
     mtl_prepare();   // done by then in the submit entry; the replay tool (nvn_replay) reaches it here
@@ -1690,7 +1692,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[143];
+static int g_red_once[144];
 #define RED_ONCE(k, ...) do { if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -9434,6 +9436,15 @@ static int fb_tile_plan(NvProg *pr, uint32_t wm, uint64_t tile[4]) {
     g_fb_tfn = fn; memcpy(g_fb_tlmap, lmap, 8); g_fb_tdesc = d;
     return 1;
 }
+// The one level a draw's sampler lets it read through texture slot reg (combined handle's sampler sid), counted from the view's base, or -1. Only a combined handle's sampler (the shader's
+// SAMPT binding of the same slot) is known here: with a mip filter, a minimum and a maximum LOD that are the same whole number pin every fetch to that level, whatever LOD the shader asks for
+static int fb_pinned_level(const NvShader *fs, unsigned reg, int sid) {
+    int combined = 0; for (int j = 0; j < fs->rf.nb && !combined; j++) combined = fs->rf.b[j].kind == NVN_RB_SAMPT && fs->rf.b[j].reg == reg;
+    if (!combined || sid <= 0) return -1;
+    os_unfair_lock_lock(&g_rmu); int ok = sid < g_nsreg && g_sreg_ok[sid]; samp_par sp = ok ? g_sreg[sid] : (samp_par){0}; os_unfair_lock_unlock(&g_rmu);
+    if (!ok || sp.minf < 2 || sp.lod_min != sp.lod_max || sp.lod_min < 0 || sp.lod_min > 15 || sp.lod_min != floorf(sp.lod_min)) return -1;   // minf 0, 1: no mip filter, the base level
+    return (int)sp.lod_min;
+}
 void mtl_fb_stats(uint64_t *snaps, uint64_t *reused, uint64_t *tile, uint64_t *wait) { *snaps = g_fb_count; *reused = g_fb_reuse; *tile = g_fb_tile_draws; *wait = g_fb_tile_wait; }   // the power line's feedback counts (hle_nvn.c)
 // Called before the draw opens its render pass: if a snapshot is needed, end the current render pass, copy the snapshot (or reuse a valid one) and register the substitution (used by this draw's argument encoding)
 static void fb_prepare(NvProg *pr) {
@@ -9483,6 +9494,20 @@ static void fb_prepare(NvProg *pr) {
             // so the same level numbers. Sampling the full view read the attachment's level too: a linear mip filter fetches the next level even at weight 0, and on Apple's GPUs an
             // attached level read through a texture holds no defined data. Donkey Kong Bananza's environment cube (128x128, 8 levels, R11G11B10F, levels 1..7 each drawn from the one
             // above with an explicit level) got NaN texels that way; its reflections spread them over the scene through the cube's prefilter, and bloom turned them into white blotches
+            // That view holds only the levels below the attachment's. An upsample pass reads the level above instead (level n drawn from n + 1), which the view clamped to n - 1, a sharper
+            // level the chain then added back up; rendering the view's base level, it read the attachment's own. When the sampler pins one level (fb_pinned_level) the draw samples a view
+            // of that level alone, whichever side of the attachment it lies on. Donkey Kong Bananza's bloom chains (576x324 R11G11B10F, 5 levels) upsample with ad1a5991aaad135e, its
+            // sampler's LOD clamp n + 1..n + 1: the stage intro's neon letters came out fat and filled
+            int pin = !image && t.mipmapLevelCount != 1 ? fb_pinned_level(fs, b->reg, (int)(handle >> 20)) : -1;
+            if (pin >= 0 && (NSUInteger)pin >= t.mipmapLevelCount) pin = (int)t.mipmapLevelCount - 1;   // past the view's levels: its last one, where the sampler's clamp ends
+            if (pin >= 0 && tl + (NSUInteger)pin != (NSUInteger)lv) {
+                id<MTLTexture> use = [base newTextureViewWithPixelFormat:t.pixelFormat textureType:t.textureType levels:NSMakeRange(tl + (NSUInteger)pin, 1) slices:NSMakeRange(ts, tn) swizzle:t.swizzle];
+                if (!use) { RED_ONCE(143, "same-pass feedback sampling: cannot make the view of level %lu that the sampler pins (format %lu); left as is", (unsigned long)(tl + (NSUInteger)pin), (unsigned long)t.pixelFormat); continue; }
+                if (g_fb_use[g_fb_n] && g_fb_use[g_fb_n] != use) defer_obj_unref(g_fb_use[g_fb_n]);
+                g_fb_src[g_fb_n] = t; g_fb_use[g_fb_n] = use; g_fb_rid[g_fb_n] = use.gpuResourceID._impl; g_fb_n++;
+                static int once; if (!once++) MLOG("same-pass feedback sampling: shader %s renders level %d of a view of levels %lu+%lu; its sampler pins level %lu, which it samples alone", fs->key, lv, (unsigned long)tl, (unsigned long)t.mipmapLevelCount, (unsigned long)(tl + (NSUInteger)pin));
+                continue;
+            }
             if (t.mipmapLevelCount != 1 && (NSUInteger)lv > tl) {
                 id<MTLTexture> use = [base newTextureViewWithPixelFormat:t.pixelFormat textureType:t.textureType levels:NSMakeRange(tl, (NSUInteger)lv - tl) slices:NSMakeRange(ts, tn) swizzle:t.swizzle];
                 if (!use) { RED_ONCE(82, "same-pass feedback sampling: cannot make the view of levels %lu+%d below the attachment (format %lu); left as is", (unsigned long)tl, lv - (int)tl, (unsigned long)t.pixelFormat); continue; }
@@ -11182,11 +11207,13 @@ int mtl_fps_target(void) { static int env = -2; if (env == -2) { const char *e =
 // recorded a copy from it (main+0x305e64, frame start) and before that frame's submit had even returned: the host was building pipelines inside the submit for 300 ms, and committed the
 // copy only at its end, so the subtitle band's gradient (BC3, 32x512) came out as the next texture's blocks. Committed at the first pass boundary, the copies run while the host encodes the rest
 static int cut_draws(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_CUT"); v = e ? atoi(e) : 64; MLOG("segmented submission: a segment is submitted between passes every %d draws (DM_NVN_CUT, 0 = off)", v); } return v; }
-static uint64_t g_cut_draw0, g_cut_sub, g_cuts, g_copy_cuts;
+static uint64_t g_cut_draw0, g_cuts, g_copy_cuts;
+// The count starts with the submission (mtl_sub_begin). It used to start at the submission's first sub_cut, which only a render target change reaches (OP_SET_RT): the draws a
+// submission makes into the target it inherited, before its first target change, were never counted, and the first segment came that many draws late
+static void sub_cut_begin(void) { g_cut_draw0 = g_stat_draw; }
 static void sub_cut(void) {
     int n = cut_draws();
     if (!g_cb || g_enc) return;
-    if (g_cut_sub != g_sub_serial) { g_cut_sub = g_sub_serial; g_cut_draw0 = g_stat_draw; }   // count from the start of each submission
     if ((!g_cut_copy && (n <= 0 || g_stat_draw - g_cut_draw0 < (uint64_t)n)) || g_hoist_n || g_defer_nact || g_defer_pend || g_fz.active || g_rt_merged) return;
     if (g_cut_copy) g_copy_cuts++;
     g_cut_copy = 0;

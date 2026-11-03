@@ -489,6 +489,7 @@ static void t_motion_hid(void) {
 static void t_hid_server(void) {
     void **srv = NULL;
     CHECK(h_hid_SrvProxy((void **)&srv) == RES_OK && srv != NULL, "hid server proxy: success and an object");
+    if (!srv) return;
     Result (*init)(void *, uint64_t, void *, uint64_t) = ((void **)srv[0])[0x508 / 8], (*rel)(void *) = ((void **)srv[0])[1];
     CHECK(init(srv, 0x80, NULL, 0x4000) == RES_OK && rel(srv) == RES_OK, "hid server proxy: commands and release succeed");
     CHECK(h_hid_ResActivate(NULL) == RES_OK && h_hid_ResDeactivate(NULL) == RES_OK, "hid applet resource: activation succeeds");

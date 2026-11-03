@@ -1202,6 +1202,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
   - [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md): `subsdk0` is NVN's runtime GLSL compiler and `main` imports `glslcCompile*`, but up to the house, the beach and the menus every shader the game loaded was in the offline tables.
   - [Captain Toad: Treasure Tracker](../../dm/games/01009BF0072D4000/README.md) (the rule that a module must define `glslcCompile`): `main` imports `glslcCompile` and holds agl's GLSL sources, but no module defines it, so nothing is compiled at run time.
 
+### Offline coverage after an empty GLSLC capture
+
+- **Symptom:** The Mac capture boot submits shader programs but writes no GLSLC capture files.
+- **Cause:** The source/import heuristic finds a compiler that the game can call. A cache hit lets the game submit a precompiled output without calling it.
+- **Fix:** If the profile requires no capture files, use an empty shader map for the capture boot to observe submitted shader keys. An empty capture can continue only after the offline split supplies every observed key. A stopped host, failed capture, missing key or no observations fails the check. This verifies coverage of the observed boot.
+- **Found on:** Alien: Isolation (SDK 8.2.0).
+
 ### GLSLC GPU code version against the driver's range
 
 - **Symptom:** a null read at `main+0x3316dc` in `nnMain`, right after the window setup (the program object's interface pointers at +0xd0 / +0xd8 both null).

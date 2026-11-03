@@ -810,4 +810,52 @@ class MacApp(Base):
         self.assertEqual(len(packs), 2)   # pack_app owns the reuse decision and sidecar key
 
 
+class GlslcCacheCoverage(Base):
+    KEY = '0123456789abcdef'
+
+    def capture(self, rc=None, observed=True, required=False, partial=False, capture_error=False):
+        work, logs = self.tmp / 'work', self.tmp / 'logs'; logs.mkdir(exist_ok=True)
+        def boot(host, patched, env, rd, log, secs, done):
+            shmap = Path(env['DM_NVN_SHMAP'])
+            if required:
+                self.assertEqual(shmap, self.src / 'shader_map.tsv')
+            else:
+                self.assertEqual(shmap.read_text(), '# GLSLC capture: observe submitted shaders\n')
+            if partial:
+                cap = Path(env['DM_GLSLC_CAPTURE'])
+                cap.mkdir()
+                (cap / 'aaaaaaaaaaaaaaaa.glslc').write_bytes(b'partial output')
+            text = f'[dm] [nvn-mtl] [RED] shader {self.KEY} is not in the shader map\n' if observed else ''
+            if capture_error:
+                text += '[dm] [RED] glslc: unknown output header\n'
+            log.write_text(text)
+            return rc
+        with mock.patch.object(nsp, 'build_mac_host', return_value=work / 'dmhost'), mock.patch.object(nsp, 'boot_mac', side_effect=boot):
+            return nsp.capture_glslc(REPO, {'v65536': self.ex}, 'v65536', work / 'patched', work, {}, logs, game.Game(self.src))
+
+    def test_surviving_boot_defers_to_offline_coverage(self):
+        observed = self.capture()
+        self.assertEqual(observed, {self.KEY})
+        (self.src / 'shader_map.tsv').write_text(f'pkg.bin\t0\tvertex\t{self.KEY}\t/cache#GLSLC@0x80\n')
+        nsp.check_glslc_coverage(observed, game.Game(self.src))
+
+    def test_empty_capture_still_fails_without_boot_evidence(self):
+        for rc in (139, 0):
+            with self.subTest(rc=rc), self.assertRaisesRegex(nsp.BuildError, 'captured only 0'):
+                self.capture(rc=rc)
+        for kwargs in ({'observed': False}, {'partial': True}, {'capture_error': True}):
+            with self.subTest(**kwargs), self.assertRaisesRegex(nsp.BuildError, 'captured only 0'):
+                self.capture(**kwargs)
+
+    def test_registered_capture_requirements_are_not_relaxed(self):
+        (self.src / 'shader_map.tsv').write_text(f'pkg.bin\t0\tvertex\t{self.KEY}\t/glslc_capture/aaaaaaaaaaaaaaaa.glslc#GLSLC@0x0\n')
+        with self.assertRaisesRegex(nsp.BuildError, 'profile needs 1'):
+            self.capture(required=True)
+
+    def test_missing_offline_key_and_no_observations_fail(self):
+        for observed, msg in (({self.KEY}, 'observed shaders absent'), (set(), 'no submitted shader keys')):
+            with self.subTest(observed=observed), self.assertRaisesRegex(nsp.BuildError, msg):
+                nsp.check_glslc_coverage(observed, game.Game(self.src))
+
+
 if __name__ == '__main__': unittest.main()

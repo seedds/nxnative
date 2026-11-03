@@ -1276,7 +1276,7 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
 GLSLC_SECS = 30   # the longest capture run: Three Houses compiles its 9 shaders within 1.2 s of boot, and the run stops as soon as every file the profile names is there
 
 
-def glslc_wanted(g):   # the capture files the profile's shader map was built from (column 5: /glslc_capture/<name>#GLSLC@…); None without any (a provisional profile)
+def glslc_wanted(g):   # the capture files the profile's shader map was built from (column 5: /glslc_capture/<name>#GLSLC@…); None when the map names no captures
     try: t = g.table('shader_map.tsv').read_text(errors='replace')
     except OSError: return None
     return set(re.findall(r'/glslc_capture/([0-9a-f]{16}\.glslc)#', t)) or None
@@ -1361,14 +1361,17 @@ def boot_mac(host, patched, henv, rd, log, secs, done=lambda: False):
 
 
 def host_stopped(log, rc, secs):   # a capture run whose host stopped by itself before the capture was complete: the game crashed or gave up, and the IPA will too (a provisional profile's IPA is still built)
+    with open(log, errors='replace') as f: tail = ''.join(collections.deque(f, maxlen=12)).rstrip('\n')
     PROG.say(f'[RED] the game stopped after {secs:.0f} s in the Mac host (exit {rc}): its shaders are incomplete and the IPA will not get further; ---- last lines of {log} ----\n'
-             + ''.join(collections.deque(open(log, errors='replace'), maxlen=12)).rstrip('\n'))
+             + tail)
 
 
 def capture_glslc(repo, dirs, pkg_ver, patched, work, env, logs, g):
     """A game that compiles some shaders at run time with its own GLSLC (Fire Emblem: Three Houses; profile_guess.py shader_sources), so no game file holds them. The game boots in the Mac host
     (headless and silent) with DM_GLSLC_CAPTURE (dm/host/hle_glslc.c), which writes each output to <version dir>/glslc_capture, where shader_split.py reads them; the outputs are the same on every run.
-    dirs: {shader version: its extraction}; a folder that already holds every file the profile's shader map names is reused"""
+    dirs: {shader version: its extraction}; a folder that already holds every file the profile's shader map names is reused.
+    The source/import heuristic can also detect a compiler used only on cache misses. With no output captured in a surviving boot, return the submitted shader keys for
+    verification against the offline split (check_glslc_coverage). Known capture files remain required. This proves coverage of the observed boot only, not later gameplay"""
     want = glslc_wanted(g)
     todo = [v for v, d in dirs.items() if not (glslc_done(d / 'glslc_capture') >= want if want else glslc_done(d / 'glslc_capture'))]
     PROG.stage('GLSLC capture')
@@ -1381,8 +1384,13 @@ def capture_glslc(repo, dirs, pkg_ver, patched, work, env, logs, g):
     d = dirs[pkg_ver]; cap, rd, log = d / 'glslc_capture.partial', work / 'tmp/glslc_run', logs / 'glslc_capture.log'
     rmtree(cap); rmtree(rd)
     for s in ('save', 'temp'): (rd / s).mkdir(parents=True)
-    # everything the run writes stays in <id>_build (DM_ROOT is already there): a fresh save and temporary storage, no shader libraries yet, the profile's shader map (the host looks beside itself by default)
-    henv = dict(env, DM_ROMFS=str(rfs.source(d)), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_MSL_DIR=str(rd / 'msl'), DM_NVN_SHMAP=str(g.table('shader_map.tsv')), DM_GLSLC_CAPTURE=str(cap))
+    # Only builds with no required captures can prove offline coverage. An empty map exposes submitted keys even if a previous split knows them.
+    shmap = g.table('shader_map.tsv')
+    if not want:
+        shmap = rd / 'shader_map.tsv'
+        shmap.write_text('# GLSLC capture: observe submitted shaders\n')
+    # everything the run writes stays in <id>_build (DM_ROOT is already there): a fresh save and temporary storage, no shader libraries yet, the observation map (the host looks beside itself by default)
+    henv = dict(env, DM_ROMFS=str(rfs.source(d)), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_MSL_DIR=str(rd / 'msl'), DM_NVN_SHMAP=str(shmap), DM_GLSLC_CAPTURE=str(cap))
     PROG.set(step='booting the game', done=0, total=len(want) if want else None, unit='shaders')
     say(f'booting the game in the Mac host to capture the shaders it compiles at run time → {d / "glslc_capture"}')
     t0 = time.time()
@@ -1392,14 +1400,31 @@ def capture_glslc(repo, dirs, pkg_ver, patched, work, env, logs, g):
     rc = boot_mac(host, patched, henv, rd, log, GLSLC_SECS, done)
     got = glslc_done(cap)
     if rc is not None and not (want and got >= want): host_stopped(log, rc, time.time() - t0)
+    if not want and not got and rc is None and not any(cap.glob('*.glslc')):
+        text = log.read_text(errors='replace')
+        observed = set(re.findall(r'\[RED\] shader ([0-9a-f]{16}) is not in the shader map', text))
+        if observed and '[RED] glslc:' not in text:
+            rmtree(cap); rmtree(rd)
+            PROG.end(f'no run-time outputs captured, {len(observed)} submitted shader keys to check against the offline split')
+            say('the GLSL/import heuristic can also select a compiler used only on cache misses. The build continues only if the offline split covers every shader observed in this boot. Later gameplay is unverified')
+            return observed
     if not got or (want and not got >= want):
         PROG.end(ok=False)
-        PROG.say(f'---- last lines of {log} ----\n' + ''.join(collections.deque(open(log, errors='replace'), maxlen=40)).rstrip('\n'))
+        with open(log, errors='replace') as f: tail = ''.join(collections.deque(f, maxlen=40)).rstrip('\n')
+        PROG.say(f'---- last lines of {log} ----\n' + tail)
         raise BuildError(f'captured only {len(got)} run-time shaders'
                          + (f', the profile needs {len(want)}' if want else '') + f' (host output: {log})')
     if want and got - want: say(f'[RED] captured files the profile\'s shader map does not name: {", ".join(sorted(got - want))}')
     swap_in(cap, d / 'glslc_capture'); rmtree(rd)
     PROG.end(f'{len(got)} shaders in {hms(time.time() - t0)}')
+
+
+def check_glslc_coverage(observed, g):
+    """Require the offline split to supply every shader observed during a surviving boot with no runtime outputs."""
+    if not observed: raise BuildError('no submitted shader keys to validate after the empty GLSLC capture')
+    missing = observed - shader_keys(g)
+    if missing: raise BuildError(f'no run-time GLSLC outputs and {len(missing)} observed shaders absent from the offline split: {", ".join(sorted(missing))}')
+    say(f'the offline split covers all {len(observed)} shaders observed during the GLSLC capture boot (later gameplay unverified)')
 
 
 UE_DECODE_SECS = 300   # the longest Oodle decode run: Octopath Traveler 0's 10,596 shaders take about 10 s, the boot up to nnMain included
@@ -2655,7 +2680,7 @@ def main(args=None):
             else: say('no heap check: it boots the game in the Mac host, which needs a Mac with Apple silicon; the profile keeps its guessed heap keys')
         if HEAP_CHECK and not args.no_heap_check and pg.has_va(game / 'ExeFS') and not region_checked(g, patched) and apple_silicon():   # where its address regions reach (a derived build too: the registered builds' cuts do not reach it)
             PROG.add(1); g = region_check(repo, game, patched, work, env, logs, g)
-    if glslc: capture_glslc(repo, {v: dirs[v] for v in sv}, pkg_ver, patched, work, env, logs, g)
+    observed_glslc = capture_glslc(repo, {v: dirs[v] for v in sv}, pkg_ver, patched, work, env, logs, g) if glslc else None
     if uedec: decode_ue_shaders(repo, {v: dirs[v] for v in sv}, pkg_ver, patched, work, env, logs, g)
     sh = work / 'shader'
     if gfx == 'vulkan':   # the packed version's merged RomFS holds the SPIR-V files the game loads; a capture holds those it generates
@@ -2682,6 +2707,7 @@ def main(args=None):
         derive_dlc = (lambda: derive_shader_tables('the installed DLC shader content differs from the registered tables')) if not own else None
         derive_compute = (lambda: derive_shader_tables('the reader decoded additional compute kernels from this registered build')) if not own else None
         pkey = split_shaders(py, repo, [rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, oodle, dlc_roms, derive_dlc, derive_compute)
+        if observed_glslc is not None: check_glslc_coverage(observed_glslc, g)
         ios = build_shaders(py, repo, sh, xlate, env, logs, g, pkey, mac)
     icon = next((d / 'icon.jpg' for d in (game, base) if (d / 'icon.jpg').exists()), None)   # the game icon nx_extract saved from the control data (English, icon.jpg); the packed version's first, then the base game's
     motion = MOTION if args.motion is None else args.motion

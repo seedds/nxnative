@@ -1,6 +1,8 @@
 """Provisional memory layouts must leave room for the game's initial heap."""
+import hashlib
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 REPO = Path(__file__).resolve().parents[3]
@@ -49,6 +51,16 @@ class GlslSources(unittest.TestCase):
     def test_complete_embedded_sources(self):
         image = b'#version 450\nvoid main() {}\0#version 450\nvoid main (void) {}\0'
         self.assertEqual(pg.glsl_sources(image), 2)
+
+    def test_only_text_files_count_as_glsl_sources(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); (root / 'shaders').mkdir()
+            (root / 'shaders/sprite.vert').write_bytes(b'#version 450\n\tvoid main() {}\r\n')
+            (root / 'shaders/sprite.FRAG').write_bytes('// café\nvoid main() {}\n'.encode())
+            (root / 'shaders/sprite.txt').write_bytes(b'void main() {}\n')   # not a shader file by its name
+            (root / 'shaders/cipher.vert').write_bytes(hashlib.sha256(b'ciphertext').digest() * 128)   # Skyward Sword HD's Dummy.vert: encrypted, read only on a cache miss
+            (root / 'shaders/empty.frag').write_bytes(b'')
+            self.assertEqual(pg.romfs_glsl_files(root), 2)
 
 
 class Npdm(unittest.TestCase):

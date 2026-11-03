@@ -89,7 +89,12 @@ int main(void) {
         CHECK(read_fs("rom:/data/a", got, sizeof got) && !strcmp(got, "hello"), "reads a file"); CHECK(read_fs("rom:/data/../data/c", got, sizeof got) && !strcmp(got, "xy"), "reads the next file, through ..");
         uint64_t h; size_t n = 0; int64_t sz = 0; char b[16] = {0};
         CHECK(h_fs_OpenFile(&h, "rom:/data/a", MODE_READ) == RES_OK && h_fs_ReadFile(&n, h, 3, b, 10) == RES_OK && n == 2 && !memcmp(b, "lo", 2), "a read stops at the end of the file (got %zu)", n);
-        CHECK(h_fs_GetFileSize(&sz, h) == RES_OK && sz == 5 && h_fs_GetFileOpenMode(h) == MODE_READ, "size 5, open for reading"); h_fs_CloseFile(h);
+        CHECK(h_fs_GetFileSize(&sz, h) == RES_OK && sz == 5 && h_fs_GetFileOpenMode(h) == MODE_READ, "size 5, open for reading");
+        // the overloads without a bytes-read output must read in full: a short read is a failure, with or without read options
+        { const uint32_t opt = 0; memset(b, 0, sizeof b);
+          CHECK(h_fs_ReadFileExact(h, 1, b, 4) == RES_OK && !memcmp(b, "ello", 4) && h_fs_ReadFileExactOpt(h, 0, b, 5, &opt) == RES_OK && !memcmp(b, "hello", 5), "full reads without a byte count succeed");
+          CHECK(h_fs_ReadFileExact(h, 3, b, 10) != RES_OK && h_fs_ReadFileExactOpt(h, 3, b, 10, &opt) != RES_OK, "short reads without a byte count fail"); }
+        h_fs_CloseFile(h);
         // entry 4: its index has low bits set, which Metroid Prime 4's file device masks off (handle & ~7) as it may of a Horizon pointer
         CHECK(h_fs_OpenFile(&h, "rom:/data/c", MODE_READ) == RES_OK && !(h & 15) && h_fs_ReadFile(&n, h & ~7ull, 0, b, 10) == RES_OK && n == 2 && !memcmp(b, "xy", 2), "entry 4 still reads after its handle's low bits are masked off (%#llx)", (unsigned long long)h);
         CHECK(h_fs_GetFileSize(&sz, h & ~7ull) == RES_OK && sz == 2, "and is 2 bytes"); h_fs_CloseFile(h & ~7ull);

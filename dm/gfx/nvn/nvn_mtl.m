@@ -1689,7 +1689,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[142];
+static int g_red_once[143];
 #define RED_ONCE(k, ...) do { if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -4365,7 +4365,7 @@ static uint64_t g_tb2_binds, g_tb2_made, g_tb2_fail, g_tb2_copy, g_tb2_copy_byte
 // gaps of tbuf_shadow: the copy holds what the CPU wrote before the submission was encoded, and a pool the CPU cannot access reads 0. Caller holds g_rmu
 enum { TB2_STAGE = 64 };
 static struct { __unsafe_unretained id<MTLTexture> src, view; uint64_t epoch, rid; } g_tb2_stage[TB2_STAGE];   // view: alive until the submission is done (defer_obj_release)
-static id<MTLTexture> tbuf_rows_copy(id<MTLTexture> t, uint32_t w, uint32_t h, uint32_t row, NSUInteger al, uint64_t *rid) {
+static id<MTLTexture> tbuf_rows_copy(id<MTLTexture> t, MTLPixelFormat pf, uint32_t w, uint32_t h, uint32_t row, NSUInteger al, uint64_t *rid) {
     id<MTLBuffer> src = t.buffer; size_t off = t.bufferOffset;
     if (!src || off >= src.length) return nil;
     if (!src.contents) { RED_ONCE(137, "texture buffer at pool offset %#zx (not a multiple of the %lu-byte linear-texture alignment) in a pool the CPU cannot access: the slot reads 0", off, (unsigned long)al); return nil; }
@@ -4375,7 +4375,7 @@ static id<MTLTexture> tbuf_rows_copy(id<MTLTexture> t, uint32_t w, uint32_t h, u
     size_t need = (size_t)row * h, n = src.length - off < need ? src.length - off : need;
     id<MTLBuffer> ab; size_t ao = arena_alloc(need + (al > 256 ? al : 0), &ab); ao = (ao + al - 1) / al * al;
     memcpy((uint8_t *)ab.contents + ao, (const uint8_t *)src.contents + off, n); memset((uint8_t *)ab.contents + ao + n, 0, need - n);
-    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:t.pixelFormat width:w height:h mipmapped:NO];
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf width:w height:h mipmapped:NO];
     d.resourceOptions = ab.resourceOptions; d.usage = MTLTextureUsageShaderRead;
     id<MTLTexture> v = [ab newTextureWithDescriptor:d offset:ao bytesPerRow:row];
     if (!v) { RED_ONCE(138, "cannot make the aligned 2D rows of a texture buffer (%ux%u, row %u, pool offset %#zx)", w, h, row, off); return nil; }
@@ -4387,19 +4387,31 @@ static id<MTLTexture> tbuf_rows_copy(id<MTLTexture> t, uint32_t w, uint32_t h, u
 }
 // DM_TBUF_ALIGN=<bytes> (diagnostic): a larger linear-texture alignment than the device's, to reproduce an iPhone's on a Mac
 static NSUInteger tbuf_align(NSUInteger al) { static long v = -1; if (v < 0) { const char *e = getenv("DM_TBUF_ALIGN"); v = e && *e ? strtol(e, NULL, 0) : 0; if (v < 0) v = 0; } return (NSUInteger)v > al ? (NSUInteger)v : al; }
-static id<MTLTexture> tbuf_as_2d(int tid, id<MTLTexture> t, uint64_t *rid) {
+// The format a texture buffer's rows are viewed in. dpf is the class the shader declares: a shader with no type answer declares float, and KTGL's (Pokemon Pokopia's light and decal lists, 32-bit
+// integer buffers in slots 16..21) fetches through it and takes the result's bits back with as_type<int>. Reading an integer texture through a float declaration is undefined in Metal,
+// so it is viewed as the float format of the same size, whose read hands the stored bits over unchanged
+static MTLPixelFormat tbuf_view_format(MTLPixelFormat pf, int dpf) {
+    if (dpf != NVN_DPF_FLOAT) return pf;
+    switch (pf) {
+    case MTLPixelFormatR32Uint: case MTLPixelFormatR32Sint: return MTLPixelFormatR32Float;
+    case MTLPixelFormatRG32Uint: case MTLPixelFormatRG32Sint: return MTLPixelFormatRG32Float;
+    case MTLPixelFormatRGBA32Uint: case MTLPixelFormatRGBA32Sint: return MTLPixelFormatRGBA32Float;
+    default: return pf;
+    }
+}
+static id<MTLTexture> tbuf_as_2d(int tid, id<MTLTexture> t, int dpf, uint64_t *rid) {
     if (tid <= 0 || tid >= g_ntreg || !g_treg[tid].ok) return nil;
-    const tex_t *tt = &g_treg[tid].t; uint64_t ser = tt->serial;
+    const tex_t *tt = &g_treg[tid].t; uint64_t ser = tt->serial; MTLPixelFormat vf = tbuf_view_format(t.pixelFormat, dpf);
     vc_set *s = nvn_hm_get(&g_vc, &ser);
     if (s && s->rows && s->rows_of == (__bridge void *)t) {   // rows_of is not retained: a texture made since at the same address must also match the buffer the rows hold, their offset, format and element count
         id<MTLTexture> rv = (__bridge id<MTLTexture>)s->rows;
-        if (rv.buffer == t.buffer && rv.bufferOffset == t.bufferOffset && rv.pixelFormat == t.pixelFormat && s->rows_n == t.width) { g_tb2_binds++; *rid = s->rows_rid; return rv; }
+        if (rv.buffer == t.buffer && rv.bufferOffset == t.bufferOffset && rv.pixelFormat == vf && s->rows_n == t.width) { g_tb2_binds++; *rid = s->rows_rid; return rv; }
     }
     id<MTLBuffer> buf = t.buffer; int bw, bh; uint32_t bpb = (uint32_t)nvn_fmt_bpb(tt->d.format, &bw, &bh), w, h, row;
     NSUInteger al = tbuf_align([g_dev minimumLinearTextureAlignmentForPixelFormat:t.pixelFormat]);
     int rows = buf && bw == 1 && bh == 1 && nvn_tbuf_rows(t.width, bpb, (uint32_t)al, &w, &h, &row);
     if (rows && t.bufferOffset % al) {   // the rows are fine, the pool offset is not: read them from an aligned copy (tbuf_rows_copy)
-        id<MTLTexture> sv = tbuf_rows_copy(t, w, h, row, al, rid);
+        id<MTLTexture> sv = tbuf_rows_copy(t, vf, w, h, row, al, rid);
         if (sv) { g_tb2_binds++; return sv; }
     }
     if (!rows || t.bufferOffset % al) {
@@ -4407,7 +4419,7 @@ static id<MTLTexture> tbuf_as_2d(int tid, id<MTLTexture> t, uint64_t *rid) {
         return nil;
     }
     while (h > 1 && t.bufferOffset + (uint64_t)row * h > buf.length) h--;   // a last row running past the pool buffer: reads beyond it are undefined anyway
-    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:t.pixelFormat width:w height:h mipmapped:NO];
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:vf width:w height:h mipmapped:NO];
     d.resourceOptions = buf.resourceOptions; d.usage = MTLTextureUsageShaderRead;
     id<MTLTexture> v = [buf newTextureWithDescriptor:d offset:t.bufferOffset bytesPerRow:row];
     if (!v) { if (!g_tb2_fail++) MLOG("[RED] cannot create the 2D-row form of a texture buffer: %ux%u format %lu row %u bytes at pool offset %lu", w, h, (unsigned long)t.pixelFormat, row, (unsigned long)t.bufferOffset); return nil; }
@@ -5613,26 +5625,45 @@ static void at_bind(id<MTLCommandEncoder> en) {
     }
     enc_r_args((id<MTL4RenderCommandEncoder>)en, MTLRenderStageFragment, gpu, DMSH_ALPHA_BUFFER);
 }
-// NVN's logic operations (ColorStateSetLogicOp: the bits a pixel shader writes combined with the target's, in place of blending; integer targets, as in OpenGL and Vulkan): Metal has none.
-// A pipeline drawn with an operation other than COPY whose fragment takes the integer entry point (fn_u or fn_m: unsigned integer targets) takes that entry of the shader's logic operation
-// library <key>_bl instead (dmsh_logic.py: it reads each integer output's attachment and combines the two before each return), and its draws bind the operation and the targets' channel
-// masks at fragment buffer DMSH_LOGIC_BUFFER (lo_bind). Xenoblade Chronicles 2 ORs probe indices into its RG32Uint light probe lists. Any other target keeps COPY, with a red line
+// NVN's logic operations (ColorStateSetLogicOp: the bits a pixel shader writes combined with the target's, in place of blending; integer and normalized targets, as in OpenGL and Vulkan): Metal has none.
+// A pipeline drawn with an operation other than COPY takes its entry point (fn, or fn_u / fn_m for unsigned integer targets) from the shader's logic operation library <key>_bl instead
+// (dmsh_logic.py: it reads each output's attachment and combines the two before each return), and its draws bind the operation and the targets' channel masks at fragment buffer
+// DMSH_LOGIC_BUFFER (lo_bind). Xenoblade Chronicles 2 ORs probe indices into its RG32Uint light probe lists; Skyward Sword HD ORs fog into the alpha of its RGBA8Unorm frame. A target
+// with no bits to combine (floating point, sRGB, signed) keeps COPY, with a red line. The operation takes the place of blending (blending stays off in pso_desc), as both APIs define
 static inline int lop_on(void) { return S.color.logic_op != NVN_LOGIC_OP_COPY; }
-static uint32_t lop_key(const pso_key *k, NvShader *fs, int merged) {   // pso_key.logic, after the formats are in k
+static int unorm_chan_masks(MTLPixelFormat f, uint32_t m[4]) {   // the bits each channel of a normalized colour format stores (alpha of a format without it: any, Metal drops the write); 0: not one
+    uint32_t b = 0;
+    switch (f) {
+        case MTLPixelFormatR8Unorm: case MTLPixelFormatRG8Unorm: case MTLPixelFormatRGBA8Unorm: case MTLPixelFormatBGRA8Unorm: b = 0xffu; break;
+        case MTLPixelFormatR16Unorm: case MTLPixelFormatRG16Unorm: case MTLPixelFormatRGBA16Unorm: b = 0xffffu; break;
+        case MTLPixelFormatRGB10A2Unorm: m[0] = m[1] = m[2] = 0x3ffu; m[3] = 3u; return 1;
+        case MTLPixelFormatB5G6R5Unorm: m[0] = m[2] = 0x1fu; m[1] = 0x3fu; m[3] = 0xffu; return 1;
+        case MTLPixelFormatBGR5A1Unorm: m[0] = m[1] = m[2] = 0x1fu; m[3] = 1u; return 1;
+        default: return 0;
+    }
+    for (int c = 0; c < 4; c++) m[c] = b;
+    return 1;
+}
+static uint32_t lop_key(const pso_key *k, NvShader *fs, int merged) {   // pso_key.logic, after the formats and the alpha test are in k
     if (!fs || !lop_on()) return 0;
-    int any = 0; for (int i = 0; i < 8; i++) any |= k->cfmt[i] && (!fs->rf.color_known || (fs->rf.color_mask >> i & 1)) && (k->chmask >> (4 * i) & 0xf);
+    int any = 0, norm = 0, other = 0;
+    for (int i = 0; i < 8; i++) if (k->cfmt[i] && (!fs->rf.color_known || (fs->rf.color_mask >> i & 1)) && (k->chmask >> (4 * i) & 0xf)) {
+        uint32_t bits[4]; any = 1;
+        if (unorm_chan_masks((MTLPixelFormat)k->cfmt[i], bits)) norm = 1; else if (pf_int_kind((MTLPixelFormat)k->cfmt[i])) other = 1;
+    }
     if (!any) return 0;   // no colour written (Xenoblade Chronicles 2's probe boxes mark stencil with the operation still set): nothing to combine
     if (merged) { RED_ONCE(134, "logic operation %u in a merged pass (shader %s): drawn with COPY", S.color.logic_op, fs->key); return 0; }
     int u = fs->fn_u && pso_all_uint(k, fs, 0), m = !u && fs->fn_m && pso_mixed_uint(k, fs, 0);
-    if (!u && !m) { RED_ONCE(133, "shader %s draws with logic operation %u into a target that is not an unsigned integer format (or it has no integer entry point): drawn with COPY", fs->key, S.color.logic_op); return 0; }
+    if (!u && !m && (other || !norm)) { RED_ONCE(133, "shader %s draws with logic operation %u into a target with no bits to combine (floating point, sRGB, signed) or an integer target it has no entry point for: drawn with COPY", fs->key, S.color.logic_op); return 0; }
+    if (k->atest) { RED_ONCE(142, "shader %s draws with logic operation %u and an alpha test, which no library combines: drawn with COPY", fs->key, S.color.logic_op); return 0; }
     if (!fs->has_logic) { RED_ONCE(135, "shader %s draws with logic operation %u but has no logic operation library: drawn with COPY", fs->key, S.color.logic_op); return 0; }
     return 1;
 }
 static os_unfair_lock g_lo_lock = OS_UNFAIR_LOCK_INIT;
-// The logic operation library's entry point named as base (fn_u or fn_m), specialized for the targets the pipeline has (targets: bit n = colour target n attached; dmsh_logic.py reads
+// The logic operation library's entry point named as base (fn, fn_u or fn_m), specialized for the targets the pipeline has (targets: bit n = colour target n attached; dmsh_logic.py reads
 // only those, DMSH_LOGIC_FC + n), loaded on first need; a library that fails is final for the shader
 static id<MTLFunction> lo_fn(NvShader *fs, id<MTLFunction> base, uint32_t targets) {
-    int w = !base ? -1 : base == fs->fn_u ? 0 : base == fs->fn_m ? 1 : -1;
+    int w = !base ? -1 : base == fs->fn_u ? 0 : base == fs->fn_m ? 1 : base == fs->fn ? 2 : -1;
     if (w < 0 || !fs->has_logic) return nil;
     os_unfair_lock_lock(&g_lo_lock);
     NSError *e = nil; const char *why = NULL;
@@ -5646,7 +5677,7 @@ static id<MTLFunction> lo_fn(NvShader *fs, id<MTLFunction> base, uint32_t target
     if (fs->lfn_state == 1 && !(f = fs->lfn[k])) {
         MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
         for (int n = 0; n < 8; n++) { bool on = targets >> n & 1; [cv setConstantValue:&on type:MTLDataTypeBool atIndex:DMSH_LOGIC_FC + n]; }
-        NSString *name = w ? fs->fn_m.name : fs->fn_u.name;
+        NSString *name = base.name;
         f = fn4_note([fs->llib newFunctionWithName:name constantValues:cv error:&e], fs->llib, name, cv);
         if (!f) why = "no entry point";
         else if (fs->rf.nb && [f newArgumentEncoderWithBufferIndex:fs->rf.abi].encodedLength != fs->arg_len) { why = "its argument buffer differs from the base library's"; f = nil; }
@@ -5665,7 +5696,10 @@ static void uint_chan_masks(MTLPixelFormat f, uint32_t m[4]) {   // the bits eac
 static void lo_bind(id<MTLCommandEncoder> en) {
     static uint64_t gpu, pass; static uint32_t last[36];
     uint32_t v[36] = {S.color.logic_op};
-    for (int i = 0; i < 8; i++) if (g_pass.cfmt[i]) uint_chan_masks((MTLPixelFormat)g_pass.cfmt[i], &v[4 + 4 * i]);
+    for (int i = 0; i < 8; i++) if (g_pass.cfmt[i]) {   // a target with neither keeps masks of zero: its float output passes through (dmsh_logic.py dm_logic_norm)
+        MTLPixelFormat f = (MTLPixelFormat)g_pass.cfmt[i];
+        if (pf_int_kind(f)) uint_chan_masks(f, &v[4 + 4 * i]); else unorm_chan_masks(f, &v[4 + 4 * i]);
+    }
     if (!gpu || pass != g_pass.serial || memcmp(v, last, sizeof v)) {
         __strong id<MTLBuffer> b; size_t off = arena_alloc(sizeof v, &b); memcpy((uint8_t *)b.contents + off, v, sizeof v);
         gpu = b.gpuAddress + off; pass = g_pass.serial; memcpy(last, v, sizeof v);
@@ -5695,7 +5729,7 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
     // Dual-source blending: target 0 reads the shader's output 1 as its second source. The dual-source entry point returns that output as [[color(0), index(1)]] (dmsh_build.py fs_dual),
     // and output 1 is then no colour output: Maxwell leaves the attachment of output 1 as it was. A shader without that entry point blends with zero for the second source, as an
     // unwritten one (blend_zero_src1): passing the state to Metal as it is makes Metal 4's blend compiler crash (MTLCompilerService in buildBlendFactor, Pokémon Legends: Arceus)
-    int dual = fs && !fsfn && fs->rf.color_known && (fs->rf.color_mask & 2) && d.fragmentFunction == fs->fn && pso_reads_src1(k, merged), dual_fn = 0;
+    int dual = !k->logic && fs && !fsfn && fs->rf.color_known && (fs->rf.color_mask & 2) && d.fragmentFunction == fs->fn && pso_reads_src1(k, merged), dual_fn = 0;   // a logic operation takes the place of blending
     if (dual && fs->fn_d) { d.fragmentFunction = fs->fn_d; dual_fn = 1; }
     else if (dual) { want_note(&g_dual_want, fs->key);
         RED_ONCE(121, "shader %s writes output 1 and a pipeline blends with it as the second source, but it has no dual-source entry point: the second source counts as zero "
@@ -5705,7 +5739,7 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
         if (af) d.fragmentFunction = af;
         else if (fsfn) RED_ONCE(129, "alpha test not applied to a specialized fragment (readable-tile merge or diagnostic) of %s", fs->key);
     }
-    if (k->logic && fs) {   // the logic operation (lop_key): the same integer entry point of the logic operation library; the alpha test has no integer colour 0 to act on (atest_key)
+    if (k->logic && fs) {   // the logic operation (lop_key): the same entry point of the logic operation library; never with the alpha test's, which lop_key leaves out
         uint32_t targets = 0; for (int i = 0; i < 8; i++) if (k->cfmt[i]) targets |= 1u << i;   // not a merged pass (lop_key): target i is output i
         id<MTLFunction> lf = fsfn ? nil : lo_fn(fs, d.fragmentFunction, targets);
         if (lf) d.fragmentFunction = lf;
@@ -5731,7 +5765,7 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
         if (unwritten) m = 0;
         c.writeMask = (m & 1 ? MTLColorWriteMaskRed : 0) | (m & 2 ? MTLColorWriteMaskGreen : 0) | (m & 4 ? MTLColorWriteMaskBlue : 0) | (m & 8 ? MTLColorWriteMaskAlpha : 0);
         // Integer targets: no blending. Maxwell ignores the blend enable on them; Metal refuses the pipeline (an assertion even without the API validation layer): Luigi's Mansion 3's integer G-buffer (PR #105)
-        if (l != 0xff && k->blend_en >> l & 1 && !unwritten && !pf_int_kind(c.pixelFormat)) {
+        if (!k->logic && l != 0xff && k->blend_en >> l & 1 && !unwritten && !pf_int_kind(c.pixelFormat)) {   // a logic operation takes the place of blending (lop_key)
             c.blendingEnabled = YES; blend_st bl = adv_blend(k->blend[l]);
             if (fs && fs->rf.color_known && (!(fs->rf.color_mask & 2) || (dual && !dual_fn)) && !fsfn) {
                 bl.src_rgb = blend_zero_src1(bl.src_rgb); bl.dst_rgb = blend_zero_src1(bl.dst_rgb);
@@ -7434,7 +7468,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
                        (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.depth,
                        (unsigned long)(t.parentTexture ? t.parentRelativeLevel : 0), (unsigned long)t.mipmapLevelCount,
                        (unsigned long)(t.parentTexture ? t.parentRelativeSlice : 0), (unsigned long)t.arrayLength, (unsigned long)t.textureType, t ? (int)t.swizzle.red : 0, t ? (int)t.swizzle.green : 0, t ? (int)t.swizzle.blue : 0, t ? (int)t.swizzle.alpha : 0, (__bridge void *)(t.parentTexture ? t.parentTexture : t));
-            if (t && b->f1d && t.textureType == MTLTextureTypeTextureBuffer && (MTLTextureType)b->dtt == MTLTextureType2D) { uint64_t r2 = 0; id<MTLTexture> v = tbuf_as_2d(tid, t, &r2); if (v) { t = v; trid = r2; } }   // see tbuf_as_2d
+            if (t && b->f1d && t.textureType == MTLTextureTypeTextureBuffer && (MTLTextureType)b->dtt == MTLTextureType2D) { uint64_t r2 = 0; id<MTLTexture> v = tbuf_as_2d(tid, t, b->dpf, &r2); if (v) { t = v; trid = r2; } }   // see tbuf_as_2d
             if (t && t.textureType != (MTLTextureType)b->dtt) { uint64_t r2 = 0; id<MTLTexture> v = tex_fit(tid, t, (MTLTextureType)b->dtt, &r2); if (v) { t = v; trid = r2; }
                 // no view fits, and one side is a buffer texture (Octopath Traveler 0: a buffer texture left in a slot a shader reads as a cube): reads of it are undefined, so the slot reads 0
                 else if (t.textureType == MTLTextureTypeTextureBuffer || (MTLTextureType)b->dtt == MTLTextureTypeTextureBuffer) { tex_mis_note(sh, nvn_stage, b->kind == NVN_RB_TEX ? reg : -1, tid, t, (MTLTextureType)b->dtt, "a buffer texture: the slot reads 0 (dummy)"); t = nil; }

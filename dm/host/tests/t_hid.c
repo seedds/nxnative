@@ -486,13 +486,25 @@ static void t_motion_hid(void) {
 }
 
 // SDK 19's main calls the hid server proxy's InitializeJcms command (vtable +0x508) with no null check (Donkey Kong Bananza v0, main+0x87266c)
+// The callers the hid server checks name (hid_caller, hid_res_from_main): the test calls them from a module named as it likes
+static module_t g_caller_mod = {.name = "main"};
+module_t *module_of(const void *p) { (void)p; return &g_caller_mod; }
 static void t_hid_server(void) {
     void **srv = NULL;
     CHECK(h_hid_SrvProxy((void **)&srv) == RES_OK && srv != NULL, "hid server proxy: success and an object");
     if (!srv) return;
-    Result (*init)(void *, uint64_t, void *, uint64_t) = ((void **)srv[0])[0x508 / 8], (*rel)(void *) = ((void **)srv[0])[1];
-    CHECK(init(srv, 0x80, NULL, 0x4000) == RES_OK && rel(srv) == RES_OK, "hid server proxy: commands and release succeed");
-    CHECK(h_hid_ResActivate(NULL) == RES_OK && h_hid_ResDeactivate(NULL) == RES_OK, "hid applet resource: activation succeeds");
+    void **vt = srv[0];
+    Result (*init)(void *, uint64_t, void *, uint64_t) = vt[0x508 / 8], (*rel)(void *) = vt[1];
+    CHECK(init(srv, 0x80, NULL, 0x4000) == RES_OK && rel(srv) == RES_OK, "hid server proxy: the Joy-Con mouse sensor's commands and release succeed");
+    for (uint32_t off = 0x508; off <= 0x520; off += 8) CHECK(((Result (*)(void *))vt[off / 8])(srv) == RES_OK, "hid server proxy: +0x508 to +0x520 succeed");
+    void *out = (void *)0x1234;
+    CHECK(((Result (*)(void *, void **, uint64_t))vt[0x20 / 8])(srv, &out, 0x80) == RES_FAIL && out == (void *)0x1234, "hid server proxy: CreateAppletResource (+0x20) fails and writes nothing");
+    CHECK(((Result (*)(void *))vt[0x500 / 8])(srv) == RES_FAIL && ((Result (*)(void *))vt[0x528 / 8])(srv) == RES_FAIL && ((Result (*)(void *))vt[0xff8 / 8])(srv) == RES_FAIL,
+          "hid server proxy: the slots beside the sensor's and the last one fail");
+    CHECK(h_hid_ResActivate(NULL) == RES_OK && h_hid_ResDeactivate(NULL) == RES_OK, "hid applet resource: activation from main succeeds");
+    strcpy(g_caller_mod.name, "sdk");
+    CHECK(h_hid_ResActivate(NULL) == RES_FAIL && h_hid_ResDeactivate(NULL) == RES_FAIL, "hid applet resource: activation from elsewhere fails");
+    strcpy(g_caller_mod.name, "main");
 }
 
 int main(void) {

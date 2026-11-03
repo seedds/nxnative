@@ -674,19 +674,52 @@ HLE_FORCE("_ZN2nn3hid13GetJcmsStatesEPNS0_9JcmsStateEiRKNS0_10JcmsHandleE", "Joy
           int, h_hid_JcmsStates, void *out, int n, const uint32_t *h) { (void)out; (void)n; (void)h; return 0; }
 // SDK 19 (Donkey Kong Bananza v0, nnSdk 19.3.2) links that sensor's client into main instead (InitializeJcms at main+0x8725e0, Finalize / Start / Stop after it): each takes the hid
 // server from CreateHidServerProxy and calls it through its vtable (+0x508 to +0x520) with no null check. sm refuses hid, so the proxy was null and the boot crashed at main+0x87266c.
-// The host hands out a server object whose every method succeeds and writes nothing; GetJcmsStates then reads the ring in the game's own work buffer, which nothing fills.
-// After the server, InitializeJcms activates the SDK's AppletResourceHolder, which asks the server for hid's shared memory (sdk+0x613914 on 19.3.2): the host serves the hid
-// API itself and has no such memory, so activation is a counted no-op
-// ponytail: one catch-all object for every IHidServer command; give a command its own slot if a caller needs an output written
+// The host hands out a server object that answers those four commands (they write nothing; GetJcmsStates then reads the ring in the game's own work buffer, which nothing fills)
+// and its reference count (AddReference / Release, +0x0 / +0x8). Any other command goes through a stub of its own (dm_hid_srv_stubs, one per vtable slot), which names the slot and the
+// caller in a red line and fails the command: a path the host does not serve stops at its first command, as it stopped at sm's refusal before, instead of reading outputs never written.
+// After the server, InitializeJcms activates the SDK's AppletResourceHolder, which would ask the server for hid's shared memory (CreateAppletResource, +0x20; sdk+0x613914 on 19.3.2).
+// The host serves the hid API itself and has no such memory: an activation from main (the client above, main+0x8726bc) is a no-op that leaves the holder without an address; one from
+// anywhere else is named in a red line and fails, as it did at sm before
+static void hid_caller(const void *ra, char *b, size_t n) {
+    module_t *m = module_of(ra);
+    if (m) snprintf(b, n, "%s+%#lx", m->name, (unsigned long)((uintptr_t)ra - (uintptr_t)m->base)); else snprintf(b, n, "%p", ra);
+}
 static Result hid_srv_ok(void) { return RES_OK; }
-static void *g_hid_srv_vt[0x200], *g_hid_srv[1] = {g_hid_srv_vt};
-HLE_FORCE("_ZN2nn3hid6server20CreateHidServerProxyEPNS_2sf13SharedPointerINS0_10IHidServerEEE", "hid server proxy (sm refuses hid) → a host object whose every command succeeds with no output",
+__attribute__((visibility("hidden"))) Result dm_hid_srv_other(uint32_t slot);
+__attribute__((visibility("hidden"))) Result dm_hid_srv_other(uint32_t slot) {   // x30 is still the caller's: the stub branches here without linking
+    static _Atomic int n; if (atomic_fetch_add(&n, 1) >= 16) return RES_FAIL;   // the first 16: a path that keeps calling does not flood the log
+    char w[64]; hid_caller(__builtin_return_address(0), w, sizeof w);
+    LOG("[RED] hid server proxy: command +%#x from %s is not served (the host answers only the Joy-Con mouse sensor's, +0x508 to +0x520); it fails", slot * 8, w);
+    return RES_FAIL;
+}
+enum { HID_SRV_SLOTS = 0x200 };
+extern const uint8_t dm_hid_srv_stubs[];   // HID_SRV_SLOTS stubs of 8 bytes: w0 = the slot, then on to dm_hid_srv_other
+__asm__(".text\n.p2align 2\n.globl _dm_hid_srv_stubs\n.private_extern _dm_hid_srv_stubs\n_dm_hid_srv_stubs:\n"
+        ".set dm_hid_slot, 0\n.rept 0x200\n    mov w0, #dm_hid_slot\n    b _dm_hid_srv_other\n.set dm_hid_slot, dm_hid_slot + 1\n.endr\n");
+static void *g_hid_srv_vt[HID_SRV_SLOTS], *g_hid_srv[1] = {g_hid_srv_vt};
+static pthread_once_t g_hid_srv_once = PTHREAD_ONCE_INIT;
+static void hid_srv_make(void) {
+    for (uint32_t i = 0; i < HID_SRV_SLOTS; i++) g_hid_srv_vt[i] = (void *)(dm_hid_srv_stubs + 8 * i);
+    g_hid_srv_vt[0] = g_hid_srv_vt[1] = (void *)hid_srv_ok;   // AddReference, Release
+    for (uint32_t off = 0x508; off <= 0x520; off += 8) g_hid_srv_vt[off / 8] = (void *)hid_srv_ok;   // the Joy-Con mouse sensor client's four commands
+}
+HLE_FORCE("_ZN2nn3hid6server20CreateHidServerProxyEPNS_2sf13SharedPointerINS0_10IHidServerEEE", "hid server proxy (sm refuses hid) → a host object for the Joy-Con mouse sensor's commands; others fail with a red line",
           Result, h_hid_SrvProxy, void **out) {
-    if (!g_hid_srv_vt[0]) for (size_t i = 0; i < sizeof g_hid_srv_vt / sizeof *g_hid_srv_vt; i++) g_hid_srv_vt[i] = (void *)hid_srv_ok;   // same value from any thread
+    pthread_once(&g_hid_srv_once, hid_srv_make);
     *out = g_hid_srv; return RES_OK;
 }
-HLE_FORCE("_ZN2nn3hid6detail20AppletResourceHolder8ActivateEv", "hid applet resource (shared memory from the hid server): the host serves hid itself", Result, h_hid_ResActivate, void *self) { (void)self; return RES_OK; }
-HLE_FORCE("_ZN2nn3hid6detail20AppletResourceHolder10DeactivateEv", "hid applet resource: nothing to release", Result, h_hid_ResDeactivate, void *self) { (void)self; return RES_OK; }
+static Result hid_res_from_main(const void *ra, const char *what) {
+    module_t *m = module_of(ra);
+    if (m && !strcmp(m->name, "main")) return RES_OK;
+    static _Atomic int n; if (atomic_fetch_add(&n, 1) >= 16) return RES_FAIL;
+    char w[64]; hid_caller(ra, w, sizeof w);
+    LOG("[RED] hid AppletResourceHolder::%s from %s: the host has no hid shared memory (only main's Joy-Con mouse sensor client is served); it fails", what, w);
+    return RES_FAIL;
+}
+HLE_FORCE("_ZN2nn3hid6detail20AppletResourceHolder8ActivateEv", "hid applet resource: no shared memory on the host; from main (the Joy-Con mouse sensor client) a no-op, else a red line and a failure",
+          Result, h_hid_ResActivate, void *self) { (void)self; return hid_res_from_main(__builtin_return_address(0), "Activate"); }
+HLE_FORCE("_ZN2nn3hid6detail20AppletResourceHolder10DeactivateEv", "hid applet resource: from main nothing to release, else a red line and a failure",
+          Result, h_hid_ResDeactivate, void *self) { (void)self; return hid_res_from_main(__builtin_return_address(0), "Deactivate"); }
 // The Switch 2's pointer on top of those sensors (Nmouse; Fire Emblem Fortune's Weave initializes it at boot with the 1920x1080 screen it maps the pointer to, main+0x650a24). InitializeNmouse opens the
 // hid service as InitializeJcms does (its Result aborts: sdk+0x6d5340). No controller of the host has the sensor, so there are no handles, and the calls on a handle have nothing to do
 HLE_FORCE("_ZN2nn3hid16InitializeNmouseEPvmii", "Joy-Con mouse pointer: no hid service; no sensor on the host", void, h_hid_NmouseInit, void *work, uint64_t size, int w, int h) { (void)work; (void)size; (void)w; (void)h; }

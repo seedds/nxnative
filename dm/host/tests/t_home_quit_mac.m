@@ -63,6 +63,25 @@ int main(void) {
         CHECK(card_of(plong).frame.size.width == w720 && NSContainsRect(plong.bounds, card_of(plong).frame), "a long title wraps, the card keeps its width");
         CHECK(first_image(plong).image.size.width > 0, "a symbol the system does not have falls back to the letter");
 
+        // The two actions keep one width in every language the launcher passes (DM_HOME_QUIT_TEXT: en, zh, de, sv, fr, it), and a label far longer than any
+        // of them shrinks or is cut instead of widening its pill
+        NSArray<NSArray<NSString *> *> *labels = @[@[@"Quit", @"Cancel"], @[@"退出", @"取消"], @[@"Beenden", @"Abbrechen"], @[@"Avsluta", @"Avbryt"],
+                                                  @[@"Quitter", @"Annuler"], @[@"Esci", @"Annulla"], @[@"Quit this game right now please", @"Cancel and go back to the game"]];
+        for (NSValue *size in @[[NSValue valueWithRect:small], [NSValue valueWithRect:tv]]) {
+            NSRect r = size.rectValue; CGFloat want = HQ_ACTION_W * hq_scale(r.size);
+            for (NSArray<NSString *> *l in labels) {
+                NSView *pv = hq_prompt_view(r, @"Quit Hades?", @"n", l[0], l[1], nil, nil);
+                [pv layoutSubtreeIfNeeded];
+                NSStackView *actions = (NSStackView *)((NSStackView *)card_of(pv)).arrangedSubviews.lastObject;
+                CHECK(actions.arrangedSubviews.count == 2, "two actions");
+                for (NSView *a in actions.arrangedSubviews) CHECK(fabs(a.frame.size.width - want) < 0.5 && fabs(a.frame.size.height - 56 * hq_scale(r.size)) < 0.5, l[0].UTF8String);
+                for (NSView *a in actions.arrangedSubviews) {
+                    NSStackView *row = (NSStackView *)a.subviews.firstObject;
+                    CHECK(NSContainsRect(a.bounds, row.frame), "the glyph and the label stay inside their pill");
+                }
+            }
+        }
+
         CAShapeLayer *ring = nil;
         NSView *h = hq_hold_view(small, @"Keep holding to quit", &ring);
         [h layoutSubtreeIfNeeded];
@@ -80,6 +99,7 @@ int main(void) {
             CAShapeLayer *r = nil; NSView *hv = hq_hold_view(tv, @"Keep holding to quit", &r); hq_hold_set(r, 0.6);
             capture(hv, tv.size, dir, "home-quit-hold.png");
             capture(hq_prompt_view(tv, @"Super Mario Odyssey beenden?", @"Nicht gesicherter Fortschritt geht verloren.", @"Beenden", @"Abbrechen", @"xmark.circle", @"circle.circle"), tv.size, dir, "home-quit-prompt-de.png");
+            capture(hq_prompt_view(tv, @"退出Super Mario Odyssey？", @"未保存的进度将会丢失。", @"退出", @"取消", @"a.circle", @"b.circle"), tv.size, dir, "home-quit-prompt-zh.png");
         }
     }
     printf("t_home_quit_mac: %d checks, %d failed\n", checks, fails);

@@ -29,15 +29,34 @@ static NSImageView *hq_glyph(NSString *symbol, NSString *fallback, CGFloat size,
     v.contentTintColor = c; v.translatesAutoresizingMaskIntoConstraints = NO;
     return v;
 }
-// One action of the prompt: glyph and label, the primary one on a cream pill
+// Every action is this wide (points at a 720-high view), whatever its label and language: the longest of the launcher's six languages
+// ("Abbrechen", "Annuler") fits at full size, and a longer label gets a smaller font, then is cut, so the pills never change width
+#define HQ_ACTION_W 220
+// The font size that fits text into room on one line: size, or smaller down to 70 % of it
+static CGFloat hq_fit(NSString *text, CGFloat size, CGFloat room) {
+    CGFloat w = [text sizeWithAttributes:@{NSFontAttributeName: [NSFont systemFontOfSize:size weight:NSFontWeightSemibold]}].width;
+    if (w <= room) return size;
+    CGFloat s = floor(size * room / w * 10) / 10;
+    return s < size * 0.7 ? size * 0.7 : s;
+}
+// One action of the prompt: glyph and label centred in a pill of a fixed size, the primary one cream
 static NSView *hq_action(NSString *symbol, NSString *fallback, NSString *label, int primary, CGFloat k) {
     NSColor *fg = primary ? HQ_BACKGROUND : [NSColor colorWithWhite:1 alpha:0.8];
-    NSStackView *row = [NSStackView stackViewWithViews:@[hq_glyph(symbol, fallback, 24 * k, fg), hq_label(label, 22 * k, NSFontWeightSemibold, fg, 0)]];
-    row.spacing = 10 * k; row.edgeInsets = NSEdgeInsetsMake(0, 24 * k, 0, 24 * k); row.translatesAutoresizingMaskIntoConstraints = NO;
-    row.wantsLayer = YES; row.layer.cornerRadius = 28 * k;
-    if (primary) row.layer.backgroundColor = HQ_CREAM.CGColor;
-    [row.heightAnchor constraintEqualToConstant:56 * k].active = YES;
-    return row;
+    CGFloat w = HQ_ACTION_W * k, glyph = 24 * k, gap = 10 * k, inset = 20 * k, room = w - 2 * inset - glyph - gap;
+    NSTextField *t = hq_label(label, hq_fit(label, 22 * k, room), NSFontWeightSemibold, fg, 0);
+    t.lineBreakMode = NSLineBreakByTruncatingTail;
+    [t setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSStackView *row = [NSStackView stackViewWithViews:@[hq_glyph(symbol, fallback, glyph, fg), t]];
+    row.spacing = gap; row.translatesAutoresizingMaskIntoConstraints = NO;
+    NSView *pill = [NSView new]; pill.translatesAutoresizingMaskIntoConstraints = NO;
+    pill.wantsLayer = YES; pill.layer.cornerRadius = 28 * k;
+    if (primary) pill.layer.backgroundColor = HQ_CREAM.CGColor;
+    [pill addSubview:row];
+    [NSLayoutConstraint activateConstraints:@[[pill.widthAnchor constraintEqualToConstant:w], [pill.heightAnchor constraintEqualToConstant:56 * k],
+        [row.centerXAnchor constraintEqualToAnchor:pill.centerXAnchor], [row.centerYAnchor constraintEqualToAnchor:pill.centerYAnchor],
+        [row.widthAnchor constraintLessThanOrEqualToConstant:w - 2 * inset]]];
+    pill.accessibilityElement = YES; pill.accessibilityRole = NSAccessibilityButtonRole; pill.accessibilityLabel = label;
+    return pill;
 }
 
 // The prompt over the whole view: a dim scrim, and in its middle the card with the title, the note and the two actions (A quits, B cancels).

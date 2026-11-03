@@ -1,0 +1,66 @@
+# Game profile of SD GUNDAM G GENERATION CROSS RAYS (Switch, Platinum Edition: base game + update 1.6.3 = v720896 + 31 DLC, all in one cartridge dump).
+# Format: see dm/games/README.md
+# TOM CREATE / Bandai Namco, SDK 9.4.1, NVN. All assets are in /Data.bin (15.14 GB, a CRIWARE container) plus /data/sound (.hca, 21,831 files)
+# and /data/movie (CRI USM); the engine is CRIWARE + compiled Lua 5.2, not Unity or Unreal.
+# The shaders are not in RomFS: 1090 GLSLC compiler outputs (magic 0x19866891) are compiled into main's read-only segment (173 vs, 917 ps),
+# scanned by shader_split.py glslc_shaders. Same shape as 13 Sentinels: Aegis Rim, which plays on the iPhone.
+
+# ---- Identity ----
+title_id	010055700CEA8000
+program_id	010055700CEA8000
+
+# ---- App ----
+name	SD GUNDAM G GENERATION CROSS RAYS
+ipa	SdGundamGGenerationCrossRays.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v720896	1.6.3	main=6fdf8701ff6143bda40d4931a98545f6	subsdk0=fbb0b46fb4fdbf4be47b76f2285f53ed	sdk=290c9a04234847a176aa1c375c16af99
+package	v720896
+shader_versions	v720896
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Data.bin
+zip_store	.bin:.rnm:.usm:.metallib
+
+# ---- Memory ----
+# main's nninitStartup sizes its heap as the application pool less "used memory" and calls SetMemoryHeapSize, then
+# AllocateMemoryBlock for its own malloc (main+0x5cc4d0). That is the Age of Calamity path (docs/reference/memory.md,
+# "Heap sized from the application pool less used memory"): the host reported 64 MB used, this game's modules take
+# 0x7800000 (120 MB), so SetHeapSize failed and AllocateMemoryBlock returned 0 — main never checked it and stored
+# through null at main+0x5cc508. mem_used is set to the modules plus room (128 MB), as Age of Calamity's 72 MB is.
+# Block: 256 MB in front + 256 MB alias region + 256 MB stack region + the heap region = 4 GB.
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+mem_used	0x8000000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+# SDK 9.4.1 is SDK 10 or older, so the host reports NVN API 53.313 on its own (hle_nvn.c nvn_api, DM_SDK_OLD):
+# the same path Hyrule Warriors: Age of Calamity (SDK 9.6.0, Bandai Namco / Koei Tecmo) already runs on. No device_api override needed.
+
+# ---- Textures ----
+# Boot reaches the title menu and draws 62 draws a frame, but every image is black and only text renders: the game writes
+# its texels into a memory pool with the CPU and the host never uploads them. `packaged textures: first uploads 0` in the
+# log is the tell. The Great Ace Attorney Chronicles had exactly this black screen, and docs/reference/services.md names
+# tex_flush_upload / tex_dirty_upload as its fix (nvn-objects.md, "Mapped-range flushes taken as uploads" and "CPU writes
+# with no flush, caught by page protection"). Both are on: this engine flushes some storages and writes others with none.
+tex_flush_upload	on
+tex_dirty_upload	on
+
+# ---- Display ----
+# The iPhone 16 Pro's screen is 2622x1206 (2.174) against the game's 1920x1080 (1.778), so a letterboxed present leaves
+# 239 px of black on each side. `crop` scales to the screen's width and lets the excess height fall outside the viewport:
+# shapes stay correct and the game loses 9% of its height at each edge (98 px of the original 1080). `stretch` would
+# distort it 22% sideways. The launcher's "Screen fill" setting overrides this per launch.
+present_fill	crop
+
+# ---- Shader split ----
+# The shaders are not in RomFS: 1090 GLSLC compiler outputs (magic 0x19866891) are compiled into main's read-only segment and
+# referenced from a {pointer, size, 0} table in .data (shader_split.py glslc_shaders scans main unconditionally).
+# Same shape as 13 Sentinels: Aegis Rim, which plays on the iPhone; /Data.bin holds the assets, not shaders.
+shader_groups	/=romfs
+shader_note	SD GUNDAM G GENERATION CROSS RAYS shaders

@@ -300,7 +300,7 @@ Under a game, "60 fps with 1.2.0" means it runs at 60 fps (30 on the Switch) wit
 <tr>
 <td align="center" valign="top" width="33%"><img src="docs/images/dead-cells.jpg" width="256" alt="Dead Cells"><br><small><b><a href="dm/games/0100646009FBE000/README.md">Dead Cells</a></b></small></td>
 <td align="center" valign="top" width="33%"><img src="docs/images/hollow-knight.jpg" width="256" alt="Hollow Knight"><br><small><b><a href="dm/games/0100633007D48000/README.md">Hollow Knight</a></b></small></td>
-<td></td>
+<td align="center" valign="top" width="33%"><img src="docs/images/sd-gundam-g-generation-cross-rays.jpg" width="256" alt="SD Gundam G Generation Cross Rays"><br><small><b><a href="dm/games/010055700CEA8000/README.md">SD Gundam G Generation Cross Rays</a></b></small></td>
 </tr>
 </table>
 <!-- end of gallery -->

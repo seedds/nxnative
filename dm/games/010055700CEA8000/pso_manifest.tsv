@@ -1,0 +1,1 @@
+# Prewarm seed list (shipped in the app, next to shader_map.tsv). Rows: S	<shader key>	<stage> / R	<render pipeline key (pso_skey hex)> / C	<compute shader key>

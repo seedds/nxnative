@@ -1690,7 +1690,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[143];
+static int g_red_once[151];
 #define RED_ONCE(k, ...) do { if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -10462,6 +10462,33 @@ static id<MTL4ComputeCommandEncoder> dispatch_enc(void) {
     args_dirty_all();
     return e;
 }
+// Compute shared memory past Apple's threadgroup memory (dmsh_abi.h DMSH_TGMEM_*, dmsh_build.py tg_spill): one buffer for every such dispatch, a slice per threadgroup. Dispatches run one
+// after another (dispatch_enc puts a barrier between them, an encoder of their own starts with a queue barrier), so they share it. It grows to the largest dispatch; the replaced buffer
+// goes through deferred release. An indirect dispatch's group counts are written by the GPU: its bound is the counts in memory now (the last ones the game or a finished submission
+// wrote) or the buffer's current size, whichever is larger; a threadgroup past it sets the head's flag, read here at the next such dispatch, and the buffer doubles
+#define TGM_MAX (512ull << 20)   // bytes of slices at most: a larger dispatch wraps threadgroups onto each other's slices (reported)
+static id<MTLBuffer> g_tgm_buf;
+static uint64_t tgm_gpu(NvShader *cs, uint64_t groups) {
+    uint64_t have = g_tgm_buf ? g_tgm_buf.length - DMSH_TGMEM_HEAD : 0, need = groups * cs->rf.tgmem;
+    if (g_tgm_buf && atomic_load_explicit((_Atomic uint32_t *)g_tgm_buf.contents + 1, memory_order_relaxed)) {
+        RED_ONCE(148, "shared memory in a device buffer: a threadgroup of an indirect dispatch lay past the bound of %llu bytes (shader %s or an earlier one); the buffer doubles", (unsigned long long)have, cs->key);
+        need = MAX(need, have * 2);
+    }
+    if (need > TGM_MAX) { RED_ONCE(149, "shared memory in a device buffer: %s needs %llu bytes for %llu threadgroups, more than %llu; threadgroups share slices", cs->key, (unsigned long long)need, (unsigned long long)groups, TGM_MAX); need = TGM_MAX; }
+    if (need > have) {
+        uint64_t len = 1ull << 20; while (len < need) len <<= 1;
+        id<MTLBuffer> b = [g_dev newBufferWithLength:DMSH_TGMEM_HEAD + len options:MTLResourceStorageModeShared];
+        if (!b) { RED_ONCE(150, "shared memory in a device buffer: cannot allocate %llu bytes; %s's dispatch is skipped", (unsigned long long)len, cs->key); return 0; }
+        uint32_t *h = (uint32_t *)b.contents; memset(h, 0, DMSH_TGMEM_HEAD); h[0] = (uint32_t)MIN(len, (uint64_t)UINT32_MAX);
+        b.label = @"nvn-mtl compute shared memory";
+        res_add(b); res_commit();
+        if (g_tgm_buf) defer_obj_release(g_tgm_buf);
+        g_tgm_buf = b;
+        MLOG("compute shared memory past %d bytes in a device buffer: %llu MB for %s (%u bytes a threadgroup, %llu threadgroups; the device gives %lu bytes of threadgroup memory)", DMSH_TGMEM_LIMIT,
+             (unsigned long long)(len >> 20), cs->key, cs->rf.tgmem, (unsigned long long)groups, (unsigned long)g_dev.maxThreadgroupMemoryLength);
+    }
+    return g_tgm_buf.gpuAddress;
+}
 static void dispatch(const p_dispatch *dp) {
     zskip_clear();
     g_wr_epoch++; g_mdx_epoch++;
@@ -10514,6 +10541,13 @@ static void dispatch(const p_dispatch *dp) {
     g_dispatch_dim[0] = (uint32_t)dp->x; g_dispatch_dim[1] = (uint32_t)dp->y; g_dispatch_dim[2] = (uint32_t)dp->z;   // read back by the driver segment c0 (encode_args_)
     g_c0_dim_buf = nil;
     encode_args(ce, cs, 5, 0);
+    if (cs->rf.tgmem) {
+        uint64_t groups = (uint64_t)dp->x * dp->y * dp->z;
+        if (dp->ind) { const uint32_t *n = (const uint32_t *)((uint8_t *)((__bridge id<MTLBuffer>)ib).contents + io); groups = (uint64_t)n[0] * n[1] * n[2]; }
+        uint64_t a = tgm_gpu(cs, MAX(groups, 1));
+        if (!a) { if (own) enc_c_end(ce); return; }
+        enc_c_args(ce, a, DMSH_TGMEM_BUFFER);
+    }
     if (dp->ind) {   // The shader reads the group counts from c0 + 0x200: copy the GPU-written ones there first (Metal 4 orders nothing inside an encoder without a barrier)
         if (g_c0_dim_buf) { [(id<MTL4ComputeCommandEncoder>)ce copyFromBuffer:(__bridge id<MTLBuffer>)ib sourceOffset:io toBuffer:g_c0_dim_buf destinationOffset:g_c0_dim_off size:12];
             if (dm_sdk_ounce()) [(id<MTL4ComputeCommandEncoder>)ce copyFromBuffer:(__bridge id<MTLBuffer>)ib sourceOffset:io toBuffer:g_c0_dim_buf destinationOffset:g_c0_dim_off - DMSH_C0_DISPATCH + DMSH_C0_DISPATCH_NVN2 size:12];

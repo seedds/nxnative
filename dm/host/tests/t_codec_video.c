@@ -206,14 +206,14 @@ int main(void) {
         h_cv_poolfin(pt); assert(!dm_native_image(ha, &nm, &nz, &nw, &nh, &ns)); free(m);
     }
     {   // SDK 19's forms (Mario Kart World): the ForCompat preference, Initialize with two sizes and no work buffer, and the output properties with the colour space; a
-        // buffer asked for before its picture is waited for briefly, then reported with the stream's size
+        // buffer asked for before its picture reports 3604 (no picture yet), as the other forms
         _Alignas(16) static uint8_t d19[0x400], p19[0x40], m19[16 * 16 * 4]; uint32_t cs = 9;
         cv_pref pc = h_cv_pref_compat(16, 16, 3, 0); assert(pc.w == 16 && pc.h == 16 && pc.fmt == 3 && pc.magic == CV_MAGIC);
         assert(!h_cv_poolsize(&size, &align, &pc, 1) && !h_cv_pool(p19, m19, size, &pc, 1, 0));
         assert(!h_cv_vp9init4(d19, 0x10000, 0x10000, 16, 16, 1, 1, 3) && cv_of(d19) && cv_of(d19)->codec == CV_VP9);
         assert(!h_cv_vp9reg(d19, 0, p19, 0) && !h_cv_vp9acq(&idx, &sync, d19));
         h_cv_vp9rel(d19, 0, sync); assert(!h_cv_vp9acq(&idx, &sync, d19) && !h_gs_trywait(&sync));
-        assert(!h_cv_vp9props2(&w, &h, &cw, &ch, &cs, &ts, &eos, d19, 0) && w == 16 && h == 16 && ts == 0 && !eos && cs == 0);
+        assert(h_cv_vp9props2(&w, &h, &cw, &ch, &cs, &ts, &eos, d19, 0) == CV_NONE);
         assert(!h_cv_vp9submit(&id, d19, vp9, sizeof vp9, 8000, false) && h_gs_trywait(&sync));
         cs = 9; assert(!h_cv_vp9props2(&w, &h, &cw, &ch, &cs, &ts, &eos, d19, 0) && w == 16 && h == 16 && ts == 8000 && cs == 0);   // under 720 lines, no colour space stated: BT.601
         assert(!h_cv_vp9fin(d19) && !cv_of(d19)); h_cv_poolfin(p19);

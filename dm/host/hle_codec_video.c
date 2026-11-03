@@ -364,14 +364,9 @@ static Result cv_dec_props(uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch,
 // The SDK 19 form also reports the picture's colour space (nn::movie::ColorSpace, taken here as 0 BT.601, 1 BT.709): BT.709 when the stream says so, or says nothing and the
 // picture is HD. Mario Kart World calls only this form; without it the SDK's own code ran on the host decoder (an IPC request on the 'DmCV' magic as its session handle) and
 // nn::diag aborted as its first course movie (VP9, 2560x1440) began
-// Mario Kart World aborts on any failure here (main+0x19e818c), where Donkey Kong Bananza's player polls through 3604: a buffer not filled yet (a release racing the decode on
-// another thread; once in a boot, as its first title movie began) is waited for briefly, then reported with the stream's size, as a picture the decoder has not shown
 static Result cv_dec_props_cs(uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, uint32_t *cs, int64_t *ts, bool *eos, void *t, uint32_t i) {
     Result r = cv_dec_props(w, h, cw, ch, ts, eos, t, i);
-    for (int k = 0; r == CV_NONE && k < 50; k++) { usleep(2000); r = cv_dec_props(w, h, cw, ch, ts, eos, t, i); }
     cv_dec *d = cv_of(t);
-    if (r == CV_NONE && d) { static int n; if (n++ < 4) LOG("[codec] %s decoder %u: properties of buffer %u before its picture: reported with the stream's size", k_cv_name[d->codec], d->id, i);
-        *w = *cw = d->w; *h = *ch = d->h; *ts = 0; *eos = false; if (cs) *cs = 0; return 0; }
     if (!r && d && cs) { uint8_t c = d->buf[i].cs; *cs = c == VPX_CS_BT_709 || (c == VPX_CS_UNKNOWN && *h >= 720) ? 1 : 0; }
     return r;
 }

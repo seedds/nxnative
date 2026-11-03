@@ -263,6 +263,9 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - an abort connecting to `pl:u` at boot; a failed `nn::audio` call at boot. → [Built-in fonts and the audio device notification of SDK 21](../reference/services.md#built-in-fonts-and-the-audio-device-notification-of-sdk-21)
 - an abort in `nn::hid` at boot, in a Switch 2 game that sets up the Joy-Con's mouse mode. → [The Joy-Con mouse pointer](../reference/services.md#the-joy-con-mouse-pointer)
 - a crash at boot in `nn::vi` under `nn::streamplay::CreateIndividualDisplays`. → [GameShare guest displays](../reference/services.md#gameshare-guest-displays)
+- `[RED] sf: the game connects to service chat:u itself, which the host does not serve`, then `game called nn::diag abort: Result 0xe15` under `nn::chat::Initialize`. → [GameChat at boot](../reference/services.md#gamechat-at-boot)
+- a null read at boot in `nn::oe::IsLanguageSelectionLimited`, right after the game asks for its language. → [Whether the language selection is limited](../reference/services.md#whether-the-language-selection-is-limited)
+- a null read at boot in `nn::os::SdkMutexType` under `nn::gs::sdk::SetGraphicsFrameLengthMode`, called from `nn::oe::SetGraphicsTargetFrameRate`. → [The target frame rate (graphics frame length)](../reference/services.md#the-target-frame-rate-graphics-frame-length)
 - a Switch 2 game presents at 720p, with its upscaler at the matching low size. → [The display's largest buffer](../reference/services.md#the-displays-largest-buffer)
 
 ## Movies

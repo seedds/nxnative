@@ -220,3 +220,11 @@ HLE_FORCE("_ZN2nn10streamplay27GetGuestVibrationDeviceInfoEPNS_3hid19VibrationDe
 HLE_FORCE("_ZN2nn10streamplay18GetGuestJcmsHandleERKNS0_10GuestPadIdERKNS_3hid8JcmsTypeE", "guest Joy-Con mouse handle: none (no guest)", uint32_t, h_stpl_JcmsHandle, const void *id, const void *type) { (void)id; (void)type; return 0; }
 HLE_FORCE("_ZN2nn10streamplay18GetGuestJcmsStatesEPNS0_14GuestJcmsStateEiRKNS0_15GuestJcmsHandleE", "guest Joy-Con mouse states: none (no guest)",
           int, h_stpl_JcmsStates, void *out, int n, const void *h) { (void)out; (void)n; (void)h; return 0; }
+
+// ---------- chat: GameChat (Switch 2 SDKs) ----------
+// Hyrule Warriors: Age of Imprisonment initializes it at boot (main+0x14480b8); the SDK's Initialize connects to the chat:u service, which the host does not serve, and aborts (Result 0xe15).
+// The host has no GameChat: the library is ready and no chat is running, so the game's screen sharing has nobody to share with. The SDK's other calls go through the service object that
+// Initialize would have made, so each one a game imports needs a hook here
+HLE_FORCE("_ZN2nn4chat10InitializeEv", "GameChat (chat:u): ready, no chat", void, h_chat_Init, void) {}
+HLE_FORCE("_ZN2nn4chat10IsChattingEv", "GameChat: not chatting", unsigned, h_chat_IsChatting, void) { return 0; }
+HLE_FORCE("_ZN2nn4chat20SetScreenSharingModeENS0_17ScreenSharingModeE", "GameChat screen sharing mode: no chat to share with", void, h_chat_ShareMode, int mode) { (void)mode; }

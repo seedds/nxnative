@@ -13,10 +13,10 @@ uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(c, label) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
 
-static id<MTLTexture> target_format(tex_t *t, uint64_t serial, int format, int levels) {
+static id<MTLTexture> sized_target_format(tex_t *t, uint64_t serial, int format, int levels, int width) {
     *t = (tex_t){.magic=MAGIC('T','E','X',0), .serial=serial};
     t->d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=format,
-        .width=4, .height=4, .depth=1, .levels=levels, .samples=1, .flags=format == NVN_FORMAT_R32UI ? NVN_TEXTURE_FLAGS_IMAGE : 0};
+        .width=width, .height=4, .depth=1, .levels=levels, .samples=1, .flags=format == NVN_FORMAT_R32UI ? NVN_TEXTURE_FLAGS_IMAGE : 0};
     MTLTextureDescriptor *d = tex_desc(t, 0); d.storageMode = MTLStorageModeShared;
     if (format == NVN_FORMAT_R32UI) d.usage |= MTLTextureUsagePixelFormatView;
     id<MTLTexture> texture = [g_dev newTextureWithDescriptor:d];
@@ -24,9 +24,13 @@ static id<MTLTexture> target_format(tex_t *t, uint64_t serial, int format, int l
     res_add(texture); mtl_tex_init(t); serial_put(serial, texture);
     return texture;
 }
-static id<MTLTexture> target(tex_t *t, uint64_t serial) {
-    return target_format(t, serial, NVN_FORMAT_RGBA8, 1);
+static id<MTLTexture> target_format(tex_t *t, uint64_t serial, int format, int levels) {
+    return sized_target_format(t, serial, format, levels, 4);
 }
+static id<MTLTexture> sized_target(tex_t *t, uint64_t serial, int width) {
+    return sized_target_format(t, serial, NVN_FORMAT_RGBA8, 1, width);
+}
+static id<MTLTexture> target(tex_t *t, uint64_t serial) { return sized_target(t, serial, 4); }
 static void clear(MTLClearColor color) {
     R.clear_c[0] = 1; R.cc[0] = color;
     CHECK(rp_begin() != nil, "production render pass opens");
@@ -257,7 +261,7 @@ static void tile_case(const char *dir) {
     tex_t source; id<MTLTexture> attachment = target(&source, 99795);
     mtl_reg_tex(tid, &source, NULL);
     id<MTLBuffer> zero = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared]; res_add(zero);   // the variant's argument buffer: the tile read leaves its texture and sampler unread
-    id<MTLBuffer> result = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared]; res_add(result);
+    id<MTLBuffer> result = [g_dev newBufferWithLength:2048 options:MTLResourceStorageModeShared]; res_add(result);
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
     R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &source; S.tex[1][0] = tid; S.chmask.mask = 0xffffffffu;
     S.has_vp = 1; S.vp[0][0] = 0; S.vp[0][1] = 0; S.vp[0][2] = 4; S.vp[0][3] = 4;
@@ -294,6 +298,14 @@ static void tile_case(const char *dir) {
     fb_prepare(pr);
     CHECK(g_fb_n == 1 && !g_enc && g_fb_tseq != g_draw_seq, "with a viewport smaller than the target the draw takes a snapshot");
     rp_end();
+    // Returning from the snapshot fallback must read the current tile, not its old snapshot.
+    uint64_t fallback_copies = g_fb_count;
+    S.vp[0][2] = 4; g_fb_bar++; clear(MTLClearColorMake(0, 0, 1, 1)); id resumed = g_enc;
+    fb_prepare(pr);
+    CHECK(g_enc == resumed && g_fb_n == 0 && g_fb_tseq == g_draw_seq && g_fb_count == fallback_copies,
+          "a ready tile draw after the viewport fallback keeps the pass and takes no snapshot");
+    if (ps) { enc_r_pso(g_enc, ps); enc_r_viewport(g_enc, (MTLViewport){0, 0, 4, 4, 0, 1}); enc_r_scissor(g_enc, (MTLScissorRect){0, 0, 4, 4}); enc_r_args(g_enc, MTLRenderStageFragment, zero.gpuAddress, 0); enc_r_draw(g_enc, MTLPrimitiveTypeTriangle, 0, 3); }
+    rp_end(); readback(attachment, result, 1024);
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "GPU submission completed");
     CHECK(!mtl_last_commit_error(), "GPU submission has no error");
     int left = 1, right = 1;
@@ -301,6 +313,7 @@ static void tile_case(const char *dir) {
         if (x < 2) left &= p[0] == 255 && p[1] == 0 && p[2] == 0; else right &= p[0] == 0 && p[1] == 0 && p[2] == 255; }
     CHECK(left, "where the earlier draw of the pass wrote green, the tile read gives green");
     CHECK(right, "elsewhere it gives the cleared red");
+    pixels(result, 1024, (const uint8_t[]){0, 255, 0, 255}, "the resumed tile draw rotates the new blue tile to green, not the red fallback snapshot");
     printf("feedback tile read: %s\n", before == failed ? "PASS" : "FAIL");
     mtl_tex_release(&source);
 }
@@ -411,6 +424,50 @@ static void shape_case(void) {
     CHECK(a2 == a && !fresh, "the live snapshot is reused until the next barrier");
     for (int i = 0; i < 8; i++) { g_fbc[i] = (fb_cache_t){0}; } g_fbc_use = 0;
 }
+// Keep all eight keys live, with only one 4x4 allocation. The first accepted binding
+// is either a valid hit or a fresh copy; the second key needs that same shape.
+// Shape ranking without draw pins copies green over the first binding's red snapshot.
+// This fixture uses only upstream fields, so its complete file can also run on fa681.
+static void accepted_case(NvProg *seed_pr, id<MTLRenderPipelineState> seed_pipeline, NvProg *pr, id<MTLRenderPipelineState> pipeline, int cached_first) {
+    int before = failed, first = cached_first ? 0 : 8, tid = cached_first ? 720 : 740;
+    seed_pr->sh[1]->rf.b[0].reg = 0;
+    tex_t sources[10], output; id<MTLTexture> originals[10];
+    for (int i = 0; i < 10; i++) {
+        originals[i] = sized_target(&sources[i], 99840 + (cached_first ? 0 : 20) + i, i < 8 ? 4 + i + !cached_first : 4);
+        mtl_reg_tex(tid + i, &sources[i], NULL);
+    }
+    id<MTLTexture> destination = target(&output, 99890 + cached_first);
+    id<MTLBuffer> result = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared];
+    CHECK(result != nil, "accepted-binding readback buffer allocated");
+    if (!result) { for (int i = 0; i < 10; i++) mtl_tex_release(&sources[i]); mtl_tex_release(&output); return; }
+    res_add(result);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); R.has_rt = 1; R.rt.n = 1;
+    // No barrier or submission boundary between seeding and the two-binding draw.
+    for (int i = 0; i < 8; i++) {
+        R.rt.color[0] = &sources[i]; S.tex[1][0] = tid + i;
+        clear(i == 0 ? MTLClearColorMake(1, 0, 0, 1) : MTLClearColorMake(1, 1, 1, 1));
+        fb_prepare(seed_pr);
+        CHECK(g_fb_n == 1 && g_fb_src[0] == originals[i] && g_fb_use[0] != originals[i], "seed draw accepts a distinct snapshot");
+        R.rt.color[0] = &output; sample(seed_pr->sh[1], seed_pipeline);
+    }
+    if (!cached_first) { R.rt.color[0] = &sources[first]; clear(MTLClearColorMake(1, 0, 0, 1)); rp_end(); }
+    R.rt.color[0] = &sources[9]; clear(MTLClearColorMake(0, 1, 0, 1)); rp_end();
+    R.rt.n = 2; R.rt.color[0] = &sources[first]; R.rt.color[1] = &sources[9];
+    S.tex[1][0] = tid + first; S.tex[1][1] = tid + 9;
+    fb_prepare(pr);
+    CHECK(g_fb_n == 2 && g_fb_src[0] == originals[first] && g_fb_src[1] == originals[9], "one draw accepts both distinct source bindings under all-live pressure");
+    // Poison both originals without preparing another draw, preserving the substitutions.
+    R.rt.n = 1; R.rt.color[1] = NULL;
+    R.rt.color[0] = &sources[first]; clear(MTLClearColorMake(1, 0, 1, 1)); rp_end();
+    R.rt.color[0] = &sources[9]; clear(MTLClearColorMake(1, 0, 1, 1)); rp_end();
+    R.rt.color[0] = &output; sample(pr->sh[1], pipeline); readback(destination, result, 0);
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "accepted-binding GPU submission completed");
+    CHECK(!mtl_last_commit_error(), "accepted-binding GPU submission has no error");
+    pixels(result, 0, (const uint8_t[]){85, 170, 0, 255}, "two accepted snapshots retain distinct red and green pixels under all-live pressure");
+    printf("feedback accepted %s first: %s\n", cached_first ? "cached" : "fresh", before == failed ? "PASS" : "FAIL");
+    for (int i = 0; i < 10; i++) mtl_tex_release(&sources[i]);
+    mtl_tex_release(&output);
+}
 int main(int argc, char **argv) { @autoreleasepool {
     setenv("DM_NVN_TBDR", "0", 1);
     mtl_init(); NSError *error = nil;
@@ -420,6 +477,8 @@ int main(int argc, char **argv) { @autoreleasepool {
         "fragment float4 f(float4 p[[position]], constant A&a[[buffer(0)]]) {return a.source.read(uint2(p.xy));}\n"
         "struct I {texture2d<uint, access::read> source[[id(0)]];};\n"
         "fragment float4 mask(float4 p[[position]], constant I&a[[buffer(0)]]) {uint v = a.source.read(uint2(p.xy)).x; return float4(v==17u, v==29u, 0, 1);}\n"
+        "struct A2 {texture2d<float, access::read> a[[id(0)]]; texture2d<float, access::read> b[[id(1)]];};\n"
+        "fragment float4 f2(float4 p[[position]], constant A2&a[[buffer(0)]]) {uint2 q=uint2(p.xy); return (a.a.read(q)+2*a.b.read(q))/3;}\n"
         options:nil error:&error];
     CHECK(lib != nil, "synthetic shader compiles");
     if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 1; }
@@ -438,6 +497,14 @@ int main(int argc, char **argv) { @autoreleasepool {
     reuse_case(pr);
     shape_case();
     mip_chain_case(pr);
+    NvProg *pr2 = [NvProg new]; NvShader *fs2 = [NvShader new]; pr2->sh[1] = fs2;
+    fs2->stage = 1; strcpy(fs2->key, "fedcba9876543210"); fs2->fn = [lib newFunctionWithName:@"f2"];
+    fs2->ae = [fs2->fn newArgumentEncoderWithBufferIndex:0]; fs2->arg_len = fs2->ae.encodedLength; fs2->rf.nb = 2;
+    for (int i = 0; i < 2; i++) fs2->rf.b[i] = (nvn_rbind){.kind=NVN_RB_TEX, .reg=i, .aid=i, .dtt=MTLTextureType2D};
+    d.fragmentFunction = fs2->fn;
+    id<MTLRenderPipelineState> pipeline2 = [g_dev newRenderPipelineStateWithDescriptor:d error:&error];
+    CHECK(pipeline2 != nil, "two-binding consumer pipeline compiles");
+    if (pipeline2) { accepted_case(pr, pipeline, pr2, pipeline2, 1); accepted_case(pr, pipeline, pr2, pipeline2, 0); }
     fs->fn = [lib newFunctionWithName:@"mask"];
     fs->ae = [fs->fn newArgumentEncoderWithBufferIndex:0]; fs->arg_len = fs->ae.encodedLength;
     fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_IMG, .aid=0, .dtt=MTLTextureType2D, .dpf=NVN_DPF_UINT};

@@ -711,7 +711,11 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         // The Switch 2's remote region: nnosInitialize builds nn::os::detail::RemoteRegionManager's address space allocator over [type 29, type 29 + type 30), and
         // nn::os::GetRemoteMemoryUsage returns types 31 and 32. The SDK's only user is the GPU driver's boot (nv::InitializeGraphics → nn::gs::sdk::BootGraphicsSystem →
         // BootWithRemoteMemory), which the host's own nv::InitializeGraphics replaces (dm/gfx/hle_nv.c), so the process has no remote region and no remote memory (Donkey Kong Bananza)
-        case I_RemoteAddr: case I_RemoteSize: case I_RemoteUsage0: case I_RemoteUsage1: v = 0; break;
+        // Mario Kart World (0400C3F00006E000) instead reserves its VAMM region in types 29/30: the alias region's upper half, backed with MapPhysicalMemory (a guess, open: the
+        // console's real layout); its remote memory (31/32) stays 0
+        case I_RemoteAddr: v = DM_GAME_PROGRAM_ID == 0x0400C3F00006E000ull ? (uint64_t)g_alias + g_alias_cap / 2 : 0; break;
+        case I_RemoteSize: v = DM_GAME_PROGRAM_ID == 0x0400C3F00006E000ull ? g_alias_cap / 2 : 0; break;
+        case I_RemoteUsage0: case I_RemoteUsage1: v = 0; break;
         default: { static uint8_t seen[64]; if (id < 64 && !seen[id]) { seen[id] = 1; LOG("[RED] svc GetInfo: unknown info type %llu (answered 0)", (unsigned long long)id); } v = 0; break; }
         }
         regs[0] = 0; regs[1] = v; return 0;

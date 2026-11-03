@@ -7433,6 +7433,366 @@ _nvnth_742:
     stadd x17, [x16]
     ldr x17, [x16, #8]
     br x17
+    .globl _nvnth_743
+_nvnth_743:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #11888
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_744
+_nvnth_744:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #11904
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_745
+_nvnth_745:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #11920
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_746
+_nvnth_746:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #11936
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_747
+_nvnth_747:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #11952
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_748
+_nvnth_748:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #11968
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_749
+_nvnth_749:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #11984
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_750
+_nvnth_750:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12000
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_751
+_nvnth_751:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12016
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_752
+_nvnth_752:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12032
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_753
+_nvnth_753:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12048
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_754
+_nvnth_754:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12064
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_755
+_nvnth_755:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12080
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_756
+_nvnth_756:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12096
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_757
+_nvnth_757:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12112
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_758
+_nvnth_758:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12128
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_759
+_nvnth_759:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12144
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_760
+_nvnth_760:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12160
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_761
+_nvnth_761:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12176
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_762
+_nvnth_762:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12192
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_763
+_nvnth_763:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12208
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_764
+_nvnth_764:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12224
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_765
+_nvnth_765:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12240
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_766
+_nvnth_766:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12256
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_767
+_nvnth_767:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12272
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_768
+_nvnth_768:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12288
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_769
+_nvnth_769:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12304
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_770
+_nvnth_770:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12320
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_771
+_nvnth_771:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12336
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_772
+_nvnth_772:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12352
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_773
+_nvnth_773:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12368
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_774
+_nvnth_774:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12384
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_775
+_nvnth_775:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12400
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_776
+_nvnth_776:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12416
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_777
+_nvnth_777:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12432
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
+    .globl _nvnth_778
+_nvnth_778:
+    adrp x16, _nvn_slot@PAGE
+    add x16, x16, _nvn_slot@PAGEOFF
+    mov x17, #12448
+    add x16, x16, x17
+    mov x17, #1
+    stadd x17, [x16]
+    ldr x17, [x16, #8]
+    br x17
     .data
     .p2align 3
     .globl _nvn_thunk
@@ -8180,6 +8540,42 @@ _nvn_thunk:
     .quad _nvnth_740
     .quad _nvnth_741
     .quad _nvnth_742
+    .quad _nvnth_743
+    .quad _nvnth_744
+    .quad _nvnth_745
+    .quad _nvnth_746
+    .quad _nvnth_747
+    .quad _nvnth_748
+    .quad _nvnth_749
+    .quad _nvnth_750
+    .quad _nvnth_751
+    .quad _nvnth_752
+    .quad _nvnth_753
+    .quad _nvnth_754
+    .quad _nvnth_755
+    .quad _nvnth_756
+    .quad _nvnth_757
+    .quad _nvnth_758
+    .quad _nvnth_759
+    .quad _nvnth_760
+    .quad _nvnth_761
+    .quad _nvnth_762
+    .quad _nvnth_763
+    .quad _nvnth_764
+    .quad _nvnth_765
+    .quad _nvnth_766
+    .quad _nvnth_767
+    .quad _nvnth_768
+    .quad _nvnth_769
+    .quad _nvnth_770
+    .quad _nvnth_771
+    .quad _nvnth_772
+    .quad _nvnth_773
+    .quad _nvnth_774
+    .quad _nvnth_775
+    .quad _nvnth_776
+    .quad _nvnth_777
+    .quad _nvnth_778
     .globl _nvn_names
 _nvn_names:
     .quad Ln0
@@ -8925,6 +9321,42 @@ _nvn_names:
     .quad Ln740
     .quad Ln741
     .quad Ln742
+    .quad Ln743
+    .quad Ln744
+    .quad Ln745
+    .quad Ln746
+    .quad Ln747
+    .quad Ln748
+    .quad Ln749
+    .quad Ln750
+    .quad Ln751
+    .quad Ln752
+    .quad Ln753
+    .quad Ln754
+    .quad Ln755
+    .quad Ln756
+    .quad Ln757
+    .quad Ln758
+    .quad Ln759
+    .quad Ln760
+    .quad Ln761
+    .quad Ln762
+    .quad Ln763
+    .quad Ln764
+    .quad Ln765
+    .quad Ln766
+    .quad Ln767
+    .quad Ln768
+    .quad Ln769
+    .quad Ln770
+    .quad Ln771
+    .quad Ln772
+    .quad Ln773
+    .quad Ln774
+    .quad Ln775
+    .quad Ln776
+    .quad Ln777
+    .quad Ln778
     .cstring
 Ln0: .asciz "nvnDeviceBuilderSetDefaults"
 Ln1: .asciz "nvnDeviceBuilderSetFlags"
@@ -9669,3 +10101,39 @@ Ln739: .asciz "nvnWindowBuilderSetAcquireTimeout"
 Ln740: .asciz "nvnWindowBuilderGetAcquireTimeout"
 Ln741: .asciz "nvnWindowSetAcquireTimeout"
 Ln742: .asciz "nvnWindowGetAcquireTimeout"
+Ln743: .asciz "nvnCUDAInteropFunction"
+Ln744: .asciz "nvnCommandBufferCopyTextureToTextureWithCopyEngineNVX"
+Ln745: .asciz "nvnDeviceBuilderGetReservedAddressRangesNVX"
+Ln746: .asciz "nvnDeviceBuilderSetReservedAddressRangesNVX"
+Ln747: .asciz "nvnDevtoolsBootstrap"
+Ln748: .asciz "nvnExternalMemoryPoolBuilderGetDevice"
+Ln749: .asciz "nvnExternalMemoryPoolBuilderGetNativeMemoryHandle"
+Ln750: .asciz "nvnExternalMemoryPoolBuilderSetDefaults"
+Ln751: .asciz "nvnExternalMemoryPoolBuilderSetDevice"
+Ln752: .asciz "nvnExternalMemoryPoolBuilderSetNativeMemoryHandle"
+Ln753: .asciz "nvnInstallGlobalDebugCallback"
+Ln754: .asciz "nvnInterceptionFinalizeNVX"
+Ln755: .asciz "nvnInterceptionInitializeNVX"
+Ln756: .asciz "nvnInterceptionOwnedNVX"
+Ln757: .asciz "nvnInterceptionReleaseNVX"
+Ln758: .asciz "nvnInterceptionSetDispatchResetCallbackNVX"
+Ln759: .asciz "nvnInterceptionSetProcAddressNVX"
+Ln760: .asciz "nvnInterceptionTryAcquireNVX"
+Ln761: .asciz "nvnMemoryPoolBuilderGetNativeHandleNVX"
+Ln762: .asciz "nvnMemoryPoolBuilderGetReservedAddressesNVX"
+Ln763: .asciz "nvnMemoryPoolBuilderSetGenericAddressNVX"
+Ln764: .asciz "nvnMemoryPoolBuilderSetNativeHandleNVX"
+Ln765: .asciz "nvnMemoryPoolBuilderSetSpecialAddressNVX"
+Ln766: .asciz "nvnMemoryPoolGetGenericAddressNVX"
+Ln767: .asciz "nvnMemoryPoolGetNativeHandleNVX"
+Ln768: .asciz "nvnMemoryPoolGetSpecialAddressNVX"
+Ln769: .asciz "nvnPrivate0"
+Ln770: .asciz "nvnProgramGetDebugDataHashesNVX"
+Ln771: .asciz "nvnQueueSetTimeoutNVX"
+Ln772: .asciz "nvnQueueSetTimesliceNVX"
+Ln773: .asciz "nvnSetGLInteropNVX"
+Ln774: .asciz "nvnSyncGetNvRmSyncNVX"
+Ln775: .asciz "nvnSyncGetSyncpointsCountNVX"
+Ln776: .asciz "nvnSyncGetSyncpointsNVX"
+Ln777: .asciz "nvnSyncInitializeFromNvRmSyncNVX"
+Ln778: .asciz "nvnSyncSetSyncpointsNVX"

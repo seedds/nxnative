@@ -465,6 +465,13 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** a sampled texture in a sparse pool (not a render target, image, linear or buffer texture) is now uploaded like a packaged one, through the pool's page table ([Textures read through a 4 KB page table of a sparse pool](#textures-read-through-a-4-kb-page-table-of-a-sparse-pool)).
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md): the hunter's innerwear (ASTC 6x6) came out magenta and the face black.
 
+### A sparse texture's CPU-write check at every lookup
+
+- **Symptom:** the submit thread spends most of its time in `nvn_dirty_since` under `nvn_sparse_since`, called from `tex_mtl` (render-target and texture lookups of textures in a sparse pool).
+- **Cause:** a sparse texture is checked for CPU writes by walking its range of the pool's page table and asking the dirty tracker about each run of physical pages. The check was skipped only when nothing had been written anywhere and nothing remapped since the last one; a game that streams pages remaps every frame and writes some page between nearly every two draws, so every lookup walked again. Each run then searched every registered range (`find_span`; about 4,300 in a Mario Kart World race).
+- **Fix:** a texture is checked once per submission: a submission sees the CPU writes and the mappings made before it, as NVN's (a map is a CPU call, not a command), so a second check in the same submission can only find writes the GPU work need not see. A skipped check leaves the write and mapping generations of the first, so what another thread writes or maps during the replay is found at the next submission's check. The walk keeps the last range it found (`nvn_dirty_since_cached`).
+- **Found on:** Mario Kart World 1.0.0 (#900; its terrain render targets are sparse, up to 16384x16384): in a race on an M4 Pro, translation 9.7 → 6.25 ms a frame, frame time p50 18.2 → 16.66 ms and p95 23.4 → 17.0 ms. Measured on its fork, where those targets are Metal placement-sparse textures; the check and the walk are the same here.
+
 ### Dirty-page ranges of pools that share a host page
 
 - **Symptom:** some textures are re-uploaded every frame (several MB per frame).

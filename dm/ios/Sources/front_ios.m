@@ -55,6 +55,7 @@ static UILabel *front_ios_fps_label(void);
     if (self.maxPixelWidth > 0) scale = MIN(scale, self.maxPixelWidth / MAX(self.bounds.size.width, 1));
     l.contentsScale = scale;
     l.drawableSize = CGSizeMake(self.bounds.size.width * l.contentsScale, self.bounds.size.height * l.contentsScale);
+    dm_game_aspect_drawable(l.drawableSize.width, l.drawableSize.height);
 }
 @end
 static void tv_attach(void);
@@ -92,7 +93,8 @@ static void tv_attach(void);
 - (void)showFPS:(BOOL)on;
 @end
 static DmRootVC *g_root;
-static CGFloat g_picture_aspect = DM_PICTURE_16_9;   // the presented picture's width / height (front_picture_shape); main thread
+static CGFloat g_source_aspect = DM_PICTURE_16_9;   // physical presented source (front_picture_shape); main thread
+static CGFloat g_picture_aspect = DM_PICTURE_16_9;  // effective ACK, else physical source; never the request
 static void launcher_done(void) { [g_root startGame]; }
 @implementation DmRootVC
 - (void)loadView { self.view = [DmRootView new]; }
@@ -182,11 +184,13 @@ static void launcher_done(void) { [g_root startGame]; }
     BOOL duoPortrait = b.size.height > b.size.width && (self.hingeStatus != 0 || !CGRectIsNull(division));
     UIEdgeInsets gameInsets = dm_game_safe_insets(b, self.view.safeAreaInsets, duoPortrait);
     BOOL onTV = self.game.superview != self.view;   // the TV's view lays the picture out; the phone is all pad
-    DmLayout layout = onTV ? dm_layout_pad_only(b) : dm_layout_picture(dm_layout(b, gameInsets, self.partiallyOpen, division, g_picture_aspect), b, self.fill, g_picture_aspect);
-    if (!onTV) self.game.frame = layout.game;
+    g_picture_aspect = dm_picture_aspect(dm_game_aspect(), g_source_aspect);
+    DmLayout layout = onTV ? dm_layout_pad_only(b) : dm_layout_picture(dm_layout(b, gameInsets, self.partiallyOpen, division, g_source_aspect), b, self.fill, g_source_aspect);
+    layout.game = dm_layout_touch_rect(layout, g_picture_aspect);
+    if (!onTV) self.game.frame = layout.drawable;
     layout.topSafeOnly = duoPortrait;
-    NSString *line = [NSString stringWithFormat:@"%@, hinge %ld%s, divisions %@, picture %@, controls %@", onTV ? @"pad only (picture on the TV)" : layout.separated ? @"split" : self.fill ? @"overlay, Fill" : @"overlay",
-                      (long)self.hingeStatus, self.partiallyOpen ? " (half open)" : "", regionLog, NSStringFromCGRect(layout.game), NSStringFromCGRect(layout.controls)];
+    NSString *line = [NSString stringWithFormat:@"%@, hinge %ld%s, divisions %@, picture %@, drawable %@, controls %@", onTV ? @"pad only (picture on the TV)" : layout.separated ? @"split" : self.fill ? @"overlay, Fill" : @"overlay",
+                      (long)self.hingeStatus, self.partiallyOpen ? " (half open)" : "", regionLog, NSStringFromCGRect(layout.game), NSStringFromCGRect(layout.drawable), NSStringFromCGRect(layout.controls)];
     if (![line isEqualToString:self.layoutLog]) { self.layoutLog = line; LOG("front end: layout %s", line.UTF8String); }
     self.pad.frame = b;
     dm_gamepad_arrange(self.pad, layout);
@@ -224,7 +228,10 @@ UIViewController *front_ios_root(void) { return [DmRootVC new]; }
 @end
 @implementation DmTVVC
 - (void)viewDidLoad { [super viewDidLoad]; self.view.backgroundColor = UIColor.blackColor; }
-- (void)viewDidLayoutSubviews { [super viewDidLayoutSubviews]; for (UIView *v in self.view.subviews) v.frame = dm_aspect_fit(self.view.bounds, g_picture_aspect); }
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    for (UIView *v in self.view.subviews) v.frame = dm_aspect_fit(self.view.bounds, g_source_aspect);
+}
 @end
 static UIWindow *g_tv; static int g_tv_mode_was = -1;
 static void tv_attach(void) {
@@ -233,7 +240,7 @@ static void tv_attach(void) {
     // Taken from the picture, not the screen, so a display of another shape still gets the full 1920 pixels across the picture (DmGameView layoutSubviews applies it)
     v.maxPixelWidth = 1920;
     [g_tv.rootViewController.view addSubview:v]; [g_tv.rootViewController.view setNeedsLayout]; [g_root.view setNeedsLayout];   // the phone's pad takes the whole screen
-    CGRect f = dm_aspect_fit(g_tv.bounds, g_picture_aspect); CGFloat scale = MIN(g_tv.windowScene.screen.nativeScale, 1920.0 / MAX(f.size.width, 1));
+    CGRect f = dm_aspect_fit(g_tv.bounds, g_source_aspect); CGFloat scale = MIN(g_tv.windowScene.screen.nativeScale, 1920.0 / MAX(f.size.width, 1));
     if (g_tv_mode_was < 0) g_tv_mode_was = dm_opmode();
     dm_set_opmode(1); dm_gamepad_opmode_changed();
     LOG("front end: TV connected (%.0fx%.0f points), the picture moves there at %.0fx%.0f, console mode", g_tv.bounds.size.width, g_tv.bounds.size.height, f.size.width * scale, f.size.height * scale);
@@ -244,12 +251,14 @@ static void tv_detach(void) {
     if (g_tv_mode_was >= 0) { dm_set_opmode(g_tv_mode_was); g_tv_mode_was = -1; dm_gamepad_opmode_changed(); }
     LOG("front end: TV disconnected, the picture is back on the phone");
 }
-void front_picture_shape(int w, int h) {   // front.h: the views take the presented picture's shape (a taller one under DM_SCREEN_ASPECT) instead of 16:9
+void front_picture_shape(int w, int h) {   // physical source notification; the renderer also publishes when the effective camera ACK changes
     if (w <= 0 || h <= 0) return;
-    CGFloat a = (CGFloat)w / h;
+    CGFloat source = (CGFloat)w / h;
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (a == g_picture_aspect) return;
-        g_picture_aspect = a; LOG("front end: picture shape %dx%d, the game's view follows it", w, h);
+        CGFloat picture = dm_picture_aspect(dm_game_aspect(), source);
+        if (source == g_source_aspect && picture == g_picture_aspect) return;
+        g_source_aspect = source; g_picture_aspect = picture;
+        LOG("front end: source shape %dx%d, effective picture aspect %.6f", w, h, (double)picture);
         [g_root.view setNeedsLayout]; if (g_tv) [g_tv.rootViewController.view setNeedsLayout];
     });
 }

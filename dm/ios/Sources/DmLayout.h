@@ -5,7 +5,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-typedef struct { CGRect game, controls; BOOL separated, topSafeOnly; } DmLayout;
+typedef struct { CGRect game, controls; BOOL separated, topSafeOnly; CGRect drawable; CGFloat sourceAspect; } DmLayout;
 
 static inline UIEdgeInsets dm_game_safe_insets(CGRect bounds, UIEdgeInsets insets, BOOL duo) {
     return duo && bounds.size.height > bounds.size.width ? UIEdgeInsetsMake(insets.top, 0, 0, 0) : insets;
@@ -14,12 +14,19 @@ static inline UIEdgeInsets dm_game_safe_insets(CGRect bounds, UIEdgeInsets inset
 // The picture's width / height before the game's first present (front.h front_picture_shape gives the real one: a taller shape under DM_SCREEN_ASPECT, 1920x1344)
 #define DM_PICTURE_16_9 (16.0 / 9.0)
 
+// A request is not a picture shape. Only the camera's effective ACK may override the actual presented source.
+static inline CGFloat dm_picture_aspect(double effective, CGFloat source) {
+    if (effective > 0 && isfinite(effective)) return effective;
+    return source > 0 && isfinite(source) ? source : DM_PICTURE_16_9;
+}
+
 // The largest centered rectangle of the picture's shape (aspect = width / height) in b
 static inline CGRect dm_aspect_fit(CGRect b, CGFloat aspect) {
     CGFloat w = b.size.width, h = b.size.height;
     if (w <= 0 || h <= 0 || aspect <= 0) return CGRectZero;
     if (w / h > aspect) w = h * aspect; else h = w / aspect;
-    return CGRectMake(floor(CGRectGetMidX(b) - w / 2), floor(CGRectGetMidY(b) - h / 2), w, h);
+    // Round inside the canvas, not in its parent's coordinates: Fill may place the canvas at a fractional origin.
+    return CGRectMake(b.origin.x + floor((b.size.width - w) / 2), b.origin.y + floor((b.size.height - h) / 2), w, h);
 }
 
 // Picture "Fill" (DM_PICTURE_FIT=fill, a launcher and in-game menu setting): the smallest centered rectangle of the picture's shape that covers b. The game's picture keeps
@@ -46,7 +53,9 @@ static inline CGRect dm_horizontal_division(CGRect b, CGRect division) {
 }
 
 static inline DmLayout dm_layout(CGRect b, UIEdgeInsets insets, BOOL partiallyOpen, CGRect division, CGFloat aspect) {
-    DmLayout l = { dm_aspect_fit(b, aspect), b, NO, NO };
+    aspect = dm_picture_aspect(0, aspect);
+    CGRect game = dm_aspect_fit(b, aspect);
+    DmLayout l = { game, b, NO, NO, game, aspect };
     if (CGRectIsEmpty(b)) return l;
     division = dm_horizontal_division(b, division);
     BOOL portrait = b.size.height > b.size.width;
@@ -58,18 +67,38 @@ static inline DmLayout dm_layout(CGRect b, UIEdgeInsets insets, BOOL partiallyOp
     CGRect lower = CGRectMake(CGRectGetMinX(b), CGRectGetMaxY(division), b.size.width,
                              CGRectGetMaxY(b) - CGRectGetMaxY(division));
     if (upper.size.height <= 0 || CGRectGetMaxY(safe) <= CGRectGetMinY(lower)) return l;
-    l.game = dm_aspect_fit(upper, aspect); l.controls = lower; l.separated = YES;
+    l.game = dm_aspect_fit(upper, aspect); l.drawable = l.game; l.controls = lower; l.separated = YES;
     return l;
 }
 
 // The picture is on a TV (front_ios.m DmTVSceneDelegate): the controls take the whole view and no touch goes to the game's touch screen (the game is docked there).
-static inline DmLayout dm_layout_pad_only(CGRect b) { return (DmLayout){ CGRectZero, b, NO, NO }; }
+static inline DmLayout dm_layout_pad_only(CGRect b) { return (DmLayout){ CGRectZero, b, NO, NO, CGRectZero, DM_PICTURE_16_9 }; }
 
 // Fill covers the full view only in the overlay layout (landscape). A portrait or tabletop split keeps the picture fitted in its
 // area above the controls, where cropping a small picture would cost more than the bars.
+// Fit on a wider overlay reserves a canvas independently of the current camera/touch picture. A tall source keeps
+// upstream's fitted layout. Fill's canvas always covers using the physical source shape, never a requested/ACK wide ratio.
+// Both aspect parameters describe the physical source; dm_layout_touch_rect applies the current logical camera within the canvas.
 static inline DmLayout dm_layout_picture(DmLayout l, CGRect b, BOOL fill, CGFloat aspect) {
-    if (fill && !l.separated && !CGRectIsEmpty(b)) l.game = dm_aspect_fill(b, aspect);
+    l.sourceAspect = dm_picture_aspect(0, aspect);
+    if (fill && !l.separated && !CGRectIsEmpty(b)) {
+        l.drawable = l.game = dm_aspect_fill(b, l.sourceAspect);
+    } else {
+        l.drawable = !l.separated && l.sourceAspect >= DM_PICTURE_16_9 && b.size.height > 0 && b.size.width / b.size.height > DM_PICTURE_16_9 ? b : l.game;
+    }
     return l;
+}
+
+// Re-read the effective camera at touch delivery: rotation/Fill can change the drawable before the guest restores
+// its projection. Zero ACK means the physical source, not a stale logical picture cached by an earlier layout.
+static inline CGRect dm_layout_touch_rect(DmLayout l, double effective) {
+    if (CGRectIsEmpty(l.drawable)) return l.game;
+    CGFloat aspect = dm_picture_aspect(effective, l.sourceAspect);
+    CGRect b = l.drawable;
+    if (fabs((b.size.width / b.size.height) / aspect - 1) < 0.01) return b;
+    CGRect picture = dm_aspect_fit(b, aspect);
+    picture.size.width = round(picture.size.width); picture.size.height = round(picture.size.height);
+    return picture;
 }
 
 // A point in the view as the game's touch screen sees it: normalized on the game rectangle, which with Fill is larger than the view,

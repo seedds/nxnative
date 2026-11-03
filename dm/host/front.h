@@ -13,6 +13,11 @@ static inline void front_hud_env(void) {
 void front_run(void (*guest)(void));
 // The CAMetalLayer the graphics backend presents frames to (NULL when there is no window)
 void *front_metal_layer(void);
+// Anamorphic game output: the frontend reports the drawable's pixel size. Supported, build-gated game patches use
+// its wider-than-16:9 ratio; unsupported games and DM_WIDESCREEN=0 retain their own framing. Both calls are thread-safe.
+// The effective ratio is 0 until the game's camera writer has applied the override (not merely when one is requested).
+void dm_game_aspect_drawable(double width, double height);
+float dm_game_aspect(void);
 // The highest refresh rate of the window's screen in Hz, 0 = not known (Mac front_mac.m; none on iOS, whose screens run at multiples of 60 Hz). Any thread
 int front_screen_max_fps(void);
 // The pixel size of the display the game is shown on: on the Mac the window's screen in its current mode (the main display before the window is up) (a scaled Retina mode's pixels), an iPhone's or iPad's screen (nativeBounds).

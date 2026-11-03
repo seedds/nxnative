@@ -72,6 +72,12 @@ $(B)/t_symbols: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h $(GAME_H) | $(
 .PHONY: symbols
 symbols: $(B)/t_symbols
 	$(B)/t_symbols
+run: $(B)/t_aspect
+$(B)/t_aspect: t_aspect.c ../loader.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_aspect.c
+.PHONY: aspect
+aspect: $(B)/t_aspect
+	$(B)/t_aspect
 run: $(B)/t_system_event
 run: $(B)/t_audren_work
 $(B)/t_audren_work: t_audren_work.c ../hle_audren.c ../hle.h ../dm.h $(GAME_H) | $(B)

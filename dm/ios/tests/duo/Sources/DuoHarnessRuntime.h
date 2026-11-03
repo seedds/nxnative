@@ -33,6 +33,7 @@ typedef struct {
 
 DuoHarnessInput duo_harness_input(void);
 int duo_harness_rumble(void);   // the in-game menu's rumble switch (dm_haptics_set_enabled)
+double duo_harness_drawable_ratio(void);   // last production Metal-view publication, before the loader's native/wide gate
 void dm_set_opmode(int mode);
 int dm_opmode(void);
 DuoHarnessState duo_harness_state(void);

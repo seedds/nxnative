@@ -31,8 +31,10 @@
 #include "nvn_border.h"
 #include "nvn_primitive.h"
 #include "nvn_timestamp.h"
+#include "nvn_aspect.h"
 #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree, one for every game (beside this file, tools/dmsh_chain.py --header)
 #include "game_profile.h"   // game profile constants (profile id, the profile's switches)
+static const char g_aspect_ui_prefixes[][9] = DM_GAME_ASPECT_UI_PREFIXES;
 // Texture slot table per stage: 0-127 the combined handles (nvnCommandBufferBindTexture), 128-255 the separate texture binds (NVN_SEPTEX_SLOT0, nvn_obj.h)
 #define NTEX 256
 // The NVN driver's constant segments c0 and c2 (byte offsets, slot counts) and the binding kinds of the shader reflection have one definition, which the shader build reads too (dmsh_build.py through dmsh_abi.py)
@@ -1692,6 +1694,8 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
+__attribute__((weak)) void dm_game_aspect_drawable(double width, double height) { (void)width; (void)height; }
+__attribute__((weak)) float dm_game_aspect(void) { return 0; }   // Graphics tests do not link the loader's supported-build / camera acknowledgement gate.
 static int g_red_once[152];
 #define RED_ONCE(k, ...) do { if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
@@ -3341,6 +3345,30 @@ static void xv_forward(void);
 static int tbdr_on(void);
 static int xv_on(void) { static int off = -1; if (off < 0) { const char *e = getenv("DM_NVN_XV"); off = e && !strcmp(e, "0"); } return !off && tbdr_on(); }
 void mtl_xv_window_tex(uint64_t serial) { if (!xv_present(serial) && g_xv_npresent < 128) g_xv_present[g_xv_npresent++] = serial; }   // Window (swapchain) texture: never enters the ledger
+// Final UI canvas: the last depth-free 16:9 packed (BOTW) or float (TOTK)
+// target before a draw to a registered swapchain image. Adapted from
+// MacNativeGames (MIT; nvn_aspect.h). Remember confirmed geometry too:
+// transient targets must be recognized before their UI, not at the later
+// swapchain pass. Only camera acknowledgement gates this shared mechanism.
+static uint64_t g_aspect_canvas, g_aspect_last_canvas;
+static NSUInteger g_aspect_canvas_w, g_aspect_canvas_h, g_aspect_last_w, g_aspect_last_h;
+static int pf_is_float(MTLPixelFormat f);
+static void aspect_canvas_learn(MTL4RenderPassDescriptor *pd) {
+    if (!(dm_game_aspect() > 0) || R.rt.n < 1 || !R.rt.color[0]) return;
+    const tex_t *t = R.rt.color[0];
+    id<MTLTexture> c = pd.colorAttachments[0].texture;
+    if (xv_present(t->serial)) {
+        if (g_aspect_last_canvas) {
+            g_aspect_canvas = g_aspect_last_canvas;
+            g_aspect_canvas_w = g_aspect_last_w; g_aspect_canvas_h = g_aspect_last_h;
+        }
+    } else if (c && nvn_aspect_canvas_candidate(c.width, c.height, pd.colorAttachments[0].level,
+               pd.depthAttachment.texture != nil, c.pixelFormat == MTLPixelFormatRGB10A2Unorm || pf_is_float(c.pixelFormat))) {
+        g_aspect_last_canvas = t->serial; g_aspect_last_w = c.width; g_aspect_last_h = c.height;
+        if (c.width == g_aspect_canvas_w && c.height == g_aspect_canvas_h)
+            g_aspect_canvas = t->serial;
+    }
+}
 void xv_test_counts(int *dc, int *viol) { if (dc) *dc = (int)g_xv_dc; if (viol) *viol = (int)g_xv_viol; }
 static void sd_finish(void);
 // Load elision (fully covering first draw): if the draw that opens the pass can be proven to cover a color attachment in full (first_draw_covers), that attachment's load becomes DontCare -
@@ -3664,6 +3692,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
         NSUInteger tw = 0, th = 0; if (!cl) rt_dims(&tw, &th);
         if (tw * th >= (1u << 24)) { NSUInteger w = MIN(tw, (NSUInteger)MAX((long)R.sc.x + R.sc.w, 1)), h = MIN(th, (NSUInteger)MAX((long)R.sc.y + R.sc.h, 1));
             if (w * h * 2 <= tw * th) { pd.renderTargetWidth = w; pd.renderTargetHeight = h; g_rp_aw = w; g_rp_ah = h; } } }
+    aspect_canvas_learn(pd);
     for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i] && zskip_zero_clear(i) && !bcrt_is(pd.colorAttachments[i].texture)) {
         g_zskip_cand_ok[i] = 1; g_zskip_cand[i] = (zskip_zero){R.rt.color[i]->serial, (uint16_t)(R.rt.has_cview[i] && R.rt.cview[i].set_levels ? R.rt.cview[i].base_level : 0), (uint16_t)(R.rt.has_cview[i] && R.rt.cview[i].set_layers ? R.rt.cview[i].min_layer : 0)};
     }
@@ -3896,6 +3925,7 @@ static void shmap_read(void) {
 
 @interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, discard_fn, fn_u, fn_m, fn_d, geo_fn; uint8_t mask_m;   // fn_u: the integer-output entry point (dmsh_build.py fs_uint), for pipelines whose colour attachments are all unsigned integer (pso_desc); fn_m: the mixed one, its outputs in mask_m unsigned integer; fn_d: the dual-source one (dmsh_build.py fs_dual)
     uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, layer_out; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
+    int aspect_ui_layout;   // immutable profile classification, set once with key in shader_load
     uint32_t geo_vertices, geo_invocations, geo_output, geo_stride, geo_index_stride;
     id<MTLComputePipelineState> geo_pso; int geo_pso_failed, cps_failed;   // cps_failed: Metal refused this compute shader's pipeline (dispatch): its dispatches are skipped without asking again
     int16_t *geo_slot; uint32_t geo_words;   // a lean passthrough kernel (dmsh_geometry.lean): capture word -> record slot (-1: not read), record words
@@ -4147,6 +4177,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
             o->geo_words = (uint32_t)reads.count;
         } }
     o->fn = fn4_note([lib newFunctionWithName:entry], lib, entry, nil); o->stage = stage; strlcpy(o->key, pc.UTF8String, sizeof o->key); o->ventry = entry;
+    if (stage == 0) o->aspect_ui_layout = nvn_aspect_ui_prefix(o->key, g_aspect_ui_prefixes, DM_GAME_ASPECT_UI_PREFIX_COUNT);
     // writes the layer (render_target_array_index, named in the library's metadata): its passes are layered and its pipelines get an input class (pso_desc). A library with layer entry points
     // names it for those alone: its main0 / main0_z write no layer
     if (stage == 0) o->layer_out = layer || (t_lib_layer && !j[@"entry_layer"]);
@@ -10336,7 +10367,10 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (g_enc && g_vis_counting && g_vis_n >= VIS_SLOTS) rp_end();   // this draw's query needs a slot and the buffer is bound for the whole pass: the next pass begins with a new one (rp_begin_ex)
     if (g_enc && g_rp_aw && (!R.has_sc || (long)R.sc.x + R.sc.w > (long)g_rp_aw || (long)R.sc.y + R.sc.h > (long)g_rp_ah)) rp_end();   // leaves the pass's render area
     fb_prepare(pr);   // same-pass feedback sampling: copy the snapshot first (see fb_prepare)
-    if (R.has_sc && !g_enc && !S.rast_discard) {
+    // Canvas UI scissors are transformed below; an originally off-canvas
+    // rectangle can become visible after squeezing and cannot be rejected here.
+    if (R.has_sc && !g_enc && !S.rast_discard &&
+        !(dm_game_aspect() > 0 && R.rt.n > 0 && R.rt.color[0] && R.rt.color[0]->serial == g_aspect_canvas)) {
         NSUInteger tw0 = 0, th0 = 0; rt_dims(&tw0, &th0);
         long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
         if (x1 > (long)tw0) x1 = tw0; if (y1 > (long)th0) y1 = th0;
@@ -10402,7 +10436,28 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
       if (!(g_ed.ok & ED_SREF) || g_ed.sref != sr) { enc_r_stencil_ref(en, sr, sr); g_ed.sref = sr; g_ed.ok |= ED_SREF; } }
     // Viewport / scissor (clamped within the target size)
     NSUInteger tw = g_pass.tw, th = g_pass.th;
+    double aspect_x = 1, aspect_y = 1;
+    double effective_aspect = dm_game_aspect();
+    if (effective_aspect > 0 && R.rt.n > 0 && R.rt.color[0] && R.rt.color[0]->serial == g_aspect_canvas) {
+        // The menus' blurred scene is a quad too: its first fragment texture
+        // is a GPU-rendered 16:9 picture, not a layout image. Keep it full width.
+        int scene_picture = 0, tid = (int)(S.tex[1][0] & 0xfffff);
+        os_unfair_lock_lock(&g_rmu);
+        if (tid > 0 && tid < g_ntreg && g_treg[tid].ok) {
+            const tex_t *t = &g_treg[tid].t;
+            scene_picture = t->d.width >= 320 && t->d.height &&
+                fabs((double)t->d.width / t->d.height * 9 / 16 - 1) < 0.02 && mtl_tex_gpu_owned(t->serial);
+        }
+        os_unfair_lock_unlock(&g_rmu);
+        if (nvn_aspect_ui_draw(1, dw ? dw->count : di ? di->count : 0, scene_picture) &&
+            nvn_aspect_ui_shader(pf_is_float(g_pass.cfmt[0]), pr->sh[0] && pr->sh[0]->aspect_ui_layout))
+            nvn_aspect_ui_scale(effective_aspect, &aspect_x, &aspect_y);
+    }
     { MTLViewport v = S.has_vp ? (MTLViewport){S.vp[0][0], S.vp[0][1], S.vp[0][2], S.vp[0][3], S.dr[0], S.dr[1]} : (MTLViewport){0, 0, tw, th, 0, 1};
+      if (aspect_x != 1 || aspect_y != 1) {
+          nvn_aspect_rect a = nvn_aspect_ui_rect((nvn_aspect_rect){v.originX, v.originY, v.width, v.height}, tw, th, aspect_x, aspect_y);
+          v.originX = a.x; v.originY = a.y; v.width = a.w; v.height = a.h;
+      }
       if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { v.originY += v.height; v.height = -v.height; }   // lower-left origin (see g_origin_ll)
       // Viewport swizzle: NEGATIVE_Y negates clip y, the same as the viewport flipped about its centre; facing is decided after it on the GPU as in Metal, so the winding stays.
       // Other swizzles (axis exchanges, negated x / z / w) are no viewport change and are drawn unswizzled
@@ -10412,7 +10467,10 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
       if (!(g_ed.ok & ED_VP) || memcmp(&g_ed.vp, &v, sizeof v)) { enc_r_viewport(en, v); g_ed.vp = v; g_ed.ok |= ED_VP; } }
     MTLScissorRect sc = {0, 0, tw, th};
     if (R.has_sc && !S.rast_discard) {   // raster state cannot suppress vertex storage writes
-        long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y <= 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
+        long sx0 = R.sc.x, sy0 = R.sc.y, sx1 = (long)R.sc.x + R.sc.w, sy1 = (long)R.sc.y + R.sc.h;
+        if (aspect_x != 1) { sx0 = lround(tw / 2.0 + (sx0 - tw / 2.0) * aspect_x); sx1 = lround(tw / 2.0 + (sx1 - tw / 2.0) * aspect_x); }
+        if (aspect_y != 1) { sy0 = lround(th / 2.0 + (sy0 - th / 2.0) * aspect_y); sy1 = lround(th / 2.0 + (sy1 - th / 2.0) * aspect_y); }
+        long x0 = MAX(sx0, 0), y0 = MAX(sy0, 0), x1 = sx1, y1 = sy1;
         if (x1 > (long)tw) x1 = tw; if (y1 > (long)th) y1 = th;
         if (x1 <= x0 || y1 <= y0) { PD("Z %llu draw skipped: empty scissor (%d,%d %dx%d, target %lux%lu)", g_stat_pass, R.sc.x, R.sc.y, R.sc.w, R.sc.h, (unsigned long)tw, (unsigned long)th); return; }
         sc = (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)};
@@ -12115,14 +12173,12 @@ static id<MTLTexture> present_raw_src(id<MTLTexture> src) {
     if (!v) { RED_ONCE(69, "present: cannot create a non-sRGB view of the sRGB swapchain texture (format %lu); presenting the decoded values", (unsigned long)src.pixelFormat); return src; }
     return v;
 }
-// The rectangle of the canvas (dw x dh) the picture (cw x ch) is drawn into: the picture's aspect ratio kept and centred, black bars in the rest (no stretching when the screen's ratio
-// differs from the game's, e.g. iPhone about 19.5:9 against the game's 16:9); when the ratios differ by under 1 % (the remainder from a game width that is a multiple of 8 in the
-// full-screen setup, e.g. 1952x900 against 2868x1320 differs by 0.17 %) the whole canvas, leaving no border of a few pixels
+// Both present encoders (including MetalFX and offscreen captures) use this
+// geometry. The acknowledged camera aspect describes the anamorphic source;
+// unsupported games retain aspect-fit using the valid crop, exactly as before.
 static MTLViewport present_viewport(double cw, double ch, double dw, double dh) {
-    double s = fmin(dw / cw, dh / ch);
-    MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
-    if (fabs((dw / dh) / (cw / ch) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
-    return vp;
+    nvn_aspect_rect r = nvn_aspect_present(cw, ch, dw, dh, dm_game_aspect());
+    return (MTLViewport){r.x, r.y, r.w, r.h, 0, 1};
 }
 // The valid source rectangle of a present (x, y, width, height; the crop of nvnWindowSetCrop, zero = the whole texture); 0 when it lies outside the texture
 static int present_crop_rect(id<MTLTexture> src, const int crop[4], NSUInteger r[4]) {
@@ -12435,11 +12491,18 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     PD("X ser=%llu", t->serial);
     id<MTLTexture> src = tex_mtl(t);
     if (!src) { RED_ONCE(8, "present texture could not get an MTLTexture"); return 0; }
-    // The picture's shape for the front end's layout (front.h front_picture_shape): reported when its width / height changes by more than 0.1 %, not on a size change of the same
-    // shape (1280x720 handheld, 1920x1080 docked)
-    { static double last; NSUInteger r[4];
-      if (present_crop_rect(src, crop, r) && r[2] && r[3]) { double a = (double)r[2] / r[3];
-          if (fabs(a - last) > last * 0.001) { last = a; MLOG("present: picture shape %lux%lu (%.3f:1) for the front end's layout", (unsigned long)r[2], (unsigned long)r[3], a); front_picture_shape((int)r[2], (int)r[3]); } } }
+    // Publish physical source shape, never the requested camera ratio. A camera ACK
+    // change also invalidates frontend layout even when the source stays 16:9.
+    // Same-shape resolution changes alone do not need a new layout.
+    { static double last; static float last_effective; NSUInteger r[4];
+      if (present_crop_rect(src, crop, r) && r[2] && r[3]) {
+          double a = (double)r[2] / r[3]; float effective = dm_game_aspect();
+          if (fabs(a - last) > last * 0.001 || effective != last_effective) {
+              last = a; last_effective = effective;
+              MLOG("present: picture shape %lux%lu (%.3f:1), camera %.3f:1 for the front end's layout", (unsigned long)r[2], (unsigned long)r[3], a, (double)effective);
+              front_picture_shape((int)r[2], (int)r[3]);
+          }
+      } }
     // A texture made on first resolution joins the residency set (res_add), which a submission commits; a window texture presented before any submission has used it was still
     // outside the committed set when the display command buffer sampled it. Super Smash Bros. Ultimate presents its window texture in its first frames before drawing into it:
     // the display queue page-faulted (kIOGPUCommandBufferCallbackErrorPageFault) and macOS then ignored every later command buffer of the process, so the window stayed pink
@@ -12481,9 +12544,6 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     CAMetalLayer *layer = (__bridge CAMetalLayer *)front_metal_layer();
     if (!layer) return 0;
     if (g_present_layer_resident != layer) { [g_q4 addResidencySet:layer.residencySet]; g_present_layer_resident = layer; }
-#if TARGET_OS_OSX
-    if (!layer.displaySyncEnabled) layer.displaySyncEnabled = YES;   // Windowed mode follows the display's vsync to prevent tearing
-#endif
     present_pipeline(layer.pixelFormat);   // Same as the original path: the first frame compiles the pipeline before taking the drawable
     if (g_grab_cb) grab_present(src, crop, layer.drawableSize);   // Game picture needed by the whole-window screenshot (peek without the lock first; the real take locks inside the function)
     uint64_t dt0 = now_ns();
@@ -12893,11 +12953,12 @@ static uint64_t snap_take(const tex_t *t) {
 static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4], uint64_t ev_val) {
     atomic_store(&dm_present_ns, now_ns());
     if (g_classic || atomic_load(&g_present_discard)) return 0;   // Ticket number 0 = no pending present; the swapchain texture acquire does not wait (g_classic: no Metal 4 queue to present on)
-    if (t) { xv_check(t->serial, 0, 0, "present"); if (g_xv_npresent < 128) g_xv_present[g_xv_npresent++] = t->serial; }
+    // t is required: NVN has already read its dimensions; external producers pass a local tex_t. The queue owns a value copy, never an optional texture pointer.
+    xv_check(t->serial, 0, 0, "present"); if (g_xv_npresent < 128) g_xv_present[g_xv_npresent++] = t->serial;
     // A texture whose content comes from its storage is uploaded when it is first resolved (and again when its pages change), in an upload batch only the submit thread may open.
     // Bastion fills both window textures with WriteTexels at boot (main+0x9374) and presents one before drawing into it: resolved on the present thread, the upload aborted the host.
     // Resolve it here, where the game queues the present, and commit the batch, so the display command buffer comes after the upload on the queue and the present thread finds it uploaded
-    if (t && !ev_val && on_sub_thread() && tex_from_storage(t)) { tex_mtl(t); up_flush(); }
+    if (!ev_val && on_sub_thread() && tex_from_storage(t)) { tex_mtl(t); up_flush(); }
     static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, present_start);
     link_sync();
     {   // Test switch DM_TEST_LINK_STALL=start seconds,duration seconds: counting from the first present, pause the display link at that point (imitating the display link not calling back while in the foreground) and release it when the duration is up. For verifying the fallback; not set in the product
@@ -12908,7 +12969,7 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
     }
     if (ws_on()) { static uint64_t f0; uint64_t f = atomic_load(&g_cur_frame); if (!f0) f0 = f; else if (f >= f0 + 300) { ws_report(f, f - f0); f0 = f; } }
     tex_t snap; uint64_t ss = 0; int slot = 0;
-    if (t && !ev_val && mtl_snap_on()) {
+    if (!ev_val && mtl_snap_on()) {
         slot = (int)(atomic_load(&g_snap_next) % (uint64_t)g_snap_n);
         if ((ss = snap_take(t))) { memset(&snap, 0, sizeof snap); snap.magic = MAGIC('T', 'E', 'X', 0); snap.serial = ss; t = &snap; }
     }

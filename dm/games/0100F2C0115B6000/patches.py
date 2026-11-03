@@ -1,7 +1,7 @@
 # The Legend of Zelda: Tears of the Kingdom (0100F2C0115B6000): the rewriter's patches of this game's own builds. dm/tools/patch_nso.py loads every profile's patches.py and applies those of a module's NSO build ID;
 # CUTS, OBS and FRAME_STEP as described there ("Registered patches"). Patches of Nintendo SDK module builds are in dm/tools/sdk_patches.py
 import struct
-from nso_asm import ADRP, B, NOP, STP_PRE
+from nso_asm import ADRP, B, LDP_POST, NOP, STP_PRE
 
 # Tears of the Kingdom picks a present interval each frame (main+0x2db174: 2 = 30 fps, 3 under load) and steps its game time by 60 / fps (int fps at timing +0x50, read at main+0x2daa54
 # and main+0x3e562c). The stub replaces that logic: int fps = 60 / step, and the float fps (timing +0x24, unused, per masagrator's FPSLocker config for this build, which found the
@@ -132,8 +132,70 @@ def frame_step(ctx):
         emit(w)
     emit(B(here(), 0xd5d84))
     fs_put(0xd5d80, [B(0xd5d80, start)], 'dynamic resolution only at render scale 1.0')
+    camera_aspect(ctx)
+
+
+def camera_aspect(ctx):
+    # Sites and register-preserving override adapted from MacNativeGames:
+    # games/totk/runtime/aspect_patch.h, aspect_math.h and game_patches_v143.c,
+    # https://github.com/ly05010419/MacNativeGames/tree/ac9821e784b9b81052547b2c75d950f93823b11d
+    # Copyright (c) 2026 MacNativeGames contributors
+    #
+    # Permission is hereby granted, free of charge, to any person obtaining a copy
+    # of this software and associated documentation files (the "Software"), to deal
+    # in the Software without restriction, including without limitation the rights
+    # to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    # copies of the Software, and to permit persons to whom the Software is
+    # furnished to do so, subject to the following conditions:
+    #
+    # The above copyright notice and this permission notice shall be included in all
+    # copies or substantial portions of the Software.
+    #
+    # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    # FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    # SOFTWARE.
+    #
+    # Exact 1.4.3 producer -> dirty flag -> PerspectiveProjection aspect stores.
+    # Unlike BOTW's enclosing camera, these projection pointers are x20 / x23;
+    # both viewport paths use x8. The projection's aspect is +0xb0 in all four.
+    # Keep the original producer, dirty flag and store even when disabled.
+    sites = (
+        (0x628c74, (0xbd414260, 0x39002295, 0xbd00b280), True),
+        (0xb43460, (0xbd406ac0, 0x390022f8, 0xbd00b2e0), True),
+        (0x1ff04f4, (0x1e211800, 0xbd00b100), False),
+        (0x253fbb0, (0x1e211800, 0xbd00b100), False),
+    )
+    # Reject every original-word mismatch before installing any camera branch.
+    for site, original, _ in sites:
+        ctx.site(site, struct.pack('<' + 'I' * len(original), *original).hex())
+    for site, original, acknowledge in sites:
+        start = ctx.here()
+        ctx.emit(original[0])
+        ctx.emit(STP_PRE(10, 11, 31, -16))
+        ctx.emit(ADRP(10, ctx.here(), ctx.state))
+        for w in (0x9101014a,   # add x10,x10,#0x40  desired ratio, 0 = original
+                  0x88dffd4b,   # ldar w11,[x10]     acquire host's float bits
+                  0x3400004b,   # cbz w11,store (+2) no flags changed
+                  0x1e270160):  # fmov s0,w11
+            ctx.emit(w)
+        for w in original[1:]: ctx.emit(w)
+        if acknowledge:
+            # The viewport can update before the world camera. Only an actual
+            # camera projection store may release the present/UI consumer gate.
+            ctx.emit(0x9100114a)   # add x10,x10,#4    acknowledgement +0x44
+            ctx.emit(0x889ffd4b)   # stlr w11,[x10]    also acknowledges disabling
+        ctx.emit(LDP_POST(10, 11, 31, 16))
+        ctx.emit(B(ctx.here(), site + 4 * len(original)))
+        ctx.put(site, [B(site, start)] + [NOP] * (len(original) - 1),
+                'camera aspect = host drawable ratio, acknowledged after projection store' if acknowledge else
+                'viewport projection aspect follows host drawable ratio without camera acknowledgement')
 
 FRAME_STEP = {'277178b7dba1b6d4949a84778d4abc58': frame_step}
+CAPABILITIES = {'277178b7dba1b6d4949a84778d4abc58': ('CAMERA_ASPECT',)}
 
 # How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
 # purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
@@ -141,4 +203,8 @@ BINDING = [
     {'what': '60 fps frame step and render scale', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
      'why': "the game's own timing object",
      'blocked': 'frame-step stubs have no function-matched form yet'},
+    {'what': 'TOTK perspective camera and viewport aspect producers', 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
+     'why': "the game's four projection update sites and their object layouts; drawable publication and presentation are general host behavior",
+     'blocked': 'projection producers have no reviewed function fingerprints yet',
+     'checked': 'original words at all four sites checked in main 277178b7dba1b6d4949a84778d4abc58; native/wide cave Mac gameplay and camera acknowledgement'},
 ]

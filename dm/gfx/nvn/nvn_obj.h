@@ -203,7 +203,7 @@ void mtl_exec(const uint8_t *handle);
 void mtl_sub_fill(uint64_t dst, uint64_t n, uint32_t value);   // in-order buffer fill within the submission (OP_CLEAR_BUF)
 void mtl_exec_rest(const uint64_t *handles, int n);   // Tells which handles in this submission still follow the current handle (used by the pass lookahead across handles)
 // Present: draw the swapchain texture to the front-end CAMetalLayer (only counts when there is no window)
-uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]);   // Enqueue a present and return the ticket immediately; period_s: minimum time this image is displayed (= present period, 0 = unlimited)
+uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]);   // t is required and copied into the queue; crop may be NULL (whole texture). Returns the ticket immediately; period_s: minimum display time (0 = unlimited)
 void mtl_present_wait(uint64_t ticket);                    // Wait until the present with this ticket has been processed (blit committed to the GPU queue)
 void mtl_present_flush(void);                              // Wait until all enqueued presents have been processed
 void mtl_present_test_stall(uint64_t ns);                  // Unit test: extra pause in ns before each present on the present thread

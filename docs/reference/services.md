@@ -312,11 +312,11 @@ Most service calls can be found before they crash, before the first boot or the 
 
 ### NFC initialization beside the amiibo library
 
-- **Symptom:** selecting amiibo initializes `nfp`, then the game connects to the unserved `nfc:user` service and aborts in `nn::nfc::Initialize`.
-- **Cause:** a game can call the general NFC library (`nn::nfc`) itself, beside the amiibo library (`nn::nfp`). The host takes over the whole `nfp` family, but `nfc::Initialize` stayed in the SDK and connected to `nfc:user`.
-- **Fix:** `hle_sdk16.c` takes over `nn::nfc::Initialize`, `Finalize`, `GetState` and `IsNfcEnabled`. Initialize and Finalize only track the library's state (no service session), and `IsNfcEnabled` answers false: a console with NFC switched off, so the game shows its own "NFC is disabled" message and returns to its menu. The `nfp` answers are unchanged. `dm/host/tests/t_nfc.c` checks the hooks. Of the games here, only Hyrule Warriors: Definitive Edition calls `nn::nfc` from its own code; the others have it only inside the `sdk` module.
-- **Open:** `nfp` answers as a console with NFC on and no amiibo ([SDK 20 six-axis sensor and amiibo (`nfp`) calls](#sdk-20-six-axis-sensor-and-amiibo-nfp-calls)), so a game that asks both libraries gets two different consoles, and the game's message points to a System Settings switch the host does not have. Answering `IsNfcEnabled` true would match `nfp`, but the game's amiibo path after it has not been run.
-- **Found on:** [Hyrule Warriors: Definitive Edition](../../dm/games/0100AE00096EA000/README.md) 1.0.1 (SDK 3.5.1), entering amiibo from the title screen (GitHub issue #708). With the fix, the message opens, closes and opens again.
+- **Symptom:** selecting amiibo aborts in `nn::nfc::Initialize`, or shows "NFC is disabled" even though `nfp` reports an available device.
+- **Cause:** a game can call the general NFC library (`nn::nfc`) itself, beside the amiibo library (`nn::nfp`). Leaving `nfc::Initialize` in the SDK connects to the unserved `nfc:user` service. With initialization handled by the host, answering `IsNfcEnabled` false still contradicts `nfp`'s NFC-enabled, no-tag device and sends the game to a System Settings switch the host does not have.
+- **Fix:** `hle_sdk16.c` takes over `nn::nfc::Initialize`, `Finalize`, `GetState` and `IsNfcEnabled`. Initialize and Finalize track only the library's state (no service session); `IsNfcEnabled` answers true, matching the existing `nfp` no-tag device. Games can poll for a tag and dismiss their own prompt. `dm/host/tests/t_nfc.c` checks availability before, during and after initialization, alongside NFP detection and guarded no-tag outputs. Of the games here, only Hyrule Warriors: Definitive Edition calls `nn::nfc` from its own code; the others have it only inside the `sdk` module.
+- **Open:** physical NFC and amiibo tag access are not implemented; detection never finds a tag.
+- **Found on:** [Hyrule Warriors: Definitive Edition](../../dm/games/0100AE00096EA000/README.md) 1.0.1 (SDK 3.5.1), entering amiibo from the title screen (GitHub issue #708). It shows "Touch an amiibo to the NFC touchpoint"; A dismisses it to the title screen. Three entry/dismissal cycles, waiting without a tag and subsequent Select Mode navigation work. B does not dismiss this prompt.
 
 ### Vibration values flushed by the SDK's vibration graph
 

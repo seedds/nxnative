@@ -42,7 +42,7 @@ int main(void) {
     Result (*tag_info)(void *, const NfpDeviceHandle *) = forced(&hle_force_h_nfp_TagInfo, "_ZN2nn3nfp10GetTagInfoEPNS0_7TagInfoERKNS0_12DeviceHandleE");
     if (fails) return 1;
     CHECK(state() == 0, "NFC begins uninitialized");
-    CHECK(enabled() == 0, "NFC has no physical reader before initialization");
+    CHECK(enabled() == 1, "NFC availability matches the existing NFP device before initialization");
     nfp_init();
     struct { uint64_t before; NfpDeviceHandle handle; uint64_t after; } device;
     memset(&device, 0xa5, sizeof device);
@@ -50,20 +50,20 @@ int main(void) {
     CHECK(list(&device.handle, &count, 1) == RES_OK && count == 1, "existing NFP device remains available");
     CHECK(device.before == UINT64_C(0xa5a5a5a5a5a5a5a5) && device.after == UINT64_C(0xa5a5a5a5a5a5a5a5), "device enumeration respects output bounds");
     CHECK(start(&device.handle) == RES_OK && device_state(&device.handle) == NFP_STATE_SEARCH, "existing NFP detection can search without a tag");
-    // Repeated entry/dismissal follows the caller's state check, init, disabled branch,
+    // Repeated entry/dismissal follows the caller's state check, init, no-tag branch,
     // and conditional finalization. A missing forced export fails before this sequence.
     for (int pass = 0; pass < 3; pass++) {
         CHECK(state() == 0, "NFC entry starts finalized");
         if (state() != 1) init();
         CHECK(state() == 1, "NFC initialization is observable");
-        CHECK(enabled() == 0, "initialization cannot fabricate physical NFC support");
+        CHECK(enabled() == 1, "NFC stays enabled while no tag is present");
         CHECK(device_state(&device.handle) == NFP_STATE_SEARCH, "NFC initialization preserves NFP detection");
         unsigned char output[0x80]; memset(output, 0x5a, sizeof output);
         CHECK(tag_info(output + 16, &device.handle) == (115u | 97u << 9), "tag access still returns tag-not-found");
         int unchanged = 1; for (unsigned i = 0; i < sizeof output; i++) if (output[i] != 0x5a) unchanged = 0;
         CHECK(unchanged, "no-tag result neither fabricates tag data nor overwrites guards");
         if (state()) fini();
-        CHECK(state() == 0 && enabled() == 0, "dismissal finalizes NFC and keeps it disabled");
+        CHECK(state() == 0 && enabled() == 1, "dismissal finalizes the library without changing NFC availability");
         CHECK(device_state(&device.handle) == NFP_STATE_SEARCH, "NFC finalization preserves NFP detection");
     }
     CHECK(stop(&device.handle) == RES_OK && device_state(&device.handle) == NFP_STATE_INIT, "NFP detection stops normally");

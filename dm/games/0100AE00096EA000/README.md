@@ -49,7 +49,7 @@ General host changes first needed here; each applies to every game:
 
 - **Movies:** [SDK 3's `movie::Decoder` constructor takes a type and a format only](../../../docs/reference/movies.md#sdk-3s-moviedecoder-constructor-takes-a-type-and-a-format-only).
 - **Power:** [Short timed waits are polls](../../../docs/reference/threads.md#short-timed-waits-are-polls).
-- **amiibo:** [NFC initialization beside the amiibo library](../../../docs/reference/services.md#nfc-initialization-beside-the-amiibo-library): entering amiibo from the title screen aborted in `nn::nfc::Initialize` (GitHub issue #708); the game now shows its "NFC is disabled" message.
+- **amiibo:** [NFC initialization beside the amiibo library](../../../docs/reference/services.md#nfc-initialization-beside-the-amiibo-library): entering amiibo from the title screen aborted in `nn::nfc::Initialize` (GitHub issue #708); the host reports NFC enabled with no tag, matching `nfp`. The game shows "Touch an amiibo to the NFC touchpoint"; A dismisses it to the title screen. Repeated entry/dismissal and subsequent Select Mode navigation work; physical NFC and tag access remain unavailable.
 
 ## Open
 

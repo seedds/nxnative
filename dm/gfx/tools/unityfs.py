@@ -300,8 +300,16 @@ SerializedShader: SerializedProperties m_PropInfo; vector<data:SerializedSubShad
 PPtr<Shader>: int m_FileID; SInt64 m_PathID
 Shader: string m_Name; SerializedShader m_ParsedForm; vector<data:unsigned int>~ platforms; vector<data:unsigned int>~ offsets; vector<data:unsigned int>~ compressedLengths; vector<data:unsigned int>~ decompressedLengths; vector<data:UInt8> compressedBlob; vector<data:PPtr<Shader>>~ m_Dependencies; bool! m_ShaderIsBaked'''
 
+# Unity 2021.3 (Dynablaster, 2021.3.25f1: no bundles, every serialized file stripped): the 2021.2 layout with the player subprograms of 2022.3 in each program and the shader's stageCounts;
+# the keyword state mask stays in the pass. Matches AssetRipper's 2021.3.25f1 release tree node for node (2,304 nodes, alignment flags included)
+SHADER_2021_3 = SHADER_2021_2.replace('SerializedProgram: vector<data:SerializedSubProgram> m_SubPrograms; SerializedProgramParameters m_CommonParameters',
+    'SerializedPlayerSubProgram: unsigned int m_BlobIndex; vector<data:UInt16> m_KeywordIndices; SInt64 m_ShaderRequirements; SInt8! m_GpuProgramType\n'
+    'SerializedProgram: vector<data:SerializedSubProgram> m_SubPrograms; vector<data:vector<data:SerializedPlayerSubProgram>> m_PlayerSubPrograms; vector<data:vector<data:unsigned int>> m_ParameterBlobIndices; SerializedProgramParameters m_CommonParameters'
+    ).replace('vector<data:UInt8> compressedBlob;', 'vector<data:UInt8> compressedBlob; vector<data:unsigned int> stageCounts;')
+
 CLASS_COMPUTE_SHADER = 72
 KNOWN_TREES = {(CLASS_SHADER, bytes.fromhex('4496e93f2179252104401c8dda0a1751')): ('Shader', SHADER_5_5),
+               (CLASS_SHADER, bytes.fromhex('f0c184272a05e54447e36366ec4876a6')): ('Shader', SHADER_2021_3),
                (CLASS_SHADER, bytes.fromhex('ea424a5fc1e48db62144df956f9e1005')): ('Shader', SHADER_2022_3),
                (CLASS_SHADER, bytes.fromhex('d8236c9bd87d85edb203acf352348124')): ('Shader', SHADER_2021_2),
                (CLASS_SHADER, bytes.fromhex('2ec7223dce3af4232b14ae1441bd7999')): ('Shader', SHADER_6000_0),

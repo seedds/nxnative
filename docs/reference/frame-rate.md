@@ -300,6 +300,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Found on:** MacNativeGames commit `0531f28`, ported in [PR #195](https://github.com/seedds/nxnative/pull/195), reports autorelease work falling from 2.63% to 1.73% of replay time; the PR does not identify the game for that measurement. It has not been repeated here.
 - **Check:** `t_ub`, `t_vbuf` and `t_geometry` exercise arena-backed uniform shadows, vertex conversion and geometry scratch on the Mac with Metal validation.
 
+### Dedicated c1 constants as slices of a bank
+
+- **Symptom:** a game runs at about 10 fps with little GPU work: the submit thread waits for a command allocator (`mtl_sub_begin` → `mtl_wait_at`), the GPU sits idle between encoders for hundreds of ms (`DM_NVN_GPUPROF`), the Metal 4 `SubmissionQueue` thread spends nearly all its time in `iokit_user_client_trap` (almost all system time), and the `memory up to frame` line shows a residency set of 10,000 objects or more.
+- **Cause:** a shader whose c1 constants must have 64 KiB of their own (every shader of a library without a `c1_full.tsv`, which a partial build never writes, and the shaders that file lists) got its own `MTLBuffer`. Each one is an allocation in the queue's residency set, and the kernel's work for every commit grows with that count: the submission queue fell behind, the game's command allocators stayed in flight and its frames waited for them.
+- **Fix:** such a c1 is an exclusive, zero-filled 64 KiB slice of the 4 MiB banks the other c1s share (`c1_bank`, `c1_store` in `nvn_mtl.m`): the same memory and the same zeros past its data, 64 slices to an allocation.
+- **Found on:** [Hyrule Warriors: Age of Imprisonment](../../dm/games/04003F40232DE000/README.md) with a partial Mac library of 15,344 shaders: 9,854 dedicated buffers (616 MB) of a residency set of 16,118 in its first field became 142 banks of 989. Frame p50 100 → 16.6 ms, p99 400–580 → 100–114 ms, submit wall clock 41–48 → 5.8 ms a frame. Open: the submission thread is still in the kernel about two thirds of the time, and the p99 follows the commits per frame (52–69 ms with `DM_NVN_CUT=0`). A Metal System Trace of 4 s in the field shows 2.8 s of driver time wiring system memory (56,769 wires, 84,954 unwire requests, mostly 512 KiB to 4 MiB): the game's GPU allocations total 7 GB, its own memory pool alone 4,655 MB (a constant, `main+0x19eb098`), on a 16 GB Mac with 9.7 GB wired system-wide and about 160 MB free, so the driver cannot keep the working set wired and re-wires it for each submission.
+- **Check:** `make -C dm/gfx/tests GAME=<id> run` passes.
+
 ### Registry lock priority inheritance
 
 - **Symptom:** the submit thread waits on the texture / sampler registry lock while a lower-priority registration thread is preempted holding it.

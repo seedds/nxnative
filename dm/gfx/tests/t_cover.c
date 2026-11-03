@@ -32,6 +32,34 @@ int main(void) {
     t("neg: full-screen quad strip (no single triangle covers it; conservative)", 0, nvn_cover(quad, 4, 5, 0, 1, 1, vp_full, 0, NULL, 1600, 900));
     t("neg: both faces culled", 0, nvn_cover(big, 3, 4, 3, 1, 1, vp_full, 0, NULL, 1600, 900));
     t("neg: primitive is lines (not triangles)", 0, nvn_cover(big, 3, 1, 0, 1, 1, vp_full, 0, NULL, 1600, 900));
+    // Two-triangle quad (nvn_cover_quad): P, A, B | B, A, Q with the diagonal A-B shared
+    const float q_full[6][4] = {{-1, -1, 0.5f, 1}, {1, -1, 0.5f, 1}, {1, 1, 0.5f, 1}, {1, 1, 0.5f, 1}, {1, -1, 0.5f, 1}, {-1, 1, 0.5f, 1}};   // not a quad on purpose: see below
+    const float qd[6][4] = {{-1, -1, 0.5f, 1}, {1, -1, 0.5f, 1}, {1, 1, 0.5f, 1}, {-1, -1, 0.5f, 1}, {1, 1, 0.5f, 1}, {-1, 1, 0.5f, 1}};     // counterclockwise, diagonal (-1,-1)-(1,1)
+    const float qd_cw[6][4] = {{-1, -1, 0.5f, 1}, {1, 1, 0.5f, 1}, {1, -1, 0.5f, 1}, {-1, -1, 0.5f, 1}, {-1, 1, 0.5f, 1}, {1, 1, 0.5f, 1}};  // the same quad clockwise
+    const float qd_big[6][4] = {{-1.5f, -1.5f, 0, 1}, {2, -1.5f, 0, 1}, {2, 2, 0, 1}, {-1.5f, -1.5f, 0, 1}, {2, 2, 0, 1}, {-1.5f, 2, 0, 1}};
+    const float qd_small[6][4] = {{-1, -1, 0.5f, 1}, {0.9f, -1, 0.5f, 1}, {0.9f, 1, 0.5f, 1}, {-1, -1, 0.5f, 1}, {0.9f, 1, 0.5f, 1}, {-1, 1, 0.5f, 1}};   // misses the right strip
+    const float qd_gap[6][4] = {{-1, -1, 0.5f, 1}, {1, -1, 0.5f, 1}, {1, 1, 0.5f, 1}, {-1, -1, 0.5f, 1}, {1.001f, 1, 0.5f, 1}, {-1, 1, 0.5f, 1}};         // the diagonal's end is not shared exactly
+    const float qd_fold[6][4] = {{-1, -1, 0.5f, 1}, {1, -1, 0.5f, 1}, {1, 1, 0.5f, 1}, {-1, -1, 0.5f, 1}, {1, 1, 0.5f, 1}, {1, -1, 0.5f, 1}};              // second triangle folds back onto the first
+    const float qd_z[6][4] = {{-1, -1, 1.5f, 1}, {1, -1, 1.5f, 1}, {1, 1, 1.5f, 1}, {-1, -1, 1.5f, 1}, {1, 1, 1.5f, 1}, {-1, 1, 1.5f, 1}};
+    const float qd_w[6][4] = {{-2, -2, 0.5f, 2}, {2, -2, 0.5f, 2}, {2, 2, 0.5f, 2}, {-2, -2, 0.5f, 2}, {2, 2, 0.5f, 2}, {-2, 2, 0.5f, 2}};
+    const float qd_dart[6][4] = {{-1, -1, 0.5f, 1}, {3, 0, 0.5f, 1}, {0, 0, 0.5f, 1}, {-1, -1, 0.5f, 1}, {0, 0, 0.5f, 1}, {0, 3, 0.5f, 1}};   // a reflex ring around the diagonal: not convex
+    t("quad of two triangles, viewport = attachment", 1, nvn_cover_quad(qd, 6, 0, 1, 1, vp_full, 0, NULL, 1600, 900));
+    t("quad of two triangles, no viewport, full scissor, back-face culling", 1, nvn_cover_quad(qd, 6, 2, 1, 0, NULL, 1, sc_full, 1600, 900));
+    t("quad larger than the screen", 1, nvn_cover_quad(qd_big, 6, 0, 1, 1, vp_full, 0, NULL, 1600, 900));
+    t("quad clockwise, clockwise is front", 1, nvn_cover_quad(qd_cw, 6, 2, 0, 1, vp_full, 0, NULL, 1600, 900));
+    t("neg: quad clockwise, counterclockwise is front, back-face culling", 0, nvn_cover_quad(qd_cw, 6, 2, 1, 1, vp_full, 0, NULL, 1600, 900));
+    t("neg: the same two triangles, nvn_cover refuses (neither holds all corners)", 0, nvn_cover(qd, 3, 4, 0, 1, 1, vp_full, 0, NULL, 1600, 900));
+    t("neg: quad misses the right strip", 0, nvn_cover_quad(qd_small, 6, 0, 1, 1, vp_full, 0, NULL, 1600, 900));
+    t("neg: diagonal end not shared exactly (a possible gap)", 0, nvn_cover_quad(qd_gap, 6, 0, 1, 1, vp_full, 0, NULL, 1600, 900));
+    t("neg: second triangle folds back over the first", 0, nvn_cover_quad(qd_fold, 6, 0, 1, 1, vp_full, 0, NULL, 1600, 900));
+    t("neg: reflex ring (not convex)", 0, nvn_cover_quad(qd_dart, 6, 0, 1, 1, vp_full, 0, NULL, 1600, 900));
+    t("neg: z outside [0,1]", 0, nvn_cover_quad(qd_z, 6, 0, 1, 1, vp_full, 0, NULL, 1600, 900));
+    t("neg: w != 1", 0, nvn_cover_quad(qd_w, 6, 0, 1, 1, vp_full, 0, NULL, 1600, 900));
+    t("neg: viewport covers half", 0, nvn_cover_quad(qd, 6, 0, 1, 1, vp_half, 0, NULL, 1600, 900));
+    t("neg: scissor covers the top half", 0, nvn_cover_quad(qd, 6, 0, 1, 1, vp_full, 1, sc_part, 1600, 900));
+    t("neg: both faces culled", 0, nvn_cover_quad(qd, 6, 3, 1, 1, vp_full, 0, NULL, 1600, 900));
+    t("neg: five vertices", 0, nvn_cover_quad(qd, 5, 0, 1, 1, vp_full, 0, NULL, 1600, 900));
+    t("neg: two triangles sharing only a corner", 0, nvn_cover_quad(q_full, 6, 0, 1, 1, vp_full, 0, NULL, 1600, 900));
     printf("== %d checks, %d failed ==\n", total, fail);
     return fail != 0;
 }

@@ -934,6 +934,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Hyrule Warriors: Age of Imprisonment](../../dm/games/04003F40232DE000/README.md#shaders): pixel shaders `02e49c189b769074` and `49241cf469c76830`, 16 pairs each (chain 95ba69b5403e).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (`BarrierMoves`: the game's encodings leave the translated shader unchanged; it fails on the translator before).
 
+### LDC with the bank in its address register (`.IS`)
+
+- **Symptom:** `Ampere b82 at 0x…: LDC with a bindless bank or an address mode (…00008a00…7b82)` in the shader build; those shaders are left out.
+- **Cause:** LDC's address mode 2 (`.IS`, bits 78..79; 3 is `.ISL`) takes the bank as the instruction's plus Ra's upper 16 bits, and the offset from Ra's lower 16 bits plus the instruction's, as Maxwell's LDC does. The compiler uses it for an indexed read of c1 with the bank folded into the address (`(index * stride) + 0x10000`). The Ampere path refused the mode, and the shared load picks a run-time bank only among the banks the accessor reports, none here, so even the Maxwell path reads 0 for it.
+- **Fix:** `ALdc` lowers `.IS` / `.ISL` to that bank and offset, and the load selects among the banks the shader can reach: its own constant segment c1, the instruction's bank and every bank its other constant reads name, but not c0 (`ARuntimeBanks`, from a scan of the decoded program; `InstEmitAmpereAlu.cs`). The host fills the driver segment only at offsets known when the shader is built and does not load a shader that indexes it at run time (`dmsh_build.py` `unfillable`): with c0 among the candidates, the pixel shader below, which reads c0 elsewhere, translated but was not loaded. Maxwell shaders are unchanged. A run-time bank 0 in a compute shader is not remapped as a constant one is (`AMapC0`).
+- **Found on:** [Hyrule Warriors: Age of Imprisonment](../../dm/games/04003F40232DE000/README.md#shaders): vertex shader `cc679c7b4d3e703c` reads its quad corners (−1,1), (1,1), (0,0), (−1,−1), (1,−1) from c1 by vertex index % 5, and pixel shader `059a0a910ff87a26` reads c1 from 0x60 (chain 316fb82e2f22). The vertex shader is also [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md#shaders)'s.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (`LdcIndexedBank`; it fails on the translator before).
+
 ### IMAD.HI adds a register pair, and IMAD.X its carry
 
 - **Symptom:** 64-bit arithmetic in a shader gives wild results: the 64-bit division behind an exposure average returned 893011 for 218, so the exposure stayed at the end of its range. With only the pair fixed it still gave 2 for 340 / 1.

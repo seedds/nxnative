@@ -80,7 +80,6 @@ dm/gfx/tests/t_pull_inv.m	bugprone-random-generator-seed	1
 dm/gfx/tests/t_pull_inv.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_queue_origin.m	clang-analyzer-osx.cocoa.RetainCount	1
 dm/gfx/tests/t_readback.m	clang-analyzer-nullability.NullablePassedToNonnull	1
-dm/gfx/tests/t_reorder_chain.m	clang-analyzer-nullability.NullablePassedToNonnull	2
 dm/gfx/tests/t_rt_range.m	clang-analyzer-osx.cocoa.RetainCount	1
 dm/gfx/tests/t_stencil_view.m	bugprone-suspicious-memory-comparison	1
 dm/gfx/tests/t_stencil_view.m	clang-analyzer-nullability.NullablePassedToNonnull	1

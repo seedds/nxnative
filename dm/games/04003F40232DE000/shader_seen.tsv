@@ -1,4 +1,4 @@
-# The shader keys (column 4 of shader_map.tsv) in the library of the Mac playtests (chain d2476e8ae3e9, 2026-11-03): the shaders the runs from the first-run settings
+# The shader keys (column 4 of shader_map.tsv) in the library of the Mac playtests (chain 316fb82e2f22, 2026-11-03): the shaders the runs from the first-run settings
 # through the opening to the first field and beyond asked for, with their pixel shaders. A partial build of these alone: docs/development.md, Building selected Mac shaders. Rows: key<TAB>stage.
 key	stage
 000274aec30d28fb	pixel
@@ -307,6 +307,7 @@ key	stage
 058040a6ad682522	pixel
 058a8a1649d7e8a2	pixel
 0598f2c882b60400	pixel
+059a0a910ff87a26	pixel
 059d4737887cc732	pixel
 05a0d1f7119ac992	pixel
 05a5bf93fa34af59	pixel
@@ -12393,6 +12394,7 @@ cc4eee007d4d0755	vertex
 cc5c739b035b1b89	pixel
 cc5ca451e6b34eeb	pixel
 cc625ce70908b275	pixel
+cc679c7b4d3e703c	vertex
 cc697ae0e5341727	vertex
 cc6cc8e684d5a012	pixel
 cc6d398b9ef66a44	pixel

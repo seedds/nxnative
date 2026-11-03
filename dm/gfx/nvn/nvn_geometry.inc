@@ -446,7 +446,10 @@ static id<MTLRenderPipelineState> geo_mesh_pso(NvProg *pr) { return g_geo_mesh.p
 // any operation but bindings, a program bind and draws (geo_mesh_keeps, from mtl_exec), a draw that is not a mesh draw of the same pair (draw_, geo_mesh_draw), and the end of
 // the pass (rp_end). Bindings only change S and dirty flags, so nothing else reaches the encoder in between. The draws of a run then run in one dispatch, whose threadgroups the
 // GPU may rasterize in any order, so a run takes only draws whose result does not depend on their order: no colour writes, no stencil writes, depth written only with a test that
-// keeps the nearest (or the farthest), no occlusion query counting, and a fragment shader with no resources (the fragment table is not in the record).
+// keeps the nearest (or the farthest), and a fragment shader with no resources (the fragment table is not in the record). Occlusion query counting may be on (it stays on for the rest
+// of the game after the first samples-passed reset): a report ends the run (geo_mesh_keeps) and a pass keeps one slot, so a query's interval holds whole runs, and whether any of its
+// samples passed is the same in any order (the nearest fragment of each pixel passes whatever the order), which is what occlusion tests and conditional rendering ask. Only the exact
+// count can differ by fragments another order rejects. Donkey Kong Bananza resets that counter once and draws its depth prepass with counting on: refused, no draw ever joined a run.
 // DM_NVN_GEO_MESH_RUN=0 turns it off
 typedef struct { uint64_t slot[31]; geo_mesh_args d; uint32_t group_end, n; } geo_mesh_rec;   // = dmsh_mesh.py dm_mesh_rec (RUN_SLOTS)
 enum { GEO_MESH_RUN = 1024 };
@@ -486,16 +489,19 @@ static int geo_mesh_keeps(uint32_t op) {
         default: return 0;
     }
 }
-// Whether the draw's result is the same in any order among the draws of a run (see above)
+// Whether the draw's result is the same in any order among the draws of a run (see above); the first refusal of each kind is logged
 static int geo_mesh_run_fits(NvProg *pr) {
-    NvShader *fs = pr->sh[1];
-    if (fs && (fs->rf.nb || fs->rf.bindless || fs->rf.dyn)) return 0;
+    static const char *const why[] = {"its fragment shader has resources", "it writes colour", "it writes stencil", "its depth test does not keep the nearest or the farthest"};
+    static uint8_t logged;
+    NvShader *fs = pr->sh[1]; int r = -1;
     uint32_t attached = 0; for (int i = 0; i < 8; i++) if (g_pass.cfmt[i]) attached |= 1u << i;
-    if (draw_color_writes(pr) & attached) return 0;
-    if (g_pass.hs && S.ds.st && (S.st_wmask[0] || S.st_wmask[1])) return 0;
-    if (g_pass.hd && S.ds.dw && !(S.ds.dt && (S.ds.df == 1 || S.ds.df == 2 || S.ds.df == 4 || S.ds.df == 5 || S.ds.df == 7))) return 0;   // NVN NEVER, LESS, LEQUAL, GREATER, GEQUAL
-    if (g_vis_counting) return 0;
-    return 1;
+    if (fs && (fs->rf.nb || fs->rf.bindless || fs->rf.dyn)) r = 0;
+    else if (draw_color_writes(pr) & attached) r = 1;
+    else if (g_pass.hs && S.ds.st && (S.st_wmask[0] || S.st_wmask[1])) r = 2;
+    else if (g_pass.hd && S.ds.dw && !(S.ds.dt && (S.ds.df == 1 || S.ds.df == 2 || S.ds.df == 4 || S.ds.df == 5 || S.ds.df == 7))) r = 3;   // NVN NEVER, LESS, LEQUAL, GREATER, GEQUAL
+    if (r < 0) return 1;
+    if (!(logged >> r & 1)) { logged |= 1 << r; MLOG("geometry mesh run: a draw of vertex %s draws alone: %s", pr->sh[0] ? pr->sh[0]->key : "-", why[r]); }
+    return 0;
 }
 // The draw about to be dispatched (geo_mesh_encode, with its arguments bound): 1 when it joined the run instead
 static int geo_mesh_take(id<MTL4RenderCommandEncoder> en) {

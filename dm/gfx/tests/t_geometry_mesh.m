@@ -3,13 +3,15 @@
 // counter, a scissor between the fourth and the fifth. Each triangle covers one pixel column of a 128x4 depth target; the kernel
 // keeps it when bit 0 of vertex t's x is set. The depth of every column and every draw's counter must be the same whether the draws
 // are dispatched one by one (DM_NVN_GEO_MESH_RUN=0) or in runs, and in runs the scissor must cut only the draws after it.
+// Then again with samples-passed counting on (a counter reset before the draws, a report after them; Donkey Kong Bananza draws its depth prepass so): the draws still join runs,
+// and the report holds every sample the draws passed (the draws cover separate columns, so the count is the same in any order)
 #define main geometry_fixture_main
 #include "t_geometry.m"
 #undef main
 enum { MR_W = 128, MR_H = 4, MR_TRIS = 64, MR_DRAWS = 6 };
 static const unsigned mr_first[MR_DRAWS] = {0, 5, 60, 37, 41, 61}, mr_count[MR_DRAWS] = {5, 32, 1, 4, 17, 3}, mr_scissored = 4;   // first triangle, triangles; draws from 4 on after the scissor
 static int mr_bit(unsigned v) { return v % 5 != 2; }   // the kernel keeps triangle t of a draw when vertex (first + t)'s bit is set
-static int run_case(NSString *directory, int pass) {
+static int run_case(NSString *directory, int pass, int counting) {
     NSError *error = nil;
     id<MTLLibrary> vl = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:[directory stringByAppendingPathComponent:@"vertex.metallib"]] error:&error];
     id<MTLLibrary> ll = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:[directory stringByAppendingPathComponent:@"lean.metallib"]] error:&error];
@@ -57,12 +59,15 @@ static int run_case(NSString *directory, int pass) {
     p_bind_vattr va = {.n = 1}; va_st attribute = {.fmt = NVN_FORMAT_RGBA32F}; memcpy(va.st, &attribute, 4); EMIT(OP_BIND_VATTR, va);
     p_bind_vstream stream = {.n = 1}; stream.st[0].stride = 16; EMIT(OP_BIND_VSTREAM, stream);
     p_bind_vbuf vb = {.n = 1}; vb.r[0] = (NVNbufferRange){(uint64_t)vtx, MR_TRIS * 3 * 16}; EMIT(OP_BIND_VBUF, vb);
+    uint64_t *rep = (uint64_t *)(mem + 106496); rep[0] = UINT64_MAX;   // the samples-passed report (counter, time)
+    if (counting) { uint64_t t = NVN_COUNTER_TYPE_SAMPLES_PASSED; EMIT(OP_RESET_COUNTER, t); }
     for (unsigned k = 0; k < MR_DRAWS; k++) {
         if (k == mr_scissored) { p_scissor cut = {0, 0, 120, MR_H}; EMIT(OP_SCISSOR, cut); }   // ends the run: columns 120 on keep the earlier draws, not the later ones
         p_bind_buf u = {.stage = 0, .index = 0, .addr = (uint64_t)(uni + 64 * k), .size = 16}; EMIT(OP_BIND_UBO, u);
         p_bind_buf c = {.stage = 2, .index = 0, .addr = (uint64_t)(ctr + 4 * k), .size = 16}; EMIT(OP_BIND_SSBO, c);
         p_draw d = {.prim = 4, .first = (int32_t)(3 * mr_first[k]), .count = (int32_t)(3 * mr_count[k]), .instances = 1}; EMIT(OP_DRAW, d);
     }
+    if (counting) { uint64_t rc[2] = {NVN_COUNTER_TYPE_SAMPLES_PASSED, (uint64_t)(uintptr_t)rep}; EMIT(OP_REPORT_COUNTER, rc); }
     op_hdr end = {OP_END, 8}; memcpy(mem + used, &end, 8);
     #undef EMIT
     state_reset(); memset(&R, 0, sizeof R); S.ds.dt = 1; S.ds.dw = 1; S.ds.df = 2;   // LESS, written
@@ -70,19 +75,21 @@ static int run_case(NSString *directory, int pass) {
     mtl_sub_begin(); uint64_t h = (uint64_t)mem; mtl_sub_index(&h, 1); mtl_exec(mem);
     id<MTLBuffer> b = [g_dev newBufferWithLength:MR_W * MR_H * 4 options:MTLResourceStorageModeShared]; res_add(b);
     [blit() copyFromTexture:tex_mtl(&depth) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(MR_W, MR_H, 1) toBuffer:b destinationOffset:0 destinationBytesPerRow:MR_W * 4 destinationBytesPerImage:MR_W * MR_H * 4];
-    finish();
+    finish(); if (counting) mtl_drain();   // the report is written when the command buffer's completion work runs
     int ready = g_geo_mesh_n - mesh0 == MR_DRAWS && (!geo_mesh_run_on() || g_mrun_draws - rdraws0 == MR_DRAWS);   // the pipelines are built in the background: earlier passes draw some other way
     int bad = 0;
     if (ready) {
-        const float *px = b.contents;
+        const float *px = b.contents; unsigned drawn = 0;
         for (unsigned g = 0; g < MR_TRIS; g++) {
             float want = 1;
             for (unsigned k = 0; k < MR_DRAWS; k++) if (g >= mr_first[k] && g < mr_first[k] + mr_count[k] && mr_bit(3 * mr_first[k] + g - mr_first[k]) && (k < mr_scissored || 2 * g < 120)) want = 0.1f * (k + 1);
             for (unsigned y = 0; y < MR_H; y++) { float got = px[y * MR_W + 2 * g];
                 if (fabsf(got - want) > 1e-5f) { fprintf(stderr, "triangle %u row %u: depth %g, expected %g\n", g, y, got, want); bad = 1; } }
         }
+        for (unsigned i = 0; i < MR_W * MR_H; i++) drawn += px[i] != 1;   // each pixel is covered by one triangle at most: one sample passed for each written
+        if (counting) EXPECT("samples-passed counting on: the report holds every sample the draws passed", drawn, rep[0]);
         for (unsigned k = 0; k < MR_DRAWS; k++) EXPECT("each draw's kernel ran once per triangle with its own counter", mr_count[k], ctr[4 * k]);
-        if (geo_mesh_run_on()) EXPECT("the scissor and the end split the draws into two runs", 2, g_mrun_runs - runs0);
+        if (geo_mesh_run_on()) EXPECT(counting ? "with counting on, the scissor and the report split the draws into two runs" : "the scissor and the end split the draws into two runs", 2, g_mrun_runs - runs0);
         else EXPECT("no runs with DM_NVN_GEO_MESH_RUN=0", 0, g_mrun_runs - runs0);
     }
     res_remove(b); mtl_tex_release(&depth); mtl_pool_del(mem); mtl_drain(); free(mem);
@@ -91,8 +98,9 @@ static int run_case(NSString *directory, int pass) {
 int main(int argc, char **argv) { @autoreleasepool {
     if (argc != 2) return 2; mtl_init();
     int r = 0;
-    for (int pass = 0; pass < 40 && !(r = run_case(@(argv[1]), pass)); pass++) usleep(100000);   // until the mesh pipelines (single and run) are built
+    for (int pass = 0; pass < 40 && !(r = run_case(@(argv[1]), pass, 0)); pass++) usleep(100000);   // until the mesh pipelines (single and run) are built
     if (r < 0 || failed) return 1;
     if (!r) { fprintf(stderr, "the mesh pipelines were never ready\n"); return 1; }
+    if ((r = run_case(@(argv[1]), 40, 1)) <= 0 || failed) { if (!r) fprintf(stderr, "with counting on, the draws did not join runs\n"); return 1; }
     printf("geometry mesh %s: %d checks passed\n", geo_mesh_run_on() ? "runs" : "single draws", checks); return 0;
 }}

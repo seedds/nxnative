@@ -1850,17 +1850,19 @@ static uint64_t g_acq_wait_ns, g_pq_wait_ns;   // Accumulated display-link wait 
 static uint64_t g_fs_start, g_fs_wait;   // frame step (fstep_tick): when the first acquire after a present returned (the frame's start, 0 = none yet), and its pacing wait
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
 extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
-// Frame workgroup (DM_FRAME_WG, on by default; 0 off): the threads that make a frame (the acquiring thread, the encode thread, the threads that record command buffers) join one
+// Frame workgroup (DM_FRAME_WG=1, the launcher's Deadline boost; off by default): the threads that make a frame (the acquiring thread, the encode thread, the threads that record command buffers) join one
 // os_workgroup interval, and the acquiring thread marks each frame as an interval with the present period as its deadline. That is how the system's performance controller
 // learns that these threads work to a deadline together: an iPad Pro M4 otherwise ran Breath of the Wild mostly on its efficiency cores whenever many threads were busy
 // (14-55% of its CPU time on performance cores while playing), with the translation thread 60-70% slower and frames dropped, though the device was not hot. Interval workgroups
-// are made by AudioWorkIntervalCreate (AudioToolbox, looked up at run time), the documented way for an app's own real-time threads with a cadence of their own
+// are made by AudioWorkIntervalCreate (AudioToolbox, looked up at run time), the documented way for an app's own real-time threads with a cadence of their own.
+// Off by default: on the same iPad, standing or turning the camera at thermal state 0, it held the translation thread at 3.8 GHz (3.3 ms a frame, against 4.75 ms at 2.6 GHz
+// without it) for 27% more CPU power (1.94 against 1.52 W) and no fewer dropped frames (none either way); whether it keeps the game off the efficiency cores in play is the player's test
 static os_workgroup_interval_t g_fwg; static int g_fwg_state;   // 0 not tried, 1 made, -1 off or failed
 static __thread int t_fwg_joined; static __thread os_workgroup_join_token_s t_fwg_tok;
 static uint64_t g_fwg_joins, g_fwg_fail;
 static int fwg_get(void) {
     if (g_fwg_state) return g_fwg_state > 0;
-    const char *e = getenv("DM_FRAME_WG"); if (e && !strcmp(e, "0")) { g_fwg_state = -1; LOG("[nvn] DM_FRAME_WG=0: no frame workgroup"); return 0; }
+    const char *e = getenv("DM_FRAME_WG"); if (!(e && atoi(e))) { g_fwg_state = -1; return 0; }   // off unless asked for (launcher: Deadline boost)
     void *h = dlopen("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox", RTLD_LAZY);
     os_workgroup_interval_t (*mk)(const char *, os_clockid_t, os_workgroup_attr_t) = h ? (os_workgroup_interval_t (*)(const char *, os_clockid_t, os_workgroup_attr_t))dlsym(h, "AudioWorkIntervalCreate") : NULL;
     g_fwg = mk ? mk("nxnative frame", OS_CLOCK_MACH_ABSOLUTE_TIME, NULL) : NULL;

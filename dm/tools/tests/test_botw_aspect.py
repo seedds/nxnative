@@ -118,15 +118,44 @@ class CameraWriter(unittest.TestCase):
         self.assertEqual(self.u.reg_read(arm.UC_ARM64_REG_NZCV), 0xa0000000)
 
     def test_acknowledgement_follows_projection_store(self):
-        self.desired(21/9)
-        observed = []
+        acknowledgement = self.base+self.state+0x44
+        observed, before_store = [], []
         def write(u, access, address, size, value, data):
-            if address == self.base+self.state+0x44:
+            if address == self.obj+0xc0:
+                before_store.append(self.read_float(acknowledgement))
+            if address == acknowledgement:
                 observed.append(self.read_float(self.obj+0xc0))
         self.u.hook_add(uc.UC_HOOK_MEM_WRITE, write)
-        self.execute()
-        self.assertEqual(len(observed), 1)
-        self.assertAlmostEqual(observed[0], 21/9, places=6)
+        previous = 0
+        for ratio in (21/9, 32/9, 0, 2.16, 0):
+            self.desired(ratio)
+            self.assertAlmostEqual(self.read_float(acknowledgement), previous, places=6)
+            self.execute()
+            self.assertAlmostEqual(before_store[-1], previous, places=6)
+            self.assertAlmostEqual(observed[-1], ratio or 16/9, places=6)
+            self.assertAlmostEqual(self.read_float(acknowledgement), ratio, places=6)
+            previous = ratio
+        self.assertEqual(len(observed), 5)
+
+    def test_tall_output_layout_and_original_camera_survive_landscape_restore(self):
+        self.desired(21/9); self.execute()
+        self.desired(0)  # the host withdraws landscape before publishing tall state
+        self.u.mem_write(self.base+self.state+0x48, struct.pack('<2I', 1344, 896))
+        self.u.mem_write(self.base+self.state+0x58, struct.pack('<f', 1920/1344))
+        for site, reg, width, height in (
+                (0xc61ef4, arm.UC_ARM64_REG_X9, 1920, 1344),
+                (0xc61f5c, arm.UC_ARM64_REG_X8, 1280, 896)):
+            self.u.reg_write(reg, width)
+            self.u.emu_start(self.base+site, self.base+site+4, count=20)
+            self.assertEqual(self.u.reg_read(arm.UC_ARM64_REG_PC), self.base+site+4)
+            self.assertEqual(self.u.reg_read(reg), (height << 32) | width)
+            # Output/layout changes alone cannot acknowledge a camera restore.
+            self.assertAlmostEqual(self.read_float(self.base+self.state+0x44), 21/9, places=6)
+        self.u.mem_write(self.obj+0x2038, struct.pack('<4f', 10, 20, 1290, 916))
+        self.u.reg_write(arm.UC_ARM64_REG_X16, 0x12345678)  # output hooks may clobber this free register
+        aspect, acknowledged = self.execute()
+        self.assertAlmostEqual(aspect, 1280/896, places=6)
+        self.assertEqual(acknowledged, 0)
 
 
 if __name__ == '__main__': unittest.main()

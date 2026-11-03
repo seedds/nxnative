@@ -423,9 +423,10 @@ static void pads_start(void) {
 
 // Mouse as a single-point touchscreen (front.h dm_touch_set): left button down / drag = finger 0, release = lifted. The content view takes the clicks,
 // not a window-wide event monitor, so clicks on the title bar, the window buttons and the resize edges still reach AppKit.
-// The picture's width / height (front.h front_picture_shape; 16:9 until the first present), which the present fits into the view
-static _Atomic double g_picture_aspect = 16.0 / 9.0;
-void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = (double)w / h; }
+// Physical source dimensions stay independent of the effective camera ACK. A pending projection restoration still
+// maps the old ACK; zero ACK falls back to the actual source (including upstream's tall-screen picture).
+static _Atomic double g_source_aspect = 16.0 / 9.0;
+void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_source_aspect = (double)w / h; }
 @interface DmGameView : NSView @end
 @implementation DmGameView
 - (void)mouseDown:(NSEvent *)e { [self mouseDragged:e]; }
@@ -434,8 +435,19 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil]; NSSize b = self.bounds.size;
     double w = b.width, h = b.height;
     if (w <= 0 || h <= 0) return;
-    double a = g_picture_aspect; if (w / h > a) w = h * a; else h = w / a;   // the centered picture the present fits into the view (16:9, or a taller one under DM_SCREEN_ASPECT)
-    double x0 = (b.width - w) / 2, y0 = (b.height - h) / 2;
+    double a = dm_game_aspect();
+    if (!(a > 0) || !isfinite(a)) a = g_source_aspect;
+    if (!(a > 0) || !isfinite(a)) a = 16.0 / 9.0;
+    // Match the renderer's 1% near-match and pixel rounding, while keeping AppKit's bottom-left origin.
+    double x0 = 0, y0 = 0;
+    if (fabs((w / h) / a - 1) >= 0.01) {
+        double scale = self.window.backingScaleFactor; if (!(scale > 0)) scale = 1;
+        if (w / h > a) w = h * a; else h = w / a;
+        x0 = floor((b.width - w) * scale / 2) / scale;
+        double top = floor((b.height - h) * scale / 2) / scale;
+        w = round(w * scale) / scale; h = round(h * scale) / scale;
+        y0 = b.height - top - h;
+    }
     dm_touch t = {0, (float)fmin(fmax((p.x - x0) / w, 0), 0.999), (float)fmin(fmax(1 - (p.y - y0) / h, 0), 0.999)};   // The AppKit view origin is at bottom left, the touchscreen origin is at top left
     dm_touch_set(&t, 1); g_mouse_down = 1;
 }

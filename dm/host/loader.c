@@ -301,10 +301,12 @@ static pthread_mutex_t g_aspect_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic(uint8_t *) g_aspect_state;
 static float g_aspect_drawable;
 static int g_aspect_enabled;
+static int g_screen_aspect_supported;
+static _Atomic int g_aspect_tall_active;
 static void aspect_publish_locked(void) {
     uint8_t *state = atomic_load_explicit(&g_aspect_state, memory_order_relaxed);
     if (!state) return;
-    float ratio = g_aspect_enabled ? g_aspect_drawable : 0;
+    float ratio = g_aspect_enabled && !atomic_load_explicit(&g_aspect_tall_active, memory_order_relaxed) ? g_aspect_drawable : 0;
     uint32_t bits; memcpy(&bits, &ratio, sizeof bits);
     atomic_store_explicit((_Atomic uint32_t *)(void *)(state + 0x40), bits, memory_order_release);
 }
@@ -318,6 +320,9 @@ void dm_game_aspect_drawable(double width, double height) {
     pthread_mutex_unlock(&g_aspect_mu);
 }
 float dm_game_aspect(void) {
+    // Supported tall output owns the projection. A prior landscape ACK remains
+    // guest-owned, but must not override the taller source's actual shape.
+    if (atomic_load_explicit(&g_aspect_tall_active, memory_order_acquire)) return 0;
     uint8_t *state = atomic_load_explicit(&g_aspect_state, memory_order_acquire);
     if (!state) return 0;
     uint32_t bits = atomic_load_explicit((_Atomic uint32_t *)(void *)(state + 0x44), memory_order_acquire);
@@ -327,9 +332,14 @@ float dm_game_aspect(void) {
     return ratio;
 }
 static void install_fps_state(module_t *m) {
-    if (m->fps_state_off > m->size || m->size - m->fps_state_off < 0x48 ||
+    if (m->fps_state_off > m->size || m->size - m->fps_state_off < 0x9c ||
         m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
     dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name;
+    // Only the profile's reviewed main builds have output/layout/FOV stubs.
+    // A tall setting alone must not disable a title's native landscape camera.
+    g_screen_aspect_supported = DM_GAME_SCREEN_ASPECT && !strcmp(m->name, "main") &&
+        (!strcmp(m->build_id, "cd57b23fa4bbad65803d9788c01821ee") ||
+         !strcmp(m->build_id, "ff1d1c05670db6021c85b624a710b963"));
     if (m->camera_aspect && !strcmp(m->name, "main") &&
         (!strcmp(m->build_id, "cd57b23fa4bbad65803d9788c01821ee") ||
          !strcmp(m->build_id, "277178b7dba1b6d4949a84778d4abc58"))) {
@@ -352,41 +362,57 @@ void dm_fps_state_apply(void) {
     if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.5f && sc <= 1.0f)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.5 to 1.0; keeping the game's size", rs); sc = 1.0f; } else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", g_fps_mod, sc); }
     memcpy(dm_fps_state + 0x10, &sc, sizeof sc);
     // Screen shape: DM_SCREEN_ASPECT, the screen's width / height between 1.3 and 1.77, makes the builds with screen-shape stubs
-    // (Breath of the Wild 1.9.0's patches.py) render that shape: the output keeps its width (1920) and takes the height that gives the ratio, a multiple of 48 so the
+    // (Breath of the Wild 1.9.0 and Animal Crossing: New Horizons 3.0.3) render that shape: the output keeps its width (1920) and takes the height that gives the ratio, a multiple of 48 so the
     // 2/3-size layout space (1280 wide) stays whole: 1.43 → 1920x1344 and 1280x896. State +0x48 u32 output height, +0x4c u32 layout height, +0x50 its float; 0 = 16:9
-    const char *as = getenv("DM_SCREEN_ASPECT");
+    const char *as = getenv("DM_SCREEN_ASPECT"); float a = 0;
     if (as && *as && strcmp(as, "0")) {   // 0: 16:9
-        char *end; float a = strtof(as, &end);
-        if (end == as || *end || !(a >= 1.3f && a < 1.77f)) LOG("[RED] DM_SCREEN_ASPECT=%s: a width / height from 1.3 to 1.77; keeping 16:9", as);
-        else {
-            uint32_t oh = (uint32_t)(1920.0f / a / 48.0f + 0.5f) * 48, lh = oh * 2 / 3; float lf = (float)lh;
-            memcpy(dm_fps_state + 0x48, &oh, 4); memcpy(dm_fps_state + 0x4c, &lh, 4); memcpy(dm_fps_state + 0x50, &lf, 4);
-            const char *ms = getenv("DM_SCREEN_ASPECT_SITES"); uint32_t mask = ms ? (uint32_t)strtoul(ms, NULL, 0) : 0xffffffffu;   // the stubs of the game's own conversions, one bit each (+0x54)
-            memcpy(dm_fps_state + 0x54, &mask, 4);
-            if (ms) LOG("%s: screen shape: conversion sites %#x (DM_SCREEN_ASPECT_SITES)", g_fps_mod, mask);
-            // The field of view: views of the screen's ratio (the scene, the HUD's camera) keep 16:9's sides and show more above and below (patches.py's sead::PerspectiveProjection stubs)
-            float r = 1920.0f / (float)oh, k = (16.0f / 9.0f) / r, tol = 0.01f;
-            const char *fo = getenv("DM_SCREEN_FOV"); if (fo && !strcmp(fo, "off")) tol = -1.0f;   // trials: the scene keeps the game's vertical angle (no view matches); the HUD camera still widens
-            memcpy(dm_fps_state + 0x58, &r, 4); memcpy(dm_fps_state + 0x5c, &k, 4); memcpy(dm_fps_state + 0x60, &tol, 4);
-            float wide = 16.0f / 9.0f, wtol = 0.001f, far = 10000.0f;   // the HUD camera's projection: 16:9, near 1, far 10000 (+0x74 / +0x78 / +0x7c)
-            memcpy(dm_fps_state + 0x74, &wide, 4); memcpy(dm_fps_state + 0x78, &wtol, 4); memcpy(dm_fps_state + 0x7c, &far, 4);
-            // The HUD at the taller edges (patches.py duo_anchor.c, +0x80..+0x98): the shift (half the layout height over 360), the stretch of full-screen panes, the edge rule's
-            // distance, the listed corner widgets' distance, a full-screen pane's width and height in the 1280x720 space, and the tallest one still stretched (a menu's
-            // background is about 720 tall, the weapon wheel's gradient 1280; the map's tiles are left alone anyway)
-            // (Mac, a Master Mode save: an edge distance of 280 takes the menus' title bars (286 to 320), the map's frame pieces (284 to 360) and the bottom guides (-318) along
-            // as whole rows; 330 left the title bars and the rupee count in the middle while the hearts moved. Text moves with its widget since the rule runs where global
-            // matrices are computed. Only panes as wide and as tall as the screen are stretched: a width of 0 stretched the inventory's half-width side panel past its top
-            // and bottom bars). DM_SCREEN_HUD=<edge>,<listed>,<full-screen width>,<full-screen height>[,<tallest>]
-            // overrides them for trials
-            float anc[7] = {(float)lh / 2 - 360.0f, (float)lh / 720.0f, 280.0f, 100.0f, 1270.0f, 710.0f, 1300.0f};
-            const char *hv = getenv("DM_SCREEN_HUD");
-            if (hv && sscanf(hv, "%f,%f,%f,%f,%f", &anc[2], &anc[3], &anc[4], &anc[5], &anc[6]) < 4) LOG("[RED] DM_SCREEN_HUD=%s: <edge>,<listed>,<full width>,<full height>[,<tallest>]; keeping the rest", hv);
-            memcpy(dm_fps_state + 0x80, anc, sizeof anc);
-            LOG("%s: screen shape: HUD moves out by %.0f (edge %.0f, listed widgets %.0f), panes %.0fx%.0f or larger stretched %.3f", g_fps_mod, anc[0], anc[2], anc[3], anc[4], anc[5], anc[1]);
-            LOG("%s: screen shape %.3f: output 1920x%u, layout 1280x%u (DM_SCREEN_ASPECT; only builds with screen-shape stubs follow it)", g_fps_mod, a, oh, lh);
+        char *end; a = strtof(as, &end);
+        if (end == as || *end || !(a >= 1.3f && a < 1.77f)) {
+            LOG("[RED] DM_SCREEN_ASPECT=%s: a width / height from 1.3 to 1.77; keeping 16:9", as);
+            a = 0;
         }
     }
+    int tall_active = g_screen_aspect_supported && a != 0;
     pthread_mutex_lock(&g_aspect_mu);
+    // Withdraw landscape before enabling any tall guest parameters. Keep an
+    // existing tall mask until those parameters have been cleared on disable.
+    if (tall_active) atomic_store_explicit(&g_aspect_tall_active, 1, memory_order_release);
+    g_aspect_enabled = 0;
+    aspect_publish_locked();
+    pthread_mutex_unlock(&g_aspect_mu);
+    // Reset only host-owned tall parameters; leave the ACK, reserved fields and
+    // guest fovy history intact when disabling or reapplying the setting.
+    memset(dm_fps_state + 0x48, 0, 0x64 - 0x48);
+    memset(dm_fps_state + 0x74, 0, 0x9c - 0x74);
+    if (tall_active) {
+        uint32_t oh = (uint32_t)(1920.0f / a / 48.0f + 0.5f) * 48, lh = oh * 2 / 3; float lf = (float)lh;
+        memcpy(dm_fps_state + 0x48, &oh, 4); memcpy(dm_fps_state + 0x4c, &lh, 4); memcpy(dm_fps_state + 0x50, &lf, 4);
+        const char *ms = getenv("DM_SCREEN_ASPECT_SITES"); uint32_t mask = ms ? (uint32_t)strtoul(ms, NULL, 0) : 0xffffffffu;   // the stubs of the game's own conversions, one bit each (+0x54)
+        memcpy(dm_fps_state + 0x54, &mask, 4);
+        if (ms) LOG("%s: screen shape: conversion sites %#x (DM_SCREEN_ASPECT_SITES)", g_fps_mod, mask);
+        // The field of view: views of the screen's ratio (the scene, the HUD's camera) keep 16:9's sides and show more above and below (patches.py's sead::PerspectiveProjection stubs)
+        float r = 1920.0f / (float)oh, k = (16.0f / 9.0f) / r, tol = 0.01f;
+        const char *fo = getenv("DM_SCREEN_FOV"); if (fo && !strcmp(fo, "off")) tol = -1.0f;   // trials: the scene keeps the game's vertical angle (no view matches); the HUD camera still widens
+        memcpy(dm_fps_state + 0x58, &r, 4); memcpy(dm_fps_state + 0x5c, &k, 4); memcpy(dm_fps_state + 0x60, &tol, 4);
+        float wide = 16.0f / 9.0f, wtol = 0.001f, far = 10000.0f;   // the HUD camera's projection: 16:9, near 1, far 10000 (+0x74 / +0x78 / +0x7c)
+        memcpy(dm_fps_state + 0x74, &wide, 4); memcpy(dm_fps_state + 0x78, &wtol, 4); memcpy(dm_fps_state + 0x7c, &far, 4);
+        // The HUD at the taller edges (patches.py duo_anchor.c, +0x80..+0x98): the shift (half the layout height over 360), the stretch of full-screen panes, the edge rule's
+        // distance, the listed corner widgets' distance, a full-screen pane's width and height in the 1280x720 space, and the tallest one still stretched (a menu's
+        // background is about 720 tall, the weapon wheel's gradient 1280; the map's tiles are left alone anyway)
+        // (Mac, a Master Mode save: an edge distance of 280 takes the menus' title bars (286 to 320), the map's frame pieces (284 to 360) and the bottom guides (-318) along
+        // as whole rows; 330 left the title bars and the rupee count in the middle while the hearts moved. Text moves with its widget since the rule runs where global
+        // matrices are computed. Only panes as wide and as tall as the screen are stretched: a width of 0 stretched the inventory's half-width side panel past its top
+        // and bottom bars). DM_SCREEN_HUD=<edge>,<listed>,<full-screen width>,<full-screen height>[,<tallest>]
+        // overrides them for trials
+        float anc[7] = {(float)lh / 2 - 360.0f, (float)lh / 720.0f, 280.0f, 100.0f, 1270.0f, 710.0f, 1300.0f};
+        const char *hv = getenv("DM_SCREEN_HUD");
+        if (hv && sscanf(hv, "%f,%f,%f,%f,%f", &anc[2], &anc[3], &anc[4], &anc[5], &anc[6]) < 4) LOG("[RED] DM_SCREEN_HUD=%s: <edge>,<listed>,<full width>,<full height>[,<tallest>]; keeping the rest", hv);
+        memcpy(dm_fps_state + 0x80, anc, sizeof anc);
+        LOG("%s: screen shape: HUD moves out by %.0f (edge %.0f, listed widgets %.0f), panes %.0fx%.0f or larger stretched %.3f", g_fps_mod, anc[0], anc[2], anc[3], anc[4], anc[5], anc[1]);
+        LOG("%s: screen shape %.3f: output 1920x%u, layout 1280x%u (DM_SCREEN_ASPECT; only builds with screen-shape stubs follow it)", g_fps_mod, a, oh, lh);
+    }
+    pthread_mutex_lock(&g_aspect_mu);
+    atomic_store_explicit(&g_aspect_tall_active, tall_active, memory_order_release);
     const char *wide = getenv("DM_WIDESCREEN");
     g_aspect_enabled = !(wide && !strcmp(wide, "0"));
     aspect_publish_locked();

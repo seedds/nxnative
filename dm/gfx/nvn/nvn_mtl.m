@@ -12486,11 +12486,18 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     PD("X ser=%llu", t->serial);
     id<MTLTexture> src = tex_mtl(t);
     if (!src) { RED_ONCE(8, "present texture could not get an MTLTexture"); return 0; }
-    // The picture's shape for the front end's layout (front.h front_picture_shape): reported when its width / height changes by more than 0.1 %, not on a size change of the same
-    // shape (1280x720 handheld, 1920x1080 docked)
-    { static double last; NSUInteger r[4];
-      if (present_crop_rect(src, crop, r) && r[2] && r[3]) { double a = (double)r[2] / r[3];
-          if (fabs(a - last) > last * 0.001) { last = a; MLOG("present: picture shape %lux%lu (%.3f:1) for the front end's layout", (unsigned long)r[2], (unsigned long)r[3], a); front_picture_shape((int)r[2], (int)r[3]); } } }
+    // Publish physical source shape, never the requested camera ratio. A camera ACK
+    // change also invalidates frontend layout even when the source stays 16:9.
+    // Same-shape resolution changes alone do not need a new layout.
+    { static double last; static float last_effective; NSUInteger r[4];
+      if (present_crop_rect(src, crop, r) && r[2] && r[3]) {
+          double a = (double)r[2] / r[3]; float effective = dm_game_aspect();
+          if (fabs(a - last) > last * 0.001 || effective != last_effective) {
+              last = a; last_effective = effective;
+              MLOG("present: picture shape %lux%lu (%.3f:1), camera %.3f:1 for the front end's layout", (unsigned long)r[2], (unsigned long)r[3], a, (double)effective);
+              front_picture_shape((int)r[2], (int)r[3]);
+          }
+      } }
     // A texture made on first resolution joins the residency set (res_add), which a submission commits; a window texture presented before any submission has used it was still
     // outside the committed set when the display command buffer sampled it. Super Smash Bros. Ultimate presents its window texture in its first frames before drawing into it:
     // the display queue page-faulted (kIOGPUCommandBufferCallbackErrorPageFault) and macOS then ignored every later command buffer of the process, so the window stayed pink

@@ -396,7 +396,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     if (changed || stick || _stickShown) [self refresh];   // also refresh on the stick release so the knob returns to the centre
     _stickShown = stick;
 }
-// Touch follows the actual presented rectangle, including an acknowledged native camera or the cropped Fill picture.
+// Touch re-reads the ACK against the physical-source canvas: neither a source notification nor a new drawable restores the guest camera.
 - (void)pushGame {
     CGRect b = dm_layout_touch_rect(_layout, dm_game_aspect());
     if (b.size.width <= 0 || b.size.height <= 0) { dm_touch_set(NULL, 0); return; }

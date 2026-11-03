@@ -21,6 +21,10 @@ int main(void) {
     CHECK(r.x == 0 && r.y == 0 && r.w == 2868 && r.h == 1320, "existing one-percent rounding tolerance");
     r = nvn_aspect_present(1280, 720, 2868, 1320, 2868.0 / 1320);
     CHECK(r.x == 0 && r.y == 0 && r.w == 2868 && r.h == 1320, "TOTK acknowledged iPhone camera uses actual drawable, not a named ultrawide preset");
+    r = nvn_aspect_present(1920, 1344, 3440, 1440, 0);
+    CHECK(r.x == 691 && r.y == 0 && r.w == 2057 && r.h == 1440, "upstream tall source keeps its own aspect without a wide camera ACK");
+    r = nvn_aspect_present(1920, 1344, 1920, 1344, 0);
+    CHECK(r.x == 0 && r.y == 0 && r.w == 1920 && r.h == 1344, "tall source fills a matching tall drawable without double fitting");
 
     CHECK(nvn_aspect_canvas_candidate(1920, 1080, 0, 0, 1), "packed or float docked final canvas is eligible");
     CHECK(nvn_aspect_canvas_candidate(1280, 720, 0, 0, 1), "handheld float final canvas is eligible");
@@ -28,6 +32,7 @@ int main(void) {
     CHECK(!nvn_aspect_canvas_candidate(1600, 896, 0, 1, 1), "depth-bearing scene target is not the final canvas");
     CHECK(!nvn_aspect_canvas_candidate(1920, 1080, 1, 0, 1), "mip target is not the final canvas");
     CHECK(!nvn_aspect_canvas_candidate(1920, 1080, 0, 0, 0), "ordinary unorm target is not a packed/float final canvas");
+    CHECK(!nvn_aspect_canvas_candidate(1920, 1344, 0, 0, 1), "native tall output is not a fixed 16:9 anamorphic UI canvas");
     CHECK(!nvn_aspect_canvas_candidate(1920, 0, 0, 0, 1), "empty canvas is rejected");
 
     double x, y;

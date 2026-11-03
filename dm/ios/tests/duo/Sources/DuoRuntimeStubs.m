@@ -11,6 +11,7 @@ NSString * const DuoHarnessInputDidChangeNotification = @"DuoHarnessInputDidChan
 
 static pthread_mutex_t g_input_lock = PTHREAD_MUTEX_INITIALIZER;
 static DuoHarnessState g_state;
+static float g_camera_aspect;   // test-controlled guest ACK; publishing a drawable never acknowledges it
 
 DuoHarnessInput duo_harness_input(void) {
     pthread_mutex_lock(&g_input_lock);
@@ -29,6 +30,7 @@ DuoHarnessState duo_harness_state(void) {
 void duo_harness_clear(void) {
     pthread_mutex_lock(&g_input_lock);
     memset(&g_state, 0, sizeof(g_state));
+    g_camera_aspect = 0;
     pthread_mutex_unlock(&g_input_lock);
 }
 
@@ -114,7 +116,8 @@ uint64_t mtl_present_count(void) { return 0; }
 static double g_drawable_ratio;
 void dm_game_aspect_drawable(double width, double height) { g_drawable_ratio = height > 0 ? width / height : 0; }
 double duo_harness_drawable_ratio(void) { return g_drawable_ratio; }
-float dm_game_aspect(void) { return 0; }   // The harness has no guest camera; pure layout tests supply acknowledgements explicitly.
+void duo_harness_set_camera_aspect(float aspect) { g_camera_aspect = aspect; }
+float dm_game_aspect(void) { return g_camera_aspect; }
 __thread _Atomic int dm_host_work;
 void dm_gfx_suspend(int on) { (void)on; }
 void dm_audio_suspend(int on) { (void)on; }

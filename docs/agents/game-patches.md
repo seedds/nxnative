@@ -69,12 +69,16 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | BOTW perspective camera aspect and projection acknowledgement | rendering | blocked: camera update has no reviewed function fingerprint yet | checked: all 13 original words checked in main cd57b23fa4bbad65803d9788c01821ee; native/wide outdoor Mac gameplay and camera acknowledgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | the game's camera update and projection-object layout; drawable publication and presentation are general host behavior |
 | `build` → `game` | frame step floor 2 → 1 vsync, and its frame step | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) | the game's own clock floor and step |
 | `build` → `game` | screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) | the output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code |
+| `build` → `game` | TOTK perspective camera and viewport aspect producers | rendering | blocked: projection producers have no reviewed function fingerprints yet | checked: original words at all four sites checked in main 277178b7dba1b6d4949a84778d4abc58; native/wide cave Mac gameplay and camera acknowledgement | 1 | [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) | the game's four projection update sites and their object layouts; drawable publication and presentation are general host behavior |
+| `build` → `host` | Animal Crossing rewritten tall-screen state gate | rendering | kept: the existing screen-aspect profile and reviewed main build authorize tall parameters, independently of landscape-camera capability | checked: loader profile/build gates and tall-state lifecycle fixtures; upstream screen-shape patches | 1 | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) | rewriter capability metadata could describe verified tall-screen stub support instead of a host build whitelist |
+| `build` → `host` | BOTW rewritten frame-state capability gates | runtime | kept: only the reviewed build is allowed to publish camera state; additional capabilities require separate validation | checked: loader capability, build, state bounds and lifecycle tests; original camera words and outdoor Mac gameplay | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | the state protocol can ultimately be described by rewriter capability metadata rather than a game-specific host whitelist |
+| `build` → `host` | TOTK rewritten frame-state capability gate | runtime | kept: only the reviewed build is allowed to publish camera state | checked: loader capability, build, state bounds and lifecycle tests; original projection words and opening-cave Mac gameplay | 1 | [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) | the state protocol can ultimately be described by rewriter capability metadata rather than a game-specific host whitelist |
 
 ## Summary
 
 | Game | Cuts | Gates | Frame-step sites | Function-matched rules | Host rows | Binding |
 |---|---|---|---|---|---|---|
-| [Animal Crossing: New Horizons](#animal-crossing-new-horizons) | 0 | 0 | 14 | 0 | 0 | `build` → `game` |
+| [Animal Crossing: New Horizons](#animal-crossing-new-horizons) | 0 | 0 | 14 | 0 | 1 | `build` → `game`, `build` → `host` |
 | [ASTRAL CHAIN](#astral-chain) | 0 | 0 | 112 | 0 | 0 | `build` → `game` |
 | [Batman: Arkham Knight](#batman-arkham-knight) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -97,7 +101,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Subnautica: Below Zero](#subnautica-below-zero) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
-| [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 43 | 0 | 0 | `build` → `game` ×2 |
+| [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 44 | 0 | 2 | `build` → `game` ×3, `build` → `host` |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 13 | 0 | 1 | `build` → `game` ×2, `build` → `host` |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -109,6 +113,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md), `01006F8002326000`, [patches.py](../../dm/games/01006F8002326000/patches.py).
 
 - **`build` → `game`**, rendering, blocked: the stubs have no function-matched form yet, judgement: screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT). The output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code
+- **`build` → `host`**, rendering, kept: the existing screen-aspect profile and reviewed main build authorize tall parameters, independently of landscape-camera capability, checked: loader profile/build gates and tall-state lifecycle fixtures; upstream screen-shape patches: Animal Crossing rewritten tall-screen state gate. Rewriter capability metadata could describe verified tall-screen stub support instead of a host build whitelist
 
 - **3.0.3 `main`** `ff1d1c05…` ([patches.py:228](../../dm/games/01006F8002326000/patches.py#L228))
   <details><summary>14 frame-step sites</summary>
@@ -130,6 +135,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
   </details>
 
+  - host [loader.c:342](../../dm/host/loader.c#L342): build check
 
 ### ASTRAL CHAIN
 
@@ -546,7 +552,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x1126794`: stepping down stops at < 3 → at < 2: cmp w9,#3 → cmp w9,#2
   - cut `+0x112691c`: interval controller always takes the GPU time path (CPU span timing): cbz x0,#0x1126934 → b #0x1126928
   - cut `+0x1126974`: interval controller always takes the GPU time path (takes max(CPU span, GPU time)): cbz x0,#0x112698c → b #0x1126980
-  <details><summary>43 frame-step sites</summary>
+  <details><summary>44 frame-step sites</summary>
 
   - frame step `+0x27ae0`: Pane::Calculate: a HUD widget at the edge moved to the taller screen's edge with its children, full-screen backgrounds stretched (duo_anchor.c)
   - frame step `+0x2df28`: projected texture fitted to the layout: a pane as tall as the taller screen maps its whole height
@@ -575,6 +581,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - frame step `+0x100817c`: 720.0 with 1280.0 passed as a layout size
   - frame step `+0x1059730`: 1280x720 layout size of an object
   - frame step `+0x106bb6c`: 1280x720 default sizes of a layer
+  - frame step `+0x10edae0`: camera aspect = host drawable ratio (state +0x40; 0 = original), acknowledged at +0x44
   - frame step `+0x10ee094`: main camera fovy getter: widened like the projection (culling tests)
   - frame step `+0x10ee0cc`: main camera fovy getter in degrees: widened like the projection
   - frame step `+0x11269b8`: setWaitVsyncInterval: the host's step unless the VFR override is set (state page target fps; 0 = the game's interval)
@@ -596,7 +603,8 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
   - render scale stub (the launcher offers DM_RENDER_SCALE)
   - launcher capabilities: CAMERA_ASPECT
-  - host [loader.c:334](../../dm/host/loader.c#L334): build check
+  - host [loader.c:341](../../dm/host/loader.c#L341): build check
+  - host [loader.c:344](../../dm/host/loader.c#L344): build check
 
 ### The Legend of Zelda: Link's Awakening
 
@@ -636,7 +644,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
   - render scale stub (the launcher offers DM_RENDER_SCALE)
   - launcher capabilities: CAMERA_ASPECT
-  - host [loader.c:335](../../dm/host/loader.c#L335): build check
+  - host [loader.c:345](../../dm/host/loader.c#L345): build check
 
 ### Xenoblade Chronicles 3
 

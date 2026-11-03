@@ -2576,9 +2576,21 @@ static id<MTLTexture> tex_linear(const tex_t *t) {
 // a copied flag would miss writes made after recording. Retired metadata can grow while a pool lives: expiring it earlier requires tracking ownership of all snapshots.
 static pthread_mutex_t g_cpu_tex_mu = PTHREAD_MUTEX_INITIALIZER;
 static nvn_hmap g_cpu_tex = {.klen = 8}, g_cpu_tex_retired = {.klen = 8};   // serial → pool (or (void *)1 for a live test texture without a pool)
+// Pools the GPU writes into (a render target, a shader image or a texture clear recorded in them), and the uncompressed textures tex_cpu_content made CPU-written (serial → pool);
+// all under g_cpu_tex_mu. g_pool_gpuw_new: a pool joined since the submit thread last dropped the CPU-written state of such textures in GPU-written pools (cpu_unc_drop)
+static nvn_hmap g_pool_gpuw = {.klen = 8}, g_cpu_unc = {.klen = 8};
+static _Atomic int g_pool_gpuw_new;
+void mtl_pool_gpu_written(const void *pool) {
+    if (!pool) return;
+    uint64_t k = (uint64_t)(uintptr_t)pool;
+    pthread_mutex_lock(&g_cpu_tex_mu);
+    if (!nvn_hm_get(&g_pool_gpuw, &k)) { nvn_hm_put(&g_pool_gpuw, &k, (void *)1); if (g_cpu_unc.n) atomic_store(&g_pool_gpuw_new, 1); }
+    pthread_mutex_unlock(&g_cpu_tex_mu);
+}
 static void cpu_tex_drop_pool(const void *pool) {
     pthread_mutex_lock(&g_cpu_tex_mu);
-    nvn_hmap *maps[] = {&g_cpu_tex, &g_cpu_tex_retired};
+    uint64_t pk = (uint64_t)(uintptr_t)pool; nvn_hm_del(&g_pool_gpuw, &pk);   // a pool made later at the same address starts with no GPU write
+    nvn_hmap *maps[] = {&g_cpu_tex, &g_cpu_tex_retired, &g_cpu_unc};
     for (unsigned m = 0; m < sizeof maps / sizeof *maps; m++)
         for (uint32_t i = 0; i < maps[m]->cap;)
             if (maps[m]->vals[i] == pool) { uint64_t serial; memcpy(&serial, maps[m]->keys + (size_t)i * 8, 8); nvn_hm_del(maps[m], &serial); }
@@ -2626,21 +2638,57 @@ static int tex_from_storage(const tex_t *t) {
 // it is made CPU-written, uploaded now and re-uploaded when its pages change. A one-time fill (tex_init_fill) is not enough: that GPU texture goes into the sharing table (g_alias),
 // and a new texture object over the same storage with the same description gets it back after the CPU has rewritten the storage. The Great Ace Attorney Chronicles (Japanese release
 // 0100D7F00FB1A000, GitHub issue #568) decodes its court-record pictures (256x256 to 2048x2048 BC1, a CPU_CACHED pool, no flush) into storage it reuses, building a new texture over
-// it for each item: they were black, and once filled once, showed the previous item's picture. Uncompressed textures cannot be told from render targets (NVN has no flag for that,
-// so tex_desc gives them render-target use) and keep the flushed-range fill. An uncompressed 3D texture with none of the flags below is taken from its storage as well: Xenoblade
-// Chronicles 3's particle steering fields (10x10x10 RGBA8 and RGBA16F, flags 0) were GPU textures of zeros, so every send-off particle moved along (-1, -1, -1) and sank into the ground;
+// it for each item: they were black, and once filled once, showed the previous item's picture. An uncompressed texture cannot be told from a render target (NVN has no flag for
+// that, so tex_desc gives it render-target use): a 2D one takes its storage this way only while no render target, shader image or texture clear has been recorded in its pool
+// (mtl_pool_gpu_written); in a pool the GPU writes it keeps the flushed-range fill. Mario Kart World streams its terrain patches (heightmaps R16, RG8, RGBA8, R11G11B10F, written by the
+// CPU with no flush) into a CPU_CACHED pool the GPU never writes: they were zeros, and every patch a flat plane.
+// An uncompressed 3D texture with none of the flags below is taken from its storage as well, in any pool: Xenoblade Chronicles 3's particle steering fields (10x10x10 RGBA8 and RGBA16F, flags 0) were GPU textures of zeros, so every send-off particle moved along (-1, -1, -1) and sank into the ground;
 // the 3D textures it renders into carry IMAGE | COMPRESSIBLE. That is what Xenoblade Chronicles 3, Breath of the Wild and Tears of the Kingdom do, not an NVN rule: a 3D render target
 // with neither flag and data in its storage at first use would still be drawn into (attach gives it render-target use), but a ReadTexels of it, or a second texture object over the
 // same storage, would read the storage rather than what the GPU drew. DM_NVN_STORAGE_FIRST_USE=0 turns this off (to measure it)
 static int tex_cpu_content(const tex_t *t) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_STORAGE_FIRST_USE"); on = !e || atoi(e) != 0; }
-    if (!on || !t->mem || !t->pool || t->has_layout || !(fmt_compressed(t->d.format) || t->d.target == NVN_TEXTURE_TARGET_3D) || t->d.samples > 1 || t->d.target == NVN_TEXTURE_TARGET_BUFFER) return 0;
+    if (!on || !t->mem || !t->pool || t->has_layout || t->d.samples > 1 || t->d.target == NVN_TEXTURE_TARGET_BUFFER) return 0;
     if (t->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL)) return 0;   // the CPU cannot write it (tex_init_fill fills it once) / sparse (tex_from_storage)
     if (t->d.flags & (NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE)) return 0;
+    int unc = !fmt_compressed(t->d.format) && t->d.target != NVN_TEXTURE_TARGET_3D;   // an uncompressed 3D texture is taken in any pool (above)
+    if (unc) {   // an uncompressed 2D one: not a display or video-decode texture, not depth / stencil, and its pool has no GPU write
+        if (t->d.flags & (NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_VIDEO_DECODE)) return 0;
+        uint32_t pf = 0; uint8_t swz[4]; if (!nvn_fmt_to_mtl(t->d.format, &pf, swz) || !pf || (pf >= 250 && pf <= 262)) return 0;   // 250..262: Depth16Unorm … X24_Stencil8
+    }
     if (!mem_any(t->mem, t->L.size)) return 0;
-    static uint64_t n; if (n++ < 4) MLOG("texture written by the CPU before its first use ser=%llu %ux%ux%u format %#x pool flags %#x: uploaded from its storage, re-uploaded when it changes (%llu so far)",
-                                         (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->pool->flags, (unsigned long long)n);
+    if (unc) {   // the pool check and the entry under one lock: a mark between them would leave the texture CPU-written in a pool the GPU writes, with no drop to come
+        uint64_t k = (uint64_t)(uintptr_t)t->pool, s = t->serial;
+        pthread_mutex_lock(&g_cpu_tex_mu);
+        int gw = nvn_hm_get(&g_pool_gpuw, &k) != NULL;
+        if (!gw) nvn_hm_put(&g_cpu_unc, &s, (void *)t->pool);
+        pthread_mutex_unlock(&g_cpu_tex_mu);
+        if (gw) return 0;
+    }
+    static uint64_t n[2]; if (n[unc]++ < 4) MLOG("texture written by the CPU before its first use ser=%llu %ux%ux%u format %#x (%s) pool flags %#x: uploaded from its storage, re-uploaded when it changes (%llu so far)",
+                                         (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, unc ? "uncompressed, pool with no GPU write" : fmt_compressed(t->d.format) ? "block-compressed" : "uncompressed 3D", t->pool->flags, (unsigned long long)n[unc]);
     return 1;
+}
+// Once the GPU writes into a pool (mtl_pool_gpu_written), its uncompressed textures that tex_cpu_content made CPU-written fall back to the rule for a pool the GPU writes: they leave the
+// CPU-written set and keep the host texture they have, as a GPU texture (no more re-uploads from the storage). Submit thread (tex_mtl_)
+static void cpu_unc_drop(void) {
+    if (!atomic_load_explicit(&g_pool_gpuw_new, memory_order_relaxed) || !atomic_exchange(&g_pool_gpuw_new, 0)) return;
+    uint64_t *ser = NULL; uint32_t n = 0, cap = 0;
+    pthread_mutex_lock(&g_cpu_tex_mu);
+    for (uint32_t i = 0; i < g_cpu_unc.cap;) {
+        uint64_t s, k = (uint64_t)(uintptr_t)g_cpu_unc.vals[i];
+        if (!g_cpu_unc.vals[i] || !nvn_hm_get(&g_pool_gpuw, &k)) { i++; continue; }
+        memcpy(&s, g_cpu_unc.keys + (size_t)i * 8, 8);
+        if (n == cap) { uint64_t *ns = realloc(ser, (cap = cap ? cap * 2 : 64) * sizeof *ser); if (!ns) break; ser = ns; }
+        ser[n++] = s; nvn_hm_del(&g_cpu_unc, &s); nvn_hm_del(&g_cpu_tex, &s); nvn_hm_del(&g_cpu_tex_retired, &s);
+    }
+    pthread_mutex_unlock(&g_cpu_tex_mu);
+    for (uint32_t j = 0; j < n; j++) {
+        __unsafe_unretained id o = tex_get(ser[j]);
+        if ([o isKindOfClass:[NvPkg class]]) { NvPkg *pk = o; id<MTLTexture> mt = pk->view ? pk->view : pk->tex; if (mt) tex_put(ser[j], mt); }
+    }
+    if (n) { g_ser_gen++; static int nl; if (nl++ < 8) MLOG("GPU write into a pool: %u uncompressed textures taken from their storage there are GPU textures from now on", n); }
+    free(ser);
 }
 static id<MTLTexture> tex_mtl_(const tex_t *ct);
 static id<MTLTexture> tex_mtl(const tex_t *ct) { AP_B; id<MTLTexture> r = tex_mtl_(ct); AP_E(4); return r; }
@@ -2718,6 +2766,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     tex_t *t = (tex_t *)ct;
     if (!t || !t->serial) return nil;
     if (t->magic != MAGIC('T', 'E', 'X', 0)) { RED_ONCE(70, "texture object no longer valid (magic %#x, first case ser=%llu): no MTLTexture created", t->magic, (unsigned long long)t->serial); return nil; }
+    cpu_unc_drop();
     // t->pool is the game's object, named by a copy of the texture that an ID or a record keeps past its life: nvnMemoryPoolFinalize clears the magic, and the game then frees the memory, which
     // then reads as anything. Everything below reads it: garbage in its vp sent an upload through a page table that was never there (nvn_sparse_protect, FINAL FANTASY RESONANCE, GitHub issue #934)
     if (t->pool && t->pool->magic != MAGIC('P', 'O', 'O', 'L')) {
@@ -7186,6 +7235,7 @@ static void image_prepare(NvProg *pr, unsigned stages) {
             if (tid >= g_ntreg || !g_treg[tid].ok || g_treg[tid].gone) { os_unfair_lock_unlock(&g_rmu); continue; }
             // The actual image binding is image intent too: some engines write a descriptor with RegisterTexture and use its handle in an image slot.
             tex_t image = g_treg[tid].t; image.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
+            mtl_pool_gpu_written(image.pool);   // shader writes into its pool (tex_cpu_content)
             id<MTLTexture> base = tex_mtl(&image); while (base.parentTexture) base = base.parentTexture;
             int upgrade = base && !(base.usage & MTLTextureUsageShaderWrite);
             os_unfair_lock_unlock(&g_rmu);

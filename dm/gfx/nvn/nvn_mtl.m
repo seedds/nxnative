@@ -7488,6 +7488,9 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             int tid = reg < 32 ? (int)(S.img[nvn_stage][reg] & 0xfffff) : 0;
             uint64_t trid; int real;
             id<MTLTexture> t = img_binding(tid, b, &trid, &real);
+            int snapped = 0;   // same-pass feedback through a read-only image: the snapshot fb_prepare registered, matched on the texture img_binding just returned (a level/layer view stays that view)
+            if (real && !b->rw && !b->atom && g_fb_n && g_fb_seq == g_draw_seq && nvn_stage == 1)
+                for (int q = 0; q < g_fb_n; q++) if (t == g_fb_src[q]) { t = g_fb_use[q]; trid = g_fb_rid[q]; snapped = 1; break; }
             if (b->atom && !img_atomic_ok(t, b)) {   // see dummy_img_atomic; an unbound slot's write sink is not atomic-capable either
                 if (real) { id<MTLTexture> base = t.parentTexture ? t.parentTexture : t;
                     RED_ONCE(93, "image atomics on a texture Metal cannot run them on (shader %s stage %d slot %d texture ID %d: Metal format %lu of base format %lu, type %lu for %u, %s): they go to a write sink",
@@ -7499,7 +7502,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             if (passdump()) PD("W %llu st%d reg%d tid=%d %s ser=%llu fmt=%lu %lux%lu view_sl=%lu array=%lu target=%lu shader wants target %u", g_stat_pass, nvn_stage, reg, tid, real ? "real" : "dummy", real && tid < g_ntreg ? g_treg[tid].t.serial : 0ull,
                                   (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)(t.parentTexture ? t.parentRelativeSlice : 0), (unsigned long)t.arrayLength, (unsigned long)t.textureType, (unsigned)b->dtt);
             slots[aid] = trid;
-            USE(t, MTLResourceUsageRead | MTLResourceUsageWrite);
+            USE(t, snapped ? MTLResourceUsageRead : MTLResourceUsageRead | MTLResourceUsageWrite);   // the snapshot is shader-read only (fb_snap): a read-only image declares no write access (below)
         } else if (b->kind == NVN_RB_TBUF) {   // Typed buffer: the buffer texture (target BUFFER) in texture slot r
             int tid = (int)(tex_slot_h(S.tex[nvn_stage], S.img[nvn_stage], reg) & 0xfffff);
             void *tv = NULL; uint64_t trid = tid ? tex_fast_rid(tid, &tv) : 0; __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
@@ -9260,7 +9263,14 @@ void ms_after(void) {
 // visible to texture reads only through nvnCommandBufferBarrier, so a snapshot taken since the game's last barrier (and in this submission) holds everything the game may expect to read; later such
 // draws reuse it without ending the pass, unless the pass also read that attachment directly. Breath of the Wild's G-buffer decals write and sample their own targets, about 460 draws a frame outdoors:
 // a fresh snapshot for each took the Mac's GPU time from about 4 to 28 ms a frame, reuse until a barrier needs about ten a frame (GPU time within the noise of none).
-// DM_NVN_FB_SNAP=0 none, all a fresh snapshot for every draw sampling an attachment of its pass (diagnostic)
+// A read-only image load is the same rule. Xenoblade Chronicles 3's lighting zone mask (15816d836842bfb5, shd_lgt.wishp) reads its own R32Uint attachment as image slot 0 between barriers, to skip zones
+// it has already marked. The translated slot is texture2d<uint> with no access qualifier (MSL's default access::sample; the reflection's rw stays 0, since that type contains neither access::write nor
+// access::read_write), so the snapshot fb_snap makes with shader-read usage is a legal binding and is declared read-only for residency. Read straight from the attachment, an open pass shows the image
+// the end of the previous frame instead of this pass's clear and draws, and each zone bit turns off and on every other frame: the flicker in rendered cutscenes. The texture compared with the attachment,
+// and the one encode_args compares with g_fb_src, is the object img_binding would bind: a RegisterImage view already names one level and layer, and a swizzle-only binding is img_fit's identity view of
+// that same range. A declared pixel class that needs a reinterpreting view is left as is (that view is a different object). An image read of an attachment nothing in the pass has written sets g_fb_rmask,
+// so a later writer starts a new pass, as a texture read does.
+// DM_NVN_FB_SNAP=0 none, all a fresh snapshot for every draw sampling or image-loading an attachment of its pass (diagnostic)
 static int g_fb_mode = -1;   // 0 none, 1 writers with reuse until a barrier, 2 every sampling draw, fresh
 static uint64_t g_fb_bar, g_fb_reuse, g_fb_split;   // game barriers so far (OP_BARRIER with bits); draws that reused a snapshot; passes ended before a write to an attachment an earlier draw read
 static uint64_t g_fb_pass = UINT64_MAX; static uint32_t g_fb_wmask, g_fb_rmask, g_fb_dread;   // the current Metal render pass: color attachments written so far, sampled directly; a draw has read its depth attachment (or could have: bindless)
@@ -9299,14 +9309,29 @@ static void fb_prepare(NvProg *pr) {
         || S.ds.fail_b != NVN_STENCIL_OP_KEEP || S.ds.zfail_b != NVN_STENCIL_OP_KEEP || S.ds.zpass_b != NVN_STENCIL_OP_KEEP)));
     if (g_enc && dsw && g_fb_dread) { g_fb_split++; rp_end(); fb_pass_sync(); }   // the same for its depth and stencil (see rtc_on)
     if (R.rt.depth && (fs->rf.bindless || fs->rf.dyn)) g_fb_dread = 1;
-    for (int i = 0; i < fs->rf.nb && g_fb_n < 4; i++) { const nvn_rbind *b = &fs->rf.b[i]; if (b->kind != NVN_RB_TEX || b->reg >= NTEX) continue;
-        int tid = (int)(tex_slot_h(S.tex[1], S.img[1], b->reg) & 0xfffff); if (!tid) continue;
+    for (int i = 0; i < fs->rf.nb && g_fb_n < 4; i++) { const nvn_rbind *b = &fs->rf.b[i];
+        // Read-only image slots take the same snapshot as texture slots (see the note above g_fb_mode). reg < 32 is encode_args' own bound for S.img
+        int is_img = b->kind == NVN_RB_IMG && !b->rw && !b->atom && b->reg < 32;
+        if (!is_img && (b->kind != NVN_RB_TEX || b->reg >= NTEX)) continue;
+        int tid = is_img ? (int)(S.img[1][b->reg] & 0xfffff) : (int)(tex_slot_h(S.tex[1], S.img[1], b->reg) & 0xfffff); if (!tid) continue;
         os_unfair_lock_lock(&g_rmu); uint64_t ser = tid < g_ntreg && g_treg[tid].ok ? g_treg[tid].t.serial : 0; os_unfair_lock_unlock(&g_rmu);
         if (!ser) continue;
         if (R.rt.depth && R.rt.depth->serial == ser) g_fb_dread = 1;
+        // The image's texture is resolved once, the way encode_args will bind it, so a view of one level or layer is what the checks and g_fb_src use
+        id<MTLTexture> img_t = nil;
+        if (is_img) {
+            os_unfair_lock_lock(&g_rmu);
+            void *rawv = NULL; tex_fast_rid(tid, &rawv); id<MTLTexture> raw = (__bridge id<MTLTexture>)rawv;
+            int reinterpret = raw && b->dpf != NVN_DPF_FLOAT && mtl_pf_dpf(raw.pixelFormat) != b->dpf;   // img_binding makes a class view here (img_fit); that object is not the attachment
+            if (!reinterpret) { uint64_t trid; int real; img_t = img_binding(tid, b, &trid, &real); if (!real) img_t = nil; }
+            os_unfair_lock_unlock(&g_rmu);
+            if (!img_t) continue;
+        }
         for (int k = 0; k < R.rt.n && k < 8 && g_fb_n < 4; k++) { if (!R.rt.color[k] || R.rt.color[k]->serial != ser) continue;
             uint64_t aser; int lv, sl; rt_sub(&R.rt, k, &aser, &lv, &sl);
-            os_unfair_lock_lock(&g_rmu); void *tv = NULL; tex_fast_rid(tid, &tv); id<MTLTexture> t = (__bridge id<MTLTexture>)tv; os_unfair_lock_unlock(&g_rmu);
+            id<MTLTexture> t;
+            if (is_img) t = img_t;
+            else { os_unfair_lock_lock(&g_rmu); void *tv = NULL; tex_fast_rid(tid, &tv); t = (__bridge id<MTLTexture>)tv; os_unfair_lock_unlock(&g_rmu); }
             if (!t) continue;
             int dup = 0; for (int q = 0; q < g_fb_n; q++) dup |= g_fb_src[q] == t; if (dup) continue;
             id<MTLTexture> base = t.parentTexture ? t.parentTexture : t; NSUInteger tl = t.parentTexture ? t.parentRelativeLevel : 0, ts = t.parentTexture ? t.parentRelativeSlice : 0;

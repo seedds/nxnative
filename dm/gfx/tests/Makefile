@@ -253,6 +253,8 @@ t_geometry_primitive_id: t_geometry_primitive_id.m t_geometry.m $(MTL_T_DEP)
 .PHONY: check_t_feedback
 check_t_feedback: t_feedback
 	MTL_DEBUG_LAYER=1 ./t_feedback
+	DM_NVN_FB_SNAP=all MTL_DEBUG_LAYER=1 ./t_feedback --image
+	DM_NVN_FB_SNAP=0 MTL_DEBUG_LAYER=1 ./t_feedback --image
 t_mip_extent: t_mip_extent.m ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_mip_extent.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 .PHONY: check_t_mip_extent

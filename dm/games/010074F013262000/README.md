@@ -179,11 +179,45 @@ closes with A; stand near an enemy to auto-attack and use the left stick to walk
 During a movie, Plus then a held X skips it. The diagnostic watchdog is off when
 `DM_WATCH` is absent; setting it to `0` still enables its default stall threshold.
 
+## Rendering
+
+**Cutscene zone flicker (GitHub issue #1009, resolved).** Reported on an M4 Max
+in Events Theater scenes 1–3. The lighting-zone shader `15816d836842bfb5`
+(`shd_lgt.wishp`, bound as `15816d836842bfb5_b`) reads its own R32Uint colour
+attachment as image slot 0 between barriers, to skip zones it has already
+marked. The translated slot is `texture2d<uint>` with no access qualifier. An
+open Metal pass returned the attachment from the end of the previous frame, so
+each zone bit inverted on alternate frames. `fb_prepare` now snapshots a
+read-only image of a colour attachment the same way it snapshots a texture
+sample ([A read-only image load of a colour attachment](../../../docs/reference/rendering.md#a-read-only-image-load-of-a-colour-attachment)).
+
+Measured on an Apple M2 (8 GB) with two hosts that differ only by this change,
+built at `5474c6f` (shader chain `d1043b780a74`, the chain of the libraries
+built for this game), 48 consecutive distinct presents per burst. On chapter 1's
+second scene, the battle with Colony Sigma (the thumbnail to the right of the
+Prologue), the host before the change reverses every frame: one stretch
+alternates about 38.3 and 40.6 (sign-flip fraction 1.00, even/odd gap 2.24,
+within-group spread 0.52), another about 64 and 58 after a cut; 8 of 10 bursts
+have a flip fraction of 0.83–1.00. The host with the change holds one level:
+its highest flip fraction across 11 bursts is 0.28, and the stretch near 40
+steps by 0.12 on average. A milestone in its log names `15816d836842bfb5_b`
+slot 0 on the snapshot path. The chapter 1 prologue does not show the
+two-level step on either host.
+
+| run | frames, bursts left out | frame p50 | GPU p50 | fps |
+|---|---|---|---|---|
+| before | 13040–15307 | 53.2 ms | 50.4 ms | 18.3 |
+| after | 5521–7913 | 55.2 ms | 53.0 ms | 17.2 |
+
+After CONTINUE the host with the change walks the first save's field (frame
+p50 51.7 ms, GPU p50 49.9 ms, 19.1 fps).
+
 ## Found on this game
 
 - [Monolith ARH1, XBC1 and HCPS/SLCT shader containers](../../../docs/reference/shaders.md#monolith-arh1-xbc1-and-hcpsslct-shader-containers).
 - [Subgroup operations rewritten for a one-lane subgroup](../../../docs/reference/shaders.md#subgroup-operations-rewritten-for-a-one-lane-subgroup).
 - [IMAGE usage does not split texture storage](../../../docs/reference/rendering.md#image-usage-does-not-split-texture-storage).
+- [A read-only image load of a colour attachment](../../../docs/reference/rendering.md#a-read-only-image-load-of-a-colour-attachment).
 - [Rasterizer discard preserves vertex storage writes](../../../docs/reference/rendering.md#rasterizer-discard-preserves-vertex-storage-writes).
 - [Primitive barriers order vertex storage writes](../../../docs/reference/rendering.md#primitive-barriers-order-vertex-storage-writes).
 - [Transform feedback captured by a vertex entry point](../../../docs/reference/rendering.md#transform-feedback-captured-by-a-vertex-entry-point): interleaved outputs and geometry capture.

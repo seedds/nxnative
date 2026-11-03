@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'dm/tools'))
 import romfs_image
 try: from compression import zstd
 except ImportError:
-    try: from backports import zstd
+    try: from backports import zstd   # pyright: ignore[reportMissingImports]  # an optional package, only Python before 3.14 needs it
     except ImportError: zstd = None
 
 
@@ -234,7 +234,7 @@ def pack(n, d, img, say=print):   # the RomFS folder d of the container → img,
     if romfs_image.reusable(dst, digest): return len(ents)
     say(f'packing {n.path.name} folder {d} → {img}')
     part = dst + '.part'
-    try: romfs_image.publish(romfs_image.write(ents, dst, lambda i, out: n.copy(i, out)), dst, digest)
+    try: romfs_image.publish(romfs_image.write(ents, dst, n.copy), dst, digest)
     except BaseException:
         Path(part).unlink(missing_ok=True); raise
     say(f'  {len(ents):,} entries, {img.stat().st_size / 2**30:.2f} GB')

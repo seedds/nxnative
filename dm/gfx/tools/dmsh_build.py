@@ -8,7 +8,7 @@
 # Build output: <key>_b.metallib, <key>_b.json (replay reflection, including drv_reads, the runtime read offsets into driver segments c0 / c2), <key>_b.metal (MSL)
 # Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately)
-import inspect, os, re, sys, json, struct, hashlib, shutil, subprocess, tempfile, collections, threading, concurrent.futures as cf
+import inspect, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, collections, threading, concurrent.futures as cf
 import dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
@@ -185,9 +185,12 @@ def mac_compile(msl, air, lib):   # same interface as ios_metal.compile
 TEX_BASE, IMG_BASE, IMG_SLOTS, SEPTEX_BASE, SEPTEX_SLOT0, SAMP_BASE = abi.C2_TEX, abi.C2_IMG, abi.C2_IMG_SLOTS, abi.C2_SEPTEX, abi.SEPTEX_SLOT0, abi.C2_SAMP
 SSBO = {'vs': abi.C0_SSBO_VS, 'cs': abi.C0_SSBO_CS, 'gs': abi.C0_SSBO_GS, 'ps': abi.C0_SSBO_PS}
 
-def records(d):
-    r = [m.start() for m in re.finditer(b'BTCDBTCD', d)]
-    return [d[x:(r[k + 1] if k + 1 < len(r) else len(d))] for k, x in enumerate(r)]
+def record_index(path):   # → (an open descriptor, the offsets of the package's records and its end): record k is bytes offsets[k]..offsets[k + 1]
+    # Scanned through a read-only mapping that is closed again, so no package stays in this process. Pokopia's ps_rdb.bin (4.25 GB) read and cut into its 105,118
+    # records left the process at 8.7 GB, and each fork (every spirv-cross and Metal compile) then took 75 ms instead of 3 with the GIL held: one shader worker at a time (GitHub issue #1036)
+    fd = os.open(path, os.O_RDONLY); n = os.fstat(fd).st_size
+    if not n: return fd, [0]
+    with mmap.mmap(fd, n, access=mmap.ACCESS_READ) as m: return fd, [x.start() for x in re.finditer(b'BTCDBTCD', m)] + [n]
 
 def clone(src, dst):   # APFS copy-on-write, else a plain copy; the clonefile call, not a cp: a fork of this large process costs about 6 ms
     os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -1298,23 +1301,23 @@ for _spec in [cache_root + ('=' + os.path.dirname(IOSOUT) if IOSOUT else '')] + 
             for _ln in MTL.fill(os.path.join(_mac, _b), os.path.join(_ios, _b) if _ios else None, targets=TARGETS): print(_ln, flush=True)
 packs, jobs, c1s = {}, {}, {}
 digests, rule_fps, cache_reasons, cache_hits = {}, {}, {}, set()
-def rec_of(key):   # → (package name, the shader's record)
+def rec_of(key):   # → (package name, the shader's record), read from the package each time and not kept (see record_index)
     name, k = loc[key]
-    if name not in packs: packs[name] = records(open(os.path.join(dm_dir, name), 'rb').read())
-    return name, packs[name][k]
-recs = {}
-for key in keys: recs[key] = rec_of(key); digests[key] = shader_key(key, *recs[key])
+    if name not in packs: packs[name] = record_index(os.path.join(dm_dir, name))
+    fd, offs = packs[name]
+    return name, os.pread(fd, offs[k + 1] - offs[k], offs[k])
+for key in keys: digests[key] = shader_key(key, *rec_of(key))
 def plain_digest(k):   # a paired pixel shader's key, also when it is not built this time
     if k in digests: return digests[k]
     return shader_key(k, *rec_of(k)) if k in loc else 'missing'
 for key in keys:
     if PAIRS.get(key): digests[key] = pair_keyed(digests[key], [plain_digest(p) for p in sorted(PAIRS[key])])
 for key in keys:
-    name, rec = recs[key]
+    name = loc[key][0]
     rule_fps[key] = hashlib.sha256(shader_rule_source(name) + ','.join(sorted(PAIRS.get(key, ()))).encode()).hexdigest()   # the vertex shader must be rebuilt when its pairs change (vs_pad)
     hit, cache_reasons[key] = cache_lookup(key, digests[key], rule_fps[key], CODE_FP)
     if hit: cache_hits.add(key)
-    else: jobs[key], c1s[key] = job_for(key, name, rec, w)
+    else: jobs[key], c1s[key] = job_for(key, name, rec_of(key)[1], w)
 misses = [key for key in keys if key not in cache_hits]
 chunks = [misses[i::NJ] for i in range(NJ)]
 def xl(ch):

@@ -505,10 +505,10 @@ Most service calls can be found before they crash, before the first boot or the 
 
 ### vi layer and display calls without vi service objects
 
-- **Symptom:** SIGSEGV in `vi::SetLayerCrop`.
+- **Symptom:** SIGSEGV in `vi::SetLayerCrop` or `vi::OpenDisplay` when opening a display by name.
 - **Cause:** the SDK's version dereferences vi service objects the host never made.
-- **Fix:** `SetLayerCrop` only records the crop for the present ([The NVN present crops by the vi layer crop](rendering.md#the-nvn-present-crops-by-the-vi-layer-crop)); `DestroyLayer`, `CloseDisplay` and `vi::Finalize` are host no-ops. Also hooked: `vi::GetIndirectImageMemoryRequirement` (asked by the inline keyboard's `GetImageMemoryRequirement`, [The inline keyboard as a resident library applet](#the-inline-keyboard-as-a-resident-library-applet)); `vi::ListDisplays` (one display, "Default"; the game lists 10 into a stack buffer and does not read them, `main+0x808f08`), found from the import list before it was met.
-- **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) (SDK 8.2.0); [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10: `vi::GetIndirectImageMemoryRequirement`); [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: `vi::ListDisplays`).
+- **Fix:** `SetLayerCrop` only records the crop for the present ([The NVN present crops by the vi layer crop](rendering.md#the-nvn-present-crops-by-the-vi-layer-crop)); `DestroyLayer`, `CloseDisplay` and `vi::Finalize` are host no-ops. Also hooked: `vi::GetIndirectImageMemoryRequirement` (asked by the inline keyboard's `GetImageMemoryRequirement`, [The inline keyboard as a resident library applet](#the-inline-keyboard-as-a-resident-library-applet)); `vi::ListDisplays` (one display, "Default"; the game lists 10 into a stack buffer and does not read them, `main+0x808f08`), found from the import list before it was met. `vi::OpenDisplay("Default")` returns the same static display as `OpenDefaultDisplay`, so applications can open the name returned by `ListDisplays` without entering the SDK's absent service client.
+- **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) (SDK 8.2.0); [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10: `vi::GetIndirectImageMemoryRequirement`); [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: `vi::ListDisplays`); Alien: Isolation (SDK 8.2.0: `vi::OpenDisplay`).
 
 ### Layer frame numbers
 

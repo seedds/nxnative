@@ -4,7 +4,7 @@ Play your own Nintendo Switch games natively on iPhone and iPad. Bring your game
 
 It is not an emulator: the game's own code runs directly on the Apple chip, with Switch graphics rebuilt on Metal. Nothing from any game is in this repository, and the project is not affiliated with Nintendo or any game publisher.
 
-Switch 2 games have started too: [Donkey Kong Bananza](dm/games/040074A01BF12000/README.md), [Splatoon Raiders](dm/games/0400380020056000/README.md), [Fire Emblem Fortune's Weave](dm/games/04007EF01F8AE000/README.md), [Pokémon Pokopia](dm/games/0400A3A01EE4C000/README.md) and [Hyrule Warriors: Age of Imprisonment](dm/games/04003F40232DE000/README.md) play on the Mac, packed from a dump of the game or a [NUP](#switch-2-games) container; iPhone and iPad are untested.
+Switch 2 games have started too: [Donkey Kong Bananza](dm/games/040074A01BF12000/README.md), [Splatoon Raiders](dm/games/0400380020056000/README.md), [Fire Emblem Fortune's Weave](dm/games/04007EF01F8AE000/README.md), [Pokémon Pokopia](dm/games/0400A3A01EE4C000/README.md) and [Hyrule Warriors: Age of Imprisonment](dm/games/04003F40232DE000/README.md) play on the Mac, packed from one [`.nup` file](#switch-2-games) or a dump of the game; iPhone and iPad are untested.
 
 ## Acknowledgements
 
@@ -20,7 +20,7 @@ This project is built on other people's work ([licenses](dm/third_party/README.m
 
 ## How to play
 
-Switch 2 games are built from a folder of their files, not from NSPs, and are tested on the Mac only: see [Switch 2 games](#switch-2-games).
+Switch 2 games are built from one `.nup` file or a folder of their files, not from NSPs, and are tested on the Mac only: see [Switch 2 games](#switch-2-games).
 
 ### With a Mac app
 
@@ -75,7 +75,17 @@ Controls, saves and settings: [Playing](docs/playing.md).
 
 ### Switch 2 games
 
-A Switch 2 game is built from a folder of its files, not from NSPs, and needs no `prod.keys`. The script expects this folder (`updates` and `dlc` are optional):
+A Switch 2 game is built from one [NUP](https://github.com/a55uka/nup) container (a `.nup` file) or a folder of its files, not from NSPs. Neither needs `prod.keys`, and both work only for a game this project already has a profile for, such as the Switch 2 games in the [gallery](#games). You get a Mac app; iPhone and iPad are untested.
+
+**From a `.nup` file**, which holds the base game, its updates and DLC in one file. Give the file, or a folder that holds it:
+
+```
+python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nup --platform mac-app
+```
+
+[Hyrule Warriors: Age of Imprisonment](dm/games/04003F40232DE000/README.md) is played this way: its 47 GB NUP unpacks in under five minutes. A NUP that carries the game's control data (its NACP) and icon gives the app the game's name and icon; otherwise the name comes from the game's profile and the app has no icon.
+
+**From a folder of files**. The script expects this layout (`updates` and `dlc` are optional):
 
 ```
 ~/Games/DonkeyKongBananza/
@@ -90,13 +100,7 @@ A Switch 2 game is built from a folder of its files, not from NSPs, and needs no
 python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza --platform mac-app
 ```
 
-You get a Mac app, with no icon because the folder holds none. iPhone and iPad are untested.
-
-The same files packed into one [NUP](https://github.com/a55uka/nup) container (`nup pack ~/Games/DonkeyKongBananza game.nup`) build the same way: give the `.nup` file, or a folder that holds it. A NUP that carries the game's control data (its NACP) and icon gives the app the game's name and icon; otherwise the name comes from the game's profile, as for a folder of files.
-
-```
-python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nup --platform mac-app
-```
+The app has no icon, because the folder holds none. To turn such a folder into a NUP: `nup pack ~/Games/DonkeyKongBananza game.nup`.
 
 ## Games
 

@@ -158,12 +158,6 @@ static void image_view_case(NvProg *pr) {
 // A clamp at the attachment, or one spanning levels, must still read the pre-overwrite content.
 static void mip_chain_case(id<MTLLibrary> lib) {
     const int tid = 671, sid = 672;
-    tex_t chain, output;
-    static id<MTLTexture> original;
-    original = target_format(&chain, 99800, NVN_FORMAT_RGBA8, 3);
-    id<MTLTexture> destination = target(&output, 99801);
-    id<MTLBuffer> result = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared]; res_add(result);
-    mtl_reg_tex(tid, &chain, NULL);
     NvProg *pr = [NvProg new]; NvShader *fs = [NvShader new]; pr->sh[1] = fs;
     fs->stage = 1; strcpy(fs->key, "1122334455667788"); fs->fn = [lib newFunctionWithName:@"fmp"];
     fs->ae = [fs->fn newArgumentEncoderWithBufferIndex:0]; fs->arg_len = fs->ae.encodedLength;
@@ -174,6 +168,12 @@ static void mip_chain_case(id<MTLLibrary> lib) {
     pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
     NSError *error = nil; id<MTLRenderPipelineState> pipeline = [g_dev newRenderPipelineStateWithDescriptor:pd error:&error];
     CHECK(pipeline != nil, "registered-sampler feedback consumer compiles"); if (!pipeline) return;
+    tex_t chain, output;
+    static id<MTLTexture> original;
+    original = target_format(&chain, 99800, NVN_FORMAT_RGBA8, 3);
+    id<MTLTexture> destination = target(&output, 99801);
+    id<MTLBuffer> result = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared]; res_add(result);
+    mtl_reg_tex(tid, &chain, NULL);
     const uint8_t colors[3][4] = {{255,0,0,255}, {0,255,0,255}, {0,0,255,255}};
     struct { int level; float lo, hi; int direct; uint8_t want[4]; const char *label; } c[] = {
         {1, 2, 2, 1, {0,0,255,255}, "pinned higher level reads blue without a snapshot"},
@@ -294,15 +294,12 @@ static void tile_case(const char *dir) {
     gd.vertexFunction = [gl newFunctionWithName:@"v"]; gd.fragmentFunction = [gl newFunctionWithName:@"f"]; gd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
     id<MTLRenderPipelineState> green = gl ? [g_dev newRenderPipelineStateWithDescriptor:gd error:&e] : nil;
     CHECK(green != nil, "the green pipeline compiles");
+    tex_t ranged; id<MTLTexture> chain = target_format(&ranged, 99796, NVN_FORMAT_RGBA8, 2);
+    if (!chain) return;
     tex_t source; id<MTLTexture> attachment = target(&source, 99795);
-    mtl_reg_tex(tid, &source, NULL);
+    mtl_reg_tex(tid, &source, NULL); mtl_reg_tex(661, &ranged, NULL);
     id<MTLBuffer> zero = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared]; res_add(zero);   // the variant's argument buffer: the tile read leaves its texture and sampler unread
     id<MTLBuffer> result = [g_dev newBufferWithLength:3072 options:MTLResourceStorageModeShared]; res_add(result);
-    tex_t ranged = {.magic=MAGIC('T','E','X',0), .serial=99796, .d=source.d}; ranged.d.levels = 2;
-    MTLTextureDescriptor *rd = tex_desc(&ranged, 0); rd.storageMode = MTLStorageModeShared;
-    id<MTLTexture> chain = [g_dev newTextureWithDescriptor:rd];
-    CHECK(chain != nil, "tile fallback mip chain allocated"); if (!chain) { mtl_tex_release(&source); return; }
-    res_add(chain); mtl_tex_init(&ranged); serial_put(ranged.serial, chain); mtl_reg_tex(661, &ranged, NULL);
     const uint8_t green_mip[] = {0,255,0,255, 0,255,0,255, 0,255,0,255, 0,255,0,255};
     [chain replaceRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:1 withBytes:green_mip bytesPerRow:8];
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();

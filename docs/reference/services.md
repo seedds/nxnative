@@ -310,6 +310,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md): the gyro pointer on the inner display, reported by klave7. Not yet tested on a device: on the Duo's inner and outer displays and on a phone with one display running iOS 27, `DM_MOTION_LOG=1` should read acc `0 0 -1` with the phone flat and still.
 - **Open:** while the scene is not full screen (Split View on the inner display) Core Motion falls back to the hardware frame without a flag that says so, and the samples are still taken as the view's frame.
 
+### Upside-down portrait on iPhone Duo's inner display
+
+- **Symptom:** with the [portrait layout](../settings.md#portrait-layout) on, the picture stayed the wrong way up when the Duo was turned over on its inner display. Turning the front end's view on `UIDeviceOrientationPortraitUpsideDown` never fired there, and when it did fire (turning from upside down into landscape) the picture spun a whole turn as the system turned too.
+- **Cause:** iOS never turns an iPhone's interface upside down, whatever the app's supported orientations. On the inner display the device orientation is in the hardware frame, a quarter turn from the picture, as for the motion above: the device reports landscape left with the picture upright and landscape right with it upside down, and portrait and portrait upside down are the two landscapes, which the system turns to itself.
+- **Fix:** `front_ios.m` puts the game view, the pad and the counter on a stage view and turns it half a turn itself. The device orientation at a turn into portrait is taken as upright, per display (`DmPortraitUp.<native size>` in the app's preferences), and its opposite turns the stage. Held in landscape, the opposite asks for portrait with `requestGeometryUpdate` after 0.35 s. Across a system rotation that changes the stage's turn, the stage spins the other way along with it (`viewWillTransitionToSize`, the coordinator's `targetTransform`). Core Motion's `deviceMotionBody` does not follow a view's transform (gravity read y +0.97 in the pad view's frame with the stage turned and the phone upside down), so the phone's motion is turned half a turn with the stage.
+- **Found on:** [Rhythm Heaven Groove](../../dm/games/0100D9F01D474000/README.md) on an iPhone Duo (iOS 27.2), from a log of the device and interface orientations and of gravity in the pad view's frame through every turn.
+- **Open:** the gyro in a game that reads it, the outer display and a TV are not checked with the stage.
+
 ### Switch Pro Controller advertises motion but sends zeroes
 
 - **Symptom:** a Pro Controller's buttons work on the Mac, but its gyro pointer never moves; `GCMotion` callbacks arrive with acceleration and rotation all zero.

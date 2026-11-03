@@ -84,7 +84,7 @@ A light tap from the phone when you press an on-screen button.
 
 ### Portrait layout
 
-On the iPhone. Off by default: the game is in landscape, with the on-screen controls over the picture. On, the game also turns with the phone: held upright, the picture fills the width of the screen's top half and the on-screen controls take the bottom half, as on a Nintendo 3DS (an iPhone Duo can be half folded like one). Only touches on the picture reach the game's touch screen there. The controls sit a little in from the sides and the bottom; `DM_PORTRAIT_INSET=<percent>` in `Documents/env.txt` moves them (`0` to the edges, up to `25`; default `6`). Turned back to landscape, it is laid out as before. The settings screen itself stays in landscape.
+On the iPhone. Off by default: the game is in landscape, with the on-screen controls over the picture. On, the game also turns with the phone: held upright, the picture fills the width of the screen's top half and the on-screen controls take the bottom half, as on a Nintendo 3DS (an iPhone Duo can be half folded like one). Only touches on the picture reach the game's touch screen there. The controls sit a little in from the sides and the bottom; `DM_PORTRAIT_INSET=<percent>` in `Documents/env.txt` moves them (`0` to the edges, up to `25`; default `6`). Held upside down, the app turns the picture and the controls itself, since iOS does not turn an iPhone's screen that way; the first time on each screen it learns which way is up when the game turns upright. With a TV connected the picture is on the TV and the controls take the whole phone screen. Turned back to landscape, it is laid out as before. The settings screen itself stays in landscape.
 
 ### Game rumble
 

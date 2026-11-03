@@ -82,6 +82,7 @@ static void motion_start(void) {
 // Before that they come in the hardware frame, turned here by the interface orientation, which holds only where the hardware frame is the screen's portrait frame: not on iPhone
 // Duo's inner display, whose picture is a quarter turn from it (up / down and left / right swapped, GitHub issue #569). Open: while the scene is not full screen (Split View on the
 // inner display) Core Motion falls back to the hardware frame without saying so, and the samples are then taken as the view's frame
+int front_ios_flipped(void);   // front_ios.m: the portrait layout is turned upside down by the front end, not by the system
 static _Atomic int g_iface_orient = 3;      // UIInterfaceOrientation, updated on layout
 static BOOL g_motion_body;                  // samples in the body's frame (iOS 27+)
 static void phone_motion_start(UIView *body) {
@@ -99,6 +100,7 @@ static void phone_motion_start(UIView *body) {
         float a[3] = {(float)(d.gravity.x + d.userAcceleration.x), (float)(d.gravity.y + d.userAcceleration.y), (float)(d.gravity.z + d.userAcceleration.z)};
         float w[3] = {(float)d.rotationRate.x, (float)d.rotationRate.y, (float)d.rotationRate.z}, as[3], ws[3];
         int o = g_motion_body ? 1 : atomic_load(&g_iface_orient);   // the body's frame is already the picture's: the portrait map, which leaves it as it is
+        if (g_motion_body && front_ios_flipped()) o = 2;   // except while the front end has turned the stage over: Core Motion does not follow a view's transform, so a half turn
         motion_phone_to_switch(o, a, as); motion_phone_to_switch(o, w, ws);
         dm_motion_set_switch(0, as, ws);
     }];
@@ -129,6 +131,7 @@ static const int k_btns[] = {B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_LS, B_RS};
 static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
 int dm_opmode(void);   // hle_oe.c: 0 = handheld
 CGRect front_ios_picture(CGRect b, UIEdgeInsets s, CGRect *pad);   // front_ios.m: the picture, and the controls' area in the portrait layout (CGRectNull: over the picture)
+UIEdgeInsets front_ios_insets(void);   // front_ios.m: the screen's safe-area insets in this view's coordinates (its stage may be turned upside down)
 
 @interface DmGamepad : UIView
 @end
@@ -228,7 +231,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
 
 // ---- Layout (points; computed inside the safe area of the controls' area) ----
 - (void)place {   // the picture and the controls' area: the whole view, or in the portrait layout the bottom half (front_ios.m front_ios_picture), with the controls laid out in it as on a landscape screen
-    CGRect pad; _pic = front_ios_picture(self.bounds, self.safeAreaInsets, &pad);
+    CGRect pad; _pic = front_ios_picture(self.bounds, front_ios_insets(), &pad);
     _split = !CGRectIsNull(pad); _area = _split ? pad : self.bounds;
     if (_split) {   // the controls come in from the sides and the bottom by DM_PORTRAIT_INSET percent of the area (6 by default), to sit under the thumbs of a phone held upright
         static CGFloat k = -1;
@@ -237,7 +240,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         _area = CGRectMake(CGRectGetMinX(pad) + mx, CGRectGetMinY(pad), pad.size.width - 2 * mx, pad.size.height - my);
     }
 }
-- (UIEdgeInsets)areaInsets { UIEdgeInsets i = self.safeAreaInsets; if (_split) i.top = 0; return i; }   // the controls' area starts below the picture: the top inset is not in it
+- (UIEdgeInsets)areaInsets { UIEdgeInsets i = front_ios_insets(); if (_split) i.top = 0; return i; }   // the controls' area starts below the picture: the top inset is not in it
 - (CGRect)safe { return UIEdgeInsetsInsetRect(_area, self.areaInsets); }
 - (CGRect)corner { UIEdgeInsets i = self.areaInsets; i.left *= K_CORNER_IN; i.right *= K_CORNER_IN; return UIEdgeInsetsInsetRect(_area, i); }   // the rectangle the bottom-corner controls use
 - (CGFloat)u {   // 1 = 430 points tall (iPhone Pro Max landscape); the portrait layout's area is narrower for its height, so its width (470 u is what the 3D layout needs across) limits it too
@@ -434,7 +437,8 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    UIWindowScene *ws = self.window.windowScene; if (ws) atomic_store(&g_iface_orient, (int)ws.effectiveGeometry.interfaceOrientation);
+    UIWindowScene *ws = self.window.windowScene;
+    if (ws) { int o = (int)ws.effectiveGeometry.interfaceOrientation; atomic_store(&g_iface_orient, o == 1 && front_ios_flipped() ? 2 : o); }   // before iOS 27: the gyro follows the picture, turned by the front end too
     [self place];
     CGFloat u = self.u;
     [CATransaction begin]; [CATransaction setDisableActions:YES];

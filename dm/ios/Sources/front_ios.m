@@ -32,6 +32,23 @@ static UILabel *front_ios_fps_label(void);
 // The app turns to portrait only once the game starts (main.m asks front_ios_orientations), so the settings screen stays in landscape
 static BOOL g_portrait;
 static BOOL g_on_tv;   // a TV shows the picture (tv_attach): no portrait split on the phone
+// Upside down: the system never turns an iPhone's interface upside down, iPhone Duo's inner display included, so in the portrait layout the front end turns its own stage (the
+// game view, the pad, the counter) half a turn instead. Which device orientation is upside down depends on the display: on the Duo's inner display the hardware frame is a quarter
+// turn from the picture (issue #569), and the device reports landscape left with the picture upright and landscape right with it upside down. So the device orientation at a turn
+// into portrait is taken as upright (kept per display in the app's preferences), and its opposite turns the stage; held in landscape, that opposite asks for portrait first
+static BOOL g_flip, g_want_flip;   // the stage is turned; portrait was asked for from landscape, and the stage turns once the interface is in portrait
+static UIDeviceOrientation g_dev_up;   // the device orientation of an upright portrait picture on this display
+int front_ios_flipped(void) { return g_flip; }
+static NSString *dev_up_key(CGSize native) { return [NSString stringWithFormat:@"DmPortraitUp.%.0fx%.0f", native.width, native.height]; }
+static UIDeviceOrientation dev_opposite(UIDeviceOrientation d) {
+    switch (d) {
+        case UIDeviceOrientationPortrait: return UIDeviceOrientationPortraitUpsideDown;
+        case UIDeviceOrientationPortraitUpsideDown: return UIDeviceOrientationPortrait;
+        case UIDeviceOrientationLandscapeLeft: return UIDeviceOrientationLandscapeRight;
+        case UIDeviceOrientationLandscapeRight: return UIDeviceOrientationLandscapeLeft;
+        default: return UIDeviceOrientationUnknown;
+    }
+}
 UIInterfaceOrientationMask front_ios_orientations(void) { return g_portrait ? UIInterfaceOrientationMaskAllButUpsideDown : UIInterfaceOrientationMaskLandscape; }
 
 @interface DmGameView : UIView
@@ -82,15 +99,21 @@ CGRect front_ios_picture(CGRect b, UIEdgeInsets s, CGRect *pad) {
 static void tv_attach(void);
 
 @interface DmRootVC : UIViewController
+@property (nonatomic, strong) UIView *stage;   // holds the game view, the pad and the counter: turned half a turn when the portrait layout is upside down
 @property (nonatomic, strong) DmGameView *game;
 @property (nonatomic, strong) UIView *pad;
 @property (nonatomic, strong) UILabel *fps;
 @property (nonatomic) BOOL launched;
 @property (nonatomic, strong) id tv;   // the TV scene accessory's registration (iOS 27)
 - (void)startGame;
+- (void)deviceTurned;
 @end
 static DmRootVC *g_root;
 static void launcher_done(void) { [g_root startGame]; }
+UIEdgeInsets front_ios_insets(void) {   // the safe-area insets in the stage's coordinates (DmGamepad.m lays out in them): the screen's, top and bottom, left and right swapped while it is turned
+    UIEdgeInsets i = g_root.view.safeAreaInsets;
+    return g_flip ? UIEdgeInsetsMake(i.bottom, i.right, i.top, i.left) : i;
+}
 @implementation DmRootVC
 - (void)showHint:(NSString *)text {   // why the game cannot start, centered over the black screen
     UILabel *lb = [[UILabel alloc] initWithFrame:CGRectInset(self.view.bounds, 40, 40)];
@@ -123,20 +146,24 @@ static void launcher_done(void) { [g_root startGame]; }
     if (g_portrait) {
         LOG("front end: portrait layout on (DM_PORTRAIT=1): held upright, the picture takes the top half and the controls the bottom half");
         if (@available(iOS 16.0, *)) [self setNeedsUpdateOfSupportedInterfaceOrientations];
+        [UIDevice.currentDevice beginGeneratingDeviceOrientationNotifications];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(deviceTurned) name:UIDeviceOrientationDidChangeNotification object:nil];
     }
     front_hud_env();   // before the process's first Metal device, which reads MTL_HUD_ENABLED (an env file's DM_METAL_HUD sets it in main.m already; GitHub issue #840)
     const char *dev = front_ios_device_check();   // that first device: a GPU without BC textures is refused here, not at launch, so the launcher's HUD switch counts
     if (dev) { [self showHint:[NSString stringWithFormat:@"This device is not supported.\n%s", dev]]; return; }   // the host does not start
     self.game =[[DmGameView alloc] initWithFrame:self.view.bounds];
-    [self.view addSubview:self.game];
+    self.stage = [[UIView alloc] initWithFrame:self.view.bounds]; self.stage.backgroundColor = UIColor.blackColor;
+    [self.view addSubview:self.stage];
+    [self.stage addSubview:self.game];
     g_layer = (CAMetalLayer *)self.game.layer;
     if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) { g_layer.developerHUDProperties = @{@"mode": @"default"}; LOG("front end: Metal performance HUD on (DM_METAL_HUD)"); }   // Apple's HUD over the game: frame rate, frame and GPU time, memory
     dm_haptics_apple_init();
     self.pad = dm_gamepad_view(self.view.bounds);
     self.pad.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [self.view addSubview:self.pad];
+    [self.stage addSubview:self.pad];
     self.fps = front_ios_fps_label();   // above the pad, which hides while a controller is connected
-    if (self.fps) [self.view addSubview:self.fps];
+    if (self.fps) [self.stage addSubview:self.fps];
     [self.view setNeedsLayout]; [self.view layoutIfNeeded];
     UIApplication.sharedApplication.idleTimerDisabled = YES;
     tv_attach();   // a TV connected while the launcher showed
@@ -145,13 +172,78 @@ static void launcher_done(void) { [g_root startGame]; }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     CGRect b = self.view.bounds; if (!self.game) return;
-    CGRect pad, pic = front_ios_picture(b, self.view.safeAreaInsets, &pad);
-    if (self.game.superview == self.view) self.game.frame = pic;   // on a TV the TV's view lays it out
+    UIInterfaceOrientation io = self.view.window.windowScene.effectiveGeometry.interfaceOrientation; static UIInterfaceOrientation last_io;
+    static CGSize screen; CGSize ns = self.view.window.screen.nativeBounds.size;
+    if (!CGSizeEqualToSize(screen, ns)) {   // another display (the Duo folded or unfolded): its upright device orientation, as learnt there before
+        screen = ns; last_io = UIInterfaceOrientationUnknown;
+        UIDeviceOrientation u = (UIDeviceOrientation)[NSUserDefaults.standardUserDefaults integerForKey:dev_up_key(ns)];
+        g_dev_up = dev_opposite(u) != UIDeviceOrientationUnknown ? u : UIDeviceOrientationUnknown;
+        if (g_flip || g_want_flip) { g_flip = g_want_flip = NO; LOG("front end: portrait layout upright again (another display)"); }
+    }
+    if (io == UIInterfaceOrientationPortrait && last_io != UIInterfaceOrientationPortrait) {
+        if (g_want_flip) { g_flip = YES; g_want_flip = NO; LOG("front end: portrait layout turned upside down (from landscape)"); }   // the portrait asked for while upside down
+        else {   // turned into portrait by the system: the device orientation now is the upright one
+            UIDeviceOrientation d = UIDevice.currentDevice.orientation;
+            if (dev_opposite(d) != UIDeviceOrientationUnknown && d != g_dev_up) {
+                g_dev_up = d; [NSUserDefaults.standardUserDefaults setInteger:d forKey:dev_up_key(ns)]; LOG("front end: portrait layout: upright is device orientation %d on this display", (int)d);
+            }
+        }
+    }
+    last_io = io;
+    if (io != UIInterfaceOrientationPortrait && g_flip) { g_flip = NO; LOG("front end: portrait layout upright again (the interface left portrait)"); }   // turned only while the interface is in portrait
+    self.stage.bounds = b; self.stage.center = CGPointMake(CGRectGetMidX(b), CGRectGetMidY(b));
+    CGAffineTransform tf = g_flip ? CGAffineTransformMakeRotation(M_PI) : CGAffineTransformIdentity;
+    if (!CGAffineTransformEqualToTransform(self.stage.transform, tf)) [UIView performWithoutAnimation:^{ self.stage.transform = tf; }];   // turns are shown by spinStageFrom:
+    UIEdgeInsets si = front_ios_insets();
+    CGRect pad, pic = front_ios_picture(b, si, &pad);
+    if (self.game.superview == self.stage) self.game.frame = pic;   // on a TV the TV's view lays it out
     if (self.fps && !CGRectIsNull(pad)) self.fps.frame = CGRectMake(CGRectGetMinX(pic) + 8, CGRectGetMinY(pic) + 8, 64, 22);   // portrait layout: the picture's top left corner
     else if (self.fps) {   // the top row's free stretch: right of DmGamepad.m's L3 key (102 + 17 of its units from the safe edge), level with − / + (22 units down); u is its unit
-        CGRect s = UIEdgeInsetsInsetRect(b, self.view.safeAreaInsets); CGFloat u = MIN(b.size.height / 430.0, 1.3);
+        CGRect s = UIEdgeInsetsInsetRect(b, si); CGFloat u = MIN(b.size.height / 430.0, 1.3);
         self.fps.frame = CGRectMake(floor(CGRectGetMinX(s) + 130 * u), floor(CGRectGetMinY(s) + 22 * u - 11), 64, 22);
     }
+}
+// The stage's half turn as the eye should see it: from one angle to another about the screen's axis, so the direction is chosen, not left to the interpolation of two transforms
+- (void)spinStageFrom:(CGFloat)from to:(CGFloat)to duration:(NSTimeInterval)dur {
+    CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+    a.fromValue = @(from); a.toValue = @(to); a.duration = dur; a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [self.stage.layer addAnimation:a forKey:@"dmStageSpin"];
+}
+// The system turns the window a quarter turn as if the picture were upright; when the stage's half turn changes across that turn (upside down into landscape, or landscape into
+// upside down), the stage spins the other way along with it, so the picture turns the quarter turn the phone did
+- (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)c {
+    [super viewWillTransitionToSize:size withTransitionCoordinator:c];
+    if (!g_portrait || !self.stage) return;
+    BOOL was = g_flip, will = size.width > size.height ? NO : (g_flip || g_want_flip);
+    CGAffineTransform tt = c.targetTransform; CGFloat th = atan2(tt.b, tt.a);   // the system's own turn of the contents
+    if (was == will || fabs(th) < 0.01) return;
+    CGFloat from = was ? M_PI : 0, to = from - copysign(M_PI, th);
+    [c animateAlongsideTransition:^(id<UIViewControllerTransitionCoordinatorContext> ctx) { (void)ctx; [self spinStageFrom:from to:to duration:c.transitionDuration]; } completion:nil];
+}
+// The portrait layout: the opposite of the upright device orientation turns the stage, the upright one turns it back; any other (flat, sideways) leaves it. In landscape, the opposite
+// (which the system does not turn to) asks for portrait once it has held for a moment (not while passing through it between the two landscapes); the stage turns when it comes
+- (void)deviceTurned {
+    if (!g_portrait || g_dev_up == UIDeviceOrientationUnknown) return;
+    UIWindowScene *ws = self.view.window.windowScene; UIDeviceOrientation d = UIDevice.currentDevice.orientation;
+    if (ws.effectiveGeometry.interfaceOrientation != UIInterfaceOrientationPortrait) {
+        if (d != dev_opposite(g_dev_up) || g_want_flip) return;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (UIDevice.currentDevice.orientation != dev_opposite(g_dev_up) || g_want_flip || ws.effectiveGeometry.interfaceOrientation == UIInterfaceOrientationPortrait) return;
+            if (@available(iOS 16.0, *)) {
+                g_want_flip = YES; LOG("front end: portrait layout: held upside down in landscape, asking for portrait");
+                UIWindowSceneGeometryPreferencesIOS *p = [[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:UIInterfaceOrientationMaskPortrait];
+                [ws requestGeometryUpdateWithPreferences:p errorHandler:^(NSError *e) { g_want_flip = NO; LOG("front end: portrait layout: portrait refused: %s", e.localizedDescription.UTF8String); }];
+            }
+        });
+        return;
+    }
+    BOOL f = g_flip;
+    if (d == dev_opposite(g_dev_up)) f = YES; else if (d == g_dev_up) f = NO;
+    if (f == g_flip) return;
+    g_flip = f; LOG("front end: portrait layout %s", f ? "turned upside down" : "upright again");
+    dm_gamepad_reset();   // a touch held through the turn would end in other coordinates
+    [self.view setNeedsLayout]; [self.pad setNeedsLayout]; [self.view layoutIfNeeded];
+    [self spinStageFrom:(f ? 0 : M_PI) to:(f ? M_PI : 0) duration:0.3];
 }
 - (void)viewDidAppear:(BOOL)a {
     [super viewDidAppear:a];
@@ -194,7 +286,8 @@ static void tv_attach(void) {
 }
 static void tv_detach(void) {
     DmGameView *v = g_root.game; g_tv = nil;
-    if (v && v.superview != g_root.view) { [g_root.view insertSubview:v atIndex:0]; [g_root.view setNeedsLayout]; }
+    UIView *home = g_root.stage ?: g_root.view;   // back on the phone's stage, under the pad, turned with it
+    if (v && v.superview != home) { [home insertSubview:v atIndex:0]; [g_root.view setNeedsLayout]; }
     if (g_tv_mode_was >= 0) { dm_set_opmode(g_tv_mode_was); g_tv_mode_was = -1; }
     g_on_tv = NO; [g_root.view setNeedsLayout]; [g_root.pad setNeedsLayout];
     LOG("front end: TV disconnected, the picture is back on the phone");
@@ -259,7 +352,7 @@ void front_progress(const char *title, long done, long total) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!tt) { [g_prog removeFromSuperview]; g_prog = nil; return; }
         if (!g_prog) {
-            UIView *root = g_root.view; if (!root) return;
+            UIView *root = g_root.stage ?: g_root.view; if (!root) return;   // on the stage, so it turns with the picture
             g_prog = [[UIView alloc] initWithFrame:root.bounds]; g_prog.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
             g_prog.backgroundColor = [UIColor colorWithWhite:0.06 alpha:0.94];
             UIView *box = [[UIView alloc] initWithFrame:CGRectMake(floor((root.bounds.size.width - 320) / 2), floor((root.bounds.size.height - 96) / 2), 320, 96)];

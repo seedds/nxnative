@@ -208,6 +208,28 @@ static void tile_case(const char *dir) {
     printf("feedback tile read: %s\n", before == failed ? "PASS" : "FAIL");
     mtl_tex_release(&source);
 }
+// A frame that snapshots more keys than the cache has entries, in several sizes (Tears of the Kingdom: 4-5 a frame), makes no texture once each size has one: a new key takes an entry
+// whose texture has its format and size. Taking the entries in turn made one for nearly every snapshot (GitHub #931). Entries a later draw can still reuse are taken last
+static void shape_case(void) {
+    for (int i = 0; i < 8; i++) { g_fbc[i] = (fb_cache_t){0}; } g_fbc_use = 0;
+    static const NSUInteger size[5][2] = {{64, 32}, {32, 16}, {16, 8}, {64, 32}, {8, 4}};
+    NSMutableSet *made = [NSMutableSet set]; int fresh, bad = 0;
+    for (int frame = 0; frame < 6; frame++) {
+        g_fb_bar++;   // the game's barrier before each snapshot draw, as in Tears of the Kingdom's shrines
+        for (int k = 0; k < 5; k++, g_fb_bar++) {
+            fb_cache_t *e = fb_snap(1000 + frame * 5 + k, 0, 0, MTLPixelFormatRGBA8Unorm, size[k][0], size[k][1], 0, &fresh);
+            bad += !e || !fresh || e->snap.width != size[k][0] || e->snap.height != size[k][1];
+            if (e) [made addObject:[NSValue valueWithPointer:(__bridge void *)e->snap]];
+        }
+    }
+    CHECK(!bad, "every new key gets a texture of its size");
+    CHECK(made.count == 4, "30 snapshots of 4 sizes over 6 frames make one texture per size, not one each");
+    fb_cache_t *a = fb_snap(1, 0, 0, MTLPixelFormatRGBA8Unorm, 64, 32, 0, &fresh), *b = fb_snap(2, 0, 0, MTLPixelFormatRGBA8Unorm, 64, 32, 0, &fresh);
+    CHECK(a != b, "a live snapshot is not taken for another key while a stale entry is free");
+    fb_cache_t *a2 = fb_snap(1, 0, 0, MTLPixelFormatRGBA8Unorm, 64, 32, 0, &fresh);
+    CHECK(a2 == a && !fresh, "the live snapshot is reused until the next barrier");
+    for (int i = 0; i < 8; i++) { g_fbc[i] = (fb_cache_t){0}; } g_fbc_use = 0;
+}
 int main(int argc, char **argv) { @autoreleasepool {
     setenv("DM_NVN_TBDR", "0", 1);
     mtl_init(); NSError *error = nil;
@@ -231,6 +253,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     const int slots[] = {0, 128, 255};
     for (int i = 0; i < 3; i++) slot_case(pr, pipeline, slots[i], i);
     reuse_case(pr);
+    shape_case();
     if (argc == 2) tile_case(argv[1]);
     printf("feedback snapshot: %d checks, %d failed\n", checks, failed);
     return failed != 0;

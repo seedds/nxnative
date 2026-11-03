@@ -221,6 +221,14 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** [FINAL FANTASY X/X-2 HD Remaster](../../dm/games/0100BC300CB48000/README.md), launcher-to-X-2 handoff.
 - **Check:** `t_queue_origin` tests independent state, switching back, finalization and address reuse with a poisoned old program pointer, alongside its real GPU culling tests.
 
+### Finalized programs leave every queue's bindings
+
+- **Symptom:** about 23 s after launch, when the title screen hands over to the opening demo, a crash in `keys_hash` (`prog_key` ← `prog_get` ← `bind_stages` ← `prog_resolve` ← `mtl_queue_activate`), reading a control address made of float data; the program object now holds other data.
+- **Cause:** NVN reads a program only when it is bound, so a game may finalize a program a queue still has bound and reuse its memory. The host kept the pointer in that queue's bindings (`S.bst`, `S.prog`, `S.cprog`); it went into the queue's saved state when another queue submitted, and switching back combined the stages from the reused memory.
+- **Fix:** `nvnProgramFinalize` drops the program from the active bindings and from every saved queue state under the submission lock (`mtl_prog_forget`). When the active queue's effective program is a composite of its stage and another program's (stages bound apart), the composite is taken again from the stages left: it holds its own copy of each stage's shader, so clearing the stage alone kept drawing the finalized program's shader. A saved queue's composite is taken again when the queue is switched back to (`prog_resolve`). It logs `finalized program … dropped from queue bindings` the first time and at powers of two.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md), left on the title screen until the opening demo: 5 of 5 runs crashed before, 0 of 7 after, each logging one drop from the active queue.
+- **Check:** `t_queue_origin` finalizes a program bound in the active queue and in a saved one, poisons its memory and switches back: both lose it; finalizing the fragment program of a composite leaves the vertex stage alone as the effective program.
+
 ### Fence syncs recorded in command buffers
 
 - **Symptom:** `nvnCommandBufferFenceSync` unimplemented, every `SyncWait` timed out at once.
@@ -432,6 +440,14 @@ Games read this count as a position in their own command memory and size their h
 - **Open:** not read back: 3D textures (as for GPU copies; `nvn_tex_mirror_b2t` writes 2D layers only), block-compressed targets drawn through a shadow (`bcrt_attach`; the shadow is copied back into the host texture only) and depth targets. A CPU write into the texture made after its pass is replayed and before the readback lands gets a page generation below the readback's stamp, so `pkg_absorb_take` keeps the host texture without it (the storage holds it; the next CPU write to that page uploads it). Telling those writes from the readback's own needs a dirty-tracker query for a generation range; no game is known to write a texture while the GPU draws into it.
 - **Check:** `t_readback` clears a packaged texture through a render pass, reads the clear colour back from its storage, checks that resolving it does not upload it again, then copies the storage to another address with `memcpy` and reads the colour from a texture created there; without the readback both reads fail. In the log, `render→texture copy into ser=… read back into the storage when the GPU completes`.
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) on the Mac: meadows lost their grass and went dark within half a minute of loading; with the fix the grass stays through three minutes of standing and walking. Uploads of textures that changed in the pool, same script: 40 before, 449 after, almost all while loading; frame times the same (p50 about 18 ms).
+
+### Readback buffers kept for reuse
+
+- **Symptom:** the `[nvn] residency set up to frame …` line shows hundreds of additions from `mirror_readback`'s line in `nvn_mtl.m` every 300 frames, and as many removals, with the residency commits' time up. Tears of the Kingdom: about 1,500 every 300 frames on an iPhone 17 (1.4.2, [seedds/nxnative#931](https://github.com/seedds/nxnative/issues/931)), about 370 on a Mac.
+- **Cause:** each [readback into a texture's storage](#render-passes-into-textures-uploaded-from-their-storage) made a shared buffer of its size, put it into the residency set, and released it after its submission, which took it out again: a residency commit each way, for about five render passes a frame in Tears of the Kingdom.
+- **Fix:** `mrbuf_get` / `mrbuf_put` in `nvn_mtl.m`, for every game: a readback takes a kept buffer of its power-of-two size (4 KB and up) and gives it back once it has landed (`mirror_rb_land`, after the GPU is done with it); at most 16 MB of them is kept, and a buffer past that leaves the residency set and is released.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_readback`: a landed buffer serves the next readback of its size, a larger one takes the next size, no more than 16 MB is kept, and a landed buffer is held only by the kept set ([Completion readbacks survive a guest waiter's pool](memory.md#completion-readbacks-survive-a-guest-waiters-pool)).
+- **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game): its four CPU-written render targets (256×256, 192×192, 96×96, 500×400) are read back every frame. On the Mac (Apple M4 Pro, 2026-11-03, the regression route) 390-418 buffers every 300 frames on `main` at `12915a31`, none with the fix; the residency numbers of both fixes together are under [Snapshot textures taken by format and size](rendering.md#snapshot-textures-taken-by-format-and-size).
 
 ### Sampled textures in a sparse pool uploaded through the page table
 

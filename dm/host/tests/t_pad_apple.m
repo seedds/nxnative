@@ -41,6 +41,10 @@ int main(void) { @autoreleasepool {
     for (NSString *k in @[@"Xbox Wireless Controller", @"DualSense Wireless Controller", @"Switch Pro Controller"]) {
         assert(face(k, 'A') == DM_BTN_A); assert(face(k, 'B') == DM_BTN_B); assert(face(k, 'X') == DM_BTN_X); assert(face(k, 'Y') == DM_BTN_Y);
     }
+    setenv("DM_PAD_LAYOUT", "playstation", 1);   // PlayStation labels: Cross / Circle / Square / Triangle press A / B / X / Y, as Xbox labels do for a PS pad
+    for (NSString *k in @[@"DualSense Wireless Controller", @"DualShock 4", @"Switch Pro Controller"]) {
+        assert(face(k, 'A') == DM_BTN_A); assert(face(k, 'B') == DM_BTN_B); assert(face(k, 'X') == DM_BTN_X); assert(face(k, 'Y') == DM_BTN_Y);
+    }
     setenv("DM_PAD_LAYOUT", "position", 1);
     assert(face(@"DualSense Wireless Controller", 'A') == DM_BTN_B); assert(face(@"DualSense Wireless Controller", 'X') == DM_BTN_Y);
     unsetenv("DM_PAD_LAYOUT");

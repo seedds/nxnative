@@ -43,9 +43,12 @@ class Ycd(unittest.TestCase):
         files = [('shaders/copy.frag.bin', stage('ps')), ('shaders/copy.frag.meta', b'meta'), ('shaders/shader.db', b'db' * 9)]
         d = archive(files)
         got = ss.ycd_files(d)
+        assert got is not None
         self.assertEqual([(n, s) for n, _, s in got], [(n, len(b)) for n, b in files])
         self.assertEqual([d[p:p + s] for _, p, s in got], [b for _, b in files])
-        self.assertEqual([n for n, _, _ in ss.ycd_files(archive(files, hsize=0x140))], [n for n, _ in files])   # a sound bank's longer header
+        bank = ss.ycd_files(archive(files, hsize=0x140))   # a sound bank's longer header
+        assert bank is not None
+        self.assertEqual([n for n, _, _ in bank], [n for n, _ in files])
 
     def test_shaders_are_single_stage_programs(self):
         d = archive([('shaders/copy.frag.bin', stage('ps')), ('shaders/copy.frag.meta', b'meta'), ('shaders/copy.vert.bin', stage('vs', 0x200, 1))])

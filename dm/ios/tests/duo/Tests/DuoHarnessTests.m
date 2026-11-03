@@ -442,7 +442,7 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     XCTAssertTrue(CGRectEqualToRect(fit.drawable, bounds), @"Fit offers the actual wide canvas, not a fixed preset");
     XCTAssertTrue(CGRectEqualToRect(dm_layout_touch_rect(fit, 0), CGRectMake(75, 0, 693, 390)), @"No ACK uses the source, with the renderer's centered pixel rounding");
     XCTAssertTrue(CGRectEqualToRect(dm_layout_touch_rect(fit, 844.0 / 390), bounds), @"Only an acknowledged camera uses the wider picture");
-    XCTAssertTrue(CGRectEqualToRect(dm_layout_touch_rect(fit, (844.0 / 390) * 1.005), bounds), @"Touch shares the renderer's 1% near-match tolerance");
+    XCTAssertTrue(CGRectEqualToRect(dm_layout_touch_rect(fit, (844.0 / 390) * 1.005), bounds), @"Touch shares the renderer's one-percent near-match tolerance");
     XCTAssertLessThan(dm_layout_touch_rect(fit, (844.0 / 390) * 1.02).size.height, bounds.size.height);
     CGPoint original = dm_game_touch_point(dm_layout_touch_rect(fit, 0), CGPointMake(300, 150));
     CGPoint wide = dm_game_touch_point(dm_layout_touch_rect(fit, 844.0 / 390), CGPointMake(300, 150));

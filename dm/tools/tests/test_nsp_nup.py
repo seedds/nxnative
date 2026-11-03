@@ -244,6 +244,22 @@ class Pack(Base):
         self.assertEqual(sorted(p.name for p in aoc.iterdir()), ['1.img', '1.img.inputs.json'])
         self.assertIn('dlcfile', romfs_image.read_index(aoc / '1.img'))
 
+    def test_nsp_dlc_not_reused_after_nup(self):   # the NUP packs into the aoc/ the NSP extraction keyed: the same NSPs again extract again
+        n = self.open(); app, _, _, dlc = pack_nup.scan(n)
+        work, logs, p = self.out(), self.out() / 'logs', self.dir / 'dlc.nsp'
+        logs.mkdir(parents=True); p.write_bytes(b'nsp')
+        runs = []
+        def extract(argv, log, **kw): runs.append(argv); Path(argv[4]).parent.mkdir(parents=True, exist_ok=True); Path(argv[4]).write_bytes(b'from the NSP')
+        nsp_fam, nup_fam = {'dlc': [(TID + 0x1001, 0, p)]}, {'dlc': [(t, None, k) for t, k in dlc.items()], 'nup': n}
+        with mock.patch.object(nsp, 'run', side_effect=extract), mock.patch.object(nsp, 'is_merged', return_value=False):
+            for fam in (nsp_fam, nsp_fam, nup_fam): aoc = nsp.extract_aoc('nx', 'keys', REPO, work, app, fam, logs)
+            self.assertEqual(len(runs), 1)   # reused while the NSPs and aoc/ are unchanged
+            self.assertIn('dlcfile', romfs_image.read_index(aoc / '1.img'))
+            nsp.extract_aoc('nx', 'keys', REPO, work, app, nsp_fam, logs)
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(sorted(f.name for f in aoc.iterdir()), ['1.img'])
+        self.assertEqual((aoc / '1.img').read_bytes(), b'from the NSP')
+
 
 class Stop(Exception): pass
 

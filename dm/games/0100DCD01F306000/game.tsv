@@ -1,0 +1,45 @@
+# Mina the Hollower update 1.0.5, SDK 21.4.3, Yacht Club Games' own engine on NVN. Plays on the Mac and the iPhone (README.md).
+# Its 114 shaders (110 keys) are in RomFS shaders.pak.yc, a YCD archive that shader_split.py reads (ycd_shaders).
+
+# ---- Identity ----
+title_id	0100DCD01F306000
+program_id	0100DCD01F306000
+
+# ---- App ----
+name	Mina the Hollower
+ipa	MinaTheHollower.ipa
+app_category	public.app-category.adventure-games
+
+# ---- Versions ----
+# The update NSP's CNMT names v262144 (nx_extract --contents); its file name has no [v...] tag
+build	v262144	1.0.5	main=2bc484524f0c86bc7c2228d6fbfb0817	sdk=cb82ed52216313df5626154efb64d45f
+package	v262144
+shader_versions	v262144
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	default.sndbnk.yc
+zip_store	.yc:.metallib
+
+# ---- Memory ----
+# The NPDM declares 32 MB of system resource (virtual address memory) and main never sets a heap: a 5 GB block with a 4.375 GB alias region, where the game maps its memory itself.
+# Measured with a 64 GB alias region (DM_ALIAS_SIZE) from boot into the opening on the boat, 7 minutes: nninitStartup's StandardAllocator over 16 GB (main+0x875c5c) maps 1.28 GB;
+# the engine's TLSF arenas "Default Mem" and "Render Mem" (4 GB each, cut in patches.py to 1 GB and 256 MB) map 320 MB and 16 MB; twelve 16 MB arenas and one of 64 MB, 0.24 GB of regions.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 32 MB of system resource
+sys_resource	0x2000000
+# The regions made after the StandardAllocator's take 1.48 GB with the arena cuts, more than the 256 MB the host's own cap leaves them: the alias region less the 62 MB node area,
+# those 1.48 GB and 256 MB for regions made later in play, in 32 MB steps (profile_guess.py stdalloc_room) is 2.56 GB
+stdalloc_cap	0xa4000000
+
+# ---- Shader split ----
+shader_groups	/=romfs
+shader_note	Mina the Hollower shaders
+
+# ---- Graphics ----
+# the game calls nvnDeviceSetDepthMode with near = 0 at boot: the pipeline bases made before it runs are made for that mode
+depth_mode	zero

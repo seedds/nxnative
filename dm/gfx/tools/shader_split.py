@@ -39,6 +39,8 @@
 #       .pak archives and of the startup material archive LZSS-compressed in main, see rfrm_shaders and retro_main_forms
 #   · BERG (Snowdrop, Mario + Rabbids Sparks of Hope): shader objects in the individually zstd-compressed records of its SDF data slices, see snowdrop_shaders
 #   · bnd2 (Criterion's Bundle 2, Need for Speed: Hot Pursuit Remastered): whole GLSLC outputs in the zlib resources of SHADERS.BNDL, see bnd2_resources and bnd2_shaders
+#   · YCD (Yacht Club Games, Mina the Hollower): one stage per <name>.vert.bin / .frag.bin of the uncompressed archive shaders.pak.yc, {control length, code length, control section,
+#       code area}, listed by the archive's file table, see ycd_files and ycd_shaders
 #   · Heaps (Dead Cells): whole GLSLC outputs in base64 after the GLSL of the engine's shader cache (shaders.cache.nx), inside its PAK archive, see heaps_pak_files and heaps_shaders
 #   · Frostbite (EA SPORTS FC 27): the CompiledBytecode resources of the bundles its superbundle tables (.toc) list, in its cas files (Oodle Leviathan, decoded by the game's own decoder in the
 #       Mac host), each a VNVN record with one code area and control section (frostbite.py), see frostbite_jobs and frostbite_shaders
@@ -2336,6 +2338,49 @@ def unity_text_glslc(x, base):
         if b'\x91\x68\x86\x19' in b: out += glslc_shaders(b, f'{base}#{name}', need=False)
     return out
 
+YCD = b'YCD\0'
+def ycd_files(d):
+    """The files of a Yacht Club Games data archive (Mina the Hollower's .pak.yc, stored uncompressed) → [(name, offset, size)], or None when it is not one this reader knows.
+    Header: 'YCD\\0', u32 version 8, u32 header size (0xc0 for every .pak.yc; the sound banks' are longer). At the header's end, a root record {u32, u32, u32 alignment, i32 offset} whose
+    offset (from the record's +8) gives the file table: one 0x20-byte pair per file, a name record {0, u32 name length, u32 alignment 0x10, i32 offset of the name} and a data record
+    {u32 size, 0x40, u32 alignment 0x10, i32 offset of the data}, each offset counted from its record's +8. The table runs up to the names, which follow it. shaders.pak.yc: 229 files,
+    shaders/<name>.vert.bin and .frag.bin (each one stage), a .meta beside each (the binding names) and shaders/shader.db (no shader code)"""
+    if len(d) < 0x20 or d[:4] != YCD: return None
+    hsize = struct.unpack_from('<I', d, 8)[0]
+    if hsize + 0x10 > len(d): return None
+    e = hsize + 8 + struct.unpack_from('<i', d, hsize + 0xc)[0]
+    files, names = [], len(d)
+    while e + 0x20 <= names:
+        zero, nlen, _, noff = struct.unpack_from('<IIIi', d, e)
+        size, kind, _, doff = struct.unpack_from('<IIIi', d, e + 0x10)
+        n, p = e + 8 + noff, e + 0x18 + doff
+        if zero or kind != 0x40 or not 0 < nlen < 0x400 or not e + 0x20 <= n <= len(d) - nlen or not 0 <= p <= len(d) - size: break
+        try: nm = d[n:n + nlen].decode('ascii')
+        except UnicodeDecodeError: break
+        files.append((nm, p, size)); names = min(names, n); e += 0x20
+    return files if files and e == names else None
+
+def ycd_shaders(d, label):
+    """The shaders of a Yacht Club Games data archive (ycd_files): each <name>.vert.bin / .frag.bin is {u32 control length, u32 code length, control section, code area}, one stage compiled
+    offline. The engine combines vertex and pixel shaders per draw (20 vertex, 94 pixel in Mina the Hollower 1.0.5), so they are paired as single-stage programs (separable_pairs).
+    Archives without such files (levels, sound banks) give nothing"""
+    files = ycd_files(d)
+    if files is None:
+        if CTL_MAGIC in d: red(f'{label}: a YCD archive holding control sections whose file table this reader cannot follow')
+        return []
+    out = []
+    for nm, p, size in files:
+        st = {'.vert.bin': 'vs', '.frag.bin': 'ps', '.comp.bin': 'cs'}.get(nm[nm.rfind('.', 0, len(nm) - 4):] if nm.endswith('.bin') else '')
+        if not st: continue
+        where = f'{label}/{nm}'
+        nctl, ncode = field(d, '<II', p, where)
+        if 8 + nctl + ncode != size: red(f'{where}: control {nctl:#x} + code {ncode:#x} bytes do not fill its {size:#x} bytes')
+        ctl, code = d[p + 8:p + 8 + nctl], d[p + 8 + nctl:p + size]
+        why = check(label, st, ctl, code) or (st != 'cs' and sph_stage(code) != st and f'its code area is a {sph_stage(code)} shader')
+        if why: red(f'{where}: {why}')
+        out.append((f'{where}#YCD@{p:#x}', st, ctl, code))
+    return out
+
 NEST = 16   # archives in archives scan_blob opens (SARC, PlatinumGames' DAT): real files nest a few. A damaged or crafted one could nest one per header's length, or have every
             # member point at the same inner archive, its work doubling with each level. Two budgets of NEST times the file bound the work: left[0], the members a file's archives open,
             # each counted by what it takes up in its archive, and left[1], what its Yaz0 members expand to. Counting a Yaz0 member by what it expands to in the first budget paid twice
@@ -2370,6 +2415,7 @@ def scan_blob(d, label, out, depth=0, left=None):
     if shaders := sead_prim_shaders(d, label): out.extend(shaders); return
     if d[:len(TFXO)] == TFXO: out.extend(tfxo_shaders(d, label)); return
     if d[:4] == b'MSHD': out.extend(mshd_shaders(d, label)); return
+    if d[:4] == YCD: out.extend(ycd_shaders(d, label)); return
     if d[:4] == PGDAT and len(d) >= 0x1c and (mem := pgdat_members(d, label)) is not None:   # PlatinumGames
         for nm, m in mem: scan_blob(m, f'{label}/{nm}', out, depth + 1, left)
         return
@@ -2402,7 +2448,7 @@ def pixel_input_cover(shaders):
         k = min(ins, key=lambda k: (-len(ins[k] & left), k)); cover.append(k); left -= ins[k]
     return cover
 
-SINGLE_STAGE = ('#GLSLC@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
+SINGLE_STAGE = ('#GLSLC@', '#YCD@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
 # Unreal Engine 3's shader caches (ue3_shaders, '#UE3@'); MonoGame's effects, whose passes may name no vertex shader and keep the one bound (Celeste: 10 of its 13 effects draw through SpriteBatch's vertex shader, which is in main); Next Level Games'
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
 # (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; YEBIS's effect file (tfxo_shaders); and Sumo's Ninty_NX descriptors and NVNsh records, one stage
@@ -2659,7 +2705,7 @@ def scan_file_in(args):
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), 'defer'
         return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
-    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members
+    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d and not (d[:4] == YCD and CTL_MAGIC in d): return rel, {}, set(), {}   # a SARC may hold Yaz0 members
     else:
         scan_blob(d, '/' + rel, found)
         # whole GLSLC outputs in a file no other reader takes (FINAL FANTASY TACTICS - The Ivalice Chronicles: its engine's technique files, resources_nx/…/shader/*.tec, 261 outputs beside

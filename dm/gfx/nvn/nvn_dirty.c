@@ -208,6 +208,17 @@ int nvn_dirty_since_span(const void *span, const void *addr, size_t len, uint64_
     return 0;
 }
 int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp) { return nvn_dirty_since_span(NULL, addr, len, stamp); }
+// As nvn_dirty_since, with the caller's last range kept in *span: a sparse texture's page-table walk (hle_nvn.c vpt_walk) asks once per run of physical pages, and those runs
+// mostly lie in one pool, where find_span scans every registered range (about 4,300 in a Mario Kart World race)
+int nvn_dirty_since_cached(const void **span, const void *addr, size_t len, uint64_t stamp) {
+    if (!len) return 0;
+    range_t *r = (range_t *)*span; uintptr_t a = (uintptr_t)addr;
+    if (!r || !atomic_load_explicit(&r->live, memory_order_acquire) || a < r->base || a + len > r->end) { r = find_span(a, len); *span = r; }
+    if (!r) return 1;
+    uintptr_t p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift;
+    for (uintptr_t i = p; i <= q; i++) if (atomic_load(&r->gen[i]) > stamp) return 1;
+    return 0;
+}
 void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total) {
     int n = atomic_load(&g_nr), active = 0;
     for (int i = 0; i < n; i++) active += live_at(i) != 0;

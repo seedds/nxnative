@@ -57,6 +57,7 @@ static size_t tex_size(int fmt, int w, int h, int flags, size_t *align) {
 }
 
 int main(void) {
+    setenv("DM_NVN_COUNT", "1", 1);   // the call-count checks below need the counting trampolines (off by default)
     // Engine-native limiters have no FPS state page. Their launcher cap must
     // still pace presents and select the display-link rate in display mode.
     { win_t w={.interval=1};nvn_present_config(60,1);dm_fps_state=NULL;

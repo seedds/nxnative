@@ -84,6 +84,7 @@ Game-specific findings. The general host changes they led to are listed under [F
 
 - [Old per-shader cache entries grew a game's build folder with each chain change](../../../docs/reference/shaders.md#old-per-shader-cache-entries-grew-a-games-build-folder-with-each-chain-change) (2026-11-03, #1033): 12 GB of earlier chains' entries in `cas/shader`.
 - [Same-pass feedback read from the tile](../../../docs/reference/rendering.md#same-pass-feedback-read-from-the-tile) (2026-11-03): the shrine decals of #737.
+- [Snapshot textures taken by format and size](../../../docs/reference/rendering.md#snapshot-textures-taken-by-format-and-size) and [Readback buffers kept for reuse](../../../docs/reference/nvn-objects.md#readback-buffers-kept-for-reuse) (2026-11-03, #931): a texture made for every snapshot and a buffer for every readback, with a residency commit each.
 - [Benchmark captures perturb the measured frame pacing](../../../docs/reference/frame-rate.md#benchmark-captures-perturb-the-measured-frame-pacing).
 - [Unmapped guest memory stays resident](../../../docs/reference/memory.md#unmapped-guest-memory-stays-resident).
 - **Resolved in the host (#613): `nn::diag` abort at `sdk+0x13ce58` after about 15 minutes**, the amiibo poll waiting on an event the game never attached: [The amiibo library's state before Initialize](../../../docs/reference/services.md#the-amiibo-librarys-state-before-initialize). Found by disassembly; the abort itself was not reproduced here.

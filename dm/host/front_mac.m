@@ -1,6 +1,7 @@
 // Mac front end: with DM_WINDOW=1 open a window (CAMetalLayer, for the graphics backend to present frames) + keyboard and controllers → dm_input; the guest runs on a large-stack thread instead and the main thread belongs to AppKit.
 // Without DM_WINDOW: the guest runs directly on the current thread, behaving the same as with no front end (windowless tests use this).
-// The window is fullscreen-capable (the green button and ⌃⌘F); DM_FULLSCREEN=1 starts it that way. ⌘Q quits; the left mouse button is the touchscreen.
+// The window is fullscreen-capable (the green button and ⌃⌘F); DM_FULLSCREEN=1 starts it that way. ⌘Q quits, and so does a controller's Home button held for 2 s and
+// confirmed with A (home_quit.h); the left mouse button is the touchscreen.
 // Cheats (hle_cheats.c): the Cheats menu's rows toggle, reload (⌘R) and open the cheats folder; its first item "Show Cheats
 // Window" (⌘⇧C, or DM_CHEATS_WINDOW=1 at launch) opens a Cheats panel beside the game: sections, search, the master switch,
 // safe mode, values, details and the import of cheat files (see the code below).
@@ -22,6 +23,8 @@
 #include "motion_pro_mac.h"
 #include "pad_apple.h"
 #include "pad_hid_mac.h"
+#include "home_quit.h"
+#include "home_quit_mac.h"
 #include <signal.h>
 #include <math.h>
 #include <sys/stat.h>
@@ -152,8 +155,11 @@ static void pad_set(int p, uint64_t m, int32_t lx, int32_t ly, int32_t rx, int32
     if (m || abs(lx) > dead || abs(ly) > dead || abs(rx) > dead || abs(ry) > dead) cursor_hide_for_input();
     dm_pad_set_player(p, m, lx, ly, rx, ry);
 }
+static void hq_poll(void);
+static home_quit g_hq;   // the Home button's hold and quit prompt (home_quit.h): while the prompt is open the controllers' input goes to it, not to the game
 static void pad_read(GCExtendedGamepad *g) {
     if (!g_input_on) return;
+    hq_poll(); if (hq_blocks_input(g_hq.phase)) return;
     int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0) return;
     dm_haptics_apple_controller(p, g.controller);
     uint64_t m = dm_pad_face(g);   // by position, a Nintendo pad by its labels
@@ -164,8 +170,12 @@ static void pad_read(GCExtendedGamepad *g) {
     #undef K
     pad_set(p, m, pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value), pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value));
 }
-// Home and Capture: without this macOS takes them as system gestures (Home opens the Games app); the host gives them no function
-static void pad_keep_system_buttons(GCController *c) { for (NSString *b in @[GCInputButtonHome, GCInputButtonShare]) c.physicalInputProfile.buttons[b].preferredSystemGestureState = GCSystemGestureStateDisabled; }
+// Home and Capture: without this macOS takes them as system gestures (Home opens the Games app). Capture has no function in the host, Home quits when it is held (hq_poll).
+// macOS 27 respects the claim when the Home button setting for apps lets the app decide (hq_log_setting names it in the log)
+static void pad_keep_system_buttons(GCController *c) {
+    for (NSString *b in @[GCInputButtonHome, GCInputButtonShare]) c.physicalInputProfile.buttons[b].preferredSystemGestureState = GCSystemGestureStateDisabled;
+    c.extendedGamepad.buttonHome.pressedChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL down) { (void)b; (void)v; (void)down; if (g_input_on) hq_poll(); };
+}
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
 static void pro_players_changed(GCController *gone) {
@@ -230,28 +240,38 @@ static void display_awake(int on) {
 // stay pressed in the game. The front end releases only what it pressed itself: scripted buttons and sticks have their own path, and the touch is also DM_KEYS / DM_CTL's (hle_hid.c).
 // Out of focus a controller's changes are ignored, so back in focus each controller is read as it is now (a button still held, a stick still deflected)
 static int g_mouse_down;   // the mouse holds the touch (DmGameView)
+// Nothing the controllers pressed stays pressed (focus lost, the Home quit prompt open)
+static void pads_release(void) {
+    if (g_merge) { if (merge_pads_left(nil)) dm_pad_set(0, 0, 0, 0, 0); return; }
+    for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
+    for (hid_pad *d = g_hidpads; d; d = d->next) { int p = pad_slot_of(&g_slots, d); if (p >= 0) dm_pad_set_player(p, 0, 0, 0, 0, 0); }
+}
+// Each controller read as it is now (focus back, the Home quit prompt closed)
+static void pads_reread(void) {
+    if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) pad_read(c.extendedGamepad); }
+    else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p].extendedGamepad) pad_read(g_held[p].extendedGamepad);
+    for (hid_pad *d = g_hidpads; d; d = d->next) hidpad_read(d);
+}
+static void hq_close(void);
 static void input_release(void) {
+    hq_close();   // the prompt or the hold indicator, if one is up: the Games app the system opens for Home takes the focus too
     [NSCursor setHiddenUntilMouseMoves:NO];
     display_awake(0);
     g_input_on = 0;
     dm_motion_pro_active(0);
     g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
-    if (g_merge) { if (merge_pads_left(nil)) dm_pad_set(0, 0, 0, 0, 0); return; }
-    for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
-    for (hid_pad *d = g_hidpads; d; d = d->next) { int p = pad_slot_of(&g_slots, d); if (p >= 0) dm_pad_set_player(p, 0, 0, 0, 0, 0); }
+    pads_release();
 }
 static void input_resume(void) {
     display_awake(1);
     g_input_on = 1;
     dm_motion_pro_active(1);
-    if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) pad_read(c.extendedGamepad); }
-    else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p].extendedGamepad) pad_read(g_held[p].extendedGamepad);
-    for (hid_pad *d = g_hidpads; d; d = d->next) hidpad_read(d);
+    pads_reread();
 }
 // Raw HID gamepads (pad_hid_mac.h): a player slot each, as a GameController controller, named by the device's product name
 static void hidpad_read(hid_pad *d) {
-    if (!g_input_on) return;
+    if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
     int p = g_merge ? 0 : pad_slot_of(&g_slots, d); if (p < 0) return;
     int32_t s[4]; pad_hid_sticks(&d->st, s);
     pad_set(p, pad_hid_buttons(&d->st), s[0], s[1], s[2], s[3]);
@@ -274,6 +294,103 @@ static void hidpad_detach(hid_pad *d) {   // d is already off g_hidpads
     dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
     dm_pad_players(pad_slot_mask(&g_slots));
 }
+// Quit with the Home button (home_quit.h, LNPANDY/NX2Apple#336): held for 2 s it opens the prompt (home_quit_mac.h) over the game's view, A quits through the same path as ⌘Q
+// (NSApp terminate, so the save writer and the other exit handlers run as there), B or Home closes it. While the prompt is open the game is told it lost the focus, as the
+// Switch's HOME menu does, and gets no controller input or touch; the keyboard and ⌘Q work as always. DM_HOME_QUIT=0 turns it off
+static int g_hq_on;
+static NSTimer *g_hq_timer;   // while Home is held: the time runs on without a button change
+static NSView *g_hq_hold, *g_hq_prompt; static CAShapeLayer *g_hq_ring;
+static char g_hq_text[HQ_TEXTS][256];
+static void hq_start(void) {
+    g_hq_on = hq_enabled(getenv("DM_HOME_QUIT"));
+    char title[256]; snprintf(title, sizeof title, "Quit %s?", DM_GAME_NAME);
+    const char *def[HQ_TEXTS] = {"Keep holding to quit", title, "Unsaved progress will be lost.", "Quit", "Cancel"};
+    const char *text = getenv("DM_HOME_QUIT_TEXT");   // a front end's, in the player's language: one line per text, in home_quit.h's order
+    for (int i = 0; i < HQ_TEXTS; i++) hq_text_line(text, i, def[i], g_hq_text[i], sizeof g_hq_text[i]);
+    LOG("front end: hold the Home button to quit %s", g_hq_on ? "is on" : "is off (DM_HOME_QUIT=0)");
+}
+// The Home button setting for apps (macOS 27), once, when the first controller is there (GameController reads it only while one is connected): "system" in the log
+// explains a hold that does nothing, since the system keeps Home whatever the host asks. A front end reads the setting itself (GCControllerHomeButtonSettingsManager)
+static void hq_log_setting(void) {
+#if defined(__MAC_27_0)
+    if (@available(macOS 27.0, *)) {
+        static int done; if (done) return;
+        int any = 0; for (GCController *c in GCController.controllers) if (c.extendedGamepad) any = 1;
+        if (!any) return;
+        done = 1;
+        GCControllerHomeButtonSettingCustomizationStatus by = GCControllerHomeButtonSettingCustomizationDefault; NSError *err = nil;
+        GCControllerHomeButtonSettingInAppAction v = [[GCControllerHomeButtonSettingsManager new] readControllerHomeButtonInAppAction:&by withError:&err];
+        LOG("front end: Home button in apps: %s (%s)%s%s", hq_in_app_name((long)v), by == GCControllerHomeButtonSettingCustomizationUser ? "set by the player" : "the system's default",
+            err ? ", " : "", err ? err.localizedDescription.UTF8String : "");
+    }
+#endif
+}
+static void hq_buttons(int *home, int *a, int *b, GCController **holder) {
+    *home = *a = *b = 0;
+    for (GCController *c in GCController.controllers) {
+        GCExtendedGamepad *g = c.extendedGamepad; if (!g) continue;
+        if (g.buttonHome.isPressed) { *home = 1; if (!*holder) *holder = c; }
+        *a |= g.buttonA.isPressed; *b |= g.buttonB.isPressed;
+    }
+}
+static void hq_fade(NSView *v, int in) {
+    if (!v) return;
+    if (in) v.alphaValue = 0;
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) { ctx.duration = 0.18; v.animator.alphaValue = in ? 1 : 0; }
+                        completionHandler:^{ if (!in) [v removeFromSuperview]; }];
+}
+static void hq_hide_hold(void) { [g_hq_timer invalidate]; g_hq_timer = nil; [g_hq_hold removeFromSuperview]; g_hq_hold = nil; g_hq_ring = nil; }
+static void hq_hide_prompt(void) { hq_fade(g_hq_prompt, 0); g_hq_prompt = nil; }
+static void hq_changed(hq_phase was, hq_phase now, GCController *holder) {
+    if (was == HQ_HOLDING) hq_hide_hold();
+    NSView *cv = g_win.contentView;
+    switch (now) {
+    case HQ_HOLDING:
+        g_hq_timer = [NSTimer scheduledTimerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *t) { (void)t; hq_poll(); }];
+        break;
+    case HQ_PROMPT: {
+        pads_release();   // nothing the game held stays pressed while the prompt has the controllers
+        if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
+        dm_focus_set(2);
+        GCExtendedGamepad *g = holder.extendedGamepad;
+        g_hq_prompt = hq_prompt_view(cv.bounds, @(g_hq_text[HQ_TEXT_TITLE]), @(g_hq_text[HQ_TEXT_NOTE]), @(g_hq_text[HQ_TEXT_QUIT]), @(g_hq_text[HQ_TEXT_CANCEL]),
+                                     g.buttonA.sfSymbolsName, g.buttonB.sfSymbolsName);
+        [cv addSubview:g_hq_prompt]; hq_fade(g_hq_prompt, 1);
+        LOG("front end: Home held, quit prompt open");
+        break;
+    }
+    case HQ_SETTLE:
+        hq_hide_prompt(); dm_focus_set(1);
+        LOG("front end: quit prompt closed, the game goes on");
+        break;
+    case HQ_IDLE:
+        if (was == HQ_SETTLE) pads_reread();   // the game reads the controllers again, as they are now
+        break;
+    case HQ_QUIT:
+        LOG("front end: quit from the Home button prompt");
+        [NSApp terminate:nil];   // as ⌘Q
+        break;
+    }
+}
+static void hq_poll(void) {
+    static int busy; if (!g_hq_on || !g_win || busy) return;
+    busy = 1;
+    int home, a, b; GCController *holder = nil; hq_buttons(&home, &a, &b, &holder);
+    double now = CACurrentMediaTime();
+    hq_phase was = g_hq.phase, ph = hq_step(&g_hq, now, home, a, b);
+    if (ph != was) hq_changed(was, ph, holder);
+    double fill = hq_ring(&g_hq, now);
+    if (fill >= 0) {
+        if (!g_hq_hold) { NSView *cv = g_win.contentView; CAShapeLayer *ring = nil; g_hq_hold = hq_hold_view(cv.bounds, @(g_hq_text[HQ_TEXT_HOLD]), &ring); g_hq_ring = ring; [cv addSubview:g_hq_hold]; hq_fade(g_hq_hold, 1); }
+        hq_hold_set(g_hq_ring, fill);
+    }
+    busy = 0;
+}
+static void hq_close(void) {
+    if (g_hq.phase == HQ_IDLE || g_hq.phase == HQ_QUIT) return;
+    if (g_hq.phase == HQ_PROMPT) LOG("front end: quit prompt closed, the window lost the focus");
+    hq_cancel(&g_hq); hq_hide_hold(); hq_hide_prompt();
+}
 static void pads_start(void) {
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
     e = getenv("DM_KBD_PLAYER"); g_kbd_own = !g_merge && e && !strcmp(e, "own");
@@ -281,7 +398,9 @@ static void pads_start(void) {
     if (g_kbd_own) pad_slot_take(&g_slots, &kbd, "keyboard");   // holds player 1 for good
     LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : g_kbd_own ? "the keyboard is player 1, each controller a player of its own from player 2 on (DM_KBD_PLAYER=own)"
                                                                            : "each controller is a player of its own, the keyboard plays with player 1");
+    hq_start();
     pads_changed(nil);
+    hq_log_setting();
     dm_motion_pro_start(pro_devices_changed);
     hidpad_start();
 }
@@ -1261,7 +1380,8 @@ void front_run(void (*guest)(void)) {
             [NSNotificationCenter.defaultCenter addObserverForName:nm object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
                 GCController *c = n.object; int conn = n.name == GCControllerDidConnectNotification;
                 if (!c.extendedGamepad || g_merge) LOG("controller %s: %s%s", conn ? "connected" : "disconnected", pad_name(c), c.extendedGamepad ? "" : " (no extended gamepad profile: not used)");
-                pads_changed(conn ? nil : c); }];
+                pads_changed(conn ? nil : c);
+                if (conn) hq_log_setting(); }];
         dm_haptics_apple_init();
         pads_start();
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {

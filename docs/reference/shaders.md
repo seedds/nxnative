@@ -556,6 +556,15 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `dm/gfx/tests/test_early_fragment_tests.py`.
 - **Open:** with the attribute, a fragment shader that writes memory gives a picture that varies from run to run on Apple's GPU: [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#open)'s `8f470f5ce5864df7`, a per-fragment visibility flag (2026-10-30; the frame's replays: one digest without the attribute, 3 to 7 in 8 with it).
 
+### Float16 target overflow stored as infinity on the A19 Pro
+
+- **Symptom:** a white line on the horizon, one pixel high, that bloom spreads into screen-wide blobs, on the A19 Pro only. `DM_NVN_MAGSCAN` finds no non-finite pixel, because the shader that goes wrong ends in `min(x, 2048.0)` and writes a finite 2048.
+- **Cause:** a pixel shader wrote a value beyond the 16-bit float range to an R16F target. It reads back as 65504 on the M1 Pro and as +infinity on the A19 Pro. A later shader that rebuilds a position from it multiplies infinity by zero, and `min(NaN, 2048.0)` returns 2048.
+- **Fix:** general: `dmsh_limit16.py` builds a side library `<key>_bs` for each pixel shader with a colour output written straight from a constant buffer, with those outputs limited to ±65504, and reflection `limit16.colors` names them. `lim_key` (`nvn_mtl.m`) takes that library only for a pipeline with such an output on a float16 target and none on a 32-bit float target, which must keep the value. It sets bit 1 of `pso_key.atest`, so the key keeps its layout and prewarm rows stay valid. These pipelines are not in the offline archive; the device builds them on first use. An alpha-tested pipeline keeps the alpha test library, which has no limit.
+- **Limit:** computed outputs are not limited, because that would move every shader's float16 pipelines off the base library. No computed overflow has been found. RG11B10F was not measured.
+- **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md#found-on-this-game): the sky writes its far sentinel to the G-buffer's R16F target, and the deferred shader lights the pixels where that lands on far terrain. With the limit, the line no longer appears on the A19 Pro (iOS 27).
+- **Check:** `dm/gfx/tests/test_dmsh_limit16.py`, `make -C dm/gfx/tests GAME=<id> check_t_limit16`. A Mac run cannot show the fault, because the M1 Pro already stores 65504.
+
 ### Dead-code removal dropped the inputs of atomics
 
 - **Cause:** Ryujinx's `Optimizer.RemoveNode` removes a dead node, then follows each source whose last use went away into the node that produced it. It did so even when that producer has side effects, such as an atomic or a call whose result is unused. Such a producer stays in the block, but its sources lost their uses, so the next dead-code pass deleted the chain that feeds it, and the atomic read undefined values.

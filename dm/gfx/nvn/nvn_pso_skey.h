@@ -8,7 +8,7 @@ typedef struct {
     const void *vs, *fs; uint32_t cfmt[8], dfmt, sfmt, samples, blend_en, chmask, a2c; blend_st blend[8];
     va_st attr[16]; vs_st stream[16];
     uint8_t lmap[8]; const void *fsfn;
-    uint32_t atest, logic;   // atest: 1 = drawn with the alpha test, the fragment from the shader's alpha test library <key>_ba (nvn_mtl.m atest_key); last, so a prewarm row written before it reads as 0
+    uint32_t atest, logic;   // atest: bit 0 = drawn with the alpha test, the fragment from the shader's alpha test library <key>_ba (nvn_mtl.m atest_key); bit 1 = from its float16 output limit library <key>_bs (lim_key); last, so a prewarm row written before it reads as 0
                              // logic: 1 = drawn with a logic operation, the fragment from the logic operation library <key>_bl (lop_key); in what was padding (0 in older rows)
 } pso_key;
 

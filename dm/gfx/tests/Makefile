@@ -442,6 +442,11 @@ t_alpha: t_alpha.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_alpha.m $(MTL_T_SRC) $(FW)
 check_t_alpha: t_alpha
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_alpha.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_alpha "$$work"
+# The float16 output limit's pipeline choice and library loading (t_limit16.m), with its shaders from test_dmsh_limit16.py
+t_limit16: t_limit16.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_limit16.m $(MTL_T_SRC) $(FW)
+check_t_limit16: t_limit16
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_limit16.py --fixture "$$work"; ./t_limit16 "$$work"
 # Logic operations through the replay (t_logic.m), with its shaders from test_dmsh_logic.py
 t_logic: t_logic.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_logic.m $(MTL_T_SRC) $(FW)

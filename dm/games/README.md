@@ -105,6 +105,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Kirby and the Forgotten Land](01004D300C5AE000/README.md) | `01004D300C5AE000` | 1.1.0 | 11.4.0 | HAL Laboratory's engine (NintendoWare) | NVN |
 | [Luigi's Mansion 3](0100DCA0064A6000/README.md) | `0100DCA0064A6000` | 1.4.0 | 7.3.2 | Next Level Games' engine | NVN |
 | [Mario Kart 8 Deluxe](0100152000022000/README.md) | `0100152000022000` | 4.0.0, 4.0.1 | 4.4.0 | Nintendo (sead / agl / gsys, NintendoWare, Pia) | NVN |
+| [Mario Kart World](0400C3F00006E000/README.md) | `0400C3F00006E000` | v917504 (Switch 2) | 21.4.0 (Ounce) | Nintendo EPD (sead / agl / gsys) | NVN2 |
 | [Mario + Rabbids Kingdom Battle](010067300059A000/README.md) | `010067300059A000` | 1.9.589692 | 4.4.0 | Ubisoft Snowdrop | NVN |
 | [Mario + Rabbids Sparks of Hope](0100317013770000/README.md) | `0100317013770000` | 1.6.2225577 | 13.3.5 | Ubisoft Snowdrop | NVN |
 | [Mario Party Superstars](01006FE013472000/README.md) | `01006FE013472000` | 1.1.1 | 11.4.3 | NintendoWare Bezel Engine 1.55 | NVN |

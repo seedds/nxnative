@@ -485,6 +485,16 @@ static void t_motion_hid(void) {
     dm_pad_players(1); g_phone_mode = -1;
 }
 
+// SDK 19's main calls the hid server proxy's InitializeJcms command (vtable +0x508) with no null check (Donkey Kong Bananza v0, main+0x87266c)
+static void t_hid_server(void) {
+    void **srv = NULL;
+    CHECK(h_hid_SrvProxy((void **)&srv) == RES_OK && srv != NULL, "hid server proxy: success and an object");
+    if (!srv) return;
+    Result (*init)(void *, uint64_t, void *, uint64_t) = ((void **)srv[0])[0x508 / 8], (*rel)(void *) = ((void **)srv[0])[1];
+    CHECK(init(srv, 0x80, NULL, 0x4000) == RES_OK && rel(srv) == RES_OK, "hid server proxy: commands and release succeed");
+    CHECK(h_hid_ResActivate(NULL) == RES_OK && h_hid_ResDeactivate(NULL) == RES_OK, "hid applet resource: activation succeeds");
+}
+
 int main(void) {
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
     t_slots();
@@ -496,6 +506,7 @@ int main(void) {
     t_motion_live();
     t_motion_hid();
     t_rec();
+    t_hid_server();
     printf("hid players: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

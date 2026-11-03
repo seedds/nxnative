@@ -672,6 +672,21 @@ HLE_FORCE("_ZN2nn3hid9StartJcmsERKNS0_10JcmsHandleE", "Joy-Con mouse sensor: no 
 HLE_FORCE("_ZN2nn3hid8StopJcmsERKNS0_10JcmsHandleE", "Joy-Con mouse sensor: no sensor on the host", void, h_hid_JcmsStop, const uint32_t *h) { (void)h; }
 HLE_FORCE("_ZN2nn3hid13GetJcmsStatesEPNS0_9JcmsStateEiRKNS0_10JcmsHandleE", "Joy-Con mouse sensor states: none (no sensor on the host)",
           int, h_hid_JcmsStates, void *out, int n, const uint32_t *h) { (void)out; (void)n; (void)h; return 0; }
+// SDK 19 (Donkey Kong Bananza v0, nnSdk 19.3.2) links that sensor's client into main instead (InitializeJcms at main+0x8725e0, Finalize / Start / Stop after it): each takes the hid
+// server from CreateHidServerProxy and calls it through its vtable (+0x508 to +0x520) with no null check. sm refuses hid, so the proxy was null and the boot crashed at main+0x87266c.
+// The host hands out a server object whose every method succeeds and writes nothing; GetJcmsStates then reads the ring in the game's own work buffer, which nothing fills.
+// After the server, InitializeJcms activates the SDK's AppletResourceHolder, which asks the server for hid's shared memory (sdk+0x613914 on 19.3.2): the host serves the hid
+// API itself and has no such memory, so activation is a counted no-op
+// ponytail: one catch-all object for every IHidServer command; give a command its own slot if a caller needs an output written
+static Result hid_srv_ok(void) { return RES_OK; }
+static void *g_hid_srv_vt[0x200], *g_hid_srv[1] = {g_hid_srv_vt};
+HLE_FORCE("_ZN2nn3hid6server20CreateHidServerProxyEPNS_2sf13SharedPointerINS0_10IHidServerEEE", "hid server proxy (sm refuses hid) → a host object whose every command succeeds with no output",
+          Result, h_hid_SrvProxy, void **out) {
+    if (!g_hid_srv_vt[0]) for (size_t i = 0; i < sizeof g_hid_srv_vt / sizeof *g_hid_srv_vt; i++) g_hid_srv_vt[i] = (void *)hid_srv_ok;   // same value from any thread
+    *out = g_hid_srv; return RES_OK;
+}
+HLE_FORCE("_ZN2nn3hid6detail20AppletResourceHolder8ActivateEv", "hid applet resource (shared memory from the hid server): the host serves hid itself", Result, h_hid_ResActivate, void *self) { (void)self; return RES_OK; }
+HLE_FORCE("_ZN2nn3hid6detail20AppletResourceHolder10DeactivateEv", "hid applet resource: nothing to release", Result, h_hid_ResDeactivate, void *self) { (void)self; return RES_OK; }
 // The Switch 2's pointer on top of those sensors (Nmouse; Fire Emblem Fortune's Weave initializes it at boot with the 1920x1080 screen it maps the pointer to, main+0x650a24). InitializeNmouse opens the
 // hid service as InitializeJcms does (its Result aborts: sdk+0x6d5340). No controller of the host has the sensor, so there are no handles, and the calls on a handle have nothing to do
 HLE_FORCE("_ZN2nn3hid16InitializeNmouseEPvmii", "Joy-Con mouse pointer: no hid service; no sensor on the host", void, h_hid_NmouseInit, void *work, uint64_t size, int w, int h) { (void)work; (void)size; (void)w; (void)h; }

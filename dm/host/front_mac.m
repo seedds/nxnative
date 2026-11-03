@@ -145,6 +145,7 @@ static void on_key(NSEvent *e, int down) {
 static pad_slots g_slots;
 static GCController *g_held[DM_PLAYERS];   // the controller of each slot, kept alive while it holds it (the slot table keys on its pointer)
 static int g_merge, g_kbd_own;
+static int g_fe_pads;   // DM_PADS_FRONTEND=1: a front end running the host in its own process (libdmhost) reads the GameController controllers itself (dm_frontend_input_set)
 static int32_t pad_axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * DM_STICK_MAX); }
 // A controller's state for player p, GameController or raw HID: a pressed button or a stick past 15% hides the pointer (cursor_hide_for_input), a resting stick's drift does not
 static void pad_set(int p, uint64_t m, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
@@ -184,6 +185,7 @@ static int merge_pads_left(GCController *gone) {
 }
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil on a connect)
 static void pads_changed(GCController *gone) {
+    if (g_fe_pads) return;   // the front end's controllers: none of them takes a player slot here
     if (g_merge) {
         int any = 0;
         for (GCController *c in GCController.controllers) if (c.extendedGamepad && c != gone) {
@@ -275,7 +277,9 @@ static void hidpad_detach(hid_pad *d) {   // d is already off g_hidpads
     dm_pad_players(pad_slot_mask(&g_slots));
 }
 static void pads_start(void) {
-    const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
+    const char *e = getenv("DM_PADS_FRONTEND"); g_fe_pads = e && atoi(e);
+    if (g_fe_pads) LOG("front end: GameController controllers belong to the app that hosts the engine (DM_PADS_FRONTEND); raw HID ones stay the host's");
+    e = getenv("DM_PAD_MERGE"); g_merge = !g_fe_pads && e && atoi(e);   // merged, the host would read every controller itself
     e = getenv("DM_KBD_PLAYER"); g_kbd_own = !g_merge && e && !strcmp(e, "own");
     static const char kbd = 0;
     if (g_kbd_own) pad_slot_take(&g_slots, &kbd, "keyboard");   // holds player 1 for good

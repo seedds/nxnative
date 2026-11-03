@@ -653,6 +653,27 @@ Notes on these steps:
 - The unsigned build pins its build product and intermediate directories inside `$W/build/ios/pkg/dd`, independently of Xcode's Locations preference.
 - hactool cannot read every update (Mario 1.2.1's patch NCA gives "Invalid BKTR layout!"), which is why `nx_extract` uses LibHac.
 
+### Building selected Mac shaders
+
+A Mac development run can use a partial NVN shader library. The missing-library lines in the host log name 16-digit keys from column four of the game's `shader_map.tsv`. After the shader split, pass the keys you need as positional arguments after the package and output directories. A selected vertex shader also builds its known pixel-shader dependencies. With no keys the builder selects the entire map.
+
+For example, from the repository root, collect the mapped shaders that failed to load during one Pokopia run and build them in a separate cache. Use the same profile as the split, including its derived profile directory when applicable.
+
+```sh
+build="<dump folder>/0400A3A01EE4C000_build"
+log="<path to the Mac host log>"
+keys="$build/missing-shader-keys.txt"
+sed -En 's/.*\[RED\] shader ([0-9a-f]{16}) \([^)]*\) failed to load:.*/\1/p' "$log" | sort -u > "$keys"
+if [ -s "$keys" ]; then
+    DM_GAME=0400A3A01EE4C000 DMSH_TARGETS=mac xargs python3 dm/gfx/tools/own_compilers.py \
+        "$build/shader/pkg" "$build/shader/partial-cache" < "$keys"
+fi
+```
+
+Set `DM_MSL_DIR="$build/shader/partial-cache"` in the manual Mac run command. Later areas may request other keys. Repeat with the next log to extend the library. If a key still fails to load, check the builder's translation failures. A fresh partial library has no full-build stamp or derived uniform tables. The Mac app packer calls the builder with no keys and requires the full-build stamp, so repeating `--platform mac-app` still schedules the full library.
+
+`DMSH_PREFILL` takes a local cache root containing earlier `b-*` libraries, as described above. `J` sets the number of shader workers. The packer defaults to the logical CPU count. If the Mac is under memory pressure, compare completed shaders per minute at a lower setting such as `J=4` with comparable uncached work. Load average alone cannot identify the fastest setting.
+
 ## Prewarm lists
 
 Metal compiles each combination of shaders and pipeline settings for the GPU the first time it is used. Each takes tens of milliseconds, so a burst of them on entering a level is a visible freeze. The host records what it had to compile and rebuilds those pipelines on a background queue at the next launch:

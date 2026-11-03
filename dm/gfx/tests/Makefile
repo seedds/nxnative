@@ -392,6 +392,14 @@ t_image_alias: t_image_alias.m $(MTL_T_DEP)
 check_t_image_alias: t_image_alias
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_image_alias
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_image_alias
+# A game's upscaler drawn by MetalFX: built for Donkey Kong Bananza's profile (its list of upscaler shaders); with and without the switch
+t_upscaler_mfx: t_upscaler_mfx.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_upscaler_mfx.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_upscaler_mfx
+# (MetalFX's Metal 4 scaler stops under Metal validation on a barrier-stage setting of its own that has no public API, "_outputTextureBarrierStages not set": its run is without it)
+check_t_upscaler_mfx: t_upscaler_mfx
+	DM_UPSCALER=metalfx ./t_upscaler_mfx
+	MTL_DEBUG_LAYER=1 ./t_upscaler_mfx
 t_image_usage: t_image_usage.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_usage.m $(MTL_T_SRC) $(FW)
 check_t_image_usage: RUN_ENV = MTL_DEBUG_LAYER=1

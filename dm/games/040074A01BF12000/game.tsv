@@ -44,3 +44,6 @@ render_cond	on
 # Dynamic resolution and the present interval read the GPU time between the frame's timestamp reports (about 26 a frame): with one time for the whole submission they read about 0,
 # the game kept 2304x1296 at 46 ms of GPU a frame and fell to interval 3 (15 fps before the odd-interval fix of the display link, 20 after). Each report takes its segment's GPU start / end: in the slow areas it steps down to 1152x648 with its upscaler and holds 30 fps
 gpu_timestamps	segment
+# The game's upscaler, agl's NDSR network (agl_ndsr.pck: these 24 compute variants, each one texture in and one image out), which the launcher's Upscaler: MetalFX (DM_UPSCALER=metalfx)
+# replaces with MetalFX's spatial scaler: 3.5-5 ms a frame on an M1 in the heavy areas (960x540 → 1920x1080), against 0.97 ms
+metalfx_upscaler	06946f57dd8833c3,0e351bd8ef324466,131d7dcc054f92b9,14a8aaf3e0a9edbd,1a4c427f99c58569,1c144a902af468de,3b716012fcd10575,446761e211ec30d8,5c5876712b1ebd78,5e0110401b4a3d8f,75e2ecd80c1e9fb8,7629d857a0a93833,7a8dcb28fa38987d,7ae23d53ffb1c2ff,8df4d4ba8fa94292,9e5597e2fcfc3c2f,a9fed0568668bf97,c56db3d5a0f1b5af,c8910045dc5b59af,d19ea940b265456f,eb0af4c68c522092,f13b72178b0d5e9f,f585ba048398f697,f8a6a2e42fe156a6

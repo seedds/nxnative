@@ -18,7 +18,7 @@ A Switch 2 game: update v655360 (the title screen says Ver. 2.0.1), SDK 20.5.25 
 
 ## Shaders
 
-- `cc679c7b4d3e703c` does not translate (`LDC with a bindless bank`). The boot loads it and logs a red line; it has not been seen drawing (open). The census also lists f55 three times, two more of that LDC and 16 BRX with no target (open).
+- Resolved: `cc679c7b4d3e703c` did not translate (`LDC with a bindless bank or an address mode`): an indexed read of c1 with the bank in the address register, found on Hyrule Warriors: Age of Imprisonment, which ships the same shader ([LDC with the bank in its address register](../../../docs/reference/shaders.md#ldc-with-the-bank-in-its-address-register-is)); not rerun on this game. The census also lists f55 three times, two more of that LDC and 16 BRX with no target: whether they are the forms since translated ([Barrier moves around warp shuffles](../../../docs/reference/shaders.md#barrier-moves-around-warp-shuffles)) is not checked (open).
 - A `3D binding fallback` line fires once at about frame 2100: a 2D 8x8 texture in a 3D slot. The shader is not identified (open).
 
 ## Rendering

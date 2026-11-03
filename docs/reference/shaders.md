@@ -1290,6 +1290,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** no game: [GitHub issue #673](https://github.com/seedds/nxnative/issues/673), `t_pso_bundle` on an M4 Pro with macOS 26.6.2 and Xcode 27.1.
 - **Check:** `dm/tools/tests/test_pso_offline.py` (`test_macos_takes_this_macs_major_version`). `t_pso_bundle` builds its archive with the default and opens it on macOS 27.2: 52 checks pass with its libraries built for 27.0 and for 26.6 (`MACOSX_DEPLOYMENT_TARGET=26.6`), the mirror of the reporter's Mac; the same libraries in an archive made for 26.6 failed the 10 checks. Open: no run on macOS 26.x here.
 
+### Python memory during offline pipeline archive preparation
+
+- **Symptom:** `pso_offline.py` holds about 1.8 GB while `metal-tt` builds an archive of 140,036 bases, and the system's memory view shows the build far larger than that (180.5 GB) before `metal-tt` fails or is stopped.
+- **Cause:** the builder made the pipeline script (503 MB at 140,036 bases) as one JSON string and as bytes, read the previous script whole to compare them, and serialized the whole key input once more; the descriptors stayed referenced while `metal-tt` ran. That is at most about 1.8 GB: the 180.5 GB were `metal-tt` and its compiler processes, not Python.
+- **Fix:** `write_script` streams the script to `bases.mtl4-json.partial` and replaces the previous script only when the two differ; `archive_key` hashes the same JSON as it is encoded (the keys of earlier builds still match); the descriptors are released before `metal-tt` starts. Measured with 140,036 synthetic bases: peak 1.83 → 0.45 GB, 1.81 → 0.06 GB held while `metal-tt` runs, about 11 s more encoding (Python 3.15), byte-identical script and key.
+- **Found on:** [Mario Party Superstars](../../dm/games/01006FE013472000/README.md) ([GitHub issue #1022](https://github.com/seedds/nxnative/issues/1022), [PR #1024](https://github.com/seedds/nxnative/pull/1024)). Open: why `metal-tt` failed after 76 minutes there, and how its memory grows with the number of bases.
+- **Check:** `dm/tools/tests/test_pso_offline.py` (`test_large_script_memory_and_compatible_archive_key`).
+
 ### Offline pipeline archive on a full disk
 
 - **Symptom:** `[RED] pso_offline: metal-tt failed for applegpu_<gpu> (exit 1)` with only `applegpu-nt command failed` in `metal-tt.<arch>.log`.

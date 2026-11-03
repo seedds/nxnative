@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import tracemalloc
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
@@ -159,6 +160,37 @@ class Build(unittest.TestCase):
         args = ['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), *extra]
         with mock.patch.object(po.subprocess, 'run', self.fake_run), mock.patch.dict(os.environ, DM_GAMES_DIR=str(self.prof.parent)), contextlib.redirect_stdout(io.StringIO()):
             return po.main(args)
+
+    def test_large_script_memory_and_compatible_archive_key(self):
+        # Share the two synthetic library files but give every base a distinct entry pair.
+        bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(512)]
+        at_compile = []
+        compiler = self.fake_run
+        def measure(cmd, **kwargs):
+            if '-o' in cmd:
+                at_compile.append(tracemalloc.get_traced_memory()[0])
+            return compiler(cmd, **kwargs)
+        with mock.patch.object(po, 'plan', return_value=(bases, [], {})), mock.patch.object(self, 'fake_run', measure):
+            tracemalloc.start()
+            try:
+                self.main('--os-min', '27.0')
+                peak = tracemalloc.get_traced_memory()[1]
+            finally:
+                tracemalloc.stop()
+        path = self.work / 'bases.mtl4-json'
+        self.assertFalse((self.work / 'bases.mtl4-json.partial').exists())
+        self.assertLess(peak, 3 * path.stat().st_size, 'serializing descriptors must not retain multiple full JSON buffers')
+        self.assertEqual(len(at_compile), 1)
+        self.assertLess(at_compile[0], path.stat().st_size, 'the compiler only needs the script on disk')
+        config = json.loads(path.read_bytes())
+        self.assertEqual(len(config['pipeline_descriptors']['render_pipeline_descriptors']), len(bases))
+        # Keys from earlier builds must continue to hit. Only library locations are normalized.
+        for lib in config['libraries']:
+            lib['path'] = lib['label'] + '.metallib'
+        inputs = dict(format=1, configuration=config, libraries=po.library_digest(self.lib, bases),
+                      arch='applegpu_g18p', platform='ios', os_min='27.0', toolchain=self.compiler)
+        expected = hashlib.sha256(json.dumps(inputs, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        self.assertEqual((self.work / 'key.applegpu_g18p').read_text().strip(), expected)
 
     def test_build_reuse_and_stamp(self):
         self.assertEqual(self.main('--gpu', 'g18p'), 0)

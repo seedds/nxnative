@@ -2,7 +2,7 @@
 
 The base game, 1.0.0 (v0), SDK 15.3.2. Good-Feel's game on Unreal Engine 4.27 (project `PJ037`, one `PJ037-Switch.pak`) with Nintendo's NVN RHI and Wwise. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`.
 
-Status: plays on the Mac. From a new game, on chain `be66496d6205`, a headless run went through the opening movie, the title, the lobby, the ticket event, the opening cutscene and the whole first swordfighter play: ribbon fights, the forest's three spotlight plants, the first Sparkle Gem, the castle, the transformation and sword fights, then the lobby with 1 Sparkle Gem and a written save. On chain `16dec73a79e7` that save loads and the ninja play's first set renders. No crash, and the only red lines are the [size queries](#found-on-this-game). Not tested on the iPhone: no IPA has been built.
+Status: plays on the Mac. From a new game, on chain `be66496d6205`, a headless run went through the opening movie, the title, the lobby, the ticket event, the opening cutscene and the whole first swordfighter play: ribbon fights, the forest's three spotlight plants, the first Sparkle Gem, the castle, the transformation and sword fights, then the lobby with 1 Sparkle Gem and a written save. On chain `16dec73a79e7` that save loads and the ninja play's first set renders, with no crash. On chain `a86eb233a4f0`, with the [size query fix](#found-on-this-game), the same route has no red lines and holds 60 fps; later chains have not been run with this game. Not tested on the iPhone: no IPA has been built.
 
 ## What it needs
 
@@ -20,7 +20,7 @@ The pak is a version 11 pak with an encrypted index; `uepak.py` finds its key in
 
 ## Frame rate
 
-At `fps_target 60` the lobby, the cutscenes and the first play hold 60 fps on an M6, with dips to about 57 when enemies appear (`[longframe]` lines of 40–140 ms with 5–9 ms of GPU time, so on the CPU; the cause is open) and one 300-frame window at 24 fps across the transformation, whose pipelines the prewarm list did not hold yet in that run. The game's speed follows real time: from the same save, a 3 s walk in the lobby ends in about the same place at 30 and at 60 fps, and the opening's dialogue advances with the same presses. `DM_FPS_TARGET=30` restores the game's own rate.
+At `fps_target 60` the lobby, the cutscenes and the first play hold 60 fps on an M6, with one 300-frame window at 24 fps across the transformation, whose pipelines the prewarm list did not hold yet in that run. With no screenshots and a ticking display link, 112 s of lobby and ninja play (frames 4727–11426) have no long frame at all. About a second of frames of 40–120 ms remains where a scene starts (with up to 70 ms of submit and a few new pipelines), which was not looked into further. The other `[longframe]` lines of these runs, 40–140 ms with little GPU time, came from the runs themselves: [Long frames a test run makes itself](../../../docs/reference/frame-rate.md#long-frames-a-test-run-makes-itself). The game's speed follows real time: from the same save, a 3 s walk in the lobby ends in about the same place at 30 and at 60 fps, and the opening's dialogue advances with the same presses. `DM_FPS_TARGET=30` restores the game's own rate.
 
 ## Memory
 
@@ -39,7 +39,8 @@ With a save past the first play, the lobby is taken over and the ninja door, the
 ## Found on this game
 
 - [Wwise loses the span header in a virtual block from Unreal's heap](../../../docs/reference/memory.md#wwise-loses-the-span-header-in-a-virtual-block-from-unreals-heap): 10 of 16 boots crashed in `AK::MemoryMgr::Init` before the fix ([#996](https://github.com/seedds/nxnative/issues/996)).
-- [A size query on a 3D texture gets a 2D slot](../../../docs/reference/shaders.md#a-size-query-on-a-3d-texture-gets-a-2d-slot): open. Up to 19 red lines per run, `declares slot 128 as Metal type 2, texture ID … is type 7`, formats 0x9a and 0x9c, all from a shader's size query on a volume it also samples.
+- [A size query on a 3D texture gets a 2D slot](../../../docs/reference/shaders.md#a-size-query-on-a-3d-texture-gets-a-2d-slot): resolved. Up to 19 red lines per run before the fix, `declares slot 128 as Metal type 2, texture ID … is type 7`, formats 0x9a and 0x9c, all from a shader's size query on a volume it also samples.
+- [Long frames a test run makes itself](../../../docs/reference/frame-rate.md#long-frames-a-test-run-makes-itself): the bursts every 60 s and the frames of about 60 ms that looked like CPU hitches.
 
 ## Open
 
@@ -47,4 +48,3 @@ With a save past the first play, the lobby is taken over and the ninja door, the
 - The sound was not heard. The runs were muted; a `DM_AUDIO_DUMP` of 160 s through the opening holds the game's mix, with signal in every 10 s window (peak 29,489).
 - A window was not tested: every run was headless (`DM_WINDOW=0`).
 - Only the first play was finished. Of the others, only the ninja play's first set was seen; their costumes and stages are untested.
-- The long CPU frames in [Frame rate](#frame-rate).

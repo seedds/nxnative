@@ -1289,6 +1289,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** no game: [GitHub issue #673](https://github.com/seedds/nxnative/issues/673), `t_pso_bundle` on an M4 Pro with macOS 26.6.2 and Xcode 27.1.
 - **Check:** `dm/tools/tests/test_pso_offline.py` (`test_macos_takes_this_macs_major_version`). `t_pso_bundle` builds its archive with the default and opens it on macOS 27.2: 52 checks pass with its libraries built for 27.0 and for 26.6 (`MACOSX_DEPLOYMENT_TARGET=26.6`), the mirror of the reporter's Mac; the same libraries in an archive made for 26.6 failed the 10 checks. Open: no run on macOS 26.x here.
 
+### Python memory during offline pipeline archive preparation
+
+- **Symptom:** preparing a large offline archive increases the builder's memory use before the compiler starts.
+- **Cause:** the builder materialized the pipeline script as a JSON string and as bytes, read the previous script in full to compare it, and serialized the entire cache-key input again. The script bytes and descriptors remained live during compilation.
+- **Fix:** stream the script and the key hash, compare the on-disk scripts in chunks and release the descriptors before starting the compiler.
+- **Found on:** [Mario Party Superstars](../../dm/games/01006FE013472000/README.md). The Python allocation pattern is reproducible with synthetic descriptors. The cause of the reported compiler exit and the compiler processes' memory use remain open.
+
 ### Offline pipeline archive on a full disk
 
 - **Symptom:** `[RED] pso_offline: metal-tt failed for applegpu_<gpu> (exit 1)` with only `applegpu-nt command failed` in `metal-tt.<arch>.log`.

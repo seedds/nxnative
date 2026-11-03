@@ -42,6 +42,8 @@ Everything else needed was general: see [Found on this game](#found-on-this-game
 
 ## Found on this game
 
+- [Memory during offline archive preparation](../../../docs/reference/shaders.md#python-memory-during-offline-pipeline-archive-preparation): the 1.1.1 report has 140,036 pipeline bases. The compiler failure remains open ([#1022](https://github.com/seedds/nxnative/issues/1022)).
+
 General changes first needed here; each applies to every game:
 
 - **Texture and sampler pools for handles traced to no slot** (`Program.cs`, vendored `BindlessElimination.cs`, `dmsh_build.py` `pool_arrays`, `nvn_mtl.m` `pool_gpu`): [Texture handles from game memory index the pools](../../../docs/reference/shaders.md#texture-handles-from-game-memory-index-the-pools).

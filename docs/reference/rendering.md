@@ -438,6 +438,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** such clears are drawn as one triangle over the pass in the open render encoder (`clear_color_tri` / `clear_ds_tri` in `nvn_mtl.m`, adapted from MacNativeGames, MIT). The pipeline has the pass's formats, the clear's mask as the write mask of its slot and no writes to the other slots. Depth is `ALWAYS` (and written for a depth clear), stencil `REPLACE` through the clear's write mask, the scissor is clamped as for draws, and visibility counting is off for the triangle. The value comes from the frame arena through the triangle's own argument tables, and the draws' tables are put back after it. A clear outside a pass opens the pass as a draw would. Clears a load action can express keep it. Two cases are still cleared whole, logged once: a depth / stencil clear with a scissor outside a pass, and a partial stencil write mask.
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md): it issues the first whole-cleared case (a depth clear scissored to 8×8 of a 64×64 target), and so does Wonder ([Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md)). With `render_cond` ([Conditional rendering evaluated at replay](#conditional-rendering-evaluated-at-replay)) TOTK's scissored colour clears are all skipped; without it they are 50×50 tiles of a 500×400 target cleared to opaque black, about five a frame. [Metroid Dread](../../dm/games/010093801237C000/README.md) logged the red line once while loading on its smoke route.
 
+### A depth clear over the whole target with a partial stencil mask
+
+- **Symptom:** a pass loads a whole depth/stencil target every frame only to clear it: Donkey Kong Bananza clears a 2880x1620 Depth32F-S8 target with stencil mask `0x1`, before any pass is open, and loads 22.8 MB a frame for it.
+- **Cause:** any stencil mask other than 0 or 0xff takes `clear_ds_tri`, for depth too, and the triangle's pass loads both planes.
+- **Fix:** with no pass open and a depth clear that covers the whole target, the depth half is the next pass's load action (`OP_CLEAR_DS` in `nvn_mtl.m`), and only the stencil is drawn. A clear that is partial in either sense, or made with a pass open, keeps the triangle for both.
+- **Check:** `t_clear_ds`: the depth and stencil planes after a masked stencil clear with a full depth clear, outside and inside a pass.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) ([issue #1138](https://github.com/seedds/nxnative/issues/1138)): on an M2 MacBook Air the pass went from 346 to 284 µs of GPU time and its load from 22.8 MB to 4.6 MB a frame.
+
 ### Depth16 load-clears match fragment writes
 
 - **Symptom:** a tile grid in Ultrahand and Recall highlights; an `EQUAL` depth test rejects fragments writing the same depth as a cleared Depth16 target.

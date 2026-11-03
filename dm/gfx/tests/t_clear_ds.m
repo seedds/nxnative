@@ -26,6 +26,8 @@ int main(void) { @autoreleasepool {
         {0, {2,1,0,2}, 1, 255, "empty scissor writes nothing"},
         {0, {-1,-1,3,3}, 1, 15, "negative scissor origin is clamped"},
         {0, {0,0,8,8}, 1, 255, "full clear remains a load action"},
+        {0, {0,0,8,8}, 1, 15, "outside-pass full depth clear with a masked stencil: depth by the load action, stencil by the triangle"},
+        {1, {0,0,8,8}, 1, 15, "inside-pass full depth clear with a masked stencil: both by the triangle"},
         {0, {0,0,8,8}, 0, 0, "new texture initialization zeros both planes"},
     };
     for (unsigned i=0; i<sizeof cases/sizeof *cases; i++) {

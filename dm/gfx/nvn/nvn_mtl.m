@@ -269,7 +269,7 @@ void mtl_res_stats(char *out, size_t n) {
     size_t o = snprintf(out, n, "commits %llu / %.1f ms, added %llu, %.0f MB (", (unsigned long long)g_rs_commits, g_rs_commit_ns / 1e6, (unsigned long long)tn, tb / 1048576.0);
     for (int i = 0; i < 4 && o < n; i++) { int best = -1; for (int k = 0; k < RS_SITES; k++) if (g_rs_site[k].n && (best < 0 || g_rs_site[k].bytes > g_rs_site[best].bytes)) best = k;
         if (best < 0) break; o += snprintf(out + o, n - o, "%sline %d: %llu, %.0f MB", i ? ", " : "", g_rs_site[best].line, (unsigned long long)g_rs_site[best].n, g_rs_site[best].bytes / 1048576.0); g_rs_site[best].n = 0; }
-    if (o < n) snprintf(out + o, n - o, "), removed %llu", (unsigned long long)g_rs_rm);
+    if (o < n) snprintf(out + o, n - o, "), removed %llu, %lu allocations in the set (%.0f MB)", (unsigned long long)g_rs_rm, g_res ? (unsigned long)g_res.allocationCount : 0ul, g_res ? g_res.allocatedSize / 1048576.0 : 0.0);
     memset(g_rs_site, 0, sizeof g_rs_site); g_rs_rm = g_rs_commits = g_rs_commit_ns = 0;
     pthread_mutex_unlock(&g_res_mu);
 }
@@ -499,20 +499,29 @@ static NSHashTable *g_dead_pools;
 enum { PC_BITS = 10, PC_RECENT = 8 };
 static _Atomic uint64_t g_pool_gen = 1;
 typedef struct { uintptr_t lo, hi, base; __unsafe_unretained id<MTLBuffer> buf; uint64_t gpu; } pc_ent;
-static __thread struct { uint64_t gen; unsigned next; pc_ent r[PC_RECENT], e[1u << PC_BITS]; } t_pc;   // an empty entry has hi 0
+typedef struct { uint64_t gen; unsigned next; pc_ent r[PC_RECENT], e[1u << PC_BITS]; } pc_cache;   // an empty entry has hi 0
+static __thread pc_cache t_pc;
+// The submit thread (about 20,000 lookups a frame) takes a cache that is a plain static: a __thread access is a call into dyld's TLV getter on Apple platforms, about a third of each
+// lookup. Submissions are serialized (g_sub_mu), so one thread at a time uses it; a thread that submits after another finds the cache of the earlier one, which is as valid
+// (entries are checked against g_pool_gen). Every other thread keeps its own __thread cache
+static pc_cache g_pc_main;
+static pthread_t g_sub_thread; static _Atomic int g_sub_thread_set;
+static inline pc_cache *pc_mine(void) { return atomic_load_explicit(&g_sub_thread_set, memory_order_relaxed) && pthread_equal(pthread_self(), g_sub_thread) ? &g_pc_main : &t_pc; }
 static inline unsigned pc_slot(uint64_t addr) { return (unsigned)(((addr >> 12) * 0x9E3779B97F4A7C15ull) >> (64 - PC_BITS)); }
 static inline const pc_ent *pc_get(uint64_t addr, uint64_t len) {
-    if (t_pc.gen != atomic_load_explicit(&g_pool_gen, memory_order_acquire)) return NULL;
-    pc_ent *c = &t_pc.e[pc_slot(addr)];
+    pc_cache *tc = pc_mine();
+    if (tc->gen != atomic_load_explicit(&g_pool_gen, memory_order_acquire)) return NULL;
+    pc_ent *c = &tc->e[pc_slot(addr)];
     if (addr >= c->lo && addr + len <= c->hi) return c;
-    for (unsigned k = 0; k < PC_RECENT; k++) { const pc_ent *x = &t_pc.r[k]; if (addr >= x->lo && addr + len <= x->hi) { *c = *x; return c; } }
+    for (unsigned k = 0; k < PC_RECENT; k++) { const pc_ent *x = &tc->r[k]; if (addr >= x->lo && addr + len <= x->hi) { *c = *x; return c; } }
     return NULL;
 }
 static void pc_put(int i, uint64_t addr) {   // caller holds g_mu, pool i is resident and holds addr
+    pc_cache *tc = pc_mine();
     uint64_t gen = atomic_load_explicit(&g_pool_gen, memory_order_relaxed);
-    if (t_pc.gen != gen) { memset(t_pc.r, 0, sizeof t_pc.r); memset(t_pc.e, 0, sizeof t_pc.e); t_pc.gen = gen; }
+    if (tc->gen != gen) { memset(tc->r, 0, sizeof tc->r); memset(tc->e, 0, sizeof tc->e); tc->gen = gen; }
     pc_ent c = {g_pools[i].lo, g_pools[i].hi, g_pools[i].base, g_pools[i].buf, g_pools[i].gpu};
-    t_pc.e[pc_slot(addr)] = c; t_pc.r[t_pc.next++ % PC_RECENT] = c;
+    tc->e[pc_slot(addr)] = c; tc->r[tc->next++ % PC_RECENT] = c;
 }
 static _Atomic uint64_t g_reg_gen = 1;   // Change generation of memory pool / texture / sampler registration: one of the invalidation conditions for argument buffer reuse
 // On-demand residency of memory pools: putting a zero-copy buffer into the residency set makes iOS read the whole pool into memory and pin it as wired, even a pool the game never uses
@@ -778,7 +787,6 @@ static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site);
 static void up_flush(void);
 // The upload batch belongs only to the submit thread (the thread that called mtl_sub_begin): the batch's encoder cannot be used across threads. Every entry point asserts current thread == submit thread,
 // and on mismatch prints the stack and aborts on the spot - so that 'another thread touched the batch' is exposed deterministically on Mac too, not by timing (real iOS device stuck at the main menu: the present thread flushed the submit thread's batch via q_cb).
-static pthread_t g_sub_thread; static _Atomic int g_sub_thread_set;
 static int on_sub_thread(void) { return atomic_load(&g_sub_thread_set) && pthread_equal(pthread_self(), g_sub_thread); }
 static void up_owner_check(const char *where) {
     if (!atomic_load(&g_sub_thread_set) || on_sub_thread()) return;
@@ -1128,32 +1136,74 @@ enum { UBD_PF = 1024 };
 static uint64_t g_ubd_pf[UBD_PF];   // pages (address >> 12, +1) the deferred updates touch, open addressing; cleared when the list is landed
 static int g_ubd_wide;              // an update spans more than 16 pages: the filter is skipped
 static inline unsigned ubd_pf_slot(uint64_t pg) { return (unsigned)((pg * 0x9E3779B97F4A7C15ull) >> 54) & (UBD_PF - 1); }
+// Pages inside the guest address space (0x70_0000_0000, 8 GB here on the Mac and on iOS) are kept in a bitmap as well: one load per page instead of probing the table, which was
+// most of the filter's cost (each draw asks for every buffer it binds). Pages outside it use the table only
+enum { UBD_BM_SHIFT = 21 };   // pages in the window
+static const uint64_t UBD_BM_BASE = 0x7000000000ull;
+static uint64_t g_ubd_bm[(1u << UBD_BM_SHIFT) / 64];
+static inline int ubd_bm_in(uint64_t lo, uint64_t hi) { return lo >= UBD_BM_BASE && ((hi - 1 - UBD_BM_BASE) >> 12) < (1u << UBD_BM_SHIFT); }
 static void ubd_pf_add(uint64_t lo, uint64_t hi) {
     if (((hi - 1) >> 12) - (lo >> 12) > 16) { g_ubd_wide = 1; return; }
+    if (ubd_bm_in(lo, hi)) for (uint64_t pg = (lo - UBD_BM_BASE) >> 12; pg <= (hi - 1 - UBD_BM_BASE) >> 12; pg++) g_ubd_bm[pg >> 6] |= 1ull << (pg & 63);
     for (uint64_t pg = lo >> 12; pg <= (hi - 1) >> 12; pg++) { unsigned k = ubd_pf_slot(pg);
         while (g_ubd_pf[k] && g_ubd_pf[k] != pg + 1) k = (k + 1) & (UBD_PF - 1);
         g_ubd_pf[k] = pg + 1; }
 }
 static inline int ubd_pf_hit(uint64_t lo, uint64_t hi) {
     if (g_ubd_wide || ((hi - 1) >> 12) - (lo >> 12) > 16) return 1;
+    if (ubd_bm_in(lo, hi)) { for (uint64_t pg = (lo - UBD_BM_BASE) >> 12; pg <= (hi - 1 - UBD_BM_BASE) >> 12; pg++) if (g_ubd_bm[pg >> 6] >> (pg & 63) & 1) return 1; return 0; }
     for (uint64_t pg = lo >> 12; pg <= (hi - 1) >> 12; pg++) { unsigned k = ubd_pf_slot(pg);
         while (g_ubd_pf[k]) { if (g_ubd_pf[k] == pg + 1) return 1; k = (k + 1) & (UBD_PF - 1); } }
     return 0;
 }
-static int ubd_hits(uint64_t lo, uint64_t hi) {
+static void ubd_bm_clear(void) {   // the pages of the listed updates (an update a later one replaced lies inside it): before the list is emptied
+    for (int i = 0; i < g_nubd; i++) { uint64_t lo = g_ubd[i].lo, hi = g_ubd[i].hi;
+        if (hi > lo && ((hi - 1) >> 12) - (lo >> 12) <= 16 && ubd_bm_in(lo, hi)) for (uint64_t pg = (lo - UBD_BM_BASE) >> 12; pg <= (hi - 1 - UBD_BM_BASE) >> 12; pg++) g_ubd_bm[pg >> 6] &= ~(1ull << (pg & 63)); }
+}
+static int ubd_hits_scan(uint64_t lo, uint64_t hi) {
     if (hi <= lo || !ubd_pf_hit(lo, hi)) return 0;
     for (int i = 0; i < g_nubd; i++) if (lo < g_ubd[i].hi && g_ubd[i].lo < hi) return 1;
     return 0;
 }
 // Whether the deferred updates cover [lo, hi) entirely (any order of overlap): the union of their ranges clipped to it, swept from lo
-static int ubd_covers(uint64_t lo, uint64_t hi) {
+static int ubd_covers_scan(uint64_t lo, uint64_t hi) {
     for (uint64_t at = lo; at < hi;) { uint64_t next = at;
         for (int i = 0; i < g_nubd; i++) if (g_ubd[i].lo <= at && g_ubd[i].hi > next) next = g_ubd[i].hi;
         if (next == at) return 0; at = next; }
     return 1;
 }
+// Answers of the two lookups above for the list as it is now (g_ubd_ver changes with every update deferred and every landing). Each draw asks about every buffer it binds, about
+// 29,000 times a frame in Breath of the Wild, and consecutive draws bind mostly the same ranges between two updates: the scans of the list (up to 160 updates kept across passes) and its
+// page filter were about 8% of the submit thread's cycles. A small table remembers the last answers per range. DM_NVN_UBD_MEMO=0 always scans (diagnostic)
+static uint64_t g_ubd_ver = 1;
+typedef struct { uint64_t lo, hi, ver, shadow; int8_t hits, covers; } ubd_memo_ent;   // shadow: ubd_shadow's GPU address (frame arena, kept until the submission ends, when the list is landed), 0 = not made
+enum { UBD_MEMO = 512 };
+static ubd_memo_ent g_ubd_memo[UBD_MEMO];
+__attribute__((noinline)) static int ubd_memo_init(void) { const char *e = getenv("DM_NVN_UBD_MEMO"); int v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_UBD_MEMO=0: deferred update lookups scan the list every time"); return v; }
+static int g_ubd_memo_on = -1;
+static inline int ubd_memo_on(void) { if (__builtin_expect(g_ubd_memo_on < 0, 0)) g_ubd_memo_on = ubd_memo_init(); return g_ubd_memo_on; }
+static inline ubd_memo_ent *ubd_memo(uint64_t lo, uint64_t hi) {
+    ubd_memo_ent *m = &g_ubd_memo[(unsigned)(((lo * 0x9E3779B97F4A7C15ull) ^ (hi * 0xC2B2AE3D27D4EB4Full)) >> 55) & (UBD_MEMO - 1)];
+    if (m->ver != g_ubd_ver || m->lo != lo || m->hi != hi) { m->lo = lo; m->hi = hi; m->ver = g_ubd_ver; m->hits = m->covers = -1; m->shadow = 0; }
+    return m;
+}
+static int ubd_hits(uint64_t lo, uint64_t hi) {
+    if (hi <= lo || !ubd_pf_hit(lo, hi)) return 0;   // the page filter answers most lookups (vertex and index buffers, other pools) without the table
+    if (!ubd_memo_on()) return ubd_hits_scan(lo, hi);
+    ubd_memo_ent *m = ubd_memo(lo, hi); if (m->hits < 0) m->hits = (int8_t)ubd_hits_scan(lo, hi); return m->hits;
+}
+static int ubd_covers(uint64_t lo, uint64_t hi) {
+    if (hi <= lo) return 1;
+    if (!ubd_memo_on()) return ubd_covers_scan(lo, hi);
+    ubd_memo_ent *m = ubd_memo(lo, hi); if (m->covers < 0) m->covers = (int8_t)ubd_covers_scan(lo, hi); return m->covers;
+}
 // GPU address of the shadow of uniform range [lo, hi) (ubd_covers holds): one deferred update holding all of it and suitably aligned is used in place; otherwise the updates are laid into the arena in order
-static uint64_t ubd_shadow(uint64_t lo, uint64_t hi) {
+static uint64_t ubd_shadow_(uint64_t lo, uint64_t hi);
+static uint64_t ubd_shadow(uint64_t lo, uint64_t hi) {   // the same range again before the list changes takes the copy already made (each draw that re-encodes its arguments asks)
+    if (!ubd_memo_on()) return ubd_shadow_(lo, hi);
+    ubd_memo_ent *m = ubd_memo(lo, hi); if (!m->shadow) m->shadow = ubd_shadow_(lo, hi); return m->shadow;
+}
+static uint64_t ubd_shadow_(uint64_t lo, uint64_t hi) {
     for (int i = g_nubd - 1; i >= 0; i--) { const ubd_ent *e = &g_ubd[i];
         if (e->lo <= lo && hi <= e->hi) { int later = 0; for (int j = i + 1; j < g_nubd; j++) later |= lo < g_ubd[j].hi && g_ubd[j].lo < hi;
             uint64_t g = e->gpu + (lo - e->lo); if (!later && !(g & 15)) return g; break; } }
@@ -1164,7 +1214,7 @@ static uint64_t ubd_shadow(uint64_t lo, uint64_t hi) {
 }
 // Encode the deferred copies in order (rp_end, once the pass has ended)
 static void ubd_flush(void) {
-    int n = g_nubd; g_nubd = 0; memset(g_ubd_pf, 0, sizeof g_ubd_pf); g_ubd_wide = 0;
+    ubd_bm_clear(); int n = g_nubd; g_nubd = 0; g_ubd_ver++; memset(g_ubd_pf, 0, sizeof g_ubd_pf); g_ubd_wide = 0;
     for (int i = 0; i < n; i++) { const ubd_ent *e = &g_ubd[i]; void *db; uint64_t dof;
         if (!mtl_addr(e->lo, e->hi - e->lo, &db, &dof)) continue;
         enc_b_copy_buffer(blit_buf(0, 0, e->lo, e->hi), e->buf, e->off, (__bridge id<MTLBuffer>)db, dof, e->hi - e->lo); g_gp_ubd++; }
@@ -1339,7 +1389,7 @@ void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
         // Games rewrite one block before every draw group (Breath of the Wild: the same 64 bytes), so the list stays short: every lookup below scans it, for most bindings of most draws
         int k = 0; for (int i = 0; i < g_nubd; i++) if (!(dst <= g_ubd[i].lo && g_ubd[i].hi <= dst + n)) g_ubd[k++] = g_ubd[i];
         g_nubd = k;
-        g_ubd[g_nubd++] = (ubd_ent){dst, dst + n, g_ubs_buf.gpuAddress + g_ubs_off, g_ubs_off, g_ubs_buf}; ubd_pf_add(dst, dst + n); g_ubd_deferred++; ubd_dirty(dst, dst + n); }   // see ubd_shadow
+        g_ubd[g_nubd++] = (ubd_ent){dst, dst + n, g_ubs_buf.gpuAddress + g_ubs_off, g_ubs_off, g_ubs_buf}; ubd_pf_add(dst, dst + n); g_ubd_ver++; g_ubd_deferred++; ubd_dirty(dst, dst + n); }   // see ubd_shadow
     else enc_b_copy_buffer(blit_buf(0, 0, dst, dst + n), g_ubs_buf, g_ubs_off, (__bridge id<MTLBuffer>)db, dof, n);
     g_ubs_off += need;
 }
@@ -3847,7 +3897,7 @@ static void shmap_read(void) {
 #include "nvn_pso_skey.h"
 #include "nvn_geometry.h"
 #include "nvn_feedback.h"
-@interface NvProg : NSObject { @public NvShader *sh[6]; char gs_miss[17]; NvProg *geo_raster, *geo_lean_raster; } @end   // geo_raster: GS output reader paired with this program's fragment stage; geo_lean_raster: its own vertex and fragment stages (a lean passthrough kernel)
+@interface NvProg : NSObject { @public NvShader *sh[6]; char gs_miss[17]; NvProg *geo_raster, *geo_lean_raster; int8_t c_sw, c_iw, c_img; } @end   // c_sw / c_iw / c_img: prog_swrites, udc_note_draw's image write, image_prepare's written image slots; + 1 once known (the shaders are fixed once made)   // geo_raster: GS output reader paired with this program's fragment stage; geo_lean_raster: its own vertex and fragment stages (a lean passthrough kernel)
 @implementation NvProg @end
 // Warm-up entry: built in the background, waiting to be taken by the submit thread. vs / fs are strong references (in pso they are only raw pointers, and the background dictionary is released when the task ends)
 @interface WarmItem : NSObject { @public int kind, record; NSString *key, *vs_key, *fs_key; NvShader *shader, *vs, *fs; pso_key pso; id<MTLFunction> fsfn; id object; } @end   // record: a prefetched library, written to the prewarm lists when claimed (shader_get's lines)
@@ -5027,9 +5077,11 @@ static void bare_dims(NSUInteger *w, NSUInteger *h) {
 // the next character's: in one pass, the earlier character's later vertices read the next one's matrices (meshes stretched across the scene to another character, for a frame).
 // → the stages that write an image or a storage buffer: bit 0 vertex, bit 1 fragment, bit 2 another
 static int prog_swrites(NvProg *pr) {
+    if (pr && pr->c_sw) return pr->c_sw - 1;
     int w = 0;
     for (int st = 0; pr && st < 6; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
         for (int i = 0; i < sh->rf.nb; i++) if (sh->rf.b[i].rw && (sh->rf.b[i].kind == NVN_RB_IMG || sh->rf.b[i].kind == NVN_RB_SBUFP || sh->rf.b[i].kind == NVN_RB_GMEM)) { w |= st == 0 ? 1 : st == 1 ? 2 : 4; break; } }
+    if (pr) pr->c_sw = (int8_t)(w + 1);
     return w;
 }
 static void order_note(NvProg *pr) {   // after each draw of the pass: does it read memory in a stage after the vertex stage (anything bound there but samplers and driver data)
@@ -5063,15 +5115,16 @@ static void udc_note_draw(NvProg *pr, uint32_t raster_mask) {
     int td = tbdr_on();
     if (td && R.has_rt) for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i]) { zskip_del(R.rt.color[i]->serial); g_zskip_cand_ok[i] = 0; }   // Zero-source set: once really drawn it is no longer all zeros
     if (td && pr) for (int st = 0; st < 6; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue; for (int i = 0; i < sh->rf.nb; i++) if (sh->rf.b[i].kind == NVN_RB_IMG) { zskip_clear(); break; } }   // Image slots are writable: conservatively clear
-    int image_write = 0;
-    NvShader *fs = pr ? pr->sh[1] : nil;
+    int image_write = pr && pr->c_iw ? pr->c_iw - 1 : 0;
+    __unsafe_unretained NvShader *fs = pr ? pr->sh[1] : nil;
     uint32_t shader_color_mask = fs ? (fs->rf.color_known ? fs->rf.color_mask : UINT32_MAX) : 0;
-    if (pr) for (int st = 0; st < 6; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
+    if (pr && !pr->c_iw) for (int st = 0; st < 6; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
         // A writable image, atomic image pointer or storage pointer may alias an attachment. Do not infer its identity from bound texture slots (bindless shaders need not use them).
         for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i];
             if (b->rw && (b->kind == NVN_RB_IMG || b->kind == NVN_RB_SBUFP || b->kind == NVN_RB_SBUFU || b->kind == NVN_RB_GMEM)) { image_write = 1; break; } }
         if (image_write) break;
     }
+    if (pr && !pr->c_iw) pr->c_iw = (int8_t)(image_write + 1);
     if (R.has_rt) for (int i = 1; i < R.rt.n && i < 8; i++)   // a slot attached twice (left unattached) really written: the writes are lost (see rt_dup_slot)
         if ((shader_color_mask >> i & 1) && ((S.chmask.mask >> (4 * i)) & 0xf) && rt_dup_slot(&R.rt, i))
             RED_ONCE(79, "color slot %d holds the same texture as an earlier slot (ser=%llu) and this draw writes it (mask %#x): these writes are lost", i, (unsigned long long)R.rt.color[i]->serial, (S.chmask.mask >> (4 * i)) & 0xf);
@@ -7178,6 +7231,11 @@ static id<MTLTexture> img_binding(int tid, const nvn_rbind *b, uint64_t *rid, in
 // copy out of an attachment while its render pass was still open. Close that pass first, then replace the shared backing (all registered sampled views follow g_ser_gen).
 static void image_prepare(NvProg *pr, unsigned stages) {
     if (!pr) return;
+    if (!pr->c_img) { int any = 0;   // no written or atomic image slot in any stage: nothing to resolve, every draw
+        for (int st = 0; st < 6 && !any; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
+            for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; if (b->kind == NVN_RB_IMG && b->reg < 32 && (b->rw || b->atom)) { any = 1; break; } } }
+        pr->c_img = (int8_t)(any + 1); }
+    if (pr->c_img == 1) return;
     for (int st = 0; st < 6; st++) {
         if (!(stages & (1u << st))) continue;
         NvShader *sh = pr->sh[st]; if (!sh) continue;

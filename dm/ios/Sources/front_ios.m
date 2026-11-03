@@ -12,9 +12,14 @@
 #include "dm.h"
 #include "haptics_apple.h"
 #include "save_sync.h"
+#include "home_quit.h"
+#import <GameController/GameController.h>
 #import "CloudSaves.h"
+#import "quit_prompt.h"
 
 void dm_gamepad_active(void);
+void dm_gamepad_pads_read(void);
+static void quit_close(void);
 #import "DmLayout.h"
 #import "DmGameMenu.h"
 
@@ -441,7 +446,7 @@ static void save_sync_background(void) {
 void front_ios_focus_event(int ev) {
     if (!g_layer) return;
     switch (ev) {
-        case 0: dm_gamepad_reset(); dm_focus_set(2); break;
+        case 0: quit_close(); dm_gamepad_reset(); dm_focus_set(2); break;
         case 1: UIApplication.sharedApplication.idleTimerDisabled = NO; dm_focus_set(3); g_audio_bg = 1; front_ios_audio_apply(); guest_clock_freeze_for(1, 1); dm_gfx_suspend(1); save_sync_background(); break;
         case 2: dm_gfx_suspend(0); guest_clock_freeze_for(1, 0); front_ios_audio_session(); g_audio_bg = 0; front_ios_audio_apply(); dm_focus_set(2); break;
         case 3:   // Becoming active again also ends an interruption whose "ended" never came (not every one sends it), and retries a session that would not activate on the way back
@@ -450,4 +455,201 @@ void front_ios_focus_event(int ev) {
             if (g_session_off) front_ios_audio_session();
             front_ios_audio_apply(); dm_gamepad_active(); dm_focus_set(1); break;
     }
+}
+
+// ---- Quit to the launcher (LNPANDY/NX2Apple#421) ----
+// Two ways open the quit prompt (quit_prompt.h) over the game: Quit at the end of the in-game menu (the gear at the top centre, GameMenu.swift, which stays while
+// a controller hides the other touch controls), and holding a controller's Home button for 2 seconds (home_quit.h, as on the Mac; the indicator at the top fills
+// while it is held). A tap on Quit or A quits, a tap on Cancel or outside the card, B or a new press of Home closes it. While it is open the game is told it lost
+// the focus, as the Switch's HOME menu does, and gets no touch or controller input.
+// Quitting ends the process: one game runs per process (dm_profile() and the host's early loading run once, the shell's ShellMain.m), so the engine cannot hand
+// the window back to a launcher and start another game. It goes the way of a SIGTERM (dm_host_shutdown: audio and graphics stopped, in-flight GPU work drained,
+// _exit(0)), after the cloud saves have gone out as they do when the app goes to the background. What the game saved is on disk already (hle_fs.c writes each
+// commit), progress it did not save is lost, as the prompt says. iOS has no way for an app to start itself again: the player opens it from the Home Screen.
+// DM_HOME_QUIT=0 turns the Home hold off. DM_HOME_QUIT_TEXT carries the texts in the player's language, one per line (home_quit.h's order), English otherwise.
+@interface DmQuitView : UIView
+@property (nonatomic) qp_layout layout;
+@property (nonatomic, strong) CALayer *prompt, *actions;
+@property (nonatomic) int down;          // what the touch went down on (QP_HIT_*); a tap counts when it is released on the same thing
+@property (nonatomic) double opened;     // a touch in the first moments after the prompt opened is not taken: a second tap meant for the menu or the game
+@end
+static home_quit g_hq; static int g_hq_on = -1, g_hq_busy;
+static char g_hq_text[HQ_TEXTS][256];
+static DmQuitView *g_hq_view; static CALayer *g_hq_hold; static CAShapeLayer *g_hq_ring; static NSTimer *g_hq_timer;
+static void quit_changed(hq_phase was, hq_phase now, GCController *holder);
+static void quit_touch(int hit);
+void front_ios_quit_poll(void);
+
+@implementation DmQuitView
+- (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
+    self.down = CACurrentMediaTime() - self.opened < 0.25 ? -1 : qp_hit(&_layout, [ts.anyObject locationInView:self]);
+    [self press:self.down == QP_HIT_QUIT ? 0 : self.down == QP_HIT_CANCEL ? 1 : -1];
+}
+- (void)touchesEnded:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
+    int hit = qp_hit(&_layout, [ts.anyObject locationInView:self]), down = self.down;
+    [self press:-1]; self.down = -1;
+    if (down >= 0 && hit == down && hit != QP_HIT_NONE) quit_touch(hit);
+}
+- (void)touchesCancelled:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self press:-1]; self.down = -1; }
+- (void)press:(int)i {   // a pill held down dims a little, as a button does
+    NSArray<CALayer *> *pills = self.actions.sublayers;
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    for (NSUInteger k = 0; k < pills.count; k++) pills[k].opacity = (int)k == i ? 0.7 : 1;
+    [CATransaction commit];
+}
+- (BOOL)isAccessibilityElement { return NO; }
+@end
+
+static NSString *quit_text(int i) { return @(g_hq_text[i]); }
+static void quit_start(void) {
+    if (g_hq_on >= 0) return;
+    g_hq_on = hq_enabled(getenv("DM_HOME_QUIT"));
+    char title[256]; snprintf(title, sizeof title, "Quit %s?", DM_GAME_NAME);
+    const char *def[HQ_TEXTS] = {"Keep holding to quit", title, "Unsaved progress will be lost. The app closes.", "Quit", "Cancel"};
+    const char *text = getenv("DM_HOME_QUIT_TEXT");   // the launcher's, in the player's language: one line per text, in home_quit.h's order
+    for (int i = 0; i < HQ_TEXTS; i++) hq_text_line(text, i, def[i], g_hq_text[i], sizeof g_hq_text[i]);
+    LOG("front end: hold the Home button to quit %s", g_hq_on ? "is on" : "is off (DM_HOME_QUIT=0)");
+}
+static void quit_buttons(int *home, int *a, int *b, GCController *__strong *holder) {
+    *home = *a = *b = 0;
+    for (GCController *c in GCController.controllers) {
+        GCExtendedGamepad *g = c.extendedGamepad; if (!g) continue;
+        if (g.buttonHome.isPressed) { *home = 1; if (!*holder) *holder = c; }
+        *a |= g.buttonA.isPressed; *b |= g.buttonB.isPressed;
+    }
+}
+static void quit_hide_hold(void) { [g_hq_timer invalidate]; g_hq_timer = nil; [g_hq_hold removeFromSuperlayer]; g_hq_hold = nil; g_hq_ring = nil; }
+static void quit_hide_prompt(void) {
+    DmQuitView *v = g_hq_view; g_hq_view = nil; if (!v) return;
+    [UIView animateWithDuration:0.18 animations:^{ v.alpha = 0; } completion:^(BOOL done) { (void)done; [v removeFromSuperview]; }];
+    UIAccessibilityPostNotification(UIAccessibilityScreenChangedNotification, nil);
+}
+static UIImage *quit_glyph(NSString *symbol, NSString *fallback) {
+    UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:48 weight:UIImageSymbolWeightMedium];
+    return [UIImage systemImageNamed:symbol ?: fallback withConfiguration:cfg] ?: [UIImage systemImageNamed:fallback withConfiguration:cfg];
+}
+static void quit_show_prompt(GCController *holder) {
+    UIView *root = g_root.view; if (!root) return;
+    GCController *pad = holder; if (!pad) for (GCController *c in GCController.controllers) if (c.extendedGamepad) { pad = c; break; }
+    GCExtendedGamepad *g = pad.extendedGamepad;   // with a controller the pills show its own A and B, with touch alone the words only
+    DmQuitView *v = [[DmQuitView alloc] initWithFrame:root.bounds];
+    v.multipleTouchEnabled = NO; v.down = -1; v.opened = CACurrentMediaTime();
+    v.layout = qp_layout_make(root.bounds.size, quit_text(HQ_TEXT_TITLE), quit_text(HQ_TEXT_NOTE), quit_text(HQ_TEXT_QUIT), quit_text(HQ_TEXT_CANCEL), g != nil);
+    UIImage *ga = g ? quit_glyph(g.buttonA.sfSymbolsName, @"a.circle") : nil, *gb = g ? quit_glyph(g.buttonB.sfSymbolsName, @"b.circle") : nil;
+    CALayer *actions = nil; qp_layout l = v.layout;
+    v.prompt = qp_prompt_layer(root.bounds, &l, quit_text(HQ_TEXT_TITLE), quit_text(HQ_TEXT_NOTE), quit_text(HQ_TEXT_QUIT), quit_text(HQ_TEXT_CANCEL),
+                               ga.CGImage, gb.CGImage, MAX(root.traitCollection.displayScale, 1), &actions);
+    v.actions = actions;
+    [v.layer addSublayer:v.prompt];
+    // VoiceOver reads the title and the note and offers the two actions
+    UIAccessibilityElement *(^element)(NSString *, CGRect, UIAccessibilityTraits) = ^(NSString *label, CGRect frame, UIAccessibilityTraits traits) {
+        UIAccessibilityElement *x = [[UIAccessibilityElement alloc] initWithAccessibilityContainer:v];
+        x.accessibilityLabel = label; x.accessibilityFrameInContainerSpace = frame; x.accessibilityTraits = traits; return x;
+    };
+    v.accessibilityElements = @[element([NSString stringWithFormat:@"%@ %@", quit_text(HQ_TEXT_TITLE), quit_text(HQ_TEXT_NOTE)], l.card, UIAccessibilityTraitHeader),
+                                element(quit_text(HQ_TEXT_QUIT), l.quit, UIAccessibilityTraitButton), element(quit_text(HQ_TEXT_CANCEL), l.cancel, UIAccessibilityTraitButton)];
+    v.alpha = 0; [root addSubview:v];
+    [UIView animateWithDuration:0.18 animations:^{ v.alpha = 1; }];
+    g_hq_view = v;
+    UIAccessibilityPostNotification(UIAccessibilityScreenChangedNotification, v.accessibilityElements.firstObject);
+}
+// The prompt's quit: the cloud saves go out (as when the app goes to the background), then the host ends as on a SIGTERM. Off the main queue: both wait
+static void quit_now(void) {
+    LOG("front end: quit from the quit prompt, the app closes (one game per process)");
+    g_hq_view.userInteractionEnabled = NO;
+    [CATransaction begin]; [CATransaction setAnimationDuration:0.2]; g_hq_view.actions.opacity = 0.4; [CATransaction commit];
+    UIApplication.sharedApplication.idleTimerDisabled = NO;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        if (!save_sync_flush(8000)) LOG("front end: the save did not reach the cloud before quitting, it goes at the next start");
+        dm_host_shutdown("the quit prompt");
+    });
+}
+static void quit_changed(hq_phase was, hq_phase now, GCController *holder) {
+    if (was == HQ_HOLDING) quit_hide_hold();
+    switch (now) {
+    case HQ_HOLDING:
+        g_hq_timer = [NSTimer scheduledTimerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *t) { (void)t; front_ios_quit_poll(); }];
+        break;
+    case HQ_PROMPT:
+        dm_gamepad_reset();   // nothing the touch gamepad or a controller held stays pressed while the prompt is open
+        dm_focus_set(2);
+        quit_show_prompt(holder);
+        LOG("front end: quit prompt open (%s)", holder ? "Home held" : "the in-game menu");
+        break;
+    case HQ_SETTLE:
+        quit_hide_prompt(); dm_focus_set(1);
+        LOG("front end: quit prompt closed, the game goes on");
+        break;
+    case HQ_IDLE:
+        if (was == HQ_SETTLE) dm_gamepad_pads_read();   // the game reads the controllers again, as they are now
+        break;
+    case HQ_QUIT:
+        quit_now();
+        break;
+    }
+}
+void front_ios_quit_poll(void) {   // DmGamepad.m on a controller's change, and the hold's timer (main queue)
+    quit_start();
+    if (!g_hq_on || !g_root.game || g_hq_busy) return;
+    g_hq_busy = 1;
+    int home, a, b; GCController *holder = nil; quit_buttons(&home, &a, &b, &holder);
+    double now = CACurrentMediaTime();
+    hq_phase was = g_hq.phase, ph = hq_step(&g_hq, now, home, a, b);
+    if (ph != was) quit_changed(was, ph, holder);
+    double fill = hq_ring(&g_hq, now);
+    if (fill >= 0) {
+        if (!g_hq_hold) {
+            CAShapeLayer *ring = nil; UIView *root = g_root.view;
+            g_hq_hold = qp_hold_layer(root.bounds, quit_text(HQ_TEXT_HOLD), MAX(root.traitCollection.displayScale, 1), &ring); g_hq_ring = ring;
+            [root.layer addSublayer:g_hq_hold];
+        }
+        qp_hold_set(g_hq_ring, fill);
+    }
+    g_hq_busy = 0;
+}
+static void quit_open(void) {   // the in-game menu's Quit
+    quit_start();
+    if (!g_root.game) return;
+    int home, a, b; GCController *holder = nil; quit_buttons(&home, &a, &b, &holder);
+    hq_phase was = g_hq.phase;
+    if (hq_touch_open(&g_hq, home, a, b) != was) quit_changed(was, HQ_PROMPT, nil);
+}
+static void quit_touch(int hit) {   // DmQuitView: a tap on Quit, on Cancel or outside the card
+    hq_phase was = g_hq.phase, now = hit == QP_HIT_QUIT ? hq_touch_quit(&g_hq) : hq_touch_cancel(&g_hq);
+    if (now == was) return;
+    quit_changed(was, now, nil);
+    if (now == HQ_SETTLE) front_ios_quit_poll();   // with every button up the game has its input again at once
+}
+int front_ios_quit_blocks_input(void) { return hq_blocks_input(g_hq.phase); }
+static void quit_close(void) {   // the app is leaving the foreground: whatever is shown closes, a Home still held needs a new press
+    if (g_hq.phase == HQ_IDLE || g_hq.phase == HQ_QUIT) return;
+    if (g_hq.phase == HQ_PROMPT || g_hq.phase == HQ_SETTLE) LOG("front end: quit prompt closed, the app left the foreground");
+    hq_cancel(&g_hq); quit_hide_hold(); quit_hide_prompt();
+}
+// The in-game menu's last item: "Quit <game>" (the prompt's title without its question mark), destructive, opening the prompt. A retained UIMenu (DmGameMenu.h)
+void *dm_quit_menu(void) {
+    quit_start();
+    NSString *title = [quit_text(HQ_TEXT_TITLE) stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"?？  "]];
+    UIAction *quit = [UIAction actionWithTitle:title image:[UIImage systemImageNamed:@"xmark.circle"] identifier:nil handler:^(UIAction *a) { (void)a; quit_open(); }];
+    quit.attributes = UIMenuElementAttributesDestructive;
+    return (void *)CFBridgingRetain([UIMenu menuWithTitle:@"" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:@[quit]]);
+}
+// The Home button setting for apps, once, when the first controller is there (GameController reads it only while one is connected): the Home hold works when
+// the app decides ("app"). Either way the in-game menu's Quit stays, as the gear stays with a controller
+void front_ios_quit_controllers(void) {
+    quit_start();
+#if defined(__IPHONE_27_0)
+    if (@available(iOS 27.0, *)) {
+        static int done; if (done || !g_hq_on) return;
+        int any = 0; for (GCController *c in GCController.controllers) if (c.extendedGamepad) any = 1;
+        if (!any) return;
+        done = 1;
+        GCControllerHomeButtonSettingCustomizationStatus by = GCControllerHomeButtonSettingCustomizationDefault; NSError *err = nil;
+        GCControllerHomeButtonSettingInAppAction v = [[GCControllerHomeButtonSettingsManager new] readControllerHomeButtonInAppAction:&by withError:&err];
+        LOG("front end: Home button in apps: %s (%s)%s%s", hq_in_app_name((long)v),
+            by == GCControllerHomeButtonSettingCustomizationUser ? "set by the player" : "the system's default", err ? ", " : "", err ? err.localizedDescription.UTF8String : "");
+        return;
+    }
+#endif
+    static int said; if (!said++) LOG("front end: the Home button setting is read on iOS 27, the Home hold works where the system lets the press through");
 }

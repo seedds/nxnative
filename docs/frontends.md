@@ -99,7 +99,9 @@ Cheats are files, not settings: the host (`dm/host/hle_cheats.c`) reads Atmosph√
 
 ## An app that hosts the engine
 
-An app that links the host and the front end's game view into its own process (a launcher holding several games, say) has these hooks in `dm/host/front.h`. nxnative's own apps do not use them, so its tests and regression runs do not cover them. Each one is unset by default, and a hook must be set before the game starts.
+An app that runs a game in its own process, rather than starting the Mac app or `dmhost` as a child, can load the host as a library: `make -C dm/host GAME=<id> libdmhost` builds `dm/host/gen/<id>/libdmhost.dylib`, the same host as `dmhost` for that game (one library per game). It exports `int dm_host_main(int argc, char **argv)`, which takes `dmhost`'s arguments: the app sets the environment and the working folder it would give `dmhost`, then calls it on its main thread, where it runs the game's window and returns when the game ends. It also exports the hooks below and the `dm_frontend_*` calls.
+
+An app that links (or loads) the host and the front end's game view into its own process (a launcher holding several games, say) has these hooks in `dm/host/front.h`. nxnative's own apps do not use them, so its tests and regression runs do not cover them. Each one is unset by default, and a hook must be set before the game starts.
 
 - **`front_progress_hook`**: draws the prepare step's progress ("Preparing shaders", "Preparing pipelines") instead of the front end's screen. With a window, it gets each call's title, done and total on the main thread; the title is `NULL` when the step ends.
 - **`dm_set_game_image_header`** (iOS): names the image that carries the game's rewritten modules, when the app links them into a framework it `dlopen`s from its signed bundle instead of into its executable. Call it with that image's mach header before `dm_host_preload_start`. Only the module sections are read from it.

@@ -531,13 +531,12 @@ def check_before_copy(insl, ctx, ld, idx):
     indexes with the other only when it knows they are equal; blocks in between that branch out and back (main+0x2dd8ce0 → main+0x2dd8cb8) write neither. Tried only when every other
     form has failed (jump_offsets copy_first), so sites that rewrote before come out the same: the one br x18 of its kind among the 25,508 x18 sites of that main. → the cmp, or None"""
     k = ctx.index(ld); kl = insl.index(ld)
-    cmp_i = None; m = None
+    cmp_i = None; src = None; n = 0
     for bi in range(k - 1, max(0, k - 8) - 1, -1):   # the bounds check: b.hi right after its cmp; base setup may sit between it and the load
         if ctx[bi].mnemonic == 'b.hi' and bi >= 1 and ctx[bi - 1].mnemonic == 'cmp':
             m = re.fullmatch(r'(w\d+), #(0x[0-9a-f]+|\d+)', ctx[bi - 1].op_str)
-            if m: cmp_i = bi - 1; break
+            if m: cmp_i, src, n = bi - 1, m.group(1), int(m.group(2), 0) + 1; break
     if cmp_i is None: return None
-    src, n = m.group(1), int(m.group(2), 0) + 1
     def writes(p):   # capstone lists a compare's first operand as written (cmp w18,#4 at main+0x2dd8c30); it only sets the flags
         return set() if p.mnemonic in ('cmp', 'cmn', 'tst') else {'w' + p.reg_name(r)[1:] for r in p.regs_access()[1]}
     for z in range(kl - 1, max(0, kl - 64) - 1, -1):   # the copy into the index: mov, or a masking and, must be the last writer before the load

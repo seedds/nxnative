@@ -205,6 +205,8 @@ Before publishing, the fixes were integrated with main's pipeline archive and GP
 - **Resolved: 1.6.0 (v786432) crashed 10-60 s into the first scene (issue #251)** in `h_nvnBufferGetAddress` (`main+0x14ef6e0`, reader `main+0x14ef440`) and in other places (`main+0x12970dc`, `+0x13615f4`, `+0x1445d48`, `+0x1db5cb8`, `+0x1472470`): the game's job queue (`main+0x13a0730`) takes its lock with a bare `ldxr` (no acquire), so on Apple cores two workers popped the same job, and two threads built draw lists into one view and arena (`main+0x14e8884` begin, commit `main+0x14ee3c0`). [Lock acquire without acquire ordering runs a queue item twice](../../../docs/reference/threads.md#lock-acquire-without-acquire-ordering-runs-a-queue-item-twice).
 - **Resolved build guard and cache isolation; rendering cause open:** [Tested tools and compiler-specific shader caches](../../../docs/reference/shaders.md#tested-tools-and-compiler-specific-shader-caches).
 
+- **Optional touch-camera preferences (device validation pending after launcher integration):** [Relative swipe camera input on iOS](../../../docs/reference/services.md#relative-swipe-camera-input-on-ios). User feedback on the 1.9.0 prototypes motivated a game-independent swipe option and configurable touch sensitivity/dead zone; this is separate from physical-controller input.
+
 General host changes first needed here; each applies to every game:
 
 - **Movies at twice their speed at 60 fps** (issue #636): [Movies hold 30 fps under the frame step](../../../docs/reference/frame-rate.md#movies-hold-30-fps-under-the-frame-step).

@@ -385,6 +385,15 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `dm/host/tests/t_hid.c` (`t_script`) runs the scripted publisher with a controller update during the hold: buttons survive repeated reads after the latch is consumed, the scripted stick wins over drift, shake continues, and release preserves physical input. Short presses are latched once, all four axes reach the handheld npad, and player 2 stays separate.
 - **Found on:** Batman: Arkham Knight (`0100ACD0163D0000`), reported in [PR #326](https://github.com/seedds/nxnative/pull/326) while driving the opening route with `DM_KEYS` and a DualShock 4. Reproduced independently in the host HID test without game files; its game profile is not in this checkout.
 
+### Relative swipe camera input on iOS
+
+- **Symptom:** the floating camera stick continues turning while a finger is held away from its starting point; short drags give little input, unlike a mobile swipe camera.
+- **Cause:** controller tilt represents turn speed, whereas a swipe camera uses relative finger movement. Reading displacement from touch-down is the intended floating-stick behaviour. A relative-input prototype that cleared its delta every display frame also produced intermittent neutral input when touch, display and guest sampling rates differed.
+- **Option:** the launcher can select `DM_TOUCH_SWIPE=1` in the 3D layout (`DmGamepad.m`, `DmSwipeLook.h`). Timestamped finger velocity is held across display callbacks, with a 40 ms expiry because UIKit stops sending movement samples when a finger stops. Release, cancellation and focus loss clear it immediately. Sensitivity is `DM_TOUCH_SWIPE_GAIN`, applied after normalizing motion so fast swipes do not saturate at both 25% and 400%. `DM_TOUCH_RIGHT_AREA=half` extends the camera start region from the right third to the right half in either mode; the left touch stick independently uses `DM_TOUCH_LEFT_DEADZONE`. Defaults preserve the floating camera stick and 10% left dead zone. No game code or physical-controller mapping changes.
+- **Limit:** this remains controller input; a game's own camera acceleration, dead zone and speed limit apply. It is not direct access to the game's camera rotation.
+- **Checks:** native C tests cover mixed 30/60/120 Hz sampling and phase offsets, expiry, reversal, settings validation and the unchanged legacy response. Launcher tests cover persistence, reset and file overrides. Device feel still needs testing after integration.
+- **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md), user feedback on touch-camera prototypes.
+
 ### Touch gestures recognized from the touch points
 
 - **Symptom:** taps in handheld mode do nothing, though the game reads the touch screen (the title's PRESS ANY BUTTON, the menus' cards).

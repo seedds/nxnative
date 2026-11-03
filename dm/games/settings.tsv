@@ -22,6 +22,10 @@ DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling
 DM_LANG	choice	languages	build:DM_LANG	languages>1	Game	Game language		level=basic
 DM_FULLSCREEN	choice	0=Window,1=Fullscreen	0	platform:mac	Game	Display mode		level=basic
 DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	platform:ios	Game	Frame-rate counter
+DM_TOUCH_SWIPE	toggle	-	0	platform:ios	Controls	Swipe camera	Move your finger to turn; the game still limits turning speed.
+DM_TOUCH_SWIPE_GAIN	range	0.25:4:0.05	1.0	platform:ios	Controls	Swipe sensitivity	Only used with Swipe camera.
+DM_TOUCH_RIGHT_AREA	choice	third=Right third,half=Right half	third	platform:ios	Controls	Camera touch area	Used by both camera modes; buttons keep priority.
+DM_TOUCH_LEFT_DEADZONE	range	0:0.4:0.01	0.10	platform:ios	Controls	Left-stick dead zone	Ignore small movements near the centre.
 DM_TOUCH_HAPTICS	toggle	-	1	platform:ios	Controls	Touch feedback
 DM_RUMBLE	toggle	-	1	always	Controls	Game rumble		level=basic
 DM_RUMBLE_GAIN	range	0:3:0.1	1.0	always	Controls	Rumble strength		needs=DM_RUMBLE=1

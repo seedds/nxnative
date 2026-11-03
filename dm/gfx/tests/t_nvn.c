@@ -71,6 +71,17 @@ int main(void) {
       setenv("DM_FPS_TARGET","0",1);g_present_cap=-1;w.interval=2;
       EXPECT("no cap preserves display pacing",1,present_itv(&w));nvn_present_config(60,0);
       EXPECT("no cap preserves game pacing",2,present_itv(&w));
+      // the 30 Hz link only for even intervals: interval 3 (20 fps) has no whole number of 30 Hz ticks and stays on the 60 Hz link
+      w.interval=1;present_period(&w);w.interval=2;present_period(&w);g_itv2_since=(now_ns()-2000000000ull)|1;
+      EXPECT("interval 2 held a second: 30 Hz link",30,nvn_game_fps());
+      w.interval=3;present_period(&w);
+      EXPECT("interval 3: 60 Hz link",60,nvn_game_fps());
+      w.interval=4;present_period(&w);g_itv2_since=(now_ns()-2000000000ull)|1;
+      EXPECT("interval 4 held a second: 30 Hz link",30,nvn_game_fps());
+      w.interval=2;present_period(&w);
+      EXPECT("4 to 2 keeps the run",30,nvn_game_fps());
+      w.interval=3;present_period(&w);w.interval=2;present_period(&w);
+      EXPECT("back to 2 from 3 waits a second again",60,nvn_game_fps());
       _Alignas(8) uint8_t state[64]={0};float cap=60;memcpy(state,&cap,4);dm_fps_state=state;
       EXPECT("stub state takes precedence over env",60,fps_present_cap());
       *(uint32_t *)(state+4)=1;

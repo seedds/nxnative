@@ -145,6 +145,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Symptom:** 24 shaders before the control-length fix, 1,355 after.
 - **Cause:** its GLSLC (output version 0x1d.2) writes the 0x848 / 0x850-byte controls and headerless compute code described in the RDB entry, which `glslc_shaders` used to drop. A few outputs of version 0x1d.0 keep something else at control +0x20 (odd values such as 0x136b), so a control length must be a multiple of 4; the section-header reading now takes 8 of them ([GLSLC outputs read through their section headers](#glslc-outputs-read-through-their-section-headers)).
 - **Found on:** [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) (the older KTGL).
+
+### KTGL on NVN2: Switch 2 GLSLC outputs and LD_ / LI_ LINKDATA
+
+- **Symptom:** the split finds almost none of a KTGL Switch 2 game's shaders: the G2S containers in its RDB entries yield nothing, and its programs name no packaged shader.
+- **Cause:** the Switch 2's GLSLC writes a longer output header (the output's length at +0x5c, the section count at +0x64, section headers from +0xa8, 0x98 apart; GPU code version 0xc9 at +0x30), its NVN2 control sections are too short for the Switch 1 rule, and the game keeps more outputs in a LINKDATA pair named `LD_<name>.BIN` / `LI_<name>.IDX`, whose larger entries use zlib chunks above 0x10000 bytes.
+- **Fix:** `glslc_layout` reads either header, `linkdata_index` names the index of either pair, and `kt_gz` takes any power of two from 0x10000 as its chunk size (`shader_split.py`).
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md): 131,426 shaders on update v655360.
 - **Note:** nine more shaders exist only at run time ([Built-in shaders compiled with the game's own GLSLC](#built-in-shaders-compiled-with-the-games-own-glslc)).
 
 ### GLSLC outputs in base64 in Heaps' shader cache
@@ -159,8 +166,15 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Symptom:** only movies render, while the 3D scene reports missing shaders and programs without a vertex stage; the shader split finds loose programs but misses those in `Shaders/Shaders.arc.gz`.
 - **Cause:** the archive is standard gzip around a Wii U8 archive containing GLSLC outputs. Its shader signatures are hidden by compression, so the loose-file scan discards it before the existing GLSLC reader can discover its programs.
 - **Fix:** `shader_split.py` recognizes gzip by its magic, regardless of the filename, and decodes it before the shader scan. `ungzip` validates the stream's CRC and end, including concatenated members, and bounds the total decoded bytes to the greater of 1 GiB and `NEST` times the compressed size. Deflate reaches about 1000x on repetitive data, and an unreadable file stops a registered game's build, so the floor lets a small, highly compressible file without shaders through and still caps a gzip bomb. A damaged or oversized source is named as unreadable and contributes no partial shader output. The existing reader retains each program's vertex/pixel pairing; Gust's differently encoded `.gz` files keep their own reader below.
-- **Found on:** [The Legend of Zelda: Skyward Sword HD 1.0.1, issue #497](https://github.com/seedds/nxnative/issues/497#issuecomment-6550286909), reported with a source-only patch by zatteogit. Measured on that build's own file: 4.9 MB of gzip decode to a 22.8 MB U8 archive with 2,096 GLSLC programs in `cache/` (one a byte-identical copy of another) and 2,096 fixed 632-byte records in `desccache/` that hold no shaders. The split takes 2,412 unique shaders (384 vertex, 2,028 pixel) and 2,095 pairs from it, and 2,470 shaders for the whole game with `main`. No registered game profile or local gameplay validation is added here: the game has not been booted with these shaders. The separate movie-upload and UNORM rendering changes in that report remain outside this fix.
+- **Found on:** [The Legend of Zelda: Skyward Sword HD 1.0.1, issue #497](https://github.com/seedds/nxnative/issues/497#issuecomment-6550286909), reported with a source-only patch by zatteogit. Measured on that build's own file: 4.9 MB of gzip decode to a 22.8 MB U8 archive with 2,096 GLSLC programs in `cache/` (one a byte-identical copy of another) and 2,096 fixed 632-byte records in `desccache/` that hold no shaders. The split takes 2,412 unique shaders (384 vertex, 2,028 pixel) and 2,095 pairs from it, and 2,470 shaders for the whole game with `main`. The game now boots and plays with them: [its note](../../dm/games/01002DA013484000/README.md).
 - **Check:** `test_split_gzip.py` uses an authored U8/GLSLC fixture: raw and gzip inputs produce byte-identical package/table files through the full CLI, with two shader stages and one pair. It also covers magic-based discovery, timestamp bytes resembling other compression headers, concatenated members, corrupt CRCs, truncated footers, trailing garbage and the decoded-byte budget.
+
+### Encrypted `.vert` and `.frag` files are no run-time GLSL
+
+- **Symptom:** the NSP script stops at its GLSLC capture with `captured only 0 run-time shaders`, after the game ran the whole capture normally, on a game whose `main` imports `glslcCompile`, with a `.vert` or `.frag` file in its RomFS.
+- **Cause:** `build_sources` counted such files by their extension as GLSL the game compiles itself (Turrican Anthology Vol. I), so `shader_sources` asked for a capture. Skyward Sword HD's `Shaders/Dummy.vert` and `Dummy.frag` are AES-256-CTR ciphertext (7.99 bits per byte). Its `main` decrypts them on first need (`main+0x1053bac`) and hashes the sources into a name in `Shaders/cache/`; it calls `glslcCompile` (`main+0x1053a38`) only when the archive lacks that program, which every shipped program avoids, so nothing is compiled and nothing can be captured.
+- **Fix:** `romfs_glsl_files` counts a `.vert` or `.frag` file only when its first 4 KiB are text (`glsl_text`: not empty, no control byte). The capture's own failure stays strict for a game that does capture. A game that compiles encrypted sources for shaders it does not ship would get no capture and show `is not in the shader map` when it draws them; none has been met.
+- **Found on:** [The Legend of Zelda: Skyward Sword HD](../../dm/games/01002DA013484000/README.md), reported in [GitHub issue #928](https://github.com/seedds/nxnative/issues/928).
 
 ### Gust's chunked zlib `.gz` files
 
@@ -818,6 +832,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Resolved:** 0x593 is SUATOM, an image atomic through a handle (`ASuatom`, `InstEmitAmpereMem.cs`): SUST's handle (40..59) and dimension (61..64), ATOMG's operation (87..91), size (73..76) and predicate result (81..83, PT here). Its two shaders, agl's `agl_technique_pfx` compute shaders, take an append counter with it (SUATOM.ADD.U32 on a 1D image, the old value shuffled to the warp, then their SUST), and now translate: all 22,852 of the package's shaders do. Neither has been met in play so far, so the picture is not checked; `test_dmsh_ampere_mem.py` translates the encoding. A handle in another bank or a predicate result is refused.
 - **Open:** loads and stores through addresses read from memory, which had no storage buffer to become, go through the memory pools now ([Global memory at an address loaded from memory](#global-memory-at-an-address-loaded-from-memory)).
 
+### Storage words read one by one
+
+- **Symptom:** a lit pass far slower on an M1 than the M4 Pro's figures suggest, the time spread over every material that loops over the scene's lights; dropping one material's draws (`DM_NVN_UB`) saved only its share.
+- **Cause:** Ampere reads a storage buffer 64 or 128 bits at a time (LDG.E.64 / .128). The translator splits each read into 32-bit LoadGlobal operations, and spirv-cross writes each word with an index of its own, `uint(int(uint(base + 4) >> uint(2)))`. Metal's front end cannot tell such words are neighbours (each index is the shift of its own sum, then widened to 64 bits), so every word stays a load of its own with its own address arithmetic: about 240 in Splatoon Raiders' Hoian_UBER, most of them in its light loop (80 bytes a light).
+- **Fix:** `wide_loads` (`dm/gfx/tools/dmsh_wide.py`, a step of `dmsh_build.py` after `pool_arrays`): the words of one read-only (`const device`) buffer at byte offsets k, k+4, … from one value, with no brace between them, become one read of a `packed_uint2/3/4` at the first word, each word taking its lane. In the AIR that read is still one load per word, but each at a constant offset from one address, so the words share the address arithmetic they each had; computing the index once in the translator (`(base >> 2) + i`, unsigned or signed) leaves every word its own widened index and gains nothing. A packed vector needs 4-byte alignment only, and the shader does not write the buffer through that binding. A run ends at any line that may write memory or change a value (a store through a subscript or a pointer, an atomic, a barrier, an image write, an assignment to an existing variable), so a write through another binding to the same memory cannot fall between its words; the values are the same. In TotK's 28,669 and Wonder's 16,266 built shaders that rule left every run as it was. A run starts on a 16-byte step of the common value and holds at most four words, as the original reads did.
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md#rendering): 4,558 of its 27,155 shaders change. On an M1 in the opening dialogue scene, the lit pass's median GPU time went from 70.2 to 15.6 ms and the frame's from 91.5 to 30.1 ms (`DM_NVN_GPUPROF=every:60`, 15 and 35 profiled frames in the scene); the 40 shaders that did not build before are the only ones that fail.
+- **Check:** `python3 dm/gfx/tests/test_dmsh_wide.py`.
+
 ## Bindings and handles
 
 - **Note:** the layout of NVN's driver segments `c0` and `c2` (the handle tables, the storage and uniform buffer tables, the words the host fills) and the binding kinds of the reflection JSON have one definition, `dm/gfx/nvn/dmsh_abi.h`. The host includes it (`nvn_mtl.m`, `nvn_refl.m`, `nvn_obj.h`); `dmsh_build.py` reads it through `dm/gfx/tools/dmsh_abi.py`, which stops on any line it cannot read. Both files are part of the chain version. `dm/tools/tests/test_dmsh_abi.py` checks that the tables fit together, that the host converts every kind the build may write, that the translator's own copy of the `c2` layout (`Program.cs`) agrees, and that the values do not come back as literals in the host or the build. The entries below cite the offsets.
@@ -852,6 +874,64 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Cause:** MUFU has an F16 form (bit 73): the source is the half that bits 60..61 select (bit 62 its abs, as in every B slot), and the result goes back as the low half of the register, the high half zero. MUFU is the multi-function unit (op 2 EXP2, 3 LOG2, …), not a multiply.
 - **Fix:** `AMufu` in `InstEmitAmpereAlu.cs`.
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): 10 compute shaders of `agl_ndsr.pck`.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
+
+### Scaled shared memory addresses
+
+- **Symptom:** a compute shader's results in shared memory land in the wrong elements, or only part of its memory is cleared. An exposure histogram came back with its bins at about four times their index, the scene several stops too dark.
+- **Cause:** LDS and STS with a register carry a stride at 78..79, so the register counts elements of 4, 8 or 16 bytes (stride 1, 2, 3), not bytes. The decoder ignored it. The field is a scale, not the access size: stride 3 occurs on 4, 8 and 16-byte accesses alike.
+- **Fix:** `AStride` in `InstEmitAmpereMem.cs`, for LDL, LDS, STL, STS and ATOMS. LDSM keeps its mode at those bits (1 is a transposed read, MT88), so it takes its address unscaled (`stride: false`): scaled by that mode, [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md)'s upscaler (`7629d857a0a93833`, 12 of its 27 LDSM) read four times too far along, and the picture came out as an 8x8 lattice of garbage for as long as the upscaler ran, with nothing in the log.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): 2 LDS and 2 STS with a register in its 16,888 shaders, all in the Lighting compute shaders; `d5bc99ffd183fa20` bounds its register by the element count (0x20) before `[R2 * 8]`. [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md): 921 accesses with stride 1, 68 with 2 and 3,312 with 3, among its 131,426 shaders; `2118ab534fac88c6`'s histogram increments `[R3 * 4]`.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
+
+### HADD2 and HMUL2 with an immediate
+
+- **Symptom:** the GPU hangs (`kIOGPUCommandBufferCallbackErrorHang`) from the first 3D scene on, or frames of about 88 ms, in a shader with a half-float loop.
+- **Cause:** the two-source half-pair operations took their second source from the operand order HFMA2 needs: in forms 2, 3 and 7 that is the unused register field at bit 64, not the immediate, constant or uniform register. A blur stepping its loop with `HADD2 Rd, Rd, imm` stepped by whatever R0 held. An immediate also took modifiers from its own bits 62 and 63, flipping the sign of a negative constant.
+- **Fix:** `AHalfSecond` in `InstEmitAmpereAlu.cs` for HADD2, HMUL2, HSETP2, HSET2 and HMNMX2; `AHalfSrcs` leaves an immediate's bits alone.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md): 25,726 of its shaders use those forms; `85446a6753300fc8` is the blur.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
+
+### HFMA2 .H0_NH1
+
+- **Symptom:** wrong shading where a shader needs a cross product or a 2D rotation of half pairs; on Eden-NS2, which first read the mode as a plain negation of the high lane, sun and cloud shadows were lost.
+- **Cause:** bit 86 of HFMA2 rotates B: the name gives the lanes high first, so the high lane reads B's low half and the low lane B's high half negated. The decoder ignored the bit.
+- **Fix:** `AHfma2` in `InstEmitAmpereAlu.cs`. The lane order comes from Eden-NS2's fix (checked there against Switch 2 footage), not from a shader that proves it here.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md): 10,177 instructions in 7,590 programs. The fix made no visible difference in its tutorial area.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
+
+### Ampere instructions new in Pokémon Pokopia
+
+- **Symptom:** `Ampere instruction <op> at 0x… is not implemented`, `F2FP.MERGE_C` or `F2I from a float that is not 32-bit` in the shader build; those shaders are left out and their draws and dispatches skipped.
+- **Fix:**
+  - F2FP.MERGE_C (bit 78): b converted into the low half, c's low half into the high one.
+  - F2I from a half (source size 1): the half that bits 60..61 select.
+  - ATOMS.POPC.INC (0xf8c): an add of 1 with no source register, also counted as using shared memory. The game's one encoding is accepted; any other stops the shader.
+  - UP2UR (0x883): `URd = UP0 ? 1 : 0`. The game's one encoding (URZ, mask 1) is accepted; any other stops the shader.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md).
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
+
+### IMAD.HI adds a register pair, and IMAD.X its carry
+
+- **Symptom:** 64-bit arithmetic in a shader gives wild results: the 64-bit division behind an exposure average returned 893011 for 218, so the exposure stayed at the end of its range. With only the pair fixed it still gave 2 for 340 / 1.
+- **Cause:** IMAD.HI is the high word of `a * b + {c + 1:c}`, the same 64-bit addition as IMAD.WIDE, with the carry out on the predicate at 81..84. The decoder took the high word of `a * b` and added `c` alone, losing the upper word of the pair and the low word's carry. The compiler's 64-bit multiply chains the two: `R9:R8 = R6 * R13 + {R9:R8}`, then `R8 = high(R7 * R11 + {R9:R8})`. Separately, all three IMAD forms have .X (bit 74, the carry predicate at 87..90), which the decoder dropped; as with IADD3.X, a negated addend is then its bitwise not.
+- **Fix:** `AImadHi` and `AImadCarryIn` in `InstEmitAmpereAlu.cs`.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): the Lighting compute shaders' division, run line by line from its translated MSL on 208 known inputs, with dividends up to 2^44: 26 wrong with only the pair fixed, none with both. Other Switch 2 games share the decoder and have not been rebuilt with this.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
+
+### NVN2 compute reads its workgroup counts at c0 + 4
+
+- **Symptom:** a scene lit by many small lights comes out too dark, with its clustered light lists empty for most clusters.
+- **Cause:** a light culling shader computes its cluster as `(z * c0[8] + y) * c0[4] + x`. NVN2 compute keeps the dispatch's workgroup counts at the start of its driver segment, below the per-shader layout at 0x10, and the host wrote them only at c0 + 0x200, Maxwell's place. At zero, every cluster of a column wrote the same entry.
+- **Fix:** with a Switch 2 `sdk` (`dm_sdk_ounce`), `encode_args_` also writes them at `DMSH_C0_DISPATCH_NVN2`, and an indirect dispatch copies its GPU-written counts there too. x and y are read by the shader; z at c0 + 12 follows their order and has not been seen read.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): `35d12d6f98fa05e2`, read from its translated MSL. The picture's change has not been measured on its own.
+
+### Texture handles of SDK 22's Ampere code
+
+- **Symptom:** `Ampere instruction 361` (or `f60`, `370`, `38d` and others) refused, or hundreds of `Failed to find handle source for bindless access of type "textureCube"` when the handle was taken from the wrong register: units drawn white, the rest of the scene right.
+- **Cause:** the bindless form of a texture instruction is the bound opcode + 1 with 0x300: 0xb60 becomes 0x361 and 0xb6f becomes 0x370. 0x361 takes its handle first in the second source block (bit 59), 0xf60 in a uniform register at 40..46, and 0x370 (TXQ) in Ra with the level in Ra + 1. A census of all the game's instructions gave the position.
+- **Fix:** `ATex` and `ATxq` in `InstEmitAmpereMem.cs`. The same bring-up adds, from their encodings in the game: 0x301 BREV and 0x2be its uniform form, 0x311 F2I.U64, 0x312 I2F of a 64-bit pair, 0x38c ATOMS, 0x38d ATOMS.CAS (Rd is 1 when it swapped, not the old value: the game's only use is a retry loop until Rd == 1), 0x992 MEMBAR, 0x9ab ERRBAR, and the carry out of IMAD.WIDE.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): 902 shaders had the wrong register at first; all 16,888 translate now. [Splatoon Raiders](../../dm/games/0400380020056000/README.md) lists 0x2be, 0x301 and 0x38c among its refused instructions; it has not been rebuilt with this.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
 
 ### Ampere HMMA through simdgroup_matrix
@@ -1027,6 +1107,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** the host's reflection reader takes the array length from the MSL type, and the replay fills element k from the handle at byte 8k of that uniform slot (`NVN_RB_TEXU` / `SAMPU` with `n`); elements whose bytes are not a registered texture or sampler ID read the dummy, silently. No chain change: the build already wrote the array type.
 - **Found on:** [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md): the reflection shaders (`reflection.bfsha`: `array<texture2d<float>, 32> fp_t2d_cb14_0` and its samplers), c14 (uniform slot 11). The first run showed elements 0–3, 6 and 8–12 holding textures, among them the shader's fixed handles at +8, +16 and +24 and the lights' from +64.
 
+### A table of handles past the array's length
+
+- **Symptom:** characters shaded black; a shader indexes a table of cube maps, and every element it reads clamps to the array's last one, which holds no handle.
+- **Cause:** the shader reads `c[14][8 * i + 0x340]`. `BindlessToArray` starts an array of handles at the buffer's start, so with a base past the array's length (32) each index ran off its end.
+- **Fix:** `TryArrayBase` finds an index plus a constant base; when the base is past the length, the array starts at the base and the index is the handle's place in the table. `nvn_mtl.m` fills element k from the array's offset + 8k (`NVN_RB_TEXU`, `NVN_RB_SAMPU`). A base inside the array keeps the array at 0, as before.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): `e496014da6497fad` and the character shaders.
+
 ### An array of handles from the driver table c2
 
 - **Symptom:** `shaders with a binding whose slot was not decoded 588`; shadow cascades read through `array<texture2d_array<float>, 32> fp_t2das_cb2_0`.
@@ -1049,6 +1136,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** two general fixes: a texture binding of slot 32–39 reads the image bound in slot 0–7 when there is one, as c2 holds it (`nvn_mtl.m` `tex_slot_h`; Hades II's texture slot 34 without an image still reads the texture), and a query on an image handle the facts do not type is translated again with the type of that image from the first translation (`dmsh_xlate` `ImageTypesOf`).
 - **Found on:** [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md): the per-pixel volumetric lightmap read brick (0, 0, 0) of the brick atlas for almost every cell. Unreal merges each streamed level's lightmap into one atlas on the GPU: brick copies (`0a7ff4171bd1a82a`), then a patch of the shared 16³ `RGBA8_UINT` indirection texture (`7b958a7b21e72801`) whose bounds come from `GetDimensions` on the very `RWTexture3D` it writes. Only cell (0, 0, 0) was written, every other cell kept size 0, and the shader fell back to the atlas origin: the first daytime level's bricks, baked about 2¹⁵ brighter (the same bricks in gameplay hold 0.5–1.4). [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) has four such size queries (`cp_t_tcb_48` / `_4A`).
 - **Check:** how it was found: the raw scene colour (`texraw`) put the characters at 1,000–2,000 and the walls at 0.05; a debug build of one character shader that wrote its terms in alternating 8-pixel columns isolated the volumetric lightmap ambient term; dumps of the atlas (`texlist` / `texraw`), of the uploaded level bricks (the 3D upload dump) and of the indirection texture, with the cell computed from the primitive's origin and View `VolumetricLightmapWorldToUVScale / Add` (View 220 / 221), gave the rest.
+
+### A size query on a 3D texture gets a 2D slot
+
+- **Symptom:** `[RED] texture type mismatch: shader … declares slot 128 as Metal type 2, texture ID … is type 7 (NVN target 2, …); bound as is`, for a shader whose MSL has a `texture3d` and a `texture2d` on the same register and only calls `get_width` / `get_height` on the `texture2d`.
+- **Cause:** a size query (TXQ) carries no texture type, and a table built without the game's PC shaders does not answer one, so `QuerySamplerType` defaults to 2D. A handle ORs a texture word and a sampler word, and the query's has another sampler word than the sample's, so Ryujinx's merge by handle (`MergeTextureMeta`) keeps them apart. The shader then has a second binding of the slot, typed 2D, beside the sample's own `texture3d`, and the host has no 2D view of a 3D texture (`tex_fit`). In Princess Peach: Showtime!, 1,490 slots in 1,463 of 56,594 shaders had that pair. The same pair with a cube (27 slots, `get_num_mip_levels`) or a 2D array raises no red line, since those have a 2D view.
+- **Fix:** general, in the translator: when a query's guess meets another type on its texture slot, `dmsh_xlate` translates again with that type (`TextureTypesOf`), as `ImageTypesOf` does for images. Types go by slot, as the answer table does; the table comes first, a query with nothing else on its slot stays 2D, and a slot two instructions give different shapes keeps the guess. The values these shaders read do not change: every query of the 1,490 3D slots reads only the width, or the mip count on the 27 cube slots, and an Apple M6 returned the right width through the old binding for all six sizes tried. What changes is that Metal now defines the binding.
+- **Check:** `dm/tools/tests/test_txq_type.py` (synthetic shaders; the fix's tests fail on the translator before it). Princess Peach: Showtime! has no such pair left, and its route into the ninja play went from 15 red lines to none, with the same picture at the same spot. Of the 69 local games' shader folders scanned, only two others hold the pattern: [Ghost Trick](../../dm/games/010029B018432000/README.md) (2 shaders) and [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) (1), each with a 2D array.
+- **Found on:** [Princess Peach: Showtime!](../../dm/games/01007A3009184000/README.md#found-on-this-game): up to 19 red lines per run, with no visible fault over the first play.
 
 ### More than 64 bindings in one shader
 
@@ -1288,6 +1383,23 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** the NSP script (`prune_stale_chains`, called last in `build_shaders`) removes the folders named `b-<12 hex digits>` of other chain versions in `shader/cache` and `shader/ios`, and their keys, once the libraries, their tables and the key of the current chain are in place (a reused build prunes too). It logs one line, `removed old shader libraries b-… (N GB)`. A build that stops or fails earlier keeps the old libraries. The regression check has run by then, and the next chain change compares with the folder this build keeps. The compile cache already holds what the old libraries compiled, since `dmsh_build.py` took them in at the first build of the new chain. The only loss is for a chain that comes back (a checkout of an older commit): its shaders compile again where the cache does not hold their MSL. The compile cache itself (`shader/cache/cas/metallib`) is keyed by the MSL and the compiler, not by the chain, so entries are shared across chains and it is not pruned. It grows only with MSL that is new, and no code removes an entry.
 - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game) (resolved).
 - **Check:** `test_nsp_mac.py` (`test_prune_stale_chains_after_success`, `test_failed_build_keeps_stale_chains`, `test_prune_ignores_other_names`).
+
+### Old per-shader cache entries grew a game's build folder with each chain change
+
+- **Symptom:** `<id>_build/shader/cache/cas/shader/` holds several entries for each shader, and grows by a full set with every upstream update that changes the shader chain. Tears of the Kingdom ([seedds/nxnative#1033](https://github.com/seedds/nxnative/issues/1033)): 172,014 entries after six builds for 28,669 shaders, 11.85 GB of `.metal` and `.json` that no build read; the test Mac's copy held 934,955, of which the prune (dry run) found 906,286 unused: 70.2 GB of sources and reflection, scanned in 18 minutes on an external SSD.
+- **Cause:** each shader's cache digest (`dmsh_build.py` `shader_key`) covers the chain's code and tools, so a chain change misses every entry and publishes a new one. [Old shader library folders](#old-shader-library-folders-grew-a-games-build-folder-with-each-chain-change) removed the old `b-<chain>/` folders, not these entries. `cas/index/<key>.json` cannot tell which entry is in use: a cache hit does not rewrite it, so after a checkout of an older commit it can name a newer digest than the one the build restores. The digests also cover the iOS compile convention, so a Mac-only and an iOS build of one chain use different entries, and `regress.py` builds other chains into the same cache.
+- **Fix:** a full `dmsh_build.py` run lists the digests it used, `b-<chain>/_b_cas.txt` beside the Mac outputs (every full build writes those; the iOS folder goes whole into the IPA). The NSP script (`prune_shader_cache`, called with `prune_stale_chains` after a successful or reused build) removes the `cas/shader/<64 hex digits>` entries the list does not name and that are older than it, and logs `removed old shader cache entries: N (X GB)`, the space of their sources and reflection (an entry's libraries are clones of the compile cache's). No list (libraries built before it), a failed or stopped build, or a regress run: nothing goes. `cas/metallib` and `cas/variant` are keyed by the MSL and stay, so a chain that comes back, or a build for the other target, translates again but compiles in Metal only MSL it has not seen. A partial `dmsh_build.py` run (named keys) does not rewrite the list, so the next prune can remove the entries it published; the next full build translates those shaders again.
+- **Found on:** [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game) (resolved).
+- **Check:** `test_nsp_mac.py` (`test_prune_shader_cache`, `test_prune_shader_cache_needs_success_and_the_list`).
+
+### A shader build that keeps its packages in memory runs one worker at a time
+
+- **Symptom:** the NSP script's Mac or iOS shader step for a game with very large shader packages runs at one or two shaders a second whatever `J` is. Its Python process sits at one full core, mostly system time, while few `metal` compiles run. Pokémon Pokopia (4.4 GB of packages, 131,426 shaders): players reported ETAs of 20 to 200 hours ([seedds/nxnative#1036](https://github.com/seedds/nxnative/issues/1036)).
+- **Cause:** `dmsh_build.py` read each package whole and kept its records as separate copies for the whole build: 105,118 of them for Pokopia's 4.25 GB `ps_rdb.bin`, leaving the process at 8.7 GB. Every child process (spirv-cross, `metal`, `metallib`, several per shader) starts with a fork of the builder, which then took 75 ms instead of 3, and Python forks with the GIL held, so the `J` workers queued behind each other. The same bytes in one buffer fork in 3 ms: the cost comes from the many separate allocations.
+- **Fix:** `record_index` scans a package for its record markers through a read-only mapping it closes again, and keeps only the offsets; `rec_of` reads one record with `pread` when the build needs it and keeps none. The outputs are byte-identical.
+- **Measurement:** a cold build of 1,001 Pokopia shaders on an M4 Pro (`J=10`): 528 s before, 240 s after (1.9 to 4.2 shaders a second); the builder's Python went from 100% to about 46% of a core, and 8 to 10 Metal compiles ran at once instead of about 3. At that rate the whole map would take about 9 hours on that Mac (not run). The largest packages of the other local games are 241 MB (Splatoon Raiders) and less, where a fork costs a few milliseconds.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md#found-on-this-game) (resolved).
+- **Check:** `test_shader_toolchain_cache.py` (`test_package_records_are_read_from_the_file_at_their_offsets`).
 
 ### Concurrent warm tasks prepare each shader once
 

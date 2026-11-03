@@ -21,7 +21,7 @@ from nso_asm import ADRP, ADDI, ADDR, B, BEQ, BLR, BR, NOP
 tree = ast.parse((TOOLS / 'patch_nso.py').read_text())
 IMG = bytearray(0x5000); tabjumps = {}; jumps = {}   # the globals the recognizers read: the module image and the jump tables resolved so far in the function
 scope = {'re': re, 'struct': struct, 'ARM64_OP_IMM': ARM64_OP_IMM, 'IMG': IMG, 'tabjumps': tabjumps, 'jumps': jumps}
-exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'written_w', 'writes_reg', 'half_count', 'copied_base', 'table_base', 'table_cands', 'forward_table_base', 'check_before_copy', 'jump_offsets', 'jump_adr_offsets', 'jump_zero_extended', 'jump_masked_pred', 'jump_masked_not')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
+exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'written_w', 'writes_reg', 'writes_reg_any', 'half_count', 'copied_base', 'table_base', 'table_cands', 'forward_table_base', 'check_before_copy', 'jump_offsets', 'jump_adr_offsets', 'jump_zero_extended', 'jump_masked_pred', 'jump_masked_not')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
 
 
 def mov(dst, src, wide=True): return (0xaa0003e0 if wide else 0x2a0003e0) | src << 16 | dst
@@ -181,6 +181,44 @@ class CopyAfterCheck(unittest.TestCase):
     def test_the_check_must_be_of_the_source(self):
         self.assertEqual(self.run_site(21), self.TARGETS)
         self.assertIsNone(self.run_site(18))
+
+
+class IndexChangedAfterCheck(unittest.TestCase):
+    TABLE = 0x4040
+    TARGETS = [32 + i * 4 for i in range(5)]
+
+    def run_site(self, between, index=18):
+        # adrp/add x4; cmp wN,#4; b.hi; <between>; ldrsw x18,[x4,xN,lsl #2]; add x18,x18,x4; br x18
+        words = [ADRP(4, 0, self.TABLE), ADDI(4, 4, self.TABLE & 0xfff), 0x7100001f | 4 << 10 | index << 5, bhi(12, 32),
+                 between, 0xb8a07800 | index << 16 | 4 << 5 | 18, ADDR(18, 18, 4), BR(18)] + [RET] * 5
+        for i, target in enumerate(self.TARGETS): struct.pack_into('<i', IMG, self.TABLE + 4 * i, target - self.TABLE)
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
+        ins = list(md.disasm(struct.pack('<' + 'I' * len(words), *words), 0))
+        return scope['jump_offsets'](ins, 7)
+
+    def test_unrelated_writes_keep_the_site(self):
+        for word in (NOP, ldr_s(18), mov(9, 0), 0xeb00025f):   # cmp x18,x0 only sets the flags
+            with self.subTest(word=hex(word)):
+                self.assertEqual(self.run_site(word), self.TARGETS)
+
+    def test_a_write_of_the_index_is_refused(self):
+        for word in (ADDI(18, 18, 1) & 0x7fffffff, ADDI(18, 18, 1), mov(18, 0)):   # add w18,w18,#1; add x18,x18,#1; mov x18,x0
+            with self.subTest(word=hex(word)):
+                self.assertIsNone(self.run_site(word))
+
+    def test_a_call_changes_only_a_caller_saved_index(self):
+        self.assertIsNone(self.run_site(0x94000040))
+        self.assertEqual(self.run_site(0x94000040, index=19), self.TARGETS)
+
+    def test_a_write_before_the_check_does_not_count(self):
+        # ldr w21,[sp,#8]; mov w18,w21; cmp w21,#4; b.hi; ldrsw x18,[x4,x18,lsl #2]: the walk passes the check first, and check_before_copy takes it
+        words = [ADRP(4, 0, self.TABLE), ADDI(4, 4, self.TABLE & 0xfff), 0xb9400000 | 2 << 10 | 31 << 5 | 21, mov(18, 21, False), 0x7100001f | 4 << 10 | 21 << 5, bhi(20, 32),
+                 0xb8a07800 | 18 << 16 | 4 << 5 | 18, ADDR(18, 18, 4), BR(18)] + [RET] * 5
+        targets = [36 + i * 4 for i in range(5)]
+        for i, target in enumerate(targets): struct.pack_into('<i', IMG, self.TABLE + 4 * i, target - self.TABLE)
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
+        ins = list(md.disasm(struct.pack('<' + 'I' * len(words), *words), 0))
+        self.assertEqual(scope['jump_offsets'](ins, 8, copy_first=True), targets)
 
 
 class ForwardBase(unittest.TestCase):

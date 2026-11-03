@@ -69,6 +69,7 @@ Each step below stopped the boot before its fix:
 - Everything under [Boot](#boot-mac) is new: the first Switch 2 game here.
 - [Ampere shader code (Switch 2)](../../../docs/reference/shaders.md#ampere-shader-code-switch-2): the translator's Ampere frontend, its scoreboard model and the IPA / texture / load semantics found on this game's menu (green boxes instead of text; no text); the tensor instructions, NVN2 compute's c[0] layout and push constants, MUFU SIN / COS in turns, and the storage base rule found in its gameplay.
 - [The Switch 2's order inside a GOB](../../../docs/reference/nvn-objects.md#the-switch-2s-order-inside-a-gob): the textures from its files.
+- [Scaled shared memory addresses](../../../docs/reference/shaders.md#scaled-shared-memory-addresses): LDSM's mode read as a stride, the upscaler's garbage picture.
 - [`nn::codec` video decoders taken over](../../../docs/reference/movies.md#nncodec-video-decoders-taken-over): the guide movies.
 - [The Switch 2's system tick is 31.25 MHz](../../../docs/reference/frame-rate.md#the-switch-2s-system-tick-is-3125-mhz): the frame-rate controller held 20 fps.
 - [Ampere HMMA through simdgroup_matrix](../../../docs/reference/shaders.md#ampere-hmma-through-simdgroup_matrix): agl's upscaler network, 2-6.5 ms a frame emulated with shuffles, 1.1-1.6 ms on the matrix hardware.
@@ -81,3 +82,5 @@ Each step below stopped the boot before its fix:
 - [Mesh geometry groups sized to the vertex output](../../../docs/reference/shaders.md#mesh-geometry-groups-sized-to-the-vertex-output): 388-byte vertices, over Metal's mesh limit at 32 triangles a group.
 - [Ampere shader code (Switch 2)](../../../docs/reference/shaders.md#ampere-shader-code-switch-2): SUATOM (0x593) in two agl technique compute shaders, the last two of the package's 22,852 that did not translate.
 - [Shader libraries loaded when the program is made](../../../docs/reference/shaders.md#shader-libraries-loaded-when-the-program-is-made): a new area's 3 to 7 libraries loaded on the submit thread, up to 4 s with the drive slowed.
+- [Odd present intervals on the 30 Hz display link](../../../docs/reference/frame-rate.md#odd-present-intervals-on-the-30-hz-display-link): interval 3 took 66.7 ms a frame, 15 fps for 20.
+- [GPU timestamps per submission segment](../../../docs/reference/frame-rate.md#gpu-timestamps-per-submission-segment): dynamic resolution read a GPU time of about 0 and kept 2304x1296 while 14 ms over budget; with `gpu_timestamps segment` it steps down to 1152x648 with its upscaler in the heavy areas and holds 30 fps.

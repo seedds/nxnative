@@ -84,6 +84,10 @@ HLE_FORCE("_ZN2nn2vi21QueryDisplayHdrStatusEPbPNS0_15HdrOutputFormatEPtPKNS0_7Di
     (void)disp; if (on) *on = 0; if (fmt) *fmt = 0; if (peak) *peak = 0; return RES_OK; }
 HLE_FORCE("_ZN2nn2vi25QueryDisplayHdrPaperWhiteEPtPKNS0_7DisplayE", "display HDR paper white: 203 nits (BT.2408); HDR is off", Result, h_vi_PaperWhite, uint16_t *nits, const void *disp) {
     (void)disp; if (nits) *nits = 203; return RES_OK; }
+// The largest buffer the display takes: BufferMaxResolution 0 is 1280x720, 1 1920x1080, 2 2560x1440, 3 3840x2160 (Fire Emblem Fortune's Weave's tables, main+0x1abc2c0 and +0x1abc050). The SDK's version
+// reads the service the host does not serve and left 0, so the game chose 720p output, its DLSS input 640x360, even docked. A Switch 2 drives a 4K TV docked and has a 1080p screen
+HLE_FORCE("_ZN2nn2vi31QueryDisplayBufferMaxResolutionEPNS0_19BufferMaxResolutionEPKNS0_7DisplayE", "the display's largest buffer: 4K in console mode, the 1080p screen in handheld mode", Result, h_vi_MaxRes, uint32_t *res, const void *disp) {
+    (void)disp; if (res) *res = dm_opmode() == 1 ? 3 : 1; return RES_OK; }
 HLE_FORCE("_ZN2nn2vi24QueryDisplayVrrSupportedEPbPKNS0_7DisplayE", "display VRR: not supported (fixed refresh rate)", Result, h_vi_VrrSupported, uint8_t *on, const void *disp) {
     (void)disp; if (on) *on = 0; return RES_OK; }
 HLE_FORCE("_ZN2nn2vi23SetDisplayVrrCapabilityEPNS0_7DisplayEb", "display VRR capability: the host has no VRR", Result, h_vi_SetVrr, void *disp, unsigned on) {

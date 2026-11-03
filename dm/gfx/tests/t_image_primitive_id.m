@@ -12,9 +12,6 @@ static tex_t image = {.magic = MAGIC('T','E','X',0), .serial = 99901};
 static prog_t program = {.serial = 99902};
 int main(void) { @autoreleasepool {
     mtl_init();
-    image.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D_ARRAY, .format = NVN_FORMAT_RGBA8, .width = 8, .height = 8, .depth = 4, .levels = 1, .samples = 1};
-    MTLTextureDescriptor *td = tex_desc(&image, 0); td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
-    id<MTLTexture> texture = [g_dev newTextureWithDescriptor:td]; res_add(texture); mtl_tex_init(&image); serial_put(image.serial, texture); mtl_reg_image(701, &image, NULL);
     NSError *error = nil;
     // A .metallib loaded as the host loads game shaders (lib_from_file)
     static const char *src = "#include <metal_stdlib>\nusing namespace metal;\n"
@@ -32,6 +29,9 @@ int main(void) { @autoreleasepool {
     }
     id<MTLLibrary> lib = lib_from_file(ml, &error);
     if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 1; }
+    image.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D_ARRAY, .format = NVN_FORMAT_RGBA8, .width = 8, .height = 8, .depth = 4, .levels = 1, .samples = 1};
+    MTLTextureDescriptor *td = tex_desc(&image, 0); td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    id<MTLTexture> texture = [g_dev newTextureWithDescriptor:td]; res_add(texture); mtl_tex_init(&image); serial_put(image.serial, texture); mtl_reg_image(701, &image, NULL);
     NvProg *pr = [NvProg new]; pr->sh[0] = [NvShader new]; pr->sh[0]->fn = fn_spec(lib, @"v", nil, &error);   // through the Metal 4 bases, as the host loads shaders
     NvShader *fs = [NvShader new]; pr->sh[1] = fs; fs->stage = 1; fs->fn = fn_spec(lib, @"f", nil, &error);
     fs->rf.reads_prim_id = 1;   // as the reflection records it (raster.primitive_id): pso_build_ex builds the pipeline whole

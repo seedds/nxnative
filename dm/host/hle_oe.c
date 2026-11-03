@@ -2,6 +2,11 @@
 // oe::Initialize is in hle_sdkinit.c, not here.
 // Environment switches: DM_OPMODE=0 handheld / 1 console (default: the profile's op_mode, console unless set; console corresponds to the console-mode render profile); DM_LANG=language code (default en-US; the iOS app sets it from the IPA's DMLanguage, main.m).
 #include "hle.h"
+#include <TargetConditionals.h>
+#include <crt_externs.h>
+#include <errno.h>
+#include <mach-o/dyld.h>
+#include <unistd.h>
 
 // The operation mode is runtime state (the front end can change it: iOS overheat downgrade switches to handheld): the single source is here, taken once from DM_OPMODE at startup, the environment variable is not read again afterwards
 #include <stdatomic.h>
@@ -104,14 +109,61 @@ HLE_FORCE("_ZN2nn2oe15EnableRecordingEv", "video recording switch; the host has 
 // Applet resource user ID (ARUID, the number am assigns to this process): the host has no am, and the SDK's own getter returns 0. SDK 20's OpenAudioRenderer (the CPU rendering + manual execution path, sdk+0x221730)
 //   aborts when it gets 0 (The Legend of Zelda: Breath of the Wild 1.9.0); SDK 16 did not check. Report a fixed non-zero ID, used only as an identifier
 HLE_FORCE("_ZN2nn6applet23GetAppletResourceUserIdEv", "applet resource user ID; the host returns a fixed non-zero value", uint64_t, h_applet_Aruid, void) { return 0x80; }
-// Launch parameter (present only when another program launched this one with one; returns bool): the host never passes one
-HLE_FORCE("_ZN2nn2oe21TryPopLaunchParameterEPmPvm", "launch parameter: none", unsigned, h_oe_PopLaunchParam, size_t *out, void *buf, size_t n) { (void)buf; (void)n; if (out) *out = 0; return 0; }
+// A program started by nn::oe::ExecuteProgram gets its launcher's parameters once (on hardware TryPopLaunchParameter returns them). The host keeps them in
+// $DM_TEMP/launch_param.bin across the relaunch (h_oe_ExecProgram) and hands them over here, consuming the file: Assassin's Creed: The Rebel Collection's
+// collection shell re-launches its own program with "/launcher:off /gamesoundlanguage:…" to become the game.
+HLE_FORCE("_ZN2nn2oe21TryPopLaunchParameterEPmPvm", "launch parameter: the one oe::ExecuteProgram passed, once", unsigned, h_oe_PopLaunchParam, size_t *out, void *buf, size_t n) {
+    if (out) *out = 0;
+    const char *dir = getenv("DM_TEMP"); if (dir == NULL || *dir == '\0') dir = getenv("DM_ROOT");
+    if (dir == NULL) return 0;
+    char path[1024]; snprintf(path, sizeof path, "%s/launch_param.bin", dir);
+    FILE *f = fopen(path, "rb"); if (f == NULL) return 0;
+    uint64_t len = 0;
+    // The writer puts the length first; a short read is a truncated file, which holds no whole parameter. Returning here also leaves the stream in a defined state.
+    if (fread(&len, 1, sizeof len, f) != sizeof len) { fclose(f); unlink(path); return 0; }
+    if (len > n) len = n;   // the caller's buffer decides how much of the parameter arrives
+    size_t got = 0;
+    if (len > 0 && buf != NULL) got = fread(buf, 1, (size_t)len, f);
+    fclose(f); unlink(path);   // once: a later program gets the parameters of its own launch, never these again
+    if (out) *out = got;
+    LOG("[dm] oe::TryPopLaunchParameter: %zu byte(s) of the launching program's parameters", got);
+    return 1;
+}
 // Tears of the Kingdom (SDK 20.5.22): the index of the program that launched this one in a multi-program application. The SDK asks the applet proxy, which the host never opens
 // (null read in applet::GetPreviousProgramIndex right after the window setup); -1 = launched from the home menu
 HLE_FORCE("_ZN2nn2oe23GetPreviousProgramIndexEv", "previous program index: launched from HOME, -1", int, h_oe_PrevProgram, void) { return -1; }
-// Launch another program of a multi-program application (Octopath Traveler 0 imports it); on hardware it does not return. The host has only this program: logged, and the game carries on
-HLE_FORCE("_ZN2nn2oe14ExecuteProgramEiPKvm", "launch another program of the application: the host runs only this one (logged)", void, h_oe_ExecProgram, int index, const void *param, size_t n) {
-    (void)param; LOG("[RED] oe::ExecuteProgram(%d, %zu bytes of parameters): the host runs only this program; the game carries on", index, n);
+// Launch another program of a multi-program application (Octopath Traveler 0 imports it); on hardware it does not return: the current program ends and the system starts the other one with
+// these parameters. The host runs one process, so for program 0 — this program — it re-executes itself (same modules, same environment, same argv) and leaves the parameters in
+// $DM_TEMP/launch_param.bin for nn::oe::TryPopLaunchParameter in the new process. Assassin's Creed: The Rebel Collection needs that: its collection shell calls it with index 0 and
+// "/launcher:off /gamesoundlanguage:en …" to become AC4, and without the relaunch it dereferences the null program state and dies at main+0x13a08dc (SIGILL) one frame after the press.
+// Another index leaves the old behaviour (logged, the game carries on): the host cannot start a program it never loaded, and re-executing would only start this one again
+HLE_FORCE("_ZN2nn2oe14ExecuteProgramEiPKvm", "launch another program of the application: program 0 re-executes the host with its parameters", void, h_oe_ExecProgram, int index, const void *param, size_t n) {
+    char text[65] = {0}, hex[3 * 32 + 1] = {0};
+    const unsigned char *p = (const unsigned char *)param;
+    for (size_t i = 0; p && i < n && i < 64; i++) text[i] = p[i] >= 0x20 && p[i] < 0x7f ? (char)p[i] : '.';
+    for (size_t i = 0; p && i < n && i < 32; i++) snprintf(hex + 3 * i, 4, "%02x ", p[i]);
+    LOG("oe::ExecuteProgram(%d, %zu bytes of parameters): %s| hex %s", index, n, text, hex);
+    if (index != 0) { LOG("[RED] oe::ExecuteProgram(%d): the host runs one program; the game carries on", index); return; }
+    const char *dir = getenv("DM_TEMP"); if (dir == NULL || *dir == '\0') dir = getenv("DM_ROOT");
+    char path[1024]; int stored = 0;
+    if (dir != NULL && param != NULL && n > 0) {
+        snprintf(path, sizeof path, "%s/launch_param.bin", dir);
+        FILE *f = fopen(path, "wb");
+        if (f != NULL) { uint64_t len = n; stored = fwrite(&len, 1, sizeof len, f) == sizeof len && fwrite(param, 1, n, f) == n; fclose(f); }
+    }
+    if (n > 0 && !stored) { LOG("[RED] oe::ExecuteProgram: the parameters could not be stored (DM_TEMP or DM_ROOT unset or not writable); the game carries on"); return; }
+    LOG("[dm] oe::ExecuteProgram: re-executing this program with %zu byte(s) of parameters", n);
+    fflush(NULL);
+#if TARGET_OS_IPHONE
+    LOG("[RED] oe::ExecuteProgram: this host runs no second program on iOS; the game carries on");   // execv is available but nothing may replace the app process
+#else
+    char exe[4096]; uint32_t sz = sizeof exe;
+    if (_NSGetExecutablePath(exe, &sz) == 0 && _NSGetArgv() != NULL) {
+        execv(exe, *_NSGetArgv());
+        LOG("[RED] oe::ExecuteProgram: execv(%s) failed: %s", exe, strerror(errno));
+    }
+    LOG("[RED] oe::ExecuteProgram: the host could not re-execute itself; the game carries on");
+#endif
 }
 HLE_FORCE("_ZN2nn2oe16DisableRecordingEv", "video recording switch; the host has no system recording", void, h_oe_DisableRec, void) {}
 // Silence the game's sound in system video captures (through am; FINAL FANTASY RESONANCE imports both): the host records nothing

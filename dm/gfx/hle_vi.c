@@ -10,6 +10,11 @@ HLE_FORCE("_ZN2nn2vi10InitializeEv", "display service init; the host has no vi s
 HLE_FORCE("_ZN2nn2vi18OpenDefaultDisplayEPPNS0_7DisplayE", "open default display; the host returns a static object", Result, h_vi_OpenDisp, void **out) {
     *out = &g_display; return RES_OK;
 }
+// The by-name form, which SDK 8's Rebel Collection calls with "Default" after ListDisplays: the SDK's body goes through the vi service object the host never made and null-dereferences
+// at +0xf4 (SIGSEGV addr=0, x1 = the name). The host has one display, so every name gets the static object
+HLE_FORCE("_ZN2nn2vi11OpenDisplayEPPNS0_7DisplayEPKc", "open a named display; the host has one, the static object", Result, h_vi_OpenDispNamed, void **out, const char *name) {
+    (void)name; *out = &g_display; return RES_OK;
+}
 HLE_FORCE("_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayE", "create layer; the host returns a static object", Result, h_vi_CreateLayer, void **out, void *disp) {
     (void)disp; *out = &g_layer; return RES_OK;
 }

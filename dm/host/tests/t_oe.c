@@ -153,5 +153,23 @@ int main(void) {
     h_oe_SetFocusMode(3); dm_applet_enter("test");
     CHECK(empty() && h_oe_GetFocus() == 2, "focus mode 3: an applet changes the state without a notification");
     dm_applet_leave(); CHECK(empty() && h_oe_GetFocus() == 1, "focus mode 3: back to 1 without a notification");
+    // Launch parameters: the file oe::ExecuteProgram leaves is handed over once, and only the bytes the caller's buffer holds
+    {
+        char tmpl[] = "/tmp/t_oe_XXXXXX"; char *tdir = mkdtemp(tmpl);
+        CHECK(tdir != NULL, "a temporary DM_TEMP for the launch parameter"); if (!tdir) { printf("== oe %d checks, %d failed ==\n", checks, fails); return 1; }
+        setenv("DM_TEMP", tdir, 1);
+        char lp[512]; snprintf(lp, sizeof lp, "%s/launch_param.bin", tdir);
+        unsigned char b[16]; size_t got = 99;
+        memset(b, 0xee, sizeof b);
+        CHECK(h_oe_PopLaunchParam(&got, b, sizeof b) == 0 && got == 0, "no launch parameter yet: false and the size 0");
+        FILE *f = fopen(lp, "wb"); CHECK(f != NULL, "the launching program left its parameters in DM_TEMP");
+        if (f) { uint64_t len = 3; fwrite(&len, 1, sizeof len, f); fwrite("abc", 1, 3, f); fclose(f); }
+        CHECK(h_oe_PopLaunchParam(&got, b, sizeof b) == 1 && got == 3 && b[0] == 'a' && b[2] == 'c' && b[3] == 0xee, "the parameters arrive once, and not the buffer's old bytes");
+        got = 99; CHECK(h_oe_PopLaunchParam(&got, b, sizeof b) == 0 && got == 0, "the parameter is consumed: the next pop is empty");
+        f = fopen(lp, "wb"); if (f) { uint64_t len = 10; fwrite(&len, 1, sizeof len, f); fwrite("0123456789", 1, 10, f); fclose(f); }
+        got = 0; CHECK(h_oe_PopLaunchParam(&got, b, 4) == 1 && got == 4 && b[0] == '0' && b[3] == '3', "a buffer smaller than the parameter takes what fits");
+        CHECK(h_oe_PopLaunchParam(&got, b, sizeof b) == 0, "and the rest does not arrive later: the file is consumed as a whole");
+        rmdir(tdir);
+    }
     printf("== oe %d checks, %d failed ==\n", checks, fails); return fails != 0;
 }

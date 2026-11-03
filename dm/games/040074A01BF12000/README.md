@@ -69,6 +69,7 @@ Each step below stopped the boot before its fix:
 - Everything under [Boot](#boot-mac) is new: the first Switch 2 game here.
 - [Ampere shader code (Switch 2)](../../../docs/reference/shaders.md#ampere-shader-code-switch-2): the translator's Ampere frontend, its scoreboard model and the IPA / texture / load semantics found on this game's menu (green boxes instead of text; no text); the tensor instructions, NVN2 compute's c[0] layout and push constants, MUFU SIN / COS in turns, and the storage base rule found in its gameplay.
 - [The Switch 2's order inside a GOB](../../../docs/reference/nvn-objects.md#the-switch-2s-order-inside-a-gob): the textures from its files.
+- [Scaled shared memory addresses](../../../docs/reference/shaders.md#scaled-shared-memory-addresses): LDSM's mode read as a stride, the upscaler's garbage picture.
 - [`nn::codec` video decoders taken over](../../../docs/reference/movies.md#nncodec-video-decoders-taken-over): the guide movies.
 - [The Switch 2's system tick is 31.25 MHz](../../../docs/reference/frame-rate.md#the-switch-2s-system-tick-is-3125-mhz): the frame-rate controller held 20 fps.
 - [Ampere HMMA through simdgroup_matrix](../../../docs/reference/shaders.md#ampere-hmma-through-simdgroup_matrix): agl's upscaler network, 2-6.5 ms a frame emulated with shuffles, 1.1-1.6 ms on the matrix hardware.

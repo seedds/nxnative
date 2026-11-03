@@ -127,6 +127,13 @@ class Shared(Translated):
     def test_stride_3_scales_its_register_by_16(self):   # Element 3 of 16 bytes, word 12
         self.assertIn('[12] = 77u', self.msl(mov(2, 3), mov(3, 77), inst(*self.STS_SCALED_16)))
 
+    # LDSM keeps its mode at 78..79, where LDS has its stride: 1 is a transposed read (MT88), not a scale. Donkey Kong Bananza's upscaler 7629d857a0a93833 +0x1ce0, on R3: scaled, its picture was garbage
+    LDSM_MT88 = 0x000fe20000004200, 0x000000000314783b   # LDSM.16.MT88.4 R20, [R3], with no write barrier for the store to wait on
+
+    def test_ldsm_mode_is_not_a_scale(self):
+        msl = self.msl(mov(3, 0x40), inst(*self.LDSM_MT88), sts(0x20, 20))
+        self.assertIn('spvSubgroupShuffle(8.96831', msl)   # the address 0x40 as a float's bits; scaled, it would be 0x100 (3.5873e-43)
+
 
 class Pokopia(Translated):
     """Pokemon Pokopia's encodings, on the register the atomic reads: F2FP.MERGE_C (22,886 shaders), F2I from a half (1,067), MEMBAR with ERRBAR (144)"""

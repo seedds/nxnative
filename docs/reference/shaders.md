@@ -872,7 +872,7 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 - **Symptom:** a compute shader's results in shared memory land in the wrong elements, or only part of its memory is cleared. An exposure histogram came back with its bins at about four times their index, the scene several stops too dark.
 - **Cause:** LDS and STS with a register carry a stride at 78..79, so the register counts elements of 4, 8 or 16 bytes (stride 1, 2, 3), not bytes. The decoder ignored it. The field is a scale, not the access size: stride 3 occurs on 4, 8 and 16-byte accesses alike.
-- **Fix:** `AStride` in `InstEmitAmpereMem.cs`, for LDL, LDS, STL, STS and ATOMS.
+- **Fix:** `AStride` in `InstEmitAmpereMem.cs`, for LDL, LDS, STL, STS and ATOMS. LDSM keeps its mode at those bits (1 is a transposed read, MT88), so it takes its address unscaled (`stride: false`): scaled by that mode, [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md)'s upscaler (`7629d857a0a93833`, 12 of its 27 LDSM) read four times too far along, and the picture came out as an 8x8 lattice of garbage for as long as the upscaler ran, with nothing in the log.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): 2 LDS and 2 STS with a register in its 16,888 shaders, all in the Lighting compute shaders; `d5bc99ffd183fa20` bounds its register by the element count (0x20) before `[R2 * 8]`. [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md): 921 accesses with stride 1, 68 with 2 and 3,312 with 3, among its 131,426 shaders; `2118ab534fac88c6`'s histogram increments `[R3 * 4]`.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
 

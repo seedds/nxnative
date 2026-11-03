@@ -85,6 +85,13 @@ class DeriveProfile(Base):
         nso(self.ex / 'ExeFS/subsdk1', BID2); self.derive(mods=('main', 'subsdk1', 'sdk'))   # a version that ships it keeps the profile's list
         self.assertEqual(game.Game(self.pdir).words('modules'), ['main', 'subsdk1', 'sdk'])
 
+    def test_the_same_profile_in_another_checkout_keeps_later_stages(self):
+        self.derive(); self.later_stages()
+        other = self.tmp / 'checkout2' / 'games' / f'{TID:016X}'; shutil.copytree(self.src, other)   # the repository cloned again, or a front end's own copy of it
+        nsp.derive_profile(game.Game(other), self.pdir, 'v65536', self.ex, ['main'])
+        self.assert_kept()
+        self.assertNotIn(str(self.tmp), (self.pdir / 'game.tsv').read_text())
+
     def test_changed_inputs_derive_again(self):
         changes = {
             'source game.tsv': lambda: (self.src / 'game.tsv').write_text((self.src / 'game.tsv').read_text() + 'pad_layout\tfull\n'),

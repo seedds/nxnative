@@ -12,6 +12,7 @@ import unittest
 
 REPO = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('jit_capture', REPO / 'dm/tools/jit_capture.py')
+assert spec and spec.loader
 jc = importlib.util.module_from_spec(spec); spec.loader.exec_module(jc)
 
 RX, RO, MAIN = 0x100000, 0x4000, 0x8000
@@ -110,6 +111,11 @@ class JitCapture(unittest.TestCase):
         r2 = dict(r, raw=r['raw'][:28] + b'\x07\0\0\0')   # other padding: the same request
         self.assertEqual(jc.rekey(r2, {4: mask}), k)
         self.assertNotEqual(jc.rekey(r, {}), k)   # without request bytes: the value-masked data
+
+    def test_span_mask(self):   # ranges are inclusive, and a span of one byte has no dash
+        self.assertEqual(jc.span_mask('0-7,24-27'), bytes([0xff] * 8 + [0] * 16 + [0xff] * 4 + [0] * 4))
+        self.assertEqual(jc.span_mask('30'), bytes([0] * 30 + [0xff] + [0]))
+        self.assertEqual(jc.span_mask('0x1f,0-0'), bytes([0xff] + [0] * 30 + [0xff]))
 
 
 if __name__ == '__main__':

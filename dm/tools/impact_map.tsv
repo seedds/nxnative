@@ -69,8 +69,8 @@ dm/gfx/tools/dmsh_build.py	shader:stage:*	the shader build: every NVN game
 dm/gfx/tools/dmsh_vin.py	shader:integer_vertex_inputs	integer vertex inputs
 dm/gfx/tools/dmsh_pull.*	shader:pulling_vertex_inputs	pulling vertex inputs
 dm/gfx/tools/dmsh_fetch.py	shader:readable_tile	readable tiles
-dm/gfx/tools/dmsh_alpha.py	nvn:nvnColorStateSetAlphaTest	the alpha test libraries
-dm/gfx/tools/dmsh_logic.py	nvn:nvnColorStateSetLogicOp	the logic operation libraries
+dm/gfx/tools/dmsh_alpha.py	nvn:nvnColorStateSetAlphaTest	the alpha test entry points
+dm/gfx/tools/dmsh_logic.py	nvn:nvnColorStateSetLogicOp	the logic operation entry points
 dm/gfx/tools/dmsh_geometry.py	shader:stage:gs	geometry shaders
 dm/gfx/tools/dmsh_facts.py	shader:stage:*	the translator's answer table
 dm/gfx/tools/dmsh_chain.*	shader:stage:*	the chain version: every NVN game's libraries are rebuilt

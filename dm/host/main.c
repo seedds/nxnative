@@ -57,11 +57,22 @@ static uint64_t proc_start_mono_ns(void) {
     return age > 0 ? mono - (uint64_t)age : mono;
 }
 
+#ifdef DM_GAME_MULTI
+// A host over the programs of a multi-program application (game.py header_multi): the profile of the program DM_PROGRAM names, program 0 without it. One run is one program (hle_oe.c)
+const dm_game_t *dm_game_cur(void) {
+    static const dm_game_t *g;
+    if (!g) {
+        const char *e = getenv("DM_PROGRAM"); int p = e ? atoi(e) : 0; g = &dm_games[0];
+        for (size_t i = 0; i < sizeof dm_games / sizeof *dm_games; i++) if (dm_games[i].program == p) g = &dm_games[i];
+    }
+    return g;
+}
+#endif
 // The modules to load when the command line names none: those of the profile's build row for main's build (its build ID from the rewriter's main.fixups.tsv), else all the profile's
 // modules. A game's versions may differ in modules: Mario Kart World's base game has main subsdk0 (a Mono runtime) sdk, its update 1.8.0 main subsdk0 (the movie player) subsdk1 sdk
 static int profile_modules(const char *dir, const char **names) {
-    static const char *all[] = DM_GAME_MODULES;
-    static const struct { const char *build, *mods; } rows[] = {DM_GAME_BUILD_MODULES};
+    const char *all[] = DM_GAME_MODULES;
+    const struct { const char *build, *mods; } rows[] = {DM_GAME_BUILD_MODULES};
     char path[1024], line[256], bid[33] = "";
     snprintf(path, sizeof path, "%s/main.fixups.tsv", dir);
     FILE *f = fopen(path, "r");

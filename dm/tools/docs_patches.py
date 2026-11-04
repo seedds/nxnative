@@ -15,7 +15,7 @@ import game   # noqa: E402
 OUT = REPO / 'docs' / 'agents' / 'game-patches.md'
 SDK = REPO / 'dm/tools/sdk_patches.py'
 HOST = ['dm/host', 'dm/gfx', 'dm/ios']   # tracked files only: dm/host/gen and other build output are git-ignored
-HOST_EXT = ('.c', '.m', '.mm', '.h', '.swift')
+HOST_EXT = ('.c', '.m', '.mm', '.h', '.inc', '.swift')
 # What a build-keyed host table does (the table's name in the source; a row of another table is listed under its own name)
 TABLES = {'k_locks': 'engine frame limit set to fps_target', 'k_ue': "Unreal's allocator on a host malloc zone", 'k_nier_dr': 'frame interval and dynamic-resolution floor'}
 # Profile keys that are not behaviour switches: per-game data or controls, not something the host does differently
@@ -179,11 +179,15 @@ def frame_step_sites(fn):   # (offset, reason) of each site a FRAME_STEP functio
     return sorted(puts), ctx.render_scale
 
 
+def host_files():   # the host's tracked sources without its tests: what the build-ID scan below and the title-ID check (test_architecture.py) read
+    tracked = subprocess.run(['git', 'ls-files', *HOST], cwd=REPO, capture_output=True, text=True, check=True).stdout.split('\n')
+    files = sorted(REPO / f for f in set(tracked) if f)   # a set: ls-files lists a file in a merge conflict once per stage
+    return [p for p in files if p.suffix in HOST_EXT and 'tests' not in p.relative_to(REPO).parts[2:]]
+
+
 def host_rows(builds):   # {build ID: [(file, line, what)]}: rows and checks of the host keyed by a main build ID
     out = {}
-    tracked = subprocess.run(['git', 'ls-files', *HOST], cwd=REPO, capture_output=True, text=True, check=True).stdout.split('\n')
-    for p in sorted(REPO / f for f in set(tracked) if f):   # a set: ls-files lists a file in a merge conflict once per stage
-        if p.suffix not in HOST_EXT or 'tests' in p.relative_to(REPO).parts[2:]: continue
+    for p in host_files():
         table = None
         for n, line in enumerate(p.read_text(errors='replace').split('\n'), 1):
             m = re.search(r'\b(k_\w+)\s*\[\]\s*=', line)

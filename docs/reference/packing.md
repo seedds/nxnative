@@ -274,6 +274,13 @@
 - **Fix:** the entry's last byte in a `DMROMFS1` index ([format](../../dm/tools/romfs_image.py)) is 1 on a file that failed the check (`img_ent.flags`, `romfs_image.h`; `nx_extract` sets it, and every reader refuses another value, or a flag on a directory). The mark stays with the image in an IPA, a Mac app or a hand-copied `romfs.img`. The host logs `[RED] fs RomFS image <path>: damaged files <N>: ...` at the mount and `[RED] fs rom:/<file> failed the NCA's hash check ...` at each damaged file's first open. A clean image is byte-identical to one from before this mark (checked on SteamWorld Dig), so its identity does not change. Not marked: an image extracted before this change, and folder extraction, which has no index (the NSP script writes images). Search a crash's log for `hash check` before looking for a cause in the host.
 - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game) ([issue #810](https://github.com/seedds/nxnative/issues/810)). `dm/host/tests/t_fs.c` checks the count, the single report at first open and the refused flags; a boot of SteamWorld Dig on a deliberately damaged image logged the count and the files it opened.
 
+### An update's offline HTML pages reported as a damaged NSP
+
+- **Symptom:** the NSP script stops at the offline HTML pages (`logs/extract_html_<version>.log`) with `[RED] the NSP is damaged: <n> files fail the NCA's hash check` and a list under `/html-document/`, although the program extracted cleanly and the NSZ tool verified every NCA of the update.
+- **Cause:** an update's HtmlDocument NCA can be a patch of the base game's. `nx_extract --html` tries the update's NCA alone first and the base's NCA patched with it second, keeping whichever reads, but a read that fails the hash check does not throw: `Copy` lists each file as damaged and goes on. So the first, wrong read was kept, the patched one was never tried, and the files listed in it stopped the build.
+- **Fix:** `Try` in `dm/tools/nx_extract/Program.cs` counts the damaged files a read adds; a read that adds any is undone (its folder deleted, its entries taken off the list) and the patched read is tried. A page that fails both ways is still reported with `[RED] an HtmlDocument NCA of the update could not be read`.
+- **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) update 13.0.5 (`v2031616`): 1,641 of the first NCA's files failed alone; through the base it reads 2,798 files (122.2 MB) with none damaged, and the game packed and booted to its opening movie on the Mac.
+
 ## Sparse base games
 
 ### The survey's build ID lookup stops on the base game alone with a hash error

@@ -80,9 +80,13 @@ static class P {
         Nca baseProg = Pick(basePkg, NcaContentType.Program, progId) ?? throw new Exception(progId == null ? "no Program NCA in the base NSP" : $"no Program NCA {progId:x16} in the base NSP");
         if (html) {   // an update's NCA may be a patch of a base game's, which of the program's it does not say: the one it reads with passes the hash check
             int k = 0; ulong tid = baseProg.Header.TitleId; var bases = basePkg.FindAll(n => n.Header.ContentType == NcaContentType.Manual && n.Header.TitleId == tid);
-            bool Try(Func<IFileSystem> open, string dst) {
-                try { Copy(open, dst, null); return true; }
-                catch (Exception e) when (e is not KeysMissing) { if (Directory.Exists(dst)) Directory.Delete(dst, true); return false; }
+            bool Try(Func<IFileSystem> open, string dst) {   // a read that fails the hash check fails too: a patch NCA read alone gives every file's data wrong without an exception
+                int damaged = g_damaged.Count;
+                try { Copy(open, dst, null); if (g_damaged.Count == damaged) return true; }
+                catch (Exception e) when (e is not KeysMissing) { }
+                g_damaged.RemoveRange(damaged, g_damaged.Count - damaged);
+                if (Directory.Exists(dst)) Directory.Delete(dst, true);
+                return false;
             }
             foreach (Nca u in updPkg ?? new List<Nca>()) {
                 if (u.Header.ContentType != NcaContentType.Manual || u.Header.TitleId != tid) continue;

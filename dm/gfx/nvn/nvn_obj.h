@@ -131,7 +131,7 @@ typedef struct { const prog_t *prog; int32_t stages; } p_bind_program;
 // 24 for blend, multisample and depth-stencil, instead of 40 for all. Readers take that kind's size from bytes. Games size display-list heaps by GetCommandMemoryUsed: Super Mario Odyssey's
 // "DisplayList" GPU heap (62 MB, a bump allocator, main+0x5e8280) filled while a kingdom loaded with 40-byte state binds (39% of its bytes), and every display list after that got no memory
 typedef struct { int32_t kind; uint8_t bytes[0x18]; } p_bind_state;
-typedef struct { int32_t first, n; uint32_t st[16]; } p_bind_vattr;
+typedef struct { int32_t first, n; uint32_t st[32]; } p_bind_vattr;
 typedef struct { int32_t first, n; vs_st st[16]; } p_bind_vstream;
 typedef struct { int32_t first, n; NVNbufferRange r[16]; } p_bind_vbuf;
 // Games measure scratch recordings to size resource heaps. Keep a single bounded binding at 24 bytes including its header (the native vertex-buffer command is 24 bytes).

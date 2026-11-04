@@ -1176,15 +1176,43 @@ static void bind_uniforms_textures(prog_t *p) {
             E.ub_gen[st] = p->ub_gen[st];
         }
     }
+    for (int i = 0; i < p->nb; i++) {
+        pblk *b = &p->b[i];
+        ubob_t *u = b->binding >= 0 && b->binding < MAXUBO ? &g_ubo[b->binding] : NULL;
+        buf_t *bf = u ? buf_of(u->buf) : NULL;
+        id<MTLBuffer> mb = bf && bf->mb ? bf->mb : ubo_zero();
+        NSUInteger off = u ? (NSUInteger)u->off : 0;
+        for (int st = 0; st < 2; st++) {
+            if (b->slot[st] < 0) continue;
+            if (st) [e setFragmentBuffer:mb offset:off atIndex:b->slot[st]]; else [e setVertexBuffer:mb offset:off atIndex:b->slot[st]];
+        }
+    }
     for (int i = 0; i < p->nu; i++) {
         puni_t *u = &p->u[i];
         if (!is_samp(u->type)) continue;
         int unit = u->unit < 0 || u->unit >= NUNITS ? 0 : u->unit;
-        GLenum target = u->type == T_SAMPCUBE ? GL_TEXTURE_CUBE_MAP : u->type == T_SAMP3D ? GL_TEXTURE_3D : u->type == T_SAMP2DARR ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D;
+        GLenum target = u->type == T_SAMPCUBE ? GL_TEXTURE_CUBE_MAP : u->type == T_SAMP3D ? GL_TEXTURE_3D : u->type == T_SAMP2DARR ? GL_TEXTURE_2D_ARRAY
+                      : is_buf_samp(u->type) ? GL_TEXTURE_BUFFER : GL_TEXTURE_2D;
         tex_t *t = tex_of(*unit_slot(unit, target));
         id<MTLTexture> tx = nil; id<MTLSamplerState> sm = g_samp0;
-        if (t && (t->made || tex_make(t, 0)) && t->tex) { tx = t->tex; sm = tex_sampler(t); t->use = g_serial; }
-        if (!tx) tx = u->type == T_SAMPCUBE ? g_cube0 : u->type == T_SAMP3D ? g_tex3d0 : u->type == T_SAMP2DARR ? g_arr0 : g_tex0;
+        // tex_make also refreshes a buffer texture's view: glBufferData orphans the buffer object's MTLBuffer, and the view must follow it every frame
+        if (t && tex_make(t, 0) && t->tex) {
+            tx = t->tex; t->use = g_serial;
+            if (t->target == GL_TEXTURE_BUFFER) {
+                buf_t *bb = buf_of(t->tbuf);
+                if (bb) bb->use = g_serial;   // the GPU reads the buffer: glBufferData must not overwrite it in place
+                { static int n; if (n < 6 && bb && bb->mb) { n++;
+                    const float *f = (const float *)bb->mb.contents;
+                    size_t fc = bb->mb.length / 4; size_t bad = 0;
+                    for (size_t i = 0; i < fc; i++) if (!isfinite(f[i]) || fabsf(f[i]) > 1e6f) bad++;
+                    GLOG("buffer texture %u: buffer %u, %zu bytes, %u texels; first %u floats %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f; %zu of %zu not a small number",
+                         S.units[unit].tbuf, t->tbuf, (size_t)bb->mb.length, t->w, (unsigned)umin((uint32_t)fc, 8), f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], bad, fc); } }
+            }
+        }
+        samp_t *so = samp_of(S.sampler[unit]);
+        if (so) sm = samp_state(so); else if (tx) sm = tex_sampler(t);
+        if (!tx) tx = is_buf_samp(u->type) ? tbuf_zero(u->type == T_USAMPBUF ? 1 : u->type == T_ISAMPBUF ? 2 : 0)
+                       : u->type == T_SAMPCUBE ? g_cube0 : u->type == T_SAMP3D ? g_tex3d0 : u->type == T_SAMP2DARR ? g_arr0 : g_tex0;
         static int dl = -1; if (dl < 0) dl = getenv("DM_GL_DRAWLOG") != NULL;
         if (dl && tx == g_tex0 && t == NULL) {   // a sampler with no texture: the layer draws the 1x1 black placeholder
             static uint32_t seen_p[64]; static int seen_u[64], nseen;
@@ -2159,6 +2187,7 @@ GLB(glLinkProgram, void, GLuint pr) {
     if (!vs || !fs || !vs->fn || !fs->fn) { RED1("program %u: a shader is missing from the library, its draws are skipped", pr); return; }
     p->si[0] = vs->si; p->si[1] = fs->si; p->fn[0] = vs->fn; p->fn[1] = fs->fn;
     int cap = vs->si->nu + vs->si->nt + fs->si->nu + fs->si->nt; p->u = zalloc((cap + 1) * sizeof *p->u);
+    p->b = zalloc((vs->si->nb + fs->si->nb + 1) * sizeof *p->b);
     for (int st = 0; st < 2; st++) {
         const shinfo *si = p->si[st];
         p->ub[st] = zalloc(si->ub_size + 16);
@@ -2169,6 +2198,12 @@ GLB(glLinkProgram, void, GLuint pr) {
             if (!u) { u = &p->u[p->nu++]; strlcpy(u->name, nm, sizeof u->name); u->off[0] = u->off[1] = -1; u->slot[0] = u->slot[1] = -1; }
             if (i < si->nu) { const shuni *m = &si->u[i]; u->type = m->type; u->count = m->count; u->off[st] = m->off; u->stride[st] = m->stride; }
             else { const shsamp *m = &si->t[i - si->nu]; u->type = m->type; u->slot[st] = m->slot; }
+        }
+        for (int i = 0; i < si->nb; i++) {
+            pblk *b = NULL;
+            for (int j = 0; j < p->nb; j++) if (!strcmp(p->b[j].name, si->b[i].name)) b = &p->b[j];
+            if (!b) { b = &p->b[p->nb++]; strlcpy(b->name, si->b[i].name, sizeof b->name); b->slot[0] = b->slot[1] = -1; }
+            b->slot[st] = si->b[i].slot; b->size = si->b[i].size;
         }
     }
     // the game's attribute indices: glBindAttribLocation's for the inputs it names, the input's own number for the others (or the lowest index no binding took)
@@ -2198,6 +2233,8 @@ GL(glGetProgramiv, void, GLuint pr, GLenum p, GLint *v) {
         case GL_LINK_STATUS: case GL_VALIDATE_STATUS: *v = 1; return;   // as glGetShaderiv's compile status
         case GL_INFO_LOG_LENGTH: *v = 0; return;
         case GL_ACTIVE_UNIFORMS: *v = x->nu; return;
+        case 0x8a36: *v = x->nb; return;   // GL_ACTIVE_UNIFORM_BLOCKS
+        case 0x8a35: { int m = 0; for (int i = 0; i < x->nb; i++) m = (int)umax(m, (uint32_t)strlen(x->b[i].name) + 1); *v = m; return; }   // ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH
         case GL_ACTIVE_UNIFORM_MAX_LENGTH: { int m = 0; for (int i = 0; i < x->nu; i++) m = (int)umax(m, (uint32_t)strlen(x->u[i].name) + 4); *v = m; return; }
         case GL_ATTACHED_SHADERS: *v = (x->vs != 0) + (x->fs != 0); return;
         case GL_ACTIVE_ATTRIBUTES: *v = x->si[0] ? x->si[0]->na : 0; return;

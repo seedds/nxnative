@@ -1,0 +1,42 @@
+# Xenoblade Chronicles 2, Nintendo Switch 2 Edition: program 1 of application 0100E95004038000's update 1114112 (SDK 21.4.4, Monolith engine, NVN2).
+# Program 0 of that update is the Switch 1 game (profile 0100E95004038000). This program's own RomFS holds only dummy.bin: its game data is the bf2.arh / bf2.ard
+# pair of DLC 98's update (0100E95004039062 v65536, NVN2 shaders), which it registers in the place of rom:/'s. See README.md.
+
+# ---- Identity ----
+title_id	0400E95004038001
+program_id	0400E95004038001
+
+# ---- App ----
+name	Xenoblade Chronicles 2
+ipa	XenobladeChronicles2NS2.ipa
+app_category	public.app-category.role-playing-games
+pad_layout	full
+
+# ---- Versions ----
+# display version 3.0.1: the game requires it to equal DLC 98's dlcver.bin (main+0x265d30), and shows the system's add-on content version error otherwise
+build	v1114112	3.0.1	main=8bef68ed1eebc24bf7278040e63b83f6	subsdk0=593524e167fecd3c7a42a184c9da3963	subsdk3=07e685d1c23a77a389fd205288ae904c	sdk=41d4de4a3b78214ad20c896960df0e5e
+package	v1114112
+shader_versions	v1114112
+
+# ---- Files ----
+# main imports from subsdk0 and subsdk3 (movie); subsdk1 (DLSS) and subsdk2 (libc) supply nothing the host does not
+modules	main subsdk0 subsdk3 sdk
+# its own RomFS: one placeholder file (the game data is DLC 98's)
+romfs_marker	dummy.bin
+zip_store	.ard:.arh:.webm:.metallib
+
+# ---- Memory ----
+# The NPDM declares 96 MB of system resource (virtual address memory). nninitStartup and nnMain both run the allocator's setup (main+0xbddb40 → main+0xb78ed0), and each
+# takes a 60 GB address region (nn::os::AllocateAddressRegion(&p, 0xf00000000), main+0xb7bdc0): the second ends at +121.07 GB of the alias region, so it takes a 128 GB one.
+# Mac only: an iPhone has no such address space (README.md, open)
+mem_reserve	0x2028000000
+mem_alias	0x2000000000
+mem_stack	0x10000000
+app_pool	0x240000000
+sys_resource	0x6000000
+# nninitStartup maps 1 MB pages into its 60 GB address region until a map fails, to measure the memory it can have (main+0xb7be04): the map stops at the pool, as on Horizon
+mem_map_limit	on
+
+# ---- Shader split ----
+shader_groups	/stream/=stream
+shader_note	Xenoblade Chronicles 2 Nintendo Switch 2 Edition shaders

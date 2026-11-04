@@ -104,3 +104,7 @@ Each step below stopped the boot before its fix:
 - [Submissions handed to the GPU in segments](../../../docs/reference/frame-rate.md#submissions-handed-to-the-gpu-in-segments): a submission drawing into the target it inherited left those draws out of the segment's draw count (PR #1073).
 - [A deferred write under a false guard](../../../docs/reference/shaders.md#a-deferred-write-under-a-false-guard): DK and Pauline bright white between Hilltop's rocks, from terrain captured into the environment cube with a placeholder material (issue #1100; fixed by the translator change found on Yoshi and the Mysterious Book, spot not revisited, reporter's test asked).
 - [MUFU.SIN and MUFU.COS of a large number of turns](../../../docs/reference/shaders.md#mufusin-and-mufucos-of-a-large-number-of-turns): the SSAO's kernel rotation, (0, 0) past 2^20 turns, no ambient occlusion in the lower right: a corner wedge at the top of dynamic resolution (1152x648), a fifth of the picture with the effects at full size.
+
+### Spatial AA capture follow-up
+
+The raw-texture spatial AA replay on iPhone 17 Pro Max remains conditional on unmeasured c24 coordinate constants. [Push-constant capture](../../../docs/reference/shaders.md#nvn2-push-constants-missing-from-a-binding-capture) adds the missing binding bytes; a fresh on-device game capture is still required. This is a diagnostic contribution, not a fur-shimmer fix or a claim of native shader equivalence.

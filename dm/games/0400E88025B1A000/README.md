@@ -44,10 +44,9 @@ What the host needed for it, all general (the reference entries are linked under
 ## Open
 
 - Once in a 7-minute gameplay session, a GPU hang in one submission (`segment command buffer execution error … kIOGPUCommandBufferCallbackErrorHang`, at 178 s, in the prologue); the game went on. Not reproduced.
-- Compute shader `7efeafcb27c39a49` (one of the 13 that do not translate: SURED form 0310e000) is dispatched while the prologue loads; its draw is skipped. What it computes has not been seen missing.
 - The game opens a new output stream each time the window regains focus and never closes the old one (the console would keep them too): each orphaned output plays on empty. Harmless so far.
 - One compute shader (`1002069a331ceded`) fails at load (`reflection conversion failed: B binding cp_t_cb196610_10280074Smplr has no resolved slot number`): its sampler words lie at c[2] 0x1028 and 0x1e0, past the separate sampler table the host decodes (NVN2 compute's own handle layout, mapped from c[0]). What it computes has not been seen missing.
-- 13 shaders do not translate: SURED form 0310e000 (6), Ampere opcodes 0x925 (2), 0xf63 (1, TLD4 through a uniform-register handle, as the TXD fix) and 0x21b (1).
+- 3 shaders do not translate: Ampere opcodes 0x925 (2 compute shaders) and 0x21b (1). (On the chain before main's surface-atomic and TLD4 changes of 2026-11-04 it was 13: SURED form 0310e000 and 0xf63 too.)
 - The memory split is Fortune's Weave's, not measured (the address region check runs only for a provisional profile; the game mapped up to alias +7.0 GB of 16 at the title).
 - `render_cond` not tried. Mario Kart World 1.8.0 is not re-tested with the camera answers changed for this game.
 - The game's wake-up eventfd fails (the host refuses `nn::socket::EventFd`), so its HTTP thread polls without a wake-up; harmless offline.

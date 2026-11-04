@@ -12167,7 +12167,7 @@ static parc_wt parc_sum(void) { WT_; parc_wt w = {g_npend, g_pend_over, g_nsbw, 
     for (int i = 0; i < g_nsbw_w && i < SBW_WN; i++) w.wide_h += parc_mix(g_sbw_wlo[i] ^ (g_sbw_whi[i] << 1));
     return w; }
 static parc_snap *g_parc; static int g_parc_n;
-static struct { uint64_t compared, same, differ, nosnap; uint64_t sf[PAR_SF], rf[PAR_RF], wf[8]; int logged; } g_pck;
+static struct { uint64_t compared, same, differ, nosnap; uint64_t sf[PAR_SF], rf[PAR_RF], wf[8]; int logged, wlogged; } g_pck;
 static const char *const g_par_wf[8] = {"npend", "pend_over", "pend (ranges)", "nsbw", "sbw_over", "sbw (pages)", "nsbw_w", "sbw (wide)"};
 // fresh-scan: full snapshots (S, R and the whole write tracking) at the boundaries a chunk may start at, the first SetRenderTargets at least par_draws() draws after the last one
 enum { PARF_MAX = 16 };
@@ -12199,11 +12199,14 @@ static void parc_check(void) {   // the replay, at a clean boundary (par_boundar
     for (int i = 0; i < g_parc_n; i++) {
         parc_snap *c = &g_parc[i]; if (c->used || c->op != g_exec_cur) continue;
         c->used = 1; g_pck.compared++;
-        int n = par_diff("S", g_par_sf, PAR_SF, (const uint8_t *)&c->s, (const uint8_t *)&S, g_pck.sf) + par_diff("R", g_par_rf, PAR_RF, (const uint8_t *)&c->r, (const uint8_t *)&R, g_pck.rf);
+        typeof(R_rx[0]) rr = R;   // a clear's values (cc, cd, cs) are read only while it is pending (clear_c, clear_d, clear_s): a value left from an earlier clear is not state
+        for (int i = 0; i < 8; i++) if (!rr.clear_c[i] && !c->r.clear_c[i]) rr.cc[i] = c->r.cc[i];
+        if (!rr.clear_d && !c->r.clear_d) rr.cd = c->r.cd; if (!rr.clear_s && !c->r.clear_s) rr.cs = c->r.cs;
+        int n = par_diff("S", g_par_sf, PAR_SF, (const uint8_t *)&c->s, (const uint8_t *)&S, g_pck.sf) + par_diff("R", g_par_rf, PAR_RF, (const uint8_t *)&c->r, (const uint8_t *)&rr, g_pck.rf);
         parc_wt w = parc_sum(); const parc_wt *x = &c->w;
         int wd[8] = {x->npend != w.npend, x->pend_over != w.pend_over, x->pend_h != w.pend_h, x->nsbw != w.nsbw, x->sbw_over != w.sbw_over, x->sbw_h != w.sbw_h, x->nsbw_w != w.nsbw_w, x->wide_h != w.wide_h};
         for (int f = 0; f < 8; f++) if (wd[f]) { n++; g_pck.wf[f]++;
-            if (g_pck.logged < 16) { g_pck.logged++; MLOG("[RED] parallel translation check: write tracking %s differs from the scan (scan npend %d nsbw %d, replay npend %d nsbw %d; frame %llu, pass %llu): the scan does not model a write the replay noted",
+            if (g_pck.wlogged < 16) { g_pck.wlogged++; MLOG("[RED] parallel translation check: write tracking %s differs from the scan (scan npend %d nsbw %d, replay npend %d nsbw %d; frame %llu, pass %llu): the scan does not model a write the replay noted",
                 g_par_wf[f], x->npend, x->nsbw, w.npend, w.nsbw, (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)g_stat_pass); } }
         if (n) g_pck.differ++; else g_pck.same++;
         return;
@@ -12217,7 +12220,7 @@ static void parc_report(uint64_t nf) {
     for (int i = 0; i < 8 && o < 1300; i++) if (g_pck.wf[i]) o += snprintf(b + o, sizeof b - o, " writes.%s %llu", g_par_wf[i], (unsigned long long)g_pck.wf[i]);
     MLOG("parallel translation, check (over %llu frames): %llu clean boundaries compared, %llu identical, %llu different%s%s; %llu with no snapshot; %llu writes the scan does not model", (unsigned long long)nf,
          (unsigned long long)g_pck.compared, (unsigned long long)g_pck.same, (unsigned long long)g_pck.differ, o ? ", by field:" : "", o ? b : "", (unsigned long long)g_pck.nosnap, (unsigned long long)g_par_unmod); g_par_unmod = 0;
-    int logged = g_pck.logged; memset(&g_pck, 0, sizeof g_pck); g_pck.logged = logged;
+    int logged = g_pck.logged, wlogged = g_pck.wlogged; memset(&g_pck, 0, sizeof g_pck); g_pck.logged = logged; g_pck.wlogged = wlogged;
 }
 // ---------- Parallel translation, milestone 4a: chunks in fresh contexts, serially (DM_NVN_PAR=fresh; docs/parallel-translation.md) ----------
 // What a worker will do, on one thread: at a clean boundary at least DM_NVN_PAR_DRAWS draws after the last switch, the segment is cut (its command buffer committed, in order) and the
@@ -12271,8 +12274,20 @@ static void par_boundary(void) {
     if (par_fresh() && (par_from_scan() ? f != NULL : g_stat_draw - g_par_last >= (uint64_t)par_draws())) { RX.cut_copy = 1; sub_cut(); if (!RX.cut_copy) { par_fresh_switch();
         if (f) { memcpy(&S, &f->s, sizeof S); memcpy(&R, &f->r, sizeof R); memcpy(&g_wt_rx[g_rxi], &f->w, sizeof f->w); prog_resolve(); g_par.from_scan++; } } else RX.cut_copy = 0; }   // the scan's snapshot, not the previous context's: S, R and the write tracking (its inline updates have no ring data, so shadows over them are refused, not wrong)   // the cut commits the segment first; a cut refused leaves the chunk where it is
 }
+static void par_scan_gml(void) {   // a shader with raw global memory stores (NVN_RB_GMEML), as gml_take notes them
+    pthread_mutex_lock(&g_gml_mu); int predict = !g_gml_over && g_gml_stable >= GML_STABLE;
+    if (predict) for (int i = 0; i < g_gml_n; i++) sbw_note(g_gml_lo[i], g_gml_hi[i] - g_gml_lo[i], SBW_GPU);
+    pthread_mutex_unlock(&g_gml_mu);
+    if (!predict) sbw_note(0, 0, SBW_GPU);
+}
+static void par_scan_gs(NvShader *gs) {   // a geometry draw's own storage writes, as its job notes them (nvn_geometry.inc)
+    if (!gs) return;
+    for (int i = 0; i < gs->rf.nb; i++) { const nvn_rbind *b = &gs->rf.b[i];
+        if (b->kind == NVN_RB_SBUFP && b->rw && b->reg < 16 && S.ssbo[2][b->reg].addr) sbw_note(S.ssbo[2][b->reg].addr, S.ssbo[2][b->reg].size, SBW_GPU); }
+}
 static void par_scan_writes(int st, NvShader *sh) {   // a draw's or dispatch's storage-buffer writes, as encode_args notes them
     if (!sh) return;
+    for (int i = 0; i < sh->rf.nb; i++) if (sh->rf.b[i].kind == NVN_RB_GMEML) { par_scan_gml(); break; }
     for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i];
         if (b->kind != NVN_RB_SBUFP || !b->rw || b->reg >= 16 || (b->reg < 32 && (sh->sb_ro >> b->reg & 1))) continue;
         const p_bind_buf *u = &S.ssbo[st][b->reg]; void *mb; uint64_t mo, gpu;
@@ -12289,7 +12304,7 @@ static void par_scan(const uint64_t *h, int n) {   // in the scan's context: S a
     for (;;) { const uint8_t *q; op_hdr hq; const void *aq; if (!fz_next(&cur, &q, &hq, &aq)) break; ops++;
         switch (hq.op) {
             case OP_SET_RT: { if (par_check()) parc_put(q); if (par_from_scan()) parf_put(q); const p_set_rt *r = aq; R.rt = *r; R.has_rt = 1; continue; }
-            case OP_DRAW: case OP_DRAW_IDX: g_parf_draws++; if (par_check()) { prog_resolve(); __unsafe_unretained NvProg *pr = S.prog ? prog_get(S.prog) : nil; if (pr) { par_scan_writes(0, pr->sh[0]); par_scan_writes(1, pr->sh[1]); } } continue;
+            case OP_DRAW: case OP_DRAW_IDX: g_parf_draws++; if (par_check()) { prog_resolve(); __unsafe_unretained NvProg *pr = S.prog ? prog_get(S.prog) : nil; if (pr) { par_scan_writes(0, pr->sh[0]); par_scan_writes(1, pr->sh[1]); par_scan_gs(pr->sh[2]); } } continue;
             case OP_DISPATCH: if (par_check()) { __unsafe_unretained NvProg *cp = S.cprog ? prog_get(S.cprog) : nil; if (cp) par_scan_writes(5, cp->sh[5]); } continue;
             case OP_UPDATE_UB: { uint64_t d, nn; memcpy(&d, aq, 8); memcpy(&nn, (const uint8_t *)aq + 8, 8); if (nn) pend_add(d, nn, 1); continue; }
             case OP_COPY_B2B: { uint64_t d, nn; memcpy(&d, (const uint8_t *)aq + 8, 8); memcpy(&nn, (const uint8_t *)aq + 16, 8); pend_add(d, nn, 2); continue; }

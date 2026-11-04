@@ -89,6 +89,8 @@ int main(void) {
     p_draw_idx *di = emit(&s0, OP_DRAW_IDX, sizeof *di); di->prim = 4; di->count = 3; di->ibuf = (uint64_t)(uintptr_t)pool_a + 0x3000; di->ind = (uint64_t)(uintptr_t)pool_a + 0x3100;
     p_multi_draw *multi = emit(&s0, OP_MULTI_DRAW, sizeof *multi);
     *multi = (p_multi_draw){(uint64_t)(uintptr_t)pool_a + 0xf000, (uint64_t)(uintptr_t)pool_b, di->ibuf, -20, 1025, 4, 2};
+    p_draw_mesh *mesh_record = emit(&s0, OP_DRAW_MESH, sizeof *mesh_record);
+    *mesh_record = (p_draw_mesh){0, 7, 11, 13, 0};
     p_draw *dr = emit(&s0, OP_DRAW, offsetof(p_draw, ind)); dr->count = 3;   // a plain draw stops before ind (hle_nvn.c rec_draw)
     uint64_t *ev = emit(&s0, OP_SIGNAL_EVENT, 16); ev[0] = (uint64_t)(uintptr_t)pool_b + 0x10; ev[1] = 0x0000000700000001ull;
     uint64_t *ext = emit(&s0, OP_REPORT_COUNTER, 16); ext[0] = 2; ext[1] = 0x12345678;   // an address outside every pool: kept as it is
@@ -119,7 +121,7 @@ int main(void) {
     cap_writer w; CHECK(cap_open(&w, path), "open for writing");
     const char *lay = cap_layout();
     const char *multi_layout = strstr(lay, "op 55 p_multi_draw");
-    CHECK(multi_layout && cap_layout_matches(lay, (size_t)(multi_layout - lay)), "the complete legacy record layout remains readable");
+    CHECK(multi_layout && !cap_layout_matches(lay, (size_t)(multi_layout - lay)), "a layout without the multi-draw definition is rejected after the NVN2 format change");
     CHECK(cap_layout_matches(lay, strlen(lay)) && !cap_layout_matches(lay, strlen(lay) - 1), "accept the current layout, reject a truncated extension");
     cap_put(&w, CAP_LAYT, 0, lay, strlen(lay), 0);
     for (int r = 0; r < nregs; r++) { uint8_t b[sizeof(cap_regn) + 65536]; cap_regn h = {(uint32_t)r, r == 2, regs[r].lo, regs[r].size};
@@ -183,6 +185,12 @@ int main(void) {
     // the walk refuses what it does not know; a truncated file is reported, not read past
     uint8_t junk[16] = {0}; CHECK(!cap_rec_fields(OP_COUNT_, junk, 16, &enc, NULL), "an unknown op is refused");
     CHECK(!cap_rec_fields(OP_SET_RT, junk, 16, &enc, NULL), "a record too short for its fields is refused");
+    p_draw_mesh mesh = {19, 7, 3, 5, 0};
+    CHECK(cap_rec_fields(OP_DRAW_MESH, (uint8_t *)&mesh, 24, &enc, NULL), "compact mesh draw needs no relocation");
+    CHECK(cap_rec_fields(OP_DRAW_MESH, (uint8_t *)&mesh, 32, &enc, NULL), "full direct mesh draw needs no relocation");
+    CHECK(!cap_rec_fields(OP_DRAW_MESH, (uint8_t *)&mesh, 16, &enc, NULL), "truncated mesh dimensions are refused");
+    mesh.ind = 0x12345678;
+    CHECK(!cap_rec_fields(OP_DRAW_MESH, (uint8_t *)&mesh, 32, &enc, NULL), "reserved indirect mesh addresses are refused");
     FILE *f = fopen(path, "r+b"); fseeko(f, 0, SEEK_END); off_t n = ftello(f); fclose(f); truncate(path, n - 40);
     CHECK(cap_load(&rd, path) == 1, "a truncated capture still opens"); int r, bad = 0; while ((r = cap_next(&rd, &c, &d)) == 1) free(d); bad = r < 0; cap_unload(&rd);
     CHECK(bad, "a truncated capture ends in an error");

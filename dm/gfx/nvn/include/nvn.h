@@ -634,6 +634,8 @@ typedef enum {
     NVN_SHADER_STAGE_TESS_CONTROL = 0x3,
     NVN_SHADER_STAGE_TESS_EVALUATION = 0x4,
     NVN_SHADER_STAGE_COMPUTE = 0x5,
+    NVN_SHADER_STAGE_TASK = 0x6,
+    NVN_SHADER_STAGE_MESH = 0x7,
 
     NVN_SHADER_STAGE_LARGE = 0x7FFFFFFF
 } NVNshaderStage;
@@ -645,6 +647,8 @@ typedef enum {
     NVN_SHADER_STAGE_TESS_CONTROL_BIT = 0x8,
     NVN_SHADER_STAGE_TESS_EVALUATION_BIT = 0x10,
     NVN_SHADER_STAGE_COMPUTE_BIT = 0x20,
+    NVN_SHADER_STAGE_TASK_BIT = 0x40,
+    NVN_SHADER_STAGE_MESH_BIT = 0x80,
     NVN_SHADER_STAGE_ALL_GRAPHICS_BITS = 31,
 
     NVN_SHADER_STAGE_BITS_LARGE = 0x7FFFFFFF
@@ -1581,6 +1585,8 @@ typedef void (*PFNNVNCOMMANDBUFFERRESUMETRANSFORMFEEDBACKPROC)(NVNcommandBuffer*
 typedef void (*PFNNVNCOMMANDBUFFERDRAWTRANSFORMFEEDBACKPROC)(NVNcommandBuffer*, NVNdrawPrimitive,
                                                              NVNbufferAddress);
 typedef void (*PFNNVNCOMMANDBUFFERDRAWARRAYSPROC)(NVNcommandBuffer*, NVNdrawPrimitive, int, int);
+typedef void (*PFNNVNCOMMANDBUFFERDRAWMESHTASKSPROC)(NVNcommandBuffer*, uint32_t, uint32_t);
+typedef void (*PFNNVNCOMMANDBUFFERDRAWMESHTASKS3DPROC)(NVNcommandBuffer*, uint32_t, uint32_t, uint32_t);
 typedef void (*PFNNVNCOMMANDBUFFERDRAWELEMENTSPROC)(NVNcommandBuffer*, NVNdrawPrimitive,
                                                     NVNindexType, int, NVNbufferAddress);
 typedef void (*PFNNVNCOMMANDBUFFERDRAWELEMENTSBASEVERTEXPROC)(NVNcommandBuffer*, NVNdrawPrimitive,

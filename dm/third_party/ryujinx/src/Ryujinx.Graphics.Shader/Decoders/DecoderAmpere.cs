@@ -263,7 +263,6 @@ namespace Ryujinx.Graphics.Shader.Decoders
                     case 0x987:
                         context.SetUsedFeature(FeatureFlags.LocalMemory);
                         break;
-                    case 0x927:   // a task or mesh shader's stage memory lies in shared memory (InstEmitAmpereMem.AStageOut)
                     case 0x984:
                     case 0x388:
                     case 0x988:

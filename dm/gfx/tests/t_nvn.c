@@ -377,6 +377,25 @@ int main(void) {
         P(nvnCommandBufferEndRecording)(&c2);
         memcpy(&rh, m, sizeof rh); d = draw_idx_rec(m + 8, rh.size, &dt);
         EXPECT("indirect draw keeps its address", 0x20000, d->ind);
+        // NVN2 mesh dispatches use first/count (not count/first) and retain all three group dimensions.
+        // Read the compact records back with a following record present: its header must not become an indirect address.
+        P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&c2);
+        P(nvnCommandBufferDrawMeshTasks)(&c2, 19, 7);
+        P(nvnCommandBufferDrawMeshTasks3D)(&c2, 2, 3, 5);
+        P(nvnCommandBufferDrawMeshTasks)(&c2, 0xf0000001u, 0);
+        P(nvnCommandBufferDrawMeshTasks3D)(&c2, 7, 0, 9);
+        P(nvnCommandBufferEndRecording)(&c2);
+        EXPECT("four direct mesh records plus END", 104, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        p_draw_mesh mt; const p_draw_mesh *md;
+        memcpy(&rh, m, sizeof rh); md = draw_mesh_rec(m + 8, rh.size, &mt);
+        EXPECT("mesh record opcode and compact size", 1, rh.op == OP_DRAW_MESH && rh.size == 24);
+        EXPECT("mesh first/count order and unit Y/Z", 1, md->first == 19 && md->x == 7 && md->y == 1 && md->z == 1 && !md->ind);
+        memcpy(&rh, m + 24, sizeof rh); md = draw_mesh_rec(m + 32, rh.size, &mt);
+        EXPECT("mesh 3D preserves every group dimension", 1, md->first == 0 && md->x == 2 && md->y == 3 && md->z == 5 && !md->ind);
+        memcpy(&rh, m + 48, sizeof rh); md = draw_mesh_rec(m + 56, rh.size, &mt);
+        EXPECT("mesh zero count is not changed to one", 1, md->first == 0xf0000001u && md->x == 0 && !md->ind);
+        memcpy(&rh, m + 72, sizeof rh); md = draw_mesh_rec(m + 80, rh.size, &mt);
+        EXPECT("mesh 3D zero dimension is preserved", 1, md->x == 7 && md->y == 0 && md->z == 9 && !md->ind);
         // A single texture bind keeps its handle 16 bytes into the command, where a game that patches recorded commands writes a new one (Luigi's Mansion 3: base + GetCommandMemoryUsed + 0x10)
         P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&c2);
         size_t at = P(nvnCommandBufferGetCommandMemoryUsed)(&c2);

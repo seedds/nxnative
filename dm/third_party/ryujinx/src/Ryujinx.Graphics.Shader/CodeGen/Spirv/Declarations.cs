@@ -65,6 +65,13 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
                 context.AddGlobalVariable(variable);
 
+                // Native task/mesh wrappers lift these regions into the entry's
+                // threadgroup storage. Keep their identity through SPIRV-Cross.
+                if (memory.Name.StartsWith("dm_isbe_"))
+                {
+                    context.Name(variable, memory.Name);
+                }
+
                 dict.Add(id, variable);
             }
         }

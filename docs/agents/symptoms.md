@@ -515,6 +515,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - red stub lines for NVN calls. → [NVN calls that were red stubs](../reference/nvn-objects.md#nvn-calls-that-were-red-stubs)
 - `nvnWindowGetPresentInterval`, `nvnCommandBufferSetCopyImageStride` missing. → [SDK 8 window and copy-stride entry points](../reference/nvn-objects.md#sdk-8-window-and-copy-stride-entry-points)
 - `[RED] texture bound to an image slot lacks the shader-write usage`, and compute image writes go to a dummy texture. → [Image bindings supply shader-write intent](../reference/nvn-objects.md#image-bindings-supply-shader-write-intent)
+- task/mesh resources use the wrong stage bindings, explicit task unbinding is lost, or three-dimensional mesh draws lose their Y/Z dimensions. → [NVN2 task and mesh draw commands and stage bindings](../reference/nvn-objects.md#nvn2-task-and-mesh-draw-commands-and-stage-bindings)
 
 ## Rendering
 
@@ -745,7 +746,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - outdoors the whole screen blurred (depth of field out of focus everywhere). → [Depth mode near = 0 needs the per-mode entry points](../reference/shaders.md#depth-mode-near--0-needs-the-per-mode-entry-points)
 - `SPIRV-Cross threw an exception: Subgroup builtins are not available in this type of function`. → [Subgroup operations rewritten for a one-lane subgroup](../reference/shaders.md#subgroup-operations-rewritten-for-a-one-lane-subgroup)
 - the tone mapper read an empty LUT and the screen came out a flat blue. → [Geometry shaders that only pick the layer](../reference/shaders.md#geometry-shaders-that-only-pick-the-layer)
-- `[RED] NVN unimplemented function called: nvnCommandBufferDrawMeshTasks`, and a build that fails with `Ampere instruction 927 ... is not implemented` in shaders the map calls vertex or domain; what they draw is missing. → [NVN2 task and mesh shaders](../reference/shaders.md#nvn2-task-and-mesh-shaders)
+- 0x927 ISBEWR fails translation, or translated mesh libraries fail linking because fragment flat inputs are missing. Geometry is absent despite successful ordinary vertex draws. → [NVN2 task and mesh shaders](../reference/shaders.md#nvn2-task-and-mesh-shaders)
 - large flat panels in front of the sky, the clouds behind them blinking at times, in some places and not others. In a `DM_NVN_PASSDUMP_ALL` dump every task and mesh shader's storage buffer shows as `st3` / `st4 sbufp reg6` or `reg7` `dummy addr=0 size=0`, though the game binds buffers for those stages. → [Task and mesh draws reading the dummy buffer](../reference/shaders.md#task-and-mesh-draws-reading-the-dummy-buffer)
 - a geometry shader fails to compile with `unknown main0_out`: SPIRV-Cross writes `unknown main0_out main0()` for the geometry stage, and the shader does not build. → [Geometry shaders with no Metal stage](../reference/shaders.md#geometry-shaders-with-no-metal-stage)
 - the models a passthrough geometry shader draws are missing: its own draw (a depth prepass) shows nothing, and so do the draws that test against that depth for equality. Before the shader loaded at all, the same models showed as black silhouettes. → [Passthrough geometry shaders](../reference/shaders.md#passthrough-geometry-shaders)

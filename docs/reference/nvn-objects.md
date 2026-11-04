@@ -693,3 +693,28 @@ Games read this count as a position in their own command memory and size their h
 ### `nvnPrivate0`, an inlined command-buffer fast path flag
 
 - `nvnPrivate0`, a new SDK 20 import, needs nothing: it is a flag in `sdk`'s bss that enables an inlined command-buffer fast path when the NVN driver sets it (it stays 0). Found on [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0, SDK 20.5.22).
+
+### NVN2 task and mesh draw commands and stage bindings
+
+- **Symptom:** task/mesh resources use the wrong stage bindings, explicit task unbinding is lost, or three-dimensional mesh draws lose their Y/Z dimensions.
+- **Cause:** task and mesh are distinct NVN2 graphics stages, 6 and 7 (bits `0x40` and `0x80`). Treating their shader-header labels as vertex/domain stages loses their bindings, and six-slot replay tables cannot retain their uniforms, storage buffers, textures or images. A mesh program is valid without a vertex shader. The packed list of shader objects in `prog_t.sd[6]` is a separate concept: its entries are not indexed by the stage enum, and `prog_t` stays within the older SDK's 112-byte object size.
+- **Native evidence:** SDK build ID `7a68b13d88183767fb9c7babffe89f3d368752e2000000000000000000000000`: `ProgramSetShaders` reads control byte `+0x56` unchanged and constructs `1 << stage` (`sdk+0x666854`, `+0x6668c8`, `+0x666a60`); `BindProgram` intersects the requested mask with that program mask (`+0x68232c`). `BindStorageBuffer` indexes its driver-offset table by the API stage (`+0x684748`, table `+0xb5fbf0`): task uses c0 byte offset `0x670`, mesh `0x770`. These are declared in `dmsh_abi.h` and shared by shader translation and argument encoding.
+- **Command ABI:** `DrawMeshTasks(commandBuffer, first, count)` takes two 32-bit workgroup values, not vertices or instances. Its implementation at `sdk+0x68a0a0` emits `{0xa0020ea2, count, first}`. `DrawMeshTasks3D(commandBuffer, x, y, z)` at `+0x68a530` emits `{0xa0030ec8, x, y, z}`. Recording preserves every bit and zero dimensions: `OP_DRAW_MESH` contains `{first, x, y, z}`, with the one-dimensional call represented as `{first, count, 1, 1}` and the three-dimensional call as `{0, x, y, z}`. The reserved `ind` field is absent from compact direct records; indirect and multi-draw entry points remain unsupported.
+- **Control metadata:** offsets below are for control version `0xc9/0x0b`, verified through the SDK's getters and task/mesh configuration methods. They must not be inferred from the legacy vertex/domain SPH stage label.
+
+  | Offset | Type | Meaning |
+  |---|---|---|
+  | `0x56` | u8 | Logical shader stage: task 6, mesh 7 |
+  | `0x58` | u16 | Threads per workgroup |
+  | `0x5a` | u16 | Payload allocation bytes, including its header |
+  | `0x5c` | u16 | Additional shared allocation bytes |
+  | `0x5f` | u8 | Mesh topology: 1 points, 2 lines, 3 triangles |
+  | `0x60` | u16 | Maximum mesh vertices |
+  | `0x62` | u16 | Maximum mesh primitives |
+  | `0x64` | u32 | Code-relative offset of the primitive geometry-passthrough SPH |
+  | `0x68` | u32 | Primitive SPH byte length (128 when present) |
+
+  The SDK rounds the task payload up to 128-byte lines with a minimum of one line, then adds the separately rounded shared allocation. Do not add another 16-byte header to `0x5a`. In the observed task outputs, word at byte 4 holds the emitted mesh-workgroup count and user payload starts at byte 16; the mesh input's first word is the child workgroup index. The addressing semantics of nonzero `0x5c` remain unverified (all observed task/mesh shaders have zero there).
+- **Fix:** replay bindings and resolved programs have eight logical stage slots, with compute stage 5 kept separate from graphics. Per-stage composition retains task/mesh and explicit unbinds; finalizing a program clears these graphics-stage bindings on active and saved queues too. Mesh commands stop store, clear-hoist, pass-fusion, deferred-pass and indirect-conversion lookahead until those optimizations model their complete resource footprints. Deferred Metal encoding preserves all three dimensions of the grid, object threads and mesh threads. Frame captures carry eight interface fingerprints (`CAP_IFACE=3`) and reject old layouts or unsupported indirect mesh addresses.
+- **Checks:** `t_nvn.c` covers direct recording, 32-bit first/count, all three axes and zero dimensions; `t_mesh_stages.m` covers separable stage composition, explicit task unbinding, bindings, capture fingerprints, conservative depth retention and deferred Metal argument replay; `t_capture.c` checks the direct payload and rejects truncated/indirect payloads. These are contract tests, not a gameplay rendering verdict.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0. The command and shader contracts apply independently of the game profile.

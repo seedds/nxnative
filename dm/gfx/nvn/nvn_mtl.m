@@ -42,7 +42,18 @@ _Static_assert(DMSH_C2_TEX + DMSH_C2_ROW * DMSH_C2_TEX_SLOTS == DMSH_C2_SEPTEX &
 _Static_assert(DMSH_C0_CS_UBO + DMSH_C0_ROW * DMSH_C0_CS_UBO_SLOTS == DMSH_C0_SSBO_CS && DMSH_C0_SSBO_PS + DMSH_C0_ROW * DMSH_C0_SSBO_SLOTS <= DMSH_C0_POINT_SIZE && DMSH_C0_POINT_SIZE + 4 <= DMSH_C0_SAMPLE_TABLE &&
                DMSH_C0_SAMPLE_TABLE + DMSH_C0_SAMPLE_BYTES <= DMSH_C0_SAMPLE_INFO && DMSH_C0_SAMPLE_INFO + 16 <= DMSH_C0_BASE_INSTANCE && DMSH_C0_BASE_INSTANCE + 4 <= DMSH_C0_SSBO_TS && DMSH_C0_SSBO_TS + DMSH_C0_ROW * DMSH_C0_SSBO_SLOTS == DMSH_C0_SSBO_MS && DMSH_C0_SSBO_MS + DMSH_C0_ROW * DMSH_C0_SSBO_SLOTS <= DMSH_DRV_SIZE, "NVN driver c0 tables");
 // Geometry's counter/output addresses are c0+0x410/0x430 (NieR:Automata's MOVC/IADDC pairs); they use the logical NVN stage even when Metal executes a compute kernel.
-static int c0_ssbo_base(int stage) { return stage == 0 ? DMSH_C0_SSBO_VS : stage == 1 ? DMSH_C0_SSBO_PS : stage == 2 ? DMSH_C0_SSBO_GS : stage == 5 ? DMSH_C0_SSBO_CS : stage == 3 ? DMSH_C0_SSBO_TS : stage == 4 ? DMSH_C0_SSBO_MS : -1; }   // NVN stages 0 vertex, 1 pixel, 2 geometry, 5 compute; hull / domain never seen
+static int c0_ssbo_base(int stage) {
+    // Lowering to compute IR does not change a shader's logical NVN stage.
+    switch (stage) {
+        case NVN_SHADER_STAGE_VERTEX: return DMSH_C0_SSBO_VS;
+        case NVN_SHADER_STAGE_FRAGMENT: return DMSH_C0_SSBO_PS;
+        case NVN_SHADER_STAGE_GEOMETRY: return DMSH_C0_SSBO_GS;
+        case NVN_SHADER_STAGE_COMPUTE: return DMSH_C0_SSBO_CS;
+        case NVN_SHADER_STAGE_TASK: return DMSH_C0_SSBO_TS;
+        case NVN_SHADER_STAGE_MESH: return DMSH_C0_SSBO_MS;
+        default: return -1;
+    }
+}
 // The handle a texture binding of slot reg reads: as c2 holds it (encode_args fills c2 the same way), a combined slot past 31 shares its word with an image slot, and a bound image
 // is what lies there. A texture instruction on an image handle names such a slot: a size query of the image a compute shader writes (Unreal's GetDimensions on a RWTexture3D,
 // dmsh_build.py decode_tex). DRAGON QUEST VII Reimagined's volumetric lightmap indirection patch read the empty texture slot 32 there, got a 1x1 size and wrote only cell (0, 0, 0)
@@ -101,7 +112,7 @@ static id<MTL4CommandAllocator> g_alloc4[ALLOC_MAX]; static int g_alloc_n, g_all
 static id<MTL4CommandAllocator> g_up_alloc4[3];
 static id<MTL4CommandAllocator> g_present_alloc4[3];
 static id<MTL4CommandBuffer> g_present_cb[3];
-static id<MTL4ArgumentTable> g_vt, g_ft, g_ct, g_up_ct, g_ot;   // g_ot: the object stage of a task / mesh draw (mesh_tasks_draw)
+static id<MTL4ArgumentTable> g_vt, g_ft, g_ct, g_up_ct, g_ot, g_mt;
 static int g_vbuf_cache = 1;   // DM_NVN_VBUF_CACHE=0 restores the uncached path for A/B measurements
 static uint64_t g_vt_addr[31]; static uint32_t g_vt_valid;
 static uint64_t g_vbuf_resolve, g_vbuf_reuse, g_vbuf_set, g_vbuf_skip, g_vbuf_copies, g_vbuf_copy_bytes;   // copies: vertex streams at addresses not 4-byte aligned (vbuf_unaligned)
@@ -481,9 +492,10 @@ void mtl_init(void) {
     NSError *ate = nil;
     g_vt = rec_table([g_dev newArgumentTableWithDescriptor:atd error:&ate]); if (!g_vt) MDIE("failed to create the vertex argument table: %s", ate.localizedDescription.UTF8String);
     g_vt_valid = 0;
+    g_ot = rec_table([g_dev newArgumentTableWithDescriptor:atd error:&ate]); if (!g_ot) MDIE("failed to create the object argument table: %s", ate.localizedDescription.UTF8String);
+    g_mt = rec_table([g_dev newArgumentTableWithDescriptor:atd error:&ate]); if (!g_mt) MDIE("failed to create the mesh argument table: %s", ate.localizedDescription.UTF8String);
     g_ft = rec_table([g_dev newArgumentTableWithDescriptor:atd error:&ate]); if (!g_ft) MDIE("failed to create the fragment argument table: %s", ate.localizedDescription.UTF8String);
     g_ct = rec_table([g_dev newArgumentTableWithDescriptor:atd error:&ate]); if (!g_ct) MDIE("failed to create the compute argument table: %s", ate.localizedDescription.UTF8String);
-    g_ot = rec_table([g_dev newArgumentTableWithDescriptor:atd error:&ate]); if (!g_ot) MDIE("failed to create the object argument table: %s", ate.localizedDescription.UTF8String);
     g_up_ct = [g_dev newArgumentTableWithDescriptor:atd error:&ate]; if (!g_up_ct) MDIE("failed to create the upload compute argument table: %s", ate.localizedDescription.UTF8String);
     MTL4ArgumentTableDescriptor *pad = [MTL4ArgumentTableDescriptor new];
     pad.maxTextureBindCount = 1; pad.maxSamplerStateBindCount = 1; pad.maxBufferBindCount = 1;
@@ -1050,7 +1062,7 @@ static inline id<MTL4RenderCommandEncoder> enc_r_begin_pass(MTL4RenderPassDescri
 }
 static inline void enc_r_end_pass(id e) {
     if (!barrier_game() || g_image_heap_n) { m4_end(e); return; }
-    gp_end(e); [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageVertex | MTLStageMesh | MTLStageFragment beforeQueueStages:MTLStageFragment | MTLStageDispatch | MTLStageBlit visibilityOptions:resource_vis()];
+    gp_end(e); [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageVertex | MTLStageObject | MTLStageMesh | MTLStageFragment beforeQueueStages:MTLStageFragment | MTLStageDispatch | MTLStageBlit visibilityOptions:resource_vis()];
     [e endEncoding]; g_last_end_relaxed = 1;
 }
 static inline id<MTL4RenderCommandEncoder> enc_r_begin(MTL4RenderPassDescriptor *d) { id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [e setArgumentTable:g_ft atStages:MTLRenderStageFragment]; gp_begin(e, 'R', d); return e; }
@@ -1821,7 +1833,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[153];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[163];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -4411,8 +4423,8 @@ static void shmap_read(void) {
 
 @interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, discard_fn, fn_u, fn_m, fn_d, geo_fn; uint8_t mask_m;   // fn_u: the integer-output entry point (dmsh_build.py fs_uint), for pipelines whose colour attachments are all unsigned integer (pso_desc); fn_m: the mixed one, its outputs in mask_m unsigned integer; fn_d: the dual-source one (dmsh_build.py fs_dual)
     uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, layer_out; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
+    id<MTLFunction> mesh_direct_fn; uint32_t mesh_threads, mesh_payload;
     uint32_t geo_vertices, geo_invocations, geo_output, geo_stride, geo_index_stride;
-    uint8_t mesh_kind, mesh_notask; uint16_t mesh_threads, mesh_payload;   // an NVN2 task (1) or mesh (2) shader, a mesh shader with no task, its workgroup's threads, its payload's bytes (dmsh_meshstage.py)
     id<MTLComputePipelineState> geo_pso; int geo_pso_failed, cps_failed;   // cps_failed: Metal refused this compute shader's pipeline (dispatch): its dispatches are skipped without asking again
     int16_t *geo_slot; uint32_t geo_words;   // a lean passthrough kernel (dmsh_geometry.lean): capture word -> record slot (-1: not read), record words
     NvShader *geo_lean_v[5]; uint8_t geo_lean_tried;   // a geometry shader's lean kernels by input topology (looked up once)
@@ -4435,7 +4447,7 @@ static void shmap_read(void) {
 #include "nvn_pso_skey.h"
 #include "nvn_geometry.h"
 #include "nvn_feedback.h"
-@interface NvProg : NSObject { @public NvShader *sh[6]; char gs_miss[17]; NvProg *geo_raster, *geo_lean_raster; int8_t c_sw, c_iw, c_img; } @end   // c_sw / c_iw / c_img: prog_swrites, udc_note_draw's image write, image_prepare's written image slots; + 1 once known (the shaders are fixed once made)   // geo_raster: GS output reader paired with this program's fragment stage; geo_lean_raster: its own vertex and fragment stages (a lean passthrough kernel)
+@interface NvProg : NSObject { @public NvShader *sh[NVN_STAGE_COUNT]; char gs_miss[17]; NvProg *geo_raster, *geo_lean_raster; int8_t c_sw, c_iw, c_img; } @end   // c_sw / c_iw / c_img: prog_swrites, udc_note_draw's image write, image_prepare's written image slots; + 1 once known (the shaders are fixed once made)   // geo_raster: GS output reader paired with this program's fragment stage; geo_lean_raster: its own vertex and fragment stages (a lean passthrough kernel)
 @implementation NvProg @end
 // Warm-up entry: built in the background, waiting to be taken by the submit thread. vs / fs are strong references (in pso they are only raw pointers, and the background dictionary is released when the task ends)
 @interface WarmItem : NSObject { @public int kind, record; NSString *key, *vs_key, *fs_key; NvShader *shader, *vs, *fs; pso_key pso; id<MTLFunction> fsfn; id object; } @end   // record: a prefetched library, written to the prewarm lists when claimed (shader_get's lines)
@@ -4648,10 +4660,28 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
         if (atomic_load(&g_depth_zero)) { if (j[@"entry_z"]) entry = j[@"entry_z"]; else RED_ONCE(85, "vertex shader %s has no near=0 entry (entry_z): depth stays in the GL convention", pc.UTF8String); }
         if (layer) entry = atomic_load(&g_depth_zero) ? j[@"entry_layer_z"] : j[@"entry_layer"];
     }
-    NSDictionary *mst = [j[@"mesh_stage"] isKindOfClass:[NSDictionary class]] ? j[@"mesh_stage"] : nil;
-    if (mst) { o->mesh_kind = [mst[@"kind"] isEqual:@"ts"] ? 1 : 2; o->mesh_threads = (uint16_t)[mst[@"threads"] unsignedIntValue]; o->mesh_payload = (uint16_t)[mst[@"payload"] unsignedIntValue];
-               o->mesh_notask = o->mesh_kind == 2 && ![mst[@"task"] boolValue];
-               if (o->mesh_kind == 2 && atomic_load(&g_depth_zero) && j[@"entry_z"]) entry = j[@"entry_z"]; }   // the depth convention, as a vertex shader takes it above
+    if (stage == NVN_SHADER_STAGE_MESH && atomic_load(&g_depth_zero)) {
+        entry = j[@"entry_z"] ?: entry;
+    }
+    if (stage == NVN_SHADER_STAGE_TASK || stage == NVN_SHADER_STAGE_MESH) {
+        o->mesh_threads = [j[@"taskmesh"][@"threads"] unsignedIntValue];
+        o->mesh_payload = [j[@"taskmesh"][@"payload"] unsignedIntValue];
+        if (!o->mesh_threads || !o->mesh_payload) {
+            MLOG("[RED] task/mesh shader %s has no stage metadata", pc.UTF8String);
+            return nil;
+        }
+        if (stage == NVN_SHADER_STAGE_MESH) {
+            NSString *direct = atomic_load(&g_depth_zero) ? j[@"entry_direct_z"] : j[@"entry_direct"];
+            o->mesh_direct_fn = [lib newFunctionWithName:direct];
+            if (o->mesh_direct_fn.functionConstantsDictionary.count) {
+                o->mesh_direct_fn = fn_lib_spec(lib, direct, [MTLFunctionConstantValues new], &e);
+            }
+            if (!o->mesh_direct_fn) {
+                MLOG("[RED] mesh shader %s has no direct entry", pc.UTF8String);
+                return nil;
+            }
+        }
+    }
     if (j[@"entry_geometry_capture"]) {
         NSError *ge = nil; MTLFunctionConstantValues *gcv = [MTLFunctionConstantValues new];
         o->geo_fn = fn_spec(lib, j[@"entry_geometry_capture"], gcv, &ge);
@@ -4695,7 +4725,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
         if (!o->fn_m) MLOG("[RED] shader %s: no mixed integer-output entry point %s in its library", pc.UTF8String, [j[@"entry_m"] UTF8String]); }
     if (stage == 1 && j[@"entry_d"]) { o->fn_d = fn4_note([lib newFunctionWithName:j[@"entry_d"]], lib, j[@"entry_d"], nil); if (!o->fn_d) MLOG("[RED] shader %s: no dual-source entry point %s in its library", pc.UTF8String, [j[@"entry_d"] UTF8String]); }
     if (o->fn.functionConstantsDictionary.count) {   // a compute shader's pipelines are MTLDevice ones: it is specialized through its library (fn_spec otherwise)
-        NSError *fe = nil; MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new]; id<MTLFunction> (*spec)(id<MTLLibrary>, NSString *, MTLFunctionConstantValues *, NSError **) = stage == 5 ? fn_lib_spec : fn_spec;
+        NSError *fe = nil; MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new]; id<MTLFunction> (*spec)(id<MTLLibrary>, NSString *, MTLFunctionConstantValues *, NSError **) = (stage == 5 || stage >= NVN_SHADER_STAGE_TASK) ? fn_lib_spec : fn_spec;
         id<MTLFunction> f = spec(lib, entry, cv, &fe);
         if (f) o->fn = f; else MLOG("[RED] shader %s: specializing its function constants failed: %s", pc.UTF8String, fe.localizedDescription.UTF8String);
         if (o->fn_u) o->fn_u = spec(lib, j[@"entry_u"], cv, &fe);
@@ -4723,8 +4753,7 @@ static inline uint64_t cb_len(NvShader *sh, int reg, uint64_t size) { uint32_t e
 static int stage_of(NSString *stage) {
     if ([stage isEqualToString:@"vertex"]) return 0; if ([stage isEqualToString:@"pixel"]) return 1; if ([stage isEqualToString:@"compute"]) return 5;
     if ([stage isEqualToString:@"hull"]) return 3; if ([stage isEqualToString:@"domain"]) return 4; if ([stage isEqualToString:@"geometry"]) return 2;
-    if ([stage isEqualToString:@"task"]) return 3; if ([stage isEqualToString:@"mesh"]) return 4;   // NVN2: in the tessellation stages' places (hle_nvn.c st_host)
-    return -1;
+    if ([stage isEqualToString:@"task"]) return 6; if ([stage isEqualToString:@"mesh"]) return 7; return -1;
 }
 #define NVN_RT_RANGE_RO_IMPL 1
 // Private continuation accepts only B reflection that is explicitly RO; a missing rw on sbuf does not let the default 0 count as proof; does not change the existing reflection / translation chain.
@@ -4817,7 +4846,7 @@ static NvShader *builtin_get(const char *ctl) {
 }
 static void up_mfx_read_color(NvShader *cs, const NVNshaderData *sd);
 static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only on the submit thread
-    prog_t *p = (prog_t *)cp;
+    prog_t *p = (prog_t *)cp; if (!p) return nil;
     static const prog_t *lp; static uint64_t lser, lgen; static NvProg *lpr;   // Last result: same object, same serial and unchanged serial table means it is used directly
     uint64_t gen = g_ser_gen;
     if (p == lp && p->serial == lser && gen == lgen && lpr) return lpr;
@@ -5472,12 +5501,12 @@ static struct {
     const prog_t *prog;
     const prog_t *cprog;       // compute program: NVN binds it apart from the graphics stages (see OP_BIND_PROGRAM in state_op)
     p_prim_restart restart;
-    const prog_t *bst[5];      // program bound per stage (NVN stage bits 1 vertex 2 fragment 4 geometry 8 / 16 tessellation, indices as in NvProg.sh), see bind_stages
+    const prog_t *bst[NVN_STAGE_COUNT];      // program bound per graphics stage (including task/mesh; compute is separate), see bind_stages
     blend_st blend[8]; color_st color; chmask_st chmask; ms_st ms; poly_st poly; ds_st ds;
     va_st attr[16]; int nattr; vs_st stream[16]; int nstream;
     NVNbufferRange vbuf[16];
-    p_bind_buf ubo[6][16], ssbo[6][16];
-    uint64_t tex[6][NTEX], samp[6][128], img[6][32];
+    p_bind_buf ubo[NVN_STAGE_COUNT][16], ssbo[NVN_STAGE_COUNT][16];
+    uint64_t tex[NVN_STAGE_COUNT][NTEX], samp[NVN_STAGE_COUNT][128], img[NVN_STAGE_COUNT][32];
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
     p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; int depth_clamp; uint8_t vp_sw[16][4];   // vp_sw: viewport swizzles XOR the identity (p_vp_swizzle)
     float blend_color[4], alpha_ref; int64_t copy_stride, copy_img_stride;   // alpha_ref: SetAlphaRef (at_bind)
@@ -5494,9 +5523,9 @@ static uint64_t c2_handle(int stage, unsigned b) {
 }
 // A deferred inline update changes what the draws after it read through the uniform bindings it overlaps (they get a shadow): the argument blocks of those stages are encoded again.
 // Only those: marking every stage made each later draw encode all of its blocks again, which with the updates kept across passes cost about 1.5 ms a frame in Breath of the Wild
-static uint8_t g_args_dirty[6];
+static uint8_t g_args_dirty[NVN_STAGE_COUNT];
 static void ubd_dirty(uint64_t lo, uint64_t hi) {
-    for (int st = 0; st < 6; st++) { if (g_args_dirty[st]) continue;
+    for (int st = 0; st < NVN_STAGE_COUNT; st++) { if (g_args_dirty[st]) continue;
         for (int r = 0; r < 16; r++) { const p_bind_buf *u = &S.ubo[st][r]; if (u->addr && lo < u->addr + u->size && u->addr < hi) { g_args_dirty[st] = 1; break; } } }
 }
 // NVN permits byte-aligned vertex streams; Metal drops the low two address bits. Keep an aligned copy in the submission arena.
@@ -5650,13 +5679,13 @@ static void bare_dims(NSUInteger *w, NSUInteger *h) {
 static int prog_swrites(NvProg *pr) {
     if (pr && pr->c_sw) return pr->c_sw - 1;
     int w = 0;
-    for (int st = 0; pr && st < 6; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
+    for (int st = 0; pr && st < NVN_STAGE_COUNT; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
         for (int i = 0; i < sh->rf.nb; i++) if (sh->rf.b[i].rw && (sh->rf.b[i].kind == NVN_RB_IMG || sh->rf.b[i].kind == NVN_RB_SBUFP || sh->rf.b[i].kind == NVN_RB_GMEM)) { w |= st == 0 ? 1 : st == 1 ? 2 : 4; break; } }
     if (pr) pr->c_sw = (int8_t)(w + 1);
     return w;
 }
 static void order_note(NvProg *pr) {   // after each draw of the pass: does it read memory in a stage after the vertex stage (anything bound there but samplers and driver data)
-    for (int st = 1; pr && st < 6 && !g_pass_late_res; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
+    for (int st = 1; pr && st < NVN_STAGE_COUNT && !g_pass_late_res; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
         for (int i = 0; i < sh->rf.nb; i++) { int k = sh->rf.b[i].kind;
             if (k != NVN_RB_SAMP && k != NVN_RB_SAMPT && k != NVN_RB_SAMPU && k != NVN_RB_SAMPI && k != NVN_RB_SAMPD && k != NVN_RB_SAMPA && k != NVN_RB_SAMPP && k != NVN_RB_SUPPORT && k != NVN_RB_C1 && k != NVN_RB_DRV0 && k != NVN_RB_DRV2 && k != NVN_RB_PUSH) { g_pass_late_res = 1; break; } } }
 }
@@ -5685,11 +5714,11 @@ static void swrite_note(NvProg *pr) {
 static void udc_note_draw(NvProg *pr, uint32_t raster_mask) {
     int td = tbdr_on();
     if (td && R.has_rt) for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i]) { zskip_del(R.rt.color[i]->serial); g_zskip_cand_ok[i] = 0; }   // Zero-source set: once really drawn it is no longer all zeros
-    if (td && pr) for (int st = 0; st < 6; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue; for (int i = 0; i < sh->rf.nb; i++) if (sh->rf.b[i].kind == NVN_RB_IMG) { zskip_clear(); break; } }   // Image slots are writable: conservatively clear
+    if (td && pr) for (int st = 0; st < NVN_STAGE_COUNT; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue; for (int i = 0; i < sh->rf.nb; i++) if (sh->rf.b[i].kind == NVN_RB_IMG) { zskip_clear(); break; } }   // Image slots are writable: conservatively clear
     int image_write = pr && pr->c_iw ? pr->c_iw - 1 : 0;
     __unsafe_unretained NvShader *fs = pr ? pr->sh[1] : nil;
     uint32_t shader_color_mask = fs ? (fs->rf.color_known ? fs->rf.color_mask : UINT32_MAX) : 0;
-    if (pr && !pr->c_iw) for (int st = 0; st < 6; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
+    if (pr && !pr->c_iw) for (int st = 0; st < NVN_STAGE_COUNT; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
         // A writable image, atomic image pointer or storage pointer may alias an attachment. Do not infer its identity from bound texture slots (bindless shaders need not use them).
         for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i];
             if (b->rw && (b->kind == NVN_RB_IMG || b->kind == NVN_RB_SBUFP || b->kind == NVN_RB_SBUFU || b->kind == NVN_RB_GMEM)) { image_write = 1; break; } }
@@ -5715,28 +5744,91 @@ static void udc_note_draw(NvProg *pr, uint32_t raster_mask) {
 // Metroid Dread's depth prepass calls BindProgram(program, vertex | fragment), then BindProgram(null, fragment): only the vertex shader remains and depth is drawn.
 // Every bind used to replace S.prog as a whole, a null program meant "no program bound", and the prepass's ~140 draws per frame were all dropped: depth stayed empty, the G-buffer's depth EQUAL test passed no pixel, and scenes and characters were black.
 // When every stage comes from the same program, that program is the effective one (all of Mario's and Engage's binds are like this, so nothing changes for them); otherwise a composite is made: a host-made prog_t carrying only a serial, whose NvProg in the serial table takes each stage from its source program (a null fragment = a vertex-only pipeline)
-// NVN2's task and mesh bits (0x40, 0x80) of a program bind: stages 3 and 4, where those shaders are kept (hle_nvn.c st_host)
-static inline int gfx_stage_bits(int stages) { return (stages & 0x1f) | (stages & 0x40 ? 8 : 0) | (stages & 0x80 ? 16 : 0); }
-static const prog_t *bind_stages(const prog_t *p, int stages) {
-    for (int st = 0; st < 5; st++) if (stages >> st & 1) S.bst[st] = p;
-    const prog_t *v = S.bst[0] ? S.bst[0] : S.bst[4];   // a mesh program has no vertex stage
-    if (!v) return NULL;
-    int same = 1; for (int st = 1; st < 5; st++) if (S.bst[st] && S.bst[st] != v) same = 0;
-    if (same && S.bst[1] == v) return v;
-    enum { NCMP = 64 };
-    static prog_t cp[NCMP]; static const prog_t *ck[NCMP][5]; static uint64_t cs[NCMP][5]; static int ncp, next;
-    for (int i = 0; i < ncp; i++) {
-        int hit = 1; for (int st = 0; st < 5 && hit; st++) hit = ck[i][st] == S.bst[st] && (!S.bst[st] || cs[i][st] == S.bst[st]->serial);
-        if (hit) return &cp[i];
+static const prog_t *bind_stages(const prog_t *program, int stages) {
+    for (int stage = 0; stage < NVN_STAGE_COUNT; stage++) {
+        if (stage != NVN_SHADER_STAGE_COMPUTE && (stages >> stage & 1)) {
+            S.bst[stage] = program;
+        }
     }
-    int i = ncp < NCMP ? ncp++ : next++ % NCMP;
-    if (cp[i].serial) serial_del(cp[i].serial);
-    NvProg *o = [NvProg new];
-    for (int st = 0; st < 5; st++) { ck[i][st] = S.bst[st]; cs[i][st] = S.bst[st] ? S.bst[st]->serial : 0; if (S.bst[st]) { __unsafe_unretained NvProg *src = prog_get(S.bst[st]); o->sh[st] = src ? src->sh[st] : nil; } }
-    prog_fold_gs(o);   // the geometry stage came from another program (see prog_fold_gs)
-    memset(&cp[i], 0, sizeof cp[i]); cp[i].magic = MAGIC('P', 'R', 'O', 'G'); cp[i].serial = nvn_new_serial(); serial_put(cp[i].serial, o);
-    { static int once; if (!once++) MLOG("per-stage program binding: first combined program (vertex %s fragment %s)", o->sh[0] ? o->sh[0]->key : "-", o->sh[1] ? o->sh[1]->key : "-"); }
-    return &cp[i];
+    const prog_t *primary = S.bst[NVN_SHADER_STAGE_VERTEX];
+    if (!primary) {
+        primary = S.bst[NVN_SHADER_STAGE_MESH];
+    }
+    if (!primary) {
+        return NULL;
+    }
+
+    int same_program = 1;
+    for (int stage = 0; stage < NVN_STAGE_COUNT; stage++) {
+        if (stage != NVN_SHADER_STAGE_COMPUTE && S.bst[stage] && S.bst[stage] != primary) {
+            same_program = 0;
+            break;
+        }
+    }
+    if (same_program && S.bst[NVN_SHADER_STAGE_FRAGMENT] == primary) {
+        NvProg *source = prog_get(primary);
+        for (int stage = 0; stage < NVN_STAGE_COUNT; stage++) {
+            if (stage != NVN_SHADER_STAGE_COMPUTE && source->sh[stage] && S.bst[stage] != primary) {
+                same_program = 0;
+                break;
+            }
+        }
+        if (same_program) {
+            return primary;
+        }
+    }
+
+    enum { NCMP = 64 };
+    static prog_t composites[NCMP];
+    static const prog_t *sources[NCMP][NVN_STAGE_COUNT];
+    static uint64_t serials[NCMP][NVN_STAGE_COUNT];
+    static int count, next;
+    for (int index = 0; index < count; index++) {
+        int match = 1;
+        for (int stage = 0; stage < NVN_STAGE_COUNT; stage++) {
+            if (stage == NVN_SHADER_STAGE_COMPUTE) {
+                continue;
+            }
+            const prog_t *bound = S.bst[stage];
+            if (sources[index][stage] != bound || (bound && serials[index][stage] != bound->serial)) {
+                match = 0;
+                break;
+            }
+        }
+        if (match) {
+            return &composites[index];
+        }
+    }
+
+    int index = count < NCMP ? count++ : next++ % NCMP;
+    prog_t *composite = &composites[index];
+    if (composite->serial) {
+        serial_del(composite->serial);
+    }
+    NvProg *resolved = [NvProg new];
+    for (int stage = 0; stage < NVN_STAGE_COUNT; stage++) {
+        if (stage == NVN_SHADER_STAGE_COMPUTE) {
+            continue;
+        }
+        const prog_t *bound = S.bst[stage];
+        sources[index][stage] = bound;
+        serials[index][stage] = bound ? bound->serial : 0;
+        if (bound) {
+            __unsafe_unretained NvProg *source = prog_get(bound);
+            resolved->sh[stage] = source ? source->sh[stage] : nil;
+        }
+    }
+    prog_fold_gs(resolved);   // The geometry stage may come from another program.
+    memset(composite, 0, sizeof *composite);
+    composite->magic = MAGIC('P', 'R', 'O', 'G');
+    composite->serial = nvn_new_serial();
+    serial_put(composite->serial, resolved);
+    static int once;
+    if (!once++) {
+        MLOG("per-stage program binding: first combined program (vertex %s fragment %s)",
+             resolved->sh[0] ? resolved->sh[0]->key : "-", resolved->sh[1] ? resolved->sh[1]->key : "-");
+    }
+    return composite;
 }
 // S.prog after S was copied back from a saved state (the precompile prediction, the fusion probe and redraw, deferred draws). A combined program is a slot of the ring above, and binds
 // replayed after the save can give the slot the saved pointer names to another combination. AI: THE SOMNIUM FILES (Unity 2017.4) binds its vertex and fragment programs apart; the
@@ -5791,7 +5883,7 @@ static int prog_unbind(typeof(S) *s, const prog_t *p) {
     int n = 0;
     if (s->prog == p) s->prog = NULL, n++;
     if (s->cprog == p) s->cprog = NULL, n++;
-    for (int st = 0; st < 5; st++) if (s->bst[st] == p) s->bst[st] = NULL, n++;
+    for (int st = 0; st < NVN_STAGE_COUNT; st++) if (st != NVN_SHADER_STAGE_COMPUTE && s->bst[st] == p) s->bst[st] = NULL, n++;
     return n;
 }
 void mtl_prog_forget(const prog_t *p) {   // caller holds the submission lock
@@ -7812,11 +7904,11 @@ static id<MTLTexture> img_binding(int tid, const nvn_rbind *b, uint64_t *rid, in
 static void image_prepare(NvProg *pr, unsigned stages) {
     if (!pr) return;
     if (!pr->c_img) { int any = 0;   // no written or atomic image slot in any stage: nothing to resolve, every draw
-        for (int st = 0; st < 6 && !any; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
+        for (int st = 0; st < NVN_STAGE_COUNT && !any; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
             for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; if (b->kind == NVN_RB_IMG && b->reg < 32 && (b->rw || b->atom)) { any = 1; break; } } }
         pr->c_img = (int8_t)(any + 1); }
     if (pr->c_img == 1) return;
-    for (int st = 0; st < 6; st++) {
+    for (int st = 0; st < NVN_STAGE_COUNT; st++) {
         if (!(stages & (1u << st))) continue;
         NvShader *sh = pr->sh[st]; if (!sh) continue;
         for (int i = 0; i < sh->rf.nb; i++) {
@@ -7883,7 +7975,7 @@ static int fb_image_view(int tid, const nvn_rbind *b, id<MTLTexture> t) {
     return b->dtt == MTLTextureType2D && t.textureType == MTLTextureType2D && t.mipmapLevelCount == 1 &&
            (b->dpf == NVN_DPF_FLOAT || mtl_pf_dpf(registered.pixelFormat) == b->dpf);
 }
-static uint8_t g_args_dirty[6] = {1, 1, 1, 1, 1, 1};
+static uint8_t g_args_dirty[NVN_STAGE_COUNT] = {1, 1, 1, 1, 1, 1, 1, 1};
 static uint64_t g_args_reg_seen, g_args_dirty_seen, g_args_ser_seen;
 static inline void args_dirty_all(void) { memset(g_args_dirty, 1, sizeof g_args_dirty); }
 // A reused block holds resource IDs: it is stale after a registration change, a guest write, or a serial's Metal object replaced (g_ser_gen: an upgraded or re-uploaded packaged texture,
@@ -7895,11 +7987,27 @@ static inline void args_sync_dirty(void) {
     }
 }
 static NSUInteger g_args_mesh;   // nonzero: geometry-stage arguments go to this slot of the vertex table, which the mesh stage shares (geo_mesh_draw)
-static void bind_args(id<MTLCommandEncoder> en, int nvn_stage, int metal_vertex, id<MTLBuffer> ab, uint64_t gpu, size_t off, NSUInteger ai) {
-    if (g_args_mesh && nvn_stage == 2) { enc_r_vbuf((id<MTL4RenderCommandEncoder>)en, g_args_mesh, gpu); return; }
-    if (nvn_stage == 3) { if (rec_on()) rec_table_op(RO_T_ADDR, g_ot, gpu, ai); else [g_ot setAddress:gpu atIndex:ai]; return; }   // a task shader: the object stage's table (mesh_tasks_draw)
-    if (nvn_stage == 5 || nvn_stage == 2) enc_c_args((id<MTLComputeCommandEncoder>)en, gpu, ai);
-    else enc_r_args((id<MTLRenderCommandEncoder>)en, metal_vertex ? MTLRenderStageVertex : MTLRenderStageFragment, gpu, ai);
+static void bind_args(id<MTLCommandEncoder> en, int nvn_stage, int metal_vertex, id<MTLBuffer> ab, uint64_t gpu,
+                      size_t off, NSUInteger ai) {
+    if (nvn_stage == NVN_SHADER_STAGE_TASK || nvn_stage == NVN_SHADER_STAGE_MESH) {
+        id<MTL4ArgumentTable> table = nvn_stage == NVN_SHADER_STAGE_TASK ? g_ot : g_mt;
+        if (rec_on()) {
+            rec_table_op(RO_T_ADDR, table, gpu, ai);
+        } else {
+            [table setAddress:gpu atIndex:ai];
+        }
+        return;
+    }
+    if (g_args_mesh && nvn_stage == 2) {
+        enc_r_vbuf((id<MTL4RenderCommandEncoder>)en, g_args_mesh, gpu);
+        return;
+    }
+    if (nvn_stage == 5 || nvn_stage == 2) {
+        enc_c_args((id<MTLComputeCommandEncoder>)en, gpu, ai);
+    } else {
+        enc_r_args((id<MTLRenderCommandEncoder>)en, metal_vertex ? MTLRenderStageVertex : MTLRenderStageFragment, gpu,
+                   ai);
+    }
 }
 // Static constant buffers of route B: the Ryujinx support_buffer (layout in Ryujinx.Graphics.Shader/SupportBuffer.cs: alpha_test u32, is_bgra u32[8],
 // viewport_inverse f4, viewport_size f4, frag_scale_count i32, render_scale f32[73]..., each field aligned to 16 bytes) and the all-0 driver constant segment (64 KB = the upper bound declared by shaders)
@@ -8026,7 +8134,7 @@ static uint64_t zero_bank_gpu(void) { static uint64_t gpu; if (!gpu) gpu = zero_
 // The same read serves storage buffer addresses kept in uniform memory (SBUFU: 8 bytes)
 static void ubo_read(int stage, int reg, int off, size_t n, void *out) {
     memset(out, 0, n);
-    if (stage < 0 || stage >= 6 || reg < 0 || reg >= 16) return;
+    if (stage < 0 || stage >= NVN_STAGE_COUNT || reg < 0 || reg >= 16) return;
     const p_bind_buf *u = &S.ubo[stage][reg];
     if (!u->addr || (uint64_t)off + n > u->size) return;
     if (g_nubd && ubd_hits(u->addr + off, u->addr + off + n) && ubd_covers(u->addr + off, u->addr + off + n)) { ubd_read(u->addr + off, n, out); return; }   // written by an inline update deferred in this pass
@@ -8084,7 +8192,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
     uint64_t slots[NVN_REFL_MAXARG]; memset(slots, 0, arg_len < sizeof slots ? arg_len : sizeof slots);   // only the bytes that are copied out (they used to be zeroed in full, before the reuse check too)
     #define USE(r, u) do { (void)(u); if (__builtin_expect(g_res_check_on, 0)) res_check((r), sh->key, reg); } while (0)
     // DM_NVN_PASSDUMP: on the first new encode per pass per stage, records the shader key (K) and the actual source of each binding (B: UBO address / length / first 4 floats, texture ID and serial, or "dummy")
-    static uint64_t bl_pass[6]; static int bl_all = -1; if (bl_all < 0) bl_all = getenv("DM_NVN_PASSDUMP_ALL") != NULL;   // Record on every new encode (otherwise only the first time per pass per stage)
+    static uint64_t bl_pass[NVN_STAGE_COUNT]; static int bl_all = -1; if (bl_all < 0) bl_all = getenv("DM_NVN_PASSDUMP_ALL") != NULL;   // Record on every new encode (otherwise only the first time per pass per stage)
     int bl = passdump() && (bl_all || g_kd_force || bl_pass[nvn_stage] != g_stat_pass);
     if (bl) { bl_pass[nvn_stage] = g_stat_pass; PD("K %llu st%d key=%s nb=%d", g_stat_pass, nvn_stage, sh->key[0] ? sh->key : sh->builtin ? sh->builtin : "?", sh->rf.nb); }
     uint32_t bmask = 0; float bk[DMSH_BORDER_SAMPLERS][4];   // the border colour block (see nvn_border.h): the twins that correct, their factors
@@ -8467,7 +8575,7 @@ static int ds_scan(const uint8_t *p, ds_st *ds, int depth) {
             case OP_CALL: { uint64_t t; memcpy(&t, a, 8); if (depth >= 8) return DS_USED;
                 int r = ds_scan((const uint8_t *)t, ds, depth + 1); if (r != DS_RET) return r; break; }
             case OP_SET_RT: case OP_COPY_B2B: case OP_CLEAR_BUF: case OP_UPDATE_UB: case OP_COPY_B2T: case OP_COPY_T2B: case OP_COPY_T2T: case OP_DRAW_TEX: case OP_CLEAR_TEX: case OP_DISPATCH: return DS_FREE;
-            case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_DLSS: g_ds_why = h.op; return DS_USED;
+            case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_DRAW_MESH: case OP_DLSS: g_ds_why = h.op; return DS_USED;
             case OP_BIND_STATE: { const p_bind_state *b = a; if (b->kind == 5) memcpy(ds, b->bytes, sizeof *ds); break; }
             case OP_DRAW: case OP_DRAW_IDX: case OP_MULTI_DRAW:   // Depth test / write → depth needed; stencil test → stencil needed; can stop once both are needed
                 g_ds_need |= (ds->dt || ds->dw ? 1 : 0) | (ds->st ? 2 : 0);
@@ -8585,7 +8693,7 @@ static int state_op(uint32_t op, const void *a) {
         // dropped, and a dispatch after a graphics bind found no compute shader. Hyrule Warriors: Age of Calamity interleaves them; its movie's NV12 → RGB draw was dropped and the intro played black
         case OP_BIND_PROGRAM: { const p_bind_program *bp_ = a;
             if ((bp_->stages & 0x20) && bp_->prog != S.cprog) { S.cprog = bp_->prog; args_dirty_all(); }
-            if (gfx_stage_bits(bp_->stages)) { const prog_t *np = bind_stages(bp_->prog, gfx_stage_bits(bp_->stages)); if (np != S.prog) { S.prog = np; g_pso_dirty = 1; args_dirty_all(); } }
+            if (bp_->stages & NVN_GRAPHICS_STAGE_MASK) { const prog_t *np = bind_stages(bp_->prog, bp_->stages & NVN_GRAPHICS_STAGE_MASK); if (np != S.prog) { S.prog = np; g_pso_dirty = 1; args_dirty_all(); } }
             break; }
         case OP_BIND_STATE: {
             const p_bind_state *b = a; void *dst = NULL; size_t n = 0;
@@ -8604,8 +8712,8 @@ static int state_op(uint32_t op, const void *a) {
         case OP_BIND_VATTR: { const p_bind_vattr *b = a; if (S.nattr != b->n || memcmp(S.attr, b->st, 4 * b->n)) { memcpy(S.attr, b->st, 4 * b->n); S.nattr = b->n; g_pso_dirty = 1; } break; }
         case OP_BIND_VSTREAM: { const p_bind_vstream *b = a; if (S.nstream != b->n || memcmp(S.stream, b->st, 8 * b->n)) { memcpy(S.stream, b->st, 8 * b->n); S.nstream = b->n; g_pso_dirty = 1; } break; }
         case OP_BIND_VBUF: case OP_BIND_VBUF1: { p_bind_vbuf tmp; const p_bind_vbuf *b = vbuf_rec(op, a, &tmp); memcpy(&S.vbuf[b->first], b->r, sizeof *b->r * b->n); break; }
-        case OP_BIND_UBO: case OP_BIND_UBO_SMALL: { p_bind_buf tmp; const p_bind_buf *b = bind_buf_rec(op, a, &tmp); if (b->stage < 6 && b->index < 16 && memcmp(&S.ubo[b->stage][b->index], b, sizeof *b)) { S.ubo[b->stage][b->index] = *b; g_args_dirty[b->stage] = 1; } break; }
-        case OP_BIND_SSBO: { const p_bind_buf *b = a; if (b->stage < 6 && b->index < 16 && memcmp(&S.ssbo[b->stage][b->index], b, sizeof *b)) { S.ssbo[b->stage][b->index] = *b; g_args_dirty[b->stage] = 1; } break; }
+        case OP_BIND_UBO: case OP_BIND_UBO_SMALL: { p_bind_buf tmp; const p_bind_buf *b = bind_buf_rec(op, a, &tmp); if (b->stage < NVN_STAGE_COUNT && b->index < 16 && memcmp(&S.ubo[b->stage][b->index], b, sizeof *b)) { S.ubo[b->stage][b->index] = *b; g_args_dirty[b->stage] = 1; } break; }
+        case OP_BIND_SSBO: { const p_bind_buf *b = a; if (b->stage < NVN_STAGE_COUNT && b->index < 16 && memcmp(&S.ssbo[b->stage][b->index], b, sizeof *b)) { S.ssbo[b->stage][b->index] = *b; g_args_dirty[b->stage] = 1; } break; }
         case OP_BIND_TEX: case OP_BIND_TEX1: { p_bind_handles t1; const p_bind_handles *b = bind_rec(op, a, &t1);
             if (b->n < 0 || b->n > 32) {   // the recorder never writes more than 32 (bind_handles): the record was overwritten after it was recorded
                 static int once; if (!once++) { const uint8_t *q = (const uint8_t *)a; char hx[3 * 96 + 1]; for (int k = 0; k < 96; k++) snprintf(hx + 3 * k, 4, "%02x ", q[k - 32]);
@@ -8614,9 +8722,9 @@ static int state_op(uint32_t op, const void *a) {
             bh_fresh(b);
             if (passdump()) for (int k = 0; k < b->n; k++) { int tid = (int)(b->h[k] & 0xfffff); if (tid) PD("T %llu bind st%d slot%d tid=%d sid=%d ser=%llu%s", g_stat_pass + 1, b->stage, b->first + k, tid, (int)(b->h[k] >> 20),
                 tid < g_ntreg ? g_treg[tid].t.serial : 0ull, b->defer ? " deferred" : ""); }
-            if (b->stage < 6 && b->first + b->n <= NTEX && memcmp(&S.tex[b->stage][b->first], b->h, 8 * b->n)) { memcpy(&S.tex[b->stage][b->first], b->h, 8 * b->n); g_args_dirty[b->stage] = 1; } break; }
-        case OP_BIND_SAMP: { const p_bind_handles *b = a; bh_fresh(b); if (b->stage < 6 && b->first + b->n <= 128 && memcmp(&S.samp[b->stage][b->first], b->h, 8 * b->n)) { memcpy(&S.samp[b->stage][b->first], b->h, 8 * b->n); g_args_dirty[b->stage] = 1; } break; }
-        case OP_BIND_IMG: { const p_bind_handles *b = a; bh_fresh(b); if (b->stage < 6 && b->first >= 0 && b->first + b->n <= 32) { if (memcmp(&S.img[b->stage][b->first], b->h, 8 * b->n)) { memcpy(&S.img[b->stage][b->first], b->h, 8 * b->n); g_args_dirty[b->stage] = 1; } } else RED_ONCE(31, "image slots out of range stage %d first %d count %d", b->stage, b->first, b->n); break; }
+            if (b->stage < NVN_STAGE_COUNT && b->first + b->n <= NTEX && memcmp(&S.tex[b->stage][b->first], b->h, 8 * b->n)) { memcpy(&S.tex[b->stage][b->first], b->h, 8 * b->n); g_args_dirty[b->stage] = 1; } break; }
+        case OP_BIND_SAMP: { const p_bind_handles *b = a; bh_fresh(b); if (b->stage < NVN_STAGE_COUNT && b->first + b->n <= 128 && memcmp(&S.samp[b->stage][b->first], b->h, 8 * b->n)) { memcpy(&S.samp[b->stage][b->first], b->h, 8 * b->n); g_args_dirty[b->stage] = 1; } break; }
+        case OP_BIND_IMG: { const p_bind_handles *b = a; bh_fresh(b); if (b->stage < NVN_STAGE_COUNT && b->first >= 0 && b->first + b->n <= 32) { if (memcmp(&S.img[b->stage][b->first], b->h, 8 * b->n)) { memcpy(&S.img[b->stage][b->first], b->h, 8 * b->n); g_args_dirty[b->stage] = 1; } } else RED_ONCE(31, "image slots out of range stage %d first %d count %d", b->stage, b->first, b->n); break; }
         case OP_STENCIL: {
             const p_stencil *b = a;
             if (b->which != 2) g_dss_dirty = 1;
@@ -8631,7 +8739,7 @@ static int state_op(uint32_t op, const void *a) {
         case OP_BLEND_COLOR: memcpy(S.blend_color, ((const p_blend_color *)a)->rgba, 16); break;
         case OP_ALPHA_REF: S.alpha_ref = ((const p_alpha_ref *)a)->ref; break;   // data for at_bind, not part of the pipeline
         case OP_PUSH_CONST: { const p_push_const *b = a; memcpy(S.push[b->compute ? 1 : 0] + b->offset, b->data, b->size);
-            for (int st = 0; st < 6; st++) if ((st == 5) == (b->compute != 0)) g_args_dirty[st] = 1; break; }
+            for (int st = 0; st < NVN_STAGE_COUNT; st++) if ((st == 5) == (b->compute != 0)) g_args_dirty[st] = 1; break; }
         case OP_COPY_STRIDE: { const p_copy_stride *cs = a; if (cs->image) S.copy_img_stride = cs->stride; else S.copy_stride = cs->stride; break; }
         case OP_TF_BIND: { const p_tf_bind *b = a; if (b->index >= 0 && b->index < 4) S.tf[b->index] = *b; break; }
         case OP_TF_STATE: { const p_tf_state *b = a; S.tf_on = b->what == 0 || b->what == 3; break; }
@@ -8931,11 +9039,11 @@ static int draw_samples_rt(NvProg *pr) {   // Sampled attachments keep the origi
     for (int k = 0; k < R.rt.n && k < 8; k++) if (R.rt.color[k]) rs[nr++] = R.rt.color[k]->serial;
     if (R.rt.depth) rs[nr++] = R.rt.depth->serial;
     if (!pr) return 1;
-    for (int st = 0; st < 5; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
+    for (int st = 0; st < NVN_STAGE_COUNT; st++) { if (st == NVN_SHADER_STAGE_COMPUTE) continue; __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
         if (sh->rf.bindless || sh->rf.dyn) return 1;
         for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; uint64_t h;
             if (b->kind == NVN_RB_TEXU || b->kind == NVN_RB_TEXD || b->kind == NVN_RB_TEXA) return 1;
-            if (b->kind == NVN_RB_IMG) h = b->reg < 32 && sh->stage < 6 ? S.img[sh->stage][b->reg] : 0; else if (b->kind == NVN_RB_TEX || b->kind == NVN_RB_TBUF) h = sh->stage < 6 ? tex_slot_h(S.tex[sh->stage], S.img[sh->stage], b->reg) : 0; else continue;
+            if (b->kind == NVN_RB_IMG) h = b->reg < 32 && sh->stage < NVN_STAGE_COUNT ? S.img[sh->stage][b->reg] : 0; else if (b->kind == NVN_RB_TEX || b->kind == NVN_RB_TBUF) h = sh->stage < NVN_STAGE_COUNT ? tex_slot_h(S.tex[sh->stage], S.img[sh->stage], b->reg) : 0; else continue;
             int tid = (int)(h & 0xfffff); if (!tid) continue;
             os_unfair_lock_lock(&g_rmu); tex_t t = tid < g_ntreg && g_treg[tid].ok ? g_treg[tid].t : (tex_t){0}; os_unfair_lock_unlock(&g_rmu);
             if (!t.serial) return 1;
@@ -8989,7 +9097,7 @@ static int sdx_bucket(uint64_t ser, int add) {   // Returns the bucket number; r
 }
 static const uint8_t **g_sdx_op; static uint32_t g_sdx_nop, g_sdx_opcap;
 static uint32_t g_exec_seq;   // Sequence number of the current operation during replay
-static uint64_t g_pp_slot[6][NTEX + 32]; static const prog_t *g_pp_prog, *g_pp_cprog; static const p_set_rt *g_pp_rt; static uint32_t g_pp_rtseq;   // g_pp_slot: textures, then images
+static uint64_t g_pp_slot[NVN_STAGE_COUNT][NTEX + 32]; static const prog_t *g_pp_prog, *g_pp_cprog; static const p_set_rt *g_pp_rt; static uint32_t g_pp_rtseq;   // g_pp_slot: textures, then images
 static uint32_t *g_rtx_seq, *g_drx_seq; static uint32_t g_rtx_n, g_rtx_cap, g_drx_n, g_drx_cap;   // This submit's SET_RT / draw sequence number tables (used by the pre-screen of the readable tile merge)
 static void seq_push(uint32_t **v, uint32_t *n, uint32_t *cap, uint32_t x) { if (*n == *cap) { *cap = *cap ? *cap * 2 : 1024; *v = realloc_or_die(*v, *cap * sizeof **v, "the store lookahead index"); } (*v)[(*n)++] = x; }
 static void sdx_ev_add(sdx_ev e) { if (sdx_bucket(e.ser, 0) < 0) return; if (g_sdx_n == g_sdx_cap) { g_sdx_cap = g_sdx_cap ? g_sdx_cap * 2 : 4096; g_sdx = realloc_or_die(g_sdx, g_sdx_cap * sizeof *g_sdx, "the store lookahead index"); g_sdx_tmp = realloc_or_die(g_sdx_tmp, g_sdx_cap * sizeof *g_sdx, "the store lookahead index"); } g_sdx[g_sdx_n++] = e; }
@@ -9020,16 +9128,17 @@ static void sdx_walk(const uint8_t *p, int depth) {
                 if ((c->stencil_mask & 0xff) == 0xff) sdx_ev_add((sdx_ev){seq, g_pp_rtseq, r->depth->serial, p, lv, sl, SDX_CLEAR, 2, !r->has_dview, 0});
                 break; }
             case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_IMG: { p_bind_handles t1; const p_bind_handles *b = bind_rec(h.op, a, &t1); bh_fresh(b); int base = h.op == OP_BIND_IMG ? NTEX : 0, lim = h.op == OP_BIND_IMG ? 32 : NTEX;
-                if (b->stage < 6 && b->first >= 0 && b->first + b->n <= lim) for (int k = 0; k < b->n; k++) g_pp_slot[b->stage][base + b->first + k] = h_ser(b->h[k]);
+                if (b->stage < NVN_STAGE_COUNT && b->first >= 0 && b->first + b->n <= lim) for (int k = 0; k < b->n; k++) g_pp_slot[b->stage][base + b->first + k] = h_ser(b->h[k]);
                 break; }
-            case OP_BIND_PROGRAM: { const p_bind_program *bp_ = a; if (bp_->stages & 0x20) g_pp_cprog = bp_->prog; if (gfx_stage_bits(bp_->stages)) g_pp_prog = bp_->prog; break; }
+            case OP_BIND_PROGRAM: { const p_bind_program *bp_ = a; if (bp_->stages & 0x20) g_pp_cprog = bp_->prog; if (bp_->stages & NVN_GRAPHICS_STAGE_MASK) g_pp_prog = bp_->prog; break; }
+            case OP_DRAW_MESH: g_sdx_ok = 0; return;   // Mesh resource/output footprints are not in this lookahead index yet: keep stores and disable pass fusion.
             case OP_DRAW: case OP_DRAW_IDX: case OP_MULTI_DRAW: case OP_DISPATCH: {
                 if (h.op != OP_DISPATCH) seq_push(&g_drx_seq, &g_drx_n, &g_drx_cap, seq);
                 const prog_t *pp = h.op == OP_DISPATCH ? g_pp_cprog : g_pp_prog; __unsafe_unretained NvProg *pr = pp ? prog_get(pp) : nil;
-                if (!pr) { for (int st = 0; st < 6; st++) for (int k = 0; k < NTEX + 32; k++) if (g_pp_slot[st][k]) sdx_ev_add((sdx_ev){seq, 0, g_pp_slot[st][k], p, 0, 0, SDX_READ, 0, 0, 1}); }
-                else for (int st = 0; st < 6; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh || (h.op == OP_DISPATCH) != (st == 5)) continue;
+                if (!pr) { for (int st = 0; st < NVN_STAGE_COUNT; st++) for (int k = 0; k < NTEX + 32; k++) if (g_pp_slot[st][k]) sdx_ev_add((sdx_ev){seq, 0, g_pp_slot[st][k], p, 0, 0, SDX_READ, 0, 0, 1}); }
+                else for (int st = 0; st < NVN_STAGE_COUNT; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh || (h.op == OP_DISPATCH) != (st == 5)) continue;
                     for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; int k = b->kind == NVN_RB_IMG ? NTEX + b->reg : (b->kind == NVN_RB_TEX || b->kind == NVN_RB_TBUF) ? b->reg : -1;
-                        if (k < 0 || k >= NTEX + 32 || sh->stage < 0 || sh->stage >= 6) continue; uint64_t ser = g_pp_slot[sh->stage][k];
+                        if (k < 0 || k >= NTEX + 32 || sh->stage < 0 || sh->stage >= NVN_STAGE_COUNT) continue; uint64_t ser = g_pp_slot[sh->stage][k];
                         if (ser) sdx_ev_add((sdx_ev){seq, 0, ser, p, 0, 0, SDX_READ, 0, 0, 1}); } }
                 const p_set_rt *r = g_pp_rt;
                 if (h.op != OP_DISPATCH && r) {
@@ -9059,7 +9168,7 @@ static void mtl_sub_index_(const uint64_t *h, int n) {   // Start of submit (hle
     for (int i = 0; i < g_xv_n; i++) sdx_bucket(g_xv[i].ser, 1);   // Textures in the ledger enter the candidate set: otherwise, when one is only sampled and not used as an attachment in this submit, its read events are not indexed and the fallback cannot see them
     if (R.has_rt) { for (int k = 0; k < R.rt.n && k < 8; k++) if (R.rt.color[k]) sdx_bucket(R.rt.color[k]->serial, 1); if (R.rt.depth) sdx_bucket(R.rt.depth->serial, 1); }   // The targets at the start of the submit (the first draw may reopen the render pass without going through SetRenderTargets)
     g_pp_prog = S.prog; g_pp_cprog = S.cprog; g_pp_rt = NULL; g_pp_rtseq = SDX_NONE;
-    for (int st = 0; st < 6; st++) { for (int k = 0; k < NTEX; k++) g_pp_slot[st][k] = S.tex[st][k] ? h_ser(S.tex[st][k]) : 0;
+    for (int st = 0; st < NVN_STAGE_COUNT; st++) { for (int k = 0; k < NTEX; k++) g_pp_slot[st][k] = S.tex[st][k] ? h_ser(S.tex[st][k]) : 0;
                                      for (int k = 0; k < 32; k++) g_pp_slot[st][NTEX + k] = S.img[st][k] ? h_ser(S.img[st][k]) : 0; }
     for (int i = 0; i < n && g_sdx_ok; i++) sdx_walk((const uint8_t *)h[i], 0);
     if (!g_sdx_ok) return;
@@ -9125,7 +9234,7 @@ static void hoist_try(void) {
     for (int guard = 0; guard < 200000; guard++) {
         op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
         switch (h.op) {
-            case OP_END: case OP_CALL: case OP_COPY_T2T: case OP_DRAW_TEX: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DLSS: case OP_DISPATCH: case OP_RENDER_COND: return;
+            case OP_END: case OP_CALL: case OP_COPY_T2T: case OP_DRAW_TEX: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DRAW_MESH: case OP_DLSS: case OP_DISPATCH: case OP_RENDER_COND: return;
             case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
             case OP_MULTI_DRAW: return;
             case OP_DRAW: case OP_DRAW_IDX: if (in_grp) return; break;
@@ -9146,7 +9255,7 @@ static void hoist_try(void) {
                 if (rt_same(&R.rt, r)) {   // Back to this render pass's targets: execute if hoisting holds
                     if (!ng) return;
                     uint64_t bound[512]; int nb = 0;   // The order of the original "check at the start": the current slots (stage x textures 128 + images 32), followed by those bound within the scan range
-                    for (int st = 0; st < 6; st++) { for (int k = 0; k < NTEX && nb < 512; k++) if (S.tex[st][k]) bound[nb++] = h_ser(S.tex[st][k]);
+                    for (int st = 0; st < NVN_STAGE_COUNT; st++) { for (int k = 0; k < NTEX && nb < 512; k++) if (S.tex[st][k]) bound[nb++] = h_ser(S.tex[st][k]);
                                                      for (int k = 0; k < 32 && nb < 512; k++) if (S.img[st][k]) bound[nb++] = h_ser(S.img[st][k]); }
                     for (int k = 0; k < nbh && nb < 512; k++) bound[nb++] = h_ser(bh[k]);
                     for (int gi = 0; gi < ng; gi++) {   // Disjoint and not bound
@@ -9247,9 +9356,9 @@ static void fz_end(void) {   // End of a merged render pass (called by rp_end): 
     else { for (int i = 0; i < g_nfzs; i++) free(g_fzs[i].S_); g_nfzs = 0; g_fzs_bad = 0; }
 }
 static int sub_eq(const p_set_rt *a, int ka, const p_set_rt *b, int kb) { uint64_t s1, s2; int l1, l2, x1, x2; rt_sub(a, ka, &s1, &l1, &x1); rt_sub(b, kb, &s2, &l2, &x2); return s1 && s1 == s2 && l1 == l2 && x1 == x2; }
-static int prog_samples_ser(const prog_t *pg, uint64_t tex[6][NTEX], uint64_t img[6][32], uint64_t ser) {   // Whether this texture is bound in any texture / image / typed buffer slot declared by the program's reflection
+static int prog_samples_ser(const prog_t *pg, uint64_t tex[NVN_STAGE_COUNT][NTEX], uint64_t img[NVN_STAGE_COUNT][32], uint64_t ser) {   // Whether this texture is bound in any texture / image / typed buffer slot declared by the program's reflection
     __unsafe_unretained NvProg *pr = pg ? prog_get(pg) : nil; if (!pr) return 1;
-    for (int st = 0; st < 5; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh || sh->stage >= 6) continue;
+    for (int st = 0; st < NVN_STAGE_COUNT; st++) { if (st == NVN_SHADER_STAGE_COMPUTE) continue; __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh || sh->stage >= NVN_STAGE_COUNT) continue;
         for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; uint64_t h;
             if (b->kind == NVN_RB_IMG) h = b->reg < 32 ? img[sh->stage][b->reg] : 0; else if (b->kind == NVN_RB_TEX || b->kind == NVN_RB_TBUF) h = tex_slot_h(tex[sh->stage], img[sh->stage], b->reg); else continue;
             if (h && h_ser(h) == ser) return 1; } }
@@ -9268,9 +9377,9 @@ static int defer_handle_sub(uint64_t h, const p_set_rt *r, int k, int cover) {
     view_t v = g_treg[tid].v; int n = v.nlevels > 0 ? v.nlevels : 1;
     return lv >= v.base_level && lv < v.base_level + n && (!v.set_layers || (sl >= v.min_layer && sl < v.min_layer + (v.nlayers > 0 ? v.nlayers : 1)));
 }
-static int defer_prog_hits(const prog_t *pg, uint64_t tex[6][NTEX], uint64_t img[6][32], const p_set_rt *r, int color_only, int cover) {
+static int defer_prog_hits(const prog_t *pg, uint64_t tex[NVN_STAGE_COUNT][NTEX], uint64_t img[NVN_STAGE_COUNT][32], const p_set_rt *r, int color_only, int cover) {
     __unsafe_unretained NvProg *pr = pg ? prog_get(pg) : nil; if (!pr) return 1;
-    for (int st = 0; st < 5; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh || sh->stage < 0 || sh->stage >= 6) continue;
+    for (int st = 0; st < NVN_STAGE_COUNT; st++) { if (st == NVN_SHADER_STAGE_COMPUTE) continue; __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh || sh->stage < 0 || sh->stage >= NVN_STAGE_COUNT) continue;
         for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; uint64_t h = 0;
             if (b->kind == NVN_RB_IMG) h = b->reg < 32 ? img[sh->stage][b->reg] : 0;
             else if (b->kind == NVN_RB_TEX || b->kind == NVN_RB_TBUF) h = tex_slot_h(tex[sh->stage], img[sh->stage], b->reg);
@@ -9281,9 +9390,9 @@ static int defer_prog_hits(const prog_t *pg, uint64_t tex[6][NTEX], uint64_t img
     }
     return 0;
 }
-static void defer_collect_reads(defer_t *d, const prog_t *pg, uint64_t tex[6][NTEX], uint64_t img[6][32]) {
+static void defer_collect_reads(defer_t *d, const prog_t *pg, uint64_t tex[NVN_STAGE_COUNT][NTEX], uint64_t img[NVN_STAGE_COUNT][32]) {
     __unsafe_unretained NvProg *pr = pg ? prog_get(pg) : nil; if (!pr) { d->nreads = 513; return; }
-    for (int st = 0; st < 5; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh || sh->stage < 0 || sh->stage >= 6) continue;
+    for (int st = 0; st < NVN_STAGE_COUNT; st++) { if (st == NVN_SHADER_STAGE_COMPUTE) continue; __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh || sh->stage < 0 || sh->stage >= NVN_STAGE_COUNT) continue;
         for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; uint64_t h = 0;
             if (b->kind == NVN_RB_IMG) h = b->reg < 32 ? img[sh->stage][b->reg] : 0;
             else if (b->kind == NVN_RB_TEX || b->kind == NVN_RB_TBUF) h = tex_slot_h(tex[sh->stage], img[sh->stage], b->reg);
@@ -9405,7 +9514,7 @@ static void defer_try(const p_draw *dw, const p_draw_idx *di) {
     if (!defer_pre()) return;
     memset(&g_defer, 0, sizeof g_defer); g_defer.p_rt = R.rt; memcpy(g_defer.clear_c, R.clear_c, 8); memcpy(g_defer.cc, R.cc, sizeof R.cc);
     g_defer.clear_d = R.clear_d; g_defer.clear_s = R.clear_s; g_defer.cd = R.cd; g_defer.cs = R.cs;
-    uint64_t tex[6][NTEX], img[6][32]; memcpy(tex, S.tex, sizeof tex); memcpy(img, S.img, sizeof img); const prog_t *pg = S.prog; ds_st ds = S.ds;
+    uint64_t tex[NVN_STAGE_COUNT][NTEX], img[NVN_STAGE_COUNT][32]; memcpy(tex, S.tex, sizeof tex); memcpy(img, S.img, sizeof img); const prog_t *pg = S.prog; ds_st ds = S.ds;
     const uint8_t *p = g_exec_next, *p_end = NULL, *qop = NULL; const p_set_rt *q = NULL; p_set_rt scan_rt = R.rt; int srt_hit = -1, ci = 0, draws = 1, p_has_draw = 1; defer_collect_reads(&g_defer, pg, tex, img);   // The current draw is P's first
     for (int guard = 0; guard < 200000; guard++) {
         op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
@@ -9416,7 +9525,7 @@ static void defer_try(const p_draw *dw, const p_draw_idx *di) {
             case OP_JUMP: memcpy(&p, a, 8); continue;
             case OP_BIND_PROGRAM: pg = ((const p_bind_program *)a)->prog; break;
             case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_IMG: { p_bind_handles t1; const p_bind_handles *b = bind_rec(h.op, a, &t1); bh_fresh(b); int lim = h.op == OP_BIND_IMG ? 32 : NTEX;
-                if (b->stage >= 0 && b->stage < 6 && b->first >= 0 && b->first + b->n <= lim) for (int k = 0; k < b->n; k++) { if (h.op == OP_BIND_IMG) img[b->stage][b->first + k] = b->h[k]; else tex[b->stage][b->first + k] = b->h[k]; } break; }
+                if (b->stage >= 0 && b->stage < NVN_STAGE_COUNT && b->first >= 0 && b->first + b->n <= lim) for (int k = 0; k < b->n; k++) { if (h.op == OP_BIND_IMG) img[b->stage][b->first + k] = b->h[k]; else tex[b->stage][b->first + k] = b->h[k]; } break; }
             case OP_BIND_STATE: { const p_bind_state *b = a; if (b->kind == 5) memcpy(&ds, b->bytes, sizeof ds); break; }
             case OP_DRAW: case OP_DRAW_IDX:
                 if (defer_prog_hits(pg, tex, img, &g_defer.p_rt, 1, 1)) { /* Suggestion: here, after identifying that an output mapping is needed but _bf is missing, call bf_want_note. */ g_defer.reason = 7; goto fail; }
@@ -9434,7 +9543,7 @@ static void defer_try(const p_draw *dw, const p_draw_idx *di) {
                 for (int k = 0; k < g_defer.nreads && !bad; k++) if (h_ser(g_defer.p_reads[k]) == ds_) bad = 1;
                 if (g_defer.nreads > 512) bad = 1;
                 if (bad) { g_defer.reason = 3; g_defer.reason_op = h.op; goto fail; } break; }
-            case OP_MULTI_DRAW: case OP_REPORT_COUNTER: case OP_RENDER_COND: case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DLSS: case OP_DISPATCH: case OP_DRAW_TEX: g_defer.reason = 3; g_defer.reason_op = h.op; goto fail;
+            case OP_MULTI_DRAW: case OP_REPORT_COUNTER: case OP_RENDER_COND: case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DRAW_MESH: case OP_DLSS: case OP_DISPATCH: case OP_DRAW_TEX: g_defer.reason = 3; g_defer.reason_op = h.op; goto fail;
             case OP_CLEAR_COLOR: { const p_clear_color *c = a; if (!p_end) { g_defer.reason = 16; goto fail; }   // A clear inside P's continuation segment: do not defer
                 if (c->index >= 0 && c->index < scan_rt.n && (defer_rt_hits_reads(&scan_rt, c->index) || (scan_rt.color[c->index] && defer_rt_hits_reads(&g_defer.p_rt, c->index)))) { g_defer.reason = 5; goto fail; } break; }
             case OP_CLEAR_DS: if (!p_end) { g_defer.reason = 16; goto fail; } break;
@@ -9447,7 +9556,7 @@ static void defer_try(const p_draw *dw, const p_draw_idx *di) {
                         if (he.op == OP_JUMP) { memcpy(&e, e + 8, 8); continue; }
                         if (he.op == OP_END) { const uint8_t *nx = defer_cont(&ec); if (!nx) break; e = nx; continue; }
                         if (he.op == OP_SET_RT) { empty = 1; break; }
-                        if (he.op == OP_DRAW || he.op == OP_DRAW_IDX || he.op == OP_MULTI_DRAW || he.op == OP_CLEAR_COLOR || he.op == OP_CLEAR_DS || he.op == OP_CALL || he.op == OP_DISPATCH || he.op == OP_CLEAR_TEX || he.op == OP_DLSS || he.op == OP_COPY_T2T || he.op == OP_DRAW_TEX || he.op == OP_COPY_B2T || he.op == OP_COPY_T2B) break;
+                        if (he.op == OP_DRAW || he.op == OP_DRAW_IDX || he.op == OP_MULTI_DRAW || he.op == OP_CLEAR_COLOR || he.op == OP_CLEAR_DS || he.op == OP_CALL || he.op == OP_DISPATCH || he.op == OP_CLEAR_TEX || he.op == OP_DRAW_MESH || he.op == OP_DLSS || he.op == OP_COPY_T2T || he.op == OP_DRAW_TEX || he.op == OP_COPY_B2T || he.op == OP_COPY_T2B) break;
                         e += he.size; }
                     if (empty) break; }
                 if (!shared) break; if (!p_has_draw || !defer_q_superset(r)) { g_defer.reason = 6; goto fail; } q = r; qop = p; goto q_found; }
@@ -9465,12 +9574,12 @@ q_found:
         if (h.op == OP_DRAW || h.op == OP_DRAW_IDX) { if (defer_prog_hits(pg, tex, img, &g_defer.p_rt, 1, 1)) { g_defer.reason = 14; goto fail; } q_body = 1; p += h.size; continue; }
         if (q_body && (h.op == OP_SET_RT || h.op == OP_END)) break;
         if (!q_body && h.op == OP_END) { const uint8_t *nx = defer_cont(&ci); if (!nx) { g_defer.reason = 9; goto fail; } p = nx; continue; }
-        if (h.op == OP_CALL || h.op == OP_MULTI_DRAW) { g_defer.reason = 9; g_defer.reason_op = h.op; goto fail; }
+        if (h.op == OP_CALL || h.op == OP_MULTI_DRAW || h.op == OP_DRAW_MESH) { g_defer.reason = 9; g_defer.reason_op = h.op; goto fail; }
         // After Q's SetRenderTargets and before its first draw and any clear, another SetRenderTargets arrives (the game sets targets repeatedly, the previous one being an empty render pass): if the new targets still cover P take it as Q, otherwise do not defer
         if (!q_body && h.op == OP_SET_RT && !q_clears) { const p_set_rt *r2 = a; if (!defer_q_superset(r2)) { g_defer.reason = 15; goto fail; } q = r2; qop = p; p += h.size; continue; }
         if (h.op == OP_CLEAR_COLOR || h.op == OP_CLEAR_DS) q_clears = 1;
         if (!q_body && (h.op == OP_END || h.op == OP_SET_RT || h.op == OP_UPDATE_UB || h.op == OP_COPY_B2B || h.op == OP_CLEAR_BUF || h.op == OP_DISPATCH)) { g_defer.reason = 9; g_defer.reason_op = h.op; goto fail; }
-        if (h.op == OP_BIND_PROGRAM) pg = ((const p_bind_program *)a)->prog; else if (h.op == OP_BIND_TEX || h.op == OP_BIND_TEX1 || h.op == OP_BIND_IMG) { p_bind_handles t1; const p_bind_handles *b = bind_rec(h.op, a, &t1); bh_fresh(b); int lim = h.op == OP_BIND_IMG ? 32 : NTEX; if (b->stage >= 0 && b->stage < 6 && b->first >= 0 && b->first + b->n <= lim) for (int k = 0; k < b->n; k++) { if (h.op == OP_BIND_IMG) img[b->stage][b->first + k] = b->h[k]; else tex[b->stage][b->first + k] = b->h[k]; } }
+        if (h.op == OP_BIND_PROGRAM) pg = ((const p_bind_program *)a)->prog; else if (h.op == OP_BIND_TEX || h.op == OP_BIND_TEX1 || h.op == OP_BIND_IMG) { p_bind_handles t1; const p_bind_handles *b = bind_rec(h.op, a, &t1); bh_fresh(b); int lim = h.op == OP_BIND_IMG ? 32 : NTEX; if (b->stage >= 0 && b->stage < NVN_STAGE_COUNT && b->first >= 0 && b->first + b->n <= lim) for (int k = 0; k < b->n; k++) { if (h.op == OP_BIND_IMG) img[b->stage][b->first + k] = b->h[k]; else tex[b->stage][b->first + k] = b->h[k]; } }
         else if (h.op == OP_CLEAR_COLOR) { const p_clear_color *c = a; if (c->index >= 0 && c->index < q->n && q->color[c->index]) for (int i = 0; i < g_defer.p_rt.n; i++) if (g_defer.p_rt.color[i] && sub_eq(q, c->index, &g_defer.p_rt, i)) { g_defer.reason = 10; goto fail; } }
         p += h.size;
     }
@@ -9517,7 +9626,7 @@ static void fuse_try(void) {
     for (int guard = 0; guard < 200000 && !r2; guard++) {
         if (!fz_next(&cur, &p, &h, &a)) return;
         switch (h.op) {
-            case OP_COPY_T2T: case OP_DRAW_TEX: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DLSS: case OP_DISPATCH: case OP_RENDER_COND:
+            case OP_COPY_T2T: case OP_DRAW_TEX: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DRAW_MESH: case OP_DLSS: case OP_DISPATCH: case OP_RENDER_COND:
             case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: return;
             case OP_SCISSOR: sc = *(const p_scissor *)a; has_sc = 1; break;
             case OP_SET_RT: {
@@ -9538,7 +9647,7 @@ static void fuse_try(void) {
     for (int guard = 0; guard < 200000; guard++) {
         if (h.op == OP_DRAW || h.op == OP_DRAW_IDX) break;
         switch (h.op) {
-            case OP_COPY_T2T: case OP_DRAW_TEX: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DLSS: case OP_DISPATCH: case OP_SET_RT: case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: case OP_RENDER_COND: return;
+            case OP_COPY_T2T: case OP_DRAW_TEX: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DRAW_MESH: case OP_DLSS: case OP_DISPATCH: case OP_SET_RT: case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: case OP_RENDER_COND: return;
             case OP_SCISSOR: sc = *(const p_scissor *)a; has_sc = 1; break;
             case OP_CLEAR_COLOR: { const p_clear_color *c = a; if (ncl >= 8 || c->index < 0 || c->index >= r2->n || !r2->color[c->index] || c->mask != 0xf) return;
                 const tex_t *t = r2->color[c->index];
@@ -9566,7 +9675,7 @@ static void fuse_try(void) {
     if (!R.rt.depth && r2->depth) { U.depth = r2->depth; U.dview = r2->dview; U.has_dview = r2->has_dview; depth_from_r2 = 1; }
     if ((cd_f || cs_f) && !depth_from_r2) return;   // The depth is already in use in the earlier pass: the depth clear at the start of the later pass has nowhere to go
     // Four: draws of the earlier pass must not sample attachments brought in by the later pass; when the depth comes from the later pass, depth-stencil testing must not be enabled
-    static uint64_t tex[6][NTEX], img[6][32]; memcpy(tex, S.tex, sizeof tex); memcpy(img, S.img, sizeof img);
+    static uint64_t tex[NVN_STAGE_COUNT][NTEX], img[NVN_STAGE_COUNT][32]; memcpy(tex, S.tex, sizeof tex); memcpy(img, S.img, sizeof img);
     const prog_t *pg = S.prog; ds_st ds = S.ds;
     cur = (fz_cursor){.p = g_exec_next};
     for (;;) {   // The first loop iteration checks the draw that opens the render pass (current state), then checks the draws in the range one by one
@@ -9580,23 +9689,23 @@ static void fuse_try(void) {
             if (hq.op == OP_BIND_PROGRAM) pg = ((const p_bind_program *)aq)->prog;
             else if (hq.op == OP_BIND_STATE) { const p_bind_state *b = aq; if (b->kind == 5) memcpy(&ds, b->bytes, sizeof ds); }
             else if (hq.op == OP_BIND_TEX || hq.op == OP_BIND_TEX1 || hq.op == OP_BIND_IMG) { p_bind_handles t1; const p_bind_handles *b = bind_rec(hq.op, aq, &t1); bh_fresh(b); int lim = hq.op == OP_BIND_IMG ? 32 : NTEX;
-                if (b->stage >= 0 && b->stage < 6 && b->first >= 0 && b->first + b->n <= lim) for (int k = 0; k < b->n; k++) { if (hq.op == OP_BIND_IMG) img[b->stage][b->first + k] = b->h[k]; else tex[b->stage][b->first + k] = b->h[k]; } }
+                if (b->stage >= 0 && b->stage < NVN_STAGE_COUNT && b->first >= 0 && b->first + b->n <= lim) for (int k = 0; k < b->n; k++) { if (hq.op == OP_BIND_IMG) img[b->stage][b->first + k] = b->h[k]; else tex[b->stage][b->first + k] = b->h[k]; } }
             else if (hq.op == OP_DRAW || hq.op == OP_DRAW_IDX) break;
         }
     }
 planned:
     {   // Five: pre-screen the first draw of the later pass (static conditions), to avoid attaching the union of attachments for nothing: track the program and texture bindings up to that draw
-        const prog_t *pg2 = S.prog; static uint64_t t2[6][NTEX], i2[6][32]; memcpy(t2, S.tex, sizeof t2); memcpy(i2, S.img, sizeof i2);
+        const prog_t *pg2 = S.prog; static uint64_t t2[NVN_STAGE_COUNT][NTEX], i2[NVN_STAGE_COUNT][32]; memcpy(t2, S.tex, sizeof t2); memcpy(i2, S.img, sizeof i2);
         cur = (fz_cursor){.p = g_exec_next};
         for (;;) { const uint8_t *q; op_hdr hq; const void *aq; if (!fz_next(&cur, &q, &hq, &aq)) return; if (q == p) break;
             if (hq.op == OP_BIND_PROGRAM) pg2 = ((const p_bind_program *)aq)->prog;
             else if (hq.op == OP_BIND_TEX || hq.op == OP_BIND_TEX1 || hq.op == OP_BIND_IMG) { p_bind_handles t1; const p_bind_handles *b = bind_rec(hq.op, aq, &t1); bh_fresh(b); int lim = hq.op == OP_BIND_IMG ? 32 : NTEX;
-                if (b->stage >= 0 && b->stage < 6 && b->first >= 0 && b->first + b->n <= lim) for (int k = 0; k < b->n; k++) { if (hq.op == OP_BIND_IMG) i2[b->stage][b->first + k] = b->h[k]; else t2[b->stage][b->first + k] = b->h[k]; } }
+                if (b->stage >= 0 && b->stage < NVN_STAGE_COUNT && b->first >= 0 && b->first + b->n <= lim) for (int k = 0; k < b->n; k++) { if (hq.op == OP_BIND_IMG) i2[b->stage][b->first + k] = b->h[k]; else t2[b->stage][b->first + k] = b->h[k]; } }
         }
         NvProg *pr2 = pg2 ? prog_get(pg2) : nil; NvShader *vs2 = pr2 ? pr2->sh[0] : nil, *fs2 = pr2 ? pr2->sh[1] : nil;
         if (!vs2 || !fs2) return;
         int touches = 0;
-        for (int st = 0; st < 5; st++) { __unsafe_unretained NvShader *sh = pr2->sh[st]; if (!sh || sh->stage >= 6) continue;
+        for (int st = 0; st < NVN_STAGE_COUNT; st++) { if (st == NVN_SHADER_STAGE_COMPUTE) continue; __unsafe_unretained NvShader *sh = pr2->sh[st]; if (!sh || sh->stage >= NVN_STAGE_COUNT) continue;
             for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *bb = &sh->rf.b[i]; uint64_t h;
                 if (bb->kind == NVN_RB_IMG) h = bb->reg < 32 ? i2[sh->stage][bb->reg] : 0; else if (bb->kind == NVN_RB_TEX || bb->kind == NVN_RB_TBUF) h = tex_slot_h(t2[sh->stage], i2[sh->stage], bb->reg); else continue;
                 uint64_t ser = h ? h_ser(h) : 0; if (!ser) continue;
@@ -9698,7 +9807,7 @@ static int zskip_can_draw(NvProg *pr) {
     // no depth write and no stencil, not counting an occlusion query, and every color attachment to be written is already 0 (a candidate cleared entirely to 0 in this render pass, or known all zero) -- writing 0 over 0.
     // Reasons for not holding (the N line of PASSDUMP): 1 depth / stencil 2 occlusion query counting with a report before the reset 3 coefficient unreadable or non-finite 4 image slot 5 sampled view not known all zero 6 no target 7 target is not 0
     if (S.rast_discard || !zskip_on() || !pr) return 0;
-    NvShader *fs = nil; for (int st = 0; st < 5; st++) if (pr->sh[st] && pr->sh[st]->stage == 1) fs = pr->sh[st];
+    NvShader *fs = nil; for (int st = 0; st < NVN_STAGE_COUNT; st++) if (st != NVN_SHADER_STAGE_COMPUTE && pr->sh[st] && pr->sh[st]->stage == 1) fs = pr->sh[st];
     zskip_fact f; float coeff; int why = 0;
     if (!fs || !zskip_fact_for(fs->key, &f)) return 0;
     if (S.ds.dw || S.ds.st) why = 1;
@@ -9764,7 +9873,7 @@ static int fz_p2_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di, uint8_
     if (!vs || !fs) { PD("F %llu not provable: no vertex / fragment shader", g_stat_pass); return 0; }
     if (!g_fz.rt2.depth && R.rt.depth && (S.ds.dt || S.ds.dw || S.ds.st)) { PD("F %llu not provable: depth comes from the previous pass and this draw has depth / stencil testing on", g_stat_pass); return 0; }
     int fx[32]; for (int i = 0; i < 32; i++) fx[i] = -1; uint8_t fbmask = 0;
-    for (int st = 0; st < 5; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh || sh->stage >= 6) continue;
+    for (int st = 0; st < NVN_STAGE_COUNT; st++) { if (st == NVN_SHADER_STAGE_COMPUTE) continue; __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh || sh->stage >= NVN_STAGE_COUNT) continue;
         for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; uint64_t h;
             if (b->kind == NVN_RB_IMG) h = b->reg < 32 ? S.img[sh->stage][b->reg] : 0; else if (b->kind == NVN_RB_TEX || b->kind == NVN_RB_TBUF) h = tex_slot_h(S.tex[sh->stage], S.img[sh->stage], b->reg); else continue;
             uint64_t ser = h ? h_ser(h) : 0; if (!ser) continue;
@@ -10252,7 +10361,7 @@ static void ixc_run(const p_draw *dw, const p_draw_idx *di) {
         fz_cursor cur = {.p = g_exec_next, .ret_n = g_ret_n}; memcpy(cur.ret, g_ret, sizeof(*g_ret) * (size_t)g_ret_n);
         const uint8_t *q; op_hdr h; const void *a;
         for (int guard = 0; guard < 200000 && g_ixc_n < IXC_MAX && fz_next(&cur, &q, &h, &a); guard++) {
-            if (h.op == OP_DISPATCH || h.op == OP_COPY_B2B || h.op == OP_UPDATE_UB || h.op == OP_CLEAR_BUF || h.op == OP_COPY_T2B) break;
+            if (h.op == OP_DISPATCH || h.op == OP_DRAW_MESH || h.op == OP_COPY_B2B || h.op == OP_UPDATE_UB || h.op == OP_CLEAR_BUF || h.op == OP_COPY_T2B) break;
             p_draw dt; p_draw_idx it; const p_draw *d = h.op == OP_DRAW ? draw_rec(a, h.size, &dt) : NULL; const p_draw_idx *x = h.op == OP_DRAW_IDX ? draw_idx_rec(a, h.size, &it) : NULL;
             if (d && ixc_wanted(d, NULL)) ixc_take(d, NULL);
             else if (x && ixc_wanted(NULL, x)) ixc_take(NULL, x);
@@ -10327,7 +10436,7 @@ static void wide_run(const p_draw_idx *di) {
         fz_cursor cur = {.p = g_exec_next, .ret_n = g_ret_n}; memcpy(cur.ret, g_ret, sizeof(*g_ret) * (size_t)g_ret_n);
         const uint8_t *q; op_hdr h; const void *a;
         for (int guard = 0; guard < 200000 && g_wide_n < WIDE_MAX && fz_next(&cur, &q, &h, &a); guard++) {
-            if (h.op == OP_DISPATCH || h.op == OP_COPY_B2B || h.op == OP_UPDATE_UB || h.op == OP_CLEAR_BUF || h.op == OP_COPY_T2B) break;
+            if (h.op == OP_DISPATCH || h.op == OP_DRAW_MESH || h.op == OP_COPY_B2B || h.op == OP_UPDATE_UB || h.op == OP_CLEAR_BUF || h.op == OP_COPY_T2B) break;
             p_draw_idx it; const p_draw_idx *x = h.op == OP_DRAW_IDX ? draw_idx_rec(a, h.size, &it) : NULL;
             if (x && wide_wanted(x)) wide_take(x);
         }
@@ -10392,7 +10501,7 @@ static int ubd_conflict(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     for (int s_ = 0; s_ < 16; s_++) if (S.vbuf[s_].address && ubd_hits(S.vbuf[s_].address, S.vbuf[s_].address + S.vbuf[s_].size)) return 1;
     if (di && di->ibuf && ubd_hits(di->ibuf, di->ibuf + (uint64_t)di->count * 4)) return 1;
     uint64_t ind = dw ? dw->ind : di ? di->ind : 0; if (ind && ubd_hits(ind, ind + 32)) return 1;
-    for (int st = 0; pr && st < 2; st++) if (pr->sh[st] && ubd_conflict_sh(pr->sh[st], st)) return 1;
+    for (int st = 0; pr && st < NVN_STAGE_COUNT; st++) if (st != NVN_SHADER_STAGE_COMPUTE && pr->sh[st] && ubd_conflict_sh(pr->sh[st], st)) return 1;
     return 0;
 }
 // The same for a dispatch: updates kept past their pass (DM_NVN_UB_LAZY) land before a dispatch that reads or writes their memory through a storage buffer or its indirect arguments, or reads a
@@ -10476,7 +10585,7 @@ static void mdx_run(const p_draw *dw, const p_draw_idx *di) {
         fz_cursor cur = {.p = g_exec_next, .ret_n = g_ret_n}; memcpy(cur.ret, g_ret, sizeof(*g_ret) * (size_t)g_ret_n);
         const uint8_t *p; op_hdr h; const void *a;
         for (int guard = 0; guard < 200000 && nq < QMAX && fz_next(&cur, &p, &h, &a); guard++) {
-            if (h.op == OP_DISPATCH || h.op == OP_COPY_B2B || h.op == OP_CLEAR_BUF || h.op == OP_COPY_T2B) break;
+            if (h.op == OP_DISPATCH || h.op == OP_DRAW_MESH || h.op == OP_COPY_B2B || h.op == OP_CLEAR_BUF || h.op == OP_COPY_T2B) break;
             if (h.op == OP_UPDATE_UB) { uint64_t d, n; memcpy(&d, a, 8); memcpy(&n, (const uint8_t *)a + 8, 8);
                 int hit = 0; for (int k = 0; d < hi && lo < d + n && k < nq && !hit; k++) { const mdx_ent *e = q[k].e; hit = (d < e->ind + 4 * q[k].words && e->ind < d + n) || (d < e->cnt + 4 && e->cnt < d + n); }
                 if (hit) { g_mdx_stop = p; break; } continue; }
@@ -10574,7 +10683,7 @@ static void lc_push(void) {
 // Whether the program samples a texture with a waiting clear (a program with bindless or dynamic handles counts as sampling)
 static int lc_sampled(NvProg *pr) {
     if (!pr) return 1;
-    for (int st = 0; st < 5; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh || sh->stage >= 6) continue;
+    for (int st = 0; st < NVN_STAGE_COUNT; st++) { if (st == NVN_SHADER_STAGE_COMPUTE) continue; __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh || sh->stage >= NVN_STAGE_COUNT) continue;
         if (sh->rf.bindless || sh->rf.dyn) return 1;
         for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; uint64_t h;
             if (b->kind == NVN_RB_IMG) h = b->reg < 32 ? S.img[sh->stage][b->reg] : 0; else if (b->kind == NVN_RB_TEX || b->kind == NVN_RB_TBUF) h = tex_slot_h(S.tex[sh->stage], S.img[sh->stage], b->reg); else continue;
@@ -10648,7 +10757,7 @@ static int csh_attachment_hit(uint64_t addr, uint64_t size) {
 }
 // The memory a draw reads besides textures; 0 when it cannot be listed or the draw may write memory
 static int csh_draw_reads(NvProg *pr, const p_draw *dw, const p_draw_idx *di, csh_rng *r, int *n) {
-    if (!pr || pr->sh[2] || pr->sh[3] || pr->sh[4] || S.rast_discard || (dw && dw->mdi_cnt) || (di && (di->mdi_cnt || di->ind))) return 0;
+    if (!pr || pr->sh[2] || pr->sh[3] || pr->sh[4] || pr->sh[NVN_SHADER_STAGE_TASK] || pr->sh[NVN_SHADER_STAGE_MESH] || S.rast_discard || (dw && dw->mdi_cnt) || (di && (di->mdi_cnt || di->ind))) return 0;
     for (int k = 0; k < 16; k++) if (S.vbuf[k].size && !csh_add(r, n, S.vbuf[k].address, S.vbuf[k].size)) return 0;   // an empty stream reads no guest memory
     if (di && !csh_add(r, n, di->ibuf, (uint64_t)(di->count > 0 ? di->count : 0) * 4 + 16)) return 0;
     if (!csh_add(r, n, dw ? dw->ind : di ? di->ind : 0, 32)) return 0;
@@ -10787,7 +10896,8 @@ static void draw_multi(const p_multi_draw *m) {
     g_mdxc.next = NULL;
 }
 static void draw_(const p_draw *dw, const p_draw_idx *di);
-static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); if (dw && dw->prim == DM_PRIM_MESH_TASKS) mesh_tasks_draw(dw); else draw_(dw, di); cp_end(5, start); }
+#include "nvn_taskmesh.inc"
+static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); draw_(dw, di); cp_end(5, start); }
 static void draw_(const p_draw *dw, const p_draw_idx *di) {
     g_draw_binst = (uint32_t)(dw ? dw->base_instance : di ? di->base_instance : 0);   // c0 + 0x644 of the stages that read the driver segment (encode_args)
     if (passdump()) { NvProg *p = g_geo_program ? g_geo_program : S.prog ? prog_get(S.prog) : nil;
@@ -10826,7 +10936,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     g_mdxc.next = NULL;
     if (!S.prog) { RED_ONCE(18, "no program bound before the draw"); PD("Z %llu draw skipped: no program bound", g_stat_pass + !g_enc); return; }
     __unsafe_unretained NvProg *pr = g_geo_program ? g_geo_program : prog_get(S.prog);
-    image_prepare(pr, 0x1f);
+    image_prepare(pr, NVN_GRAPHICS_STAGE_MASK);
     draw_gs_check(pr);   // a geometry stage left with no function (see prog_fold_gs)
     if (!g_geo_program && S.rast_discard && S.tf_on) { tf_draw(pr, dw, di); return; }
     // Feedback captures rasterized draws too (Donkey Kong Country: Tropical Freeze's fur).
@@ -10920,7 +11030,6 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     static id<MTLRenderPipelineState> cur_ps; static NvProg *cur_pr; static uint64_t cur_ps_pass; static int cur_pull;   // cur_pull: a hybrid (pulling) pipeline, asked for again at the next draw
     if (g_fz.active && !g_defer_replaying) { g_pso_lmap = g_fz.phase == 1 ? g_fz.lmap1 : g_fz.lmap2; g_pso_fsfn = g_fz.phase == 1 ? nil : fz_fn; g_pso_fz = g_fz.phase == 1 ? (pso_fz_desc){0} : g_fz_desc; g_pso_dirty = 1; }   // Readable tile merge: fetch the pipeline by the physical -> logical mapping and the specialization
     else if (g_fb_tseq == g_draw_seq && g_fb_tfn && !g_defer_replaying) { g_pso_lmap = g_fb_tlmap; g_pso_fsfn = g_fb_tfn; g_pso_fz = g_fb_tdesc; g_pso_dirty = 1; }   // same-pass feedback read from the tile (fb_tile_plan)
-    if (g_mtk.on) { cur_ps = mtk_pso(pr); cur_pull = 0; cur_pr = nil; if (!cur_ps) { g_mtk.miss = 1; return; } }   // a task / mesh draw (mesh_tasks_draw)
     else if (g_geo_mesh.on) { cur_ps = geo_mesh_pso(pr); cur_pull = 1; cur_pr = nil; if (!cur_ps) { g_geo_mesh.miss = 1; return; } }   // a mesh draw (geo_mesh_draw): pulls its streams; the next draw fetches its own pipeline; none yet: the compute path draws
     else if (g_pso_dirty || pr != cur_pr || cur_ps_pass != g_pass.serial) { g_pso_amp = g_sm_pass; cur_ps = pso_get(pr, nil); g_pso_amp = 0; cur_pull = g_pso_pull; cur_pr = pr; cur_ps_pass = g_pass.serial; g_pso_dirty = !cur_ps || cur_pull; }
     if (!cur_ps && g_sm_pass) {   // a draw whose amplified pipeline is not built yet (sm_amp_get queued it): the slice-merged pass ends and the draw opens a pass of its own
@@ -10943,37 +11052,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         unsigned df0 = (unsigned)S.ds.df; if (ovr) S.ds.df = 8; cur_ds = dss_get(g_pass.hd, g_pass.hs); S.ds.df = df0; cur_ds_pass = g_pass.serial; g_dss_dirty = 0; }
     else if (g_dss_dirty || cur_ds_pass != g_pass.serial) { cur_ds = dss_get(g_pass.hd, g_pass.hs); cur_ds_pass = g_pass.serial; g_dss_dirty = 0; }
     if (cur_ds != g_enc_dss) { enc_r_dss(en, cur_ds); g_enc_dss = cur_ds; }
-    { uint32_t sr = S.st_ref[0];   // enc_r_stencil_ref sends the front value only
-      if (!(g_ed.ok & ED_SREF) || g_ed.sref != sr) { enc_r_stencil_ref(en, sr, sr); g_ed.sref = sr; g_ed.ok |= ED_SREF; } }
-    // Viewport / scissor (clamped within the target size)
-    NSUInteger tw = g_pass.tw, th = g_pass.th;
-    { MTLViewport v = S.has_vp ? (MTLViewport){S.vp[0][0], S.vp[0][1], S.vp[0][2], S.vp[0][3], S.dr[0], S.dr[1]} : (MTLViewport){0, 0, tw, th, 0, 1};
-      if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { v.originY += v.height; v.height = -v.height; }   // lower-left origin (see g_origin_ll)
-      // Viewport swizzle: NEGATIVE_Y negates clip y, the same as the viewport flipped about its centre; facing is decided after it on the GPU as in Metal, so the winding stays.
-      // Other swizzles (axis exchanges, negated x / z / w) are no viewport change and are drawn unswizzled
-      { uint32_t sw; memcpy(&sw, S.vp_sw[0], 4);
-        if (sw == 0x100) { v.originY += v.height; v.height = -v.height; }
-        else if (sw) RED_ONCE(108, "viewport swizzle %d,%d,%d,%d not implemented (drawn unswizzled)", S.vp_sw[0][0], S.vp_sw[0][1] ^ 2, S.vp_sw[0][2] ^ 4, S.vp_sw[0][3] ^ 6); }
-      if (!(g_ed.ok & ED_VP) || memcmp(&g_ed.vp, &v, sizeof v)) { enc_r_viewport(en, v); g_ed.vp = v; g_ed.ok |= ED_VP; } }
-    MTLScissorRect sc = {0, 0, tw, th};
-    if (R.has_sc && !S.rast_discard) {   // raster state cannot suppress vertex storage writes
-        long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y <= 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
-        if (x1 > (long)tw) x1 = tw; if (y1 > (long)th) y1 = th;
-        if (x1 <= x0 || y1 <= y0) { PD("Z %llu draw skipped: empty scissor (%d,%d %dx%d, target %lux%lu)", g_stat_pass, R.sc.x, R.sc.y, R.sc.w, R.sc.h, (unsigned long)tw, (unsigned long)th); return; }
-        sc = (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)};
-    }
-    if (!(g_ed.ok & ED_SC) || memcmp(&g_ed.sc, &sc, sizeof sc)) { enc_r_scissor(en, sc); g_ed.sc = sc; g_ed.ok |= ED_SC; }
-    if (S.poly.cull == NVN_FACE_FRONT_AND_BACK && !S.rast_discard) { PD("Z %llu draw skipped: both faces culled", g_stat_pass); return; }
-    { int cu = S.poly.cull == NVN_FACE_FRONT ? MTLCullModeFront : S.poly.cull == NVN_FACE_BACK ? MTLCullModeBack : MTLCullModeNone;
-      int wi = (S.poly.front == NVN_FRONT_FACE_CCW) != g_queue_origin_ll ? MTLWindingCounterClockwise : MTLWindingClockwise;   // NVN's raster flip is captured when the queue is initialized, rather than when the device origin changes.
-      int fi = S.poly.mode == NVN_POLYGON_MODE_LINE ? MTLTriangleFillModeLines : MTLTriangleFillModeFill, cl = !S.depth_clamp;   // depth clip off = SetDepthClamp
-      float bi[3] = {0, 0, 0}; if (S.poly.offset_en & 4) { bi[0] = S.po.units; bi[1] = S.po.factor; bi[2] = S.po.clamp; }
-      if (!(g_ed.ok & ED_CULL) || g_ed.cull != cu) { enc_r_cull(en, (MTLCullMode)cu); g_ed.cull = cu; g_ed.ok |= ED_CULL; }
-      if (!(g_ed.ok & ED_WIND) || g_ed.wind != wi) { enc_r_winding(en, (MTLWinding)wi); g_ed.wind = wi; g_ed.ok |= ED_WIND; }
-      if (!(g_ed.ok & ED_FILL) || g_ed.fill != fi) { enc_r_fill(en, (MTLTriangleFillMode)fi); g_ed.fill = fi; g_ed.ok |= ED_FILL; }
-      if (!(g_ed.ok & ED_BIAS) || memcmp(g_ed.bias, bi, sizeof bi)) { enc_r_depth_bias(en, bi[0], bi[1], bi[2]); memcpy(g_ed.bias, bi, sizeof bi); g_ed.ok |= ED_BIAS; }
-      if (!(g_ed.ok & ED_CLIP) || g_ed.clip != cl) { enc_r_depth_clip(en, cl); g_ed.clip = cl; g_ed.ok |= ED_CLIP; }
-      if (!(g_ed.ok & ED_BLEND) || memcmp(g_ed.blend, S.blend_color, sizeof g_ed.blend)) { enc_r_blend_color(en, S.blend_color[0], S.blend_color[1], S.blend_color[2], S.blend_color[3]); memcpy(g_ed.blend, S.blend_color, sizeof g_ed.blend); g_ed.ok |= ED_BLEND; } }
+    if (!draw_raster_state((id<MTL4RenderCommandEncoder>)en)) return;
+    NSUInteger tw = g_pass.tw, th = g_pass.th; MTLScissorRect sc = g_ed.sc;
     if (cur_pull) { pull_bind(en); g_hy_draws += !g_geo_mesh.on; }   // a pulling pipeline reads the streams itself (no conversion either: dm_fetch decodes every format)
     else {
         bind_vbufs(en);
@@ -11069,7 +11149,6 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
 #endif
     udc_note_draw(pr, raster_mask);
     swrite_note(pr); order_note(pr);
-    if (g_mtk.on) { mtk_encode(en); return; }
     if (g_geo_mesh.on) { geo_mesh_encode(en); return; }
     if (g_geo_program) {
         if (g_geo_count) enc_r_draw_indexed(en, mp, g_geo_count, MTLIndexTypeUInt32, g_geo_indices, g_geo_index_bytes, 1, 0, (uint32_t)g_draw_binst);   // geo_lean_tri's slots
@@ -12250,6 +12329,7 @@ void mtl_exec(const uint8_t *p) {
                 g_mdx_epoch++;
                 break;
             case OP_DRAW: { if (g_rc_skip) break; p_draw t; g_exec_cur = p; g_exec_next = p + h.size; draw(draw_rec(a, h.size, &t), NULL); g_exec_next = NULL; break; }   // Lookahead start point
+            case OP_DRAW_MESH: { if (g_rc_skip) break; p_draw_mesh t; g_exec_cur = p; g_exec_next = p + h.size; taskmesh_draw(draw_mesh_rec(a, h.size, &t)); g_exec_next = NULL; break; }
             case OP_DRAW_IDX: { if (g_rc_skip) break; p_draw_idx t; g_exec_cur = p; g_exec_next = p + h.size; draw(NULL, draw_idx_rec(a, h.size, &t)); g_exec_next = NULL; break; }
             // Do not mark dirty if the state did not change (the game often re-sends the same program / state block / vertex format before each draw; the dirty flag only decides whether to re-fetch the pipeline / depth-stencil object, and equal values mean the same object)
             case OP_BIND_PROGRAM: { const p_bind_program *b = a; state_op(h.op,a);

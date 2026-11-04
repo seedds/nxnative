@@ -129,6 +129,24 @@ namespace Ryujinx.Graphics.Shader.Translation
         // workgroup, made the first time an HMMA needs it
         public int HmmaScratchMemoryId { get; private set; } = -1;
 
+        private readonly int[] _isbeMemory = [-1, -1, -1];
+
+        public int GetIsbeMemoryId(int region)
+        {
+            if (_isbeMemory[region] < 0)
+            {
+                int[] sizes = _gpuAccessor.QueryAmpereIsbeSizes();
+                if (sizes == null || sizes.Length != 3 || sizes[region] <= 0)
+                {
+                    throw new System.InvalidOperationException("Task/mesh shader has no ISBE allocation metadata");
+                }
+                string[] names = ["dm_isbe_input", "dm_isbe_output", "dm_isbe_map"];
+                MemoryDefinition memory = new(names[region], AggregateType.Array | AggregateType.U32, sizes[region]);
+                _isbeMemory[region] = Properties.AddSharedMemory(memory);
+            }
+            return _isbeMemory[region];
+        }
+
         public int GetHmmaScratchMemoryId(int subgroups)
         {
             if (HmmaScratchMemoryId < 0)

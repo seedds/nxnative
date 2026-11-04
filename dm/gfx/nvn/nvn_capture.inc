@@ -91,10 +91,10 @@ static int cap_enc_addr(void *ctx, uint64_t *field, uint64_t len, int writable) 
 // replayer computes the same from its own libraries and compares). It hashes their values field by field, and a field at 0 adds nothing (header key iface 2), so a field
 // widened or added to nvn_refl.h later keeps the hash of every shader that does not use it. A hash of the structs' bytes (captures without the key) changed for every
 // program when 682fdd26 widened nvn_rbind.n and added soff, and the replayer refused every capture although no binding had changed
-#define CAP_IFACE 2
+#define CAP_IFACE 3   // Eight NVN stage slots, including task and mesh.
 static void cap_iface_put(CC_SHA256_CTX *c, uint32_t tag, uint64_t v) { if (!v) return; uint64_t x[2] = {tag, v}; CC_SHA256_Update(c, x, sizeof x); }
-static void cap_iface(NvProg *o, uint64_t out[6]) {
-    for (int st = 0; st < 6; st++) {
+static void cap_iface(NvProg *o, uint64_t out[NVN_STAGE_COUNT]) {
+    for (int st = 0; st < NVN_STAGE_COUNT; st++) {
         NvShader *sh = o ? o->sh[st] : nil; out[st] = 0; if (!sh) continue;
         const nvn_refl *r = &sh->rf; int nb = MAX(0, MIN(r->nb, NVN_REFL_MAXB)), nv = MAX(0, MIN(r->nv, NVN_REFL_MAXV));
         CC_SHA256_CTX c; uint8_t md[32]; CC_SHA256_Init(&c);
@@ -456,6 +456,7 @@ static int cap_digest(const tex_t *t, uint8_t md[32], uint64_t *bytes, uint32_t 
     int bpp = cap_pf_bpp(mt.pixelFormat, 0); if (!bpp) return 0;
     size_t row = mt.width * (size_t)bpp, n = row * mt.height;
     id<MTLBuffer> b = [g_dev newBufferWithLength:n options:MTLResourceStorageModeShared];
+    if (!b) return 0;
     id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder];
     [e copyFromTexture:mt sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(mt.width, mt.height, 1) toBuffer:b destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:n];
     [e endEncoding]; [cb commit]; [cb waitUntilCompleted];

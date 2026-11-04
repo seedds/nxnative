@@ -9,7 +9,7 @@
 # Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately)
 import inspect, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, collections, threading, concurrent.futures as cf
-import dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
+import dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_taskmesh, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
@@ -584,19 +584,23 @@ def job_for(key, name, rec, w):
         # frontend reads (job arch sm86); its c1 segment lies between control +0x40 and +0x44. The NVN control fields the steps below read (VertexA / B,
         # transform feedback, early fragment tests) are not in an NVN2 section
         c1 = dmsh_ampere.c1_segment(rec[ci:], code)
-        code = code[:dmsh_ampere.inst_len(rec[ci:])]
         extra['arch'] = 'sm86'
+        if rec[ci + 0x56] in (6, 7):
+            # Mesh primitive outputs have a separate passthrough SPH after the
+            # instructions. Decode both headers before removing that tail.
+            taskmesh = dmsh_taskmesh.metadata(rec[ci:], code)
+            stage = taskmesh['stage']
+            extra.update(
+                taskmesh=taskmesh,
+                local=[taskmesh['threads'], 1, 1],
+                shared=taskmesh['shared'],
+                isbe_sizes=taskmesh['isbe_sizes'],
+            )
+        code = code[:dmsh_ampere.inst_len(rec[ci:])]
         # compute lays out its driver constants in c[0] per shader: the control section gives its push constants' words (+0xa9), counts its uniform buffer, storage
         # buffer and texture entries (+0xb1, +0xb2, +0xb3) and gives the size (+0xba); the translator maps them to c[24] and NVN's fixed tables (InstEmitAmpere.cs
         # AMapC0). Graphics keeps NVN's tables
         if stage == 'cs': extra['nvn2_cs'] = [rec[ci + 0xb1], rec[ci + 0xb2], rec[ci + 0xb3], struct.unpack_from('<H', rec, ci + 0xba)[0], rec[ci + 0xa9] * 4]
-        if stage in ('ts', 'ms'):
-            # A task or mesh shader: translated as compute, its SPH taken off and its stage memory in shared memory, then wrapped as the Metal stage function (dmsh_meshstage.py).
-            # Graphics stages' c[0] and c[2] tables stay: the translator reads their addresses out of the code as for a vertex shader
-            mesh = dmsh_meshstage.info(rec[ci:], rec[0x38:ci])
-            lay, size = dmsh_meshstage.memory(mesh)
-            if dmsh_meshstage.own_shared(code[0x80:]) or size > dmsh_meshstage.METAL_MAX_SHARED: mesh['refused'] = 'shared memory of its own, or stage memory past Metal\'s limit'
-            extra.update(mesh_stage=mesh, stage_memory=lay, local=[mesh['threads'], 1, 1], shared=size); code = code[0x80:]; stage = 'cs'
     else:
         c1o, c1t = struct.unpack_from('<2I', rec, ci + 0x700)   # control segment +0x700: c1 relative to the start of the instruction area, +0x704: total length of the instruction area (c1 = what lies between the two; lengths across the whole library are 0 / 256 / 512 / 768)
         c1 = rec[0x38 + c1o:0x38 + c1t]
@@ -614,7 +618,6 @@ def job_for(key, name, rec, w):
     cp = os.path.join(w, key + '.bin'); open(cp, 'wb').write(code)
     j = {'key': key, 'stage': stage, 'code': cp, 'tex': {}, 'img': {}, 'attr': {}, 'fout': {}, 'c1': c1.hex(), **extra,
          'debug': os.environ.get('XLATE_DEBUG', '1') != '0', 'reduced': os.environ.get('XLATE_REDUCED', '1') == '1'}   # translation options (see dmsh_xlate/Program.cs); relaxed precision is on by default (GPU float last-bit error does not enter game state, whole frame −26% on the second Mac)   # c1: used by the translator to read indirect jump tables
-    if extra.get('mesh_stage'): return j, c1   # its threads and memory come from its control section (above)
     if key not in FACTS: j['no_facts'] = True; return j, c1   # not in the answer table: queries use defaults (listed separately in the summary)
     j.update(FACTS[key])
     return j, c1
@@ -924,7 +927,7 @@ RULES = []   # MSL rewrite rules attached by shader name (function, applicabilit
 # The library ABI enters as its values (dmsh_abi.VALUES), so a comment in dmsh_abi.h does not change a key either.
 # It covers what runs only when a shader misses the cache, since a hit restores the output and skips it. dmsh_fetch.py is not in it, but for screen_varyings (raster_facts): readable-tile variants get a
 # separate second-stage cache keyed on the generated MSL. Nor are the other side libraries' modules, made again from the restored MSL on every build (test_dmsh_code_fp.py checks this list).
-CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_ampere, abi) + ((ios_metal,) if IOSOUT else ()))
+CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_taskmesh, dmsh_ampere, abi) + ((ios_metal,) if IOSOUT else ()))
                          + b'\0' + inspect.getsource(dmsh_fetch.screen_varyings).encode()
                          + b'\0abi\0' + repr(sorted(abi.VALUES.items())).encode()).hexdigest()
 TOOL_FP = tool_fingerprint().encode()
@@ -1339,12 +1342,7 @@ def finish(key, w, j, c1):
     src = dmsh_wide.wide_loads(src)   # storage words the translator split, read whole again (see dmsh_wide.py)
     src = border_emu(src); open(msl, 'w').write(src)   # border colours Metal lacks (see border_emu)
     first, spill = [], 0
-    mesh = j.get('mesh_stage')
-    if mesh:   # the kernel as the Metal object or mesh function (dmsh_meshstage.py)
-        if mesh.get('refused'): return 'mesh stage failed', mesh['refused'], None
-        try: src = dmsh_meshstage.to_stage(src, mesh); open(msl, 'w').write(src)
-        except ValueError as e: return 'mesh stage failed', str(e)[:160], None
-    elif j['stage'] == 'cs':
+    if j['stage'] == 'cs':
         src, first = first_store(src, j.get('local')); open(msl, 'w').write(src)   # the first invocation's store, for the host (see first_store)
         try: src, spill = tg_spill(src)   # shared memory past Metal's 32 KB in a device buffer (see tg_spill)
         except ValueError as e: return 'shared memory rewrite failed', str(e)[:160], None
@@ -1370,6 +1368,12 @@ def finish(key, w, j, c1):
     fu, fmask = fs_uint(src) if j['stage'] == 'ps' else (None, 0)   # the integer-output entry points (see fs_uint); the analysis below uses the source with only main0
     fd = fs_dual(src) if j['stage'] == 'ps' and key in DUAL_WANT else None   # the dual-source entry point (see fs_dual), from the source with only main0
     if fu or fd: plain = src; open(msl, 'w').write((fu or src) + (fd or ''))
+    if j.get('taskmesh'):
+        try:
+            full = dmsh_taskmesh.wrap(src, j['taskmesh'])
+        except ValueError as error:
+            return 'task/mesh rewrite failed', str(error), None
+        open(msl, 'w').write(full)
     side = {}
     def compile_targets():   # the selected targets from the same MSL (MSL identical to one compiled before takes that library, dmsh_mtlcache.py)
         if j['stage'] == 'ps': side.clear(); side.update(ps_libraries(key, msl, open(msl).read())); return
@@ -1384,20 +1388,28 @@ def finish(key, w, j, c1):
     clone(msl, os.path.join(out, key + '_b.metal'))
     entry = re.search(r'(vertex|fragment|kernel)\s+\S+\s+(\w+)\s*\(', src)
     dr = drv_reads(src)
-    try: binds = reflect(key, mesh['kind'] if mesh else j['stage'], src, res)
+    try: binds = reflect(key, j['stage'], src, res)
     except ValueError as e: return 'reflection failed', str(e)[:160], None
-    refl = {'key': key + '_b', 'route': 'B', 'chain': CHAIN, 'dm_ctl': key, 'source': f'{name}#{k}', 'pc_paired': pc_of[key], 'stage': mesh['kind'] if mesh else j['stage'],
-            **({'mesh_stage': {'kind': mesh['kind'], 'threads': mesh['threads'], 'payload': mesh['payload'], 'task': mesh.get('task', True)}, **({'entry_z': 'main0_z'} if mesh['kind'] == 'ms' else {})} if mesh else {}),
+    refl = {'key': key + '_b', 'route': 'B', 'chain': CHAIN, 'dm_ctl': key, 'source': f'{name}#{k}', 'pc_paired': pc_of[key], 'stage': j['stage'],
+
             'entry': entry.group(2) if entry else 'main0', 'msl_entry_kind': entry.group(1) if entry else None, **({'entry_z': 'main0_z', 'entry_geometry_capture': 'main0_gs'} if j['stage'] == 'vs' else {}),
             **({'entry_discard': 'main0_discard'} if discard else {}),
             **({'entry_tf': 'main0_tf', 'tf_strides': [e['stride'] if e else 0 for e in j['tf']]} if j.get('tf') else {}),
             **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u'} if fu else {}), **({'entry_m': 'main0_m', 'uint_mask_m': fmask} if fu and fmask else {}), **({'entry_d': 'main0_d'} if fd else {}),
             **({'first_store': [{'reg': next(b['reg'] for b in binds if b['msl_name'] == n), 'word': w, 'value': v} for n, w, v in first]} if first else {}),
             **({'tg_spill': spill} if spill else {}),
-            'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr, mesh['kind'] if mesh else j['stage']),
+            'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr, j['stage']),
             'bindings': binds,
             'vertex_inputs': [{'location': int(m.group(2)), 'msl_type': m.group(1)} for m in re.finditer(r'(\w+)\s+\w+\s*\[\[attribute\((\d+)\)\]\]', src)],
             'raster': raster_facts(j['stage'], src), 'vs_pad': pad}
+    if j.get('taskmesh'):
+        refl.update(
+            taskmesh=j['taskmesh'],
+            entry='main0',
+            msl_entry_kind='object' if j['stage'] == 'ts' else 'mesh',
+        )
+        if j['stage'] == 'ms':
+            refl.update(entry_z='main0_z', entry_direct='main0_direct', entry_direct_z='main0_direct_z')
     if j['stage'] == 'vs': full = open(msl).read(); vin_finish(key, full, refl); pull_finish(key, full, refl)   # the shadow-input and pulling libraries (dmsh_vin.py, dmsh_pull.py), from the source with every entry point
     refl.update(side)   # the alpha test and logic operation entry points (ps_libraries)
     write_refl(key, refl)

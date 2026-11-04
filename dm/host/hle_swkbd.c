@@ -118,7 +118,7 @@ _Static_assert(offsetof(ikb_str_arg, length) == 0x3ec && offsetof(ikb_str_arg, c
 typedef void (*ikb_cb1)(const ikb_str_arg *);
 // state: what Calc returns (nn::swkbd::State as Monster Hunter Rise reads it at main+0x6fb3e6c: it finishes an entered name only when Calc returns 1 after a non-zero value):
 // 0 until initialization has finished, 1 ready / hidden, 3 shown. The hook used to return nothing, leaving w0 as whatever the host last held
-static struct { const void *kb; ikb_cb0 cancel, fin_init, released, finished; ikb_cb1 enter, changed; int pending, fin_init_due, released_due, finished_due, max_len, state; } g_ikb[4];   // finished: called on the Calc after Disappear (the keyboard has closed)
+static struct { const void *kb; ikb_cb0 cancel, fin_init, released, finished; ikb_cb1 enter, changed; void (*enter_u)(const void *), (*changed_u)(const void *); int pending, fin_init_due, released_due, finished_due, max_len, state, utf8; } g_ikb[4];   // finished: called on the Calc after Disappear (the keyboard has closed)
 static pthread_mutex_t g_ikb_mu = PTHREAD_MUTEX_INITIALIZER;
 static int ikb_slot(const void *kb) {   // the caller holds the lock
     for (int i = 0; i < 4; i++) if (g_ikb[i].kb == kb) return i;
@@ -146,6 +146,18 @@ HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard23SetDecidedEnterCallbackEPFvPKNS0_15Deci
 HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard24SetChangedStringCallbackEPFvPKNS0_16ChangedStringArgEE", "inline keyboard: records the changed-string callback", void, h_ikb_SetChanged, void *kb, ikb_cb1 fn) {
     pthread_mutex_lock(&g_ikb_mu); int i = ikb_slot(kb); if (i >= 0) g_ikb[i].changed = fn; pthread_mutex_unlock(&g_ikb_mu);
 }
+// Factorio and other newer ports use the Utf8 callback forms (SetChangedStringCallbackUtf8 / SetDecidedEnterCallbackUtf8): without an enter callback the
+// host's Calc saw no one to hand the text to and cancelled every Appear, so the save-name field never opened the keyboard.
+HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard11SetUtf8ModeEb", "inline keyboard: remembers that the UTF-8 callbacks are in use", void, h_ikb_SetUtf8, void *kb, int mode) {
+    pthread_mutex_lock(&g_ikb_mu); int i = ikb_slot(kb); if (i >= 0) g_ikb[i].utf8 = mode != 0; pthread_mutex_unlock(&g_ikb_mu);
+}
+HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard28SetChangedStringCallbackUtf8EPFvPKNS0_20ChangedStringArgUtf8EE", "inline keyboard: records the UTF-8 changed-string callback", void, h_ikb_SetChangedU, void *kb, void *fn) {
+    pthread_mutex_lock(&g_ikb_mu); int i = ikb_slot(kb); if (i >= 0) { g_ikb[i].changed_u = fn; g_ikb[i].utf8 = 1; } pthread_mutex_unlock(&g_ikb_mu);
+}
+HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard27SetDecidedEnterCallbackUtf8EPFvPKNS0_19DecidedEnterArgUtf8EE", "inline keyboard: records the UTF-8 enter callback", void, h_ikb_SetEnterU, void *kb, void *fn) {
+    pthread_mutex_lock(&g_ikb_mu); int i = ikb_slot(kb); if (i >= 0) { g_ikb[i].enter_u = fn; g_ikb[i].utf8 = 1; } pthread_mutex_unlock(&g_ikb_mu);
+}
+HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard26SetMovedCursorCallbackUtf8EPFvPKNS0_18MovedCursorArgUtf8EE", "inline keyboard: the cursor is placed at the end of the entered text, no moved-cursor callback call", void, h_ikb_SetMovedU, void *kb, void *fn) { (void)kb; (void)fn; }
 HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard27SetFinishedKeyboardCallbackEPFvvE", "inline keyboard: records the finished callback, called on the next Calc after Disappear", void, h_ikb_SetFinished, void *kb, ikb_cb0 fn) {
     pthread_mutex_lock(&g_ikb_mu); int i = ikb_slot(kb); if (i >= 0) g_ikb[i].finished = fn; pthread_mutex_unlock(&g_ikb_mu);
 }
@@ -158,31 +170,45 @@ HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard9DisappearEv", "inline keyboard hidden: t
     pthread_mutex_lock(&g_ikb_mu); int i = ikb_slot(kb); if (i >= 0) { g_ikb[i].pending = 0; g_ikb[i].finished_due = 1; if (g_ikb[i].state) g_ikb[i].state = 1; } pthread_mutex_unlock(&g_ikb_mu);
 }
 HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard4CalcEv", "inline keyboard per-frame update: a pending Appear gets the text and the game's callbacks; returns the keyboard state", int, h_ikb_Calc, void *kb) {
-    ikb_cb0 fn = NULL, init = NULL, rel = NULL, fin = NULL; ikb_cb1 enter = NULL, changed = NULL; int ask = 0, max = 0;
+    ikb_cb0 fn = NULL, init = NULL, rel = NULL, fin = NULL; ikb_cb1 enter = NULL, changed = NULL;
+    void (*enter_u)(const void *) = NULL, (*changed_u)(const void *) = NULL; int ask = 0, max = 0, utf8 = 0;
     pthread_mutex_lock(&g_ikb_mu); int i = ikb_slot(kb);
     if (i >= 0 && g_ikb[i].fin_init_due) { if (!g_ikb[i].state) g_ikb[i].state = 1; if (g_ikb[i].fin_init) { g_ikb[i].fin_init_due = 0; init = g_ikb[i].fin_init; } }
     if (i >= 0 && g_ikb[i].released_due && g_ikb[i].released) { g_ikb[i].released_due = 0; rel = g_ikb[i].released; }
     if (i >= 0 && g_ikb[i].finished_due) { g_ikb[i].finished_due = 0; fin = g_ikb[i].finished; }
-    if (i >= 0 && g_ikb[i].pending) { g_ikb[i].pending = 0; ask = 1; fn = g_ikb[i].cancel; enter = g_ikb[i].enter; changed = g_ikb[i].changed; max = g_ikb[i].max_len; }
+    if (i >= 0 && g_ikb[i].pending) {
+        g_ikb[i].pending = 0; ask = 1; fn = g_ikb[i].cancel; enter = g_ikb[i].enter; changed = g_ikb[i].changed;
+        enter_u = g_ikb[i].enter_u; changed_u = g_ikb[i].changed_u; utf8 = g_ikb[i].utf8; max = g_ikb[i].max_len;
+    }
     pthread_mutex_unlock(&g_ikb_mu);
     if (init) init();   // guest code, called on the guest thread that called Calc (as on hardware)
     if (rel) rel();
     if (fin) fin();
     if (!ask) return i >= 0 ? g_ikb[i].state : 0;
     char text[502 * 3 + 1]; int r = 0;
-    if (enter) {   // as swkbd_show: DM_KBD answers without a box; the guest clock stands still while the box is up
+    if (enter || enter_u) {   // as swkbd_show: DM_KBD answers without a box; the guest clock stands still while the box is up
         const char *script = getenv("DM_KBD");
         if (script) { snprintf(text, sizeof text, "%s", script); r = 1; }
         else { guest_clock_freeze_for(2, 1); r = front_text_input("", "", "", "", max, text, sizeof text); guest_clock_freeze_for(2, 0); }
     }
-    LOG("swkbd: inline keyboard %p → %s%s%s", kb, r > 0 ? "OK '" : enter ? "cancel" : "no enter callback, cancel", r > 0 ? text : "", r > 0 ? "'" : "");
+    LOG("swkbd: inline keyboard %p → %s%s%s", kb, r > 0 ? "OK '" : (enter || enter_u) ? "cancel" : "no enter callback, cancel", r > 0 ? text : "", r > 0 ? "'" : "");
     pthread_mutex_lock(&g_ikb_mu); if (g_ikb[i].kb == kb) g_ikb[i].state = 1; pthread_mutex_unlock(&g_ikb_mu);   // the keyboard closes once the text is decided or cancelled
     if (r <= 0) { if (fn) fn(); return 1; }
+    if (utf8 || (!enter && enter_u)) {   // nn::swkbd::ChangedStringArgUtf8 / DecidedEnterArgUtf8: text inline, then the byte length and cursor positions
+        static uint8_t a[0x400]; memset(a, 0, sizeof a);
+        size_t n = strlcpy((char *)a, text, sizeof a); if (n >= sizeof a) n = sizeof a - 1;
+        int32_t len = (int32_t)n;
+        memcpy(a + 0x3E8, &len, 4); memcpy(a + 0x3EC, &len, 4);   // string length: the UTF-8 struct's offset is one of these across SDK versions
+        memcpy(a + 0x3F0, &len, 4); memcpy(a + 0x3F4, &len, 4); memcpy(a + 0x3F8, &len, 4);   // dictionary start/end, cursor at the end
+        if (changed_u) changed_u(a);
+        if (enter_u) enter_u(a);
+        return 1;
+    }
     static ikb_str_arg a; memset(&a, 0, sizeof a);   // one keyboard request at a time; static keeps 1 KB off the guest stack
     size_t n = swkbd_u8_to_u16(text, max > 0 ? (size_t)max : 500, a.str, 502);
     a.length = (int32_t)n; a.cursor = (int32_t)n;
     if (changed) changed(&a);
-    enter(&a);
+    if (enter) enter(&a);
     return 1;
 }
 HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard29SetFinishedInitializeCallbackEPFvvE", "inline keyboard: records the finished-initialize callback, called on the next Calc after Initialize", void, h_ikb_SetFinInit, void *kb, ikb_cb0 fn) {

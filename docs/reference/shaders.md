@@ -19,6 +19,12 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `scan_file_in` passes every file with the `NARC` magic to `scan_blob`, whatever its name. The members go through the same `cra.narc_members` and `cra.undo` as Fever's.
 - **Check:** `dm/tools/tests/test_split_narc.py`: synthetic files with every packing and BNSH hidden in the file's bytes give the same keys and pairs as plain ones.
 - **Found on:** Mario Tennis Aces, no profile yet ([issue #1131](https://github.com/seedds/nxnative/issues/1131), diagnosed by PikaMan80, who counted 1,388 shaders from the loose `.nsb` files and 21,703 with the archives read). Not run on the game's files here. Open: that report says kind `0x50` wraps a zlib stream, and `cra.undo` does not unwrap one, so such members would give no shaders and no red line.
+### Main and archive discovery delay independent shader scans
+
+- **Symptom:** a first shader split completes all executable scans and archive preparation before scanning resources, then waits for every archive range before submitting loose files.
+- **Cause:** serial preparation and separate pool submissions create barriers between otherwise independent scans. LINKDATA indexes were also parsed again merely to exclude their files from the loose-file list.
+- **Fix:** `shader_split.py` scans executable versions in one process-pool task while another prepares archive ranges, then submits archive ranges and loose-file batches together to the same pool. Executables stay serial within their task to bound full-image memory. The first executable's Unity strings and the zstd dictionaries are loaded before worker initialization; executable scans temporarily use their original context and restore the worker context afterward. Results retain executable, archive and loose-file precedence, including Unity's deferred second pass. LINKDATA discovery is reused for exclusion.
+- **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md#first-build-stage-measurements).
 
 ### Sumo Ninty_NX shaders and MuxFDMR streams
 
@@ -620,6 +626,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md): in all 1,244 vertex shaders A writes no generic output, A ends in an `EXIT` predicated on CC FCSM_TR (which Ryujinx never takes; left as it is), an unconditional `EXIT` and a `BRA` to itself, and neither part has an absolute or table jump, so moving B keeps every branch; c1 (what follows part B) is zero padding in all of them. A census of the other games' packages and of every `main` on hand found no other type-0 vertex shader.
 
 ## Translation
+
+### Translation batches delay shader compilation
+
+- **Symptom:** a first shader build waits for every translator process before compiling any MSL, then waits for every unpaired shader before compiling paired vertices.
+- **Cause:** static translator chunks and two global finishing phases impose barriers beyond the vertex shader's actual pixel dependencies.
+- **Fix:** `dmsh_schedule.py` schedules dependency-ready translation tasks (at most four shaders each) and finishing jobs on one `J` worker budget. A paired vertex enters translation only after its own pixel jobs finish, so an unrelated slow pixel neither blocks a ready vertex nor accumulates translated vertices on disk. Finishing stages outputs in the compile cache before dependencies run; a task's folder is removed only after its last shader finishes. A hit pruned since the initial lookup is translated in that same worker. Failed-job handling and original result order remain. The pinned translator binary is unchanged; progress comes from the builder's completion counter in `DMSH_PROGRESS`, since staged outputs no longer remain as individual files.
+- **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md#first-build-scheduling-measurements).
 
 ### Tested tools and compiler-specific shader caches
 
@@ -1647,6 +1660,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Well Dweller](../../dm/games/0100217023F6C000/README.md), whose lighting programs were the missing ones.
 
 ## Pipelines and caches
+
+### Offline pipeline input preparation rereads libraries serially
+
+- **Symptom:** preparing a large pipeline archive spends time opening reflection and library files before starting `metal-tt`.
+- **Cause:** planning reads function headers and layer markers separately, and the archive cache key later rereads the selected libraries for SHA-256.
+- **Fix:** bounded input readers prepare unique reflection records and libraries. Each library read supplies its function metadata, layer marker and digest; only that small metadata remains in memory. Pair selection, skip counts, descriptor order and sorted digest reduction remain deterministic. `--jobs` controls reader concurrency; the default is at most eight cores. This changes preparation, not `metal-tt`'s compiler scheduling.
+- **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md#first-build-scheduling-measurements).
 
 ### A compile that does not return stalls every flush and draw
 

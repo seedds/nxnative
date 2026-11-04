@@ -21,12 +21,13 @@
 #   t:<name>=<slot>:<type>                       a combined sampler: texture and sampler slot
 #   o:<name>=<location>                          a fragment output, [[color(location)]]
 # <TAB> where it came from
-# Usage: gl_shaders.py <input path>... <out dir> [--ios <dir>]   (input paths: the RomFS, the main NSO, capture folders)
+# Usage: gl_shaders.py <input path>... <out dir> [--ios <dir>] [--targets mac|ios|mac,ios]   (input paths: the RomFS, the main NSO, capture folders)
 import concurrent.futures as cf, hashlib, json, os, re, subprocess, sys, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mvgl
+import shader_targets
 from dmsh_chain import SPIRV_CROSS   # the in-repo spirv-cross build the NVN chain uses too (spirv_cross_bin)
 
 VEC_TYPES = {'float', 'vec2', 'vec3', 'vec4', 'int', 'ivec2', 'ivec3', 'ivec4', 'uint', 'uvec2', 'uvec3', 'uvec4', 'bool', 'mat2', 'mat3', 'mat4'}
@@ -199,11 +200,8 @@ def metallib(msls, out, sdk, extra):
     return lib
 
 def main():
-    a = sys.argv[1:]
-    ios = None
-    if '--ios' in a: i = a.index('--ios'); ios = a[i + 1]; del a[i:i + 2]
-    if len(a) < 2: sys.exit('usage: gl_shaders.py <input path>... <out dir> [--ios <dir>]')
-    roots, out = a[:-1], a[-1]
+    args = shader_targets.arguments(sys.argv[1:], 'GLSL paths')
+    roots = args.roots
     items, seen_src = [], set()
     for s, st, where in sources(roots):
         if (s, st) in seen_src: continue
@@ -222,12 +220,11 @@ def main():
                '# ' + ' '.join(subprocess.run(['glslangValidator', '--version'], capture_output=True, text=True).stdout.split()[:3]) + '; spirv-cross '
                + ' '.join((lambda r: r.stdout + r.stderr)(subprocess.run([SPIRV_CROSS, '--revision'], capture_output=True, text=True)).split())]
         tsv += [f'{k[0]}\t{v[0]}\t{" ".join(v[1])}\t{v[3]}' for k, v in sorted(seen.items())]
-        dirs = [(os.path.join(out, 'gl'), 'macosx', [])]
-        if ios: dirs.append((os.path.join(ios, 'gl'), 'iphoneos', ['-mios-version-min=18.0', '-fmetal-math-mode=relaxed']))   # relaxed as in vk_shaders.py and ios_metal.py: no NaN / Inf assumption on the iPhone's GPU compiler
+        dirs = shader_targets.destinations(args, 'gl')
         msls = [v[2] for v in seen.values()]
         for d, sdk, extra in dirs:
             lib = metallib(msls, d, sdk, extra)
-            open(os.path.join(d, 'gl_shaders.tsv'), 'w').write('\n'.join(tsv) + '\n')
+            with open(os.path.join(d, 'gl_shaders.tsv'), 'w') as table: table.write('\n'.join(tsv) + '\n')
             print(f'{sdk}: {len(seen)} shaders ({sum(1 for v in seen.values() if v[0] == "vert")} vertex) → {lib}' + (f'; {len(failed)} failed' if failed else ''))
 
 if __name__ == '__main__':

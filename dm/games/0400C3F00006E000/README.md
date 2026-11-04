@@ -56,6 +56,8 @@ The first race on the 16 GB M6, in order of the fixes:
 
 GPU time is about 8.3 ms a frame without the mesh draws and 8.6 to 9.3 ms with them; the numbers after this are from before them. Over 3,900 frames of the race (frames 8100 to 12000) the worst frame of each 300 is usually 35 to 65 ms, with five of the fourteen stretches reaching 140 to 233 ms; pipelines that compile at first use account for some of them (one took 703 ms in an earlier run), and there is no prewarm list yet. No out-of-memory error came. The residency set is 7.1 GB (shared buffers 1,554 MB, textures 2,011 MB, placement heaps 3,328 MB, private 192 MB), wired memory steady at 9.6 to 9.8 GB, about 6.5 GB of swap in use with 130 MB free. Taking the terrain tiles from their storage costs about 8 ms at the 95th percentile on this Mac (rule off in the same build: 17-24 ms) and 0.24 GB of GPU memory, with resident memory the same at 12.8 GB. It is not a leak, but runs of one build vary a lot with the Mac's memory state: another run right after a regression reached 35-56 ms and 13.8 GB resident with 8.5 GB of swap. Not measured on a Mac with more memory, or on iOS, where the address space is far smaller.
 
+On a 16 GB M1 Pro (2026-11-04) the same race kept its frame median at 25 to 28 ms, the GPU taking about 24 ms of it. Before [Physical pages mapped at several places of a placement sparse texture](../../../docs/reference/nvn-objects.md#physical-pages-mapped-at-several-places-of-a-placement-sparse-texture), the placement heaps reached 2.75 GB within three minutes, wired memory 8.7 GB, and the system swapped (frames to 50 ms). With it, the heaps stayed at 1 GB and wired memory at about 7 GB over five minutes, with no swap growth; two Grand Prix in one session (about 30 minutes) played at a race median of 25 to 27 ms, with single frames of 100 to 200 ms now and then.
+
 ## Terrain and movies
 
 The flat ground with blocky seams behind the title and the menu was terrain tiles the CPU wrote with no flush, read as zeros: [Uncompressed storage the CPU wrote, in a pool the GPU has not written](../../../docs/reference/nvn-objects.md#uncompressed-storage-the-cpu-wrote-in-a-pool-the-gpu-has-not-written). The title now shows real terrain, with hills, lawns and road edges.
@@ -85,6 +87,7 @@ Update 1.8.0 (v917504, SDK 21.4.0) is not on this Mac. Pull request #1116 ported
 ## Found on this game
 
 - [Large sparse textures as Metal placement sparse textures](../../../docs/reference/nvn-objects.md#large-sparse-textures-as-metal-placement-sparse-textures)
+- [Physical pages mapped at several places of a placement sparse texture](../../../docs/reference/nvn-objects.md#physical-pages-mapped-at-several-places-of-a-placement-sparse-texture)
 - [Large pools wrapped in chunks](../../../docs/reference/nvn-objects.md#large-pools-wrapped-in-chunks)
 - [NVN2 task and mesh shaders](../../../docs/reference/shaders.md#nvn2-task-and-mesh-shaders)
 - [A store only a dispatch's first invocation makes](../../../docs/reference/shaders.md#a-store-only-a-dispatchs-first-invocation-makes)

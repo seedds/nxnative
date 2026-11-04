@@ -1,6 +1,7 @@
 // Large sparse textures as placement sparse textures (nvn_mtl.m sparse_make, sparse_sync, sparse_look) through the real NVN entry points: a tile the game maps holds what its physical pages hold, in
 // level 0 and in the mip tail; nothing is uploaded or mapped without a request; an unmapped tile gives its heap tile back; a tile rewritten in place is uploaded again; more requests than the pool's
-// log holds still end right; a GPU-written texture gets tiles and no uploads; a small sparse texture stays whole.
+// log holds still end right; a GPU-written texture gets tiles and no uploads; a small sparse texture stays whole. Shared tiles: one physical page mapped at two places is one heap tile, a GPU
+// write through one place shows at the other, an unmapped shared tile keeps its memory's content for the next place, and its pool's Finalize gives it back.
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
@@ -32,6 +33,23 @@ static int same(id<MTLTexture> m, unsigned level, unsigned x, unsigned y, unsign
     const uint32_t *got = rb.contents;
     for (unsigned r = 0; r < h; r++) if (memcmp(got + (size_t)r * w, lin + (size_t)(y + r) * stride + x, (size_t)w * 4)) return 0;
     return 1;
+}
+// The texels of [x, y, w, h] of level 0 equal w × h packed ones
+static int same_tile(id<MTLTexture> m, unsigned x, unsigned y, unsigned w, unsigned h, const uint32_t *want) {
+    uint32_t *full = calloc((size_t)(x + w) * (y + h), 4); if (!full) return 0;   // where same() reads them
+    for (unsigned r = 0; r < h; r++) memcpy(full + (size_t)(y + r) * (x + w) + x, want + (size_t)r * w, (size_t)w * 4);
+    int ok = same(m, 0, x, y, w, h, full, x + w); free(full); return ok;
+}
+// The texels of [x, y, w, h] of level 0 equal those at [lx, ly] of the expected level (a tile at another place)
+static int same_at(id<MTLTexture> m, unsigned x, unsigned y, unsigned w, unsigned h, const uint32_t *lin, unsigned stride, unsigned lx, unsigned ly) {
+    uint32_t *part = malloc((size_t)w * h * 4); if (!part) return 0;
+    for (unsigned r = 0; r < h; r++) memcpy(part + (size_t)r * w, lin + (size_t)(ly + r) * stride + lx, (size_t)w * 4);
+    int ok = same_tile(m, x, y, w, h, part); free(part); return ok;
+}
+static uint64_t kept_for(const uint8_t *lo, size_t n) {   // shared slots of [lo, lo+n) no place maps (their memory's content kept)
+    uint64_t k = 0; pthread_mutex_lock(&g_sp_mu);
+    for (size_t i = 0; i < g_sp_ntl; i++) if (g_sp_tl[i].p >= (uintptr_t)lo && g_sp_tl[i].p < (uintptr_t)lo + n && !g_sp_tl[i].rc) k++;
+    pthread_mutex_unlock(&g_sp_mu); return k;
 }
 int main(void) { @autoreleasepool {
     mtl_init();
@@ -73,7 +91,27 @@ int main(void) { @autoreleasepool {
     // A mapping elsewhere in the pool leaves the texture's tiles alone
     map_at(T->L.size + (1u << 20), TILE, 8 * TILE, 1); (void)resolve(&tx); CHECK("a request past the texture", g_sp_live == live0 + 3 && ps->seq != seq);
     // Unmapped
-    map_at(0, TILE, 0, 0); (void)resolve(&tx); CHECK("an unmapped tile gives its heap tile back", g_sp_live == live0 + 2 && !ps->slot[0]);
+    map_at(0, TILE, 0, 0); (void)resolve(&tx); CHECK("an unmapped tile leaves its place", !ps->slot[0]);
+    CHECK("its heap tile is kept for its memory", g_sp_live == live0 + 3 && kept_for(phys, plen) == 1);
+    // That memory at two other places: the kept heap tile, its content, nothing uploaded
+    uint64_t nb0 = g_bp_up_bytes;
+    map_at(1 * TILE, TILE, 0, 1); map_at(3 * TILE, TILE, 0, 1); (void)resolve(&tx);
+    CHECK("one heap tile for one physical page", ps->slot[1] && ps->slot[1] == ps->slot[3] && g_sp_live == live0 + 3 && !kept_for(phys, plen));
+    CHECK("nothing uploaded for it", g_bp_up_bytes == nb0);
+    CHECK("tile (1, 0) holds that page", same_at(m, TW, 0, TW, TW, lin[0], W, 0, 0));
+    CHECK("tile (3, 0) holds that page", same_at(m, 3 * TW, 0, TW, TW, lin[0], W, 0, 0));
+    {   // a GPU write through one place shows at the other
+        id<MTLBuffer> wb = [g_dev newBufferWithLength:(size_t)TW * TW * 4 options:MTLResourceStorageModeShared]; uint32_t *wp = wb.contents;
+        for (size_t i = 0; i < (size_t)TW * TW; i++) wp[i] = 0xC0DE0000u + (uint32_t)i;
+        id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
+        [be copyFromBuffer:wb sourceOffset:0 sourceBytesPerRow:TW * 4 sourceBytesPerImage:(NSUInteger)TW * TW * 4 sourceSize:MTLSizeMake(TW, TW, 1) toTexture:m destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(TW, 0, 0)];
+        [be endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        CHECK("a GPU write through tile (1, 0) shows in tile (3, 0)", same_tile(m, 3 * TW, 0, TW, TW, wp));
+        map_at(1 * TILE, TILE, 0, 0); map_at(3 * TILE, TILE, 0, 0); (void)resolve(&tx);
+        map_at(6 * TILE, TILE, 0, 1); (void)resolve(&tx);
+        CHECK("the GPU's content stays with the memory after both places went", ps->slot[6] && same_tile(m, 6 * TW, 0, TW, TW, wp));
+        map_at(6 * TILE, TILE, 0, 0); (void)resolve(&tx);
+    }
     // Rewritten in place while mapped: uploaded again at the next look a second on
     uint64_t w0 = nvn_dirty_sparse_writes();
     uint32_t *fresh = malloc((size_t)W * W * 4); memcpy(fresh, lin[0], (size_t)W * W * 4);
@@ -86,7 +124,7 @@ int main(void) { @autoreleasepool {
     // More requests than the log holds: the texture is looked at whole
     for (int i = 0; i < VLOG_N + 8; i++) map_at(5 * TILE, TILE, 16 * TILE, i & 1);   // ends mapped when VLOG_N + 8 is odd, unmapped when even
     dm_guest_write_prepare(phys + 16 * TILE, TILE); memcpy(phys + 16 * TILE, store + 5 * TILE, TILE); map_at(5 * TILE, TILE, 16 * TILE, 1);
-    (void)resolve(&tx); CHECK("after an overflow the tile is mapped", g_sp_live == live0 + 3);
+    (void)resolve(&tx); CHECK("after an overflow the tile is mapped", ps->slot[5]);
     CHECK("and holds its pages", same(m, 0, 5 * TW, 0, TW, TW, lin[0], W));
     // GPU-written: tiles and no uploads
     NVNtexture gx; h_nvnTextureBuilderSetLevels(&tb, 1); h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_COMPRESSIBLE); h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&g_sparse, 1ull << 30);
@@ -98,10 +136,16 @@ int main(void) { @autoreleasepool {
     CHECK("its tile is mapped", g_sp_live == live1 + 1);
     CHECK("nothing uploaded", g_bp_up_bytes == nblit);
     map_at((1ull << 30) + 3 * TILE, TILE, 20 * TILE, 0); (void)resolve(&gx);
-    CHECK("and unmapped", g_sp_live == live1);
+    NvSparse *gs = objc_getAssociatedObject(g, &g_sp_key);
+    CHECK("and unmapped, its heap tile kept for its memory", gs && !gs->slot[3] && g_sp_live == live1 + 1);
     // Small: the whole upload, as before
     NVNtexture sx; h_nvnTextureBuilderSetWidth(&tb, 512); h_nvnTextureBuilderSetHeight(&tb, 512); h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_SPARSE); h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&g_sparse, 2ull << 30);
     CHECK("small sparse texture", h_nvnTextureInitialize(&sx, &tb));
     CHECK("stays whole", !resolve(&sx).isSparse);
+    // The physical pool's Finalize gives back the heap tiles kept for its memory
+    uint64_t kept = kept_for(phys, plen), live2 = g_sp_live;
+    CHECK("tiles kept for the pool's memory", kept >= 2);
+    h_nvnMemoryPoolFinalize((NVNmemoryPool *)&g_phys);
+    CHECK("its Finalize gives them back", !kept_for(phys, plen) && g_sp_live == live2 - kept);
     printf("t_sparse_tiles: %d checks, %d failed\n", checks, failed); return failed != 0;
 }}

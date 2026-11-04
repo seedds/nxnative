@@ -2632,12 +2632,14 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
 #define SP_HEAP_TILES 4096u            // 256 MB placement heaps
 #define SP_MIN (64ull << 20)
 int nvn_sparse_tile_state(const void *pool, uint64_t a, uint64_t n, uint64_t gen, uint64_t stamp);   // hle_nvn.c
+const uint8_t *nvn_sparse_tile_phys(const void *pool, uint64_t a);
 uint64_t nvn_sparse_log_seq(const void *pool); int nvn_sparse_log_read(const void *pool, uint64_t *seq, uint64_t (*out)[2], int max); void nvn_sparse_protect_tile(const void *pool, uint64_t a, uint64_t n);
 static pthread_mutex_t g_sp_mu = PTHREAD_MUTEX_INITIALIZER;
 static NSMutableArray *g_sp_heaps;     // id<MTLHeap>, SP_HEAP_TILES tiles each; a slot is heap × SP_HEAP_TILES + tile
 static uint32_t *g_sp_free; static size_t g_sp_nfree, g_sp_freecap;
 static struct sp_late { uint32_t slot; uint64_t fence; } *g_sp_late; static size_t g_sp_nlate, g_sp_latecap;   // unmapped tiles, free once the GPU is past the fence
 static uint64_t g_sp_live, g_sp_peak;
+typedef struct sp_tl { uintptr_t p; uint64_t stamp; uint32_t rc; int fmt; uint8_t dead; } sp_tl; static sp_tl *sp_tl_of(uint32_t slot);   // shared tiles, below
 static int sp_slot(uint32_t *out) {   // caller holds g_sp_mu
     uint64_t done = atomic_load(&g_done); size_t k = 0;
     for (size_t i = 0; i < g_sp_nlate; i++) {
@@ -2658,11 +2660,68 @@ static int sp_slot(uint32_t *out) {   // caller holds g_sp_mu
         MLOG("sparse tiles: placement heap %lu (256 MB), %llu tiles mapped", (unsigned long)g_sp_heaps.count, (unsigned long long)g_sp_live);
     }
     *out = g_sp_free[--g_sp_nfree]; if (++g_sp_live > g_sp_peak) g_sp_peak = g_sp_live;
+    *sp_tl_of(*out) = (sp_tl){.rc = 1};
     return 1;
 }
 static void sp_slot_free(uint32_t slot) {   // caller holds g_sp_mu; the GPU may still read the tile through work committed so far and the submission being built
     if (g_sp_nlate == g_sp_latecap) { g_sp_latecap = g_sp_latecap ? 2 * g_sp_latecap : 1024; g_sp_late = realloc_or_die(g_sp_late, g_sp_latecap * sizeof *g_sp_late, "the sparse tile list"); }
     g_sp_late[g_sp_nlate++] = (struct sp_late){slot, atomic_load(&g_fence) + 1}; g_sp_live--;
+}
+// Shared tiles. On hardware a sparse texture's content is the physical memory the game maps, and a game may map one physical page at several places at once: Mario Kart World maps each page of
+// its sparse pools at about three (976 MB of memory behind 2,959 MB of mappings in a race), always in textures of one format: its RGBA8 SNORM 3072² and 6144² arrays (which the GPU draws into)
+// with each other, its BC6H and ASTC 8x8 terrain arrays within themselves. A tile whose 16 pages are consecutive physical memory takes the heap tile of that memory and format, so every place
+// that maps it maps the same heap tile, as the hardware's page table does: one copy where there were three, and a GPU write through one place shows at the others. Metal reads one heap tile
+// through several textures only without lossless compression, which no placement sparse texture has (sparse_make). A slot counts the places mapping it; a shared slot nothing maps keeps its
+// content while its physical pool lives, as the memory would, and goes back after the pool's Finalize (mtl_sp_phys_gone). The tail and tiles of scattered pages keep a slot of their own
+// sp_tl, per slot: p the physical memory a shared slot stands for (0: one place's own); stamp its content's dirty-page stamp
+static sp_tl *g_sp_tl; static size_t g_sp_ntl;
+static uint32_t *g_sp_ph; static size_t g_sp_phcap, g_sp_phn;   // physical memory and format → slot + 1, linear probing
+static uint64_t g_sp_shared;   // shared slots
+static sp_tl *sp_tl_of(uint32_t slot) {   // caller holds g_sp_mu
+    if (slot >= g_sp_ntl) { size_t n = ((size_t)slot / SP_HEAP_TILES + 1) * SP_HEAP_TILES; g_sp_tl = realloc_or_die(g_sp_tl, n * sizeof *g_sp_tl, "the sparse tile table"); memset(g_sp_tl + g_sp_ntl, 0, (n - g_sp_ntl) * sizeof *g_sp_tl); g_sp_ntl = n; }
+    return &g_sp_tl[slot];
+}
+static size_t sp_ph_at(uintptr_t p, int fmt) { return (size_t)((((uint64_t)p >> 16) ^ (uint64_t)fmt * 0x9E3779B97F4A7C15ull) * 0x9E3779B97F4A7C15ull >> 20) & (g_sp_phcap - 1); }
+static uint32_t sp_ph_find(uintptr_t p, int fmt) {   // caller holds g_sp_mu; → slot, or ~0u
+    if (!g_sp_phcap) return ~0u;
+    for (size_t i = sp_ph_at(p, fmt);; i = (i + 1) & (g_sp_phcap - 1)) { uint32_t e = g_sp_ph[i]; if (!e) return ~0u; if (g_sp_tl[e - 1].p == p && g_sp_tl[e - 1].fmt == fmt) return e - 1; }
+}
+static void sp_ph_put(uint32_t slot) {   // caller holds g_sp_mu
+    if (2 * (g_sp_phn + 1) > g_sp_phcap) {
+        uint32_t *old = g_sp_ph; size_t oc = g_sp_phcap; g_sp_phcap = oc ? 2 * oc : 4096;
+        if (!(g_sp_ph = calloc(g_sp_phcap, sizeof *g_sp_ph))) MDIE("the shared sparse tile table");
+        for (size_t i = 0; i < oc; i++) if (old[i]) { size_t j = sp_ph_at(g_sp_tl[old[i] - 1].p, g_sp_tl[old[i] - 1].fmt); while (g_sp_ph[j]) j = (j + 1) & (g_sp_phcap - 1); g_sp_ph[j] = old[i]; }
+        free(old);
+    }
+    size_t j = sp_ph_at(g_sp_tl[slot].p, g_sp_tl[slot].fmt); while (g_sp_ph[j]) j = (j + 1) & (g_sp_phcap - 1);
+    g_sp_ph[j] = slot + 1; g_sp_phn++; g_sp_shared++;
+}
+static void sp_ph_del(uint32_t slot) {   // caller holds g_sp_mu; backward-shift deletion
+    size_t i = sp_ph_at(g_sp_tl[slot].p, g_sp_tl[slot].fmt); while (g_sp_ph[i] && g_sp_ph[i] != slot + 1) i = (i + 1) & (g_sp_phcap - 1);
+    if (!g_sp_ph[i]) return;
+    g_sp_ph[i] = 0; g_sp_phn--; g_sp_shared--;
+    for (size_t j = (i + 1) & (g_sp_phcap - 1); g_sp_ph[j]; j = (j + 1) & (g_sp_phcap - 1)) {
+        size_t h = sp_ph_at(g_sp_tl[g_sp_ph[j] - 1].p, g_sp_tl[g_sp_ph[j] - 1].fmt);
+        if ((j > i && (h <= i || h > j)) || (j < i && h <= i && h > j)) { g_sp_ph[i] = g_sp_ph[j]; g_sp_ph[j] = 0; i = j; }
+    }
+}
+static void sp_release(uint32_t slot) {   // caller holds g_sp_mu: one place stops mapping the slot
+    sp_tl *e = sp_tl_of(slot);
+    if (e->rc && --e->rc) return;
+    if (e->p && !e->dead) return;   // its physical pool lives: the content stays for the next place that maps that memory
+    if (e->p) sp_ph_del(slot);
+    *e = (sp_tl){0}; sp_slot_free(slot);
+}
+void mtl_sp_phys_gone(const void *mem, uint64_t size) {
+    uintptr_t lo = (uintptr_t)mem, hi = lo + size;
+    pthread_mutex_lock(&g_sp_mu);
+    for (size_t i = 0; g_sp_phn && i < g_sp_phcap; i++) {
+        uint32_t e = g_sp_ph[i]; if (!e) continue;
+        sp_tl *t = &g_sp_tl[e - 1]; if (t->p < lo || t->p >= hi || t->dead) continue;
+        t->dead = 1;
+        if (!t->rc) { sp_ph_del(e - 1); *t = (sp_tl){0}; sp_slot_free(e - 1); i--; }   // the deletion may shift a later entry into slot i
+    }
+    pthread_mutex_unlock(&g_sp_mu);
 }
 
 @interface NvSparse : NSObject { @public
@@ -2676,7 +2735,7 @@ static void sp_slot_free(uint32_t slot) {   // caller holds g_sp_mu; the GPU may
     uint64_t wseen, wframe;            // nvn_dirty_sparse_writes and the frame at the last look for rewritten tiles
 } @end   // tex is weak: the NvPkg of a packaged texture owns it, a GPU texture owns its NvSparse (sparse_gpu_look)
 @implementation NvSparse
-- (void)dealloc { pthread_mutex_lock(&g_sp_mu); for (uint32_t i = 0; slot && i < layers * per_layer; i++) if (slot[i]) sp_slot_free(slot[i] - 1); pthread_mutex_unlock(&g_sp_mu); free(slot); free(nmap); }
+- (void)dealloc { pthread_mutex_lock(&g_sp_mu); for (uint32_t i = 0; slot && i < layers * per_layer; i++) if (slot[i]) sp_release(slot[i] - 1); pthread_mutex_unlock(&g_sp_mu); free(slot); free(nmap); }
 @end
 
 // A placement sparse texture for t, or nil when it does not qualify: a 2D texture or 2D array in a sparse pool, laid out in tiles whose shape is Metal's, each tiled level whole tiles,
@@ -2728,7 +2787,7 @@ static void sp_op(sp_ops *o, MTL4UpdateSparseTextureMappingOperation x) {
     o->op[o->n++] = x;
 }
 // One look at a texture's tiles: the mapping operations by heap (unmaps, with no heap, last) and the staging of what is uploaded
-typedef struct { NvSparse *s; const tex_t *t; id<MTLTexture> tex; sp_ops *ops; uint32_t nheaps; uint8_t *tile, *tail; id<MTLBuffer> stg; size_t stg_off; uint64_t up, unmapped; int bw, bh, bpb, force; } sp_look;
+typedef struct { NvSparse *s; const tex_t *t; id<MTLTexture> tex; sp_ops *ops; uint32_t nheaps; uint8_t *tile, *tail; id<MTLBuffer> stg; size_t stg_off; uint64_t up, unmapped, stamp; int bw, bh, bpb, force; } sp_look;
 static void sp_stg(sp_look *c, size_t n) {
     if (c->stg && c->stg_off + n <= c->stg.length) return;
     c->stg = [g_dev newBufferWithLength:MAX((size_t)8 << 20, n) options:MTLResourceStorageModeShared]; if (!c->stg) MDIE("sparse upload staging");
@@ -2744,17 +2803,29 @@ static void sp_tile(sp_look *c, uint32_t y, uint32_t i) {
     int st = nvn_sparse_tile_state(t->pool, a, n, s->gen, s->stamp); if (st < 0) st = 0;
     if (!(st & 1)) {
         if (*sl) { sp_op(&c->ops[c->nheaps], (MTL4UpdateSparseTextureMappingOperation){MTLSparseTextureMappingModeUnmap, rg, lev, y, 0});
-            sp_slot_free(*sl - 1); *sl = 0; s->nmap[lev]--; c->unmapped++; }
+            sp_release(*sl - 1); *sl = 0; s->nmap[lev]--; c->unmapped++; }
         return;
     }
-    if (*sl && (s->gpu || (!(st & 2) && !c->force))) return;   // the GPU's own writes are in the tile: a CPU write to its pages is not looked at
+    const uint8_t *p = is_tail ? NULL : nvn_sparse_tile_phys(t->pool, a);   // shared tiles (see above)
+    if (*sl) {
+        const sp_tl *e = sp_tl_of(*sl - 1);
+        if (e->p != (uintptr_t)p || (p && e->fmt != t->d.format)) {   // other memory behind the tile now: give up this place's slot (the unmaps go first, sparse_sync)
+            sp_op(&c->ops[c->nheaps], (MTL4UpdateSparseTextureMappingOperation){MTLSparseTextureMappingModeUnmap, rg, lev, y, 0});
+            sp_release(*sl - 1); *sl = 0; s->nmap[lev]--;
+        } else if (s->gpu) return;   // the GPU's own writes are in the tile: a CPU write to its pages is not looked at
+        else if (!c->force && !(p ? nvn_dirty_since(p, SP_TILE, e->stamp) : (st & 2))) return;   // a shared slot: the CPU wrote its memory since its content was taken, through any place
+    }
     if (!*sl) {
-        uint32_t slot; if (!sp_slot(&slot)) return;
-        uint32_t hi = slot / SP_HEAP_TILES; if (hi >= c->nheaps) { RED_ONCE(146, "sparse tiles: more than 64 heaps made in one look"); sp_slot_free(slot); return; }
+        uint32_t slot = p ? sp_ph_find((uintptr_t)p, t->d.format) : ~0u; int fresh = slot == ~0u;
+        if (fresh) { if (!sp_slot(&slot)) return; }
+        else sp_tl_of(slot)->rc++;
+        uint32_t hi = slot / SP_HEAP_TILES; if (hi >= c->nheaps) { RED_ONCE(146, "sparse tiles: more than 64 heaps made in one look"); sp_release(slot); return; }
         c->ops[hi].heap = g_sp_heaps[hi];
         sp_op(&c->ops[hi], (MTL4UpdateSparseTextureMappingOperation){MTLSparseTextureMappingModeMap, rg, lev, y, slot % SP_HEAP_TILES});
         *sl = slot + 1; s->nmap[lev]++;
-        if (s->gpu) { c->up++; return; }   // mapped, for the GPU to write
+        if (fresh && p) { sp_tl *e = sp_tl_of(slot); e->p = (uintptr_t)p; e->fmt = t->d.format; e->stamp = nvn_dirty_now(); sp_ph_put(slot); }
+        if (s->gpu) { if (fresh && p) nvn_sparse_protect_tile(t->pool, a, n); c->up++; return; }   // mapped, for the GPU to write (a later CPU write to the memory shows at a packaged place)
+        if (!fresh && !c->force && !nvn_dirty_since(p, SP_TILE, sp_tl_of(slot)->stamp)) return;   // the memory's content is in the slot already
     }
     // the content: protected before it is read, as any packaged texture's, so a later CPU write shows (nvn_dirty_sparse_writes, sparse_look)
     nvn_sparse_protect_tile(t->pool, a, n);
@@ -2776,6 +2847,7 @@ static void sp_tile(sp_look *c, uint32_t y, uint32_t i) {
         uint32_t lw = MAX(t->d.width >> l, 1u), lh = MAX(t->d.height >> l, 1u), x0 = tx * s->tw, y0 = ty * s->th;
         if (wb && rows) up_blit_add_at(c->stg, c->stg_off, tpitch, tpitch * rows, MTLSizeMake(MIN(s->tw, lw - x0), MIN(s->th, lh - y0), 1), c->tex, y, l, MTLOriginMake(x0, y0, 0));
         c->stg_off += SP_TILE;
+        if (p) sp_tl_of(*sl - 1)->stamp = c->stamp;   // taken before the protection above
     }
     c->up++;
 }
@@ -2803,7 +2875,7 @@ static void sparse_sync(NvSparse *s, const tex_t *t, int whole) {
     if (whole == 1) s->seq = nvn_sparse_log_seq(t->pool);
     else if (whole >= 2) { s->wseen = nvn_dirty_sparse_writes(); s->wframe = atomic_load(&g_cur_frame); }
     else { if (!(ranges = malloc(RANGES * sizeof *ranges))) MDIE("sparse mapping ranges"); nr = nvn_sparse_log_read(t->pool, &s->seq, ranges, RANGES); if (!nr) { free(ranges); return; } }
-    sp_look c = {.s = s, .t = t, .tex = stex, .nheaps = (uint32_t)g_sp_heaps.count + 64, .force = whole == 3}; c.bpb = nvn_fmt_bpb(t->d.format, &c.bw, &c.bh);
+    sp_look c = {.s = s, .t = t, .tex = stex, .nheaps = (uint32_t)g_sp_heaps.count + 64, .force = whole == 3, .stamp = stamp}; c.bpb = nvn_fmt_bpb(t->d.format, &c.bw, &c.bh);
     if (!(c.ops = calloc(c.nheaps + 1, sizeof *c.ops)) || !(c.tile = malloc(SP_TILE))) MDIE("sparse mapping operations");
     pthread_mutex_lock(&g_sp_mu);
     if (nr < 0) for (uint32_t y = 0; y < s->layers; y++) for (uint32_t i = 0; i < s->per_layer; i++) { if (whole < 2 || s->slot[(size_t)y * s->per_layer + i]) sp_tile(&c, y, i); }
@@ -2816,15 +2888,16 @@ static void sparse_sync(NvSparse *s, const tex_t *t, int whole) {
     pthread_mutex_unlock(&g_sp_mu);
     free(c.tile); free(c.tail); free(ranges);
     s->gen = gen; s->stamp = stamp;
-    for (uint32_t h = 0; h <= c.nheaps; h++) {
+    for (uint32_t k = 0; k <= c.nheaps; k++) {   // the unmaps first: a tile moving to another shared slot is unmapped, then mapped again
+        uint32_t h = k ? k - 1 : c.nheaps;
         if (!c.ops[h].n) continue;
         id<MTLHeap> heap = c.ops[h].heap; MTL4UpdateSparseTextureMappingOperation *op = c.ops[h].op; size_t n = c.ops[h].n;
         rec_queue_block(^{ [g_q4 updateTextureMappings:stex heap:heap operations:op count:n]; free(op); });
     }
     free(c.ops);
     if (c.up && !s->gpu) { [g_up_texs addObject:stex]; if (!g_cb) up_flush(); }
-    static uint64_t looks; if (c.up || c.unmapped) { looks++; if (looks <= 20 || looks % 500 == 0) MLOG("sparse texture ser=%llu: %llu tiles uploaded, %llu unmapped; %llu tiles mapped in all, peak %llu (%llu MB)", (unsigned long long)t->serial,
-                                                        (unsigned long long)c.up, (unsigned long long)c.unmapped, (unsigned long long)g_sp_live, (unsigned long long)g_sp_peak, (unsigned long long)(g_sp_peak * SP_TILE >> 20)); }
+    static uint64_t looks; if (c.up || c.unmapped) { looks++; if (looks <= 20 || looks % 500 == 0) MLOG("sparse texture ser=%llu: %llu tiles uploaded, %llu unmapped; %llu tiles mapped in all (%llu of them shared by physical memory), peak %llu (%llu MB)", (unsigned long long)t->serial,
+                                                        (unsigned long long)c.up, (unsigned long long)c.unmapped, (unsigned long long)g_sp_live, (unsigned long long)g_sp_shared, (unsigned long long)g_sp_peak, (unsigned long long)(g_sp_peak * SP_TILE >> 20)); }
 }
 // A look when the texture is resolved: only a new mapping request in its pool costs anything, or a write to a page behind a tile, which no game seen does to a tile it keeps mapped (none of 42,072
 // in Mario Kart World's first race): at most once a second, as the look goes over every mapped tile, so a rewritten tile can show its old content for that long

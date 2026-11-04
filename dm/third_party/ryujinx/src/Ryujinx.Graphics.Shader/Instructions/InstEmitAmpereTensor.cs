@@ -254,7 +254,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 throw AFail(context, $"LDSM mode {mode} count {count}");
             }
 
-            Operand addr = context.IAdd(ALocalAddress(context, x, 32), Const((int)x.SignedField(40, 64)));
+            Operand addr = context.IAdd(ALocalAddress(context, x, 32, stride: false), Const((int)x.SignedField(40, 64)));
             Operand lane = ALaneId(context);
             Operand g = context.ShiftRightU32(lane, Const(2));
             Operand t = context.BitwiseAnd(lane, Const(3));
@@ -327,7 +327,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         public static void AHsetp2(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (Operand[] a, Operand[] b, _) = AHalfSrcs(context, x);
+            (Operand[] a, Operand[] b) = AHalfSecond(context, x);
 
             Operand lo = GetFPComparison(context, (FComp)x.Bits(76, 80), a[0], b[0]);
             Operand hi = GetFPComparison(context, (FComp)x.Bits(76, 80), a[1], b[1]);
@@ -349,7 +349,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         public static void AHset2(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (Operand[] a, Operand[] b, _) = AHalfSrcs(context, x);
+            (Operand[] a, Operand[] b) = AHalfSecond(context, x);
             Operand p = APred(context, x, 87, 90);
             BoolOp bop = (BoolOp)x.Bits(69, 71);
             Operand res = Const(0);
@@ -374,7 +374,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 throw AFail(context, "HMNMX2 .F32 / .NAN / .XORSIGN / .BF16");
             }
 
-            (Operand[] a, Operand[] b, _) = AHalfSrcs(context, x);
+            (Operand[] a, Operand[] b) = AHalfSecond(context, x);
             Operand p = APred(context, x, 87, 90);
             Operand[] r = new Operand[2];
 

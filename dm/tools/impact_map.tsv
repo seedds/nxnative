@@ -52,6 +52,7 @@ dm/gfx/tex/*	api:*	texture layouts: every game
 dm/gfx/vk/*	api:vulkan	Vulkan on Metal
 dm/gfx/gl/*	api:gl	OpenGL on Metal
 dm/gfx/tools/dmsh_atomic.py	shader:image_atomic*	image atomics in the MSL
+dm/gfx/tools/dmsh_wide.py	shader:stage:*	storage buffer reads in the MSL: every NVN game
 dm/gfx/tools/dmsh_build.py:vs_tf|tf_layout	shader:transform_feedback	transform feedback capture
 dm/gfx/tools/dmsh_build.py:gs_slice|geometry_finish|vs_layer|_ep_drop	shader:stage:gs	geometry shaders
 dm/gfx/tools/dmsh_build.py:vs_layer|vs_layer_entry	shader:layer_output	layer output

@@ -10,6 +10,13 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Cause:** the SDK movie library's hardware decoder opens nvdrv directly.
 - **Fix:** the host takes over `movie::Decoder` (`hle_movie.c`, [`movie::Decoder` taken over as a MediaCodec-style protocol](#moviedecoder-taken-over-as-a-mediacodec-style-protocol)); nvdrv opens fail (`hle_nvdrv.c`).
 
+### SDK 1 movie buffer getters
+
+- **Symptom:** constructing a movie decoder aborts with `FATAL movie: missing SDK symbol _ZNK5movie6Buffer4DataEv`.
+- **Cause:** SDK 1.3.1 exports `movie::Buffer::Data()`, `Capacity()` and `Size()` as non-const methods. Looking up only the const overloads misses the symbols in `subsdk0`.
+- **Fix:** resolve each getter by the const name first, then by its non-const name. The decoder still requires all three; it uses the guest's methods to read the buffer without assuming its layout.
+- **Found on:** [Ultra Street Fighter II: The Final Challengers (#960)](https://github.com/seedds/nxnative/issues/960).
+
 ### `movie::Decoder` taken over as a MediaCodec-style protocol
 
 - **Symptom:** the game waits forever at a movie (Engage's 94 s opening `S01F.webm`; frames keep presenting, nothing happens).
@@ -38,6 +45,13 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Cause:** SDK 3.5.1's constructor is `Decoder(DecoderType, DecoderOutputFormat)` (`_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatE`, `subsdk1+0x2de630`: it builds `DecoderImpl(type, format)`), a third form after [SDK 4's](#sdk-4s-moviedecoder-constructor-without-a-priority): the SDK built its own decoder, as on SDK 4. That SDK has no decoder mode: its decoders work on the CPU. And its output formats are numbered one lower than later SDKs': `DecoderImpl` keeps the format at +0xdc and the type at +0xe0, `ConvertDecoderOutputFormat` (`subsdk1+0x2dd16c`) converts format 2 to ARGB and copies format 3 out as NV12 with stride = width, the UV rows right after the Y rows, and `GetOutputBufferSize` (`subsdk1+0x2dcde8`) gives w × h × 4 for 2 and w × h × 1.5 for 3; format 1 is PCM16 as later. Its `GetOutputBufferSize` also puts 0x20, an alignment, in the second output, where SDK 4 and later put the decoder mode (Metroid Dread `subsdk0+0x11f308`: `str w8,[x2]` with the mode, 1 for the CPU).
 - **Fix:** the two-argument constructor is taken over as a CPU-mode decoder (mode 1) with format 3 as NV12 and 2 as ABGR (`h_movie_Decoder3` in `hle_movie.c`), and its decoders report 0x20 as `GetOutputBufferSize`'s second output (`out_align`). The host's NV12 already has the SDK 3 layout (`md_nv12`).
 - **Found on:** [Hyrule Warriors: Definitive Edition](../../dm/games/0100AE00096EA000/README.md) (SDK 3.5.1, H.264 MP4 movies through its own player): the title's background and the opening movie play.
+
+### The base-object constructors of `movie::Decoder`
+
+- **Symptom:** `CRASH sig=11 addr=0 pc=0` with `lr=h_movie_Configure+…`, as the first movie starts.
+- **Cause:** the host took over only `movie::Decoder`'s complete-object constructors (`C1`). A game that reaches the base-object constructor (`C2`) ran the SDK's: Mario Tennis Aces' SDK 4.5.0 has a `C1` of two instructions (`mov w4,#0; b C2`). The object then held a guest `DecoderImpl`, whose vtable pointer `Configure` read as the host's decoder.
+- **Fix:** `hle_movie.c` takes over the three `C2` forms as well. The class has no virtual bases, so both constructors do the same.
+- **Found on:** Mario Tennis Aces (`0100BDE00862A000`, no profile; [issue #1131](https://github.com/seedds/nxnative/issues/1131), found and tested by its reporter).
 
 ### The complete-object destructor
 

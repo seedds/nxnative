@@ -151,7 +151,7 @@ typedef struct {
         uint64_t ready; ubp_ent pc[UBP_CACHE]; unsigned pc_i;   // ready of the shadow ubp_get returned last; the shadows kept per range
     } ub;
 } rx_t;
-enum { RX_MAX = 4 };   // replay contexts: one translates today; the parallel workers will use the others (milestone 4)
+enum { RX_MAX = 5, RX_CHUNKS = 4, RX_SCAN = 4 };   // replay contexts: 0..3 translate chunks (one today; the workers in milestone 4), 4 is the scan's (par_scan)
 static rx_t g_rxs[RX_MAX] = {[0] = {.pso_dirty = 1, .dss_dirty = 1, .args_dirty = {1, 1, 1, 1, 1, 1}, .ub.ver = 1}}, *g_rx = &g_rxs[0];
 static int g_rxi;   // g_rx's index in g_rxs (RXI): state kept per context in arrays [RX_MAX], for state whose types are defined further down (slice 4)
 #define RXI g_rxi
@@ -878,8 +878,10 @@ static int sbw_slot(uint64_t pg, int add) { WT_;   // open addressing; −1 = no
 }
 enum { SBW_GPU = 1, SBW_REPORT = 2 };
 static void drw_note(uint64_t lo, uint64_t n);   // the writes since the last drain (below g_wr_epoch)
+static int g_par_scanning;   // par_scan is walking the submission in the scan's context
+static uint64_t g_par_unmod;   // writes the scan does not model, met this period (texture-to-buffer copies, transform feedback, buffer-addressed storage)
 static void sbw_note(uint64_t lo, uint64_t n, int src) { WT_;
-    if (src == SBW_GPU) { g_sbw_gen++; drw_note(lo, n); }
+    if (src == SBW_GPU) { g_sbw_gen++; if (!g_par_scanning) drw_note(lo, n); }   // the scan (par_scan) only models the set
     if (!n) { if (src == SBW_GPU) g_sbw_over = 1; return; }
     uint64_t hi = lo + n;
     if (src == SBW_GPU && ((hi - 1) >> 12) - (lo >> 12) >= SBW_WPAGES) {   // a report is 16 bytes, never wide
@@ -8424,7 +8426,7 @@ typedef struct {
 } defer_t;
 static defer_t g_defer_slots_rx[RX_MAX][4];
 #define g_defer_slots (g_defer_slots_rx[RXI])
-static defer_t *g_defer_cur_rx[RX_MAX] = {&g_defer_slots_rx[0][0], &g_defer_slots_rx[1][0], &g_defer_slots_rx[2][0], &g_defer_slots_rx[3][0]};
+static defer_t *g_defer_cur_rx[RX_MAX] = {&g_defer_slots_rx[0][0], &g_defer_slots_rx[1][0], &g_defer_slots_rx[2][0], &g_defer_slots_rx[3][0], &g_defer_slots_rx[4][0]};
 #define g_defer_cur (g_defer_cur_rx[RXI])
 #define g_defer (*g_defer_cur)
 static int sub_eq(const p_set_rt *a, int ka, const p_set_rt *b, int kb);
@@ -12151,12 +12153,20 @@ typedef struct { const char *name; size_t off, size; } par_field;
 static const par_field g_par_sf[] = {{"prog", __builtin_offsetof(typeof(S_rx[0]), prog), sizeof S_rx[0].prog}, {"cprog", __builtin_offsetof(typeof(S_rx[0]), cprog), sizeof S_rx[0].cprog}, {"restart", __builtin_offsetof(typeof(S_rx[0]), restart), sizeof S_rx[0].restart}, {"bst", __builtin_offsetof(typeof(S_rx[0]), bst), sizeof S_rx[0].bst}, {"blend", __builtin_offsetof(typeof(S_rx[0]), blend), sizeof S_rx[0].blend}, {"color", __builtin_offsetof(typeof(S_rx[0]), color), sizeof S_rx[0].color}, {"chmask", __builtin_offsetof(typeof(S_rx[0]), chmask), sizeof S_rx[0].chmask}, {"ms", __builtin_offsetof(typeof(S_rx[0]), ms), sizeof S_rx[0].ms}, {"poly", __builtin_offsetof(typeof(S_rx[0]), poly), sizeof S_rx[0].poly}, {"ds", __builtin_offsetof(typeof(S_rx[0]), ds), sizeof S_rx[0].ds}, {"attr", __builtin_offsetof(typeof(S_rx[0]), attr), sizeof S_rx[0].attr}, {"nattr", __builtin_offsetof(typeof(S_rx[0]), nattr), sizeof S_rx[0].nattr}, {"stream", __builtin_offsetof(typeof(S_rx[0]), stream), sizeof S_rx[0].stream}, {"nstream", __builtin_offsetof(typeof(S_rx[0]), nstream), sizeof S_rx[0].nstream}, {"vbuf", __builtin_offsetof(typeof(S_rx[0]), vbuf), sizeof S_rx[0].vbuf}, {"ubo", __builtin_offsetof(typeof(S_rx[0]), ubo), sizeof S_rx[0].ubo}, {"ssbo", __builtin_offsetof(typeof(S_rx[0]), ssbo), sizeof S_rx[0].ssbo}, {"tex", __builtin_offsetof(typeof(S_rx[0]), tex), sizeof S_rx[0].tex}, {"samp", __builtin_offsetof(typeof(S_rx[0]), samp), sizeof S_rx[0].samp}, {"img", __builtin_offsetof(typeof(S_rx[0]), img), sizeof S_rx[0].img}, {"st_vmask", __builtin_offsetof(typeof(S_rx[0]), st_vmask), sizeof S_rx[0].st_vmask}, {"st_wmask", __builtin_offsetof(typeof(S_rx[0]), st_wmask), sizeof S_rx[0].st_wmask}, {"st_ref", __builtin_offsetof(typeof(S_rx[0]), st_ref), sizeof S_rx[0].st_ref}, {"po", __builtin_offsetof(typeof(S_rx[0]), po), sizeof S_rx[0].po}, {"vp", __builtin_offsetof(typeof(S_rx[0]), vp), sizeof S_rx[0].vp}, {"dr", __builtin_offsetof(typeof(S_rx[0]), dr), sizeof S_rx[0].dr}, {"has_vp", __builtin_offsetof(typeof(S_rx[0]), has_vp), sizeof S_rx[0].has_vp}, {"depth_clamp", __builtin_offsetof(typeof(S_rx[0]), depth_clamp), sizeof S_rx[0].depth_clamp}, {"vp_sw", __builtin_offsetof(typeof(S_rx[0]), vp_sw), sizeof S_rx[0].vp_sw}, {"blend_color", __builtin_offsetof(typeof(S_rx[0]), blend_color), sizeof S_rx[0].blend_color}, {"alpha_ref", __builtin_offsetof(typeof(S_rx[0]), alpha_ref), sizeof S_rx[0].alpha_ref}, {"copy_stride", __builtin_offsetof(typeof(S_rx[0]), copy_stride), sizeof S_rx[0].copy_stride}, {"copy_img_stride", __builtin_offsetof(typeof(S_rx[0]), copy_img_stride), sizeof S_rx[0].copy_img_stride}, {"push", __builtin_offsetof(typeof(S_rx[0]), push), sizeof S_rx[0].push}, {"tf", __builtin_offsetof(typeof(S_rx[0]), tf), sizeof S_rx[0].tf}, {"tf_on", __builtin_offsetof(typeof(S_rx[0]), tf_on), sizeof S_rx[0].tf_on}, {"rast_discard", __builtin_offsetof(typeof(S_rx[0]), rast_discard), sizeof S_rx[0].rast_discard}, {"tex_base", __builtin_offsetof(typeof(S_rx[0]), tex_base), sizeof S_rx[0].tex_base}, {"samp_base", __builtin_offsetof(typeof(S_rx[0]), samp_base), sizeof S_rx[0].samp_base}};
 static const par_field g_par_rf[] = {{"rt", __builtin_offsetof(typeof(R_rx[0]), rt), sizeof R_rx[0].rt}, {"has_rt", __builtin_offsetof(typeof(R_rx[0]), has_rt), sizeof R_rx[0].has_rt}, {"clear_c", __builtin_offsetof(typeof(R_rx[0]), clear_c), sizeof R_rx[0].clear_c}, {"cc", __builtin_offsetof(typeof(R_rx[0]), cc), sizeof R_rx[0].cc}, {"clear_d", __builtin_offsetof(typeof(R_rx[0]), clear_d), sizeof R_rx[0].clear_d}, {"clear_s", __builtin_offsetof(typeof(R_rx[0]), clear_s), sizeof R_rx[0].clear_s}, {"cd", __builtin_offsetof(typeof(R_rx[0]), cd), sizeof R_rx[0].cd}, {"cs", __builtin_offsetof(typeof(R_rx[0]), cs), sizeof R_rx[0].cs}, {"sc", __builtin_offsetof(typeof(R_rx[0]), sc), sizeof R_rx[0].sc}, {"has_sc", __builtin_offsetof(typeof(R_rx[0]), has_sc), sizeof R_rx[0].has_sc}};
 enum { PAR_SF = sizeof g_par_sf / sizeof *g_par_sf, PAR_RF = sizeof g_par_rf / sizeof *g_par_rf, PARC_MAX = 160 };
-typedef struct { const uint8_t *op; typeof(S_rx[0]) s; typeof(R_rx[0]) r; uint8_t used; } parc_snap;
+typedef struct { int npend, pend_over, nsbw, sbw_over, nsbw_w; uint64_t pend_h, sbw_h, wide_h; } parc_wt;   // the write tracking, summed: counts, and hashes independent of the order the set was filled in
+typedef struct { const uint8_t *op; typeof(S_rx[0]) s; typeof(R_rx[0]) r; parc_wt w; uint8_t used; } parc_snap;
+static inline uint64_t parc_mix(uint64_t x) { x ^= x >> 31; x *= 0x9E3779B97F4A7C15ull; x ^= x >> 29; return x; }
+static parc_wt parc_sum(void) { WT_; parc_wt w = {g_npend, g_pend_over, g_nsbw, g_sbw_over, g_nsbw_w, 0, 0, 0};
+    for (int i = 0; i < g_npend && i < PEND_MAX; i++) w.pend_h += parc_mix(g_pend_lo[i] * 31 + g_pend_hi[i] * 7 + g_pend_kind[i]);
+    for (int i = 0; i < SBW_N; i++) if (g_sbwp[i].gen == g_pend_gen) w.sbw_h += parc_mix(g_sbwp[i].page * 4 + g_sbwp[i].src);
+    for (int i = 0; i < g_nsbw_w && i < SBW_WN; i++) w.wide_h += parc_mix(g_sbw_wlo[i] ^ (g_sbw_whi[i] << 1));
+    return w; }
 static parc_snap *g_parc; static int g_parc_n;
-static struct { uint64_t compared, same, differ, nosnap; uint64_t sf[PAR_SF], rf[PAR_RF]; int logged; } g_pck;
+static struct { uint64_t compared, same, differ, nosnap; uint64_t sf[PAR_SF], rf[PAR_RF], wf[8]; int logged; } g_pck;
+static const char *const g_par_wf[8] = {"npend", "pend_over", "pend (ranges)", "nsbw", "sbw_over", "sbw (pages)", "nsbw_w", "sbw (wide)"};
 static void parc_put(const uint8_t *op) {   // the scan, at a SetRenderTargets about to apply
     if (!g_parc) g_parc = calloc(PARC_MAX, sizeof *g_parc);
-    if (g_parc_n < PARC_MAX) { parc_snap *c = &g_parc[g_parc_n++]; c->op = op; memcpy(&c->s, &S, sizeof S); memcpy(&c->r, &R, sizeof R); c->used = 0; }
+    if (g_parc_n < PARC_MAX) { parc_snap *c = &g_parc[g_parc_n++]; c->op = op; memcpy(&c->s, &S, sizeof S); memcpy(&c->r, &R, sizeof R); c->w = parc_sum(); c->used = 0; }
 }
 static int par_diff(const char *what, const par_field *f, int nf, const uint8_t *a, const uint8_t *b, uint64_t *count) {
     int n = 0;
@@ -12175,6 +12185,11 @@ static void parc_check(void) {   // the replay, at a clean boundary (par_boundar
         parc_snap *c = &g_parc[i]; if (c->used || c->op != g_exec_cur) continue;
         c->used = 1; g_pck.compared++;
         int n = par_diff("S", g_par_sf, PAR_SF, (const uint8_t *)&c->s, (const uint8_t *)&S, g_pck.sf) + par_diff("R", g_par_rf, PAR_RF, (const uint8_t *)&c->r, (const uint8_t *)&R, g_pck.rf);
+        parc_wt w = parc_sum(); const parc_wt *x = &c->w;
+        int wd[8] = {x->npend != w.npend, x->pend_over != w.pend_over, x->pend_h != w.pend_h, x->nsbw != w.nsbw, x->sbw_over != w.sbw_over, x->sbw_h != w.sbw_h, x->nsbw_w != w.nsbw_w, x->wide_h != w.wide_h};
+        for (int f = 0; f < 8; f++) if (wd[f]) { n++; g_pck.wf[f]++;
+            if (g_pck.logged < 16) { g_pck.logged++; MLOG("[RED] parallel translation check: write tracking %s differs from the scan (scan npend %d nsbw %d, replay npend %d nsbw %d; frame %llu, pass %llu): the scan does not model a write the replay noted",
+                g_par_wf[f], x->npend, x->nsbw, w.npend, w.nsbw, (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)g_stat_pass); } }
         if (n) g_pck.differ++; else g_pck.same++;
         return;
     }
@@ -12184,8 +12199,9 @@ static void parc_report(uint64_t nf) {
     char b[1500]; int o = 0;
     for (int i = 0; i < PAR_SF && o < 1300; i++) if (g_pck.sf[i]) o += snprintf(b + o, sizeof b - o, " S.%s %llu", g_par_sf[i].name, (unsigned long long)g_pck.sf[i]);
     for (int i = 0; i < PAR_RF && o < 1300; i++) if (g_pck.rf[i]) o += snprintf(b + o, sizeof b - o, " R.%s %llu", g_par_rf[i].name, (unsigned long long)g_pck.rf[i]);
-    MLOG("parallel translation, check (over %llu frames): %llu clean boundaries compared, %llu identical, %llu different%s%s; %llu with no snapshot", (unsigned long long)nf,
-         (unsigned long long)g_pck.compared, (unsigned long long)g_pck.same, (unsigned long long)g_pck.differ, o ? ", by field:" : "", o ? b : "", (unsigned long long)g_pck.nosnap);
+    for (int i = 0; i < 8 && o < 1300; i++) if (g_pck.wf[i]) o += snprintf(b + o, sizeof b - o, " writes.%s %llu", g_par_wf[i], (unsigned long long)g_pck.wf[i]);
+    MLOG("parallel translation, check (over %llu frames): %llu clean boundaries compared, %llu identical, %llu different%s%s; %llu with no snapshot; %llu writes the scan does not model", (unsigned long long)nf,
+         (unsigned long long)g_pck.compared, (unsigned long long)g_pck.same, (unsigned long long)g_pck.differ, o ? ", by field:" : "", o ? b : "", (unsigned long long)g_pck.nosnap, (unsigned long long)g_par_unmod); g_par_unmod = 0;
     int logged = g_pck.logged; memset(&g_pck, 0, sizeof g_pck); g_pck.logged = logged;
 }
 // ---------- Parallel translation, milestone 4a: chunks in fresh contexts, serially (DM_NVN_PAR=fresh; docs/parallel-translation.md) ----------
@@ -12204,7 +12220,7 @@ static void rx_fresh(rx_t *b, const rx_t *a) {   // b's chunk-local state as a w
     memset(b->ub.pc, 0, sizeof b->ub.pc); b->ub.pc_i = 0;
 }
 static void par_fresh_switch(void) {
-    int k = g_rxi, j = (k + 1) % RX_MAX; rx_t *a = &g_rxs[k], *b = &g_rxs[j];
+    int k = g_rxi, j = (k + 1) % RX_CHUNKS; rx_t *a = &g_rxs[k], *b = &g_rxs[j];
     if (!b->vt) rx_tables(b);
     rx_fresh(b, a);
     // the submission's own state moves
@@ -12238,18 +12254,35 @@ static void par_boundary(void) {
     if (par_check()) parc_check();
     if (par_fresh() && g_stat_draw - g_par_last >= (uint64_t)par_draws()) { RX.cut_copy = 1; sub_cut(); if (!RX.cut_copy) par_fresh_switch(); else RX.cut_copy = 0; }   // the cut commits the segment first; a cut refused leaves the chunk where it is
 }
-static void par_scan(const uint64_t *h, int n) {
+static void par_scan_writes(int st, NvShader *sh) {   // a draw's or dispatch's storage-buffer writes, as encode_args notes them
+    if (!sh) return;
+    for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i];
+        if (b->kind != NVN_RB_SBUFP || !b->rw || b->reg >= 16 || (b->reg < 32 && (sh->sb_ro >> b->reg & 1))) continue;
+        const p_bind_buf *u = &S.ssbo[st][b->reg]; void *mb; uint64_t mo, gpu;
+        if (u->addr && mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu)) sbw_note(u->addr, sbw_len(u->size, mb, mo), SBW_GPU); }
+}
+static void par_scan(const uint64_t *h, int n) {   // in the scan's context: S and R from the submission's start, its own write tracking; the replay's context is not touched
     if (n <= 0) return;
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-    static typeof(S) Ssave; memcpy(&Ssave, &S, sizeof S); typeof(R) Rsave = R; int pso_dirty = RX.pso_dirty, dss_dirty = RX.dss_dirty;
+    int k = g_rxi; rx_t *keep = g_rx;
+    S_rx[RX_SCAN] = S_rx[k]; R_rx[RX_SCAN] = R_rx[k];
+    g_rx = &g_rxs[RX_SCAN]; g_rxi = RX_SCAN; g_par_scanning = 1; pend_reset();
     const uint64_t *rest = g_rest; int nrest = g_nrest; g_rest = h + 1; g_nrest = n - 1;
     fz_cursor cur = {.p = (const uint8_t *)h[0]}; uint64_t ops = 0; g_parc_n = 0;
     for (;;) { const uint8_t *q; op_hdr hq; const void *aq; if (!fz_next(&cur, &q, &hq, &aq)) break; ops++;
-        if (hq.op == OP_SET_RT) { if (par_check()) parc_put(q); const p_set_rt *r = aq; R.rt = *r; R.has_rt = 1; continue; }
-        if (hq.op == OP_DRAW || hq.op == OP_DRAW_IDX || hq.op == OP_DISPATCH) continue;
-        state_op(hq.op, aq); }
+        switch (hq.op) {
+            case OP_SET_RT: { if (par_check()) parc_put(q); const p_set_rt *r = aq; R.rt = *r; R.has_rt = 1; continue; }
+            case OP_DRAW: case OP_DRAW_IDX: if (par_check()) { prog_resolve(); __unsafe_unretained NvProg *pr = S.prog ? prog_get(S.prog) : nil; if (pr) { par_scan_writes(0, pr->sh[0]); par_scan_writes(1, pr->sh[1]); } } continue;
+            case OP_DISPATCH: if (par_check()) { __unsafe_unretained NvProg *cp = S.cprog ? prog_get(S.cprog) : nil; if (cp) par_scan_writes(5, cp->sh[5]); } continue;
+            case OP_UPDATE_UB: { uint64_t d, nn; memcpy(&d, aq, 8); memcpy(&nn, (const uint8_t *)aq + 8, 8); if (nn) pend_add(d, nn, 1); continue; }
+            case OP_COPY_B2B: { uint64_t d, nn; memcpy(&d, (const uint8_t *)aq + 8, 8); memcpy(&nn, (const uint8_t *)aq + 16, 8); pend_add(d, nn, 2); continue; }
+            case OP_CLEAR_BUF: { const p_clear_buf *cb = aq; if (cb->size) pend_add(cb->addr, cb->size, 3); continue; }
+            case OP_REPORT_COUNTER: { uint64_t ad; memcpy(&ad, (const uint8_t *)aq + 8, 8); sbw_note(ad, 16, SBW_REPORT); continue; }
+            case OP_COPY_T2B: case OP_TF_BIND: case OP_TF_STATE: g_par_unmod++; if (hq.op != OP_COPY_T2B) state_op(hq.op, aq); continue;
+            default: state_op(hq.op, aq); continue;
+        } }
     g_rest = rest; g_nrest = nrest;
-    memcpy(&S, &Ssave, sizeof S); args_dirty_all(); R = Rsave; RX.pso_dirty = pso_dirty; RX.dss_dirty = dss_dirty; prog_resolve();
+    g_par_scanning = 0; g_rx = keep; g_rxi = k;
     g_par.scan_ns += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0; g_par.scan_ops += ops; g_par.scan_bad += cur.bad;
 }
 static uint64_t par_run_cost(uint32_t lo, uint32_t hi, int *bi) {   // the run [lo, hi) of draws cut at up to three clean boundaries inside it, nearest its quarter marks: its largest chunk

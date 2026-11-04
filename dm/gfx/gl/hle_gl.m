@@ -648,7 +648,7 @@ static id<MTLSamplerState> tex_sampler(tex_t *t) {
              t->border[3] > 0.5f ? (t->border[0] > 0.5f ? 2.f : 1.f) : 0.f};
     // Metal has no linear filtering for integer textures (GL does not allow it either): nearest, as the game's sampler asks for them
     if (fmt_int(t->fmt)) { k.magf = GL_NEAREST; k.minf = mips ? GL_NEAREST_MIPMAP_NEAREST : GL_NEAREST; }
-    for (int i = 0; i < n; i++) if (!memcmp(&cache[i].k, &k, sizeof k)) { t->smp = cache[i].s; t->smp_dirty = 0; return t->smp; }
+    for (int i = 0; i < n; i++) if (!memcmp(&cache[i].k, &k, sizeof k)) { t->smp = cache[i].s; t->smp_dirty = 0; return t->smp; }   // NOLINT(bugprone-suspicious-memory-comparison): skey is nine 4-byte fields, all set by the initializer, so it has no padding
     MTLSamplerDescriptor *d = [MTLSamplerDescriptor new];
     d.magFilter = k.magf == GL_NEAREST ? MTLSamplerMinMagFilterNearest : MTLSamplerMinMagFilterLinear;
     d.minFilter = k.minf == GL_NEAREST || k.minf == GL_NEAREST_MIPMAP_NEAREST || k.minf == GL_NEAREST_MIPMAP_LINEAR ? MTLSamplerMinMagFilterNearest : MTLSamplerMinMagFilterLinear;
@@ -2074,7 +2074,8 @@ static void gl_read_sync(void) {
 }
 GL(glGetTexImage, void, GLenum target, GLint level, GLenum format, GLenum type, void *pixels) {    (void)type;
     tex_t *t = bound_tex(target);
-    GLOG("glGetTexImage target %#x level %d format %#x type %#x texture %u %s %ux%u", target, level, format, type, S.units[S.unit].t2d,
+    GLuint *slot = unit_slot(S.unit, target);
+    GLOG("glGetTexImage target %#x level %d format %#x type %#x texture %u %s %ux%u", target, level, format, type, slot ? *slot : 0,
          t ? g_fmt[t->fmt].name : "none", t ? t->w : 0, t ? t->h : 0);
     if (!t || level < 0 || level >= MAXLV) return;
     gl_read_sync();                          // the draws into the target must have run before any read of it
@@ -2093,6 +2094,7 @@ GL(glGetTexImage, void, GLenum target, GLint level, GLenum format, GLenum type, 
                 [t->tex getBytes:pixels bytesPerRow:pitch bytesPerImage:0 fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:level slice:face];
             } else {
                 id<MTLBuffer> b = [g_dev newBufferWithLength:pitch * h options:MTLResourceStorageModeShared];
+                if (!b) { RED1("glGetTexImage: the readback buffer did not allocate (%zu bytes)", pitch * h); return; }
                 id<MTLCommandBuffer> cb = [g_q commandBuffer]; cb.label = @"gl read texture";
                 id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder];
                 [e copyFromTexture:t->tex sourceSlice:face sourceLevel:level sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1)
@@ -2122,6 +2124,7 @@ GL(glGetCompressedTexImage, void, GLenum target, GLint level, void *pixels) {
             [t->tex getBytes:pixels bytesPerRow:pitch bytesPerImage:pitch * rows fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:level slice:0];
         } else {
             id<MTLBuffer> b = [g_dev newBufferWithLength:n options:MTLResourceStorageModeShared];
+            if (!b) { RED1("glGetCompressedTexImage: the readback buffer did not allocate (%zu bytes)", n); return; }
             id<MTLCommandBuffer> cb = [g_q commandBuffer]; cb.label = @"gl read compressed texture";
             id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder];
             [e copyFromTexture:t->tex sourceSlice:0 sourceLevel:level sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1)
@@ -2387,6 +2390,7 @@ static void readpix_impl(const readpix_args *a) {
         dm_gfx_enter();
         pass_end();
         size_t pitch = (size_t)a->w * 4; id<MTLBuffer> out = [g_dev newBufferWithLength:pitch * a->h options:MTLResourceStorageModeShared];
+        if (!out) { RED1("glReadPixels: the readback buffer did not allocate (%zu bytes)", pitch * a->h); dm_gfx_leave(); return; }
         id<MTLCommandBuffer> cb = cb_get();
         id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
         [b copyFromTexture:src sourceSlice:sl sourceLevel:lv sourceOrigin:MTLOriginMake(a->x, a->y, 0) sourceSize:MTLSizeMake(a->w, a->h, 1) toBuffer:out destinationOffset:0

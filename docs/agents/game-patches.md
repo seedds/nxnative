@@ -290,7 +290,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → `host`**, rendering, gap, judgement: Factorio's copy-image dispatch slot at main+0x2e37260. The game fills the slot from a weak glCopyImageSubData import that its loader never asks eglGetProcAddress for, so the 3D bitmap assembly calls address 0; the host writes its own function there. The offset is this build's: writing it in another game would corrupt its data
 
 - **2.0.77 `main`** `30bf431e…`
-  - host [hle_gl.m:2383](../../dm/gfx/gl/hle_gl.m#L2383): copy-image dispatch slot written at a fixed offset
+  - host [hle_gl.m:2362](../../dm/gfx/gl/hle_gl.m#L2362): copy-image dispatch slot written at a fixed offset
 
 ### FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition
 

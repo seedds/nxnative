@@ -324,6 +324,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Program code:** on Switch every subprogram is one whole NVN program. Its code is a 0x60-byte header of four `i32 ×6` arrays indexed by NVN stage (0 vertex, 1 fragment, 2 geometry, 3 tess control, 4 tess evaluation, 5 compute): an unused / scratch size, the block offset from +0x60 (−1 = no stage), the control size and the code size. Each block is the control section followed by the code area. The vertex and fragment stages of one program form a pair.
 - **Found on:** [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md): 209 `Shader` objects in 188 bundles plus the engine files, 9,269 stage shaders (4,634 vertex / pixel pairs and one geometry shader), no compute shaders.
 
+### Unity compute kernels with no code
+
+- **Symptom:** `[RED] 1 file(s) could not be read, their shaders are left out (first: Data/resources.assets: error: unpack_from requires a buffer of at least 96 bytes for unpacking 96 bytes at offset 0 (actual buffer size is 0))` from the shader split, and the game's built-in shaders in that file missing at run time.
+- **Cause:** a `ComputeShader` kernel can have an empty `code`, with no buffers and no constants, so nothing to translate. `unity_compute` read it as a program, and the exception cost the split every shader in the file, not only that kernel.
+- **Fix:** `unity_compute` in `shader_split.py` skips a kernel with no code and reads the rest (`dm/gfx/tests/test_unity_compute.py`).
+- **Found on:** [DAVE THE DIVER](../../dm/games/010097F018538000/README.md) (Unity 6000.0.52f1): 11 of the 142 kernels in `Data/resources.assets`, such as `ParticleGrid`'s `BuildContactList` and `ClothRendering`'s `UpdateClothMesh`. The file holds 1,815 programs, of which 1,669 shaders occur nowhere else.
+
 ### Legacy Unity stages lose their pass partners
 
 - **Symptom:** `failed to create render pipeline` with a fragment `user(locn1)` input missing from the vertex output, while the split found all shaders but almost no vertex / pixel pairs.

@@ -40,3 +40,6 @@ present_interval	display
 # ---- Shader split ----
 shader_groups	/Data/=data
 shader_note	Pokémon Brilliant Diamond shaders
+# Compatibility policy: FieldTvRedGyaradosEntity deliberately selects a zero blink cycle for TV off.
+# Black locn1 RGB with finite alpha 1; original-console arithmetic remains open. See README.md, Zero TV pulse period.
+shader_zero_period_off	b8b1925cc16f8247:4:9.w:10.x:1

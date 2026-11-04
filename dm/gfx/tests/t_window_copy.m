@@ -60,29 +60,58 @@ static void production_target(void) {
     MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:8 height:8 mipmapped:NO];
     id<MTLTexture> wt = [g_dev newTextureWithDescriptor:desc]; serial_put(w.serial, wt);
     g_xv_present[g_xv_npresent++] = w.serial;
+    NSError *error = nil;
+    id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+        "struct I { float4 p [[attribute(0)]]; }; struct O { float4 p [[position]]; float2 uv; };\n"
+        "vertex O v(I i [[stage_in]]) { return {float4(i.p.xyz,1), float2((i.p.x+1)*0.5, (1-i.p.y)*0.5)}; }\n"
+        "struct A { texture2d<float, access::read> t [[id(0)]]; };\n"
+        "fragment float4 f(O i [[stage_in]], constant A& a [[buffer(0)]]) { return a.t.read(uint2(i.uv * 4)); }\n"
+        options:nil error:&error];
+    CHECK("synthetic textured shaders compile", lib != nil);
+    if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return; }
     NvProg *pr = [NvProg new]; NvShader *vs = [NvShader new], *fs = [NvShader new];
+    vs->fn = [lib newFunctionWithName:@"v"]; vs->rf.nv = 1; vs->rf.v[0].ct = NVN_CT_FLOAT;
+    memset(vs->rf.v[0].sh, 0xff, sizeof vs->rf.v[0].sh);
     vs->rf.pos_attr = 0; vs->rf.pos_w1 = 1; fs->stage = 1; strcpy(fs->key, "fixture");
-    fs->rf.color_known = 1; fs->rf.color_mask = 1; fs->rf.nb = 1; fs->rf.b[0].kind = NVN_RB_TEX;
+    fs->fn = [lib newFunctionWithName:@"f"]; fs->ae = [fs->fn newArgumentEncoderWithBufferIndex:0]; fs->arg_len = fs->ae.encodedLength;
+    fs->rf.color_known = 1; fs->rf.color_mask = 1; fs->rf.nb = 1; fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEX, .aid=0, .dtt=MTLTextureType2D};
     pr->sh[0] = vs; pr->sh[1] = fs;
     prog_t pg = {.serial=10202}; serial_put(pg.serial, pr);
-    tex_t sample = window(10203); sample.d = w.d;
-    g_treg = calloc(2, sizeof *g_treg); g_ntreg = 2; g_treg[1].ok = 1; g_treg[1].t = sample;
+    tex_t sample = window(10203); sample.d = w.d; sample.d.width = sample.d.height = 4;
+    MTLTextureDescriptor *sd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
+    sd.storageMode = MTLStorageModeShared; sd.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> source = [g_dev newTextureWithDescriptor:sd];
+    const uint8_t pattern[64] = {255,0,0,255, 0,255,0,255, 0,0,255,255, 255,255,0,255,
+        0,255,255,255, 255,0,255,255, 64,0,0,255, 0,64,0,255,
+        0,0,64,255, 128,64,0,255, 0,128,64,255, 64,0,128,255,
+        255,128,0,255, 0,255,128,255, 128,0,255,255, 255,255,255,255};
+    [source replaceRegion:MTLRegionMake2D(0,0,4,4) mipmapLevel:0 withBytes:pattern bytesPerRow:16];
+    serial_put(sample.serial, source); mtl_reg_tex(1, &sample, NULL);
     void *vertices = NULL; int allocated = !posix_memalign(&vertices, getpagesize(), 65536);
     CHECK("vertex fixture allocated", allocated); if (!allocated) return;
     memset(vertices, 0, 65536); float triangle[3][4] = {{-1,-1,0,1},{3,-1,0,1},{-1,3,0,1}};
     memcpy(vertices, triangle, sizeof triangle); mtl_pool_add(vertices, 65536);
     state_reset(); memset(&R, 0, sizeof R); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &w;
-    S.prog = &pg; S.tex[1][0] = 1; S.nattr = 1; S.attr[0].fmt = NVN_FORMAT_RGBA32F;
+    S.prog = S.bst[0] = S.bst[1] = &pg; S.tex[1][0] = 1; S.nattr = 1; S.attr[0].fmt = NVN_FORMAT_RGBA32F;
     S.stream[0].stride = 16; S.vbuf[0] = (NVNbufferRange){(uint64_t)vertices, sizeof triangle};
-    p_draw draw = {.prim=NVN_DRAW_PRIMITIVE_TRIANGLES, .count=3, .instances=1}; g_fd_dw = &draw;
+    S.has_vp = 1; S.vp[0][2] = S.vp[0][3] = 8; S.dr[1] = 1;
+    p_draw dw = {.prim=NVN_DRAW_PRIMITIVE_TRIANGLES, .count=3, .instances=1}; g_fd_dw = &dw;
     op_hdr end = {OP_END, 8}; g_exec_next = (const uint8_t *)&end;
-    wc_ent *e = wc_try(pr, &draw, NULL);
+    wc_ent *e = wc_try(pr, &dw, NULL);
     CHECK("wc_try creates a drawable-sized target", e && e->pw == 4 && e->ph == 4 && g_wc_base && g_wc_base.width == 4);
     if (!e) goto cleanup;
     {
     uint64_t old = e->pser;
-    CHECK("wc_try reuses matching target", wc_try(pr, &draw, NULL) && e->pser == old);
-    g_wc_cur = e; g_wc_ndraw = 0; uint64_t before = g_stat_draw++; wc_drawn(before); g_wc_cur = NULL;
+    CHECK("wc_try reuses matching target", wc_try(pr, &dw, NULL) && e->pser == old);
+    g_wc_base = nil; g_wc_wser = 0; g_fd_dw = NULL;
+    mtl_sub_begin(); uint64_t before = g_stat_draw; draw(&dw, NULL);
+    CHECK("production draw redirects and marks the target pending", g_stat_draw == before + 1 && g_wc_cur == e && e->pending == old);
+    rp_end();
+    id<MTLBuffer> drawn = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared]; res_add(drawn);
+    enc_b_copy_texture_buffer(blit(), (id<MTLTexture>)tex_get(old), 0, 0, MTLOriginMake(0,0,0), MTLSizeMake(4,4,1), drawn, 0, 256, 1024);
+    CHECK("redirected draw GPU submission completes", mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error());
+    int matched = 1; for (int y = 0; y < 4; y++) matched &= !memcmp((uint8_t *)drawn.contents + y*256, pattern + y*16, 16);
+    CHECK("redirected textured draw preserves all 16 spatial colors", matched);
     int crop[4]; CHECK("created target acquires a present reference", wc_take(w.serial, NULL, crop) == old);
     id<MTLCommandQueue> queue = [g_dev newCommandQueue]; id<MTLCommandBuffer> cb = [queue commandBuffer];
     id<MTLSharedEvent> gate = [g_dev newSharedEvent];
@@ -99,7 +128,7 @@ static void production_target(void) {
     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
     [blit copyFromTexture:(id<MTLTexture>)tex_get(old) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(4,4,1) toBuffer:pixels destinationOffset:0 destinationBytesPerRow:16 destinationBytesPerImage:64];
     [blit endEncoding]; [cb commit];
-    test_layer.drawableSize = CGSizeMake(2, 2); e = wc_try(pr, &draw, NULL);
+    test_layer.drawableSize = CGSizeMake(2, 2); g_fd_dw = &dw; e = wc_try(pr, &dw, NULL);
     CHECK("wc_try resize replaces target", e && e->pser != old && e->pw == 2 && e->ph == 2);
     CHECK("retired target remains registered while GPU work is queued", tex_get(old) != nil);
     gate.signaledValue = 1; [cb waitUntilCompleted];
@@ -112,9 +141,11 @@ static void production_target(void) {
     }
 cleanup:
     g_fd_dw = NULL; g_exec_next = NULL; g_wc_base = nil; g_wc_wser = 0;
-    mtl_tex_release(&w); serial_del(pg.serial); g_xv_npresent--; test_layer = nil;
+    mtl_tex_release(&sample); mtl_tex_release(&w); serial_del(pg.serial); g_xv_npresent--; test_layer = nil;
 }
 int main(void) { @autoreleasepool {
-    alarm(15); setbuf(stdout, NULL); mtl_init(); production_target(); lifecycle(); guards();
+    setenv("DM_PSO_PREBUILD", "0", 1); setenv("DM_PSO_HYBRID", "0", 1);
+    setenv("DM_PSO_ARCHIVE", "off", 1); setenv("DM_PSO_MANIFEST", "off", 1); setenv("DM_PSO_USER", "/dev/null", 1);
+    alarm(15); setbuf(stdout, NULL); mtl_init(); g_shmap = [NSMutableDictionary dictionary]; production_target(); lifecycle(); guards();
     printf("window copy: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

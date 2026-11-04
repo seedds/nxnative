@@ -164,7 +164,20 @@ static void on_key(NSEvent *e, int down) {
 static pad_slots g_slots;
 static GCController *g_held[DM_PLAYERS];   // the controller of each slot, kept alive while it holds it (the slot table keys on its pointer)
 static int g_merge, g_kbd_own;
-static int32_t pad_axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * DM_STICK_MAX); }
+static void pad_stick(float x, float y, int32_t *ox, int32_t *oy) {
+    float d = hypotf(x, y);
+    const float DZ = 0.05f;
+    const float SAT = 0.88f;
+    if (d <= DZ) {
+        *ox = 0;
+        *oy = 0;
+        return;
+    }
+    float s = fminf((d - DZ) / (SAT - DZ), 1.0f);
+    float m = (s / d) * DM_STICK_MAX;
+    *ox = (int32_t)lrintf(x * m);
+    *oy = (int32_t)lrintf(y * m);
+}
 // A controller's state for player p, GameController or raw HID: a pressed button or a stick past 15% hides the pointer (cursor_hide_for_input), a resting stick's drift does not
 static void pad_set(int p, uint64_t m, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     const int32_t dead = DM_STICK_MAX * 15 / 100;
@@ -184,7 +197,10 @@ static void pad_read(GCExtendedGamepad *g) {
     K(g.buttonMenu, DM_BTN_PLUS); K(g.buttonOptions, DM_BTN_MINUS); K(g.leftThumbstickButton, DM_BTN_LS); K(g.rightThumbstickButton, DM_BTN_RS);   // nil on pads without them: not pressed
     K(g.dpad.left, DM_BTN_LEFT); K(g.dpad.up, DM_BTN_UP); K(g.dpad.right, DM_BTN_RIGHT); K(g.dpad.down, DM_BTN_DOWN);
     #undef K
-    pad_set(p, m, pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value), pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value));
+    int32_t lx, ly, rx, ry;
+    pad_stick(g.leftThumbstick.xAxis.value, g.leftThumbstick.yAxis.value, &lx, &ly);
+    pad_stick(g.rightThumbstick.xAxis.value, g.rightThumbstick.yAxis.value, &rx, &ry);
+    pad_set(p, m, lx, ly, rx, ry);
 }
 // Home and Capture: without this macOS takes them as system gestures (Home opens the Games app). Capture has no function in the host, Home quits when it is held (hq_poll).
 // macOS 27 respects the claim when the Home button setting for apps lets the app decide (hq_log_setting names it in the log)

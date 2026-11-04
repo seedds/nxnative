@@ -428,6 +428,16 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
         b |= atomic_load(&g_sc_btn) | atomic_exchange(&g_sc_latch, 0);
         uint64_t c = atomic_load(&g_sc_axes); for (int i = 0; i < 4; i++) a[i] = pick(a[i], ax(c, i));
     }
+    float lmag = hypotf((float)a[0], (float)a[1]);
+    if (lmag > 32767.f) {
+        a[0] = (int32_t)lrintf((float)a[0] * (32767.f / lmag));
+        a[1] = (int32_t)lrintf((float)a[1] * (32767.f / lmag));
+    }
+    float rmag = hypotf((float)a[2], (float)a[3]);
+    if (rmag > 32767.f) {
+        a[2] = (int32_t)lrintf((float)a[2] * (32767.f / rmag));
+        a[3] = (int32_t)lrintf((float)a[3] * (32767.f / rmag));
+    }
     s->lx = a[0]; s->ly = a[1]; s->rx = a[2]; s->ry = a[3];
     b &= 0xffffull;
     if (s->lx < -STICK_THRESH) b |= 1u << 16;

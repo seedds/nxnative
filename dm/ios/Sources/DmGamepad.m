@@ -547,7 +547,20 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
 static pad_slots g_slots;
 static GCController *g_held[DM_PLAYERS];   // the controller of each slot, kept alive while it holds it (the slot table keys on its pointer)
 static int g_merge;
-static int32_t axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * 32767); }
+static void clamp_stick(float x, float y, int32_t *ox, int32_t *oy) {
+    float d = hypotf(x, y);
+    const float DZ = 0.05f;
+    const float SAT = 0.88f;
+    if (d <= DZ) {
+        *ox = 0;
+        *oy = 0;
+        return;
+    }
+    float s = fminf((d - DZ) / (SAT - DZ), 1.0f);
+    float m = (s / d) * 32767.f;
+    *ox = (int32_t)lrintf(x * m);
+    *oy = (int32_t)lrintf(y * m);
+}
 static void read_pad(GCExtendedGamepad *g) {
     int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0) return;
     dm_haptics_apple_controller(p, g.controller);
@@ -559,7 +572,10 @@ static void read_pad(GCExtendedGamepad *g) {
     if (g.leftThumbstickButton) K(g.leftThumbstickButton, B_LS); if (g.rightThumbstickButton) K(g.rightThumbstickButton, B_RS);
     K(g.dpad.left, B_LEFT); K(g.dpad.up, B_UP); K(g.dpad.right, B_RIGHT); K(g.dpad.down, B_DOWN);
     #undef K
-    dm_pad_set_player(p, m, axis(g.leftThumbstick.xAxis.value), axis(g.leftThumbstick.yAxis.value), axis(g.rightThumbstick.xAxis.value), axis(g.rightThumbstick.yAxis.value));
+    int32_t lx, ly, rx, ry;
+    clamp_stick(g.leftThumbstick.xAxis.value, g.leftThumbstick.yAxis.value, &lx, &ly);
+    clamp_stick(g.rightThumbstick.xAxis.value, g.rightThumbstick.yAxis.value, &rx, &ry);
+    dm_pad_set_player(p, m, lx, ly, rx, ry);
 }
 // Home and Capture: without this iOS takes them as system gestures (Home opens the Games overlay, Capture a screenshot); the app gives them no function
 static void pad_keep_system_buttons(GCController *c) { for (NSString *b in @[GCInputButtonHome, GCInputButtonShare]) c.physicalInputProfile.buttons[b].preferredSystemGestureState = GCSystemGestureStateDisabled; }

@@ -760,8 +760,11 @@ NVN(nvnEventBuilderSetStorage, void, NVNeventBuilder *b, const NVNmemoryPool *p,
 NVN(nvnEventInitialize, NVNboolean, NVNevent *e, const NVNeventBuilder *b) {
     const ev_builder_t *s = (const ev_builder_t *)b;
     if (!s->pool || !s->pool->mem) { LOG("[RED] EventInitialize has no storage"); return 0; }
-    *(ev_t *)e = (ev_t){MAGIC('E', 'V', 'N', 'T'), (volatile uint32_t *)(s->pool->mem + s->off)}; return 1;
+    *(ev_t *)e = (ev_t){MAGIC('E', 'V', 'N', 'T'), (volatile uint32_t *)(s->pool->mem + s->off), s->pool, s->off}; return 1;
 }
+// Assassin's Creed Revelations asks an event for its storage and maps that pool at start-up; a null pool crashed it in MemoryPoolMap
+NVN_NOPROTO(nvnEventGetMemoryPool, NVNmemoryPool *, const NVNevent *e) { return (NVNmemoryPool *)((const ev_t *)e)->pool; }
+NVN_NOPROTO(nvnEventGetMemoryOffset, int64_t, const NVNevent *e) { return ((const ev_t *)e)->off; }
 NVN(nvnEventFinalize, void, NVNevent *e) { ((ev_t *)e)->magic = 0; }
 NVN(nvnEventGetValue, uint32_t, const NVNevent *e) { return *((const ev_t *)e)->val; }
 static void ev_signal(const ev_t *e, int mode, uint32_t v) { if (mode == NVN_EVENT_SIGNAL_MODE_ADD) *e->val += v; else *e->val = v; }

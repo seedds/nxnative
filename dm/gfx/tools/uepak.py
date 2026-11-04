@@ -9,6 +9,9 @@
 # Unreal Engine 5.6 (FINAL FANTASY RESONANCE) has no shader code archive in its pak (FFRS-Switch.pak holds configs only): the cooker converted both libraries into its IoStore container
 #   (FFRS-Switch.utoc / .ucas, Oodle in 64 KB blocks, not encrypted) as one ShaderCodeLibrary chunk each (the tables) and one ShaderCode chunk per group of shaders, every group Oodle-compressed
 #   on its own (Toc, io_archive). Both layers need the game's decoder, which runs in the Mac host's tool mode (OodleHost); the libraries come out as version 2 archives with every shader decoded.
+# Unreal Engine 5.1 with bShareMaterialShaderCode off (DRAGON BALL Sparking! ZERO 2.0.73) has neither: each material keeps its shaders in its own package (pakchunk0/1-Switch.utoc, AES-encrypted,
+#   Oodle in 64 KB blocks, 311,936 packages, 12.5 GB) and the engine's global shaders are in Engine/GlobalShaderCache-SP_GLSL_SWITCH.bin of the encrypted pak, every shader an FShaderEntry whose
+#   code is one Oodle stream (io_inline_archive: 69,749 entries, 11,598 distinct, about 80 s through OodleHost); they come out as one version 2 archive with every shader decoded.
 # The AES key is in main (Unreal embeds it): the 32-byte window of main's read-only or data segment that decrypts the index start to its mount point ("../../../"; Octopath Traveler 0: one window of
 #   116,287 tried), or, where clang split the key into two 16-byte literals, the pair main's code loads and stores together (code_keys; DRAGON QUEST III HD-2D Remake). It is only kept in
 #   memory, never printed or written.
@@ -376,7 +379,7 @@ class Toc:
         self.methods = [b[o + mlen * i:o + mlen * (i + 1)].rstrip(b'\0').decode('latin1') for i in range(nmeth)]
         o += mlen * nmeth
         self.dir_index = b[o:o + dsz] if b[80] & 8 and not b[80] & 6 else b''   # the directory index follows unless a signature comes first (flag 4) or it is encrypted (flag 2)
-        self.index = {c: i for i, c in enumerate(self.ids)}; self.files = {}
+        self.index = {c: i for i, c in enumerate(self.ids)}; self.files = {}; self.last = (None, None)
     def of_type(self, t):
         """Indices of the chunks of one EIoChunkType (Unreal Engine 5 numbering: TOC version 4 and later)"""
         return [i for i, c in enumerate(self.ids) if c[11] == t] if self.version >= 4 else []
@@ -410,6 +413,7 @@ class Toc:
         if self.encrypted and not self.key: raise ValueError(f'{self.path}: the container is encrypted and no key was given')
         off, ln = self.ranges[i]; first = off // self.block_size; out = []
         for k in range(first, (off + ln - 1) // self.block_size + 1 if ln else first):
+            if self.last[0] == k: out.append(self.last[1]); continue   # small packages share a block: read in offset order, each block is decoded once
             at, size, raw, m = self.blocks[k]; f = self.ucas(at // self.part_size); f.seek(at % self.part_size)
             d = f.read((size + 15) & ~15 if self.encrypted else size)
             if self.encrypted: d = aes_decrypt(self.key, d)[:size]
@@ -421,6 +425,7 @@ class Toc:
             elif meth == 'Zlib': import zlib; out.append(zlib.decompress(d))
             elif meth == 'LZ4': import lz4.block; out.append(lz4.block.decompress(d, uncompressed_size=raw))
             else: raise ValueError(f'{self.path}: compression method {meth} is not read')
+            self.last = (k, out[-1])
         s = off - first * self.block_size
         return b''.join(out)[s:s + ln]
 
@@ -460,12 +465,62 @@ def io_archive(toc, i, decode, chunk=None):
             if (ents[s] >> 4) & 0x3FFFFFFF != g: raise ValueError(f'{toc.path}: shader {s} is listed in group {g} but names another')
             code[s] = d[at:nxt]
     if any(c is None for c in code): raise ValueError(f'{toc.path}: {sum(c is None for c in code)} shaders in no group')
-    out, off = bytearray(struct.pack('<II', ARCHIVE_VERSION, len(maph) // 20) + maph + struct.pack('<I', n) + shh + struct.pack('<I', len(maps))), 0
+    return decoded_tables(maph, shh, maps, [e & 0xF for e in ents], idx, code)
+
+def decoded_tables(maph, shh, maps, freqs, idx, code):
+    """A version 2 shader code archive of decoded shaders: shader map hashes and shader hashes (20 bytes each, concatenated), shader maps [(first index, count)], each shader's frequency
+    and code, the shader indices; no preload entries"""
+    out, off = bytearray(struct.pack('<II', ARCHIVE_VERSION, len(maph) // 20) + maph + struct.pack('<I', len(code)) + shh + struct.pack('<I', len(maps))), 0
     for a, c in maps: out += struct.pack('<IIII', a, c, 0, 0)
-    out += struct.pack('<I', n)
-    for e, c in zip(ents, code): out += struct.pack('<QIIB', off, len(c), len(c), e & 0xF); off += len(c)
+    out += struct.pack('<I', len(code))
+    for fr, c in zip(freqs, code): out += struct.pack('<QIIB', off, len(c), len(c), fr); off += len(c)
     out += struct.pack('<I', 0) + struct.pack(f'<I{len(idx)}I', len(idx), *idx)
     return bytes(out) + b''.join(code)
+
+IO_EXPORT_BUNDLE, OODLE_HEAD = 1, re.compile(rb'[\x0c\x4c\x8c\xcc][\x06\x0a\x0b\x0c]')   # a package's export data (Unreal Engine 5 numbering, Toc.of_type); an Oodle stream's first two bytes (Kraken, Mermaid, Selkie, Leviathan)
+
+def inline_entries(d, decode, found):
+    """The FShaderEntry records kept inline in an Unreal Engine 5.1 package or global shader cache (FShaderMapResourceCode, DRAGON BALL Sparking! ZERO): the code (i32 length, then one
+    Oodle stream, Mermaid 8C 0A in the game; or the LSLG record itself when compression did not pay), the raw size (i32) and the frequency (u8). Found by the stream's header and the length in
+    front, a raw size and a known frequency after; kept when the game's decoder (decode) turns it into an LSLG record of the known layout (lslg). found: {SHA-1: (frequency, record)}.
+    → how many candidates the decoder refused (in the game: about 7,600 byte patterns that only look like an entry, none of them with LSLG among its first literals)"""
+    import hashlib
+    bad = 0
+    for m in (*OODLE_HEAD.finditer(d), *re.finditer(b'LSLG', d)):
+        i = m.start(); n = int.from_bytes(d[i - 4:i], 'little') if i >= 4 else 0
+        if not 8 <= n <= len(d) - i - 5: continue
+        raw, fr = int.from_bytes(d[i + n:i + n + 4], 'little'), d[i + n + 4]
+        if fr not in FREQ: continue
+        if d[i:i + 4] == b'LSLG': s = d[i:i + n] if raw == n else None
+        elif not n < raw <= 1 << 24: continue
+        else:
+            try: s = decode(d[i:i + n], raw)
+            except ValueError: bad += 1; continue
+        if s and lslg(s): found.setdefault(hashlib.sha1(s).digest(), (fr, s))
+    return bad
+
+def io_inline_archive(tocs, chunk, paks, decode):
+    """Every shader kept inline (inline_entries) in the current copy of each package of the IoStore containers (chunk: chunk ID → (container, index), newest container first) and in the
+    global shader caches (Engine/GlobalShaderCache-*.bin) of the paks [(Pak, its path)], as one version 2 archive of decoded shaders, one shader map holding them all.
+    Both layers go through decode: the containers' Oodle blocks, then each shader. → (archive bytes, candidates refused)"""
+    found, bad = {}, 0
+    for p, path in paks:
+        for name in sorted(x for x in p.files if re.search(r'(^|/)GlobalShaderCache-[^/]*\.bin$', x)):
+            bad += inline_entries(p.read(name, decode), decode, found)
+    for t, i in sorted({(t, i) for t, i in chunk.values() if t.version >= 4 and t.ids[i][11] == IO_EXPORT_BUNDLE}, key=lambda v: (v[0].path, v[0].ranges[v[1]][0])):
+        bad += inline_entries(t.read(i, decode), decode, found)
+    if not found: return None, bad
+    keys = sorted(found); n = len(keys)
+    return decoded_tables(bytes(20), b''.join(keys), [(0, n)], [found[k][0] for k in keys], list(range(n)), [found[k][1] for k in keys]), bad
+
+class Lazy:
+    """A decoder made on its first call (make() → decode, e.g. an OodleHost), so a game whose shaders need none starts no Mac host"""
+    def __init__(self, make): self.make, self.d = make, None
+    def __call__(self, comp, n):
+        if self.d is None: self.d = self.make()
+        return self.d(comp, n)
+    def close(self):
+        if self.d is not None: self.d.close()
 
 def mount_order(path):
     """A container's place in the mount stack: the game's container first, then the numbered patch chunks in order. A chunk ID that two containers both have resolves to the later container, as in
@@ -548,7 +603,7 @@ def job(romfs, main_nso, work, decode=None):
     chunk = {}
     for t in reversed(tocs):
         for k, c in enumerate(t.ids): chunk.setdefault(c, (t, k))
-    seen = set()
+    seen, opened = set(), []
     for t in reversed(tocs):
         for i in t.of_type(IO_SHADER_LIBRARY):
             if t.ids[i] in seen: continue   # a library the patch container replaces: its chunk ID is the same, and its tables are the current ones
@@ -561,7 +616,7 @@ def job(romfs, main_nso, work, decode=None):
         if enc and key is None:
             key = find_key(img, lo, hi, pak)
             if key is None: raise ValueError(f'{pak}: the index is encrypted and no key in main (a 32-byte window or two 16-byte literals its code stores together) decrypts it')
-        p = Pak(pak, key)
+        p = Pak(pak, key); opened.append((p, pak))
         for path in sorted(x for x in p.files if x.endswith('.ushaderbytecode')):
             b = p.read(path); a = archive(b, f'{pak}: {path}'); name = os.path.basename(path)
             comp = [i for i, (_, size, raw, _) in enumerate(a['shaders']) if size != raw]
@@ -572,6 +627,15 @@ def job(romfs, main_nso, work, decode=None):
             for i in comp:
                 off, size, raw, _ = a['shaders'][i]; recs.append((name, i, b[a['code'] + off:a['code'] + off + size], raw))
             listing.append(dict(name=name, pak=os.path.relpath(pak, romfs), path=path, shaders=len(a['shaders']), compressed=len(comp), compression=how))
+    if not listing and any(t.of_type(IO_EXPORT_BUNDLE) for t in tocs):   # no shader library anywhere: the shaders are inline in the packages (Unreal Engine 5.1, bShareMaterialShaderCode off)
+        if any(t.encrypted for t in tocs) and key is None: raise ValueError(f'{tocs[0].path}: the IoStore containers are encrypted, and no encrypted pak to find main\'s key with')
+        if not decode: raise ValueError(f'{tocs[0].path}: shaders inline in IoStore packages need the game\'s decoder (decode)')
+        for t in tocs: t.key = key
+        b, bad = io_inline_archive(tocs, chunk, opened, decode)
+        if b:
+            name = 'ShaderArchive-IoStoreInline.ushaderbytecode'; open(os.path.join(work, 'archives', name), 'wb').write(b)
+            listing.append(dict(name=name, pak=os.path.relpath(os.path.dirname(tocs[0].path), romfs), path=f'inline in the packages ({bad:,} look-alike byte patterns refused)',
+                                shaders=len(archive(b)['shaders']), compressed=0, compression='IoStore inline, decoded'))
     with open(os.path.join(work, 'oodle.job'), 'wb') as f:
         f.write(struct.pack('<II', JOB_MAGIC, len(recs)))
         for _, _, c, raw in recs: f.write(struct.pack('<II', len(c), raw)); f.write(c)

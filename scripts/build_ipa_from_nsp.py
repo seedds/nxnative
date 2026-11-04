@@ -1678,17 +1678,18 @@ def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g):
         jd, rd, log = work / f'tmp/ue_job_{v}', work / 'tmp/ue_run', logs / f'ue_decode_{v}.log'
         rmtree(jd); rmtree(rd)
         for s in ('save', 'temp'): (rd / s).mkdir(parents=True)
-        dec = None
-        if uepak.io_shader_tocs(str(rfs.source(d))):
+        def oodle_host(v=v):
+            nonlocal host
             if not host:
                 PROG.set(step='building the Mac host')
                 host = build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
-            dec = uepak.OodleHost(host, patched, env)
-        PROG.set(step=f'{v}: shader archives out of the paks' + (' and IoStore containers' if dec else ''))
+                PROG.set(step=f'{v}: shader archives out of the paks and IoStore containers')
+            return uepak.OodleHost(host, patched, env)
+        dec = uepak.Lazy(oodle_host)   # the IoStore containers' libraries (UE 5.6) or inline shaders (UE 5.1) only
+        PROG.set(step=f'{v}: shader archives out of the paks' + (' and IoStore containers' if uepak.io_tocs(str(rfs.source(d))) else ''))
         try: listing, n = uepak.job(str(rfs.source(d)), str(d / 'ExeFS/main'), str(jd), decode=dec)
         except ValueError as e: raise BuildError(str(e)) from e   # a damaged pak, archive or main (uepak's errors name it)
-        finally:
-            if dec: dec.close()
+        finally: dec.close()
         if not listing: raise BuildError(f'the RomFS has Unreal paks, but none under {rfs.source(d)} holds a shader code archive: where the shaders are has to be found first')
         say(f'{v}: ' + '; '.join(f'{x["name"]} {x["shaders"]:,} shaders' + (f' ({x["compression"]})' if x.get('compression') else '') for x in listing)
             + (f'; decoding {n:,} with the game\'s Oodle in the Mac host' if n else ''))
@@ -1705,7 +1706,7 @@ def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g):
                 raise BuildError(f'the Oodle decode run stopped with exit {rc} (host output: {log})')
         out = d / 'ue_shaders.partial'; rmtree(out)
         uepak.finish(str(jd), str(out)); (out / 'stamp').write_text(ue_stamp(d))
-        swap_in(out, d / 'ue_shaders'); rmtree(jd); rmtree(rd); total += n + sum(x['shaders'] for x in listing if x['compression'] == 'IoStore, decoded')
+        swap_in(out, d / 'ue_shaders'); rmtree(jd); rmtree(rd); total += n + sum(x['shaders'] for x in listing if x['compression'].startswith('IoStore'))
     PROG.end(f'{total:,} shaders in {hms(time.time() - t0)}')
 
 

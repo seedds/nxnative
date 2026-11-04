@@ -75,9 +75,9 @@ def check(W, a, k):
     if len(calls) < 4 or not calls[2] < k < calls[3]: return None, 'not four calls with the page count before the last'
     b0, b1, b2, b3 = calls[:4]
     xa = W[a] & 31
-    g12 = [j for j in range(b1, b2) if loaded(W[j], G12)]
-    if len(g12) != 2 or load_imm(W[g12[1]])[0] != 0: return None, 'the second reservation is not 12 GB from x0'
-    xb = load_imm(W[g12[0]])[0]
+    g12 = [(j, value) for j in range(b1, b2) if (value := load_imm(W[j])) is not None and value[1] == G12]
+    if len(g12) != 2 or g12[1][1][0] != 0: return None, 'the second reservation is not 12 GB from x0'
+    xb = g12[0][1][0]
     if not 19 <= xb <= 28: return None, 'the 12 GB end is not in a saved register'
     # the object's register: mov xS, x0, before the first call
     movs = [W[j] & 31 for j in range(max(0, a - 8), b0) if W[j] & 0xFFFFFFE0 == 0xAA0003E0 and 19 <= W[j] & 31 <= 28]
@@ -106,7 +106,7 @@ def check(W, a, k):
     if not 0 <= r < len(W) - 12: return None, 'the reservation function is out of the text'
     end = next((j for j in range(r, r + 12) if is_bl(W[j])), None)
     if end is None or not any(W[j] & 0xFFE0FFFF == 0xAA0003E1 for j in range(r, end)): return None, 'the reservation function does not overwrite x1'
-    return {'sizes': a, 'end': g12[0], 'total': g12[1], 'pages': k, 'w1_meta': args[0], 'x2_meta': args[1], 'w1': args[2], 'x2': args[3], 'field': f, 'xs': xs}, ''
+    return {'sizes': a, 'end': g12[0][0], 'total': g12[1][0], 'pages': k, 'w1_meta': args[0], 'x2_meta': args[1], 'w1': args[2], 'x2': args[3], 'field': f, 'xs': xs}, ''
 
 
 def find(img, text_end):

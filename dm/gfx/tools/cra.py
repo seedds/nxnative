@@ -105,7 +105,7 @@ def index_of(nro):
             for k in range(i - 3, i):
                 for reg in range(31):
                     if (a := adrp_add(w, k, reg)) is not None: sums = a
-    if table is None or sums is None: raise Error('this NRO has no CRA file table (or another layout of it)')
+    if table is None or count is None or sums is None: raise Error('this NRO has no CRA file table (or another layout of it)')
     for i in range(len(w) - 4):   # ldrsb w, [x, #3]; tbnz; and; adrp; add
         if w[i] & 0xfffffc00 == 0x39c00c00 and w[i + 1] & 0xff000000 == 0x37000000 and (w[i + 2] & 0xfffffc00) == 0x92401c00:
             for reg in range(31):
@@ -212,7 +212,9 @@ def lz_undo(d, at):   # kinds 0x50 and 0x60 (nro0+0x1237f04): flag bytes, each n
 
 def zstd_mod():
     try: from compression import zstd
-    except ImportError: from backports import zstd
+    except ImportError:
+        import importlib
+        zstd = importlib.import_module('backports.zstd')
     return zstd
 
 

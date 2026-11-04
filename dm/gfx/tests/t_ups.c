@@ -5,6 +5,7 @@
 // Which render targets scale (shape, flags, screen-like size, the 4K ceiling: IMAGE no longer keeps one unscaled), and which image bindings demote their texture.
 #include "../nvn/nvn_ups.h"
 #include <stdio.h>
+#include <string.h>
 
 static int fails;
 #define CHECK(cond, ...) do { if (!(cond)) { fails++; printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
@@ -94,6 +95,56 @@ int main(void) {
     CHECK(nvn_ups_img_writes(NVN_RB_IMG, 1, 0) && nvn_ups_img_writes(NVN_RB_IMG, 0, 1) && nvn_ups_img_writes(NVN_RB_IMGU, 1, 0), "a written or atomic image slot demotes its texture, its handle in an image slot or in a uniform buffer");
     CHECK(!nvn_ups_img_writes(NVN_RB_IMG, 0, 0) && !nvn_ups_img_writes(NVN_RB_TEX, 1, 0) && !nvn_ups_img_writes(NVN_RB_SBUFP, 1, 0), "read-only images, textures and buffers do not");
     CHECK(nvn_ups_img_desc(NVN_RB_IMG, 0) && nvn_ups_img_desc(NVN_RB_IMG, 1) && !nvn_ups_img_desc(NVN_RB_IMG, 4) && !nvn_ups_img_desc(NVN_RB_TEX, 0), "single images are image descriptors; arrays and textures are not");
+
+    // The game's upscaler resolved by the host. Shape: KTGL's FSR-style pass binds a constant buffer, one sampled texture with its sampler and one written image
+    { int ti = -1, oi = -1;
+      nvn_rbind fsr[4] = {{.kind = NVN_RB_CBUF}, {.kind = NVN_RB_TEX, .reg = 0}, {.kind = NVN_RB_SAMP}, {.kind = NVN_RB_IMG, .reg = 0, .rw = 1}};
+      CHECK(nvn_ups_bypass_shape(fsr, 4, &ti, &oi) && ti == 1 && oi == 3, "one sampled texture and one written image: the upscaler's shape (bindings %d, %d)", ti, oi);
+      nvn_rbind two_tex[3] = {{.kind = NVN_RB_TEX, .reg = 0}, {.kind = NVN_RB_TEX, .reg = 1}, {.kind = NVN_RB_IMG, .rw = 1}};
+      CHECK(!nvn_ups_bypass_shape(two_tex, 3, &ti, &oi), "a second texture (a depth, a history) is a reconstruction, not a resampling");
+      nvn_rbind two_img[3] = {{.kind = NVN_RB_TEX}, {.kind = NVN_RB_IMG, .reg = 0, .rw = 1}, {.kind = NVN_RB_IMG, .reg = 1, .rw = 1}};
+      CHECK(!nvn_ups_bypass_shape(two_img, 3, &ti, &oi), "two written images are not one output");
+      nvn_rbind ro_img[2] = {{.kind = NVN_RB_TEX}, {.kind = NVN_RB_IMG, .rw = 0}};
+      CHECK(!nvn_ups_bypass_shape(ro_img, 2, &ti, &oi), "a read-only image is an input, so there is no output");
+      nvn_rbind atom[2] = {{.kind = NVN_RB_TEX}, {.kind = NVN_RB_IMG, .rw = 1, .atom = 1}};
+      CHECK(!nvn_ups_bypass_shape(atom, 2, &ti, &oi), "an atomic image is a counter, not an output");
+      nvn_rbind ubo_tex[3] = {{.kind = NVN_RB_TEXU, .n = 1}, {.kind = NVN_RB_TEX}, {.kind = NVN_RB_IMG, .rw = 1}};
+      CHECK(!nvn_ups_bypass_shape(ubo_tex, 3, &ti, &oi), "a bindless texture beside the sampled one is a second input");
+      nvn_rbind no_tex[2] = {{.kind = NVN_RB_CBUF}, {.kind = NVN_RB_IMG, .rw = 1}};
+      CHECK(!nvn_ups_bypass_shape(no_tex, 2, &ti, &oi), "no sampled texture: nothing to resample");
+      nvn_rbind with_buf[4] = {{.kind = NVN_RB_SBUFP, .rw = 1}, {.kind = NVN_RB_TEX}, {.kind = NVN_RB_SUPPORT}, {.kind = NVN_RB_IMG, .rw = 1}};
+      CHECK(nvn_ups_bypass_shape(with_buf, 4, &ti, &oi) && ti == 1 && oi == 3, "buffers and the support buffer do not change the shape"); }
+    // The rectangle of the scene the upscaler reads, from FSR 1's EASU constants: Hyrule Warriors' first field renders 1152x648 of its 1600x900 scene into 1920x1080
+    { uint32_t vw = 0, vh = 0;
+      float c[16] = {1152.0f / 1920, 648.0f / 1080, 0.5f * (1152.0f / 1920) - 0.5f, 0.5f * (648.0f / 1080) - 0.5f, 1.0f / 1600, 1.0f / 900, 1.0f / 1600, -1.0f / 900, -1.0f / 1600, 2.0f / 900, 1.0f / 1600, 2.0f / 900, 0, 4.0f / 900, 0, 0};
+      CHECK(nvn_ups_fsr_rect(c, 1600, 900, 1920, 1080, &vw, &vh) && vw == 1152 && vh == 648, "EASU constants name the 1152x648 viewport of the 1600x900 scene (got %ux%u)", vw, vh);
+      c[0] = 1; c[1] = 1; c[2] = c[3] = 0;
+      CHECK(!nvn_ups_fsr_rect(c, 1600, 900, 1920, 1080, &vw, &vh), "a viewport of the output's size lies past the 1600x900 texture: refused");
+      c[0] = 1600.0f / 1920; c[1] = 900.0f / 1080; c[2] = 0.5f * c[0] - 0.5f; c[3] = 0.5f * c[1] - 0.5f;
+      CHECK(nvn_ups_fsr_rect(c, 1600, 900, 1920, 1080, &vw, &vh) && vw == 1600 && vh == 900, "the whole scene when the viewport is the texture (got %ux%u)", vw, vh);
+      CHECK(!nvn_ups_fsr_rect(c, 1280, 720, 1920, 1080, &vw, &vh), "constants of another texture size are not this scene's: refused");
+      float d[16]; memcpy(d, c, sizeof d); d[2] = 0;
+      CHECK(!nvn_ups_fsr_rect(d, 1600, 900, 1920, 1080, &vw, &vh), "con0.zw not the half terms: not EASU's constants");
+      memcpy(d, c, sizeof d); d[7] = 1.0f / 900;
+      CHECK(!nvn_ups_fsr_rect(d, 1600, 900, 1920, 1080, &vw, &vh), "con1.w positive: not EASU's constants");
+      float z[16] = {0};
+      CHECK(!nvn_ups_fsr_rect(z, 1600, 900, 1920, 1080, &vw, &vh), "zeros are not constants");
+      memcpy(d, c, sizeof d); d[0] = 1.1f; d[2] = 0.5f * d[0] - 0.5f;
+      CHECK(!nvn_ups_fsr_rect(d, 1600, 900, 1920, 1080, &vw, &vh), "a viewport past the texture is refused"); }
+    // Sizes (the scene's rectangle in the game's pixels, as the host holds it, the output): Hyrule Warriors' 1600x900 scene into its 1920x1080 image
+    CHECK(nvn_ups_bypass_ok(1152, 648, 2304, 1296, 1920, 1080), "2x: a 1152x648 viewport is 2304x1296, past the 1920x1080 output");
+    CHECK(!nvn_ups_bypass_ok(1152, 648, 1728, 972, 1920, 1080), "1.5x: the same viewport is 1728x972, under the output: the game's kernel runs");
+    CHECK(nvn_ups_bypass_ok(1600, 900, 3200, 1800, 1920, 1080), "2x: a 3200x1800 scene holds more than the 1920x1080 output");
+    CHECK(nvn_ups_bypass_ok(1600, 900, 2400, 1350, 1920, 1080), "1.5x: 2400x1350 still past 1920x1080");
+    CHECK(!nvn_ups_bypass_ok(1600, 900, 1600, 900, 1920, 1080), "1x (the scene at the game's size): the game's kernel runs");
+    CHECK(!nvn_ups_bypass_ok(1200, 675, 1800, 1012, 1920, 1080), "a dynamic resolution whose scaled size falls under the output: the game's kernel runs");
+    CHECK(nvn_ups_bypass_ok(1200, 675, 2400, 1350, 1920, 1080), "the same scene at 2x is still past the output");
+    CHECK(!nvn_ups_bypass_ok(1600, 900, 3200, 1800, 1600, 900), "an output of the scene's size is a per-pixel effect, not an upscale");
+    CHECK(!nvn_ups_bypass_ok(1600, 900, 3200, 1800, 800, 450), "a smaller output is the game's own downsample");
+    CHECK(!nvn_ups_bypass_ok(1600, 900, 3200, 1800, 1920, 1200), "another shape (1920x1200) is not the whole scene resampled");
+    CHECK(!nvn_ups_bypass_ok(1600, 900, 3200, 1800, 3840, 2160), "an output past the scene the host holds would need an upscale, not a resolve");
+    CHECK(!nvn_ups_bypass_ok(1600, 900, 3200, 1800, 1920, 900), "larger in one direction and equal in the other is not of the same shape");
+    CHECK(!nvn_ups_bypass_ok(0, 0, 0, 0, 1920, 1080) && !nvn_ups_bypass_ok(1600, 900, 3200, 1800, 0, 0), "empty sizes are refused");
 
     printf("t_ups: %s (%d failures)\n", fails ? "FAIL" : "OK", fails);
     return fails ? 1 : 0;

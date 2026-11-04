@@ -1,7 +1,8 @@
 // Resolution upscaling (DM_UPSCALE): the pure arithmetic of nvn_mtl.m's upscaling section, kept apart from Metal so a CPU-only unit test (tests/t_ups.c) can check it:
 // regions of the game's pixels mapped into a scaled texture's, occlusion-query sample counts brought back to the game's pixels, the present crop of a scaled window texture, and
 // which reflection bindings count as texture and image descriptors of the shader translator (whose render_scale entries the host fills per bound texture); also which
-// render targets are scaled by their flags and size (IMAGE included, a 4K ceiling) and which image bindings write their texture, so a scaled one is demoted first.
+// render targets are scaled by their flags and size (IMAGE included, a 4K ceiling) and which image bindings write their texture, so a scaled one is demoted first; and which
+// compute dispatch is the game's own spatial upscaler reading a scaled scene, whose output the host resolves itself (nvn_ups_bypass_shape, nvn_ups_fsr_rect, nvn_ups_bypass_ok).
 #pragma once
 #include <stdint.h>
 #include <math.h>
@@ -92,4 +93,54 @@ static inline int nvn_ups_crop(const int crop[4], double f, long sw, long sh, in
 // arrays) come after them and are never scaled, and images, samplers and buffers are other lists. The reflection keeps the MSL argument order, which is the binding order.
 static inline int nvn_ups_tex_desc(int kind, int n) {
     return (kind == NVN_RB_TEX || kind == NVN_RB_TEXU || kind == NVN_RB_TBUF) && n <= 1;
+}
+
+// The game's own spatial upscaler, resolved by the host (nvn_mtl.m ups_bypass_encode; DM_UPSCALE_GAME). A game that renders its 3D below its output size upscales it in a
+// compute dispatch whose tap offsets its constants computed for the game's sizes (KTGL's FSR-style pass in Hyrule Warriors: Age of Imprisonment: 48 gathers at normalized
+// coordinates of a 1600x900 scene into a 1920x1080 image). With the scene rendered scaled (3200x1800 at 2x), those taps land between texels and span the factor times the
+// intended radius, and the player sees a softened picture, while the host already holds more texels than the output needs. The host then writes the output itself, the scaled
+// scene filtered down over each output texel's footprint; the game's later passes (sharpening, the copy to the swap chain) read the output unchanged.
+// Shape: the dispatch binds exactly one sampled 2D texture (the scene) and exactly one written image (the output), no other texture or image: a pass with more inputs
+// (a depth, a motion vector, a history) is a reconstruction whose output is not a resampling of one texture. Returns 1 with the two bindings' indices (b: the shader's
+// reflection bindings; written images as nvn_ups_img_writes: an atomic image is not an output)
+static inline int nvn_ups_bypass_shape(const nvn_rbind *b, int nb, int *ti, int *oi) {
+    int t = -1, o = -1;
+    for (int i = 0; i < nb; i++) {
+        int k = b[i].kind;
+        if (k == NVN_RB_TEX && b[i].n <= 1 && t < 0) t = i;
+        else if (k == NVN_RB_IMG && b[i].rw && !b[i].atom && b[i].n <= 1 && o < 0) o = i;
+        else if (k == NVN_RB_TEX || k == NVN_RB_TEXU || k == NVN_RB_TEXD || k == NVN_RB_TEXA || k == NVN_RB_TEXP || k == NVN_RB_TBUF || k == NVN_RB_IMG) return 0;
+    }
+    if (t < 0 || o < 0) return 0;
+    *ti = t; *oi = o; return 1;
+}
+
+// The part of the scene the upscaler reads, from the upscaler's own constants. A game with dynamic resolution renders into a rectangle at the origin of a fixed texture (KTGL:
+// 1152x648 of its 1600x900 scene in the first field), so the whole texture must not be taken as the input: the rest holds stale texels. FSR 1's EASU constants (FsrEasuCon in
+// ffx_fsr1.h; c: the first four vec4 of the kernel's constant buffer) name both the rectangle and the texture: con0.xy = viewport / output size, con0.zw = con0.xy / 2 - 1/2,
+// con1.xy = 1 / texture size, con1.zw = (con1.x, -con1.y). The texture terms must agree with the bound scene (tw x th, the game's size) and con0.zw with con0.xy, which is
+// the fingerprint that the buffer holds these constants and not another kernel's: the viewport is then con0.xy × (ow, oh), rounded, within the texture. Returns 1 with it.
+// (Without it the dispatch is left to the game's kernel: a kernel whose rectangle the host cannot read may read any part of the scene.) Tolerances: a relative 1e-4 on the
+// reciprocals (floats computed by the game), 1e-3 on the half terms
+static inline int nvn_ups_fsr_rect(const float c[16], uint32_t tw, uint32_t th, uint32_t ow, uint32_t oh, uint32_t *vw, uint32_t *vh) {
+    if (!tw || !th || !ow || !oh) return 0;
+    double rx = 1.0 / tw, ry = 1.0 / th;
+    if (fabs(c[4] - rx) > rx * 1e-4 || fabs(c[5] - ry) > ry * 1e-4 || fabs(c[6] - rx) > rx * 1e-4 || fabs(c[7] + ry) > ry * 1e-4) return 0;
+    if (!(c[0] > 0) || !(c[1] > 0) || fabs(c[2] - (0.5 * c[0] - 0.5)) > 1e-3 || fabs(c[3] - (0.5 * c[1] - 0.5)) > 1e-3) return 0;
+    long w = lround((double)c[0] * ow), h = lround((double)c[1] * oh);
+    if (w < 1 || h < 1 || w > (long)tw || h > (long)th) return 0;
+    *vw = (uint32_t)w; *vh = (uint32_t)h; return 1;
+}
+
+// Whether such a dispatch is an upscale the host resolves: the scene the upscaler reads is iw x ih in the game's pixels (its rectangle, nvn_ups_fsr_rect) and sw x sh texels as
+// the host made it, the output image ow x oh (at the game's size: a written image is demoted before the dispatch). The output must be larger than the game's scene in at least
+// one direction and smaller in none (a pass between equal sizes is a per-pixel effect, a smaller output a downsample the game filters itself), of the same shape within 1 %
+// (the scene maps to the whole output), and at most the scene the host holds in both directions (the resolve only ever filters down; at 1x, or when the dynamic resolution
+// drops under the output over the factor, the game's kernel runs as before). 1.5x: a 1600x900 scene is 2400x1350, still past 1920x1080; 2x: 3200x1800
+static inline int nvn_ups_bypass_ok(uint32_t iw, uint32_t ih, uint32_t sw, uint32_t sh, uint32_t ow, uint32_t oh) {
+    if (!iw || !ih || !ow || !oh || sw <= iw || sh <= ih) return 0;
+    if (ow < iw || oh < ih || (ow == iw && oh == ih)) return 0;
+    if (ow > sw || oh > sh) return 0;
+    double ai = (double)iw / ih, ao = (double)ow / oh;
+    return ao > ai * 0.99 && ao < ai * 1.01;
 }

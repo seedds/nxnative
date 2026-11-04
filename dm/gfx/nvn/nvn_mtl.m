@@ -2185,7 +2185,8 @@ static int tex_atomic_capable(id<MTLTexture> base) { return pf_r32i(base.pixelFo
 // Compute dispatches keep the game's thread-group counts: the images a dispatch (or a draw) writes are of the game's size, and it reads scaled textures through the same per-binding
 // entries, image loads included (render_scale after the texture descriptors: nvn_ups_img_desc). The NVN IMAGE flag does not keep a texture unscaled, since engines set it on
 // render targets no shader writes (KTGL on every one); a scaled texture bound to a written or atomic image slot is demoted first (image_prepare, nvn_ups_img_writes; why not
-// scale the dispatch instead: the comment before ups_pick).
+// scale the dispatch instead: the comment before ups_pick). A game's own spatial upscaler, a dispatch reading one scaled scene into one written image smaller than the scene
+// the host holds, is not run on the scene it was not computed for: the host writes its output itself, the scene filtered down (ups_bypass_encode; DM_UPSCALE_GAME).
 // Mixed passes demote (ups_demote_pass): when the attachments of a pass disagree, each scaled one is replaced by a texture of the game's size with its content drawn down, and
 // the texture is never scaled again (ups_pick, g_ups_demoted), as Ryujinx blacklists a texture that must match an unscalable one. Only the attachments the pass takes vote: a
 // depth that no draw of the pass tests or writes is left out of the pass by the depth lookahead (pass_ds_need, run for such a pass off TBDR too: ups_pass_mixed_depth), so an
@@ -4670,6 +4671,7 @@ static void shmap_read(void) {
     NSMutableDictionary *geo_mesh;   // a vertex shader's mesh entries by lean kernel key (geo_mesh_fn; NSNull: none)
     uint8_t up_mfx;   // a compute shader that is the game's own upscaler (DM_GAME_UPSCALER_KEYS, from the shader map): 0 not decided, 1 drawn by MetalFX when DM_UPSCALER=metalfx, 2 not one or one its colour keeps (up_mfx_wanted)
     uint8_t up_color;   // such a shader's colour, from its code at load with DM_UPSCALER=metalfx (up_mfx_color; UP_COLOR_UNREAD otherwise)
+    uint8_t up_byp;   // a compute shader shaped like a spatial upscaler (one sampled texture, one written image: nvn_ups_bypass_shape): 0 not decided, 1 yes, 2 no (ups_bypass_encode)
     int gs_loc, lay_loc; char gs_comp, lay_comp;   // a slice-writing geometry shader (no function: the layer comes from input gs_loc.gs_comp) / a vertex shader with layer entry points writing output lay_loc.lay_comp (dmsh_build.py gs_slice, vs_layer_entry); -1 = none
     // The argument buffer encoded last time
     id<MTLBuffer> ab_buf; uint64_t ab_gpu; size_t ab_off; uint64_t ab_pass; uint32_t ab_binst; uint64_t ab_pgen;   // ab_pass: serial of the render pass that encoded this argument block - reused only within the same pass (the arena holding a block from another pass / another submission may already have been reclaimed and rewritten); ab_pgen: g_psnap_gen when it was encoded (pools, pool_gpu)
@@ -11026,6 +11028,7 @@ static int lc_keeps(uint32_t op) {
 
 static void dispatch(const p_dispatch *dp);
 static int up_mfx_wanted(NvShader *cs); static int up_mfx_encode(NvShader *cs);   // a game's upscaler through MetalFX (see up_mfx_encode)
+static int ups_bypass_encode(NvShader *cs);   // resolution upscaling: a game's upscaler reading a scaled scene, resolved by the host (see ups_bypass_encode)
 // ---------- Compute dispatches moved ahead of the render pass they would split (DM_NVN_CS_HOIST) ----------
 // Metal cannot run a compute dispatch inside a render pass, so a dispatch between two draws of one pass ends it, and on a tile-based GPU every attachment is stored and loaded again:
 // Breath of the Wild runs one GPU particle dispatch per emitter between the G-buffer's effect draws, six to eight splits of a 1600x900 G-buffer a frame (about 350 MB of attachment
@@ -11685,6 +11688,7 @@ static void dispatch(const p_dispatch *dp) {
     rp_flush();   // A full clear with no draw after it waits for the next pass on its targets, but it comes before this dispatch, which may read or write them as images: land it first, as copy_t2t does
     image_prepare(prog_get(S.cprog), 0x20);
     if (up_mfx_wanted(cs) && !dp->ind && up_mfx_encode(cs)) return;   // the game's upscaler, drawn by MetalFX instead (DM_UPSCALER=metalfx)
+    if (g_ups > 1 && !dp->ind && ups_bypass_encode(cs)) return;   // resolution upscaling: the game's upscaler reading a scene the host made larger than its output: resolved by the host (DM_UPSCALE_GAME)
     int own = dispatch_own();
     if (own && g_blit) { enc_b_end(g_blit); g_blit = nil; }
     id<MTLComputeCommandEncoder> ce = own ? pg_compute() : (id<MTLComputeCommandEncoder>)dispatch_enc();
@@ -13531,6 +13535,106 @@ static int up_mfx_encode(NvShader *cs) {
     if (!g_up_mfx_n++) MLOG("upscaler: first dispatch of %s drawn by MetalFX, %dx%d at %d,%d of %lux%lu (format %lu) → %dx%d at %d,%d of %lux%lu (format %lu)%s", cs->key, ir.width, ir.height, ir.xoffset, ir.yoffset,
                             (unsigned long)in.width, (unsigned long)in.height, (unsigned long)in.pixelFormat, orr.width, orr.height, orr.xoffset, orr.yoffset, (unsigned long)out.width, (unsigned long)out.height,
                             (unsigned long)out.pixelFormat, direct ? ", straight" : srgb ? ", through RGBA16F, decoded from sRGB" : ", through RGBA16F");
+    return 1;
+}
+// ---------- Resolution upscaling: a game's own spatial upscaler resolved by the host (DM_UPSCALE_GAME) ----------
+// A game that renders its 3D below its output size and upscales it in a compute dispatch (KTGL's FSR-style pass in Hyrule Warriors: Age of Imprisonment, its README:
+// 48 gathers of the 1600x900 scene at normalized coordinates into a 1920x1080 image, then a sharpening pass and the copy into the swap chain) reads, with DM_UPSCALE, a
+// scene the host made larger than its output (3200x1800 at 2x, 2400x1350 at 1.5x) with tap offsets its constants computed for the game's sizes: the taps land between
+// texels and span the factor times their radius, and the picture comes out softer than at 1x. The host then writes the output image itself: the scaled scene filtered down
+// over each output texel's footprint (dm/gfx/msl/ups_resolve.metal; DM_UPSCALE_GAME_FILTER picks box, tent or Lanczos-2, read at use for side-by-side shots), bound as the
+// game's kernel binds the two textures (an sRGB scene decodes on read, the output encodes on write), so the later passes run unchanged on a sharper output.
+// The rule is generic (nvn_ups.h): a dispatch shaped like a spatial upscaler (one sampled 2D texture, one written image, nothing else: nvn_ups_bypass_shape, decided once
+// per shader) whose constants are FSR 1's EASU constants for the bound scene (nvn_ups_fsr_rect: they name the rectangle of the scene the kernel reads, which a dynamic
+// resolution moves inside the fixed texture, 1152x648 of 1600x900 in the first field) and whose output is larger than that rectangle in the game's pixels, of the same shape,
+// and no larger than the rectangle as the host holds it (nvn_ups_bypass_ok, checked at each dispatch). Everything else, an indirect dispatch, a kernel without those
+// constants (its rectangle unknown: logged once), or a texture the kernel cannot read or write (integer, depth, compressed, multisample) leaves the game's kernel to run.
+// DM_UPSCALE_GAME=keep runs the game's kernel instead (the player's comparison; read at each such dispatch, so DM_CTL's env command switches
+// it while the game runs); at 1x nothing changes. Unlike DM_UPSCALER=metalfx this keeps the game's look (the output is the game's own render, filtered), so it is the default
+typedef struct { uint32_t ow, oh, sw, sh, filter; } ups_byp_params;   // as dm/gfx/msl/ups_resolve.metal's P (sw x sh: the rectangle of the scaled scene read, at its origin)
+enum { UPS_BYP_BOX, UPS_BYP_TENT, UPS_BYP_LANCZOS };
+#define UPS_BYP_FILTER_DEFAULT UPS_BYP_LANCZOS   // compared in shots on Hyrule Warriors' first field at 2x (its README, Resolution upscaling)
+static uint64_t g_ups_byp_n, g_ups_byp_kept;   // dispatches resolved by the host; upscaler-shaped dispatches left to the game's kernel (sizes or textures the resolve does not take)
+void mtl_ups_bypass_stats(uint64_t *n, uint64_t *kept) { *n = g_ups_byp_n; *kept = g_ups_byp_kept; }
+// DM_UPSCALE_GAME: bypass (the default) or keep; read at each upscaler-shaped dispatch (one or two a frame), so the DM_CTL env command changes it while the game runs
+static int ups_bypass_on(void) {
+    const char *e = getenv("DM_UPSCALE_GAME");
+    if (!e || !*e || !strcmp(e, "bypass")) return 1;
+    if (!strcmp(e, "keep")) return 0;
+    static int once; if (!once++) MLOG("[RED] DM_UPSCALE_GAME=%s: keep or bypass; bypassing the game's upscaler", e);
+    return 1;
+}
+// DM_UPSCALE_GAME_FILTER: box, tent or lanczos (the default UPS_BYP_FILTER_DEFAULT); read at use as DM_UPSCALE_GAME is
+static uint32_t ups_bypass_filter(void) {
+    const char *e = getenv("DM_UPSCALE_GAME_FILTER");
+    if (!e || !*e) return UPS_BYP_FILTER_DEFAULT;
+    if (!strcmp(e, "box")) return UPS_BYP_BOX;
+    if (!strcmp(e, "tent")) return UPS_BYP_TENT;
+    if (!strcmp(e, "lanczos")) return UPS_BYP_LANCZOS;
+    static int once; if (!once++) MLOG("[RED] DM_UPSCALE_GAME_FILTER=%s: box, tent or lanczos; using the default", e);
+    return UPS_BYP_FILTER_DEFAULT;
+}
+static const char *ups_bypass_filter_name(uint32_t f) { return f == UPS_BYP_BOX ? "box" : f == UPS_BYP_TENT ? "tent" : "Lanczos-2"; }
+// The dispatch of cs resolved by the host when it is the game's upscaler reading a scaled scene (see above): 1 when the output was written here, 0 to run the game's kernel.
+// Called after image_prepare, so the output image is at the game's size (demoted at its first written binding). Caller: dispatch (g_ups > 1, a direct dispatch)
+static int ups_bypass_encode(NvShader *cs) {
+    static id<MTLComputePipelineState> ps; static id<MTL4ArgumentTable> at; static int failed;
+    int ti = -1, oi = -1;
+    if (cs->up_byp == 2 || failed) return 0;
+    if (!nvn_ups_bypass_shape(cs->rf.b, cs->rf.nb, &ti, &oi)) { cs->up_byp = 2; return 0; }
+    cs->up_byp = 1;
+    if (!ups_bypass_on()) return 0;
+    int tin = (int)(tex_slot_h(S.tex[5], S.img[5], cs->rf.b[ti].reg) & 0xfffff), tout = cs->rf.b[oi].reg < 32 ? (int)(S.img[5][cs->rf.b[oi].reg] & 0xfffff) : 0;
+    tex_t din = {0}, dout = {0}; id<MTLTexture> in, out;
+    os_unfair_lock_lock(&g_rmu);
+    int ok = tin > 0 && tin < g_ntreg && g_treg[tin].ok && tout > 0 && tout < g_ntreg && g_treg[tout].ok;
+    if (ok) { din = g_treg[tin].t; dout = g_treg[tout].t; }
+    in = ok ? tex_by_id(tin) : nil;   // the scene as the kernel samples it (its format view: an sRGB scene decodes on read)
+    uint64_t rid = 0; int real = 0;
+    out = ok ? img_binding(tout, &cs->rf.b[oi], &rid, &real) : nil;   // the output as the kernel writes it (level and slice kept, as up_mfx_encode)
+    if (!real) out = nil;
+    os_unfair_lock_unlock(&g_rmu);
+    if (!in || !out || in == out || in.textureType != MTLTextureType2D || out.textureType != MTLTextureType2D || in.sampleCount != 1 || out.sampleCount != 1 ||
+        fmt_int_or_ds(in.pixelFormat) || fmt_int_or_ds(out.pixelFormat) || mtl_fmt_block(in.pixelFormat) || mtl_fmt_block(out.pixelFormat) || !(out.usage & MTLTextureUsageShaderWrite)) return 0;
+    // The scene must be scaled and the output at the game's size; otherwise the game's kernel reads what it computed for
+    if (ups_of(&din, in) <= 1 || ups_of(&dout, out) > 1) { g_ups_byp_kept++; return 0; }
+    // The rectangle of the scene the kernel reads, from FSR's EASU constants in one of its constant buffers (nvn_ups_fsr_rect: KTGL renders a dynamic resolution into a rectangle
+    // of its fixed 1600x900 scene); a kernel whose constants are not those is left to run, once logged
+    uint32_t vw = 0, vh = 0; int rect = 0;
+    for (int i = 0; i < cs->rf.nb && !rect; i++) { const nvn_rbind *b = &cs->rf.b[i]; float con[16];
+        if (b->kind != NVN_RB_CBUF || b->reg >= 16) continue;
+        ubo_read(5, b->reg, 0, sizeof con, con);
+        rect = nvn_ups_fsr_rect(con, din.d.width, din.d.height, (uint32_t)out.width, (uint32_t)out.height, &vw, &vh); }
+    if (!rect) { g_ups_byp_kept++; if (!(cs->logged & 32)) { cs->logged |= 32; MLOG("resolution upscaling: compute shader %s is shaped like an upscaler (%ux%u scene made %lux%lu → %lux%lu image) but no constant buffer of its holds FSR's EASU constants: the rectangle it reads is unknown, so the game's kernel runs", cs->key, din.d.width, din.d.height, (unsigned long)in.width, (unsigned long)in.height, (unsigned long)out.width, (unsigned long)out.height); } return 0; }
+    NSUInteger sx = (NSUInteger)lround(vw * g_ups), sy = (NSUInteger)lround(vh * g_ups);   // the rectangle in the scaled scene (whole texels: nvn_ups_region's rounding of a region at the origin)
+    if (sx > in.width) sx = in.width; if (sy > in.height) sy = in.height;
+    if (!nvn_ups_bypass_ok(vw, vh, (uint32_t)sx, (uint32_t)sy, (uint32_t)out.width, (uint32_t)out.height)) { g_ups_byp_kept++; return 0; }
+    if (!ps) {
+        NSError *e = nil; id<MTLLibrary> lib = host_lib("ups_resolve", &e);
+        id<MTLFunction> fn = [lib newFunctionWithName:@"ups_resolve"];
+        ps = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&e] : nil;
+        MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount = 2; ad.maxBufferBindCount = 1; at = ps ? rec_table([g_dev newArgumentTableWithDescriptor:ad error:&e]) : nil;
+        if (!ps || !at) { failed = 1; MLOG("[RED] resolution upscaling: cannot create the resolve of the game's upscaler: %s (the game's kernel runs)", e.localizedDescription.UTF8String); return 0; }
+    }
+    uint32_t filter = ups_bypass_filter();
+    zskip_del(dout.serial);   // the output is written whole: a pending zero-skip of it would be wrong
+    rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    id<MTLComputeCommandEncoder> ce = pg_compute();   // an encoder of its own: enc_c_begin's queue barrier orders it after the pass that drew the scene, and the next encoder's after it
+    [(id<MTL4ComputeCommandEncoder>)ce setArgumentTable:at];   // two textures: the shared compute table (g_ct) binds one
+    id<MTLBuffer> pb; size_t po = arena_alloc(sizeof(ups_byp_params), &pb);
+    if (!pb) { enc_c_end(ce); args_dirty_all(); return 0; }
+    ups_byp_params *p = (ups_byp_params *)((uint8_t *)pb.contents + po);
+    *p = (ups_byp_params){(uint32_t)out.width, (uint32_t)out.height, (uint32_t)sx, (uint32_t)sy, filter};
+    [at setTexture:in.gpuResourceID atIndex:0]; [at setTexture:out.gpuResourceID atIndex:1]; [at setAddress:pb.gpuAddress + po atIndex:0];
+    enc_c_pso(ce, ps);
+    enc_c_dispatch(ce, MTLSizeMake((out.width + 7) / 8, (out.height + 7) / 8, 1), MTLSizeMake(8, 8, 1));
+    enc_c_end(ce);
+    args_dirty_all(); g_last_end_relaxed = 0;   // the next pass waits for the resolve whole (enc_r_begin_pass)
+    static NSUInteger lw, lh, lo, lp; static uint32_t lf; static int nlog;   // the first resolve, and each change of the rectangle (dynamic resolution), the output or the filter, up to 24 lines
+    if (!g_ups_byp_n++ || sx != lw || sy != lh || out.width != lo || out.height != lp || filter != lf) { lw = sx; lh = sy; lo = out.width; lp = out.height; lf = filter;
+        if (nlog++ < 24) MLOG("resolution upscaling: the game's upscaler %s (%ux%u of the %ux%u scene ser=%llu, made %lux%lu of %lux%lu, format %lu → %lux%lu image ser=%llu, format %lu) is resolved by the host: %s filter over %.2fx%.2f texels (DM_UPSCALE_GAME)",
+                              cs->key, vw, vh, din.d.width, din.d.height, (unsigned long long)din.serial, (unsigned long)sx, (unsigned long)sy, (unsigned long)in.width, (unsigned long)in.height, (unsigned long)in.pixelFormat, (unsigned long)out.width, (unsigned long)out.height,
+                              (unsigned long long)dout.serial, (unsigned long)out.pixelFormat, ups_bypass_filter_name(filter), (double)sx / out.width, (double)sy / out.height); }
     return 1;
 }
 // The present pass: src's valid rectangle drawn into dst (the drawable, or a screenshot's texture) as present_encode draws it, through MetalFX first where fx_encode takes it

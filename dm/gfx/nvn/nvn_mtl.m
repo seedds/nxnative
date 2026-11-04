@@ -1402,8 +1402,58 @@ void mtl_prepare(void) {
 }
 static void sub_cut_begin(void); static void ts_sub_begin(void), ts_boundary(void); static int ts_on(void);
 static void gmem_commit_patch(void);   // the raw pool table words of the arguments encoded so far follow the pools (gmem_slot_note)
+// GPU hang watchdog. A shader that never ends (Hyrule Warriors: Age of Imprisonment's light-list loops in a battle: the game README, "Found on this game") keeps the GPU busy
+// without a fault, so no command buffer completes, no feedback handler runs, g_done stops, and every wait on the CPU for the GPU blocks for good: the allocator wait of the next
+// submission (WS_ALLOC, no timeout) froze the host silently. Metal cannot abort GPU work, so the watchdog only tells: a wait that sees no fence complete for DM_NVN_GPU_WATCHDOG
+// seconds (5 by default, 0 off) while submissions are in flight logs one [RED] line per stuck fence naming the pipelines of the oldest submission in flight (the GPU runs them in
+// order, so that is the one it is stuck on) and of the two after it, from a record each submission keeps of the distinct (vertex, fragment) pairs its draws bound and the compute
+// shaders it dispatched (subrec_add from draw_ and dispatch). The record is filled by the submit thread and read by the waiting thread only for fences already committed, which the
+// ring rewrites 64 submissions later. The line names what to pass to DM_NVN_SKIP_FS to play on without the looping draws (docs/env_switches.tsv)
+#define SUBREC_RING 64
+#define SUBREC_PAIRS 24
+typedef struct { char vs[17], fs[17]; } subrec_pair;   // shader keys (16 hex digits, or a builtin's name cut to 16)
+typedef struct { uint64_t fence, frame; uint32_t draws, dispatches, n, n_more; subrec_pair p[SUBREC_PAIRS]; const void *last; } subrec_t;   // last: the program or compute shader of the previous add (most draws repeat it)
+static subrec_t g_subrec[SUBREC_RING]; static subrec_t *g_subrec_cur;
+static _Atomic uint64_t g_cur_frame;   // tentative, as below: the presented frame counter (mtl_set_frame)
+static void subrec_begin(uint64_t fence) { subrec_t *r = &g_subrec[fence % SUBREC_RING]; memset(r, 0, sizeof *r); r->fence = fence; r->frame = atomic_load(&g_cur_frame); g_subrec_cur = r; }
+static void subrec_key(char *dst, const char *key, const char *builtin) { const char *s = key && key[0] ? key : builtin ? builtin : "(unnamed)"; size_t n = strlen(s); if (n > 16) n = 16; memcpy(dst, s, n); dst[n] = 0; }   // not "?" for the fallback: that string is DMSH_KIND_UNKNOWN, which test_dmsh_abi counts as an ABI literal
+// who: the NvProg of a draw or the NvShader of a dispatch, to skip the scan when a run of draws uses one program; vs / fs: the keys as subrec_key makes them
+static void subrec_add(const char *vs, const char *fs, const void *who, int dispatch) {
+    subrec_t *r = g_subrec_cur; if (!r) return;
+    if (dispatch) r->dispatches++; else r->draws++;
+    if (who == r->last) return;
+    r->last = who;
+    for (uint32_t i = 0; i < r->n; i++) if (!strcmp(r->p[i].vs, vs) && !strcmp(r->p[i].fs, fs)) return;
+    if (r->n == SUBREC_PAIRS) { r->n_more++; return; }
+    memcpy(r->p[r->n].vs, vs, 17); memcpy(r->p[r->n].fs, fs, 17); r->n++;
+}
+#define WD_SLICE_MS 2000ull   // a blocking wait is cut into slices of this length so the watchdog can look between them
+static long wd_secs(void) { static long v = -1; if (v < 0) { const char *e = getenv("DM_NVN_GPU_WATCHDOG"); v = e && *e ? strtol(e, NULL, 0) : 5; if (v < 0) v = 0; } return v; }
+static _Atomic uint64_t g_wd_reported;   // the oldest in-flight fence the last report named: one report per stuck fence, whichever threads wait
+// Called between slices of a blocking wait: done0 is g_done when the slice loop began or last saw progress, t0 that moment (CLOCK_UPTIME_RAW ns). Returns the current g_done
+static uint64_t wd_check(uint64_t waited_for, int site, uint64_t *t0, uint64_t done0) {
+    uint64_t done = atomic_load(&g_done), now = ws_t0();
+    if (done != done0) { *t0 = now; return done; }   // the GPU completed something: not stuck
+    long secs = wd_secs(); uint64_t newest = atomic_load(&g_fence);
+    if (!secs || now - *t0 < (uint64_t)secs * 1000000000ull || newest <= done) return done;   // nothing in flight: the wait is for work not committed yet, not the GPU's fault
+    uint64_t oldest = done + 1;
+    if (atomic_exchange(&g_wd_reported, oldest) == oldest) return done;
+    char line[2600]; int o = snprintf(line, sizeof line, "[RED] GPU watchdog: no submission completed in %llu s (waiting for fence %llu at '%s', done %llu, committed %llu): the GPU is stuck on fence %llu or keeps it from running;",
+                                      (unsigned long long)((now - *t0) / 1000000000ull), (unsigned long long)waited_for, ws_name[site], (unsigned long long)done, (unsigned long long)newest, (unsigned long long)oldest);
+    for (uint64_t f = oldest; f <= newest && f < oldest + 3 && o < (int)sizeof line - 200; f++) {
+        const subrec_t *r = &g_subrec[f % SUBREC_RING]; if (r->fence != f) continue;
+        o += snprintf(line + o, sizeof line - (size_t)o, " fence %llu (frame %llu, %u draws, %u dispatches) pipelines", (unsigned long long)f, (unsigned long long)r->frame, r->draws, r->dispatches);
+        for (uint32_t i = 0; i < r->n && o < (int)sizeof line - 60; i++) o += snprintf(line + o, sizeof line - (size_t)o, " %s/%s", r->p[i].vs, r->p[i].fs);
+        if (r->n_more && o < (int)sizeof line - 60) o += snprintf(line + o, sizeof line - (size_t)o, " (+%u more)", r->n_more);
+        if (o < (int)sizeof line - 4) o += snprintf(line + o, sizeof line - (size_t)o, ";");
+    }
+    MLOG("%s", line);
+    MLOG("[RED] GPU watchdog: the host cannot abort GPU work; if a fragment shader above loops, relaunch with DM_NVN_SKIP_FS=<its key> (the title's env.txt on the Mac) to play on without its draws");
+    return done;
+}
 void mtl_sub_begin(void) {
     mtl_init(); g_sub_serial++; g_seg = 0; seg_clk_put(g_sclk); g_sclk = NULL;
+    subrec_begin(atomic_load(&g_fence) + 1);   // GPU hang watchdog: this submission's pipelines, under the fence mtl_sub_commit will give it
     sub_cut_begin();
     defer_drain();
     rh_trim();
@@ -2454,9 +2504,15 @@ static void post_early(uint64_t fence) {
 static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
     if (g_done >= fence) { if (ws_on()) ws_put(site, 0, 0); return 1; }
     uint64_t w0 = ws_t0();
+    uint64_t wd_t0 = w0, wd_done = atomic_load(&g_done);   // GPU hang watchdog (wd_check): progress seen so far
     if ((site == WS_SYNC || site == WS_SYNC_NEWEST || site == WS_ACQ) && fast_wake() && g_ev && fence <= g_fence) {   // the game's own wait: wake on the GPU's signal (rec_signal(g_ev, fence) after each submission)
         uint64_t ms = timeout_ns / 1000000ull; if (ms > 3600000ull) ms = 3600000ull;
-        if ([g_ev waitUntilSignaledValue:fence timeoutMS:ms]) post_early(fence);
+        for (;;) {   // in slices, so a GPU that never signals is reported (wd_check) instead of waited for in silence
+            uint64_t slice = ms > WD_SLICE_MS ? WD_SLICE_MS : ms;
+            if ([g_ev waitUntilSignaledValue:fence timeoutMS:slice]) { post_early(fence); break; }
+            ms -= slice; if (!ms) break;
+            wd_done = wd_check(fence, site, &wd_t0, wd_done);
+        }
         int ok = g_done >= fence;
         if (ws_on()) { ws_put(site, w0, 1); ws_wake(fence); }
         if (ok || timeout_ns < 1000000ull) return ok;
@@ -2472,7 +2528,14 @@ static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
     dl.tv_sec += ns / 1000000000ull; dl.tv_nsec = ns % 1000000000ull;
     pthread_mutex_lock(&g_mu);
     int r = 0;
-    while (g_done < fence) if ((r = pthread_cond_timedwait(&g_cv, &g_mu, &dl))) break;
+    while (g_done < fence) {   // in slices of WD_SLICE_MS up to the deadline, with the watchdog looking between them (the lock is dropped for its report)
+        struct timespec sl; clock_gettime(CLOCK_REALTIME, &sl);
+        uint64_t sns = (uint64_t)sl.tv_nsec + WD_SLICE_MS * 1000000ull; sl.tv_sec += sns / 1000000000ull; sl.tv_nsec = sns % 1000000000ull;
+        int last = sl.tv_sec > dl.tv_sec || (sl.tv_sec == dl.tv_sec && sl.tv_nsec >= dl.tv_nsec);   // the slice reaches the deadline: wait to the deadline itself
+        if ((r = pthread_cond_timedwait(&g_cv, &g_mu, last ? &dl : &sl))) { if (r != ETIMEDOUT || last) break; r = 0; }
+        if (g_done >= fence) break;
+        pthread_mutex_unlock(&g_mu); wd_done = wd_check(fence, site, &wd_t0, wd_done); pthread_mutex_lock(&g_mu);
+    }
     int ok = g_done >= fence;
     pthread_mutex_unlock(&g_mu);
     if (ws_on()) { ws_put(site, w0, 1); if (site == WS_SYNC_NEWEST || site == WS_SYNC || site == WS_ACQ) ws_wake(fence); }
@@ -13911,6 +13974,10 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     __unsafe_unretained id<MTLRenderPipelineState> ps = cur_ps;
     if (!ps) { PD("Z %llu draw skipped: no render pipeline (vertex %s fragment %s)", g_stat_pass, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-"); return; }
     if (ps != g_enc_pso) { enc_r_pso(en, ps); g_enc_pso = ps; }
+    if (g_subrec_cur && g_subrec_cur->last != (__bridge const void *)pr) {   // GPU hang watchdog: the pipelines of this submission (a repeated program costs one compare)
+        char vk[17], fk[17]; subrec_key(vk, pr->sh[0] ? pr->sh[0]->key : NULL, pr->sh[0] ? pr->sh[0]->builtin : NULL); subrec_key(fk, pr->sh[1] ? pr->sh[1]->key : NULL, pr->sh[1] ? pr->sh[1]->builtin : "-");
+        subrec_add(vk, fk, (__bridge const void *)pr, 0); }
+    else if (g_subrec_cur) g_subrec_cur->draws++;
     if (g_sm_pass && g_sm_applied != g_sm_cur) {   // the layer this draw goes to (see g_sm_plan)
         MTLVertexAmplificationViewMapping vm = {0, (uint32_t)(g_sm_cur - g_sm_lo)}; [(id<MTL4RenderCommandEncoder>)en setVertexAmplificationCount:1 viewMappings:&vm]; g_sm_applied = g_sm_cur; }
     static id<MTLDepthStencilState> cur_ds; static uint64_t cur_ds_pass;
@@ -14284,6 +14351,7 @@ static void dispatch(const p_dispatch *dp) {
     if (own && g_blit) { enc_b_end(g_blit); g_blit = nil; }
     id<MTLComputeCommandEncoder> ce = own ? pg_compute() : (id<MTLComputeCommandEncoder>)dispatch_enc();
     enc_c_pso(ce, ps);
+    { char ck[17]; subrec_key(ck, cs->key, cs->builtin); subrec_add("-", ck, (__bridge const void *)cs, 1); }   // GPU hang watchdog: the compute shaders of this submission
     if (tg_groups) {
         __strong id<MTLBuffer> tb = nil; size_t to = arena_alloc((size_t)(tg_groups * cs->rf.tg_spill), &tb);
         enc_c_args(ce, tb.gpuAddress + to, DMSH_TG_SLOT);

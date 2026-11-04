@@ -3471,7 +3471,8 @@ static struct {
     uint8_t clear_d, clear_s; double cd; uint32_t cs;
     p_scissor sc; int has_sc;
 } R_rx[RX_MAX];
-#define R (R_rx[RXI])
+static typeof(R_rx[0]) *g_R = &R_rx[0];   // the current context's R (rx_select): one pointer load where R_rx[RXI] cost an index and a reload of the context number, all over the replay
+#define R (*g_R)
 
 // ---------- Zero-source skip ----------
 // Shader fact table (statically proven keys): 'the textures it samples are all 0 and the coefficient is finite ⇒ the output is all 0'. Coefficient = component comp of vector vec of fragment-stage constant buffer register ubo_slot.
@@ -5473,7 +5474,9 @@ static struct {
     p_tf_bind tf[4]; int tf_on, rast_discard;   // capture buffers and enables; byte offsets and captured count stay on the GPU (nvn_feedback.inc)
     int tex_base, samp_base;   // host-table bases of the texture / sampler pool bound (OP_SET_TEX_POOL / OP_SET_SAMP_POOL), for handles read at replay from uniform buffers (encode_args)
 } S_rx[RX_MAX];
-#define S (S_rx[RXI])
+static typeof(S_rx[0]) *g_S = &S_rx[0];   // the current context's S (rx_select)
+#define S (*g_S)
+static inline void rx_select(int i) { g_rx = &g_rxs[i]; g_rxi = i; g_S = &S_rx[i]; g_R = &R_rx[i]; }   // every switch of the current context goes through here
 // The handle c2 holds at byte b, as encode_args fills the table (DRV2): a combined slot (past slot 31 the image there, tex_slot_h), a separate texture, else none
 static uint64_t c2_handle(int stage, unsigned b) {
     if (b >= DMSH_C2_TEX && b < DMSH_C2_SEPTEX && !((b - DMSH_C2_TEX) % DMSH_C2_ROW)) return tex_slot_h(S.tex[stage], S.img[stage], (b - DMSH_C2_TEX) / DMSH_C2_ROW);
@@ -12252,7 +12255,7 @@ static void par_fresh_switch(void) {
     g_defer_pend_rx[j] = NULL; g_defer_nact_rx[j] = g_defer_natq_rx[j] = 0; g_nlc_rx[j] = 0; g_mrun_rx[j].n = 0; g_geo_mesh_rx[j].on = g_geo_mesh_rx[j].miss = 0;
     g_mtk_rx[j].on = g_mtk_rx[j].miss = 0;
     g_fz_rx[j].active = 0;
-    g_rx = b; g_rxi = j;
+    rx_select(j);
     g_par.switches++; g_par.sw_draws[j] += g_stat_draw - g_par_last; g_par_last = g_stat_draw;
     { static int n; if (n++ < 12) MLOG("parallel translation, fresh: context %d → %d at pass %llu, draw %llu of the frame (frame %llu, segment %u)", k, j,
                                       (unsigned long long)g_stat_pass, (unsigned long long)g_stat_draw, (unsigned long long)atomic_load(&g_cur_frame), RX.seg); }
@@ -12280,7 +12283,7 @@ static void par_scan(const uint64_t *h, int n) {   // in the scan's context: S a
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     int k = g_rxi; rx_t *keep = g_rx;
     S_rx[RX_SCAN] = S_rx[k]; R_rx[RX_SCAN] = R_rx[k];
-    g_rx = &g_rxs[RX_SCAN]; g_rxi = RX_SCAN; g_par_scanning = 1; pend_reset();
+    rx_select(RX_SCAN); g_par_scanning = 1; pend_reset();
     const uint64_t *rest = g_rest; int nrest = g_nrest; g_rest = h + 1; g_nrest = n - 1;
     fz_cursor cur = {.p = (const uint8_t *)h[0]}; uint64_t ops = 0; g_parc_n = 0; g_parf_n = 0; g_parf_draws = 0;
     for (;;) { const uint8_t *q; op_hdr hq; const void *aq; if (!fz_next(&cur, &q, &hq, &aq)) break; ops++;
@@ -12296,7 +12299,7 @@ static void par_scan(const uint64_t *h, int n) {   // in the scan's context: S a
             default: state_op(hq.op, aq); continue;
         } }
     g_rest = rest; g_nrest = nrest;
-    g_par_scanning = 0; g_rx = keep; g_rxi = k;
+    g_par_scanning = 0; rx_select(k); (void)keep;
     g_par.scan_ns += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0; g_par.scan_ops += ops; g_par.scan_bad += cur.bad;
 }
 static uint64_t par_run_cost(uint32_t lo, uint32_t hi, int *bi) {   // the run [lo, hi) of draws cut at up to three clean boundaries inside it, nearest its quarter marks: its largest chunk

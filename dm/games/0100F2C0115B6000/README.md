@@ -59,6 +59,8 @@ Game-specific findings. The general host changes they led to are listed under [F
 
 ## Services
 
+- **Resolved: Steam Controller stick drift suppressing gyro aiming.** In update 1.4.3, small nonzero stick values at rest take priority over bow gyro input. The adapter's default 10% radial deadzone reports a centred stick as zero. The game also resets its aim reference at an exactly identity orientation; Recenter keeps that truthful pose rather than fabricating a rotation. Current physical-device retesting remains open, including trackpads, rear buttons, mapping persistence, Bluetooth and Puck. The gyro scale has not been calibrated against a known rotation.
+- **Resolved in the host; gameplay retest pending:** six-axis handles now use SDK style indices and device bytes. The earlier handle-format mismatch was independent of the gyro-aiming failure; changing the style alone did not restore aiming.
 - SDK 20 calls it needed (each aborted in `sm::Initialize` or read a null applet proxy, one per boot): `oe::GetPreviousProgramIndex`, the hardware Opus decoder's C interface, cache storage, `fs::IsSaveDataExisting` for another title (it asks for Breath of the Wild's save: none), `MountSaveDataReadOnly`, `time::ClockSnapshot::CreateWithStandardSystemClock` ([Applet resource user ID, launch parameters and VR mode](../../../docs/reference/services.md#applet-resource-user-id-launch-parameters-and-vr-mode), [Hardware Opus decoders](../../../docs/reference/audio.md#hardware-opus-decoders-built-on-the-sdks-software-decoders), [Cache storage and other titles' save data](../../../docs/reference/services.md#cache-storage-and-other-titles-save-data), [Steady clock, clock snapshots and user clocks](../../../docs/reference/services.md#steady-clock-clock-snapshots-and-user-clocks)).
 - **Resolved: clock snapshot types** ([PR #385](https://github.com/seedds/nxnative/pull/385), static SDK check). SDK build `574284b40c06cf1821a44857939083bee5716820` passes type 1 for standard snapshots (`sdk+0x441890`) and 2 for adjustable snapshots (`sdk+0x441924`); both entries first read the time-service session through `sdk+0xb6b280`. The host now sets the standard type and takes over the adjustable entry as described in [Steady clock, clock snapshots and user clocks](../../../docs/reference/services.md#steady-clock-clock-snapshots-and-user-clocks). This verifies the ABI; gameplay was not rerun for this check.
 - `main` imports `nn::ro` (it loads NRO modules at run time).
@@ -109,6 +111,10 @@ General host changes first needed here; each applies to every game:
 - **Display link at frame latency 2 in fullscreen (#347, a workaround; why the system misses at 16 ms is open):** [Frame latency 2 for the display link in fullscreen](../../../docs/reference/frame-rate.md#frame-latency-2-for-the-display-link-in-fullscreen). Measured from the issue #70 save on an M4 Pro's built-in ProMotion screen: a window held 60; fullscreen at latency 1 stepped to 20 fps on cheap frames in one run of three.
 
 - **RomFS folder transfer and startup deletion failures:** [RomFS images](../../../docs/reference/packing.md#romfs-folder-transfers-fail-or-leave-stale-game-files).
+
+- **Six-axis SDK handle encoding:** [Handle style, device and sensor count](../../../docs/reference/services.md#six-axis-handle-encoding).
+
+- **Steam Controller stick drift suppressing gyro aiming:** [Radial stick deadzone](../../../docs/reference/services.md#steam-controller-stick-drift-suppresses-gyro-aiming).
 
 - **Resolved in the host (#531): `DM_NVN_GPUPROF` abort when an upload flush lands in a profiled draw pass:** [GPU profiles stamp only the encoder they began](../../../docs/reference/rendering.md#gpu-profiles-stamp-only-the-encoder-they-began). Covered by `t_gpuprof`; not rerun in the game.
 

@@ -21,7 +21,7 @@ uint64_t dm_input_samples(void);   // Cumulative number of times the game has sa
 uint64_t dm_cheats_keys(void);
 // Physical controller path (Mac / iOS GameController): stored separately from keyboard / touch and scripted input (DM_KEYS / DM_CTL); when the game reads player 1,
 // buttons are ORed bitwise and each stick axis takes whichever source is deflected more. All 0 when no controller is connected.
-// dm_pad_set is player 1's controller (DM_BTN_SHAKE counts there only); dm_pad_set_player sets player n + 1's, which the game reads on its own npad (hle_hid.c) while
+// dm_pad_set is player 1's controller (DM_BTN_SHAKE follows each controller's player); dm_pad_set_player sets player n + 1's, which the game reads on its own npad (hle_hid.c) while
 // dm_pad_players has its bit set; a player whose npad the game does not support (SetSupportedNpadIdType) feeds player 1 instead, so a one-player game sees every controller
 #define DM_PLAYERS 8   // npads No1..No8; player 1 is the Handheld npad in handheld mode (DM_OPMODE=0)
 void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry);
@@ -56,6 +56,10 @@ uint32_t dm_player_npad(int player);  // the npad id the game reads player p + 1
 // axis the most deflected one, plus the presses since the last peek (a tap between two peeks is reported once). Any thread
 void dm_input_hold(int on);
 void dm_input_peek(uint64_t *buttons, int32_t axes[4]);
+// Physical six-axis samples in Switch coordinates: G (gravity is -Z at rest),
+// revolutions/s, accumulated revolutions, and a column-major direction matrix.
+typedef struct { float acc[3], gyro[3], angle[3], dir[9]; } dm_motion;
+void dm_pad_motion(int player, const dm_motion *sample); // NULL clears history on disconnect/recenter
 
 // Optional diagnostic DM_HID_RECEIPT_LOG=<writable JSONL path>: received samples of real GetNpadState returns.
 // Fields read_start_ns/time_ns use the same host now_ns(); the front-end publish window must use the same helper, and a read interval that spans a publish must not be force-matched.

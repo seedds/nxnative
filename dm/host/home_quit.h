@@ -1,9 +1,9 @@
 // Quit with the Home button (Mac front end, front_mac.m; LNPANDY/NX2Apple#336). Holding Home (the logo button on Xbox and PlayStation pads) for HQ_HOLD_S seconds opens a
 // "Quit?" prompt over the game: A quits (the same exit as ⌘Q), B or a new press of Home closes it. Letting go of Home before the time is up does nothing. A and B are
 // GameController's buttonA and buttonB (by label: the bottom button on an Xbox or PlayStation pad, the one printed A on a Nintendo pad), not the Switch buttons the game
-// gets. Pure, so tests/t_home_quit.c checks it without a controller or a window.
+// gets. Direct Triton reports use Guide and the physical A and B labels. Pure, so tests/t_home_quit.c checks it without a controller or a window.
 //
-// The hold works wherever the press reaches the host: pad_keep_system_buttons claims Home on every pad (preferredSystemGestureState = GCSystemGestureStateDisabled), and
+// The hold works wherever the press reaches the host: controller_add_gc claims Home on each native pad (preferredSystemGestureState = GCSystemGestureStateDisabled), and
 // macOS 27 respects the claim when the Home button setting for apps lets the app decide (front_mac.m logs the setting). When the system takes Home anyway (it opens the
 // Games app or the player's chosen app), the game window loses the focus and whatever was shown closes (hq_cancel). DM_HOME_QUIT=0 turns it off. A front end passes the
 // texts in the player's language as DM_HOME_QUIT_TEXT (hq_text_line, docs/frontends.md), English otherwise.

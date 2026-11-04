@@ -1640,6 +1640,16 @@ def jit_stamp(patched, g):   # what captures depend on: the size of every rewrit
     return json.dumps({'modules': sizes, 'jit_key_data': g.get('jit_key_data', ''), 'jit_out_code': g.get('jit_out_code', ''), 'jit_route': g.get('jit_route', '')})
 
 
+def jit_boot_done(part):
+    """boot_mac's done() for a JIT capture into the folder part: the boot code (the largest request) and nothing new for 10 s"""
+    last = {'n': 0, 't': time.time()}
+    def done():
+        fs = list(part.glob('*.jit')); n = len(fs)
+        if n != last['n']: last['n'], last['t'] = n, time.time()
+        return bool(fs and max(f.stat().st_size for f in fs) > 1 << 20 and time.time() - last['t'] > 10)
+    return done
+
+
 def capture_jit(py, repo, d, patched, work, env, logs, g):
     """A game that generates code at run time through nn::jit (uses_jit): the iPhone runs no such code, so it serves the plugin's output from an image built here (dm/tools/jit_capture.py,
     hle_jit.c). The game boots twice in the Mac host (headless and silent) with DM_JIT_CAPTURE, each run into a folder of its own under <version dir>/jit_capture (boot1, boot2): two runs in
@@ -1665,12 +1675,7 @@ def capture_jit(py, repo, d, patched, work, env, logs, g):
         if name == 'route': henv['DM_KEYS'] = route
         PROG.set(step=f'booting the game ({name})')
         say(f'booting the game in the Mac host to capture the code its JIT plugin makes ({name}) → {c}')
-        last = {'n': 0, 't': time.time()}
-        def done():   # the boot code (the largest request) and nothing new for 10 s
-            fs = list(part.glob('*.jit')); n = len(fs)
-            if n != last['n']: last['n'], last['t'] = n, time.time()
-            return bool(fs and max(f.stat().st_size for f in fs) > 1 << 20 and time.time() - last['t'] > 10)
-        t0 = time.time(); rc = boot_mac(host, patched, henv, rd, log, *((JIT_ROUTE_SECS, lambda: False) if name == 'route' else (JIT_SECS, done)))
+        t0 = time.time(); rc = boot_mac(host, patched, henv, rd, log, *((JIT_ROUTE_SECS, lambda: False) if name == 'route' else (JIT_SECS, jit_boot_done(part))))
         if not any(f.stat().st_size > 1 << 20 for f in part.glob('*.jit')):
             if rc is not None: host_stopped(log, rc, time.time() - t0)
             raise BuildError(f'the JIT capture ({name}) holds no boot code (host output: {log})')

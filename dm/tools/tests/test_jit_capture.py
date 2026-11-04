@@ -12,6 +12,7 @@ import unittest
 
 REPO = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('jit_capture', REPO / 'dm/tools/jit_capture.py')
+assert spec and spec.loader
 jc = importlib.util.module_from_spec(spec); spec.loader.exec_module(jc)
 
 RX, RO, MAIN = 0x100000, 0x4000, 0x8000

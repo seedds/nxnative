@@ -40,6 +40,9 @@ Of those keys, 2,834 first appear in DLC assets, 12,732 in the base/update
 assets and six in main. Full Mac and iOS compilation passes, including all
 three geometry shaders. DLC gameplay remains unvalidated.
 
+The Nintendo Switch 2 Edition's Switch 2 program (update 1114112, program 1) has a
+profile of its own: [Xenoblade Chronicles 2, Nintendo Switch 2 Edition](../0400E95004038001/README.md).
+
 ## Rendering
 
 **Current, iPadOS pipeline validation ([#702](https://github.com/seedds/nxnative/issues/702)):**

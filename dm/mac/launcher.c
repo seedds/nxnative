@@ -206,6 +206,9 @@ int main(int argc, char **argv) {
     if (!shown) return 0;   // Quit: no game
     if (shown == 2) saved_choices();
     cloud_saves_folder();
+    // Apply the build default after saved/window choices; Metal reads the switch at its first device.
+    CFTypeRef fps = CFBundleGetValueForInfoDictionaryKey(CFBundleGetMainBundle(), CFSTR("DMShowFPS"));
+    if (fps && CFGetTypeID(fps) == CFBooleanGetTypeID()) setenv("DM_METAL_HUD", CFBooleanGetValue(fps) ? "1" : "0", 0);
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_TEMP", temp, 0);
     snprintf(p, sizeof p, "%s/Library/Application Support/nxnative/system", home); setenv("DM_SYSTEM_DIR", p, 0);   // the player's own console files, for every game
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);

@@ -10,6 +10,7 @@ typedef struct {
     uint8_t lmap[8]; const void *fsfn;
     uint32_t atest, logic;   // atest: 1 = drawn with the alpha test, the fragment from the shader's side library <key>_bx (nvn_mtl.m atest_key); last, so a prewarm row written before it reads as 0
                              // logic: 1 = drawn with a logic operation, the fragment from the side library <key>_bx (lop_key); in what was padding (0 in older rows)
+                             //   bit 1 (2): drawn while a sampler of the pixel shader has a border-colour twin, the fragment from its border correcting library <key>_bb (border_key)
 } pso_key;
 
 typedef struct {

@@ -80,6 +80,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Digimon Story Cyber Sleuth: Complete Edition](010014E00DB56000/README.md) | `010014E00DB56000` | 1.0.3 | 6.4.0 | Media.Vision MVGL | OpenGL |
 | [Donkey Kong Bananza](040074A01BF12000/README.md) | `040074A01BF12000` | v458752 (Switch 2) | 20.5.19 (Ounce) | Nintendo EPD (sead / agl / gsys) | NVN2 |
 | [Splatoon Raiders](0400380020056000/README.md) | `0400380020056000` | v65536 (Switch 2) | 21.4.4 (Ounce) | Nintendo EPD (sead / agl / gsys) | NVN2 |
+| [Star Fox](0400E88025B1A000/README.md) | `0400E88025B1A000` | v131072 (Switch 2) | 21.4.4 (Ounce) | Its own engine (`vrender`, `vfs`), Wwise | NVN2 |
 | [Donkey Kong Country Returns HD](01009D901BC56000/README.md) | `01009D901BC56000` | 1.1.0 | 18.3.5 | Unity 6000.0.28f1 IL2CPP | NVN |
 | [Donkey Kong Country: Tropical Freeze](0100C1F0051B6000/README.md) | `0100C1F0051B6000` | 1.0.2 | 4.4.0 | Retro Studios' engine | NVN |
 | [DRAGON QUEST BUILDERS 2](010042000A986000/README.md) | `010042000A986000` | 1.7.3d | 5.4.0 | Koei Tecmo's KTGL | NVN |

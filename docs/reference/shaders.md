@@ -921,8 +921,8 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Symptom:** a compute shader's results in shared memory land in the wrong elements, or only part of its memory is cleared. An exposure histogram came back with its bins at about four times their index, the scene several stops too dark.
 - **Cause:** LDS and STS with a register carry a stride at 78..79, so the register counts elements of 4, 8 or 16 bytes (stride 1, 2, 3), not bytes. The decoder ignored it. The field is a scale, not the access size: stride 3 occurs on 4, 8 and 16-byte accesses alike.
 - **Fix:** `AStride` in `InstEmitAmpereMem.cs`, for LDL, LDS, STL, STS and ATOMS. LDSM keeps its mode at those bits (1 is a transposed read, MT88), so it takes its address unscaled (`stride: false`): scaled by that mode, [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md)'s upscaler (`7629d857a0a93833`, 12 of its 27 LDSM) read four times too far along, and the picture came out as an 8x8 lattice of garbage for as long as the upscaler ran, with nothing in the log.
-- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): 2 LDS and 2 STS with a register in its 16,888 shaders, all in the Lighting compute shaders; `d5bc99ffd183fa20` bounds its register by the element count (0x20) before `[R2 * 8]`. [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md): 921 accesses with stride 1, 68 with 2 and 3,312 with 3, among its 131,426 shaders; `2118ab534fac88c6`'s histogram increments `[R3 * 4]`.
-- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): 2 LDS and 2 STS with a register in its 16,888 shaders, all in the Lighting compute shaders; `d5bc99ffd183fa20` bounds its register by the element count (0x20) before `[R2 * 8]`. [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md): 921 accesses with stride 1, 68 with 2 and 3,312 with 3, among its 131,426 shaders; `2118ab534fac88c6`'s histogram increments `[R3 * 4]`. [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): its froxel shaders (`03923de3c507135e` and 35 variants) keep a float4 a thread at `[R * 16 + 0x500]`; unscaled, pull request #1151 reports the race picture in rainbow bands by depth slice. The stride is not the access size there: `f94552a2a2bff505` stores 8 bytes at `[R9 * 16]` and 4 at `[R9 * 16 + 8]`.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (`Shared`: each stride, on 4, 8 and 16-byte stores in the games' encodings).
 
 ### Compute shared memory past 32 KB
 
@@ -946,7 +946,7 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Cause:** the two-source half-pair operations took their second source from the operand order HFMA2 needs: in forms 2, 3 and 7 that is the unused register field at bit 64, not the immediate, constant or uniform register. A blur stepping its loop with `HADD2 Rd, Rd, imm` stepped by whatever R0 held. An immediate also took modifiers from its own bits 62 and 63, flipping the sign of a negative constant.
 - **Fix:** `AHalfSecond` in `InstEmitAmpereAlu.cs` for HADD2, HMUL2, HSETP2, HSET2 and HMNMX2; `AHalfSrcs` leaves an immediate's bits alone.
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md): 25,726 of its shaders use those forms; `85446a6753300fc8` is the blur.
-- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (`Pokopia`: constants, a negative immediate's sign) and `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`HalfImmediate`: on a live register).
 
 ### HFMA2 .H0_NH1
 
@@ -1453,6 +1453,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Cause:** `dmsh_build.py`'s shader cache was keyed without the pairs.
 - **Fix:** the per-shader key covers the pairs, and a paired vertex shader's key also covers its pixel shaders' keys (`shader_key`, `pair_keyed`), so a change to a profile's pairs rebuilds what it affects ([Pixel shader inputs the vertex shader does not write](#pixel-shader-inputs-the-vertex-shader-does-not-write)).
 - **Found on:** [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md).
+
+### Shader cache key missing helper modules
+
+- **Symptom:** an edit to a shader build helper reaches no library: `shader cache: hit` for every shader, and the old MSL is filed under the new chain version. An edit to `dmsh_meshstage.py` did not change the chain version either.
+- **Cause:** a cache hit restores a shader's outputs and skips `job_for` and `finish`, so everything they run has to be in the shader's key. `CODE_FP` left out `dmsh_wide.py`, `dmsh_ampere.py`, `dmsh_meshstage.py` and `dmsh_fetch.screen_varyings` (through `raster_facts`), and `dmsh_chain.py`'s `FILES` left out `dmsh_meshstage.py`.
+- **Fix:** `FILES` and `CODE_FP` cover them. The modules that stay out of `CODE_FP` are made again from the restored MSL on every build (`dmsh_vin.py`, `dmsh_pull.py`, `dmsh_alpha.py`, `dmsh_logic.py`, `dmsh_mesh.py`, the rest of `dmsh_fetch.py`), or are covered otherwise (`dmsh_facts.py`: its row is in the key; `dmsh_mtlcache.py` changes no output). The change bumps the chain with the libraries byte for byte as before (Animal Well's 46), so Metal compiles nothing again.
+- **Found on:** no game: found reading the code after Mario Kart World added `dmsh_meshstage.py`, then reproduced on [ANIMAL WELL](../../dm/games/010020D01AD24000/README.md) (an edit to `wide_loads` reached 0 of 46 libraries before the fix, all 46 after it).
+- **Check:** `test_dmsh_code_fp.py` `Coverage` fails when `dmsh_build.py` imports a `dmsh_*` module that neither list accounts for.
 
 ### Partial vertex builds missing paired pixel sources
 

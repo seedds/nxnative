@@ -15548,6 +15548,13 @@ static int up_mfx_encode(NvShader *cs) {
         args_dirty_all(); g_up_mfx_kept++; return 0;   // only the scratch image was scaled; the game's shader can still produce the output
     }
     args_dirty_all();
+    // Creation logs miss returns to a cached dynamic-resolution size.
+    static int last_size[4]; int size[4] = {ir.width, ir.height, orr.width, orr.height};
+    if (memcmp(size, last_size, sizeof size)) {
+        MLOG("upscaler: size at frame %llu, MetalFX dispatch %llu: %dx%d → %dx%d", (unsigned long long)atomic_load(&g_cur_frame),
+             (unsigned long long)(g_up_mfx_n + 1), size[0], size[1], size[2], size[3]);
+        memcpy(last_size, size, sizeof size);
+    }
     if (!g_up_mfx_n++) MLOG("upscaler: first dispatch of %s drawn by MetalFX, %dx%d at %d,%d of %lux%lu (format %lu) → %dx%d at %d,%d of %lux%lu (format %lu)%s", cs->key, ir.width, ir.height, ir.xoffset, ir.yoffset,
                             (unsigned long)in.width, (unsigned long)in.height, (unsigned long)in.pixelFormat, orr.width, orr.height, orr.xoffset, orr.yoffset, (unsigned long)out.width, (unsigned long)out.height,
                             (unsigned long)out.pixelFormat, direct ? ", straight" : srgb ? ", through RGBA16F, decoded from sRGB" : ", through RGBA16F");

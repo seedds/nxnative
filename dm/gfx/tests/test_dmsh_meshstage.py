@@ -139,6 +139,13 @@ class Stage(unittest.TestCase):
     def test_no_kernel_refused(self):
         with self.assertRaises(ValueError): ms.to_stage(HEAD, ms.info(control(6), bytes(0x80)))
 
+    def test_unreadable_parameter_refused(self):
+        i = ms.info(control(6), bytes(0x80))
+        src = (KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][2] // 4 + 1)).replace(
+            'uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]]', '...')
+        with self.assertRaisesRegex(ValueError, 'cannot read kernel parameter name'):
+            ms.to_stage(src, i)
+
     @unittest.skipUnless(shutil.which('xcrun') and subprocess.run(['xcrun', '-sdk', 'macosx', '-f', 'metal'], capture_output=True).returncode == 0, 'no Metal compiler')
     def test_compiles(self):
         cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0]]

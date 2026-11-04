@@ -40,12 +40,12 @@ int main(void) { @autoreleasepool {
     id<MTLBuffer> cross = look(base + 48 * MB - 8, 64);   // across a stride's end: one buffer holds it
     CHECK("across strides: its stride's chunk", cross && cross != a);
     // Length 1: the read's extent is not known
-    void *mb; uint64_t mo, gpu;
+    void *mb; uint64_t mo, gpu; int found;
     uint64_t un = base + 100 * MB + 3;
-    CHECK("unknown extent: found", mtl_gpu_addr(un, 1, &mb, &mo, &gpu));
+    found = mtl_gpu_addr(un, 1, &mb, &mo, &gpu); CHECK("unknown extent: found", found); if (!found) return 1;
     CHECK("unknown extent: BIG_UNKNOWN past the address", ((__bridge id<MTLBuffer>)mb).length - mo >= BIG_UNKNOWN);
     (void)look(base + 200 * MB + 3, 100);   // a short chunk first
-    CHECK("then unknown in its stride: found", mtl_gpu_addr(base + 200 * MB + 9, 1, &mb, &mo, &gpu));
+    found = mtl_gpu_addr(base + 200 * MB + 9, 1, &mb, &mo, &gpu); CHECK("then unknown in its stride: found", found); if (!found) return 1;
     CHECK("then unknown in its stride: lengthened", ((__bridge id<MTLBuffer>)mb).length - mo >= BIG_UNKNOWN);
     int n1 = g_npool;
     id<MTLBuffer> big = look(base + 300 * MB, 100 * MB);
@@ -55,7 +55,7 @@ int main(void) { @autoreleasepool {
     // The pool's end
     CHECK("past the end: not found", !mtl_gpu_addr(base + GB - 8, 64, &mb, &mo, &gpu));
     CHECK("at the end: found", mtl_gpu_addr(base + GB - 8, 8, &mb, &mo, &gpu));
-    CHECK("at the end, unknown: found", mtl_gpu_addr(base + GB - 8, 1, &mb, &mo, &gpu));
+    found = mtl_gpu_addr(base + GB - 8, 1, &mb, &mo, &gpu); CHECK("at the end, unknown: found", found); if (!found) return 1;
     CHECK("the end's buffer stops at the pool", (uint64_t)(uintptr_t)((__bridge id<MTLBuffer>)mb).contents + ((__bridge id<MTLBuffer>)mb).length == base + GB);
     // A texture's upload: right bytes, through a buffer of its own, no chunk made and no chunk's memory left resident
     tex_t t = {.magic = MAGIC('T', 'E', 'X', 0), .has_layout = 1, .serial = 99700};

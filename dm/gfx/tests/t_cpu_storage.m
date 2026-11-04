@@ -17,8 +17,10 @@ static void fill(tex_t *t, void *mem, uint8_t v) {
     CHECK("fixture swizzle succeeds", !nvn_swizzle(&t->d, 0, 0, linear, SIZE * 4, mem));
 }
 static uint8_t first_red(id<MTLTexture> image) {   // the red of texel (3, 5), read through a blit: the texture is private
+    if (!image) return 0;   // resolve already recorded the failure
     static id<MTLCommandQueue> queue; if (!queue) queue = [g_dev newCommandQueue];
     id<MTLBuffer> out = [g_dev newBufferWithLength:4 options:MTLResourceStorageModeShared];
+    if (!out) { CHECK("readback buffer allocated", 0); return 0; }
     id<MTLCommandBuffer> cb = [queue commandBuffer]; id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
     [be copyFromTexture:image.parentTexture ?: image sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(3, 5, 0) sourceSize:MTLSizeMake(1, 1, 1) toBuffer:out destinationOffset:0 destinationBytesPerRow:4 destinationBytesPerImage:4];
     [be endEncoding]; [cb commit]; [cb waitUntilCompleted];

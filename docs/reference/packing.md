@@ -164,6 +164,15 @@
 - **Check:** Well Dweller's `main` decodes to 85,370,056 bytes with segments `0x39680d0 / 0x9f7e74 / 0x9b1930`, every SHA-256 matching; `dm/tools/tests/test_nso.py` checks that a flag-bit-7 module whose segments are not ZBIC is an Error naming ZBIC.
 - **Found on:** [Well Dweller](../../dm/games/0100217023F6C000/README.md) (SDK 22.2.0).
 
+## Versions with different modules
+
+### A version without one of the profile's modules stops the host at boot
+
+- **Symptom:** `FATAL open <folder>/subsdk1.fixups.tsv` right after the host starts, or `build_ipa.sh` stops with `no rewritten module …/subsdk1`, for a version that has no such module.
+- **Cause:** a game's versions can differ in modules: Mario Kart World's base game has `main`, `subsdk0` (a Mono runtime) and `sdk`, its update 1.8.0 `main`, `subsdk0` (the movie player), `subsdk1` (a C library) and `sdk`. The host, the rewrite, the IPA and the shader split all took the one `modules` list of the profile.
+- **Fix:** `modules` lists all of them in load order, and each `build` row names its own (`game.py` `build_modules`; a row naming one `modules` lacks is an error). The host loads the modules of the row of `main`'s build, read from the rewriter's `main.fixups.tsv` (`main.c` `profile_modules`, from `DM_GAME_BUILD_MODULES`), and all of `modules` for a build with no row. `build_ipa.sh` takes the same list (`game.py modules <id> <folder>`). The NSP script rewrites, sizes `mem_used` from and splits the modules the packed version's ExeFS holds (`Game.modules_in`), and a derived profile's row names those (`derive_profile`).
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): the base game boots with its three modules from a profile that lists four. Applies to every game. `test_game_profile.py` checks the rows and the list.
+
 ## Package identification
 
 ### An NSP without a ticket or a title ID in its name stops with "no NSP with a readable title ID"

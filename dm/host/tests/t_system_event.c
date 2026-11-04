@@ -58,10 +58,12 @@ uint64_t guest_ns(void) { return now_ns(); }
 int dm_detclock_enabled(void) { return 0; }
 int dm_guest_as_contains(uintptr_t addr) { (void)addr; return 0; }
 int dm_sdk_major(void) { return 20; }
-int dm_main_imports(const char *prefix) { (void)prefix; return 1; }
+int dm_game_imports(const char *prefix) { (void)prefix; return 1; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 void dm_backtrace(uint64_t fp) { (void)fp; }
 uint32_t hle_hid_connected_npad(void) { return 0; }
+uint32_t dm_native_image_blank(uint32_t w, uint32_t h) { (void)w; (void)h; return 0; }   // hle_codec_video.c: GameChat's camera storage
+void dm_native_image_blank_free(uint32_t handle) { (void)handle; }
 static uint32_t create_event(void *p, int mode, int interprocess) {
     (void)mode; assert(interprocess);
     uint64_t r[32] = {0}; assert(svc_thread(0x45, r) && !r[0]);

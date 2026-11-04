@@ -25,6 +25,9 @@ HLE_FORCE("_ZN2nv16FinalizeGraphicsEv", WHY, void, h_nv_Fin, void) { g_nv_pool =
 HLE_FORCE("_ZN2nv9InitCheckEv", WHY "; nv::InitializeGraphics recorded on the host", void, h_nv_InitCheck, void) {
     if (!g_nv_pool.inited) die("nv::InitCheck: graphics not initialised (nv::InitializeGraphics was not called)");
 }
+// The Switch 2's graphics system (nn::gs) check: SDK 22.2.0's (sdk+0x476d60) aborts unless the SDK's own flag reads 1, which the SDK's graphics boot sets on the console and the host, whose
+// graphics layer stands in for that system from the start, never runs. Mario Kart World 1.8.0 checks it before it makes its camera context (by pull request #1116)
+HLE_FORCE("_ZN2nn2gs3sdk30CheckGraphicsSystemInitializedEPKcm", "the graphics system is the host's graphics layer, up from the start", void, h_gs_Check, const char *who, unsigned long n) { (void)who; (void)n; }
 // nv::MemoryInfo is 64-bit counters, the SDK fills them from sign-extended 32-bit driver counters. Its size follows the SDK: 0x20 bytes (four counters) on SDK 10 and older,
 // 0x40 bytes from SDK 11 on (where the SDK zeroes all 0x40 when nv is not initialised). Writing 0x40 on an old SDK overran the caller's record by 32 bytes (Hyrule Warriors:
 // Definitive Edition, SDK 3.5.1). Its own implementation reads the NV driver object, which the host never creates, so it faults: Well Dweller crashed there (sdk+0x4656c8,

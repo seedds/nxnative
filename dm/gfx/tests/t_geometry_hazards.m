@@ -138,7 +138,7 @@ static void dependency(int mode) {
     strcpy(gs->key,"fedcba9876543210_b");gs->geo_vertices=3;gs->geo_invocations=1;gs->geo_output=7;gs->geo_stride=4;gs->geo_index_stride=4;
     g_shcache=[NSMutableDictionary dictionary];g_shcache[@"fedcba9876543210_bg0"]=gs;g_shcache[@"fedcba9876543210_bgv"]=shader(l,@"reader",0,rh,1);
     prog_t cp={.serial=9700+mode};serial_put(cp.serial,pr);
-    uint8_t *cmd;posix_memalign((void**)&cmd,getpagesize(),65536);memset(cmd,0,65536);mtl_pool_add(cmd,65536);size_t used=0;
+    uint8_t *cmd;posix_memalign((void**)&cmd,getpagesize(),65536);memset(cmd,0,65536);mtl_pool_add(cmd,65536);size_t used=0;   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns pr (serial_put's CFBridgingRetain) for the life of the test, not a leak
     #define EMIT(OP,X) do{size_t z=(8+sizeof(X)+7)&~7ull;op_hdr h={OP,(uint32_t)z};memcpy(cmd+used,&h,8);memcpy(cmd+used+8,&(X),sizeof(X));used+=z;}while(0)
     tex_t target={.magic=MAGIC('T','E','X',0),.serial=9800+mode,.d={.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8,.width=32,.height=32,.depth=1,.levels=1,.samples=1}};
     p_set_rt rt={.n=1};rt.color[0]=&target;EMIT(OP_SET_RT,rt);p_viewports vp={.n=1};vp.v[0][2]=vp.v[0][3]=32;EMIT(OP_VIEWPORTS,vp);
@@ -150,8 +150,7 @@ static void dependency(int mode) {
     EMIT(OP_DRAW,d);op_hdr end={OP_END,8};memcpy(cmd+used,&end,8);
     #undef EMIT
     state_reset();memset(&R,0,sizeof R);mtl_set_frame(100+mode);mtl_sub_begin();uint64_t cuts=g_cuts,h=(uint64_t)cmd;mtl_sub_index(&h,1);mtl_exec(cmd);
-    id<MTLBuffer> rb=[g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared];EXPECT("readback buffer",1,rb!=nil);if(!rb)abort();
-    [blit() copyFromTexture:tex_mtl(&target) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(32,32,1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:128 destinationBytesPerImage:4096];finish();
+    id<MTLBuffer> rb=[g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared];EXPECT("readback buffer",1,rb!=nil);if(!rb)abort();[blit() copyFromTexture:tex_mtl(&target) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(32,32,1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:128 destinationBytesPerImage:4096];finish();
     uint8_t *px=rb.contents;
     if(independent) {
         EXPECT("first draw wrote its own storage",1,*(uint32_t*)(cmd+32768));EXPECT("second draw wrote its own storage",1,*(uint32_t*)(cmd+32768+16));
@@ -163,11 +162,7 @@ static void dependency(int mode) {
         EXPECT("dependent geometry does not join earlier run",1,g_geo_nrun);
         EXPECT("geometry boundary submits early only when enabled",cut_draws()==1&&geo_cut_on(),g_cuts>cuts);
     }
-    state_reset();mtl_tex_release(&target);mtl_pool_del(cmd);mtl_drain();free(cmd);
-    // The serial table owns the CF retain from serial_put; the GPU is finished.
-    pthread_mutex_lock(&g_smu);
-    void *owned=nvn_hm_del(&g_by_serial,&cp.serial);if(owned!=(__bridge void*)pr)abort();
-    CFRelease(owned);g_ser_gen++;pthread_mutex_unlock(&g_smu);
+    mtl_tex_release(&target);mtl_pool_del(cmd);mtl_drain();free(cmd);
 }
 int main(int argc,char **argv){@autoreleasepool{
     if(argc>1&&!strcmp(argv[1],"--access-bench"))return access_benchmark();

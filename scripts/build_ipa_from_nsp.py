@@ -439,6 +439,23 @@ def configure_dotnet(env):
             return
 
 
+def dotnet_sdk10_first(env):
+    """Put the first dotnet on PATH that lists an SDK 10 or newer in front. TOOL_PATHS looks in /usr/local/share/dotnet before ~/.dotnet, so an
+    older .NET left there by an installer would build nx_extract and stop with NETSDK1045 while the .NET 10 of dotnet-install.sh sits in ~/.dotnet.
+    PATH stays as it is when the first dotnet has an SDK 10 or none has one."""
+    dirs = env['PATH'].split(os.pathsep)
+    found = [(d, dn) for d in dict.fromkeys(dirs) if d and (dn := shutil.which('dotnet', path=d))]
+    for i, (d, dn) in enumerate(found):
+        try:
+            out = subprocess.run([dn, '--list-sdks'], env=env, capture_output=True, text=True, timeout=30).stdout
+        except (OSError, subprocess.SubprocessError): continue
+        if any(int(v) >= 10 for v in re.findall(r'^(\d+)\.', out, re.M)):
+            if i:
+                env['PATH'] = os.pathsep.join([d] + [x for x in dirs if x != d])
+                say(f'dotnet: {d}, the first with an SDK 10 ({found[0][0]} comes before it and has none)')
+            return
+
+
 # ---- NSP identification ----
 def pfs0_names(path):   # NSP = PFS0: list the file names inside
     with open(path, 'rb') as f:
@@ -2846,6 +2863,7 @@ def main(args=None):
     if not want_lang: raise BuildError(f'unknown game language {lang_in!r}; give one of {language_list([c for c, _ in nacp.LANGUAGES])}, by code or by name')
     env = dict(os.environ, PATH=os.pathsep.join(TOOL_PATHS + [os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')]))
     env.setdefault('USER', getpass.getuser())   # xcodegen fails without USER (Couldn't find current username)
+    dotnet_sdk10_first(env)   # before configure_dotnet, which takes the runtime root from the dotnet PATH finds first
     configure_dotnet(env)
     env.setdefault('J', str(os.cpu_count() or 8))   # shader_split.py's and dmsh_build.py's workers (their default is 8)
     py = sys.executable

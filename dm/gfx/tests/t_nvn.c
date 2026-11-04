@@ -56,6 +56,25 @@ static size_t tex_size(int fmt, int w, int h, int flags, size_t *align) {
     return P(nvnTextureBuilderGetStorageSize)(&tb);
 }
 
+static void worker_count_work(void) {
+    volatile uint64_t value = 1;
+    for (int i = 0; i < 100000; i++) value = value * 3 + (uint64_t)i;
+}
+static void *worker_count_test(void *unused) { (void)unused; nvn_sub_worker_run(worker_count_work); return NULL; }
+static void test_worker_counts(void) {
+    uint64_t cpu = atomic_load(&g_sub_cpu_ns), instr = atomic_load(&g_sub_instr), wall = atomic_load(&g_sub_wall_ns);
+    uint64_t ccpu = atomic_load(&g_cum_sub_cpu_ns), ci = atomic_load(&g_cum_sub_instr), cw = atomic_load(&g_cum_sub_wall_ns);
+    pthread_t worker; int err = pthread_create(&worker, NULL, worker_count_test, NULL);
+    EXPECT("create measured worker", 0, err); if (err) return;
+    pthread_join(worker, NULL);
+    uint64_t dc = atomic_load(&g_sub_cpu_ns) - cpu, di = atomic_load(&g_sub_instr) - instr;
+    EXPECT("worker CPU included", 1, dc > 0);
+    EXPECT("worker cumulative CPU matches frame CPU", dc, atomic_load(&g_cum_sub_cpu_ns) - ccpu);
+    EXPECT("worker cumulative instructions match frame instructions", di, atomic_load(&g_cum_sub_instr) - ci);
+    EXPECT("worker does not duplicate wall time", wall, atomic_load(&g_sub_wall_ns));
+    EXPECT("worker does not duplicate cumulative wall time", cw, atomic_load(&g_cum_sub_wall_ns));
+}
+
 int main(void) {
     setenv("DM_NVN_COUNT", "1", 1);   // the call-count checks below need the counting trampolines (off by default)
     // Engine-native limiters have no FPS state page. Their launcher cap must
@@ -946,6 +965,7 @@ int main(void) {
         EXPECT("several rows whose alignment would break the wrapped address: refused", 0, nvn_tbuf_rows(20000, 4, 3, &w, &h, &row));
     }
 
+    test_worker_counts();
     printf("== %d checks, %d failed ==\n", g_n, g_fail);
     return g_fail != 0;
 }

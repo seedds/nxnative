@@ -1,6 +1,6 @@
 # Translating one submission on several cores (design, work in progress)
 
-Status: milestones 1–2 built, 3 built for S and R (`DM_NVN_PAR=measure`, `DM_NVN_PAR=check`; log only). Results below; how to test at the end. Each milestone below lands as its own commit on this branch.
+Status: milestones 1–2, check mode (3) and fresh/fresh-scan contexts (4a/4b) tested in Bananza. Serialized real workers (4c, `DM_NVN_PAR=thread1`) ran in Bananza; the run exposed a diagnostic capacity limit and incomplete CPU accounting, corrected below. Gameplay with those corrections is pending. Concurrent workers are not enabled. Results and test steps below. Each milestone lands as its own commit on this branch.
 
 ## Why
 
@@ -131,3 +131,63 @@ After milestone 2, about 890 file-scope variables in `nvn_mtl.m`, `nvn_geometry.
 | Everything else | 600 | case by case; the encoder-adjacent ones first (`g_blit_*`, `g_bw_*`, `g_br_*`, `g_bar_*`, `g_gp_*`, `g_last_end_relaxed`), which belong in the context, then the submission-level pools (`g_alloc4`, `g_arenas`), which take a lock |
 
 The modes above already exercise the context split on one thread. Threads add data races. A practical next step is to run `DM_NVN_PAR=fresh-scan` under the thread sanitizer with chunks on threads one at a time (each still waiting for the one before it), so a race is reported by name before any two chunks really overlap.
+
+## Milestone 4c: serialized worker (`DM_NVN_PAR=thread1`)
+
+`thread1` continues the fresh-scan ladder on a real worker. The submitting thread translates the first chunk, stops before applying the split's SetRenderTargets, and waits while one worker translates the remaining chunks in order. The continuation preserves nested call returns and later submission handles. Resuming a boundary neither counts it twice nor applies its render-target operation twice. Default replay is unchanged; chunks do not overlap.
+
+The serialized worker is recognized through a thread-local ownership flag; it never rewrites the submitting thread's shared identity. Its autorelease pool stays on the worker and survives until its next submission, while the original submission pool is still popped on the submitting thread. Worker creation failure continues the chunks serially instead of waiting forever.
+
+`make -C dm/gfx/tests GAME=040074A01BF12000 check_t_parallel_thread` checks nested calls, multiple handoffs, remaining handles, exact event order, context reuse across submissions and actual GPU buffer writes, with Metal validation in direct and deferred encoding. `check_t_parallel_thread_tsan` runs the same fixture under ThreadSanitizer in both encoding modes. The original four runs passed 97 checks; the default partial depth/stencil clear test passed 59 checks and the docs suite passed 11 tests. These are targeted continuation tests, not gameplay or throughput measurements. The later gameplay run and additional ownership checks are described below.
+
+Sequential handoffs establish ordering between this worker and the submitting thread. ThreadSanitizer can expose races with other background threads in exercised paths, but a clean run does not establish safety for multiple overlapping translation workers. The shared-state audit above remains necessary before enabling overlap.
+
+Validation scope: the broad game regression run remains pending. The local harness inventory finds Splatoon Raiders without a smoke route; Bananza is built in the separate combined test-all work folder, and Breath of the Wild has no discovered local build. These targeted tests do not replace the three-game milestone checks.
+
+### November 4 worker follow-up
+
+The Bananza `par-thread1-codex` run reached 17,820 worker chunks and 5,591 busy-view samples. It logged 16 write-tracking warnings (the logging cap), with continuing mismatches in the summaries. Early comparisons had about 6,800 written pages, beyond the checker's 1,024-page snapshot. At that size it skipped the inclusion check and reported any differing hash as a missing write. The snapshot now holds `SBW_N` entries, the entire write table capacity; synthetic checks at 6,800 and 16,384 pages accept a safe superset and still reject a missing replay page. This fixes the diagnostic blind spot, but a new gameplay run must establish whether the observed differences were all safe supersets.
+
+The run's 9.03 ms median `@cpu_ms` is the presenting thread's CPU time, not total translation CPU. Chunk work is now charged to `@sub_cpu_ms`, `@sub_instr` and the cumulative translation summaries, including cycles and kernel CPU time. Submission wall time is counted once. Compare `@sub_wall_ms` and frame time for latency, `@sub_cpu_ms` for translation CPU work, and `@proc_cpu_ms` for whole-process CPU; retain `@cpu_ms`'s existing presenting-thread meaning. Deferred Metal encoding and uniform-copy workers are not included in `@sub_cpu_ms`. No speedup is established by the old run.
+
+Context selection (`RX`, `S`, `R`) is now thread-local. The serialized worker explicitly receives and returns its selected context across the semaphore pair. Queue activation, finalization and submission start rebind the last committed context under the submission lock, so changing guest submitting threads does not lose queue state. Shader argument reuse, copy-encoder hazard ranges and compute dispatch parameters are stored per context. Tests exercise simultaneous independent context selection and real GPU writes from alternating submitting threads.
+
+These ownership changes do not enable overlapping translation. The remaining production dependencies include:
+
+- `thread1` now reserves a distinct command allocator pool per replay context, but `par_fresh_switch` still transfers the new command buffer, arenas, update ring, post list and visibility buffer between contexts. Concurrent jobs still need independent resources and ordered completion/retirement.
+- `sub_cut` commits immediately. Speculative chunks need bounded command-list ranges and a way to discard failed speculation before any GPU commit or CPU-visible side effect.
+- Every measured busy-scene boundary has an open occlusion query. The scan must carry query/reset state, and reports must combine preceding chunks' visibility slots in command order.
+- Deferred recording now has independent held streams and the uniform-copy queue has atomic producer reservation, tested concurrently below. Replay jobs must still publish complete streams in command order and finish their copies before releasing discarded scratch storage.
+- Upload batches, texture state, lazy shader/pipeline caches and diagnostics still require an ownership/locking audit. A successful serialized ThreadSanitizer run does not cover simultaneous writers.
+
+Do not advertise `thread1` as a parallel throughput build or infer that adding threads to its existing driver is safe.
+
+Follow-up validation: 111 worker checks pass in each of direct encoding, deferred encoding, and both ThreadSanitizer variants. Queue-origin rendering passes 398 checks in both encoding modes, copy-alias coverage passes 101 in both, the default partial depth/stencil clear test passes 59, and the NVN fixture including worker timing passes 240. The combined tree passes 111 worker checks in both encoding modes. The docs suite passes 11 tests; the C analyzer reports no baseline regressions. No updated gameplay run or full multi-game regression is claimed. The installed Bananza app has not been rebuilt with this follow-up.
+
+### Context allocator and query ownership
+
+`thread1` now gives each replay context an independent command allocator pool. A submission reserves at most one allocator from each pool; returning to a context reuses that reservation without resetting it. Every reserved allocator is retired at the final submission fence, including those used only by early segments. Pools grow lazily, with eight allocators per context; normal serial replay retains its original single pool and limit. Ordinary geometry and copy cuts keep their existing entry point and allocator.
+
+Occlusion-query accumulation now belongs to each replay context, including the live slot list, counting flags, current pass and visibility-ring retirement index. Serialized handoffs transfer ownership and clear the previous context's pointers. Recorded reports retain independent snapshots, so subsequent resets cannot erase their results. This is ownership groundwork; independently translated chunks still need a prefix merge for queries spanning chunks.
+
+The worker fixture now passes 146 checks in direct/deferred encoding and both ThreadSanitizer variants. It cycles through nine handoffs in one submission, checks distinct allocator objects and final-fence retirement, verifies every GPU write after context reuse, and checks query-report prefixes across a handoff and reset. The query fixture uses known slot values to isolate accumulation from rasterization. The combined tree passes the same 146 checks in both encoding modes. Queue-origin rendering passes 398 checks in both modes; deferred-pass rendering passes 59 checks. Static analysis reports no new findings. Overlapping translation and an updated gameplay build remain pending.
+
+### Concurrent recording, copy producers and scratch reuse
+
+Each replay context now owns its current record block. A held stream keeps full blocks private instead of automatically publishing them. Once its producer has finished, the coordinator can enqueue its entire chain atomically in command order or discard it, releasing retained objects without executing the records. Waiting for GPU work from an unpublished held stream is rejected. Queue callbacks, upload commits and signals respect holding even before the encode thread starts; the startup flag is atomic. Serialized context switches publish the new command-buffer prefix before the next context records its commands.
+
+This is command-record cancellation, not rollback of arbitrary replay-side mutations. The full translator does not yet run speculative jobs through held streams. Texture updates, residency, query prefixes and other shared state still need the earlier audit and an ordered replay-job coordinator. Metal encoding itself remains on one consumer thread.
+
+Uniform-copy producers now serialize slot reservation and publication with a separate producer mutex. The copy consumer never takes that mutex, so ring backpressure can wait for progress without blocking the consumer. Dependencies within each producer retain their enqueue order. Scratch-arena claim, trim and retirement use the same pool mutex; every context initializes its own active arena list, and the arena creation statistic is atomic.
+
+`check_t_parallel_record` and `check_t_parallel_record_tsan` pass 32 checks. Two record producers finish in reverse order; publication still yields ordered callbacks and dependent GPU writes, including full-block boundaries. Cancellation releases captured objects and executes no callbacks, and a discarded stream is reusable. Two uniform-copy producers enqueue 16,418 dependent copies, verifying unique completion sequences and all copied bytes through ring wraparound. Two contexts also claim and retire scratch buffers 1,000 times each, proving simultaneous ownership is distinct and completed buffers are reused. Tests explicitly exercise cold encoder startup. These are concurrent component tests, not a Bananza throughput measurement or proof that the whole replay is safe to overlap.
+
+Producer follow-up validation: the combined tree passes the 32 concurrent-component checks and 146 worker checks in each encoding mode. The PR tree also passes both 146-check worker ThreadSanitizer runs, the default NVN fixture (240 checks), and the docs suite (11 tests); static analysis has no baseline regression. The combined tree needed the existing PR queue-callback record helper carried over. No app rebuild, gameplay speedup, commit or push is claimed for this stage.
+
+### Invocation-aware plans and bounded continuation
+
+A boundary is now identified by its opcode address, return stack and remaining submission handles. The same command list can be called several times; matching only its address could select a later invocation's snapshot for an earlier call. The scan owns its cursor and no longer depends on the replay context's remaining handles. Incomplete walks, excessive nesting and unsupported write operations invalidate the entire plan, including snapshots already collected. This keeps a partially modeled submission on serial replay.
+
+The continuation driver accepts an exclusive invocation endpoint and propagates that stop through recursive calls without consuming the saved return stack. It validates endpoint reachability before replay so an invalid range cannot partially execute. The existing serialized worker uses the same driver with no endpoint. Bounded execution is currently exercised only by the fixture: production overlap still requires lookahead confinement, independent resource ownership, query-prefix merging and ordered publication. A bounded opcode loop alone does not constrain optimizations which execute later work early.
+
+The tests distinguish repeated calls and repeated submission handles, check exact snapshot selection after skipped boundaries, reject malformed/cyclic control flow, and verify individual state operations across bounded replay and nested returns. They also verify that an empty range executes nothing and an unreachable endpoint changes no state. These are correctness tests, not a throughput result; no new gameplay build has been installed for this stage.

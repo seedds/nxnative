@@ -19,6 +19,7 @@ enum { UBC_N = 8192 };
 static ubc_op g_ubc[UBC_N];
 static _Atomic uint64_t g_ubc_head, g_ubc_done;   // ops queued / made (monotonic)
 static _Atomic int g_ubc_sleeping;
+static pthread_mutex_t g_ubc_produce_mu = PTHREAD_MUTEX_INITIALIZER;   // reserve and publish a complete copy atomically across producers
 static pthread_mutex_t g_ubc_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_ubc_cv = PTHREAD_COND_INITIALIZER;
 static int ubc_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_UB_COPY_THREAD"); v = !(e && !strcmp(e, "0")); } return v; }
 static void *ubc_thread(void *arg) {
@@ -47,8 +48,10 @@ static void ubc_wait(uint64_t seq) {
     if (ws_on()) ws_put(WS_UBC, w0, 1);
 }
 static inline uint64_t ubc_head(void) { return atomic_load_explicit(&g_ubc_head, memory_order_relaxed); }
-// Queue a copy (submit thread only); returns the count of ops that must be made for it to be done
+// Queue a copy; returns its completion sequence. Producer order within a chunk preserves dependent shadows.
+// The consumer never takes the producer lock, so waiting for ring space cannot block its progress.
 static uint64_t ubc_push(void *d, const void *s, size_t n) {
+    pthread_mutex_lock(&g_ubc_produce_mu);
     static int started;
     if (!started) { pthread_t th; if (pthread_create(&th, NULL, ubc_thread, NULL)) MDIE("cannot start the uniform copy thread"); pthread_detach(th); started = 1; }
     uint64_t h = atomic_load_explicit(&g_ubc_head, memory_order_relaxed);
@@ -56,6 +59,7 @@ static uint64_t ubc_push(void *d, const void *s, size_t n) {
     g_ubc[h % UBC_N] = (ubc_op){d, s, n};
     atomic_store_explicit(&g_ubc_head, h + 1, memory_order_release);
     if (atomic_load(&g_ubc_sleeping)) { pthread_mutex_lock(&g_ubc_mu); pthread_cond_signal(&g_ubc_cv); pthread_mutex_unlock(&g_ubc_mu); }
+    pthread_mutex_unlock(&g_ubc_produce_mu);
     return h + 1;
 }
 
@@ -89,8 +93,12 @@ static inline int rec_on(void) {
 }
 static pthread_mutex_t g_rb_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_rb_work = PTHREAD_COND_INITIALIZER, g_rb_idle = PTHREAD_COND_INITIALIZER;
-static rec_blk *g_rb_cur, *g_rb_head, *g_rb_tail, *g_rb_free;   // the submit thread's open block; blocks waiting for the encode thread; empty blocks
-static int g_rb_busy, g_rb_started, g_rb_sleeping;              // the encode thread is working through a block; the thread exists; it waits for work
+typedef struct { rec_blk *cur, *head, *tail; int held; } rec_stream;
+static rec_stream g_rec_streams[RX_MAX];   // one producer owns each selected context; held streams are submitted in command order after workers finish
+#define g_rb_cur (g_rec_streams[RXI].cur)
+static rec_blk *g_rb_head, *g_rb_tail, *g_rb_free;   // published blocks and the reusable block pool, under g_rb_mu
+static _Atomic int g_rb_started;
+static int g_rb_busy, g_rb_sleeping;              // the encode thread is working through a block; the thread exists; it waits for work
 
 static inline uint64_t rec_obj(id o) { return o ? (uint64_t)(uintptr_t)CFBridgingRetain(o) : 0; }
 static inline id rec_id(uint64_t v) { return (__bridge id)(void *)(uintptr_t)v; }
@@ -197,12 +205,44 @@ static void *rec_thread(void *arg) {
 }
 
 // ---------- The submit thread's side ----------
-static void rec_publish(void) {
-    if (!g_rb_cur || !g_rb_cur->n) return;
+// Publish a complete chain atomically: another producer cannot splice records into this stream.
+static void rec_enqueue(rec_blk *head, rec_blk *tail) {
+    if (!head) return;
     pthread_mutex_lock(&g_rb_mu);
-    g_rb_cur->next = NULL; if (g_rb_tail) g_rb_tail->next = g_rb_cur; else g_rb_head = g_rb_cur; g_rb_tail = g_rb_cur; g_rb_cur = NULL;
+    tail->next = NULL; if (g_rb_tail) g_rb_tail->next = head; else g_rb_head = head; g_rb_tail = tail;
     if (g_rb_sleeping) pthread_cond_signal(&g_rb_work);
     pthread_mutex_unlock(&g_rb_mu);
+}
+static void rec_stream_flush(rec_stream *s) {
+    rec_blk *b = s->cur; if (!b || !b->n) return;
+    s->cur = NULL; b->next = NULL;
+    if (s->held) { if (s->tail) s->tail->next = b; else s->head = b; s->tail = b; }
+    else rec_enqueue(b, b);
+}
+static void rec_publish(void) { rec_stream_flush(&g_rec_streams[RXI]); }
+// Speculative recording keeps every block private, including automatic publication of full blocks.
+// The coordinator calls submit/discard only after joining the stream's producer. It chooses command
+// order, independently of worker completion order. No replay speculation uses this API yet.
+static void rec_stream_hold(rec_stream *s) {
+    if (!rec_on()) MDIE("deferred encoding: holding a stream requires deferred encoding");
+    if (s->held || s->head || (s->cur && s->cur->n)) MDIE("deferred encoding: holding a nonempty stream");
+    s->held = 1;
+}
+static void rec_stream_submit(rec_stream *s) {
+    if (!s->held) MDIE("deferred encoding: submitting a stream that is not held");
+    rec_stream_flush(s); rec_enqueue(s->head, s->tail); s->head = s->tail = NULL; s->held = 0;
+}
+static void rec_stream_discard(rec_stream *s) {
+    if (!s->held) MDIE("deferred encoding: discarding a stream that is not held");
+    rec_stream_flush(s);
+    rec_blk *b = s->head, *tail = s->tail;
+    for (rec_blk *p = b; p; p = p->next) {
+        for (int i = 0; i < p->n; i++) for (uint32_t j = 0; j < p->r[i].nobj; j++)
+            if (p->r[i].a[j]) CFRelease((CFTypeRef)(uintptr_t)p->r[i].a[j]);
+        p->n = 0;
+    }
+    if (b) { pthread_mutex_lock(&g_rb_mu); tail->next = g_rb_free; g_rb_free = b; pthread_mutex_unlock(&g_rb_mu); }
+    s->head = s->tail = NULL; s->held = 0;
 }
 static rec_t *rec_put(uint32_t op, uint32_t nobj) {
     if (g_rb_cur && g_rb_cur->n == REC_BLK) rec_publish();
@@ -219,6 +259,7 @@ static rec_t *rec_put(uint32_t op, uint32_t nobj) {
 }
 // Hand over what is recorded and wait until the encode thread has made every call
 static void rec_drain(void) {
+    if (g_rec_streams[RXI].held) MDIE("deferred encoding: a held stream cannot wait for GPU work before submission");
     if (!g_rb_started) return;
     rec_publish();
     uint64_t w0 = ws_t0(); int blocked = 0;
@@ -347,11 +388,11 @@ static void rec_commit(id cb, MTL4CommitOptions *o) {
 }
 // An upload batch: its place in the queue is after what is recorded so far (it reads no uniform shadow)
 static void rec_commit_upload(id cb, MTL4CommitOptions *o) {
-    if (rec_on() && g_rb_started) { rec_t *r = rec_put(RO_COMMIT_REAL, 2); r->a[0] = rec_obj(o); r->a[1] = rec_obj(cb); return; }
+    if (rec_on() && (g_rb_started || g_rec_streams[RXI].held)) { rec_t *r = rec_put(RO_COMMIT_REAL, 2); r->a[0] = rec_obj(o); r->a[1] = rec_obj(cb); return; }
     id<MTL4CommandBuffer> buffers[] = {cb};
     if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
 }
 // A queue operation (a sparse texture's mapping update, nvn_mtl.m sparse_*): on the encoding thread in its place among the recorded commits, so it reaches the queue before the upload batch
 // committed after it and after the command buffers committed before it
-static void rec_queue_block(void (^block)(void)) { if (rec_on() && g_rb_started) rec_put(RO_Q_BLOCK, 1)->a[0] = rec_obj([block copy]); else block(); }
-static void rec_signal(id ev, uint64_t v) { if (rec_on() && g_rb_started) { rec_t *r = rec_put(RO_SIGNAL, 1); r->a[0] = rec_obj(ev); r->a[1] = v; } else [g_q4 signalEvent:ev value:v]; }
+static void rec_queue_block(void (^block)(void)) { if (rec_on() && (g_rb_started || g_rec_streams[RXI].held)) rec_put(RO_Q_BLOCK, 1)->a[0] = rec_obj([block copy]); else block(); }
+static void rec_signal(id ev, uint64_t v) { if (rec_on() && (g_rb_started || g_rec_streams[RXI].held)) { rec_t *r = rec_put(RO_SIGNAL, 1); r->a[0] = rec_obj(ev); r->a[1] = v; } else [g_q4 signalEvent:ev value:v]; }

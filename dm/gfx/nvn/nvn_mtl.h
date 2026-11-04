@@ -39,6 +39,7 @@ void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n);               // Buff
 void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v);   // Write the event value after completion (0 write / 1 add)
 void mtl_sub_counter(uint64_t addr, uint32_t type);                       // Write the counter record after completion
 uint64_t mtl_sub_commit(void);
+void nvn_sub_worker_run(void (*run)(void));   // hle_nvn: charge worker CPU, instructions and cycles to submission totals
 
 uint64_t mtl_last_fence(void);                       // Fence value of the most recent submit (0 = never submitted)
 int mtl_wait(uint64_t fence, uint64_t timeout_ns);   // Returns 1 when the GPU has completed up to fence, 0 on timeout

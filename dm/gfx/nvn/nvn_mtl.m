@@ -150,13 +150,18 @@ typedef struct {
         int idx[PEND_MAX + PEND_WIDE];                // ubp_get's scratch: every entry a lookup can meet
         uint64_t ready; ubp_ent pc[UBP_CACHE]; unsigned pc_i;   // ready of the shadow ubp_get returned last; the shadows kept per range
     } ub;
+    const uint8_t *par_start, *par_resume; const uint64_t *par_rest; int par_nrest;   // thread1: where the chunk this context translates starts (its SetRenderTargets, met again without a second switch), and the handles after the one it is in
 } rx_t;
 enum { RX_MAX = 5, RX_CHUNKS = 4, RX_SCAN = 4 };   // replay contexts: 0..3 translate chunks (one today; the workers in milestone 4), 4 is the scan's (par_scan)
-static rx_t g_rxs[RX_MAX] = {[0] = {.pso_dirty = 1, .dss_dirty = 1, .args_dirty = {1, 1, 1, 1, 1, 1}, .ub.ver = 1}}, *g_rx = &g_rxs[0];
-static int g_rxi;   // g_rx's index in g_rxs (RXI): state kept per context in arrays [RX_MAX], for state whose types are defined further down (slice 4)
+static rx_t g_rxs[RX_MAX] = {[0] = {.pso_dirty = 1, .dss_dirty = 1, .args_dirty = {1, 1, 1, 1, 1, 1}, .ub.ver = 1}};
+static _Thread_local rx_t *g_rx = &g_rxs[0];
+static _Thread_local int g_rxi;   // g_rx's index in g_rxs (RXI): state kept per context in arrays [RX_MAX], for state whose types are defined further down (slice 4)
+static int g_serial_rxi;   // last committed context, protected by the submission lock
+static void rx_bind_serial(void);
 #define RXI g_rxi
 #define RX (*g_rx)
-static id<MTL4CommandAllocator> g_alloc4[ALLOC_MAX]; static int g_alloc_n;   // Command allocator pool of the main submission: at start pick one the GPU has finished with, create a new one if there is none (wait only at the cap)
+enum { ALLOC_TOTAL = ALLOC_MAX * RX_CHUNKS };
+static id<MTL4CommandAllocator> g_alloc4[ALLOC_TOTAL]; static int g_alloc_n;   // Command allocator pool of the main submission: at start pick one the GPU has finished with, create a new one if there is none (wait only at the cap)
 static id<MTL4CommandAllocator> g_up_alloc4[3];
 static id<MTL4CommandAllocator> g_present_alloc4[3];
 static id<MTL4CommandBuffer> g_present_cb[3];
@@ -192,7 +197,7 @@ static _Atomic uint64_t g_fence;                // Highest committed fence value
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
 static _Atomic uint64_t g_done;                 // GPU complete and all CPU-visible effects through this fence published
-static uint64_t g_arena_made;
+static _Atomic uint64_t g_arena_made;
 static int g_allocprof = -1; static uint64_t g_ap_bytes[64], g_ap_fn[8];
 // Diagnostic only: inclusive wall/CPU time on the replay thread. No GPU waits
 // are added, and no clocks are read when DM_NVN_CPUPROF is absent or zero.
@@ -811,12 +816,27 @@ typedef struct { int n; vis_slot s[]; } vis_list;
 typedef struct { __strong id<MTLBuffer> buf; uint64_t fence; } vis_buf;
 // One visibility buffer per submission in flight, as many as command allocators: with 4, Age of Calamity (about twelve submissions a frame) waited in mtl_sub_begin for the previous frame's GPU work; its first battle went from 18.0 to 16.9 ms a frame on the Mac
 enum { VIS_RING = ALLOC_MAX };
-static vis_buf g_vis_ring[VIS_RING]; static int g_vis_ring_n, g_vis_ring_i = -1;
+static vis_buf g_vis_ring[VIS_RING]; static int g_vis_ring_n;
 static int vis_in_ring(id<MTLBuffer> b) { for (int i = 0; i < g_vis_ring_n; i++) if (g_vis_ring[i].buf == b) return 1; return 0; }
-static int g_vis_on, g_vis_counting, g_vis_cur = -1; static uint64_t g_vis_cur_pass;
-static vis_slot *g_vs; static int g_nvs, g_vscap;      // Slots since the last reset
+typedef struct { int on, counting, cur, ring; uint64_t pass; vis_slot *slots; int n, cap; } vis_state;
+static vis_state g_vis_rx[RX_MAX] = {[0 ... RX_MAX - 1] = {.cur = -1, .ring = -1}};
+#define g_vis_on (g_vis_rx[RXI].on)
+#define g_vis_counting (g_vis_rx[RXI].counting)
+#define g_vis_cur (g_vis_rx[RXI].cur)
+#define g_vis_cur_pass (g_vis_rx[RXI].pass)
+#define g_vis_ring_i (g_vis_rx[RXI].ring)
+#define g_vs (g_vis_rx[RXI].slots)
+#define g_nvs (g_vis_rx[RXI].n)
+#define g_vscap (g_vis_rx[RXI].cap)
 static uint64_t g_cnt_report[32], g_cnt_reset[32];       // Report / reset counts per counter type (diagnostics)
 static void vis_clear(void) { for (int i = 0; i < g_nvs; i++) CFRelease(g_vs[i].buf); g_nvs = 0; g_vis_cur = -1; }
+// Serialized handoff transfers ownership of the cumulative query. Snapshots held by reports
+// retain their own buffers, so a later reset cannot change an already recorded result.
+static void vis_move(int dst, int src) {
+    vis_state *d = &g_vis_rx[dst], *s = &g_vis_rx[src];
+    for (int i = 0; i < d->n; i++) CFRelease(d->slots[i].buf);
+    free(d->slots); *d = *s; *s = (vis_state){.cur = -1, .ring = -1};
+}
 static vis_list *vis_snapshot(void) {
     vis_list *l = malloc(sizeof *l + g_nvs * sizeof(vis_slot)); l->n = g_nvs;
     for (int i = 0; i < g_nvs; i++) { l->s[i] = g_vs[i]; CFRetain(g_vs[i].buf); }
@@ -947,14 +967,16 @@ static inline MTL4VisibilityOptions blit_vis(void) { return resource_vis() | (g_
 enum { GSR_N = 16384 };
 static struct { uint64_t fence, lo, hi; } g_gsr[GSR_N]; static uint64_t g_gsr_n; static int g_gml_on;
 static pthread_mutex_t g_gsr_mu = PTHREAD_MUTEX_INITIALIZER;
-static uint64_t g_alloc_fence[ALLOC_MAX]; static uint64_t g_alloc_waits, g_alloc_grown;
+static int g_sub_alloc[RX_CHUNKS];   // one reserved allocator per context pool until the submission fence
+static uint64_t g_alloc_fence[ALLOC_TOTAL]; static uint64_t g_alloc_waits, g_alloc_grown;
 int mtl_wait(uint64_t fence, uint64_t timeout_ns);
 static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site);
 static void up_flush(void);
 // The upload batch belongs only to the submit thread (the thread that called mtl_sub_begin): the batch's encoder cannot be used across threads. Every entry point asserts current thread == submit thread,
 // and on mismatch prints the stack and aborts on the spot - so that 'another thread touched the batch' is exposed deterministically on Mac too, not by timing (real iOS device stuck at the main menu: the present thread flushed the submit thread's batch via q_cb).
 static pthread_t g_sub_thread; static _Atomic int g_sub_thread_set;
-static int on_sub_thread(void) { return atomic_load(&g_sub_thread_set) && pthread_equal(pthread_self(), g_sub_thread); }
+static _Thread_local int t_par_worker;   // serialized worker owns replay while the submitting thread waits
+static int on_sub_thread(void) { return t_par_worker || (atomic_load(&g_sub_thread_set) && pthread_equal(pthread_self(), g_sub_thread)); }
 static void up_owner_check(const char *where) {
     if (!atomic_load(&g_sub_thread_set) || on_sub_thread()) return;
     char name[64] = ""; pthread_getname_np(pthread_self(), name, sizeof name);
@@ -980,8 +1002,32 @@ void mtl_prepare(void) {
     if (!g_warm_started && prepare_on()) { mtl_init(); shmap_load(); }
 }
 static void sub_cut_begin(void);
-static int par_measure(void); static void par_sub_begin(void), par_sub_end(void), par_wait(void), par_scan(const uint64_t *h, int n);   // DM_NVN_PAR=measure (docs/parallel-translation.md, milestone 1)
+static int par_measure(void); static void par_sub_begin(void), par_sub_end(void), par_wait(void), par_scan(const uint64_t *h, int n); static int g_par_handoff;   // DM_NVN_PAR=measure (docs/parallel-translation.md, milestone 1)
+static int par_thread1(void);
+// The submission lock (or its serialized worker handoff) owns reservation. A context may return to
+// its reserved allocator within this submission, but must never reset it while earlier segments use it.
+static int sub_allocator(int pool) {
+    if (g_sub_alloc[pool] >= 0) return g_sub_alloc[pool];
+    int lo = pool * ALLOC_MAX, hi = lo + ALLOC_MAX, pick = -1, empty = -1;
+    uint64_t done = g_done;
+    for (int i = lo; i < hi; i++) {
+        if (!g_alloc4[i]) { if (empty < 0) empty = i; continue; }
+        if (g_alloc_fence[i] <= done) { pick = i; break; }
+    }
+    if (pick < 0 && empty >= 0) {
+        NSError *error = nil; MTL4CommandAllocatorDescriptor *d = [MTL4CommandAllocatorDescriptor new];
+        g_alloc4[empty] = [g_dev newCommandAllocatorWithDescriptor:d error:&error];
+        if (!g_alloc4[empty]) MDIE("failed to create command allocator for context %d: %s", pool, error.localizedDescription.UTF8String);
+        pick = empty; g_alloc_n++; g_alloc_grown++;
+    }
+    if (pick < 0) {
+        pick = lo; for (int i = lo + 1; i < hi; i++) if (g_alloc_fence[i] < g_alloc_fence[pick]) pick = i;
+        g_alloc_waits++; mtl_wait_at(g_alloc_fence[pick], UINT64_MAX, WS_ALLOC);
+    }
+    [g_alloc4[pick] reset]; g_sub_alloc[pool] = pick; return pick;
+}
 void mtl_sub_begin(void) {
+    rx_bind_serial();
     mtl_init(); g_sub_serial++; RX.seg = 0; seg_clk_put(RX.sclk); RX.sclk = NULL; g_rc_npend = 0; g_rc_skip = 0;
     sub_cut_begin(); if (par_measure()) par_sub_begin();
     defer_drain();
@@ -995,15 +1041,9 @@ void mtl_sub_begin(void) {
     RX.cb = rec_cb_new();
     // Do not wait for the GPU mid-frame (hot real device: with a fixed rotation of 3, when the GPU cannot keep up every frame blocks here, and the submit thread runs at low frequency after waking, instruction count −18% but CPU time +49%):
     // pick an allocator the GPU has finished with; if all are in use create a new one; only at the cap wait for the oldest one. How far ahead it runs is bounded by the wait where the game acquires the swapchain texture, same as the old interface.
-    int alloc_i = -1; uint64_t done = g_done;
-    for (int i = 0; i < g_alloc_n; i++) if (g_alloc_fence[i] <= done) { alloc_i = i; break; }
-    if (alloc_i < 0 && g_alloc_n < ALLOC_MAX) { NSError *ae = nil; MTL4CommandAllocatorDescriptor *ad = [MTL4CommandAllocatorDescriptor new];
-        g_alloc4[g_alloc_n] = [g_dev newCommandAllocatorWithDescriptor:ad error:&ae]; if (!g_alloc4[g_alloc_n]) MDIE("failed to create a new MTL4CommandAllocator: %s", ae.localizedDescription.UTF8String);
-        alloc_i = g_alloc_n++; g_alloc_grown++; }
-    if (alloc_i < 0) { alloc_i = 0; for (int i = 1; i < g_alloc_n; i++) if (g_alloc_fence[i] < g_alloc_fence[alloc_i]) alloc_i = i; g_alloc_waits++; mtl_wait_at(g_alloc_fence[alloc_i], UINT64_MAX, WS_ALLOC); }
-    RX.alloc_cur = alloc_i;
-    [g_alloc4[alloc_i] reset];
-    [RX.cb beginCommandBufferWithAllocator:g_alloc4[alloc_i]];
+    for (int i = 0; i < RX_CHUNKS; i++) g_sub_alloc[i] = -1;
+    RX.alloc_cur = sub_allocator(par_thread1() ? RXI : 0);
+    [RX.cb beginCommandBufferWithAllocator:g_alloc4[RX.alloc_cur]];
     RX.commit_blocks = [NSMutableArray array];
     // The overflow buffer created when the previous submission ran out of slots (see RX.vis_n >= VIS_SLOTS): retire it. It used to be just cleared here and stayed in the residency set for good (from d2r-mobile 2eb575877)
     if (RX.vis && !vis_in_ring(RX.vis)) defer_obj_release(RX.vis);
@@ -1194,11 +1234,20 @@ static void blit_note(void);   // Per-pass dump: a copy / buffer update ended th
 // one whenever the encoder already holds an operation. Reads were not tracked at first, so a copy writing bytes an earlier copy reads could run first (seen in Cuphead while its pool
 // allocator gave out overlapping blocks, see hle_nvn.c zcull_size; NVN runs copies in order for any game)
 enum { BW_MAX = 64 };
-static uint64_t g_bw_lo[BW_MAX], g_bw_hi[BW_MAX], g_br_lo[BW_MAX], g_br_hi[BW_MAX]; static int g_bw_n, g_br_n, g_blit_ops; static uint64_t g_blit_barriers;
+static struct { uint64_t bw_lo[BW_MAX], bw_hi[BW_MAX], br_lo[BW_MAX], br_hi[BW_MAX]; int bw_n, br_n, blit_ops, blit_ct; } g_copy_rx[RX_MAX];
+#define g_bw_lo (g_copy_rx[RXI].bw_lo)
+#define g_bw_hi (g_copy_rx[RXI].bw_hi)
+#define g_br_lo (g_copy_rx[RXI].br_lo)
+#define g_br_hi (g_copy_rx[RXI].br_hi)
+#define g_bw_n (g_copy_rx[RXI].bw_n)
+#define g_br_n (g_copy_rx[RXI].br_n)
+#define g_blit_ops (g_copy_rx[RXI].blit_ops)
+#define g_blit_ct (g_copy_rx[RXI].blit_ct)
+static uint64_t g_blit_barriers;
 static uint64_t g_blit_splits;   // copies / buffer updates / fills that ended an open draw pass (the residency set line; a pass ended this way stores and the next one reloads its attachments)
 uint64_t mtl_blit_splits(void) { return g_blit_splits; }
 static int enc_open(void);
-static int g_blit_ct;   // the open copy encoder has the compute argument table set (dispatches share it, dispatch_enc)
+// g_blit_ct: the open copy encoder has the compute argument table set (dispatch_enc).
 static id<MTL4ComputeCommandEncoder> blit_open(void) { if (!RX.blit) { ser_gate(); RX.blit = enc_b_begin(RX.cb); [RX.blit barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:blit_vis()]; gp_begin(RX.blit, 'C', nil); g_bw_n = g_br_n = 0; g_blit_ops = 0; g_blit_ct = 0; } return RX.blit; }
 static void ubd_flush(void);   // the inline updates deferred (see mtl_sub_update)
 static id<MTL4ComputeCommandEncoder> blit_raw(void) {
@@ -1784,7 +1833,9 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
     }
     pthread_mutex_lock(&g_mu); if (fence > g_done) g_done = fence; pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu);
 }
+static void par_chunks_run(void);
 uint64_t mtl_sub_commit(void) {
+    if (g_par_handoff) par_chunks_run();   // thread1: the chunks handed off first
     if (par_measure()) par_sub_end();
     lc_land();   // clears still waiting (the command list ends with them)
     defer_fallback();   // Deferred merged pass: at the end of the submission there are still P draws not replayed (the normal path never gets here)
@@ -1826,10 +1877,11 @@ uint64_t mtl_sub_commit(void) {
     rec_commit(RX.cb, o);
     rec_signal(g_ev, fence);
     rec_drain();
-    g_alloc_fence[RX.alloc_cur] = fence;
+    for (int i = 0; i < RX_CHUNKS; i++) if (g_sub_alloc[i] >= 0) g_alloc_fence[g_sub_alloc[i]] = fence;
     RX.cb = nil;
     RX.commit_blocks = nil;
     objc_autoreleasePoolPop(RX.sub_pool); RX.sub_pool = NULL;
+    g_serial_rxi = g_rxi;
     return fence;
 }
 
@@ -3435,7 +3487,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
       MLOG("texture views by texture (vc_get): %u textures hold cached views; %llu views reused, %llu made in total; texture buffers bound as 2D rows for wrapped 1D fetches %llu times, %llu made, %llu failed, %llu copied into aligned rows (%llu MB) "
            "(tbuf_as_2d); texture type mismatches no view bridges %llu in total (tex_mis_note)",
            vn, (unsigned long long)vh, (unsigned long long)vm, (unsigned long long)tb, (unsigned long long)tm, (unsigned long long)tf, (unsigned long long)tc, (unsigned long long)(tcb >> 20), (unsigned long long)mtl_tex_mis_count()); }
-    if (g_allocprof > 0) { char ab[256]; int o = 0; for (int i = 0; i < g_alloc_n && o < 200; i++) o += snprintf(ab + o, sizeof ab - o, " #%d %llu MB", i, (unsigned long long)(g_alloc4[i].allocatedSize >> 20));
+    if (g_allocprof > 0) { char ab[256]; int o = 0; for (int i = 0; i < ALLOC_TOTAL && o < 200; i++) if (g_alloc4[i]) o += snprintf(ab + o, sizeof ab - o, " #%d %llu MB", i, (unsigned long long)(g_alloc4[i].allocatedSize >> 20));
         for (int i = 0; i < 3 && o < 240; i++) o += snprintf(ab + o, sizeof ab - o, " up%d %llu pres%d %llu", i, (unsigned long long)(g_up_alloc4[i].allocatedSize >> 20), i, (unsigned long long)(g_present_alloc4[i].allocatedSize >> 20));
         MLOG("command allocator usage:%s", ab);
         MLOG("GPU allocation growth by function: pass end %llu MB, pass begin %llu MB, pipeline fetch %llu MB, argument buffers %llu MB, texture fetch %llu MB", g_ap_fn[0] >> 20, g_ap_fn[1] >> 20, g_ap_fn[2] >> 20, g_ap_fn[3] >> 20, g_ap_fn[4] >> 20); }
@@ -3471,7 +3523,7 @@ static struct {
     uint8_t clear_d, clear_s; double cd; uint32_t cs;
     p_scissor sc; int has_sc;
 } R_rx[RX_MAX];
-static typeof(R_rx[0]) *g_R = &R_rx[0];   // the current context's R (rx_select): one pointer load where R_rx[RXI] cost an index and a reload of the context number, all over the replay
+static _Thread_local typeof(R_rx[0]) *g_R = &R_rx[0];   // the current context's R (rx_select): one pointer load where R_rx[RXI] cost an index and a reload of the context number, all over the replay
 #define R (*g_R)
 
 // ---------- Zero-source skip ----------
@@ -4411,7 +4463,7 @@ static void shmap_read(void) {
     uint8_t up_color;   // such a shader's colour, from its code at load with DM_UPSCALER=metalfx (up_mfx_color; UP_COLOR_UNREAD otherwise)
     int gs_loc, lay_loc; char gs_comp, lay_comp;   // a slice-writing geometry shader (no function: the layer comes from input gs_loc.gs_comp) / a vertex shader with layer entry points writing output lay_loc.lay_comp (dmsh_build.py gs_slice, vs_layer_entry); -1 = none
     // The argument buffer encoded last time
-    id<MTLBuffer> ab_buf; uint64_t ab_gpu; size_t ab_off; uint64_t ab_pass; uint32_t ab_binst; uint64_t ab_pgen; void *ab_rx;   // ab_rx: the replay context that encoded it (rx_t), the only one that reuses it   // ab_pass: serial of the render pass that encoded this argument block - reused only within the same pass (the arena holding a block from another pass / another submission may already have been reclaimed and rewritten); ab_pgen: g_psnap_gen when it was encoded (pools, pool_gpu)
+    struct { id<MTLBuffer> buf; uint64_t gpu; size_t off; uint64_t pass; uint32_t binst; uint64_t pgen; } ab[RX_MAX];   // argument reuse belongs to each replay context, even when chunks bind the same shader
     id<MTLLibrary> bflib; int bflib_tried; NSMutableDictionary<NSString *, id<MTLFunction>> *bffn;   // bflib: readable-tile version <key>_bf (merge B step 2)
     uint64_t mis[4];   // mis: texture slots 0-255 already reported for a type mismatch (tex_mis_note)
     NSString *ventry; id<MTLFunction> vfn; int vfn_state;
@@ -5438,13 +5490,21 @@ static NvArena *arena_new(size_t minimum) {
 // them again and took 300 ms. The usual 4 MB blocks are always kept
 enum { ARENA_KEEP = 32 << 20, ARENA_IDLE = 600 };
 void arena_begin(void) {
-    if (!g_arenas) { g_arenas = [NSMutableArray array]; RX.sub_arenas = [NSMutableArray array]; }
+    if (!RX.sub_arenas) RX.sub_arenas = [NSMutableArray array];
     RX.cur_arena = nil;
+    pthread_mutex_lock(&g_mu);
+    if (!g_arenas) g_arenas = [NSMutableArray array];
     uint64_t done = g_done;   // read as the submission start does (its allocator and visibility ring)
     for (NSUInteger i = g_arenas.count; i-- > 0;) { NvArena *a = g_arenas[i];
         if (a->fence && a->fence <= done && a->len > ARENA_KEEP && g_fence > a->fence + ARENA_IDLE) { res_remove(a->buf); [g_arenas removeObjectAtIndex:i]; } }
+    pthread_mutex_unlock(&g_mu);
 }
-void arena_commit(uint64_t fence) { for (NvArena *a in RX.sub_arenas) { a->fence = fence; [g_arenas addObject:a]; } [RX.sub_arenas removeAllObjects]; RX.cur_arena = nil; }
+void arena_commit(uint64_t fence) {
+    pthread_mutex_lock(&g_mu);
+    for (NvArena *a in RX.sub_arenas) { a->fence = fence; [g_arenas addObject:a]; }
+    pthread_mutex_unlock(&g_mu);
+    [RX.sub_arenas removeAllObjects]; RX.cur_arena = nil;
+}
 // An unqualified id * out-parameter is __autoreleasing under ARC; __strong avoids autoreleasing the arena buffer at every allocation.
 // Measurements: docs/reference/frame-rate.md, Arena buffer ownership on allocation.
 static size_t arena_alloc(size_t n, __strong id<MTLBuffer> *buf) {
@@ -5474,9 +5534,10 @@ static struct {
     p_tf_bind tf[4]; int tf_on, rast_discard;   // capture buffers and enables; byte offsets and captured count stay on the GPU (nvn_feedback.inc)
     int tex_base, samp_base;   // host-table bases of the texture / sampler pool bound (OP_SET_TEX_POOL / OP_SET_SAMP_POOL), for handles read at replay from uniform buffers (encode_args)
 } S_rx[RX_MAX];
-static typeof(S_rx[0]) *g_S = &S_rx[0];   // the current context's S (rx_select)
+static _Thread_local typeof(S_rx[0]) *g_S = &S_rx[0];   // the current context's S (rx_select)
 #define S (*g_S)
 static inline void rx_select(int i) { g_rx = &g_rxs[i]; g_rxi = i; g_S = &S_rx[i]; g_R = &R_rx[i]; }   // every switch of the current context goes through here
+static void rx_bind_serial(void) { rx_select(g_serial_rxi); }
 // The handle c2 holds at byte b, as encode_args fills the table (DRV2): a combined slot (past slot 31 the image there, tex_slot_h), a separate texture, else none
 static uint64_t c2_handle(int stage, unsigned b) {
     if (b >= DMSH_C2_TEX && b < DMSH_C2_SEPTEX && !((b - DMSH_C2_TEX) % DMSH_C2_ROW)) return tex_slot_h(S.tex[stage], S.img[stage], (b - DMSH_C2_TEX) / DMSH_C2_ROW);
@@ -5755,6 +5816,7 @@ static void state_reset(void) {
 typedef struct queue_state { uint64_t serial; typeof(S) s; typeof(R) r; struct queue_state *next; } queue_state;
 static queue_state *g_queue_states, *g_active_queue;
 void mtl_queue_activate(uint64_t serial) {   // caller holds the submission lock
+    rx_bind_serial();
     if (g_active_queue && g_active_queue->serial == serial) return;
     if (g_active_queue) { g_active_queue->s = S; g_active_queue->r = R; }
     queue_state *q = g_queue_states;
@@ -5768,6 +5830,7 @@ void mtl_queue_activate(uint64_t serial) {   // caller holds the submission lock
     g_active_queue = q; RX.pso_dirty = RX.dss_dirty = 1; args_dirty_all();
 }
 void mtl_queue_forget(uint64_t serial) {   // caller holds the submission lock
+    rx_bind_serial();
     queue_state **p = &g_queue_states;
     while (*p && (*p)->serial != serial) p = &(*p)->next;
     if (!*p) return;
@@ -5786,6 +5849,7 @@ static int prog_unbind(typeof(S) *s, const prog_t *p) {
     return n;
 }
 void mtl_prog_forget(const prog_t *p) {   // caller holds the submission lock
+    rx_bind_serial();
     const prog_t *prog = S.prog, *cprog = S.cprog;
     int active = prog_unbind(&S, p) > 0, inactive = 0;
     if (active) S.prog = bind_stages(NULL, 0);   // a composite of p's stage and another program's: taken again from the stages left (a saved queue's is at its activation, prog_resolve)
@@ -8036,8 +8100,13 @@ static uint32_t ubo_handle(int stage, int reg, int off) { uint32_t h; ubo_read(s
 static int ubo_tex_id(uint32_t h) { int t = (int)(h & 0xfffff); return t ? t + S.tex_base : 0; }
 static int ubo_samp_id(uint32_t h) { int s = (int)(h >> 20); return s ? s + S.samp_base : 0; }
 int dm_sdk_ounce(void);
-static uint32_t g_dispatch_dim[3];   // the current dispatch's workgroup counts (driver segment c0 + 0x200 for compute, and c0 + 4 on NVN2)
-static __unsafe_unretained id<MTLBuffer> g_c0_dim_buf; static size_t g_c0_dim_off;   // where encode_args put them for this dispatch (nil: the shader reads no c0); an indirect dispatch copies its GPU-written counts there
+static uint32_t g_dispatch_dim_rx[RX_MAX][3];
+#define g_dispatch_dim (g_dispatch_dim_rx[RXI])
+//   // the current dispatch's workgroup counts (driver segment c0 + 0x200 for compute, and c0 + 4 on NVN2)
+static __unsafe_unretained id<MTLBuffer> g_c0_dim_buf_rx[RX_MAX]; static size_t g_c0_dim_off_rx[RX_MAX];
+#define g_c0_dim_buf (g_c0_dim_buf_rx[RXI])
+#define g_c0_dim_off (g_c0_dim_off_rx[RXI])
+//   // where encode_args put them for this dispatch (nil: the shader reads no c0); an indirect dispatch copies its GPU-written counts there
 // The pixel stage's sample position rows of c0, for the current pass's sample count. GLSLC lowers gl_SamplePosition (and interpolation at a sample) to a byte of a table at 0x620,
 // indexed by the sample index (PIXLD.MYINDEX) and the pixel's place in a location grid: index = ((((y & w) << z) + (x & z)) << log2 samples) + (sample & mask), with
 // {mask, log2 samples, z, w} at 0x630; each byte holds the sample's x (low nibble) and y (high nibble) in 1/16 pixel. Metroid Prime Remastered's G-buffer shaders pack it into an
@@ -8064,8 +8133,8 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
     if (nvn_stage == 1 && !metal_vertex && sh->has_logic && lop_on()) lo_bind(en);
     if (!sh->ae) return 1;
     args_sync_dirty();
-    if (!passdump() && !RX.args_dirty[nvn_stage] && sh->ab_rx == g_rx && sh->ab_buf && sh->ab_pass == g_pass.serial && nvn_stage != 5 && !(sh->rf.drv_read[0] && sh->ab_binst != RX.draw_binst) && !(sh->rf.pool && sh->ab_pgen != g_psnap_gen)) {
-        bind_args(en, nvn_stage, metal_vertex, sh->ab_buf, sh->ab_gpu, sh->ab_off, sh->rf.abi);
+    if (!passdump() && !RX.args_dirty[nvn_stage] && sh->ab[RXI].buf && sh->ab[RXI].pass == g_pass.serial && nvn_stage != 5 && !(sh->rf.drv_read[0] && sh->ab[RXI].binst != RX.draw_binst) && !(sh->rf.pool && sh->ab[RXI].pgen != g_psnap_gen)) {
+        bind_args(en, nvn_stage, metal_vertex, sh->ab[RXI].buf, sh->ab[RXI].gpu, sh->ab[RXI].off, sh->rf.abi);
         g_stat_args_reuse++;
         return 1;
     }
@@ -8334,7 +8403,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
     id<MTLBuffer> ab; size_t off = arena_alloc(arg_len, &ab);
     memcpy(RX.cur_arena->cpu + off, slots, arg_len);   // the arena arena_alloc took it from (no contents message: see ubo_read)
     bind_args(en, nvn_stage, metal_vertex, ab, RX.cur_arena->gpu + off, off, sh->rf.abi);
-    sh->ab_rx = g_rx; sh->ab_buf = ab; sh->ab_gpu = RX.cur_arena->gpu + off; sh->ab_off = off; sh->ab_pass = g_pass.serial; sh->ab_binst = RX.draw_binst; sh->ab_pgen = g_psnap_gen; RX.args_dirty[nvn_stage] = 0;
+    sh->ab[RXI].buf = ab; sh->ab[RXI].gpu = RX.cur_arena->gpu + off; sh->ab[RXI].off = off; sh->ab[RXI].pass = g_pass.serial; sh->ab[RXI].binst = RX.draw_binst; sh->ab[RXI].pgen = g_psnap_gen; RX.args_dirty[nvn_stage] = 0;
     g_stat_args_enc++;
     return 1;
 }
@@ -8366,7 +8435,10 @@ static const uint8_t *g_exec_cur_rx[RX_MAX];    // The current draw's own op (se
 static const uint8_t *g_ret_rx[RX_MAX][16]; static int g_ret_n_rx[RX_MAX];   // Call return stack of the replay (at OP_CALL the caller's next op is pushed)
 #define g_ret (g_ret_rx[RXI])
 #define g_ret_n (g_ret_n_rx[RXI])
-static const uint64_t *g_rest; static int g_nrest;      // Handles in this submission still to be replayed after the current handle
+static const uint64_t *g_rest_rx[RX_MAX]; static int g_nrest_rx[RX_MAX];
+#define g_rest (g_rest_rx[RXI])
+#define g_nrest (g_nrest_rx[RXI])
+// Handles in this context still to be replayed after the current handle.
 void mtl_exec_rest(const uint64_t *h, int n) { g_rest = h; g_nrest = n; }
 static uint64_t g_stat_ds_omit;      // Number of passes that attach less depth-stencil because the lookahead proved it unused (including stencil-only / depth-only)
 static uint64_t g_stat_s_only, g_stat_d_only;   // Of those, the number of passes that attach only stencil / only depth
@@ -11485,7 +11557,8 @@ static void mirror_rb_land(void *p) {   // the submission's completion handler
     free(m);
 }
 static void copy_b2t(const p_copy_b2t *c) { WT_;
-    if (c->tex) zskip_del(c->tex->serial);
+    if (!c->tex) { MLOG("[RED] buffer-to-texture copy has no texture"); return; }
+    zskip_del(c->tex->serial);
     id<MTLTexture> t = tex_mtl(c->tex);
     if (!t) { PD("C ser=%llu (no host texture)", c->tex->serial); return; }
     int bw, bh, bpb = nvn_fmt_bpb(c->tex->d.format, &bw, &bh);
@@ -11951,7 +12024,7 @@ static void sub_cut_begin(void) { RX.cut_draw0 = g_stat_draw; }
 // DM_FSTEP_PROBE_RAMP=1 (default) / 0 / ab: a frame-step probe's grace is renewed while its frames keep getting cheaper (nvn_fstep.h FSTEP_RAMP), the time macOS's GPU clock takes to rise for the shorter deadline
 static int probe_ramp_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_FSTEP_PROBE_RAMP", 1); return m; }
 int mtl_probe_ramp_on(void) { return sw_on(probe_ramp_mode()); }
-static void sub_cut(void) {
+static void sub_cut_to(int next_context) {
     int n = cut_draws();
     if (!RX.cb || RX.enc) return;
     if ((!RX.cut_copy && (n <= 0 || g_stat_draw - RX.cut_draw0 < (uint64_t)n)) || g_hoist_n || g_defer_nact || g_defer_pend || g_fz.active || g_rt_merged) return;
@@ -11973,10 +12046,12 @@ static void sub_cut(void) {
     rec_commit(RX.cb, o);
     if (rec_on()) rec_publish();   // the segment reaches the encode thread now, not when its block of records fills
     RX.cb = rec_cb_new();
-    [RX.cb beginCommandBufferWithAllocator:g_alloc4[RX.alloc_cur]];   // one allocator encodes several command buffers in sequence; it is reset only once its fence (the last segment) has passed, when a later submission starts
+    if (next_context >= 0) RX.alloc_cur = sub_allocator(next_context);
+    [RX.cb beginCommandBufferWithAllocator:g_alloc4[RX.alloc_cur]];   // the reserved allocator is reset only on its first use this submission
     RX.cut_draw0 = g_stat_draw;
     if (!g_cuts++) MLOG("segmented submission: first segment submitted at frame %llu pass %llu", (unsigned long long)f, (unsigned long long)g_stat_pass);
 }
+static void sub_cut(void) { sub_cut_to(-1); }
 uint64_t mtl_cut_count(void) { return g_cuts; }
 uint64_t mtl_copy_cut_count(void) { return g_copy_cuts; }
 
@@ -12139,33 +12214,53 @@ enum { PAR_B = 4096, PAR_W = 256 };
 static uint32_t g_par_b[PAR_B], g_par_w[PAR_W]; static uint8_t g_par_bq[PAR_B]; static int g_par_nb, g_par_nw; static uint64_t g_par_d0;
 static struct { uint64_t subs, draws, clean, clean_q, dirty, waits, cost, scan_ns, scan_ops, scan_bad, switches, from_scan, sw_draws[RX_MAX]; uint64_t why[9]; } g_par;
 static int par_draws(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PAR_DRAWS"); v = e && atoi(e) > 0 ? atoi(e) : 2500; } return v; }
-static int par_mode(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PAR"); v = !e ? 0 : !strcmp(e, "measure") ? 1 : !strcmp(e, "check") ? 2 : !strcmp(e, "fresh") ? 3 : !strcmp(e, "fresh+check") ? 4 : !strcmp(e, "fresh-scan") ? 5 : 0;
+static int par_mode(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PAR"); v = !e ? 0 : !strcmp(e, "measure") ? 1 : !strcmp(e, "check") ? 2 : !strcmp(e, "fresh") ? 3 : !strcmp(e, "fresh+check") ? 4 : !strcmp(e, "fresh-scan") ? 5 : !strcmp(e, "thread1") ? 6 : 0;
     if (v == 1) MLOG("DM_NVN_PAR=measure: logging how far submissions could be split (log only)");
     if (v == 2) MLOG("DM_NVN_PAR=check: the scan's state at every pass boundary is compared with the replay's where a chunk could start (log only; slow)");
-    if (v >= 3) MLOG("DM_NVN_PAR=%s: at a clean boundary every %d draws or more the translation moves to the next replay context, which starts fresh except for the contract (S, R, write tracking, replay position): serial, one thread (DM_NVN_PAR_DRAWS)%s", e, par_draws(), v == 4 ? "; and the scan's S and R are checked" : "");
+    if (v >= 3 && v <= 5) MLOG("DM_NVN_PAR=%s: at a clean boundary every %d draws or more the translation moves to the next replay context, which starts fresh except for the contract (S, R, write tracking, replay position): serial, one thread (DM_NVN_PAR_DRAWS)%s", e, par_draws(), v == 4 ? "; and the scan's S and R are checked" : "");
     if (v == 5) MLOG("DM_NVN_PAR=fresh-scan: the context a chunk starts in takes S, R and the write tracking from the scan's snapshot of that boundary, as a worker will; the scan's state is also checked");
-    if (e && !v) MLOG("[RED] DM_NVN_PAR=%s: unknown (measure, check, fresh, fresh+check, fresh-scan)", e); } return v; }
+    if (v == 6) MLOG("DM_NVN_PAR=thread1: as fresh-scan, and every chunk after a submission's first is translated on a worker thread, one at a time (the submitting thread waits for it)");
+    if (e && !v) MLOG("[RED] DM_NVN_PAR=%s: unknown (measure, check, fresh, fresh+check, fresh-scan, thread1)", e); } return v; }
 static int par_measure(void) { return par_mode() >= 1; }
 static int par_check(void) { return par_mode() == 2 || par_mode() >= 4; }
-static int par_from_scan(void) { return par_mode() == 5; }
+static int par_from_scan(void) { return par_mode() == 5 || par_mode() == 6; }
+static int par_thread1(void) { return par_mode() == 6; }
+static uint64_t g_parw_chunks;   // accessed only across the serialized worker handoff
 static int par_fresh(void) { return par_mode() >= 3; }
+#include "nvn_par_walk.h"
+_Static_assert(PAR_CALLS == sizeof g_ret / sizeof *g_ret, "planner and replay call depths must match");
+static par_pos par_here(const uint8_t *op) {
+    par_pos p = {.op = op, .rest = g_rest, .nrest = g_nrest, .depth = g_ret_n};
+    if (g_ret_n >= 0 && g_ret_n <= PAR_CALLS) memcpy(p.ret, g_ret, (size_t)g_ret_n * sizeof *g_ret);
+    return p;
+}
+// An exclusive invocation boundary propagates through recursive CALL returns. The coordinator
+// must separately prove that lookahead and pending work do not cross this boundary.
+static _Thread_local const par_pos *t_par_stop;
+static _Thread_local int t_par_stopped;
+static int par_stop_at(const uint8_t *op) {
+    if (!t_par_stop) return 0;
+    par_pos here = par_here(op);
+    if (par_pos_equal(&here, t_par_stop)) { g_exec_cur = op; t_par_stopped = 1; }
+    return t_par_stopped;
+}
 // ---------- Parallel translation, milestone 3: the scan's snapshots checked against the replay (DM_NVN_PAR=check; docs/parallel-translation.md) ----------
 // A chunk will start from what the scan computed for its first pass boundary. Here the scan keeps S and R at every boundary (before the boundary's SetRenderTargets applies), and when the
 // serial replay reaches the same operation at a clean boundary (par_boundary: nothing in flight across it), every field of S and R is compared. A field that differs is something the scan does
 // not model: the log names it with the first byte that differs, the frame and the pass (the first 16 cases), and every 300 frames counts the boundaries compared, identical, different by field,
 // and those with no snapshot (past PARC_MAX in a submission, or reached by another path)
 typedef struct { const char *name; size_t off, size; } par_field;
-static const par_field g_par_sf[] = {{"prog", __builtin_offsetof(typeof(S_rx[0]), prog), sizeof S_rx[0].prog}, {"cprog", __builtin_offsetof(typeof(S_rx[0]), cprog), sizeof S_rx[0].cprog}, {"restart", __builtin_offsetof(typeof(S_rx[0]), restart), sizeof S_rx[0].restart}, {"bst", __builtin_offsetof(typeof(S_rx[0]), bst), sizeof S_rx[0].bst}, {"blend", __builtin_offsetof(typeof(S_rx[0]), blend), sizeof S_rx[0].blend}, {"color", __builtin_offsetof(typeof(S_rx[0]), color), sizeof S_rx[0].color}, {"chmask", __builtin_offsetof(typeof(S_rx[0]), chmask), sizeof S_rx[0].chmask}, {"ms", __builtin_offsetof(typeof(S_rx[0]), ms), sizeof S_rx[0].ms}, {"poly", __builtin_offsetof(typeof(S_rx[0]), poly), sizeof S_rx[0].poly}, {"ds", __builtin_offsetof(typeof(S_rx[0]), ds), sizeof S_rx[0].ds}, {"attr", __builtin_offsetof(typeof(S_rx[0]), attr), sizeof S_rx[0].attr}, {"nattr", __builtin_offsetof(typeof(S_rx[0]), nattr), sizeof S_rx[0].nattr}, {"stream", __builtin_offsetof(typeof(S_rx[0]), stream), sizeof S_rx[0].stream}, {"nstream", __builtin_offsetof(typeof(S_rx[0]), nstream), sizeof S_rx[0].nstream}, {"vbuf", __builtin_offsetof(typeof(S_rx[0]), vbuf), sizeof S_rx[0].vbuf}, {"ubo", __builtin_offsetof(typeof(S_rx[0]), ubo), sizeof S_rx[0].ubo}, {"ssbo", __builtin_offsetof(typeof(S_rx[0]), ssbo), sizeof S_rx[0].ssbo}, {"tex", __builtin_offsetof(typeof(S_rx[0]), tex), sizeof S_rx[0].tex}, {"samp", __builtin_offsetof(typeof(S_rx[0]), samp), sizeof S_rx[0].samp}, {"img", __builtin_offsetof(typeof(S_rx[0]), img), sizeof S_rx[0].img}, {"st_vmask", __builtin_offsetof(typeof(S_rx[0]), st_vmask), sizeof S_rx[0].st_vmask}, {"st_wmask", __builtin_offsetof(typeof(S_rx[0]), st_wmask), sizeof S_rx[0].st_wmask}, {"st_ref", __builtin_offsetof(typeof(S_rx[0]), st_ref), sizeof S_rx[0].st_ref}, {"po", __builtin_offsetof(typeof(S_rx[0]), po), sizeof S_rx[0].po}, {"vp", __builtin_offsetof(typeof(S_rx[0]), vp), sizeof S_rx[0].vp}, {"dr", __builtin_offsetof(typeof(S_rx[0]), dr), sizeof S_rx[0].dr}, {"has_vp", __builtin_offsetof(typeof(S_rx[0]), has_vp), sizeof S_rx[0].has_vp}, {"depth_clamp", __builtin_offsetof(typeof(S_rx[0]), depth_clamp), sizeof S_rx[0].depth_clamp}, {"vp_sw", __builtin_offsetof(typeof(S_rx[0]), vp_sw), sizeof S_rx[0].vp_sw}, {"blend_color", __builtin_offsetof(typeof(S_rx[0]), blend_color), sizeof S_rx[0].blend_color}, {"alpha_ref", __builtin_offsetof(typeof(S_rx[0]), alpha_ref), sizeof S_rx[0].alpha_ref}, {"copy_stride", __builtin_offsetof(typeof(S_rx[0]), copy_stride), sizeof S_rx[0].copy_stride}, {"copy_img_stride", __builtin_offsetof(typeof(S_rx[0]), copy_img_stride), sizeof S_rx[0].copy_img_stride}, {"push", __builtin_offsetof(typeof(S_rx[0]), push), sizeof S_rx[0].push}, {"tf", __builtin_offsetof(typeof(S_rx[0]), tf), sizeof S_rx[0].tf}, {"tf_on", __builtin_offsetof(typeof(S_rx[0]), tf_on), sizeof S_rx[0].tf_on}, {"rast_discard", __builtin_offsetof(typeof(S_rx[0]), rast_discard), sizeof S_rx[0].rast_discard}, {"tex_base", __builtin_offsetof(typeof(S_rx[0]), tex_base), sizeof S_rx[0].tex_base}, {"samp_base", __builtin_offsetof(typeof(S_rx[0]), samp_base), sizeof S_rx[0].samp_base}};
+static const par_field g_par_sf[] = {{"prog", __builtin_offsetof(typeof(S_rx[0]), prog), sizeof(typeof(S_rx[0].prog))}, {"cprog", __builtin_offsetof(typeof(S_rx[0]), cprog), sizeof(typeof(S_rx[0].cprog))}, {"restart", __builtin_offsetof(typeof(S_rx[0]), restart), sizeof S_rx[0].restart}, {"bst", __builtin_offsetof(typeof(S_rx[0]), bst), sizeof S_rx[0].bst}, {"blend", __builtin_offsetof(typeof(S_rx[0]), blend), sizeof S_rx[0].blend}, {"color", __builtin_offsetof(typeof(S_rx[0]), color), sizeof S_rx[0].color}, {"chmask", __builtin_offsetof(typeof(S_rx[0]), chmask), sizeof S_rx[0].chmask}, {"ms", __builtin_offsetof(typeof(S_rx[0]), ms), sizeof S_rx[0].ms}, {"poly", __builtin_offsetof(typeof(S_rx[0]), poly), sizeof S_rx[0].poly}, {"ds", __builtin_offsetof(typeof(S_rx[0]), ds), sizeof S_rx[0].ds}, {"attr", __builtin_offsetof(typeof(S_rx[0]), attr), sizeof S_rx[0].attr}, {"nattr", __builtin_offsetof(typeof(S_rx[0]), nattr), sizeof S_rx[0].nattr}, {"stream", __builtin_offsetof(typeof(S_rx[0]), stream), sizeof S_rx[0].stream}, {"nstream", __builtin_offsetof(typeof(S_rx[0]), nstream), sizeof S_rx[0].nstream}, {"vbuf", __builtin_offsetof(typeof(S_rx[0]), vbuf), sizeof S_rx[0].vbuf}, {"ubo", __builtin_offsetof(typeof(S_rx[0]), ubo), sizeof S_rx[0].ubo}, {"ssbo", __builtin_offsetof(typeof(S_rx[0]), ssbo), sizeof S_rx[0].ssbo}, {"tex", __builtin_offsetof(typeof(S_rx[0]), tex), sizeof S_rx[0].tex}, {"samp", __builtin_offsetof(typeof(S_rx[0]), samp), sizeof S_rx[0].samp}, {"img", __builtin_offsetof(typeof(S_rx[0]), img), sizeof S_rx[0].img}, {"st_vmask", __builtin_offsetof(typeof(S_rx[0]), st_vmask), sizeof S_rx[0].st_vmask}, {"st_wmask", __builtin_offsetof(typeof(S_rx[0]), st_wmask), sizeof S_rx[0].st_wmask}, {"st_ref", __builtin_offsetof(typeof(S_rx[0]), st_ref), sizeof S_rx[0].st_ref}, {"po", __builtin_offsetof(typeof(S_rx[0]), po), sizeof S_rx[0].po}, {"vp", __builtin_offsetof(typeof(S_rx[0]), vp), sizeof S_rx[0].vp}, {"dr", __builtin_offsetof(typeof(S_rx[0]), dr), sizeof S_rx[0].dr}, {"has_vp", __builtin_offsetof(typeof(S_rx[0]), has_vp), sizeof S_rx[0].has_vp}, {"depth_clamp", __builtin_offsetof(typeof(S_rx[0]), depth_clamp), sizeof S_rx[0].depth_clamp}, {"vp_sw", __builtin_offsetof(typeof(S_rx[0]), vp_sw), sizeof S_rx[0].vp_sw}, {"blend_color", __builtin_offsetof(typeof(S_rx[0]), blend_color), sizeof S_rx[0].blend_color}, {"alpha_ref", __builtin_offsetof(typeof(S_rx[0]), alpha_ref), sizeof S_rx[0].alpha_ref}, {"copy_stride", __builtin_offsetof(typeof(S_rx[0]), copy_stride), sizeof S_rx[0].copy_stride}, {"copy_img_stride", __builtin_offsetof(typeof(S_rx[0]), copy_img_stride), sizeof S_rx[0].copy_img_stride}, {"push", __builtin_offsetof(typeof(S_rx[0]), push), sizeof S_rx[0].push}, {"tf", __builtin_offsetof(typeof(S_rx[0]), tf), sizeof S_rx[0].tf}, {"tf_on", __builtin_offsetof(typeof(S_rx[0]), tf_on), sizeof S_rx[0].tf_on}, {"rast_discard", __builtin_offsetof(typeof(S_rx[0]), rast_discard), sizeof S_rx[0].rast_discard}, {"tex_base", __builtin_offsetof(typeof(S_rx[0]), tex_base), sizeof S_rx[0].tex_base}, {"samp_base", __builtin_offsetof(typeof(S_rx[0]), samp_base), sizeof S_rx[0].samp_base}};
 static const par_field g_par_rf[] = {{"rt", __builtin_offsetof(typeof(R_rx[0]), rt), sizeof R_rx[0].rt}, {"has_rt", __builtin_offsetof(typeof(R_rx[0]), has_rt), sizeof R_rx[0].has_rt}, {"clear_c", __builtin_offsetof(typeof(R_rx[0]), clear_c), sizeof R_rx[0].clear_c}, {"cc", __builtin_offsetof(typeof(R_rx[0]), cc), sizeof R_rx[0].cc}, {"clear_d", __builtin_offsetof(typeof(R_rx[0]), clear_d), sizeof R_rx[0].clear_d}, {"clear_s", __builtin_offsetof(typeof(R_rx[0]), clear_s), sizeof R_rx[0].clear_s}, {"cd", __builtin_offsetof(typeof(R_rx[0]), cd), sizeof R_rx[0].cd}, {"cs", __builtin_offsetof(typeof(R_rx[0]), cs), sizeof R_rx[0].cs}, {"sc", __builtin_offsetof(typeof(R_rx[0]), sc), sizeof R_rx[0].sc}, {"has_sc", __builtin_offsetof(typeof(R_rx[0]), has_sc), sizeof R_rx[0].has_sc}};
 enum { PAR_SF = sizeof g_par_sf / sizeof *g_par_sf, PAR_RF = sizeof g_par_rf / sizeof *g_par_rf, PARC_MAX = 160 };
-enum { PARC_PAGES = 1024 };
-typedef struct { int npend, pend_over, nsbw, sbw_over, nsbw_w, npg; uint64_t pend_h, sbw_h, wide_h, pg[PARC_PAGES]; } parc_wt;   // pg: the written pages themselves while few (npg; -1 when more)   // the write tracking, summed: counts, and hashes independent of the order the set was filled in
-typedef struct { const uint8_t *op; typeof(S_rx[0]) s; typeof(R_rx[0]) r; parc_wt w; uint8_t used; } parc_snap;
+enum { PARC_PAGES = SBW_N };   // cover the entire write table, not a scene-dependent page limit
+typedef struct { int npend, pend_over, nsbw, sbw_over, nsbw_w, npg; uint64_t pend_h, sbw_h, wide_h, pg[PARC_PAGES]; } parc_wt;   // pg: all written pages (npg), bounded by the write table capacity   // the write tracking, summed: counts, and hashes independent of the order the set was filled in
+typedef struct { const uint8_t *op; par_pos pos; typeof(S_rx[0]) s; typeof(R_rx[0]) r; parc_wt w; uint8_t used; } parc_snap;
 static int par_u64cmp(const void *a, const void *b) { uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x < y ? -1 : x > y; }
 static inline uint64_t parc_mix(uint64_t x) { x ^= x >> 31; x *= 0x9E3779B97F4A7C15ull; x ^= x >> 29; return x; }
 static parc_wt parc_sum(void) { WT_; parc_wt w = {g_npend, g_pend_over, g_nsbw, g_sbw_over, g_nsbw_w, 0, 0, 0};
     for (int i = 0; i < g_npend && i < PEND_MAX; i++) w.pend_h += parc_mix(g_pend_lo[i] * 31 + g_pend_hi[i] * 7 + g_pend_kind[i]);
-    for (int i = 0; i < SBW_N; i++) if (g_sbwp[i].gen == g_pend_gen) { w.sbw_h += parc_mix(g_sbwp[i].page * 4 + g_sbwp[i].src); if (w.npg >= 0 && w.npg < PARC_PAGES) w.pg[w.npg++] = g_sbwp[i].page * 4 + g_sbwp[i].src; else w.npg = -1; }
+    for (int i = 0; i < SBW_N; i++) if (g_sbwp[i].gen == g_pend_gen) { w.sbw_h += parc_mix(g_sbwp[i].page * 4 + g_sbwp[i].src); w.pg[w.npg++] = g_sbwp[i].page * 4 + g_sbwp[i].src; }
     for (int i = 0; i < g_nsbw_w && i < SBW_WN; i++) w.wide_h += parc_mix(g_sbw_wlo[i] ^ (g_sbw_whi[i] << 1));
     return w; }
 static parc_snap *g_parc; static int g_parc_n;
@@ -12173,17 +12268,17 @@ static struct { uint64_t compared, same, differ, nosnap, extra; uint64_t sf[PAR_
 static const char *const g_par_wf[8] = {"npend", "pend_over", "pend (ranges)", "nsbw", "sbw_over", "sbw (pages)", "nsbw_w", "sbw (wide)"};
 // fresh-scan: full snapshots (S, R and the whole write tracking) at the boundaries a chunk may start at, the first SetRenderTargets at least par_draws() draws after the last one
 enum { PARF_MAX = 16 };
-typedef struct { const uint8_t *op; typeof(S_rx[0]) s; typeof(R_rx[0]) r; rx_wt w; } parf_snap;
+typedef struct { const uint8_t *op; par_pos pos; typeof(S_rx[0]) s; typeof(R_rx[0]) r; rx_wt w; } parf_snap;
 static parf_snap *g_parf; static int g_parf_n; static uint64_t g_parf_draws;
-static void parf_put(const uint8_t *op) { WT_;
+static void parf_put(const par_pos *pos) { WT_;
     if (!g_parf) g_parf = calloc(PARF_MAX, sizeof *g_parf);
     if (g_parf_n >= PARF_MAX || g_parf_draws < (uint64_t)par_draws()) return;
-    parf_snap *f = &g_parf[g_parf_n++]; f->op = op; memcpy(&f->s, &S, sizeof S); memcpy(&f->r, &R, sizeof R); memcpy(&f->w, wt_, sizeof f->w); g_parf_draws = 0;
+    parf_snap *f = &g_parf[g_parf_n++]; f->op = pos->op; f->pos = *pos; memcpy(&f->s, &S, sizeof S); memcpy(&f->r, &R, sizeof R); memcpy(&f->w, wt_, sizeof f->w); g_parf_draws = 0;
 }
-static const parf_snap *parf_at(const uint8_t *op) { for (int i = 0; i < g_parf_n; i++) if (g_parf[i].op == op) return &g_parf[i]; return NULL; }
-static void parc_put(const uint8_t *op) {   // the scan, at a SetRenderTargets about to apply
+static const parf_snap *parf_at(const uint8_t *op) { par_pos pos = par_here(op); for (int i = 0; i < g_parf_n; i++) if (par_pos_equal(&g_parf[i].pos, &pos)) return &g_parf[i]; return NULL; }
+static void parc_put(const uint8_t *op, const par_pos *pos) {   // the scan, at a SetRenderTargets about to apply
     if (!g_parc) g_parc = calloc(PARC_MAX, sizeof *g_parc);
-    if (g_parc_n < PARC_MAX) { parc_snap *c = &g_parc[g_parc_n++]; c->op = op; memcpy(&c->s, &S, sizeof S); memcpy(&c->r, &R, sizeof R); c->w = parc_sum(); c->used = 0; }
+    if (g_parc_n < PARC_MAX) { parc_snap *c = &g_parc[g_parc_n++]; c->op = op; c->pos = pos ? *pos : par_here(op); memcpy(&c->s, &S, sizeof S); memcpy(&c->r, &R, sizeof R); c->w = parc_sum(); c->used = 0; }
 }
 static int par_diff(const char *what, const par_field *f, int nf, const uint8_t *a, const uint8_t *b, uint64_t *count) {
     int n = 0;
@@ -12198,8 +12293,9 @@ static int par_diff(const char *what, const par_field *f, int nf, const uint8_t 
 }
 static void parc_check(void) {   // the replay, at a clean boundary (par_boundary), the current operation being the boundary's SetRenderTargets
     if (!g_parc) { g_pck.nosnap++; return; }
+    par_pos pos = par_here(g_exec_cur);
     for (int i = 0; i < g_parc_n; i++) {
-        parc_snap *c = &g_parc[i]; if (c->used || c->op != g_exec_cur) continue;
+        parc_snap *c = &g_parc[i]; if (c->used || !par_pos_equal(&c->pos, &pos)) continue;
         c->used = 1; g_pck.compared++;
         typeof(R_rx[0]) rr = R;   // a clear's values (cc, cd, cs) are read only while it is pending (clear_c, clear_d, clear_s): a value left from an earlier clear is not state
         for (int i = 0; i < 8; i++) if (!rr.clear_c[i] && !c->r.clear_c[i]) rr.cc[i] = c->r.cc[i];
@@ -12207,7 +12303,7 @@ static void parc_check(void) {   // the replay, at a clean boundary (par_boundar
         int n = par_diff("S", g_par_sf, PAR_SF, (const uint8_t *)&c->s, (const uint8_t *)&S, g_pck.sf) + par_diff("R", g_par_rf, PAR_RF, (const uint8_t *)&c->r, (const uint8_t *)&rr, g_pck.rf);
         parc_wt w = parc_sum(); const parc_wt *x = &c->w;
         int wd[8] = {x->npend != w.npend, x->pend_over != w.pend_over, x->pend_h != w.pend_h, x->nsbw != w.nsbw, x->sbw_over != w.sbw_over, x->sbw_h != w.sbw_h, x->nsbw_w != w.nsbw_w, x->wide_h != w.wide_h};
-        if ((wd[3] || wd[5]) && x->npg >= 0 && w.npg >= 0) {   // the scan noting more pages than the replay is safe (a shadow over them is refused); only a page the scan lacks is not
+        if (wd[3] || wd[5]) {   // the scan noting more pages than the replay is safe (a shadow over them is refused); only a page the scan lacks is not
             static uint64_t sa[PARC_PAGES], sb[PARC_PAGES]; memcpy(sa, x->pg, sizeof *sa * (size_t)x->npg); memcpy(sb, w.pg, sizeof *sb * (size_t)w.npg);
             qsort(sa, (size_t)x->npg, sizeof *sa, par_u64cmp); qsort(sb, (size_t)w.npg, sizeof *sb, par_u64cmp);
             int missing = 0; for (int a = 0, b = 0; b < w.npg; b++) { while (a < x->npg && sa[a] < sb[b]) a++; missing += !(a < x->npg && sa[a] == sb[b]); }   // every replay page in the scan's set?
@@ -12253,33 +12349,37 @@ static void par_fresh_switch(void) {
     b->seg = a->seg; b->sclk = a->sclk; a->sclk = NULL; b->cut_draw0 = a->cut_draw0; b->cut_copy = a->cut_copy;
     b->cur_arena = a->cur_arena; a->cur_arena = nil; b->sub_arenas = a->sub_arenas; a->sub_arenas = nil;
     b->post = a->post; b->npost = a->npost; b->postcap = a->postcap; a->post = NULL; a->npost = a->postcap = 0;
-    b->vis = a->vis; a->vis = nil; b->vis_n = a->vis_n; a->vis_n = 0;
+    b->vis = a->vis; a->vis = nil; b->vis_n = a->vis_n; a->vis_n = 0; vis_move(j, k);
     b->ub.ring = a->ub.ring; a->ub.ring = nil; b->ub.ring_off = a->ub.ring_off; b->ub.ring_size = a->ub.ring_size; b->ub.ready = a->ub.ready;
     // the contract is copied
     S_rx[j] = S_rx[k]; R_rx[j] = R_rx[k]; g_wt_rx[j] = g_wt_rx[k]; g_pass_rx[j] = g_pass_rx[k];
     g_rp_aw_rx[j] = g_rp_aw_rx[k]; g_rp_ah_rx[j] = g_rp_ah_rx[k]; g_rp_whole_rx[j] = g_rp_whole_rx[k];
-    g_exec_next_rx[j] = g_exec_next_rx[k]; g_exec_cur_rx[j] = g_exec_cur_rx[k]; memcpy(g_ret_rx[j], g_ret_rx[k], sizeof g_ret_rx[j]); g_ret_n_rx[j] = g_ret_n_rx[k];
+    g_exec_next_rx[j] = g_exec_next_rx[k]; g_exec_cur_rx[j] = g_exec_cur_rx[k]; memcpy(g_ret_rx[j], g_ret_rx[k], sizeof g_ret_rx[j]); g_ret_n_rx[j] = g_ret_n_rx[k]; g_rest_rx[j] = g_rest_rx[k]; g_nrest_rx[j] = g_nrest_rx[k];
     // the rest of the per-context state starts empty (none of it is in flight at a clean boundary)
     g_sm_pass_rx[j] = g_sm_lo_rx[j] = g_sm_hi_rx[j] = g_sm_cur_rx[j] = g_sm_applied_rx[j] = 0; g_sm_plan_rx[j].on = 0;
     g_rt_range_active_rx[j] = g_rt_range_pending_rx[j] = 0; g_rt_merged_rx[j] = 0; g_defer_replaying_rx[j] = 0; g_hoist_n_rx[j] = 0; g_csh_n_rx[j] = 0;
     g_defer_pend_rx[j] = NULL; g_defer_nact_rx[j] = g_defer_natq_rx[j] = 0; g_nlc_rx[j] = 0; g_mrun_rx[j].n = 0; g_geo_mesh_rx[j].on = g_geo_mesh_rx[j].miss = 0;
     g_mtk_rx[j].on = g_mtk_rx[j].miss = 0;
     g_fz_rx[j].active = 0;
+    rec_publish();   // the new command buffer prefix precedes records produced by the next context
     rx_select(j);
     g_par.switches++; g_par.sw_draws[j] += g_stat_draw - g_par_last; g_par_last = g_stat_draw;
     { static int n; if (n++ < 12) MLOG("parallel translation, fresh: context %d → %d at pass %llu, draw %llu since the start (frame %llu, segment %u)", k, j,
                                       (unsigned long long)g_stat_pass, (unsigned long long)g_stat_draw, (unsigned long long)atomic_load(&g_cur_frame), RX.seg); }
 }
 static void par_sub_begin(void) { g_par_nb = g_par_nw = 0; g_par_d0 = g_stat_draw; g_par_last = g_stat_draw; }
-static void par_wait(void) { if (!RX.cb || !pthread_equal(pthread_self(), g_sub_thread)) return; if (g_par_nw < PAR_W) g_par_w[g_par_nw++] = (uint32_t)(g_stat_draw - g_par_d0); }
+static void par_wait(void) { if (!RX.cb || !on_sub_thread()) return; if (g_par_nw < PAR_W) g_par_w[g_par_nw++] = (uint32_t)(g_stat_draw - g_par_d0); }
 static void par_boundary(void) {
+    if (t_par_stop) return;   // a bounded job cannot hand its continuation to the serialized driver
+    if (RX.par_resume && RX.par_resume == g_exec_cur) { RX.par_resume = NULL; return; }   // already counted and checked before the handoff
     int why = g_hoist_n ? 1 : (g_defer_nact || g_defer_pend) ? 2 : g_fz.active ? 3 : g_sm_pass ? 4 : g_nlc ? 5 : g_mrun.n ? 6 : RX.ub.n ? 7 : g_csh_n ? 8 : 0;   // csh: dispatches run ahead that the replay will skip when it reaches them
     if (why) { g_par.dirty++; g_par.why[why]++; return; }
     if (g_par_nb < PAR_B) { g_par_bq[g_par_nb] = g_vis_counting && g_nvs > 0; g_par_b[g_par_nb++] = (uint32_t)(g_stat_draw - g_par_d0); }
     if (par_check()) parc_check();
     const parf_snap *f = par_from_scan() ? parf_at(g_exec_cur) : NULL;
-    if (par_fresh() && (par_from_scan() ? f != NULL : g_stat_draw - g_par_last >= (uint64_t)par_draws())) { RX.cut_copy = 1; sub_cut(); if (!RX.cut_copy) { par_fresh_switch();
-        if (f) { memcpy(&S, &f->s, sizeof S); memcpy(&R, &f->r, sizeof R); memcpy(&g_wt_rx[g_rxi], &f->w, sizeof f->w); prog_resolve(); g_par.from_scan++; } } else RX.cut_copy = 0; }   // the scan's snapshot, not the previous context's: S, R and the write tracking (its inline updates have no ring data, so shadows over them are refused, not wrong)   // the cut commits the segment first; a cut refused leaves the chunk where it is
+    if (par_fresh() && (par_from_scan() ? f != NULL : g_stat_draw - g_par_last >= (uint64_t)par_draws())) { RX.cut_copy = 1; sub_cut_to(par_thread1() ? (RXI + 1) % RX_CHUNKS : -1); if (!RX.cut_copy) { par_fresh_switch();
+        if (f) { memcpy(&S, &f->s, sizeof S); memcpy(&R, &f->r, sizeof R); memcpy(&g_wt_rx[g_rxi], &f->w, sizeof f->w); prog_resolve(); g_par.from_scan++; }
+        if (par_thread1() && g_ret_n <= 16) { RX.par_start = RX.par_resume = g_exec_cur; RX.par_rest = g_rest; RX.par_nrest = g_nrest; g_par_handoff = 1; } } else RX.cut_copy = 0; }   // the rest of this pass's SetRenderTargets runs again in the chunk   // the scan's snapshot, not the previous context's: S, R and the write tracking (its inline updates have no ring data, so shadows over them are refused, not wrong)   // the cut commits the segment first; a cut refused leaves the chunk where it is
 }
 static void par_scan_gml(void) {   // a shader with raw global memory stores (NVN_RB_GMEML), as gml_take notes them
     pthread_mutex_lock(&g_gml_mu); int predict = !g_gml_over && g_gml_stable >= GML_STABLE;
@@ -12303,25 +12403,26 @@ static void par_scan_writes(int st, NvShader *sh) {   // a draw's or dispatch's 
 static void par_scan(const uint64_t *h, int n) {   // in the scan's context: S and R from the submission's start, its own write tracking; the replay's context is not touched
     if (n <= 0) return;
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-    int k = g_rxi; rx_t *keep = g_rx;
+    int k = g_rxi;
     S_rx[RX_SCAN] = S_rx[k]; R_rx[RX_SCAN] = R_rx[k];
     rx_select(RX_SCAN); g_par_scanning = 1; pend_reset();
-    const uint64_t *rest = g_rest; int nrest = g_nrest; g_rest = h + 1; g_nrest = n - 1;
-    fz_cursor cur = {.p = (const uint8_t *)h[0]}; uint64_t ops = 0; g_parc_n = 0; g_parf_n = 0; g_parf_draws = 0;
-    for (;;) { const uint8_t *q; op_hdr hq; const void *aq; if (!fz_next(&cur, &q, &hq, &aq)) break; ops++;
+    par_walk cur = par_walk_begin(h, n); uint64_t ops = 0; g_parc_n = 0; g_parf_n = 0; g_parf_draws = 0;
+    for (;;) { par_pos pos; op_hdr hq; const void *aq; if (!par_walk_next(&cur, &pos, &hq, &aq)) break; const uint8_t *q = pos.op; ops++;
         switch (hq.op) {
-            case OP_SET_RT: { if (par_check()) parc_put(q); if (par_from_scan()) parf_put(q); const p_set_rt *r = aq; R.rt = *r; R.has_rt = 1; continue; }
+            case OP_SET_RT: { if (par_check()) parc_put(q, &pos); if (par_from_scan()) parf_put(&pos); const p_set_rt *r = aq; R.rt = *r; R.has_rt = 1; continue; }
             case OP_DRAW: case OP_DRAW_IDX: g_parf_draws++; if (par_check()) { prog_resolve(); __unsafe_unretained NvProg *pr = S.prog ? prog_get(S.prog) : nil; if (pr) { par_scan_writes(0, pr->sh[0]); par_scan_writes(1, pr->sh[1]); par_scan_gs(pr->sh[2]); } } continue;
             case OP_DISPATCH: if (par_check()) { __unsafe_unretained NvProg *cp = S.cprog ? prog_get(S.cprog) : nil; if (cp) par_scan_writes(5, cp->sh[5]); } continue;
             case OP_UPDATE_UB: { uint64_t d, nn; memcpy(&d, aq, 8); memcpy(&nn, (const uint8_t *)aq + 8, 8); if (nn) pend_add(d, nn, 1); continue; }
             case OP_COPY_B2B: { uint64_t d, nn; memcpy(&d, (const uint8_t *)aq + 8, 8); memcpy(&nn, (const uint8_t *)aq + 16, 8); pend_add(d, nn, 2); continue; }
             case OP_CLEAR_BUF: { const p_clear_buf *cb = aq; if (cb->size) pend_add(cb->addr, cb->size, 3); continue; }
             case OP_REPORT_COUNTER: { uint64_t ad; memcpy(&ad, (const uint8_t *)aq + 8, 8); sbw_note(ad, 16, SBW_REPORT); continue; }
-            case OP_COPY_T2B: case OP_TF_BIND: case OP_TF_STATE: g_par_unmod++; if (hq.op != OP_COPY_T2B) state_op(hq.op, aq); continue;
+            case OP_COPY_T2B: case OP_TF_BIND: case OP_TF_STATE: g_par_unmod++; cur.bad = 1; break;
             default: state_op(hq.op, aq); continue;
-        } }
-    g_rest = rest; g_nrest = nrest;
-    g_par_scanning = 0; rx_select(k); (void)keep;
+        }
+        if (cur.bad) break;
+    }
+    if (cur.bad) g_parc_n = g_parf_n = 0;   // never hand off using a partial or unsupported plan
+    g_par_scanning = 0; rx_select(k);
     g_par.scan_ns += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0; g_par.scan_ops += ops; g_par.scan_bad += cur.bad;
 }
 static uint64_t par_run_cost(uint32_t lo, uint32_t hi, int *bi) {   // the run [lo, hi) of draws cut at up to three clean boundaries inside it, nearest its quarter marks: its largest chunk
@@ -12349,17 +12450,80 @@ static void par_sub_end(void) {
                              (unsigned long long)nf, (double)g_par.draws / nf, (double)g_par.subs / nf, (double)g_par.clean / nf, (double)g_par.clean_q / nf, (double)g_par.dirty / nf,
                              (unsigned long long)g_par.why[1], (unsigned long long)g_par.why[2], (unsigned long long)g_par.why[3], (unsigned long long)g_par.why[4], (unsigned long long)g_par.why[5],
                              (unsigned long long)g_par.why[6], (unsigned long long)g_par.why[7], (unsigned long long)g_par.why[8], (double)g_par.waits / nf, g_par.cost ? (double)g_par.draws / g_par.cost : 0.0,
-                             g_par.scan_ns / 1e6 / nf, (double)g_par.scan_ops / nf, g_par.scan_bad ? " (stopped early at a multi-draw in some)" : "");
+                             g_par.scan_ns / 1e6 / nf, (double)g_par.scan_ops / nf, g_par.scan_bad ? " (some incomplete or unsupported scans declined)" : "");
+        if (par_thread1()) { MLOG("parallel translation, thread1: %llu chunks translated on the worker so far", (unsigned long long)g_parw_chunks); }
         if (par_fresh()) { MLOG("parallel translation, fresh (over %llu frames): %llu switches (%llu from the scan's snapshot), draws translated per context %llu %llu %llu %llu", (unsigned long long)nf, (unsigned long long)g_par.switches, (unsigned long long)g_par.from_scan, (unsigned long long)g_par.sw_draws[0], (unsigned long long)g_par.sw_draws[1], (unsigned long long)g_par.sw_draws[2], (unsigned long long)g_par.sw_draws[3]); }
         memset(&g_par, 0, sizeof g_par);
         if (par_check()) parc_report(nf);
     }
+}
+// ---------- Parallel translation, milestone 4c: chunks on a worker thread, one at a time (DM_NVN_PAR=thread1; docs/parallel-translation.md) ----------
+// At a switch the submitting thread's replay stops (g_par_handoff: every mtl_exec frame returns, and the submission's later handles are skipped); when the submission would commit, the worker
+// translates the chunk from its SetRenderTargets in the new context: the rest of the list it is in, the callers' lists after their calls (the return stack), then the handles left. Its own
+// switch hands the next chunk on the same way. One worker, one chunk at a time: what this tests is translation on a thread that is not the game's (on_sub_thread recognizes the serialized worker without changing the submitting thread's identity);
+// autoreleased objects of a submission's chunks live until the worker's next submission
+// Resume a preplanned invocation, optionally stopping before another invocation. A bounded
+// range is validated before replay; an unreachable endpoint must not execute a partial range.
+// NULL stop retains the serialized worker's handoff behavior.
+static int par_continue(par_pos start, const par_pos *stop) {
+    if (t_par_stop || !start.op || start.depth < 0 || start.depth > PAR_CALLS || start.nrest < 0 || (start.nrest && !start.rest)) return -1;
+    if (stop) {
+        par_walk walk = par_walk_from(start); par_pos pos; op_hdr h; const void *args; int found = 0;
+        while (par_walk_next(&walk, &pos, &h, &args)) if (par_pos_equal(&pos, stop)) { found = 1; break; }
+        if (!found || walk.bad) return -1;
+    }
+    g_ret_n = start.depth; memcpy(g_ret, start.ret, (size_t)start.depth * sizeof *g_ret);
+    mtl_exec_rest(start.rest, start.nrest); t_par_stop = stop; t_par_stopped = 0;
+    mtl_exec(start.op);
+    while (!g_par_handoff && !t_par_stopped && g_ret_n > 0) { const uint8_t *q = g_ret[--g_ret_n]; mtl_exec(q); }
+    for (int i = 0; i < start.nrest && !g_par_handoff && !t_par_stopped; i++) {
+        mtl_exec_rest(start.rest + i + 1, start.nrest - i - 1); mtl_exec((const uint8_t *)start.rest[i]);
+    }
+    int stopped = t_par_stopped; t_par_stop = NULL; t_par_stopped = 0;
+    if (!stopped) mtl_exec_rest(NULL, 0);
+    return stopped;
+}
+static void par_chunk_run(void) {
+    g_par_handoff = 0;
+    par_pos start = par_here(RX.par_start); start.rest = RX.par_rest; start.nrest = RX.par_nrest;
+    (void)par_continue(start, NULL);
+}
+static dispatch_semaphore_t g_parw_go, g_parw_done; static uint64_t g_parw_sub = ~0ull; static void *g_parw_pool;
+static int g_parw_context;   // selected context handed across the semaphore pair
+static void parw_chunk(void) {
+    rx_select(g_parw_context);
+    if (g_parw_sub != g_sub_serial) { if (g_parw_pool) objc_autoreleasePoolPop(g_parw_pool); g_parw_pool = objc_autoreleasePoolPush(); g_parw_sub = g_sub_serial; }
+    t_par_worker = 1; par_chunk_run(); t_par_worker = 0; g_parw_chunks++;
+    g_parw_context = g_rxi;
+}
+extern void nvn_sub_worker_run(void (*run)(void)) __attribute__((weak_import));   // standalone replay tools have no HLE timing collector
+static void *parw_main(void *arg) {
+    (void)arg; pthread_setname_np("dm-par-chunk"); pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    for (;;) {
+        dispatch_semaphore_wait(g_parw_go, DISPATCH_TIME_FOREVER);
+        if (nvn_sub_worker_run) nvn_sub_worker_run(parw_chunk); else parw_chunk();
+        dispatch_semaphore_signal(g_parw_done);
+    }
+    return NULL;
+}
+static void par_chunks_run(void) {   // the submitting thread, at the commit: the chunks handed off, one after another on the worker
+    static pthread_t w;
+    if (!g_parw_go) {
+        g_parw_go = dispatch_semaphore_create(0); g_parw_done = dispatch_semaphore_create(0);
+        pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, 8 << 20);
+        int err = pthread_create(&w, &at, parw_main, NULL); pthread_attr_destroy(&at);
+        if (err) { g_parw_go = g_parw_done = nil; MLOG("[RED] parallel translation: cannot start worker (%d); continuing serially", err);
+            while (g_par_handoff) par_chunk_run(); return; }
+        pthread_detach(w); MLOG("parallel translation, thread1: worker thread started");
+    }
+    while (g_par_handoff) { g_parw_context = g_rxi; dispatch_semaphore_signal(g_parw_go); dispatch_semaphore_wait(g_parw_done, DISPATCH_TIME_FOREVER); rx_select(g_parw_context); }
 }
 void mtl_exec(const uint8_t *p) {
     if (!g_state_inited) state_reset();
     static int dump_all = -1; if (dump_all < 0) dump_all = getenv("DM_NVN_PASSDUMP_ALL") != NULL;
     int trace = dump_all && passdump();   // Normal mode does not check the frame range per operation; the full command position is only used for the designated diagnostic frames
     for (;;) {
+        if (__builtin_expect(g_par_handoff || par_stop_at(p), 0)) return;   // thread1: a worker goes on from the switch (par_chunk_run)
         op_hdr h; memcpy(&h, p, sizeof h);
         g_exec_cur = p;   // Scan start point of the store lookahead: the operation that ends the render pass (inclusive)
         if (p == g_defer_pend) { for (int gi = 0; gi < 4; gi++) if (g_defer_slots[gi].active && g_defer_slots[gi].p_end_op == p) g_defer_slots[gi].in_p = 0; g_defer_pend = NULL; }
@@ -12383,7 +12547,7 @@ void mtl_exec(const uint8_t *p) {
             case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
             case OP_CALL: { uint64_t t; memcpy(&t, a, 8);
                 if (g_ret_n < 16) g_ret[g_ret_n] = p + h.size; g_ret_n++;   // Return stack for lookahead: after a sub-list ends, continue looking at the caller
-                mtl_exec((const uint8_t *)t); g_ret_n--; break; }
+                mtl_exec((const uint8_t *)t); if (g_par_handoff || t_par_stopped) return; g_ret_n--; break; }
             case OP_SIGNAL_EVENT: { volatile uint32_t *val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, (const uint8_t *)a + 8, 4); memcpy(&v, (const uint8_t *)a + 12, 4);
                 PD("Y signal_event cmd=%p dst=%p mode=%u value=%u", p, val, m, v); mtl_sub_event(val, m, v); break; }
             case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, (const uint8_t *)a + 8, 8); g_cnt_report[t & 31]++;
@@ -12432,6 +12596,7 @@ void mtl_exec(const uint8_t *p) {
                         { void td_note_layer(id<MTLTexture>, uint64_t, NSUInteger, NSUInteger); td_note_layer(tex_mtl(r->color[0]), r->color[0]->serial, r->cview[0].set_levels ? r->cview[0].base_level : 0, (NSUInteger)sl); } PD("M %llu slice-merged pass goes on in layer %d", g_stat_pass, sl); break; } }
                 if (pend && !RX.enc && RX.cb && lc_on()) lc_push(); else rp_flush();   // clears with no draw wait for the next pass that attaches their targets (lc_push)
                 if (par_measure()) par_boundary();
+                if (g_par_handoff) return;   // the worker applies this SetRenderTargets exactly once
                 sub_cut(); R.rt = *r; R.has_rt = 1; break;
             }
             case OP_CLEAR_COLOR: {

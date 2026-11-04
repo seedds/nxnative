@@ -457,3 +457,26 @@ t_logic: t_logic.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_logic.m $(MTL_T_SRC) $(FW)
 check_t_logic: t_logic
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_logic.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_logic "$$work"
+
+# Real serial worker handoffs, including nested lists and later handles.
+t_parallel_thread: t_parallel_thread.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_parallel_thread.m $(MTL_T_SRC) $(FW)
+check_t_parallel_thread: t_parallel_thread
+	MTL_DEBUG_LAYER=1 ./t_parallel_thread
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_parallel_thread
+
+t_parallel_thread_tsan: t_parallel_thread.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -fsanitize=thread -o $@ t_parallel_thread.m $(MTL_T_SRC) $(FW)
+check_t_parallel_thread_tsan: t_parallel_thread_tsan
+	TSAN_OPTIONS=halt_on_error=1 ./t_parallel_thread_tsan
+	DM_NVN_ENC_THREAD=1 TSAN_OPTIONS=halt_on_error=1 ./t_parallel_thread_tsan
+
+# Independent record streams, ordered publication and cancellation.
+t_parallel_record: t_parallel_record.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_parallel_record.m $(MTL_T_SRC) $(FW)
+check_t_parallel_record: t_parallel_record
+	MTL_DEBUG_LAYER=1 ./t_parallel_record
+t_parallel_record_tsan: t_parallel_record.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -fsanitize=thread -o $@ t_parallel_record.m $(MTL_T_SRC) $(FW)
+check_t_parallel_record_tsan: t_parallel_record_tsan
+	TSAN_OPTIONS=halt_on_error=1 ./t_parallel_record_tsan

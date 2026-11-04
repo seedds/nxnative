@@ -176,6 +176,20 @@ The game may also write into an NVN object directly, without an NVN call, throug
 - **Fix:** `nvn_replay` raises the counter to 2^61 before it loads a capture (`nvn_serial_floor`); a live run's serials stay far below that, and external textures take 2^62 and up. `check_t_capture_live` binds two programs to separate stages to cover it.
 - **Found on:** [Pokemon Scarlet](../../dm/games/0100A3D008C5C000/README.md) (frame 3000 of its regression route).
 
+### A replay without the live run's Switch 2 state
+
+- **Symptom:** `nvn_replay` of a Switch 2 game's capture shows every texture from the game's files with a lattice of misplaced blocks (ASTC 8x8: a regular 8x8 grid), fur and HUD tinted, and about 4 million pixels differing from the live frame.
+- **Cause:** the live run sets two things before the frame that the replayer, which runs no guest code, never set: `nvn_gob_switch2` at `nvnDeviceInitialize` ([The Switch 2's order inside a GOB](#the-switch-2s-order-inside-a-gob)) and the loader's `dm_sdk_ounce()`, which the replay layer reads to give NVN2 compute shaders their group counts at c0 + 4 (a light culling shader's cluster index). The replayer's `dm_sdk_ounce` was the weak default in `hle_nvn.c`, 0. The packaged textures were untiled in the Tegra X1's order (the lattice and the tint), and the compute shaders saw 0 groups (no change in Donkey Kong Bananza's frame: the replay with only the order applied differs from the one with both by the run-to-run noise).
+- **Fix:** the capture's state chunk carries `sdk_ounce` and `gob_switch2`; `nvn_replay` answers `dm_sdk_ounce` from the first and sets `nvn_gob_switch2` from the second. A capture made before them takes `sdk_ounce` from its records (NVN2 only has the push-constant calls; `--ounce 0|1` overrides) and the order from it. `check_t_capture_live` has a packaged texture tiled in the Switch 2's order whose untiled bytes are copied into the frame: replayed in the X1's order the frame differs, and it fails if the replay does not report the Switch 2's state.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#open) (frame 3000 of gameplay: 4.09 million pixels differing from the live frame, 2.28 million with the state applied).
+
+### A texture the GPU's copies filled that the capture did not read
+
+- **Symptom:** `DM_NVN_CAPTURE: texture ser=N WxH format F samples 1: content not captured (format the capture cannot read back)`; `nvn_replay --made` lists that texture; surfaces that sample it replay as the format's error colour (magenta for ASTC), and replays of one capture differ because the texture's memory was never written.
+- **Cause:** a texture whose content lives only in Metal (a GPU copy into it, no CPU-written storage) is read back by `cap_tex_read`, which knew plain texels and BC but no ASTC format. Donkey Kong Bananza's rock material array (512x512 ASTC 8x8 sRGB, 44 layers, 10 levels, Metal format 194) is registered through a texture ID, filled by buffer-to-texture copies over earlier frames, and its storage in the pools is all zero (`nvn_replay --uses`).
+- **Fix:** `cap_astc_block` gives the ASTC formats' 16-byte blocks and footprints (sRGB, LDR and HDR), read back and filled by the same blit as BC. `check_t_capture_live` has a two-layer ASTC 8x8 array of 20x12 (blocks cut by the edge) with two levels, written by GPU copies only, with the staging bytes cleared before the frame: without the read back the frame differs.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#open). Whether a new capture made with this reads the array back and replays to the live frame is **open** (the old capture has none; filled with one colour, the rock stops being magenta).
+
 ### A captured texture ID whose memory pool was finalized
 
 - **Symptom:** `DM_NVN_CAPTURE` reports `a record names … (0 bytes), outside every pool … texture registry entry …` for some texture IDs, with addresses that look like data; one capture stopped with `a sparse virtual pool (step 1 does not capture page tables): the capture is incomplete`, another with `straddles a region`.

@@ -2,7 +2,7 @@
 // the one the live run took. Built like the gfx tests, which include nvn_mtl.m (and hle_nvn.c) in one translation unit: the replayer reaches the replay layer's own tables
 // and the host's pool / program / descriptor-pool side tables without any entry point added to them for it.
 //   make -C dm/gfx/tests GAME=<id> nvn_replay
-//   ./nvn_replay <capture> [--repeat n] [--max-pixels n] [--warm n] [--png path] [--texdump dir] [--writes] [--made]
+//   ./nvn_replay <capture> [--repeat n] [--max-pixels n] [--warm n] [--png path] [--texdump dir] [--writes] [--made] [--uses serial] [--fill serial rrggbb] [--ounce 0|1]
 // --repeat n: n replays, each in a fresh process; --warm n: n replays in one process, each after the one before (the replay layer keeps its state; see docs/development.md)
 // --max-pixels n: a replay whose frame differs from the live one in at most n pixels still counts as a match (the replay noise of the game's frame; default 0, bit for bit)
 // Exit status: 0 the replayed frame equals the live one (within --max-pixels), 1 it differs, 2 the capture cannot be replayed by this build (another game, record layout or shader
@@ -14,8 +14,13 @@
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
 #define g_ft g_ft_hle
+#define dm_sdk_ounce dm_sdk_ounce_hle   // hle_nvn.c's weak default (0): the replayer answers from the capture, below
+int dm_sdk_ounce_hle(void);
 #include "../nvn/hle_nvn.c"
+#undef dm_sdk_ounce
 #undef g_ft
+static int rp_ounce;   // the live run's sdk was built for the Switch 2 (NVN2): the capture's sdk_ounce
+int dm_sdk_ounce(void) { return rp_ounce; }   // read by the replay layer's compute dispatch (the group counts NVN2 shaders read at c0 + 4); loader.c answers it in the host
 uint64_t g_t0_ns;
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -73,6 +78,18 @@ static void raw_walk(const uint8_t *seg, uint32_t len, const uint8_t **segs, con
         g_raw_write = 1; cap_rec_fields(h.op, b + o + 8, h.size, &g_raw, NULL); g_raw_write = 0;
         o += h.size; }
     free(b);
+}
+// --uses: which records name a texture serial (a copy or clear destination, a target)
+static uint64_t g_use_serial; static uint32_t g_use_op, g_use_hits;
+static int use_addr(void *ctx, uint64_t *field, uint64_t len, int writable) { (void)ctx; (void)field; (void)len; (void)writable; return 1; }
+static int use_obj(void *ctx, int kind, uint64_t *field, uint8_t *payload, uint32_t size);
+static const cap_ops g_use = {use_addr, use_obj};
+static int use_obj(void *ctx, int kind, uint64_t *field, uint8_t *payload, uint32_t size) {
+    (void)ctx; uint64_t v = *field; if (kind != CAP_K_TEX || !v) return 1;
+    uint64_t ser = 0; if (cap_obj_kind(v) == CAP_K_TEXIN) { if (payload && cap_obj_index(v) + sizeof(tex_t) <= size) memcpy(&ser, payload + cap_obj_index(v) + offsetof(tex_t, serial), 8); }
+    else if (cap_obj_index(v) < rp_nto) ser = rp_to[cap_obj_index(v)].serial;
+    if (ser == g_use_serial) g_use_hits++;
+    return 1;
 }
 static int dec_addr(void *ctx, uint64_t *field, uint64_t len, int writable) {
     (void)ctx; (void)writable;
@@ -144,7 +161,7 @@ static void add_pools(const uint8_t *d, size_t n) {   // the replay layer's pool
 }
 
 // Fill a texture from a TPIX chunk: made as the replay layer makes it (tex_mtl), then each level and slice copied in from the captured bytes
-static int opt_writes, opt_made;   // --writes: GPU writes and the reads after them in each submission; --made: list the textures the frame made itself
+static int opt_writes, opt_made, opt_ounce = -1; static uint64_t opt_uses, opt_fill_ser; static uint32_t opt_fill_rgb;   // --writes: GPU writes and the reads after them in each submission; --made: list the textures the frame made itself
 static nvn_hmap g_filled = {.klen = 8};   // host textures the capture's contents filled
 static void fill_tex(const uint8_t *d, size_t n) {
     cap_tpix h; if (n < sizeof h) RFAIL("short texture chunk");
@@ -194,12 +211,15 @@ int main(int argc, char **argv) { @autoreleasepool {
         else if (!strcmp(argv[i], "--texdump") && i + 1 < argc) tdir = argv[++i];   // every colour target of each replay as <dir>/r<n>_<serial*100+level>.png (DM_NVN_TEXDUMP), to compare replays target by target
         else if (!strcmp(argv[i], "--warm") && i + 1 < argc) warm = MAX(1, atoi(argv[++i]));
         else if (!strcmp(argv[i], "--index") && i + 1 < argc) index = MAX(1, atoi(argv[++i]));   // (the n-th fresh replay of --repeat)
+        else if (!strcmp(argv[i], "--ounce") && i + 1 < argc) opt_ounce = atoi(argv[++i]) != 0;   // for a capture without sdk_ounce (made before it was recorded)
+        else if (!strcmp(argv[i], "--uses") && i + 1 < argc) opt_uses = strtoull(argv[++i], NULL, 10);   // the records of each submission that name this texture serial (and its registry entries)
+        else if (!strcmp(argv[i], "--fill") && i + 2 < argc) { opt_fill_ser = strtoull(argv[i + 1], NULL, 10); opt_fill_rgb = (uint32_t)strtoul(argv[i + 2], NULL, 16); i += 2; }   // diagnostic: an ASTC texture without captured content, every block one colour
         else if (!strcmp(argv[i], "--writes")) opt_writes = 1;
         else if (!strcmp(argv[i], "--made")) opt_made = 1;
         else if (argv[i][0] != '-' && !path) path = argv[i];
-        else { fprintf(stderr, "usage: %s <capture> [--repeat n] [--max-pixels n] [--warm n] [--png path] [--texdump dir] [--writes] [--made]\n", argv[0]); return 2; }
+        else { fprintf(stderr, "usage: %s <capture> [--repeat n] [--max-pixels n] [--warm n] [--png path] [--texdump dir] [--writes] [--made] [--uses serial] [--fill serial rrggbb] [--ounce 0|1]\n", argv[0]); return 2; }
     }
-    if (!path) { fprintf(stderr, "usage: %s <capture> [--repeat n] [--max-pixels n] [--warm n] [--png path] [--texdump dir] [--writes] [--made]\n", argv[0]); return 2; }
+    if (!path) { fprintf(stderr, "usage: %s <capture> [--repeat n] [--max-pixels n] [--warm n] [--png path] [--texdump dir] [--writes] [--made] [--uses serial] [--fill serial rrggbb] [--ounce 0|1]\n", argv[0]); return 2; }
     uint64_t maxpx = strtoull(maxpx_arg, NULL, 10);
     if (repeat > 1) {   // each replay in a fresh process: a replay in the same process starts from the replay layer's state the one before left (--warm), which changes the frame
         int ok = 0, worst = 0;
@@ -208,6 +228,7 @@ int main(int argc, char **argv) { @autoreleasepool {
             args[na++] = argv[0]; args[na++] = path; args[na++] = "--index"; args[na++] = idx; args[na++] = "--max-pixels"; args[na++] = maxpx_arg;
             if (png) { args[na++] = "--png"; args[na++] = png; }
             if (tdir) { args[na++] = "--texdump"; args[na++] = tdir; }
+            char ou[4]; if (opt_ounce >= 0) { snprintf(ou, sizeof ou, "%d", opt_ounce); args[na++] = "--ounce"; args[na++] = ou; }
             args[na] = NULL;
             pid_t pid; extern char **environ; int st = 0; char self[1024]; uint32_t sn = sizeof self;   // this executable by its path (argv[0] may have come from PATH)
             if (_NSGetExecutablePath(self, &sn)) strlcpy(self, argv[0], sizeof self);
@@ -247,6 +268,16 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (head_get(stat, sn, "origin_ll", v, sizeof v)) mtl_set_origin_lower_left(atoi(v));
     if (head_get(stat, sn, "depth_zero", v, sizeof v)) mtl_set_depth_zero(atoi(v));
     int qll = head_get(stat, sn, "queue_origin_ll", v, sizeof v) ? atoi(v) : 1;
+    // The state nvnDeviceInitialize and the loader give the live run, which the replayer does not run: the Switch 2's NVN (dm_sdk_ounce) and its order inside a GOB (nvn_gob_switch2).
+    // A capture made before they were recorded: --ounce n, else NVN2 when its records push constants (nvnCommandBufferPush*Constants exist only there)
+    if (head_get(stat, sn, "sdk_ounce", v, sizeof v)) rp_ounce = atoi(v) != 0;
+    else if (opt_ounce >= 0) rp_ounce = opt_ounce;
+    else { for (size_t i = 0; i < rp_nch && !rp_ounce; i++) if (rp_ch[i].c.tag == CAP_SEGM && rp_ch[i].c.raw >= 8) { uint32_t len; memcpy(&len, rp_ch[i].d + 4, 4);
+            for (uint32_t o = 0; o + 8 <= len && o + 8 + 8 <= rp_ch[i].c.raw;) { op_hdr h; memcpy(&h, rp_ch[i].d + 8 + o, 8); if (h.size < 8) break; if (h.op == OP_PUSH_CONST) { rp_ounce = 1; break; } o += h.size; } }
+        fprintf(stderr, "nvn_replay: the capture does not say whether its sdk was the Switch 2's (made before sdk_ounce was recorded): taken as %s, from its records (--ounce 0|1 overrides)\n", rp_ounce ? "the Switch 2's" : "not");
+    }
+    nvn_gob_switch2 = head_get(stat, sn, "gob_switch2", v, sizeof v) ? atoi(v) != 0 : rp_ounce;   // nvnDeviceInitialize: gob_switch2 = dm_sdk_ounce
+    if (rp_ounce) printf("the live run's sdk was built for the Switch 2: NVN2 compute group counts, %s order inside a GOB\n", nvn_gob_switch2 ? "its" : "the Tegra X1's");
     // regions first (every later decode needs them), then the object tables, sized before any is filled (objects point at each other)
     uint32_t nsub = 0; const cap_pres *pres = NULL;
 #define GROW(tab, n, idx) do { if ((idx) >= (n)) n = (idx) + 1; } while (0)
@@ -299,6 +330,22 @@ int main(int argc, char **argv) { @autoreleasepool {
     printf("loaded in %.0f ms: %u regions, %d pools, %u textures, %u programs, %u descriptor pools, %u submits; %llu live and %llu CPU-written textures marked\n",
            load_ms, rp_nrg, rp_pools_added, rp_nto, rp_npr, rp_ndp, nsub, (unsigned long long)nlive, (unsigned long long)ncpu);
 
+    if (opt_uses) {
+        g_use_serial = opt_uses;
+        for (size_t i = 0; i < rp_nch; i++) if (rp_ch[i].c.tag == CAP_TREG) for (size_t o = 0; o + sizeof(cap_treg) <= rp_ch[i].c.raw; o += sizeof(cap_treg)) { cap_treg *e = (cap_treg *)(rp_ch[i].d + o);
+            if (e->ok && e->t.serial == opt_uses) { uint64_t m = (uint64_t)(uintptr_t)e->t.mem, nz = 0, sz = e->t.L.size; uint32_t rg = 0; int have = 0;   // its storage in the captured pools (decoded: an address in a replay mapping; the first submit's bytes): how much of it is not zero
+                for (uint32_t r = 0; r < rp_nrg && !have; r++) if (rp_rg[r].mem && m >= (uint64_t)(uintptr_t)rp_rg[r].mem && m + sz <= (uint64_t)(uintptr_t)rp_rg[r].mem + rp_rg[r].size) { rg = r; have = 1;
+                    const uint8_t *src = rp_rg[r].orig + (m - (uint64_t)(uintptr_t)rp_rg[r].mem); for (uint64_t k = 0; k < sz; k++) nz += src[k] != 0; }
+                printf("--uses %llu: submit %u: registered as texture ID %d (%ux%ux%u format %#x target %d levels %u flags %#x, storage %llu bytes at pool offset %lld%s%s)", (unsigned long long)opt_uses, rp_ch[i].c.submit, e->tid,
+                    e->t.d.width, e->t.d.height, e->t.d.depth, e->t.d.format, e->t.d.target, e->t.d.levels, e->t.d.flags, (unsigned long long)sz, (long long)e->t.off, e->t.has_layout ? ", packaged" : "", e->t.pool ? "" : ", no pool");
+                if (have) printf("; %llu of its bytes are not zero in the captured pool (region %u)", (unsigned long long)nz, rg); printf("\n"); } }
+        for (size_t i = 0; i < rp_nch; i++) { if (rp_ch[i].c.tag != CAP_SEGM) continue; uint32_t len; memcpy(&len, rp_ch[i].d + 4, 4); uint8_t *b = malloc(len); memcpy(b, rp_ch[i].d + 8, len);
+            uint64_t hits[OP_COUNT_] = {0};
+            for (uint32_t o = 0; o + 8 <= len;) { op_hdr h; memcpy(&h, b + o, 8); if (h.size < 8 || o + h.size > len) break; g_use_hits = 0; if (h.op < OP_COUNT_) { cap_rec_fields(h.op, b + o + 8, h.size, &g_use, NULL); hits[h.op] += g_use_hits; } o += h.size; }
+            int any = 0; for (int op = 0; op < OP_COUNT_; op++) any |= hits[op] != 0;
+            if (any) { printf("--uses %llu: submit %u segment: records by op:", (unsigned long long)opt_uses, rp_ch[i].c.submit); for (int op = 0; op < OP_COUNT_; op++) if (hits[op]) printf(" %d×%llu", op, (unsigned long long)hits[op]); printf("\n"); }
+            free(b); }
+    }
     if (opt_writes) for (uint32_t sub = 1; sub <= nsub; sub++) {
         const uint8_t *segs[65536]; uint32_t lens[65536], nseg = 0, nh = 0; const uint32_t *top = NULL;
         for (size_t i = 0; i < rp_nch; i++) { if (rp_ch[i].c.submit != sub) continue;
@@ -308,6 +355,23 @@ int main(int argc, char **argv) { @autoreleasepool {
         printf("submit %u: %zu GPU writes to pools; later reads of them (writer op → reader op × count):", sub, g_nrw);
         for (int a = 0; a < OP_COUNT_; a++) for (int b = 0; b < OP_COUNT_; b++) if (g_raw_hits[a][b]) printf(" %d→%d×%llu", a, b, (unsigned long long)g_raw_hits[a][b]);
         printf("\n"); memset(g_raw_hits, 0, sizeof g_raw_hits);
+    }
+    if (opt_fill_ser) {   // --fill: which surfaces sample a texture the capture holds no content of: its blocks all one colour (an ASTC LDR void-extent block, colour 0xRRGGBB). An empty ASTC texture decodes as the error colour, magenta
+        int done = 0;
+        for (size_t i = 0; i < rp_nch && !done; i++) if (rp_ch[i].c.tag == CAP_TREG) for (size_t o = 0; o + sizeof(cap_treg) <= rp_ch[i].c.raw && !done; o += sizeof(cap_treg)) { cap_treg *e = (cap_treg *)(rp_ch[i].d + o);
+            if (!e->ok || e->t.serial != opt_fill_ser) continue;
+            id<MTLTexture> t = tex_mtl(&e->t); uint32_t bw = 0, bh = 0; if (t.parentTexture) t = t.parentTexture;
+            if (!t || !cap_astc_block(t.pixelFormat, &bw, &bh)) RFAIL("--fill: texture ser=%llu is not an ASTC texture the replay layer made", (unsigned long long)opt_fill_ser);
+            uint8_t blk[16] = {0xFC, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF}; for (int c = 0; c < 3; c++) blk[9 + 2 * c] = (uint8_t)(opt_fill_rgb >> (16 - 8 * c));   // the colour channels' high bytes
+            uint32_t slices = (uint32_t)(t.textureType == MTLTextureTypeCube || t.textureType == MTLTextureTypeCubeArray ? 6 * t.arrayLength : t.arrayLength);
+            id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
+            for (uint32_t lv = 0; lv < t.mipmapLevelCount; lv++) { uint32_t w = (uint32_t)MAX(t.width >> lv, 1u), h = (uint32_t)MAX(t.height >> lv, 1u), nbx = (w + bw - 1) / bw, nby = (h + bh - 1) / bh;
+                uint8_t *row = malloc((size_t)nbx * nby * 16); for (uint32_t k = 0; k < nbx * nby; k++) memcpy(row + 16 * (size_t)k, blk, 16);
+                id<MTLBuffer> b = [g_dev newBufferWithBytes:row length:(size_t)nbx * nby * 16 options:MTLResourceStorageModeShared]; free(row);
+                for (uint32_t sl = 0; sl < slices; sl++) [be copyFromBuffer:b sourceOffset:0 sourceBytesPerRow:(size_t)nbx * 16 sourceBytesPerImage:(size_t)nbx * nby * 16 sourceSize:MTLSizeMake(w, h, 1) toTexture:t destinationSlice:sl destinationLevel:lv destinationOrigin:MTLOriginMake(0, 0, 0)]; }
+            [be endEncoding]; [cb commit]; [cb waitUntilCompleted]; done = 1;
+            printf("--fill: ASTC texture ser=%llu (%lux%lu, %u slices, %lu levels) filled with colour %06x\n", (unsigned long long)opt_fill_ser, (unsigned long)t.width, (unsigned long)t.height, slices, (unsigned long)t.mipmapLevelCount, opt_fill_rgb); }
+        if (!done) RFAIL("--fill: no registered texture ser=%llu", (unsigned long long)opt_fill_ser);
     }
     const uint8_t *lpix = NULL; uint64_t lpixn = 0;   // the live frame's pixels (captures made before LPIX have only its digest)
     for (size_t i = 0; i < rp_nch; i++) if (rp_ch[i].c.tag == CAP_LPIX) { lpix = rp_ch[i].d; lpixn = rp_ch[i].c.raw; }
@@ -373,14 +437,14 @@ int main(int argc, char **argv) { @autoreleasepool {
             printf("render targets and images the frame made without captured content: %llu (%.1f MB)\n", (unsigned long long)n, bytes / 1048576.0);
         }
         if (1) {   // pool blocks after the frame against the live run's: written live but not here = the CPU wrote them while the frame ran (or a GPU write the replay missed)
-            uint64_t live_only = 0, rep_only = 0, both = 0, blocks = 0; uint32_t worst = 0, worst_n = 0; nvn_hm_clear(&g_diffblk, NULL);
+            uint64_t live_only = 0, rep_only = 0, both = 0, blocks = 0, diff_sum = 0; uint32_t worst = 0, worst_n = 0; nvn_hm_clear(&g_diffblk, NULL);
             for (size_t i = 0; i < rp_nch; i++) { if (rp_ch[i].c.tag != CAP_PHSH) continue; const uint8_t *d = rp_ch[i].d;
                 for (size_t o = 0; o + 8 <= rp_ch[i].c.raw;) { uint32_t r, nb; memcpy(&r, d + o, 4); memcpy(&nb, d + o + 4, 4); o += 8; uint32_t rn = 0;
                     for (uint32_t k = 0; k < nb && o + 8 <= rp_ch[i].c.raw; k++, o += 8) {
                         if (r >= rp_nrg || !rp_rg[r].mem) continue; uint64_t off = (uint64_t)k * 4096; size_t len = (size_t)MIN(4096, rp_rg[r].size - off); uint64_t lh; memcpy(&lh, d + o, 8);
                         uint64_t h0 = cap_hash_block(rp_rg[r].orig + off, len), h1 = cap_hash_block(rp_rg[r].mem + off, len); blocks++;
                         if (h1 == lh) continue;
-                        rn++; if (lh != h0 && h1 == h0) live_only++; else if (lh == h0) rep_only++; else both++; uint64_t key = (uint64_t)r << 32 | k; nvn_hm_put(&g_diffblk, &key, (void *)1); }
+                        rn++; if (lh != h0 && h1 == h0) live_only++; else if (lh == h0) rep_only++; else both++; uint64_t key = (uint64_t)r << 32 | k; nvn_hm_put(&g_diffblk, &key, (void *)1); diff_sum += h1; }
                     if (rn > worst_n) { worst_n = rn; worst = r; } } }
             if (g_diffblk.n && rep == 0) {   // which records touch them (unbounded buffer bindings are taken as their first 4 KiB)
                 cap_ops sc = {scan_addr, scan_obj};
@@ -391,6 +455,7 @@ int main(int argc, char **argv) { @autoreleasepool {
             }
             printf("pool blocks after the frame: %llu of %llu differ from the live run (%llu written only live, %llu written only in the replay, %llu written in both with other bytes; most in region %u, %u blocks)\n",
                    (unsigned long long)(live_only + rep_only + both), (unsigned long long)blocks, (unsigned long long)live_only, (unsigned long long)rep_only, (unsigned long long)both, worst, worst_n);
+            if (g_diffblk.n) printf("sum of the differing blocks' hashes %016llx (the same in two fresh replays when the GPU wrote the same bytes: when it differs, the GPU's own writes vary from run to run)\n", (unsigned long long)diff_sum);
         }   // DM_NVN_TEXDUMP of the live frame: the replay has no next frame to trigger it
         double gpu = mtl_gpu_ms(frame_no);
         uint64_t pass1, draw1; mtl_stats(&pass1, &draw1);

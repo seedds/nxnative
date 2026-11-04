@@ -137,7 +137,8 @@ t_capture_live: t_capture_live.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_capture_live.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 .PHONY: check_t_capture_live
 check_t_capture_live: t_capture_live nvn_replay
-	@d=$$(mktemp -d); ./t_capture_live $$d/live.nvncap && ./nvn_replay $$d/live.nvncap --repeat 2; rc=$$?; rm -rf $$d; exit $$rc
+	@d=$$(mktemp -d); ./t_capture_live $$d/live.nvncap && { ./nvn_replay $$d/live.nvncap --repeat 2 > $$d/out.txt; rc=$$?; cat $$d/out.txt; \
+	  if [ $$rc -eq 0 ] && ! grep -q "built for the Switch 2" $$d/out.txt; then echo "FAIL: the replay did not apply the capture's Switch 2 state (sdk_ounce)"; rc=1; fi; }; rc=$${rc:-1}; rm -rf $$d; exit $$rc
 t_cube_placeholder: t_cube_placeholder.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_cube_placeholder.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_cube_placeholder

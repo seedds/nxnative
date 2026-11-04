@@ -70,6 +70,12 @@ The Mushroom Cup's opening movie plays: VP9 at 2560x1440, 1,423 pictures over ab
 
 Whole groups of trees and bushes vanished or appeared in one frame while the camera barely moved, for hundreds of frames, in the title scenes and while driving. The culling shader (`e04783bda5a52269`) reads a list that `2ce9071c2f22d74f` rebuilds every few frames, and a race in that shader's reset lost entries: [A store only a dispatch's first invocation makes](../../../docs/reference/shaders.md#a-store-only-a-dispatchs-first-invocation-makes). Ruled out on the way: conditional rendering (only some clears), stale camera uniforms, and a depth pyramid in the culling shader (it reads no textures).
 
+## Sky panels
+
+Current ([issue #1186](https://github.com/seedds/nxnative/issues/1186)): large flat panels in front of the sky on many courses, on the base game and 1.8.0. The vertex shader `90a9a728715fd08b` (`DriveRefreshUber.Procedural`) moves its vertices by a 128x128x5 RGBA16F array, whose `y` reached 1,064 in layer 4 and 1,085 in layer 3 here (14,416 in the report), and stayed under 1 elsewhere. It is not a simulation running away: `8f3581eb40d8ce71` adds to a second array that is cleared every frame, and the large values are drawn into that one. They come from the per-layer task and mesh draws, which read [the dummy buffer](../../../docs/reference/shaders.md#task-and-mesh-draws-reading-the-dummy-buffer) instead of the game's data.
+
+Checked with a host that remapped the slots, on the older chain `475a55e74858`: the array's `y` stayed at or below 0.9 over 28 samples of desert scenes, with no panels in their shots. Not yet run on a library built with the fix, not checked at Crown City with it, and its frame time cost, now that these draws read real data, is not measured.
+
 ## Driving it on the Mac
 
 The work folder `0400C3F00006E000-work` beside the dump has `rewrite.sh`, `rebuild.sh` (host copy `build/mkwhost`), `split.sh`, `shaders.sh`, `play.sh` (boots headless with `DM_CTL=run/ctl.txt`), `ctl.sh` (control lines; `wait S`, `snap NAME`), `to_race.sh` and `measure.sh <log>`. From a boot at the title (about 80 s): `to_race.sh` presses L+R, then A nine times with waits (Single Player, Grand Prix, Mario, the kart, the Mushroom Cup, 50cc, "Start Grand Prix?"). The opening and the race's start then take about a minute; `A~40` drives. `measure.sh` does all of this, waits for the race (over 1,500 draws a frame, no movie thread), and writes the timing and the `restop` residency lines to `run/<log>.res`. Control presses run in order, so `A~40` holds up later lines.
@@ -93,6 +99,7 @@ Update 1.8.0 (v917504, SDK 21.4.0) is not on this Mac. Pull request #1116 ported
 - [Physical pages mapped at several places of a placement sparse texture](../../../docs/reference/nvn-objects.md#physical-pages-mapped-at-several-places-of-a-placement-sparse-texture)
 - [Large pools wrapped in chunks](../../../docs/reference/nvn-objects.md#large-pools-wrapped-in-chunks)
 - [NVN2 task and mesh shaders](../../../docs/reference/shaders.md#nvn2-task-and-mesh-shaders)
+- [Task and mesh draws reading the dummy buffer](../../../docs/reference/shaders.md#task-and-mesh-draws-reading-the-dummy-buffer)
 - [A store only a dispatch's first invocation makes](../../../docs/reference/shaders.md#a-store-only-a-dispatchs-first-invocation-makes)
 - [Uncompressed storage the CPU wrote, in a pool the GPU has not written](../../../docs/reference/nvn-objects.md#uncompressed-storage-the-cpu-wrote-in-a-pool-the-gpu-has-not-written)
 - [Variable rate shading ignored](../../../docs/reference/rendering.md#variable-rate-shading-ignored)

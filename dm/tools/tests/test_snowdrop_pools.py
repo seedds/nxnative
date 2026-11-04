@@ -58,8 +58,7 @@ class FindTest(unittest.TestCase):
     def test_found_both_encodings(self):
         for load4, load12, w5, f in ((MOVZ4, MOVZ12, 0x52A00025, 0x98), (ORR4, ORR12, 0x321003E5, 0x90)):
             s, why = find(image(body(f=f, load4=load4, load12=load12, w5=w5)))
-            self.assertIsNotNone(s, why)
-            assert s is not None
+            assert s is not None, why
             self.assertEqual((s['sizes'], s['field'], s['xs']), (CTOR, f, 19), why)
 
     def test_nothing_there_is_not_red(self):
@@ -89,8 +88,7 @@ class CutsTest(unittest.TestCase):
     def apply(self, sizes, **kw):
         img = image(body(**kw))
         s, why = find(img)
-        self.assertIsNotNone(s, why)
-        assert s is not None
+        assert s is not None, why
         cuts = sp.cuts(img, s, sizes)
         for off, old, new, _ in cuts:
             self.assertEqual(bytes(img[off:off + 4]).hex(), old)

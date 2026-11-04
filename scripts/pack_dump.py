@@ -108,7 +108,7 @@ def npdm_of(dump):   # the main.npdm that names the game: program 0's of the bas
 
 
 def is_dump(folder):   # whether a folder has the layout above
-    return npdm_of(folder) is not None and any((program_dir(p) / 'romfs').is_dir() for p in [folder / 'base', *numbered(folder / 'updates').values()])
+    return npdm_of(folder) is not None and any((d := program_dir(p)) is not None and (d / 'romfs').is_dir() for p in [folder / 'base', *numbered(folder / 'updates').values()])
 
 
 def romfs_of(folder):   # a DLC version folder's RomFS: romfs/, or program 0's

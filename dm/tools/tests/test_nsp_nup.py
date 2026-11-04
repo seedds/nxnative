@@ -432,6 +432,32 @@ class Main(Base):
                 self.assertTrue(any('the folder has no v0' in s for s in said), said)
                 self.assertIn(pack_nup.NO_BASE, said)
 
+    def test_mkw_180_uses_registered_tables(self):
+        title_id, update = 0x0400C3F00006E000, 917504
+        update_package = (1, title_id, update, version(tid=title_id), META)
+        base_package = (0, title_id, 0, version(tid=title_id), META)
+        for include_base in (False, True):
+            with self.subTest(include_base=include_base):
+                packages = [base_package, update_package] if include_base else [update_package]
+                write_nup(self.path, packages, update_flags=pack_nup.STANDALONE)
+                work, messages = self.run_main(self.path, extract=True)
+                self.assertTrue((work / 'extract/v917504/ExeFS/main').is_file())
+                self.assertFalse((work / 'extract/v0').exists())
+                self.assertFalse(any('from a profile derived from it' in message for message in messages), messages)
+
+    def test_mkw_base_gets_its_own_tables_even_when_update_is_available(self):
+        title_id, update = 0x0400C3F00006E000, 917504
+        base_package = (0, title_id, 0, version(tid=title_id), META)
+        update_package = (1, title_id, update, version(tid=title_id), META)
+        for include_update in (False, True):
+            with self.subTest(include_update=include_update):
+                packages = [base_package, update_package] if include_update else [base_package]
+                write_nup(self.path, packages, update_flags=pack_nup.STANDALONE)
+                work, messages = self.run_main(self.path, package='v0', extract=True)
+                self.assertTrue((work / 'extract/v0/ExeFS/main').is_file())
+                self.assertFalse((work / 'extract/v917504').exists())
+                self.assertTrue(any('packing v0 from a profile derived from it' in message for message in messages), messages)
+
     def test_a_version_it_cannot_pack_is_a_red_line(self):   # through cli(): the disk check reads the RomFS folder before any extraction
         exefs_only = {'exefs': version()['exefs']}
         for packages, flags, package in (([(1, TID, VER, exefs_only, b'')], pack_nup.STANDALONE, None),   # the only update

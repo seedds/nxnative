@@ -669,6 +669,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** hooked (`hle_net.c`, `hle_offline.c`): the `nifm` IP queries with SDK 10's `socket::InAddr` / `in_addr` mangling; `prepo::AddSessionId` / `AddInternetConnectionStatus`; `ldn::GetNetworkConfig`; SDK 11's socket overloads with plain `sockaddr` / `int` arguments (`Connect`, `Accept`, `GetSockName`, `Get` / `SetSockOpt`, `Fcntl`, `Recv`, `Send`).
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10: `nifm`, `prepo`); [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3: LDN, sockets).
 
+### An SSL context created offline
+
+- **Symptom:** the game stops at boot, before its first frame, with its own network layer's fatal error (`SpNet Panic 0x5cbad1cc`, the failure code `0xFFF12`), right after `nn::ssl::Initialize`.
+- **Cause:** the game's runtime (`SpnUERuntime`) calls `nn::ssl::Initialize`, constructs an `nn::ssl::Context` and calls `Context::Create(SslVersion)` (`main+0x477e5b4`); a failed `Create` takes the path to the panic. The host failed `Create` as it fails every ssl call. On Horizon, creating a context is a request to the ssl service that needs no network, so it succeeds offline; only a connection's handshake needs one.
+- **Fix:** `Context::Create` succeeds and stores a handle in the context, its only field, and `Context::Destroy` succeeds and clears it (`hle_net.c`). The handle is never dereferenced: every call that would use it (`RegisterInternalPki`, `Connection::Create` and the rest) still fails, so the game's requests stop at the connection as without a network.
+- **Found on:** DRAGON BALL Sparking! ZERO (`010035F022078000`, a provisional profile; [issue #714](https://github.com/seedds/nxnative/issues/714)). Update 2.0.73 on an M1 Max, macOS 26.6.2, and the base game by a second user on an M1 Pro: the game boots with rendering, audio and controls. Not checked: iOS, other games that create a context at boot.
+
 ### Bluetooth LE at boot
 
 - **Symptom:** `[RED] sf: the game connects to service bt itself, which the host does not serve`, then `game called nn::diag abort` at `sdk+0x16ba48` and exit 134, a second after the audio renderer starts. With `bt` and `btm:u` served as zeroed host sessions the abort moves to `nn::btm::user::InitializeBtmUserInterface` (`sdk+0xb8eb4`), before either session gets a request.

@@ -105,8 +105,10 @@ HLE_FORCE("nnsocketSetLastErrno", "socket error code kept by the host", void, h_
 #define SSF(m, cname, ...) HLE_FORCE(m, "ssl service (cut): fails", Result, cname, __VA_ARGS__)
 HLE_FORCE("_ZN2nn3ssl10InitializeEv", "same as nnsslInitialize: succeeds, creates no session (cut)", Result, h_ssl_InitCpp, void) { return RES_OK; }
 HLE_FORCE("_ZN2nn3ssl8FinalizeEv", "pairs with Initialize (cut)", Result, h_ssl_FinCpp, void) { return RES_OK; }
-SSF("_ZN2nn3ssl7Context6CreateENS1_10SslVersionE", h_ssl_CtxCreate, void *self, int v) { (void)self; (void)v; return RES_FAIL; }
-SSF("_ZN2nn3ssl7Context7DestroyEv", h_ssl_CtxDestroy, void *self) { (void)self; return RES_FAIL; }
+// Creating a context is local to the ssl service and succeeds offline on Horizon; DRAGON BALL Sparking! ZERO (SpnUERuntime, main+0x477e5b4) panics when it fails.
+// The handle (the Context's only field) is never dereferenced: every call that would use it is cut above or below.
+HLE_FORCE("_ZN2nn3ssl7Context6CreateENS1_10SslVersionE", "offline: succeeds with a handle no other call uses (cut)", Result, h_ssl_CtxCreate, uint64_t *self, int v) { (void)v; if (self) *self = 1; return RES_OK; }
+HLE_FORCE("_ZN2nn3ssl7Context7DestroyEv", "offline: pairs with Create (cut)", Result, h_ssl_CtxDestroy, uint64_t *self) { if (self) *self = 0; return RES_OK; }
 SSF("_ZN2nn3ssl7Context19RegisterInternalPkiEPmNS1_11InternalPkiE", h_ssl_CtxRegPki, void *self, uint64_t *id, int p) { (void)self; (void)id; (void)p; return RES_FAIL; }
 SSF("_ZN2nn3ssl7Context9RemovePkiEm", h_ssl_CtxRemovePki, void *self, uint64_t id) { (void)self; (void)id; return RES_FAIL; }
 SSF("_ZN2nn3ssl14BuiltInManager28GetBuiltInCertificateBufSizeEPjPNS0_15CaCertificateIdEj", h_ssl_BiBufSize, uint32_t *o, void *ids, unsigned n) { (void)ids; (void)n; if (o) *o = 0; return RES_FAIL; }

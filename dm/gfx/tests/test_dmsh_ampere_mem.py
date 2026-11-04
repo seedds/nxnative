@@ -361,5 +361,51 @@ class Pokopia(Translated):
         self.assertRegex(self.msl(self.MEMBAR, self.ERRBAR), r'threadgroup_barrier|atomic_thread_fence')
 
 
+class SurfaceLiveInputs(Translated):
+    """An RGBA surface load must keep its coordinates when only RGB is used.
+
+    MKW's water derivative shader computes min(thread.y + 1, 127) for a
+    neighbor load. Removing the unused alpha's deferred-register copy used
+    to remove that coordinate's use from the still-live four-result load.
+    """
+    def translate_neighbor_load(self, live_component_count):
+        code = (
+            inst(0x000fe20000002200, 0x0000000000017919)  # S2R R1, SR_TID.Y
+            + inst(0x000fe40007ffe0ff, 0x0000000101047810)  # IADD3 R4, R1, 1
+            + inst(0x000fe20003800200, 0x0000007f04157817)  # IMNMX R21, R4, 127, PT
+            + mov(20, 0)
+            + mov(22, 0)
+            + inst(0x000f6200001e0f00, 0x80000c00140c7b97)  # SULD.RGBA R12, [R20:R22], write barrier 5
+        )
+        for component in range(live_component_count):
+            shared_byte_offset = component * 4
+            source_register = 12 + component
+            zero_base_register = 0xff
+            shared_store_opcode = 0x7388
+            shared_store = (
+                shared_byte_offset << 40
+                | source_register << 32
+                | zero_base_register << 24
+                | shared_store_opcode
+            )
+            # Store this component to shared memory, waiting for load barrier 5.
+            wait_for_load = 0x020fe80000000800
+            code += inst(wait_for_load, shared_store)
+        return self.translate(code + inst(*EXIT), shared=256)
+
+    def test_rgb_live_alpha_dead_preserves_neighbor_coordinate(self):
+        msl = self.translate_neighbor_load(3)
+        self.assertIn('.read(', msl)
+        self.assertRegex(msl, r'min\([^;]*, 127\)')
+        self.assertNotRegex(msl, r'\bint _\d+;')  # No undefined coordinate replacing the deleted minimum.
+
+    def test_all_components_live_preserves_neighbor_coordinate(self):
+        self.assertRegex(self.translate_neighbor_load(4), r'min\([^;]*, 127\)')
+
+    def test_dead_load_can_still_drop_its_coordinate(self):
+        msl = self.translate_neighbor_load(0)
+        self.assertNotIn('.read(', msl)
+        self.assertNotIn('min(', msl)
+
 if __name__ == '__main__':
     unittest.main()

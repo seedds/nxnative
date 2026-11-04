@@ -1,0 +1,10 @@
+# New save: skip startup movie, Game Start, Original Mode, skip the prologue cutscene.
+# Stand at the school gate; manual gameplay validation continues through its first combat wave.
+save	new
+keys	12:A,17:A,22:A,27:A,60:Plus,62:A
+secs	95
+quick	95
+reach	3000@90
+window	75	15
+shots	75,90
+hang	30

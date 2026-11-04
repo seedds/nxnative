@@ -215,6 +215,9 @@ static void dev_init_once(void) {
     @autoreleasepool {
         g_log = getenv("DM_GL_LOG") && atoi(getenv("DM_GL_LOG"));
         g_dev = (__bridge id<MTLDevice>)mtl_device_classic();
+        g_bc = [g_dev supportsBCTextureCompression];
+        if (getenv("DM_GL_NO_BC")) g_bc = 0;   // development: take the A16 path (decode compressed uploads) on a device that has BC, to compare the two
+        GLOG("BC texture compression: %s%s", g_bc ? "yes" : "no (compressed uploads are decoded to RGBA8/R8)", getenv("DM_GL_NO_BC") ? " (DM_GL_NO_BC)" : "");
         g_q = [g_dev newCommandQueueWithMaxCommandBufferCount:64]; g_q.label = @"gl";
         g_ev = [g_dev newSharedEvent];
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:1 height:1 mipmapped:NO];
@@ -492,6 +495,21 @@ static const fmt_t g_fmt[F_N] = {
 // internal format (+ format / type for unsized ones) → fmt and the conversion of the given data; -1 when not mapped
 static int fmt_pick(GLint ifmt, GLenum format, GLenum type, int *cv) {
     *cv = CV_COPY;
+    if (!g_bc) {   // no BC hardware: decompress on upload, upload into an uncompressed Metal format
+        switch (ifmt) {
+            case GL_COMPRESSED_RGB_S3TC_DXT1: case GL_COMPRESSED_RGBA_S3TC_DXT1: *cv = CV_BC1; return F_RGBA8;
+            case GL_COMPRESSED_RGBA_S3TC_DXT3: *cv = CV_BC2; return F_RGBA8;
+            case GL_COMPRESSED_RGBA_S3TC_DXT5: *cv = CV_BC3; return F_RGBA8;
+            case GL_COMPRESSED_SRGB_S3TC_DXT1: case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1: *cv = CV_BC1; return F_SRGBA8;
+            case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3: *cv = CV_BC2; return F_SRGBA8;
+            case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5: *cv = CV_BC3; return F_SRGBA8;
+            case GL_COMPRESSED_RED_RGTC1: case GL_COMPRESSED_SIGNED_RED_RGTC1: *cv = CV_BC4; return F_R8;
+            case GL_COMPRESSED_RG_RGTC2: case GL_COMPRESSED_SIGNED_RG_RGTC2: *cv = CV_BC5; return F_RG8;
+            case GL_COMPRESSED_RGBA_BPTC_UNORM: *cv = CV_BC7; return F_RGBA8;
+            case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM: *cv = CV_BC7; return F_SRGBA8;
+            case GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT: case GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT: *cv = CV_BC6H; return F_RGBA16F;
+        }
+    }
     if (format == GL_COLOR_INDEX) { *cv = type == GL_UNSIGNED_BYTE ? CV_INDEX : CV_NONE; return F_RGBA8; }
     if (type == GL_UNSIGNED_SHORT_5_6_5) { *cv = CV_565; return F_RGBA8; }
     if (type == GL_UNSIGNED_SHORT_4_4_4_4) { *cv = CV_4444; return F_RGBA8; }
@@ -918,6 +936,7 @@ static void tex_image(GLenum target, GLint level, int f, int cv, uint32_t w, uin
     tex_t *t = target == GL_TEXTURE_2D || (target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z) ? bound_tex(target) : NULL;
     int face = target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z ? (int)(target - GL_TEXTURE_CUBE_MAP_POSITIVE_X) : 0;
     if (!t || level < 0 || level >= MAXLV) { RED1("glTexImage2D target %#x level %d with no texture bound", target, level); free(conv); return; }
+    if (cv >= CV_BC1 && !t->made && !t->defined) t->bc = cv;
     (void)cv;
     uint32_t w0 = level ? w << level : w, h0 = level ? h << level : h;
     if (level == 0 && (t->fmt != f || t->w != w || t->h != h) && (t->made || t->defined)) tex_drop(t);   // level 0 respecified: a new texture
@@ -1921,18 +1940,23 @@ static void teximg_impl(const teximg_args *a0) {
         if (cv == CV_INDEX && !S.color_table) RED1("colour-index texture data with GL_COLOR_TABLE disabled");
         size_t pitch; void *conv;
         if (a->compressed) {
-            size_t need = fmt_pitch(f, a->w) * fmt_rows(f, a->h);
-            if (g_fmt[f].kind != K_BLOCK || (size_t)a->size < need) { RED1("glCompressedTexImage2D: %d bytes for %dx%d %s (%zu expected)", a->size, a->w, a->h, g_fmt[f].name, need); return; }
-            conv = pixels_convert(a->pixels, a->w, a->h, 0, 0, f, CV_COPY, &pitch);
+            size_t need = cv >= CV_BC1 ? bc_src_size(cv, a->w, a->h) : fmt_pitch(f, a->w) * fmt_rows(f, a->h);
+            if ((cv < CV_BC1 && g_fmt[f].kind != K_BLOCK) || (size_t)a->size < need) { RED1("glCompressedTexImage2D: %d bytes for %dx%d %s (%zu expected)", a->size, a->w, a->h, g_fmt[f].name, need); return; }
+            conv = pixels_convert(a->pixels, a->w, a->h, 0, 0, f, cv, &pitch);
         } else conv = pixels_convert(cv == CV_NONE ? NULL : a->pixels, a->w, a->h, a->format, a->type, f, cv, &pitch);
         tex_image(a->target, a->level, f, cv, a->w, a->h, a->pixels || a->compressed ? conv : (free(conv), (void *)NULL), pitch);
     }
 }
 GL(glTexImage2D, void, GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border, GLenum format, GLenum type, const void *pixels) {
+    TLOG("tex image 2D target %#x level %d ifmt %#x %dx%d format %#x type %#x pixels %p", target, level, ifmt, w, h, format, type, pixels);
     (void)border; teximg_args a = {target, level, ifmt, 0, 0, w, h, format, type, pixels, 0, 0, 0}; ((void (*)(const teximg_args *))(const void *)teximg_impl_bs)(&a);
 }
 GL(glTexSubImage2D, void, GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, const void *pixels) {
+    TLOG("tex sub image 2D target %#x level %d %d,%d %dx%d format %#x type %#x pixels %p", target, level, x, y, w, h, format, type, pixels);
     teximg_args a = {target, level, 0, x, y, w, h, format, type, pixels, 0, 1, 0}; ((void (*)(const teximg_args *))(const void *)teximg_impl_bs)(&a);
+}
+GL(glCompressedTexSubImage2D, void, GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLsizei size, const void *data) {   // blocks copied as they are, as glCompressedTexImage2D's
+    (void)format; (void)size; teximg_args a = {target, level, 0, x, y, w, h, 0, 0, data, size, 1, 1}; ((void (*)(const teximg_args *))(const void *)teximg_impl_bs)(&a);
 }
 GL(glCompressedTexImage2D, void, GLenum target, GLint level, GLenum ifmt, GLsizei w, GLsizei h, GLint border, GLsizei size, const void *data) {
     (void)border; teximg_args a = {target, level, (GLint)ifmt, 0, 0, w, h, 0, 0, data, size, 0, 1}; ((void (*)(const teximg_args *))(const void *)teximg_impl_bs)(&a);
@@ -1944,7 +1968,7 @@ static void tex_storage(GLenum target, GLsizei levels, GLenum ifmt, GLsizei w, G
     int cv, f = fmt_pick((GLint)ifmt, 0, 0, &cv);
     if (!t || f < 0 || levels <= 0 || w <= 0 || h <= 0 || d <= 0) { RED1("glTexStorage(%#x, %d levels, %#x, %dx%dx%d) not implemented", target, levels, ifmt, w, h, d); return; }
     if (t->made || t->defined) tex_drop(t);
-    t->fmt = f; t->w = w; t->h = h; t->d = d; t->slevels = levels; t->smp_dirty = 1;
+    t->fmt = f; t->bc = cv >= CV_BC1 ? cv : 0; t->w = w; t->h = h; t->d = d; t->slevels = levels; t->smp_dirty = 1;
 }
 GL(glTexStorage2D, void, GLenum target, GLsizei levels, GLenum ifmt, GLsizei w, GLsizei h) { tex_storage(target, levels, ifmt, w, h, 1); }
 GL(glTexStorage3D, void, GLenum target, GLsizei levels, GLenum ifmt, GLsizei w, GLsizei h, GLsizei d) { tex_storage(target, levels, ifmt, w, h, d); }

@@ -20,7 +20,13 @@
 // switch an engine reads before it takes those fields at all (written 1 at any target)
 enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, TICKS_U32, SECS_F32, MODE_U32, FPS_F64 };
 #define MS_MARGIN 0.5f
-static float ms_want(int fps) { return 1000.0f / (float)fps - (fps == 60 ? MS_MARGIN : 0); }
+static float ms_want(int fps) { return 1000.0f / (float)fps - (fps >= 60 ? MS_MARGIN : 0); }
+// A limiter that holds a rate (FPS_F64's first copy) gets the same margin as a rate: at 60 the FC 26 regulator at exactly 60.0 waited 16.67 ms from each frame's start, so in a match
+// every 11th frame missed its display-link tick and took 24.6 ms (57.6 fps, GPU 8 ms); 1000 / (16.67 - 0.5) = 61.9 lets the host's present pacing set the pace.
+// The reported rate (the second copy) stays the exact target; at 120 the wait rate is 127.66 fps.
+static double rate_want(int fps) { return 1000.0 / (double)ms_want(fps); }
+// The fps_max mechanism, this margin and the 120 Hz link selection follow the FC 26 120 fps patch by @imnotsharingmyname (MIT):
+// https://github.com/imnotsharingmyname/nxnative-fc26-120fps. This branch adds 100 fps and the FC 27 regulator row.
 typedef struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; uint32_t scale; } lock_t;
 static const lock_t k_locks[] = {
     // Pokemon Brilliant Diamond 1.3.0: Unity's Application.targetFrameRate. Its icall registration (main+0xe34e60) resolves to main+0xdc8e70 -> +0x5fa640,
@@ -50,6 +56,10 @@ static const lock_t k_locks[] = {
     // this row the game keeps 30 fps at the right speed (the simulation at 60 and the regulator at 30: match clock as at 30). The game asks for present interval 2
     // (BaseDisplaySettings.PresentInterval), which the profile's present_interval display ignores
     { "a48c0de3bc353efa0e4d359bde05ef24", "FIFA frame regulator", 0xda20e38, 0x8, FPS_F64, 2, 0 },
+    // EA SPORTS FC 27 1.8d.6523: the same regulator moved. The setter main+0x5d66b70 loads the object from [main+0xda450d8] and has the same fmov v1.2d, #30.0; stur q1, [x9, #8]
+    // (30.0 into +0x8 and +0x10), then computes the gameplay rate 60 / DeltaTicks at [+0x1e54c] as the 310c note describes. The tick main+0x9a0b690 loads 1 / [+0x8] and uses [+0x10],
+    // [+0x500] and [+0x508] like 310c's main+0x99ea580. Found by the setter's instruction pattern; no 310c NSP was on disk for nso_fnmap.py byte matching.
+    { "570dc9f1750fa7ea9df20b95b482d039", "FIFA frame regulator", 0xda450d8, 0x8, FPS_F64, 2, 0 },
 };
 #define NLOCKS ((int)(sizeof k_locks / sizeof k_locks[0]))
 
@@ -181,6 +191,77 @@ static void fb_tick(int target, const char *src) {
     }
 }
 
+// Frostbite's GameRenderSettings.ResolutionScale: the engine's internal render scale, in the same reflection layout as SimulationTimeSettings. At 1.0 the 3D views are the output
+// size; above it they render larger than the swapchain and resolve down (supersampling). The game's dynamic resolution may write it too, so DM_RESOLUTION_SCALE also clears
+// DynamicResolutionScaleEnable and sets ResolutionScaleMin. Found by name in main, like the simulation rate.
+static struct { int n; uint8_t *base; uint64_t ti, cache[8]; int ncache; uint32_t off_scale, off_min, off_dyn; } fbr;
+static void fb_res_find(void) {
+    module_t *m = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) m = &g_mod[i];
+    if (!m || !m->text_end || !m->ro_off || m->ro_off >= m->size) return;
+    static const char cls[] = "GameRenderSettings";
+    uint8_t *base = m->base, *ro = base + m->ro_off; uint64_t size = m->back_off ? m->back_off : m->size, b = (uint64_t)(uintptr_t)base;
+    const uint8_t *s = memmem(ro, (size_t)(size - m->ro_off), "\0GameRenderSettings\0", sizeof cls + 1); if (!s) return;   // not Frostbite
+    uint64_t name = (uint64_t)(uintptr_t)(s + 1), rec = 0, scale = 0, min = 0, dyn = 0;
+    for (uint64_t o = (m->ro_off + 7) & ~7ull; o + 0x48 <= size && !rec; o += 8) {
+        if (*(uint64_t *)(base + o) != name) continue;
+        uint64_t fl = *(uint64_t *)(base + o + 0x40); if (fl < b || fl - b + 0x20 > size) continue;
+        for (uint64_t f = fl - b; f + 0x20 <= size; f += 0x20) {   // the field list ends where a name stops being one
+            uint64_t np = *(uint64_t *)(base + f); if (np < b || np - b >= size) break;
+            const char *fn = (const char *)(uintptr_t)(np);
+            uint32_t off = *(uint32_t *)(base + f + 0x10);
+            if (!strcmp(fn, "ResolutionScale")) scale = off;
+            else if (!strcmp(fn, "ResolutionScaleMin")) min = off;
+            else if (!strcmp(fn, "DynamicResolutionScaleEnable")) dyn = off;
+        }
+        if (scale && min && dyn) rec = o;
+    }
+    if (!rec) { LOG("[RED] main: Frostbite's GameRenderSettings found, but not its resolution fields; leaving the render scale"); return; }
+    const uint32_t *t = (const uint32_t *)base; uint64_t nw = m->text_end / 4;
+    for (uint64_t i = 0; i + 3 < nw && !fbr.ti; i++) {   // the registration: adrp / add xR = record, str xR, [xT] with xT = the type info from an adrp / add just before
+        int r = (int)(t[i] & 31); if (fb_pair(t, i, r) != (int64_t)rec) continue;
+        uint32_t st = t[i + 2]; if ((st & 0xFFFFFC00u) != 0xF9000000u || (int)(st & 31) != r) continue;   // str xR, [xT] (no offset)
+        int xt = (int)((st >> 5) & 31);
+        for (uint64_t k = i >= 6 ? i - 6 : 0; k < i; k++) { int64_t ti = fb_pair(t, k, xt); if (ti > 0) fbr.ti = (uint64_t)ti; }
+    }
+    if (!fbr.ti) { LOG("[RED] main: Frostbite's GameRenderSettings: its type info was not found; leaving the render scale"); return; }
+    for (uint64_t i = 8; i + 12 < nw && fbr.ncache < 8; i++) {   // the readers: adrp / add x1 = type info, adrp / add x2 = cache word, near each other before a bl
+        if (fb_pair(t, i, 1) != (int64_t)fbr.ti) continue;
+        for (uint64_t k = i - 8; k < i + 10; k++) {
+            int64_t c = fb_pair(t, k, 2); if (c <= 0 || (uint64_t)c + 8 > m->size) continue;
+            int known = 0; for (int j = 0; j < fbr.ncache; j++) known |= fbr.cache[j] == (uint64_t)c;
+            if (!known) fbr.cache[fbr.ncache++] = (uint64_t)c;
+            break;
+        }
+    }
+    if (!fbr.ncache) { LOG("[RED] main: Frostbite's GameRenderSettings: no settings lookup found; leaving the render scale"); return; }
+    fbr.base = base; fbr.n = 1; fbr.off_scale = (uint32_t)scale; fbr.off_min = (uint32_t)min; fbr.off_dyn = (uint32_t)dyn;
+    LOG("main: Frostbite GameRenderSettings at main+%#llx (ResolutionScale +%#x, min +%#x, dynamic +%#x), type info main+%#llx, %d instance caches",
+        (unsigned long long)rec, fbr.off_scale, fbr.off_min, fbr.off_dyn, (unsigned long long)fbr.ti, fbr.ncache);
+}
+static void fb_res_tick(void) {
+    static int init, nlog; static float want;
+    if (!fbr.n) return;
+    if (!init) {
+        init = 1; const char *e = getenv("DM_RESOLUTION_SCALE");
+        if (!e || !*e) { fbr.n = 0; return; }
+        want = strtof(e, NULL);
+        if (!(want >= 0.5f && want <= 2.0f)) { LOG("[RED] DM_RESOLUTION_SCALE=%s: must be 0.5 to 2.0; leaving the render scale", e); fbr.n = 0; return; }
+    }
+    uint64_t ti = (uint64_t)(uintptr_t)(fbr.base + fbr.ti);
+    for (int j = 0; j < fbr.ncache; j++) {
+        uint64_t inst = 0, tinfo = 0; float cur = 0, min = 0; uint8_t dyn = 0;
+        if (!rd((uint64_t)(uintptr_t)(fbr.base + fbr.cache[j]), &inst, sizeof inst) || !inst || !rd(inst + 8, &tinfo, sizeof tinfo) || tinfo != ti) continue;   // not made yet, or another word
+        if (!rd(inst + fbr.off_scale, &cur, sizeof cur) || !rd(inst + fbr.off_min, &min, sizeof min) || !rd(inst + fbr.off_dyn, &dyn, sizeof dyn)) continue;
+        int changed = 0;
+        if (cur != want) { float *p = (float *)(uintptr_t)(inst + fbr.off_scale); dm_guest_write_prepare(p, sizeof *p); __atomic_store_n((uint32_t *)p, *(uint32_t *)&want, __ATOMIC_RELAXED); changed = 1; }
+        if (min != want) { float *p = (float *)(uintptr_t)(inst + fbr.off_min); dm_guest_write_prepare(p, sizeof *p); __atomic_store_n((uint32_t *)p, *(uint32_t *)&want, __ATOMIC_RELAXED); changed = 1; }
+        if (dyn) { uint8_t *p = (uint8_t *)(uintptr_t)(inst + fbr.off_dyn); dm_guest_write_prepare(p, sizeof *p); __atomic_store_n(p, 0, __ATOMIC_RELAXED); changed = 1; }
+        if (changed && nlog < 8) { nlog++; LOG("main: Frostbite ResolutionScale %g -> %g, min %g, dynamic %d -> 0 (DM_RESOLUTION_SCALE)", cur, want, min, dyn); }
+        return;
+    }
+}
+
+
 // The row of a target frame rate the game steps by, at the place the rewriter found (dm/tools/fps_target.py; main's fixups FPS_TARGET_PTR, FPS_TARGET_FIELD): an int32 frame rate in the
 // object a global points to, which the game's readers divide 60.0 by to step it, and which the game sets to 30 or 60 itself. Fire Emblem Fortune's Weave's gxc graphics object holds it
 // (+0x1dc; its present asks for interval 60 / target), so at 60 the game asks for interval 1 and steps by 1.0 a frame. 0 rows: not found in this main
@@ -216,6 +297,7 @@ static void lock_find(void) {
         for (int k = 0; k < nue; k++) { rows[nrow++] = &ue[k]; base = g_mod[i].base; }
     }
     fb_find();
+    fb_res_find();
 }
 // Whether the host writes fps_target into an engine limiter of this main (a row for its build, NieR's frame interval, a target frame rate found by its readers, Unreal's variables or
 // Frostbite's simulation rate, found by name).
@@ -224,13 +306,16 @@ static void lock_find(void) {
 int dm_fps_lock_engine(void) { pthread_once(&g_found, lock_find); return nrow || nier || fb.n; }
 void dm_fps_lock_tick(void) {
     dynamic_resolution_tick();   // separate from the FPS cap
+    static int res_once;
+    if (!res_once) { res_once = 1; pthread_once(&g_found, lock_find); }
+    fb_res_tick();
     static int state = -2, nlog[NLOCKS + 4], target; static const char *src;
     if (state == -1) return;
     if (state == -2) {
         state = -1; pthread_once(&g_found, lock_find);
         if (!nrow && !nier && !fb.n && !ue_missing) return;
         const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET; src = e ? "DM_FPS_TARGET" : "game profile fps_target";
-        if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; leaving the game's frame limit", e); t = 0; }
+        if (t != 0 && t != 30 && t != 60 && !(t == 100 && DM_GAME_FPS_MAX >= 100) && !(t == 120 && DM_GAME_FPS_MAX >= 120)) { LOG("[RED] frame target %d: must be 0, 30 or 60%s; leaving the game's frame limit", t, DM_GAME_FPS_MAX >= 120 ? ", 100 or 120" : DM_GAME_FPS_MAX >= 100 ? " or 100" : ""); t = 0; }
         if (t && ue_missing) LOG("[RED] main: Unreal %s not found by the rewriter (ue_cvar.py NAMES; game profile ue_fps_cvar): the game's own frame limit stays", DM_GAME_UE_FPS_CVAR);
         if (!nrow && !nier && !fb.n) return;
         if (!t) { for (int r = 0; r < nrow; r++) LOG("main: %s left as the game sets it (%s)", rows[r]->what, src); if (nier) LOG("main: NieR frame interval left as the game sets it (%s)", src);
@@ -265,12 +350,12 @@ void dm_fps_lock_tick(void) {
         if (L->ptr_off && (!rd((uint64_t)(uintptr_t)(base + L->ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
         if (L->kind == FPS_F64) {
             for (int c = 0; c < L->copies; c++) {
-                uint64_t a = obj + L->field + 8 * (uint64_t)c; double cur, want = target;
+                uint64_t a = obj + L->field + 8 * (uint64_t)c; double cur, want = c ? target : rate_want(target);   // the reported rate stays the exact target
                 if (!rd(a, &cur, sizeof cur)) break;
-                if (cur == want || !(cur >= 10 && cur <= 120)) continue;   // already set, or not set yet
+                if (cur == want || !(cur >= 10 && cur <= 130)) continue;   // already set, or not set yet
                 double *p = (double *)(uintptr_t)a;
                 dm_guest_write_prepare(p, sizeof *p); __atomic_store_n((uint64_t *)p, *(uint64_t *)&want, __ATOMIC_RELAXED);
-                if (nlog[r] < 8) { nlog[r]++; LOG("main: %s%s %g → %d fps (%s)", L->what, L->copies > 1 ? (c ? " (reported rate)" : " (target)") : "", cur, target, src); }
+                if (nlog[r] < 8) { nlog[r]++; LOG("main: %s%s %g → %.2f fps (%s)", L->what, L->copies > 1 ? (c ? " (reported rate)" : " (target)") : "", cur, want, src); }
             }
             continue;
         }

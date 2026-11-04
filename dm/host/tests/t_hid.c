@@ -273,6 +273,23 @@ static void t_script(void) {
     g_nsteps = 0; g_steps = NULL;
 }
 
+// dm_frontend_input_set: a front end's own path to player 1, ORed with the others and latched like them, kept out of player 2 and of the shake
+static void t_frontend(void) {
+    g_mode = 1; dm_pad_players(3);
+    dm_input_set(0, 0, 0, 0, 0); dm_pad_set(0, 0, 0, 0, 0); script_set(0, 0, 0, 0, 0); buttons_of(0, STYLE_FULLKEY);
+    dm_frontend_input_set(DM_BTN_A | DM_BTN_SHAKE, 100, -200, 300, -400); dm_pad_set(DM_BTN_B, 0, 0, 0, 0);
+    NpadState s; fill(&s, 0, STYLE_FULLKEY);
+    CHECK(s.buttons == (DM_BTN_A | DM_BTN_B) && s.lx == 100 && s.ly == -200 && s.rx == 300 && s.ry == -400, "front end buttons and sticks reach player 1, ORed with the controller");
+    CHECK(buttons_of(1, STYLE_FULLKEY) == 0, "player 2 does not receive the front end's input");
+    CHECK(!atomic_load(&g_shake_on), "the front end's path carries no shake");
+    dm_frontend_input_set(0, 0, 0, 0, 0); dm_pad_set(0, 0, 0, 0, 0);
+    CHECK(buttons_of(0, STYLE_FULLKEY) == 0, "a front end release reaches player 1");
+    dm_frontend_input_set(DM_BTN_Y, 0, 0, 0, 0); dm_frontend_input_set(0, 0, 0, 0, 0);
+    CHECK(buttons_of(0, STYLE_FULLKEY) == DM_BTN_Y, "a front end press released before the game reads is latched");
+    CHECK(buttons_of(0, STYLE_FULLKEY) == 0, "the latched front end press is read once");
+    dm_pad_players(1);
+}
+
 // DM_REC (GitHub issue #313): player 1's physical input written as DM_KEYS steps, read back by the DM_KEYS parser and played on the scripted path at the game's reads (keys_sync);
 // the game's view of every frame (buttons with their press latch, the shake, sticks, the touchscreen) is the same in the recording and the replay, to the recorder's stick and touch
 // steps, also for input that arrived after a frame's read
@@ -493,6 +510,7 @@ int main(void) {
     t_slots();
     t_npads();
     t_script();
+    t_frontend();
     t_vibration();
     t_rumble_log();
     t_motion_threads();

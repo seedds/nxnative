@@ -669,13 +669,169 @@ static id<MTLSamplerState> tex_sampler(tex_t *t) {
     if (n < 256) { cache[n].k = k; cache[n].s = s; n++; } else RED1("more than 256 distinct sampler parameter sets");
     t->smp = s; t->smp_dirty = 0; return s;
 }
+// ---------- Sampler objects ----------
+static void samp_defaults(samp_t *s) {
+    memset(s, 0, sizeof *s);
+    s->minf = GL_NEAREST_MIPMAP_LINEAR; s->magf = GL_LINEAR;
+    s->ws = s->wt = s->wr = GL_REPEAT;
+    s->minlod = 0; s->maxlod = 1000; s->bias = 0; s->aniso = 1; s->cmpfunc = 0x203; s->dirty = 1;
+}
+static id<MTLSamplerState> samp_state(samp_t *s) {
+    if (!s->dirty && s->st) return s->st;
+    @autoreleasepool {
+        MTLSamplerDescriptor *d = [MTLSamplerDescriptor new];
+        d.magFilter = s->magf == GL_NEAREST ? MTLSamplerMinMagFilterNearest : MTLSamplerMinMagFilterLinear;
+        d.minFilter = s->minf == GL_NEAREST || s->minf == GL_NEAREST_MIPMAP_NEAREST || s->minf == GL_NEAREST_MIPMAP_LINEAR ? MTLSamplerMinMagFilterNearest : MTLSamplerMinMagFilterLinear;
+        d.mipFilter = s->minf == GL_NEAREST || s->minf == GL_LINEAR ? MTLSamplerMipFilterNotMipmapped :
+                      s->minf == GL_NEAREST_MIPMAP_NEAREST || s->minf == GL_LINEAR_MIPMAP_NEAREST ? MTLSamplerMipFilterNearest : MTLSamplerMipFilterLinear;
+        d.sAddressMode = wrap_of(s->ws); d.tAddressMode = wrap_of(s->wt); d.rAddressMode = wrap_of(s->wr);
+        d.lodMinClamp = s->minlod; d.lodMaxClamp = s->maxlod; d.lodBias = s->bias;
+        d.maxAnisotropy = (NSUInteger)fmaxf(1, fminf(16, s->aniso));
+        float b = s->border[3] > 0.5f ? (s->border[0] > 0.5f ? 2.f : 1.f) : 0.f;
+        d.borderColor = b == 2.f ? MTLSamplerBorderColorOpaqueWhite : b == 1.f ? MTLSamplerBorderColorOpaqueBlack : MTLSamplerBorderColorTransparentBlack;
+        if (s->cmpmode) d.compareFunction = (MTLCompareFunction)(s->cmpfunc - GL_NEVER);
+        s->st = [g_dev newSamplerStateWithDescriptor:d];
+    }
+    s->dirty = 0; return s->st;
+}
+GL(glGenSamplers, void, GLsizei n, GLuint *out) {
+    for (GLsizei i = 0; i < n; i++) { GLuint x = name_new((void ***)&g_samps, &g_nsamps, &g_capsamps, sizeof(samp_t)); samp_defaults(g_samps[x]); out[i] = x; }
+}
+GL(glDeleteSamplers, void, GLsizei n, const GLuint *s) {
+    for (GLsizei i = 0; i < n; i++) { samp_t *x = samp_of(s[i]); if (!x) continue; x->st = nil; free(x); g_samps[s[i]] = NULL;
+        for (int u = 0; u < NUNITS; u++) if (S.sampler[u] == s[i]) S.sampler[u] = 0; }
+}
+GL(glBindSampler, void, GLuint unit, GLuint s) { if (unit < NUNITS) S.sampler[unit] = s; }
+GL(glIsSampler, uint32_t, GLuint s) { return samp_of(s) != NULL; }
+static void samp_param_i(samp_t *s, GLenum p, GLint v) {
+    switch (p) {
+        case 0x2800: s->magf = v; break; case 0x2801: s->minf = v; break;                          // MAG / MIN_FILTER
+        case 0x2802: s->ws = v; break; case 0x2803: s->wt = v; break; case 0x8072: s->wr = v; break; // WRAP_S / T / R
+        case 0x884c: s->cmpmode = v == 0x884e; break;                                               // COMPARE_MODE
+        case 0x884d: s->cmpfunc = v; break;                                                         // COMPARE_FUNC
+        case 0x84fe: s->aniso = (float)v; break;                                                    // MAX_ANISOTROPY
+        case 0x813a: s->minlod = (float)v; break; case 0x813b: s->maxlod = (float)v; break;         // MIN_LOD / MAX_LOD
+        case 0x8501: s->bias = (float)v; break;                                                     // LOD_BIAS
+        default: RED1("glSamplerParameteri(%#x) not implemented", p); return;
+    }
+    s->dirty = 1;
+}
+static void samp_param_f(samp_t *s, GLenum p, GLfloat v) {
+    switch (p) {
+        case 0x2800: s->magf = (GLint)v; break; case 0x2801: s->minf = (GLint)v; break;
+        case 0x2802: s->ws = (GLint)v; break; case 0x2803: s->wt = (GLint)v; break; case 0x8072: s->wr = (GLint)v; break;
+        case 0x884c: s->cmpmode = (GLint)v == 0x884e; break; case 0x884d: s->cmpfunc = (GLint)v; break;
+        case 0x84fe: s->aniso = v; break; case 0x813a: s->minlod = v; break; case 0x813b: s->maxlod = v; break; case 0x8501: s->bias = v; break;
+        default: RED1("glSamplerParameterf(%#x) not implemented", p); return;
+    }
+    s->dirty = 1;
+}
+GL(glSamplerParameteri, void, GLuint s, GLenum p, GLint v) { samp_t *x = samp_of(s); if (x) samp_param_i(x, p, v); }
+GL(glSamplerParameteriv, void, GLuint s, GLenum p, const GLint *v) { samp_t *x = samp_of(s); if (x) samp_param_i(x, p, v[0]); }
+GL(glSamplerParameterIiv, void, GLuint s, GLenum p, const GLint *v) { samp_t *x = samp_of(s); if (x) samp_param_i(x, p, v[0]); }
+GL(glSamplerParameterIuiv, void, GLuint s, GLenum p, const GLuint *v) { samp_t *x = samp_of(s); if (x) samp_param_i(x, p, (GLint)v[0]); }
+GL(glSamplerParameterf, void, GLuint s, GLenum p, GLfloat v) { samp_t *x = samp_of(s); if (x) samp_param_f(x, p, v); }
+GL(glSamplerParameterfv, void, GLuint s, GLenum p, const GLfloat *v) {
+    samp_t *x = samp_of(s); if (!x) return;
+    if (p == 0x1004) { for (int i = 0; i < 4; i++) x->border[i] = v[i]; x->dirty = 1; }
+    else samp_param_f(x, p, v[0]);
+}
+GL(glGetSamplerParameteriv, void, GLuint s, GLenum p, GLint *v) {
+    samp_t *x = samp_of(s); if (!x) { v[0] = 0; return; }
+    switch (p) {
+        case 0x2800: *v = x->magf; return; case 0x2801: *v = x->minf; return;
+        case 0x2802: *v = x->ws; return; case 0x2803: *v = x->wt; return; case 0x8072: *v = x->wr; return;
+        case 0x884c: *v = x->cmpmode ? 0x884e : 0; return; case 0x884d: *v = x->cmpfunc; return;
+        case 0x84fe: *v = (GLint)x->aniso; return; case 0x813a: *v = (GLint)x->minlod; return; case 0x813b: *v = (GLint)x->maxlod; return;
+        case 0x8501: *v = (GLint)x->bias; return;
+    }
+    RED1("glGetSamplerParameteriv(%#x) not implemented", p); *v = 0;
+}
+GL(glGetSamplerParameterfv, void, GLuint s, GLenum p, GLfloat *v) {
+    samp_t *x = samp_of(s); if (!x) { v[0] = 0; return; }
+    if (p == 0x1004) { for (int i = 0; i < 4; i++) v[i] = x->border[i]; return; }
+    switch (p) {
+        case 0x2800: *v = (GLfloat)x->magf; return; case 0x2801: *v = (GLfloat)x->minf; return;
+        case 0x2802: *v = (GLfloat)x->ws; return; case 0x2803: *v = (GLfloat)x->wt; return; case 0x8072: *v = (GLfloat)x->wr; return;
+        case 0x84fe: *v = x->aniso; return; case 0x813a: *v = x->minlod; return; case 0x813b: *v = x->maxlod; return; case 0x8501: *v = x->bias; return;
+    }
+    RED1("glGetSamplerParameterfv(%#x) not implemented", p); *v = 0;
+}
+// ---------- Query objects ----------
+// Factorio's frame timers: a GPU timer query is a name; its result is not read into anything the game draws, so result 0 and always available is enough
+typedef struct { GLenum target; } query_t;
+NAMES(query_t, g_queries, g_nqueries, g_capqueries)
+static query_t *query_of(GLuint n) { return n && n < g_nqueries ? g_queries[n] : NULL; }
+GL(glGenQueries, void, GLsizei n, GLuint *out) { for (GLsizei i = 0; i < n; i++) out[i] = name_new((void ***)&g_queries, &g_nqueries, &g_capqueries, sizeof(query_t)); }
+GL(glDeleteQueries, void, GLsizei n, const GLuint *q) {
+    for (GLsizei i = 0; i < n; i++) { query_t *x = query_of(q[i]); if (!x) continue; free(x); g_queries[q[i]] = NULL; }
+}
+GL(glIsQuery, uint32_t, GLuint q) { return query_of(q) != NULL; }
+GL(glBeginQuery, void, GLenum target, GLuint q) { query_t *x = query_of(q); if (x) x->target = target; }
+GL(glEndQuery, void, GLenum target) { (void)target; }
+GL(glQueryCounter, void, GLuint q, GLenum target) { query_t *x = query_of(q); if (x) x->target = target; }
+GL(glGetQueryiv, void, GLenum target, GLenum p, GLint *v) {
+    (void)target;
+    switch (p) {
+        case 0x8865: *v = 0; return;   // CURRENT_QUERY
+        case 0x8864: *v = 64; return;  // QUERY_COUNTER_BITS
+    }
+    RED1("glGetQueryiv(%#x) not implemented", p); *v = 0;
+}
+static void query_result(GLenum p, int64_t *v) {
+    switch (p) {
+        case 0x8866: *v = 0; return;   // QUERY_RESULT
+        case 0x8867: *v = 1; return;   // QUERY_RESULT_AVAILABLE
+    }
+    RED1("query parameter %#x not implemented", p); *v = 0;
+}
+GL(glGetQueryObjectiv, void, GLuint q, GLenum p, GLint *v) { (void)q; int64_t x; query_result(p, &x); *v = (GLint)x; }
+GL(glGetQueryObjectuiv, void, GLuint q, GLenum p, GLuint *v) { (void)q; int64_t x; query_result(p, &x); *v = (GLuint)x; }
+GL(glGetQueryObjecti64v, void, GLuint q, GLenum p, int64_t *v) { (void)q; query_result(p, v); }
+GL(glGetQueryObjectui64v, void, GLuint q, GLenum p, uint64_t *v) { (void)q; int64_t x; query_result(p, &x); *v = (uint64_t)x; }
+
 static void lv_free(level_t *l) { free(l->data); memset(l, 0, sizeof *l); }
-static void tex_drop(tex_t *t) { for (int f = 0; f < 6; f++) for (int l = 0; l < MAXLV; l++) lv_free(&t->pend[f][l]); t->tex = nil; t->made = 0; t->defined = 0; t->levels = 0; t->gen++; }
+static void tex_drop(tex_t *t) { for (int f = 0; f < 6; f++) for (int l = 0; l < MAXLV; l++) lv_free(&t->pend[f][l]); t->tex = nil; t->tbuf_mb = nil; t->made = 0; t->defined = 0; t->levels = 0; t->bc = 0; t->gen++; }
+// A buffer texture (glTexBuffer, GLSL samplerBuffer): a Metal texture_buffer viewing the buffer object's own MTLBuffer, so the game's per-frame writes need no upload.
+// The view is remade when glTexBuffer names another buffer or that buffer object is reallocated (glBufferData gives it a new MTLBuffer).
+static int tex_make_buffer(tex_t *t) {
+    buf_t *b = buf_of(t->tbuf);
+    if (!b || !b->mb || t->fmt < 0) return 0;
+    if (t->made && t->tex && t->tbuf_mb == b->mb && t->tbuf_mb_size == b->size) return 1;
+    size_t esz = (size_t)g_fmt[t->fmt].bytes;
+    size_t off = (size_t)t->tbuf_off;
+    size_t avail = b->size > off ? b->size - off : 0;
+    if (b->mb.length > off && b->mb.length - off < avail) avail = b->mb.length - off;   // the MTLBuffer is what the view can span
+    size_t len = t->tbuf_size > 0 ? (size_t)t->tbuf_size : avail;
+    if (len > avail) len = avail;
+    if (!esz || len < esz) { RED1("buffer texture over buffer %u: %zu bytes at %lld", t->tbuf, avail, (long long)t->tbuf_off); return 0; }
+    @autoreleasepool {
+        // the view may have to start at an aligned offset: move it back and keep the same end
+        MTLPixelFormat pf = g_fmt[t->fmt].pf;
+        NSUInteger align = [g_dev minimumTextureBufferAlignmentForPixelFormat:pf];
+        if (align > 1 && off % align) { size_t back = off % align; off -= back; len += back; if (off + len > b->mb.length) len = b->mb.length - off; }
+        // a texture buffer's stride is the buffer's, not 0: Metal's stride validation rejects a zero bytesPerRow (it aborts, not fails)
+        MTLTextureDescriptor *td = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:pf width:len / esz
+                                                                               resourceOptions:b->mb.resourceOptions usage:MTLTextureUsageShaderRead];
+        t->tex = [b->mb newTextureWithDescriptor:td offset:off bytesPerRow:b->mb.length];
+    }
+    if (!t->tex) { RED1("cannot make buffer texture %s over buffer %u (%zu bytes)", g_fmt[t->fmt].name, t->tbuf, len); return 0; }
+    t->tbuf_mb = b->mb; t->tbuf_mb_size = b->size;
+    t->w = (uint32_t)(len / esz); t->h = 1; t->d = 1; t->levels = 1; t->made = 1; t->smp_dirty = 1;
+    { static int n; if (n++ < 12) OLOG("buffer texture %s: buffer %u, %zu bytes at %lld, %u texels", g_fmt[t->fmt].name, t->tbuf, len, (long long)t->tbuf_off, t->w); }
+    return 1;
+}
 // Make the Metal texture from the levels given so far: as many levels as are given in a row from level 0 (and fit the size), or as glTexStorage said. rt: made for a framebuffer attachment
 static int tex_make(tex_t *t, int rt) {
+    if (t->target == GL_TEXTURE_BUFFER) return tex_make_buffer(t);
     if (t->made) return t->tex != nil;
     if (t->fmt < 0 || !t->w || !t->h) return 0;
     int faces = tex_faces(t), lv = 0, vol = t->target == GL_TEXTURE_3D, arr = t->target == GL_TEXTURE_2D_ARRAY;
+    if (vol && t->w == 16 && t->h == 16 && t->d == 16 && !g_trace3d) {
+        patch_copy_image_slot();
+        if (getenv("DM_GL_TRACE")) { g_trace3d = 1; GLOG("GL trace: 3D bitmap phase"); }
+        else g_trace3d = -1;   // phase entered, tracing off: do not re-enter
+    }
     uint32_t full = 1; for (uint32_t m = umax(umax(t->w, t->h), vol ? t->d : 1); m > 1; m >>= 1) full++;
     if (t->slevels) lv = (int)umin(umin((uint32_t)t->slevels, full), MAXLV);
     else { while (lv < MAXLV && lv < (int)full && (t->defined >> lv & 1)) lv++; if (!lv) lv = 1; }

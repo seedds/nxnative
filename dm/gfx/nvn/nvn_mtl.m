@@ -9522,7 +9522,33 @@ planned:
     if (!g_fz_n++) MLOG("readable-tile pass merge: first case pass %llu (%d physical attachments)", g_stat_pass + 1, n);
     PD("F %llu merge with the next pass (readable tile): physical attachments %d, previous pass %d", g_stat_pass + 1, n, R.rt.n == n ? g_fz.n1 : g_fz.n1);
 }
-static id<MTLFunction> bf_fn(NvShader *fs, const int *fx, uint8_t fbmask, const uint8_t *lmap) {   // The readable tile version is specialized by constants (cached)
+// The specialized functions by their numbers, ahead of bf_fn's string-keyed caches: fb_tile_plan asks at every draw that reads the tile (Breath of the Wild: about 270 a
+// frame), and building the strings took more time than the rest of those draws' translation (Mac, encode thread on: 10,900 → 15,900 instructions a draw)
+typedef struct { NvShader *fs; id<MTLFunction> fn; uint64_t h; int nfc; int fx[32]; uint8_t fbmask, lmap[8], miss; } bf_memo;
+static bf_memo g_bf_memo[1024];
+static uint64_t bf_hash(NvShader *fs, const int *fx, int nfc, uint8_t fbmask, const uint8_t *lmap) {
+    uint64_t h = 1469598103934665603ull ^ (uint64_t)(uintptr_t)(__bridge void *)fs; h *= 1099511628211ull;
+    h ^= fbmask; h *= 1099511628211ull;
+    for (int i = 0; i < nfc; i++) { h ^= (uint32_t)fx[i]; h *= 1099511628211ull; }
+    uint64_t l; memcpy(&l, lmap, 8); h ^= l; h *= 1099511628211ull;
+    return h ^ h >> 29;
+}
+static id<MTLFunction> bf_fn_slow(NvShader *fs, const int *fx, uint8_t fbmask, const uint8_t *lmap);
+static id<MTLFunction> bf_fn(NvShader *fs, const int *fx, uint8_t fbmask, const uint8_t *lmap) {
+    int nfc = fs->rf.nfc < 32 ? fs->rf.nfc : 32; uint64_t h = bf_hash(fs, fx, nfc, fbmask, lmap);
+    bf_memo *m = &g_bf_memo[h & 1023];
+    os_unfair_lock_lock(&g_fz_fn_lock);
+    if (m->h == h && m->fs == fs && m->nfc == nfc && m->fbmask == fbmask && !memcmp(m->lmap, lmap, 8) && !memcmp(m->fx, fx, sizeof(int) * (size_t)nfc)) {
+        id<MTLFunction> f = m->miss ? nil : m->fn; os_unfair_lock_unlock(&g_fz_fn_lock); return f;
+    }
+    os_unfair_lock_unlock(&g_fz_fn_lock);
+    id<MTLFunction> f = bf_fn_slow(fs, fx, fbmask, lmap);
+    os_unfair_lock_lock(&g_fz_fn_lock);
+    m->fs = fs; m->fn = f; m->h = h; m->nfc = nfc; memcpy(m->fx, fx, sizeof(int) * (size_t)nfc); m->fbmask = fbmask; memcpy(m->lmap, lmap, 8); m->miss = !f;
+    os_unfair_lock_unlock(&g_fz_fn_lock);
+    return f;
+}
+static id<MTLFunction> bf_fn_slow(NvShader *fs, const int *fx, uint8_t fbmask, const uint8_t *lmap) {   // The readable tile version is specialized by constants (cached)
     os_unfair_lock_lock(&g_fz_fn_lock);
     if (!g_bf_fn_cache) { g_bf_fn_cache = [NSMutableDictionary dictionary]; g_bf_lib_cache = [NSMutableDictionary dictionary]; }
     size_t kl = strlen(fs->key); NSString *base = [NSString stringWithFormat:@"%.*s", (int)(kl > 2 ? kl - 2 : kl), fs->key];

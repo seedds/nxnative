@@ -191,6 +191,14 @@ To enroll a cut for any game's own module:
 - **Found on:** [Ace Attorney Investigations Collection](../../dm/games/010005501E68C000/README.md) (Unity 2022.3 IL2CPP): `main+0x1d271bc` and `+0x204ebec`.
 - **Check:** every module the rewriter accepted before comes out byte-identical.
 
+### Unframed pointer tail calls followed by zero trap padding
+
+- **Symptom:** `AssertionError: jump table d29e68` while rewriting Moving Out 2 1.3.315.
+- **Cause:** the function loads its method pointer with `ldp x18,x17,[x17,#0x138]`, moves caller stack arguments and ends with `br x18`, followed by one `udf #0` padding word before the next unwind entry. The terminal-tail rule accepted only `ldr` and required the branch to be the last decoded instruction.
+- **Fix:** for a tail followed by zero trap padding, accept a plain paired pointer load as well as a single load, with contiguous decoding, straight-line argument moves and memory transfers, and no writes to SP, FP or LR, including their 32-bit aliases and writeback. The last write to either `x18` or `w18` must be the pointer load. Branches, calls, nonzero traps, decoding gaps and framed thunks do not match this fallback. The terminal-tail rule and other nonterminal-tail checks are unchanged.
+- **Found on:** Moving Out 2 1.3.315, `main` build `c552b6464e7348a7bb261a708b353137`, at `+0xd29e68`. This is a rewrite-stage finding, not gameplay validation or a game profile.
+- **Check:** `dm/tools/tests/test_tail_call.py` covers synthetic paired loads, zero padding, argument stores and rejection of control flow, frame changes, pointer clobbers and missing instructions.
+
 ### Loaded method-pointer tail call before an error block
 
 - **Symptom:** `jump table 53e9c` while rewriting Warm Snow 2.1.4's Unity IL2CPP `main`, or `jump table 108bb70` on Ori and the Blind Forest: Definitive Edition.
@@ -275,6 +283,13 @@ To enroll a cut for any game's own module:
 - **Cause:** a text longer than the ±128 MB a `b` reaches has no place for one patch area from which every site is in reach: before the base the last sites are too far, after the image the first ones.
 - **Fix:** such a module (`TWO` in `patch_nso.py`: the text alone ends past the reach) gets two patch areas. The front one, 16 MB before the base, takes the sites below `SPLIT` (128 MB less the front area and 1 MB of margin for a stub's exits past its site); the back one, right after bss, the key page and the frame step page (`BACK_OFF`, 64 KB aligned), takes the others. A site's stubs and their branches back stay in its own area (`use_area`); when the front sites need more room, the rewriter runs again with exactly that size, and `B()` checks every branch. The file is the image, the front area padded to 16 KB, then the back area; `fixups.tsv` adds `BACK_OFF` and `BACK_LEN`, and `IMAGE_SIZE` covers the back area. The Mac loader copies it to `BACK_OFF` and seals it read-only and executable, the iOS embedding gives it a fourth section (`gen_embed.py`: `__TEXT,__dm<name>x2`) that the loader remaps there, and `svcQueryMemory` reports it as CodeData+RX like a patch area after the image (data and bss end at it). A module that does not need it is rewritten byte for byte as before.
 - **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) `main` (1.8d.310c): 185.6 MB of text, 177,058 sites; 3.9 MB of stubs in front and 3.2 MB at `BACK_OFF` `0xdec0000`.
+
+### Split point within the back area's reach
+
+- **Symptom:** a `B()` range assertion in `site_plain` on the branch back to the site, in a module that takes two patch areas.
+- **Cause:** `SPLIT` only kept the front area in reach. The back area sits after ro, data and bss, so when those are large it is more than 128 MB from the sites just above a split set by a 16 MB front area: here `SPLIT` was `0x6f00000` and the back area at `0xfa40000` reaches down to `0x7a40000`.
+- **Fix:** `SPLIT` is also no lower than `BACK_MIN`, `BACK_OFF` less the reach plus the same 1 MB of margin. When that lifts it, the front area's first pass takes the gap up to `BACK_MIN` instead of 16 MB, so the front area still reaches every site below the split; the rerun with exactly the size its sites need works as before, and `B()` checks every branch. A module whose back area already reaches the 16 MB split (EA SPORTS FC 27) is rewritten byte for byte as before; one where no split reaches stops with a message naming `BACK_MIN`.
+- **Found on:** Hello Kitty Party Land `main` (1.0.2): 151.8 MB of text and 98 MB of ro, data and bss after it; `SPLIT` `0x7b40000`, 1.7 MB of stubs in a 3.75 MB front area (no rerun) and 123 KB at `BACK_OFF` `0xfa40000`.
 
 ## Cuts and observation gates
 

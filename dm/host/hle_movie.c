@@ -118,17 +118,24 @@ static struct {
 static _Atomic uint64_t g_movie_pic_ns;   // when a video decoder last handed out a picture (0 = stopped since)
 int dm_movie_playing(void) { uint64_t t = atomic_load_explicit(&g_movie_pic_ns, memory_order_relaxed); return t && now_ns() - t < MD_PLAYING_NS; }
 static void *msym(const char *n) { void *p = guest_sym(n); if (!p) die("movie: missing SDK symbol %s", n); return p; }
+// SDK 1.3.1 exports mutable Buffer getters. Both overloads take the same this pointer.
+static void *buffer_getter(const char *const_name, const char *mutable_name) {
+    void *p = guest_sym(const_name);
+    if (!p) p = guest_sym(mutable_name);
+    if (!p) die("movie: missing SDK symbol %s or %s", const_name, mutable_name);
+    return p;
+}
 static void md_syms(void) {
     if (G.signal) return;
     G.set_data = msym("_ZN5movie6Buffer18SetDataAndCapacityEPvm");
     G.set_range = msym("_ZN5movie6Buffer8SetRangeEii");
-    G.data = msym("_ZNK5movie6Buffer4DataEv");
-    G.cap = msym("_ZNK5movie6Buffer8CapacityEv");
+    G.data = buffer_getter("_ZNK5movie6Buffer4DataEv", "_ZN5movie6Buffer4DataEv");
+    G.cap = buffer_getter("_ZNK5movie6Buffer8CapacityEv", "_ZN5movie6Buffer8CapacityEv");
     G.set_i32 = msym("_ZN5movie9MediaData8SetInt32EPKci");
     G.set_rect = msym("_ZN5movie9MediaData7SetRectEPKciiii");
     G.find_i32 = msym("_ZNK5movie9MediaData9FindInt32EPKcPi");
     G.find_buf = msym("_ZNK5movie9MediaData10FindBufferEPKcPPNS_6BufferE");
-    G.size = msym("_ZNK5movie6Buffer4SizeEv");
+    G.size = buffer_getter("_ZNK5movie6Buffer4SizeEv", "_ZN5movie6Buffer4SizeEv");
     G.signal = msym("_ZN2nn2os11SignalEventEPNS0_9EventTypeE");
 }
 static mdec_t *md_of(void **self) { return self ? (mdec_t *)self[1] : NULL; }
@@ -549,6 +556,14 @@ HLE_FORCE("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatE", "mov
     h_movie_Decoder(self, type, fmt == 3 ? MD_FMT_NV12 : fmt == 2 ? MD_FMT_ABGR : fmt, 1, 0);
     mdec_t *d = md_of(self); if (d) d->out_align = 0x20;
 }
+// The base-object constructors: a game can reach C2 with no C1 (Mario Tennis Aces, NintendoSDK_movie 4.5.0: C1 is a thunk of 8 bytes, mov w4,#0; b C2, GitHub issue #1131). Left to the SDK, the guest's
+// constructor put a DecoderImpl there, and h_movie_Configure read its vtable as the host's decoder and branched to 0. The class has no virtual bases, so both constructors do the same
+HLE_FORCE("_ZN5movie7DecoderC2ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeEi", "movie decoder (base-object constructor): host implementation", void, h_movie_Decoder_C2,
+          void **self, int type, int fmt, int mode, int prio) { h_movie_Decoder(self, type, fmt, mode, prio); }
+HLE_FORCE("_ZN5movie7DecoderC2ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeE", "movie decoder (SDK 4, base-object constructor): host implementation", void, h_movie_Decoder4_C2,
+          void **self, int type, int fmt, int mode) { h_movie_Decoder4(self, type, fmt, mode); }
+HLE_FORCE("_ZN5movie7DecoderC2ENS_11DecoderTypeENS_19DecoderOutputFormatE", "movie decoder (SDK 3, base-object constructor): host implementation", void, h_movie_Decoder3_C2,
+          void **self, int type, int fmt) { h_movie_Decoder3(self, type, fmt); }
 static void md_free(void **self) {
     mdec_t *d = md_of(self); if (!d) return;
     md_defer_drop(d);

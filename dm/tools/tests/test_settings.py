@@ -37,6 +37,19 @@ class UpscalerSetting(unittest.TestCase):
             for gid,shown in [('040074A01BF12000',True),('010056B015FE8000',False)]:   # Donkey Kong Bananza (its NDSR network), NieR:Automata (none)
                 up=[s for s in settings.build(gid,tmp,'unused')['settings'] if s['env']=='DM_UPSCALER']
                 self.assertEqual(bool(up),shown,gid)
-                if up:self.assertEqual((up[0]['default'],up[0]['options']),('game',[['game',"Game's own"],['metalfx','MetalFX']]))
+                if up:self.assertEqual(up[0]['options'],[['game',"Game's own"],['metalfx','MetalFX']])
+
+class BananzaLauncherDefaults(unittest.TestCase):
+    """Donkey Kong Bananza's iPhone launcher shows the settings it was tested with (upscaler_default, pso_mtl4); the Mac's Game's upscaler stays the game's own,
+    and the settings its profile leaves at the defaults of every game (docked, Standard upscaling, no frame buffering) are as before"""
+    WANT={'ios':{'DM_OPMODE':'1','DM_UPSCALER':'metalfx','DM_PRESENT_UPSCALE':'off','DM_PSO_MTL4':'1','DM_PRESENT_SNAP':'0'},
+          'mac':{'DM_OPMODE':'1','DM_UPSCALER':'game','DM_PRESENT_UPSCALE':'off','DM_PSO_MTL4':'1','DM_PRESENT_SNAP':'0'}}
+    def test_defaults(self):
+        for platform,want in self.WANT.items():
+            with tempfile.TemporaryDirectory() as tmp,patch.object(settings.nacp,'languages',return_value=['en-US']),\
+                 patch.dict(settings.os.environ,{'GFXAPI':'nvn','SETTINGS_PLATFORM':platform}):
+                (Path(tmp)/'main.fixups.tsv').write_text('')
+                rows={s['env']:s['default'] for s in settings.build('040074A01BF12000',tmp,'unused')['settings']}
+                self.assertEqual({k:rows[k] for k in want},want,platform)
 
 if __name__=='__main__':unittest.main()

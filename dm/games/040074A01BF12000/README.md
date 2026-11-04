@@ -18,6 +18,26 @@ A Switch 2 game: update v458752 over the base game, SDK 20.5.19 built for the Sw
 | `app_pool 0x240000000`, `mem_reserve 0x270000000` | `game.tsv` | the Switch 2 leaves games 9 GB of its 12 GB (not measured here); with a Switch 1 pool (3.2 GB) the game's heaps did not fit: `AudioSystemHeap` creation returned null (`main+0x564b48`) |
 | `romfs_marker System/Resource/ResourceSizeTable.Product.rsizetable.zs` | `game.tsv` | a file every version has |
 | `render_cond on` | `game.tsv` | agl's render buffer binding wraps its clears in render conditions (`SetRenderEnableConditional` at `main+0x12798c`, before the `ClearColor` at `main+0x1279d4`); drawn unconditionally, a clear-only rebinding of the composite target right after the composite draw wiped it before the upscaler read it, and every gameplay frame was black |
+| `pso_mtl4 on` | `game.tsv` | the iOS launcher's **Metal 4 pipelines** default (and the IPA's pipeline archive made offline): the setting the game was tested with on iPhones ([iPhone launcher defaults](#iphone-launcher-defaults)). The Mac has Metal 4 pipelines on for every game |
+| `upscaler_default metalfx` | `game.tsv` | the iOS launcher's **Game's upscaler** default: MetalFX instead of the game's NDSR network, as tested on iPhones ([iPhone launcher defaults](#iphone-launcher-defaults)). The Mac's default and the host without the launcher stay the game's own |
+
+## iPhone launcher defaults
+
+The iOS launcher's defaults for this game are the settings it was tested with on iPhones. Without a saved choice it showed this before, and shows this now:
+
+| Setting | Variable | Before | Now | From |
+|---|---|---|---|---|
+| Console mode | `DM_OPMODE` | Docked (`1`) | Docked (`1`) | `op_mode` (`console`, the default of every game), unchanged |
+| Game's upscaler | `DM_UPSCALER` | Game's own (`game`) | MetalFX (`metalfx`) | `upscaler_default metalfx` |
+| Upscaling | `DM_PRESENT_UPSCALE` | Standard (`off`) | Standard (`off`) | `settings.tsv`, unchanged |
+| Metal 4 pipelines | `DM_PSO_MTL4` | off (`0`) | on (`1`) | `pso_mtl4 on` |
+| Frame buffering | `DM_PRESENT_SNAP` | off (`0`) | off (`0`) | `present_snap` (`off`, the default), unchanged |
+
+The Mac settings window is unchanged: it already had Metal 4 pipelines on for every game, and its Game's upscaler default stays the game's own (`upscaler_default` is the iOS launcher's default, `DM_GAME_UPSCALER_DEFAULT|game` in `settings.tsv`). A saved choice, `DM_UPSCALER` and `Documents/env.txt` still win, and a start without the launcher keeps the host's own default (the game's upscaler). An IPA built for this game now packs the pipeline archive made offline for the A19 / A19 Pro (`g18p`, the `pso_gpu` default), as it does for any profile with `pso_mtl4 on`; the pulling libraries are in every iOS build, whatever the key says ([`build_ipa.sh`](../../../dm/ios/tools/build_ipa.sh)).
+
+Why: the player judged gameplay sharper with MetalFX than with the game's own upscaler in the same docked mode (a subjective comparison), and docked with MetalFX and Metal 4 pipelines is the combination my iPhone runs used; a community run on the defaults is recorded above (issue #1183). On an iPhone 17 Pro Max it ran the scene at 1676x943 scaled to 2304x1296 (`upscaler: ... 1676x943 -> 2304x1296`); a 70-second route in a local build (shader chain `215a6d278114`) held 33.34 ms on-screen p99 in six complete 300-frame windows (frames 9600 to 11400) with no dropped frames at thermal state 0, while other docked runs on that phone were at thermal state 1 and some windows were 50 ms (three of five in one rerun). Handheld (`DM_OPMODE=0`) ran a smaller scene, 1397x786 scaled to 1920x1080, and also held 33.34 ms in six windows, so the defaults keep docked. On the iPhone Duo, an A/B on one save found the game's own upscaler shimmering the same as MetalFX, with GPU p50 about 29.6 ms for the game's own (a 30 fps cadence, thermal state 2, frame 3900) and about 16.4 ms for MetalFX (frames 1800 to 3600, thermal state 2, 33.34 ms p99, 11 to 42 dropped frames per 300, cause not established); the two were not the same scene, so that is no performance verdict. The logs are the author's own and are not in this repository.
+
+Not established: sustained 30 fps once the phone is warm, any improvement of the fur's shimmer (the same on both upscalers), and a run of the exact commit these defaults ship in on a phone. The defaults only decide what the launcher shows first; the choice between the game's upscaler and MetalFX stays the player's, and the look differs ([A game's own upscaler drawn by MetalFX](../../../docs/reference/rendering.md#a-games-own-upscaler-drawn-by-metalfx)). Whether a game ships a non-default launcher setting is the maintainer's call.
 
 ## Files
 

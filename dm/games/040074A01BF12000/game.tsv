@@ -44,3 +44,9 @@ render_cond	on
 # Dynamic resolution and the present interval read the GPU time between the frame's timestamp reports (about 26 a frame): with one time for the whole submission they read about 0,
 # the game kept 2304x1296 at 46 ms of GPU a frame and fell to interval 3 (15 fps before the odd-interval fix of the display link, 20 after). Each report takes its segment's GPU start / end: in the slow areas it steps down to 1152x648 with its upscaler and holds 30 fps
 gpu_timestamps	segment
+
+# ---- iPhone launcher defaults ----
+# The settings the game was tested with on iPhones (docked, the game's upscaler drawn by MetalFX, Standard upscaling, Metal 4 pipelines, no frame buffering; the note's "iPhone launcher defaults"): the iOS launcher shows them on a first start and Reset to tested defaults.
+# Docked, Standard upscaling and no frame buffering are the defaults of every game already (op_mode console, present_snap off), so only these two keys are set. The Mac keeps the game's own upscaler (upscaler_default is the iOS launcher's default).
+pso_mtl4	on
+upscaler_default	metalfx

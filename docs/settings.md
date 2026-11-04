@@ -71,7 +71,7 @@ flowchart LR
 
 ### Game language
 
-The game's own languages. The app was packed with one of them; pick another here without repacking.
+The game's own languages. The app was packed with one of them; pick another here without repacking. A game packed from a dump or a NUP may come without its list: every language is offered then, with a note, and a game that lacks the one you pick may show another.
 
 ### Picture
 

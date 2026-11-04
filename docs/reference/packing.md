@@ -103,6 +103,13 @@
 
 ## Launcher metadata
 
+### No Game language row in an app packed from a NUP or a dump
+
+- **Symptom:** the settings of a Mac app or IPA packed from a NUP or a dump folder have no Game language row, while `DM_LANG` in the environment changes the language. Reported on [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) ([NX2Apple#619](https://github.com/LNPANDY/NX2Apple/issues/619), [#659](https://github.com/LNPANDY/NX2Apple/issues/659); the reporters' packed files were not available).
+- **Cause:** `settings.py` shows the row when the game's `control.nacp` lists more than one language, and two cases gave it none. A NUP update may carry no control data: the NSP script's language check fell back to the base game's file, but the Mac settings got only the update's path, and `build_ipa.sh`'s fallback (`$W/data/v0`) is a folder the NSP script does not make. And there may be no NACP at all: the Yoshi and the Mysterious Book and [Age of Imprisonment](../../dm/games/04003F40232DE000/README.md) NUPs carry none in any package, and an FTP dump such as Bananza's has no control data.
+- **Fix:** `languages_control` in `build_ipa_from_nsp.py` picks the file once (the packed version's, else the base game's), for the check, `mac_app` and `build_ipa.sh` (`CONTROL`). With no list, `settings.py` offers every language with a note, as `game_language` and `DM_LANG` already accept any. Age of Imprisonment shows a language it lacks as English (Russian, Portuguese) and has more text languages than its voice folders suggest (Dutch, Simplified Chinese), so a game's list cannot be read from its folders.
+- **Found on:** code reading and the NUP records of the two games above, with [PR #1182](https://github.com/seedds/nxnative/pull/1182); boots of [Age of Imprisonment](../../dm/games/04003F40232DE000/README.md) to its first settings screen. Not confirmed on Bananza by the reporters.
+
 ### A Mac front end's default settings change Metal execution paths
 
 - **Symptom:** starting a Mac app through a front end with unchanged settings enables the encode thread, and can disable Metal 4 pipelines and the pipeline archive; starting the same app from Finder keeps the host's defaults.

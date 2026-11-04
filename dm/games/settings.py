@@ -56,13 +56,17 @@ def fixups_keys(path):   # '# KEY<TAB>value' header rows of a rewriter table
     return {m[1] for m in re.finditer(r'^# (\w+)\t', path.read_text(encoding='utf-8'), re.M)}
 
 
+UNKNOWN_LANGUAGES = 'This game\'s files do not list its languages, so some of these may not be in the game. It may then show another one.'
+
+
 def build(gid, patched, control):
     platform = os.environ.get('SETTINGS_PLATFORM') or 'ios'
     if platform not in ('ios', 'mac'): sys.exit(f'SETTINGS_PLATFORM must be ios or mac: {platform}')
     g = game.load(gid)
     macros = dict(re.findall(r'^#define (DM_GAME_\w+) (.*)$', game.header_one(g), re.M))   # the host's own defaults, as it is compiled for this game
     keys = fixups_keys(Path(patched) / 'main.fixups.tsv')
-    langs = [(c, n) for c, n in nacp.LANGUAGES if c in nacp.languages(control)]
+    have = nacp.languages(control)
+    langs = [(c, n) for c, n in nacp.LANGUAGES if not have or c in have]   # no list (a dump or a NUP has no control data, none of its packages may): any language may be the game's, as DM_LANG and the NSP script's check take it
 
     def macro(name, n):
         if name not in macros: sys.exit(f'settings.tsv:{n}: no {name} in the game profile header (game.py header)')
@@ -110,6 +114,7 @@ def build(gid, patched, control):
             if any(len(o) != 2 for o in opts): sys.exit(f'settings.tsv:{n}: choice values are value=label,...')
             if s['default'] not in [o[0] for o in opts]: s['default'] = opts[0][0]   # a default the game does not offer (a language it lacks): its first
             s['options'] = opts
+            if values == 'languages' and not have: s['note'] = UNKNOWN_LANGUAGES
         elif kind == 'range':
             lo, hi, st = (float(x) for x in values.split(':'))
             s.update(min=lo, max=hi, step=st)

@@ -25,7 +25,20 @@ def build(gid, api, platform=None):
         return {s['env']: s for s in settings.build(gid, tmp, Path(tmp) / 'control.nacp')['settings']}
 
 
+def language_row(listed):   # the Game language row for a game whose control data lists these languages
+    with tempfile.TemporaryDirectory() as tmp, patch.object(settings.nacp, 'languages', return_value=listed), patch.dict(os.environ, {'GFXAPI': 'nvn', 'DM_LANG': 'en-US'}):
+        return next((s for s in settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')['settings'] if s['env'] == 'DM_LANG'), None)
+
+
 class LauncherSettingsTests(unittest.TestCase):
+    def test_game_language_row_offers_the_games_own_or_every_language_when_unknown(self):
+        self.assertIsNone(language_row(['ja']))   # one language: nothing to pick
+        s = language_row(['en-US', 'ja'])
+        self.assertEqual((s['options'], s['note']), ([['en-US', 'American English'], ['ja', 'Japanese']], ''))
+        s = language_row([])   # no control data: a dump, a NUP without a NACP
+        self.assertEqual(s['options'], [list(l) for l in settings.nacp.LANGUAGES])
+        self.assertEqual((s['default'], s['note']), ('en-US', settings.UNKNOWN_LANGUAGES))
+
     def test_upscaling_is_opt_in_for_every_graphics_api(self):
         for api, gid in [('nvn', BOTW), ('vulkan', '0100535012974000'), ('gl', '010014E00DB56000')]:
             with self.subTest(api=api):

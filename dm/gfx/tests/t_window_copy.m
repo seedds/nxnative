@@ -19,6 +19,7 @@ static tex_t window(uint64_t serial) { tex_t t = {.magic=MAGIC('T','E','X',0), .
 static void target(tex_t *w, uint64_t p, int ww, int wh, int pw, int ph) {
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:pw height:ph mipmapped:NO];
     id<MTLTexture> mt = [g_dev newTextureWithDescriptor:d]; serial_put(p, mt);
+    // NOLINTNEXTLINE(clang-analyzer-osx.cocoa.RetainCount): serial_put retains mt in the C registry; wc_release/wc_forget delete it.
     wc_owner *o = calloc(1, sizeof *o); o->serial = p; o->next = g_wc_owners; g_wc_owners = o;
     g_wc[0] = (wc_ent){w->serial, p, p, ww, wh, pw, ph}; atomic_store(&g_wc_n, 1);
 }
@@ -65,6 +66,7 @@ static void production_target(void) {
     tex_t w = window(10201); w.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=NVN_FORMAT_RGBA8, .width=8, .height=8, .depth=1, .levels=1, .samples=1};
     MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:8 height:8 mipmapped:NO];
     id<MTLTexture> wt = [g_dev newTextureWithDescriptor:desc]; serial_put(w.serial, wt);
+    // NOLINTNEXTLINE(clang-analyzer-osx.cocoa.RetainCount): serial_put retains wt in the C registry; both exits call mtl_tex_release.
     g_xv_present[g_xv_npresent++] = w.serial;
     NSError *error = nil;
     id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
@@ -74,7 +76,10 @@ static void production_target(void) {
         "fragment float4 f(O i [[stage_in]], constant A& a [[buffer(0)]]) { return a.t.read(uint2(i.uv * 4)); }\n"
         options:nil error:&error];
     CHECK("synthetic textured shaders compile", lib != nil);
-    if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return; }
+    if (!lib) {
+        fprintf(stderr, "%s\n", error.localizedDescription.UTF8String);
+        mtl_tex_release(&w); g_xv_npresent--; test_layer = nil; return;
+    }
     NvProg *pr = [NvProg new]; NvShader *vs = [NvShader new], *fs = [NvShader new];
     vs->fn = [lib newFunctionWithName:@"v"]; vs->rf.nv = 1; vs->rf.v[0].ct = NVN_CT_FLOAT;
     memset(vs->rf.v[0].sh, 0xff, sizeof vs->rf.v[0].sh);
@@ -92,9 +97,9 @@ static void production_target(void) {
         0,0,64,255, 128,64,0,255, 0,128,64,255, 64,0,128,255,
         255,128,0,255, 0,255,128,255, 128,0,255,255, 255,255,255,255};
     [source replaceRegion:MTLRegionMake2D(0,0,4,4) mipmapLevel:0 withBytes:pattern bytesPerRow:16];
-    serial_put(sample.serial, source); mtl_reg_tex(1, &sample, NULL);
+    serial_put(sample.serial, source); mtl_reg_tex(1, &sample, NULL); // NOLINT(clang-analyzer-osx.cocoa.RetainCount): C registry owns the retained reference until cleanup calls mtl_tex_release.
     void *vertices = NULL; int allocated = !posix_memalign(&vertices, getpagesize(), 65536);
-    CHECK("vertex fixture allocated", allocated); if (!allocated) return;
+    CHECK("vertex fixture allocated", allocated); if (!allocated) goto cleanup;
     memset(vertices, 0, 65536); float triangle[3][4] = {{-1,-1,0,1},{3,-1,0,1},{-1,3,0,1}};
     memcpy(vertices, triangle, sizeof triangle); mtl_pool_add(vertices, 65536);
     state_reset(); memset(&R, 0, sizeof R); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &w;
@@ -162,6 +167,7 @@ cleanup:
 int main(void) { @autoreleasepool {
     setenv("DM_PSO_PREBUILD", "0", 1); setenv("DM_PSO_HYBRID", "0", 1);
     setenv("DM_PSO_ARCHIVE", "off", 1); setenv("DM_PSO_MANIFEST", "off", 1); setenv("DM_PSO_USER", "/dev/null", 1);
-    alarm(15); setbuf(stdout, NULL); mtl_init(); g_shmap = [NSMutableDictionary dictionary]; production_target(); lifecycle(); guards();
+    if (setvbuf(stdout, NULL, _IONBF, 0)) { fprintf(stderr, "cannot disable stdout buffering\n"); return 1; }
+    alarm(15); mtl_init(); g_shmap = [NSMutableDictionary dictionary]; production_target(); lifecycle(); guards();
     printf("window copy: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

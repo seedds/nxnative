@@ -95,7 +95,7 @@ def build(gid, patched, control):
 
     def takes(kind, values):   # the values a row's variable can take, for needs; None when any (a range, the game's languages)
         if kind == 'toggle': return {'1', '0'} if values == '-' else set(values.split('/'))
-        if kind == 'choice' and values != 'languages': return {v.split('=', 1)[0] for v in values.split(',')}
+        if kind == 'choice' and values != 'languages': return {v.split('?', 1)[0].split('=', 1)[0] for v in values.split(',')}
         return None
 
     out, table, base = [], {r[1][0]: takes(r[1][1], r[1][2]) for r in rows()}, render_base(g)
@@ -110,7 +110,10 @@ def build(gid, patched, control):
         s = {'env': var, 'kind': kind, 'section': section, 'label': label, 'note': note, 'default': value(default, n), **m}
         if var == 'DM_RENDER_SCALE' and base: s['base'] = base   # the render scale in pixels, for the console mode chosen
         if kind == 'choice':
-            opts = [list(l) for l in langs] if values == 'languages' else [v.split('=', 1) for v in values.split(',')]
+            def offered(v):   # value=label?cond&cond: an option only some games or platforms have
+                parts = v.split('?', 1)
+                return len(parts) == 1 or all(shown(c, n) for c in parts[1].split('&'))
+            opts = [list(l) for l in langs] if values == 'languages' else [v.split('?', 1)[0].split('=', 1) for v in values.split(',') if offered(v)]
             if any(len(o) != 2 for o in opts): sys.exit(f'settings.tsv:{n}: choice values are value=label,...')
             if s['default'] not in [o[0] for o in opts]: s['default'] = opts[0][0]   # a default the game does not offer (a language it lacks): its first
             s['options'] = opts

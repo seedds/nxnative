@@ -25,6 +25,7 @@ static void map_at(uint64_t voff, uint64_t size, uint64_t poff, int mapped) {
 // The texels of [x, y, w, h] of a level read back from the Metal texture equal the expected linear level
 static int same(id<MTLTexture> m, unsigned level, unsigned x, unsigned y, unsigned w, unsigned h, const uint32_t *lin, unsigned stride) {
     id<MTLBuffer> rb = [g_dev newBufferWithLength:(size_t)w * h * 4 options:MTLResourceStorageModeShared];
+    if (!rb) { fprintf(stderr, "readback buffer did not allocate\n"); return 0; }
     id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> ce = [cb blitCommandEncoder];
     [ce copyFromTexture:m sourceSlice:0 sourceLevel:level sourceOrigin:MTLOriginMake(x, y, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:w * 4 destinationBytesPerImage:(NSUInteger)w * h * 4];
     [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];

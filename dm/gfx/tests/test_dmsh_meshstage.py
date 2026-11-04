@@ -139,6 +139,11 @@ class Stage(unittest.TestCase):
     def test_no_kernel_refused(self):
         with self.assertRaises(ValueError): ms.to_stage(HEAD, ms.info(control(6), bytes(0x80)))
 
+    def test_parameter_without_a_name_refused(self):   # the build records a ValueError as this shader's failure (dmsh_build.py); anything else stops it
+        i = ms.info(control(6), bytes(0x80))
+        src = (KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][2] // 4 + 1)).replace('main0(', 'main0(uint (&a)[4], ')
+        with self.assertRaises(ValueError): ms.to_stage(src, i)
+
     @unittest.skipUnless(shutil.which('xcrun') and subprocess.run(['xcrun', '-sdk', 'macosx', '-f', 'metal'], capture_output=True).returncode == 0, 'no Metal compiler')
     def test_compiles(self):
         cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0]]
@@ -177,8 +182,8 @@ fragment main0_out main0(main0_in in [[stage_in]])
         import ast, re
         tools = Path(__file__).resolve().parents[1] / 'tools'
         tree = ast.parse((tools / 'dmsh_build.py').read_text())
-        scope = {'re': re}
-        exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'fs_uint'], type_ignores=[]), 'dmsh_build.py', 'exec'), scope)
+        scope = {'re': re, 'collections': __import__('collections')}
+        exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('fs_uint', 'int_outputs')], type_ignores=[]), 'dmsh_build.py', 'exec'), scope)
         cls.fs_uint = staticmethod(scope['fs_uint'])
 
     def test_flat_input_through_a_local(self):
@@ -187,6 +192,63 @@ fragment main0_out main0(main0_in in [[stage_in]])
 
     def test_flat_input_directly(self):
         self.assertIsNotNone(self.fs_uint(self.SRC % (', flat', 'in.m_16.x'))[0])
+
+    # Kirby Star Allies' grass shader (c44819fbd37e33dc): normal and albedo reach their outputs as the bits of floats, its material word from integer locals, one a denormal literal after SPIRV-Cross
+    GBUFFER = """struct main0_out
+{
+    float4 m_48 [[color(0)]];
+    float4 m_50 [[color(1)]];
+    float4 m_52 [[color(2)]];
+    float4 m_54 [[color(3)]];
+};
+
+fragment main0_out main0(main0_in in [[stage_in]])
+{
+    main0_out out = {};
+    float _10 = in.m_1.x;
+    int _20 = 0;
+    int _21 = 0;
+    if (_10 > 0.0)
+    {
+        _20 = as_type<int>(_10);
+        _21 = 64;
+    }
+    int _30 = _20;
+    int _31 = _21;
+    int _32 = _31 << 1;
+    out.m_48.x = as_type<float>(_30);
+    out.m_50.x = as_type<float>(_30);
+    out.m_52.x = as_type<float>(_31);
+    out.m_52.y = as_type<float>(_32);
+    out.m_52.z = %s;
+    out.m_54.x = 0.0;
+    return out;
+}
+"""
+
+    def test_material_word_beside_float_bits(self):
+        src, mask = self.fs_uint(self.GBUFFER % '8.96831e-44')
+        self.assertEqual(mask, 1 << 2)
+        self.assertIn('uint4 m_52 [[color(2)]];\n    float4 m_54 [[color(3)]];\n};\n\nfragment main0_out_m main0_m(', src)
+
+    def test_float_bits_are_no_integers(self):   # every output the bits of a float: nothing to tell an integer target by, so the mask stays on the old rule, every output written through integer bits
+        src, mask = self.fs_uint("""struct main0_out
+{
+    float4 m_48 [[color(0)]];
+    float4 m_50 [[color(1)]];
+};
+
+fragment main0_out main0(main0_in in [[stage_in]])
+{
+    main0_out out = {};
+    float _10 = in.m_1.x;
+    int _20 = as_type<int>(_10);
+    out.m_48.x = as_type<float>(_20);
+    out.m_50.x = _10;
+    return out;
+}
+""")
+        self.assertEqual(mask, 1)
 
     def test_smooth_input_gets_none(self):
         self.assertIsNone(self.fs_uint(self.SRC % ('', '_26'))[0])

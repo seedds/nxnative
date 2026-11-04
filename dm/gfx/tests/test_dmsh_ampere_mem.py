@@ -159,8 +159,8 @@ class Shared(Translated):
     IMAD_HI = 0x000fc80007820008, 0x0000000b07087227        # IMAD.HI R8, R7, R11, {R9:R8} (08faccfa2eaa7e01 +0xa80)
     ATOMS_CAS = 0x000e640001800001, 0x00000400ff01738d      # ATOMS.CAS R1, [RZ + 4], R0, R1 (f4aa178bc67c9793 +0x200)
 
-    def msl(self, *code):
-        msl = self.translate(b''.join(code) + inst(*EXIT), shared=0x400)
+    def msl(self, *code, shared=0x400):
+        msl = self.translate(b''.join(code) + inst(*EXIT), shared=shared)
         return msl[msl.index('kernel void'):]
 
     def test_a_32_bit_access_scales_its_register_by_4(self):   # Element 3, not byte 3 (which is element 0)
@@ -206,6 +206,30 @@ class Shared(Translated):
 
     def test_stride_3_scales_its_register_by_16(self):   # Element 3 of 16 bytes, word 12
         self.assertIn('[12] = 77u', self.msl(mov(2, 3), mov(3, 77), inst(*self.STS_SCALED_16)))
+
+    # The same field on other sizes, with an offset: the stride decides the scale, whatever the access size
+    STS64_SCALED_4 = 0x0009ee0000004a00, 0x000900182c007388     # STS.U64 [R44 * 4 + 0x900], R24:R25 (Donkey Kong Bananza's upscaler 7629d857a0a93833)
+    STS_SCALED_16_AT_8 = 0x000fe8000000c800, 0x0000080609008388   # STS.U32 [R9 * 16 + 8], R6 (agl_common: Mario Kart World f94552a2a2bff505, Donkey Kong Bananza c5c746915e9a3265)
+    STS64_SCALED_16 = 0x000fe8000000ca00, 0x0000000209008388    # STS.U64 [R9 * 16], R2:R3 (the same shaders)
+    STS128_SCALED_16 = 0x0001e2000000cc00, 0x000000ff26007388   # STS.128 [R38 * 16], RZ (Pokemon Pokopia 8987796cd5718078)
+
+    def test_a_64_bit_access_with_stride_1_scales_its_register_by_4(self):   # Byte 3 * 4 + 0x900, word 579
+        msl = self.msl(mov(44, 3), mov(24, 77), mov(25, 88), inst(*self.STS64_SCALED_4), shared=0x1000)
+        self.assertIn('[579] = 77u', msl)
+        self.assertIn('[580] = 88u', msl)
+
+    def test_stride_3_adds_its_offset_after_the_scale(self):   # Byte 3 * 16 + 8, word 14
+        self.assertIn('[14] = 77u', self.msl(mov(9, 3), mov(6, 77), inst(*self.STS_SCALED_16_AT_8)))
+
+    def test_a_64_bit_access_with_stride_3_scales_its_register_by_16(self):   # Element 3 of 16 bytes, word 12
+        msl = self.msl(mov(9, 3), mov(2, 77), mov(3, 88), inst(*self.STS64_SCALED_16))
+        self.assertIn('[12] = 77u', msl)
+        self.assertIn('[13] = 88u', msl)
+
+    def test_a_128_bit_access_with_stride_3_scales_its_register_by_16(self):   # Element 3 of 16 bytes, words 12 to 15
+        msl = self.msl(mov(38, 3), inst(*self.STS128_SCALED_16))
+        self.assertIn('[12] = 0u', msl)
+        self.assertIn('[15] = 0u', msl)
 
     # LDSM keeps its mode at 78..79, where LDS has its stride: 1 is a transposed read (MT88), not a scale. Donkey Kong Bananza's upscaler 7629d857a0a93833 +0x1ce0, on R3: scaled, its picture was garbage
     LDSM_MT88 = 0x000fe20000004200, 0x000000000314783b   # LDSM.16.MT88.4 R20, [R3], with no write barrier for the store to wait on

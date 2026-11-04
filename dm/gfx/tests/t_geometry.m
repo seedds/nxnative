@@ -57,7 +57,7 @@ static void capture_indices(void) {
     EXPECT("capture address overflow rejected",SIZE_MAX,geo_capture_unique(invalid,2,0,0,UINT32_MAX,2,out,8));
     EXPECT("invalid capture output canary",0xcccccccc,out[0]);
 }
-static void cpu_read_proofs(void) {
+static void cpu_read_proofs(void) { WT_;
     // Independent hazards from each production tracker, including its unknown
     // cases. Fake addresses are queried only; no CPU/GPU memory is dereferenced.
     const uint64_t address=0x40000000;pend_reset();memset(g_gw,0,sizeof g_gw);g_gw_all=0;state_reset();
@@ -398,7 +398,7 @@ static void passthrough_kernels(const char *directory) {
         EXPECT("passthrough compacted canary",0xcccccccc,packed[groups*bound]);
     }
 }
-static void replay(int mode) {
+static void replay(int mode) { WT_;
     int kind=mode<7?mode:mode>=16?5:3;
     int conversion=mode==12||mode==13,native_stream=mode==11;
     id<MTLLibrary> l=library(@"#include <metal_stdlib>\nusing namespace metal;\n"

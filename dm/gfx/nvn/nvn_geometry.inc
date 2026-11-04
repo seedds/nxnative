@@ -51,7 +51,7 @@ static size_t geo_capture_unique(uint32_t *order, size_t count, int restart, uin
 // Only CPU reads need a completed snapshot. Native vertex capture stays on the
 // GPU and follows earlier writes through normal encoder ordering. Unknown or
 // overflowing write sets always retain the conservative drain.
-static int geo_cpu_hazard(uint64_t lo, uint64_t n) {
+static int geo_cpu_hazard(uint64_t lo, uint64_t n) { WT_;
     if (!n) return 0;
     if (!lo || n > UINT64_MAX - lo) return 1;
     if (drw_valid()) return drw_hits(lo, n) || nvn_sparse_alias(lo, lo + n);   // drained in this submission: only later writes count
@@ -82,7 +82,7 @@ static void geo_pack_encode(id<MTL4ComputeCommandEncoder> ce, id<MTLComputePipel
 
 // CPU primitive assembly may read static indices without draining unrelated GPU
 // work. Unknown writes and both current/prior submission hazards retain the wait.
-static int geo_index_wait(uint64_t address, uint64_t bytes) {
+static int geo_index_wait(uint64_t address, uint64_t bytes) { WT_;
     static int always = -1;
     if (always < 0) { const char *e = getenv("DM_NVN_GEOMETRY_WAIT"); always = e && !strcmp(e, "always"); }
     return always || !address || !bytes || bytes > (16ull << 20) || bytes > UINT64_MAX - address ||

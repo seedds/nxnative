@@ -819,42 +819,50 @@ static vis_list *vis_snapshot(void) {
 // Inline updates keep where their data sits in the update ring (g_pend_upd: index + 1 into g_upd), so a bindless handle they wrote can be read as the GPU will see it (pend_read).
 // Monster Hunter Rise queues more than 256 writes in a submission (the old limit, after which every address counted as written). The writes are indexed by 4 KB page (a chain per hash
 // bucket, newest first); a write over more than PEND_SPAN pages goes to a short list that every lookup scans
-static uint64_t g_pend_lo_rx[RX_MAX][PEND_MAX], g_pend_hi_rx[RX_MAX][PEND_MAX]; static int g_npend_rx[RX_MAX], g_pend_over_rx[RX_MAX]; static uint8_t g_pend_kind_rx[RX_MAX][PEND_MAX]; static uint16_t g_pend_upd_rx[RX_MAX][PEND_MAX];   // kind: 1 inline update, 2 copy, 3 fill
-#define g_pend_lo (g_pend_lo_rx[RXI])
-#define g_pend_hi (g_pend_hi_rx[RXI])
-#define g_npend (g_npend_rx[RXI])
-#define g_pend_over (g_pend_over_rx[RXI])
-#define g_pend_kind (g_pend_kind_rx[RXI])
-#define g_pend_upd (g_pend_upd_rx[RXI])
-static int32_t g_pend_head_rx[RX_MAX][PEND_HB]; static uint32_t g_pend_hgen_rx[RX_MAX][PEND_HB], g_pend_gen_rx[RX_MAX] = {1, 1, 1, 1};   // a bucket's chain is valid when its generation is this submission's
-#define g_pend_head (g_pend_head_rx[RXI])
-#define g_pend_hgen (g_pend_hgen_rx[RXI])
-#define g_pend_gen (g_pend_gen_rx[RXI])
-static struct { int32_t e, next; } g_pend_node_rx[RX_MAX][PEND_NODES]; static int g_npnode_rx[RX_MAX];
-#define g_pend_node (g_pend_node_rx[RXI])
-#define g_npnode (g_npnode_rx[RXI])
-static int32_t g_pend_wide_rx[RX_MAX][PEND_WIDE]; static int g_nwide_rx[RX_MAX];
-#define g_pend_wide (g_pend_wide_rx[RXI])
-#define g_nwide (g_nwide_rx[RXI])
 typedef struct { uint64_t lo; size_t off; __unsafe_unretained id<MTLBuffer> buf; } upd_ent;   // the ring block lives until this submission completes (mtl_sub_update)
-static upd_ent g_upd_rx[RX_MAX][PEND_MAX]; static int g_nupd_rx[RX_MAX];
-#define g_upd (g_upd_rx[RXI])
-#define g_nupd (g_nupd_rx[RXI])
+enum { SBW_N = 16384, SBW_WPAGES = 64, SBW_WN = 64 };
+// The submission's write tracking (pend: inline updates, copies, fills; sbw: other writes to guest memory), one per replay context. A function that reads or writes it takes its
+// context's once (WT_; wt_), so its loops do not reload the context number after every store (kept as arrays indexed by it, slice 5 cost 1.6% of the submitting thread)
+typedef struct {
+    uint64_t pend_lo[PEND_MAX], pend_hi[PEND_MAX]; int npend, pend_over; uint8_t pend_kind[PEND_MAX]; uint16_t pend_upd[PEND_MAX];   // kind: 1 inline update, 2 copy, 3 fill
+    int32_t pend_head[PEND_HB]; uint32_t pend_hgen[PEND_HB], pend_gen;   // a bucket's chain is valid when its generation is this submission's
+    struct { int32_t e, next; } pend_node[PEND_NODES]; int npnode;
+    int32_t pend_wide[PEND_WIDE]; int nwide;
+    upd_ent upd[PEND_MAX]; int nupd;
+    struct { uint64_t page; uint32_t gen; uint8_t src; } sbwp[SBW_N]; int nsbw, sbw_over;   // src: SBW_* bits; pages in the set this submission; over: a write could not be kept (set full, size not known)
+    uint64_t sbw_wlo[SBW_WN], sbw_whi[SBW_WN]; int nsbw_w;   // the wide writes of this submission
+    uint32_t sbw_gen;   // bumped by every write noted that this submission's shadows must respect (a cached shadow made before it is checked again)
+} rx_wt;
+static rx_wt g_wt_rx[RX_MAX] = {[0 ... RX_MAX - 1] = {.pend_gen = 1}};
+#define WT_ rx_wt *const wt_ = &g_wt_rx[RXI]
+#define g_pend_lo (wt_->pend_lo)
+#define g_pend_hi (wt_->pend_hi)
+#define g_npend (wt_->npend)
+#define g_pend_over (wt_->pend_over)
+#define g_pend_kind (wt_->pend_kind)
+#define g_pend_upd (wt_->pend_upd)
+#define g_pend_head (wt_->pend_head)
+#define g_pend_hgen (wt_->pend_hgen)
+#define g_pend_gen (wt_->pend_gen)
+#define g_pend_node (wt_->pend_node)
+#define g_npnode (wt_->npnode)
+#define g_pend_wide (wt_->pend_wide)
+#define g_nwide (wt_->nwide)
+#define g_upd (wt_->upd)
+#define g_nupd (wt_->nupd)
+#define g_sbwp (wt_->sbwp)
+#define g_nsbw (wt_->nsbw)
+#define g_sbw_over (wt_->sbw_over)
+#define g_sbw_wlo (wt_->sbw_wlo)
+#define g_sbw_whi (wt_->sbw_whi)
+#define g_nsbw_w (wt_->nsbw_w)
+#define g_sbw_gen (wt_->sbw_gen)
 // Other writes to guest memory in this submission, which the pend list does not hold: writable storage buffers bound to a shader, texture→buffer copies, counter reports (ubp_get).
 // Kept by 4 KB page (Breath of the Wild's particle dispatches bind about ten storage buffers each, hundreds a frame): a set of pages tagged with the submission (g_pend_gen) and with what
 // wrote them. A counter report does not count against this submission's shadows: the host writes reports on the CPU when the whole submission has completed, so no draw of it reads one
 // (Fire Emblem Engage writes its query reports into the page of a uniform block); it counts for later submissions while this one runs (gw_commit).
 // A GPU write over more than SBW_WPAGES pages is kept as an interval instead (overlapping ones merge): a storage buffer bound with size 0 counts as the rest of its Metal buffer (sbw_len)
-enum { SBW_N = 16384, SBW_WPAGES = 64, SBW_WN = 64 };
-static struct { uint64_t page; uint32_t gen; uint8_t src; } g_sbwp_rx[RX_MAX][SBW_N]; static int g_nsbw_rx[RX_MAX], g_sbw_over_rx[RX_MAX];   // src: SBW_* bits; pages in the set this submission; over: a write could not be kept (set full, size not known)
-#define g_sbwp (g_sbwp_rx[RXI])
-#define g_nsbw (g_nsbw_rx[RXI])
-#define g_sbw_over (g_sbw_over_rx[RXI])
-static uint64_t g_sbw_wlo_rx[RX_MAX][SBW_WN], g_sbw_whi_rx[RX_MAX][SBW_WN]; static int g_nsbw_w_rx[RX_MAX];   // the wide writes of this submission
-#define g_sbw_wlo (g_sbw_wlo_rx[RXI])
-#define g_sbw_whi (g_sbw_whi_rx[RXI])
-#define g_nsbw_w (g_nsbw_w_rx[RXI])
-static int sbw_slot(uint64_t pg, int add) {   // open addressing; −1 = not there (or no room to add)
+static int sbw_slot(uint64_t pg, int add) { WT_;   // open addressing; −1 = not there (or no room to add)
     unsigned h = (unsigned)((pg * 0x9E3779B97F4A7C15ull) >> 50) & (SBW_N - 1);
     for (int i = 0; i < 64; i++, h = (h + 1) & (SBW_N - 1)) {
         if (g_sbwp[h].gen != g_pend_gen) { if (!add) return -1; g_sbwp[h].page = pg; g_sbwp[h].gen = g_pend_gen; g_sbwp[h].src = 0; g_nsbw++; return (int)h; }
@@ -862,10 +870,8 @@ static int sbw_slot(uint64_t pg, int add) {   // open addressing; −1 = not the
     return -1;
 }
 enum { SBW_GPU = 1, SBW_REPORT = 2 };
-static uint32_t g_sbw_gen_rx[RX_MAX];   // bumped by every write noted that this submission's shadows must respect (a cached shadow made before it is checked again)
-#define g_sbw_gen (g_sbw_gen_rx[RXI])
 static void drw_note(uint64_t lo, uint64_t n);   // the writes since the last drain (below g_wr_epoch)
-static void sbw_note(uint64_t lo, uint64_t n, int src) {
+static void sbw_note(uint64_t lo, uint64_t n, int src) { WT_;
     if (src == SBW_GPU) { g_sbw_gen++; drw_note(lo, n); }
     if (!n) { if (src == SBW_GPU) g_sbw_over = 1; return; }
     uint64_t hi = lo + n;
@@ -876,7 +882,7 @@ static void sbw_note(uint64_t lo, uint64_t n, int src) {
     }
     for (uint64_t pg = lo >> 12; pg <= (hi - 1) >> 12; pg++) { int k = sbw_slot(pg, 1); if (k < 0) { g_sbw_over = 1; return; } g_sbwp[k].src |= (uint8_t)src; }
 }
-static int sbw_hits(uint64_t lo, uint64_t hi) {
+static int sbw_hits(uint64_t lo, uint64_t hi) { WT_;
     for (int i = 0; i < g_nsbw_w; i++) if (lo < g_sbw_whi[i] && g_sbw_wlo[i] < hi) return 1;
     if (!g_nsbw) return 0;
     for (uint64_t pg = lo >> 12; pg <= (hi - 1) >> 12; pg++) { int k = sbw_slot(pg, 0); if (k >= 0 && (g_sbwp[k].src & SBW_GPU)) return 1; }
@@ -887,9 +893,9 @@ static int sbw_hits(uint64_t lo, uint64_t hi) {
 // a binding counted as a write anywhere, and every partly covered uniform shadow after it in the submission was refused (BotW shrines: about 240 more passes a frame, GitHub issue #534)
 static uint64_t sbw_len(uint64_t size, void *mb, uint64_t mo) { if (size) return size; uint64_t len = ((__bridge id<MTLBuffer>)mb).length; return len > mo ? len - mo : 0; }
 static inline unsigned pend_bucket(uint64_t page) { return (unsigned)((page * 0x9E3779B97F4A7C15ull) >> 53) & (PEND_HB - 1); }
-static void pend_reset(void) { g_npend = g_pend_over = g_nupd = g_npnode = g_nwide = g_nsbw = g_nsbw_w = g_sbw_over = 0; if (!++g_pend_gen) { memset(g_pend_hgen, 0, sizeof g_pend_hgen); memset(g_sbwp, 0, sizeof g_sbwp); g_pend_gen = 1; } }
+static void pend_reset(void) { WT_; g_npend = g_pend_over = g_nupd = g_npnode = g_nwide = g_nsbw = g_nsbw_w = g_sbw_over = 0; if (!++g_pend_gen) { memset(g_pend_hgen, 0, sizeof g_pend_hgen); memset(g_sbwp, 0, sizeof g_sbwp); g_pend_gen = 1; } }
 static void vc_gpu_write(uint64_t dst, uint64_t n);   // kept index ranges under the written range are not trusted again (ix_range)
-static int pend_add(uint64_t dst, uint64_t n, int kind) {
+static int pend_add(uint64_t dst, uint64_t n, int kind) { WT_;
     vc_gpu_write(dst, n); drw_note(dst, n ? n : 1);
     if (g_pend_over || g_npend == PEND_MAX) { g_pend_over = 1; return -1; }
     int e = g_npend; uint64_t p0 = dst >> 12, p1 = (dst + (n ? n : 1) - 1) >> 12;
@@ -901,7 +907,7 @@ static int pend_add(uint64_t dst, uint64_t n, int kind) {
     g_pend_lo[e] = dst; g_pend_hi[e] = dst + n; g_pend_kind[e] = (uint8_t)kind; g_pend_upd[e] = 0; return g_npend++;
 }
 // The newest queued write overlapping [a, a+n): its index, -1 for none, -2 when it cannot be told (overflow)
-static int pend_last(uint64_t a, uint64_t n) {
+static int pend_last(uint64_t a, uint64_t n) { WT_;
     if (g_pend_over) return -2;
     int best = -1; uint64_t p0 = a >> 12, p1 = (a + (n ? n : 1) - 1) >> 12;
     for (int i = 0; i < g_nwide; i++) { int e = g_pend_wide[i]; if (e > best && a < g_pend_hi[e] && a + n > g_pend_lo[e]) best = e; }
@@ -912,7 +918,7 @@ static int pend_last(uint64_t a, uint64_t n) {
 }
 static int pend_hits(uint64_t a, uint64_t n) { return pend_last(a, n) != -1; }
 // The n bytes at a as the last write queued in this submission leaves them, when that write is an inline update covering them all → 1; otherwise → 0 and *kind = what wrote them (0 = too many writes to tell)
-static int pend_read(uint64_t a, uint64_t n, void *out, int *kind) {
+static int pend_read(uint64_t a, uint64_t n, void *out, int *kind) { WT_;
     int e = pend_last(a, n); *kind = e >= 0 ? g_pend_kind[e] : 0;
     if (e < 0 || !g_pend_upd[e] || a < g_pend_lo[e] || a + n > g_pend_hi[e]) return 0;
     const upd_ent *u = &g_upd[g_pend_upd[e] - 1]; memcpy(out, (const uint8_t *)u->buf.contents + u->off + (a - u->lo), n); return 1;
@@ -1422,7 +1428,7 @@ static void um_put(uint64_t lo, uint64_t hi, const uint8_t *src, uint64_t fence,
         memcpy(&m->val[o], src + (at - lo), n); for (unsigned i = 0; i < n; i++) m->f[o + i] = fence; }
 }
 // The submission's GPU writes go into the page tables with its fence (mtl_sub_commit)
-static void gw_commit(uint64_t fence) {
+static void gw_commit(uint64_t fence) { WT_;
     uint64_t done = g_done;
     if ((g_pend_over || g_sbw_over) && fence > g_gw_all) g_gw_all = fence;
     for (int e = 0; e < g_npend; e++) {
@@ -1441,7 +1447,7 @@ static void um_overlay(uint64_t lo, uint64_t hi, uint8_t *d, uint64_t ready) {
         for (uint64_t x = at; x < end; x++) if (m->f[x & 4095] > done) { if (!waited) { ubc_wait(ready); waited = 1; } d[x - lo] = m->val[x & 4095]; } }
 }
 // The writes queued in this submission from index since on that overlap [a, b), newest first, into out (room for every entry a lookup can meet); -1 when they cannot all be told
-static int pend_since(uint64_t a, uint64_t b, int since, int *out) {
+static int pend_since(uint64_t a, uint64_t b, int since, int *out) { WT_;
     if (g_pend_over) return -1;
     int n = 0; uint64_t p0 = a >> 12, p1 = (b - 1) >> 12;
     if (p1 - p0 >= PEND_SPAN) { for (int e = g_npend - 1; e >= since; e--) if (a < g_pend_hi[e] && g_pend_lo[e] < b) out[n++] = e; return n; }   // every entry, newest first
@@ -1458,7 +1464,7 @@ int nvn_host_readable(uint64_t a, uint64_t n);   // hle_nvn.c: guest memory and 
 // Shadows made from memory, per range. One is kept while no write is queued after it (the draws after an update bind the same block again and again); the next one for the same range starts
 // from it and lays over only the writes queued since (the game rewrites one block hundreds of times a submission). A range read whole from memory once is not read from memory again in the submission
 // The bytes [lo, hi) as the GPU will read them at this point of the submission (see above): 1 with the shadow's GPU and CPU addresses, 0 when they cannot be known (the pass ends instead)
-static int ubp_get(uint64_t lo, uint64_t hi, uint64_t *gpu, const uint8_t **cpu) {
+static int ubp_get(uint64_t lo, uint64_t hi, uint64_t *gpu, const uint8_t **cpu) { WT_;
     if (!ub_partial_on() || hi <= lo || hi - lo > UBP_MAX_BYTES) { g_ubp_why[0]++; return 0; }
     ubp_ent *c = NULL;
     for (int i = 0; i < UBP_CACHE; i++) if (RX.ub.pc[i].lo == lo && RX.ub.pc[i].hi == hi && RX.ub.pc[i].gen == g_pend_gen) { c = &RX.ub.pc[i]; break; }
@@ -1500,7 +1506,7 @@ static int ubp_get(uint64_t lo, uint64_t hi, uint64_t *gpu, const uint8_t **cpu)
 }
 void mtl_ubp_stats(uint64_t *made, uint64_t *reused, uint64_t *refused) { *made = g_ubp_made; *reused = g_ubp_reused; *refused = g_ubp_refused; }
 void mtl_ubp_why(uint64_t w[5]) { memcpy(w, g_ubp_why, sizeof g_ubp_why); }
-void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
+void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) { WT_;
     if (!n) return;
     int pi = pend_add(dst, n, 1);
     void *db; uint64_t dof;
@@ -5482,7 +5488,7 @@ typedef struct { uint64_t gpu, epoch, writes; uint32_t sbw; int npend; } vbuf_co
 static nvn_hmap g_vbuf_unaligned = {.klen = 24};
 static uint64_t g_vbuf_write_epoch;   // shader writes invalidate snapshots without disturbing indirect conversions of the same draw
 static uint64_t g_vbuf_need[16];   // per stream: the bytes the draw reads when that is more than the bound size, else 0
-static uint64_t vbuf_unaligned(uint64_t addr, uint64_t size, uint64_t need, int prepare) {   // need: 0, or the copy's length (more than size; zeros past size)
+static uint64_t vbuf_unaligned(uint64_t addr, uint64_t size, uint64_t need, int prepare) { WT_;   // need: 0, or the copy's length (more than size; zeros past size)
     uint64_t key[3] = {addr, size, need}, len = need > size ? need : size; vbuf_copy *c = nvn_hm_get(&g_vbuf_unaligned, key);
     if (c && !prepare) return c->gpu;
     if (c) {
@@ -11464,7 +11470,7 @@ static void mirror_rb_land(void *p) {   // the submission's completion handler
     mrbuf_put(b);
     free(m);
 }
-static void copy_b2t(const p_copy_b2t *c) {
+static void copy_b2t(const p_copy_b2t *c) { WT_;
     if (c->tex) zskip_del(c->tex->serial);
     id<MTLTexture> t = tex_mtl(c->tex);
     if (!t) { PD("C ser=%llu (no host texture)", c->tex->serial); return; }

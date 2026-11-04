@@ -172,8 +172,17 @@ class Report(unittest.TestCase):
         self.assertEqual(self.numbers(self.t['unlinked']), [29, 167, 193, 269, 415, 734])   # 756 merges as a no-op
         self.assertEqual(self.numbers(self.t['untriaged']), [10, 224, 542])
         self.assertEqual(self.t['naming'], {313: [408], 224: [573]})
-        self.assertEqual((self.t['no_reply'], self.t['no_label']), (3, 4))
+        self.assertEqual((self.t['no_reply'], self.t['no_label']), (3, 5))   # 635's enhancement is a kind, which issue-areas.yml adds unread
         self.assertEqual(self.t['skipped'], [])
+
+    def test_automatic_labels_are_not_triage(self):
+        data = copy.deepcopy(self.data)
+        issue = next(i for i in data['issues'] if i['number'] == 542)
+        issue['labels']['nodes'] = [{'name': 'mac'}, {'name': 'bug'}, {'name': 'game: 01007EF00011E000'}]
+        t = tr.triage(data, self.git)
+        self.assertIn(542, self.numbers(t['untriaged']))
+        issue['labels']['nodes'].append({'name': 'wontfix'})
+        self.assertNotIn(542, self.numbers(tr.triage(data, self.git)['untriaged']))
 
     def test_markdown(self):
         md = tr.report(self.data, self.git, self.t, NOW, limit=2)

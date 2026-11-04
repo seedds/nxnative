@@ -1709,3 +1709,28 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** the present reports the shape of the frame it draws ([the layer's](#a-crop-only-picks-texels-the-picture-has-the-layers-shape)) whenever its width / height changes (`nvn_mtl.m` `present_now` → `front.h` `front_picture_shape`; every graphics API presents there). The iOS front end lays the game's view out in that shape (`DmLayout.h` takes it as a parameter: the overlay, the split, Fill and the TV alike), so a 1.43:1 picture fills a 1.43:1 screen in Fit and touches are normalized on the picture as drawn; the Mac maps the mouse on the picture's own rectangle. A 16:9 game reports 16:9 and keeps its layout, and a size change of the same shape (1280x720 handheld, 1920x1080 docked) is not reported.
 - **Check:** the [Duo harness](../../dm/ios/tests/duo/README.md) tests the taller picture in Fit, in Fill and on a wider screen, and the production root view following a reported shape and returning to 16:9. Not yet run on a device.
 - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#screen-shape-dm_screen_aspect-current) and [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md#screen-shape-dm_screen_aspect-current) with `DM_SCREEN_ASPECT=1.43`.
+
+
+### Bounded fence timeline (experimental)
+
+`DM_NVN_FENCE_TRACE=first-last:path` selects an inclusive presentation-frame
+range and exports a TSV after that range closes. It records one guest `SyncWait`
+identity across the initial poll and timed wait, including event return, CPU
+completion work, fallback wait, and return. Fence identities join submission
+recording to actual Metal queue commit and feedback, including deferred replay.
+
+Storage is append-only and capped at 262,144 records. Overflow is counted. The
+export runs after the capture closes, without file writes inside the wait path.
+Closing a capture does not wait for the GPU: missing commit or feedback records
+remain unknown. A wait can span frames; each event carries its observed frame.
+CPU raw-uptime nanoseconds and Metal GPU seconds remain separate, with a bracketed
+CA clock sample recorded for calibration. Do not subtract clock domains without
+validating their relationship. Locking and timestamp collection add diagnostic
+overhead; this trace alone cannot establish a performance improvement.
+
+`make -C dm/gfx/tests GAME=040074A01BF12000 check_fence_trace_cpu` checks bounded
+storage and wait budgets with tracing enabled. The `t_perf_order --trace-gpu` mode checks real commit/feedback correlation and
+the completed TSV export; run it with `DM_NVN_ENC_THREAD=0` and `1`. These
+synthetic checks do not establish physical iPhone or game behavior.
+
+Analyze an exported capture with `python3 dm/tools/analyze_fence_timeline.py fence-events.tsv --output analysis.json`. The report retains raw wait events, flags contradictory endpoints and unavailable GPU timing, and lists missing or duplicate joins. A complete endpoint pair does not prove intermediate events were retained.

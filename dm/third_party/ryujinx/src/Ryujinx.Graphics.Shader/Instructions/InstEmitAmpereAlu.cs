@@ -222,8 +222,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             res = x.Bits(74, 80) switch
             {
-                0 => context.FPCosine(context.FPMultiply(res, ConstF(2f * MathF.PI))),   // Volta and later: the argument is in turns (the compiler multiplies by 1 / 2pi first,
-                1 => context.FPSine(context.FPMultiply(res, ConstF(2f * MathF.PI))),     // NAK lowers fsin / fcos the same way); Maxwell's came through RRO instead
+                0 => context.FPCosine(ATurnsToRadians(context, res)),   // Volta and later: the argument is in turns (the compiler multiplies by 1 / 2pi first,
+                1 => context.FPSine(ATurnsToRadians(context, res)),     // NAK lowers fsin / fcos the same way); Maxwell's came through RRO instead
                 2 => context.FPExponentB2(res),
                 3 => context.FPLogarithmB2(res),
                 4 => context.FPReciprocal(res),
@@ -235,6 +235,16 @@ namespace Ryujinx.Graphics.Shader.Instructions
             };
 
             ASet(context, x, half ? context.PackHalf2x16(res, ConstF(0f)) : res);
+        }
+
+        // MUFU.SIN / COS take turns and use only their fraction, so a large argument keeps an exact angle. t * 2pi in float rounds away that fraction (at 2^20 turns a step of 0.4 rad), and
+        // Metal's fast sin / cos return 0 from about 2^20 turns on (both, so a rotation (cos, sin) collapses to the origin): Donkey Kong Bananza's SSAO (a6f04605183d9915) rotates its kernel by
+        // 10 (3 (x mod y) + x y) / 2pi turns, past 2^20 where x y > 659,000, which at its full-size effects is a corner of the screen with no ambient occlusion. t - rint(t) is exact for
+        // every float (|t| < 2^23 has the same exponent or a smaller one; at and past 2^23 every float is an integer and the fraction is 0) and lies in [-0.5, 0.5]: the angle is in [-pi, pi],
+        // where fast sin / cos are accurate, and a small t stays itself (sin of a small angle is not moved to near 2pi). Infinity and NaN give NaN, as the hardware
+        private static Operand ATurnsToRadians(EmitterContext context, Operand turns)
+        {
+            return context.FPMultiply(context.FPSubtract(turns, context.FPRound(turns)), ConstF(2f * MathF.PI));
         }
 
         // F2I: destination signed (72) and size (75..77, log2 bytes), rounding (78..80), source size (84..86); a half source is the half 60..62 selects, as F2F's (Pokemon Pokopia: 1,067 shaders)

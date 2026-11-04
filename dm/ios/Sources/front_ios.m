@@ -9,6 +9,7 @@
 #import <AVFAudio/AVFAudio.h>
 #include <errno.h>
 #include "front.h"
+#include "../../gfx/nvn/nvn_hdr.h"
 #include "hle.h"
 #include "dm.h"
 #include "haptics_apple.h"
@@ -34,6 +35,7 @@ static UILabel *front_ios_fps_label(void);
 
 @interface DmGameView : UIView
 @property (nonatomic) CGFloat maxPixelWidth;   // 0: the screen's own pixels; a TV caps the drawable at 1920 across (tv_attach)
+- (void)updateHDRDisplay;
 @end
 @implementation DmGameView
 + (Class)layerClass { return CAMetalLayer.class; }
@@ -45,15 +47,26 @@ static UILabel *front_ios_fps_label(void);
         CAMetalLayer *l = (CAMetalLayer *)self.layer;
         l.device = MTLCreateSystemDefaultDevice(); l.pixelFormat = MTLPixelFormatBGRA8Unorm;
         l.contentsScale = MAX(self.traitCollection.displayScale, 1); l.framebufferOnly = NO; l.opaque = YES;
+        [self updateHDRDisplay];
         self.backgroundColor = UIColor.blackColor;
     }
     return self;
 }
-- (void)didMoveToWindow { [super didMoveToWindow]; [self setNeedsLayout]; }   // the phone's screen or a TV's (DmTVSceneDelegate)
+- (void)updateHDRDisplay {
+    UIScreen *screen = self.window.windowScene.screen;
+    // Use capability rather than current brightness, which can be 1 before any EDR content is shown.
+    dm_hdr_configure_layer((__bridge void *)self.layer, screen ? screen.potentialEDRHeadroom : 0);
+}
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    [self updateHDRDisplay]; // The phone's screen or a TV's (DmTVSceneDelegate).
+    [self setNeedsLayout];
+}
 - (void)layoutSubviews {   // render at the pixels of the screen the view is on (an iPad window can move to another), at most maxPixelWidth across
     [super layoutSubviews];
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
     UIScreen *screen = self.window.windowScene.screen;
+    [self updateHDRDisplay];
     CGFloat scale = screen ? screen.nativeScale : MAX(self.traitCollection.displayScale, 1);
     if (self.maxPixelWidth > 0) scale = MIN(scale, self.maxPixelWidth / MAX(self.bounds.size.width, 1));
     l.contentsScale = scale;

@@ -37,6 +37,59 @@ static int check_present_resize(id<MTLTexture> src, int w, int h) {
 }
 #endif
 
+#ifndef CROP_LEGACY_HEADER
+// Exercise the production encoding selection and both constant-buffer layouts with real scanout formats.
+static void check_hdr_scanout(void) {
+    setenv("DM_HDR", "1", 1);
+    dm_hdr_display(1);
+    EXPECT("HDR display negotiation", 1, dm_hdr_query());
+    g_fx_mode = 1; // HDR must bypass the perceptual SDR scaler even when upscaling is requested.
+    for (int linear = 0; linear < 2; linear++) {
+        MTLPixelFormat format = linear ? MTLPixelFormatRGBA16Float : MTLPixelFormatRGB10A2Unorm;
+        MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+                                                                                      width:1 height:1 mipmapped:NO];
+        desc.storageMode = MTLStorageModeShared;
+        desc.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> source = [g_dev newTextureWithDescriptor:desc];
+        uint32_t pq_white = UINT32_MAX; // PQ 1.0 is 10,000 nits.
+        __fp16 linear_white[4] = {12.5, 12.5, 12.5, 1}; // scRGB 12.5 is 1,000 nits.
+        const void *pixels = linear ? (const void *)linear_white : (const void *)&pq_white;
+        [source replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:pixels
+                  bytesPerRow:linear ? sizeof linear_white : sizeof pq_white];
+        desc.pixelFormat = MTLPixelFormatRGBA16Float;
+        desc.width = desc.height = 2;
+        desc.usage = MTLTextureUsageRenderTarget;
+        id<MTLTexture> output = [g_dev newTextureWithDescriptor:desc];
+        for (int metal4 = 0; metal4 < 2; metal4++) {
+            if (metal4) {
+                EXPECT("HDR bypasses perceptual MetalFX scaling", PRESENT_STANDARD,
+                       present_offscreen_wait(source, NULL, output));
+            } else {
+                id<MTLCommandBuffer> command_buffer = [g_q commandBuffer];
+                EXPECT("legacy HDR present encodes", 1, present_encode(command_buffer, source, output, NULL));
+                [command_buffer commit];
+                [command_buffer waitUntilCompleted];
+                EXPECT("legacy HDR present completes", MTLCommandBufferStatusCompleted, command_buffer.status);
+            }
+            __fp16 result[16];
+            [output getBytes:result bytesPerRow:sizeof(__fp16) * 8
+                  fromRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:0];
+            float expected = linear ? 12.5f : 125.0f;
+            int bad = 0;
+            for (int pixel = 0; pixel < 4; pixel++) {
+                for (int channel = 0; channel < 3; channel++) {
+                    bad += fabsf(result[pixel * 4 + channel] - expected) > .01f;
+                }
+                bad += result[pixel * 4 + 3] != 1;
+            }
+            EXPECT("production scanout preserves absolute HDR luminance and alpha", 0, bad);
+        }
+    }
+    dm_hdr_display(0);
+    setenv("DM_HDR", "0", 1);
+}
+#endif
+
 static void check(id<MTLTexture> src, const char *name, const int crop[4], int w, int h, int color) {
     MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
     d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageRenderTarget;
@@ -210,6 +263,9 @@ int main(void) { @autoreleasepool {
         EXPECT("real QueuePresent: a window without a crop queues the layer crop",1,got);
         mtl_present_wait(t2);mtl_present_test_stall(0);
     }
+#endif
+#ifndef CROP_LEGACY_HEADER
+    check_hdr_scanout();
 #endif
     printf("== %d checks, %d failed ==\n",cases,failed);return failed!=0;
 } }

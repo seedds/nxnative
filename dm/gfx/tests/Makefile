@@ -457,3 +457,6 @@ t_logic: t_logic.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_logic.m $(MTL_T_SRC) $(FW)
 check_t_logic: t_logic
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_logic.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_logic "$$work"
+
+t_present_hdr: t_present_hdr.m ../nvn/host_msl.m ../nvn/nvn_hdr.c ../nvn/nvn_hdr_layer.m ../nvn/nvn_hdr.h $(MSL_H)
+	clang -O1 -g -Wall -I$(dir $(MSL_H)) -fobjc-arc -o $@ t_present_hdr.m ../nvn/host_msl.m ../nvn/nvn_hdr.c ../nvn/nvn_hdr_layer.m -framework Metal -framework Foundation -framework QuartzCore -framework CoreGraphics

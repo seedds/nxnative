@@ -1028,3 +1028,10 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** an NRR with 1 in the byte at +5 (the Switch 2's) has a header 0x180 bytes longer. The same fields follow it: program ID +0x4b0, size +0x4b8, hash table +0x4c0, its count +0x4c4.
 - **Fix:** `hle_ro.c` and `nro_collect.py` read the table by that byte.
 - **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md).
+
+### HDR display negotiation
+
+- **Symptom:** a game with HDR support stays in SDR or presents its PQ signal as ordinary SDR RGB.
+- **Cause:** the host previously advertised SDR regardless of the attached display and had no HDR scanout conversion.
+- **Fix:** the opt-in [HDR presentation path](rendering.md#negotiated-hdr-scanout-to-apple-edr) negotiates HDR support, retains luminance metadata and converts PQ to extended-linear EDR output.
+- **Found on:** [Mario Kart World 1.8.0](../../dm/games/0400C3F00006E000/README.md).

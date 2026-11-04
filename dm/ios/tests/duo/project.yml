@@ -13,6 +13,8 @@ targets:
       - path: ../../Sources/LauncherSettings.swift
       - path: ../../Sources/DmGamepad.m
       - path: ../../Sources/front_ios.m
+      - path: ../../../gfx/nvn/nvn_hdr.c
+      - path: ../../../gfx/nvn/nvn_hdr_layer.m
     dependencies:
       - sdk: UIKit.framework
       - sdk: GameController.framework

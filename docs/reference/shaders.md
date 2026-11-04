@@ -12,6 +12,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `dm/gfx/tests/test_cra.py`. All 8,671 files of 1.1.1 pass the game's checksums.
 - **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md): 35,045 shaders.
 
+### Packed shader banks in loose NARC files
+
+- **Symptom:** the split finds only a small part of a game's shaders, with no `[RED]` line, and its RomFS holds files that start `NARC` (`.narc`, `.nptl`, `.ntex` on Mario Tennis Aces).
+- **Cause:** the split reads a whole file only when it sees a shader magic in the file's bytes. A NARC's members are packed by their first byte (`cra.undo`), which hides those magics, so the file was left out before the reader ever saw it. Mario Tennis Fever did not show this: its files come through `cra_jobs`, past that check.
+- **Fix:** `scan_file_in` passes every file with the `NARC` magic to `scan_blob`, whatever its name. The members go through the same `cra.narc_members` and `cra.undo` as Fever's.
+- **Check:** `dm/tools/tests/test_split_narc.py`: synthetic files with every packing and BNSH hidden in the file's bytes give the same keys and pairs as plain ones.
+- **Found on:** Mario Tennis Aces, no profile yet ([issue #1131](https://github.com/seedds/nxnative/issues/1131), diagnosed by PikaMan80, who counted 1,388 shaders from the loose `.nsb` files and 21,703 with the archives read). Not run on the game's files here. Open: that report says kind `0x50` wraps a zlib stream, and `cra.undo` does not unwrap one, so such members would give no shaders and no red line.
+
 ### Sumo Ninty_NX shaders and MuxFDMR streams
 
 - **Symptom:** the split finds no shaders in `main` or RomFS, while reporting control sections in `main` with no code area. The game has `.sp4` resources and loose `.nvnbin` files rather than BNSH archives or whole GLSLC outputs.

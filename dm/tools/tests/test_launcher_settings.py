@@ -68,6 +68,21 @@ class LauncherSettingsTests(unittest.TestCase):
         s = mac['DM_FULLSCREEN']
         self.assertEqual((s['kind'], s['default'], s['options'], s['level']), ('choice', '0', [['0', 'Window'], ['1', 'Fullscreen']], 'basic'))
 
+    def test_widescreen_requires_the_builds_camera_patch(self):
+        for gid in (BOTW, '0100F2C0115B6000'):
+            for platform in ('ios', 'mac'):
+                for fixups in (None, '# RENDER_SCALE\t1\n', '# CAMERA_ASPECT\t1\n'):
+                    with self.subTest(game=gid, platform=platform, fixups=fixups), tempfile.TemporaryDirectory() as tmp, \
+                            patch.object(settings.nacp, 'languages', return_value=['en-US']), \
+                            patch.dict(os.environ, {'GFXAPI': 'nvn', 'SETTINGS_PLATFORM': platform}):
+                        if fixups is not None:
+                            (Path(tmp) / 'main.fixups.tsv').write_text(fixups, encoding='utf-8')
+                        rows = {s['env']: s for s in settings.build(gid, tmp, Path(tmp) / 'control.nacp')['settings']}
+                        patched = fixups == '# CAMERA_ASPECT\t1\n'
+                        self.assertEqual('DM_WIDESCREEN' in rows, patched)
+                        if patched:
+                            self.assertEqual(rows['DM_WIDESCREEN']['default'], '1')
+
     def test_defaults_follow_each_platform_host(self):
         # nvn_mtl.m pso4_on: Mac defaults on, iOS follows the profile. nvn_rec.h rec_on: iOS on, Mac off.
         for gid, ios_pso in ((BOTW, '1'), (WONDER, '0')):

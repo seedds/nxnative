@@ -3,7 +3,7 @@
 The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
 
 - [Tested defaults](#tested-defaults)
-- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
+- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Widescreen](#widescreen), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
@@ -35,7 +35,7 @@ Breath of the Wild 1.9.0 and Tears of the Kingdom 1.4.3 automatically widen thei
 
 On iPhone and iPad this applies to **Picture: Fit** in landscape. **Fill** remains a cropped picture, not a wider camera. Portrait and half-folded layouts keep the fitted picture above the controls; a TV keeps its fitted picture too. Changing Picture in the in-game menu updates the camera request from the new drawable; presentation follows only when the game acknowledges the camera change. A supported taller **Picture shape** takes precedence over landscape widening.
 
-Set `DM_WIDESCREEN=0` in `env.txt` and restart to disable landscape widening; this does not disable a supported taller **Picture shape**. There is no launcher row for this switch. Maps, cinematic framing and other game-specific layouts are not guaranteed to fill every screen.
+**Widescreen** is on by default and appears in the launcher only when that build has the camera patch. Turn it off before starting the game to keep the original landscape framing. `DM_WIDESCREEN=0` in `env.txt` overrides the launcher choice. This does not disable a supported taller **Picture shape**. Maps, cinematic framing and other game-specific layouts are not guaranteed to fill every screen.
 
 ### Console mode
 
@@ -267,7 +267,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |
 | Picture (iPhone and iPad) | `DM_PICTURE_FIT` | `fit` 16:9 with black bars, `fill` covers the screen, cropped |
 | Picture shape | `DM_SCREEN_ASPECT` | `1.43` the iPhone Duo's shape, `0` 16:9 |
-| Widescreen (BOTW 1.9.0, TOTK 1.4.3) | `DM_WIDESCREEN` | `0` original framing; unset enables wider screens |
+| Widescreen (BOTW 1.9.0, TOTK 1.4.3) | `DM_WIDESCREEN` | `1` wider camera (default), `0` original framing |
 | Frame-rate counter | `DM_SHOW_FPS` | `1`, `0` |
 | Touch feedback | `DM_TOUCH_HAPTICS` | `1`, `0` |
 | Game rumble | `DM_RUMBLE` | `1`, `0` |

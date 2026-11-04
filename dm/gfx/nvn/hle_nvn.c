@@ -263,7 +263,7 @@ NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) {
     mtl_alias_drop_pool(p); ((pool_t *)p)->magic = 0;
     if (((pool_t *)p)->flags & 0x200 && ((pool_t *)p)->vp) vpool_release((pool_t *)p);
     if (((pool_t *)p)->mem && !(((pool_t *)p)->flags & 0x200)) {   // A virtual pool's storage is borrowed from a physical pool; do not unregister it
- nvn_dirty_remove_range(((pool_t *)p)->mem); mtl_pool_del(((pool_t *)p)->mem); fl_drop(((pool_t *)p)->mem, ((pool_t *)p)->size); } }
+ nvn_dirty_remove_range(((pool_t *)p)->mem); mtl_pool_del(((pool_t *)p)->mem); mtl_sp_phys_gone(((pool_t *)p)->mem, ((pool_t *)p)->size); fl_drop(((pool_t *)p)->mem, ((pool_t *)p)->size); } }
 static void ft_flush(const uint8_t *a, uint64_t n);
 NVN(nvnMemoryPoolFlushMappedRange, void, const NVNmemoryPool *p, ptrdiff_t off, size_t n) {   // see ft_add and nvn_flushed
     const pool_t *o = (const pool_t *)p;
@@ -2723,6 +2723,16 @@ int nvn_sparse_mapped(const void *pool, uint64_t a, uint64_t n) {   // every pag
 void nvn_sparse_protect(const void *pool, uint64_t a, uint64_t n) { vpt_walk(pool, a, n, ~0ull, run_protect, 0); }
 static int run_protect_tile(const uint8_t *p, uint64_t n, uint64_t unused) { (void)unused; nvn_dirty_protect_sparse(p, n); return 0; }
 void nvn_sparse_protect_tile(const void *pool, uint64_t a, uint64_t n) { vpt_walk(pool, a, n, ~0ull, run_protect_tile, 0); }
+// The physical memory behind the 64 KB tile at a: its first page when all 16 are mapped and consecutive, NULL otherwise (nvn_mtl.m keys shared sparse tiles by it, sp_share)
+const uint8_t *nvn_sparse_tile_phys(const void *pool, uint64_t a) {
+    pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); const uint8_t *p = NULL;
+    uint64_t o = v ? a - (uint64_t)(uintptr_t)v->base : 0;
+    if (v && !(o & 0xFFFF) && o + 65536 <= v->size) {
+        const vpte *e = vpt_get(v, o); p = e ? e->phys : NULL;
+        for (uint64_t k = 1; p && k < 16; k++) { const vpte *f = vpt_get(v, o + (k << 12)); if (!f || f->phys != p + (k << 12)) p = NULL; }
+    }
+    pthread_mutex_unlock(&g_vp_mu); return p;
+}
 // A sparse pool's mapping requests, for a placement sparse texture (nvn_mtl.m sparse_look): walking a texture's pages at each look took half of the submit thread's time in Mario Kart World, held
 // g_vp_mu against the game's own mapping calls, and the dirty-page generation it was gated on moves with any guest write. The log starts at the first call. How many requests the pool has had
 // (no lock, called at each look of a texture)

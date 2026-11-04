@@ -17,7 +17,7 @@ $W/run/boot.sh <log name> [seconds] [VAR=value ...]
 | `>>> nnosInitialize`, `>>> nnMain` | Boot stages reached |
 | `[RED] …` | Something unimplemented or wrong, printed once per kind. Collect them with `grep -aF "[RED]" log \| sort \| uniq -c` after every run |
 | `UNIMPL <name>` | A forced NVN / SDK stub was called |
-| `[nvn] frame N: … \| name=count …` | Per-frame NVN call counts (calls made on the frame thread; command buffers recorded elsewhere replay later) |
+| `[nvn] frame N: … \| name=count …` | With `DM_NVN_COUNT=1`: per-frame NVN call counts (calls made on the frame thread; command buffers recorded elsewhere replay later) |
 | `[longframe]` | A long frame, with submit / GPU / pipeline / upload breakdown |
 | `memory up to frame N: resident … GPU allocated …` | Memory report (RSS, Metal allocated size). Printed when memory moves; steady growth here is a leak. A watchdog exits at 24 GB. Also: memory pools and how many are resident (pools join the residency set on first GPU use), finalized pool buffers still alive, the storage-sharing texture table, and on iOS `headroom to the system memory limit` (`os_proc_available_memory`, how far the app is from being killed for memory) |
 | `CRASH sig=… pc=… lr=…` + registers + `bt:` + `stack scan` + thread dump | Crash report: see [05](05-debugging.md) |

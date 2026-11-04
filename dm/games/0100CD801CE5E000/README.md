@@ -9,7 +9,7 @@ On the Mac: the intro, the title, a new run by touch and the tutorial's first st
 | Setting | Where | Why |
 |---|---|---|
 | `op_mode handheld` | [`game.tsv`](game.tsv) | the Switch build plays by touch there (SDL turns the touch screen into LÖVE touches and mouse presses: tap a card, drag it): on the iPhone the touches outside the gamepad controls, on the Mac the mouse. Docked it reads only the pads. Its window is then the 1280x720 handheld display |
-| `pad_layout touch` | `game.tsv` | the virtual gamepad starts in its Tap layout (only the layout button; every touch goes to the game), since the 2D layout's corners cover Run Info, Options and the deck; the layout button brings back 2D and 3D |
+| `pad_layout touch` | `game.tsv` | the virtual gamepad starts in its Tap layout (only the menu button; every touch goes to the game), since the 2D layout's corners cover Run Info, Options and the deck; the in-game menu's Controller layout brings back 2D and 3D |
 | [`gl_capture.tsv`](gl_capture.tsv) | profile | the 35 shaders LÖVE puts together at run time, which no game file holds; the NSP script captures them on the Mac; see [Shaders](#shaders) |
 | `modules main sdk` | `game.tsv` | `subsdk0` / `subsdk1` are NVIDIA's OpenGL and Vulkan drivers, which program the GPU through NvRm: never loaded, the GL layer answers `main`'s EGL imports |
 | `sys_resource 0x0`; `mem_reserve 0xf0000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | `game.tsv` | no system resource, so no virtual address memory: `nninitStartup` gives its malloc a heap of the pool − used memory, which it maps only as it touches it; `main`'s 264 MB bss counts as used memory |

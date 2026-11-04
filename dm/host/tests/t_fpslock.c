@@ -1,4 +1,5 @@
-// Exercise production build gates and frame-limit writes against sparse synthetic module memory; Unreal's rows come from the console variables the rewriter names in main's fixups.
+// Exercise production build gates and frame-limit writes against sparse synthetic module memory; Unreal's rows come from the console variables the rewriter names in main's fixups,
+// and a target frame rate the game steps by from the field it names there (FPS_TARGET_PTR, FPS_TARGET_FIELD).
 #include "../hle_fpslock.c"
 #include <assert.h>
 #include <math.h>
@@ -45,7 +46,7 @@ static void check(int which) {
     assert(base != MAP_FAILED);
     g_nmod = 1; strcpy(g_mod[0].name, "main"); g_mod[0].base = base;
     strcpy(g_mod[0].build_id, "94ceae325c205c4b9d6f7235552f28fd");
-    setenv("DM_FPS_TARGET", which == 1 || which == 10 ? "30" : which == 2 || which == 11 ? "0" : "60", 1);
+    setenv("DM_FPS_TARGET", which == 1 || which == 10 || which == 18 ? "30" : which == 2 || which == 11 ? "0" : "60", 1);
     int32_t *unity = (int32_t *)(base + 0x4afc868);
     *unity = which == 1 ? 60 : which == 4 ? -1 : which == 5 ? 0 : 30;
     uint8_t object[0x500] = {0};
@@ -74,6 +75,11 @@ static void check(int which) {
         frostbite(base, object);
         *(float *)(object + 0x34) = 30; *(int32_t *)(object + 0x38) = 30;
         if (which == 16) *(uint64_t *)(object + 8) = 0;   // the cache word holds something else
+    } else if (which == 17 || which == 18) {   // Fire Emblem Fortune's Weave: the target the rewriter found, 30 in gameplay (17) or 60 in a menu (18, at DM_FPS_TARGET=30)
+        strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
+        g_mod[0].fps_target_ptr = 0x21e60d8; g_mod[0].fps_target_field = 0x1dc;
+        *(uintptr_t *)(base + 0x21e60d8) = (uintptr_t)object;
+        *(int32_t *)(object + 0x1dc) = which == 17 ? 30 : 60;
     } else if (which >= 9) {   // the present interval alone (UE 4.18's nvn.SyncInterval); 12: a main the rewriter found no variable in
         strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
         if (which != 12) cvar("nvn.SyncInterval", 0x8adca10);
@@ -106,7 +112,13 @@ static void check(int which) {
         assert(*(float *)(object + 0x34) == 60 && *(int32_t *)(object + 0x38) == 60 && writes == 2);
         dm_fps_lock_tick(); assert(writes == 2);
         *(int32_t *)(object + 0x38) = 30; dm_fps_lock_tick(); assert(*(int32_t *)(object + 0x38) == 60 && writes == 3);
-    } else if (which == 16) assert(*(float *)(object + 0x34) == 30 && *(int32_t *)(object + 0x38) == 30 && writes == 0);
+    } else if (which == 17) {
+        int32_t *t = (int32_t *)(object + 0x1dc);
+        assert(*t == 60 && writes == 1);
+        dm_fps_lock_tick(); assert(writes == 1);
+        *t = 30; dm_fps_lock_tick(); assert(*t == 60 && writes == 2);   // the game sets 30 again where gameplay starts
+    } else if (which == 18) assert(*(int32_t *)(object + 0x1dc) == 30 && writes == 1);
+    else if (which == 16) assert(*(float *)(object + 0x34) == 30 && *(int32_t *)(object + 0x38) == 30 && writes == 0);
     else if (which == 13) {
         assert(sync[0] == 2 && sync[1] == 2 && writes == 0);
         *(uintptr_t *)(base + 0x8adca10 + 0x10) = (uintptr_t)object;
@@ -119,10 +131,10 @@ static void check(int which) {
 
 int main(void) {
     // Each process starts the production one-time initialization with a fresh build and target.
-    for (int i = 0; i < 17; i++) {
+    for (int i = 0; i < 19; i++) {
         pid_t p = fork(); assert(p >= 0);
         if (!p) { check(i); _exit(0); }
         int status; assert(waitpid(p, &status, 0) == p); assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
-    puts("Frame limits: integer/float FPS, milliseconds, vsync copies, build gates and overrides passed");
+    puts("Frame limits: integer/float FPS, milliseconds, vsync copies, build gates, found fields and overrides passed");
 }

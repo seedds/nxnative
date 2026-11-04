@@ -5,6 +5,8 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>disable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- AnyCPU under any -r: a build for a runtime ID otherwise ties the dll to that architecture, and the universal launcher's x86_64 half cannot load an arm64 dll (GitHub issue #803) -->
+    <PlatformTarget>AnyCPU</PlatformTarget>
     <RyuSrc Condition="'$(RyuSrc)' == ''">$(MSBuildThisFileDirectory)../../../third_party/ryujinx</RyuSrc>
   </PropertyGroup>
   <ItemGroup>

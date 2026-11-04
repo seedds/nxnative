@@ -99,4 +99,6 @@ No `patches.py`.
 
 ## Found on this game
 
-Nothing new: the findings are Scarlet's ([Found on this game](../0100A3D008C5C000/README.md#found-on-this-game)).
+The other findings are Scarlet's ([Found on this game](../0100A3D008C5C000/README.md#found-on-this-game)).
+
+- [Bluetooth LE at boot](../../../docs/reference/services.md#bluetooth-le-at-boot): 3.0.1 (`v720896`, a derived profile) calls `nn::bluetooth::InitializeBle` a second after boot and aborted without the `bt` service; the host answers the BLE calls offline (resolved).

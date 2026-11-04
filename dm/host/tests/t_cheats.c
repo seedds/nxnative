@@ -36,6 +36,8 @@ static uint8_t *gas;
 int dm_guest_as_contains(uintptr_t a) { uintptr_t b = (uintptr_t)gas; return gas && a >= b && a - b < GAS; }
 static int as_ready = 1;   // 0: the block is not reserved yet (a pass before hle_svc.c's mem_init): svc_guest_range answers NULL
 void svc_guest_range(uint8_t **base, size_t *size) { *base = as_ready ? gas : NULL; *size = as_ready ? GAS : 0; }
+// The alias region: before the guest block is reserved none, then one laid out from the test's heap, which is not the block's partition (region 2's refusal)
+void svc_alias_range(uint8_t **base, size_t *size) { *base = as_ready && heap ? (uint8_t *)(uintptr_t)((uint64_t)(uintptr_t)heap - DM_GAME_MEM_STACK - DM_GAME_MEM_ALIAS) : NULL; *size = as_ready ? DM_GAME_MEM_ALIAS : 0; }
 static uint64_t held;                            // the keys "held" for the key-press conditional (hle_hid.c)
 uint64_t dm_cheats_keys(void) { return held; }
 static char moddir[1100];                        // the module folder (loader.c), with the rewriter's main.changed.tsv

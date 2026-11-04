@@ -286,17 +286,25 @@ def mshd_shaders(d, label):
 
 def glslc_stage(ctl, code):
     """A GLSLC output's stage, from its code area's header (graphics: the SPH's stage bits), or compute when the code has no header and the control's thread group (+0x748) is filled"""
+    if nvn2_ctl(ctl): return nvn2_stage(ctl, code)
     headerless_cs = code[:4] not in (CS_MAGIC, GFX_MAGIC) and len(ctl) >= 0x754 and all(struct.unpack_from('<3I', ctl, 0x748))
     return 'cs' if code[:4] == CS_MAGIC or headerless_cs else sph_stage(code) if code[:4] == GFX_MAGIC and len(code) >= 0x34 else None
 
+def glslc_layout(d, h):
+    """The header of the GLSLC output at h → (the whole output's length, section count, first section header, distance between section headers), all relative to the output.
+    An NVN2 output (Pokemon Pokopia's G2S containers and main: GPU code version 0xc9 at +0x30, +0x44 zero) has the same section header fields as an NVN output, further along"""
+    w = lambda o: struct.unpack_from('<I', d, h + o)[0]
+    if h + 0x68 <= len(d) and w(0x30) == 0xc9 and not w(0x44): return w(0x5c), w(0x64), 0xa8, 0x98
+    return (w(0x44), w(0x4c), 0x90, 0x90) if h + 0x50 <= len(d) else (0, 0, 0x90, 0x90)
+
 def glslc_section(d, h, size):
-    """The GPU code sections of the GLSLC output at h, from its section headers: output +0x4c = section count, section i's header at +0x90 + 0x90 i = {u32 size, u32 data offset (from the
+    """The GPU code sections of the GLSLC output at h, from its section headers (glslc_layout): output +0x4c = section count, section i's header at +0x90 + 0x90 i = {u32 size, u32 data offset (from the
     output), u32 type (0 = GPU code)}; a GPU code header adds +0x30 control offset, +0x34 code offset (both from the section's data), +0x38 code length, +0x3c control length.
     → [(control, code)] of each GPU code section, or None"""
-    n, secs = struct.unpack_from('<I', d, h + 0x4c)[0], []
-    if not 0 < n <= 16 or h + 0x90 * (n + 1) > len(d): return None
+    _, n, first, stride = glslc_layout(d, h); secs = []
+    if not 0 < n <= 16 or h + first + stride * n > len(d): return None
     for i in range(n):
-        s = h + 0x90 + 0x90 * i
+        s = h + first + stride * i
         ssz, soff, typ = struct.unpack_from('<3I', d, s)
         if typ: continue
         co, ko, kn, cn = struct.unpack_from('<4I', d, s + 0x30)
@@ -325,7 +333,13 @@ def glslc_shaders(d, label, need=True, skip=()):
     for m in re.finditer(b'\x91\x68\x86\x19', d):
         if any(a <= m.start() < b for a, b in skip): continue
         if m.start() + 0x48 > len(d): continue
-        h = m.start(); size = struct.unpack_from('<I', d, h + 0x44)[0]
+        h = m.start(); size, _, first, _ = glslc_layout(d, h)
+        if first == 0xa8:   # NVN2: its section headers say everything; its control sections are too short for the rule below
+            if not 0 < size <= len(d) - h: continue
+            secs = glslc_section(d, h, size) or []
+            if len(secs) > 1: out += glslc_program(d, h, size, label)
+            elif secs and (st := glslc_stage(*secs[0])) and not check(label, st, *secs[0]): out.append((f'{label}#GLSLC@{h:#x}', st, *secs[0]))
+            continue
         c = d.find(CTL_MAGIC, h, h + size) if 0x760 < size <= len(d) - h else -1
         if c < 0: continue
         if d.find(CTL_MAGIC, c + 4, h + size) >= 0:
@@ -483,13 +497,13 @@ def idrk_shaders(path, label, out):
 
 G2S, SPKG = b'_S2G3000', b'SPKG'
 def kt_gz(d):
-    """Koei Tecmo's older chunked zlib (Fire Emblem: Three Houses: the compressed entries of DATA1.bin and the patch*/…/*.gz files): u32 chunk size (0x10000), u32 chunk count, u32 inflated length,
+    """Koei Tecmo's older chunked zlib (Fire Emblem: Three Houses: the compressed entries of DATA1.bin and the patch*/…/*.gz files): u32 chunk size (0x10000; Pokemon Pokopia's LD_C0_R.BIN also 0x20000 and 0x80000), u32 chunk count, u32 inflated length,
     u32 stored length of each chunk, then the chunks at 0x80 alignment, each a u32 length + one zlib stream, or the plain bytes when the stored length equals the chunk's inflated length (a short last
     chunk, or one that does not compress). → the inflated data, or None when d is not in that form"""
     import zlib
     if len(d) < 16: return None
     cs, n, tot = struct.unpack_from('<III', d)
-    if cs != 0x10000 or not n or n != (tot + cs - 1) // cs or 12 + 4 * n > len(d): return None
+    if cs < 0x10000 or cs & (cs - 1) or not n or n != (tot + cs - 1) // cs or 12 + 4 * n > len(d): return None
     sizes = struct.unpack_from(f'<{n}I', d, 12); o = (12 + 4 * n + 0x7f) & ~0x7f; out = []
     for i, s in enumerate(sizes):
         if o + s > len(d): return None
@@ -527,11 +541,18 @@ def kt_shaders(d, label, out):
     if b'\x91\x68\x86\x19' in d: out.extend(glslc_shaders(d, label, need=False))
     if d[:4] == b'SARC' or b'BNSH\0\0\0\0' in d: scan_blob(d, label, out)
 
+def linkdata_index(path):
+    """The index beside a LINKDATA archive, or None: Three Houses' DATA0.bin beside DATA1.bin, Pokemon Pokopia's LI_C0_R.IDX beside LD_C0_R.BIN (247 MB, 12,298 records, 700 GLSLC outputs: the same records and chunks)"""
+    name = os.path.basename(path)
+    idx = 'DATA0.bin' if name == 'DATA1.bin' else 'LI_' + name[3:-4] + '.IDX' if name.startswith('LD_') and name.endswith('.BIN') else None
+    idx = idx and os.path.join(os.path.dirname(path), idx)
+    return idx if idx and os.path.exists(idx) else None
+
 def linkdata_jobs(path, rel, parts=64):
-    """Three Houses' LINKDATA: DATA0.bin, beside DATA1.bin (6.9 GB), indexes it with 32-byte entries {u64 offset, u64 inflated length, u64 stored length, u64 compressed}. The entries are split into
+    """A LINKDATA archive's index (linkdata_index; Three Houses' DATA1.bin is 6.9 GB) has 32-byte entries {u64 offset, u64 inflated length, u64 stored length, u64 compressed}. The entries are split into
     ranges of about equal stored size, one scan job each. → [(path, rel, (first entry, end entry)), …], or None when there is no index beside the file"""
-    idx = os.path.join(os.path.dirname(path), 'DATA0.bin')
-    if os.path.basename(path) != 'DATA1.bin' or not os.path.exists(idx): return None
+    idx = linkdata_index(path)
+    if not idx: return None
     n = os.path.getsize(idx) // 32; step = os.path.getsize(path) / parts; jobs, lo = [], 0
     with open(idx, 'rb') as f: ents = [struct.unpack('<QQQQ', f.read(32)) for _ in range(n)]
     for i in range(1, n + 1):
@@ -540,7 +561,9 @@ def linkdata_jobs(path, rel, parts=64):
 
 def linkdata_shaders(path, rel, rng, out):
     from romfs import mmap
-    with open(os.path.join(os.path.dirname(path), 'DATA0.bin'), 'rb') as f: idx = f.read()
+    index = linkdata_index(path)
+    if not index: return red(f'{path}: the LINKDATA index its scan jobs were planned from is gone')
+    with open(index, 'rb') as f: idx = f.read()
     with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
         for i in range(*rng):
             off, n, stored, comp = struct.unpack_from('<QQQQ', idx, i * 32)
@@ -761,38 +784,71 @@ def pg_sized_shader(d, label):
 
 MTARC, MTSPK = b'ARC\0', b'SPK\0'
 def mtarc_members(d, label):
-    """Capcom's MT Framework archive (The Great Ace Attorney Chronicles: 447 '.arc' files under nativeNXx64): 'ARC\\0', u16 version 7, u16 entry count, then one 0x90-byte entry per file
-    {char path[128] ('\\\\'-separated, no extension), u32 type hash, u32 stored length, u32 length in the low 29 bits (flags above), u32 offset}; the data is a zlib stream, or stored when the
-    stored length equals the length. → (path, data) of each entry"""
+    """Capcom's MT Framework archive: 'ARC\\0', u16 version 7, u16 entry count, then one entry per file {char path[128 or 64] ('\\\\'-separated, no extension), u32 type hash, u32 stored length,
+    u32 length in the low 29 bits (flags above), u32 offset}: 128 in The Great Ace Attorney Chronicles (447 '.arc' files under nativeNXx64), 64 in Ultra Street Fighter II. The data is a zlib stream, or
+    stored when the stored length equals the length. → (path, data) of each entry"""
     import zlib
-    ver, n = struct.unpack_from('<HH', d, 4)
+    ver, n = field(d, '<HH', 4, label)
     if ver != 7: red(f'{label}: ARC version {ver}: only version 7 is known')
+    if not n: return
+    # The version does not name the width. Check every member against the end of its candidate directory and the archive;
+    # the last member need not end at EOF. Prefer the established wide layout when both fit.
+    def directory_rank(width):
+        step = width + 16
+        table_end = 8 + n * step
+        if table_end > len(d): return -1
+        has_data = False
+        for o in range(8, table_end, step):
+            stored, size, offset = struct.unpack_from('<3I', d, o + width + 4)
+            if not stored and not (size & 0x1fffffff) and not offset: continue  # an empty member needs no offset
+            if offset < table_end or offset + stored > len(d): return -1
+            has_data |= stored != 0
+        return int(has_data)  # zero-filled padding can look like an all-empty directory
+    wide = directory_rank(128)
+    if wide == 1: width = 128
+    else:
+        short = directory_rank(64)
+        if wide < 0 and short < 0: red(f'{label}: ARC v7 has no complete directory with in-bounds members')
+        width = 128 if wide >= short else 64
     for i in range(n):
-        o = 8 + 0x90 * i
-        path = d[o:o + 0x80].split(b'\0')[0].decode('latin-1')
-        csz, usz, off = struct.unpack_from('<3I', d, o + 0x84); usz &= 0x1fffffff
-        data = d[off:off + csz] if csz == usz else zlib.decompress(d[off:off + csz])
+        o = 8 + i * (width + 16)
+        path = d[o:o + width].split(b'\0')[0].decode('latin-1')
+        csz, usz, off = struct.unpack_from('<3I', d, o + width + 4); usz &= 0x1fffffff
+        data = d[off:off + csz]
+        if csz != usz:
+            try: data = zlib.decompress(data)
+            except zlib.error as e: red(f'{label}#{path}: invalid ARC zlib stream: {e}')
         if len(data) != usz: red(f'{label}#{path}: {len(data):#x} bytes, the entry says {usz:#x}')
         yield path.replace('\\', '/'), data
 
 def mtspk_shaders(d, label):
-    """MT Framework's shader package ('SPK\\0'; The Great Ace Attorney Chronicles keeps its only one, sc\\NX_64\\root, in sa/NX_64/root.arc): after the package's tables every shader is a
-    code area followed directly by its control section, back to back to the end of the file (230 vertex shaders, then 230 pixel shaders). Each control section names its code length (+0x704),
-    so the code area is the bytes right before it, and every block must start where the previous one ended. The tables that say which vertex and pixel shaders the engine combines are not
-    read, so the shaders are paired as single-stage programs (separable_pairs)"""
+    """MT Framework's shader package ('SPK\\0'; The Great Ace Attorney Chronicles keeps its only one, sc\\NX_64\\root, in sa/NX_64/root.arc): after the package's tables the shaders lie back to back to the
+    end of the file (230 vertex shaders, then 230 pixel shaders), each a code area and a control section: code first there, control first in Ultra Street Fighter II. Each control section names its code
+    length (+0x704), and every block must start where the previous one ended. The tables that say which vertex and pixel shaders the engine combines are not read, so the shaders are paired as
+    single-stage programs (separable_pairs)"""
     out, end, c = [], None, d.find(CTL_MAGIC)
+    if c < 0: red(f'{label} SPK: no shader control section')
+    ncode, = field(d, '<I', c + 0x704, f'{label} SPK')
+    # In a code-first package the next shader's code also follows this control. Its *own* code comes
+    # before it at the declared distance. Once established, keep the order even if a later pair is damaged.
+    control_first = c < ncode or d[c - ncode:c - ncode + 4] != GFX_MAGIC
     while c >= 0:
+        if c + 0x708 > len(d) or d[c:c + 4] != CTL_MAGIC: red(f'{label} SPK: no complete control header at {c:#x}')
         nctl, ncode = struct.unpack_from('<I', d, c + 0x20)[0], struct.unpack_from('<I', d, c + 0x704)[0]
-        a = c - ncode
-        if a < 0 or d[a:a + 4] != GFX_MAGIC or end is not None and a != end: red(f'{label} SPK control section @{c:#x}: its code area does not end right before it')
-        ctl, code = d[c:c + nctl], d[a:c]
+        g = c + nctl if control_first else c - ncode
+        start = c if control_first else g
+        if nctl < 0x708 or g < 0 or c + nctl > len(d) or g + ncode > len(d) or d[g:g + 4] != GFX_MAGIC:
+            red(f'{label} SPK: no matching graphics code area for control at {c:#x}')
+        if end is not None and start != end: red(f'{label} SPK: noncontiguous shader at {start:#x} after {end:#x}')
+        ctl, code = d[c:c + nctl], d[g:g + ncode]
         st = sph_stage(code)
         why = check(label, st, ctl, code) if st else 'no stage in the SPH'
-        if why: red(f'{label} SPK @{a:#x}: {why}')
-        out.append((f'{label}#MTSPK@{a:#x}', st, ctl, code))
-        end = c + nctl; c = d.find(CTL_MAGIC, end)
-    if end != len(d): red(f'{label} SPK: the last shader ends at {end}, not at the end of the package ({len(d):#x})')
-    return out
+        if why: red(f'{label} SPK @{start:#x}: {why}')
+        out.append((f'{label}#MTSPK@{start:#x}', st, ctl, code))
+        end = g + ncode if control_first else c + nctl
+        if end == len(d): return out
+        c = end if control_first else d.find(CTL_MAGIC, end)
+    red(f'{label} SPK: last shader ends at {end}, before the end of the package')
 
 def mtarc_shaders(d, label, out):
     for path, m in mtarc_members(d, label):
@@ -1611,8 +1667,8 @@ def raw_shaders(d, label, known=()):
     Of 25 mains on hand only that one has such control sections, so the tables of every other game stay as they were"""
     skip = []
     for m in re.finditer(b'\x91\x68\x86\x19', d):
-        size = struct.unpack_from('<I', d, m.start() + 0x44)[0]
-        if 0x760 < size <= len(d) - m.start(): skip.append((m.start(), m.start() + size))
+        size, _, first, _ = glslc_layout(d, m.start())
+        if (0 if first == 0xa8 else 0x760) < size <= len(d) - m.start(): skip.append((m.start(), m.start() + size))
     for m in re.finditer(b'BNSH\0\0\0\0', d): skip.append((m.start(), m.start() + struct.unpack_from('<I', d, m.start() + 0x1c)[0]))
     ctls = [c for m in re.finditer(re.escape(CTL_MAGIC), d) if not (c := m.start()) & 3 and not any(a <= c < b for a, b in skip) and d[c:c + struct.unpack_from('<I', d, c + 0x20)[0]] not in known]
     if not ctls: return []
@@ -2117,7 +2173,10 @@ def sarc_members(d, label='SARC'):
     for i in range(n):
         h, attr, s, e = struct.unpack_from('<IIII', d, hl + 12 + 16 * i)
         if not s <= e <= len(d) - doff: red(f'{label}: SARC member {i} at {s:#x}..{e:#x} of the data lies outside its {len(d) - doff:#x} bytes')
-        nm = d[names + (attr & 0xffffff) * 4:].split(b'\0')[0].decode('utf-8', 'replace') if attr >> 24 else f'#{i}'
+        if attr >> 24:   # up to the name's own NUL: splitting the rest of the archive per member was quadratic (Fire Emblem Fortune's Weave's Layout/Common.arc.zst: 6 minutes)
+            o = names + (attr & 0xffffff) * 4; z = d.find(b'\0', o)
+            nm = d[o:z if z >= 0 else len(d)].decode('utf-8', 'replace')
+        else: nm = f'#{i}'
         yield nm, d[doff + s:doff + e]
 
 NV_STAGES = ['vs', 'ps', 'gs', 'hs', 'ds', 'cs']   # NVN stage order
@@ -2696,13 +2755,13 @@ def main():
         # GLSLC outputs the game compiles at run time, captured on the Mac (hle_glslc.c): <version dir>/glslc_capture, or DM_GLSLC_CAPTURE. A game needs them when main holds GLSL sources and
         # calls glslcCompile in a module it loads (Fire Emblem: Three Houses; profile_guess.py shader_sources). Captain Toad: Treasure Tracker imports it with agl's GLSL sources, but no module defines it
         cap = os.environ.get('DM_GLSLC_CAPTURE') or os.path.join(os.path.dirname(os.path.abspath(romfs)), 'glslc_capture')
-        names = sorted(f for f in os.listdir(cap) if f.endswith('.glslc')) if os.path.isdir(cap) else []
+        names = sorted(f for f in os.listdir(cap) if f.endswith('.glslc') and not f.startswith('._')) if os.path.isdir(cap) else []   # AppleDouble metadata beside captures on external drives
         if not names and glsl_sources(img) and 'glslcCompile' in main_imports(img) and glslc_module(os.path.dirname(os.path.abspath(mainnso))):
-            print(f'[RED] main holds GLSL sources and imports glslcCompile, but there are no captured GLSLC outputs in {cap}: the shaders the game compiles at run time will have no translation', flush=True)
+            print(f'[RED] main holds GLSL sources and imports glslcCompile, but there are no captured GLSLC outputs in {cap}: the shaders the game compiles at run time will have no translation (the NSP script checks an empty capture against the offline split)', flush=True)
         for nm in names: found += glslc_shaders(open(os.path.join(cap, nm), 'rb').read(), f'/glslc_capture/{nm}')
         # Unreal Engine shader code archives decoded on the Mac (uepak.py): <version dir>/ue_shaders, or DM_UE_SHADERS; needed when the RomFS has Unreal paks
         ued = os.environ.get('DM_UE_SHADERS') or os.path.join(os.path.dirname(os.path.abspath(romfs)), 'ue_shaders')
-        names = sorted(f for f in os.listdir(ued) if f.endswith('.ushaderbytecode')) if os.path.isdir(ued) else []
+        names = sorted(f for f in os.listdir(ued) if f.endswith('.ushaderbytecode') and not f.startswith('._')) if os.path.isdir(ued) else []   # AppleDouble metadata, not decoded shader archives
         if not names and uepak.unreal_paks(romfs, inline=False): red(f'the RomFS has Unreal paks, but there are no decoded shader code archives in {ued} (the NSP script writes them)')
         for nm in names: found += ue_shaders(open(os.path.join(ued, nm), 'rb').read(), f'/ue_shaders/{nm}')
         results.append(('main', {skey(c, k): (w, s, c, k) for w, s, c, k in found}, var_pairs(found), {}))

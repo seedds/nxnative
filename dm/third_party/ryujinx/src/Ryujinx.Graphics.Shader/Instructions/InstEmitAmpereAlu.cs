@@ -71,6 +71,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             alu(0x09a, InstName.Bfe, ASgxt, uniform: true);
 
             x(0x882, InstName.Mov, AUMov, N, uniform: true);
+            x(0x883, InstName.P2r, AUp2ur, N, uniform: true);
             x(0xc82, InstName.Mov, AUMov, N, uniform: true);
             x(0x805, InstName.Cs2r, ACs2r, N);
             x(0x919, InstName.S2r, AS2r, N);
@@ -236,15 +237,17 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, half ? context.PackHalf2x16(res, ConstF(0f)) : res);
         }
 
-        // F2I: destination signed (72) and size (75..77, log2 bytes), rounding (78..80), source size (84..86)
+        // F2I: destination signed (72) and size (75..77, log2 bytes), rounding (78..80), source size (84..86); a half source is the half 60..62 selects, as F2F's (Pokemon Pokopia: 1,067 shaders)
         public static void AF2i(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
             ASrc s = AOne(context, x);
 
-            if (x.Bits(84, 86) != 2)
+            int srcSize = x.Bits(84, 86);
+
+            if (srcSize is not (1 or 2))
             {
-                throw AFail(context, "F2I from a float that is not 32-bit");
+                throw AFail(context, "F2I from a float that is neither 16-bit nor 32-bit");
             }
 
             int size = x.Bits(75, 77);
@@ -257,7 +260,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             IDstFmt dst = (IDstFmt)((signed ? 4 : 0) | System.Math.Max(size, 1));
 
-            EmitF2I(context, DstFmt.F32, dst, (RoundMode2)x.Bits(78, 80), AGet(context, s), x.Rd, s.Abs, s.Neg);
+            Operand src = AGet(context, s);
+
+            if (srcSize == 1)
+            {
+                src = x.Bits(60, 62) is 1 or 3 ? context.UnpackHalf2x16High(src) : context.UnpackHalf2x16Low(src);
+            }
+
+            EmitF2I(context, DstFmt.F32, dst, (RoundMode2)x.Bits(78, 80), src, x.Rd, s.Abs, s.Neg);
 
             if (size == 0 && x.Rd != RegisterConsts.RegisterZeroIndex)
             {
@@ -397,17 +407,28 @@ namespace Ryujinx.Graphics.Shader.Instructions
             EmitF2F(context, (DstFmt)srcSize, (DstFmt)dstSize, IntegerRound.Pass, src, x.Rd, s.Abs, s.Neg, false);
         }
 
-        // F2FP.F16.F32.PACK_AB Rd, a, b: a to the high half, b to the low one
+        // F2FP.F16.F32.PACK_AB Rd, a, b: a to the high half, b to the low one.
+        // .MERGE_C (78): a is not read; b to the low half, the low half of c to the high one. The compiler builds a half pair in two steps, high component first: Pokemon Pokopia's 22,886
+        // shaders have F2FP.MERGE_C Rd, RZ, c[3][word + 1], RZ then F2FP.MERGE_C Rd, RZ, c[3][word], Rd, with RZ in a every time (Mesa's NAK documents the same behaviour for OpF2FP)
         public static void AF2fp(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
 
-            if (x.Bit(78) || x.Bit(72))
+            if (x.Bit(72))
             {
-                throw AFail(context, "F2FP.MERGE_C");
+                throw AFail(context, "F2FP bit 72");
             }
 
             (ASrc a, ASrc b) = ASecond(context, x, abs: false);
+
+            if (x.Bit(78))
+            {
+                Operand low = context.PackHalf2x16(AFloat(context, b), ConstF(0f));
+                Operand high = context.ShiftLeft(Register(x.Rc, RegisterType.Gpr), Const(16));
+
+                ASet(context, x, context.BitwiseOr(high, low), AUniform(context));
+                return;
+            }
 
             ASet(context, x, context.PackHalf2x16(AFloat(context, b), AFloat(context, a)), AUniform(context));
         }
@@ -446,7 +467,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             bool bIn32 = x.Form is 1 or 4 or 5 or 6;
             ASrc slot32 = bIn32 ? b : c;
             ASrc slot64 = bIn32 ? c : b;
-            slot32 = slot32.WithMods(x.Bit(63), x.Bit(62));
+            // An immediate has no modifiers: bits 62 and 63 are its own, and they would flip the sign of a negative constant
+            slot32 = slot32.Kind == AKind.Imm ? slot32 : slot32.WithMods(x.Bit(63), x.Bit(62));
             slot64 = slot64.WithMods(x.Bit(84), x.Bit(83));
 
             Operand[] ha = AHalfLanes(context, a, x.Bits(74, 76));
@@ -454,6 +476,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand[] h64 = AHalfLanes(context, slot64, x.Bits(81, 83));
 
             return bIn32 ? (ha, h32, h64) : (ha, h64, h32);
+        }
+
+        // The sources of a two-source half-pair operation, as ASecond: the second is B in forms 1, 4, 5, 6 and C in forms 2, 3, 7, where B would be the unused register field at 64.
+        // Pokemon Pokopia's bilateral blur steps its loop with HADD2 Rd, Rd, imm: reading that field instead stepped by the bits of whatever R0 held, and hung the GPU
+        private static (Operand[] A, Operand[] B) AHalfSecond(EmitterContext context, AmpereOp x)
+        {
+            (Operand[] a, Operand[] b, Operand[] c) = AHalfSrcs(context, x);
+
+            return (a, x.Form is 1 or 4 or 5 or 6 ? b : c);
         }
 
         // The result: two halves packed, or with .F32 (78) the low lane as one float. HFMA2 / HMUL2 (sm_86): .RELU (79) clamps at zero; .BF16_V2 (85)
@@ -485,7 +516,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         public static void AHadd2(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (Operand[] a, Operand[] b, _) = AHalfSrcs(context, x);
+            (Operand[] a, Operand[] b) = AHalfSecond(context, x);
 
             AHalfResult(context, x, context.FPAdd(a[0], b[0]), context.FPAdd(a[1], b[1]));
         }
@@ -493,7 +524,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         public static void AHmul2(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (Operand[] a, Operand[] b, _) = AHalfSrcs(context, x);
+            (Operand[] a, Operand[] b) = AHalfSecond(context, x);
 
             AHalfResult(context, x, context.FPMultiply(a[0], b[0]), context.FPMultiply(a[1], b[1]));
         }
@@ -502,6 +533,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             AmpereOp x = new(context.CurrOp);
             (Operand[] a, Operand[] b, Operand[] c) = AHalfSrcs(context, x);
+
+            // .H0_NH1 (86), named high lane first: the high lane reads B's low half, the low lane B's high half negated (a rotation by 90 degrees, what cross products and 2D rotations need).
+            // Pokemon Pokopia's sun shadow mask crosses its two lanes without it (the shadow against the cloud map rather than the cascade fade), which lights cave floors and drops cloud shadows
+            if (x.Bit(86))
+            {
+                b = [context.FPNegate(b[1]), b[0]];
+            }
 
             AHalfResult(context, x, context.FPFusedMultiplyAdd(a[0], b[0], c[0]), context.FPFusedMultiplyAdd(a[1], b[1], c[1]));
         }
@@ -592,9 +630,24 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             AmpereOp x = new(context.CurrOp);
 
-            if (x.Bit(91) || x.Bits(78, 80) != 0)
+            int mode = x.Bits(78, 80);
+
+            if (x.Bit(91) || mode == 1)
             {
-                throw AFail(context, "LDC with a bindless bank or an address mode");
+                throw AFail(context, "LDC with a bindless bank or the .IL address mode");
+            }
+
+            if (mode != 0)
+            {
+                // .IS / .ISL, as Maxwell's (InstEmitMemory.Ldc): the bank is the instruction's plus Ra's upper half, the offset Ra's lower half plus the instruction's.
+                // Hyrule Warriors: Age of Imprisonment's vertex shader cc679c7b4d3e703c reads c[1][(vertex index % 5) * stride] this way, and its pixel shader
+                // 059a0a910ff87a26 c[1][0x60 + R12 * scale]: the compiler adds 0x10000 to the offset. The bank is chosen at run time among the banks the shader
+                // can reach (ARuntimeBanks); a run-time bank 0 in a compute shader is not remapped (AMapC0).
+                Operand ra = Register(x.Ra, RegisterType.Gpr);
+                Operand slot = context.IAdd(Const(x.Bits(54, 59)), context.ShiftRightU32(ra, Const(16)));
+
+                ALoadConstant(context, x, slot, context.BitwiseAnd(ra, Const(0xffff)), (int)x.SignedField(38, 54), uniform: false, ARuntimeBanks(context, x.Bits(54, 59)));
+                return;
             }
 
             if (x.Ra == RegisterConsts.RegisterZeroIndex)
@@ -610,6 +663,39 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
         private static void ALoadConstant(EmitterContext context, AmpereOp x, int bank, Operand index, int offset, bool uniform)
         {
+            ALoadConstant(context, x, Const(bank), index, offset, uniform, null);
+        }
+
+        // The banks a run-time bank of LDC .IS can be: the shader's own constant segment (c1, which every shader has), the instruction's bank and every bank the
+        // shader's other constant reads name. A bank outside them reads 0, as in Ryujinx's Maxwell path for an unbound one. c0 is left out: the host fills the
+        // driver segment only at offsets known when the shader is built, and a shader indexing it at run time is not loaded (dmsh_build.py unfillable), which
+        // took pixel shader 059a0a910ff87a26 (it reads c0 elsewhere) out with its indexed c1 read
+        private static uint ARuntimeBanks(EmitterContext context, int bank)
+        {
+            uint banks = 1u << 1 | 1u << bank;
+
+            foreach (DecodedFunction function in context.Program)
+            {
+                foreach (Block block in function.Blocks)
+                {
+                    foreach (InstOp op in block.OpCodes)
+                    {
+                        AmpereOp y = new(op);
+
+                        if (AmpereTable.ReadsConstantBank(y) && !y.Bit(91))
+                        {
+                            banks |= 1u << AMapC0(context, y.Bits(54, 59), (int)y.SignedField(38, 54)).Bank;
+                        }
+                    }
+                }
+            }
+
+            return banks & ~1u;
+        }
+
+        // slot: a constant bank, or one chosen at run time among banks (EmitLoadConstant)
+        private static void ALoadConstant(EmitterContext context, AmpereOp x, Operand slot, Operand index, int offset, bool uniform, uint? banks)
+        {
             int size = x.Bits(73, 76);
 
             if (size > 5)
@@ -624,7 +710,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             for (int k = 0; k < (size == 5 ? 2 : 1) && rd + k < zero; k++)
             {
-                Operand value = EmitLoadConstant(context, Const(bank), context.IAdd(wordOffset, Const(k)));
+                Operand value = EmitLoadConstant(context, slot, context.IAdd(wordOffset, Const(k)), banks);
 
                 if (size < 4)
                 {
@@ -1232,6 +1318,20 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand mask = x.Opcode == 0x803 ? Const((int)x.Imm32) : Register(x.Rb, RegisterType.Gpr);
 
             EmitP2r(context, Register(x.Ra, RegisterType.Gpr), Register(x.Rd, RegisterType.Gpr), mask, (ByteSel)x.Bits(76, 78), false);
+        }
+
+        // UP2UR URd, URZ, 1: the uniform predicate UP0 as 0 or 1 in a uniform register. Pokemon Pokopia's two compute shaders with it use this one encoding (a mask over UP0..UP6 with a merge source
+        // is P2R's form, not seen here)
+        public static void AUp2ur(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+
+            if (x.Bits(24, 30) != RegisterConsts.UniformZeroIndex || x.Imm32 != 1)
+            {
+                throw AFail(context, "UP2UR with a merge source or another mask");
+            }
+
+            ASet(context, x, context.ConditionalSelect(APredReg(0, uniform: true), Const(1), Const(0)), uniform: true);
         }
 
         // PLOP3 Pd0, Pd1, a (87..90), b (77..80), c (68..71; uniform with bit 67), lut0 (64..67 | 72..77 << 3), lut1 (16..24)

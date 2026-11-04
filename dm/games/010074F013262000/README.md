@@ -161,6 +161,21 @@ the new library/table stamps. The all-local-game regression harness was started
 but stopped during its first baseline compilation, before any comparison
 completed; no cross-game comparison coverage is claimed for that sweep.
 
+### Send-off particles (GitHub issue #1011, resolved)
+
+A soldier's remains in Everblight Plain, A to send off. The steering field is a 10x10x10 RGBA8 3D texture
+(format `0x25`, flags 0, pool flags `0x64`) whose 4,000 bytes of texels the CPU wrote before first use. It is
+now taken from its storage ([entry](../../../docs/reference/nvn-objects.md#block-compressed-storage-the-cpu-wrote-before-first-use)).
+A/B on two Mac hosts that differ only by that change, the same save, 120-frame screenshot bursts from the
+press of A, spark pixels counted against the frame before it:
+- before: no sparks on the remains before A (3 pixels in the box), and none rise after it; they sink out of
+  sight at once;
+- after: sparks sit on the remains before A (1,281 pixels), then rise up the rock. Over the second burst their
+  centroid moves up by 153 px and their top edge from y 709 to 418, while the ground band empties
+  (1,358 to 81 pixels).
+
+The issue also names a 10x10x10 RGBA16F field; it did not appear in this scene.
+
 ## Mac development files
 
 The supplied folder is `/Volumes/S790/nsp/Xenoblade Chronicles 3/`. Extraction,
@@ -181,6 +196,7 @@ During a movie, Plus then a held X skips it. The diagnostic watchdog is off when
 
 ## Found on this game
 
+- [Same-pass feedback through a read-only image](../../../docs/reference/rendering.md#same-pass-feedback-read-through-a-snapshot): lighting shader `15816d836842bfb5` reads its R32Uint zone mask between barriers. Reading the previous frame’s mask made the Colony Sigma cutscene alternate in brightness. Resolved ([#1009](https://github.com/seedds/nxnative/issues/1009)): measured on an Apple M2 in Events Theater chapter 1's Colony Sigma battle, 8 of 10 bursts flipped brightness every frame before (sign-flip fraction 0.83–1.00), at most 0.28 of 11 after. The extra snapshots cost GPU time there: p50 50.4 → 53.0 ms, 18.3 → 17.2 fps. Open: if the shader loads the mask at its own pixel, a tile read (as sampled textures have) would avoid that cost; it needs the translator to record image loads' coordinates.
 - [Monolith ARH1, XBC1 and HCPS/SLCT shader containers](../../../docs/reference/shaders.md#monolith-arh1-xbc1-and-hcpsslct-shader-containers).
 - [Subgroup operations rewritten for a one-lane subgroup](../../../docs/reference/shaders.md#subgroup-operations-rewritten-for-a-one-lane-subgroup).
 - [IMAGE usage does not split texture storage](../../../docs/reference/rendering.md#image-usage-does-not-split-texture-storage).
@@ -190,3 +206,4 @@ During a movie, Plus then a held X skips it. The diagnostic watchdog is off when
 - [A host lock held across a same-core handoff](../../../docs/reference/threads.md#a-host-lock-held-across-a-same-core-handoff): contended native decoder waits must release a handoff.
 - [oe calls answered without an applet proxy](../../../docs/reference/services.md#oe-calls-answered-without-an-applet-proxy): enabling album-image notifications dereferenced the absent SelfController.
 - [The SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area) and [1 GB alignment of regions of 1 GB and more](../../../docs/reference/memory.md#1-gb-alignment-of-regions-of-1-gb-and-more).
+- [Block-compressed storage the CPU wrote before first use](../../../docs/reference/nvn-objects.md#block-compressed-storage-the-cpu-wrote-before-first-use): uncompressed 3D particle steering fields, taken from their storage too (GitHub issue #1011).

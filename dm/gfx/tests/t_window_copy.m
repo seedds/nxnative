@@ -1,6 +1,12 @@
 // Window-copy eligibility, target lifetime and fail-stop guards. The GPU exercise
-// is offscreen and does not claim to test a drawable or actual presentation.
+// uses an offscreen drawable and a manually invoked display-link callback.
 #include "../nvn/nvn_mtl.m"
+@interface FakeLinkUpdate : NSObject
+@property id<CAMetalDrawable> drawable;
+@property CFTimeInterval targetPresentationTimestamp;
+@end
+@implementation FakeLinkUpdate
+@end
 static CAMetalLayer *test_layer;
 void *front_metal_layer(void) { return (__bridge void *)test_layer; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -112,32 +118,42 @@ static void production_target(void) {
     CHECK("redirected draw GPU submission completes", mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error());
     int matched = 1; for (int y = 0; y < 4; y++) matched &= !memcmp((uint8_t *)drawn.contents + y*256, pattern + y*16, 16);
     CHECK("redirected textured draw preserves all 16 spatial colors", matched);
-    int crop[4]; CHECK("created target acquires a present reference", wc_take(w.serial, NULL, crop) == old);
-    id<MTLCommandQueue> queue = [g_dev newCommandQueue]; id<MTLCommandBuffer> cb = [queue commandBuffer];
     id<MTLSharedEvent> gate = [g_dev newSharedEvent];
-    CHECK("GPU lifetime gate created", gate != nil);
-    if (!gate) { wc_release(old); goto cleanup; }
-    {
-    [cb encodeWaitForEvent:gate value:1];
-    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
-    pass.colorAttachments[0].texture = (id<MTLTexture>)tex_get(old);
-    pass.colorAttachments[0].loadAction = MTLLoadActionClear; pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-    pass.colorAttachments[0].clearColor = MTLClearColorMake(1, 0.25, 0, 1);
-    id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:pass]; [enc endEncoding];
-    id<MTLBuffer> pixels = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared];
-    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-    [blit copyFromTexture:(id<MTLTexture>)tex_get(old) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(4,4,1) toBuffer:pixels destinationOffset:0 destinationBytesPerRow:16 destinationBytesPerImage:64];
-    [blit endEncoding]; [cb commit];
+    CAMetalLayer *present_layer = [CAMetalLayer layer]; present_layer.device = g_dev;
+    present_layer.pixelFormat = MTLPixelFormatBGRA8Unorm; present_layer.framebufferOnly = NO;
+    present_layer.drawableSize = CGSizeMake(4, 4); [g_q4 addResidencySet:present_layer.residencySet];
+    id<CAMetalDrawable> drawable = [present_layer nextDrawable];
+    CHECK("present gate and offscreen drawable created", gate && drawable);
+    if (!gate || !drawable) goto cleanup;
+    g_dm_present_link = 1; g_link_started = 1; g_link_owns_layer = 1;
+    NvMetalDisplayLinkDelegate *delegate = [NvMetalDisplayLinkDelegate new];
+    [g_q4 waitForEvent:gate value:1];
+    uint64_t ticket = present_enqueue(&w, 1. / 60, NULL, 0);
+    CHECK("production enqueue takes pending target", ticket && e->pending == 0);
+    FakeLinkUpdate *update = [FakeLinkUpdate new]; update.drawable = drawable;
+    update.targetPresentationTimestamp = CACurrentMediaTime() + 0.016;
+    [delegate metalDisplayLink:(CAMetalDisplayLink *)(id)update needsUpdate:(CAMetalDisplayLinkUpdate *)update];
+    pthread_mutex_lock(&g_pq_mu); int inflight = g_pq_inflight; pthread_mutex_unlock(&g_pq_mu);
+    CHECK("production callback queues gated present", inflight == 1);
     test_layer.drawableSize = CGSizeMake(2, 2); g_fd_dw = &dw; e = wc_try(pr, &dw, NULL);
     CHECK("wc_try resize replaces target", e && e->pser != old && e->pw == 2 && e->ph == 2);
-    CHECK("retired target remains registered while GPU work is queued", tex_get(old) != nil);
-    gate.signaledValue = 1; [cb waitUntilCompleted];
-    CHECK("offscreen GPU commands complete", cb.status == MTLCommandBufferStatusCompleted);
-    uint8_t *bytes = pixels.contents; int good = 1;
-    for (int i = 0; i < 16; i++) good &= bytes[4*i] == 255 && bytes[4*i+1] == 64 && bytes[4*i+2] == 0 && bytes[4*i+3] == 255;
-    CHECK("retired target GPU clear reads back expected pixels", good);
-    wc_release(old); CHECK("retired target is removed after GPU reader releases", tex_get(old) == nil);
-    }
+    CHECK("retired target remains registered while present is gated", tex_get(old) != nil);
+    gate.signaledValue = 1;
+    pthread_mutex_lock(&g_pq_mu); struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec += 5;
+    while (g_pq_inflight && pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts) != ETIMEDOUT) {}
+    int completed = !g_pq_inflight && g_pq_done >= ticket; pthread_mutex_unlock(&g_pq_mu);
+    CHECK("production present completion arrives", completed);
+    CHECK("completion releases retired target", completed && tex_get(old) == nil);
+    if (completed) {
+        id<MTLBuffer> pixels = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+        [b copyFromTexture:drawable.texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
+            sourceSize:MTLSizeMake(4,4,1) toBuffer:pixels destinationOffset:0 destinationBytesPerRow:16 destinationBytesPerImage:64];
+        [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        const uint8_t *bytes = pixels.contents; int good = cb.status == MTLCommandBufferStatusCompleted;
+        for (int i = 0; i < 16; i++) good &= bytes[4*i] == pattern[4*i+2] && bytes[4*i+1] == pattern[4*i+1] && bytes[4*i+2] == pattern[4*i] && bytes[4*i+3] == pattern[4*i+3];
+        CHECK("present drawable preserves all 16 asymmetric colors in BGRA", good);
+    } else CHECK("present drawable preserves all 16 asymmetric colors in BGRA", 0);
     }
 cleanup:
     g_fd_dw = NULL; g_exec_next = NULL; g_wc_base = nil; g_wc_wser = 0;

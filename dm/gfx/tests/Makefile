@@ -419,6 +419,10 @@ check_t_upscaler_mfx: t_upscaler_mfx
 	DM_NVN_ENC_THREAD=0 DM_UPSCALER=metalfx ./t_upscaler_mfx
 	DM_NVN_ENC_THREAD=1 DM_UPSCALER=metalfx ./t_upscaler_mfx
 	MTL_DEBUG_LAYER=1 ./t_upscaler_mfx
+# A fragment shader's colour outputs drawn one at a time (split_outputs): the guarded copy of its MSL, and two pieces writing the bytes the whole draw writes
+t_split_outputs: t_split_outputs.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_split_outputs.m $(MTL_T_SRC) $(FW)
+check_t_split_outputs: RUN_ENV = MTL_DEBUG_LAYER=1
 # NVN2's DLSS on MetalFX's temporal scaler, with and without the encoding thread (MetalFX encodes into the real command buffer; validation stops its Metal 4 scalers, as above)
 t_dlss_mfx: t_dlss_mfx.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_dlss_mfx.m $(MTL_T_SRC) $(FW)

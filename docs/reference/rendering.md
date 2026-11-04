@@ -901,6 +901,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** the swizzle is recorded (`OP_VP_SWIZZLE`) and applied at the draw as a viewport flipped about its centre, the same mapping. Facing is decided after the swizzle on the GPU as in Metal, so the winding stays. Other swizzles (axis exchanges, negated x / z / w) give a red line and are drawn unswizzled.
 - **Found on:** [Absolum](../../dm/games/0100A83022A22000/README.md) (FNA3D's NVN driver, `FNA3D_Driver_NVN.cpp`).
 
+### A fragment shader's colour outputs drawn one at a time
+
+- **Symptom:** on an M1 Pro, Mario Kart World's cube-map prefilter (fragment `4744589bb8f9f7dd`, Drive's `GearPassShader`) took 2.3 ms of GPU time a frame in a race: three chains of six mip levels, 64x64 down to 2x2, the 8x8 to 2x2 levels about 75 us a pass whatever their size.
+- **Cause:** the shader writes the six faces of one mip level as six colour outputs of one full-screen draw, 32 explicit-LOD cube samples per face and nothing shared between faces. At the small levels the draw has a handful of pixels, each one long thread, and the GPU waits on each thread's chain of samples with little else to run.
+- **Fix:** the profile key `split_outputs` names such shaders, and the replay makes each of their direct draws as one draw per colour output in the same pass (`osplit_prep` in `nvn_mtl.m`, through the `enc_r_draw` wrappers), so the short threads run side by side. Each piece has a write mask on its own attachment alone and a copy of the shader's MSL whose lines writing other outputs are behind a function constant, which its compile drops; the draw's own pipeline is bound again after the pieces. The copy is compiled once in the background with the shader build's flags, the pieces' pipelines are built in the background, and the draw goes whole until both are there. Draws whose result could differ in pieces stay whole (shader writes, depth or stencil state, blending, a logic operation, the alpha test, alpha to coverage, and draws the replay rewrites), each reason logged once. `DM_NVN_SPLIT_OUTPUTS=0` turns it off and `ab` alternates it with the `DM_AB` phases.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#frame-rate). In a Metal harness with the game's MSL a 64x64 to 2x2 chain went from 748 to 477 us with the same bytes written; in two races on an M1 Pro, alternating every 300 frames, the three chains went from 2.29 to 1.71 and 1.74 ms a frame and the GPU time median fell by 0.2 and 0.4 ms.
+- **Check:** `t_split_outputs` (gfx tests) checks the guarded MSL, and that two pieces write the bytes the whole draw writes, under Metal validation. Measured only on the M1 Pro.
+
 ## Uniforms, copies and ordering
 
 ### Bindless handles read from guest memory directly

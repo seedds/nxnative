@@ -109,6 +109,8 @@ SWITCH_BINDING = [
      'why': "right only where the handle comes from c2's tables: the translator could prove that per shader"}),
     ('feedback_snap', '', {'what': 'draws that sample their own colour attachment read a snapshot', 'now': 'game', 'goal': 'host', 'purpose': 'rendering',
      'why': 'the replay could find such draws itself, at the cost of a pass split each'}),
+    ('split_outputs', '', {'what': "fragment shaders' colour outputs drawn one at a time", 'now': 'game', 'goal': 'host', 'purpose': 'frame rate',
+     'why': 'right for any draw it takes (the same bytes); which shaders gain is measured per shader for now: the translator could find those whose outputs share no work, and a cost rule pick them for every game'}),
     ('enc_thread', '', {'what': 'Metal encoding on its own thread on the Mac', 'now': 'game', 'goal': 'host', 'purpose': 'frame rate',
      'why': f'what iOS does for every game: {DEFAULT_SOON}'}),
     ('present_snap', '', {'what': 'present snapshots', 'now': 'game', 'goal': 'host', 'purpose': 'rendering', 'why': f'a setting the game was tested with: {DEFAULT_SOON}'}),

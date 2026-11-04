@@ -104,6 +104,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Hyrule Warriors: Definitive Edition](0100AE00096EA000/README.md) | `0100AE00096EA000` | 1.0.1 | 3.5.1 | Koei Tecmo's KTGL | NVN |
 | [Kirby and the Forgotten Land](01004D300C5AE000/README.md) | `01004D300C5AE000` | 1.1.0 | 11.4.0 | HAL Laboratory's engine (NintendoWare) | NVN |
 | [Luigi's Mansion 3](0100DCA0064A6000/README.md) | `0100DCA0064A6000` | 1.4.0 | 7.3.2 | Next Level Games' engine | NVN |
+| [Mario Kart World](0400C3F00006E000/README.md) | `0400C3F00006E000` | v0 (Switch 2) | 19.3.3 (Ounce) | Nintendo EPD (sead / agl / gsys, Pia) | NVN2 |
 | [Mario Kart 8 Deluxe](0100152000022000/README.md) | `0100152000022000` | 4.0.0, 4.0.1 | 4.4.0 | Nintendo (sead / agl / gsys, NintendoWare, Pia) | NVN |
 | [Mario + Rabbids Kingdom Battle](010067300059A000/README.md) | `010067300059A000` | 1.9.589692 | 4.4.0 | Ubisoft Snowdrop | NVN |
 | [Mario + Rabbids Sparks of Hope](0100317013770000/README.md) | `0100317013770000` | 1.6.2225577 | 13.3.5 | Ubisoft Snowdrop | NVN |
@@ -189,7 +190,7 @@ One row per profile; the notes are each profile's `README.md`.
 | `build <ver> <display version> <module>=<build ID>…` | One row per version the game was brought up on. The NSP script builds any version (the base game alone, any update): a registered one from the profile as it is, any other from a profile derived from it (`<id>_build/profile`: the same keys, that version's own shader tables; `derive_profile`), with a red line naming the modules whose build no row registers, which the per-build cuts and host fixes do not reach. The host reports the display version by `main`'s build ID |
 | `package` | The version the profile's tables, prewarm list and notes were made on. The NSP script packs the newest version in the folder (`-p` / `PACKAGE` picks another) |
 | `shader_versions` | Versions whose union the shader tables are (base game first). A registered version is built from the profile as it is only when all of them are in the folder; otherwise from a derived profile, with tables from the packed version alone |
-| `modules` | Code modules rewritten and loaded, in load order. `rtld` is replaced by the host |
+| `modules` | Code modules rewritten and loaded, in load order. `rtld` is replaced by the host. A game whose versions differ in modules lists them all (Mario Kart World: `main subsdk0 subsdk1 sdk`, the base game has no `subsdk1`): each `build` row names its own, the host loads the modules of the row of `main`'s build (`main.c` `profile_modules`; all of `modules` for a build with no row), `build_ipa.sh` packs the same (`game.py modules`), and the NSP script rewrites the ones the packed version's ExeFS holds. A module a row names that `modules` does not list stays unloaded (Hades' `subsdk0` and `subsdk1`) |
 | `romfs_marker` | A path that must exist in the RomFS; empty checks the directory itself for a program without a data section (ANIMAL WELL) |
 | `zip_store` | Extensions the IPA stores without compressing |
 | `mem_reserve`, `mem_alias`, `mem_stack`, `app_pool` | Guest address-space partition and application pool (`hle_svc.c`) |

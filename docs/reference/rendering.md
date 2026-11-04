@@ -591,6 +591,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): each ink stamp's pass, scissored to 1952x2940 at (0, 3460), about 0.95 → 0.32 ms. Metal keeps what lies outside the area (a 6400x6400 target checked texel by texel on an M4 Pro, with API validation on).
 - **Note:** the same stamps sample the map they write, with a game barrier each, so each still takes a whole snapshot of it ([Same-pass feedback read through a snapshot](#same-pass-feedback-read-through-a-snapshot)), about 0.76 ms; a copy of the stamp's rectangle takes 0.09 ms, but nothing proves a stamp samples only inside it. **Open.**
 
+### Variable rate shading ignored
+
+- **Symptom:** `[RED] NVN unimplemented function called: nvnCommandBufferShadingRateImagePalette`, or `nvnCommandBufferBindShadingRateImage` or `nvnCommandBufferSetShadingRatePaletteMode`, every frame.
+- **Cause:** NVN2 lets a game shade tiles of a pass at a coarser rate. Metal's render passes have no per-tile rate: a rasterization rate map resamples the whole target instead, which is another thing.
+- **Fix:** `hle_nvn.c` accepts the three calls and records nothing. Shading every pixel is the most any rate asks for, so the picture is the same or sharper, and the only cost is GPU time where the game meant to save it. This drops a feature rather than emulating it, and the choice is a platform limit.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md), every frame; [Splatoon Raiders](../../dm/games/0400380020056000/README.md), the palette.
+
 ## Blend, depth and stencil
 
 ### Ten attachment records for eight colors and depth-stencil

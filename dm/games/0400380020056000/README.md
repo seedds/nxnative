@@ -35,7 +35,6 @@ The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots i
 
 ## Open
 
-- `nvnCommandBufferShadingRateImagePalette` is unimplemented (dozens of red lines a run), with no effect seen.
 - `texture type mismatch: shader d0ce73e71074df85_b (stage 1) declares slot 0 as Metal type 6, texture ID 428 is type 5`, once.
 - An IPA: the 16 GB alias region is over iOS's limit until the SDK 21 cuts are ported.
 - A crash dump once hung in `flockfile` under `shader_load`, with the log contended.

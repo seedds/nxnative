@@ -27,6 +27,9 @@
 #define DMSH_C0_SSBO_CS 0x310            // compute stage storage buffer table
 #define DMSH_C0_SSBO_GS 0x410            // geometry stage storage buffer table (NieR:Automata); the hull and domain stages' bases were never seen
 #define DMSH_C0_SSBO_PS 0x510            // pixel stage storage buffer table
+#define DMSH_C0_SSBO_TS 0x610            // NVN2 task stage storage buffer table (over the pixel stage's rows below: each stage's c0 is its own)
+#define DMSH_C0_SSBO_MS 0x710            // NVN2 mesh stage storage buffer table
+#define DMSH_MESH_FIRST_SLOT 29          // a task or mesh function's buffer: the draw's first workgroup (dmsh_meshstage.py, nvn_geometry.inc mtk_encode)
 #define DMSH_C0_DISPATCH 0x200           // compute: the dispatch's workgroup counts x, y, z (32 bits each; Link's Awakening's light culling)
 #define DMSH_C0_DISPATCH_NVN2 4          // NVN2 compute keeps them here, below its per-shader layout at 0x10 (x and y read by Fire Emblem Fortune's Weave's light culling; z by their order)
 #define DMSH_C0_CS_UBO 0x210             // compute: uniform slot r's address and size at 0x210 + 0x10 r, read through global memory (the build's ubo_ptr bindings); it ends where the storage buffer table starts
@@ -96,3 +99,8 @@
 #define DMSH_LOGIC_BUFFER 29
 // Its function constants: bool, colour target n is attached (the variant reads it only then), at this index + n (nvn_mtl.m lo_fn specializes the entry point per pass's targets)
 #define DMSH_LOGIC_FC 200
+// Compute shared memory past Metal's limit (dm/gfx/tools/dmsh_build.py tg_spill): a kernel whose threadgroup arrays exceed DMSH_TG_MAX bytes takes them from a device buffer at this compute
+// buffer index, one slice of the reflection's tg_spill bytes per workgroup, the workgroup's index in the dispatch modulo DMSH_TG_GROUPS (nvn_mtl.m dispatch binds DMSH_TG_GROUPS slices at most)
+#define DMSH_TG_SLOT 30
+#define DMSH_TG_MAX 0x8000
+#define DMSH_TG_GROUPS 512

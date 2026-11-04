@@ -515,6 +515,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - red stub lines for NVN calls. → [NVN calls that were red stubs](../reference/nvn-objects.md#nvn-calls-that-were-red-stubs)
 - `nvnWindowGetPresentInterval`, `nvnCommandBufferSetCopyImageStride` missing. → [SDK 8 window and copy-stride entry points](../reference/nvn-objects.md#sdk-8-window-and-copy-stride-entry-points)
 - `[RED] texture bound to an image slot lacks the shader-write usage`, and compute image writes go to a dummy texture. → [Image bindings supply shader-write intent](../reference/nvn-objects.md#image-bindings-supply-shader-write-intent)
+- sparse-texture checks spend substantial submission CPU time searching thousands of memory pools. A cache of any containing live range can also miss writes to a shared host page and leave texture content stale. → [Cached dirty-range lookups with overlapping pools](../reference/nvn-objects.md#cached-dirty-range-lookups-with-overlapping-pools)
 
 ## Rendering
 

@@ -39,6 +39,9 @@ static _Atomic int g_live, g_live_peak;   // number of registered pools and peak
 void nvn_dirty_stat(int *live, int *peak, int *cap) { *live = atomic_load(&g_live); *peak = atomic_load(&g_live_peak); *cap = MAX_RANGE; }
 static _Atomic int g_overflow_logged;
 static pthread_mutex_t g_slot_mu = PTHREAD_MUTEX_INITIALIZER;   // Pool creation, retirement and protection serialize descriptor lifetime; the page-fault path does not touch this mutex
+// Even epochs describe a stable registry. Registration and retirement make the
+// epoch odd while changing descriptors, invalidating every thread's lookup cache.
+static _Atomic uint64_t g_range_epoch;
 static _Atomic uint64_t g_mp_calls, g_mp_pages, g_mp_ticks;   // This module's mprotect: call count, pages covered, time spent (mach timebase, safe in the page-fault path too)
 static void mp(uintptr_t a, size_t len, int prot) {
     uint64_t t = mach_absolute_time(); mprotect((void *)a, len, prot);
@@ -61,12 +64,88 @@ static int busy_wait(range_t *r, uintptr_t p) {
     return 1;
 }
 static int live_at(int i) { return atomic_load_explicit(&rg(i)->live, memory_order_acquire); }
-// The registered range that holds all of [a, a+len) (used for a texture's tracking / protection / dirty check)
-static _Atomic int g_span_last;   // the last range found: looks come in runs over one pool, and a scan of Mario Kart World's 5,000 pools per look took a quarter of its submit thread's time
-static range_t *find_span(uintptr_t a, size_t len) {
-    int n = atomic_load(&g_nr), k = atomic_load_explicit(&g_span_last, memory_order_relaxed);
-    if (k < n) { range_t *r = rg(k); if (live_at(k) && a >= r->base && a + len <= r->end) return r; }
-    for (int i = 0; i < n; i++) { range_t *r = rg(i); if (live_at(i) && a >= r->base && a + len <= r->end) { atomic_store_explicit(&g_span_last, i, memory_order_relaxed); return r; } }
+typedef struct {
+    range_t *range;
+    uintptr_t base;
+    uintptr_t end;
+    // Exclusive bounds that keep earlier registry entries from containing a hit.
+    uintptr_t start_upper_bound;
+    uintptr_t end_lower_bound;
+    uint64_t epoch;
+} cached_span_t;
+
+// Keep a power-of-two capacity so the insertion counter can wrap naturally.
+enum { SPAN_CACHE_SIZE = 8, SPAN_CACHE_MASK = SPAN_CACHE_SIZE - 1 };
+
+// Find the first registered range containing [start, start + length).
+// Cache descriptors, never page generations or dirty/clean results.
+static range_t *find_span(uintptr_t start, size_t length) {
+    static _Thread_local cached_span_t recent_spans[SPAN_CACHE_SIZE];
+    static _Thread_local unsigned next_cache_slot;
+    uintptr_t end = start + length;
+    uint64_t epoch = atomic_load_explicit(&g_range_epoch, memory_order_acquire);
+
+    if (!(epoch & 1)) {
+        // Search newest entries first; recent sparse-texture runs often share a pool.
+        for (unsigned offset = 0; offset < SPAN_CACHE_SIZE; offset++) {
+            unsigned slot = (next_cache_slot - 1 - offset) & SPAN_CACHE_MASK;
+            const cached_span_t *entry = &recent_spans[slot];
+            if (!entry->range || entry->epoch != epoch) {
+                continue;
+            }
+            if (start < entry->base || end > entry->end) {
+                continue;
+            }
+            // A containing range is not enough: every earlier slot must still
+            // fail to contain this span, or we could read the wrong generation.
+            if (start >= entry->start_upper_bound || end <= entry->end_lower_bound) {
+                continue;
+            }
+            if (atomic_load_explicit(&g_range_epoch, memory_order_acquire) == epoch) {
+                return entry->range;
+            }
+        }
+    }
+
+    uintptr_t start_upper_bound = UINTPTR_MAX;
+    uintptr_t end_lower_bound = 0;
+    int range_count = atomic_load(&g_nr);
+    for (int slot = 0; slot < range_count; slot++) {
+        range_t *range = rg(slot);
+        if (!live_at(slot)) {
+            continue;
+        }
+        uintptr_t base = range->base;
+        uintptr_t limit = range->end;
+        if (start < base) {
+            // Future hits must keep starting before this excluded range.
+            if (base < start_upper_bound) {
+                start_upper_bound = base;
+            }
+            continue;
+        }
+        if (end > limit) {
+            // Future hits must keep ending beyond this excluded range.
+            if (limit > end_lower_bound) {
+                end_lower_bound = limit;
+            }
+            continue;
+        }
+
+        // Only cache a selection made against one unchanged, stable registry.
+        if (!(epoch & 1) && atomic_load_explicit(&g_range_epoch, memory_order_acquire) == epoch) {
+            recent_spans[next_cache_slot & SPAN_CACHE_MASK] = (cached_span_t){
+                .range = range,
+                .base = base,
+                .end = limit,
+                .start_upper_bound = start_upper_bound,
+                .end_lower_bound = end_lower_bound,
+                .epoch = epoch,
+            };
+            next_cache_slot++;
+        }
+        return range;
+    }
     return NULL;
 }
 static void stamp_page(range_t *r, uintptr_t p) {
@@ -147,6 +226,7 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
             atomic_store_explicit(&g_blk[n >> BLK_SHIFT], b, memory_order_release);
         }
     }
+    atomic_fetch_add(&g_range_epoch, 1);
     { int lv = atomic_fetch_add(&g_live, 1) + 1, pk = atomic_load(&g_live_peak); while (lv > pk && !atomic_compare_exchange_weak(&g_live_peak, &pk, lv)) {} }
     range_t *r = rg(slot);
     uintptr_t base = (uintptr_t)mem & ~(g_pg - 1), end = ((uintptr_t)mem + size + g_pg - 1) & ~(g_pg - 1);
@@ -166,6 +246,7 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
     r->base = base; r->end = end; r->mem = (uintptr_t)mem; r->state = state; r->gen = gen;
     if (slot == n) atomic_store(&g_nr, n + 1);
     atomic_store_explicit(&r->live, 1, memory_order_release);
+    atomic_fetch_add(&g_range_epoch, 1);
     pthread_mutex_unlock(&g_slot_mu);
 }
 // Pool destruction: first restore still-protected pages to writable (the pool memory may be reused for something else once returned to the game), then mark invalid
@@ -173,7 +254,13 @@ void nvn_dirty_remove_range(const void *mem) {
     pthread_mutex_lock(&g_slot_mu);
     range_t *r = NULL; int n = atomic_load(&g_nr);
     for (int i = 0; i < n && !r; i++) if (live_at(i) && rg(i)->mem == (uintptr_t)mem) r = rg(i);   // Match by the pool's exact start: an adjacent pool sharing a page may have the same rounded base
-    if (r) { prep_write((void *)r->base, r->end - r->base); atomic_store_explicit(&r->live, 0, memory_order_release); atomic_fetch_sub(&g_live, 1); }
+    if (r) {
+        atomic_fetch_add(&g_range_epoch, 1);
+        prep_write((void *)r->base, r->end - r->base);
+        atomic_store_explicit(&r->live, 0, memory_order_release);
+        atomic_fetch_sub(&g_live, 1);
+        atomic_fetch_add(&g_range_epoch, 1);
+    }
     pthread_mutex_unlock(&g_slot_mu);
 }
 int nvn_dirty_tracked(const void *addr, size_t len) {

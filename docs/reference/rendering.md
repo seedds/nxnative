@@ -294,12 +294,20 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** host textures are shared by `(pool, offset, description)`.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md).
 
+### Transient buffer textures shared by storage
+
+- **Symptom:** Metal residency-set and texture-object growth when a game rebuilds transient buffer textures (`NVN_TEXTURE_TARGET_BUFFER`) over the same pool range every frame.
+- **Cause:** `tex_mtl_` returned buffer textures before the storage-sharing table (`g_alias`), allocating and adding a new texture-buffer view to the residency set for every `NVNtexture` serial.
+- **Fix:** buffer textures (`tex_buffer` in `nvn_mtl.m`) share by `(pool, offset, description)` in `g_alias`, take over superseded ranges (`alias_take_over`), upgrade in place for image writes and format views (`tex_upgrade`), and refresh unaligned staging copies per submission (`tbuf_shadow`).
+- **Check:** `make -C dm/gfx/tests GAME=01006D0017F7A000 check_t_upgrade_alias` covers buffer-texture sharing across live and finalized descriptors, `IMAGE` and format-view upgrades on the shared pool buffer, GPU image writes read back through shared descriptors and the guest pool map, and `tbuf_shadow` reuse within a submission and refresh across submissions.
+- **Found on:** [Mario & Luigi: Brothership](../../dm/games/01006D0017F7A000/README.md).
+
 ### IMAGE usage does not split texture storage
 
 - **Symptom:** a model has correct geometry, base colour and normals but appears as a black silhouette; deferred lighting's material-ID depth texture stays zero.
 - **Cause:** render and stencil-sampling descriptors name the same pool, offset and layout, differing only by `NVN_TEXTURE_FLAGS_IMAGE`. Including that usage flag in the storage key made two independent Metal textures; sampling read the empty one's stencil.
-- **Fix:** the storage key excludes `IMAGE`. Sampling shares the original texture. A writable image binding prepares any needed `ShaderWrite` usage before opening its encoder; the upgrade copies the pixels and replaces every name of the old texture. Upgrading while encoding arguments would end the active encoder underneath its caller.
-- **Check:** `t_stencil_view` writes both planes, reads through an IMAGE stencil descriptor and copies to separate storage under Metal validation; `t_upgrade_alias` checks image-write preparation and every live/finalized alias.
+- **Fix:** the storage key excludes `IMAGE`. Sampling shares the original texture. A writable image binding prepares any needed `ShaderWrite` usage before opening its encoder; the upgrade copies the pixels (or rebinds the same pool buffer for linear and buffer textures) and replaces every name of the old texture. Upgrading while encoding arguments would end the active encoder underneath its caller.
+- **Check:** `t_stencil_view` writes both planes, reads through an IMAGE stencil descriptor and copies to separate storage under Metal validation; `t_upgrade_alias` checks image-write preparation, format-view upgrades and every live/finalized alias for both 2D and buffer textures.
 - **Found on:** [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md).
 
 ### Shared-storage entries taken over by a new texture

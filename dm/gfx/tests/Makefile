@@ -408,7 +408,10 @@ t_unwritten_store: t_unwritten_store.m $(MTL_T_DEP)
 check_t_unwritten_store: RUN_ENV = MTL_DEBUG_LAYER=1
 t_upgrade_alias: t_upgrade_alias.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upgrade_alias.m $(MTL_T_SRC) $(FW)
-check_t_upgrade_alias: RUN_ENV = MTL_DEBUG_LAYER=1
+.PHONY: check_t_upgrade_alias
+check_t_upgrade_alias: t_upgrade_alias
+	MTL_DEBUG_LAYER=1 ./t_upgrade_alias
+	./t_upgrade_alias
 t_srgb_alias: t_srgb_alias.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_srgb_alias.m $(MTL_T_SRC) $(FW)
 check_t_srgb_alias: RUN_ENV = MTL_DEBUG_LAYER=1

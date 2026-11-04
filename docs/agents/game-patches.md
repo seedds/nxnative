@@ -27,6 +27,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 |---|---|---|---|---|---|---|---|
 | `build` → `game` | 60 fps intervals and dynamic-resolution constants | frame rate | gap | checked: both releases' mains, where the host's rows for them were found | 2 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md); [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md) | the game's own constants; the Asian release's function is the global one's 0x13c0 further on, so one function-matched rule could serve both releases |
 | `build` → `game` | NieR's frame interval and dynamic-resolution floor at fixed addresses | frame rate | gap | checked: both releases' mains, where these rows were found | 2 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md); [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md) | the game's own display object; the Asian release's function is the global one's 0x13c0 further on, so the rewriter's function match could give the host both releases' addresses |
+| `build` → `host` | Factorio's copy-image dispatch slot at main+0x2e37260 | rendering | gap | judgement | 1 | [Factorio](../../dm/games/01004200189F4000/README.md) | the game fills the slot from a weak glCopyImageSubData import that its loader never asks eglGetProcAddress for, so the 3D bitmap assembly calls address 0; the host writes its own function there. The offset is this build's: writing it in another game would corrupt its data |
 | `build` → `host` | frame limiter wait: yield → sleep | power | gap | checked: Mac runs with the cut undone, 2026-10-26 (the game note) | 1 | [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) | without it the host's yield back-off (thr_yield) holds 59.7 to 59.8 fps, at 0.9 to 1.2 W of CPU against 0.14 to 0.42 W (2026-10-26): a back-off that reaches a yield-and-tick loop's deadline sooner would make the cut unnecessary for every game |
 | `game` → `host` | one vertex shader's visibility counter (VertexCounterLowering) | shaders | gap | judgement | — | [Program.cs:256](../../dm/gfx/tools/dmsh_xlate/Program.cs#L256) | a general lowering of subgroup ballots in vertex shaders would cover any shader that counts that way |
 | `build` → `engine` | Unity QualitySettings.vSyncCount held at 1 | frame rate | gap | judgement | 1 | [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md) | an IL2CPP player registers the setter by its icall name, so the place can be found in any Unity game; holding it at 1 stays this profile's choice (its logic steps by the count) |
@@ -67,6 +68,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Batman: Arkham Knight](#batman-arkham-knight) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [EA SPORTS FC 27](#ea-sports-fc-27) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
+| [Factorio](#factorio) | 0 | 0 | 0 | 0 | 1 | `build` → `host` |
 | [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](#final-fantasy-crystal-chronicles-remastered-edition) | 8 | 0 | 0 | 0 | 0 | `build` → `engine` |
 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](#final-fantasy-tactics---the-ivalice-chronicles) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Fire Emblem Engage](#fire-emblem-engage) | 1 | 0 | 0 | 0 | 0 | `build` → `engine` |
@@ -280,6 +282,15 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **1.8d.310c `main`** `a48c0de3…`
   - host [hle_fpslock.c:52](../../dm/host/hle_fpslock.c#L52): engine frame limit set to fps_target: FIFA frame regulator
+
+### Factorio
+
+[Factorio](../../dm/games/01004200189F4000/README.md), `01004200189F4000`.
+
+- **`build` → `host`**, rendering, gap, judgement: Factorio's copy-image dispatch slot at main+0x2e37260. The game fills the slot from a weak glCopyImageSubData import that its loader never asks eglGetProcAddress for, so the 3D bitmap assembly calls address 0; the host writes its own function there. The offset is this build's: writing it in another game would corrupt its data
+
+- **2.0.77 `main`** `30bf431e…`
+  - host [hle_gl.m:2383](../../dm/gfx/gl/hle_gl.m#L2383): copy-image dispatch slot written at a fixed offset
 
 ### FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition
 

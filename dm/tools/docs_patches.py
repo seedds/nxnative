@@ -17,7 +17,8 @@ SDK = REPO / 'dm/tools/sdk_patches.py'
 HOST = ['dm/host', 'dm/gfx', 'dm/ios']   # tracked files only: dm/host/gen and other build output are git-ignored
 HOST_EXT = ('.c', '.m', '.mm', '.h', '.inc', '.swift')
 # What a build-keyed host table does (the table's name in the source; a row of another table is listed under its own name)
-TABLES = {'k_locks': 'engine frame limit set to fps_target', 'k_ue': "Unreal's allocator on a host malloc zone", 'k_nier_dr': 'frame interval and dynamic-resolution floor'}
+TABLES = {'k_locks': 'engine frame limit set to fps_target', 'k_ue': "Unreal's allocator on a host malloc zone", 'k_nier_dr': 'frame interval and dynamic-resolution floor',
+          'k_copy_image': 'copy-image dispatch slot written at a fixed offset'}
 # Profile keys that are not behaviour switches: per-game data or controls, not something the host does differently
 NOT_SWITCHES = {'pad_layout', 'depth_mode', 'mem_used', 'sys_resource'}
 
@@ -80,6 +81,9 @@ HOST_BINDING = [
      'why': "engine code other Frostbite games ship (the simulation's own rate is already set by name)", 'blocked': 'one Frostbite game here'}),
     ('k_ue', '', 'feae83dc9e9fb34c77d0a62f1fa9ae9f', {'what': "UE3's GMalloc setup skipped, the host allocator in (hle_uemalloc.c)", 'now': 'build', 'goal': 'game', 'purpose': 'address space',
      'why': "UE3 inlines the allocator's constructor into the GMalloc setup and has its own vtable layout (25 slots, 32-bit sizes), so the Unreal 4/5 discovery does not apply"}),
+    ('k_copy_image', '', '30bf431ee5105f84382808faf85eb420', {'what': "Factorio's copy-image dispatch slot at main+0x2e37260", 'now': 'build', 'goal': 'host', 'purpose': 'rendering',
+     'why': 'the game fills the slot from a weak glCopyImageSubData import that its loader never asks eglGetProcAddress for, so the 3D bitmap assembly calls address 0; the host '
+            'writes its own function there. The offset is this build\'s: writing it in another game would corrupt its data'}),
     ('k_nier_dr', '', '', {'what': "NieR's frame interval and dynamic-resolution floor at fixed addresses", 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
      'checked': "both releases' mains, where these rows were found",
      'why': "the game's own display object; the Asian release's function is the global one's 0x13c0 further on, so the rewriter's function match could give the host both releases' addresses"}),

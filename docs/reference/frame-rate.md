@@ -462,3 +462,10 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** `dmsh_build.py` `pool_arrays`: a fragment shader whose only store is the mark gets `[[early_fragment_tests]]`. One that discards, writes depth, stencil or a sample mask, or stores anything itself keeps its test where it was; there the mark costs the shading. A chain change.
 - **Check:** `python3 dm/tools/tests/test_dmsh_pool_arrays.py`. On the same route, the game's own controller then held its main pass at 1536x864, four times the pixels, at the same GPU time.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): 56 of the 258 fragment programs of a frame in Kokiri Forest carry the mark, 3 of them with a discard.
+
+### Acquire-wait telemetry measures elapsed pacing time
+
+- **Symptom:** `DM_NVN_TSV` reports zero `@wait_ms` when acquire blocks on a display-link tick, or reports the planned fallback delay instead of the elapsed wait.
+- **Cause:** `nvnWindowAcquireTexture` accumulated `wait`, computed from the texture's fallback availability deadline, even when display-link pacing took a different path.
+- **Fix:** accumulate the already measured `pace_ns`, including snapshot-capacity waiting. Present-queue waiting remains separate in `@pq_wait_ms`. This changes diagnostics only; it does not change the wait, frame rate or presentation policy. The controlled-clock `t_link_ticks` case has a zero fallback deadline and a nonzero display-link wait.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md), while analyzing a 350-second physical iPhone 17 Pro Max trace from a combined experimental build. Older `@wait_ms` values must not be treated as measured blocked time. This correction does not establish the cause of its pacing dips or improve performance.

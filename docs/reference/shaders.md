@@ -139,6 +139,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `shader_split.py` reads zip archives member by member in parallel ranges (`zip_jobs` / `zip_shaders`; `zipfile`), each member scanned like a loose file, whole GLSLC outputs included. `profile_guess.py` `shader_sources` asks for the run-time GLSLC capture when an NRO the game loads imports `glslcCompile` and a subsdk defines it (`glslc_capture`). Portal's map: 242 keys from the `.nvsb` files and 13 from the capture, 229 vertex and pixel pairs.
 - **Found on:** [Portal](../../dm/games/01007BB017812000/README.md). No other profile's RomFS has a zip archive holding shaders.
 
+### LZ4-chained zip members behind a VZIP preamble, and shader binaries of one stage
+
+- **Symptom:** a Switch 2 game's RomFS is one `data.zip` that does not start with a zip's local header, zipfile reads a member of it only to stop on `Bad CRC-32`, and the split finds no shader: every member is listed as stored, yet most are smaller on disk than their file size.
+- **Cause:** Star Fox's engine keeps the whole game in a zip of its own making (`vfs.zip.c`): an 18 MB `VZIP` index before the first member, and members the central directory calls stored (method 0) that are chains of 64 KB chunks, each a u32 length and an LZ4 block of that length compressed against the previous chunk as its dictionary (a chunk that would not shrink is stored raw); the CRC is the decoded data's. Its shaders are 2,828 members of a wrapper the engine calls `_vrender_shader_binary_t`: the GLSLC output magic, u32 code length, u32 control length, u32 0, a 64-bit hash, then the Ampere code area and the NVN2 control section, one stage each; `glslc_shaders` finds no section headers in it.
+- **Fix:** `zip_jobs` takes a `VZIP` file as a zip too, `zip_member` decodes a stored member whose size on disk differs from its file size through the LZ4 chain (`viper_zip_member`, with the CRC checked), and `scan_blob` reads the wrapper as a single-stage program (`viper_shader`, keys `#VIPER`, paired at draw time as GLSLC outputs are). The engine's `VIPR` resource containers are scanned for an embedded NDSR file (two of them wrap `ounce-nvn2-upper_left_ndsr.bin`, the upscaler networks, 40 shaders each, which the host first met as `shader ddc729bcdb4c8df9 is not in the shader map` and `the dispatched program has no compute shader`): `ndsr_shaders` reads it from the magic on. `dm/tools/tests/test_split_viper.py` covers the zip and the wrapper with synthetic bytes.
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md): 2,856 shaders, 1,483 vertex, 1,305 pixel and 68 compute, all in `data.zip`.
+
 ### GLSLC outputs in Criterion's Bundle 2 resources
 
 - **Symptom:** an NVN game's split finds a few dozen shaders (`main`'s and a loose file's) and the screen stays black but for the loading indicator, with `[RED] shader … is not in the shader map` and `program has no vertex shader`; the RomFS holds `.BNDL` files that start with `bnd2`.
@@ -1136,6 +1143,20 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `ATex` and `ATxq` in `InstEmitAmpereMem.cs`. The same bring-up adds, from their encodings in the game: 0x301 BREV and 0x2be its uniform form, 0x311 F2I.U64, 0x312 I2F of a 64-bit pair, 0x38c ATOMS, 0x38d ATOMS.CAS (Rd is 1 when it swapped, not the old value: the game's only use is a retry loop until Rd == 1), 0x992 MEMBAR, 0x9ab ERRBAR, and the carry out of IMAD.WIDE.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): 902 shaders had the wrong register at first; all 16,888 translate now. [Splatoon Raiders](../../dm/games/0400380020056000/README.md) lists 0x2be, 0x301 and 0x38c among its refused instructions; it has not been rebuilt with this.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
+
+### TXD through a uniform-register handle
+
+- **Symptom:** `Ampere instruction f6c at 0x… is not implemented` in 294 of a game's 2,828 shaders (pixel shaders with explicit derivatives).
+- **Cause:** 0xf6c is TXD with its texture handle in a uniform register at bits 40..46, the form 0xf60 is for TEX; the translator knew TXD only as 0xb6c.
+- **Fix:** `InstEmitAmpereMem.cs` registers 0xf6c and reads its handle as 0xf60's, then decodes the rest as 0xb6c (chain change). The handle has to lead the operation's sources, as it does for a bindless TEX: the first version put only the coordinates there, so the bindless elimination read the first coordinate (a float) as the handle, logged `Failed to find handle source for bindless access of type "texture2DArray"` (765 reads in 281 of the game's pixel shaders, the fur shells among them) and replaced each read by 0. `DMSH_BINDLESS_TRACE=1` on a `dmsh_xlate` job prints what a refused handle is made of (phis, operations and their sources), which is how this one was found.
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md) (294 of its 2,828 shaders, then the 281 pixel shaders whose reads were dropped). Open there: 13 shaders still do not translate: SURED form 0310e000 (6), opcodes 0x925 (2), 0xf63 (1, TLD4 by the same uniform-register form) and 0x21b (1).
+
+### A handle pair ORed sampler word first
+
+- **Symptom:** `reflection conversion failed: B binding fp_t_cb2_170 has no resolved slot number` at load (the draw is skipped), the build summary counting the binding under *slot was not decoded*; or, once the read's other inputs are known, `Failed to find handle source for bindless access of type "texture2D"` and the read answers 0.
+- **Cause:** the compiler ORs the separate texture word and the separate sampler word of c[2] in either order. The bindless elimination took the OR's first operand as the texture: with the sampler word first (`c[2][0x5c0] | c[2][0x248]`, word 0x170 of the separate sampler table at 0x568), the sampler's word was named as the texture, a slot the host cannot decode. Through a phi (the OR predicated, the bare sampler word on the other path) the bare word was a candidate too, so the read was refused.
+- **Fix:** `BindlessElimination.cs` orders a pair of c[2] words by the table they lie in: a word of the separate sampler table (`dmsh_abi.h` `DMSH_C2_SAMP`, 128 slots) is the sampler, the other the texture, in the plain OR and among a phi's candidates; a bare sampler word is no texture candidate (chain change).
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md) (62 pixel shaders, 5 of them loaded at the prologue cinematic).
 
 ### Ampere HMMA through simdgroup_matrix
 

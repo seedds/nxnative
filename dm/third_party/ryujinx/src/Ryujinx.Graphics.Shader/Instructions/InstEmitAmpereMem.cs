@@ -51,6 +51,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0xb63, InstName.Tld4, ATex, InstProps.Tex);
             x(0xb69, InstName.Tmml, ATex, InstProps.Tex);
             x(0xb6c, InstName.Txd, ATex, InstProps.Tex);
+            x(0xf6c, InstName.Txd, ATex, InstProps.Tex);   // TXD through a handle in a uniform register, as 0xf60 is TEX's (Star Fox: 294 shaders)
             x(0xb6f, InstName.Txq, ATxq, InstProps.Tex);
             x(0x370, InstName.Txq, ATxq, InstProps.Tex);
             x(0xb97, InstName.Suld, ASurface, N);

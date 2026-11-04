@@ -2044,14 +2044,51 @@ GLB(glBindFramebuffer, void, GLenum target, GLuint f) {
     S.fb = f;   // the pass ends at the next draw or clear into another framebuffer (pass_ensure)
 }
 GL(glCheckFramebufferStatus, GLenum, GLenum target) { (void)target; return GL_FRAMEBUFFER_COMPLETE; }
-// One colour attachment: GL_NONE (LÖVE's depth-only canvases) and attachment 0 are the same draw buffer here
-GL(glDrawBuffers, void, GLsizei n, const GLenum *b) { if (n > 1) RED1("glDrawBuffers of %d buffers (one colour attachment is implemented)", n); (void)b; }
-GL(glDrawBuffer, void, GLenum b) { (void)b; }
+GL(glIsFramebuffer, uint32_t, GLuint f) { return fb_of(f) != NULL; }
+// What a framebuffer's attachments are (Factorio asks before it renders into its MRT target)
+static const att_t *fb_att_of(const fb_t *f, GLenum att) {
+    if (att >= GL_COLOR_ATTACHMENT0 && att < GL_COLOR_ATTACHMENT0 + MAXCOL) return &f->col[att - GL_COLOR_ATTACHMENT0];
+    if (att == GL_DEPTH_ATTACHMENT) return &f->depth;
+    if (att == GL_STENCIL_ATTACHMENT) return &f->stencil;
+    if (att == GL_DEPTH_STENCIL_ATTACHMENT) return f->depth.kind ? &f->depth : &f->stencil;
+    return NULL;
+}
+GL(glGetFramebufferAttachmentParameteriv, void, GLenum target, GLenum att, GLenum p, GLint *v) {
+    fb_t *f = fb_of(target == GL_READ_FRAMEBUFFER ? S.read_fb : S.fb);
+    const att_t *a = f ? fb_att_of(f, att) : NULL;
+    if (!a) { *v = 0; return; }
+    switch (p) {
+        case 0x8cd0: *v = !a->kind ? GL_NONE : a->kind == 2 ? 0x8d41 : 0x1702; return;   // OBJECT_TYPE: NONE / RENDERBUFFER / TEXTURE
+        case 0x8cd1: *v = (GLint)a->name; return;                                          // OBJECT_NAME
+        case 0x8cd2: *v = a->level; return;                                                // TEXTURE_LEVEL
+        case 0x8cd4: *v = a->face; return;                                                 // TEXTURE_LAYER
+        case 0x8cd3: *v = GL_FLOAT; return;                                                // COMPONENT_TYPE
+    }
+    RED1("glGetFramebufferAttachmentParameteriv(%#x) not implemented", p); *v = 0;
+}
+// The framebuffer's draw-buffer mapping: draw buffer i reads GL_COLOR_ATTACHMENT0 + i by default. The pass orders its attachments by draw buffer, so a
+// fragment shader's [[color(i)]] lands in draw buffer i as GLSL's layout(location = i) does.
+GL(glDrawBuffers, void, GLsizei n, const GLenum *b) {
+    if (n < 0) return;
+    if (n > MAXCOL) { RED1("glDrawBuffers of %d buffers (%d implemented)", n, MAXCOL); n = MAXCOL; }
+    if (!S.fb) {   // the default framebuffer has only GL_BACK (or GL_NONE)
+        if (n && b[0] != GL_BACK && b[0] != GL_NONE && b[0] != GL_COLOR_ATTACHMENT0) RED1("glDrawBuffers(%#x) on the window", b[0]);
+        return;
+    }
+    fb_t *f = fb_of(S.fb); if (!f) return;
+    if (P.open && P.fb == S.fb) pass_end();
+    for (GLsizei i = 0; i < n; i++) f->dbuf[i] = b[i];
+    f->ndb = n; f->gen++;
+    { static int k; if (k++ < 40) { char line[160]; size_t o = 0; for (GLsizei i = 0; i < n && o < sizeof line; i++) o += snprintf(line + o, sizeof line - o, "%s%#x", i ? " " : "", b[i]);
+        GLOG("glDrawBuffers framebuffer %u: %s", S.fb, line); } }
+}
+GL(glDrawBuffer, void, GLenum b) { GLenum x = b; h_glDrawBuffers(1, &x); }
 GL(glReadBuffer, void, GLenum b) { (void)b; }
 GL(glInvalidateFramebuffer, void, GLenum target, GLsizei n, const GLenum *att) { (void)target; (void)n; (void)att; }   // the contents are kept (a store action)
 GL(glDiscardFramebufferEXT, void, GLenum target, GLsizei n, const GLenum *att) { (void)target; (void)n; (void)att; }
 GL(glGenRenderbuffers, void, GLsizei n, GLuint *out) { for (GLsizei i = 0; i < n; i++) out[i] = name_new((void ***)&g_rbs, &g_nrbs, &g_caprbs, sizeof(rb_t)); }
 GL(glDeleteRenderbuffers, void, GLsizei n, const GLuint *r) { for (GLsizei i = 0; i < n; i++) { rb_t *x = rb_of(r[i]); if (!x) continue; x->tex = nil; free(x); g_rbs[r[i]] = NULL; } }
+GL(glIsRenderbuffer, uint32_t, GLuint r) { return rb_of(r) != NULL; }
 GL(glBindRenderbuffer, void, GLenum target, GLuint r) { (void)target; S.rb = r; }
 static void h_glRenderbufferStorage(GLenum target, GLenum ifmt, GLsizei w, GLsizei h);
 GLB(glRenderbufferStorageMultisample, void, GLenum target, GLsizei samples, GLenum ifmt, GLsizei w, GLsizei h) {
@@ -2118,6 +2155,8 @@ static void blit_impl(const blit_args *a) __attribute__((used));
 BIGSTUB(blit_impl);
 static void blit_impl(const blit_args *a) {
     @autoreleasepool {
+        if (a->mask & GL_COLOR_BUFFER_BIT) { static int n; if (n++ < 30) GLOG("glBlitFramebuffer src %d,%d..%d,%d -> dst %d,%d..%d,%d mask %#llx read fb %u draw fb %u",
+            a->s[0], a->s[1], a->s[2], a->s[3], a->d[0], a->d[1], a->d[2], a->d[3], (unsigned long long)a->mask, S.read_fb, S.fb); }
         if (a->mask & ~GL_COLOR_BUFFER_BIT) RED1("glBlitFramebuffer of depth or stencil not implemented");
         if (!(a->mask & GL_COLOR_BUFFER_BIT)) return;
         if (g_pend_clear.bits) clears_flush();
@@ -2133,10 +2172,102 @@ static void blit_impl(const blit_args *a) {
         [b endEncoding]; g_n_blit++;
     }
 }
+// glCopyTexSubImage2D/3D: copy from the read framebuffer's colour image into the bound texture. Factorio uses the 3D form for the level-intro/cutscene
+// frames (15 calls right after level.dat loads); without it those frames stay black. Metal copies only between matching pixel formats, so a format change is
+// reported rather than silently producing garbage.
+static void copy_tex_from_fb(GLenum target, GLint level, GLint xoff, GLint yoff, GLint zoff, GLint x, GLint y, GLsizei w, GLsizei h) {
+    GLOG("copy tex sub image target %#x level %d -> %d,%d,%d from %d,%d %dx%d (read fb %u)", target, level, xoff, yoff, zoff, x, y, w, h, S.read_fb);
+    tex_t *d = bound_tex(target);
+    if (!d || w <= 0 || h <= 0) { RED1("glCopyTexSubImage: no destination texture (%dx%d)", w, h); return; }
+    if (!d->made && !tex_make(d, 0)) return;
+    if (!d->tex) return;
+    int sl = 0, ss = 0; id<MTLTexture> s = fb_color(S.read_fb, &sl, &ss);
+    if (!s) return;
+    if (s.pixelFormat != d->tex.pixelFormat) { RED1("glCopyTexSubImage: framebuffer and %s texture formats differ", g_fmt[d->fmt].name); return; }
+    @autoreleasepool {
+        pass_end();
+        id<MTLCommandBuffer> cb = cb_get();
+        id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+        [b copyFromTexture:s sourceSlice:ss sourceLevel:sl sourceOrigin:MTLOriginMake(x, y, 0) sourceSize:MTLSizeMake(w, h, 1)
+                 toTexture:d->tex destinationSlice:0 destinationLevel:level destinationOrigin:MTLOriginMake(xoff, yoff, target == GL_TEXTURE_3D ? zoff : 0)];
+        [b endEncoding]; g_n_blit++;
+    }
+}
+GL(glCopyTexSubImage3D, void, GLenum target, GLint level, GLint xoff, GLint yoff, GLint zoff, GLint x, GLint y, GLsizei w, GLsizei h) {
+    copy_tex_from_fb(target, level, xoff, yoff, zoff, x, y, w, h);
+}
+GL(glCopyTexSubImage2D, void, GLenum target, GLint level, GLint xoff, GLint yoff, GLint x, GLint y, GLsizei w, GLsizei h) {
+    copy_tex_from_fb(target, level, xoff, yoff, 0, x, y, w, h);
+}
 GL(glBlitFramebuffer, void, GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLint dx0, GLint dy0, GLint dx1, GLint dy1, uint64_t mask, uint64_t filter) {
     (void)filter; blit_args a = {{sx0, sy0, sx1, sy1}, {dx0, dy0, dx1, dy1}, (GLbitfield)mask}; ((void (*)(const blit_args *))(const void *)blit_impl_bs)(&a);
 }
 GL(glResolveMultisampleFramebufferAPPLE, void, void) { RED1("glResolveMultisampleFramebufferAPPLE not implemented"); }
+// glCopyImageSubData (GL 4.3) / glCopyImageSubDataNV: a GPU-side copy between two textures, which Factorio uses to assemble its 3D bitmap atlases. The game imports this
+// weakly, so without it the function pointer is 0 and the call is a jump to address 0 (the 3D bitmap crash). A copy needs both textures made and matching formats; the
+// alternative form between different formats cannot be a Metal texture copy, so it is reported rather than silently writing the wrong bytes.
+typedef struct { GLuint srcName; GLenum srcTarget; GLint srcLevel, srcX, srcY, srcZ; GLuint dstName; GLenum dstTarget; GLint dstLevel, dstX, dstY, dstZ; GLsizei w, h, d; } copyimg_t;
+// noinline: the TLOG call inside must not run in the 15-argument wrapper's frame, where it can overwrite the incoming stack arguments before they are copied
+static void copy_image_sub_data(const char *what, const copyimg_t *a) __attribute__((noinline));
+static void copy_image_sub_data(const char *what, const copyimg_t *a) {
+    { static int n; if (n++ < 40) GLOG("%s %u/%#x level %d (%d,%d,%d) -> %u/%#x level %d (%d,%d,%d) %dx%dx%d", what, a->srcName, a->srcTarget, a->srcLevel, a->srcX, a->srcY, a->srcZ,
+         a->dstName, a->dstTarget, a->dstLevel, a->dstX, a->dstY, a->dstZ, a->w, a->h, a->d); }
+    tex_t *s = tex_of(a->srcName), *dt = tex_of(a->dstName);
+    if (!s || !dt || a->w <= 0 || a->h <= 0 || a->d <= 0) { RED1("%s: no source or destination texture (%ux%ux%u)", what, a->w, a->h, a->d); return; }
+    if (!s->made && !tex_make(s, 0)) return;
+    if (!dt->made && !tex_make(dt, 0)) return;
+    if (!s->tex || !dt->tex) return;
+    if (s->tex.pixelFormat != dt->tex.pixelFormat) {
+        RED1("%s: %s -> %s, formats differ (Metal cannot copy between them)", what, g_fmt[s->fmt].name, g_fmt[dt->fmt].name);
+        return;
+    }
+    @autoreleasepool {
+        pass_end();
+        id<MTLCommandBuffer> cb = cb_get();
+        id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+        if (a->srcTarget == GL_TEXTURE_3D && a->dstTarget == GL_TEXTURE_3D) {
+            [b copyFromTexture:s->tex sourceSlice:0 sourceLevel:a->srcLevel sourceOrigin:MTLOriginMake(a->srcX, a->srcY, a->srcZ) sourceSize:MTLSizeMake(a->w, a->h, a->d)
+                     toTexture:dt->tex destinationSlice:0 destinationLevel:a->dstLevel destinationOrigin:MTLOriginMake(a->dstX, a->dstY, a->dstZ)];
+        } else {
+            // a 2D array or cube: one layer / face at a time; a plain 2D texture has one slice
+            for (GLsizei k = 0; k < a->d; k++) {
+                int ss = a->srcTarget == GL_TEXTURE_2D && a->srcZ == 0 ? 0 : a->srcZ + k;
+                int ds = a->dstTarget == GL_TEXTURE_2D && a->dstZ == 0 ? 0 : a->dstZ + k;
+                [b copyFromTexture:s->tex sourceSlice:ss sourceLevel:a->srcLevel sourceOrigin:MTLOriginMake(a->srcX, a->srcY, 0) sourceSize:MTLSizeMake(a->w, a->h, 1)
+                         toTexture:dt->tex destinationSlice:ds destinationLevel:a->dstLevel destinationOrigin:MTLOriginMake(a->dstX, a->dstY, 0)];
+            }
+        }
+        [b endEncoding]; g_n_blit++;
+    }
+}
+GL(glCopyImageSubData, void, GLuint srcName, GLenum srcTarget, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ,
+   GLuint dstName, GLenum dstTarget, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ, GLsizei w, GLsizei h, GLsizei d) {
+    copyimg_t a = {srcName, srcTarget, srcLevel, srcX, srcY, srcZ, dstName, dstTarget, dstLevel, dstX, dstY, dstZ, w, h, d};
+    copy_image_sub_data("glCopyImageSubData", &a);
+}
+GL(glCopyImageSubDataNV, void, GLuint srcName, GLenum srcTarget, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ,
+   GLuint dstName, GLenum dstTarget, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ, GLsizei w, GLsizei h, GLsizei d) {
+    copyimg_t a = {srcName, srcTarget, srcLevel, srcX, srcY, srcZ, dstName, dstTarget, dstLevel, dstX, dstY, dstZ, w, h, d};
+    copy_image_sub_data("glCopyImageSubDataNV", &a);
+}
+// Factorio 2.0.77 keeps its copy-image entry in a dispatch table at main+0x2e37260, filled from a weak import. Its loader never asked eglGetProcAddress for the name,
+// and the weak import bound to 0, so the 3D bitmap assembly calls address 0 even though the host now implements the function. Put the host function in that one slot.
+// Keyed by build: the offset is game-specific, and writing it in another game would corrupt its data.
+static const struct { const char *build; uint64_t slot; } k_copy_image[] = {
+    {"30bf431ee5105f84382808faf85eb420", 0x2e37260},   // Factorio 2.0.77 (build 84539)
+};
+static void patch_copy_image_slot(void) {
+    static int done;
+    if (done) return; done = 1;
+    for (size_t r = 0; r < sizeof k_copy_image / sizeof *k_copy_image; r++) {
+        if (strcmp(dm_main_build(), k_copy_image[r].build)) continue;
+        for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) {
+            uint64_t *t = (uint64_t *)(g_mod[i].base + k_copy_image[r].slot);
+            if (!t[0]) { t[0] = (uint64_t)(void *)h_glCopyImageSubData; GLOG("copy-image dispatch slot was 0: bound the host glCopyImageSubData"); }
+            return;
+        }
+    }
+}
 // glReadPixels: everything recorded so far runs first (the frame's command buffer is committed and waited for), then the rows are copied out as GL lays them, bottom row first,
 // which is how this layer stores them. RGBA / unsigned byte from an RGBA8 or BGRA8 image (LÖVE's Canvas:newImageData and screenshots)
 typedef struct { GLint x, y; GLsizei w, h; GLenum format, type; void *data; } readpix_args;
@@ -2170,6 +2301,7 @@ static void readpix_impl(const readpix_args *a) {
     }
 }
 GL(glReadPixels, void, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, void *data) {
+    GLOG("glReadPixels %d,%d %dx%d format %#x type %#x read framebuffer %u", x, y, w, h, format, type, S.read_fb);
     readpix_args a = {x, y, w, h, format, type, data}; ((void (*)(const readpix_args *))(const void *)readpix_impl_bs)(&a);
 }
 

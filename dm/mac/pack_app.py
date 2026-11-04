@@ -12,7 +12,7 @@
 # file's extended attributes live in such a file beside it, and codesign reads each one as a code object that is not signed, which fails the whole bundle.
 # Usage: pack_app.py <out.app> --host <dmhost> --patched <dir> --romfs <image or dir> --msl <dir> --tables <profile dir> --font <dir> --title-id <id> --name <name> [options]
 #   Reuses <out.app> while <out.app>.key matches; otherwise writes <out.app>.partial and swaps it in at the end. Prints "step: ..." and "app: <path>[, reused (inputs unchanged)]".
-import argparse, ctypes, hashlib, json, os, plistlib, re, shutil, stat, subprocess, sys, tempfile
+import argparse, ctypes, errno, hashlib, json, os, plistlib, re, shutil, stat, subprocess, sys, tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -216,9 +216,30 @@ def replace_app(tmp, out):
         swap.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
         swap.restype = ctypes.c_int
         if swap(os.fsencode(tmp), os.fsencode(out), 2):
-            err = ctypes.get_errno(); raise OSError(err, os.strerror(err), str(out))
+            err = ctypes.get_errno()
+            if err not in (errno.ENOTSUP, errno.EOPNOTSUPP): raise OSError(err, os.strerror(err), str(out))
+            swap_by_moves(tmp, out)   # a volume without RENAME_SWAP (Mac OS Extended, Journaled: [Errno 45])
     else:
         tmp.rename(out)
+
+
+def swap_by_moves(tmp, out):
+    """The state RENAME_SWAP leaves, made with plain renames in out's folder: the new app at out and the old one at tmp. The old app moves aside, the new one moves in, and the old one
+    takes tmp's place. A step that fails undoes the ones before it, so out is the old app again (or still) and tmp the new one. Unlike the swap this is not atomic: a process killed between
+    the first two renames leaves no app at out and the old one at <out>.old, a fixed name (as <out>.partial is) so that the next replacement clears what was left there."""
+    aside = out.with_name(out.name + '.old')
+    shutil.rmtree(aside, ignore_errors=True)
+    out.rename(aside)
+    try:
+        tmp.rename(out)
+    except BaseException:
+        aside.rename(out)
+        raise
+    try:
+        aside.rename(tmp)
+    except BaseException:
+        out.rename(tmp); aside.rename(out)
+        raise
 
 
 def pack(a):

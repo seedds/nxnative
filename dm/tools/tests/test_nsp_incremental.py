@@ -906,4 +906,21 @@ class GlslcCacheCoverage(Base):
                 nsp.check_glslc_coverage(observed, game.Game(self.src))
 
 
+class JitBootDone(unittest.TestCase):
+    def test_needs_the_boot_code_and_ten_seconds_with_nothing_new(self):
+        with tempfile.TemporaryDirectory() as t, mock.patch.object(nsp.time, 'time', return_value=100.0) as now:
+            part = Path(t); done = nsp.jit_boot_done(part)
+            self.assertFalse(done())   # nothing captured yet
+            (part / 'small.jit').write_bytes(b'x'); now.return_value = 200.0
+            self.assertFalse(done())   # a request, but not the boot code
+            (part / 'boot.jit').write_bytes(bytes((1 << 20) + 1)); now.return_value = 201.0
+            self.assertFalse(done())   # the boot code, just now
+            now.return_value = 211.0
+            self.assertFalse(done())
+            now.return_value = 211.5
+            self.assertTrue(done())
+            (part / 'late.jit').write_bytes(b'x')
+            self.assertFalse(done())   # something new starts the wait again
+
+
 if __name__ == '__main__': unittest.main()

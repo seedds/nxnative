@@ -9,6 +9,14 @@
 - **Fix:** the scanner accepts the table boundary as the end of the final name. `nx_extract` supplies LibHac with a virtual header containing the missing NUL followed by the original payload storage. File offsets remain relative to that payload, and the source package and encrypted NCA bytes are unchanged. Truncated tables and out-of-table name offsets still fail. Synthetic package tests cover both readers and payload preservation.
 - **Found on:** Moving Out 2 (`010065D018172000`), base 1.1.254 NSP and update 1.3.315 NSZ. Package reading was checked, not gameplay.
 
+### A NUP with complete standalone updates stops at "no base game"
+
+- **Symptom:** `no base game, only update packages: pack the base game and its update into one NUP`, even when the update carries the complete game's files ([issue #1195](https://github.com/seedds/nxnative/issues/1195)).
+- **Cause:** `pack_nup.scan` required a `base` record. NUP v1 permits a container without one when every update has the `standalone_update` flag (package flags bit 0, [SPEC §3.1.2](https://github.com/a55uka/nup/blob/meow/SPEC.md#312-package-kinds)). The reference packer writes one for a dump with no `base/` folder and, since its commit `92089de3`, for an empty `base/` too; before that an empty `base/` gave an empty base record, which got through the check. The issue was filed before that commit, so its NUP came from a dump with no `base/` folder or from another packer; the file itself was not seen.
+- **Fix:** no base record and a base record with no files are one case: `scan` gives `None` for the base, and only the update versions present are offered. Both packing entry points select the newest update by default; requesting version 0 fails. The selected update must have `exefs/main`, `exefs/main.npdm` and its own RomFS; it cannot borrow another update's RomFS. Control data the update lacks comes from the record that holds application metadata: the empty base record, else the first package ([SPEC §5.1](https://github.com/a55uka/nup/blob/meow/SPEC.md#51-localized-records-types-0x0009--0x000a)). A base with files still supplies the RomFS for an update without one. Program-ID, DLC, content-size and SHA-256 checks apply as before. A version that cannot be packed stops at a `[RED]` line: the disk check reads its RomFS folder before extraction, so `cli()` catches `pack_nup.Error`.
+- **Not known from the file:** whether the update is the whole game. The flag does not promise it (the spec says such an update needs a matching base elsewhere), and an update holding only changed files would pack and then fail at boot, after a full shader build. The scripts print that the update is taken as the whole game. Measured: both NUPs at hand have an update RomFS that holds every path of its base (Age of Imprisonment: 2,065 base files, 2,153 in the update, none missing; Yoshi and the Mysterious Book: 147 and 147, none missing).
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md). Reproduced with its base dump repackaged by the reference tool as a standalone-update fixture; this checks packaging, not the reported 1.8.0's contents or gameplay. Synthetic tests cover both entry points, both forms of no base, multiple versions, control data, DLC and incomplete updates.
+
 ## Build tools
 
 ### Homebrew .NET is on PATH but apphosts cannot find the runtime
@@ -103,6 +111,13 @@
 
 ## Launcher metadata
 
+### No Game language row in an app packed from a NUP or a dump
+
+- **Symptom:** the settings of a Mac app or IPA packed from a NUP or a dump folder have no Game language row, while `DM_LANG` in the environment changes the language. Reported on [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) ([NX2Apple#619](https://github.com/LNPANDY/NX2Apple/issues/619), [#659](https://github.com/LNPANDY/NX2Apple/issues/659); the reporters' packed files were not available).
+- **Cause:** `settings.py` shows the row when the game's `control.nacp` lists more than one language, and two cases gave it none. A NUP update may carry no control data: the NSP script's language check fell back to the base game's file, but the Mac settings got only the update's path, and `build_ipa.sh`'s fallback (`$W/data/v0`) is a folder the NSP script does not make. And there may be no NACP at all: the Yoshi and the Mysterious Book and [Age of Imprisonment](../../dm/games/04003F40232DE000/README.md) NUPs carry none in any package, and an FTP dump such as Bananza's has no control data.
+- **Fix:** `languages_control` in `build_ipa_from_nsp.py` picks the file once (the packed version's, else the base game's), for the check, `mac_app` and `build_ipa.sh` (`CONTROL`). With no list, `settings.py` offers every language with a note, as `game_language` and `DM_LANG` already accept any. Age of Imprisonment shows a language it lacks as English (Russian, Portuguese) and has more text languages than its voice folders suggest (Dutch, Simplified Chinese), so a game's list cannot be read from its folders.
+- **Found on:** code reading and the NUP records of the two games above, with [PR #1182](https://github.com/seedds/nxnative/pull/1182); boots of [Age of Imprisonment](../../dm/games/04003F40232DE000/README.md) to its first settings screen. Not confirmed on Bananza by the reporters.
+
 ### A Mac front end's default settings change Metal execution paths
 
 - **Symptom:** starting a Mac app through a front end with unchanged settings enables the encode thread, and can disable Metal 4 pipelines and the pipeline archive; starting the same app from Finder keeps the host's defaults.
@@ -139,6 +154,13 @@
 - **Cause:** the same AppleDouble files as above. The module, shader, pipeline and font globs of `selected_inputs` took `._<name>` for a module or a library, and a `._x.patched.bin` has no `x.fixups.tsv` beside it. `shutil.copy2` of the host tried to set the copy's flags on a file system without extended attributes (`chflags: Operation not permitted`), and `cp -R` carried a folder's sidecars into the bundle, where `DMModuleFiles` listed them. `codesign` then read the `._nxnative` beside the launcher as a nested code object that is not signed and refused the whole bundle. Signing also sets an attribute on what it signs, so the sidecar comes back after a successful signature.
 - **Fix:** `dm/mac/pack_app.py` `detritus()` drops those names from `selected_inputs`, so neither the pack nor `DMModuleFiles` sees them. `copy()` passes `-X` where it copies and not where it clones (`cp` refuses the two together), and the host goes through `shutil.copy` instead of `copy2`, so a copy creates none of them. `strip_detritus()` runs before `codesign` reads the staged bundle, runs again after `xattr -cr` when `codesign` still refuses one, and runs once more after signing. On APFS nothing changes: no sidecar exists there, and the two passes are a stat walk. `dm/tools/tests/test_nsp_mac_app.py` puts a `._` file in every input folder and checks that it is not selected, does not reach the bundle, and is not in `DMModuleFiles`.
 - **Found on:** the NX2Apple fork's users, packing Mac apps on an external drive ([LNPANDY/NX2Apple#486](https://github.com/LNPANDY/NX2Apple/issues/486)); reproduced on an exFAT disk image made with `hdiutil create -fs ExFAT`, where the same inputs pack, sign and pass `codesign --verify --strict` with the change and stop three ways without it. Applies to every game's Mac app.
+
+### A second Mac app build stops with `[Errno 45]` when it replaces the old app
+
+- **Symptom:** with the app on a Mac OS Extended, exFAT or FAT drive, the first build into a folder works and the next one that changes anything stops in `pack_app.py` `replace_app` with `OSError: [Errno 45] Operation not supported: '<app>'`. The old app stays in place.
+- **Cause:** `replace_app` exchanges the new and the old app with `renamex_np(RENAME_SWAP)`, which only APFS offers: the others return `ENOTSUP`. A first build has no old app to exchange, so it takes a plain rename.
+- **Fix:** on `ENOTSUP` or `EOPNOTSUPP`, `swap_by_moves` makes the state the swap leaves with three renames (the old app to `<app>.old`, the new one to `<app>`, the old one to `<app>.partial`), so the key write and its rollback do not change. A rename that fails undoes the ones before it. These volumes cannot make it atomic: a process killed between the first two renames leaves no app at `<app>`, with the old one at `<app>.old` until the next replacement clears it. APFS still swaps. Tests: `dm/tools/tests/test_nsp_mac_app.py` `test_volume_without_atomic_swap_replaces_by_moves`, `test_fallback_restores_the_old_app_when_a_move_fails` and `test_fallback_clears_an_old_app_a_killed_build_left_aside`.
+- **Found on:** a user's rebuild onto an external Mac OS Extended (Journaled) drive ([LNPANDY/NX2Apple#595](https://github.com/LNPANDY/NX2Apple/issues/595), [PR #1190](https://github.com/seedds/nxnative/pull/1190)); reproduced on HFS+ and exFAT disk images made with `hdiutil create`, where the `PackReuse` tests stop with the real errno without the change and reach the fallback with it. Applies to every game's Mac app.
 
 ### External shader directories contain AppleDouble metadata
 
@@ -181,6 +203,13 @@
 - **Cause:** `title_of` took the title ID only from the ticket's file name (`<rights ID>.tik`) or from a `[title ID]` tag in the package's file name. Many NSPs carry no ticket (standard-crypto dumps, repacks), and a download's file name often has no tag.
 - **Fix:** with neither, `title_of` asks the package: `nx_extract <prod.keys> --title <package>` opens it, decrypts the header of each meta NCA with the keys' `header_key` and prints the lowest title ID (the base game's before its update's or a DLC's). It works for NSP, NSZ (the meta NCA is not compressed), XCI and XCZ, and runs only when the ticket and the tag are both missing, so the common cases stay a read of the file name table. `nx_extract` is built into a temporary folder for it, since the build folder is named after the title ID. Key values are never printed.
 - **Found on:** NX2Apple, [LNPANDY/NX2Apple#177](https://github.com/LNPANDY/NX2Apple/issues/177) ([Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), whose base NSP has no ticket). Applies to every game.
+
+### A game file whose extension is in capitals is not found
+
+- **Symptom:** `[RED] no NSP with a readable title ID in <folder>` for a folder holding `Game [0100XXXXXXXXXXXX].NSP`, on any Mac volume; renaming it to `.nsp` makes the build go on. A dump folder beside `Game.NSP` is packed instead of the package, and `Game.NUP` is not found. A `Game.NSZ` stops with `nsz made no Game.nsp`.
+- **Cause:** the script listed the folder with `Path.glob('*.nsp')`, which compares case-sensitively on every POSIX system, a case-insensitive Mac volume included. nsz has the same limit of its own: `PathTools.isCompressedGame` takes only a lowercase extension, and nsz skips anything else and exits 0 with no output. It resolves a symlink before it looks.
+- **Fix:** `files_with_suffix` lists a folder's files by their lowercased extension, for every scan of the inputs, and a package beside a compressed one is found in that listing. A compressed file in capitals goes to nsz as a hard link with a lowercase extension in its temporary folder, or as a copy where there can be none (another volume, exFAT), so the player's file stays as it is.
+- **Found on:** NX2Apple, [LNPANDY/NX2Apple#554](https://github.com/LNPANDY/NX2Apple/issues/554) ([Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md)). Applies to every game.
 
 ### A merged NSP (base game, update and DLC in one file) packs as one title
 
@@ -230,6 +259,13 @@
 - **Cause:** a damaged NSP with more than a few damaged files used up LibHac 0.19's hash cache. `CachedStorage.GetBlock` takes a block off its list before reading into it and does not put it back when the read fails, so the 4 blocks of a filesystem last for 4 failed reads and the next read that misses the cache throws. That exception is no hash error, so `nx_extract` did not catch it. A copy of SteamWorld Dig with 2 flipped bytes listed its 2 files; with 40 it crashed.
 - **Fix:** each hash error gets a new checked filesystem (`Failed` in `dm/tools/nx_extract/Program.cs`, on the image, folder and manifest paths), so a damaged NSP lists every damaged file and stops with exit code 3, or goes on with `--allow-damaged`. The same copy with 40 flipped bytes lists all 36 files. `test_every_damaged_file_is_listed_past_the_hash_cache` in `dm/tools/tests/test_romfs_read.py` puts a real RomFS behind a real `CachedStorage` on all three paths, with no NSP or keys.
 - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game) ([issue #810](https://github.com/seedds/nxnative/issues/810), whose reporter diagnosed the lost cache blocks and carried a local patch that reopens the filesystem). Applies to any game.
+
+### A damaged RomFS's own tables
+
+- **Symptom:** `[RED] the NSP is damaged: a filesystem's own tables fail the NCA's hash check`, exit code 3, right after the build IDs; before 2026-11-04, `[RED] nx_extract exit code -6` with an unhandled `ResultFsNonRealDataVerificationFailed (2002-4604)` under `RomfsHeader`. The ExeFS reads, and the build IDs and name are printed, since only the RomFS is hit.
+- **Cause:** the damage lies in what the RomFS opens from (its header, or the hash levels above it), so no file can be listed, and `--allow-damaged` has no file to write as read. Hashing each NCA tells which one it is: its file name is the first 16 bytes of its SHA-256.
+- **Fix:** `nx_extract` says so and exits with 3, as for damaged files. A good copy of the NSP is the only cure. A base game that is intact packs alone with `--package <its version>`, once it has a profile.
+- **Found on:** [Mario & Luigi: Brothership](../../dm/games/01006D0017F7A000/README.md#versions): update 1.0.1's Program NCA `074db5a4…` (its NSP is also a repack: it holds a `.cnmt.xml`).
 
 ### A crash from a damaged NSP's file looks like a host bug
 

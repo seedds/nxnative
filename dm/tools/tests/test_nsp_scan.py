@@ -46,6 +46,46 @@ class Scan(unittest.TestCase):
         self.assertEqual(nsp.scan_nsps(self.tmp)[1]['base'], base)
         self.assertEqual(self.said, [])
 
+    def test_extension_in_any_letter_case(self):   # `Game [id].NSP` (a download, a card dump): glob('*.nsp') missed it on every POSIX system, a case-insensitive Mac volume too (LNPANDY/NX2Apple#554)
+        base = self.tmp / f'Game [{APP:016X}][v0].NSP'; pfs0(base, [f'{APP:016x}0000000000000011.tik'])
+        upd = self.tmp / f'Update [{APP | 0x800:016X}][v65536].Nsp'; pfs0(upd, [])
+        dlc = self.tmp / f'DLC [{APP + 0x1001:016X}].XCI'; dlc.write_bytes(bytes(0x100) + b'HEAD' + bytes(0x100))
+        app, fam = nsp.scan_nsps(self.tmp)
+        self.assertEqual((app, fam['base'], [p for _, p in fam['updates']], [p for _, _, p in fam['dlc']]), (APP, base, [upd], [dlc]))
+
+    def test_compressed_extension_in_capitals_counts(self):   # its conversion: test_nsp_nsz
+        nsz = self.tmp / f'Game [{APP:016X}].NSZ'; pfs0(nsz, [f'{APP:016x}0000000000000011.tik'])
+        self.assertEqual(nsp.scan_nsps(self.tmp)[1]['base'], nsz)
+
+    def test_package_beside_a_compressed_one_wins_in_any_letter_case(self):   # read from the listing: Game.nsp, which with_suffix would look for, is not on a case-sensitive volume
+        for packed, compressed in (('.NSP', '.NSZ'), ('.NSP', '.nsz'), ('.nsp', '.NSZ'), ('.XCI', '.XCZ')):
+            with self.subTest(packed=packed, compressed=compressed):
+                self.said.clear()
+                base = self.tmp / f'Game [{APP:016X}]{packed}'; pfs0(base, [f'{APP:016x}0000000000000011.tik'])
+                nsz = self.tmp / f'Game [{APP:016X}]{compressed}'; pfs0(nsz, [f'{APP:016x}0000000000000011.tik'])
+                self.assertEqual(nsp.scan_nsps(self.tmp)[1]['base'], base)
+                self.assertEqual(self.said, [f'skipping {nsz.name}: {base.name} is beside it'])
+                base.unlink(); nsz.unlink()
+
+    def test_folder_named_like_a_package_is_not_one(self):
+        (self.tmp / 'old.nsp').mkdir()
+        base = self.tmp / f'Game [{APP:016X}].nsp'; pfs0(base, [f'{APP:016x}0000000000000011.tik'])
+        self.assertEqual(nsp.scan_nsps(self.tmp)[1]['base'], base)
+
+    def test_nup_in_capitals(self):
+        nup = self.tmp / 'Game.NUP'; nup.write_bytes(b'NUP\0')
+        self.assertEqual(nsp.nup_file(self.tmp), nup)
+        (self.tmp / '._Game.NSP').write_bytes(b'\0\x05\x16\x07')   # an AppleDouble file is not a package
+        self.assertEqual(nsp.nup_file(self.tmp), nup)
+        pfs0(self.tmp / 'Game.NSP', ['x.nca'])
+        self.assertIsNone(nsp.nup_file(self.tmp))   # a package in capitals counts as a package, so no NUP is looked for
+
+    def test_dump_with_a_package_in_capitals_beside_it(self):
+        (self.tmp / 'base/exefs').mkdir(parents=True); (self.tmp / 'base/romfs').mkdir(); (self.tmp / 'base/exefs/main.npdm').write_bytes(b'x')
+        self.assertTrue(nsp.dump_folder(self.tmp))
+        pfs0(self.tmp / 'Game.NSP', ['x.nca'])
+        self.assertFalse(nsp.dump_folder(self.tmp))   # the package is what the player asked for
+
     def test_missing_final_name_terminator(self):
         for extension in ('.nsp', '.nsz'):
             with self.subTest(extension=extension):

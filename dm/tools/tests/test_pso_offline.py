@@ -430,6 +430,32 @@ class Build(unittest.TestCase):
             self.main('--batch-size','2','--os-min','27.0')
         self.assertEqual(observed, [('merge',2)])
 
+    def test_groups_are_the_default_above_the_batch_size(self):
+        bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(3)]
+        for size, want in ((2, [('merge', 2)]), (3, [])):   # more bases than a group: groups, merged; as many: one compiler run, no merge
+            shutil.rmtree(self.work, ignore_errors=True); shutil.rmtree(self.out, ignore_errors=True)
+            runner, observed = self.batched_runner()
+            with mock.patch.object(po, 'BATCH', size), mock.patch.object(po, 'plan', return_value=(bases, [], {})), mock.patch.object(self, 'fake_run', runner):
+                self.main('--os-min', '27.0')
+            self.assertEqual([x for x in observed if x[0] == 'merge'], want)
+            self.assertTrue((self.out / 'applegpu_g18p.mtl4a').is_file())
+        shutil.rmtree(self.work); shutil.rmtree(self.out)
+        runner, observed = self.batched_runner()
+        with mock.patch.object(po, 'BATCH', 2), mock.patch.object(po, 'plan', return_value=(bases, [], {})), mock.patch.object(self, 'fake_run', runner):
+            self.main('--os-min', '27.0', '--batch-size', '0')   # 0: one compiler run
+        self.assertEqual(observed, [('compile', ['vertex0', 'vertex1', 'vertex2'])])
+
+    def test_groups_of_a_longer_list_are_removed(self):
+        bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(4)]
+        runner, _ = self.batched_runner()
+        with mock.patch.object(po, 'plan', return_value=(bases, [], {})), mock.patch.object(self, 'fake_run', runner):
+            self.main('--batch-size', '1', '--os-min', '27.0')
+        groups = self.work / 'batches.applegpu_g18p'
+        self.assertEqual(sorted(d.name for d in groups.iterdir()), ['00001', '00002', '00003', '00004'])
+        with mock.patch.object(po, 'plan', return_value=(bases[:2], [], {})), mock.patch.object(self, 'fake_run', runner):
+            self.main('--batch-size', '1', '--os-min', '27.0')
+        self.assertEqual(sorted(d.name for d in groups.iterdir()), ['00001', '00002'])
+
     def test_only_changed_batch_is_recompiled(self):
         bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(5)]
         runner, observed = self.batched_runner()
@@ -466,6 +492,30 @@ class Build(unittest.TestCase):
         text, left = self.failed_run(10 << 30)
         self.assertNotIn('out of disk space', text); self.assertIn('metal-tt failed', text)
         self.assertFalse({'translate-0001', 'a.airp'} & left)
+
+
+class IpaFallback(unittest.TestCase):
+    """build_ipa.sh's own archive step with a pso_offline.py that fails: a [RED] line, no archive folder, and the build goes on (an optimization: the device builds the bases)"""
+
+    def step(self, python):
+        lines = (REPO / 'dm/ios/tools/build_ipa.sh').read_text().splitlines()
+        i = next(n for n, ln in enumerate(lines) if ln.startswith('if [ "$GFXAPI" = nvn ] && [ -n "$GPUS" ]'))
+        j = next(n for n, ln in enumerate(lines) if n > i and ln.startswith('else [ "$GFXAPI" != nvn ]'))
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / 'bin').mkdir(); stub = Path(d) / 'bin/python3'; stub.write_text('#!/bin/sh\n' + python); stub.chmod(0o755)
+            (Path(d) / 'shader_pairs.tsv').write_text('v\tf\n')
+            env = dict(os.environ, PATH=f'{d}/bin:{os.environ["PATH"]}', W=d, GD=d, GAME='G', DM='dm', MSL_IOS='m', V='0', GPUS='g18p', GFXAPI='nvn')
+            script = 'die() { echo "FAIL: $*"; exit 1; }\nt() { echo "$*"; }\nDM_PSO_IOS_MIN=\n' + '\n'.join(lines[i:j]) + '\nfi\necho "PSO=[$PSO]"\n[ -d "$W/build/ios/pso/bundle" ] && echo folder\necho went on\n'
+            return subprocess.run(['bash', '-c', 'set -u\n' + script], env=env, capture_output=True, text=True).stdout
+
+    def test_failed_archive_is_a_warning(self):
+        out = self.step('mkdir -p "$W/build/ios/pso/bundle"; echo half; exit 1\n')
+        self.assertIn('[RED] pipeline archive: pso_offline.py failed', out); self.assertIn('PSO=[]', out); self.assertNotIn('folder', out); self.assertIn('went on', out)
+        self.assertNotIn('FAIL', out)
+
+    def test_made_archive_goes_into_the_app(self):
+        out = self.step('mkdir -p "$W/build/ios/pso/bundle"; exit 0\n')
+        self.assertNotIn('[RED]', out); self.assertIn('/build/ios/pso/bundle]', out); self.assertIn('folder', out)
 
 
 class Default(unittest.TestCase):

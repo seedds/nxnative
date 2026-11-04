@@ -29,7 +29,7 @@ NOP = 0xd503201f
 def align(v, a=PAGE): return (v + a - 1) // a * a
 
 
-def read(path):
+def read(path) -> dict:   # load adds the record's key
     b = open(path, 'rb').read()
     if b[:4] != b'DMJ5': sys.exit(f'[RED] {path}: not a capture of this format (rewrite it with the current host)')
     cmd, = struct.unpack_from('<I', b, 4)
@@ -97,17 +97,23 @@ def adrp_add(rd, pos, target):
     return [adrp, add, NOP, NOP]
 
 
+def span_mask(spans):
+    """32-byte mask of the request bytes named by spans such as 0-7,24-27,30: a span is one byte or an inclusive range"""
+    m = bytearray(32)
+    for sp in spans.split(','):
+        first, _, last = sp.partition('-')
+        for i in range(int(first, 0), int(last or first, 0) + 1): m[i] = 0xff
+    return bytes(m)
+
+
 def key_masks(profile):
     """command → 32-byte mask from the profile key jit_key_data"""
     if not profile: return {}
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'games')); import game
     out = {}
     for item in game.load(profile).words('jit_key_data', ''):
-        cmd, spans = item.split(':'); m = bytearray(32)
-        for sp in spans.split(','):
-            a, _, b = sp.partition('-'); a = int(a, 0); b = int(b or a, 0)
-            for i in range(a, b + 1): m[i] = 0xff
-        out[int(cmd)] = bytes(m)
+        cmd, spans = item.split(':')
+        out[int(cmd)] = span_mask(spans)
     return out
 
 

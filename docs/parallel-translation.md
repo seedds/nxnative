@@ -104,3 +104,17 @@ If three workers each take a third of the 13.5–15 ms, plus the scan (target: u
 - **Lock contention** in the caches could eat the gain. Milestone 1 measures, before workers exist, how often the replay touches shared caches.
 - **Memory:** each worker has its own arenas and command buffer allocator.
 - **Games with many GPU waits per submission** get little parallelism. They still run correctly, just serially.
+
+## How to test (milestones 1–4b)
+
+Every mode is off unless `DM_NVN_PAR` is set, and every mode so far translates on one thread. Run them in this order, in the same busy spot, and stop at the first one that changes the picture. That mode names the layer that's wrong:
+
+| Step | `DM_NVN_PAR=` | What it does | If the picture breaks | If the log shows red lines |
+|---|---|---|---|---|
+| 0 | (unset) | the normal replay, through the context struct (milestone 2) | milestone 2's rename: bisect its six slice commits | — |
+| 1 | `measure` | the scan runs (in its own context) and boundaries are counted | the scan touched the replay's state (it should not now) | — |
+| 2 | `check` | the scan's S, R and write tracking compared at every clean boundary | as step 1 | each names a field the scan does not model: the contract's gap |
+| 3 | `fresh` | at a clean boundary every `DM_NVN_PAR_DRAWS` (2500) draws, translation moves to a fresh context with the contract copied from the previous one | something a chunk needs is outside the contract: the log's first switches give the pass and draw, so the first wrong pass after a switch points at it | — |
+| 4 | `fresh-scan` | as 3, but the contract comes from the scan's snapshot, as a worker's will | the scan's contract is not enough (step 2's red lines say which part) | as 2 |
+
+Lowering `DM_NVN_PAR_DRAWS` (say to 500) makes step 3 and 4 switch more often, so a problem shows sooner. The log lines to read are the ones starting `parallel translation` and any `[RED] parallel translation check`. `work/apps/partest.sh <mode>` (outside the repository) runs one step and collects them.

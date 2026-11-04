@@ -231,6 +231,15 @@
 - **Fix:** keep only complete lines at the two read boundaries before redaction, using the byte before the tail to distinguish a complete first line from a fragment. The omitted-byte count includes the discarded fragments; reading stays bounded. Files within the limit and a complete final line without a newline are unchanged.
 - **Found on:** synthetic logs in `dm/tools/tests/test_bug_report.py`, including a key value surviving in the final zip on the old code. No game files or real keys are needed; this is a diagnostic collector finding, not a game-runtime failure.
 
+## Mac apps
+
+### The Mac app drops the FPS setting and Metal HUD menu
+
+- **Symptom:** a Mac app built with `--show-fps` has neither the Metal performance overlay nor its Metal HUD menu.
+- **Cause:** the NSP script returned from its Mac packaging path before applying `SHOW_FPS` / `--show-fps`. The older bundler carried that preference into the app, but the current launcher received no HUD default. The Mac host enables Apple's HUD through `DM_METAL_HUD`, and Apple adds its menu when the HUD is enabled.
+- **Fix:** `scripts/build_ipa_from_nsp.py` passes the resolved choice to `dm/mac/pack_app.py`, which stores `DMShowFPS` in `Info.plist`. `dm/mac/launcher.c` sets `DM_METAL_HUD` from it before spawning the host, after reading environment files and the player's saved or window choices so those retain precedence. The packed `launcher.json` HUD row uses the same build default. `--no-show-fps` disables the bundled default; changing the option invalidates bundle reuse.
+- **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md); applies to every Mac app. The restored menu still needs a visual check in a running game.
+
 ## IPA archives
 
 ### AltServer cannot install a file of 2 GiB or more

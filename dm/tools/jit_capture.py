@@ -20,6 +20,7 @@ state, the precompiled NRO's blocks, other code in the code memory) as movz xN, 
 jit.tsv: "layout <code size> <data size> <image size>", "mod <name> <offset> <size> <front patch>" and per request "req <key> <command> <code offset> <code size> <data offset>
 <data size> <return value> <out offset in jit.out> <out size> <relocations>" (relocations: comma-separated <out offset>=<region>+<offset>, '-' for none)."""
 import os, struct, sys
+from typing import Any
 from collections import Counter, defaultdict
 
 PAGE = 0x4000
@@ -29,7 +30,7 @@ NOP = 0xd503201f
 def align(v, a=PAGE): return (v + a - 1) // a * a
 
 
-def read(path):
+def read(path) -> dict[str, Any]:   # one capture record; load adds its key
     b = open(path, 'rb').read()
     if b[:4] != b'DMJ5': sys.exit(f'[RED] {path}: not a capture of this format (rewrite it with the current host)')
     cmd, = struct.unpack_from('<I', b, 4)
@@ -105,7 +106,7 @@ def key_masks(profile):
     for item in game.load(profile).words('jit_key_data', ''):
         cmd, spans = item.split(':'); m = bytearray(32)
         for sp in spans.split(','):
-            a, _, b = sp.partition('-'); a = int(a, 0); b = int(b or a, 0)
+            lo, _, hi = sp.partition('-'); a = int(lo, 0); b = int(hi or lo, 0)
             for i in range(a, b + 1): m[i] = 0xff
         out[int(cmd)] = bytes(m)
     return out

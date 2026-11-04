@@ -1666,7 +1666,7 @@ def capture_jit(py, repo, d, patched, work, env, logs, g):
         PROG.set(step=f'booting the game ({name})')
         say(f'booting the game in the Mac host to capture the code its JIT plugin makes ({name}) → {c}')
         last = {'n': 0, 't': time.time()}
-        def done():   # the boot code (the largest request) and nothing new for 10 s
+        def done(part=part, last=last):   # the boot code (the largest request) and nothing new for 10 s (this run's folder and counter, bound here)
             fs = list(part.glob('*.jit')); n = len(fs)
             if n != last['n']: last['n'], last['t'] = n, time.time()
             return bool(fs and max(f.stat().st_size for f in fs) > 1 << 20 and time.time() - last['t'] > 10)

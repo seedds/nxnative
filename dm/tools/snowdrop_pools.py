@@ -76,8 +76,8 @@ def check(W, a, k):
     b0, b1, b2, b3 = calls[:4]
     xa = W[a] & 31
     g12 = [j for j in range(b1, b2) if loaded(W[j], G12)]
-    if len(g12) != 2 or load_imm(W[g12[1]])[0] != 0: return None, 'the second reservation is not 12 GB from x0'
-    xb = load_imm(W[g12[0]])[0]
+    if len(g12) != 2 or W[g12[1]] & 31 != 0: return None, 'the second reservation is not 12 GB from x0'
+    xb = W[g12[0]] & 31
     if not 19 <= xb <= 28: return None, 'the 12 GB end is not in a saved register'
     # the object's register: mov xS, x0, before the first call
     movs = [W[j] & 31 for j in range(max(0, a - 8), b0) if W[j] & 0xFFFFFFE0 == 0xAA0003E0 and 19 <= W[j] & 31 <= 28]

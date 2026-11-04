@@ -18,9 +18,10 @@ on:
 permissions:
   contents: read
 
+# As in tests.yml: it waits for the same Mac runners, so a push to main never cancels, or main's runs do not finish.
 concurrency:
   group: lint-c-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # The LLVM release whose clang-tidy runs here, and the sha256 of its macOS arm64 archive (github.com/llvm/llvm-project/releases). The baseline names

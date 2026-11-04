@@ -56,6 +56,7 @@
 #   Unity type trees need Unity's common string table, which is taken from the first main
 # Pair table: (vertex key, pixel key) of every BNSH variation (every Unity program); dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
 import base64, collections, concurrent.futures as cf, glob, hashlib, json, os, re, struct, subprocess, sys, time, zlib
+from typing import NoReturn
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open, is_image
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../games')); import game as _game
@@ -79,7 +80,7 @@ def sph_stage(code):
     return 'vs' if (w >> 10) & 0xf == 0 and w & 0x1f == 1 else SPH_STAGE.get((w >> 10) & 0xf)
 STAGE_NAME = {'vs': 'vertex', 'hs': 'hull', 'ds': 'domain', 'gs': 'geometry', 'ps': 'pixel', 'cs': 'compute', 'ts': 'task', 'ms': 'mesh'}   # shader_map.tsv column 3
 
-def red(msg): sys.exit('[RED] ' + msg)
+def red(msg) -> NoReturn: sys.exit('[RED] ' + msg)
 
 def field(d, fmt, at, where):
     """struct.unpack_from(fmt, d, at) of a field a header or table points at: red() naming where and the offset when it is not inside d (a damaged or cut file)"""
@@ -2325,7 +2326,9 @@ def unity_compute(x, base, trees):
     Unity 2022.3: the post-processing stack's 12 compute shaders, its colour grading LUT baker among them, in Data/sharedassets2.assets). Raises NoTree in the first pass, so the file is scanned
     again with the borrowed trees and unityfs.py's layouts; in the second pass a class still without a tree is reported and its kernels left out, as before compute shaders were read.
     Unity 2022.3 lists a kernel's variants in uniqueVariants; Unity 2020.3 keys them by keyword set in variantMap (AI: THE SOMNIUM FILES - nirvanA Initiative's bundles, whose type trees say so).
-    Unity 2019.4 has no variant wrapper: each named kernel holds its code directly (Pokemon Brilliant Diamond's GPU skinning)."""
+    Unity 2019.4 has no variant wrapper: each named kernel holds its code directly (Pokemon Brilliant Diamond's GPU skinning).
+    A kernel may have no code at all, so nothing to translate: 11 of the 142 in DAVE THE DIVER's Data/resources.assets (Unity 6000.0.52f1; ParticleGrid's BuildContactList, ClothRendering's UpdateClothMesh)
+    have an empty code, no buffers and no constants. Reading one as a program would lose every shader of the file."""
     import unityfs
     out = []
     try:
@@ -2334,6 +2337,7 @@ def unity_compute(x, base, trees):
                 for k in v['kernels']:
                     variants = k['uniqueVariants'] if 'uniqueVariants' in k else [p['second'] for p in k['variantMap']] if 'variantMap' in k else [k]
                     for i, u in enumerate(variants):
+                        if not u['code']: continue
                         where = f'{base}#{o["m_Name"]}#{k["name"]}.{i}'
                         out.extend((where, st, ctl, cd) for st, ctl, cd in unity_program(u['code'], where, 'cs'))
     except unityfs.NoTree as e:

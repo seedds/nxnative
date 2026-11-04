@@ -222,6 +222,27 @@ class Pack(Base):
         jp = (b / 'control.nacp').read_bytes()[2 * 0x300:2 * 0x300 + 0x200].split(b'\0')[0]
         self.assertEqual(jp.decode(), 'テス')
 
+    def test_settings_read_the_base_games_languages_when_the_update_has_no_control_data(self):   # a Switch 2 game's settings had no Game language row (GitHub issue #619)
+        sys.path.insert(0, str(REPO / 'dm/games')); import settings
+        vars(nsp)['nacp'] = nacp   # main sets it
+        n = self.open(); app, base, vers, _ = pack_nup.scan(n)
+        pack_nup.pack_version(n, vers[VER], base, app, self.out() / 'u', say=lambda s: None)
+        pack_nup.pack_version(n, base, base, app, self.out() / 'b', say=lambda s: None)
+        u, b = self.out() / 'u', self.out() / 'b'
+        nac = bytearray((b / 'control.nacp').read_bytes()); struct.pack_into('<I', nac, 0x302C, 0b101)   # American English and Japanese
+        (b / 'control.nacp').write_bytes(nac)
+        self.assertFalse((u / 'control.nacp').exists())
+        control = nsp.languages_control(u, b)
+        self.assertEqual(nacp.languages(control), ['en-US', 'ja'])
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'main.fixups.tsv').write_text('')
+            row = lambda path: [s for s in settings.build(f'{TID:016X}', tmp, str(path))['settings'] if s['env'] == 'DM_LANG']
+            self.assertEqual(row(u / 'control.nacp'), [])   # the path the Mac pack passed before: no row
+            self.assertEqual(row(control)[0]['options'], [['en-US', 'American English'], ['ja', 'Japanese']])
+        self.assertEqual(nsp.languages_control(b, u), b / 'control.nacp')   # the packed version's own list wins when it has one
+        nac = bytearray(nac); struct.pack_into('<I', nac, 0x302C, 0b11); (u / 'control.nacp').write_bytes(nac)
+        self.assertEqual(nsp.languages_control(u, b), u / 'control.nacp')
+
     def test_name_label_without_nacp_writes_none(self):   # the script then takes the profile's name, as for a dump
         write_nup(self.path, [(0, TID, 0, version(), tlv([(T_NAME, b'TG'), (pack_nup.T_ICON, b'\xff\xd8 icon')]))])
         n = self.open(); app, base, _, _ = pack_nup.scan(n)

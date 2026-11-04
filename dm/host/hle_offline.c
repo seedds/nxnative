@@ -138,6 +138,10 @@ HLE_FORCE("_ZN2nn4nifm18GetCurrentIpConfigEPNS0_10Ipv4ConfigEPiPNS0_10Ipv6Config
           void *v4, int *n4, void *v6, int *n6, int c4, int c6) { (void)v4; (void)v6; (void)c4; (void)c6; if (n4) *n4 = 0; if (n6) *n6 = 0; return RES_FAIL; }
 // EnvironmentIdentifier = char[8]: retail environment "lp1"
 HLE_FORCE("_ZN2nn3nsd24GetEnvironmentIdentifierEPNS0_21EnvironmentIdentifierE", "server environment name: retail lp1", void, h_nsd_EnvId, char *out) { memset(out, 0, 8); memcpy(out, "lp1", 3); }
+// oe::ServerEnvironmentType: 0 dd1, 1 lp1, 2 sd1, 3 sp1, 4 dp1 (Hogwarts Legacy's table at main+0x42e6c50). SDK 17's oe::GetServerEnvironmentType is a tail call into
+// nsd::GetApplicationServerEnvironmentType, which asks nsd:a / nsd:u; the host serves neither and the SDK aborts on the failed connect (Result 0xe8d)
+HLE_FORCE("_ZN2nn2oe24GetServerEnvironmentTypeEv", "server environment type: retail lp1 (1)", int, h_oe_SrvEnv, void) { return 1; }
+HLE_FORCE("_ZN2nn3nsd35GetApplicationServerEnvironmentTypeEv", "server environment type: retail lp1 (1), nsd not served", int, h_nsd_AppSrvEnv, void) { return 1; }
 
 // ---------- friends: newer SDK overloads ----------
 HLE_FORCE("_ZN2nn7friends12SetAllocatorEPFPvmEPFvS1_mE", "friends library allocator; no session is created, ignored", void, h_fr_SetAlloc, void *a, void *f) { (void)a; (void)f; }

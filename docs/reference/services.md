@@ -684,6 +684,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Open:** the host refuses `nn::socket::EventFd`, so the HTTP thread polls without a wake-up, and with a garbage descriptor beside it. Harmless offline.
 - **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md).
 
+### Server environment queries without nsd
+
+- **Symptom:** `[RED] sf: the game connects to service nsd:a itself, which the host does not serve` (also `nsd:u`), then `game called nn::diag abort: Result 0xe8d` and exit 134 during startup.
+- **Cause:** SDK 17's `nn::oe::GetServerEnvironmentType` tail-calls `nn::nsd::GetApplicationServerEnvironmentType`, which connects to the nsd services. The host has no such service, so the SDK aborts on the failed connection. The query asks for the console's server environment, not for a network connection.
+- **Fix:** take over both public entry points in `hle_offline.c` and return the retail environment enum `1` (`lp1`), consistent with the existing `nsd::GetEnvironmentIdentifier` answer. The game's enum table maps `0 dd1`, `1 lp1`, `2 sd1`, `3 sp1`, `4 dp1`. No service session is needed to answer this fixed host property. This does not implement other nsd operations. `t_server_environment` resolves the real forced registrations by their exported names and checks both answers against the existing identifier.
+- **Found on:** Hogwarts Legacy (`0100F7E00C70E000`, SDK 17, provisional profile), during local bring-up. The same abort is reported in [NX2Apple issue #475](https://github.com/LNPANDY/NX2Apple/issues/475). With the original local change the game passed this call and continued rendering. Gameplay on current upstream and PATAPON 1+2 REPLAY ([NX2Apple issue #426](https://github.com/LNPANDY/NX2Apple/issues/426)) have not been checked.
+
 ### Bluetooth LE at boot
 
 - **Symptom:** `[RED] sf: the game connects to service bt itself, which the host does not serve`, then `game called nn::diag abort` at `sdk+0x16ba48` and exit 134, a second after the audio renderer starts. With `bt` and `btm:u` served as zeroed host sessions the abort moves to `nn::btm::user::InitializeBtmUserInterface` (`sdk+0xb8eb4`), before either session gets a request.

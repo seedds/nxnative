@@ -101,7 +101,7 @@ typedef struct { int kind; volatile uint32_t *val; uint32_t mode, v; uint64_t ad
 typedef struct seg_clk seg_clk;
 // ---------- The replay's per-submission state (docs/parallel-translation.md, milestone 2) ----------
 // What one submission's translation encodes into and keeps while it runs: its command buffer and allocator, the open encoders, segments, frame arenas, post-completion list and visibility
-// buffer. One context today (g_rx0), reached through g_rx; the parallel workers will each translate into their own. Moved here from file-scope variables of the same names (g_cb → RX.cb, …)
+// buffer. One context today (g_rxs[0]), reached through g_rx; the parallel workers will each translate into their own. Moved here from file-scope variables of the same names (g_cb → RX.cb, …)
 @class NvArena, NvProg;
 enum { PEND_MAX = 8192, PEND_HB = 2048, PEND_NODES = 16384, PEND_SPAN = 8, PEND_WIDE = 256 };
 typedef struct { uint64_t lo, hi, gpu; size_t off; __unsafe_unretained id<MTLBuffer> buf; } ubd_ent;   // data at buf + off (the ubs ring; a ring block replaced meanwhile lives until this submission completes)
@@ -151,7 +151,10 @@ typedef struct {
         uint64_t ready; ubp_ent pc[UBP_CACHE]; unsigned pc_i;   // ready of the shadow ubp_get returned last; the shadows kept per range
     } ub;
 } rx_t;
-static rx_t g_rx0 = {.pso_dirty = 1, .dss_dirty = 1, .args_dirty = {1, 1, 1, 1, 1, 1}, .ub.ver = 1}, *g_rx = &g_rx0;
+enum { RX_MAX = 4 };   // replay contexts: one translates today; the parallel workers will use the others (milestone 4)
+static rx_t g_rxs[RX_MAX] = {[0] = {.pso_dirty = 1, .dss_dirty = 1, .args_dirty = {1, 1, 1, 1, 1, 1}, .ub.ver = 1}}, *g_rx = &g_rxs[0];
+static int g_rxi;   // g_rx's index in g_rxs (RXI): state kept per context in arrays [RX_MAX], for state whose types are defined further down (slice 4)
+#define RXI g_rxi
 #define RX (*g_rx)
 static id<MTL4CommandAllocator> g_alloc4[ALLOC_MAX]; static int g_alloc_n;   // Command allocator pool of the main submission: at start pick one the GPU has finished with, create a new one if there is none (wait only at the cap)
 static id<MTL4CommandAllocator> g_up_alloc4[3];
@@ -3461,15 +3464,22 @@ static void rr_reset(void);
 #endif
 static int enc_open(void) { return RX.enc != nil; }
 // Target info of the current render pass: determined once from the attachments at rp_begin and shared by all draws in the pass (pipeline key, depth-stencil, viewport / scissor all depend only on it)
-static struct { uint32_t cfmt[8], dfmt, sfmt, samples; int hd, hs; NSUInteger tw, th; uint64_t serial, reg_gen, ser_gen, range_dirty; int range_external, range_depth_nonro, layered; __unsafe_unretained id<MTLTexture> range_color, range_depth; } g_pass;
+static struct { uint32_t cfmt[8], dfmt, sfmt, samples; int hd, hs; NSUInteger tw, th; uint64_t serial, reg_gen, ser_gen, range_dirty; int range_external, range_depth_nonro, layered; __unsafe_unretained id<MTLTexture> range_color, range_depth; } g_pass_rx[RX_MAX];
+#define g_pass (g_pass_rx[RXI])
 static int g_rp_layered;   // the pass about to open is for a vertex shader that writes the layer (draw → rp_begin_ex)
 // Slice-merged passes (DM_NVN_SLICE_MERGE, on by default; 0 off): consecutive passes that each draw into another layer of one level of the same array or cube texture,
 // with nothing between them but state, uniform updates and draws (no game barrier, clear, copy or dispatch: sm_scan), run as one layered pass. Each draw reaches its layer through a vertex
 // amplification view mapping (count 1, renderTargetArrayIndexOffset), which needs pipelines built with maxVertexAmplificationCount 2 (sm_amp_get; a pipeline with the default 1 ignores
 // the mapping and every draw lands in the first layer). On Apple GPUs a render pass costs about 35-40 us whatever it draws (M2 Max): Breath of the Wild filters its environment cube map
 // every tenth frame in 132 one-draw passes, 22 levels of 6 faces, and that frame's GPU time grew by about 5 ms
-static struct { int on, lo, hi; } g_sm_plan;   // set by draw() for the pass rp_begin_ex is about to open
-static int g_sm_pass, g_sm_lo, g_sm_hi, g_sm_cur, g_sm_applied;   // the open pass is slice-merged: its attachment holds layers lo..hi; cur: the layer the game's target names now; applied: the offset set on the encoder (-1 none)
+static struct { int on, lo, hi; } g_sm_plan_rx[RX_MAX];   // set by draw() for the pass rp_begin_ex is about to open
+#define g_sm_plan (g_sm_plan_rx[RXI])
+static int g_sm_pass_rx[RX_MAX], g_sm_lo_rx[RX_MAX], g_sm_hi_rx[RX_MAX], g_sm_cur_rx[RX_MAX], g_sm_applied_rx[RX_MAX];   // the open pass is slice-merged: its attachment holds layers lo..hi; cur: the layer the game's target names now; applied: the offset set on the encoder (-1 none)
+#define g_sm_pass (g_sm_pass_rx[RXI])
+#define g_sm_lo (g_sm_lo_rx[RXI])
+#define g_sm_hi (g_sm_hi_rx[RXI])
+#define g_sm_cur (g_sm_cur_rx[RXI])
+#define g_sm_applied (g_sm_applied_rx[RXI])
 static uint64_t g_sm_npass, g_sm_ncont, g_sm_nwait;   // slice-merged passes, layer switches taken into them, draws that left one because their pipeline was not built yet
 static int g_pso_amp;   // pso_get: the pipeline of a slice-merged pass (sm_amp_get)
 void mtl_sm_stats(uint64_t *np, uint64_t *nc, uint64_t *nw) { *np = g_sm_npass; *nc = g_sm_ncont; *nw = g_sm_nwait; }
@@ -3813,16 +3823,23 @@ static void lp_finish(void);
 // Only the synthetic raster draw of geo_draw may open a pass without these
 // colors. geo_draw ends that pass before returning to ordinary command replay.
 static int g_geo_omit_colors;
-static int g_rt_range_active, g_rt_range_pending;
+static int g_rt_range_active_rx[RX_MAX], g_rt_range_pending_rx[RX_MAX];
+#define g_rt_range_active (g_rt_range_active_rx[RXI])
+#define g_rt_range_pending (g_rt_range_pending_rx[RXI])
 // The render area of the open pass (0: its whole attachments). A draw pass on a very large target that loads what it keeps can stop at the far corner of its scissor: the GPU then does not load and store what lies beyond,
 // which keeps its contents. Splatoon Raiders' 6400x6400 ink map, each stamp's pass scissored to 1952x2940 at (0, 3460): about 0.95 → 0.32 ms a pass. Only the draw path opens such a pass, only from targets of 16 M pixels, and only when
 // the area is at most half of it; a draw whose scissor leaves the area, and anything else that needs the pass (rp_begin), ends it first. DM_NVN_RP_AREA=0 turns it off
-static NSUInteger g_rp_aw, g_rp_ah; static void rt_dims(NSUInteger *tw, NSUInteger *th);
+static NSUInteger g_rp_aw_rx[RX_MAX], g_rp_ah_rx[RX_MAX]; static void rt_dims(NSUInteger *tw, NSUInteger *th);
+#define g_rp_aw (g_rp_aw_rx[RXI])
+#define g_rp_ah (g_rp_ah_rx[RXI])
 static int rpa_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_RP_AREA"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_RP_AREA=0: passes on very large targets cover the whole target"); } return v; }
-static int g_rp_whole;   // the pass about to open must cover the whole target (rp_begin)
-static int g_rt_merged;         // The current pass has already been continued (at least one same-target SetRenderTargets was merged in)
+static int g_rp_whole_rx[RX_MAX];   // the pass about to open must cover the whole target (rp_begin)
+#define g_rp_whole (g_rp_whole_rx[RXI])
+static int g_rt_merged_rx[RX_MAX];         // The current pass has already been continued (at least one same-target SetRenderTargets was merged in)
+#define g_rt_merged (g_rt_merged_rx[RXI])
 static uint64_t g_rt_merge_n;   // Cumulative continuation count
-static int g_defer_replaying;
+static int g_defer_replaying_rx[RX_MAX];
+#define g_defer_replaying (g_defer_replaying_rx[RXI])
 static void fz_end(void);   // Wrap-up of the readable-tile pass merge (defined before draw)
 static void defer_fallback(void);
 // DM_NVN_ENC_LABEL=1: label every render encoder with 'p<index of the render pass within the frame> <width>x<height> <first 8 digits of the first draw's fragment key> d<draw count>'; in Instruments (xctrace Game Performance / Metal System Trace)
@@ -4007,7 +4024,7 @@ static void attach(MTLRenderPassAttachmentDescriptor *a, const tex_t *t, const v
 // clear_only: a pass opened only to land pending clears, attaching only the attachments that have clears - the other attachments are not touched by this pass, and attaching them costs a pointless load and store on TBDR
 // (Mac character select screen: the color-clear pass drags along a 400x225 depth load and store)
 static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only);
-static NSUInteger g_rp_aw; static int g_rp_whole;
+static NSUInteger g_rp_aw_rx[RX_MAX]; static int g_rp_whole_rx[RX_MAX];
 static id<MTL4RenderCommandEncoder> rp_begin(void) { if (RX.enc && g_rp_aw) rp_end(); g_rp_whole = 1; id<MTL4RenderCommandEncoder> e = rp_begin_ex(0); g_rp_whole = 0; return e; }   // the callers draw anywhere in the target (see g_rp_aw)
 static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only);
 static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) { AP_B; id<MTL4RenderCommandEncoder> e = rp_begin_ex_(clear_only); AP_E(1); return e; }
@@ -8300,9 +8317,13 @@ static id<MTL4RenderCommandEncoder> rp_begin(void);
 // matching one-to-one the ops that end a pass in the replay). If no draw in between enables depth test / depth write / stencil test, this pass may leave the depth attachment unattached:
 // not one byte of the depth content is touched, and on TBDR the load and store of the whole depth texture are saved (measured on a real device: a single-draw fullscreen pass takes half the GPU, with an extra D32S8 load and store attached).
 // The scan follows real replay order across sub-list returns and across the remaining handles of this submission; end of submission = the pass must end. Undecidable cases such as a mid-pass clear or too-deep nesting always count as 'used'.
-static const uint8_t *g_exec_next;   // The op following the current draw in the replay
-static const uint8_t *g_exec_cur;    // The current draw's own op (set with g_exec_next)
-static const uint8_t *g_ret[16]; static int g_ret_n;   // Call return stack of the replay (at OP_CALL the caller's next op is pushed)
+static const uint8_t *g_exec_next_rx[RX_MAX];   // The op following the current draw in the replay
+#define g_exec_next (g_exec_next_rx[RXI])
+static const uint8_t *g_exec_cur_rx[RX_MAX];    // The current draw's own op (set with g_exec_next)
+#define g_exec_cur (g_exec_cur_rx[RXI])
+static const uint8_t *g_ret_rx[RX_MAX][16]; static int g_ret_n_rx[RX_MAX];   // Call return stack of the replay (at OP_CALL the caller's next op is pushed)
+#define g_ret (g_ret_rx[RXI])
+#define g_ret_n (g_ret_n_rx[RXI])
 static const uint64_t *g_rest; static int g_nrest;      // Handles in this submission still to be replayed after the current handle
 void mtl_exec_rest(const uint64_t *h, int n) { g_rest = h; g_nrest = n; }
 static uint64_t g_stat_ds_omit;      // Number of passes that attach less depth-stencil because the lookahead proved it unused (including stencil-only / depth-only)
@@ -8310,7 +8331,9 @@ static uint64_t g_stat_s_only, g_stat_d_only;   // Of those, the number of passe
 // Clear-only pass hoist (hoist_try): ops that were already executed early and must be skipped when replay reaches their original position (each group's SetRenderTargets and the clears in it).
 // The exec loop, the store lookahead (sdx index) and the depth-stencil lookahead (ds_scan) all skip by it - otherwise the lookahead would take the clear at the original position as 'cleared again' and wrongly judge the early-cleared content redundant
 #define HOIST_MAX 40   // At most 4 groups × (1 set-target op + 8 clears)
-static const uint8_t *g_hoist_skip[HOIST_MAX]; static int g_hoist_n; static uint64_t g_hoist_groups;
+static const uint8_t *g_hoist_skip_rx[RX_MAX][HOIST_MAX]; static int g_hoist_n_rx[RX_MAX]; static uint64_t g_hoist_groups;
+#define g_hoist_skip (g_hoist_skip_rx[RXI])
+#define g_hoist_n (g_hoist_n_rx[RXI])
 static int hoist_skipped(const uint8_t *p) { for (int i = 0; i < g_hoist_n; i++) if (g_hoist_skip[i] == p) return 1; return 0; }
 typedef struct { const uint8_t *p, *ret[8]; int ret_n, rest_i, bad; } fz_cursor;
 static int fz_next(fz_cursor *c, const uint8_t **out, op_hdr *oh, const void **oa) {
@@ -8348,7 +8371,8 @@ typedef struct {
     uint8_t wrote[8];                   // Physical attachments written by the later pass
     uint8_t cov2[8];                     // Physical attachments covered by the first draw of the later pass
 } fuse_t;
-static fuse_t g_fz; static uint64_t g_fz_n, g_fz_draws, g_fz_fallback;
+static fuse_t g_fz_rx[RX_MAX]; static uint64_t g_fz_n, g_fz_draws, g_fz_fallback;
+#define g_fz (g_fz_rx[RXI])
 typedef struct { int idx; p_draw dw; p_draw_idx di; p_scissor sc; int has_sc; void *S_; uint8_t pm[8]; } defer_snap;   // pm: group P target index → logical color number of this draw (identity for its own draws; a composed mapping for absorbed upstream groups)
 typedef struct {
     int active, at_q, in_p, n, reason, reason_op, logged, reset_between; uint64_t born;   // born: creation serial (replay is ordered by it, not by slot)
@@ -8361,13 +8385,18 @@ typedef struct {
     uint64_t p_reads[512]; int nreads, p_dw, p_st;
     defer_snap snap[64];
 } defer_t;
-static defer_t g_defer_slots[4];
-static defer_t *g_defer_cur = &g_defer_slots[0];
+static defer_t g_defer_slots_rx[RX_MAX][4];
+#define g_defer_slots (g_defer_slots_rx[RXI])
+static defer_t *g_defer_cur_rx[RX_MAX] = {&g_defer_slots_rx[0][0], &g_defer_slots_rx[1][0], &g_defer_slots_rx[2][0], &g_defer_slots_rx[3][0]};
+#define g_defer_cur (g_defer_cur_rx[RXI])
 #define g_defer (*g_defer_cur)
 static int sub_eq(const p_set_rt *a, int ka, const p_set_rt *b, int kb);
 static uint64_t g_defer_n, g_defer_draws, g_defer_fallbacks;
-static const uint8_t *g_defer_pend;   // The P-range end op of the group that is in its P range (NULL if none): the exec loop compares each op against just this one pointer
-static int g_defer_nact, g_defer_natq;   // Number of active groups, number of groups that reached Q and await replay (the hot path only looks at the counts, no per-slot scan)
+static const uint8_t *g_defer_pend_rx[RX_MAX];   // The P-range end op of the group that is in its P range (NULL if none): the exec loop compares each op against just this one pointer
+#define g_defer_pend (g_defer_pend_rx[RXI])
+static int g_defer_nact_rx[RX_MAX], g_defer_natq_rx[RX_MAX];   // Number of active groups, number of groups that reached Q and await replay (the hot path only looks at the counts, no per-slot scan)
+#define g_defer_nact (g_defer_nact_rx[RXI])
+#define g_defer_natq (g_defer_natq_rx[RXI])
 static int g_defer_ab = -1, g_defer_ab_on;
 static void draw(const p_draw *dw, const p_draw_idx *di);
 static int defer_has_in_p(void) { return g_defer_pend != NULL; }
@@ -8412,7 +8441,7 @@ static int ds_scan(const uint8_t *p, ds_st *ds, int depth) {
 //   Redundant: after being set as an attachment again and before any draw, it is cleared in full (color: all four channels of that index written; depth: depth clear; stencil: all 8 stencil bits cleared. Depth and stencil are decided separately and their write-back is set separately)
 //   Needed: at a draw / dispatch it is bound to a texture or image slot of any stage (including ones already bound when the scan starts); used as copy source / copy destination / texture-clear target; drawn before cleared after becoming an attachment again (load)
 // Different levels / layers of the same texture are decided separately (a downsample chain writes level k and reads level k−1); a sampler binding counts as a read of the whole texture (conservative)
-static const uint8_t *g_exec_cur;   // The op currently being replayed (inclusive)
+static const uint8_t *g_exec_cur_rx[RX_MAX];   // The op currently being replayed (inclusive)
 static void sd_need(sd_att *t, int why) { if (!t->state) { t->state = 1; t->why = (uint8_t)why; } }   // why: 1 a draw reads it as a texture 2 as an attachment, drawn before cleared 3 copy 4 texture clear 5 scanned to the end undecided 6 no start point / index unavailable
 static int sdx_decide(uint8_t st[SD_ATT_MAX]);   // Store lookahead decision (for the index see mtl_sub_index)
 static void sd_finish(void) {
@@ -10466,7 +10495,9 @@ static int geo_drawing(void) { return g_geo_program != nil || g_geo_mesh.on; }
 // DM_NVN_LAZY_CLEAR=0 turns it off
 typedef struct { p_set_rt rt; uint8_t clear_c[8]; MTLClearColor cc[8]; uint8_t clear_d, clear_s; double cd; uint32_t cs; } lc_group;
 enum { LC_MAX = 8 };
-static lc_group g_lc[LC_MAX]; static int g_nlc;
+static lc_group g_lc_rx[RX_MAX][LC_MAX]; static int g_nlc_rx[RX_MAX];
+#define g_lc (g_lc_rx[RXI])
+#define g_nlc (g_nlc_rx[RXI])
 static uint64_t g_lc_taken, g_lc_landed;   // clears a later pass took as its load action / clear-only passes still opened for them (the residency set line)
 void mtl_lc_stats(uint64_t *taken, uint64_t *landed) { *taken = g_lc_taken; *landed = g_lc_landed; }
 static int lc_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_LAZY_CLEAR"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_LAZY_CLEAR=0: clears with no draw open a pass of their own as before"); } return v && !tbdr_on(); }
@@ -10556,7 +10587,9 @@ static int up_mfx_wanted(NvShader *cs); static int up_mfx_encode(NvShader *cs); 
 static int cshoist_on(void) { static int m = -1; if (m < 0) { const char *e = getenv("DM_NVN_CS_HOIST"); m = !(e && !strcmp(e, "0")); if (!m) MLOG("DM_NVN_CS_HOIST=0: compute dispatches between the draws of a pass end it"); } return m; }
 typedef struct { uint64_t lo, hi; } csh_rng;
 enum { CSH_RN = 1024, CSH_MAX = 64 };
-static const uint8_t *g_csh_op[CSH_MAX]; static int g_csh_n; static uint64_t g_csh_moved, g_csh_depth, g_csh_stop[8];   // dispatches run ahead and not yet met by replay; moved, of them sampling the pass's depth; why scans stopped
+static const uint8_t *g_csh_op_rx[RX_MAX][CSH_MAX]; static int g_csh_n_rx[RX_MAX]; static uint64_t g_csh_moved, g_csh_depth, g_csh_stop[8];   // dispatches run ahead and not yet met by replay; moved, of them sampling the pass's depth; why scans stopped
+#define g_csh_op (g_csh_op_rx[RXI])
+#define g_csh_n (g_csh_n_rx[RXI])
 static int csh_take(const uint8_t *p) { for (int i = 0; i < g_csh_n; i++) if (g_csh_op[i] == p) { g_csh_op[i] = g_csh_op[--g_csh_n]; return 1; } return 0; }
 static int csh_add(csh_rng *r, int *n, uint64_t a, uint64_t sz) {
     if (!a) return 1;

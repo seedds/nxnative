@@ -373,7 +373,8 @@ static int geo_mesh_on(void) {
 }
 enum { GEO_MESH_PRIMS = 32, GEO_MESH_DRAW_SLOT = 12, GEO_MESH_GS_SLOT = 13 };   // = dmsh_mesh.py PRIMS, DRAW_SLOT, GS_SLOT
 typedef struct { uint64_t ib; uint32_t itype, first, count; int32_t base_vertex; uint32_t base_instance, pad; } geo_mesh_args;   // dmsh_mesh.py dm_mesh_draw
-static struct { int on, miss; uint32_t prims; __unsafe_unretained id<MTLFunction> fn; __unsafe_unretained NvShader *lean; __unsafe_unretained id<MTLRenderPipelineState> ps; geo_mesh_args a; } g_geo_mesh;
+static struct { int on, miss; uint32_t prims; __unsafe_unretained id<MTLFunction> fn; __unsafe_unretained NvShader *lean; __unsafe_unretained id<MTLRenderPipelineState> ps; geo_mesh_args a; } g_geo_mesh_rx[RX_MAX];
+#define g_geo_mesh (g_geo_mesh_rx[RXI])
 // Triangles a threadgroup of this mesh entry takes: GEO_MESH_PRIMS, or the count its name gives (dm_mesh_p16: dmsh_mesh.py prims_for, when the vertices of 32 exceed the mesh output limit)
 static uint32_t geo_mesh_prims(id<MTLFunction> f) {
     static __unsafe_unretained id<MTLFunction> last; static uint32_t prims;
@@ -458,7 +459,8 @@ static id<MTLRenderPipelineState> geo_mesh_pso(NvProg *pr) { return g_geo_mesh.p
 typedef struct { uint64_t slot[31]; geo_mesh_args d; uint32_t group_end, n; } geo_mesh_rec;   // = dmsh_mesh.py dm_mesh_rec (RUN_SLOTS)
 enum { GEO_MESH_RUN = 1024 };
 static struct { int n; uint32_t groups, prims; __unsafe_unretained id<MTL4RenderCommandEncoder> en; __unsafe_unretained id<MTLRenderPipelineState> ps, run_ps;
-                __unsafe_unretained NvShader *vs, *fs, *lean; __unsafe_unretained id<MTLFunction> fn; geo_mesh_rec r[GEO_MESH_RUN]; } g_mrun;
+                __unsafe_unretained NvShader *vs, *fs, *lean; __unsafe_unretained id<MTLFunction> fn; geo_mesh_rec r[GEO_MESH_RUN]; } g_mrun_rx[RX_MAX];
+#define g_mrun (g_mrun_rx[RXI])
 static uint64_t g_mrun_draws, g_mrun_runs, g_mrun_ends[4];   // draws drawn in runs, runs; runs ended by an operation, another draw, the pass end, a full table
 static int geo_mesh_run_on(void) {
     static int on = -1;
@@ -550,7 +552,8 @@ static void geo_mesh_encode(id<MTLRenderCommandEncoder> en_) {
 // pixel stage alone, a program of its own as a geometry draw's raster stage is, so it takes the render pass and the pixel stage's state like any draw; mtk_pso gives its pipeline and
 // mtk_encode binds the two stages and draws. The mesh stage shares the vertex stage's table, as geo_mesh_encode's does, and a task shader has the object stage's; both read the
 // draw's first workgroup at buffer 29. A pipeline is built in the background and its draws are left out until it is ready, as for a geometry mesh pipeline
-static struct { int on, miss; NvShader *ts, *ms; uint32_t first, count; } g_mtk;
+static struct { int on, miss; NvShader *ts, *ms; uint32_t first, count; } g_mtk_rx[RX_MAX];
+#define g_mtk (g_mtk_rx[RXI])
 static void draw_(const p_draw *dw, const p_draw_idx *di);
 static uint64_t g_mtk_n, g_mtk_wait;
 static nvn_hmap g_pso_mtk = {.klen = sizeof(pso_key)}; static os_unfair_lock g_pso_mtk_lock = OS_UNFAIR_LOCK_INIT;

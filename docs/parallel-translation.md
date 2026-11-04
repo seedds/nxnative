@@ -55,7 +55,7 @@ The contract is a struct with a compare function. A debug mode (`DM_NVN_PAR=chec
 
 `nvn_mtl.m` has about 460 file-scope and 160 function-scope static variables. Each has to be sorted into one of these:
 
-1. **Per-submission replay state:** the current encoders and command buffer (`g_cb`, `g_enc`, `g_blit`), `g_pass`, segment counters, post list, visibility buffer, arenas, the draw loop's cached pipeline (`cur_ps`, `cur_pr`, …), deferred uniform updates. This moves into a worker context (`rx`), reached through one pointer passed down or one thread-local.
+1. **Per-submission replay state:** (moving in milestone 2: into `rx_t`, reached as `RX.…`, or, for state whose types are defined further down the file, kept per context in arrays `<name>_rx[RX_MAX]` behind a macro `<name>` → `<name>_rx[RXI]`) the current encoders and command buffer (`g_cb`, `g_enc`, `g_blit`), `g_pass`, segment counters, post list, visibility buffer, arenas, the draw loop's cached pipeline (`cur_ps`, `cur_pr`, …), deferred uniform updates. This moves into a worker context (`rx`), reached through one pointer passed down or one thread-local.
 2. **Caches shared across submissions:** pipelines, shaders, texture views, sampler states, the address lookup cache (already per thread). These need a lock or a thread-safe structure. Most are already filled from background threads, so the audit is mostly about the replay's own fast paths.
 3. **Per-shader reuse fields:** `ab_buf`, `ab_pass` and friends on `NvShader`. Two workers can draw with the same shader, so these become per worker (indexed by worker) or keyed by the worker's arena.
 4. **Diagnostics:** pass dumps, the GPU profiler's labels, counters. Per worker, merged at commit, or allowed only in serial mode.

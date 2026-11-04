@@ -2596,6 +2596,12 @@ NVN_NOPROTO(nvnDlssNetworkInitialize, NVNboolean, dlss_net_t *n, const dlss_buil
     return 1;
 }
 NVN_NOPROTO(nvnDlssNetworkFinalize, void, dlss_net_t *n) { (void)n; }
+// Star Fox resizes the network as its dynamic resolution moves (768x432 into a 1536x864 window at the title): the input size reaches the replay with each evaluation's parameters
+// (SetInputSubrectangleSize), so the network itself keeps nothing of it
+NVN_NOPROTO(nvnDlssNetworkResize, NVNboolean, dlss_net_t *n, int w, int h) {
+    (void)n; static int once; if (!once++) LOG("[nvn] DLSS network resized to %dx%d input (the evaluation's own size is used)", w, h);
+    return 1;
+}
 NVN_NOPROTO(nvnDlssParametersSetDefaults, void, dlss_params_t *p) { memset(p, 0, sizeof *p); p->pre_exposure = 1; p->mv[0] = p->mv[1] = 1; }
 static void dlss_set_tex(dlss_params_t *p, int k, const NVNtexture *t, const NVNtextureView *v) {
     p->tex[k] = t;

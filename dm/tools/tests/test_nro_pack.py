@@ -22,7 +22,7 @@ class NroPack(unittest.TestCase):
         for f in ('dm/tools/nro_collect.py', 'dm/tools/nso_syms.py', 'dm/tools/patch_nso.py', 'dm/tools/nso_code.py', 'dm/tools/nso_asm.py', 'dm/tools/nso_match.py', 'dm/tools/sdk_patches.py', 'dm/gfx/tools/smash_arc.py'):
             p = self.repo / f; p.parent.mkdir(parents=True, exist_ok=True); p.write_text('v1')
         self.out = self.tmp / 'patched_test'; self.logs = self.tmp / 'logs'; self.logs.mkdir()
-        self.g = types.SimpleNamespace(words=lambda k: ['main'])
+        self.g = types.SimpleNamespace(words=lambda k: ['main'], modules_in=lambda folder: ['main'])
         self.row = 'refused\t' + 'ab' * 32 + '\t128\tgame.nrr\tloose sdk.nro\n'
         self.collections = self.rewrites = 0
         for cm in (mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'run', self.collect),

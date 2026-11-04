@@ -17,6 +17,7 @@
 #include "hle.h"
 #include <pthread.h>
 #include <stdbool.h>
+#include <sys/mman.h>
 #include "vpx/vpx_decoder.h"
 #include "vpx/vp8dx.h"
 #include "hle_movie_yuv.h"
@@ -26,7 +27,9 @@
 #define CV_MAGIC 0x56436d44u        // 'DmCV'
 #define CV_SYNC 0x53436d44u         // 'DmCS': a sync handle the host made (dec id, index, generation)
 #define CV_BUFS 32
-#define CV_HOLD 4                   // decoded pictures waiting for a released buffer
+#define CV_READY 4                  // decoded pictures waiting for a released buffer at which the submission-ready event goes down
+#define CV_HOLD 12                  // and at which packets are refused. Mario Tennis Fever's player sends one packet per signal and ignores the result (nro0+0xd16130), so a signal in flight when the
+                                    // event goes down must still find room: refused at 4, a packet about 6 s into the title movie was lost, and libvpx found every frame after it corrupt
 #define CV_EVENT_OFF 0x100          // the submission-ready SystemEventType inside the decoder type
 #define CV_R(desc) ((Result)(0x6f | ((desc) << 9)))   // nn::codec results (module 111)
 #define CV_BUSY CV_R(3603)          // the decoder cannot take the packet now
@@ -96,8 +99,11 @@ static void pool_native_write(cv_pool *p, uint32_t i, const vpx_image_t *im) {
     for (uint32_t y = 0; y < p->h; y++) memcpy(dst + (size_t)y * stride, tmp + (size_t)y * p->w * 4, (size_t)p->w * 4);
     free(tmp);
 }
-// Pictures and end of stream into the released buffers, in order (decoder lock held)
-static void drain(cv_dec *d) {
+// Pictures and end of stream into the released buffers, in order (decoder lock held). The event says a packet can come: it rises when one was taken (took) or room came back, not at every release.
+// Mario Tennis Fever's player counts each signal as one packet it may send: raised at every release, its count grew while a seek held back the samples (a skipped cutscene),
+// and the packets it then sent overran CV_HOLD
+static void drain(cv_dec *d, int took) {
+    int before = d->nheld;
     while (d->pcount && (d->nheld || d->eos_pending)) {
         uint32_t i = d->pend[d->phead]; d->phead = (d->phead + 1) % CV_BUFS; d->pcount--;
         typeof(d->buf[0]) *b = &d->buf[i];
@@ -113,7 +119,7 @@ static void drain(cv_dec *d) {
         b->filled = 1; b->filled_gen = b->gen;
         spt_fire(d, i);
     }
-    if (d->event) { if (d->nheld < CV_HOLD) hle_signal_system_event(d->event); else hle_clear_system_event(d->event); }
+    if (d->event) { if (d->nheld >= CV_READY) hle_clear_system_event(d->event); else if (took || before >= CV_READY) hle_signal_system_event(d->event); }
 }
 
 HLE_FORCE("_ZN2nn5codec5video10InitializeEv", "the decoder service is the host's (hle_codec_video.c)", Result, h_cv_init, void) { return 0; }
@@ -162,10 +168,39 @@ HLE_FORCE("_ZN2nn5codec36GetDecoderImagePoolNativeImageHandleEPKNS0_25VideoDecod
     p->native = 1;
     return (uint32_t)p->slot << 8 | i;
 }
-// A native image handle's picture for hle_nvn.c: 1 and its memory, size and layout; 0 for a handle no pool holds
+// Blank native images: a picture the system would fill that the host has no source for (GameChat's camera pictures, hle_misc.c), all zeros. Their handles have the top bit set, apart from
+// the decoder pools' (slot << 8 | image). The storage holds any uncompressed format up to 16 bytes a pixel, as the texture's format is known only when the game makes it
+#define BLANK_MAX 32
+static struct { uint32_t w, h; uint8_t *mem; uint64_t size; } g_blank[BLANK_MAX];
+static uint32_t blank_stride(uint32_t w) { return (w * 16 + 63) & ~63u; }
+uint32_t dm_native_image_blank(uint32_t w, uint32_t h) {   // a blank image's handle; 0 when there is no room
+    uint64_t size = ((uint64_t)blank_stride(w) * h + CV_NATIVE_ALIGN - 1) & ~(CV_NATIVE_ALIGN - 1);
+    void *mem = size ? mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0) : MAP_FAILED;
+    if (mem == MAP_FAILED) return 0;
+    pthread_mutex_lock(&g_cv_mu);
+    uint32_t k = 0; while (k < BLANK_MAX && g_blank[k].mem) k++;
+    if (k < BLANK_MAX) { g_blank[k].w = w; g_blank[k].h = h; g_blank[k].mem = mem; g_blank[k].size = size; }
+    pthread_mutex_unlock(&g_cv_mu);
+    if (k == BLANK_MAX) { munmap(mem, size); LOG("[RED] native images: more than %d blank images", BLANK_MAX); return 0; }
+    return 0x80000000u | (k + 1);
+}
+void dm_native_image_blank_free(uint32_t handle) {   // a texture on it must be finalized first, as on the console
+    uint32_t k = (handle & 0x7fffffffu) - 1;
+    if (!(handle >> 31) || k >= BLANK_MAX) return;
+    pthread_mutex_lock(&g_cv_mu);
+    uint8_t *mem = g_blank[k].mem; uint64_t size = g_blank[k].size; memset(&g_blank[k], 0, sizeof g_blank[k]);
+    pthread_mutex_unlock(&g_cv_mu);
+    if (mem) munmap(mem, size);
+}
+// A native image handle's picture for hle_nvn.c: 1 and its memory, size and layout; 0 for a handle no pool or blank image holds
 int dm_native_image(uint32_t handle, uint8_t **mem, uint64_t *size, uint32_t *w, uint32_t *h, uint32_t *stride) {
     uint32_t slot = handle >> 8, i = handle & 0xff; int ok = 0;
     pthread_mutex_lock(&g_cv_mu);
+    uint32_t k = (handle & 0x7fffffffu) - 1;
+    if (handle >> 31 && k < BLANK_MAX && g_blank[k].mem) {
+        *mem = g_blank[k].mem; *size = g_blank[k].size; *w = g_blank[k].w; *h = g_blank[k].h; *stride = blank_stride(g_blank[k].w);
+        pthread_mutex_unlock(&g_cv_mu); return 1;
+    }
     cv_pool *p = slot && slot <= 256 ? g_cv_pools[slot - 1] : NULL;
     if (p && p->mem && i < p->count && (i + 1) * native_size(p->w, p->h) <= p->size) {
         *mem = p->mem + i * native_size(p->w, p->h); *size = native_size(p->w, p->h); *w = p->w; *h = p->h; *stride = native_stride(p->w); ok = 1;
@@ -275,6 +310,15 @@ static Result cv_dec_reset(void *t) {   // Stop / Flush: pictures not yet given 
     pthread_mutex_unlock(&d->mu);
     return 0;
 }
+// A started decoder that has room takes packets, whatever became of the signal Initialize gave. Mario Tennis Fever's player (nro0+0xd19d18) clears that one and drops it while it is not yet started,
+// then counts only later signals: with none at Start it never sent a packet, and every movie stayed black, with the game waiting behind it
+static Result cv_dec_start(void *t) {
+    cv_dec *d = cv_of(t); if (!d) return CV_R(2004);
+    pthread_mutex_lock(&d->mu);
+    if (d->event && d->nheld < CV_READY) hle_signal_system_event(d->event);
+    pthread_mutex_unlock(&d->mu);
+    return 0;
+}
 static Result cv_dec_event(void **out, void *t) { cv_dec *d = cv_of(t); *out = d ? d->event : NULL; return d ? 0 : CV_R(2004); }
 static int cv_hold(cv_dec *d, vpx_image_t *c, int64_t ts) {   // a decoded picture waits for a released buffer (decoder lock held); 0 when the host holds no more
     if (d->nheld >= CV_HOLD) { static int n; if (n++ < 4) LOG("[RED] nn::codec %s: a packet gave more pictures than the host holds: one dropped", k_cv_name[d->codec]); vpx_img_free(c); return 0; }
@@ -303,7 +347,7 @@ static vpx_image_t *av1_to_i420(const mav1_picture *p) {   // the decoder's NV12
 static Result cv_dec_submit(uint64_t *out, void *t, const void *data, uint64_t size, int64_t ts, bool eos) {
     cv_dec *d = cv_of(t); if (!d) return CV_R(2004);
     pthread_mutex_lock(&d->mu);
-    if (d->nheld >= CV_HOLD) { if (d->event) hle_clear_system_event(d->event); pthread_mutex_unlock(&d->mu); return CV_BUSY; }
+    if (d->nheld >= CV_HOLD) { static int n; if (n++ < 4) LOG("[RED] nn::codec %s: a packet refused with %d pictures waiting for a released buffer", k_cv_name[d->codec], d->nheld); if (d->event) hle_clear_system_event(d->event); pthread_mutex_unlock(&d->mu); return CV_BUSY; }
     int got = 0;
     if (d->codec == CV_H264 && d->avc) {   // VideoToolbox reorders: pictures leave in presentation order, all of them at the end of the stream
         if (size && mavc_decode(d->avc, data, (int)size, ts / 1000) < 0) { static int n; if (n++ < 4) LOG("[RED] nn::codec H.264: VideoToolbox could not decode a packet"); }
@@ -322,7 +366,7 @@ static Result cv_dec_submit(uint64_t *out, void *t, const void *data, uint64_t s
     }
     if (eos) { if (got) d->held_eos[d->nheld - 1] = 1; else d->eos_pending = 1; }
     *out = ++d->submits;
-    drain(d);
+    drain(d, 1);
     pthread_mutex_unlock(&d->mu);
     return 0;
 }
@@ -341,7 +385,7 @@ static void cv_dec_rel(void *t, uint32_t i, cv_sync sync) {
     d->buf[i].gen++; d->buf[i].filled = 0;
     if (d->pcount < CV_BUFS) { d->pend[(d->phead + d->pcount) % CV_BUFS] = i; d->pcount++; }
     if (d->fcount < 8) { d->fifo[(d->fhead + d->fcount) % 8] = i; d->fcount++; } else LOG("[RED] nn::codec: acquirable queue full at release %u", i);
-    drain(d);
+    drain(d, 0);
     pthread_mutex_unlock(&d->mu);
 }
 static Result cv_dec_props(uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, int64_t *ts, bool *eos, void *t, uint32_t i) {
@@ -361,7 +405,7 @@ static Result cv_dec_encrypted(void) { static int once; if (!once++) LOG("[RED] 
     HLE_FORCE(s_fin, "frees the host decoder", Result, h_cv_##tag##fin, void *t) { return cv_dec_fin(t); } \
     HLE_FORCE(s_reg, "a buffer of the host decoder, acquirable at once", Result, h_cv_##tag##reg, void *t, uint32_t i, void *pool, uint32_t pidx) { return cv_dec_reg(t, i, pool, pidx); } \
     HLE_FORCE(s_unreg, "the buffer leaves the host decoder", Result, h_cv_##tag##unreg, void *t, uint32_t i) { return cv_dec_unreg(t, i); } \
-    HLE_FORCE(s_start, "the host decoder decodes on submission", Result, h_cv_##tag##start, void *t) { (void)t; return 0; } \
+    HLE_FORCE(s_start, "the host decoder decodes on submission; ready for packets from here on", Result, h_cv_##tag##start, void *t) { return cv_dec_start(t); } \
     HLE_FORCE(s_stop, "drops undelivered pictures", Result, h_cv_##tag##stop, void *t) { return cv_dec_reset(t); } \
     HLE_FORCE(s_flush, "drops undelivered pictures", Result, h_cv_##tag##flush, void *t) { return cv_dec_reset(t); } \
     HLE_FORCE(s_ev, "signalled while the host decoder takes packets", Result, h_cv_##tag##event, void **out, void *t) { return cv_dec_event(out, t); } \
@@ -442,6 +486,34 @@ HLE_FORCE("_ZN2nn5codec35InitializeH264DecoderByRemoteMemoryEPNS0_15H264DecoderT
     (void)bs; (void)refs; (void)mode; return cv_dec_init(t, CV_H264, (uint16_t)w, (uint16_t)h, in, out, csd, csd_n);
 }
 HLE_FORCE("_ZN2nn5codec34GetH264DecoderSubmissionReadyEventEPNS0_15H264DecoderTypeE", "signalled while the host decoder takes packets", void *, h_cv_h264ev22, void *t) { cv_dec *d = cv_of(t); return d ? d->event : NULL; }
+// SDK 19's forms (Mario Kart World's base game, SDK 19.3.3 Ounce, whose movie player is in main). Initialize by remote memory takes two sizes before the picture size (`mmttj`), eight
+// arguments in registers (H.264 two more past them: the parameter sets, 8-byte slots as above). The output buffer properties take a nn::movie::ColorSpace* before the time (nine
+// arguments: the index is the first stack slot; the sdk's own wrapper, sdk+0x2ca110, reorders them for the implementation that writes it as 32 bits). The game reads neither the colour space
+// near either call (main+0x19e63d4, +0x19e702c), and it converts the NV12 pictures it reads itself, so it gets 0. MakeDecodeImagePreferenceForCompat is MakeDecodeImagePreference with fewer
+// output formats (sdk+0x2c6040); the game picks one of the two per decoder (main+0x19e7860)
+#define CV_SDK19(tag, codec, s_rm, s_props) \
+    HLE_FORCE(s_rm, "decoded on the host", Result, h_cv_##tag##rm19, void *t, uint64_t bs, uint64_t mem, uint64_t w, uint64_t h, uint32_t refs, uint32_t in, uint32_t out) { \
+        (void)bs; (void)mem; (void)refs; return cv_dec_init(t, codec, (uint16_t)w, (uint16_t)h, in, out, NULL, 0); } \
+    HLE_FORCE(s_props, "the filled buffer's picture size, time and end of stream; colour space 0", Result, h_cv_##tag##props19, uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, uint32_t *cs, \
+              int64_t *ts, bool *eos, void *t, uint64_t i) { *cs = 0; return cv_dec_props(w, h, cw, ch, ts, eos, t, (uint32_t)i); }
+CV_SDK19(vp9, CV_VP9, "_ZN2nn5codec20InitializeVp9DecoderEPNS0_14Vp9DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatE",
+    "_ZN2nn5codec35GetVp9DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_14Vp9DecoderTypeEj")
+CV_SDK19(vp8, CV_VP8, "_ZN2nn5codec20InitializeVp8DecoderEPNS0_14Vp8DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatE",
+    "_ZN2nn5codec35GetVp8DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_14Vp8DecoderTypeEj")
+CV_SDK19(av1, CV_AV1, "_ZN2nn5codec20InitializeAv1DecoderEPNS0_14Av1DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatE",
+    "_ZN2nn5codec35GetAv1DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_14Av1DecoderTypeEj")
+#undef CV_SDK19
+HLE_FORCE("_ZN2nn5codec21InitializeH264DecoderEPNS0_15H264DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatEPKvm",
+          "decoded with VideoToolbox on the host", Result, h_cv_h264rm19, void *t, uint64_t bs, uint64_t mem, uint64_t w, uint64_t h, uint32_t refs, uint32_t in, uint32_t out, const void *csd, uint64_t csd_n) {
+    (void)bs; (void)mem; (void)refs; return cv_dec_init(t, CV_H264, (uint16_t)w, (uint16_t)h, in, out, csd, csd_n);
+}
+HLE_FORCE("_ZN2nn5codec36GetH264DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_15H264DecoderTypeEj",
+          "the filled buffer's picture size, time and end of stream; colour space 0", Result, h_cv_h264props19, uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, uint32_t *cs, int64_t *ts, bool *eos,
+          void *t, uint64_t i) { *cs = 0; return cv_dec_props(w, h, cw, ch, ts, eos, t, (uint32_t)i); }
+HLE_FORCE("_ZN2nn5codec3sdk34MakeDecodeImagePreferenceForCompatEttNS0_24VideoDecoderOutputFormatENS0_9CodecModeE", "the preference only carries the size and format to the host's pool (SDK 19)",
+          cv_pref, h_cv_pref19, uint64_t w, uint64_t h, uint32_t fmt, uint32_t mode) {
+    return (cv_pref){(uint16_t)w, (uint16_t)h, fmt, mode, CV_MAGIC, {0, 0}};
+}
 // The host's sync handles signal when their buffer holds the picture of that release; a handle the host did not make (another nn::gs user) reads as signalled
 static bool sync_reached(const cv_sync *s) {
     if (s->magic != CV_SYNC) { static int once; if (!once++ && (s->magic || s->dec)) LOG("[RED] nn::codec: a sync handle the host did not make (%#x): signalled", s->magic); return true; }
@@ -474,6 +546,12 @@ HLE_FORCE("_ZN2nn6syncpt3sdk21RequestSyncPointEventEPNS1_18SyncPointEventTypeERK
     return 0;
 }
 HLE_FORCE("_ZN2nn6syncpt3sdk20CancelSyncPointEventEPNS1_18SyncPointEventTypeE", "disarms the event", void, h_spt_cancel, void *e) { spt_unarm(e); hle_clear_system_event(e); }
+// Whether the awaited picture is in its buffer: the event's SystemEvent is signalled (manual clear, so the look leaves it signalled). Mario Kart World's base game asks it before each
+// request (main+0x19e779c, SDK 19.3.3); the SDK's own went through the same null table as CreateSyncPointEvent (pc 0)
+HLE_FORCE("_ZN2nn6syncpt3sdk21TryWaitSyncPointEventEPKNS1_18SyncPointEventTypeE", "the event's SystemEvent is signalled", bool, h_spt_trywait, const void *e) {
+    static uint32_t (*tw)(void *); if (!tw && !(tw = guest_sym("_ZN2nn2os18TryWaitSystemEventEPNS0_15SystemEventTypeE"))) die("nn::os::TryWaitSystemEvent missing");
+    return (tw((void *)e) & 0xff) != 0;
+}
 HLE_FORCE("_ZN2nn6syncpt3sdk21DestroySyncPointEventEPNS1_18SyncPointEventTypeE", "destroys the event's SystemEvent", void, h_spt_destroy, void *e) {
     spt_unarm(e);
     static void (*destroy)(void *); if (!destroy && !(destroy = guest_sym("_ZN2nn2os18DestroySystemEventEPNS0_15SystemEventTypeE"))) die("nn::os::DestroySystemEvent missing");

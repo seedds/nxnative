@@ -13,5 +13,6 @@ int mavc_decode(mavc *a, const uint8_t *p, int n, int64_t pts_us);   // one acce
 // 1 = a picture was written (its time in *pts_us), 0 = none yet; with flush every queued picture comes out (end of stream)
 int mavc_take(mavc *a, int flush, uint8_t *nv12, int w, int h, int64_t *pts_us);
 int mavc_queued(const mavc *a);
+int mavc_bt709(const mavc *a, int h);   // the stream's colour matrix is BT.709: as its SPS declares; undeclared (or no SPS yet), from 720 lines up
 void mavc_set_rgba(mavc *a);   // pictures come out as 4-byte RGBA (stride w * 4) instead of NV12: the native texture mode
 void mavc_drop(mavc *a);   // a flush / seek: queued pictures are discarded

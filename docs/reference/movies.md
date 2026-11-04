@@ -32,6 +32,13 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Fix:** the host now sets everything the SDK's `DecoderImpl::GetOutputBufferFormatFromDecoder` (SDK 19 `subsdk0+0x121f50`) does: also `nv12-uv-stride`, the luma (Y) stride as for any NV12 picture, `nv12-width` and `nv12-height` (`md_format` in `hle_movie.c`).
 - **Found on:** [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (the grey picture); [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md) (SDK 8.2.1, CRI middleware; one boot: the crash).
 
+### `nv12-colorspace` picks the game's YUV matrix
+
+- **Symptom:** a movie decodes and its sound plays, but the picture is black: `DM_MOVIE_TRACE=1` shows pictures coming out, the pass dump shows the two planes uploaded and one quad drawn, and the uniform block of the conversion shader (`DM_NVN_CBDUMP`) is all zeros.
+- **Cause:** the host's output format had no `nv12-colorspace`. The SDK's `DecoderImpl::GetOutputBufferFormatFromDecoder` sets it (SDK 4.4.1 `subsdk0+0x2d8c60`) to the hardware decoder's `hw-buf-ColorSpace` / 32 + 1, from 1 to 5. A player can index its matrices with it: Kirby Star Allies' (`main+0x1529f8`) copies a 64-byte block chosen by the value, 1 and 5 BT.601 limited range, 2 BT.601 full, 3 BT.709 limited, 4 BT.709 full, and for anything else, an unset key's 0 too, an all-zero block.
+- **Fix:** `md_format` sets the key from the stream, by the rule native-texture output already uses for its own conversion: the matrix the stream declares (the H.264 format description's `YCbCrMatrix`, the VP9 colour config), undeclared BT.709 from 720 lines up. H.264 pictures are reported as limited range, since VideoToolbox gives video range NV12 whatever the stream's range; VP8 and VP9 report the stream's range.
+- **Found on:** [Kirby Star Allies](../../dm/games/01007E3006DDA000/README.md): the opening movie and the movie after the first file start.
+
 ### SDK 4's `movie::Decoder` constructor without a priority
 
 - **Symptom:** a call through a null pointer in the host's `movie::Decoder::Configure` right after `nnMain` starts the logos.

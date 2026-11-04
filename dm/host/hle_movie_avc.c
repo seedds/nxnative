@@ -20,6 +20,11 @@ struct mavc {
     int red, rgba;               // rgba: pictures as 4-byte RGBA (native texture mode, Monster Hunter Rise) instead of NV12
 };
 
+int mavc_bt709(const mavc *a, int h) {
+    CFTypeRef m = a->fd ? CMFormatDescriptionGetExtension(a->fd, kCMFormatDescriptionExtension_YCbCrMatrix) : NULL;
+    if (m && CFGetTypeID(m) == CFStringGetTypeID()) return CFEqual(m, kCMFormatDescriptionYCbCrMatrix_ITU_R_709_2);
+    return h >= 720;
+}
 mavc *mavc_new(void) { mavc *a = calloc(1, sizeof *a); if (!a) die("movie: AVC decoder allocation failed"); return a; }
 static void close_session(mavc *a) {
     if (a->vs) { VTDecompressionSessionWaitForAsynchronousFrames(a->vs); VTDecompressionSessionInvalidate(a->vs); CFRelease(a->vs); a->vs = NULL; }

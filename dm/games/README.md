@@ -75,6 +75,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Cult of the Lamb](01002E7016C46000/README.md) | `01002E7016C46000` | 1.5.28 | 19.3.14 | Unity 2022.3.62f3 IL2CPP, FMOD | NVN |
 | [Cuphead](0100A5C00D162000/README.md) | `0100A5C00D162000` | 1.3.7 | 5.5.0 | Unity 2017.4.9f1 IL2CPP | NVN |
 | [DARK SOULS: REMASTERED](01004AB00A260000/README.md) | `01004AB00A260000` | 1.0.3 | 4.5.0 | FromSoftware's engine | NVN |
+| [DAVE THE DIVER](010097F018538000/README.md) | `010097F018538000` | 1.0.6.1267 | 20.5.29 | Unity 6000.0.52f1 IL2CPP, FMOD | NVN |
 | [Dead Cells](0100646009FBE000/README.md) | `0100646009FBE000` | 1.25.0 | 13.3.5 | Heaps / HashLink (HL/C) | NVN |
 | [Digimon Story Cyber Sleuth: Complete Edition](010014E00DB56000/README.md) | `010014E00DB56000` | 1.0.3 | 6.4.0 | Media.Vision MVGL | OpenGL |
 | [Donkey Kong Bananza](040074A01BF12000/README.md) | `040074A01BF12000` | v458752 (Switch 2) | 20.5.19 (Ounce) | Nintendo EPD (sead / agl / gsys) | NVN2 |
@@ -103,6 +104,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Hyrule Warriors: Age of Imprisonment](04003F40232DE000/README.md) | `04003F40232DE000` | v196608 (Switch 2) | 20.5.15 (Ounce) | Koei Tecmo's KTGL | NVN2 |
 | [Hyrule Warriors: Definitive Edition](0100AE00096EA000/README.md) | `0100AE00096EA000` | 1.0.1 | 3.5.1 | Koei Tecmo's KTGL | NVN |
 | [Kirby and the Forgotten Land](01004D300C5AE000/README.md) | `01004D300C5AE000` | 1.1.0 | 11.4.0 | HAL Laboratory's engine (NintendoWare) | NVN |
+| [Kirby Star Allies](01007E3006DDA000/README.md) | `01007E3006DDA000` | 4.0.0a | 4.4.1 | HAL Laboratory's engine (NintendoWare) | NVN |
 | [Luigi's Mansion 3](0100DCA0064A6000/README.md) | `0100DCA0064A6000` | 1.4.0 | 7.3.2 | Next Level Games' engine | NVN |
 | [Mario Kart World](0400C3F00006E000/README.md) | `0400C3F00006E000` | v0 (Switch 2) | 19.3.3 (Ounce) | Nintendo EPD (sead / agl / gsys, Pia) | NVN2 |
 | [Mario Tennis Fever](0400D4201C6EA000/README.md) | `0400D4201C6EA000` | v327680 (Switch 2) | 20.5.17 (Ounce) | Camelot's engine, NintendoWare | NVN2 |
@@ -197,6 +199,7 @@ One row per profile; the notes are each profile's `README.md`.
 | `romfs_marker` | A path that must exist in the RomFS; empty checks the directory itself for a program without a data section (ANIMAL WELL) |
 | `zip_store` | Extensions the IPA stores without compressing |
 | `mem_reserve`, `mem_alias`, `mem_stack`, `app_pool` | Guest address-space partition and application pool (`hle_svc.c`) |
+| `snowdrop_pools` | Snowdrop games: the address ranges of the large, 512 KB and 64 KB page pools in MB, under 4 GB in all (`dm/tools/snowdrop_pools.py`, which finds the allocator in any build; [Separate virtual ranges in Snowdrop's page allocator](../../docs/reference/memory.md#separate-virtual-ranges-in-snowdrops-page-allocator)). Without it, 2048 512 1280. Each pool's peak must fit: one that outgrows its range aborts the game |
 | `mem_used` | Memory `GetInfo(UsedMemorySize)` reports beside the heap (default `0x4000000`, 64 MB). `SetHeapSize` checks a request against the real size of the loaded modules, so a game that sizes its heap as total − used and has more than 64 MB of modules needs at least their size here. Hyrule Warriors: Age of Calamity: 66.6 MB of modules, so the default made `SetHeapSize(pool − 64 MB)` fail and `nnMain` return at once; it sets 72 MB. Cuphead: 80 MB of modules, 84 MB |
 | `sys_resource` | The system resource size the NPDM declares (main.npdm META +0x14), which `GetInfo(TotalSystemResourceSize)` reports (`hle_svc.c`). The SDK's `IsVirtualAddressMemoryEnabled` is "that size is not 0", and some games choose their memory setup by it: Big Brain Academy: Brain vs. Brain's `nninitStartup` asks StandardAllocator for a 60 GB address region with virtual address memory and sets a heap without it, and its NPDM declares none (`0`). The survey writes it from the NPDM for every new game; a profile without it gets the host's earlier answer, 32 MB, for every game |
 | `game_args` | Arguments the game gets when the command line gives none (the iOS app, the NSP script's Mac runs), split at spaces; `dmhost <dir> -- …` overrides them. The SDK hands them to the game before `nninitStartup`, as on hardware (`main.c`). No profile sets any now: Unreal's engine region, which `-SwitchVirtualAddressSpaceSize=` sized until 2026-10-31, gets what the alias region has room for from the rewriter's gate (`dm/tools/ue_region.py`) |

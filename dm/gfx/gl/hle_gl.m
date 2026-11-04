@@ -1223,6 +1223,17 @@ static void bind_uniforms_textures(prog_t *p) {
         buf_t *bf = u ? buf_of(u->buf) : NULL;
         id<MTLBuffer> mb = bf && bf->mb ? bf->mb : ubo_zero();
         NSUInteger off = u ? (NSUInteger)u->off : 0;
+        // A game rewrites one uniform buffer between the passes of a frame (Factorio uploads the half-resolution projection, draws its 640x360 smoke pass, uploads the
+        // full-resolution one, draws the scene) while the frame is still one command buffer: the GPU reads the buffer when it executes, so every draw saw the last upload
+        // and the smoke layer drew with the full-resolution projection — half position and half size in the half-resolution target. Give this draw its own copy of the block,
+        // as glBufferSubData orphans a vertex buffer a pending command buffer still reads. It is a block's size (64 bytes for a projection) and a memcpy a draw
+        if (bf && bf->mb && b->size > 0 && off + (NSUInteger)b->size <= bf->mb.length) {
+            size_t aoff = 0; id<MTLBuffer> snap = arena_alloc((size_t)b->size, &aoff);
+            if (snap && aoff + (size_t)b->size <= snap.length) {
+                memcpy((uint8_t *)snap.contents + aoff, (const uint8_t *)bf->mb.contents + off, (size_t)b->size);
+                mb = snap; off = aoff;
+            }
+        }
         for (int st = 0; st < 2; st++) {
             if (b->slot[st] < 0) continue;
             if (st) [e setFragmentBuffer:mb offset:off atIndex:b->slot[st]]; else [e setVertexBuffer:mb offset:off atIndex:b->slot[st]];

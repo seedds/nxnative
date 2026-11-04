@@ -1,4 +1,4 @@
-// hle_audio.c unit test (silent sink): SDK 21's OutputStream on the host's AudioOut. A write of planar float frames becomes one 16-bit interleaved block,
+// hle_audio.c unit test (silent sink): SDK 21's OutputStream on the host's AudioOut. A write of interleaved float frames becomes one 16-bit interleaved block,
 // the free frame count is the capacity less the frames queued, played blocks come back (the release event fires) and the count recovers; a purge after a stop
 // drops what was queued; the states are 0 not open, 1 stopped, 2 started.
 #include "../hle_audio.c"
@@ -30,9 +30,9 @@ int main(void) {
     char other[0x350] = {0};
     if (!h_os_Open(other, NULL, NULL, 0, name, bad, CAP, 0, 0) || h_os_State(other) != OS_NONE) FAIL("a 44.1 kHz stream opened");
 
-    // planar float: channel 0 then channel 1; the block is interleaved, scaled to 16 bits and clamped
+    // interleaved float, as the game writes it (Xenoblade Chronicles 2's Switch 2 program; read as planar, all its sound came out an octave low): the block keeps the order, scaled to 16 bits and clamped
     static float pcm[2 * FRAMES];
-    for (int i = 0; i < FRAMES; i++) { pcm[i] = (float)i / FRAMES; pcm[FRAMES + i] = i == 1 ? 2.0f : -0.5f; }
+    for (int i = 0; i < FRAMES; i++) { pcm[2 * i] = (float)i / FRAMES; pcm[2 * i + 1] = i == 1 ? 2.0f : -0.5f; }
     if (h_os_Write(stream, pcm, FRAMES) != FRAMES) FAIL("write");
     if (h_os_Free(stream) != CAP - FRAMES) FAIL("free after one write: %d", h_os_Free(stream));
     ostream *o = os_of(stream); aout *a = ao(o->key);

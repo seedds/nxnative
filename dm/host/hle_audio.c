@@ -587,7 +587,8 @@ HLE_FORCE("_ZN2nn5audio22GetAudioInSampleFormatEPKNS0_7AudioInE", "recording sam
 // ---------- SDK 21's OutputStream (Xenoblade Chronicles 2's Switch 2 Edition, SDK 21.4.4) ----------
 // nn::audio::OpenOutputStream on a virtual output device (GetDefaultVirtualOutputDevice) takes a StreamFormat {sample format, channels, sample rate} and a capacity in frames; the game
 // writes one period at a time with WriteOutputStream once GetOutputStreamFreeFrameCount covers it, and its audio thread waits on the stream's event with a short timeout between writes
-// (main+0xad0860, main+0xad14c0, main+0xad15c0). Its frames are 32-bit float, one channel after another (planar: channel c at c x frames; main+0xad1684 zeroes each channel's tail so).
+// (main+0xad0860, main+0xad14c0, main+0xad15c0). Its frames are 32-bit float, interleaved (L, R, L, R), though main+0xad1684 zeroes an unfilled tail as if each channel had its own run of a
+// period: read as planar, every 10 ms block's first half played as left and its second half as right, each at half speed, so all sound came out an octave low with a jump at each block.
 // Host: each write becomes one 16-bit interleaved block on an AudioOut of the stream's own (the AudioOut machinery above: real output or silent sink, its release event the stream's),
 // so the free count is the capacity less the frames still queued and the event fires as blocks play. States as the game reads them: 0 not open, 1 open (stopped), 2 started
 // (main+0xad1310: a started stream is stopped, then purged and closed). Without these the SDK connected to auddmg:u itself and aborted with 0xa99 (sdk+0x221520)
@@ -659,16 +660,14 @@ HLE_FORCE("_ZN2nn5audio17WriteOutputStreamEPNS0_16OutputStreamTypeEPKvi", "frame
     pthread_mutex_lock(&o->m); os_reclaim(o);
     if (o->nblk >= QMAX - 1 || frames > o->cap - o->queued) { pthread_mutex_unlock(&o->m); return 0; }   // the game writes only what the free count allows (main+0xad14f0)
     oblock *k = malloc(sizeof *k + (size_t)frames * o->ch * 2); if (!k) die("OutputStream block malloc");
+    size_t n = (size_t)frames * o->ch;
     if (o->fmt == OS_FLOAT) {
         const float *in = data;
-        for (int c = 0; c < o->ch; c++) for (int i = 0; i < frames; i++) {
-            float v = in[(size_t)c * frames + i] * 32767.0f;
-            k->pcm[(size_t)i * o->ch + c] = (int16_t)(v > 32767.0f ? 32767 : v < -32768.0f ? -32768 : v);
+        for (size_t i = 0; i < n; i++) {
+            float v = in[i] * 32767.0f;
+            k->pcm[i] = (int16_t)(v > 32767.0f ? 32767 : v < -32768.0f ? -32768 : v);
         }
-    } else {
-        const int16_t *in = data;
-        for (int c = 0; c < o->ch; c++) for (int i = 0; i < frames; i++) k->pcm[(size_t)i * o->ch + c] = in[(size_t)c * frames + i];
-    }
+    } else memcpy(k->pcm, data, n * 2);
     k->b.ptr = k->pcm; k->b.cap = k->b.size = (uint64_t)frames * o->ch * 2; k->frames = frames;
     if (!h_au_Append(o->key, &k->b)) { pthread_mutex_unlock(&o->m); free(k); return 0; }
     o->queued += frames; o->nblk++;

@@ -42,6 +42,12 @@ typedef NS_ENUM(NSInteger, DmPlayerAssignment) {
 @property(nonatomic, copy) void (^output)(int, DmPlayerState);
 @property(nonatomic, copy) void (^players)(uint32_t);
 @property(nonatomic, copy) void (^routesChanged)(void);
+// Profile opt-in: physical SL/SR replace ordinary shoulders on sideways Joy-Cons.
+// Provider returns neutral raw bits 0x20=SL, 0x10=SR, only for an unambiguous side.
+@property(nonatomic) BOOL nativeSingleJoyCons;
+@property(nonatomic, copy) BOOL (^joyConRails)(int side, uint8_t *bits);
+@property(nonatomic, copy) void (^styles)(int player, uint32_t style);
+- (uint32_t)controllerStyleForPlayer:(int)player;
 - (void)sync:(NSArray<GCController *> *)controllers;
 - (void)read;
 // Recompute and deliver every state (including zeros) and the mask to newly attached callbacks.

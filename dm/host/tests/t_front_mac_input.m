@@ -23,6 +23,7 @@ void dm_pad_set_player(int p, uint64_t b, int32_t x, int32_t y, int32_t rx, int3
 }
 void dm_pad_set(uint64_t b, int32_t x, int32_t y, int32_t rx, int32_t ry) { dm_pad_set_player(0, b, x, y, rx, ry); }
 void dm_pad_players(uint32_t mask) { player_mask = mask; }
+void dm_pad_style_player(int p, uint32_t style) { assert(p >= 0 && p < DM_PLAYERS); assert(style == 1 || style == 8 || style == 16); }
 uint32_t dm_player_npad(int p) { assert(p >= 0 && p < DM_PLAYERS); return (uint32_t)p; }
 void dm_haptics_apple_controller(int p, GCController *c) { (void)p; (void)c; }
 void dm_motion_set(int p, const float a[3], const float r[3]) { (void)p; (void)a; (void)r; }

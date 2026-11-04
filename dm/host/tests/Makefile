@@ -231,6 +231,15 @@ $(B)/t_front_mac_input: t_front_mac_input.m ../front_mac.m ../players_mac.m ../p
 .PHONY: front-mac-input
 front-mac-input: $(B)/t_front_mac_input
 	$(B)/t_front_mac_input
+.PHONY: joycon-rails
+joycon-rails: $(B)/t_joycon_rails $(B)/t_joycon_rails_mac
+	$(B)/t_joycon_rails
+	$(B)/t_joycon_rails_mac
+run: joycon-rails
+$(B)/t_joycon_rails: t_joycon_rails.c ../joycon_rails.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -fsanitize=address,undefined -o $@ t_joycon_rails.c
+$(B)/t_joycon_rails_mac: t_joycon_rails_mac.m ../joycon_rails_mac.h ../joycon_rails.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -o $@ t_joycon_rails_mac.m -framework Foundation -framework GameController -framework IOKit
 run: $(B)/t_motion_pro $(B)/t_motion_pro_mac
 $(B)/t_motion_pro: t_motion_pro.c ../motion_pro.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -fsanitize=address,undefined -o $@ t_motion_pro.c

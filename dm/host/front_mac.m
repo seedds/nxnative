@@ -27,6 +27,7 @@
 #include "home_quit.h"
 #include "home_quit_mac.h"
 #import "players_mac.h"
+#import "joycon_rails_mac.h"
 static DmMacPlayers *g_players; // prepared in the launch window; retained for gameplay only with DM_PLAYER_SETUP=1
 #include <signal.h>
 #include <math.h>
@@ -423,16 +424,22 @@ static void hq_close(void) {
     if (g_hq.phase == HQ_PROMPT) LOG("front end: quit prompt closed, the window lost the focus");
     hq_cancel(&g_hq); hq_hide_hold(); hq_hide_prompt();
 }
+static void joycon_rails_changed(void) { [g_players read]; }
 // The launcher embeds this view before Play; no guest input, motion or haptics callbacks exist yet.
 void *dm_mac_players_view(void) {
     if (!g_players) {
         g_players = [DmMacPlayers new];
+        if (DM_GAME_JOYCON_SIDEWAYS) {
+            g_players.nativeSingleJoyCons = YES;
+            g_players.joyConRails = ^BOOL(int side, uint8_t *bits) { return dm_joycon_rails_state(side, bits); };
+        }
         g_players.routeLog = ^(NSString *line) { LOG("players: %s", line.UTF8String); };
         const char *saved = getenv("DM_SAVED_CHOICES");
         if (!saved || strcmp(saved, "0")) [g_players loadPreferences:NSUserDefaults.standardUserDefaults];
     }
     [g_players beginConfiguration];
     [g_players sync:GCController.controllers];
+    if (g_players.nativeSingleJoyCons) dm_joycon_rails_start(joycon_rails_changed);
     return (__bridge void *)[g_players configurationView];
 }
 void dm_mac_players_finish(int play) {
@@ -441,7 +448,7 @@ void dm_mac_players_finish(int play) {
     const char *saved = getenv("DM_SAVED_CHOICES");
     if (play && (!saved || strcmp(saved, "0"))) [g_players commitPreferences];
     const char *setup = getenv("DM_PLAYER_SETUP");
-    if (!play || !setup || strcmp(setup, "1")) g_players = nil;
+    if (!play || !setup || strcmp(setup, "1")) { dm_joycon_rails_stop(); g_players = nil; }
 }
 
 static void pads_start(void) {
@@ -458,6 +465,7 @@ static void pads_start(void) {
             pad_set(p, s.buttons, s.lx, s.ly, s.rx, s.ry);
         };
         g_players.players = ^(uint32_t mask) { dm_pad_players(mask); };
+        g_players.styles = ^(int p, uint32_t style) { dm_pad_style_player(p, style); };
         g_players.routesChanged = ^{
             GCController *next[DM_PLAYERS];
             for (int p = 0; p < DM_PLAYERS; p++) next[p] = [g_players wholeControllerForPlayer:p];

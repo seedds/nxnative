@@ -44,7 +44,7 @@ static DmPlayerState whole(GCExtendedGamepad *g) {
     return s;
 }
 // App-local split INPUT, not Bluetooth unpairing. Sideways: L rotates CCW, R rotates CW.
-// Only controls GameController exposes are used; this cannot invent per-half motion or SL/SR.
+// The profile-opted rail path below replaces this legacy shoulder mapping with passive HID SL/SR.
 static DmPlayerState half(GCExtendedGamepad *g, BOOL right) {
     DmPlayerState s = {0};
     if (right) {
@@ -69,6 +69,13 @@ static DmPlayerState half(GCExtendedGamepad *g, BOOL right) {
     return s;
 }
 static BOOL combined(GCController *c) { return c.extendedGamepad && [c.productCategory isEqualToString:@"Nintendo Switch Joy-Con (L/R)"]; }
+static int single_side(DmPlayerSource *s, int side) {
+    if (s.split && combined(s.controller)) return side;
+    NSString *category = s.controller.productCategory;
+    if ([category isEqualToString:@"Nintendo Switch Joy-Con (L)"]) return 0;
+    if ([category isEqualToString:@"Nintendo Switch Joy-Con (R)"]) return 1;
+    return -1;
+}
 static void merge(DmPlayerState *a, DmPlayerState b) {
     a->buttons |= b.buttons;
     if (llabs(b.lx) + llabs(b.ly) > llabs(a->lx) + llabs(a->ly)) { a->lx = b.lx; a->ly = b.ly; }
@@ -125,7 +132,7 @@ static DmPlayerState standard_state(GCPhysicalInputProfile *p) {
 @implementation DmMacPlayers {
     DmPlayerState _keyboard;
     DmPlayerState _last[DM_PLAYERS];
-    uint32_t _mask;
+    uint32_t _mask, _lastStyles[DM_PLAYERS];
     BOOL _hasConfigured;
 }
 - (instancetype)init {
@@ -366,6 +373,30 @@ static DmPlayerState standard_state(GCPhysicalInputProfile *p) {
     for (DmPlayerSource *s in _entries) if (s.controller.extendedGamepad && !s.split && s.player == p && (s.role == DmPlayerOwn || s.role == DmPlayerShare)) { if (found) return nil; found = s.controller; }
     return found;
 }
+- (BOOL)railsForSide:(int)side bits:(uint8_t *)bits {
+    *bits = 0;
+    // GCDevice has no public physical HID identity. Do not bind the one raw side
+    // to a guessed GC object when multiple pairs/individual devices are present.
+    NSUInteger count = 0;
+    for (DmPlayerSource *s in _entries)
+        if (combined(s.controller) || single_side(s, 0) == side) count++;
+    return count == 1 && _joyConRails && _joyConRails(side, bits);
+}
+- (uint32_t)controllerStyleForPlayer:(int)p {
+    if (!_nativeSingleJoyCons || !valid(p) ||
+        (_keyboardPlayer == p && (_keyboardRole == DmPlayerOwn || _keyboardRole == DmPlayerShare))) return 1;
+    NSUInteger count = 0; int foundSide = -1;
+    for (DmPlayerSource *s in _entries) if (controller_supported(s.controller)) {
+        for (int side = 0; side < (s.split ? 2 : 1); side++) {
+            NSInteger player = side ? s.rightPlayer : s.player;
+            DmPlayerRole role = side ? s.rightRole : s.role;
+            if (player != p || (role != DmPlayerOwn && role != DmPlayerShare) || [self ownCount:p] > 1) continue;
+            count++; foundSide = single_side(s, side);
+        }
+    }
+    uint8_t bits;
+    return count == 1 && foundSide >= 0 && [self railsForSide:foundSide bits:&bits] ? (foundSide ? 16 : 8) : 1;
+}
 - (void)read { [self readWithForce:NO]; }
 - (void)publish { [self readWithForce:YES]; }
 - (void)readWithForce:(BOOL)force {
@@ -380,15 +411,32 @@ static DmPlayerState standard_state(GCPhysicalInputProfile *p) {
             // must never silently merge, including any shared input on that invalid slot.
             if (!valid(p) || (role != DmPlayerOwn && role != DmPlayerShare) || [self ownCount:p] > 1) continue;
             mask |= 1u << p;
-            if (_active && !_configuring) merge(&states[p], s.split ? half(s.controller.extendedGamepad, side) :
-                s.controller.extendedGamepad ? whole(s.controller.extendedGamepad) : standard_state(standard_profile(s.controller)));
+            if (_active && !_configuring) {
+                DmPlayerState state = s.split ? half(s.controller.extendedGamepad, side) :
+                    s.controller.extendedGamepad ? whole(s.controller.extendedGamepad) : standard_state(standard_profile(s.controller));
+                int joySide = single_side(s, side);
+                if (_nativeSingleJoyCons && joySide >= 0) {
+                    // Never fall back to outer shoulders when raw rails are unavailable.
+                    state.buttons &= ~(uint64_t)(DM_BTN_L | DM_BTN_R | DM_BTN_ZL | DM_BTN_ZR);
+                    uint8_t bits;
+                    if ([self railsForSide:joySide bits:&bits]) {
+                        if (bits & 0x20) state.buttons |= 1ull << 24;
+                        if (bits & 0x10) state.buttons |= 1ull << 25;
+                    }
+                }
+                merge(&states[p], state);
+            }
         }
     }
     // Normally emit only actual changes; publish also initializes newly attached consumers.
     // Recompute from every live source so a release/disconnect cannot erase
     // another source sharing that player, or leave the disconnected source's buttons/sticks held.
-    for (int p = 0; p < DM_PLAYERS; p++) if (force || memcmp(&_last[p], &states[p], sizeof states[p])) {
-        _last[p] = states[p]; if (_output) _output(p, states[p]);
+    for (int p = 0; p < DM_PLAYERS; p++) {
+        uint32_t style = [self controllerStyleForPlayer:p];
+        if (force || _lastStyles[p] != style) { _lastStyles[p] = style; if (_styles) _styles(p, style); }
+        if (force || memcmp(&_last[p], &states[p], sizeof states[p])) {
+            _last[p] = states[p]; if (_output) _output(p, states[p]);
+        }
     }
     if (force || _mask != mask) { _mask = mask; if (_players) _players(mask); }
 }

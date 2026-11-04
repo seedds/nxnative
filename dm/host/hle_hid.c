@@ -1,6 +1,6 @@
 // nn::hid (controller): on the real device shared memory is read through the hid service; the host takes the current state written by the front end (Mac keyboard / controller, iOS virtual gamepad / controller).
 // Generic, game-independent version: player 1 is always connected, as the handheld controller (Npad id 0x20) with DM_OPMODE=0 (handheld), otherwise as the 1P full-key controller (id 0);
-// players 2..8 are full-key controllers on No2..No8 (ids 1..7) while the front end reports a controller for them (dm_pad_players; the Mac gives each physical controller a player
+// players 2..8 are controllers on No2..No8 (ids 1..7), FullKey by default or native single Joy-Con on request, while the front end reports a controller for them (dm_pad_players; the Mac gives each physical controller a player
 // of its own, front_mac.m). A player whose npad the game does not support (SetSupportedNpadIdType) is not reported: in a one-player game it feeds player 1, otherwise it is not used.
 // Six-axis sensor: one per connected controller (two for handheld), at rest lying flat, player 1's shaken side to side while the front end holds DM_BTN_SHAKE (see the six-axis section below).
 // Vibration follows the player assignments through hle_haptics.c. Mouse and keyboard: not connected; the controller applet reports the connected players with player 1 selected.
@@ -296,7 +296,18 @@ static int player_of(uint32_t id) {   // the reported player on npad id; -1 when
     if (id == connected_id()) return 0;
     return id > 0 && id < DM_PLAYERS && reported((int)id) ? (int)id : -1;
 }
-static uint32_t style_for_player(uint32_t id, int p) { return p < 0 ? 0 : id == NPAD_HANDHELD ? STYLE_HANDHELD : STYLE_FULLKEY; }
+static _Atomic uint32_t g_pad_style[DM_PLAYERS];   // zero requests the default FullKey
+static _Atomic uint32_t g_styles_supported = 0xffffffffu;
+static uint32_t style_for_player(uint32_t id, int p) {
+    if (p < 0) return 0;
+    if (id == NPAD_HANDHELD) return STYLE_HANDHELD;
+    uint32_t want = atomic_load(&g_pad_style[p]), supported = atomic_load(&g_styles_supported);
+    // Only explicit single-Joy requests negotiate styles; preserve legacy FullKey reporting.
+    if (!want || want == STYLE_FULLKEY) return STYLE_FULLKEY;
+    // A one-player npad combines every merged source in FullKey coordinates, not one Joy side.
+    if (p == 0 && merged_players()) return supported & STYLE_FULLKEY;
+    return want & supported ? want : supported & STYLE_FULLKEY;
+}
 static uint32_t style_of(uint32_t id) { return style_for_player(id, player_of(id)); }
 static int32_t ax(uint64_t v, int i) { return (int16_t)(v >> (16 * i)); }
 static int32_t pick(int32_t a, int32_t b) { return (a < 0 ? -a : a) >= (b < 0 ? -b : b) ? a : b; }   // whichever of two sources is deflected more
@@ -305,6 +316,13 @@ static int32_t pick(int32_t a, int32_t b) { return (a < 0 ? -a : a) >= (b < 0 ? 
 // service does. The front end reports from its own thread, where an event cannot be bound, so only a bound one is signalled (one the game destroyed is not bound any more)
 static void *_Atomic g_style_ev[DM_PLAYERS];
 static void style_changed(uint32_t id) { void *ev = id < DM_PLAYERS ? atomic_load(&g_style_ev[id]) : NULL; if (ev) hle_signal_bound_system_event(ev); }
+void dm_pad_style_player(int p, uint32_t style) {
+    if (p < 0 || p >= DM_PLAYERS) return;
+    if (style != STYLE_JOYLEFT && style != STYLE_JOYRIGHT) style = STYLE_FULLKEY;
+    uint32_t old = style_of((uint32_t)p);
+    atomic_store(&g_pad_style[p], style);
+    if (old != style_of((uint32_t)p)) { dm_haptics_clear(p); style_changed((uint32_t)p); }
+}
 static void note_merged(void) {   // logs the players whose npad the game does not support, when that changes
     static _Atomic uint32_t last; uint32_t m = unsupported_players(), one = (uint32_t)one_player();
     if (atomic_exchange(&last, m | one << 31) == (m | one << 31)) return;
@@ -315,10 +333,11 @@ static void note_merged(void) {   // logs the players whose npad the game does n
 }
 void dm_pad_players(uint32_t mask) {
     mask = (mask | 1u) & ((1u << DM_PLAYERS) - 1);
+    uint32_t before[DM_PLAYERS]; for (int p = 0; p < DM_PLAYERS; p++) before[p] = style_of((uint32_t)p);
     uint32_t old = atomic_exchange(&g_players, mask);
-    for (int p = 1; p < DM_PLAYERS; p++) if ((old ^ mask) >> p & 1) {
-        if (!(mask >> p & 1)) dm_pad_set_player(p, 0, 0, 0, 0, 0);   // a controller that went away leaves nothing pressed
-        if (atomic_load(&g_ids_supported) & id_bit((uint32_t)p)) style_changed((uint32_t)p);
+    for (int p = 0; p < DM_PLAYERS; p++) {
+        if ((old & ~mask) >> p & 1) dm_pad_set_player(p, 0, 0, 0, 0, 0);   // a controller that went away leaves nothing pressed
+        if (before[p] != style_of((uint32_t)p)) { dm_haptics_clear(p); style_changed((uint32_t)p); }
     }
     note_merged();
 }
@@ -431,7 +450,7 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
     memset(s, 0, sizeof *s);
     s->sampling = atomic_fetch_add(&g_sampling, 1) + 1;
     int pl = player_of(id);
-    if (!(style_for_player(id, pl) & style)) return;   // no controller of this id / style: attributes = 0
+    if (pl < 0 || !(style_for_player(id, pl) & style)) return;   // no controller of this id / style: attributes = 0
     // Player 1: keyboard / touch, script, its controller and the players merged into it; another player: its own controller path
     uint32_t src = pl ? 1u << pl : 1u | merged_players();
     uint64_t b = 0; int32_t a[4] = {0};
@@ -450,8 +469,46 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
         uint64_t c = atomic_load(&g_sc_axes); for (int i = 0; i < 4; i++) a[i] = pick(a[i], ax(c, i));
     }
     if (atomic_load(&g_hold)) { b = 0; memset(a, 0, sizeof a); }   // an applet is in front: the game reads nothing (the latches were taken all the same)
-    s->lx = a[0]; s->ly = a[1]; s->rx = a[2]; s->ry = a[3];
-    b &= 0xffffull;
+    // Native Joy states are device-relative, not FullKey aliases. libnx services/hid.c
+    // hidGetNpadStatesJoyLeft/Right copies each native ring without hold-dependent rotation;
+    // services/hid.h defines native left rails 24/25, right rails 26/27 and side attributes.
+    // https://github.com/switchbrew/libnx/blob/master/nx/source/services/hid.c
+    // https://github.com/switchbrew/libnx/blob/master/nx/include/switch/services/hid.h
+    // Our single-Joy source is already horizontal: undo the physical rotation (left
+    // counterclockwise, right clockwise) before deriving native stick pseudo-buttons.
+    // HoldType is the game's orientation preference, not a remapping of native state.
+    if (style == STYLE_JOYLEFT || style == STYLE_JOYRIGHT) {
+        uint64_t native = 0, rails = b & (3ull << 24);
+        if (style == STYLE_JOYLEFT) {
+            native = b & (DM_BTN_LS | DM_BTN_L | DM_BTN_ZL | DM_BTN_MINUS);
+            // Both horizontal halves publish logical Plus for menu; only native JoyLeft relabels it.
+            if (b & DM_BTN_PLUS) native |= DM_BTN_MINUS;
+            if (b & DM_BTN_A) native |= DM_BTN_DOWN;
+            if (b & DM_BTN_B) native |= DM_BTN_LEFT;
+            if (b & DM_BTN_X) native |= DM_BTN_RIGHT;
+            if (b & DM_BTN_Y) native |= DM_BTN_UP;
+            s->lx = a[1]; s->ly = -a[0];
+            s->attributes = ATTR_CONNECTED | ATTR_LEFT_CONN;
+        } else {
+            native = b & (DM_BTN_R | DM_BTN_ZR | DM_BTN_PLUS);
+            if (b & DM_BTN_LS) native |= DM_BTN_RS;
+            if (b & DM_BTN_A) native |= DM_BTN_X;
+            if (b & DM_BTN_B) native |= DM_BTN_A;
+            if (b & DM_BTN_X) native |= DM_BTN_Y;
+            if (b & DM_BTN_Y) native |= DM_BTN_B;
+            rails <<= 2;
+            s->rx = -a[1]; s->ry = a[0];
+            s->attributes = ATTR_CONNECTED | ATTR_RIGHT_CONN;
+        }
+        b = native | rails;   // never synthesize SL/SR from canonical L/R
+    } else {
+        s->lx = a[0]; s->ly = a[1]; s->rx = a[2]; s->ry = a[3];
+        // Raw rails remain usable on shared FullKey routes and unsupported-single fallbacks.
+        if (b & (1ull << 24)) b |= DM_BTN_L;
+        if (b & (1ull << 25)) b |= DM_BTN_R;
+        b &= 0xffffull;
+        s->attributes = ATTR_CONNECTED | (id == NPAD_HANDHELD ? ATTR_WIRED | ATTR_LEFT_CONN | ATTR_LEFT_WIRED | ATTR_RIGHT_CONN | ATTR_RIGHT_WIRED : ATTR_LEFT_CONN | ATTR_RIGHT_CONN);
+    }
     if (s->lx < -STICK_THRESH) b |= 1u << 16;
     if (s->ly > STICK_THRESH) b |= 1u << 17;
     if (s->lx > STICK_THRESH) b |= 1u << 18;
@@ -461,14 +518,13 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
     if (s->rx > STICK_THRESH) b |= 1u << 22;
     if (s->ry < -STICK_THRESH) b |= 1u << 23;
     s->buttons = b;
-    s->attributes = ATTR_CONNECTED | (id == NPAD_HANDHELD ? ATTR_WIRED | ATTR_LEFT_CONN | ATTR_LEFT_WIRED | ATTR_RIGHT_CONN | ATTR_RIGHT_WIRED : ATTR_LEFT_CONN | ATTR_RIGHT_CONN);
 }
 // The cheat VM's key mask (hle_cheats.c "all keys of the mask held"): the OR of every player's controller buttons
 // (the keyboard / touch source's bits included) plus the eight stick-direction pseudo buttons of the merged axes —
 // one flat bitset, not exactly any one npad read (fill() publishes per-npad states with attributes, merges and
 // latches), and nothing here consumes a latch or bumps the sampling: the game's own reads keep them both. Mask bits:
-// the buttons 0..15 in NpadButton order and the sticks' directions 16..23; SL / SR (bits 24 / 25) can never fire, no
-// input source of this host reports them
+// the buttons 0..15 in NpadButton order and the sticks' directions 16..23; raw single-Joy rail inputs
+// are not part of this legacy cheat mask
 uint64_t dm_cheats_keys(void) {
     uint64_t b = 0; int32_t a[4] = {0};
     b |= atomic_load(&g_btn);
@@ -504,26 +560,29 @@ HLE_FORCE("_ZN2nn3hid14InitializeNpadEv", "connect to the hid service; the host 
 // game ({No1..No4, Handheld}) gets players 1..4, and a fifth controller is not used
 HLE_FORCE("_ZN2nn3hid22SetSupportedNpadIdTypeEPKjm", "supported controller ids; the host records them and reports further players only on supported ids", void, h_hid_SetIds, const uint32_t *ids, uint64_t n) {
     uint32_t m = 0; for (uint64_t i = 0; ids && i < n; i++) m |= id_bit(ids[i]);
-    uint32_t was = 0; for (int p = 1; p < DM_PLAYERS; p++) was |= (uint32_t)reported(p) << p;
+    uint32_t was[DM_PLAYERS]; for (int p = 0; p < DM_PLAYERS; p++) was[p] = style_of((uint32_t)p);
     if (atomic_exchange(&g_ids_supported, m) == m) return;
     for (int p = 0; p < DM_PLAYERS; p++) dm_haptics_clear(p);
     LOG("hid supported controller ids %#x (bit n: No n+1, bit 8 Handheld, bit 9 Other)", m);
-    for (int p = 1; p < DM_PLAYERS; p++) if ((uint32_t)reported(p) != (was >> p & 1)) style_changed((uint32_t)p);
+    for (int p = 0; p < DM_PLAYERS; p++) if (style_of((uint32_t)p) != was[p]) style_changed((uint32_t)p);
     note_merged();
 }
-static uint32_t g_styles_supported = 0xffffffffu;
 HLE_FORCE("_ZN2nn3hid24SetSupportedNpadStyleSetENS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "supported controller styles; the host records them and picks the reported style from them", void, h_hid_SetStyles, uint32_t styles) {
-    if (styles != g_styles_supported) LOG("hid supported controller styles %#x", styles); g_styles_supported = styles; }
+    uint32_t was[DM_PLAYERS]; for (int p = 0; p < DM_PLAYERS; p++) was[p] = style_of((uint32_t)p);
+    if (atomic_exchange(&g_styles_supported, styles) == styles) return;
+    LOG("hid supported controller styles %#x", styles);
+    for (int p = 0; p < DM_PLAYERS; p++) if (was[p] != style_of((uint32_t)p)) { dm_haptics_clear(p); style_changed((uint32_t)p); }
+}
 HLE_FORCE("_ZN2nn3hid15GetNpadStyleSetERKj", "controller style query; follows DM_OPMODE", uint32_t, h_hid_GetStyle, const uint32_t *id) { return style_of(*id); }
 HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadFullKeyStateEiRKj", "full-key controller states", int, h_hid_StatesFullKey, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_FULLKEY); }
 HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadHandheldStateEiRKj", "handheld controller states", int, h_hid_StatesHandheld, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_HANDHELD); }
 HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyDualStateEiRKj", "dual Joy-Con states (not connected on the host)", int, h_hid_StatesJoyDual, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_JOYDUAL); }
-HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyLeftStateEiRKj", "left Joy-Con states (not connected on the host)", int, h_hid_StatesJoyLeft, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_JOYLEFT); }
-HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadJoyRightStateEiRKj", "right Joy-Con states (not connected on the host)", int, h_hid_StatesJoyRight, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_JOYRIGHT); }
+HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyLeftStateEiRKj", "native left Joy-Con states", int, h_hid_StatesJoyLeft, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_JOYLEFT); }
+HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadJoyRightStateEiRKj", "native right Joy-Con states", int, h_hid_StatesJoyRight, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_JOYRIGHT); }
 HLE_FORCE("_ZN2nn3hid14DisconnectNpadERKj", "disconnect a controller; ignored by the host", void, h_hid_Disconnect, const uint32_t *id) { (void)id; }
-static uint32_t g_hold_type;
-HLE_FORCE("_ZN2nn3hid18SetNpadJoyHoldTypeENS0_15NpadJoyHoldTypeE", "Joy-Con hold orientation; the host only records it", void, h_hid_HoldType, int t) { g_hold_type = (uint32_t)t; }
-HLE_FORCE("_ZN2nn3hid20GetNpadJoyAssignmentERKj", "Joy-Con assignment: dual", int, h_hid_GetJoyAssign, const uint32_t *id) { (void)id; return 0; }
+static _Atomic uint32_t g_hold_type;
+HLE_FORCE("_ZN2nn3hid18SetNpadJoyHoldTypeENS0_15NpadJoyHoldTypeE", "Joy-Con hold preference; native state remains device-relative", void, h_hid_HoldType, int t) { g_hold_type = (uint32_t)t; }
+HLE_FORCE("_ZN2nn3hid20GetNpadJoyAssignmentERKj", "Joy-Con assignment: single for a native single Joy-Con, otherwise dual", int, h_hid_GetJoyAssign, const uint32_t *id) { return !!(style_of(*id) & (STYLE_JOYLEFT | STYLE_JOYRIGHT)); }
 HLE_FORCE("_ZN2nn3hid30SetNpadJoyAssignmentModeSingleERKj", "Joy-Con single assignment; ignored by the host", void, h_hid_JoySingle, const uint32_t *id) { (void)id; }
 HLE_FORCE("_ZN2nn3hid18SwapNpadAssignmentERKjS2_", "swap controller ids; ignored by the host", void, h_hid_Swap, const uint32_t *a, const uint32_t *b) { (void)a; (void)b; }
 HLE_FORCE("_ZN2nn3hid21StartLrAssignmentModeEv", "L/R assignment mode; ignored by the host", void, h_hid_LrStart, void) {}
@@ -725,7 +784,7 @@ static uint32_t vib_targets(uint32_t h) {
     unsigned type = h & 0xff, id = h >> 8 & 0xff, motor = h >> 16 & 0xff;
     if (h >> 24 || motor > 1 || (type != 3 && type != 4)) return 0;
     int p = player_of(id);
-    if (style_for_player(id, p) != (1u << (type - 3))) return 0;
+    if (p < 0 || style_for_player(id, p) != (1u << (type - 3))) return 0;
     return dm_haptics_available() & (p == 0 ? 1u | merged_players() : 1u << p);
 }
 static void vib_send(const uint32_t *handles, const dm_vibration *values, int n) {
@@ -803,12 +862,12 @@ HLE_FORCE("_ZN2nn3kpr13GetKeyCodeMapEPNS0_10KeyCodeMapE", "keyboard layout key c
 HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj", "full-key controller current state", void, h_hid_StateFullKey, NpadState *s, const uint32_t *id) { fill(s, *id, STYLE_FULLKEY); }
 HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_17NpadHandheldStateERKj", "handheld controller current state", void, h_hid_StateHandheld, NpadState *s, const uint32_t *id) { fill(s, *id, STYLE_HANDHELD); }
 HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyDualStateERKj", "dual Joy-Con current state (not connected on the host)", void, h_hid_StateJoyDual, NpadState *s, const uint32_t *id) { fill(s, *id, STYLE_JOYDUAL); }
-HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyLeftStateERKj", "left Joy-Con current state (not connected on the host)", void, h_hid_StateJoyLeft, NpadState *s, const uint32_t *id) { fill(s, *id, STYLE_JOYLEFT); }
-HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_17NpadJoyRightStateERKj", "right Joy-Con current state (not connected on the host)", void, h_hid_StateJoyRight, NpadState *s, const uint32_t *id) { fill(s, *id, STYLE_JOYRIGHT); }
+HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyLeftStateERKj", "native left Joy-Con current state", void, h_hid_StateJoyLeft, NpadState *s, const uint32_t *id) { fill(s, *id, STYLE_JOYLEFT); }
+HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_17NpadJoyRightStateERKj", "native right Joy-Con current state", void, h_hid_StateJoyRight, NpadState *s, const uint32_t *id) { fill(s, *id, STYLE_JOYRIGHT); }
 
 static uint32_t g_comm_mode, g_hh_mode;
 HLE_FORCE("_ZN2nn3hid18GetNpadJoyHoldTypeEv", "Joy-Con hold orientation: returns the value that was set", int, h_hid_GetHold, void) { return (int)g_hold_type; }
-HLE_FORCE("_ZN2nn3hid24GetSupportedNpadStyleSetEv", "supported controller styles: all", uint32_t, h_hid_GetStyles, void) { return g_styles_supported; }
+HLE_FORCE("_ZN2nn3hid24GetSupportedNpadStyleSetEv", "supported controller styles: the game's configured mask", uint32_t, h_hid_GetStyles, void) { return g_styles_supported; }
 HLE_FORCE("_ZN2nn3hid24GetNpadCommunicationModeEv", "wireless communication mode: returns the value that was set", int, h_hid_GetComm, void) { return (int)g_comm_mode; }
 HLE_FORCE("_ZN2nn3hid24SetNpadCommunicationModeENS0_21NpadCommunicationModeE", "wireless communication mode; the host only records it", void, h_hid_SetComm, int m) { g_comm_mode = (uint32_t)m; }
 HLE_FORCE("_ZN2nn3hid29GetNpadHandheldActivationModeEv", "handheld activation mode: returns the value that was set", int, h_hid_GetHh, void) { return (int)g_hh_mode; }

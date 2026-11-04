@@ -84,7 +84,7 @@ static TestController *standardController(NSString *category) {
 @public
     DmPlayerState state[DM_PLAYERS];
     unsigned changes[DM_PLAYERS], maskChanges, routeChanges;
-    uint32_t mask;
+    uint32_t mask, styles[DM_PLAYERS];
 }
 @end
 @implementation Output
@@ -94,6 +94,7 @@ static DmMacPlayers *router(Output *o) {
     r.output = ^(int p, DmPlayerState s) { assert(p >= 0 && p < DM_PLAYERS); o->state[p] = s; o->changes[p]++; };
     r.players = ^(uint32_t mask) { o->mask = mask; o->maskChanges++; };
     r.routesChanged = ^{ o->routeChanges++; };
+    r.styles = ^(int p, uint32_t style) { o->styles[p] = style; };
     r.routeLog = ^(NSString *line) { (void)line; };
     return r;
 }
@@ -1075,7 +1076,54 @@ static void pro_controller_keeps_macos_button_names(void) {
         buttons[i].isPressed = NO; [r read]; zero(o, 0);
     }
 }
+static void marioKartRails(void) {
+    Output *o = [Output new]; DmMacPlayers *r = router(o); r.keyboardPlayer = -1;
+    TestController *c = controller(@"Nintendo Switch Joy-Con (L/R)");
+    [r sync:@[gc(c)]];
+    DmPlayerSource *s = r.sources[0]; s.split = YES; s.player = 0; s.rightPlayer = 1;
+    __block uint8_t left = 0, right = 0; __block BOOL available = YES;
+    r.joyConRails = ^BOOL(int side, uint8_t *bits) { *bits = side ? right : left; return available; };
+    c.extendedGamepad.leftShoulder.isPressed = c.extendedGamepad.leftTrigger.isPressed = YES;
+    c.extendedGamepad.rightShoulder.isPressed = c.extendedGamepad.rightTrigger.isPressed = YES;
+    [r read]; // Default keeps every other game's legacy sideways shoulders.
+    expect(o, 0, DM_BTN_L | DM_BTN_R, 0, 0, 0, 0); expect(o, 1, DM_BTN_L | DM_BTN_R, 0, 0, 0, 0);
+    r.nativeSingleJoyCons = YES; [r read]; zero(o, 0); zero(o, 1);
+    assert(o->styles[0] == 8 && o->styles[1] == 16);
+    left = 0x20; right = 0x10; [r read];
+    expect(o, 0, 1ull << 24, 0, 0, 0, 0); expect(o, 1, 1ull << 25, 0, 0, 0, 0);
+    left = 0; [r read]; zero(o, 0); expect(o, 1, 1ull << 25, 0, 0, 0, 0);
+    c.extendedGamepad.buttonOptions.isPressed = YES; [r read];
+    expect(o, 0, DM_BTN_PLUS, 0, 0, 0, 0); assert(o->styles[0] == 8); // HLE converts logical menu to native Minus
+    c.extendedGamepad.buttonOptions.isPressed = NO; [r read]; zero(o, 0);
+    right = 0x30; [r read]; expect(o, 1, 3ull << 24, 0, 0, 0, 0);
+    available = NO; [r read]; zero(o, 1); assert(o->styles[1] == 1); // no outer-shoulder fallback
+    available = YES; r.active = NO; zero(o, 0); zero(o, 1);
+    right = 0; r.active = YES; zero(o, 0); zero(o, 1);
+    left = right = 0x20; [r read];
+    TestController *other = controller(@"Nintendo Switch Joy-Con (L/R)");
+    [r sync:@[gc(c), gc(other)]]; zero(o, 0); zero(o, 1); // no guessed physical identity
+    assert(o->styles[0] == 1 && o->styles[1] == 1);
+    [r sync:@[gc(c)]]; expect(o, 0, 1ull << 24, 0, 0, 0, 0);
+    r.keyboardPlayer = 0; [r read]; assert(o->styles[0] == 1); // shared route uses FullKey fallback
+    r.keyboardPlayer = -1;
+    s.split = NO; [r read];
+    expect(o, 0, DM_BTN_L | DM_BTN_R | DM_BTN_ZL | DM_BTN_ZR, 0, 0, 0, 0);
+    assert(o->styles[0] == 1); zero(o, 1); // Together stays normal
+    [r sync:@[]]; zero(o, 0); zero(o, 1);
+    TestController *individual = standardController(@"Nintendo Switch Joy-Con (R)");
+    [r sync:@[gc(individual)]]; r.sources[0].player = 2;
+    ((TestButton *)individual.physicalInputProfile.buttons[GCInputLeftShoulder]).isPressed = YES;
+    ((TestButton *)individual.physicalInputProfile.buttons[GCInputRightShoulder]).isPressed = YES;
+    right = 0x10; [r read]; expect(o, 2, 1ull << 25, 0, 0, 0, 0); assert(o->styles[2] == 16);
+    r.nativeSingleJoyCons = NO; [r read]; expect(o, 2, DM_BTN_L | DM_BTN_R, 0, 0, 0, 0);
+    r.nativeSingleJoyCons = YES;
+    TestController *pro = controller(@"Switch Pro Controller");
+    [r sync:@[gc(pro)]]; r.sources[0].player = 3;
+    pro.extendedGamepad.leftShoulder.isPressed = pro.extendedGamepad.leftTrigger.isPressed = YES;
+    [r read]; expect(o, 3, DM_BTN_L | DM_BTN_ZL, 0, 0, 0, 0); assert(o->styles[3] == 1);
+}
 int main(void) { @autoreleasepool {
+    marioKartRails();
     pro_controller_keeps_macos_button_names();
     keyboard(); handoff(); full(); split(); hotplug(); assignmentActions(); identification(); unavailable(); configuration(); callbacks(); lifetimes(); preferences(); controllerPreferences(); standardNativeEvents(); standardProfiles();
     explicitAssignments(); ownedKeyboardHotplug(); playerSelection(); splitSelection(); routeChooser(); playerChoices(); newPlayerChoices();

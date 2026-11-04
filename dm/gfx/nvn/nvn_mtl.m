@@ -12134,15 +12134,17 @@ static void clear_ds_tri(const p_clear_ds *c) {
 // Every 300 frames: per frame, draws, clean boundaries (and those with an open count), serial waits, the estimated speedup, and the scan's time
 enum { PAR_B = 4096, PAR_W = 256 };
 static uint32_t g_par_b[PAR_B], g_par_w[PAR_W]; static uint8_t g_par_bq[PAR_B]; static int g_par_nb, g_par_nw; static uint64_t g_par_d0;
-static struct { uint64_t subs, draws, clean, clean_q, dirty, waits, cost, scan_ns, scan_ops, scan_bad, switches, sw_draws[RX_MAX]; uint64_t why[9]; } g_par;
+static struct { uint64_t subs, draws, clean, clean_q, dirty, waits, cost, scan_ns, scan_ops, scan_bad, switches, from_scan, sw_draws[RX_MAX]; uint64_t why[9]; } g_par;
 static int par_draws(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PAR_DRAWS"); v = e && atoi(e) > 0 ? atoi(e) : 2500; } return v; }
-static int par_mode(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PAR"); v = !e ? 0 : !strcmp(e, "measure") ? 1 : !strcmp(e, "check") ? 2 : !strcmp(e, "fresh") ? 3 : !strcmp(e, "fresh+check") ? 4 : 0;
+static int par_mode(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PAR"); v = !e ? 0 : !strcmp(e, "measure") ? 1 : !strcmp(e, "check") ? 2 : !strcmp(e, "fresh") ? 3 : !strcmp(e, "fresh+check") ? 4 : !strcmp(e, "fresh-scan") ? 5 : 0;
     if (v == 1) MLOG("DM_NVN_PAR=measure: logging how far submissions could be split (log only)");
     if (v == 2) MLOG("DM_NVN_PAR=check: the scan's state at every pass boundary is compared with the replay's where a chunk could start (log only; slow)");
     if (v >= 3) MLOG("DM_NVN_PAR=%s: at a clean boundary every %d draws or more the translation moves to the next replay context, which starts fresh except for the contract (S, R, write tracking, replay position): serial, one thread (DM_NVN_PAR_DRAWS)%s", e, par_draws(), v == 4 ? "; and the scan's S and R are checked" : "");
-    if (e && !v) MLOG("[RED] DM_NVN_PAR=%s: unknown (measure, check, fresh, fresh+check)", e); } return v; }
+    if (v == 5) MLOG("DM_NVN_PAR=fresh-scan: the context a chunk starts in takes S, R and the write tracking from the scan's snapshot of that boundary, as a worker will; the scan's state is also checked");
+    if (e && !v) MLOG("[RED] DM_NVN_PAR=%s: unknown (measure, check, fresh, fresh+check, fresh-scan)", e); } return v; }
 static int par_measure(void) { return par_mode() >= 1; }
-static int par_check(void) { return par_mode() == 2 || par_mode() == 4; }
+static int par_check(void) { return par_mode() == 2 || par_mode() >= 4; }
+static int par_from_scan(void) { return par_mode() == 5; }
 static int par_fresh(void) { return par_mode() >= 3; }
 // ---------- Parallel translation, milestone 3: the scan's snapshots checked against the replay (DM_NVN_PAR=check; docs/parallel-translation.md) ----------
 // A chunk will start from what the scan computed for its first pass boundary. Here the scan keeps S and R at every boundary (before the boundary's SetRenderTargets applies), and when the
@@ -12164,6 +12166,16 @@ static parc_wt parc_sum(void) { WT_; parc_wt w = {g_npend, g_pend_over, g_nsbw, 
 static parc_snap *g_parc; static int g_parc_n;
 static struct { uint64_t compared, same, differ, nosnap; uint64_t sf[PAR_SF], rf[PAR_RF], wf[8]; int logged; } g_pck;
 static const char *const g_par_wf[8] = {"npend", "pend_over", "pend (ranges)", "nsbw", "sbw_over", "sbw (pages)", "nsbw_w", "sbw (wide)"};
+// fresh-scan: full snapshots (S, R and the whole write tracking) at the boundaries a chunk may start at, the first SetRenderTargets at least par_draws() draws after the last one
+enum { PARF_MAX = 16 };
+typedef struct { const uint8_t *op; typeof(S_rx[0]) s; typeof(R_rx[0]) r; rx_wt w; } parf_snap;
+static parf_snap *g_parf; static int g_parf_n; static uint64_t g_parf_draws;
+static void parf_put(const uint8_t *op) { WT_;
+    if (!g_parf) g_parf = calloc(PARF_MAX, sizeof *g_parf);
+    if (g_parf_n >= PARF_MAX || g_parf_draws < (uint64_t)par_draws()) return;
+    parf_snap *f = &g_parf[g_parf_n++]; f->op = op; memcpy(&f->s, &S, sizeof S); memcpy(&f->r, &R, sizeof R); memcpy(&f->w, wt_, sizeof f->w); g_parf_draws = 0;
+}
+static const parf_snap *parf_at(const uint8_t *op) { for (int i = 0; i < g_parf_n; i++) if (g_parf[i].op == op) return &g_parf[i]; return NULL; }
 static void parc_put(const uint8_t *op) {   // the scan, at a SetRenderTargets about to apply
     if (!g_parc) g_parc = calloc(PARC_MAX, sizeof *g_parc);
     if (g_parc_n < PARC_MAX) { parc_snap *c = &g_parc[g_parc_n++]; c->op = op; memcpy(&c->s, &S, sizeof S); memcpy(&c->r, &R, sizeof R); c->w = parc_sum(); c->used = 0; }
@@ -12252,7 +12264,9 @@ static void par_boundary(void) {
     if (why) { g_par.dirty++; g_par.why[why]++; return; }
     if (g_par_nb < PAR_B) { g_par_bq[g_par_nb] = g_vis_counting && g_nvs > 0; g_par_b[g_par_nb++] = (uint32_t)(g_stat_draw - g_par_d0); }
     if (par_check()) parc_check();
-    if (par_fresh() && g_stat_draw - g_par_last >= (uint64_t)par_draws()) { RX.cut_copy = 1; sub_cut(); if (!RX.cut_copy) par_fresh_switch(); else RX.cut_copy = 0; }   // the cut commits the segment first; a cut refused leaves the chunk where it is
+    const parf_snap *f = par_from_scan() ? parf_at(g_exec_cur) : NULL;
+    if (par_fresh() && (par_from_scan() ? f != NULL : g_stat_draw - g_par_last >= (uint64_t)par_draws())) { RX.cut_copy = 1; sub_cut(); if (!RX.cut_copy) { par_fresh_switch();
+        if (f) { memcpy(&S, &f->s, sizeof S); memcpy(&R, &f->r, sizeof R); memcpy(&g_wt_rx[g_rxi], &f->w, sizeof f->w); prog_resolve(); g_par.from_scan++; } } else RX.cut_copy = 0; }   // the scan's snapshot, not the previous context's: S, R and the write tracking (its inline updates have no ring data, so shadows over them are refused, not wrong)   // the cut commits the segment first; a cut refused leaves the chunk where it is
 }
 static void par_scan_writes(int st, NvShader *sh) {   // a draw's or dispatch's storage-buffer writes, as encode_args notes them
     if (!sh) return;
@@ -12268,11 +12282,11 @@ static void par_scan(const uint64_t *h, int n) {   // in the scan's context: S a
     S_rx[RX_SCAN] = S_rx[k]; R_rx[RX_SCAN] = R_rx[k];
     g_rx = &g_rxs[RX_SCAN]; g_rxi = RX_SCAN; g_par_scanning = 1; pend_reset();
     const uint64_t *rest = g_rest; int nrest = g_nrest; g_rest = h + 1; g_nrest = n - 1;
-    fz_cursor cur = {.p = (const uint8_t *)h[0]}; uint64_t ops = 0; g_parc_n = 0;
+    fz_cursor cur = {.p = (const uint8_t *)h[0]}; uint64_t ops = 0; g_parc_n = 0; g_parf_n = 0; g_parf_draws = 0;
     for (;;) { const uint8_t *q; op_hdr hq; const void *aq; if (!fz_next(&cur, &q, &hq, &aq)) break; ops++;
         switch (hq.op) {
-            case OP_SET_RT: { if (par_check()) parc_put(q); const p_set_rt *r = aq; R.rt = *r; R.has_rt = 1; continue; }
-            case OP_DRAW: case OP_DRAW_IDX: if (par_check()) { prog_resolve(); __unsafe_unretained NvProg *pr = S.prog ? prog_get(S.prog) : nil; if (pr) { par_scan_writes(0, pr->sh[0]); par_scan_writes(1, pr->sh[1]); } } continue;
+            case OP_SET_RT: { if (par_check()) parc_put(q); if (par_from_scan()) parf_put(q); const p_set_rt *r = aq; R.rt = *r; R.has_rt = 1; continue; }
+            case OP_DRAW: case OP_DRAW_IDX: g_parf_draws++; if (par_check()) { prog_resolve(); __unsafe_unretained NvProg *pr = S.prog ? prog_get(S.prog) : nil; if (pr) { par_scan_writes(0, pr->sh[0]); par_scan_writes(1, pr->sh[1]); } } continue;
             case OP_DISPATCH: if (par_check()) { __unsafe_unretained NvProg *cp = S.cprog ? prog_get(S.cprog) : nil; if (cp) par_scan_writes(5, cp->sh[5]); } continue;
             case OP_UPDATE_UB: { uint64_t d, nn; memcpy(&d, aq, 8); memcpy(&nn, (const uint8_t *)aq + 8, 8); if (nn) pend_add(d, nn, 1); continue; }
             case OP_COPY_B2B: { uint64_t d, nn; memcpy(&d, (const uint8_t *)aq + 8, 8); memcpy(&nn, (const uint8_t *)aq + 16, 8); pend_add(d, nn, 2); continue; }
@@ -12313,7 +12327,7 @@ static void par_sub_end(void) {
                              g_par.scan_ns / 1e6 / nf, (double)g_par.scan_ops / nf, g_par.scan_bad ? " (stopped early at a multi-draw in some)" : "");
         memset(&g_par, 0, sizeof g_par);
         if (par_check()) parc_report(nf);
-        if (par_fresh()) { MLOG("parallel translation, fresh (over %llu frames): %llu switches, draws translated per context %llu %llu %llu %llu", (unsigned long long)nf, (unsigned long long)g_par.switches, (unsigned long long)g_par.sw_draws[0], (unsigned long long)g_par.sw_draws[1], (unsigned long long)g_par.sw_draws[2], (unsigned long long)g_par.sw_draws[3]); }
+        if (par_fresh()) { MLOG("parallel translation, fresh (over %llu frames): %llu switches (%llu from the scan's snapshot), draws translated per context %llu %llu %llu %llu", (unsigned long long)nf, (unsigned long long)g_par.switches, (unsigned long long)g_par.from_scan, (unsigned long long)g_par.sw_draws[0], (unsigned long long)g_par.sw_draws[1], (unsigned long long)g_par.sw_draws[2], (unsigned long long)g_par.sw_draws[3]); }
     }
 }
 void mtl_exec(const uint8_t *p) {

@@ -457,3 +457,13 @@ t_logic: t_logic.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_logic.m $(MTL_T_SRC) $(FW)
 check_t_logic: t_logic
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_logic.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_logic "$$work"
+
+t_tgmem_indirect: t_tgmem_indirect.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tgmem_indirect.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_tgmem_indirect
+check_t_tgmem_indirect: t_tgmem_indirect
+	MTL_DEBUG_LAYER=1 ./t_tgmem_indirect
+
+t_first_store: t_first_store.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_first_store.m $(MTL_T_SRC) $(FW)
+check_t_first_store: RUN_ENV = MTL_DEBUG_LAYER=1

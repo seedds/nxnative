@@ -10355,7 +10355,7 @@ static void wide_run(const p_draw_idx *di) {
 }
 // Diagnostic DM_NVN_UBP_CHECK=1: each shadow made from memory (ubp_get) is checked against the GPU. The pass ends, the deferred updates land, the replay waits for the GPU (as an indirect-count
 // multi-draw does), and the bytes the draw would have read from the shadow are compared with memory, which now holds exactly what the GPU reads. The draw then goes on as without the shadows
-static void mdi_wait(void);
+static int mdi_wait(void);
 static uint64_t g_ubpk_same, g_ubpk_diff;
 static int ubp_check_on(void) { static int v = -1; if (v < 0) { v = getenv("DM_NVN_UBP_CHECK") != NULL; if (v) MLOG("DM_NVN_UBP_CHECK: every uniform shadow made from memory is compared with the GPU's memory after the updates land (slow)"); } return v; }
 static void ubp_check(uint64_t lo, uint64_t hi, const uint8_t *sh) {
@@ -10403,7 +10403,7 @@ static int ubd_conflict_cs(NvShader *cs, uint64_t ind) { return (ind && ubd_hits
 // converts, and records or counts in no Metal buffer) wait here: before the first such draw after GPU writes (a dispatch, copy, update or fill since the last wait, g_wr_epoch; or a new
 // submission) the replay ends the render pass, commits what it has encoded and waits for it, then reads the count on the CPU; later draws of the group use the same value
 static id<MTLSharedEvent> g_mdi_ev; static uint64_t g_mdi_v, g_mdi_waits, g_mdi_epoch = ~0ull, g_mdi_sub, g_mdi_addr; static uint32_t g_mdi_count;
-static void mdi_wait(void) {
+static int mdi_wait(void) {
     rp_end(); ubd_land();
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     up_flush(); res_commit();
@@ -10412,11 +10412,15 @@ static void mdi_wait(void) {
     if (!g_mdi_ev) g_mdi_ev = [g_dev newSharedEvent];
     rec_signal(g_mdi_ev, ++g_mdi_v); rec_drain();
     uint64_t w0 = ws_t0(); int ok = [g_mdi_ev waitUntilSignaledValue:g_mdi_v timeoutMS:10000]; if (ws_on()) ws_put(WS_MDI, w0, 1);
-    if (!ok) RED_ONCE(97, "indirect-count multi-draw: the GPU did not finish within 10 s; the count is read anyway");
-    else drw_drained();
+    if (!ok) {
+        RED_ONCE(97, "GPU-written indirect arguments did not finish within 10 s");
+    } else {
+        drw_drained();
+    }
     g_cb = rec_cb_new();
     [g_cb beginCommandBufferWithAllocator:g_alloc4[g_alloc_cur]];
     if (!g_mdi_waits++) MLOG("indirect-count multi-draw: first wait for the GPU-written count at frame %llu pass %llu", (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass);
+    return ok;
 }
 static uint32_t mdi_count(uint64_t cnt) {
     if (cnt != g_mdi_addr || g_mdi_epoch != g_wr_epoch || g_mdi_sub != g_sub_serial) {
@@ -11212,6 +11216,58 @@ static id<MTL4ComputeCommandEncoder> dispatch_enc(void) {
     args_dirty_all();
     return e;
 }
+// Spilled shared arrays use one device-memory slice per workgroup (dmsh_abi.h DMSH_TGMEM_*).
+// Dispatch barriers order uses of this reusable buffer; replaced buffers are retired after GPU completion.
+// Indirect counts must be read after their GPU writers finish, before sizing the allocation.
+// This synchronization costs time, but prevents allocating from stale counts and aliasing workgroup storage.
+static id<MTLBuffer> g_tgm_buf;
+static uint64_t tgm_gpu(NvShader *shader, MTLSize grid) {
+    const uint64_t bytes_per_group = shader->rf.tgmem;
+    const uint64_t allocation_limit = MIN((uint64_t)UINT32_MAX,
+                                         (uint64_t)g_dev.maxBufferLength - DMSH_TGMEM_HEAD);
+    const uint64_t dimensions[] = {grid.width, grid.height, grid.depth};
+    uint64_t group_count = 1;
+    if (grid.width && grid.height && grid.depth) {
+        for (int dimension = 0; dimension < 3; dimension++) {
+            if (dimensions[dimension] > allocation_limit / bytes_per_group / group_count) {
+                MDIE("compute shared memory: %s's grid exceeds the device/ABI allocation limit of %llu bytes",
+                     shader->key, (unsigned long long)allocation_limit);
+            }
+            group_count *= dimensions[dimension];
+        }
+    }
+
+    const uint64_t capacity = g_tgm_buf ? g_tgm_buf.length - DMSH_TGMEM_HEAD : 0;
+    const uint64_t required_bytes = group_count * bytes_per_group;
+    if (required_bytes > capacity) {
+        uint64_t buffer_size = 1ull << 20;
+        while (buffer_size < required_bytes) {
+            buffer_size <<= 1;
+        }
+        buffer_size = MIN(buffer_size, allocation_limit);
+        id<MTLBuffer> buffer = [g_dev newBufferWithLength:DMSH_TGMEM_HEAD + buffer_size
+                                                options:MTLResourceStorageModeShared];
+        if (!buffer) {
+            MDIE("compute shared memory: cannot allocate %llu bytes for %s",
+                 (unsigned long long)buffer_size, shader->key);
+        }
+        uint32_t *header = buffer.contents;
+        memset(header, 0, DMSH_TGMEM_HEAD);
+        header[0] = (uint32_t)buffer_size;
+        buffer.label = @"nvn-mtl compute shared memory";
+        res_add(buffer);
+        res_commit();
+        if (g_tgm_buf) {
+            defer_obj_release(g_tgm_buf);
+        }
+        g_tgm_buf = buffer;
+        MLOG("compute shared memory past %d bytes in a device buffer: %llu MB for %s "
+             "(%u bytes a threadgroup, %llu threadgroups; the device gives %lu bytes of threadgroup memory)",
+             DMSH_TGMEM_LIMIT, (unsigned long long)(buffer_size >> 20), shader->key, shader->rf.tgmem,
+             (unsigned long long)group_count, (unsigned long)g_dev.maxThreadgroupMemoryLength);
+    }
+    return g_tgm_buf.gpuAddress;
+}
 static void dispatch(const p_dispatch *dp) {
     zskip_clear();
     g_wr_epoch++; g_mdx_epoch++;
@@ -11258,6 +11314,18 @@ static void dispatch(const p_dispatch *dp) {
     rp_flush();   // A full clear with no draw after it waits for the next pass on its targets, but it comes before this dispatch, which may read or write them as images: land it first, as copy_t2t does
     image_prepare(prog_get(S.cprog), 0x20);
     if (up_mfx_wanted(cs) && !dp->ind && up_mfx_encode(cs)) return;   // the game's upscaler, drawn by MetalFX instead (DM_UPSCALER=metalfx)
+    uint64_t spill_address = 0;
+    if (cs->rf.tgmem) {
+        MTLSize grid = MTLSizeMake((uint32_t)dp->x, (uint32_t)dp->y, (uint32_t)dp->z);
+        if (dp->ind) {
+            if (!mdi_wait()) {
+                MDIE("compute shared memory: cannot read unfinished indirect dispatch arguments for %s", cs->key);
+            }
+            const uint32_t *counts = (const uint32_t *)((uint8_t *)((__bridge id<MTLBuffer>)ib).contents + io);
+            grid = MTLSizeMake(counts[0], counts[1], counts[2]);
+        }
+        spill_address = tgm_gpu(cs, grid);
+    }
     int own = dispatch_own();
     if (own && g_blit) { enc_b_end(g_blit); g_blit = nil; }
     id<MTLComputeCommandEncoder> ce = own ? pg_compute() : (id<MTLComputeCommandEncoder>)dispatch_enc();
@@ -11265,11 +11333,8 @@ static void dispatch(const p_dispatch *dp) {
     g_dispatch_dim[0] = (uint32_t)dp->x; g_dispatch_dim[1] = (uint32_t)dp->y; g_dispatch_dim[2] = (uint32_t)dp->z;   // read back by the driver segment c0 (encode_args_)
     g_c0_dim_buf = nil;
     encode_args(ce, cs, 5, 0);
-    if (cs->rf.tg_spill) {   // threadgroup memory past Metal's 32 KB, in a device buffer (dmsh_build.py tg_spill): a slice per workgroup, the workgroup's index modulo DMSH_TG_GROUPS
-        uint64_t groups = dp->ind ? DMSH_TG_GROUPS : MIN((uint64_t)dp->x * dp->y * dp->z, (uint64_t)DMSH_TG_GROUPS);
-        __strong id<MTLBuffer> tb = nil; size_t to = arena_alloc((size_t)MAX(groups, 1ull) * cs->rf.tg_spill, &tb);
-        enc_c_args(ce, tb.gpuAddress + to, DMSH_TG_SLOT);
-        static int once; if (!once++) MLOG("compute shader %s: %u bytes of threadgroup memory a workgroup, past Metal's %d, from a device buffer (first dispatch %llu workgroups)", cs->key, cs->rf.tg_spill, DMSH_TG_MAX, (unsigned long long)groups);
+    if (spill_address) {
+        enc_c_args(ce, spill_address, DMSH_TGMEM_BUFFER);
     }
     if (dp->ind) {   // The shader reads the group counts from c0 + 0x200: copy the GPU-written ones there first (Metal 4 orders nothing inside an encoder without a barrier)
         if (g_c0_dim_buf) { [(id<MTL4ComputeCommandEncoder>)ce copyFromBuffer:(__bridge id<MTLBuffer>)ib sourceOffset:io toBuffer:g_c0_dim_buf destinationOffset:g_c0_dim_off size:12];

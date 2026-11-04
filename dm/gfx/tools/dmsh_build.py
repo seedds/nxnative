@@ -75,7 +75,7 @@ HMMA_BODY = '''{
     return as_type<%(rt)s>(d0);
 }'''
 # A store only the very first invocation of a dispatch makes (a compute shader's preamble: `if (-local.x == workgroup.x << log2(local size)) buffer[k] = value`). Hoian_Proc in Splatoon Raiders resets its append counter
-# that way, with the other invocations adding to the counter at their end, hundreds of instructions later. On the Switch the first workgroup starts ahead of them. Apple's GPUs start workgroups in no order: a workgroup that had appended before
+# that way, with the other invocations adding to the counter at their end, hundreds of instructions later. This relies on workgroup scheduling, not an API ordering guarantee. Apple's GPUs start workgroups in no order: a workgroup that had appended before
 # the reset lost its plants to the next one's, a different few each frame, and they flickered. So the store leaves the shader and the host makes it, in order, before the dispatch (the reflection's first_store, nvn_mtl.m). Only this exact
 # condition counts: it holds for one invocation of a dispatch with a flat local size. The stores may come one guarded block at a time, and a value may be a local set under the same guard, as in
 # Mario Kart World's scenery lists (2ce9071c2f22d74f, 5fea9b7ddb30e8a8: `int a = -local; if (first) a = 1; int b = a; if (first) x[0] = 0; if (first) x[2] = b; ...`): the race took a different
@@ -118,49 +118,6 @@ def first_store(msl, local):
     rest = msl[at:]
     if not stores or len(stores) > 4 or re.search(r'if \(%s\)' % guard, rest): return msl, []
     return out + rest, stores
-# Compute shared memory past Metal's limit: Apple's GPUs give a kernel 32 KB of threadgroup memory (maxThreadgroupMemoryLength), and Metal refuses a pipeline that declares more, while Ampere
-# gives up to 100 KB. Mario Kart World's DrivePassShaderDefault has 168 compute shaders of 48 KB (spvUnsafeArray<uint, 12288>), seven of them run on the way to the first race; refused, their
-# dispatches were skipped. Such a kernel takes its threadgroup arrays from a device buffer the host binds (abi.TG_SLOT): one slice of the arrays' total per workgroup, at the workgroup's index in
-# the dispatch modulo abi.TG_GROUPS (an indirect dispatch's count is not known on the CPU; workgroups that far apart are not on the GPU together). Its threadgroup barriers order device memory
-# too, and threadgroup atomics become device atomics. Returns the shader and the bytes per workgroup (0: unchanged)
-TG_DECL = re.compile(r'^([ \t]*)threadgroup (spvUnsafeArray<(\w+), (\d+)>|\w+) (\w+)(?:\[(\d+)\])?;[ \t]*$', re.M)
-TG_BYTES = {'uint': 4, 'int': 4, 'float': 4, 'uint2': 8, 'int2': 8, 'float2': 8, 'uint3': 16, 'int3': 16, 'float3': 16, 'uint4': 16, 'int4': 16, 'float4': 16,
-            'half': 2, 'short': 2, 'ushort': 2, 'half2': 4, 'half4': 8, 'char': 1, 'uchar': 1}
-def tg_spill(msl):
-    m = re.search(r'\bkernel\s+void\s+main0\s*\(', msl)
-    if not m: return msl, 0
-    decls, total = [], 0
-    for d in TG_DECL.finditer(msl, m.end()):
-        elem = d.group(3) or d.group(2); n = int(d.group(4) or d.group(6) or 1)
-        if elem not in TG_BYTES: raise ValueError(f'threadgroup array of {elem}')
-        decls.append((d, total)); total += (TG_BYTES[elem] * n + 15) & ~15
-    if total <= abi.TG_MAX: return msl, 0
-    depth = 1; i = m.end()   # the parameter list's end: its attributes hold parentheses ([[buffer(0)]])
-    while depth: depth += {'(': 1, ')': -1}.get(msl[i], 0); i += 1
-    sig_end = i - 1
-    params = msl[m.end():sig_end]
-    g = re.search(r'uint3 (\w+) \[\[threadgroup_position_in_grid\]\]', params)
-    gid = g.group(1) if g else 'dm_tgid'
-    add = ('' if g else ', uint3 dm_tgid [[threadgroup_position_in_grid]]') + f', uint3 dm_ntg [[threadgroups_per_grid]], device uchar* dm_tg [[buffer({abi.TG_SLOT})]]'
-    out, at = [], 0
-    for k, (d, off) in enumerate(decls):
-        out.append(msl[at:d.start()])
-        t = d.group(2) + (f'[{d.group(6)}]' if d.group(6) else '')
-        if k == 0: out.append(f'{d.group(1)}ulong dm_tgbase = ulong((({gid}.z * dm_ntg.y + {gid}.y) * dm_ntg.x + {gid}.x) % {abi.TG_GROUPS}u) * {total}ul;\n')
-        if d.group(6): out.append(f'{d.group(1)}device {d.group(2)} (&{d.group(5)})[{d.group(6)}] = *(device {d.group(2)} (*)[{d.group(6)}])(dm_tg + dm_tgbase + {off});')
-        else: out.append(f'{d.group(1)}device {t}& {d.group(5)} = *(device {t}*)(dm_tg + dm_tgbase + {off});')
-        at = d.end()
-    out.append(msl[at:])
-    src = ''.join(out)
-    e = src.index(params, m.start()) + len(params)
-    src = src[:e] + add + src[e:]
-    lines = src.split('\n')
-    for n, ln in enumerate(lines):   # the rest of the address space (helper parameters, atomics); the array template's own threadgroup overloads stay
-        if 'operator [] (size_t pos)' in ln: continue
-        ln = re.sub(r'\bthreadgroup\b(?=\s)', 'device', ln)
-        ln = re.sub(r'(?<!mem_device \| )mem_flags::mem_threadgroup\b', 'mem_flags::mem_device | mem_flags::mem_threadgroup', ln)
-        lines[n] = ln
-    return '\n'.join(lines), total
 def hmma_msl(msl):
     m = re.search(r'\n(\w+) dmsh_hmma16816_f16\(([^)]*)\)\n\{', msl)
     if not m: return msl
@@ -231,6 +188,124 @@ def border_emu(msl):
         twin = f'spvDescriptorSet0.{m.group(2)}{abi.BORDER_TWIN}'
         msl = msl[:m.start()] + f'dm_bs({msl[m.start():i]}, spvDescriptorSet0.{abi.BORDER_MEMBER}, {bit[m.group(2)]}u, spvDescriptorSet0.{m.group(1)}, {twin}, {args})' + msl[i:]
     return msl.replace('using namespace metal;\n', 'using namespace metal;\n' + BORDER_HELPERS, 1)
+# Spill the largest shared array when a kernel exceeds the portable threadgroup-memory limit.
+# Each workgroup owns a distinct slice of a device buffer. The header carries the payload
+# capacity and an overflow flag; an undersized binding never aliases another group's slice.
+TG_ELEM = {
+    'bool': 1, 'char': 1, 'uchar': 1,
+    'half': 2, 'short': 2, 'ushort': 2,
+    'uint': 4, 'int': 4, 'float': 4, 'half2': 4,
+    'uint2': 8, 'int2': 8, 'float2': 8, 'half4': 8,
+    'uint3': 16, 'int3': 16, 'float3': 16,
+    'uint4': 16, 'int4': 16, 'float4': 16,
+}
+
+
+def tg_spill(msl):
+    """Return rewritten MSL and bytes per device slice, or (msl, 0) within the limit.
+
+    Reject unsupported rewrites and kernels whose remaining arrays still exceed the limit.
+    Unknown types stay in threadgroup memory and remain subject to Metal's validation.
+    """
+    kernel = re.search(r'^kernel\s+void\s+\w+\((.*?)\)\s*\{[ \t]*\n', msl, re.M | re.S)
+    if not kernel:
+        return msl, 0
+
+    declaration = re.compile(
+        r'^[ \t]+threadgroup (?:spvUnsafeArray<(?P<template_element>\w+), (?P<template_count>\d+)>'
+        r'|(?P<element>\w+)) (?P<name>\w+)(?:\[(?P<count>\d+)\])?;[ \t]*\n',
+        re.M,
+    )
+    arrays = []
+    for match in declaration.finditer(msl, kernel.end()):
+        element = match['template_element'] or match['element']
+        count = int(match['template_count'] or match['count'] or 1)
+        arrays.append((TG_ELEM.get(element, 0) * count, match))
+
+    total_bytes = sum(size for size, _ in arrays)
+    if total_bytes <= abi.TGMEM_LIMIT:
+        return msl, 0
+    array_bytes, array = max(arrays, key=lambda item: item[0])
+    remaining_bytes = total_bytes - array_bytes
+    if remaining_bytes > abi.TGMEM_LIMIT:
+        raise ValueError(f'{remaining_bytes} bytes of threadgroup memory left after moving the largest array')
+
+    name = array['name']
+    element = array['template_element'] or array['element']
+    if re.search(r'dmsh_hmma16816_f16\([^;]*\b' + name + r'\)', msl):
+        raise ValueError(f'{name} is the HMMA scratch')
+    slice_bytes = (array_bytes + 15) & ~15
+
+    parameters = kernel.group(1)
+    position = re.search(r'(\w+) \[\[threadgroup_position_in_grid\]\]', parameters)
+    position_name = None
+    if position and re.search(r'uint3 ' + position.group(1) + r' \[\[', parameters):
+        position_name = position.group(1)
+    grid = re.search(r'uint3\s+(\w+)\s*\[\[threadgroups_per_grid\]\]', parameters)
+    if ('threadgroups_per_grid' in parameters and not grid) or (position and not position_name):
+        raise ValueError('shared memory spill requires uint3 grid builtins')
+
+    grid_name = grid.group(1) if grid else 'dmsh_tgn'
+    added_parameters = [f'device uchar* dmsh_tgmem [[buffer({abi.TGMEM_BUFFER})]]']
+    if not grid:
+        added_parameters.append('uint3 dmsh_tgn [[threadgroups_per_grid]]')
+    if not position_name:
+        position_name = 'dmsh_tgp'
+        added_parameters.append('uint3 dmsh_tgp [[threadgroup_position_in_grid]]')
+    parameter_suffix = (', ' if parameters.strip() else '') + ', '.join(added_parameters)
+
+    slice_address = f'(dmsh_tgmem + {abi.TGMEM_HEAD} + dmsh_tgl * {slice_bytes}u)'
+    array_type = None
+    if array['template_element']:
+        array_type = f'spvUnsafeArray<{element}, {array["template_count"]}>'
+        reference = f'device {array_type}& {name} = *(device {array_type}*){slice_address};'
+    elif array['count']:
+        count = array['count']
+        reference = f'device {element} (&{name})[{count}] = *(device {element} (*)[{count}]){slice_address};'
+    else:
+        reference = f'device {element}& {name} = *(device {element}*){slice_address};'
+
+    setup = (
+        f'    ulong dmsh_tgl = (ulong({position_name}.z) * {grid_name}.y + {position_name}.y)'
+        f' * {grid_name}.x + {position_name}.x;\n'
+        f'    uint dmsh_tgcap = *(device uint*)dmsh_tgmem / {slice_bytes}u;\n'
+        '    if (dmsh_tgl >= dmsh_tgcap)\n'
+        '    {\n'
+        '        atomic_store_explicit((device atomic_uint*)dmsh_tgmem + 1, 1u, memory_order_relaxed);\n'
+        '        return;\n'
+        '    }\n'
+        f'    {reference}\n'
+    )
+    msl = msl[:array.start()] + setup + msl[array.end():]
+    msl = msl[:kernel.end(1)] + parameter_suffix + msl[kernel.end(1):]
+
+    # Helpers taking this array by reference must use the same address space.
+    # A second array of the same type would make that rewrite ambiguous.
+    names = {name}
+    if array_type:
+        for _, other in arrays:
+            same_type = (other['template_element'], other['template_count']) == (
+                array['template_element'], array['template_count'])
+            if other is not array and same_type:
+                raise ValueError(f'two threadgroup arrays of type {array_type}')
+        msl = msl.replace(f'threadgroup {array_type}& ', f'device {array_type}& ')
+        helper_parameters = re.findall(r'device ' + re.escape(array_type) + r'& (\w+)[,)]', msl)
+        names.update(helper_parameters)
+
+    array_names = '|'.join(sorted(names))
+    msl = re.sub(r'\(threadgroup (atomic_\w+)\*\)&(' + array_names + r')\[', r'(device \1*)&\2[', msl)
+    if re.search(r'\(threadgroup atomic_\w+\*\)&(' + array_names + r')\b', msl):
+        raise ValueError(f'an atomic on {name} this does not rewrite')
+
+    def add_device_barrier(match):
+        flags = match.group(1)
+        if 'mem_device' in flags:
+            return match.group(0)
+        return f'threadgroup_barrier({flags} | mem_flags::mem_device)'
+
+    msl = re.sub(r'threadgroup_barrier\(([^)]*\bmem_threadgroup\b[^)]*)\)', add_device_barrier, msl)
+    return msl, slice_bytes
+
 CAS =os.environ.get('DMSH_CAS', os.path.join(cache_root, 'cas'))
 CAS_LOCKS, CAS_LOCKS_GUARD = {}, threading.Lock()
 PRE_STATS = collections.Counter()
@@ -1393,7 +1468,7 @@ def finish(key, w, j, c1):
             **({'entry_tf': 'main0_tf', 'tf_strides': [e['stride'] if e else 0 for e in j['tf']]} if j.get('tf') else {}),
             **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u'} if fu else {}), **({'entry_m': 'main0_m', 'uint_mask_m': fmask} if fu and fmask else {}), **({'entry_d': 'main0_d'} if fd else {}),
             **({'first_store': [{'reg': next(b['reg'] for b in binds if b['msl_name'] == n), 'word': w, 'value': v} for n, w, v in first]} if first else {}),
-            **({'tg_spill': spill} if spill else {}),
+            **({'tgmem': spill} if spill else {}),
             'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr, mesh['kind'] if mesh else j['stage']),
             'bindings': binds,
             'vertex_inputs': [{'location': int(m.group(2)), 'msl_type': m.group(1)} for m in re.finditer(r'(\w+)\s+\w+\s*\[\[attribute\((\d+)\)\]\]', src)],

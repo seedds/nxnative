@@ -103,6 +103,15 @@ typedef struct seg_clk seg_clk;
 // What one submission's translation encodes into and keeps while it runs: its command buffer and allocator, the open encoders, segments, frame arenas, post-completion list and visibility
 // buffer. One context today (g_rx0), reached through g_rx; the parallel workers will each translate into their own. Moved here from file-scope variables of the same names (g_cb → RX.cb, …)
 @class NvArena, NvProg;
+enum { PEND_MAX = 8192, PEND_HB = 2048, PEND_NODES = 16384, PEND_SPAN = 8, PEND_WIDE = 256 };
+typedef struct { uint64_t lo, hi, gpu; size_t off; __unsafe_unretained id<MTLBuffer> buf; } ubd_ent;   // data at buf + off (the ubs ring; a ring block replaced meanwhile lives until this submission completes)
+enum { UBD_MAX = 512 };
+enum { UBD_PF = 1024 };
+enum { UBD_BM_SHIFT = 21 };   // pages in the window
+typedef struct { uint64_t lo, hi, ver, shadow; int8_t hits, covers; } ubd_memo_ent;   // shadow: ubd_shadow's GPU address (frame arena, kept until the submission ends, when the list is landed), 0 = not made
+enum { UBD_MEMO = 512 };
+enum { UBP_CACHE = 16, UBP_MAX_BYTES = 65536 };
+typedef struct { uint64_t lo, hi, gpu; uint8_t *cpu; int npend; uint32_t gen, sbw; uint64_t ready; } ubp_ent;   // sbw: g_sbw_gen when the other writes were last checked; ready: copy ops that fill it (ubc_push)
 // dynamic encoder state (rx_t.ed): each draw used to send all nine (stencil reference, viewport, scissor, cull, winding, fill, depth bias, depth clip, blend colour); now a value is sent only when it differs.
 // ok holds one bit per item and is cleared for every new encoder and after a clear triangle (which sets its own)
 typedef struct { unsigned ok; uint32_t sref; MTLViewport vp; MTLScissorRect sc; int cull, wind, fill, clip; float bias[3], blend[4]; } rx_ed;
@@ -131,8 +140,18 @@ typedef struct {
     uint32_t draw_binst;                          // the current draw's base instance (draw), for c0 + 0x644
     __unsafe_unretained id<MTLRenderPipelineState> cur_ps; __unsafe_unretained NvProg *cur_pr; uint64_t cur_ps_pass; int cur_pull;   // draw_: the last pipeline and the program and pass it was for
     __unsafe_unretained id<MTLDepthStencilState> cur_ds; uint64_t cur_ds_pass;   // draw_: the last depth-stencil state
+    // uniform updates deferred inside the pass and their shadows (slice 3; see mtl_sub_update, ubd_*, ubp_get)
+    struct {
+        id<MTLBuffer> ring; size_t ring_off, ring_size;   // the update ring the inline updates are copied into (g_ubs_*)
+        ubd_ent ent[UBD_MAX]; int n, landing;         // the updates deferred in the open pass; being landed
+        uint64_t pf[UBD_PF]; int wide;                // pages they touch (open addressing; cleared when landed); an update spans more than 16 pages: the filter is skipped
+        uint64_t bm[(1u << UBD_BM_SHIFT) / 64];       // the same pages as a bitmap over the pool window (ubd_bm_*)
+        uint64_t ver; ubd_memo_ent memo[UBD_MEMO];    // the list's version (moves with every update and landing); answers per range for that version
+        int idx[PEND_MAX + PEND_WIDE];                // ubp_get's scratch: every entry a lookup can meet
+        uint64_t ready; ubp_ent pc[UBP_CACHE]; unsigned pc_i;   // ready of the shadow ubp_get returned last; the shadows kept per range
+    } ub;
 } rx_t;
-static rx_t g_rx0 = {.pso_dirty = 1, .dss_dirty = 1, .args_dirty = {1, 1, 1, 1, 1, 1}}, *g_rx = &g_rx0;
+static rx_t g_rx0 = {.pso_dirty = 1, .dss_dirty = 1, .args_dirty = {1, 1, 1, 1, 1, 1}, .ub.ver = 1}, *g_rx = &g_rx0;
 #define RX (*g_rx)
 static id<MTL4CommandAllocator> g_alloc4[ALLOC_MAX]; static int g_alloc_n;   // Command allocator pool of the main submission: at start pick one the GPU has finished with, create a new one if there is none (wait only at the cap)
 static id<MTL4CommandAllocator> g_up_alloc4[3];
@@ -797,7 +816,6 @@ static vis_list *vis_snapshot(void) {
 // Inline updates keep where their data sits in the update ring (g_pend_upd: index + 1 into g_upd), so a bindless handle they wrote can be read as the GPU will see it (pend_read).
 // Monster Hunter Rise queues more than 256 writes in a submission (the old limit, after which every address counted as written). The writes are indexed by 4 KB page (a chain per hash
 // bucket, newest first); a write over more than PEND_SPAN pages goes to a short list that every lookup scans
-enum { PEND_MAX = 8192, PEND_HB = 2048, PEND_NODES = 16384, PEND_SPAN = 8, PEND_WIDE = 256 };
 static uint64_t g_pend_lo[PEND_MAX], g_pend_hi[PEND_MAX]; static int g_npend, g_pend_over; static uint8_t g_pend_kind[PEND_MAX]; static uint16_t g_pend_upd[PEND_MAX];   // kind: 1 inline update, 2 copy, 3 fill
 static int32_t g_pend_head[PEND_HB]; static uint32_t g_pend_hgen[PEND_HB], g_pend_gen = 1;   // a bucket's chain is valid when its generation is this submission's
 static struct { int32_t e, next; } g_pend_node[PEND_NODES]; static int g_npnode;
@@ -1142,16 +1160,15 @@ uint64_t mtl_blit_splits(void) { return g_blit_splits; }
 static int enc_open(void);
 static int g_blit_ct;   // the open copy encoder has the compute argument table set (dispatches share it, dispatch_enc)
 static id<MTL4ComputeCommandEncoder> blit_open(void) { if (!RX.blit) { ser_gate(); RX.blit = enc_b_begin(RX.cb); [RX.blit barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:blit_vis()]; gp_begin(RX.blit, 'C', nil); g_bw_n = g_br_n = 0; g_blit_ops = 0; g_blit_ct = 0; } return RX.blit; }
-static void ubd_flush(void); static int g_nubd;   // the inline updates deferred (see mtl_sub_update)
-static int g_ubd_landing;
+static void ubd_flush(void);   // the inline updates deferred (see mtl_sub_update)
 static id<MTL4ComputeCommandEncoder> blit_raw(void) {
     blit_note(); if (enc_open()) g_blit_splits++; rp_end(); id<MTL4ComputeCommandEncoder> e = blit_open();
-    if (g_nubd && !g_ubd_landing) { g_ubd_landing = 1; ubd_flush(); g_ubd_landing = 0; }   // deferred inline updates come before this copy or dispatch in command order
+    if (RX.ub.n && !RX.ub.landing) { RX.ub.landing = 1; ubd_flush(); RX.ub.landing = 0; }   // deferred inline updates come before this copy or dispatch in command order
     return e;
 }
 // Land the deferred inline updates before other GPU work outside the copy encoder (helper compute passes, the end of the submission, a GPU wait)
-static void ubd_land(void) { if (g_nubd && !g_ubd_landing) { rp_end(); g_ubd_landing = 1; ubd_flush(); g_ubd_landing = 0; } }
-static void ubd_land_compute(void) { if (g_nubd && !g_ubd_landing) { ubd_land(); if (RX.blit) { enc_b_end(RX.blit); RX.blit = nil; } } }   // before a compute encoder of its own (no other encoder may be open then)
+static void ubd_land(void) { if (RX.ub.n && !RX.ub.landing) { rp_end(); RX.ub.landing = 1; ubd_flush(); RX.ub.landing = 0; } }
+static void ubd_land_compute(void) { if (RX.ub.n && !RX.ub.landing) { ubd_land(); if (RX.blit) { enc_b_end(RX.blit); RX.blit = nil; } } }   // before a compute encoder of its own (no other encoder may be open then)
 static void blit_barrier(void) {
     static int off = -1; if (off < 0) { const char *e = getenv("DM_NVN_BLIT_ORDER"); off = e && !strcmp(e, "0"); if (off) MLOG("DM_NVN_BLIT_ORDER=0: no barriers inside the copy encoder (diagnostic; brings back the fountain's vertical stripes)"); }
     // Only the stages a compute encoder has: MTLStageAll here fails Metal validation (macOS 27: "must be a valid combination of MTLStages for the current encoder type")
@@ -1219,7 +1236,6 @@ void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
 
 // Inline uniform update (UpdateUniformBuffer): the data is copied into the host's own shared ring at encode time, then copied in order to the destination.
 // Previously it was read from command memory only when the GPU executed - if the game recycles command memory before the GPU runs, it reads the bytes of the next batch of commands (SMBW's fountain water wave simulation got the wrong coefficients and diverged to ±65504).
-static id<MTLBuffer> g_ubs_buf; static size_t g_ubs_off, g_ubs_size;
 // Inline updates inside an open render pass are deferred instead of ending the pass. Metal cannot copy into a buffer inside a render pass, so each update used to end it: all attachments stored,
 // reloaded by the next pass, new encoders (Metroid Dread about 246 times a frame, Tears of the Kingdom about 50). NVN applies the update in command order, so the draws after it in the pass must
 // read the new data: a draw whose uniform binding overlaps a deferred update reads a shadow. When the updates deferred in this pass cover all of the binding the shader can read, the shadow is
@@ -1227,9 +1243,6 @@ static id<MTLBuffer> g_ubs_buf; static size_t g_ubs_off, g_ubs_size;
 // The real copies are encoded in order when the pass ends (rp_end), so later passes and the CPU see them as before. The pass still ends before a draw that would need more: a partly covered binding
 // whose rest memory cannot give, or a read of the deferred data through a vertex, index, indirect or storage buffer (ubd_conflict). Off in TBDR mode (it reorders passes). DM_NVN_UB_DEFER=0 turns it off
 static size_t arena_alloc(size_t n, __strong id<MTLBuffer> *buf); static inline void args_dirty_all(void); static void ubd_dirty(uint64_t lo, uint64_t hi);
-typedef struct { uint64_t lo, hi, gpu; size_t off; __unsafe_unretained id<MTLBuffer> buf; } ubd_ent;   // data at buf + off (the ubs ring; a ring block replaced meanwhile lives until this submission completes)
-enum { UBD_MAX = 512 };
-static ubd_ent g_ubd[UBD_MAX]; static int g_nubd;
 static uint64_t g_ubd_deferred, g_ubd_conflicts;   // updates deferred, passes ended before a draw that needed more (the residency set line)
 static int ubd_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_UB_DEFER"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_UB_DEFER=0: uniform updates inside a pass end the pass as before"); } return v && !tbdr_on(); }
 void mtl_ubd_stats(uint64_t *deferred, uint64_t *conflicts) { *deferred = g_ubd_deferred; *conflicts = g_ubd_conflicts; }
@@ -1240,59 +1253,50 @@ void mtl_ubd_stats(uint64_t *deferred, uint64_t *conflicts) { *deferred = g_ubd_
 // 10-50 µs of idle GPU before and after it: GPU time 9.3 → 8.0 ms a frame, frame 11.9 → 10.7 ms at the 120 fps cap (M2 Max), for about 0.8 ms more translation (more shadows).
 // The list can then hold hundreds of updates: a page filter answers most lookups without the scan
 static int ubd_lazy(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_UB_LAZY"); v = e ? atoi(e) : 160; if (v < 0) v = 0; } return v; }   // the most updates kept across a pass end (0 = off)
-enum { UBD_PF = 1024 };
-static uint64_t g_ubd_pf[UBD_PF];   // pages (address >> 12, +1) the deferred updates touch, open addressing; cleared when the list is landed
-static int g_ubd_wide;              // an update spans more than 16 pages: the filter is skipped
 static inline unsigned ubd_pf_slot(uint64_t pg) { return (unsigned)((pg * 0x9E3779B97F4A7C15ull) >> 54) & (UBD_PF - 1); }
 // Pages inside the guest address space (0x70_0000_0000, 8 GB here on the Mac and on iOS) are kept in a bitmap as well: one load per page instead of probing the table, which was
 // most of the filter's cost (each draw asks for every buffer it binds). Pages outside it use the table only
-enum { UBD_BM_SHIFT = 21 };   // pages in the window
 static const uint64_t UBD_BM_BASE = 0x7000000000ull;
-static uint64_t g_ubd_bm[(1u << UBD_BM_SHIFT) / 64];
 static inline int ubd_bm_in(uint64_t lo, uint64_t hi) { return lo >= UBD_BM_BASE && ((hi - 1 - UBD_BM_BASE) >> 12) < (1u << UBD_BM_SHIFT); }
 static void ubd_pf_add(uint64_t lo, uint64_t hi) {
-    if (((hi - 1) >> 12) - (lo >> 12) > 16) { g_ubd_wide = 1; return; }
-    for (uint64_t a = lo >> 12; a <= (hi - 1) >> 12; a++) if (a >= UBD_BM_BASE >> 12 && a - (UBD_BM_BASE >> 12) < (1u << UBD_BM_SHIFT)) { uint64_t pg = a - (UBD_BM_BASE >> 12); g_ubd_bm[pg >> 6] |= 1ull << (pg & 63); }   // a range across the window's edge too: a lookup inside the window asks only the bitmap
+    if (((hi - 1) >> 12) - (lo >> 12) > 16) { RX.ub.wide = 1; return; }
+    for (uint64_t a = lo >> 12; a <= (hi - 1) >> 12; a++) if (a >= UBD_BM_BASE >> 12 && a - (UBD_BM_BASE >> 12) < (1u << UBD_BM_SHIFT)) { uint64_t pg = a - (UBD_BM_BASE >> 12); RX.ub.bm[pg >> 6] |= 1ull << (pg & 63); }   // a range across the window's edge too: a lookup inside the window asks only the bitmap
     for (uint64_t pg = lo >> 12; pg <= (hi - 1) >> 12; pg++) { unsigned k = ubd_pf_slot(pg);
-        while (g_ubd_pf[k] && g_ubd_pf[k] != pg + 1) k = (k + 1) & (UBD_PF - 1);
-        g_ubd_pf[k] = pg + 1; }
+        while (RX.ub.pf[k] && RX.ub.pf[k] != pg + 1) k = (k + 1) & (UBD_PF - 1);
+        RX.ub.pf[k] = pg + 1; }
 }
 static inline int ubd_pf_hit(uint64_t lo, uint64_t hi) {
-    if (g_ubd_wide || ((hi - 1) >> 12) - (lo >> 12) > 16) return 1;
-    if (ubd_bm_in(lo, hi)) { for (uint64_t pg = (lo - UBD_BM_BASE) >> 12; pg <= (hi - 1 - UBD_BM_BASE) >> 12; pg++) if (g_ubd_bm[pg >> 6] >> (pg & 63) & 1) return 1; return 0; }
+    if (RX.ub.wide || ((hi - 1) >> 12) - (lo >> 12) > 16) return 1;
+    if (ubd_bm_in(lo, hi)) { for (uint64_t pg = (lo - UBD_BM_BASE) >> 12; pg <= (hi - 1 - UBD_BM_BASE) >> 12; pg++) if (RX.ub.bm[pg >> 6] >> (pg & 63) & 1) return 1; return 0; }
     for (uint64_t pg = lo >> 12; pg <= (hi - 1) >> 12; pg++) { unsigned k = ubd_pf_slot(pg);
-        while (g_ubd_pf[k]) { if (g_ubd_pf[k] == pg + 1) return 1; k = (k + 1) & (UBD_PF - 1); } }
+        while (RX.ub.pf[k]) { if (RX.ub.pf[k] == pg + 1) return 1; k = (k + 1) & (UBD_PF - 1); } }
     return 0;
 }
 static void ubd_bm_clear(void) {   // the pages of the listed updates (an update a later one replaced lies inside it): before the list is emptied
-    for (int i = 0; i < g_nubd; i++) { uint64_t lo = g_ubd[i].lo, hi = g_ubd[i].hi;
-        if (hi > lo && ((hi - 1) >> 12) - (lo >> 12) <= 16) for (uint64_t a = lo >> 12; a <= (hi - 1) >> 12; a++) if (a >= UBD_BM_BASE >> 12 && a - (UBD_BM_BASE >> 12) < (1u << UBD_BM_SHIFT)) { uint64_t pg = a - (UBD_BM_BASE >> 12); g_ubd_bm[pg >> 6] &= ~(1ull << (pg & 63)); } }
+    for (int i = 0; i < RX.ub.n; i++) { uint64_t lo = RX.ub.ent[i].lo, hi = RX.ub.ent[i].hi;
+        if (hi > lo && ((hi - 1) >> 12) - (lo >> 12) <= 16) for (uint64_t a = lo >> 12; a <= (hi - 1) >> 12; a++) if (a >= UBD_BM_BASE >> 12 && a - (UBD_BM_BASE >> 12) < (1u << UBD_BM_SHIFT)) { uint64_t pg = a - (UBD_BM_BASE >> 12); RX.ub.bm[pg >> 6] &= ~(1ull << (pg & 63)); } }
 }
 static int ubd_hits_scan(uint64_t lo, uint64_t hi) {
     if (hi <= lo || !ubd_pf_hit(lo, hi)) return 0;
-    for (int i = 0; i < g_nubd; i++) if (lo < g_ubd[i].hi && g_ubd[i].lo < hi) return 1;
+    for (int i = 0; i < RX.ub.n; i++) if (lo < RX.ub.ent[i].hi && RX.ub.ent[i].lo < hi) return 1;
     return 0;
 }
 // Whether the deferred updates cover [lo, hi) entirely (any order of overlap): the union of their ranges clipped to it, swept from lo
 static int ubd_covers_scan(uint64_t lo, uint64_t hi) {
     for (uint64_t at = lo; at < hi;) { uint64_t next = at;
-        for (int i = 0; i < g_nubd; i++) if (g_ubd[i].lo <= at && g_ubd[i].hi > next) next = g_ubd[i].hi;
+        for (int i = 0; i < RX.ub.n; i++) if (RX.ub.ent[i].lo <= at && RX.ub.ent[i].hi > next) next = RX.ub.ent[i].hi;
         if (next == at) return 0; at = next; }
     return 1;
 }
-// Answers of the two lookups above for the list as it is now (g_ubd_ver changes with every update deferred and every landing). Each draw asks about every buffer it binds, about
+// Answers of the two lookups above for the list as it is now (RX.ub.ver changes with every update deferred and every landing). Each draw asks about every buffer it binds, about
 // 29,000 times a frame in Breath of the Wild, and consecutive draws bind mostly the same ranges between two updates: the scans of the list (up to 160 updates kept across passes) and its
 // page filter were about 8% of the submit thread's cycles. A small table remembers the last answers per range. DM_NVN_UBD_MEMO=0 always scans (diagnostic)
-static uint64_t g_ubd_ver = 1;
-typedef struct { uint64_t lo, hi, ver, shadow; int8_t hits, covers; } ubd_memo_ent;   // shadow: ubd_shadow's GPU address (frame arena, kept until the submission ends, when the list is landed), 0 = not made
-enum { UBD_MEMO = 512 };
-static ubd_memo_ent g_ubd_memo[UBD_MEMO];
 __attribute__((noinline)) static int ubd_memo_init(void) { const char *e = getenv("DM_NVN_UBD_MEMO"); int v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_UBD_MEMO=0: deferred update lookups scan the list every time"); return v; }
 static int g_ubd_memo_on = -1;
 static inline int ubd_memo_on(void) { if (__builtin_expect(g_ubd_memo_on < 0, 0)) g_ubd_memo_on = ubd_memo_init(); return g_ubd_memo_on; }
 static inline ubd_memo_ent *ubd_memo(uint64_t lo, uint64_t hi) {
-    ubd_memo_ent *m = &g_ubd_memo[(unsigned)(((lo * 0x9E3779B97F4A7C15ull) ^ (hi * 0xC2B2AE3D27D4EB4Full)) >> 55) & (UBD_MEMO - 1)];
-    if (m->ver != g_ubd_ver || m->lo != lo || m->hi != hi) { m->lo = lo; m->hi = hi; m->ver = g_ubd_ver; m->hits = m->covers = -1; m->shadow = 0; }
+    ubd_memo_ent *m = &RX.ub.memo[(unsigned)(((lo * 0x9E3779B97F4A7C15ull) ^ (hi * 0xC2B2AE3D27D4EB4Full)) >> 55) & (UBD_MEMO - 1)];
+    if (m->ver != RX.ub.ver || m->lo != lo || m->hi != hi) { m->lo = lo; m->hi = hi; m->ver = RX.ub.ver; m->hits = m->covers = -1; m->shadow = 0; }
     return m;
 }
 static int ubd_hits(uint64_t lo, uint64_t hi) {
@@ -1312,24 +1316,24 @@ static uint64_t ubd_shadow(uint64_t lo, uint64_t hi) {   // the same range again
     ubd_memo_ent *m = ubd_memo(lo, hi); if (!m->shadow) m->shadow = ubd_shadow_(lo, hi); return m->shadow;
 }
 static uint64_t ubd_shadow_(uint64_t lo, uint64_t hi) {
-    for (int i = g_nubd - 1; i >= 0; i--) { const ubd_ent *e = &g_ubd[i];
-        if (e->lo <= lo && hi <= e->hi) { int later = 0; for (int j = i + 1; j < g_nubd; j++) later |= lo < g_ubd[j].hi && g_ubd[j].lo < hi;
+    for (int i = RX.ub.n - 1; i >= 0; i--) { const ubd_ent *e = &RX.ub.ent[i];
+        if (e->lo <= lo && hi <= e->hi) { int later = 0; for (int j = i + 1; j < RX.ub.n; j++) later |= lo < RX.ub.ent[j].hi && RX.ub.ent[j].lo < hi;
             uint64_t g = e->gpu + (lo - e->lo); if (!later && !(g & 15)) return g; break; } }
     id<MTLBuffer> ab; size_t o = arena_alloc((size_t)(hi - lo), &ab); uint8_t *d = (uint8_t *)ab.contents + o;
-    for (int i = 0; i < g_nubd; i++) { const ubd_ent *e = &g_ubd[i]; uint64_t a = e->lo > lo ? e->lo : lo, b = e->hi < hi ? e->hi : hi;
+    for (int i = 0; i < RX.ub.n; i++) { const ubd_ent *e = &RX.ub.ent[i]; uint64_t a = e->lo > lo ? e->lo : lo, b = e->hi < hi ? e->hi : hi;
         if (a < b) memcpy(d + (a - lo), (const uint8_t *)e->buf.contents + e->off + (a - e->lo), (size_t)(b - a)); }
     return ab.gpuAddress + o;
 }
 // Encode the deferred copies in order (rp_end, once the pass has ended)
 static void ubd_flush(void) {
-    ubd_bm_clear(); int n = g_nubd; g_nubd = 0; g_ubd_ver++; memset(g_ubd_pf, 0, sizeof g_ubd_pf); g_ubd_wide = 0;
-    for (int i = 0; i < n; i++) { const ubd_ent *e = &g_ubd[i]; void *db; uint64_t dof;
+    ubd_bm_clear(); int n = RX.ub.n; RX.ub.n = 0; RX.ub.ver++; memset(RX.ub.pf, 0, sizeof RX.ub.pf); RX.ub.wide = 0;
+    for (int i = 0; i < n; i++) { const ubd_ent *e = &RX.ub.ent[i]; void *db; uint64_t dof;
         if (!mtl_addr(e->lo, e->hi - e->lo, &db, &dof)) continue;
         enc_b_copy_buffer(blit_buf(0, 0, e->lo, e->hi), e->buf, e->off, (__bridge id<MTLBuffer>)db, dof, e->hi - e->lo); g_gp_ubd++; }
 }
 // The bytes [lo, lo+n) as the deferred updates leave them (ubd_covers holds): for bindless handles read from uniform memory (ubo_handle)
 static void ubd_read(uint64_t lo, size_t n, void *out) {
-    for (int i = 0; i < g_nubd; i++) { const ubd_ent *e = &g_ubd[i]; uint64_t a = e->lo > lo ? e->lo : lo, b = e->hi < lo + n ? e->hi : lo + n;
+    for (int i = 0; i < RX.ub.n; i++) { const ubd_ent *e = &RX.ub.ent[i]; uint64_t a = e->lo > lo ? e->lo : lo, b = e->hi < lo + n ? e->hi : lo + n;
         if (a < b) memcpy((uint8_t *)out + (a - lo), (const uint8_t *)e->buf.contents + e->off + (a - e->lo), (size_t)(b - a)); }
 }
 // Bindings the deferred updates cover only in part. The rest of the binding is what memory holds when the pass runs on the GPU. The shadow then starts from memory as the CPU sees it at encode
@@ -1428,31 +1432,26 @@ static int pend_since(uint64_t a, uint64_t b, int since, int *out) {
 int nvn_host_readable(uint64_t a, uint64_t n);   // hle_nvn.c: guest memory and sparse pools
 // Shadows made from memory, per range. One is kept while no write is queued after it (the draws after an update bind the same block again and again); the next one for the same range starts
 // from it and lays over only the writes queued since (the game rewrites one block hundreds of times a submission). A range read whole from memory once is not read from memory again in the submission
-enum { UBP_CACHE = 16, UBP_MAX_BYTES = 65536 };
-static int g_ubp_idx[PEND_MAX + PEND_WIDE];   // every entry a lookup can meet: the chains of the range's pages hold each entry at most once after dedup, the wide list at most PEND_WIDE
-typedef struct { uint64_t lo, hi, gpu; uint8_t *cpu; int npend; uint32_t gen, sbw; uint64_t ready; } ubp_ent;   // sbw: g_sbw_gen when the other writes were last checked; ready: copy ops that fill it (ubc_push)
-static uint64_t g_ubp_ready;   // ready of the shadow ubp_get returned last (a CPU read of it waits for that: ubc_wait)
-static ubp_ent g_ubpc[UBP_CACHE]; static unsigned g_ubpc_i;
 // The bytes [lo, hi) as the GPU will read them at this point of the submission (see above): 1 with the shadow's GPU and CPU addresses, 0 when they cannot be known (the pass ends instead)
 static int ubp_get(uint64_t lo, uint64_t hi, uint64_t *gpu, const uint8_t **cpu) {
     if (!ub_partial_on() || hi <= lo || hi - lo > UBP_MAX_BYTES) { g_ubp_why[0]++; return 0; }
     ubp_ent *c = NULL;
-    for (int i = 0; i < UBP_CACHE; i++) if (g_ubpc[i].lo == lo && g_ubpc[i].hi == hi && g_ubpc[i].gen == g_pend_gen) { c = &g_ubpc[i]; break; }
+    for (int i = 0; i < UBP_CACHE; i++) if (RX.ub.pc[i].lo == lo && RX.ub.pc[i].hi == hi && RX.ub.pc[i].gen == g_pend_gen) { c = &RX.ub.pc[i]; break; }
     if (!c || c->sbw != g_sbw_gen) { if (g_sbw_over || sbw_hits(lo, hi)) { g_ubp_why[1]++; return 0; } if (c) c->sbw = g_sbw_gen;
         if (g_gml_on) { pthread_mutex_lock(&g_gsr_mu); uint64_t i = g_gsr_n++ % GSR_N; g_gsr[i].fence = g_fence + 1; g_gsr[i].lo = lo; g_gsr[i].hi = hi; pthread_mutex_unlock(&g_gsr_mu); } }
-    if (c && c->npend == g_npend) { g_ubp_reused++; *gpu = c->gpu; *cpu = c->cpu; g_ubp_ready = c->ready; return 1; }
+    if (c && c->npend == g_npend) { g_ubp_reused++; *gpu = c->gpu; *cpu = c->cpu; RX.ub.ready = c->ready; return 1; }
     int since = c ? c->npend : 0;
     if (!c && gw_live_in(g_gwx, lo, hi)) { g_ubp_why[2]++; return 0; }
     if (!c && !nvn_host_readable(lo, hi - lo)) { g_ubp_why[4]++; return 0; }
-    int n = pend_since(lo, hi, since, g_ubp_idx); if (n < 0) { g_ubp_why[4]++; return 0; }
+    int n = pend_since(lo, hi, since, RX.ub.idx); if (n < 0) { g_ubp_why[4]++; return 0; }
     // Newest first, keep the writes that still show through somewhere (a write only newer ones cover is never read, whatever wrote it); stop once they cover the range
     enum { COVN = 64 }; uint64_t cl[COVN], ch[COVN]; int nc = 0, nk = 0, exact = 1;   // covered intervals, sorted and disjoint; exact = 0 once they no longer fit
-    for (int i = 0; i < n; i++) { int e = g_ubp_idx[i];
+    for (int i = 0; i < n; i++) { int e = RX.ub.idx[i];
         uint64_t x = g_pend_lo[e] > lo ? g_pend_lo[e] : lo, y = g_pend_hi[e] < hi ? g_pend_hi[e] : hi;
         int j = 0; while (j < nc && ch[j] < y) j++;
         if (exact && j < nc && cl[j] <= x && y <= ch[j]) continue;   // newer writes cover all of it
         if (g_pend_kind[e] != 1 || !g_pend_upd[e]) { g_ubp_why[3]++; return 0; }   // a copy, fill or feedback write the CPU cannot see
-        g_ubp_idx[nk++] = e;
+        RX.ub.idx[nk++] = e;
         if (exact) {   // add [x, y) and merge neighbours
             int k = 0; while (k < nc && ch[k] < x) k++;
             int m = k; uint64_t nl = x, nh = y; while (m < nc && cl[m] <= y) { nl = MIN(nl, cl[m]); nh = MAX(nh, ch[m]); m++; }
@@ -1465,14 +1464,14 @@ static int ubp_get(uint64_t lo, uint64_t hi, uint64_t *gpu, const uint8_t **cpu)
     if (defer) ready = ubc_push(d, c ? c->cpu : (const uint8_t *)(uintptr_t)lo, (size_t)len);   // the previous shadow's own copies are queued before these
     else { if (c) ubc_wait(c->ready); memcpy(d, c ? c->cpu : (const uint8_t *)(uintptr_t)lo, (size_t)len); }
     if (!c) um_overlay(lo, hi, d, ready);   // a shadow made from the previous one has them already
-    for (int i = nk - 1; i >= 0; i--) { int e = g_ubp_idx[i]; const upd_ent *u = &g_upd[g_pend_upd[e] - 1];   // oldest first: each byte ends with the newest write
+    for (int i = nk - 1; i >= 0; i--) { int e = RX.ub.idx[i]; const upd_ent *u = &g_upd[g_pend_upd[e] - 1];   // oldest first: each byte ends with the newest write
         uint64_t x = g_pend_lo[e] > lo ? g_pend_lo[e] : lo, y = g_pend_hi[e] < hi ? g_pend_hi[e] : hi;
         const uint8_t *src = (const uint8_t *)u->buf.contents + u->off + (x - u->lo);
         if (defer) ready = ubc_push(d + (x - lo), src, (size_t)(y - x)); else memcpy(d + (x - lo), src, (size_t)(y - x)); }
     g_ubp_made++;
-    if (!c) c = &g_ubpc[g_ubpc_i++ % UBP_CACHE];
+    if (!c) c = &RX.ub.pc[RX.ub.pc_i++ % UBP_CACHE];
     *c = (ubp_ent){lo, hi, ab.gpuAddress + o, d, g_npend, g_pend_gen, g_sbw_gen, ready};
-    *gpu = c->gpu; *cpu = d; g_ubp_ready = ready; return 1;
+    *gpu = c->gpu; *cpu = d; RX.ub.ready = ready; return 1;
 }
 void mtl_ubp_stats(uint64_t *made, uint64_t *reused, uint64_t *refused) { *made = g_ubp_made; *reused = g_ubp_reused; *refused = g_ubp_refused; }
 void mtl_ubp_why(uint64_t w[5]) { memcpy(w, g_ubp_why, sizeof g_ubp_why); }
@@ -1481,25 +1480,25 @@ void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
     int pi = pend_add(dst, n, 1);
     void *db; uint64_t dof;
     if (!mtl_addr(dst, n, &db, &dof)) MDIE("uniform update target is in no memory pool dst=%#llx n=%#llx", (unsigned long long)dst, (unsigned long long)n);
-    int defer = (enc_open() || (ubd_lazy() && !RX.blit)) && g_nubd < UBD_MAX && ubd_on();
+    int defer = (enc_open() || (ubd_lazy() && !RX.blit)) && RX.ub.n < UBD_MAX && ubd_on();
     size_t need = (n + 255u) & ~(size_t)255u;   // 256-aligned slots: a deferred update is read in place by draws as a uniform buffer
-    if (!g_ubs_buf || g_ubs_off + need > g_ubs_size) {
-        if (g_ubs_buf) defer_obj_release(g_ubs_buf);   // copies already encoded still reference the old block: release after this submission completes
-        g_ubs_size = MAX((size_t)1 << 20, need);
-        g_ubs_buf = [g_dev newBufferWithLength:g_ubs_size options:MTLResourceStorageModeShared];
-        if (!g_ubs_buf) MDIE("uniform update ring allocation failed %#zx", g_ubs_size);
-        res_add(g_ubs_buf); g_ubs_off = 0;
+    if (!RX.ub.ring || RX.ub.ring_off + need > RX.ub.ring_size) {
+        if (RX.ub.ring) defer_obj_release(RX.ub.ring);   // copies already encoded still reference the old block: release after this submission completes
+        RX.ub.ring_size = MAX((size_t)1 << 20, need);
+        RX.ub.ring = [g_dev newBufferWithLength:RX.ub.ring_size options:MTLResourceStorageModeShared];
+        if (!RX.ub.ring) MDIE("uniform update ring allocation failed %#zx", RX.ub.ring_size);
+        res_add(RX.ub.ring); RX.ub.ring_off = 0;
     }
-    memcpy((uint8_t *)g_ubs_buf.contents + g_ubs_off, data, n);
-    if (pi >= 0) { g_upd[g_nupd] = (upd_ent){dst, g_ubs_off, g_ubs_buf}; g_pend_upd[pi] = (uint16_t)++g_nupd; }
+    memcpy((uint8_t *)RX.ub.ring.contents + RX.ub.ring_off, data, n);
+    if (pi >= 0) { g_upd[g_nupd] = (upd_ent){dst, RX.ub.ring_off, RX.ub.ring}; g_pend_upd[pi] = (uint16_t)++g_nupd; }
     if (defer) {
         // A deferred update this one covers whole never needs to land: the same landing writes these bytes after it, and the draws that read it hold its ring copy (ubd_shadow).
         // Games rewrite one block before every draw group (Breath of the Wild: the same 64 bytes), so the list stays short: every lookup below scans it, for most bindings of most draws
-        int k = 0; for (int i = 0; i < g_nubd; i++) if (!(dst <= g_ubd[i].lo && g_ubd[i].hi <= dst + n)) g_ubd[k++] = g_ubd[i];
-        g_nubd = k;
-        g_ubd[g_nubd++] = (ubd_ent){dst, dst + n, g_ubs_buf.gpuAddress + g_ubs_off, g_ubs_off, g_ubs_buf}; ubd_pf_add(dst, dst + n); g_ubd_ver++; g_ubd_deferred++; ubd_dirty(dst, dst + n); }   // see ubd_shadow
-    else enc_b_copy_buffer(blit_buf(0, 0, dst, dst + n), g_ubs_buf, g_ubs_off, (__bridge id<MTLBuffer>)db, dof, n);
-    g_ubs_off += need;
+        int k = 0; for (int i = 0; i < RX.ub.n; i++) if (!(dst <= RX.ub.ent[i].lo && RX.ub.ent[i].hi <= dst + n)) RX.ub.ent[k++] = RX.ub.ent[i];
+        RX.ub.n = k;
+        RX.ub.ent[RX.ub.n++] = (ubd_ent){dst, dst + n, RX.ub.ring.gpuAddress + RX.ub.ring_off, RX.ub.ring_off, RX.ub.ring}; ubd_pf_add(dst, dst + n); RX.ub.ver++; g_ubd_deferred++; ubd_dirty(dst, dst + n); }   // see ubd_shadow
+    else enc_b_copy_buffer(blit_buf(0, 0, dst, dst + n), RX.ub.ring, RX.ub.ring_off, (__bridge id<MTLBuffer>)db, dof, n);
+    RX.ub.ring_off += need;
 }
 
 // In-order buffer fill within the submission: all four bytes equal → fillBuffer; otherwise copied in chunks from a 64 KiB pattern buffer
@@ -3868,7 +3867,7 @@ static void rp_end(void) { if (RX.enc) { AP_B; geo_mesh_flush_pass();
 #endif
     sd_finish(); enc_r_end_pass(RX.enc); g_gp_bw_l0 = g_bw_load; g_gp_bw_s0 = g_bw_store;   // the profile's per-pass ledger counts from the previous pass end, profiled or not
     zskip_commit_clears(); RX.enc = nil; RX.enc_geo_nocolor = 0; g_rt_merged = 0; g_sm_pass = 0; g_rt_range_active = g_rt_range_pending = 0; pg_end_render(); ts_after(); ms_after(); if (g_lp.count) lp_finish(); fz_end();
-    if (g_nubd && g_nubd >= ubd_lazy()) ubd_flush();   // the inline updates deferred in this pass, in order (see mtl_sub_update); across passes they wait for the next copy or dispatch (blit_raw)
+    if (RX.ub.n && RX.ub.n >= ubd_lazy()) ubd_flush();   // the inline updates deferred in this pass, in order (see mtl_sub_update); across passes they wait for the next copy or dispatch (blit_raw)
     if (g_nbcrt) bcrt_flush();   // blocks drawn into shadows go back into their compressed textures
     if (g_nrtm) rt_mirror_flush();
 #ifdef NVN_RT_RANGE_TEST
@@ -7961,8 +7960,8 @@ static void ubo_read(int stage, int reg, int off, size_t n, void *out) {
     if (stage < 0 || stage >= 6 || reg < 0 || reg >= 16) return;
     const p_bind_buf *u = &S.ubo[stage][reg];
     if (!u->addr || (uint64_t)off + n > u->size) return;
-    if (g_nubd && ubd_hits(u->addr + off, u->addr + off + n) && ubd_covers(u->addr + off, u->addr + off + n)) { ubd_read(u->addr + off, n, out); return; }   // written by an inline update deferred in this pass
-    { uint64_t g; const uint8_t *c; if (pend_hits(u->addr + off, n) && ubp_get(u->addr + off, u->addr + off + n, &g, &c)) { ubc_wait(g_ubp_ready); memcpy(out, c, n); return; } }   // memory and the inline updates queued over it
+    if (RX.ub.n && ubd_hits(u->addr + off, u->addr + off + n) && ubd_covers(u->addr + off, u->addr + off + n)) { ubd_read(u->addr + off, n, out); return; }   // written by an inline update deferred in this pass
+    { uint64_t g; const uint8_t *c; if (pend_hits(u->addr + off, n) && ubp_get(u->addr + off, u->addr + off + n, &g, &c)) { ubc_wait(RX.ub.ready); memcpy(out, c, n); return; } }   // memory and the inline updates queued over it
     if (pend_hits(u->addr + off, n)) { int kind; if (pend_read(u->addr + off, n, out, &kind)) return;   // written by an inline update queued in this submission: its data
         RED_ONCE(47, "the uniform buffer holding bindless handles (stage %d slot %d +%#x) has GPU-side writes in this submission (%s): the current value is read", stage, reg, off,
                  kind == 2 ? "a buffer copy" : kind == 3 ? "a fill" : kind == 1 ? "an inline update covering part of it" : "more writes than the host tracks"); }
@@ -8030,7 +8029,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             if (!u || !u->addr || !mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu)) {   // reads 0 (the all-zero bank), as an unbound texture slot does, instead of through a null pointer
                 RED_ONCE(16, "stage %d cb%d has no uniform buffer bound", nvn_stage, reg); slots[aid] = zero_bank_gpu(); USE(zero_bank(), MTLResourceUsageRead); continue; }
             uint64_t ul = cb_len(sh, reg, u->size);   // what the shader can read of it
-            if (g_nubd && ubd_hits(u->addr, u->addr + ul)) {   // inline updates deferred in this pass (see mtl_sub_update); ubd_conflict made sure they cover the binding or the rest can be read from memory
+            if (RX.ub.n && ubd_hits(u->addr, u->addr + ul)) {   // inline updates deferred in this pass (see mtl_sub_update); ubd_conflict made sure they cover the binding or the rest can be read from memory
                 uint64_t g; const uint8_t *c; if (ubd_covers(u->addr, u->addr + ul)) gpu = ubd_shadow(u->addr, u->addr + ul);
                 else if (ubp_get(u->addr, u->addr + ul, &g, &c)) gpu = g;
                 else RED_ONCE(92, "a uniform update deferred inside the pass covers only part of the binding (stage %d cb%d): the content before the update is read", nvn_stage, reg); }
@@ -10290,7 +10289,7 @@ static void mdi_wait(void);
 static uint64_t g_ubpk_same, g_ubpk_diff;
 static int ubp_check_on(void) { static int v = -1; if (v < 0) { v = getenv("DM_NVN_UBP_CHECK") != NULL; if (v) MLOG("DM_NVN_UBP_CHECK: every uniform shadow made from memory is compared with the GPU's memory after the updates land (slow)"); } return v; }
 static void ubp_check(uint64_t lo, uint64_t hi, const uint8_t *sh) {
-    ubc_wait(g_ubp_ready);   // the shadow ubp_get just returned may still be filled by the copy worker
+    ubc_wait(RX.ub.ready);   // the shadow ubp_get just returned may still be filled by the copy worker
     size_t n = (size_t)(hi - lo); uint8_t *tmp = malloc(n); memcpy(tmp, sh, n);
     mdi_wait();
     const uint8_t *m = (const uint8_t *)(uintptr_t)lo; size_t bad = 0, first = 0;
@@ -10766,7 +10765,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     // Rasterizer discard suppresses fragments, not vertex execution or its storage and image writes (the build gives such a vertex shader main0_discard).
     // Xenoblade Chronicles 3 uses vertex-only work before its skinned-model draws; Metroid Prime Remastered fills its fog volume with image stores from points.
     if (S.rast_discard && (!pr->sh[0] || !pr->sh[0]->discard_fn)) { PD("Z %llu draw skipped: rasterizer discard with no vertex storage or image writes vs=%s", g_stat_pass + !RX.enc, pr->sh[0] ? pr->sh[0]->key : "-"); return; }
-    if (g_nubd && (RX.enc || ubd_lazy()) && ubd_conflict(pr, dw, di)) { g_ubd_conflicts++; rp_end(); ubd_land(); }   // land the deferred inline updates before this draw (see ubd_conflict)
+    if (RX.ub.n && (RX.enc || ubd_lazy()) && ubd_conflict(pr, dw, di)) { g_ubd_conflicts++; rp_end(); ubd_land(); }   // land the deferred inline updates before this draw (see ubd_conflict)
     vertex_dump(pr->sh[0], dw, di);
     if (zskip_can_draw(pr)) {   // Zero-source skip: the output is always 0, writing 0 over 0, so this draw changes no result (see zskip_can_draw)
         g_zskip_count++; { static int once; if (!once++) MLOG("zero-source skip: first case pass %llu", g_stat_pass + 1); }
@@ -11185,7 +11184,7 @@ static void dispatch(const p_dispatch *dp) {
     if (!tg[0]) { RED_ONCE(29, "compute shader lacks threadgroup size reflection"); return; }
     // A store the shader makes on its very first invocation only, before the others run on the Switch: the build takes it out of the shader (dmsh_build.py first_store), as Apple's GPUs start workgroups in no order
     if (dp->ind || (dp->x && dp->y && dp->z)) for (int i = 0; i < cs->rf.nfirst; i++) { const p_bind_buf *u = &S.ssbo[5][cs->rf.first[i].reg]; if (u->addr) mtl_sub_fill(u->addr + 4ull * cs->rf.first[i].word, 4, cs->rf.first[i].value); }
-    if (g_nubd && ubd_conflict_cs(cs, dp->ind)) { g_ubd_conflicts++; ubd_land(); }   // see ubd_conflict_cs
+    if (RX.ub.n && ubd_conflict_cs(cs, dp->ind)) { g_ubd_conflicts++; ubd_land(); }   // see ubd_conflict_cs
     rp_flush();   // A full clear with no draw after it waits for the next pass on its targets, but it comes before this dispatch, which may read or write them as images: land it first, as copy_t2t does
     image_prepare(prog_get(S.cprog), 0x20);
     if (up_mfx_wanted(cs) && !dp->ind && up_mfx_encode(cs)) return;   // the game's upscaler, drawn by MetalFX instead (DM_UPSCALER=metalfx)
@@ -12068,7 +12067,7 @@ static int par_measure(void) { static int v = -1; if (v < 0) { const char *e = g
 static void par_sub_begin(void) { g_par_nb = g_par_nw = 0; g_par_d0 = g_stat_draw; }
 static void par_wait(void) { if (!RX.cb || !pthread_equal(pthread_self(), g_sub_thread)) return; if (g_par_nw < PAR_W) g_par_w[g_par_nw++] = (uint32_t)(g_stat_draw - g_par_d0); }
 static void par_boundary(void) {
-    int why = g_hoist_n ? 1 : (g_defer_nact || g_defer_pend) ? 2 : g_fz.active ? 3 : g_sm_pass ? 4 : g_nlc ? 5 : g_mrun.n ? 6 : g_nubd ? 7 : 0;
+    int why = g_hoist_n ? 1 : (g_defer_nact || g_defer_pend) ? 2 : g_fz.active ? 3 : g_sm_pass ? 4 : g_nlc ? 5 : g_mrun.n ? 6 : RX.ub.n ? 7 : 0;
     if (why) { g_par.dirty++; g_par.why[why]++; return; }
     if (g_par_nb < PAR_B) { g_par_bq[g_par_nb] = g_vis_counting && g_nvs > 0; g_par_b[g_par_nb++] = (uint32_t)(g_stat_draw - g_par_d0); }
 }

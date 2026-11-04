@@ -5,6 +5,7 @@ A graphical app that packs games, keeps a library of them or starts them is a pr
 - [Building: the NSP script](#building-the-nsp-script)
 - [The settings list](#the-settings-list)
 - [Starting a game](#starting-a-game)
+- [Local users](#local-users)
 - [An app that hosts the engine](#an-app-that-hosts-the-engine)
 - [Following main](#following-main)
 - [What a front end cannot see yet](#what-a-front-end-cannot-see-yet)
@@ -61,6 +62,46 @@ A Mac game quits when the player holds a controller's Home button for 2 seconds 
 Settings a player chose in a front end and wants kept, also for a start from Finder or the Dock, go in the app's saved choices ([Saved choices](#saved-choices)), not in its environment.
 
 **An IPA** is installed by the player (sideloading); its own settings screen starts the game. Lines in the app's `Documents/env.txt` win over that screen ([Settings in a file](settings.md#settings-in-a-file)). The save and `log.txt` are in the app's Documents folder.
+
+## Local users
+
+A frontend can supply a roster, show the nicknames and pass the chosen ID to the built app. The game sees the same IDs through its account service. The built-in Mac and iOS launchers create and rename users as well as offering the choice before Play.
+
+`DM_USERS_FILE` names a UTF-8 JSON file. A built Mac app looks for `~/Library/Application Support/nxnative/users.json` by default, shared by its games. An iOS app looks in its own `Documents/users.json`. An explicit relative path in the launch environment or `env.txt` resolves against the Mac game's Application Support directory or the iOS app's Documents directory. A directly invoked `dmhost` takes its configuration from the environment and resolves relative paths against its working directory.
+
+```json
+{
+  "version": 1,
+  "users": [
+    {"id": "53574e415449564578626c0000000001", "nickname": "Alice"},
+    {"id": "d78867e01fd44334a238078801be53ea", "nickname": "Bob"}
+  ]
+}
+```
+
+The roster holds 1–8 users and fits in 16 KiB. Each ID is 32 hex digits (high 64-bit word first), nonzero, unique regardless of case. Generate an ID once, for example from a UUID with its hyphens removed, and retain it when renaming or reordering users. Nicknames are 1–32 UTF-8 bytes and exclude control characters. The legacy ID shown for Alice retains the original player's saves. Removing an entry leaves that user's files on disk. Built-in editors merge each edit with the current roster while holding an exclusive advisory lock on `<roster>.lock`, then replace the JSON file atomically. Changes apply immediately in the editing launcher and on subsequent launches elsewhere. A first edit materializes the original user's ID. A rename preserves the ID, save directory and other JSON fields. Prefer the launcher commands or the C bridge over independent file writes. If writing directly, take the same lock before reading or modifying the file.
+
+For the built Mac app, run its launcher with `--list-users` to include the app's normal `env.txt` files and roster discovery. For a raw host, provide the roster path explicitly. Either query exits before loading game files.
+
+```sh
+"/path/to/Game.app/Contents/MacOS/nxnative" --list-users
+"/path/to/Game.app/Contents/MacOS/nxnative" --create-user "Robin"
+"/path/to/Game.app/Contents/MacOS/nxnative" --rename-user d78867e01fd44334a238078801be53ea "Robert"
+DM_USERS_FILE=/path/to/users.json dmhost --list-users
+DM_USERS_FILE=/path/to/users.json DM_USER_ID=d78867e01fd44334a238078801be53ea "/path/to/Game.app/Contents/MacOS/nxnative"
+```
+
+The query writes one JSON object to stdout containing `version`, `users` (as above, IDs in lowercase), and `selected` (the effective ID). Successful edits return the same object, with the created or renamed account selected for that invocation. Edits are refused when an external launch fixes the user with `DM_USER_ID`. A malformed roster, unsupported version, unreadable explicit path or unknown selected ID produces a diagnostic and nonzero exit. The engine refuses to start a guest with invalid configuration. The default selection is the first listed user. An explicit `DM_USER_ID` fixes the selection for that launch. A choice made inside the app applies to the current launch. An external frontend can remember a choice by ID and pass it on future starts. The guest user-selector applet returns the chosen ID. If the game excludes that user or requires a linked online account, the configured selection fails. Games can also enumerate and open other local users explicitly.
+
+For account saves the engine uses the UID the **game passes to the mount**, even if it differs from the launcher selection. The legacy account uses `DM_SAVE`. Every other account uses its sibling `<DM_SAVE>.user-<lowercase ID>`. Device data is shared across users of the title: a title that mounts both kinds keeps its device data in `<DM_SAVE>_device`; a device-save-only title keeps its existing `DM_SAVE` (for example, the Animal Crossing island). The existing cloud archive covers the legacy and shared device trees. Additional users' individual save directories are local and must be backed up separately. A frontend that transfers saves can identify them from the roster and these paths. Run one game process at a time against a title's save root, since its device save and transaction directories are shared.
+
+### Selecting a save folder
+
+A built Mac or iOS launcher accepts `DM_SAVE_ROOT` set to an absolute, accessible top-level directory (a launch override or an `env.txt` entry). The effective order is an explicit exact directory in `DM_SAVE`, then `DM_SAVE_ROOT`, then the folder the player picked, then the app’s usual per-game directory. On iOS use the Files picker for paths that need sandbox access. The app remembers its permission for subsequent launches.
+
+Under a chosen root the layout is `<root>/<uppercase title ID>/save` for the original player, `save.user-<ID>` beside it for other players, and `save_device` when the game has a separate device save. The default and exact-directory layouts remain unchanged. A fresh destination copies committed saves (including accounts missing from the current roster), extended attributes and the cloud base hash, if present. It excludes transaction scratch, backups and shader caches. An existing title folder with saves is opened as-is. Switching back to the default reopens those original files. Frontends should keep the roster separate from the save library and present errors if a chosen volume is unavailable.
+
+For an embedded launcher, [local_users.h](../dm/host/local_users.h) exposes the same user enumeration, selection, edit and storage operations used by the bundled apps. Prepare the roster path before reading it. On the launcher thread, call `dm_users_edit(NULL, nickname)` to create or pass the stable ID to rename; a non-NULL return is a displayable error. Refresh the roster after an edit. Call `dm_save_prepare_root` with the chosen folder, title ID and previous save base, and supply its returned path as `DM_SAVE` when starting a raw host. The raw host also supports `--list-users` with an explicit roster path.
 
 ## Saved choices
 

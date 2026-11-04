@@ -11,6 +11,9 @@ targets:
       - path: ../../Sources/DmHostingController.swift
       - path: ../../Sources/GameMenu.swift
       - path: ../../Sources/LauncherSettings.swift
+      - path: ../../Sources/LocalSaveFolder.swift
+      - path: ../../../host/local_users.m
+      - path: ../../../host/local_save_root.m
       - path: ../../Sources/DmGamepad.m
       - path: ../../Sources/front_ios.m
     dependencies:

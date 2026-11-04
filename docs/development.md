@@ -14,6 +14,10 @@ The README covers packing and playing. This page is for working on nxnative itse
 | iOS app | One unsigned IPA for iPhone and iPad. The rewritten code is embedded in the executable; the shader libraries, the RomFS and the game icon are inside the app. A settings screen comes before the game (`Launcher.swift`, drawn from `dm/launcher.json`, which `dm/games/settings.py` writes from `dm/games/settings.tsv`); the host's loading starts at app launch meanwhile, and the frame rate and render scale go into the frame step state when the game starts (`loader.c` `dm_fps_state_apply`) |
 | Known gaps | Conditional render is always drawn; [indirect-count multi-draws](reference/rendering.md#indirect-count-multi-draws) can wait for a GPU-written count when the records need conversion, cannot be GPU-masked, or exceed the mask table capacity; geometry shaders do not translate. TBDR optimizations are off by default (they don't understand bindless textures yet). No amiibo. On the Mac, Mario's menu and dialogue text render blank (fine on the iPhone) |
 
+## Local accounts and save storage
+
+The Mac and iOS launchers and the host share the roster reader in `dm/host/local_users.m`. Creation and renaming run in the launcher before guest execution. The built apps use `dm/host/local_save_root.m` to prepare a selected top-level library, copying committed saves when a title first uses it. The host freezes the chosen identity at game start, and `hle_account.c` uses the roster for guest enumeration, handles and nicknames. `hle_fs.c` routes account mounts by their requested UID while device mounts retain the title's existing shared directory. The [frontend contract](frontends.md#local-users) specifies roster discovery, the JSON query, storage paths and cloud coverage. For hosts without a roster, the original local UID, nickname override and save paths still apply.
+
 ## Cheats
 
 How a Switch with Atmosphère runs cheats, and where this host differs, is in [Cheats on a Switch](reference/cheats.md).
@@ -312,6 +316,11 @@ its C hash maps (`hm_put_id`: the serial table, the pending pipeline bases) is
 handed to the map for the analyzer's eyes (a `CF_CONSUMED` declaration under
 `__clang_analyzer__` in `nvn_mtl.m`), so code that leaves an object there needs
 no `NOLINT` for a leak.
+
+Both lint workflows compare a pull request's baseline with the base commit SHA
+recorded in its event, not the branch tip when the runner starts. If `main`
+shrinks its baseline while a job is queued, fetching that newer tip would
+incorrectly count the tested snapshot's older baseline as new findings.
 
 Raising `LLVM_VERSION` takes a new baseline in the same change
 (`tidy --rebaseline`; `dm/tools/tests/test_lint_c.py` checks that the two name

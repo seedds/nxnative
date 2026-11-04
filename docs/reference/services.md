@@ -99,7 +99,7 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** `game called nn::diag abort: Result 0x7802` (`MountNameAlreadyExists`) when a game mounts a RAM disk under a name it has just unmounted.
 - **Cause:** the host's mount table is permanent and `nn::fs::Unmount` did nothing. `nn::fs::MountRamDisk` has no host version, so it runs in `sdk` and registers in the SDK's own table, and the no-op left that entry there while the game freed the disk's buffer.
-- **Fix:** `h_fs_Unmount` leaves a host mount alone and sends any other name to the SDK: its `IsMounted`, then its `Unmount` if it holds the name (the SDK's `Unmount` aborts on a name it does not hold). `guest_sym` gives the module's own definitions, not the host's take-overs. A name in neither table stays a no-op. `t_fs.c` covers each case.
+- **Fix:** `h_fs_Unmount` keeps legacy save and ordinary host mounts permanent. It releases add-on mount names and, with configured local users, save mount names while preserving open handles and aliases. Names outside the host table go to the SDK: its `IsMounted`, then its `Unmount` if it holds the name (the SDK's `Unmount` aborts on a name it does not hold). `guest_sym` gives the module's own definitions, not the host's take-overs. A name in neither table stays a no-op. SDK calls run after releasing the host path lock. `t_fs.c` and `t_local_saves.c` cover legacy and configured-user behavior.
 - **Note:** the file calls on such a mount now reach the SDK too: [File calls on a mount in the SDK's own table](#file-calls-on-a-mount-in-the-sdks-own-table).
 - **Found on:** [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) ([GitHub issue #1012](https://github.com/seedds/nxnative/issues/1012)).
 

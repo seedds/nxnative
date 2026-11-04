@@ -14,6 +14,7 @@ private func info(_ key: String) -> Any? { Bundle.main.object(forInfoDictionaryK
 /// Cloud saves too). The host brings the save in from there when the game starts and
 /// sends it there after each save (dm/host/save_sync.h); the folder is a bookmark (CloudSaves.m).
 private struct CloudSavesSection: View {
+    let personalSaveIsLocal: Bool
     @State private var folder: String = ""
     @State private var note: String = ""
     @State private var picking = false
@@ -45,9 +46,12 @@ private struct CloudSavesSection: View {
                 }
             }
         } footer: {
-            Text(note.isEmpty
-                 ? "Choose a folder in iCloud Drive, and the same one in the Mac app's Cloud saves. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in save-backups."
-                 : note)
+            if !note.isEmpty { Text(note) }
+            if personalSaveIsLocal {
+                Text("This player’s personal save uses the local save location. Cloud saves syncs the original player’s save and shared game data.")
+            } else if note.isEmpty {
+                Text("Choose a folder in iCloud Drive, and the same one in the Mac app's Cloud saves. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in save-backups.")
+            }
         }
         .onAppear(perform: refresh)
     }
@@ -100,6 +104,7 @@ private struct LauncherView: View {
     @State private var check = 0   // which Play the running check is for: one the player went on from without it is dropped
     @State private var report: SaveSyncReport?
     @State private var asking: SaveSyncReport.Step?
+    @State private var preparingSaves = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -119,6 +124,7 @@ private struct LauncherView: View {
                 .padding(16)
                 .frame(width: geometry.size.width / 3, height: geometry.size.height)
                 List {
+                    PlayerSection(m: m)
                     ForEach(m.sections, id: \.self) { section in
                         let rows = m.rows(in: section)
                         if !rows.isEmpty {
@@ -133,7 +139,8 @@ private struct LauncherView: View {
                     } footer: {
                         Text("Brings back all settings this game was tested with.")
                     }
-                    CloudSavesSection()
+                    LocalSaveFolderSection(working: $preparingSaves)
+                    CloudSavesSection(personalSaveIsLocal: m.personalSaveIsLocal)
                     Section {
                         HStack {
                             Text("Memory available")
@@ -167,7 +174,7 @@ private struct LauncherView: View {
     }
 
     @ViewBuilder var playButton: some View {
-        let button = Button(action: start) { Text("Play").font(.title3.weight(.semibold)).frame(maxWidth: 220) }.controlSize(.large).disabled(checking)
+        let button = LocalSavePlayButton(working: $preparingSaves, ready: start) { Text("Play").font(.title3.weight(.semibold)).frame(maxWidth: 220) }.controlSize(.large).disabled(checking)
         if #available(iOS 26.0, *) { button.buttonStyle(.glassProminent) } else { button.buttonStyle(.borderedProminent) }
         if checking {
             VStack(spacing: 6) {
@@ -231,25 +238,22 @@ private struct LauncherView: View {
 // Shows the launcher over the root view controller and calls done once the settings are in the environment; false (done is not called) when there is no launcher
 @_cdecl("dm_show_launcher")
 public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @convention(c) () -> Void) -> Bool {
-    // a game of several programs (main.m): the running program's settings, in its dm/p<N>
-    let dir = getenv("DM_APP_DM").map { URL(fileURLWithPath: String(cString: $0)) } ?? Bundle.main.resourceURL?.appendingPathComponent("dm")
-    guard let url = dir?.appendingPathComponent("launcher.json"), let data = try? Data(contentsOf: url) else { return false }
-    guard let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else { fputs("[RED] launcher: dm/launcher.json cannot be read; starting the game\n", stderr); return false }
-    let model = LauncherModel(file.settings)
+    let settings = SettingsFile.bundledSettings()
+    guard !settings.isEmpty || dm_users_count() > 1 || dm_users_can_edit() != 0 || LocalSaveFolder.fixed == nil else { return false }
+    let model = LauncherModel(settings)
     gameMenuModel = model   // the in-game menu shows and saves the same choices (GameMenu.swift)
     if ProcessInfo.processInfo.environment["DM_LAUNCHER"] == "0" { fputs("launcher: off (DM_LAUNCHER=0)\n", stderr); model.applySaved(); return false }
     let parent = Unmanaged<UIViewController>.fromOpaque(viewController).takeUnretainedValue()
     var host: UIViewController?
     let view = LauncherView(m: model) {
-        guard let h = host else { return }
+        guard let h = host, model.apply() else { return }
         host = nil
-        model.apply()
         h.dismiss(animated: false) { done() }
     }
     let h = DmHostingController(rootView: view)
     h.modalPresentationStyle = .fullScreen
     host = h
     parent.present(h, animated: false)
-    fputs("launcher: \(file.settings.count) settings shown\n", stderr)
+    fputs("launcher: \(settings.count) settings shown\n", stderr)
     return true
 }

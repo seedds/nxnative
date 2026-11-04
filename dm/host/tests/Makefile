@@ -12,6 +12,8 @@ QUIET = $(if $(findstring -fsanitize,$(SAN)),,2>/dev/null)
 GINC = $(if $(strip $(GAME)),-I../gen/$(GAME) -I../../games/$(GAME),$(error GAME is not set: make GAME=<base game title ID>: $(shell python3 ../../games/game.py list | awk -F'\t' '{printf "%s (%s)  ", $$1, $$3}')))
 $(B)/t_fs $(B)/t_fs_case $(B)/t_fs_commit_list $(B)/t_fs_commit_list_tsan: ../romfs_image.h
 GAME_H = ../gen/$(GAME)/game_profile.h
+LOCAL_USERS = ../local_users.m -fobjc-arc -framework Foundation
+$(B)/t_fs $(B)/t_fs_directory $(B)/t_fs_commit_list $(B)/t_fs_commit_list_tsan $(B)/t_fs_case $(B)/t_save_sync: ../local_users.h ../local_users.m
 run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t_fs $(B)/t_fs_commit_list $(B)/t_thread_leak $(B)/t_fs_case $(B)/t_audio $(B)/t_output_stream $(B)/t_audio_spsc $(B)/t_swkbd $(B)/t_altstack $(B)/t_condvar $(B)/t_condvar_old $(B)/t_pollwait $(B)/t_clockwait $(B)/t_pause $(B)/t_pause_stress $(B)/t_pctl $(B)/t_sf $(B)/t_time $(B)/t_shared_font $(B)/t_vorbis $(B)/t_vorbis_divides $(B)/t_hid $(B)/t_haptics $(B)/t_haptics_apple $(B)/t_cheats $(B)/t_pad_hid $(B)/t_switch2
 	$(B)/t_language
 	$(B)/t_heap_size
@@ -134,27 +136,36 @@ $(B)/t_gesture: t_gesture.c ../hle_touch.c ../front.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_gesture.c ../hle_touch.c
 $(B)/t_thread_leak: t_thread_leak.c ../thread.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_thread_leak.c
+run: local-users
+.PHONY: local-users
+local-users: $(B)/t_local_accounts $(B)/t_local_saves
+	$(B)/t_local_accounts
+	TMPDIR="$(abspath $(B))" $(B)/t_local_saves
+$(B)/t_local_accounts: t_local_accounts.c ../hle_account.c ../local_users.h ../local_users.m ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_local_accounts.c $(LOCAL_USERS)
+$(B)/t_local_saves: t_local_saves.c t_fs_stub.c ../hle_fs.c ../romfs_image.h ../save_sync.c ../save_sync.h ../local_users.m ../local_users.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_local_saves.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c $(LOCAL_USERS)
 $(B)/t_fs: t_fs.c t_fs_stub.c ../hle_fs.c ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_fs.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
+	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_fs.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c $(LOCAL_USERS)
 # Inject only the folder handle allocation; directory I/O remains real.
 $(B)/t_fs_directory: t_fs_directory.c t_fs_stub.c ../hle_fs.c ../romfs_image.h ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_fs_directory.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_fs_directory.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c $(LOCAL_USERS)
 .PHONY: fs-directory
 fs-directory: $(B)/t_fs_directory
 	TMPDIR="$(abspath $(B))" $(B)/t_fs_directory
 run: fs-directory
 $(B)/t_fs_commit_list: t_fs_commit_list.c t_fs_stub.c ../hle_fs.c ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_fs_commit_list.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
+	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_fs_commit_list.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c $(LOCAL_USERS)
 $(B)/t_fs_commit_list_tsan: t_fs_commit_list.c t_fs_stub.c ../hle_fs.c ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -fsanitize=thread -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_fs_commit_list.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
+	$(CLANG) -O1 -g -fsanitize=thread -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_fs_commit_list.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c $(LOCAL_USERS)
 .PHONY: fs-tsan
 fs-tsan: $(B)/t_fs_commit_list_tsan
 	TMPDIR="$(abspath $(B))" $(B)/t_fs_commit_list_tsan
 $(B)/t_fs_case: t_fs_case.c ../hle_fs.c ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_fs_case.c ../hle_bigstack.c ../save_sync.c
+	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_fs_case.c ../hle_bigstack.c ../save_sync.c $(LOCAL_USERS)
 run: $(B)/t_save_sync $(B)/t_save_sync_metadata
 $(B)/t_save_sync: t_save_sync.c t_fs_stub.c ../hle_fs.c ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_save_sync.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
+	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_save_sync.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c $(LOCAL_USERS)
 $(B)/t_save_sync_metadata: t_save_sync_metadata.c ../save_sync.c ../save_sync.h | $(B)
 	$(CLANG) -O1 -Wall -Wno-unused-function -I.. -o $@ t_save_sync_metadata.c
 .PHONY: save-sync

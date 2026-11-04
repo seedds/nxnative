@@ -88,16 +88,19 @@ def min_os(host):   # the host's deployment target (LC_BUILD_VERSION minos): the
 
 
 def swift_sources():   # the settings window, with the iOS launcher's model, rows and cloud-save report
-    return [HERE / 'Launcher.swift', HERE.parent / 'ios/Sources/LauncherSettings.swift', HERE.parent / 'ios/Sources/LauncherRow.swift', HERE.parent / 'ios/Sources/SaveSyncReport.swift']
+    return [HERE / 'Launcher.swift', HERE.parent / 'ios/Sources/LauncherSettings.swift', HERE.parent / 'ios/Sources/LauncherRow.swift', HERE.parent / 'ios/Sources/SaveSyncReport.swift', HERE.parent / 'ios/Sources/LocalSaveFolder.swift']
 
 
-def build_launcher(out, minos, clang, swiftc, sdk):   # launcher.c's main and the host's cloud-save code (its send after the host exits), linked by swiftc with the settings window (no Swift main: -parse-as-library)
+def build_launcher(out, minos, clang, swiftc, sdk):   # the C entry point and shared host code, linked with the Swift settings window
     with tempfile.TemporaryDirectory(dir=out.parents[3]) as t:
-        objs = [Path(t) / 'launcher.o', Path(t) / 'save_sync.o']
-        for obj, src in zip(objs, (HERE / 'launcher.c', HERE.parent / 'host/save_sync.c')):
-            run([clang, '-isysroot', sdk, '-arch', 'arm64', f'-mmacosx-version-min={minos}', '-O2', '-Wall', '-I', HERE.parent / 'host', '-c', '-o', obj, src])
+        host = HERE.parent / 'host'
+        objs = []
+        for src in (HERE / 'launcher.c', host / 'save_sync.c', host / 'local_users.m', host / 'local_save_root.m'):
+            obj = Path(t) / (src.stem + '.o'); objs.append(obj)
+            arc = ['-fobjc-arc'] if src.suffix == '.m' else []
+            run([clang, '-isysroot', sdk, '-arch', 'arm64', f'-mmacosx-version-min={minos}', '-O2', '-Wall', *arc, '-I', host, '-c', '-o', obj, src])
         run([swiftc, '-sdk', sdk, '-target', f'arm64-apple-macos{minos}', '-O', '-swift-version', '5', '-parse-as-library', '-module-cache-path', Path(t) / 'module-cache',
-             '-o', out, *swift_sources(), *objs, '-framework', 'CoreFoundation', '-framework', 'AppKit', '-framework', 'SwiftUI'])
+             '-import-objc-header', host / 'local_users.h', '-o', out, *swift_sources(), *objs, '-framework', 'Foundation', '-framework', 'CoreFoundation', '-framework', 'AppKit', '-framework', 'SwiftUI'])
 
 
 def make_icns(jpg, out):   # the game's icon (256x256 JPEG) at every size an .icns holds
@@ -287,7 +290,9 @@ def pack(a):
         if not codesign: raise SystemExit('codesign is not available')
         codesign = Path(codesign).resolve()
         minos = min_os(a.host)
-        sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'tools/romfs.py'] + swift_sources()
+        sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'tools/romfs.py'] + swift_sources()
+        sources.append(HERE.parent / 'ios/Sources/LocalSaveFolder.h')
+        sources += [HERE.parent / 'host' / n for n in ('romfs_image.h', 'save_sync.c', 'save_sync.h', 'local_users.m', 'local_users.h', 'local_save_root.m')]
         inputs = {'options': vars(a), 'files': [(str(p), p.stat().st_mode, digest(p), os.readlink(p) if p.is_symlink() else None) for p in files + sources],
                   'trees': [(p, inventory(Path(p))) for p in (a.romfs, a.aoc, a.html, *(str(x[1]) for x in programs), *(str(x[3]) for x in programs)) if p and Path(p).exists()],
                   'tools': [[str(c), c.stat().st_mode, c.stat().st_size, c.stat().st_mtime_ns, c.stat().st_ctime_ns, run([c, '--version']).strip()] for c in (clang, swiftc)] + [

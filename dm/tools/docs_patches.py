@@ -202,6 +202,8 @@ def host_rows(builds):   # {build ID: [(file, line, what)]}: rows and checks of 
             m = re.search(r'\b(k_\w+)\s*\[\]\s*=', line)
             if m: table = m.group(1)
             if line.lstrip().startswith('}'): table = None
+            # The original console account ID has the same text width as a build ID.
+            if line.startswith('#define DM_LEGACY_USER_ID '): continue
             for m in re.finditer(r'"([0-9a-f]{32})"', line):
                 strings = re.findall(r'"([^"]*)"', line)
                 what = TABLES.get(table, table) if table else 'build check'

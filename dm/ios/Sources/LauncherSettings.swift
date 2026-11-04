@@ -32,13 +32,70 @@ struct Setting: Decodable, Identifiable {
     }
     enum CodingKeys: String, CodingKey { case env, kind, label, note, def = "default", section, needs, level, base, options, min, max, step, on, off }
 }
-struct SettingsFile: Decodable { let settings: [Setting] }
+struct SettingsFile: Decodable {
+    let settings: [Setting]
+
+    static func bundledSettings() -> [Setting] {
+        // Multi-program apps load the running program's settings from its dm/p<N>.
+        let dir = getenv("DM_APP_DM").map { URL(fileURLWithPath: String(cString: $0)) } ?? Bundle.main.resourceURL?.appendingPathComponent("dm")
+        guard let url = dir?.appendingPathComponent("launcher.json"), let data = try? Data(contentsOf: url) else { return [] }
+        guard let file = try? JSONDecoder().decode(Self.self, from: data) else {
+            fputs("[RED] launcher: dm/launcher.json cannot be read\n", stderr)
+            return []
+        }
+        return file.settings
+    }
+}
+
+struct LauncherUser: Identifiable {
+    let id, nickname, label: String
+    let index: Int32
+
+    static func read() -> [LauncherUser] {
+        let users = (0..<dm_users_count()).map {
+            (name: String(cString: dm_users_nickname_at($0)), id: String(cString: dm_users_id_at($0)))
+        }
+        return users.enumerated().map { index, user in
+            let peers = users.filter { $0.name == user.name && $0.id != user.id }
+            var label = user.name
+            if !peers.isEmpty {
+                let suffix = user.id.suffix(8), short = "\(user.name) · \(suffix)"
+                let ambiguous = peers.contains { $0.id.suffix(8) == suffix } || users.contains { $0.name == short }
+                label = ambiguous ? "\(user.name) · \(user.id)" : short
+            }
+            return LauncherUser(id: user.id, nickname: user.name, label: label, index: Int32(index))
+        }
+    }
+}
 
 final class LauncherModel: ObservableObject {
     let settings: [Setting]
     let fixed: Set<String>      // set by an env file or by the launch environment: shown, not changed
     let fromLaunch: Set<String>   // of those, the ones the launch environment set (a front end's launch overrides, Xcode; DM_ENV_LAUNCH_KEYS from launcher.c or main.m)
     let ignoreSaved: Bool   // DM_SAVED_CHOICES=0: start from the defaults, and leave the saved choices as they are
+    @Published private(set) var users = LauncherUser.read()
+    let userLocked = dm_users_selection_locked() != 0
+    @Published var selectedUser = dm_users_selected_index()
+    var pickedUser: LauncherUser? { users.first { $0.index == selectedUser } }
+    var personalSaveIsLocal: Bool { pickedUser.map { $0.id != DM_LEGACY_USER_ID } ?? false }
+    var canEditUsers: Bool { dm_users_can_edit() != 0 }
+    var canCreateUser: Bool { canEditUsers && users.count < Int(DM_MAX_LOCAL_USERS) }
+
+    static func nicknameProblem(_ name: String) -> String? {
+        if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Enter a nickname." }
+        if name.utf8.count > 32 { return "Use a nickname of 32 UTF-8 bytes or fewer." }
+        if name.rangeOfCharacter(from: .controlCharacters) != nil { return "Remove line breaks and control characters from the nickname." }
+        return nil
+    }
+
+    func editUser(renameID: String?, nickname: String) -> String? {
+        if let problem = Self.nicknameProblem(nickname) { return problem }
+        if let id = renameID, !users.contains(where: { $0.id == id }) { return "Choose a user from the list to rename." }
+        if let problem = dm_users_edit(renameID, nickname) { return String(cString: problem) }
+        users = LauncherUser.read()
+        selectedUser = dm_users_selected_index()
+        return nil
+    }
     @Published var values: [String: String] = [:]
 
     private let defaults: UserDefaults
@@ -95,13 +152,18 @@ final class LauncherModel: ObservableObject {
 
     // Before the game starts: every setting not set by an env file goes into the environment (DM_LANG replaces the packed language main.m set as a default). Only a choice that
     // differs from the game's default is stored: a setting the player left at its default follows the defaults of a later build (the settings it was tested with)
-    func apply() {
+    @discardableResult func apply() -> Bool {
+        if !userLocked && selectedUser != dm_users_selected_index() && dm_users_select_index(selectedUser) == 0 {
+            fputs("[RED] launcher: could not select the local user\n", stderr)
+            return false
+        }
         for s in settings {
             let v = values[s.env] ?? s.def
             if fixed.contains(s.env) { fputs("launcher: \(s.env) kept at \(v) (\(fromLaunch.contains(s.env) ? "launch environment" : "env file"))\n", stderr); continue }
             store(s, v)
             setenv(s.env, v, 1); fputs("launcher: \(s.env)=\(v)\(s.isDefault(v) ? "" : " (changed)")\n", stderr)
         }
+        return true
     }
     private func store(_ s: Setting, _ v: String) {
         if !ignoreSaved { if s.isDefault(v) { defaults.removeObject(forKey: "launcher." + s.env) } else { defaults.set(v, forKey: "launcher." + s.env) } }

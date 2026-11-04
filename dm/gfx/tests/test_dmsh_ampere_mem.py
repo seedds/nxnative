@@ -43,6 +43,31 @@ class Suatom(Translated):
         self.assertRegex(msl, r'uint \w+ = [^;]*atomic_fetch_add')
 
 
+class HandleForms(Translated):
+    """Unreal's NVN2 forms (Yoshi and the Mysterious Book): gathers and gradients with the handle in a uniform register, surface atomics with the handle in the game's uniform slot (bank 3)."""
+
+    def test_tld4_uniform_handle_decodes(self):   # the game's encoding, at UR4. Nothing here gives the handle a source, so the translator drops the read: this checks the decoding (a refusal fails translate)
+        self.translate(inst(0x000f4200081e0f06, 0x3000040403047f63) + inst(*EXIT))
+
+    def test_sured_max_in_bank_3(self):
+        msl = self.translate(inst(0x000fe2000110e000, 0x60c000000504759f) + inst(*EXIT))
+        self.assertIn('atomic_fetch_max', msl); self.assertIn('cp_i_cb3_0_r32ui', msl)
+
+    def test_suatom_in_bank_3(self):
+        msl = self.translate(inst(0x002ea200001ee000, 0x20c000050c0c7593) + inst(*EXIT))
+        self.assertIn('atomic_fetch_add', msl); self.assertIn('cp_i_cb3_', msl)
+
+
+class DeferredGuarded(Translated):
+    """A guarded instruction with a write barrier whose guard is false writes nothing, so what follows it stays: Unreal's light attenuation, @P4 R12 = EXP2(R32) with a barrier, then
+    @!P4 R12 = R29 * R29 (Yoshi and the Mysterious Book's bytes, R23 there). P4 reads false here, which folds the first away; a landing without a guard put R12's old value over the second"""
+
+    def test_later_write_survives(self):
+        wait_for_barrier_3 = (SUATOM[0] & ~(0x7f << 52)) | (1 << (52 + 3))
+        msl = self.translate(inst(0x000ee20000000800, 0x00000020000c4308) + inst(0x000fe20000410000, 0x0000001d1d0cc220) + inst(wait_for_barrier_3, SUATOM[1]) + inst(*EXIT))
+        self.assertIn('spvFMul', msl)
+
+
 class MufuF16(Translated):
     """MUFU.F16 (Splatoon Raiders' upscaler network): the source is the half bits 60..61 select (bit 62 its abs, as in every B slot), the result the low half"""
     LOG2_HIGH = (0x000fe60000000e00, 0x5000000c000c7308)   # MUFU.F16.LOG2 R12, |R12.H1|: the game's encoding (c1b8edc09e3313b1 +0x5970) on the register the atomic reads

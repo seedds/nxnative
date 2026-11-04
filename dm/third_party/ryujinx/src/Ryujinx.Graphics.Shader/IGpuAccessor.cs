@@ -455,7 +455,8 @@ namespace Ryujinx.Graphics.Shader
         /// because the texture type query did not say it is a texture buffer.
         /// </summary>
         /// <param name="handle">Texture handle</param>
-        void RecordTexelFetch1D(int handle)
+        /// <param name="cbufSlot">Constant buffer slot for the texture handle</param>
+        void RecordTexelFetch1D(int handle, int cbufSlot = -1)
         {
         }
 

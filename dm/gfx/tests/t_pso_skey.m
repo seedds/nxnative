@@ -33,9 +33,20 @@ int main(void) {
         NvShader *vs = [NvShader new]; snprintf(vs->key, sizeof vs->key, "vs-a");
         pso_skey a, b; char hex[sizeof a * 2 + 1];
         pso_skey_from(&k, vs, nil, 0, NULL, &a); pso_skey_hex(&a, hex);
-        size_t old = strlen(hex) - 2 * (sizeof k.atest + sizeof k.logic); hex[old] = 0;
+        size_t old = strlen(hex) - 2 * (sizeof k.attr_hi + sizeof k.atest + sizeof k.logic); hex[old] = 0;
         assert(pso_skey_parse(hex, &b) == 0); assert(b.k.atest == 0 && b.k.logic == 0);
-        a.k.atest = a.k.logic = 0; assert(memcmp(&a, &b, sizeof a) == 0);
+        a.k.atest = a.k.logic = 0; memset(a.k.attr_hi, 0, sizeof a.k.attr_hi); assert(memcmp(&a, &b, sizeof a) == 0);
+    }
+    // A prewarm row from before pso_key.attr_hi (attributes 0-15 only): it keeps its fields and reads as attributes 16-31 unused; no other length is taken
+    {
+        pso_key k; fill(&k, 11); pso_key_norm(&k, 0);
+        NvShader *vs = [NvShader new]; snprintf(vs->key, sizeof vs->key, "vs-h");
+        pso_skey a, b; char hex[sizeof a * 2 + 1];
+        pso_skey_from(&k, vs, nil, 0, NULL, &a); pso_skey_hex(&a, hex);
+        assert(pso_attr(&a.k, 16).offset == a.k.attr_hi[0].offset && pso_attr(&a.k, 3).offset == a.k.attr[3].offset);
+        size_t no_hi = strlen(hex) - 2 * sizeof k.attr_hi; hex[no_hi] = 0;
+        assert(pso_skey_parse(hex, &b) == 0); memset(a.k.attr_hi, 0, sizeof a.k.attr_hi); assert(memcmp(&a, &b, sizeof a) == 0);
+        hex[no_hi - 2] = 0; assert(pso_skey_parse(hex, &b) == -1);
     }
     // pso_key_norm: blend factors of a target that does not blend, and the mask / blend bit of a target a normal pass lacks, are not part of the key; a merged pass keeps
     // the mask and blend bits (they index logical targets through lmap)

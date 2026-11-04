@@ -235,4 +235,63 @@ class IoStore(unittest.TestCase):
         self.assertEqual(seen, [(raw, '/Game.utoc#Game/M_A.uasset')])
 
 
+def nvn2_record(code=b'\x01' * 0x100, stage=0):
+    ctl = bytearray(0xe0); ctl[:8] = b'\x34\x12\x76\x98\xc9\0\0\0'
+    struct.pack_into('<I', ctl, 0x30, len(ctl)); struct.pack_into('<I', ctl, 0x44, len(code)); ctl[0x56] = stage
+    return bytes(0x100) + struct.pack('<I', len(code)) + code + struct.pack('<I', len(ctl)) + bytes(ctl) + bytes(12)
+
+
+class FakeStream:   # entries as an Oodle stream's first bytes + an index, and a decoder that gives back the record of that index
+    def __init__(self, *records): self.records, self.calls = records, 0
+    def entry(self, k, freq): return self.frame(b'\x8c\x0a' + bytes([k]) * 30, len(self.records[k]), freq)
+    @staticmethod
+    def frame(stored, raw, freq): return struct.pack('<i', len(stored)) + stored + struct.pack('<iB', raw, freq)
+    def __call__(self, comp, n):
+        self.calls += 1
+        return self.records[comp[2]]
+
+
+def resource_map(*entries):
+    return struct.pack('<i', len(entries)) + bytes(20) * len(entries) + struct.pack('<i', len(entries)) + b''.join(entries)
+
+
+class ShaderResourceMaps(unittest.TestCase):
+    def test_export_bundles_follow_the_toc_version(self):
+        t = uepak.Toc.__new__(uepak.Toc)
+        t.ids = [chunk_id(1, 1), chunk_id(2, 2)]
+        t.version = 3; self.assertEqual(t.export_bundles(), [1])
+        t.version = 6; self.assertEqual(t.export_bundles(), [0])
+
+    def test_nvn2_record(self):
+        ctl, code = uepak.nvn2_record(nvn2_record())
+        self.assertEqual((len(ctl), code), (0xe0, b'\x01' * 0x100))
+        self.assertIsNone(uepak.nvn2_record(b'no control section here' * 8))
+
+    def test_maps_walked_with_stored_entries(self):
+        fake = FakeStream(nvn2_record(), nvn2_record(b'\x02' * 0x100))
+        stored = FakeStream.frame(nvn2_record(b'\x03' * 0x100), len(nvn2_record()), 5)
+        d = b'pad' + resource_map(fake.entry(0, 3), stored, fake.entry(1, 0)) + b'tail'
+        entries, spans = uepak.resource_maps(d, fake)
+        self.assertEqual([f for _, _, f in entries], [3, 5, 0])
+        self.assertEqual(fake.calls, 2)
+        self.assertEqual(uepak.nvn2_record(entries[1][1])[1], b'\x03' * 0x100)
+        self.assertEqual(len(spans), 1)
+
+    def test_an_oodle_lookalike_is_never_decoded(self):   # a mesh package's bytes: the head and a plausible size, but no counts in front
+        fake = FakeStream(nvn2_record())
+        d = bytes(64) + fake.entry(0, 3) + bytes(64)
+        self.assertEqual(uepak.resource_maps(d, fake), ([], []))
+        self.assertEqual(fake.calls, 0)
+
+    def test_a_map_that_does_not_fit_is_never_decoded(self):
+        fake = FakeStream(nvn2_record())
+        d = struct.pack('<i', 2) + bytes(40) + struct.pack('<i', 2) + fake.entry(0, 3)   # two entries announced, one there
+        self.assertEqual(uepak.resource_maps(d, fake), ([], []))
+        self.assertEqual(fake.calls, 0)
+
+    def test_a_control_section_outside_a_map_stops_the_split(self):
+        with patch.object(ss, 'oodle', FakeStream()), self.assertRaises(SystemExit):
+            ss.ue_nvn2_shaders(bytes(16) + nvn2_record() + bytes(16), '/x', [])
+
+
 if __name__ == '__main__': unittest.main()

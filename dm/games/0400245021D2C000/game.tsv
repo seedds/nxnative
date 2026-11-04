@@ -1,0 +1,39 @@
+# Yoshi and the Mysterious Book (Switch 2, update 1.0.2, v131072). In bring-up: reaches its title screen and opening on the Mac; 133,154 shaders, some not translated yet (README.md)
+# Unreal Engine 5.4.4 (SDK MW+EpicGames+UnrealEngine-5_4_4 in main; its NVN2 RHI), SDK 20.5.15 built for the Switch 2 (Ounce). Modules main + subsdk2 (movie) + sdk. subsdk0 (DLSS) and subsdk1 (CUDA) are not loaded: main imports nothing from them.
+# Packed from a NUP container (scripts/pack_nup.py), no base game: the update's RomFS holds every path of its base. One IoStore container, PJ045-Sage.utoc / .ucas, beside one pak.
+
+# ---- Identity ----
+title_id	0400245021D2C000
+program_id	0400245021D2C000
+
+# ---- App ----
+name	Yoshi and the Mysterious Book
+ipa	YoshiAndTheMysteriousBook.ipa
+app_category	public.app-category.games
+pad_layout	full
+
+# ---- Versions ----
+# v131072 is the update's title version; the NUP carries no NACP, 1.0.2 is what the title screen shows
+build	v131072	1.0.2	main=893c30e75521afb8b23326eb6aa0e2dc	subsdk2=2f1ad4154aecbb0c128030906af67685	sdk=820cd7d096aac448693f504400cc2375
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+modules	main subsdk2 sdk
+romfs_marker	PJ045/Content/Paks/PJ045-Sage.ucas
+zip_store	.pak:.ucas:.utoc:.mp4:.webm:.metallib
+
+# ---- Memory ----
+# The Switch 2 leaves games 9 GB of its 12 GB (Donkey Kong Bananza's figure, not measured here). The NPDM declares 20 MB of system resource, so virtual address memory is on; the rewriter gives Unreal's engine region what the alias region has room for (dm/tools/ue_region.py) and cuts its allocator (dm/tools/ue_malloc.py, layout UE 5).
+# 256 MB in front + 16 GB alias region + 256 MB stack region + heap region: Splatoon Raiders' split as a starting point, to be measured
+mem_reserve	0x550000000
+mem_alias	0x400000000
+mem_stack	0x10000000
+app_pool	0x240000000
+sys_resource	0x1400000
+
+# ---- Shader split (shader_split.py) ----
+# No shader library: the global shaders are in the pak's GlobalShaderCache-SP_GLSL_SAGE.bin, the others inline in the cooked packages of the IoStore container, each Oodle-compressed (uepak.py resource_maps).
+# Unreal combines vertex and pixel shaders per draw from its pipeline state, so every vertex shader is made to link with any pixel shader (shader_split.py separable_pairs)
+shader_groups	GlobalShaderCache=global #Engine/=engine #pj045/=game
+shader_note	Yoshi and the Mysterious Book shaders

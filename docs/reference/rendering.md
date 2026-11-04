@@ -716,6 +716,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** short float32 vectors use the existing float shadow input, or CPU expansion with float `(0,0,0,1)` defaults when shadows are unavailable or disabled. Float4 keeps direct reinterpretation. `t_float_pad` checks signed/unsigned GPU fetch, CPU fallback and Float4 controls.
 - **Found on:** [Xenoblade Chronicles: Definitive Edition](../../dm/games/0100FF500E34A000/README.md) (the game profile is a separate, pending contribution).
 
+### More than 16 vertex attributes
+
+- **Symptom:** `[RED] BindVertexAttribState n=17`, thousands of times a run.
+- **Cause:** the host took at most 16 attributes and dropped the whole state over that, so the draws that followed read the attributes bound before. Unreal binds 17, and the shaders do read the last: 9,802 of Yoshi and the Mysterious Book's 45,614 vertex shaders read attribute 16 by their headers.
+- **Fix:** the host keeps 32 attributes, as the headers can name; NVN's streams stay 16. `pso_key` holds attributes 16-31 in `attr_hi`, after its other fields, so a prewarm row from before them keeps its layout and reads as those attributes unused. The pulling and shadow-input libraries still refuse a shader with an input at 16 or above (`dmsh_pull.py`, `dmsh_vin.py`), and such a shader goes through the vertex descriptor.
+- **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): stream 6, offset 0, format `0x0b`.
+- **Check:** `t_pso_skey` for the key; the red line is gone in a headless run of the game.
+
 ### CPU conversion of vertex attributes the input type cannot take
 
 - **Symptom:** `Vertex attribute m_36(5) of type uint4 cannot be read using MTLAttributeFormatHalf2` (draws dropped: black silhouettes); UVs collapse onto one texel (flat tan characters); vertices far out of view (negative 16-bit values widened with zeros).

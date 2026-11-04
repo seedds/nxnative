@@ -29,6 +29,14 @@ int main(void) { @autoreleasepool {
             @{@"kind": @"img", @"reg": @3, @"arg_id": @1, @"msl_name": @"cp_i_cb2_4E_r32ui", @"msl_type": @"texture3d<uint, access::write>"}]};
         check("atomic image: conversion succeeds", 0, nvn_refl_from_json(j, &r, err, sizeof err));
         check("atomic image: IMG kind", NVN_RB_IMG, r.b[0].kind);
+        // an image whose handle is in uniform slot 0, byte 8: the kind, its offset and its access, and it counts as bindless
+        NSDictionary *ju = @{@"route": @"B", @"bindings": @[@{@"kind": @"img_ubo", @"reg": @0, @"off": @8, @"arg_id": @0, @"msl_name": @"cp_i_cb3_2_r32ui", @"msl_type": @"texture2d<uint, access::read_write>", @"atomic": @YES}]};
+        nvn_refl ru; check("image in a uniform buffer: conversion succeeds", 0, nvn_refl_from_json(ju, &ru, err, sizeof err));
+        check("image in a uniform buffer: kind", NVN_RB_IMGU, ru.b[0].kind); check("image in a uniform buffer: offset", 8, ru.b[0].off); check("image in a uniform buffer: atomic", 1, ru.b[0].atom); check("image in a uniform buffer: bindless", 1, ru.bindless);
+        // a type 1 handle's other word, and a texture read by 1D fetches through a uniform handle
+        NSDictionary *jo = @{@"route": @"B", @"bindings": @[@{@"kind": @"tex_ubo", @"reg": @3, @"off": @16, @"arg_id": @0, @"msl_name": @"fp_t_cb3_10", @"msl_type": @"texture2d<float>", @"other": @[@0, @36], @"fetch1d": @YES}]};
+        nvn_refl ro; check("type 1 handle: conversion succeeds", 0, nvn_refl_from_json(jo, &ro, err, sizeof err));
+        check("type 1 handle: other word's slot", 0, ro.b[0].reg2); check("type 1 handle: other word's offset + 1", 37, ro.b[0].off2); check("texture in a uniform buffer: 1D fetches", 1, ro.b[0].f1d);
         check("atomic image: texture type", MTLTextureTypeTextureBuffer, r.b[0].dtt);
         check("atomic image: unsigned format", NVN_DPF_UINT, r.b[0].dpf);
         check("atomic image: written", 1, r.b[0].rw);

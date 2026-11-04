@@ -45,8 +45,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0xf60, InstName.Tex, ATex, InstProps.Tex);
             x(0xb66, InstName.Tld, ATex, InstProps.Tex);
             x(0xb63, InstName.Tld4, ATex, InstProps.Tex);
+            x(0xf63, InstName.Tld4, ATex, InstProps.Tex);
+            x(0x364, InstName.Tld4, ATex, InstProps.Tex);
             x(0xb69, InstName.Tmml, ATex, InstProps.Tex);
             x(0xb6c, InstName.Txd, ATex, InstProps.Tex);
+            x(0xf6c, InstName.Txd, ATex, InstProps.Tex);
             x(0xb6f, InstName.Txq, ATxq, InstProps.Tex);
             x(0x370, InstName.Txq, ATxq, InstProps.Tex);
             x(0xb97, InstName.Suld, ASurface, N);
@@ -279,6 +282,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 }
             }
 
+            // The address is read once, before any result is written and before the zeros of the predicated form: the destination may hold the address register
+            // (LDG.128 R0, [R1 + UR4], when P6 in Unreal's GPU scene reads, Yoshi and the Mysterious Book: zeroing first made every instance read the buffer's first element)
+            (Operand[] los, Operand[] his) = (new Operand[count], new Operand[count]);
+
+            for (int index = 0; index < count; index++)
+            {
+                (los[index], his[index]) = AGlobalAddress(context, x, 90, 32, index * 4);
+            }
+
             Operand lblSkip = null;
 
             if (pred != null)
@@ -290,14 +302,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                 lblSkip = Label();
                 context.BranchIfFalse(lblSkip, pred);
-            }
-
-            // The address is read once, before any result is written (the destination may be the address register: LDG.128 R0, [R0.64])
-            (Operand[] los, Operand[] his) = (new Operand[count], new Operand[count]);
-
-            for (int index = 0; index < count; index++)
-            {
-                (los[index], his[index]) = AGlobalAddress(context, x, 90, 32, index * 4);
             }
 
             for (int index = 0; index < count; index++)
@@ -484,45 +488,38 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
         // SURED [Ra], Rb (0x59f): an image reduction through a handle, laid out as SUATOM with no result: the coordinates from Ra, the value in Rb, the handle at 40..59, the dimension
         // at 61..64, the size at 73..76 and the operation at 87..91 (Eglantine's lowering to Maxwell names the fields). Mario Kart World's compute shader adds 1 at (R4, R5) of a 2D
-        // image; its word 2 is SUATOM's in Donkey Kong Bananza's encoding less the predicate result. Only that form has been seen, so another is refused
+        // image; its word 2 is SUATOM's in Donkey Kong Bananza's encoding less the predicate result. Yoshi and the Mysterious Book takes MIN, MAX and OR too, its handles in bank 3 with every image
+        // (the game's own uniform slot 0). Word 2 is otherwise fixed, and another form is refused; a 64-bit size stops in EmitSured
         public static void ASured(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
 
-            if (x.Bits(64, 96) != 0x0010e000 || x.Bits(59, 61) != 0)
+            RedOp operation = (RedOp)x.Bits(87, 91);
+
+            if ((x.Bits(64, 96) & ~((0xf << 23) | (0x7 << 9))) != 0x0010e000 || x.Bits(59, 61) != 0 || operation is not (RedOp.Add or RedOp.Min or RedOp.Max or RedOp.Or))
             {
                 throw AFail(context, $"SURED form {x.Bits(64, 96):x8}");
             }
 
             (int handle, int cbufSlot) = ATexHandle(context, x);
 
-            if (cbufSlot != TextureOperation.DefaultCbufSlot)
-            {
-                throw AFail(context, $"SURED handle in bank {cbufSlot}");
-            }
-
-            EmitSured(context, (SuDim)x.Bits(61, 64), 0, RedOp.Add, SuatomSize.U32, handle, x.Ra, x.Rb, 0, false, isBindless: false);
+            EmitSured(context, (SuDim)x.Bits(61, 64), 0, operation, (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, 0, false, isBindless: false, cbufSlot);
         }
 
         // SUATOM Rd, [Ra], Rb (0x593): an atomic on an image through a handle, laid out as SUST's (handle 40..59, dimension 61..64) and as ATOMG's (operation
         // 87..91, size 73..76, Pu 81..83). Donkey Kong Bananza's append compute shaders take a counter with it (SUATOM.ADD.U32 on a 1D image, the old value
-        // shuffled to the warp) before their SUST. Another handle bank or a predicate result is not met in a game: refused.
+        // shuffled to the warp) before their SUST. A predicate result is not met in a game: refused.
         public static void ASuatom(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
             (int handle, int cbufSlot) = ATexHandle(context, x);
-
-            if (cbufSlot != TextureOperation.DefaultCbufSlot)
-            {
-                throw AFail(context, $"SUATOM handle in bank {cbufSlot}");
-            }
 
             if (x.Bits(81, 84) != 7)
             {
                 throw AFail(context, "SUATOM with a predicate result");
             }
 
-            EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, (SuatomOp)x.Bits(87, 91), (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, 0, x.Rd, false, isBindless: false, compareAndSwap: false);
+            EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, (SuatomOp)x.Bits(87, 91), (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, 0, x.Rd, false, isBindless: false, compareAndSwap: false, cbufSlot: cbufSlot);
         }
 
         // BAR.SYNC: the workgroup barrier
@@ -655,10 +652,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
             // handle from there, as for Maxwell's TEX.B. The other fields are 0xb60's. 0xf60: a uniform register at 40..46. 0x361 (bit 59 set): a register, the first of the second source block,
             // before the LOD (a census of Fire Emblem Fortune's Weave's 3,327: of the sources that an LDC just wrote, always that place, with and without .SCR). Rc stays the second destination in both
             Operand boundHandle = null;
-            bool handleInB = opcode == 0x361;
-            bool bindless = handleInB || opcode == 0xf60;
+            // 0xf63 and 0xf6c are 0xf60's form of TLD4 and TXD, and 0x364 is 0x361's of TLD4 (Yoshi and the Mysterious Book's Unreal shaders; 0xf63's field checked against Lichii's decoder).
+            bool handleInB = opcode is 0x361 or 0x364;
+            bool handleInUr = opcode is 0xf60 or 0xf63 or 0xf6c;
+            bool bindless = handleInB || handleInUr;
 
-            if (opcode == 0xf60)
+            if (handleInUr)
             {
                 int ur = x.Bits(40, 46);
 
@@ -667,7 +666,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (bindless)
             {
-                opcode = 0xb60;
+                opcode = opcode is 0xf63 or 0x364 ? 0xb63 : opcode == 0xf6c ? 0xb6c : 0xb60;
             }
 
             TexDim dim = ATexDim(context, x.Bits(61, 64));
@@ -746,6 +745,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 int n0 = coords + (isArray || offset ? 1 : 0);
                 (List<Operand> a, List<Operand> b) = ATexBlocks(context, x, n0, 2 * coords);
 
+                if (bindless)
+                {
+                    sources.Add(boundHandle);
+                }
+
                 sources.AddRange(a.GetRange(0, coords));
 
                 if (Sample1DAs2D && (type & SamplerType.Mask) == SamplerType.Texture1D)
@@ -821,14 +825,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 {
                     bool plainFetch = opcode == 0xb66 && !isArray && lod == 1 && !offset && !ms;
 
-                    if (!plainFetch || context.TranslatorContext.GpuAccessor.QuerySamplerType(handle) != SamplerType.TextureBuffer)
+                    if (!plainFetch || context.TranslatorContext.GpuAccessor.QuerySamplerType(handle, cbufSlot) != SamplerType.TextureBuffer)
                     {
                         if (plainFetch)
                         {
                             Operand fetchX = sources[^1];
                             sources[^1] = context.BitwiseAnd(fetchX, Const(0x3FFF));
                             sources.Add(context.ShiftRightU32(fetchX, Const(14)));
-                            context.TranslatorContext.GpuAccessor.RecordTexelFetch1D(handle);
+                            context.TranslatorContext.GpuAccessor.RecordTexelFetch1D(handle, cbufSlot);
                         }
                         else
                         {

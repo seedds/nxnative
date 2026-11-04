@@ -455,6 +455,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Reader:** `uepak.py` `inline_shaders` also takes the global shader cache with no `.ushaderbytecode` as inline, and `shader_split.py` `ue_legacy_jobs` then also reads the export bundles of the containers beside such a pak, the newest copy of each chunk ID (`mount_order`), through the game's own Oodle in the host's tool mode. Bulk data chunks are skipped. `Toc.names` reads the container's directory index, so a shader's label names its package, as for a pak, and `shader_groups` works the same way.
 - **Found on:** [Mario & Luigi: Brothership](../../dm/games/01006D0017F7A000/README.md): 45,824 unique shaders from 8.8 GB of export bundles in 39 s.
 
+### Unreal's Switch 2 shaders inline in cooked packages
+
+- **Symptom:** the NSP script stops with `[RED] the shader split found no shaders in main or the RomFS`, after about 20 minutes at one worker on a pak holding `Engine/GlobalShaderCache-SP_GLSL_SAGE.bin`.
+- **Cause:** Unreal's Switch 2 RHI has its own shader format, `SP_GLSL_SAGE`, with no `LSLG` record, which is all the inline reader looks for. The container's chunks went unread too: `Toc.export_bundles` knew only Unreal Engine 4.27's chunk numbering, and in Unreal Engine 5's (TOC version 4 and later) a package's exports are type 1.
+- **Fix:** `uepak.resource_maps` walks each `FShaderMapResourceCode` as the engine serializes it (hashes; entries of code, raw size and frequency), anchored on a first entry that starts as an Oodle stream with the two equal counts in front of it. The whole map has to fit before anything goes to the game's decoder, as a mesh package's bytes can look like an Oodle stream. `uepak.nvn2_record` takes the code area and the NVN2 control section out of each entry: a header of about 0x100 bytes, `u32` code length, code, `u32` control length, control section, short tail. `shader_split.py` `ue_nvn2_shaders` checks each stage against the entry's frequency and stops on a control section outside every map. Of such a pak only the global shader cache is read.
+- **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md#shaders) (UE 5.4.4, TOC version 6): 133,154 shaders, split in about 50 s; every key the host asked for in the runs so far is in the map.
+- **Check:** `test_uepak_iostore.py` (`ShaderResourceMaps`).
+
 ### Unreal Engine 4.22 to 4.25 paks (version 8)
 
 - **Symptom:** `[RED] the shader split found no shaders in main or the RomFS`; the survey counts the game's Unreal paks, but no `UE shader decode` step runs and the split reads none of them.
@@ -909,6 +917,63 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** not done. The draws would need a tessellator in a compute kernel and domain shaders rewritten as plain vertex functions.
 - **Found on:** [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md): 15 hull and 18 domain shaders. Two tessellated programs (vertex `28a39709d0adfcfa` / hull `51d2d156bb12c260` / domain `0b95742e863bec50`, and `d4d89931b5a9a514` / `8aa6feeb7d33e9f6` / `f254b4dce2d6c012`) draw twice a frame for about 30 frames, in the title scene behind the file select as it slides out before a new game. [Bayonetta 3](../../dm/games/01004A4010FEA000/README.md): two domain shaders do not build (`DS_Vanish05_*.dso`: `SPIRV-Cross threw an exception: Subgroup builtins are not available in this type of function`); the one-lane rewrite (`spv_single_lane`, [Subgroup operations rewritten for a one-lane subgroup](#subgroup-operations-rewritten-for-a-one-lane-subgroup)) covers vertex shaders only, and tessellated draws are skipped anyway.
 - **Note:** the vertex shaders that feed a hull or geometry shader can be found from the shader headers (SPH): the generic attribute map at +0x18 of the consumer's header (inputs) equals the one at +0x36 of the vertex shader's (outputs). In Luigi's Mansion 3, 40 vertex shaders match a hull shader and 49 a geometry shader.
+
+### Unreal's Ampere resource forms: handles in the game's uniform slot
+
+- **Symptom:** a Switch 2 Unreal Engine game whose shaders fail with `Ampere instruction f63 ... is not implemented` (also `0x364`, `0xf6c`), or `SUATOM` / `SURED` refused with the handle in bank 3; then black passes, because such a shader's image binds nothing.
+- **Cause:** Unreal's NVN2 RHI puts its handles in the first uniform buffer the game binds (bank 3, `0x40003` in the handle), not in the driver's tables. `0xf63` (gathers), `0xf6c` and `0x364` take the handle in a uniform register; the atomics take it in that bank. The host had no binding kind for an image in a uniform buffer.
+- **Fix:** the decoders in `InstEmitAmpereMem.cs` (`ASured`, `ASuatom`, the handle forms) and `cbufSlot` in `InstEmitSurface.cs`; binding kind `img_ubo` (`DMSH_KIND_IMG_UBO`, `decode_ubo_img`, `NVN_RB_IMGU`), resolved at bind by `img_tid` in `nvn_mtl.m`. An image declared float over an integer texture gets a view of its class (`img_fit`).
+- **Open:** `SURED` on 64 bits is still refused: 12,811 shaders of the game have it (7,272 compute, 5,539 pixel), none asked for so far.
+- **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md).
+- **Check:** `test_dmsh_ampere_mem.py` (`HandleForms`), `t_refl`.
+
+### 1D fetches through a uniform handle
+
+- **Symptom:** a mesh collapsed or absent while its draws look right: vertex data read from a buffer texture comes back zero.
+- **Cause:** a 1D fetch is wrapped by the shader (`x & 0x3FFF`, `x >> 14`) as 2D rows of 16,384 texels, and the host binds such a buffer texture as those rows (`tbuf_as_2d`). The record of those fetches keyed on driver handles, so a fetch through a uniform handle left its texture bound as a plain buffer texture.
+- **Fix:** `RecordTexelFetch1D` takes the uniform slot, `fetch1d_ubo` lists those handles, and `dmsh_build.py` flags the `tex_ubo` binding `fetch1d`.
+- **Open:** `tbuf_as_2d` remakes the view at every bind (2.8 million made in one run): its cache check does not hold, cause not found. It costs time, not correctness.
+- **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): Unreal's GPU scene.
+- **Check:** `t_refl`.
+
+### A predicated LDG with its address in its destination
+
+- **Symptom:** every instance of a mesh drawn at the first instance's place.
+- **Cause:** `LDG.128 R0, [R1 + UR4]` when P zeroes its destinations when P is false. The translator wrote those zeros before it read the address, and the destinations R0..R3 hold the address register R1, so the load used a zeroed address.
+- **Fix:** `ALdg` computes every address first. There is no unit test: the translator folds the undefined registers a small program would have; the game's instance transforms are the check.
+- **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): Unreal's GPU scene reads.
+
+### Both words of a type 1 handle
+
+- **Symptom:** lighting without its G-buffer: a black scene with the interface drawn on top.
+- **Cause:** a handle of type 1 (`fp_t_cb262147_10020016`) names two words that the hardware ORs. The host read one of them, assuming the texture word comes first, and Unreal may put the texture in either.
+- **Fix:** `dmsh_build.py` records the other word (`other`), `nvn_refl` keeps it (`off2`, `reg2`), and `ubo_handle_of` in `nvn_mtl.m` ORs both for `TEXU` and `SAMPU`.
+- **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md).
+- **Check:** `t_refl`.
+
+### A guarded instruction's deferred write
+
+- **Symptom:** a light far too bright: the scene saturates to white and bloom spreads it, while skipping the light gives the right picture.
+- **Cause:** an Ampere instruction with a write barrier lands late, which `DeferAmpereWrites` models by writing a shadow and copying it to the register at the wait. Under a guard, a false guard left the shadow at the register's old value and the copy still happened, over anything written in between. Unreal's attenuation is `@P4 R23 = EXP2(R32)` then `@!P4 R23 = R29 * R29`: with P4 false the second write was lost (the compiler then removed it), and a light of colour 2,000,000 took a leftover square as its falloff.
+- **Fix:** a guarded deferred instruction sets a flag local when it runs, and its writes land only if the flag is set. A later guarded write no longer cancels an earlier pending one. A guarded instruction that ends a block no longer branches straight to the next block past a pending landing.
+- **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): spot light `d1924554ef7d2c12`, the Mr. E scene.
+- **Check:** `test_dmsh_ampere_mem.py` (`DeferredGuarded`).
+
+### A BRX table followed by a word past the code
+
+- **Symptom:** `[translation failed] ArgumentOutOfRangeException: Specified argument was out of the range of valid values.`, with `FindBrxTargetsAmpere` on the stack (`DMSH_STACK=1` in the translator).
+- **Cause:** the search for a BRX's targets ends at the first word that is no target, and tests that by an empty read. `Accessor.GetCode` threw instead when the address lay past the end of the code.
+- **Fix:** `GetCode` returns nothing past the end.
+- **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): compute shaders `23e73eaf528c9c0b`, `bdc969d0aeb4afc2`.
+- **Check:** `test_dmsh_control_flow.py` (`test_word_past_the_code_ends_the_table`).
+
+### Layer entry points of a vertex shader whose body is a function
+
+- **Symptom:** in a build log, `<key>.metal: does not compile` with `no member named 'gl_PointSize' in 'main0l_out'`; at run time a layered pass reaching only its first layer (`[RED] geometry shader ... has no layer entry points`, for shaders that should have them).
+- **Cause:** `vs_layer_entry` and `vs_layer` drop the point size output by deleting its assignments, but a body in a function of its own takes the output by reference (`_88(..., out.gl_PointSize, ...)`). The build then fell back to a library without the entry points, with no failure in its count.
+- **Fix:** `drop_point_size` gives such a call a local. 38 vertex shaders of 1,517 failed here.
+- **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md).
+- **Check:** `test_dmsh_geometry.py` (`PointSize`).
 
 ### Ampere shader code (Switch 2)
 

@@ -10,7 +10,11 @@ typedef struct {
     uint8_t lmap[8]; const void *fsfn;
     uint32_t atest, logic;   // atest: 1 = drawn with the alpha test, the fragment from the shader's side library <key>_bx (nvn_mtl.m atest_key); last, so a prewarm row written before it reads as 0
                              // logic: 1 = drawn with a logic operation, the fragment from the side library <key>_bx (lop_key); in what was padding (0 in older rows)
+    va_st attr_hi[16];       // attributes 16-31, here so that a prewarm row from before them (attributes 0-15 only) keeps its layout and reads as these unused
 } pso_key;
+
+static inline va_st pso_attr(const pso_key *k, int a) { return a < 16 ? k->attr[a] : k->attr_hi[a - 16]; }
+static inline void pso_attr_set(pso_key *k, int a, va_st v) { if (a < 16) k->attr[a] = v; else k->attr_hi[a - 16] = v; }
 
 typedef struct {
     uint8_t kind, fbmask;
@@ -49,9 +53,10 @@ static inline void pso_skey_hex(const pso_skey *key, char *out) {
 }
 
 static inline int pso_skey_parse(const char *hex, pso_skey *out) {
-    size_t n = sizeof *out * 2, old = n - 2 * (sizeof out->k.atest + sizeof out->k.logic);   // a row from before the alpha test field: the key without it, alpha test off
-    if (!hex || (strlen(hex) != n && strlen(hex) != old)) return -1;
-    if (strlen(hex) == old) { memset(out, 0, sizeof *out); n = old; }
+    // Rows from before a field end before it, and read as that field off: pso_key.attr_hi, and before it atest and logic
+    size_t n = sizeof *out * 2, no_hi = n - 2 * sizeof out->k.attr_hi, old = no_hi - 2 * (sizeof out->k.atest + sizeof out->k.logic), len = hex ? strlen(hex) : 0;
+    if (len != n && len != no_hi && len != old) return -1;
+    if (len != n) { memset(out, 0, sizeof *out); n = len; }
     uint8_t *p = (uint8_t *)out;
     for (size_t i = 0; i < n; i += 2) {
         int a = hex[i] >= '0' && hex[i] <= '9' ? hex[i] - '0' : hex[i] >= 'a' && hex[i] <= 'f' ? hex[i] - 'a' + 10 : hex[i] >= 'A' && hex[i] <= 'F' ? hex[i] - 'A' + 10 : -1;

@@ -337,9 +337,11 @@ namespace Ryujinx.Graphics.Shader.Translation
         // arrives, and the compiler lets later instructions that do not wait on that barrier (wait mask, bits 116..122) read the registers' old values (LDG R2,
         // [R2.64] then LDG R4, [R2.64 + 4] reads the address twice). Such an instruction's writes go to locals that start as the registers' values; they are
         // copied to the registers before the first instruction that waits on the barrier, at DEPBAR, and at the end of the block.
+        // A guarded instruction whose guard is false writes nothing: such an instruction's locals land only if it ran, which a flag local remembers. Unreal's light attenuation is
+        // @P4 R23 = EXP2(R32) (a barrier) then @!P4 R23 = R29 * R29: landing unconditionally put R23's old value over the second write, and a light's attenuation was a leftover square (Yoshi and the Mysterious Book)
         private static void EmitOpsAmpere(EmitterContext context, Block block)
         {
-            List<(Register Reg, Operand Value)>[] pending = new List<(Register, Operand)>[7];
+            List<(Register Reg, Operand Value, Operand Flag)>[] pending = new List<(Register, Operand, Operand)>[7];
             int shadows = 0;
             Stack<int> freeShadows = new();
 
@@ -347,10 +349,31 @@ namespace Ryujinx.Graphics.Shader.Translation
             {
                 if (pending[barrier] != null)
                 {
-                    foreach ((Register reg, Operand value) in pending[barrier])
+                    HashSet<int> flags = new();
+
+                    foreach ((Register reg, Operand value, Operand flag) in pending[barrier])
                     {
+                        Operand landed = flag != null ? Label() : null;
+
+                        if (flag != null)
+                        {
+                            context.BranchIfFalse(landed, context.ICompareNotEqual(flag, Const(0)));
+                            flags.Add(flag.GetRegister().Index);
+                        }
+
                         context.Copy(Register(reg), value);
+
+                        if (flag != null)
+                        {
+                            context.MarkLabel(landed);
+                        }
+
                         freeShadows.Push(value.GetRegister().Index);
+                    }
+
+                    foreach (int flag in flags)
+                    {
+                        freeShadows.Push(flag);
                     }
 
                     pending[barrier] = null;
@@ -395,15 +418,30 @@ namespace Ryujinx.Graphics.Shader.Translation
                     continue;
                 }
 
+                bool guarded = a.Pred != RegisterConsts.PredicateTrueIndex && a.Opcode != Instructions.AmpereOpcodes.Bra;
+                Operand ranFlag = null;
+
+                if (guarded && writeBarrier < 6)
+                {
+                    if (freeShadows.Count == 0 && shadows == RegisterConsts.ShadowsCount)
+                    {
+                        throw new InvalidOperationException("Ampere: more deferred register writes pending at once than shadow registers");
+                    }
+
+                    ranFlag = Register(freeShadows.Count != 0 ? freeShadows.Pop() : shadows++, RegisterType.Shadow);
+                    context.Copy(ranFlag, Const(0));
+                }
+
                 int opStart = context.OperationsCount;
 
                 Operand predSkipLbl = null;
 
-                if (a.Pred != RegisterConsts.PredicateTrueIndex && a.Opcode != Instructions.AmpereOpcodes.Bra)
+                if (guarded)
                 {
                     Operand label;
 
-                    if (opIndex == block.OpCodes.Count - 1 && block.HasNext())
+                    // Not straight to the next block while a deferred write is to land at this block's end
+                    if (opIndex == block.OpCodes.Count - 1 && block.HasNext() && ranFlag == null && !Array.Exists(pending, p => p != null && p.Count != 0))
                     {
                         label = context.GetLabel(block.Successors[0].Address);
                     }
@@ -431,6 +469,11 @@ namespace Ryujinx.Graphics.Shader.Translation
 
                 op.Emitter?.Invoke(context);
 
+                if (ranFlag != null)
+                {
+                    context.Copy(ranFlag, Const(1));
+                }
+
                 if (predSkipLbl != null)
                 {
                     context.MarkLabel(predSkipLbl);
@@ -438,7 +481,7 @@ namespace Ryujinx.Graphics.Shader.Translation
 
                 if (writeBarrier < 6 && !op.Props.HasFlag(InstProps.Bra))
                 {
-                    DeferAmpereWrites(context, opStart, pending, writeBarrier, ref shadows, freeShadows);
+                    DeferAmpereWrites(context, opStart, pending, writeBarrier, ref shadows, freeShadows, ranFlag);
                 }
             }
 
@@ -449,12 +492,13 @@ namespace Ryujinx.Graphics.Shader.Translation
         private static void DeferAmpereWrites(
             EmitterContext context,
             int opStart,
-            List<(Register Reg, Operand Value)>[] pendingAll,
+            List<(Register Reg, Operand Value, Operand Flag)>[] pendingAll,
             int barrier,
             ref int shadows,
-            Stack<int> freeShadows)
+            Stack<int> freeShadows,
+            Operand ranFlag)
         {
-            List<(Register Reg, Operand Value)> pending = pendingAll[barrier] ??= [];
+            List<(Register Reg, Operand Value, Operand Flag)> pending = pendingAll[barrier] ??= [];
 
             int end = context.OperationsCount;
             Dictionary<Register, Operand> locals = new();
@@ -467,7 +511,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                 {
                     Operand dest = operation.GetDest(d);
 
-                    if (dest != null && dest.Type == OperandType.Register && !locals.ContainsKey(dest.GetRegister()))
+                    if (dest != null && dest != ranFlag && dest.Type == OperandType.Register && !locals.ContainsKey(dest.GetRegister()))
                     {
                         if (freeShadows.Count == 0 && shadows == RegisterConsts.ShadowsCount)
                         {
@@ -481,6 +525,11 @@ namespace Ryujinx.Graphics.Shader.Translation
 
             if (locals.Count == 0)
             {
+                if (ranFlag != null)
+                {
+                    freeShadows.Push(ranFlag.GetRegister().Index);
+                }
+
                 return;
             }
 
@@ -515,15 +564,16 @@ namespace Ryujinx.Graphics.Shader.Translation
             {
                 context.InsertOperation(at++, new Operation(Instruction.Copy, local, Register(reg)));
 
-                // A register written again before its earlier deferred write landed: the later write wins, the earlier shadow is free
-                foreach (List<(Register Reg, Operand Value)> list in pendingAll)
+                // A register written again before its earlier deferred write landed: the later write wins and the earlier shadow is free, unless the later one's guard may turn out false.
+                // An earlier write's flag stays taken: another register of its instruction may still need it, and it is freed when the block's shadows are
+                foreach (List<(Register Reg, Operand Value, Operand Flag)> list in pendingAll)
                 {
-                    if (list == null)
+                    if (list == null || ranFlag != null)
                     {
                         continue;
                     }
 
-                    foreach ((Register r, Operand v) in list.FindAll(p => p.Reg.Equals(reg)))
+                    foreach ((Register r, Operand v, Operand _) in list.FindAll(p => p.Reg.Equals(reg)))
                     {
                         freeShadows.Push(v.GetRegister().Index);
                     }
@@ -531,7 +581,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                     list.RemoveAll(p => p.Reg.Equals(reg));
                 }
 
-                pending.Add((reg, local));
+                pending.Add((reg, local, ranFlag));
             }
         }
 

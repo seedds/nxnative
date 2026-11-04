@@ -347,6 +347,7 @@ def lz4_shaders(b, a):
 
 TOC_MAGIC, IO_SHADER_LIBRARY, IO_SHADER_CODE = b'-==--==--==--==-', 8, 9   # EIoChunkType in Unreal Engine 5 (TOC version 4 and later; 4.27 numbers its chunk types otherwise)
 IO_EXPORT_BUNDLE_427 = 2   # EIoChunkType in Unreal Engine 4.27 (TOC version 3): a cooked package's exports
+IO_EXPORT_BUNDLE_5 = 1   # EIoChunkType in Unreal Engine 5 (TOC version 4 and later): a cooked package's exports (Yoshi and the Mysterious Book, UE 5.4, TOC version 6)
 
 class Toc:
     """An IoStore container: the .utoc's chunk table and compression blocks, the data in the .ucas beside it (<name>_s<n>.ucas for partitions after the first). A chunk is a range of the
@@ -380,8 +381,9 @@ class Toc:
         """Indices of the chunks of one EIoChunkType (Unreal Engine 5 numbering: TOC version 4 and later)"""
         return [i for i, c in enumerate(self.ids) if c[11] == t] if self.version >= 4 else []
     def export_bundles(self):
-        """Indices of the cooked packages' export chunks in a container of Unreal Engine 4.27's chunk type numbering (TOC version 3 and before)"""
-        return [i for i, c in enumerate(self.ids) if c[11] == IO_EXPORT_BUNDLE_427] if self.version < 4 else []
+        """Indices of the cooked packages' export chunks, in Unreal Engine 4.27's chunk type numbering (TOC version 3 and before) or Unreal Engine 5's"""
+        kind = IO_EXPORT_BUNDLE_427 if self.version < 4 else IO_EXPORT_BUNDLE_5
+        return [i for i, c in enumerate(self.ids) if c[11] == kind]
     def ucas_paths(self):
         return [self.path[:-5] + ('.ucas' if not k else f'_s{k}.ucas') for k in range(max(self.parts, 1))]
     def names(self):
@@ -597,6 +599,44 @@ def lslg(s):
     c = k - 4 - ncode
     if c < 4 or struct.unpack_from('<I', s, c - 4)[0] != ncode or k + nctl > len(s): return None
     return s[4:6].decode('latin1'), s[k:k + nctl], s[c:c + ncode]
+
+GLOBAL_SAGE = 'GlobalShaderCache-SP_GLSL_SAGE.bin'   # the engine's global shaders in the Switch 2's shader format
+
+def nvn2_record(s):
+    """A decoded shader of Unreal's Switch 2 RHI (shader format SP_GLSL_SAGE, Yoshi and the Mysterious Book, UE 5.4): a header of about 0x100 bytes, u32 code length, the code area (Ampere code),
+    u32 control length, the NVN2 control section (+0x44 the code area's length, +0x30 its own), and a short tail. No LSLG magic. → (control section, code area), or None if the layout differs"""
+    k = s.find(b'\x34\x12\x76\x98')
+    if k < 8 or k + 0x48 > len(s) or s[k + 4:k + 8] != b'\xc9\0\0\0': return None
+    nctl, ncode = struct.unpack_from('<I', s, k + 0x30)[0], struct.unpack_from('<I', s, k + 0x44)[0]
+    c = k - 4 - ncode
+    if c < 4 or struct.unpack_from('<I', s, k - 4)[0] != nctl or struct.unpack_from('<I', s, c - 4)[0] != ncode or k + nctl > len(s): return None
+    return s[k:k + nctl], s[c:c + ncode]
+
+OODLE_HEAD = re.compile(b'\x8c[\x06\x0a\x0b\x0c]')   # the first bytes of an Oodle stream: Kraken, Mermaid, Selkie, Leviathan (this game: Mermaid, 8C 0A)
+
+def resource_maps(d, decode):
+    """The shaders of every FShaderMapResourceCode in a cooked package or a global shader cache, walked as the engine serializes it: hashes (i32 count, 20 bytes each), entries (i32 count, then for each the
+    code, i32 length and bytes, i32 raw size, u8 frequency). Found by a first entry that starts as an Oodle stream, with the two equal counts in front of it. The whole walk has to fit before anything is decoded:
+    a mesh package's bytes can start like an Oodle stream with a plausible size after them, and the game's decoder is not to be handed those. → [(entry offset, raw record, frequency)], and the (start, end) ranges walked"""
+    out, spans, at = [], [], 0
+    for m in OODLE_HEAD.finditer(d):
+        i = m.start()
+        if i < at or i < 8: continue
+        count = int.from_bytes(d[i - 8:i - 4], 'little')
+        top = i - 8 - 20 * count - 4
+        if not 1 <= count <= 1 << 20 or top < 0 or int.from_bytes(d[top:top + 4], 'little') != count: continue
+        p, ents = i - 4, []
+        for _ in range(count):
+            if p + 4 > len(d): break
+            n = int.from_bytes(d[p:p + 4], 'little')
+            if not 0 < n <= len(d) - p - 9: break
+            raw, freq = struct.unpack_from('<iB', d, p + 4 + n)
+            if raw < n or freq > 8: break
+            ents.append((p + 4, n, raw, freq)); p += 4 + n + 5
+        else:
+            out += [(a, d[a:a + n] if n == raw else decode(d[a:a + n], raw), freq) for a, n, raw, freq in ents]
+            spans.append((i - 4, p)); at = p
+    return out, spans
 
 if __name__ == '__main__':
     try:

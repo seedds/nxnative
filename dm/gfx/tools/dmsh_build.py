@@ -766,6 +766,11 @@ def decode_ubo_tex(name):
     if not 3 <= tb <= 16 or ty not in (0, 1, 3) or (ty == 1 and not 3 <= sb <= 16): return None
     return (tb - 3, o0 * 4), (('id', o1) if ty == 3 else (sb - 3, o1 * 4) if ty else (tb - 3, o0 * 4))
 
+def decode_ubo_img(name):
+    """An image whose handle the game keeps in its own uniform buffer (cp_i_cb3_2_r32ui = c[3] word 2): (uniform slot, byte offset). Unreal's NVN2 shaders hold every image this way (Yoshi and the Mysterious Book)."""
+    m = re.match(r'[a-z]+_i\w*?_cb(\d+)_([0-9A-F]+)', name)
+    return (int(m.group(1)) - 3, (int(m.group(2), 16) & 0x3fff) * 4) if m and 3 <= int(m.group(1)) <= 16 else None
+
 def c2_array(name, ty):
     """An array of handles in the driver table c2 that the shader indexes at run time (Ryujinx's texture array from a buffer, here bank 2: <stage>_t<type>_cb<slots>_<handle>, declared
     array<element, n>, one element per c2 handle word; the index is the handle's byte offset ÷ 8). Luigi's Mansion 3: 586 pixel shaders sample their shadow cascades from
@@ -852,7 +857,14 @@ def reflect(key, stage, msl, res):
             ut, us = decode_ubo_tex(nm[:-5] if nm.endswith('Smplr') else nm)
             if nm.endswith('Smplr'): e.update(kind=abi.KIND_SAMP_ID, reg=us[1]) if us[0] == 'id' else e.update(kind=abi.KIND_SAMP_UBO, reg=us[0], off=us[1])
             elif 'texture_buffer' in ty: e.update(kind=abi.KIND_UNKNOWN)   # bindless typed buffer: not implemented in the replay layer
-            else: e.update(kind=abi.KIND_TEX_UBO, reg=ut[0], off=ut[1])
+            else:
+                e.update(kind=abi.KIND_TEX_UBO, reg=ut[0], off=ut[1])
+                # as for a slot below: a 1D integer fetch read as 2D rows, its handle in a uniform buffer (Program.cs RecordTexelFetch1D; Unreal's vertex fetch on NVN2)
+                if re.search(r'_cb(\d+_[0-9A-F]+)', nm).group(1) in res.get('fetch1d_ubo', ()):
+                    e['fetch1d'] = True
+                    if re.search(r'\b%s\.get_width\(' % re.escape(nm), msl): e['fetch1d_size'] = True
+            # handle type 1: the hardware ORs the two words, and either may hold the texture (Unreal's NVN2 shaders have both orders: c[3][22] | c[3][8] with the sampler in word 22), so each binding reads both
+            if us[0] != 'id' and ut != us and 'texture_buffer' not in ty: e['other'] = list(us if not nm.endswith('Smplr') else ut)
         elif c2_array(nm, ty) is not None:   # an array of the driver table's handles (c2_array): the replay fills element k from the slot whose c2 word is at off + 8k
             off, soff = c2_array(nm, ty)   # pyright: ignore[reportGeneralTypeIssues]  (not None: tested above)
             e.update(kind=abi.KIND_SAMP_C2A if nm.endswith('Smplr') else abi.KIND_TEX_C2A, off=off, **({'soff': soff} if soff is not None else {}))
@@ -861,9 +873,10 @@ def reflect(key, stage, msl, res):
         else:
             d = decode_tex(nm)
             if not d: e.update(kind=abi.KIND_UNKNOWN)
+            elif decode_ubo_img(nm): e.update(kind=abi.KIND_IMG_UBO, reg=decode_ubo_img(nm)[0], off=decode_ubo_img(nm)[1])
             else: e.update(kind=abi.KIND_IMG if re.match(r'[a-z]+_i', nm) else (abi.KIND_TBUF if 'texture_buffer' in ty else abi.KIND_TEX), reg=d[0])
             # native texture atomics (dmsh_atomic.py): Metal allows them only on an R32Uint / R32Sint texture made with the shader-atomic usage, which the host checks for this slot
-            if e.get('kind') == abi.KIND_IMG and re.search(r'\b%s\.atomic_' % re.escape(nm), msl): e['atomic'] = True
+            if e.get('kind') in (abi.KIND_IMG, abi.KIND_IMG_UBO) and re.search(r'\b%s\.atomic_' % re.escape(nm), msl): e['atomic'] = True
             # a 1D integer fetch the translator read as 2D rows of 16384 texels (Program.cs RecordTexelFetch1D): the host binds a texture buffer in this slot as such rows (nvn_mtl.m tbuf_as_2d)
             if e.get('kind') == abi.KIND_TEX and e.get('reg') in res.get('fetch1d', ()):
                 e['fetch1d'] = True
@@ -1019,6 +1032,21 @@ def vs_base_instance(src):
         return m.group(0) if '[[base_instance]]' in m.group(0) else m.group(0)[:-1] + ', uint gl_BaseInstance [[base_instance]])'
     return re.sub(r'\bvertex\s+\w+\s+main0\s*\((?:[^()]|\([^()]*\))*\)', add, src)   # the parameter list, whose attributes hold parentheses ([[buffer(0)]])
 
+def drop_point_size(src):
+    """The vertex functions of src without their point size output (see vs_layer). A write goes; a shader whose body is a function of its own hands the output over by reference (_88(..., out.gl_Position,
+    out.gl_PointSize, out.gl_ClipDistance), Yoshi and the Mysterious Book's skinned vertex shaders), which then takes a local of the function instead"""
+    src = re.sub(r'\n    out\.gl_PointSize = [^;\n]*;', '', src)
+    while 'out.gl_PointSize' in src:
+        use = src.find('out.gl_PointSize')
+        a = [m for m in re.finditer(r'\bvertex\s+\w+\s+\w+\s*\(', src) if m.start() < use]
+        if not a: sys.exit('[RED] a point size output used outside a vertex function')
+        b, depth = src.find('{', a[-1].end()), 0
+        for e in range(b, len(src)):
+            depth += src[e] == '{'; depth -= src[e] == '}'
+            if not depth: break
+        src = src[:b + 1] + '\n    float dmsh_point_size = 1.0;' + src[b + 1:e].replace('out.gl_PointSize', 'dmsh_point_size') + src[e:]
+    return src
+
 def vs_layer(src):
     """A vertex shader that writes the layer (render_target_array_index) loses the point size output. The translator writes gl_PointSize = 1.0 in every vertex shader; Metal builds a pipeline
     whose vertex function writes the layer only with an input primitive class, and one that writes a point size only with the point class (or none), so with both no pipeline can be built.
@@ -1027,7 +1055,7 @@ def vs_layer(src):
     i = src.find('struct main0_out\n{\n'); j = src.find('\n};', i)
     if i < 0 or j < 0 or '[[render_target_array_index]]' not in src[i:j] or '[[point_size]]' not in src[i:j]: return src
     src = src[:i] + re.sub(r'\n    float gl_PointSize \[\[point_size\]\];', '', src[i:j], count=1) + src[j:]
-    return re.sub(r'\n    out\.gl_PointSize = [^;\n]*;', '', src)
+    return drop_point_size(src)
 
 def gs_slice(spv):
     """A geometry shader that only picks the layer: triangles in, at most 3 vertices out, each vertex copying its input position and the input components it passes on, and gl_Layer taking the
@@ -1081,7 +1109,7 @@ def vs_layer_entry(full):
             depth += full[e] == '{'; depth -= full[e] == '}'
             if not depth: break
         fn = full[a.start():e + 1].replace('main0_out', 'main0l_out').replace(f' {ep}(', f' {new}(', 1)
-        fn = re.sub(r'\n    out\.gl_PointSize = [^;\n]*;', '', fn)
+        fn = drop_point_size(fn)
         add += '\n' + fn.replace('return out;', f'out.gl_Layer = as_type<uint>(out.{name}.{comp});\n    return out;') + '\n'
     return full + add, {'loc': locs[name], 'comp': comp}
 
@@ -1512,7 +1540,7 @@ for e, n in collections.Counter(u for x in ok for u in x['drv_unfillable']).most
 f1 = [b for x in ok for b in x['bindings'] if b.get('fetch1d')]
 print(f'1D integer fetches read as 2D rows of 16384 texels (a texture buffer there is bound as rows, nvn_mtl.m tbuf_as_2d): {len(f1)} bindings in {sum(any(b.get("fetch1d") for b in x["bindings"]) for x in ok)} shaders, '
       f'{sum(1 for b in f1 if b.get("fetch1d_size"))} of them also size-queried')
-SLOTK = {abi.KIND_CBUF, abi.KIND_SAMP, abi.KIND_SAMP_TEX, abi.KIND_TEX, abi.KIND_IMG, abi.KIND_TBUF, abi.KIND_SBUF, abi.KIND_UBO_PTR, abi.KIND_SBUF_UBO, abi.KIND_TEX_UBO, abi.KIND_SAMP_UBO, abi.KIND_SAMP_ID}
+SLOTK = {abi.KIND_CBUF, abi.KIND_SAMP, abi.KIND_SAMP_TEX, abi.KIND_TEX, abi.KIND_IMG, abi.KIND_IMG_UBO, abi.KIND_TBUF, abi.KIND_SBUF, abi.KIND_UBO_PTR, abi.KIND_SBUF_UBO, abi.KIND_TEX_UBO, abi.KIND_SAMP_UBO, abi.KIND_SAMP_ID}
 noreg = [x for x in ok if any(b['kind'] in SLOTK and b.get('reg') is None for b in x['bindings'])]
 unk = [x for x in ok if any(b['kind'] == abi.KIND_UNKNOWN for b in x['bindings'])]
 print(f'shaders with a binding whose slot was not decoded {len(noreg)}, with an unrecognized binding kind {len(unk)} (loading them at run time prints [RED] lines)')

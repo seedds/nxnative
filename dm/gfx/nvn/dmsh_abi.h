@@ -57,6 +57,7 @@
 #define DMSH_KIND_TEX "tex"              // texture slot reg (combined, or DMSH_SEPTEX_SLOT0 + r for a separate texture)
 #define DMSH_KIND_TBUF "tbuf"            // a buffer texture in texture slot reg
 #define DMSH_KIND_IMG "img"              // image slot reg; atomic = the shader runs image atomics on it
+#define DMSH_KIND_IMG_UBO "img_ubo"      // bindless: the image handle is in uniform slot reg at byte off; atomic as for img
 #define DMSH_KIND_SAMP "samp"            // separate sampler slot reg
 #define DMSH_KIND_SAMP_TEX "samp_tex"    // the sampler of the combined handle in texture slot reg
 #define DMSH_KIND_SAMP_ID "samp_id"      // a sampler ID that is a constant in the shader (reg = the ID)

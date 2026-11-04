@@ -1934,7 +1934,9 @@ def ue_legacy_jobs(files, parts=64):
     for p, r in sorted(paks, key=lambda x: (x[1].endswith('_P.pak'), x[1])):   # patch paks last, so they replace; one view per pak folder (one per version given)
         try:   # all of a pak's names or none: a patch pak read halfway would still replace the base pak's files
             pk = uepak.Pak(p)
-            view.update({(os.path.dirname(p), os.path.normpath(pk.mount + name)): (p, r, name, pk.entry(name)['raw']) for name in pk.files})
+            # The Switch 2's shader format: of such a pak only the global shader cache holds shaders, and its other files would only go through the slow search for LSLG records
+            sage = [name for name in pk.files if name.endswith(uepak.GLOBAL_SAGE)]
+            view.update({(os.path.dirname(p), os.path.normpath(pk.mount + name)): (p, r, name, pk.entry(name)['raw']) for name in sage or pk.files})
         except (OSError, ValueError) as e: print(f'[RED] /{r}: the pak cannot be read ({e}); its shaders are left out', flush=True)
     chunks, taken, folders = {}, {p for p, _ in paks}, {os.path.dirname(p) for p, _ in paks}
     for p, r in sorted(((p, r) for p, r in files if p.endswith('.utoc') and os.path.dirname(p) in folders), key=lambda x: uepak.mount_order(x[0])):
@@ -1962,13 +1964,31 @@ def ue_legacy_shaders(path, rel, names, out):
     for name in names:
         d = pk.read(name, decode=oodle)
         label = re.sub(r"^(\.\./)+", "", os.path.normpath(pk.mount + name))
-        ue_inline_shaders(d, f'/{rel}#{label}', out)
+        (ue_nvn2_shaders if name.endswith(uepak.GLOBAL_SAGE) else ue_inline_shaders)(d, f'/{rel}#{label}', out)
 
 def ue_io_shaders(path, rel, chunks, out):
     """Export bundles of an IoStore container (ue_legacy_jobs), decoded with the game's own decoder as far as its blocks need it, and scanned as a pak's cooked packages are; labelled by the package's
     path where the container has a directory index, so that shader_groups and the shader map read as for a pak"""
     t, names = _PAKS.get(path) or _PAKS.setdefault(path, (lambda k: (k, k.names()))(uepak.Toc(path)))
-    for i in chunks: ue_inline_shaders(t.read(i, decode=oodle), f'/{rel}#{names.get(i) or t.ids[i].hex()}', out)
+    scan = ue_nvn2_shaders if t.version >= 4 else ue_inline_shaders   # a container of Unreal Engine 5's numbering beside a pak with inline shaders: only the Switch 2's format has been met
+    for i in chunks: scan(t.read(i, decode=oodle), f'/{rel}#{names.get(i) or t.ids[i].hex()}', out)
+
+UE_FREQ = {0: 'vs', 3: 'ps', 4: 'gs', 5: 'cs'}   # EShaderFrequency, for the stages an NVN2 shader's own stage can be checked against
+def ue_nvn2_shaders(d, label, out):
+    """Shaders inline in a cooked package or global shader cache of Unreal's Switch 2 RHI (shader format SP_GLSL_SAGE, Yoshi and the Mysterious Book, UE 5.4): FShaderMapResourceCode as on 4.27, each
+    entry here Oodle-compressed, or stored when that did not make it smaller (uepak.resource_maps), and holding an NVN2 record (uepak.nvn2_record). A control section outside every walked map would
+    be a form this does not read, so it stops the split rather than leave shaders out. The engine combines vertex and pixel shaders per draw (separable_pairs)"""
+    entries, spans = uepak.resource_maps(d, oodle)
+    for at, s, freq in entries:
+        rec = uepak.nvn2_record(s)
+        if not rec: red(f'{label}: the shader entry at {at:#x} is not an NVN2 record of the known layout')
+        ctl, code = rec; st = nvn2_stage(ctl, code)
+        if UE_FREQ.get(freq, st) != st: red(f'{label}: the shader entry at {at:#x} has frequency {freq}, and its code is stage {st}')
+        why = check(label, st, ctl, code)
+        if why: red(f'{label}: shader at {at:#x} ({st}): {why}')
+        out.append((f'{label}#UE{at:x}', st, ctl, code))
+    for m in re.finditer(re.escape(CTL_MAGIC + b'\xc9\0\0\0'), d):
+        if not any(a <= m.start() < b for a, b in spans): red(f'{label}: an NVN2 control section at {m.start():#x}, outside every shader map read')
 
 ZLIB_HEAD = re.compile(b'\x78[\x01\x5e\x9c\xda]')
 def ue_inline_shaders(d, label, out):

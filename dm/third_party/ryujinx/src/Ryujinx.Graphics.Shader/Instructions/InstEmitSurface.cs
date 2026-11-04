@@ -197,7 +197,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             bool byteAddress,
             bool isBindless,
             bool compareAndSwap,
-            bool hasPredicateResult = false)
+            bool hasPredicateResult = false,
+            int cbufSlot = TextureOperation.DefaultCbufSlot)
         {
             // Preserve source width before descriptor-sized formats are resolved.
             // Other backends retain their existing surface-instruction handling.
@@ -312,7 +313,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 type,
                 format,
                 flags,
-                TextureOperation.DefaultCbufSlot,
+                cbufSlot,
                 imm);
 
             Operand res = context.ImageAtomic(type, format, flags, setAndBinding, sources);
@@ -501,7 +502,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             int srcB,
             int srcC,
             bool byteAddress,
-            bool isBindless)
+            bool isBindless,
+            int cbufSlot = TextureOperation.DefaultCbufSlot)
         {
             // Preserve source width before descriptor-sized formats are resolved.
             // Other backends retain their existing surface-instruction handling.
@@ -602,7 +604,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 type,
                 format,
                 flags,
-                TextureOperation.DefaultCbufSlot,
+                cbufSlot,
                 imm);
 
             context.ImageAtomic(type, format, flags, setAndBinding, sources);

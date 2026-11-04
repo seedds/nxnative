@@ -894,9 +894,10 @@ void mtl_prepare(void) {
     if (!g_warm_started && prepare_on()) { mtl_init(); shmap_load(); }
 }
 static void sub_cut_begin(void);
+static int par_measure(void); static void par_sub_begin(void), par_sub_end(void), par_wait(void), par_scan(const uint64_t *h, int n);   // DM_NVN_PAR=measure (docs/parallel-translation.md, milestone 1)
 void mtl_sub_begin(void) {
     mtl_init(); g_sub_serial++; g_seg = 0; seg_clk_put(g_sclk); g_sclk = NULL; g_rc_npend = 0; g_rc_skip = 0;
-    sub_cut_begin();
+    sub_cut_begin(); if (par_measure()) par_sub_begin();
     defer_drain();
     defer_reset();
     mtl_prepare();   // done by then in the submit entry; the replay tool (nvn_replay) reaches it here
@@ -1717,6 +1718,7 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
     pthread_mutex_lock(&g_mu); if (fence > g_done) g_done = fence; pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu);
 }
 uint64_t mtl_sub_commit(void) {
+    if (par_measure()) par_sub_end();
     lc_land();   // clears still waiting (the command list ends with them)
     defer_fallback();   // Deferred merged pass: at the end of the submission there are still P draws not replayed (the normal path never gets here)
     rp_flush(); ubd_land();
@@ -1775,6 +1777,7 @@ static void post_early(uint64_t fence) {
 }
 static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
     if (g_done >= fence) { if (ws_on()) ws_put(site, 0, 0); return 1; }
+    if (par_measure()) par_wait();
     uint64_t w0 = ws_t0();
     if ((site == WS_SYNC || site == WS_SYNC_NEWEST || site == WS_ACQ) && fast_wake() && g_ev && fence <= g_fence) {   // the game's own wait: wake on the GPU's signal (rec_signal(g_ev, fence) after each submission)
         uint64_t ms = timeout_ns / 1000000ull; if (ms > 3600000ull) ms = 3600000ull;
@@ -8960,7 +8963,7 @@ static void sdx_walk(const uint8_t *p, int depth) {
     }
 }
 static void mtl_sub_index_(const uint64_t *h, int n);
-void mtl_sub_index(const uint64_t *h, int n) { cp_stamp start = cp_begin(); mtl_sub_index_(h, n); cp_end(7, start); }
+void mtl_sub_index(const uint64_t *h, int n) { cp_stamp start = cp_begin(); mtl_sub_index_(h, n); cp_end(7, start); if (par_measure()) par_scan(h, n); }
 static void mtl_sub_index_(const uint64_t *h, int n) {   // Start of submit (hle_nvn.c QueueSubmitCommands): build this submit's store lookahead index
     g_xv_ntouch = 0; g_sdx_n = g_sdx_nop = 0; g_rtx_n = g_drx_n = 0; g_exec_seq = 0; g_sdx_ok = tbdr_on();
     if (!g_sdx_ok) { g_xv_n = 0; g_xv_block = 1; return; }   // Index unavailable: clear the ledger and add nothing in this submit (the next touch cannot be verified)
@@ -10314,6 +10317,7 @@ static int ubd_conflict_cs(NvShader *cs, uint64_t ind) { return (ind && ubd_hits
 // submission) the replay ends the render pass, commits what it has encoded and waits for it, then reads the count on the CPU; later draws of the group use the same value
 static id<MTLSharedEvent> g_mdi_ev; static uint64_t g_mdi_v, g_mdi_waits, g_mdi_epoch = ~0ull, g_mdi_sub, g_mdi_addr; static uint32_t g_mdi_count;
 static void mdi_wait(void) {
+    if (par_measure()) par_wait();
     rp_end(); ubd_land();
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     up_flush(); res_commit();
@@ -12034,6 +12038,66 @@ static void clear_ds_tri(const p_clear_ds *c) {
        (unsigned long)sc.x, (unsigned long)sc.y, (unsigned long)sc.width, (unsigned long)sc.height);
 }
 
+// ---------- Parallel translation, milestone 1: how much a submission could be split (DM_NVN_PAR=measure; docs/parallel-translation.md) ----------
+// Log only. At every pass boundary the serial replay reaches (OP_SET_RT ending a pass), it notes whether a chunk could start there: nothing that looks across the boundary is in flight
+// (hoisted clears, deferred draw groups, a merged or slice-merged pass, lazy clears, a waiting mesh run, deferred uniform updates) and whether an occlusion count is open. GPU waits inside the
+// submission are serial points. At the end of the submission it estimates, by draws, how far four workers could go: in each run between serial points, up to three cuts at the clean
+// boundaries nearest its quarter marks, and the run then costs its largest chunk. A state-only scan of the submission (state_op on a copy of S, as cs_hoist_try does) is timed too.
+// Every 300 frames: per frame, draws, clean boundaries (and those with an open count), serial waits, the estimated speedup, and the scan's time
+enum { PAR_B = 4096, PAR_W = 256 };
+static uint32_t g_par_b[PAR_B], g_par_w[PAR_W]; static uint8_t g_par_bq[PAR_B]; static int g_par_nb, g_par_nw; static uint64_t g_par_d0;
+static struct { uint64_t subs, draws, clean, clean_q, dirty, waits, cost, scan_ns, scan_ops, scan_bad; uint64_t why[8]; } g_par;
+static int par_measure(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PAR"); v = e && !strcmp(e, "measure"); if (v) MLOG("DM_NVN_PAR=measure: logging how far submissions could be split (log only)"); } return v; }
+static void par_sub_begin(void) { g_par_nb = g_par_nw = 0; g_par_d0 = g_stat_draw; }
+static void par_wait(void) { if (!g_cb || !pthread_equal(pthread_self(), g_sub_thread)) return; if (g_par_nw < PAR_W) g_par_w[g_par_nw++] = (uint32_t)(g_stat_draw - g_par_d0); }
+static void par_boundary(void) {
+    int why = g_hoist_n ? 1 : (g_defer_nact || g_defer_pend) ? 2 : g_fz.active ? 3 : g_sm_pass ? 4 : g_nlc ? 5 : g_mrun.n ? 6 : g_nubd ? 7 : 0;
+    if (why) { g_par.dirty++; g_par.why[why]++; return; }
+    if (g_par_nb < PAR_B) { g_par_bq[g_par_nb] = g_vis_counting && g_nvs > 0; g_par_b[g_par_nb++] = (uint32_t)(g_stat_draw - g_par_d0); }
+}
+static void par_scan(const uint64_t *h, int n) {
+    if (n <= 0) return;
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    static typeof(S) Ssave; memcpy(&Ssave, &S, sizeof S); typeof(R) Rsave = R; int pso_dirty = g_pso_dirty, dss_dirty = g_dss_dirty;
+    const uint64_t *rest = g_rest; int nrest = g_nrest; g_rest = h + 1; g_nrest = n - 1;
+    fz_cursor cur = {.p = (const uint8_t *)h[0]}; uint64_t ops = 0;
+    for (;;) { const uint8_t *q; op_hdr hq; const void *aq; if (!fz_next(&cur, &q, &hq, &aq)) break; ops++;
+        if (hq.op == OP_SET_RT) { const p_set_rt *r = aq; R.rt = *r; R.has_rt = 1; continue; }
+        if (hq.op == OP_DRAW || hq.op == OP_DRAW_IDX || hq.op == OP_DISPATCH) continue;
+        state_op(hq.op, aq); }
+    g_rest = rest; g_nrest = nrest;
+    memcpy(&S, &Ssave, sizeof S); args_dirty_all(); R = Rsave; g_pso_dirty = pso_dirty; g_dss_dirty = dss_dirty; prog_resolve();
+    g_par.scan_ns += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0; g_par.scan_ops += ops; g_par.scan_bad += cur.bad;
+}
+static uint64_t par_run_cost(uint32_t lo, uint32_t hi, int *bi) {   // the run [lo, hi) of draws cut at up to three clean boundaries inside it, nearest its quarter marks: its largest chunk
+    uint32_t cuts[5] = {lo, 0, 0, 0, hi}; int nc = 1;
+    for (int q = 1; q <= 3; q++) {
+        uint64_t mark = lo + (uint64_t)(hi - lo) * q / 4; int best = -1; uint64_t bd = UINT64_MAX;
+        for (int i = *bi; i < g_par_nb && g_par_b[i] < hi; i++) if (g_par_b[i] > cuts[nc - 1]) { uint64_t d = g_par_b[i] > mark ? g_par_b[i] - mark : mark - g_par_b[i]; if (d < bd) { bd = d; best = i; } }
+        if (best >= 0) cuts[nc++] = g_par_b[best];
+    }
+    cuts[nc] = hi; uint64_t mx = 0; for (int i = 0; i < nc; i++) if (cuts[i + 1] - cuts[i] > mx) mx = cuts[i + 1] - cuts[i];
+    while (*bi < g_par_nb && g_par_b[*bi] < hi) (*bi)++;
+    return mx;
+}
+static void par_sub_end(void) {
+    uint32_t d = (uint32_t)(g_stat_draw - g_par_d0); uint64_t cost = 0; uint32_t lo = 0; int bi = 0;
+    for (int i = 0; i <= g_par_nw; i++) { uint32_t hi = i < g_par_nw ? g_par_w[i] : d; if (hi > lo) cost += par_run_cost(lo, hi, &bi); if (hi > lo) lo = hi; }
+    g_par.subs++; g_par.draws += d; g_par.cost += cost; g_par.waits += g_par_nw; g_par.clean += g_par_nb;
+    for (int i = 0; i < g_par_nb; i++) g_par.clean_q += g_par_bq[i];
+    static uint64_t lf; uint64_t f = atomic_load(&g_cur_frame);
+    if (f / 300 != lf / 300) {
+        uint64_t nf = f > lf ? f - lf : 1; lf = f;
+        if (g_par.subs) MLOG("parallel translation, measure (per frame over %llu frames): %.0f draws in %.1f submissions; boundaries %.1f clean (%.1f with an occlusion count open), %.1f not "
+                             "(hoist %llu, deferred draws %llu, merged pass %llu, slice-merged %llu, lazy clears %llu, mesh run %llu, uniform updates %llu over the period); GPU waits %.1f; "
+                             "estimated speedup with 4 workers %.2fx (by draws); state-only scan %.3f ms, %.0f ops%s",
+                             (unsigned long long)nf, (double)g_par.draws / nf, (double)g_par.subs / nf, (double)g_par.clean / nf, (double)g_par.clean_q / nf, (double)g_par.dirty / nf,
+                             (unsigned long long)g_par.why[1], (unsigned long long)g_par.why[2], (unsigned long long)g_par.why[3], (unsigned long long)g_par.why[4], (unsigned long long)g_par.why[5],
+                             (unsigned long long)g_par.why[6], (unsigned long long)g_par.why[7], (double)g_par.waits / nf, g_par.cost ? (double)g_par.draws / g_par.cost : 0.0,
+                             g_par.scan_ns / 1e6 / nf, (double)g_par.scan_ops / nf, g_par.scan_bad ? " (stopped early at a multi-draw in some)" : "");
+        memset(&g_par, 0, sizeof g_par);
+    }
+}
 void mtl_exec(const uint8_t *p) {
     if (!g_state_inited) state_reset();
     static int dump_all = -1; if (dump_all < 0) dump_all = getenv("DM_NVN_PASSDUMP_ALL") != NULL;
@@ -12110,6 +12174,7 @@ void mtl_exec(const uint8_t *p) {
                     if (sm_rt_slice(&R.rt, r, &sl) && sl >= g_sm_lo && sl <= g_sm_hi) { R.rt = *r; g_sm_cur = sl; g_sm_ncont++;
                         { void td_note_layer(id<MTLTexture>, uint64_t, NSUInteger, NSUInteger); td_note_layer(tex_mtl(r->color[0]), r->color[0]->serial, r->cview[0].set_levels ? r->cview[0].base_level : 0, (NSUInteger)sl); } PD("M %llu slice-merged pass goes on in layer %d", g_stat_pass, sl); break; } }
                 if (pend && !g_enc && g_cb && lc_on()) lc_push(); else rp_flush();   // clears with no draw wait for the next pass that attaches their targets (lc_push)
+                if (par_measure()) par_boundary();
                 sub_cut(); R.rt = *r; R.has_rt = 1; break;
             }
             case OP_CLEAR_COLOR: {

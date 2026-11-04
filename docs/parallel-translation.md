@@ -1,6 +1,6 @@
 # Translating one submission on several cores (design, work in progress)
 
-Status: design only. Nothing in this document is built yet. Each milestone below lands as its own commit on this branch.
+Status: milestone 1 built (`DM_NVN_PAR=measure`, log only). Each milestone below lands as its own commit on this branch.
 
 ## Why
 
@@ -67,7 +67,7 @@ The contract is a struct with a compare function. A debug mode (`DM_NVN_PAR=chec
 Each one is a commit on this branch and keeps the default behaviour unchanged until the last.
 
 0. **This design.**
-1. **Measure the opportunity.** Count, per frame, how many `sub_cut` points the serial replay passes with a clean contract, and the draws between them. Time a state-only scan of the submission. Log lines only, no behaviour change.
+1. **Measure the opportunity** (built: `DM_NVN_PAR=measure`, `par_*` in `nvn_mtl.m`). Count, per frame, how many `sub_cut` points the serial replay passes with a clean contract, and the draws between them. Time a state-only scan of the submission. Log lines only, no behaviour change.
 2. **Replay context.** Move class 1 state into a context struct, with one context and serial replay, so behaviour is identical. This is the large mechanical change. It can land in slices by subsystem (encoders and segments, arenas and post list, the draw loop's statics, uniform deferral).
 3. **Scan and contract in check mode.** `DM_NVN_PAR=check` scans, snapshots, and compares at every proposed split point while still replaying serially. Done when Bananza, Splatoon Raiders and Breath of the Wild show no mismatches over several minutes.
 4. **Workers.** `DM_NVN_PAR=<n>` translates chunks on *n* threads with speculation and fallback, off by default. Classes 2–4 are made safe here.

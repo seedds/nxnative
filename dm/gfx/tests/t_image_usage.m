@@ -62,7 +62,7 @@ static void image_case(int explicit_image) { @autoreleasepool {
     CHECK(rid == image.gpuResourceID._impl, "image argument names the real view");
     os_unfair_lock_unlock(&g_rmu);
     mtl_sub_commit(); mtl_drain();
-    uint16_t pixels[64]; read_level(upgraded, 0, pixels);
+    uint16_t pixels[64] = {0}; read_level(upgraded, 0, pixels);
     int same = 1; for (int i = 0; i < 64; i++) same &= pixels[i] == 0x3800; CHECK(same, "upgrade preserves the clear from the pass it ended");
     read_level(upgraded, 1, pixels); same = 1; for (int i = 0; i < 16; i++) same &= pixels[i] == 0x3a00; CHECK(same, "upgrade preserves the other mip");
     NSError *error = nil;

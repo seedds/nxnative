@@ -87,8 +87,8 @@ writers (`shd_lgt.wishp` var3: `ef07fd3d5046164f`, `aa9a0923524b7e46`,
 the next free byte and set a bit in an R32Uint image, and every other fragment
 writes 0. The host drew them with COPY, so the list was replaced fragment by
 fragment. Hand-patching the five writers to OR into their target removed the
-boxes; the general fix is [Logic operations through a library of its own](../../../docs/reference/rendering.md#logic-operations-through-a-library-of-its-own)
-(4,245 `_bl` libraries for this game, 101 MB on the Mac). The reporter's lead,
+boxes; the general fix is [Logic operations through a library of its own](../../../docs/reference/rendering.md#logic-operations-through-a-library-of-its-own).
+The reporter's lead,
 3 of 21 64×64 cube-map arrays with few non-zero bytes, counts guest memory the
 CPU wrote and does not bear on it.
 

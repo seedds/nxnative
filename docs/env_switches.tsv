@@ -5,6 +5,7 @@ DM_ALIAS_WINDOWS	diagnostic	`=<MB>` logs every 30 s how much of each window of t
 DM_ALLOW_OTHER_METAL	switch	`1` lets `own_compilers.py` build the shader libraries with a Metal compiler other than the one in `dmsh_chain.lock` (it stops otherwise, GitHub issue #242); the NSP script sets it for `--allow-other-metal`
 DM_AOC_DIR	path	Folder of add-on content: one numbered subfolder per DLC index holding that DLC's RomFS, reported by `aoc` and mounted read-only; the app, the Mac launcher and the NSP script set it when the build has DLC
 DM_AOC_OWNED	switch	`0` reports no add-on content even when `DM_AOC_DIR` has some, for runs without the DLC
+DM_APP_DM	path	Set by the iOS app of a game of several programs: the running program's `dm/p<N>` folder, where the settings screen finds its `launcher.json`
 DM_APP_VERSION	switch	Overrides the IPA's version in `build_ipa.sh`; by default it is the packed game's display version from its control data (the update's when one is packed)
 DM_AUDIO	switch	`1` plays audio through Core Audio, `0` uses the silent sink; real output is the default on iOS, the silent sink on the Mac (the Mac launcher sets `1`)
 DM_AUDIO_DUMP	diagnostic	`=<file>` writes every PCM block the game appends as is (16-bit, 48 kHz, channel count as in the OpenAudioOut log), to judge whether a sound played
@@ -27,10 +28,12 @@ DM_DETCLOCK	switch	`=<step ns>`: from the first present on, the guest clock adva
 DM_DETCLOCK_PACE	switch	`=1` with `DM_DETCLOCK`: each frame takes at least one clock step of wall time, so background loading keeps up with the fixed clock (used by the screenshot gate)
 DM_DISPLAY_NAME	switch	Overrides the iOS app's name in `build_ipa.sh` (default the game name in the base NSP's control data)
 DM_DYNAMIC_RESOLUTION	player	`1` lets NieR:Automata 1.0.3's own dynamic resolution scale between 70 and 100 %, `0` (default) keeps full resolution; only on the builds whose patches.py names the DYNAMIC_RESOLUTION capability (`hle_fpslock.c` `k_nier_dr`). The launcher's Dynamic resolution
+DM_EMBED_TAG	path	Set by the iOS app of a game of several programs: the tag of the running program's embedded sections (`p<N>`, `gen_embed.py --tag`)
 DM_ENTITLEMENTS	path	`=<plist>` gives a prepared Xcode project another entitlements file instead of the Increased Memory Limit one, and the ad-hoc signature of the unsigned IPA's executable carries them; empty means no entitlements
 DM_ENV_FILE	path	`=<file>` makes `build_ipa.sh` bake its `KEY=VALUE` lines into the app as `dm/env.txt`, applied at boot; `Documents/env.txt` overrides them
 DM_ENV_FILE_KEYS	switch	Set by the iOS app and the Mac launcher at launch to the space-separated names an env file set; the settings screen keeps those values and shows them greyed out
 DM_ENV_LAUNCH_KEYS	switch	Set at launch by the Mac launcher (the launcher settings already in the environment) and the iOS app (every DM_* variable already in it) to the space-separated names; the settings screen keeps those values and shows them greyed out
+DM_EXEC_OUT	path	File `oe::ExecuteProgram` records the next program and its parameters in, then the app ends (the iOS app of a game of several programs sets it to `Documents/program.bin`)
 DM_FD_LOG	diagnostic	`=<seconds>` logs, every that many seconds, the number and kinds of file descriptors the process has open
 DM_FIXED_TIME	switch	`=<seconds>`: the user clock always returns that time and the host time zone is pinned to UTC, for deterministic comparison
 DM_FOCUS_KEEP	switch	`1` keeps the game in focus while its Mac window is up, whichever app is active (minimizing still counts); `scripts/regress.py` sets it, so another app taking the key window during a run does not pause a game that stops out of focus
@@ -68,13 +71,19 @@ DM_HLECOUNT	diagnostic	`=<file>` (`%d` = process ID) writes at exit a TSV of how
 DM_HOME_QUIT	player	`0` turns off quitting with the controller's Home button (Mac, on by default): held for 2 s it opens a quit prompt over the game, A quits as ⌘Q does, B or Home closes it (`home_quit.h`)
 DM_HOME_QUIT_CAPTURE	test	`=<folder>`: `tests/t_home_quit_mac.m` also draws the Home button's quit prompt and hold indicator into PNG files there
 DM_HOME_QUIT_TEXT	switch	The texts of the Home button's quit prompt in the player's language, one per line: the hold indicator, the title, the note, the quit and the cancel button; a front end such as NX2Apple sets it ([Starting a game](frontends.md#starting-a-game)), an empty or missing line keeps the English text
+DM_HTML	path	Folder of the offline HTML pages (default: `html` beside the RomFS)
 DM_ICON	path	`=<image>` gives `build_ipa.sh` another app icon (default the `icon.jpg` beside the RomFS)
 DM_IMPORTS	diagnostic	When set, logs each import the loader binds to a host function and each forced takeover
+DM_JIT_CAPTURE	path	Folder the Mac host writes what a game's `nn::jit` plugin makes to, one `<key>.jit` per request, for `dm/tools/jit_capture.py`; the NSP script sets it
+DM_JIT_LOG	diagnostic	`1` logs every `nn::jit` `GenerateCode` request
+DM_JIT_MISS_DUMP	diagnostic	Folder for the input of each `nn::jit` request a served image lacks
+DM_JIT_SERVE	path	Folder of a `nn::jit` image (`jit.img`, `jit.tsv`, `jit.out`): the Mac serves requests from it as the iOS app does, and the plugin does not run
 DM_KBD	switch	`=<text>`: the system keyboard returns that text as OK without showing an input box; unset with no window, it returns cancel
 DM_KBD_PLAYER	switch	`own` makes the Mac keyboard player 1 on its own, with controllers from player 2 on (by default the first controller shares player 1 with the keyboard)
 DM_KEYS	switch	Scripted input: `<seconds or f<frame>>:<key>[+key][~hold or ~f<frames>][*count/interval],…` presses buttons, sticks, touches and `Shake` at those times; `=@<file>` reads the steps from the file
 DM_LANG	player	Game language as a language code (default `en-US`; the iOS app sets the one the IPA was packed with)
 DM_LAUNCHER	switch	`0` skips the iOS settings screen or the Mac settings window and starts the game at once, with the saved choices (on the Mac also `--no-launcher`)
+DM_LAUNCH_PARAM	path	File whose bytes `oe::TryPopLaunchParameter` returns once; `oe::ExecuteProgram` sets it for the program it starts
 DM_LINK_VTICK	switch	`0` keeps the system's display-link rate on 144 or 165 Hz Mac screens; by default the link counts only the refreshes nearest a steady 1/60 s clock
 DM_LOADHASH	diagnostic	`=1` logs an address-independent SHA-256 per module after loading
 DM_LONGFRAME	diagnostic	`0` turns off the long-frame log (on by default), a line for a frame over 20 ms or with GPU time over 16.7 ms that is clearly above recent frames
@@ -227,6 +236,7 @@ DM_PRESENT_LATENCY	switch	`=1` or `2`: overrides the display link's preferred fr
 DM_PRESENT_LINK	switch	Present pacing: `0` acquires the drawable itself, `1` (the default) presents on a 60 Hz display link, `2` uses a 120 Hz display link with a frame every other tick
 DM_PRESENT_SNAP	player	`=<n>`: present snapshots, a ring of n host textures (2 to 4; `1` = 2) the presents are copied to so the game's swapchain texture is free at once; `0` off (default: the profile's `present_snap`)
 DM_PRESENT_UPSCALE	player	`metalfx` scales a picture smaller than its rectangle on the screen through MetalFX's spatial scaler; `off` (the default) scales it bilinearly
+DM_PREV_PROGRAM	switch	What `oe::GetPreviousProgramIndex` answers (default -1, started from HOME); `oe::ExecuteProgram` sets it for the program it starts
 DM_PROBE	diagnostic	`=module:offset,…` (Mac only): puts a `brk` at each guest address and on every hit prints the thread, registers, strings they point to and a backtrace, then runs the original instruction
 DM_PROBE_ALL	diagnostic	Set: probe hits (`DM_PROBE`) also print x8–x18
 DM_PROBE_DUMP	diagnostic	`=module:offset:length[:file]`: on the first hit of any probe, writes that range of guest memory to a file (default `run/<platform>/probe_dump.bin`)
@@ -240,6 +250,8 @@ DM_PROBE_LIMIT	diagnostic	Maximum printed hits per guest probe; 0 or absent leav
 DM_PROBE_POLL	diagnostic	`=<address>[+<length>]` (hex, 4 bytes by default, up to 8): a host thread spins on the bytes and on each change snapshots every thread's pc, lr and frames, for writes the watch misses
 DM_PROBE_WATCH	diagnostic	`=<address>[+<length>]` (hex, 8 bytes by default): write-protects that host page and reports who writes these bytes, without a debugger
 DM_PROBE_X2	diagnostic	`=<bytes>` (hex): probe hits also dump that many bytes of the memory x2 points to
+DM_PROGRAM	switch	`=<index>`: the program of a game of several programs that a host over their profiles runs (default 0; `main.c` `dm_game_cur`)
+DM_PROGRAMS	path	Table of a game's programs on the Mac (`programs.tsv`: index, host, modules, run folder, environment): `oe::ExecuteProgram` starts the named one in this process's place; the NSP script's run command and the Mac app set it
 DM_PROGRAM_ID	switch	`=<hex>`: the program ID the host reports from `svcGetInfo(ProgramId)` (default: the profile's `program_id`)
 DM_PSO_ARCHIVE	path	The folder of the per-game Metal 4 pipeline archive of pipeline bases (default `pso_archive/` beside `pso_user.tsv`); `off` keeps no archive
 DM_PSO_BUNDLE	path	The pipeline archive made offline (`<GPU architecture>.mtl4a`, `prebuilt.tsv`), read only; the iOS app and Mac launcher set it to their `pso/` folder; `off` ignores it
@@ -268,6 +280,7 @@ DM_RESOURCE_BUILD	switch	Package version (for example `v327680`), written to `Ge
 DM_RESOURCE_CHAIN_H	path	Path of `dm/gfx/nvn/dmsh_chain.h`, written to `Gen/resources.env` by `build_ipa.sh`; the Xcode copy phase (`stage_resources.sh`) stops when the prepared shaders are not of its chain version
 DM_RESOURCE_MARKER	path	A file under the RomFS, written to `Gen/resources.env` by `build_ipa.sh`, that the Xcode copy phase (`stage_resources.sh`) checks for before copying the game files
 DM_RESOURCE_MSLDIR	path	Name of the shader library folder (`b-<chain>`), written to `Gen/resources.env` by `build_ipa.sh`; the Xcode copy phase copies the shaders to `msl/<name>` in the app
+DM_RESOURCE_PROGRAMS	path	The table of a game's programs' files for the Xcode build phase (`stage_resources.sh`; `build_ipa.sh` writes it)
 DM_RESOURCE_PSO	path	Folder of the offline Metal pipeline archive (empty for none), written to `Gen/resources.env` by `build_ipa.sh`; the Xcode copy phase copies it to `<App>/pso`
 DM_RESOURCE_ROMFS	path	RomFS folder, written to `Gen/resources.env` by `build_ipa.sh`; the Xcode copy phase (`stage_resources.sh`) copies it into the app's `romfs`
 DM_RESOURCE_SHADERS	path	iOS shader library folder, written to `Gen/resources.env` by `build_ipa.sh`; the Xcode copy phase (`stage_resources.sh`) copies it into the app's `msl/b-<chain>`
@@ -341,6 +354,7 @@ DM_VSYNC_HZ	switch	`=<Hz>`: rate at which a host thread fires the vi vsync event
 DM_WATCH	diagnostic	`=<s>` dumps all threads after that many seconds (SIGALRM) and turns on the stall watchdog; off unless set
 DM_WATCH_SAMPLE	diagnostic	`=<path>` (Mac): when the stall watchdog fires, samples the process for 1 s with `/usr/bin/sample` and writes the thread stacks to that path
 DM_WATCH_STALL	diagnostic	`=<s>`: when the frame loop makes no progress for that long (default 15 with `DM_WATCH`), logs a red line, dumps the threads and exits
+DM_WEB_LOG	diagnostic	`1` logs each key an offline HTML page is given and where the focus is after it
 DM_WINDOW	switch	When set (to any value, `0` included) opens a Mac window with keyboard and controller input; unset runs headless with the guest on the current thread; the Mac launcher sets it
 DM_WINDOW_TOP	diagnostic	`1` (Mac, with `DM_WINDOW`) orders the game window in front without activating it and keeps it above other apps' windows, so a covered window does not slow the run; `regress.py` sets it
 DM_XCODE_DERIVED_DATA	path	Xcode derived data folder for `build_ipa.sh` (default `$W/build/ios/xcode-dd`); the NSP script points it into the game's build folder

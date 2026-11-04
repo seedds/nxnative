@@ -1821,8 +1821,8 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[152];
-#define RED_ONCE(k, ...) do { if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
+static int g_red_once[153];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+#define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
 #define VB_SLOT(st) ((st) < 14 ? 16 + (st) : (st))
@@ -4272,7 +4272,7 @@ static void shmap_load(void) { shmap_read_once(); static int warmed; if (!warmed
 static void shmap_read(void) {
     if (g_shmap) return;
     const char *e = getenv("DM_NVN_SHMAP");
-    NSString *path = e ? @(e) : exe_rel("../games/" DM_GAME_ID "/shader_map.tsv");   // default: the current game profile folder (Mac: dm/games/<id>; on iOS main.m sets DM_NVN_SHMAP)
+    NSString *path = e ? @(e) : exe_rel([NSString stringWithFormat:@"../games/%s/shader_map.tsv", DM_GAME_ID].UTF8String);   // default: the current game profile folder (Mac: dm/games/<id>; on iOS main.m sets DM_NVN_SHMAP)
     NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
     if (!txt) MDIE("cannot read the shader map %s (DM_NVN_SHMAP can name another)", path.UTF8String);
     g_shmap = [NSMutableDictionary dictionary];
@@ -4294,7 +4294,7 @@ static void shmap_read(void) {
         if (c.count == 2 && [c[0] isEqual:@"game"]) st_game = c[1]; else if (c.count == 2 && [c[0] isEqual:@"inputs"]) st_inputs = c[1];
     }
     if (!st_inputs) MLOG("[RED] shader library %s has no stamp (inputs.tsv): no full dmsh_build.py run made it as it is, so c1_full.tsv and cb_extent.tsv are not taken", g_msl_dir.UTF8String);
-    else if (st_game && ![st_game isEqual:@DM_GAME_ID]) MLOG("[RED] shader library %s was built for game %s, not " DM_GAME_ID, g_msl_dir.UTF8String, st_game.UTF8String);
+    else if (st_game && ![st_game isEqual:@(DM_GAME_ID)]) MLOG("[RED] shader library %s was built for game %s, not %s", g_msl_dir.UTF8String, st_game.UTF8String, DM_GAME_ID);
     else MLOG("shader library stamp: game %s, inputs %s", st_game.UTF8String, st_inputs.UTF8String);
     NSString *cp = [[path stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"c1_full.tsv"];   // Same directory as the mapping table (Mac: dm/games/<id>; iOS: dm/ inside the App, copied along by build_ipa.sh)
     NSString *ct = cp ? [NSString stringWithContentsOfFile:cp encoding:NSUTF8StringEncoding error:nil] : nil;
@@ -4338,7 +4338,8 @@ static void shmap_read(void) {
     NSString *ventry; id<MTLFunction> vfn; int vfn_state;
     id<MTLFunction> pfn; int pfn_state, has_pull;
     id<MTLFunction> afn[4]; int afn_state, has_alpha;
-    id<MTLLibrary> llib; NSMutableDictionary<NSNumber *, id<MTLFunction>> *lfn; int lfn_state, has_logic; } @end   // llib: the logic operation library <key>_bl, lfn: its fn_u / fn_m specialized per set of targets (lo_fn; lfn_state as afn_state; has_logic: the reflection names one, dmsh_logic.py)   // afn: fn, fn_u, fn_m, fn_d of the alpha test library <key>_ba (at_fn; afn_state 0 untried, 1 loaded, 2 failed; has_alpha: the reflection names one, dmsh_alpha.py)   // pfn: the same entry of the pulling library <key>_bp (pull_fn; has_pull: the reflection names one, dmsh_pull.py)   // vertex: the entry point loaded (by the depth mode); vfn: the same entry of the shadow-input library <key>_bv (vin_fn; state 0 untried, 1 loaded, 2 failed)
+    id<MTLLibrary> xlib; int xlib_state;
+    id<MTLLibrary> llib; NSMutableDictionary<NSNumber *, id<MTLFunction>> *lfn; int lfn_state, has_logic; } @end   // xlib: the side library <key>_bx compiled from its source (side_lib; xlib_state as afn_state); llib: that library for logic operations, lfn: its fn_u / fn_m specialized per set of targets (lo_fn; lfn_state as afn_state; has_logic: the reflection names its entry points, dmsh_logic.py)   // afn: the alpha test entry points of fn, fn_u, fn_m, fn_d in the side library <key>_bx (at_fn; afn_state 0 untried, 1 loaded, 2 failed; has_alpha: the reflection names them, dmsh_alpha.py)   // pfn: the same entry of the pulling library <key>_bp (pull_fn; has_pull: the reflection names one, dmsh_pull.py)   // vertex: the entry point loaded (by the depth mode); vfn: the same entry of the shadow-input library <key>_bv (vin_fn; state 0 untried, 1 loaded, 2 failed)
 @implementation NvShader
 - (void)dealloc { free(rf.c1); free(geo_slot); }
 @end
@@ -6149,58 +6150,66 @@ static int pso_mixed_uint(const pso_key *k, NvShader *fs, int merged) {
     return ints && floats;
 }
 // NVN's alpha test (ColorStateSetAlphaTest and SetAlphaRef; Maxwell's fixed-function test of the alpha a pixel shader writes to colour 0, before blending): Metal has none.
-// A pipeline drawn with an alpha function other than ALWAYS takes its fragment from the shader's alpha test library <key>_ba (dmsh_alpha.py: the same entry points, comparing
-// colour 0's alpha with the function and reference at fragment buffer DMSH_ALPHA_BUFFER before each return), and its draws bind them there (at_bind). The function and the
+// A pipeline drawn with an alpha function other than ALWAYS takes its fragment from the shader's side library <key>_bx (dmsh_alpha.py: <entry>_a runs the body and compares
+// colour 0's alpha with the function and reference at fragment buffer DMSH_ALPHA_BUFFER), and its draws bind them there (at_bind). The function and the
 // reference are data, not part of the pipeline: one pipeline serves every function, and a draw that changes the reference every frame (a dissolve) keeps it. As in OpenGL,
 // there is no test when colour 0 goes to an integer target
 static inline int atest_on(void) { return S.color.alpha_func && S.color.alpha_func != NVN_ALPHA_FUNC_ALWAYS; }
 static uint32_t atest_key(NvShader *fs, const uint32_t cfmt[8], const uint8_t *lmap) {   // pso_key.atest; lmap: a merged pass's physical → logical targets
     if (!fs || !atest_on()) return 0;
     for (int i = 0; i < 8; i++) if (cfmt[i] && (lmap ? lmap[i] : i) == 0 && pf_int_kind((MTLPixelFormat)cfmt[i])) return 0;
-    if (!fs->has_alpha) { RED_ONCE(128, "shader %s draws with alpha function %u but has no alpha test library (its colour 0 has no float alpha): drawn without the test", fs->key, S.color.alpha_func); return 0; }
+    if (!fs->has_alpha) { RED_ONCE(128, "shader %s draws with alpha function %u but has no alpha test entry point (its colour 0 has no float alpha): drawn without the test", fs->key, S.color.alpha_func); return 0; }
     return 1;
 }
-// A pixel shader's alpha test or logic operation library (sfx "ba" / "bl"), compiled here from <key>_<sfx>.metal: the build writes these variants as MSL only (dmsh_build.py
-// ps_side_finish), since few shaders ever draw with either and compiling one for every pixel shader was two of every three Metal compiles of a build. The options follow the
-// chain's offline compiles (dmsh_build.py MAC_METAL, ios_metal.py): preserved invariance, relaxed math on the iPhone; the run-time compiler has no -O1, and its default level
-// compiled Pokémon Scarlet's 40 largest variants in the same time with AIR within 1% of -O1's. The system's Metal shader cache keeps the result for later runs. Called once per
-// shader under its variant's lock; the draw that first needs it waits for the compile (logged)
-static id<MTLLibrary> side_lib(NvShader *fs, const char *sfx, NSError **e) {
-    size_t kl = strlen(fs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_%s.metal", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), fs->key, sfx];
-    NSString *src = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:e];
-    if (!src) return nil;
-    static MTLCompileOptions *opt; static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        opt = [MTLCompileOptions new]; opt.preserveInvariance = YES;
+// A pixel shader's side library <key>_bx (its alpha test and logic operation entry points, dmsh_side.py), compiled here from <key>_bx.metal: the build writes the side compile unit as
+// MSL only (dmsh_build.py ps_libraries), since few shaders ever draw with either and compiling it for every pixel shader was most of a build's Metal compiles. The options follow the
+// chain's offline compiles (dmsh_build.py MAC_METAL, ios_metal.py): preserved invariance, relaxed math on the iPhone; the run-time compiler has no -O1 (see the reference entry
+// "Alpha test and logic operation variants compiled on first need"). The system's Metal shader cache keeps the result for later runs. Compiled once per shader for both at_fn and
+// lo_fn (a failure is final); the draw that first needs it waits for the compile (logged)
+static os_unfair_lock g_side_lock = OS_UNFAIR_LOCK_INIT;
+static id<MTLLibrary> side_lib(NvShader *fs, NSError **e) {
+    os_unfair_lock_lock(&g_side_lock);
+    if (!fs->xlib_state) {
+        fs->xlib_state = 2;
+        size_t kl = strlen(fs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bx.metal", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), fs->key];
+        NSString *src = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:e];
+        static MTLCompileOptions *opt; static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            opt = [MTLCompileOptions new]; opt.preserveInvariance = YES;
 #if TARGET_OS_IPHONE
-        opt.mathMode = MTLMathModeRelaxed;
+            opt.mathMode = MTLMathModeRelaxed;
 #endif
-    });
-    uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
-    id<MTLLibrary> lib = [g_dev newLibraryWithSource:src options:opt error:e];
-    static _Atomic int n; static _Atomic uint64_t ns; uint64_t dt = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0; int c = ++n; ns += dt;
-    if (lib && (c <= 3 || !(c & (c - 1)))) MLOG("side library %.*s_%s compiled from source in %.1f ms (%d so far, %.1f ms in all)", (int)(kl > 2 ? kl - 2 : kl), fs->key, sfx, dt / 1e6, c, ns / 1e6);
+        });
+        uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+        if (src && (fs->xlib = [g_dev newLibraryWithSource:src options:opt error:e])) {
+            fs->xlib_state = 1;
+            static int n; static uint64_t ns; uint64_t dt = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0; ns += dt;
+            if (++n <= 3 || !(n & (n - 1))) MLOG("side library %.*s_bx compiled from source in %.1f ms (%d so far, %.1f ms in all)", (int)(kl > 2 ? kl - 2 : kl), fs->key, dt / 1e6, n, ns / 1e6);
+        }
+    }
+    id<MTLLibrary> lib = fs->xlib;
+    os_unfair_lock_unlock(&g_side_lock);
     return lib;
 }
 static os_unfair_lock g_at_lock = OS_UNFAIR_LOCK_INIT;
-static id<MTLFunction> at_fn(NvShader *fs, id<MTLFunction> base) {   // the alpha test library's entry point named as base (one of fs's own), loaded on first need; a failure is final for the shader
+static id<MTLFunction> at_fn(NvShader *fs, id<MTLFunction> base) {   // the side library's alpha test entry point of base (one of fs's own), loaded on first need; a failure is final for the shader
     int w = !base ? -1 : base == fs->fn ? 0 : base == fs->fn_u ? 1 : base == fs->fn_m ? 2 : base == fs->fn_d ? 3 : -1;
     if (w < 0 || !fs->has_alpha) return nil;
     os_unfair_lock_lock(&g_at_lock);
     if (!fs->afn_state) {
         fs->afn_state = 2;
-        NSError *e = nil; id<MTLLibrary> lib = side_lib(fs, "ba", &e); const char *why = lib ? NULL : "no library";
+        NSError *e = nil; id<MTLLibrary> lib = side_lib(fs, &e); const char *why = lib ? NULL : "no library";
         id<MTLFunction> own[4] = {fs->fn, fs->fn_u, fs->fn_m, fs->fn_d};
         for (int i = 0; i < 4 && !why; i++) {
             if (!own[i]) continue;
-            NSString *name = own[i].name; id<MTLFunction> f = fn4_note([lib newFunctionWithName:name], lib, name, nil);
+            NSString *name = [own[i].name stringByAppendingString:@"_a"]; id<MTLFunction> f = fn4_note([lib newFunctionWithName:name], lib, name, nil);
             if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, name, [MTLFunctionConstantValues new], &e);   // as shader_load
             if (!f) why = "no entry point";
             else if (fs->rf.nb && [f newArgumentEncoderWithBufferIndex:fs->rf.abi].encodedLength != fs->arg_len) why = "its argument buffer differs from the base library's";
             else fs->afn[i] = f;
         }
-        if (!why) { fs->afn_state = 1; static int n; if (++n <= 3 || !(n & (n - 1))) MLOG("alpha test: library of %s loaded (%d shaders so far)", fs->key, n); }
-        else { static int n; if (n++ < 8) MLOG("[RED] alpha test library of %s not usable (%s%s%s): its alpha-tested draws go without the test", fs->key, why, e ? ": " : "", e ? e.localizedDescription.UTF8String : ""); }
+        if (!why) { fs->afn_state = 1; static int n; if (++n <= 3 || !(n & (n - 1))) MLOG("alpha test: side library of %s loaded (%d shaders so far)", fs->key, n); }
+        else { static int n; if (n++ < 8) MLOG("[RED] alpha test entry points of %s not usable (%s%s%s): its alpha-tested draws go without the test", fs->key, why, e ? ": " : "", e ? e.localizedDescription.UTF8String : ""); }
     }
     id<MTLFunction> f = fs->afn_state == 1 ? fs->afn[w] : nil;
     os_unfair_lock_unlock(&g_at_lock);
@@ -6218,8 +6227,8 @@ static void at_bind(id<MTLCommandEncoder> en) {
     enc_r_args((id<MTL4RenderCommandEncoder>)en, MTLRenderStageFragment, gpu, DMSH_ALPHA_BUFFER);
 }
 // NVN's logic operations (ColorStateSetLogicOp: the bits a pixel shader writes combined with the target's, in place of blending; integer and normalized targets, as in OpenGL and Vulkan): Metal has none.
-// A pipeline drawn with an operation other than COPY takes its entry point (fn, or fn_u / fn_m for unsigned integer targets) from the shader's logic operation library <key>_bl instead
-// (dmsh_logic.py: it reads each output's attachment and combines the two before each return), and its draws bind the operation and the targets' channel masks at fragment buffer
+// A pipeline drawn with an operation other than COPY takes its entry point (for fn, or fn_u / fn_m for unsigned integer targets) from the shader's side library <key>_bx instead
+// (dmsh_logic.py: <entry>_l runs the body, reads each output's attachment and combines the two), and its draws bind the operation and the targets' channel masks at fragment buffer
 // DMSH_LOGIC_BUFFER (lo_bind). Xenoblade Chronicles 2 ORs probe indices into its RG32Uint light probe lists; Skyward Sword HD ORs fog into the alpha of its RGBA8Unorm frame. A target
 // with no bits to combine (floating point, sRGB, signed) keeps COPY, with a red line. The operation takes the place of blending (blending stays off in pso_desc), as both APIs define
 static inline int lop_on(void) { return S.color.logic_op != NVN_LOGIC_OP_COPY; }
@@ -6248,11 +6257,11 @@ static uint32_t lop_key(const pso_key *k, NvShader *fs, int merged) {   // pso_k
     int u = fs->fn_u && pso_all_uint(k, fs, 0), m = !u && fs->fn_m && pso_mixed_uint(k, fs, 0);
     if (!u && !m && (other || !norm)) { RED_ONCE(133, "shader %s draws with logic operation %u into a target with no bits to combine (floating point, sRGB, signed) or an integer target it has no entry point for: drawn with COPY", fs->key, S.color.logic_op); return 0; }
     if (k->atest) { RED_ONCE(142, "shader %s draws with logic operation %u and an alpha test, which no library combines: drawn with COPY", fs->key, S.color.logic_op); return 0; }
-    if (!fs->has_logic) { RED_ONCE(135, "shader %s draws with logic operation %u but has no logic operation library: drawn with COPY", fs->key, S.color.logic_op); return 0; }
+    if (!fs->has_logic) { RED_ONCE(135, "shader %s draws with logic operation %u but has no logic operation entry point: drawn with COPY", fs->key, S.color.logic_op); return 0; }
     return 1;
 }
 static os_unfair_lock g_lo_lock = OS_UNFAIR_LOCK_INIT;
-// The logic operation library's entry point named as base (fn, fn_u or fn_m), specialized for the targets the pipeline has (targets: bit n = colour target n attached; dmsh_logic.py reads
+// The side library's logic operation entry point of base (fn, fn_u or fn_m), specialized for the targets the pipeline has (targets: bit n = colour target n attached; dmsh_logic.py reads
 // only those, DMSH_LOGIC_FC + n), loaded on first need; a library that fails is final for the shader
 static id<MTLFunction> lo_fn(NvShader *fs, id<MTLFunction> base, uint32_t targets) {
     int w = !base ? -1 : base == fs->fn_u ? 0 : base == fs->fn_m ? 1 : base == fs->fn ? 2 : -1;
@@ -6261,20 +6270,20 @@ static id<MTLFunction> lo_fn(NvShader *fs, id<MTLFunction> base, uint32_t target
     NSError *e = nil; const char *why = NULL;
     if (!fs->lfn_state) {
         fs->lfn_state = 2;
-        if ((fs->llib = side_lib(fs, "bl", &e))) { fs->lfn_state = 1; fs->lfn = [NSMutableDictionary dictionary]; static int n; if (++n <= 3 || !(n & (n - 1))) MLOG("logic operation: library of %s loaded (%d shaders so far)", fs->key, n); }
+        if ((fs->llib = side_lib(fs, &e))) { fs->lfn_state = 1; fs->lfn = [NSMutableDictionary dictionary]; static int n; if (++n <= 3 || !(n & (n - 1))) MLOG("logic operation: side library of %s loaded (%d shaders so far)", fs->key, n); }
         else why = "no library";
     }
     id<MTLFunction> f = nil; NSNumber *k = @(w << 8 | (targets & 0xff));
     if (fs->lfn_state == 1 && !(f = fs->lfn[k])) {
         MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
         for (int n = 0; n < 8; n++) { bool on = targets >> n & 1; [cv setConstantValue:&on type:MTLDataTypeBool atIndex:DMSH_LOGIC_FC + n]; }
-        NSString *name = base.name;
+        NSString *name = [base.name stringByAppendingString:@"_l"];
         f = fn4_note([fs->llib newFunctionWithName:name constantValues:cv error:&e], fs->llib, name, cv);
         if (!f) why = "no entry point";
         else if (fs->rf.nb && [f newArgumentEncoderWithBufferIndex:fs->rf.abi].encodedLength != fs->arg_len) { why = "its argument buffer differs from the base library's"; f = nil; }
         if (f) fs->lfn[k] = f; else fs->lfn_state = 2;
     }
-    if (why) { static int n; if (n++ < 8) MLOG("[RED] logic operation library of %s not usable (%s%s%s): its draws go with COPY", fs->key, why, e ? ": " : "", e ? e.localizedDescription.UTF8String : ""); }
+    if (why) { static int n; if (n++ < 8) MLOG("[RED] logic operation entry points of %s not usable (%s%s%s): its draws go with COPY", fs->key, why, e ? ": " : "", e ? e.localizedDescription.UTF8String : ""); }
     os_unfair_lock_unlock(&g_lo_lock);
     return f;
 }
@@ -6331,12 +6340,12 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
     else if (dual) { want_note(&g_dual_want, fs->key);
         RED_ONCE(121, "shader %s writes output 1 and a pipeline blends with it as the second source, but it has no dual-source entry point: the second source counts as zero "
                  "(add its key to the profile's dual_want.tsv; DM_NVN_DUAL_WANT=<file> lists every such shader)", fs->key); }
-    if (k->atest && fs) {   // the alpha test (atest_key): the same entry point of the alpha test library
+    if (k->atest && fs) {   // the alpha test (atest_key): the same entry point's in the side library
         id<MTLFunction> af = fsfn ? nil : at_fn(fs, d.fragmentFunction);
         if (af) d.fragmentFunction = af;
         else if (fsfn) RED_ONCE(129, "alpha test not applied to a specialized fragment (readable-tile merge or diagnostic) of %s", fs->key);
     }
-    if (k->logic && fs) {   // the logic operation (lop_key): the same entry point of the logic operation library; never with the alpha test's, which lop_key leaves out
+    if (k->logic && fs) {   // the logic operation (lop_key): the same entry point's in the side library; never with the alpha test's, which lop_key leaves out
         uint32_t targets = 0; for (int i = 0; i < 8; i++) if (k->cfmt[i]) targets |= 1u << i;   // not a merged pass (lop_key): target i is output i
         id<MTLFunction> lf = fsfn ? nil : lo_fn(fs, d.fragmentFunction, targets);
         if (lf) d.fragmentFunction = lf;

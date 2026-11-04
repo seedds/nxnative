@@ -1558,10 +1558,12 @@ static void treg_sparse_notes(void);
 static void pass_split_try(void);
 static uint64_t g_setrt_n;   // render target changes so far (pass_split_try: splits per NVN pass)
 static int g_split_resume;   // the pass was split at this draw: it opens again where the dispatch scan already looked (cs_hoist_try)
+static void mfx_trace_sub_begin(void); static void mfx_trace_sub_end(void);
 void mtl_sub_begin(void) {
     mtl_init(); g_sub_serial++; g_seg = 0;
     treg_sparse_notes();   // the mappings made before this submission
     if (g_pkg_kept) { g_pkg_kept = 0; nvn_dirty_touch(); } seg_clk_put(g_sclk); g_sclk = NULL;
+    mfx_trace_sub_begin();
     sub_cut_begin();
     defer_drain();
     rh_trim();
@@ -2622,6 +2624,7 @@ uint64_t mtl_sub_commit(void) {
     defer_idle_commit();   // a feedback handler that drained since this submission's own commit saw it open
     g_commit_blocks = nil;
     objc_autoreleasePoolPop(g_sub_pool); g_sub_pool = NULL;
+    mfx_trace_sub_end();
     return fence;
 }
 
@@ -5078,6 +5081,25 @@ static inline int passdump(void) {
 // The next n frames' passes, on request (the Mac's DM_CTL "passdump n", hle_hid.c): for a scene that a fixed DM_NVN_PASSDUMP frame range cannot be timed to
 void dm_gfx_passdump_next(long n) { long f = (long)atomic_load(&g_cur_frame); g_pd_a1 = f + n; g_pd_a0 = f + 1; }
 #define PD(...) do { if (passdump()) { flockfile(stderr); fprintf(stderr, "[pass] F%llu ", (unsigned long long)atomic_load(&g_cur_frame)); fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); funlockfile(stderr); } } while (0)
+// Owned by serialized submission replay. Present can advance g_cur_frame but never touches these counters.
+static unsigned g_mfx_trace_calls, g_mfx_trace_named, g_mfx_trace_seen, g_mfx_trace_encoded;
+static int g_mfx_trace_selected; static uint64_t g_mfx_trace_frame;
+static struct { uint64_t iser, oser; NSUInteger iw, ih, ow, oh; int resolved; } g_mfx_trace_binding;
+static int mfx_trace_on(void) { return g_mfx_trace_selected; }
+#define MFX_PD(...) do { if (g_mfx_trace_selected) { flockfile(stderr); fprintf(stderr, "[pass] F%llu MFX submission=%llu ", (unsigned long long)g_mfx_trace_frame, (unsigned long long)g_sub_serial); fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); funlockfile(stderr); } } while (0)
+static void mfx_trace_sub_begin(void) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_MFX_TRACE"); on = e && !strcmp(e, "1"); }
+    g_mfx_trace_calls = g_mfx_trace_named = g_mfx_trace_seen = g_mfx_trace_encoded = 0;
+    g_mfx_trace_frame = atomic_load(&g_cur_frame);
+    g_mfx_trace_selected = on && passdump();
+    // A concurrent boundary while choosing the sample leaves this submission unselected, not a false zero.
+    if (g_mfx_trace_frame != atomic_load(&g_cur_frame)) g_mfx_trace_selected = 0;
+}
+static void mfx_trace_sub_end(void) {
+    uint64_t end = atomic_load(&g_cur_frame);
+    MFX_PD("summary observed_end_frame=%llu crossed_boundary=%d dispatch_calls=%u named_attempts=%u at_substitution=%u encoded=%u original=%u early_exit=%u detail_limit=64", (unsigned long long)end, end != g_mfx_trace_frame, g_mfx_trace_calls, g_mfx_trace_named, g_mfx_trace_seen, g_mfx_trace_encoded, g_mfx_trace_seen - g_mfx_trace_encoded, g_mfx_trace_named - g_mfx_trace_seen);
+    g_mfx_trace_selected = 0;
+}
 static void blit_note(void) { if (g_enc) PD("E %llu copy / buffer update ends the render pass", g_stat_pass); }
 __attribute__((weak)) void dm_guest_frame_tick(void) {}   // hle_os.c provides the strong definition (DM_DETCLOCK deterministic guest clock); a no-op when graphics unit tests do not link the host   // diag.c provides the strong definition (DM_TICK_HOLD=E:SHOT unfreeze); a no-op when graphics unit tests do not link the host
 __attribute__((weak)) void dm_cheats_present(void) {}   // hle_cheats.c provides the strong definition (the Atmosphère cheat pass per presented frame); a no-op when graphics unit tests do not link the host
@@ -14856,7 +14878,8 @@ static int lc_keeps(uint32_t op) {
 }
 
 static void dispatch(const p_dispatch *dp);
-static int up_mfx_wanted(NvShader *cs); static int up_mfx_encode(NvShader *cs);   // a game's upscaler through MetalFX (see up_mfx_encode)
+static int up_mfx_on(void); static int up_mfx_wanted(NvShader *cs); static int up_mfx_named(NvShader *cs); static int up_mfx_encode(NvShader *cs, const char **why);
+static void mfx_trace_dispatch(NvShader *cs, int indirect, int encoded, const char *why);   // a game's upscaler through MetalFX (see up_mfx_encode)
 static int ndve_engine_dispatch(NvShader *cs, const p_dispatch *dp);   // nn::ndve's movie network as the host's kernels (DM_NDVE_ENGINE=1, nvn_ndve.inc)
 // ---------- Compute dispatches moved ahead of the render pass they would split (DM_NVN_CS_HOIST) ----------
 // Metal cannot run a compute dispatch inside a render pass, so a dispatch between two draws of one pass ends it, and on a tile-based GPU every attachment is stored and loaded again:
@@ -15613,6 +15636,7 @@ static id<MTL4ComputeCommandEncoder> dispatch_enc_cs(NvShader *cs, uint64_t ind)
     return e;
 }
 static void dispatch(const p_dispatch *dp) {
+    if (mfx_trace_on()) g_mfx_trace_calls++;
     zskip_clear();
     g_wr_epoch++; g_mdx_epoch++;
     if (!S.cprog) { RED_ONCE(27, "no program bound before the dispatch"); return; }
@@ -15622,6 +15646,7 @@ static void dispatch(const p_dispatch *dp) {
     if (dp->ind) { static int once; if (!once++) MLOG("indirect dispatch: first time (the GPU reads the threadgroup counts from %#llx)", (unsigned long long)dp->ind); }
     NvShader *cs = prog_get(S.cprog)->sh[5];
     if (!cs) { RED_ONCE(28, "the dispatched program has no compute shader (or it is not mapped)"); return; }
+    if (mfx_trace_on() && up_mfx_named(cs)) g_mfx_trace_named++;
     if (dp->ind) ind_fly_put(cs->key, dp->ind, io, ib);
     if (passdump()) { uint32_t n[3] = {0, 0, 0}; if (dp->ind && nvn_host_readable(dp->ind, 12)) memcpy(n, (const void *)(uintptr_t)dp->ind, 12);
         PD("g %llu dispatch %s %ux%ux%u indirect=%#llx (now %u %u %u)", g_stat_pass, cs->key, dp->x, dp->y, dp->z, (unsigned long long)dp->ind, n[0], n[1], n[2]); }
@@ -15670,7 +15695,14 @@ static void dispatch(const p_dispatch *dp) {
     rp_flush();   // A full clear with no draw after it waits for the next pass on its targets, but it comes before this dispatch, which may read or write them as images: land it first, as copy_t2t does
     image_prepare(prog_get(S.cprog), 0x20);
     if (ndve_engine_dispatch(cs, dp)) return;   // nn::ndve's movie network as the host's kernels (DM_NDVE_ENGINE=1)
-    if (up_mfx_wanted(cs) && !dp->ind && up_mfx_encode(cs)) return;   // the game's upscaler, drawn by MetalFX instead (DM_UPSCALER=metalfx)
+    int trace = mfx_trace_on() && up_mfx_named(cs);
+    if (trace) memset(&g_mfx_trace_binding, 0, sizeof g_mfx_trace_binding);
+    int wanted = up_mfx_wanted(cs), encoded = 0; const char *why = NULL;
+    if (!wanted) { if (trace) why = !up_mfx_on() ? "disabled_or_unsupported" : "unsupported_color"; }
+    else if (dp->ind) why = "indirect";
+    else encoded = up_mfx_encode(cs, &why);
+    if (trace) mfx_trace_dispatch(cs, dp->ind != 0, encoded, why);
+    if (encoded) return;   // the game's upscaler, drawn by MetalFX instead (DM_UPSCALER=metalfx)
     // Threadgroup memory past Metal's 32 KB, in a device buffer (dmsh_rewrite.py tg_spill): a slice for every workgroup of the grid. An indirect dispatch's grid is in GPU memory, written earlier
     // in the frame: the replay waits for the GPU (as an indirect-count multi-draw does, mdi_wait) and reads it. Mario Kart World's spilled dispatches are all direct, of 1 to 3 workgroups
     uint64_t tg_groups = 0;
@@ -17542,11 +17574,30 @@ static int up_mfx_rect(const uint32_t v[4], NSUInteger w, NSUInteger h, NVNcopyR
     if (v[0] > INT_MAX || v[1] > INT_MAX || rw > INT_MAX || rh > INT_MAX || (uint64_t)v[0] + rw > w || (uint64_t)v[1] + rh > h) return 0;
     *r = (NVNcopyRegion){(int)v[0], (int)v[1], 0, (int)rw, (int)rh, 1}; return 1;
 }
-// The dispatch of upscaler cs as MetalFX's spatial scaler from its texture slot's rectangle to its image slot's (see above): 1 when drawn, 0 to run the shader
-static int up_mfx_encode(NvShader *cs) {
+// Dimensions come from the exact bindings resolved by up_mfx_encode; other decisions report unresolved bindings.
+static void mfx_trace_dispatch(NvShader *cs, int indirect, int encoded, const char *why) {
+    g_mfx_trace_seen++; g_mfx_trace_encoded += encoded != 0;
+    if (g_mfx_trace_seen > 64) return;
     int ti = -1, oi = -1;
-    for (int i = 0; i < cs->rf.nb; i++) { int k = cs->rf.b[i].kind; if (k == NVN_RB_TEX && ti < 0) ti = i; else if (k == NVN_RB_IMG && oi < 0) oi = i; else if (k == NVN_RB_TEX || k == NVN_RB_IMG) return 0; }
-    if (ti < 0 || oi < 0) { static int once; if (!once++) MLOG("[RED] upscaler %s: not one texture and one image; the shader draws", cs->key); return 0; }
+    for (int i = 0; i < cs->rf.nb; i++) {
+        if (cs->rf.b[i].kind == NVN_RB_TEX && ti < 0) ti = i;
+        if (cs->rf.b[i].kind == NVN_RB_IMG && oi < 0) oi = i;
+    }
+    int tin = ti < 0 ? 0 : (int)(tex_slot_h(S.tex[5], S.img[5], cs->rf.b[ti].reg) & 0xfffff);
+    int tout = oi < 0 || cs->rf.b[oi].reg >= 32 ? 0 : (int)(S.img[5][cs->rf.b[oi].reg] & 0xfffff);
+    uint32_t v[8]; memcpy(v, S.push[1], sizeof v); NVNcopyRegion ir = {0}, orr = {0};
+    int iv = g_mfx_trace_binding.resolved && up_mfx_rect(v, g_mfx_trace_binding.iw, g_mfx_trace_binding.ih, &ir);
+    int ov = g_mfx_trace_binding.resolved && up_mfx_rect(v + 4, g_mfx_trace_binding.ow, g_mfx_trace_binding.oh, &orr);
+    MFX_PD("dispatch key=%s kind=%s bindings_resolved=%d input=%d/ser%llu/%lux%lu rect_valid=%d rect=%d,%d,%d,%d output=%d/ser%llu/%lux%lu rect_valid=%d rect=%d,%d,%d,%d outcome=%s reason=%s",
+       cs->key, indirect ? "indirect" : "direct", g_mfx_trace_binding.resolved, tin, (unsigned long long)g_mfx_trace_binding.iser, (unsigned long)g_mfx_trace_binding.iw, (unsigned long)g_mfx_trace_binding.ih, iv, ir.xoffset, ir.yoffset, ir.width, ir.height,
+       tout, (unsigned long long)g_mfx_trace_binding.oser, (unsigned long)g_mfx_trace_binding.ow, (unsigned long)g_mfx_trace_binding.oh, ov, orr.xoffset, orr.yoffset, orr.width, orr.height, encoded ? "metalfx" : "original", encoded ? "none" : why ? why : "unclassified");
+}
+// The dispatch of upscaler cs as MetalFX's spatial scaler from its texture slot's rectangle to its image slot's (see above): 1 when drawn, 0 to run the shader
+static int up_mfx_encode(NvShader *cs, const char **why) {
+#define MFX_REFUSE(reason) do { if (why) *why = (reason); return 0; } while (0)
+    int ti = -1, oi = -1;
+    for (int i = 0; i < cs->rf.nb; i++) { int k = cs->rf.b[i].kind; if (k == NVN_RB_TEX && ti < 0) ti = i; else if (k == NVN_RB_IMG && oi < 0) oi = i; else if (k == NVN_RB_TEX || k == NVN_RB_IMG) MFX_REFUSE("multiple_bindings"); }
+    if (ti < 0 || oi < 0) { static int once; if (!once++) MLOG("[RED] upscaler %s: not one texture and one image; the shader draws", cs->key); MFX_REFUSE("missing_binding"); }
     int tin = (int)(tex_slot_h(S.tex[5], S.img[5], cs->rf.b[ti].reg) & 0xfffff), tout = cs->rf.b[oi].reg < 32 ? (int)(S.img[5][cs->rf.b[oi].reg] & 0xfffff) : 0;
     tex_t dout = {0}; id<MTLTexture> in, out;
     os_unfair_lock_lock(&g_rmu);
@@ -17558,12 +17609,23 @@ static int up_mfx_encode(NvShader *cs) {
     uint64_t rid = 0; int real = 0;
     out = ok ? img_binding(tout, &cs->rf.b[oi], &rid, &real) : nil;
     if (!real) out = nil;
+    if (mfx_trace_on()) {
+        g_mfx_trace_binding.resolved = in != nil && out != nil;
+        g_mfx_trace_binding.iser = ok ? g_treg[tin].t.serial : 0; g_mfx_trace_binding.oser = dout.serial;
+        g_mfx_trace_binding.iw = in.width; g_mfx_trace_binding.ih = in.height;
+        g_mfx_trace_binding.ow = out.width; g_mfx_trace_binding.oh = out.height;
+    }
     os_unfair_lock_unlock(&g_rmu);
     uint32_t v[8]; memcpy(v, S.push[1], sizeof v);
     NVNcopyRegion ir, orr;
-    if (!in || !out || in == out || in.textureType != MTLTextureType2D || out.textureType != MTLTextureType2D || in.sampleCount != 1 || out.sampleCount != 1 ||
-        fmt_int_or_ds(in.pixelFormat) || fmt_int_or_ds(out.pixelFormat) || mtl_fmt_block(out.pixelFormat) || !up_mfx_rect(v, in.width, in.height, &ir) || !up_mfx_rect(v + 4, out.width, out.height, &orr) ||
-        orr.width < ir.width || orr.height < ir.height || (orr.width == ir.width && orr.height == ir.height)) { g_up_mfx_kept++; return 0; }
+    const char *reject = !in || !out ? "missing_texture" : in == out ? "same_texture" :
+        in.textureType != MTLTextureType2D || out.textureType != MTLTextureType2D ? "texture_type" :
+        in.sampleCount != 1 || out.sampleCount != 1 ? "multisample" :
+        fmt_int_or_ds(in.pixelFormat) || fmt_int_or_ds(out.pixelFormat) || mtl_fmt_block(out.pixelFormat) ? "format" :
+        !up_mfx_rect(v, in.width, in.height, &ir) ? "input_rect" :
+        !up_mfx_rect(v + 4, out.width, out.height, &orr) ? "output_rect" :
+        orr.width < ir.width || orr.height < ir.height || (orr.width == ir.width && orr.height == ir.height) ? "not_upscale" : NULL;
+    if (reject) { g_up_mfx_kept++; MFX_REFUSE(reject); }
     int srgb = cs->up_color == UP_COLOR_SRGB, root = cs->up_color == UP_COLOR_ROOT;
     // Each side is the game's own texture when MetalFX can take it as it is: the rectangle is the whole texture (MetalFX reads and writes from the origin) and the format is not sRGB (as the
     // copies, which keep its decode). The input in any format MetalFX takes, unless it is square-rooted: only the copy squares it (COPY_T2T_SQUARE). The output, private, only in the
@@ -17585,15 +17647,16 @@ static int up_mfx_encode(NvShader *cs) {
             e = NULL;
         }
     }
-    if (!e || (!sout && !(out.usage & MTLTextureUsageRenderTarget))) { g_up_mfx_kept++; return 0; }
+    if (!e) { g_up_mfx_kept++; MFX_REFUSE("scaler_unavailable"); }
+    if (!sout && !(out.usage & MTLTextureUsageRenderTarget)) { g_up_mfx_kept++; MFX_REFUSE("output_not_renderable"); }
     id<MTL4FXSpatialScaler> sc = e->sc;
     id<MTLTexture> color = sin ? in : up_mfx_scratch(e, 0), drawn = sout ? out : up_mfx_scratch(e, 1), result = sout ? out : e->out;
-    if (!color || !drawn) { g_up_mfx_kept++; return 0; }
+    if (!color || !drawn) { g_up_mfx_kept++; MFX_REFUSE("scratch_unavailable"); }
     zskip_del(dout.serial);
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     ubd_land_compute();
     NVNcopyRegion at0 = {0, 0, 0, ir.width, ir.height, 1}, at0o = {0, 0, 0, orr.width, orr.height, 1};
-    if (!sin && !copy_t2t_draw(in, color, 0, 0, 0, 0, &ir, &at0, 0, root ? COPY_T2T_SQUARE : 0)) { g_up_mfx_kept++; return 0; }   // to the origin of the scaler's input (a nearest draw: same size)
+    if (!sin && !copy_t2t_draw(in, color, 0, 0, 0, 0, &ir, &at0, 0, root ? COPY_T2T_SQUARE : 0)) { g_up_mfx_kept++; MFX_REFUSE("input_copy"); }   // to the origin of the scaler's input (a nearest draw: same size)
     mfx_order(g_cb, nil, MTLOriginMake(0, 0, 0), MTLSizeMake(0, 0, 0), nil);   // the scaler after the frame's work so far, and the next pass after the scaler
     NSUInteger cw = (NSUInteger)ir.width, ch = (NSUInteger)ir.height;
     rec_cb_block(g_cb, ^(id<MTL4CommandBuffer> cb) {   // the real command buffer, on the encoding thread when it runs (iOS's default)
@@ -17601,7 +17664,7 @@ static int up_mfx_encode(NvShader *cs) {
         [sc encodeToCommandBuffer:cb];
     });
     if (!sout && !copy_t2t_draw(drawn, out, 0, 0, 0, 0, &at0o, &orr, 0, 0)) {
-        args_dirty_all(); g_up_mfx_kept++; return 0;   // only the scratch image was scaled; the game's shader can still produce the output
+        args_dirty_all(); g_up_mfx_kept++; MFX_REFUSE("output_copy");   // only the scratch image was scaled; the game's shader can still produce the output
     }
     args_dirty_all();
     g_up_mfx_straight[0] += sin; g_up_mfx_straight[1] += sout;
@@ -17616,6 +17679,7 @@ static int up_mfx_encode(NvShader *cs) {
                             (unsigned long)in.width, (unsigned long)in.height, (unsigned long)in.pixelFormat, sin ? "straight" : "copied", orr.width, orr.height, orr.xoffset, orr.yoffset, (unsigned long)out.width,
                             (unsigned long)out.height, (unsigned long)out.pixelFormat, sout ? "straight" : "drawn back", srgb ? ", decoded from sRGB" : root ? ", squared from its square roots" : "");
     return 1;
+#undef MFX_REFUSE
 }
 // The present pass: src's valid rectangle drawn into dst (the drawable, or a screenshot's texture) as present_encode draws it, through MetalFX first where fx_encode takes it
 // (fx: the scaler state to use, nil = bilinear). uvb: the pass's crop constants (one buffer per present allocator, written by the CPU)

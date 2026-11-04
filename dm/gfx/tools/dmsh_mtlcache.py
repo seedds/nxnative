@@ -60,6 +60,22 @@ class Cache:
         os.replace(tmp, lib)
         os.makedirs(os.path.dirname(p), exist_ok=True); clone(lib, p); self.count((target, 'compiled'))
 
+    def compile_split(self, target, msl, a, b, split):
+        """msl → two libraries cut from its one compile, split(the library's bytes) → (a's bytes, b's bytes): clones of what the same source gave before, or a compile (then both kept, not the whole
+        library, so an output stays a clone as compile's are). Raises CalledProcessError as the compile does, and what split raises"""
+        p = self.path(target, open(msl, 'rb').read()); q = p[:-len('.metallib')] + '_x.metallib'
+        if os.path.exists(p) and os.path.exists(q):
+            clone(p, a); clone(q, b); self.count((target, 'reused')); return
+        whole = f'{a}.tmp-{os.getpid()}-{threading.get_ident()}'
+        self._compile(target, msl, whole)
+        try:
+            with open(whole, 'rb') as f: pieces = split(f.read())
+        finally: os.unlink(whole)
+        for lib, data in zip((a, b), pieces):
+            with open(whole, 'wb') as f: f.write(data)
+            os.replace(whole, lib)
+        os.makedirs(os.path.dirname(p), exist_ok=True); clone(b, q); clone(a, p); self.count((target, 'compiled'))
+
     def _check(self, target, d, stems, mac_dir):
         """None if folder d was built with the current convention and compiler, else why not"""
         rec, picks = self.targets[target][1], collections.defaultdict(list)
@@ -82,7 +98,8 @@ class Cache:
         stamp_file = os.path.join(self.root, 'filled.json')
         try: stamps = json.load(open(stamp_file))
         except (OSError, ValueError): stamps = {}
-        names = set(os.listdir(mac_dir)); stems = sorted(n[:-6] for n in names if OUTPUT.fullmatch(n))   # not an AppleDouble ._<name> (exFAT / FAT drives)
+        names = set(os.listdir(mac_dir))   # a library with a side library was cut from another source than its .metal (compile_split, dmsh_side.py), and a compile of that source is never asked for
+        stems = sorted(n[:-6] for n in names if OUTPUT.fullmatch(n) and n[:-6] + 'x.metallib' not in names)   # not an AppleDouble ._<name> (exFAT / FAT drives)
         todo, notes = {}, []
         for target, d in (('mac', mac_dir), ('ios', ios_dir)):
             if targets is not None and target not in targets: continue   # checking an earlier build compiles samples too

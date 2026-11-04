@@ -1129,43 +1129,81 @@ def int_outputs(src, body, cols):
     return {nm for nm, k in found.items() if k == {'int'}} or {nm for nm, k in found.items() if 'int' in k}
 
 def fs_uint(src):
-    """Integer colour targets. With no PC version the translator declares every fragment output float; a shader writes an integer as the float with its bits (as_type<float>(…)), and Metal
-    refuses a pipeline whose float output meets an integer attachment. Luigi's Mansion 3 draws its whole scene into an R32Uint + RGBA8Uint G-buffer (1,377 of its 4,307 pixel shaders write
-    an output from integer bits): a hand-written row per shader (shader_facts_manual.tsv) does not scale to that. A pixel shader that writes an output from integer bits gets a second entry
-    point, main0_u, the same body returning every colour output as the unsigned integer vector of the same bits (as_type, nothing converted); the host takes it for a pipeline whose colour
-    attachments are all unsigned integer formats (nvn_mtl.m).
-    A G-buffer may mix the two: Pokémon Sword's scene shaders write colour 0 and 2 as floats and colour 1 from integer bits into an RGBA16Uint target. A shader whose outputs include both
-    gets a third entry point, main0_m, that returns only the outputs written from integer bits as unsigned integers (their colour indices: the mask); the host takes it for a pipeline whose
-    integer attachments are exactly those; which outputs those are comes from how their values are computed (int_outputs), as nearly every float output is written as integer bits too.
-    → (the source with main0_u (and main0_m) added, the main0_m mask or 0), or (None, 0)"""
-    m = re.search(r'^.*\bfragment\s+main0_out\s+main0\s*\(', src, re.M); st = re.search(r'struct main0_out\s*\{(.*?)\};', src, re.S)
-    if not m or not st: return None, 0
-    mem = re.findall(r'^\s*(\w+)\s+(\w+)\s*(\[\[[^\]]*\]\])?;', st.group(1), re.M)
-    cols = {nm: ty for ty, nm, at in mem if 'color(' in at and ty.startswith('float')}
-    # The hardware writes an output's bits to an integer target whatever the shader computed, so main0_u is right for any pixel shader; only those that look like integer writers get one
-    # (the library stays small): an output from integer bits, nothing but constants (a clear drawn into an integer target, 35e1865e313f0553 writes 0 into Luigi's Mansion 3's R32Uint target),
-    # or nothing but flat stage inputs passed through (the bits its vertex or mesh stage wrote: Mario Kart World's dcb0504c844f1ecc copies a primitive's id into an R8Uint target)
-    from_int = {nm for nm in cols if re.search(r'\bout\.%s(?:\.\w+)? = as_type<float\d?>\(' % nm, src)}
-    writes = [m.group(1) for nm in cols for m in re.finditer(r'\bout\.%s(?:\.\w+)? = ([^;]+);' % nm, src)]
-    flat = set(re.findall(r'\b(\w+) \[\[user\(locn\d+\), flat\]\]', src))
-    def passed(w):   # a flat input, or a local that holds one
-        w = w.strip(); d = re.fullmatch(r'\w+', w) and re.search(r'\bfloat\d? %s = (in\.\w+(?:\.\w+)?);' % w, src)
-        i = re.fullmatch(r'in\.(\w+)(?:\.\w+)?', d[1] if d else w)
-        return bool(i and i[1] in flat)
-    body = src[m.start():]; body = body[:body.find('return out;') + 1 or len(body)]
-    ints = int_outputs(src, body, cols)
-    if not from_int and not ints and not (writes and (all(re.fullmatch(r'-?[0-9.]+f?|float\d\([-0-9., ]*\)', w.strip()) for w in writes) or all(passed(w) for w in writes))): return None, 0
-    uty = lambda ty: 'u' + ty.replace('float', 'int')   # float4 → uint4, float → uint
-    def entry(sfx, as_uint):   # main0 again as main0_<sfx>, returning the outputs in as_uint as the unsigned integer vectors of their bits (dmsh_fetch.py cuts the source at main0_out_u)
-        struct = f'struct main0_out_{sfx}\n{{\n' + ''.join(f'    {uty(cols[nm]) if nm in as_uint else ty} {nm} {at};\n' for ty, nm, at in mem) + '};\n\n'
-        ret = f'return main0_out_{sfx}{{' + ', '.join(f'as_type<{uty(cols[nm])}>(out.{nm})' if nm in as_uint else f'out.{nm}' for _, nm, _ in mem) + '};'
-        return '\n' + struct + re.sub(r'\bfragment\s+main0_out\s+main0\s*\(', f'fragment main0_out_{sfx} main0_{sfx}(', src[m.start():], count=1).replace('return out;', ret)
-    out, mask = src + entry('u', set(cols)), 0
-    as_int = ints or from_int
-    if as_int and set(cols) - as_int:   # some outputs from integer bits, some not: the mixed entry point
-        out += entry('m', as_int)
-        mask = sum(1 << int(re.search(r'color\((\d+)\)', at).group(1)) for _, nm, at in mem if nm in as_int)
-    return out, mask
+    """Add entries that preserve float colour outputs as unsigned integer bits.
+
+    The runtime attachment format determines how to interpret the output bits.
+    Every shader with float colour outputs gets main0_u, even if its outputs
+    come from arithmetic or flat varyings rather than explicit bit casts.
+
+    Mixed float/integer attachments still use the existing dataflow inference:
+    main0_m reinterprets only the outputs identified as integer bit patterns.
+    Return the extended source and mixed-output mask, or (None, 0) when there
+    are no float colour outputs.
+    """
+    fragment = re.search(r'^.*\bfragment\s+main0_out\s+main0\s*\(', src, re.M)
+    output_struct = re.search(r'struct main0_out\s*\{(.*?)\};', src, re.S)
+    if not fragment or not output_struct:
+        return None, 0
+
+    members = re.findall(
+        r'^\s*(\w+)\s+(\w+)\s*(\[\[[^\]]*\]\])?;',
+        output_struct.group(1),
+        re.M,
+    )
+    float_colours = {
+        name: member_type
+        for member_type, name, attributes in members
+        if 'color(' in attributes and member_type.startswith('float')
+    }
+    if not float_colours:
+        return None, 0
+
+    explicit_integer_outputs = {
+        name for name in float_colours
+        if re.search(r'\bout\.%s(?:\.\w+)? = as_type<float\d?>\(' % name, src)
+    }
+    fragment_source = src[fragment.start():]
+    first_return = fragment_source.find('return out;')
+    inference_body = fragment_source[:first_return + 1] if first_return >= 0 else fragment_source
+    inferred_integer_outputs = int_outputs(src, inference_body, float_colours)
+
+    def unsigned_type(float_type):
+        return 'u' + float_type.replace('float', 'int')
+
+    def make_entry(suffix, integer_outputs):
+        # dmsh_fetch.py finds the unsigned entry by its main0_out_u struct.
+        declarations = []
+        return_values = []
+        for member_type, name, attributes in members:
+            if name in integer_outputs:
+                member_type = unsigned_type(float_colours[name])
+                return_values.append(f'as_type<{member_type}>(out.{name})')
+            else:
+                return_values.append(f'out.{name}')
+            declarations.append(f'    {member_type} {name} {attributes};\n')
+
+        struct_name = f'main0_out_{suffix}'
+        struct_source = f'struct {struct_name}\n{{\n' + ''.join(declarations) + '};\n\n'
+        return_statement = f'return {struct_name}{{' + ', '.join(return_values) + '};'
+        entry_source = re.sub(
+            r'\bfragment\s+main0_out\s+main0\s*\(',
+            f'fragment {struct_name} main0_{suffix}(',
+            fragment_source,
+            count=1,
+        )
+        entry_source = entry_source.replace('return out;', return_statement)
+        return '\n' + struct_source + entry_source
+
+    output_source = src + make_entry('u', set(float_colours))
+    mixed_mask = 0
+    integer_outputs = inferred_integer_outputs or explicit_integer_outputs
+    if integer_outputs and set(float_colours) - integer_outputs:
+        output_source += make_entry('m', integer_outputs)
+        for _, name, attributes in members:
+            if name in integer_outputs:
+                colour_index = int(re.search(r'color\((\d+)\)', attributes).group(1))
+                mixed_mask += 1 << colour_index
+    return output_source, mixed_mask
 
 def fs_dual(src):
     """Dual-source blending. NVN's SRC1 blend factors read the pixel shader's output 1 as target 0's second source (Maxwell feeds MRT 1 to it), and the translator declares that

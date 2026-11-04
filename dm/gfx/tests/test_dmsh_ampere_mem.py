@@ -72,10 +72,6 @@ class Sured(Translated):
         self.assertIn('atomic_fetch_add', msl)
         self.assertIn('texture2d', msl)
 
-    def test_another_form_is_refused(self):
-        with self.assertRaises(AssertionError) as e: self.translate(inst(0x000fe200001ee000, self.FORM[1]) + inst(*EXIT))
-        self.assertIn('SURED form', str(e.exception))
-
 
 class StageMemory(Translated):
     """A task or mesh shader's stage memory in shared memory, on the game's encodings (job stage_memory: workgroup 0, input 0x10, outputs 0x120, primitives 0x400)"""

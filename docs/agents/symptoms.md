@@ -866,6 +866,9 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - geometry preparation dominates rendering CPU even after geometry passes have been batched; primitive assembly and capture-index deduplication repeat for unchanged meshes. → [Prepared geometry indices reused after byte comparison](../reference/shaders.md#prepared-geometry-indices-reused-after-byte-comparison)
 - geometry vertex-capture passes consume substantial GPU time before geometry compute or depth rasterization. → [Geometry capture initializes only missing words](../reference/shaders.md#geometry-capture-initializes-only-missing-words)
 - Apple's performance HUD (`DM_METAL_HUD=1`) says `Compiled 2 shaders. Total compilation time is 102.70ms. Consider adopting MTL4Compiler for more fine grained compilations` during play, with a dip in the frame-rate graph at that moment, for example when a new room first issues a scissored clear. → [The host's own shaders compiled from source at run time](../reference/shaders.md#the-hosts-own-shaders-compiled-from-source-at-run-time)
+- an Ampere SURED encoding other than the observed unsigned ADD form fails to translate. → [Ampere SURED image reductions](../reference/shaders.md#ampere-sured-image-reductions)
+- workgroup-scoped MEMBAR becomes a device-memory barrier, while ERRBAR emits no ordering operation. → [Ampere MEMBAR and ERRBAR](../reference/shaders.md#ampere-membar-and-errbar)
+- a fragment shader used with an unsigned integer attachment lacks a compatible entry point when its output expression does not match integer-output heuristics. → [Integer entries for every float colour output](../reference/shaders.md#integer-entries-for-every-float-colour-output)
 
 ## Game state
 

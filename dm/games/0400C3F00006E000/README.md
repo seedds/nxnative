@@ -94,6 +94,10 @@ Update 1.8.0 (v917504, SDK 21.4.0) is not on this Mac. Pull request #1116 ported
 
 ## Found on this game
 
+- [Ampere SURED image reductions](../../../docs/reference/shaders.md#ampere-sured-image-reductions)
+- [Ampere MEMBAR and ERRBAR](../../../docs/reference/shaders.md#ampere-membar-and-errbar)
+- [Integer entries for every float colour output](../../../docs/reference/shaders.md#integer-entries-for-every-float-colour-output)
+
 - [A NUP with complete standalone updates stops at "no base game"](../../../docs/reference/packing.md#a-nup-with-complete-standalone-updates-stops-at-no-base-game) (packing reproduced with the base dump; 1.8.0 gameplay remains untested)
 - [Large sparse textures as Metal placement sparse textures](../../../docs/reference/nvn-objects.md#large-sparse-textures-as-metal-placement-sparse-textures)
 - [Physical pages mapped at several places of a placement sparse texture](../../../docs/reference/nvn-objects.md#physical-pages-mapped-at-several-places-of-a-placement-sparse-texture)

@@ -278,6 +278,14 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_codec_video` (AddressSanitizer and UBSan), which covers the AV1 and SDK 22 forms, native images and the av1C record, and decodes a 64x64 AV1 key frame (SVT-AV1) on each backend the Mac has, read back as NV12.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): 82 movies in WebM at 2560x1440; the opening's 3,301 pictures play. On #957's branch, VideoToolbox and dav1d gave the same pictures, bit for bit, over the opening's first 600 (about 450 pictures a second each on an M3 Pro), and a tester's M1 Pro played the first two movies through dav1d, smooth and in sync ([seedds/nxnative#927](https://github.com/seedds/nxnative/issues/927)).
 
+### SDK 19's decoder forms
+
+- **Symptom:** an abort in `nn::codec` (the SDK's own decoder client, which opens a service the host does not have) when a movie starts in a game built with SDK 19 for the Switch 2.
+- **Cause:** SDK 19 names three calls differently from SDK 20 and 22. Initialize by remote memory takes two sizes before the picture size (`…DecoderEPNS0_14Vp9DecoderTypeEmmttj…`). The output buffer properties take a `nn::movie::ColorSpace*` before the time, nine arguments with the index in the first stack slot. The preference has a second form, `nn::codec::sdk::MakeDecodeImagePreferenceForCompat` (fewer output formats, `sdk+0x2c6040`), which the game chooses per decoder (`main+0x19e7860`).
+- **Fix:** `hle_codec_video.c` takes them for VP9, VP8, AV1 and H.264 into the same host decoder. The colour space is written as 0: the 32-bit value the SDK fills in from the service. The game does not read it near either call (`main+0x19e63d4`, `+0x19e702c`), and it converts the NV12 pictures it reads itself.
+- **Check:** `t_codec_video` initializes a VP9 decoder by SDK 19's remote memory form and reads a picture's properties through the nine-argument form.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md)'s base game (SDK 19.3.3 Ounce; its movie player is in `main`), from its imports: the Mushroom Cup's opening (VP9, 2560x1440) decodes with them.
+
 ## Movie players
 
 ### Unity's video planes and checking the movie path

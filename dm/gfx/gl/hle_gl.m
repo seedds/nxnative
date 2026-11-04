@@ -2023,12 +2023,138 @@ static void mip_impl(GLenum target) {
             for (int f = 0; f < tex_faces(t); f++) [b copyFromTexture:old sourceSlice:f sourceLevel:0 toTexture:t->tex destinationSlice:f destinationLevel:0 sliceCount:1 levelCount:1];
             t->gen++;
         }
-        if (t->levels > 1) [b generateMipmapsForTexture:t->tex];
+        if (t->levels > 1) {
+            // Metal's generateMipmapsForTexture takes 2D, 2D-array and cube textures only (not 3D), and integer formats have no filterable mip generation:
+            // copy level 0 into each level instead (nearest, as GL's integer filtering is nearest). A 3D bitmap is the first texture that needs this.
+            if (t->tex.textureType == MTLTextureType3D || fmt_int(t->fmt)) {
+                static int once;
+                if (!once++) GLOG("glGenerateMipmap: %s texture %ux%ux%u, copying level 0 into %d levels", t->tex.textureType == MTLTextureType3D ? "3D" : "integer", t->w, t->h, t->d, t->levels - 1);
+                int slices = t->tex.textureType == MTLTextureType2DArray ? (int)t->tex.arrayLength : t->tex.textureType == MTLTextureTypeCube ? 6 : 1;
+                for (int l = 1; l < t->levels; l++) {
+                    uint32_t w = umax(1, t->w >> l), h = umax(1, t->h >> l), d = umax(1, t->d >> l);
+                    for (int s = 0; s < slices; s++)
+                        [b copyFromTexture:t->tex sourceSlice:s sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                                sourceSize:MTLSizeMake(w, h, t->tex.textureType == MTLTextureType3D ? d : 1)
+                                  toTexture:t->tex destinationSlice:s destinationLevel:l destinationOrigin:MTLOriginMake(0, 0, 0)];
+                }
+            } else [b generateMipmapsForTexture:t->tex];
+        }
         [b endEncoding]; g_n_blit++; t->use = g_serial;
         if (cb != g_cb) { dm_gfx_enter(); cb_commit_one(cb); dm_gfx_leave(); }
     }
 }
-GL(glGenerateMipmap, void, GLenum target) { ((void (*)(GLenum))(const void *)mip_impl_bs)(target); }
+GL(glGenerateMipmap, void, GLenum target) { TLOG("generate mipmap target %#x", target); ((void (*)(GLenum))(const void *)mip_impl_bs)(target); }
+// The GL internal format of a layer format (glGetTexLevelParameteriv's INTERNAL_FORMAT); the reverse of fmt_pick for the formats a game asks about
+static int fmt_ifmt(int f) {
+    switch (f) {
+        case F_RGBA8: return GL_RGBA8; case F_BGRA8: return GL_RGBA8; case F_SRGBA8: return GL_SRGB8_ALPHA8;
+        case F_R8: return GL_R8; case F_RG8: return GL_RG8; case F_RGBA16F: return GL_RGBA16F; case F_RGBA32F: return GL_RGBA32F;
+        case F_R16F: return GL_R16F; case F_RG16F: return GL_RG16F; case F_R32F: return GL_R32F; case F_RG32F: return GL_RG32F;
+        case F_RG11B10F: return GL_R11F_G11F_B10F; case F_RGB10A2: return GL_RGB10_A2; case F_RGBA16: return GL_RGBA16;
+        case F_RGBA32UI: return GL_RGBA32UI; case F_RG32UI: return GL_RG32UI; case F_RGBA16UI: return GL_RGBA16UI; case F_RG16UI: return GL_RG16UI;
+        case F_BC1_RGB: return GL_COMPRESSED_RGB_S3TC_DXT1; case F_BC1: return GL_COMPRESSED_RGBA_S3TC_DXT1; case F_BC2: return GL_COMPRESSED_RGBA_S3TC_DXT3;
+        case F_BC3: return GL_COMPRESSED_RGBA_S3TC_DXT5; case F_BC4: return GL_COMPRESSED_RED_RGTC1; case F_BC5: return GL_COMPRESSED_RG_RGTC2;
+        case F_BC7: return GL_COMPRESSED_RGBA_BPTC_UNORM; case F_BC6S: return GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT; case F_BC6U: return GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT;
+    }
+    return GL_RGBA8;
+}
+static int bc_ifmt(int cv) {
+    switch (cv) {
+        case CV_BC1: return GL_COMPRESSED_RGBA_S3TC_DXT1; case CV_BC2: return GL_COMPRESSED_RGBA_S3TC_DXT3; case CV_BC3: return GL_COMPRESSED_RGBA_S3TC_DXT5;
+        case CV_BC4: return GL_COMPRESSED_RED_RGTC1; case CV_BC5: return GL_COMPRESSED_RG_RGTC2; case CV_BC7: return GL_COMPRESSED_RGBA_BPTC_UNORM;
+        case CV_BC6H: return GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT;
+    }
+    return GL_RGBA8;
+}
+GL(glGetTexLevelParameteriv, void, GLenum target, GLint level, GLenum pname, GLint *v) {
+    tex_t *t = bound_tex(target);
+    if (!t || level < 0 || level >= MAXLV) { *v = 0; return; }
+    if (t->target == GL_TEXTURE_BUFFER && !t->made) tex_make(t, 0);   // a buffer texture's width is its texel count, known once the view is made
+    uint32_t w = umax(1, t->w >> level), h = umax(1, t->h >> level);
+    switch (pname) {
+        case 0x1000: *v = (GLint)w; return;                                         // WIDTH
+        case 0x1001: *v = (GLint)h; return;                                         // HEIGHT
+        case 0x1002: *v = (GLint)umax(1, t->d >> level); return;                    // DEPTH
+        case 0x1003: *v = t->bc ? bc_ifmt(t->bc) : fmt_ifmt(t->fmt); return;        // INTERNAL_FORMAT
+        case 0x86a1: *v = t->bc != 0; return;                                          // COMPRESSED
+        case 0x86a0: *v = (GLint)(t->bc ? bc_src_size(t->bc, w, h) : fmt_pitch(t->fmt, w) * fmt_rows(t->fmt, h)); return;   // COMPRESSED_IMAGE_SIZE
+    }
+    RED1("glGetTexLevelParameteriv(%#x) not implemented", pname); *v = 0;
+}
+// glGetTexImage: the game reads a texture back to CPU memory (Factorio's VideoBitmapOpenGL verifies generated bitmaps this way, and its save preview is the
+// 960x540 capture it renders into 75/76/79 and composites into 74). RGBA8/BGRA8 textures are copied as they are; compressed formats are left as zeros of the
+// requested size (the generator already has the blocks in its staging texture, and A16 cannot filter-read BC).
+// A client-visible read (glGetTexImage, glGetCompressedTexImage) must see every command recorded so far: the game draws into its capture target and reads it back
+// without a swap in between. Those draws sit in the current command buffer, which is committed at the next present, while a readback blit would be a new command
+// buffer on the same queue and would run before them. Commit and wait for the frame's buffer first, as glFinish does.
+static void gl_read_sync(void) {
+    if (!g_cb) return;
+    if (g_pend_clear.bits) clears_flush();
+    dm_gfx_enter();
+    id<MTLCommandBuffer> cb = cb_get();
+    cb_commit();
+    [cb waitUntilCompleted];
+    dm_gfx_leave();
+}
+GL(glGetTexImage, void, GLenum target, GLint level, GLenum format, GLenum type, void *pixels) {    (void)type;
+    tex_t *t = bound_tex(target);
+    GLOG("glGetTexImage target %#x level %d format %#x type %#x texture %u %s %ux%u", target, level, format, type, S.units[S.unit].t2d,
+         t ? g_fmt[t->fmt].name : "none", t ? t->w : 0, t ? t->h : 0);
+    if (!t || level < 0 || level >= MAXLV) return;
+    gl_read_sync();                          // the draws into the target must have run before any read of it
+    pass_end();                              // a blit encoder cannot be made while this pass is open
+    int face = target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z ? (int)(target - GL_TEXTURE_CUBE_MAP_POSITIVE_X) : 0;
+    uint32_t w = umax(1, t->w >> level), h = umax(1, t->h >> level);
+    int comps = format == GL_RGBA || format == GL_BGRA ? 4 : format == GL_RGB ? 3 : format == GL_RED ? 1 : 4;
+    size_t pitch = (size_t)w * comps;
+    if (!pixels) return;
+    memset(pixels, 0, pitch * h);
+    if (pixels && comps == 4 && (format == GL_RGBA || format == GL_BGRA) && g_fmt[t->fmt].pf == MTLPixelFormatRGBA8Unorm) {
+        if (!t->made && !tex_make(t, 0)) return;
+        if (!t->tex) return;
+        @autoreleasepool {
+            if (t->tex.storageMode == MTLStorageModeShared) {
+                [t->tex getBytes:pixels bytesPerRow:pitch bytesPerImage:0 fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:level slice:face];
+            } else {
+                id<MTLBuffer> b = [g_dev newBufferWithLength:pitch * h options:MTLResourceStorageModeShared];
+                id<MTLCommandBuffer> cb = [g_q commandBuffer]; cb.label = @"gl read texture";
+                id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder];
+                [e copyFromTexture:t->tex sourceSlice:face sourceLevel:level sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1)
+                           toBuffer:b destinationOffset:0 destinationBytesPerRow:pitch destinationBytesPerImage:pitch * h];
+                [e endEncoding]; [cb commit]; [cb waitUntilCompleted]; g_n_blit++;
+                memcpy(pixels, b.contents, pitch * h);
+            }
+            if (format == GL_BGRA) { uint8_t *p = pixels; for (size_t i = 0; i < pitch * h; i += 4) { uint8_t r = p[i]; p[i] = p[i + 2]; p[i + 2] = r; } }
+        }
+    }
+}
+
+// glGetCompressedTexImage: a texture decoded from BC has no compressed bytes to return; the game's compression self-test asks for this buffer and compares
+// sizes. Fill the requested compressed size with zeros so the upload path's size check holds; BC-capable devices copy the texture's own bytes.
+GL(glGetCompressedTexImage, void, GLenum target, GLint level, void *pixels) {
+    tex_t *t = bound_tex(target);
+    if (!t || !pixels || level < 0 || level >= MAXLV) return;
+    gl_read_sync();
+    uint32_t w = umax(1, t->w >> level), h = umax(1, t->h >> level);
+    size_t pitch = t->bc ? (size_t)((w + 3) / 4) * bc_block_bytes(t->bc) : fmt_pitch(t->fmt, w);
+    size_t rows = t->bc ? (h + 3) / 4 : fmt_rows(t->fmt, h);
+    size_t n = pitch * rows;
+    memset(pixels, 0, n);
+    if (!t->made || !t->tex || !g_bc || t->bc || g_fmt[t->fmt].kind != K_BLOCK) return;   // a decoded texture has no block bytes to return
+    @autoreleasepool {
+        if (t->tex.storageMode == MTLStorageModeShared) {
+            [t->tex getBytes:pixels bytesPerRow:pitch bytesPerImage:pitch * rows fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:level slice:0];
+        } else {
+            id<MTLBuffer> b = [g_dev newBufferWithLength:n options:MTLResourceStorageModeShared];
+            id<MTLCommandBuffer> cb = [g_q commandBuffer]; cb.label = @"gl read compressed texture";
+            id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder];
+            [e copyFromTexture:t->tex sourceSlice:0 sourceLevel:level sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1)
+                       toBuffer:b destinationOffset:0 destinationBytesPerRow:pitch destinationBytesPerImage:pitch * rows];
+            [e endEncoding]; [cb commit]; [cb waitUntilCompleted]; g_n_blit++;
+            memcpy(pixels, b.contents, n);
+        }
+    }
+}
 
 // ---------- Framebuffers and renderbuffers ----------
 GL(glGenFramebuffers, void, GLsizei n, GLuint *out) { for (GLsizei i = 0; i < n; i++) out[i] = name_new((void ***)&g_fbs, &g_nfbs, &g_capfbs, sizeof(fb_t)); }

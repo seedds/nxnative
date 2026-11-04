@@ -183,6 +183,11 @@ int main(void) {
         h_ar_Close(handle[0], handle[1]);
     }
     free(work);
+    // Catch-up frames: at start-up and for an output that fell behind, never for a second update inside a frame.
+    assert(catchup_due(1, 0) && catchup_due(CATCHUP_STARTUP_UPDATES, 0));
+    assert(!catchup_due(CATCHUP_STARTUP_UPDATES + 1, 1000000));      // 1 ms after a render: Donkey Kong's main thread update
+    assert(!catchup_due(1000, 11000000));                            // the gap of a 512-frame device callback
+    assert(catchup_due(1000, CATCHUP_LATE_NS + 1));
     puts("audren work buffer: Horizon sizing fixtures, both opens, nested open, failures and close lifetime passed");
     return 0;
 }

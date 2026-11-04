@@ -380,6 +380,7 @@ static int capture(const uint8_t *cl, size_t len, int16_t *dst) {
 // Render one frame (generate commands + CPU processing); dst = output (stereo int16, *nout samples). The two callers (render thread, catch-up) are serialized by a host lock: they share one command buffer
 static pthread_mutex_t g_render_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_updates, g_renders, g_catchups;
+static _Atomic uint64_t g_last_render_ns;   // when render_once last ran, for catchup_due
 // SDK 20's AudioRenderSystem (The Legend of Zelda: Breath of the Wild 1.9.0) has another layout: the member functions for mode / device / command buffer are inlined (sdk+0x22a70c ExecuteAudioRendererRendering:
 //   +0x48 rendering device and +0x4c execution mode, both must be 1; +0xf8 / +0x100 command buffer start / length), GenerateCommand takes a Span<std::byte> and returns a Span (x0 start, x1 length: the generated command list),
 //   and the mutex UpdateImpl holds is at +0x2d0 (+0x1f0 in SDK 16). The layout is recognized by the presence of the Span version of GenerateCommand
@@ -448,6 +449,7 @@ static Result render_once(uint8_t *sys, int16_t *dst, int *nout) {
     else { cl = cbuf(sys); n = gen(sys, cl, cbsz(sys)); }
     unlock(sys + mu_off);
     atomic_fetch_add(&g_renders, 1);
+    atomic_store(&g_last_render_ns, t0);
     uint64_t proc[16] __attribute__((aligned(16))) = {0};   // CommandListProcessor (0x58 bytes; 0x60 in SDK 21, whose Process reads +0x58)
     tmax(proc, 0xffffffffu); setup(proc, cl, n); process(proc);
     if (dst) *nout = capture(cl, n, dst);
@@ -493,12 +495,19 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem29ExecuteAudioRendererRendering
 // queue was full ran it at 11,000 updates a second on one core, the game's sound about 50 times faster than the output. Waiting keeps the queue full instead: the render thread then
 // only plays queued frames, and the driver's own updates render every frame. A queued frame does not signal the renderer event: the SDK signals it in each render, and a game woken by a
 // queued frame updated with nothing rendered since, which rendered the next catch-up frame, and so on (Big Brain Academy: Brain vs. Brain, one catch-up per update instead of 37 a run)
+// A catch-up frame only where one is missing: the first updates, where effects get initialized, and an output that fell behind. A second update inside one 5 ms frame is normal: Donkey
+// Kong Country: Tropical Freeze's main thread updates once per video frame beside its audio thread's update per renderer event. A frame rendered for it advances the voices 5 ms before the
+// audio thread refills them, so they run dry for a moment, 60 times a second: the crackle, with no underrun in the log because the output never starves. The late limit is above the
+// longest gap an output's blocks can leave (512-frame device callbacks are 10.7 ms)
+enum { CATCHUP_STARTUP_UPDATES = 10 };
+#define CATCHUP_LATE_NS 20000000ull
+static int catchup_due(uint64_t update, uint64_t since_render_ns) { return update <= CATCHUP_STARTUP_UPDATES || since_render_ns > CATCHUP_LATE_NS; }
 HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "renderer update: if nothing was rendered since the last update, render a catch-up frame first (so effects get initialized), then hand over to the SDK",
           Result, h_ars_Update, uint8_t *sys, void *o, size_t on, void *p, size_t pn, const void *in, size_t inn) {
     static Result (*orig)(void *, void *, size_t, void *, size_t, const void *, size_t); if (!orig) orig = gsym("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm");
     static uint64_t last_r = ~0ull;
     uint64_t u = atomic_fetch_add(&g_updates, 1) + 1, r = atomic_load(&g_renders);
-    if (last_r != ~0ull && r == last_r) {
+    if (last_r != ~0ull && r == last_r && catchup_due(u, now_ns() - atomic_load(&g_last_render_ns))) {
         uint64_t c = atomic_fetch_add(&g_catchups, 1) + 1;
         if (c <= 3) LOG("audren: no frame rendered before update %llu, rendering a catch-up frame first (%llu so far)", (unsigned long long)u, (unsigned long long)c);
         uint32_t t = atomic_load(&g_cq_tail);

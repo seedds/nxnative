@@ -328,6 +328,14 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md).
 - **Check:** `DM_AUDREN_TRACE=1` logs every update with the number of frames rendered since the previous one.
 
+### A second update inside one frame is not a missing frame
+
+- **Symptom:** the sound crackles all through play, with `0 underruns, 0.0 ms zero-padded` in the log. `catch-up renders so far` grows by about 600 per 2000 frames: 60 a second, one per video frame.
+- **Cause:** the game's main thread updates the renderer once per video frame, beside its audio thread's update per renderer event, so two updates often fall inside one 5 ms frame. The hook took that for a missing frame and rendered one early, which advanced the voices before the audio thread had refilled them.
+- **Fix:** `catchup_due` in `hle_audren.c` renders a catch-up frame only for the first 10 updates, where effects get initialized, or when nothing has rendered for 20 ms (an output that fell behind).
+- **Found on:** [Donkey Kong Country: Tropical Freeze](../../dm/games/0100C1F0051B6000/README.md).
+- **Check:** `catch-up renders so far` stays at a handful for a whole run, and the crackle is gone.
+
 ### A sound driver that never waits on the renderer event
 
 - **Symptom:** the sound runs about 50 times faster than the output; the loop runs 11,000 updates a second on one core.

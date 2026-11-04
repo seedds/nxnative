@@ -107,3 +107,7 @@ Each step below stopped the boot before its fix:
 - [Submissions handed to the GPU in segments](../../../docs/reference/frame-rate.md#submissions-handed-to-the-gpu-in-segments): a submission drawing into the target it inherited left those draws out of the segment's draw count (PR #1073).
 - [A deferred write under a false guard](../../../docs/reference/shaders.md#a-deferred-write-under-a-false-guard): DK and Pauline bright white between Hilltop's rocks, from terrain captured into the environment cube with a placeholder material (issue #1100; fixed by the translator change found on Yoshi and the Mysterious Book, spot not revisited, reporter's test asked).
 - [MUFU.SIN and MUFU.COS of a large number of turns](../../../docs/reference/shaders.md#mufusin-and-mufucos-of-a-large-number-of-turns): the SSAO's kernel rotation, (0, 0) past 2^20 turns, no ambient occlusion in the lower right: a corner wedge at the top of dynamic resolution (1152x648), a fifth of the picture with the effects at full size.
+
+### Acquire-wait diagnostic correction
+
+A 350-second gameplay trace on iPhone 17 Pro Max, using a combined experimental renderer, exposed [incorrect acquire-wait telemetry](../../../docs/reference/frame-rate.md#acquire-wait-telemetry-measures-elapsed-pacing-time). `@wait_ms` now measures elapsed pacing wait. This diagnostic correction changes no rendering or pacing behavior; that phone trace is not verification of this exact source head.

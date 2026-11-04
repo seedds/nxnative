@@ -1830,7 +1830,7 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
         if (pace) { if (last && now_ns() < last + step) sleep_until_ns(last + step); last = now_ns(); }
     }
     pace_ns += mtl_snap_acquire_wait();   // ring capacity is waited for at acquire, where the game does not hold its present lock
-    g_acq_wait_ns += wait; trow(g_frame, "@late_ms", wait ? (now_ns() - at) / 1e6 : 0);
+    g_acq_wait_ns += pace_ns; trow(g_frame, "@late_ms", wait ? (now_ns() - at) / 1e6 : 0);
     // The previous present of this texture has not yet been processed by the present thread (display cannot keep up, a whole swapchain round behind): wait for it to be returned, then hand it to the game to draw
     uint64_t tk = *idx < 4 ? o->ticket[*idx] : 0;
     if (tk) { uint64_t w0 = now_ns(); nvn_queue_present_wait(tk); nvn_queue_present_release(tk); o->ticket[*idx]=0; g_pq_wait_ns += now_ns() - w0; }

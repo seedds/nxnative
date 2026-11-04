@@ -613,3 +613,10 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** general, in the host (`nvn_mtl.m`, `g_pbase_miss`): a base the archives lack is remembered under the base lock. `pso4_init` opens the archives once and nothing adds to them in a run, so a miss holds for the process. A later call for that base skips the search: a non-compiling one returns nil, a compiling one goes straight to the compiler. A base once built is in `g_pbase`, looked at first. Nothing is written to disk.
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_pso_archive`: 100 asks for one missing base search once, another vertex layout searches on its own, the compile that follows searches no more, and the base it builds is then given without a search.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#frame-rate), found and measured by a contributor ([PR #1825](https://github.com/seedds/nxnative/pull/1825)), confirmed by a second.
+
+### Acquire-wait telemetry measures elapsed pacing time
+
+- **Symptom:** `DM_NVN_TSV` reports zero `@wait_ms` when acquire blocks on a display-link tick, or reports the planned fallback delay instead of the elapsed wait.
+- **Cause:** `nvnWindowAcquireTexture` accumulated `wait`, computed from the texture's fallback availability deadline, even when display-link pacing took a different path.
+- **Fix:** accumulate the already measured `pace_ns`, including snapshot-capacity waiting. Present-queue waiting remains separate in `@pq_wait_ms`. This changes diagnostics only; it does not change the wait, frame rate or presentation policy. The controlled-clock `t_link_ticks` case has a zero fallback deadline and a nonzero display-link wait.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md), while analyzing a 350-second physical iPhone 17 Pro Max trace from a combined experimental build. Older `@wait_ms` values must not be treated as measured blocked time. This correction does not establish the cause of its pacing dips or improve performance.

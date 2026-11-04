@@ -14,14 +14,19 @@ AREAS = [   # label, color, description, paths (regular expression, matched from
     ('rewriter', 'fbca04', 'The NSO rewriter and per-build patches', r'dm/tools/(patch_nso|sdk_patches|nso_)|dm/games/[^/]+/patches\.py$'),
     ('packing', 'c5def5', 'Building an IPA or a Mac app: the NSP script, extraction, the shader split, the packers',
      r'scripts/build_ipa_from_nsp\.py$|dm/tools/nx_extract/|dm/ios/tools/build_ipa\.sh$|dm/mac/pack_app\.py$|dm/gfx/tools/shader_split\.py$'),
-    ('ios', 'c5def5', 'The iPhone and iPad app (dm/ios)', r'dm/ios/'),
-    ('mac', 'c5def5', 'The Mac front end and app (dm/mac, front_mac.m)', r'dm/mac/|dm/host/front_mac\.m$'),
+    ('ios', 'c5def5', 'The iPhone and iPad app (dm/ios); on an issue, seen on one', r'dm/ios/'),
+    ('mac', 'c5def5', 'The Mac front end and app (dm/mac, front_mac.m); on an issue, seen on a Mac', r'dm/mac/|dm/host/front_mac\.m$'),
     ('tools', 'bfdadc', 'Tools and scripts (dm/tools, scripts)', r'dm/tools/|scripts/'),
     ('docs', '0075ca', 'Documentation', r'docs/|.*\.md$'),
     ('ci', 'ededed', 'Continuous integration and repository settings (.github)', r'\.github/'),
 ]
 CHAIN = ('shader chain', 'b60205', "The shader translation chain (DMSH_CHAIN): a change rebuilds every game's shaders")   # its files: chain_paths()
-GAME_COLOR, NEW_GAME = 'f9d0c4', ('new game', 'd93f0b', 'Adds a game profile that main does not have yet')
+GAME_COLOR, NEW_GAME = 'f9d0c4', ('new game', 'd93f0b', 'A game main has no profile for yet: a pull request adding one, or an issue about one')
+KINDS = {'bug': ('d73a4a', "Something isn't working"), 'enhancement': ('a2eeef', 'New feature or request')}   # issue_areas.py only, with NEW_GAME
+
+
+def automatic(name):   # a label this file or issue_areas.py adds, so it says nothing about whether someone has read the issue (triage_report.py)
+    return name.startswith('game: ') or name in {a[0] for a in AREAS} | {CHAIN[0], NEW_GAME[0]} | set(KINDS)
 
 
 def chain_paths(root):   # the files DMSH_CHAIN hashes (main's dmsh_chain.FILES, so the label cannot drift from the chain) and the header it writes

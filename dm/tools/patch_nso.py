@@ -179,6 +179,18 @@ if UE_CALL is not None:
     print(f'{NAME}: {ue_why}')
 elif ue_why.startswith('[RED] '): print(f'[RED] {NAME}: {ue_why[6:]}: Unreal\'s own allocator runs')
 
+# ---- Snowdrop's three-pool page allocator (main: dm/tools/snowdrop_pools.py finds its constructor by its structure, without a build ID) ----
+# Its 12 GB of address ranges become the sizes the profile decides on (snowdrop_pools, measured against the game's regions)
+import snowdrop_pools
+sd_sites, sd_why = snowdrop_pools.find(bytes(IMG), TEXT_END) if NAME == 'main' else (None, '')
+if sd_sites is not None:
+    sd_sizes, sd_from = snowdrop_pools.profile_sizes()
+    for off, ob, nb, why in snowdrop_pools.cuts(IMG, sd_sites, sd_sizes):
+        cuts.append((off, ob, nb, why))
+        IMG[off:off + 4] = bytes.fromhex(nb)
+    print(f'{NAME}: {sd_why}: large {sd_sizes[0]} MB, 512 KB pages {sd_sizes[1]} MB, 64 KB pages {sd_sizes[2]} MB ({sd_from})')
+elif sd_why.startswith('[RED] '): print(f'[RED] {NAME}: {sd_why[6:]}: its 12 GB reservation stays and fails on an iPhone')
+
 # ---- Unreal's engine address region (main: dm/tools/ue_region.py finds the store of its size right before nninitStartup reserves it, without a build ID) ----
 # Observation gate OBS_UE_REGION goes on that store (below), the size register in the gate number's upper bits: the host gives the region what the alias region has room for there
 # (dm/host/hle_svc.c "Unreal's engine region"), where the engine would ask for 62 GB (16 GB in Unreal Engine 4.18)
@@ -1721,7 +1733,7 @@ else:
     open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
 import hashlib
 with open(os.path.join(outdir, 'build_src.sha256'), 'w') as f:   # the same for every module: the rewriter and every patch file, by path from dm/tools
-    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, ue_cvar.__file__, ue_malloc.__file__, fps_target.__file__, ue_region.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
+    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, ue_cvar.__file__, ue_malloc.__file__, fps_target.__file__, ue_region.__file__, snowdrop_pools.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
 with open(P('fixups.tsv'), 'w') as f:
     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
     if FAR: f.write(f'# IMAGE_SIZE\t{IMAGE_SIZE:#x}\n# FILE_IMAGE_LEN\t{FILE_IMAGE_LEN:#x}\n')   # patch area before the base (negative PATCH_OFF): whole image size, length of the image part of the file

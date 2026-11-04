@@ -1261,7 +1261,7 @@ def collect_nros(py, repo, romfs, dst, env, logs):
     if not ((dst / 'nro.tsv').is_file() and reused(kf, key) is not None):
         tmp = dst.with_name(dst.name + '.partial'); rmtree(tmp)
         PROG.set(step=f'finding the NROs {len(nrrs)} NRR files register')
-        run([py, repo / 'dm/tools/nro_collect.py', romfs, tmp], logs / 'nro_collect.log', env=env)
+        run([py, repo / 'dm/tools/nro_collect.py', romfs, tmp, '--missing-ok'], logs / 'nro_collect.log', env=env)
         rmtree(kf); swap_in(tmp, dst); kf.write_text(f'{key}\n')
     # rows named 'refused' are online SDKs the host never loads (Epic Online Services): listed for the host's log, not rewritten
     return {l.split('\t')[0]: dst / (l.split('\t')[0] + '.nro') for l in (dst / 'nro.tsv').read_text().splitlines() if l and not l.startswith('#') and not l.startswith('refused\t')}
@@ -1296,13 +1296,14 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
     src = {m: exe_dir / m for m in mods} | nros
     names = list(src)
     kf = out.with_name(out.name + '.key')
-    # the repository profile's build rows decide which builds the rewriter treats as the game's own (SDK-wide function patches skip those), so they are an input too
-    try: own = [l for l in (repo / 'dm/games' / Path(env.get('DM_GAME') or '-').name / 'game.tsv').read_text(encoding='utf-8').splitlines() if l.startswith('build\t')]
+    # the repository profile's build rows decide which builds the rewriter treats as the game's own (SDK-wide function patches skip those), and its snowdrop_pools the sizes of those cuts, so they are inputs too
+    try: own = [l for l in (repo / 'dm/games' / Path(env.get('DM_GAME') or '-').name / 'game.tsv').read_text(encoding='utf-8').splitlines() if l.startswith(('build\t', 'snowdrop_pools\t'))]
     except OSError: own = []
-    key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'nso.py', 'nso_code.py', 'nso_asm.py', 'nso_match.py', 'ue_cvar.py', 'ue_malloc.py', 'ue_region.py', 'loader_census.py')] + patch_files(repo, exe_dir, mods, env.get('DM_GAME')) + list(src.values()) + ([manifest] if manifest.is_file() else [])), names, capstone.__version__,
+    key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'nso.py', 'nso_code.py', 'nso_asm.py', 'nso_match.py', 'ue_cvar.py', 'ue_malloc.py', 'ue_region.py', 'snowdrop_pools.py', 'loader_census.py')] + patch_files(repo, exe_dir, mods, env.get('DM_GAME')) + list(src.values()) + ([manifest] if manifest.is_file() else [])), names, capstone.__version__,
                       {k: env.get(k) for k in ('DM_PATCH_FRONT', 'DM_GAME')}, own)
     if all((out / f'{m}.patched.bin').is_file() for m in names) and reused(kf, key) is not None:
-        PROG.end(f'{", ".join(mods)}{f" and {len(nros)} NROs" if nros else ""}, reused (inputs unchanged)'); return g
+        PROG.end(f'{", ".join(mods)}{f" and {len(nros)} NROs" if nros else ""}, reused (inputs unchanged)')
+        return capture_nro(py, repo, exe_dir, out, nro_dir, env, logs, g, provisional)
     tmp = out.with_name(out.name + '.partial'); rmtree(tmp); tmp.mkdir(parents=True); logs.mkdir(parents=True, exist_ok=True)
     if manifest.is_file(): shutil.copyfile(manifest, tmp / 'nro.tsv')   # refused-only manifests preserve the game's offline registration path too
     PROG.set(step=', '.join(mods) + (f' and {len(nros)} NROs' if nros else ''), done=0, total=len(names), unit='modules')
@@ -1328,7 +1329,51 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
         for f in logf.values(): f.close()
     rmtree(kf); swap_in(tmp, out); kf.write_text(f'{key}\n')
     PROG.end(', '.join(mods) + (f' and {len(nros)} NROs' if nros else ''))
-    return g
+    return capture_nro(py, repo, exe_dir, out, nro_dir, env, logs, g, provisional)
+
+
+NRO_CAPTURE_SECS = 120   # Mario Tennis Fever's boot stub decodes its 24.7 MB NRO in under a second, with a cold file cache far less than this
+
+
+def capture_nro(py, repo, exe_dir, out, nro_dir, env, logs, g, provisional):
+    """An NRO its NRR registers and no file holds (nro_collect.py's missing.tsv): the game decodes it at run time, so boot the rewritten modules with DM_NRO_CAPTURE (dm/host/hle_ro.c), which writes the image
+    of the first LoadModule the host has no rewritten copy of, by its SHA-256, and ends the run. That image joins the collected NROs, kept for the next build as they are, and the rewrite runs again with it.
+    Mario Tennis Fever: main is a boot stub, and the game's code is one NRO in main's data segment. Returns the profile"""
+    missing = nro_dir / 'missing.tsv'
+    if not missing.is_file(): return g
+    want = dict(l.split('\t') for l in missing.read_text().splitlines() if l)
+    if not want: return g
+    PROG.add(2); PROG.stage('NRO capture', step='building the Mac host')   # and the rewrite again
+    work = out.parent
+    host = build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
+    cap, rd, log = nro_dir / 'capture.partial', work / 'tmp/nro_run', logs / 'nro_capture.log'
+    rmtree(cap); rmtree(rd); cap.mkdir(parents=True)
+    for d in ('save', 'temp'): (rd / d).mkdir(parents=True)
+    PROG.set(step='booting the game')
+    say(f'{len(want)} registered NRO(s) in no file: booting the game in the Mac host to capture what it decodes at run time')
+    henv = dict(env, DM_ROMFS=str(rfs.source(exe_dir.parent)), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_MSL_DIR=str(rd / 'msl'), DM_NRO_CAPTURE=str(cap))
+    boot_mac(host, out, henv, rd, log, NRO_CAPTURE_SECS, lambda: any(cap.glob('*.nro')))
+    got = sorted(cap.glob('*.nro'))
+    if not got or got[0].stem not in want:
+        PROG.end(ok=False)
+        with open(log, errors='replace') as f: tail = ''.join(collections.deque(f, maxlen=40)).rstrip('\n')
+        PROG.say(f'---- last lines of {log} ----\n' + tail)
+        raise BuildError(f'the game loaded none of the {len(want)} NRO(s) its NRR registers and no file holds, first {next(iter(want))} (host output: {log})')
+    sha = got[0].stem; manifest = nro_dir / 'nro.tsv'
+    rows = [l for l in manifest.read_text().splitlines() if l]
+    name = f'nro{sum(1 for l in rows if not l.startswith(("#", "refused")))}'
+    shutil.move(got[0], nro_dir / f'{name}.nro')
+    manifest.write_text('\n'.join(rows + [f'{name}\t{sha}\t{(nro_dir / f"{name}.nro").stat().st_size}\t{want.pop(sha)}\tcapture']) + '\n')
+    missing.write_text(''.join(f'{h}\t{n}\n' for h, n in want.items()))
+    rmtree(cap); rmtree(rd)
+    PROG.end(f'{name}, {(nro_dir / f"{name}.nro").stat().st_size / 2**20:.1f} MB')
+    return rewrite(py, repo, exe_dir, out, env, logs, g, provisional)
+
+
+def captured_nros(patched):   # the folder of the NROs of a build that captured some (capture_nro): the shader split reads them, as it reads main, and the file table of Camelot's archive is in one
+    d = patched.with_name('nro_' + patched.name.removeprefix('patched_'))
+    try: return d if any(l.endswith('\tcapture') for l in (d / 'nro.tsv').read_text().splitlines()) else None
+    except OSError: return None
 
 
 GLSLC_SECS = 30   # the longest capture run: Three Houses compiles its 9 shaders within 1.2 s of boot, and the run stops as soon as every file the profile names is there
@@ -1904,6 +1949,7 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
         for setting, folder, pattern in (('DM_GLSLC_CAPTURE', 'glslc_capture', '*.glslc'), ('DM_UE_SHADERS', 'ue_shaders', '*.ushaderbytecode')):
             capture = Path(env.get(setting) or r.parent / folder)
             inputs += [('stat', capture) if provisional else ('files', sorted(capture.glob(pattern)))]   # its files, not where it is: the same build reached through a moved folder or a link keeps its split
+    if env.get('DM_NRO_DIR'): inputs += [('files', sorted(Path(env['DM_NRO_DIR']).glob('*.nro')))]   # NROs captured from a boot (capture_nro)
     inputs += [item for r in dlc_roms for item in (('dlc', Path(r).name), ('stat', r))]   # DLC has no registered module build to pin its contents: include its index and re-extraction times, even when file sizes stay the same
     if oodle:   # a host or rewriter fix can change what the game's decoder produces
         PROG.set(step='building the Mac host for the game\'s Oodle decoder'); env = dict(env, **oodle())
@@ -2799,6 +2845,7 @@ def main(args=None):
 
     patched = work / f'patched_{pkg_ver}'
     g = rewrite(py, repo, game / 'ExeFS', patched, env, logs, g, provisional)
+    if nd := captured_nros(patched): env = dict(env, DM_NRO_DIR=str(nd))
     chain_header(py, repo, env, logs)   # before any host is built
     if provisional or derived:   # the keys that need the rewritten modules, then (provisional) the heap check (both only change keys the host is built with, not the rewrite or the shader steps)
         provisional_prep(py, repo, env, logs, g)

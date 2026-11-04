@@ -13,7 +13,7 @@ import dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_abi as abi   
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_pch, dmsh_vin, dmsh_pull, dmsh_alpha, dmsh_logic, dmsh_mesh, dmsh_ampere, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_pch, dmsh_vin, dmsh_pull, dmsh_side, dmsh_mesh, dmsh_ampere, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
 _bad = tool_lock.check_tools()
 if _bad: sys.exit('\n'.join('[RED] translation chain tools do not match the lock file: ' + b for b in _bad) + '\n(if the tools changed, run tool_lock.py --update-lock and commit the lock file; if the translator just was not rebuilt, rebuild it)')
 CHAIN = dmsh_chain.version(); out = os.path.join(out, 'b-' + CHAIN)
@@ -441,8 +441,7 @@ def fetch_finish(key, src, refl):
 
 VIN_STATS = collections.Counter()
 PULL_STATS = collections.Counter()
-ALPHA_STATS = collections.Counter()
-LOGIC_STATS = collections.Counter()
+SIDE_STATS = collections.Counter()
 
 def pull_finish(key, full, refl):
     """The pulling library <key>_bp of a vertex shader with stage inputs (dmsh_pull.py: no [[stage_in]], the inputs read through the per-draw layout block), compiled through the
@@ -503,37 +502,29 @@ def vin_finish(key, full, refl):
     VIN_STATS['inputs'] += len(shadows); VIN_STATS['float only'] += sum(1 for s in shadows if 'sint' not in s and 'uint' not in s)
     return refl
 
-def ps_side_finish(key, full, refl, mod, sfx, field, stats, what):
-    """A pixel shader's side library <key>_<sfx> (mod.variant: dmsh_alpha.py, dmsh_logic.py), from the source with every entry point, compiled through the MSL-keyed Metal cache;
-    reflection <field> names its entry points. A shader the variant does not apply to gets none (stale libraries removed): the host draws it without. Changes refl; the caller writes it"""
-    if refl['stage'] != 'ps': return refl
-    libs = [os.path.join(out, f'{key}_{sfx}.metallib')] + ([os.path.join(IOSOUT, f'{key}_{sfx}.metallib')] if IOSOUT else [])
-    refl.pop(field, None)
-    def drop():
-        for p in libs:
-            try: os.unlink(p)
+def ps_libraries(key, msl, full):
+    """A pixel shader's libraries: <key>_b, and <key>_bx with its alpha test and logic operation entry points, cut from one compile through the MSL-keyed Metal cache (dmsh_side.py). msl: the file of
+    its plain source, full. A shader none of them apply to, or whose compile unit does not build, gets <key>_b from the plain source and no <key>_bx (a stale one removed): the host draws it
+    without. → what the reflection says of them. Raises CalledProcessError when the plain source does not compile"""
+    targets = [(t, d) for t, d in (('mac', out), ('ios', IOSOUT)) if d and t in TARGETS]
+    src, info = dmsh_side.unit(full)
+    if src:
+        u = os.path.join(w, key + '_bu.metal'); open(u, 'w').write(src)
+        try:
+            for t, d in targets: MTL.compile_split(t, u, os.path.join(d, key + '_b.metallib'), os.path.join(d, key + '_bx.metallib'), lambda lib: dmsh_side.cut(lib, set(info['alpha'] + info['logic'])))
+            SIDE_STATS['generated'] += 1
+            return {f: {'entries': info[f]} for f in ('alpha', 'logic') if info[f]}
+        except (subprocess.CalledProcessError, ValueError) as e:
+            SIDE_STATS['failed'] += 1; print(f'[RED] {key}: the alpha test and logic operation entry points do not build ({str(e)[:120]}): its draws go without them', flush=True)
+        finally:
+            try: os.unlink(u)
             except FileNotFoundError: pass
-    v, info = mod.variant(full)
-    if not v: stats['not generated'] += 1; drop(); return refl
-    msl = os.path.join(w, f'{key}_{sfx}.metal'); open(msl, 'w').write(v)
-    try:
-        if 'mac' in TARGETS: MTL.compile('mac', msl, libs[0])
-        if IOSOUT: MTL.compile('ios', msl, libs[1])
-    except subprocess.CalledProcessError as e:
-        stats['failed'] += 1; print(f'[RED] {key}: the {what} library does not compile ({str(e)[:120]}): its draws go without it', flush=True)
-        drop(); return refl
-    finally:
-        try: os.unlink(msl)
+    else: SIDE_STATS['not generated'] += 1
+    for t, d in targets:
+        try: os.unlink(os.path.join(d, key + '_bx.metallib'))
         except FileNotFoundError: pass
-    stats['generated'] += 1
-    refl[field] = {'entries': info}
-    return refl
-
-def alpha_finish(key, full, refl):   # the alpha test library <key>_ba (dmsh_alpha.py): none for a shader whose colour 0 has no float alpha
-    return ps_side_finish(key, full, refl, dmsh_alpha, 'ba', 'alpha', ALPHA_STATS, 'alpha test')
-
-def logic_finish(key, full, refl):   # the logic operation library <key>_bl (dmsh_logic.py): none for a shader without colour outputs
-    return ps_side_finish(key, full, refl, dmsh_logic, 'bl', 'logic', LOGIC_STATS, 'logic operation')
+        MTL.compile(t, msl, os.path.join(d, key + '_b.metallib'))
+    return {}
 
 pc_of, loc = {}, {}
 MAP_ROWS, MAP_CONFLICT_ROWS = {}, {}
@@ -1106,6 +1097,37 @@ def vs_depth(src):
     single = src[:m.start()] + gl
     return single, single + '\n' + re.sub(r'\bmain0\s*\(', 'main0_z(', body, count=1)
 
+def int_outputs(src, body, cols):
+    """The colour outputs that hold integers, not float bits. The translator keeps registers in integer locals, so a float colour also reaches its output as as_type<float>(_n), with _n =
+    as_type<int>(<a float>) somewhere above; Kirby Star Allies' G-buffer shaders write all four of colour 0 to 2 that way, and only colour 2 goes to an integer target (RGBA8Uint, its material bits:
+    constants, shifts and ORs). So each write is followed back through the locals: a value computed by an integer operation or a small integer constant counts as integer, the bits of a computed
+    float as float; zero, larger constants (the bits of a float constant) and words copied from a uniform or an input say nothing. A denormal float literal is a small integer constant SPIRV-Cross
+    printed through the output's type. → the outputs with integers and no float bits, or, when none is that clean (a register reused by two branches), the outputs with integers"""
+    types = {v: t for t, v in re.findall(r'^\s*(u?int\d?|float\d?|bool)\s+(_\d+)\b', body, re.M)}
+    defs = collections.defaultdict(list)
+    for v, e in re.findall(r'^\s*(?:(?:u?int\d?|float\d?|bool)\s+)?(_\d+)\s*=\s*([^;]+);', body, re.M): defs[v].append(e.strip())
+    def kinds(e, seen):
+        if re.fullmatch(r'_\d+', e):
+            if types.get(e, '').startswith('float'): return {'float'}
+            if e in seen: return set()
+            seen.add(e); return set().union(*(kinds(x, seen) for x in defs[e])) if defs[e] else set()
+        if re.fullmatch(r'-?\d+u?', e): return {'int'} if 0 < abs(int(e.rstrip('u'))) < 0x800000 else set()
+        t = re.fullmatch(r'[^?]+\?\s*([^:]+?)\s*:\s*(.+)', e)   # a choice between two values (a comparison's 1.0 or 0.0 in Ghost Trick's colour 0) is what its values are
+        if t: return kinds(t[1], seen) | kinds(t[2], seen)
+        a = re.fullmatch(r'as_type<u?int\d?>\((.*)\)', e)
+        if a: return set() if re.search(r'fp_c\d|\bin\.|^-?[0-9.]', a[1]) else {'float'}
+        return set() if e.startswith(('(*spvDescriptorSet0', 'spvDescriptorSet0')) else {'int'}
+    found = {}
+    for nm in cols:
+        k = set()
+        for w in re.findall(r'\bout\.%s(?:\.\w+)? = ([^;]+);' % nm, body):
+            w = w.strip(); a = re.fullmatch(r'as_type<float\d?>\((.*)\)', w)
+            if a: k |= kinds(a[1].strip(), set())
+            elif re.fullmatch(r'-?[0-9.]+(?:e[-+]?\d+)?f?', w): k |= {'int'} if 0 < abs(float(w.rstrip('f'))) < 1.17549e-38 else set()
+            else: k.add('float')
+        found[nm] = k
+    return {nm for nm, k in found.items() if k == {'int'}} or {nm for nm, k in found.items() if 'int' in k}
+
 def fs_uint(src):
     """Integer colour targets. With no PC version the translator declares every fragment output float; a shader writes an integer as the float with its bits (as_type<float>(…)), and Metal
     refuses a pipeline whose float output meets an integer attachment. Luigi's Mansion 3 draws its whole scene into an R32Uint + RGBA8Uint G-buffer (1,377 of its 4,307 pixel shaders write
@@ -1114,7 +1136,8 @@ def fs_uint(src):
     attachments are all unsigned integer formats (nvn_mtl.m).
     A G-buffer may mix the two: Pokémon Sword's scene shaders write colour 0 and 2 as floats and colour 1 from integer bits into an RGBA16Uint target. A shader whose outputs include both
     gets a third entry point, main0_m, that returns only the outputs written from integer bits as unsigned integers (their colour indices: the mask); the host takes it for a pipeline whose
-    integer attachments are exactly those. → (the source with main0_u (and main0_m) added, the main0_m mask or 0), or (None, 0)"""
+    integer attachments are exactly those; which outputs those are comes from how their values are computed (int_outputs), as nearly every float output is written as integer bits too.
+    → (the source with main0_u (and main0_m) added, the main0_m mask or 0), or (None, 0)"""
     m = re.search(r'^.*\bfragment\s+main0_out\s+main0\s*\(', src, re.M); st = re.search(r'struct main0_out\s*\{(.*?)\};', src, re.S)
     if not m or not st: return None, 0
     mem = re.findall(r'^\s*(\w+)\s+(\w+)\s*(\[\[[^\]]*\]\])?;', st.group(1), re.M)
@@ -1129,16 +1152,19 @@ def fs_uint(src):
         w = w.strip(); d = re.fullmatch(r'\w+', w) and re.search(r'\bfloat\d? %s = (in\.\w+(?:\.\w+)?);' % w, src)
         i = re.fullmatch(r'in\.(\w+)(?:\.\w+)?', d[1] if d else w)
         return bool(i and i[1] in flat)
-    if not from_int and not (writes and (all(re.fullmatch(r'-?[0-9.]+f?|float\d\([-0-9., ]*\)', w.strip()) for w in writes) or all(passed(w) for w in writes))): return None, 0
+    body = src[m.start():]; body = body[:body.find('return out;') + 1 or len(body)]
+    ints = int_outputs(src, body, cols)
+    if not from_int and not ints and not (writes and (all(re.fullmatch(r'-?[0-9.]+f?|float\d\([-0-9., ]*\)', w.strip()) for w in writes) or all(passed(w) for w in writes))): return None, 0
     uty = lambda ty: 'u' + ty.replace('float', 'int')   # float4 → uint4, float → uint
     def entry(sfx, as_uint):   # main0 again as main0_<sfx>, returning the outputs in as_uint as the unsigned integer vectors of their bits (dmsh_fetch.py cuts the source at main0_out_u)
         struct = f'struct main0_out_{sfx}\n{{\n' + ''.join(f'    {uty(cols[nm]) if nm in as_uint else ty} {nm} {at};\n' for ty, nm, at in mem) + '};\n\n'
         ret = f'return main0_out_{sfx}{{' + ', '.join(f'as_type<{uty(cols[nm])}>(out.{nm})' if nm in as_uint else f'out.{nm}' for _, nm, _ in mem) + '};'
         return '\n' + struct + re.sub(r'\bfragment\s+main0_out\s+main0\s*\(', f'fragment main0_out_{sfx} main0_{sfx}(', src[m.start():], count=1).replace('return out;', ret)
     out, mask = src + entry('u', set(cols)), 0
-    if from_int and set(cols) - from_int:   # some outputs from integer bits, some not: the mixed entry point
-        out += entry('m', from_int)
-        mask = sum(1 << int(re.search(r'color\((\d+)\)', at).group(1)) for _, nm, at in mem if nm in from_int)
+    as_int = ints or from_int
+    if as_int and set(cols) - as_int:   # some outputs from integer bits, some not: the mixed entry point
+        out += entry('m', as_int)
+        mask = sum(1 << int(re.search(r'color\((\d+)\)', at).group(1)) for _, nm, at in mem if nm in as_int)
     return out, mask
 
 def fs_dual(src):
@@ -1344,7 +1370,9 @@ def finish(key, w, j, c1):
     fu, fmask = fs_uint(src) if j['stage'] == 'ps' else (None, 0)   # the integer-output entry points (see fs_uint); the analysis below uses the source with only main0
     fd = fs_dual(src) if j['stage'] == 'ps' and key in DUAL_WANT else None   # the dual-source entry point (see fs_dual), from the source with only main0
     if fu or fd: plain = src; open(msl, 'w').write((fu or src) + (fd or ''))
+    side = {}
     def compile_targets():   # the selected targets from the same MSL (MSL identical to one compiled before takes that library, dmsh_mtlcache.py)
+        if j['stage'] == 'ps': side.clear(); side.update(ps_libraries(key, msl, open(msl).read())); return
         if 'mac' in TARGETS: MTL.compile('mac', msl, lib)
         if 'ios' in TARGETS and IOSOUT: MTL.compile('ios', msl, os.path.join(IOSOUT, key + '_b.metallib'))
     try: compile_targets()
@@ -1371,7 +1399,7 @@ def finish(key, w, j, c1):
             'vertex_inputs': [{'location': int(m.group(2)), 'msl_type': m.group(1)} for m in re.finditer(r'(\w+)\s+\w+\s*\[\[attribute\((\d+)\)\]\]', src)],
             'raster': raster_facts(j['stage'], src), 'vs_pad': pad}
     if j['stage'] == 'vs': full = open(msl).read(); vin_finish(key, full, refl); pull_finish(key, full, refl)   # the shadow-input and pulling libraries (dmsh_vin.py, dmsh_pull.py), from the source with every entry point
-    if j['stage'] == 'ps': full = open(msl).read(); alpha_finish(key, full, refl); logic_finish(key, full, refl)   # the alpha test and logic operation libraries (dmsh_alpha.py, dmsh_logic.py), from the source with every entry point
+    refl.update(side)   # the alpha test and logic operation entry points (ps_libraries)
     write_refl(key, refl)
     fetch_finish(key, src, refl)
     return 'ok', '', refl
@@ -1434,7 +1462,8 @@ def fin(key):
         refl = json.load(open(os.path.join(out, key + '_b.json')))
         src = open(os.path.join(out, key + '_b.metal')).read() if refl['stage'] in ('ps', 'vs') else ''
         if refl['stage'] == 'vs': write_refl(key, pull_finish(key, src, vin_finish(key, src, refl)))
-        return key, 'ok', '', fetch_finish(key, src, logic_finish(key, src, alpha_finish(key, src, refl)))
+        if refl['stage'] == 'ps': refl.update(ps_libraries(key, os.path.join(out, key + '_b.metal'), src))
+        return key, 'ok', '', fetch_finish(key, src, refl)
     if key in xerr or not os.path.exists(os.path.join(w, key + '.spv')): return key, 'translation failed', xerr.get(key, 'no spv'), None
     result = (key,) + finish(key, w, jobs[key], c1s[key])
     if result[1] == 'ok': publish_cache(key, digests[key], rule_fps[key], CODE_FP)
@@ -1469,8 +1498,7 @@ for reason in ('new key', 'rule changed', 'code fingerprint changed: all rebuilt
 print(f'variant cache: generated {BF_STATS["generated"]}, hit {BF_STATS["hit"]}, rebuilt {BF_STATS["miss"]}, compiled {BF_STATS["compile"]}')
 print(f'shadow-input libraries (<key>_bv, dmsh_vin.py): {VIN_STATS["generated"]} generated, {VIN_STATS["failed"]} failed to compile, {VIN_STATS["not generated"]} not generated; '
       f'{VIN_STATS["inputs"]} integer inputs shadowed, {VIN_STATS["float only"]} of them with no other-sign shadow (attribute indices ran out)')
-print(f'alpha test libraries (<key>_ba, dmsh_alpha.py): {ALPHA_STATS["generated"]} generated, {ALPHA_STATS["failed"]} failed to compile, {ALPHA_STATS["not generated"]} pixel shaders without a float colour 0 alpha')
-print(f'logic operation libraries (<key>_bl, dmsh_logic.py): {LOGIC_STATS["generated"]} generated, {LOGIC_STATS["failed"]} failed to compile, {LOGIC_STATS["not generated"]} pixel shaders without colour outputs')
+print(f'alpha test and logic operation libraries (<key>_bx, dmsh_side.py): {SIDE_STATS["generated"]} generated, {SIDE_STATS["failed"]} failed to compile, {SIDE_STATS["not generated"]} pixel shaders without either')
 print(f'pulling libraries (<key>_bp, dmsh_pull.py): {PULL_STATS["generated"]} generated, {PULL_STATS["failed"]} failed to compile, {PULL_STATS["not generated"]} not generated, '
       f'{PULL_STATS["no stage input"]} vertex shaders without stage inputs (none needed)')
 print('mesh libraries (<vertex>_<geometry>_m3, dmsh_mesh.py): ' + (', '.join(f'{k} {v}' for k, v in MESH_STATS.items()) or 'none'))

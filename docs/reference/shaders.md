@@ -1063,6 +1063,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
 
+### Comparisons with .FTZ
+
+- **Symptom:** single bright dots at thin far geometry (railings, track edges), changing frame to frame as the camera moves; already in the lit picture before anti-aliasing.
+- **Cause:** FSET and FSETP have an .FTZ flag (bit 80, after the comparison at 76..80): on NVIDIA a denormal operand compares as zero. The translator decoded it and dropped it, and Apple's GPUs keep fp32 denormals. A guard like `sum != 0` before `1 / sum` then lets a denormal sum through: its reciprocal overflows, the products give NaN, and a `min(x, 1.0)` (`precise::`, see [min, max and clamp with a NaN operand](#min-max-and-clamp-with-a-nan-operand)) turns it into 1.0, a fully lit pixel.
+- **Fix:** `AFset` / `AFsetp` compare a flushed operand where bit 80 is set: `|x| < FLT_MIN ? 0 : x` (`AFtz`, `InstEmitAmpereAlu.cs`). Maxwell's FSETP has the same flag (`InstFsetp*.Ftz`) and is not changed here.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): its deferred lighting `635061c90d75a8d1` normalises four depth-weighted half-resolution samples by `1 / sum` only where `FSETP.NEU.FTZ` says the sum is not zero (+0x10a0); every FSETP of that shader has the flag. On the Grand Prix's first flyover, a hand-patched library took the isolated dots out; the dotted rims along silhouettes stay (another cause, open).
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`CompareFtz`, on the game's encoding; it fails on the translator before).
+
 ### Barrier moves around warp shuffles
 
 - **Symptom:** `Ampere instruction f55 at 0x… (000fe20000000000000000001a0f7f55) is not implemented` in the shader build; those shaders are left out.

@@ -85,6 +85,8 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nup --platform m
 
 [Hyrule Warriors: Age of Imprisonment](dm/games/04003F40232DE000/README.md) is played this way: its 47 GB NUP unpacks in under five minutes. A NUP that carries the game's control data (its NACP) and icon gives the app the game's name and icon; otherwise the name comes from the game's profile and the app has no icon.
 
+A NUP without a base package also works when its updates are marked `standalone_update` and the selected update contains its complete ExeFS and RomFS. The newest update is selected by default; `--package v<N>` selects another version in the container. Such a container has no `v0` (base game) to select.
+
 **From a folder of files**. The script expects this layout (`updates` and `dlc` are optional):
 
 ```

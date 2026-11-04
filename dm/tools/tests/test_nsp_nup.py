@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 from pathlib import Path
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -36,7 +37,7 @@ def tlv(recs):
     return b''.join(struct.pack('<HHI', t, 0, len(v)) + v for t, v in recs)
 
 
-def write_nup(path, packages):
+def write_nup(path, packages, *, update_flags=0):
     """packages: [(kind, title ID, version, {'exefs': {name: bytes}, 'romfs': {path: bytes}}, meta bytes)] → a NUP file, every file of 200 bytes or more zstd-compressed"""
     dirs, files, slots, pool = [], [], [], bytearray()
     def walk(name, tree):   # tree: {name: bytes or dict}; dirs pre-order, children contiguous and sorted
@@ -79,7 +80,7 @@ def write_nup(path, packages):
         ext.append((pos, len(stored), codec)); blobs.append((pos, stored)); pos = (pos + len(stored) + 15) // 16 * 16
     toc = bytearray(struct.pack('<4sIQQQQQ', b'TOC\x01', len(recs), len(dirs), len(files), pool_off, len(pool), 0))
     for r, (moff, m) in zip(recs, metas):
-        toc += struct.pack('<QIIIIBBHIQI20x', r[0], r[1], r[2], r[3], r[4], r[5], 0, 0, 0, moff if m else 0, len(m))
+        toc += struct.pack('<QIIIIBBHIQI20x', r[0], r[1], r[2], r[3], r[4], r[5], update_flags if r[5] == 1 else 0, 0, 0, moff if m else 0, len(m))
     for (o, ln), d in zip(names_d, dirs): toc += struct.pack('<IIIIQ', o, ln, d[1], d[2], 0)
     for (o, ln), (n, data), (eo, es, c) in zip(names_f, files, ext): toc += struct.pack('<IIQQQ32sBBH12x', o, ln, len(data), eo, es, hashlib.sha256(data).digest(), c, 0, 0)
     for k, i in slots: toc += struct.pack('<I', i if k == 'd' else len(dirs) + i)
@@ -164,6 +165,18 @@ class Read(Base):
         write_nup(self.path, [(1, TID, VER, version(), b'')])
         with self.assertRaisesRegex(pack_nup.Error, 'no base game'): pack_nup.scan(self.open())
 
+    def test_addon_alone_is_not_a_standalone_program(self):
+        write_nup(self.path, [(2, TID + 0x1001, 0, {'romfs': {'dlc': b'dlc'}}, b'')])
+        with self.assertRaisesRegex(pack_nup.Error, 'no base game'): pack_nup.scan(self.open())
+
+    def test_standalone_updates_keep_identity_and_version_checks(self):
+        for packages, error in (([(1, TID, 0, version(), b'')], 'update of version 0'),
+                                ([(1, TID, VER, version(), b'')] * 2, 'two updates of version'),
+                                ([(1, TID, VER, version(), b''), (1, TID + 0x2000, VER + 1, version(tid=TID + 0x2000), b'')], 'different program IDs')):
+            with self.subTest(error=error):
+                write_nup(self.path, packages, update_flags=pack_nup.STANDALONE)
+                with pack_nup.Nup(self.path) as n, self.assertRaisesRegex(pack_nup.Error, error): pack_nup.scan(n)
+
     def test_folder_or_file(self):
         self.assertEqual(nsp.nup_file(self.dir), self.path)
         self.assertEqual(nsp.nup_file(self.path), self.path)
@@ -173,6 +186,48 @@ class Read(Base):
 
 class Pack(Base):
     def out(self): return self.dir / 'out'
+
+    def test_standalone_updates_keep_their_versions_and_dlc(self):
+        write_nup(self.path, [(1, TID, VER, version(marker='older'), META),
+                              (1, TID, VER + 1, version(main=b'newest', marker='newest'), tlv([(pack_nup.T_ICON, b'new icon')])),
+                              (2, TID + 0x1001, 0, {'romfs': {'dlc': b'dlc'}}, b'')], update_flags=pack_nup.STANDALONE)
+        n = self.open(); app, base, vers, dlc = pack_nup.scan(n)
+        self.assertIsNone(base)
+        self.assertEqual((app, sorted(vers), sorted(dlc)), (TID, [VER, VER + 1], [TID + 0x1001]))
+        app, fam = nsp.scan_nup(self.path); self.addCleanup(fam['nup'].close)
+        have = nsp.nsp_versions(fam, {})
+        self.assertEqual(set(have), {f'v{VER}', f'v{VER + 1}'})
+        with mock.patch.object(nsp, 'say'):
+            picks = nsp.pick_nsps(fam, have, sorted(have))
+        self.assertTrue(all(b is None and u.version == int(v[1:]) for v, (b, u) in picks.items()))
+        for ver in (VER, VER + 1):
+            out = self.out() / f'v{ver}'
+            pack_nup.pack_version(n, vers[ver], base, app, out, say=lambda s: None)
+            self.assertEqual((out / 'ExeFS/main').read_bytes(), b'code' if ver == VER else b'newest')
+            self.assertIn('dir/older' if ver == VER else 'dir/newest', romfs_image.read_index(out / 'RomFS.img'))
+        self.assertEqual(nacp.name(self.out() / f'v{VER}/control.nacp'), 'Test Game')
+        self.assertEqual(nacp.name(self.out() / f'v{VER + 1}/control.nacp'), 'Test Game')
+        self.assertEqual((self.out() / f'v{VER + 1}/icon.jpg').read_bytes(), b'new icon')
+        pack_nup.pack_dlc(n, app, dlc, self.out() / 'aoc', say=lambda s: None)
+        self.assertIn('dlc', romfs_image.read_index(self.out() / 'aoc/1.img'))
+
+    def test_standalone_update_needs_its_own_romfs(self):
+        write_nup(self.path, [(1, TID, VER, version(), b''),
+                              (1, TID, VER + 1, {'exefs': version()['exefs']}, b'')], update_flags=pack_nup.STANDALONE)
+        n = self.open(); app, base, vers, _ = pack_nup.scan(n)
+        with self.assertRaisesRegex(pack_nup.Error, 'no romfs/'):
+            pack_nup.pack_version(n, vers[VER + 1], base, app, self.out())
+        with self.assertRaisesRegex(nsp.BuildError, 'no romfs/'):
+            nsp.extract_nup(self.out(), f'v{VER + 1}', vers[VER + 1], base, app, n)
+        self.assertFalse(self.out().exists())
+
+    def test_standalone_update_needs_main(self):
+        tree = version(); del tree['exefs']['main']
+        write_nup(self.path, [(1, TID, VER, tree, b'')], update_flags=pack_nup.STANDALONE)
+        n = self.open(); app, base, vers, _ = pack_nup.scan(n)
+        with self.assertRaisesRegex(pack_nup.Error, 'no exefs/main'):
+            pack_nup.pack_version(n, vers[VER], base, app, self.out())
+        self.assertFalse(self.out().exists())
 
     def test_empty_base_with_complete_update(self):
         for tree in ({'exefs': {}}, {}):
@@ -264,14 +319,34 @@ class Pack(Base):
 class Stop(Exception): pass
 
 
+class StandaloneCLI(Base):
+    def test_default_and_explicit_versions_and_missing_base(self):
+        write_nup(self.path, [(1, TID, VER, version(), META),
+                              (1, TID, VER + 1, version(main=b'newest'), b'')], update_flags=pack_nup.STANDALONE)
+        work = self.dir / 'cli'
+        cmd = [sys.executable, str(REPO / 'scripts/pack_nup.py'), str(self.path), '--work-dir', str(work)]
+        for args, ver, main in (([], VER + 1, b'newest'), (['--version', str(VER)], VER, b'code')):
+            r = subprocess.run(cmd + args, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual((work / f'extract/v{ver}/ExeFS/main').read_bytes(), main)
+        r = subprocess.run(cmd + ['--version', '0'], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('no base game (version 0)', r.stderr)
+        self.assertNotIn('Traceback', r.stderr)
+        self.assertFalse((work / 'extract/v0').exists())
+
+
 class Main(Base):
-    def run_main(self, target):
+    def run_main(self, target, *, extract=False, package=None):
         seen, said = {}, []
-        def stop(env, *a): seen.update(env); raise Stop()
+        def stop(env, *a):
+            seen.update(env)
+            if not extract: raise Stop()
         with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), mock.patch.object(nsp, 'WORK_DIR', ''), mock.patch.object(nsp, 'PROD_KEYS', ''), \
              mock.patch.object(nsp, 'check_prereqs', side_effect=stop), mock.patch.object(nsp, 'say', side_effect=said.append), \
+             mock.patch.object(nsp, 'check_versions_aarch64', side_effect=Stop), \
              mock.patch.object(nsp, 'ask', side_effect=AssertionError('asked for something')), mock.patch.object(nsp, 'package_title_reader', side_effect=AssertionError('read a package')):
-            with self.assertRaises(Stop): nsp.main(nsp.parse_args([str(target)]))
+            with self.assertRaises(Stop): nsp.main(nsp.parse_args([str(target)] + (['--package', package] if package else [])))
         return Path(seen['DM_ROOT']), said
 
     def test_needs_no_keys_and_builds_beside_the_nup(self):
@@ -279,6 +354,17 @@ class Main(Base):
             work, said = self.run_main(target)
             self.assertEqual(work, self.dir / f'{TID:016X}_build')
             self.assertTrue(any(s.startswith('a NUP: game.nup') for s in said), said)
+
+    def test_standalone_update_reaches_extraction_without_a_base(self):
+        write_nup(self.path, [(1, TID, VER, version(), META)], update_flags=pack_nup.STANDALONE)
+        for target in (self.dir, self.path):
+            work, said = self.run_main(target, extract=True)
+            self.assertFalse((work / 'extract/v0').exists())
+            self.assertEqual((work / f'extract/v{VER}/ExeFS/main').read_bytes(), b'code')
+            self.assertEqual(nacp.name(work / f'extract/v{VER}/control.nacp'), 'Test Game')
+            self.assertFalse(any(s.startswith('base:') for s in said))
+            with self.assertRaisesRegex(nsp.BuildError, 'version to pack .* is not in the folder'):
+                self.run_main(target, package='v0')
 
 
 if __name__ == '__main__':

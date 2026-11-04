@@ -9,6 +9,13 @@
 - **Fix:** the scanner accepts the table boundary as the end of the final name. `nx_extract` supplies LibHac with a virtual header containing the missing NUL followed by the original payload storage. File offsets remain relative to that payload, and the source package and encrypted NCA bytes are unchanged. Truncated tables and out-of-table name offsets still fail. Synthetic package tests cover both readers and payload preservation.
 - **Found on:** Moving Out 2 (`010065D018172000`), base 1.1.254 NSP and update 1.3.315 NSZ. Package reading was checked, not gameplay.
 
+### A NUP with complete standalone updates stops at "no base game"
+
+- **Symptom:** `no base game, only update packages: pack the base game and its update into one NUP`, even when the update carries the complete game's files ([issue #1195](https://github.com/seedds/nxnative/issues/1195)).
+- **Cause:** `pack_nup.scan` required a `base` record. NUP v1 permits a container without one when every update has the `standalone_update` flag (package flags bit 0, [SPEC §3.1.2](https://github.com/a55uka/nup/blob/meow/SPEC.md#312-package-kinds)). The reference packer omits an empty `base/` and sets that flag on its updates, so an empty placeholder no longer gets through the check.
+- **Fix:** keep the absent base as `None` and expose only the update versions actually present. Both packing entry points select the newest update by default; requesting version 0 fails. The selected update must have `exefs/main`, `exefs/main.npdm` and its own RomFS; it cannot borrow another update's RomFS. Application control data falls back to the first package's metadata, as NUP specifies for containers without a base. A real base still supplies the RomFS for an update without one. Program-ID, DLC, content-size and SHA-256 checks apply as before.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md). Reproduced with its base dump repackaged by the reference tool as a standalone-update fixture; this checks packaging, not the reported 1.8.0's contents or gameplay. Synthetic tests cover both entry points, multiple versions, control data, DLC and incomplete updates.
+
 ## Build tools
 
 ### Homebrew .NET is on PATH but apphosts cannot find the runtime

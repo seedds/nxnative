@@ -1617,7 +1617,7 @@ for off, oid, ow, why in region_obs: use_area(off); put_branch(off, site_obs(off
 obs += region_obs
 
 # ---- Frame step in whole vsyncs (the mains whose patch file has FRAME_STEP: The Legend of Zelda: Tears of the Kingdom 1.4.3, Breath of the Wild 1.9.0, Hyrule Warriors: Age of Calamity 1.3.0,
-# Paper Mario: The Thousand-Year Door 1.0.1 and ASTRAL CHAIN 1.0.1; host only) ----
+# Paper Mario: The Thousand-Year Door 1.0.1, ASTRAL CHAIN 1.0.1 and Pokemon Legends: Z-A 2.0.2; host only) ----
 # The games step their game time by a whole number of vsyncs (1/60 s) per frame that their own interval logic picks. With the stubs the host picks it (hle_nvn.c fstep_tick,
 # nvn_fstep.h): the step is the number of vsyncs the host keeps the frame on screen (1 = 60 fps, 2 = 30 when 60 does not hold), plus one while the game is behind real time after
 # a late frame, so motion is even and game time = real time. The steps stay values the games' own logic uses (1 to 3). Age of Calamity's updates are not held by the presents:

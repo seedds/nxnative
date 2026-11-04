@@ -33,10 +33,10 @@ static void clear(MTLClearColor color) {
 }
 static void sample(NvShader *fs, id<MTLRenderPipelineState> pipeline) {
     clear(MTLClearColorMake(0, 0, 0, 1));
-    enc_r_pso(g_enc, pipeline);
-    enc_r_viewport(g_enc, (MTLViewport){0, 0, 4, 4, 0, 1});
-    CHECK(encode_args((id<MTLCommandEncoder>)g_enc, fs, 1, 0), "production fragment arguments encoded");
-    enc_r_draw(g_enc, MTLPrimitiveTypeTriangle, 0, 3);
+    enc_r_pso(RX.enc, pipeline);
+    enc_r_viewport(RX.enc, (MTLViewport){0, 0, 4, 4, 0, 1});
+    CHECK(encode_args((id<MTLCommandEncoder>)RX.enc, fs, 1, 0), "production fragment arguments encoded");
+    enc_r_draw(RX.enc, MTLPrimitiveTypeTriangle, 0, 3);
     rp_end();
 }
 static void readback(id<MTLTexture> t, id<MTLBuffer> b, unsigned offset) {
@@ -63,13 +63,13 @@ static void slot_case(NvProg *pr, id<MTLRenderPipelineState> pipeline, int slot,
     clear(MTLClearColorMake(image ? 17 : 1, 0, 0, 1));
     if (image) {
         fs->rf.b[0].rw = 1; fb_prepare(pr);
-        CHECK(!g_fb_n && g_enc, "writes stay on the original attachment");
+        CHECK(!g_fb_n && RX.enc, "writes stay on the original attachment");
         fs->rf.b[0].rw = 0; fs->rf.b[0].atom = 1; fb_prepare(pr);
-        CHECK(!g_fb_n && g_enc, "atomics stay on the original attachment");
+        CHECK(!g_fb_n && RX.enc, "atomics stay on the original attachment");
         fs->rf.b[0].atom = 0;
     }
     fb_prepare(pr);
-    CHECK(!g_enc, "snapshot closes the preceding render pass");
+    CHECK(!RX.enc, "snapshot closes the preceding render pass");
     CHECK(g_fb_n == 1, "feedback attachment receives a snapshot");
     CHECK(g_fb_n == 1 && g_fb_src[0] == original && g_fb_use[0] != original,
           "snapshot substitutes a distinct texture for the registered source");
@@ -118,12 +118,12 @@ static void image_view_case(NvProg *pr) {
     R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &source; S.img[1][b->reg] = tid;
     clear(MTLClearColorMake(11, 0, 0, 1));
     fb_prepare(pr);
-    CHECK(g_fb_n == 0 && g_enc, "a level-1 image does not snapshot a level-0 attachment");
+    CHECK(g_fb_n == 0 && RX.enc, "a level-1 image does not snapshot a level-0 attachment");
     rp_end();
     R.rt.has_cview[0] = 1; R.rt.cview[0] = level1;
     clear(MTLClearColorMake(17, 0, 0, 1));
     fb_prepare(pr);
-    CHECK(g_fb_n == 1 && !g_enc && g_fb_src[0].parentTexture == original &&
+    CHECK(g_fb_n == 1 && !RX.enc && g_fb_src[0].parentTexture == original &&
           g_fb_src[0].parentRelativeLevel == 1 && g_fb_use[0].width == 2,
           "a level-1 image snapshots its level-1 attachment");
     rp_end();
@@ -134,7 +134,7 @@ static void image_view_case(NvProg *pr) {
     os_unfair_lock_unlock(&g_rmu);
     CHECK(real && signed_view.pixelFormat == MTLPixelFormatR32Sint, "the image binding can reinterpret R32Uint as SINT");
     fb_prepare(pr);
-    CHECK(g_fb_n == 0 && g_enc, "a SINT-class read of the R32Uint attachment keeps its reinterpreted image binding");
+    CHECK(g_fb_n == 0 && RX.enc, "a SINT-class read of the R32Uint attachment keeps its reinterpreted image binding");
     rp_end(); b->dpf = NVN_DPF_UINT;
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "image view submission completed without error");
     CHECK(serial_get(source.serial) == original, "the serial table still holds the image target");   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns original (serial_put's CFBridgingRetain) until mtl_tex_release below, not a leak
@@ -182,39 +182,39 @@ static void reuse_case(NvProg *pr) {
     S.chmask.mask = 0; clear(MTLClearColorMake(1, 0, 0, 1));
     uint64_t copies = g_fb_count;
     fb_prepare(pr);
-    CHECK(g_fb_n == 0 && g_enc, "a draw that writes nothing reads an unwritten attachment directly");
+    CHECK(g_fb_n == 0 && RX.enc, "a draw that writes nothing reads an unwritten attachment directly");
     S.chmask.mask = 0xffffffffu;
     fb_prepare(pr);
-    CHECK(g_fb_n == 1 && !g_enc && g_fb_count == copies + 1, "a writing draw takes a snapshot");
+    CHECK(g_fb_n == 1 && !RX.enc && g_fb_count == copies + 1, "a writing draw takes a snapshot");
     id<MTLTexture> first = g_fb_use[0];
     clear(MTLClearColorMake(0, 1, 0, 1));
     fb_prepare(pr);
-    CHECK(g_fb_n == 1 && g_enc && g_fb_count == copies + 1 && g_fb_use[0] == first, "the next writing draw reuses the snapshot without ending the pass");
+    CHECK(g_fb_n == 1 && RX.enc && g_fb_count == copies + 1 && g_fb_use[0] == first, "the next writing draw reuses the snapshot without ending the pass");
     S.chmask.mask = 0; rp_end(); clear(MTLClearColorMake(0, 1, 0, 1));
     fb_prepare(pr);
-    CHECK(g_fb_n == 0 && g_enc, "a reading draw first in a pass reads directly");
+    CHECK(g_fb_n == 0 && RX.enc, "a reading draw first in a pass reads directly");
     S.chmask.mask = 0xffffffffu;
     fb_prepare(pr);
-    CHECK(g_fb_n == 1 && !g_enc && g_fb_count == copies + 1, "a writing draw after a direct read ends the pass and reuses the snapshot");
+    CHECK(g_fb_n == 1 && !RX.enc && g_fb_count == copies + 1, "a writing draw after a direct read ends the pass and reuses the snapshot");
     g_fb_bar++;
     clear(MTLClearColorMake(0, 0, 1, 1));
     fb_prepare(pr);
-    CHECK(g_fb_n == 1 && !g_enc && g_fb_count == copies + 2, "a game barrier makes the next writing draw take a fresh snapshot");
+    CHECK(g_fb_n == 1 && !RX.enc && g_fb_count == copies + 2, "a game barrier makes the next writing draw take a fresh snapshot");
     rp_end();
     // The depth attachment read, then written in the same pass (only serials matter to the rule: the attachment is named after the pass opens)
     { tex_t output, depth; target(&output, 99791); target(&depth, 99792); mtl_reg_tex(651, &depth, NULL);   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns both textures (serial_put's CFBridgingRetain) until mtl_tex_release below, not a leak
       R.rt.color[0] = &output; R.rt.depth = NULL; S.tex[1][0] = 651; S.chmask.mask = 0xffffffffu; S.ds.dt = 1; S.ds.dw = 0;
       clear(MTLClearColorMake(0, 0, 0, 1)); R.rt.depth = &depth;
       fb_prepare(pr);
-      CHECK(g_enc != nil, "a draw that reads the depth attachment stays in its pass");
+      CHECK(RX.enc != nil, "a draw that reads the depth attachment stays in its pass");
       fb_prepare(pr);
-      CHECK(g_enc != nil, "so does the next one, which writes no depth");
+      CHECK(RX.enc != nil, "so does the next one, which writes no depth");
       S.ds.dw = 1; fb_prepare(pr);
-      CHECK(!g_enc, "a draw writing depth after a read of it ends the pass");
+      CHECK(!RX.enc, "a draw writing depth after a read of it ends the pass");
       R.rt.depth = NULL; clear(MTLClearColorMake(0, 0, 0, 1)); rp_end();   // that draw read it too, and began the pass it would open: the next pass is a clean one
       clear(MTLClearColorMake(0, 0, 0, 1)); R.rt.depth = &depth; S.tex[1][0] = 0;
       fb_prepare(pr);
-      CHECK(g_enc != nil, "a draw writing depth with no read of it in its pass stays");
+      CHECK(RX.enc != nil, "a draw writing depth with no read of it in its pass stays");
       R.rt.depth = NULL; S.ds.dt = S.ds.dw = 0; rp_end(); mtl_tex_release(&output); mtl_tex_release(&depth); }
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "GPU submission completed");
     CHECK(!mtl_last_commit_error(), "GPU submission has no error");
@@ -264,22 +264,22 @@ static void tile_case(const char *dir) {
     uint64_t copies = g_fb_count, waits = g_fb_tile_wait, tiles = g_fb_tile_draws;
     clear(MTLClearColorMake(1, 0, 0, 1));
     fb_prepare(pr);
-    CHECK(g_fb_n == 1 && !g_enc && g_fb_count == copies + 1 && g_fb_tile_wait == waits + 1 && g_fb_tseq != g_draw_seq, "while its pipeline builds, the draw takes a snapshot");
+    CHECK(g_fb_n == 1 && !RX.enc && g_fb_count == copies + 1 && g_fb_tile_wait == waits + 1 && g_fb_tseq != g_draw_seq, "while its pipeline builds, the draw takes a snapshot");
     for (int i = 0; i < 1000; i++) { os_unfair_lock_lock(&g_fb_tp_lock); int done = g_fb_tp_n && g_fb_tp[0].done; os_unfair_lock_unlock(&g_fb_tp_lock); if (done) break; usleep(10000); }
     CHECK(g_fb_tp_n == 1 && g_fb_tp[0].done && g_fb_tp[0].ps, "the tile-reading pipeline is built in the background");
     g_fb_bar++;   // a game barrier: a snapshot would have to be taken again
     clear(MTLClearColorMake(1, 0, 0, 1));
-    id first = g_enc;
-    enc_r_pso(g_enc, green); enc_r_viewport(g_enc, (MTLViewport){0, 0, 4, 4, 0, 1}); enc_r_scissor(g_enc, (MTLScissorRect){0, 0, 2, 4});
-    enc_r_draw(g_enc, MTLPrimitiveTypeTriangle, 0, 3);
+    id first = RX.enc;
+    enc_r_pso(RX.enc, green); enc_r_viewport(RX.enc, (MTLViewport){0, 0, 4, 4, 0, 1}); enc_r_scissor(RX.enc, (MTLScissorRect){0, 0, 2, 4});
+    enc_r_draw(RX.enc, MTLPrimitiveTypeTriangle, 0, 3);
     fb_prepare(pr);
-    CHECK(g_enc == first && g_fb_n == 0 && g_fb_count == copies + 1 && g_fb_tseq == g_draw_seq && g_fb_tfn && g_fb_tile_draws == tiles + 1 && g_fb_tdesc.fbmask == 1 && g_fb_tdesc.fx[0] == 0,
+    CHECK(RX.enc == first && g_fb_n == 0 && g_fb_count == copies + 1 && g_fb_tseq == g_draw_seq && g_fb_tfn && g_fb_tile_draws == tiles + 1 && g_fb_tdesc.fbmask == 1 && g_fb_tdesc.fx[0] == 0,
           "after a barrier the draw reads the tile: no snapshot, the pass stays open");
     g_pso_lmap = g_fb_tlmap; g_pso_fsfn = g_fb_tfn; g_pso_fz = g_fb_tdesc;
     id<MTLRenderPipelineState> ps = pso_get(pr, nil);
     g_pso_lmap = NULL; g_pso_fsfn = nil; memset(&g_pso_fz, 0, sizeof g_pso_fz);
     CHECK(ps == g_fb_tp[0].ps, "the draw's pipeline is the one built in the background");
-    if (ps) { enc_r_pso(g_enc, ps); enc_r_scissor(g_enc, (MTLScissorRect){0, 0, 4, 4}); enc_r_args(g_enc, MTLRenderStageFragment, zero.gpuAddress, 0); enc_r_draw(g_enc, MTLPrimitiveTypeTriangle, 0, 3); }
+    if (ps) { enc_r_pso(RX.enc, ps); enc_r_scissor(RX.enc, (MTLScissorRect){0, 0, 4, 4}); enc_r_args(RX.enc, MTLRenderStageFragment, zero.gpuAddress, 0); enc_r_draw(RX.enc, MTLPrimitiveTypeTriangle, 0, 3); }
     rp_end();
     enc_b_copy_texture_buffer(blit(), attachment, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(4, 4, 1), result, 0, 256, 1024);
     // An image and a sampled texture can share a slot number. Only the sampled binding reads the tile.
@@ -292,7 +292,7 @@ static void tile_case(const char *dir) {
     S.vp[0][2] = 2; g_fb_bar++;
     clear(MTLClearColorMake(1, 0, 0, 1));
     fb_prepare(pr);
-    CHECK(g_fb_n == 1 && !g_enc && g_fb_tseq != g_draw_seq, "with a viewport smaller than the target the draw takes a snapshot");
+    CHECK(g_fb_n == 1 && !RX.enc && g_fb_tseq != g_draw_seq, "with a viewport smaller than the target the draw takes a snapshot");
     rp_end();
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "GPU submission completed");
     CHECK(!mtl_last_commit_error(), "GPU submission has no error");
@@ -359,24 +359,24 @@ static void fpos_case(const char *dir) {
     S.has_vp = 1; S.vp[0][0] = 0; S.vp[0][1] = 0; S.vp[0][2] = 2; S.vp[0][3] = 2;   // a viewport smaller than the target does not matter to gl_FragCoord
     uint64_t copies = g_fb_count, waits = g_fb_tile_wait, tiles = g_fb_tile_draws;
     clear(MTLClearColorMake(1, 0, 0, 1)); fb_prepare(pr);
-    CHECK(g_fb_n == 1 && !g_enc && g_fb_count == copies + 1 && g_fb_tile_wait == waits, "with a scale of 1/8 the draw is not its pixel's: a snapshot, no tile-reading pipeline");
+    CHECK(g_fb_n == 1 && !RX.enc && g_fb_count == copies + 1 && g_fb_tile_wait == waits, "with a scale of 1/8 the draw is not its pixel's: a snapshot, no tile-reading pipeline");
     float quarter[2] = {0.25f, 0.25f}; mtl_sub_update(quarter, (uint64_t)(mem + 24), 8);
     g_fb_bar++; clear(MTLClearColorMake(1, 0, 0, 1)); fb_prepare(pr);
-    CHECK(g_fb_n == 1 && !g_enc && g_fb_count == copies + 2 && g_fb_tile_wait == waits + 1, "the inline update's 1/4 proves it; while the pipeline builds, a snapshot");
+    CHECK(g_fb_n == 1 && !RX.enc && g_fb_count == copies + 2 && g_fb_tile_wait == waits + 1, "the inline update's 1/4 proves it; while the pipeline builds, a snapshot");
     for (int i = 0; i < 1000; i++) { os_unfair_lock_lock(&g_fb_tp_lock); int done = 1; for (int k = 0; k < g_fb_tp_n; k++) done &= g_fb_tp[k].done; os_unfair_lock_unlock(&g_fb_tp_lock); if (done) break; usleep(10000); }
     g_fb_bar++;
     clear(MTLClearColorMake(1, 0, 0, 1));
-    id first = g_enc;
-    enc_r_pso(g_enc, green); enc_r_viewport(g_enc, (MTLViewport){0, 0, 4, 4, 0, 1}); enc_r_scissor(g_enc, (MTLScissorRect){0, 0, 2, 4});
-    enc_r_draw(g_enc, MTLPrimitiveTypeTriangle, 0, 3);
+    id first = RX.enc;
+    enc_r_pso(RX.enc, green); enc_r_viewport(RX.enc, (MTLViewport){0, 0, 4, 4, 0, 1}); enc_r_scissor(RX.enc, (MTLScissorRect){0, 0, 2, 4});
+    enc_r_draw(RX.enc, MTLPrimitiveTypeTriangle, 0, 3);
     fb_prepare(pr);
-    CHECK(g_enc == first && g_fb_n == 0 && g_fb_tseq == g_draw_seq && g_fb_tfn && g_fb_tile_draws == tiles + 1 && g_fb_tdesc.fbmask == 1 && g_fb_tdesc.fx[0] == 0,
+    CHECK(RX.enc == first && g_fb_n == 0 && g_fb_tseq == g_draw_seq && g_fb_tfn && g_fb_tile_draws == tiles + 1 && g_fb_tdesc.fbmask == 1 && g_fb_tdesc.fx[0] == 0,
           "after a barrier the draw reads the tile: no snapshot, the pass stays open");
     g_pso_lmap = g_fb_tlmap; g_pso_fsfn = g_fb_tfn; g_pso_fz = g_fb_tdesc;
     id<MTLRenderPipelineState> ps = pso_get(pr, nil);
     g_pso_lmap = NULL; g_pso_fsfn = nil; memset(&g_pso_fz, 0, sizeof g_pso_fz);
     CHECK(ps != nil, "the tile-reading pipeline is there");
-    if (ps) { enc_r_pso(g_enc, ps); enc_r_viewport(g_enc, (MTLViewport){0, 0, 4, 4, 0, 1}); enc_r_scissor(g_enc, (MTLScissorRect){0, 0, 4, 4}); enc_r_args(g_enc, MTLRenderStageFragment, args.gpuAddress, 0); enc_r_draw(g_enc, MTLPrimitiveTypeTriangle, 0, 3); }
+    if (ps) { enc_r_pso(RX.enc, ps); enc_r_viewport(RX.enc, (MTLViewport){0, 0, 4, 4, 0, 1}); enc_r_scissor(RX.enc, (MTLScissorRect){0, 0, 4, 4}); enc_r_args(RX.enc, MTLRenderStageFragment, args.gpuAddress, 0); enc_r_draw(RX.enc, MTLPrimitiveTypeTriangle, 0, 3); }
     rp_end();
     enc_b_copy_texture_buffer(blit(), attachment, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(4, 4, 1), result, 0, 256, 1024);
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "GPU submission completed");

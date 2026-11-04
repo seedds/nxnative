@@ -26,20 +26,20 @@ int main(void) {
     id fill = blit();   // copies on the main command buffer go through the host wrapper (which carries its own barrier)
     [fill copyFromBuffer:src sourceOffset:0 sourceBytesPerRow:16 sourceBytesPerImage:16 sourceSize:MTLSizeMake(4, 1, 1)
                toTexture:base destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
-    enc_b_end(g_blit); g_blit = nil;
+    enc_b_end(RX.blit); RX.blit = nil;
     serial_put(t.serial, base);
     id<MTLTexture> upgraded = tex_upgrade_pfv(&t, base, MTLPixelFormatR32Uint);
     failed += upgraded.pixelFormat != MTLPixelFormatRGBA8Unorm;   // the upgrade keeps the original format
     failed += !(upgraded.usage & MTLTextureUsagePixelFormatView);
     failed += serial_get(t.serial) != upgraded;   // the registration has been replaced
-    if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    if (RX.blit) { enc_b_end(RX.blit); RX.blit = nil; }
     id<MTLTexture> view = [upgraded newTextureViewWithPixelFormat:MTLPixelFormatR32Uint];
     id<MTLBuffer> dst = [g_dev newBufferWithLength:sizeof bytes options:MTLResourceStorageModeShared];
     res_add(dst);
     id read = blit();
     [read copyFromTexture:view sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(4, 1, 1)
                  toBuffer:dst destinationOffset:0 destinationBytesPerRow:16 destinationBytesPerImage:16];
-    enc_b_end(g_blit); g_blit = nil;
+    enc_b_end(RX.blit); RX.blit = nil;
     mtl_sub_commit(); mtl_drain();
     failed += memcmp(dst.contents, bytes, sizeof bytes) != 0;
     printf("pfv predicate failed=%d\n", failed);

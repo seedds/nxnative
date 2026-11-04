@@ -3,9 +3,9 @@
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
-#define g_ft g_ft_hle
+#define RX.ft g_ft_hle
 #include "../nvn/hle_nvn.c"
-#undef g_ft
+#undef RX.ft
 uint64_t g_t0_ns;
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -238,7 +238,7 @@ static void mirror_completion(void) {
     ReadbackDevice *device = [ReadbackDevice new]; device.device = g_dev; device.observedLength = 4096; g_dev = (id)device;   // the 128-byte readback's size (mrbuf_get)
     mtl_exec((const uint8_t *)handle);
     g_dev = device.device;
-    [g_commit_blocks addObject:^{
+    [RX.commit_blocks addObject:^{
         dispatch_semaphore_signal(c->feedbackEntered);
         if (dispatch_semaphore_wait(c->feedbackRelease, dispatch_time(DISPATCH_TIME_NOW, 10000000000ll))) atomic_store(&c->gateTimedOut, 1);
     }];

@@ -42,7 +42,7 @@ static void run(int mode, int store_all) {
         R.has_rt=1; R.rt=code.rt;
         MTL4RenderPassDescriptor *pd=[MTL4RenderPassDescriptor new];
         pd.colorAttachments[0].texture=tex_mtl(&color); pd.colorAttachments[0].loadAction=MTLLoadActionDontCare;
-        pd.colorAttachments[0].storeAction=MTLStoreActionUnknown; g_enc=enc_r_begin(pd);
+        pd.colorAttachments[0].storeAction=MTLStoreActionUnknown; RX.enc=enc_r_begin(pd);
         g_sd[0]=(sd_att){.ser=color.serial,.idx=0,.bytes=256,.load=0}; g_nsd=1;
         NvProg *tail=prog_get(&programs[2]); NvShader *fs=tail?tail->sh[1]:nil;
         if(!fs||!tail->sh[0]) { CHECK(0,"DontCare-load image program resolves its two stages"); rp_end(); return; } // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns the NvProg prog_get returned (serial_put's CFBridgingRetain)
@@ -50,9 +50,9 @@ static void run(int mode, int store_all) {
         d.colorAttachments[0].pixelFormat=MTLPixelFormatRGBA8Unorm; d.colorAttachments[0].writeMask=MTLColorWriteMaskNone;
         NSError *error=nil; id<MTLRenderPipelineState> ps=[g_dev newRenderPipelineStateWithDescriptor:d error:&error];
         boundary_pipeline=ps; CHECK(ps!=nil,"DontCare-load image pipeline compiles");
-        enc_r_pso(g_enc,ps); enc_r_viewport(g_enc,(MTLViewport){0,0,8,8,0,1});
-        CHECK(encode_args((id<MTLCommandEncoder>)g_enc,fs,1,0),"DontCare-load image arguments encoded");
-        udc_note_draw(tail,0); enc_r_draw(g_enc,MTLPrimitiveTypeTriangle,0,3);
+        enc_r_pso(RX.enc,ps); enc_r_viewport(RX.enc,(MTLViewport){0,0,8,8,0,1});
+        CHECK(encode_args((id<MTLCommandEncoder>)RX.enc,fs,1,0),"DontCare-load image arguments encoded");
+        udc_note_draw(tail,0); enc_r_draw(RX.enc,MTLPrimitiveTypeTriangle,0,3);
     } else mtl_exec(mode==8 ? (const uint8_t *)&code.ph : (const uint8_t *)&code); // Keep mode 8's pending clear for the first draw; another SetRenderTargets would land it alone.
     if(mode==4) { code.pr=(p_bind_program){&programs[2],3}; mtl_exec((const uint8_t *)&code.ph); }
     if(mode==6) pr->sh[1]->rf.color_known=1;

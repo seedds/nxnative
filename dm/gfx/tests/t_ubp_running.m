@@ -14,11 +14,11 @@ static uint8_t *mem;
 static uint64_t running;   // the fence of the submission that stays unfinished
 
 // What the open submission has queued goes into the running one
-static void commit_as_running(void) { gw_commit(running); g_nubd = 0; memset(g_ubd_pf, 0, sizeof g_ubd_pf); g_ubd_wide = 0; pend_reset(); memset(g_ubpc, 0, sizeof g_ubpc); }
+static void commit_as_running(void) { gw_commit(running); RX.ub.n = 0; memset(RX.ub.pf, 0, sizeof RX.ub.pf); RX.ub.wide = 0; pend_reset(); memset(RX.ub.pc, 0, sizeof RX.ub.pc); }
 static void update(uint64_t off, uint32_t value, uint64_t n) { uint32_t v[16]; for (int i = 0; i < 16; i++) v[i] = value; mtl_sub_update(v, (uint64_t)mem + off, n); }
 static const uint32_t *made_shadow(uint64_t off, uint64_t n) {
     uint64_t g; const uint8_t *c; if (!ubp_get((uint64_t)mem + off, (uint64_t)mem + off + n, &g, &c)) return NULL;
-    ubc_wait(g_ubp_ready); return (const uint32_t *)c;
+    ubc_wait(RX.ub.ready); return (const uint32_t *)c;
 }
 static void words(const uint32_t *got, const uint32_t *want, int n, const char *label) {
     CHECK(got && !memcmp(got, want, 4 * (size_t)n), label);
@@ -78,7 +78,7 @@ int main(void) { @autoreleasepool {
         const uint32_t *got = made_shadow(other, 12);
         CHECK(!got || got[0] == 0xa6, "a slot collision refuses or shows the update"); commit_as_running(); }
 
-    pend_reset(); g_nubd = 0;
+    pend_reset(); RX.ub.n = 0;
     printf("t_ubp_running: %d checks, %d failed\n", checks, failed); fflush(stdout);
     _exit(failed != 0);
 }}

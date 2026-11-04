@@ -3,9 +3,9 @@
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
-#define g_ft g_ft_hle   // both files have a static g_ft, so hle_nvn.c's is renamed too (as in t_present_crop.m)
+#define RX.ft g_ft_hle   // both files have a static RX.ft, so hle_nvn.c's is renamed too (as in t_present_crop.m)
 #include "../nvn/hle_nvn.c"
-#undef g_ft
+#undef RX.ft
 uint64_t g_t0_ns;   // process start time from host main.c (used by hle_nvn's per-frame @t_s); unit test stub
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -113,7 +113,7 @@ int main(int argc,char **argv){@autoreleasepool{
     for(int i=0;i<2;i++){NvProg *p=[NvProg new];p->sh[0]=[NvShader new];p->sh[0]->fn=[lib newFunctionWithName:@"v"];
         if(!i){p->sh[1]=[NvShader new];p->sh[1]->fn=[lib newFunctionWithName:@"f"];p->sh[1]->stage=1;}
         (i?&depth_pg:&colour_pg)->serial=80000+i;serial_put(80000+i,p);}
-    if(stencil_only){plane_case("stencil_only",1,0);EXPECT("existing stencil-only mode",3,g_enc_mode);EXPECT("stencil-only usage disables depth",1,g_pass.hs&&!g_pass.hd);}
+    if(stencil_only){plane_case("stencil_only",1,0);EXPECT("existing stencil-only mode",3,RX.enc_mode);EXPECT("stencil-only usage disables depth",1,g_pass.hs&&!g_pass.hd);}
     else if(argc>1&&!strcmp(argv[1],"--default"))colour_case("default",1,0,0,0,0);
     else if(argc>1&&!strcmp(argv[1],"--oversized"))colour_case("oversized",1,2,0,0,0);
     else {for(int lv=0;lv<4;lv++){char name[64];snprintf(name,sizeof name,"bounded_L%d",lv);colour_case(name,lv,1,0,0,0);

@@ -23,9 +23,9 @@ static int test_pthread_cond_timedwait(pthread_cond_t *, pthread_mutex_t *, cons
 #undef nvn_game_fps
 #undef pthread_cond_timedwait
 #undef clock_gettime
-#define g_ft g_ft_hle
+#define RX.ft g_ft_hle
 #include "../nvn/hle_nvn.c"
-#undef g_ft
+#undef RX.ft
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;

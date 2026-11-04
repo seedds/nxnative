@@ -39,7 +39,7 @@ int main(void) { @autoreleasepool {
     pass.colorAttachments[0].loadAction = MTLLoadActionClear;
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
     pass.colorAttachments[0].clearColor = MTLClearColorMake(1, 0, 0, 1);
-    id encoder = [g_cb renderCommandEncoderWithDescriptor:pass];
+    id encoder = [RX.cb renderCommandEncoderWithDescriptor:pass];
     size_t peak = 0;
     for (int i = 0; i < 64; i++) {
         id<MTLTexture> t = [g_dev newTextureWithDescriptor:d];

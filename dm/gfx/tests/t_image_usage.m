@@ -37,7 +37,7 @@ static void image_case(int explicit_image) { @autoreleasepool {
     os_unfair_lock_lock(&g_rmu); CHECK(tex_by_id(601) == old, "sampled descriptor caches the old backing"); os_unfair_lock_unlock(&g_rmu);
     mtl_sub_begin(); memset(&R, 0, sizeof R); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &texture;
     R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(0.5,0,0,1);
-    CHECK(rp_begin() != nil && g_enc != nil, "production render pass is open before image registration");
+    CHECK(rp_begin() != nil && RX.enc != nil, "production render pass is open before image registration");
     view_t mip = {.set_levels=1, .base_level=1, .nlevels=1};
     if (explicit_image) mtl_reg_image(602, &texture, &mip); else mtl_reg_tex(602, &texture, &mip);
     CHECK(texture.d.flags == NVN_TEXTURE_FLAGS_COMPRESSIBLE, "image registration leaves the guest texture flags alone");
@@ -47,10 +47,10 @@ static void image_case(int explicit_image) { @autoreleasepool {
     os_unfair_lock_lock(&g_rmu); uint64_t read_rid; int read_real;
     id<MTLTexture> read_only = img_binding(602, &shader->rf.b[0], &read_rid, &read_real);
     CHECK(read_real && read_only && !(read_only.usage & MTLTextureUsageShaderWrite), "load-only image accepts a read-only texture");
-    CHECK(tex_mtl(&texture) == old && g_enc != nil, "load-only image does not upgrade storage or end the render pass");
+    CHECK(tex_mtl(&texture) == old && RX.enc != nil, "load-only image does not upgrade storage or end the render pass");
     os_unfair_lock_unlock(&g_rmu);
     shader->rf.b[0].rw = 1; program->c_img = 0; image_prepare(program, 0x20);   // c_img: image_prepare caches the program's written image slots; a real program's shaders never change
-    CHECK(!g_enc, "image preparation ends the previous render pass before copying it");
+    CHECK(!RX.enc, "image preparation ends the previous render pass before copying it");
     id<MTLTexture> upgraded = tex_mtl(&texture);
     CHECK(upgraded != old && (upgraded.usage & MTLTextureUsageShaderWrite), "explicit image use upgrades only its backing");
     CHECK(tex_mtl(&alias) == upgraded, "sampled alias follows the upgraded backing");

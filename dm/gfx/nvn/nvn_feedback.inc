@@ -44,7 +44,7 @@ static uint64_t tf_prepare(NvShader *vs, uint64_t source_count, uint64_t order, 
         if (!g_tf_prepare) { MLOG("[RED] transform feedback prepare: %s",e.localizedDescription.UTF8String); return 0; }
     }
     rp_end(); ubd_land();
-    if (g_blit) { enc_b_end(g_blit);g_blit=nil; }
+    if (RX.blit) { enc_b_end(RX.blit);RX.blit=nil; }
     id<MTLBuffer> buf;size_t off=arena_alloc(sizeof j,&buf);memcpy((uint8_t *)buf.contents+off,&j,sizeof j);
     uint64_t job=buf.gpuAddress+off;
     id<MTL4ComputeCommandEncoder> ce=enc_c_begin(NULL);enc_c_pso(ce,g_tf_prepare);enc_c_args(ce,job,0);
@@ -53,7 +53,7 @@ static uint64_t tf_prepare(NvShader *vs, uint64_t source_count, uint64_t order, 
 }
 static void tf_note(NvShader *vs) {
     for(int b=0;b<4;b++)if(vs->tf_stride[b])pend_add(S.tf[b].addr,S.tf[b].size,4);
-    args_dirty_all();g_enc_pso=nil;g_enc_dss=nil;g_ed.ok=0;g_wr_epoch++;g_mdx_epoch++;
+    args_dirty_all();RX.enc_pso=nil;RX.enc_dss=nil;RX.ed.ok=0;g_wr_epoch++;g_mdx_epoch++;
 }
 static void tf_draw(NvProg *pr,const p_draw *dw,const p_draw_idx *di) {
     NvShader *vs=pr?pr->sh[0]:nil;
@@ -65,7 +65,7 @@ static void tf_draw(NvProg *pr,const p_draw *dw,const p_draw_idx *di) {
     id<MTLRenderPipelineState> ps=vs&&vs->tf_fn?tf_pso(vs):nil;if(!ps)return;
     uint64_t dst[4]={0};uint64_t job=tf_prepare(vs,0,0,(uint32_t)count,dw->prim==0?1:dw->prim==1?2:3,
                                               dw->first,dw->count,dw->base_instance,dst);if(!job)return;
-    vbuf_prepare(vs?&vs->rf:NULL,dw,NULL);if(g_blit){enc_b_end(g_blit);g_blit=nil;}
+    vbuf_prepare(vs?&vs->rf:NULL,dw,NULL);if(RX.blit){enc_b_end(RX.blit);RX.blit=nil;}
     MTL4RenderPassDescriptor *rd=[MTL4RenderPassDescriptor new];rd.renderTargetWidth=rd.renderTargetHeight=rd.defaultRasterSampleCount=1;
     id<MTL4RenderCommandEncoder> en=enc_r_begin(rd);enc_r_pso(en,ps);bind_vbufs(en);vconv_bind(en,vs,1,dw,NULL);
     args_dirty_all();encode_args(en,vs,0,1);enc_r_vbuf(en,14,job);

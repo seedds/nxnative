@@ -28,7 +28,7 @@ static id<MTLRenderPipelineState> pipeline(NSString *fn) {   // v: the first wor
 }
 static id<MTL4RenderCommandEncoder> encoder_prepared(id<MTLRenderPipelineState> ps) {   // after the caller's vbuf_prepare
     ubd_land_compute();
-    if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    if (RX.blit) { enc_b_end(RX.blit); RX.blit = nil; }
     MTL4RenderPassDescriptor *d = [MTL4RenderPassDescriptor new];
     d.renderTargetWidth = d.renderTargetHeight = d.defaultRasterSampleCount = 1;
     id<MTL4RenderCommandEncoder> en = enc_r_begin(d); enc_r_pso(en, ps); return en;
@@ -86,7 +86,7 @@ int main(void) { @autoreleasepool {
     EXPECT("replacement buffer has a different GPU address", 1, old.gpuAddress + 12 != newgpu);
     mtl_sub_begin(); en = encoder(ps); resolves = g_vbuf_resolve;
     bind_vbufs(en); EXPECT("pool replacement resolves all streams", 3, g_vbuf_resolve - resolves);
-    EXPECT("replacement address bound", newgpu, g_vt_addr[VB_SLOT(0)]);
+    EXPECT("replacement address bound", newgpu, RX.vt_addr[VB_SLOT(0)]);
     capture(en, out, 7); enc_r_end(en); finish();
     mtl_sub_begin(); S.vbuf[0].address = (uint64_t)(ub + 2); S.vbuf[0].size = 6;
     uint64_t copies = g_vbuf_copies, copy_bytes = g_vbuf_copy_bytes; en = encoder(ps);
@@ -160,7 +160,7 @@ int main(void) { @autoreleasepool {
     EXPECT("bytes the draw reads past the bound size", 36, g_vbuf_need[0]);
     en = encoder_prepared(tail); bind_vbufs(en); capture(en, out, 22);
     pull_layout L; pull_layout_fill(&L);
-    EXPECT("pulling layout reads the padded copy", g_vt_addr[VB_SLOT(0)] & ~3ull, L.s[0].base);
+    EXPECT("pulling layout reads the padded copy", RX.vt_addr[VB_SLOT(0)] & ~3ull, L.s[0].base);
     enc_r_end(en); finish();
     EXPECT("padded stream copied once", 1, g_vbuf_copies - copies);
     EXPECT("vertex 0 inside the bound range", 0x1000u, ((const uint32_t *)out.contents)[22 * 4]);

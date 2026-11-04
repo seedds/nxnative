@@ -76,6 +76,7 @@ class Choice(Tmp):
     def test_each_run_reads_the_source_from_its_start(self):
         read = []
         def run(cmd, stdin=None, **kw):
+            assert stdin, cmd
             read.append(stdin.read()); return self.result(len(read) == 1)   # the first run fails, having read the whole source
         with mock.patch.object(dmsh_pch, 'make', return_value=('/p.pch', None)), mock.patch.object(subprocess, 'run', side_effect=run):
             dmsh_pch.compile(['metal', '-c'], 'a.metal', 'a.air')

@@ -6,6 +6,7 @@
 #include <AudioToolbox/AudioToolbox.h>
 #include <TargetConditionals.h>
 #include <dispatch/dispatch.h>
+#include <math.h>
 #include <stdatomic.h>
 #include <unistd.h>
 
@@ -16,7 +17,7 @@ enum { AU_IDLE, AU_STARTING, AU_CANCELED, AU_WAIT_CALLBACK };
 typedef struct { void *ptr; uint64_t cap, size; } gbuf;     // The first 24 bytes written into the guest AudioOutBuffer
 #define QMAX 64
 #define RELMAX QMAX                    // Released max = number of in-flight buffers (the game must take a buffer back before it can append again), same limit as pending
-typedef struct { uint64_t calls, count, qsum, underruns, zero_bytes; uint32_t fmin, fmax; } audio_stats;
+typedef struct { uint64_t calls, count, qsum, underruns, zero_bytes; uint32_t fmin, fmax, peak; } audio_stats;   // peak: the largest sample handed to the device in the period (0 = silence delivered)
 typedef struct {
     pthread_mutex_t m;
     void *event;                       // Guest SystemEvent: signaled whenever a buffer is released
@@ -38,7 +39,7 @@ typedef struct {
     int id;                            // open sequence number (#N in the log; tells simultaneous outputs apart, e.g. Engage's Wwise and Unity's built-in FMOD)
     int nlog;                          // Start / Stop / Close lines logged so far (at most 32 per output)
     _Atomic uint64_t under_n, under_b; // underruns: times the pending queue was empty when the callback needed data / zero-filled bytes
-    uint64_t st_calls, st_count, st_qsum, st_u0, st_ub0; uint32_t st_fmin, st_fmax;   // callback-owned accumulators
+    uint64_t st_calls, st_count, st_qsum, st_u0, st_ub0; uint32_t st_fmin, st_fmax, st_peak;   // callback-owned accumulators
     audio_stats st_report; _Atomic int st_pending; // one snapshot, consumed by the watchdog or Close under g_aos_lock
     _Atomic uint64_t cb_n;             // device callbacks of this output (the watchdog's evidence that the device still plays it)
     uint64_t wd_n, wd_t;               // watchdog: callback count last seen and when it last moved (under g_aos_lock)
@@ -164,14 +165,15 @@ static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioT
         a->st_count++;
         if (++a->st_calls % 2000 == 0 && !atomic_load_explicit(&a->st_pending, memory_order_acquire)) {
             uint64_t un = atomic_load(&a->under_n), ubb = atomic_load(&a->under_b);
-            a->st_report = (audio_stats){a->st_calls, a->st_count, a->st_qsum, un - a->st_u0, ubb - a->st_ub0, a->st_fmin, a->st_fmax};
+            a->st_report = (audio_stats){a->st_calls, a->st_count, a->st_qsum, un - a->st_u0, ubb - a->st_ub0, a->st_fmin, a->st_fmax, a->st_peak};
             atomic_store_explicit(&a->st_pending, 1, memory_order_release);
-            a->st_fmin = ~0u; a->st_fmax = 0; a->st_qsum = a->st_count = 0; a->st_u0 = un; a->st_ub0 = ubb;
+            a->st_fmin = ~0u; a->st_fmax = 0; a->st_qsum = a->st_count = 0; a->st_u0 = un; a->st_ub0 = ubb; a->st_peak = 0;
         } }
     if (atomic_load_explicit(&a->hold_device, memory_order_acquire)) {
         memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize);
     } else {
         pull_device(a, bl->mBuffers[0].mData, bl->mBuffers[0].mDataByteSize);
+        { const int16_t *d = bl->mBuffers[0].mData; uint32_t n = bl->mBuffers[0].mDataByteSize / 2, pk = a->st_peak; for (uint32_t i = 0; i < n; i++) { uint32_t v = (uint32_t)abs(d[i]); if (v > pk) pk = v; } a->st_peak = pk; }   // what the device gets (before a mute), for the periodic line
         if (a->mute) memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize);
     }
     return noErr;
@@ -341,9 +343,9 @@ static int stats_take(aout *a, audio_report *r) {
 }
 static void stats_log(const audio_report *r) {
     const audio_stats *s = &r->stats;
-    LOG("audio #%d device callbacks %llu: %u–%u frames each, %.1f blocks queued on average at callback; in these %llu, %llu underruns, %.1f ms zero-padded", r->id,
+    LOG("audio #%d device callbacks %llu: %u–%u frames each, %.1f blocks queued on average at callback; in these %llu, %llu underruns, %.1f ms zero-padded, peak %u/32767 to the device", r->id,
         (unsigned long long)s->calls, s->fmin, s->fmax, (double)s->qsum / s->count, (unsigned long long)s->count,
-        (unsigned long long)s->underruns, s->zero_bytes / (2.0 * r->ch) / (RATE / 1000.0));
+        (unsigned long long)s->underruns, s->zero_bytes / (2.0 * r->ch) / (RATE / 1000.0), s->peak);
 }
 static void stats_drain(void) {
     audio_report reports[AOMAX]; int n = 0;
@@ -630,3 +632,151 @@ void dm_audio_reset(void) {
     LOG("audio outputs set up again after the media services reset");
     pthread_mutex_unlock(&g_aos_lock);
 }
+
+// ---------- SDK 21's output streams (Star Fox, Wwise 2024.1): nn::audio::OutputStreamType ----------
+// The Switch 2 SDK's audio output: the game opens a stream on a virtual output device (GetDefaultVirtualOutputDevice asks the auddmg:u service, which the host does not serve: the
+// SDK aborted there, Result 0xa99), gives it a ring buffer and a format, writes frames into it (WriteOutputStream) as GetOutputStreamFreeFrameCount allows, and waits on its event.
+// Host: a stream is an AudioOut of the same channel count (au_open_at: the AudioUnit or the silent sink), and each write becomes one PCM block appended to it; the blocks come back
+// released as they play, which frees their frames for the count and signals the game's event as a buffer release does. Float samples are converted to 16-bit on the way in.
+// The format's three words are told apart by their values (sample rate, channel count, sample format: the SDK's order is not relied on) and logged at the first open
+enum { SF_PCM16 = 2, SF_PCM24 = 3, SF_PCM32 = 4, SF_FLOAT = 5 };
+typedef struct { gbuf b; uint64_t frames; uint8_t data[]; } osblock;   // one write: the AudioOut buffer descriptor first (what h_au_Append / h_au_Released pass around), then its PCM
+typedef struct { void *g; int ch, rate, fmt, bps; uint64_t cap_frames, queued; int nwrite; } ostream;
+static pthread_mutex_t g_os_mu = PTHREAD_MUTEX_INITIALIZER;
+static ostream *os_of(const void *g) { ostream *s = objmap_get((const uint8_t *)g + 1); if (!s) die("output stream %p was not opened by the host", g); return s; }   // keyed one past the AudioOut's own key
+// Star Fox sets the gain of a stream object it never opened (main+0xbce9280, right after opening another): the SDK's functions on an unopened OutputStreamType read its zeroed fields and do
+// nothing, so the host answers as for a stopped, empty stream instead of stopping the game (ao() dies on an unknown object, which is right for the AudioOut calls, whose objects the SDK fills)
+static aout *os_aout(const void *g, const char *what) {
+    aout *a = objmap_get(g);
+    if (!a) { static int once; if (!once++) LOG("audio: %s on output stream %p, which was never opened: ignored", what, g); }
+    return a;
+}
+static void os_drain(ostream *s) {   // played blocks back from the AudioOut: their frames are free again
+    for (gbuf *b; (b = h_au_Released(s->g));) { osblock *k = (osblock *)b; s->queued -= k->frames; free(k); }
+}
+static void os_format(const uint32_t *f, int *rate, int *ch, int *fmt) {
+    *rate = 48000; *ch = 2; *fmt = SF_PCM16;
+    for (int i = 0; i < 3; i++) {
+        uint32_t v = f[i];
+        if (v >= 8000 && v <= 192000) *rate = (int)v;
+        else if (v == 1 || v == 2 || v == 4 || v == 6 || v == 8) *ch = (int)v;
+        else if (v >= SF_PCM16 && v <= SF_FLOAT) *fmt = (int)v;
+    }
+}
+static void os_close(void *g, void *lr) {   // the stream's AudioOut and the host's record of it: stopped first, so that every pending block is released and can be freed before the AudioOut goes
+    ostream *s = os_of(g);
+    au_stop_at(g, NULL);
+    pthread_mutex_lock(&g_os_mu); os_drain(s); pthread_mutex_unlock(&g_os_mu);   // before au_close: the drain asks the AudioOut for its released blocks, and the closed AudioOut is gone (a FATAL on the second focus flap, Star Fox)
+    au_close(g, lr);
+    objmap_del((uint8_t *)g + 1); free(s);
+}
+static Result os_open(void *g, void *ev, void *buf, size_t size, const char *name, const uint32_t *format, int a, int b, uint32_t flags, void *lr) {
+    int rate, ch, fmt; os_format(format, &rate, &ch, &fmt);
+    // Star Fox opens a new stream each time its window regains focus and never closes the old one; a quick loss and regain made it open the same object twice. The second open made a
+    // second AudioOut under the same key and bound the release event again: the game's mixer thread, waiting on the first binding, was never woken, and the stream starved (0.5 blocks queued,
+    // 1,800 underruns in 2,000 callbacks, silence). An open stream object is closed first, as the SDK keeps one output per object
+    if (objmap_get(g)) { LOG("audio: OpenOutputStream %p: the object is open already: its earlier output is closed first", g); os_close(g, lr); }
+    LOG("audio: OpenOutputStream %p on %s: format words %#x %#x %#x → %d Hz, %d channels, sample format %d; ring %zu bytes, %d, %d, flags %#x", g, name ? name : "(default)", format[0], format[1], format[2], rate, ch, fmt, size, a, b, flags);
+    if (rate != RATE) { LOG("[RED] audio: output stream at %d Hz: only 48 kHz plays (the stream is opened at 48 kHz: pitch and speed are off)", rate); rate = RATE; }
+    uint8_t param[16] = {0}; memcpy(param, &rate, 4); uint16_t c16 = (uint16_t)ch; memcpy(param + 4, &c16, 2);
+    Result r = au_open_at(g, ev, name, param, lr);
+    if (r) return r;
+    ostream *s = calloc(1, sizeof *s);
+    s->g = g; s->ch = ch; s->rate = rate; s->fmt = fmt; s->bps = fmt == SF_FLOAT || fmt == SF_PCM32 ? 4 : fmt == SF_PCM24 ? 3 : 2;
+    s->cap_frames = size / (size_t)(ch * s->bps); if (!s->cap_frames) s->cap_frames = RATE / 10;
+    (void)buf;
+    objmap_put((uint8_t *)g + 1, s);
+    return RES_OK;
+}
+HLE_FORCE("_ZN2nn5audio16OpenOutputStreamEPNS0_16OutputStreamTypeEPNS_2os11SystemEventEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEiiNS_4util10BitFlagSetILi32ENS0_16OutputStreamFlagEEE",
+          "SDK 21 output stream (with event) → a host AudioOut", Result, h_os_Open, void *g, void *ev, void *buf, size_t size, const char *name, const uint32_t *format, int a, int b, uint32_t flags) {
+    return os_open(g, ev, buf, size, name, format, a, b, flags, __builtin_return_address(0));
+}
+HLE_FORCE("_ZN2nn5audio16OpenOutputStreamEPNS0_16OutputStreamTypeEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEiNS_4util10BitFlagSetILi32ENS0_16OutputStreamFlagEEE",
+          "SDK 21 output stream (no event) → a host AudioOut", Result, h_os_Open0, void *g, void *buf, size_t size, const char *name, const uint32_t *format, int a, uint32_t flags) {
+    return os_open(g, NULL, buf, size, name, format, a, 0, flags, __builtin_return_address(0));
+}
+HLE_FORCE_BIG("_ZN2nn5audio17CloseOutputStreamEPNS0_16OutputStreamTypeE", "SDK 21 output stream: close", void, h_os_Close, void *g) {
+    if (!os_aout(g, "CloseOutputStream")) return;
+    os_close(g, dm_bigstack_caller(__builtin_return_address(0)));
+}
+HLE_FORCE_BIG("_ZN2nn5audio17StartOutputStreamEPNS0_16OutputStreamTypeE", "SDK 21 output stream: start", Result, h_os_Start, void *g) { return os_aout(g, "StartOutputStream") ? au_start_at(g, dm_bigstack_caller(__builtin_return_address(0))) : RES_FAIL; }
+HLE_FORCE_BIG("_ZN2nn5audio18StartOutputStreamsEPKPNS0_16OutputStreamTypeEi", "SDK 21 output streams: start several at once", Result, h_os_StartN, void *const *gs, int n) {
+    for (int i = 0; i < n; i++) { Result r = os_aout(gs[i], "StartOutputStreams") ? au_start_at(gs[i], dm_bigstack_caller(__builtin_return_address(0))) : RES_FAIL; if (r) return r; }
+    return RES_OK;
+}
+HLE_FORCE_BIG("_ZN2nn5audio16StopOutputStreamEPNS0_16OutputStreamTypeE", "SDK 21 output stream: stop", void, h_os_Stop, void *g) { if (os_aout(g, "StopOutputStream")) au_stop_at(g, dm_bigstack_caller(__builtin_return_address(0))); }
+HLE_FORCE_BIG("_ZN2nn5audio17PurgeOutputStreamEPNS0_16OutputStreamTypeE", "SDK 21 output stream: drop what is queued (a stop and a start)", void, h_os_Purge, void *g) {
+    aout *a = os_aout(g, "PurgeOutputStream"); if (!a) return;
+    ostream *s = os_of(g);
+    int started = atomic_load_explicit(&a->state, memory_order_acquire) == STATE_STARTED;
+    au_stop_at(g, NULL);
+    pthread_mutex_lock(&g_os_mu); os_drain(s); pthread_mutex_unlock(&g_os_mu);
+    if (started) au_start_at(g, NULL);
+}
+HLE_FORCE("_ZN2nn5audio17WriteOutputStreamEPNS0_16OutputStreamTypeEPKvi", "SDK 21 output stream: frames written become one PCM block of the host AudioOut", int, h_os_Write, void *g, const void *data, int frames) {
+    if (frames <= 0 || !data || !os_aout(g, "WriteOutputStream")) return 0;
+    ostream *s = os_of(g);
+    pthread_mutex_lock(&g_os_mu);
+    os_drain(s);
+    uint64_t room = s->cap_frames > s->queued ? s->cap_frames - s->queued : 0;
+    int n = (uint64_t)frames < room ? frames : (int)room;
+    if (s->nwrite++ == 0) LOG("audio: WriteOutputStream %d frames (%zu bytes of %d-byte samples) of a %llu-frame ring", frames, (size_t)frames * s->ch * s->bps, s->bps, (unsigned long long)s->cap_frames);
+    if ((s->nwrite <= 200 && s->nwrite % 50 == 0) || s->nwrite % 2000 == 0) {   // the level of what the game writes, early on and then every 2,000 writes: a conversion that reads the samples in the wrong format shows here as silence or full-scale noise
+        const uint32_t *w = data; size_t samples = (size_t)frames * s->ch; float peak = 0.f;
+        for (size_t i = 0; i < samples; i++) { float v = s->fmt == SF_FLOAT ? fabsf(((const float *)data)[i]) : s->fmt == SF_PCM32 ? fabsf((float)((const int32_t *)data)[i] / 2147483648.f) : s->fmt == SF_PCM16 ? fabsf((float)((const int16_t *)data)[i] / 32768.f) : 0.f; if (v > peak) peak = v; }
+        LOG("audio: WriteOutputStream #%d: peak %.4f of full scale, first words %08x %08x %08x %08x", s->nwrite, peak, w[0], w[1], w[2], w[3]);
+    }
+    if (n > 0) {
+        size_t bytes = (size_t)n * s->ch * 2;
+        osblock *k = malloc(sizeof *k + bytes); k->frames = (uint64_t)n;
+        int16_t *dst = (int16_t *)k->data; size_t samples = (size_t)n * s->ch;
+        if (s->fmt == SF_FLOAT) { const float *src = data; for (size_t i = 0; i < samples; i++) { float v = src[i] * 32767.f; dst[i] = (int16_t)(v > 32767.f ? 32767.f : v < -32768.f ? -32768.f : v); } }
+        else if (s->fmt == SF_PCM32) { const int32_t *src = data; for (size_t i = 0; i < samples; i++) dst[i] = (int16_t)(src[i] >> 16); }
+        else if (s->fmt == SF_PCM24) { const uint8_t *src = data; for (size_t i = 0; i < samples; i++) dst[i] = (int16_t)(src[i * 3 + 1] | src[i * 3 + 2] << 8); }
+        else memcpy(dst, data, bytes);
+        k->b.ptr = k->data; k->b.cap = k->b.size = bytes;
+        if (h_au_Append(g, &k->b)) s->queued += (uint64_t)n;
+        else { free(k); n = 0; static int once; if (!once++) LOG("[RED] audio: output stream %p: the AudioOut queue is full (%d blocks): the write is dropped", g, QMAX); }
+    }
+    pthread_mutex_unlock(&g_os_mu);
+    return n;
+}
+HLE_FORCE("_ZN2nn5audio29GetOutputStreamFreeFrameCountEPKNS0_16OutputStreamTypeE", "SDK 21 output stream: frames the ring can take", int, h_os_Free, const void *g) {
+    if (!os_aout(g, "GetOutputStreamFreeFrameCount")) return 0;
+    ostream *s = os_of(g); pthread_mutex_lock(&g_os_mu); os_drain(s); uint64_t room = s->cap_frames > s->queued ? s->cap_frames - s->queued : 0; pthread_mutex_unlock(&g_os_mu);
+    return (int)room;
+}
+HLE_FORCE("_ZN2nn5audio31GetOutputStreamFilledFrameCountEPKNS0_16OutputStreamTypeE", "SDK 21 output stream: frames written and not yet played", int, h_os_Filled, const void *g) {
+    if (!os_aout(g, "GetOutputStreamFilledFrameCount")) return 0;
+    ostream *s = os_of(g); pthread_mutex_lock(&g_os_mu); os_drain(s); uint64_t q = s->queued; pthread_mutex_unlock(&g_os_mu);
+    return (int)q;
+}
+HLE_FORCE("_ZN2nn5audio20GetOutputStreamStateEPKNS0_16OutputStreamTypeE", "SDK 21 output stream: playback state (0 started, 1 stopped, as AudioOut's)", int, h_os_State, const void *g) { aout *a = os_aout(g, "GetOutputStreamState"); return a ? atomic_load_explicit(&a->state, memory_order_acquire) : STATE_STOPPED; }
+HLE_FORCE("_ZN2nn5audio19SetOutputStreamGainEPNS0_16OutputStreamTypeEfNS_8TimeSpanE", "SDK 21 output stream: gain, applied at once (the fade time is not followed)", void, h_os_Gain, void *g, float v, int64_t fade) {
+    (void)fade; aout *a = os_aout(g, "SetOutputStreamGain"); if (!a) return;
+    if (!(v >= 0.f)) v = 0.f; uint32_t b; memcpy(&b, &v, 4); atomic_store_explicit(&a->vol, b, memory_order_relaxed);
+    { static int n; if (n++ < 8) LOG("audio: SetOutputStreamGain %p: %.3f over %lld ns", g, v, (long long)fade); }   // a gain left at 0 is silence: the first calls are logged
+}
+// Returns a structure by value whose size is not known here: nothing is written, so the caller's copy keeps what it had; the stream has no statistics on the host
+HLE_FORCE("_ZN2nn5audio25GetOutputStreamStatisticsEPNS0_16OutputStreamTypeEb", "SDK 21 output stream: statistics (none kept; the result is left as the caller had it)", void, h_os_Stats, void *g, unsigned reset) {
+    (void)g; (void)reset; static int once; if (!once++) LOG("audio: GetOutputStreamStatistics: no statistics on the host (the structure is left untouched)");
+}
+// The virtual output device: one, the built-in speaker, as the device list answers (hle_audren.c). The SDK's own asks the auddmg:u service
+HLE_FORCE("_ZN2nn5audio29GetDefaultVirtualOutputDeviceEPNS0_15AudioDeviceNameE", "SDK 21 default virtual output device: the built-in speaker (the SDK asks auddmg:u, which the host does not serve)", Result, h_vd_Default, char *name) {
+    memset(name, 0, 0x100); strlcpy(name, "AudioBuiltInSpeakerOutput", 0x100); return RES_OK;
+}
+// Input streams (a microphone, GameChat): the host has none, as for AudioIn above: no device is listed, an open fails, and the rest answers without touching the guest object
+HLE_FORCE("_ZN2nn5audio23ListVirtualInputDevicesEPNS0_15AudioDeviceNameEi", "SDK 21 virtual input devices: none", int, h_vd_ListIn, char *names, int n) { (void)names; (void)n; return 0; }
+HLE_FORCE("_ZN2nn5audio31GetVirtualInputDevicePropertiesEPNS0_23VirtualDevicePropertiesERKNS0_15AudioDeviceNameE", "SDK 21 virtual input device properties: no such device", Result, h_vd_InProps, void *props, const char *name) { (void)props; (void)name; return RES_FAIL; }
+HLE_FORCE("_ZN2nn5audio15OpenInputStreamEPNS0_15InputStreamTypeEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEi", "SDK 21 input stream: no microphone, the open fails", Result, h_is_Open, void *g, void *buf, size_t size, const char *name, const void *format, int a) {
+    (void)g; (void)buf; (void)size; (void)name; (void)format; (void)a; static int once; if (!once++) LOG("audio: OpenInputStream: no microphone"); return RES_FAIL;
+}
+HLE_FORCE("_ZN2nn5audio16CloseInputStreamEPNS0_15InputStreamTypeE", "SDK 21 input stream (never open)", void, h_is_Close, void *g) { (void)g; }
+HLE_FORCE("_ZN2nn5audio16StartInputStreamEPNS0_15InputStreamTypeE", "SDK 21 input stream (never open)", Result, h_is_Start, void *g) { (void)g; return RES_FAIL; }
+HLE_FORCE("_ZN2nn5audio15StopInputStreamEPNS0_15InputStreamTypeE", "SDK 21 input stream (never open)", void, h_is_Stop, void *g) { (void)g; }
+HLE_FORCE("_ZN2nn5audio15ReadInputStreamEPNS0_15InputStreamTypeEPvi", "SDK 21 input stream (never open): nothing read", int, h_is_Read, void *g, void *buf, int frames) { (void)g; (void)buf; (void)frames; return 0; }
+HLE_FORCE("_ZN2nn5audio30GetInputStreamFilledFrameCountEPKNS0_15InputStreamTypeE", "SDK 21 input stream (never open): nothing captured", int, h_is_Filled, const void *g) { (void)g; return 0; }
+// Returns the format by value (three words: in registers); 48 kHz mono PCM16 reads as a sane answer for a stream that was never open
+typedef struct { uint32_t a, b, c; } stream_format_t;
+HLE_FORCE("_ZN2nn5audio20GetInputStreamFormatEPKNS0_15InputStreamTypeE", "SDK 21 input stream (never open): a 48 kHz mono PCM16 format", stream_format_t, h_is_Format, const void *g) { (void)g; return (stream_format_t){RATE, 1, SF_PCM16}; }

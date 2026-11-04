@@ -277,6 +277,15 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Fix:** the host keeps the volume per output and scales the PCM16 it plays, saturating; `GetAudioOutVolume` reads it back (`hle_audio.c`).
 - **Found on:** [STEINS;GATE RE:BOOT](../../dm/games/01008BC024FDE000/README.md) (SDK 20.5.17, M2's ADV engine; the one call it needed).
 
+### SDK 21 output streams on the host's AudioOut
+
+- **Symptom:** `game called nn::diag abort: Result 0xa99, call site sdk+0x221520` in `nn::audio::detail::GetVirtualOutputDeviceProperties` after `[RED] sf: the game connects to service auddmg:u itself`, as the game's audio engine starts.
+- **Cause:** the Switch 2 SDK's audio output is `nn::audio::OutputStreamType`: the game asks for the default virtual output device (`GetDefaultVirtualOutputDevice`, which asks the auddmg:u service), opens a stream on it with a ring buffer and a `StreamFormat` (three words: sample format 5 = float, channels, rate), writes frames as `GetOutputStreamFreeFrameCount` allows and waits on the stream's event. None of it existed on the host.
+- **Fix:** the default device is the built-in speaker, and a stream is an AudioOut of the same channel count (`hle_audio.c`): each `WriteOutputStream` becomes one PCM block (float, 24- and 32-bit samples converted to 16-bit), the released blocks free their frames and signal the event, `Start` / `Stop` / `Purge` / `Close` map to the AudioOut's, `SetOutputStreamGain` is the AudioOut's volume at once. The format's words are told apart by their values. A stream object the game never opened answers as stopped and empty (Star Fox sets the gain of one right after opening another). Input streams: no microphone. `GetOutputStreamStatistics` returns a structure of unknown size and is left unwritten.
+- **Streams opened again:** the game opens a new stream each time its window regains focus (it writes nothing while out of focus) and never closes the old one, which plays on empty; a quick loss and regain made it open the same object twice. The second open made a second AudioOut under the same key, and the stream the game then fed ran starved (0.5 blocks queued, 1,800 underruns in 2,000 callbacks: silence after switching windows). An open object is closed first now, one output per object as the SDK keeps.
+- **Diagnostics:** the periodic `audio #N device callbacks` line ends with the peak sample handed to the device in the period (0 = silence delivered); `WriteOutputStream #N: peak … of full scale` gives the level of what the game writes, early on and then every 2,000 writes; the first `SetOutputStreamGain` calls are logged.
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md): Wwise 2024.1, one stereo float stream at 48 kHz, 512 frames per write into a 3,072-frame ring.
+
 ### AudioOut buffer count from the host queue
 
 - **Symptom:** a null read in `audio::GetAudioOutBufferCount` on Wwise's sink wakeup thread (`sdk+0x1e7ed0`, from `main+0x30faae8`).
@@ -324,6 +333,13 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
   - the multi-stream C interface, including the SDK 12+ overload with an option argument, goes to the `sdk`'s software `OpusMultiStreamDecoder` C interface, with a host-held state per game object as for the single-stream decoder. `GetHardwareOpusMultiStreamDecoderProcessingTime` reports 0.
   - the two-argument `GetHardwareOpusDecoderWorkBufferSize` is hooked beside the three-argument one.
 - **Found on:** [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) (SDK 9.6: only the `HardwareOpusMultiStreamDecoder` class and the four-argument size); [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) (1.4.3, the single-stream C interface); [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3, the two-argument size); [Unicorn Overlord](../../dm/games/010069401ADB8000/README.md) (SDK 16.2.4, the multi-stream C interface; one boot).
+
+### SDK 21's hardware Opus decoder manager
+
+- **Symptom:** `[RED] sf: the game connects to service hwopus itself`, then `game called nn::diag abort: Result 0xe15, call site sdk+0x323180` under `nn::codec::opus::hw::GetHardwareOpusDecoderManagerWorkBufferSizeImpl`, as the audio engine starts.
+- **Cause:** SDK 21 adds an asynchronous hardware Opus API: a `HardwareOpusDecoderManager` with a work buffer and a `SystemEvent`, decoders registered with it (`InitializeHardwareOpusDecoder(decoder, rate, channels, TimeSpan, manager)`), packets enqueued per decoder, one `ExecuteHardwareOpusDecoderDecoding(manager)` for all of them, PCM dequeued per decoder, and counts of waiting, executing and completed requests and of the manager's free I/O buffers. The first call opened hwopus.
+- **Fix:** the manager is a host object (`hle_codec.c`): its parameters are the sample rate, channels, frame length, decoder count and I/O buffer count (Star Fox: 48000, 1, 20 ms, 128, 255 for its mono voices; 48000, 2, 20 ms, 72, 160 for stereo); each decoder is the SDK's software `OpusDecoder` with a host work buffer; `Execute` decodes every queued packet on the calling thread with `DecodeOpusInterleaved` and signals the event (a local auto-clear system event the host creates), so nothing is ever "executing"; the counts follow the queues, `DM_OPUS_LOG=1` logs every call.
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md).
 
 ## Timing and catch-up
 

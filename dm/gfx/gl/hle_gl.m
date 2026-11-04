@@ -1912,9 +1912,17 @@ static void teximg_impl(const teximg_args *a0) {
             if (!t || t->fmt < 0 || a->w <= 0 || a->h <= 0) return;
             int f = t->fmt, cv = CV_COPY;   // the data is converted to the texture's format
             if (a->compressed) {
-                // glCompressedTexSubImage2D: blocks for a sub-rect, decoded as the image upload decodes them. Factorio creates these textures with
-                // glTexImage2D(BC4/BC3, NULL) and then sends the blocks this way; reading them as pixels is what turned its water noise and alpha masks into
-                // static on the no-BC path (a device that samples BC never takes it)
+                // glCompressedTexSubImage2D: a sub-rect of blocks. A texture that is still compressed takes them as they are (the device samples BC); one the host
+                // decoded into RGBA8/R8/RG8 (no BC hardware) takes them through the decoder, as the image upload does. Factorio creates these textures with
+                // glTexImage2D(BC4/BC3, NULL) and then sends the blocks this way, one block-aligned rect at a time
+                if (g_fmt[f].kind == K_BLOCK) {
+                    if (a->x % 4 || a->y % 4 || a->w % 4 || a->h % 4) { RED1("glCompressedTexSubImage2D %dx%d at %d,%d is not block aligned", a->w, a->h, a->x, a->y); return; }
+                    size_t pitch = (size_t)((a->w + 3) / 4) * g_fmt[f].bytes, need = pitch * ((a->h + 3) / 4);
+                    if ((size_t)a->size < need) { RED1("glCompressedTexSubImage2D: %d bytes for %dx%d %s (%zu expected)", a->size, a->w, a->h, g_fmt[f].name, need); return; }
+                    if (!t->made) tex_make(t, 0);
+                    if (t->made && t->tex && a->level < t->levels) tex_write(t, face, a->level, a->x, a->y, 0, a->w, a->h, a->pixels, pitch);
+                    return;
+                }
                 if (t->bc < CV_BC1) { RED1("glCompressedTexSubImage2D into a %s texture", g_fmt[f].name); return; }
                 size_t need = bc_src_size(t->bc, a->w, a->h);
                 if ((size_t)a->size < need) { RED1("glCompressedTexSubImage2D: %d bytes for %dx%d %s (%zu expected)", a->size, a->w, a->h, g_fmt[f].name, need); return; }

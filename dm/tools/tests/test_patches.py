@@ -38,6 +38,42 @@ end = next(i for i, n in enumerate(tree.body[start:], start) if isinstance(n, as
 REGISTRY_CODE = compile(ast.Module(body=tree.body[start:end], type_ignores=[]), str(source), 'exec')
 
 
+class FrameStateLayout(unittest.TestCase):
+    def layout(self, key, patch, enabled=True, name='main', far=False, matched=False):
+        # Run the driver's layout adjustment after registry discovery, before
+        # any patch-area branch is emitted. No original game bytes are needed.
+        adjustment = next(n for n in tree.body if isinstance(n, ast.If)
+                          and 'FAR' in ast.unparse(n.test) and "PATCHES['FRAME_STEP']" in ast.unparse(n.test))
+        code = compile(ast.Module(body=[adjustment], type_ignores=[]), str(source), 'exec')
+        bid = bytes.fromhex('a1'*16)
+        ns: dict = dict(BUILD_ID=bid.hex(), NAME=name, FAR=far,
+                  KEY_PAGE_OFF=key, PATCH_OFF=patch, FS_MATCH=({'stub': None}, 0x20) if matched else None,
+                  PATCHES={'FRAME_STEP': {bid.hex(): None} if enabled else {}})
+        exec(code, ns)
+        return ns['PATCH_OFF']
+
+    def test_state_fits_before_patch_code_for_every_key_alignment(self):
+        for key in (0x6000000, 0x6004000, 0x6008000, 0x600c000):
+            old = (key+0x4000+0xffff) & ~0xffff
+            with self.subTest(key=hex(key)):
+                new = self.layout(key, old)
+                self.assertGreaterEqual(new, key+0x8000)
+                self.assertEqual(new % 0x10000, 0)
+                self.assertEqual(new, old if old >= key+0x8000 else old+0x10000)
+
+    def test_function_match_reserves_state_at_boundary(self):
+        key, patch = 0x600c000, 0x6010000
+        self.assertEqual(self.layout(key, patch, enabled=False, matched=True), 0x6020000)
+        self.assertEqual(self.layout(key, patch, enabled=False), patch)
+        self.assertEqual(self.layout(key, -0x2000000, enabled=False, far=True, matched=True), -0x2000000)
+
+    def test_unpatched_sdk_and_front_patch_layouts_are_unchanged(self):
+        for enabled, name, far in ((False, 'main', False), (True, 'sdk', False), (True, 'main', True)):
+            with self.subTest(enabled=enabled, name=name, far=far):
+                old = -0x2000000 if far else 0x6010000
+                self.assertEqual(self.layout(0x600c000, old, enabled, name, far), old)
+
+
 def builds_of(g):   # {build ID: module name} of a profile's build rows (a profile or its title ID)
     return {bid: m for row in (game.load(g) if isinstance(g, str) else g).builds().values() for m, bid in row.items() if m != 'display'}
 

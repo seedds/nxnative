@@ -2,6 +2,15 @@
 
 The guest address space, heaps, pools, virtual address memory and the allocators games bring. Each entry: symptom, cause, fix, the games it was found on. The [symptom index](../agents/symptoms.md) lists every symptom.
 
+## Diagnostics
+
+### Diagnostic samplers ignore iOS env files
+
+- **Symptom:** `DM_MEMSTAT` in `Documents/env.txt` creates no TSV on iOS, although the same switch supplied at process launch works. `DM_THRCPU` has the same startup ordering.
+- **Cause:** the samplers were constructors, before `main.m` reads env files; a launch-enabled memory sampler could also create Metal before the launcher's HUD settings.
+- **Fix:** start both samplers explicitly after host loading and environment / launcher setup, before the guest. Their clocks start there; early loading and the standalone pipeline-prebuild tool are outside the sampling window.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md), reported while investigating [issue #1184](https://github.com/seedds/nxnative/issues/1184#issuecomment-6643773364). This fixes diagnostic startup, not the game's device memory limit.
+
 ## Guest layout
 
 ### The Mac's alias region is the Switch's 64 GB

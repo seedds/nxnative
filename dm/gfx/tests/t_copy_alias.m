@@ -34,7 +34,7 @@ static void separate_buffers(void) {
         memset(mem, 0, pg); memset(io.contents, 0, pg); memset(io.contents, 0x6d, 256);
         mtl_sub_begin();
         enc_b_copy_buffer(blit_buf(0x10000, 0x10100, (uint64_t)mem, (uint64_t)mem + 256), io, 0, a, 0, 256);
-        if (split) { enc_b_end(g_blit); g_blit = nil; }
+        if (split) { enc_b_end(RX.blit); RX.blit = nil; }
         enc_b_copy_buffer(blit_buf((uint64_t)mem, (uint64_t)mem + 256, 0x20000, 0x20100), b, 0, io, 512, 256);
         finish(); bytes((uint8_t *)io.contents + 512, io.contents, 256, "copy reads through a second no-copy buffer");
     }
@@ -69,7 +69,7 @@ static void sparse_copies(void) {
         else if (op == 1) mtl_sub_update(io, dst, n);
         else mtl_sub_fill(dst, n, value);
         if (split) ubd_land_compute();
-        if (split && g_blit) { enc_b_end(g_blit); g_blit = nil; }
+        if (split && RX.blit) { enc_b_end(RX.blit); RX.blit = nil; }
         uint64_t before = mtl_blit_barriers();
         mtl_sub_copy(src, (uint64_t)io + 512, n);
         if (!split) CHECK(mtl_blit_barriers() > before, "sparse alias dependency inserts an intra-encoder barrier");

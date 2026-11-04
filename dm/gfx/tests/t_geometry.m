@@ -480,12 +480,12 @@ static void replay(int mode) {
     EXPECT(wait_name,mode==7||mode==8||mode==9||mode==13||mode>=14,g_mdi_v-waits);
     if(conversion) {
         float first=-1;for(int i=0;i<64;i++)if(g_vconv[i].serial==g_sub_serial&&g_vconv[i].addr==(uint64_t)(commands+24576))
-            for(NvArena *a in g_sub_arenas)if(g_vconv[i].gpu>=a->gpu&&g_vconv[i].gpu+4<=a->gpu+a->buf.length)memcpy(&first,(char*)a->buf.contents+g_vconv[i].gpu-a->gpu,4);
+            for(NvArena *a in RX.sub_arenas)if(g_vconv[i].gpu>=a->gpu&&g_vconv[i].gpu+4<=a->gpu+a->buf.length)memcpy(&first,(char*)a->buf.contents+g_vconv[i].gpu-a->gpu,4);
         EXPECT("CPU conversion sees the queued GPU write",1,first==17);
     }
     id<MTLBuffer> b=[g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared];res_add(b);
     uint32_t *args=NULL;id<MTLBuffer> argsBuffer;
-    for(NvArena *a in g_sub_arenas)if(g_geo_args>=a->gpu&&g_geo_args+20<=a->gpu+a->buf.length){argsBuffer=a->buf;args=(uint32_t*)((char*)argsBuffer.contents+g_geo_args-a->gpu);}
+    for(NvArena *a in RX.sub_arenas)if(g_geo_args>=a->gpu&&g_geo_args+20<=a->gpu+a->buf.length){argsBuffer=a->buf;args=(uint32_t*)((char*)argsBuffer.contents+g_geo_args-a->gpu);}
     [blit() copyFromTexture:tex_mtl(&target) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(32,32,1) toBuffer:b destinationOffset:0 destinationBytesPerRow:128 destinationBytesPerImage:4096];finish();
     EXPECT("two GS invocations per input primitive",kind==6?216000:72,args?args[0]:0);
     int red=0;uint8_t *px=b.contents;for(int i=0;i<1024;i++)if(px[i*4]>200)red++;
@@ -583,7 +583,7 @@ static void replay_local(int mode) {
     if(mode==7) EXPECT("GPU-copied indices retain drain",1,g_mdi_waits-waits);
     id<MTLBuffer> b=[g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared];res_add(b);
     uint32_t *args=NULL;id<MTLBuffer> argsBuffer;
-    for(NvArena *a in g_sub_arenas)if(g_geo_args>=a->gpu&&g_geo_args+20<=a->gpu+a->buf.length){argsBuffer=a->buf;args=(uint32_t*)((char*)argsBuffer.contents+g_geo_args-a->gpu);}
+    for(NvArena *a in RX.sub_arenas)if(g_geo_args>=a->gpu&&g_geo_args+20<=a->gpu+a->buf.length){argsBuffer=a->buf;args=(uint32_t*)((char*)argsBuffer.contents+g_geo_args-a->gpu);}
     [blit() copyFromTexture:tex_mtl(&target) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(32,32,1) toBuffer:b destinationOffset:0 destinationBytesPerRow:128 destinationBytesPerImage:4096];
     id<MTLBuffer> db;
     if(mode>=11){db=[g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared];res_add(db);[blit() copyFromTexture:tex_mtl(&depth) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(32,32,1) toBuffer:db destinationOffset:0 destinationBytesPerRow:128 destinationBytesPerImage:4096];}finish();

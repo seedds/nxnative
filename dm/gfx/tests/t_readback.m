@@ -238,7 +238,7 @@ static void mirror_completion(void) {
     ReadbackDevice *device = [ReadbackDevice new]; device.device = g_dev; device.observedLength = 4096; g_dev = (id)device;   // the 128-byte readback's size (mrbuf_get)
     mtl_exec((const uint8_t *)handle);
     g_dev = device.device;
-    [g_commit_blocks addObject:^{
+    [RX.commit_blocks addObject:^{
         dispatch_semaphore_signal(c->feedbackEntered);
         if (dispatch_semaphore_wait(c->feedbackRelease, dispatch_time(DISPATCH_TIME_NOW, 10000000000ll))) atomic_store(&c->gateTimedOut, 1);
     }];

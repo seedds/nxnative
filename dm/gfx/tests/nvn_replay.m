@@ -397,7 +397,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         if (opt_writes) { uint64_t a[6]; mtl_vbuf_stats(&a[0], &a[1], &a[2], &a[3], &a[4], &a[5]); printf("vbuf: resolve %llu reuse %llu set %llu skip %llu unaligned copies %llu (%llu bytes)\n", a[0], a[1], a[2], a[3], a[4], a[5]); }
         if (have_px) printf("replay %d: %llu pixels differ from the live frame (largest byte difference %u, x %u-%u y %u-%u)\n", index + rep, (unsigned long long)npx, big, x0, x1, y0, y1);
         printf("replay %d: digest %s %s live %s (%ux%u format %u); submit CPU %.2f ms (+ %.2f ms applying the captured state), GPU %.2f ms; %llu passes, %llu draws, %llu segments\n", index + rep, out, same ? "==" : "!=", live, w, h, pf, exec_ns / 1e6, setup_ns / 1e6, gpu,
-               (unsigned long long)(pass1 - pass0), (unsigned long long)(draw1 - draw0), (unsigned long long)g_seg + 1);
+               (unsigned long long)(pass1 - pass0), (unsigned long long)(draw1 - draw0), (unsigned long long)RX.seg + 1);
     }
     if (same_all) printf("MATCH: the replayed frame equals the live frame\n");
     else if (ok_all) printf("MATCH within --max-pixels %llu: the replayed frame differs from the live frame in at most %llu pixels\n", (unsigned long long)maxpx, (unsigned long long)worst_px);

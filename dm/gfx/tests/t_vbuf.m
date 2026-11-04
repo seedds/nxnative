@@ -28,7 +28,7 @@ static id<MTLRenderPipelineState> pipeline(NSString *fn) {   // v: the first wor
 }
 static id<MTL4RenderCommandEncoder> encoder_prepared(id<MTLRenderPipelineState> ps) {   // after the caller's vbuf_prepare
     ubd_land_compute();
-    if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    if (RX.blit) { enc_b_end(RX.blit); RX.blit = nil; }
     MTL4RenderPassDescriptor *d = [MTL4RenderPassDescriptor new];
     d.renderTargetWidth = d.renderTargetHeight = d.defaultRasterSampleCount = 1;
     id<MTL4RenderCommandEncoder> en = enc_r_begin(d); enc_r_pso(en, ps); return en;

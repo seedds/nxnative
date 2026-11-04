@@ -10,6 +10,7 @@ static int checks, failed;
 static void read_level(id<MTLTexture> texture, unsigned level, uint16_t *out) {
     NSUInteger n = texture.width >> level;
     id<MTLBuffer> readback = [g_dev newBufferWithLength:n * n * 2 options:MTLResourceStorageModeShared];
+    if (!readback) { CHECK(0, "readback buffer allocated"); memset(out, 0, n * n * 2); return; }
     id<MTLCommandBuffer> command = q_cb(); id<MTLBlitCommandEncoder> copy = [command blitCommandEncoder];
     [copy copyFromTexture:texture sourceSlice:0 sourceLevel:level sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(n,n,1)
                 toBuffer:readback destinationOffset:0 destinationBytesPerRow:n * 2 destinationBytesPerImage:n * n * 2];
@@ -48,7 +49,7 @@ static void image_case(int explicit_image) { @autoreleasepool {
     CHECK(read_real && read_only && !(read_only.usage & MTLTextureUsageShaderWrite), "load-only image accepts a read-only texture");
     CHECK(tex_mtl(&texture) == old && g_enc != nil, "load-only image does not upgrade storage or end the render pass");
     os_unfair_lock_unlock(&g_rmu);
-    shader->rf.b[0].rw = 1; image_prepare(program, 0x20);
+    shader->rf.b[0].rw = 1; program->c_img = 0; image_prepare(program, 0x20);   // c_img: image_prepare caches the program's written image slots; a real program's shaders never change
     CHECK(!g_enc, "image preparation ends the previous render pass before copying it");
     id<MTLTexture> upgraded = tex_mtl(&texture);
     CHECK(upgraded != old && (upgraded.usage & MTLTextureUsageShaderWrite), "explicit image use upgrades only its backing");

@@ -1320,18 +1320,28 @@ namespace Ryujinx.Graphics.Shader.Instructions
             EmitP2r(context, Register(x.Ra, RegisterType.Gpr), Register(x.Rd, RegisterType.Gpr), mask, (ByteSel)x.Bits(76, 78), false);
         }
 
-        // UP2UR URd, URZ, 1: the uniform predicate UP0 as 0 or 1 in a uniform register. Pokemon Pokopia's two compute shaders with it use this one encoding (a mask over UP0..UP6 with a merge source
-        // is P2R's form, not seen here)
+        // UP2UR URd, URZ, mask: bit k of URd is the uniform predicate UPk where bit k of the mask is set, as P2R does for the general predicates (7 is the always-true UPT).
+        // Pokemon Pokopia's compute shaders use mask 1. Mario Kart World's pixel shaders save one predicate with mask 8 or 0x40 and test the register against URZ later
         public static void AUp2ur(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
 
-            if (x.Bits(24, 30) != RegisterConsts.UniformZeroIndex || x.Imm32 != 1)
+            if (x.Bits(24, 30) != RegisterConsts.UniformZeroIndex || (x.Imm32 & ~0xffu) != 0)
             {
-                throw AFail(context, "UP2UR with a merge source or another mask");
+                throw AFail(context, "UP2UR with a merge source or a mask past the predicates");
             }
 
-            ASet(context, x, context.ConditionalSelect(APredReg(0, uniform: true), Const(1), Const(0)), uniform: true);
+            Operand res = Const(0);
+
+            for (int k = 0; k < 8; k++)
+            {
+                if ((x.Imm32 >> k & 1) != 0)
+                {
+                    res = context.BitwiseOr(res, context.ConditionalSelect(APredReg(k, uniform: true), Const(1 << k), Const(0)));
+                }
+            }
+
+            ASet(context, x, res, uniform: true);
         }
 
         // PLOP3 Pd0, Pd1, a (87..90), b (77..80), c (68..71; uniform with bit 67), lut0 (64..67 | 72..77 << 3), lut1 (16..24)

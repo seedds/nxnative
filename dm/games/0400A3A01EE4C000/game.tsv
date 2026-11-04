@@ -34,6 +34,10 @@ sys_resource	0x0
 # nninitStartup asks for pool - used memory and does not check the answer; the rewritten modules take 82 MB, more than the default 64 MB SetHeapSize checks the request against
 mem_used	0x5600000
 
+# ---- Pipelines ----
+# the game sets near = 0 (the log's depth mode line): the pipeline bases made before it runs are made for that mode
+depth_mode	zero
+
 # ---- Shader split (shader_split.py) ----
 shader_groups	/motor_asset_re/=rdb
 shader_note	Pokemon Pokopia shaders

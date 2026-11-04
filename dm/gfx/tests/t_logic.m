@@ -1,4 +1,4 @@
-// Logic operations through the replay: ColorStateSetLogicOp records, the pipeline from the shader's logic operation library (<key>_bl, loaded by the host from the library
+// Logic operations through the replay: ColorStateSetLogicOp records, the pipeline from the shader's side library (<key>_bx, loaded by the host from the library
 // directory) and the operation and channel masks at its fragment buffer, drawn on the GPU. For every operation a row gets a destination by a COPY draw, then the operation's draw
 // with a source, into RG32Uint, RGBA8Uint, RGBA8Unorm and RGBA16Unorm targets (the result cut to the target's bits); every operation shares one pipeline; a target with no bits to combine keeps COPY (lop_key).
 // make GAME=<id> check_t_logic (the fixture comes from test_dmsh_logic.py --fixture <dir>; ./t_logic <dir>)
@@ -23,7 +23,7 @@ static NvProg *prog(NSString *dir, prog_t *program, NvShader **out) {
     NvShader *ps = [NvShader new]; pr->sh[1] = ps; *out = ps;
     ps->fn = fn4_note([lib newFunctionWithName:@"main0"], lib, @"main0", nil); ps->fn_u = fn4_note([lib newFunctionWithName:@"main0_u"], lib, @"main0_u", nil);
     ps->stage = 1; ps->has_logic = 1; ps->rf.color_known = 1; ps->rf.color_mask = 1;
-    memset(ps->key, '1', 16); memcpy(ps->key + 16, "_b", 3);   // the host loads <dir>/<16 digits>_bl.metallib
+    memset(ps->key, '1', 16); memcpy(ps->key + 16, "_b", 3);   // the host loads <dir>/<16 digits>_bx.metallib
     ps->ae = [ps->fn newArgumentEncoderWithBufferIndex:0]; ps->arg_len = ps->ae.encodedLength; ps->rf.nb = 1; ps->rf.b[0] = (nvn_rbind){.kind = NVN_RB_CBUF, .reg = 0, .aid = 0};
     program->serial = 97000; serial_put(program->serial, pr);
     return pr;

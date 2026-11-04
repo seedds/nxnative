@@ -39,6 +39,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | PhysX completion task release | race | gap | judgement | 1 | [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) | a lifetime race in the game's own completion task (its release slot serves this one vtable) |
 | `build` → `game` | render intervals, the forced-interval flag and the render-wait timeout | frame rate | gap | judgement | 1 | [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) | the game's own tables, flag and timeout |
 | `build` → `game` | task ring push and pop barriers | race | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | a data race in the game's own task ring |
+| `build` → `game` | the game's 30 fps mode → its 60 fps mode (vSyncCount 1 and the mode field) | frame rate | gap | checked: about an hour on the Mac and 30 minutes on an iPhone 15 Pro Max at 60 fps, the minigames at their intended speed, 2026-11-01 | 1 | [Hello Kitty Party Land](../../dm/games/01001340271EC000/README.md) | the game's own frame-rate class; a function-matched rule could carry it over the game's updates |
 | `build` → `game` | UE3's GMalloc setup skipped, the host allocator in (hle_uemalloc.c) | address space | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | UE3 inlines the allocator's constructor into the GMalloc setup and has its own vtable layout (25 slots, 32-bit sizes), so the Unreal 4/5 discovery does not apply |
 | `build` → `game` | unused 272-byte slot pool: 4,194,304 → 65,536 slots | address space | gap | judgement | 1 | [Mario + Rabbids® Sparks of Hope](../../dm/games/0100317013770000/README.md) | Sparks of Hope's own init (Kingdom Battle has none) |
 | `build` → `sdk` | rows the rules would add the alignment cuts to (2d369d99, 12f16103, 311deab1) | address space | blocked: the games that reach them (Pokémon Brilliant Diamond, Monster Hunter Rise, 13 Sentinels: Aegis Rim; Brain Memory Training Academy; Ace Attorney Investigations Collection) have no Mac build: run one per build with the alignment cuts | checked: the rules resolved on each build's sdk, 2026-10-29 and 2026-10-30 | 12 | [sdk_patches.py](../../dm/tools/sdk_patches.py) | the rules give these builds the same node area cut and the three alignment cuts more; each row keeps the alignment out |
@@ -71,6 +72,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](#final-fantasy-tactics---the-ivalice-chronicles) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Fire Emblem Engage](#fire-emblem-engage) | 1 | 0 | 0 | 0 | 0 | `build` → `engine` |
 | [Fire Emblem: Three Houses](#fire-emblem-three-houses) | 12 | 0 | 0 | 0 | 0 | `build` → `game`, `build` → `host` |
+| [Hello Kitty Party Land](#hello-kitty-party-land) | 4 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Hyrule Warriors: Age of Calamity](#hyrule-warriors-age-of-calamity) | 0 | 0 | 3 | 0 | 0 | `build` → `game` |
 | [Luigi's Mansion 3](#luigis-mansion-3) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [Mario + Rabbids® Sparks of Hope](#mario--rabbids-sparks-of-hope) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -336,6 +338,18 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x50f8ec`: render thread wait timeout: fdiv s0,s1,s0 → ldr s8,[x8,#0xb50] (1000.0)
   - cut `+0x50f8f0`: render thread wait timeout: adrp x8,#0xcb7000 → fdiv s0,s8,s0 (1000/fps; the fmul by s8 that follows makes it µs)
   - cut `+0x50f8f4`: render thread wait timeout: ldr s8,[x8,#0xb50] → nop (moved up)
+
+### Hello Kitty Party Land
+
+[Hello Kitty Party Land](../../dm/games/01001340271EC000/README.md), `01001340271EC000`, [patches.py](../../dm/games/01001340271EC000/patches.py).
+
+- **`build` → `game`**, frame rate, gap, checked: about an hour on the Mac and 30 minutes on an iPhone 15 Pro Max at 60 fps, the minigames at their intended speed, 2026-11-01: the game's 30 fps mode → its 60 fps mode (vSyncCount 1 and the mode field). The game's own frame-rate class; a function-matched rule could carry it over the game's updates
+
+- **1.0.2 `main`** `ca82f3ab…` ([patches.py:9](../../dm/games/01001340271EC000/patches.py#L9))
+  - cut `+0x863b318`: frame rate SetMode(0): vSyncCount mov w0,#2 → mov w0,#1 (the game's own 60 fps mode)
+  - cut `+0x863b31c`: frame rate SetMode(0): 60 fps field str wzr → str w0 (1, as SetMode(1))
+  - cut `+0x863b4ec`: 30 fps setter: vSyncCount mov w0,#2 → mov w0,#1
+  - cut `+0x863b4f8`: 30 fps setter: 60 fps field str wzr → str w0 (1)
 
 ### Hyrule Warriors: Age of Calamity
 

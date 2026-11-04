@@ -1,0 +1,41 @@
+# Game profile of Hello Kitty Party Land (Switch, update 1.0.2 = v131072). Plays on the Mac and on the iPhone at 60 fps
+# Format: see dm/games/README.md
+# Unity 6000.3.11f1 (IL2CPP) with CRIWARE movies (USM) and Addressables, SDK 21.4.4; subsdk0 is the movie module. The player's serialized files and built-in resources have no type trees; the
+# Shader objects borrow the tree the Addressables bundles carry, and the ComputeShader objects (Unity's GPU skinning among them) take unityfs.py's written-out 6000.3 layout (COMPUTE_6000_3).
+# The game runs its menus at 60 fps and switches gameplay to 30; patches.py keeps its own 60 fps mode everywhere (README.md, Frame rate)
+
+# ---- Identity ----
+title_id	01001340271EC000
+program_id	01001340271EC000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Hello Kitty Party Land
+ipa	HelloKittyPartyLand.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.0.2	main=ca82f3aba950e98060aa8b6aa8f24217	subsdk0=fc537f0b21c880e89d6f247d22a150ca	sdk=148394139d9d26ca8afd5c9ba5d30601
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie)
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/aa/Switch/movieassets_assets_assets/app/movieresources/opening.usm_data
+zip_store	.assets:.bin:.bundle:.dat:.ress:.usm_data:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource, so IsVirtualAddressMemoryEnabled is true, and main never sets a heap: Unity 6 takes its memory itself in the alias region, as in BALL x PIT and
+# Hollow Knight: Silksong. The 5 GB block of the other Unity games with virtual address memory. Measured on the Mac (2026-11-01, menus, the tutorial and minigames): the alias region's
+# high-water mark +2.75 GB of 4.375 GB, 1.26 GB mapped, about 2 GB resident and 0.5 GB of GPU memory
+sys_resource	0x1000000
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+
+# ---- Shader split (shader_split.py; Unity Shader and ComputeShader objects, read by unityfs.py) ----
+# everything is under Data/: the player's serialized files and the StreamingAssets bundles (12,739 shaders, 92 of them compute, 11 GLSLC outputs of Unity's player in main)
+shader_groups	/Data/=data
+shader_note	Hello Kitty Party Land shaders

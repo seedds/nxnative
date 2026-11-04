@@ -335,7 +335,7 @@ Under a game, "60 fps with 1.2.0" means it runs at 60 fps (30 on the console) wi
 <tr>
 <td align="center" valign="top" width="33%"><img src="docs/images/kirby-star-allies.jpg" width="256" alt="Kirby Star Allies"><br><small><b><a href="dm/games/01007E3006DDA000/README.md">Kirby Star Allies</a></b></small></td>
 <td align="center" valign="top" width="33%"><img src="docs/images/dave-the-diver.jpg" width="256" alt="DAVE THE DIVER"><br><small><b><a href="dm/games/010097F018538000/README.md">DAVE THE DIVER</a></b></small></td>
-<td></td>
+<td align="center" valign="top" width="33%"><img src="docs/images/hello-kitty-party-land.jpg" width="256" alt="Hello Kitty Party Land"><br><small><b><a href="dm/games/01001340271EC000/README.md">Hello Kitty Party Land</a></b><br>60 fps with 1.0.2</small></td>
 </tr>
 </table>
 <!-- end of gallery -->

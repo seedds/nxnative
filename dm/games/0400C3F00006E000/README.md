@@ -90,6 +90,7 @@ Update 1.8.0 (v917504, SDK 21.4.0) is not on this Mac. Pull request #1116 ported
 - [A store only a dispatch's first invocation makes](../../../docs/reference/shaders.md#a-store-only-a-dispatchs-first-invocation-makes)
 - [Uncompressed storage the CPU wrote, in a pool the GPU has not written](../../../docs/reference/nvn-objects.md#uncompressed-storage-the-cpu-wrote-in-a-pool-the-gpu-has-not-written)
 - [Variable rate shading ignored](../../../docs/reference/rendering.md#variable-rate-shading-ignored)
+- [A DualShock 4 that connects after the first stays on Core Haptics](../../../docs/reference/services.md#a-dualshock-4-that-connects-after-the-first-stays-on-core-haptics)
 - [Scaled shared memory addresses](../../../docs/reference/shaders.md#scaled-shared-memory-addresses)
 - [Compute shared memory past 32 KB](../../../docs/reference/shaders.md#compute-shared-memory-past-32-kb)
 - [Uniform references past the first kilobyte](../../../docs/reference/shaders.md#uniform-references-past-the-first-kilobyte)

@@ -1454,6 +1454,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** the per-shader key covers the pairs, and a paired vertex shader's key also covers its pixel shaders' keys (`shader_key`, `pair_keyed`), so a change to a profile's pairs rebuilds what it affects ([Pixel shader inputs the vertex shader does not write](#pixel-shader-inputs-the-vertex-shader-does-not-write)).
 - **Found on:** [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md).
 
+### Shader cache key missing helper modules
+
+- **Symptom:** an edit to a shader build helper reaches no library: `shader cache: hit` for every shader, and the old MSL is filed under the new chain version. An edit to `dmsh_meshstage.py` did not change the chain version either.
+- **Cause:** a cache hit restores a shader's outputs and skips `job_for` and `finish`, so everything they run has to be in the shader's key. `CODE_FP` left out `dmsh_wide.py`, `dmsh_ampere.py`, `dmsh_meshstage.py` and `dmsh_fetch.screen_varyings` (through `raster_facts`), and `dmsh_chain.py`'s `FILES` left out `dmsh_meshstage.py`.
+- **Fix:** `FILES` and `CODE_FP` cover them. The modules that stay out of `CODE_FP` are made again from the restored MSL on every build (`dmsh_vin.py`, `dmsh_pull.py`, `dmsh_alpha.py`, `dmsh_logic.py`, `dmsh_mesh.py`, the rest of `dmsh_fetch.py`), or are covered otherwise (`dmsh_facts.py`: its row is in the key; `dmsh_mtlcache.py` changes no output). The change bumps the chain with the libraries byte for byte as before (Animal Well's 46), so Metal compiles nothing again.
+- **Found on:** no game: found reading the code after Mario Kart World added `dmsh_meshstage.py`, then reproduced on [ANIMAL WELL](../../dm/games/010020D01AD24000/README.md) (an edit to `wide_loads` reached 0 of 46 libraries before the fix, all 46 after it).
+- **Check:** `test_dmsh_code_fp.py` `Coverage` fails when `dmsh_build.py` imports a `dmsh_*` module that neither list accounts for.
+
 ### Partial vertex builds missing paired pixel sources
 
 - **Symptom:** a full build reports successful shaders, but `metal-tt` rejects its pipeline archive with fragment inputs not written by the vertex shader. Fifteen cached vertices lacked default outputs in DRAGON QUEST I & II.
@@ -1512,6 +1520,15 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Open:** wall time now falls less than CPU, as the builder's Python takes about 0.12 s a shader under the GIL (about 120 of those 176 s), which alone comes to about 4.3 hours for Pokopia. A pixel shader's `_ba` and `_bl` libraries are also compiled whole: about 57% of Pokopia's compiles before those whose MSL matches another's, though its runs opened none of them (Pokopia's note).
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md#found-on-this-game).
 - **Check:** `test_shader_pch.py`.
+
+### A library that depends on its source's file name
+
+- **Symptom:** two builds of the same shaders give different `_bl` or `_bf` libraries for some keys, of the same size, 46 bytes apart, while their MSL is the same. A byte comparison of two library folders reports them, and `regress.py` can report them as changed variants.
+- **Cause:** clang names a source's static initializer after its file (`_GLOBAL__sub_I_<key>_bl.metal`), and any function constant brings one, so the name and the library's stored hash change with the file's base name (its folder does not matter). Sources without function constants do not depend on it. The MSL-keyed Metal cache takes the same text for the same bytes, so shaders that share a source took the library of whichever compiled first, or their own when they compiled at once. In Breath of the Wild 3,936 of 10,560 pixel shaders share their `_bl` source and 1,710 their `_bf` source.
+- **Fix:** `dmsh_pch.compile`, which every compile of a shader library goes through, passes the source on standard input (`-x metal -`), so no file name reaches the compiler. Metal's messages then say `<stdin>`, and a failed compile also prints the source's path. Libraries from an earlier compile keep their bytes in the Metal cache: a cold build differs from them once, in `_bl` and `_bf`. The compile records and the chain version did not change, as the code the libraries hold did not. `_check` in `dmsh_mtlcache.py` samples only `_b`, and the offline pipeline archive leaves function constants to the device, so neither ever saw the difference.
+- **Measurement:** cold builds at `J=4` and `J=14` of 471 Breath of the Wild shaders chosen from shared sources: 15 of 2,595 Mac files and 13 of 2,123 iOS files differed, all `_bl`; with the source on standard input none did. Pokopia's 1,001 at `J=6` and `J=14`: none of 4,581 Mac and 3,579 iOS files.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md#found-on-this-game) (resolved), [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game) (resolved).
+- **Check:** `test_shader_pch.py` (`test_a_mac_library_does_not_depend_on_the_source_name`, `test_each_run_reads_the_source_from_its_start`).
 
 ### Concurrent warm tasks prepare each shader once
 

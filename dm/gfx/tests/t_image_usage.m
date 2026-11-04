@@ -10,6 +10,7 @@ static int checks, failed;
 static void read_level(id<MTLTexture> texture, unsigned level, uint16_t *out) {
     NSUInteger n = texture.width >> level;
     id<MTLBuffer> readback = [g_dev newBufferWithLength:n * n * 2 options:MTLResourceStorageModeShared];
+    if (!readback) { CHECK(0, "readback buffer allocated"); memset(out, 0, n * n * 2); return; }
     id<MTLCommandBuffer> command = q_cb(); id<MTLBlitCommandEncoder> copy = [command blitCommandEncoder];
     [copy copyFromTexture:texture sourceSlice:0 sourceLevel:level sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(n,n,1)
                 toBuffer:readback destinationOffset:0 destinationBytesPerRow:n * 2 destinationBytesPerImage:n * n * 2];

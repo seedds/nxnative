@@ -81,6 +81,13 @@ def _params(text):
     return out + [cur.strip()] if cur.strip() else out
 
 
+def _name(param):
+    """A kernel parameter's name."""
+    m = _NAME.search(param)
+    if not m: raise ValueError(f'no name in the kernel parameter {param}')
+    return m[1]
+
+
 def _component(c, base):
     """A vector of 4 from the attribute area's components: base[c] is the word's expression, or None for a component the shader does not write (0, 0, 0, 1 as a vertex output starts)."""
     return 'float4(' + ', '.join(f'as_type<float>({base[k]})' if base[k] else ('1.0' if k == 3 else '0.0') for k in range(4)) + ')' if c else ''
@@ -98,7 +105,7 @@ def to_stage(msl, i):
     m = _KERNEL.search(msl)
     if not m: raise ValueError(f'{kind}: no kernel main0 starting with its stage memory')
     params, words, mem = _params(m[1]), int(m[2]), m[3]
-    names = [_NAME.search(p)[1] for p in params]
+    names = [_name(p) for p in params]
     plain = [re.sub(r'\s*\[\[.*\]\]$', '', p) for p in params]
     # The kernel's body, called with the stage memory the wrapper owns: its early returns (a thread with nothing to write) come back to the wrapper's copy of the outputs
     src = msl[:m.start()] + f'static inline __attribute__((always_inline)) void dm_stage_body({", ".join(plain + [f"threadgroup spvUnsafeArray<uint, {words}>& {mem}"])})\n{{\n' + msl[m.end():]

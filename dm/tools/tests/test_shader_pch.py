@@ -1,6 +1,7 @@
 """The shader libraries' precompiled Metal header (dm/gfx/tools/dmsh_pch.py, GitHub issue #1036): a compile uses it when it builds and gives the same bytes on a test shader, runs
 again without it when it fails, so what a failure reports is the plain compile's, and DMSH_PCH=0 turns it off. With a Metal compiler (each SDK skipped without one), synthetic shaders
-compile to byte-identical output with and without it, in the flags of the real builds; a shader with an error raises as a plain compile does. No game files."""
+compile to byte-identical output with and without it, in the flags of the real builds; a shader with an error raises as a plain compile does. The source goes on standard input, so a
+library does not depend on its file's name. No game files."""
 import os
 from pathlib import Path
 import shutil
@@ -39,6 +40,11 @@ class Tmp(unittest.TestCase):
 
 
 class Choice(Tmp):
+    def setUp(self):
+        super().setUp()
+        for n in 'ab': (self.tmp / f'{n}.metal').write_text(n)
+        cwd = os.getcwd(); os.chdir(self.tmp); self.addCleanup(os.chdir, cwd)
+
     def result(self, code=0, err=b''):
         return subprocess.CompletedProcess([], code, b'', err)
 
@@ -46,12 +52,12 @@ class Choice(Tmp):
         with mock.patch.object(dmsh_pch, 'make', return_value=('/p.pch', None)) as make, mock.patch.object(subprocess, 'run', return_value=self.result()) as run:
             dmsh_pch.compile(['metal', '-c'], 'a.metal', 'a.air'); dmsh_pch.compile(['metal', '-c'], 'b.metal', 'b.air')
         make.assert_called_once()   # one header per convention
-        self.assertEqual([c.args[0] for c in run.call_args_list], [['metal', '-c', '-include-pch', '/p.pch', n + '.metal', '-o', n + '.air'] for n in 'ab'])
+        self.assertEqual([c.args[0] for c in run.call_args_list], [['metal', '-c', '-include-pch', '/p.pch', '-x', 'metal', '-', '-o', n + '.air'] for n in 'ab'])
 
     def test_a_failure_with_the_header_runs_the_plain_compile(self):
         with mock.patch.object(dmsh_pch, 'make', return_value=('/p.pch', None)), mock.patch.object(subprocess, 'run', side_effect=[self.result(1), self.result()]) as run:
             dmsh_pch.compile(['metal', '-c'], 'a.metal', 'a.air')
-        self.assertEqual(run.call_args_list[1].args[0], ['metal', '-c', 'a.metal', '-o', 'a.air'])
+        self.assertEqual(run.call_args_list[1].args[0], ['metal', '-c', '-x', 'metal', '-', '-o', 'a.air'])
         self.assertTrue(run.call_args_list[1].kwargs.get('check'))
 
     def test_a_header_that_cannot_be_used_is_said_once_and_compiles_stay_plain(self):
@@ -65,7 +71,15 @@ class Choice(Tmp):
         with mock.patch.dict(os.environ, {'DMSH_PCH': '0'}), mock.patch.object(dmsh_pch, 'make') as make, mock.patch.object(subprocess, 'run', return_value=self.result()) as run:
             dmsh_pch.compile(['metal', '-c'], 'a.metal', 'a.air')
         make.assert_not_called()
-        self.assertEqual(run.call_args.args[0], ['metal', '-c', 'a.metal', '-o', 'a.air'])
+        self.assertEqual(run.call_args.args[0], ['metal', '-c', '-x', 'metal', '-', '-o', 'a.air'])
+
+    def test_each_run_reads_the_source_from_its_start(self):
+        read = []
+        def run(cmd, stdin, **kw):
+            read.append(stdin.read()); return self.result(len(read) == 1)   # the first run fails, having read the whole source
+        with mock.patch.object(dmsh_pch, 'make', return_value=('/p.pch', None)), mock.patch.object(subprocess, 'run', side_effect=run):
+            dmsh_pch.compile(['metal', '-c'], 'a.metal', 'a.air')
+        self.assertEqual(read, [b'a', b'a'])
 
     def test_make_refuses_a_header_whose_test_shader_differs(self):
         def run(cmd, **kw):
@@ -87,7 +101,7 @@ class RealCompiler(Tmp):
         for name, body in SHADERS.items():
             src = self.tmp / f'{name}.metal'; src.write_text('#pragma clang diagnostic ignored "-Wmissing-prototypes"\n\n#include <metal_stdlib>\n#include <simd/simd.h>\n\nusing namespace metal;\n\n' + body)
             plain, used = self.tmp / f'{name}.plain.air', self.tmp / f'{name}.air'
-            subprocess.run([*metal, src, '-o', plain], check=True, capture_output=True)
+            with open(src, 'rb') as f: subprocess.run([*metal, '-x', 'metal', '-', '-o', plain], stdin=f, check=True, capture_output=True)   # as compile runs it: an .air records a named source's path
             with mock.patch.dict(dmsh_pch._headers, {tuple(metal): pch}), mock.patch.object(subprocess, 'run', wraps=subprocess.run) as run:
                 dmsh_pch.compile(metal, str(src), str(used))
             self.assertIn('-include-pch', run.call_args_list[0].args[0]); self.assertEqual(run.call_count, 1, f'{name}: the compile with the header failed')
@@ -100,6 +114,25 @@ class RealCompiler(Tmp):
     @unittest.skipUnless(has_sdk('iphoneos'), 'no iOS Metal compiler')
     def test_ios_output_is_byte_identical(self):
         self.check_identical(ios_metal.METAL)
+
+    def check_no_name(self, metal, header):
+        pch = dmsh_pch.make(metal)[0] if header else None
+        if header: self.assertTrue(pch)
+        out = []
+        for name in ('0123456789abcdef_bl', 'fedcba9876543210_bl'):   # a function constant brings a static initializer, which clang names after the file
+            d = self.tmp / name; d.mkdir(exist_ok=True); src = d / f'{name}.metal'; air = d / f'{name}.{header}.air'
+            src.write_text('#include <metal_stdlib>\nusing namespace metal;\nconstant bool fc [[function_constant(0)]];\nfragment float4 main0(float4 d [[color(0), function_constant(fc)]]) { return fc ? d : float4(1); }\n')
+            with mock.patch.dict(dmsh_pch._headers, {tuple(metal): pch}): dmsh_pch.compile(metal, str(src), str(air))
+            out.append(air.read_bytes())
+        self.assertEqual(out[0], out[1])
+
+    @unittest.skipUnless(has_sdk('macosx'), 'no macOS Metal compiler')
+    def test_a_mac_library_does_not_depend_on_the_source_name(self):
+        self.check_no_name(MAC, True); self.check_no_name(MAC, False)
+
+    @unittest.skipUnless(has_sdk('iphoneos'), 'no iOS Metal compiler')
+    def test_an_ios_library_does_not_depend_on_the_source_name(self):
+        self.check_no_name(ios_metal.METAL, True); self.check_no_name(ios_metal.METAL, False)
 
     @unittest.skipUnless(has_sdk('macosx'), 'no macOS Metal compiler')
     def test_a_shader_with_an_error_raises_as_a_plain_compile_does(self):

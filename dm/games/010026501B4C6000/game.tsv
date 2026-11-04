@@ -1,0 +1,33 @@
+# Game profile of Cricket 24 (Switch, base game 1.0.0 = v0)
+# Format: see dm/games/README.md
+# Big Ant Studios' engine with Wwise, SDK 16.2.3. Started from the NSP script's provisional profile (dm/games/profile_guess.py) and brought up on the Mac (docs/agents)
+# ---- Identity ----
+title_id	010026501B4C6000
+program_id	010026501B4C6000
+# ---- App ----
+name	Cricket 24
+ipa	Cricket24.ipa
+app_category	public.app-category.sports-games
+# ---- Versions ----
+build	v0	1.0.0	main=67daae6d0ecd0ec66df65a3858c0a0ac	sdk=835c229763ce5c1816a70f875bd70ccd
+package	v0
+shader_versions	v0
+# ---- Files ----
+# main imports nothing from subsdk0 (NintendoSDK_movie) that the host does not supply; the game loads one NRO (nro/party.nro) through nn::ro
+modules	main sdk
+romfs_marker	data/data-0.blobset.nx
+zip_store	.log:.nro:.nx:.metallib
+# ---- Memory ----
+# The NPDM declares no system resource: main sets a heap of at most the pool less 64 MB, 3.13 GB in the 3.25 GB heap region of the 4 GB layout ([mem] heap 3.13 GB)
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+# ---- Shader split ----
+# every shader is in data/<xx>/<hash> files named in data/data-0.blobset.nx.log; the pack is shaders.blob.nx (docs/reference/shaders.md, Big Ant's chunked zstd files and shader pack)
+shader_groups	/data/=data
+shader_note	Cricket 24 shaders (shaders.blob.nx)
+# ---- After the rewrite ----
+# the rewritten modules are larger than the default 64 MB of used memory
+mem_used	0x4c00000

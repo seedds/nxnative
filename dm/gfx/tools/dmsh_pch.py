@@ -4,7 +4,7 @@
 # The module cache holds those templates, not their instantiations; this header holds the instantiations, so a compile reads them instead of making them.
 # The translated source stays as it was: the header only adds the two includes the sources start with and completes classes, and declares no name. A class left out of CLASSES costs only its
 # time. The output is byte-identical (checked on a shader of every kind in make(), so a compiler that behaves otherwise builds without the header), so -include-pch is not in the compile records
-# (dmsh_build.py MAC_RECORD, ios_metal.RECORD), and like dmsh_mtlcache.py this file is not part of the chain version: it never changes an output, it only makes one faster.
+# (dmsh_build.py MAC_RECORD, ios_metal.RECORD), and like dmsh_mtlcache.py this file is not part of the chain version: it never changes the code in an output, it only makes one faster and keeps the source's name out of it (_run).
 # One header per compile convention, made at the first compile of a process (about 2 s) and removed when it ends. Environment: DMSH_PCH=0 compiles without it.
 import atexit, os, shutil, subprocess, sys, tempfile, threading
 
@@ -55,12 +55,19 @@ def header(metal):   # the path of the convention's header, None when it is not 
         return _headers[tuple(metal)]
 
 
+def _run(metal, msl, air, **kw):
+    # The source on standard input, so no file name reaches the compiler: clang names a source's static initializer after its file (_GLOBAL__sub_I_<name>, which any function constant brings),
+    # so the same text under two names gave two libraries, and shaders sharing a source (3,936 of Breath of the Wild's 10,560 pixel shaders, in their _bl) took the bytes of whichever compiled first
+    with open(msl, 'rb') as f: return subprocess.run([*metal, '-x', 'metal', '-', '-o', air], stdin=f, **kw)
+
+
 def compile(metal, msl, air):
     """metal (the command up to its source, with -c) on msl → air. A compile that fails with the header runs again without it, so what a failure reports and raises (CalledProcessError) is the plain compile's"""
     pch = header(metal)
     if pch:
-        r = subprocess.run([*metal, '-include-pch', pch, msl, '-o', air], capture_output=True)
+        r = _run([*metal, '-include-pch', pch], msl, air, capture_output=True)
         if not r.returncode:
             sys.stderr.buffer.write(r.stderr); sys.stderr.flush()
             return
-    subprocess.run([*metal, msl, '-o', air], check=True)
+    try: _run(metal, msl, air, check=True)
+    except subprocess.CalledProcessError: print(f'{msl}: does not compile (the messages above say <stdin>)', file=sys.stderr, flush=True); raise

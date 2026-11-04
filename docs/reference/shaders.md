@@ -1521,6 +1521,15 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md#found-on-this-game).
 - **Check:** `test_shader_pch.py`.
 
+### A library that depends on its source's file name
+
+- **Symptom:** two builds of the same shaders give different `_bl` or `_bf` libraries for some keys, of the same size, 46 bytes apart, while their MSL is the same. A byte comparison of two library folders reports them, and `regress.py` can report them as changed variants.
+- **Cause:** clang names a source's static initializer after its file (`_GLOBAL__sub_I_<key>_bl.metal`), and any function constant brings one, so the name and the library's stored hash change with the file's base name (its folder does not matter). Sources without function constants do not depend on it. The MSL-keyed Metal cache takes the same text for the same bytes, so shaders that share a source took the library of whichever compiled first, or their own when they compiled at once. In Breath of the Wild 3,936 of 10,560 pixel shaders share their `_bl` source and 1,710 their `_bf` source.
+- **Fix:** `dmsh_pch.compile`, which every compile of a shader library goes through, passes the source on standard input (`-x metal -`), so no file name reaches the compiler. Metal's messages then say `<stdin>`, and a failed compile also prints the source's path. Libraries from an earlier compile keep their bytes in the Metal cache: a cold build differs from them once, in `_bl` and `_bf`. The compile records and the chain version did not change, as the code the libraries hold did not. `_check` in `dmsh_mtlcache.py` samples only `_b`, and the offline pipeline archive leaves function constants to the device, so neither ever saw the difference.
+- **Measurement:** cold builds at `J=4` and `J=14` of 471 Breath of the Wild shaders chosen from shared sources: 15 of 2,595 Mac files and 13 of 2,123 iOS files differed, all `_bl`; with the source on standard input none did. Pokopia's 1,001 at `J=6` and `J=14`: none of 4,581 Mac and 3,579 iOS files.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md#found-on-this-game) (resolved), [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game) (resolved).
+- **Check:** `test_shader_pch.py` (`test_a_mac_library_does_not_depend_on_the_source_name`, `test_each_run_reads_the_source_from_its_start`).
+
 ### Concurrent warm tasks prepare each shader once
 
 - **Symptom:** startup tasks can prepare the same shader more than once, even though only one object enters the warm dictionary. A measured Tears of the Kingdom startup avoided 320 duplicate preparations; this is not a steady-frame-rate claim.

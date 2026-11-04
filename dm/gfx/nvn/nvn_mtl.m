@@ -12126,22 +12126,74 @@ static void clear_ds_tri(const p_clear_ds *c) {
 enum { PAR_B = 4096, PAR_W = 256 };
 static uint32_t g_par_b[PAR_B], g_par_w[PAR_W]; static uint8_t g_par_bq[PAR_B]; static int g_par_nb, g_par_nw; static uint64_t g_par_d0;
 static struct { uint64_t subs, draws, clean, clean_q, dirty, waits, cost, scan_ns, scan_ops, scan_bad; uint64_t why[8]; } g_par;
-static int par_measure(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PAR"); v = e && !strcmp(e, "measure"); if (v) MLOG("DM_NVN_PAR=measure: logging how far submissions could be split (log only)"); } return v; }
+static int par_mode(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PAR"); v = !e ? 0 : !strcmp(e, "measure") ? 1 : !strcmp(e, "check") ? 2 : 0;
+    if (v == 1) MLOG("DM_NVN_PAR=measure: logging how far submissions could be split (log only)");
+    if (v == 2) MLOG("DM_NVN_PAR=check: the scan's state at every pass boundary is compared with the replay's where a chunk could start (log only; slow)");
+    if (e && !v) MLOG("[RED] DM_NVN_PAR=%s: unknown (measure, check)", e); } return v; }
+static int par_measure(void) { return par_mode() >= 1; }
+static int par_check(void) { return par_mode() == 2; }
+// ---------- Parallel translation, milestone 3: the scan's snapshots checked against the replay (DM_NVN_PAR=check; docs/parallel-translation.md) ----------
+// A chunk will start from what the scan computed for its first pass boundary. Here the scan keeps S and R at every boundary (before the boundary's SetRenderTargets applies), and when the
+// serial replay reaches the same operation at a clean boundary (par_boundary: nothing in flight across it), every field of S and R is compared. A field that differs is something the scan does
+// not model: the log names it with the first byte that differs, the frame and the pass (the first 16 cases), and every 300 frames counts the boundaries compared, identical, different by field,
+// and those with no snapshot (past PARC_MAX in a submission, or reached by another path)
+typedef struct { const char *name; size_t off, size; } par_field;
+static const par_field g_par_sf[] = {{"prog", __builtin_offsetof(typeof(S_rx[0]), prog), sizeof S_rx[0].prog}, {"cprog", __builtin_offsetof(typeof(S_rx[0]), cprog), sizeof S_rx[0].cprog}, {"restart", __builtin_offsetof(typeof(S_rx[0]), restart), sizeof S_rx[0].restart}, {"bst", __builtin_offsetof(typeof(S_rx[0]), bst), sizeof S_rx[0].bst}, {"blend", __builtin_offsetof(typeof(S_rx[0]), blend), sizeof S_rx[0].blend}, {"color", __builtin_offsetof(typeof(S_rx[0]), color), sizeof S_rx[0].color}, {"chmask", __builtin_offsetof(typeof(S_rx[0]), chmask), sizeof S_rx[0].chmask}, {"ms", __builtin_offsetof(typeof(S_rx[0]), ms), sizeof S_rx[0].ms}, {"poly", __builtin_offsetof(typeof(S_rx[0]), poly), sizeof S_rx[0].poly}, {"ds", __builtin_offsetof(typeof(S_rx[0]), ds), sizeof S_rx[0].ds}, {"attr", __builtin_offsetof(typeof(S_rx[0]), attr), sizeof S_rx[0].attr}, {"nattr", __builtin_offsetof(typeof(S_rx[0]), nattr), sizeof S_rx[0].nattr}, {"stream", __builtin_offsetof(typeof(S_rx[0]), stream), sizeof S_rx[0].stream}, {"nstream", __builtin_offsetof(typeof(S_rx[0]), nstream), sizeof S_rx[0].nstream}, {"vbuf", __builtin_offsetof(typeof(S_rx[0]), vbuf), sizeof S_rx[0].vbuf}, {"ubo", __builtin_offsetof(typeof(S_rx[0]), ubo), sizeof S_rx[0].ubo}, {"ssbo", __builtin_offsetof(typeof(S_rx[0]), ssbo), sizeof S_rx[0].ssbo}, {"tex", __builtin_offsetof(typeof(S_rx[0]), tex), sizeof S_rx[0].tex}, {"samp", __builtin_offsetof(typeof(S_rx[0]), samp), sizeof S_rx[0].samp}, {"img", __builtin_offsetof(typeof(S_rx[0]), img), sizeof S_rx[0].img}, {"st_vmask", __builtin_offsetof(typeof(S_rx[0]), st_vmask), sizeof S_rx[0].st_vmask}, {"st_wmask", __builtin_offsetof(typeof(S_rx[0]), st_wmask), sizeof S_rx[0].st_wmask}, {"st_ref", __builtin_offsetof(typeof(S_rx[0]), st_ref), sizeof S_rx[0].st_ref}, {"po", __builtin_offsetof(typeof(S_rx[0]), po), sizeof S_rx[0].po}, {"vp", __builtin_offsetof(typeof(S_rx[0]), vp), sizeof S_rx[0].vp}, {"dr", __builtin_offsetof(typeof(S_rx[0]), dr), sizeof S_rx[0].dr}, {"has_vp", __builtin_offsetof(typeof(S_rx[0]), has_vp), sizeof S_rx[0].has_vp}, {"depth_clamp", __builtin_offsetof(typeof(S_rx[0]), depth_clamp), sizeof S_rx[0].depth_clamp}, {"vp_sw", __builtin_offsetof(typeof(S_rx[0]), vp_sw), sizeof S_rx[0].vp_sw}, {"blend_color", __builtin_offsetof(typeof(S_rx[0]), blend_color), sizeof S_rx[0].blend_color}, {"alpha_ref", __builtin_offsetof(typeof(S_rx[0]), alpha_ref), sizeof S_rx[0].alpha_ref}, {"copy_stride", __builtin_offsetof(typeof(S_rx[0]), copy_stride), sizeof S_rx[0].copy_stride}, {"copy_img_stride", __builtin_offsetof(typeof(S_rx[0]), copy_img_stride), sizeof S_rx[0].copy_img_stride}, {"push", __builtin_offsetof(typeof(S_rx[0]), push), sizeof S_rx[0].push}, {"tf", __builtin_offsetof(typeof(S_rx[0]), tf), sizeof S_rx[0].tf}, {"tf_on", __builtin_offsetof(typeof(S_rx[0]), tf_on), sizeof S_rx[0].tf_on}, {"rast_discard", __builtin_offsetof(typeof(S_rx[0]), rast_discard), sizeof S_rx[0].rast_discard}, {"tex_base", __builtin_offsetof(typeof(S_rx[0]), tex_base), sizeof S_rx[0].tex_base}, {"samp_base", __builtin_offsetof(typeof(S_rx[0]), samp_base), sizeof S_rx[0].samp_base}};
+static const par_field g_par_rf[] = {{"rt", __builtin_offsetof(typeof(R_rx[0]), rt), sizeof R_rx[0].rt}, {"has_rt", __builtin_offsetof(typeof(R_rx[0]), has_rt), sizeof R_rx[0].has_rt}, {"clear_c", __builtin_offsetof(typeof(R_rx[0]), clear_c), sizeof R_rx[0].clear_c}, {"cc", __builtin_offsetof(typeof(R_rx[0]), cc), sizeof R_rx[0].cc}, {"clear_d", __builtin_offsetof(typeof(R_rx[0]), clear_d), sizeof R_rx[0].clear_d}, {"clear_s", __builtin_offsetof(typeof(R_rx[0]), clear_s), sizeof R_rx[0].clear_s}, {"cd", __builtin_offsetof(typeof(R_rx[0]), cd), sizeof R_rx[0].cd}, {"cs", __builtin_offsetof(typeof(R_rx[0]), cs), sizeof R_rx[0].cs}, {"sc", __builtin_offsetof(typeof(R_rx[0]), sc), sizeof R_rx[0].sc}, {"has_sc", __builtin_offsetof(typeof(R_rx[0]), has_sc), sizeof R_rx[0].has_sc}};
+enum { PAR_SF = sizeof g_par_sf / sizeof *g_par_sf, PAR_RF = sizeof g_par_rf / sizeof *g_par_rf, PARC_MAX = 160 };
+typedef struct { const uint8_t *op; typeof(S_rx[0]) s; typeof(R_rx[0]) r; uint8_t used; } parc_snap;
+static parc_snap *g_parc; static int g_parc_n;
+static struct { uint64_t compared, same, differ, nosnap; uint64_t sf[PAR_SF], rf[PAR_RF]; int logged; } g_pck;
+static void parc_put(const uint8_t *op) {   // the scan, at a SetRenderTargets about to apply
+    if (!g_parc) g_parc = calloc(PARC_MAX, sizeof *g_parc);
+    if (g_parc_n < PARC_MAX) { parc_snap *c = &g_parc[g_parc_n++]; c->op = op; memcpy(&c->s, &S, sizeof S); memcpy(&c->r, &R, sizeof R); c->used = 0; }
+}
+static int par_diff(const char *what, const par_field *f, int nf, const uint8_t *a, const uint8_t *b, uint64_t *count) {
+    int n = 0;
+    for (int i = 0; i < nf; i++) {
+        if (!memcmp(a + f[i].off, b + f[i].off, f[i].size)) continue;
+        n++; count[i]++;
+        if (g_pck.logged < 16) { g_pck.logged++; size_t k = 0; while (k < f[i].size && a[f[i].off + k] == b[f[i].off + k]) k++;
+            MLOG("[RED] parallel translation check: %s.%s differs from the scan at byte %zu of %zu (frame %llu, pass %llu): the scan does not model what changes it", what, f[i].name, k, f[i].size,
+                 (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)g_stat_pass); }
+    }
+    return n;
+}
+static void parc_check(void) {   // the replay, at a clean boundary (par_boundary), the current operation being the boundary's SetRenderTargets
+    if (!g_parc) { g_pck.nosnap++; return; }
+    for (int i = 0; i < g_parc_n; i++) {
+        parc_snap *c = &g_parc[i]; if (c->used || c->op != g_exec_cur) continue;
+        c->used = 1; g_pck.compared++;
+        int n = par_diff("S", g_par_sf, PAR_SF, (const uint8_t *)&c->s, (const uint8_t *)&S, g_pck.sf) + par_diff("R", g_par_rf, PAR_RF, (const uint8_t *)&c->r, (const uint8_t *)&R, g_pck.rf);
+        if (n) g_pck.differ++; else g_pck.same++;
+        return;
+    }
+    g_pck.nosnap++;
+}
+static void parc_report(uint64_t nf) {
+    char b[1500]; int o = 0;
+    for (int i = 0; i < PAR_SF && o < 1300; i++) if (g_pck.sf[i]) o += snprintf(b + o, sizeof b - o, " S.%s %llu", g_par_sf[i].name, (unsigned long long)g_pck.sf[i]);
+    for (int i = 0; i < PAR_RF && o < 1300; i++) if (g_pck.rf[i]) o += snprintf(b + o, sizeof b - o, " R.%s %llu", g_par_rf[i].name, (unsigned long long)g_pck.rf[i]);
+    MLOG("parallel translation, check (over %llu frames): %llu clean boundaries compared, %llu identical, %llu different%s%s; %llu with no snapshot", (unsigned long long)nf,
+         (unsigned long long)g_pck.compared, (unsigned long long)g_pck.same, (unsigned long long)g_pck.differ, o ? ", by field:" : "", o ? b : "", (unsigned long long)g_pck.nosnap);
+    int logged = g_pck.logged; memset(&g_pck, 0, sizeof g_pck); g_pck.logged = logged;
+}
 static void par_sub_begin(void) { g_par_nb = g_par_nw = 0; g_par_d0 = g_stat_draw; }
 static void par_wait(void) { if (!RX.cb || !pthread_equal(pthread_self(), g_sub_thread)) return; if (g_par_nw < PAR_W) g_par_w[g_par_nw++] = (uint32_t)(g_stat_draw - g_par_d0); }
 static void par_boundary(void) {
     int why = g_hoist_n ? 1 : (g_defer_nact || g_defer_pend) ? 2 : g_fz.active ? 3 : g_sm_pass ? 4 : g_nlc ? 5 : g_mrun.n ? 6 : RX.ub.n ? 7 : 0;
     if (why) { g_par.dirty++; g_par.why[why]++; return; }
     if (g_par_nb < PAR_B) { g_par_bq[g_par_nb] = g_vis_counting && g_nvs > 0; g_par_b[g_par_nb++] = (uint32_t)(g_stat_draw - g_par_d0); }
+    if (par_check()) parc_check();
 }
 static void par_scan(const uint64_t *h, int n) {
     if (n <= 0) return;
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     static typeof(S) Ssave; memcpy(&Ssave, &S, sizeof S); typeof(R) Rsave = R; int pso_dirty = RX.pso_dirty, dss_dirty = RX.dss_dirty;
     const uint64_t *rest = g_rest; int nrest = g_nrest; g_rest = h + 1; g_nrest = n - 1;
-    fz_cursor cur = {.p = (const uint8_t *)h[0]}; uint64_t ops = 0;
+    fz_cursor cur = {.p = (const uint8_t *)h[0]}; uint64_t ops = 0; g_parc_n = 0;
     for (;;) { const uint8_t *q; op_hdr hq; const void *aq; if (!fz_next(&cur, &q, &hq, &aq)) break; ops++;
-        if (hq.op == OP_SET_RT) { const p_set_rt *r = aq; R.rt = *r; R.has_rt = 1; continue; }
+        if (hq.op == OP_SET_RT) { if (par_check()) parc_put(q); const p_set_rt *r = aq; R.rt = *r; R.has_rt = 1; continue; }
         if (hq.op == OP_DRAW || hq.op == OP_DRAW_IDX || hq.op == OP_DISPATCH) continue;
         state_op(hq.op, aq); }
     g_rest = rest; g_nrest = nrest;
@@ -12175,6 +12227,7 @@ static void par_sub_end(void) {
                              (unsigned long long)g_par.why[6], (unsigned long long)g_par.why[7], (double)g_par.waits / nf, g_par.cost ? (double)g_par.draws / g_par.cost : 0.0,
                              g_par.scan_ns / 1e6 / nf, (double)g_par.scan_ops / nf, g_par.scan_bad ? " (stopped early at a multi-draw in some)" : "");
         memset(&g_par, 0, sizeof g_par);
+        if (par_check()) parc_report(nf);
     }
 }
 void mtl_exec(const uint8_t *p) {

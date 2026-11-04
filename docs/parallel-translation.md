@@ -1,6 +1,6 @@
 # Translating one submission on several cores (design, work in progress)
 
-Status: milestone 1 built and measured (`DM_NVN_PAR=measure`, log only; results below). Each milestone below lands as its own commit on this branch.
+Status: milestones 1–2 built, 3 built for S and R (`DM_NVN_PAR=measure`, `DM_NVN_PAR=check`; log only). Results below; how to test at the end. Each milestone below lands as its own commit on this branch.
 
 ## Why
 
@@ -90,7 +90,7 @@ Each one is a commit on this branch and keeps the default behaviour unchanged un
 0. **This design.**
 1. **Measure the opportunity** (built: `DM_NVN_PAR=measure`, `par_*` in `nvn_mtl.m`). Count, per frame, how many `sub_cut` points the serial replay passes with a clean contract, and the draws between them. Time a state-only scan of the submission. Log lines only, no behaviour change.
 2. **Replay context.** Move class 1 state into a context struct, with one context and serial replay, so behaviour is identical. This is the large mechanical change. It can land in slices by subsystem (encoders and segments, arenas and post list, the draw loop's statics, uniform deferral).
-3. **Scan and contract in check mode.** `DM_NVN_PAR=check` scans, snapshots, and compares at every proposed split point while still replaying serially. Done when Bananza, Splatoon Raiders and Breath of the Wild show no mismatches over several minutes.
+3. **Scan and contract in check mode** (built: `DM_NVN_PAR=check`, `parc_*` in `nvn_mtl.m`; S and R so far, the write tracking next). `DM_NVN_PAR=check` scans, snapshots, and compares at every proposed split point while still replaying serially. Done when Bananza, Splatoon Raiders and Breath of the Wild show no mismatches over several minutes.
 4. **Workers.** `DM_NVN_PAR=<n>` translates chunks on *n* threads with speculation and fallback, off by default. Classes 2–4 are made safe here.
 5. **Measure and tune.** Run the same spots as above and compare frame time, GPU span and fallback rate, then decide on a default (per profile at first).
 

@@ -383,6 +383,50 @@ def snowdrop_wrapped(d, label):
         yield h, pos - len(dec.unused_data), b''.join(parts)
 
 
+def snowdrop_objects(raw, where):
+    """The shader objects of one decoded Snowdrop cache record: each GLSLC control section sits immediately before its code area; control +0x20 and +0x704 give their lengths"""
+    out = []
+    for cm in re.finditer(re.escape(CTL_MAGIC), raw):
+        c = cm.start()
+        if c + 0x708 > len(raw): continue
+        nc, nk = struct.unpack_from('<I', raw, c + 0x20)[0], struct.unpack_from('<I', raw, c + 0x704)[0]
+        if nc < 0x760 or nc & 3 or nk < 0x34 or c + nc + nk > len(raw): continue
+        ctl, code = raw[c:c + nc], raw[c + nc:c + nc + nk]
+        st = glslc_stage(ctl, code)
+        if st and not check(where, st, ctl, code): out.append((f'{where}:{c:#x}', st, ctl, code))
+    return out
+
+
+SNOWDROP_CACHE = b'\xd4\x00\xcd\xab'   # 0xabcd00d4: the decoded head of a bare cache record (.mcache), then its kind, 0 and twice the length of what follows its 20-byte header
+ZLIB_CMF = re.compile(rb'[\x08\x18\x28\x38\x48\x58\x68\x78]')   # a zlib stream's first byte: deflate, any window
+def snowdrop_zlib(d, label):
+    """Older SDF data slices (South Park: The Fractured But Whole, SDF version 22 with the ubisoft tag) store each shader cache file (camel/shadercache/nx/*.mcache) as a bare zlib stream,
+    without the 20-byte c5 / c6 record header: the data slice holds only the stream, at the offset its table of contents gives. Its decoded head is a 0xabcd00d4 record, and the shader objects
+    inside have the same layout as in the c5 / c6 records. Find each stream by its zlib header (CMF / FLG check) and a peek at the first decoded bytes, then decode it in full: the
+    base game's slice sdf-A-0200 holds 1,994 of them, matching the game's own _DataPartList.txt. A file over 64 KB is a run of 64 KB streams, decoded one after another up to the length in its head. A cheap peek rejects the other assets; bytes inside a decoded record are skipped by position"""
+    out, mv, end = [], memoryview(d), 0
+    for m in ZLIB_CMF.finditer(d):
+        h = m.start()
+        if h < end or h + 26 > len(d) or ((d[h] << 8) | d[h + 1]) % 31: continue
+        dec = zlib.decompressobj()
+        try: head = dec.decompress(mv[h:h + 256], 20)
+        except zlib.error: continue
+        if len(head) < 20 or head[:4] != SNOWDROP_CACHE or head[8:12] != bytes(4) or head[12:16] != head[16:20]: continue   # +4: the record's kind (0x13c, 0x65, ...)
+        nraw = struct.unpack_from('<I', head, 12)[0] + 20   # the length after the 20-byte header
+        parts, got, pos = [], 0, h
+        while got < nraw:   # a file over 64 KB is stored as consecutive zlib streams of 64 KB each (the list's Block column)
+            dec, lim = zlib.decompressobj(), pos + min(nraw - got, 0x10000) + 0x500
+            try: part = dec.decompress(mv[pos:lim])
+            except zlib.error as e: red(f'{label} Snowdrop zlib record @{h:#x}, block @{pos:#x}: {e}')
+            if not dec.eof or not part: red(f'{label} Snowdrop zlib record @{h:#x}: block @{pos:#x} not finished')
+            parts.append(part); got += len(part); pos = min(lim, len(d)) - len(dec.unused_data)
+        raw = b''.join(parts)
+        if len(raw) != nraw: red(f'{label} Snowdrop zlib record @{h:#x}: expected {nraw} raw bytes, got {len(raw)}')
+        end = pos
+        out += snowdrop_objects(raw, f'{label}#SDFZLIB@{h:#x}')
+    return out
+
+
 def snowdrop_shaders(d, label, wrapped=True):
     """Snowdrop's BERG data slices (SDF version 22): compressed shader records have a 20-byte header {0xabcd00c5 / 0xabcd00c6, flags, 0, raw length, stored length}, then zlib / zstd data.
     Kingdom Battle uses c5 with zlib (0x838-byte controls, including headerless compute), sometimes inside another zstd chunk; Sparks of Hope uses c6 with zstd. Their shader section layout is the same.
@@ -391,7 +435,7 @@ def snowdrop_shaders(d, label, wrapped=True):
     uncompressed data without this header. Some cache records are wrapped in zstd chunks; only decoded frames starting with the cache header are shader assets. Shader programs hold one stage; pairs are selected at draw time.
     Scan by the record header and peek at decoded chunk headers, not by slice names: compressed bytes can contain a coincidental frame header, which is not another asset."""
     chunks = list(snowdrop_wrapped(d, label)) if wrapped else []
-    out = []; ci = 0
+    out = [] if not wrapped else snowdrop_zlib(d, label); ci = 0
     for m in re.finditer(SNOWDROP_RECORD, d):
         h = m.start()
         while ci < len(chunks) and h >= chunks[ci][1]: ci += 1
@@ -406,14 +450,7 @@ def snowdrop_shaders(d, label, wrapped=True):
         stored = d[h + 20:h + 20 + nstored]
         raw = zstd_mod().decompress(stored) if zstd else zlib.decompress(stored)
         if len(raw) != nraw: red(f'{label} Snowdrop record @{h:#x}: expected {nraw} raw bytes, got {len(raw)}')
-        for cm in re.finditer(re.escape(CTL_MAGIC), raw):
-            c = cm.start()
-            if c + 0x708 > len(raw): continue
-            nc, nk = struct.unpack_from('<I', raw, c + 0x20)[0], struct.unpack_from('<I', raw, c + 0x704)[0]
-            if nc < 0x760 or nc & 3 or nk < 0x34 or c + nc + nk > len(raw): continue
-            ctl, code = raw[c:c + nc], raw[c + nc:c + nc + nk]
-            st = glslc_stage(ctl, code)
-            if st and not check(label, st, ctl, code): out.append((f'{label}#SNOWDROP@{h:#x}:{c:#x}', st, ctl, code))
+        out += snowdrop_objects(raw, f'{label}#SNOWDROP@{h:#x}')
     for h, _, raw in chunks:
         out += snowdrop_shaders(raw, f'{label}#SDFZSTD@{h:#x}', wrapped=False)
     return out

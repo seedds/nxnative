@@ -80,6 +80,11 @@ static void check(int which) {
         g_mod[0].fps_target_ptr = 0x21e60d8; g_mod[0].fps_target_field = 0x1dc;
         *(uintptr_t *)(base + 0x21e60d8) = (uintptr_t)object;
         *(int32_t *)(object + 0x1dc) = which == 17 ? 30 : 60;
+    } else if (which >= 19) {   // Batman: Arkham Knight: the RRS pair at main+0x5117248, 75 at boot, and DM_RRS
+        strcpy(g_mod[0].build_id, "feae83dc9e9fb34c77d0a62f1fa9ae9f");
+        float *rrs = (float *)(base + 0x5117248);
+        rrs[0] = rrs[1] = which == 21 ? 0.0f : 75.0f;
+        setenv("DM_RRS", which == 20 ? "0.75" : "1", 1);
     } else if (which >= 9) {   // the present interval alone (UE 4.18's nvn.SyncInterval); 12: a main the rewriter found no variable in
         strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
         if (which != 12) cvar("nvn.SyncInterval", 0x8adca10);
@@ -119,6 +124,13 @@ static void check(int which) {
         *t = 30; dm_fps_lock_tick(); assert(*t == 60 && writes == 2);   // the game sets 30 again where gameplay starts
     } else if (which == 18) assert(*(int32_t *)(object + 0x1dc) == 30 && writes == 1);
     else if (which == 16) assert(*(float *)(object + 0x34) == 30 && *(int32_t *)(object + 0x38) == 30 && writes == 0);
+    else if (which == 19) {
+        float *rrs = (float *)(base + 0x5117248);
+        assert(rrs[0] == 100.0f && rrs[1] == 100.0f && writes == 2);
+        dm_fps_lock_tick(); assert(writes == 2);
+        rrs[0] = 75.0f; dm_fps_lock_tick(); assert(rrs[0] == 100.0f && writes == 3);   // the game's own 75 comes back
+    } else if (which == 20) assert(*(float *)(base + 0x5117248) == 75.0f && writes == 0);   // DM_RRS=0.75 leaves it
+    else if (which == 21) assert(*(float *)(base + 0x5117248) == 0.0f && writes == 0);      // not set yet
     else if (which == 13) {
         assert(sync[0] == 2 && sync[1] == 2 && writes == 0);
         *(uintptr_t *)(base + 0x8adca10 + 0x10) = (uintptr_t)object;
@@ -131,7 +143,7 @@ static void check(int which) {
 
 int main(void) {
     // Each process starts the production one-time initialization with a fresh build and target.
-    for (int i = 0; i < 19; i++) {
+    for (int i = 0; i < 22; i++) {
         pid_t p = fork(); assert(p >= 0);
         if (!p) { check(i); _exit(0); }
         int status; assert(waitpid(p, &status, 0) == p); assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);

@@ -1764,15 +1764,36 @@ static int fstep_on(void) { return fps_step_cap() != 0; }   // the host decides 
 // follow the cap, so the game's own present interval stays: a fixed-step game
 // presented at a cap it does not step by runs fast or slow.
 static int g_present_cap = -1;
+// A 120 fps target needs a screen that runs at 120 Hz: present_cfg takes the present tick to 120 Hz (one frame per tick) and nvn_mtl.m link_sync syncs the display link to 120.
+// 0 = the screen's rate is not known (no window, graphics unit tests): the host still paces 120, with no screen to show it on
+static int screen_supports_120(void) {
+    int hz = mtl_display_hz(); if (hz <= 0) hz = front_screen_max_fps();
+    return hz <= 0 || hz >= 120;
+}
 static int fps_present_cap(void) {
     if (dm_fps_state) return fps_step_cap();
     if (g_present_cap < 0) {
         const char *e=getenv("DM_FPS_TARGET");int t=e?atoi(e):DM_GAME_FPS_TARGET;
-        g_present_cap=t==30||t==60?t:0;
+        g_present_cap=t==30||t==60||t==120?t:0;
+        if (g_present_cap > DM_GAME_FPS_MAX) {   // 120 is for a profile whose engine limiter the host raises and whose presents pace the frames (the profile's fps_max)
+            LOG("[RED] DM_FPS_TARGET=%d: this game's pacing reaches %d fps; using %d", g_present_cap, DM_GAME_FPS_MAX, DM_GAME_FPS_MAX);
+            g_present_cap = DM_GAME_FPS_MAX;
+        }
         if (g_present_cap && !dm_fps_lock_engine()) {
             LOG("[nvn] present cap %d fps (%s) not applied: this main has neither a frame step nor an engine frame limit the host writes, so the game's own present interval stays", g_present_cap, e ? "DM_FPS_TARGET" : "game profile fps_target");
             g_present_cap=0;
         }
+    }
+    if (g_present_cap == 120 && !screen_supports_120()) {
+        static int once; int hz = mtl_display_hz();
+        if (!once++) LOG("[RED] a 120 fps target needs a screen at 120 Hz (the screen runs at %d Hz, it can show %d): 60 fps", hz, front_screen_max_fps());
+        g_present_cap = 60;
+    }
+    // A movie's player may take one picture from the decoder per game frame instead of following the pictures' times (frame-rate.md, "Movies hold 30 fps under the frame step"):
+    // the Switch's 30 fps holds during one here too, as under the frame step's own cap
+    if (g_present_cap > 30 && dm_movie_playing()) {
+        static int once; if (!once++) LOG("[nvn] present cap %d → 30 fps (movie playing)", g_present_cap);
+        return 30;
     }
     return g_present_cap;
 }
@@ -1786,6 +1807,8 @@ static void present_cfg(const win_t *o) {
     // The interval mode comes from the game profile (present_interval, default game): whether frames follow the present interval the game sets depends on whether the game's logic counts frames, which differs per game. Environment variables override it, and can override the fixed 60 Hz.
     int scr = mtl_display_hz();
     const char *e = getenv("DM_PRESENT_HZ"); g_hz = e ? atoi(e) : 60;
+    // A 120 fps target runs the present tick at 120 Hz, one frame per tick, as DM_PRESENT_HZ=120 does: below it every frame would be shown twice and the acquire would wait two link ticks
+    if (!e && fps_present_cap() == 120) g_hz = 120;
     if (!g_hz) LOG("[nvn] [WARNING] DM_PRESENT_HZ=0: frame rate uncapped, frame pacing unlike the device, UI logic may drift (for profiling only, not for verdicts / cross-checks)");
     // Cut (intentional deviation from the original game's behavior): with DM_PRESENT_INTERVAL=display the present interval set by the game is not followed and one frame is presented per display-link tick,
     // with a fixed hard floor of 60 fps; the logic stays at 25 ticks, and the client's frame-counted UI logic is unaffected -
@@ -1793,14 +1816,21 @@ static void present_cfg(const win_t *o) {
     // (the save indicator is exempted as a timing race), and the timing differences of key messages are within game mode's own noise band; proof after entering a run is still missing, pending action script coverage
     const char *m = getenv("DM_PRESENT_INTERVAL"); g_display_mode = m ? !strcmp(m, "display") : DM_GAME_PRESENT_DISPLAY;
     LOG("[nvn] present tick %d Hz, interval mode %s (%s; present interval set by the game %d; %s)", g_hz, g_display_mode ? "display (one frame per tick, a cut)" : "game (original semantics)",
-        m ? "DM_PRESENT_INTERVAL" : "game profile present_interval", o->interval, scr > 0 ? "window, fixed 60 Hz" : "no window, fixed 60 Hz");
+        m ? "DM_PRESENT_INTERVAL" : "game profile present_interval", o->interval, scr > 0 ? "window" : "no window");
 }
-static int present_itv(const win_t *o) { int c = fps_present_cap(), k = atomic_load(&g_fs_k); return c ? (k && fstep_on() ? k : 60 / c) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; }   // vsyncs per frame that presentation follows
+static int present_itv(const win_t *o) {   // vsyncs per frame that presentation follows, in 60 Hz vsyncs (mtl_link_wait_tick's unit)
+    int c = fps_present_cap(), k = atomic_load(&g_fs_k);
+    if (!c) return g_display_mode ? 1 : o->interval > 0 ? o->interval : 1;
+    if (k && fstep_on()) return k;
+    if (c > 60) return 1;   // 120 fps: one present tick per frame (present_cfg runs the tick at 120 Hz, and the acquire waits one link tick)
+    return 60 / c;
+}
 // The acquire's wait for the display link: the present interval's vsyncs (60 Hz units), or with present_interval display above 60 Hz (DM_PRESENT_HZ=120 on a 120 Hz link,
 // DM_PRESENT_LINK=2) one tick of the present rate, as many link ticks as that takes. Before, a 120 Hz link waited two ticks per frame there, and display mode never went past 60 fps
 static int link_wait(const win_t *o, uint64_t timeout_ns) {
     static int hz_was, rate_was, remainder;   // acquire thread only, as with mtl_link_wait_ticks
-    int hz = g_display_mode && !fps_present_cap() && g_hz > 60 ? g_hz : 0, rate = mtl_link_rate();
+    int cap = fps_present_cap();
+    int hz = g_hz > 60 && (cap ? cap == g_hz : g_display_mode) ? g_hz : 0, rate = mtl_link_rate();
     if (hz != hz_was || rate != rate_was) { remainder = 0; hz_was = hz; rate_was = rate; }
     if (hz) {
         int ticks = 1;

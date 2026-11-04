@@ -108,6 +108,8 @@ def build(gid, patched, control):
         if kind == 'choice':
             opts = [list(l) for l in langs] if values == 'languages' else [v.split('=', 1) for v in values.split(',')]
             if any(len(o) != 2 for o in opts): sys.exit(f'settings.tsv:{n}: choice values are value=label,...')
+            if var == 'DM_FPS_TARGET':   # the rates this game's pacing reaches: a frame step steps whole vsyncs (60), a raised engine cap reaches 120 (profile fps_max)
+                top = int(macro('DM_GAME_FPS_MAX', n)); opts = [o for o in opts if int(o[0]) <= top]
             if s['default'] not in [o[0] for o in opts]: s['default'] = opts[0][0]   # a default the game does not offer (a language it lacks): its first
             s['options'] = opts
         elif kind == 'range':

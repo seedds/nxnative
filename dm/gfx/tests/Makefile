@@ -484,3 +484,8 @@ t_logic: t_logic.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_logic.m $(MTL_T_SRC) $(FW)
 check_t_logic: t_logic
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_logic.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_logic "$$work"
+
+# Push-constant diagnostic through the production argument encoder.
+t_push_capture: t_push_capture.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_push_capture.m $(MTL_T_SRC) $(FW)
+check_t_push_capture: RUN_ENV = MTL_DEBUG_LAYER=1

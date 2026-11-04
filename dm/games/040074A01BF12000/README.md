@@ -94,3 +94,7 @@ Each step below stopped the boot before its fix:
 - [Present snapshots: the game's swapchain texture free at once](../../../docs/reference/frame-rate.md#present-snapshots-the-games-swapchain-texture-free-at-once): at the 30 fps cap with snapshots on it ran 43-65 fps of game time (fast-forward) and dropped about 110 of every 300 frames (PR #1073).
 - [Submissions handed to the GPU in segments](../../../docs/reference/frame-rate.md#submissions-handed-to-the-gpu-in-segments): a submission drawing into the target it inherited left those draws out of the segment's draw count (PR #1073).
 - [A deferred write under a false guard](../../../docs/reference/shaders.md#a-deferred-write-under-a-false-guard): DK and Pauline bright white between Hilltop's rocks, from terrain captured into the environment cube with a placeholder material (issue #1100; fixed by the translator change found on Yoshi and the Mysterious Book, spot not revisited, reporter's test asked).
+
+### Spatial AA capture follow-up
+
+The raw-texture spatial AA replay on iPhone 17 Pro Max remains conditional on unmeasured c24 coordinate constants. [Push-constant capture](../../../docs/reference/shaders.md#nvn2-push-constants-missing-from-a-binding-capture) adds the missing binding bytes; a fresh on-device game capture is still required. This is a diagnostic contribution, not a fur-shimmer fix or a claim of native shader equivalence.

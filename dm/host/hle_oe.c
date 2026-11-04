@@ -215,6 +215,7 @@ void dm_oe_execute(int index, const void *param, size_t n) {
         FILE *fp = fopen(pf, "rb"); char *rows2 = NULL;
         if (fp) {
             fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
+            if (sz < 0) { LOG("[RED] oe::ExecuteProgram: cannot size DM_PROGRAMS %s", pf); sz = 0; }   // ftell failed: read it as empty, not as SIZE_MAX bytes
             tsv = calloc(1, (size_t)sz + 1); rows2 = calloc(1, (size_t)sz + 1);
             if (fread(tsv, 1, (size_t)sz, fp) != (size_t)sz) tsv[0] = 0;
             memcpy(rows2, tsv, (size_t)sz); fclose(fp);

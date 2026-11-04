@@ -869,7 +869,7 @@ def run_env(g, art, route, outdir, a):
     else: save.mkdir()
     temp.mkdir()
     env = dict(os.environ, DM_ROOT=str(g.build), DM_ROMFS=str(g.romfs()), DM_SAVE=str(save), DM_TEMP=str(temp), DM_MSL_DIR=str(lib), DM_FONT_DIR=str(g.build / 'font'),
-               DM_WINDOW='1', DM_WINDOW_TOP='1', DM_AUDIO='0', DM_METAL_HUD='0' if a.no_hud else '1', DM_CTL=str(outdir / 'ctl'), TMPDIR=str(game_root(g) / 'tmp') + '/')
+               DM_WINDOW='1', DM_WINDOW_TOP='1', DM_FOCUS_KEEP='1', DM_AUDIO='0', DM_METAL_HUD='0' if a.no_hud else '1', DM_CTL=str(outdir / 'ctl'), TMPDIR=str(game_root(g) / 'tmp') + '/')
     if g.kind == 'nvn':
         env.update(DM_NVN_SHMAP=str(prof / 'shader_map.tsv'), DM_NVN_TSV=str(outdir / 'frames.tsv'), DM_NVN_TSV_CALLS='0')
         if not (prof / 'pso_pairs.tsv').is_file() and (g.build / 'shader/pso_pairs.tsv').is_file(): env['DM_PSO_PAIRS'] = str(g.build / 'shader/pso_pairs.tsv')

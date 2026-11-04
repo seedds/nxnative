@@ -302,6 +302,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Note:** history entries repeat the newest sample; yaw drifts as on the console, with no recenter. The console's own sensor still reports no states ([SDK 20 six-axis sensor and amiibo (`nfp`) calls](#sdk-20-six-axis-sensor-and-amiibo-nfp-calls)), so motion follows the controller in docked mode.
 - **Open:** [PR #286](https://github.com/seedds/nxnative/pull/286) has iPad aiming measurements and calibration controls to compare on a device before choosing shared defaults. Related reports: [#153](https://github.com/seedds/nxnative/issues/153), [#389](https://github.com/seedds/nxnative/issues/389).
 
+### Non-finite motion samples
+
+- **Symptom:** a non-finite accelerometer or gyro sample corrupts the six-axis fields; later valid samples do not restore the previous fusion state.
+- **Cause:** `motion_update` published raw NaN/Infinity and integrated it into persistent angle/orientation. Finite but extreme rates can also overflow the float rotation norm or accumulated angle.
+- **Fix:** reject a non-finite sensor sample before priming or changing any state. A non-finite time step skips integration, and a non-finite gain disables tilt correction. Do not commit an overflowing rotation step or angle; normal finite samples keep the same arithmetic and coordinate conventions.
+- **Found on:** synthetic `t_motion` samples, not a reproduced game or controller fault. Tests cover each sensor axis before/after priming, subsequent valid input, invalid timing/gain, finite overflow, all 48 signed frame maps and small-angle accumulation. No device or gameplay result is claimed for this change.
+
 ### The phone's motion in the picture's frame
 
 - **Symptom:** on iPhone Duo's inner display the phone's gyro is turned a quarter turn: tilting up and down moves the pointer left and right, and the other way round ([GitHub issue #569](https://github.com/seedds/nxnative/issues/569)); the outer display is right.
@@ -473,6 +480,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the text arrives through the enter callback, whose argument is the text inline (`char16_t[502]`, the length at +0x3EC; the changed-string argument adds three cursor positions at +0x3F0..+0x3F8: `ikb_str_arg`, read off the game's callbacks at `main+0x6fb3910` / `main+0x6fb3afc`). `Calc` now returns 0 until initialization finishes, 3 while shown and 1 otherwise. `SetFinishedKeyboardCallback` is called on the `Calc` after `Disappear`. AppearArg's `textMaxLength` (+0x20) limits the text.
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md).
 
+### The Mac input box keeps the game's focus
+
+- **Symptom:** the name typed in the Mac input box is dropped and the game asks again; the log has `oe focus state → 2` and `→ 1` between `inline keyboard Appear` and `→ OK` (Monster Hunter Rise, character creation).
+- **Cause:** the box (`front_text_input`, an `NSAlert`) takes the key window, and the game window resigning key was sent to the game as out of focus. On hardware the inline keyboard is drawn inside the game, which keeps its focus.
+- **Fix:** `front_mac.m` does not report the game window resigning key while the box is up (`g_text_box`). `ShowKeyboard`'s applet still sends its own out-of-focus / in-focus pair (`DM_APPLET`).
+- **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md).
+
 ### `nn::ngc::ProfanityFilter` vtable and by-name overloads
 
 - **Symptom:** `CRASH sig=10` at a heap address, called from `main+0x6bca160` right after the name was entered (Monster Hunter Rise); crash in `lmem::AllocateFromExpHeap` under `ngc::ProfanityFilter::MaskProfanityWordsInText` right after the character name is entered (DARK SOULS: REMASTERED); filter methods among the undefined imports with no hook, found from the import list before they were met (The Great Ace Attorney Chronicles).
@@ -505,10 +519,10 @@ Most service calls can be found before they crash, before the first boot or the 
 
 ### vi layer and display calls without vi service objects
 
-- **Symptom:** SIGSEGV in `vi::SetLayerCrop`.
+- **Symptom:** SIGSEGV in `vi::SetLayerCrop` or `vi::OpenDisplay` when opening a display by name.
 - **Cause:** the SDK's version dereferences vi service objects the host never made.
-- **Fix:** `SetLayerCrop` only records the crop for the present ([The NVN present crops by the vi layer crop](rendering.md#the-nvn-present-crops-by-the-vi-layer-crop)); `DestroyLayer`, `CloseDisplay` and `vi::Finalize` are host no-ops. Also hooked: `vi::GetIndirectImageMemoryRequirement` (asked by the inline keyboard's `GetImageMemoryRequirement`, [The inline keyboard as a resident library applet](#the-inline-keyboard-as-a-resident-library-applet)); `vi::ListDisplays` (one display, "Default"; the game lists 10 into a stack buffer and does not read them, `main+0x808f08`), found from the import list before it was met.
-- **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) (SDK 8.2.0); [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10: `vi::GetIndirectImageMemoryRequirement`); [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: `vi::ListDisplays`).
+- **Fix:** `SetLayerCrop` only records the crop for the present ([The NVN present crops by the vi layer crop](rendering.md#the-nvn-present-crops-by-the-vi-layer-crop)); `DestroyLayer`, `CloseDisplay` and `vi::Finalize` are host no-ops. Also hooked: `vi::GetIndirectImageMemoryRequirement` (asked by the inline keyboard's `GetImageMemoryRequirement`, [The inline keyboard as a resident library applet](#the-inline-keyboard-as-a-resident-library-applet)); `vi::ListDisplays` (one display, "Default"; the game lists 10 into a stack buffer and does not read them, `main+0x808f08`), found from the import list before it was met. `vi::OpenDisplay("Default")` returns the same static display as `OpenDefaultDisplay`, so applications can open the name returned by `ListDisplays` without entering the SDK's absent service client.
+- **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) (SDK 8.2.0); [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10: `vi::GetIndirectImageMemoryRequirement`); [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: `vi::ListDisplays`); Alien: Isolation (SDK 8.2.0: `vi::OpenDisplay`).
 
 ### Layer frame numbers
 
@@ -587,6 +601,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10, `ListAllUsers`); [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md) (`PushOpenUsers`); [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) (the friends calls); [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (the Nintendo Account request); [Pokémon Sword](../../dm/games/0100ABF008968000/README.md) (SDK 7, `pdm`); [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: the friend requests); [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3: `LoadCachedNintendoAccountInfo`).
 - **Note:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md)'s `account::OpenPreselectedUser` and `account::GetLastOpenedUser` are in [SDK calls that open a system service through sm](#sdk-calls-that-open-a-system-service-through-sm); SDK 6's `OpenPreselectedUser` in [SDK 6's `account::OpenPreselectedUser` returns a Result](#sdk-6s-accountopenpreselecteduser-returns-a-result); SDK 4's `GetBlockedUserList` without a `Uid` in [SDK 4's `friends::GetBlockedUserList` without a `Uid`](#sdk-4s-friendsgetblockeduserlist-without-a-uid); the save thumbnail calls in [Directory, file data cache and save-thumbnail calls](#directory-file-data-cache-and-save-thumbnail-calls).
 
+### The local user's profile image
+
+- **Symptom:** `Break#1 reason=0 Result=0` right after the first save is created, then exit 42; the stack has `nn::diag::detail::OnAssertionFailure` under `nn::image::JpegDecoder::Decode` (`sdk+0x394e4`), called from the game (Burnout Paradise Remastered, SDK 9.3).
+- **Cause:** `account::LoadProfileImage` failed with 0 bytes ("the host has none"). Every user on a console has a profile image, a 256x256 JPEG, and the game hands the buffer to `JpegDecoder` without checking the Result.
+- **Fix:** `hle_account.c` answers with the local user's image, a plain 256x256 baseline JPEG of 670 bytes built into the host: the size is the image's, the copy what the buffer holds.
+- **Found on:** Burnout Paradise Remastered (`0100DBF01000A000`, no profile; [issue #1118](https://github.com/seedds/nxnative/issues/1118)), from the reporter's symbolized stack; not run here.
+
 ### Mii database answered by the host
 
 - **Symptom:** `[RED] sf: the game connects to service mii:e … mii:u itself`, then an abort.
@@ -603,6 +624,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) (SDK 7.3.2: the game then runs its opening movie at 30 fps); [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (SDK 19.3.1: `FinalizeForShopServiceAccessors`, `Cancel`, `GetErrorCode`, `ShowShopSubscriptionDetails`, found by the import list).
 - **Note:** the shop's `Show…` pages are under [System applets opened by `Show…` calls](#system-applets-opened-by-show-calls).
 
+### Offline purchased-item notifications
+
+- **Symptom:** a purchase watcher crashes in `nn::ec::InitializePurchasedEvent` after account selection, before it can wait for a notification.
+- **Cause:** the guest SDK initializer uses an add-on-content service object that the offline host never opened.
+- **Fix:** the purchased-item queue is empty offline. Its notification is a persistent, unsignalled system event that guest threads can wait on. Popping either form of purchased-item info returns false without writing a record.
+- **Found on:** [Super Kirby Clash 1.0.1 (#987)](https://github.com/seedds/nxnative/issues/987), SDK 7.4.0.
+
 ### Parental controls and free communication
 
 - **Symptom:** abort in `nn::sm::Initialize` under `nn::pctl::IsFreeCommunicationAvailable` (Engage, entering its first battle map).
@@ -616,6 +644,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** play report calls met entering the save select (3D World); undefined `nn::ldn::` / `nn::socket::` imports with no hook, found from the import list before they were met (Big Brain Academy).
 - **Fix:** hooked (`hle_net.c`, `hle_offline.c`): the `nifm` IP queries with SDK 10's `socket::InAddr` / `in_addr` mangling; `prepo::AddSessionId` / `AddInternetConnectionStatus`; `ldn::GetNetworkConfig`; SDK 11's socket overloads with plain `sockaddr` / `int` arguments (`Connect`, `Accept`, `GetSockName`, `Get` / `SetSockOpt`, `Fcntl`, `Recv`, `Send`).
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10: `nifm`, `prepo`); [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3: LDN, sockets).
+
+### Bluetooth LE at boot
+
+- **Symptom:** `[RED] sf: the game connects to service bt itself, which the host does not serve`, then `game called nn::diag abort` at `sdk+0x16ba48` and exit 134, a second after the audio renderer starts. With `bt` and `btm:u` served as zeroed host sessions the abort moves to `nn::btm::user::InitializeBtmUserInterface` (`sdk+0xb8eb4`), before either session gets a request.
+- **Cause:** `main` calls `nn::bluetooth::InitializeBle` at boot (`main+0xa0b030`; the Pokémon GO Plus + support of the 3.0.1 update), which runs `bluetooth::hal::user::InitializeBluetoothUserInterface` and `btm::user::InitializeBtmUserInterface` and aborts when they fail. Zeroed answers are not enough: the BTM setup expects real objects or handles back.
+- **Fix:** `hle_offline.c` takes over the BLE calls the game reaches without a device: `InitializeBle` connects to nothing, the five `AcquireBle…Event` calls bind an event that never fires, scan parameter, scan start and `ConnectToGattServer` fail, scan stop succeeds, and the scan result and connection lists are empty. The GATT calls after a connect are never reached.
+- **Found on:** [Pokémon Violet](../../dm/games/01008F6008C5E000/README.md) 3.0.1 (`v720896`, a derived profile), on an M3, macOS 27.2: the opening plays through. Not checked: 1.0.0 (the registered build), Pokémon Scarlet 3.0.1.
 
 ### Network requests stay on hold before they settle
 
@@ -864,9 +899,30 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `CreateIndividualDisplays`, `DestroyIndividualDisplays` and `GetNativeWindowHandle` answer that there is no guest (`hle_misc.c`).
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md).
 
+### GameChat at boot
+
+- **Symptom:** `[RED] sf: the game connects to service chat:u itself, which the host does not serve`, then `game called nn::diag abort: Result 0xe15` under `nn::chat::Initialize`.
+- **Cause:** a Switch 2 game can initialize GameChat at boot. The SDK's `Initialize` opens `chat:u`, and its other calls go through the service object that `Initialize` makes.
+- **Fix:** `nn::chat::Initialize` (ready, no chat), `IsChatting` (no) and `SetScreenSharingMode` (nobody to share with) are hooked (`hle_misc.c`). Another GameChat call a game imports needs a hook of its own.
+- **Found on:** [Hyrule Warriors: Age of Imprisonment](../../dm/games/04003F40232DE000/README.md).
+
+### Whether the language selection is limited
+
+- **Symptom:** a null read at boot in `nn::oe::IsLanguageSelectionLimited`, right after the game asks for its language.
+- **Cause:** the SDK asks the `am` session at vtable +0x238, and the host never opens that session (`oe::Initialize` is taken over).
+- **Fix:** hooked: no limit; the host's language is `DM_LANG` alone (`hle_oe.c`).
+- **Found on:** [Hyrule Warriors: Age of Imprisonment](../../dm/games/04003F40232DE000/README.md).
+
+### The target frame rate (graphics frame length)
+
+- **Symptom:** a null read at boot in `nn::os::SdkMutexType` under `nn::gs::sdk::SetGraphicsFrameLengthMode`, called from `nn::oe::SetGraphicsTargetFrameRate`.
+- **Cause:** `SetGraphicsTargetFrameRate` maps up to 59 fps to mode 1, up to 119 to mode 2 and above to mode 3 (`SetGraphicsTargetFrameRateAuto` to mode 0) and calls `SetGraphicsFrameLengthMode`, which locks the gs graphics server's context and sends it the mode. The host has no graphics server, so the context is null.
+- **Fix:** `SetGraphicsFrameLengthMode` is hooked and logs the mode once per change; both `oe` paths reach it. The host paces by the window's present interval (`hle_oe.c`).
+- **Found on:** [Hyrule Warriors: Age of Imprisonment](../../dm/games/04003F40232DE000/README.md): 60 / its present interval at boot.
+
 ### The display's largest buffer
 
 - **Symptom:** a Switch 2 game presents at 720p, with its upscaler at the matching low size.
 - **Cause:** the game chooses its output from `nn::vi::QueryDisplayBufferMaxResolution` (its tables: 0 is 720p, 1 is 1080p, 2 is 1440p, 3 is 4K), and what the game got before the hook gave it 720p.
-- **Fix:** `hle_vi.c` answers 4K in console mode and the 1080p screen in handheld mode.
-- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): the DLSS network goes to 2048x1152 with this.
+- **Fix:** `hle_vi.c` answers as a Switch 2 does: in handheld mode its own 1080p screen; in console mode the largest of the four that the display the game is shown on holds, as a docked Switch 2 does with its TV. The display's size comes from the front end (`front_display_pixels`: on the Mac the window's screen in its current mode, an iPhone's or iPad's screen), 1080p when it is not known. The host logs the answer once.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): its DLSS output is 2048x1152 for 1440p and for 4K, from 1024x576; for 1080p it renders 960x540 into 1920x1080, a fifth fewer pixels at each stage, and the output matches the screen.

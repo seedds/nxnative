@@ -36,6 +36,22 @@ int main(void) { @autoreleasepool {
         check("stored image: 3D texture type", MTLTextureType3D, r.b[1].dtt);
         check("stored image: no atomic flag", 0, r.b[1].atom);
     }
+    {   // readable-tile calls (dmsh_fetch.py): one at an interpolated output, one projective, one at the pixel position times c[6].xy (frag_pos, Splatoon Raiders' ink stamps)
+        NSDictionary *j = @{@"route": @"B", @"stage": @"ps", @"bindings": @[], @"fetch": @{@"calls": @[@{@"fc": @0, @"tex_reg": @1, @"varying_locn": @3},
+            @{@"fc": @1, @"tex_reg": @2, @"varying_locn": @4, @"proj": @1}, @{@"fc": @2, @"tex_reg": @3, @"frag_pos": @[@[@0, @6, @0], @[@0, @6, @1]]}]}};
+        check("fetch calls: conversion succeeds", 0, nvn_refl_from_json(j, &r, err, sizeof err));
+        check("fetch calls: three", 3, r.nfc);
+        check("fetch calls: projective bit", 2, r.fc_proj);
+        check("fetch calls: pixel-position bit", 4, r.fc_fpos);
+        check("fetch calls: pixel-position has no interpolated output", 0xff, r.fc_locn[2]);
+        check("fetch calls: x scale c[6].x", 6 << 2, r.fc_scale[2][0]);
+        check("fetch calls: y scale c[6].y", 6 << 2 | 1, r.fc_scale[2][1]);
+        NSDictionary *far = @{@"route": @"B", @"stage": @"ps", @"bindings": @[], @"fetch": @{@"calls": @[@{@"fc": @0, @"tex_reg": @6, @"frag_pos": @[@[@6, @989, @0], @[@6, @989, @1]]}]}};
+        check("fetch calls: a vector past c[x][63] converts (Mario Kart World's c6[989])", 0, nvn_refl_from_json(far, &r, err, sizeof err));
+        check("fetch calls: slot 6, vector 989, x", 6 << 16 | 989 << 2, r.fc_scale[0][0]);
+        NSDictionary *bad = @{@"route": @"B", @"stage": @"ps", @"bindings": @[], @"fetch": @{@"calls": @[@{@"fc": @0, @"tex_reg": @3, @"frag_pos": @[@[@16, @6, @0], @[@0, @6, @1]]}]}};
+        check("fetch calls: a uniform slot out of range is refused", 1, nvn_refl_from_json(bad, &r, err, sizeof err) != 0);
+    }
     {   int f0 = fail;   // Route A is retired: PC-chain reflection (no route = B) must be rejected
         NSDictionary *pc = @{@"arg_buffer_index": @0, @"bindings": @[@{@"type": @"cbuffer", @"reg": @10, @"arg_id": @0, @"access": @"constant", @"msl_type": @"constant cb1_struct*"}], @"vertex_inputs": @[]};
         check("PC chain reflection (no route = B) fails", 1, nvn_refl_from_json(pc, &r, err, sizeof err) != 0);

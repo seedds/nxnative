@@ -1,5 +1,5 @@
 # dm/games/game.py's profile-key validation, on a synthetic profile: pso_gpu (the GPU architectures the app's offline pipeline archive is made for, beside pso_mtl4) takes, none and no others,
-# and a profile without the key generates its header unchanged
+# and a profile without the key generates its header unchanged; the game's upscaler shaders (the launcher's Game's upscaler) are the compute shaders its shader map found in agl_ndsr.pck
 from pathlib import Path
 import os
 import subprocess
@@ -38,6 +38,33 @@ class PsoGPU(unittest.TestCase):
             rc, out = header(rows)
             self.assertNotEqual(rc, 0, rows)
             self.assertIn(': pso_gpu takes 1-4 whitespace-separated GPU architectures', out, rows)
+
+
+
+MAP = ('# kind: evidence  Test shaders\n# column 5 records where each key first appears\npackage\tindex\tstage\tdm_ctl_sha16\tsource\n'
+       'cs_other.bin\t1\tcompute\tc56db3d5a0f1b5af\t/Lib/agl/agl_resource.Nin_Ounce_NVN2.release.sarc.zs/agl_ndsr.pck#NDSR@0x124900\n'
+       'cs_other.bin\t2\tcompute\t7629d857a0a93833\t/Lib/agl/agl_resource.Nin_Ounce_NVN2.debug.sarc.zs/agl_ndsr.pck#NDSR@0xeb4c0\n'
+       'cs_other.bin\t3\tcompute\t7629d857a0a93833\t/Lib/agl/agl_resource.Nin_Ounce_NVN2.release.sarc.zs/agl_ndsr.pck#NDSR@0x124a00\n'   # a key twice: once
+       'ps_other.bin\t4\tpixel\t0e423e497f1e3355\t/Lib/agl/agl_resource.Nin_Ounce_NVN2.release.sarc.zs/agl_ndsr.pck#NDSR@0x1247d8\n'   # the pack's draw shaders: not the upscaler
+       'cs_other.bin\t5\tcompute\t0123456789abcdef\t/Lib/agl/agl_resource.Nin_Ounce_NVN2.release.sarc.zs/agl_common.sharcb#BAHS@0x40\n')
+
+
+def macros(shader_map):
+    """The upscaler macros of a synthetic profile's header, with this shader map (None: none)"""
+    with tempfile.TemporaryDirectory() as d:
+        Path(d, ID).mkdir()
+        (Path(d, ID) / 'game.tsv').write_text(TSV)
+        if shader_map is not None: (Path(d, ID) / 'shader_map.tsv').write_text(shader_map)
+        subprocess.run([sys.executable, str(GAME), 'header', ID, str(Path(d, ID) / 'game.h')], env={**os.environ, 'DM_GAMES_DIR': d}, check=True, capture_output=True)
+        return [l for l in (Path(d, ID) / 'game.h').read_text().splitlines() if 'UPSCALER' in l]
+
+
+class UpscalerKeys(unittest.TestCase):
+    def test_from_shader_map(self):
+        none = ['#define DM_GAME_UPSCALER_KEYS ""', '#define DM_GAME_UPSCALER_N 0']   # the launcher hides the setting
+        self.assertEqual(macros(None), none)
+        self.assertEqual(macros(MAP.split('cs_other.bin')[0]), none)
+        self.assertEqual(macros(MAP), ['#define DM_GAME_UPSCALER_KEYS "7629d857a0a93833,c56db3d5a0f1b5af"', '#define DM_GAME_UPSCALER_N 2'])
 
 
 if __name__ == '__main__':

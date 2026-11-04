@@ -190,7 +190,9 @@ static void t_vibration(void) {
     dm_haptics_route(1, 0);
     CHECK(!h_hid_VibPermit(), "disconnecting the last output disables vibration");
     dm_haptics_init(vibration_sink, 0); dm_haptics_route(0, 1);
-    CHECK(!h_hid_VibPermit() && !h_hid_VibHandles(h, 2, &id, STYLE_HANDHELD), "rumble disabled: no vibration devices");
+    CHECK(!h_hid_VibPermit() && h_hid_VibHandles(h, 2, &id, STYLE_HANDHELD) == 2, "rumble disabled: not permitted, but the handles exist, as on a Switch");
+    dm_haptics_set_enabled(1);
+    CHECK(h_hid_VibPermit(), "rumble turned on while the game runs: the handles it took work");
 }
 
 static void *vibration_sender(void *arg) {

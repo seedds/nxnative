@@ -67,11 +67,13 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | 60 fps frame step and render scale (ksys::VFR) | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | the game's own frame code; the frame-step state page is general |
 | `build` → `game` | 60 fps frame step: the KIDS frame task and frame-rate block | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the game's own frame code; only the host's frame-step state page is shared. Fire Emblem: Three Houses and Taiko Risshiden V DX run on KTGL too, with other frame code |
 | `build` → `game` | frame step floor 2 → 1 vsync, and its frame step | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) | the game's own clock floor and step |
+| `build` → `game` | screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) | the output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code |
 
 ## Summary
 
 | Game | Cuts | Gates | Frame-step sites | Function-matched rules | Host rows | Binding |
 |---|---|---|---|---|---|---|
+| [Animal Crossing: New Horizons](#animal-crossing-new-horizons) | 0 | 0 | 14 | 0 | 0 | `build` → `game` |
 | [ASTRAL CHAIN](#astral-chain) | 0 | 0 | 112 | 0 | 0 | `build` → `game` |
 | [Batman: Arkham Knight](#batman-arkham-knight) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -94,12 +96,39 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Subnautica: Below Zero](#subnautica-below-zero) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
-| [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 5 | 0 | 0 | `build` → `game` ×2 |
+| [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 43 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `build` → `game` |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
 
 ## Games
+
+### Animal Crossing: New Horizons
+
+[Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md), `01006F8002326000`, [patches.py](../../dm/games/01006F8002326000/patches.py).
+
+- **`build` → `game`**, rendering, blocked: the stubs have no function-matched form yet, judgement: screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT). The output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code
+
+- **3.0.3 `main`** `ff1d1c05…` ([patches.py:228](../../dm/games/01006F8002326000/patches.py#L228))
+  <details><summary>14 frame-step sites</summary>
+
+  - frame step `+0x265140`: nn::ui2d::DrawInfo::SetProjectionMtx: the y row divided by the vertical stretch, layouts in their own shape (bit 6)
+  - frame step `+0x27d570`: nn::ui2d::Pane::Calculate after the global matrix: duo_calc (the HUD at the taller screen's edges, full-screen backgrounds stretched)
+  - frame step `+0x5c9b80`: graphics create arg +0x60: the display size in the screen's shape (bit 0)
+  - frame step `+0x5c9b94`: graphics create arg +0x20: 1280 x the layout height (bit 1)
+  - frame step `+0x5cdcc8`: platform config slot 3: the arg's 1920x1080 in the screen's shape (bit 4)
+  - frame step `+0x5cdd74`: platform config slot 7: the static display size in the screen's shape (bit 2)
+  - frame step `+0x5cddd4`: platform config slot 8: the static layout size 1280.0 x the layout height (bit 3)
+  - frame step `+0x7a895c`: field camera: its vertical angle widened so the taller screen keeps 16:9's sides (bit 5)
+  - frame step `+0x7a89a8`: field camera: its vertical angle widened so the taller screen keeps 16:9's sides (bit 5)
+  - frame step `+0x1527f00`: resolution table entry of the frame (crop, render scale): the height of the screen's shape (bit 7)
+  - frame step `+0x1527f2c`: resolution table entry of the frame (crop, render scale): the height of the screen's shape (bit 7)
+  - frame step `+0x31cee60`: layouts' DrawInfo: the framebuffer's size in the screen's shape (bit 8)
+  - frame step `+0x31cee9c`: layouts' DrawInfo: the framebuffer's size in the screen's shape (bit 8)
+  - frame step `+0x386a7a0`: game camera: the vertical angle widened so the taller screen keeps 16:9's sides (bit 5)
+
+  </details>
+
 
 ### ASTRAL CHAIN
 
@@ -514,11 +543,54 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x1126794`: stepping down stops at < 3 → at < 2: cmp w9,#3 → cmp w9,#2
   - cut `+0x112691c`: interval controller always takes the GPU time path (CPU span timing): cbz x0,#0x1126934 → b #0x1126928
   - cut `+0x1126974`: interval controller always takes the GPU time path (takes max(CPU span, GPU time)): cbz x0,#0x112698c → b #0x1126980
+  <details><summary>43 frame-step sites</summary>
+
+  - frame step `+0x27ae0`: Pane::Calculate: a HUD widget at the edge moved to the taller screen's edge with its children, full-screen backgrounds stretched (duo_anchor.c)
+  - frame step `+0x2df28`: projected texture fitted to the layout: a pane as tall as the taller screen maps its whole height
+  - frame step `+0xc61ef4`: output size static, nnMain: 1920x1080 → the host's height
+  - frame step `+0xc61f28`: output size static, nnMain (second path)
+  - frame step `+0xc61f5c`: layout size static, nnMain: 1280x720 → the host's layout height
+  - frame step `+0xde85dc`: 720.0 with 1280.0 (screen position in layout space)
+  - frame step `+0xdea070`: 720.0 with 1280.0 (screen position / layout size)
+  - frame step `+0xdea678`: 720.0 with 1280.0
+  - frame step `+0xdf19ac`: 720.0: output size / layout size (the layout scale)
+  - frame step `+0xe27b44`: 720.0 stored with 1280.0
   - frame step `+0xeb0f88`: held-button counts step by the VFR ratio (menu repeat in game time at any frame step)
+  - frame step `+0xeb48b8`: sead::PerspectiveProjection fovy widened for a view of the screen's ratio (more above and below, 16:9 sides), stored widened
+  - frame step `+0xeb4968`: sead::PerspectiveProjection fovy widened for a view of the screen's ratio (more above and below, 16:9 sides), stored widened
+  - frame step `+0xeb49d0`: sead::PerspectiveProjection fovy widened for a view of the screen's ratio (more above and below, 16:9 sides), stored widened
+  - frame step `+0xeb4a50`: PerspectiveProjection matrix: the HUD camera (16:9, near 1, far 10000) takes the screen's ratio and a widened vertical angle
+  - frame step `+0xef1388`: 1280x720 in a descriptor
+  - frame step `+0xf59b2c`: capture pane Calculate: a full-screen capture made as tall as the screen (duo_anchor.c)
+  - frame step `+0xf5a0dc`: capture: the screen's layout height instead of the layout file's 720 (texture size, copied rect)
+  - frame step `+0xf5a4b8`: capture: the screen's layout height instead of the layout file's 720 (texture size, copied rect)
+  - frame step `+0xf60cc0`: capture pane Calculate: a full-screen capture made as tall as the screen (duo_anchor.c)
+  - frame step `+0xf66118`: capture: the screen's layout height instead of the layout file's 720 (texture size, copied rect)
+  - frame step `+0xf66334`: capture: the screen's layout height instead of the layout file's 720 (texture size, copied rect)
+  - frame step `+0xf6e798`: 720.0 with 1280.0 (screen position)
+  - frame step `+0xf75ba4`: screen copy into a 16:9 picture (camera photo): the screen's middle 16:9 band, not the whole taller screen squashed into it
+  - frame step `+0x100817c`: 720.0 with 1280.0 passed as a layout size
+  - frame step `+0x1059730`: 1280x720 layout size of an object
+  - frame step `+0x106bb6c`: 1280x720 default sizes of a layer
+  - frame step `+0x10ee094`: main camera fovy getter: widened like the projection (culling tests)
+  - frame step `+0x10ee0cc`: main camera fovy getter in degrees: widened like the projection
   - frame step `+0x11269b8`: setWaitVsyncInterval: the host's step unless the VFR override is set (state page target fps; 0 = the game's interval)
+  - frame step `+0x12618c4`: output size static, its getter
+  - frame step `+0x1261920`: layout size static, its getter
+  - frame step `+0x12660d4`: docked display size 1920x1080
+  - frame step `+0x12660f0`: docked viewport height 1080
+  - frame step `+0x1266124`: handheld display size 1280x720
+  - frame step `+0x1266134`: scaled display height 720.0
+  - frame step `+0x1266188`: handheld viewport height 720
   - frame step `+0x126686c`: scale apply block taken every frame when the host render scale is not 1.0
   - frame step `+0x1266880`: 3D view scale = the host render scale (1.0 = the game's dynamic resolution)
+  - frame step `+0x127a2f8`: map footprint trail: its viewport and projection at the 720 pane's half-height, not the taller frame's
+  - frame step `+0x13f9704`: 1280x720 passed as a size
   - frame step `+0x151d3d0`: VFR::updateInterval: its own override published for the host (state page target fps; 0 = original)
+  - frame step `+0x1544644`: 720.0 with 1280.0
+
+  </details>
+
   - render scale stub (the launcher offers DM_RENDER_SCALE)
 
 ### The Legend of Zelda: Link's Awakening
@@ -632,6 +704,7 @@ Profile keys (`game.tsv`) whose value changes what the host does, set away from 
 | `vconv_range on` | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | `game` → `host`, gap | the same vertices as the whole range, for less work; DM_NVN_VCONV_CHECK checks it: a default for every game after `regress.py check` on the games |
 | `fps_hold off` | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md), [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) | `game`, at goal | the game's pacing |
 | `perf_mode boost` | [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md), [Rhythm Heaven Groove](../../dm/games/0100D9F01D474000/README.md) | `game`, at goal | a combination a Switch 1 never reports: a choice per game |
+| `screen_aspect on` | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md), [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | `game`, at goal | the output size is the host's, but the stubs that follow it (projections, layout panes, screen copies) are this build's code |
 | `tex_dyn_slots on` | [FINAL FANTASY RESONANCE](../../dm/games/0100606026F12000/README.md), [FINAL FANTASY RESONANCE (Asian release)](../../dm/games/0100B8A026F14000/README.md), [OCTOPATH TRAVELER 0](../../dm/games/01005270232F2000/README.md) | `game` → `host`, gap | right only where the handle comes from c2's tables: the translator could prove that per shader |
 | `gpu_timestamps segment` | [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md), [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md), [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md), [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | `game` → `host`, gap | what hardware records: a default for every game after `regress.py check` on the games |
 | `mem_map_limit on` | [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md), [Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md), [Pokémon Violet](../../dm/games/01008F6008C5E000/README.md), [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md) | `game` → `host`, gap | Horizon's limit; off by default because Ace Attorney Investigations Collection maps a little more than its profile's 1 GB pool, which is the thing to fix |

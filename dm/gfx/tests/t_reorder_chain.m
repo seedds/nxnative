@@ -71,7 +71,7 @@ static result execute(chain *c, const tex_t *a, const tex_t *b, const tex_t *out
     emit(c,OP_END,NULL,0); state_reset(); memset(&R,0,sizeof R); vis_clear(); g_vis_on=g_vis_counting=0;
     mtl_sub_begin(); mtl_exec(c->p);
     const tex_t *t[4]={a,b,out,e}; id<MTLBuffer> buf[4];
-    for(int k=0;k<4;k++) { buf[k]=[g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared];
+    for(int k=0;k<4;k++) { buf[k]=[g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared]; if(!buf[k]) exit(1);
         [blit() copyFromTexture:tex_mtl(t[k]) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(8,8,1)
           toBuffer:buf[k] destinationOffset:0 destinationBytesPerRow:32 destinationBytesPerImage:256]; }
     uint64_t f=mtl_sub_commit(); EXPECT("production submit completed",1,mtl_wait(f,5000000000ull)); EXPECT("no error in commit feedback",0,mtl_last_commit_error());
@@ -170,7 +170,7 @@ static result range_case(int array,int reordered) {
     slice_rt(&c,&a,array?0:1,array?1:0); stencil(&c,0,8,1,255,255,0); blending(&c,0); draw_prog(&c,1,0);
     if(!reordered) sample_block(&c,&b,array?6:5,tid);
     result r=execute(&c,&a,&b,&out,&e,NULL);
-    NSUInteger w=array?8:4; id<MTLBuffer> buf=[g_dev newBufferWithLength:w*w*4 options:MTLResourceStorageModeShared];
+    NSUInteger w=array?8:4; id<MTLBuffer> buf=[g_dev newBufferWithLength:w*w*4 options:MTLResourceStorageModeShared]; if(!buf) exit(1);
     id<MTLCommandBuffer> cb=[g_q commandBuffer]; id<MTLBlitCommandEncoder> bl=[cb blitCommandEncoder];
     [bl copyFromTexture:tex_mtl(&a) sourceSlice:array?1:0 sourceLevel:array?0:1 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(w,w,1)
       toBuffer:buf destinationOffset:0 destinationBytesPerRow:w*4 destinationBytesPerImage:w*w*4]; [bl endEncoding]; [cb commit]; [cb waitUntilCompleted];
@@ -228,6 +228,26 @@ static void compare_pair(const char *name,const result *o,const result *r,unsign
     for(int k=0;k<1024;k+=4) bad+=memcmp((const uint8_t *)o+k,(const uint8_t *)r+k,4)!=0;
     EXPECT("full range/state/control flow differing pixels (out of 256)",all_independent?0:different,bad);
 }
+// A submission that draws into the render target it inherited: its draws before its first target change count toward the segment cut (sub_cut). The count used to start at
+// that first change, so a submission of cut_draws() draws into the inherited target and then a target change made no cut there
+static void inherited_target_case(void) {
+    tex_t a=texture(8,1,0),b=texture(8,1,0); chain setup=make_chain(),c=make_chain();
+    clear(&setup,&a,0,NULL,0,0,0); draw_prog(&setup,0,0); emit(&setup,OP_END,NULL,0);
+    state_reset(); memset(&R,0,sizeof R); mtl_sub_begin(); mtl_exec(setup.p);
+    EXPECT("inherited target: the setup submission completed",1,mtl_wait(mtl_sub_commit(),5000000000ull));
+    uint64_t cuts=mtl_cut_count(); c.width=8;
+    for(int i=0;i<cut_draws();i++) draw_prog(&c,i&1,0);   // no OP_SET_RT: the target is the one the setup submission left
+    rt(&c,&b,0,NULL); draw_prog(&c,1,0); emit(&c,OP_END,NULL,0);
+    mtl_sub_begin(); mtl_exec(c.p);
+    EXPECT("inherited target: one segment cut at the target change after cut_draws() draws",1,mtl_cut_count()-cuts);
+    id<MTLBuffer> out=[g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared]; if(!out) exit(1);
+    [blit() copyFromTexture:tex_mtl(&a) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(8,8,1)
+      toBuffer:out destinationOffset:0 destinationBytesPerRow:32 destinationBytesPerImage:256];
+    EXPECT("inherited target: the segmented submission completed",1,mtl_wait(mtl_sub_commit(),5000000000ull));
+    EXPECT("inherited target: no error in commit feedback",0,mtl_last_commit_error());
+    uniform_pixels("inherited target: the last draw into it (blue)",out.contents,0,0,255,255);
+    mtl_pool_del(setup.p); free(setup.p); mtl_pool_del(c.p); free(c.p);
+}
 int main(int argc,char **argv) { @autoreleasepool {
     setvbuf(stdout,NULL,_IONBF,0);
     all_independent=argc>1&&!strcmp(argv[1],"--all-independent"); setenv("DM_NVN_TBDR","0",1); mtl_init();
@@ -245,6 +265,8 @@ int main(int argc,char **argv) { @autoreleasepool {
         p->sh[1]=[NvShader new]; NvShader *f=p->sh[1]; f->fn=[lib newFunctionWithName:fn[i]]; f->stage=1;
         if(i>=2&&i!=7) { f->rf.nb=1; f->rf.b[0]=(nvn_rbind){.kind=i==4?NVN_RB_CBUF:NVN_RB_TEX,.dtt=i==6?3:2}; f->ae=[f->fn newArgumentEncoderWithBufferIndex:0]; }
         pg[i].serial=4000+i; serial_put(pg[i].serial,p); }
+    printf("CASE inherited_target\n"); inherited_target_case();
+    if(argc>1&&!strcmp(argv[1],"--inherited-target-only")) { printf("== %d checks, %d failed ==\n",count,fail); return fail!=0; }
     const char *names[]={"independent_mip_copy","same_mip_negative","stencil_disjoint_bits","stencil_shared_bits_negative","copy_reads_source_negative","in_block_order_negative"};
     for(int mode=0;mode<6;mode++) { printf("CASE %s\n",names[mode]); result o=render_case(mode,0),r=render_case(mode,1);
         save_result(names[mode],0,&o); save_result(names[mode],1,&r);

@@ -40,7 +40,7 @@ static void run_case(int format) {
     uint8_t *map = (uint8_t *)h_nvnMemoryPoolMap((const NVNmemoryPool *)&pool) + 65536; int bad = 0;
     static const uint8_t want[] = {51,102,153,255}; for(int i=0;i<160*90;i++) bad += memcmp(map+i*4,want,4) != 0;
     EXPECT("GPU image writes -> CPU pool map, 14400 literal pixels", 0, bad);
-    h_nvnTextureFinalize(&tex); mtl_pool_del(mem); free(mem);
+    h_nvnTextureFinalize(&tex); mtl_pool_del(mem); mtl_alias_drop_pool(&pool); free(mem);   // as nvnMemoryPoolFinalize: the next case's pool object has the same address
 }
 static void render_target_stride_case(void) {
     void *mem = NULL; if (posix_memalign(&mem, getpagesize(), 65536)) abort(); memset(mem, 0, 65536);

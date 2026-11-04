@@ -36,7 +36,7 @@ class ShaderCache(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         root = Path(self.tmp.name)
         self.ns: dict[str, Any] = dict(hashlib=hashlib, os=os, json=json, re=re, threading=threading,
-                       subprocess=subprocess, dmsh_chain=dmsh_chain, SPIRV_CROSS='converter',
+                       subprocess=subprocess, dmsh_chain=dmsh_chain, SPIRV_CROSS='converter', CROSS=types.SimpleNamespace(record='cli'),
                        XC=['--msl'], MAC_RECORD='mac flags', IOSOUT=None, TARGETS={'mac'},
                        ios_metal=types.SimpleNamespace(RECORD='ios flags'), METAL_FP='tested Metal and SDK',
                        FACTS={}, MAP_ROWS={}, MAP_CONFLICT_ROWS={}, CODE_FP='source', PROFILE_ROWS=b'', PAIRS={},
@@ -45,16 +45,19 @@ class ShaderCache(unittest.TestCase):
         (root / 'out').mkdir()
         names = {'tool_fingerprint', 'shader_key', 'cache_path', 'cache_outputs', 'restore_cache', 'publish_cache', 'atomic_json', 'cache_meta_path',
                  'bf_digest', 'bf_cache_root', 'bf_cache_restore', 'vs_pad'}
-        tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-        self.tree = tree
+        tree = ast.parse((TOOLS / 'dmsh_build.py').read_text()); self.tree = tree
         nodes: list[ast.stmt] = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
         self.assertEqual({n.name for n in nodes if isinstance(n, ast.FunctionDef)}, names)
         exec(compile(ast.Module(body=nodes, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), self.ns)
 
-    def digest(self):
+    def digest(self, name='ps_test.bin'):
         with mock.patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'same revision', '')):
             self.ns['TOOL_FP'] = self.ns['tool_fingerprint']().encode()
-        return self.ns['shader_key']('key', 'shader', b'original shader')
+        return self.ns['shader_key']('key', name, b'original shader')
+
+
+
+
 
     def test_return_to_tested_compiler_does_not_restore_override_libraries(self):
         for ios in (False, True):
@@ -296,6 +299,51 @@ class TargetSelection(unittest.TestCase):
     def test_invalid_targets(self):
         for env in ({'DMSH_TARGETS': 'ios'}, {'DMSH_TARGETS': 'other'}, {'DMSH_TARGETS': ', '}):
             with self.subTest(env=env), self.assertRaises(SystemExit): self.selection(env)
+
+
+class ConcurrentMetalCache(unittest.TestCase):
+    def test_parallel_identical_sources_compile_once_and_share_failures(self):
+        for fail, split in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(fail=fail, split=split), tempfile.TemporaryDirectory() as d:
+                root = Path(d); source = root / 'shader.metal'; source.write_text('identical source')
+                entered, release, joined = threading.Event(), threading.Event(), threading.Event()
+                guard = threading.Lock(); waiters = [0]; compiles = []
+                class ObservedFuture(cf.Future):
+                    def result(self, timeout=None, guard=guard, waiters=waiters, joined=joined):
+                        with guard:
+                            waiters[0] += 1
+                            if waiters[0] == 7: joined.set()
+                        return super().result(timeout)
+                def compiler(msl, air, lib, compiles=compiles, entered=entered, release=release, fail=fail):
+                    compiles.append(msl); entered.set()
+                    if not release.wait(5): raise TimeoutError('test did not release compile')
+                    if fail: raise subprocess.CalledProcessError(1, 'metal')
+                    Path(lib).write_bytes(b'compiled shader')
+                with mock.patch.object(dmsh_mtlcache, 'compiler_id', return_value='compiler'):
+                    cache = dmsh_mtlcache.Cache(str(root / 'cache'), {'mac': ('macosx', 'flags', compiler)}, d)
+                with mock.patch.object(dmsh_mtlcache.cf, 'Future', ObservedFuture), cf.ThreadPoolExecutor(8) as pool:
+                    if split:
+                        futures = [pool.submit(cache.compile_split, 'mac', str(source), str(root / f'{i}.metallib'), str(root / f'{i}_x.metallib'), lambda data: (data, data + b' side')) for i in range(8)]
+                    else:
+                        futures = [pool.submit(cache.compile, 'mac', str(source), str(root / f'{i}.metallib')) for i in range(8)]
+                    try:
+                        self.assertTrue(entered.wait(5)); self.assertTrue(joined.wait(5))
+                    finally: release.set()
+                    for f in futures:
+                        if fail:
+                            with self.assertRaises(subprocess.CalledProcessError): f.result(5)
+                        else: f.result(5)
+                self.assertEqual(len(compiles), 1)
+                self.assertFalse(cache.pending)
+                if not fail:
+                    self.assertEqual(cache.stats['mac', 'coalesced'], 7)
+                    for i in range(8):
+                        self.assertEqual((root / f'{i}.metallib').read_bytes(), b'compiled shader')
+                        if split: self.assertEqual((root / f'{i}_x.metallib').read_bytes(), b'compiled shader side')
+                else:
+                    self.assertFalse(list((root / 'cache').rglob('*.metallib')))
+
+
 
 
 class StageCache(unittest.TestCase):

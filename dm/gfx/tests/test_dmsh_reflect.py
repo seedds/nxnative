@@ -14,7 +14,7 @@ import dmsh_geometry
 def builder_reflection():
     # Isolate pure reflection code from the builder's CLI/profile initialization.
     tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-    names = {'reflect', 'decode_tex', 'decode_ubo_tex', 'const_sampler', 'c2_array'}
+    names = {'member_calls', 'reflect', 'decode_tex', 'decode_ubo_tex', 'const_sampler', 'c2_array'}
     selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in names)
                 or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'SSBO' for t in n.targets))
                 or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Tuple) and any(isinstance(e, ast.Name) and e.id == 'TEX_BASE' for e in t.elts) for t in n.targets))]
@@ -33,6 +33,19 @@ def bindings(stage, offsets, flags, cb_slot=0):
                       'cb_offset': off // 4, 'flags': flag}
                      for i, (off, flag) in enumerate(zip(offsets, flags))]}
     return REFLECT('synthetic', stage, source, res)
+
+
+class MemberCalls(unittest.TestCase):
+    def test_operation_index_matches_per_resource_word_boundaries(self):
+        names = ['tex', 'tex2', '_tex', 'prefix_tex', 'TEX', 'resource_2']
+        operations = ['.get_width(', '.atomic_']
+        source = '\n'.join(prefix + name + operation + 'x);' for prefix in ['', 'obj.', 'not_'] for name in names for operation in operations)
+        source += '\ntex .get_width(0); (tex).get_width(0);'
+        for operation in operations:
+            got = REFLECT.__globals__['member_calls'](source, operation)
+            for name in names:
+                expected = re.search(r'\b' + re.escape(name + operation), source) is not None
+                self.assertEqual(name in got, expected)
 
 
 class StorageBuffers(unittest.TestCase):

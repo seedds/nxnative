@@ -17,6 +17,8 @@ def tools_now():
     t['xlate_source'] = xlate_embedded()
     sc = shutil.which(SPIRV_CROSS)
     t['spirv-cross'] = sha16(sc) if sc else 'missing'
+    native = os.path.join(os.path.dirname(SPIRV_CROSS), 'libspirv-cross-c-shared.dylib')
+    if os.path.isfile(native): t['spirv-cross-c-shared'] = sha16(native)   # optional native path; without it the builder uses the pinned CLI
     for sdk in ('macosx', 'iphoneos'):
         t['metal_' + sdk] = subprocess.run(['xcrun', '-sdk', sdk, 'metal', '--version'], capture_output=True, text=True).stdout.splitlines()[0:1] or ['missing']
         t['metal_' + sdk] = t['metal_' + sdk][0]

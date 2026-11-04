@@ -13,9 +13,10 @@ import dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_abi as abi   
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_pch, dmsh_vin, dmsh_pull, dmsh_side, dmsh_mesh, dmsh_ampere, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_stages, dmsh_cross, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_pch, dmsh_vin, dmsh_pull, dmsh_side, dmsh_mesh, dmsh_ampere, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
 _bad = tool_lock.check_tools()
 if _bad: sys.exit('\n'.join('[RED] translation chain tools do not match the lock file: ' + b for b in _bad) + '\n(if the tools changed, run tool_lock.py --update-lock and commit the lock file; if the translator just was not rebuilt, rebuild it)')
+CROSS = dmsh_cross.Compiler(os.path.join(os.path.dirname(dmsh_chain.SPIRV_CROSS), 'libspirv-cross-c-shared.dylib'))
 CHAIN = dmsh_chain.version(); out = os.path.join(out, 'b-' + CHAIN)
 GAME = dmsh_chain.load_game()   # the current game profile (DM_GAME): the tables come from here
 if f'"{CHAIN}"' not in open(dmsh_chain.HEADER).read(): sys.exit(f'[RED] {dmsh_chain.HEADER} does not hold the current translation chain version {CHAIN}: run dmsh_chain.py --header first and commit it (otherwise the host cannot find these libraries)')
@@ -232,6 +233,7 @@ def border_emu(msl):
         msl = msl[:m.start()] + f'dm_bs({msl[m.start():i]}, spvDescriptorSet0.{abi.BORDER_MEMBER}, {bit[m.group(2)]}u, spvDescriptorSet0.{m.group(1)}, {twin}, {args})' + msl[i:]
     return msl.replace('using namespace metal;\n', 'using namespace metal;\n' + BORDER_HELPERS, 1)
 CAS =os.environ.get('DMSH_CAS', os.path.join(cache_root, 'cas'))
+STAGES = dmsh_stages.Cache(CAS) if os.environ.get('DMSH_STAGE_CACHE', '1') != '0' else None
 CAS_LOCKS, CAS_LOCKS_GUARD = {}, threading.Lock()
 PRE_STATS = collections.Counter()
 # -fpreserve-invariance: vertex positions are marked [[invariant]], but without this flag Metal does not promise that two different shaders compute the same expression to the same value; on Maxwell the same multiply-adds always agree.
@@ -286,7 +288,7 @@ def tool_fingerprint():
     sc = subprocess.run([SPIRV_CROSS, '--version'], capture_output=True, text=True, timeout=30)
     return ('lock\0' + open(dmsh_chain.LOCK).read() + '\0options\0' + dmsh_chain.options() +
             '\0xlate\0' + dmsh_chain.xlate_source_sha() + '\0spirv-cross\0' + sc.stdout + sc.stderr +
-            '\0xc\0' + repr(XC) + '\0mac\0' + MAC_RECORD + '\0ios\0' + (ios_metal.RECORD if IOSOUT else '') + '\0metal\0' + METAL_FP)
+            '\0xc\0' + repr(XC) + '\0cross-backend\0' + CROSS.record + '\0mac\0' + MAC_RECORD + '\0ios\0' + (ios_metal.RECORD if IOSOUT else '') + '\0metal\0' + METAL_FP)
 
 # The profile keys that change how a shader is built (nvn_*, shader_*), as dmsh_chain.inputs takes them: part of every shader's cache key
 PROFILE_ROWS = dmsh_chain.profile_rows(GAME)
@@ -824,6 +826,17 @@ def pool_arrays(src):
         if left: raise ValueError(f'{nm}: {left} uses of the pool array the rewrite does not cover')
     return src
 
+def member_calls(source, operation):
+    """Names immediately before a literal member operation; equivalent to a word-boundary regex per resource, in one scan."""
+    names, at = set(), 0
+    while True:
+        end = source.find(operation, at)
+        if end < 0: return names
+        start = end
+        while start and (source[start - 1].isalnum() or source[start - 1] == '_'): start -= 1
+        if start < end: names.add(source[start:end])
+        at = end + len(operation)
+
 def reflect(key, stage, msl, res):
     """MSL argument buffer struct member → replay reflection: kind (same as nvn_refl.h) + NVN slot number + argument buffer member index"""
     body = re.search(r'struct spvDescriptorSetBuffer0\s*\{(.*?)\};', msl, re.S)
@@ -833,6 +846,8 @@ def reflect(key, stage, msl, res):
     # (Mario Party Superstars' light_primitive_point_cluster.bnsh, a storage buffer and two images); a member the pattern skipped left the host's argument buffer longer than the reflection
     members = list(re.finditer(r'^\s*(.+?)\s+(\w+)\s*\[\[id\((\d+)\)(?:\s*,\s*\w+\(\d+\))*\]\];', body.group(1) if body else '', re.M))
     if body and len(members) != body.group(1).count('[[id('): raise ValueError(f'{key}: an argument buffer member the reflection cannot read')
+    width_members = member_calls(msl, '.get_width(') if res.get('fetch1d') else set()
+    atomic_members = member_calls(msl, '.atomic_')
     for m in members:
         ty, nm, aid = m.group(1).strip(), m.group(2), int(m.group(3))
         e = {'msl_name': nm, 'msl_type': ty, 'arg_id': aid}
@@ -863,11 +878,11 @@ def reflect(key, stage, msl, res):
             if not d: e.update(kind=abi.KIND_UNKNOWN)
             else: e.update(kind=abi.KIND_IMG if re.match(r'[a-z]+_i', nm) else (abi.KIND_TBUF if 'texture_buffer' in ty else abi.KIND_TEX), reg=d[0])
             # native texture atomics (dmsh_atomic.py): Metal allows them only on an R32Uint / R32Sint texture made with the shader-atomic usage, which the host checks for this slot
-            if e.get('kind') == abi.KIND_IMG and re.search(r'\b%s\.atomic_' % re.escape(nm), msl): e['atomic'] = True
+            if e.get('kind') == abi.KIND_IMG and nm in atomic_members: e['atomic'] = True
             # a 1D integer fetch the translator read as 2D rows of 16384 texels (Program.cs RecordTexelFetch1D): the host binds a texture buffer in this slot as such rows (nvn_mtl.m tbuf_as_2d)
             if e.get('kind') == abi.KIND_TEX and e.get('reg') in res.get('fetch1d', ()):
                 e['fetch1d'] = True
-                if re.search(r'\b%s\.get_width\(' % re.escape(nm), msl): e['fetch1d_size'] = True   # also size-queried: a texture buffer of more than 16384 elements reports 16384 there
+                if nm in width_members: e['fetch1d_size'] = True   # also size-queried: a texture buffer of more than 16384 elements reports 16384 there
         binds.append(e)
     # Storage buffers: SPIR-V binding number → c0 offset → NVN storage buffer slot (c0 base SSBO[stage], C0_ROW bytes per slot)
     base = SSBO.get(stage)   # storage buffer base for the hull / domain stages has not been measured: a storage buffer there is reported with no slot
@@ -920,14 +935,80 @@ def unfillable(dr, stage):
     return bad
 
 RULES = []   # MSL rewrite rules attached by shader name (function, applicability test); the former dark-range remap toe has been removed (back to the original Switch brightness)
+def module_form(module):
+    path = module.__file__
+    assert path is not None, 'shader tool has no source file'
+    with open(path) as f: return dmsh_chain.code_form(f.read())
+
 # CODE_FP hashes the code form of this file and its helper modules (dmsh_chain.code_form): editing a comment, a docstring or the layout does not change any shader's key.
 # The library ABI enters as its values (dmsh_abi.VALUES), so a comment in dmsh_abi.h does not change a key either.
 # It covers what runs only when a shader misses the cache, since a hit restores the output and skips it. dmsh_fetch.py is not in it, but for screen_varyings (raster_facts): readable-tile variants get a
 # separate second-stage cache keyed on the generated MSL. Nor are the other side libraries' modules, made again from the restored MSL on every build (test_dmsh_code_fp.py checks this list).
-CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_ampere, abi) + ((ios_metal,) if IOSOUT else ()))
+CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + module_form(m) for m in (dmsh_chain, dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_ampere, dmsh_stages, dmsh_cross, abi) + ((ios_metal,) if IOSOUT else ()))
                          + b'\0' + inspect.getsource(dmsh_fetch.screen_varyings).encode()
                          + b'\0abi\0' + repr(sorted(abi.VALUES.items())).encode()).hexdigest()
 TOOL_FP = tool_fingerprint().encode()
+with open(dmsh_chain.LOCK) as _f: _lock = dict(line.rstrip('\n').split('\t', 1) for line in _f if '\t' in line and not line.startswith('#'))
+XLATE_STAGE_ID = {k: v for k, v in _lock.items() if not k.startswith(('spirv-cross', 'metal_'))}
+XLATE_STAGE_ID['source'] = dmsh_chain.xlate_source_sha()
+with open(SPIRV_CROSS, 'rb') as _f: MSL_STAGE_ID = [hashlib.sha256(_f.read()).hexdigest(), CROSS.record, hashlib.sha256(module_form(dmsh_cross)).hexdigest()]
+MSL_STAGE_RULE = hashlib.sha256(module_form(dmsh_atomic)).hexdigest()
+
+def xlate_cache_key(job):
+    with open(job['code'], 'rb') as f: code = f.read()
+    return dmsh_stages.digest(XLATE_STAGE_ID, {k: v for k, v in job.items() if k != 'code'}, code)
+
+def xlate_files(job, directory):
+    return {name: os.path.join(directory, job['key'] + suffix) for name, suffix in
+            [('spv', '.spv'), ('resources', '.res.json')] + ([('reader', '.reader.spv')] if 'geometry_topology' in job else [])}
+
+def xlate_restore(job, directory):
+    if STAGES is None: return False
+    parts = STAGES.get('xlate', xlate_cache_key(job))
+    paths = xlate_files(job, directory)
+    if parts is None or not paths.keys() <= parts.keys(): return False
+    for name, path in paths.items():
+        with open(path, 'wb') as f: f.write(parts[name])
+    return True
+
+def xlate_store(job, directory):
+    if STAGES is None: return
+    paths = xlate_files(job, directory)
+    if not all(os.path.isfile(path) for path in paths.values()): return
+    parts = {}
+    for name, path in paths.items():
+        with open(path, 'rb') as f: parts[name] = f.read()
+    STAGES.put('xlate', xlate_cache_key(job), parts)
+
+def cross_msl(spv, output=None):
+    """Initial SPIRV-Cross output, before game-independent MSL rewrites. A hit avoids the instruction walk and the subprocess."""
+    key = None
+    if STAGES is not None:
+        with open(spv, 'rb') as f: binary = f.read()
+        key = dmsh_stages.digest(MSL_STAGE_ID, [XC, MSL_STAGE_RULE], binary)
+        cached = STAGES.get('msl', key)
+        if cached is not None and 'source' in cached:
+            source = cached['source'].decode()
+            if output:
+                with open(output, 'w') as f: f.write(source)
+            return subprocess.CompletedProcess([], 0, '' if output else source, '')
+    cross_args = dmsh_atomic.cross_args(XC, spv)
+    with open(spv, 'rb') as f: binary = f.read()
+    try: source = CROSS.compile(binary, cross_args)
+    except dmsh_cross.Error: source = None   # the CLI retains its established diagnostics for failures
+    if source is None:
+        args = [SPIRV_CROSS, *cross_args, spv] + (['--output', output] if output else [])
+        result = subprocess.run(args, capture_output=True, text=True)
+    else:
+        if output:
+            with open(output, 'w') as f: f.write(source)
+        result = subprocess.CompletedProcess([], 0, '' if output else source, '')
+    if result.returncode == 0 and STAGES is not None and key is not None:
+        if output:
+            with open(output, 'rb') as f: source_bytes = f.read()
+        else: source_bytes = result.stdout.encode()
+        STAGES.put('msl', key, {'source': source_bytes})
+    return result
 
 _CAST = ('as_type<int>(', 'as_type<uint>(')
 def int_inputs(src):
@@ -1250,15 +1331,18 @@ def geometry_finish(key, w, j, c1):
     code = open(j['code'], 'rb').read()
     dmsh_geometry.output_layout(code, 0)   # validate before running the translator
     jobs = [{**j, 'key': key + '_g' + str(t), 'geometry_topology': t} for t in range(5)]
-    jp = os.path.join(w, key + '_geometry.json'); atomic_json(jp, jobs)
-    rx = subprocess.run([XLATE, jp, w], capture_output=True, text=True)
-    if rx.returncode: return 'geometry failed', rx.stderr.strip()[:160], None
+    missing = [job for job in jobs if not xlate_restore(job, w)]
+    if missing:
+        jp = os.path.join(w, key + '_geometry.json'); atomic_json(jp, missing)
+        rx = subprocess.run([XLATE, jp, w], capture_output=True, text=True)
+        if rx.returncode: return 'geometry failed', rx.stderr.strip()[:160], None
+        for job in missing: xlate_store(job, w)
     base = None
     for t, job in enumerate(jobs):
         layout = dmsh_geometry.output_layout(code, t)
         k = job['key']; spv = os.path.join(w, k + '.spv')
         dmsh_geometry.flatten_sets(spv)
-        r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
+        r = cross_msl(spv)
         if r.returncode: return 'geometry MSL failed', r.stderr.strip()[:160], None
         plain = dmsh_geometry.topology_pointer(pool_arrays(precise(dmsh_atomic.check_msl(r.stdout))))
         src = dmsh_geometry.capture_input(plain)
@@ -1288,7 +1372,7 @@ def geometry_finish(key, w, j, c1):
             base = {**refl, 'key': key + '_b'}
             save('_b', src, base)
             spv = os.path.join(w, k + '.reader.spv'); dmsh_geometry.flatten_sets(spv)
-            r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
+            r = cross_msl(spv)
             if r.returncode: return 'geometry reader failed', r.stderr.strip()[:160], None
             reader = vs_layer(vs_init(dmsh_geometry.reader(pool_arrays(precise(dmsh_atomic.check_msl(r.stdout))))))
             analysis, full = vs_depth(reader)
@@ -1316,17 +1400,20 @@ def finish(key, w, j, c1):
         try: return geometry_finish(key, w, j, c1)
         except (ValueError, subprocess.CalledProcessError) as e: return 'geometry failed', str(e)[:160], None
     if j['stage'] == 'vs': spv_single_lane(os.path.join(w, key + '.spv'))   # one-lane subgroups (see spv_single_lane)
-    r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, os.path.join(w, key + '.spv')), os.path.join(w, key + '.spv'), '--output', msl], capture_output=True, text=True)
+    r = cross_msl(os.path.join(w, key + '.spv'), msl)
     if r.returncode: return 'MSL failed', r.stderr.strip()[:160], None
     src = open(msl).read()
     if j['stage'] == 'vs':   # second pass: re-translate with inputs that are only used as integers reported as uint (see int_inputs)
         extra = {l: t for l, t in int_inputs(src).items() if l not in j['attr']}
         if extra:
-            j['attr'].update(extra); jp = os.path.join(w, f'job1_{key}.json'); json.dump([j], open(jp, 'w'))
-            rx = subprocess.run([XLATE, jp, w], capture_output=True, text=True)
-            if rx.returncode or not os.path.exists(os.path.join(w, key + '.spv')): return 'translation failed', ('integer-input retranslation: ' + rx.stderr.strip())[:160], None
+            j['attr'].update(extra)
+            if not xlate_restore(j, w):
+                jp = os.path.join(w, f'job1_{key}.json'); json.dump([j], open(jp, 'w'))
+                rx = subprocess.run([XLATE, jp, w], capture_output=True, text=True)
+                if rx.returncode or not os.path.exists(os.path.join(w, key + '.spv')): return 'translation failed', ('integer-input retranslation: ' + rx.stderr.strip())[:160], None
+                xlate_store(j, w)
             spv_single_lane(os.path.join(w, key + '.spv'))
-            r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, os.path.join(w, key + '.spv')), os.path.join(w, key + '.spv'), '--output', msl], capture_output=True, text=True)
+            r = cross_msl(os.path.join(w, key + '.spv'), msl)
             if r.returncode: return 'MSL failed', r.stderr.strip()[:160], None
             src = open(msl).read()
     try: src = dmsh_atomic.check_msl(src)
@@ -1447,7 +1534,8 @@ for key in keys:
     if hit: cache_hits.add(key)
     else: jobs[key], c1s[key] = job_for(key, name, rec_of(key)[1], w)
 misses = [key for key in keys if key not in cache_hits]
-chunks = [misses[i::NJ] for i in range(NJ)]
+translation_misses = [key for key in misses if not xlate_restore(jobs[key], w)]
+chunks = [translation_misses[i::NJ] for i in range(NJ)]
 def xl(ch):
     jp = os.path.join(w, f'job_{abs(hash(ch[0]))}.json'); json.dump([jobs[k] for k in ch], open(jp, 'w'))
     return subprocess.run([XLATE, jp, w], capture_output=True, text=True)
@@ -1457,6 +1545,8 @@ for r in xr:
     for ln in r.stderr.splitlines():
         m = re.match(r'\[RED\] (\w+): (.*)', ln)
         if m: xerr[m.group(1)] = m.group(2)[:160]
+for key in translation_misses:
+    if key not in xerr: xlate_store(jobs[key], w)
 def fin(key):
     if key in cache_hits:
         refl = json.load(open(os.path.join(out, key + '_b.json')))
@@ -1493,6 +1583,7 @@ shutil.rmtree(w, ignore_errors=True)
 st = collections.Counter(r[1] for r in res)
 print(f'shaders {len(res)}: ok {st["ok"]}, ' + ', '.join(f'{k} {v}' for k, v in st.items() if k != 'ok'))
 print(f'shader cache: hit {PRE_STATS["hit"]}, rebuilt {PRE_STATS["miss"]}')
+if STAGES is not None: print(STAGES.summary())
 for reason in ('new key', 'rule changed', 'code fingerprint changed: all rebuilt'):
     if PRE_STATS[reason]: print(f'  {reason} {PRE_STATS[reason]}')
 print(f'variant cache: generated {BF_STATS["generated"]}, hit {BF_STATS["hit"]}, rebuilt {BF_STATS["miss"]}, compiled {BF_STATS["compile"]}')

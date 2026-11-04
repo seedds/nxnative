@@ -70,6 +70,20 @@ namespace Ryujinx.Graphics.Shader.Decoders
 
             rightBlock.EndAddress = EndAddress;
             rightBlock.Successors.AddRange(Successors);
+
+            // The outgoing edges now originate in the right block. Update them
+            // before adding the new fallthrough edge, including self-loops.
+            foreach (Block successor in Successors)
+            {
+                for (int i = 0; i < successor.Predecessors.Count; i++)
+                {
+                    if (successor.Predecessors[i] == this)
+                    {
+                        successor.Predecessors[i] = rightBlock;
+                    }
+                }
+            }
+
             rightBlock.Predecessors.Add(this);
 
             EndAddress = rightBlock.Address;

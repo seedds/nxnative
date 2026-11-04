@@ -71,7 +71,7 @@ enum {
     GL_ONE_MINUS_DST_COLOR, GL_SRC_ALPHA_SATURATE,
     GL_FRONT = 0x404, GL_BACK = 0x405, GL_FRONT_AND_BACK = 0x408,
     GL_CULL_FACE = 0xb44, GL_DEPTH_TEST = 0xb71, GL_STENCIL_TEST = 0xb90, GL_VIEWPORT = 0xba2, GL_BLEND = 0xbe2, GL_SCISSOR_TEST = 0xc11,
-    GL_UNPACK_ROW_LENGTH = 0xcf2, GL_UNPACK_ALIGNMENT = 0xcf5, GL_MAX_TEXTURE_SIZE = 0xd33, GL_INDEX_SHIFT = 0xd12, GL_INDEX_OFFSET = 0xd13,
+    GL_UNPACK_SWAP_BYTES = 0xcf0, GL_UNPACK_ROW_LENGTH = 0xcf2, GL_UNPACK_ALIGNMENT = 0xcf5, GL_MAX_TEXTURE_SIZE = 0xd33, GL_INDEX_SHIFT = 0xd12, GL_INDEX_OFFSET = 0xd13,
     GL_TEXTURE_2D = 0xde1, GL_TEXTURE_BORDER_COLOR = 0x1004,
     GL_BYTE = 0x1400, GL_UNSIGNED_BYTE, GL_SHORT, GL_UNSIGNED_SHORT, GL_INT, GL_UNSIGNED_INT, GL_FLOAT, GL_HALF_FLOAT = 0x140b,
     GL_INVERT = 0x150a, GL_COLOR_INDEX = 0x1900, GL_STENCIL_INDEX = 0x1901, GL_DEPTH_COMPONENT = 0x1902, GL_RED = 0x1903, GL_GREEN, GL_BLUE, GL_ALPHA, GL_RGB, GL_RGBA,
@@ -86,7 +86,7 @@ enum {
     GL_CLAMP_TO_BORDER = 0x812d, GL_CLAMP_TO_EDGE = 0x812f, GL_TEXTURE_MAX_LEVEL = 0x813d,
     GL_DEPTH_COMPONENT16 = 0x81a5, GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT32,
     GL_MAJOR_VERSION = 0x821b, GL_MINOR_VERSION, GL_NUM_EXTENSIONS, GL_RG = 0x8227, GL_R8 = 0x8229, GL_RG8 = 0x822b, GL_R16F = 0x822d, GL_R32F, GL_RG16F, GL_RG32F,
-    GL_UNSIGNED_SHORT_5_6_5 = 0x8363, GL_MIRRORED_REPEAT = 0x8370,
+    GL_UNSIGNED_SHORT_5_6_5 = 0x8363, GL_UNSIGNED_INT_2_10_10_10_REV = 0x8368, GL_UNSIGNED_INT_10F_11F_11F_REV = 0x8c3b, GL_MIRRORED_REPEAT = 0x8370,
     GL_COMPRESSED_RGB_S3TC_DXT1 = 0x83f0, GL_COMPRESSED_RGBA_S3TC_DXT1, GL_COMPRESSED_RGBA_S3TC_DXT3, GL_COMPRESSED_RGBA_S3TC_DXT5,
     GL_TEXTURE0 = 0x84c0, GL_MAX_RENDERBUFFER_SIZE = 0x84e8, GL_DEPTH_STENCIL = 0x84f9, GL_UNSIGNED_INT_24_8 = 0x84fa, GL_MAX_TEXTURE_LOD_BIAS = 0x84fd,
     GL_TEXTURE_MAX_ANISOTROPY = 0x84fe, GL_MAX_TEXTURE_MAX_ANISOTROPY, GL_TEXTURE_LOD_BIAS = 0x8501,
@@ -371,7 +371,7 @@ static struct {
     GLenum sfunc, sfail, szfail, spass; GLint sref; GLuint smask, swmask;
     GLint vp[4], sc[4]; float pfactor, punits, psize;
     float va[16][4];
-    int unpack_align, unpack_row, pack_align;
+    int unpack_align, unpack_row, unpack_swap, pack_align;
     uint32_t palette[256]; int npalette, color_table, index_shift, index_offset;
     int swap_interval;
 } S = {.cmask = 0xf, .dmask = 1, .dfunc = 0x201, .cull_face = GL_BACK, .front = GL_CCW, .bsrc = 1, .bdst = 0, .bsa = 1, .bda = 0, .eqc = GL_FUNC_ADD, .eqa = GL_FUNC_ADD,
@@ -477,7 +477,7 @@ static int fmt_pick(GLint ifmt, GLenum format, GLenum type, int *cv) {
         case GL_RG16F: return F_RG16F;
         case GL_R32F: return F_R32F;
         case GL_RG32F: return F_RG32F;
-        case GL_R11F_G11F_B10F: if (type != 0x8c3b) *cv = CV_NONE; return F_RG11B10F;
+        case GL_R11F_G11F_B10F: if (type != GL_UNSIGNED_INT_10F_11F_11F_REV) *cv = CV_NONE; return F_RG11B10F;
         case GL_RGB10_A2: return F_RGB10A2;
         case GL_RGBA16: return F_RGBA16;
         case GL_DEPTH_COMPONENT16: return F_D16;
@@ -507,6 +507,15 @@ static int fmt_pick(GLint ifmt, GLenum format, GLenum type, int *cv) {
 static size_t fmt_pitch(int f, uint32_t w) { const fmt_t *m = &g_fmt[f]; return (size_t)((w + m->bw - 1) / m->bw) * m->bytes; }
 static size_t fmt_rows(int f, uint32_t h) { const fmt_t *m = &g_fmt[f]; return (h + m->bh - 1) / m->bh; }
 
+// GL swaps bytes within each element, before converting packed colours; it never reverses component order or changes the caller's memory.
+static void unpack_copy(void *dst, const void *src, size_t bytes, int element) {
+    memcpy(dst, src, bytes);
+    if (S.unpack_swap && element > 1) {
+        uint8_t *d = dst;
+        for (size_t i = 0; i + element <= bytes; i += element)
+            for (int j = 0; j < element / 2; j++) { uint8_t v = d[i + j]; d[i + j] = d[i + element - 1 - j]; d[i + element - 1 - j] = v; }
+    }
+}
 // The given pixels (GL unpack rules: rows of unpack_row or w pixels, each row aligned to unpack_align) → the Metal texture's bytes, rows packed. NULL data → zeros
 static void *pixels_convert(const void *src, uint32_t w, uint32_t h, GLenum format, GLenum type, int f, int cv, size_t *pitch_out) {
     size_t dp = fmt_pitch(f, w), rows = fmt_rows(f, h);
@@ -519,16 +528,17 @@ static void *pixels_convert(const void *src, uint32_t w, uint32_t h, GLenum form
                 format >= GL_RED && format <= GL_LUMINANCE_ALPHA ? comps_of[format - GL_RED] : 4;
     int tbytes = type == GL_FLOAT || type == GL_UNSIGNED_INT || type == GL_INT ? 4 : type == GL_HALF_FLOAT || type == GL_UNSIGNED_SHORT || type == GL_SHORT ? 2 : 1;
     if (cv == CV_565 || cv == CV_4444 || cv == CV_5551) { comps = 1; tbytes = 2; }
+    if (type == GL_UNSIGNED_INT_2_10_10_10_REV || type == GL_UNSIGNED_INT_10F_11F_11F_REV) { comps = 1; tbytes = 4; }
     size_t sp = (size_t)(S.unpack_row ? S.unpack_row : w) * comps * tbytes; sp = (sp + S.unpack_align - 1) / S.unpack_align * S.unpack_align;
     const uint8_t *s = src;
     for (uint32_t y = 0; y < h; y++, s += sp) {
         uint8_t *d = dst + y * dp;
         switch (cv) {
-            case CV_COPY: memcpy(d, s, umin((uint32_t)dp, (uint32_t)((size_t)w * comps * tbytes))); break;
+            case CV_COPY: unpack_copy(d, s, umin((uint32_t)dp, (uint32_t)((size_t)w * comps * tbytes)), tbytes); break;
             case CV_RGB8: for (uint32_t x = 0; x < w; x++) { d[4 * x] = s[3 * x]; d[4 * x + 1] = s[3 * x + 1]; d[4 * x + 2] = s[3 * x + 2]; d[4 * x + 3] = 255; } break;
-            case CV_565: for (uint32_t x = 0; x < w; x++) { uint16_t v; memcpy(&v, s + 2 * x, 2); d[4 * x] = (v >> 11) * 255 / 31; d[4 * x + 1] = (v >> 5 & 63) * 255 / 63; d[4 * x + 2] = (v & 31) * 255 / 31; d[4 * x + 3] = 255; } break;
-            case CV_4444: for (uint32_t x = 0; x < w; x++) { uint16_t v; memcpy(&v, s + 2 * x, 2); d[4 * x] = (v >> 12) * 17; d[4 * x + 1] = (v >> 8 & 15) * 17; d[4 * x + 2] = (v >> 4 & 15) * 17; d[4 * x + 3] = (v & 15) * 17; } break;
-            case CV_5551: for (uint32_t x = 0; x < w; x++) { uint16_t v; memcpy(&v, s + 2 * x, 2); d[4 * x] = (v >> 11) * 255 / 31; d[4 * x + 1] = (v >> 6 & 31) * 255 / 31; d[4 * x + 2] = (v >> 1 & 31) * 255 / 31; d[4 * x + 3] = v & 1 ? 255 : 0; } break;
+            case CV_565: for (uint32_t x = 0; x < w; x++) { uint16_t v; unpack_copy(&v, s + 2 * x, 2, 2); d[4 * x] = (v >> 11) * 255 / 31; d[4 * x + 1] = (v >> 5 & 63) * 255 / 63; d[4 * x + 2] = (v & 31) * 255 / 31; d[4 * x + 3] = 255; } break;
+            case CV_4444: for (uint32_t x = 0; x < w; x++) { uint16_t v; unpack_copy(&v, s + 2 * x, 2, 2); d[4 * x] = (v >> 12) * 17; d[4 * x + 1] = (v >> 8 & 15) * 17; d[4 * x + 2] = (v >> 4 & 15) * 17; d[4 * x + 3] = (v & 15) * 17; } break;
+            case CV_5551: for (uint32_t x = 0; x < w; x++) { uint16_t v; unpack_copy(&v, s + 2 * x, 2, 2); d[4 * x] = (v >> 11) * 255 / 31; d[4 * x + 1] = (v >> 6 & 31) * 255 / 31; d[4 * x + 2] = (v >> 1 & 31) * 255 / 31; d[4 * x + 3] = v & 1 ? 255 : 0; } break;
             case CV_INDEX:
                 for (uint32_t x = 0; x < w; x++) {
                     int i = ((int)s[x] << S.index_shift) + S.index_offset; uint32_t c = S.npalette ? S.palette[i < 0 ? 0 : i >= S.npalette ? S.npalette - 1 : i] : 0xff000000u | s[x] * 0x10101u;
@@ -1205,8 +1215,9 @@ GL(glScissor, void, GLint x, GLint y, GLsizei w, GLsizei h) { S.sc[0] = x; S.sc[
 GL(glPixelStorei, void, GLenum p, GLint v) {
     if (p == GL_UNPACK_ALIGNMENT && (v == 1 || v == 2 || v == 4 || v == 8)) S.unpack_align = v;
     else if (p == GL_UNPACK_ROW_LENGTH) S.unpack_row = v;
+    else if (p == GL_UNPACK_SWAP_BYTES) S.unpack_swap = v != 0;
     else if (p == GL_PACK_ALIGNMENT && (v == 1 || v == 2 || v == 4 || v == 8)) S.pack_align = v;
-    else if (p >= 0xcf0 && p <= 0xcf4 && !v) {}   // SWAP_BYTES, LSB_FIRST, SKIP_ROWS, SKIP_PIXELS at their defaults
+    else if (p >= 0xcf1 && p <= 0xcf4 && !v) {}   // LSB_FIRST, SKIP_ROWS, SKIP_PIXELS at their defaults
     else RED1("glPixelStorei(%#x, %d) not implemented", p, v);
 }
 // Colour-index images through a palette (GL's compatibility pixel transfer: glColorTable, GL_INDEX_SHIFT / GL_INDEX_OFFSET); the game's texture loader sets a palette for its
@@ -1290,6 +1301,7 @@ GL(glGetIntegerv, void, GLenum p, GLint *v) {
         case 0x84e0: *v = GL_TEXTURE0 + S.unit; return;   // ACTIVE_TEXTURE
         case GL_MAX_TEXTURE_MAX_ANISOTROPY: *v = 16; return;
         case GL_UNPACK_ALIGNMENT: *v = S.unpack_align; return;
+        case GL_UNPACK_SWAP_BYTES: *v = S.unpack_swap; return;
         case GL_PACK_ALIGNMENT: *v = S.pack_align; return;
     }
     static GLenum seen[32]; static int n;

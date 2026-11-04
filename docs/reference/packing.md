@@ -189,6 +189,13 @@
 - **Fix:** with neither, `title_of` asks the package: `nx_extract <prod.keys> --title <package>` opens it, decrypts the header of each meta NCA with the keys' `header_key` and prints the lowest title ID (the base game's before its update's or a DLC's). It works for NSP, NSZ (the meta NCA is not compressed), XCI and XCZ, and runs only when the ticket and the tag are both missing, so the common cases stay a read of the file name table. `nx_extract` is built into a temporary folder for it, since the build folder is named after the title ID. Key values are never printed.
 - **Found on:** NX2Apple, [LNPANDY/NX2Apple#177](https://github.com/LNPANDY/NX2Apple/issues/177) ([Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), whose base NSP has no ticket). Applies to every game.
 
+### A game file whose extension is in capitals is not found
+
+- **Symptom:** `[RED] no NSP with a readable title ID in <folder>` for a folder holding `Game [0100XXXXXXXXXXXX].NSP`, on any Mac volume; renaming it to `.nsp` makes the build go on. A dump folder beside `Game.NSP` is packed instead of the package, and `Game.NUP` is not found. A `Game.NSZ` stops with `nsz made no Game.nsp`.
+- **Cause:** the script listed the folder with `Path.glob('*.nsp')`, which compares case-sensitively on every POSIX system, a case-insensitive Mac volume included. nsz has the same limit of its own: `PathTools.isCompressedGame` takes only a lowercase extension, and nsz skips anything else and exits 0 with no output. It resolves a symlink before it looks.
+- **Fix:** `files_with_suffix` lists a folder's files by their lowercased extension, for every scan of the inputs, and a package beside a compressed one is found in that listing. A compressed file in capitals goes to nsz as a hard link with a lowercase extension in its temporary folder, or as a copy where there can be none (another volume, exFAT), so the player's file stays as it is.
+- **Found on:** NX2Apple, [LNPANDY/NX2Apple#554](https://github.com/LNPANDY/NX2Apple/issues/554) ([Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md)). Applies to every game.
+
 ### A merged NSP (base game, update and DLC in one file) packs as one title
 
 - **Symptom:** a game folder holding one merged package (`[Base + Update + DLC].nsp`, or a 1G+1U cartridge dump with no update NSP beside it) stops with `no base game NSP found`, or packs the base game alone (v0) without its update and DLC; when the base game's own build cannot be packed (Mario Kart 8 Deluxe 1.0.0's `main` is 32-bit), the build stops there.

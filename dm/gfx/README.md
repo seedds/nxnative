@@ -126,6 +126,20 @@ make -C dm/gfx/tex/tests run    # texture submodule unit tests; the real-data it
 make -C dm/gfx/metal run        # offscreen example self-test, see metal/README.md
 ```
 
+The opt-in `python3 dm/gfx/tests/metal_conversion_probe.py --output-dir /path/to/new-run`
+measures Metal's RG11B10Float fragment-output, attachment-store and blit path. It builds a
+standalone probe and requires a new directory; no game profile, data or renderer is used.
+`results.json` is published only after a complete measurement and includes 95 exact FP32
+input words, raw packed output words, source/input hashes, run ID and OS/GPU/compiler/SDK
+provenance. Failed attempts leave `failure.json`, not a completed report. Keep the binary
+inputs and outputs with the report. Nearest-even and lower-representable candidates are
+comparisons for these nonnegative finite inputs, not required GPU behavior. This does not
+establish a game's sampling precision, isolate conversion stages or prove an aliasing fix.
+The shared Metal routine can be called without the CLI main, but an iPhone app wrapper and
+physical verification remain outstanding. The measurement is excluded from `make run`;
+`python3 -m unittest discover -s dm/gfx/tests -p test_metal_conversion_probe.py` checks its
+input identity, arithmetic, raw-word serialization and rejection of incomplete reports.
+
 The tests in `dm/gfx/tests` compile the production code in directly and need a Metal device on the local machine; a few of them run under `MTL_DEBUG_LAYER=1` (the Metal validation layer). Most tests do not read the workspace; the exceptions are `t_refl` and `t_rt_range_ro`, which read the translated shader reflection json under `$DM_ROOT/build/cache/metal_shader_cache`, and `test_tbdr_budget.py`, which creates a temporary directory under `$DM_ROOT/run/gfx`. Main contents:
 
 | Test | What it checks |

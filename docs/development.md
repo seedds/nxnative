@@ -232,6 +232,36 @@ Generated projects and Xcode build products stay in that folder; the host profil
 header is generated under `dm/host/gen/` as usual. CI uploads failure logs.
 GPU regression tests still run locally with `make -C dm/gfx/tests GAME=<id> run`.
 
+For the depth/stencil clear fixture on a physical iPhone, use
+`dm/ios/tools/test_gfx_on_iphone.py`. It compiles `t_clear_ds.m` unchanged in a
+Debug/O1 app, calls it on a background thread, and collects its checks and log.
+Xcode, the iPhoneOS SDK, Metal tools, XcodeGen and a development signing team are
+required. No game files or keys are used. Choose exactly one mode:
+`--generate-only` writes the project and headers, `--build-only` also builds and
+signs, and `--run` additionally installs and launches on the named device.
+
+```sh
+python3 dm/ios/tools/test_gfx_on_iphone.py --run \
+    --profile 040074A01BF12000 --team YOUR_TEAM_ID \
+    --bundle-id YOUR_REGISTERED_BUNDLE_ID --device YOUR_DEVICE_UDID \
+    --output-dir /path/to/new/scratch/clear-ds
+```
+
+Reserve the device before running; the tool replaces the app with the selected
+bundle ID and terminates an existing instance of that app. It does not manage
+other games or device ownership. The default deployment target is iOS 26.0.
+`--slot-run /path/to/slot-run.sh` optionally wraps the build, with `--slot-dir`
+and `--slot-name` for shared build coordination; no wrapper is needed otherwise.
+All generated files stay in the new output directory. `receipt.json` records
+source hashes, signing verification and whether the tree changed during the
+build. `results.json` is accepted only when its run ID matches this build and
+the report is complete; passing requires a zero exit status, no failures and at
+least one check. Device operations have timeouts and copy diagnostics remain in
+`device-copy.log`. The fixture requests Metal validation; confirm the log's
+`Metal API Validation Enabled` message rather than inferring it from the
+environment value. These checks verify depth/stencil behavior, not Release
+gameplay, presentation correctness or sustained frame pacing.
+
 `.github/workflows/lint-python.yml` lints `scripts/` and the Python tools under
 `dm/` with ruff (rules for bugs, never reformatting) and type-checks them with
 pyright in basic mode (`pyproject.toml`). It is a ratchet: today's findings are

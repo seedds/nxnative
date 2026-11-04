@@ -601,6 +601,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `dmsh_build.py` (`precise`), `vk_shaders.py` and `gl_shaders.py` write the `precise::` functions instead (every game).
 - **Found on:** [Super Mario Galaxy 2](../../dm/games/0100FD8022DAA000/README.md) (GitHub issue 72). The NVN chain had about 124,000 `fast::max`, 98,000 `fast::clamp` and 41,000 `fast::min` in [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md), none guarded by its `isnan` selects.
 
+### Non-finite floating colour outputs saturate the HDR target
+
+- **Symptom:** an object that the game expects to be black becomes the brightest part of an HDR image, and bloom spreads it across the screen.
+- **Cause:** a shader can legitimately produce a non-finite floating colour output, for example when a packed animation scale is zero and a later expression becomes `inf - inf`. Maxwell's colour output conversion writes black for that value; Metal's conversion to R11G11B10F writes the format's maximum finite value (`65024`), so the following bloom passes receive a saturated rectangle.
+- **Fix:** `dmsh_build.py` (`finite_fragment_outputs`, `finite_vertex_outputs`) rewrites every generated MSL entry point: a non-finite floating `[[color(n)]]` or `[[user(locnN)]]` member becomes zero, at early returns and struct-literal returns too. The translated arithmetic is untouched; the change is at the output boundary, where the GPUs' conversions differ. Positions, point size, integer outputs and bit-pattern outputs are left untouched. Sanitizing at the vertex side matters because interpolation can turn a NaN varying into the format maximum before the fragment stage sees it. This is unconditional in the translation chain, for every game; no profile key selects it.
+- **Found on:** [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md): the `LineUVScroll` TV material produced a non-finite colour while the TV's saved disabled state was active. The scene target became saturated and bloom covered the room; sanitizing the varying and fragment output makes the TV black without changing its active frames.
+- **Check:** `dm/gfx/tests/test_dmsh_fragment_outputs.py` covers early and struct-literal returns, every output struct and entry point, integer and position members, and the strip that keeps the readable-tile variant (`dmsh_fetch.py`) working.
+
 ### Integer fragment outputs declared by hand
 
 - **Symptom:** a pipeline red line for a float output meeting an integer attachment (the red line prints the row to add); a BC encoder's pipeline fails.

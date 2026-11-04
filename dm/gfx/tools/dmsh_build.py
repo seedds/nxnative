@@ -49,6 +49,100 @@ XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-textur
 # GX lighting takes max(0, NaN) from light directions left at zero, and the half of Mario its fill light faces came out white on the iPhone (GitHub issue 72; vk_shaders.py PRECISE)
 def precise(msl): return re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', msl)
 
+def _finite_component_helpers(fn):
+    """The scalar / vector helpers one output rewrite adds: a non-finite component becomes zero, finite components keep their value."""
+    out = []
+    for ty in ('float', 'half', 'float2', 'half2', 'float3', 'half3', 'float4', 'half4'):
+        if ty in ('float', 'half'):
+            zero = '0.0f' if ty == 'float' else '0.0h'
+            out.append(f'static inline {ty} {fn}({ty} v) {{ return isfinite(v) ? v : {zero}; }}')
+        else:
+            out.append(f'static inline {ty} {fn}({ty} v) {{ return {ty}(' + ', '.join(f'{fn}(v.{c})' for c in 'xyzw'[:int(ty[-1])]) + '); }')
+    return '\n'.join(out)
+
+def _finite_outputs(msl, stage):
+    """Write zero for a non-finite floating output of a vertex or fragment entry point (see finite_fragment_outputs / finite_vertex_outputs).
+
+    A generated output struct may carry [[color(n)]] (fragment) or [[user(locnN)]] (vertex) members. Each such struct gets a helper that sanitizes only its floating
+    members, and every entry point returning it gets every return wrapped. The helper is inserted directly after its struct: extra structs (main0_out_u, main0_out_m,
+    main0_out_d, main0l_out) are appended after earlier functions, so a single block after the last struct could sit after its first use. Positions, point size,
+    integer / bit-pattern outputs and non-floating members keep their values."""
+    attr = 'color' if stage == 'fragment' else 'user'
+    fn = 'dm_finite_output' if stage == 'fragment' else 'dm_finite_vertex'
+    prefix = 'dm_finite_out_' if stage == 'fragment' else 'dm_finite_vout_'
+    marker = 'dm_finite_output' if stage == 'fragment' else 'dm_finite_vertex'
+    if f'// {marker} helpers begin' in msl: return msl
+    structs = []
+    for m in re.finditer(r'struct\s+(\w+)\s*\{', msl):
+        end = msl.find('};', m.end())
+        if end < 0: continue
+        fields = [(f.group(1) + (f.group(2) or ''), f.group(3)) for f in re.finditer(
+            r'^\s*(float|half)([234])?\s+(\w+)\s*\[\[\s*' + attr + r'\(', msl[m.end():end], re.M)]
+        # A float declaration can carry raw integer bits (as_type<float>(...), the integer-entry-point source): those are data, not a colour value.
+        fields = [f for f in fields if not re.search(r'\bout\.%s(?:\.\w+)?\s*=\s*as_type<float\d?>\(' % re.escape(f[1]), msl)]
+        if fields: structs.append((m.group(1), fields, end + 2))
+    if not structs: return msl
+    for name, fields, end in reversed(structs):   # last first: an insertion does not move the earlier structs' offsets
+        body = ''.join(f'    v.{field} = {fn}(v.{field});\n' for _, field in fields)
+        block = (f'\n// {marker} struct begin\n'
+                 f'static inline {name} {prefix}{name}({name} v)\n{{\n{body}    return v;\n}}\n'
+                 f'// {marker} struct end\n')
+        msl = msl[:end] + block + msl[end:]
+    helpers = f'\n// {marker} helpers begin\n' + _finite_component_helpers(fn) + f'\n// {marker} helpers end\n'
+    if 'using namespace metal;' in msl: msl = msl.replace('using namespace metal;', 'using namespace metal;' + helpers, 1)
+    else: msl = helpers + msl
+    names = {name: prefix + name for name, _, _ in structs}
+    for m in reversed(list(re.finditer(r'\b' + stage + r'\s+(\w+)\s+(\w+)\s*\(', msl))):
+        sanitize = names.get(m.group(1))
+        if not sanitize: continue
+        brace = msl.find('{', m.end())
+        if brace < 0: continue
+        depth, end = 0, -1
+        for i in range(brace, len(msl)):
+            depth += (msl[i] == '{') - (msl[i] == '}')
+            if depth == 0: end = i + 1; break
+        if end < 0: continue
+        body, n = re.subn(r'\breturn\s+(?!' + re.escape(sanitize) + r'\s*\()([^;]+);',
+                          lambda r, sanitize=sanitize: f'return {sanitize}({r.group(1)});', msl[brace:end])
+        if n: msl = msl[:brace] + body + msl[end:]
+    return msl
+
+def finite_fragment_outputs(msl):
+    """A non-finite floating colour output becomes zero. Maxwell's colour output conversion writes black for a non-finite value (seen on R11G11B10F); Metal may write the
+    format's largest finite value (65024), which bloom spreads across the screen. A game may leave an output non-finite legitimately (a packed animation scale of zero makes
+    inf - inf); that is no reason to saturate the attachment. Integer and bit-pattern colour outputs are left untouched."""
+    return _finite_outputs(msl, 'fragment')
+
+def finite_vertex_outputs(msl):
+    """A non-finite floating user varying becomes zero before rasterization. Hardware may turn a NaN interpolant into a finite maximum before the fragment stage sees it.
+    Positions, point size and integer outputs keep their values; every floating [[user(locnN)]] member is sanitized."""
+    return _finite_outputs(msl, 'vertex')
+
+def finite_fragment_strip(msl):
+    """finite_fragment_outputs undone: its helpers removed and every wrapped return unwrapped. dmsh_fetch.py renames the output members and needs the original return out;
+    the readable-tile variant is sanitized again after that rewrite."""
+    if '// dm_finite_output' not in msl: return msl
+    msl = re.sub(r'\n?// dm_finite_output helpers begin.*?// dm_finite_output helpers end\n?', '\n', msl, flags=re.S)
+    msl = re.sub(r'\n?// dm_finite_output struct begin.*?// dm_finite_output struct end\n?', '\n', msl, flags=re.S)
+    for m in reversed(list(re.finditer(r'\breturn\s+dm_finite_out_\w+\s*\(', msl))):
+        start, i, depth = m.end() - 1, m.end() - 1, 0
+        while i < len(msl):
+            depth += (msl[i] == '(') - (msl[i] == ')')
+            if depth == 0: break
+            i += 1
+        j = i + 1
+        while j < len(msl) and msl[j] in ' \t': j += 1
+        if depth or j >= len(msl) or msl[j] != ';': continue
+        msl = msl[:m.start()] + 'return ' + msl[start + 1:i] + ';' + msl[j + 1:]
+    return msl
+
+def finite_fragment_base(msl):
+    """The fragment source with only main0: the finite rewrite stripped and the extra entry points fs_uint / fs_dual append (main0_out_u / _m / _d) cut."""
+    msl = finite_fragment_strip(msl)
+    cuts = [msl.find(marker) for marker in ('\nstruct main0_out_u\n', '\nstruct main0_out_d\n')]
+    cuts = [c for c in cuts if c >= 0]
+    return msl[:min(cuts) + 1] if cuts else msl
+
 # Ampere HMMA.16816 with an f16 accumulator (agl's upscaler networks) reaches the MSL as a call of dmsh_hmma16816_f16(lane, block, A0..A3, B0, B1, C0, C1, out D1) → D0, with
 # the subgroup's 256-word block of the scratch shared memory as the last argument (InstEmitAmpereTensor.AHmma, TensorPass, HelperFunctionManager.GenerateHmma16816F16). The
 # translator's body computes D lane by lane from the block; here it becomes simdgroup_matrix code over the same block: A row-major (halves 0..255, 16 a row), B transposed
@@ -325,14 +419,17 @@ def write_refl(key, refl):
 
 def fetch_finish(key, src, refl):
     if refl['stage'] != 'ps': return refl
-    # Those with rewritable samples get variants as before; those without get an output-mapping-only variant, and only for keys in the list (bf_want.tsv, produced by the host planner)
-    fv, fmeta = dmsh_fetch.variant(src, refl['bindings'], om_only_ok=key in BF_WANT)
+    # Those with rewritable samples get variants as before; those without get an output-mapping-only variant, and only for keys in the list (bf_want.tsv, produced by the host planner).
+    # The variant renames main0_out's members, so it is made from the source without the finite-output wrapper and sanitized again afterwards. finite_fragment_base also
+    # cuts main0_out_d: dmsh_fetch.py cuts at main0_out_u, but a shader with a dual-source entry point and no integer one has only main0_out_d after main0.
+    fv, fmeta = dmsh_fetch.variant(finite_fragment_base(src), refl['bindings'], om_only_ok=key in BF_WANT)
     if not fv:
         for path in (os.path.join(out, key + '_bf.metallib'), os.path.join(out, key + '_bf.metal')) + ((os.path.join(IOSOUT, key + '_bf.metallib'),) if IOSOUT else ()):
             try: os.unlink(path)
             except FileNotFoundError: pass
         write_refl(key, refl)
         return refl
+    fv = finite_fragment_outputs(fv)
     BF_STATS['generated'] += 1
     fmsl = os.path.join(out, key + '_bf.metal')
     digest = bf_digest(fv, key)
@@ -431,7 +528,8 @@ def vin_finish(key, full, refl):
 
 def ps_side_finish(key, full, refl, mod, sfx, field, stats, what):
     """A pixel shader's side library <key>_<sfx> (mod.variant: dmsh_alpha.py, dmsh_logic.py), from the source with every entry point, compiled through the MSL-keyed Metal cache;
-    reflection <field> names its entry points. A shader the variant does not apply to gets none (stale libraries removed): the host draws it without. Changes refl; the caller writes it"""
+    reflection <field> names its entry points. A shader the variant does not apply to gets none (stale libraries removed): the host draws it without. Changes refl; the caller writes it.
+    The finite-output rewrite runs after the variant: both variants rewrite every return after the first entry point, which would also wrap the sanitizer functions' returns."""
     if refl['stage'] != 'ps': return refl
     libs = [os.path.join(out, f'{key}_{sfx}.metallib')] + ([os.path.join(IOSOUT, f'{key}_{sfx}.metallib')] if IOSOUT else [])
     refl.pop(field, None)
@@ -441,6 +539,7 @@ def ps_side_finish(key, full, refl, mod, sfx, field, stats, what):
             except FileNotFoundError: pass
     v, info = mod.variant(full)
     if not v: stats['not generated'] += 1; drop(); return refl
+    v = finite_fragment_outputs(v)
     msl = os.path.join(w, f'{key}_{sfx}.metal'); open(msl, 'w').write(v)
     try:
         if 'mac' in TARGETS: MTL.compile('mac', msl, libs[0])
@@ -1240,12 +1339,19 @@ def finish(key, w, j, c1):
         discard = vs_writes(src, reflect(key, 'vs', src, res))
         if discard: full += vs_discard(src)
         if j.get('tf'): full += vs_tf(src, j['tf'])   # transform feedback capture (see vs_tf)
-        plain = full
         full, lay = vs_layer_entry(full)   # layer entry points for a slice-writing geometry shader (see vs_layer_entry)
+        full = finite_vertex_outputs(full)   # a non-finite varying becomes zero before interpolation
+        plain = full
         open(msl, 'w').write(full)
     fu, fmask = fs_uint(src) if j['stage'] == 'ps' else (None, 0)   # the integer-output entry points (see fs_uint); the analysis below uses the source with only main0
     fd = fs_dual(src) if j['stage'] == 'ps' and key in DUAL_WANT else None   # the dual-source entry point (see fs_dual), from the source with only main0
-    if fu or fd: plain = src; open(msl, 'w').write((fu or src) + (fd or ''))
+    if j['stage'] == 'ps':
+        base = finite_fragment_outputs(src)   # a non-finite colour output becomes zero, not the attachment format's maximum
+        if fu or fd:
+            plain = base
+            src = finite_fragment_outputs((fu or src) + (fd or ''))   # fs_uint / fs_dual rename and copy outputs; sanitize the combined entry points
+        else: src = base
+        open(msl, 'w').write(src)
     def compile_targets():   # the selected targets from the same MSL (MSL identical to one compiled before takes that library, dmsh_mtlcache.py)
         if 'mac' in TARGETS: MTL.compile('mac', msl, lib)
         if 'ios' in TARGETS and IOSOUT: MTL.compile('ios', msl, os.path.join(IOSOUT, key + '_b.metallib'))
@@ -1271,7 +1377,8 @@ def finish(key, w, j, c1):
             'vertex_inputs': [{'location': int(m.group(2)), 'msl_type': m.group(1)} for m in re.finditer(r'(\w+)\s+\w+\s*\[\[attribute\((\d+)\)\]\]', src)],
             'raster': raster_facts(j['stage'], src), 'vs_pad': pad}
     if j['stage'] == 'vs': full = open(msl).read(); vin_finish(key, full, refl); pull_finish(key, full, refl)   # the shadow-input and pulling libraries (dmsh_vin.py, dmsh_pull.py), from the source with every entry point
-    if j['stage'] == 'ps': full = open(msl).read(); alpha_finish(key, full, refl); logic_finish(key, full, refl)   # the alpha test and logic operation libraries (dmsh_alpha.py, dmsh_logic.py), from the source with every entry point
+    if j['stage'] == 'ps':   # the alpha test and logic operation libraries (dmsh_alpha.py, dmsh_logic.py), from the source with every entry point, before the finite-output rewrite
+        full = finite_fragment_strip(open(msl).read()); alpha_finish(key, full, refl); logic_finish(key, full, refl)
     write_refl(key, refl)
     fetch_finish(key, src, refl)
     return 'ok', '', refl
@@ -1334,7 +1441,8 @@ def fin(key):
         refl = json.load(open(os.path.join(out, key + '_b.json')))
         src = open(os.path.join(out, key + '_b.metal')).read() if refl['stage'] in ('ps', 'vs') else ''
         if refl['stage'] == 'vs': write_refl(key, pull_finish(key, src, vin_finish(key, src, refl)))
-        return key, 'ok', '', fetch_finish(key, src, logic_finish(key, src, alpha_finish(key, src, refl)))
+        side = finite_fragment_strip(src) if refl['stage'] == 'ps' else src
+        return key, 'ok', '', fetch_finish(key, side, logic_finish(key, side, alpha_finish(key, side, refl)))
     if key in xerr or not os.path.exists(os.path.join(w, key + '.spv')): return key, 'translation failed', xerr.get(key, 'no spv'), None
     result = (key,) + finish(key, w, jobs[key], c1s[key])
     if result[1] == 'ok': publish_cache(key, digests[key], rule_fps[key], CODE_FP)

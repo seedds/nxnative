@@ -59,6 +59,7 @@ Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform
 - [iOS layouts: portrait, a half-folded Duo, iPad windows](../../../docs/reference/rendering.md#ios-layouts-portrait-a-half-folded-duo-ipad-windows), from PR #683 (iPhone Duo).
 - [AudioOut stop releases pending buffers](../../../docs/reference/audio.md#stopping-an-audioout-releases-its-pending-buffers), reported on 1.0.0 in PR #190.
 - [Unity's integer target frame rate](../../../docs/reference/frame-rate.md#unitys-integer-target-frame-rate).
+- [Non-finite floating colour outputs saturate the HDR target](../../../docs/reference/shaders.md#non-finite-floating-colour-outputs-saturate-the-hdr-target): the TV's saved-off `LineUVScroll` material.
 
 ## Open
 

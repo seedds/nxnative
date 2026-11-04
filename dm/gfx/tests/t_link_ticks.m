@@ -23,6 +23,10 @@ static int test_pthread_cond_timedwait(pthread_cond_t *, pthread_mutex_t *, cons
 #undef nvn_game_fps
 #undef pthread_cond_timedwait
 #undef clock_gettime
+// The 120 fps pacing cases below are about the host's code, not the profile the suite is built for: CI builds it for Super Mario Bros. Wonder,
+// whose fps_max is 60, and the profile gate would turn that target down to 60 before the cases start. The profile gate itself is t_fpslock's.
+#undef DM_GAME_FPS_MAX
+#define DM_GAME_FPS_MAX 120
 #define g_ft g_ft_hle
 #include "../nvn/hle_nvn.c"
 #undef g_ft
@@ -95,6 +99,14 @@ int main(int argc, char **argv) { @autoreleasepool {
     acquire_ticks(90, 1, 1, 4. / 3, "display 90 Hz preserves fractional ticks");
     acquire_ticks(75, 1, 1, 1.6, "display 75 Hz preserves fractional ticks");
     acquire_ticks(120, 0, 2, 4, "game mode keeps interval 2 in 60 Hz vsyncs");
+    // A 120 fps target with no DM_PRESENT_HZ: present_cfg takes the present tick to 120 Hz itself, one frame per tick, and the acquire waits one link tick
+    setenv("DM_FPS_TARGET", "120", 1); g_present_cap = -1;
+    acquire_ticks(-1, 0, 2, 1, "a 120 fps target runs the present tick at 120 Hz: one tick per frame");
+    CHECK(nvn_game_fps() == 120, "a 120 fps target configures the display link at 120");
+    // DM_PRESENT_HZ=60 with a 120 fps target: the tick stays 60 Hz and frames follow it, two 120 Hz link ticks each
+    setenv("DM_PRESENT_HZ", "60", 1);
+    acquire_ticks(-1, 0, 2, 2, "DM_PRESENT_HZ=60 with a 120 fps target: frames follow the 60 Hz tick");
+    unsetenv("DM_PRESENT_HZ"); setenv("DM_FPS_TARGET", "0", 1); g_present_cap = -1; nvn_present_config(-1, 0);
     acquire_ticks(60, 1, 2, 2, "display 60 Hz ignores the game's interval");
     acquire_ticks(240, 1, 1, 1, "a rate above the link's waits one tick");
     setenv("DM_FPS_TARGET", "30", 1); g_present_cap = -1;

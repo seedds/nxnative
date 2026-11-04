@@ -18,7 +18,9 @@
 // frame for two, so a shorter time showed some frames for one (30.4 fps); 30 writes the game's own 33.333 ms
 // Also: a frame time in ticks as a uint32 (scale / frame rate: 19,200,000 for the Switch's 19.2 MHz system tick), a frame step in seconds as a float (1 / frame rate), and a mode
 // switch an engine reads before it takes those fields at all (written 1 at any target)
-enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, TICKS_U32, SECS_F32, MODE_U32, FPS_F64 };
+// CAP_F32: a frame rate cap the engine sleeps down to, written 2 above the target as the engine's own 62 for 60 (frames at exactly the target would come a little late). This is the
+// only kind that takes a 120 target: the engine sleeps 1 / 122 s and the host's present pace (hle_nvn.c fps_present_cap) carries the frames there
+enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, TICKS_U32, SECS_F32, MODE_U32, FPS_F64, CAP_F32 };
 #define MS_MARGIN 0.5f
 static float ms_want(int fps) { return 1000.0f / (float)fps - (fps == 60 ? MS_MARGIN : 0); }
 typedef struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; uint32_t scale; } lock_t;
@@ -50,6 +52,11 @@ static const lock_t k_locks[] = {
     // this row the game keeps 30 fps at the right speed (the simulation at 60 and the regulator at 30: match clock as at 30). The game asks for present interval 2
     // (BaseDisplaySettings.PresentInterval), which the profile's present_interval display ignores
     { "a48c0de3bc353efa0e4d359bde05ef24", "FIFA frame regulator", 0xda20e38, 0x8, FPS_F64, 2, 0 },
+    // Batman: Arkham Knight 1.0.5 (Rocksteady's Unreal Engine 3): MaxSmoothedFrameRate, a float at GEngine+0x884 (GEngine: main+0x511a150). UEngine::GetMaxTickRate (main+0x1283dd4,
+    // vtable slot 0x158) returns it while frame smoothing is on (main+0x5117244), and appUpdateTimeAndHandleMaxTickRate (main+0x1932960) sleeps until 1 / it has passed since the last
+    // frame; the game steps by the time that really passed. Coalesced_INT.bin sets 62 (MinSmoothedFrameRate 22), so 60 changes nothing here, and 120 writes 122. The game asks for
+    // present interval 2 (30 fps), which the host's present pacing replaces. The row is FPSLocker's for this build (patches/0100ACD0163D0000, CAP_F32)
+    { "feae83dc9e9fb34c77d0a62f1fa9ae9f", "Unreal Engine 3 MaxSmoothedFrameRate", 0x511a150, 0x884, CAP_F32, 1, 0 },
 };
 #define NLOCKS ((int)(sizeof k_locks / sizeof k_locks[0]))
 
@@ -107,6 +114,49 @@ static void dynamic_resolution_tick(void) {
         uint32_t *p = (uint32_t *)(uintptr_t)(a + 4);
         dm_guest_write_prepare(p, 4);
         __atomic_store_n(p, 0x3f800000u, __ATOMIC_RELAXED);
+    }
+}
+
+// The render resolution a port keeps for its 3D views: a pair of percentages in main's bss, the share of the console mode's size they are drawn at. Batman: Arkham
+// Knight 1.0.5 keeps its RRS (render resolution scale) at main+0x5117248, 75 and 75 written at boot; its title screen's 3D passes are 1440x812 then and 1920x1080
+// with the pair at 100 (a cheat's "Docked RRS 100% (1080p)" writes the same pair; 1.0.3's main+0x51151c8 holds a pointer list in this build). DM_RRS=1 draws them at
+// 100% of the console mode's size (1920x1080 docked, 1280x720 handheld), the launcher's Render resolution default (the profile's render_fix); 0.75 leaves the game's
+// own. Written every present its value differs, so the game's own dynamic resolution cannot lower it again; a field not set yet (0), or outside 10..100, is left alone
+static const struct { const char *build; uint32_t off, off2; } k_rrs[] = {
+    { "feae83dc9e9fb34c77d0a62f1fa9ae9f", 0x5117248, 0x511724c },
+};
+static void rrs_tick(void) {
+    static int state = -1, nlog; static uint8_t *base; static uint32_t a[2]; static const char *src;
+    if (state < 0) {
+        state = 0; module_t *m = NULL;
+        for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) {
+            m = &g_mod[i];
+            for (int k = 0; k < (int)(sizeof k_rrs / sizeof *k_rrs); k++) if (!strcmp(g_mod[i].build_id, k_rrs[k].build)) {
+                base = g_mod[i].base; a[0] = k_rrs[k].off; a[1] = k_rrs[k].off2; }
+        }
+        const char *e = getenv("DM_RRS");
+        if (!base) {   // another build: the profile's row has no address here
+            if (m && e && *e && strcmp(e, "0.75")) LOG("[RED] DM_RRS=%s: no render resolution row for this main (%s); the game's own stays", e, m->build_id);
+            return;
+        }
+        int on = DM_GAME_RENDER_FIX; src = "game profile render_fix";
+        if (e && *e) {
+            char *end; double v = strtod(e, &end); src = "DM_RRS";
+            if (end == e || *end || (v != 0.75 && v != 1.0)) { LOG("[RED] DM_RRS=%s: must be 0.75 or 1; leaving the game's render resolution", e); return; }
+            on = v == 1.0;
+        }
+        if (!on) { LOG("main: render resolution scale left as the game sets it (%.2f of the console mode's size; %s)", 0.75, src); return; }
+        state = 1;
+    }
+    if (state != 1) return;
+    for (int c = 0; c < 2; c++) {
+        uint64_t p = (uint64_t)(uintptr_t)(base + a[c]); uint32_t cur, want = 0x42c80000u; float f;
+        if (!rd(p, &cur, sizeof cur) || cur == want) continue;
+        memcpy(&f, &cur, sizeof f);
+        if (!(f >= 10 && f <= 100)) continue;   // not set yet, or not a percentage
+        uint32_t *dst = (uint32_t *)(uintptr_t)p;
+        dm_guest_write_prepare(dst, sizeof *dst); __atomic_store_n(dst, want, __ATOMIC_RELAXED);
+        if (nlog < 8) { nlog++; LOG("main: render resolution scale %g → 100 (%s; %s)", f, c ? "vertical" : "horizontal", src); }
     }
 }
 
@@ -224,13 +274,15 @@ static void lock_find(void) {
 int dm_fps_lock_engine(void) { pthread_once(&g_found, lock_find); return nrow || nier || fb.n; }
 void dm_fps_lock_tick(void) {
     dynamic_resolution_tick();   // separate from the FPS cap
+    rrs_tick();                  // the 3D views' render resolution too
     static int state = -2, nlog[NLOCKS + 4], target; static const char *src;
     if (state == -1) return;
     if (state == -2) {
         state = -1; pthread_once(&g_found, lock_find);
         if (!nrow && !nier && !fb.n && !ue_missing) return;
         const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET; src = e ? "DM_FPS_TARGET" : "game profile fps_target";
-        if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; leaving the game's frame limit", e); t = 0; }
+        if (t != 0 && t != 30 && t != 60 && t != 120) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30, 60 or 120; leaving the game's frame limit", e); t = 0; }
+        if (t == 120) for (int r = 0; r < nrow; r++) if (rows[r]->kind != CAP_F32) { LOG("[RED] DM_FPS_TARGET=120: %s takes 30 or 60 only; leaving the game's frame limit", rows[r]->what); t = 0; break; }
         if (t && ue_missing) LOG("[RED] main: Unreal %s not found by the rewriter (ue_cvar.py NAMES; game profile ue_fps_cvar): the game's own frame limit stays", DM_GAME_UE_FPS_CVAR);
         if (!nrow && !nier && !fb.n) return;
         if (!t) { for (int r = 0; r < nrow; r++) LOG("main: %s left as the game sets it (%s)", rows[r]->what, src); if (nier) LOG("main: NieR frame interval left as the game sets it (%s)", src);
@@ -277,9 +329,9 @@ void dm_fps_lock_tick(void) {
         for (int c = 0; c < L->copies; c++) {
             uint64_t a = obj + L->field + 4 * (uint64_t)c; uint32_t cur, want; char was[16];
             if (!rd(a, &cur, sizeof cur)) break;
-            if (L->kind == FPS_F32 || L->kind == MS_F32) {
-                int ms = L->kind == MS_F32; float f, w = ms ? ms_want(target) : (float)target; memcpy(&f, &cur, sizeof f); memcpy(&want, &w, sizeof want);
-                if (cur == want || !(ms ? f >= 8 && f <= 100 : f >= 10 && f <= 120)) continue;   // already set, or not set yet (RE Engine: 6000 at boot; Unreal: 0 = no limit until the config sets it)
+            if (L->kind == FPS_F32 || L->kind == MS_F32 || L->kind == CAP_F32) {
+                int ms = L->kind == MS_F32, cap = L->kind == CAP_F32; float f, w = ms ? ms_want(target) : (float)target + (cap ? 2 : 0); memcpy(&f, &cur, sizeof f); memcpy(&want, &w, sizeof want);
+                if (cur == want || !(ms ? f >= 8 && f <= 100 : f >= 10 && f <= (cap ? 200 : 120))) continue;   // already set, or not set yet (RE Engine: 6000 at boot; Unreal: 0 = no limit until the config sets it)
                 snprintf(was, sizeof was, ms ? "%.3f ms" : "%g", f);
             } else if (L->kind == SECS_F32) {
                 float f, w = 1.0f / (float)target; memcpy(&f, &cur, sizeof f); memcpy(&want, &w, sizeof want);
@@ -303,6 +355,7 @@ void dm_fps_lock_tick(void) {
             dm_guest_write_prepare(p, sizeof *p); __atomic_store_n(p, want, __ATOMIC_RELAXED);
             if (nlog[r] < 8) { nlog[r]++; char now[24];
                 if (L->kind == MS_F32) snprintf(now, sizeof now, "%.3f ms (%d fps)", ms_want(target), target);
+                else if (L->kind == CAP_F32) snprintf(now, sizeof now, "%g cap (%d fps)", (double)(target + 2), target);
                 else if (L->kind == SECS_F32) snprintf(now, sizeof now, "%.5f s (%d fps)", 1.0 / target, target);
                 else if (L->kind == TICKS_U32) snprintf(now, sizeof now, "%u (%d fps)", want, target);
                 else if (L->kind == MODE_U32) snprintf(now, sizeof now, "1 (%d fps)", target);

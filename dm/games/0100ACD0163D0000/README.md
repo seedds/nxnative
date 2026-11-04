@@ -1,6 +1,6 @@
 # Batman: Arkham Knight (`0100ACD0163D0000`)
 
-Update 1.0.5 (v327680) over the base game; the base NSP is a 7 MB stub and the update holds the game (26.9 GB). SDK 14.3.0. Rocksteady's Unreal Engine 3 (package version 864, licensee 0x80e3) on NVN, with Wwise for the sound, CRI Sofdec for the movies (`.usm`) and Scaleform for the menus. Modules `main` and `sdk`. Plays on the Mac at 30 fps, as on the Switch: the language screen, the health warning, the title, the save select, New Story, the opening cutscene and the cremation, then Pauli's Diner as Officer Owens. An unsigned IPA has not been built; iOS is untested.
+Update 1.0.5 (v327680) over the base game; the base NSP is a 7 MB stub and the update holds the game (26.9 GB). SDK 14.3.0. Rocksteady's Unreal Engine 3 (package version 864, licensee 0x80e3) on NVN, with Wwise for the sound, CRI Sofdec for the movies (`.usm`) and Scaleform for the menus. Modules `main` and `sdk`. Plays on the Mac at 60 fps — 120 on a 120 Hz screen — with its 3D views at 1x of the console mode's size (1920x1080 docked), the Switch's 30 fps and 0.75x behind them (`fps_target`, `render_fix`; [Frame rate](#frame-rate), [Render resolution](#render-resolution)): the language screen, the health warning, the title, the save select, New Story, the opening cutscene and the cremation, then Pauli's Diner as Officer Owens. An unsigned IPA builds from this profile; no iPhone has installed it.
 
 Two pull requests brought this game up before this profile, separately: [#339](https://github.com/seedds/nxnative/pull/339) / [#340](https://github.com/seedds/nxnative/pull/340) and [#384](https://github.com/seedds/nxnative/pull/384). This port was done on its own and then checked against them; what it takes from them is named below.
 
@@ -15,8 +15,9 @@ Two pull requests brought this game up before this profile, separately: [#339](h
 | A 2 GB block: `mem_reserve 0x80000000`, `mem_alias 0x58000000` | `game.tsv` | the host heap lies outside the block; see [Memory](#memory) |
 | `sys_resource 0x2000000` | `game.tsv` | the NPDM's 32 MB of system resource: virtual address memory |
 | `depth_mode zero` | `game.tsv` | the game selects near-zero NVN depth (the NSP script's region check on the registered build); offline pipeline bases must use the matching vertex entry |
+| `render_fix on` | [`game.tsv`](game.tsv), `hle_fpslock.c` | the launcher's **Render resolution** row: the 3D views are drawn at 0.75 of the console mode's size, and 1x (the default) writes 100 into the pair at `main+0x5117248`; see [Render resolution](#render-resolution) |
 
-No frame-rate key: the game asks for present interval 2 and runs at 30 fps, as on the Switch.
+`fps_target 60` and `fps_max 120`: the engine caps itself with `MaxSmoothedFrameRate` (62 in `Coalesced_INT.bin`, `MinSmoothedFrameRate` 22), a `CAP_F32` row of `hle_fpslock.c` for this build, so the host writes 62 for 60 and 122 for 120 and the host's presents pace the frames ([Frame rate](#frame-rate)); without the keys the game asks for present interval 2 and runs at 30 fps, as on the Switch.
 
 ## Files and shaders
 
@@ -39,7 +40,14 @@ No frame-rate key: the game asks for present interval 2 and runs at 30 fps, as o
 
 ## Frame rate
 
-- **Current:** 30 fps in the diner on the Mac (an Apple M6, headless): frame time p50 33.4 / p95 42.8 ms, GPU p50 9.7 ms, about a minute after it loaded; the first seconds there are slower while pipelines are built on first use (p50 41.8 ms), and there is no `pso_manifest.tsv` yet. #384 runs it at 60 with `present_interval display` (the engine's own cap is 62); not taken here.
+- **The profile asks for 60 and offers 120:** `fps_target 60`, `fps_max 120` (`game.tsv`). The engine's own cap is `MaxSmoothedFrameRate` at `GEngine+0x884`, a `CAP_F32` row of `hle_fpslock.c` for this build: the host writes `target + 2` — 62, the game's own value, at 60, and 122 at 120 — and `appUpdateTimeAndHandleMaxTickRate` (`main+0x1932960`) sleeps until 1 / it has passed, the game stepping by the time that really passed; the host's presents pace the frames (`hle_nvn.c` `fps_present_cap`). The launcher's **Frame rate** row offers 30, 60 and 120 (`dm/games/settings.py` drops the values above `fps_max`), `DM_FPS_TARGET` overrides it from `Documents/env.txt`. A 120 target needs a screen that runs at 120 Hz: the present tick and the display link run at 120 with one tick per frame (`present_cfg`, `link_wait`; `nvn_mtl.m` `link_sync`), otherwise the host logs the screen's rate and holds 60. A prerendered movie holds 30 fps.
+- **Before these keys:** 30 fps in the diner on the Mac (an Apple M6, headless): frame time p50 33.4 / p95 42.8 ms, GPU p50 9.7 ms, about a minute after it loaded; the first seconds there are slower while pipelines are built on first use (p50 41.8 ms), and there is no `pso_manifest.tsv` yet. #384 runs it at 60 with `present_interval display` (the engine's own cap is 62); not taken here.
+
+## Render resolution
+
+- **The game draws its 3D views at 0.75 of the console mode's size:** 1440x810 docked, the Switch's 810p, kept as a pair of percentages — the game's render resolution scale (RRS) — at `main+0x5117248`, 75.0 and 75.0 written at boot (the bytes are zero in the image). Its title screen's 3D passes measure 1440x812, with the half-size targets at 720x406 and the quarter at 360x203 (`DM_CTL` `passdump 2`).
+- **The fix:** `render_fix on` (`game.tsv`) has the launcher show **Render resolution** (`DM_RRS`). `1x (1080p)`, the default, has `hle_fpslock.c` write 100 into both fields on every present their value differs, and the 3D passes become 1920x1080, halves 960x540, quarters 480x270 — 1.8x the pixels; `0.75x (Switch)` leaves the game's own. This is the 1.0.3 cheat `08000000 051151C8 42C80000 42C80000` ("Docked RRS 100% (1080p)"); 1.0.5 moved the pair by 0x2080, and the cheat's own address there holds a pointer list. Pinning the pair also keeps the game's dynamic resolution from lowering it again.
+- **Checked** through the host's cheat VM, which applies `cheats/FEAE83DC9E9FB34C.txt` (`[Docked RRS 100% (1080p)]` and `08000000 05117248 42C80000 42C80000`) at 12 Hz: `peek` of the pair reads 75/75 without it and 100/100 with it, `passdump` gives the two sets of sizes above, and the 1080p title screen renders correctly (no stretched or shifted UI).
 
 ## Mac routes
 

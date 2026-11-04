@@ -39,6 +39,21 @@ sys_resource	0x2000000
 # The registered build selects near-zero NVN depth (the NSP script's region check, 2026-10-29: one nvnDeviceSetDepthMode call, near = 0); offline pipeline bases use main0_z.
 depth_mode	zero
 
+# ---- Resolution ----
+# The 3D views are drawn at 0.75 of the console mode's size (1440x810 docked, 540p handheld), the game's render resolution scale (RRS): a pair of percentages at
+# main+0x5117248 that it writes 75 at boot (the title screen's 3D passes are 1440x812, and 1920x1080 with the pair at 100). The launcher's Render resolution row
+# (DM_RRS) raises them to 100, as the "Docked RRS 100% (1080p)" cheat does; 0.75 leaves the game's own. That cheat's 1.0.3 address, main+0x51151c8, is a pointer
+# list in this build
+render_fix	on
+
+# ---- Frame rate ----
+# The engine caps itself with MaxSmoothedFrameRate (Coalesced_INT.bin: 62, MinSmoothedFrameRate 22), a row in hle_fpslock.c for this build (CAP_F32): the host writes 62 for 60 and 122 for 120,
+# and appUpdateTimeAndHandleMaxTickRate sleeps until 1 / it has passed, the game stepping by the time that really passed; the host's presents pace the frames (hle_nvn.c fps_present_cap).
+# The game asks for present interval 2 (30 fps, the Switch's rate), which the host's pacing replaces. 60 is the default; fps_max 120 puts 120 in the launcher's Frame rate row, and a 120 target
+# needs a screen at 120 Hz (present tick and display link at 120). A prerendered movie holds 30 fps.
+fps_target	60
+fps_max	120
+
 # ---- Shader split ----
 shader_groups	/BmGame/=bmgame
 shader_note	Batman: Arkham Knight shaders (Unreal Engine 3 global and combined shader caches)

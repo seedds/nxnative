@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # Compiled-shader cache keyed by the Metal source (dmsh_build.py): a library is compiled once per (MSL text, compile convention, compiler), so a chain change
 # that leaves a shader's MSL as it was (a translator fix, a new rule for other shaders) costs that shader no Metal compile. The Metal compiler is deterministic:
-# the same MSL with the same flags gives a byte-identical metallib (checked for macOS and iOS), which is what makes reuse safe.
+# the same MSL with the same flags gives a byte-identical metallib (checked for macOS and iOS), which is what makes reuse safe. Its input is the text alone: dmsh_pch.compile passes the source on
+# standard input, as a file's name reaches the library of a source with function constants.
 # Layout: <cache>/<target>/<2 hex>/<digest>.metallib, digest = sha256 over FORMAT, the target's compile convention (the record written into json chain_metal),
 # the compiler's identity (metal / metallib --version without the install path, the SDK version and build) and the MSL bytes.
 # Filling from earlier builds: every imported library must record the current compiler identity and flags in its reflection. Legacy libraries without that identity are not imported.

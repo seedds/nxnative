@@ -8,7 +8,8 @@
 #import <AVFAudio/AVFAudio.h>
 #else
 #import <AppKit/AppKit.h>
-#import <IOKit/hid/IOHIDManager.h>
+#import <IOKit/IOKitLib.h>
+#import <IOKit/hid/IOHIDDevice.h>
 #endif
 #include <math.h>
 #include <pthread.h>
@@ -228,9 +229,8 @@ static void report(NSError *e, NSString *target, const char *stage) {
 // failed on every locality on macOS 27.0.1), is driven through its own effects report, as SDL's hidapi driver does: 0x11 over Bluetooth
 // (78 bytes, CRC32 over 0xA2 and the first 74 bytes, rumble only, so the light bar is left alone), 0x05 over USB (32 bytes). Unlike the
 // handle engines of a server without advanced players, the report keeps the strong (left) and weak (right) motor apart.
-typedef struct { IOHIDDeviceRef dev; BOOL bluetooth; uint8_t motor[2], sent[2]; } ds4_out;
+typedef struct { IOHIDDeviceRef dev; uint64_t id; BOOL bluetooth; uint8_t motor[2], sent[2]; } ds4_out;   // id: its registry entry
 static ds4_out ds4[DM_PLAYERS];
-static IOHIDManagerRef hidManager;
 static uint32_t ds4_crc(const uint8_t *p, size_t n) {
     uint32_t c = ~0u;
     while (n--) { c ^= *p++; for (int k = 0; k < 8; k++) c = c >> 1 ^ (0xEDB88320u & -(c & 1)); }
@@ -260,7 +260,7 @@ static void ds4_apply(dm_haptic_state s) {
 }
 static void ds4_release(int p) {
     ds4_out *o = &ds4[p];
-    if (o->dev) { o->motor[0] = o->motor[1] = 0; if (o->sent[0] || o->sent[1]) ds4_send(p); CFRelease(o->dev); }
+    if (o->dev) { o->motor[0] = o->motor[1] = 0; if (o->sent[0] || o->sent[1]) ds4_send(p); IOHIDDeviceClose(o->dev, kIOHIDOptionsTypeNone); CFRelease(o->dev); }
     *o = (ds4_out){0};
 }
 @interface DmDs4Channel : DmRumbleChannel   // one per motor; the route takes both motors' values at once (ds4_apply)
@@ -273,30 +273,37 @@ static void ds4_release(int p) {
     if (o->dev && (o->sent[0] || o->sent[1]) && !o->motor[0] && !o->motor[1]) ds4_send(self.player);
 }
 @end
-// Only a controller GameController calls a DualShock 4, and only while a Sony DualShock 4 HID device no other player drives is there
-static BOOL ds4_route(int p, GCController *controller) {
-    if (![controller.productCategory isEqualToString:GCProductCategoryDualShock4]) return NO;
-    if (!hidManager) {
-        hidManager = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
-        IOHIDManagerSetDeviceMatching(hidManager, (__bridge CFDictionaryRef)@{@kIOHIDVendorIDKey: @0x054C});
-        if (IOHIDManagerOpen(hidManager, kIOHIDOptionsTypeNone) != kIOReturnSuccess) { CFRelease(hidManager); hidManager = NULL; return NO; }
-    }
-    NSSet *devices = CFBridgingRelease(IOHIDManagerCopyDevices(hidManager));
-    for (id d in devices) {
-        IOHIDDeviceRef dev = (__bridge IOHIDDeviceRef)d;
+// The first DualShock 4 device no other player drives, opened for player p. The registry is asked at each connect: an IOHIDManager that is never scheduled
+// keeps the devices of the moment its matching was set, so a controller turned on later found none and stayed on Core Haptics, and one that came back got
+// its dead device. A scheduled one would depend on its arrival callback running before GameController's connect; the registry has the device by then
+static BOOL ds4_take(int p) {
+    CFMutableDictionaryRef match = IOServiceMatching(kIOHIDDeviceKey); io_iterator_t it = 0;
+    if (!match) return NO;
+    CFDictionarySetValue(match, CFSTR(kIOHIDVendorIDKey), (__bridge CFNumberRef)@0x054C);
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, match, &it) != KERN_SUCCESS) return NO;   // takes match
+    BOOL found = NO;
+    for (io_service_t s; !found && (s = IOIteratorNext(it)); IOObjectRelease(s)) {
+        uint64_t id = 0; BOOL taken = NO;   // GameController does not name a controller's HID device: two connecting together may get each other's
+        if (IORegistryEntryGetRegistryEntryID(s, &id) != KERN_SUCCESS) continue;
+        for (int q = 0; q < DM_PLAYERS; q++) taken |= q != p && ds4[q].dev && ds4[q].id == id;
+        IOHIDDeviceRef dev = taken ? NULL : IOHIDDeviceCreate(kCFAllocatorDefault, s);
+        if (!dev) continue;
         int pid = [(__bridge NSNumber *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDProductIDKey)) intValue];
-        if (pid != 0x05C4 && pid != 0x09CC && pid != 0x0BA0) continue;   // DualShock 4 v1, v2, the USB wireless adapter
-        BOOL taken = NO;   // GameController does not name a controller's HID device: two DualShock 4s each get one, possibly swapped
-        for (int q = 0; q < DM_PLAYERS; q++) taken |= q != p && ds4[q].dev && CFEqual(ds4[q].dev, dev);
-        if (taken) continue;
-        ds4[p].dev = (IOHIDDeviceRef)CFRetain(dev);
-        ds4[p].bluetooth = [(__bridge NSString *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDTransportKey)) isEqualToString:@"Bluetooth"];
-        for (int m = 0; m < 2; m++) { DmDs4Channel *c = [DmDs4Channel new]; c.player = p; c.motor = m; c.target = @"DualShock 4 report"; [channels[p] addObject:c]; }
-        fprintf(stderr, "haptics: player %d controller %s, rumble through the DualShock 4 effects report (%s, product 0x%04x)\n",
-                p + 1, controller.vendorName.UTF8String ?: "unknown", ds4[p].bluetooth ? "Bluetooth" : "USB", pid);
-        return YES;
+        if ((pid == 0x05C4 || pid == 0x09CC || pid == 0x0BA0) && IOHIDDeviceOpen(dev, kIOHIDOptionsTypeNone) == kIOReturnSuccess) {   // DualShock 4 v1, v2, the USB wireless adapter
+            ds4[p].dev = dev; ds4[p].id = id; found = YES;
+            ds4[p].bluetooth = [(__bridge NSString *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDTransportKey)) isEqualToString:@"Bluetooth"];
+        } else CFRelease(dev);
     }
-    return NO;
+    IOObjectRelease(it);
+    return found;
+}
+// Only a controller GameController calls a DualShock 4, and only while such a HID device is free
+static BOOL ds4_route(int p, GCController *controller) {
+    if (![controller.productCategory isEqualToString:GCProductCategoryDualShock4] || !ds4_take(p)) return NO;
+    for (int m = 0; m < 2; m++) { DmDs4Channel *c = [DmDs4Channel new]; c.player = p; c.motor = m; c.target = @"DualShock 4 report"; [channels[p] addObject:c]; }
+    fprintf(stderr, "haptics: player %d controller %s, rumble through the DualShock 4 effects report (%s, product 0x%04x)\n", p + 1, controller.vendorName.UTF8String ?: "unknown",
+            ds4[p].bluetooth ? "Bluetooth" : "USB", [(__bridge NSNumber *)IOHIDDeviceGetProperty(ds4[p].dev, CFSTR(kIOHIDProductIDKey)) intValue]);
+    return YES;
 }
 #endif
 

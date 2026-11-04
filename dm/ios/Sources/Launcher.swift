@@ -21,32 +21,32 @@ private struct CloudSavesSection: View {
     var body: some View {
         Section {
             HStack {
-                Text("Cloud saves")
+                Text(launcherString("Cloud saves"))
                 Spacer()
-                Text(folder.isEmpty ? "Off" : (folder as NSString).lastPathComponent)
+                Text(folder.isEmpty ? launcherString("Off") : (folder as NSString).lastPathComponent)
                     .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             }
-            Button(folder.isEmpty ? "Choose a folder in iCloud Drive…" : "Choose a different folder…") { picking = true }
+            Button(folder.isEmpty ? launcherString("Choose a folder in iCloud Drive…") : launcherString("Choose a different folder…")) { picking = true }
                 // The sheet sits on the button, not on the Section: SwiftUI hands a Section's modifiers to every row, so one tap presented a picker per row and they invalidated each other (LNPANDY/NX2Apple#315).
                 .sheet(isPresented: $picking) {
                     DocumentPicker(types: [.folder]) { url in
                         picking = false
                         if dm_store_cloud_saves(url) {
-                            note = "Saved. The game uses this folder when you press Play."
+                            note = launcherString("Saved. The game uses this folder when you press Play.")
                             refresh()
                         } else {
-                            note = "That folder could not be remembered — try a different one."
+                            note = launcherString("That folder could not be remembered — try a different one.")
                         }
                     } onCancel: { picking = false }
                 }
             if !folder.isEmpty {
-                Button("Turn off cloud saves", role: .destructive) {
+                Button(launcherString("Turn off cloud saves"), role: .destructive) {
                     dm_clear_cloud_saves(); refresh(); note = ""
                 }
             }
         } footer: {
             Text(note.isEmpty
-                 ? "Choose a folder in iCloud Drive, and the same one in the Mac app's Cloud saves. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in save-backups."
+                 ? launcherString("Choose a folder in iCloud Drive, and the same one in the Mac app's Cloud saves. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in save-backups.")
                  : note)
         }
         .onAppear(perform: refresh)
@@ -56,7 +56,7 @@ private struct CloudSavesSection: View {
         var stale: ObjCBool = false
         folder = dm_cloud_saves_path(&stale) ?? ""
         if stale.boolValue && folder.isEmpty {
-            note = "The folder you chose before is no longer readable (the app was signed differently). Please choose it again."
+            note = launcherString("The folder you chose before is no longer readable (the app was signed differently). Please choose it again.")
         }
     }
 }
@@ -110,9 +110,9 @@ private struct LauncherView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 22))
                             .accessibilityHidden(true)
                     }
-                    Text((info("CFBundleDisplayName") as? String) ?? "Game")
+                    Text((info("CFBundleDisplayName") as? String) ?? launcherString("Game"))
                         .font(.title.weight(.bold)).multilineTextAlignment(.center)
-                    Text("Version \((info("CFBundleShortVersionString") as? String) ?? "")")
+                    Text(String(format: launcherString("Version %@"), (info("CFBundleShortVersionString") as? String) ?? ""))
                         .font(.callout).foregroundStyle(.secondary)
                     playButton
                 }
@@ -122,21 +122,21 @@ private struct LauncherView: View {
                     ForEach(m.sections, id: \.self) { section in
                         let rows = m.rows(in: section)
                         if !rows.isEmpty {
-                            Section(section) {
+                            Section(rows[0].displaySection()) {
                                 ForEach(rows) { SettingRow(s: $0, m: m) }
                             }
                         }
                     }
                     Section {
-                        Button("Reset to tested defaults") { m.reset() }
+                        Button(launcherString("Reset to tested defaults")) { m.reset() }
                             .disabled(!m.changed)
                     } footer: {
-                        Text("Brings back all settings this game was tested with.")
+                        Text(launcherString("Brings back all settings this game was tested with."))
                     }
                     CloudSavesSection()
                     Section {
                         HStack {
-                            Text("Memory available")
+                            Text(launcherString("Memory available"))
                             Spacer()
                             Text(ByteCountFormatter.string(fromByteCount: Int64(memory), countStyle: .memory)).monospacedDigit().foregroundStyle(.secondary)
                         }
@@ -151,12 +151,12 @@ private struct LauncherView: View {
         .confirmationDialog(SaveSyncReport.chooseTitle, isPresented: isAsking(.choose), titleVisibility: .visible, presenting: report) { r in
             Button(r.localLabel(here: "iPhone")) { go(r.localChoice) }
             Button(r.cloudLabel) { go(r.cloudChoice) }
-            Button("Cancel", role: .cancel) {}
+            Button(launcherString("Cancel"), role: .cancel) {}
         } message: { r in Text(r.chooseMessage(here: "iPhone")) }
         .confirmationDialog(SaveSyncReport.unreadableTitle, isPresented: isAsking(.unreadable), titleVisibility: .visible, presenting: report) { r in
-            Button("Play This iPhone's Save") { go("offline") }   // the mount does not wait for the cloud again
-            Button("Try Again") { DispatchQueue.main.async { start() } }
-            Button("Cancel", role: .cancel) {}
+            Button(launcherString("Play This iPhone's Save")) { go("offline") }   // the mount does not wait for the cloud again
+            Button(launcherString("Try Again")) { DispatchQueue.main.async { start() } }
+            Button(launcherString("Cancel"), role: .cancel) {}
         } message: { r in Text(r.unreadableMessage(here: "iPhone")) }
         .task {
             while !Task.isCancelled {
@@ -167,12 +167,12 @@ private struct LauncherView: View {
     }
 
     @ViewBuilder var playButton: some View {
-        let button = Button(action: start) { Text("Play").font(.title3.weight(.semibold)).frame(maxWidth: 220) }.controlSize(.large).disabled(checking)
+        let button = Button(action: start) { Text(launcherString("Play")).font(.title3.weight(.semibold)).frame(maxWidth: 220) }.controlSize(.large).disabled(checking)
         if #available(iOS 26.0, *) { button.buttonStyle(.glassProminent) } else { button.buttonStyle(.borderedProminent) }
         if checking {
             VStack(spacing: 6) {
-                HStack(spacing: 6) { ProgressView(); Text("Checking the cloud save…").font(.callout).foregroundStyle(.secondary) }
-                Button("Play Without It") { checking = false; go("offline") }.font(.callout)
+                HStack(spacing: 6) { ProgressView(); Text(launcherString("Checking the cloud save…")).font(.callout).foregroundStyle(.secondary) }
+                Button(launcherString("Play Without It")) { checking = false; go("offline") }.font(.callout)
             }
         }
     }

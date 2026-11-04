@@ -2,6 +2,13 @@
 import Foundation
 import Combine
 
+// The shared Launcher.strings table follows the app's preferred language, independently of DM_LANG.
+// Missing keys (including older launcher.json files) keep their English text.
+func launcherString(_ key: String?, fallback: String? = nil, bundle: Bundle = .main) -> String {
+    guard let key else { return fallback ?? "" }
+    return bundle.localizedString(forKey: key, value: fallback ?? key, table: "Launcher")
+}
+
 struct Setting: Decodable, Identifiable {
     let env, kind, label, note, def: String
     let section: String?   // heading on the settings screen; absent in older bundles
@@ -9,11 +16,17 @@ struct Setting: Decodable, Identifiable {
     let level: String?     // "basic": shown first (the Mac window's Basic settings); any other or none: Advanced settings. The iPhone keeps one list
     let base: Base?        // render scale: the 3D views' size at 1.0, docked and handheld, for the size in pixels (the Mac window)
     struct Base: Decodable { let docked, handheld: [Int] }
+    let labelKey, noteKey, sectionKey: String?
+    let optionKeys: [String: String]?
     let options: [[String]]?   // choice: [value, label]
     let min, max, step: Double?   // range
     let on, off: String?   // toggle: the values the variable takes (1 / 0 when not given)
     var id: String { env }
     var sectionTitle: String { section ?? "Game" }
+    func displayLabel(bundle: Bundle = .main) -> String { launcherString(labelKey, fallback: label, bundle: bundle) }
+    func displayNote(bundle: Bundle = .main) -> String { launcherString(noteKey, fallback: note, bundle: bundle) }
+    func displaySection(bundle: Bundle = .main) -> String { launcherString(sectionKey, fallback: sectionTitle, bundle: bundle) }
+    func displayOption(_ option: [String], bundle: Bundle = .main) -> String { launcherString(optionKeys?[option[0]], fallback: option[1], bundle: bundle) }
     var basic: Bool { level == "basic" }
     var onValue: String { on ?? "1" }
     var offValue: String { off ?? "0" }
@@ -30,7 +43,9 @@ struct Setting: Decodable, Identifiable {
         default: return true
         }
     }
-    enum CodingKeys: String, CodingKey { case env, kind, label, note, def = "default", section, needs, level, base, options, min, max, step, on, off }
+    enum CodingKeys: String, CodingKey { case env, kind, label, note, def = "default", section, needs, level, base, options, min, max, step, on, off
+        case labelKey = "label_key", noteKey = "note_key", sectionKey = "section_key", optionKeys = "option_keys"
+    }
 }
 struct SettingsFile: Decodable { let settings: [Setting] }
 

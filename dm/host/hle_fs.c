@@ -556,12 +556,49 @@ HLE_FORCE("_ZN2nn2fs21MountTemporaryStorageEPKc", "fsp-srv; temporary storage �
     char b[1024]; return mount(name, envdir("DM_TEMP", "run/platform/temp", b, sizeof b), 0);
 }
 // Cache storage (Tears of the Kingdom; its first list call opened fsp-srv and aborted in sm::Initialize): storage <index> is the host folder <temporary storage>_cache<index>,
-// created when it is created or mounted. The list reports none (a fresh console), so the game creates its storage at every boot; creating an existing one succeeds
+// created when it is created or mounted. Enumeration reports existing indexed directories; creating an existing one succeeds.
 static const char *cache_dir(int index, char *b, size_t n) { char t[1024]; snprintf(b, n, "%s_cache%d", envdir("DM_TEMP", "run/platform/temp", t, sizeof t), index); return b; }
-HLE_FORCE("_ZN2nn2fs20OpenCacheStorageListEPNS0_22CacheStorageListHandleE", "fsp-srv; cache storage list: reports none", Result, h_fs_OpenCacheList, void *h) { (void)h; return RES_OK; }
-HLE_FORCE("_ZN2nn2fs20ReadCacheStorageListEPiPNS0_16CacheStorageInfoENS0_22CacheStorageListHandleEi", "fsp-srv; cache storage list: reports none", Result, h_fs_ReadCacheList,
-          int *n, void *info, uint64_t h, int max) { (void)info; (void)h; (void)max; *n = 0; return RES_OK; }
-HLE_FORCE("_ZN2nn2fs21CloseCacheStorageListENS0_22CacheStorageListHandleE", "fsp-srv; cache storage list", void, h_fs_CloseCacheList, uint64_t h) { (void)h; }
+// Numeric handles prevent arbitrary guest pointers or a double close from reaching free().
+// Enumeration is serialized with handle lifetime, including concurrent reads/closes.
+typedef struct { uint64_t id; int next; } HostCacheList;
+static HostCacheList g_cache_lists[64];
+static uint64_t g_cache_list_id = 1;
+static pthread_mutex_t g_cache_list_mutex = PTHREAD_MUTEX_INITIALIZER;
+HLE_FORCE("_ZN2nn2fs20OpenCacheStorageListEPNS0_22CacheStorageListHandleE", "fsp-srv; enumerate existing cache directories", Result, h_fs_OpenCacheList, void *h) {
+    if (!h) return RES_PATH_NOT_FOUND;
+    pthread_mutex_lock(&g_cache_list_mutex);
+    for (size_t i = 0; i < sizeof g_cache_lists / sizeof *g_cache_lists; i++) {
+        if (g_cache_lists[i].id) continue;
+        uint64_t id = g_cache_list_id++; if (!id) id = g_cache_list_id++;
+        g_cache_lists[i] = (HostCacheList){.id = id};
+        memcpy(h, &id, sizeof id); pthread_mutex_unlock(&g_cache_list_mutex); return RES_OK;
+    }
+    pthread_mutex_unlock(&g_cache_list_mutex); return RES_PATH_NOT_FOUND;
+}
+HLE_FORCE("_ZN2nn2fs20ReadCacheStorageListEPiPNS0_16CacheStorageInfoENS0_22CacheStorageListHandleEi", "fsp-srv; enumerate existing indexed cache directories", Result, h_fs_ReadCacheList,
+          int *n, void *info, uint64_t h, int max) {
+    if (!n || max < 0 || (max && !info)) return RES_PATH_NOT_FOUND;
+    *n = 0; pthread_mutex_lock(&g_cache_list_mutex);
+    HostCacheList *list = NULL;
+    for (size_t i = 0; i < sizeof g_cache_lists / sizeof *g_cache_lists; i++)
+        if (h && g_cache_lists[i].id == h) { list = &g_cache_lists[i]; break; }
+    if (!list) { pthread_mutex_unlock(&g_cache_list_mutex); return RES_PATH_NOT_FOUND; }
+    // SDK 14 ReadCacheStorageList zeroes 0x20 bytes per entry and writes a u32 index.
+    while (list->next <= 65535 && *n < max) {
+        int index = list->next++; char path[1100]; struct stat st;
+        if (lstat(cache_dir(index, path, sizeof path), &st) || !S_ISDIR(st.st_mode)) continue;
+        uint8_t *entry = (uint8_t *)info + (size_t)(*n) * 0x20;
+        memset(entry, 0, 0x20); memcpy(entry, &index, sizeof index); (*n)++;
+    }
+    pthread_mutex_unlock(&g_cache_list_mutex);
+    LOG("fs cache list returned %d entries", *n); return RES_OK;
+}
+HLE_FORCE("_ZN2nn2fs21CloseCacheStorageListENS0_22CacheStorageListHandleE", "fsp-srv; cache storage list", void, h_fs_CloseCacheList, uint64_t h) {
+    pthread_mutex_lock(&g_cache_list_mutex);
+    for (size_t i = 0; i < sizeof g_cache_lists / sizeof *g_cache_lists; i++)
+        if (h && g_cache_lists[i].id == h) { g_cache_lists[i].id = 0; break; }
+    pthread_mutex_unlock(&g_cache_list_mutex);
+}
 HLE_FORCE("_ZN2nn2fs18CreateCacheStorageEill", "fsp-srv; cache storage → host directory", Result, h_fs_CreateCache, int index, int64_t size, int64_t journal) {
     char b[1100]; LOG("fs create cache storage %d (%lld bytes, journal %lld) → %s", index, (long long)size, (long long)journal, cache_dir(index, b, sizeof b)); mkdir(b, 0755); return RES_OK;
 }
@@ -580,6 +617,23 @@ HLE_FORCE("_ZN2nn2fs15GetSaveDataSizeEPlS1_RKNS_7account3UidE", "fsp-srv; save d
 // object the host never made, SIGSEGV at GetSaveDataSizeMax+0xbc), the size of a cache storage and the free space of a mount: the same 256 MB the save data size reports, more than a game asks for
 HLE_FORCE("_ZN2nn2fs18GetSaveDataSizeMaxEPlS1_", "fsp-srv; largest save data size: 256 MB data + 256 MB journal", Result, h_fs_SaveSizeMax, int64_t *size, int64_t *journal) {
     if (size) *size = 256 << 20; if (journal) *journal = 256 << 20; return RES_OK;
+}
+// Cache capacity is application metadata, not the size of a single mounted cache.
+// DM_CONTROL_NACP names the original control data retained with a local build.
+HLE_FORCE("_ZN2nn2fs18GetCacheStorageMaxEPiPl", "fsp-srv; cache limits from application control metadata", Result, h_fs_CacheMax, int *index, int64_t *size) {
+    if (!index || !size) return RES_PATH_NOT_FOUND;
+    const char *path = getenv("DM_CONTROL_NACP");
+    if (!path) { LOG("[RED] cache limits unavailable: rebuild with application control metadata"); return RES_PATH_NOT_FOUND; }
+    FILE *f = fopen(path, "rb"); uint8_t limits[10];
+    if (!f || fseek(f, 0x3180, SEEK_SET) || fread(limits, 1, sizeof limits, f) != sizeof limits) {
+        if (f) fclose(f); LOG("[RED] cannot read application cache limits"); return RES_PATH_NOT_FOUND;
+    }
+    fclose(f); uint64_t maximum = 0;
+    for (int i = 0; i < 8; i++) maximum |= (uint64_t)limits[i] << (8 * i);
+    if (index) *index = limits[8] | limits[9] << 8;
+    if (size) *size = (int64_t)maximum;
+    LOG("fs cache limits: index %d, data+journal %llu", limits[8] | limits[9] << 8, (unsigned long long)maximum);
+    return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs19GetCacheStorageSizeEPlS1_i", "fsp-srv; cache storage size: 256 MB data + 256 MB journal", Result, h_fs_CacheSize, int64_t *size, int64_t *journal, int index) {
     (void)index; if (size) *size = 256 << 20; if (journal) *journal = 256 << 20; return RES_OK;

@@ -194,7 +194,7 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** each aborted in `sm::Initialize` or read a null applet proxy, one per boot.
 - **Cause:** SDK 20 file system calls that reach a service.
-- **Fix:** cache storage: `OpenCacheStorageList` / `ReadCacheStorageList` report none, `CreateCacheStorage` / `MountCacheStorage` use a host folder beside the temporary storage. `fs::IsSaveDataExisting(ApplicationId, Uid)` for another title (it asks for Breath of the Wild's save: none) and `MountSaveDataReadOnly`.
+- **Fix:** cache storage: `OpenCacheStorageList` / `ReadCacheStorageList` enumerate existing indexed host cache directories (none on a fresh run), `CreateCacheStorage` / `MountCacheStorage` use a host folder beside the temporary storage. `fs::IsSaveDataExisting(ApplicationId, Uid)` for another title (it asks for Breath of the Wild's save: none) and `MountSaveDataReadOnly`.
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) (1.4.3, the same `sdk` build as Breath of the Wild 1.9.0).
 
 ### Device save data on the account save's directory
@@ -243,6 +243,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the shared array holds 2000 indices, covering the scanner's existing accepted range (1..2000), and a static buffer holds the complete index log without increasing guest-stack use. Folder and `.img` discovery, sorting, deduplication, pagination and `DM_AOC_OWNED=0` retain their behavior. This applies to every game using the add-on content hooks.
 - **Open:** the existing 1..2000 acceptance range is retained; it is not established here as Horizon's full legal range. More than 2000 accepted folder/image entries can still fill the array before deduplication, even when their unique indices fit.
 - **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (13.0.5, 99 DLC licences; PR #441).
+
+### Cache storage capacity and imported indexed storage
+
+- **Symptom:** Just Dance 25.0.3 (0100BEE017FC0000, provisional profile) crashes in SDK 14 `GetCacheStorageMax` at `sdk+0x34fb44`, dereferencing a null service object. Existing imported caches are invisible to the old list hooks.
+- **Cause:** no host takeover for the capacity query; enumeration always returned zero entries.
+- **Fix:** read the application-declared maximum data+journal size and index from original control metadata (little-endian NACP +0x3180/+0x3188). Mac packaging carries `control.nacp` and the launcher supplies `DM_CONTROL_NACP`. Missing/truncated metadata returns failure, not a guessed limit. Indexed directories use the existing `<DM_TEMP>_cache<N>` mapping; paginated lists use validated numeric handles with synchronized lifetime, not guest pointers. SDK 14 returns 0x20-byte records with a u32 index and zero reserved bytes.
+- **Checked:** filesystem tests cover pagination, EOF, null output, invalid handle and double close, metadata values and missing/truncated metadata. Synthetic Mac packaging checks the metadata copy. Local diagnostic builds mounted nine supplied cache indices and read the offline save. The user reports playback of A Queda in a manually integrated Just Dance candidate; whole-catalog, motion scoring and network-independent playback are not established. No game data is shipped by this change.
+- **Open:** list membership is scanned on read rather than snapshotted at open; the compatibility of the record ABI on other SDK generations is not independently verified. iOS and manual Mac runs must explicitly supply control metadata; this patch wires only Mac app packing.
 
 ### Add-on content mount cache sized as RomFS working memory
 

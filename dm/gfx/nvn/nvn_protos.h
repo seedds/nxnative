@@ -473,6 +473,7 @@ typedef NVNsyncWaitResult (*NVNT_nvnSyncWait)(const NVNsync*, uint64_t);
 typedef NVNboolean (*NVNT_nvnQueueWaitSync)(NVNqueue*, const NVNsync*);
 typedef void (*NVNT_nvnEventBuilderSetDefaults)(NVNeventBuilder*);
 typedef void (*NVNT_nvnEventBuilderSetStorage)(NVNeventBuilder*, const NVNmemoryPool*, int64_t);
+typedef void *(*NVNT_nvnEventBuilderGetStorage)(const NVNeventBuilder*);
 typedef NVNboolean (*NVNT_nvnEventInitialize)(NVNevent*, const NVNeventBuilder*);
 typedef void (*NVNT_nvnEventFinalize)(NVNevent*);
 typedef uint32_t (*NVNT_nvnEventGetValue)(const NVNevent*);
@@ -516,7 +517,6 @@ typedef void (*NVNT_nvnCommandBufferSignalEvent)(NVNcommandBuffer*, const NVNeve
 //   nvnCommandBufferSetColorReductionThresholds
 //   nvnSyncInitializeFromFencedGLSync
 //   nvnSyncCreateGLSync
-//   nvnEventBuilderGetStorage
 //   nvnEventBuilderGetMemoryPool
 //   nvnEventBuilderGetMemoryOffset
 //   nvnCommandBufferSetStencilCullCriteria

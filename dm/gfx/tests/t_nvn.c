@@ -297,6 +297,7 @@ int main(void) {
     P(nvnMemoryPoolInitialize)(&g_cmdpool, &cpb);
     P(nvnCommandBufferSetMemoryCallback)(&cb, mem_cb); P(nvnCommandBufferSetMemoryCallbackData)(&cb, NULL);
     NVNeventBuilder eb; NVNevent ev; P(nvnEventBuilderSetDefaults)(&eb); P(nvnEventBuilderSetStorage)(&eb, &pool, 0x1000);
+    EXPECT("event builder storage", 1, (void *)P(nvnEventBuilderGetStorage)(&eb) == (void *)(poolmem + 0x1000));
     P(nvnEventInitialize)(&ev, &eb);
     EXPECT("event memory pool", 1, (void *)P(nvnEventGetMemoryPool)(&ev) == (void *)&pool);
     EXPECT("event memory offset", 0x1000, (long long)P(nvnEventGetMemoryOffset)(&ev));

@@ -2,7 +2,7 @@
 
 The Switch 2 program of [Xenoblade Chronicles 2](../0100E95004038000/README.md)'s Nintendo Switch 2 Edition: program 1 of the application `0100E95004038000`'s update 1114112 (program 0 is the Switch 1 game). SDK 21.4.4 built for the Switch 2 (`Ounce`), NVN2 API 231.39, Monolith's engine. Modules `main`, `subsdk0` and `subsdk3` (movie) and `sdk`; `subsdk1` (DLSS) and `subsdk2` (libc) supply nothing the host does not.
 
-**Status: plays on the Mac (Mac only), through its first battle.** Headless, from a new save: the title (from frame 600), the one-time screen on the Switch 2 Edition's new content, the main menu, New Game, the difficulty choice, the opening (its credits over in-engine scenes, skipped partway) and the first battle against King Crustip with its tutorial, at 60 fps (frame time p50 16.6 ms, p95 17.1 to 17.4 ms) with no crash and no `[RED]` line. Audio has not been heard and no IPA has been built (the iPhone needs a cut, Open).
+**Status: plays on the Mac (Mac only), through its first battle.** Headless, from a new save: the title (from frame 600), the one-time screen on the Switch 2 Edition's new content, the main menu, New Game, the difficulty choice, the opening (its credits over in-engine scenes, skipped partway) and the first battle against King Crustip with its tutorial, at 60 fps (frame time p50 16.6 ms, p95 17.1 to 17.4 ms) with no crash and no `[RED]` line. No IPA has been built (the iPhone needs a cut, Open).
 
 ## What it needs
 
@@ -47,7 +47,8 @@ The Switch 2 program of [Xenoblade Chronicles 2](../0100E95004038000/README.md)'
 
 ## Audio
 
-- Sound is decoded through SDK 21's hardware Opus decoder manager ([SDK 21's hardware Opus decoder manager](../../../docs/reference/audio.md#sdk-21s-hardware-opus-decoder-manager)) and played through an OutputStream ([SDK 21's OutputStream on a virtual output device](../../../docs/reference/audio.md#sdk-21s-outputstream-on-a-virtual-output-device)), both new in the host for this game. Not heard yet (open).
+- Sound is decoded through SDK 21's hardware Opus decoder manager ([SDK 21's hardware Opus decoder manager](../../../docs/reference/audio.md#sdk-21s-hardware-opus-decoder-manager)) and played through an OutputStream ([SDK 21's OutputStream on a virtual output device](../../../docs/reference/audio.md#sdk-21s-outputstream-on-a-virtual-output-device)), both new in the host for this game.
+- Resolved: all sound was an octave low with crackling, reported by ear on the Mac app (voices very deep), because the host read the stream's interleaved frames as planar ([the entry](../../../docs/reference/audio.md#sdk-21s-outputstream-on-a-virtual-output-device)). Measured on the same 4-minute route with `DM_AUDIO_DUMP`, through the real AudioUnit (muted): the mirrored energy above 20 kHz gone (33-39 % to 0.00 %), the block edges no louder than any other sample (jump ratio 1.42 to 1.00), 0 underruns in 48,000 device callbacks of 240 frames with about 4 blocks queued. Then checked by ear on the rebuilt Mac app: it sounds right.
 
 ## Open
 

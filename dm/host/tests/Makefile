@@ -355,3 +355,66 @@ coverage:
 	rm -rf $(B)/cov/prof
 	LLVM_PROFILE_FILE="$(call cov_profile,$(B)/cov)" $(MAKE) -i B=$(B)/cov SAN="$(COV_FLAGS)" run
 	@$(call cov_export,$(B)/cov)
+
+# Local transport fixtures use only synthetic packets and loopback peers.
+NET_SOURCES = ../hle_net_backend.c t_net_write_stub.c
+NET_HEADERS = ../net_socket.h ../net_discovery.h ../net_discovery_queue.inc ../discovery_protocol.h
+NET_FLAGS = -O1 -g -Wall -Wextra -Werror -Wno-unused-function
+$(B)/t_hle_wait: t_hle_wait.c t_hle_wait.S ../hle.h ../entry.S ../hle_bigstack.c $(GAME_H) | $(B)
+	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_hle_wait.c t_hle_wait.S ../entry.S ../hle_bigstack.c
+$(B)/t_net: t_net.c ../hle_net.c ../hle_offline.c ../hle.h ../entry.S ../hle_bigstack.c $(NET_SOURCES) $(NET_HEADERS) $(GAME_H) | $(B)
+	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_net.c ../hle_net.c ../hle_offline.c $(NET_SOURCES) ../entry.S ../hle_bigstack.c
+$(B)/t_net_discovery: t_net_discovery.c $(NET_SOURCES) $(NET_HEADERS) | $(B)
+	$(CLANG) $(NET_FLAGS) -DDM_NET_TEST -o $@ t_net_discovery.c $(NET_SOURCES)
+$(B)/t_discovery_protocol: t_discovery_protocol.c ../discovery_protocol.h | $(B)
+	$(CLANG) -std=c11 -O2 -Wall -Wextra -Werror -pedantic -o $@ t_discovery_protocol.c
+LDN_SOURCES = ../hle_ldn.c ../hle_ldn_protocol.c
+LDN_HEADERS = ../hle_ldn.h $(NET_HEADERS)
+$(B)/t_ldn: t_ldn.c $(LDN_SOURCES) $(LDN_HEADERS) $(NET_SOURCES) | $(B)
+	$(CLANG) $(NET_FLAGS) -DDM_NET_TEST -DDM_LDN_TEST -DDM_LDN_NET_TEST -o $@ t_ldn.c $(LDN_SOURCES) $(NET_SOURCES)
+$(B)/t_ldn_events: t_ldn_events.c ../hle_ldn.c ../hle_ldn_protocol.c ../hle_ldn.h $(GAME_H) | $(B)
+	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_ldn_events.c ../hle_ldn_protocol.c
+.PHONY: local-network-tests
+local-network-tests: $(B)/t_hle_wait $(B)/t_net $(B)/t_net_discovery $(B)/t_discovery_protocol $(B)/t_ldn $(B)/t_ldn_events
+	$(B)/t_hle_wait
+	$(B)/t_oe_handoff
+	$(B)/t_net --no-broadcast
+	$(B)/t_net_discovery
+	$(B)/t_discovery_protocol
+	$(B)/t_ldn
+	$(B)/t_ldn_events
+	$(B)/t_friends_history
+run: local-network-tests
+
+$(B)/t_friends_history: t_friends_history.c ../hle_friends_history.c ../friends_history.h ../hle_friends.c ../account_local.h memory_profile/game_profile.h | $(B)
+	$(CLANG) $(NET_FLAGS) -DDM_FRIENDS_HISTORY_TEST -Imemory_profile -o $@ t_friends_history.c ../hle_friends_history.c
+local-network-tests: $(B)/t_friends_history
+
+$(B)/t_oe_handoff: t_oe_handoff.c t_condvar_stub.c ../hle_thread.c ../hle_oe.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_oe_handoff.c t_condvar_stub.c
+local-network-tests: $(B)/t_oe_handoff
+
+# A kernel socket receive must prepare tracked guest pages, including after waits.
+$(B)/t_net_write_prepare: t_net_write_prepare.c ../hle_net_backend.c ../net_socket.h ../net_discovery.h ../net_discovery_queue.inc ../discovery_protocol.h ../../gfx/nvn/nvn_dirty.c ../../gfx/nvn/nvn_dirty.h $(GAME_H) | $(B)
+	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_net_write_prepare.c ../../gfx/nvn/nvn_dirty.c
+.PHONY: net-write net-write-sanitize
+net-write: $(B)/t_net_write_prepare
+	$(B)/t_net_write_prepare
+net-write-sanitize:
+	$(call san_fresh,build/net-write-asan,$(ASAN_FLAGS))
+	$(ASAN_ENV) $(MAKE) B=build/net-write-asan SAN="$(ASAN_FLAGS)" net-write
+run: net-write
+
+# Original synthetic DNSService callbacks exercise ownership/cancellation offline.
+$(B)/t_resolver_cancel: t_resolver_cancel.c t_net_write_stub.c ../hle_net_backend.c ../net_socket.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -Wno-unused-function -o $@ t_resolver_cancel.c t_net_write_stub.c
+.PHONY: resolver
+resolver: $(B)/t_resolver_cancel
+	$(B)/t_resolver_cancel
+run: resolver
+# Optional system API smoke uses only localhost and is not part of CI.
+$(B)/t_resolver_live: t_resolver_live.c t_net_write_stub.c ../hle_net_backend.c ../net_socket.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -o $@ t_resolver_live.c ../hle_net_backend.c t_net_write_stub.c
+.PHONY: resolver-live
+resolver-live: $(B)/t_resolver_live
+	$(B)/t_resolver_live

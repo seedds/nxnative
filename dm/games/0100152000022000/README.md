@@ -80,3 +80,7 @@ General host changes first needed here; each applies to every game:
 ## Open
 
 - Mii heads draw nothing: the host ships no MiiModel firmware data (the player README notes "no Mii heads").
+
+### Native local-network contribution
+
+I tested LAN and LDN play across native Mac/iOS ports and a physical Switch on 2026-10-31, using 3.0.5 in my originating fork. My modified console used a compatible LDN module; this does not establish stock radio LDN. The rebased backend and local identity/resource requirements are documented under [native LAN and LDN](../../../docs/reference/services.md#opt-in-native-lan-sockets-and-ldn-over-ip). Automated fixtures are separate from a fresh hardware game qualification of this upstream branch.

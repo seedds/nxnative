@@ -13,7 +13,7 @@ from pathlib import Path
 
 import lz4.block
 
-from dm.tools.tests.test_split_gzip import REPO, fz, ss
+from dm.tools.tests.test_split_gzip import REPO, ss
 
 CHUNK = 0x10000
 

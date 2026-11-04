@@ -58,7 +58,7 @@ uint64_t guest_ns(void) { return now_ns(); }
 int dm_detclock_enabled(void) { return 0; }
 int dm_guest_as_contains(uintptr_t addr) { (void)addr; return 0; }
 int dm_sdk_major(void) { return 20; }
-int dm_main_imports(const char *prefix) { (void)prefix; return 1; }
+int dm_game_imports(const char *prefix) { (void)prefix; return 1; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 void dm_backtrace(uint64_t fp) { (void)fp; }
 uint32_t hle_hid_connected_npad(void) { return 0; }

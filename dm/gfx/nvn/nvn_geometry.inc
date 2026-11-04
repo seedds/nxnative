@@ -329,11 +329,15 @@ static geo_access geo_access_of(NvProg *pr, NvShader *gs) {
 // A passthrough geometry shader cannot change the vertices it passes on: with input of points, lines or triangles, its lean
 // kernel (dmsh_geometry.lean) reads only the capture words it decides with, writes the viewport masks and its storage, and the
 // program's own vertex and fragment stages draw the kept primitives. Instanced or multi-invocation draws, vertex shaders with
-// storage writes (they would run twice) and transform feedback keep the full kernel and its reader. DM_NVN_GEO_LEAN=0 turns it off.
+// storage writes (they would run twice) and transform feedback keep the full kernel and its reader. So does a passthrough shader that writes the layer (its reader has it, the
+// vertex shader does not): Mario Tennis Fever's atmosphere table (d9c3a99828b4f39f, one 8x8 plane of a 64-plane 3D texture per draw) and its shadow map went to layer 0, and the
+// other planes stayed zero: a blue wash over the whole scene. DM_NVN_GEO_LEAN=0 turns it off.
 static NvShader *geo_lean_pick(NvProg *pr, NvShader *gs, int topology, int instances) {
     static int lean_on = -1; if (lean_on < 0) { const char *e = getenv("DM_NVN_GEO_LEAN"); lean_on = !(e && !strcmp(e, "0")); }
     NvShader *vs = pr->sh[0], *base = pr->sh[2];
     if (!lean_on || instances > 1 || (gs && gs->geo_invocations != 1) || base->geo_invocations != 1 || !vs || vs->discard_fn || S.tf_on || !pr->sh[1] || !(topology == 0 || topology == 1 || topology == 3)) return NULL;
+    if (!(base->geo_bg_tried & 0x80)) { base->geo_bg_tried |= 0x80; base->geo_bgv_v = shader_get([[[NSString stringWithUTF8String:base->key] substringToIndex:16] stringByAppendingString:@"_bgv"], 0); }
+    if (base->geo_bgv_v && base->geo_bgv_v->layer_out) return NULL;
     if (!(base->geo_lean_tried >> topology & 1)) {
         base->geo_lean_tried |= 1 << topology;
         NSString *key = [[NSString stringWithUTF8String:base->key] substringToIndex:16];
@@ -697,7 +701,7 @@ static int geo_prep(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, geo_jo
     NvShader *vs = j->vs, *base = j->gs;
     if (!vs || !vs->geo_fn || !base || !base->geo_vertices || pr->sh[3] || pr->sh[4]) {
         if (!may_wait) return -1;
-        MLOG("[RED] geometry draw cannot capture this pipeline (vertex %s, geometry %s, tessellation %d, feedback %d)", vs ? vs->key : "-", base ? base->key : "-", !!(pr->sh[3] || pr->sh[4]), S.tf_on); return 0;
+        static int red; if (red++ < 8) MLOG("[RED] geometry draw cannot capture this pipeline (vertex %s, geometry %s, tessellation %d, feedback %d)", vs ? vs->key : "-", base ? base->key : "-", !!(pr->sh[3] || pr->sh[4]), S.tf_on); return 0;
     }
     if (di0 && (j->di.itype < 0 || j->di.itype > 2)) { if (may_wait) MLOG("[RED] geometry index type %d is invalid", j->di.itype); return 0; }
     uint64_t ind = dw0 ? j->dw.ind : j->di.ind;

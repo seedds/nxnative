@@ -13,7 +13,7 @@ void *guest_sym(const char *name) { return t_guest_sym ? t_guest_sym(name) : NUL
 #include <stdint.h>
 int dm_guest_as_contains(uintptr_t a) { (void)a; return 0; }
 // main's imports (loader.c) and the MiiModel stand-in (hle_mii.c): no main module, no system data
-int dm_main_imports(const char *prefix) { (void)prefix; return 0; }
+int dm_game_imports(const char *prefix) { (void)prefix; return 0; }
 int dm_mii_standin(const char *dir) { (void)dir; return 0; }
 // the guest scheduler (hle_thread.c): no guest threads, so no handoff to leave
 void dm_thread_service_request(void) {}

@@ -4,9 +4,11 @@
 # Function constant numbering: FX_i (which color index the i-th rewritable sample reads, -1 = sample as usual) = i; FB_k (enable color input k) = 32 + k;
 #               OM_j_k (the j-th output writes to attachment k) = 64 + 8 j + k
 # Rewritable samples: .sample(sampler, select(_N, float2(0.0), isnan(_N))) on a 2D float texture, where _N = float2(in.m_X.x, in.m_X.y) (interpolated output unchanged),
-# or _N = float2(in.m_X.x / in.m_X.w, in.m_X.y / in.m_X.w) (projective: 'proj', the screen position deferred decals sample their G-buffer at; screen_varyings gives the vertex side);
-# whether the texel is really fetched at this pixel is proven at runtime (correspondence between vertex uv and position, or a screen varying with the viewport over the whole target;
-# texture size = target size); if it cannot be proven, the original version is used
+# or _N = float2(in.m_X.x / in.m_X.w, in.m_X.y / in.m_X.w) (projective: 'proj', the screen position deferred decals sample their G-buffer at; screen_varyings gives the vertex side),
+# or _N = float2(gl_FragCoord.x [/ render scale] * U, gl_FragCoord.y [/ render scale] * V) with U, V uniform components ('frag_pos': their [slot, vector, component]; Splatoon Raiders'
+# ink stamps read their map at gl_FragCoord / 6400);
+# whether the texel is really fetched at this pixel is proven at runtime (correspondence between vertex uv and position, a screen varying with the viewport over the whole target,
+# or U and V = 1 / the target's size; texture size = target size); if it cannot be proven, the original version is used
 import collections
 import re
 import dmsh_abi as abi
@@ -30,6 +32,26 @@ def _proj(msl, var, comp, locn):
         return None
     m = re.search(r'float %s = (_\d+) / (_\d+);' % re.escape(var), msl)
     return src(m.group(1), comp) if m and src(m.group(1), comp) == src(m.group(2), 'w') else None
+
+_UNI = re.compile(r'\(\*spvDescriptorSet0\.fp_c(\d+)\)\._m0\[(\d+)\]\.([xyzw])')
+_SCALE = '(*spvDescriptorSet0.support_buffer)._m5[0].x'   # the support buffer's render scale (Ryujinx's layout), which the host fills with 1 (nvn_mtl.m support buffer)
+
+def _frag_pos(msl, var, comp):
+    """var = gl_FragCoord.<comp> [/ render scale] * U (either order), U a fragment uniform component, each name assigned once → [uniform slot, vector, component] (fp_cN is slot N − 3,
+    as dmsh_build.py raster_facts reads vp_cN), or None"""
+    def one(n, pat):
+        m = re.search(r'float %s = %s;' % (re.escape(n), pat), msl)
+        return m if m and _once(msl, n) else None
+    def pixel(n):   # n = gl_FragCoord.<comp>, or that over the render scale
+        if one(n, r'gl_FragCoord\.%s' % comp): return True
+        q = one(n, r'(_\d+) / (_\d+)')
+        return bool(q and one(q.group(1), r'gl_FragCoord\.%s' % comp) and one(q.group(2), re.escape(_SCALE)))
+    m = one(var, r'(\S+) \* (\S+)')
+    if not m: return None
+    for a, u in ((m.group(1), m.group(2)), (m.group(2), m.group(1))):
+        k = _UNI.fullmatch(u)
+        if k and int(k.group(1)) >= 3 and re.fullmatch(r'_\d+', a) and pixel(a): return [int(k.group(1)) - 3, int(k.group(2)), 'xyzw'.index(k.group(3))]
+    return None
 
 # ---- Screen varyings (vertex side of a projective sample) ----
 # Interpolated output locn K is the clip → screen varying when, in every vertex entry point (main0, main0_z, ...), its .x = (P.x + P.w) / 2, .y = (P.w − P.y) / 2 and .w = P.w,
@@ -171,17 +193,18 @@ def variant(msl, bindings, om_only_ok=False):
         if member not in tex or member != m.group(3) or member not in reg: continue
         d = re.search(r'float2 %s = float2\((_\d+), (_\d+)\);' % var, msl)
         a = d and re.search(r'float %s = in\.(m_\d+)\.x;' % d.group(1), msl); b = d and re.search(r'float %s = in\.(m_\d+)\.y;' % d.group(2), msl)
-        proj = 0
-        if not (a and b) or a.group(1) != b.group(1) or a.group(1) not in locn:
+        if a and b and a.group(1) == b.group(1) and a.group(1) in locn: how = {'varying_locn': locn[a.group(1)]}
+        else:
             pa, pb = (_proj(msl, d.group(1), 'x', locn), _proj(msl, d.group(2), 'y', locn)) if d else (None, None)
-            if not pa or pa != pb: continue
-            mem, proj = pa, 1
-        else: mem = a.group(1)
+            fx, fy = (_frag_pos(msl, d.group(1), 'x'), _frag_pos(msl, d.group(2), 'y')) if d else (None, None)
+            if pa and pa == pb: how = {'varying_locn': locn[pa], 'proj': 1}
+            elif fx and fy: how = {'frag_pos': [fx, fy]}
+            else: continue
         i = len(calls)
         if i >= 32: break
         sel = ''.join(f'FX_{i} == {k} ? fb{k} : ' for k in range(NFB))
         out_parts.append(msl[pos:m.start()]); out_parts.append(f'({sel}{m.group(0)})'); pos = m.end()
-        calls.append({'fc': i, 'tex_reg': reg[member], 'varying_locn': locn[mem], **({'proj': 1} if proj else {})})
+        calls.append({'fc': i, 'tex_reg': reg[member], **how})
     if not calls and not om_only_ok:
         return None, 'no rewritable sample'
     # Mixed-use slots: the same texture also has other (non-rewritable) uses - at runtime this texture must not be switched to tile reads (the rewritten reads and the unrewritten ones would not see the same data)

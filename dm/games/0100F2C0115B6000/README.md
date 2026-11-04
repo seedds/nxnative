@@ -82,6 +82,8 @@ Game-specific findings. The general host changes they led to are listed under [F
 
 ## Found on this game
 
+- [macOS Game Mode holds the GPU at its lowest clock](../../../docs/reference/frame-rate.md#macos-game-mode-holds-the-gpu-at-its-lowest-clock) (2026-11-04, #349): the Mac's fall to 30 fps at 338 MHz; a new Mac app opts out, a re-packed one needs the Game Overlay switch once.
+- [A regress run stops when another app takes the key window](../../../docs/reference/frame-rate.md#a-regress-run-stops-when-another-app-takes-the-key-window): the route's intermittent "hang" was the game paused out of focus (resolved).
 - [Old per-shader cache entries grew a game's build folder with each chain change](../../../docs/reference/shaders.md#old-per-shader-cache-entries-grew-a-games-build-folder-with-each-chain-change) (2026-11-03, #1033): 12 GB of earlier chains' entries in `cas/shader`.
 - [Same-pass feedback read from the tile](../../../docs/reference/rendering.md#same-pass-feedback-read-from-the-tile) (2026-11-03): the shrine decals of #737.
 - [Snapshot textures taken by format and size](../../../docs/reference/rendering.md#snapshot-textures-taken-by-format-and-size) and [Readback buffers kept for reuse](../../../docs/reference/nvn-objects.md#readback-buffers-kept-for-reuse) (2026-11-03, #931): a texture made for every snapshot and a buffer for every readback, with a residency commit each.

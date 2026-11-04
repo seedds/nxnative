@@ -217,6 +217,14 @@ class Unity6000_3Tests(unittest.TestCase):
         self.assertEqual(shaders, [('fixture#VrsTexture#TextureCopy.0', 'cs', control, code)])
 
 
+class Shader6000_3Tests(unittest.TestCase):
+    def test_shader_appends_local_identifier_to_6000_0(self):
+        old = unityfs.known_tree(48, bytes.fromhex('2ec7223dce3af4232b14ae1441bd7999'))
+        new = unityfs.known_tree(48, bytes.fromhex('57f0dd2d4ef24437b4655529a673a936'))
+        self.assertEqual([k.name for k in new.kids], [k.name for k in old.kids] + ['m_AssetLocalIdentifierInFile'])
+        self.assertEqual((new.kids[-1].type, new.kids[-1].flags), ('SInt64', 0))
+
+
 class Compute2020Tests(unittest.TestCase):
     """Unity 2020.3.27f1 (MADiSON): the 2021.3 kernel without its trailing SInt64 requirements."""
     def test_stripped_2020_kernel_variants_reach_shader_split(self):

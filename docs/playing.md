@@ -8,11 +8,13 @@ How to build and install a game: [README](../README.md#how-to-play).
 
 ## Touch controls
 
-Tap **2D** / **3D** at the top to switch layouts; the app remembers your choice. Wonder, Engage, Dread, 13 Sentinels, Link's Awakening, Ace Attorney Investigations Collection, Unicorn Overlord, Rhythm Heaven Groove, Octopath Traveler 0, Pokémon Legends: Z-A, Cuphead, Absolum, Blasphemous 2, Brain Memory Training Academy, The Great Ace Attorney Chronicles, STEINS;GATE RE:BOOT, Big Brain Academy: Brain vs. Brain, Patrick's Parabox, Celeste, Raging Loop and Mario vs. Donkey Kong start in 2D, the other games in 3D (STEINS;GATE RE:BOOT's quick save is R3, in the 3D layout).
+The gear at the top centre opens the in-game menu: **Controller layout** switches between **2D** and **3D** (and **Tap**, every touch to the game, in handheld mode), and the settings that take effect at once are there too, such as **Picture**, **Console mode** and **Game rumble** ([In-game menu](settings.md#in-game-menu)). The app remembers your choices. Wonder, Engage, Dread, 13 Sentinels, Link's Awakening, Ace Attorney Investigations Collection, Unicorn Overlord, Rhythm Heaven Groove, Octopath Traveler 0, Pokémon Legends: Z-A, Cuphead, Absolum, Blasphemous 2, Brain Memory Training Academy, The Great Ace Attorney Chronicles, STEINS;GATE RE:BOOT, Big Brain Academy: Brain vs. Brain, Patrick's Parabox, Celeste, Raging Loop and Mario vs. Donkey Kong start in 2D, the other games in 3D (STEINS;GATE RE:BOOT's quick save is R3, in the 3D layout).
 
 In 3D, the right stick (the camera in most games) is not drawn: swipe on the right third of the screen, starting anywhere off the buttons. In Super Mario Galaxy and Super Mario Galaxy 2, other touches outside the controls move the pointer; in Captain Toad: Treasure Tracker they touch the game's screen (touch blocks, stun enemies), and in Big Brain Academy: Brain vs. Brain too (its menus and activities).
 
-A connected game controller hides the touch controls and keeps every button.
+A connected game controller hides the touch controls, all but the gear, and keeps every button.
+
+In portrait (an iPad, an iPhone Duo's inner screen) the picture sits above the controls; so it does on a Duo half folded, the picture on the upper half. An iPad game also runs in a window of any size (Stage Manager).
 
 ## Rumble
 
@@ -41,6 +43,8 @@ Lines like `DM_OPMODE=0` (handheld mode: lower resolution, higher frame rate) in
 A Mac app shows the game's settings in a window before the game starts ([The Mac settings window](settings.md#the-mac-settings-window)). Its `env.txt` is `~/Library/Application Support/nxnative/<title ID>/env.txt`, and its log is `~/Library/Logs/nxnative/<title ID>.log`. [NX2Apple](https://github.com/LNPANDY/NX2Apple)'s library can also start it with the settings you pick there.
 
 A controller macOS pairs but Apple's controller support does not list, such as an 8BitDo in its own mode (Ultimate 2C Wireless over Bluetooth), is read as a raw HID gamepad, with full analog sticks: it takes a player as any other controller does, and the log says `controller '<name>' (HID) connected`. Its buttons follow 8BitDo's numbering by default; another maker's pad may number them differently, and the log then says so. `DM_HID_MAP=A=1,B=2,X=4,Y=5` in `env.txt` moves them (here: the printed letters instead of the positions), `DM_HID_LOG=1` logs the number of each button pressed, and `DM_HID_PADS=0` turns this off.
+
+To quit with a controller, hold its Home button (the logo button on an Xbox or PlayStation controller) for 2 seconds, then press A to quit or B to go back to the game. Quitting this way is the same as ⌘Q: progress the game has not saved is lost. If holding Home opens the Games app instead, macOS keeps the Home button for itself: its controller settings for the Home button decide whether apps may use it. `DM_HOME_QUIT=0` in `env.txt` turns the hold off.
 
 The mouse pointer hides when you press a key or a controller button, or move a stick, while it is over the game picture. Moving the mouse shows it again, as does switching to another window or app.
 

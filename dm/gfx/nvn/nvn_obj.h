@@ -20,7 +20,8 @@ typedef struct { uint32_t magic; NVNdevice *dev; uint64_t submits; int origin_ll
 
 typedef struct { NVNdevice *dev; void *mem; uint64_t size; uint32_t flags; } pool_builder_t;  FITS(pool_builder_t, NVNmemoryPoolBuilder);
 // A virtual pool (flags 0x200) keeps its sparse state in vp (hle_nvn.c struct vpool, NULL for an aliased one); vmode: 0 not mapped yet, 1 aliased onto one physical pool, 2 sparse
-typedef struct { uint32_t magic, flags; uint8_t *mem; uint64_t size; struct vpool *vp; int vmode; } pool_t;   FITS(pool_t, NVNmemoryPool);
+// gpu_written: a render target, a shader image, a texture clear or a copy into a texture has been recorded in it (mtl_pool_gpu_written)
+typedef struct { uint32_t magic, flags; uint8_t *mem; uint64_t size; struct vpool *vp; int vmode; _Atomic int gpu_written; } pool_t;   FITS(pool_t, NVNmemoryPool);
 
 typedef struct { const pool_t *pool; int64_t off; int32_t n; } dpool_t;                       // Texture / sampler descriptor pool
 FITS(dpool_t, NVNtexturePool); FITS(dpool_t, NVNsamplerPool);
@@ -106,9 +107,14 @@ enum {
     OP_BIND_PROGRAM, OP_BIND_STATE, OP_BIND_VATTR, OP_BIND_VSTREAM, OP_BIND_VBUF,
     OP_BIND_UBO, OP_BIND_SSBO, OP_BIND_TEX, OP_BIND_SAMP,
     OP_STENCIL, OP_POLY_OFFSET, OP_DRAW, OP_DRAW_IDX, OP_DISPATCH, OP_BARRIER,
-    OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_CLEAR_BUF, OP_DEPTH_CLAMP, OP_RENDER_COND, OP_FENCE_SYNC, OP_TF_BIND, OP_TF_STATE, OP_RAST_DISCARD, OP_VP_SWIZZLE, OP_BIND_TEX1, OP_PRIM_RESTART, OP_BIND_UBO_SMALL, OP_BIND_VBUF1, OP_DRAW_TEX, OP_ALPHA_REF, OP_PUSH_CONST, OP_DLSS, OP_COUNT_
+    OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_CLEAR_BUF, OP_DEPTH_CLAMP, OP_RENDER_COND, OP_FENCE_SYNC, OP_TF_BIND, OP_TF_STATE, OP_RAST_DISCARD, OP_VP_SWIZZLE, OP_BIND_TEX1, OP_PRIM_RESTART, OP_BIND_UBO_SMALL, OP_BIND_VBUF1, OP_DRAW_TEX, OP_ALPHA_REF, OP_PUSH_CONST, OP_DLSS, OP_MULTI_DRAW, OP_COUNT_
 };
 // Payload (immediately follows op_hdr)
+typedef struct {
+    uint64_t ind, cnt, ibuf;
+    int64_t stride;
+    int32_t max, prim, itype;  // itype is -1 for DrawArrays
+} p_multi_draw;
 typedef struct { int32_t n; const tex_t *color[8]; view_t cview[8]; uint8_t has_cview[8]; const tex_t *depth; view_t dview; uint8_t has_dview; } p_set_rt;
 typedef struct { int32_t index, mask; float rgba[4]; } p_clear_color;
 typedef struct { uint64_t h; NVNdrawTextureRegion d, s; } p_draw_tex;   // nvnCommandBufferDrawTexture: texture handle, destination (pixels) and source (texels) regions
@@ -166,6 +172,7 @@ static inline const p_bind_handles *bind_rec(uint32_t op, const void *a, p_bind_
 #define NVN_SEPTEX_SLOT0 DMSH_SEPTEX_SLOT0
 typedef struct { int32_t face, value_mask, mask, ref, which; } p_stencil;  // which: 0 value mask 1 write mask 2 reference value
 typedef struct { float factor, units, clamp; } p_poly_offset;
+enum { DM_PRIM_MESH_TASKS = 0x40 };   // p_draw.prim of nvnCommandBufferDrawMeshTasks (first task or mesh workgroup, count): no NVN primitive has this value
 typedef struct { int32_t prim, first, count, instances, base_instance; uint64_t ind; uint64_t mdi_cnt; int32_t mdi_i, pad; } p_draw;   // instances 0 counts as 1; ind != 0: DrawArraysIndirect, the arguments are read by the GPU from that address; mdi_cnt != 0: draw mdi_i of an indirect-count multi-draw (drawn only while mdi_i < the u32 at mdi_cnt)
 typedef struct { int32_t prim, itype, count, base_vertex, base_instance, instances; uint64_t ibuf, ind; uint64_t mdi_cnt; int32_t mdi_i, pad; } p_draw_idx;   // ind != 0: DrawElementsIndirect, {count, instances, first index, base vertex, base instance} read by the GPU from that address; mdi_cnt: as in p_draw
 // A draw record stops before ind unless it is an indirect draw or a multi-draw (hle_nvn.c rec_draw); read it with draw_rec / draw_idx_rec, which give the missing fields as 0.

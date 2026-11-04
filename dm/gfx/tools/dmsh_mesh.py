@@ -12,13 +12,22 @@ compute kernel: one triangle per thread, PRIMS consecutive triangles per SIMD gr
 vertices of PRIMS triangles exceed the mesh output limit (MESH_BYTES), a threadgroup takes 16,
 8, ... (prims_for) and its SIMD group runs with the rest of its lanes inactive, which subgroup
 operations of the guest's own (ballots, scans over active lanes) already allow.
+
+Each entry has a run twin (dm_mesh_run, dm_mesh_run_z, ..._p16) that draws several such draws in
+one dispatch: buffer 12 holds a table of dm_mesh_rec, one a draw, each with the draw's arguments,
+the end of its threadgroups (a running total) and the addresses bound at the vertex table's slots
+for it. A threadgroup finds its draw by halving, takes its resources through those addresses and
+runs the same body with the draw's own threadgroup and primitive numbers. A mesh draw on an M1
+costs about 2.7 us however few triangles it has; Donkey Kong Bananza's depth prepass draws 420-550
+of them a frame (nvn_geometry.inc, geo_mesh_run).
 """
 import re
 import dmsh_geometry, dmsh_pull
 
 PRIMS = 32   # triangles a threadgroup takes, fewer when their vertices exceed the mesh output limit (prims_for); the entry names any other count (dm_mesh_p16)
 MESH_BYTES = 32768   # Metal's limit on a mesh threadgroup's output: vertices and primitives
-DRAW_SLOT, GS_SLOT = 12, 13   # argument-table slots the vertex stage leaves free in a pulling pipeline
+DRAW_SLOT, GS_SLOT = 12, 13   # argument-table slots the vertex stage leaves free in a pulling pipeline (a run entry takes its table at DRAW_SLOT)
+RUN_SLOTS = 31   # vertex table slots a run record holds (= nvn_geometry.inc geo_mesh_rec)
 _SCALAR = {'float': 4, 'int': 4, 'uint': 4, 'half': 2, 'short': 2, 'ushort': 2}
 
 
@@ -129,13 +138,16 @@ def compose(vs_src, gs_src, reads):
     out = ['#include <metal_stdlib>', '#include <simd/simd.h>', '#include <metal_atomic>', 'using namespace metal;',
            'namespace dm_v {', _strip_head(pulled), '}', 'namespace dm_g {', _strip_head(gfn), '}', 'using namespace dm_v;',
            'struct dm_mesh_draw { device const uchar* ib; uint itype; uint first; uint count; int base_vertex; uint base_instance; };',
-           'struct dm_mesh_prim { bool culled [[primitive_culled]]; };']
+           'struct dm_mesh_prim { bool culled [[primitive_culled]]; };',
+           f'struct dm_mesh_rec {{ constant uchar* slot[{RUN_SLOTS}]; dm_mesh_draw d; uint group_end; uint n; }};']
     if res is None: raise ValueError('mesh: no vertex entries')
+    # The run twin takes each resource of the vertex entries from the draw's record (constant references only: a run entry is left out otherwise)
+    run_res = [m for m in (re.fullmatch(r'constant (.+?)& (\w+) \[\[buffer\((\d+)\)\]\]', p) for p in res) if m and int(m[3]) < RUN_SLOTS]
+    run_ok = len(run_res) == len(res)
+    head = f'metal::mesh<main0_out, dm_mesh_prim, {3 * P}, {P}, metal::topology::triangle> dm_m'
     for name, args in entries.items():
-        out.append(f'''[[mesh]] void dm_mesh{name[5:]}{'' if P == PRIMS else f'_p{P}'}(metal::mesh<main0_out, dm_mesh_prim, {3 * P}, {P}, metal::topology::triangle> dm_m, {', '.join(res)},
-    constant dm_mesh_draw& dm_d [[buffer({DRAW_SLOT})]], constant dm_g::spvDescriptorSetBuffer0& dm_gset [[buffer({GS_SLOT})]],
-    uint dm_t [[thread_index_in_threadgroup]], uint dm_tg [[threadgroup_position_in_grid]], uint dm_sg [[thread_index_in_simdgroup]])
-{{
+        sfx = f'{name[5:]}{"" if P == PRIMS else f"_p{P}"}'
+        body = f'''
     threadgroup float dm_rec[{3 * P * n}];
     uint dm_p0 = dm_tg * {P}u, dm_np = min({P}u, dm_d.count / 3u - dm_p0);
     if (dm_t < dm_np * 3u) {{
@@ -154,7 +166,22 @@ def compose(vs_src, gs_src, reads):
         dm_m.set_index(dm_t * 3u, dm_t * 3u); dm_m.set_index(dm_t * 3u + 1u, dm_t * 3u + 1u); dm_m.set_index(dm_t * 3u + 2u, dm_t * 3u + 2u);
         dm_m.set_primitive(dm_t, dm_mesh_prim{{(dm_mask & 1u) == 0u}});
     }}
-}}''')
+}}'''
+        out.append(f'''[[mesh]] void dm_mesh{sfx}({head}, {', '.join(res)},
+    constant dm_mesh_draw& dm_d [[buffer({DRAW_SLOT})]], constant dm_g::spvDescriptorSetBuffer0& dm_gset [[buffer({GS_SLOT})]],
+    uint dm_t [[thread_index_in_threadgroup]], uint dm_tg [[threadgroup_position_in_grid]], uint dm_sg [[thread_index_in_simdgroup]])
+{{{body}''')
+        if not run_ok: continue
+        takes = ''.join(f'\n    constant {m[1]}& {m[2]} = *(constant {m[1]}*)dm_r.slot[{m[3]}];' for m in run_res)
+        out.append(f'''[[mesh]] void dm_mesh_run{sfx}({head}, constant dm_mesh_rec* dm_run [[buffer({DRAW_SLOT})]],
+    uint dm_t [[thread_index_in_threadgroup]], uint dm_tgr [[threadgroup_position_in_grid]], uint dm_sg [[thread_index_in_simdgroup]])
+{{
+    uint dm_lo = 0u, dm_hi = dm_run[0].n - 1u;   // the draw this threadgroup belongs to: the first whose group_end is past it
+    while (dm_lo < dm_hi) {{ uint dm_mid = (dm_lo + dm_hi) / 2u; if (dm_run[dm_mid].group_end <= dm_tgr) dm_lo = dm_mid + 1u; else dm_hi = dm_mid; }}
+    constant dm_mesh_rec& dm_r = dm_run[dm_lo];
+    uint dm_tg = dm_tgr - (dm_lo ? dm_run[dm_lo - 1u].group_end : 0u);
+    constant dm_mesh_draw& dm_d = dm_r.d;
+    constant dm_g::spvDescriptorSetBuffer0& dm_gset = *(constant dm_g::spvDescriptorSetBuffer0*)dm_r.slot[{GS_SLOT}];{takes}{body}''')
     return '\n'.join(out) + '\n'
 
 

@@ -16,6 +16,7 @@
 // The base game may also be a cartridge dump (.xci, Monster Hunter Rise): its secure partition holds the NCAs, which carry their keys in the key area (no ticket).
 //   When the cartridge also carries an update (1G+1U), only the base game's NCAs (those its Application content meta lists) are read; the update comes from the update NSP.
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -216,6 +217,30 @@ static class P {
         }
     }
 
+    internal static IStorage PackageStorage(IStorage source) {
+        source.GetSize(out long size).ThrowIfFailure();
+        if (size < 16) throw new InvalidDataException("truncated PFS0 header");
+        byte[] first = new byte[16]; source.Read(0, first).ThrowIfFailure();
+        if (!first.AsSpan(0, 4).SequenceEqual("PFS0"u8)) return source;
+        uint count = BinaryPrimitives.ReadUInt32LittleEndian(first.AsSpan(4));
+        uint strings = BinaryPrimitives.ReadUInt32LittleEndian(first.AsSpan(8));
+        long headerSize = 16 + 24L * count + strings;
+        if (headerSize > size || headerSize >= int.MaxValue) throw new InvalidDataException("invalid PFS0 file-name table size");
+        byte[] header = new byte[(int)headerSize + 1];
+        source.Read(0, header.AsSpan(0, (int)headerSize)).ThrowIfFailure();
+        for (int i = 0; i < count; i++) {
+            uint offset = BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(16 + 24 * i + 16));
+            if (offset >= strings) throw new InvalidDataException("PFS0 file-name offset outside the string table");
+        }
+        if (strings == 0 || header[(int)headerSize - 1] == 0) return source;
+        // Older NSZ writers omitted the last NUL. Insert it in a virtual header, leaving the source and NCA bytes untouched.
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(8), strings + 1);
+        Console.WriteLine("PFS0: reading a missing final file-name terminator through an in-memory header");
+        return new LibHac.Tools.FsSystem.ConcatenationStorage(new IStorage[] {
+            new MemoryStorage(header), new SubStorage(source, headerSize, size - headerSize)
+        }, false);
+    }
+
     // Open an NSP (PFS0) or the secure partition of an XCI, import the common tickets, list all NCAs. With a content meta type, only the NCAs that the package's content metas of
     // that type list (when it has one), and with a title ID only that title's: a cartridge dump with its update on it (1G+1U) or a merged NSP holds the update's NCAs beside the
     // base game's, its Program NCA under the same title ID; a cartridge with two games holds two Application content metas. ncz: an NSZ's or XCZ's compressed NCAs too, by their
@@ -228,7 +253,7 @@ static class P {
             if (!xci.HasPartition(XciPartitionType.Secure)) throw new Exception($"no secure partition in {path}");
             pfs = xci.OpenPartition(XciPartitionType.Secure);
         } else {
-            var p = new PartitionFileSystem(); p.Initialize(st0).ThrowIfFailure(); pfs = p;
+            var p = new PartitionFileSystem(); p.Initialize(PackageStorage(st0)).ThrowIfFailure(); pfs = p;
         }
         var ncas = new List<Nca>(); var ids = new List<string>();   // ids: content IDs (the file names' hex)
         foreach (DirectoryEntryEx e in pfs.EnumerateEntries("*", SearchOptions.Default)) {

@@ -17,6 +17,7 @@ void mtl_pool_add(const void *mem, uint64_t size);
 void mtl_pool_del(const void *mem);
 // memory pool Finalize: evict the textures built on this pool (pool object address) from the storage-sharing table
 void mtl_alias_drop_pool(const void *pool);
+void mtl_pool_gpu_written(const void *pool);   // the GPU writes this pool: its uncompressed textures are no longer taken from storage (tex_cpu_content)
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off);   // 1 on success; buf is a (__bridge) id<MTLBuffer>
 
 typedef struct {
@@ -24,7 +25,7 @@ typedef struct {
     uint32_t view_nonnull, view_slots, live_tex, sview_nonnull;
     uint32_t pools;
     uint64_t pool_adds;
-    uint32_t c1_bufs; uint64_t c1_alloc, c1_data;   // Shader c1 constant segment: buffer count (4 MiB blocks + dedicated 64 KiB), allocated bytes, actual bytes
+    uint32_t c1_bufs; uint64_t c1_alloc, c1_data;   // Shader c1 constant segment: buffer count (4 MiB banks, dedicated 64 KiB slices inside them), allocated bytes, actual bytes
 } mtl_res_count;
 void mtl_res_counts(uint32_t tick, const char *why);   // Print one line of resource counts (the host calls it per tick / event, see dm_res_report_register in dm.h)
 void mtl_res_snapshot(mtl_res_count *out);

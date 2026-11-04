@@ -1180,6 +1180,12 @@ uint32_t hle_dup_readable_handle(uint32_t h) {   // A second read end of the sam
     pthread_mutex_unlock(&G);
     return r;
 }
+uint32_t hle_new_event(uint32_t *write_end) {   // A new kernel event, as svcCreateEvent makes it, for a host service to copy to its client: its read end; its write end in *write_end, or none when NULL
+    event_t *e = calloc(1, sizeof *e); if (!e) die("event calloc");
+    e->refs = write_end ? 2 : 1;
+    pthread_mutex_lock(&G); uint32_t r = h_new(O_EVENT_R, e); if (write_end) *write_end = h_new(O_EVENT_W, e); pthread_mutex_unlock(&G);
+    return r;
+}
 uint64_t hle_system_event_binding(void *ev) {
     uint64_t id = 0;
     pthread_mutex_lock(&g_se_lock);

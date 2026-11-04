@@ -29,6 +29,9 @@ fps_target	60
 # pipeline archive, the prepare step and the hybrid pipelines on the iPhone too (5,100 prewarm lines prepared in 0.28 s at start instead of compiling on first use)
 present_snap	on
 pso_mtl4	on
+# Screen shape (patches.py): DM_SCREEN_ASPECT renders a screen taller than 16:9 in its own shape, the iPhone Duo's 1.43:1 as
+# 1920x1344 with a 1280x896 layout space, the HUD at the screen's edges and 16:9's sides in view (more above and below); the iOS launcher offers it
+screen_aspect	on
 
 # ---- Versions ----
 # only the merged 1.9.0 copy is extracted; the base game's own build IDs are added when needed

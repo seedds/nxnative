@@ -17,6 +17,7 @@
 #include "hle.h"
 #include <pthread.h>
 #include <stdbool.h>
+#include <sys/mman.h>
 #include "vpx/vpx_decoder.h"
 #include "vpx/vp8dx.h"
 #include "hle_movie_yuv.h"
@@ -162,10 +163,39 @@ HLE_FORCE("_ZN2nn5codec36GetDecoderImagePoolNativeImageHandleEPKNS0_25VideoDecod
     p->native = 1;
     return (uint32_t)p->slot << 8 | i;
 }
-// A native image handle's picture for hle_nvn.c: 1 and its memory, size and layout; 0 for a handle no pool holds
+// Blank native images: a picture the system would fill that the host has no source for (GameChat's camera pictures, hle_misc.c), all zeros. Their handles have the top bit set, apart from
+// the decoder pools' (slot << 8 | image). The storage holds any uncompressed format up to 16 bytes a pixel, as the texture's format is known only when the game makes it
+#define BLANK_MAX 32
+static struct { uint32_t w, h; uint8_t *mem; uint64_t size; } g_blank[BLANK_MAX];
+static uint32_t blank_stride(uint32_t w) { return (w * 16 + 63) & ~63u; }
+uint32_t dm_native_image_blank(uint32_t w, uint32_t h) {   // a blank image's handle; 0 when there is no room
+    uint64_t size = ((uint64_t)blank_stride(w) * h + CV_NATIVE_ALIGN - 1) & ~(CV_NATIVE_ALIGN - 1);
+    void *mem = size ? mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0) : MAP_FAILED;
+    if (mem == MAP_FAILED) return 0;
+    pthread_mutex_lock(&g_cv_mu);
+    uint32_t k = 0; while (k < BLANK_MAX && g_blank[k].mem) k++;
+    if (k < BLANK_MAX) { g_blank[k].w = w; g_blank[k].h = h; g_blank[k].mem = mem; g_blank[k].size = size; }
+    pthread_mutex_unlock(&g_cv_mu);
+    if (k == BLANK_MAX) { munmap(mem, size); LOG("[RED] native images: more than %d blank images", BLANK_MAX); return 0; }
+    return 0x80000000u | (k + 1);
+}
+void dm_native_image_blank_free(uint32_t handle) {   // a texture on it must be finalized first, as on the console
+    uint32_t k = (handle & 0x7fffffffu) - 1;
+    if (!(handle >> 31) || k >= BLANK_MAX) return;
+    pthread_mutex_lock(&g_cv_mu);
+    uint8_t *mem = g_blank[k].mem; uint64_t size = g_blank[k].size; memset(&g_blank[k], 0, sizeof g_blank[k]);
+    pthread_mutex_unlock(&g_cv_mu);
+    if (mem) munmap(mem, size);
+}
+// A native image handle's picture for hle_nvn.c: 1 and its memory, size and layout; 0 for a handle no pool or blank image holds
 int dm_native_image(uint32_t handle, uint8_t **mem, uint64_t *size, uint32_t *w, uint32_t *h, uint32_t *stride) {
     uint32_t slot = handle >> 8, i = handle & 0xff; int ok = 0;
     pthread_mutex_lock(&g_cv_mu);
+    uint32_t k = (handle & 0x7fffffffu) - 1;
+    if (handle >> 31 && k < BLANK_MAX && g_blank[k].mem) {
+        *mem = g_blank[k].mem; *size = g_blank[k].size; *w = g_blank[k].w; *h = g_blank[k].h; *stride = blank_stride(g_blank[k].w);
+        pthread_mutex_unlock(&g_cv_mu); return 1;
+    }
     cv_pool *p = slot && slot <= 256 ? g_cv_pools[slot - 1] : NULL;
     if (p && p->mem && i < p->count && (i + 1) * native_size(p->w, p->h) <= p->size) {
         *mem = p->mem + i * native_size(p->w, p->h); *size = native_size(p->w, p->h); *w = p->w; *h = p->h; *stride = native_stride(p->w); ok = 1;
@@ -442,6 +472,34 @@ HLE_FORCE("_ZN2nn5codec35InitializeH264DecoderByRemoteMemoryEPNS0_15H264DecoderT
     (void)bs; (void)refs; (void)mode; return cv_dec_init(t, CV_H264, (uint16_t)w, (uint16_t)h, in, out, csd, csd_n);
 }
 HLE_FORCE("_ZN2nn5codec34GetH264DecoderSubmissionReadyEventEPNS0_15H264DecoderTypeE", "signalled while the host decoder takes packets", void *, h_cv_h264ev22, void *t) { cv_dec *d = cv_of(t); return d ? d->event : NULL; }
+// SDK 19's forms (Mario Kart World's base game, SDK 19.3.3 Ounce, whose movie player is in main). Initialize by remote memory takes two sizes before the picture size (`mmttj`), eight
+// arguments in registers (H.264 two more past them: the parameter sets, 8-byte slots as above). The output buffer properties take a nn::movie::ColorSpace* before the time (nine
+// arguments: the index is the first stack slot; the sdk's own wrapper, sdk+0x2ca110, reorders them for the implementation that writes it as 32 bits). The game reads neither the colour space
+// near either call (main+0x19e63d4, +0x19e702c), and it converts the NV12 pictures it reads itself, so it gets 0. MakeDecodeImagePreferenceForCompat is MakeDecodeImagePreference with fewer
+// output formats (sdk+0x2c6040); the game picks one of the two per decoder (main+0x19e7860)
+#define CV_SDK19(tag, codec, s_rm, s_props) \
+    HLE_FORCE(s_rm, "decoded on the host", Result, h_cv_##tag##rm19, void *t, uint64_t bs, uint64_t mem, uint64_t w, uint64_t h, uint32_t refs, uint32_t in, uint32_t out) { \
+        (void)bs; (void)mem; (void)refs; return cv_dec_init(t, codec, (uint16_t)w, (uint16_t)h, in, out, NULL, 0); } \
+    HLE_FORCE(s_props, "the filled buffer's picture size, time and end of stream; colour space 0", Result, h_cv_##tag##props19, uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, uint32_t *cs, \
+              int64_t *ts, bool *eos, void *t, uint64_t i) { *cs = 0; return cv_dec_props(w, h, cw, ch, ts, eos, t, (uint32_t)i); }
+CV_SDK19(vp9, CV_VP9, "_ZN2nn5codec20InitializeVp9DecoderEPNS0_14Vp9DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatE",
+    "_ZN2nn5codec35GetVp9DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_14Vp9DecoderTypeEj")
+CV_SDK19(vp8, CV_VP8, "_ZN2nn5codec20InitializeVp8DecoderEPNS0_14Vp8DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatE",
+    "_ZN2nn5codec35GetVp8DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_14Vp8DecoderTypeEj")
+CV_SDK19(av1, CV_AV1, "_ZN2nn5codec20InitializeAv1DecoderEPNS0_14Av1DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatE",
+    "_ZN2nn5codec35GetAv1DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_14Av1DecoderTypeEj")
+#undef CV_SDK19
+HLE_FORCE("_ZN2nn5codec21InitializeH264DecoderEPNS0_15H264DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatEPKvm",
+          "decoded with VideoToolbox on the host", Result, h_cv_h264rm19, void *t, uint64_t bs, uint64_t mem, uint64_t w, uint64_t h, uint32_t refs, uint32_t in, uint32_t out, const void *csd, uint64_t csd_n) {
+    (void)bs; (void)mem; (void)refs; return cv_dec_init(t, CV_H264, (uint16_t)w, (uint16_t)h, in, out, csd, csd_n);
+}
+HLE_FORCE("_ZN2nn5codec36GetH264DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_15H264DecoderTypeEj",
+          "the filled buffer's picture size, time and end of stream; colour space 0", Result, h_cv_h264props19, uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, uint32_t *cs, int64_t *ts, bool *eos,
+          void *t, uint64_t i) { *cs = 0; return cv_dec_props(w, h, cw, ch, ts, eos, t, (uint32_t)i); }
+HLE_FORCE("_ZN2nn5codec3sdk34MakeDecodeImagePreferenceForCompatEttNS0_24VideoDecoderOutputFormatENS0_9CodecModeE", "the preference only carries the size and format to the host's pool (SDK 19)",
+          cv_pref, h_cv_pref19, uint64_t w, uint64_t h, uint32_t fmt, uint32_t mode) {
+    return (cv_pref){(uint16_t)w, (uint16_t)h, fmt, mode, CV_MAGIC, {0, 0}};
+}
 // The host's sync handles signal when their buffer holds the picture of that release; a handle the host did not make (another nn::gs user) reads as signalled
 static bool sync_reached(const cv_sync *s) {
     if (s->magic != CV_SYNC) { static int once; if (!once++ && (s->magic || s->dec)) LOG("[RED] nn::codec: a sync handle the host did not make (%#x): signalled", s->magic); return true; }
@@ -474,6 +532,12 @@ HLE_FORCE("_ZN2nn6syncpt3sdk21RequestSyncPointEventEPNS1_18SyncPointEventTypeERK
     return 0;
 }
 HLE_FORCE("_ZN2nn6syncpt3sdk20CancelSyncPointEventEPNS1_18SyncPointEventTypeE", "disarms the event", void, h_spt_cancel, void *e) { spt_unarm(e); hle_clear_system_event(e); }
+// Whether the awaited picture is in its buffer: the event's SystemEvent is signalled (manual clear, so the look leaves it signalled). Mario Kart World's base game asks it before each
+// request (main+0x19e779c, SDK 19.3.3); the SDK's own went through the same null table as CreateSyncPointEvent (pc 0)
+HLE_FORCE("_ZN2nn6syncpt3sdk21TryWaitSyncPointEventEPKNS1_18SyncPointEventTypeE", "the event's SystemEvent is signalled", bool, h_spt_trywait, const void *e) {
+    static uint32_t (*tw)(void *); if (!tw && !(tw = guest_sym("_ZN2nn2os18TryWaitSystemEventEPNS0_15SystemEventTypeE"))) die("nn::os::TryWaitSystemEvent missing");
+    return (tw((void *)e) & 0xff) != 0;
+}
 HLE_FORCE("_ZN2nn6syncpt3sdk21DestroySyncPointEventEPNS1_18SyncPointEventTypeE", "destroys the event's SystemEvent", void, h_spt_destroy, void *e) {
     spt_unarm(e);
     static void (*destroy)(void *); if (!destroy && !(destroy = guest_sym("_ZN2nn2os18DestroySystemEventEPNS0_15SystemEventTypeE"))) die("nn::os::DestroySystemEvent missing");

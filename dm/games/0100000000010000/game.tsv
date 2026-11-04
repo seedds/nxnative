@@ -11,6 +11,13 @@ ipa	SuperMarioOdyssey.ipa
 app_category	public.app-category.action-games
 pad_layout	full
 
+# ---- Graphics ----
+# Tested on the iPhone (17 Pro Max, A19 Pro, iOS 27.0.1, docked, 1.4.1): render pipelines through MTL4Compiler with the g18p pipeline archive and the pulling
+# libraries cut the long frames from pipeline compiles in about 8 minutes of play from 322 (17 minutes without them) to 28, the worst 4.4 s to 0.1 s, apart from
+# one 2 s archive compaction. Without the key the NSP script built neither, while the launcher still offered the Metal 4 toggle: turned on, its prebuild left
+# 29,366 of the 32,864 pairs to the draws
+pso_mtl4	on
+
 # ---- Versions ----
 build	v393216	1.4.1	main=b424be150a8e7d78701cbe7a439d9ebf	subsdk0=93ff8252d975adf07230cb86c83301c5	sdk=fcf93a41b08c5193a1410d262602dc62
 package	v393216

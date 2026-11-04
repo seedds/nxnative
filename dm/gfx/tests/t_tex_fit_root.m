@@ -23,6 +23,81 @@ static int same(const float v[4], NSUInteger level, NSUInteger layer, const int 
     for (int c = 0; c < 4; c++) if (fabsf(v[c] - texel(level, layer, ch[c]) / 255.0f) > 1e-4f) return 0;
     return 1;
 }
+// Observe the compatible Metal view itself, not its parent (which the serial/view
+// caches legitimately retain). Each scope drains ARC/autoreleased GPU encoders
+// before testing the weak reference. Full unregister is the positive control.
+static void finish_retirement(void) {
+    mtl_sub_commit();
+    @autoreleasepool { mtl_drain(); dispatch_sync(g_feedback_q, ^{}); defer_drain(); }
+}
+static void check_fitted_pixels(id<MTLComputePipelineState> pipeline, id<MTLTexture> fit) {
+    const int swapped[4] = {2, 1, 0, 3}; float v[4];
+    CHECK(fit != nil, "registered compatible Metal view exists");
+    if (!fit) return;
+    read2d(pipeline, fit, 0, v); CHECK(same(v, 1, 2, swapped), "registered fitted view reads level 1, layer 2");
+    read2d(pipeline, fit, 1, v); CHECK(same(v, 2, 2, swapped), "registered fitted view reads level 2, layer 2");
+}
+static void retirement_lifetime(id<MTLComputePipelineState> pipeline, id<MTLTexture> root) {
+    const char *names[] = {"unregister control", "descriptor gone", "pool gone", "descriptor gone then same registration", "pool gone then same registration"};
+    for (int mode = 0; mode < 5; mode++) {
+        fprintf(stderr, "compatible-view lifetime: %s\n", names[mode]);
+        pool_t pool = {0};
+        tex_t t = {.magic = MAGIC('T', 'E', 'X', 0), .serial = nvn_new_serial(), .pool = &pool};
+        t.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D_ARRAY, .format = NVN_FORMAT_RGBA8,
+            .width = W, .height = W, .depth = LAYERS, .levels = LEVELS, .samples = 1};
+        nvn_tex_layout(&t.d, &t.L);
+        view_t v = {.set_levels = 1, .base_level = 1, .nlevels = 2,
+            .set_layers = 1, .min_layer = 2, .nlayers = 2, .set_swizzle = 1,
+            .swz = {MTLTextureSwizzleBlue, MTLTextureSwizzleGreen, MTLTextureSwizzleRed, MTLTextureSwizzleAlpha}};
+        int tid = TID + 1 + mode;
+        __weak id<MTLTexture> retired;
+        mtl_tex_init(&t); serial_put(t.serial, root); mtl_reg_tex(tid, &t, &v);
+        mtl_sub_begin();
+        @autoreleasepool {
+            uint64_t rid = 0;
+            os_unfair_lock_lock(&g_rmu);
+            id<MTLTexture> primary = tex_by_id(tid);
+            id<MTLTexture> fitted = tex_fit(tid, primary, MTLTextureType2D, &rid);
+            os_unfair_lock_unlock(&g_rmu);
+            CHECK(primary != root && primary.parentTexture == root, "real registered mip/layer/swizzle cache populated");
+            CHECK(fitted && fitted != primary && fitted.parentTexture == root, "compatible view is a distinct real Metal object");
+            retired = fitted;
+            check_fitted_pixels(pipeline, fitted);
+            if (mode == 0) mtl_reg_tex(tid, NULL, NULL);
+            else if (mode == 1 || mode == 3) mtl_reg_tex_gone(tid);
+            else mtl_alias_drop_pool(&pool);
+            if (mode >= 3) mtl_reg_tex(tid, &t, &v);
+        }
+        @autoreleasepool {
+            defer_drain();   // No submission fence has completed: the view must still be usable.
+            CHECK(retired != nil, "retirement preserves the compatible view before its submission completes");
+            check_fitted_pixels(pipeline, retired);
+        }
+        finish_retirement();
+        @autoreleasepool {
+            CHECK(retired == nil, "compatible Metal view released after gone/unregister and submission completion");
+        }
+        mtl_sub_begin();
+        @autoreleasepool {
+            if (mode >= 3) {
+                uint64_t rid = 0;
+                os_unfair_lock_lock(&g_rmu);
+                id<MTLTexture> primary = tex_by_id(tid);
+                id<MTLTexture> fitted = tex_fit(tid, primary, MTLTextureType2D, &rid);
+                os_unfair_lock_unlock(&g_rmu);
+                check_fitted_pixels(pipeline, fitted);
+            }
+            // Also a per-case release control: a failed gone assertion must not
+            // be confused with Metal retaining every compatible view regardless.
+            mtl_reg_tex(tid, NULL, NULL);
+            mtl_tex_release(&t); mtl_vc_drop(t.serial);
+        }
+        finish_retirement();
+        @autoreleasepool {
+            CHECK(retired == nil, "full unregister control releases the original compatible Metal view");
+        }
+    }
+}
 int main(void) { @autoreleasepool {
     mtl_init(); NSError *error = nil;
     NSString *source = @"#include <metal_stdlib>\nusing namespace metal;\n"
@@ -57,5 +132,6 @@ int main(void) { @autoreleasepool {
     float v[4];
     read2d(pipeline, fit, 0, v); CHECK(same(v, 1, 2, swapped), "level 0 of the fitted view is level 1, layer 2, swizzled");
     read2d(pipeline, fit, 1, v); CHECK(same(v, 2, 2, swapped), "level 1 of the fitted view is level 2, layer 2, swizzled");
+    retirement_lifetime(pipeline, root);
     printf("tex_fit views from the root: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

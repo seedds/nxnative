@@ -13985,7 +13985,7 @@ static int dr_tex(dr_t *d, int w, int tid) {
     // Level offsets follow the guest's block-linear layout, which says where the host's level / layer is only for a texture of its own: not a linear one, not a 3D one (a "layer" of its
     // view is a depth slice), not one placed in a heap with aliases of other sizes (image_heap) or made on a pool buffer
     if (one && lv < nl && sl < t->L.layers && !(t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) && t->d.target != NVN_TEXTURE_TARGET_3D) {
-        __unsafe_unretained id<MTLTexture> mt = tex_get(t->serial);
+        __unsafe_unretained id h = tex_get(t->serial); __unsafe_unretained id<MTLTexture> mt = [h isKindOfClass:[NvPkg class]] ? ((NvPkg *)h)->tex : h;   // a texture from the game's files is held in an NvPkg (tex_mtl unwraps it the same way)
         if (mt && !mt.heap && !mt.buffer && lv < mt.mipmapLevelCount) {   // a level the host texture lacks may share a host level with another
             uint64_t l0 = base + (uint64_t)sl * t->L.layer_size;
             lo = l0 + nvn_tex_level_offset(&t->d, lv); hi = lv + 1 < nl ? l0 + nvn_tex_level_offset(&t->d, lv + 1) : l0 + t->L.layer_size;

@@ -478,6 +478,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `uepak.py` reads version 8 as a legacy pak: its footer as version 11's, its index as version 4's, each file's method named from the footer (`Zlib`, decoded in Python by `Pak.read`). The shaders are inline in the cooked packages and `Engine/GlobalShaderCache-GLSL_SWITCH.bin`, as in [Unreal Engine 4.18](#unreal-engine-418-shaders-inline-in-cooked-packages), so `shader_split.py` `ue_legacy_jobs` reads them unchanged. `dm/tools/tests/test_uepak_v8.py` builds a version 8 pak with a Zlib file and a stored one.
 - **Found on:** DRAGON BALL Z: KAKAROT + A NEW POWER AWAKENS SET (`010051C0134F8000`, 1.00, SDK 9.3.1): 43,113 shaders from 3,776 files in 38 s; it plays from the title through the opening fight.
 
+### Unreal Engine 4.25 frozen-index paks (version 9)
+
+- **Symptom:** `[RED] the shader split found no shaders in main or the RomFS` on an Unreal Engine 4.25 game whose `.pak` has `PAK_MAGIC` `0xcd` bytes from the end (`PakFile_Version_FrozenIndex = 9`).
+- **Cause:** version 9 paks insert a 1-byte `bIndexIsFrozen` flag (`1`) between the 20-byte index SHA-1 and the five 32-byte compression method names in the footer (placing `PAK_MAGIC` `0xcd` bytes from the end instead of `0xcc`), and write the index as a frozen `FMemoryImage` (`FPakIndex`: UTF-16LE `MountPoint` at `+0x00`, `TMemoryImageArray<FPakEntry>` of `0x50`-byte entries at `+0x10`, and `DirectoryIndex` of `0x50`-byte directory elements at `+0x20` with `0x20`-byte `{FMemoryImageString, i32}` file pairs, every pointer an `i64` with bit 0 = 1 and `p >> 1` the signed byte offset from the pointer field itself). `uepak.py` only looked for `PAK_MAGIC` at `0x2c`, `0xc8`, and `0xcc` from the end, so `unreal_paks` skipped the pak.
+- **Fix:** `uepak.py` checks `0xcd` in `magic_back` and `footer`, reads the frozen `FMemoryImage` index in `frozen_index`, and treats a version 9 pak whose directory index names `.uexp` or `GlobalShaderCache-` and no `.ushaderbytecode` as having inline shaders (`inline_shaders`). Tested by `Version9` in `dm/tools/tests/test_uepak_v8.py` and the `pak9` seed in `dm/tools/fuzz/fuzz_uepak.py`.
+- **Found on:** DRAGON QUEST TREASURES (`0100217014266000`, update 1.0.1 / v65536, SDK 13.3.0): 15,700 unique shaders (3,053 vertex, 12,018 pixel, 626 compute, 3 geometry) from `DarwinGame/Content/Paks/pakchunk0-Switch.pak` (2.1 GB, 97,689 files, Zlib blocks) in 8 s.
+
 ### Unreal Engine 3 shader caches (Oodle packages)
 
 - **Symptom:** `the shader split found no shaders in main or the RomFS`; the survey lists the RomFS as cooked packages (`.xxx`) and `.usm` movies only.

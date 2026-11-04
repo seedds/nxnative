@@ -15,9 +15,9 @@ endif
 endif
 GAME_H = gen/$(GAME)/game_profile.h
 include ../mac/min_os.mk
-CFLAGS=-O1 -g -Wall -Wno-unused-function -mmacosx-version-min=$(MACOS_MIN)
+CFLAGS=-O1 -g -Wall -Wno-unused-function -mmacosx-version-min=$(MACOS_MIN) -DDM_MAC_PROFILE_SYMBOL=dm_mac_host_abi_1_$(GAME)
 # Service-layer takeover hle_*.c files are included by wildcard: adding a file does not touch this line (avoids merge conflicts)
-SRC=main.c loader.c hle.c crash.c probe.c thread.c save_sync.c memstat.m haptics_apple.m $(sort $(wildcard hle_*.c)) front_mac.m web_apple.m entry.S
+SRC=main.c loader.c hle.c crash.c probe.c thread.c save_sync.c memstat.m haptics_apple.m $(sort $(wildcard hle_*.c)) front_mac.m players_mac.m web_apple.m entry.S
 # NVN null device + nn::vi + the Vulkan layer (dm/gfx/)
 # Sources under dm/gfx, dm/gfx/nvn, dm/gfx/tex, dm/gfx/vk and dm/gfx/gl are included by wildcard (tests/ and metal/ do not go into the host): adding a file does not touch this line
 GFX=$(sort $(wildcard ../gfx/*.c ../gfx/nvn/*.c ../gfx/nvn/*.m ../gfx/nvn/*.S ../gfx/tex/*.c ../gfx/tex/*.m ../gfx/vk/*.m ../gfx/gl/*.m))
@@ -71,13 +71,16 @@ $(GAME_STAMP): FORCE
 	@mkdir -p gen; echo $(GAME) | cmp -s - $@ || echo $(GAME) > $@
 ifneq ($(strip $(GAME)),)
 ifneq ($(shell cat $(GAME_STAMP) 2>/dev/null),$(GAME))
-dmhost: FORCE
+dmhost dmhost.dylib: FORCE
 endif
 endif
 .PHONY: FORCE
 FORCE:
-dmhost: $(SRC) $(GFX) ../third_party/stb_vorbis/stb_vorbis.c dm.h hle.h romfs_image.h save_sync.h dm_input.h pad_slots.h hle_haptics.h haptics_apple.h motion_fusion.h motion_apple.h motion_pro.h motion_pro_mac.h pad_apple.h pad_hid.h pad_hid_mac.h home_quit.h home_quit_mac.h front.h $(GFX_H) $(GAME_H) $(GAME_STAMP) $(VPX_LIB) $(DAV1D_LIB) $(MSL_H)
-	clang $(CFLAGS) -I../gfx/nvn/include -I$(dir $(MSL_H)) -I../third_party/vulkan-headers/include -I$(dir $(GAME_H)) -I$(VPX) -I$(DAV1D)/include -I../third_party/stb_vorbis -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) $(DAV1D_LIB) -framework Cocoa -framework WebKit -framework UserNotifications -framework QuartzCore -framework Metal -framework MetalFX -framework GameController -framework CoreHaptics -framework IOKit -framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework ImageIO -framework UniformTypeIdentifiers
+# The library is paired to these exact executable bytes, not just the title ID.
+dmhost.dylib: dmhost
+
+dmhost dmhost.dylib: $(SRC) $(GFX) ../third_party/stb_vorbis/stb_vorbis.c dm.h hle.h romfs_image.h save_sync.h dm_input.h pad_slots.h players_mac.h hle_haptics.h haptics_apple.h motion_fusion.h motion_apple.h motion_pro.h motion_pro_mac.h pad_apple.h pad_hid.h pad_hid_mac.h home_quit.h home_quit_mac.h front.h mac_host.h $(GFX_H) $(GAME_H) $(GAME_STAMP) $(VPX_LIB) $(DAV1D_LIB) $(MSL_H)
+	clang $(CFLAGS) $(if $(filter dmhost.dylib,$@),-dynamiclib -DDM_MAC_HOST_LIBRARY -DDM_MAC_EXECUTABLE_SHA_SYMBOL=dm_mac_host_executable_sha256_$(shell shasum -a 256 dmhost | cut -d' ' -f1)) -I../gfx/nvn/include -I$(dir $(MSL_H)) -I../third_party/vulkan-headers/include -I$(dir $(GAME_H)) -I$(VPX) -I$(DAV1D)/include -I../third_party/stb_vorbis -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) $(DAV1D_LIB) -framework Cocoa -framework WebKit -framework UserNotifications -framework QuartzCore -framework Metal -framework MetalFX -framework GameController -framework CoreHaptics -framework IOKit -framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework ImageIO -framework UniformTypeIdentifiers
 clean:   # the host and everything make generates for it (gen/: the profile headers, the game stamp and the libvpx and dav1d builds; dmhost_* and *.dSYM beside them, as in .gitignore)
-	rm -rf gen dmhost dmhost_* *.dSYM
+	rm -rf gen dmhost dmhost.dylib dmhost_* *.dSYM
 .PHONY: clean

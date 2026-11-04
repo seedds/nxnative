@@ -212,7 +212,9 @@ int front_web_touch(void) { return g_touch; }
 
 static NSString *json(NSString *s) {   // a JavaScript string literal
     NSData *d = [NSJSONSerialization dataWithJSONObject:@[s ?: @""] options:0 error:nil];
+    if (!d) return nil;
     NSString *a = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+    if (!a || a.length < 2) return nil;
     return [a substringWithRange:NSMakeRange(1, a.length - 2)];
 }
 static NSString *mime(NSString *ext) {
@@ -282,12 +284,22 @@ static NSString *mime(NSString *ext) {
 
 // The document's files; anything else is not served
 - (void)serve:(id<WKURLSchemeTask>)t {
-    NSURL *u = t.request.URL; NSString *rel = [u.path stringByStandardizingPath];
+    NSURL *u = t.request.URL;
+    NSString *path = u.path;
+    if (!u || !path) {
+        [t didFailWithError:[NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorBadURL userInfo:nil]];
+        return;
+    }
+    NSString *rel = [path stringByStandardizingPath];
     while ([rel hasPrefix:@"/"]) rel = [rel substringFromIndex:1];
     NSString *f = [_dir stringByAppendingPathComponent:rel]; NSData *d = nil;
     if ([rel isEqualToString:@"__dm_font/nintendo_ext.ttf"]) {   // the Nintendo extension font (button icons): the host's stand-in, as the shared font service gives it (hle_sdk16.c)
         const char *e = getenv("DM_SHARED_FONT_EXT"), *fd = getenv("DM_FONT_DIR");
         f = e ? @(e) : fd ? [@(fd) stringByAppendingPathComponent:@"nintendo_ext.ttf"] : @"";
+        if (!f) {   // Environment paths may contain invalid UTF-8.
+            [t didFailWithError:[NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorBadURL userInfo:nil]];
+            return;
+        }
         d = [NSData dataWithContentsOfFile:f];
     } else if (rel.length && ![rel containsString:@".."] && [f hasPrefix:_dir]) {
         d = [NSData dataWithContentsOfFile:f];
@@ -300,6 +312,10 @@ static NSString *mime(NSString *ext) {
     }
     NSHTTPURLResponse *r = [[NSHTTPURLResponse alloc] initWithURL:u statusCode:d ? 200 : 404 HTTPVersion:@"HTTP/1.1"
                                                      headerFields:@{@"Content-Type": mime(f.pathExtension), @"Content-Length": [NSString stringWithFormat:@"%lu", (unsigned long)d.length]}];
+    if (!r) {
+        [t didFailWithError:[NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCannotParseResponse userInfo:nil]];
+        return;
+    }
     if (!d) LOG("[RED] web: the page asked for %s, which its document does not have", u.absoluteString.UTF8String);
     [t didReceiveResponse:r]; [t didReceiveData:d ?: [NSData data]]; [t didFinish];
 }
@@ -334,7 +350,11 @@ static NSString *mime(NSString *ext) {
     else if ([k isEqualToString:@"end"]) { _closed = YES; [self stopInput]; [self setHiddenState:YES]; _shown = NO; g_touch = 0; dm_web_ended((uint32_t)[b[@"r"] intValue], NULL); }
     else if ([k isEqualToString:@"log"]) { static int n; if (n++ < 200) LOG("web: page %s", [b[@"d"] description].UTF8String); }
 }
-- (void)deliver:(NSString *)m { [_web evaluateJavaScript:[NSString stringWithFormat:@"window.__dm&&__dm.recv(%@)", json(m)] completionHandler:nil]; }
+- (void)deliver:(NSString *)m {
+    NSString *s = json(m);
+    if (!s) { LOG("[RED] web: content message could not be encoded as JSON"); return; }
+    [_web evaluateJavaScript:[NSString stringWithFormat:@"window.__dm&&__dm.recv(%@)", s] completionHandler:nil];
+}
 - (void)send:(NSString *)m { if (_loaded) [self deliver:m]; else [_pending addObject:m]; }
 
 // Input while shown: hle_hid.c's state (the keyboard, every controller, DM_CTL) at 60 Hz, sent when it changes; buttons held as the page appears are left out until released
@@ -367,12 +387,14 @@ int front_web_open(const char *dir, const char *path, const char *callback, int 
     NSString *d = @(dir), *p = @(path), *cb = @(callback); dm_web_opts o = opts ? *opts : (dm_web_opts){0, 0};
     dispatch_async(dispatch_get_main_queue(), ^{
         if (g_box) { [g_box close]; g_box = nil; }
+        NSString *q = [p stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLFragmentAllowedCharacterSet];
+        NSURL *u = q ? [NSURL URLWithString:[@"dmweb://doc/" stringByAppendingString:q]] : nil;
+        if (!u) { dm_web_failed("the document path could not be encoded as a URL"); return; }
         DmWebBox *box = g_box = [[DmWebBox alloc] initWithDir:d callback:cb opts:o];
         NSArray *parts = [p componentsSeparatedByString:@"/"]; if (parts.count > 1) box.top = parts[0];
         front_web_attach(box);
         [box place];
-        NSString *q = [p stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLFragmentAllowedCharacterSet];
-        [box.web loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:[@"dmweb://doc/" stringByAppendingString:q]]]];
+        [box.web loadRequest:[NSURLRequest requestWithURL:u]];
         if (!hidden) { box.shown = YES; g_touch = 1; [box setHiddenState:NO]; [box startInput]; }
     });
     return 0;
@@ -398,7 +420,8 @@ void front_web_shot(const char *path) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!g_box) { LOG("webshot: no page"); return; }
         [g_box.web takeSnapshotWithConfiguration:nil completionHandler:^(NSImage *im, NSError *e) {
-            NSBitmapImageRep *r = im ? [[NSBitmapImageRep alloc] initWithData:im.TIFFRepresentation] : nil;
+            NSData *tiff = im.TIFFRepresentation;
+            NSBitmapImageRep *r = tiff ? [[NSBitmapImageRep alloc] initWithData:tiff] : nil;
             NSData *d = [r representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
             if (![d writeToFile:p atomically:YES]) LOG("[RED] webshot: nothing written to %s (%s)", p.UTF8String, e.localizedDescription.UTF8String ?: "-");
         }];

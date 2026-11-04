@@ -95,7 +95,7 @@ static void nvn_init_slots(void) {
     static int done; if (done) return; done = 1;
     g_log = getenv("DM_NVN_LOG") != NULL;
     unsigned long sz;
-    const nvn_impl *im = (const nvn_impl *)getsectiondata(&_mh_execute_header, "__DATA", "swnvn", &sz);
+    const nvn_impl *im = (const nvn_impl *)getsectiondata(DM_HOST_IMAGE_HEADER, "__DATA", "swnvn", &sz);
     unsigned nim = im ? (unsigned)(sz / sizeof *im) : 0, hit = 0;
     for (unsigned i = 0; i < NVN_NFUNC; i++) nvn_slot[i].fn = (void *)nvn_unimpl_entry;
     for (unsigned k = 0; k < nim; k++) {

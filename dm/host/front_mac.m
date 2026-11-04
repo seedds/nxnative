@@ -9,6 +9,7 @@
 // Controllers: face buttons as on the iPhone, by position (right A, bottom B, top X, left Y) or on a Nintendo pad by its labels (pad_apple.h), shoulders L R, triggers ZL ZR, Menu + Options −, both sticks and their presses.
 // Each controller is a player of its own (local co-op): the first one connected is player 1, together with the keyboard, the next player 2, and so on up to 8 (pad_slots.h);
 // DM_PAD_MERGE=1 merges every controller into player 1 instead, DM_KBD_PLAYER=own makes the keyboard player 1 on its own, with the controllers from player 2 on.
+// DM_PLAYER_SETUP=1 uses the launch window's prepared, same-process player routes (players_mac.m; docs/frontends.md).
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
@@ -25,6 +26,8 @@
 #include "pad_hid_mac.h"
 #include "home_quit.h"
 #include "home_quit_mac.h"
+#import "players_mac.h"
+static DmMacPlayers *g_players; // prepared in the launch window; retained for gameplay only with DM_PLAYER_SETUP=1
 #include <signal.h>
 #include <math.h>
 #include <sys/stat.h>
@@ -121,10 +124,13 @@ static void cursor_hide_for_input(void) {
     NSView *v = g_win.contentView;
     if (NSPointInRect([v convertPoint:g_win.mouseLocationOutsideOfEventStream fromView:nil], v.bounds)) [NSCursor setHiddenUntilMouseMoves:YES];
 }
+static DmPlayerState keyboard_input(void) {
+    return (DmPlayerState){g_btn, (g_d - g_a) * 32767, (g_w - g_s) * 32767, (g_rr - g_rl) * 32767, (g_ru - g_rd) * 32767};
+}
 static void push(void) {
-    int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767;
-    int32_t rx = (g_rr - g_rl) * 32767, ry = (g_ru - g_rd) * 32767;
-    dm_input_set(g_btn, lx, ly, rx, ry);
+    DmPlayerState s = keyboard_input();
+    if (g_players) [g_players keyboard:s];
+    else dm_input_set(s.buttons, s.lx, s.ly, s.rx, s.ry);
 }
 static int key_bit(unsigned short code) {
     switch (code) {
@@ -176,6 +182,7 @@ static home_quit g_hq;   // the Home button's hold and quit prompt (home_quit.h)
 static void pad_read(GCExtendedGamepad *g) {
     if (!g_input_on) return;
     hq_poll(); if (hq_blocks_input(g_hq.phase)) return;
+    if (g_players) { [g_players read]; return; }
     int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0) return;
     dm_haptics_apple_controller(p, g.controller);
     uint64_t m = dm_pad_face(g);   // by position, a Nintendo pad by its labels
@@ -190,7 +197,7 @@ static void pad_read(GCExtendedGamepad *g) {
 // macOS 27 respects the claim when the Home button setting for apps lets the app decide (hq_log_setting names it in the log)
 static void pad_keep_system_buttons(GCController *c) {
     for (NSString *b in @[GCInputButtonHome, GCInputButtonShare]) c.physicalInputProfile.buttons[b].preferredSystemGestureState = GCSystemGestureStateDisabled;
-    c.extendedGamepad.buttonHome.pressedChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL down) { (void)b; (void)v; (void)down; if (g_input_on) hq_poll(); };
+    c.physicalInputProfile.buttons[GCInputButtonHome].pressedChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL down) { (void)b; (void)v; (void)down; if (g_input_on) hq_poll(); };
 }
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
@@ -198,6 +205,7 @@ static void pro_players_changed(GCController *gone) {
     int count = 0, player = -1;
     for (GCController *c in GCController.controllers) if (c != gone && c.extendedGamepad && [c.productCategory isEqualToString:@"Switch Pro Controller"]) {
         count++; player = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)c);
+        if (g_players) { player = -1; for (int p = 0; p < DM_PLAYERS; p++) if ([g_players wholeControllerForPlayer:p] == c) player = p; }
     }
     dm_motion_pro_players(count, player);
 }
@@ -210,6 +218,10 @@ static int merge_pads_left(GCController *gone) {
 }
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil on a connect)
 static void pads_changed(GCController *gone) {
+    if (g_players) {
+        NSMutableArray *now = [GCController.controllers mutableCopy]; if (gone) [now removeObjectIdenticalTo:gone];
+        [g_players sync:now]; pro_players_changed(gone); return;
+    }
     if (g_merge) {
         int any = 0;
         for (GCController *c in GCController.controllers) if (c.extendedGamepad && c != gone) {
@@ -258,12 +270,14 @@ static void display_awake(int on) {
 static int g_mouse_down;   // the mouse holds the touch (DmGameView)
 // Nothing the controllers pressed stays pressed (focus lost, the Home quit prompt open)
 static void pads_release(void) {
+    if (g_players) { [g_players publish]; return; }
     if (g_merge) { if (merge_pads_left(nil)) dm_pad_set(0, 0, 0, 0, 0); return; }
     for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
     for (hid_pad *d = g_hidpads; d; d = d->next) { int p = pad_slot_of(&g_slots, d); if (p >= 0) dm_pad_set_player(p, 0, 0, 0, 0, 0); }
 }
 // Each controller read as it is now (focus back, the Home quit prompt closed)
 static void pads_reread(void) {
+    if (g_players) { [g_players publish]; return; }
     if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) pad_read(c.extendedGamepad); }
     else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p].extendedGamepad) pad_read(g_held[p].extendedGamepad);
     for (hid_pad *d = g_hidpads; d; d = d->next) hidpad_read(d);
@@ -275,6 +289,7 @@ static void input_release(void) {
     display_awake(0);
     g_input_on = 0;
     dm_motion_pro_active(0);
+    if (g_players) g_players.active = NO;
     g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
     pads_release();
@@ -283,6 +298,7 @@ static void input_resume(void) {
     display_awake(1);
     g_input_on = 1;
     dm_motion_pro_active(1);
+    if (g_players) { g_players.active = YES; return; }
     pads_reread();
 }
 // Raw HID gamepads (pad_hid_mac.h): a player slot each, as a GameController controller, named by the device's product name
@@ -344,9 +360,9 @@ static void hq_log_setting(void) {
 static void hq_buttons(int *home, int *a, int *b, GCController **holder) {
     *home = *a = *b = 0;
     for (GCController *c in GCController.controllers) {
-        GCExtendedGamepad *g = c.extendedGamepad; if (!g) continue;
-        if (g.buttonHome.isPressed) { *home = 1; if (!*holder) *holder = c; }
-        *a |= g.buttonA.isPressed; *b |= g.buttonB.isPressed;
+        GCPhysicalInputProfile *p = c.physicalInputProfile;
+        if (p.buttons[GCInputButtonHome].isPressed) { *home = 1; if (!*holder) *holder = c; }
+        *a |= p.buttons[GCInputButtonA].isPressed; *b |= p.buttons[GCInputButtonB].isPressed;
     }
 }
 static void hq_fade(NSView *v, int in) {
@@ -368,9 +384,9 @@ static void hq_changed(hq_phase was, hq_phase now, GCController *holder) {
         pads_release();   // nothing the game held stays pressed while the prompt has the controllers
         if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
         dm_focus_set(2);
-        GCExtendedGamepad *g = holder.extendedGamepad;
+        GCPhysicalInputProfile *p = holder.physicalInputProfile;
         g_hq_prompt = hq_prompt_view(cv.bounds, @(g_hq_text[HQ_TEXT_TITLE]), @(g_hq_text[HQ_TEXT_NOTE]), @(g_hq_text[HQ_TEXT_QUIT]), @(g_hq_text[HQ_TEXT_CANCEL]),
-                                     g.buttonA.sfSymbolsName, g.buttonB.sfSymbolsName);
+                                     p.buttons[GCInputButtonA].sfSymbolsName, p.buttons[GCInputButtonB].sfSymbolsName);
         [cv addSubview:g_hq_prompt]; hq_fade(g_hq_prompt, 1);
         LOG("front end: Home held, quit prompt open");
         break;
@@ -407,14 +423,74 @@ static void hq_close(void) {
     if (g_hq.phase == HQ_PROMPT) LOG("front end: quit prompt closed, the window lost the focus");
     hq_cancel(&g_hq); hq_hide_hold(); hq_hide_prompt();
 }
+// The launcher embeds this view before Play; no guest input, motion or haptics callbacks exist yet.
+void *dm_mac_players_view(void) {
+    if (!g_players) {
+        g_players = [DmMacPlayers new];
+        g_players.routeLog = ^(NSString *line) { LOG("players: %s", line.UTF8String); };
+        const char *saved = getenv("DM_SAVED_CHOICES");
+        if (!saved || strcmp(saved, "0")) [g_players loadPreferences:NSUserDefaults.standardUserDefaults];
+    }
+    [g_players beginConfiguration];
+    [g_players sync:GCController.controllers];
+    return (__bridge void *)[g_players configurationView];
+}
+void dm_mac_players_finish(int play) {
+    if (!g_players) return;
+    [g_players endConfiguration];
+    const char *saved = getenv("DM_SAVED_CHOICES");
+    if (play && (!saved || strcmp(saved, "0"))) [g_players commitPreferences];
+    const char *setup = getenv("DM_PLAYER_SETUP");
+    if (!play || !setup || strcmp(setup, "1")) g_players = nil;
+}
+
 static void pads_start(void) {
+    hq_start();
+    if (g_players) {
+        g_players.output = ^(int p, DmPlayerState s) {
+            if (g_input_on) hq_poll();
+            if (hq_blocks_input(g_hq.phase)) {
+                // The prompt owns controllers, including split/shared routes; the keyboard still works.
+                s = (DmPlayerState){0};
+                if (g_input_on) for (DmPlayerRoute *r in [g_players assignedRoutes])
+                    if (!r.source && r.supported && r.player == p) s = keyboard_input();
+            }
+            pad_set(p, s.buttons, s.lx, s.ly, s.rx, s.ry);
+        };
+        g_players.players = ^(uint32_t mask) { dm_pad_players(mask); };
+        g_players.routesChanged = ^{
+            GCController *next[DM_PLAYERS];
+            for (int p = 0; p < DM_PLAYERS; p++) next[p] = [g_players wholeControllerForPlayer:p];
+            // Detach all old motion AND haptics routes before attaching any new one: moving a
+            // controller downward must not clear its new handler or leave its native HID device
+            // owned by the old haptics slot when the destination tries to acquire it.
+            for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p] != next[p]) {
+                if (g_held[p]) dm_motion_detach(g_held[p], p);
+                dm_haptics_apple_controller(p, nil);
+            }
+            for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p] != next[p]) {
+                g_held[p] = next[p]; dm_haptics_apple_controller(p, next[p]);
+                if (next[p]) dm_motion_attach(next[p], p);
+            }
+            // Split and shared-player inputs also own their buttons, even without motion/rumble.
+            for (DmPlayerSource *s in g_players.sources)
+                if ((s.player >= 0 && s.player < DM_PLAYERS) || (s.split && s.rightPlayer >= 0 && s.rightPlayer < DM_PLAYERS)) pad_keep_system_buttons(s.controller);
+            pro_players_changed(nil);
+        };
+        LOG("front end: using confirmed launch-window player setup");
+        pads_changed(nil);
+        hq_log_setting();
+        // Configuration reads populated the model's caches before the output callbacks existed.
+        [g_players publish];
+        dm_motion_pro_start(pro_devices_changed);
+        return;
+    }
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
     e = getenv("DM_KBD_PLAYER"); g_kbd_own = !g_merge && e && !strcmp(e, "own");
     static const char kbd = 0;
     if (g_kbd_own) pad_slot_take(&g_slots, &kbd, "keyboard");   // holds player 1 for good
     LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : g_kbd_own ? "the keyboard is player 1, each controller a player of its own from player 2 on (DM_KBD_PLAYER=own)"
                                                                            : "each controller is a player of its own, the keyboard plays with player 1");
-    hq_start();
     pads_changed(nil);
     hq_log_setting();
     dm_motion_pro_start(pro_devices_changed);
@@ -466,8 +542,11 @@ static void *guest_tramp(void *p) {
     ((guest_arg *)p)->fn(); LOG("guest thread finished"); exit(0);
 }
 
-// Metal reads MTL_HUD_ENABLED when the process makes its first device, which can be before the window: set from DM_METAL_HUD before main (set in front_run, the HUD did not show)
+// A library is loaded before Play applies settings; defer its HUD setup to the host entry.
+#ifndef DM_MAC_HOST_LIBRARY
+// Metal reads MTL_HUD_ENABLED when the process makes its first device, which can be before the window.
 __attribute__((constructor)) static void hud_env(void) { front_hud_env(); }
+#endif
 
 // ---------- Cheats: the menu and the panel (hle_cheats.c holds every state; these only show it and call it) ----------
 
@@ -1315,6 +1394,8 @@ static NSArray<NSURL *> *found_cheat_files(NSString *build) {
 @end
 
 void front_run(void (*guest)(void)) {
+    // Play has now applied the settings. Metal reads this when the first device is made.
+    front_hud_env();
     // A game: tell macOS its work is latency-critical, so the system does not trade its frame time for power while the frame rate is capped
     static id activity; activity = [[NSProcessInfo processInfo] beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical reason:@"game"];
     if (!getenv("DM_WINDOW")) { guest(); return; }

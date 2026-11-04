@@ -61,6 +61,9 @@ The game builds Mii heads from the console's MiiModel system data, starting at b
 
 ## Found on this game
 
+- **Mac local player assignment (opt-in; real-device multiplayer validation open):** **Assign players** (`DM_PLAYER_SETUP=1`) embeds controller and keyboard routing before Play; see [setup and limits](../../../docs/frontends.md#mac-local-player-setup-opt-in) and [Mac local player assignment](../../../docs/reference/services.md#mac-local-player-assignment). Standalone and bypassed-window starts retain automatic routing.
+- **Individual right Joy-Con unavailable or connected without input (resolved; native-event regression passed, gameplay pending):** [An individual Joy-Con is connected but unavailable in player setup](../../../docs/reference/services.md#an-individual-joy-con-is-connected-but-unavailable-in-player-setup). Its standard Apple profile is now accepted alongside extended profiles; combined-pair splitting remains unchanged.
+- **Launch-window measurement abort (resolved; noninteractive regression coverage):** [Player setup aborts during SwiftUI measurement](../../../docs/reference/services.md#player-setup-aborts-during-swiftui-measurement). Interactive controller/gameplay validation remains open.
 - **Display sleep during controller play on the Mac (resolved, player-confirmed):** [Mac display sleep during controller play](../../../docs/reference/services.md#mac-display-sleep-during-controller-play).
 - **Resolved in the sanitizer audit:** [Unaligned command headers during layout probing](../../../docs/reference/audio.md#unaligned-command-headers-during-layout-probing), reproduced with the SDK 4 command-list fixture.
 

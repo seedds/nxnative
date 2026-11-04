@@ -208,17 +208,25 @@ static const char *prog_name(int index) {   // the profile's name of a program o
 __attribute__((weak)) void front_program_handoff(int index, const char *name) { (void)index; (void)name; }   // front.h; the iOS front end has it
 void dm_oe_execute(int index, const void *param, size_t n) {
     char hex[3 * 32 + 1] = ""; for (size_t i = 0; i < n && i < 32; i++) snprintf(hex + 3 * i, 4, " %02x", ((const uint8_t *)param)[i]);
-    static prog_plan P; static char *tsv; int have = 0;
+    static prog_plan P; int have = 0;
 #if !TARGET_OS_IPHONE
     const char *pf = getenv("DM_PROGRAMS");
     if (pf && *pf) {
-        FILE *fp = fopen(pf, "rb"); char *rows2 = NULL;
+        FILE *fp = fopen(pf, "rb"); char *tsv = NULL, *rows2 = NULL;
         if (fp) {
-            fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
-            tsv = calloc(1, (size_t)sz + 1); rows2 = calloc(1, (size_t)sz + 1);
-            if (fread(tsv, 1, (size_t)sz, fp) != (size_t)sz) tsv[0] = 0;
-            memcpy(rows2, tsv, (size_t)sz); fclose(fp);
-        } else LOG("[RED] oe::ExecuteProgram: cannot read DM_PROGRAMS %s", pf);
+            long sz = -1;
+            if (!fseek(fp, 0, SEEK_END)) sz = ftell(fp);
+            // Validate the signed file size before conversion and leave room for the terminator.
+            if (sz >= 0 && (uintmax_t)sz < SIZE_MAX && !fseek(fp, 0, SEEK_SET)) {
+                size_t len = (size_t)sz;
+                tsv = calloc(1, len + 1); rows2 = calloc(1, len + 1);
+                if (!tsv || !rows2 || fread(tsv, 1, len, fp) != len) {
+                    free(tsv); free(rows2); tsv = rows2 = NULL;
+                } else memcpy(rows2, tsv, len);
+            }
+            fclose(fp);
+        }
+        if (!tsv) LOG("[RED] oe::ExecuteProgram: cannot read DM_PROGRAMS %s", pf);
         if (tsv && (have = prog_plan_make(tsv, index, &P, param, n))) LOG("oe::ExecuteProgram(%d, %zu bytes of parameters:%s): this program ends, %s starts", index, n, hex, P.exe);
         else if (rows2) {
             LOG("[RED] oe::ExecuteProgram(%d, %zu bytes of parameters:%s): this application has no such program here; its first program starts instead", index, n, hex);

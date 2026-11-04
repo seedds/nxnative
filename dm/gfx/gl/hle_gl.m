@@ -465,6 +465,16 @@ static const fmt_t g_fmt[F_N] = {
     [F_R32F] = {MTLPixelFormatR32Float, 4, 1, 1, K_COL, SW0, "R32F"}, [F_RG32F] = {MTLPixelFormatRG32Float, 8, 1, 1, K_COL, SW0, "RG32F"},
     [F_RG11B10F] = {MTLPixelFormatRG11B10Float, 4, 1, 1, K_COL, SW0, "R11F_G11F_B10F"},
     [F_RGB10A2] = {MTLPixelFormatRGB10A2Unorm, 4, 1, 1, K_COL, SW0, "RGB10_A2"}, [F_RGBA16] = {MTLPixelFormatRGBA16Unorm, 8, 1, 1, K_COL, SW0, "RGBA16"},
+    // Integer textures (Factorio's 3D bitmaps): Metal filters these as nearest only; the sampler's filters are what GL accepts for them
+    [F_R8I] = {MTLPixelFormatR8Sint, 1, 1, 1, K_COL, SW0, "R8I"}, [F_R8UI] = {MTLPixelFormatR8Uint, 1, 1, 1, K_COL, SW0, "R8UI"},
+    [F_R16I] = {MTLPixelFormatR16Sint, 2, 1, 1, K_COL, SW0, "R16I"}, [F_R16UI] = {MTLPixelFormatR16Uint, 2, 1, 1, K_COL, SW0, "R16UI"},
+    [F_R32I] = {MTLPixelFormatR32Sint, 4, 1, 1, K_COL, SW0, "R32I"}, [F_R32UI] = {MTLPixelFormatR32Uint, 4, 1, 1, K_COL, SW0, "R32UI"},
+    [F_RG8I] = {MTLPixelFormatRG8Sint, 2, 1, 1, K_COL, SW0, "RG8I"}, [F_RG8UI] = {MTLPixelFormatRG8Uint, 2, 1, 1, K_COL, SW0, "RG8UI"},
+    [F_RG16I] = {MTLPixelFormatRG16Sint, 4, 1, 1, K_COL, SW0, "RG16I"}, [F_RG16UI] = {MTLPixelFormatRG16Uint, 4, 1, 1, K_COL, SW0, "RG16UI"},
+    [F_RG32I] = {MTLPixelFormatRG32Sint, 8, 1, 1, K_COL, SW0, "RG32I"}, [F_RG32UI] = {MTLPixelFormatRG32Uint, 8, 1, 1, K_COL, SW0, "RG32UI"},
+    [F_RGBA8I] = {MTLPixelFormatRGBA8Sint, 4, 1, 1, K_COL, SW0, "RGBA8I"}, [F_RGBA8UI] = {MTLPixelFormatRGBA8Uint, 4, 1, 1, K_COL, SW0, "RGBA8UI"},
+    [F_RGBA16I] = {MTLPixelFormatRGBA16Sint, 8, 1, 1, K_COL, SW0, "RGBA16I"}, [F_RGBA16UI] = {MTLPixelFormatRGBA16Uint, 8, 1, 1, K_COL, SW0, "RGBA16UI"},
+    [F_RGBA32I] = {MTLPixelFormatRGBA32Sint, 16, 1, 1, K_COL, SW0, "RGBA32I"}, [F_RGBA32UI] = {MTLPixelFormatRGBA32Uint, 16, 1, 1, K_COL, SW0, "RGBA32UI"},
     [F_D16] = {MTLPixelFormatDepth16Unorm, 2, 1, 1, K_DEPTH, SW0, "DEPTH16"}, [F_D32F] = {MTLPixelFormatDepth32Float, 4, 1, 1, K_DEPTH, SW0, "DEPTH24/32"},
     [F_D32FS8] = {MTLPixelFormatDepth32Float_Stencil8, 8, 1, 1, K_DS, SW0, "DEPTH24_STENCIL8"}, [F_S8] = {MTLPixelFormatStencil8, 1, 1, 1, K_DS, SW0, "STENCIL8"},
     [F_BC1_RGB] = {MTLPixelFormatBC1_RGBA, 8, 4, 4, K_BLOCK, SWZ(Red, Green, Blue, One), "DXT1 RGB"}, [F_BC1] = {MTLPixelFormatBC1_RGBA, 8, 4, 4, K_BLOCK, SW0, "DXT1"},
@@ -514,6 +524,15 @@ static int fmt_pick(GLint ifmt, GLenum format, GLenum type, int *cv) {
         case GL_R11F_G11F_B10F: if (type != 0x8c3b) *cv = CV_NONE; return F_RG11B10F;
         case GL_RGB10_A2: return F_RGB10A2;
         case GL_RGBA16: return F_RGBA16;
+        case GL_R8I: return F_R8I; case GL_R8UI: return F_R8UI;
+        case GL_R16I: return F_R16I; case GL_R16UI: return F_R16UI;
+        case GL_R32I: return F_R32I; case GL_R32UI: return F_R32UI;
+        case GL_RG8I: return F_RG8I; case GL_RG8UI: return F_RG8UI;
+        case GL_RG16I: return F_RG16I; case GL_RG16UI: return F_RG16UI;
+        case GL_RG32I: return F_RG32I; case GL_RG32UI: return F_RG32UI;
+        case GL_RGBA8I: return F_RGBA8I; case GL_RGBA8UI: return F_RGBA8UI;
+        case GL_RGBA16I: return F_RGBA16I; case GL_RGBA16UI: return F_RGBA16UI;
+        case GL_RGBA32I: return F_RGBA32I; case GL_RGBA32UI: return F_RGBA32UI;
         case GL_DEPTH_COMPONENT16: return F_D16;
         case GL_DEPTH_COMPONENT: case GL_DEPTH_COMPONENT24: case GL_DEPTH_COMPONENT32: case GL_DEPTH_COMPONENT32F: if (type != GL_FLOAT) *cv = CV_NONE; return F_D32F;
         case GL_DEPTH_STENCIL: case GL_DEPTH24_STENCIL8: case GL_DEPTH32F_STENCIL8: *cv = CV_NONE; return F_D32FS8;
@@ -653,6 +672,8 @@ static id<MTLSamplerState> tex_sampler(tex_t *t) {
     int mips = t->levels > 1;
     skey k = {t->minf, t->magf, t->ws, t->wt, t->target == GL_TEXTURE_CUBE_MAP ? GL_CLAMP_TO_EDGE : t->wr, mips ? (GLint)umin((uint32_t)t->maxlv, (uint32_t)t->levels - 1) : 0, t->cmp, t->aniso,
              t->border[3] > 0.5f ? (t->border[0] > 0.5f ? 2.f : 1.f) : 0.f};
+    // Metal has no linear filtering for integer textures (GL does not allow it either): nearest, as the game's sampler asks for them
+    if (fmt_int(t->fmt)) { k.magf = GL_NEAREST; k.minf = mips ? GL_NEAREST_MIPMAP_NEAREST : GL_NEAREST; }
     for (int i = 0; i < n; i++) if (!memcmp(&cache[i].k, &k, sizeof k)) { t->smp = cache[i].s; t->smp_dirty = 0; return t->smp; }
     MTLSamplerDescriptor *d = [MTLSamplerDescriptor new];
     d.magFilter = k.magf == GL_NEAREST ? MTLSamplerMinMagFilterNearest : MTLSamplerMinMagFilterLinear;
@@ -1777,12 +1798,18 @@ GL(glVertexAttribPointer, void, GLuint i, GLint size, GLenum type, uint32_t norm
     if (i >= 16) { RED1("vertex attribute %u over 15", i); return; }
     vattr_t *a = &cur_vao()->a[i]; a->size = size == 0x80e1 ? 4 : size; a->type = type; a->norm = (norm & 0xff) != 0; a->stride = stride; a->off = (uintptr_t)ptr; a->buf = S.array_buf;
 }
+// Integer vertex attributes (glVertexAttribIPointer): the same binding without normalisation; the shader's input is int / uint, and vfmt_of picks an integer Metal format
+GL(glVertexAttribIPointer, void, GLuint i, GLint size, GLenum type, GLsizei stride, const void *ptr) {
+    if (i >= 16) { RED1("vertex attribute %u over 15", i); return; }
+    vattr_t *a = &cur_vao()->a[i]; a->size = size == 0x80e1 ? 4 : size; a->type = type; a->norm = 0; a->stride = stride; a->off = (uintptr_t)ptr; a->buf = S.array_buf;
+}
 GL(glVertexAttribDivisor, void, GLuint i, GLuint d) { if (i < 16) cur_vao()->a[i].div = d > 255 ? 255 : (uint8_t)d; }
 GL(glVertexAttrib4f, void, GLuint i, GLfloat x, GLfloat y, GLfloat z, GLfloat w) { if (i < 16) { S.va[i][0] = x; S.va[i][1] = y; S.va[i][2] = z; S.va[i][3] = w; } }
 GL(glVertexAttrib4fv, void, GLuint i, const GLfloat *v) { if (i < 16) memcpy(S.va[i], v, sizeof S.va[i]); }
 
 // ---------- Textures ----------
 GL(glGenTextures, void, GLsizei n, GLuint *out) { for (GLsizei i = 0; i < n; i++) out[i] = name_new((void ***)&g_texs, &g_ntexs, &g_captexs, sizeof(tex_t)); }
+GL(glIsTexture, uint32_t, GLuint t) { return tex_of(t) != NULL; }
 GL(glDeleteTextures, void, GLsizei n, const GLuint *t) {
     for (GLsizei i = 0; i < n; i++) {
         tex_t *x = tex_of(t[i]); if (!x) continue;

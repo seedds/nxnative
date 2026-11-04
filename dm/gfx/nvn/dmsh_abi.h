@@ -62,6 +62,8 @@
 #define DMSH_KIND_SAMP_ID "samp_id"      // a sampler ID that is a constant in the shader (reg = the ID)
 #define DMSH_KIND_TEX_UBO "tex_ubo"      // bindless: the texture handle is in uniform slot reg at byte off
 #define DMSH_KIND_SAMP_UBO "samp_ubo"    // bindless: the sampler handle is in uniform slot reg at byte off
+#define DMSH_KIND_IMG_UBO "img_ubo"      // bindless: the image handle is in uniform slot reg at byte off
+#define DMSH_KIND_TBUF_UBO "tbuf_ubo"    // bindless: the handle of a buffer texture is in uniform slot reg at byte off
 #define DMSH_KIND_TEX_C2A "tex_c2a"      // an array of c2 handles the shader indexes at run time: element k = the texture whose c2 word lies at off + 8 k
 #define DMSH_KIND_SAMP_C2A "samp_c2a"    // the same for samplers
 #define DMSH_KIND_TEX_POOL "tex_pool"    // the game's texture pool, indexed by the handle's texture ID (a handle traced to no slot; dmsh_build.py pool_arrays): elem = the element type

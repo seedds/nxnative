@@ -32,7 +32,48 @@ class Translated(unittest.TestCase):
             return r.stdout
 
 
+class GuardedWrites(Translated):
+    P0 = (0x000fda0003f06070, 0x00c0060005007a0c)   # P0 = R5 >= c3[0x18], R5 an instruction's own
+    MOV_R5 = (0x000fe20000000f00, 0x0100000000057a02)   # R5 = c4[0]
+
+    def test_a_guarded_load_reads_its_address_before_the_false_guards_zero(self):
+        # UR4 = c3[0x10]; LDG.!P0 R5, [R5 + UR4], Unreal Engine 5.4's bounds-checked read of its scene data: zeroing R5 first read at the table's start, every instance with the first one's data
+        ur4, ldg = (0x000fe20000000a00, 0x00c0040000047ab9), (0x000ea200081e890f, 0x0000000405057981)
+        waits = (0x004ea200001ee000, 0x00000c05050c7593)   # waits for the load's barrier, then atomically adds its result at the address it read: both uses of it
+        msl = self.translate(inst(*self.MOV_R5) + inst(*ur4) + inst(*self.P0) + inst(*ldg) + inst(*waits) + inst(*EXIT))
+        self.assertNotIn('_m0[0]);', msl.split('kernel')[1].replace('_m0[0].x', ''))   # no read of the table's first word
+        self.assertRegex(msl, r'_m0\[(int\()?\w+')   # an index from the register
+
+    def test_a_deferred_write_under_a_false_guard_writes_nothing(self):
+        # MUFU.EX2 R17, R32 under P0 (write barrier 3); R17 = R29 * R29 under !P0; R17 = R36 * R17 after waiting on the barrier: Yoshi and the Mysterious Book's local lights' falloff. The wait copied
+        # the old R17 over !P0's value, whatever the guard had been
+        ex2, other, used = (0x000ee20000000800, 0x0000002000170308), (0x000fe20000410000, 0x0000001d1d178220), (0x008fe20000410000, 0x0000001724177220)
+        msl = self.translate(inst(*self.MOV_R5) + inst(*self.P0) + inst(*ex2) + inst(*other) + inst(*used) + inst(SUATOM[0], 0x00000c17030c7593) + inst(*EXIT))
+        self.assertRegex(msl, r'\? 1065353216 : 0;')   # the guard as it was at issue, a word that keeps its bits through a select
+        self.assertRegex(msl, r'bool \w+ = \w+ != 0;\s+float \w+ = \w+;\s+if \(\w+\)')   # the copy only where it held
+
+    def test_uniform_handle_forms_translate(self):
+        for code in ((0x000f4200081e0f04, 0x3000040702067f63), (0x000142000c1e03ff, 0x2000040400167f6c), (0x00014200001e0f12, 0x3800001002101364)):   # TLD4 and TXD through a uniform register, TLD4 through a register
+            self.translate(inst(*code) + inst(*EXIT))
+
+
 class Suatom(Translated):
+    def test_handle_in_the_games_uniform_buffer(self):   # Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]: the same word 12, in bank 3
+        msl = self.translate(inst(SUATOM[0], SUATOM[1] | 3 << 54) + inst(*EXIT))
+        self.assertIn('cp_i_cb3_C_r32ui', msl)
+        self.assertIn('atomic_fetch_add', msl)
+
+    def test_sured_takes_its_operation(self):   # SURED.OR.U32 as Yoshi and the Mysterious Book's compute shaders encode it, in bank 3
+        self.assertIn('atomic_fetch_or', self.translate(inst(0x000fe2000310e000, 0xa0c002010800759f) + inst(*EXIT)))
+
+    def test_sured_u64_is_still_refused(self):   # the MAX.U64 of its Nanite shaders: no 64-bit image atomics here yet
+        code = inst(0x000fe2000110e400, 0xa0c002010800759f) + inst(*EXIT)
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / 'k.bin').write_bytes(code)
+            (Path(d) / 'jobs.json').write_text(json.dumps([dict(key='k', stage='cs', arch='sm86', code=str(Path(d) / 'k.bin'), tex={}, img={}, attr={}, fout={}, local=[32, 1, 1], nvn2_cs=[0, 0, 3, 0x40, 0])]))
+            r = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(Path(d) / 'jobs.json'), d], capture_output=True, text=True)
+        self.assertIn('SURED form', r.stdout + r.stderr)
+
     def test_add_u32_on_a_1d_image(self):
         msl = self.translate(inst(*SUATOM) + inst(*EXIT))
         self.assertIn('atomic_fetch_add', msl)   # native (the build's options) or through spirv-cross's buffer alias (these defaults)

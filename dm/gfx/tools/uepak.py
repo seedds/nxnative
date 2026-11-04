@@ -31,6 +31,7 @@
 # Unreal Engine 4.27 with bShareMaterialShaderCode off (OCTOPATH TRAVELER II: Majesty/Content/Paks/Majesty-Switch.pak, version 11, 3.3 GB / 376,601 files, index not encrypted, Zlib blocks)
 #   has no shader code archive at all: each material keeps its shaders in its own cooked package (.uexp) and the engine's global shaders are in Engine/GlobalShaderCache-SF_GLSL_SWITCH.bin,
 #   every shader an LSLG record stored without compression, as in a legacy pak (inline_shaders; shader_split.py ue_legacy_jobs reads them). Zlib and LZ4 blocks are decoded here (Pak.read).
+#   Unreal Engine 5.4 for the Switch 2 (Yoshi and the Mysterious Book: PJ045-Sage.utoc / .ucas, TOC version 6) does the same with export chunks of Unreal Engine 5's numbering, each shader an Oodle stream holding an NVN2 record with no LSLG (shader_map_entries, sage_record).
 #   With IoStore on as well (Mario & Luigi: Brothership: Vermillion-Switch.utoc / .ucas, Oodle in 256 KB blocks, TOC version 3) the cooked packages are the container's export bundles (Toc.export_bundles,
 #   named by Toc.names); the pak beside it keeps everything else, the global shader cache too.
 # Shader code archive (version 2): shader map hashes (20 bytes each), shader hashes (20 each), shader map entries {u32 first index, u32 shader count, u32 first preload, u32 preload count}, shader
@@ -346,7 +347,7 @@ def lz4_shaders(b, a):
     return out
 
 TOC_MAGIC, IO_SHADER_LIBRARY, IO_SHADER_CODE = b'-==--==--==--==-', 8, 9   # EIoChunkType in Unreal Engine 5 (TOC version 4 and later; 4.27 numbers its chunk types otherwise)
-IO_EXPORT_BUNDLE_427 = 2   # EIoChunkType in Unreal Engine 4.27 (TOC version 3): a cooked package's exports
+IO_EXPORT_BUNDLE, IO_EXPORT_BUNDLE_427 = 1, 2   # a cooked package's exports: EIoChunkType in Unreal Engine 5 (TOC version 4 and later), in Unreal Engine 4.27 (TOC version 3)
 
 class Toc:
     """An IoStore container: the .utoc's chunk table and compression blocks, the data in the .ucas beside it (<name>_s<n>.ucas for partitions after the first). A chunk is a range of the
@@ -380,8 +381,9 @@ class Toc:
         """Indices of the chunks of one EIoChunkType (Unreal Engine 5 numbering: TOC version 4 and later)"""
         return [i for i, c in enumerate(self.ids) if c[11] == t] if self.version >= 4 else []
     def export_bundles(self):
-        """Indices of the cooked packages' export chunks in a container of Unreal Engine 4.27's chunk type numbering (TOC version 3 and before)"""
-        return [i for i, c in enumerate(self.ids) if c[11] == IO_EXPORT_BUNDLE_427] if self.version < 4 else []
+        """Indices of the cooked packages' export chunks: chunk type 2 in Unreal Engine 4.27's numbering (TOC version 3 and before), 1 in Unreal Engine 5's"""
+        t = IO_EXPORT_BUNDLE if self.version >= 4 else IO_EXPORT_BUNDLE_427
+        return [i for i, c in enumerate(self.ids) if c[11] == t]
     def ucas_paths(self):
         return [self.path[:-5] + ('.ucas' if not k else f'_s{k}.ucas') for k in range(max(self.parts, 1))]
     def names(self):
@@ -597,6 +599,39 @@ def lslg(s):
     c = k - 4 - ncode
     if c < 4 or struct.unpack_from('<I', s, c - 4)[0] != ncode or k + nctl > len(s): return None
     return s[4:6].decode('latin1'), s[k:k + nctl], s[c:c + ncode]
+
+CTL_NVN2 = b'\x34\x12\x76\x98\xc9\0\0\0'
+def sage_record(s):
+    """A decoded Switch 2 shader (Unreal Engine 5.4's SP_GLSL_SAGE, Yoshi and the Mysterious Book): a 0x3e-byte header with no magic, u32 name length, the name ("Global/<type>/0:/Engine/Private/<file>.usf|<entry>"),
+    u32 code length, the code area (Ampere), u32 control length, the control section (an NVN2 one, version 0xc9) and a tail of 12 bytes. → (name, control section, code area), or None if the layout differs"""
+    k = s.find(CTL_NVN2)
+    if k < 12 or k + 0x48 > len(s): return None
+    nctl, ncode = struct.unpack_from('<I', s, k - 4)[0], struct.unpack_from('<I', s, k + 0x44)[0]
+    c = k - 4 - ncode
+    if c < 4 or struct.unpack_from('<I', s, c - 4)[0] != ncode or k + nctl > len(s): return None
+    return bytes(s[:c - 4]).rstrip(b'\0').rsplit(b'\0', 1)[-1].decode('latin1'), s[k:k + nctl], s[c:c + ncode]
+
+OODLE_BLOCK = re.compile(b'\x8c[\x06\x0a\x0b\x0c]')   # the first bytes of a stream: Kraken, Mermaid, Selkie, Leviathan
+def shader_map_entries(d):
+    """The entries of the FShaderMapResourceCode tables in a cooked package or global shader cache of Unreal Engine 5 whose shaders Oodle compressed: a count, that many 20-byte hashes, the count again, then
+    that many {i32 length, code, i32 raw size, u8 frequency}. A table is found by a first entry's stream and proved by its two counts and by the walk over all its entries, as a stream's two first bytes
+    turn up inside other data. → [(offset of the code, length, raw size, frequency)] of the tables that hold"""
+    out, end = [], 0
+    for m in OODLE_BLOCK.finditer(d):
+        i = m.start()
+        if i < end or i < 12: continue
+        count = int.from_bytes(d[i - 8:i - 4], 'little'); hashes = i - 8 - 20 * count
+        if not 1 <= count <= 1 << 20 or hashes < 4 or int.from_bytes(d[hashes - 4:hashes], 'little') != count: continue
+        rows, p = [], i - 4
+        for _ in range(count):
+            if p + 4 > len(d): break
+            n = int.from_bytes(d[p:p + 4], 'little'); q = p + 4 + n
+            if not 1 <= n or q + 5 > len(d): break
+            raw, f = int.from_bytes(d[q:q + 4], 'little'), d[q + 4]
+            if not n <= raw <= 1 << 28 or f > 15: break
+            rows.append((p + 4, n, raw, f)); p = q + 5
+        if len(rows) == count: out += rows; end = p
+    return out
 
 if __name__ == '__main__':
     try:

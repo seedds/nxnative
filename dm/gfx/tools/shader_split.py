@@ -2008,6 +2008,15 @@ def ue_inline_shaders(d, label, out):
             try: s = lz4.block.decompress(d[j:j + n], uncompressed_size=raw)
             except Exception: continue
             if len(s) == raw and s[:4] == b'LSLG': take(s, j); break
+    # Unreal Engine 5.4 for the Switch 2 (Yoshi and the Mysterious Book): the same tables of the shader map, the code in Oodle and an NVN2 record that has no LSLG (uepak.sage_record)
+    for at, n, raw, f in uepak.shader_map_entries(d):
+        s = d[at:at + n] if n == raw else oodle(bytes(d[at:at + n]), raw)
+        rec = uepak.sage_record(s)
+        if not rec: red(f'{label}: the shader record at {at:#x} (frequency {f}) is not a record of the known layout')
+        _, ctl, code = rec; st = nvn2_stage(ctl, code)
+        why = check(label, st, ctl, code) if st else 'no stage'
+        if why: red(f'{label}: shader at {at:#x} ({st}): {why}')
+        out.append((f'{label}#UE{at:x}', st, bytes(ctl), bytes(code)))
 
 def arh_entries(d):
     """Monolith ARH1 index → (path, ARD offset, stored size). The XOR trie

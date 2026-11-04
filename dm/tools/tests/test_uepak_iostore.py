@@ -189,9 +189,41 @@ class IoStore(unittest.TestCase):
         self.assertEqual(t.export_bundles(), [0, 1])
         self.assertEqual(t.names(), paths)
 
-    def test_ue5_numbering_has_no_export_bundles(self):
-        t = uepak.Toc(str(container(self.romfs, 'Game.utoc', [(chunk_id(1, uepak.IO_EXPORT_BUNDLE_427), b'a')], version=4)))
-        self.assertEqual((t.export_bundles(), t.names()), ([], {}))
+    def test_ue5_numbers_export_bundles_as_type_1(self):
+        chunks = [(chunk_id(1, uepak.IO_EXPORT_BUNDLE), b'a'), (chunk_id(2, 2), b'bulk')]
+        t = uepak.Toc(str(container(self.romfs, 'Game.utoc', chunks, version=6)))
+        self.assertEqual((t.export_bundles(), t.names()), ([0], {}))
+
+    def sage(self, name=b'Global/FShader/0:/Engine/Private/X.usf|MainPS\0', code=b'\x11' * 0x40):
+        ctl = uepak.CTL_NVN2 + bytes(0x3c) + struct.pack('<I', len(code)) + bytes(0x98)
+        return bytes(0x3e) + struct.pack('<I', len(name)) + name + struct.pack('<I', len(code)) + code + struct.pack('<I', len(ctl)) + ctl + bytes(12), ctl, code
+
+    def test_a_switch_2_record_gives_its_name_control_and_code(self):
+        rec, ctl, code = self.sage()
+        self.assertEqual(uepak.sage_record(rec), ('Global/FShader/0:/Engine/Private/X.usf|MainPS', ctl, code))
+
+    def test_a_record_whose_lengths_disagree_is_refused(self):
+        rec, ctl, code = self.sage()
+        self.assertIsNone(uepak.sage_record(rec.replace(struct.pack('<I', len(code)) + code, struct.pack('<I', len(code) + 4) + code, 1)))
+        self.assertIsNone(uepak.sage_record(b'no record here' * 8))
+
+    @staticmethod
+    def table(streams):   # FShaderMapResourceCode: hashes, then {i32 length, code, i32 raw size, u8 frequency}
+        out = struct.pack('<I', len(streams)) + bytes(20 * len(streams)) + struct.pack('<I', len(streams))
+        for b, raw, f in streams: out += struct.pack('<I', len(b)) + b + struct.pack('<IB', raw, f)
+        return out
+
+    def test_shader_map_tables_are_walked_whole(self):
+        a, b = b'\x8c\x0a' + b'A' * 10, b'\x8c\x0a' + b'B' * 20
+        d = b'\x8c\x0a stray stream bytes ' + self.table([(a, 40, 3), (b, 80, 5)]) + b'tail'
+        at = d.index(a)
+        self.assertEqual(uepak.shader_map_entries(d), [(at, len(a), 40, 3), (at + len(a) + 5 + 4, len(b), 80, 5)])
+
+    def test_a_table_that_does_not_hold_is_not_taken(self):
+        a = b'\x8c\x0a' + b'A' * 10
+        t = self.table([(a, 40, 3), (a, 40, 3)])
+        self.assertEqual(uepak.shader_map_entries(t[:-30]), [])   # its second entry runs past the end
+        self.assertEqual(uepak.shader_map_entries(struct.pack('<I', 9) + t[4:]), [])   # the two counts differ
 
     def inline_pak(self, names=('Engine/GlobalShaderCache-SF_GLSL_SWITCH.bin',)):
         pak11(self.romfs / 'Game.pak', names)

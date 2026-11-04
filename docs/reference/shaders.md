@@ -455,6 +455,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Reader:** `uepak.py` `inline_shaders` also takes the global shader cache with no `.ushaderbytecode` as inline, and `shader_split.py` `ue_legacy_jobs` then also reads the export bundles of the containers beside such a pak, the newest copy of each chunk ID (`mount_order`), through the game's own Oodle in the host's tool mode. Bulk data chunks are skipped. `Toc.names` reads the container's directory index, so a shader's label names its package, as for a pak, and `shader_groups` works the same way.
 - **Found on:** [Mario & Luigi: Brothership](../../dm/games/01006D0017F7A000/README.md): 45,824 unique shaders from 8.8 GB of export bundles in 39 s.
 
+### Unreal Engine 5.4 shaders for the Switch 2
+
+- **Symptom:** `shaders: 0` from the split, with no red line, on a game whose pak holds `Engine/GlobalShaderCache-SP_GLSL_SAGE.bin` (`Sage` is the engine's name for the platform).
+- **How it is stored:** inline as in [the 4.27 export bundles](#unreal-engine-427-shaders-inline-in-iostore-export-bundles), `bShareMaterialShaderCode` being off, in the TOC version 6 container's export bundles, which are chunk type 1 in Unreal Engine 5's numbering. Two things differ. The code of each `FShaderMapResourceCode` entry is one Oodle stream, not LZ4. And the record is NVN2's, with no `LSLG`: a 0x3e-byte header, `u32` name length, the name (`Global/<type>/0:/Engine/Private/<file>.usf|<entry>`), `u32` code length, the code area, `u32` control length, the control section (version 0xc9), a 12-byte tail. The frequency byte after each entry names the stage as in Unreal's `EShaderFrequency`.
+- **Reader:** `uepak.shader_map_entries` finds a table by its first entry's stream (`8C 0A` is Mermaid) and takes it only when the count before the first entry, the same count before the 20-byte hashes, and a walk over all its entries agree: those two bytes also turn up inside other data, and decoding such a false start aborts the decoder (85 of 5,341 candidates in the global cache). `uepak.sage_record` splits each decoded stream by its lengths and the control section's own. `Toc.export_bundles` now takes UE5's chunk type as well; a container is read only beside a pak `inline_shaders` accepts, so FINAL FANTASY RESONANCE and Octopath Traveler 0 are unaffected.
+- **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): 133,154 unique shaders (45,614 vertex, 60,840 pixel, 21,654 compute, 5,041 mesh, 5 geometry) from 19 GB of container in 76 s.
+
 ### Unreal Engine 4.22 to 4.25 paks (version 8)
 
 - **Symptom:** `[RED] the shader split found no shaders in main or the RomFS`; the survey counts the game's Unreal paks, but no `UE shader decode` step runs and the split reads none of them.
@@ -937,6 +944,20 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 - **Note:** the layout of NVN's driver segments `c0` and `c2` (the handle tables, the storage and uniform buffer tables, the words the host fills) and the binding kinds of the reflection JSON have one definition, `dm/gfx/nvn/dmsh_abi.h`. The host includes it (`nvn_mtl.m`, `nvn_refl.m`, `nvn_obj.h`); `dmsh_build.py` reads it through `dm/gfx/tools/dmsh_abi.py`, which stops on any line it cannot read. Both files are part of the chain version. `dm/tools/tests/test_dmsh_abi.py` checks that the tables fit together, that the host converts every kind the build may write, that the translator's own copy of the `c2` layout (`Program.cs`) agrees, and that the values do not come back as literals in the host or the build. The entries below cite the offsets.
 
+### Images and buffer textures with their handle in a uniform buffer
+
+- **Symptom:** `reflection conversion failed: B binding cp_i_cb3_0_ has no resolved slot number` at load, then `the dispatched program has no compute shader`; in the build, `SUATOM handle in bank 3` or `SURED handle in bank 3`, and bindings of an unrecognized kind for a typed buffer. Compute passes are skipped.
+- **Cause:** the compiler reads a texture handle from wherever the game put it, and bindless textures in uniform buffers were already [read at bind time](#storage-buffer-addresses-in-the-games-own-uniform-buffer). Images and buffer textures were not, as no game had done it: Unreal Engine 5.4 for the Switch 2 keeps every one in `c[3]`, uniform slot 0 (about 87,000 SURED, 15,000 SULD and 121,000 SUST in one game's shaders, none of them in another bank).
+- **Fix:** binding kinds `img_ubo` and `tbuf_ubo` (`dmsh_abi.h`), `NVN_RB_IMGU` and `NVN_RB_TBUFU` in the host, which read the handle as `NVN_RB_TEXU` does and otherwise bind as an image slot or a typed buffer: usage upgrades for written images (`image_prepare`), the uniform shadow check, and the pass logic that treats any bindless shader cautiously. In the translator SUATOM and SURED pass their bank on. With no descriptor to ask at build time, an atomic takes its format from the instruction's size (`UniformHandleAtomicFormat`).
+- **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md).
+
+### Texture and sampler words in either order
+
+- **Symptom:** a scene lit black with correct geometry. In `DM_NVN_PASSDUMP`, the lighting shader's bindings show `tex … tid=0 dummy` where the G-buffer should be, and a sampler bound where a texture is expected.
+- **Cause:** a handle from two words (`fp_t_cb262147_10020016`: words 0x16 and 8, handle type 1) is the OR of a texture and a sampler word, and the GPU does not care which comes first. The build took the first as the texture and the second as the sampler. Unreal Engine 5.4's lighting shaders read a shared sampler's word first, so each G-buffer texture came out as ID 0.
+- **Fix:** each half of such a binding carries the other word (`soff`, `sreg`), and the host ORs the two as the GPU does (`ubo_bind_handle`). A shader whose order was as assumed gets the same handle.
+- **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): its lighting, with this as the last step from a black scene to a lit one.
+
 ### A store only a dispatch's first invocation makes
 
 - **Symptom:** objects from a compute-built list flicker: each is in one of two states, on and off irregularly and independently of the others, while the draws are the same frame to frame and the camera is still. Whole groups may vanish or appear in one frame and stay that way until the list's next rebuild. Shots of consecutive frames show the change per frame jumping between two levels.
@@ -1008,6 +1029,27 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `AHfma2` in `InstEmitAmpereAlu.cs`. The lane order comes from Eden-NS2's fix (checked there against Switch 2 footage), not from a shader that proves it here.
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md): 10,177 instructions in 7,590 programs. The fix made no visible difference in its tutorial area.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
+
+### A guarded load whose destination is its address
+
+- **Symptom:** none in the log: everything drawn with an engine's scene data lands on the first instance's transform, or at nothing. In the MSL, a bounds-checked read has a constant index (`vp_s2._m0[0]`) just after a comparison of the register it should use.
+- **Cause:** a uniform-form LDG (`0x981`) with a predicate is zero where the predicate is false, so the translator zeroed the destination first and then read the address. With `LDG.P R5, [R5 + UR4]` the address was already gone.
+- **Fix:** `ALdg` reads the address into locals before anything is written.
+- **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): Unreal Engine 5.4's GPU scene reads, every one of them; the first step away from a black scene.
+
+### A deferred write under a false guard
+
+- **Symptom:** the scene goes white with a yellow fringe: a few objects hold the largest value their target can, and bloom spreads it over the picture. Clamping a shader's terms one by one finds a value that is a register's stale contents.
+- **Cause:** an instruction with a write barrier [writes through a shadow register](#ampere-shader-code-switch-2), which starts as the register's value and is copied back at the first instruction that waits on the barrier. A guarded one whose guard is false writes nothing on hardware, but the copy still ran, and overwrote whatever had been written meanwhile. Here: `EXP2 R17` under P4, `R17 = R29 * R29` under !P4, then the wait; under !P4, R17 got back a squared distance from long before, and the light's falloff with it.
+- **Fix:** `EmitOpsAmpere` keeps the guard as it was at issue in a shadow register of its own and commits only where it held. A predicated last instruction of a block no longer branches straight to the next block when writes are pending, which skipped their commits. A later guarded write no longer discards an earlier pending one, which may still be the one that lands.
+- **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): the first light's falloff, 65,000 in R11G11B10 on leaves and eggs.
+
+### Ampere forms with a handle in a register, and SURED's other operations
+
+- **Symptom:** `Ampere instruction f63` (or `f6c`, `364`, `367`) `is not implemented`, or `SURED form 0310e000`, in the build.
+- **Cause:** 0xf60 and 0x361 were known for TEX. The same pairs exist for the others: 0xf63 and 0xf6c are TLD4 and TXD through a uniform register at 40..46, 0x364 and 0x367 are TLD4 and TLD through a register, the first of the second source block, each otherwise laid out as its bound form. SURED takes SUATOM's operation field (87..91): MAX, OR and MIN on 32 bits turn up.
+- **Fix:** `ATex` maps them to the bound forms, `ASured` takes the operation. Open: SURED.MAX.U64 (33,550 uses, Nanite's visibility buffer) is still refused, as the host has no 64-bit image atomics; the game does not reach those shaders so far.
+- **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md). Its shaders' jump tables also ran past their code on two compute shaders (`ArgumentOutOfRangeException`, in `GetCode`): an address past the code is now no code, which ends the table as the decoder expected.
 
 ### Ampere instructions new in Pokémon Pokopia
 

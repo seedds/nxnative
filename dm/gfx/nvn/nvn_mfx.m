@@ -44,6 +44,7 @@ void mfx_note_camera(const float *cam, int n) { (void)cam; (void)n; }
 id<MTLResidencySet> mfx_residency(void) { return nil; }
 int mfx_frame_prepare(double frame_s, unsigned busy) { (void)frame_s; (void)busy; return -1; }
 void mfx_frame_skip(void) {}
+void mfx_frame_ui_lost(int why) { (void)why; }
 NSArray *mfx_frame_encode(id<MTL4CommandBuffer> cb, int slot, id<MTL4CounterHeap> heap, NSUInteger stamp) { (void)cb; (void)slot; (void)heap; (void)stamp; return nil; }
 void mfx_note_gpu(double ms) { (void)ms; }
 void mfx_history_reset(void) {}
@@ -77,7 +78,7 @@ static struct {
     double mv_prev_yaw;
     id<MTLTexture> last_depth;     // for mfx_dump
     int last_slot;
-    uint64_t frames, made, skip_input, skip_first, skip_cut, skip_busy, miss[4];   // miss: scene, camera, depth, UI
+    uint64_t frames, made, skip_input, skip_first, skip_cut, skip_busy, miss[4], skip_ui, ui_why[3];   // miss: scene, camera, depth, UI; ui_why: mfx_frame_ui_lost's reasons
     double gpu_ms[300]; int ngpu;   // GPU time of the last interpolations (MetalFX part)
     double last_prepare_s, dt;      // time of the previous game frame's prepare; this pair's interval (MetalFX deltaTime)
 } g;
@@ -266,6 +267,10 @@ static int camera_cut(void) {
 void mfx_frame_skip(void) {   // no command buffer free: nothing of this frame is computed, the next pair starts fresh
     g.frames++; g.scene_ok = g.cam_ok = 0; g.depth = nil; g.prev_ok = g.hist_ok = 0; g.skip_busy++;
 }
+void mfx_frame_ui_lost(int why) {
+    g.frames++; g.scene_ok = g.cam_ok = 0; g.depth = nil; g.prev_ok = g.hist_ok = 0; g.skip_ui++;
+    for (int i = 0; i < 3; i++) g.ui_why[i] += why >> i & 1;
+}
 int mfx_frame_prepare(double frame_s, unsigned busy) {
     g.frames++;
     id<MTLTexture> depth = g.depth;
@@ -423,10 +428,11 @@ static double gpu_pct(double q) {
     return a[(int)(q * (n - 1))];
 }
 void mfx_stats(char *out, size_t n) {
-    snprintf(out, n, "interpolated %llu of %llu game frames (MetalFX GPU p50 %.2f / p95 %.2f ms; frame interval %.1f ms); not interpolated: missing input %llu (scene %llu camera %llu depth %llu UI %llu), first frame / history reset %llu, camera cut %llu, command buffer busy %llu",
+    snprintf(out, n, "interpolated %llu of %llu game frames (MetalFX GPU p50 %.2f / p95 %.2f ms; frame interval %.1f ms); not interpolated: missing input %llu (scene %llu camera %llu depth %llu UI %llu), first frame / history reset %llu, camera cut %llu, command buffer busy %llu, UI outside the UI layer %llu (presented texture %llu, copy not made %llu, merged pass %llu)",
              (unsigned long long)g.made, (unsigned long long)g.frames, gpu_pct(0.5), gpu_pct(0.95), g.dt * 1e3, (unsigned long long)g.skip_input, (unsigned long long)g.miss[0], (unsigned long long)g.miss[1],
              (unsigned long long)g.miss[2], (unsigned long long)g.miss[3],
-             (unsigned long long)g.skip_first, (unsigned long long)g.skip_cut, (unsigned long long)g.skip_busy);
+             (unsigned long long)g.skip_first, (unsigned long long)g.skip_cut, (unsigned long long)g.skip_busy,
+             (unsigned long long)g.skip_ui, (unsigned long long)g.ui_why[0], (unsigned long long)g.ui_why[1], (unsigned long long)g.ui_why[2]);
 }
 
 #endif  // TARGET_OS_VISION

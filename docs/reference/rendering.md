@@ -386,6 +386,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#frame-interpolation-opt-in) 1.9.0, M1 Pro: 30 fps held, every frame after the load interpolated, MetalFX about 7.7 ms of GPU per interpolated frame.
 - **Check:** `DM_MFX_DUMP=<dir>` saves the scenes, depth, motion and output of 16 frame pairs while the camera turns (diagnostic: it waits for the GPU); the log's `[mfx] up to frame` line counts interpolated frames and why the others were not.
 
+### A HUD element blinks at half strength under frame interpolation
+
+- **Symptom:** with `DM_MFX_INTERP=interp30`, a HUD element that appears for the first time in a session (Breath of the Wild's quest announcement) blinks on and off while it comes in, dim and half transparent.
+- **Cause:** a UI draw reaches the UI layer through a copy of its fragment shader that also writes attachment 7, made from the shader's MSL on a background queue (`fs_fn_mfx`); until it is made, about a second for the first ones, the draw masks attachment 7 (`MFX_MASK_MARK`). The canvas still showed the element on the game's frames, but the frames between them were the interpolated scene with a UI layer that lacked it.
+- **Fix:** a frame whose UI did not all reach the UI layer (a copy not made yet, a merged pass, or a draw into the presented texture after the canvas copy) gets no frame between it and the previous one (`mfx_frame_ui_lost`, `g_mfx.ui_lost` in `nvn_mtl.m`): those moments run at the game's 30 fps instead of showing the scene without the element.
+- **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#frame-interpolation-opt-in) 1.9.0, Mac: from a save, 48 of the first 2,400 frames had a UI copy not made yet (the first at the HUD's first frame, a second batch later), 830 frames interpolated.
+- **Check:** the `[mfx] up to frame` line's `UI outside the UI layer` count and its three reasons; a `frames whose UI is not all in the UI layer` line names the first frames.
+
 ## Blend, depth and stencil
 
 ### No writes to colour outputs the shader does not write

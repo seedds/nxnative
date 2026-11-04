@@ -2631,7 +2631,7 @@ static struct { uint32_t cfmt[8], dfmt, sfmt, samples; int hd, hs; NSUInteger tw
 #define MFX_ROLE_UI_OPAQUE 3
 static char g_mfx_mask_mark;
 #define MFX_MASK_MARK ((const void *)&g_mfx_mask_mark)   /* pso_key fsfn: a UI draw whose copy function is not available (yet): attachment 7 masked */
-static struct { uint64_t canvas, last_c0, swap[4]; uint32_t swap_w, swap_h; int nswap, scene_done, ui_cleared, depth_done, want_cam, role, ready, pass_mfx; uint64_t frames, noui, fused, resets, scene_canvas, prev_scene_canvas; __weak id<MTLTexture> canvas_tex; } g_mfx;   // canvas_tex: the texture this frame's upscale drew into; scene_canvas: the canvas this frame's scene came from
+static struct { uint64_t canvas, last_c0, swap[4]; uint32_t swap_w, swap_h; int nswap, scene_done, ui_cleared, depth_done, want_cam, role, ready, pass_mfx, swap_draws, ui_lost; uint64_t frames, noui, fused, resets, lost, scene_canvas, prev_scene_canvas; __weak id<MTLTexture> canvas_tex; } g_mfx;   // canvas_tex: the texture this frame's upscale drew into; scene_canvas: the canvas this frame's scene came from
 static int mfx_on(void) {   // DM_MFX_INTERP set and the profile names the scene's upscale draw and the camera block
     static int ok = -1;
     if (ok < 0) { ok = DM_GAME_SCENE_UPSCALE[0] && DM_GAME_CAMERA_SIZE; if (!ok && mfx_enabled()) MLOG("[RED] [mfx] DM_MFX_INTERP: this game's profile has no scene_upscale and camera_block keys; frame interpolation off"); }
@@ -3154,7 +3154,7 @@ static void mfx_pass_setup(MTL4RenderPassDescriptor *pd, int clear_only) {
         if (nc >= 3) { mfx_note_depth(dt); g_mfx.depth_done = 1; g_mfx.want_cam = 1; }
     }
     if (clear_only != 1 && t0 && c0 && g_mfx.scene_done && g_mfx.canvas == t0->serial && R.rt.n <= 7 && pd.colorAttachments[0].level == 0 && !pd.colorAttachments[7].texture) {
-        if (fz_active()) { if (!g_mfx.fused++) MLOG("[RED] [mfx] a canvas pass after the scene copy is a merged pass: its UI draws stay out of the UI layer"); return; }
+        if (fz_active()) { g_mfx.ui_lost |= 4; if (!g_mfx.fused++) MLOG("[RED] [mfx] a canvas pass after the scene copy is a merged pass: its UI draws stay out of the UI layer"); return; }
         MTLRenderPassColorAttachmentDescriptor *a7 = pd.colorAttachments[7];
         a7.texture = mfx_ui_target(g_dev, c0.width, c0.height);
         a7.loadAction = g_mfx.ui_cleared ? MTLLoadActionLoad : MTLLoadActionClear; a7.clearColor = MTLClearColorMake(0, 0, 0, 0); a7.storeAction = MTLStoreActionStore;
@@ -5936,7 +5936,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
     // Frame interpolation: a UI draw into the canvas also writes the UI layer, through its copy function (fs_fn_mfx; attachment 7 masked until that is made). As ms_fn:
     // its own key, no stand-in, no queued or Metal 4 build, not recorded in the prewarm lists
     int ov = ms_fn != nil;
-    if (!ov && !g_pso_lmap && g_mfx.role && g_pass.cfmt[7]) { ms_fn = fs_fn_mfx(fs, g_mfx.role); k.fsfn = ms_fn ? (__bridge void *)ms_fn : MFX_MASK_MARK; ov = 1; }
+    if (!ov && !g_pso_lmap && g_mfx.role && g_pass.cfmt[7]) { ms_fn = fs_fn_mfx(fs, g_mfx.role); k.fsfn = ms_fn ? (__bridge void *)ms_fn : MFX_MASK_MARK; ov = 1; if (!ms_fn) g_mfx.ui_lost |= 2; }
     // DM_PSO_PULL_ALL=1 (diagnostic): every draw that has a pulling pipeline draws with it, never with the pipeline for its layout
     { static int all = -1; if (all < 0) { const char *ev = getenv("DM_PSO_PULL_ALL"); all = ev && !strcmp(ev, "1"); if (all) MLOG("DM_PSO_PULL_ALL=1: every draw with a pulling pipeline draws with it (diagnostic)"); }
       if (all && !g_pso_lmap && !ov && hybrid_on()) { __unsafe_unretained id<MTLRenderPipelineState> h = hybrid_get(&k, vs, fs); if (h) { g_pso_pull = 1; return h; } } }
@@ -8925,6 +8925,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     if (g_enc && g_sm_pass && draw_samples_rt(pr)) { PD("M %llu a draw in the slice-merged pass samples its attachment; split here", g_stat_pass); rp_end(); }
     if (!g_enc && mode == 0 && !g_rp_layered && !defer_q_draw && g_exec_next && !tbdr_on() && !g_geo_program && sm_on()) sm_plan(pr);
     if (mfx_on() && pr && R.rt.n > 0 && R.rt.color[0] && !g_defer_replaying) {   // frame interpolation (g_mfx); before vbuf_prepare: the scene copy may end the pass
+        if (mfx_to_swap(R.rt.color[0]->serial) && g_mfx.swap_draws++) g_mfx.ui_lost |= 1;   // a draw into the presented texture after the first (the canvas copy): UI the canvas never holds
         if (pr->sh[1] && !strncmp(pr->sh[1]->key, DM_GAME_SCENE_UPSCALE, 16)) {   // the upscale draw into the canvas: after it the canvas holds the finished scene
             if (R.rt.color[0]->serial == g_mfx.canvas) { g_mfx.ready = 1; g_mfx.canvas_tex = tex_mtl(R.rt.color[0]); }
         }
@@ -11087,7 +11088,10 @@ static int mfx_present_frame(const tex_t *t, double period) { @autoreleasepool {
     pthread_mutex_lock(&g_pq_mu);
     for (uint64_t k = g_pq_done + 1; k <= g_pq_in; k++) { const pq_item *q = &g_pq[(k - 1) % PQ]; if (q->interp >= 0) busy |= 1u << q->interp; }
     pthread_mutex_unlock(&g_pq_mu);
-    int slot = a < 0 ? (mfx_frame_skip(), -1) : mfx_frame_prepare(period, busy);   // no command buffer free: nothing to compute
+    if (a >= 0 && g_mfx.ui_lost && (++g_mfx.lost <= 3 || g_mfx.lost % 100 == 0))
+        MLOG("[mfx] %llu frames whose UI is not all in the UI layer so far (game frame %llu:%s%s%s): no frame between it and the previous one", (unsigned long long)g_mfx.lost, (unsigned long long)atomic_load(&g_cur_frame),
+             g_mfx.ui_lost & 1 ? " drawn into the presented texture after the canvas copy" : "", g_mfx.ui_lost & 2 ? " a UI copy not made yet" : "", g_mfx.ui_lost & 4 ? " a merged pass" : "");
+    int slot = a < 0 ? (mfx_frame_skip(), -1) : g_mfx.ui_lost ? (mfx_frame_ui_lost(g_mfx.ui_lost), -1) : mfx_frame_prepare(period, busy);   // no command buffer free: nothing to compute
     NSArray *keep = nil;
     if (slot >= 0) {
         {
@@ -11107,7 +11111,7 @@ static int mfx_present_frame(const tex_t *t, double period) { @autoreleasepool {
         mfx_mv_log();   // DM_MFX_MVLOG (diagnostic)
         if (keep && mfx_dump_due()) { while (atomic_load(&g_mfx_busy[a])) usleep(200); mfx_dump((long)atomic_load(&g_cur_frame), nil, nil); }   // DM_MFX_DUMP (diagnostic): waits for the GPU
     }
-    g_mfx.scene_done = g_mfx.ui_cleared = g_mfx.depth_done = g_mfx.want_cam = g_mfx.ready = 0; g_mfx.canvas_tex = nil;
+    g_mfx.scene_done = g_mfx.ui_cleared = g_mfx.depth_done = g_mfx.want_cam = g_mfx.ready = g_mfx.swap_draws = g_mfx.ui_lost = 0; g_mfx.canvas_tex = nil;
     if (++g_mfx.frames % 300 == 0) { char b[320]; mfx_stats(b, sizeof b); MLOG("[mfx] up to frame %llu: %s", (unsigned long long)atomic_load(&g_cur_frame), b); }
     return slot;
 } }

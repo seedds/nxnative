@@ -25,6 +25,9 @@ id<MTLResidencySet> mfx_residency(void);   // our textures; the queue adds it on
 // command buffer is free: this frame's inputs are dropped and the history reset.
 int mfx_frame_prepare(double frame_s, unsigned busy);
 void mfx_frame_skip(void);
+// instead of prepare, when some of this frame's UI did not reach the UI layer (why: bit 0 drawn into the presented texture after the canvas copy, bit 1 a UI copy not made yet, bit 2 a merged
+// pass): a frame between it and the previous one would show the scene without that UI (a HUD element blinking at half strength), so none is made and the next pair starts fresh
+void mfx_frame_ui_lost(int why);
 // Keep the returned resources alive until this command buffer's GPU completion.
 // Cached interpolators drop their public texture bindings after encoding.
 NSArray *mfx_frame_encode(id<MTL4CommandBuffer> cb, int slot, id<MTL4CounterHeap> heap, NSUInteger stamp);   // heap: timestamps at stamp / stamp+1 around MetalFX (may be nil)

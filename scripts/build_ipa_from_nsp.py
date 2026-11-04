@@ -33,7 +33,7 @@
 # unless ALLOW_OTHER_METAL / --allow-other-metal. Issue #242 reported corruption with another compiler; the cause is still unconfirmed.
 # Python 3.12+ is required for bounded archive mappings inside images. The Python running this file needs lz4, capstone 5.x and fonttools (and backports.zstd before Python 3.14); also needed: Xcode, xcodegen, .NET SDK 10, zstd. SPIRV-Cross is the in-repo build. A first run takes 2 (Metroid Dread) to 10 minutes (Breath of the Wild: 5 of them the shader split), longer when shader libraries must be compiled; a repeat run with unchanged inputs takes about 20 s (Metroid Dread), mostly packing the IPA. Key values are never printed.
 # The console shows one line per stage ([k/n] stage, with a bar, done/total, percent, elapsed time and ETA where the work can be counted); the tools' own output goes only to logs/ (PROGRESS / --progress). --progress json writes newline-delimited JSON events to stdout.
-import ast, collections, contextlib, ctypes, errno, getpass, hashlib, importlib.util, json, os, re, shlex, shutil, struct, subprocess, sys, tempfile, threading, time, types
+import ast, atexit, collections, contextlib, ctypes, errno, getpass, hashlib, importlib.util, json, os, re, shlex, shutil, struct, subprocess, sys, tempfile, threading, time, types
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dm/tools"))
 import romfs as rfs
@@ -390,14 +390,25 @@ def rmtree(p):
     elif p.exists(): shutil.rmtree(p, onexc=_gone)   # Python 3.13 and later pass these by themselves
 
 
+_NX_BUILT = {}   # this run's nx_extract builds: the fingerprint of its sources and the .NET SDK -> the temporary folder that build is in (removed when the script exits)
+
+
 def build_nx_extract(repo, work, logs, env):
     """Build nx_extract into <work>/tools/nx_extract/. It is built in a temporary folder and copied over: with an apostrophe in the output path (e.g. "Bowser's Fury") MSBuild's conditions break,
-    LibHac.dll and the executable are not copied, and the build still reports success"""
-    nx = work / 'tools/nx_extract/nx_extract'
-    with tempfile.TemporaryDirectory(prefix='nx_extract_') as t:
-        run(['dotnet', 'build', repo / 'dm/tools/nx_extract', '-c', 'Release', '-o', t, '-v', 'quiet', '-nologo'], logs / 'nx_extract_build.log', env=env)
-        if not (Path(t) / 'nx_extract').exists(): raise BuildError(f'nx_extract built without an executable (see {logs / "nx_extract_build.log"})')
-        rmtree(nx.parent); shutil.copytree(t, nx.parent)
+    LibHac.dll and the executable are not copied, and the build still reports success. One run needs it in up to four places (the title probe, the build ID lookup, the survey, the work
+    folder): it is built once per run and copied to each, and a copy whose key (its sources, `dotnet --version` and the copy itself) is as at its last build is used as it is"""
+    src = repo / 'dm/tools/nx_extract'
+    nx, kf = work / 'tools/nx_extract/nx_extract', work / 'tools/nx_extract.key'
+    key = fingerprint(('files', sorted(src.glob('*.cs')) + [src / 'nx_extract.csproj']), ('cmd', ['dotnet', '--version']), env=env)
+    if nx.exists() and reused(kf, fingerprint(key, ('stat', nx.parent))) is not None: return nx
+    built = _NX_BUILT.get(key)
+    if not (built and (built / 'nx_extract').exists()):
+        built = Path(tempfile.mkdtemp(prefix='nx_extract_')); atexit.register(rmtree, built)
+        run(['dotnet', 'build', src, '-c', 'Release', '-o', built, '-v', 'quiet', '-nologo'], logs / 'nx_extract_build.log', env=env)
+        if not (built / 'nx_extract').exists(): raise BuildError(f'nx_extract built without an executable (see {logs / "nx_extract_build.log"})')
+        _NX_BUILT[key] = built
+    rmtree(kf); rmtree(nx.parent); shutil.copytree(built, nx.parent)   # copy2 keeps the mtimes, so the stat key holds for the next run
+    kf.write_text(f'{fingerprint(key, ("stat", nx.parent))}\n')
     return nx
 
 

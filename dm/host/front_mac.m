@@ -210,6 +210,7 @@ static int merge_pads_left(GCController *gone) {
 }
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil on a connect)
 static void pads_changed(GCController *gone) {
+    for (GCController *c in GCController.controllers) if (c.extendedGamepad && c != gone) dm_pad_icons_seen(dm_pad_icons(c));
     if (g_merge) {
         int any = 0;
         for (GCController *c in GCController.controllers) if (c.extendedGamepad && c != gone) {

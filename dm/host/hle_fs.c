@@ -185,6 +185,7 @@ static int img_path(const char *p, int *mi, int64_t *k) {
     }
     return 0;
 }
+static const char *rom_overlays(char *buf, size_t n);
 static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     pthread_once(&g_txn_lock_once, txn_locks_init);
     PATH_LOCK(); pthread_mutex_lock(&g_lock);
@@ -196,7 +197,7 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     g_mnt[g_nmnt].txn_root = -1;
     atomic_store(&g_mnt[g_nmnt].poison, 0);
     atomic_store(&g_mnt[g_nmnt].first_write_ns, 0);
-    const char *overlay = !strcmp(name, "rom") ? getenv("DM_ROMFS_OVERLAY") : NULL;
+    char ob[4096]; const char *overlay = !strcmp(name, "rom") ? rom_overlays(ob, sizeof ob) : NULL;
     if (overlay) strlcpy(g_mnt[g_nmnt].overlay, overlay, sizeof g_mnt[0].overlay);
     // The transaction directory cannot be set up (leftovers cannot be cleared / clone failed, which really happens on a full disk): do not exit; mount the committed directory read-only -- saves still read, every write fails, commits are no-ops, the committed version is untouched, and the front end is told
     // (each of these three failures used to call die: with the phone's storage full the game exited as soon as it mounted its saves)
@@ -433,10 +434,25 @@ static Result err_res(const char *op, const char *path) {
 
 // ---------- Mount ----------
 HLE_FORCE("_ZN2nn2fs22QueryMountRomCacheSizeEPm", "fsp-srv; rom reads the host directory directly, the cache gets only the minimum size", Result, h_fs_QueryRomCache, size_t *out) { *out = 0x1000; return RES_OK; }
+// The rom mount's overlay folders: DM_ROMFS_OVERLAY's, after the button-icon folder of the style DM_BUTTON_ICONS picks ($DM_FONT_DIR/button_icons/<style>, made by
+// dm/tools/button_icons.py for a game whose own font holds its prompts' icons) when there is one. NULL for none
+const char *dm_button_icons(void);
+#ifndef DM_TEST_BUTTON_ICONS   // a test that sets the style itself (t_fs.c)
+__attribute__((weak)) const char *dm_button_icons(void) { return "switch"; }   // hle_sdk16.c's replaces it; a test without that file gets the game's own icons
+#endif
+static const char *rom_overlays(char *buf, size_t n) {
+    const char *env = getenv("DM_ROMFS_OVERLAY"), *dir = getenv("DM_FONT_DIR"), *style = dm_button_icons(); struct stat st;
+    if (!dir || !*dir || !strcmp(style, "switch")) return env && *env ? env : NULL;
+    snprintf(buf, n, "%s/button_icons/%s", dir, style);
+    if (stat(buf, &st) || !S_ISDIR(st.st_mode)) return env && *env ? env : NULL;
+    static atomic_int logged; if (!atomic_exchange(&logged, 1)) LOG("button icons: %s overlay first", buf);
+    if (env && *env) { strlcat(buf, ":", n); strlcat(buf, env, n); }
+    return buf;
+}
 HLE_FORCE("_ZN2nn2fs8MountRomEPKcPvm", "fsp-srv; rom → host RomFS directory", Result, h_fs_MountRom, const char *name, void *cache, size_t sz) { dm_thread_service_request();
-    (void)cache; (void)sz; char b[1024];
+    (void)cache; (void)sz; char b[1024], ob[4096];
     Result r = mount(name, envdir("DM_ROMFS", "romfs", b, sizeof b), 1);
-    const char *overlay = getenv("DM_ROMFS_OVERLAY");
+    const char *overlay = rom_overlays(ob, sizeof ob);
     if (r == RES_OK && overlay) {
         PATH_LOCK();
         for (int i = 0; i < g_nmnt; i++) if (!strcmp(g_mnt[i].name, name)) {

@@ -13,6 +13,12 @@ static inline int dm_pad_labelled(GCController *c) {
     NSString *k = c.productCategory;
     return [k isEqualToString:@"Switch Pro Controller"] || [k containsString:@"Joy-Con"];
 }
+// The button icons that look like this pad's own (DM_BUTTON_ICONS=auto): a DualSense or DualShock's symbols, an Xbox pad's letters; NULL for a Nintendo or any other pad
+static inline const char *dm_pad_icons(GCController *c) {
+    NSString *k = c.productCategory;
+    if ([k isEqualToString:GCProductCategoryDualSense] || [k isEqualToString:GCProductCategoryDualShock4] || [k containsString:@"DualSense"]) return "playstation";
+    return [k containsString:@"Xbox"] ? "xbox" : NULL;
+}
 // DM_BTN_A / B / X / Y of the pad's pressed face buttons
 static inline uint64_t dm_pad_face(GCExtendedGamepad *g) {
     GCControllerButtonInput *a = g.buttonA, *b = g.buttonB, *x = g.buttonX, *y = g.buttonY;

@@ -38,6 +38,12 @@ English by default. Pick another when packing with `--language` (`-l`), by code 
 
 Lines like `DM_OPMODE=0` (handheld mode: lower resolution, higher frame rate) in `Documents/env.txt` win over the settings screen, which then shows them greyed out ([the full list](settings.md#settings-in-a-file)). `DM_FPS_TARGET=30` keeps Breath of the Wild, Tears of the Kingdom, Octopath Traveler 0 and Octopath Traveler II at their original 30 fps, which saves battery; `DM_PRESENT_INTERVAL=game` does the same for Monster Train 2. `DM_SHOW_FPS=1` shows the frame rate at the top left (`--show-fps` when packing turns it on from the start). `DM_LAUNCHER=0` skips the settings screen.
 
+## Button icons
+
+With a PlayStation controller the game's prompts show its symbols (○ ✕ △ □, L1 R1 L2 R2, Options and Create), and with an Xbox controller its letters (B A Y X, LB RB LT RT, Menu and View), each where that button sits on the pad: the right button is the Switch's A, so its prompt shows ○ (Xbox B). The choice is made when the game starts, from the first controller connected; one connected later changes the icons at the next start. `DM_BUTTON_ICONS=playstation` (or `xbox`, `switch`) in `env.txt` picks them yourself, `switch` keeps the game's own.
+
+This covers every game whose prompts use the system's button font, and Breath of the Wild, whose own icon font the build redraws. Another game that keeps its icons in its own font shows the Switch's until it gets a profile in `dm/tools/button_icons.py` ([Button icons](development.md#button-icons)).
+
 ## On the Mac
 
 A Mac app shows the game's settings in a window before the game starts ([The Mac settings window](settings.md#the-mac-settings-window)). Its `env.txt` is `~/Library/Application Support/nxnative/<title ID>/env.txt`, and its log is `~/Library/Logs/nxnative/<title ID>.log`. [NX2Apple](https://github.com/LNPANDY/NX2Apple)'s library can also start it with the settings you pick there.

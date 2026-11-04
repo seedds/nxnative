@@ -666,9 +666,11 @@ for m in $(python3 dm/games/game.py $G modules); do python3 dm/tools/patch_nso.p
 # 3. shaders: extract from every version in the profile's shader_versions (comma-separated, base first), then translate into <cache>/b-<chain version>/
 DM_GAME=$G python3 dm/gfx/tools/shader_split.py $W/data/v0/RomFS.img,$W/data/$VER/RomFS.img $W/data/v0/ExeFS/main,$W/data/$VER/ExeFS/main $W/shader/pkg dm/games/$G/shader_map.tsv dm/games/$G/shader_facts.tsv dm/games/$G/shader_pairs.tsv
 DM_GAME=$G python3 dm/gfx/tools/dmsh_build.py $W/shader/pkg $W/build/cache/metal_shader_cache   # also writes dm/games/$G/c1_full.tsv and cb_extent.tsv
-# 4. the host, and the button-icon font for the Nintendo-extension shared font
+# 4. the host, and the button-icon fonts for the Nintendo-extension shared font (the Switch's, a PlayStation and an Xbox style), with the game's own icon font redrawn when it has a profile
 make -C dm/host GAME=$G dmhost
 python3 dm/tools/make_ext_font.py $W/build/font/nintendo_ext.ttf
+for S in playstation xbox; do python3 dm/tools/make_ext_font.py $W/build/font/nintendo_ext_$S.ttf --style $S; done
+python3 dm/tools/button_icons.py make $W/data/$VER/RomFS.img $W/build/font/button_icons --title-id $G --font-dir $W/build/font
 # 5. run on the Mac
 DM_ROOT=$W DM_ROMFS=$W/data/$VER/RomFS.img DM_SAVE=$W/run/save DM_TEMP=$W/run/temp DM_MSL_DIR=$W/build/cache/metal_shader_cache DM_FONT_DIR=$W/build/font dm/host/dmhost $W/build/patched_$VER
 # 6. iOS shader libraries (about 15 min for Mario), then the IPA (default <NSP folder>/<the profile's ipa>)
@@ -683,7 +685,16 @@ Notes on these steps:
 - Its Metal compiles use a precompiled header of Metal's texture classes (`dm/gfx/tools/dmsh_pch.py`), about half of a compile's CPU, with byte-identical output ([Each Metal compile instantiates Metal's texture classes again](reference/shaders.md#each-metal-compile-instantiates-metals-texture-classes-again)). `DMSH_PCH=0` compiles without it.
 - Each shader's cache key (`shader_key`) includes `CODE_FP`, a hash of the *code form* (`dmsh_chain.code_form`: the AST, with docstrings and the rule functions' bodies removed) of `dmsh_build.py` and its helper modules. An edit that cannot change the output (a comment, a docstring, blank lines, formatting) keeps every shader's key, so the next build restores them all instead of translating them again; any change to code, a constant, a string literal or a default argument still rebuilds all of them. The chain version is not touched by this: it still hashes whole files.
 - `build_ipa.sh` takes the rewritten modules from `$W/build/patched_<package>` and the RomFS image from `$W/data/<package>/RomFS.img` (legacy folders are also accepted); `PATCHED` and `ROMFS` override them. In unsigned IPA mode, `pack_ipa.py` packs the shader libraries, RomFS and add-on content beside the app Xcode built, as `DmIOS.app/msl/b-<chain version>`, `romfs` and `aoc`. Prepared Xcode projects instead sync these resources into the app before signing.
-- It also bundles a standard font (macOS's Arial Unicode, `STD_FONT=` overrides it) and the generated `nintendo_ext.ttf`.
+- It also bundles a standard font (macOS's Arial Unicode, `STD_FONT=` overrides it), the generated `nintendo_ext.ttf` in its three styles and the game's redrawn icon font ([Button icons](#button-icons)).
+
+### Button icons
+
+A game draws its button prompts from one of two places, and `DM_BUTTON_ICONS` (`auto` by default: the first controller's kind, `pad_apple.h`'s `dm_pad_icons`) switches both at start:
+
+- The Nintendo-extension shared font (type 5). The host serves `make_ext_font.py`'s stand-in, `nintendo_ext_<style>.ttf` for a PlayStation or Xbox style (`hle_sdk16.c`). Every glyph keeps its name and code point in each style; the face buttons follow the positions the host maps them by (`pad_apple.h`: Switch A is the right button, ○ or Xbox B). Nothing per game.
+- A font in the game's own RomFS. `dm/tools/button_icons.py` has a profile per title (the archives, the font in them, whether its sheet is upside down, and which code point is which stand-in glyph) and redraws those glyphs from the same styled stand-in into `<font dir>/button_icons/<style>/<RomFS path>`; the host puts that folder in front of the RomFS (`hle_fs.c`, before `DM_ROMFS_OVERLAY`'s). It reads NX BFFNT fonts with a BC4 sheet (the sheet is a BNTX, whose BRTI gives the block height and where the pixels start) in a Yaz0 SARC. Each glyph is drawn into the box its icon's ink filled; a wider one (L1 for L) takes more of its cell and grows its CWDH widths. Only the changed BC4 blocks are encoded again, so the font keeps its size and no resource size table changes, and the archive is compressed again only around the font, so it stays the game's size.
+
+To add a game, run `python3 dm/tools/button_icons.py survey <RomFS> <out>`: it writes each BFFNT with private-use code points it finds as a PNG (as stored, and upside down) with a TSV of each code point's cell, from which the profile's code points are read. A font in another format (an OpenType `.bfotf`, a sheet in another texture format) needs its reader first.
 - The icon is the `icon.jpg` that `nx_extract` saves next to `RomFS.img`; `DM_ICON=` points at another image.
 - `DM_ENV_FILE=` bakes environment switches into the app, and `DM_DISPLAY_NAME=` renames it.
 - The optional compiler definition `DM_PLAYER_BUILD=1` makes the iOS app ignore saved NVN diagnostic/renderer overrides, test switches, Metal validation switches and scripted input/capture controls from environment files. It also ignores a saved shader-library path so the app uses the new bundle's libraries. FPS and Metal HUD switches, frame rate, console mode, language and controller settings remain available. `DM_NVN_ENC_THREAD` is also retained: it selects direct/deferred encoding without enabling profiling, validation or dumps. Normal builds keep the existing environment-file behavior. This allows a player IPA to update a previously profiled installation without deleting its saved environment file or saves.

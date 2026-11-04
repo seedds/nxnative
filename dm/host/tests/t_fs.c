@@ -18,6 +18,7 @@ static ssize_t fake_pwrite(int fd, const void *buf, size_t n, off_t off);
 static int fake_clonefile(const char *src, const char *dst, uint32_t flags);
 #define pwrite fake_pwrite
 #define clonefile fake_clonefile
+#define DM_TEST_BUTTON_ICONS   // dm_button_icons below
 #include "../hle_fs.c"
 #undef pwrite
 #undef clonefile
@@ -39,6 +40,8 @@ static ssize_t fake_pwrite(int fd, const void *buf, size_t n, off_t off) {
     return pwrite(fd, buf, n, off);
 }
 static int fails, checks;
+static const char *g_icons = "switch";
+const char *dm_button_icons(void) { return g_icons; }   // hle_sdk16.c's, decided once per start there; the test sets it per mount
 #define CHECK(c, ...) do { checks++; if (!(c)) { fails++; printf("  ✗ "); } else printf("  ✓ "); printf(__VA_ARGS__); printf("\n"); } while (0)
 static void put(const char *p, const char *s) { FILE *f = fopen(p, "w"); fputs(s, f); fclose(f); }
 static int same(const char *p, const char *s) {
@@ -79,6 +82,16 @@ int main(void) {
     CHECK(read_fs("rom:\\data\\over", got, sizeof got) && !strcmp(got, "only-overlay") && read_fs("rom:\\data\\base", got, sizeof got) && !strcmp(got, "only-base"), "backslashes separate as slashes do, in both layers");
     CHECK(h_fs_OpenFile(&rh, "rom:/data/base", MODE_READ) == RES_OK && rh && !(rh & 15), "a folder file's handle is 16-byte aligned, as a Horizon FileAccessor pointer is (%#llx)", (unsigned long long)rh); h_fs_CloseFile(rh);
     g_nmnt = 0;
+    {   // DM_BUTTON_ICONS' style: $DM_FONT_DIR/button_icons/<style> comes before DM_ROMFS_OVERLAY's folders (button_icons.py's redrawn icon font); switch, or no such folder, adds nothing
+        char font[1200], icons[1300]; snprintf(font, sizeof font, "%s/font", root); snprintf(icons, sizeof icons, "%s/button_icons/playstation/data", font);
+        mkdir(font, 0755); snprintf(fn, sizeof fn, "%s/button_icons", font); mkdir(fn, 0755); snprintf(fn, sizeof fn, "%s/button_icons/playstation", font); mkdir(fn, 0755); mkdir(icons, 0755);
+        snprintf(fn, sizeof fn, "%s/same", icons); put(fn, "icons"); setenv("DM_FONT_DIR", font, 1);
+        g_icons = "playstation"; CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK && read_fs("rom:/data/same", got, sizeof got) && !strcmp(got, "icons"), "the button-icon folder of the style wins over DM_ROMFS_OVERLAY");
+        CHECK(read_fs("rom:/data/over", got, sizeof got) && !strcmp(got, "only-overlay") && read_fs("rom:/data/base", got, sizeof got) && !strcmp(got, "only-base"), "DM_ROMFS_OVERLAY and the base still serve what it lacks");
+        g_nmnt = 0; g_icons = "xbox"; CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK && read_fs("rom:/data/same", got, sizeof got) && !strcmp(got, "overlay"), "a style without a folder adds no overlay");
+        g_nmnt = 0; g_icons = "switch"; CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK && read_fs("rom:/data/same", got, sizeof got) && !strcmp(got, "overlay"), "switch: the game's own icons");
+        g_nmnt = 0; unsetenv("DM_FONT_DIR");
+    }
     unsetenv("DM_ROMFS_OVERLAY");
     {   // game files that are neither a folder nor a file (a stale path, a fifo) stop the rom mount with a FATAL line, in a child so the abort does not end this test
         char gone[1200], fifo[1200], out[1200]; snprintf(gone, sizeof gone, "%s/RomFS", root); snprintf(fifo, sizeof fifo, "%s/fifo", root); snprintf(out, sizeof out, "%s/fatal.txt", root);

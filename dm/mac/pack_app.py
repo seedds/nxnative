@@ -202,6 +202,7 @@ def selected_inputs(a):
     tables = [Path(a.tables) / n for n in TABLES if (Path(a.tables) / n).is_file()]
     pairs = Path(a.pso_pairs) if a.pso_pairs and not any(p.name == 'pso_pairs.tsv' for p in tables) else None
     fonts = sorted(p for p in Path(a.font).glob('*.ttf') if not detritus(p.name))
+    fonts += sorted(p for p in (Path(a.font) / 'button_icons').rglob('*') if p.is_file() and not detritus(p.name))   # a game's own icon font in the other styles (button_icons.py), as RomFS overlays
     files = [Path(a.host)] + mods + msls + pso + tables + fonts + ([pairs] if pairs else [])
     files += [Path(p) for p in (a.env_file, a.settings, a.icon) if p]
     for p in files:
@@ -273,7 +274,8 @@ def pack(a):
     copy(mods, dm, clone['mods'])
     if tables: copy(tables, dm, False)
     if pairs: shutil.copyfile(pairs, dm / 'pso_pairs.tsv')   # the split's copy, for a profile without the table
-    if fonts: copy(fonts, dm / 'font', False)
+    for p in fonts:   # font/<name>.ttf, and font/button_icons/<style>/<RomFS path> kept as it is
+        dst = dm / 'font' / p.relative_to(a.font); dst.parent.mkdir(parents=True, exist_ok=True); shutil.copyfile(p, dst)
     if a.env_file: shutil.copyfile(a.env_file, dm / 'env.txt')
     if a.settings: shutil.copyfile(a.settings, dm / 'launcher.json')
     step('shader libraries'); msl_dst = res / 'msl' / (a.msl_name or msl.name); msl_dst.mkdir(parents=True); copy(msls, msl_dst, clone['msl'])

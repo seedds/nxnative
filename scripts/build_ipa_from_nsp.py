@@ -70,6 +70,7 @@ PSO_GPUS = ''                           # NVN games: GPU architectures the app g
                                         #   else 'g18p' for a game without the key, and 'none' without pso_mtl4 on
                                         #   PLATFORM 'mac-app': the Mac app's archive (Resources/pso), empty = this Mac's GPU (e.g. 'g14s' for an M2 Max), 'none' = the app builds its bases on its first start
 SHOW_FPS = True                         # True shows the game's frame rate on the iPhone (frames on screen per second, top left); DM_SHOW_FPS=0 / 1 in the app's Documents/env.txt changes it without a rebuild
+BUTTON_ICON_STYLES = ('playstation', 'xbox')   # the styles besides the Switch's own the button-icon fonts are made in (make_ext_font.py --style, button_icons.py); DM_BUTTON_ICONS picks one at start
 MOTION = True                           # True passes a gyro controller's motion (on iOS also the phone's own) to games that read it; False builds with DM_MOTION=0, for when motion misbehaves (DM_MOTION=1 in the app's Documents/env.txt turns it back on without a rebuild)
 SURVEY_ONLY = False                     # a game with no profile in dm/games: only write the survey, no provisional profile and no IPA
 PROFILE_OUT = ''                        # where a provisional profile goes (empty = <build folder>/profile, i.e. <NSP folder>/<title ID>_build/profile unless WORK_DIR is set; the profile is <this>/<title ID>/)
@@ -2407,18 +2408,21 @@ def build_env_file(work, env_file, motion):
     return str(f)
 
 
-def mac_host(py, repo, work, env, logs, g):
+def mac_host(py, repo, work, env, logs, g, romfs=None):
     """The stage "Mac host" of a Mac-only build or a Mac app (PLATFORM 'mac', 'mac-app'): the Mac host for the profile (build_mac_host, into <id>_build/tools/dmhost, where the run-time captures
-    build it too; DM_GAMES_DIR / DM_GAMES_FIRST in env pick a provisional or derived profile) and the button-icon font the host gives a game for the Nintendo extension shared font
-    (make_ext_font.py, into <id>_build/font, made again when the tool changed). Returns (host, font folder)"""
+    build it too; DM_GAMES_DIR / DM_GAMES_FIRST in env pick a provisional or derived profile) and the button-icon fonts the host gives a game for the Nintendo extension shared font
+    (make_ext_font.py: nintendo_ext.ttf and a PlayStation and an Xbox style, into <id>_build/font), with the game's own icon font redrawn in those styles when it has a profile
+    (button_icons.py, from romfs into <id>_build/font/button_icons/<style>; DM_BUTTON_ICONS picks one at start). Made again when the tools or the RomFS changed. Returns (host, font folder)"""
     PROG.stage('Mac host', step='building')
     host = build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
     PROG.set(step='button-icon font')
     font = work / 'font'; ttf, kf = font / 'nintendo_ext.ttf', font / 'nintendo_ext.key'
-    key = fingerprint(('files', [repo / 'dm/tools/make_ext_font.py']))
+    key = fingerprint(('files', [repo / 'dm/tools/make_ext_font.py', repo / 'dm/tools/button_icons.py']), str(romfs or ''))
     if not (ttf.is_file() and reused(kf, key) is not None):
-        rmtree(kf); font.mkdir(parents=True, exist_ok=True)
+        rmtree(kf); rmtree(font / 'button_icons'); font.mkdir(parents=True, exist_ok=True)
         run([py, repo / 'dm/tools/make_ext_font.py', ttf], logs / 'make_ext_font.log', env=env)
+        for style in BUTTON_ICON_STYLES: run([py, repo / 'dm/tools/make_ext_font.py', font / f'nintendo_ext_{style}.ttf', '--style', style], logs / f'make_ext_font_{style}.log', env=env)
+        if romfs: run([py, repo / 'dm/tools/button_icons.py', 'make', romfs, font / 'button_icons', '--title-id', g.id, '--font-dir', font], logs / 'button_icons.log', env=env)
         kf.write_text(f'{key}\n')
     PROG.end(str(host))
     return host, font
@@ -2890,7 +2894,7 @@ def main(args=None):
     env_file = build_env_file(work, args.env_file or DM_ENV_FILE, motion)
     if not motion: say('motion (gyro): off, DM_MOTION=0 is built in (on the iPhone, DM_MOTION=1 in the app\'s Documents/env.txt turns it back on)')
     if mac_pack:   # a Mac app: the Mac host, then the app packed from it and the build's files
-        host, font = mac_host(py, repo, work, env, logs, g)
+        host, font = mac_host(py, repo, work, env, logs, g, rfs.source(game))
         if not icon: say(('no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') + '; the app\'s icon will be blank' if dump else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the app\'s icon will be blank')
         mac_app(py, repo, out_ipa, app, work, game, patched, host, font, ios, aoc, gfx, lang, g, app_name, app_version, bundle_id, icon, args.mac_sign or MAC_SIGN, env, logs, env_file,
                 (args.gpu or PSO_GPUS).strip())
@@ -2901,7 +2905,7 @@ def main(args=None):
         report_profile_status(g, reg, pkg_ver, derived, provisional, 'Mac app', patched)
         return
     if mac:   # a Mac-only build ends with the Mac host and the command that runs the game
-        host, font = mac_host(py, repo, work, env, logs, g)
+        host, font = mac_host(py, repo, work, env, logs, g, rfs.source(game))
         cmd = mac_run(work, game, patched, host, font, ios, aoc, gfx, lang, env, logs, g, env_file, partial=seen_shaders)
         rmtree(work / 'tmp')
         say(f'done: the game runs on the Mac with this command (its save in {work / "run/save"}, kept from run to run; DM_WINDOW=1 opens a window, DM_AUDIO=1 plays sound):')

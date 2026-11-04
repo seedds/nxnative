@@ -17,6 +17,10 @@ Update 1.9.0 (v1114112) over the base game, SDK 20.5.22. Nintendo EPD's engine (
 
 No `tex_flush_upload` (a minute's boot saw it flush 32 CPU-filled textures with data, and it needs none).
 
+## Button icons
+
+The prompts' icons are `External_00.bffnt` in each `Font/Font_<region>.sbfarc` (the same font in all seven): 50 glyphs at U+E040–E091 in one 256 x 1024 BC4 sheet, cells of 50 x 50 on a 51-pixel pitch, stored upside down. `dm/tools/button_icons.py` redraws A B X Y (U+E040–E043), L R ZL ZR (U+E044–E047), + and - (U+E04B, E04C), the d-pad (U+E049) and its lit arms (U+E060–E065, up down left right, up+down, left+right) in the PlayStation and Xbox styles; the stick icons (U+E050–E05F, the presses at U+E056 / E057), Home, the power button, the console and the arrows stay the game's. The action guide beside an object is drawn from `Layout/Common.sblarc`'s textures, not this font, and keeps the Switch's icons. Checked on 1.9.0 (the archives of 1.6.0 are not checked).
+
 ## Frame rate
 
 ### The frame step (current)

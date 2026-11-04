@@ -80,6 +80,29 @@ int main(void) {
     CHECK(seen_index == 0 && seen_capacity == 0, "zero unsigned arguments preserved");
     CHECK(lookups == 1, "original resolved once");
     CHECK(!memcmp(standard, unrelated, sizeof standard) && !memcmp(extension, unrelated, sizeof extension), "input bytes unchanged");
+    {   // DM_BUTTON_ICONS: the extension font of the style (nintendo_ext_<style>.ttf beside nintendo_ext.ttf), the plain one for switch or when the style's is missing; auto takes the
+        // first controller the front end reported. dm_button_icons is decided once per process, so each case runs in a child
+        char dir[] = "/private/tmp/t_shared_font.XXXXXX", f[1200]; CHECK(mkdtemp(dir) != NULL, "temp folder");
+        const char *files[][2] = {{"nintendo_ext.ttf", "switch-icons"}, {"nintendo_ext_playstation.ttf", "playstation-icons"}, {"standard.ttf", "standard"}};
+        for (int i = 0; i < 3; i++) { snprintf(f, sizeof f, "%s/%s", dir, files[i][0]); FILE *o = fopen(f, "w"); fputs(files[i][1], o); fclose(o); }
+        setenv("DM_FONT_DIR", dir, 1); unsetenv("DM_SHARED_FONT"); unsetenv("DM_SHARED_FONT_EXT");
+        const char *cases[][4] = {{"playstation", NULL, "playstation-icons", "playstation"}, {"switch", NULL, "switch-icons", "switch"}, {"xbox", NULL, "switch-icons", "xbox"},
+                                  {"auto", "playstation", "playstation-icons", "playstation"}, {NULL, NULL, "switch-icons", "switch"}, {"bogus", "xbox", "switch-icons", "xbox"}};
+        for (unsigned i = 0; i < sizeof cases / sizeof *cases; i++) {
+            fflush(NULL); pid_t pid = fork();
+            if (!pid) {
+                if (cases[i][0]) setenv("DM_BUTTON_ICONS", cases[i][0], 1); else unsetenv("DM_BUTTON_ICONS");
+                if (cases[i][1]) { dm_pad_icons_seen(NULL); dm_pad_icons_seen(cases[i][1]); dm_pad_icons_seen("xbox"); }   // NULL is no report; the first report stays
+                ext_f = std_f = (font_t){0}; font_t e = font_get(5);
+                _exit(!(e.p && e.n == 8 + strlen(cases[i][2]) && !memcmp(e.p + 8, cases[i][2], e.n - 8) && !strcmp(dm_button_icons(), cases[i][3])));
+            }
+            int st = 0; waitpid(pid, &st, 0); char msg[200];
+            snprintf(msg, sizeof msg, "DM_BUTTON_ICONS=%s, controller %s: %s, extension font %s", cases[i][0] ? cases[i][0] : "(unset)", cases[i][1] ? cases[i][1] : "none", cases[i][3], cases[i][2]);
+            CHECK(WIFEXITED(st) && !WEXITSTATUS(st), msg);
+        }
+        for (int i = 0; i < 3; i++) { snprintf(f, sizeof f, "%s/%s", dir, files[i][0]); unlink(f); }
+        rmdir(dir); unsetenv("DM_FONT_DIR");
+    }
     printf("shared font: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

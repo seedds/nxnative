@@ -570,7 +570,7 @@ The bundle holds what the IPA holds, with the Mac's shader libraries:
   MacOS/nxnative             the launcher (dm/mac/launcher.c, linked by pack_app.py with swiftc and its settings window: dm/mac/Launcher.swift, LauncherSettings.swift and LauncherRow.swift)
   MacOS/dmhost               the Mac host built for the profile
   Resources/romfs.img        the packed version's RomFS image
-  Resources/msl/b-<chain>/   the Mac shader libraries, reflection JSON and runtime TSV tables (vk/ or gl/ for a Vulkan or GL game)
+  Resources/msl/b-<chain>/   the Mac shader libraries, reflection JSON and runtime TSV tables (vk/ or gl/ for a Vulkan or GL game), and the MSL of the profile's split_outputs shaders
   Resources/aoc/<index>/     the DLC, when the folder has some
   Resources/pso/             an NVN game's pipeline archive made offline for this Mac's GPU (<arch>.mtl4a, prebuilt.tsv; --gpu none leaves it out)
   Resources/dm/              the rewritten modules and their rewriter tables, nro.tsv, the profile's shader_map.tsv, pso_manifest.tsv, c1_full.tsv, cb_extent.tsv, shader_pairs.tsv and pso_pairs.tsv, font/, env.txt (--env-file)

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # Pack a self-contained, double-clickable Mac app of a game (the NSP script's --platform mac-app): the launcher (dm/mac/launcher.c, linked here with its settings window,
 # dm/mac/Launcher.swift, and the iOS launcher's model and rows) as CFBundleExecutable, the Mac host beside it,
-# and in Contents/Resources what the IPA carries (dm/ios/tools/build_ipa.sh): romfs.img (the RomFS image), msl/<b-chain | vk | gl>/ (the Mac shader libraries, the folder named as in the IPA),
+# and in Contents/Resources what the IPA carries (dm/ios/tools/build_ipa.sh): romfs.img (the RomFS image), msl/<b-chain | vk | gl>/ (the Mac shader libraries, the folder named as in the IPA,
+# with the MSL of the fragment shaders the profile's split_outputs names: --msl-source, which nvn_mtl.m osplit_load compiles at run time),
 # aoc/<index>/ (DLC), pso/ (an NVN game's pipeline archive made offline for this Mac's GPU, dm/gfx/tools/pso_offline.py: the launcher hands it to the host as DM_PSO_BUNDLE),
 # and dm/ (the rewritten modules and their rewriter tables, nro.tsv, the profile's shader_map.tsv / pso_manifest.tsv / c1_full.tsv / cb_extent.tsv / shader_pairs.tsv / pso_pairs.tsv, font/, env.txt,
 # launcher.json: the game's launcher settings, dm/games/settings.py, which the settings window and Mac front ends show),
@@ -19,7 +20,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / 'tools'))
 import romfs as rfs
 MODULE_FILES = ('*.patched.bin', '*.fixups.tsv', '*.gates.tsv', '*.cuts.tsv', '*.obs.tsv', '*.changed.tsv', 'nro.tsv')   # what the host reads from the module folder (build_ipa.sh copies the same tables but changed.tsv: the iPhone's cheats never write code)
-MSL_FILES = ('*.metallib', '*.json', '*.tsv')   # what the host reads from msl/ (not the Mac build's .metal sources or _b_build.json)
+MSL_FILES = ('*.metallib', '*.json', '*.tsv')   # what the host reads from msl/ (not the Mac build's .metal sources, but those --msl-source names, or _b_build.json)
 # read beside DM_NVN_SHMAP; any of them may be absent (a Vulkan or GL game has no c1_full.tsv). The shader pairs are the pipeline prebuild's (nvn_mtl.m pso_prebuild): without them the
 # app makes no pulling bases, a hybrid draw has no stand-in and a new pipeline compiles on the submit thread (build_ipa.sh copies them into the IPA the same way)
 TABLES = ('shader_map.tsv', 'pso_manifest.tsv', 'c1_full.tsv', 'cb_extent.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv')
@@ -196,6 +197,11 @@ def selected_inputs(a):
             raise SystemExit(f'no rewriter fixups for {p}')
     msls = sorted(p for pat in MSL_FILES for p in Path(a.msl).glob(pat) if p.is_file() and p.name != '_b_build.json' and not detritus(p.name))
     if not any(p.suffix == '.metallib' for p in msls): raise SystemExit(f'no shader libraries at {a.msl}')
+    for k in a.msl_source or []:   # split_outputs: without its MSL the shader's draws stay whole (nvn_mtl.m osplit_load: no MSL beside its library)
+        if not re.fullmatch(r'[0-9a-f]{16}', k): raise SystemExit(f'--msl-source takes a 16-digit fragment shader key: {k}')
+        src = Path(a.msl) / f'{k}_b.metal'
+        if not src.is_file(): raise SystemExit(f'no MSL source of {k} at {src} (the profile\'s split_outputs names it)')
+        msls.append(src)
     pso = sorted({p for pat in PSO_FILES for p in Path(a.pso).glob(pat) if not detritus(p.name)}) if a.pso else []
     if a.pso and (not any(p.suffix == '.mtl4a' for p in pso) or not (Path(a.pso) / 'prebuilt.tsv').is_file()):
         raise SystemExit(f'no pipeline archive with its prebuilt.tsv in {a.pso}')
@@ -258,7 +264,7 @@ def pack(a):
         programs = []
         for row in a.program or []:
             n, patched, prom, pmsl, ptab, phtml = row.split('\t')
-            pa = argparse.Namespace(**{**vars(a), 'patched': patched, 'romfs': prom, 'msl': pmsl, 'tables': ptab, 'pso': None, 'pso_pairs': None, 'aoc': None, 'marker': None})
+            pa = argparse.Namespace(**{**vars(a), 'patched': patched, 'romfs': prom, 'msl': pmsl, 'tables': ptab, 'pso': None, 'pso_pairs': None, 'aoc': None, 'marker': None, 'msl_source': None})
             pmods, pmsls, _, ptables, _, _, pfiles = selected_inputs(pa)
             programs.append((n, Path(prom), Path(pmsl), Path(phtml), pmods, pmsls, ptables)); files += pfiles
         clang = Path(run(['xcrun', '--find', 'clang']).strip()).resolve()
@@ -355,6 +361,8 @@ def parse(argv):
     ap.add_argument('--romfs', required=True, help='the RomFS of the packed version')
     ap.add_argument('--msl', required=True, help='the Mac shader libraries: <shader>/cache/b-<chain>, or a Vulkan or GL game\'s <shader>/vk or gl')
     ap.add_argument('--msl-name', help='its folder name in the app (default: its own)')
+    ap.add_argument('--msl-source', action='append', help='a fragment shader key (16 digits) whose MSL, <key>_b.metal in --msl, goes in beside the libraries: the profile\'s split_outputs, '
+                    'compiled at run time (repeat for each)')
     ap.add_argument('--tables', required=True, help='the game profile folder (shader_map.tsv and the tables beside it)')
     ap.add_argument('--font', required=True, help='the folder of the shared-font stand-ins (nintendo_ext.ttf)')
     ap.add_argument('--aoc', help='the DLC RomFS images or folders by index')

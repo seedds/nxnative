@@ -1,5 +1,9 @@
 """Check the ordering semantics of individual Ampere barrier encodings."""
+from pathlib import Path
+import sys
 import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_dmsh_ampere_mem import Translated, EXIT, inst
 
 

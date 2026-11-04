@@ -17,6 +17,8 @@
 #include "nvn_pace.h"
 #include "nvn_fstep.h"
 #include "nvn_timestamp.h"
+#include "nvn_queue_schedule.h"
+#include "nvn_obj.h"
 #include "../../host/front.h"
 #include "nvn_dirty.h"
 #include <mach/mach_time.h>
@@ -85,6 +87,14 @@ typedef struct { const char *name; void *fn; } nvn_impl;
 
 static int g_log;
 static pthread_mutex_t g_sub_mu = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic int g_event_waits;
+static void qe_queue_fence(const queue_t *, sync_t *);
+static int qe_wait(nvn_qs_ticket, uint64_t, int);
+static int qe_wait_recorded(const sync_t *, uint64_t);
+static void qe_flush_queue(void);
+static void qe_finish(const queue_t *);
+static void qe_cpu_signal(const ev_t *, int, uint32_t);
+static void qe_sync_wait(const queue_t *, const sync_t *);
 static _Atomic uint64_t g_serial;
 uint64_t nvn_new_serial(void) { return ++g_serial; }
 void nvn_serial_floor(uint64_t s) { uint64_t c = atomic_load(&g_serial); while (c < s && !atomic_compare_exchange_weak(&g_serial, &c, s)) {} }
@@ -736,10 +746,19 @@ NVN(nvnSyncInitialize, NVNboolean, NVNsync *s, NVNdevice *d) { (void)d; *(sync_t
 NVN(nvnSyncFinalize, void, NVNsync *s) { ((sync_t *)s)->magic = 0; }
 NVN(nvnSyncSetDebugLabel, void, NVNsync *s, const char *l) { (void)s; (void)l; }
 // Fence = "all commands previously submitted to the queue have completed": record the fence value of the most recent submit
-NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)q; (void)c; (void)f; ((sync_t *)s)->fenced = 1; ((sync_t *)s)->fence = mtl_last_fence(); }
+NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) {
+    (void)c;
+    (void)f;
+    qe_queue_fence((const queue_t *)q, (sync_t *)s);
+}
+
 // A sync object that was never fenced waits until timeout, as on a real device; a fenced one is released only after the GPU has actually completed up to that fence value
-// A GPU-side wait on a sync: the host has a single Metal queue that executes submissions in order, so commands before the fence are always done first and nothing needs waiting. A sync not fenced yet (fenced later by another thread) is not waited for here; logged once
-NVN(nvnQueueWaitSync, NVNboolean, NVNqueue *q, const NVNsync *s) { (void)q; static int once; if (!((const sync_t *)s)->fenced && !once++) LOG("[nvn] QueueWaitSync: the sync object has no fence yet, the host does not wait"); return 1; }
+// A GPU-side wait yields its guest queue until the fenced prefix has been ordered on the shared Metal queue.
+NVN(nvnQueueWaitSync, NVNboolean, NVNqueue *q, const NVNsync *s) {
+    qe_sync_wait((const queue_t *)q, (const sync_t *)s);
+    return 1;
+}
+
 // ZCull data: the host does no ZCull, so there is nothing to save / restore
 NVN(nvnCommandBufferRestoreZCullData, void, NVNcommandBuffer *c, NVNbufferAddress a, size_t n) { (void)c; (void)a; (void)n; }
 NVN(nvnCommandBufferSaveZCullData, void, NVNcommandBuffer *c, NVNbufferAddress a, size_t n) { (void)c; (void)a; (void)n; }
@@ -748,12 +767,37 @@ NVN(nvnCommandBufferSaveZCullData, void, NVNcommandBuffer *c, NVNbufferAddress a
 NVN_NOPROTO(nvnCommandBufferSetStencilCullCriteria, void, NVNcommandBuffer *c, int func, int ref) { (void)c; (void)func; (void)ref; }
 static _Atomic uint64_t g_sync_ns;
 NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
-    const sync_t *o = (const sync_t *)s;
-    if (!o->fenced) return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
-    int (*w)(uint64_t, uint64_t) = o->fenced == 2 ? mtl_wait_acq : mtl_wait;
-    if (w(o->fence, 0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
-    uint64_t t0 = now_ns(); int ok = w(o->fence, timeout); atomic_fetch_add(&g_sync_ns, now_ns() - t0);   // the frame's blocked SyncWait time (@sync_ms)
-    return ok ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
+    const sync_t *sync = (const sync_t *)s;
+    if (!sync->fenced) {
+        return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
+    }
+    if (sync->fenced == NVN_SYNC_FENCE_RECORDED_PENDING) {
+        if (qe_wait_recorded(sync, 0)) {
+            return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
+        }
+        uint64_t started = now_ns();
+        int completed = qe_wait_recorded(sync, timeout);
+        atomic_fetch_add(&g_sync_ns, now_ns() - started);
+        return completed ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
+    }
+    if (sync->fenced == NVN_SYNC_FENCE_QUEUE_PREFIX) {
+        nvn_qs_ticket ticket = {sync->queue, sync->fence};
+        if (qe_wait(ticket, 0, 1)) {
+            return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
+        }
+        uint64_t started = now_ns();
+        int completed = qe_wait(ticket, timeout, 1);
+        atomic_fetch_add(&g_sync_ns, now_ns() - started);
+        return completed ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
+    }
+    int (*wait_for_fence)(uint64_t, uint64_t) = sync->fenced == NVN_SYNC_FENCE_ACQUIRE ? mtl_wait_acq : mtl_wait;
+    if (wait_for_fence(sync->fence, 0)) {
+        return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
+    }
+    uint64_t started = now_ns();
+    int completed = wait_for_fence(sync->fence, timeout);
+    atomic_fetch_add(&g_sync_ns, now_ns() - started); // the frame's blocked SyncWait time (@sync_ms)
+    return completed ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
 }
 NVN(nvnEventBuilderSetDefaults, void, NVNeventBuilder *b) { memset(b, 0, sizeof(ev_builder_t)); }
 NVN(nvnEventBuilderSetStorage, void, NVNeventBuilder *b, const NVNmemoryPool *p, int64_t off) { *(ev_builder_t *)b = (ev_builder_t){(const pool_t *)p, off}; }
@@ -765,7 +809,9 @@ NVN(nvnEventInitialize, NVNboolean, NVNevent *e, const NVNeventBuilder *b) {
 NVN(nvnEventFinalize, void, NVNevent *e) { ((ev_t *)e)->magic = 0; }
 NVN(nvnEventGetValue, uint32_t, const NVNevent *e) { return *((const ev_t *)e)->val; }
 static void ev_signal(const ev_t *e, int mode, uint32_t v) { if (mode == NVN_EVENT_SIGNAL_MODE_ADD) *e->val += v; else *e->val = v; }
-NVN(nvnEventSignal, void, NVNevent *e, NVNeventSignalMode m, uint32_t v) { ev_signal((const ev_t *)e, m, v); }
+NVN(nvnEventSignal, void, NVNevent *event, NVNeventSignalMode mode, uint32_t value) {
+    qe_cpu_signal((const ev_t *)event, mode, value);
+}
 
 // ---------- Queue ----------
 #define QB(b) ((queue_builder_t *)(b))
@@ -795,13 +841,23 @@ NVN(nvnQueueInitialize, NVNboolean, NVNqueue *q, const NVNqueueBuilder *b) {
     OLOG("QueueInitialize %p", (void *)q); return 1;
 }
 NVN(nvnQueueFinalize, void, NVNqueue *q) {
-    pthread_mutex_lock(&g_sub_mu); mtl_queue_forget(((queue_t *)q)->serial); ((queue_t *)q)->magic = 0; pthread_mutex_unlock(&g_sub_mu);
+    qe_finish((const queue_t *)q);
+    pthread_mutex_lock(&g_sub_mu);
+    mtl_queue_forget(((queue_t *)q)->serial);
+    ((queue_t *)q)->magic = 0;
+    pthread_mutex_unlock(&g_sub_mu);
 }
+
 NVN(nvnQueueGetError, NVNqueueGetErrorResult, NVNqueue *q, NVNqueueErrorInfo *info) {
     (void)q; if (info) memset(info, 0, sizeof *info); return NVN_QUEUE_GET_ERROR_RESULT_GPU_NO_ERROR;
 }
-NVN(nvnQueueFlush, void, NVNqueue *q) { (void)q; }
-NVN(nvnQueueFinish, void, NVNqueue *q) { (void)q; mtl_finish(); }
+NVN(nvnQueueFlush, void, NVNqueue *q) {
+    (void)q;
+    qe_flush_queue();
+}
+NVN(nvnQueueFinish, void, NVNqueue *q) {
+    qe_finish((const queue_t *)q);
+}
 
 // ---------- Command buffer: record into the game's command memory, perform CPU-visible side effects at submit ----------
 #define CB(c) ((cmd_t *)(c))
@@ -950,12 +1006,37 @@ NVN(nvnCommandBufferIsRecording, NVNboolean, const NVNcommandBuffer *c) { return
 NVN(nvnCommandBufferCopyCommands, void, NVNcommandBuffer *c, int n, const NVNcommandHandle *h) {
     for (int i = 0; i < n; i++) { uint8_t *p = cmd_alloc(CB(c), 16); put_hdr(p, OP_CALL, 16); memcpy(p + 8, &h[i], 8); }
 }
-NVN(nvnCommandBufferSignalEvent, void, NVNcommandBuffer *c, const NVNevent *e, NVNeventSignalMode m, NVNeventSignalLocation loc, int flags, uint32_t v) {
-    (void)loc; (void)flags;
-    uint8_t *p = cmd_alloc(CB(c), 24); put_hdr(p, OP_SIGNAL_EVENT, 24);
-    const ev_t *ev = (const ev_t *)e; volatile uint32_t *val = ev->val; uint32_t mm = m;
-    memcpy(p + 8, &val, 8); memcpy(p + 16, &mm, 4); memcpy(p + 20, &v, 4);
+NVN(nvnCommandBufferSignalEvent, void, NVNcommandBuffer *command_buffer, const NVNevent *event, NVNeventSignalMode mode,
+    NVNeventSignalLocation loc, int flags, uint32_t value) {
+    uint8_t *record = cmd_alloc(CB(command_buffer), 32);
+    put_hdr(record, OP_SIGNAL_EVENT, 32);
+    const ev_t *event_state = (const ev_t *)event;
+    volatile uint32_t *event_value = event_state->val;
+    uint32_t signal_mode = mode;
+    memcpy(record + 8, &event_value, 8);
+    memcpy(record + 16, &signal_mode, 4);
+    memcpy(record + 20, &value, 4);
+    uint32_t location = loc;
+    memcpy(record + 24, &location, 4);
+    memcpy(record + 28, &flags, 4);
 }
+NVN(nvnCommandBufferWaitEvent, void, NVNcommandBuffer *command_buffer, const NVNevent *event, NVNeventWaitMode mode, uint32_t value) {
+    uint8_t *record = cmd_alloc(CB(command_buffer), 24);
+    put_hdr(record, OP_WAIT_EVENT, 24);
+    volatile uint32_t *event_value = ((const ev_t *)event)->val;
+    uint32_t wait_mode = mode;
+    memcpy(record + 8, &event_value, 8);
+    memcpy(record + 16, &wait_mode, 4);
+    memcpy(record + 20, &value, 4);
+    atomic_store(&g_event_waits, 1);
+}
+NVN(nvnCommandBufferWaitSync, void, NVNcommandBuffer *command_buffer, const NVNsync *sync) {
+    uint8_t *record = cmd_alloc(CB(command_buffer), 16);
+    put_hdr(record, OP_WAIT_SYNC, 16);
+    memcpy(record + 8, &sync, 8);
+    atomic_store(&g_event_waits, 1);
+}
+
 // A fence recorded in a command buffer: the replay fences the sync with the submission that reaches this point (OP_FENCE_SYNC). Unreal Engine's NVN RHI fences its command buffers this way (Octopath Traveler 0); Pokémon Legends: Z-A fences once a frame this way and waits on it
 NVN(nvnCommandBufferFenceSync, void, NVNcommandBuffer *c, NVNsync *s, NVNsyncCondition cond, int flags) {
     (void)cond; (void)flags;
@@ -1297,34 +1378,53 @@ void dm_gfx_suspend(int on) {
     pthread_mutex_unlock(&g_susp_mu);
     if (on) { dm_vk_drain(); dm_gl_drain(); mtl_drain(); LOG("[nvn] graphics suspended: in-flight GPU work drained"); } else LOG("[nvn] graphics resumed");   // the Vulkan and GL queues first: presents on the NVN queue wait for their frames
 }
+#include "nvn_queue_dispatch.inc"
+
 // One submission at a time: the Metal replay keeps one command buffer and one upload batch for the submission in progress (nvn_mtl.m g_cb). Fire Emblem: Three Houses initializes two queues and
-// submits on both from two threads; the second submission arrived while the first was replaying and the host stopped with "submit re-entered" at the ninth frame. NVN orders work on different queues only
-// through syncs, so replaying the two queues' submissions in lock order is one valid order.
+// submits on both from two threads; the second submission arrived while the first was replaying and the host stopped with "submit re-entered" at the ninth frame. Cross-queue events and syncs
+// additionally constrain replay order; the scheduler suspends blocked prefixes while other guest queues supply their producers.
 // The first submission's prepare step (mtl_prepare: the prewarm and the pipeline prebuild) loads shaders and builds pipelines and submits no GPU work, so it runs under the lock but outside the
 // graphics gate: inside it, going to the background meanwhile (dm_gfx_suspend, on the main thread) waited for it, minutes on a first start. It stays host work for the guest scheduler. The lock
 // comes before the gate: a second submission waiting for it must not count as in flight, or the suspend waits for it while the first waits to enter the closed gate holding the lock
 NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h) {
     dm_host_mutex_lock(&g_sub_mu);
-    dm_host_work++; mtl_prepare(); dm_host_work--;
+    dm_host_work++;
+    mtl_prepare();
+    dm_host_work--;
     gfx_enter();
-    uint64_t t0 = now_ns(), c0 = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID), i0, y0, s0 = thr_sys_ns(); thr_counts(&i0, &y0);
+    uint64_t t0 = now_ns(), c0 = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID), i0, y0, s0 = thr_sys_ns();
+    thr_counts(&i0, &y0);
     ((queue_t *)q)->submits++;
-    mtl_queue_activate(((const queue_t *)q)->serial);
-    mtl_set_queue_origin_lower_left(((const queue_t *)q)->origin_ll);
-    nvn_cap_submit(n, (const uint64_t *)h);   // DM_NVN_CAPTURE (nvn_capture.inc)
-    mtl_sub_begin();
+    nvn_cap_submit(n, (const uint64_t *)h); // DM_NVN_CAPTURE (nvn_capture.inc)
     nvn_ft_poll();
-    mtl_sub_index((const uint64_t *)h, n);
-    for (int i = 0; i < n; i++) { mtl_exec_rest((const uint64_t *)h + i + 1, n - i - 1); mtl_exec((const uint8_t *)h[i]); }
-    mtl_exec_rest(NULL, 0);
-    mtl_sub_commit();
+    if (g_qs || atomic_load(&g_event_waits)) {
+        qe_submit((const queue_t *)q, n, (const uint64_t *)h);
+    } else {
+        mtl_queue_activate(((const queue_t *)q)->serial);
+        mtl_set_queue_origin_lower_left(((const queue_t *)q)->origin_ll);
+        mtl_sub_begin();
+        mtl_sub_index((const uint64_t *)h, n);
+        for (int i = 0; i < n; i++) {
+            mtl_exec_rest((const uint64_t *)h + i + 1, n - i - 1);
+            mtl_exec((const uint8_t *)h[i]);
+        }
+        mtl_exec_rest(NULL, 0);
+        mtl_sub_commit();
+    }
     pthread_mutex_unlock(&g_sub_mu);
     uint64_t dw = now_ns() - t0;
-    atomic_fetch_add(&g_nvn_ns, dw); atomic_fetch_add(&g_sub_wall_ns, dw);
-    uint64_t i1, y1; thr_counts(&i1, &y1); uint64_t dc = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - c0, di = i1 - i0;
-    atomic_fetch_add(&g_cum_sub_cyc, y1 - y0); atomic_fetch_add(&g_cum_sub_sys_ns, thr_sys_ns() - s0); atomic_fetch_add(&g_cum_sub_wall_ns, dw);
-    atomic_fetch_add(&g_sub_cpu_ns, dc); atomic_fetch_add(&g_cum_sub_cpu_ns, dc);
-    atomic_fetch_add(&g_sub_instr, di); atomic_fetch_add(&g_cum_sub_instr, di);
+    atomic_fetch_add(&g_nvn_ns, dw);
+    atomic_fetch_add(&g_sub_wall_ns, dw);
+    uint64_t i1, y1;
+    thr_counts(&i1, &y1);
+    uint64_t dc = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - c0, di = i1 - i0;
+    atomic_fetch_add(&g_cum_sub_cyc, y1 - y0);
+    atomic_fetch_add(&g_cum_sub_sys_ns, thr_sys_ns() - s0);
+    atomic_fetch_add(&g_cum_sub_wall_ns, dw);
+    atomic_fetch_add(&g_sub_cpu_ns, dc);
+    atomic_fetch_add(&g_cum_sub_cpu_ns, dc);
+    atomic_fetch_add(&g_sub_instr, di);
+    atomic_fetch_add(&g_cum_sub_instr, di);
     gfx_leave();
 }
 
@@ -1333,7 +1433,6 @@ static void nvn_nop(void) {}
 static const char *const g_nops[] = {
     "nvnCommandBufferSetPatchSize",
     "nvnCommandBufferSetDepthBounds",
-    "nvnCommandBufferWaitSync",
     "nvnCommandBufferSetShaderScratchMemory",
     "nvnCommandBufferPushDebugGroupDynamic",
     "nvnCommandBufferPopDebugGroup",
@@ -1343,7 +1442,6 @@ static const char *const g_nops[] = {
     "nvnCommandBufferPushDebugGroupStatic",
     "nvnCommandBufferPopDebugGroupId",
     "nvnCommandBufferInsertDebugMarkerStatic",
-    "nvnCommandBufferWaitEvent",
     "nvnWindowFinalize",
 };
 __attribute__((constructor)) static void nvn_nops_register(void) {
@@ -1455,9 +1553,12 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     pace_ns += mtl_snap_acquire_wait();   // ring capacity is waited for at acquire, where the game does not hold its present lock
     g_acq_wait_ns += wait; trow(g_frame, "@late_ms", wait ? (now_ns() - at) / 1e6 : 0);
     // The previous present of this texture has not yet been processed by the present thread (display cannot keep up, a whole swapchain round behind): wait for it to be returned, then hand it to the game to draw
+    if (*idx < 4 && o->submit_queue[*idx]) {
+        qe_wait((nvn_qs_ticket){o->submit_queue[*idx], o->submit_seq[*idx]}, UINT64_MAX, 0);
+    }
     uint64_t tk = *idx < 4 ? o->ticket[*idx] : 0;
     if (tk) { uint64_t w0 = now_ns(); mtl_present_wait(tk); g_pq_wait_ns += now_ns() - w0; }
-    if (s) { ((sync_t *)s)->fenced = 2; ((sync_t *)s)->fence = mtl_last_fence(); }   // The swapchain texture becomes available once the commits before this point have completed (fenced 2: an acquire sync, for the wait ledger)
+    if (s) { ((sync_t *)s)->fenced = NVN_SYNC_FENCE_ACQUIRE; ((sync_t *)s)->fence = mtl_last_fence(); }   // The swapchain texture becomes available once the commits before this point have completed (fenced 2: an acquire sync, for the wait ledger)
     if (!g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; }   // the frame starts when the first acquire after a present returns: on a display-link tick when on time
     return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
 }
@@ -1998,14 +2099,20 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         int lag = 0; for (int i = 0; i < lag_k; i++) if (o->presents % (uint64_t)lag_n[i] < (uint64_t)lag_run[i]) lag += lag_ms[i];
         if (lag) usleep((useconds_t)lag * 1000);
     }
+    dm_host_mutex_lock(&g_sub_mu);
     gfx_enter();
     uint64_t t0 = now_ns();
     if (idx >= 0 && idx < o->ntex && idx < 4) {   // enqueue only, return immediately
         const tex_t *t = CTX(o->tex[idx]); int lc[4]; const int *crop = present_crop(o->crop, (int)t->d.width, (int)t->d.height, lc);
         nvn_cap_present(t, crop);   // DM_NVN_CAPTURE (nvn_capture.inc)
-        o->ticket[idx] = mtl_present(t, present_period(o) / 1e9, crop);
+        if (g_qs) {
+            qe_present((const queue_t *)q, o, idx, t, present_period(o) / 1e9, crop);
+        } else {
+            o->ticket[idx] = mtl_present(t, present_period(o) / 1e9, crop);
+        }
     }
     gfx_leave();
+    pthread_mutex_unlock(&g_sub_mu);
     atomic_fetch_add(&g_nvn_ns, now_ns() - t0);
     uint64_t f = g_frame, ps, dr; mtl_stats(&ps, &dr);
     if (nvn_real[0] || nvn_real[1]) {   // DM_NVN_PROF: record phase = time of all implemented functions except submit; submit phase = QueueSubmitCommands
@@ -2985,6 +3092,6 @@ int nvn_host_write_texture(const void *nvntex, const void *src, int w, int h, si
 int nvn_host_signal_sync(void *nvnsync) {
     sync_t *o = nvnsync;
     if (!o || o->magic != MAGIC('S', 'Y', 'N', 'C')) return -1;
-    o->fence = 0; o->fenced = 1; return 0;
+    o->fence = 0; o->fenced = NVN_SYNC_FENCE_GPU; return 0;
 }
 NVN(nvnTextureFlushTexels, void, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r) { (void)t; (void)v; (void)r; }   // unified memory + dirty page tracking: nothing to flush

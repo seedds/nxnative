@@ -35,6 +35,24 @@ void mtl_res_snapshot(mtl_res_count *out);
 // One submit: begin -> several operations -> commit (returns the fence value at which this submit completes)
 void mtl_prepare(void);                                // the first submission's prepare step (prewarm, pipeline prebuild): no GPU work, called outside the graphics gate
 void mtl_sub_begin(void);
+void mtl_queue_seal(void);                         // own persistent target snapshots before record retirement
+void mtl_sub_resume(void);                         // continuation after a guest event boundary
+// Serialized by the submit lock. Event chunks append to one allocator lease;
+// pressure may revoke its completed prefix so blocked submissions cannot pin
+// the bounded allocator pool forever. Unencoded continuations reacquire it.
+typedef struct mtl_submit_alloc mtl_submit_alloc;
+mtl_submit_alloc *mtl_submit_alloc_new(void);
+void mtl_submit_alloc_close(mtl_submit_alloc *alloc); // last chunk committed, or owner released
+void mtl_submit_alloc_release(mtl_submit_alloc *alloc);
+void mtl_sub_begin_alloc(mtl_submit_alloc *alloc, int resume);
+// Submission-mode timestamps share one clock across host event chunks. The
+// logical submission owns the token; set_clock retains it until completion.
+// Segment-mode GPU timestamps and direct submits without a token are unchanged.
+typedef struct mtl_submit_clock mtl_submit_clock;
+mtl_submit_clock *mtl_submit_clock_new(void);
+void mtl_submit_clock_release(mtl_submit_clock *clock);
+void mtl_sub_set_clock(mtl_submit_clock *clock);    // after begin/resume, before encoding reports
+uint64_t mtl_completed_fence(void);                // post-operations are visible through this fence
 void mtl_queue_activate(uint64_t serial);              // submit lock held: restore this queue's persistent GPU state
 void mtl_queue_forget(uint64_t serial);                // finalize: discard its state, including guest object pointers
 void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n);               // Buffer copy in GPU ordering

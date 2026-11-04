@@ -51,8 +51,9 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** abort in `sm::Initialize` under `sf::hipc::InitializeHipcServiceResolution`, right after the first frames (from `main+0x5b8198`).
 - **Cause:** `main` links its own clients of `olsc:u` (cloud save data backup settings) and `npns` (push notifications), which talk HIPC through `sm` and `svcSendSyncRequest`. For each user the game asks whether backup is on and switches it off where it is (`main+0x2809c8c`); a failed connect aborts as well.
-- **Fix:** `hle_sf.c` takes over the SDK's HIPC client entry points (`InitializeHipcServiceResolution`, `ConnectToHipcService`, `SendSyncRequest`, `CloseClientSessionHandle` and the control requests `QueryPointerBufferSize`, `ConvertSessionToDomain`, `DuplicateSession(Ex)`): a service it serves (`olsc:u`) gets a host session, and every request on it succeeds with zeroed output, which reads as backup off for every user. Any other name is refused with a red line, as `sm` refuses a service nobody registered (`npns` was never connected). `DM_SF_TRACE=1` dumps each request.
-- **Found on:** [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) (SDK 20.5.4).
+- **Fix:** `hle_sf.c` takes over the SDK's HIPC client entry points (`InitializeHipcServiceResolution`, `ConnectToHipcService`, `SendSyncRequest`, `CloseClientSessionHandle` and the control requests `QueryPointerBufferSize`, `ConvertSessionToDomain`, `DuplicateSession(Ex)`): a service it serves (`olsc:u`, the capture services below) gets a host session, and every request on it succeeds with zeroed output, which reads as backup off for every user. Any other name is refused with a red line, as `sm` refuses a service nobody registered (`npns` was never connected). `DM_SF_TRACE=1` dumps each request.
+- **Capture services:** Super Smash Bros. Ultimate links clients of `caps:su` and `caps:u` (screenshots and clips) and aborts with `Result=0xe15` when `sm` refuses them at the start of its single-player mode. The host has no album, so `caps:su`, `caps:u`, `caps:a`, `caps:c`, `caps:sc` and `caps:ss` get host sessions too: a list reads as empty and a save does nothing.
+- **Found on:** [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) (SDK 20.5.4); [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (capture services).
 
 ## SDK names that changed between versions
 
@@ -62,7 +63,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** older SDKs export other names for the same calls.
 - **Fix:** hook both generations. SDK 12 names: `ListAudioDeviceName` / `GetActiveAudioDeviceName`, singular `hid::GetNpadState`, `OpenDefaultAudioOut`. SDK 11 names: `fs::CommitSaveData(mount)` is the older name of `fs::Commit`.
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md) (SDK 11 names).
-- **Note:** overloads change too: SDK 18's `nn::hid::InitializeTouchScreen(int, int)` ([Super Mario Galaxy](../../dm/games/010099C022B96000/README.md), [SDK calls that open a system service through sm](#sdk-calls-that-open-a-system-service-through-sm)), SDK 19's `LoadModule` with one more bool ([`nn::ro` and its port](#nnro-and-its-port)), and `vi::CreateLayer` with the layer's size ([Absolum](../../dm/games/0100A83022A22000/README.md), [`vi::CreateLayer` with the layer's size](#vicreatelayer-with-the-layers-size)).
+- **Note:** overloads change too: SDK 18's `nn::hid::InitializeTouchScreen(int, int)` ([Super Mario Galaxy](../../dm/games/010099C022B96000/README.md), [SDK calls that open a system service through sm](#sdk-calls-that-open-a-system-service-through-sm)), SDK 19's `LoadModule` with one more bool ([`nn::ro` and its port](#nnro-and-its-port)), and `vi::CreateLayer` with the layer's size ([Absolum](../../dm/games/0100A83022A22000/README.md), [`vi::CreateLayer` with the layer's size](#vicreatelayer-with-the-layers-size)). SDK 19's `fs::MountRom(const char *, int, void *, size_t)` and `fs::QueryMountRomCacheSize(size_t *, int)` take a program index (Metroid Prime 4: Beyond's boot, `[RED] sf: the game connects to service fsp-srv itself`): the host has one RomFS, so index 0 mounts it and any other index logs a red line.
 
 ### SDK 4's `friends::GetBlockedUserList` without a `Uid`
 
@@ -524,6 +525,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `SetLayerCrop` only records the crop for the present ([The NVN present crops by the vi layer crop](rendering.md#the-nvn-present-crops-by-the-vi-layer-crop)); `DestroyLayer`, `CloseDisplay` and `vi::Finalize` are host no-ops. Also hooked: `vi::GetIndirectImageMemoryRequirement` (asked by the inline keyboard's `GetImageMemoryRequirement`, [The inline keyboard as a resident library applet](#the-inline-keyboard-as-a-resident-library-applet)); `vi::ListDisplays` (one display, "Default"; the game lists 10 into a stack buffer and does not read them, `main+0x808f08`), found from the import list before it was met. `vi::OpenDisplay("Default")` returns the same static display as `OpenDefaultDisplay`, so applications can open the name returned by `ListDisplays` without entering the SDK's absent service client.
 - **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) (SDK 8.2.0); [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10: `vi::GetIndirectImageMemoryRequirement`); [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: `vi::ListDisplays`); Alien: Isolation (SDK 8.2.0: `vi::OpenDisplay`).
 
+### Layer HDR metadata
+
+- **Symptom:** `CRASH sig=11 addr=0 pc=0` with the link register just after a call to a `vi::SetLayerNextHdr…` or `vi::ClearLayerNextHdr…` function.
+- **Cause:** the SDK forwards a layer's HDR metadata through a table its graphics system fills, which is null on the host.
+- **Fix:** every layer HDR metadata call of SDK 22's free functions succeeds with nothing to apply (`dm/gfx/hle_vi.c`): the content gamut, the HDR to SDR tone mapping, the standard and extended content luminance ranges, the adjustable Bezier tone curve, and the clears of the gamut, the tone mapping and the curve. The host presents SDR.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) (the set calls); the curve and the clears: [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0 sets the curve every frame, from pull request #1116 (that build is not run here).
+
 ### Layer frame numbers
 
 - **Symptom:** SIGSEGV in `android::Surface::getQueuedFrameNumber` under `nn::vi::GetLatestFrameNumber`.
@@ -889,8 +897,8 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** an abort in `nn::hid` at boot, in a Switch 2 game that sets up the Joy-Con's mouse mode.
 - **Cause:** `InitializeNmouse` opens the hid service, and the host has neither the service nor the sensor.
-- **Fix:** `InitializeNmouse`, `GetNmouseHandles` (none), the button configuration calls and the merged pointer's calls (a handle with no states) are hooked (`hle_hid.c`).
-- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md), [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md).
+- **Fix:** `InitializeNmouse`, `GetNmouseHandles` (none), the button configuration calls and the merged pointer's calls (a handle with no states) are hooked (`hle_hid.c`). SDK 21's forms too: `InitializeNmouse` with a pointer type, the pointer range, movement area and restriction (kept or dropped), the USB mouse's button configuration and handle (none), and the calls on a handle, which return the SDK's bool (SDK 22.2.0 `sdk+0x6d5510`: its result is success): the merged handle 0 takes the pointer settings and has no state and no controller; any other handle is unknown.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md), [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md). SDK 21's forms: [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0 at boot, from pull request #1116 (that build is not run here).
 
 ### GameShare guest displays
 
@@ -903,8 +911,15 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** `[RED] sf: the game connects to service chat:u itself, which the host does not serve`, then `game called nn::diag abort: Result 0xe15` under `nn::chat::Initialize`.
 - **Cause:** a Switch 2 game can initialize GameChat at boot. The SDK's `Initialize` opens `chat:u`, and its other calls go through the service object that `Initialize` makes.
-- **Fix:** `nn::chat::Initialize` (ready, no chat), `IsChatting` (no) and `SetScreenSharingMode` (nobody to share with) are hooked (`hle_misc.c`). Another GameChat call a game imports needs a hook of its own.
-- **Found on:** [Hyrule Warriors: Age of Imprisonment](../../dm/games/04003F40232DE000/README.md).
+- **Fix:** `nn::chat::Initialize` (ready, no chat), `IsChatting` (no) and `SetScreenSharingMode` (nobody to share with) are hooked (`hle_misc.c`). Another GameChat call a game imports needs a hook of its own: each of the SDK's calls checks a count only its own `Initialize` raises, and aborts otherwise. Also hooked: `AttachToRoomInfoChangedEvent` (bound, never signaled), and the camera video storage, local and remote. SDK 22.2.0 (`sdk+0x6b43c0`) checks 32 to 1920 by 32 to 1080 pixels, 1 to 4 images and a page-aligned buffer, and zeroes the 0xe0-byte storage type. With no camera each image is a blank native image of that size, zeroed memory with room for 16 bytes a pixel (`hle_codec_video.c` `dm_native_image_blank`), so the game's NVN textures on them (`nvnTextureInitializeFromNativeImage`) are made as on a decoded picture ([AV1 movies through SDK 22's decoder](movies.md#av1-movies-through-sdk-22s-decoder)). The storage type keeps their handles, and the game's buffer is one page that stays unused.
+- **Found on:** [Hyrule Warriors: Age of Imprisonment](../../dm/games/04003F40232DE000/README.md). The room event and the camera storage: [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0 (three local images of 384x216 at boot), from pull request #1116 (that build is not run here).
+
+### The camera through the graphics system
+
+- **Symptom:** `nn::diag abort` in `gs::sdk::CheckGraphicsSystemInitialized`, or a failed `camera::sdk::CreateCameraContext` (0x3af3), at boot.
+- **Cause:** the Switch 2's camera (a USB camera, for GameChat) is a session the SDK asks the graphics system's user session (`gsv`) for. The host never opens that session, and the SDK's check that its graphics system is booted reads a flag only the SDK's own graphics boot sets.
+- **Fix:** `CheckGraphicsSystemInitialized` passes (`hle_nv.c`): the host's graphics layer is up from the start. `CreateCameraContext` gives a host session (`hle_sf.c`), a 32-bit handle (SDK 22.2.0 `sdk+0x2c42c0` writes it), that answers as a console with no camera. Every command fails with 0xdc4, except command 21, the camera's event, which copies the read end of a kernel event that never fires (`hle_thread.c` `hle_new_event`) in the response's special header. The game is said to take 0xdc4 from command 3, opening the camera, as "no camera"; any other error aborts.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0, from pull request #1116, not checked here (that build is not on this Mac): the meaning of 0xdc4 and the commands are inferred there from the game's code. `t_sf` checks the session's answers.
 
 ### Whether the language selection is limited
 

@@ -225,6 +225,9 @@ int main(void) {
     {
         NVNtextureBuilder tb; NVNtexture original = {0}, replacement = {0};
         P(nvnTextureBuilderSetDevice)(&tb, &dev); P(nvnTextureBuilderSetDefaults)(&tb);
+        NVNtextureSwizzle swz[4] = {0};
+        P(nvnTextureBuilderGetSwizzle)(&tb, &swz[0], &swz[1], &swz[2], &swz[3]);
+        EXPECT("TextureBuilderGetSwizzle default identity", 1, swz[0] == 2 && swz[1] == 3 && swz[2] == 4 && swz[3] == 5);
         P(nvnTextureBuilderSetSize2D)(&tb, 4, 4);
         P(nvnTextureBuilderSetFormat)(&tb, NVN_FORMAT_R8);
         P(nvnTextureBuilderSetStorage)(&tb, &pool, 0);
@@ -234,6 +237,8 @@ int main(void) {
         EXPECT("TextureCompare implicit/explicit identity", 1, P(nvnTextureCompare)(&original, &replacement));
         P(nvnTextureFinalize)(&replacement);
         P(nvnTextureBuilderSetSwizzle)(&tb, 1, 1, 1, 2);
+        P(nvnTextureBuilderGetSwizzle)(&tb, &swz[0], &swz[1], &swz[2], &swz[3]);
+        EXPECT("TextureBuilderGetSwizzle reads what was set", 1, swz[0] == 1 && swz[1] == 1 && swz[2] == 1 && swz[3] == 2);
         P(nvnTextureInitialize)(&replacement, &tb);
         EXPECT("TextureCompare A8 channel replacement", 0, P(nvnTextureCompare)(&original, &replacement));
         EXPECT("TextureCompare channel replacement symmetric", 0, P(nvnTextureCompare)(&replacement, &original));

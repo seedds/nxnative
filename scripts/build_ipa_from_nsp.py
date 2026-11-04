@@ -1289,7 +1289,7 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
     nro_dir = out.with_name('nro_' + out.name.removeprefix('patched_'))
     nros = collect_nros(py, repo, rfs.source(exe_dir.parent), nro_dir, env, logs)
     if provisional and nros: g = nro_modules(g, exe_dir, nros)
-    mods = g.words('modules')
+    mods = g.modules_in(exe_dir)   # a version may lack a module of the profile another version has (game.py build_modules)
     manifest = nro_dir / 'nro.tsv'
     src = {m: exe_dir / m for m in mods} | nros
     names = list(src)
@@ -1691,7 +1691,7 @@ def refine_after_rewrite(g, ex_dir, patched, reg=None):
                 if not computed: return g
             reason = line
     if pg.npdm(ex_dir / 'ExeFS/main.npdm')[0]: return g
-    used = pg.mem_used(patched, g.words('modules')) or 0x4000000
+    used = pg.mem_used(patched, g.modules_in(patched)) or 0x4000000
     if int(g.get('mem_used', '0x4000000'), 0) == used: return g
     say(f'mem_used {used:#x}: from the current rewritten modules (64 MB when the default covers them)')
     return set_keys(g, {'mem_used': (f'{used:#x}', 'used memory for the current rewritten modules, at least the default 64 MB')}, 'After the rewrite')
@@ -1898,7 +1898,7 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     kf, outputkf = pkg.with_name(pkg.name + '.key'), pkg.with_name(pkg.name + '.outputs.key')
     inputs = [('files', python_tool_files(repo, 'dm/gfx/tools/shader_split.py', ('dm/gfx/tools', 'dm/tools', 'dm/games'))), bool(provisional), 'split-v2']
     for r, m in zip(roms, mains):
-        inputs += [('files', [m] + [m.parent / n for n in g.words('modules', 'main') if n != 'main']), ('stat' if provisional else 'tree', r)]
+        inputs += [('files', [m] + [m.parent / n for n in g.modules_in(m.parent) if n != 'main']), ('stat' if provisional else 'tree', r)]
         for setting, folder, pattern in (('DM_GLSLC_CAPTURE', 'glslc_capture', '*.glslc'), ('DM_UE_SHADERS', 'ue_shaders', '*.ushaderbytecode')):
             capture = Path(env.get(setting) or r.parent / folder)
             inputs += [('stat', capture) if provisional else ('files', sorted(capture.glob(pattern)))]   # its files, not where it is: the same build reached through a moved folder or a link keeps its split
@@ -2711,7 +2711,7 @@ def main(args=None):
     sv = versions if derived else need   # the versions whose files the shaders come from
     game = dirs[pkg_ver]
     # how the shaders are got follows from the packed version's files (profile_guess.py shader_sources): the graphics API, and the shaders made only at run time
-    src = pg.build_sources(game / 'ExeFS', rfs.source(game), g.words('modules'))
+    src = pg.build_sources(game / 'ExeFS', rfs.source(game), g.modules_in(game / 'ExeFS'))
     gfx = src['graphics'][0]   # nvn, vulkan (Hades: the host's Vulkan layer, SPIR-V shaders) or gl (Digimon Story Cyber Sleuth: the host's GL layer, GLSL sources)
     glslc = gfx == 'nvn' and src['glslc_capture'][0]   # shaders the game compiles at run time, captured in the Mac host (capture_glslc)
     vkcap = gfx == 'vulkan' and src['vk_capture'][0]   # SPIR-V shaders the game generates at run time, captured in the Mac host (capture_shaders)

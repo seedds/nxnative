@@ -75,6 +75,8 @@ int main(void) {
     assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 1000, false) && id == 1);
     assert(h_gs_trywait(&sync));
     assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 0) && w == 16 && h == 16 && cw == 16 && ch == 16 && ts == 1000 && !eos);
+    uint32_t cs = 7; w = h = 0;   // SDK 19's form: the same properties, and colour space 0
+    assert(!h_cv_vp9props19(&w, &h, &cw, &ch, &cs, &ts, &eos, dec, 0) && w == 16 && h == 16 && ts == 1000 && !eos && cs == 0);
     uint8_t nv12[16 * 16 * 3 / 2], rgba[16 * 16 * 4];
     assert(!h_cv_nv12(pool[0], 0, 0, 0, 16, 16, nv12, 16, 256, nv12 + 256, 16, 128));
     for (int i = 0; i < 256; i++) assert(abs(nv12[i] - 81) <= 3);
@@ -200,6 +202,24 @@ int main(void) {
         pool_native_write(pool_of(pt), 1, im); vpx_img_free(im);
         assert(nm[0] == 0 && nm[3] == 255 && nm[ns * 15 + 31 * 4 + 3] == 255);
         h_cv_poolfin(pt); assert(!dm_native_image(ha, &nm, &nz, &nw, &nh, &ns)); free(m);
+    }
+    {   // SDK 19's Initialize by remote memory (two sizes before the picture size) and its preference: a VP9 decoder as the other forms make
+        _Alignas(16) static uint8_t d19[0x400];
+        cv_pref p19 = h_cv_pref19(0xffff0000u | 64, 32, 3, 1);   // the 16-bit sizes come unextended
+        assert(p19.w == 64 && p19.h == 32 && p19.fmt == 3 && p19.magic == CV_MAGIC);
+        assert(!h_cv_vp9rm19(d19, 0x10000, 0x200000, 0xabcd0000u | 16, 16, 1, 1, 3) && cv_of(d19) && cv_of(d19)->w == 16);
+        assert(!h_cv_vp9fin(d19));
+    }
+    {   // Blank native images (GameChat's camera pictures with no camera): zeroed storage with room for 16 bytes a pixel, apart from the decoder pools' handles, gone once freed
+        uint32_t a = dm_native_image_blank(384, 216), b = dm_native_image_blank(384, 216), nw, nh, ns; uint8_t *nm = NULL; uint64_t nz;
+        assert(a && b && a != b && a >> 31 && b >> 31);
+        assert(dm_native_image(a, &nm, &nz, &nw, &nh, &ns) && nw == 384 && nh == 216 && ns >= 384 * 16 && ns % 64 == 0 && nz >= (uint64_t)ns * 216);
+        for (uint64_t k = 0; k < nz; k++) assert(!nm[k]);
+        dm_native_image_blank_free(a); assert(!dm_native_image(a, &nm, &nz, &nw, &nh, &ns)); assert(dm_native_image(b, &nm, &nz, &nw, &nh, &ns));
+        dm_native_image_blank_free(b); dm_native_image_blank_free(b); dm_native_image_blank_free(0x100);   // twice, and a decoder pool's handle: nothing happens
+        uint32_t k[BLANK_MAX + 1]; for (int i = 0; i < BLANK_MAX; i++) assert((k[i] = dm_native_image_blank(32, 32)));
+        assert(!(k[BLANK_MAX] = dm_native_image_blank(32, 32)));   // full
+        for (int i = 0; i < BLANK_MAX; i++) dm_native_image_blank_free(k[i]);
     }
     printf("t_codec_video: all passed\n");
     return 0;

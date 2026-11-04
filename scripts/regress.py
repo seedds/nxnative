@@ -607,7 +607,7 @@ def modules_for(tree, g, rewrite, jobs):
         mods.pop('DM_GAMES_DIR', None)
         mods.pop('DM_GAMES_FIRST', None)
     names = tree.py(f"import sys; sys.path.insert(0, 'dm/games'); import game; print(' '.join(game.load({g.id!r}).words('modules')))", mods).split()
-    src = {m: g.build / 'extract' / g.ver / 'ExeFS' / m for m in names}
+    src = {m: g.build / 'extract' / g.ver / 'ExeFS' / m for m in names if m == 'main' or (g.build / 'extract' / g.ver / 'ExeFS' / m).is_file()}   # a version may lack a module another has
     nro = g.build / f'nro_{g.ver}' / 'nro.tsv'
     if nro.is_file():
         for ln in nro.read_text().splitlines():

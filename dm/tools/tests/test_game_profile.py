@@ -69,3 +69,50 @@ class UpscalerKeys(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class BuildModules(unittest.TestCase):
+    """Versions of a game with different modules (Mario Kart World: the base game has main subsdk0 sdk, 1.8.0 main subsdk0 subsdk1 sdk): each build row's own modules, in the load order
+    of modules, go into the header for the host (main.c profile_modules picks the row of main's build), `game.py modules` gives the same list for a folder of rewritten modules, and a
+    module a row names that modules does not list stays unloaded (Hades' subsdk0 and subsdk1)"""
+    ROWS = ('modules\tmain subsdk0 subsdk1 sdk\n'
+            'build\tv0\t1.0.0\tmain=' + 'a' * 32 + '\tsubsdk0=' + 'b' * 32 + '\tsdk=' + 'c' * 32 + '\n'
+            'build\tv917504\t1.8.0\tmain=' + 'd' * 32 + '\tsubsdk1=' + 'e' * 32 + '\tsubsdk0=' + 'f' * 32 + '\tsdk=' + '1' * 32 + '\n')
+
+    def run_game(self, rows, *args):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, ID).mkdir()
+            (Path(d, ID) / 'game.tsv').write_text(TSV.replace('modules\tmain\n', '') + rows)
+            args = [a.replace('{d}', d) for a in args]
+            mods = Path(d, 'patched'); mods.mkdir()
+            (mods / 'main.fixups.tsv').write_text('# PATCH_OFF\t0x1000\n# BUILD_ID\t' + 'd' * 32 + '\n')
+            r = subprocess.run([sys.executable, str(GAME), *args], env={**os.environ, 'DM_GAMES_DIR': d}, capture_output=True, text=True)
+            text = Path(d, 'game.h').read_text() if Path(d, 'game.h').exists() else ''
+        return r, text
+
+    def test_header_rows(self):
+        r, text = self.run_game(self.ROWS, 'header', ID, '{d}/game.h')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('#define DM_GAME_MODULES {"main", "subsdk0", "subsdk1", "sdk"}', text)
+        self.assertIn('#define DM_GAME_BUILD_MODULES {"' + 'a' * 32 + '", "main subsdk0 sdk"}, {"' + 'd' * 32 + '", "main subsdk0 subsdk1 sdk"}', text)
+
+    def test_modules_of_a_rewritten_folder(self):
+        r, _ = self.run_game(self.ROWS, 'modules', ID, '{d}/patched')
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, 'main subsdk0 subsdk1 sdk'), r.stderr)   # main's build is 1.8.0's
+        r, _ = self.run_game(self.ROWS.replace('d' * 32, '2' * 32), 'modules', ID, '{d}/patched')
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, 'main subsdk0 subsdk1 sdk'), r.stderr)   # no row for its build: the profile's modules
+
+    def test_modules_in_a_folder(self):
+        sys.path.insert(0, str(REPO / 'dm/games'))
+        import game
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, ID).mkdir(); (Path(d, ID) / 'game.tsv').write_text(TSV.replace('modules\tmain\n', '') + self.ROWS)
+            g = game.Game(Path(d, ID))
+            for name in ('main', 'sdk', 'subsdk0'): Path(d, name).write_bytes(b'')
+            self.assertEqual(g.modules_in(d), ['main', 'subsdk0', 'sdk'])
+            self.assertEqual(g.build_modules()['a' * 32], ['main', 'subsdk0', 'sdk'])
+
+    def test_unlisted_module_not_loaded(self):
+        r, text = self.run_game(self.ROWS.replace('subsdk1=', 'subsdk2='), 'header', ID, '{d}/game.h')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('{"' + 'd' * 32 + '", "main subsdk0 sdk"}', text)

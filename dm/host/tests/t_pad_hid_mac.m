@@ -13,6 +13,7 @@
 #include "../dm_input.h"
 
 @interface TestDev : NSObject
+@property BOOL opened, scheduled;
 @property int vid, pid; @property long loc; @property uint64_t entry; @property NSString *transport;
 @property uint8_t *buffer; @property IOHIDReportCallback callback; @property void *context;
 @property NSNumber *virtualDevice; @property BOOL synthetic;
@@ -74,6 +75,22 @@ static IOReturn test_set_report(IOHIDDeviceRef d, IOHIDReportType t, CFIndex id,
     outs[nouts][0] = r[0]; outs[nouts][1] = r[10]; outs[nouts][2] = r[11]; nouts++; return kIOReturnSuccess;
 }
 
+static IOReturn test_open(IOHIDDeviceRef device, IOOptionBits options) {
+    (void)options; TestDev *d = (__bridge id)device; assert(!d.opened); d.opened = YES; return kIOReturnSuccess;
+}
+static IOReturn test_close(IOHIDDeviceRef device, IOOptionBits options) {
+    (void)options; TestDev *d = (__bridge id)device; assert(d.opened && !d.scheduled && !d.callback); d.opened = NO; return kIOReturnSuccess;
+}
+static void test_schedule(IOHIDDeviceRef device, CFRunLoopRef loop, CFStringRef mode) {
+    (void)loop; (void)mode; TestDev *d = (__bridge id)device; assert(d.opened && !d.scheduled); d.scheduled = YES;
+}
+static void test_unschedule(IOHIDDeviceRef device, CFRunLoopRef loop, CFStringRef mode) {
+    (void)loop; (void)mode; TestDev *d = (__bridge id)device; assert(d.scheduled); d.scheduled = NO;
+}
+#define IOHIDDeviceOpen test_open
+#define IOHIDDeviceClose test_close
+#define IOHIDDeviceScheduleWithRunLoop test_schedule
+#define IOHIDDeviceUnscheduleFromRunLoop test_unschedule
 static uint64_t tick = 1000000000;
 uint64_t now_ns(void) { return tick; }
 // The device and clock are synthetic; drive its one-shot timers by deadline too.
@@ -127,6 +144,7 @@ static void advance_timers(uint64_t ns) {
 #undef dispatch_time
 #undef dispatch_after
 
+static int hidpad_available(IOHIDDeviceRef device) { (void)device; return 1; }
 static int attached, changes;
 static void hidpad_attach(hid_pad *d) { (void)d; attached++; }
 static void hidpad_detach(hid_pad *d) { (void)d; attached--; }

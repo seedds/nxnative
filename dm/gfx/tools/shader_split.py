@@ -1043,6 +1043,97 @@ def gfpak_members(d, label):
         if len(data) != usz: red(f'{label}#{i}: {len(data):#x} bytes, the entry says {usz:#x}')
         yield f'#{i}', data
 
+NARC = b'NARC\xfe\xff'
+NARC_FLOOR = 1 << 30   # decoded bytes per archive, or NEST times its stored size when larger
+
+def camelot_lzss(s, label):
+    """Camelot's byte-aligned LZSS (issue #1131, PikaMan80): 0x50 has a big-endian u32 size at +4, 0x60 a u24 at +1.
+    Negate each control byte, then read its bits high first: 0 is a literal, 1 a little-endian reference with a 12-bit distance
+    above the length nibble. Lengths 0 and 1 take one extra byte +0x10 or two little-endian bytes +0x110; distance 0 ends the stream."""
+    tag, = field(s, '<B', 0, f'{label}: Camelot LZSS header')
+    if tag == 0x50: size, = field(s, '>I', 4, f'{label}: Camelot LZSS size'); pos = 8
+    elif tag == 0x60: size, pos = int.from_bytes(span(s, 1, 3, label), 'big'), 4
+    else: red(f'{label}: unknown Camelot LZSS tag {tag:#x}')
+    if size > max(NARC_FLOOR, NEST * len(s)): red(f'{label}: Camelot LZSS exceeds its decoded byte budget')
+    out = bytearray()
+    while len(out) < size:
+        control, = field(s, '<B', pos, f'{label}: Camelot LZSS control'); pos += 1
+        control = -control & 0xff
+        for bit in range(7, -1, -1):
+            if len(out) == size: break
+            if not control & (1 << bit):
+                out += span(s, pos, 1, f'{label}: Camelot LZSS literal'); pos += 1
+                continue
+            ref, = field(s, '<H', pos, f'{label}: Camelot LZSS reference'); pos += 2
+            distance, length = ref >> 4, ref & 15
+            if not distance: red(f'{label}: Camelot LZSS ends after {len(out):#x} of {size:#x} bytes')
+            if length < 2:
+                n = length + 1
+                length = int.from_bytes(span(s, pos, n, f'{label}: Camelot LZSS length'), 'little') + (0x10 if n == 1 else 0x110)
+                pos += n
+            if distance > len(out): red(f'{label}: Camelot LZSS reference precedes the output')
+            if length > size - len(out): red(f'{label}: Camelot LZSS reference exceeds the declared size')
+            start = len(out) - distance
+            out += out[start:start + length] if distance >= length else (out[start:] * (length // distance + 1))[:length]
+    return bytes(out)
+
+def narc_members(d, label, budget=None):
+    """Camelot NARC (Mario Tennis Aces, issue #1131): BTAF start/end pairs, BTNF names, then GMIF member data.
+    Members use zlib (0x10/0x20), raw deflate (0x30), Camelot LZSS (0x50/0x60), stored bytes (0x70/0x80) or LZ4 (0x94).
+    BNTX textures and vlsr vertex/index buffers cannot contain shader banks; peek at four decoded bytes before expanding them."""
+    total, header, sections = field(d, '<IHH', 8, f'{label}: NARC header')
+    if d[:6] != NARC or header != 16 or sections != 3 or not 16 <= total <= len(d): red(f'{label}: invalid NARC header')
+    d = d[:total]
+    if d[16:20] != b'BTAF': red(f'{label}: NARC without BTAF')
+    bsize, count = field(d, '<II', 20, f'{label}: NARC BTAF')
+    if bsize < 12 or bsize > len(d) - 16 or count > (bsize - 12) // 8: red(f'{label}: NARC entry table exceeds BTAF')
+    names = 16 + bsize
+    if d[names:names + 4] != b'BTNF': red(f'{label}: NARC without BTNF')
+    nsize, = field(d, '<I', names + 4, f'{label}: NARC BTNF')
+    if nsize < 8 or nsize > len(d) - names: red(f'{label}: invalid NARC BTNF size')
+    image = names + nsize
+    if d[image:image + 4] != b'GMIF': red(f'{label}: NARC without GMIF')
+    isize, = field(d, '<I', image + 4, f'{label}: NARC GMIF')
+    if isize < 8 or isize > len(d) - image: red(f'{label}: invalid NARC GMIF size')
+    base = image + 8
+    left = max(NARC_FLOOR, NEST * len(d))
+    for i in range(count):
+        start, end = field(d, '<II', 28 + i * 8, f'{label}: NARC entry {i}')
+        where = f'{label}#{i}'
+        if not start <= end <= isize - 8: red(f'{where}: NARC member lies outside GMIF')
+        if start == end: continue
+        m = d[base + start:base + end]; tag = m[0]
+        if tag in (0x10, 0x20, 0x30, 0x70, 0x80):
+            span(m, 0, 16, f'{where}: NARC member header'); size, = field(m, '>I', 1, where); pos = 16
+        elif tag in (0x50, 0x94):
+            size, = field(m, '>I' if tag == 0x50 else '<I', 4, f'{where}: NARC member header'); pos = 8
+        elif tag == 0x60: size, pos = int.from_bytes(span(m, 1, 3, where), 'big'), 4
+        else: size, pos = len(m), 0   # uncompressed member, without a codec header
+        try:
+            wb = -15 if tag == 0x30 else 15
+            if tag in (0x10, 0x20, 0x30): prefix = zlib.decompressobj(wb).decompress(m[pos:], 4)
+            elif tag in (0x50, 0x60):
+                prefix = m[pos + 1:pos + 5] if len(m) >= pos + 5 and (-m[pos] & 0xf0) == 0 else b''
+            else: prefix = m[pos:pos + 4] if tag != 0x94 else b''
+            if size >= 4 and prefix in (b'BNTX', b'vlsr'): continue
+            left -= size
+            if left < 0: red(f'{where}: NARC members exceed their decoded byte budget')
+            if budget is not None:
+                budget[1] -= size
+                if budget[1] < 0: red(f'{where}: NARC members exceed the shared decoded byte budget')
+            if tag in (0x10, 0x20, 0x30):
+                stream = zlib.decompressobj(wb); data = stream.decompress(m[pos:], size + 1)
+                if not stream.eof: red(f'{where}: NARC deflate is truncated or exceeds the declared size')
+            elif tag in (0x50, 0x60): data = camelot_lzss(m, where)
+            elif tag == 0x94:
+                import lz4.block
+                try: data = lz4.block.decompress(m[pos:], uncompressed_size=size)
+                except lz4.block.LZ4BlockError as e: red(f'{where}: invalid NARC LZ4 stream ({e})')
+            else: data = span(m, pos, size, f'{where}: NARC stored member')
+        except zlib.error as e: red(f'{where}: invalid NARC deflate stream ({e})')
+        if len(data) != size: red(f'{where}: NARC decoded {len(data):#x} bytes, expected {size:#x}')
+        yield f'#{i}', data
+
 NLG_DICT = bytes.fromhex('5824f3a9')
 def nlg_dict(d, label):
     """Next Level Games' archive index (Luigi's Mansion 3: '<name>.dict' beside '<name>.data', every RomFS file but the Wwise banks): u32 magic 0xa9f32458, u8 4, u8 1, u8 compressed,
@@ -2371,11 +2462,19 @@ def unity_text_glslc(x, base):
 
 NEST = 16   # archives in archives scan_blob opens (SARC, PlatinumGames' DAT): real files nest a few. A damaged or crafted one could nest one per header's length, or have every
             # member point at the same inner archive, its work doubling with each level. Two budgets of NEST times the file bound the work: left[0], the members a file's archives open,
-            # each counted by what it takes up in its archive, and left[1], what its Yaz0 members expand to. Counting a Yaz0 member by what it expands to in the first budget paid twice
+            # each counted by what it takes up in its archive, and left[1], what its Yaz0 / NARC members expand to. Counting a Yaz0 member by what it expands to in the first budget paid twice
             # for the same bytes, once for the member and once for its members (GitHub issue #640: Mario Kart 8 Deluxe's UI/<lang>/race.sarc, 204 KB, holds one layout archive
             # that expands 9 times, which then added up to 18 times the file)
 def scan_blob(d, label, out, depth=0, left=None):
     if depth > NEST: red(f'{label}: archives nested more than {NEST} deep')
+    if d[:6] == NARC:
+        if left is not None:
+            left[0] -= len(d)
+            if left[0] < 0: red(f'{label}: the archive members add up to more than {NEST} times the file (members that overlap)')
+        members = list(narc_members(d, label, left))
+        if left is None: left = [NEST * sum(len(member) for _, member in members)] * 2
+        for nm, member in members: scan_blob(member, label + nm, out, depth + 1, left)
+        return
     if d[:8] == SUMO_MUX:
         members = list(sumo_members(d, label))
         if left is None: left = [NEST * sum(len(member) for _, member in members)] * 2   # as with Yaz0, count decoded bytes, not compressed bytes
@@ -2654,6 +2753,9 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:8] == GFPAK:   # a Game Freak archive (gfpak_members): each entry scanned as a file of its own (the shaders are BNSH entries)
         for nm, m in gfpak_members(open(path, 'rb').read(), '/' + rel): scan_blob(m, f'/{rel}{nm}', found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:6] == NARC:   # Camelot's compressed shader banks; filenames also include .nptl and .ntex
+        with open(path, 'rb') as f: scan_blob(f.read(), '/' + rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == b'SRYK':
         import vbf

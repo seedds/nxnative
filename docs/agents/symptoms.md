@@ -655,6 +655,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Shaders
 
+- the split misses shaders inside Camelot's `.narc`, `.nptl` and `.ntex` resources, leaving programs unavailable to the offline shader build. → [Compressed shader banks in Camelot NARC archives](../reference/shaders.md#compressed-shader-banks-in-camelot-narc-archives)
 - the split finds no shaders in `main` or RomFS, while reporting control sections in `main` with no code area. The game has `.sp4` resources and loose `.nvnbin` files rather than BNSH archives or whole GLSLC outputs. → [Sumo Ninty_NX shaders and MuxFDMR streams](../reference/shaders.md#sumo-ninty_nx-shaders-and-muxfdmr-streams)
 - the shader split finds no game programs despite loose `.fx.phyre` effects and multi-GB `.vbf` archives. → [Phyre NVN effects in Virtuos VBF archives](../reference/shaders.md#phyre-nvn-effects-in-virtuos-vbf-archives)
 - the shader split stops on one archive with a Python traceback (an `IndexError` or `struct.error` naming no file), or a reader's `[RED]` line about a format it does not know, and nothing is written; the NSP script loses the build at the split. → [A file no reader reads](../reference/shaders.md#a-file-no-reader-reads)

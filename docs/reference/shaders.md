@@ -4,6 +4,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Containers by engine
 
+### Compressed shader banks in Camelot NARC archives
+
+- **Symptom:** the split misses shaders inside Camelot's `.narc`, `.nptl` and `.ntex` resources, leaving programs unavailable to the offline shader build.
+- **Cause:** the `NARC` container's `BTAF` table gives member ranges in `GMIF`, after the `BTNF` section. Members wrap shader banks in zlib (`0x10`/`0x20`), raw deflate (`0x30`), Camelot LZSS (`0x50`/`0x60`), stored data (`0x70`/`0x80`) or LZ4 (`0x94`); scanning the compressed file cannot find the banks.
+- **Fix:** `shader_split.py` recognizes the archive by magic, validates its sections and member ranges, decodes the supported wrappers and passes each member to the existing shader readers, preserving shader keys and vertex/pixel pairs. It rejects truncated streams, invalid references and inconsistent decoded lengths, bounds expansion and nested work, and skips recognized `BNTX` textures and `vlsr` vertex/index buffers after a small prefix decode. A filename extension alone does not exclude an archive.
+- **Found on:** Mario Tennis Aces (no registered profile; [issue #1131](https://github.com/seedds/nxnative/issues/1131), format and decoder contributed by PikaMan80). This addresses archive extraction only; the reported vertex `ViewportMaskNV` lowering and full game validation remain open.
+
 ### Sumo Ninty_NX shaders and MuxFDMR streams
 
 - **Symptom:** the split finds no shaders in `main` or RomFS, while reporting control sections in `main` with no code area. The game has `.sp4` resources and loose `.nvnbin` files rather than BNSH archives or whole GLSLC outputs.

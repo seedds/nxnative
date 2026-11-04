@@ -1,10 +1,47 @@
 // Resolution upscaling (DM_UPSCALE): the pure arithmetic of nvn_mtl.m's upscaling section, kept apart from Metal so a CPU-only unit test (tests/t_ups.c) can check it:
 // regions of the game's pixels mapped into a scaled texture's, occlusion-query sample counts brought back to the game's pixels, the present crop of a scaled window texture, and
-// which reflection bindings count as texture descriptors of the shader translator (whose render_scale entries the host fills per bound texture).
+// which reflection bindings count as texture and image descriptors of the shader translator (whose render_scale entries the host fills per bound texture); also which
+// render targets are scaled by their flags and size (IMAGE included, a 4K ceiling) and which image bindings write their texture, so a scaled one is demoted first.
 #pragma once
 #include <stdint.h>
 #include <math.h>
 #include "nvn_refl.h"
+#include "include/nvn.h"
+
+// The NVN texture flags that keep a texture at the game's size: linear layouts (a CPU or display reads their bytes), sparse and video-decode textures. IMAGE is not among them:
+// KTGL (Hyrule Warriors: Age of Imprisonment) sets it on every render target whether or not a shader writes it, so the flag alone says nothing; a scaled texture that a shader
+// does bind as a written image is demoted when that happens (nvn_ups_img_writes, nvn_mtl.m image_prepare)
+#define NVN_UPS_FLAGS_UNSCALED (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_VIDEO_DECODE)
+// The largest scaled size: a target past 4K gains nothing on a Mac display and costs the factor squared in memory and bandwidth. Switch 1 targets (at most 1920x1080) stay under
+// it at 2x; a Switch 2 swap chain already at 3840x2160 (Hyrule Warriors') stays at its size
+#define NVN_UPS_MAX_W 3840
+#define NVN_UPS_MAX_H 2160
+
+// Whether a single-level 2D texture of the game's size w x h with these NVN flags is a render target to scale by f (the size and flag part of nvn_mtl.m ups_pick; the caller checks
+// target, levels, layers, samples and render-target usage). depth: a depth / stencil format (a render target without COMPRESSIBLE or DISPLAY). Screen-like means at least 320x180
+// and an aspect of 1.4 to 1.9 (lookup tables, atlases, shadow maps and small effect buffers are not), and the scaled size must stay within NVN_UPS_MAX_W x NVN_UPS_MAX_H.
+// A colour texture without COMPRESSIBLE or DISPLAY is data copied in rather than a render target
+static inline int nvn_ups_size_flags_ok(uint32_t w, uint32_t h, uint32_t flags, int depth, double f) {
+    if (f <= 1 || (flags & NVN_UPS_FLAGS_UNSCALED)) return 0;
+    if (!depth && !(flags & (NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_DISPLAY))) return 0;
+    if (w < 320 || h < 180 || (double)w / h < 1.4 || (double)w / h > 1.9) return 0;
+    long sw = lround(w * f), sh = lround(h * f);
+    return sw <= NVN_UPS_MAX_W && sh <= NVN_UPS_MAX_H;
+}
+
+// Whether a reflection binding writes the texture bound to it as an image (an image slot declared write / read_write, or one the shader runs atomics on; the slot's handle either
+// bound as an NVN image, IMG, or kept by the game in a uniform buffer, IMGU, as Unreal Engine 5.4 does). A dispatch or draw keeps the game's thread-group counts and
+// viewport-free image coordinates, so such a texture must be of the game's size: a scaled one is demoted before the binding (image_prepare)
+static inline int nvn_ups_img_writes(int kind, int rw, int atom) {
+    return (kind == NVN_RB_IMG || kind == NVN_RB_IMGU) && (rw || atom);
+}
+
+// Whether a reflection binding is an image descriptor of the translator's _usedImages list, which follows the texture descriptors in render_scale (TexturePass.cs: ImageLoad's
+// scale index is the count of non-array texture descriptors + the image's rank among the non-array images, in binding order). Only image loads are scaled there (stores and
+// atomics are not: IsImageInstructionWithScale), which is why a written image is demoted rather than given an entry
+static inline int nvn_ups_img_desc(int kind, int n) {
+    return kind == NVN_RB_IMG && n <= 1;
+}
 
 // A region of the game's pixels → the scaled texture's. Offset and size are rounded separately (lround), so two regions of the same game size always get the same scaled size
 // whatever their offsets: a copy's source and destination regions then match. Rounding the ends instead (floor of the offset, ceil of the end) gave x=1,w=2 → 4 wide but x=0,w=2 → 3

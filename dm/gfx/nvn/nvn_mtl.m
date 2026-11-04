@@ -2119,14 +2119,18 @@ static int tex_atomic_capable(id<MTLTexture> base) { return pf_r32i(base.pixelFo
 // render_scale[1 + i] of the support buffer, i being the texture's rank among the shader's texture descriptors (nvn_ups_tex_desc), and the host fills those entries per draw and
 // dispatch from the textures actually bound (ups_support, encode_args): a full-screen pass fetching a 2x scene at ivec2(gl_FragCoord.xy) then reads the whole scene, a 1x pass
 // reading a 2x texture steps through it at the factor. A vertex shader's entries come after the fragment shader's (FragmentRenderScaleCount, as the translator indexes them).
-// Compute dispatches keep the game's thread-group counts: a dispatch writes images, which are never scaled, and reads scaled textures through the same per-binding entries.
+// Compute dispatches keep the game's thread-group counts: the images a dispatch (or a draw) writes are of the game's size, and it reads scaled textures through the same per-binding
+// entries, image loads included (render_scale after the texture descriptors: nvn_ups_img_desc). The NVN IMAGE flag does not keep a texture unscaled, since engines set it on
+// render targets no shader writes (KTGL on every one); a scaled texture bound to a written or atomic image slot is demoted first (image_prepare, nvn_ups_img_writes; why not
+// scale the dispatch instead: the comment before ups_pick).
 // Mixed passes demote (ups_demote_pass): when the attachments of a pass disagree, each scaled one is replaced by a texture of the game's size with its content drawn down, and
 // the texture is never scaled again (ups_pick, g_ups_demoted), as Ryujinx blacklists a texture that must match an unscalable one. A copy or resolve between a scaled and an unscaled
 // texture is drawn as a scaling copy where that can be done (copy_t2t_draw, also integer and Depth16 formats), and demotes the scaled side first where it cannot (multisample,
 // compressed, 3D, other flags: ups_demote_copy), so no copy case is left unimplemented by a mismatch alone.
 // Not scaled: textures with mip levels, arrays, 3D, cubes, multisample ones (they cannot be drawn down for a demotion, so they and their resolve destinations stay at the game's
-// size together), compressed / linear / image (shader-written) / sparse ones, square ones (shadow maps), sizes under 320x180 or not of a screen's aspect (1.4 to 1.9: lookup tables,
-// atlases, small effect buffers), and textures that are neither COMPRESSIBLE, DISPLAY nor depth (uploaded data rather than render targets).
+// size together), compressed / linear / sparse / video-decode ones, square ones (shadow maps), sizes under 320x180 or not of a screen's aspect (1.4 to 1.9: lookup tables,
+// atlases, small effect buffers), sizes whose scaled size would pass 3840x2160 (a Switch 2 swap chain already at 4K), and textures that are neither COMPRESSIBLE, DISPLAY nor depth
+// (uploaded data rather than render targets); shader-written images are made scaled when they look like render targets and demoted at their first written binding.
 // The factor is fixed for the run (textures already made keep their size): DM_UPSCALE=1|1.5|2, else 1. A Mac app's launcher sets DM_UPSCALE from the player's saved choice
 // (launcher.DM_UPSCALE, the Render Resolution menu in front_mac.m and the settings window write it; docs/frontends.md, Saved choices). At 1 none of this runs: ups_pick and the conversions are gated on g_ups > 1, so allocations and passes are as without it.
 // The log names the first 24 scaled textures and every 200th after them, the demotions the same way, and once per shader the ranks at which it binds scaled textures (ups_vec_build)
@@ -2164,18 +2168,33 @@ static int ups_demoted(const tex_t *t) {
 // Whether a texture about to be made from descriptor d is allocated scaled (see the section comment for the classes left out and why). Multisample targets are left out: a
 // multisample texture cannot be drawn down when a demotion asks for it (copy_t2t_draw), so its resolve into an unscalable destination would cost a frame of undefined content and
 // end the scaling anyway; left at the game's size, it and its resolve destination always agree
+// Image-flagged textures (NVN_TEXTURE_FLAGS_IMAGE) are scaled like the rest; the one that a shader actually binds as a written image is demoted then (image_prepare). Of the two ways
+// to serve such a texture, this host takes the smaller one, (b): measured on Hyrule Warriors: Age of Imprisonment (its README, Resolution upscaling), KTGL flags every render target
+// IMAGE, yet its whole 3D chain is drawn and only the FSR-style upscale and sharpening passes write 1920x1080 images in compute. The other way, (a), would scale those images
+// and their dispatches: a dispatch's thread-group counts, and every coordinate the kernel derives from its invocation ID and the game's constants (input UVs, the output texel),
+// which the translator cannot tell apart from other integer arithmetic (it scales only image loads and integer fetches, never stores: TexturePass.cs). With (b) a chain of
+// image-flagged targets that draws fill renders scaled, a dispatch that reads it at normalized coordinates sees the finer texels, and the images it writes stay at the game's
+// size, as Ryujinx blacklists a texture used as a stored image. (Whether a game's chain stays scaled then depends on the mixed-pass rule: ups_demote_pass.)
+// Whether an image-shaped texture's storage has another live description of another size and the same format: an alias family (image_texture), whose members share one placement
+// heap so a write through one size is seen through the others (Luigi's Mansion 3's resolution families). A scaled member could not join it, so a family stays at the game's size
+static int ups_family(const tex_t *t) {
+    if (!image_shape(t)) return 0;
+    int fam = 0;
+    pthread_mutex_lock(&g_smu);
+    for (uint32_t i = 0; i < g_image_desc.cap && !fam; i++) { const tex_t *o = g_image_desc.vals[i];
+        fam = o && o->pool == t->pool && o->off == t->off && o->d.format == t->d.format && (o->d.width != t->d.width || o->d.height != t->d.height); }
+    pthread_mutex_unlock(&g_smu);
+    return fam;
+}
 static int ups_pick(const tex_t *t, MTLTextureDescriptor *d) {
     if (ups_factor() <= 1) return 0;
     if (t->d.target != NVN_TEXTURE_TARGET_2D) return 0;
     if ((g_ups_demoted.n || g_ups_demoted_mem.n) && ups_demoted(t)) return 0;   // demoted once: stays at the game's size
     if (d.mipmapLevelCount > 1 || d.arrayLength > 1 || d.depth > 1 || !(d.usage & MTLTextureUsageRenderTarget)) return 0;
-    if (t->d.flags & (NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_VIDEO_DECODE)) return 0;
     int depth = (int)d.pixelFormat >= 250 && (int)d.pixelFormat <= 262;   // Depth16Unorm … X24_Stencil8, as tex_init_fill
-    if (!depth && !(t->d.flags & (NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_DISPLAY))) return 0;   // a render target is made COMPRESSIBLE (or DISPLAY: the window's); a plain one is data copied in
-    NSUInteger w = d.width, h = d.height;
-    if (w < 320 || h < 180 || (double)w / h < 1.4 || (double)w / h > 1.9) return 0;
-    if (ups_dim(w) > 16384 || ups_dim(h) > 16384) return 0;
-    return 1;
+    // Flags, screen-like size and the 4K ceiling (nvn_ups.h, unit-tested in tests/t_ups.c): a render target is COMPRESSIBLE (or DISPLAY: the window's), a plain one is data copied in
+    if (!nvn_ups_size_flags_ok((uint32_t)d.width, (uint32_t)d.height, t->d.flags, depth, g_ups)) return 0;
+    return !ups_family(t);   // last: it scans the live image descriptions
 }
 // The factor a texture was made at: g_ups for one ups_pick took (its Metal texture is wider than the game's), else 1. mt may be a view of it (views keep the size)
 // (a texture description with no size, as the Vulkan / GL presents pass, counts as unscaled: those layers never scale)
@@ -3343,7 +3362,7 @@ static id<MTLTexture> image_texture(const tex_t *t, MTLTextureDescriptor *d) {
         // Initialize the whole family, including storage outside a first-used small resolution. Only a new heap is zeroed; later descriptors alias its existing bytes.
         id<MTLTexture> zero = largest == d ? mt : [owner->heap newTextureWithDescriptor:largest offset:0];
         if (!zero) return nil;
-        objc_setAssociatedObject(zero, &g_image_heap_owner_key, owner, OBJC_ASSOCIATION_RETAIN_NONATOMIC); tex_zero_fill(zero, 1);   // an image family is never scaled (ups_pick skips images): the plain fill cap
+        objc_setAssociatedObject(zero, &g_image_heap_owner_key, owner, OBJC_ASSOCIATION_RETAIN_NONATOMIC); tex_zero_fill(zero, 1);   // an image family is never scaled (ups_family): the plain fill cap
     }
     return mt;
 }
@@ -8030,6 +8049,9 @@ static id<MTLTexture> img_binding(int tid, const nvn_rbind *b, uint64_t *rid, in
 // An image bind may follow rendering into a texture created without IMAGE; upgrading it inside encode_args would
 // copy out of an attachment while its render pass was still open. Close that pass first, then replace the shared backing (all registered sampled views follow g_ser_gen).
 static uint32_t ubo_handle(int stage, int reg, int off); static int ubo_tex_id(uint32_t h);
+// Resolution upscaling: a texture bound here that was made scaled (ups_pick takes image-flagged render targets) is demoted to the game's size first, as the shader writes it at
+// the game's coordinates (the comment before ups_pick); the usage upgrade then runs on the replacement when it still lacks the shader-write usage
+static void ups_demote(const tex_t *t, id<MTLTexture> scaled, const char *why);
 static void image_prepare(NvProg *pr, unsigned stages) {
     if (!pr) return;
     if (!pr->c_img) { int any = 0;   // no written or atomic image slot in any stage: nothing to resolve, every draw
@@ -8041,7 +8063,7 @@ static void image_prepare(NvProg *pr, unsigned stages) {
         if (!(stages & (1u << st))) continue;
         NvShader *sh = pr->sh[st]; if (!sh) continue;
         for (int i = 0; i < sh->rf.nb; i++) {
-            const nvn_rbind *b = &sh->rf.b[i]; if ((b->kind != NVN_RB_IMGU && (b->kind != NVN_RB_IMG || b->reg >= 32)) || (!b->rw && !b->atom)) continue;
+            const nvn_rbind *b = &sh->rf.b[i]; if ((b->kind == NVN_RB_IMG && b->reg >= 32) || !nvn_ups_img_writes(b->kind, b->rw, b->atom)) continue;   // an IMGU slot has no register limit: its handle is read from the uniform buffer
             int tid = b->kind == NVN_RB_IMGU ? ubo_tex_id(ubo_handle(st, b->reg, b->off)) : (int)(S.img[st][b->reg] & 0xfffff); if (tid <= 0) continue;
             os_unfair_lock_lock(&g_rmu);
             if (tid >= g_ntreg || !g_treg[tid].ok || g_treg[tid].gone) { os_unfair_lock_unlock(&g_rmu); continue; }
@@ -8049,7 +8071,13 @@ static void image_prepare(NvProg *pr, unsigned stages) {
             tex_t image = g_treg[tid].t; image.d.flags |= NVN_TEXTURE_FLAGS_IMAGE; mtl_pool_gpu_written(image.pool);
             id<MTLTexture> base = tex_mtl(&image); sparse_gpu_wrote(&image); while (base.parentTexture) base = base.parentTexture;
             int upgrade = base && !(base.usage & MTLTextureUsageShaderWrite);
+            int scaled = g_ups > 1 && base && ups_of(&image, base) > 1;
             os_unfair_lock_unlock(&g_rmu);
+            if (scaled) {   // resolution upscaling (see above): `image` is a copy of the registration, so the drawn-down copy runs without the descriptor lock, as ups_demote_pass's do
+                rp_end();
+                ups_demote(&image, base, "a shader writes it as an image");
+                upgrade = 1;   // the replacement is checked below under the lock like any texture (it keeps the scaled one's usage)
+            }
             if (!upgrade) continue;
             rp_end();
             os_unfair_lock_lock(&g_rmu);
@@ -8310,7 +8338,8 @@ static uint64_t g_geo_bind[5];
 // the submission are the same (a recycled arena belongs to a later fence, so a stale entry never matches).
 // A fragment-stage entry is negative when the texture is scaled like the pass: the helper then adds gl_FragCoord's fraction of the factor, so a fetch at
 // ivec2(gl_FragCoord.xy / render_scale[0]) lands on the fragment's own scaled texel instead of its block's first (the translator's convention; positive elsewhere, where the
-// coordinates are multiplied: a game-size pass reading a scaled texture steps through it at the factor). Images are never scaled (ups_pick), so their entries stay 1
+// coordinates are multiplied: a game-size pass reading a scaled texture steps through it at the factor). Read-only images of a scaled texture get entries after the textures'
+// (image loads are scaled by the translator); written ones are demoted before the encode (image_prepare), so theirs stay 1
 #define UPS_SB_ENTRIES 72   // render_scale[1 .. 72] (SupportBuffer.RenderScaleMaxCount = 1 + 64 + 8)
 #define UPS_SB_LEN 2048     // covers the support_buffer struct (1392 bytes: ... frag_scale_count 176, render_scale[73] 192, tfe_offset, tfe_vertex_count); arena_alloc rounds to 256
 typedef struct { float f0; int32_t nf; int n; float e[UPS_SB_ENTRIES]; } ups_vec;   // f0: render_scale[0]; nf: FragmentRenderScaleCount; e[0 .. n): render_scale[1 ..]
@@ -8345,6 +8374,21 @@ static void ups_vec_build(NvShader *sh, int nvn_stage, ups_vec *v) {
         if (f <= 1) continue;
         v->e[k] = nvn_stage == 1 && f == v->f0 ? -f : f; if (k + 1 > v->n) v->n = k + 1;
         if (log && rn < (int)sizeof ranks - 40) rn += snprintf(ranks + rn, sizeof ranks - (size_t)rn, "%s%d(slot %d)→ser=%llu", rn ? ", " : "", k - base, b->reg, (unsigned long long)g_treg[tid].t.serial);
+    }
+    // Image loads: the image descriptors follow every texture descriptor (nvn_ups_img_desc), so their ranks start after the textures counted in full. A written image is of the
+    // game's size by now (image_prepare demoted it before this encode), so only read-only images of a scaled texture get an entry; the sign convention is the textures' own
+    int nt = 0, ii = 0;
+    for (int i = 0; i < sh->rf.nb; i++) nt += nvn_ups_tex_desc(sh->rf.b[i].kind, sh->rf.b[i].n);
+    for (int i = 0; i < sh->rf.nb; i++) {
+        const nvn_rbind *b = &sh->rf.b[i];
+        if (!nvn_ups_img_desc(b->kind, b->n)) continue;
+        int k = base + nt + ii++; if (k >= UPS_SB_ENTRIES) break;
+        int tid = b->reg < 32 ? (int)(S.img[nvn_stage][b->reg] & 0xfffff) : 0;
+        if (tid <= 0 || tid >= g_ntreg || !g_treg[tid].ok) continue;
+        void *tv = NULL; tex_fast_rid(tid, &tv); float f = ups_of(&g_treg[tid].t, (__bridge id<MTLTexture>)tv);
+        if (f <= 1) continue;
+        v->e[k] = nvn_stage == 1 && f == v->f0 ? -f : f; if (k + 1 > v->n) v->n = k + 1;
+        if (log && rn < (int)sizeof ranks - 40) rn += snprintf(ranks + rn, sizeof ranks - (size_t)rn, "%simage %d(slot %d)→ser=%llu", rn ? ", " : "", k - base, b->reg, (unsigned long long)g_treg[tid].t.serial);
     }
     if (log && rn) { sh->logged |= 16; static int nlog; if (nlog++ < 200) MLOG("resolution upscaling: shader %s (stage %d) binds scaled textures at descriptor ranks %s%s (render_scale[1 + %d + rank])", sh->key, nvn_stage, ranks, di > 0 && base + di > UPS_SB_ENTRIES ? " (some past the 72 entries)" : "", base); }
 }
@@ -11676,7 +11720,12 @@ static void ups_demote_pass(void) {
         ts[n] = t; ms[n] = m; if (ups_of(t, m) > 1) scaled++; else unscaled++; n++;
     }
     if (!scaled || !unscaled) return;
-    for (int i = 0; i < n; i++) if (ups_of(ts[i], ms[i]) > 1) ups_demote(ts[i], ms[i], "a pass mixes scaled and unscaled attachments");
+    // The log names the first unscaled attachment, so a chain of demotions through shared attachments can be traced back to the texture that started it
+    char why[160]; const tex_t *u = NULL; NSUInteger uw = 0, uh = 0;
+    for (int i = 0; i < n && !u; i++) if (ups_of(ts[i], ms[i]) <= 1) { u = ts[i]; uw = ms[i].width; uh = ms[i].height; }
+    snprintf(why, sizeof why, "a pass mixes scaled and unscaled attachments (unscaled: ser=%llu %lux%lu format %#x flags %#x)", u ? (unsigned long long)u->serial : 0ull,
+             (unsigned long)uw, (unsigned long)uh, u ? u->d.format : 0u, u ? u->d.flags : 0u);
+    for (int i = 0; i < n; i++) if (ups_of(ts[i], ms[i]) > 1) ups_demote(ts[i], ms[i], why);
 }
 // Resolution upscaling: a copy or resolve between a scaled and an unscaled texture is drawn as a scaling copy by copy_t2t where copy_t2t_draw can draw it; where it cannot
 // (multisample textures, 3D textures, compressed or stencil-only or mismatched integer formats, a depth count that differs, flags the draw does not take), the scaled side is

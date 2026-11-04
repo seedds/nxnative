@@ -1,7 +1,8 @@
 // Resolution upscaling unit test (CPU only): the pure arithmetic of nvn_mtl.m's upscaling section in ../nvn/nvn_ups.h, with the expectations hand-calculated.
 // Regions: equal game regions map to equal scaled regions whatever their offsets (the audit's 1.5x case: x=1,w=2 and x=0,w=2 used to come out 4 and 3 wide), clamped to the texture.
 // Occlusion queries: samples counted in a scaled pass come back divided by the factor squared, rounded. Present crop: a scaled window texture's crop in its own pixels.
-// Descriptor ranks: which reflection bindings the translator counts as texture descriptors (render_scale[1 + i]).
+// Descriptor ranks: which reflection bindings the translator counts as texture and image descriptors (render_scale[1 + i]).
+// Which render targets scale (flags, screen-like size, the 4K ceiling: IMAGE no longer keeps one unscaled), and which image bindings demote their texture.
 #include "../nvn/nvn_ups.h"
 #include <stdio.h>
 
@@ -68,6 +69,23 @@ int main(void) {
     CHECK(nvn_ups_tex_desc(NVN_RB_TEX, 0) && nvn_ups_tex_desc(NVN_RB_TEX, 1) && nvn_ups_tex_desc(NVN_RB_TEXU, 0) && nvn_ups_tex_desc(NVN_RB_TBUF, 0), "single textures count");
     CHECK(!nvn_ups_tex_desc(NVN_RB_TEXU, 32) && !nvn_ups_tex_desc(NVN_RB_TEXD, 8) && !nvn_ups_tex_desc(NVN_RB_TEXA, 32), "arrays do not count");
     CHECK(!nvn_ups_tex_desc(NVN_RB_IMG, 0) && !nvn_ups_tex_desc(NVN_RB_SAMP, 0) && !nvn_ups_tex_desc(NVN_RB_CBUF, 0) && !nvn_ups_tex_desc(NVN_RB_SUPPORT, 0), "images, samplers, buffers do not count");
+
+    // Which render targets scale (nvn_ups_size_flags_ok). Flags: 0x1 DISPLAY, 0x4 IMAGE, 0x8 COMPRESSIBLE, 0x10 LINEAR, 0x20 SPARSE, 0x40 LINEAR_RENDER_TARGET, 0x2 VIDEO_DECODE
+    CHECK(nvn_ups_size_flags_ok(1920, 1080, 0x8, 0, 2), "a COMPRESSIBLE 1920x1080 target scales at 2x (FINAL FANTASY CRYSTAL CHRONICLES)");
+    CHECK(nvn_ups_size_flags_ok(1600, 900, 0xc, 0, 2) && nvn_ups_size_flags_ok(1920, 1080, 0xc, 0, 1.5), "IMAGE | COMPRESSIBLE targets scale (KTGL flags every one: Hyrule Warriors' 1600x900 scene)");
+    CHECK(nvn_ups_size_flags_ok(1600, 900, 0x4, 1, 2), "an IMAGE depth target scales (depth needs no COMPRESSIBLE)");
+    CHECK(!nvn_ups_size_flags_ok(1920, 1080, 0x4, 0, 2), "an IMAGE colour texture without COMPRESSIBLE or DISPLAY is data (the movie planes), not a render target");
+    CHECK(!nvn_ups_size_flags_ok(1920, 1080, 0x8 | 0x10, 0, 2) && !nvn_ups_size_flags_ok(1920, 1080, 0x8 | 0x40, 0, 2) && !nvn_ups_size_flags_ok(1920, 1080, 0x8 | 0x20, 0, 2)
+          && !nvn_ups_size_flags_ok(1920, 1080, 0x8 | 0x2, 0, 2), "linear, linear render target, sparse and video-decode textures stay");
+    CHECK(!nvn_ups_size_flags_ok(3840, 2160, 0xd, 0, 2) && !nvn_ups_size_flags_ok(3840, 2160, 0xd, 0, 1.5), "a 4K swap chain (DISPLAY | IMAGE | COMPRESSIBLE) stays: past the 4K ceiling");
+    CHECK(nvn_ups_size_flags_ok(2560, 1440, 0x8, 0, 1.5) && !nvn_ups_size_flags_ok(2560, 1440, 0x8, 0, 2), "2560x1440: 1.5x reaches exactly 3840x2160, 2x would pass it");
+    CHECK(nvn_ups_size_flags_ok(1920, 1080, 0x9, 0, 2), "a 1920x1080 window texture (DISPLAY) reaches exactly 3840x2160 at 2x");
+    CHECK(!nvn_ups_size_flags_ok(1024, 1024, 0x8, 0, 2) && !nvn_ups_size_flags_ok(256, 144, 0x8, 0, 2) && !nvn_ups_size_flags_ok(1740, 200, 0xc, 0, 2), "square, small and banner-shaped targets stay");
+    CHECK(!nvn_ups_size_flags_ok(1920, 1080, 0x8, 0, 1) && !nvn_ups_size_flags_ok(1920, 1080, 0x8, 0, 0), "nothing scales at 1x or unset");
+    // Written images demote; image loads take render_scale entries after the textures
+    CHECK(nvn_ups_img_writes(NVN_RB_IMG, 1, 0) && nvn_ups_img_writes(NVN_RB_IMG, 0, 1) && nvn_ups_img_writes(NVN_RB_IMGU, 1, 0), "a written or atomic image slot demotes its texture, its handle in an image slot or in a uniform buffer");
+    CHECK(!nvn_ups_img_writes(NVN_RB_IMG, 0, 0) && !nvn_ups_img_writes(NVN_RB_TEX, 1, 0) && !nvn_ups_img_writes(NVN_RB_SBUFP, 1, 0), "read-only images, textures and buffers do not");
+    CHECK(nvn_ups_img_desc(NVN_RB_IMG, 0) && nvn_ups_img_desc(NVN_RB_IMG, 1) && !nvn_ups_img_desc(NVN_RB_IMG, 4) && !nvn_ups_img_desc(NVN_RB_TEX, 0), "single images are image descriptors; arrays and textures are not");
 
     printf("t_ups: %s (%d failures)\n", fails ? "FAIL" : "OK", fails);
     return fails ? 1 : 0;

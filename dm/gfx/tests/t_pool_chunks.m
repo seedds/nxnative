@@ -40,7 +40,7 @@ int main(void) { @autoreleasepool {
     id<MTLBuffer> cross = look(base + 48 * MB - 8, 64);   // across a stride's end: one buffer holds it
     CHECK("across strides: its stride's chunk", cross && cross != a);
     // Length 1: the read's extent is not known
-    void *mb; uint64_t mo, gpu;
+    void *mb = NULL; uint64_t mo = 0, gpu = 0;   // CHECK goes on after a failed lookup, which writes none of them
     uint64_t un = base + 100 * MB + 3;
     CHECK("unknown extent: found", mtl_gpu_addr(un, 1, &mb, &mo, &gpu));
     CHECK("unknown extent: BIG_UNKNOWN past the address", ((__bridge id<MTLBuffer>)mb).length - mo >= BIG_UNKNOWN);

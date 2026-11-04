@@ -212,6 +212,7 @@ int front_web_touch(void) { return g_touch; }
 
 static NSString *json(NSString *s) {   // a JavaScript string literal
     NSData *d = [NSJSONSerialization dataWithJSONObject:@[s ?: @""] options:0 error:nil];
+    if (!d) return @"";
     NSString *a = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
     return [a substringWithRange:NSMakeRange(1, a.length - 2)];
 }
@@ -287,7 +288,7 @@ static NSString *mime(NSString *ext) {
     NSString *f = [_dir stringByAppendingPathComponent:rel]; NSData *d = nil;
     if ([rel isEqualToString:@"__dm_font/nintendo_ext.ttf"]) {   // the Nintendo extension font (button icons): the host's stand-in, as the shared font service gives it (hle_sdk16.c)
         const char *e = getenv("DM_SHARED_FONT_EXT"), *fd = getenv("DM_FONT_DIR");
-        f = e ? @(e) : fd ? [@(fd) stringByAppendingPathComponent:@"nintendo_ext.ttf"] : @"";
+        f = (e ? @(e) : fd ? [@(fd) stringByAppendingPathComponent:@"nintendo_ext.ttf"] : nil) ?: @"";   // @() is nil for a path that is not UTF-8
         d = [NSData dataWithContentsOfFile:f];
     } else if (rel.length && ![rel containsString:@".."] && [f hasPrefix:_dir]) {
         d = [NSData dataWithContentsOfFile:f];
@@ -301,6 +302,7 @@ static NSString *mime(NSString *ext) {
     NSHTTPURLResponse *r = [[NSHTTPURLResponse alloc] initWithURL:u statusCode:d ? 200 : 404 HTTPVersion:@"HTTP/1.1"
                                                      headerFields:@{@"Content-Type": mime(f.pathExtension), @"Content-Length": [NSString stringWithFormat:@"%lu", (unsigned long)d.length]}];
     if (!d) LOG("[RED] web: the page asked for %s, which its document does not have", u.absoluteString.UTF8String);
+    if (!r) { [t didFailWithError:[NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorBadURL userInfo:nil]]; return; }
     [t didReceiveResponse:r]; [t didReceiveData:d ?: [NSData data]]; [t didFinish];
 }
 
@@ -372,7 +374,9 @@ int front_web_open(const char *dir, const char *path, const char *callback, int 
         front_web_attach(box);
         [box place];
         NSString *q = [p stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLFragmentAllowedCharacterSet];
-        [box.web loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:[@"dmweb://doc/" stringByAppendingString:q]]]];
+        NSURL *url = q ? [NSURL URLWithString:[@"dmweb://doc/" stringByAppendingString:q]] : nil;
+        if (url) [box.web loadRequest:[NSURLRequest requestWithURL:url]];
+        else LOG("[RED] web: no URL names the document %s", p.UTF8String);
         if (!hidden) { box.shown = YES; g_touch = 1; [box setHiddenState:NO]; [box startInput]; }
     });
     return 0;
@@ -398,7 +402,8 @@ void front_web_shot(const char *path) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!g_box) { LOG("webshot: no page"); return; }
         [g_box.web takeSnapshotWithConfiguration:nil completionHandler:^(NSImage *im, NSError *e) {
-            NSBitmapImageRep *r = im ? [[NSBitmapImageRep alloc] initWithData:im.TIFFRepresentation] : nil;
+            NSData *tiff = im.TIFFRepresentation;
+            NSBitmapImageRep *r = tiff ? [[NSBitmapImageRep alloc] initWithData:tiff] : nil;
             NSData *d = [r representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
             if (![d writeToFile:p atomically:YES]) LOG("[RED] webshot: nothing written to %s (%s)", p.UTF8String, e.localizedDescription.UTF8String ?: "-");
         }];

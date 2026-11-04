@@ -472,6 +472,16 @@ check_t_parallel_thread_tsan: t_parallel_thread_tsan
 	DM_NVN_ENC_THREAD=1 TSAN_OPTIONS=halt_on_error=1 ./t_parallel_thread_tsan
 
 # Independent record streams, ordered publication and cancellation.
+t_parallel_plan: t_parallel_plan.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_parallel_plan.m $(MTL_T_SRC) $(FW)
+check_t_parallel_plan: t_parallel_plan
+	MTL_DEBUG_LAYER=1 ./t_parallel_plan
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_parallel_plan
+t_parallel_plan_tsan: t_parallel_plan.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -fsanitize=thread -o $@ t_parallel_plan.m $(MTL_T_SRC) $(FW)
+check_t_parallel_plan_tsan: t_parallel_plan_tsan
+	TSAN_OPTIONS=halt_on_error=1 ./t_parallel_plan_tsan
+	DM_NVN_ENC_THREAD=1 TSAN_OPTIONS=halt_on_error=1 ./t_parallel_plan_tsan
 t_parallel_record: t_parallel_record.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_parallel_record.m $(MTL_T_SRC) $(FW)
 check_t_parallel_record: t_parallel_record

@@ -1002,7 +1002,8 @@ void mtl_prepare(void) {
     if (!g_warm_started && prepare_on()) { mtl_init(); shmap_load(); }
 }
 static void sub_cut_begin(void);
-static int par_measure(void); static void par_sub_begin(void), par_sub_end(void), par_wait(void), par_scan(const uint64_t *h, int n); static int g_par_handoff;   // DM_NVN_PAR=measure (docs/parallel-translation.md, milestone 1)
+static int par_measure(void); static void par_sub_begin(void), par_sub_end(void), par_wait(void), par_scan(const uint64_t *h, int n); static int g_par_handoff; static int par_plan(void); static void par_plan_make(void);
+static struct { uint64_t subs, planned, chunks, fb_dirty, fb_state, fb_range; } g_planst;   // the coordinator's counters (par_plan_run)   // DM_NVN_PAR=measure (docs/parallel-translation.md, milestone 1)
 static int par_thread1(void);
 // The submission lock (or its serialized worker handoff) owns reservation. A context may return to
 // its reserved allocator within this submission, but must never reset it while earlier segments use it.
@@ -1833,9 +1834,10 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
     }
     pthread_mutex_lock(&g_mu); if (fence > g_done) g_done = fence; pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu);
 }
-static void par_chunks_run(void);
+static void par_chunks_run(void); static void par_plan_run(void); static int g_plan_active;
 uint64_t mtl_sub_commit(void) {
     if (g_par_handoff) par_chunks_run();   // thread1: the chunks handed off first
+    if (g_plan_active) par_plan_run();   // plan: the planned chunks after the first
     if (par_measure()) par_sub_end();
     lc_land();   // clears still waiting (the command list ends with them)
     defer_fallback();   // Deferred merged pass: at the end of the submission there are still P draws not replayed (the normal path never gets here)
@@ -9123,7 +9125,8 @@ static void sdx_walk(const uint8_t *p, int depth) {
     }
 }
 static void mtl_sub_index_(const uint64_t *h, int n);
-void mtl_sub_index(const uint64_t *h, int n) { cp_stamp start = cp_begin(); mtl_sub_index_(h, n); cp_end(7, start); if (par_measure()) par_scan(h, n); }
+static void par_plan_begin(void);
+void mtl_sub_index(const uint64_t *h, int n) { cp_stamp start = cp_begin(); mtl_sub_index_(h, n); cp_end(7, start); if (par_measure()) par_scan(h, n); if (par_plan()) par_plan_begin(); }
 static void mtl_sub_index_(const uint64_t *h, int n) {   // Start of submit (hle_nvn.c QueueSubmitCommands): build this submit's store lookahead index
     g_xv_ntouch = 0; g_sdx_n = g_sdx_nop = 0; g_rtx_n = g_drx_n = 0; g_exec_seq = 0; g_sdx_ok = tbdr_on();
     if (!g_sdx_ok) { g_xv_n = 0; g_xv_block = 1; return; }   // Index unavailable: clear the ledger and add nothing in this submit (the next touch cannot be verified)
@@ -12024,12 +12027,22 @@ static void sub_cut_begin(void) { RX.cut_draw0 = g_stat_draw; }
 // DM_FSTEP_PROBE_RAMP=1 (default) / 0 / ab: a frame-step probe's grace is renewed while its frames keep getting cheaper (nvn_fstep.h FSTEP_RAMP), the time macOS's GPU clock takes to rise for the shorter deadline
 static int probe_ramp_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_FSTEP_PROBE_RAMP", 1); return m; }
 int mtl_probe_ramp_on(void) { return sw_on(probe_ramp_mode()); }
+static void seg_commit(void);
 static void sub_cut_to(int next_context) {
     int n = cut_draws();
     if (!RX.cb || RX.enc) return;
     if ((!RX.cut_copy && (n <= 0 || g_stat_draw - RX.cut_draw0 < (uint64_t)n)) || g_hoist_n || g_defer_nact || g_defer_pend || g_fz.active || g_rt_merged) return;
     if (RX.cut_copy) g_copy_cuts++;
     RX.cut_copy = 0;
+    seg_commit();
+    RX.cb = rec_cb_new();
+    if (next_context >= 0) RX.alloc_cur = sub_allocator(next_context);
+    [RX.cb beginCommandBufferWithAllocator:g_alloc4[RX.alloc_cur]];   // the reserved allocator is reset only on its first use this submission
+    RX.cut_draw0 = g_stat_draw;
+    if (!g_cuts++) MLOG("segmented submission: first segment submitted at frame %llu pass %llu", (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)g_stat_pass);
+}
+// The open segment committed in order (sub_cut_to, and a planned chunk's end: par_plan_run); RX.cb is left for the caller to replace
+static void seg_commit(void) {
     if (RX.blit) { enc_b_end(RX.blit); RX.blit = nil; }
     up_flush();
     uint64_t f = atomic_load(&g_cur_frame); gpu_tag_begin(f);
@@ -12045,11 +12058,7 @@ static void sub_cut_to(int next_context) {
     [RX.cb endCommandBuffer];
     rec_commit(RX.cb, o);
     if (rec_on()) rec_publish();   // the segment reaches the encode thread now, not when its block of records fills
-    RX.cb = rec_cb_new();
-    if (next_context >= 0) RX.alloc_cur = sub_allocator(next_context);
-    [RX.cb beginCommandBufferWithAllocator:g_alloc4[RX.alloc_cur]];   // the reserved allocator is reset only on its first use this submission
-    RX.cut_draw0 = g_stat_draw;
-    if (!g_cuts++) MLOG("segmented submission: first segment submitted at frame %llu pass %llu", (unsigned long long)f, (unsigned long long)g_stat_pass);
+    RX.cb = nil;
 }
 static void sub_cut(void) { sub_cut_to(-1); }
 uint64_t mtl_cut_count(void) { return g_cuts; }
@@ -12213,20 +12222,23 @@ static void clear_ds_tri(const p_clear_ds *c) {
 enum { PAR_B = 4096, PAR_W = 256 };
 static uint32_t g_par_b[PAR_B], g_par_w[PAR_W]; static uint8_t g_par_bq[PAR_B]; static int g_par_nb, g_par_nw; static uint64_t g_par_d0;
 static struct { uint64_t subs, draws, clean, clean_q, dirty, waits, cost, scan_ns, scan_ops, scan_bad, switches, from_scan, sw_draws[RX_MAX]; uint64_t why[9]; } g_par;
-static int par_draws(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PAR_DRAWS"); v = e && atoi(e) > 0 ? atoi(e) : 2500; } return v; }
-static int par_mode(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PAR"); v = !e ? 0 : !strcmp(e, "measure") ? 1 : !strcmp(e, "check") ? 2 : !strcmp(e, "fresh") ? 3 : !strcmp(e, "fresh+check") ? 4 : !strcmp(e, "fresh-scan") ? 5 : !strcmp(e, "thread1") ? 6 : 0;
+static int par_mode(void);
+static int par_draws(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PAR_DRAWS"); v = e && atoi(e) > 0 ? atoi(e) : par_mode() == 7 ? 400 : 2500; } return v; }
+static int par_mode(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PAR"); v = !e ? 0 : !strcmp(e, "measure") ? 1 : !strcmp(e, "check") ? 2 : !strcmp(e, "fresh") ? 3 : !strcmp(e, "fresh+check") ? 4 : !strcmp(e, "fresh-scan") ? 5 : !strcmp(e, "thread1") ? 6 : !strcmp(e, "plan") ? 7 : 0;
     if (v == 1) MLOG("DM_NVN_PAR=measure: logging how far submissions could be split (log only)");
     if (v == 2) MLOG("DM_NVN_PAR=check: the scan's state at every pass boundary is compared with the replay's where a chunk could start (log only; slow)");
     if (v >= 3 && v <= 5) MLOG("DM_NVN_PAR=%s: at a clean boundary every %d draws or more the translation moves to the next replay context, which starts fresh except for the contract (S, R, write tracking, replay position): serial, one thread (DM_NVN_PAR_DRAWS)%s", e, par_draws(), v == 4 ? "; and the scan's S and R are checked" : "");
     if (v == 5) MLOG("DM_NVN_PAR=fresh-scan: the context a chunk starts in takes S, R and the write tracking from the scan's snapshot of that boundary, as a worker will; the scan's state is also checked");
     if (v == 6) MLOG("DM_NVN_PAR=thread1: as fresh-scan, and every chunk after a submission's first is translated on a worker thread, one at a time (the submitting thread waits for it)");
-    if (e && !v) MLOG("[RED] DM_NVN_PAR=%s: unknown (measure, check, fresh, fresh+check, fresh-scan, thread1)", e); } return v; }
+    if (v == 7) MLOG("DM_NVN_PAR=plan: the scan plans up to %d chunks a submission at the boundaries nearest its quarters by draws; each is translated from the scan's snapshot into its own command buffer, allocator and arenas, one after another; a boundary that is not clean or whose state differs from the snapshot finishes the submission serially", RX_CHUNKS);
+    if (e && !v) MLOG("[RED] DM_NVN_PAR=%s: unknown (measure, check, fresh, fresh+check, fresh-scan, thread1, plan)", e); } return v; }
 static int par_measure(void) { return par_mode() >= 1; }
 static int par_check(void) { return par_mode() == 2 || par_mode() >= 4; }
-static int par_from_scan(void) { return par_mode() == 5 || par_mode() == 6; }
+static int par_from_scan(void) { return par_mode() == 5 || par_mode() == 6 || par_mode() == 7; }
+static int par_plan(void) { return par_mode() == 7; }
 static int par_thread1(void) { return par_mode() == 6; }
 static uint64_t g_parw_chunks;   // accessed only across the serialized worker handoff
-static int par_fresh(void) { return par_mode() >= 3; }
+static int par_fresh(void) { return par_mode() >= 3 && par_mode() <= 6; }
 #include "nvn_par_walk.h"
 _Static_assert(PAR_CALLS == sizeof g_ret / sizeof *g_ret, "planner and replay call depths must match");
 static par_pos par_here(const uint8_t *op) {
@@ -12268,12 +12280,12 @@ static struct { uint64_t compared, same, differ, nosnap, extra; uint64_t sf[PAR_
 static const char *const g_par_wf[8] = {"npend", "pend_over", "pend (ranges)", "nsbw", "sbw_over", "sbw (pages)", "nsbw_w", "sbw (wide)"};
 // fresh-scan: full snapshots (S, R and the whole write tracking) at the boundaries a chunk may start at, the first SetRenderTargets at least par_draws() draws after the last one
 enum { PARF_MAX = 16 };
-typedef struct { const uint8_t *op; par_pos pos; typeof(S_rx[0]) s; typeof(R_rx[0]) r; rx_wt w; } parf_snap;
-static parf_snap *g_parf; static int g_parf_n; static uint64_t g_parf_draws;
+typedef struct { const uint8_t *op; par_pos pos; typeof(S_rx[0]) s; typeof(R_rx[0]) r; rx_wt w; uint64_t at; } parf_snap;   // at: the scan's draws before it
+static parf_snap *g_parf; static int g_parf_n; static uint64_t g_parf_draws, g_parf_total;
 static void parf_put(const par_pos *pos) { WT_;
     if (!g_parf) g_parf = calloc(PARF_MAX, sizeof *g_parf);
     if (g_parf_n >= PARF_MAX || g_parf_draws < (uint64_t)par_draws()) return;
-    parf_snap *f = &g_parf[g_parf_n++]; f->op = pos->op; f->pos = *pos; memcpy(&f->s, &S, sizeof S); memcpy(&f->r, &R, sizeof R); memcpy(&f->w, wt_, sizeof f->w); g_parf_draws = 0;
+    parf_snap *f = &g_parf[g_parf_n++]; f->op = pos->op; f->pos = *pos; memcpy(&f->s, &S, sizeof S); memcpy(&f->r, &R, sizeof R); memcpy(&f->w, wt_, sizeof f->w); f->at = g_parf_total; g_parf_draws = 0;
 }
 static const parf_snap *parf_at(const uint8_t *op) { par_pos pos = par_here(op); for (int i = 0; i < g_parf_n; i++) if (par_pos_equal(&g_parf[i].pos, &pos)) return &g_parf[i]; return NULL; }
 static void parc_put(const uint8_t *op, const par_pos *pos) {   // the scan, at a SetRenderTargets about to apply
@@ -12406,12 +12418,12 @@ static void par_scan(const uint64_t *h, int n) {   // in the scan's context: S a
     int k = g_rxi;
     S_rx[RX_SCAN] = S_rx[k]; R_rx[RX_SCAN] = R_rx[k];
     rx_select(RX_SCAN); g_par_scanning = 1; pend_reset();
-    par_walk cur = par_walk_begin(h, n); uint64_t ops = 0; g_parc_n = 0; g_parf_n = 0; g_parf_draws = 0;
+    par_walk cur = par_walk_begin(h, n); uint64_t ops = 0; g_parc_n = 0; g_parf_n = 0; g_parf_draws = 0; g_parf_total = 0;
     for (;;) { par_pos pos; op_hdr hq; const void *aq; if (!par_walk_next(&cur, &pos, &hq, &aq)) break; const uint8_t *q = pos.op; ops++;
         switch (hq.op) {
             case OP_SET_RT: { if (par_check()) parc_put(q, &pos); if (par_from_scan()) parf_put(&pos); const p_set_rt *r = aq; R.rt = *r; R.has_rt = 1; continue; }
-            case OP_DRAW: case OP_DRAW_IDX: g_parf_draws++; if (par_check()) { prog_resolve(); __unsafe_unretained NvProg *pr = S.prog ? prog_get(S.prog) : nil; if (pr) { par_scan_writes(0, pr->sh[0]); par_scan_writes(1, pr->sh[1]); par_scan_gs(pr->sh[2]); } } continue;
-            case OP_DISPATCH: if (par_check()) { __unsafe_unretained NvProg *cp = S.cprog ? prog_get(S.cprog) : nil; if (cp) par_scan_writes(5, cp->sh[5]); } continue;
+            case OP_DRAW: case OP_DRAW_IDX: g_parf_draws++; g_parf_total++; if (par_check() || par_plan()) { prog_resolve(); __unsafe_unretained NvProg *pr = S.prog ? prog_get(S.prog) : nil; if (pr) { par_scan_writes(0, pr->sh[0]); par_scan_writes(1, pr->sh[1]); par_scan_gs(pr->sh[2]); } } continue;
+            case OP_DISPATCH: if (par_check() || par_plan()) { __unsafe_unretained NvProg *cp = S.cprog ? prog_get(S.cprog) : nil; if (cp) par_scan_writes(5, cp->sh[5]); } continue;
             case OP_UPDATE_UB: { uint64_t d, nn; memcpy(&d, aq, 8); memcpy(&nn, (const uint8_t *)aq + 8, 8); if (nn) pend_add(d, nn, 1); continue; }
             case OP_COPY_B2B: { uint64_t d, nn; memcpy(&d, (const uint8_t *)aq + 8, 8); memcpy(&nn, (const uint8_t *)aq + 16, 8); pend_add(d, nn, 2); continue; }
             case OP_CLEAR_BUF: { const p_clear_buf *cb = aq; if (cb->size) pend_add(cb->addr, cb->size, 3); continue; }
@@ -12422,6 +12434,7 @@ static void par_scan(const uint64_t *h, int n) {   // in the scan's context: S a
         if (cur.bad) break;
     }
     if (cur.bad) g_parc_n = g_parf_n = 0;   // never hand off using a partial or unsupported plan
+    if (par_plan()) par_plan_make();
     g_par_scanning = 0; rx_select(k);
     g_par.scan_ns += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0; g_par.scan_ops += ops; g_par.scan_bad += cur.bad;
 }
@@ -12451,6 +12464,7 @@ static void par_sub_end(void) {
                              (unsigned long long)g_par.why[1], (unsigned long long)g_par.why[2], (unsigned long long)g_par.why[3], (unsigned long long)g_par.why[4], (unsigned long long)g_par.why[5],
                              (unsigned long long)g_par.why[6], (unsigned long long)g_par.why[7], (unsigned long long)g_par.why[8], (double)g_par.waits / nf, g_par.cost ? (double)g_par.draws / g_par.cost : 0.0,
                              g_par.scan_ns / 1e6 / nf, (double)g_par.scan_ops / nf, g_par.scan_bad ? " (some incomplete or unsupported scans declined)" : "");
+        if (par_plan()) { MLOG("parallel translation, plan (over %llu frames): %llu submissions planned, %llu chunks planned, %llu translated from a snapshot; finished serially: %llu at a boundary not clean, %llu with a state not the scan's, %llu with a range refused", (unsigned long long)nf, (unsigned long long)g_planst.subs, (unsigned long long)g_planst.planned, (unsigned long long)g_planst.chunks, (unsigned long long)g_planst.fb_dirty, (unsigned long long)g_planst.fb_state, (unsigned long long)g_planst.fb_range); memset(&g_planst, 0, sizeof g_planst); }
         if (par_thread1()) { MLOG("parallel translation, thread1: %llu chunks translated on the worker so far", (unsigned long long)g_parw_chunks); }
         if (par_fresh()) { MLOG("parallel translation, fresh (over %llu frames): %llu switches (%llu from the scan's snapshot), draws translated per context %llu %llu %llu %llu", (unsigned long long)nf, (unsigned long long)g_par.switches, (unsigned long long)g_par.from_scan, (unsigned long long)g_par.sw_draws[0], (unsigned long long)g_par.sw_draws[1], (unsigned long long)g_par.sw_draws[2], (unsigned long long)g_par.sw_draws[3]); }
         memset(&g_par, 0, sizeof g_par);
@@ -12482,6 +12496,76 @@ static int par_continue(par_pos start, const par_pos *stop) {
     int stopped = t_par_stopped; t_par_stop = NULL; t_par_stopped = 0;
     if (!stopped) mtl_exec_rest(NULL, 0);
     return stopped;
+}
+// ---------- Parallel translation, the coordinator (slice A: DM_NVN_PAR=plan; docs/parallel-translation.md) ----------
+// The scan plans the chunks: of its full snapshots, the ones nearest a quarter, a half and three quarters of the submission's draws (at most RX_CHUNKS - 1 splits). The submitting thread's
+// replay stops before the first split (t_par_stop); at the commit, par_plan_run ends that chunk (its pass, deferred updates, its last segment committed) and, if the boundary is clean and the
+// replay's S and R are the scan's, translates each next chunk with par_continue from the snapshot in a fresh context, into its own command buffer begun from that context's allocator, with its
+// own arenas. One after another on this thread: the chunks do not overlap yet. Passed along from chunk to chunk for now: the post list, the visibility buffer, the segment count and clock,
+// the update ring, the commit blocks and the submission's autorelease pool (independent copies, merged in command order, are what overlap needs). A boundary that is not clean, a state
+// that differs or a range the driver refuses finishes the submission in the current context, serially
+static const parf_snap *g_plan[RX_CHUNKS - 1]; static int g_plan_n, g_plan_active;
+static void par_plan_make(void) {
+    g_plan_n = 0; uint64_t d = g_parf_total, last = 0;
+    if (d < (uint64_t)par_draws() * 2) return;
+    for (int q = 1; q < RX_CHUNKS && g_plan_n < RX_CHUNKS - 1; q++) {
+        uint64_t mark = d * (uint64_t)q / RX_CHUNKS; int best = -1; uint64_t bd = UINT64_MAX;
+        for (int i = 0; i < g_parf_n; i++) { if (g_parf[i].at <= last) continue; uint64_t dd = g_parf[i].at > mark ? g_parf[i].at - mark : mark - g_parf[i].at; if (dd < bd) { bd = dd; best = i; } }
+        if (best >= 0) { g_plan[g_plan_n++] = &g_parf[best]; last = g_parf[best].at; }
+    }
+}
+static void par_plan_begin(void) {   // the submitting thread, before its replay: stop before the first split
+    g_plan_active = 0; if (!g_plan_n || t_par_stop) return;
+    t_par_stop = &g_plan[0]->pos; t_par_stopped = 0; g_plan_active = 1; g_planst.subs++; g_planst.planned += (uint64_t)g_plan_n + 1;
+}
+static int par_plan_same(const parf_snap *f) {   // the replay's S and R at the boundary are the scan's (a pending clear's values only while it is pending)
+    typeof(R_rx[0]) rr = R; for (int i = 0; i < 8; i++) if (!rr.clear_c[i] && !f->r.clear_c[i]) rr.cc[i] = f->r.cc[i];
+    if (!rr.clear_d && !f->r.clear_d) rr.cd = f->r.cd; if (!rr.clear_s && !f->r.clear_s) rr.cs = f->r.cs;
+    for (int i = 0; i < PAR_SF; i++) if (memcmp((const uint8_t *)&f->s + g_par_sf[i].off, (const uint8_t *)&S + g_par_sf[i].off, g_par_sf[i].size)) return 0;
+    for (int i = 0; i < PAR_RF; i++) if (memcmp((const uint8_t *)&f->r + g_par_rf[i].off, (const uint8_t *)&rr + g_par_rf[i].off, g_par_rf[i].size)) return 0;
+    return 1;
+}
+static void par_plan_switch(int j, const parf_snap *f) {   // to context j for the chunk starting at f
+    int k = g_rxi; rx_t *a = &g_rxs[k], *b = &g_rxs[j];
+    if (!b->vt) rx_tables(b);
+    rx_fresh(b, a);
+    b->sub_pool = a->sub_pool; a->sub_pool = NULL; b->commit_blocks = a->commit_blocks; a->commit_blocks = nil;
+    b->seg = a->seg; b->sclk = a->sclk; a->sclk = NULL;
+    b->post = a->post; b->npost = a->npost; b->postcap = a->postcap; a->post = NULL; a->npost = a->postcap = 0;
+    b->vis = a->vis; a->vis = nil; b->vis_n = a->vis_n; a->vis_n = 0; vis_move(j, k);
+    b->ub.ring = a->ub.ring; a->ub.ring = nil; b->ub.ring_off = a->ub.ring_off; b->ub.ring_size = a->ub.ring_size; b->ub.ready = a->ub.ready;
+    b->cur_arena = nil; b->sub_arenas = [NSMutableArray array];   // its own (a keeps its own until the commit merges them)
+    S_rx[j] = f->s; R_rx[j] = f->r; memcpy(&g_wt_rx[j], &f->w, sizeof f->w);
+    g_pass_rx[j] = g_pass_rx[k]; g_rp_aw_rx[j] = g_rp_aw_rx[k]; g_rp_ah_rx[j] = g_rp_ah_rx[k]; g_rp_whole_rx[j] = g_rp_whole_rx[k];
+    g_sm_pass_rx[j] = g_sm_lo_rx[j] = g_sm_hi_rx[j] = g_sm_cur_rx[j] = g_sm_applied_rx[j] = 0; g_sm_plan_rx[j].on = 0;
+    g_rt_range_active_rx[j] = g_rt_range_pending_rx[j] = 0; g_rt_merged_rx[j] = 0; g_defer_replaying_rx[j] = 0; g_hoist_n_rx[j] = 0; g_csh_n_rx[j] = 0;
+    g_defer_pend_rx[j] = NULL; g_defer_nact_rx[j] = g_defer_natq_rx[j] = 0; g_nlc_rx[j] = 0; g_mrun_rx[j].n = 0; g_geo_mesh_rx[j].on = g_geo_mesh_rx[j].miss = 0;
+    g_mtk_rx[j].on = g_mtk_rx[j].miss = 0;
+    g_fz_rx[j].active = 0;
+    rec_publish(); rx_select(j);
+    RX.cb = rec_cb_new(); RX.alloc_cur = sub_allocator(j); [RX.cb beginCommandBufferWithAllocator:g_alloc4[RX.alloc_cur]]; RX.cut_draw0 = g_stat_draw;
+    prog_resolve();
+}
+static void par_plan_run(void) {   // the submitting thread, at the commit
+    g_plan_active = 0;
+    int stopped = t_par_stopped; t_par_stop = NULL; t_par_stopped = 0;
+    if (!stopped) return;   // the replay ended before the first split
+    int first = g_rxi;
+    for (int i = 0; i < g_plan_n; i++) {
+        const parf_snap *f = g_plan[i]; const par_pos *next = i + 1 < g_plan_n ? &g_plan[i + 1]->pos : NULL;
+        lc_land(); rp_flush(); ubd_land();
+        int why = g_hoist_n ? 1 : (g_defer_nact || g_defer_pend) ? 2 : g_fz.active ? 3 : g_sm_pass ? 4 : g_nlc ? 5 : g_mrun.n ? 6 : RX.ub.n ? 7 : g_csh_n ? 8 : 0;
+        int same = !why && par_plan_same(f), j = (first + i + 1) % RX_CHUNKS;
+        if (why || !same) { if (why) g_planst.fb_dirty++; else g_planst.fb_state++; par_continue(f->pos, NULL); break; }   // finish serially here
+        seg_commit();                // the chunk's last segment, in order
+        par_plan_switch(j, f);
+        int r = par_continue(f->pos, next);
+        if (r < 0) { g_planst.fb_range++; par_continue(f->pos, NULL); break; }
+        g_planst.chunks++;
+        if (r == 0) break;           // the submission ended in this chunk
+    }
+    // the arenas of every chunk retire with the submission's fence
+    for (int c = 0; c < RX_CHUNKS; c++) { rx_t *x = &g_rxs[c]; if (x == g_rx || !x->sub_arenas.count) continue; [RX.sub_arenas addObjectsFromArray:x->sub_arenas]; [x->sub_arenas removeAllObjects]; x->cur_arena = nil; }
 }
 static void par_chunk_run(void) {
     g_par_handoff = 0;

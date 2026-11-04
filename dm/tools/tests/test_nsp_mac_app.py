@@ -3,6 +3,7 @@ runtime; the launcher's environment for the host (the bundle's files, the save, 
 code returned and SIGTERM forwarded to it, an alert when the game data is missing; the script's options and its pack_app.py command line; --seen-shaders' keys and partial library.
 No game files, keys or Xcode needed: a stand-in host compiled here records what it was given (temporary files only in a temporary folder)."""
 import contextlib
+import errno
 import importlib.util
 import io
 import json
@@ -362,6 +363,42 @@ class PackReuse(unittest.TestCase):
         self.assertFalse(self.key.exists())
         self.assertEqual((Path(self.args.out) / 'Contents/Info.plist').read_bytes(), before)
         self.assert_repacked()
+
+    def test_volume_without_atomic_swap_replaces_by_moves(self):   # Mac OS Extended (Journaled): renamex_np fails with [Errno 45] on the second build into the same folder
+        self.pack(); before = (Path(self.args.out) / 'Contents/Info.plist').read_bytes()
+        self.args.name = 'changed'
+        library = types.SimpleNamespace(renamex_np=mock.Mock(return_value=-1))
+        with mock.patch.object(pack_app.ctypes, 'CDLL', return_value=library), mock.patch.object(pack_app.ctypes, 'get_errno', return_value=errno.ENOTSUP):
+            self.pack()
+        library.renamex_np.assert_called()
+        self.assertNotEqual((Path(self.args.out) / 'Contents/Info.plist').read_bytes(), before)
+        self.assertTrue(self.key.exists())
+        self.assertFalse(Path(self.args.out + '.old').exists())   # nothing left of the old app beside the new one
+        self.assertIn('reused (inputs unchanged)', self.pack())   # the key matches the app that is in place
+
+    def test_fallback_restores_the_old_app_when_a_move_fails(self):
+        out, tmp = self.tmp / 'Game.app', self.tmp / 'Game.app.partial'
+        for n, tree in ((out, 'old'), (tmp, 'new')): (n / 'Contents').mkdir(parents=True); (n / 'Contents/id').write_text(tree)
+        real = Path.rename
+        for failing in (tmp, Path(f'{out}.old')):   # the new app cannot move in, then the old one cannot move to tmp's place
+            with self.subTest(failing=failing.name):
+                def rename(path, target, failing=failing):
+                    if path == failing and (failing == tmp or target == tmp): raise OSError(errno.EIO, 'fixture')
+                    return real(path, target)
+                with mock.patch.object(Path, 'rename', rename), self.assertRaises(OSError): pack_app.swap_by_moves(tmp, out)
+                self.assertEqual((out / 'Contents/id').read_text(), 'old')
+                self.assertEqual((tmp / 'Contents/id').read_text(), 'new')
+        pack_app.swap_by_moves(tmp, out)
+        self.assertEqual((out / 'Contents/id').read_text(), 'new')
+        self.assertEqual((tmp / 'Contents/id').read_text(), 'old')
+
+    def test_fallback_clears_an_old_app_a_killed_build_left_aside(self):
+        out, tmp, aside = self.tmp / 'Game.app', self.tmp / 'Game.app.partial', self.tmp / 'Game.app.old'
+        for n, tree in ((out, 'old'), (tmp, 'new'), (aside, 'killed')): (n / 'Contents').mkdir(parents=True); (n / 'Contents/id').write_text(tree)
+        pack_app.swap_by_moves(tmp, out)
+        self.assertEqual((out / 'Contents/id').read_text(), 'new')
+        self.assertEqual((tmp / 'Contents/id').read_text(), 'old')
+        self.assertFalse(aside.exists())
 
     def test_failed_key_write_rolls_back_app_and_drops_key(self):
         self.pack(); before = (Path(self.args.out) / 'Contents/Info.plist').read_bytes()

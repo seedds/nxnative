@@ -2282,6 +2282,69 @@ def unsized(d, where):
     print(f'[RED] {where}: a size-prefixed frame that did not open ({why}): the file is read as it is', flush=True)   # a container that stays closed holds its shaders unread
     return d
 
+BIGANT_SHADERS = bytes.fromhex('81f9ec1c')   # Big Ant's shader pack (shaders.blob.nx), once bigant_chunks has decoded it
+BIGANT_BLOCK = 0x40000   # the uncompressed size of a Big Ant chunk; one zstd did not shrink is stored as it is
+
+def bigant_chunks(d, where):
+    """Big Ant Studios' compressed files (Cricket 24: 54,177 of its 103,353 RomFS files, data/<xx>/<hash>, named in data/data-0.blobset.nx.log): a chain of chunks to the end of the file,
+    each a u32 length (of the chunk, those 4 bytes included) and a zstd frame, or after the first the block itself when zstd did not shrink it (at most BIGANT_BLOCK bytes, no frame magic:
+    719 blocks in 120 of Cricket 24's files) → the chunks decompressed and joined, or None when the bytes are not such a chain. The word counts the chunk, not the uncompressed size
+    of HAL's .cmp containers (unsized), so the chain has to end exactly at the end of the file"""
+    p, parts, frames = 0, [], []   # parts: (the zstd frames before a stored block, the block)
+    while p < len(d):
+        n = struct.unpack_from('<I', d, p)[0] if p + 8 <= len(d) else 0
+        if n < 12 or p + n > len(d): return None
+        body = d[p + 4:p + n]
+        if body[:4] == ZSTD_MAGIC: frames.append(body)
+        elif not p or n - 4 > BIGANT_BLOCK: return None
+        else: parts.append((frames, body)); frames = []
+        p += n
+    z = zstd_mod()
+    try: return b''.join((z.decompress(b''.join(f)) if f else b'') + block for f, block in parts) + (z.decompress(b''.join(frames)) if frames else b'')
+    except Exception as e:
+        print(f'[RED] {where}: Big Ant zstd chunks that did not open ({str(e) or type(e).__name__}): the file is read as it is', flush=True)
+        return None
+
+def bigant_shaders(d, label):
+    """Big Ant's shader pack (Cricket 24's shaders.blob.nx, 140 MB once decoded): magic 0x1cecf981, version at +8 (0x13). Its control sections (NVN's, 0x880 bytes each) and its code areas
+    (0x12345678 / 0x12345679 headers, packed one after another from the first of them on) lie in two regions. A record names each shader: a u32 offset of the code area from the start
+    of the code region, then a u32 offset from that word to the control section. A program's records follow one another 8 bytes apart (Cricket 24: 8,528 programs, 8,399 of them a
+    pixel and a vertex shader, 126 compute; 8,484 distinct shaders). A zero word before a control pointer also reads as a record that names the first code area: of a control section's
+    candidates, the code area whose length (control +0x704) reaches the next one, and that no other control section took, is its own"""
+    ctls = {m.start() for m in re.finditer(re.escape(CTL_MAGIC), d) if not m.start() & 3}
+    codes = sorted(m.start() for m in re.finditer(re.escape(GFX_MAGIC) + b'|' + re.escape(CS_MAGIC), d) if not m.start() & 3)
+    if not ctls or not codes: red(f'{label}: a Big Ant shader pack (version {struct.unpack_from("<I", d, 8)[0]:#x}) with {len(ctls)} control sections and {len(codes)} code areas')
+    base, cset = codes[0], set(codes)
+    after = dict(zip(codes, codes[1:]))
+    words = struct.unpack_from(f'<{len(d) // 4}I', d)
+    cand, recs = collections.defaultdict(set), []
+    for i in range(len(words) - 1):
+        p = 4 * i; c, k = p + 4 + words[i + 1], base + words[i]
+        if c in ctls and k in cset: cand[c].add(k); recs.append((p, c, k))
+    code_len = lambda c: struct.unpack_from('<I', d, c + 0x704)[0]
+    own = {c: next(iter(ks)) for c, ks in cand.items() if len(ks) == 1}
+    taken = set(own.values())
+    for c, ks in cand.items():
+        if c in own: continue
+        fit = [k for k in ks if k not in taken and (k not in after or after[k] - k == code_len(c))]
+        if len(fit) != 1: red(f'{label}: control section @{c:#x} has {len(fit)} code areas that fit (of {len(ks)} records)')
+        own[c] = fit[0]; taken.add(fit[0])
+    if len(own) != len(ctls): print(f'[RED] {label}: {len(ctls) - len(own)} of {len(ctls)} control sections have no record; left out', flush=True)
+    progs, run = [], []
+    for p, c, k in recs:
+        if own.get(c) != k: continue
+        if run and p - run[-1][0] != 8: progs.append(run); run = []
+        run.append((p, c))
+    if run: progs.append(run)
+    out = []
+    for run in progs:
+        for _, c in run:
+            ctl, code = d[c:c + struct.unpack_from('<I', d, c + 0x20)[0]], span(d, own[c], code_len(c), f'{label} code area @{own[c]:#x}')
+            st = glslc_stage(ctl, code)
+            if not st or (why := check(label, st, ctl, code)): red(f'{label} control section @{c:#x}: {why if st else "no stage"}')
+            out.append((f'{label}#BIGANT@{run[0][0]:#x}' + ('#var' if len(run) > 1 else ''), st, ctl, code))
+    return out
+
 def unity_program(code, where, stage=None):
     """Unity's Switch program code → [(stage, control, code)]; stage = the subprogram's stage from m_ParsedForm, which only the pre-2019.3 layout needs"""
     if len(code) >= 0x14 and code[0x10:0x14] == CTL_MAGIC:   # before 2019.3: 0x10 header + control section + code area, one stage
@@ -2440,6 +2503,7 @@ def scan_blob(d, label, out, depth=0, left=None):
         for i, m in enumerate(cra.narc_members(d, label)): scan_blob(cra.undo(m), f'{label}/{i}', out, depth + 1)
         return
     if d[:4] == b'BAHS': out.extend(bahs_shaders(d, label)); return
+    if d[:4] == BIGANT_SHADERS: out.extend(bigant_shaders(d, label)); return
     if d[:4] == b'NDSR': out.extend(ndsr_shaders(d, label)); return
     if shaders := sead_prim_shaders(d, label): out.extend(shaders); return
     if d[:len(TFXO)] == TFXO: out.extend(tfxo_shaders(d, label)); return
@@ -2722,7 +2786,8 @@ def scan_file_in(args):
     if d[:4] == b'RYHP' or d[8:12] == GFX_MAGIC:
         found += phyre_shaders(d, '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
-    if head[:4] != ZSTD_MAGIC and head[4:8] in (ZSTD_MAGIC, LZ4_FRAME_MAGIC): d = unsized(d, '/' + rel)   # HAL's .cmp containers (Kirby and the Forgotten Land: 7,201 of them, 5,121 zstd frames with 19,364 BNSH inside and 2,080 LZ4 frames). Read raw, the split found 121 shaders and the game asked for 900 it did not have ("[RED] shader ... is not in the shader map")
+    if head[:4] != ZSTD_MAGIC and head[4:8] == ZSTD_MAGIC and (z := bigant_chunks(d, '/' + rel)) is not None: d = z   # Big Ant's chunked files (Cricket 24: its shader pack is one)
+    elif head[:4] != ZSTD_MAGIC and head[4:8] in (ZSTD_MAGIC, LZ4_FRAME_MAGIC): d = unsized(d, '/' + rel)   # HAL's .cmp containers (Kirby and the Forgotten Land: 7,201 of them, 5,121 zstd frames with 19,364 BNSH inside and 2,080 LZ4 frames). Read raw, the split found 121 shaders and the game asked for 900 it did not have ("[RED] shader ... is not in the shader map")
     if d[:4] == b'Yaz0': d = yaz0(d, '/' + rel)
     if d[:3] == b'XNB' and d[4] == 5 and d[5] & 0xC0 and len(d) > 14:   # a compressed XNB (Stardew Valley: 3,535 LZ4 files, 8 LZX): only effects (EffectReader) carry MGFX shaders, and for LZX the reader names sit in the first block, so it decides whether the rest is worth decoding
         if d[5] & 0x80:
@@ -2736,7 +2801,7 @@ def scan_file_in(args):
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), 'defer'
         return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
-    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members
+    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != BIGANT_SHADERS and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members
     else:
         scan_blob(d, '/' + rel, found)
         # whole GLSLC outputs in a file no other reader takes (FINAL FANTASY TACTICS - The Ivalice Chronicles: its engine's technique files, resources_nx/…/shader/*.tec, 261 outputs beside
@@ -2884,8 +2949,8 @@ def main():
     for name, rr in recs.items():
         with open(os.path.join(pkg, name), 'wb') as f: f.write(b''.join(rr))
     with open(mapout, 'w') as f:
-        kinds = ' / '.join(k for k, hit in (('BNSH / BAHS', any('#BNSH@' in r[4] or '#BAHS@' in r[4] for r in rows)), ('Unity Shader', any('#var' in r[4] and '#BNSH@' not in r[4] and '#MSHD#' not in r[4] and '#SDF#' not in r[4] and '#GLSLC@' not in r[4] and '#SNVN@' not in r[4] for r in rows)),
-                                            ('Retro Studios SNVN', any('#SNVN@' in r[4] for r in rows)),
+        kinds = ' / '.join(k for k, hit in (('BNSH / BAHS', any('#BNSH@' in r[4] or '#BAHS@' in r[4] for r in rows)), ('Unity Shader', any('#var' in r[4] and '#BNSH@' not in r[4] and '#MSHD#' not in r[4] and '#SDF#' not in r[4] and '#GLSLC@' not in r[4] and '#SNVN@' not in r[4] and '#BIGANT@' not in r[4] for r in rows)),
+                                            ('Retro Studios SNVN', any('#SNVN@' in r[4] for r in rows)), ("Big Ant's shader pack", any('#BIGANT@' in r[4] for r in rows)),
                                             ('MSHD', any('#MSHD#' in r[4] for r in rows)), ('GLSLC', any('#GLSLC@' in r[4] for r in rows)), ('RE Engine SDF', any('#SDF#' in r[4] for r in rows)),
                                             ('MT Framework SPK', any('#MTSPK@' in r[4] for r in rows)), ('MonoGame MGFX', any('#MGFX@' in r[4] for r in rows)),
                                             ('PlatinumGames shader objects', any('#PGSO' in r[4] for r in rows)),

@@ -52,9 +52,23 @@ Each step below stopped the boot before its fix:
 5. Switch 2 SDK calls through services the host does not serve: `hid::InitializeJcms` and the Joy-Con mouse sensor (`hle_hid.c`), `oe::GetCurrentGraphicsScale` (`hle_oe.c`), `audio::IsDeviceOutputVolumeAutoTuneModeEnabled` (`hle_audren.c`), `streamplay` (GameShare, `hle_misc.c`), `vi` HDR / VRR / extended swap interval (`dm/gfx/hle_vi.c`).
 6. `nv::InitCheck` (from `main+0xe19d04`, the start of a video decoder, after the first punch) tested the SDK's own flag, which `nv::InitializeGraphics` sets and the host's version of it does not: `hle_nv.c` answers it from the host's record. The same function then starts a video decoder: the Switch 2's `nn::codec` video API and sync point events, served on the host ([`nn::codec` video decoders taken over](../../../docs/reference/movies.md#nncodec-video-decoders-taken-over)).
 
+## HDR output
+
+The HDR output setting (Game section; Switch 2 games, Mac and iPhone) sets `DM_HDR=1`. Measured on this game only.
+
+- The game creates its SDR window (format 0x25), queries `vi::QueryDisplayHdrStatus`, then creates an RGB10A2 window (format 0x3d) of SMPTE ST 2084 (PQ) code values. SDR white is 203 nits (code 594 of 1023 is 202.9 nits), and the extended range it declares is 0 to 1000 nits.
+- The window is BT.2020 PQ, and the scene is Display P3 linear before the encoder. The PQ encoder shader (`359ddaa5bb1e298e_b`) reads a 3x3 matrix from constant-buffer entries 17 to 19. That matrix is 203 times the Display P3 to BT.2020 conversion, within 0.00006 RMS. It is the same from the title screen through the mining tunnel, and the encoder is the only shader that writes the window in the captured frames. Read as P3, the window's pixels have no negative channels; read as BT.709, 16% do.
+- The game declares gamut 1 (`SetLayerNextHdrContentGamutMetadata`) for its SDR and HDR windows alike. The host drops the metadata calls and logs the first three of each.
+- `present.metal` decodes the PQ codes to linear light (1.0 at the paper white) into an RGBA16Float layer in extended linear BT.2020. Highlights roll off into the screen's headroom; with no headroom, the largest channel of a highlight goes to SDR white, and its hue is kept.
+
 ## Open
 
 - **Shader tables:** split them again with this game's files and compare: `shader_map.tsv` may hold agl rows that are no shaders ([A control section's words read as a BAHS entry](../../../docs/reference/shaders.md#a-control-sections-words-read-as-a-bahs-entry); `bahs_variations` already met one stray entry in `agl_common`), and if so the NSP script stops at the table check until the split's tables replace them.
+- HDR: the gamut metadata value 1 has no name in the SDK modules, so what the game tells the system is unconfirmed. The pixels do not depend on it.
+- HDR: the module holds a second row set for the same matrix, chosen by a flag bit in the function at main+0x7e3960. No captured frame used it, and its caller is not traced.
+- HDR: only the title screen and the first gameplay area were captured.
+- HDR: `DM_HDR_FMT` (1) is a guess. The peak (`DM_HDR_PEAK`, 1000) is the declared range.
+- HDR: the highlight roll-off has not been seen on an EDR display. The Mac look was judged by eye on one MacBook, and the iPhone path has not run on a device.
 - **Video decoding:** the guide movies are VP9 and play (a 180-picture clip on loop in the tutorial's panel, read back as NV12). The player also imports the VP8, H.264 and AV1 decoders: VP8 and H.264 are served too (checked by `t_codec_video` only), AV1 is not ([`nn::codec` video decoders taken over](../../../docs/reference/movies.md#nncodec-video-decoders-taken-over)).
 - **The gameplay picture:** the mining tunnel matches a YouTube capture of the same spot ([Rendering](#rendering) 7); nothing past the tunnel's first minute has been compared.
 - Full shader build (about 75 minutes on the Mac from an empty cache): 22,852 of 22,852 shaders on chain 6f41726ef36d (SUATOM decoded; 22,850 on chain 3c66991eb439). Chain 9a0726336e9d had 22,834: the Metal compiler refused 11 (too deeply nested jump tables) and 5 used BRXU or REDUX ([Ampere shader code](../../../docs/reference/shaders.md#ampere-shader-code-switch-2)); 2 still do not translate (0x593).
@@ -94,3 +108,4 @@ Each step below stopped the boot before its fix:
 - [Present snapshots: the game's swapchain texture free at once](../../../docs/reference/frame-rate.md#present-snapshots-the-games-swapchain-texture-free-at-once): at the 30 fps cap with snapshots on it ran 43-65 fps of game time (fast-forward) and dropped about 110 of every 300 frames (PR #1073).
 - [Submissions handed to the GPU in segments](../../../docs/reference/frame-rate.md#submissions-handed-to-the-gpu-in-segments): a submission drawing into the target it inherited left those draws out of the segment's draw count (PR #1073).
 - [A deferred write under a false guard](../../../docs/reference/shaders.md#a-deferred-write-under-a-false-guard): DK and Pauline bright white between Hilltop's rocks, from terrain captured into the environment cube with a placeholder material (issue #1100; fixed by the translator change found on Yoshi and the Mysterious Book, spot not revisited, reporter's test asked).
+- [The status query and the present for an HDR window](../../../docs/reference/rendering.md#the-status-query-and-the-present-for-an-hdr-window): the window is RGB10A2 with PQ code values once the status reports HDR on (the HDR output setting).

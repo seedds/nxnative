@@ -552,7 +552,7 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** `CRASH sig=11 addr=0 pc=0` with the link register just after a call to a `vi::SetLayerNextHdr…` or `vi::ClearLayerNextHdr…` function.
 - **Cause:** the SDK forwards a layer's HDR metadata through a table its graphics system fills, which is null on the host.
-- **Fix:** every layer HDR metadata call of SDK 22's free functions succeeds with nothing to apply (`dm/gfx/hle_vi.c`): the content gamut, the HDR to SDR tone mapping, the standard and extended content luminance ranges, the adjustable Bezier tone curve, and the clears of the gamut, the tone mapping and the curve. The host presents SDR.
+- **Fix:** every layer HDR metadata call of SDK 22's free functions succeeds with nothing to apply (`dm/gfx/hle_vi.c`): the content gamut, the HDR to SDR tone mapping, the standard and extended content luminance ranges, the adjustable Bezier tone curve, and the clears of the gamut, the tone mapping and the curve. The host sends no metadata: it presents SDR, or with `DM_HDR=1` decodes the game's PQ window itself ([The status query and the present for an HDR window](rendering.md#the-status-query-and-the-present-for-an-hdr-window)).
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) (the set calls); the curve and the clears: [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0 sets the curve every frame, from pull request #1116 (that build is not run here).
 
 ### Layer frame numbers

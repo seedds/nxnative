@@ -59,6 +59,11 @@ def fixups_keys(path):   # '# KEY<TAB>value' header rows of a rewriter table
 UNKNOWN_LANGUAGES = 'This game\'s files do not list its languages, so some of these may not be in the game. It may then show another one.'
 
 
+def switch2(patched):   # the sdk module names the Switch 2's build spec ("spec: Ounce"). dm_sdk_ounce (dm/host/loader.c) searches the loader's range (read-only data, data, bss) for it; this searches the whole file, a superset that gives the same answer on the local modules
+    path = Path(patched) / 'sdk.patched.bin'
+    return path.is_file() and b'spec: Ounce' in path.read_bytes()
+
+
 def build(gid, patched, control):
     platform = os.environ.get('SETTINGS_PLATFORM') or 'ios'
     if platform not in ('ios', 'mac'): sys.exit(f'SETTINGS_PLATFORM must be ios or mac: {platform}')
@@ -75,6 +80,7 @@ def build(gid, patched, control):
     def shown(cond, n):
         if cond == 'always': return True
         if cond == 'languages>1': return len(langs) > 1
+        if cond == 'switch2': return switch2(patched)
         if cond.startswith('fixups:'): return cond[7:] in keys
         if cond.startswith('gfxapi:'): return os.environ.get('GFXAPI', '') == cond[7:]
         if cond.startswith('platform:'): return platform == cond[9:]

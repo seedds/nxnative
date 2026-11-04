@@ -658,6 +658,16 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `hle_nvn.c` accepts the three calls and records nothing. Shading every pixel is the most any rate asks for, so the picture is the same or sharper, and the only cost is GPU time where the game meant to save it. This drops a feature rather than emulating it, and the choice is a platform limit.
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md), every frame; [Splatoon Raiders](../../dm/games/0400380020056000/README.md), the palette.
 
+## HDR output
+
+### The status query and the present for an HDR window
+
+- **Symptom:** no HDR output on a Switch 2 game that asks for its HDR status: its window stays RGBA8 and the picture is SDR.
+- **Cause:** `vi::QueryDisplayHdrStatus` answered SDR, so the game never made its RGB10A2 PQ window, and the present had no decode for it.
+- **Fix:** with `DM_HDR=1` the status answers HDR on (Switch 2 SDKs only). The layer is RGBA16Float in extended linear BT.2020 on any screen. `present.metal` `fs_linear` decodes PQ to linear light (1.0 at `DM_HDR_PAPER_WHITE`, default 203) and maps BT.709 sources into BT.2020. Highlights roll off into the screen's headroom: `maximumExtendedDynamicRangeColorComponentValue` on the Mac, `UIScreen.currentEDRHeadroom` on the iPhone. With no headroom, the largest channel of a highlight goes to SDR white with its hue kept. An RGB10A2 window is decoded as PQ only after the status has answered HDR on; any other RGB10A2 window is treated as gamma-coded SDR.
+- **Open:** `DM_HDR_FMT` is a guess, and the roll-off is untested on an EDR display. The window's primaries are settled in the Donkey Kong Bananza note.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#hdr-output).
+
 ## Blend, depth and stencil
 
 ### Ten attachment records for eight colors and depth-stencil

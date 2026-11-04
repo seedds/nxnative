@@ -87,7 +87,7 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nup --platform m
 
 A NUP without the base game also works, when its base package is empty or it has none and its updates are marked `standalone_update`: the update is taken as the whole game, and the script says so. If the game then stops on missing files, that update holds only what changed: pack a NUP with the base game. The newest update is selected by default; `--package v<N>` selects another version in the container. Such a container has no `v0` (base game) to select.
 
-**From a folder of files**. The script expects this layout (`updates` and `dlc` are optional):
+**From a folder of files**. The script expects this layout (`updates` and `dlc` are optional; `base` is optional when there is an update, whose files are whole):
 
 ```
 ~/Games/DonkeyKongBananza/
@@ -95,12 +95,14 @@ A NUP without the base game also works, when its base package is empty or it has
   base/romfs/
   updates/458752/exefs/           the update's version, as a decimal number
   updates/458752/romfs/           the patched RomFS, not a patch
-  dlc/040074a01bf13001/0/romfs/   the DLC's title ID
+  dlc/040074a01bf13001/0/romfs/   the DLC's title ID; <n>/base/romfs/ or <n>/updates/<version>/romfs/ also work
 ```
 
 ```
 python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza --platform mac-app
 ```
+
+Each version folder may instead hold one folder per program, `program/<n>/exefs/` and `program/<n>/romfs/`, as some dumpers write them. For a Nintendo Switch 2 Edition, whose update has the Switch 1 game as program 0 and the Switch 2 one as program 1, the script packs the Switch 2 program; `--program 0` packs the Switch 1 one. If the folder holds only a Switch 2 Edition's own program, without `program/` folders, the title ID comes from the DLC; with no DLC, give it with `--title-id`.
 
 The app has no icon, because the folder holds none. To turn such a folder into a NUP: `nup pack ~/Games/DonkeyKongBananza game.nup`.
 

@@ -19,10 +19,11 @@ git clone --quiet --depth 1 --branch "$TAG" https://github.com/KhronosGroup/SPIR
 got=$(git -C "$WORK/src" rev-parse HEAD)
 [ "$got" = "$COMMIT" ] || { echo "[RED] $TAG is commit $got, not the pinned $COMMIT" >&2; exit 1; }
 export SOURCE_DATE_EPOCH="$(git -C "$WORK/src" log -1 --format=%ct)" TZ=UTC
-cmake -S "$WORK/src" -B "$WORK/build" -DCMAKE_BUILD_TYPE=Release -DSPIRV_CROSS_ENABLE_TESTS=OFF -DSPIRV_CROSS_SKIP_INSTALL=ON \
-    -DCMAKE_OSX_ARCHITECTURES='arm64;x86_64' -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 -DCMAKE_EXE_LINKER_FLAGS='-Wl,-S,-x' > "$WORK/configure.log"
-cmake --build "$WORK/build" --target spirv-cross -j "$(sysctl -n hw.ncpu)" > "$WORK/build.log"
+cmake -S "$WORK/src" -B "$WORK/build" -DCMAKE_BUILD_TYPE=Release -DSPIRV_CROSS_SHARED=ON -DSPIRV_CROSS_ENABLE_TESTS=OFF -DSPIRV_CROSS_SKIP_INSTALL=ON \
+    -DCMAKE_OSX_ARCHITECTURES='arm64;x86_64' -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 -DCMAKE_EXE_LINKER_FLAGS='-Wl,-S,-x' -DCMAKE_SHARED_LINKER_FLAGS='-Wl,-S,-x' > "$WORK/configure.log"
+cmake --build "$WORK/build" --target spirv-cross spirv-cross-c-shared -j "$(sysctl -n hw.ncpu)" > "$WORK/build.log"
 cp "$WORK/build/spirv-cross" "$HERE/spirv-cross"
+cp "$WORK/build/libspirv-cross-c-shared.dylib" "$HERE/libspirv-cross-c-shared.dylib"
 cp "$WORK/src/LICENSE" "$HERE/LICENSE"
 rm -rf "$HERE/LICENSES"; cp -R "$WORK/src/LICENSES" "$HERE/LICENSES"
 echo "spirv-cross $TAG ($COMMIT), $(xcodebuild -version | head -1): sha256 $(shasum -a 256 "$HERE/spirv-cross" | cut -c1-64)"

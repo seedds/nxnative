@@ -27,10 +27,11 @@ def uses_image_atomics(spv):
     with open(spv, 'rb') as f:
         data = f.read()
     words = struct.unpack('<%dI' % (len(data) // 4), data[:len(data) // 4 * 4])
-    if len(words) < 5 or words[0] != 0x07230203:
+    count = len(words)
+    if count < 5 or words[0] != 0x07230203:
         raise ValueError('not a SPIR-V module: ' + spv)
     i = 5
-    while i < len(words):
+    while i < count:
         n, op = words[i] >> 16, words[i] & 0xffff
         if op == OP_IMAGE_TEXEL_POINTER:
             return True
@@ -54,6 +55,6 @@ _EMULATED = re.compile(r'\bspvImage2DAtomicCoord\b|device\s+atomic_u?int\s*\*\s*
 
 def check_msl(source):
     """Fail closed on SPIRV-Cross's pointer emulation of image atomics; return the source unchanged"""
-    if _EMULATED.search(source):
+    if ('spvImage2DAtomicCoord' in source or 'atomic' in source) and _EMULATED.search(source):
         raise ValueError('image atomics emulated through a raw pointer; they must be native texture atomics (MSL 3.1)')
     return source

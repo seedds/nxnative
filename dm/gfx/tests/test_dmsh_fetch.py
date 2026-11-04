@@ -5,9 +5,19 @@ an early return or a uniform coefficient; a sample at gl_FragCoord.xy [/ render 
 position, scale or uniform; the variants compile for the Mac and the iPhone. With --fixture <dir>, writes t_feedback.m's tile-read shaders: fb_vs.metal, fb_fs.metal, the variant
 library fedcba9876543210_bf.metallib and facts.json (the vertex shader's screen varyings and the fragment shader's calls), and the pixel-position shader fb_pos.metal with its
 variant fedcba9876543211_bf.metallib and pos.json"""
-import json, pathlib, subprocess, sys, tempfile, unittest
+import json, pathlib, re, subprocess, sys, tempfile, unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'tools'))
 import dmsh_abi, dmsh_fetch
+
+
+class Declarations(unittest.TestCase):
+    def test_index_keeps_first_matching_declaration_and_capture_groups(self):
+        source = 'float _12 = other;\nfloat _12 = in.m_8.x;\nfloat _120 = in.m_9.x;\nfloat2 _5 = float2(_12, _19);\nfloat _12 = in.m_10.x;'
+        for ty, name, expression in [('float', '_12', r'in\.(m_\d+)\.x'), ('float2', '_5', r'float2\((_\d+), (_\d+)\)'), ('float', '_120', r'in\.(m_\d+)\.x'), ('float', '_9', r'(_\d+) / (_\d+)')]:
+            with self.subTest(name=name):
+                old = re.search(re.escape(ty + ' ' + name + ' = ') + expression + ';', source)
+                new = dmsh_fetch._decl(source, ty, name, expression)
+                self.assertEqual(old.groups() if old else None, new.groups() if new else None)
 
 # Breath of the Wild's decal vertex shader 095cd6ad97fd779a as spirv-cross writes it, cut down (a full-screen triangle with w = 2 in place of the decal box), and a branch first,
 # as Tears of the Kingdom's bb19fab2f950e587 has

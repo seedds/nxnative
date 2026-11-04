@@ -55,6 +55,24 @@ class ControlFlow(unittest.TestCase):
     def assert_no_loop(self, msl):
         self.assertNotRegex(msl[msl.index('kernel void main0'):], r'\bdo\b|\bwhile\b|\bfor\b')
 
+    def test_jump_table_load_survives_block_split(self):
+        # Decode block 3 first, then split it at 4 when block 1 branches into it.
+        # Its old successors must name block 4 as their predecessor: the LDC moved there.
+        program = [bra(0, 3, pred=0), WORK, bra(2, 4), WORK, ldc(20, 255, 0),
+                   bra(5, 8, pred=1), WORK, bra(7, 8), branch(0x949, -9 * SIZE, ra=20),
+                   EXIT, WORK, EXIT, WORK, EXIT]
+        msl = self.translate(program, struct.pack('<3i', 10 * SIZE, 12 * SIZE, 0))
+        self.assertEqual(msl.count('atomic_fetch_add'), 5, msl)
+        self.assert_no_loop(msl)
+
+    def test_split_self_loop_keeps_incoming_load(self):
+        # Splitting block 0 at its own branch target 1 moves the back edge to
+        # the right block, while the new left-to-right edge must stay intact.
+        program = [ldc(20, 255, 0), bra(1, 1, pred=0), branch(0x949, -3 * SIZE, ra=20),
+                   EXIT, WORK, EXIT, WORK, EXIT]
+        msl = self.translate(program, struct.pack('<3i', 4 * SIZE, 6 * SIZE, 0))
+        self.assertEqual(msl.count('atomic_fetch_add'), 2, msl)
+
     def test_jump_into_what_follows_the_if(self):
         # if (!P0) { if (P1) goto M; work; goto N; }  L: work;  M: work;  N: exit. The goto to N moves out of the if, and an else around L and M would leave the goto to M only a loop
         program = [bra(0, 5, pred=0), bra(1, 6, pred=1), WORK, WORK, bra(4, 8), WORK, WORK, WORK, EXIT]

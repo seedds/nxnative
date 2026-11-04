@@ -8,7 +8,7 @@
 # Filling from earlier builds: every imported library must record the current compiler identity and flags in its reflection. Legacy libraries without that identity are not imported.
 # A fresh compile of two shaders per stage also checks their bytes. Each folder is read once per compiler identity (filled.json remembers its number of libraries).
 # Not part of the chain version (dmsh_chain.py): the cache never changes an output, it only skips recompiling one. Change FORMAT when what it stores changes.
-import os, re, json, shutil, ctypes, hashlib, threading, subprocess, collections
+import os, re, json, shutil, ctypes, hashlib, threading, subprocess, collections, concurrent.futures as cf
 
 FORMAT = b'dmsh_mtlcache 2'   # earlier prefill could misclassify an unsampled library from another compiler
 OUTPUT = re.compile(r'[0-9a-f]{16}_b\.metal')   # a shader's MSL in dmsh_build.py's outputs: <key>_b.metal
@@ -33,6 +33,7 @@ class Cache:
         self.root, self.targets, self.work = root, targets, work
         self.ident = {t: hashlib.sha256(FORMAT + b'\0' + rec.encode() + b'\0' + compiler_id(sdk).encode()).digest() for t, (sdk, rec, _) in targets.items()}
         self.stats, self.lock = collections.Counter(), threading.Lock()
+        self.pending = {}   # identical concurrent requests share a compile or failure
 
     def path(self, target, src):
         d = hashlib.sha256(self.ident[target] + b'\0' + src).hexdigest()
@@ -50,7 +51,35 @@ class Cache:
         finally:
             if os.path.exists(air): os.unlink(air)
 
+    def _shared(self, target, key, action):
+        with self.lock:
+            future = self.pending.get(key)
+            owner = future is None
+            if owner: future = self.pending[key] = cf.Future()
+        assert future is not None
+        if not owner:
+            self.count((target, 'coalesced'))
+            future.result()
+            return action()   # the completed owner published every piece; this call only restores them
+        try:
+            result = action()
+            future.set_result(None)
+            return result
+        except BaseException as error:
+            future.set_exception(error)
+            raise
+        finally:
+            with self.lock: self.pending.pop(key, None)
+
     def compile(self, target, msl, lib):
+        with open(msl, 'rb') as f: key = self.path(target, f.read())
+        return self._shared(target, (key, 'whole'), lambda: self._compile_cached(target, msl, lib))
+
+    def compile_split(self, target, msl, a, b, split):
+        with open(msl, 'rb') as f: key = self.path(target, f.read())
+        return self._shared(target, (key, 'split'), lambda: self._compile_split_cached(target, msl, a, b, split))
+
+    def _compile_cached(self, target, msl, lib):
         """msl → lib for target: a clone of the library that the same source compiled to before, or a compile (then kept). Raises CalledProcessError as the compile does"""
         p = self.path(target, open(msl, 'rb').read())
         if os.path.exists(p):
@@ -60,7 +89,7 @@ class Cache:
         os.replace(tmp, lib)
         os.makedirs(os.path.dirname(p), exist_ok=True); clone(lib, p); self.count((target, 'compiled'))
 
-    def compile_split(self, target, msl, a, b, split):
+    def _compile_split_cached(self, target, msl, a, b, split):
         """msl → two libraries cut from its one compile, split(the library's bytes) → (a's bytes, b's bytes): clones of what the same source gave before, or a compile (then both kept, not the whole
         library, so an output stays a clone as compile's are). Raises CalledProcessError as the compile does, and what split raises"""
         p = self.path(target, open(msl, 'rb').read()); q = p[:-len('.metallib')] + '_x.metallib'
@@ -128,5 +157,5 @@ class Cache:
 
     def summary(self):
         s = self.stats
-        return 'Metal cache: ' + '; '.join(f'{t} {s[t, "reused"]} reused, {s[t, "compiled"]} compiled' + (f', {s[t, "filled"]} filled from earlier builds' if s[t, 'filled'] else '')
+        return 'Metal cache: ' + '; '.join(f'{t} {s[t, "reused"]} reused, {s[t, "coalesced"]} shared in flight, {s[t, "compiled"]} compiled' + (f', {s[t, "filled"]} filled from earlier builds' if s[t, 'filled'] else '')
                                           for t in self.targets)

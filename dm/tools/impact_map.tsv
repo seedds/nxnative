@@ -136,3 +136,8 @@ dm/host/motion_pro_mac.h	hle:*SixAxisSensor*	Mac Pro Controller raw motion trans
 dm/host/front.h	present:*	the front end
 dm/ios/*	*:*	the iOS app
 dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Translation/Transforms/GeometryToCompute.cs	shader:stage:gs	geometry compute input and output lowering
+dm/gfx/tools/dmsh_pch.py	shader:stage:*	precompiled Metal texture types for every NVN shader compile
+dm/gfx/tools/dmsh_scan.py	shader:stage:ps	fragment entry-point scanning
+dm/gfx/tools/dmsh_stages.py	shader:stage:*	verified intermediate shader caches
+dm/gfx/tools/dmsh_cross.py	shader:stage:*	native SPIRV-Cross conversion
+dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Decoders/Block.cs	shader:stage:*	shared shader control-flow graph splitting

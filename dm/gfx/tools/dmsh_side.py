@@ -9,7 +9,7 @@
 # keeps the cut libraries, not the whole one: a change to cut() changes what the cache holds, so it needs a new dmsh_mtlcache.FORMAT.
 # Usage: unit(msl) → (the compile unit, {'alpha': entry point names, 'logic': entry point names}), or (None, {'why': why}); cut(library bytes, names of the side library's functions) → (base bytes, side bytes)
 import re, struct
-import dmsh_alpha, dmsh_logic
+import dmsh_alpha, dmsh_logic, dmsh_scan
 
 _ENTRY = re.compile(r'^((?:\[\[[^\]]*\]\]\s*)?)fragment\s+(\w+)\s+(\w+)\s*\(', re.M)   # an attribute may come first on the line ([[ early_fragment_tests ]])
 
@@ -33,7 +33,7 @@ def entries(msl):
     """The fragment entry points in source order: attr (the text before `fragment`), ret, name, params, decl (the parameters without attributes), args, start (of the entry point), head (after its
     parameter list), end (after its body). Raises ValueError on a shape it does not know"""
     out = []
-    for m in _ENTRY.finditer(msl):
+    for m in dmsh_scan.literal_lines(_ENTRY, msl, 'fragment'):
         attr, ret, name = m.groups()
         head = _close(msl, m.end(), '(', ')')
         body = msl.find('{', head) if head >= 0 else -1

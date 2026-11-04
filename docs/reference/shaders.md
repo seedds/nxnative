@@ -938,6 +938,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): 18 `Hoian_UBER` vertex shaders, 5 of them used at boot.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_control_flow.py`.
 
+### Split shader blocks retain stale predecessor links
+
+- **Symptom:** `BRX with no target found in the c1 jump table` even though the table and its load are present and every target is valid.
+- **Cause:** `Decoders/Block.cs` moved a split block's instructions and outgoing edges to its right half without updating the successor blocks' predecessor lists. Backward jump-table lookup visited the old left half and missed the load that moved to the right half.
+- **Fix:** `Block.Split` replaces each outgoing successor's reference to the old block with the right block, before adding the new left-to-right fallthrough edge. That order also preserves a split block's self-loop and its incoming load. This repairs the general control-flow graph; no shader is skipped and no target is guessed.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md#shaders): all 16 outstanding BRX failures in the v327680 full build. Their tables were valid; all 16 translate and compile after the fix. The game note records the diagnostic and comparison with previously successful shaders.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 -m unittest dm.gfx.tests.test_dmsh_control_flow` (`test_jump_table_load_survives_block_split`, which fails before the fix, and `test_split_self_loop_keeps_incoming_load`).
+
 ### MUFU.F16
 
 - **Symptom:** `Ampere instruction 308` refused; a neural upscaler's programs missing, so the frame never reaches the window (a black 3D scene).
@@ -1569,6 +1577,42 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Measurement:** Metal CPU per pixel shader on 125 shaders of six games, three compiles to one: Pokopia 1.503 to 0.512 s with the Mac's flags and 0.830 to 0.285 s with the iPhone's; the others 0.324 to 0.114 s and 0.245 to 0.087 s. Cold builds of 1,021 Pokopia shaders (`J=10`, other jobs on the Mac): Metal compiles 2,444 to 1,095 on the Mac and 2,445 to 1,094 for iOS; the whole build's CPU 1,399 to 670 s and 959 to 451 s; wall 273 to 195 s and 232 to 127 s; libraries 359 to 358 MB. All 1,021 `_b.metal` came out unchanged, and their reflections but for the chain version and the entry point names. Not measured on a device.
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md#found-on-this-game).
 - **Check:** `test_dmsh_side.py`, `test_dmsh_alpha.py`, `test_dmsh_logic.py`, `make check_t_alpha`, `make check_t_logic`.
+### Identical shader sources race in the Metal compile cache
+
+- **Symptom:** parallel shader workers can invoke Metal more than once for identical sources in a cold cache.
+- **Cause:** `dmsh_mtlcache.Cache.compile` checked for an existing library without coordinating requests still compiling. Another worker could observe the same miss before the first published its result.
+- **Fix:** each cache holds a future per source/compiler/target key while a compile is in flight. Other workers share the result or failure, and the entry is removed after completion. Different source keys remain independent. Failed compiles leave no cached library. The summary counts requests shared in flight.
+- **Measurement:** [Pokopia's source census](../../dm/games/0400A3A01EE4C000/README.md#build-performance) found exact duplicates but no extra reuse from whitespace/comment normalization or generated-identifier renumbering. Those rewrites were not added. The concurrency test verifies one compile for eight cold identical requests, shared results and shared failures. Full-build savings remain unmeasured.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md#found-on-this-game), through source census and a deterministic concurrent cache test (resolved; full-build savings not yet measured).
+- **Check:** `test_shader_toolchain_cache.py`, `ConcurrentMetalCache`.
+
+### Shader preparation scans resource operations repeatedly
+
+- **Symptom:** after merging the pixel-shader libraries, the Python builder can occupy one CPU core while preparing the next Metal jobs.
+- **Cause:** reflection searched the entire MSL separately for each texture's size query or image atomic. Entry-point lookup also tried the full line-prefix regex throughout a large shared helper body. Fetch analysis compiled regexes containing each generated variable name and searched the source repeatedly; the atomic-emulation check scanned sources with neither marker present.
+- **Fix:** `member_calls` indexes literal member operations once per source. `dmsh_scan.literal_lines` locates the required `fragment` literal and applies the original anchored regex only to candidate lines, retaining match boundaries, qualifiers and multiline signatures in the factoring, alpha and logic tools. Fetch analysis indexes declaration positions once and matches the unchanged expression regex at those positions, retaining the first matching declaration and capture groups. The atomic check runs its regex only when a required literal exists. These alter scanning cost, not shader text or reflection results.
+- **Measurement:** [Pokopia's build performance](../../dm/games/0400A3A01EE4C000/README.md#build-performance) records real-source equality checks and CPU timings; the sustained build rate remains under measurement.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md#found-on-this-game) (resolved; full-build savings pending).
+- **Check:** `test_dmsh_reflect.py`, `test_dmsh_onelib.py`, `test_dmsh_scan.py`, `test_dmsh_fetch.py`, `test_dmsh_pool_arrays.py`.
+
+### Downstream shader changes repeat translation and source conversion
+
+- **Symptom:** changing output wrappers or Metal flags repeats the translator and SPIRV-Cross even for shaders whose initial translation is unchanged.
+- **Cause:** only completed shaders and compiled Metal libraries were cached; intermediate SPIR-V, resource reflection and initial MSL lived only in the temporary build folder.
+- **Fix:** `dmsh_stages.py` stores compressed, checksummed stage results under `cas/stages-v1/`. Translation keys include the pinned translator identities, its source and every job value, including attributes, constants and geometry topology, plus the code bytes instead of its temporary path. Initial MSL keys include the SPIR-V bytes, converter/backend identity, adapter and atomic-version rules, and arguments. Geometry readers and integer-input retranslations retain distinct entries. Only successful, complete stages are published, atomically; corrupt entries are rebuilt. Later rewrites and Metal compilation retain their own keys. `DMSH_STAGE_CACHE=0` disables this cache without changing shader coverage.
+- **Measurement:** [Pokopia's build performance](../../dm/games/0400A3A01EE4C000/README.md#build-performance) records sample timings, output equality and storage. No completed full-build timing is claimed.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md#found-on-this-game) (resolved in sample builds; full build and gameplay validation open).
+- **Check:** `test_dmsh_stages.py` (keys, corruption, concurrent publication, geometry readers, failed conversion and subprocess avoidance).
+
+### Each shader conversion launches SPIRV-Cross again
+
+- **Symptom:** each uncached MSL conversion pays for a converter process launch, including the fork from a large Python builder.
+- **Cause:** the builder used the pinned CLI for every conversion.
+- **Fix:** `dmsh_cross.py` calls the same pinned SPIRV-Cross through its C API, with an independent context per conversion; ctypes releases the GIL inside the compiler. `spirv_cross_bin/build.sh` builds the universal shared library beside the CLI; its fingerprint is checked when it is present. The backend, adapter and binary identities participate in cache keys. A missing library, an unmapped option or a conversion error uses the CLI, preserving coverage and its failure diagnostics. `DMSH_CROSS=cli` selects the CLI for comparisons.
+- **Measurement and validation:** [Pokopia's build performance](../../dm/games/0400A3A01EE4C000/README.md#build-performance) records real-module equality and timings. Synthetic tests compare concurrent compute conversions and MSL 3.1 image atomics on buffer, 2D, array and 3D textures.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md#found-on-this-game) (resolved in samples; full build and gameplay validation open).
+- **Check:** `test_dmsh_cross.py` (with `DMSH_TEST_XLATE` for atomic fixtures), `test_spirv_cross_pin.py`, and the real shader sample comparison.
+
 
 ### Concurrent warm tasks prepare each shader once
 

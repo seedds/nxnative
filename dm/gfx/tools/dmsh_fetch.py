@@ -10,27 +10,47 @@
 # whether the texel is really fetched at this pixel is proven at runtime (correspondence between vertex uv and position, a screen varying with the viewport over the whole target,
 # or U and V = 1 / the target's size; texture size = target size); if it cannot be proven, the original version is used
 import collections
+import functools
 import re
 import dmsh_abi as abi
 
 NFB = 8
 
+@functools.lru_cache(maxsize=16)
+def _assigned(msl):   # how often each name is assigned in the source: one scan per shader (a scan per name took Pokopia's 312 KB pixel shaders 3 ms each, 70 ms a shader)
+    return collections.Counter(re.findall(r'(?<![\w.])(\w+) = ', msl))
+
 def _once(msl, name):   # name is assigned exactly once in the source (its declaration): spirv-cross also declares variables first and assigns them in branches
+    if re.fullmatch(r'\w+', name): return _assigned(msl)[name] == 1
     return len(re.findall(r'(?<![\w.])%s = ' % re.escape(name), msl)) == 1
+
+@functools.lru_cache(maxsize=16)
+def _declarations(msl):
+    found = collections.defaultdict(list)
+    for match in re.finditer(r'(float2?) (\w+) = ', msl): found[match.group(1), match.group(2)].append(match.end())
+    return found
+
+def _decl(msl, ty, name, expression):
+    """Find the first matching declaration without compiling a regex containing each generated variable name."""
+    pattern = re.compile(expression + ';')
+    for at in _declarations(msl).get((ty, name), ()):
+        match = pattern.match(msl, at)
+        if match: return match
+    return None
 
 def _proj(msl, var, comp, locn):
     """var = in.m_X.<comp> / in.m_X.w, written as a product with 1.0 / w or as a quotient (each name assigned once) → m_X, or None"""
     def src(n, c):   # float n = in.m_X.c; → m_X
-        m = re.search(r'float %s = in\.(m_\d+)\.%s;' % (re.escape(n), c), msl)
+        m = _decl(msl, 'float', n, r'in\.(m_\d+)\.%s' % c)
         return m.group(1) if m and _once(msl, n) and m.group(1) in locn else None
     if not _once(msl, var): return None
-    m = re.search(r'float %s = (_\d+) \* (_\d+);' % re.escape(var), msl)
+    m = _decl(msl, 'float', var, r'(_\d+) \* (_\d+)')
     if m:
         for x, r in ((m.group(1), m.group(2)), (m.group(2), m.group(1))):
-            d = re.search(r'float %s = 1\.0 / (_\d+);' % re.escape(r), msl)
+            d = _decl(msl, 'float', r, r'1\.0 / (_\d+)')
             if d and _once(msl, r) and src(x, comp) and src(x, comp) == src(d.group(1), 'w'): return src(x, comp)
         return None
-    m = re.search(r'float %s = (_\d+) / (_\d+);' % re.escape(var), msl)
+    m = _decl(msl, 'float', var, r'(_\d+) / (_\d+)')
     return src(m.group(1), comp) if m and src(m.group(1), comp) == src(m.group(2), 'w') else None
 
 _UNI = re.compile(r'\(\*spvDescriptorSet0\.fp_c(\d+)\)\._m0\[(\d+)\]\.([xyzw])')
@@ -40,7 +60,7 @@ def _frag_pos(msl, var, comp):
     """var = gl_FragCoord.<comp> [/ render scale] * U (either order), U a fragment uniform component, each name assigned once → [uniform slot, vector, component] (fp_cN is slot N − 3,
     as dmsh_build.py raster_facts reads vp_cN), or None"""
     def one(n, pat):
-        m = re.search(r'float %s = %s;' % (re.escape(n), pat), msl)
+        m = _decl(msl, 'float', n, pat)
         return m if m and _once(msl, n) else None
     def pixel(n):   # n = gl_FragCoord.<comp>, or that over the render scale
         if one(n, r'gl_FragCoord\.%s' % comp): return True
@@ -191,8 +211,8 @@ def variant(msl, bindings, om_only_ok=False):
     for m in pat.finditer(msl):
         member, var = m.group(2), m.group(4)
         if member not in tex or member != m.group(3) or member not in reg: continue
-        d = re.search(r'float2 %s = float2\((_\d+), (_\d+)\);' % var, msl)
-        a = d and re.search(r'float %s = in\.(m_\d+)\.x;' % d.group(1), msl); b = d and re.search(r'float %s = in\.(m_\d+)\.y;' % d.group(2), msl)
+        d = _decl(msl, 'float2', var, r'float2\((_\d+), (_\d+)\)')
+        a = d and _decl(msl, 'float', d.group(1), r'in\.(m_\d+)\.x'); b = d and _decl(msl, 'float', d.group(2), r'in\.(m_\d+)\.y')
         if a and b and a.group(1) == b.group(1) and a.group(1) in locn: how = {'varying_locn': locn[a.group(1)]}
         else:
             pa, pb = (_proj(msl, d.group(1), 'x', locn), _proj(msl, d.group(2), 'y', locn)) if d else (None, None)

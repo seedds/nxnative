@@ -1325,7 +1325,8 @@ void front_run(void (*guest)(void)) {
         NSWindow *win = [[NSWindow alloc] initWithContentRect:r
                                                     styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
                                                       backing:NSBackingStoreBuffered defer:NO];
-        win.title = @DM_GAME_NAME;   // the game profile's name (game name label)
+        const char *dm_title = getenv("DM_WINDOW_TITLE");   // a front end that starts the host names the window
+        win.title = dm_title && *dm_title ? [NSString stringWithUTF8String:dm_title] : @DM_GAME_NAME;   // else the game profile's name (game name label)
         // Fullscreen: without FullScreenPrimary the green button only zooms the window. The present path already scales
         // the game picture to fit the drawable with black bars around it, so fullscreen keeps the game's aspect ratio.
         win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;

@@ -39,7 +39,7 @@ static int g_trace3d;   // the 3D bitmap phase began: log the GL calls that foll
 static void patch_copy_image_slot(void);
 #define TLOG(...) do { if (g_trace3d > 0) GLOG(__VA_ARGS__); } while (0)
 static int g_log;
-static int g_bc;   // the Metal device supports BC texture compression (A16 does not: compressed uploads are decoded)
+static int g_bc;   // the Metal device samples BC texture compression; a device without it is refused compressed uploads (no decoder in this build)
 #define OLOG(...) do { if (g_log) GLOG(__VA_ARGS__); } while (0)
 
 typedef uint32_t GLenum, GLuint, GLbitfield; typedef int32_t GLint, GLsizei; typedef float GLfloat; typedef double GLdouble; typedef char GLchar; typedef intptr_t GLsizeiptr, GLintptr;
@@ -216,8 +216,7 @@ static void dev_init_once(void) {
         g_log = getenv("DM_GL_LOG") && atoi(getenv("DM_GL_LOG"));
         g_dev = (__bridge id<MTLDevice>)mtl_device_classic();
         g_bc = [g_dev supportsBCTextureCompression];
-        if (getenv("DM_GL_NO_BC")) g_bc = 0;   // development: take the A16 path (decode compressed uploads) on a device that has BC, to compare the two
-        GLOG("BC texture compression: %s%s", g_bc ? "yes" : "no (compressed uploads are decoded to RGBA8/R8)", getenv("DM_GL_NO_BC") ? " (DM_GL_NO_BC)" : "");
+        GLOG("BC texture compression: %s", g_bc ? "yes" : "no (a compressed upload is refused: this build carries no decoder)");
         g_q = [g_dev newCommandQueueWithMaxCommandBufferCount:64]; g_q.label = @"gl";
         g_ev = [g_dev newSharedEvent];
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:1 height:1 mipmapped:NO];
@@ -495,21 +494,6 @@ static const fmt_t g_fmt[F_N] = {
 // internal format (+ format / type for unsized ones) → fmt and the conversion of the given data; -1 when not mapped
 static int fmt_pick(GLint ifmt, GLenum format, GLenum type, int *cv) {
     *cv = CV_COPY;
-    if (!g_bc) {   // no BC hardware: decompress on upload, upload into an uncompressed Metal format
-        switch (ifmt) {
-            case GL_COMPRESSED_RGB_S3TC_DXT1: case GL_COMPRESSED_RGBA_S3TC_DXT1: *cv = CV_BC1; return F_RGBA8;
-            case GL_COMPRESSED_RGBA_S3TC_DXT3: *cv = CV_BC2; return F_RGBA8;
-            case GL_COMPRESSED_RGBA_S3TC_DXT5: *cv = CV_BC3; return F_RGBA8;
-            case GL_COMPRESSED_SRGB_S3TC_DXT1: case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1: *cv = CV_BC1; return F_SRGBA8;
-            case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3: *cv = CV_BC2; return F_SRGBA8;
-            case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5: *cv = CV_BC3; return F_SRGBA8;
-            case GL_COMPRESSED_RED_RGTC1: case GL_COMPRESSED_SIGNED_RED_RGTC1: *cv = CV_BC4; return F_R8;
-            case GL_COMPRESSED_RG_RGTC2: case GL_COMPRESSED_SIGNED_RG_RGTC2: *cv = CV_BC5; return F_RG8;
-            case GL_COMPRESSED_RGBA_BPTC_UNORM: *cv = CV_BC7; return F_RGBA8;
-            case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM: *cv = CV_BC7; return F_SRGBA8;
-            case GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT: case GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT: *cv = CV_BC6H; return F_RGBA16F;
-        }
-    }
     if (format == GL_COLOR_INDEX) { *cv = type == GL_UNSIGNED_BYTE ? CV_INDEX : CV_NONE; return F_RGBA8; }
     if (type == GL_UNSIGNED_SHORT_5_6_5) { *cv = CV_565; return F_RGBA8; }
     if (type == GL_UNSIGNED_SHORT_4_4_4_4) { *cv = CV_4444; return F_RGBA8; }
@@ -578,44 +562,15 @@ static int fmt_pick(GLint ifmt, GLenum format, GLenum type, int *cv) {
 }
 static size_t fmt_pitch(int f, uint32_t w) { const fmt_t *m = &g_fmt[f]; return (size_t)((w + m->bw - 1) / m->bw) * m->bytes; }
 static size_t fmt_rows(int f, uint32_t h) { const fmt_t *m = &g_fmt[f]; return (h + m->bh - 1) / m->bh; }
-// BC decoding (dm/third_party/bcdec, also used by the NVN layer): A16 has no BC hardware, so a compressed upload becomes RGBA8/R8/RG8. The nvn_bcdec.c
-// translation unit has the implementations; these are its prototypes with the BC4/BC5 signed flag it is compiled with.
-extern void bcdec_bc1(const void *, void *, int);
-extern void bcdec_bc2(const void *, void *, int);
-extern void bcdec_bc3(const void *, void *, int);
-extern void bcdec_bc4(const void *, void *, int, int);
-extern void bcdec_bc5(const void *, void *, int, int);
-extern void bcdec_bc7(const void *, void *, int);
+// BC blocks: the source sizes a compressed upload needs, in bytes. This build carries no decoder (a GPU that does not sample BC is refused such an upload), so the
+// blocks go to Metal as they are
 static int bc_block_bytes(int cv) { return cv == CV_BC1 || cv == CV_BC4 ? 8 : 16; }
-static int bc_pixel_bytes(int cv) { return cv == CV_BC4 ? 1 : cv == CV_BC5 ? 2 : 4; }
 static size_t bc_src_size(int cv, uint32_t w, uint32_t h) { return (size_t)((w + 3) / 4) * ((h + 3) / 4) * bc_block_bytes(cv); }
-static void bc_decode(int cv, const uint8_t *src, size_t sp, uint32_t w, uint32_t h, uint8_t *dst, size_t dp) {
-    if (!src) return;
-    int bb = bc_block_bytes(cv), bpp = bc_pixel_bytes(cv);
-    for (uint32_t by = 0; by * 4 < h; by++) for (uint32_t bx = 0; bx * 4 < w; bx++) {
-        const uint8_t *b = src + by * sp + bx * bb;
-        uint32_t cw = w - bx * 4 < 4 ? w - bx * 4 : 4, ch = h - by * 4 < 4 ? h - by * 4 : 4;
-        uint8_t *o = dst + (size_t)by * 4 * dp + (size_t)bx * 4 * bpp, tmp[4 * 4 * 4];
-        int full = cw == 4 && ch == 4;
-        uint8_t *d = full ? o : tmp; int pitch = full ? (int)dp : 4 * bpp;
-        switch (cv) {
-            case CV_BC1: bcdec_bc1(b, d, pitch); break;
-            case CV_BC2: bcdec_bc2(b, d, pitch); break;
-            case CV_BC3: bcdec_bc3(b, d, pitch); break;
-            case CV_BC4: bcdec_bc4(b, d, pitch, 0); break;
-            case CV_BC5: bcdec_bc5(b, d, pitch, 0); break;
-            case CV_BC7: bcdec_bc7(b, d, pitch); break;
-            default: memset(d, 0, 4 * pitch); break;
-        }
-        if (!full) for (uint32_t y = 0; y < ch; y++) memcpy(o + y * dp, tmp + y * pitch, cw * bpp);
-    }
-}
 
 // The given pixels (GL unpack rules: rows of unpack_row or w pixels, each row aligned to unpack_align) → the Metal texture's bytes, rows packed. NULL data → zeros
 static void *pixels_convert(const void *src, uint32_t w, uint32_t h, GLenum format, GLenum type, int f, int cv, size_t *pitch_out) {
     size_t dp = fmt_pitch(f, w), rows = fmt_rows(f, h);
     uint8_t *dst = zalloc(dp * rows + 1); *pitch_out = dp;
-    if (cv >= CV_BC1) { bc_decode(cv, src, (size_t)((w + 3) / 4) * bc_block_bytes(cv), w, h, dst, dp); return dst; }
     if (!src) return dst;
     if (g_fmt[f].kind == K_BLOCK) { memcpy(dst, src, dp * rows); return dst; }   // compressed data has no unpack rows
     static const int comps_of[] = {[GL_RED - GL_RED] = 1, [GL_GREEN - GL_RED] = 1, [GL_BLUE - GL_RED] = 1, [GL_ALPHA - GL_RED] = 1, [GL_RGB - GL_RED] = 3, [GL_RGBA - GL_RED] = 4,
@@ -936,6 +891,7 @@ static void tex_image(GLenum target, GLint level, int f, int cv, uint32_t w, uin
     tex_t *t = target == GL_TEXTURE_2D || (target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z) ? bound_tex(target) : NULL;
     int face = target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z ? (int)(target - GL_TEXTURE_CUBE_MAP_POSITIVE_X) : 0;
     if (!t || level < 0 || level >= MAXLV) { RED1("glTexImage2D target %#x level %d with no texture bound", target, level); free(conv); return; }
+    if (!g_bc && cv >= CV_BC1) { RED1("a compressed upload on a GPU that samples no BC formats (this build carries no decoder)"); free(conv); return; }
     if (cv >= CV_BC1 && !t->made && !t->defined) t->bc = cv;
     (void)cv;
     uint32_t w0 = level ? w << level : w, h0 = level ? h << level : h;
@@ -1616,8 +1572,8 @@ static const char *const g_exts[] = {"GL_ARB_ES3_2_compatibility", "GL_ARB_ES3_c
     "GL_ARB_copy_image", "GL_NV_copy_image",
     "GL_EXT_texture_compression_s3tc", "GL_ARB_texture_compression_bptc", "GL_ARB_texture_compression_rgtc"};
 #define NEXTS (int)(sizeof g_exts / sizeof *g_exts)
-// BC formats are advertised only on devices that can sample them (A16 cannot: there the uploads are decoded to RGBA8/R8/RG8). The entries stay in the array so the
-// index mapping is stable; the queries below skip them when the device has no BC hardware.
+// BC formats are advertised only on devices that can sample them: there is no decoder to fall back on, so on one that cannot the game is told the formats are absent
+// and a compressed upload is refused rather than stored as garbage. The entries stay in the array so the index mapping is stable; the queries skip them.
 static int ext_on(int i) {
     if (g_bc) return 1;
     const char *n = g_exts[i];
@@ -1986,6 +1942,7 @@ static void tex_storage(GLenum target, GLsizei levels, GLenum ifmt, GLsizei w, G
     tex_t *t = bound_tex(target);
     int cv, f = fmt_pick((GLint)ifmt, 0, 0, &cv);
     if (!t || f < 0 || levels <= 0 || w <= 0 || h <= 0 || d <= 0) { RED1("glTexStorage(%#x, %d levels, %#x, %dx%dx%d) not implemented", target, levels, ifmt, w, h, d); return; }
+    if (!g_bc && cv >= CV_BC1) { RED1("a compressed texture (%s) on a GPU that samples no BC formats (this build carries no decoder)", g_fmt[f].name); return; }
     if (t->made || t->defined) tex_drop(t);
     t->fmt = f; t->bc = cv >= CV_BC1 ? cv : 0; t->w = w; t->h = h; t->d = d; t->slevels = levels; t->smp_dirty = 1;
 }

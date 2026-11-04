@@ -71,6 +71,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 X(op, InstName.Nop, InstEmit.ANop, InstProps.None, writesRd: false);
             }
 
+            // 0xf55 and 0xf56 move convergence barrier B15 to and from R26 around warp shuffles (BMOV): Hyrule Warriors: Age of Imprisonment's pixel shaders
+            // 02e49c189b769074 and 49241cf469c76830 save it before each block of SHFL and restore it after, 16 times each. With the barriers themselves no-ops,
+            // they are too: no other instruction reads R26 after them, and the general register next to the barrier field (R15) is read live by an FMUL.
+            foreach (int op in new[] { 0xf55, 0xf56 })
+            {
+                X(op, InstName.Nop, InstEmit.ANop, InstProps.None, writesRd: false);
+            }
+
             InstEmit.RegisterAmpereAlu(Alu, X);
             InstEmit.RegisterAmpereMemory(X);
             InstEmit.RegisterAmpereTensor(X);
@@ -106,6 +114,17 @@ namespace Ryujinx.Graphics.Shader.Instructions
         }
 
         public static bool HasUniformGuard(int opcode) => TryGet(opcode, out Entry e) && e.UniformGuard;
+
+        // Whether the instruction reads a constant buffer word with its bank in bits 54..59: LDC, ULDC, or an ALU operation in form 3 or 5 (a uniform one has neither)
+        public static bool ReadsConstantBank(AmpereOp x)
+        {
+            if (x.Opcode is AmpereOpcodes.Ldc or 0xab9 or 0xabb)
+            {
+                return true;
+            }
+
+            return !_exact.ContainsKey(x.Opcode) && _alu.TryGetValue(x.Opcode & 0x1ff, out Entry e) && !e.UniformGuard && x.Form is 3 or 5;
+        }
 
         public static bool WritesRd(int opcode) => !TryGet(opcode, out Entry e) || e.WritesRd;
     }

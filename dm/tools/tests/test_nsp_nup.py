@@ -57,7 +57,7 @@ def write_nup(path, packages):
         return t
     recs = []
     for kind, tid, ver, tree, meta in packages:
-        t = {k: nest(v) for k, v in tree.items()}
+        t = {k: v if k == 'exefs' else nest(v) for k, v in tree.items()}
         root = walk('', t)
         sub = {n: s[1] for n, s in zip(sorted(t), slots[dirs[root][1]:dirs[root][1] + dirs[root][2]])}
         recs.append([tid, root, sub.get('exefs', 0xFFFFFFFF), sub.get('romfs', 0xFFFFFFFF), ver, kind, meta])
@@ -118,6 +118,27 @@ class Base(unittest.TestCase):
 
     def open(self):
         n = pack_nup.Nup(self.path); self.addCleanup(n.close); return n
+
+
+class ExeFSNames(unittest.TestCase):
+    def test_rejects_names_that_are_not_path_components(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            target = root / 'sentinel'
+            target.write_bytes(b'original')
+            archive = root / 'game.nup'
+            dst = root / 'build' / 'ExeFS'
+            for name in (str(target), '../sentinel', 'nested/file', '', '.', '..', 'bad\0name'):
+                with self.subTest(name=name):
+                    tree = {'exefs': {name: b'overwritten'}}
+                    write_nup(archive, [(0, TID, 0, tree, b'')])
+                    try:
+                        with pack_nup.Nup(archive) as n:
+                            with self.assertRaisesRegex(pack_nup.Error, 'invalid ExeFS name'):
+                                pack_nup.exefs(n, n.packages[0], dst)
+                    finally:
+                        self.assertEqual(target.read_bytes(), b'original')
+                    self.assertFalse(dst.with_name('ExeFS.partial').exists())
 
 
 class Read(Base):
@@ -222,6 +243,22 @@ class Pack(Base):
         pack_nup.pack_dlc(n, app, dlc, aoc, say=lambda s: None)
         self.assertEqual(sorted(p.name for p in aoc.iterdir()), ['1.img', '1.img.inputs.json'])
         self.assertIn('dlcfile', romfs_image.read_index(aoc / '1.img'))
+
+    def test_nsp_dlc_not_reused_after_nup(self):   # the NUP packs into the aoc/ the NSP extraction keyed: the same NSPs again extract again
+        n = self.open(); app, _, _, dlc = pack_nup.scan(n)
+        work, logs, p = self.out(), self.out() / 'logs', self.dir / 'dlc.nsp'
+        logs.mkdir(parents=True); p.write_bytes(b'nsp')
+        runs = []
+        def extract(argv, log, **kw): runs.append(argv); Path(argv[4]).parent.mkdir(parents=True, exist_ok=True); Path(argv[4]).write_bytes(b'from the NSP')
+        nsp_fam, nup_fam = {'dlc': [(TID + 0x1001, 0, p)]}, {'dlc': [(t, None, k) for t, k in dlc.items()], 'nup': n}
+        with mock.patch.object(nsp, 'run', side_effect=extract), mock.patch.object(nsp, 'is_merged', return_value=False):
+            for fam in (nsp_fam, nsp_fam, nup_fam): aoc = nsp.extract_aoc('nx', 'keys', REPO, work, app, fam, logs)
+            self.assertEqual(len(runs), 1)   # reused while the NSPs and aoc/ are unchanged
+            self.assertIn('dlcfile', romfs_image.read_index(aoc / '1.img'))
+            nsp.extract_aoc('nx', 'keys', REPO, work, app, nsp_fam, logs)
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(sorted(f.name for f in aoc.iterdir()), ['1.img'])
+        self.assertEqual((aoc / '1.img').read_bytes(), b'from the NSP')
 
 
 class Stop(Exception): pass

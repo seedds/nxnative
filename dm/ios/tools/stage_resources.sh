@@ -23,6 +23,12 @@ case "$DM_RESOURCE_MSLDIR" in b-*)
     [ "$DM_RESOURCE_MSLDIR" = "b-$V" ] || die "The prepared shaders are chain $DM_RESOURCE_MSLDIR, the sources are now at b-$V: prepare the game again (build_ipa_from_nsp.py --prepare-xcode)";;
 esac
 echo 'Copy game resources (the first build copies the complete game; later builds sync changes)'
+# A first copy into an empty place is an APFS clone (cp -c, clonefile): the game's files take no more disk space until either side changes, where rsync wrote all of them again
+# (BotW's app is 16.5 GB; a full copy filled a Mac that had 13 GB free). cp falls back to a plain copy on a volume without clones. Later builds sync with rsync as before
+sync_dir() {   # source folder, destination folder
+    if [ ! -d "$2" ] || [ -z "$(ls -A "$2" 2>/dev/null)" ]; then mkdir -p "$2"; /bin/cp -cRp -- "$1/." "$2/" || die "copy $1 to $2"
+    else /usr/bin/rsync -a --delete -- "$1/" "$2/" || die "sync $1 to $2"; fi
+}
 mkdir -p "$APP/msl/$DM_RESOURCE_MSLDIR"
 # DM_COPY_ROMFS=NO: the game files stay out of the app (main.m takes Documents/romfs first, copied there once): a reinstall then sends the code and shaders, not the whole game
 if [ "${DM_COPY_ROMFS:-YES}" = NO ]; then
@@ -32,26 +38,24 @@ if [ "${DM_COPY_ROMFS:-YES}" = NO ]; then
         python3 -I "$resource_dm/tools/romfs_image.py" --identity "$DM_RESOURCE_ROMFS" "${DM_RESOURCE_TITLE:-}" "${DM_RESOURCE_VERSION:-}" "${DM_RESOURCE_BUILD:-}" > "$APP/romfs.id" || die "identity of $DM_RESOURCE_ROMFS"
     fi
 elif [ -f "$DM_RESOURCE_ROMFS" ]; then
-    /usr/bin/rsync -a -- "$DM_RESOURCE_ROMFS" "$APP/romfs.img"
+    if [ -f "$APP/romfs.img" ]; then /usr/bin/rsync -a -- "$DM_RESOURCE_ROMFS" "$APP/romfs.img"; else /bin/cp -cp -- "$DM_RESOURCE_ROMFS" "$APP/romfs.img" || die "copy $DM_RESOURCE_ROMFS"; fi
     rm -rf "$APP/romfs"; rm -f "$APP/romfs.id"
 else
-    mkdir -p "$APP/romfs"; /usr/bin/rsync -a --delete -- "$DM_RESOURCE_ROMFS/" "$APP/romfs/"
+    sync_dir "$DM_RESOURCE_ROMFS" "$APP/romfs"
     rm -f "$APP/romfs.img" "$APP/romfs.id"
 fi
-/usr/bin/rsync -a --delete -- "$DM_RESOURCE_SHADERS/" "$APP/msl/$DM_RESOURCE_MSLDIR/"
+sync_dir "$DM_RESOURCE_SHADERS" "$APP/msl/$DM_RESOURCE_MSLDIR"
 for old in "$APP/msl/"*; do
     [ "$old" = "$APP/msl/$DM_RESOURCE_MSLDIR" ] || rm -rf "$old"
 done
 if [ -n "$DM_RESOURCE_AOC" ]; then
-    mkdir -p "$APP/aoc"
-    /usr/bin/rsync -a --delete -- "$DM_RESOURCE_AOC/" "$APP/aoc/"
+    sync_dir "$DM_RESOURCE_AOC" "$APP/aoc"
 else
     rm -rf "$APP/aoc"
 fi
 # The pipeline archive made offline (the shader pairs' bases, build_ipa.sh): the app hands <App>/pso to the host as DM_PSO_BUNDLE
 if [ -n "$DM_RESOURCE_PSO" ]; then
-    mkdir -p "$APP/pso"
-    /usr/bin/rsync -a --delete -- "$DM_RESOURCE_PSO/" "$APP/pso/"
+    sync_dir "$DM_RESOURCE_PSO" "$APP/pso"
 else
     rm -rf "$APP/pso"
 fi

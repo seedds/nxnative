@@ -96,6 +96,13 @@ def main():
                            (shaders / marker, app / 'msl' / f'b-{chain}' / marker)):
         if source.read_bytes() != packed.read_bytes():
             raise RuntimeError(f'Resource staging failed: {packed}')
+    for table in (ios / 'Sources/Resources').glob('*.lproj/Launcher.strings'):
+        packed = app / table.parent.name / table.name
+        # Xcode may compile .strings to a binary plist, so compare their parsed contents.
+        source_strings = json.loads(run('plutil', '-convert', 'json', '-o', '-', table, capture=True).stdout)
+        packed_strings = json.loads(run('plutil', '-convert', 'json', '-o', '-', packed, capture=True).stdout)
+        if source_strings != packed_strings:
+            raise RuntimeError(f'Launcher localization staging failed: {packed}')
     if (app / '_CodeSignature').exists() or (app / 'embedded.mobileprovision').exists():
         raise RuntimeError('The smoke-test app must be unsigned')
     print(f'iOS smoke build passed: {executable}', flush=True)

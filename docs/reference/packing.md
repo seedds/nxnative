@@ -276,6 +276,15 @@
 - **Fix:** keep only complete lines at the two read boundaries before redaction, using the byte before the tail to distinguish a complete first line from a fragment. The omitted-byte count includes the discarded fragments; reading stays bounded. Files within the limit and a complete final line without a newline are unchanged.
 - **Found on:** synthetic logs in `dm/tools/tests/test_bug_report.py`, including a key value surviving in the final zip on the old code. No game files or real keys are needed; this is a diagnostic collector finding, not a game-runtime failure.
 
+## Launcher text
+
+### Launcher buttons and settings cannot be translated
+
+- **Symptom:** the iOS and Mac launchers show English settings and buttons regardless of the app's language, and contributors must edit source code to translate them.
+- **Cause:** UI literals have no bundled string table; dynamic labels from `launcher.json` are rendered verbatim and have no translation keys.
+- **Fix:** both launchers look up a shared `Launcher.strings` table. The settings generator adds optional stable keys while retaining English fallbacks and the original values. Both app packers include the locale resources. The translation and compatibility contract is in [Translating the built-in launchers](../frontends.md#translating-the-built-in-launchers).
+- **Found on:** [issue #775](https://github.com/seedds/nxnative/issues/775), covering both launchers.
+
 ## IPA archives
 
 ### AltServer cannot install a file of 2 GiB or more

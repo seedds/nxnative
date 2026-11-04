@@ -8,12 +8,13 @@
 // Only success matters for the failures: the game checks IsSuccess only, so a failure code is a non-zero value under the ro module number 22.
 #include "hle.h"
 #include <CommonCrypto/CommonDigest.h>
+#include <unistd.h>
 
 #define RO_FAIL ((Result)(22 | (1 << 9)))   // a failure under ro module 22
 #define RO_NOT_NRO ((Result)0x816)           // the SDK's result for an image without NRO0 (sdk+0x3471e8)
 static pthread_mutex_t g_ro_mu = PTHREAD_MUTEX_INITIALIZER;   // the SDK holds g_RoLock over a load as well
 
-HLE_FORCE("_ZN2nn2ro10InitializeEv", "connect to the ldr:ro service; the host has none, symbol lookups search the loaded modules directly", Result, h_ro_Initialize, void) { LOG("init takeover: ro::Initialize (no-op)"); return 0; }
+HLE_FORCE("_ZN2nn2ro10InitializeEv", "connect to the ldr:ro service; the host has none, symbol lookups search the loaded modules directly", Result, h_ro_Initialize, void) { LOG("init takeover: ro::Initialize (no-op)"); dm_thread_service_connect(); return 0; }
 
 HLE_FORCE("_ZN2nn2ro12LookupSymbolEPmPKc", "look up a definition by name in the loaded modules", Result, h_ro_LookupSymbol, uintptr_t *out, const char *name) {
     void *p = name ? guest_sym(name) : NULL;
@@ -49,6 +50,19 @@ HLE_FORCE("_ZN2nn2ro13GetBufferSizeEPmPKv", "the bss size from the NRO header, a
     return 0;
 }
 
+// A game may decode a module at run time, so that no file holds it for dm/tools/nro_collect.py (Mario Tennis Fever: main is a boot stub, nxboot, whose threads decode the game's one NRO out of
+// main's data segment). DM_NRO_CAPTURE=<dir> writes the image of a LoadModule the host has no rewritten copy of to <dir>/<SHA-256>.nro and ends the run; the NSP script rewrites it like any NRO
+static void capture_nro(const uint8_t *h, uint32_t n, const uint8_t sha[32]) {
+    const char *dir = getenv("DM_NRO_CAPTURE");
+    if (!dir) return;
+    char hex[65], path[1024], tmp[1040]; for (int k = 0; k < 32; k++) snprintf(hex + 2 * k, 3, "%02x", sha[k]);
+    snprintf(path, sizeof path, "%s/%s.nro", dir, hex); snprintf(tmp, sizeof tmp, "%s.partial", path);
+    FILE *f = fopen(tmp, "wb");
+    if (!f || fwrite(h, 1, n, f) != n || fclose(f) || rename(tmp, path)) die("DM_NRO_CAPTURE: cannot write %s", path);
+    LOG("ro::LoadModule: captured %s (%u bytes)", path, n);
+    fflush(NULL); _exit(0);
+}
+
 HLE_FORCE("_ZN2nn2ro10LoadModuleEPNS0_6ModuleEPKvPvmi", "load an NRO rewritten offline (loader.c): found by the image's SHA-256, relocated against the loaded modules, its init called",
           Result, h_ro_LoadModule, void *mod, const void *image, void *buf, size_t size, int flag) {
     const uint8_t *h = image;
@@ -63,7 +77,7 @@ HLE_FORCE("_ZN2nn2ro10LoadModuleEPNS0_6ModuleEPKvPvmi", "load an NRO rewritten o
     if (nro_refused(sha)) { LOG("ro::LoadModule: refused %s… (%u bytes): an online SDK (Epic Online Services), not loaded; the game plays offline", hx, n); return RO_FAIL; }
     pthread_mutex_lock(&g_ro_mu);
     module_t *m = nro_find(sha);
-    if (!m) { pthread_mutex_unlock(&g_ro_mu); LOG("[RED] ro::LoadModule: no rewritten NRO with SHA-256 %s… (%u bytes): it is not in the patched modules' nro.tsv", hx, n); return RO_FAIL; }
+    if (!m) { capture_nro(h, n, sha); pthread_mutex_unlock(&g_ro_mu); LOG("[RED] ro::LoadModule: no rewritten NRO with SHA-256 %s… (%u bytes): it is not in the patched modules' nro.tsv", hx, n); return RO_FAIL; }
     if (module_sym(m, "EOS_Platform_Create")) { pthread_mutex_unlock(&g_ro_mu); LOG("ro::LoadModule: refused %s (%s…): an online SDK (Epic Online Services), not loaded; the game plays offline", m->name, hx); return RO_FAIL; }
     if (m->loaded) { pthread_mutex_unlock(&g_ro_mu); LOG("[RED] ro::LoadModule: %s (%s…) is loaded already", m->name, hx); return RO_FAIL; }
     if (m->nro_size != n) LOG("[RED] ro::LoadModule: %s is %u bytes, nro.tsv says %u", m->name, n, m->nro_size);
@@ -98,7 +112,8 @@ HLE_FORCE("_ZN2nn2ro12UnloadModuleEPNS0_6ModuleE", "unload an NRO: its fini, the
 HLE_FORCE("_ZN2nn2ro18RegisterModuleInfoEPNS0_16RegistrationInfoEPKv", "register an NRR: nothing to check, the host's NROs were collected by its hashes", Result, h_ro_RegisterModuleInfo, void *info, const void *nrr) {
     const uint8_t *r = nrr;
     if (!r || memcmp(r, "NRR0", 4)) return RO_FAIL;
-    uint32_t off = *(const uint32_t *)(r + 0x340), cnt = *(const uint32_t *)(r + 0x344), refused = 0;
+    // Version 1 (the byte at +5; the Switch 2's: Mario Tennis Fever) has a header 0x180 bytes longer, the same fields after it: program ID +0x4b0, size +0x4b8, hash table +0x4c0, count +0x4c4
+    size_t hdr = r[5] == 1 ? 0x4c0 : 0x340; uint32_t off = *(const uint32_t *)(r + hdr), cnt = *(const uint32_t *)(r + hdr + 4), refused = 0;
     for (uint32_t i = 0; i < cnt; i++) refused += nro_refused(r + off + 32 * i);
     // An NRR that registers only online SDKs the host refuses (Hades and Hades II: game.nrr with the one EOS SDK hash) fails as every registration did before the host loaded NROs,
     // so such a game takes the path it took then (it never asked for the module)

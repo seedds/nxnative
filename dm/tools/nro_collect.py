@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Collect the NRO modules a game registers (nn::ro): every SHA-256 its NRR files list (RomFS .nrr/*.nrr), found as loose files or inside the RomFS's archives.
-Usage: nro_collect.py <RomFS> <out dir> [<nrr name>]
+Usage: nro_collect.py <RomFS> <out dir> [<nrr name>] [--missing-ok]
 Writes <out dir>/<name>.nro for each registered NRO found and <out dir>/nro.tsv (name, SHA-256, size, NRR, where it was found); exits 1 when a registered hash is not found.
+With --missing-ok such a hash goes to <out dir>/missing.tsv (SHA-256, NRR) instead: a game may decode its NRO at run time, so that no file holds it (Mario Tennis Fever), and the NSP script then captures it from a boot.
 An online SDK (ONLINE_SDKS: Epic Online Services, by its export EOS_Platform_Create) is listed with the name 'refused' and not written: the host refuses to load it.
 <nrr name> picks one NRR (default: every NRR; Super Smash Bros. Ultimate 13.0.5 ships 14, one per release, cross2_130004.nrr the newest, with the 98 current hashes).
 The game passes nn::ro::LoadModule the NRO's bytes; the host finds the rewritten copy by that SHA-256 (hle_ro.c), so the names here are only labels: nro<index> in hash order.
 Where: a loose file whose bytes at +0x10 are NRO0 (Hades and Hades II ship their EOS SDK so); the .nro files among the current files of an archive with an index (Super Smash Bros. Ultimate's data.arc,
 read by dm/gfx/tools/smash_arc.py: 98 NROs, while the NRRs of every older release also register 666 superseded copies the archive still holds, which are left out); else a scan of the
-other RomFS files for stored NROs and zstd frames that inflate to one (on data.arc: all 764 registered hashes in 7 minutes)."""
+other RomFS files for stored NROs and zstd frames that inflate to one (on data.arc: all 764 registered hashes in 7 minutes); and NERD's Hagi .nrolz files, an NRO compressed with
+LZ4 (the uncompressed size as a big-endian u32, then one LZ4 block), which Hagi unpacks and loads (Super Mario 3D All-Stars' Super Mario Sunshine: its statically recompiled game)."""
 import hashlib, struct, sys
 from multiprocessing import Pool
 from romfs import os, open, mmap
@@ -30,7 +32,7 @@ def nrr_hashes(romfs, only=None):
             if not f.endswith('.nrr') or (only and f != only): continue
             d = open(os.path.join(dp, f), 'rb').read()
             if d[:4] != b'NRR0': continue
-            off, cnt = struct.unpack_from('<II', d, 0x340)
+            off, cnt = struct.unpack_from('<II', d, 0x4c0 if d[5] == 1 else 0x340)   # version 1, the Switch 2's (Mario Tennis Fever), has a header 0x180 bytes longer
             for i in range(cnt): out.setdefault(d[off + 32 * i:off + 32 * i + 32], f)
     return out
 
@@ -90,8 +92,9 @@ def online_sdk(body):   # the online SDK an NRO is (by its exports), or None
 
 
 def main():
-    romfs, out = sys.argv[1], sys.argv[2]
-    want = nrr_hashes(romfs, sys.argv[3] if len(sys.argv) > 3 else None)
+    args = [a for a in sys.argv[1:] if a != '--missing-ok']; missing_ok = len(args) != len(sys.argv) - 1
+    romfs, out = args[0], args[1]
+    want = nrr_hashes(romfs, args[2] if len(args) > 2 else None)
     if not want: sys.exit(f'no NRR file with hashes in {romfs}')
     os.makedirs(out, exist_ok=True)
     found, big, indexed = {}, [], 0
@@ -102,6 +105,15 @@ def main():
             p = os.path.join(dp, f); sz = os.path.getsize(p)
             if f.endswith('.nrr') or sz < 0x40: continue
             with open(p, 'rb') as fh: head = fh.read(0x40)
+            if f.lower().endswith('.nrolz'):   # NERD's Hagi: LZ4 block behind its big-endian uncompressed size
+                import lz4.block
+                raw = open(p, 'rb').read()
+                try: body = lz4.block.decompress(raw[4:], uncompressed_size=struct.unpack('>I', raw[:4])[0])
+                except Exception: body = b''
+                if nro_size(body[:0x40]) == len(body):
+                    h = hashlib.sha256(body).digest()
+                    if h in want: found[h] = (os.path.relpath(p, romfs), 'lz4', body)
+                continue
             if nro_size(head) == sz:
                 body = open(p, 'rb').read(); h = hashlib.sha256(body).digest()
                 if h in want: found[h] = (os.path.relpath(p, romfs), 'loose', body)
@@ -115,7 +127,7 @@ def main():
                         body = smash_arc.read(m, e); h = hashlib.sha256(body).digest()
                         if h in want: found[h] = (f'{os.path.relpath(p, romfs)}#{e[0]:010x}', 'index', body)
                         else: print(f'[RED] {os.path.relpath(p, romfs)}#{e[0]:010x}: an NRO that no NRR registers')
-            else: big.append((p, sz))
+            elif head[:4] != b'CRA.': big.append((p, sz))   # Camelot's archive is scrambled, so no scan can find anything in it (dm/gfx/tools/cra.py)
     if indexed:   # the NROs a game loads are the current files of its archives: the hashes not among them belong to superseded copies
         print(f'{len(found)} NROs among the current files of {indexed} indexed archive(s); {len(want) - len(found)} registered hashes are superseded copies, left out')
         want = {h: n for h, n in want.items() if h in found}
@@ -143,7 +155,10 @@ def main():
     open(os.path.join(out, 'nro.tsv'), 'w').write('# name\tsha256\tsize\tnrr\twhere\n' + '\n'.join(rows) + '\n')
     miss = [h.hex() for h in want if h not in found]
     print(f'{len(found)} of {len(want)} registered NROs found ({sum(len(found[h][2]) for h in found) / 2**20:.1f} MB) → {out}')
-    if miss: print(f'[RED] {len(miss)} registered NROs not found, first {miss[0]}'); sys.exit(1)
+    if miss and missing_ok:
+        open(os.path.join(out, 'missing.tsv'), 'w').write(''.join(f'{h.hex()}\t{want[h]}\n' for h in want if h not in found))
+        print(f'{len(miss)} registered NROs in no file, first {miss[0]}: the game may decode them at run time')
+    elif miss: print(f'[RED] {len(miss)} registered NROs not found, first {miss[0]}'); sys.exit(1)
 
 
 if __name__ == '__main__': main()

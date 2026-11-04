@@ -35,6 +35,11 @@ void dm_motion_clear(int player);   // clears GameController motion; another fre
 void dm_motion_set_hid(int player, const float acc[3], const float rot[3], uint64_t sample_ns);
 void dm_motion_clear_hid(int player);
 uint32_t dm_player_npad(int player);  // the npad id the game reads player p + 1 on: Handheld (0x20) or No1 (0) for player 1, No n (id n - 1) for player n
+// A library applet in front of the game (the offline web page, hle_web.c / web_apple.m): while held, the game reads no buttons and centred sticks on every npad, as an application
+// out of focus does, and presses made meanwhile are dropped when the hold ends. dm_input_peek reads what the applet sees: every path ORed (any controller drives it), each stick
+// axis the most deflected one, plus the presses since the last peek (a tap between two peeks is reported once). Any thread
+void dm_input_hold(int on);
+void dm_input_peek(uint64_t *buttons, int32_t axes[4]);
 
 // Optional diagnostic DM_HID_RECEIPT_LOG=<writable JSONL path>: received samples of real GetNpadState returns.
 // Fields read_start_ns/time_ns use the same host now_ns(); the front-end publish window must use the same helper, and a read interval that spans a publish must not be force-matched.

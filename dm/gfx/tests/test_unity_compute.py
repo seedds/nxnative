@@ -6,6 +6,7 @@ import json
 import struct
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 import shader_split
@@ -54,6 +55,18 @@ class LegacyComputeTests(unittest.TestCase):
         self.assertEqual(objects[0][2]['variants'][0]['resourcesResolved'], True)
         shaders = shader_split.unity_compute(data, 'fixture', trees)
         self.assertEqual(shaders, [('fixture#LegacySkinning#SkinVertices.0', 'cs', control, code)])
+
+    def test_kernel_with_no_code_is_skipped_and_the_others_are_read(self):
+        # DAVE THE DIVER's Data/resources.assets: an empty code raised, and the file lost its 1,815 programs.
+        data, type_hash, control, code = legacy_compute()
+        trees = {(72, type_hash): unityfs.known_tree(72, type_hash)}
+        program = list(unityfs.serialized_objects(data, {}, {72}, trees))[0][2]['variants'][0]['kernels'][0]['code']
+        shader = {'m_Name': 'Fluid', 'variants': [{'kernels': [
+            {'name': 'Empty', 'uniqueVariants': [{'code': b''}]},
+            {'name': 'Kept', 'uniqueVariants': [{'code': b''}, {'code': program}]}]}]}
+        with mock.patch.object(unityfs, 'serialized_objects', return_value=[(72, 1, shader)]), contextlib.redirect_stdout(io.StringIO()):
+            shaders = shader_split.unity_compute(data, 'fixture', trees)
+        self.assertEqual(shaders, [('fixture#Fluid#Kept.1', 'cs', control, code)])
 
     def test_stripped_2017_counters_and_kernel_reach_shader_split(self):
         data, old_hash, control, code = legacy_compute()
@@ -215,6 +228,14 @@ class Unity6000_3Tests(unittest.TestCase):
         self.assertEqual(reader.p, size)
         with contextlib.redirect_stdout(io.StringIO()): shaders = shader_split.unity_compute(data, 'fixture', trees)
         self.assertEqual(shaders, [('fixture#VrsTexture#TextureCopy.0', 'cs', control, code)])
+
+
+class Shader6000_3Tests(unittest.TestCase):
+    def test_shader_appends_local_identifier_to_6000_0(self):
+        old = unityfs.known_tree(48, bytes.fromhex('2ec7223dce3af4232b14ae1441bd7999'))
+        new = unityfs.known_tree(48, bytes.fromhex('57f0dd2d4ef24437b4655529a673a936'))
+        self.assertEqual([k.name for k in new.kids], [k.name for k in old.kids] + ['m_AssetLocalIdentifierInFile'])
+        self.assertEqual((new.kids[-1].type, new.kids[-1].flags), ('SInt64', 0))
 
 
 class Compute2020Tests(unittest.TestCase):

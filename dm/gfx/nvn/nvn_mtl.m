@@ -2124,10 +2124,12 @@ static int tex_atomic_capable(id<MTLTexture> base) { return pf_r32i(base.pixelFo
 // render targets no shader writes (KTGL on every one); a scaled texture bound to a written or atomic image slot is demoted first (image_prepare, nvn_ups_img_writes; why not
 // scale the dispatch instead: the comment before ups_pick).
 // Mixed passes demote (ups_demote_pass): when the attachments of a pass disagree, each scaled one is replaced by a texture of the game's size with its content drawn down, and
-// the texture is never scaled again (ups_pick, g_ups_demoted), as Ryujinx blacklists a texture that must match an unscalable one. A copy or resolve between a scaled and an unscaled
+// the texture is never scaled again (ups_pick, g_ups_demoted), as Ryujinx blacklists a texture that must match an unscalable one. Only the attachments the pass takes vote: a
+// depth that no draw of the pass tests or writes is left out of the pass by the depth lookahead (pass_ds_need, run for such a pass off TBDR too: ups_pass_mixed_depth), so an
+// unscalable swap chain with an idle depth beside it does not demote the depth, nor that depth the scene it idles beside next. A copy or resolve between a scaled and an unscaled
 // texture is drawn as a scaling copy where that can be done (copy_t2t_draw, also integer and Depth16 formats), and demotes the scaled side first where it cannot (multisample,
 // compressed, 3D, other flags: ups_demote_copy), so no copy case is left unimplemented by a mismatch alone.
-// Not scaled: textures with mip levels, arrays, 3D, cubes, multisample ones (they cannot be drawn down for a demotion, so they and their resolve destinations stay at the game's
+// Not scaled: textures with mip levels, arrays of more than 8 layers (shorter 2D arrays scale: KTGL's G-buffer layers; nvn_ups_shape_ok), 3D, cubes, multisample ones (they cannot be drawn down for a demotion, so they and their resolve destinations stay at the game's
 // size together), compressed / linear / sparse / video-decode ones, square ones (shadow maps), sizes under 320x180 or not of a screen's aspect (1.4 to 1.9: lookup tables,
 // atlases, small effect buffers), sizes whose scaled size would pass 3840x2160 (a Switch 2 swap chain already at 4K), and textures that are neither COMPRESSIBLE, DISPLAY nor depth
 // (uploaded data rather than render targets); shader-written images are made scaled when they look like render targets and demoted at their first written binding.
@@ -2175,6 +2177,8 @@ static int ups_demoted(const tex_t *t) {
 // which the translator cannot tell apart from other integer arithmetic (it scales only image loads and integer fetches, never stores: TexturePass.cs). With (b) a chain of
 // image-flagged targets that draws fill renders scaled, a dispatch that reads it at normalized coordinates sees the finer texels, and the images it writes stay at the game's
 // size, as Ryujinx blacklists a texture used as a stored image. (Whether a game's chain stays scaled then depends on the mixed-pass rule: ups_demote_pass.)
+// The same game needs short 2D arrays scaled as well (nvn_ups_shape_ok): its G-buffer pass draws into layers of 1600x900 arrays beside 2D targets, and with the arrays left out
+// the mixed-pass rule demoted every target of the pass, so nothing of the 3D stayed scaled
 // Whether an image-shaped texture's storage has another live description of another size and the same format: an alias family (image_texture), whose members share one placement
 // heap so a write through one size is seen through the others (Luigi's Mansion 3's resolution families). A scaled member could not join it, so a family stays at the game's size
 static int ups_family(const tex_t *t) {
@@ -2188,9 +2192,9 @@ static int ups_family(const tex_t *t) {
 }
 static int ups_pick(const tex_t *t, MTLTextureDescriptor *d) {
     if (ups_factor() <= 1) return 0;
-    if (t->d.target != NVN_TEXTURE_TARGET_2D) return 0;
+    if (!nvn_ups_shape_ok(t->d.target, (uint32_t)d.mipmapLevelCount, (uint32_t)d.arrayLength, (uint32_t)d.sampleCount)) return 0;   // 2D, or a short 2D array (nvn_ups.h)
     if ((g_ups_demoted.n || g_ups_demoted_mem.n) && ups_demoted(t)) return 0;   // demoted once: stays at the game's size
-    if (d.mipmapLevelCount > 1 || d.arrayLength > 1 || d.depth > 1 || !(d.usage & MTLTextureUsageRenderTarget)) return 0;
+    if (d.depth > 1 || !(d.usage & MTLTextureUsageRenderTarget)) return 0;
     int depth = (int)d.pixelFormat >= 250 && (int)d.pixelFormat <= 262;   // Depth16Unorm … X24_Stencil8, as tex_init_fill
     // Flags, screen-like size and the 4K ceiling (nvn_ups.h, unit-tested in tests/t_ups.c): a render target is COMPRESSIBLE (or DISPLAY: the window's), a plain one is data copied in
     if (!nvn_ups_size_flags_ok((uint32_t)d.width, (uint32_t)d.height, t->d.flags, depth, g_ups)) return 0;
@@ -4188,7 +4192,8 @@ static void ups_pass(MTL4RenderPassDescriptor *pd) {
     // ups_demote_pass has demoted the scaled attachments of a mixed pass before they were attached; a mix left here comes from a shadow (bcrt_attach) or a failed demotion
     if (mixed) { static int once; if (!once++) MLOG("[RED] resolution upscaling: a pass still mixes scaled and unscaled attachments after demotion, drawn at %gx (first case pass %llu)", g_pass.ups, g_stat_pass + 1); }
 }
-static void ups_demote_pass(void);
+static void ups_demote_pass(int mode);
+static int ups_pass_mixed_depth(void);
 // A rectangle in the game's pixels → the open pass's (rounded outwards), before it is clamped to the pass: viewports and scissors of draws and clears on scaled attachments
 static inline void ups_rect(long *x0, long *y0, long *x1, long *y1) {
     if (g_pass.ups <= 1) return;
@@ -4232,7 +4237,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
     g_enc_mode = clear_only; g_enc_geo_nocolor = g_geo_omit_colors; g_pass_swrite = g_pass_order = g_pass_late_res = 0; g_sm_pass = 0;
     if (!R.has_rt) { RED_ONCE(3, "no render target set before the draw"); return nil; }
     if (g_imfit_npend) img_fit_upgrade();   // no pass is open here: the upgrade's copy may run (img_fit)
-    if (g_ups > 1) ups_demote_pass();   // resolution upscaling: attachments that disagree on the factor are brought to the game's size first (their copies run here, before the pass)
+    if (g_ups > 1) ups_demote_pass(clear_only);   // resolution upscaling: attachments that disagree on the factor are brought to the game's size first (their copies run here, before the pass)
     // The version of the attachment-range candidate is taken before capturing any attachment; if it changes during setup, there is no continuation.
     uint64_t reg0 = 0, ser0 = 0, dirty0 = 0;
     if (rt_range_on()) { reg0 = g_reg_gen; ser0 = g_ser_gen; }
@@ -8811,8 +8816,10 @@ static int ds_scan(const uint8_t *p, ds_st *ds, int depth) {
             case OP_SET_RT: case OP_COPY_B2B: case OP_CLEAR_BUF: case OP_UPDATE_UB: case OP_COPY_B2T: case OP_COPY_T2B: case OP_COPY_T2T: case OP_DRAW_TEX: case OP_CLEAR_TEX: case OP_DISPATCH: return DS_FREE;
             case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_DLSS: g_ds_why = h.op; return DS_USED;
             case OP_BIND_STATE: { const p_bind_state *b = a; if (b->kind == 5) memcpy(ds, b->bytes, sizeof *ds); break; }
-            case OP_DRAW: case OP_DRAW_IDX: case OP_MULTI_DRAW:   // Depth test / write → depth needed; stencil test → stencil needed; can stop once both are needed
-                g_ds_need |= (ds->dt || ds->dw ? 1 : 0) | (ds->st ? 2 : 0);
+            case OP_DRAW: case OP_DRAW_IDX: case OP_MULTI_DRAW:   // Depth test → depth needed; stencil test → stencil needed; can stop once both are needed
+                // Depth write without the test is no use: as in GL, NVN writes depth only under the test, and dss_get sets Metal's compare and write only with it (write NO otherwise).
+                // KTGL's copies into its swap chain and its scene composite draw with the test off and the write on (Hyrule Warriors)
+                g_ds_need |= (ds->dt ? 1 : 0) | (ds->st ? 2 : 0);
                 if (g_ds_need == 3) { g_ds_why = 1000 + ds->dt * 100 + ds->dw * 10 + ds->st; return DS_USED; } break;
             default: break;
         }
@@ -9290,7 +9297,7 @@ static int draw_samples_rt(NvProg *pr) {   // Sampled attachments keep the origi
 // The whole render pass's need for depth / stencil (bits: 1 depth 2 stencil; 3 = both needed or cannot be proven). Starting from the draw that opens the render pass, scan in real replay order to the end of the render pass:
 // the attached clears and this draw's state are counted first; later draws accumulate by their depth-stencil state; anything unprovable such as a mid-pass clear or nesting too deep is treated as both needed
 static int pass_ds_need(void) {
-    int need = (R.clear_d || S.ds.dt || S.ds.dw ? 1 : 0) | (R.clear_s || S.ds.st ? 2 : 0);
+    int need = (R.clear_d || S.ds.dt ? 1 : 0) | (R.clear_s || S.ds.st ? 2 : 0);   // a depth write counts only under the test (ds_scan)
     if (!R.rt.depth || need == 3 || !g_exec_next || g_ret_n > 16) {
         PD("S %llu no lookahead depth=%d clear_d=%d clear_s=%d dt=%d dw=%d st=%d next=%d ret=%d", g_stat_pass + 1, R.rt.depth != NULL, R.clear_d, R.clear_s, (int)S.ds.dt, (int)S.ds.dw, (int)S.ds.st, g_exec_next != NULL, g_ret_n);
         return 3;
@@ -11238,7 +11245,14 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (!g_enc && tbdr_on() && !g_geo_program && !defer_has_in_p() && !g_defer_replaying && !g_fz.active && !g_fz_checking && g_exec_next) { defer_try(dw, di); if (g_defer_cur->active && g_defer_cur->in_p) return; }
     if (!g_enc && tbdr_on() && !g_fz_checking && !g_geo_program) fuse_try();   // Readable tile render pass merge is on by default; when the structure / same-pixel proof does not hold it still falls back to a normal render pass, and it is not re-entered during the CHECK redraw
     if (!g_enc && !tbdr_on() && !g_geo_program && cshoist_on()) cs_hoist_try(pr, dw, di);   // see DM_NVN_CS_HOIST
-    int need = g_enc || !tbdr_on() ? 3 : pass_ds_need(), mode = defer_q_draw ? 0 : need == 0 ? 2 : need == 2 ? 3 : need == 1 ? 4 : 0;   // 2 attach neither, 3 attach stencil only, 4 attach depth only
+    // Resolution upscaling runs the depth lookahead off TBDR too, for a pass whose depth disagrees with its colours on the factor (ups_pass_mixed_depth): proven unused, the depth is
+    // not attached (mode 2) and does not vote in ups_demote_pass, so the scaled side keeps its size. KTGL leaves a 1920x1080 depth attached to the pass that copies into its 4K
+    // swap chain and to the one that composites its scene, with depth test, depth write and stencil off: through the vote it demoted the whole 3D chain (Hyrule Warriors' README)
+    int ups_la = !g_enc && !tbdr_on() && ups_pass_mixed_depth();
+    int need = g_enc || !(tbdr_on() || ups_la) ? 3 : pass_ds_need(), mode = defer_q_draw ? 0 : need == 0 ? 2 : need == 2 ? 3 : need == 1 ? 4 : 0;   // 2 attach neither, 3 attach stencil only, 4 attach depth only
+    // The log explains the first demotions such a pass still causes: what of the pass needed its depth (a mid-pass clear, a draw with the test on, or the unproven cases of pass_ds_need)
+    if (ups_la && need) { static int n; if (n++ < 12) MLOG("resolution upscaling: pass %llu keeps its depth (ser=%llu): lookahead need=%d (1 depth 2 stencil, 3 both or unproven) why=%d scanned %d; this draw dt=%d dw=%d st=%d clear_d=%d clear_s=%d",
+                                                      g_stat_pass + 1, (unsigned long long)R.rt.depth->serial, need, g_ds_why, g_ds_scanned, (int)S.ds.dt, (int)S.ds.dw, (int)S.ds.st, R.clear_d, R.clear_s); }
     int skip_d = mode != 0;
     if (!g_enc) { g_fd_dw = dw; g_fd_di = di; }
     g_rp_layered = pr->sh[0] && pr->sh[0]->layer_out;
@@ -11684,7 +11698,7 @@ static int ups_draw_formats(MTLPixelFormat sp, MTLPixelFormat dp) {
 }
 static uint64_t g_ups_demotions;   // textures demoted so far (log)
 // Resolution upscaling: a scaled texture returns to the game's size (the section comment before tex_desc: a pass whose attachments disagree, a copy the scaling copy cannot draw), as
-// Ryujinx blacklists a texture that has to match an unscalable one. A texture of the game's size takes its place under every name (tex_rename_all), with level 0 drawn down into it
+// Ryujinx blacklists a texture that has to match an unscalable one. A texture of the game's size takes its place under every name (tex_rename_all), with level 0 (each layer of an array) drawn down into it
 // (bilinear for colour, nearest for integer and depth formats through copy_t2t_draw); a multisample texture cannot be drawn from and starts undefined, as one the game clears each
 // frame does (logged). The serial is marked first (g_ups_demoted), so the replacement and every later resolution of the serial come out unscaled. `old` is the scaled texture
 // as the caller resolved it (a view of it names its base)
@@ -11698,7 +11712,8 @@ static void ups_demote(const tex_t *t, id<MTLTexture> scaled, const char *why) {
     id<MTLTexture> nt = [g_dev newTextureWithDescriptor:d];
     if (!nt) { RED_ONCE(113, "resolution upscaling: cannot make the game-size texture of a demotion (ser=%llu %ux%u format %#x); the scaled one stays", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format); return; }
     res_add(nt);
-    NVNcopyRegion sr = {0, 0, 0, (int)old.width, (int)old.height, 1}, dr = {0, 0, 0, (int)nt.width, (int)nt.height, 1};
+    int layers = (int)MAX(old.arrayLength, 1u);   // a 2D array target: every layer is drawn down (copy_t2t_draw takes the region's depth as layers)
+    NVNcopyRegion sr = {0, 0, 0, (int)old.width, (int)old.height, layers}, dr = {0, 0, 0, (int)nt.width, (int)nt.height, layers};
     int copied = old.sampleCount == 1 && copy_t2t_draw(old, nt, 0, 0, 0, 0, &sr, &dr, !fmt_int_or_ds(old.pixelFormat), 0);
     if (!copied) tex_zero_fill(nt, 1);   // what can be cleared is (not depth, stencil or multisample formats): the game's next clear or full draw settles the rest
     if (!tex_rename_all(t, old, nt)) tex_put(t->serial, nt);
@@ -11710,12 +11725,16 @@ static void ups_demote(const tex_t *t, id<MTLTexture> scaled, const char *why) {
 }
 // Resolution upscaling: the attachments R.rt is about to open a pass on must agree on the factor (a pass covers the smaller extent while viewports and scissors are multiplied by
 // its factor: a scaled colour beside an unscaled depth drew only the top-left part of the scaled one). When they disagree the scaled ones are demoted. Compressed attachments are
-// drawn through shadows (bcrt_attach) and do not vote, nor do the slots rt_dup_slot leaves out. Runs before the attachments are fetched, so attach() takes the replacements
-static void ups_demote_pass(void) {
+// drawn through shadows (bcrt_attach) and do not vote, nor do the slots rt_dup_slot leaves out, nor an attachment the pass does not take in this open mode (rp_begin_ex_: a
+// clear-only pass takes only the cleared ones, mode 2 no depth, the geometry emulation no uncleared colour): a set depth that no draw of the pass tests or writes is left out
+// with the lookahead (pass_ds_need, run for such a pass by ups_pass_mixed_depth), so it neither demotes the colours nor is demoted by them. Runs before the attachments are
+// fetched, so attach() takes the replacements
+static void ups_demote_pass(int mode) {
     const tex_t *ts[9]; __unsafe_unretained id<MTLTexture> ms[9]; int n = 0, scaled = 0, unscaled = 0;
     for (int i = 0; i <= R.rt.n && i < 9; i++) {
         const tex_t *t = i < R.rt.n ? (i < 8 ? R.rt.color[i] : NULL) : R.rt.depth;
         if (!t || (i < R.rt.n && rt_dup_slot(&R.rt, i))) continue;
+        if (i < R.rt.n ? ((mode == 1 || g_geo_omit_colors) && !R.clear_c[i]) : (mode == 2 || (mode == 1 && !R.clear_d && !R.clear_s))) continue;   // not attached in this mode
         id<MTLTexture> m = tex_mtl(t); if (!m || mtl_fmt_block(m.pixelFormat)) continue;
         ts[n] = t; ms[n] = m; if (ups_of(t, m) > 1) scaled++; else unscaled++; n++;
     }
@@ -11726,6 +11745,20 @@ static void ups_demote_pass(void) {
     snprintf(why, sizeof why, "a pass mixes scaled and unscaled attachments (unscaled: ser=%llu %lux%lu format %#x flags %#x)", u ? (unsigned long long)u->serial : 0ull,
              (unsigned long)uw, (unsigned long)uh, u ? u->d.format : 0u, u ? u->d.flags : 0u);
     for (int i = 0; i < n; i++) if (ups_of(ts[i], ms[i]) > 1) ups_demote(ts[i], ms[i], why);
+}
+// Resolution upscaling: whether the pass a draw is about to open has a depth attachment that disagrees with a colour attachment on the factor (either side scaled). Such a pass is
+// worth the depth lookahead off TBDR (the draw path): with depth and stencil unused by every draw of the pass, the depth is not attached and does not vote (ups_demote_pass).
+// Compressed and duplicate slots are skipped as the vote skips them. Cheap: the attachments' Metal textures are already resolved by this point of the draw
+static int ups_pass_mixed_depth(void) {
+    if (g_ups <= 1 || !R.rt.depth) return 0;
+    id<MTLTexture> dm = tex_mtl(R.rt.depth); if (!dm) return 0;
+    float fd = ups_of(R.rt.depth, dm);
+    for (int i = 0; i < R.rt.n && i < 8; i++) {
+        const tex_t *t = R.rt.color[i]; if (!t || rt_dup_slot(&R.rt, i)) continue;
+        id<MTLTexture> m = tex_mtl(t); if (!m || mtl_fmt_block(m.pixelFormat)) continue;
+        if (ups_of(t, m) != fd) { static int once; if (!once++) MLOG("resolution upscaling: a pass whose depth (ser=%llu) and colours disagree on the factor runs the depth lookahead; an unused depth then stays out of the pass and of the vote (first case pass %llu)", (unsigned long long)R.rt.depth->serial, g_stat_pass + 1); return 1; }
+    }
+    return 0;
 }
 // Resolution upscaling: a copy or resolve between a scaled and an unscaled texture is drawn as a scaling copy by copy_t2t where copy_t2t_draw can draw it; where it cannot
 // (multisample textures, 3D textures, compressed or stencil-only or mismatched integer formats, a depth count that differs, flags the draw does not take), the scaled side is

@@ -17,8 +17,21 @@
 #define NVN_UPS_MAX_W 3840
 #define NVN_UPS_MAX_H 2160
 
-// Whether a single-level 2D texture of the game's size w x h with these NVN flags is a render target to scale by f (the size and flag part of nvn_mtl.m ups_pick; the caller checks
-// target, levels, layers, samples and render-target usage). depth: a depth / stencil format (a render target without COMPRESSIBLE or DISPLAY). Screen-like means at least 320x180
+// The most layers of a 2D array target that is scaled: each layer costs the factor squared in memory. KTGL's G-buffer draws into layers of 1600x900 arrays (4 layers seen) beside
+// plain 2D targets, so leaving arrays out demoted the whole pass to the game's size; a longer array is more likely history or atlas data than a render target
+#define NVN_UPS_MAX_LAYERS 8
+
+// Whether a texture's shape can be scaled: a single-level 2D texture, or a single-level 2D array of at most NVN_UPS_MAX_LAYERS layers (target: NVN_TEXTURE_TARGET_*). The
+// translator scales integer fetches and size queries on 2D arrays as on 2D textures (TexturePass.cs TypeSupportsScale masks the array flag off), and the host's copies, clears
+// and demotions run per layer. Mipmapped, 3D, cube, multisample and rectangle / buffer textures stay at the game's size
+static inline int nvn_ups_shape_ok(int target, uint32_t levels, uint32_t layers, uint32_t samples) {
+    if (levels > 1 || samples > 1) return 0;
+    if (target == NVN_TEXTURE_TARGET_2D) return layers <= 1;
+    return target == NVN_TEXTURE_TARGET_2D_ARRAY && layers >= 1 && layers <= NVN_UPS_MAX_LAYERS;
+}
+
+// Whether a single-level 2D texture (or 2D array: nvn_ups_shape_ok) of the game's size w x h with these NVN flags is a render target to scale by f (the size and flag part of
+// nvn_mtl.m ups_pick; the caller checks the shape and the render-target usage). depth: a depth / stencil format (a render target without COMPRESSIBLE or DISPLAY). Screen-like means at least 320x180
 // and an aspect of 1.4 to 1.9 (lookup tables, atlases, shadow maps and small effect buffers are not), and the scaled size must stay within NVN_UPS_MAX_W x NVN_UPS_MAX_H.
 // A colour texture without COMPRESSIBLE or DISPLAY is data copied in rather than a render target
 static inline int nvn_ups_size_flags_ok(uint32_t w, uint32_t h, uint32_t flags, int depth, double f) {

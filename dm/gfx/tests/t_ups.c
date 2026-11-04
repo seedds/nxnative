@@ -2,7 +2,7 @@
 // Regions: equal game regions map to equal scaled regions whatever their offsets (the audit's 1.5x case: x=1,w=2 and x=0,w=2 used to come out 4 and 3 wide), clamped to the texture.
 // Occlusion queries: samples counted in a scaled pass come back divided by the factor squared, rounded. Present crop: a scaled window texture's crop in its own pixels.
 // Descriptor ranks: which reflection bindings the translator counts as texture and image descriptors (render_scale[1 + i]).
-// Which render targets scale (flags, screen-like size, the 4K ceiling: IMAGE no longer keeps one unscaled), and which image bindings demote their texture.
+// Which render targets scale (shape, flags, screen-like size, the 4K ceiling: IMAGE no longer keeps one unscaled), and which image bindings demote their texture.
 #include "../nvn/nvn_ups.h"
 #include <stdio.h>
 
@@ -82,6 +82,14 @@ int main(void) {
     CHECK(nvn_ups_size_flags_ok(1920, 1080, 0x9, 0, 2), "a 1920x1080 window texture (DISPLAY) reaches exactly 3840x2160 at 2x");
     CHECK(!nvn_ups_size_flags_ok(1024, 1024, 0x8, 0, 2) && !nvn_ups_size_flags_ok(256, 144, 0x8, 0, 2) && !nvn_ups_size_flags_ok(1740, 200, 0xc, 0, 2), "square, small and banner-shaped targets stay");
     CHECK(!nvn_ups_size_flags_ok(1920, 1080, 0x8, 0, 1) && !nvn_ups_size_flags_ok(1920, 1080, 0x8, 0, 0), "nothing scales at 1x or unset");
+    // Shapes (nvn_ups_shape_ok): single-level 2D textures and short 2D arrays (KTGL's 4-layer G-buffer arrays) scale; mipmapped, multisample, 3D, cube and long arrays do not
+    CHECK(nvn_ups_shape_ok(NVN_TEXTURE_TARGET_2D, 1, 1, 1) && nvn_ups_shape_ok(NVN_TEXTURE_TARGET_2D, 1, 1, 0), "a single-level 2D texture");
+    CHECK(nvn_ups_shape_ok(NVN_TEXTURE_TARGET_2D_ARRAY, 1, 4, 1) && nvn_ups_shape_ok(NVN_TEXTURE_TARGET_2D_ARRAY, 1, 8, 1), "2D arrays of up to 8 layers");
+    CHECK(!nvn_ups_shape_ok(NVN_TEXTURE_TARGET_2D_ARRAY, 1, 9, 1) && !nvn_ups_shape_ok(NVN_TEXTURE_TARGET_2D_ARRAY, 2, 4, 1), "a longer array, or a mipmapped one, stays");
+    CHECK(!nvn_ups_shape_ok(NVN_TEXTURE_TARGET_2D, 10, 1, 1) && !nvn_ups_shape_ok(NVN_TEXTURE_TARGET_2D, 1, 1, 4) && !nvn_ups_shape_ok(NVN_TEXTURE_TARGET_2D_MULTISAMPLE, 1, 1, 4),
+          "mipmapped and multisample textures stay");
+    CHECK(!nvn_ups_shape_ok(NVN_TEXTURE_TARGET_3D, 1, 1, 1) && !nvn_ups_shape_ok(NVN_TEXTURE_TARGET_CUBEMAP, 1, 6, 1) && !nvn_ups_shape_ok(NVN_TEXTURE_TARGET_RECTANGLE, 1, 1, 1),
+          "3D, cube and rectangle textures stay");
     // Written images demote; image loads take render_scale entries after the textures
     CHECK(nvn_ups_img_writes(NVN_RB_IMG, 1, 0) && nvn_ups_img_writes(NVN_RB_IMG, 0, 1) && nvn_ups_img_writes(NVN_RB_IMGU, 1, 0), "a written or atomic image slot demotes its texture, its handle in an image slot or in a uniform buffer");
     CHECK(!nvn_ups_img_writes(NVN_RB_IMG, 0, 0) && !nvn_ups_img_writes(NVN_RB_TEX, 1, 0) && !nvn_ups_img_writes(NVN_RB_SBUFP, 1, 0), "read-only images, textures and buffers do not");

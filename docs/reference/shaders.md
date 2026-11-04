@@ -440,6 +440,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Reader:** `uepak.py` `inline_shaders` tells such a pak from one with archives by its directory index (cooked packages and no `.ushaderbytecode`; an encrypted index is taken for one with archives), and `shader_split.py` `ue_legacy_jobs` reads it file by file, Zlib and LZ4 blocks decoded in Python (`Pak.read`), so no host runs. `ue_inline_shaders` finds each LZ4 block by its first literals, the record's `LSLG`, with the token and literal length bytes in front of it, and takes it when it decodes to exactly the raw size after the block.
 - **Found on:** [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md): 13,980 unique shaders (1,910 vertex, 11,346 pixel, 694 compute, 30 geometry) from the 3.3 GB pak in 13 s.
 
+### Unreal Engine 4.27 shaders inline in IoStore export bundles
+
+- **Symptom:** `the RomFS has Unreal paks, but none … holds a shader code archive` from the NSP script, on a game with a `.pak` beside a `.utoc` and `.ucas`.
+- **How it is stored:** the same inline records as [the paks' `.uexp` files](#unreal-engine-427-shaders-inline-in-cooked-packages-lz4), `bShareMaterialShaderCode` being off, with IoStore on as well: the cooked packages are the container's export bundles (chunk type 2 in Unreal 4.27's numbering, TOC version 3), Oodle-compressed block by block, and the pak beside it keeps everything else, the global shader cache (`Engine/GlobalShaderCache-SF_GLSL_SWITCH.bin`) too. The pak's directory has neither `.ushaderbytecode` nor `.uexp`, so it was taken for one with archives.
+- **Reader:** `uepak.py` `inline_shaders` also takes the global shader cache with no `.ushaderbytecode` as inline, and `shader_split.py` `ue_legacy_jobs` then also reads the export bundles of the containers beside such a pak, the newest copy of each chunk ID (`mount_order`), through the game's own Oodle in the host's tool mode. Bulk data chunks are skipped. `Toc.names` reads the container's directory index, so a shader's label names its package, as for a pak, and `shader_groups` works the same way.
+- **Found on:** [Mario & Luigi: Brothership](../../dm/games/01006D0017F7A000/README.md): 45,824 unique shaders from 8.8 GB of export bundles in 39 s.
+
 ### Unreal Engine 4.22 to 4.25 paks (version 8)
 
 - **Symptom:** `[RED] the shader split found no shaders in main or the RomFS`; the survey counts the game's Unreal paks, but no `UE shader decode` step runs and the split reads none of them.

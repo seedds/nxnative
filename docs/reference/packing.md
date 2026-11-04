@@ -252,6 +252,13 @@
 - **Fix:** each hash error gets a new checked filesystem (`Failed` in `dm/tools/nx_extract/Program.cs`, on the image, folder and manifest paths), so a damaged NSP lists every damaged file and stops with exit code 3, or goes on with `--allow-damaged`. The same copy with 40 flipped bytes lists all 36 files. `test_every_damaged_file_is_listed_past_the_hash_cache` in `dm/tools/tests/test_romfs_read.py` puts a real RomFS behind a real `CachedStorage` on all three paths, with no NSP or keys.
 - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game) ([issue #810](https://github.com/seedds/nxnative/issues/810), whose reporter diagnosed the lost cache blocks and carried a local patch that reopens the filesystem). Applies to any game.
 
+### A damaged RomFS's own tables
+
+- **Symptom:** `[RED] the NSP is damaged: a filesystem's own tables fail the NCA's hash check`, exit code 3, right after the build IDs; before 2026-11-04, `[RED] nx_extract exit code -6` with an unhandled `ResultFsNonRealDataVerificationFailed (2002-4604)` under `RomfsHeader`. The ExeFS reads, and the build IDs and name are printed, since only the RomFS is hit.
+- **Cause:** the damage lies in what the RomFS opens from (its header, or the hash levels above it), so no file can be listed, and `--allow-damaged` has no file to write as read. Hashing each NCA tells which one it is: its file name is the first 16 bytes of its SHA-256.
+- **Fix:** `nx_extract` says so and exits with 3, as for damaged files. A good copy of the NSP is the only cure. A base game that is intact packs alone with `--package <its version>`, once it has a profile.
+- **Found on:** [Mario & Luigi: Brothership](../../dm/games/01006D0017F7A000/README.md#versions): update 1.0.1's Program NCA `074db5a4…` (its NSP is also a repack: it holds a `.cnmt.xml`).
+
 ### A crash from a damaged NSP's file looks like a host bug
 
 - **Symptom:** a build packed with `--allow-damaged` crashes or draws wrongly in game code, the same way on each run, at a place unrelated to the host's last work. The log gave no sign of damage; the build log's list (`logs/extract_<version>.log`) is the only record, and it is not part of a bug report's run log.

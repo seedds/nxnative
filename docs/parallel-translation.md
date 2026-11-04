@@ -118,3 +118,16 @@ Every mode is off unless `DM_NVN_PAR` is set, and every mode so far translates o
 | 4 | `fresh-scan` | as 3, but the contract comes from the scan's snapshot, as a worker's will | the scan's contract is not enough (step 2's red lines say which part) | as 2 |
 
 Lowering `DM_NVN_PAR_DRAWS` (say to 500) makes step 3 and 4 switch more often, so a problem shows sooner. The log lines to read are the ones starting `parallel translation` and any `[RED] parallel translation check`. `work/apps/partest.sh <mode>` (outside the repository) runs one step and collects them.
+
+## Before real worker threads: the state still shared
+
+After milestone 2, about 890 file-scope variables in `nvn_mtl.m`, `nvn_geometry.inc` and `nvn_feedback.inc` are still shared (not every one is touched by translation). Sorted by name:
+
+| Kind | About | What a worker needs |
+|---|---|---|
+| Statistics and counters (`*_n`, `*_draws`, `*_why`, …) | 160 | per context, summed when the submission commits, or atomic |
+| Switches and configuration (`*_on`, read once from the environment) | 50 | read-only once set: initialise every one before the workers start |
+| Caches and registries (pipelines, shaders, texture and sampler tables, pools) | 50 | most already have a lock (about 40 locks exist); the hot reads (`g_treg`, `g_sview`) want a reader lock or generation checks |
+| Everything else | 600 | case by case; the encoder-adjacent ones first (`g_blit_*`, `g_bw_*`, `g_br_*`, `g_bar_*`, `g_gp_*`, `g_last_end_relaxed`), which belong in the context, then the submission-level pools (`g_alloc4`, `g_arenas`), which take a lock |
+
+The modes above already exercise the context split on one thread. Threads add data races. A practical next step is to run `DM_NVN_PAR=fresh-scan` under the thread sanitizer with chunks on threads one at a time (each still waiting for the one before it), so a race is reported by name before any two chunks really overlap.

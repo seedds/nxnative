@@ -394,7 +394,9 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                         // nxnative (from MacNativeGames' translator patch 0002, after Ryujinx_Optime 01a1e37f): follow only into a producer that will be removed
                         // itself. One with side effects (an atomic, a call) stays in the block when its result is unused, so its sources are still live; dropping
                         // their uses here let the next dead-code pass delete the chain that feeds it, and the atomic then read undefined values.
-                        if (!HasSideEffects(src.AsgOp))
+                        // A multi-result producer is still live if another result is used: an image load's dead alpha must not drop the coordinate
+                        // uses needed by its live RGB results (MKW's water derivative neighbor load).
+                        if (!HasSideEffects(src.AsgOp) && DestHasNoUses(src.AsgOp))
                         {
                             nodes.Enqueue(src.AsgOp);
                         }

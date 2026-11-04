@@ -232,9 +232,9 @@ Generated projects and Xcode build products stay in that folder; the host profil
 header is generated under `dm/host/gen/` as usual. CI uploads failure logs.
 GPU regression tests still run locally with `make -C dm/gfx/tests GAME=<id> run`.
 
-For the depth/stencil clear fixture on a physical iPhone, use
-`dm/ios/tools/test_gfx_on_iphone.py`. It compiles `t_clear_ds.m` unchanged in a
-Debug/O1 app, calls it on a background thread, and collects its checks and log.
+For graphics regression fixtures on a physical iPhone, use
+`dm/ios/tools/test_gfx_on_iphone.py`. It compiles the selected fixture unchanged
+in a Debug/O1 app, calls it on a background thread, and collects its checks and log.
 Xcode, the iPhoneOS SDK, Metal tools, XcodeGen and a development signing team are
 required. No game files or keys are used. Choose exactly one mode:
 `--generate-only` writes the project and headers, `--build-only` also builds and
@@ -246,6 +246,17 @@ python3 dm/ios/tools/test_gfx_on_iphone.py --run \
     --bundle-id YOUR_REGISTERED_BUNDLE_ID --device YOUR_DEVICE_UDID \
     --output-dir /path/to/new/scratch/clear-ds
 ```
+
+The default fixture is `--fixture clear_ds` (`t_clear_ds.m`). The runner also
+accepts `--fixture window_copy` and `--fixture push_capture` when their fixture
+sources are present in the selected checkout. These are supplied by
+[the window-copy PR](https://github.com/seedds/nxnative/pull/1140) and
+[the push-constant capture PR](https://github.com/seedds/nxnative/pull/1160),
+respectively. Use `--tree /path/to/checkout` to select that source tree; the
+runner reports a missing source before generating or installing anything.
+Window-copy checks exercise synthetic rendering and ownership paths;
+push-capture checks inspect host argument data and do not execute a GPU shader.
+Neither establishes actual game behavior or physical-screen output.
 
 Reserve the device before running; the tool replaces the app with the selected
 bundle ID and terminates an existing instance of that app. It does not manage
@@ -259,8 +270,8 @@ the report is complete; passing requires a zero exit status, no failures and at
 least one check. Device operations have timeouts and copy diagnostics remain in
 `device-copy.log`. The fixture requests Metal validation; confirm the log's
 `Metal API Validation Enabled` message rather than inferring it from the
-environment value. These checks verify depth/stencil behavior, not Release
-gameplay, presentation correctness or sustained frame pacing.
+environment value. Results apply to the selected fixture and recorded source
+hashes; they do not establish Release gameplay or sustained frame pacing.
 
 `.github/workflows/lint-python.yml` lints `scripts/` and the Python tools under
 `dm/` with ruff (rules for bugs, never reformatting) and type-checks them with

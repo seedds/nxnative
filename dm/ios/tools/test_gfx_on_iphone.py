@@ -289,7 +289,7 @@ def main():
                         help="nxnative checkout whose fixture and sources are built")
     parser.add_argument("--output-dir", type=Path, required=True,
                         help="A new scratch directory for the project, build and reports")
-    parser.add_argument("--fixture", choices=("clear_ds",), default="clear_ds")
+    parser.add_argument("--fixture", choices=("clear_ds", "window_copy", "push_capture"), default="clear_ds")
     parser.add_argument("--device", help="devicectl device name or UDID (required for --run)")
     parser.add_argument("--team", required=True, help="Apple development team for signing")
     parser.add_argument("--bundle-id", required=True, help="Bundle identifier registered to your team")

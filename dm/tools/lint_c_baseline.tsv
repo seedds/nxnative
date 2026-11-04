@@ -24,7 +24,6 @@ dm/gfx/nvn/nvn_hmap.h	clang-analyzer-unix.cstring.UninitializedRead	2
 dm/gfx/nvn/nvn_mtl.m	bugprone-misplaced-widening-cast	1
 dm/gfx/nvn/nvn_mtl.m	bugprone-signed-char-misuse	1
 dm/gfx/nvn/nvn_mtl.m	bugprone-suspicious-memory-comparison	8
-dm/gfx/nvn/nvn_mtl.m	bugprone-suspicious-realloc-usage	20
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-core.NullDereference	9
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-core.uninitialized.Assign	2
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-nullability.NullableDereferenced	5
@@ -105,7 +104,6 @@ dm/gfx/vk/hle_vk.m	misc-misplaced-const	5
 dm/host/haptics_apple.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/host/hle_fs.c	bugprone-suspicious-realloc-usage	4
 dm/host/hle_fs.c	clang-analyzer-unix.Errno	2
-dm/host/hle_fs.c	clang-analyzer-unix.cstring.NullArg	1
 dm/host/hle_haptics.c	bugprone-suspicious-memory-comparison	1
 dm/host/hle_hid.c	bugprone-signed-char-misuse	1
 dm/host/hle_hid.c	clang-analyzer-unix.Stream	2

@@ -17605,6 +17605,13 @@ static int up_mfx_encode(NvShader *cs) {
     }
     args_dirty_all();
     g_up_mfx_straight[0] += sin; g_up_mfx_straight[1] += sout;
+    // Creation logs miss returns to a cached dynamic-resolution size.
+    static int last_size[4]; int size[4] = {ir.width, ir.height, orr.width, orr.height};
+    if (memcmp(size, last_size, sizeof size)) {
+        MLOG("upscaler: size at frame %llu, MetalFX dispatch %llu: %dx%d → %dx%d", (unsigned long long)atomic_load(&g_cur_frame),
+             (unsigned long long)(g_up_mfx_n + 1), size[0], size[1], size[2], size[3]);
+        memcpy(last_size, size, sizeof size);
+    }
     if (!g_up_mfx_n++) MLOG("upscaler: first dispatch of %s drawn by MetalFX, %dx%d at %d,%d of %lux%lu (format %lu, %s) → %dx%d at %d,%d of %lux%lu (format %lu, %s)%s", cs->key, ir.width, ir.height, ir.xoffset, ir.yoffset,
                             (unsigned long)in.width, (unsigned long)in.height, (unsigned long)in.pixelFormat, sin ? "straight" : "copied", orr.width, orr.height, orr.xoffset, orr.yoffset, (unsigned long)out.width,
                             (unsigned long)out.height, (unsigned long)out.pixelFormat, sout ? "straight" : "drawn back", srgb ? ", decoded from sRGB" : root ? ", squared from its square roots" : "");

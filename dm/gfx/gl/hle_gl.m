@@ -418,6 +418,7 @@ static GLuint *unit_slot(int unit, GLenum target) {   // a unit's binding of a t
     switch (target) {
         case GL_TEXTURE_2D: return &S.units[unit].t2d; case GL_TEXTURE_CUBE_MAP: return &S.units[unit].tcube;
         case GL_TEXTURE_3D: return &S.units[unit].t3d; case GL_TEXTURE_2D_ARRAY: return &S.units[unit].t2da;
+        case GL_TEXTURE_BUFFER: return &S.units[unit].tbuf;
     }
     return NULL;
 }
@@ -1817,12 +1818,13 @@ GL(glDeleteTextures, void, GLsizei n, const GLuint *t) {
         for (int u = 0; u < NUNITS; u++) {
             if (S.units[u].t2d == t[i]) S.units[u].t2d = 0; if (S.units[u].tcube == t[i]) S.units[u].tcube = 0;
             if (S.units[u].t3d == t[i]) S.units[u].t3d = 0; if (S.units[u].t2da == t[i]) S.units[u].t2da = 0;
+            if (S.units[u].tbuf == t[i]) S.units[u].tbuf = 0;
         }
     }
 }
 GL(glActiveTexture, void, GLenum u) { if (u >= GL_TEXTURE0 && u < GL_TEXTURE0 + NUNITS) S.unit = u - GL_TEXTURE0; }
 GL(glBindTexture, void, GLenum target, GLuint t) {
-    GLuint *slot = target == GL_TEXTURE_2D || target == GL_TEXTURE_CUBE_MAP || target == GL_TEXTURE_3D || target == GL_TEXTURE_2D_ARRAY ? unit_slot(S.unit, target) : NULL;
+    GLuint *slot = target == GL_TEXTURE_2D || target == GL_TEXTURE_CUBE_MAP || target == GL_TEXTURE_3D || target == GL_TEXTURE_2D_ARRAY || target == GL_TEXTURE_BUFFER ? unit_slot(S.unit, target) : NULL;
     if (!slot) { RED1("texture target %#x not implemented", target); return; }
     tex_t *x = tex_of(t);
     if (t && !x) {   // a name glGenTextures never gave: GL makes the texture on its first bind
@@ -1831,7 +1833,23 @@ GL(glBindTexture, void, GLenum target, GLuint t) {
     }
     if (x && !x->target) tex_init_params(x, target);
     *slot = t;
+    TLOG("bind texture unit %d target %#x name %u", S.unit, target, t);
 }
+// glTexBuffer / glTexBufferRange: a texture over a buffer object's bytes. Factorio's tile vertex shaders (tiles.vert, tiles-lava-effect.vert) fetch each tile's mask
+// coordinates from one, so without it the terrain pass blends every tile with the mask texel at 0: hard biome edges and a water surface that never overlaps the shore.
+static void tex_buffer_set(GLenum target, GLenum ifmt, GLuint b, GLintptr off, GLsizeiptr size) {
+    if (target != GL_TEXTURE_BUFFER) { RED1("glTexBuffer target %#x not implemented", target); return; }
+    tex_t *t = bound_tex(target);
+    if (!t) { RED1("glTexBuffer with no texture bound"); return; }
+    int cv = CV_COPY, f = fmt_pick(ifmt, 0, 0, &cv);
+    if (f < 0 || g_fmt[f].kind == K_BLOCK) { RED1("glTexBuffer internal format %#x not mapped", ifmt); return; }
+    if (b && !buf_of(b)) { RED1("glTexBuffer of buffer %u: no such buffer", b); return; }
+    t->tbuf = b; t->tbuf_off = off; t->tbuf_size = size; t->fmt = f;
+    t->made = 0; t->tex = nil; t->tbuf_mb = nil; t->gen++;
+    TLOG("buffer texture %#x: %s, buffer %u offset %ld size %ld", target, g_fmt[f].name, b, (long)off, (long)size);
+}
+GL(glTexBuffer, void, GLenum target, GLenum ifmt, GLuint b) { tex_buffer_set(target, ifmt, b, 0, 0); }
+GL(glTexBufferRange, void, GLenum target, GLenum ifmt, GLuint b, GLintptr off, GLsizeiptr size) { tex_buffer_set(target, ifmt, b, off, size); }
 static void tex_param(GLenum target, GLenum p, float f, GLint i) {
     tex_t *t = bound_tex(target);
     if (!t) return;

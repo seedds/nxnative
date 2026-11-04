@@ -146,7 +146,7 @@ static void vertex_dump(NvShader *vs, const p_draw *dw, const p_draw_idx *di) {
         if (all) for (uint64_t i=0;i<span;i++) fwrite((uint8_t *)output.contents + offset + 512 + i*144*4,1,16,f);
         else fwrite((uint8_t *)output.contents + offset + 512, 1, bytes, f); fclose(f); }
     MLOG("vertex dump %s: first %u, count %llu, %s", vs->key, lo, (unsigned long long)span, filename);
-    args_dirty_all(); g_enc_pso = nil; g_enc_dss = nil; g_ed.ok = 0;
+    args_dirty_all(); RX.enc_pso = nil; RX.enc_dss = nil; RX.ed.ok = 0;
 }
 static void geo_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint32_t primitive_base);
 // A draw whose capture would need more scratch than the bound, drawn as smaller draws in the hardware's order: one instance at a time, then runs of a list topology's primitives
@@ -445,7 +445,7 @@ static id<MTLRenderPipelineState> geo_mesh_pso_for(NvProg *pr, id<MTLFunction> f
 static id<MTLRenderPipelineState> geo_mesh_pso(NvProg *pr) { return g_geo_mesh.ps = geo_mesh_pso_for(pr, g_geo_mesh.fn, 0); }
 // Mesh draws gathered into one dispatch. A mesh draw costs the M1 about 2.7 us however few triangles it has: Donkey Kong Bananza's depth prepass draws 420-550 of them a frame
 // (vertex f9c807930abd1234, culling kernel 5d537f7630ec3671), each a culling geometry shader over 15-350 triangles, 1.5-1.7 ms of GPU a frame where one draw of the same
-// triangles takes 0.5-0.6. A draw that fits waits instead (geo_mesh_take): its record keeps its arguments and the addresses bound at the vertex table's slots for it (g_vt_addr,
+// triangles takes 0.5-0.6. A draw that fits waits instead (geo_mesh_take): its record keeps its arguments and the addresses bound at the vertex table's slots for it (RX.vt_addr,
 // which the mesh stage shares), and the run is drawn as one dispatch of the run twin (dmsh_mesh.py dm_mesh_run...), whose threadgroups find their draw in the table, before:
 // any operation but bindings, a program bind and draws (geo_mesh_keeps, from mtl_exec), a draw that is not a mesh draw of the same pair (draw_, geo_mesh_draw), and the end of
 // the pass (rp_end). Bindings only change S and dirty flags, so nothing else reaches the encoder in between. The draws of a run then run in one dispatch, whose threadgroups the
@@ -475,7 +475,7 @@ static void geo_mesh_flush_(int why) {
     size_t bytes = sizeof(geo_mesh_rec) * (size_t)n; id<MTLBuffer> b; size_t o = arena_alloc(bytes, &b);
     memcpy((uint8_t *)b.contents + o, g_mrun.r, bytes);
     [en setRenderPipelineState:g_mrun.run_ps];
-    [en setArgumentTable:g_vt atStages:MTLRenderStageMesh];
+    [en setArgumentTable:RX.vt atStages:MTLRenderStageMesh];
     enc_r_vbuf(en, GEO_MESH_DRAW_SLOT, b.gpuAddress + o);
     [en drawMeshThreadgroups:MTLSizeMake(g_mrun.groups, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(3 * g_mrun.prims, 1, 1)];
     [en setRenderPipelineState:g_mrun.ps];   // as the draws left it
@@ -524,7 +524,7 @@ static int geo_mesh_take(id<MTL4RenderCommandEncoder> en) {
         g_mrun.prims = g_geo_mesh.prims; g_mrun.groups = 0;
     }
     geo_mesh_rec *r = &g_mrun.r[g_mrun.n++];
-    for (int i = 0; i < 31; i++) r->slot[i] = g_vt_valid >> i & 1 ? g_vt_addr[i] : 0;
+    for (int i = 0; i < 31; i++) r->slot[i] = RX.vt_valid >> i & 1 ? RX.vt_addr[i] : 0;
     r->d = g_geo_mesh.a; r->n = 0;
     uint32_t tris = g_geo_mesh.a.count / 3; g_mrun.groups += (tris + g_mrun.prims - 1) / g_mrun.prims; r->group_end = g_mrun.groups;
     return 1;
@@ -533,13 +533,13 @@ static int geo_mesh_take(id<MTL4RenderCommandEncoder> en) {
 // m0 = (0, 1 instance) and m1.x = the draw's triangles, and the draw's index source
 static void geo_mesh_encode(id<MTLRenderCommandEncoder> en_) {
     id<MTL4RenderCommandEncoder> en = (id<MTL4RenderCommandEncoder>)en_;
-    [en setArgumentTable:g_vt atStages:MTLRenderStageMesh];
+    [en setArgumentTable:RX.vt atStages:MTLRenderStageMesh];
     uint32_t tris = g_geo_mesh.a.count / 3;
     id<MTLBuffer> b; size_t o = arena_alloc(64, &b); uint8_t *p = (uint8_t *)b.contents + o;
     uint32_t info[8] = {0, 1, 0, 0, tris, 0, 0, 0}; memcpy(p, info, 32); memcpy(p + 32, &g_geo_mesh.a, sizeof g_geo_mesh.a);
     enc_r_vbuf(en, GEO_MESH_DRAW_SLOT, b.gpuAddress + o + 32);
     uint64_t save[5]; memcpy(save, g_geo_bind, sizeof save); memset(g_geo_bind, 0, sizeof g_geo_bind); g_geo_bind[3] = b.gpuAddress + o;
-    g_args_dirty[2] = 1; g_args_mesh = GEO_MESH_GS_SLOT; encode_args(en, g_geo_mesh.lean, 2, 0); g_args_mesh = 0; g_args_dirty[2] = 1;
+    RX.args_dirty[2] = 1; g_args_mesh = GEO_MESH_GS_SLOT; encode_args(en, g_geo_mesh.lean, 2, 0); g_args_mesh = 0; RX.args_dirty[2] = 1;
     memcpy(g_geo_bind, save, sizeof save);
     if (geo_mesh_take(en)) return;
     uint32_t pg = g_geo_mesh.prims;
@@ -582,11 +582,11 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
 }
 static void mtk_encode(id<MTLRenderCommandEncoder> en_) {
     id<MTL4RenderCommandEncoder> en = (id<MTL4RenderCommandEncoder>)en_; NvShader *ts = g_mtk.ts, *ms = g_mtk.ms;
-    [en setArgumentTable:g_vt atStages:MTLRenderStageMesh];
+    [en setArgumentTable:RX.vt atStages:MTLRenderStageMesh];
     id<MTLBuffer> b; size_t o = arena_alloc(16, &b); memcpy((uint8_t *)b.contents + o, &g_mtk.first, 4);
-    if (ts) { [en setArgumentTable:g_ot atStages:MTLRenderStageObject]; g_args_dirty[3] = 1; encode_args(en, ts, 3, 0);
-              if (rec_on()) rec_table_op(RO_T_ADDR, g_ot, b.gpuAddress + o, DMSH_MESH_FIRST_SLOT); else [g_ot setAddress:b.gpuAddress + o atIndex:DMSH_MESH_FIRST_SLOT]; }
-    g_args_dirty[4] = 1; encode_args(en, ms, 4, 1);
+    if (ts) { [en setArgumentTable:RX.ot atStages:MTLRenderStageObject]; RX.args_dirty[3] = 1; encode_args(en, ts, 3, 0);
+              if (rec_on()) rec_table_op(RO_T_ADDR, RX.ot, b.gpuAddress + o, DMSH_MESH_FIRST_SLOT); else [RX.ot setAddress:b.gpuAddress + o atIndex:DMSH_MESH_FIRST_SLOT]; }
+    RX.args_dirty[4] = 1; encode_args(en, ms, 4, 1);
     enc_r_vbuf(en, DMSH_MESH_FIRST_SLOT, b.gpuAddress + o);
     [en drawMeshThreadgroups:MTLSizeMake(g_mtk.count, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(ts ? ts->mesh_threads : 1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(ms->mesh_threads, 1, 1)];
 }
@@ -729,7 +729,7 @@ static int geo_prep(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, geo_jo
     int prim = dw0 ? j->dw.prim : j->di.prim, topology = nvn_geo_topology(prim);
     int count = dw0 ? j->dw.count : j->di.count, instances = dw0 ? j->dw.instances : j->di.instances;
     uint32_t first_instance = (uint32_t)(dw0 ? j->dw.base_instance : j->di.base_instance);
-    g_draw_binst = first_instance;
+    RX.draw_binst = first_instance;
     if (count <= 0 || instances < 0) return 0;
     if (!instances) instances = 1;
     if (topology < 0 || count > (1 << 22)) { if (may_wait) MLOG("[RED] geometry primitive %d or count %d exceeds the assembly path", prim, count); return 0; }
@@ -862,7 +862,7 @@ static int geo_prep(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, geo_jo
 }
 static void geo_capture_one(id<MTL4RenderCommandEncoder> re, const geo_job *j) {
     if (!j->capture_words) return;
-    g_draw_binst = j->first_instance;
+    RX.draw_binst = j->first_instance;
     memset(g_vbuf_need, 0, sizeof g_vbuf_need);   // a later draw's bounds do not apply here (geo_prepare)
     enc_r_pso(re, j->capture); bind_vbufs(re);
     vconv_bind(re, j->vs, 1, &j->vertex_range, NULL);
@@ -871,7 +871,7 @@ static void geo_capture_one(id<MTL4RenderCommandEncoder> re, const geo_job *j) {
     else enc_r_draw_instanced(re, MTLPrimitiveTypePoint, j->dw.first, j->dw.count, j->dw.instances, j->first_instance);
 }
 static void geo_gs_one(id<MTL4ComputeCommandEncoder> ce, const geo_job *j) {
-    g_draw_binst = j->first_instance;
+    RX.draw_binst = j->first_instance;
     g_geo_bind[0] = j->input; g_geo_bind[1] = j->output; g_geo_bind[2] = j->raw; g_geo_bind[3] = j->info; g_geo_bind[4] = j->map;
     args_dirty_all(); encode_args(ce, j->gs, 2, 0); enc_c_pso(ce, j->gs->geo_pso);
     enc_c_dispatch(ce, MTLSizeMake((j->np + 31) / 32, j->dw.instances, j->gs->geo_invocations), MTLSizeMake(32, 1, 1));
@@ -886,7 +886,7 @@ static void geo_gs_one(id<MTL4ComputeCommandEncoder> ce, const geo_job *j) {
 static void geo_raster(const geo_job *j, int last_in_run) {
     g_geo_bind[1] = j->output;
     if (S.tf_on) tf_geometry(j->reader, j->packed, j->args, j->gs->geo_output == 1 ? 1 : j->gs->geo_output == 6 ? 2 : 3, j->first_instance);
-    if (S.rast_discard || !j->emits) { if (last_in_run && g_enc_geo_nocolor) rp_end(); return; }
+    if (S.rast_discard || !j->emits) { if (last_in_run && RX.enc_geo_nocolor) rp_end(); return; }
     NvProg *pr = j->pr, *raster = pr->geo_raster;
     if (!raster || raster->sh[0] != j->reader || raster->sh[1] != pr->sh[1]) {
         raster = [NvProg new]; raster->sh[0] = j->reader; raster->sh[1] = pr->sh[1]; pr->geo_raster = raster;
@@ -900,7 +900,7 @@ static void geo_raster(const geo_job *j, int last_in_run) {
     draw(&synthetic, NULL);
     g_geo_omit_colors = 0; g_geo_program = nil; g_geo_vrange = NULL; g_geo_count = 0; args_dirty_all();
     // Ordinary draws may enable color writes, so they must open their own pass.
-    if (last_in_run && g_enc_geo_nocolor) rp_end();
+    if (last_in_run && RX.enc_geo_nocolor) rp_end();
     static int once; if (!once++) MLOG("geometry compute: vertex %s, geometry %s, %llu input primitives, %d instances", j->vs->key, j->gs->key, (unsigned long long)j->np, j->dw.instances);
 }
 // Query reports/resets remain at their original places in raster replay. Each
@@ -921,7 +921,7 @@ static int geo_run_passes(uint32_t op, const void *a) {
 static int geo_run_walk(id<MTL4RenderCommandEncoder> re) {
     int n = 1;
     if (!geo_hoist_on() || S.tf_on || g_geo_split_depth || g_defer_replaying || !g_exec_next || g_ret_n > 8) return n;
-    typeof(S) s0 = S; typeof(R) r0 = R; int pd = g_pso_dirty, dd = g_dss_dirty;
+    typeof(S) s0 = S; typeof(R) r0 = R; int pd = RX.pso_dirty, dd = RX.dss_dirty;
     fz_cursor cur = {.p = g_exec_next, .ret_n = g_ret_n}; memcpy(cur.ret, g_ret, sizeof(*g_ret) * (size_t)g_ret_n);
     const uint8_t *p; op_hdr h; const void *a;
     static geo_run_access run;   // 128 KiB: not on the stack
@@ -944,7 +944,7 @@ static int geo_run_walk(id<MTL4RenderCommandEncoder> re) {
         geo_capture_one(re, &g_geo_run[n]);
         n++;
     }
-    S = s0; R = r0; g_pso_dirty = pd; g_dss_dirty = dd;
+    S = s0; R = r0; RX.pso_dirty = pd; RX.dss_dirty = dd;
     return n;
 }
 static void geo_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint32_t primitive_base) { cp_stamp start = cp_begin(); geo_draw_(pr, dw0, di0, primitive_base); cp_end(6, start); }
@@ -975,7 +975,7 @@ static void geo_draw_(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint
     int n = g_geo_nrun = geo_run_walk(re);
     if (n > 1) { g_geo_hoisted += n - 1; g_geo_hoist_runs++; }
     enc_r_end(re);
-    typeof(S) s0 = S; typeof(R) r0 = R; int pd = g_pso_dirty, dd = g_dss_dirty;
+    typeof(S) s0 = S; typeof(R) r0 = R; int pd = RX.pso_dirty, dd = RX.dss_dirty;
     fz_cursor cur = {.p = g_exec_next, .ret_n = g_ret_n};
     if (n > 1) memcpy(cur.ret, g_ret, sizeof(*g_ret) * (size_t)g_ret_n);
     id<MTL4ComputeCommandEncoder> ce = nil;
@@ -990,7 +990,7 @@ static void geo_draw_(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint
         if (g_geo_split_compute) { enc_c_end(ce); ce = nil; }
         packs += g_geo_run[i].emits != 0 && !g_geo_run[i].direct_count;
     }
-    if (n > 1) { S = s0; R = r0; g_pso_dirty = pd; g_dss_dirty = dd; }
+    if (n > 1) { S = s0; R = r0; RX.pso_dirty = pd; RX.dss_dirty = dd; }
     int legacy = geo_pack_legacy(), small = 0;
     for (int i = 0; i < n; i++) if (!legacy && g_geo_run[i].emits && !g_geo_run[i].direct_count && g_geo_run[i].groups <= 1024) small++;
     if (small) {
@@ -1020,6 +1020,6 @@ static void geo_draw_(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint
         enc_c_dispatch(ce, MTLSizeMake((g_geo_run[i].packed_size / 4 + 63) / 64, 1, 1), MTLSizeMake(64, 1, 1));
     }
     if (ce) enc_c_end(ce);
-    args_dirty_all(); g_enc_pso = nil; g_enc_dss = nil; g_ed.ok = 0;
+    args_dirty_all(); RX.enc_pso = nil; RX.enc_dss = nil; RX.ed.ok = 0;
     geo_raster(j0, n == 1);
 }

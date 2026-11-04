@@ -42,13 +42,13 @@ static void rr_finish(int ranged) {
     if(g_rr_reg!=g_reg_gen||g_rr_ser!=g_ser_gen)MDIE("RT range oracle: resource generation changed, stopped before submit without comparing");
     NSArray *candidate=rr_read(c,d);rr_copy(g_rr_initial[0],c);rr_copy(g_rr_initial[1],d);RX.vis=[g_dev newBufferWithLength:VIS_SLOTS*8 options:MTLResourceStorageModeShared];RX.vis_n=0;g_vis_cur=-1;g_vis_on=g_vis_counting=1;g_vs=NULL;g_nvs=g_vscap=0;g_exec_next=g_exec_cur=NULL;
     id<MTLBuffer> refvis[2];int refslot[2];
-    for(int i=0;i<2;i++){if(i)rp_end();g_vis_cur=-1;memcpy(&S,&g_rr_s[i].s,sizeof S);R=g_rr_s[i].r;g_pso_dirty=g_dss_dirty=1;rp_begin_ex(4); // In the original trace both passes are mode4; do not attach an extra stencil with mode0, which has no scan start point
+    for(int i=0;i<2;i++){if(i)rp_end();g_vis_cur=-1;memcpy(&S,&g_rr_s[i].s,sizeof S);R=g_rr_s[i].r;RX.pso_dirty=RX.dss_dirty=1;rp_begin_ex(4); // In the original trace both passes are mode4; do not attach an extra stencil with mode0, which has no scan start point
         draw(g_rr_s[i].indexed?NULL:&g_rr_s[i].dw,g_rr_s[i].indexed?&g_rr_s[i].di:NULL);refvis[i]=RX.vis;refslot[i]=g_vis_cur;}rp_end();
     uint64_t original_passes=g_stat_pass-pass,original_bytes=g_bw_load-load+g_bw_store-store;NSArray *reference=rr_read(c,d);
     if(g_rr_reg!=g_reg_gen||g_rr_ser!=g_ser_gen||g_rr_dirty!=nvn_dirty_now())MDIE("RT range oracle: resource/data generation changed while bound, stopped before submit without comparing");
     rr_copy(saved[0],c);rr_copy(saved[1],d); // Subsequent commands read the candidate; the oracle must not overwrite it to force the screenshot green
     NSArray *referencevis=@[refvis[0],refvis[1]];int refslot0=refslot[0],refslot1=refslot[1];vis_clear();free(g_vs);g_vs=oldvs;g_nvs=vsn;g_vscap=vscap;RX.vis=oldvis;RX.vis_n=visn;
-    memcpy(&S,&ss,sizeof S);R=rs;g_exec_next=next;g_exec_cur=cur_op;g_vis_on=vis;g_vis_counting=counting;g_vis_cur=cur;g_vis_cur_pass=curpass;g_pso_dirty=g_dss_dirty=1;g_stat_pass=pass;g_stat_draw=draws;g_bw_load=load;g_bw_store=store;g_pass_full_rw=full;g_sd_dead_bytes=dead;g_sd_n_dead=ndead;g_sd_n_all=nall;
+    memcpy(&S,&ss,sizeof S);R=rs;g_exec_next=next;g_exec_cur=cur_op;g_vis_on=vis;g_vis_counting=counting;g_vis_cur=cur;g_vis_cur_pass=curpass;RX.pso_dirty=RX.dss_dirty=1;g_stat_pass=pass;g_stat_draw=draws;g_bw_load=load;g_bw_store=store;g_pass_full_rw=full;g_sd_dead_bytes=dead;g_sd_n_dead=ndead;g_sd_n_all=nall;
     uint64_t frame=g_rr_frame;unsigned vc=g_rr_s[1].indexed?g_rr_s[1].di.count:g_rr_s[1].dw.count;NSUInteger n=c.width*c.height;NSString *out=@(getenv("DM_NVN_RT_RANGE_CHECK"));
     [RX.cb addCompletedHandler:^(id<MTLCommandBuffer> cb){unsigned long long diff[3]={0};
         unsigned long long av[2],rv[2];int as[2]={slot0,slot1},rs[2]={refslot0,refslot1};for(int k=0;k<2;k++){id<MTLBuffer> a=actualvis[k],r=referencevis[k];av[k]=((uint64_t *)a.contents)[as[k]];rv[k]=((uint64_t *)r.contents)[rs[k]];}if(use_before)av[0]-=*(uint64_t *)before.contents;const char *names[3]={"color","depth","stencil"};

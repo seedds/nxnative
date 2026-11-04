@@ -53,7 +53,7 @@ static uint64_t tf_prepare(NvShader *vs, uint64_t source_count, uint64_t order, 
 }
 static void tf_note(NvShader *vs) {
     for(int b=0;b<4;b++)if(vs->tf_stride[b])pend_add(S.tf[b].addr,S.tf[b].size,4);
-    args_dirty_all();g_enc_pso=nil;g_enc_dss=nil;g_ed.ok=0;g_wr_epoch++;g_mdx_epoch++;
+    args_dirty_all();RX.enc_pso=nil;RX.enc_dss=nil;RX.ed.ok=0;g_wr_epoch++;g_mdx_epoch++;
 }
 static void tf_draw(NvProg *pr,const p_draw *dw,const p_draw_idx *di) {
     NvShader *vs=pr?pr->sh[0]:nil;

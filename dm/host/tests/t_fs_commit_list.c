@@ -56,7 +56,7 @@ static Result write_save(const char *path, const char *s) {
     h_fs_CloseFile(h); return r;
 }
 static int read_save(const char *path, char *out, size_t n) {
-    uint64_t h; size_t got = 0; if (h_fs_OpenFile(&h, path, MODE_READ)) return 0;
+    uint64_t h=0; size_t got = 0; if (!n || h_fs_OpenFile(&h, path, MODE_READ)) return 0;
     Result r = h_fs_ReadFile(&got, h, 0, out, n - 1); h_fs_CloseFile(h); out[got] = 0; return !r;
 }
 static pthread_mutex_t first_lock = PTHREAD_MUTEX_INITIALIZER;

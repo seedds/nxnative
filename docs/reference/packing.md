@@ -68,6 +68,15 @@
 - **Fix:** the error shows each differing table's row counts and its first row on each side. For a splitter change, check that the new rows are right, then copy the tables from `shader/pkg.partial/tables` in the build folder into the profile. A change to the splitter's output also needs the other profiles it reaches split again.
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md) ([issue #1263](https://github.com/seedds/nxnative/issues/1263)): [NVN2 task and mesh shaders](shaders.md#nvn2-task-and-mesh-shaders) moved one row from vertex to mesh. Donkey Kong Bananza, Pokemon Pokopia and Hyrule Warriors: Age of Imprisonment were checked and hold no such shader; Fire Emblem Fortune's Weave was not checked, as no dump was at hand.
 
+## Mac apps
+
+### The Mac app drops the FPS setting and Metal HUD menu
+
+- **Symptom:** a Mac app built with `--show-fps` has neither the Metal performance overlay nor its Metal HUD menu.
+- **Cause:** the NSP script returned from its Mac packaging path before applying `SHOW_FPS` / `--show-fps`. The older bundler carried that preference into the app, but the current launcher received no HUD default. The Mac host enables Apple's HUD through `DM_METAL_HUD`, and Apple adds its menu when the HUD is enabled.
+- **Fix:** `scripts/build_ipa_from_nsp.py` passes the resolved choice to `dm/mac/pack_app.py`, which stores `DMShowFPS` in `Info.plist`. `dm/mac/launcher.c` sets `DM_METAL_HUD` from it before spawning the host, after reading environment files and the player's saved or window choices so those retain precedence. The packed `launcher.json` HUD row uses the same build default. `--no-show-fps` disables the bundled default; changing the option invalidates bundle reuse.
+- **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md); applies to every Mac app. The restored menu still needs a visual check in a running game.
+
 ## IPA archives
 
 ### A streamed file changes size and the IPA fails its CRC check

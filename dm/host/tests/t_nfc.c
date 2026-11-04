@@ -10,7 +10,7 @@ int g_nmod;
 uint64_t g_t0_ns;
 uint64_t now_ns(void) { return 0; }
 int dm_sdk_major(void) { return 3; }
-int dm_main_imports(const char *prefix) { (void)prefix; return 0; }
+int dm_game_imports(const char *prefix) { (void)prefix; return 0; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 void dm_backtrace(uint64_t fp) { (void)fp; }
 void hle_bind_system_event(void *ev, int autoclear) { (void)ev; (void)autoclear; }

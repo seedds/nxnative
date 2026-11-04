@@ -335,7 +335,9 @@ or comments on anything. The maintainer decides what to do with each row.
   body name none after "Fixes", "Closes", "Resolves", "Part of", "Refs",
   "Related to", "See" or "Issue". A reference to a closed PR counts as a link.
 - Issues with no reply and no label: no comment from anyone but the author or
-  a bot. "Named by" lists the open PRs that link the issue.
+  a bot, and no label but the automatic ones (`issue-areas.yml` adds area, game
+  and kind labels to issues nobody has read). "Named by" lists the open PRs that
+  link the issue.
 
 The workflow checks out `main` only. It fetches each open PR's head into the object store and never
 checks out or runs it. With the repository variable `TRIAGE_REPORT_ISSUE` set to

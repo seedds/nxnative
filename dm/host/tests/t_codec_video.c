@@ -86,14 +86,26 @@ int main(void) {
     assert(!h_cv_rgba(pool[0], 0, 0, 0, 16, 16, rgba, 64, sizeof rgba));
     for (int i = 0; i < 1024; i += 4) assert(rgba[i] >= 250 && rgba[i + 1] <= 5 && rgba[i + 2] <= 5 && rgba[i + 3] == 255);
 
-    // No released buffer: pictures wait (4), then packets are refused (3603) and the event is cleared; a release takes the oldest and signals again
-    for (int i = 0; i < CV_HOLD; i++) assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 2000 + i, false));
+    // No released buffer: pictures wait; the event goes down at CV_READY, with room left for a client's signal in flight, and packets are refused (3603) at CV_HOLD
+    for (int i = 0; i < CV_READY; i++) assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 2000 + i, false));
+    assert(d->nheld == CV_READY && !ev_set(ev));
+    for (int i = CV_READY; i < CV_HOLD; i++) assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 2000 + i, false));
     assert(d->nheld == CV_HOLD && !ev_set(ev));
     assert(h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 9999, false) == CV_BUSY);
+    // A release takes the oldest; the event comes back below CV_READY
+    for (int i = CV_HOLD; i > CV_READY; i--) { h_cv_vp9rel(dec, 1, sync); assert(d->nheld == i - 1 && !ev_set(ev)); assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 1); }
     h_cv_vp9rel(dec, 1, sync);
-    assert(d->nheld == CV_HOLD - 1 && ev_set(ev));
+    assert(d->nheld == CV_READY - 1 && ev_set(ev));
     assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 1 && h_gs_trywait(&sync));
-    assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 1) && ts == 2000);
+    // Start signals it again: a client may drop the signal Initialize gave
+    hle_clear_system_event(ev); assert(!ev_set(ev));
+    assert(!h_cv_vp9start(dec) && ev_set(ev));
+    // A release below CV_READY with no packet taken signals nothing: a client counts each signal as one packet it may send. A packet taken does
+    hle_clear_system_event(ev);
+    h_cv_vp9rel(dec, 1, sync); assert(d->nheld == CV_READY - 2 && !ev_set(ev));
+    assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 1);
+    assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 2000 + CV_HOLD, false) && d->nheld == CV_READY - 1 && ev_set(ev));
+    assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 1) && ts == 2000 + CV_HOLD - CV_READY + 1);
 
     // Sync point event: armed on an unfilled buffer, signalled when the picture lands; one armed on a filled buffer is signalled at once
     assert(!h_spt_create(spt) && g_ev[ev_slot(spt)].bound);

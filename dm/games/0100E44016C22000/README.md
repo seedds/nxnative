@@ -21,7 +21,7 @@ Update 1.0.1 (v65536) over the base game, SDK 13.3.7. Unity 2020.3.30f1 IL2CPP w
 
 ## Fonts
 
-- **Resolved: Japanese, Korean and Chinese text drew nothing** (the language menu showed three blank lines), Latin text was fine. The game's one font, Jost (a Unity dynamic font), falls back to the OS fonts for those glyphs, and Unity's Switch player loads them from the shared fonts: `main+0x2390b0` maps the names `Switch_Font_STD`, `Switch_Font_CN_Simplified`, `Switch_Font_CN_Extended`, `Switch_Font_CN_Traditional`, `Switch_Font_KR` and `Switch_Font_NIN_Extended` to types 0–5 and hands `GetSharedFontAddress` / `GetSharedFontSize` straight to FreeType's `FT_New_Memory_Face` (`main+0x23b2e0`). The host gave every SDK 11+ game the 8-byte BFTTF header in front, so every face failed to open. The host now gives a game that imports no `ScalableFontEngineHelper::Decode` the TTF itself (`font_skip` in `hle_sdk16.c`, `dm_main_imports` in `loader.c`; the `shared_font` key, which no profile sets, overrides it).
+- **Resolved: Japanese, Korean and Chinese text drew nothing** (the language menu showed three blank lines), Latin text was fine. The game's one font, Jost (a Unity dynamic font), falls back to the OS fonts for those glyphs, and Unity's Switch player loads them from the shared fonts: `main+0x2390b0` maps the names `Switch_Font_STD`, `Switch_Font_CN_Simplified`, `Switch_Font_CN_Extended`, `Switch_Font_CN_Traditional`, `Switch_Font_KR` and `Switch_Font_NIN_Extended` to types 0–5 and hands `GetSharedFontAddress` / `GetSharedFontSize` straight to FreeType's `FT_New_Memory_Face` (`main+0x23b2e0`). The host gave every SDK 11+ game the 8-byte BFTTF header in front, so every face failed to open. The host now gives a game that imports no `ScalableFontEngineHelper::Decode` the TTF itself (`font_skip` in `hle_sdk16.c`, `dm_game_imports` in `loader.c`; the `shared_font` key, which no profile sets, overrides it).
 - To see which fonts a Unity game asks for, probe its name mapper's entry: `DM_PROBE=main:2390b0` on 1.0.1 (the function is the one `main` caller of `GetSharedFontLoadState`).
 
 ## Input
@@ -41,7 +41,7 @@ Update 1.0.1 (v65536) over the base game, SDK 13.3.7. Unity 2020.3.30f1 IL2CPP w
 
 General host changes first needed here; each applies to every game:
 
-- **The shared-font address is the TTF** unless the game is on SDK 11 or later and imports `ScalableFontEngineHelper::Decode` (`font_skip`, `dm_main_imports`): [Shared font address: BFTTF header or bare TTF](../../../docs/reference/services.md#shared-font-address-bfttf-header-or-bare-ttf), [dm/games/README.md, Keys](../README.md#keys) (`shared_font`).
+- **The shared-font address is the TTF** unless the game is on SDK 11 or later and imports `ScalableFontEngineHelper::Decode` (`font_skip`, `dm_game_imports`): [Shared font address: BFTTF header or bare TTF](../../../docs/reference/services.md#shared-font-address-bfttf-header-or-bare-ttf), [dm/games/README.md, Keys](../README.md#keys) (`shared_font`).
 - **Unity 2020.3's `Shader` layout written out** (`SHADER_2020_3`, `_SHADER_COMMON`): [Unity Shader layouts written out for players without bundles](../../../docs/reference/shaders.md#unity-shader-layouts-written-out-for-players-without-bundles).
 - **Finding the AddressRegionManager constructor on a new `sdk` build**: [The SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area).
 

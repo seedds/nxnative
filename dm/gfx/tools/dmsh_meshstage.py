@@ -98,7 +98,9 @@ def to_stage(msl, i):
     m = _KERNEL.search(msl)
     if not m: raise ValueError(f'{kind}: no kernel main0 starting with its stage memory')
     params, words, mem = _params(m[1]), int(m[2]), m[3]
-    names = [_NAME.search(p)[1] for p in params]
+    found = [_NAME.search(p) for p in params]
+    if not all(found): raise ValueError(f'{kind}: a kernel parameter without a name')
+    names = [n[1] for n in found if n]
     plain = [re.sub(r'\s*\[\[.*\]\]$', '', p) for p in params]
     # The kernel's body, called with the stage memory the wrapper owns: its early returns (a thread with nothing to write) come back to the wrapper's copy of the outputs
     src = msl[:m.start()] + f'static inline __attribute__((always_inline)) void dm_stage_body({", ".join(plain + [f"threadgroup spvUnsafeArray<uint, {words}>& {mem}"])})\n{{\n' + msl[m.end():]

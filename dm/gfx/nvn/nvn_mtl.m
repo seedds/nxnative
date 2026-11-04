@@ -4338,6 +4338,7 @@ static void shmap_read(void) {
     NSString *ventry; id<MTLFunction> vfn; int vfn_state;
     id<MTLFunction> pfn; int pfn_state, has_pull;
     id<MTLFunction> afn[4]; int afn_state, has_alpha;
+    id<MTLFunction> bbfn[4]; int bbfn_state, has_border;   // bbfn: fn, fn_u, fn_m, fn_d of the border correcting library <key>_bb (bb_fn; bbfn_state as afn_state; has_border: the reflection names one, dmsh_build.py border_plain)
     id<MTLLibrary> llib; NSMutableDictionary<NSNumber *, id<MTLFunction>> *lfn; int lfn_state, has_logic; } @end   // llib: the side library <key>_bx for logic operations, lfn: its fn_u / fn_m specialized per set of targets (lo_fn; lfn_state as afn_state; has_logic: the reflection names its entry points, dmsh_logic.py)   // afn: the alpha test entry points of fn, fn_u, fn_m, fn_d in the side library <key>_bx (at_fn; afn_state 0 untried, 1 loaded, 2 failed; has_alpha: the reflection names them, dmsh_alpha.py)   // pfn: the same entry of the pulling library <key>_bp (pull_fn; has_pull: the reflection names one, dmsh_pull.py)   // vertex: the entry point loaded (by the depth mode); vfn: the same entry of the shadow-input library <key>_bv (vin_fn; state 0 untried, 1 loaded, 2 failed)
 @implementation NvShader
 - (void)dealloc { free(rf.c1); free(geo_slot); }
@@ -4584,6 +4585,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     if (stage == 0 && !layer) o->has_pull = [j[@"pull"] isKindOfClass:[NSDictionary class]];
     if (stage == 1) o->has_alpha = [j[@"alpha"] isKindOfClass:[NSDictionary class]];
     if (stage == 1) o->has_logic = [j[@"logic"] isKindOfClass:[NSDictionary class]];
+    if (stage == 1) o->has_border = [j[@"border"] isKindOfClass:[NSDictionary class]];
     // A function that declares function constants cannot go into a pipeline until it is specialized, even when every constant is optional. SPIRV-Cross declares one for shaders that read a
     // texel buffer (spvLinearTextureAlignmentOverride, used only through is_function_constant_defined; one of Pokémon Legends: Z-A's imgui pixel shaders, 2bd5037003980716): an empty set of
     // values keeps its default. Without it the first pipeline with that shader failed Metal's validation (`fragmentFunction main0 cannot be used to build a pipeline state`)
@@ -4791,6 +4793,7 @@ static int *g_treg_transient; static size_t g_ntreg_transient, g_treg_transient_
 static _Atomic uint64_t g_tser[1 << 20];
 static samp_par *g_sreg; static uint8_t *g_sreg_ok; static void **g_sview; static uint64_t *g_srid; static int g_nsreg;   // g_sview: sampler ID → MTLSamplerState (retained)
 static void **g_sview_w; static uint64_t *g_srid_w; static float (*g_sbk)[4];   // a sampler's twin for a border colour Metal lacks (retained, NULL = none) and the shader's factors k (see nvn_border.h)
+static int g_ntwin;   // registered samplers whose border colour Metal lacks (nvn_border: they get a twin), counted by mtl_reg_samp under g_rmu; 0: border_key needs no look at the bindings
 // Memory pool Finalize: for texture IDs whose registered texture lives on this pool, drop the cached MTLTexture (view or base texture). The cache used to be released only when the ID was registered again,
 // so a linear texture built directly on a pool kept the whole pool buffer alive (6 to 17 finalized 16 MB pool buffers stayed alive in Engage's title demo). If the ID is still used, the next lookup rebuilds it on the slow path
 static void treg_drop_im(treg_t *r) { if (r->im) { defer_obj_unref((__bridge id)r->im); CFRelease(r->im); r->im = r->im_of = NULL; r->im_rid = 0; } }   // the image class view (img_fit)
@@ -5034,6 +5037,9 @@ void mtl_reg_samp(int sid, const samp_par *sp) {
     if (g_sview[id_]) { CFRelease(g_sview[id_]); g_sview[id_] = NULL; g_srid[id_] = 0; }
     if (g_sview_w[id_]) { CFRelease(g_sview_w[id_]); g_sview_w[id_] = NULL; g_srid_w[id_] = 0; }
     g_reg_gen++;
+    { int bn, bw; float k[4]; const samp_par *o = &g_sreg[id_];   // g_ntwin: the registration replaced, then this one
+      if (g_sreg_ok[id_] && nvn_border(o->border, (const uint8_t[3]){o->ws, o->wt, o->wr}, o->reduction, &bn, &bw, k)) __atomic_store_n(&g_ntwin, g_ntwin - 1, __ATOMIC_RELAXED);
+      if (nvn_border(sp->border, (const uint8_t[3]){sp->ws, sp->wt, sp->wr}, sp->reduction, &bn, &bw, k)) __atomic_store_n(&g_ntwin, g_ntwin + 1, __ATOMIC_RELAXED); }
     g_sreg[id_] = *sp; g_sreg_ok[id_] = 1;
     os_unfair_lock_unlock(&g_rmu);
 }
@@ -6160,6 +6166,34 @@ static uint32_t atest_key(NvShader *fs, const uint32_t cfmt[8], const uint8_t *l
     if (!fs->has_alpha) { RED_ONCE(128, "shader %s draws with alpha function %u but has no alpha test entry point (its colour 0 has no float alpha): drawn without the test", fs->key, S.color.alpha_func); return 0; }
     return 1;
 }
+// Border colours Metal lacks (dmsh_build.py border_emu, nvn_border.h): a pixel shader's main library is built without the correction (border_plain), which took registers in every
+// pixel for a branch almost never taken; its border correcting library <key>_bb has the same entry points and argument buffer with the correction. A pipeline drawn while one of the
+// shader's sampler members has a twin (border_key) takes its fragment from there. The side library <key>_bx (alpha test, logic operation) is built from the correcting source
+static os_unfair_lock g_bb_lock = OS_UNFAIR_LOCK_INIT;
+static id<MTLFunction> bb_fn(NvShader *fs, id<MTLFunction> base) {   // the border correcting library's entry point named as base (one of fs's own), loaded on first need; a failure is final for the shader
+    int w = !base ? -1 : base == fs->fn ? 0 : base == fs->fn_u ? 1 : base == fs->fn_m ? 2 : base == fs->fn_d ? 3 : -1;
+    if (w < 0 || !fs->has_border) return nil;
+    os_unfair_lock_lock(&g_bb_lock);
+    if (!fs->bbfn_state) {
+        fs->bbfn_state = 2;
+        size_t kl = strlen(fs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bb.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), fs->key];
+        NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); const char *why = lib ? NULL : "no library";
+        id<MTLFunction> own[4] = {fs->fn, fs->fn_u, fs->fn_m, fs->fn_d};
+        for (int i = 0; i < 4 && !why; i++) {
+            if (!own[i]) continue;
+            NSString *name = own[i].name; id<MTLFunction> f = fn4_note([lib newFunctionWithName:name], lib, name, nil);
+            if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, name, [MTLFunctionConstantValues new], &e);   // as shader_load
+            if (!f) why = "no entry point";
+            else if (fs->rf.nb && [f newArgumentEncoderWithBufferIndex:fs->rf.abi].encodedLength != fs->arg_len) why = "its argument buffer differs from the base library's";
+            else fs->bbfn[i] = f;
+        }
+        if (!why) { fs->bbfn_state = 1; static int n; if (++n <= 3 || !(n & (n - 1))) MLOG("border colours: correcting library of %s loaded (%d shaders so far)", fs->key, n); }
+        else { static int n; if (n++ < 8) MLOG("[RED] border correcting library of %s not usable (%s%s%s): its draws take Metal's nearest border colour", fs->key, why, e ? ": " : "", e ? e.localizedDescription.UTF8String : ""); }
+    }
+    id<MTLFunction> f = fs->bbfn_state == 1 ? fs->bbfn[w] : nil;
+    os_unfair_lock_unlock(&g_bb_lock);
+    return f;
+}
 static os_unfair_lock g_at_lock = OS_UNFAIR_LOCK_INIT;
 static id<MTLFunction> at_fn(NvShader *fs, id<MTLFunction> base) {   // the side library's alpha test entry point of base (one of fs's own), loaded on first need; a failure is final for the shader
     int w = !base ? -1 : base == fs->fn ? 0 : base == fs->fn_u ? 1 : base == fs->fn_m ? 2 : base == fs->fn_d ? 3 : -1;
@@ -6306,17 +6340,21 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
     // Dual-source blending: target 0 reads the shader's output 1 as its second source. The dual-source entry point returns that output as [[color(0), index(1)]] (dmsh_build.py fs_dual),
     // and output 1 is then no colour output: Maxwell leaves the attachment of output 1 as it was. A shader without that entry point blends with zero for the second source, as an
     // unwritten one (blend_zero_src1): passing the state to Metal as it is makes Metal 4's blend compiler crash (MTLCompilerService in buildBlendFactor, Pokémon Legends: Arceus)
-    int dual = !k->logic && fs && !fsfn && fs->rf.color_known && (fs->rf.color_mask & 2) && d.fragmentFunction == fs->fn && pso_reads_src1(k, merged), dual_fn = 0;   // a logic operation takes the place of blending
+    int dual = !(k->logic & 1) && fs && !fsfn && fs->rf.color_known && (fs->rf.color_mask & 2) && d.fragmentFunction == fs->fn && pso_reads_src1(k, merged), dual_fn = 0;   // a logic operation takes the place of blending
     if (dual && fs->fn_d) { d.fragmentFunction = fs->fn_d; dual_fn = 1; }
     else if (dual) { want_note(&g_dual_want, fs->key);
         RED_ONCE(121, "shader %s writes output 1 and a pipeline blends with it as the second source, but it has no dual-source entry point: the second source counts as zero "
                  "(add its key to the profile's dual_want.tsv; DM_NVN_DUAL_WANT=<file> lists every such shader)", fs->key); }
+    if ((k->logic & 2) && fs && !k->atest && !(k->logic & 1)) {   // a border colour Metal lacks (border_key): the same entry point of the border correcting library; the side library's alpha test and logic operation entry points correct it themselves (built from that source)
+        id<MTLFunction> bf = fsfn ? nil : bb_fn(fs, d.fragmentFunction);
+        if (bf) d.fragmentFunction = bf;
+    }
     if (k->atest && fs) {   // the alpha test (atest_key): the same entry point's in the side library
         id<MTLFunction> af = fsfn ? nil : at_fn(fs, d.fragmentFunction);
         if (af) d.fragmentFunction = af;
         else if (fsfn) RED_ONCE(129, "alpha test not applied to a specialized fragment (readable-tile merge or diagnostic) of %s", fs->key);
     }
-    if (k->logic && fs) {   // the logic operation (lop_key): the same entry point's in the side library; never with the alpha test's, which lop_key leaves out
+    if ((k->logic & 1) && fs) {   // the logic operation (lop_key): the same entry point's in the side library; never with the alpha test's, which lop_key leaves out
         uint32_t targets = 0; for (int i = 0; i < 8; i++) if (k->cfmt[i]) targets |= 1u << i;   // not a merged pass (lop_key): target i is output i
         id<MTLFunction> lf = fsfn ? nil : lo_fn(fs, d.fragmentFunction, targets);
         if (lf) d.fragmentFunction = lf;
@@ -6342,7 +6380,7 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
         if (unwritten) m = 0;
         c.writeMask = (m & 1 ? MTLColorWriteMaskRed : 0) | (m & 2 ? MTLColorWriteMaskGreen : 0) | (m & 4 ? MTLColorWriteMaskBlue : 0) | (m & 8 ? MTLColorWriteMaskAlpha : 0);
         // Integer targets: no blending. Maxwell ignores the blend enable on them; Metal refuses the pipeline (an assertion even without the API validation layer): Luigi's Mansion 3's integer G-buffer (PR #105)
-        if (!k->logic && l != 0xff && k->blend_en >> l & 1 && !unwritten && !pf_int_kind(c.pixelFormat)) {   // a logic operation takes the place of blending (lop_key)
+        if (!(k->logic & 1) && l != 0xff && k->blend_en >> l & 1 && !unwritten && !pf_int_kind(c.pixelFormat)) {   // a logic operation takes the place of blending (lop_key)
             c.blendingEnabled = YES; blend_st bl = adv_blend(k->blend[l]);
             if (fs && fs->rf.color_known && (!(fs->rf.color_mask & 2) || (dual && !dual_fn)) && !fsfn) {
                 bl.src_rgb = blend_zero_src1(bl.src_rgb); bl.dst_rgb = blend_zero_src1(bl.dst_rgb);
@@ -6822,13 +6860,28 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
 }
 static id<MTLRenderPipelineState> pso_build(MTLRenderPipelineDescriptor *d, NSError **e) { return pso_build_ex(d, e, 1); }
 // Pipeline key: current state S + pass formats (normal pass; a merged pass additionally carries lmap / specialized function, filled in by pso_get)
+static uint32_t ubo_handle(int stage, int reg, int off); static int ubo_samp_id(uint32_t h);
+static uint32_t border_key(NvShader *fs) {   // pso_key.logic bit 1: a sampler member of the pixel shader has a twin, so encode_args sets a bit of its border mask (the same sampler as there)
+    if (!fs || !fs->has_border || !__atomic_load_n(&g_ntwin, __ATOMIC_RELAXED)) return 0;
+    uint32_t on = 0;
+    os_unfair_lock_lock(&g_rmu);
+    for (int i = 0; i < fs->rf.nb && !on; i++) {
+        const nvn_rbind *b = &fs->rf.b[i]; int reg = b->reg;
+        if (!b->bw || !(b->kind == NVN_RB_SAMP || b->kind == NVN_RB_SAMPT || b->kind == NVN_RB_SAMPU || b->kind == NVN_RB_SAMPI)) continue;
+        int sid = b->kind == NVN_RB_SAMPU ? ubo_samp_id(ubo_handle(1, reg, b->off)) :
+                  b->kind == NVN_RB_SAMPI ? reg : b->kind == NVN_RB_SAMPT ? (reg < NTEX ? (int)(S.tex[1][reg] >> 20) : 0) : reg < 128 ? (int)(S.samp[1][reg] >> 20) : 0;
+        on = sid && samp_fast(sid) && g_sview_w[sid];
+    }
+    os_unfair_lock_unlock(&g_rmu);
+    return on ? 2 : 0;
+}
 static void pso_key_fill(pso_key *k, NvShader *vs, NvShader *fs, const uint32_t cfmt[8], uint32_t dfmt, uint32_t sfmt, uint32_t samples, int lmap) {
     memset(k, 0, sizeof *k);
     k->vs = (__bridge void *)vs; k->fs = (__bridge void *)fs;
     memcpy(k->cfmt, cfmt, sizeof k->cfmt); k->dfmt = dfmt; k->sfmt = sfmt; k->samples = samples;
     k->blend_en = S.color.blend_en; k->chmask = S.chmask.mask; k->a2c = S.ms.a2c; k->atest = atest_key(fs, cfmt, lmap ? g_pso_lmap : NULL);
     for (int i = 0; i < 8; i++) if (k->cfmt[i] || lmap) k->blend[i] = S.blend[i];
-    k->logic = lop_key(k, fs, lmap);
+    k->logic = lop_key(k, fs, lmap) | border_key(fs);
     const nvn_refl *rf = &vs->rf;
     for (int v = 0; v < rf->nv; v++) { int a = rf->v[v].nvn; if (a < 16 && a < S.nattr) { k->attr[a] = S.attr[a]; int st = S.attr[a].stream; if (st < 16) k->stream[st] = S.stream[st]; } }
     pso_key_norm(k, lmap);
@@ -10827,16 +10880,18 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     }
     if (skip_d) { g_stat_ds_omit++; if (mode == 3) g_stat_s_only++; else if (mode == 4) g_stat_d_only++; }
     // The pipeline depends only on (program, render pass targets, blend / color / write mask / multisample state, vertex layout): if these did not change, reuse the previous one
+    // The border correcting library (border_key) follows the samplers bound at this draw, and binding a sampler does not mark the pipeline dirty
+    static uint32_t cur_bkey; uint32_t bkey = g_geo_mesh.on || S.rast_discard ? 0 : border_key(pr->sh[1]);
     static id<MTLRenderPipelineState> cur_ps; static NvProg *cur_pr; static uint64_t cur_ps_pass; static int cur_pull;   // cur_pull: a hybrid (pulling) pipeline, asked for again at the next draw
     if (g_fz.active && !g_defer_replaying) { g_pso_lmap = g_fz.phase == 1 ? g_fz.lmap1 : g_fz.lmap2; g_pso_fsfn = g_fz.phase == 1 ? nil : fz_fn; g_pso_fz = g_fz.phase == 1 ? (pso_fz_desc){0} : g_fz_desc; g_pso_dirty = 1; }   // Readable tile merge: fetch the pipeline by the physical -> logical mapping and the specialization
     else if (g_fb_tseq == g_draw_seq && g_fb_tfn && !g_defer_replaying) { g_pso_lmap = g_fb_tlmap; g_pso_fsfn = g_fb_tfn; g_pso_fz = g_fb_tdesc; g_pso_dirty = 1; }   // same-pass feedback read from the tile (fb_tile_plan)
     if (g_mtk.on) { cur_ps = mtk_pso(pr); cur_pull = 0; cur_pr = nil; if (!cur_ps) { g_mtk.miss = 1; return; } }   // a task / mesh draw (mesh_tasks_draw)
     else if (g_geo_mesh.on) { cur_ps = geo_mesh_pso(pr); cur_pull = 1; cur_pr = nil; if (!cur_ps) { g_geo_mesh.miss = 1; return; } }   // a mesh draw (geo_mesh_draw): pulls its streams; the next draw fetches its own pipeline; none yet: the compute path draws
-    else if (g_pso_dirty || pr != cur_pr || cur_ps_pass != g_pass.serial) { g_pso_amp = g_sm_pass; cur_ps = pso_get(pr, nil); g_pso_amp = 0; cur_pull = g_pso_pull; cur_pr = pr; cur_ps_pass = g_pass.serial; g_pso_dirty = !cur_ps || cur_pull; }
+    else if (g_pso_dirty || pr != cur_pr || cur_ps_pass != g_pass.serial || bkey != cur_bkey) { g_pso_amp = g_sm_pass; cur_ps = pso_get(pr, nil); g_pso_amp = 0; cur_pull = g_pso_pull; cur_pr = pr; cur_ps_pass = g_pass.serial; cur_bkey = bkey; g_pso_dirty = !cur_ps || cur_pull; }
     if (!cur_ps && g_sm_pass) {   // a draw whose amplified pipeline is not built yet (sm_amp_get queued it): the slice-merged pass ends and the draw opens a pass of its own
         g_sm_nwait++; PD("M %llu slice-merged pass: no amplified pipeline yet for vertex %s fragment %s; split here", g_stat_pass, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-");
         rp_end(); en = rp_begin_ex(mode); if (!en) return;
-        cur_ps = pso_get(pr, nil); cur_pull = g_pso_pull; cur_pr = pr; cur_ps_pass = g_pass.serial; g_pso_dirty = !cur_ps || cur_pull; }
+        cur_ps = pso_get(pr, nil); cur_pull = g_pso_pull; cur_pr = pr; cur_ps_pass = g_pass.serial; cur_bkey = bkey; g_pso_dirty = !cur_ps || cur_pull; }
     uint32_t raster_mask = draw_color_writes(pr);   // Capture the physical mapping before resetting the merged pipeline state.
     if (g_pso_lmap) { g_pso_lmap = NULL; g_pso_fsfn = nil; memset(&g_pso_fz, 0, sizeof g_pso_fz); g_pso_dirty = 1; }   // The next draw fetches again according to its own situation
     __unsafe_unretained id<MTLRenderPipelineState> ps = cur_ps;

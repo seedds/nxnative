@@ -16,6 +16,9 @@ uint64_t now_ns(void) { return bp_now(); }
 static int checks, fails;
 #define CHECK(c, label) do { checks++; if (!(c)) { fails++; fprintf(stderr,"FAIL: %s\n",label); } } while (0)
 static uint8_t commands[8192]; static size_t used;
+// Explicit ARC owners complement the serial registry's opaque CF retains.
+// Keep both composites alive until all GPU work and registry teardown finish.
+static NvProg *program, *fprogram, *composites[2];
 static void emit(unsigned op, const void *p, size_t n) {
     size_t size = (8 + n + 7) & ~7ull; op_hdr h = {op, (uint32_t)size};
     memcpy(commands + used, &h, 8); if (n) memcpy(commands + used + 8, p, n); used += size;
@@ -28,7 +31,7 @@ int main(void) { @autoreleasepool {
         "fragment float4 f(bool front [[front_facing]]) { return front ? float4(0,1,0,1) : float4(1,0,0,1); }\n"
         options:nil error:&error];
     CHECK(library != nil,"test shaders compile"); if (!library) return 1;
-    static prog_t pg = {.serial=920001}; NvProg *program = [NvProg new];
+    static prog_t pg = {.serial=920001}; program = [NvProg new];
     NvShader *vs = [NvShader new]; vs->fn = [library newFunctionWithName:@"v"];
     vs->rf.nv = 1; vs->rf.v[0].ct = NVN_CT_FLOAT;
     memset(vs->rf.v[0].sh,0xff,sizeof vs->rf.v[0].sh);
@@ -74,11 +77,16 @@ int main(void) { @autoreleasepool {
     mtl_queue_activate(((queue_t *)&queues[1])->serial);
     CHECK(!S.bst[0] && !S.bst[1] && !S.prog,"finalizing a program unbinds it from a saved queue state");
     // Stages bound from two programs make a composite: finalizing the fragment program takes the effective program again, the vertex stage alone
-    static prog_t pf = {.serial=920003}; NvProg *fprogram = [NvProg new]; fprogram->sh[1] = fs; serial_put(pf.serial,fprogram);
-    S.prog = bind_stages(&pg,1); S.prog = bind_stages(&pf,2);   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns fprogram (serial_put's CFBridgingRetain), not a leak
-    CHECK(S.prog && S.prog != &pg && prog_get(S.prog)->sh[0] == vs && prog_get(S.prog)->sh[1] == fs,"a vertex and a fragment program bound apart make a composite");   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns the composite bind_stages made (serial_put's CFBridgingRetain), not a leak
+    static prog_t pf = {.serial=920003}; fprogram = [NvProg new]; fprogram->sh[1] = fs; serial_put(pf.serial,fprogram);
+    const prog_t *vertex_only = bind_stages(&pg,1); S.prog = vertex_only;
+    composites[0] = vertex_only ? prog_get(vertex_only) : nil;
+    CHECK(composites[0] && composites[0]->sh[0] == vs && !composites[0]->sh[1],"a vertex-only bind resolves its required stage");
+    const prog_t *mixed = bind_stages(&pf,2); S.prog = mixed;
+    composites[1] = mixed ? prog_get(mixed) : nil;
+    CHECK(mixed != &pg && composites[1] && composites[1]->sh[0] == vs && composites[1]->sh[1] == fs,"a vertex and a fragment program bound apart make a composite");
     P(nvnProgramFinalize)((NVNprogram *)&pf);
-    CHECK(!S.bst[1] && S.prog && prog_get(S.prog)->sh[0] == vs && !prog_get(S.prog)->sh[1],"finalizing a composite's fragment program drops its stage from the effective program");
+    composites[0] = S.prog ? prog_get(S.prog) : nil;
+    CHECK(!S.bst[1] && composites[0] && composites[0]->sh[0] == vs && !composites[0]->sh[1],"finalizing a composite's fragment program drops its stage from the effective program");
     memset(S.bst,0,sizeof S.bst); S.prog = NULL;
     // Native GPU state: matching queue/device origins keep NVN's NDC facing;
     // differing origins reverse it. CW and CCW expectations are explicit here.
@@ -116,6 +124,19 @@ int main(void) { @autoreleasepool {
         if (!good) fprintf(stderr,"queue origin=%d device origin=%d front=%d cull=%d triangle CCW=%d\n",queue,current,winding,cull,ccw);
         CHECK(good,"queue-latched culling and front_facing match native GPU state");
     }
-    mtl_pool_del(vertices); free(vertices);
+    mtl_drain();
+    for (int queue=0;queue<2;queue++) P(nvnQueueFinalize)(&queues[queue]);
+    CHECK(!g_queue_states && !g_active_queue,"finalizing both queues releases their saved bindings");
+    P(nvnProgramFinalize)((NVNprogram *)&pg);
+    if (vertex_only) mtl_prog_release((prog_t *)vertex_only);
+    if (mixed) mtl_prog_release((prog_t *)mixed);
+    CHECK(!serial_get(pg.serial) && !serial_get(pf.serial)
+        && (!vertex_only || !serial_get(vertex_only->serial)) && (!mixed || !serial_get(mixed->serial)),"fixture programs and composites leave the serial registry");
+    mtl_tex_release(&target); mtl_pool_del(vertices);
+    // Retirement uses the next submission fence, even after the last draw.
+    mtl_sub_begin(); CHECK(mtl_wait(mtl_sub_commit(),5000000000ull),"fixture retirement submission completes");
+    mtl_drain(); defer_drain();
+    program = fprogram = composites[0] = composites[1] = nil;
+    P(nvnDeviceFinalize)(&device); free(vertices);
     printf("queue origin: %d checks, %d failed\n",checks,fails); return fails != 0;
 } }

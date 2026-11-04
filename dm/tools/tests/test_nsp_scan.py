@@ -46,6 +46,27 @@ class Scan(unittest.TestCase):
         self.assertEqual(nsp.scan_nsps(self.tmp)[1]['base'], base)
         self.assertEqual(self.said, [])
 
+    def test_extension_in_any_letter_case(self):   # `Game [id].NSP` (a download, a card dump): glob('*.nsp') missed it on a case-sensitive volume (LNPANDY/NX2Apple#554)
+        base = self.tmp / f'Game [{APP:016X}][v0].NSP'; pfs0(base, [f'{APP:016x}0000000000000011.tik'])
+        upd = self.tmp / f'Update [{APP | 0x800:016X}][v65536].Nsp'; pfs0(upd, [])
+        dlc = self.tmp / f'DLC [{APP + 0x1001:016X}].XCI'; dlc.write_bytes(bytes(0x100) + b'HEAD' + bytes(0x100))
+        app, fam = nsp.scan_nsps(self.tmp)
+        self.assertEqual((app, fam['base'], [p for _, p in fam['updates']], [p for _, _, p in fam['dlc']]), (APP, base, [upd], [dlc]))
+
+    def test_compressed_extension_in_capitals_is_converted_and_skipped_like_lowercase(self):
+        nsz = self.tmp / f'Game [{APP:016X}].NSZ'; pfs0(nsz, [f'{APP:016x}0000000000000011.tik'])
+        self.assertEqual(nsp.scan_nsps(self.tmp)[1]['base'], nsz)
+        self.assertEqual(nsp.COMPRESSED[nsz.suffix.lower()], '.nsp')
+        self.assertEqual(nsp.files_with_suffix(self.tmp, '.nsz'), [nsz])
+
+    def test_package_beside_a_dump_or_nup_in_capitals(self):
+        pkg = self.tmp / 'Game.NSP'; pfs0(pkg, ['x.nca'])
+        self.assertIsNone(nsp.nup_file(self.tmp))   # a package in capitals counts as a package, so no NUP is looked for
+        pkg.unlink()
+        self.assertEqual(nsp.files_with_suffix(self.tmp, '.nup'), [])
+        nup = self.tmp / 'Game.NUP'; nup.write_bytes(b'x')
+        self.assertEqual(nsp.files_with_suffix(self.tmp, '.nup'), [nup])
+
     def test_missing_final_name_terminator(self):
         for extension in ('.nsp', '.nsz'):
             with self.subTest(extension=extension):

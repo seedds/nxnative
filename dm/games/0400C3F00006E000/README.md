@@ -76,6 +76,13 @@ Whole groups of trees and bushes vanished or appeared in one frame while the cam
 
 Resolved on the base game, on chain `d5fe9ae8bfba` (M6, 16 GB, another session's game running at the same time): at Crown City the array's `y` stays at or below 0.9 and the sky shots show no panels, and desert scenes checked with an earlier host that remapped the slots show none either. The first race, on the route of `measure.sh`, keeps a frame median of 16.6 to 16.7 ms and a 95th percentile of 17 to 18 ms, with GPU time 7.2 to 7.7 ms and resident memory 11.4 GB. That matches runs from before the fix, so reading real data costs nothing measurable there. One run reached 14 to 15 ms of GPU time and did not repeat. 1.8.0 has not been run here.
 
+## HDR output
+
+With the HDR output setting (`DM_HDR=1`), on the base game to the title screen on the Mac:
+
+- Like [Donkey Kong Bananza](../040074A01BF12000/README.md#hdr-output), the game boots an RGBA8 window (format 0x25), queries `vi::QueryDisplayHdrStatus`, then makes an RGB10A2 window (0x3d). It declares the same luminance ranges, SDR 0 to 203 nits and extended 0 to 1000, and sets no content gamut before the title.
+- The present decodes the window as PQ. A screenshot through `DM_NVN_SHOT_OUT` (decoded to SDR) shows the title with its colours and crop, and highlights above SDR white clipped, as SDR has no room for them. No new `[RED]` line with it on.
+
 ## Driving it on the Mac
 
 The work folder `0400C3F00006E000-work` beside the dump has `rewrite.sh`, `rebuild.sh` (host copy `build/mkwhost`), `split.sh`, `shaders.sh`, `play.sh` (boots headless with `DM_CTL=run/ctl.txt`), `ctl.sh` (control lines; `wait S`, `snap NAME`), `to_race.sh` and `measure.sh <log>`. From a boot at the title (about 80 s): `to_race.sh` presses L+R, then A nine times with waits (Single Player, Grand Prix, Mario, the kart, the Mushroom Cup, 50cc, "Start Grand Prix?"). The opening and the race's start then take about a minute; `A~40` drives. `measure.sh` does all of this, waits for the race (over 1,500 draws a frame, no movie thread), and writes the timing and the `restop` residency lines to `run/<log>.res`. Control presses run in order, so `A~40` holds up later lines.
@@ -92,6 +99,7 @@ Update 1.8.0 (v917504, SDK 21.4.0) is not on this Mac. Pull request #1116 ported
 - **Mesh draws:** `DrawMeshTasks3D` and the indirect forms are not implemented; no run reached them.
 - `649e36162cad9e79`, a foliage shader with an 8x8 local size, keeps a first-invocation race: its setup loops over a uniform's count, so [the host cannot make it as stores](../../../docs/reference/shaders.md#a-store-only-a-dispatchs-first-invocation-makes). Its list's count read 0 in every one of 7,350 traced title frames, so the race had nothing to act on there; whether that list should be empty is not known.
 - The engine class screen offers 50, 100 and 150cc in this build.
+- **HDR:** only the title was run with HDR on. The window's primaries are taken to be BT.2020, as on Donkey Kong Bananza, but are not measured here, and the picture on an EDR screen has not been judged.
 
 ## Found on this game
 
@@ -105,6 +113,7 @@ Update 1.8.0 (v917504, SDK 21.4.0) is not on this Mac. Pull request #1116 ported
 - [Uncompressed storage the CPU wrote, in a pool the GPU has not written](../../../docs/reference/nvn-objects.md#uncompressed-storage-the-cpu-wrote-in-a-pool-the-gpu-has-not-written)
 - [Comparisons with .FTZ](../../../docs/reference/shaders.md#comparisons-with-ftz)
 - [Variable rate shading ignored](../../../docs/reference/rendering.md#variable-rate-shading-ignored)
+- [The status query and the present for an HDR window](../../../docs/reference/rendering.md#the-status-query-and-the-present-for-an-hdr-window): the same HDR window as Donkey Kong Bananza's
 - [A DualShock 4 that connects after the first stays on Core Haptics](../../../docs/reference/services.md#a-dualshock-4-that-connects-after-the-first-stays-on-core-haptics)
 - [Scaled shared memory addresses](../../../docs/reference/shaders.md#scaled-shared-memory-addresses)
 - [iOS ends the app once the guest's touched pages reach its memory limit](../../../docs/reference/memory.md#ios-ends-the-app-once-the-guests-touched-pages-reach-its-memory-limit)

@@ -81,7 +81,7 @@ iPhone and iPad. **Fit**, the default, shows the game's picture (16:9, or the ta
 
 ### HDR output
 
-Shown for Switch 2 games, on the Mac and the iPhone (measured on Donkey Kong Bananza; the other Switch 2 titles are untested). **On** starts the game with its own HDR output: on a screen with HDR headroom, whites stay at the screen's normal white and the picture's highlights can go brighter above it; a screen without headroom shows SDR. **Off**, the default, keeps the picture as SDR. The setting applies from the next start.
+Shown for Switch 2 games, on the Mac and the iPhone (measured on Donkey Kong Bananza and, to its title screen, Mario Kart World; the other Switch 2 titles are untested). **On** starts the game with its own HDR output: on a screen with HDR headroom, whites stay at the screen's normal white and the picture's highlights can go brighter above it; a screen without headroom shows SDR. **Off**, the default, keeps the picture as SDR. The setting applies from the next start.
 
 ### Picture shape
 

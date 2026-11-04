@@ -17,7 +17,7 @@
 #   or in a terminal: python3 scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> [options] (values given on the command line override "Settings", -h lists every option;
 #   without keyboard input a missing value is not asked for but reported as an error; exit code 0 on success, 1 on error, 130 when interrupted). Command-line options entered in Spyder's run configuration work the same way.
 # Uses only three things: this repository, a folder holding one game's NSPs (the base game, with or without an update; DLC NSPs, when present, are packed too and unlock the add-on content already in the game), and prod.keys.
-#   Instead of NSPs, the folder may hold the game's files as a dump (base/, updates/<version>/, dlc/; scripts/pack_dump.py lists the layout): that needs no prod.keys, and a game profile, since the survey reads NSPs. A dump has no control data: the name comes from the profile, and the app has no icon.
+#   Instead of NSPs, the folder may hold the game's files as a dump (base/, updates/<version>/, dlc/; base/ may be left out beside an update; scripts/pack_dump.py lists the layout): that needs no prod.keys, and a game profile, since the survey reads NSPs. A dump has no control data: the name comes from the profile, and the app has no icon.
 #   Or the folder may hold the game as one NUP container (a .nup file: base game, updates and DLC; scripts/pack_nup.py), or the .nup file may be given in its place: like a dump it needs no prod.keys and a game profile,
 #   and its RomFS images are written straight from it; the name, display version and icon come from the NACP and icon it carries, else as for a dump (its name record is a packer's label, not the game's).
 #   The newest version in the folder is packed. A version the profile registers (with every version in its shader_versions in the folder) is built from the profile as it is; any other
@@ -693,7 +693,7 @@ def pick_nsps(fam, have, versions):
     if fam['base'] is not None: say(f'base: {fam["base"].name}')
     out = {}
     for ver in versions:
-        if ver not in have: raise BuildError(f'no NSP for update {ver} (the game profile needs these versions: {", ".join(versions)})')
+        if ver not in have: raise BuildError(f'no {"base game" if ver == "v0" else "NSP for update " + ver} in the folder (the game profile needs these versions: {", ".join(versions)})')
         if have[ver]: say(f'update {ver}: {have[ver].name}')
         out[ver] = (fam['base'], have[ver])
     return out
@@ -1219,11 +1219,18 @@ def extract_nup(ex, name, k, base, app, n):   # one version of a NUP (k: its bas
     return dst
 
 
-def scan_dump(dump, want=None):   # a dump folder as scan_nsps gives a folder of NSPs, with folders for the packages: (title ID, {'base', 'updates', 'dlc', 'dump': True})
-    try: app, vers, dlc = pack_dump.scan(dump)
+def scan_dump(dump, want=None, program=None):
+    """A dump folder as scan_nsps gives a folder of NSPs, with folders for the packages: (title ID, {'base', 'updates', 'dlc', 'dump': True}). Each version's folder is that of the
+    program packed (pack_dump.program_dir: program, else a Switch 2 Edition's Switch 2 program, else program 0)"""
+    try: app, vers, dlc = pack_dump.scan(dump, want, program)
     except pack_dump.Error as e: raise BuildError(str(e)) from e
     if want is not None and want != app: raise BuildError(f'no game {want:016X} (--title-id / TITLE_ID) in {dump}, which holds {app:016X}')
-    return app, {'base': dump / 'base', 'updates': sorted(vers.items()), 'dlc': [(tid, None, roms) for tid, roms in dlc.items()], 'dump': True}
+    base = pack_dump.base_dir(dump, program)
+    for name, d in ([('base', base)] if base else []) + [(f'v{v}', d) for v, d in sorted(vers.items())]:
+        if d.parent.name == 'program':
+            pid = pack_dump.pid_of(d)
+            say(f'{name}: program {d.name}' + (f' ({pid:016X}{", the Switch 2 Edition" if pack_dump.switch2(pid) and not pack_dump.switch2(app) else ""})' if pid is not None else ''))
+    return app, {'base': base, 'updates': sorted(vers.items()), 'dlc': [(tid, None, roms) for tid, roms in dlc.items()], 'dump': True}
 
 
 def extract_dump(ex, name, src, app):   # one version of a dump folder (src: base/ or updates/<version>/) into the layout extract makes; the code modules and the image are kept while unchanged
@@ -2721,7 +2728,7 @@ def parse_args(argv):
     ap.add_argument('--show-fps', action=argparse.BooleanOptionalAction, help='show the game\'s frame rate on the iPhone, frames on screen per second at the top left (default: the SHOW_FPS setting, on)')
     ap.add_argument('--motion', action=argparse.BooleanOptionalAction, help='pass a gyro controller\'s motion (on iOS also the phone\'s own) to games that read it; --no-motion builds with DM_MOTION=0, for when motion misbehaves (default: the MOTION setting, on)')
     ap.add_argument('--survey-only', action='store_true', help='a game with no profile: only the survey, no provisional profile and no IPA')
-    ap.add_argument('--program', type=int, default=None, help='a multi-program application (Super Mario 3D All-Stars): pack program N of the NSPs as a game of its own, title ID = the application\'s + N (default: the PROGRAM_INDEX setting, 0; a game whose profile lists programs packs them all as one from program 0: this is for bring-up)')
+    ap.add_argument('--program', type=int, default=None, help='a multi-program application (Super Mario 3D All-Stars): pack program N of the NSPs as a game of its own, title ID = the application\'s + N (default: the PROGRAM_INDEX setting, 0; a game whose profile lists programs packs them all as one from program 0: this is for bring-up; a dump folder: pack its program/<N>/ folders, by default a Switch 2 Edition\'s Switch 2 program, else program 0)')
     ap.add_argument('--allow-damaged', action='store_true', help='a damaged NSP (files failing the NCA hash check): write them as read and go on instead of stopping')
     ap.add_argument('--allow-shader-regressions', action='store_true', help='shaders that translated in the game\'s previous build and fail with the current translation chain: '
                     'pack the app without them instead of stopping')
@@ -2851,6 +2858,9 @@ def main(args=None):
     py = sys.executable
     want = args.title_id or TITLE_ID
     if want and not re.fullmatch(r'[0-9A-Fa-f]{16}', want): raise BuildError(f'--title-id / TITLE_ID takes a title ID, 16 hex digits: {want}')
+    dump_program = None
+    if dump == 'folder' and (args.program is not None or PROGRAM_INDEX):   # a dump folder's program/<N>/ folders: that program's files are packed as the game's, under the application's title ID
+        dump_program, PROGRAM_INDEX = (args.program if args.program is not None else PROGRAM_INDEX), 0
     if PROGRAM_INDEX and dump: raise BuildError('--program / PROGRAM_INDEX picks a program from a multi-program application\'s NSPs; '
                                                      + ('a NUP' if nup else 'a dump folder') + ' is read as one program\'s files')
     if nup:
@@ -2858,7 +2868,7 @@ def main(args=None):
         say(f'a NUP: {nup.name}, {app:016X}, {len(fam["updates"])} update(s), {len(fam["dlc"])} DLC')
         if fam['base'] is None: say(pack_nup.NO_BASE)
     elif dump:
-        app, fam = scan_dump(nsp_dir, int(want, 16) if want else None)
+        app, fam = scan_dump(nsp_dir, int(want, 16) if want else None, dump_program)
         say(f'a dump folder: {app:016X}, {len(fam["updates"])} update(s), {len(fam["dlc"])} DLC')
     else:
         with package_title_reader(repo, keys, env) as from_package:
@@ -2869,6 +2879,10 @@ def main(args=None):
         fam = decompress_nsz(nsp_dir, app, fam, keys, env, work_dir(args))
     force =args.provisional or PROVISIONAL   # a provisional profile even when dm/games has one (testing the guesses)
     g, provisional, shadowed = None if force else gamemod.by_title(app), False, False
+    if dump == 'folder' and not force:   # a dump folder packs one program (a Switch 2 Edition's Switch 2 one): a profile of that program's own comes before the application's
+        pids = [pack_dump.pid_of(d) for _, d in sorted(fam['updates'], reverse=True)] + ([pack_dump.pid_of(fam['base'])] if fam['base'] else [])
+        own = next((p for p in pids if p is not None), None)
+        if own is not None and own != app and (alt := gamemod.by_title(own)): g = alt; say(f'program {own:016X} has a game profile of its own')
     if dump and (force or g is None): raise BuildError(f'{"a NUP" if nup else "a dump folder"} packs only a game with a profile, and {app:016X} ' + ('asked for a provisional one (--provisional)' if g else 'has none') + ': the survey that makes a provisional profile reads NSPs')
     alias = None if force or g else same_build(nsp_dir, app, fam, keys, repo, env)   # a known build under another title ID: packed from a profile derived from that build's
     if alias:

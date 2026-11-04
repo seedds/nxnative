@@ -66,12 +66,73 @@ class Scan(Base):
         shutil.rmtree(d / f'updates/{VER}/romfs')
         self.assertFalse(pack_dump.is_dump(d))
 
+    def test_updates_only(self):   # no base/: the game is named by the update's main.npdm, and the base is not offered
+        d = self.dump.parent / 'nobase'; version(d / f'updates/{VER}', main=b'new code', marker='new')
+        (d / 'dlc/040074a01bf13001/0/base/romfs').mkdir(parents=True)
+        self.assertTrue(pack_dump.is_dump(d))
+        self.assertFalse(pack_dump.has_base(d))
+        self.assertEqual(pack_dump.scan(d), (TID, {VER: d / f'updates/{VER}'}, {TID + 0x1001: d / 'dlc/040074a01bf13001/0/base/romfs'}))
+        app, fam = nsp.scan_dump(d)
+        self.assertIsNone(fam['base'])
+        self.assertEqual(nsp.nsp_versions(fam, {}), {f'v{VER}': d / f'updates/{VER}'})
+        with self.assertRaisesRegex(nsp.BuildError, 'no base game'): nsp.pick_nsps(fam, nsp.nsp_versions(fam, {}), ['v0'])
+
+    def test_switch2_edition_program(self):   # the update's code names a program of its own (Xenoblade Chronicles 2: 0400E95004038001): the game is the one its DLC belong to, or the one given
+        prog = TID + 1
+        d = self.dump.parent / 'ns2'; version(d / f'updates/{VER}', tid=prog)
+        with self.assertRaisesRegex(pack_dump.Error, 'no DLC names the game'): pack_dump.scan(d)
+        self.assertEqual(pack_dump.scan(d, TID)[0], TID)
+        (d / 'dlc/040074a01bf13001/0/romfs').mkdir(parents=True)
+        self.assertEqual(pack_dump.scan(d)[0], TID)
+        self.assertEqual(nsp.scan_dump(d)[0], TID)
+        pack_dump.pack_version(d / f'updates/{VER}', TID, d / 'out', say=lambda s: None)   # the application's own program, accepted
+        self.assertTrue((d / 'out/RomFS.img').is_file())
+
+    def test_program_folders(self):   # updates/<v>/program/<i>/: a Switch 2 Edition packs its Switch 2 program, --program another; program 0 names the title
+        app, ns2 = 0x0100E95004038000, 0x0400E95004038001
+        d = self.dump.parent / 'programs'
+        version(d / 'base/program/0', tid=app, marker='ns1base')
+        version(d / f'updates/{VER}/program/0', tid=app, marker='ns1')
+        version(d / f'updates/{VER}/program/1', tid=ns2, marker='ns2')
+        (d / 'dlc/0100e95004039001/196608/base/program/0/romfs').mkdir(parents=True)
+        self.assertTrue(pack_dump.is_dump(d))
+        tid, vers, dlc = pack_dump.scan(d)
+        self.assertEqual((tid, vers), (app, {VER: d / f'updates/{VER}/program/1'}))
+        self.assertEqual(dlc, {app + 0x1001: d / 'dlc/0100e95004039001/196608/base/program/0/romfs'})
+        self.assertEqual(pack_dump.base_dir(d), d / 'base/program/0')   # the base has no Switch 2 program: its own is packed
+        self.assertEqual(pack_dump.scan(d, program=0)[1], {VER: d / f'updates/{VER}/program/0'})
+        self.assertIsNone(pack_dump.base_dir(d, 1))
+        with self.assertRaisesRegex(pack_dump.Error, 'no program/2/'): pack_dump.scan(d, program=2)
+        pack_dump.pack_version(vers[VER], app, d / 'out', say=lambda s: None)
+        self.assertIn('dir/ns2', romfs_image.read_index(d / 'out/RomFS.img'))
+        said = []
+        with mock.patch.object(nsp, 'say', side_effect=said.append):
+            fam = nsp.scan_dump(d)[1]
+            self.assertIsNone(nsp.scan_dump(d, program=1)[1]['base'])
+        self.assertIn(f'v{VER}: program 1 ({ns2:016X}, the Switch 2 Edition)', said)
+        self.assertEqual(sorted(nsp.nsp_versions(fam, {})), ['v0', f'v{VER}'])
+
+    def test_multi_program_packs_program_0(self):   # programs all of one platform (a launcher and its games): program 0 unless asked
+        d = self.dump.parent / 'multi'
+        for i in range(3): version(d / f'base/program/{i}', tid=TID + i)
+        self.assertEqual(pack_dump.base_dir(d), d / 'base/program/0')
+        self.assertEqual(pack_dump.base_dir(d, 2), d / 'base/program/2')
+        self.assertEqual(pack_dump.scan(d)[0], TID)
+
+    def test_dlc_update_wins(self):   # dlc/<id>/<n>/updates/<version>/romfs is whole: the newest is packed rather than the DLC's base
+        d = self.dump / 'dlc/040074a01bf13002/0'
+        for r in ('base/romfs', 'updates/65536/romfs', 'updates/131072/romfs'): (d / r).mkdir(parents=True)
+        self.assertEqual(pack_dump.scan(self.dump)[2][TID + 0x1002], d / 'updates/131072/romfs')
+
     def test_refuses(self):
         (self.dump / 'dlc/0100000000000000/romfs').mkdir(parents=True)
         with self.assertRaisesRegex(pack_dump.Error, 'is not a DLC of'): pack_dump.scan(self.dump)
         d = self.dump.parent / 'patch'; version(d / 'base', tid=TID + 0x800)
         with self.assertRaisesRegex(pack_dump.Error, 'not a base title ID'): pack_dump.scan(d)
-        with self.assertRaisesRegex(pack_dump.Error, 'no base/exefs'): pack_dump.scan(self.dump.parent)
+        with self.assertRaisesRegex(pack_dump.Error, 'no main.npdm'): pack_dump.scan(self.dump.parent)
+        shutil.rmtree(self.dump / 'dlc/0100000000000000')
+        (self.dump / 'dlc/040074a01bf13001/1/romfs').mkdir(parents=True)
+        with self.assertRaisesRegex(pack_dump.Error, 'expected one'): pack_dump.scan(self.dump)
 
     def test_packages_win_over_the_layout(self):
         self.assertTrue(nsp.dump_folder(self.dump))
@@ -135,6 +196,12 @@ class Main(Base):
         work, said = self.run_main()
         self.assertEqual(work, self.dump / f'{TID:016X}_build')
         self.assertTrue(any(s.startswith('a dump folder: ') for s in said), said)
+
+    def test_updates_only(self):
+        shutil.rmtree(self.dump / 'base')
+        work, said = self.run_main()
+        self.assertEqual(work, self.dump / f'{TID:016X}_build')
+        self.assertFalse(any(s.startswith('base: ') for s in said), said)
 
     def test_title_id_must_match(self):
         with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), self.assertRaisesRegex(nsp.BuildError, 'which holds'):

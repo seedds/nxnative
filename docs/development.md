@@ -258,6 +258,27 @@ Window-copy checks exercise synthetic rendering and ownership paths;
 push-capture checks inspect host argument data and do not execute a GPU shader.
 Neither establishes actual game behavior or physical-screen output.
 
+For a raw RG11B10Float conversion measurement, select `--measurement metal_conversion`
+instead of `--fixture` and omit `--profile`. The selected `--tree` must contain
+[the standalone conversion probe](https://github.com/seedds/nxnative/pull/1168).
+Only that probe and the app wrapper compile; no game or renderer sources are used.
+For example, prepare without installing:
+
+```sh
+python3 dm/ios/tools/test_gfx_on_iphone.py --build-only \
+    --measurement metal_conversion --tree /path/to/conversion-checkout \
+    --team YOUR_TEAM_ID --bundle-id YOUR_REGISTERED_BUNDLE_ID \
+    --output-dir /path/to/new/scratch/conversion
+```
+
+The measurement report preserves all 95 ordered input and raw packed output words,
+input identity, source provenance, run ID, GPU and OS. Completion means the raw
+measurement was captured; it is not a rounding pass/fail assertion. The collector
+rejects stale, incomplete or malformed reports and keeps `gfx-fixture.log` for
+execution errors. No iPhone conversion result is established by a successful build.
+Measurement mode does not request Metal validation; fixture mode retains its
+existing validation request and test pass criteria.
+
 Reserve the device before running; the tool replaces the app with the selected
 bundle ID and terminates an existing instance of that app. It does not manage
 other games or device ownership. The default deployment target is iOS 26.0.
@@ -266,7 +287,7 @@ and `--slot-name` for shared build coordination; no wrapper is needed otherwise.
 All generated files stay in the new output directory. `receipt.json` records
 source hashes, signing verification and whether the tree changed during the
 build. `results.json` is accepted only when its run ID matches this build and
-the report is complete; passing requires a zero exit status, no failures and at
+the report is complete; fixture passing requires a zero exit status, no failures and at
 least one check. Device operations have timeouts and copy diagnostics remain in
 `device-copy.log`. The fixture requests Metal validation; confirm the log's
 `Metal API Validation Enabled` message rather than inferring it from the

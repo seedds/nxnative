@@ -778,3 +778,10 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
   - frame time unchanged (frame p50 33.2 ms, the game's 30 fps step), no red lines, the pictures right; GPU p50 16.65 → 15.65 ms, measured while another session ran a game on the same Mac, so not counted;
   - the submit thread standing on the deck (85–105 s, per-frame instructions fitted against draws a frame, at 2,180 draws): 73.93 → 73.06 M instructions a frame (−1.2 %), CPU p50 9.40 → 9.18 ms.
   - PR #2542's own run before PR #2482 (M4 Pro): 84,748 → 1,948 views made by frame 4,200.
+
+### Acquire-wait telemetry measures elapsed pacing time
+
+- **Symptom:** `DM_NVN_TSV` reports zero `@wait_ms` when acquire blocks on a display-link tick, or reports the planned fallback delay instead of the elapsed wait.
+- **Cause:** `nvnWindowAcquireTexture` accumulated `wait`, computed from the texture's fallback availability deadline, even when display-link pacing took a different path.
+- **Fix:** accumulate the already measured `pace_ns`, including snapshot-capacity waiting. Present-queue waiting remains separate in `@pq_wait_ms`. This changes diagnostics only; it does not change the wait, frame rate or presentation policy. The controlled-clock `t_link_ticks` case has a zero fallback deadline and a nonzero display-link wait.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md), while analyzing a 350-second physical iPhone 17 Pro Max trace from a combined experimental build. Older `@wait_ms` values must not be treated as measured blocked time. This correction does not establish the cause of its pacing dips or improve performance.

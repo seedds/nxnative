@@ -160,6 +160,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** `make -C dm/gfx/tests GAME=010015100B514000 t_present_rescue` and `dm/gfx/tests/t_present_rescue` exercise the production wait and retry paths with a controlled clock and a silent link double, without a GPU. They cover foreground grace, backoff saturation, runtime mode changes, and layer release only after run-loop invalidation. The test also runs in CPU graphics CI. `make -C dm/gfx/tests GAME=010015100B514000 check_t_present_rescue` adds a paused real Metal display link on an offscreen Mac layer: rescue invalidates it, then `nextDrawable` succeeds (47 checks, zero failures with Metal validation). `DM_TEST_LINK_STALL=<start seconds>,<duration seconds>` pauses a real window's display link for manual verification.
 - **Not checked:** gameplay during stalled-link recovery or the iPhone; the PR's gameplay runs were headless.
 
+### Long frames a test run makes itself
+
+- **Symptom:** `[longframe]` lines of 40–180 ms with no new pipelines, a short submit and normal GPU time, which read like CPU hitches in the game: single frames of 60–100 ms, or bursts of 5–12 frames, one of 140–180 ms and the rest about 40 ms.
+- **Cause:** the run, not the game. Each `shot` line of `DM_CTL` costs the frame it captures 60–100 ms, so a script that takes a shot every few seconds prints a long frame every few seconds. Each retry of a [silent display link](#present-thread-rescues-a-silent-display-link) waits out the silence for about 0.5 s, and those bursts repeat 3, 6, 12, 24, 48 and then every 60 s, with `display link: rescue ended` just before them. The link was silent in runs with no session on the Mac's display and ticked once a remote session had connected (seen across runs, not tested on purpose). Losing focus (`oe focus state → 2`) adds its own long frames and halves the rate.
+- **Fix:** no code change. Shots are diagnostics only, and the retries need a silent link; a link that stops while its picture is visible, as on the iPhone in the entry above, would show the retry as a stutter of about 0.5 s every 60 s. To measure frame times, take no shots, and read a long frame's cause from the log before looking for it in the game: the shot or `rescue ended` line before it, and the focus lines. A stall that repeats on a timer is worth timing first: the doubling gaps gave the retry away.
+- **Found on:** [Princess Peach: Showtime!](../../dm/games/01007A3009184000/README.md#frame-rate): of 491 long frames in one 18-minute run, 315 were link retries and 53 followed a shot; with neither, 112 s of lobby and play had none.
+
 ### A present command allocator is reused only after its own present completes
 
 - **Symptom:** with the display link driving presents, a presented frame comes out black when three presents are on the GPU at once, or two after a dropped frame; on an M6 the same reuse also logs `[RED] display command buffer error` with `kIOGPUCommandBufferCallbackErrorPageFault`.
@@ -179,6 +186,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (1.2.1, iPhone: the display-link hold); [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (iPhone: the acquire).
 - **Check:** `DM_TEST_PRESENT_LAG=90,30` (sleep 30 ms before every 90th present) makes Mario do this on the Mac; run it with `DM_WINDOW=1` to get the display link. `DM_NVN_TSV` writes each frame's interval as `@itv`.
 - **Note:** the windowless Mac host was never affected by the acquire: there the acquire sleeps until the interval's slot.
+
+### Odd present intervals on the 30 Hz display link
+
+- **Symptom:** Donkey Kong Bananza ran its heavy areas at 15 fps where its GPU took about 46 ms a frame: the frames came every 66.7 ms, and the presentation thread spent 85% of its time in `nvnWindowAcquireTexture` waiting for display-link ticks.
+- **Cause:** after a second at interval 2 the display link drops to 30 Hz (`nvn_game_fps`). When the game then stepped to interval 3 (20 fps) the link stayed at 30 Hz, where 3 vsyncs are (3 + 1) / 2 = 2 ticks (`mtl_link_wait_tick`): 66.7 ms for the 50 the game asked for. The comment said such intervals "run at 30"; they ran at 15.
+- **Fix:** only an even interval counts toward the 30 Hz link; an odd one returns to the 60 Hz link at once, as interval 1 does, and takes its own 3 ticks (`present_period` in `hle_nvn.c`). The one-second test no longer wraps: the run's start is stored with `| 1` and could be 1 ns after the next clock read, which made `now - start` huge and asked for 30 Hz at once.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md): the slow area on an M1, frame time p50 66.7 → 50.2 ms at interval 3 (`DM_NVN_TSV` `@frame_ms`, `@itv`, `@link_gap_ms` 33.3 → 16.7).
+- **Check:** `t_nvn` (`interval 3: 60 Hz link`, `back to 2 from 3 waits a second again`).
 
 ### One frame per tick of a 120 Hz display link
 

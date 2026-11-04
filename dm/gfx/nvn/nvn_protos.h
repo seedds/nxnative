@@ -477,6 +477,8 @@ typedef NVNboolean (*NVNT_nvnEventInitialize)(NVNevent*, const NVNeventBuilder*)
 typedef void (*NVNT_nvnEventFinalize)(NVNevent*);
 typedef uint32_t (*NVNT_nvnEventGetValue)(const NVNevent*);
 typedef void (*NVNT_nvnEventSignal)(NVNevent*, NVNeventSignalMode, uint32_t);
+typedef NVNmemoryPool *(*NVNT_nvnEventGetMemoryPool)(const NVNevent*);
+typedef int64_t (*NVNT_nvnEventGetMemoryOffset)(const NVNevent*);
 typedef void (*NVNT_nvnCommandBufferWaitEvent)(NVNcommandBuffer*, const NVNevent*, NVNeventWaitMode, uint32_t);
 typedef void (*NVNT_nvnCommandBufferSignalEvent)(NVNcommandBuffer*, const NVNevent*, NVNeventSignalMode, NVNeventSignalLocation, int, uint32_t);
 
@@ -517,8 +519,6 @@ typedef void (*NVNT_nvnCommandBufferSignalEvent)(NVNcommandBuffer*, const NVNeve
 //   nvnEventBuilderGetStorage
 //   nvnEventBuilderGetMemoryPool
 //   nvnEventBuilderGetMemoryOffset
-//   nvnEventGetMemoryPool
-//   nvnEventGetMemoryOffset
 //   nvnCommandBufferSetStencilCullCriteria
 //   nvnCommandBufferInsertCheckpointStatic
 //   nvnCommandBufferInsertCheckpointDynamic

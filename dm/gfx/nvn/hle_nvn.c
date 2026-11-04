@@ -760,10 +760,22 @@ NVN(nvnEventBuilderSetStorage, void, NVNeventBuilder *b, const NVNmemoryPool *p,
 NVN(nvnEventInitialize, NVNboolean, NVNevent *e, const NVNeventBuilder *b) {
     const ev_builder_t *s = (const ev_builder_t *)b;
     if (!s->pool || !s->pool->mem) { LOG("[RED] EventInitialize has no storage"); return 0; }
-    *(ev_t *)e = (ev_t){MAGIC('E', 'V', 'N', 'T'), (volatile uint32_t *)(s->pool->mem + s->off)}; return 1;
+    volatile uint32_t *val = (volatile uint32_t *)(s->pool->mem + s->off);
+    *(ev_t *)e = (ev_t){MAGIC('E', 'V', 'N', 'T'), val};
+    objmap_put((const void *)val, (void *)s->pool);   // the event value's pool, for nvnEventGetMemoryPool / nvnEventGetMemoryOffset (the game copies NVNevent by value)
+    return 1;
 }
-NVN(nvnEventFinalize, void, NVNevent *e) { ((ev_t *)e)->magic = 0; }
+NVN(nvnEventFinalize, void, NVNevent *e) {
+    ev_t *o = (ev_t *)e;
+    if (o->magic == MAGIC('E', 'V', 'N', 'T')) objmap_del((const void *)o->val);
+    o->magic = 0;
+}
 NVN(nvnEventGetValue, uint32_t, const NVNevent *e) { return *((const ev_t *)e)->val; }
+NVN_NOPROTO(nvnEventGetMemoryPool, NVNmemoryPool *, const NVNevent *e) { return (NVNmemoryPool *)objmap_get((const void *)((const ev_t *)e)->val); }
+NVN_NOPROTO(nvnEventGetMemoryOffset, int64_t, const NVNevent *e) {
+    const ev_t *o = (const ev_t *)e; const pool_t *p = (const pool_t *)objmap_get((const void *)o->val);
+    return p ? (int64_t)((const uint8_t *)o->val - p->mem) : 0;
+}
 static void ev_signal(const ev_t *e, int mode, uint32_t v) { if (mode == NVN_EVENT_SIGNAL_MODE_ADD) *e->val += v; else *e->val = v; }
 NVN(nvnEventSignal, void, NVNevent *e, NVNeventSignalMode m, uint32_t v) { ev_signal((const ev_t *)e, m, v); }
 

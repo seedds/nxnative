@@ -10,6 +10,11 @@ module_t *module_of(const void *p) { (void)p; return NULL; }   // no guest modul
 module_t *g_mod; int g_nmod;                            // host symbols that crash.c depends on
 void svc_thread_dump(void) {}
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; } // Tests use host-thread stacks.
+// The host's guest-object side table; this test only needs the event value's pool.
+static const void *g_obj_key; static void *g_obj_val;
+void *objmap_get(const void *g) { return g == g_obj_key ? g_obj_val : NULL; }
+void objmap_put(const void *g, void *h) { g_obj_key = g; g_obj_val = h; }
+void *objmap_del(const void *g) { void *v = g == g_obj_key ? g_obj_val : NULL; if (g == g_obj_key) { g_obj_key = NULL; g_obj_val = NULL; } return v; }
 void dm_vi_layer_crop(int c[4]) { c[0] = c[1] = c[2] = c[3] = 0; }   // no vi layer crop in unit tests (hle_vi.c)
 void crash_install(void);
 void nvn_present_config(int hz, int display_mode);
@@ -293,6 +298,8 @@ int main(void) {
     P(nvnCommandBufferSetMemoryCallback)(&cb, mem_cb); P(nvnCommandBufferSetMemoryCallbackData)(&cb, NULL);
     NVNeventBuilder eb; NVNevent ev; P(nvnEventBuilderSetDefaults)(&eb); P(nvnEventBuilderSetStorage)(&eb, &pool, 0x1000);
     P(nvnEventInitialize)(&ev, &eb);
+    EXPECT("event memory pool", 1, (void *)P(nvnEventGetMemoryPool)(&ev) == (void *)&pool);
+    EXPECT("event memory offset", 0x1000, (long long)P(nvnEventGetMemoryOffset)(&ev));
     uint8_t *ub = poolmem + 0x2000, *cnt = poolmem + 0x3000, *src = poolmem + 0x4000, *dst = poolmem + 0x5000;
     for (int i = 0; i < 64; i++) src[i] = (uint8_t)(i * 3 + 1);
     uint32_t data[16];

@@ -15,5 +15,8 @@ namespace Ryujinx.Graphics.Shader.Translation
         // Ampere (sm_86) machine code, as NVN2 (Switch 2) ships it: a 0x80-byte shader header (SPH version 4, its first 0x50 bytes laid out as version 3)
         // and 128-bit instructions, decoded and emitted by the Ampere frontend.
         Ampere = 1 << 4,
+        // Decode a task/mesh SPH, then lower its body to a compute function.
+        // The offline Metal wrapper supplies the ISBE storage and mesh outputs.
+        AmpereMesh = 1 << 5,
     }
 }

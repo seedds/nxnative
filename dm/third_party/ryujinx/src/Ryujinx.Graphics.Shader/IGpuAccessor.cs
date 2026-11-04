@@ -11,6 +11,10 @@ namespace Ryujinx.Graphics.Shader
         // Fixed VS capture ABI used by the offline Metal geometry path.
         bool QueryGeometryInputFixed() => false;
 
+        // ISBE input/output attribute words and output-map bytes. Only supplied
+        // when the caller has decoded the task/mesh program's allocation sizes.
+        int[] QueryAmpereIsbeSizes() => null;
+
         /// <summary>
         /// Reads data from the constant buffer 1.
         /// </summary>
@@ -34,15 +38,6 @@ namespace Ryujinx.Graphics.Shader
         /// handles), its size and the bytes of its push constants, from the control section; null for other shaders.
         /// </summary>
         int[] QueryAmpereComputeC0Layout()
-        {
-            return null;
-        }
-
-        /// <summary>
-        /// NVN2 (Switch 2) task and mesh shaders, translated as compute: the byte offsets in shared memory of the stage memory the build reads back (dmsh_meshstage.py): the
-        /// workgroup's number, the stage input (a task's payload), the outputs (a payload, or a mesh shader's attributes) and a mesh shader's primitive bytes; null for other shaders.
-        /// </summary>
-        int[] QueryAmpereStageMemory()
         {
             return null;
         }

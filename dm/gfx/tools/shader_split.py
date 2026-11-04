@@ -7,6 +7,7 @@
 #   · BAHS (agl's sharcb: the agl / gsys resource packs, GameAglShader in the Secred pack): file header +0x1c code region start, +0x18 code region length;
 #       each binary entry in the table area is 16 bytes {code offset (relative to the code region, 0x100-aligned), 0, control length 0x880 / 0x88c (3D World 0x848), signed offset of the control relative to this entry's address}.
 #       Control sections are shared between programs, so pairing goes by entry, never by finding code from a control; entries are recognized by a triple check of "control magic + code magic + consistent lengths".
+#       Where the complete binary record array validates, only its entries are shaders: reflection data can accidentally pass the same range checks.
 #   · Unity (UnityFS bundles and the serialized files under Data, read by unityfs.py): the Switch subprograms of each Shader object; the program code = a 0x60 header + one block per stage.
 #       The header is 4 i32 ×6 arrays indexed by NVN stage (0 vertex 1 pixel 2 geometry 3 hull 4 domain 5 compute): [0] unused (0 or a scratch size), [1] block offset (from +0x60, -1 = no such stage), [2] control length, [3] code length;
 #       block = control section + code area. A program's vertex / pixel stages form a pair. The game's own serialized files (data.unity3d, unity default resources) carry no type trees and borrow the bundles' Shader type tree of the same hash (second pass),
@@ -47,6 +48,7 @@
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
+#   NVN2 control +0x56 identifies compute (5), task (6), and mesh (7); task/mesh reuse graphics SPH types and archive slots.
 # Key = sha256(first 0x880 bytes of the control section (its own length when control +0x20 says it is shorter, see ctl_len) + code area)[:16], the same as the host's prog_get: in this game many shaders share a control section but differ in code
 #   (SecredUber's 16600 stage shaders have only 3079 distinct control sections, with 6367 cases of same control, different code), so hashing the control alone picks the wrong library.
 # Output: <package dir>/<stage>_<source group>.bin, each record = 'BTCDBTCD' + header (+0x28 control length, +0x2c code length) padded to 0x38 + code area + control section, one copy per key;
@@ -157,14 +159,56 @@ def bnsh_shaders(d, base, label):
             if not sc: continue
             pctl, pcode, ncode, nctl = field(d, '<QQII', base + sc + 8, f'{where} variation {v} {st}')
             ctl, code = span(d, base + pctl, nctl, f'{where} variation {v} {st} control section'), span(d, base + pcode, ncode, f'{where} variation {v} {st} code area')
+            if nvn2_ctl(ctl) and len(ctl) > 0x56 and ctl[0x56] in (6, 7):
+                st = nvn2_stage(ctl, code)
             why = check(label, st, ctl, code)
             if why: red(f'{label} BNSH @{base:#x} variation {v} {st}: {why}')
             out.append((f'{label}#BNSH@{base:#x}#var{v}', st, ctl, code))
     return out
 
-def nvn2_stage(ctl, code):   # an NVN2 shader's stage: compute, task and mesh by the control section's stage byte (+0x56: 5, 6, 7; a task or mesh shader's SPH reads as vertex or domain), else the SPH at the code area's start (no code header)
-    if len(ctl) > 0x56 and ctl[0x56] in (5, 6, 7): return {5: 'cs', 6: 'ts', 7: 'ms'}[ctl[0x56]]
+def nvn2_stage(ctl, code):
+    """Identify NVN2 stages from control metadata before trying the reused SPH.
+
+    Task and mesh reuse vertex/domain SPH types, so those types cannot identify
+    their pipeline stage. Ordinary graphics still use the SPH at the code start.
+    """
+    if len(ctl) > 0x56 and ctl[0x56] in (5, 6, 7):
+        return {5: 'cs', 6: 'ts', 7: 'ms'}[ctl[0x56]]
     return sph_stage(bytes(0x30) + code[:4]) if len(code) >= 4 else None
+
+
+def bahs_record_entries(data, candidates):
+    """Recover a complete BAHS binary array from its first scanned entry.
+
+    Each record starts with its byte length and kind; the shader descriptor is
+    at +0x10. Accept only a full walk ending at the declared array boundary,
+    with every record already validated by the control/code scan. Otherwise
+    retain the scan for archive layouts whose binary array we do not know.
+
+    Reflection metadata can resemble an extra descriptor pairing unrelated
+    code and control ranges. Such a descriptor is not a shader in the array.
+    """
+    if not candidates:
+        return None
+    array_start = min(candidates) - 0x18
+    if array_start < 0x20 or array_start + 8 > len(data):
+        return None
+    size, count = struct.unpack_from('<II', data, array_start)
+    if size < 8 or size > len(data) - array_start or not 0 < count <= (size - 8) // 0x20:
+        return None
+    array_end = array_start + size
+    position = array_start + 8
+    entries = set()
+    for _ in range(count):
+        if position + 0x20 > array_end:
+            return None
+        record_size = struct.unpack_from('<I', data, position)[0]
+        descriptor = position + 0x10
+        if record_size < 0x20 or record_size > array_end - position or descriptor not in candidates:
+            return None
+        entries.add(descriptor)
+        position += record_size
+    return entries if position == array_end else None
 
 def bahs_shaders(d, label):
     rsz, region = field(d, '<II', 0x18, f'{label} BAHS header')
@@ -183,6 +227,9 @@ def bahs_shaders(d, label):
         st = nvn2_stage(ctl, code) if nvn2 else 'cs' if code[:4] == CS_MAGIC else sph_stage(code) if code[:4] == GFX_MAGIC else None
         if not st or check(label, st, ctl, code): continue
         out.append((f'{label}#BAHS@{a:#x}', st, ctl, code))
+    records = bahs_record_entries(d, {int(o[0].rsplit('@', 1)[1], 16) for o in out})
+    if records is not None:
+        out = [record for record in out if int(record[0].rsplit('@', 1)[1], 16) in records]
     bahs_variations(d, label, [o[0] for o in out])
     return out
 

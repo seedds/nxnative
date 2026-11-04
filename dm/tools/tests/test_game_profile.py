@@ -24,6 +24,17 @@ def header(rows):
     return r.returncode, (r.stderr + r.stdout).strip()
 
 
+class TimestampReports(unittest.TestCase):
+    def test_splatoon_raiders_times_gpu_segments(self):
+        # Its dynamic resolution controller subtracts TIMESTAMP_TOP reports from one submission.
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / 'game_profile.h'
+            env = {k: v for k, v in os.environ.items() if k not in ('DM_GAMES_DIR', 'DM_GAMES_FIRST')}
+            subprocess.run([sys.executable, str(GAME), 'header', '0400380020056000', str(out)],
+                           env=env, check=True)
+            self.assertIn('#define DM_GAME_GPU_TS_SEGMENT 1', out.read_text().splitlines())
+
+
 class PsoGPU(unittest.TestCase):
     def test_valid_tokens(self):
         for rows in ('', 'pso_mtl4\ton\npso_gpu\tg18p\n', 'pso_mtl4\ton\npso_gpu\tapplegpu_g19p\n',   # without the key: the header is made as before, no message

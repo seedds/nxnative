@@ -31,6 +31,21 @@ A Switch 2 game: update v65536 over the base game, SDK 21.4.4 built for the Swit
 - The first boss fight's third stage (resolved, 2026-11-05, 16 GB M2 Air, docked): it measures its ink map with about 1,550 occlusion queries a frame, each after 7 inline updates of the query block and with colour writes masked off (`wm=0xfffffff0`), so those draws read the map directly rather than from the tile. Their 11,010 writes in one submission overflowed the host's list of queued writes, and from then on each query ended its render pass, at 1-2 fps ([the reference entry](../../../docs/reference/rendering.md#a-submission-past-8192-queued-writes-counted-as-writing-everywhere)). With a list that grows as needed (a larger fixed limit in the measured build), the stage holds a median of 17.7-19.9 ms with at most 118 render passes. A later stretch of the same run sat at 32-34 ms (frames 15,300-16,200); where in the game that was is not known (open).
 - Focus: the game stops drawing its 3D scene when the window loses focus (10 passes, GPU 2 ms), so a frame rate read then says nothing.
 
+### Dynamic resolution in inked stages
+
+The game reads 29 `TIMESTAMP_TOP` reports per frame. When every report in a submission had the same time, its controller held the 3D view at 1440 pixels wide even on frames taking 22–26 ms. Segment times let the game lower its resolution under load. The render-scale setting sets the upper limit.
+
+| Timestamp mode | Render scale | 3D view width (pixels) | Frame time (p50) |
+|---|---|---|---|
+| Submission, before tile reads for ink stamps | 0.75 | 1440 | 22–26 ms |
+| Segment, before tile reads for ink stamps | 0.75 | 755–1440 | 18–21 ms |
+| Segment, with tile reads for ink stamps | 0.75 | 855–1440 | 16.3–16.8 ms |
+| Segment, with tile reads for ink stamps | 1.0 | 960–1706 | 16.1–16.9 ms |
+
+The M2 MacBook Air measurements cover about ten sampled frames per setting in the inklet stage. The first two rows isolate the timestamp change. The last two include the reduction in ink-map snapshots. [Measurements from dpadr](https://github.com/seedds/nxnative/issues/1064)
+
+A later [same-route comparison from dpadr](https://github.com/seedds/nxnative/pull/1130#issuecomment-6675776240), on v131072 docked on a 16 GB M2 MacBook Air, isolated the timestamp mode: submission timestamps gave GPU busy time of 15–19 ms and frame p50 of 22–23 ms; segment timestamps gave 9–12 ms and 16.5–18.5 ms. The busiest pass fell from 8.6–10.5 ms to 3.8–4.8 ms. The last segment-mode window still reached 18.5 ms, so this does not establish sustained 60 fps everywhere. These are the contributor's historical measurements, not a new run on this revision.
+
 ## Driving it on the Mac
 
 The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots in a window with the HUD, raises it and appends control lines (`A~0.1`, `LUp~4`, `shot <path>`, `passdump 1`, `texdump <path with %d>`). With the save at the start of the dialogue, four presses of A get to the beach at about 75 s. `DM_NVN_SHOT=<frames>:<relative path>` takes consecutive frames: the path must have no space, as the driver's environment is split on them.
@@ -48,6 +63,7 @@ The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots i
 - [Compatible views for a mismatched declared texture type](../../../docs/reference/rendering.md#compatible-views-for-a-mismatched-declared-texture-type): resolved, a cube in a cube array slot. `d0ce73e71074df85_b` (NigoProc, layer index a literal 0) read texture ID 428 as `texture type mismatch … declares slot 0 as Metal type 6, … is type 5`, 180 binds at frame 0 and none after. With the view the count is 0. The opening looks the same, though the two runs are not frame-aligned, so no pixel comparison was possible.
 - [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles): NigoProc's `800215a0f8d0c44d` is a mesh shader, and every pack stopped until its row was split again ([issue #1263](https://github.com/seedds/nxnative/issues/1263)).
 - [A control section's words read as a BAHS entry](../../../docs/reference/shaders.md#a-control-sections-words-read-as-a-bahs-entry): resolved, 2026-11-10. Three rows of `agl_resource.Nin_Ounce_NVN2.debug.sarc.zs` were no shaders (`cs_other` `68bbe98b3bfd9876` in `agl_common`, `ps_other` `18be578dfdaaffa0` in `agl_technique`, `vs_other` `7a4936fccf82094e` in `agl_technique_pfx`), and every NSP build stopped at the table check after 04df08d4 ([issue #1613](https://github.com/seedds/nxnative/issues/1613)). The tables were split again from the update: those rows and one fact went, the later rows of each package moved down one index, and nothing else changed.
+- [GPU timestamps per submission segment](../../../docs/reference/frame-rate.md#gpu-timestamps-per-submission-segment) for the dynamic resolution controller.
 - [Storage words read one by one](../../../docs/reference/shaders.md#storage-words-read-one-by-one): the lit pass on an M1, 70 → 16 ms.
 - [A blocked audio device start freezes the game](../../../docs/reference/audio.md#a-blocked-audio-device-start-freezes-the-game) when the selected HDMI device refuses to play.
 

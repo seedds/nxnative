@@ -35,7 +35,7 @@ static class SwshXlate
     {
         readonly byte[] _code; readonly JsonObject _job; int _binding = 1; public readonly List<string> Notes = new();
         readonly byte[] _c1;
-        public Accessor(byte[] code, JsonObject job, Dictionary<int, SamplerType> imageTypes = null) { if (job["geometry_topology"] != null) _binding = 40; _code = code; _job = job; _c1 = job["c1"] is JsonNode h ? Convert.FromHexString((string)h) : Array.Empty<byte>(); _imageTypes = imageTypes; }
+        public Accessor(byte[] code, JsonObject job, Dictionary<int, SamplerType> imageTypes = null, Dictionary<int, SamplerType> textureTypes = null) { if (job["geometry_topology"] != null) _binding = 40; _code = code; _job = job; _c1 = job["c1"] is JsonNode h ? Convert.FromHexString((string)h) : Array.Empty<byte>(); _imageTypes = imageTypes; _textureTypes = textureTypes; }
         // A texture query on an image handle (TXQ on c2 0x120 + 8 r: Unreal's GetDimensions on the RWTexture3D a compute shader writes) asks the type of that handle, which a table built
         // without the game's PC shaders does not answer, and the 2D default took a 3D image's depth from its width. The shader's own surface instructions give the image's type: the
         // first translation records that a query went unanswered (ImageQueryGuessed), and Main translates again with the types of the images it found, by c2 handle (ImageTypesOf)
@@ -46,9 +46,29 @@ static class SwshXlate
             foreach (var im in p.Info.Images) if (im.CbufSlot == 2 || im.CbufSlot < 0) types[im.HandleIndex] = im.Type & (SamplerType.Mask | SamplerType.Array);
             return types;
         }
+        // The same for a texture (Princess Peach: Showtime!'s size query on a volume it also samples, 1,463 of its shaders). A handle ORs a texture word and a sampler word, and the query's has
+        // another sampler word than the sample's, so Ryujinx's merge by handle (MergeTextureMeta) keeps them apart and the query gets its own binding, typed 2D, of a 3D texture: a binding Metal
+        // does not define. So the types go by texture slot, as the answer table does (Slot). A binding whose handle a query guessed counts only when it is not the guess: then an instruction typed
+        // it, through that merge. A slot two instructions give different types is left out. Only a slot a query guessed and another instruction types otherwise is returned, as nothing else would change
+        readonly Dictionary<int, SamplerType> _textureTypes; readonly HashSet<int> _guessedHandles = new();
+        public Dictionary<int, SamplerType> TextureTypesOf(ShaderProgram p)
+        {
+            var types = new Dictionary<int, SamplerType>(); var mixed = new HashSet<int>();
+            foreach (var t in p.Info.Textures)
+            {
+                if (t.ArrayLength != 1) continue;
+                SamplerType ty = t.Type & (SamplerType.Mask | SamplerType.Array | SamplerType.Multisample);
+                int slot = Slot(t.HandleIndex, t.CbufSlot, false);
+                if (slot < 0 || (ty == SamplerType.Texture2D && _guessedHandles.Contains(t.HandleIndex))) continue;
+                if (types.TryGetValue(slot, out SamplerType seen) && seen != ty) mixed.Add(slot); else types[slot] = ty;
+            }
+            var guessed = new HashSet<int>(_guessedHandles.Select(h => Slot(h, -1, false)));
+            return types.Where(kv => !mixed.Contains(kv.Key) && guessed.Contains(kv.Key) && kv.Value != SamplerType.Texture2D).ToDictionary(kv => kv.Key, kv => kv.Value);
+        }
         // c1 constant segment (the 0x100 bytes before the control segment in the shader package): the jump table of indirect jump BRX lives here (LDC c[1]); without it the translator cannot resolve jump targets and control flow goes wrong (particle shaders loop forever)
         public int QueryConstantBuffer1Size() => _c1.Length;
         public int[] QueryAmpereComputeC0Layout() => _job["nvn2_cs"] is JsonArray l ? l.Select(v => (int)v).ToArray() : null;
+        public int[] QueryAmpereStageMemory() => _job["stage_memory"] is JsonArray l ? l.Select(v => (int)v).ToArray() : null;   // a task or mesh shader (dmsh_meshstage.py)
         public uint ConstantBuffer1Read(int offset) { if (offset >= 0 && offset + 4 <= _c1.Length) return BitConverter.ToUInt32(_c1, offset); Notes.Add($"c1 read out of bounds +{offset:X} (c1 length {_c1.Length})"); return 0; }
         // All resources go into set 0, each with a distinct binding number (spirv-cross emits them as one argument buffer); the translator's convention of giving the buffer of constant segment number index binding = index+1 is not relied on
         // The translator's own messages (a bindless read it resolved, or could not and removed, its result 0; an invalid encoding) go into the notes, marked, which dmsh_build.py counts apart
@@ -91,6 +111,11 @@ static class SwshXlate
             {
                 if (_imageTypes != null && _imageTypes.TryGetValue(handle, out SamplerType it)) { Notes.Add($"texture handle {handle:X} is image slot {islot}: type {it} from the shader's image instructions"); return it; }
                 ImageQueryGuessed = true;
+            }
+            if (t == null && slot >= 0 && islot < 0)
+            {
+                if (_textureTypes != null && _textureTypes.TryGetValue(slot, out SamplerType tt)) { Notes.Add($"texture handle {handle:X} is texture slot {slot}: type {tt} from the shader's other instructions"); return tt; }
+                _guessedHandles.Add(handle);
             }
             if (t == null) { Notes.Add($"texture handle {handle:X} (constant buffer {cbufSlot}, slot {slot}) has no type in the answer table, using 2D"); return SamplerType.Texture2D; }
             return t switch
@@ -177,23 +202,25 @@ static class SwshXlate
                 var ctx = Translator.CreateContext(0, acc, new TranslationOptions(TargetLanguage.Spirv, TargetApi.Vulkan, flags));
                 bool geometry = job["geometry_topology"] != null;
                 ShaderProgram p = ctx.Translate(geometry);
-                Dictionary<int, SamplerType> imageTypes = null;
-                if (acc.ImageQueryGuessed && (imageTypes = Accessor.ImageTypesOf(p)).Count > 0)   // a query on an image handle went unanswered: again with the images' types (see Accessor)
+                Dictionary<int, SamplerType> imageTypes = null, textureTypes = null;
+                if (acc.ImageQueryGuessed && (imageTypes = Accessor.ImageTypesOf(p)).Count == 0) imageTypes = null;   // a query on an image handle went unanswered: again with the images' types (see Accessor)
+                if ((textureTypes = acc.TextureTypesOf(p)).Count == 0) textureTypes = null;   // and on a texture word: again with the types its other instructions gave it
+                if (imageTypes != null || textureTypes != null)
                 {
-                    acc = new Accessor(code, job, imageTypes);
+                    acc = new Accessor(code, job, imageTypes, textureTypes);
                     ctx = Translator.CreateContext(0, acc, new TranslationOptions(TargetLanguage.Spirv, TargetApi.Vulkan, flags));
                     p = ctx.Translate(geometry);
                 }
                 if (UsesFloat64(p.BinaryCode))   // Tears of the Kingdom 1.4.3: 30 shaders used double and failed in the Metal compiler
                 {
-                    job["softfloat64"] = true; acc = new Accessor(code, job, imageTypes);
+                    job["softfloat64"] = true; acc = new Accessor(code, job, imageTypes, textureTypes);
                     ctx = Translator.CreateContext(0, acc, new TranslationOptions(TargetLanguage.Spirv, TargetApi.Vulkan, flags));
                     p = ctx.Translate(geometry); acc.Notes.Add("FP64 lowered to FP32 (DoubleToFloat)");
                 }
                 if (geometry)
                 {
                     // A fresh context: translation mutates the decoded program.
-                    var reader = Translator.CreateContext(0, new Accessor(code, job, imageTypes), new TranslationOptions(TargetLanguage.Spirv, TargetApi.Vulkan, flags));
+                    var reader = Translator.CreateContext(0, new Accessor(code, job, imageTypes, textureTypes), new TranslationOptions(TargetLanguage.Spirv, TargetApi.Vulkan, flags));
                     File.WriteAllBytes(Path.Combine(outDir, key + ".reader.spv"), reader.GenerateVertexPassthroughForCompute().BinaryCode);
                 }
                 File.WriteAllBytes(Path.Combine(outDir, key + ".spv"), VertexCounterLowering.Apply(code, (string)job["stage"], p.BinaryCode, acc.Notes));

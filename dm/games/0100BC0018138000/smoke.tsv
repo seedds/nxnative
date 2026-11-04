@@ -1,0 +1,11 @@
+# Boot smoke route for scripts/regress.py (docs/development.md, The regression harness): key <TAB> value
+# A save on Mushroom Way (the note's Mac routes): the presses at frames 800 to 1160 take the title, the menu and the file, and Mario stands on the path from about 28 s with a
+# Goomba just below him; holding the stick down walks into it, and its battle (three Goombas in a sunlit arena) waits in the command menu from about 40 s
+save	saves/mushroom_way
+keys	f800:A,f980:A,f1100:A,f1160:A,f1800:LDown~0.6
+secs	80
+quick	60
+reach	3000@75
+window	50	20
+shots	30,55,70
+hang	20

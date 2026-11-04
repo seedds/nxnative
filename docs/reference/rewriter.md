@@ -144,6 +144,22 @@ To enroll a cut for any game's own module:
 - **Check:** `dm/tools/tests/test_jump_copies.py` exercises both comparison widths, unrelated checks, overwritten indices and a bounds check on the copied source with real AArch64 instructions.
 - **Open:** as in the existing 32-bit form, this recognizer assumes the comparison has an effective unsigned bounds guard; it does not prove guard/flag validity or that every incoming path passes the check. This game's actual dispatch has `b.hi` with unchanged flags. Validating those branches remains separate from this fix.
 
+### Vector registers read as writes of the jump-table index
+
+- **Symptom:** `AssertionError: jump table 3ce6c` while rewriting `main`, on an ADR-relative dispatch that the existing form describes: `ldrb w0, [x18, #5]; cmp w0, #5; b.hi; ldr s0, [sp, #8]; ldr s1, [x18, #0xc]; adr x18, #L; ldrsw x1, [x17, x0, lsl #2]; add x18, x18, x1; br x18`.
+- **Cause:** the backward walk from the load to the bounds check refuses the site when an instruction writes the index. It named each written register `'w' + name[1:]`, so `ldr s0` became a write of `w0`, the index, and `jump_adr_offsets` gave up. `half_count`, `check_before_copy` and the masked form of `jump_offsets` had the same test. It also failed the other way: capstone's `reg_name` calls x30 `lr` and x29 `fp`, so a real write of an index in either went unseen. `jump_masked_not` missed those writes too.
+- **Fix:** all of them ask `written_w`, which names only general-purpose registers, with `lr` and `fp` as w30 and w29. A vector or floating-point register (`s`, `d`, `q`, `b`, `h`, `v`) never changes the index.
+- **Found on:** Tomodachi Life: Living the Dream (`010051F0207B2000`) 1.0.0, `main+0x3ce6c` (six targets, table at `main+0x2a5967c`), by the pull request's author: with the fix the game rewrites, packs as a Mac app from a provisional profile and boots to its first screen. The other forms were found by reading the code and shown on synthetic sites.
+- **Check:** `dm/tools/tests/test_jump_copies.py` puts vector loads and x29 / x30 writes between the check and the load in each form, including `half_count`.
+
+### Overwritten jump-table indices and bases taken as unchanged
+
+- **Symptom:** no failure seen on a game. The rewriter could read a jump table with the wrong size or base, so a case's target or landing pad would be missing or wrong. In the other direction, a halfword table whose base is in x30 got all 65,536 landing pads (`J` rows with 65536 in `main.sites.tsv`), which only makes the patch area larger.
+- **Cause:** `jump_offsets` and `half_count` followed `mov w9,w0` as a copy into the index but kept `w9` as the index too, so `cmp w9,#4` before the copy counted as its check. The table-base writer chains and `jump_adr_offsets`' search for the `adr` compared written names with `xN`, so a write of `wN`, which replaces the register as well, went unseen, as did `lr` and `fp`. A compare of `xN` counted as a write there.
+- **Fix:** a copy replaces the index, as `jump_adr_offsets` already did. Those searches ask `writes_reg`, which sees either width and the `lr` / `fp` names and leaves compares out. `jump_offsets` also refuses a site whose index is written after its check, such as `add w18,w18,#1`, or a caller-saved index across a call. A write that keeps the value, such as `sxtw x0,w0`, is refused too: no game on the drive has one, and a refusal stops the rewrite with a `jump table` assertion instead of reading the table wrongly.
+- **Found on:** reading the code while fixing [Vector registers read as writes of the jump-table index](#vector-registers-read-as-writes-of-the-jump-table-index). Of the 51 `main`s that rewrote in a comparison of old and new, only [Absolum](../../dm/games/0100A83022A22000/README.md)'s changed: its four tables at `main+0x1ed2dc`, `+0x1ed4fc`, `+0x1ed71c` and `+0x1ed8cc`, based in x30, went from 65,536 pads to 445, 373, 301 and 257, each its table's largest entry + 1, and the patch area from 3.7 MB to 570 KB.
+- **Check:** `dm/tools/tests/test_jump_copies.py` `CopyAfterCheck`, `IndexChangedAfterCheck`, `HalfCount`, `test_table_base_sees_every_write_of_the_register` and `test_a_32_bit_write_after_the_adr_replaces_its_value`.
+
 ### Byte tables indexed by x30 (capstone register names)
 
 - **Symptom:** `jump table <addr>` assertion on a byte table indexed by x30 (`adr x18, #L; ldrb w30, [x14, x12]; add x18, x18, x30, lsl #2; br x18`).
@@ -174,6 +190,14 @@ To enroll a cut for any game's own module:
 - **Fix:** when neither table form is found, the last write of `x18` is a plain load and the `br` ends the function, it becomes `x16 = guest x18; br x16` (`tail_call` / `site_br_call`; at a call `x16` / `x17` are free, as for `blr x18`). It is tried only where the rewriter used to stop.
 - **Found on:** [Ace Attorney Investigations Collection](../../dm/games/010005501E68C000/README.md) (Unity 2022.3 IL2CPP): `main+0x1d271bc` and `+0x204ebec`.
 - **Check:** every module the rewriter accepted before comes out byte-identical.
+
+### Unframed pointer tail calls followed by zero trap padding
+
+- **Symptom:** `AssertionError: jump table d29e68` while rewriting Moving Out 2 1.3.315.
+- **Cause:** the function loads its method pointer with `ldp x18,x17,[x17,#0x138]`, moves caller stack arguments and ends with `br x18`, followed by one `udf #0` padding word before the next unwind entry. The terminal-tail rule accepted only `ldr` and required the branch to be the last decoded instruction.
+- **Fix:** for a tail followed by zero trap padding, accept a plain paired pointer load as well as a single load, with contiguous decoding, straight-line argument moves and memory transfers, and no writes to SP, FP or LR, including their 32-bit aliases and writeback. The last write to either `x18` or `w18` must be the pointer load. Branches, calls, nonzero traps, decoding gaps and framed thunks do not match this fallback. The terminal-tail rule and other nonterminal-tail checks are unchanged.
+- **Found on:** Moving Out 2 1.3.315, `main` build `c552b6464e7348a7bb261a708b353137`, at `+0xd29e68`. This is a rewrite-stage finding, not gameplay validation or a game profile.
+- **Check:** `dm/tools/tests/test_tail_call.py` covers synthetic paired loads, zero padding, argument stores and rejection of control flow, frame changes, pointer clobbers and missing instructions.
 
 ### Loaded method-pointer tail call before an error block
 
@@ -259,6 +283,13 @@ To enroll a cut for any game's own module:
 - **Cause:** a text longer than the ±128 MB a `b` reaches has no place for one patch area from which every site is in reach: before the base the last sites are too far, after the image the first ones.
 - **Fix:** such a module (`TWO` in `patch_nso.py`: the text alone ends past the reach) gets two patch areas. The front one, 16 MB before the base, takes the sites below `SPLIT` (128 MB less the front area and 1 MB of margin for a stub's exits past its site); the back one, right after bss, the key page and the frame step page (`BACK_OFF`, 64 KB aligned), takes the others. A site's stubs and their branches back stay in its own area (`use_area`); when the front sites need more room, the rewriter runs again with exactly that size, and `B()` checks every branch. The file is the image, the front area padded to 16 KB, then the back area; `fixups.tsv` adds `BACK_OFF` and `BACK_LEN`, and `IMAGE_SIZE` covers the back area. The Mac loader copies it to `BACK_OFF` and seals it read-only and executable, the iOS embedding gives it a fourth section (`gen_embed.py`: `__TEXT,__dm<name>x2`) that the loader remaps there, and `svcQueryMemory` reports it as CodeData+RX like a patch area after the image (data and bss end at it). A module that does not need it is rewritten byte for byte as before.
 - **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) `main` (1.8d.310c): 185.6 MB of text, 177,058 sites; 3.9 MB of stubs in front and 3.2 MB at `BACK_OFF` `0xdec0000`.
+
+### Split point within the back area's reach
+
+- **Symptom:** a `B()` range assertion in `site_plain` on the branch back to the site, in a module that takes two patch areas.
+- **Cause:** `SPLIT` only kept the front area in reach. The back area sits after ro, data and bss, so when those are large it is more than 128 MB from the sites just above a split set by a 16 MB front area: here `SPLIT` was `0x6f00000` and the back area at `0xfa40000` reaches down to `0x7a40000`.
+- **Fix:** `SPLIT` is also no lower than `BACK_MIN`, `BACK_OFF` less the reach plus the same 1 MB of margin. When that lifts it, the front area's first pass takes the gap up to `BACK_MIN` instead of 16 MB, so the front area still reaches every site below the split; the rerun with exactly the size its sites need works as before, and `B()` checks every branch. A module whose back area already reaches the 16 MB split (EA SPORTS FC 27) is rewritten byte for byte as before; one where no split reaches stops with a message naming `BACK_MIN`.
+- **Found on:** Hello Kitty Party Land `main` (1.0.2): 151.8 MB of text and 98 MB of ro, data and bss after it; `SPLIT` `0x7b40000`, 1.7 MB of stubs in a 3.75 MB front area (no rerun) and 123 KB at `BACK_OFF` `0xfa40000`.
 
 ## Cuts and observation gates
 

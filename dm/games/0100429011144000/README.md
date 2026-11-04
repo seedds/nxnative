@@ -37,7 +37,7 @@ Update 1.23.83358 (v458752) over the base game, SDK 13.3.5. Unity 2019.4.36f1 IL
 ## Audio
 
 - FMOD on one `AudioOut`; music and effects play.
-- **Current, cause unknown:** `[RED] audio #0: the device has not called back for 216–219 ms while playing` once in each of three runs: twice right after `AudioOut Start` (3–5 s from boot), once at frame 3,300 (about 110 s, in the menu). In two of them the log shows the Mac's output device changing at that moment (`audio device buffer: … after output changed`), so a device change on the Mac is one candidate; for the stall right after the start, the device's start-up latency is another, as the watchdog in `hle_audio.c` counts its 200 ms from `AudioOutputUnitStart`. The restart a second later plays on. Below Zero's line comes at the landing instead ([its note](../010014C011146000/README.md#audio)).
+- **Current, cause unknown:** `[RED] audio #0: the device has not called back for 216–219 ms while playing` once in each of three runs: twice right after `AudioOut Start` (3–5 s from boot), once at frame 3,300 (about 110 s, in the menu). In two of them the log shows the Mac's output device changing at that moment (`audio device buffer: … after output changed`), so a device change on the Mac is one candidate; for the stall right after the start, the device's start-up latency is another, as the watchdog at the time counted its 200 ms from `AudioOutputUnitStart`. It now [waits for callbacks before handing playback to the device](../../../docs/reference/audio.md#a-blocked-audio-device-start-freezes-the-game). The restart a second later plays on. Below Zero's line comes at the landing instead ([its note](../010014C011146000/README.md#audio)).
 
 ## Mac routes
 

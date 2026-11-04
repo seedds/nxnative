@@ -91,7 +91,7 @@ usage = load_module('usage', REPO / 'dm/tools/usage.py')   # usage manifests and
 ROOT = Path(os.environ.get('REGRESS_ROOT', ''))
 GAMES = Path(os.environ.get('REGRESS_GAMES', ''))
 HOST_DIRS = ('dm/host', 'dm/gfx', 'dm/gfx/nvn', 'dm/gfx/nvn/include', 'dm/gfx/tex', 'dm/gfx/vk', 'dm/gfx/gl')   # as build_ipa_from_nsp.py: the host's sources and headers
-REWRITER = ('dm/tools/patch_nso.py', 'dm/tools/nso.py', 'dm/tools/nso_code.py', 'dm/tools/nso_asm.py', 'dm/tools/nso_match.py', 'dm/tools/sdk_patches.py', 'dm/tools/ue_cvar.py', 'dm/tools/ue_malloc.py', 'dm/tools/ue_region.py', 'dm/tools/loader_census.py')
+REWRITER = ('dm/tools/patch_nso.py', 'dm/tools/nso.py', 'dm/tools/nso_code.py', 'dm/tools/nso_asm.py', 'dm/tools/nso_match.py', 'dm/tools/sdk_patches.py', 'dm/tools/ue_cvar.py', 'dm/tools/ue_malloc.py', 'dm/tools/ue_region.py', 'dm/tools/fps_target.py', 'dm/tools/loader_census.py')
 HEAVY_EXE = {'clang', 'make', 'xcodebuild', 'ld', 'ld64', 'swift-frontend', 'dotnet', 'metal', 'metal-tt', 'air-tt', 'applegpu-nt', 'dmsh_xlate', 'spirv-cross'}   # jobs that skew a measurement
 HEAVY_PY = r'(dmsh_build|shader_split|own_compilers|patch_nso|vk_shaders)\.py'   # (the shared measuring rule)
 # Tolerances, from runs of one revision against itself (docs/development.md, The regression harness)
@@ -337,7 +337,7 @@ def toolchain_fp():
 def chain_key(tree, g, tools):
     if g.kind == 'nvn':
         v, inp = json.loads(tree.py("import sys, json; sys.path.insert(0, 'dm/gfx/tools'); import dmsh_chain as c; g = c.load_game(); print(json.dumps([c.version(), c.inputs(g)]))", g.env(tree)))
-        side = digest([tree.path / 'dm/gfx/tools' / f for f in ('c1_guard.py', 'cb_extent.py', 'dmsh_mtlcache.py', 'own_compilers.py', 'tool_lock.py')] + [tree.path / 'dm/games/game.py'])
+        side = digest([tree.path / 'dm/gfx/tools' / f for f in ('c1_guard.py', 'cb_extent.py', 'dmsh_mtlcache.py', 'dmsh_pch.py', 'own_compilers.py', 'tool_lock.py')] + [tree.path / 'dm/games/game.py'])
         pkg = g.build / 'shader/pkg'
         sources = digest(sorted(p for p in pkg.rglob('*') if p.is_file()), root=pkg)
         pairs = g.profile_dir(tree) / 'pso_pairs.tsv'
@@ -607,7 +607,7 @@ def modules_for(tree, g, rewrite, jobs):
         mods.pop('DM_GAMES_DIR', None)
         mods.pop('DM_GAMES_FIRST', None)
     names = tree.py(f"import sys; sys.path.insert(0, 'dm/games'); import game; print(' '.join(game.load({g.id!r}).words('modules')))", mods).split()
-    src = {m: g.build / 'extract' / g.ver / 'ExeFS' / m for m in names}
+    src = {m: g.build / 'extract' / g.ver / 'ExeFS' / m for m in names if m == 'main' or (g.build / 'extract' / g.ver / 'ExeFS' / m).is_file()}   # a version may lack a module another has
     nro = g.build / f'nro_{g.ver}' / 'nro.tsv'
     if nro.is_file():
         for ln in nro.read_text().splitlines():
@@ -869,7 +869,7 @@ def run_env(g, art, route, outdir, a):
     else: save.mkdir()
     temp.mkdir()
     env = dict(os.environ, DM_ROOT=str(g.build), DM_ROMFS=str(g.romfs()), DM_SAVE=str(save), DM_TEMP=str(temp), DM_MSL_DIR=str(lib), DM_FONT_DIR=str(g.build / 'font'),
-               DM_WINDOW='1', DM_WINDOW_TOP='1', DM_AUDIO='0', DM_METAL_HUD='0' if a.no_hud else '1', DM_CTL=str(outdir / 'ctl'), TMPDIR=str(game_root(g) / 'tmp') + '/')
+               DM_WINDOW='1', DM_WINDOW_TOP='1', DM_FOCUS_KEEP='1', DM_AUDIO='0', DM_METAL_HUD='0' if a.no_hud else '1', DM_CTL=str(outdir / 'ctl'), TMPDIR=str(game_root(g) / 'tmp') + '/')
     if g.kind == 'nvn':
         env.update(DM_NVN_SHMAP=str(prof / 'shader_map.tsv'), DM_NVN_TSV=str(outdir / 'frames.tsv'), DM_NVN_TSV_CALLS='0')
         if not (prof / 'pso_pairs.tsv').is_file() and (g.build / 'shader/pso_pairs.tsv').is_file(): env['DM_PSO_PAIRS'] = str(g.build / 'shader/pso_pairs.tsv')

@@ -1,5 +1,6 @@
 // Synthetic modules exercise real relocation and nn::ro calls; no game files or executable guest code required.
 #include "../loader.c"
+void dm_thread_service_connect(void) {}   // threads started so far have nothing to wait for here
 #include "../hle_ro.c"
 #include <assert.h>
 #include <stddef.h>

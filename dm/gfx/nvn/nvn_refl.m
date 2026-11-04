@@ -142,6 +142,7 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             if (ra[@"pos_attr"]) { int pa = [ra[@"pos_attr"] intValue]; o->pos_attr = (int8_t)(pa >= 0 && pa < 16 ? pa : -1); o->pos_w1 = [ra[@"pos_w"] isEqual:@"one"]; }
             if (ra[@"discard"]) o->may_discard = [ra[@"discard"] intValue] != 0;
             if (ra[@"sample_mask"]) o->writes_smask = [ra[@"sample_mask"] intValue] != 0;
+            o->reads_prim_id = [ra[@"primitive_id"] intValue] != 0;
             for (NSNumber *c in ra[@"colors"]) if (c.intValue >= 0 && c.intValue < 8) o->color_mask |= (uint8_t)(1u << c.intValue);
             o->color_known = [ra[@"colors"] isKindOfClass:[NSArray class]];
         }
@@ -151,21 +152,32 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             if (l < 0 || l >= 32 || a < 0 || a >= 16) continue;
             NSArray *refs[4] = {e[@"sx"], e[@"ox"], e[@"sy"], e[@"oy"]}; int ok = 1;
             for (int q = 0; q < 4; q++) { NSArray *r = refs[q]; if (![r isKindOfClass:[NSArray class]] || r.count != 3) { ok = 0; break; }
-                int sl = [r[0] intValue], vec = [r[1] intValue], cmp = [r[2] intValue]; if (sl < 0 || sl > 15 || vec < 0 || vec > 63 || cmp < 0 || cmp > 3) { ok = 0; break; }
-                o->uv_aff[l][q] = (uint16_t)(sl << 8 | vec << 2 | cmp); }
+                int sl = [r[0] intValue], vec = [r[1] intValue], cmp = [r[2] intValue]; if (sl < 0 || sl > 15 || vec < 0 || vec > 4095 || cmp < 0 || cmp > 3) { ok = 0; break; }
+                o->uv_aff[l][q] = (uint32_t)(sl << 16 | vec << 2 | cmp); }
             if (ok) o->uv_aff_attr[l] = (int8_t)a; }
         NSDictionary *uv = [ra isKindOfClass:[NSDictionary class]] ? ra[@"uv_from_attr"] : nil;
         if ([uv isKindOfClass:[NSDictionary class]]) for (NSString *k in uv) { int l = k.intValue, a = [uv[k] intValue]; if (l >= 0 && l < 32 && a >= 0 && a < 16) o->uv_attr[l] = (int8_t)a; }
+        NSArray *scr = [ra isKindOfClass:[NSDictionary class]] ? ra[@"screen"] : nil;
+        if ([scr isKindOfClass:[NSArray class]]) for (NSNumber *k in scr) if (k.intValue >= 0 && k.intValue < 32) o->scr_locn |= 1u << k.intValue;
         NSDictionary *fe = j[@"fetch"];
         if ([fe isKindOfClass:[NSDictionary class]]) {
-            for (NSDictionary *c in fe[@"calls"]) { int i = [c[@"fc"] intValue], r = [c[@"tex_reg"] intValue], l = [c[@"varying_locn"] intValue];
-                if (i != o->nfc || i >= 32 || r < 0 || r >= 256 || l < 0 || l >= 32) FAIL("fetch call table not contiguous or out of range (entry %d)", i);
+            for (NSDictionary *c in fe[@"calls"]) { int i = [c[@"fc"] intValue], r = [c[@"tex_reg"] intValue], l = [c[@"varying_locn"] intValue]; NSArray *fp = c[@"frag_pos"];
+                if ([fp isKindOfClass:[NSArray class]]) {   // a pixel-position sample: two uniform references, no interpolated output
+                    if (fp.count != 2 || i >= 32) FAIL("fetch call %d: frag_pos is not two uniform references", i);
+                    for (int q = 0; q < 2; q++) { NSArray *x = fp[q]; int sl = [x isKindOfClass:[NSArray class]] && x.count == 3 ? [x[0] intValue] : -1, vec = sl >= 0 ? [x[1] intValue] : -1, cmp = sl >= 0 ? [x[2] intValue] : -1;
+                        if (sl < 0 || sl > 15 || vec < 0 || vec > 4095 || cmp < 0 || cmp > 3) FAIL("fetch call %d: frag_pos uniform reference out of range", i);
+                        o->fc_scale[i][q] = (uint32_t)(sl << 16 | vec << 2 | cmp); }
+                    o->fc_fpos |= 1u << i; l = 0xff; }
+                else if (l < 0 || l >= 32) l = -1;
+                if (i != o->nfc || i >= 32 || r < 0 || r >= 256 || l < 0) FAIL("fetch call table not contiguous or out of range (entry %d)", i);
+                if ([c[@"proj"] intValue]) o->fc_proj |= 1u << i;
                 o->fc_reg[o->nfc] = (uint8_t)r; o->fc_locn[o->nfc] = (uint8_t)l; o->nfc++; }
             for (NSNumber *r in fe[@"mixed_regs"]) if (r.intValue >= 0 && r.intValue < 256) o->fc_mixed[r.intValue >> 6] |= 1ull << (r.intValue & 63);
             for (NSDictionary *u in fe[@"outputs"]) { if (o->nfo >= 4) FAIL("more than 4 fetch outputs"); o->fo_color[o->nfo++] = (uint8_t)[u[@"color"] intValue]; }
         }
         NSArray *tg = j[@"threadgroup_size"];
         if ([tg isKindOfClass:[NSArray class]] && tg.count == 3) for (int i = 0; i < 3; i++) o->tg[i] = (uint16_t)[tg[i] intValue];
+        o->tg_spill = (uint32_t)[j[@"tg_spill"] unsignedIntValue];
         for (NSDictionary *u in j[@"first_store"]) { if (o->nfirst >= 4) FAIL("more than 4 first-invocation stores");
             int reg = [u[@"reg"] intValue]; if (reg < 0 || reg >= 16) FAIL("first-invocation store to storage slot %d", reg);
             o->first[o->nfirst].reg = (uint8_t)reg; o->first[o->nfirst].word = (uint16_t)[u[@"word"] intValue]; o->first[o->nfirst++].value = (uint32_t)[u[@"value"] unsignedIntValue]; }

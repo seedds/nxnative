@@ -29,6 +29,16 @@ class NroGraphics(unittest.TestCase):
         self.assertEqual(s['graphics'][0], 'gl')
         self.assertFalse(s['glslc_capture'][0])
 
+    def test_own_glslc_beats_egl_in_main(self):   # Rayman 30th Anniversary Edition: EGL and glShaderSource linked, NVN and its own GLSL compiled with GLSLC
+        s = pg.shader_sources(SDL_MAIN | {'nvnBootstrapLoader', 'glslcCompile'}, 4, ['subsdk2'], 0, 0, gl_names=2)
+        self.assertEqual(s['graphics'][0], 'nvn')
+        self.assertTrue(s['glslc_capture'][0])
+        self.assertFalse(s['gl_capture'][0])
+
+    def test_glslc_without_nvn_stays_gl(self):   # no nvnBootstrapLoader in main: GLSLC alone does not make it an NVN game
+        s = pg.shader_sources(SDL_MAIN | {'glslcCompile'}, 4, ['subsdk2'], 0, 0, gl_names=2)
+        self.assertEqual(s['graphics'][0], 'gl')
+
     def test_nro_glslc_needs_a_module_that_defines_it(self):
         s = pg.shader_sources(set(), 0, [], 0, 0, nro_imports={'nvnBootstrapLoader', 'glslcCompile'})
         self.assertEqual(s['graphics'][0], 'nvn')

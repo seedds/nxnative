@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Game profiles: dm/games/<base game title ID>/game.tsv (key <TAB> values..., lines starting with # are comments) + the shader tables (and patches.py, the rewriter's patches of the game's builds) in the same folder. The shader tools, the host build, iOS packaging and the NSP script take each game's constants from here.
 # Usage: game.py list (list all profiles); game.py <id> <key> [<default>] (print that key's value, for shell; without a default a missing key is an error); game.py header <id> <out.h> (generate the host's game_profile.h);
+#   game.py modules <id> <folder of rewritten modules> (the modules to load from it: the build row of its main's build, else the profile's modules);
 #   game.py dir <id> (print the profile folder); game.py link <id> <link> (point a symlink at the profile folder: make cannot take paths with spaces)
 #   From Python: import game; g = game.load() (takes DM_GAME; there is no default game: unset is an error that lists the profiles); game.by_title(title ID); g.get / g.words / g.int / g.builds() / g.table(file name)
 # DM_GAMES_DIR (folders separated by ':') adds profile folders outside the repository, searched after dm/games: the NSP script writes a provisional profile for a game without one into
@@ -41,6 +42,18 @@ class Game:
         for ver, disp, *mods in self.values('build'):
             out[ver] = dict([('display', disp)] + [tuple(m.split('=', 1)) for m in mods])
         return out
+
+    def build_modules(self):
+        """{main build ID: [modules]} for each build row with a main: the modules that build has, in the load order of modules (Mario Kart World: the base game's main subsdk0 sdk,
+        1.8.0's main subsdk0 subsdk1 sdk). A row may name modules the profile does not load (Hades' subsdk0 and subsdk1): they stay unloaded"""
+        order, out = self.words('modules'), {}
+        for b in self.builds().values():
+            if 'main' in b: out[b['main']] = [m for m in order if m in b]
+        return out
+
+    def modules_in(self, folder):   # the modules of the profile a version's ExeFS (or its rewritten modules' folder) holds, in load order: a game's versions may differ in modules
+        folder = Path(folder)
+        return [m for m in self.words('modules', 'main') if (folder / m).is_file() or (folder / f'{m}.patched.bin').is_file()]
 
     def pairs(self, key):   # "a=b c=d" → [(a, b), (c, d)]
         return [tuple(w.split('=', 1)) for w in self.words(key)]
@@ -86,6 +99,21 @@ def by_title(tid):
 
 def by_build(main_id):   # the profile whose build rows register this main build ID (a release of the same build under another title ID: the NSP script's same_build)
     return next((g for g in all_games() if any(b.get('main') == main_id for b in g.builds().values())), None)
+
+
+# agl's upscaler network (NDSR), by where the shader map found each key: the compute shaders of agl_ndsr.pck (Donkey Kong Bananza's 24 in its release library, Splatoon Raiders' 20 in its debug one)
+UPSCALER_SOURCE = re.compile(r'/agl_ndsr\.pck#')
+
+
+def upscaler_keys(g):
+    """the game's own upscaler shaders, from its shader map (shader_split.py's source column): sorted 16-digit keys, none without a map"""
+    p = g.table('shader_map.tsv')
+    if not p.exists(): return []
+    keys = set()
+    for line in p.read_text(encoding='utf-8').splitlines():
+        c = line.split('\t')
+        if len(c) >= 5 and c[2] == 'compute' and UPSCALER_SOURCE.search(c[4]) and re.fullmatch(r'[0-9a-f]{16}', c[3]): keys.add(c[3])
+    return sorted(keys)
 
 
 def header(g):
@@ -137,6 +165,7 @@ def header(g):
     if vcr not in ('on', 'off'): sys.exit(f'{g.id}: vconv_range must be on or off: {vcr}')
     mml = g.get('mem_map_limit', 'off')   # MapPhysicalMemory refused beyond the application pool, as on Horizon (hle_svc.c): on / off
     if mml not in ('on', 'off'): sys.exit(f'{g.id}: mem_map_limit must be on or off: {mml}')
+    ups = upscaler_keys(g)   # the game's own upscaler shaders, which DM_UPSCALER=metalfx (the launcher's Game's upscaler) replaces with MetalFX's spatial scaler (nvn_mtl.m up_mfx_encode)
     gts = g.get('gpu_timestamps', 'submission')   # counter timestamps (nvn_mtl.m rep_ticks): submission = one time per submission, segment = the GPU start / end of the segment holding the report
     if gts not in ('submission', 'segment'): sys.exit(f'{g.id}: gpu_timestamps must be submission or segment: {gts}')
     om = g.get('op_mode', 'console')   # the operation mode reported at start (hle_oe.c dm_opmode; DM_OPMODE overrides): console = docked, handheld = touch screen in use (Super Mario Galaxy's pointer)
@@ -156,6 +185,8 @@ def header(g):
          f'#define DM_GAME_PROGRAM_ID 0x{int(g.get("program_id"), 16):016X}ull',
          f'#define DM_GAME_MODULES {{{", ".join(map(q, mods))}}}',
          f'#define DM_GAME_NMOD {len(mods)}',
+         # each build's own modules (main.c picks the row of main's build ID, else DM_GAME_MODULES): a version may lack a module another has
+         f'#define DM_GAME_BUILD_MODULES {", ".join("{" + q(bid) + ", " + q(" ".join(ms)) + "}" for bid, ms in g.build_modules().items()) or "{0}"}',
          f'#define DM_GAME_ROMFS_MARKER {q(g.get("romfs_marker"))}',
          f'#define DM_GAME_MEM_RESERVE {g.int("mem_reserve"):#x}ull',
          f'#define DM_GAME_MEM_ALIAS {g.int("mem_alias"):#x}ull',
@@ -167,6 +198,7 @@ def header(g):
          f'#define DM_GAME_ENV {q(g.get("game_env", ""))}',   # KEY=VALUE pairs getenv answers (hle_os.c; Absolum: .NET's DOTNET_GCRegionRange)
          f'#define DM_GAME_MEM_MAP_LIMIT {int(mml == "on")}',
          f'#define DM_GAME_STDALLOC_CAP {int(g.get("stdalloc_cap", "0"), 0):#x}ull',   # StandardAllocator's address space with virtual address memory (hle_svc.c); 0 = what the alias region has room for
+         f'#define DM_GAME_SCREEN_ASPECT {("off", "on").index(g.get("screen_aspect", "off"))}',   # stubs that follow a screen taller than 16:9 (DM_SCREEN_ASPECT): off / on
          f'#define DM_GAME_DISPLAY_VERSIONS {vers}',
          f'#define DM_GAME_PRESENT_DISPLAY {int(pi == "display")}',
          f'#define DM_GAME_CORE_PREEMPT {int(cp == "on")}',
@@ -188,6 +220,7 @@ def header(g):
          f'#define DM_GAME_TEX_DIRTY_UPLOAD {int(tdu == "on")}',
          f'#define DM_GAME_TEX_DYN_SLOTS {int(tds == "on")}',
          f'#define DM_GAME_GPU_TS_SEGMENT {int(gts == "segment")}',
+         f'#define DM_GAME_UPSCALER_KEYS {q(",".join(ups))}', f'#define DM_GAME_UPSCALER_N {len(ups)}',
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)
          '']
@@ -202,6 +235,9 @@ if __name__ == '__main__':
         out, text = Path(a[2]), header(load(a[1])); out.parent.mkdir(parents=True, exist_ok=True)
         if not (out.exists() and out.read_text() == text):   # written only when it changes: make runs this every time (the profile folder can change under the same GAME), and an unchanged header must not rebuild the host
             tmp = out.with_name(out.name + '.tmp'); tmp.write_text(text); tmp.replace(out)
+    elif len(a) == 3 and a[0] == 'modules':   # the modules to load from a folder of rewritten modules: its main build's row, else all the profile's (main.c profile_modules)
+        g, bid = load(a[1]), re.search(r'^# BUILD_ID\s+(\w+)', (Path(a[2]) / 'main.fixups.tsv').read_text(errors='replace'), re.M)
+        print(' '.join(g.build_modules().get(bid.group(1) if bid else '', g.words('modules'))))
     elif len(a) == 2 and a[0] == 'dir':
         print(load(a[1]).dir)
     elif len(a) == 3 and a[0] == 'link':   # link → the profile folder (replaced when it points elsewhere)
@@ -212,4 +248,4 @@ if __name__ == '__main__':
     elif len(a) in (2, 3):
         print(load(a[0]).get(*a[1:]))
     else:
-        sys.exit(__doc__ or 'usage: game.py list | game.py <id> <key> [<default>] | game.py header <id> <out.h> | game.py dir <id> | game.py link <id> <link>')
+        sys.exit(__doc__ or 'usage: game.py list | game.py <id> <key> [<default>] | game.py header <id> <out.h> | game.py modules <id> <rewritten modules> | game.py dir <id> | game.py link <id> <link>')

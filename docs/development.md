@@ -560,7 +560,7 @@ The bundle holds what the IPA holds, with the Mac's shader libraries:
 
 ```
 <game name>.app/Contents/
-  Info.plist                 name, version, bundle ID, the profile's app_category; DMTitleID, DMRomfsMarker, DMLanguage, DMModuleFiles and DMSettings for the launcher
+  Info.plist                 name, version, bundle ID, the profile's app_category, LSSupportsGameMode false (reference/frame-rate.md); DMTitleID, DMRomfsMarker, DMLanguage, DMModuleFiles and DMSettings for the launcher
   MacOS/nxnative             the launcher (dm/mac/launcher.c, linked by pack_app.py with swiftc and its settings window: dm/mac/Launcher.swift, LauncherSettings.swift and LauncherRow.swift)
   MacOS/dmhost               the Mac host built for the profile
   Resources/romfs.img        the packed version's RomFS image

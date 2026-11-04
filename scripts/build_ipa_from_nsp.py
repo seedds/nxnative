@@ -1206,6 +1206,16 @@ def scan_nup(path, want=None):   # a NUP as scan_nsps gives a folder of NSPs, wi
     return app, {'base': base, 'updates': sorted(vers.items()), 'dlc': [(tid, None, k) for tid, k in sorted(dlc.items())], 'nup': n}
 
 
+def nup_base_control(fam, ex, base):
+    """The folder with the base game's control data for a NUP build: base itself when it has any, else extract/v0 holding only the base package's NACP and icon (pack_nup.control), written here.
+    An update package usually carries no control data (the NUP packs the game's own packages, and the console's updates have none of their own): with the update packed alone, the base game was
+    never extracted, and the app had neither the game's name nor its icon. The base package's are written beside the versions, without its files (the base's RomFS is not extracted for them)"""
+    if fam.get('base') is None or any((base / f).exists() for f in ('control.nacp', 'icon.jpg')): return base
+    b0 = ex / 'v0'; b0.mkdir(parents=True, exist_ok=True)
+    pack_nup.control(fam['base'], b0)
+    return b0 if any((b0 / f).exists() for f in ('control.nacp', 'icon.jpg')) else base
+
+
 def extract_nup(ex, name, k, base, app, n):   # one version of a NUP (k: its base or an update package) into the layout extract makes; the code modules and the image are kept while unchanged
     dst = ex / name; part = dst / 'RomFS.img.part'
     def poll():
@@ -2999,6 +3009,7 @@ def main(args=None):
     aoc = extract_aoc(nx, keys, repo, work, app, fam, logs)
     dlc_roms = sorted(p for p in aoc.iterdir() if p.is_dir() or p.suffix == '.img') if aoc else []
     base = next((dirs[v] for v in versions if picks[v][1] is None), dirs[versions[0]])   # the folder the base game was extracted to alone
+    if nup: base = nup_base_control(fam, ex, base)   # a NUP packed at an update alone: the base package's NACP and icon, which the update's package does not carry (Star Fox), from a folder of their own
     # the app name and bundle ID both come from the base NSP: the game name in its control data, and a bundle ID from its title ID; a setting / the command line overrides them
     app_name = args.app_name or APP_NAME or nacp.name(base / 'control.nacp') or (g.get('name') if dump else '')   # a dump has no control data, a NUP may have no NACP
     if not app_name and not (mac and not mac_pack): raise BuildError(f'no game name in the base extraction ({base / "control.nacp"}; an older extraction did not save it: delete extract/ and run again, or give --app-name)')

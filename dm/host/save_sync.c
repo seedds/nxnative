@@ -9,6 +9,7 @@
 #include <TargetConditionals.h>
 #include <ctype.h>
 #include <dirent.h>
+#include <dispatch/dispatch.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -444,10 +445,10 @@ done:
 }
 
 // ---------- the host: the first mount, the sender, flushes ----------
-static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER, g_mount_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
 static _Atomic int g_on;
-static int g_mounted, g_want, g_busy, g_failed;   // the mount ran; a send asked for without a Commit (the mount found this save newer, a flush); a send running; the last one failed
+static int g_want, g_busy, g_failed;   // a send asked for without a Commit (the mount found this save newer, a flush); a send running; the last one failed
 static uint64_t g_commits, g_sent;                // Commits seen; the Commits the last send covered
 static char g_save[PATH_MAX], g_title[24], g_cloud[PATH_MAX];
 
@@ -473,10 +474,79 @@ static void *sender(void *arg) {
     return NULL;
 }
 
-static void mount_once(const char *save, const char *title) {
+// A Mac launcher may recover a pending commit after a crash. The selected account alone
+// cannot tell it which save the game mounted, or whether a cloud pull succeeded.
+#define LAUNCH_MOUNT_FD "NXNATIVE_SAVE_MOUNT_FD"
+void save_sync_launch_prepare(int channel[2]) {
+    channel[0] = channel[1] = -1;
+    unsetenv(LAUNCH_MOUNT_FD);
+    const char *config = getenv("DM_SAVE_SYNC");
+    if (!config || !*config || !strcmp(config, "0")) return;
+    int fd[2]; char number[24];
+    if (!pipe(fd)) {
+        snprintf(number, sizeof number, "%d", fd[1]);
+        if (fd[0] > 2 && fd[1] > 2 && !fcntl(fd[0], F_SETFD, FD_CLOEXEC) &&
+            !fcntl(fd[0], F_SETFL, O_NONBLOCK) && !fcntl(fd[1], F_SETFL, O_NONBLOCK) &&
+            !fcntl(fd[1], F_SETNOSIGPIPE, 1) && !setenv(LAUNCH_MOUNT_FD, number, 1)) {
+            channel[0] = fd[0]; channel[1] = fd[1];
+            return;
+        }
+        close(fd[0]); close(fd[1]);
+    }
+    SRED("could not set up the launcher receipt; exit-time sync is disabled");
+}
+
+static void notify_reconciled_mount(void) {
+    const char *number = getenv(LAUNCH_MOUNT_FD);
+    if (!number || !isdigit((unsigned char)*number)) return;
+    char *end;
+    long fd = strtol(number, &end, 10);
+    struct stat st;
+    if (*end || fd <= 2 || fd > INT_MAX || fstat((int)fd, &st) || !S_ISFIFO(st.st_mode)) return;
+    int flags = fcntl((int)fd, F_GETFL);
+    if (flags < 0 || (flags & (O_ACCMODE | O_NONBLOCK)) != (O_WRONLY | O_NONBLOCK) ||
+        fcntl((int)fd, F_SETNOSIGPIPE, 1)) return;
+    ssize_t sent;
+    do { sent = write((int)fd, "M", 1); } while (sent < 0 && errno == EINTR);
+    close((int)fd);
+}
+
+int save_sync_launch_finish(int read_fd, const char *save, const char *title) {
+    if (read_fd < 0) return 1;
+    char receipt;
+    ssize_t n;
+    do { n = read(read_fd, &receipt, 1); } while (n < 0 && errno == EINTR);
+    close(read_fd);
+    return n != 1 || receipt != 'M' || save_sync_after_exit(save, title);
+}
+
+// The deepest fixed path the sync engine constructs is a numbered backup's device
+// directory. Leave room before creating a snapshot or removing its scratch tree.
+static int sync_root(const char *save, char out[PATH_MAX]) {
+    size_t n = strlen(save);
+    while (n && save[n - 1] == '/') n--;
+    if (!n || n > PATH_MAX - sizeof "-backups/2000-01-01 00.00.00 cloud 2147483647/save_device") {
+        SRED("DM_SAVE needs a directory name with room for its sync and backup paths");
+        return 0;
+    }
+    memcpy(out, save, n); out[n] = 0;
+    const char *leaf = strrchr(out, '/'); leaf = leaf ? leaf + 1 : out;
+    if (!strcmp(leaf, ".") || !strcmp(leaf, "..")) {
+        SRED("DM_SAVE needs a directory name for its sibling sync and backup paths");
+        return 0;
+    }
+    return 1;
+}
+struct mount_args { const char *save, *title; };
+static void mount_once(void *context) {
+    const struct mount_args *args = context;
+    const char *save = args->save, *title = args->title;
     char cloud[PATH_MAX], tmp[PATH_MAX], theirs[PATH_MAX], base[SS_HASH + 1], kept[PATH_MAX], t[32];
     ss_meta mine, other; memset(&other, 0, sizeof other);
     if (!cloud_file(title, cloud, sizeof cloud)) return;
+    char root[PATH_MAX];
+    if (!sync_root(save, root)) return;
+    save = root;
     SLOG("on: %s", cloud);
     snprintf(tmp, sizeof tmp, "%s.sync-tmp", save); snprintf(theirs, sizeof theirs, "%s/in.dmsync", tmp);
     if (rm_tree(tmp) || mkdirs(tmp)) { SRED("cannot make %s (errno=%d): off", tmp, errno); return; }   // rm_tree: what an earlier session left
@@ -503,6 +573,7 @@ static void mount_once(const char *save, const char *title) {
         else if (!got) SLOG("no save here or in the cloud yet");
         break;
     }
+    if (!failed) notify_reconciled_mount();
     rm_tree(tmp);
     snprintf(g_save, sizeof g_save, "%s", save); upper_title(title, g_title, sizeof g_title); snprintf(g_cloud, sizeof g_cloud, "%s", cloud);
     g_failed = failed;
@@ -513,9 +584,9 @@ static void mount_once(const char *save, const char *title) {
 }
 
 void save_sync_mount(const char *save, const char *title) {   // the first mount does it; a second one (the device save) waits for it
-    pthread_mutex_lock(&g_mount_mu);
-    if (!g_mounted) { g_mounted = 1; mount_once(save, title); }
-    pthread_mutex_unlock(&g_mount_mu);
+    static dispatch_once_t once;
+    struct mount_args args = {save, title};
+    dispatch_once_f(&once, &args, mount_once);
 }
 
 void save_sync_committed(void) {
@@ -536,9 +607,8 @@ int save_sync_flush(int timeout_ms) {
 
 int save_sync_after_exit(const char *save, const char *title) {   // save: DM_SAVE, its trailing slashes stripped as h_fs_MountSave strips them (the same <save>.sync and <save>-backups)
     char cloud[PATH_MAX], dd[PATH_MAX];
-    if (!save || !*save) return 1;
-    snprintf(dd, sizeof dd, "%s", save); size_t L = strlen(dd); while (L > 1 && dd[L - 1] == '/') dd[--L] = 0;
-    return !cloud_file(title, cloud, sizeof cloud) || send_save(dd, title, cloud);
+    if (!save || !*save || !cloud_file(title, cloud, sizeof cloud)) return 1;
+    return sync_root(save, dd) && send_save(dd, title, cloud);
 }
 
 // ---------- the platform's parts: these defaults are plain file copies, which the Mac's iCloud Drive takes (it downloads a file a read asks for) ----------

@@ -45,6 +45,7 @@ static void *reader(void *unused) {
 }
 
 int main(void) {
+    setenv("DM_FPS_TARGET", "60", 1);   // the cap logic under test, not the profile's fps_target: a profile at 30 (Orbitals) would cap every check at 30
     target(60);
     const char *enabled = getenv("DM_THERMAL_CAP");
     if (enabled && !strcmp(enabled, "0")) {

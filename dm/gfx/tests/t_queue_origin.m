@@ -34,11 +34,12 @@ int main(void) { @autoreleasepool {
     memset(vs->rf.v[0].sh,0xff,sizeof vs->rf.v[0].sh);
     vs->rf.pos_attr = 0; vs->rf.pos_w1 = 1; program->sh[0] = vs;
     NvShader *fs = [NvShader new]; fs->fn = [library newFunctionWithName:@"f"];
-    fs->stage = 1; fs->rf.color_mask = 1; program->sh[1] = fs; serial_put(pg.serial,program);
+    fs->stage = 1; fs->rf.color_mask = 1; program->sh[1] = fs;
     tex_t target = {.magic=MAGIC('T','E','X',0),.serial=920002};
     target.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8,.width=8,.height=8,.depth=1,.levels=1,.samples=1};
     void *vertices = NULL; CHECK(!posix_memalign(&vertices,getpagesize(),65536),"vertex storage allocated");
     if (!vertices) return 1; memset(vertices,0,65536); mtl_pool_add(vertices,65536);
+    serial_put(pg.serial,program);
     static NVNdevice device; static NVNqueue queues[2]; NVNdeviceBuilder db = {0};
     P(nvnDeviceBuilderSetDefaults)(&db); CHECK(P(nvnDeviceInitialize)(&device,&db),"device initialized");
     for (int origin=0;origin<2;origin++) {
@@ -74,11 +75,18 @@ int main(void) { @autoreleasepool {
     mtl_queue_activate(((queue_t *)&queues[1])->serial);
     CHECK(!S.bst[0] && !S.bst[1] && !S.prog,"finalizing a program unbinds it from a saved queue state");
     // Stages bound from two programs make a composite: finalizing the fragment program takes the effective program again, the vertex stage alone
-    static prog_t pf = {.serial=920003}; NvProg *fprogram = [NvProg new]; fprogram->sh[1] = fs; serial_put(pf.serial,fprogram);
+    static prog_t pf = {.serial=920003};
+    NvProg *fprogram = [NvProg new];
+    fprogram->sh[1] = fs;
+    serial_put(pf.serial,fprogram);
     S.prog = bind_stages(&pg,1); S.prog = bind_stages(&pf,2);
-    CHECK(S.prog && S.prog != &pg && prog_get(S.prog)->sh[0] == vs && prog_get(S.prog)->sh[1] == fs,"a vertex and a fragment program bound apart make a composite");
+    NvProg *composite = S.prog ? serial_get(S.prog->serial) : nil;
+    CHECK(S.prog != &pg && composite && composite->sh[0] == vs && composite->sh[1] == fs,"a vertex and a fragment program bound apart make a composite");
+    CHECK(serial_get(pf.serial) == fprogram,"the fragment program is registered before finalization"); // nvnProgramFinalize releases the table's retain; the next assertion checks its removal.
     P(nvnProgramFinalize)((NVNprogram *)&pf);
-    CHECK(!S.bst[1] && S.prog && prog_get(S.prog)->sh[0] == vs && !prog_get(S.prog)->sh[1],"finalizing a composite's fragment program drops its stage from the effective program");
+    CHECK(!serial_get(pf.serial),"finalizing the fragment program removes its serial entry");
+    NvProg *remaining = S.prog ? serial_get(S.prog->serial) : nil;
+    CHECK(!S.bst[1] && remaining && remaining->sh[0] == vs && !remaining->sh[1],"finalizing a composite's fragment program drops its stage from the effective program");
     memset(S.bst,0,sizeof S.bst); S.prog = NULL;
     // Native GPU state: matching queue/device origins keep NVN's NDC facing;
     // differing origins reverse it. CW and CCW expectations are explicit here.
@@ -118,5 +126,8 @@ int main(void) { @autoreleasepool {
         CHECK(good,"queue-latched culling and front_facing match native GPU state");
     }
     mtl_pool_del(vertices); free(vertices);
+    CHECK(serial_get(pg.serial) == program,"the draw program stays registered through the final draw");
+    mtl_prog_release(&pg);
+    CHECK(!serial_get(pg.serial),"releasing the draw program removes its serial entry");
     printf("queue origin: %d checks, %d failed\n",checks,fails); return fails != 0;
 } }

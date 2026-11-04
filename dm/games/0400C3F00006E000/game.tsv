@@ -37,6 +37,11 @@ sys_resource	0x4000000
 # ---- Shader split (shader_split.py) ----
 shader_groups	/Shader/=shader /Effect/=effect /Lib/=lib /Layout/=layout
 shader_note	Mario Kart World shaders
+# No twin samplers and the NaN coordinate guard as fmax, none on cube directions (dmsh_build.py border_emu, nan_coord_fmax): on an M1 Pro the per-sample border branch and the
+# coordinate NaN select kept the samples from overlapping (the cube prefilter 4744589bb8f9f7dd: 2.2 → 0.7 ms a chain). No run printed a border colour Metal lacks (title, menus, the
+# Mushroom Cup's four races). Title screen, M1 Pro, alternating runs: GPU p50 27.0–27.8 → 18.3–19.5 ms a frame
+shader_border_emu	0
+shader_nan_coord	fmax
 
 # ---- Graphics ----
 # agl wraps its clears in render conditions on Donkey Kong Bananza and Splatoon Raiders; the same library here, to be confirmed on this game

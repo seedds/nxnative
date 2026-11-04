@@ -12,14 +12,29 @@ static char *seen_name;
 static const void *seen_data;
 static unsigned seen_index, seen_capacity;
 static uint32_t status;
+// A model of the iType engine: GetError reads what the last LoadFont left, engine_err for any font but the compact stand-in and small_err for it; a failed load leaves the engine
+// used up (every later load fails with 201) until Initialize starts it afresh
+static uint32_t engine_err, small_err, cur_err;
+static int used_up, inits, finis;
+static void *init_buf;
+static unsigned init_size;
+static const void *small_payload;
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s\n", msg); } } while (0)
 static uint32_t original(void *self, char *name, const void *data, unsigned index, unsigned capacity) {
     calls++; seen_self = self; seen_name = name; seen_data = data;
     seen_index = index; seen_capacity = capacity;
+    cur_err = used_up ? 201 : data && data == small_payload ? small_err : engine_err;
+    if (cur_err) used_up = 1;
     return status;
 }
+static uint32_t get_error(void *self) { (void)self; return cur_err; }
+static uint32_t init_engine(void *self, void *buf, unsigned size) { (void)self; inits++; used_up = 0; cur_err = 0; init_buf = buf; init_size = size; return 0; }
+static void fini_engine(void *self) { (void)self; finis++; }
 void *guest_sym(const char *name) {
     lookups++;
+    if (!strcmp(name, "_ZN2nn6fontll18ScalableFontEngine8GetErrorEv")) return get_error;
+    if (!strcmp(name, "_ZN2nn6fontll18ScalableFontEngine10InitializeEPvj")) return init_engine;
+    if (!strcmp(name, "_ZN2nn6fontll18ScalableFontEngine8FinalizeEv")) return fini_engine;
     CHECK(!strcmp(name, "_ZN2nn6fontll18ScalableFontEngine8LoadFontEPcPKvjj"), "original symbol lookup");
     return missing ? NULL : original;
 }
@@ -78,8 +93,49 @@ int main(void) {
     ext_f = std_f;
     CHECK(load(&self, name, standard, 0, 0) == status && seen_data == standard + 8, "extension fallback to standard");
     CHECK(seen_index == 0 && seen_capacity == 0, "zero unsigned arguments preserved");
-    CHECK(lookups == 1, "original resolved once");
+    CHECK(lookups == 4, "LoadFont, GetError, Initialize and Finalize resolved once");
     CHECK(!memcmp(standard, unrelated, sizeof standard) && !memcmp(extension, unrelated, sizeof extension), "input bytes unchanged");
+    // The compact stand-in: tried only for the host's standard font, only when the engine reports an error after loading it, only in an engine the host saw initialized and that holds
+    // no font yet, and only when there is one; the engine is started afresh on its own work buffer first
+    uint32_t (*init)(void *, void *, unsigned) = NULL; count = 0;
+    for (size_t i = 0; e && i < bytes / sizeof *e; i++) if (!strcmp(e[i].name, "_ZN2nn6fontll18ScalableFontEngine10InitializeEPvj")) { init = e[i].fn; count++; }
+    CHECK(count == 1 && init, "exact Initialize forced registration exists once");
+    if (!init) return 1;
+    ext_f = (font_t){extension, sizeof extension};
+    uint8_t compact[64] = {0}, work[32]; memcpy(compact, &marker, 4);
+    small_done = 1; small_f = (font_t){0}; small_payload = compact + 8; status = 7;
+    int eng, n, i0;
+    CHECK(init(&eng, work, sizeof work) == 0 && inits == 1 && init_buf == work && init_size == sizeof work, "Initialize forwards its arguments");
+    engine_err = 201; small_err = 0; n = calls;
+    CHECK(load(&eng, name, standard, 3, 5) == status && calls == n + 1 && seen_data == standard + 8 && finis == 0, "no compact stand-in: the failed load stands");
+    small_f = (font_t){compact, sizeof compact};
+    const void *std_in[] = {standard, standard + 8};
+    for (unsigned i = 0; i < 2; i++) {
+        init(&eng, work, sizeof work); n = calls; i0 = inits; int f0 = finis;
+        CHECK(load(&eng, name, std_in[i], 3, 5) == status && calls == n + 2, "a failed standard load is made again");
+        CHECK(finis == f0 + 1 && inits == i0 + 1 && init_buf == work && init_size == sizeof work, "after Finalize and Initialize on the engine's own work buffer");
+        CHECK(seen_data == compact + 8 && seen_self == &eng && seen_name == name && seen_index == 3 && seen_capacity == 5, "with the compact payload, other arguments as given");
+        CHECK(get_error(&eng) == 0, "the compact font loads in the fresh engine");
+    }
+    n = calls; i0 = inits;
+    CHECK(load(&eng, name, standard, 3, 5) == status && calls == n + 1 && inits == i0, "an engine that holds a font is never started afresh");
+    init(&eng, work, sizeof work); engine_err = 0;
+    CHECK(load(&eng, name, unrelated, 3, 5) == status && get_error(&eng) == 0, "the game's own font loads");
+    engine_err = 201; n = calls; i0 = inits;
+    CHECK(load(&eng, name, standard, 3, 5) == status && calls == n + 1 && inits == i0, "nor one that loaded the game's own font");
+    int other_eng; used_up = 0; n = calls; i0 = inits;
+    CHECK(load(&other_eng, name, standard, 3, 5) == status && calls == n + 1 && inits == i0, "an engine initialized out of the host's sight is left as it is");
+    const void *other[] = {extension, extension + 8, unrelated, NULL};
+    for (unsigned i = 0; i < sizeof other / sizeof *other; i++) {
+        init(&eng, work, sizeof work); n = calls;
+        load(&eng, name, other[i], 3, 5);
+        CHECK(calls == n + 1, "only the standard stand-in is replaced");
+    }
+    init(&eng, work, sizeof work); engine_err = 0; n = calls;
+    CHECK(load(&eng, name, standard, 3, 5) == status && calls == n + 1 && seen_data == standard + 8, "a standard load without an error is kept");
+    init(&eng, work, sizeof work); engine_err = 201; small_err = 201; n = calls;
+    CHECK(load(&eng, name, standard, 3, 5) == status && calls == n + 2 && get_error(&eng) == 201, "a compact load that fails too is not tried a third time");
+    CHECK(!memcmp(compact + 8, unrelated + 8, sizeof compact - 8), "compact bytes unchanged");
     printf("shared font: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

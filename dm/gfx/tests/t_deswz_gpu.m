@@ -97,8 +97,8 @@ int main(void) {
         };
         int fail = 0; unsigned n = 0;
         for (unsigned i = 0; i < sizeof(cases) / sizeof(*cases); i++) { fail |= run_case(dev, queue, &cases[i], i == 1); n++; }
-        nvn_gob_switch2 = 1;   // the Switch 2's order inside a GOB (nvn_deswizzle.h): the GPU paths must match the CPU one there too
-        for (unsigned i = 0; i < sizeof(cases) / sizeof(*cases); i++) { fail |= run_case(dev, queue, &cases[i], 0); n++; }
+        nvn_gob_switch2 = 1;   // the Switch 2's order inside a GOB (nvn_deswizzle.h), for textures made with flag 0x4: the GPU paths must match the CPU one there too
+        for (unsigned i = 0; i < sizeof(cases) / sizeof(*cases); i++) { test_case c = cases[i]; c.d.flags |= 0x4; fail |= run_case(dev, queue, &c, 0); n++; }
         nvn_gob_switch2 = 0;
 
         test_case neg = {"negative control", {1, NVN_FORMAT_RGBA8, 0, 0, 64, 64, 1, 2, 0}};

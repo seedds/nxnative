@@ -167,6 +167,22 @@ int main(void) {
     nvn_gob_switch2 = 0;
     for (unsigned i = 0; i < sizeof B2 / sizeof *B2; i++)
         CHECK(nvn_bl_offset(B2[i].x, B2[i].y, 0, 128, 32, 1, 0) == B2[i].x1, "B2 (%u,%u) in the X1's order expected %llu", B2[i].x, B2[i].y, (unsigned long long)B2[i].x1);
+    // In a Switch 2 game the order is the texture's (nvn_gob_order): the Switch 2's with flag 0x4 (Donkey Kong Bananza's file textures), the X1's without (Xenoblade Chronicles 2's
+    // Switch 2 program: its 16x16x16 RGBA8 grading LUTs). A marker placed at a piece only one order moves lands where that texture's order puts it
+    {
+        nvn_texdesc lut = {2, 0x25, 0, 0, 16, 16, 16, 1, 0, 0}, img = lut; img.flags = 0x4;
+        nvn_texlayout L; nvn_tex_layout(&lut, &L);
+        uint8_t *st = calloc(1, L.size), *lin = malloc(16 * 16 * 16 * 4);
+        nvn_gob_switch2 = 1;
+        uint32_t th, td; nvn_tex_level_tiles(&lut, 0, &th, &td);
+        st[nvn_bl_offset_o(16, 0, 3, 64, 16, th, td, 0)] = 0xa1;   // texel (4, 0, 3) in the X1's order
+        st[nvn_bl_offset_o(16, 0, 3, 64, 16, th, td, 1)] = 0xb2;   // the same texel in the Switch 2's
+        CHECK(!nvn_deswizzle(&lut, 0, 0, st, lin, 64) && lin[(3 * 16 + 0) * 64 + 16] == 0xa1, "a Switch 2 game's texture without flag 0x4 decodes in the X1's order");
+        CHECK(!nvn_deswizzle(&img, 0, 0, st, lin, 64) && lin[(3 * 16 + 0) * 64 + 16] == 0xb2, "a Switch 2 game's texture with flag 0x4 decodes in the Switch 2's order");
+        nvn_gob_switch2 = 0;
+        CHECK(!nvn_deswizzle(&img, 0, 0, st, lin, 64) && lin[(3 * 16 + 0) * 64 + 16] == 0xa1, "a Switch game's texture with flag 0x4 keeps the X1's order");
+        free(st); free(lin);
+    }
 
     // ---------- E hand-built 3D: place markers into block-linear storage at hand-calculated addresses, decode, and verify where the markers land (round trip A only proves self-consistency, not whether the layout is right) ----------
     // Source of the block height / block depth rule: deko3d dk_image.cpp - for 3D textures block height is fixed at 1 GOB, block depth = pickTileSize(depth + depth/2).

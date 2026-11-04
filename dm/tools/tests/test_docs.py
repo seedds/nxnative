@@ -78,6 +78,7 @@ class GameNotes(unittest.TestCase):
         self.assertTrue(profiles)
         for g in profiles:
             self.assertTrue((games / g / 'README.md').is_file(), f'dm/games/{g} has no README.md (its game note)')
+            if re.search(r'^program_of\t', (games / g / 'game.tsv').read_text(), re.M): continue   # a program of a game of several programs: packed with its first program, whose row it is
             self.assertIn((g, g), rows, f'dm/games/{g} has no row in the games table of dm/games/README.md')
         for g, _ in rows:
             self.assertIn(g, profiles, f'the games table lists {g}, which has no profile')

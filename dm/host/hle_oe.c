@@ -2,9 +2,13 @@
 // oe::Initialize is in hle_sdkinit.c, not here.
 // Environment switches: DM_OPMODE=0 handheld / 1 console (default: the profile's op_mode, console unless set; console corresponds to the console-mode render profile); DM_LANG=language code (default en-US; the iOS app sets it from the IPA's DMLanguage, main.m).
 #include "hle.h"
+#include "front.h"
 
 // The operation mode is runtime state (the front end can change it: iOS overheat downgrade switches to handheld): the single source is here, taken once from DM_OPMODE at startup, the environment variable is not read again afterwards
 #include <stdatomic.h>
+#include <errno.h>
+#include <TargetConditionals.h>
+#include <unistd.h>
 static _Atomic int g_opmode = -1;
 int dm_opmode(void) {
     int m = g_opmode;
@@ -105,14 +109,140 @@ HLE_FORCE("_ZN2nn2oe15EnableRecordingEv", "video recording switch; the host has 
 //   aborts when it gets 0 (The Legend of Zelda: Breath of the Wild 1.9.0); SDK 16 did not check. Report a fixed non-zero ID, used only as an identifier
 HLE_FORCE("_ZN2nn6applet23GetAppletResourceUserIdEv", "applet resource user ID; the host returns a fixed non-zero value", uint64_t, h_applet_Aruid, void) { return 0x80; }
 // Launch parameter (present only when another program launched this one with one; returns bool): the host never passes one
-HLE_FORCE("_ZN2nn2oe21TryPopLaunchParameterEPmPvm", "launch parameter: none", unsigned, h_oe_PopLaunchParam, size_t *out, void *buf, size_t n) { (void)buf; (void)n; if (out) *out = 0; return 0; }
+// Launch parameter (present only when another program launched this one with one; returns bool): DM_LAUNCH_PARAM=<file>, written by oe::ExecuteProgram on the way here (below), else what
+// the profile's launch_param describes, for a program of a multi-program application run by itself: Super Mario 3D All-Stars' games quit without the launcher's language and two volumes
+// (fields: lang8, the language code GetDesiredLanguage gives; f32:<value>; u32:<value>; hex:<bytes>). Handed over once, as a popped parameter
+static uint64_t h_oe_GetLang(void);
+HLE_FORCE("_ZN2nn2oe21TryPopLaunchParameterEPmPvm", "launch parameter: what the program that started this one handed over, else the profile's launch_param; once", unsigned, h_oe_PopLaunchParam, size_t *out, uint8_t *buf, size_t n) {
+    static _Atomic int popped; if (out) *out = 0;
+    const char *f = getenv("DM_LAUNCH_PARAM");
+    if ((!(f && *f) && !*DM_GAME_LAUNCH_PARAM) || atomic_exchange(&popped, 1)) return 0;
+    if (f && *f) {
+        FILE *fp = fopen(f, "rb");
+        if (!fp) { LOG("[RED] oe::TryPopLaunchParameter: cannot open DM_LAUNCH_PARAM %s", f); return 0; }
+        size_t got = buf ? fread(buf, 1, n, fp) : 0; fclose(fp);
+        LOG("oe::TryPopLaunchParameter: %zu bytes from %s", got, f);
+        if (!got) return 0;   // started with no parameter
+        if (out) *out = got;
+        return 1;
+    }
+    uint8_t p[256]; size_t len = 0; char spec[512]; strlcpy(spec, DM_GAME_LAUNCH_PARAM, sizeof spec);
+    for (char *t = strtok(spec, " "); t && len < sizeof p - 8; t = strtok(NULL, " ")) {
+        if (!strcmp(t, "lang8")) { uint64_t v = h_oe_GetLang(); memcpy(p + len, &v, 8); len += 8; }
+        else if (!strncmp(t, "f32:", 4)) { float v = strtof(t + 4, NULL); memcpy(p + len, &v, 4); len += 4; }
+        else if (!strncmp(t, "u32:", 4)) { uint32_t u = (uint32_t)strtoul(t + 4, NULL, 0); memcpy(p + len, &u, 4); len += 4; }
+        else if (!strncmp(t, "hex:", 4)) for (const char *h = t + 4; h[0] && h[1] && len < sizeof p; h += 2) { unsigned b; sscanf(h, "%2x", &b); p[len++] = (uint8_t)b; }
+        else LOG("[RED] launch_param: field %s not understood", t);
+    }
+    if (len > n) len = n;
+    memcpy(buf, p, len); if (out) *out = len;
+    LOG("oe::TryPopLaunchParameter: %zu bytes from the profile (%s)", len, DM_GAME_LAUNCH_PARAM);
+    return 1;
+}
 // Tears of the Kingdom (SDK 20.5.22): the index of the program that launched this one in a multi-program application. The SDK asks the applet proxy, which the host never opens
 // (null read in applet::GetPreviousProgramIndex right after the window setup); -1 = launched from the home menu
-HLE_FORCE("_ZN2nn2oe23GetPreviousProgramIndexEv", "previous program index: launched from HOME, -1", int, h_oe_PrevProgram, void) { return -1; }
-// Launch another program of a multi-program application (Octopath Traveler 0 imports it); on hardware it does not return. The host has only this program: logged, and the game carries on
-HLE_FORCE("_ZN2nn2oe14ExecuteProgramEiPKvm", "launch another program of the application: the host runs only this one (logged)", void, h_oe_ExecProgram, int index, const void *param, size_t n) {
-    (void)param; LOG("[RED] oe::ExecuteProgram(%d, %zu bytes of parameters): the host runs only this program; the game carries on", index, n);
+HLE_FORCE("_ZN2nn2oe23GetPreviousProgramIndexEv", "previous program index: the program that started this one (DM_PREV_PROGRAM), else launched from HOME, -1", int, h_oe_PrevProgram, void) {
+    const char *e = getenv("DM_PREV_PROGRAM"); return e && *e ? atoi(e) : -1;
 }
+// The programs of a multi-program application on the Mac: DM_PROGRAMS=<file> has one row per packed program, "<index>\t<KEY=VALUE>\t…": exe= its host, arg= its rewritten modules, cwd= its
+// run folder, and its environment (DM_ROOT, DM_ROMFS, DM_SAVE, DM_MSL_DIR, …; the NSP script writes it). Each program has a host of its own, as a host is built for one profile.
+// oe::ExecuteProgram ends this program and starts the named one in its place, as Horizon does: execve of its host after the graceful exit, with this environment less every key a row sets,
+// then the row's keys, DM_LAUNCH_PARAM=<cwd>/launch_param.bin and DM_PREV_PROGRAM.
+// The call never returns on Horizon, and the code after it is not code to run: a trap (Super Mario 3D All-Stars' launcher, main+0x10a58) or the next function (ROMANCE OF THE THREE KINGDOMS 8
+// REMAKE, main+0xa31914). A program with no row (Super Mario 3D All-Stars' Galaxy, 32-bit ARM, which Apple silicon cannot run): the application's first program starts instead, as after a
+// restart from HOME. No table (a program run by itself): the program just ends.
+// The iPhone cannot start a process: with DM_EXEC_OUT=<file> (main.m, an app holding several programs) the program index (4 bytes) and the parameters go to that file, the front end names the next
+// program and schedules a notification that opens the app (front_program_handoff), the app ends, and its next start reads the file and runs that program. A program the app lacks: its first
+typedef struct { const char *exe, *arg, *cwd; char **env; } prog_plan;
+static int prog_row_sets(const char *row, const char *kv) {
+    size_t kl = strcspn(kv, "=");
+    for (const char *f = strchr(row, '\t'); f && f[1]; f = strchr(f + 1, '\t')) if (!strncmp(f + 1, kv, kl) && f[1 + kl] == '=') return 1;
+    return 0;
+}
+static int prog_plan_make(char *tsv, int index, prog_plan *out, const void *param, size_t n) {
+    extern char **environ;
+    char *rows[64]; int nr = 0, hit = -1, cur = (int)(DM_GAME_PROGRAM_ID & 0xf);   // the program index is the program ID less the application's
+    for (char *ln = strtok(tsv, "\n"); ln && nr < 64; ln = strtok(NULL, "\n")) {
+        if (*ln < '0' || *ln > '9') continue;
+        if (atoi(ln) == index) hit = nr;
+        rows[nr++] = ln;
+    }
+    if (hit < 0) return 0;
+    size_t ne = 0; while (environ[ne]) ne++;
+    char **env = calloc(ne + 68, sizeof *env); size_t k = 0;
+    for (size_t i = 0; i < ne; i++) {
+        int drop = !strncmp(environ[i], "DM_LAUNCH_PARAM=", 16) || !strncmp(environ[i], "DM_PREV_PROGRAM=", 16);
+        for (int r = 0; r < nr && !drop; r++) drop = prog_row_sets(rows[r], environ[i]);
+        if (!drop) env[k++] = environ[i];
+    }
+    memset(out, 0, sizeof *out);
+    int field = 0;
+    for (char *f = strtok(rows[hit], "\t"); f; f = strtok(NULL, "\t")) {
+        if (!field++) continue;
+        if (!strncmp(f, "exe=", 4)) out->exe = f + 4;
+        else if (!strncmp(f, "arg=", 4)) out->arg = f + 4;
+        else if (!strncmp(f, "cwd=", 4)) out->cwd = f + 4;
+        else if (strchr(f, '=') && k < ne + 64) env[k++] = f;
+    }
+    if (!out->exe || !out->arg || !out->cwd) { LOG("[RED] oe::ExecuteProgram: DM_PROGRAMS's row of program %d lacks exe=, arg= or cwd=", index); free(env); return 0; }
+    char *pp = NULL, *pe = NULL, *pv = NULL;
+    if (asprintf(&pp, "%s/launch_param.bin", out->cwd) < 0 || asprintf(&pe, "DM_LAUNCH_PARAM=%s", pp) < 0 || asprintf(&pv, "DM_PREV_PROGRAM=%d", cur) < 0) die("oe::ExecuteProgram: out of memory");
+    FILE *po = fopen(pp, "wb");
+    if (!po || (n && fwrite(param, n, 1, po) != 1)) LOG("[RED] oe::ExecuteProgram: cannot write %s", pp);
+    if (po) fclose(po);
+    env[k++] = pe; env[k++] = pv; env[k] = NULL; out->env = env;
+    return 1;
+}
+static void prog_exec(void *p) {
+    const prog_plan *P = p; char *argv[] = {(char *)P->exe, (char *)P->arg, NULL};
+    if (chdir(P->cwd)) LOG("[RED] oe::ExecuteProgram: cannot enter %s", P->cwd);
+    execve(P->exe, argv, P->env);
+    LOG("[RED] oe::ExecuteProgram: cannot start %s (errno %d)", P->exe, errno);
+}
+static const char *prog_name(int index) {   // the profile's name of a program of this app (game.py header_multi), NULL when it has no such program
+#ifdef DM_GAME_MULTI
+    for (size_t i = 0; i < sizeof dm_games / sizeof *dm_games; i++) if (dm_games[i].program == index) return dm_games[i].name;
+#endif
+    (void)index; return NULL;
+}
+__attribute__((weak)) void front_program_handoff(int index, const char *name) { (void)index; (void)name; }   // front.h; the iOS front end has it
+void dm_oe_execute(int index, const void *param, size_t n) {
+    char hex[3 * 32 + 1] = ""; for (size_t i = 0; i < n && i < 32; i++) snprintf(hex + 3 * i, 4, " %02x", ((const uint8_t *)param)[i]);
+    static prog_plan P; static char *tsv; int have = 0;
+#if !TARGET_OS_IPHONE
+    const char *pf = getenv("DM_PROGRAMS");
+    if (pf && *pf) {
+        FILE *fp = fopen(pf, "rb"); char *rows2 = NULL;
+        if (fp) {
+            fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
+            tsv = calloc(1, (size_t)sz + 1); rows2 = calloc(1, (size_t)sz + 1);
+            if (fread(tsv, 1, (size_t)sz, fp) != (size_t)sz) tsv[0] = 0;
+            memcpy(rows2, tsv, (size_t)sz); fclose(fp);
+        } else LOG("[RED] oe::ExecuteProgram: cannot read DM_PROGRAMS %s", pf);
+        if (tsv && (have = prog_plan_make(tsv, index, &P, param, n))) LOG("oe::ExecuteProgram(%d, %zu bytes of parameters:%s): this program ends, %s starts", index, n, hex, P.exe);
+        else if (rows2) {
+            LOG("[RED] oe::ExecuteProgram(%d, %zu bytes of parameters:%s): this application has no such program here; its first program starts instead", index, n, hex);
+            have = prog_plan_make(rows2, 0, &P, NULL, 0);
+        }
+    }
+#endif
+    const char *rec = getenv("DM_EXEC_OUT");
+    if (!have && rec && *rec) {
+        const char *name = prog_name(index); int32_t ix = name ? index : 0;
+        if (!name) LOG("[RED] oe::ExecuteProgram(%d, %zu bytes of parameters:%s): this application has no such program here; its first program starts instead", index, n, hex);
+        FILE *fp = fopen(rec, "wb");
+        if (!fp || fwrite(&ix, 4, 1, fp) != 1 || (name && n && fwrite(param, n, 1, fp) != 1)) LOG("[RED] oe::ExecuteProgram(%d): cannot write DM_EXEC_OUT %s", index, rec);
+        if (fp) fclose(fp);
+        LOG("oe::ExecuteProgram(%d, %zu bytes of parameters:%s): recorded, this program ends", index, n, hex);
+        front_program_handoff(ix, prog_name(ix));
+        dm_host_shutdown("oe::ExecuteProgram");
+        for (;;) pause();
+    }
+    if (!have) LOG("[RED] oe::ExecuteProgram(%d, %zu bytes of parameters:%s): the host has only this program; it ends", index, n, hex);
+    dm_host_shutdown_then("oe::ExecuteProgram", have ? prog_exec : NULL, &P);
+    for (;;) pause();   // another thread is ending the host
+}
+HLE_FORCE("_ZN2nn2oe14ExecuteProgramEiPKvm", "end this program and start another of the application (DM_PROGRAMS on the Mac); never returns", void, h_oe_ExecProgram, int index, const void *param, size_t n) { dm_oe_execute(index, param, n); }
 HLE_FORCE("_ZN2nn2oe16DisableRecordingEv", "video recording switch; the host has no system recording", void, h_oe_DisableRec, void) {}
 // Silence the game's sound in system video captures (through am; FINAL FANTASY RESONANCE imports both): the host records nothing
 HLE_FORCE("_ZN2nn2oe13MuteRecordingEv", "mute the sound of system video recording; the host has no system recording", void, h_oe_MuteRec, void) {}

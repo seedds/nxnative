@@ -63,6 +63,59 @@ class MufuF16(Translated):
         self.assertNotRegex(self.msl(self.LOG2_LOW), r'as_type<half2>\(.*\)\)\.y;')
 
 
+class Sured(Translated):
+    """SURED.ADD.U32 [R4], R0 (0x59f) on a 2D image, Mario Kart World's ab77eaee44cfef88: SUATOM's layout with no result"""
+    FORM = (0x000fe2000010e000, 0x60000c000400759f)
+
+    def test_adds_at_the_coordinates(self):
+        msl = self.translate(inst(*self.FORM) + inst(*EXIT))
+        self.assertIn('atomic_fetch_add', msl)
+        self.assertIn('texture2d', msl)
+
+    def test_another_form_is_refused(self):
+        with self.assertRaises(AssertionError) as e: self.translate(inst(0x000fe200001ee000, self.FORM[1]) + inst(*EXIT))
+        self.assertIn('SURED form', str(e.exception))
+
+
+class StageMemory(Translated):
+    """A task or mesh shader's stage memory in shared memory, on the game's encodings (job stage_memory: workgroup 0, input 0x10, outputs 0x120, primitives 0x400)"""
+    MEMORY = dict(stage_memory=[0, 0x10, 0x120, 0x400], shared=0x800)
+    # The game's ISBERDs set a write barrier, which their readers wait on; these set none, so the store after one reads its result
+    WORKGROUP = (0x000fe20000007800, 0x00000000ff007923)   # ISBERD R0, mode 0x78 (b6d76b6fc9dc926f +0)
+    INPUT = (0x000fe20000003800, 0x00002000ff137923)       # ISBERD R19, [RZ + 0x20], mode 0x38 (ddc034e8e009ebfc, its base register made RZ)
+    PAYLOAD = (0x0041e8000000b800, 0x0000100201007927)     # 0x927 [R1 + 0x10], R2, mode 0xb8 (a task's record)
+    KEEP_R0 = (0x0041e8000000b800, 0x00001000ff007927)     # the same with [RZ + 0x10], R0: so what ISBERD read is used
+    KEEP_R19 = (0x0041e8000000b800, 0x00001013ff007927)    # with R19
+    ATTRIBUTE = (0x0001e2000000f800, 0x0000800307007927)   # 0x927 [R7 + 0x80], R3, mode 0xf8 (a vertex's y, b6d76b6fc9dc926f +0x3c0 on another base register)
+    COUNT_ZERO = (0x000fe20000008800, 0x000003ffff007927)  # 0x927 [RZ + 3], RZ, mode 0x88: every thread clears the count first
+    COUNT = (0x0001e20000008800, 0x00000307ff007927)       # 0x927 [RZ + 3], R7, mode 0x88: the thread with the count
+    INDEX = (0x0001e20000008000, 0x0000040605057927)       # 0x927 [R5 + 4], R6, mode 0x80: an index byte
+
+    def msl(self, *code):
+        return self.translate(b''.join(inst(*c) for c in code) + inst(*EXIT), **self.MEMORY)
+
+    def test_workgroup_number_reads_word_0(self):
+        self.assertRegex(self.msl(self.WORKGROUP, self.KEEP_R0), r'as_type<float>\(_\d+\[0\]\)')
+
+    def test_input_is_at_its_offset(self):   # 0x10 + 0x20
+        self.assertRegex(self.msl(self.INPUT, self.KEEP_R19), r'as_type<float>\(_\d+\[12\]\)')
+
+    def test_word_store_goes_to_the_outputs(self):   # 0x120 + 0x80
+        self.assertIn('0 + 416', self.msl(self.ATTRIBUTE))
+
+    def test_the_zero_count_is_left_out(self):   # threads are not in step on Metal: it could land after the real count, and the stage memory starts at zero
+        without = self.msl(self.COUNT)
+        with_zero = self.msl(self.COUNT_ZERO, self.COUNT)
+        self.assertEqual(without.count('atomic_compare_exchange'), with_zero.count('atomic_compare_exchange'))
+
+    def test_a_byte_goes_through_its_word_atomically(self):   # neighbouring threads write neighbouring bytes
+        self.assertIn('atomic_compare_exchange', self.msl(self.INDEX))
+
+    def test_outside_a_task_or_mesh_shader_it_is_refused(self):
+        with self.assertRaises(AssertionError) as e: self.translate(inst(*self.PAYLOAD) + inst(*EXIT))
+        self.assertIn('outside a task or mesh shader', str(e.exception))
+
+
 class BarrierMoves(Translated):
     """BMOV around warp shuffles (Hyrule Warriors: Age of Imprisonment's pixel shaders 02e49c189b769074 and 49241cf469c76830): convergence barrier B15 to and
     from R26, in the game's encodings. Per thread they do nothing, as the barriers they save do"""
@@ -106,8 +159,8 @@ class Shared(Translated):
     IMAD_HI = 0x000fc80007820008, 0x0000000b07087227        # IMAD.HI R8, R7, R11, {R9:R8} (08faccfa2eaa7e01 +0xa80)
     ATOMS_CAS = 0x000e640001800001, 0x00000400ff01738d      # ATOMS.CAS R1, [RZ + 4], R0, R1 (f4aa178bc67c9793 +0x200)
 
-    def msl(self, *code):
-        msl = self.translate(b''.join(code) + inst(*EXIT), shared=0x400)
+    def msl(self, *code, shared=0x400):
+        msl = self.translate(b''.join(code) + inst(*EXIT), shared=shared)
         return msl[msl.index('kernel void'):]
 
     def test_a_32_bit_access_scales_its_register_by_4(self):   # Element 3, not byte 3 (which is element 0)
@@ -153,6 +206,30 @@ class Shared(Translated):
 
     def test_stride_3_scales_its_register_by_16(self):   # Element 3 of 16 bytes, word 12
         self.assertIn('[12] = 77u', self.msl(mov(2, 3), mov(3, 77), inst(*self.STS_SCALED_16)))
+
+    # The same field on other sizes, with an offset: the stride decides the scale, whatever the access size
+    STS64_SCALED_4 = 0x0009ee0000004a00, 0x000900182c007388     # STS.U64 [R44 * 4 + 0x900], R24:R25 (Donkey Kong Bananza's upscaler 7629d857a0a93833)
+    STS_SCALED_16_AT_8 = 0x000fe8000000c800, 0x0000080609008388   # STS.U32 [R9 * 16 + 8], R6 (agl_common: Mario Kart World f94552a2a2bff505, Donkey Kong Bananza c5c746915e9a3265)
+    STS64_SCALED_16 = 0x000fe8000000ca00, 0x0000000209008388    # STS.U64 [R9 * 16], R2:R3 (the same shaders)
+    STS128_SCALED_16 = 0x0001e2000000cc00, 0x000000ff26007388   # STS.128 [R38 * 16], RZ (Pokemon Pokopia 8987796cd5718078)
+
+    def test_a_64_bit_access_with_stride_1_scales_its_register_by_4(self):   # Byte 3 * 4 + 0x900, word 579
+        msl = self.msl(mov(44, 3), mov(24, 77), mov(25, 88), inst(*self.STS64_SCALED_4), shared=0x1000)
+        self.assertIn('[579] = 77u', msl)
+        self.assertIn('[580] = 88u', msl)
+
+    def test_stride_3_adds_its_offset_after_the_scale(self):   # Byte 3 * 16 + 8, word 14
+        self.assertIn('[14] = 77u', self.msl(mov(9, 3), mov(6, 77), inst(*self.STS_SCALED_16_AT_8)))
+
+    def test_a_64_bit_access_with_stride_3_scales_its_register_by_16(self):   # Element 3 of 16 bytes, word 12
+        msl = self.msl(mov(9, 3), mov(2, 77), mov(3, 88), inst(*self.STS64_SCALED_16))
+        self.assertIn('[12] = 77u', msl)
+        self.assertIn('[13] = 88u', msl)
+
+    def test_a_128_bit_access_with_stride_3_scales_its_register_by_16(self):   # Element 3 of 16 bytes, words 12 to 15
+        msl = self.msl(mov(38, 3), inst(*self.STS128_SCALED_16))
+        self.assertIn('[12] = 0u', msl)
+        self.assertIn('[15] = 0u', msl)
 
     # LDSM keeps its mode at 78..79, where LDS has its stride: 1 is a transposed read (MT88), not a scale. Donkey Kong Bananza's upscaler 7629d857a0a93833 +0x1ce0, on R3: scaled, its picture was garbage
     LDSM_MT88 = 0x000fe20000004200, 0x000000000314783b   # LDSM.16.MT88.4 R20, [R3], with no write barrier for the store to wait on
@@ -251,6 +328,13 @@ class Pokopia(Translated):
     def test_fsel_negates_b(self):
         msl = self.msl(self.MERGE_FIRST, self.MERGE_SECOND, self.FSEL_NEG_B)
         self.assertRegex(msl, r'float _\d+ = -')
+
+    def test_up2ur_takes_any_predicate_by_its_mask_bit(self):   # Mario Kart World's pixel shaders save UP6 or UP3 and test the register against URZ later
+        for mask in (0x40, 0x08): self.msl((0x000fe20008000000, mask << 32 | 0x3f067883))
+
+    def test_up2ur_with_a_merge_source_is_refused(self):
+        with self.assertRaises(AssertionError) as e: self.msl((0x000fe20008000000, 0x40 << 32 | 0x05067883))
+        self.assertIn('UP2UR with a merge source', str(e.exception))
 
     def test_up2ur_reads_up0(self):   # cs_main's encoding: UR6 = UP0 ? 1 : 0
         self.msl((0x000fc60008000000, 0x000000013f067883))

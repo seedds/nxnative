@@ -116,9 +116,10 @@ module_t *module_of(const void *p) {
 }
 
 // Whether main imports a symbol whose name starts with prefix (an undefined dynamic symbol: one main calls but another module defines), for behaviour that follows what the game uses
-int dm_main_imports(const char *prefix) {
+// The NROs count too, loaded or not: main may be only a boot stub that loads the game's code as an NRO (Mario Tennis Fever), and a Source engine game's modules are NROs
+int dm_game_imports(const char *prefix) {
     size_t n = strlen(prefix);
-    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) {
+    for (int i = 0; i < g_nmod; i++) if (g_mod[i].nro || !strcmp(g_mod[i].name, "main")) {
         module_t *m = &g_mod[i];
         for (unsigned k = 1; k < m->nsym; k++) if (!m->symtab[k].st_shndx && !strncmp(m->strtab + m->symtab[k].st_name, prefix, n)) return 1;
     }

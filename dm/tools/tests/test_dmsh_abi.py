@@ -95,7 +95,7 @@ class Build(unittest.TestCase):
         exec(compile(ast.Module(body=body, type_ignores=[]), 'dmsh_build.py', 'exec'), ns)
         self.assertEqual((ns['TEX_BASE'], ns['IMG_BASE'], ns['IMG_SLOTS'], ns['SEPTEX_BASE'], ns['SEPTEX_SLOT0'], ns['SAMP_BASE']),
                          (abi.C2_TEX, abi.C2_IMG, abi.C2_IMG_SLOTS, abi.C2_SEPTEX, abi.SEPTEX_SLOT0, abi.C2_SAMP))
-        self.assertEqual(ns['SSBO'], {'vs': abi.C0_SSBO_VS, 'cs': abi.C0_SSBO_CS, 'gs': abi.C0_SSBO_GS, 'ps': abi.C0_SSBO_PS})
+        self.assertEqual(ns['SSBO'], {'vs': abi.C0_SSBO_VS, 'cs': abi.C0_SSBO_CS, 'gs': abi.C0_SSBO_GS, 'ps': abi.C0_SSBO_PS, 'ts': abi.C0_SSBO_TS, 'ms': abi.C0_SSBO_MS})
         self.assertEqual(ns['DRV_FILL'][2][-1], (abi.C2_SAMP, abi.C2_SAMP + abi.C2_ROW * abi.C2_SEP_SLOTS))
 
     def test_every_kind_is_written_by_the_build(self):

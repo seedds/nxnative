@@ -20,6 +20,13 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Check:** `make -C dm/host/tests GAME=010038B015560000 preempt` delays the child's host dispatch by 1 ms and 20 ms. With `DM_PREEMPT=0`, both delayed starts failed before the fix. Afterward both `DM_PREEMPT=0` and `1` pass; the broader mode already supplied the handoff before this correction. Equal-priority, other-core, migratable, host-helper, suspended and host-GPU-work children do not hold up the caller.
 - **Found on:** the threading audit of [FINAL FANTASY TACTICS](../../dm/games/010038B015560000/README.md#threads); its affected workers are lower priority and initially migratable, so this correction does not remove its local wake cut.
 
+### A thread's arguments in slots its starter reuses after connecting to a service
+
+- **Symptom:** a crash at the very start of a new thread, reading through a null pointer it took from its argument (`main+0x1dc0`, in a boot stub's last thread, about once in a dozen boots), with the starter still in its next few calls.
+- **Cause:** the thread reads its arguments from its starter's stack, and the starter reuses those slots a few calls after `StartThread`. [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md)'s boot stub builds them at `main+0x97c`, starts the thread and calls `nn::ro::Initialize`, then builds a string in them at `main+0xa04`. On Horizon `Initialize` connects to ldr:ro, several round trips, so the thread has long read them. The host's `Initialize` returned at once.
+- **Fix:** `dm_thread_service_connect` (`hle_thread.c`), called by the host's `ro::Initialize`, waits until the threads started so far have been dispatched into guest code (at most 50 ms), then for a round trip (200 µs). Only `ro::Initialize` calls it so far. **Open:** like [File system calls are service requests](#file-system-calls-are-service-requests), this models a time rather than giving an order: the thread could still be stopped by the Mac between its dispatch and its read.
+- **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md).
+
 ### Core mask changes move the ideal core into the new mask
 
 - **Symptom:** per-core job queues never drained.

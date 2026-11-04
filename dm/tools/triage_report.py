@@ -16,6 +16,8 @@ import sys
 import urllib.request
 from datetime import datetime, timezone
 
+import pr_areas
+
 GRAPHQL = 'https://api.github.com/graphql'
 PRS = '''query($owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) {
   pullRequests(states: OPEN, first: 50, after: $after, orderBy: {field: CREATED_AT, direction: ASC}) { pageInfo { hasNextPage endCursor }
@@ -248,11 +250,12 @@ def triage(data, git_data):
         for i in links[p['number']]:
             naming.setdefault(i, []).append(p['number'])
     issues = sorted(data['issues'], key=lambda i: i['createdAt'])
+    unlabelled = lambda i: all(pr_areas.automatic(l['name']) for l in i['labels']['nodes'])   # issue-areas.yml labels every issue it can, unread
     return {
         'no_op': no_op, 'named': named, 'duplicates': duplicates(rest, analysis, git_data['profiles']), 'conflicts': conflicts,
         'unlinked': [p for p in rest if not links[p['number']]], 'links': links,
-        'untriaged': [i for i in issues if not replied(i) and not i['labels']['nodes']], 'naming': naming,
-        'no_reply': sum(not replied(i) for i in issues), 'no_label': sum(not i['labels']['nodes'] for i in issues),
+        'untriaged': [i for i in issues if not replied(i) and unlabelled(i)], 'naming': naming,
+        'no_reply': sum(not replied(i) for i in issues), 'no_label': sum(unlabelled(i) for i in issues),
         'skipped': [p for p in rest if analysis[p['number']]['state'] in ('missing', 'unrelated', 'other base')],
     }
 
@@ -337,7 +340,7 @@ def report(data, git_data, t, now, limit=25):
     rows = [[ref(p), title(p), login(p), day(p['createdAt'])] for p in t['unlinked']]
     out += table(['PR', 'Title', 'Author', 'Opened'], rows, limit, 'pull requests')
     out += ['', '## Issues with no reply and no label', '',
-            'No comment from anyone but the author or a bot, and no label. "Named by" lists open PRs that link the issue. Oldest first.', '']
+            'No comment from anyone but the author or a bot, and no label but the automatic ones (area, game, kind). "Named by" lists open PRs that link the issue. Oldest first.', '']
     rows = [[ref(i), cell(i['title']), login(i), day(i['createdAt']), issue_refs(t['naming'].get(i['number'], []))] for i in t['untriaged']]
     out += table(['Issue', 'Title', 'Author', 'Opened', 'Named by'], rows, limit, 'issues')
     if t['skipped']:

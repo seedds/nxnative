@@ -118,10 +118,11 @@ def settings_rules(listed):   # DMSettings: what the launcher accepts as each se
 
 
 def info_plist(a, minos, icon):
+    # LSSupportsGameMode off: macOS's Game Mode holds the GPU at its lowest clock while it is busy (docs/reference/frame-rate.md, macOS Game Mode holds the GPU at its lowest clock)
     p = {'CFBundleName': a.name, 'CFBundleDisplayName': a.name, 'CFBundleIdentifier': a.bundle_id or f'org.nxnative.{a.title_id.lower()}',
          'CFBundleVersion': a.version or '1.0', 'CFBundleShortVersionString': a.version or '1.0', 'CFBundlePackageType': 'APPL', 'CFBundleExecutable': EXE,
          'CFBundleInfoDictionaryVersion': '6.0', 'LSMinimumSystemVersion': minos, 'LSArchitecturePriority': ['arm64'], 'NSHighResolutionCapable': True,
-         'LSApplicationCategoryType': a.category or 'public.app-category.games', 'LSSupportsGameMode': True, 'DMTitleID': a.title_id.upper(), 'DMRomfsMarker': a.marker or '', 'DMLanguage': a.lang or 'en-US'}
+         'LSApplicationCategoryType': a.category or 'public.app-category.games', 'LSSupportsGameMode': False, 'DMTitleID': a.title_id.upper(), 'DMRomfsMarker': a.marker or '', 'DMLanguage': a.lang or 'en-US'}
     if icon: p['CFBundleIconFile'] = 'AppIcon'
     if a.settings:
         listed = json.loads(Path(a.settings).read_text(encoding='utf-8'))['settings']

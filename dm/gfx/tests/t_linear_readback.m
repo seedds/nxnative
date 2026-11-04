@@ -3,9 +3,9 @@
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
-#define RX.ft g_ft_hle
+#define g_ft g_ft_hle
 #include "../nvn/hle_nvn.c"
-#undef RX.ft
+#undef g_ft
 uint64_t g_t0_ns;
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }

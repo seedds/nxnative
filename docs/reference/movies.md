@@ -270,6 +270,14 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md): 101 guide movies (`Movie/*.webm`, VP9 960×540, no sound); its player reads the pictures as NV12 (`ReadDecoderOutputImageNv12`, output format 3).
 - **Open:** AV1 (no decoder on the host: Initialize fails with a red line, so a client takes its error path instead of reaching the service), encrypted input, native image handles (the GPU route of decoded pictures), alias pools and the readback of part of a picture are not served (each prints a red line once). No game here plays VP8 or H.264 through this API yet: those paths are checked by the test only. Donkey Kong Bananza's player imports all four decoders; its movies are VP9.
 
+### The submission-ready event counted as packets
+
+- **Symptom:** a movie stays black with the game waiting behind it, the decoder made and no `first picture` line (`Submit…InputBuffer` never called). Or `[RED] nn::codec VP9: Corrupt frame detected`, then `Keyframe / intra-only frame required`, each time about 6 s into a movie or after skipping in one.
+- **Cause:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md)'s player sends one packet per signal of the event it counts, and ignores `DecodeAsync`'s result (`nro0+0xd16130`), so each signal has to mean room for a packet. The host signalled at `Initialize`, which the player clears and drops while it is not started, and then only at releases. So nothing came after `Start`, and it never sent a packet. With a signal at `Start`, it then got one per release while a seek held back the samples, its count grew, and the host's refusal of a packet with 4 pictures waiting lost a frame for good: libvpx found everything after it corrupt until the next key frame.
+- **Fix:** `Start…Decoder` signals (`cv_dec_start`). After that the event rises when a packet was taken or room came back, not at every release (`drain`), and goes down at 4 pictures waiting, while packets are refused only at 12 (`CV_READY`, `CV_HOLD`), so a signal in flight still finds room.
+- **Check:** `t_codec_video`.
+- **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md), every movie.
+
 ### AV1 movies through SDK 22's decoder
 
 - **Symptom:** a crash in `nn::codec::video::InitializeAv1DecoderByTransferMemory` when a movie starts.

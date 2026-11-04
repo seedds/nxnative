@@ -4,6 +4,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Containers by engine
 
+### One scrambled archive indexed by the NRO
+
+- **Symptom:** the split finds no shaders, and the RomFS is one huge file with a short name (`42`) whose bytes look random past a table at its start (magic `CRA.`).
+- **Cause:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md)'s engine keeps its 8,671 files in that archive, listed only in the game's code: a file table in read-only data, which an NRO the game decodes at run time holds ([A game that decodes its code at run time](services.md#a-game-that-decodes-its-code-at-run-time)). Each file is scrambled in 16-byte blocks with a key from its name, and most are NARC containers (the DS's format) whose members are packed by their first byte (LZ4, zstd, deflate, an LZ of the game's own, or chunks of these). The shaders are BNSH in the FSHA, VFXB and SARC members, one FSHA per model, and 40 more in the NRO's own data.
+- **Fix:** `dm/gfx/tools/cra.py` finds the table from the code that reads it, in any build, and reads a file as the game does; the game's checksum of each file catches a wrong key. `shader_split.py` (`cra_jobs`) reads the NRO from `DM_NRO_DIR`, scans each file but sound and movies (by their magics), and expands NARC members in `scan_blob`. The whole archive unscrambles in 30 s with numpy; the split, in pure Python with 12 workers and a warm file cache, takes under a minute.
+- **Check:** `dm/gfx/tests/test_cra.py`. All 8,671 files of 1.1.1 pass the game's checksums.
+- **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md): 35,045 shaders.
+
 ### Sumo Ninty_NX shaders and MuxFDMR streams
 
 - **Symptom:** the split finds no shaders in `main` or RomFS, while reporting control sections in `main` with no code area. The game has `.sp4` resources and loose `.nvnbin` files rather than BNSH archives or whole GLSLC outputs.
@@ -818,6 +826,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** the same scene, M1 at 720p: render passes a frame 205 → 39, encoders 290 → 45, attachment traffic 860 → 190 MB, GPU busy 7.6 ms, translation 4.6 ms, frame time p50 / p95 16.66 / 17.26 ms: 60 fps held through four minutes of the flight, factory and ocean combat (frame time 16.6–16.8 ms in every 300-frame window), where it was 50 ms at first.
 - **Fix:** the compute path still costs the CPU a capture, a kernel and a compaction per draw, and the GPU the vertex shader twice. A pair listed in the profile's `geo_mesh.tsv` gets a mesh library `<vertex key>_<geometry key>_m3` at the end of `dmsh_build.py` (`dmsh_mesh.py`): the vertex shader's pulling entry ([vertex pulling](../../dm/gfx/tools/dmsh_pull.py)) and the lean triangle kernel, each in its own namespace, under one mesh entry per depth convention (`dm_mesh`, `dm_mesh_z`). A threadgroup takes 32 triangles of a list: 96 threads run the vertex shader once per index, write the vertex, and keep the words the kernel reads in threadgroup memory; the first 32 run the kernel body (capture reads from that memory, the topology map as the identity, the mask store into a variable, index stores dropped) and cull their triangle when viewport 0's bit is clear (`[[primitive_culled]]`). The kernel's storage writes and the subgroup operations that order them run as before, one triangle per thread, 32 consecutive triangles per SIMD group. The host (`geo_mesh_draw`, `DM_NVN_GEO_MESH=0` off) takes it for a non-instanced, non-indirect triangle list without restart whose vertex shader has a pulling entry and no storage writes: the draw stays in the open pass, with the pulling layout, the vertex and fragment arguments as for any draw, the kernel's arguments and the draw's index source in two free slots of the vertex table (which the mesh stage shares), and `drawMeshThreadgroups`. The mesh pipeline (the draw's colour state, as `pso_desc` gives it) is built in the background; until it is ready, the draw takes the compute path. The vertex shader runs per index instead of per vertex.
 - **Found on:** the same game: its 24 shadow-map vertex shaders (`zmap_vs_*.vso`) with the four kernels, 96 pairs. In the Resistance Camp on an M1 at 720p, every geometry draw became a mesh draw: translation 184 M → 122 M instructions (16.3 → 12.0 ms) a frame, GPU 12.3 → 11.3 ms, attachment traffic 463 → 415 MB a frame, frame time 21.2 → 16.6–17.4 ms.
+
+### A passthrough geometry shader that writes the layer
+
+- **Symptom:** a pale blue wash over every 3D scene with atmosphere; the HUD is clean, and the albedo and normal targets are right. A 3D table (`texraw`) has data in plane 0 only, and the pass that fills it has no `L … layered pass` line and draws with `gs=-`.
+- **Cause:** a passthrough geometry shader cannot change the vertices it passes on, but it may pick the layer. The [lean path](#passthrough-geometry-shaders-drawn-by-the-vertex-shader) draws with the program's own vertex shader, which has no layer output, so every plane went to plane 0 and the rest of the table stayed zero. The output reader the full path uses (`<key>_bgv`) does write it.
+- **Fix:** `geo_lean_pick` keeps the full kernel and its reader when the reader writes the layer (`nvn_geometry.inc`). No chain change. Those draws cost the full path's capture.
+- **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md): the atmosphere's table (`d9c3a99828b4f39f`, one 8x8 plane of 64 per draw, which the atmosphere pass `1cdcda78119d2e8d` reads) and the shadow map's `f4c2c8feea0727e9`. 6 of its 7 lean-capable geometry shaders write the layer.
 
 ### Mesh geometry primitive IDs restart per group
 

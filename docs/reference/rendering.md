@@ -732,6 +732,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Cause / Fix:** Mario uses `RGB10A2SN` (0x69) → `MTLVertexFormatInt1010102Normalized`. Unmapped formats fall back to a 4-component read and print the line once. The integer-read-as-float formats (`*_UI2F` / `*_I2F`, 0x51–0x68), which Metal has no vertex format for, are converted on the CPU at replay like the other conversions (`vconv_i2f`).
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (`RGB10A2SN`); [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) has an `RG8_UI2F` attribute.
 
+### Null vertex buffers bound past stream 15
+
+- **Symptom:** `[RED] BindVertexBuffers first=16 n=1` … `first=31`, thousands of times a run and no visible fault.
+- **Cause:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md) clears 32 streams before each model, while NVN has 16.
+- **Fix:** a null range past stream 15 is dropped silently, as nothing can read it (`hle_nvn.c`); a real one still prints a red line, limited to 8.
+- **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md).
+
 ### Vertex streams 14 and 15 at Metal slots 14 and 15
 
 - **Symptom:** the assertion `buffer index (31) must be < 31`.

@@ -22,6 +22,8 @@ int nvn_fmt_bpb(int format, int *bw, int *bh);   // Bytes per block (0 = unknown
 void nvn_tex_level_tiles(const nvn_texdesc *d, unsigned level, unsigned *tileH, unsigned *tileD);
 // A sparse texture's tiled levels (the levels before its mip tail) and one 64 KB tile in texels; 0 and no tile for a texture that is not sparse
 int nvn_tex_sparse_tiles(const nvn_texdesc *d, uint32_t *tw, uint32_t *th, uint32_t *td);
+// The 64 KB tiles across and down one tiled level of a sparse texture (tile (tx, ty) at (ty * cols + tx) * 64 KB from the level's start); 0 for a level in the mip tail or a texture that is not sparse
+int nvn_tex_tile_grid(const nvn_texdesc *d, unsigned level, uint32_t *cols, uint32_t *rows);
 // A texture buffer of n elements of bpb bytes read as 2D rows of NVN_TBUF_ROW texels (the translator's wrapped 1D fetch, x & 0x3FFF / x >> 14): width, height and bytes per row of the
 // linear 2D texture over the same memory. One row is n texels, its byte length rounded up to align (the linear-texture row alignment); more rows are full 16384-texel rows. 0 when n or bpb is 0
 #define NVN_TBUF_ROW 16384u

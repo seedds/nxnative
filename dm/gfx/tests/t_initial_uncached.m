@@ -1,8 +1,14 @@
-// Initial ASTC image data exists before registration in a CPU_UNCACHED or CPU_CACHED pool, with no flush.
+// Initial image data exists before registration in a CPU_UNCACHED or CPU_CACHED pool, with no flush.
 // Every mip must sample its literal color at first use. The storage stays the content: a later CPU write is
 // re-uploaded, and a new texture object over rewritten storage samples the new data, not the earlier upload.
 // An uncompressed 3D texture with no IMAGE / COMPRESSIBLE flag is taken from its storage the same way (Xenoblade Chronicles 3's 10x10x10
 // particle steering fields, GitHub issue #1011); with IMAGE it stays a GPU texture. IMAGE does not keep a block-compressed texture out (Pokemon Pokopia's icons).
+// Exercise dirty uploads independently of the selected game's default.
+#include "game_profile.h"
+#undef DM_GAME_TEX_FLUSH_UPLOAD
+#define DM_GAME_TEX_FLUSH_UPLOAD 1
+#undef DM_GAME_TEX_DIRTY_UPLOAD
+#define DM_GAME_TEX_DIRTY_UPLOAD 1
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -15,9 +21,23 @@ static void finish(void) { CHECK("submission completes",mtl_wait(mtl_sub_commit(
 static const uint16_t colors[4][4]={{0,65535,0,65535},{65535,0,0,65535},{0,0,65535,65535},{65535,65535,0,65535}};
 static void fill(tex_t *t,void *mem,int first){   // level lv gets colors[(first+lv)%4]
     for(int lv=0;lv<3;lv++){
-        unsigned w=12u>>lv,blocks=(w+5)/6;uint8_t linear[64];
-        for(unsigned i=0;i<blocks*blocks;i++){static const uint8_t head[8]={0xfc,0xfd,0xff,0xff,0xff,0xff,0xff,0xff};memcpy(linear+i*16,head,8);memcpy(linear+i*16+8,colors[(first+lv)%4],8);}
-        CHECK("fixture swizzle succeeds",!nvn_swizzle(&t->d,lv,0,linear,blocks*16,mem));
+        unsigned w = 12u >> lv, blocks = (w + 5) / 6;
+        uint8_t linear[12 * 12 * 8];
+        unsigned pitch;
+        if (t->d.format == NVN_FORMAT_RGBA16) {
+            for (unsigned i = 0; i < w * w; i++) {
+                memcpy(linear + i * 8, colors[(first + lv) % 4], 8);
+            }
+            pitch = w * 8;
+        } else {
+            for (unsigned i = 0; i < blocks * blocks; i++) {
+                static const uint8_t head[8] = {0xfc, 0xfd, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+                memcpy(linear + i * 16, head, 8);
+                memcpy(linear + i * 16 + 8, colors[(first + lv) % 4], 8);
+            }
+            pitch = blocks * 16;
+        }
+        CHECK("fixture swizzle succeeds", !nvn_swizzle(&t->d, lv, 0, linear, pitch, mem));
     }
 }
 static void expect(id<MTLTexture> image,int first,const char *label){
@@ -35,15 +55,17 @@ static void expect(id<MTLTexture> image,int first,const char *label){
 static void run(int format, uint64_t serial, uint32_t pool_flags, int c0, uint32_t tex_flags) {   // c0: the first fill's colour (distinct per run: a run's pool and storage may reuse an earlier run's addresses)
     void *mem=NULL; if(posix_memalign(&mem,getpagesize(),65536))abort(); memset(mem,0,65536);
     pool_t pool={.magic=MAGIC('P','O','O','L'),.mem=mem,.size=65536,.flags=pool_flags};
-    mtl_pool_add(mem,65536);
+    mtl_pool_add(mem, 65536);
+    nvn_dirty_add_range(mem, 65536); // as nvnMemoryPoolInitialize: exercise real generation tracking
     tex_t t={.magic=MAGIC('T','E','X',0),.serial=serial,.pool=&pool,.mem=mem};
     t.d=(nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D,.format=format,.width=12,.height=12,.depth=1,.levels=3,.samples=1,.flags=tex_flags};
     nvn_tex_layout(&t.d,&t.L);
     fill(&t,mem,c0);
     mtl_tex_init(&t);mtl_sub_begin();id<MTLTexture> image=tex_mtl(&t);
-    CHECK("ASTC texture resolves",image!=nil);finish();
-    expect(image,c0,"literal ASTC mip color at first use");
-    // A later CPU write is the texture's content (a block-compressed texture is never rendered into, and GPU copies into it reach its storage too)
+    CHECK("texture resolves", image != nil);
+    finish();
+    expect(image, c0, "literal mip color at first use");
+    // A later CPU write is the texture's content; the upload must remain tracked after first use.
     dm_guest_write_prepare(mem,t.L.size);fill(&t,mem,c0+1);mtl_sub_begin();id<MTLTexture> again=tex_mtl(&t);finish();
     expect(again,c0+1,"a later CPU write is re-uploaded");
     // A new texture object with the same description over the rewritten storage (GitHub issue #568): its own upload, not the earlier object's texture
@@ -51,7 +73,10 @@ static void run(int format, uint64_t serial, uint32_t pool_flags, int c0, uint32
     tex_t u=t;u.serial=serial+100;mtl_tex_init(&u);mtl_sub_begin();id<MTLTexture> other=tex_mtl(&u);finish();
     expect(other,c0+2,"a new object over rewritten storage samples the new data");
     mtl_tex_release(&u);mtl_tex_release(&t);
-    mtl_pool_del(mem);mtl_drain();free(mem);
+    nvn_dirty_remove_range(mem);
+    mtl_pool_del(mem);
+    mtl_drain();
+    free(mem);
 }
 // Each slice z of a 4x4x4 RGBA8 3D texture holds the colour {z*40+1, z*40+2, z*40+3, 255}
 static void run3d(uint64_t serial, uint32_t tex_flags, int want) {
@@ -85,4 +110,8 @@ int main(void){@autoreleasepool{mtl_init();
     run(NVN_FORMAT_RGBA_ASTC_6x6,9750,uncached,0,0);run(NVN_FORMAT_RGBA_ASTC_6x6_SRGB,9751,uncached,0,0);run(NVN_FORMAT_RGBA_ASTC_6x6,9752,cached,3,0);
     run(NVN_FORMAT_RGBA_ASTC_6x6,9753,uncached,1,NVN_TEXTURE_FLAGS_IMAGE);   // IMAGE on a block-compressed format: shaders cannot write it (Pokemon Pokopia's icons)
     run3d(9760,0,1);run3d(9761,NVN_TEXTURE_FLAGS_IMAGE,0);
+    // RGBA16 before registration, subsequent writes and storage reuse (Naosukii/nxnative d007ac1).
+    if (DM_GAME_TEX_DIRTY_UPLOAD) {
+        run(NVN_FORMAT_RGBA16, 9754, cached, 0, 0);
+    }
     printf("t_initial_uncached: %d checks, %d failed\n",checks,failed);return failed!=0;}}

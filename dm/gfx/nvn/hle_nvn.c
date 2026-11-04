@@ -2787,22 +2787,46 @@ int nvn_sparse_log_read(const void *pool, uint64_t *seq, uint64_t (*out)[2], int
     *seq = end;
     pthread_mutex_unlock(&g_vp_mu); return n;
 }
-// One tile of a placement sparse texture (nvn_mtl.m sparse_sync) in one walk: bit 0 every page of [a, a+n) has memory behind it, bit 1 a mapping in it is newer than gen or a physical
-// page behind it was written after the dirty-page stamp. -1 outside a sparse pool
-int nvn_sparse_tile_state(const void *pool, uint64_t a, uint64_t n, uint64_t gen, uint64_t stamp) {
-    pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a);
-    if (!v) { pthread_mutex_unlock(&g_vp_mu); return -1; }
-    int all = 1, chg = 0; const uint8_t *rs = NULL, *re = NULL;
-    for (uint64_t o = (a - (uint64_t)(uintptr_t)v->base) & ~0xFFFull, end = a - (uint64_t)(uintptr_t)v->base + n; o < end; o += 0x1000) {
-        const vpte *e = o < v->size ? vpt_get(v, o) : NULL;
-        if (e && e->gen > gen) chg = 1;
-        if (!e || !e->phys) { all = 0; continue; }
-        if (rs && e->phys == re) { re += 0x1000; continue; }
-        if (rs && !chg) chg = nvn_dirty_since(rs, (uint64_t)(re - rs), stamp);
-        rs = e->phys; re = rs + 0x1000;
+// One tile of a placement sparse texture, checked in a single page-table walk:
+// bit 0: any page is mapped; bit 1: a mapping or physical page changed since the supplied stamps.
+// Returns -1 outside a sparse pool.
+int nvn_sparse_tile_state(const void *pool, uint64_t address, uint64_t size, uint64_t generation, uint64_t stamp) {
+    pthread_mutex_lock(&g_vp_mu);
+    struct vpool *virtual_pool = vpool_at(pool, address);
+    if (!virtual_pool) {
+        pthread_mutex_unlock(&g_vp_mu);
+        return -1;
     }
-    if (rs && !chg) chg = nvn_dirty_since(rs, (uint64_t)(re - rs), stamp);
-    pthread_mutex_unlock(&g_vp_mu); return all | chg << 1;
+    int has_mapped_pages = 0;
+    int changed = 0;
+    const uint8_t *range_start = NULL;
+    const uint8_t *range_end = NULL;
+    uint64_t pool_offset = address - (uint64_t)(uintptr_t)virtual_pool->base;
+    uint64_t end_offset = pool_offset + size;
+    for (uint64_t offset = pool_offset & ~0xFFFull; offset < end_offset; offset += 0x1000) {
+        const vpte *entry = offset < virtual_pool->size ? vpt_get(virtual_pool, offset) : NULL;
+        if (entry && entry->gen > generation) {
+            changed = 1;
+        }
+        if (!entry || !entry->phys) {
+            continue;
+        }
+        has_mapped_pages = 1;
+        if (range_start && entry->phys == range_end) {
+            range_end += 0x1000;
+            continue;
+        }
+        if (range_start && !changed) {
+            changed = nvn_dirty_since(range_start, (uint64_t)(range_end - range_start), stamp);
+        }
+        range_start = entry->phys;
+        range_end = range_start + 0x1000;
+    }
+    if (range_start && !changed) {
+        changed = nvn_dirty_since(range_start, (uint64_t)(range_end - range_start), stamp);
+    }
+    pthread_mutex_unlock(&g_vp_mu);
+    return has_mapped_pages | (changed << 1);
 }
 NVN(nvnCommandBufferDrawElementsIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, NVNbufferAddress ib, NVNbufferAddress ind) {
     rec_draw_idx(c, (p_draw_idx){pr, it, 0, 0, 0, 1, ib, ind});

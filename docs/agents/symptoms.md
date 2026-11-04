@@ -515,6 +515,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - red stub lines for NVN calls. → [NVN calls that were red stubs](../reference/nvn-objects.md#nvn-calls-that-were-red-stubs)
 - `nvnWindowGetPresentInterval`, `nvnCommandBufferSetCopyImageStride` missing. → [SDK 8 window and copy-stride entry points](../reference/nvn-objects.md#sdk-8-window-and-copy-stride-entry-points)
 - `[RED] texture bound to an image slot lacks the shader-write usage`, and compute image writes go to a dummy texture. → [Image bindings supply shader-write intent](../reference/nvn-objects.md#image-bindings-supply-shader-write-intent)
+- large ground patches collapse or disappear although vertex and fragment shaders run. The vertex shader's height texture reads zero on the GPU while its CPU-cached pool contains nonzero height data. → [Uncompressed CPU tiles before initialization and after first use](../reference/nvn-objects.md#uncompressed-cpu-tiles-before-initialization-and-after-first-use)
 
 ## Rendering
 

@@ -133,6 +133,49 @@ static void sparse_reads(const NVNcopyRegion *region, const uint8_t expected[4])
         char name[128]; snprintf(name, sizeof name, "sparse texture, %s pages, ReadTexels on %s thread, 32 literal pixels", m ? "unmapped" : "mapped", other ? "a game" : "the submit");
         EXPECT(name, 0, bad);
     }
+    // Each mip and array layer has a distinct value. A level-only staging copy
+    // must retain the original storage offset when it is deswizzled.
+    NVNtexture mip_texture;
+    h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_2D_ARRAY);
+    h_nvnTextureBuilderSetDepth(&tb, 2);
+    h_nvnTextureBuilderSetLevels(&tb, 3);
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&sparse, 0);
+    EXPECT("sparse mip array init", 1, h_nvnTextureInitialize(&mip_texture, &tb));
+    const tex_t *mip_desc = (const tex_t *)&mip_texture;
+    if (mip_desc->L.size > len) {
+        abort();
+    }
+    for (unsigned layer = 0; layer < 2; layer++) {
+        for (unsigned level = 0; level < 3; level++) {
+            unsigned width = 8u >> level;
+            uint8_t value = (uint8_t)(17 + 40 * layer + 7 * level);
+            uint8_t pixels[128];
+            memset(pixels, value, sizeof pixels);
+            EXPECT("sparse mip array fill", 0,
+                   nvn_swizzle(&mip_desc->d, level, layer, pixels, width * 4, phys));
+        }
+    }
+    for (unsigned layer = 0; layer < 2; layer++) {
+        for (unsigned level = 0; level < 3; level++) {
+            unsigned width = 8u >> level;
+            unsigned height = MAX(4u >> level, 1u);
+            uint8_t value = (uint8_t)(17 + 40 * layer + 7 * level);
+            NVNtextureView view;
+            h_nvnTextureViewSetDefaults(&view);
+            h_nvnTextureViewSetLevels(&view, level, 1);
+            h_nvnTextureViewSetLayers(&view, layer, 1);
+            NVNcopyRegion mip_region = {0, 0, 0, (int)width, (int)height, 1};
+            uint8_t pixels[128];
+            memset(pixels, 0xEE, sizeof pixels);
+            h_nvnTextureReadTexels(&mip_texture, &view, &mip_region, pixels);
+            int mismatches = 0;
+            for (unsigned byte = 0; byte < width * height * 4; byte++) {
+                mismatches += pixels[byte] != value;
+            }
+            EXPECT("sparse readback selects the requested mip and layer", 0, mismatches);
+        }
+    }
+    h_nvnTextureFinalize(&mip_texture);
     h_nvnTextureFinalize(&unmapped); h_nvnTextureFinalize(&mapped);
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&sparse); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&physical); munmap(phys, len);
 }

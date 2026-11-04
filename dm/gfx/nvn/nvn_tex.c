@@ -206,6 +206,34 @@ int nvn_tex_sparse_tiles(const nvn_texdesc *d, uint32_t *tw, uint32_t *th, uint3
     return (int)n;
 }
 
+// A tiled level stores whole 64 KB tiles in row-major order.
+// Tile (x, y) begins at (y * cols + x) * 64 KB from the level's start;
+// nvn_tex_sparse_tiles supplies its dimensions in texels.
+int nvn_tex_tile_grid(const nvn_texdesc *desc, unsigned level, uint32_t *cols, uint32_t *rows) {
+    uint32_t tile_width, tile_height, tile_depth;
+    *cols = *rows = 0;
+    if ((unsigned)nvn_tex_sparse_tiles(desc, &tile_width, &tile_height, &tile_depth) <= level) {
+        return 0;
+    }
+    fmt_t format = fmt_of(desc->format);
+    unsigned dimensions;
+    int layered;
+    uint32_t width, height, depth;
+    shape(desc, &dimensions, &layered, &width, &height, &depth);
+    uint32_t samples_x, samples_y;
+    samples_xy(desc->samples, &samples_x, &samples_y);
+    nvn_texlayout layout;
+    nvn_tex_layout(desc, &layout);
+    unsigned block_height_log2 = tile_shape_h(desc, dimensions, format, layout.tileH);
+    uint32_t gobs_per_tile = 128u >> (block_height_log2 + layout.tileD);
+    if (!gobs_per_tile) {
+        gobs_per_tile = 1;
+    }
+    *cols = nvn_tex_level_gobs(desc, level) / gobs_per_tile;
+    *rows = (blk(mip(height * samples_y, level), format.bh) + (8u << block_height_log2) - 1) >> (3 + block_height_log2);
+    return 1;
+}
+
 void nvn_tex_level_tiles(const nvn_texdesc *d, unsigned level, unsigned *tileH, unsigned *tileD) {
     fmt_t t = fmt_of(d->format);
     unsigned dpl; int layered; uint32_t w, h, z;

@@ -29,4 +29,4 @@
   The translator is `dm/gfx/tools/dmsh_xlate_bin`, which matches `dmsh_chain.lock`; a fresh `dotnet publish` does not.
 - A change to the chain, host or tools runs `scripts/regress.py check --games` on the five local games it is most likely to reach (`regress.py impact` helps): more only when truly needed, fewer when its reach is narrow and clear. Its report, naming the games and why, goes into the PR ([06-dev-loop.md](docs/agents/06-dev-loop.md)).
 - iOS builds are unsigned IPAs that the user sideloads and tests; diagnostics come back as the app's `Documents/log.txt`. Do not sign or install builds on the user's devices.
-- Commit only when asked, with `git -c user.name=seedds -c user.email=seedds@gmail.com commit`. A change a front end must act on takes a `Front-ends:` line ([Following main](docs/frontends.md#following-main)).
+- Commit only when asked, using the contributor's configured Git author, committer and signing identity. A change a front end must act on takes a `Front-ends:` line ([Following main](docs/frontends.md#following-main)).

@@ -349,6 +349,14 @@
 - **Cause:** `collect` read `DMCommit`/`DMChain` only from an explicit `.app` target's `Info.plist`: it neither parsed the host's startup `build:` line from the collected run log (`dm/host/main.c`) nor checked the `<game name>.app` that `build_ipa_from_nsp.py --platform mac-app` writes directly into the NSP folder. Separately, `shader_dirs` skipped every symlink, which excluded data-bundle Mac apps' `Contents/Resources/msl` link into `Contents/PlugIns/ShaderLibraries.bundle`.
 - **Fix:** for non-`.app` targets, `collect` first reads `[dm] build: commit …, shader chain …` from the collected run log (`--ios-log` when given, never mixing Mac logs or a sibling Mac app into an iPhone report; otherwise the Mac app log, falling back to `.prev.log` only when `.log` is absent). When no run log has a `build:` line for an NSP folder (and `--ios-log` is not given), `resolve` lists the apps directly in the NSP folder whose `DMTitleID` matches the build's title ID, and with exactly one, `collect` takes its `DMCommit` and `DMChain` (or its sole `b-<chain>` library, stripping `.img`), names the app beside each value, lists its library before the build's shader folders, and keeps the build's logs. With none or several, both stay unknown and the report's file list says why: a folder never guesses which app ran. Only the stamps are taken: the name, version, settings and `env.txt` of a sibling app stay out, and "How it was built and run" is left to fill in. `shader_dirs` follows a `Contents/Resources/msl` symlink only when it resolves inside the `.app` bundle.
 - **Found on:** the NSP folder of [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): commit and chain unknown before; after, `786715256f37` and `ded41f8d62ed` from its app, the values the same script reports for the app, with the same 18 files in the zip. `dm/tools/tests/test_bug_report.py` covers one app, two apps, an app of another title, runtime Mac and iPhone startup logs, and data-bundle `msl` symlinks.
+## Launcher text
+
+### Launcher buttons and settings cannot be translated
+
+- **Symptom:** the iOS and Mac launchers show English settings and buttons regardless of the app's language, and contributors must edit source code to translate them.
+- **Cause:** UI literals have no bundled string table; dynamic labels from `launcher.json` are rendered verbatim and have no translation keys.
+- **Fix:** both launchers look up a shared `Launcher.strings` table. The settings generator adds optional stable keys while retaining English fallbacks and the original values. Both app packers include the locale resources. The translation and compatibility contract is in [Translating the built-in launchers](../frontends.md#translating-the-built-in-launchers).
+- **Found on:** [issue #775](https://github.com/seedds/nxnative/issues/775), covering both launchers.
 
 ## IPA archives
 

@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # the probe is a sibling module: the CI runs each test file from the repository root
 import metal_conversion_probe as probe
 
 

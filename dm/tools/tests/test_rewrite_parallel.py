@@ -33,7 +33,9 @@ def pool_helper():
     body: list[ast.stmt] = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'in_parallel'
             or isinstance(n, ast.Expr) and isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Attribute)
             and isinstance(n.value.func.value, ast.Name) and n.value.func.value.id == 'signal' and n.value.func.attr == 'signal']
-    return 'import multiprocessing, os, signal, sys, time\nfrom pathlib import Path\nWORKERS = 2\n' + ast.unparse(ast.Module(body=body, type_ignores=[])) + '\n'
+    return ('import multiprocessing, os, signal, sys, time\nfrom pathlib import Path\n'
+            f'sys.path.insert(0, {str(SOURCE.parent)!r})\nimport rewrite_jobs\nWORKERS = 2\n'
+            + ast.unparse(ast.Module(body=body, type_ignores=[])) + '\n')
 
 
 class RewriteWorkers(unittest.TestCase):

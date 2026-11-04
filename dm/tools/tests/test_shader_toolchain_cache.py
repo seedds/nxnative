@@ -3,7 +3,6 @@ Exercise the builder's real key/restore functions without game files or Xcode.
 """
 import ast
 import collections
-import concurrent.futures as cf
 import hashlib
 import importlib.util
 import json
@@ -29,6 +28,7 @@ import shader_cache  # noqa: E402
 sys.path.insert(0, str(REPO / 'dm/tools'))
 import romfs  # noqa: E402
 import shader_lib  # noqa: E402
+import dmsh_schedule  # noqa: E402
 
 spec = importlib.util.spec_from_file_location('nsp_toolchain_cache', REPO / 'scripts/build_ipa_from_nsp.py')
 assert spec and spec.loader
@@ -50,7 +50,7 @@ class ShaderCache(unittest.TestCase):
                        STAMP_BEFORE=None, INPUTS='inputs')
         (root / 'out').mkdir()
         names = {'tool_fingerprint', 'shader_key', 'cache_path', 'cache_outputs', 'restore_cache', 'publish_cache', 'atomic_json', 'cache_meta_path',
-                 'vs_pad', 'partner_inputs', 'label_dir', 'output', 'commit', 'publish_library', 'submit', 'results'}
+                 'vs_pad', 'partner_inputs', 'label_dir', 'output', 'commit', 'publish_library'}
         tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
         self.tree = tree
         nodes: list[ast.stmt] = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
@@ -207,6 +207,88 @@ class ShaderCache(unittest.TestCase):
         self.assertFalse(self.ns['STORE'].has(self.ns['cache_meta_path']('vertex')))
         self.assertFalse(self.ns['restore_cache']('vertex', 'digest'))
 
+    def stream_callbacks(self, keys):
+        work = Path(self.tmp.name) / 'work'; work.mkdir()
+        self.ns.update(tempfile=tempfile, w=str(work), loc={k: ('package', i) for i, k in enumerate(keys)},
+                       jobs={}, c1s={}, work_of={}, work_left=collections.Counter(), work_lock=threading.Lock(),
+                       xerr={}, cache_hits=set(), digests={k: k + '-digest' for k in keys}, rule_fps=dict.fromkeys(keys, 'rule'),
+                       PRE_STATS=collections.Counter(), DONE=collections.Counter(), _prog={'lock': threading.Lock()},
+                       keys=keys, NMISS=len(keys), px=None, rec_of=lambda k: ('package', b'code'), progress=lambda *a, **k: None, XLATE='translator')
+        names = {'xl', 'xlate_errors', 'restored', 'fin', 'finished', 'scheduled_finish', 'output_of'}
+        nodes: list[ast.stmt] = [n for n in self.tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
+        self.assertEqual({n.name for n in nodes if isinstance(n, ast.FunctionDef)}, names)
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), self.ns)
+        def job(key, name, code, wb):
+            (Path(wb) / (key + '.bin')).write_bytes(code)
+            return {'key': key}, b''
+        def translate(cmd, **kw):
+            for job in json.loads(Path(cmd[1]).read_text()):
+                (Path(cmd[2]) / (job['key'] + '.spv')).write_bytes(b'spv')
+            return subprocess.CompletedProcess(cmd, 0, '', '')
+        def finish(key, wb, job, c1):
+            self.assertTrue((Path(wb) / (key + '.spv')).is_file())
+            out = Path(self.ns['out'])
+            (out / (key + '_b.metal')).write_text('source ' + key)
+            (out / (key + '_b.json')).write_text('{"stage":"cs"}')
+            (out / (key + '_b.metallib')).write_bytes(('library ' + key).encode())
+            return 'ok', '', {'stage': 'cs'}
+        self.ns.update(job_for=job, finish=finish)
+        return work, translate
+
+    def test_streamed_batch_is_kept_until_its_last_shader_and_publishes_staged_bytes(self):
+        keys = ['1' * 16, '2' * 16]
+        work, translate = self.stream_callbacks(keys)
+        with mock.patch.object(subprocess, 'run', side_effect=translate): self.ns['xl'](keys)
+        batch = Path(self.ns['work_of'][keys[0]])
+        self.assertEqual(self.ns['scheduled_finish'](keys[0])[1], 'ok')
+        self.assertTrue(batch.is_dir())
+        self.assertTrue((batch / (keys[1] + '.spv')).is_file(), 'another shader still needs its batch')
+        self.assertFalse((batch / (keys[0] + '.spv')).exists())
+        self.assertEqual(self.ns['output']('mac', keys[0] + '_b.metal'), ('source ' + keys[0]).encode())
+        self.assertFalse((Path(self.ns['out']) / (keys[0] + '_b.metal')).exists(), 'finished output is staged, not left on disk')
+        self.assertEqual(self.ns['scheduled_finish'](keys[1])[1], 'ok')
+        self.assertEqual(list(work.iterdir()), [])
+        self.assertEqual((self.ns['jobs'], self.ns['c1s'], self.ns['work_of'], dict(self.ns['work_left'])), ({}, {}, {}, {}))
+        self.ns['publish_library']('mac')
+        image = romfs.Path(shader_lib.image_of(self.ns['out']))
+        for key in keys: self.assertEqual((image / (key + '_b.metallib')).read_bytes(), ('library ' + key).encode())
+        self.assertEqual(self.ns['DONE']['n'], 2)
+
+    def test_process_result_is_published_before_dependency_and_batch_release(self):
+        key = '1' * 16
+        work, translate = self.stream_callbacks([key])
+        with mock.patch.object(subprocess, 'run', side_effect=translate): self.ns['xl']([key])
+        batch = Path(self.ns['work_of'][key])
+        calls = []
+        def submit(worker, got_key, wb, job, err):
+            import concurrent.futures as cf
+            calls.append((got_key, wb, job, err))
+            self.assertTrue(batch.is_dir())
+            future = cf.Future()
+            # A process returns only after fin has staged its output in the parent's cache.
+            self.ns['jobs'][got_key], self.ns['c1s'][got_key] = job
+            future.set_result((self.ns['fin'](got_key, wb), [{'compiled': 1}]))
+            return future
+        self.ns.update(px=types.SimpleNamespace(submit=submit), fin_worker=object())
+        result, counts = self.ns['scheduled_finish'](key)
+        self.assertEqual(result[:2], (key, 'ok')); self.assertEqual(counts, [{'compiled': 1}])
+        self.assertEqual(calls, [(key, str(batch), ({'key': key}, b''), None)])
+        self.assertEqual(self.ns['output']('mac', key + '_b.metallib'), ('library ' + key).encode())
+        self.assertEqual(list(work.iterdir()), [])
+        self.assertEqual((self.ns['jobs'], self.ns['c1s'], self.ns['work_of'], dict(self.ns['work_left'])), ({}, {}, {}, {}))
+
+    def test_pruned_hit_retranslates_within_its_worker_and_releases_its_private_folder(self):
+        key = '1' * 16
+        work, translate = self.stream_callbacks([key])
+        self.ns['cache_hits'] = {key}; self.ns['PRE_STATS']['hit'] = 1
+        with mock.patch.object(subprocess, 'run', side_effect=translate), mock.patch.dict(self.ns, restore_cache=lambda *a: False):
+            self.assertEqual(self.ns['scheduled_finish'](key)[1], 'ok')
+        self.assertEqual(list(work.iterdir()), [])
+        self.assertEqual(self.ns['PRE_STATS']['hit'], 0)
+        self.assertEqual(self.ns['PRE_STATS']['miss'], 1)
+        self.assertEqual(self.ns['PRE_STATS']['pruned meanwhile'], 1)
+        self.assertEqual(self.ns['output']('mac', key + '_b.metallib'), ('library ' + key).encode())
+
     def test_vertex_only_request_retains_padding_on_subsequent_full_cache_reuse(self):
         vertex, pixel = '1' * 16, '2' * 16   # lexical order puts the vertex first; the real phase ordering must put its pixel first.
         locations, pairs = dict.fromkeys((vertex, pixel)), {vertex: {pixel}}
@@ -230,13 +312,11 @@ class ShaderCache(unittest.TestCase):
             self.ns['publish_cache'](key, key + '-digest', 'rule', 'source')
             return key, 'ok', '', refl
 
-        # the batches, then the loop that translates and finishes them (the translator and fin substituted)
-        start = next(i for i, n in enumerate(self.tree.body) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'batches' for t in n.targets))
-        end = next(i for i, n in enumerate(self.tree.body) if i > start and isinstance(n, ast.Try)) + 1
-        work = Path(self.tmp.name) / 'work'
-        def translate(batch): work.mkdir(exist_ok=True); return str(work)
-        self.ns.update(cf=cf, NJ=1, BATCH=1, keys=keys, fin=lambda key, wb: finish_key(key), translate=translate, px=None)   # finished in threads (DMSH_PROCS=0)
-        exec(compile(ast.Module(body=self.tree.body[start:end], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), self.ns)
+        phase = next(n for n in ast.walk(self.tree) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call) and
+                     isinstance(n.value.func, ast.Attribute) and n.value.func.attr == 'run' and any(
+                         isinstance(t, ast.Name) and t.id == 'res' for t in n.targets))
+        self.ns.update(dmsh_schedule=dmsh_schedule, NJ=1, keys=keys, misses=keys, xl=lambda batch: None, scheduled_finish=finish_key)
+        exec(compile(ast.Module(body=[phase], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), self.ns)
         self.assertEqual(built, [pixel, vertex])
         self.assertIn('dm_pad7 [[user(locn7)]]', (out / (vertex + '_b.metal')).read_text())
         expected = {p.name: json.loads(p.read_text()) if p.suffix == '.json' else p.read_bytes() for p in out.iterdir()}

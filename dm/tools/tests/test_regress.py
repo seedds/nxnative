@@ -64,6 +64,14 @@ class Regress(unittest.TestCase):
                 with self.assertRaises(regress.HarnessError): regress.run_env(g, art, route, root / 'run', NS(env=[f'DM_SAVE_SYNC={root}/cloud'], no_hud=True))
                 self.assertEqual(regress.run_env(g, art, route, root / 'run', NS(env=['DM_SAVE_SYNC=0'], no_hud=True))[0]['DM_SAVE_SYNC'], '0')
 
+    def test_rewrite_worker_policy_changes_the_regression_key(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            helper = root / 'dm/tools/rewrite_jobs.py'; helper.parent.mkdir(parents=True)
+            before = regress.rewriter_key(NS(path=root))
+            helper.write_text('def workers(limit): return limit\n')
+            self.assertNotEqual(before, regress.rewriter_key(NS(path=root)))
+
     def test_impact_without_machine_paths(self):
         env = {k: v for k, v in regress.os.environ.items() if k not in ('REGRESS_ROOT', 'REGRESS_GAMES')}
         with tempfile.TemporaryDirectory() as td:

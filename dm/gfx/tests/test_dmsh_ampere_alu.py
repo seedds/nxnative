@@ -46,5 +46,35 @@ class HalfImmediate(Alu):
         self.assertRegex(msl, r'\b2\.0\b')
 
 
+class HalfSecond(Translated):
+    """Two-source half ops use the operand at bit 32, including constants.
+
+    A shared store keeps the result live; R0 deliberately remains undefined.
+    """
+    def translate_with_live_result(self, opcode, second_operand):
+        thread_id = inst(0x000e260000002100, 0x0000000000067919)
+        operand_bits = second_operand << 32
+        source_register = 6 << 24
+        destination_register = 6 << 16
+        half_instruction = operand_bits | source_register | destination_register | 0x7000 | opcode
+        half = inst(0x03ffe20000000800, half_instruction)
+        stored_register = 6 << 32
+        zero_base_register = 255 << 24
+        store = inst(0x03ffe80000000800, stored_register | zero_base_register | 0x7388)
+        shader = thread_id + half + store + inst(*EXIT)
+        return self.translate(shader, shared=256)
+
+    def test_immediate_is_used_by_add_and_multiply(self):
+        for opcode in (0x430, 0x432):
+            with self.subTest(opcode=opcode):
+                self.assertRegex(self.translate_with_live_result(opcode, 0x40004000), r'\b2\.0\b')
+
+    def test_constant_buffer_second_operand_is_read(self):
+        for opcode in (0x630, 0x632):
+            with self.subTest(opcode=opcode):
+                constant_buffer_operand = (3 << 22) | 0x20
+                self.assertIn('cp_c3', self.translate_with_live_result(opcode, constant_buffer_operand))
+
+
 if __name__ == '__main__':
     unittest.main()

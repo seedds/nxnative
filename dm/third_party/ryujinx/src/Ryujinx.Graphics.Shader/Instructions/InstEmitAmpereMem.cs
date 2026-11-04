@@ -37,8 +37,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x988, InstName.Sts, AStLocalShared, N, writesRd: false);
             x(0x38c, InstName.Atoms, AAtoms, N);
             x(0x38d, InstName.Atoms, AAtomsCas, N);
-            x(0x992, InstName.Membar, AMembar, N, writesRd: false);
-            x(0x9ab, InstName.Membar, AErrbar, N, writesRd: false);
 
             x(0xb60, InstName.Tex, ATex, InstProps.Tex);
             x(0x361, InstName.Tex, ATex, InstProps.Tex);
@@ -56,6 +54,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x593, InstName.Suatom, ASuatom, N);
             x(0x59f, InstName.Sured, ASured, N, writesRd: false);
             x(0xb1d, InstName.Bar, ABar, N, writesRd: false);
+            x(0x992, InstName.Membar, AMembar, N, writesRd: false);
+            x(0x9ab, InstName.Membar, AErrbar, N, writesRd: false);
         }
 
         // ---- attributes ----
@@ -361,17 +361,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, res);
         }
 
-        // MEMBAR: the order of this thread's memory operations
-        public static void AMembar(EmitterContext context)
-        {
-            context.MemoryBarrier();
-        }
-
-        // ERRBAR, after a MEMBAR: waits for errors of earlier memory operations to be reported, which here is nothing to do
-        public static void AErrbar(EmitterContext context)
-        {
-        }
-
         // ATOMS.CAS Rd, [Ra + offset], Rb (expected), Rc (new value): Rd = 1 when the swap happened, not the old value (Fire Emblem Fortune's Weave's only use is a retry loop for a float add that repeats until Rd == 1).
         // Only the 32-bit form (operation 3 at 87..91, size 0) occurs
         public static void AAtomsCas(EmitterContext context)
@@ -482,26 +471,51 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
-        // SURED [Ra], Rb (0x59f): an image reduction through a handle, laid out as SUATOM with no result: the coordinates from Ra, the value in Rb, the handle at 40..59, the dimension
-        // at 61..64, the size at 73..76 and the operation at 87..91 (Eglantine's lowering to Maxwell names the fields). Mario Kart World's compute shader adds 1 at (R4, R5) of a 2D
-        // image; its word 2 is SUATOM's in Donkey Kong Bananza's encoding less the predicate result. Only that form has been seen, so another is refused
+        // SURED [Ra], Rb (0x59f) updates an image atomically without returning its old value.
+        // Unlike SUATOM, its operation occupies three bits (87..90) and it has no destination.
         public static void ASured(EmitterContext context)
         {
-            AmpereOp x = new(context.CurrOp);
-
-            if (x.Bits(64, 96) != 0x0010e000 || x.Bits(59, 61) != 0)
-            {
-                throw AFail(context, $"SURED form {x.Bits(64, 96):x8}");
-            }
-
-            (int handle, int cbufSlot) = ATexHandle(context, x);
+            AmpereOp instruction = new(context.CurrOp);
+            (int handle, int cbufSlot) = ATexHandle(context, instruction);
+            SuDim dimensions = (SuDim)instruction.Bits(61, 64);
+            Clamp boundsMode = (Clamp)instruction.Bits(59, 61);
+            RedOp operation = (RedOp)instruction.Bits(87, 90);
+            SuatomSize size = (SuatomSize)instruction.Bits(73, 76);
+            bool byteAddress = instruction.Bit(72);
 
             if (cbufSlot != TextureOperation.DefaultCbufSlot)
             {
                 throw AFail(context, $"SURED handle in bank {cbufSlot}");
             }
 
-            EmitSured(context, (SuDim)x.Bits(61, 64), 0, RedOp.Add, SuatomSize.U32, handle, x.Ra, x.Rb, 0, false, isBindless: false);
+            if (dimensions > SuDim._3d)
+            {
+                throw AFail(context, $"SURED dimension {(int)dimensions}");
+            }
+
+            if (boundsMode != Clamp.Ign)
+            {
+                throw AFail(context, "SURED bounds mode other than IGN");
+            }
+
+            // NVIDIA INC/DEC wrap at the source limit; SPIR-V's IIncrement/IDecrement do not.
+            if (operation is RedOp.Inc or RedOp.Dec)
+            {
+                throw AFail(context, "SURED increment/decrement with a limit");
+            }
+
+            EmitSured(
+                context,
+                dimensions,
+                boundsMode,
+                operation,
+                size,
+                handle,
+                instruction.Ra,
+                instruction.Rb,
+                srcC: 0,
+                byteAddress: byteAddress,
+                isBindless: false);
         }
 
         // SUATOM Rd, [Ra], Rb (0x593): an atomic on an image through a handle, laid out as SUST's (handle 40..59, dimension 61..64) and as ATOMG's (operation
@@ -536,6 +550,45 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             context.Barrier();
+        }
+
+        // CTA orders workgroup memory. Wider scopes use a device barrier;
+        // Metal has no memory scope beyond the device.
+        public static void AMembar(EmitterContext context)
+        {
+            AmpereOp instruction = new(context.CurrOp);
+            int scope = instruction.Bits(76, 79);
+            int supportedControlBits = scope << 12;
+
+            if (instruction.Bits(32, 64) != 0 ||
+                instruction.Bits(64, 96) != supportedControlBits ||
+                scope is not (0 or 2 or 3 or 5))
+            {
+                throw AFail(context, $"MEMBAR form (scope {scope})");
+            }
+
+            if (scope == 0)
+            {
+                context.GroupMemoryBarrier();
+            }
+            else
+            {
+                context.MemoryBarrier();
+            }
+        }
+
+        // ERRBAR's memory-error reporting has no direct Metal equivalent.
+        // Use a conservative device memory barrier for the observed encoding.
+        public static void AErrbar(EmitterContext context)
+        {
+            AmpereOp instruction = new(context.CurrOp);
+
+            if (instruction.Bits(32, 96) != 0)
+            {
+                throw AFail(context, "ERRBAR form");
+            }
+
+            context.MemoryBarrier();
         }
 
         // ---- textures ----

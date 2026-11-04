@@ -156,8 +156,12 @@ class Stage(unittest.TestCase):
 
 
 class IntegerPassThrough(unittest.TestCase):
-    """dmsh_build.py fs_uint: a pixel shader that passes a flat input through to an integer target needs the integer entry point: Mario Kart World's dcb0504c844f1ecc, whose R8Uint output
-    comes from its mesh stage's per-primitive attribute. A smooth input is not integer data"""
+    """Integer attachments use a bit-preserving variant of the float entry point.
+
+    MKW's R8Uint pass copies a flat per-primitive attribute. Smooth inputs and
+    computed outputs also need the variant when an integer target is bound;
+    their values alone do not identify mixed float/integer attachments.
+    """
     SRC = """struct main0_out
 {
     float4 m_19 [[color(0)]];
@@ -250,11 +254,21 @@ fragment main0_out main0(main0_in in [[stage_in]])
 """)
         self.assertEqual(mask, 1)
 
-    def test_smooth_input_gets_none(self):
-        self.assertIsNone(self.fs_uint(self.SRC % ('', '_26'))[0])
+    def test_smooth_input_keeps_float_entry_and_offers_integer_variant(self):
+        original = self.SRC % ('', '_26')
+        source, mask = self.fs_uint(original)
+        self.assertTrue(source.startswith(original))
+        self.assertIn('fragment main0_out_u main0_u(', source)
+        self.assertIn('return main0_out_u{as_type<uint4>(out.m_19)};', source)
+        self.assertEqual(mask, 0)
 
-    def test_computed_from_a_flat_input_gets_none(self):
-        self.assertIsNone(self.fs_uint(self.SRC % (', flat', '_26 * 2.0'))[0])
+    def test_computed_flat_input_preserves_arithmetic_in_both_entries(self):
+        original = self.SRC % (', flat', '_26 * 2.0')
+        source, mask = self.fs_uint(original)
+        self.assertTrue(source.startswith(original))
+        self.assertEqual(source.count('out.m_19.x = _26 * 2.0;'), 2)
+        self.assertIn('return main0_out_u{as_type<uint4>(out.m_19)};', source)
+        self.assertEqual(mask, 0)
 
 
 if __name__ == '__main__':

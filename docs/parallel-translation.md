@@ -1,6 +1,6 @@
 # Translating one submission on several cores (design, work in progress)
 
-Status: milestone 1 built (`DM_NVN_PAR=measure`, log only). Each milestone below lands as its own commit on this branch.
+Status: milestone 1 built and measured (`DM_NVN_PAR=measure`, log only; results below). Each milestone below lands as its own commit on this branch.
 
 ## Why
 
@@ -61,6 +61,27 @@ The contract is a struct with a compare function. A debug mode (`DM_NVN_PAR=chec
 4. **Diagnostics:** pass dumps, the GPU profiler's labels, counters. Per worker, merged at commit, or allowed only in serial mode.
 
 `g_rmu` (the texture and sampler registry lock) is taken once per argument encode. Four workers would contend for it, so it should become a reader-writer lock, or the hot reads should go lock-free through generation checks.
+
+## Milestone 1 result
+
+Donkey Kong Bananza, busiest handheld view, M1, MetalFX on, `DM_NVN_PAR=measure`. Per frame, averaged over 300 frames:
+
+| | Light area | Busy view |
+|---|---|---|
+| Draws (in 4 submissions) | 1,060 | 10,667 |
+| Clean pass boundaries | 25.1 | 47.5 |
+| Boundaries blocked | 62.9 | 45.1 (37 by deferred uniform updates, 8 by lazy clears) |
+| GPU waits inside a submission | 0 | 0 |
+| Estimated speedup with 4 workers (by draws) | 1.91x | 2.95x |
+| State-only scan | 0.26 ms | 1.28 ms (70,000 operations) |
+
+What this means for the design:
+- **The busy view splits well.** About three of the four workers' worth of work can run at once. With no GPU waits inside a submission, there are no forced serial points.
+- **Every clean boundary has an occlusion count open.** Splitting only where no count is open is therefore not an option for this game. The slot lists have to be linked at merge time, which is the contract's second option.
+- **Deferred uniform updates block most of the rest.** Carrying the pending update list in the contract, as a copy a chunk starts from, would roughly double the clean boundaries.
+- **The scan costs about 1.3 ms against 15 ms of translation.** Estimated translation with 4 workers: 15 / 2.95 + 1.3 ≈ 6.4 ms, before merge costs and lock contention.
+
+The measurement itself raised the translation cost per draw (13,190 → 14,170 instructions), because restoring state after the scan makes the next draw re-encode its arguments. That only happens with the switch on.
 
 ## Milestones
 

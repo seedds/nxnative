@@ -4,6 +4,10 @@
 #include <stdatomic.h>
 
 HLE_FORCE("_ZN2nn6socket10InitializeERKNS0_6ConfigE", "connects to the bsd socket service; offline, creates no session (cut)", Result, h_socket_Initialize, const void *cfg) { (void)cfg; return RES_OK; }
+// SDK 21 (Star Fox): nn::socket::Initialize(const Config &) is inlined into the game, and the service connection is nn::socket::internal::Initialize(int), which the SDK's C library
+// relies on afterwards: with that call cut (a hook that only returned success), nnmusl's poll found no socket state and failed with EFAULT, which the game's event loop takes as fatal
+// (main+0xbe2efc4: only EINTR is tolerated). So the SDK's own initialization runs, against host sessions for bsd:u, bsd:s and bsd:a (hle_sf.c sf_served: every request succeeds with
+// zeroed output); the socket calls themselves stay the cuts below
 HLE_FORCE("_ZN2nn4nifm10InitializeEv", "connects to the nifm network management service; offline (cut)", Result, h_nifm_Initialize, void) { return RES_OK; }
 // The request is asynchronous on Horizon: SubmitNetworkRequest only hands it to the nifm service, and IsNetworkRequestOnHold stays true until the service has evaluated it, so a query
 // right after the submission finds it on hold. Pikmin 4 (Unreal Engine 4.26, main+0x203f3b0) relies on that: it starts its BCAT thread, whose Run (main+0x203f510) sets its status
@@ -43,9 +47,15 @@ static int sk_fail(void) { t_skerr = SK_ENETDOWN; return -1; }
 void dm_guest_sleep_ns(int64_t ns);
 static int sk_idle(int64_t ms) { dm_guest_sleep_ns((ms < 0 ? 100 : ms) * 1000000); return 0; }
 typedef struct { int32_t fd; int16_t events, revents; } sk_pollfd;
+// A descriptor the host never made (it creates no socket): Star Fox's HTTP thread polls two, its wake-up eventfd that failed (-1) and one it never got a value for, with a zero timeout,
+// and takes any failure but EINTR as fatal (main+0xbe2efc4). On a console a socket with nothing to say reports no event at the timeout, so that is the answer for every descriptor:
+// nothing ready, the timeout waited out, 0. Failing with ENETDOWN here made the loop abort
 int dm_sk_poll(void *fds, uint64_t n, int ms) {   // also hle_offline.c's plain pollfd form
     sk_pollfd *p = fds;
-    for (uint64_t i = 0; i < n; i++) if (p[i].fd >= 0) return sk_fail();
+    for (uint64_t i = 0; i < n; i++) if (p[i].fd >= 0) {
+        static int once; if (!once++) LOG("socket: Poll of %llu descriptors with one the host never made (fd %d, events %#x; %d ms): nothing ready at the timeout", (unsigned long long)n, p[i].fd, p[i].events, ms);
+        break;
+    }
     for (uint64_t i = 0; i < n; i++) p[i].revents = 0;
     return sk_idle(ms);
 }
@@ -65,7 +75,18 @@ SKF("_ZN2nn6socket11GetSockNameEiPNS0_8SockAddrEPj", h_sk_GetSockName, int s, vo
 SKF("_ZN2nn6socket10GetSockOptEiNS0_5LevelENS0_6OptionEPvPj", h_sk_GetSockOpt, int s, int l, int o, void *v, unsigned *n) { (void)s; (void)l; (void)o; (void)v; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket10SetSockOptEiNS0_5LevelENS0_6OptionEPKvj", h_sk_SetSockOpt, int s, int l, int o, const void *v, unsigned n) { (void)s; (void)l; (void)o; (void)v; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket5FcntlEiNS0_12FcntlCommandEz", h_sk_Fcntl, int s, int c) { (void)s; (void)c; return sk_fail(); }
+// SDK 21 overloads Star Fox imports: plain sockaddr, the ShutdownMethod enum, Read / Write and a name lookup without options; SetAllocator keeps nothing, as no session is created
+SKF("_ZN2nn6socket11GetPeerNameEiP8sockaddrPj", h_sk_GetPeerName21, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
+SKF("_ZN2nn6socket8ShutdownEiNS0_14ShutdownMethodE", h_sk_Shutdown21, int s, int how) { (void)s; (void)how; return sk_fail(); }
+HLE_FORCE("_ZN2nn6socket4ReadEiPvm", "bsd socket service (cut)", long, h_sk_Read, int s, void *b, unsigned long n) { (void)s; (void)b; (void)n; return sk_fail(); }
+HLE_FORCE("_ZN2nn6socket5WriteEiPKvm", "bsd socket service (cut)", long, h_sk_Write, int s, const void *b, unsigned long n) { (void)s; (void)b; (void)n; return sk_fail(); }
+HLE_FORCE("_ZN2nn6socket16GetHostEntByNameEPKc", "name resolution (cut): NULL", void *, h_sk_GetHostEnt21, const char *n) { (void)n; t_skerr = SK_ENETDOWN; return NULL; }
+HLE_FORCE("_ZN2nn6socket12SetAllocatorEPNS_14MemoryResourceE", "socket library allocator; no session is created, ignored", void, h_sk_SetAlloc, void *r) { (void)r; }
 SKF("_ZN2nn6socket4PollEPNS0_6PollFdEmi", h_sk_Poll, void *f, unsigned long n, int t) { return dm_sk_poll(f, n, t); }
+// The C library's poll (SDK 21's nnmusl, Star Fox): it maps its descriptors through its own socket table before nn::socket::Poll, and a descriptor the host never made (the game's
+// wake-up eventfd failed, so its event loop polls -1 with a zero timeout) fails that mapping with EFAULT, which the game's loop takes as fatal (main+0xbe2efc4, EINTR alone is tolerated).
+// On a console poll ignores a negative descriptor and returns 0 at the timeout, which is what the host's Poll does, so the C library's poll is routed there too
+SKF("poll", h_libc_Poll, void *f, unsigned long n, int t) { return dm_sk_poll(f, n, t); }
 SKF("_ZN2nn6socket6SelectEiPNS0_5FdSetES2_S2_PNS0_7TimeValE", h_sk_Select, int n, void *r, void *w, void *e, void *t) { return dm_sk_select(n, r, w, e, t); }
 SKF("_ZN2nn6socket7EventFdEmNS0_12EventFdFlagsE", h_sk_EventFd, unsigned long v, int f) { (void)v; (void)f; return sk_fail(); }
 SKF("_ZN2nn6socket11EventFdReadEiPm", h_sk_EventFdRead, int s, unsigned long *v) { (void)s; (void)v; return sk_fail(); }

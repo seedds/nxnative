@@ -520,7 +520,7 @@ void mtl_init(void) {
     g_present_args = [g_dev newArgumentTableWithDescriptor:pad error:&ate];
     if (!g_present_args) MDIE("failed to create the present argument table: %s", ate.localizedDescription.UTF8String);
     for (int i = 0; i < 3; i++) {
-        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
+        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 12 options:MTLResourceStorageModeShared];
         if (!g_present_uv[i]) MDIE("failed to create present UV buffer[%d]", i);
         res_add(g_present_uv[i]);
     }
@@ -13259,7 +13259,7 @@ static void shot(id<MTLTexture> src, const char *path, int screen, const int cro
         read = out;
     }
     if (read.pixelFormat != MTLPixelFormatRGBA8Unorm && read.pixelFormat != MTLPixelFormatRGBA8Unorm_sRGB &&
-        read.pixelFormat != MTLPixelFormatBGRA8Unorm && read.pixelFormat != MTLPixelFormatBGRA8Unorm_sRGB) { MLOG("[RED] screenshot does not support format %lu", (unsigned long)read.pixelFormat); return; }
+        read.pixelFormat != MTLPixelFormatBGRA8Unorm && read.pixelFormat != MTLPixelFormatBGRA8Unorm_sRGB && read.pixelFormat != MTLPixelFormatRGB10A2Unorm) { MLOG("[RED] screenshot does not support format %lu", (unsigned long)read.pixelFormat); return; }
     size_t w = read.width, h = read.height, row = w * 4;
     id<MTLBuffer> buf = [g_dev newBufferWithLength:row * h options:MTLResourceStorageModeShared];
     id<MTLCommandBuffer> cb = q_cb();
@@ -13270,10 +13270,21 @@ static void shot(id<MTLTexture> src, const char *path, int screen, const int cro
     if (screen && read == src && atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) {   // lower-left origin: the window image is stored bottom-up (see g_origin_ll)
         uint8_t *p = buf.contents, *tmp = malloc(row);
         if (tmp) { for (size_t y = 0; y < h / 2; y++) { memcpy(tmp, p + y * row, row); memcpy(p + y * row, p + (h - 1 - y) * row, row); memcpy(p + (h - 1 - y) * row, tmp, row); } free(tmp); } }
+    // An RGB10A2 frame (a 10-bit window: the HDR window with DM_HDR=1, or any other 10-bit window, which used to be refused): the PNG holds each channel's top 8 bits as the code values, not decoded; path.raw keeps the 32-bit words (R bits 0-9, G 10-19, B 20-29) for analysis
+    uint8_t *pix = buf.contents, *c8 = NULL;
+    if (read.pixelFormat == MTLPixelFormatRGB10A2Unorm) {
+        const uint32_t *s = buf.contents;
+        c8 = malloc(w * h * 4);
+        if (!c8) { MLOG("[RED] screenshot %s: no memory for the 10-bit conversion", path); return; }
+        { for (size_t i = 0; i < w * h; i++) { uint32_t v = s[i]; c8[4 * i] = (v & 0x3ff) >> 2; c8[4 * i + 1] = ((v >> 10) & 0x3ff) >> 2; c8[4 * i + 2] = ((v >> 20) & 0x3ff) >> 2; c8[4 * i + 3] = 255; } pix = c8; }
+        char rawp[1024]; snprintf(rawp, sizeof rawp, "%s.raw", path);
+        FILE *rf = fopen(rawp, "wb");
+        if (rf) { fprintf(rf, "rgb10a2 %zu %zu\n", w, h); fwrite(buf.contents, 4, w * h, rf); fclose(rf); }
+    }
     int bgra = read.pixelFormat == MTLPixelFormatBGRA8Unorm || read.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB;
     CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
     CGBitmapInfo bi = bgra ? (kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little) : (CGBitmapInfo)kCGImageAlphaNoneSkipLast;
-    CGContextRef ctx = CGBitmapContextCreate(buf.contents, w, h, 8, row, cs, bi);
+    CGContextRef ctx = CGBitmapContextCreate(pix, w, h, 8, row, cs, bi);
     CGImageRef img = ctx ? CGBitmapContextCreateImage(ctx) : NULL;
     CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, strlen(path), false);
     CGImageDestinationRef dst = url ? CGImageDestinationCreateWithURL(url, (__bridge CFStringRef)UTTypePNG.identifier, 1, NULL) : NULL;
@@ -13281,7 +13292,7 @@ static void shot(id<MTLTexture> src, const char *path, int screen, const int cro
     int ok = 0;
     if (!ctx || !img || !dst) MLOG("[RED] screenshot %s failed: %s", path, !ctx ? "cannot create the bitmap context" : !img ? "cannot get the image" : "cannot write (directory missing or not writable)");
     else { CGImageDestinationAddImage(dst, img, NULL); ok = CGImageDestinationFinalize(dst); }
-    if (dst) CFRelease(dst); if (url) CFRelease(url); CGImageRelease(img); CGContextRelease(ctx); CGColorSpaceRelease(cs);
+    if (dst) CFRelease(dst); if (url) CFRelease(url); CGImageRelease(img); CGContextRelease(ctx); CGColorSpaceRelease(cs); free(c8);
     MLOG("screenshot %zux%zu format %lu → %s %s", w, h, (unsigned long)read.pixelFormat, path, ok ? "ok" : "failed");
     if (g_defer_ab >= 0 && getenv("DM_NVN_DEFER_AB") && !strcmp(getenv("DM_NVN_DEFER_AB"), "1") && ok) { static int shots; if (++shots == 2) { g_defer_ab_on = 1; MLOG("DM_NVN_DEFER_AB: second screenshot written; deferred pass merging on"); } }
     if (g_udc_ab >= 0 && getenv("DM_NVN_UDC_AB") && !strcmp(getenv("DM_NVN_UDC_AB"), "1") && ok) {
@@ -13505,7 +13516,8 @@ static void present_pipeline(MTLPixelFormat format) {
         id<MTLLibrary> lib = host_lib("present", &e);
         if (!lib) MDIE("present shader compile failed %s", e.localizedDescription.UTF8String);
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
-        pd.vertexFunction = [lib newFunctionWithName:@"vs"]; pd.fragmentFunction = [lib newFunctionWithName:@"fs"];
+        // An extended-range layer (RGBA16Float, DM_HDR=1, BT.2020) takes the picture in linear light: fs_linear converts gamma-coded 8-bit BT.709 sources to BT.2020 and PQ-decodes HDR10 sources (present_encode and present_encode_m4 set the mode)
+        pd.vertexFunction = [lib newFunctionWithName:@"vs"]; pd.fragmentFunction = [lib newFunctionWithName:format == MTLPixelFormatRGBA16Float ? @"fs_linear" : @"fs"];
         pd.colorAttachments[0].pixelFormat = format;
         g_blit_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
         if (!g_blit_pso) MDIE("present pipeline failed %s", e.localizedDescription.UTF8String);
@@ -13562,6 +13574,24 @@ static int present_crop_rect(id<MTLTexture> src, const int crop[4], NSUInteger r
     }
     r[0] = crop[0]; r[1] = crop[1]; r[2] = crop[2]; r[3] = crop[3]; return 1;
 }
+// The Crop mode (present.metal): how the source is encoded. An RGB10A2 source is the game's HDR10 window (SMPTE ST 2084 code values in BT.2020 primaries) once its status query has answered HDR on; an 8-bit gamma source (BT.709, sRGB) drawn into the extended-range BT.2020 layer is decoded and converted to BT.2020
+__attribute__((weak)) int vi_hdr_answered(void) { return 0; }   // hle_vi.c; the graphics unit tests have no vi service
+static float present_mode(MTLPixelFormat src, MTLPixelFormat dst) {
+    // An RGB10A2 window is PQ code values only once the game's status query has answered HDR on (vi_hdr_answered); any other RGB10A2 window is read as stored
+    // Not answered: an SDR 10-bit window, gamma-coded like the 8-bit ones, so it is decoded to linear light for an extended-range layer
+    if (src == MTLPixelFormatRGB10A2Unorm) return vi_hdr_answered() ? 2.0f : (dst == MTLPixelFormatRGBA16Float ? 1.0f : 0.0f);
+    if (dst != MTLPixelFormatRGBA16Float) return 0.0f;
+    // Gamma-coded 8-bit sources. The sRGB-typed ones are sampled through a non-sRGB view (present_raw_src), so the shader reads gamma-coded values for them too
+    return src == MTLPixelFormatRGBA8Unorm || src == MTLPixelFormatBGRA8Unorm || src == MTLPixelFormatRGBA8Unorm_sRGB || src == MTLPixelFormatBGRA8Unorm_sRGB ? 1.0f : 0.0f;
+}
+// The screen's current EDR headroom (Crop.mode.z): the highlights roll off into it (present.metal present_shoulder). The front end reads it (front_mac.m, front_ios.m);
+// 1 without one (the graphics unit tests have no window), which leaves every value as it is
+__attribute__((weak)) float front_edr_headroom(void) { return 1.0f; }
+static float present_headroom(void) { return front_edr_headroom(); }
+// The paper white in nits: the luminance of the picture's SDR white (DM_HDR_PAPER_WHITE, default 203, the value nn::vi answers the game; a number from 1 to 65535, as hle_vi.c reads it)
+static float present_paper_white_v;
+static void present_paper_white_read(void) { const char *e = getenv("DM_HDR_PAPER_WHITE"); double v = e && *e ? strtod(e, NULL) : 203.0; present_paper_white_v = (v >= 1.0 && v <= 65535.0) ? (float)v : 203.0f; }
+static float present_paper_white(void) { static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, present_paper_white_read); return present_paper_white_v; }   // read once, as the answer is (hle_vi.c vi_paper_white): the same value for both
 static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4]) {
     NSUInteger r[4]; if (!present_crop_rect(src, crop, r)) return 0;
     NSUInteger cx = r[0], cy = r[1], cw = r[2], ch = r[3];
@@ -13583,8 +13613,8 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
     [en setViewport:vp];
     [en setRenderPipelineState:g_blit_pso]; [en setFragmentTexture:present_raw_src(src) atIndex:0]; [en setFragmentSamplerState:g_blit_samp atIndex:0];
-    float uv[8] = {(float)cx / src.width, (float)cy / src.height, (float)cw / src.width, (float)ch / src.height,
-                   (cx + 0.5f) / src.width, (cy + 0.5f) / src.height, (cx + cw - 0.5f) / src.width, (cy + ch - 0.5f) / src.height};
+    float uv[12] = {(float)cx / src.width, (float)cy / src.height, (float)cw / src.width, (float)ch / src.height,
+                   (cx + 0.5f) / src.width, (cy + 0.5f) / src.height, (cx + cw - 0.5f) / src.width, (cy + ch - 0.5f) / src.height, present_mode(src.pixelFormat, dst.pixelFormat), present_paper_white(), present_headroom()};
     if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
     [en setFragmentBytes:uv length:sizeof uv atIndex:0];
     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -13834,6 +13864,8 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     float *uv = uvb.contents; NSUInteger tw = tex.width, th = tex.height, cx = r[0], cy = r[1], cw = r[2], ch = r[3];
     uv[0] = (float)cx / tw; uv[1] = (float)cy / th; uv[2] = (float)cw / tw; uv[3] = (float)ch / th;
     uv[4] = (cx + 0.5f) / tw; uv[5] = (cy + 0.5f) / th; uv[6] = (cx + cw - 0.5f) / tw; uv[7] = (cy + ch - 0.5f) / th;
+    // Crop.mode.x (present.metal): an extended-range BT.2020 layer decodes gamma-coded 8-bit BT.709 sources to linear light and converts them; HDR10 sources are PQ-decoded
+    uv[8] = present_mode(src.pixelFormat, dst.pixelFormat); uv[9] = present_paper_white(); uv[10] = present_headroom(); uv[11] = 0;
     if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
     [g_present_args setAddress:uvb.gpuAddress atIndex:0];
     [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];
@@ -13845,7 +13877,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
 // returns whether it was submitted. Completion reports the encoding kind, or PRESENT_FAILED on a GPU error. Resources remain resident and retained until GPU completion.
 static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTexture> out, void (^done)(int)) {
     id<MTL4CommandAllocator> al = [g_dev newCommandAllocator]; id<MTL4CommandBuffer> cb = [g_dev newCommandBuffer];
-    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 12 options:MTLResourceStorageModeShared];
     if (!al || !cb || !uvb) { MLOG("[RED] offscreen present: no command allocator or buffer"); return 0; }
     id<MTLTexture> raw = present_raw_src(src);
     fx_state fx = {0};

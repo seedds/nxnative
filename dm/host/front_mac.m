@@ -11,6 +11,7 @@
 // DM_PAD_MERGE=1 merges every controller into player 1 instead, DM_KBD_PLAYER=own makes the keyboard player 1 on its own, with the controllers from player 2 on.
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
+#include <stdatomic.h>
 #import <Metal/Metal.h>
 #import <GameController/GameController.h>
 #include "dm.h"
@@ -30,6 +31,15 @@
 #include <sys/stat.h>
 
 static CAMetalLayer *g_layer;
+// The screen's current EDR headroom (NSScreen maximumExtendedDynamicRangeColorComponentValue, the current value; the potential one is only a ceiling): read four times a second
+// on the main thread while the HDR layer is on, and taken by the present (front_edr_headroom; nvn_mtl.m present_headroom). 1.0 without a headroom
+static _Atomic uint32_t g_edr_bits = 0x3f800000u;
+float front_edr_headroom(void) { uint32_t b = atomic_load(&g_edr_bits); float h; memcpy(&h, &b, sizeof h); return h; }
+static void front_edr_read(NSScreen *s) {
+    float h = (float)s.maximumExtendedDynamicRangeColorComponentValue;
+    if (!(h >= 1.0f)) h = 1.0f;
+    uint32_t b; memcpy(&b, &h, sizeof b); atomic_store(&g_edr_bits, b);
+}
 static uint64_t g_btn;
 static int g_w, g_a, g_s, g_d;
 static int g_rl, g_ru, g_rr, g_rd;   // arrow keys pressed with Shift held: the right stick (each goes back up as it went down, whatever Shift does meanwhile)
@@ -1334,6 +1344,18 @@ void front_run(void (*guest)(void)) {
         g_layer = [CAMetalLayer layer];
         g_layer.device = MTLCreateSystemDefaultDevice();
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        // DM_HDR=1 (the HDR mode): an extended-range layer whatever the window's screen. The layer is BT.2020 (the game's HDR10 is BT.2020 with PQ;
+        // SDR content is converted from BT.709 in present.metal), in linear light (present.metal fs_linear). Values above 1.0 roll off into the screen's current headroom (front_edr_read);
+        // a screen without headroom gives the SDR picture: the largest channel of a highlight goes to SDR white
+        if (getenv("DM_HDR") && atoi(getenv("DM_HDR"))) {
+            g_layer.pixelFormat = MTLPixelFormatRGBA16Float;
+            CGColorSpaceRef ecs = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearITUR_2020);
+            g_layer.colorspace = ecs; CGColorSpaceRelease(ecs);
+            g_layer.wantsExtendedDynamicRangeContent = YES;
+            LOG("front end: HDR output on (DM_HDR): the window's layer is RGBA16Float in extended linear BT.2020; the screen's headroom %.2f now, at most %.2f", (win.screen ?: NSScreen.mainScreen).maximumExtendedDynamicRangeColorComponentValue, (win.screen ?: NSScreen.mainScreen).maximumPotentialExtendedDynamicRangeColorComponentValue);
+            front_edr_read(win.screen ?: NSScreen.mainScreen);
+            [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) { (void)t; front_edr_read(win.screen ?: NSScreen.mainScreen); }];
+        }
         g_layer.contentsScale = win.backingScaleFactor;
         // Apple's HUD over the game (frame rate, frame and GPU time, memory): front_hud_env turns it on before the first device. The layer's developerHUDProperties
         // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen

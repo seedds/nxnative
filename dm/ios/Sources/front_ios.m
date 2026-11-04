@@ -5,6 +5,7 @@
 #import <UIKit/UIKit.h>
 #import <UserNotifications/UserNotifications.h>
 #import <QuartzCore/CAMetalLayer.h>
+#include <stdatomic.h>
 #import <Metal/Metal.h>
 #import <AVFAudio/AVFAudio.h>
 #include <errno.h>
@@ -60,6 +61,33 @@ static UILabel *front_ios_fps_label(void);
     l.drawableSize = CGSizeMake(self.bounds.size.width * l.contentsScale, self.bounds.size.height * l.contentsScale);
 }
 @end
+// DM_HDR=1 (the HDR mode; the Mac's layer is made in front_mac.m the same way): an extended-range layer, whatever the screen the game is shown on.
+// The layer is BT.2020 in linear light, where present.metal decodes the game's PQ and converts its SDR. It is set before the game draws; a screen without headroom clamps
+// the layer at SDR white. A TV the picture moves to (tv_attach) keeps the layer, and its headroom is read from the screen the view is on
+// The screen's current EDR headroom (UIScreen currentEDRHeadroom, iOS 16+): read four times a second on the main thread while the HDR layer is on, and taken by the
+// present (front_edr_headroom; nvn_mtl.m present_headroom). 1.0 without a headroom
+static _Atomic uint32_t g_edr_bits = 0x3f800000u;
+static UIScreen *g_edr_screen;   // the screen the layer was made for: the fallback while the layer is not on a window
+static CAMetalLayer *g_edr_layer;
+float front_edr_headroom(void) { uint32_t b = atomic_load(&g_edr_bits); float h; memcpy(&h, &b, sizeof h); return h; }
+static void front_ios_edr_read(void) {
+    UIScreen *s = ((UIView *)g_edr_layer.delegate).window.windowScene.screen ?: g_edr_screen;   // the game view's own screen (a TV after tv_attach)
+    float h = (float)s.currentEDRHeadroom;
+    if (!(h >= 1.0f)) h = 1.0f;
+    uint32_t b; memcpy(&b, &h, sizeof b); atomic_store(&g_edr_bits, b);
+}
+static void front_ios_hdr_layer(CAMetalLayer *l, UIScreen *screen) {
+    const char *e = getenv("DM_HDR");
+    if (!e || !atoi(e)) return;
+    CGFloat headroom = screen.potentialEDRHeadroom;   // 0 when the view has no screen yet; a screen without headroom clamps the layer at SDR white
+    l.pixelFormat = MTLPixelFormatRGBA16Float;
+    CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearITUR_2020);
+    l.colorspace = cs; CGColorSpaceRelease(cs);
+    l.wantsExtendedDynamicRangeContent = YES;
+    g_edr_screen = screen; g_edr_layer = l; front_ios_edr_read();
+    [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) { (void)t; front_ios_edr_read(); }];
+    LOG("front end: HDR output on (DM_HDR): the layer is RGBA16Float in extended linear BT.2020; the screen's potential headroom %.2f", headroom);
+}
 static void tv_attach(void);
 
 @interface DmRootView : UIView
@@ -156,6 +184,7 @@ static void launcher_done(void) { [g_root startGame]; }
     self.view.window.traitOverrides.preferredContentSizeCategory = UIContentSizeCategorySmall;   // UIKit draws the in-game menu (GameMenu.swift) in this window: it keeps one compact text size over the game, whatever the system's text size
     self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
     [self.view addSubview:self.game];
+    front_ios_hdr_layer((CAMetalLayer *)self.game.layer, self.view.window.windowScene.screen);   // the layer's format before the game's first drawable (DM_HDR)
     g_layer = (CAMetalLayer *)self.game.layer;
     if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) { g_layer.developerHUDProperties = @{@"mode": @"default"}; LOG("front end: Metal performance HUD on (DM_METAL_HUD)"); }   // Apple's HUD over the game: frame rate, frame and GPU time, memory
     dm_haptics_apple_init();

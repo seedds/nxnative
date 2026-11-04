@@ -12264,7 +12264,7 @@ static void par_fresh_switch(void) {
     g_fz_rx[j].active = 0;
     rx_select(j);
     g_par.switches++; g_par.sw_draws[j] += g_stat_draw - g_par_last; g_par_last = g_stat_draw;
-    { static int n; if (n++ < 12) MLOG("parallel translation, fresh: context %d → %d at pass %llu, draw %llu of the frame (frame %llu, segment %u)", k, j,
+    { static int n; if (n++ < 12) MLOG("parallel translation, fresh: context %d → %d at pass %llu, draw %llu since the start (frame %llu, segment %u)", k, j,
                                       (unsigned long long)g_stat_pass, (unsigned long long)g_stat_draw, (unsigned long long)atomic_load(&g_cur_frame), RX.seg); }
 }
 static void par_sub_begin(void) { g_par_nb = g_par_nw = 0; g_par_d0 = g_stat_draw; g_par_last = g_stat_draw; }
@@ -12347,9 +12347,9 @@ static void par_sub_end(void) {
                              (unsigned long long)g_par.why[1], (unsigned long long)g_par.why[2], (unsigned long long)g_par.why[3], (unsigned long long)g_par.why[4], (unsigned long long)g_par.why[5],
                              (unsigned long long)g_par.why[6], (unsigned long long)g_par.why[7], (unsigned long long)g_par.why[8], (double)g_par.waits / nf, g_par.cost ? (double)g_par.draws / g_par.cost : 0.0,
                              g_par.scan_ns / 1e6 / nf, (double)g_par.scan_ops / nf, g_par.scan_bad ? " (stopped early at a multi-draw in some)" : "");
+        if (par_fresh()) { MLOG("parallel translation, fresh (over %llu frames): %llu switches (%llu from the scan's snapshot), draws translated per context %llu %llu %llu %llu", (unsigned long long)nf, (unsigned long long)g_par.switches, (unsigned long long)g_par.from_scan, (unsigned long long)g_par.sw_draws[0], (unsigned long long)g_par.sw_draws[1], (unsigned long long)g_par.sw_draws[2], (unsigned long long)g_par.sw_draws[3]); }
         memset(&g_par, 0, sizeof g_par);
         if (par_check()) parc_report(nf);
-        if (par_fresh()) { MLOG("parallel translation, fresh (over %llu frames): %llu switches (%llu from the scan's snapshot), draws translated per context %llu %llu %llu %llu", (unsigned long long)nf, (unsigned long long)g_par.switches, (unsigned long long)g_par.from_scan, (unsigned long long)g_par.sw_draws[0], (unsigned long long)g_par.sw_draws[1], (unsigned long long)g_par.sw_draws[2], (unsigned long long)g_par.sw_draws[3]); }
     }
 }
 void mtl_exec(const uint8_t *p) {

@@ -17,7 +17,7 @@
 typedef Result (*sf_answer)(unsigned cmd, uint32_t *copy);
 static struct { char name[16]; int used, domain; unsigned seen; sf_answer answer; } g_sf[SF_MAX];
 static pthread_mutex_t g_sf_mu = PTHREAD_MUTEX_INITIALIZER;
-static const char *const sf_served[] = {"olsc:u", "caps:su", "caps:u", "caps:a", "caps:c", "caps:sc", "caps:ss"};
+static const char *const sf_served[] = {"olsc:u", "caps:su", "caps:u", "caps:a", "caps:c", "caps:sc", "caps:ss", "fsp-srv"};   // fsp-srv: Factorio links its own fs client and connects directly
 
 static int sf_slot(uint32_t h) {
     unsigned i = h - SF_H0;

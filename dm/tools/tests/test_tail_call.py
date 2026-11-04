@@ -4,18 +4,19 @@ from pathlib import Path
 import re
 import struct
 import sys
+from typing import Callable, cast
 import unittest
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
 
 TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
-from nso_asm import STP, STUR, STRX
+from nso_asm import ADDI, BR, LDP, LDP_POST, LDRX, STP, STP_PRE, STUR, STRX
 
 tree = ast.parse((TOOLS / 'patch_nso.py').read_text())
 scope = {'re': re}
 exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef)
-    and n.name in ('tail_call', 'tail_call_at_end')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
+    and n.name in ('tail_call', 'tail_call_at_end', 'tail_call_padded')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
 
 # Standard frame, null guard to error block, pointer load, argument move,
 # frame restore, tail jump, error call, trap padding.
@@ -95,6 +96,29 @@ class TailCall(unittest.TestCase):
         # The broader rule proposed in #188 accepts an unframed guarded block.
         # Keep the framed fallback's boundary even when a null guard is present.
         self.assertFalse(self.check([0xb4000061, 0xf9400812, 0xd61f0240, 0x94000400], 2))
+
+    def test_padded_straight_line_pointer_tail(self):
+        for load in (LDRX(18, 0, 3), LDP(18, 17, 0, 16)):
+            words = [ADDI(0, 0, 8), load, STP(1, 2, 31, 8), BR(18)]
+            for padding in (1, 2, 3):
+                with self.subTest(load=hex(load), padding=padding):
+                    self.assertTrue(self.check(words + [0] * padding, 3))
+            self.assertEqual(self.check([load, BR(18)], 1), load == LDRX(18, 0, 3))
+
+    def test_padded_tail_requires_straight_line_and_no_frame(self):
+        for word in (0xb4000061, 0x94000400, 0x14000001, BR(0), 0xd63f0000,
+                     0xd65f03c0, 0, ADDI(31, 31, 16), STP_PRE(29, 30, 31, -16),
+                     LDP_POST(0, 1, 31, 16), LDP(29, 30, 31, 0), 0xaa0003fd,
+                     0xaa0003fe, 0x110003ff, 0x2a0003fd, 0x2a0003fe):
+            with self.subTest(word=hex(word)):
+                self.assertFalse(self.check([word, LDP(18, 17, 0, 16), BR(18), 0], 2))
+        for word in (0x52800012, 0xaa0003f2, 0x2a0003f2, ADDI(18, 18, 4)):
+            self.assertFalse(self.check([LDP(18, 17, 0, 16), word, BR(18), 0], 2))
+        self.assertFalse(self.check([LDP(18, 17, 0, 16), BR(18), 1], 1))
+        self.assertFalse(self.check([LDP(18, 17, 0, 16), BR(18), 0x94000400], 1))
+        ins = decode([LDP(18, 17, 0, 16), ADDI(0, 0, 8), BR(18), 0])
+        del ins[1]
+        self.assertFalse(cast(Callable[[list, int], bool], scope['tail_call'])(ins, 1))
 
     def test_stores_must_not_overwrite_saved_frame(self):
         for base in (31, 29):   # sp and the unchanged frame pointer

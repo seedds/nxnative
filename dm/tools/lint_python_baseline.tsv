@@ -24,7 +24,6 @@ pyright	dm/gfx/tools/shader_split.py	reportArgumentType	1	Argument of type "byte
 pyright	dm/gfx/tools/shader_split.py	reportArgumentType	2	Argument of type "Unknown | int | None" cannot be assigned to parameter "offset" of type "int" in function "unpack_from" Type "Unknown | int | None" is not assignable to type "int" "None" is not assignable to "int"
 pyright	dm/gfx/tools/shader_split.py	reportAttributeAccessIssue	1	Cannot access attribute "get" for class "list[Any]" Attribute "get" is unknown
 pyright	dm/gfx/tools/shader_split.py	reportCallIssue	3	No overloads for "__getitem__" match the provided arguments
-pyright	dm/gfx/tools/shader_split.py	reportGeneralTypeIssues	2	"None" is not iterable "__iter__" method not defined
 pyright	dm/gfx/tools/shader_split.py	reportMissingImports	1	Import "backports" could not be resolved
 pyright	dm/gfx/tools/shader_split.py	reportOperatorIssue	1	Operator "<=" not supported for types "int" and "Any | tuple[Any, ...]" Operator "<=" not supported for types "int" and "tuple[Any, ...]"
 pyright	dm/gfx/tools/shader_split.py	reportOptionalIterable	5	Object of type "None" cannot be used as iterable value

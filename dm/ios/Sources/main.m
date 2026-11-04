@@ -53,9 +53,14 @@ static NSArray<NSString *> *romfs_document_images(NSString *doc) {
     }];
     return imgs;
 }
-static NSString *romfs_locate(void) {
+static NSString *romfs_locate(NSString *prog) {   // prog: a game of several programs, the running program's folder in the app (p<N>); nil otherwise
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
+    if (prog) {   // the program's files are in the app (Documents holds one image, one program's)
+        NSString *p = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:prog], *img = [p stringByAppendingPathComponent:@"romfs.img"], *d = [p stringByAppendingPathComponent:@"romfs"];
+        if (romfs_image_complete(img)) return img;
+        return [fm fileExistsAtPath:[d stringByAppendingPathComponent:@(DM_GAME_ROMFS_MARKER)]] ? d : nil;
+    }
     for (NSString *img in romfs_document_images(doc)) {
         if (!romfs_image_complete(img) || !romfs_identity_accepts(img)) continue;
         // A folder copy from before images is now dead weight of up to many GB (often cut off partway). Deleting its 300,000 files here took longer than iOS allows an app to start
@@ -71,10 +76,10 @@ static NSString *romfs_locate(void) {
     }
     NSString *bundledImage = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"romfs.img"];
     NSString *documentFolder = [doc stringByAppendingPathComponent:@"romfs"];
-    if ([fm fileExistsAtPath:[documentFolder stringByAppendingPathComponent:@DM_GAME_ROMFS_MARKER]]) return documentFolder;
+    if ([fm fileExistsAtPath:[documentFolder stringByAppendingPathComponent:@(DM_GAME_ROMFS_MARKER)]]) return documentFolder;
     if (romfs_image_complete(bundledImage)) return bundledImage;
     for (NSString *d in @[[doc stringByAppendingPathComponent:@"romfs"], [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"romfs"]])
-        if ([fm fileExistsAtPath:[d stringByAppendingPathComponent:@DM_GAME_ROMFS_MARKER]]) return d;   // only a directory containing the game profile's romfs_marker path counts (Mario: System/Resource, the resource size table)
+        if ([fm fileExistsAtPath:[d stringByAppendingPathComponent:@(DM_GAME_ROMFS_MARKER)]]) return d;   // only a directory containing the game profile's romfs_marker path counts (Mario: System/Resource, the resource size table)
     return nil;
 }
 
@@ -119,6 +124,7 @@ static void romfs_identity_report(NSString *doc) {
     fprintf(stderr, "[RED] boot: %s\n", g_boot_message);
 }
 
+static NSString *program_env(void);
 static int boot_env(void) {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
@@ -168,16 +174,11 @@ static int boot_env(void) {
     NSString *lang = [NSBundle.mainBundle objectForInfoDictionaryKey:@"DMLanguage"];
     if (!getenv("DM_LANG") && [lang isKindOfClass:NSString.class] && lang.length) setenv("DM_LANG", lang.UTF8String, 0);
     fprintf(stderr, "boot: game language %s\n", getenv("DM_LANG") ?: "en-US");
-    NSString *romfs = romfs_locate();
-    if (!romfs) { romfs_identity_report(doc); fprintf(stderr, "boot: game files not found (Documents/romfs.img, Documents/romfs or <App>/romfs)\n"); return 0; }
-    fprintf(stderr, "boot: game files %s\n", romfs.fileSystemRepresentation);
-    setenv("DM_ROMFS", romfs.fileSystemRepresentation, 0);
+    NSString *dm = program_env();
+    if (!dm) { romfs_identity_report(doc); fprintf(stderr, "boot: game files not found (Documents/romfs.img, Documents/romfs or <App>/romfs)\n"); return 0; }
     setenv("DM_SAVE", [doc stringByAppendingPathComponent:@"save"].fileSystemRepresentation, 0);
     setenv("DM_TEMP", [doc stringByAppendingPathComponent:@"temp"].fileSystemRepresentation, 0);
-    NSString *dm = [res stringByAppendingPathComponent:@"dm"];
-    setenv("DM_NVN_SHMAP", [dm stringByAppendingPathComponent:@"shader_map.tsv"].fileSystemRepresentation, 0);
-    setenv("DM_MSL_DIR", [res stringByAppendingPathComponent:@"msl"].fileSystemRepresentation, 0);
-    setenv("DM_FONT_DIR", [dm stringByAppendingPathComponent:@"font"].fileSystemRepresentation, 0);   // Shared-font stand-ins (standard.ttf / nintendo_ext.ttf): iOS lacks the macOS font path
+    setenv("DM_FONT_DIR", [[res stringByAppendingPathComponent:@"dm"] stringByAppendingPathComponent:@"font"].fileSystemRepresentation, 0);   // Shared-font stand-ins (standard.ttf / nintendo_ext.ttf): iOS lacks the macOS font path
     aoc_locate();   // add-on content: Documents/aoc, else <App>/aoc; an empty Documents/aoc explicitly selects no DLC
     NSString *pso = [res stringByAppendingPathComponent:@"pso"];   // the pipeline archive made offline (build_ipa.sh, dm/gfx/tools/pso_offline.py): the shader pairs' bases, which the device then does not build
     if ([fm fileExistsAtPath:pso]) setenv("DM_PSO_BUNDLE", pso.fileSystemRepresentation, 0);
@@ -185,6 +186,41 @@ static int boot_env(void) {
     g_argv[0] = strdup("dmhost"); g_argv[1] = strdup(dm.fileSystemRepresentation); g_argc = 2;
     dm_host_preload_start(g_argc, g_argv);   // Module tables / relocation / takeover run early in the background, in parallel with UIKit startup (and the launcher: the settings it sets are read when the game starts)
     return 1;
+}
+
+// The running program's files (an app holding the programs of one game, build_ipa.sh PROGRAMS_TSV: Super Mario 3D All-Stars' launcher and the games it starts): dm/programs.txt lists them, and each has
+// its own: <App>/p<N>/romfs.img (html and jit beside it), <App>/msl/p<N>, <App>/dm/p<N> (rewriter tables, shader tables, launcher settings) and its modules in sections tagged p<N> (DM_EMBED_TAG, loader.c).
+// The host's profile is the program's (DM_PROGRAM, main.c dm_game_cur). oe::ExecuteProgram records the program and its parameters in Documents/program.bin (DM_EXEC_OUT, hle_oe.c), names it on screen, schedules a
+// notification that opens the app (front_ios.m front_program_handoff) and ends; this start reads the record and takes it away, so a later start, after the player quit the game, is at the launcher as on the Switch.
+// Started from the record, the settings screen stays away (DM_LAUNCHER=0): the player is on the way into a game. Returns the program's dm folder (the host's modules folder), nil when its game files are missing
+static NSString *program_env(void) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0], *res = NSBundle.mainBundle.resourcePath;
+    NSString *dmdir = [res stringByAppendingPathComponent:@"dm"], *msl = [res stringByAppendingPathComponent:@"msl"], *prog = nil;
+    NSString *plist = [NSString stringWithContentsOfFile:[dmdir stringByAppendingPathComponent:@"programs.txt"] encoding:NSUTF8StringEncoding error:nil];
+    if (plist) {
+        NSArray *have = [plist componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        NSString *rec = [doc stringByAppendingPathComponent:@"program.bin"]; NSData *d = [NSData dataWithContentsOfFile:rec]; int32_t n = 0;
+        if (d.length >= 4) { memcpy(&n, d.bytes, 4); [fm removeItemAtPath:rec error:nil]; setenv("DM_LAUNCHER", "0", 1); }
+        if (![have containsObject:[NSString stringWithFormat:@"%d", n]]) { fprintf(stderr, "[RED] boot: program %d is not in this app; program 0\n", n); n = 0; d = nil; }
+        prog = [NSString stringWithFormat:@"p%d", n];
+        NSString *lp = [doc stringByAppendingPathComponent:@"launch_param.bin"];
+        if (d.length > 4) { [[d subdataWithRange:NSMakeRange(4, d.length - 4)] writeToFile:lp atomically:YES]; setenv("DM_LAUNCH_PARAM", lp.fileSystemRepresentation, 1); }
+        else { [fm removeItemAtPath:lp error:nil]; unsetenv("DM_LAUNCH_PARAM"); }
+        setenv("DM_PROGRAM", [NSString stringWithFormat:@"%d", n].UTF8String, 1);
+        setenv("DM_EMBED_TAG", prog.UTF8String, 1);
+        setenv("DM_EXEC_OUT", rec.fileSystemRepresentation, 0);
+        dmdir = [dmdir stringByAppendingPathComponent:prog]; msl = [msl stringByAppendingPathComponent:prog];
+        setenv("DM_APP_DM", dmdir.fileSystemRepresentation, 1);   // the launcher's settings (Launcher.swift)
+        fprintf(stderr, "boot: program %d of %s (%zu bytes of launch parameter)\n", n, [[plist stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] stringByReplacingOccurrencesOfString:@"\n" withString:@" "].UTF8String, d.length > 4 ? (size_t)d.length - 4 : 0);
+    }
+    NSString *romfs = romfs_locate(prog);
+    if (!romfs) return nil;
+    fprintf(stderr, "boot: game files %s\n", romfs.fileSystemRepresentation);
+    setenv("DM_ROMFS", romfs.fileSystemRepresentation, 0);
+    setenv("DM_NVN_SHMAP", [dmdir stringByAppendingPathComponent:@"shader_map.tsv"].fileSystemRepresentation, 0);
+    setenv("DM_MSL_DIR", msl.fileSystemRepresentation, 0);
+    return dmdir;
 }
 static int g_boot_ok;
 

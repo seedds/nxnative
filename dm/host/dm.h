@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 #include "game_profile.h"   // constants of the current game profile (generated from dm/games/<id>/game.tsv, chosen by the Makefile's GAME)
 
 // Explicit host work does not occupy a guest core (Metal submission, or a blocked native codec lock). A contended host mutex must count as blocked: a signal's same-core handoff
@@ -94,6 +95,14 @@ void nro_load_alone(module_t *m);   // relocate an NRO against itself only: a JI
 const char *dm_jit_serve_dir(void); uint8_t *dm_jit_layout_base(void);   // a served nn::jit image and the layout the modules are mapped in for it (loader.c, hle_jit.c)
 void nro_unload(module_t *m);   // take an NRO out of the lookups and bind the imports that pointed into it again
 int svc_nro_deactivate(module_t *m);   // mark inactive under the memory map lock, refusing while a stack borrows its data
+int svc_guest_file_fd(void);   // the guest file's descriptor while the block lies in one file, mapping it from offset 0 (DM_GUEST_FILE, hle_svc.c: read and write); -1 while the guest is anonymous, and with several files (DM_GUEST_FILE_CHUNK: svc_guest_file_at)
+// The files that hold the guest block (DM_GUEST_FILE; several with DM_GUEST_FILE_CHUNK, where an offset from the block's base is wrong past the first file), file i mapping its part of the
+// block from its offset 0, so that an address's file and offset come from svc_guest_file_at (that file's part starts at a - *off), and a range past the hi it gives goes on in the next file:
+// one lseek or pread per file, st_blocks summed over svc_guest_file_nth, fstatfs of file 0 for the volume they all lie on. Filled once at init and never changed afterwards: any
+// thread may read them without a lock. Output pointers may be NULL
+int svc_guest_files(void);   // how many files hold the guest block, 0 while it is anonymous
+int svc_guest_file_nth(int i, uintptr_t *lo, uintptr_t *hi);   // descriptor of file i and the guest addresses [lo, hi) it maps; -1 when i is out of range
+int svc_guest_file_at(uintptr_t a, off_t *off, uintptr_t *hi);   // descriptor of the file that maps a, a's offset in that file, and the end of that file's range; -1 outside the block or while anonymous
 void *module_sym(module_t *m, const char *name);
 int dm_sdk_major(void);   // SDK major version from the sdk module's version string (loader.c); 0 = unknown
 int dm_sdk_ounce(void);   // 1 when the sdk module was built for the Switch 2 (its spec string "spec: Ounce", loader.c)

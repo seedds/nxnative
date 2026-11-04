@@ -460,6 +460,14 @@ static void release_fallback(void) {
     assert(!resize(0) && !g_heap_cur);
     fail_mmap = 0;
 }
+// A heap given back reads 0 when it grows again: a fresh mapping in anonymous memory, and SetHeapSize's zeroing with the guest in files (DM_GUEST_FILE), where the pages keep their bytes
+static void heap_regrow(void) {
+    assert(!resize(4 * 1024 * 1024));
+    memset((void *)(heap + 3 * 1024 * 1024), 0x5a, P);
+    assert(!resize(2 * 1024 * 1024) && !resize(4 * 1024 * 1024));
+    for (size_t i = 0; i < P; ++i) assert(((uint8_t *)heap)[3 * 1024 * 1024 + i] == 0);
+    assert(!resize(0));
+}
 // Exercise the real host helper through SDK-shaped test entry points. Its stack
 // allocation must reach MapMemory as guest backing and outlive SDK copyback.
 #include "../hle_guestthread.c"
@@ -516,7 +524,7 @@ int main(int argc, char **argv) {
     for (unsigned i = 0; i < 8; ++i) assert(!pthread_create(&threads[i], NULL, init_worker, &addresses[i]));
     for (unsigned i = 0; i < 8; ++i) { assert(!pthread_join(threads[i], NULL)); assert(addresses[i] == addresses[0]); }
     alias = addresses[0]; stack = info(I_StackAddr); heap = info(I_HeapAddr);
-    lazy_commit(); alias_lifecycle(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); concurrency(); fragmented_queries();
+    lazy_commit(); alias_lifecycle(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); heap_regrow(); concurrency(); fragmented_queries();
     guest_helper();
     if (!DM_GAME_MEM_MAP_LIMIT) metadata_limit();
 #ifdef TEST_REAL_DIRTY
@@ -536,6 +544,6 @@ int main(int argc, char **argv) {
     assert(image_bytes() == 0x10000000);
     g_nmod = 0;
     free(g_alias_bits); free(g_alias_exposed); assert(!munmap(g_as, RESERVE));
-    printf("memory SVCs passed (map limit=%d, host page=%d)\n", DM_GAME_MEM_MAP_LIMIT, memory_getpagesize());
+    printf("memory SVCs passed (map limit=%d, host page=%d, guest files %d)\n", DM_GAME_MEM_MAP_LIMIT, memory_getpagesize(), svc_guest_files());
     return 0;
 }

@@ -146,6 +146,20 @@ static void cloud_saves_folder(void) {
     if (v) CFRelease(v);
 }
 
+// A game of several programs (Super Mario 3D All-Stars): pack_app.py's table of them, with this app's paths filled in (it may move), for oe::ExecuteProgram (DM_PROGRAMS, hle_oe.c)
+static void programs_table(const char *contents, const char *res, const char *sup) {
+    char in[PATH_MAX], out[PATH_MAX]; snprintf(in, sizeof in, "%s/dm/programs.tsv", res); snprintf(out, sizeof out, "%s/programs.tsv", sup);
+    FILE *f = fopen(in, "r"); if (!f) return;
+    FILE *o = fopen(out, "w"); if (!o) { fprintf(stderr, "[RED] launcher: cannot write %s\n", out); fclose(f); return; }
+    int c;
+    while ((c = fgetc(f)) != EOF) {
+        if (c != '@') { fputc(c, o); continue; }
+        int k = fgetc(f), e = fgetc(f); const char *v = k == 'R' ? res : k == 'C' ? contents : k == 'S' ? sup : NULL;
+        if (v && e == '@') fputs(v, o); else { fputc(c, o); if (k != EOF) fputc(k, o); if (e != EOF) fputc(e, o); }
+    }
+    fclose(f); fclose(o); setenv("DM_PROGRAMS", out, 0);
+}
+
 int main(int argc, char **argv) {
     char self[PATH_MAX], exe[PATH_MAX]; uint32_t n = sizeof self;
     if (_NSGetExecutablePath(self, &n) || !realpath(self, exe)) return 1;
@@ -199,6 +213,7 @@ int main(int argc, char **argv) {
     snprintf(p, sizeof p, "%s/pso", res); if (!stat(p, &st)) setenv("DM_PSO_BUNDLE", p, 0);   // the bases of every shader pair: the first start builds none
     if (*lang) setenv("DM_LANG", lang, 0);
     setenv("DM_WINDOW", "1", 0); setenv("DM_AUDIO", "1", 0);
+    programs_table(contents, res, sup);
     if (chdir(sup)) { fprintf(stderr, "[RED] launcher: cannot enter %s\n", sup); return 1; }
     struct sigaction sa = {.sa_handler = forward};   // no SA_RESTART: waitpid below sees EINTR and waits again
     sigemptyset(&sa.sa_mask);

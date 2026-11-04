@@ -113,6 +113,9 @@ def build(out, letter_font):
     for c, (nm, deg) in zip(range(0xE090, 0xE098), [('right', 0), ('left', 180), ('up', 90), ('down', 270), ('rightup', 45), ('rightdown', 315), ('leftdown', 225), ('leftup', 135)]):
         glyph('arrow_' + nm, [c], 1000, arrow(deg))
     glyph('stick', [0xE100], 1000, stick(None)); glyph('stickL', [0xE101, 0xE0C1], 1000, stick('L')); glyph('stickR', [0xE102, 0xE0C2], 1000, stick('R'))
+    # The other code points of the private-use block the real font covers get a plain ring: a game may take one of its glyphs without a null check (Super Mario 3D All-Stars' launcher
+    # sets U+E06B as its font's alternate character at boot and read through the null glyph), and in text a ring is no worse than the "?" of a missing icon
+    glyph('icon', [c for c in range(0xE000, 0xE200) if c not in cmap], 1000, lambda pen, cx: (contour(pen, circle(cx, CY, R)), contour(pen, circle(cx, CY, R - 70), hole=True)))
 
     order = ['.notdef'] + sorted(n for n in glyphs if n != '.notdef')
     fb = FontBuilder(EM, isTTF=True)

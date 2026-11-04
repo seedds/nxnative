@@ -11,6 +11,8 @@ static int hid_usleep(useconds_t usec);
 #undef clock_gettime
 #undef usleep
 #include "../pad_slots.h"
+void dm_oe_execute(int index, const void *param, size_t n) { (void)index; (void)param; (void)n; }   // DM_CTL "program", "webshot": not exercised here
+void front_web_shot(const char *path) { (void)path; }
 
 static int checks, fails, g_mode = 1, g_signals;
 static void *g_signalled;

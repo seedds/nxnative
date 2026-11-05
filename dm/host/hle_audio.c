@@ -564,10 +564,6 @@ HLE_FORCE("_ZN2nn5audio25GetReleasedAudioOutBufferEPNS0_8AudioOutE", "get a play
 // No device is listed and an open fails, so the calls that need an open AudioIn are never reached; they still answer without touching the guest object, in case a game ignores the open's result.
 // The buffer descriptor functions (SetAudioInBufferInfo, GetAudioInBufferDataPointer / Size) only fill and read the game's own struct and run in the sdk
 HLE_FORCE("_ZN2nn5audio12ListAudioInsEPNS0_11AudioInInfoEi", "audio input device list; the host has no microphone: 0 entries", int, h_ai_List, void *info, int n) { (void)info; (void)n; return 0; }
-// Switch 2 SDK 22's input-stream API asks the audio device manager (auddmg:u) for virtual inputs before it opens one. Ocarina of Time does this at boot; with no service the SDK aborts
-// in audio::detail::ListVirtualInputDevices. As with AudioIn above, a Mac host with no microphone exposes an empty list and the caller treats that as no available input device.
-HLE_FORCE("_ZN2nn5audio23ListVirtualInputDevicesEPNS0_15AudioDeviceNameEi", "virtual audio input device list (Switch 2); the host has no microphone: 0 entries",
-          int, h_ai_ListVirtual, void *names, int n) { (void)names; (void)n; return 0; }
 static Result ai_open(const char *name, void *lr) {
     static _Atomic int once; char sb[64];
     if (!atomic_exchange(&once, 1)) LOG("audio input %s: the host has no microphone, the open fails (call site %s)", name ? name : "(default)", site(lr, sb, sizeof sb));
@@ -701,7 +697,7 @@ typedef struct { int64_t a, b, c; } os_stats;
 HLE_FORCE("_ZN2nn5audio25GetOutputStreamStatisticsEPNS0_16OutputStreamTypeEb", "stream statistics: none kept", os_stats, h_os_Stats, void *g, bool reset) {
     (void)g; (void)reset; os_stats s = {0}; return s;
 }
-// SDK 21's input streams (a microphone, GameChat; Star Fox imports them), as AudioIn above: no device is listed and an open fails, so the calls that need an open stream are never reached;
+// SDK 21/22's input streams (a microphone, GameChat; Star Fox and Ocarina of Time import them), as AudioIn above: no device is listed and an open fails, so the calls that need an open stream are never reached;
 // they still answer without touching the guest object, in case a game ignores the open's result
 HLE_FORCE("_ZN2nn5audio23ListVirtualInputDevicesEPNS0_15AudioDeviceNameEi", "connect to auddmg:u; the host has no microphone: no device", int, h_is_List, void *names, int n) { (void)names; (void)n; return 0; }
 HLE_FORCE("_ZN2nn5audio31GetVirtualInputDevicePropertiesEPNS0_23VirtualDevicePropertiesERKNS0_15AudioDeviceNameE", "connect to auddmg:u; no such device", Result, h_is_Props, void *props, const char *name) { (void)props; (void)name; return RES_FAIL; }

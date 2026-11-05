@@ -9,32 +9,31 @@ Status marks reflect the update v131072 package currently under survey: **done**
 Run these steps from the nxnative checkout. They resume safely: the shader content-addressed cache keeps completed work. Never create `inputs.tsv`, `c1_full.tsv` or `cb_extent.tsv` by hand; only a successful unfiltered shader build proves and writes them.
 
 ```sh
-NX=/Users/vinicius/Documents/Switch/nxnative
-W=/Users/vinicius/Documents/Switch/0400486024DEC000-work
+NX=/Users/vinicius/Documents/Switch/nxnative-oot
+W=/Users/vinicius/Documents/Switch/0400486024DEC000-work-build
 G=0400486024DEC000
+NUP="/Users/vinicius/Documents/Switch/The Legend of Zelda Ocarina of Time [0400486024dec000][v131072] (1).nup"
 PY=/opt/homebrew/bin/python3.14
 cd "$NX"
 ```
 
-1. **Finish the currently running full Mac shader build.** Follow `"$W/logs/shader-build-full-02.log"`; if the process was interrupted, rerun the command below. Do not pass shader keys: an unfiltered run is what stamps the complete 42,343-stage library and generates the two constant-buffer tables.
+1. **Build the observed Mac shaders only.** Pass `--seen-shaders`; without it, the script builds the full 42,854-shader map, which can take hours. The selected build covers the 2,765 shader keys in `shader_seen.tsv` plus any missing keys reported by the latest run logs; uncovered areas may render incompletely. The script owns the cache setting and stores it in `"$W/shader/cache/cas.db"`. Do not set `DMSH_CAS` to a `cas/` directory: it must be a SQLite file.
 
    ```sh
-   DM_GAME="$G" DM_ROOT="$W" DMSH_CAS="$W/build/shader_lib/cas" J=12 \
-     "$PY" dm/gfx/tools/dmsh_build.py \
-     "$W/build/shader/pkg-v3" "$W/build/shader_lib" \
-     > "$W/logs/shader-build-full-02.log" 2>&1
+   DM_GAME="$G" DM_ROOT="$W" \
+     "$PY" scripts/build_ipa_from_nsp.py "$NUP" \
+     --work-dir "$W" --platform mac --seen-shaders --keep-extracted
    ```
 
-   The success gate is a final summary with all 42,343 shaders accounted for, no new failure class, and these files present for the chain printed by `"$PY" dm/gfx/tools/dmsh_chain.py`:
+   The success gate is a completed Mac build and `"$W/shader/partial-keys.txt"` containing the selected shader keys. This partial library is for development only; it is not stamped as full coverage and does not produce `c1_full.tsv` or `cb_extent.tsv`.
 
    ```sh
    CHAIN=$("$PY" dm/gfx/tools/dmsh_chain.py)
-   test -f "$W/build/shader_lib/b-$CHAIN/inputs.tsv"
-   test -f "dm/games/$G/c1_full.tsv"
-   test -f "dm/games/$G/cb_extent.tsv"
+   test -f "$W/shader/partial/b-$CHAIN/key"
+   wc -l < "$W/shader/partial-keys.txt"
    ```
 
-   If it fails, preserve the log, search it for `[RED]`, `failed` and `Traceback`, fix the general translator/Metal cause, and rerun the same command. Check free space before retrying; do not delete the CAS.
+   The CAS is the file `"$W/shader/cache/cas.db"`; a stale shell override pointing to a directory is ignored by the build script. If the stage fails, preserve the log, search it for `[RED]`, `failed` and `Traceback`, and rerun with the same `--seen-shaders` command.
 
 2. **Rebuild the host and run the scoped checks.** The host and libraries must name the same chain.
 
@@ -124,9 +123,9 @@ cd "$NX"
 - [x] **In progress:** build `shader_seen.tsv` plus the latest boot keys for macOS, sharing nxnative's shader CAS in the external work tree: 3,493 selected shaders succeeded, including the 22 newly split NDVE shaders, with no translation failure.
 - [x] Record the selected build result: 3,471 cache hits, 22 rebuilt shaders, 697 generated variants and 134 compiled variants; there were no undecoded binding slots or unrecognized binding kinds.
 - [ ] Rebuild the host after any shader-chain change and regenerate the chain header when chain tools change.
-- [ ] **Running:** finish the unfiltered 42,343-stage build for chain `72cda3479180`; require its `inputs.tsv`, `c1_full.tsv` and `cb_extent.tsv`, then verify that the stamped library loads.
+- [ ] Run an unfiltered full build of the current 42,854-shader map when full-game coverage is required; require its stamp and generated constant-buffer tables, then verify the library loads.
 - [ ] Expand the selected list from actual routes. A selected build is a development shortcut, not full-game shader coverage.
-- [ ] After the current full 42,343-stage build, use selected incremental builds only for newly discovered route keys; rerun the unfiltered build whenever profile inputs or the shader chain change.
+- [ ] Use selected incremental builds for newly discovered route keys; rerun the unfiltered build whenever full-game coverage is required or profile inputs / the shader chain change.
 
 ## 7. Reach the first correct frame
 

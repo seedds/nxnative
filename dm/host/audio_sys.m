@@ -40,8 +40,10 @@ void *dm_conv_open(const int *role, int tag, int rate) {
     // More than two channels needs a layout: a bare common format with 6 channels comes back nil, so the
     // layout-carrying form is the only road in.
     AVAudioFormat *inF = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatInt16 sampleRate:rate interleaved:YES channelLayout:inL];
+    AVAudioChannelLayout *outL = [[AVAudioChannelLayout alloc] initWithLayoutTag:kAudioChannelLayoutTag_Stereo];
+    if (!outL) { ARMERR("the stereo output channel layout did not build"); return NULL; }
     AVAudioFormat *outF = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatInt16 sampleRate:rate interleaved:YES
-                                                      channelLayout:[[AVAudioChannelLayout alloc] initWithLayoutTag:kAudioChannelLayoutTag_Stereo]];
+                                                      channelLayout:outL];
     if (!inF || !outF) { ARMERR("the formats did not build (input %d output %d)", inF != nil, outF != nil); return NULL; }
     AVAudioConverter *cv = [[AVAudioConverter alloc] initFromFormat:inF toFormat:outF];
     if (!cv) { ARMERR("the converter did not build"); return NULL; }
@@ -115,7 +117,9 @@ void *dm_ausm_open(const int *role, int tag, unsigned slice) {
     SET(kAudioUnitProperty_ElementCount, kAudioUnitScope_Input, 0, &one, sizeof one);
     SET(kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &mf, sizeof mf);   // one fixed slice for the instance's life: the caller banks whole slices around it
     s.mChannelsPerFrame = 2; SET(kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &s, sizeof s);
-    AudioChannelLayout st = { .mChannelLayoutTag = kAudioChannelLayoutTag_Stereo };
+    AudioChannelLayout st;
+memset(&st, 0, sizeof(st));
+st.mChannelLayoutTag = kAudioChannelLayoutTag_Stereo;
     SET(kAudioUnitProperty_AudioChannelLayout, kAudioUnitScope_Output, 0, &st, sizeof st);        // the output is stereo either way; the spatial render describes itself, it does not request more channels
     s.mChannelsPerFrame = 6; SET(kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &s, sizeof s);
     SET(kAudioUnitProperty_AudioChannelLayout, kAudioUnitScope_Input, 0, acl, (UInt32)aclSz);

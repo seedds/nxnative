@@ -745,19 +745,41 @@ static int mtl_addr_known(uint64_t addr, uint64_t len) {
     pthread_mutex_lock(&g_mu); int ok = big_of(addr) >= 0 || pool_find(addr, len) >= 0; pthread_mutex_unlock(&g_mu);
     return ok;
 }
-uint64_t nvn_sparse_phys(uint64_t a, uint64_t n, uint64_t *mapped);
+uint64_t nvn_sparse_phys(uint64_t a, uint64_t n, uint64_t *mapped); uint64_t nvn_sparse_vrun(uint64_t a, uint64_t n, uint64_t *phys, uint64_t *run);
 // DM_NVN_SPARSE_PHYS=0: a lookup of more than one page inside a sparse pool goes through the virtual range's buffers as before (see nvn_sparse_phys)
-static uint64_t sparse_redirect(uint64_t addr, uint64_t *lenp) {   // may shorten *lenp to the mapped part
-    uint64_t len = *lenp;
-    static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_SPARSE_PHYS"); on = !e || atoi(e); if (!on) MLOG("DM_NVN_SPARSE_PHYS=0: lookups in sparse pools are not redirected"); }
-    if (!on || len <= 0x1000) return addr;
-    uint64_t mp = 0, p = nvn_sparse_phys(addr, len, &mp); if (!p) return addr;
-    *lenp = mp;
+// DM_NVN_SPARSE_RUN=0 (A/B, on by default): a lookup whose mapped part is one virtual run in several physical pieces is not shortened to it (see nvn_sparse_vrun), and so resolves
+// to the larger entry made over the virtual range before the remaps, which reads stale pages
+static uint64_t sparse_redirect(uint64_t addr, uint64_t *lenp, uint64_t *runp) {   // may shorten *lenp to the mapped part; *runp: the key of the run's own pool entry to look up, or 0
+    uint64_t len = *lenp; *runp = 0;
+    static int on = -1, run = -1; if (on < 0) { const char *e = getenv("DM_NVN_SPARSE_PHYS"); on = !e || atoi(e); if (!on) MLOG("DM_NVN_SPARSE_PHYS=0: lookups in sparse pools are not redirected"); }
+    if (run < 0) { const char *e = getenv("DM_NVN_SPARSE_RUN"); run = !e || atoi(e); if (!run) MLOG("DM_NVN_SPARSE_RUN=0: lookups in sparse pools across several physical pieces are not shortened to their mapped run"); }
+    if ((!on && !run) || len <= 4096) return addr;   // one page or less: nothing to redirect
+    uint64_t p = 0, rk = 0, vr = nvn_sparse_vrun(addr, len, &p, run ? &rk : NULL);
+    if (!p || !on) {   // several physical pieces (or the physical redirect off): the run's own buffer over the virtual range, made after its last remap
+        if (run && vr && rk) { *lenp = vr; *runp = rk; static int l2; if (l2 < 8) { l2++; MLOG("sparse pool lookup %#llx+%#llx → the buffer of its mapped run at %#llx (%#llx bytes mapped, several physical pieces)", (unsigned long long)addr, (unsigned long long)len, (unsigned long long)rk, (unsigned long long)vr); } }
+        return addr; }
+    *lenp = vr;
     static int lines; if (lines < 8) { lines++; MLOG("sparse pool lookup %#llx+%#llx → its physical pages at %#llx", (unsigned long long)addr, (unsigned long long)len, (unsigned long long)p); }
     return p;
 }
+// The pool entry made for a sparse pool's mapped run (key: the run's start), holding [addr, addr + len): → its index, or -1. Not through pool_find, which may return an older
+// entry over the same virtual range (a large pool's chunk), made before pages under it were remapped. Caller holds g_mu
+static int pool_run(uint64_t key, uint64_t addr, uint64_t len) {
+    static __thread struct { uint64_t gen, key; int i; } c[4]; static __thread unsigned nx; uint64_t gen = atomic_load_explicit(&g_pool_gen, memory_order_relaxed);
+    for (int k = 0; k < 4; k++) if (c[k].gen == gen && c[k].key == key) { int i = c[k].i; if (i < g_npool && addr >= g_pools[i].lo && addr + len <= g_pools[i].hi) return i; }
+    for (int i = 0; i < g_npool; i++) if ((uint64_t)(uintptr_t)g_pools[i].key == key && addr >= g_pools[i].lo && addr + len <= g_pools[i].hi) { c[nx++ & 3] = (typeof(c[0])){gen, key, i}; return i; }
+    return -1;
+}
+static int run_lookup(uint64_t key, uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_t *gpu) {
+    pthread_mutex_lock(&g_mu); int i = pool_run(key, addr, len);
+    if (i >= 0) { pool_res(i); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; if (gpu) *gpu = g_pools[i].gpu + *off; }
+    pthread_mutex_unlock(&g_mu);
+    if (i < 0) { static int l; if (l++ < 8) MLOG("[RED] sparse pool run %#llx: no pool entry of its own holds %#llx+%#llx; looked up as before", (unsigned long long)key, (unsigned long long)addr, (unsigned long long)len); }
+    return i >= 0;
+}
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
-    addr = sparse_redirect(addr, &len);
+    uint64_t rk; addr = sparse_redirect(addr, &len, &rk);
+    if (rk && run_lookup(rk, addr, len, buf, off, NULL)) return 1;
     const pc_ent *c = pc_get(addr, len);
     if (c) { *buf = (__bridge void *)c->buf; *off = addr - c->base; return 1; }
     int ok = 0;
@@ -768,7 +790,8 @@ int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     return ok;
 }
 int mtl_gpu_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_t *gpu) {
-    addr = sparse_redirect(addr, &len);
+    uint64_t rk; addr = sparse_redirect(addr, &len, &rk);
+    if (rk && run_lookup(rk, addr, len, buf, off, gpu)) return 1;
     const pc_ent *c = pc_get(addr, len);
     if (c) { *buf = (__bridge void *)c->buf; *off = addr - c->base; *gpu = c->gpu + *off; return 1; }
     int ok = 0;

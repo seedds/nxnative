@@ -1,6 +1,7 @@
 // Buffers in sparse virtual pools (hle_nvn.c vrun_set, nvn_sparse_phys; nvn_mtl.m sparse_redirect): more than 1024 separately mapped runs all stay addressable; a lookup of a
 // multi-page buffer whose mapped part is one contiguous physical range resolves to the physical pool's own buffer at that offset (a zero-copy buffer over the remapped virtual
-// range does not see the physical pages on the Mac: PRAGMATA's title Earth read zeros); a lookup across pieces from different physical places is not redirected.
+// range does not see the physical pages on the Mac: PRAGMATA's title Earth read zeros); a lookup across pieces from different physical places is not redirected to one, but
+// resolves to the buffer of its mapped run, which the GPU reads both pieces through (PRAGMATA's title terrain).
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
@@ -52,6 +53,22 @@ int main(void) { @autoreleasepool {
     // 3. Two pieces from different physical places: not redirected
     uint64_t vo2 = 600ull << 20; map_at(vo2, 1u << 20, 16u << 20); map_at(vo2 + (1u << 20), 1u << 20, 40u << 20);
     if (v) { uint64_t mp = 0; CHECK("non-contiguous mapping not redirected", nvn_sparse_phys((uint64_t)(uintptr_t)v->base + vo2, 2u << 20, &mp) == 0); }
+    // 4. A 16 MB lookup over those two pieces and the unmapped pages after them (PRAGMATA's terrain instance buffer: 80 MB, 448 KB mapped in two pieces) resolves to the buffer
+    // of their mapped run, and the GPU reads both pieces through it. A copy on the GPU, as the CPU-side view of a zero-copy buffer is not what failed on the Mac
+    if (v) { uint64_t a = (uint64_t)(uintptr_t)v->base + vo2, ph = 1, rk = 0; void *mb = NULL; uint64_t mo = 0, gpu = 0;
+        CHECK("virtual run of two pieces", nvn_sparse_vrun(a, 16u << 20, &ph, &rk) == (2u << 20) && ph == 0 && rk == a);
+        CHECK("lookup succeeds", mtl_gpu_addr(a, 16u << 20, &mb, &mo, &gpu));
+        id<MTLBuffer> src = (__bridge id<MTLBuffer>)mb;
+        CHECK("the run's own buffer", src && (const uint8_t *)src.contents + mo == (const uint8_t *)(uintptr_t)a && src.length - mo >= (2u << 20));
+        if (src) { id<MTLBuffer> dst = [g_dev newBufferWithLength:2u << 20 options:MTLResourceStorageModeShared];
+            id<MTLCommandQueue> q = [g_dev newCommandQueue]; id<MTLCommandBuffer> cb = [q commandBuffer]; id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
+            [be copyFromBuffer:src sourceOffset:mo toBuffer:dst destinationOffset:0 size:2u << 20]; [be endEncoding]; [cb commit]; [cb waitUntilCompleted];
+            const uint8_t *d = dst.contents;
+            CHECK("the GPU reads the first piece", !memcmp(d, phys + (16u << 20), 1u << 20));
+            CHECK("the GPU reads the second piece", !memcmp(d + (1u << 20), phys + (40u << 20), 1u << 20)); } }
+    // 5. A piece mapped after a hole: no virtual run (the part past the hole would be out of the run's buffer)
+    if (v) { uint64_t vo3 = 700ull << 20; map_at(vo3, 1u << 20, 20u << 20); map_at(vo3 + (2u << 20), 1u << 20, 44u << 20);
+        uint64_t ph = 0, rk = 0; CHECK("no run across a hole", nvn_sparse_vrun((uint64_t)(uintptr_t)v->base + vo3, 4u << 20, &ph, &rk) == 0 && rk == 0); }
     printf("%s: %d checks, %d failed\n", failed ? "FAIL" : "ok", checks, failed);
     return failed != 0;
 } }

@@ -2826,11 +2826,13 @@ uint64_t nvn_sparse_gen(void) { return atomic_load(&g_vp_gen); }
 // A buffer the GPU reads whole across many separately remapped pieces gets a zero-copy buffer over the virtual range, which on the Mac does not see the pages remapped under it
 // (PRAGMATA's mesh stage instance buffer, 80 MB in a 1 GB sparse pool mapped in 64 KB pieces, read as zeros while the CPU and one-word lookups saw the records): nvn_mtl.m binds
 // the physical pool's own buffer at that offset instead. A one-entry cache per caller thread, keyed by the mapping generation
-uint64_t nvn_sparse_phys(uint64_t a, uint64_t n, uint64_t *mapped) {
+// *vrun (may be NULL): the mapped part's length when it is one virtual run from a (any number of physical pieces) with nothing mapped after it, else 0 (nvn_sparse_vrun)
+static uint64_t sparse_phys2(uint64_t a, uint64_t n, uint64_t *mapped, uint64_t *vrun) {
+    if (vrun) *vrun = 0;
     if (!n || !__atomic_load_n(&g_nvp, __ATOMIC_ACQUIRE)) return 0;
-    static __thread uint64_t ca, cn, cg, cp, cm; uint64_t gen = atomic_load(&g_vp_gen);
-    if (ca == a && cn == n && cg == gen) { *mapped = cm; return cp; }
-    uint64_t m = 0;
+    static __thread uint64_t ca, cn, cg, cp, cm, cv; uint64_t gen = atomic_load(&g_vp_gen);
+    if (ca == a && cn == n && cg == gen) { *mapped = cm; if (vrun) *vrun = cv; return cp; }
+    uint64_t m = 0, vr = 0;
     uint64_t res = 0; pthread_mutex_lock(&g_vp_mu);
     for (int k = 0; k < g_nvp; k++) { const struct vpool *v = g_vp[k]; uint64_t base = (uint64_t)(uintptr_t)v->base;
         if (a < base || a >= base + v->len) continue;
@@ -2841,16 +2843,48 @@ uint64_t nvn_sparse_phys(uint64_t a, uint64_t n, uint64_t *mapped) {
         for (; q < n; q += 0x1000) { const vpte *t = vpt_get(v, o + q); if (!t || !t->phys) break; if (t->phys != p0 + q) { ok = 0; break; } }
         m = q < n ? q : n;
         for (uint64_t r = q; ok && r < n; r += 0x1000) { const vpte *t = vpt_get(v, o + r); if (t && t->phys) ok = 0; }
+        if (ok) vr = m;
+        else {   // the virtual run: mapped pages from a on, whatever their physical places, then nothing mapped up to n
+            uint64_t r = q; for (; r < n; r += 0x1000) { const vpte *t = vpt_get(v, o + r); if (!t || !t->phys) break; }
+            uint64_t e = r; int tail = 0; for (; r < n; r += 0x1000) { const vpte *t = vpt_get(v, o + r); if (t && t->phys) { tail = 1; break; } }
+            if (!tail) vr = e < n ? e : n; }
         if (ok) res = (uint64_t)(uintptr_t)p0;
-        else if (n >= (1u << 20)) { static int lines; if (lines < 12) { lines++;   // why a large lookup is not redirected: its pieces
-            int pieces = 1, holes = 0; uint64_t mappedp = 0; const uint8_t *prev = NULL;
-            for (uint64_t r = 0; r < n; r += 0x1000) { const vpte *t = vpt_get(v, o + r); const uint8_t *ph = t ? t->phys : NULL; if (ph) mappedp++; else holes++;
+        else if (n >= (1u << 20)) { static int lines; static uint64_t seen[16]; int fresh = 1; for (int z = 0; z < 16; z++) if (seen[z] == a) fresh = 0;
+            if (fresh && lines < 16) { seen[lines++] = a;   // why a large lookup is not redirected: its pieces (each address once)
+            int pieces = 1; uint64_t mappedp = 0; const uint8_t *prev = NULL;
+            for (uint64_t r = 0; r < n; r += 0x1000) { const vpte *t = vpt_get(v, o + r); const uint8_t *ph = t ? t->phys : NULL; if (ph) mappedp++;
                 if (r && ph && prev && ph != prev + 0x1000) pieces++; if (r && ph && !prev) pieces++; prev = ph; }
             LOG("[nvn] sparse lookup %#llx+%#llx not redirected: %llu of %llu pages mapped, %d contiguous pieces, first break at +%#llx (phys %p)", (unsigned long long)a, (unsigned long long)n,
-                (unsigned long long)mappedp, (unsigned long long)(n >> 12), pieces, (unsigned long long)q, (const void *)p0); } }
+                (unsigned long long)mappedp, (unsigned long long)(n >> 12), pieces, (unsigned long long)q, (const void *)p0);
+            { char t[1200]; size_t tl = 0; const uint8_t *st = NULL, *pv = NULL; uint64_t so = 0; int np = 0;   // the pieces: virtual offset, length, physical start
+              for (uint64_t r = 0; r <= n && np < 24; r += 0x1000) { const vpte *t2 = r < n ? vpt_get(v, o + r) : NULL; const uint8_t *ph = t2 ? t2->phys : NULL;
+                  if (st && (!ph || ph != pv + 0x1000)) { tl += (size_t)snprintf(t + tl, sizeof t - tl, " +%#llx:%#llx@%p", (unsigned long long)so, (unsigned long long)(r - so), (const void *)st); np++; st = NULL; }
+                  if (ph && !st) { st = ph; so = r; } pv = ph; }
+              LOG("[nvn]   pieces:%s", t); } } }
         break; }
     pthread_mutex_unlock(&g_vp_mu);
-    ca = a; cn = n; cg = gen; cp = res; cm = m; *mapped = m; return res;
+    ca = a; cn = n; cg = gen; cp = res; cm = m; cv = vr; *mapped = m; if (vrun) *vrun = vr; return res;
+}
+uint64_t nvn_sparse_phys(uint64_t a, uint64_t n, uint64_t *mapped) { return sparse_phys2(a, n, mapped, NULL); }
+// [a, a + n) of a sparse pool whose mapped part is one run of the pool's virtual range from a, possibly in several physical pieces, with nothing mapped after it: → the run's
+// mapped length (0 otherwise or outside sparse pools), and the physical address when it is also one physical piece (nvn_sparse_phys). The run has a zero-copy buffer of its own,
+// made over the virtual range after its last remap (vrun_set), which does see the physical pages; nvn_mtl.m sparse_redirect looks up only the mapped length so that the lookup
+// lands on it instead of an older, larger entry made before the remaps (PRAGMATA's title terrain: its mesh stage's instance, cluster and vertex buffers in 2 to 9 pieces read zeros)
+// *run: the host address of that run's start, the key of its buffer (0 when the run table does not hold it)
+uint64_t nvn_sparse_vrun(uint64_t a, uint64_t n, uint64_t *phys, uint64_t *run) {
+    uint64_t mp = 0, vr = 0; uint64_t p = sparse_phys2(a, n, &mp, &vr); if (phys) *phys = p; if (run) *run = 0;
+    if (!vr || !run) return vr;
+    static __thread uint64_t ca, cg, cr; uint64_t gen = atomic_load(&g_vp_gen);
+    if (ca == a && cg == gen) { *run = cr; return vr; }
+    uint64_t r = 0; pthread_mutex_lock(&g_vp_mu);
+    for (int k = 0; k < g_nvp; k++) { const struct vpool *v = g_vp[k]; uint64_t base = (uint64_t)(uintptr_t)v->base;
+        if (a < base || a >= base + v->len) continue;
+        uint64_t o = a - base; int lo = 0, hi = v->nrun - 1, hit = -1;   // the last run starting at or before o
+        while (lo <= hi) { int m = (lo + hi) / 2; if (v->run[m].lo <= o) { hit = m; lo = m + 1; } else hi = m - 1; }
+        if (hit >= 0 && o + vr <= v->run[hit].hi) r = base + v->run[hit].lo;
+        break; }
+    pthread_mutex_unlock(&g_vp_mu);
+    ca = a; cg = gen; cr = r; *run = r; return vr;
 }
 uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n) {
     pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); uint64_t miss = 0;

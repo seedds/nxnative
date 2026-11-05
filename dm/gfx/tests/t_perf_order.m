@@ -82,7 +82,11 @@ static void reset(void) {
     state_reset(); memset(&R,0,sizeof R); g_csh_n=0;
 }
 static uint64_t execute(chain *c) {
-    emit(c,OP_END,NULL,0); reset(); mtl_sub_begin(); mtl_exec(c->p);
+    emit(c,OP_END,NULL,0); reset();
+    // The opt-in residency comparison must preserve the same pixels and queue
+    // ordering while switching both ways between consecutive submissions.
+    if(g_res_ab_n) { static uint64_t frame; mtl_set_frame(frame); frame+=(uint64_t)g_res_ab_n; }
+    mtl_sub_begin(); mtl_exec(c->p);
     uint64_t f=mtl_sub_commit(); CHECK("submission completes",mtl_wait(f,2000000000ull));
     mtl_drain(); CHECK("no GPU error",!mtl_last_commit_error()); return f;
 }

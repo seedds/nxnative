@@ -122,13 +122,14 @@ int main(void) { @autoreleasepool {
     EXPECT("other depth mode: every pair", 3, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
     EXPECT("other depth mode: every base compiled", 3, g_pre_built);
     atomic_store(&g_depth_zero, 0);
-    // other pairs (a second list): the device's prebuild runs and takes the bundled bases it finds
+    // other pairs (a second list): the device's prebuild runs and takes the bundled bases it finds, and the function-constant pair's base from the file the device wrote for it
+    // earlier in this run ("covered"), which the run opened when it wrote it
     [NSFileManager.defaultManager removeItemAtPath:[arch stringByAppendingPathComponent:@"prebuilt.tsv"] error:nil];
     put([tables stringByAppendingPathComponent:@"more.tsv"], @"v1\tf2\nv1\tfc\n"); setenv("DM_PSO_PAIRS", [tables stringByAppendingPathComponent:@"more.tsv"].UTF8String, 1);
     reset_counts();
     EXPECT("other pairs: every pair", 3, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
-    EXPECT("other pairs: two bases from the bundle", 2, g_pre_archived);
-    EXPECT("other pairs: one compiled", 1, g_pre_built);
+    EXPECT("other pairs: two bases from the bundle, one from this run's own file", 3, g_pre_archived);
+    EXPECT("other pairs: none compiled", 0, g_pre_built);
     unsetenv("DM_PSO_PAIRS");
     // a matching stamp but an archive without the bases (here: one of the device's own files): the probe finds none, so it is not trusted
     @autoreleasepool {

@@ -49,11 +49,12 @@ int main(void) { @autoreleasepool {
     }
     up_flush(); rec_publish(); up_wait_zero(&g_up_pending, WS_DIAG);
     size_t idle = live_bytes(buffers);
-    CHECK(peak <= (512u << 20), "streaming burst staging stays within 512 MiB");
+    CHECK(peak <= 3 * UP_BATCH_BYTES, "streaming burst staging stays within three upload batches");
     // Demand reuse retains a primary and one bounded overflow block per slot.
     // Everything beyond those six blocks must retire before the rendering fence.
     CHECK(idle <= (up_reuse() ? (192u << 20) : (96u << 20)),
           "completed uploads retain only the bounded slot staging cache");
+    if (UP_BATCH_BYTES == (32u << 20)) CHECK(idle <= (96u << 20), "iOS retains at most three 32 MiB blocks");
     m4_end(encoder);
     uint64_t fence = mtl_sub_commit();
     CHECK(mtl_wait(fence, 5000000000ull), "rendering submission completes");
@@ -66,6 +67,27 @@ int main(void) { @autoreleasepool {
         uint8_t pixel[4] = {0};
         [textures[i] getBytes:pixel bytesPerRow:4 fromRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0];
         for (int c = 0; c < 4; c++) CHECK(pixel[c] == i + 1, "upload pixels survive batch splitting and staging retirement");
+    }
+    // An individual texture bigger than the iOS batch budget must stay whole.
+    // Follow it with another allocation to force a split after that upload.
+    id<MTLTexture> large = [g_dev newTextureWithDescriptor:d]; res_add(large);
+    mtl_sub_begin(); up_begin();
+    size_t large_off;
+    id<MTLBuffer> large_buffer = up_alloc(64u << 20, &large_off);
+    CHECK(large_buffer.length - large_off >= (64u << 20), "oversized texture receives its whole staging allocation");
+    [g_up_ce fillBuffer:large_buffer range:NSMakeRange(large_off, 256) value:173];
+    up_blit_add(large_buffer, large_off, 256, 256, MTLSizeMake(1, 1, 1), large, 0, 0);
+    [g_up_texs addObject:large];
+    upload_one(textures[0], buffers, 211);
+    fence = mtl_sub_commit();
+    CHECK(mtl_wait(fence, 5000000000ull), "oversized upload submission completes");
+    CHECK(!mtl_last_commit_error(), "no oversized upload GPU error");
+    uint8_t large_pixel[4] = {0}, next_pixel[4] = {0};
+    [large getBytes:large_pixel bytesPerRow:4 fromRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0];
+    [textures[0] getBytes:next_pixel bytesPerRow:4 fromRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0];
+    for (int c = 0; c < 4; c++) {
+        CHECK(large_pixel[c] == 173, "oversized upload pixels survive the batch split");
+        CHECK(next_pixel[c] == 211, "upload after the oversized texture survives");
     }
     printf("upload budget: peak %zu MiB, completed %zu MiB, %d checks, %d failed\n", peak >> 20, idle >> 20, checks, fails);
     return fails != 0;

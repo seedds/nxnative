@@ -36,8 +36,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x988, InstName.Sts, AStLocalShared, N, writesRd: false);
             x(0x38c, InstName.Atoms, AAtoms, N);
             x(0x38d, InstName.Atoms, AAtomsCas, N);
-            x(0x992, InstName.Membar, AMembar, N, writesRd: false);
-            x(0x9ab, InstName.Membar, AErrbar, N, writesRd: false);
 
             x(0xb60, InstName.Tex, ATex, InstProps.Tex);
             x(0x361, InstName.Tex, ATex, InstProps.Tex);
@@ -53,7 +51,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0xb9b, InstName.Sust, ASurface, N, writesRd: false);
             x(0xb9d, InstName.Sust, ASurface, N, writesRd: false);
             x(0x593, InstName.Suatom, ASuatom, N);
+            x(0x59f, InstName.Sured, ASured, N, writesRd: false);
             x(0xb1d, InstName.Bar, ABar, N, writesRd: false);
+            x(0x992, InstName.Membar, AMembar, N, writesRd: false);
+            x(0x9ab, InstName.Membar, AErrbar, N, writesRd: false);
         }
 
         // ---- attributes ----
@@ -327,17 +328,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, res);
         }
 
-        // MEMBAR: the order of this thread's memory operations
-        public static void AMembar(EmitterContext context)
-        {
-            context.MemoryBarrier();
-        }
-
-        // ERRBAR, after a MEMBAR: waits for errors of earlier memory operations to be reported, which here is nothing to do
-        public static void AErrbar(EmitterContext context)
-        {
-        }
-
         // ATOMS.CAS Rd, [Ra + offset], Rb (expected), Rc (new value): Rd = 1 when the swap happened, not the old value (Fire Emblem Fortune's Weave's only use is a retry loop for a float add that repeats until Rd == 1).
         // Only the 32-bit form (operation 3 at 87..91, size 0) occurs
         public static void AAtomsCas(EmitterContext context)
@@ -363,10 +353,18 @@ namespace Ryujinx.Graphics.Shader.Instructions
             return stride == 0 ? ra : context.ShiftLeft(ra, Const(stride + 1));
         }
 
-        // The 32-bit address of a local / shared access: Ra by its stride, plus the uniform register (at urLo in the uniform form, bit 91)
-        private static Operand ALocalAddress(EmitterContext context, AmpereOp x, int urLo)
+        // The 32-bit address of a local / shared access: Ra plus the uniform register (at urLo in the uniform form, bit 91). A shared access scales Ra by
+        // the stride at 78..80 (0..3: X1, X4, X8, X16). Inferred, not documented: from NAK's encoder as recalled (OffsetStride) and Mario Kart World's SASS,
+        // whose 32-bit LDS / STS carry 1 (X4) and 128-bit ones 3 (X16), as its froxel compute shaders index vec4 slots as LDS.128 [Ra.X16 + imm]
+        private static Operand ALocalAddress(EmitterContext context, AmpereOp x, int urLo, bool shared)
         {
-            Operand addr = x.Ra == RegisterConsts.RegisterZeroIndex ? Const(0) : AStride(context, x, Register(x.Ra, RegisterType.Gpr));
+            Operand addr = Register(x.Ra, RegisterType.Gpr);
+            int stride = shared ? x.Bits(78, 80) : 0;
+
+            if (stride != 0 && x.Ra != RegisterConsts.RegisterZeroIndex)
+            {
+                addr = context.ShiftLeft(addr, Const(stride + 1));
+            }
 
             if (x.Bit(91) && x.Bits(urLo, urLo + 6) != RegisterConsts.UniformZeroIndex)
             {
@@ -382,7 +380,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             StorageKind kind = x.Opcode == AmpereOpcodes.Ldl ? StorageKind.LocalMemory : StorageKind.SharedMemory;
 
-            EmitLoad(context, kind, (LsSize2)x.Bits(73, 76), ALocalAddress(context, x, 32), x.Rd, (int)x.SignedField(40, 64));
+            EmitLoad(context, kind, (LsSize2)x.Bits(73, 76), ALocalAddress(context, x, 32, kind == StorageKind.SharedMemory), x.Rd, (int)x.SignedField(40, 64));
         }
 
         // STL / STS [Ra + UR + offset], Rb: UR at 64
@@ -391,7 +389,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             StorageKind kind = x.Opcode is 0x387 or 0x987 ? StorageKind.LocalMemory : StorageKind.SharedMemory;
 
-            EmitStore(context, kind, (LsSize2)x.Bits(73, 76), ALocalAddress(context, x, 64), x.Rb, (int)x.SignedField(40, 64));
+            EmitStore(context, kind, (LsSize2)x.Bits(73, 76), ALocalAddress(context, x, 64, kind == StorageKind.SharedMemory), x.Rb, (int)x.SignedField(40, 64));
         }
 
         // ---- surfaces ----
@@ -438,6 +436,41 @@ namespace Ryujinx.Graphics.Shader.Instructions
             EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, (SuatomOp)x.Bits(87, 91), (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, 0, x.Rd, false, isBindless: false, compareAndSwap: false);
         }
 
+        // SURED [Ra], Rb (0x59f): non-returning image atomic. NVIDIA nvdisasm 12.9.88, SM86, decoded MKW ab77eaee44cfef88 +0xc0 as
+        // SURED.D.2D.ADD.STRONG.GPU.IGN [R4], R0, 0x0, 0xc. Independent bit/field probes verified Ra 24..32, Rb 32..40, handle 40..59,
+        // bounds 59..61, dimension 61..64, byte addressing 72, size 73..76 and operation 87..90. Bits 16..24 and 90 are not a destination/op bit.
+        // These fields match Maxwell's EmitSured, including signed formats, byte addressing, IGN bounds checks and discarding the result.
+        public static void ASured(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            (int handle, int cbufSlot) = ATexHandle(context, x);
+            int dimensions = x.Bits(61, 64);
+            RedOp operation = (RedOp)x.Bits(87, 90);
+
+            if (cbufSlot != TextureOperation.DefaultCbufSlot)
+            {
+                throw AFail(context, $"SURED handle in bank {cbufSlot}");
+            }
+
+            if (dimensions > (int)SuDim._3d)
+            {
+                throw AFail(context, $"SURED dimension {dimensions}");
+            }
+
+            if (x.Bits(59, 61) != (int)Clamp.Ign)
+            {
+                throw AFail(context, "SURED bounds mode other than IGN");
+            }
+
+            // NVIDIA INC/DEC wrap at the source limit; SPIR-V's IIncrement/IDecrement do not. Do not silently use the latter.
+            if (operation is RedOp.Inc or RedOp.Dec)
+            {
+                throw AFail(context, "SURED increment/decrement with a limit");
+            }
+
+            EmitSured(context, (SuDim)dimensions, Clamp.Ign, operation, (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, 0, x.Bit(72), isBindless: false);
+        }
+
         // BAR.SYNC: the workgroup barrier
         public static void ABar(EmitterContext context)
         {
@@ -449,6 +482,44 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             context.Barrier();
+        }
+
+        // MEMBAR: scope 76..79 (Mesa NAK sm70_encode.rs OpMemBar: 0 CTA, 2 GPU, 3 system; 5, which Mario Kart World encodes, is a system-wide scope after
+        // the Eglantine fork's lower_to_maxwell.h:1057), 72 .MMIO and 80 .SC clear. CTA orders the workgroup's memory; every wider scope is a device
+        // barrier, as Maxwell's MEMBAR translates (Metal has no scope beyond the device)
+        public static void AMembar(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            int scope = x.Bits(76, 79);
+
+            if (x.Bits(32, 64) != 0 || x.Bits(64, 96) != scope << 12 || scope is not (0 or 2 or 3 or 5))
+            {
+                throw AFail(context, $"MEMBAR form (scope {scope})");
+            }
+
+            if (scope == 0)
+            {
+                context.GroupMemoryBarrier();
+            }
+            else
+            {
+                context.MemoryBarrier();
+            }
+        }
+
+        // ERRBAR (0x9ab; the name from Eden-NS2's ampere_isa_table.h:401, no encoder in Mesa NAK) with words 1 and 2 zero: a device memory barrier, as the
+        // Eglantine fork's lower_to_maxwell.h:1061 lowers it. A conservative stand-in: what ERRBAR waits for (prior memory errors) has no public
+        // description, and a device barrier orders at least as much
+        public static void AErrbar(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+
+            if (x.Bits(32, 96) != 0)
+            {
+                throw AFail(context, "ERRBAR form");
+            }
+
+            context.MemoryBarrier();
         }
 
         // ---- textures ----

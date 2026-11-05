@@ -339,6 +339,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** they try the last hit, then a binary search over pools sorted by start address (`pool_find`, rebuilt when pools are added or removed).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): about 1,760 memory pools alive; a CPU sample of the submit thread had about 1,000 of its samples under those scans. Host submit time in the shrine went from 21 ms to 7 ms per frame (p50), the median frame from 38 ms to 21 ms.
 
+### Dirty-region lookup scans thousands of pools on cache misses
+
+- **Symptom:** repeated sparse-texture dirty checks consume substantial submission CPU time even when no texture is uploaded.
+- **Cause:** `nvn_dirty.c` caches canonical containing ranges, but misses still scan all registered slots. Many physical runs and changing span lengths exceed the page/recent caches. A wider cache alone does not bound miss cost.
+- **Fix:** a shared address-sorted tree bounds subtrees by their earliest start, latest end and lowest registration slot. Queries prune non-containing subtrees while preserving the first containing slot, including overlapping host pages. Rejected-subtree bounds certify positive and negative cache entries. Registration/retirement epochs invalidate both the cache and lazy index; index access/rebuild uses the existing descriptor mutex, and the signal handler retains its lock-free path. The tree occupies 384 KiB for 5,000 slots. Calling-thread counters expose queries, index queries and rebuild cost.
+- **Check:** `t_dirty_index` compares 400,000 queries against an independent linear oracle, with overlaps, changing spans, 200 retire/re-add cycles and cross-thread negative-cache invalidation. Dirty-slot, protection-race and retirement-race fixtures pass, as do 106 sparse-texture and 18 range-upload checks. Two local synthetic runs reduce 300,000 broad-working-set queries from 669–688 ms to 17 ms, without changing warm-cache cost; this is not a gameplay FPS measurement.
+- **Found on:** [Mario Kart World on iOS](../../dm/games/0400C3F00006E000/README.md#dirty-region-index-candidate-2026-11-04). Device validation and the independent CPU speed change remain open.
+
 ### Main guest thread keeps inherited default QoS
 
 - **Symptom:** gameplay has low CPU clocks, large render submission wall time compared with thread CPU time, and default QoS (`0x15`) on the main guest thread while workers report user-interactive (`0x21`).
@@ -352,3 +360,54 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Cause:** the thread that acquires the window (here the render thread) runs under a time-constraint policy whose computation the host re-declares every 120 frames; it was 1.25 × the 90th percentile of that thread's CPU time per frame. This render thread needs 1.9–2.0 ms a frame with one or two frames in 120 near 4.4 ms, against 2.5 ms declared, and each frame past the declaration stalled the thread. Probes on both threads' waits showed the main thread's waits; adding probes slowed the render thread and the stalls vanished, and `DM_RT=0` or a fixed `DM_RT_COMP=5` / `10` removed them too (99th percentile 18–21 ms) at the same CPU energy.
 - **Fix:** the declaration also covers 1.1 × the window's peak (`rt_comp_tick` in `hle_nvn.c`): 5.6 ms here, 60.0 fps, 99th percentile 21 ms.
 - **Found on:** [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md), in the Asylum cell.
+
+
+### Classic drawable handoff diagnostic for temporal block corruption
+
+- **Symptom:** parts of successive frames appear mixed on the iPhone; the user also reports corruption in the Metal HUD. Screen recording suppresses the visible defect while changing GPU time.
+- **Cause:** **open**. Timing sensitivity and HUD involvement justify isolating drawable presentation, but do not establish a Metal driver bug or exclude resource lifetime errors. The separately fixed sparse remap and command-allocator ordering defects have deterministic tests and must remain fixed.
+- **Diagnostic:** `DM_TEST_PRESENT_CLASSIC=1` with `DM_PRESENT_LINK=0` keeps game rendering on Metal 4 and hands the final drawable to Core Animation through a classic command buffer. A shared event signalled by the Metal 4 queue orders the classic read after rendering; the source ticket is released only by the classic command buffer's completion. Existing HDR conversion and bilinear presentation are retained. This opt-in comparison is adapted from the local Bananza work; it is not a confirmed root-cause fix or a new default.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#classic-presentation-comparison-2026-11-03): the user confirms that the classic handoff removes visible corruption, and that native Metal 4 presentation restores it even with the display link and HUD disabled. This does not identify the underlying fault. A separate local Donkey Kong Bananza comparison motivated the diagnostic.
+- **Check:** `t_present_alloc classic` blocks the producing Metal 4 queue, verifies that the source ticket remains held, releases the producer and verifies both completion and output pixels (five checks). The existing display-link allocator tests retain their thirteen checks. Both run with Metal API Validation. Physical iPhone visual correctness, HDR appearance and frame pacing still require comparison; no cross-game gameplay regression is claimed for this isolated non-Git snapshot.
+
+
+### Classic handoff with display-link pacing
+
+- **Symptom:** enabling the display link while requesting the classic handoff silently uses native Metal 4 presentation instead, preventing an isolated pacing comparison. Waiting for a later present ticket can also release an older cross-queue source read prematurely.
+- **Cause:** `present_now` selected the classic path only without a supplied drawable; display-link callbacks always supply one. Their handoff counter can advance past a read that is still in flight on the classic queue. On suspension, a callback may have taken a source before it creates a command buffer, so counting only GPU submissions misses that interval.
+- **Fix:** classic handoff accepts the supplied drawable and uses ordinary `presentDrawable:` because the display link owns its timing. Exact source leases survive handoff-counter advancement and end only on GPU completion or explicit drop/failure; ring slots cannot overwrite live leases. Suspension waits for both callback encoding and submitted reads. The path remains opt-in with `DM_TEST_PRESENT_CLASSIC=1`; this enables a controlled pacing comparison, not a claim that its performance is fixed.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#display-link-pacing-comparison-2026-11-04), while investigating menu/focus-return slowdowns after worker batching.
+- **Check:** `t_present_alloc classic-link` has 19 checks with a held Metal 4 producer, dropped middle frame, three concurrent classic reads, exact output/crop pixels, ring tags, failure, and suspension while a callback is preparing its read. Classic handoff (5), native allocator (16), and acquire sync (8) checks also pass under Metal API Validation. iPhone performance and visual validation are separate.
+
+### Dedicated Metal 4 display queue comparison
+
+- **Symptom:** long game GPU-fence waits despite short measured GPU work, with temporal corruption changing between classic and Metal 4 drawable handoff.
+- **Cause:** open on device. The shared queue schedules `waitForDrawable` ahead of unrelated later game work and uses the whole game residency set for a final image read. A held display wait blocks later game signals by construction. This is not yet proof that drawable waits explain the observed stalls or corruption.
+- **Comparison:** `DM_TEST_PRESENT_M4_QUEUE=1` with `DM_PRESENT_LINK=0` uses a dedicated Metal 4 queue. A game-queue shared-event signal precedes the display read; per-slot residency retains only the source backing, uniforms and optional upscale images. Source tickets and allocator reuse remain gated by actual display completion. The default is unchanged until device validation; this retains the same Metal 4 present shader and HDR transfer. Each queue owns its feedback dispatcher: sharing the explicit dispatch queue between descriptors traps in descriptor deallocation on the tested macOS runtime.
+- **Found on:** [Mario Kart World Duo comparison](../../dm/games/0400C3F00006E000/README.md#same-process-residency-comparison-and-isolated-metal-4-display-queue-2026-11-03). Targeted GPU tests pass, but the Duo comparison reports heavy corruption and worse performance. The candidate is rejected and removed from the current source; neither queue topology nor driver fault is established as the cause. Cross-game validation is not claimed.
+
+
+### Acquire sync waits for newer unrelated work
+
+- **Symptom:** the CPU waits on a window-acquire sync for newer GPU work even though that swapchain image's display read has already completed.
+- **Cause:** `WindowAcquireTexture` waits for the previous present ticket and then captures `mtl_last_fence()`. This is a queue-wide fence and may include newer submissions using other swapchain images; the acquire contract concerns the returned image.
+- **Fix:** presentation callbacks record successful GPU completion by exact ticket in a bounded atomic ring, separate from the early handoff/drop counter. After the existing ticket wait, a matching completion makes the acquire sync already signaled. Unknown completion, snapshot ticket zero and overwritten ring entries retain the existing queue-fence fallback. Ordinary queue fences and pending source reads still wait.
+- **Check:** `t_acquire_sync` holds the producer behind an event, verifies that acquire cannot return prematurely, then holds unrelated later work. The original code wrongly times out the completed image's acquire sync; the fixed code signals it while the ordinary queue sync still times out. Eight GPU checks pass, plus the display-link completion/generation guards in `t_present_alloc`.
+- **Found on:** [Mario Kart World Duo](../../dm/games/0400C3F00006E000/README.md#acquire-sync-waits-for-unrelated-gpu-work-2026-11-03). The wait ledger establishes the expensive path; the fixture establishes over-synchronization. Sustained device FPS and cross-game gameplay validation remain open.
+
+
+### Classic presentation waits for unrelated later GPU work
+
+- **Symptom:** the optional classic drawable handoff delays source-image release when newer rendering is queued while `nextDrawable` waits. This can extend the critical path even if the displayed frame's producer is finished.
+- **Cause:** `present_classic_drawable` originally appended its shared-event signal to the Metal 4 queue after acquiring the drawable. That position includes newer submissions, rather than only the producer prefix associated with the queued frame.
+- **Fix:** place the signal at `present_enqueue`, in presentation-ticket order and behind any deferred encoding or snapshot-copy records. The classic command buffer waits for that captured ticket. Actual display-read completion still gates reuse of the source image. No rendering, resolution, pacing or CPU scheduling policy changes.
+- **Found on:** the iOS Mario Kart World transition investigation. This is a deterministic extra dependency. The corrected device build still dipped after a long pause and recovered, so this fix alone does not resolve that slowdown or explain the CPU speed change.
+- **Check:** `t_present_alloc classic-prefix` holds the producer, enqueues a frame, then blocks later GPU work. The old implementation fails to complete the present until the later work is released; the fixed implementation waits for its own producer but completes before that unrelated work. Both direct and deferred-worker cases verify source lifetime and output pixels. Native allocator (16), classic handoff (5), and prefix (6 direct + 6 worker) checks pass with Metal API Validation.
+
+### CPU demand declaration reacts late to a workload increase
+
+- **Symptom:** after a low-load scene, the acquire thread can exceed its declared CPU computation for many frames before the host updates the real-time policy.
+- **Cause:** the automatic estimator only evaluated each completed 120-frame window. A demand increase immediately after a window boundary could remain undeclared for 119 more frames; slow frames make that delay longer in seconds.
+- **Fix:** `nvn_rt_comp_sample` raises the declaration after the first measured overrun, retaining the existing 10-percent peak margin and 90-percent-of-period cap. Downward adjustments still use a complete 120-frame p90/peak window. Fixed `DM_RT_COMP` and disabled `DM_RT` modes remain unchanged. This reports observed CPU demand; it does not force a CPU or GPU clock, change game timing, or add artificial work.
+- **Found on:** [Mario Kart World's iOS pause transition](../../dm/games/0400C3F00006E000/README.md#cpu-demand-response-candidate-2026-11-04). The delayed software response is reproduced in isolation and the immediate update is confirmed on device. It does not eliminate the measured 5–6-second pause-return dips, and the user still reports prolonged driving slowdowns. A previous fixed-budget experiment also did not fix the overall problem.
+- **Check:** `t_rt_comp` replays an increase from menu demand to 11 ms gameplay CPU time at all 120 window phases, checks conservative reductions, deadline capping, stable policy feedback and invalid samples. The old window-only estimator fails the immediate-response tests.

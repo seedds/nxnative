@@ -174,6 +174,12 @@ int main(void) {
     // the walk refuses what it does not know; a truncated file is reported, not read past
     uint8_t junk[16] = {0}; CHECK(!cap_rec_fields(OP_COUNT_, junk, 16, &enc, NULL), "an unknown op is refused");
     CHECK(!cap_rec_fields(OP_SET_RT, junk, 16, &enc, NULL), "a record too short for its fields is refused");
+    p_draw_mesh mesh = {19, 7, 3, 5, 0};
+    CHECK(cap_rec_fields(OP_DRAW_MESH, (uint8_t *)&mesh, 24, &enc, NULL), "compact mesh draw needs no relocation");
+    CHECK(cap_rec_fields(OP_DRAW_MESH, (uint8_t *)&mesh, 32, &enc, NULL), "full direct mesh draw needs no relocation");
+    CHECK(!cap_rec_fields(OP_DRAW_MESH, (uint8_t *)&mesh, 16, &enc, NULL), "truncated mesh dimensions are refused");
+    mesh.ind = 0x12345678;
+    CHECK(!cap_rec_fields(OP_DRAW_MESH, (uint8_t *)&mesh, 32, &enc, NULL), "reserved indirect mesh addresses are refused");
     FILE *f = fopen(path, "r+b"); fseeko(f, 0, SEEK_END); off_t n = ftello(f); fclose(f); truncate(path, n - 40);
     CHECK(cap_load(&rd, path) == 1, "a truncated capture still opens"); int r, bad = 0; while ((r = cap_next(&rd, &c, &d)) == 1) free(d); bad = r < 0; cap_unload(&rd);
     CHECK(bad, "a truncated capture ends in an error");

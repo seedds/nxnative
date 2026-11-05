@@ -34,6 +34,7 @@ namespace Ryujinx.Graphics.Shader.Translation
             ShaderDefinitions definitions;
             DecodedProgram program;
             bool ampere = options.Flags.HasFlag(TranslationFlags.Ampere);
+            bool mesh = options.Flags.HasFlag(TranslationFlags.AmpereMesh);
             int headerSize = ampere ? AmpereHeaderSize : HeaderSize;
 
             if (options.Flags.HasFlag(TranslationFlags.Compute))
@@ -41,7 +42,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                 definitions = CreateComputeDefinitions(gpuAccessor);
                 localMemorySize = gpuAccessor.QueryComputeLocalMemorySize();
 
-                program = ampere ? Decoder.DecodeAmpere(definitions, gpuAccessor, address) : Decoder.Decode(definitions, gpuAccessor, address);
+                program = ampere ? Decoder.DecodeAmpere(definitions, gpuAccessor, address + (mesh ? (ulong)headerSize : 0)) : Decoder.Decode(definitions, gpuAccessor, address);
             }
             else
             {
@@ -68,7 +69,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                 }
             }
 
-            int size = (int)maxEndAddress + (options.Flags.HasFlag(TranslationFlags.Compute) ? 0 : headerSize);
+            int size = (int)maxEndAddress + (options.Flags.HasFlag(TranslationFlags.Compute) && !mesh ? 0 : headerSize);
 
             return new TranslatorContext(address, size, localMemorySize, definitions, gpuAccessor, options, program);
         }

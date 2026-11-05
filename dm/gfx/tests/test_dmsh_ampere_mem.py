@@ -62,6 +62,42 @@ class MufuF16(Translated):
     def test_low_half_translates_apart(self):   # R12 is a constant here, so the low half folds away; what is left must not read the high one
         self.assertNotRegex(self.msl(self.LOG2_LOW), r'as_type<half2>\(.*\)\)\.y;')
 
+# S2R R40, SR_TID.X; STS.128 [R40.X16 + 0x500], R24 as Mario Kart World's froxel compute shader fd413f04f59c161e encodes it (stride 78..80 = 3, X16); EXIT
+S2R_TID = (0x000fe20000002100, 0x0000000000287919)
+STS128_X16 = (0x000fe2000000cc00, 0x0005001828007388)
+STRIDE = 3 << 14   # the stride field, bits 78..80 of the instruction (half-open: 78 and 79), in the high word
+
+
+@unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
+class SharedStride(unittest.TestCase):
+    translate = Translated.translate
+
+    def store(self, hi):
+        return self.translate(inst(*S2R_TID) + inst(hi, STS128_X16[1]) + inst(*EXIT), shared=2304)
+
+    def test_x16_scales_the_register(self):   # thread n stores its vec4 at byte 0x500 + 16 n: the register is shifted left by 4
+        self.assertRegex(self.store(STS128_X16[0]), r'<< (uint\()?4')
+
+    def test_x1_keeps_the_register(self):
+        self.assertNotRegex(self.store(STS128_X16[0] & ~STRIDE), r'<< (uint\()?4')
+
+
+# MEMBAR.SC with scope 5 (76..79) as Mario Kart World's DrivePass compute shader 0f31fb64c991a12b encodes it (opcode 0x992), between its STS and BAR.SYNC
+MEMBAR = (0x000fec0000005000, 0x0000000000007992)
+# ERRBAR right after that MEMBAR in the same shader (opcode 0x9ab)
+ERRBAR = (0x000fc00000000000, 0x00000000000079ab)
+
+
+@unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
+class Membar(unittest.TestCase):
+    translate = Suatom.translate
+
+    def test_membar_orders_device_memory(self):
+        self.assertIn('threadgroup_barrier(mem_flags::mem_device', self.translate(inst(*MEMBAR) + inst(*EXIT)))
+
+    def test_errbar_orders_device_memory(self):
+        self.assertIn('threadgroup_barrier(mem_flags::mem_device', self.translate(inst(*ERRBAR) + inst(*EXIT)))
+
 
 def mov(rd, value):   # MOV Rd, imm32: values the tests can see in the output
     return inst(0x000fc60000000f00, value << 32 | rd << 16 | 0x7802)

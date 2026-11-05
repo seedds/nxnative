@@ -42,6 +42,8 @@ targets:
         UIStatusBarHidden: true
         UIViewControllerBasedStatusBarAppearance: false
         LSApplicationCategoryType: ${DM_APP_CATEGORY}   # game profile app_category
+        DMCommit: 0a759de7864b+dirty-ios-duo-snapshot
+        DMBuildVariant: ios-duo-20261103
         DMShowFPS: ${DM_SHOW_FPS}           # YES = the frame-rate counter is on (front_ios.m; set by build_ipa.sh)
         DMLanguage: ${DM_LANG}              # the game language code (main.m sets DM_LANG from it; set by build_ipa.sh)
         LSSupportsGameMode: true

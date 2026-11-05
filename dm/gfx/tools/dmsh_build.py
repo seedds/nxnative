@@ -9,7 +9,7 @@
 # Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately)
 import inspect, os, re, sys, json, struct, hashlib, shutil, subprocess, tempfile, collections, threading, concurrent.futures as cf
-import dmsh_geometry, dmsh_atomic, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
+import dmsh_geometry, dmsh_atomic, dmsh_taskmesh, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
@@ -75,18 +75,51 @@ HMMA_BODY = '''{
     return as_type<%(rt)s>(d0);
 }'''
 # A store only the very first invocation of a dispatch makes (a compute shader's preamble: `if (-local.x == workgroup.x << log2(local size)) buffer[k] = value`). Hoian_Proc in Splatoon Raiders resets its append counter
-# that way, with the other invocations adding to the counter at their end, hundreds of instructions later. On the Switch the first workgroup starts ahead of them. Apple's GPUs start workgroups in no order: a workgroup that had appended before
+# that way, with the other invocations adding to the counter at their end, hundreds of instructions later. This relies on workgroup scheduling, not an API ordering guarantee. Apple's GPUs start workgroups in no order: a workgroup that had appended before
 # the reset lost its plants to the next one's, a different few each frame, and they flickered. So the store leaves the shader and the host makes it, in order, before the dispatch (the reflection's first_store, nvn_mtl.m). Only this exact
 # condition counts: it holds for one invocation of a dispatch with a flat local size. Returns the shader and [(storage binding's MSL name, word, value)]
 FIRST_STORE = re.compile(r'float (\w+) = as_type<float>\(gl_WorkGroupID\.x\);\s*float (\w+) = as_type<float>\(gl_LocalInvocationID\.x\);\s*int (\w+) = as_type<int>\(\1\) << (\d+);\s*'
-                         r'int (\w+) = ~as_type<int>\(\2\);\s*int (\w+) = \5 \+ 1;\s*bool (\w+) = \6 != \3;\s*if \(!\7\)\s*\{\s*((?:\(\*\w+\.\w+\)\._m0\[\d+\] = \d+u;\s*)+)\}')
+                         r'int (\w+) = ~as_type<int>\(\2\);\s*int (\w+) = \5 \+ 1;\s*bool (\w+) = \6 != \3;')
 def first_store(msl, local):
     m = FIRST_STORE.search(msl)
     if not m or not local or local[1:] != [1, 1] or 1 << int(m.group(4)) != local[0]: return msl, []
-    stores = [(n, int(w), int(v)) for n, w, v in re.findall(r'\(\*\w+\.(\w+)\)\._m0\[(\d+)\] = (\d+)u;', m.group(8))]
-    if len(stores) > 4: return msl, []
-    body = msl[m.start():m.end()]
-    return msl[:m.start()] + body[:body.rindex('if (!')] + msl[m.end():], stores
+    # SPIRV-Cross may split predicated stores into separate blocks and carry their
+    # literal value through a conditional assignment and copies (MKW's instance
+    # compaction). Track constants only on this same first-invocation branch.
+    known, stores, cuts = {}, [], []
+    def value(s):
+        c = re.fullmatch(r'uint\((\w+)\)', s)
+        if c: s = c.group(1)
+        return int(s.rstrip('u')) if re.fullmatch(r'[0-9]+u?', s) else known.get(s)
+    pos = m.end()
+    while True:
+        decl = re.match(r'\s*(?:int|uint) (\w+) = ([^;]+);', msl[pos:])
+        if decl:
+            # Do not hoist a later store across a read or any other expression.
+            if not re.fullmatch(r'\w+|uint\(\w+\)', decl.group(2)): break
+            known[decl.group(1)] = value(decl.group(2)); pos += decl.end(); continue
+        block = re.match(r'\s*if \(!' + re.escape(m.group(7)) + r'\)\s*\{([^{}]*)\}', msl[pos:])
+        if not block: break
+        keep, pending = [], []
+        for stmt in block.group(1).split(';'):
+            if not stmt.strip(): continue
+            store = re.fullmatch(r'\s*\(\*\w+\.(\w+)\)\._m0\[(\d+)\] = ([^;]+)', stmt)
+            assign = re.fullmatch(r'\s*(\w+) = ([^;]+)', stmt)
+            if store:
+                v = value(store.group(3))
+                if v is None or not 0 <= v <= 0xffffffff: return msl, []
+                pending.append((store.group(1), int(store.group(2)), v))
+            elif assign and assign.group(1) in known:
+                known[assign.group(1)] = value(assign.group(2)); keep.append(stmt + ';')
+            else: return msl, []   # never move a partial or unrecognised preamble
+        if pending:
+            stores.extend(pending)
+            replacement = '\n    if (!' + m.group(7) + ')\n    {' + ''.join(keep) + '\n    }' if keep else ''
+            cuts.append((pos, pos + block.end(), replacement))
+        pos += block.end()
+    if not stores or len(stores) > 4: return msl, []
+    for start, end, replacement in reversed(cuts): msl = msl[:start] + replacement + msl[end:]
+    return msl, stores
 def hmma_msl(msl):
     m = re.search(r'\n(\w+) dmsh_hmma16816_f16\(([^)]*)\)\n\{', msl)
     if not m: return msl
@@ -157,6 +190,59 @@ def border_emu(msl):
         twin = f'spvDescriptorSet0.{m.group(2)}{abi.BORDER_TWIN}'
         msl = msl[:m.start()] + f'dm_bs({msl[m.start():i]}, spvDescriptorSet0.{abi.BORDER_MEMBER}, {bit[m.group(2)]}u, spvDescriptorSet0.{m.group(1)}, {twin}, {args})' + msl[i:]
     return msl.replace('using namespace metal;\n', 'using namespace metal;\n' + BORDER_HELPERS, 1)
+# Shared memory past Apple's threadgroup memory: Ampere gives a compute shader up to 99 KB of shared memory, every Apple GPU 32 KB (MTLDevice maxThreadgroupMemoryLength), and Metal
+# refuses the pipeline of a kernel that declares more. Mario Kart World's DrivePassShaderDefault declares 48 KB in 168 compute shaders. The MSL is compiled offline for every device,
+# so the build decides, against abi.TGMEM_LIMIT: the kernel's largest threadgroup array becomes a slice of a device buffer the host binds at compute buffer abi.TGMEM_BUFFER, one slice per
+# threadgroup at its linear position in the grid, so it keeps the semantics of shared memory: its barriers also order device memory, its atomics become device atomics. The buffer
+# starts with abi.TGMEM_HEAD bytes: the bytes of slices it holds, then a word the shader sets when a threadgroup lies past them (an indirect dispatch larger than the host's bound;
+# an undersized binding is rejected, never aliased onto another group's slice). A kernel within the limit is returned unchanged
+TG_ELEM = {'uint': 4, 'int': 4, 'float': 4, 'half': 2, 'ushort': 2, 'short': 2, 'uchar': 1, 'char': 1, 'bool': 1, 'uint2': 8, 'int2': 8, 'float2': 8, 'uint4': 16, 'int4': 16, 'float4': 16}
+def tg_spill(msl):
+    """(msl, slice bytes) with the largest threadgroup array of a kernel whose threadgroup memory exceeds abi.TGMEM_LIMIT moved into the device buffer (see above);
+    (msl, 0) unchanged otherwise. ValueError when the rest still exceeds the limit or the array is of a form this does not rewrite"""
+    k = re.search(r'^kernel void \w+\((.*)\)\n\{\n', msl, re.M)
+    if not k: return msl, 0
+    decl = re.compile(r'^    threadgroup (?:spvUnsafeArray<(\w+), (\d+)>|(\w+)) (\w+)(?:\[(\d+)\])?;\n', re.M)
+    arrays = []   # variables of a type not in TG_ELEM (atomic_uint, uint3, a struct) count as 0 bytes and are never moved: within the limit the kernel stays as it is, past it Metal refuses it as before
+    for m in decl.finditer(msl, k.end()):
+        elem = m.group(1) or m.group(3)
+        arrays.append((TG_ELEM.get(elem, 0) * int(m.group(2) or m.group(5) or 1), m))
+    total = sum(n for n, _ in arrays)
+    if total <= abi.TGMEM_LIMIT: return msl, 0
+    size, m = max(arrays, key=lambda a: a[0])
+    if total - size > abi.TGMEM_LIMIT: raise ValueError(f'{total - size} bytes of threadgroup memory left after moving the largest array')
+    name = m.group(4); elem = m.group(1) or m.group(3)
+    if re.search(r'dmsh_hmma16816_f16\([^;]*\b' + name + r'\)', msl): raise ValueError(f'{name} is the HMMA scratch')
+    slice_ = (size + 15) & ~15
+    pos = re.search(r'(\w+) \[\[threadgroup_position_in_grid\]\]', k.group(1))
+    tgp = pos.group(1) if pos and re.search(r'uint3 ' + pos.group(1) + r' \[\[', k.group(1)) else None
+    grid = re.search(r'uint3\s+(\w+)\s*\[\[threadgroups_per_grid\]\]', k.group(1))
+    if ('threadgroups_per_grid' in k.group(1) and not grid) or (pos and not tgp):
+        raise ValueError('shared memory spill requires uint3 grid builtins')
+    tgn = grid.group(1) if grid else 'dmsh_tgn'
+    params = (', ' if k.group(1).strip() else '') + f'device uchar* dmsh_tgmem [[buffer({abi.TGMEM_BUFFER})]]'
+    params += '' if grid else ', uint3 dmsh_tgn [[threadgroups_per_grid]]'
+    params += '' if tgp else ', uint3 dmsh_tgp [[threadgroup_position_in_grid]]'
+    tgp = tgp or 'dmsh_tgp'
+    at = f'(dmsh_tgmem + {abi.TGMEM_HEAD} + dmsh_tgl * {slice_}u)'
+    if m.group(1): ty = f'spvUnsafeArray<{elem}, {m.group(2)}>'; ref = f'device {ty}& {name} = *(device {ty}*){at};'
+    elif m.group(5): ty = None; ref = f'device {elem} (&{name})[{m.group(5)}] = *(device {elem} (*)[{m.group(5)}]){at};'
+    else: ty = None; ref = f'device {elem}& {name} = *(device {elem}*){at};'
+    setup = (f'    ulong dmsh_tgl = (ulong({tgp}.z) * {tgn}.y + {tgp}.y) * {tgn}.x + {tgp}.x;\n'
+             f'    uint dmsh_tgcap = *(device uint*)dmsh_tgmem / {slice_}u;\n'
+             f'    if (dmsh_tgl >= dmsh_tgcap) {{ atomic_store_explicit((device atomic_uint*)dmsh_tgmem + 1, 1u, memory_order_relaxed); return; }}\n'
+             f'    {ref}\n')
+    msl = msl[:m.start()] + setup + msl[m.end():]
+    msl = msl[:k.end(1)] + params + msl[k.end(1):]
+    names = {name}
+    if ty:   # helpers that take the array by reference (no other threadgroup array of the same type stays)
+        if any(o is not m and (o.group(1), o.group(2)) == (m.group(1), m.group(2)) for _, o in arrays): raise ValueError(f'two threadgroup arrays of type {ty}')
+        msl = msl.replace(f'threadgroup {ty}& ', f'device {ty}& ')
+        names |= set(re.findall(r'device ' + re.escape(ty) + r'& (\w+)[,)]', msl))
+    msl = re.sub(r'\(threadgroup (atomic_\w+)\*\)&(' + '|'.join(sorted(names)) + r')\[', r'(device \1*)&\2[', msl)
+    if re.search(r'\(threadgroup atomic_\w+\*\)&(' + '|'.join(sorted(names)) + r')\b', msl): raise ValueError(f'an atomic on {name} this does not rewrite')
+    msl = re.sub(r'threadgroup_barrier\(([^)]*\bmem_threadgroup\b[^)]*)\)', lambda b: b.group(0) if 'mem_device' in b.group(1) else f'threadgroup_barrier({b.group(1)} | mem_flags::mem_device)', msl)
+    return msl, slice_
 CAS =os.environ.get('DMSH_CAS', os.path.join(cache_root, 'cas'))
 CAS_LOCKS, CAS_LOCKS_GUARD = {}, threading.Lock()
 PRE_STATS = collections.Counter()
@@ -183,7 +269,7 @@ def mac_compile(msl, air, lib):   # same interface as ios_metal.compile
 #   c2 C2_SAMP + 8 r: separate samplers (nvnCommandBufferBindSeparateSampler), slot r < C2_SEP_SLOTS
 #   c0 base + 0x10 r: storage buffer r (64-bit address, 32-bit size), base C0_SSBO_<stage> (the hull / domain stages' bases were never seen)
 TEX_BASE, IMG_BASE, IMG_SLOTS, SEPTEX_BASE, SEPTEX_SLOT0, SAMP_BASE = abi.C2_TEX, abi.C2_IMG, abi.C2_IMG_SLOTS, abi.C2_SEPTEX, abi.SEPTEX_SLOT0, abi.C2_SAMP
-SSBO = {'vs': abi.C0_SSBO_VS, 'cs': abi.C0_SSBO_CS, 'gs': abi.C0_SSBO_GS, 'ps': abi.C0_SSBO_PS}
+SSBO = {'vs': abi.C0_SSBO_VS, 'cs': abi.C0_SSBO_CS, 'gs': abi.C0_SSBO_GS, 'ps': abi.C0_SSBO_PS, 'ts': abi.C0_SSBO_TS, 'ms': abi.C0_SSBO_MS}
 
 def records(d):
     r = [m.start() for m in re.finditer(b'BTCDBTCD', d)]
@@ -515,8 +601,14 @@ def job_for(key, name, rec, w):
         # frontend reads (job arch sm86); its c1 segment lies between control +0x40 and +0x44. The NVN control fields the steps below read (VertexA / B,
         # transform feedback, early fragment tests) are not in an NVN2 section
         c1 = dmsh_ampere.c1_segment(rec[ci:], code)
-        code = code[:dmsh_ampere.inst_len(rec[ci:])]
         extra['arch'] = 'sm86'
+        if rec[ci + 0x56] in (6, 7):
+            # Mesh primitive outputs have a separate passthrough SPH after the
+            # instructions. Decode both headers before removing that tail.
+            tm = dmsh_taskmesh.metadata(rec[ci:], code)
+            stage = tm['stage']
+            extra.update(taskmesh=tm, local=[tm['threads'], 1, 1], shared=tm['shared'], isbe_sizes=tm['isbe_sizes'])
+        code = code[:dmsh_ampere.inst_len(rec[ci:])]
         # compute lays out its driver constants in c[0] per shader: the control section gives its push constants' words (+0xa9), counts its uniform buffer, storage
         # buffer and texture entries (+0xb1, +0xb2, +0xb3) and gives the size (+0xba); the translator maps them to c[24] and NVN's fixed tables (InstEmitAmpere.cs
         # AMapC0). Graphics keeps NVN's tables
@@ -844,7 +936,7 @@ RULES = []   # MSL rewrite rules attached by shader name (function, applicabilit
 # CODE_FP hashes the code form of this file and its helper modules (dmsh_chain.code_form): editing a comment, a docstring or the layout does not change any shader's key.
 # The library ABI enters as its values (dmsh_abi.VALUES), so a comment in dmsh_abi.h does not change a key either.
 # The first-stage code fingerprint does not include dmsh_fetch.py; readable-tile variants get a separate second-stage cache keyed on the generated MSL.
-CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_atomic, abi) + ((ios_metal,) if IOSOUT else ()))
+CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_atomic, dmsh_taskmesh, abi) + ((ios_metal,) if IOSOUT else ()))
                          + b'\0abi\0' + repr(sorted(abi.VALUES.items())).encode()).hexdigest()
 TOOL_FP = tool_fingerprint().encode()
 
@@ -1017,11 +1109,10 @@ def vs_depth(src):
     return single, single + '\n' + re.sub(r'\bmain0\s*\(', 'main0_z(', body, count=1)
 
 def fs_uint(src):
-    """Integer colour targets. With no PC version the translator declares every fragment output float; a shader writes an integer as the float with its bits (as_type<float>(…)), and Metal
-    refuses a pipeline whose float output meets an integer attachment. Luigi's Mansion 3 draws its whole scene into an R32Uint + RGBA8Uint G-buffer (1,377 of its 4,307 pixel shaders write
-    an output from integer bits): a hand-written row per shader (shader_facts_manual.tsv) does not scale to that. A pixel shader that writes an output from integer bits gets a second entry
-    point, main0_u, the same body returning every colour output as the unsigned integer vector of the same bits (as_type, nothing converted); the host takes it for a pipeline whose colour
-    attachments are all unsigned integer formats (nvn_mtl.m).
+    """Integer colour targets. The translator declares fragment outputs float, but the runtime attachment format determines how the hardware interprets their bits. Metal refuses a
+    pipeline whose float output meets an integer attachment. Every shader with float colour outputs therefore gets main0_u: the same body returning those outputs as unsigned integer
+    vectors of the same bits (as_type, nothing converted). The host selects it when the colour attachments are all unsigned integer formats (nvn_mtl.m). This includes raw flat-varying
+    copies and arithmetic results: an explicit as_type<float> at an output store is not required and cannot identify every shader used with an integer attachment.
     A G-buffer may mix the two: Pokémon Sword's scene shaders write colour 0 and 2 as floats and colour 1 from integer bits into an RGBA16Uint target. A shader whose outputs include both
     gets a third entry point, main0_m, that returns only the outputs written from integer bits as unsigned integers (their colour indices: the mask); the host takes it for a pipeline whose
     integer attachments are exactly those. → (the source with main0_u (and main0_m) added, the main0_m mask or 0), or (None, 0)"""
@@ -1029,11 +1120,9 @@ def fs_uint(src):
     if not m or not st: return None, 0
     mem = re.findall(r'^\s*(\w+)\s+(\w+)\s*(\[\[[^\]]*\]\])?;', st.group(1), re.M)
     cols = {nm: ty for ty, nm, at in mem if 'color(' in at and ty.startswith('float')}
-    # The hardware writes an output's bits to an integer target whatever the shader computed, so main0_u is right for any pixel shader; only those that look like integer writers get one
-    # (the library stays small): an output from integer bits, or nothing but constants (a clear drawn into an integer target, 35e1865e313f0553 writes 0 into Luigi's Mansion 3's R32Uint target)
+    if not cols: return None, 0
+    # Keep the existing mixed-target inference separate; main0_u never depends on output-expression heuristics.
     from_int = {nm for nm in cols if re.search(r'\bout\.%s(?:\.\w+)? = as_type<float\d?>\(' % nm, src)}
-    writes = [m.group(1) for nm in cols for m in re.finditer(r'\bout\.%s(?:\.\w+)? = ([^;]+);' % nm, src)]
-    if not from_int and not (writes and all(re.fullmatch(r'-?[0-9.]+f?|float\d\([-0-9., ]*\)', w.strip()) for w in writes)): return None, 0
     uty = lambda ty: 'u' + ty.replace('float', 'int')   # float4 → uint4, float → uint
     def entry(sfx, as_uint):   # main0 again as main0_<sfx>, returning the outputs in as_uint as the unsigned integer vectors of their bits (dmsh_fetch.py cuts the source at main0_out_u)
         struct = f'struct main0_out_{sfx}\n{{\n' + ''.join(f'    {uty(cols[nm]) if nm in as_uint else ty} {nm} {at};\n' for ty, nm, at in mem) + '};\n\n'
@@ -1214,6 +1303,10 @@ def finish(key, w, j, c1):
     except ValueError as e: return 'HMMA rewrite failed', str(e)[:160], None
     try: src = pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)
     except ValueError as e: return 'pool rewrite failed', str(e)[:160], None
+    tgm = 0
+    if j['stage'] == 'cs':
+        try: src, tgm = tg_spill(src)   # shared memory past Apple's threadgroup memory in a device buffer (see tg_spill)
+        except ValueError as e: return 'shared memory rewrite failed', str(e)[:160], None
     src = border_emu(src); open(msl, 'w').write(src)   # border colours Metal lacks (see border_emu)
     first = []
     if j['stage'] == 'cs':
@@ -1239,6 +1332,10 @@ def finish(key, w, j, c1):
     fu, fmask = fs_uint(src) if j['stage'] == 'ps' else (None, 0)   # the integer-output entry points (see fs_uint); the analysis below uses the source with only main0
     fd = fs_dual(src) if j['stage'] == 'ps' and key in DUAL_WANT else None   # the dual-source entry point (see fs_dual), from the source with only main0
     if fu or fd: plain = src; open(msl, 'w').write((fu or src) + (fd or ''))
+    if j.get('taskmesh'):
+        try: full = dmsh_taskmesh.wrap(src, j['taskmesh'])
+        except ValueError as e: return 'task/mesh rewrite failed', str(e), None
+        open(msl, 'w').write(full)
     def compile_targets():   # the selected targets from the same MSL (MSL identical to one compiled before takes that library, dmsh_mtlcache.py)
         if 'mac' in TARGETS: MTL.compile('mac', msl, lib)
         if 'ios' in TARGETS and IOSOUT: MTL.compile('ios', msl, os.path.join(IOSOUT, key + '_b.metallib'))
@@ -1256,10 +1353,12 @@ def finish(key, w, j, c1):
     refl = {'key': key + '_b', 'route': 'B', 'chain': CHAIN, 'dm_ctl': key, 'source': f'{name}#{k}', 'pc_paired': pc_of[key], 'stage': j['stage'],
             'entry': entry.group(2) if entry else 'main0', 'msl_entry_kind': entry.group(1) if entry else None, **({'entry_z': 'main0_z', 'entry_geometry_capture': 'main0_gs'} if j['stage'] == 'vs' else {}),
             **({'entry_discard': 'main0_discard'} if discard else {}),
+            **({'taskmesh': j['taskmesh'], 'entry': 'main0', 'msl_entry_kind': 'object' if j['stage'] == 'ts' else 'mesh'} if j.get('taskmesh') else {}),
+            **({'entry_z': 'main0_z', 'entry_direct': 'main0_direct', 'entry_direct_z': 'main0_direct_z'} if j['stage'] == 'ms' else {}),
             **({'entry_tf': 'main0_tf', 'tf_strides': [e['stride'] if e else 0 for e in j['tf']]} if j.get('tf') else {}),
             **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u'} if fu else {}), **({'entry_m': 'main0_m', 'uint_mask_m': fmask} if fu and fmask else {}), **({'entry_d': 'main0_d'} if fd else {}),
             **({'first_store': [{'reg': next(b['reg'] for b in binds if b['msl_name'] == n), 'word': w, 'value': v} for n, w, v in first]} if first else {}),
-            'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr, j['stage']),
+            'threadgroup_size': j.get('local'), **({'tgmem': tgm} if tgm else {}), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr, j['stage']),
             'bindings': binds,
             'vertex_inputs': [{'location': int(m.group(2)), 'msl_type': m.group(1)} for m in re.finditer(r'(\w+)\s+\w+\s*\[\[attribute\((\d+)\)\]\]', src)],
             'raster': raster_facts(j['stage'], src), 'vs_pad': pad}

@@ -2,6 +2,8 @@
 // Register convention: inputs w1.. / outputs w0=Result, x1=value (GetInfo / SetHeapSize), consistent with the public Horizon ABI.
 #include "dm.h"
 #include <sys/mman.h>
+#include <sys/statvfs.h>
+#include <limits.h>
 #include <errno.h>
 #include <unistd.h>
 #include <unistd.h>
@@ -50,7 +52,30 @@ static void mem_init_once(void) {
     size_t alias = DM_GAME_MEM_ALIAS; const char *as = getenv("DM_ALIAS_SIZE");
     if (as && *as) { alias = (size_t)strtoull(as, NULL, 0); if (alias < 0x10000000 || (alias & (pg - 1))) die("DM_ALIAS_SIZE %s: at least 256 MB, in whole host pages", as); }
     g_reserve = RESERVE - DM_GAME_MEM_ALIAS + alias;
-    g_as = mmap(NULL, g_reserve, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    // Explicit experiment for devices whose process budget cannot hold guest
+    // data plus translated GPU images. Shared file backing preserves every byte
+    // and lets the kernel write inactive data to storage; it does not discard
+    // live guest pages. It may increase I/O latency and is not a default policy.
+    const char *file_backed = getenv("DM_GUEST_FILE_BACKED");
+    if (file_backed && atoi(file_backed)) {
+        const char *tmp = getenv("TMPDIR"); if (!tmp || !*tmp) tmp = "/tmp";
+        struct statvfs fs;
+        if (statvfs(tmp, &fs) || (uint64_t)fs.f_bavail * fs.f_frsize < (uint64_t)g_reserve + (512ull << 20))
+            die("guest file backing: insufficient temporary storage for reservation plus 512 MiB margin");
+        char path[PATH_MAX];
+        int n = snprintf(path, sizeof path, "%s/dm-guest-XXXXXX", tmp);
+        if (n < 0 || (size_t)n >= sizeof path) die("guest file backing: temporary path too long");
+        int fd = mkstemp(path); if (fd < 0) die("guest file backing mkstemp errno=%d", errno);
+        // The mapping holds the unlinked file alive; even a Jetsam termination
+        // then releases it without leaving a multi-GB temporary file behind.
+        if (unlink(path)) { close(fd); die("guest file backing unlink errno=%d", errno); }
+        if (ftruncate(fd, (off_t)g_reserve)) { close(fd); die("guest file backing ftruncate errno=%d", errno); }
+        g_as = mmap(NULL, g_reserve, PROT_NONE, MAP_SHARED, fd, 0);
+        int saved_errno = errno; close(fd); errno = saved_errno;
+        LOG("[mem] experimental shared-file guest backing: %llu MiB reserved; inactive bytes may page to storage", (unsigned long long)(g_reserve >> 20));
+        // guest_release still replaces decommitted ranges with anonymous zero
+        // pages. Old no-copy GPU buffers keep their former backing until retired.
+    } else g_as = mmap(NULL, g_reserve, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (g_as == MAP_FAILED) die("reserve guest AS");
     // Fixed partition (all inside the reserved block): alias 2.875 GB, stack 256 MB, heap the remaining 1.625 GB.
     // In newer SDKs the AddressRegionManager always takes 0x3fe00000 (~1 GB) at the start of the alias region as its node area (sdk 0x134728) before handing out regions; with a 512 MB alias region the very first AllocateAddressRegion fails (0x1803).

@@ -17,6 +17,7 @@ void mtl_pool_add(const void *mem, uint64_t size);
 void mtl_pool_del(const void *mem);
 // memory pool Finalize: evict the textures built on this pool (pool object address) from the storage-sharing table
 void mtl_alias_drop_pool(const void *pool);
+int mtl_pool_contains(uint64_t addr, uint64_t len);   // CPU-only bounds check; does not request GPU residency
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off);   // 1 on success; buf is a (__bridge) id<MTLBuffer>
 
 typedef struct {
@@ -32,12 +33,35 @@ void mtl_res_snapshot(mtl_res_count *out);
 // One submit: begin -> several operations -> commit (returns the fence value at which this submit completes)
 void mtl_prepare(void);                                // the first submission's prepare step (prewarm, pipeline prebuild): no GPU work, called outside the graphics gate
 void mtl_sub_begin(void);
+void mtl_queue_seal(void);                         // own persistent target snapshots before record retirement
+void mtl_sub_resume(void);                         // continuation after a guest event boundary
+// Serialized by the submit lock. Event chunks append to one allocator lease;
+// pressure may revoke its completed prefix so blocked submissions cannot pin
+// the bounded allocator pool forever. Unencoded continuations reacquire it.
+typedef struct mtl_submit_alloc mtl_submit_alloc;
+mtl_submit_alloc *mtl_submit_alloc_new(void);
+void mtl_submit_alloc_close(mtl_submit_alloc *alloc); // last chunk committed, or owner released
+void mtl_submit_alloc_release(mtl_submit_alloc *alloc);
+void mtl_sub_begin_alloc(mtl_submit_alloc *alloc, int resume);
+// Submission-mode timestamps share one clock across host event chunks. The
+// logical submission owns the token; set_clock retains it until completion.
+// Segment-mode GPU timestamps and direct submits without a token are unchanged.
+typedef struct mtl_submit_clock mtl_submit_clock;
+mtl_submit_clock *mtl_submit_clock_new(void);
+void mtl_submit_clock_release(mtl_submit_clock *clock);
+void mtl_sub_set_clock(mtl_submit_clock *clock);    // after begin/resume, before encoding reports
+uint64_t mtl_completed_fence(void);                // post-operations are visible through this fence
 void mtl_queue_activate(uint64_t serial);              // submit lock held: restore this queue's persistent GPU state
 void mtl_queue_forget(uint64_t serial);                // finalize: discard its state, including guest object pointers
 void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n);               // Buffer copy in GPU ordering
 void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v);   // Write the event value after completion (0 write / 1 add)
 void mtl_sub_counter(uint64_t addr, uint32_t type);                       // Write the counter record after completion
 uint64_t mtl_sub_commit(void);
+// Group scheduled prefixes under the submission lock. Publish each prefix, but
+// join the encode worker only at the boundary or before an external queue user.
+void mtl_encode_batch_begin(void);
+void mtl_encode_batch_flush(void);
+void mtl_encode_batch_end(void);
 
 uint64_t mtl_last_fence(void);                       // Fence value of the most recent submit (0 = never submitted)
 int mtl_wait(uint64_t fence, uint64_t timeout_ns);   // Returns 1 when the GPU has completed up to fence, 0 on timeout
@@ -51,3 +75,4 @@ void *mtl_device_classic(void);   // the same for a layer that draws only on cla
 uint64_t mtl_ext_tex(void *tex);
 uint64_t mtl_present_ext(uint64_t serial, double period, void *ev, uint64_t ev_val, const int crop[4]);   // crop: x, y, w, h of the texture to show (NULL = all of it)
 void mtl_present_wait(uint64_t ticket);   // as in nvn_obj.h: wait until that present has been handed to the GPU
+int mtl_present_source_ready(uint64_t ticket);   // exact ticket's source read completed on the GPU, not just handed off

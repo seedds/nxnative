@@ -13,7 +13,8 @@
 
 #define SF_H0 0xd0000u   // session handles: outside the kernel handle table (0x1000 + slot, 4096 slots, hle_thread.c)
 #define SF_MAX 64
-static struct { char name[16]; int used, domain; unsigned seen; } g_sf[SF_MAX];
+typedef Result (*sf_reply)(unsigned cmd, uint32_t *copy);   // a host service's answer to one command: its result and a handle to copy to the client (0: none)
+static struct { char name[16]; int used, domain; unsigned seen; sf_reply reply; } g_sf[SF_MAX];
 static pthread_mutex_t g_sf_mu = PTHREAD_MUTEX_INITIALIZER;
 static const char *const sf_served[] = {"olsc:u"};
 
@@ -25,9 +26,25 @@ static uint32_t sf_new(const char *name, int domain) {
     pthread_mutex_lock(&g_sf_mu);
     unsigned i = 0; while (i < SF_MAX && g_sf[i].used) i++;
     if (i == SF_MAX) die("sf: more than %d host service sessions", SF_MAX);
-    strlcpy(g_sf[i].name, name, sizeof g_sf[i].name); g_sf[i].used = 1; g_sf[i].domain = domain; g_sf[i].seen = 0;
+    strlcpy(g_sf[i].name, name, sizeof g_sf[i].name); g_sf[i].used = 1; g_sf[i].domain = domain; g_sf[i].seen = 0; g_sf[i].reply = NULL;
     pthread_mutex_unlock(&g_sf_mu);
     return SF_H0 + i;
+}
+
+// The Switch 2's camera (a USB camera for GameChat): the SDK's CreateCameraContext opens a session to the camera service through the graphics system's user session (gsv), which the
+// host does not have; the game talks to the camera over that session with its own HIPC client. The host has no camera. Mario Kart World (main+0xcdebc0, at boot) opens the camera
+// "Default" (command 3) and takes the result 0xdc4 (module 452, description 6) as "no camera": it leaves its camera off and goes on, any other error aborts. So that result's meaning
+// is inferred from the game. Then it asks for the camera's event (command 21, a copy handle it attaches to a SystemEvent; an error aborts): an event that never fires. Every other
+// command fails with 0xdc4 too
+static Result camera_reply(unsigned cmd, uint32_t *copy) {
+    if (cmd == 21) { *copy = hle_new_idle_event(); return RES_OK; }
+    return 0xdc4u;
+}
+HLE_FORCE("_ZN2nn6camera3sdk19CreateCameraContextEPNS_5gsdrv18UniqueNativeHandleE", "camera context (gsv camera service) → a host session: no camera", Result, h_cam_Ctx, uint32_t *out) {
+    uint32_t h = sf_new("camera", 0);
+    pthread_mutex_lock(&g_sf_mu); g_sf[h - SF_H0].reply = camera_reply; pthread_mutex_unlock(&g_sf_mu);
+    *out = h; LOG("sf: camera context → host session %#x (no camera)", h);
+    return RES_OK;
 }
 
 HLE_FORCE("_ZN2nn2sf4hipc31InitializeHipcServiceResolutionEv", "service name resolution (connects to sm); the host resolves the names it serves itself", Result, h_sf_InitRes, void) { return RES_OK; }
@@ -86,12 +103,15 @@ HLE_FORCE("_ZN2nn2sf4hipc15SendSyncRequestENS_3svc6HandleEPvm", "send a request 
     if (magic != 0x49434653) { LOG("[RED] sf: %s: request without SFCI (%#x)", g_sf[i].name, magic); return 0xe401u; }
     unsigned key = (obj & 0xff) << 16 | (cmd & 0xffff);   // log each object / command once
     pthread_mutex_lock(&g_sf_mu); int first = g_sf[i].seen != key; g_sf[i].seen = key; pthread_mutex_unlock(&g_sf_mu);
-    if (first || trace) LOG("sf: %s object %u command %u (%u data words in): success, zeroed output", g_sf[i].name, obj, cmd, ndw);
-    // The response: no special header and no descriptors, so the data words start at +8 and the CMIF part at +0x10; everything after the headers up to the buffer's end reads as zero
-    size_t end = size < 0x1000 ? size : 0x1000;
+    uint32_t copy = 0; Result res = g_sf[i].reply ? g_sf[i].reply(cmd & 0xffff, &copy) : RES_OK;
+    if (first || trace) LOG("sf: %s object %u command %u (%u data words in): %s%s", g_sf[i].name, obj, cmd, ndw, res ? "fails" : "success, zeroed output", copy ? ", an event handle" : "");
+    // The response: no descriptors, and a special header only for a copied handle (two words: the counts, the handle), so the CMIF part starts at +0x10 either way; everything after
+    // the headers up to the buffer's end reads as zero
+    size_t end = size < 0x1000 ? size : 0x1000, dw = copy ? 0x10 : 8;
     memset(base, 0, end);
-    m[1] = (uint32_t)((end - 8) / 4 < 0x3ff ? (end - 8) / 4 : 0x3ff);
+    m[1] = (uint32_t)((end - dw) / 4 < 0x3ff ? (end - dw) / 4 : 0x3ff);
+    if (copy) { m[1] |= 1u << 31; m[2] = 1u << 1; m[3] = copy; }
     size_t out = 0x10 + (dom ? 16 : 0);
-    uint32_t *o = (uint32_t *)(base + out); o[0] = 0x4f434653; o[1] = ver; o[2] = RES_OK; o[3] = 0;   // "SFCO"; a domain's out-object count before it stays 0
+    uint32_t *o = (uint32_t *)(base + out); o[0] = 0x4f434653; o[1] = ver; o[2] = res; o[3] = 0;   // "SFCO"; a domain's out-object count before it stays 0
     return RES_OK;
 }

@@ -9,6 +9,7 @@
 #include "dm_input.h"
 #include "front.h"
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <unistd.h>
 #include <strings.h>
 #include <pthread.h>
@@ -208,6 +209,12 @@ void hid_keys_init(void) {
 //   points over that time and lifts it (the touch screen's pans and swipes, hle_touch.c gesture_sample), "dump" logs what each guest thread waits on and the graphics wait points
 //   (crash_dump_now, as the iOS app's DM_LOG_PORT dump; scripts/regress.py asks for it before stopping a hung game), "#…" is ignored.
 //   Look at a screen, decide, press, look again: menus whose timing moves from run to run (loading) need no blind timed script
+// Optional front-end diagnostic. It is unavailable in ordinary host builds.
+__attribute__((weak)) void dm_test_foreground_idle(int guest_lifecycle, unsigned milliseconds) {
+    (void)guest_lifecycle;
+    (void)milliseconds;
+    LOG("DM_CTL: foreground idle diagnostic is unavailable");
+}
 static void *ctl_main(void *arg) {
     const char *path = arg; long off = 0; char line[1100];
     for (;;) {
@@ -217,6 +224,18 @@ static void *ctl_main(void *arg) {
                 size_t n = strlen(line); if (!n || line[n - 1] != '\n') break;   // a line still being written: read it next time
                 off += (long)n; line[--n] = 0; if (n && line[n - 1] == '\r') line[--n] = 0;
                 if (!n || line[0] == '#') continue;
+                if (!strncmp(line, "testidle ", 9)) {
+                    char mode[16], extra;
+                    unsigned milliseconds;
+                    int fields = sscanf(line + 9, "%15s %u %c", mode, &milliseconds, &extra);
+                    if (fields != 2 || milliseconds < 100 || milliseconds > 5000 ||
+                        (strcmp(mode, "graphics") && strcmp(mode, "guest"))) {
+                        LOG("DM_CTL: testidle wants graphics|guest and 100..5000 milliseconds");
+                        continue;
+                    }
+                    dm_test_foreground_idle(!strcmp(mode, "guest"), milliseconds);
+                    continue;
+                }
                 if (!strcmp(line, "dump")) { crash_dump_now("DM_CTL dump"); continue; }
                 if (!strncmp(line, "shot ", 5)) { dm_gfx_shot_at(1, line + 5); LOG("DM_CTL: screenshot of the next frame → %s", line + 5); continue; }
                 if (!strncmp(line, "texlist ", 8)) { void dm_gfx_texlist(int target); dm_gfx_texlist(atoi(line + 8)); continue; }
@@ -666,7 +685,6 @@ HLE_FORCE("_ZN2nn3hid13GetJcmsStatesEPNS0_9JcmsStateEiRKNS0_10JcmsHandleE", "Joy
           int, h_hid_JcmsStates, void *out, int n, const uint32_t *h) { (void)out; (void)n; (void)h; return 0; }
 // The Switch 2's pointer on top of those sensors (Nmouse; Fire Emblem Fortune's Weave initializes it at boot with the 1920x1080 screen it maps the pointer to, main+0x650a24). InitializeNmouse opens the
 // hid service as InitializeJcms does (its Result aborts: sdk+0x6d5340). No controller of the host has the sensor, so there are no handles, and the calls on a handle have nothing to do
-HLE_FORCE("_ZN2nn3hid16InitializeNmouseEPvmii", "Joy-Con mouse pointer: no hid service; no sensor on the host", void, h_hid_NmouseInit, void *work, uint64_t size, int w, int h) { (void)work; (void)size; (void)w; (void)h; }
 HLE_FORCE("_ZN2nn3hid16GetNmouseHandlesEPNS0_12NmouseHandleEij", "Joy-Con mouse pointer handles: none (no sensor on the host)", int, h_hid_NmouseHandles, void *out, int n, uint32_t id) { (void)out; (void)n; (void)id; return 0; }
 HLE_FORCE("_ZN2nn3hid32SetNmouseButtonConfigJoyLeftJcmsERKNS0_29NmouseButtonConfigJoyLeftJcmsE", "Joy-Con mouse pointer: no sensor on the host", void, h_hid_NmouseCfgL, const void *c) { (void)c; }
 HLE_FORCE("_ZN2nn3hid33SetNmouseButtonConfigJoyRightJcmsERKNS0_30NmouseButtonConfigJoyRightJcmsE", "Joy-Con mouse pointer: no sensor on the host", void, h_hid_NmouseCfgR, const void *c) { (void)c; }
@@ -736,6 +754,27 @@ HLE_FORCE("_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEi", "mouse states: 0 ent
 HLE_FORCE("_ZN2nn3hid13GetMouseStateEPNS0_10MouseStateE", "mouse state: not connected (MouseState 0x28 bytes zeroed)", void, h_hid_MouseState, void *s) {
     memset(s, 0, 0x28); ((int64_t *)s)[0] = atomic_fetch_add(&g_sampling, 1) + 1;
 }
+// Nmouse (SDK 21, the Switch 2's mouse: a Joy-Con 2 on a surface or a USB mouse): none connected. The SDK's own calls open the hid service, which sm refuses (0xe15): Mario Kart World's
+// nnMain aborted in InitializeNmouse (sdk+0x6df504). The setters and Initialize / Finalize succeed (their SDK wrappers abort on an error); no handles, so the queries that take a handle
+// answer false, as the SDK does for an unknown handle (detail result 0xbcca), and the merged / standard mouse handles are not found (0xc0ca)
+static int g_nmouse_range[2];
+HLE_FORCE("_ZN2nn3hid16InitializeNmouseEPvmii", "Nmouse; none connected on the host", void, h_hid_InitNmouse, void *buf, size_t n, int w, int h) { (void)buf; (void)n; (void)w; (void)h; }
+HLE_FORCE("_ZN2nn3hid16InitializeNmouseEPvmiiNS0_17NmousePointerTypeE", "Nmouse (pointer type given); none connected on the host", void, h_hid_InitNmouseT, void *buf, size_t n, int w, int h, int t) { (void)buf; (void)n; (void)w; (void)h; (void)t; }
+HLE_FORCE("_ZN2nn3hid14FinalizeNmouseEv", "Nmouse; none connected on the host", void, h_hid_FinNmouse, void) {}
+HLE_FORCE("_ZN2nn3hid26SetMergedNmouseSourceTypesENS_4util10BitFlagSetILi32ENS0_10NmouseTypeEEE", "Nmouse merged source types; ignored, none connected", void, h_hid_NmouseMerge, uint32_t t) { (void)t; }
+HLE_FORCE("_ZN2nn3hid22SetNmousePointerRangesEii", "Nmouse pointer ranges; the host only records them", void, h_hid_NmouseSetRange, int w, int h) { g_nmouse_range[0] = w; g_nmouse_range[1] = h; }
+HLE_FORCE("_ZN2nn3hid22GetNmousePointerRangesEPiS1_", "Nmouse pointer ranges: the ones that were set", void, h_hid_NmouseGetRange, int *w, int *h) { *w = g_nmouse_range[0]; *h = g_nmouse_range[1]; }
+HLE_FORCE("_ZN2nn3hid28SetNmousePointerMovementAreaEiiii", "Nmouse pointer area; ignored, none connected", void, h_hid_NmouseArea, int x, int y, int w, int h) { (void)x; (void)y; (void)w; (void)h; }
+HLE_FORCE("_ZN2nn3hid21GetMergedNmouseHandleEPNS0_12NmouseHandleE", "Nmouse merged handle: none connected", bool, h_hid_NmouseMerged, void *out) { (void)out; return false; }
+HLE_FORCE("_ZN2nn3hid28GetStandardMouseNmouseHandleEPNS0_12NmouseHandleE", "Nmouse standard mouse handle: none connected", bool, h_hid_NmouseStd, void *out) { (void)out; return false; }
+HLE_FORCE("_ZN2nn3hid16GetNmouseTypeSetEPNS_4util10BitFlagSetILi32ENS0_10NmouseTypeEEENS0_12NmouseHandleE", "Nmouse type set: unknown handle", bool, h_hid_NmouseTypes, uint32_t *out) { *out = 0; return false; }
+HLE_FORCE("_ZN2nn3hid13GetNpadIdTypeEPjNS0_12NmouseHandleE", "Nmouse controller: unknown handle", bool, h_hid_NmouseNpad, uint32_t *out) { (void)out; return false; }
+HLE_FORCE("_ZN2nn3hid34SetNmouseButtonConfigStandardMouseERKNS0_31NmouseButtonConfigStandardMouseE", "Nmouse button config; ignored, none connected", void, h_hid_NmouseCfgM, const void *c) { (void)c; }
+HLE_FORCE("_ZN2nn3hid19EnableNmousePointerENS0_12NmouseHandleEb", "Nmouse pointer: unknown handle", bool, h_hid_NmouseEnable, void) { return false; }
+HLE_FORCE("_ZN2nn3hid24SetNmousePointerPositionENS0_12NmouseHandleEii", "Nmouse pointer position: unknown handle", bool, h_hid_NmousePos, void) { return false; }
+HLE_FORCE("_ZN2nn3hid14GetNmouseStateEPNS0_11NmouseStateENS0_12NmouseHandleE", "Nmouse state: unknown handle", bool, h_hid_NmouseState, void *s) { (void)s; return false; }
+HLE_FORCE("_ZN2nn3hid15GetNmouseStatesEPiPNS0_11NmouseStateEiNS0_12NmouseHandleE", "Nmouse states: unknown handle, 0 entries", bool, h_hid_NmouseStates, int *count, void *s, int n) { (void)s; (void)n; *count = 0; return false; }
+HLE_FORCE("_ZN2nn3hid21RestrictNmousePointerEffff", "Nmouse pointer restriction; ignored, none connected", void, h_hid_NmouseRestrict, float a, float b, float c, float d) { (void)a; (void)b; (void)c; (void)d; }
 HLE_FORCE("_ZN2nn3hid18InitializeKeyboardEv", "keyboard; not provided by the host", void, h_hid_InitKbd, void) {}
 HLE_FORCE("_ZN2nn3hid16GetKeyboardStateEPNS0_13KeyboardStateE", "keyboard state: not connected (KeyboardState 0x30 bytes zeroed)", void, h_hid_KbdState, void *s) {
     memset(s, 0, 0x30); ((int64_t *)s)[0] = atomic_fetch_add(&g_sampling, 1) + 1;

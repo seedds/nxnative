@@ -7,6 +7,7 @@
 #import <AVFAudio/AVFAudio.h>
 #include <errno.h>
 #include "front.h"
+#include "nvn_hdr.h"
 #include "hle.h"
 #include "dm.h"
 #include "haptics_apple.h"
@@ -42,7 +43,13 @@ static UILabel *front_ios_fps_label(void);
 }
 - (void)didMoveToWindow {   // the phone's screen or a TV's (DmTVSceneDelegate): render at that screen's pixels
     [super didMoveToWindow];
-    UIScreen *s = self.window.windowScene.screen; if (!s) return;
+    UIScreen *s = self.window.windowScene.screen;
+    if (!s) { dm_hdr_display(0); return; }
+    // Advertise HDR only after configuring the actual phone/TV drawable. The
+    // shared present pass already decodes negotiated PQ/scRGB into this layer.
+    dm_hdr_configure_layer((__bridge void *)self.layer, s.potentialEDRHeadroom);
+    if (dm_hdr_requested()) LOG("front end: iOS HDR requested, potential EDR headroom %.2f, current %.2f, drawable format %lu",
+        (double)s.potentialEDRHeadroom, (double)s.currentEDRHeadroom, (unsigned long)((CAMetalLayer *)self.layer).pixelFormat);
     self.layer.contentsScale = s.nativeScale; [self setNeedsLayout];
 }
 - (void)layoutSubviews {
@@ -339,7 +346,52 @@ static void save_sync_background(void) {
     });
 }
 
+// Diagnostic only: compare an idle/drain with a real UIKit background transition.
+// No quality, scheduling or presentation configuration changes. The existing
+// background clock hold blocks guest polling as well as stopping elapsed time.
+static unsigned g_test_focus_generation;
+void dm_test_foreground_idle(int guest_lifecycle, unsigned milliseconds) {
+    const char *enabled = getenv("DM_TEST_FOREGROUND_IDLE");
+    if (!enabled || strcmp(enabled, "1")) {
+        LOG("foreground idle diagnostic requires DM_TEST_FOREGROUND_IDLE=1");
+        return;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        static int busy;
+        if (busy || !g_layer || UIApplication.sharedApplication.applicationState != UIApplicationStateActive) {
+            LOG("foreground idle diagnostic skipped: app inactive or test already running");
+            return;
+        }
+        busy = 1;
+        unsigned focus_generation = g_test_focus_generation;
+        LOG("foreground idle diagnostic begin: %s, %u ms", guest_lifecycle ? "guest lifecycle" : "graphics", milliseconds);
+        if (guest_lifecycle) {
+            dm_focus_set(2);
+            dm_focus_set(3);
+            dm_audio_suspend(1);
+        }
+        guest_clock_freeze_for(1, 1);
+        dm_gfx_suspend(1);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)milliseconds * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+            // A real background transition owns the graphics/audio suspension
+            // until UIKit resumes the app; this diagnostic must not undo it.
+            if (!g_audio_bg) {
+                dm_gfx_suspend(0);
+                guest_clock_freeze_for(1, 0);
+            }
+            if (guest_lifecycle && !g_audio_bg) {
+                front_ios_audio_apply();
+                dm_focus_set(UIApplication.sharedApplication.applicationState == UIApplicationStateActive ? 1 : 2);
+            }
+            busy = 0;
+            LOG("foreground idle diagnostic end: actual background=%d, UIKit transition during test=%d",
+                g_audio_bg, focus_generation != g_test_focus_generation);
+        });
+    });
+}
+
 void front_ios_focus_event(int ev) {
+    g_test_focus_generation++;
     if (!g_layer) return;
     switch (ev) {
         case 0: dm_gamepad_reset(); dm_focus_set(2); break;

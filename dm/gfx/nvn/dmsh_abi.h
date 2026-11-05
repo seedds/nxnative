@@ -27,6 +27,8 @@
 #define DMSH_C0_SSBO_CS 0x310            // compute stage storage buffer table
 #define DMSH_C0_SSBO_GS 0x410            // geometry stage storage buffer table (NieR:Automata); the hull and domain stages' bases were never seen
 #define DMSH_C0_SSBO_PS 0x510            // pixel stage storage buffer table
+#define DMSH_C0_SSBO_TS 0x670            // NVN2 task stage storage buffer table (SDK stage slot 6)
+#define DMSH_C0_SSBO_MS 0x770            // NVN2 mesh stage storage buffer table (SDK stage slot 7)
 #define DMSH_C0_DISPATCH 0x200           // compute: the dispatch's workgroup counts x, y, z (32 bits each; Link's Awakening's light culling)
 #define DMSH_C0_DISPATCH_NVN2 4          // NVN2 compute keeps them here, below its per-shader layout at 0x10 (x and y read by Fire Emblem Fortune's Weave's light culling; z by their order)
 #define DMSH_C0_CS_UBO 0x210             // compute: uniform slot r's address and size at 0x210 + 0x10 r, read through global memory (the build's ubo_ptr bindings); it ends where the storage buffer table starts
@@ -96,3 +98,10 @@
 #define DMSH_LOGIC_BUFFER 29
 // Its function constants: bool, colour target n is attached (the variant reads it only then), at this index + n (nvn_mtl.m lo_fn specializes the entry point per pass's targets)
 #define DMSH_LOGIC_FC 200
+
+// Compute shared memory past the threadgroup memory every Apple GPU gives a kernel (MTLDevice maxThreadgroupMemoryLength): the build moves it into a device buffer, one slice per threadgroup
+// (dmsh_build.py tg_spill; the reflection's "tgmem" = the slice's bytes), which the host binds at this compute buffer index (nvn_mtl.m tgm_gpu). The buffer starts with DMSH_TGMEM_HEAD bytes:
+// a uint, the bytes of slices after the head, then a uint the shader sets to 1 when a threadgroup lies past them
+#define DMSH_TGMEM_LIMIT 32768
+#define DMSH_TGMEM_BUFFER 30
+#define DMSH_TGMEM_HEAD 16

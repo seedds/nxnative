@@ -15,6 +15,7 @@
 #include "dm.h"
 #include "dm_input.h"
 #include "front.h"
+#include "../gfx/nvn/nvn_hdr.h"
 #include "hle.h"
 #include "pad_slots.h"
 #include "haptics_apple.h"
@@ -38,7 +39,8 @@ int front_screen_max_fps(void) { return g_screen_fps; }
 static _Atomic int g_screen_variable_refresh;
 int front_screen_variable_refresh(void) { return g_screen_variable_refresh; }
 static void screen_refresh(NSScreen *screen) {   // main thread: refresh capabilities of the current screen and mode, including a mode change without moving the window
-    if (!screen) return;
+    if (!screen) { dm_hdr_display(0); return; }
+    dm_hdr_configure_layer((__bridge void *)g_layer, screen.maximumPotentialExtendedDynamicRangeColorComponentValue);
     g_screen_fps = (int)screen.maximumFramesPerSecond;
     g_screen_variable_refresh = screen.minimumRefreshInterval > 0 && screen.maximumRefreshInterval > screen.minimumRefreshInterval;
 }

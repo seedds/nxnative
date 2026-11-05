@@ -1,6 +1,7 @@
 // Metal 4 pipelines (pso_build): one base per pipeline with its colour state unspecialized, made into pipelines by specialization, kept in the pipeline archive.
 // Checks: pipelines that differ only in colour state share one base; a specialized pipeline draws the same pixels as one built through the MTLDevice; a flushed archive
-// file serves the base again without compiling; a flush of bases without a vertex layout is a p<seq> file, where a base with a layout is not looked up; a function with no
+// file serves the base again without compiling; a flush of bases without a vertex layout is a p<seq> file, where a base with a layout is not looked up, and serves this run's
+// lookups at once; a function with no
 // Metal 4 descriptor keeps the MTLDevice path; pso_key_norm drops what no pipeline depends on; compaction merges the files the prewarm took bases from into one despite a
 // mid-prewarm flush, and a compaction that did not finish is not tried again on the same system build; depth-only draws write depth; concurrent colour variants compile
 // one base; archive flushes preserve unrelated compiler state; a function with function constants is specialized by its pipeline's descriptor, not through its library,
@@ -357,6 +358,22 @@ int main(int argc, char **argv) { @autoreleasepool {
     same_pixels("layout base with only p files open", MTLPixelFormatRGBA8Unorm, 1, MTLPixelFormatRGBA16Float, MTLColorWriteMaskAll);
     EXPECT("layout base: not taken from a p file, compiled", built + 1, g_pb_built);
     EXPECT("layout base: one waits for a plain file", 1, g_arch_new_vd);
+    // a p file written in this run serves its bases to a lookup that does not compile (a hybrid draw's pulling base, built by the prebuild, which keeps no base in memory) in the same run
+    {
+        MTLRenderPipelineDescriptor *pd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+        pd.vertexFunction = nd.vertexFunction; pd.fragmentFunction = test_fn(g_lib, @"fs2", 1); pd.vertexDescriptor = [MTLVertexDescriptor vertexDescriptor];
+        arch_flush_wait();   // the layout base above goes to a plain file, which this run does not open
+        g_arch4p = @[]; nvn_hm_clear(&g_pbase, hm_rel); built = g_pb_built;
+        EXPECT("same run: no file yet, no pipeline without compiling", 0, pso_build_ex(pd, &err, 0) != nil);
+        EXPECT("same run: a pipeline", 1, pso_build(pd, &err) != nil);
+        EXPECT("same run: its base compiled", built + 1, g_pb_built);
+        arch_flush_wait();
+        nvn_hm_clear(&g_pbase, hm_rel); arch0 = g_pb_archived;
+        EXPECT("same run: the written p file is open", 1, arch4p_now().count);
+        EXPECT("same run: a pipeline without compiling", 1, pso_build_ex(pd, &err, 0) != nil);
+        EXPECT("same run: base from the file just written", arch0 + 1, g_pb_archived);
+        EXPECT("same run: nothing compiled again", built + 1, g_pb_built);
+    }
     // compaction: with more than PSO_ARCH_COMPACT files, the bases the prewarm takes from them are captured again; after the flush that follows, one file holds them and the old ones are gone
     {
         char cdir[] = "/tmp/t_pso_compact.XXXXXX"; if (!mkdtemp(cdir)) abort();

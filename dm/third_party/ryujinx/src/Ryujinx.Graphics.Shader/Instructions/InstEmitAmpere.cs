@@ -75,6 +75,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             InstEmit.RegisterAmpereTensor(X);
             InstEmit.RegisterAmpereHalfCompare(Alu);
             InstEmit.RegisterAmpereGeometry(Alu, X);
+            InstEmit.RegisterAmpereMesh(X);
         }
 
         private static void X(int opcode, InstName name, InstEmitter emitter, InstProps props, bool uniform = false, bool writesRd = true)

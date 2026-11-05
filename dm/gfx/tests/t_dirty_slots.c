@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <stdatomic.h>
 
 module_t *g_mod;
 int g_nmod;
@@ -22,6 +23,84 @@ static void *page_map(void) {
     void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (p == MAP_FAILED) { perror("mmap"); exit(2); }
     return p;
+}
+
+// Adjacent pools can both contain a short span after host-page rounding, but
+// only the protected descriptor receives a generation on the write fault.
+// Warming the other descriptor must not change the canonical first match.
+static void *cache_shared_page(void *arg) {
+    int reverse = (int)(intptr_t)arg;
+    size_t pg = (size_t)getpagesize();
+    uint8_t *p = mmap(NULL, 4 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (p == MAP_FAILED) { perror("mmap"); exit(2); }
+    uint8_t *a = reverse ? p + 2 * pg - 0x1000 : p;
+    uint8_t *b = reverse ? p : p + pg - 0x1000;
+    size_t na = reverse ? 0x1000 : pg - 0x1000, nb = reverse ? 2 * pg - 0x1000 : 2 * pg;
+    nvn_dirty_add_range(a, na); nvn_dirty_add_range(b, nb);
+    const void *first = nvn_dirty_span(a, 16);
+    uint64_t stamp = nvn_dirty_now();
+    nvn_dirty_protect(a, 16);
+    const void *other = nvn_dirty_span(reverse ? p : p + pg, pg);
+    a[0] = 7;
+    printf("lookup cache, shared page (%s):\n", reverse ? "earlier range starts later" : "earlier range ends sooner");
+    EXPECT("warmed a different containing descriptor", 1, first != other);
+    EXPECT("cached lookup still detects the write", 1, nvn_dirty_since(a, 16, stamp));
+    EXPECT("cached lookup preserves the first containing range", 1, nvn_dirty_span(a, 16) == first);
+    nvn_dirty_remove_range(a); nvn_dirty_remove_range(b); munmap(p, 4 * pg);
+    return NULL;
+}
+
+typedef struct { const void *addr, *expected; _Atomic int phase; int matched; } cache_reuse;
+static void *cache_reuse_reader(void *arg) {
+    cache_reuse *t = arg;
+    nvn_dirty_span(t->addr, 16);   // warm this thread's cache while only the later slot contains the span
+    atomic_store(&t->phase, 1);
+    while (atomic_load(&t->phase) != 2) usleep(100);
+    t->matched = nvn_dirty_span(t->addr, 16) == t->expected;
+    return NULL;
+}
+static void cache_slot_reuse(void) {
+    size_t pg = (size_t)getpagesize();
+    uint8_t *p = mmap(NULL, 4 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (p == MAP_FAILED) { perror("mmap"); exit(2); }
+    nvn_dirty_add_range(p, pg); nvn_dirty_add_range(p + 2 * pg, 2 * pg);
+    const void *first_slot = nvn_dirty_span(p, 16), *later_slot = nvn_dirty_span(p + 2 * pg, 2 * pg);
+    nvn_dirty_remove_range(p);
+    uint8_t *c = p + 2 * pg + 0x1000;
+    cache_reuse t = {.addr = c, .expected = first_slot}; pthread_t reader;
+    if (pthread_create(&reader, NULL, cache_reuse_reader, &t)) exit(2);
+    while (atomic_load(&t.phase) != 1) usleep(100);
+    nvn_dirty_add_range(c, pg - 0x1000);   // reuse an earlier slot, now overlapping the cached range
+    atomic_store(&t.phase, 2); pthread_join(reader, NULL);
+    EXPECT("slot reuse invalidates another thread's cached selection", 1, t.matched);
+    EXPECT("reused earlier slot is the canonical match", 1, nvn_dirty_span(c, 16) == first_slot);
+    nvn_dirty_remove_range(c);
+    EXPECT("retiring a cached match falls back to the remaining range", 1, nvn_dirty_span(c, 16) == later_slot);
+    nvn_dirty_remove_range(p + 2 * pg); munmap(p, 4 * pg);
+}
+
+// A page key alone cannot select a descriptor: queries starting on the same
+// page but covering different lengths can have different canonical matches.
+static void cache_span_lengths(void) {
+    size_t pg = (size_t)getpagesize();
+    uint8_t *p = mmap(NULL, 4 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (p == MAP_FAILED) { perror("mmap"); exit(2); }
+    nvn_dirty_add_range(p, pg);
+    const void *short_span = nvn_dirty_span(p, 16);
+    nvn_dirty_add_range(p + 0x1000, 2 * pg);
+    const void *long_span = nvn_dirty_span(p, 2 * pg);
+    EXPECT("different query lengths select distinct overlapping pools", 1, short_span != long_span);
+    int bad = 0;
+    for (int i = 0; i < 1000; i++) {
+        bad |= nvn_dirty_span(p + 32, 2 * pg) != long_span;
+        bad |= nvn_dirty_span(p + 32, 16) != short_span;
+    }
+    EXPECT("page-cache collisions preserve span-dependent first match", 0, bad);
+    nvn_dirty_remove_range(p);
+    EXPECT("retired short range no longer wins a cached page", 1, nvn_dirty_span(p + 32, 16) == long_span);
+    nvn_dirty_remove_range(p + 0x1000);
+    EXPECT("retired long range is not returned from either cache", 0, nvn_dirty_tracked(p + 32, 16));
+    munmap(p, 4 * pg);
 }
 
 int main(void) {
@@ -99,5 +178,12 @@ int main(void) {
     EXPECT("B no longer tracked after destroying B", 0, nvn_dirty_tracked(pb, tex));
     nvn_dirty_remove_range(pa);
     munmap(blk, 4 * pg);
+    for (int reverse = 0; reverse < 2; reverse++) {
+        pthread_t reader;   // each case starts with an empty TLS cache
+        if (pthread_create(&reader, NULL, cache_shared_page, (void *)(intptr_t)reverse)) exit(2);
+        pthread_join(reader, NULL);
+    }
+    cache_slot_reuse();
+    cache_span_lengths();
     return g_fail != 0;
 }

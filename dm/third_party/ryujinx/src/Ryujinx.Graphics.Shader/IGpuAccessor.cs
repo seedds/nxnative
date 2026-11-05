@@ -11,6 +11,10 @@ namespace Ryujinx.Graphics.Shader
         // Fixed VS capture ABI used by the offline Metal geometry path.
         bool QueryGeometryInputFixed() => false;
 
+        // ISBE input/output attribute words and output-map bytes. Only supplied
+        // when the caller has decoded the task/mesh program's allocation sizes.
+        int[] QueryAmpereIsbeSizes() => null;
+
         /// <summary>
         /// Reads data from the constant buffer 1.
         /// </summary>

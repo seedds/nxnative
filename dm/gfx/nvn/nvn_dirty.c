@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <mach/mach_time.h>
 #include <sched.h>
+#include <limits.h>
 
 // Order of page state and mprotect: the side changing protection first sets the state to BUSY and sets the final state only after mprotect has landed; other threads wait when they see BUSY.
 //   set read-only: NONE -> BUSY -> mprotect(read-only) -> PROT; unprotect: PROT -> BUSY -> mprotect(writable) -> NONE.
@@ -39,6 +40,7 @@ static _Atomic int g_live, g_live_peak;   // number of registered pools and peak
 void nvn_dirty_stat(int *live, int *peak, int *cap) { *live = atomic_load(&g_live); *peak = atomic_load(&g_live_peak); *cap = MAX_RANGE; }
 static _Atomic int g_overflow_logged;
 static pthread_mutex_t g_slot_mu = PTHREAD_MUTEX_INITIALIZER;   // Pool creation, retirement and protection serialize descriptor lifetime; the page-fault path does not touch this mutex
+static _Atomic uint64_t g_range_epoch;   // Even = stable descriptors; add / remove bracket changes with an odd epoch, invalidating every thread's lookup cache
 static _Atomic uint64_t g_mp_calls, g_mp_pages, g_mp_ticks;   // This module's mprotect: call count, pages covered, time spent (mach timebase, safe in the page-fault path too)
 static void mp(uintptr_t a, size_t len, int prot) {
     uint64_t t = mach_absolute_time(); mprotect((void *)a, len, prot);
@@ -61,12 +63,99 @@ static int busy_wait(range_t *r, uintptr_t p) {
     return 1;
 }
 static int live_at(int i) { return atomic_load_explicit(&rg(i)->live, memory_order_acquire); }
-// The registered range that holds all of [a, a+len) (used for a texture's tracking / protection / dirty check)
-static range_t *find_span(uintptr_t a, size_t len) {
-    int n = atomic_load(&g_nr);
-    for (int i = 0; i < n; i++) { range_t *r = rg(i); if (live_at(i) && a >= r->base && a + len <= r->end) return r; }
-    return NULL;
+// Shared address index, rebuilt lazily under g_slot_mu after descriptor changes.
+// Leaves are ordered by base; internal nodes bound their addresses and earliest
+// registration slot. A query can discard whole subtrees while retaining the
+// canonical first containing slot. The signal handler never uses this index.
+typedef struct { uintptr_t base, end; int slot; } span_node;
+static span_node *g_span_tree;
+static size_t g_span_cap;
+static uint64_t g_span_epoch = UINT64_MAX;
+static _Thread_local uint64_t g_span_queries, g_span_misses, g_span_rebuilds, g_span_rebuild_ticks;
+void nvn_dirty_lookup_stats(uint64_t out[4]) {
+    out[0] = g_span_queries; out[1] = g_span_misses; out[2] = g_span_rebuilds;
+    out[3] = g_tb.denom ? g_span_rebuild_ticks * g_tb.numer / g_tb.denom : 0;
 }
+static int span_order(const void *av, const void *bv) {
+    const span_node *a = av, *b = bv;
+    if (a->base != b->base) return a->base < b->base ? -1 : 1;
+    return (a->slot > b->slot) - (a->slot < b->slot);
+}
+static void span_index_build(uint64_t epoch) {   // g_slot_mu held, descriptors stable
+    uint64_t begin = mach_absolute_time();
+    int n = atomic_load(&g_nr);
+    size_t cap = 1; while (cap < (size_t)n) cap *= 2;
+    if (cap > g_span_cap) {
+        span_node *tree = realloc(g_span_tree, 2 * cap * sizeof *tree);
+        if (!tree) die("dirty-page address index allocation failed (%zu leaves)", cap);
+        g_span_tree = tree; g_span_cap = cap;
+    }
+    size_t used = 0;
+    for (int i = 0; i < n; i++) {
+        range_t *r = rg(i);
+        if (live_at(i)) g_span_tree[g_span_cap + used++] = (span_node){r->base, r->end, i};
+    }
+    qsort(g_span_tree + g_span_cap, used, sizeof *g_span_tree, span_order);
+    for (size_t i = used; i < g_span_cap; i++) g_span_tree[g_span_cap + i] = (span_node){UINTPTR_MAX, 0, INT_MAX};
+    for (size_t i = g_span_cap - 1; i; i--) {
+        span_node a = g_span_tree[2 * i], b = g_span_tree[2 * i + 1];
+        g_span_tree[i] = (span_node){a.base, a.end > b.end ? a.end : b.end, a.slot < b.slot ? a.slot : b.slot};
+    }
+    g_span_epoch = epoch;
+    g_span_rebuilds++; g_span_rebuild_ticks += mach_absolute_time() - begin;
+}
+typedef struct { uintptr_t a, end, start_before, end_after; int slot; } span_query;
+static void span_index_find(size_t i, span_query *q) {
+    span_node n = g_span_tree[i];
+    if (n.slot >= q->slot) return;   // all slots here are later than a match already found
+    if (q->a < n.base) { if (n.base < q->start_before) q->start_before = n.base; return; }
+    if (q->end > n.end) { if (n.end > q->end_after) q->end_after = n.end; return; }
+    if (i >= g_span_cap) { q->slot = n.slot; return; }
+    span_index_find(2 * i, q); span_index_find(2 * i + 1, q);
+}
+// The registered range that holds all of [a, a+len) (used for a texture's tracking / protection / dirty check)
+static range_t *find_span_(uintptr_t a, size_t len, int locked) {
+    g_span_queries++;
+    // Sparse textures resolve many physical runs on every dirty check. Repeating
+    // the scan over thousands of pools for each run dominated MKW submission.
+    // Cache descriptors, never cleanliness. Preserve the first containing range:
+    // overlapping host pages have separate generations, so picking another live
+    // range can miss a write. The bounds below retain each earlier range's reason
+    // for being excluded; the epoch invalidates them when any slot changes.
+    typedef struct { range_t *r; uintptr_t base, end, start_before, end_after; uint64_t epoch; } cached_span;
+    // The recent entries cover sequential accesses within one range. A frame
+    // revisits hundreds of texture pools, so eight entries alone still thrash:
+    // retain a page-indexed first level with the same canonical-match bounds.
+    enum { SPAN_BITS = 10 };
+    static _Thread_local cached_span pages[1u << SPAN_BITS], recent[8];
+    static _Thread_local unsigned next;
+    if (len > UINTPTR_MAX - a) return NULL;
+    uintptr_t end = a + len;
+    uint64_t epoch = atomic_load_explicit(&g_range_epoch, memory_order_acquire);
+    unsigned slot = (unsigned)(((uint64_t)(a >> g_shift) * UINT64_C(0x9e3779b97f4a7c15)) >> (64 - SPAN_BITS));
+    const cached_span *page = &pages[slot];
+    if (!(epoch & 1) && page->epoch == epoch && a >= page->base && end <= page->end &&
+        a < page->start_before && end > page->end_after && atomic_load_explicit(&g_range_epoch, memory_order_acquire) == epoch) return page->r;
+    for (unsigned i = 0; !(epoch & 1) && i < 8; i++) {
+        const cached_span *c = &recent[(next - 1 - i) & 7];
+        if (c->epoch == epoch && a >= c->base && end <= c->end && a < c->start_before && end > c->end_after &&
+            atomic_load_explicit(&g_range_epoch, memory_order_acquire) == epoch) { pages[slot] = *c; return c->r; }
+    }
+    g_span_misses++;
+    if (!locked) pthread_mutex_lock(&g_slot_mu);
+    epoch = atomic_load_explicit(&g_range_epoch, memory_order_acquire);
+    if (g_span_epoch != epoch) span_index_build(epoch);
+    span_query q = {a, end, UINTPTR_MAX, 0, INT_MAX};
+    span_index_find(1, &q);
+    range_t *r = q.slot == INT_MAX ? NULL : rg(q.slot);
+    // The rejected subtrees certify both positive and negative cache entries:
+    // their ranges stay excluded while start/end obey these bounds. A later
+    // registration, retirement or reuse invalidates every certificate by epoch.
+    pages[slot] = recent[next++ & 7] = (cached_span){r, r ? r->base : 0, r ? r->end : UINTPTR_MAX, q.start_before, q.end_after, epoch};
+    if (!locked) pthread_mutex_unlock(&g_slot_mu);
+    return r;
+}
+static range_t *find_span(uintptr_t a, size_t len) { return find_span_(a, len, 0); }
 static void stamp_page(range_t *r, uintptr_t p) {
     atomic_store(&r->gen[p], atomic_fetch_add(&g_now, 1) + 1);
     // Publish completion after the generation: a checker may have cached "clean" using the incremented clock before the generation store. Both fault and host-write paths
@@ -143,6 +232,7 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
             atomic_store_explicit(&g_blk[n >> BLK_SHIFT], b, memory_order_release);
         }
     }
+    atomic_fetch_add(&g_range_epoch, 1);
     { int lv = atomic_fetch_add(&g_live, 1) + 1, pk = atomic_load(&g_live_peak); while (lv > pk && !atomic_compare_exchange_weak(&g_live_peak, &pk, lv)) {} }
     range_t *r = rg(slot);
     uintptr_t base = (uintptr_t)mem & ~(g_pg - 1), end = ((uintptr_t)mem + size + g_pg - 1) & ~(g_pg - 1);
@@ -160,6 +250,7 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
     r->base = base; r->end = end; r->mem = (uintptr_t)mem; r->state = state; r->gen = gen;
     if (slot == n) atomic_store(&g_nr, n + 1);
     atomic_store_explicit(&r->live, 1, memory_order_release);
+    atomic_fetch_add(&g_range_epoch, 1);
     pthread_mutex_unlock(&g_slot_mu);
 }
 // Pool destruction: first restore still-protected pages to writable (the pool memory may be reused for something else once returned to the game), then mark invalid
@@ -167,7 +258,7 @@ void nvn_dirty_remove_range(const void *mem) {
     pthread_mutex_lock(&g_slot_mu);
     range_t *r = NULL; int n = atomic_load(&g_nr);
     for (int i = 0; i < n && !r; i++) if (live_at(i) && rg(i)->mem == (uintptr_t)mem) r = rg(i);   // Match by the pool's exact start: an adjacent pool sharing a page may have the same rounded base
-    if (r) { prep_write((void *)r->base, r->end - r->base); atomic_store_explicit(&r->live, 0, memory_order_release); atomic_fetch_sub(&g_live, 1); }
+    if (r) { atomic_fetch_add(&g_range_epoch, 1); prep_write((void *)r->base, r->end - r->base); atomic_store_explicit(&r->live, 0, memory_order_release); atomic_fetch_sub(&g_live, 1); atomic_fetch_add(&g_range_epoch, 1); }
     pthread_mutex_unlock(&g_slot_mu);
 }
 int nvn_dirty_tracked(const void *addr, size_t len) {
@@ -180,7 +271,7 @@ void nvn_dirty_protect(const void *addr, size_t len) {
     // Keep this descriptor live through the last mprotect. Retirement restores
     // RW under this same mutex; it must not finish between lookup and PG_BUSY.
     pthread_mutex_lock(&g_slot_mu);
-    range_t *r = len ? find_span((uintptr_t)addr, len) : NULL;
+    range_t *r = len ? find_span_((uintptr_t)addr, len, 1) : NULL;
     if (!r) { pthread_mutex_unlock(&g_slot_mu); return; }
     uintptr_t a = (uintptr_t)addr, p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift;
     // Consecutive pages are merged into one mprotect (per-page calls reach thousands per frame on the first upload of large textures; character select page startup frame 5: 4888 calls).

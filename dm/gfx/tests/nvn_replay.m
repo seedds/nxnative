@@ -54,7 +54,7 @@ static uint64_t g_raw_hits[OP_COUNT_][OP_COUNT_];
 static int raw_addr(void *ctx, uint64_t *field, uint64_t len, int writable) {
     (void)ctx; uint64_t v = *field; if (!cap_is_addr(v)) return 1;
     uint64_t r = cap_addr_region(v), lo = cap_addr_off(v), hi = lo + (len ? len : 1);
-    if (writable && g_raw_write) { if (g_nrw == g_rwcap) { g_rwcap = g_rwcap ? 2 * g_rwcap : 256; g_rw = realloc(g_rw, g_rwcap * sizeof *g_rw); } g_rw[g_nrw++] = (raw_w){r, lo, hi, g_raw_op}; return 1; }
+    if (writable && g_raw_write) { if (g_nrw == g_rwcap) { g_rwcap = g_rwcap ? 2 * g_rwcap : 256; raw_w *next = realloc(g_rw, g_rwcap * sizeof *g_rw); if (!next) RFAIL("cannot grow GPU write ranges"); g_rw = next; } g_rw[g_nrw++] = (raw_w){r, lo, hi, g_raw_op}; return 1; }
     for (size_t i = 0; i < g_nrw; i++) if (g_rw[i].r == r && lo < g_rw[i].hi && g_rw[i].lo < hi) { g_raw_hits[g_rw[i].op][g_raw_op]++; break; }
     return 1;
 }
@@ -124,7 +124,7 @@ static void apply_env(const char *head, size_t n) {   // the live run's DM_* set
 }
 
 static void map_region(uint32_t idx, const cap_regn *h, const uint8_t *bytes) {   // a fresh mapping at the same offset within 64 KiB as the live one (alignment the replay layer may depend on)
-    if (idx >= rp_nrg) { rp_rg = realloc(rp_rg, (idx + 1) * sizeof *rp_rg); memset(rp_rg + rp_nrg, 0, (idx + 1 - rp_nrg) * sizeof *rp_rg); rp_nrg = idx + 1; }
+    if (idx >= rp_nrg) { region *next = realloc(rp_rg, (idx + 1) * sizeof *rp_rg); if (!next) RFAIL("cannot grow captured regions"); rp_rg = next; memset(rp_rg + rp_nrg, 0, (idx + 1 - rp_nrg) * sizeof *rp_rg); rp_nrg = idx + 1; }
     size_t lead = (size_t)(h->old_lo & 0xffff), len = (size_t)h->size + lead + 0x30000;   // room for the alignment and the pool buffers' page rounding
     uint8_t *m = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (m == MAP_FAILED) RFAIL("cannot map region %u (%llu bytes)", idx, (unsigned long long)h->size);
@@ -159,6 +159,7 @@ static void fill_tex(const uint8_t *d, size_t n) {
               (unsigned long long)h.t.serial, h.width, h.height, h.pixfmt, h.levels, h.slices, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat, (unsigned long)t.mipmapLevelCount, slices);
     uint64_t total = 0; for (uint32_t i = 0; i < h.nsub; i++) total += subs[i].bytes;
     id<MTLBuffer> b = [g_dev newBufferWithBytes:px length:MAX(total, 16u) options:MTLResourceStorageModeShared];
+    if (!b) RFAIL("cannot allocate captured texture staging buffer");
     id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder]; uint64_t off = 0;
     for (uint32_t i = 0; i < h.nsub; i++) { const cap_tsub *s = &subs[i];
         [e copyFromBuffer:b sourceOffset:off sourceBytesPerRow:s->row sourceBytesPerImage:s->img sourceSize:MTLSizeMake(s->w, s->h, s->d) toTexture:t destinationSlice:s->slice
@@ -167,11 +168,12 @@ static void fill_tex(const uint8_t *d, size_t n) {
     [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
 }
 
+// NOLINTBEGIN(clang-analyzer-osx.cocoa.RetainCount): prog_get retains programs in the serial table for the entire replay; the analyzer cannot model C hash-table ownership.
 static void check_programs(const char *cap_chain) {   // every program resolves to shaders with the interface the records were made for
     int missing = 0;
     for (uint32_t i = 0; i < rp_npr; i++) {
-        NvProg *o = prog_get(&rp_pr[i]); uint64_t now[6]; cap_iface(o, now);
-        for (int st = 0; st < 6; st++) {
+        NvProg *o = prog_get(&rp_pr[i]); uint64_t now[NVN_STAGE_COUNT]; cap_iface(o, now);
+        for (int st = 0; st < NVN_STAGE_COUNT; st++) {
             if (now[st] == rp_prc[i].iface[st]) continue;
             char key[17] = "?"; for (unsigned s = 0; s < rp_prc[i].nstage && s < 6; s++) if (rp_prc[i].ok >> s & 1) { snprintf(key, sizeof key, "%02x%02x%02x%02x%02x%02x%02x%02x", rp_prc[i].key[s][0], rp_prc[i].key[s][1],
                 rp_prc[i].key[s][2], rp_prc[i].key[s][3], rp_prc[i].key[s][4], rp_prc[i].key[s][5], rp_prc[i].key[s][6], rp_prc[i].key[s][7]); }
@@ -183,6 +185,7 @@ static void check_programs(const char *cap_chain) {   // every program resolves 
     }
     if (missing) RFAIL("%d program stages resolve differently than at capture: the same libraries (DM_MSL_DIR, DM_NVN_SHMAP) are needed", missing);
 }
+// NOLINTEND(clang-analyzer-osx.cocoa.RetainCount)
 
 int main(int argc, char **argv) { @autoreleasepool {
     const char *path = NULL, *png = NULL, *tdir = NULL, *maxpx_arg = "0"; int repeat = 1, warm = 1, index = 1;
@@ -225,7 +228,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     cap_reader rd; int lr = cap_load(&rd, path);
     if (lr <= 0) RFAIL("%s: %s", path, lr < 0 ? "not a capture of format 1" : "cannot read");
     for (;;) { cap_chunk c; uint8_t *d; int r = cap_next(&rd, &c, &d); if (r < 0) RFAIL("%s: corrupt chunk at byte %zu", path, rd.pos); if (!r) break;
-        rp_ch = realloc(rp_ch, (rp_nch + 1) * sizeof *rp_ch); rp_ch[rp_nch++] = (chunk){c, d}; }
+        chunk *next = realloc(rp_ch, (rp_nch + 1) * sizeof *rp_ch); if (!next) RFAIL("cannot grow captured chunks"); rp_ch = next; rp_ch[rp_nch++] = (chunk){c, d}; }
     cap_unload(&rd);
     // header: game, layout, chain; then the live run's settings
     char *head = NULL; size_t hn = 0; const char *lay = NULL; size_t ln = 0; const char *stat = ""; size_t sn = 0;
@@ -239,7 +242,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (strcmp(title, DM_GAME_ID)) RFAIL("the capture is of %s, this replayer is built for %s (make GAME=%s nvn_replay)", title, DM_GAME_ID, title);
     if (ln != strlen(cap_layout()) || memcmp(lay, cap_layout(), ln)) RFAIL("the capture's record layout differs from this build's (nvn_obj.h changed since the capture): capture again");
     if (!head_get(head, hn, "iface", v, sizeof v) || atoi(v) != CAP_IFACE)   // the shader interface hashes check_programs compares (nvn_capture.inc cap_iface)
-        RFAIL("the capture's shader interface hashes are of another kind (%s, this build %d: before 2 they hashed nvn_refl.h's struct bytes): capture again", head_get(head, hn, "iface", v, sizeof v) ? v : "none", CAP_IFACE);
+        RFAIL("the capture's shader interface hashes are of another kind (%s, this build %d: version 3 includes task and mesh stage interfaces): capture again", head_get(head, hn, "iface", v, sizeof v) ? v : "none", CAP_IFACE);
     printf("capture %s: %s frame %s, build %s, host %s, chain %s (this build: chain %s)\n", path, title, frame, build, commit, chain, DMSH_CHAIN);
     apply_env(head, hn);
     mtl_init();
@@ -330,7 +333,7 @@ int main(int argc, char **argv) { @autoreleasepool {
             // this submit's segments: copied, decoded (calls and jumps point at the copies), handed to the replay as the host hands the game's handles
             uint32_t nh = 0; const uint32_t *top = NULL; rp_nseg = 0;
             for (size_t i = 0; i < rp_nch; i++) { cap_chunk *c = &rp_ch[i].c; if (c->submit != s) continue;
-                if (c->tag == CAP_SEGM) { uint32_t idx, len; memcpy(&idx, rp_ch[i].d, 4); memcpy(&len, rp_ch[i].d + 4, 4); if (idx >= rp_nseg) { rp_seg = realloc(rp_seg, (idx + 1) * sizeof *rp_seg); rp_nseg = idx + 1; }
+                if (c->tag == CAP_SEGM) { uint32_t idx, len; memcpy(&idx, rp_ch[i].d, 4); memcpy(&len, rp_ch[i].d + 4, 4); if (idx >= rp_nseg) { uint8_t **next = realloc(rp_seg, (idx + 1) * sizeof *rp_seg); if (!next) RFAIL("cannot grow captured command segments"); rp_seg = next; rp_nseg = idx + 1; }
                     rp_seg[idx] = malloc(len + 8); memcpy(rp_seg[idx], rp_ch[i].d + 8, len); memset(rp_seg[idx] + len, 0, 8); }
                 if (c->tag == CAP_SUBM) { memcpy(&nh, rp_ch[i].d, 4); top = (const uint32_t *)(rp_ch[i].d + 4); } }
             for (size_t i = 0; i < rp_nch; i++) { cap_chunk *c = &rp_ch[i].c; if (c->submit != s || c->tag != CAP_SEGM) continue;

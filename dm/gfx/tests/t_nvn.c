@@ -41,6 +41,59 @@ static NVNqueue *g_sq; static NVNcommandHandle g_sh; static NVNT_nvnQueueSubmitC
 static void *susp_thr(void *a) { (void)a; pthread_mutex_lock(&g_smu); atomic_store(&g_sstarted, 1); pthread_cond_broadcast(&g_scv); pthread_mutex_unlock(&g_smu); g_sub(g_sq, 1, &g_sh); atomic_store(&g_sdone, 1); return NULL; }
 static int wait_started(void) { struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_sec += 10; pthread_mutex_lock(&g_smu); while (!atomic_load(&g_sstarted) && pthread_cond_timedwait(&g_scv, &g_smu, &dl) == 0) {} int ok = atomic_load(&g_sstarted); pthread_mutex_unlock(&g_smu); return ok; }
 
+static void *event_store_later(void *word) { usleep(30000); *(volatile uint32_t *)word = 1; return NULL; }
+
+// Poison a completed submission before the production release frees it. A
+// later clear must use the queue's retained targets, not these retired records.
+static int g_reloc_retired;
+static void reloc_release(void *ctx, nvn_qs_ticket ticket, void *payload) {
+    qe_submission *s = payload;
+    for (qe_work *w = s->head; w; w = w->next) if (w->bytes) {
+        size_t size = 0; op_hdr h;
+        do { memcpy(&h, w->bytes + size, sizeof h); size += h.size; } while (h.op != OP_END);
+        volatile uint8_t *bytes = w->bytes;
+        for (size_t i = 0; i < size; i++) bytes[i] = 0xa5; // keep poisoning observable before free
+    }
+    g_reloc_retired++; qe_release(ctx, ticket, payload);
+}
+static qe_builder reloc_clear(const NVNtexture *target, const float color[4]) {
+    qe_builder b = {.submission = calloc(1, sizeof(qe_submission)), .first = 1};
+    _Alignas(8) uint8_t original[8 + SNAP_OFF(p_set_rt) + 2 * sizeof(tex_t)] = {0};
+    tex_t expected;
+    if (target) {
+        put_hdr(original, OP_SET_RT, sizeof original);
+        p_set_rt *rt = (p_set_rt *)(original + 8); rt->n = 1;
+        rt->color[0] = tex_snap(rt, SNAP_OFF(p_set_rt), 0, target, 0);
+        expected = *(const tex_t *)target;
+        qe_record_copy(&b, original, sizeof original);
+    }
+    struct { op_hdr h; p_scissor s; } scissor = {{OP_SCISSOR, sizeof scissor}, {0, 0, 1280, 720}};
+    struct { op_hdr h; p_clear_color c; } clear = {{OP_CLEAR_COLOR, sizeof clear}, {.index = 0, .mask = 15}};
+    memcpy(clear.c.rgba, color, sizeof clear.c.rgba);
+    qe_record_copy(&b, (const uint8_t *)&scissor, sizeof scissor);
+    qe_record_copy(&b, (const uint8_t *)&clear, sizeof clear);
+    qe_flush(&b, 0, 0, 0);
+    if (target) {
+        const p_set_rt *owned = (const p_set_rt *)(b.submission->head->bytes + 8);
+        EXPECT("copied RT snapshot points inside owned record", (uintptr_t)(b.submission->head->bytes + 8 + SNAP_OFF(p_set_rt)), (uintptr_t)owned->color[0]);
+        memset(original, 0, sizeof original);
+        EXPECT("clearing original record preserves owned texture", 0, memcmp(owned->color[0], &expected, sizeof expected));
+    }
+    return b;
+}
+static void reloc_submit(qe_builder *b, const queue_t *q) { // submission lock and graphics gate held
+    nvn_qs_ticket ticket;
+    int enqueued = nvn_qs_enqueue(g_qs, q->serial, b->steps, b->count, b->submission, &ticket);
+    EXPECT("target snapshot work enqueues", 1, enqueued);
+    if (!enqueued) abort();
+    free(b->steps); free(b->bytes); free(b->records); qe_pump();
+    uint64_t fence = 0;
+    EXPECT("target snapshot work schedules", 1, nvn_qs_fence(g_qs, ticket, &fence));
+    EXPECT("target snapshot GPU work completes", 1, mtl_wait(fence, 5000000000ull));
+    nvn_qs_complete(g_qs, mtl_completed_fence());
+    EXPECT("target snapshot chunk retired before continuation", 1, nvn_qs_done(g_qs, ticket));
+}
+
 static size_t tex_size3(int target, int fmt, int w, int h, int depth) {   // a layered or 3D texture's storage size
     NVNtextureBuilder tb;
     P(nvnTextureBuilderSetDevice)(&tb, &dev); P(nvnTextureBuilderSetDefaults)(&tb); P(nvnTextureBuilderSetTarget)(&tb, target);
@@ -56,7 +109,50 @@ static size_t tex_size(int fmt, int w, int h, int flags, size_t *align) {
     return P(nvnTextureBuilderGetStorageSize)(&tb);
 }
 
+static uint64_t walk_bytes, walk_runs;
+static int walk_count(const uint8_t *p, uint64_t n, uint64_t unused) { (void)p; (void)unused; walk_bytes += n; walk_runs++; return 0; }
+static void check_sparse_walk(void) {
+    const uint64_t size = 64ull << 20;
+    uint8_t *phys = malloc(size);
+    struct vpool v = {.base = phys, .size = size, .pt = calloc(size >> 21, sizeof *v.pt)};
+    pool_t pool = {.vp = &v}; uint64_t a = (uint64_t)(uintptr_t)v.base;
+    vpt_set(&v, 0, size, phys); uint64_t gen = nvn_sparse_gen();
+    walk_bytes = walk_runs = 0;
+    EXPECT("sparse walk: contiguous region clean", 0, vpt_walk(&pool, a, size, gen, walk_count, 0));
+    EXPECT("sparse walk: whole contiguous byte range", size, walk_bytes);
+    EXPECT("sparse walk: contiguous leaves merge", 1, walk_runs);
+    EXPECT("sparse walk: older generation detects map", 1, vpt_walk(&pool, a, size, gen - 1, walk_count, 0));
+    // Unaligned ranges conservatively cover whole 4 KiB pages. Cross a leaf edge.
+    walk_bytes = walk_runs = 0;
+    vpt_walk(&pool, a + (2u << 20) - 100, 200, gen, walk_count, 0);
+    EXPECT("sparse walk: unaligned boundary bytes", 8192, walk_bytes);
+    EXPECT("sparse walk: unaligned boundary one run", 1, walk_runs);
+    vpt_set(&v, 2u << 20, 4096, NULL);
+    EXPECT("sparse walk: unmap invalidates old content", 1, vpt_walk(&pool, a + (2u << 20), 4096, gen, walk_count, 0));
+    EXPECT("sparse walk: adjacent remap is outside query", 0, vpt_walk(&pool, a, 2u << 20, gen, walk_count, 0));
+    gen = nvn_sparse_gen(); walk_bytes = walk_runs = 0;
+    vpt_walk(&pool, a, size, gen, walk_count, 0);
+    EXPECT("sparse walk: hole removes just one page", size - 4096, walk_bytes);
+    EXPECT("sparse walk: physical hole splits run", 2, walk_runs);
+    // Replacing one middle page must split cached runs on both sides immediately.
+    vpt_set(&v, (2u << 20) + 4096, 4096, phys);
+    EXPECT("sparse walk: replacement invalidates old content", 1, vpt_walk(&pool, a + (2u << 20) + 4096, 4096, gen, walk_count, 0));
+    gen = nvn_sparse_gen(); walk_bytes = walk_runs = 0;
+    vpt_walk(&pool, a, size, gen, walk_count, 0);
+    EXPECT("sparse walk: replacement preserves byte count", size - 4096, walk_bytes);
+    EXPECT("sparse walk: replacement adds physical run", 3, walk_runs);
+    if (getenv("DM_TEST_VPT_BENCH")) {
+        vpt_set(&v, 0, size, phys); gen = nvn_sparse_gen();
+        uint64_t start = now_ns(); walk_bytes = walk_runs = 0;
+        for (int i = 0; i < 2000; i++) vpt_walk(&pool, a, size, gen, walk_count, 0);
+        printf("sparse walk benchmark: 2000 x 64 MiB queries %.3f ms, %llu runs\n", (now_ns() - start) / 1e6, (unsigned long long)walk_runs);
+    }
+    for (uint64_t i = 0; i < size >> 21; i++) free(v.pt[i]);
+    free(v.pt); free(phys);
+}
+
 int main(void) {
+    check_sparse_walk();
     // Engine-native limiters have no FPS state page. Their launcher cap must
     // still pace presents and select the display-link rate in display mode.
     { win_t w={.interval=1};nvn_present_config(60,1);dm_fps_state=NULL;
@@ -360,6 +456,25 @@ int main(void) {
         P(nvnCommandBufferEndRecording)(&c2);
         memcpy(&rh, m, sizeof rh); d = draw_idx_rec(m + 8, rh.size, &dt);
         EXPECT("indirect draw keeps its address", 0x20000, d->ind);
+        // NVN2 mesh dispatches use first/count (not count/first) and retain all three group dimensions.
+        // Read the compact records back with a following record present: its header must not become an indirect address.
+        P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&c2);
+        P(nvnCommandBufferDrawMeshTasks)(&c2, 19, 7);
+        P(nvnCommandBufferDrawMeshTasks3D)(&c2, 2, 3, 5);
+        P(nvnCommandBufferDrawMeshTasks)(&c2, 0xf0000001u, 0);
+        P(nvnCommandBufferDrawMeshTasks3D)(&c2, 7, 0, 9);
+        P(nvnCommandBufferEndRecording)(&c2);
+        EXPECT("four direct mesh records plus END", 104, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        p_draw_mesh mt; const p_draw_mesh *md;
+        memcpy(&rh, m, sizeof rh); md = draw_mesh_rec(m + 8, rh.size, &mt);
+        EXPECT("mesh record opcode and compact size", 1, rh.op == OP_DRAW_MESH && rh.size == 24);
+        EXPECT("mesh first/count order and unit Y/Z", 1, md->first == 19 && md->x == 7 && md->y == 1 && md->z == 1 && !md->ind);
+        memcpy(&rh, m + 24, sizeof rh); md = draw_mesh_rec(m + 32, rh.size, &mt);
+        EXPECT("mesh 3D preserves every group dimension", 1, md->first == 0 && md->x == 2 && md->y == 3 && md->z == 5 && !md->ind);
+        memcpy(&rh, m + 48, sizeof rh); md = draw_mesh_rec(m + 56, rh.size, &mt);
+        EXPECT("mesh zero count is not changed to one", 1, md->first == 0xf0000001u && md->x == 0 && !md->ind);
+        memcpy(&rh, m + 72, sizeof rh); md = draw_mesh_rec(m + 80, rh.size, &mt);
+        EXPECT("mesh 3D zero dimension is preserved", 1, md->x == 7 && md->y == 0 && md->z == 9 && !md->ind);
         // A single texture bind keeps its handle 16 bytes into the command, where a game that patches recorded commands writes a new one (Luigi's Mansion 3: base + GetCommandMemoryUsed + 0x10)
         P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&c2);
         size_t at = P(nvnCommandBufferGetCommandMemoryUsed)(&c2);
@@ -603,7 +718,15 @@ int main(void) {
     EXPECT("wait after fence = already signaled (0)", 0, P(nvnSyncWait)(&s1, 0));
     NVNtexture sc[2]; NVNtextureBuilder tb; P(nvnTextureBuilderSetDevice)(&tb, &dev); P(nvnTextureBuilderSetDefaults)(&tb);
     P(nvnTextureBuilderSetWidth)(&tb, 1280); P(nvnTextureBuilderSetHeight)(&tb, 720); P(nvnTextureBuilderSetFormat)(&tb, NVN_FORMAT_RGBA8);
-    P(nvnTextureBuilderSetStorage)(&tb, &pool, 0); P(nvnTextureInitialize)(&sc[0], &tb); P(nvnTextureInitialize)(&sc[1], &tb);
+    // Dedicated, correctly sized swapchain storage. The old 1 MB scratch pool was too small for a 1280x720 image and later tests wrote over it;
+    // with tex_dirty_upload that made these unused presentation fixtures look CPU-written (and tried to upload them on the present thread).
+    size_t scslot = (P(nvnTextureBuilderGetStorageSize)(&tb) + 65535u) & ~(size_t)65535u;
+    void *scmem = NULL; if (posix_memalign(&scmem, (size_t)getpagesize(), scslot * 2)) abort(); memset(scmem, 0, scslot * 2);
+    NVNmemoryPoolBuilder scpb; NVNmemoryPool scpool;
+    P(nvnMemoryPoolBuilderSetDevice)(&scpb, &dev); P(nvnMemoryPoolBuilderSetDefaults)(&scpb);
+    P(nvnMemoryPoolBuilderSetStorage)(&scpb, scmem, scslot * 2); P(nvnMemoryPoolBuilderSetFlags)(&scpb, 0x24); P(nvnMemoryPoolInitialize)(&scpool, &scpb);
+    P(nvnTextureBuilderSetStorage)(&tb, &scpool, 0); P(nvnTextureInitialize)(&sc[0], &tb);
+    P(nvnTextureBuilderSetStorage)(&tb, &scpool, (ptrdiff_t)scslot); P(nvnTextureInitialize)(&sc[1], &tb);
     EXPECT("texture width", 1280, P(nvnTextureGetWidth)(&sc[0]));
     NVNtexture *scp[2] = {&sc[0], &sc[1]};
     NVNwindowBuilder wb; NVNwindow win; P(nvnWindowBuilderSetDevice)(&wb, &dev); P(nvnWindowBuilderSetDefaults)(&wb);
@@ -929,6 +1052,233 @@ int main(void) {
         EXPECT("several rows whose alignment would break the wrapped address: refused", 0, nvn_tbuf_rows(20000, 4, 3, &w, &h, &row));
     }
 
+    // 9. NVN2 native images (Mario Kart World's GameChat camera textures aborted the boot): the SDK's builder layout (device +0, handle +8, permission +0xc, format +0x10), a texture of the
+    //    image's size and format on host storage, and a handle the host did not make refused
+    {
+        struct { NVNdevice *dev; uint32_t handle, perm, format; } nb = {&dev, nvn_native_image_new(384, 216), 1, NVN_FORMAT_RGBA8_SRGB};
+        _Alignas(16) uint8_t img[0x1a0]; NVNtexture t;
+        EXPECT("native image: the host's handle initializes", 1, h_nvnNativeImageInitialize(img, &nb));
+        EXPECT("texture from a native image succeeds", 1, h_nvnTextureInitializeFromNativeImage(&t, img));
+        EXPECT("native image texture width", 384, P(nvnTextureGetWidth)(&t));
+        EXPECT("native image texture height", 216, P(nvnTextureGetHeight)(&t));
+        EXPECT("native image texture format", NVN_FORMAT_RGBA8_SRGB, P(nvnTextureGetFormat)(&t));
+        P(nvnTextureFinalize)(&t); h_nvnNativeImageFinalize(img); nvn_native_image_free(nb.handle);
+        nb.handle = 0x1234;
+        EXPECT("native image: a handle the host did not make fails", 0, h_nvnNativeImageInitialize(img, &nb));
+    }
+
+    // 10. A sparse virtual pool's page table in tiles (nvn_sparse_tile_state, the Metal placement sparse textures of nvn_mtl.m): a 256 KB virtual pool (flags 0x2a1) whose first
+    // mapping is not the whole pool becomes sparse; 64 KB of a physical pool mapped at 128 KB marks tile 2 mapped and changed; a mapping of a later generation marks changed; unmapped tiles read 0
+    {
+        static uint8_t phys[0x20000] __attribute__((aligned(16384))); NVNmemoryPoolBuilder vb, phb; NVNmemoryPool vp, ph;
+        P(nvnMemoryPoolBuilderSetDefaults)(&phb); P(nvnMemoryPoolBuilderSetStorage)(&phb, phys, sizeof phys); P(nvnMemoryPoolBuilderSetFlags)(&phb, 0x24);
+        EXPECT("tile state: physical pool", 1, P(nvnMemoryPoolInitialize)(&ph, &phb));
+        P(nvnMemoryPoolBuilderSetDefaults)(&vb); P(nvnMemoryPoolBuilderSetStorage)(&vb, NULL, 0x40000); P(nvnMemoryPoolBuilderSetFlags)(&vb, 0x2a1);
+        EXPECT("tile state: virtual pool", 1, P(nvnMemoryPoolInitialize)(&vp, &vb));
+        const pool_t *vo = (const pool_t *)&vp; uint8_t st[4];
+        EXPECT("tile state: nothing mapped", 0, nvn_sparse_tile_state(&vp, (uint64_t)(uintptr_t)vo->mem, 0x40000, 0x10000, 0, 0, st));
+        map_req rq = {&ph, 0x10000, 0x20000, 0x10000, 0, 0};   // hle_nvn.c's layout of NVNmappingRequest
+        uint64_t g0 = nvn_sparse_gen();
+        EXPECT("tile state: a partial mapping succeeds (sparse)", 1, P(nvnMemoryPoolMapVirtual)(&vp, 1, (const NVNmappingRequest *)&rq));
+        EXPECT("tile state: one tile mapped", 1, nvn_sparse_tile_state(&vp, (uint64_t)(uintptr_t)vo->mem, 0x40000, 0x10000, g0, 0, st));
+        EXPECT("tile state: tile 2 mapped and changed", 3, st[2]); EXPECT("tile state: tile 0 unmapped", 0, st[0]); EXPECT("tile state: tile 3 unmapped", 0, st[3]);
+        uint64_t g1 = nvn_sparse_gen(), now = nvn_dirty_now();
+        nvn_sparse_tile_state(&vp, (uint64_t)(uintptr_t)vo->mem, 0x40000, 0x10000, g1, now, st);
+        EXPECT("tile state: unchanged since its generation", 1, st[2]);
+        map_req rq2 = {&ph, 0, 0x30000, 0x8000, 0, 0};
+        P(nvnMemoryPoolMapVirtual)(&vp, 1, (const NVNmappingRequest *)&rq2);
+        EXPECT("tile state: a later mapping marks its tile", 2, nvn_sparse_tile_state(&vp, (uint64_t)(uintptr_t)vo->mem, 0x40000, 0x10000, g1, now, st));
+        EXPECT("tile state: tile 3 mapped and changed", 3, st[3]); EXPECT("tile state: tile 2 still unchanged", 1, st[2]);
+        EXPECT("tile state: from an address 2 KB into the pool (not 4 KB aligned) the 32 KB mapping spans two tiles", 3, nvn_sparse_tile_state(&vp, (uint64_t)(uintptr_t)vo->mem + 0x800, 0x40000 - 0x800, 0x10000, g1, now, st));
+        EXPECT("tile state: tile 1 (from 2 KB) holds the older mapping's pages, unchanged", 1, st[1]); EXPECT("tile state: tiles 2 and 3 hold the later mapping", 3, st[2] & st[3]);
+        uint8_t got[0x10000]; memset(phys + 0x10000, 0x5a, 0x10000);
+        EXPECT("tile state: a tile's bytes come from the physical pool", 0, nvn_sparse_copy(&vp, got, (uint64_t)(uintptr_t)vo->mem + 0x20000, 0x10000));
+        EXPECT("tile state: the mapped bytes", 0x5a, got[0x1234]);
+        EXPECT("tile state: an unmapped tile reads 0 (all bytes missing)", 0x10000, nvn_sparse_copy(&vp, got, (uint64_t)(uintptr_t)vo->mem, 0x10000));
+        uint64_t before_unmap = nvn_sparse_gen();
+        map_req unmap = {NULL, 0, 0x20000, 0x4000, 0, 0};
+        EXPECT("tile state: partial unmap succeeds", 1, P(nvnMemoryPoolMapVirtual)(&vp, 1, (const NVNmappingRequest *)&unmap));
+        nvn_sparse_tile_state(&vp, (uint64_t)(uintptr_t)vo->mem, 0x40000, 0x10000, before_unmap, nvn_dirty_now(), st);
+        EXPECT("tile state: partial unmap marks remaining tile changed", 3, st[2]);
+        EXPECT("tile state: partial copy reports missing bytes", 0x4000, nvn_sparse_copy(&vp, got, (uint64_t)(uintptr_t)vo->mem + 0x20000, 0x10000));
+        EXPECT("tile state: unmapped bytes cleared", 0, got[0x1234]);
+        EXPECT("tile state: mapped bytes preserved", 0x5a, got[0x5234]);
+        unmap.size = 0x10000;
+        EXPECT("tile state: full unmap succeeds", 1, P(nvnMemoryPoolMapVirtual)(&vp, 1, (const NVNmappingRequest *)&unmap));
+        nvn_sparse_tile_state(&vp, (uint64_t)(uintptr_t)vo->mem, 0x40000, 0x10000, before_unmap, nvn_dirty_now(), st);
+        EXPECT("tile state: full unmap marks content changed without residency", 2, st[2]);
+        P(nvnMemoryPoolFinalize)(&vp); P(nvnMemoryPoolFinalize)(&ph);
+    }
+
+    // Forward queue dependency: the consumer is submitted first on this same
+    // CPU thread. Its wait must yield so the producer can be submitted later.
+    {
+        NVNqueue producer; EXPECT("event producer queue", 1, P(nvnQueueInitialize)(&producer, &qb));
+        NVNevent a, b; NVNeventBuilder builder;
+        P(nvnEventBuilderSetDefaults)(&builder); P(nvnEventBuilderSetStorage)(&builder, &pool, 0x9000);
+        P(nvnEventInitialize)(&a, &builder); P(nvnEventBuilderSetStorage)(&builder, &pool, 0x9040); P(nvnEventInitialize)(&b, &builder);
+        P(nvnEventSignal)(&a, NVN_EVENT_SIGNAL_MODE_WRITE, 0); P(nvnEventSignal)(&b, NVN_EVENT_SIGNAL_MODE_WRITE, 0);
+        uint32_t *source = (uint32_t *)(poolmem + 0xa000), *copy = (uint32_t *)(poolmem + 0xa100);
+        *source = *copy = 0;
+        P(nvnCommandBufferBeginRecording)(&cb);
+        P(nvnCommandBufferWaitEvent)(&cb, &a, NVN_EVENT_WAIT_MODE_GEQUAL_WRAP, 1);
+        P(nvnCommandBufferCopyBufferToBuffer)(&cb, (NVNbufferAddress)source, (NVNbufferAddress)copy, 4, 0);
+        P(nvnCommandBufferSignalEvent)(&cb, &b, NVN_EVENT_SIGNAL_MODE_WRITE, NVN_EVENT_SIGNAL_LOCATION_BOTTOM, 0, 1);
+        P(nvnCommandBufferWaitEvent)(&cb, &a, NVN_EVENT_WAIT_MODE_GEQUAL_WRAP, 2);
+        P(nvnCommandBufferCopyBufferToBuffer)(&cb, (NVNbufferAddress)source, (NVNbufferAddress)(copy + 1), 4, 0);
+        NVNcommandHandle consumer = P(nvnCommandBufferEndRecording)(&cb);
+        P(nvnQueueSubmitCommands)(&q, 1, &consumer);
+        NVNsync pending; P(nvnSyncInitialize)(&pending, &dev); P(nvnQueueFenceSync)(&q, &pending, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
+        EXPECT("blocked queue fence does not complete early", NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED, P(nvnSyncWait)(&pending, 0));
+        EXPECT("forward waiter did not copy old input", 0, *copy);
+        P(nvnCommandBufferBeginRecording)(&cb);
+        uint32_t word = 0x1234abcd;
+        P(nvnCommandBufferUpdateUniformBuffer)(&cb, (NVNbufferAddress)source, 256, 0, 4, &word);
+        P(nvnCommandBufferSignalEvent)(&cb, &a, NVN_EVENT_SIGNAL_MODE_WRITE, NVN_EVENT_SIGNAL_LOCATION_BOTTOM, 0, 1);
+        P(nvnCommandBufferWaitEvent)(&cb, &b, NVN_EVENT_WAIT_MODE_EQUAL, 1);
+        word = 0x5678ef01;
+        P(nvnCommandBufferUpdateUniformBuffer)(&cb, (NVNbufferAddress)source, 256, 0, 4, &word);
+        P(nvnCommandBufferSignalEvent)(&cb, &a, NVN_EVENT_SIGNAL_MODE_ADD, NVN_EVENT_SIGNAL_LOCATION_BOTTOM, 0, 1);
+        NVNcommandHandle writer = P(nvnCommandBufferEndRecording)(&cb);
+        // Nested CALL plus existing 256-byte command segments exercise flattening.
+        P(nvnCommandBufferBeginRecording)(&cb); P(nvnCommandBufferCopyCommands)(&cb, 1, &writer);
+        NVNcommandHandle outer = P(nvnCommandBufferEndRecording)(&cb);
+        P(nvnQueueSubmitCommands)(&producer, 1, &outer);
+        int result = P(nvnSyncWait)(&pending, 5000000000ull);
+        EXPECT("bidirectional event handshake fence", 1, result == 0 || result == 1);
+        EXPECT("first consumer reads first producer version", 0x1234abcd, copy[0]);
+        EXPECT("resumed consumer reads second producer version", 0x5678ef01, copy[1]);
+        EXPECT("GPU event ADD executes exactly once", 2, P(nvnEventGetValue)(&a));
+        P(nvnQueueFinish)(&producer); P(nvnQueueFinish)(&q);
+        P(nvnEventSignal)(&a, NVN_EVENT_SIGNAL_MODE_WRITE, 0);
+        EXPECT("CPU event reset supersedes completed projection", 0, P(nvnEventGetValue)(&a));
+        NVNsync recorded; P(nvnSyncInitialize)(&recorded, &dev);
+        P(nvnCommandBufferBeginRecording)(&cb);
+        P(nvnCommandBufferWaitEvent)(&cb, &a, NVN_EVENT_WAIT_MODE_EQUAL, 1);
+        P(nvnCommandBufferFenceSync)(&cb, &recorded, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
+        P(nvnCommandBufferSignalEvent)(&cb, &b, NVN_EVENT_SIGNAL_MODE_WRITE, NVN_EVENT_SIGNAL_LOCATION_BOTTOM, 0, 2);
+        NVNcommandHandle deferred_fence = P(nvnCommandBufferEndRecording)(&cb);
+        P(nvnQueueSubmitCommands)(&q, 1, &deferred_fence);
+        EXPECT("command-buffer fence pending behind event", NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED, P(nvnSyncWait)(&recorded, 0));
+        pthread_t cpu_writer; pthread_create(&cpu_writer, NULL, event_store_later, poolmem + 0x9000);
+        uint64_t started = now_ns(); result = P(nvnSyncWait)(&recorded, 5000000000ull);
+        EXPECT("deferred recorded fence honors timeout and resumes", 1, result == 0 || result == 1);
+        EXPECT("recorded fence actually waited for producer", 1, now_ns() - started >= 15000000);
+        pthread_join(cpu_writer, NULL); P(nvnQueueFinish)(&q);
+        P(nvnEventSignal)(&a, NVN_EVENT_SIGNAL_MODE_WRITE, 0); P(nvnEventSignal)(&b, NVN_EVENT_SIGNAL_MODE_WRITE, 0);
+        P(nvnCommandBufferBeginRecording)(&cb);
+        P(nvnCommandBufferWaitEvent)(&cb, &a, NVN_EVENT_WAIT_MODE_EQUAL, 1);
+        P(nvnCommandBufferSignalEvent)(&cb, &b, NVN_EVENT_SIGNAL_MODE_WRITE, NVN_EVENT_SIGNAL_LOCATION_BOTTOM, 0, 3);
+        NVNcommandHandle autonomous = P(nvnCommandBufferEndRecording)(&cb);
+        P(nvnQueueSubmitCommands)(&q, 1, &autonomous);
+        *(volatile uint32_t *)(poolmem + 0x9000) = 1;
+        started = now_ns();
+        while (*(volatile uint32_t *)(poolmem + 0x9040) != 3 && now_ns() - started < 5000000000ull) usleep(1000);
+        EXPECT("mapped event store progresses without another NVN call", 3, *(volatile uint32_t *)(poolmem + 0x9040));
+        P(nvnQueueFinish)(&q);
+
+        // More forward-waiting logical submissions than the allocator pool:
+        // completed prefixes may surrender their allocator lease, so this same
+        // CPU thread can still submit the late producer and resume every queue.
+        enum { BLOCKED_QUEUES = 12 };
+        NVNqueue blocked[BLOCKED_QUEUES];
+        P(nvnEventSignal)(&a, NVN_EVENT_SIGNAL_MODE_WRITE, 0);
+        *source = 0x31415926; source[4] = 0;
+        memset(copy + 8, 0, BLOCKED_QUEUES * 2 * sizeof *copy);
+        for (int i = 0; i < BLOCKED_QUEUES; i++) {
+            EXPECT("blocked-prefix queue initializes", 1, P(nvnQueueInitialize)(&blocked[i], &qb));
+            P(nvnCommandBufferBeginRecording)(&cb);
+            P(nvnCommandBufferCopyBufferToBuffer)(&cb, (NVNbufferAddress)source, (NVNbufferAddress)(copy + 8 + i), 4, 0);
+            P(nvnCommandBufferWaitEvent)(&cb, &a, NVN_EVENT_WAIT_MODE_EQUAL, 1);
+            P(nvnCommandBufferCopyBufferToBuffer)(&cb, (NVNbufferAddress)(source + 4), (NVNbufferAddress)(copy + 8 + BLOCKED_QUEUES + i), 4, 0);
+            NVNcommandHandle prefix = P(nvnCommandBufferEndRecording)(&cb);
+            P(nvnQueueSubmitCommands)(&blocked[i], 1, &prefix);
+        }
+        for (int i = 0; i < BLOCKED_QUEUES; i++) EXPECT("blocked continuation has not executed", 0, copy[8 + BLOCKED_QUEUES + i]);
+        P(nvnCommandBufferBeginRecording)(&cb); word = 0x27182818;
+        P(nvnCommandBufferUpdateUniformBuffer)(&cb, (NVNbufferAddress)source, 256, 16, 4, &word);
+        P(nvnCommandBufferSignalEvent)(&cb, &a, NVN_EVENT_SIGNAL_MODE_WRITE, NVN_EVENT_SIGNAL_LOCATION_BOTTOM, 0, 1);
+        NVNcommandHandle late = P(nvnCommandBufferEndRecording)(&cb);
+        P(nvnQueueSubmitCommands)(&producer, 1, &late);
+        for (int i = 0; i < BLOCKED_QUEUES; i++) {
+            P(nvnQueueFinish)(&blocked[i]);
+            EXPECT("reclaimed prefix retains GPU data", 0x31415926, copy[8 + i]);
+            EXPECT("resumed queue observes late producer", 0x27182818, copy[8 + BLOCKED_QUEUES + i]);
+            P(nvnQueueFinalize)(&blocked[i]);
+        }
+        P(nvnQueueFinish)(&producer);
+
+        // Event splitting is an implementation boundary, not another guest
+        // submission. Its reports share one timestamp in submission mode even
+        // when an interleaved queue supplies a delayed dependency.
+        uint64_t *top = (uint64_t *)(poolmem + 0xa200), *bottom = top + 2, *interleaved = top + 4, *later = top + 6;
+        memset(top, 0, 8 * sizeof *top);
+        P(nvnEventSignal)(&a, NVN_EVENT_SIGNAL_MODE_WRITE, 0); P(nvnEventSignal)(&b, NVN_EVENT_SIGNAL_MODE_WRITE, 0);
+        P(nvnCommandBufferBeginRecording)(&cb);
+        P(nvnCommandBufferReportCounter)(&cb, NVN_COUNTER_TYPE_TIMESTAMP_TOP, (NVNbufferAddress)top);
+        P(nvnCommandBufferSignalEvent)(&cb, &b, NVN_EVENT_SIGNAL_MODE_WRITE, NVN_EVENT_SIGNAL_LOCATION_BOTTOM, 0, 4);
+        P(nvnCommandBufferWaitEvent)(&cb, &a, NVN_EVENT_WAIT_MODE_EQUAL, 1);
+        P(nvnCommandBufferCopyBufferToBuffer)(&cb, (NVNbufferAddress)source, (NVNbufferAddress)(copy + 2), 4, 0);
+        P(nvnCommandBufferReportCounter)(&cb, NVN_COUNTER_TYPE_TIMESTAMP, (NVNbufferAddress)bottom);
+        NVNcommandHandle timed = P(nvnCommandBufferEndRecording)(&cb);
+        P(nvnQueueSubmitCommands)(&q, 1, &timed);
+        started = now_ns();
+        while (*(volatile uint32_t *)(poolmem + 0x9040) != 4 && now_ns() - started < 5000000000ull) usleep(1000);
+        EXPECT("first timestamp publishes before blocked continuation", 1, top[1] != 0 && bottom[1] == 0);
+        usleep(30000);
+        P(nvnCommandBufferBeginRecording)(&cb); word = 0x6688aacc;
+        P(nvnCommandBufferUpdateUniformBuffer)(&cb, (NVNbufferAddress)source, 256, 0, 4, &word);
+        P(nvnCommandBufferReportCounter)(&cb, NVN_COUNTER_TYPE_TIMESTAMP, (NVNbufferAddress)interleaved);
+        P(nvnCommandBufferSignalEvent)(&cb, &a, NVN_EVENT_SIGNAL_MODE_WRITE, NVN_EVENT_SIGNAL_LOCATION_BOTTOM, 0, 1);
+        NVNcommandHandle timed_producer = P(nvnCommandBufferEndRecording)(&cb);
+        P(nvnQueueSubmitCommands)(&producer, 1, &timed_producer);
+        P(nvnQueueFinish)(&producer); P(nvnQueueFinish)(&q);
+        const char *ts_mode = getenv("DM_NVN_GPU_TS");
+        int segment_times = ts_mode && *ts_mode ? !strcmp(ts_mode, "segment") : DM_GAME_GPU_TS_SEGMENT;
+        if (segment_times) EXPECT("segment timestamps preserve dependency interval", 1, bottom[1] > top[1]);
+        else EXPECT("logical submission timestamps ignore host event splits", top[1], bottom[1]);
+        EXPECT("interleaved queue uses a separate timestamp", 1, interleaved[1] > top[1]);
+        EXPECT("timed continuation reads actual ordered producer data", 0x6688aacc, copy[2]);
+        P(nvnCommandBufferBeginRecording)(&cb);
+        P(nvnCommandBufferReportCounter)(&cb, NVN_COUNTER_TYPE_TIMESTAMP, (NVNbufferAddress)later);
+        NVNcommandHandle next_timed = P(nvnCommandBufferEndRecording)(&cb);
+        P(nvnQueueSubmitCommands)(&q, 1, &next_timed); P(nvnQueueFinish)(&q);
+        EXPECT("later logical submission gets a fresh timestamp", 1, later[1] > top[1] && later[1] >= interleaved[1]);
+        P(nvnQueueFinalize)(&producer);
+    }
+
+    // Copied inline RT snapshots must survive both original record reuse and
+    // retirement of the owned chunk that established the queue's bindings.
+    {
+        NVNqueue qa, qb_saved;
+        EXPECT("snapshot first queue", 1, P(nvnQueueInitialize)(&qa, &qb));
+        EXPECT("snapshot second queue", 1, P(nvnQueueInitialize)(&qb_saved, &qb));
+        const float red[4] = {1, 0, 0, 1}, blue[4] = {0, 0, 1, 1}, green[4] = {0, 1, 0, 1};
+        qe_builder first = reloc_clear(&sc[0], red), other = reloc_clear(&sc[1], blue), continuation = reloc_clear(NULL, green);
+        // The worker uses the same lock, so it cannot observe the temporary
+        // scheduler or race its destruction. Replay and retirement stay real.
+        pthread_mutex_lock(&g_sub_mu); gfx_enter(); qe_pump();
+        nvn_qs *saved = g_qs; g_qs = nvn_qs_create(qe_read, reloc_release, NULL);
+        if (!g_qs) abort();
+        g_reloc_retired = 0;
+        reloc_submit(&first, (const queue_t *)&qa);
+        EXPECT("first target chunk poisoned and freed", 1, g_reloc_retired);
+        uint8_t pixel[4]; NVNcopyRegion one = {0, 0, 0, 1, 1, 1};
+        P(nvnTextureReadTexels)(&sc[0], NULL, &one, pixel);
+        EXPECT("owned copied target receives initial red clear", 0, memcmp(pixel, (uint8_t[]){255, 0, 0, 255}, 4));
+        reloc_submit(&other, (const queue_t *)&qb_saved);
+        reloc_submit(&continuation, (const queue_t *)&qa);
+        EXPECT("all target chunks poisoned and freed", 3, g_reloc_retired);
+        EXPECT("snapshot scheduler destroys after retirement", 1, nvn_qs_destroy(g_qs));
+        g_qs = saved; gfx_leave(); pthread_mutex_unlock(&g_sub_mu);
+        P(nvnTextureReadTexels)(&sc[0], NULL, &one, pixel);
+        EXPECT("resumed queue clears retained target without rebind", 0, memcmp(pixel, (uint8_t[]){0, 255, 0, 255}, 4));
+        P(nvnTextureReadTexels)(&sc[1], NULL, &one, pixel);
+        EXPECT("other queue retains its independent blue target", 0, memcmp(pixel, (uint8_t[]){0, 0, 255, 255}, 4));
+        P(nvnQueueFinalize)(&qa); P(nvnQueueFinalize)(&qb_saved);
+    }
+
+    P(nvnQueueFinish)(&q); P(nvnTextureFinalize)(&sc[0]); P(nvnTextureFinalize)(&sc[1]); P(nvnMemoryPoolFinalize)(&scpool); free(scmem);
     printf("== %d checks, %d failed ==\n", g_n, g_fail);
     return g_fail != 0;
 }

@@ -140,6 +140,7 @@ static void add_pools(const uint8_t *d, size_t n) {   // the replay layer's pool
         if (!dec_addr(NULL, &a.mem, 0, 0) || !a.mem) RFAIL("a pool lies in no captured region");
         static nvn_hmap seen = {.klen = 8}; if (nvn_hm_get(&seen, &a.mem)) continue; nvn_hm_put(&seen, &a.mem, (void *)1);
         mtl_pool_add((void *)(uintptr_t)a.mem, a.size); nvn_dirty_add_range((void *)(uintptr_t)a.mem, a.size); rp_pools_added++;
+        mtl_pool_buffer_addr((void *)(uintptr_t)a.mem, a.size);   // a capture does not record which pools the game took a buffer address in: every one counts (gmem_map_gpu)
     }
 }
 

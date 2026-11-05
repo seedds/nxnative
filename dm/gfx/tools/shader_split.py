@@ -609,19 +609,44 @@ SDF_STAGES = ['vs', 'hs', 'ds', 'gs', 'ps', 'cs']   # an SDF entry's stage offse
 def kpka_entries(path):
     """Capcom's RE Engine PAK (Monster Hunter Rise: re_chunk_000.pak plus 16 .patch_NNN.pak, 19.6 GB): 'KPKA', u8 version 4, u8 0, u16 features (0: the table is not encrypted), u32 count, u32 fingerprint,
     then count 0x30-byte entries {u32 hash of the lower-case path, u32 hash of the upper-case path, u64 offset, u64 stored length, u64 length, u64 attributes, u64 checksum}.
-    Attribute bits 0-3: 0 stored, 1 raw deflate, 2 zstd. → [(path hash, offset, stored length, length, attributes)]"""
+    Attribute bits 0-3: 0 stored, 1 raw deflate, 2 zstd. → [(path hash, offset, stored length, length, attributes)]
+    Version 4.2 (PRAGMATA, a Switch 2 RE Engine game) sets feature flags; after the entry table come, in this order (eigeen/ree-pak-rs read_metadata): a u32 (0x10), 9 bytes (0x4),
+    the 128-byte key of an encrypted table (0x8, not supported here), then the chunk table (0x20): u32 block size, u32 count, count {u32 start (low 32 bits, increasing, wrapping at 4 GiB),
+    u32 meta (compressed length << 10 | flags)}. An entry with attribute bit 24 keeps a chunk index in its offset: its data is the chunks from there on, each block size long when expanded
+    (stored when the compressed length is the block size, else zstd), cut at its length. Such entries carry the table as a sixth element"""
     with open(path, 'rb') as f:
         h = f.read(16)
         if h[:4] != KPKA: return None
         ver, feat, n = h[4], struct.unpack_from('<H', h, 6)[0], struct.unpack_from('<I', h, 8)[0]
-        if ver != 4 or feat: red(f'{path}: PAK version {ver}, features {feat:#x}: only version 4 with a plain entry table is known')
+        if ver != 4 or feat & ~0x34: red(f'{path}: PAK version {ver}.{h[5]}, features {feat:#x}: only version 4 with a plain entry table (features 0x4 / 0x10 / 0x20) is known')
         t = f.read(0x30 * n)
-    return [(lo | hi << 32, off, csz, usz, attr) for lo, hi, off, csz, usz, attr, _ in struct.iter_unpack('<IIqqqqQ', t)]
+        if feat & 0x10: f.read(4)
+        if feat & 0x4: f.read(9)
+        chunks = None
+        if feat & 0x20:
+            bs, cn = struct.unpack('<II', f.read(8)); raw = f.read(8 * cn); starts, metas, high, prev = [], [], 0, None
+            for lo, meta in struct.iter_unpack('<II', raw):
+                if prev is not None and lo < prev: high += 1 << 32
+                starts.append(high | lo); metas.append(meta >> 10); prev = lo
+            chunks = (bs, starts, metas)
+    return [(lo | hi << 32, off, csz, usz, attr) + ((chunks,) if chunks and attr >> 24 & 1 else ()) for lo, hi, off, csz, usz, attr, _ in struct.iter_unpack('<IIqqqqQ', t)]
 
 def kpka_data(d, e, head=None):
     """An entry's data (head: only its first bytes)"""
     import zlib
-    _, off, csz, usz, attr = e; raw = d[off:off + csz]
+    _, off, csz, usz, attr = e[:5]
+    if len(e) > 5:   # chunked (kpka_entries): the chunks from index off on, expanded and cut at the entry's length
+        bs, starts, lens = e[5]; want = min(usz or csz, head) if head else (usz or csz); out = bytearray(); i = off; zstd = None
+        while len(out) < want and i < len(starts):
+            c = d[starts[i]:starts[i] + lens[i]]
+            if lens[i] == bs: out += c
+            else:
+                zstd = zstd or zstd_mod(); out += zstd.ZstdDecompressor().decompress(c, max_length=bs)
+            i += 1
+        raw = bytes(out[:want])
+        if attr & 0xf == 0 or head: return raw
+        csz = len(raw)
+    else: raw = d[off:off + csz]
     if attr & 0xf == 0: return raw[:head] if head else raw
     if attr & 0xf == 1: return zlib.decompressobj(-15).decompress(raw, head or 0)
     if attr & 0xf == 2:
@@ -652,13 +677,25 @@ def sdf_shaders(d, label):
     ver, n = field(d, '<HH', 4, f'{label} SDF header'); out = []
     if not ver and not n: return out   # an empty definition: 16 bytes, version 0, no entries
     if ver != 1: red(f'{label}: SDF version {ver}')
+    # The Switch 2 form (PRAGMATA, SDK 20, NVN2): 0x110-byte entries with the six offsets at +0x18, each to a record {u64 hash, u32 control length, u32 code length, …} whose NVN2
+    # control section starts at +0x58 and the code right after it. Told apart by the first stage of entry 0: its record, read the Switch 2 way, has the NVN2 control magic there
+    nx2 = False
+    if n:
+        o0 = next((o for o in field(d, '<6Q', 0x10 + 0x18, f'{label} SDF entry 0') if o), 0)
+        nx2 = bool(o0) and o0 + 0x60 <= len(d) and bytes(d[o0 + 0x58:o0 + 0x5c]) == CTL_MAGIC and bytes(d[o0 + 0x5c:o0 + 0x60]) == b'\xc9\0\0\0'
+    esz, eoff = (0x110, 0x18) if nx2 else (0x108, 0x10)
     for i in range(n):
-        offs = field(d, '<6Q', 0x10 + 0x108 * i + 0x10, f'{label} SDF entry {i}')
+        offs = field(d, '<6Q', 0x10 + esz * i + eoff, f'{label} SDF entry {i}')
         for st, o in zip(SDF_STAGES, offs):
             if not o: continue
-            nctl, ncode = field(d, '<II', o, f'{label} SDF entry {i} {st}'); b = span(d, o + 8, nctl + ncode, f'{label} SDF entry {i} {st}'); ctl, code = b[:nctl], b[nctl:]
+            if nx2: _, nctl, ncode = field(d, '<QII', o, f'{label} SDF entry {i} {st}'); b = span(d, o + 0x58, nctl + ncode, f'{label} SDF entry {i} {st}')
+            else: nctl, ncode = field(d, '<II', o, f'{label} SDF entry {i} {st}'); b = span(d, o + 8, nctl + ncode, f'{label} SDF entry {i} {st}')
+            ctl, code = b[:nctl], b[nctl:]
+            # Switch 2: a program with task and mesh shaders keeps them in the hull and domain slots; the control section's stage byte (+0x56: 6 task, 7 mesh) names
+            # them (PRAGMATA: its task / mesh shaders went to the hull and domain translators and failed on ISBEWR, their stage memory stores)
+            if nx2 and len(ctl) > 0x56 and ctl[0x56] in (6, 7): st = 'ts' if ctl[0x56] == 6 else 'ms'
             why = check(label, st, ctl, code)
-            if not why and st != 'cs' and sph_stage(code) != st: why = 'the SPH stage does not match the entry slot'
+            if not why and st != 'cs' and not nx2 and sph_stage(code) != st: why = 'the SPH stage does not match the entry slot'
             if why: red(f'{label} SDF entry {i} {st}: {why}')
             out.append((f'{label}#SDF#var{i}', st, ctl, code))
     return out

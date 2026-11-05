@@ -1,6 +1,8 @@
-// Networking (out of scope: online play/friends/store/cloud saves): all hooked up as "network unavailable", the game takes the offline branch.
-// Cuts: nifm reports no network; socket only hooks up Initialize (returns success, creates no session), the rest of socket/ssl/friends are hooked up as failures when they come into use.
+// Networking (online play/friends/store/cloud saves): reports network unavailable.
+// BSD-local event counters still provide inter-thread wakeups without a network.
+// Initialize succeeds without a service session; socket/ssl network operations fail.
 #include "hle.h"
+#include "socket_eventfd.h"
 #include <stdatomic.h>
 
 HLE_FORCE("_ZN2nn6socket10InitializeERKNS0_6ConfigE", "connects to the bsd socket service; offline, creates no session (cut)", Result, h_socket_Initialize, const void *cfg) { (void)cfg; return RES_OK; }
@@ -34,24 +36,36 @@ HLE_FORCE("nnsslFinalize", "pairs with nnsslInitialize (cut)", Result, h_ssl_Fin
 // Not cut: Inet* / nnsocketInet* byte order and address text conversion (pure computation).
 #define SK_ENETDOWN 50                  // Horizon sockets use FreeBSD error codes
 static __thread int t_skerr = SK_ENETDOWN;
-static int sk_fail(void) { t_skerr = SK_ENETDOWN; return -1; }
+static int sk_error(int error) {
+    t_skerr = error;
+    // Socket wrappers and libc clients read __errno_location directly;
+    // keeping only GetLastError's host TLS loses EAGAIN in gRPC's wakeup drain.
+    int *(*location)(void) = guest_sym("__errno_location");
+    if (location) *location() = error;
+    return -1;
+}
+static int sk_fail(void) { return sk_error(SK_ENETDOWN); }
+static int sk_result(int result) { return result < 0 ? sk_error(-result) : result; }
 #define SKF(m, cname, ...) HLE_FORCE(m, "bsd socket service (cut): returns -1/ENETDOWN", int, cname, __VA_ARGS__)
-// Poll / Select with nothing to wait on: the host creates no socket, so a game's descriptors are all -1, or it passes none. POSIX and Horizon's bsd service ignore negative
+// Poll / Select with nothing to wait on: offline callers may pass only -1 descriptors or none. POSIX and Horizon's bsd service ignore negative
 // descriptors and wait out the timeout, returning 0. Failing at once made Dark Souls Remastered's network thread ("NexusRevolution Socket", main+0x92c7c4) spin a core at 100%
 // on Poll(fds, 0, 33 ms), 11,000 calls a second. An endless wait on nothing never returns on hardware; here it returns 0 after 100 ms: a thread in a host hook pauses for a garbage
 // collector (IL2CPP's, hle_thread.c) only once the hook returns, and the caller can still see a shutdown
 void dm_guest_sleep_ns(int64_t ns);
 static int sk_idle(int64_t ms) { dm_guest_sleep_ns((ms < 0 ? 100 : ms) * 1000000); return 0; }
-typedef struct { int32_t fd; int16_t events, revents; } sk_pollfd;
 int dm_sk_poll(void *fds, uint64_t n, int ms) {   // also hle_offline.c's plain pollfd form
-    sk_pollfd *p = fds;
-    for (uint64_t i = 0; i < n; i++) if (p[i].fd >= 0) return sk_fail();
+    dm_socket_pollfd *p = fds;
+    if (n > DM_SOCKET_FDS) return sk_error(22);
+    if (n && !p) return sk_error(14);
+    for (uint64_t i = 0; i < n; i++) if (p[i].fd >= 0) return sk_result(dm_eventfd_poll(p, n, ms < 0 ? -1 : (int64_t)ms * 1000000));
     for (uint64_t i = 0; i < n; i++) p[i].revents = 0;
     return sk_idle(ms);
 }
-int dm_sk_select(int nfds, const uint64_t *r, const uint64_t *w, const uint64_t *e, const int64_t *tv) {   // fd_set: 1024 bits; timeval: {i64 seconds, i64 microseconds}
+int dm_sk_select(int nfds, uint64_t *r, uint64_t *w, uint64_t *e, const int64_t *tv) {   // fd_set: 1024 bits; timeval: {i64 seconds, i64 microseconds}
+    if (nfds < 0 || nfds > DM_SOCKET_FDS) return sk_error(22);
+    if (tv && (tv[0] < 0 || tv[1] < 0 || tv[1] >= 1000000 || tv[0] > (INT64_MAX - tv[1] * 1000) / 1000000000)) return sk_error(22);
     const uint64_t *sets[3] = {r, w, e};
-    for (int k = 0; k < 3; k++) for (int fd = 0; sets[k] && fd < nfds && fd < 1024; fd++) if (sets[k][fd >> 6] >> (fd & 63) & 1) return sk_fail();
+    for (int k = 0; k < 3; k++) for (int fd = 0; sets[k] && fd < nfds; fd++) if (sets[k][fd >> 6] >> (fd & 63) & 1) return sk_result(dm_eventfd_select(nfds, r, w, e, tv));
     return sk_idle(tv ? tv[0] * 1000 + tv[1] / 1000 : -1);
 }
 SKF("_ZN2nn6socket6SocketENS0_6FamilyENS0_4TypeENS0_8ProtocolE", h_sk_Socket, int a, int b, int c) { (void)a; (void)b; (void)c; return sk_fail(); }
@@ -59,17 +73,30 @@ SKF("_ZN2nn6socket4BindEiPKNS0_8SockAddrEj", h_sk_Bind, int s, const void *a, un
 SKF("_ZN2nn6socket7ConnectEiPKNS0_8SockAddrEj", h_sk_Connect, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket6ListenEii", h_sk_Listen, int s, int n) { (void)s; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket6AcceptEiPNS0_8SockAddrEPj", h_sk_Accept, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
-SKF("_ZN2nn6socket5CloseEi", h_sk_Close, int s) { (void)s; return sk_fail(); }
+HLE_FORCE("_ZN2nn6socket5CloseEi", "close a host-owned BSD event counter", int, h_sk_Close, int s) { return sk_result(dm_eventfd_close(s)); }
 SKF("_ZN2nn6socket11GetPeerNameEiPNS0_8SockAddrEPj", h_sk_GetPeerName, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket11GetSockNameEiPNS0_8SockAddrEPj", h_sk_GetSockName, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket10GetSockOptEiNS0_5LevelENS0_6OptionEPvPj", h_sk_GetSockOpt, int s, int l, int o, void *v, unsigned *n) { (void)s; (void)l; (void)o; (void)v; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket10SetSockOptEiNS0_5LevelENS0_6OptionEPKvj", h_sk_SetSockOpt, int s, int l, int o, const void *v, unsigned n) { (void)s; (void)l; (void)o; (void)v; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket5FcntlEiNS0_12FcntlCommandEz", h_sk_Fcntl, int s, int c) { (void)s; (void)c; return sk_fail(); }
-SKF("_ZN2nn6socket4PollEPNS0_6PollFdEmi", h_sk_Poll, void *f, unsigned long n, int t) { return dm_sk_poll(f, n, t); }
-SKF("_ZN2nn6socket6SelectEiPNS0_5FdSetES2_S2_PNS0_7TimeValE", h_sk_Select, int n, void *r, void *w, void *e, void *t) { return dm_sk_select(n, r, w, e, t); }
-SKF("_ZN2nn6socket7EventFdEmNS0_12EventFdFlagsE", h_sk_EventFd, unsigned long v, int f) { (void)v; (void)f; return sk_fail(); }
-SKF("_ZN2nn6socket11EventFdReadEiPm", h_sk_EventFdRead, int s, unsigned long *v) { (void)s; (void)v; return sk_fail(); }
-SKF("_ZN2nn6socket12EventFdWriteEim", h_sk_EventFdWrite, int s, unsigned long v) { (void)s; (void)v; return sk_fail(); }
+HLE_FORCE("_ZN2nn6socket4PollEPNS0_6PollFdEmi", "wait for BSD event counters or the empty-set timeout", int, h_sk_Poll, void *f, unsigned long n, int t) { return dm_sk_poll(f, n, t); }
+HLE_FORCE("_ZN2nn6socket6SelectEiPNS0_5FdSetES2_S2_PNS0_7TimeValE", "select BSD event counters or the empty-set timeout", int, h_sk_Select, int n, void *r, void *w, void *e, void *t) { return dm_sk_select(n, r, w, e, t); }
+HLE_FORCE("_ZN2nn6socket7EventFdEmNS0_12EventFdFlagsE", "BSD local event counter; works without a network", int, h_sk_EventFd, unsigned long v, unsigned f) { return sk_result(dm_eventfd_create(v, f)); }
+HLE_FORCE("_ZN2nn6socket11EventFdReadEiPm", "read and drain a BSD event counter (or one semaphore unit)", int, h_sk_EventFdRead, int s, uint64_t *v) { return v ? sk_result(dm_eventfd_read(s, v)) : -1; }
+HLE_FORCE("_ZN2nn6socket12EventFdWriteEim", "add to a BSD event counter and wake its waiters", int, h_sk_EventFdWrite, int s, uint64_t v) { return sk_result(dm_eventfd_write(s, v)); }
+HLE_FORCE("_ZN2nn6socket4ReadEiPvm", "read eight bytes from a BSD event counter", long, h_sk_Read, int s, void *v, unsigned long n) {
+    if (n < 8) return sk_error(22);
+    uint64_t value; if (!v) return sk_error(14);
+    int result = sk_result(dm_eventfd_read(s, &value));
+    if (result) return result;
+    memcpy(v, &value, 8); return 8;
+}
+HLE_FORCE("_ZN2nn6socket5WriteEiPKvm", "write eight bytes to a BSD event counter", long, h_sk_Write, int s, const void *v, unsigned long n) {
+    if (n < 8) return sk_error(22);
+    uint64_t value; if (!v) return sk_error(14);
+    memcpy(&value, v, 8);
+    return sk_result(dm_eventfd_write(s, value)) ? -1 : 8;
+}
 SKF("_ZN2nn6socket17ResolverGetOptionEPNS0_14ResolverOptionENS0_17ResolverOptionKeyE", h_sk_ResGet, void *o, int k) { (void)o; (void)k; return sk_fail(); }
 SKF("_ZN2nn6socket17ResolverSetOptionERKNS0_14ResolverOptionE", h_sk_ResSet, const void *o) { (void)o; return sk_fail(); }
 HLE_FORCE("_ZN2nn6socket4RecvEiPvmNS0_7MsgFlagE", "bsd socket service (cut)", long, h_sk_Recv, int s, void *b, unsigned long n, int f) { (void)s; (void)b; (void)n; (void)f; return sk_fail(); }
@@ -85,20 +112,26 @@ HLE_FORCE("_ZN2nn6socket12GetLastErrorEv", "socket error code kept by the host",
 SKF("nnsocketSocket", h_nsk_Socket, int a, int b, int c) { (void)a; (void)b; (void)c; return sk_fail(); }
 SKF("nnsocketBind", h_nsk_Bind, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("nnsocketConnect", h_nsk_Connect, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return sk_fail(); }
-SKF("nnsocketClose", h_nsk_Close, int s) { (void)s; return sk_fail(); }
+HLE_FORCE("nnsocketClose", "close a host-owned BSD event counter", int, h_nsk_Close, int s) { return h_sk_Close(s); }
+HLE_FORCE("nnsocketEventFd", "BSD local event counter", int, h_nsk_EventFd, uint64_t v, unsigned f) { return h_sk_EventFd(v, f); }
+HLE_FORCE("nnsocketEventFdRead", "read a BSD event counter", int, h_nsk_EventFdRead, int s, uint64_t *v) { return h_sk_EventFdRead(s, v); }
+HLE_FORCE("nnsocketEventFdWrite", "write a BSD event counter", int, h_nsk_EventFdWrite, int s, uint64_t v) { return h_sk_EventFdWrite(s, v); }
+HLE_FORCE("nnsocketRead", "read bytes from a BSD event counter", long, h_nsk_Read, int s, void *v, unsigned long n) { return h_sk_Read(s, v, n); }
+HLE_FORCE("nnsocketWrite", "write bytes to a BSD event counter", long, h_nsk_Write, int s, const void *v, unsigned long n) { return h_sk_Write(s, v, n); }
+HLE_FORCE("nnsocketSelect", "wait for BSD event counters", int, h_nsk_Select, int n, void *r, void *w, void *e, const int64_t *tv) { return dm_sk_select(n, r, w, e, tv); }
 SKF("nnsocketGetPeerName", h_nsk_GetPeerName, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("nnsocketGetSockName", h_nsk_GetSockName, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("nnsocketGetSockOpt", h_nsk_GetSockOpt, int s, int l, int o, void *v, unsigned *n) { (void)s; (void)l; (void)o; (void)v; (void)n; return sk_fail(); }
 SKF("nnsocketSetSockOpt", h_nsk_SetSockOpt, int s, int l, int o, const void *v, unsigned n) { (void)s; (void)l; (void)o; (void)v; (void)n; return sk_fail(); }
 SKF("nnsocketFcntl", h_nsk_Fcntl, int s, int c) { (void)s; (void)c; return sk_fail(); }
-SKF("nnsocketPoll", h_nsk_Poll, void *f, unsigned long n, int t) { return dm_sk_poll(f, n, t); }
+HLE_FORCE("nnsocketPoll", "wait for BSD event counters or the empty-set timeout", int, h_nsk_Poll, void *f, unsigned long n, int t) { return dm_sk_poll(f, n, t); }
 SKF("nnsocketResolverGetOption", h_nsk_ResGet, void *o, int k) { (void)o; (void)k; return sk_fail(); }
 SKF("nnsocketResolverSetOption", h_nsk_ResSet, const void *o) { (void)o; return sk_fail(); }
 HLE_FORCE("nnsocketRecv", "bsd socket service (cut)", long, h_nsk_Recv, int s, void *b, unsigned long n, int f) { (void)s; (void)b; (void)n; (void)f; return sk_fail(); }
 HLE_FORCE("nnsocketSend", "bsd socket service (cut)", long, h_nsk_Send, int s, const void *b, unsigned long n, int f) { (void)s; (void)b; (void)n; (void)f; return sk_fail(); }
 HLE_FORCE("nnsocketGetHostByNameWithOptions", "name resolution (cut): NULL", void *, h_nsk_GetHost, const char *n, const void *o, unsigned long c) { (void)n; (void)o; (void)c; t_skerr = SK_ENETDOWN; return NULL; }
 HLE_FORCE("nnsocketGetLastErrno", "socket error code kept by the host", int, h_nsk_GetErrno, void) { return t_skerr; }
-HLE_FORCE("nnsocketSetLastErrno", "socket error code kept by the host", void, h_nsk_SetErrno, int e) { t_skerr = e; }
+HLE_FORCE("nnsocketSetLastErrno", "socket error code shared with the guest C library", void, h_nsk_SetErrno, int e) { sk_error(e); }
 
 // ---------- ssl: offline, Initialize and a context's Create / Destroy succeed, everything else that contacts the service fails ----------
 // A context is a session of the local ssl service, so on Horizon Create works with no network and only a connection needs one; DRAGON QUEST BUILDERS 2 ends its startup when Create fails (main+0x861260).

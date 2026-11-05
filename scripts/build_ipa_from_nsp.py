@@ -2854,6 +2854,7 @@ def main(args=None):
     if not nsp_dir.exists(): raise BuildError(f'not a folder: {nsp_dir}')
     nup = nup_file(nsp_dir)   # a NUP file given in place of the folder: its folder is the NSP folder (the build folder and the IPA go there)
     if nsp_dir.is_file(): nsp_dir = nsp_dir.parent
+    global NSP_FOLDER; NSP_FOLDER = nsp_dir
     dump = 'nup' if nup else 'folder' if dump_folder(nsp_dir) else None   # their files are not encrypted, so they need no keys
     keys = None if dump else Path(os.path.expanduser(args.keys or PROD_KEYS or ask('path of prod.keys: ', 'prod.keys (-k)'))).resolve()
     if keys and not keys.is_file(): raise BuildError(f'no such file: {keys}')
@@ -3157,12 +3158,18 @@ def main(args=None):
     report_profile_status(g, reg, pkg_ver, derived, provisional, patched=patched)
 
 
+NSP_FOLDER = None   # main's: the folder whose work folders cli tidies after a build that succeeded
+
+
 def cli(argv):   # returns the exit code: 0 done, 1 error, 130 interrupted
     # main points DM_GAMES_DIR (and DM_GAMES_FIRST) at this run's provisional or derived profile for its tools. Spyder runs the next F5 in the same process, where the game lookup
     # (game.py by_title) then found that profile and took it for a registered one: ASTRAL CHAIN's second run skipped every provisional step and stopped with no dmsh_chain.h
     environ = dict(os.environ)
     try:
         main(parse_args(argv))
+        if NSP_FOLDER:   # a developer's work folder, which a player's NSP folder does not have (tree_tar.py)
+            for w in NSP_FOLDER.glob('*-work'):
+                if re.fullmatch(r'[0-9A-Fa-f]{16}-work', w.name): tree_tar.pack_quiet(w, say)
     except (BuildError, nso.Error, pack_nup.Error) as e:   # a damaged module, read in this process (the survey, the heap and region checks), or a NUP's version it cannot pack (no RomFS, read for the disk check before extraction) stops the build the same way
         PROG.close(ok=False); PROG.say(f'[RED] {e}'); return 1
     except KeyboardInterrupt:

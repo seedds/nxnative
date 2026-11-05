@@ -30,7 +30,7 @@
 # 1. Chain (static): the game's shaders translated by each revision's chain (dmsh_build.py through own_compilers.py; a Vulkan game: vk_shaders.py), compared shader by shader: built or failed
 #    (newly failing by the rule of dm/gfx/tools/shader_regressions.py, which the NSP script applies to one game's previous build; a new shader that fails is listed apart),
 #    the SHA-256 of the MSL (<key>_b.metal), of the reflection (<key>_b.json without its chain fields) and of the variant libraries (_bf, _bv, _bp, _bg*). A build is kept per chain version,
-#    shader package, profile inputs and compilers (<NSP folder>/<id>-work/regress/chain/<key>/), so a revision whose chain did not change costs nothing, and dmsh_build.py uses the build's own shader cache (DMSH_CAS), so MSL
+#    shader package, profile inputs and compilers (<NSP folder>/<id>-work/regress/chain/<key>/; only the few used last stay, prune_chains), so a revision whose chain did not change costs nothing, and dmsh_build.py uses the build's own shader cache (DMSH_CAS), so MSL
 #    that did not change is not compiled again. Then the vertex / pixel interface of every pipeline base pso_offline.py would put into the pipeline archive (shader_pairs.tsv and
 #    pso_pairs.tsv): a pixel shader input [[user(locnN)]] the vertex shader does not write, or writes with another type, makes metal-tt refuse the whole archive (GitHub issue #283).
 # 2. Smoke (runtime): the game in the Mac host (window, no audio), from a copy of the route's save, with the route's buttons, under a watchdog: the frame it must reach, crash (exit status,
@@ -362,6 +362,10 @@ def chain_key(tree, g, tools):
     return v, inp, f'{g.kind}-{v}-{inp}-{hashlib.sha256((tools + side + sources).encode()).hexdigest()[:16]}'
 
 
+CHAIN_KEEP, CHAIN_KEEP_HOURS = 3, 24   # prune_chains
+WORK_FOLDERS = set()   # the work folders of the games this run built chains for: main packs their quiet folders (tree_tar.pack_quiet) at its end
+
+
 def chain_build(tree, g, a):
     """The game's shaders built into its NSP work folder's regress/chain/<key>/ (reused when its manifest is there): → manifest"""
     v, inp, key = chain_key(tree, g, a.tools_fp)
@@ -371,7 +375,41 @@ def chain_build(tree, g, a):
         try: fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             say(f'  {g.id}: another process is building chain {key}: waiting for it'); fcntl.flock(lk, fcntl.LOCK_EX)
-        return chain_build_locked(tree, g, a, v, inp, key, out)
+        built = chain_build_locked(tree, g, a, v, inp, key, out)
+    WORK_FOLDERS.add(game_root(g).parent)
+    prune_chains(g)
+    return built
+
+
+def prune_chains(g):
+    """Remove the game's chain builds beyond the CHAIN_KEEP used last, which a later check that needs one builds again (its compile cache saves most of that): Tears of the Kingdom held 45, Breath of the Wild 57,
+    each a library for each of 28,669 shaders. Kept too: any used in the last CHAIN_KEEP_HOURS (another session's game may be running from it, holding no lock) and those of the newest
+    CHAIN_KEEP stored baselines. A build's <key>.lock is rewritten at each use, so its time is the last use. A build being made holds its lock and stays. Only names of the form chain_key gives go"""
+    root = game_root(g) / 'chain'
+    def used(p):
+        lock = p.with_name(p.name + '.lock')
+        return max(p.stat().st_mtime, lock.stat().st_mtime if lock.exists() else 0)
+    try: builds = sorted((p for p in root.iterdir() if p.is_dir() and re.fullmatch(r'(nvn|vk|gl)-[0-9a-f]+-.+', p.name)), key=used, reverse=True)
+    except OSError: return []
+    keep = {p.name for p in builds[:CHAIN_KEEP]} | {p.name for p in builds if time.time() - used(p) < CHAIN_KEEP_HOURS * 3600}
+    try: stored = sorted((game_root(g) / 'baselines').glob('*/chain.json'), key=lambda p: p.stat().st_mtime, reverse=True)[:CHAIN_KEEP]
+    except OSError: stored = []
+    for f in stored:
+        try: keep.add(json.loads(f.read_text())['key'])
+        except (OSError, ValueError, KeyError): pass
+    old, gone = [p for p in builds if p.name not in keep], []
+    if old: say(f'  {g.id}: removing {len(old)} old chain builds (kept: the {CHAIN_KEEP} used last)')
+    for p in old:
+        lock = p.with_name(p.name + '.lock')
+        try:
+            with open(lock, 'a') as lk:
+                try: fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError: continue
+                shutil.rmtree(p)
+                lock.unlink(missing_ok=True)
+            gone.append(p.name)
+        except OSError as e: say(f'  [RED] {g.id}: could not remove the old chain build {p}: {e}')
+    return gone
 
 
 def chain_build_locked(tree, g, a, v, inp, key, out):
@@ -1681,7 +1719,9 @@ def main():
         a.jobs = a.jobs or os.cpu_count() or 8
         a.tools_fp = toolchain_fp()
         free = check_disk(a.min_free_gb, clean=True); say(f'internal disk: {free:.1f} GB free; root {ROOT}; {a.jobs} workers')
-        return {'baseline': cmd_baseline, 'check': cmd_check, 'usage': cmd_usage, 'chain': lambda a: cmd_check(a, smoke=False), 'capture': cmd_capture, 'replay': cmd_replay}[a.cmd](a)
+        rc = {'baseline': cmd_baseline, 'check': cmd_check, 'usage': cmd_usage, 'chain': lambda a: cmd_check(a, smoke=False), 'capture': cmd_capture, 'replay': cmd_replay}[a.cmd](a)
+        for w in sorted(WORK_FOLDERS): tree_tar.pack_quiet(w, say)   # at the end: nothing is measuring here any more
+        return rc
     except HarnessError as e:
         print(f'[RED] regress.py: {e}', file=sys.stderr); return 2
 

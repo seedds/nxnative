@@ -8,9 +8,10 @@
 #   tar and <folder>.gone       stopped while the pack removed the folder: the tar is complete, the rest goes
 #   <folder>.unpack, <tar>.part unfinished, they go
 # unpack takes a lock on the parent folder that pack releases: regress.py's chain builds share a game's compile cache with the NSP script, and neither may pack it under the other.
-import fcntl, os, shutil, subprocess
+import fcntl, os, shutil, subprocess, time
 from pathlib import Path
 
+QUIET_DAYS, QUIET_MIN_FILES, QUIET_FREE = 14, 100, 20 * 2**30   # pack_quiet
 _locks = {}   # parent folder → descriptor: a second unpack in this process (Spyder runs each F5 in one process, after a build that raised) takes what it already holds
 
 
@@ -66,15 +67,16 @@ def unpack(folder, say=print):
     return True
 
 
-def pack(folder, say=print):
+def pack(folder, say=print, xattrs=False):
     """Replace folder with its tar and release unpack's lock. A folder another build is using is left to that build, which packs it at its end.
-    A pack that fails (a full drive) is one [RED] line, not an error: the build is done, and the folder stays for the next one"""
+    A pack that fails (a full drive) is one [RED] line, not an error: the build is done, and the folder stays for the next one.
+    xattrs: keep extended attributes, which `tar --xattrs -xf` restores (a RomFS folder's case-collision names, hle_fs.c's guest_name; the two caches have none they need)"""
     folder = Path(folder); tar = tar_of(folder); part = Path(f'{tar}.part'); gone = Path(f'{folder}.gone')
     if not _lock(folder): return
     try:
         if not folder.is_dir(): return
         try:
-            subprocess.run(['tar', '--no-xattrs', '--format=pax', '-cf', part, '-C', folder, '.'], check=True, capture_output=True, env=dict(os.environ, COPYFILE_DISABLE='1'))
+            subprocess.run(['tar', '--xattrs' if xattrs else '--no-xattrs', '--format=pax', '-cf', part, '-C', folder, '.'], check=True, capture_output=True, env=dict(os.environ, COPYFILE_DISABLE='1'))
             os.replace(part, tar)
             os.rename(folder, gone)
             _remove(gone)
@@ -83,3 +85,36 @@ def pack(folder, say=print):
             try: part.unlink(missing_ok=True)
             except OSError: pass
     finally: _unlock(folder)
+
+
+def _quiet_size(folder, since):   # (files, bytes) under folder; None as soon as anything in it changed at or after since (a walk of a folder in use ends early)
+    stack, n, size = [folder], 0, 0
+    while stack:
+        with os.scandir(stack.pop()) as it:
+            for e in it:
+                st = e.stat(follow_symlinks=False)
+                if max(st.st_mtime, st.st_ctime) >= since: return None   # ctime too: a folder just unpacked to work on has old times, and a recent ctime
+                if e.is_dir(follow_symlinks=False): stack.append(e.path)
+                else: n += 1; size += st.st_size
+    return n, size
+
+
+def pack_quiet(work, say=print, days=QUIET_DAYS, min_files=QUIET_MIN_FILES):
+    """Each top-level folder of a game's work folder (<NSP folder>/<id>-work) untouched for days becomes <name>.tar, `tar --xattrs -xf <name>.tar -C <name>` in a new folder bringing it back:
+    what agents and investigations leave there, hundreds of thousands of files nothing reads again. regress/ is regress.py's own, and a folder of few files is left readable.
+    An existing <name>.tar is never overwritten. The tar must fit on the drive beside the folder, with QUIET_FREE to spare. Returns the names packed"""
+    done, since = [], time.time() - days * 86400
+    try:
+        with os.scandir(work) as it: entries = sorted((e for e in it if e.is_dir(follow_symlinks=False)), key=lambda e: e.name)
+    except OSError: return done
+    for e in entries:
+        if e.name == 'regress' or e.name.endswith(('.gone', '.unpack')) or tar_of(e.path).exists(): continue
+        try:
+            if os.stat(e.path).st_ctime >= since or not (size := _quiet_size(e.path, since)) or size[0] < min_files: continue
+            if shutil.disk_usage(work).free < size[1] + QUIET_FREE:
+                say(f'{e.path} stays a folder: no room for its {size[1] / 2**30:.1f} GB tar'); continue
+        except OSError: continue
+        say(f'packing {e.path}, untouched for {days} days: {size[0]:,} files into one file')
+        pack(e.path, say, xattrs=True)
+        if tar_of(e.path).is_file() and not os.path.isdir(e.path): done.append(e.name)
+    return done

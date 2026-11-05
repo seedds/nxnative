@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # tree_tar.py: a folder becomes one tar and comes back the same, and every state a stopped build can leave is taken up by the next one.
-import fcntl, os, shutil, sys, tempfile, unittest
+import fcntl, os, shutil, subprocess, sys, tempfile, time, unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -88,6 +89,50 @@ class TreeTar(unittest.TestCase):
         fcntl.flock(fd, fcntl.LOCK_UN)
         tree_tar.pack(self.d, self.lines.append)
         self.assertEqual(self.names(), ['x.tar'])
+
+
+class PackQuiet(unittest.TestCase):
+    OLD = time.time() - 30 * 86400
+
+    def setUp(self):
+        self.w = Path(tempfile.mkdtemp(prefix='tree_tar_work_')); self.addCleanup(shutil.rmtree, self.w, True); self.lines = []
+
+    def folder(self, name, files=100):
+        d = self.w / name / 'sub'; d.mkdir(parents=True)
+        for i in range(files): (d / f'f{i}').write_text('x')
+        return self.w / name
+
+    def run_old(self, **k):   # now is what the folders' ctimes are, which a test cannot set: ask for a quiet time of less than a moment
+        time.sleep(0.05)
+        return tree_tar.pack_quiet(self.w, self.lines.append, days=0.0000001, **k)
+
+    def test_packs_a_quiet_folder_and_keeps_its_attributes(self):
+        d = self.folder('issue1')
+        subprocess.run(['xattr', '-w', 'org.d2rmobile.guest-name', 'Foo.txt', d / 'sub/f0'], check=True)
+        self.assertEqual(self.run_old(), ['issue1'])
+        self.assertEqual(sorted(p.name for p in self.w.iterdir()), ['issue1.tar'])
+        (self.w / 'back').mkdir()
+        subprocess.run(['tar', '--xattrs', '-xf', self.w / 'issue1.tar', '-C', self.w / 'back'], check=True)
+        self.assertEqual(subprocess.run(['xattr', '-p', 'org.d2rmobile.guest-name', self.w / 'back/sub/f0'], capture_output=True, text=True).stdout.strip(), 'Foo.txt')
+
+    def test_leaves_regress_small_recent_and_an_existing_tar(self):
+        self.folder('regress'); self.folder('small', 99); self.folder('kept'); (self.w / 'kept.tar').write_bytes(b'mine')
+        self.assertEqual(self.run_old(), [])
+        self.assertEqual((self.w / 'kept.tar').read_bytes(), b'mine')
+        self.assertTrue((self.w / 'kept').is_dir()); self.assertTrue((self.w / 'regress').is_dir()); self.assertTrue((self.w / 'small').is_dir())
+
+    def test_a_folder_with_a_recent_file_stays(self):
+        self.folder('busy')
+        self.assertEqual(tree_tar.pack_quiet(self.w, self.lines.append), [])   # 14 days: everything here is newer
+        self.assertTrue((self.w / 'busy').is_dir())
+
+    def test_no_room_stays_a_folder(self):
+        self.folder('big')
+        with mock.patch.object(tree_tar, 'QUIET_FREE', 2**62): self.assertEqual(self.run_old(), [])
+        self.assertTrue((self.w / 'big').is_dir()); self.assertIn('no room', self.lines[0])
+
+    def test_no_work_folder(self):
+        self.assertEqual(tree_tar.pack_quiet(self.w / 'absent', self.lines.append), [])
 
 
 if __name__ == '__main__': unittest.main()

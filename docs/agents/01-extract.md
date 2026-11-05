@@ -52,6 +52,8 @@ The work folder `$W` sits in the game's NSP folder, beside the NSP script's `<ti
   dbg/                  lldb scripts
 ```
 
+A top-level folder of `$W` untouched for 14 days, with 100 files or more, becomes `<name>.tar` at the end of the next NSP script or `regress.py` run (`dm/tools/tree_tar.py`). `regress/` stays. To bring one back: `mkdir <name> && tar --xattrs -xf <name>.tar -C <name> && rm <name>.tar`.
+
 ## Compressed RomFS content
 
 - Newer EPD titles store most files as `*.zs` (plain zstd, no dictionary in Mario; Zelda TotK needs `ZsDic.pack` dictionaries). Check for `*dic*` files before assuming plain zstd.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # scripts/regress.py: the parts that need no game, GPU or git revision: the MSL interface reader (GitHub issue #283), the [RED] normalization, the routes, and the comparisons
-import importlib.util, json, tempfile, unittest
+import fcntl, importlib.util, json, os, tempfile, time, unittest
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -343,6 +343,23 @@ class Regress(unittest.TestCase):
             self.assertEqual(chain.call_count, 4)
             hosts.assert_not_called(); smoke.assert_not_called()
             self.assertEqual([g['status'] for g in finish.call_args.args[0]['games'].values()], ['PASS', 'PASS'])
+
+    def test_prune_chains(self):   # the 3 used last, the recent and the stored baselines' stay; a build in use and other names are never touched
+        with tempfile.TemporaryDirectory() as td:
+            g = NS(id='game', kind='nvn', folder=Path(td)); root = regress.game_root(g) / 'chain'; root.mkdir(parents=True); old = time.time() - 30 * 86400
+            def build(i, when):
+                p = root / f'nvn-{i:012x}-in-k'; p.mkdir(); (p / 'f').write_text('x'); (root / f'{p.name}.lock').write_text('')
+                os.utime(root / f'{p.name}.lock', (when, when)); os.utime(p, (when, when)); return p
+            builds = [build(i, old - i * 3600) for i in range(8)]
+            recent = build(99, time.time() - 3600)
+            (root / 'mine').mkdir()
+            b = regress.game_root(g) / 'baselines/abc'; b.mkdir(parents=True); (b / 'chain.json').write_text(json.dumps({'key': builds[6].name}))
+            with open(root / f'{builds[7].name}.lock', 'a') as held, patch.object(regress, 'say'):
+                fcntl.flock(held, fcntl.LOCK_EX)
+                gone = regress.prune_chains(g)
+            self.assertEqual(sorted(gone), sorted(p.name for p in builds[2:6]))   # builds[0:2] and recent are the 3 used last, 6 is a baseline's, 7 is held
+            self.assertEqual(sorted(p.name for p in root.iterdir() if p.is_dir()), sorted(['mine', recent.name, builds[0].name, builds[1].name, builds[6].name, builds[7].name]))
+            self.assertFalse((root / f'{builds[2].name}.lock').exists())
 
     def test_reused_chain_rechecks_current_interface(self):
         with tempfile.TemporaryDirectory() as td:

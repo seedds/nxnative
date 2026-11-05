@@ -626,6 +626,13 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 }
             }
 
+            // nxnative: a phi source that is neither a storage buffer nor another phi (typically a pointer the shader loaded from memory). Ryujinx ignores it, so the helper
+            // checks only the buffers the other sources named and reads 0 for the loaded pointer. PRAGMATA's meshlet queue kernels (12a52b683eec95c1, 8c48c7ffd257c63d,
+            // 251426e9d44fd558) hit this case: "@P0 LDG.64 R0, [s5]; @!P0 LDG.64 R0, [s5 + i*16]" redefines the R0:R1 that held &s3[ticket], so the phi of the
+            // ptr+0x20 loads gets the old s3 address as a third source. The helper then checked only s3's window, the eight LOD offsets read 0, every instance got
+            // 0 clusters, and no mesh record was ever written
+            bool untraced = false;
+
             while (phis.TryDequeue(out phi))
             {
                 for (int srcIndex = 0; srcIndex < phi.SourcesCount; srcIndex++)
@@ -644,10 +651,34 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                             targetCbs.Add(targetCb);
                         }
                     }
-                    else if (phiSource.AsgOp is PhiNode phi2 && visited.Add(phi2))
+                    else if (phiSource.AsgOp is PhiNode phi2)
                     {
-                        phis.Enqueue(phi2);
+                        if (visited.Add(phi2))
+                        {
+                            phis.Enqueue(phi2);
+                        }
                     }
+                    else
+                    {
+                        untraced = true;
+                    }
+                }
+            }
+
+            // nxnative: with an untraced source, a load goes through the memory pool table, which also covers the named storage buffers (they live in the game's pools).
+            // Stores and atomics keep the old behaviour for now (only the traced buffers), logged so they can be found
+            if (untraced && targetCbs.Count != 0)
+            {
+                bool writes = operation.Inst == Instruction.Store || operation.Inst.IsAtomic();
+
+                if (!writes)
+                {
+                    gpuAccessor.Log($"Global memory operation \"{operation.Inst}\": an address source traced to no storage buffer next to {targetCbs.Count} that did; it goes through the memory pool table.");
+                    targetCbs.Clear();
+                }
+                else
+                {
+                    gpuAccessor.Log($"Global memory operation \"{operation.Inst}\": an address source traced to no storage buffer next to {targetCbs.Count} that did; only those are written.");
                 }
             }
 

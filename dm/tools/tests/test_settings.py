@@ -39,4 +39,27 @@ class UpscalerSetting(unittest.TestCase):
                 self.assertEqual(bool(up),shown,gid)
                 if up:self.assertEqual((up[0]['default'],up[0]['options']),('game',[['game',"Game's own"],['metalfx','MetalFX']]))
 
+class HdrSetting(unittest.TestCase):
+    def test_offered_for_hdr_games_on_both_platforms(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(settings.nacp, 'languages', return_value=['en-US']):
+            (Path(tmp) / 'main.fixups.tsv').write_text('')
+            cases = [
+                ('0400C3F00006E000', 'mac', True),
+                ('0400C3F00006E000', 'ios', True),
+                ('040074A01BF12000', 'mac', True),
+                ('040074A01BF12000', 'ios', True),
+                ('010056B015FE8000', 'mac', False),
+                ('010056B015FE8000', 'ios', False),
+            ]
+            for game_id, platform, expected in cases:
+                with self.subTest(game=game_id, platform=platform):
+                    with patch.dict(settings.os.environ, {'SETTINGS_PLATFORM': platform}):
+                        rows = settings.build(game_id, tmp, 'unused')['settings']
+                    hdr = [row for row in rows if row['env'] == 'DM_HDR']
+                    self.assertEqual(bool(hdr), expected)
+                    if hdr:
+                        self.assertEqual(hdr[0]['kind'], 'toggle')
+                        self.assertEqual(hdr[0]['default'], '1')
+
+
 if __name__=='__main__':unittest.main()

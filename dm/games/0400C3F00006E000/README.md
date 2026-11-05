@@ -111,3 +111,12 @@ Update 1.8.0 (v917504, SDK 21.4.0) is not on this Mac. Pull request #1116 ported
 - [SDK 19's decoder forms](../../../docs/reference/movies.md#sdk-19s-decoder-forms)
 - [A version without one of the profile's modules stops the host at boot](../../../docs/reference/packing.md#a-version-without-one-of-the-profiles-modules-stops-the-host-at-boot)
 - 1.8.0, by pull request #1116: [The camera through the graphics system](../../../docs/reference/services.md#the-camera-through-the-graphics-system), [Layer HDR metadata](../../../docs/reference/services.md#layer-hdr-metadata), the SDK 21 forms in [The Joy-Con mouse pointer](../../../docs/reference/services.md#the-joy-con-mouse-pointer) and [GameChat at boot](../../../docs/reference/services.md#gamechat-at-boot)
+
+- [Negotiated HDR scanout to Apple EDR](../../../docs/reference/rendering.md#negotiated-hdr-scanout-to-apple-edr): PQ scanout, luminance metadata and SDR captures.
+- [HDR display negotiation](../../../docs/reference/services.md#hdr-display-negotiation): the launcher enables HDR on capable displays.
+
+## Game Mode and queue lifetimes
+
+MKW 1.8.0 could remain at 30 fps after splitting submissions at water event dependencies. The queue fixes in [PR #1245](https://github.com/seedds/nxnative/pull/1245) preserve submission timestamps and reuse bounded command-allocator leases without resetting GPU-owned data. Gameplay testing on M5 Max confirmed sustained 60 fps with Game Mode on, correct water and sharp moving images after those fixes.
+
+The Mac packer restores Game Mode eligibility. The [independent M4 Pro report](../../../docs/reference/frame-rate.md#macos-game-mode-holds-the-gpu-at-its-lowest-clock) remains unresolved; affected users can disable Game Mode per game in Game Overlay.

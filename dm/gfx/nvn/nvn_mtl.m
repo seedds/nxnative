@@ -18,6 +18,7 @@
 #include <os/proc.h>   // os_proc_available_memory: for the memory readout line
 #endif
 #include "nvn_mtl.h"
+#include "nvn_hdr.h"
 #include "nvn_obj.h"
 #include "../tex/nvn_fmt_mtl.h"
 #include "../tex/nvn_deswizzle.h"
@@ -490,7 +491,7 @@ void mtl_init(void) {
     g_present_args = [g_dev newArgumentTableWithDescriptor:pad error:&ate];
     if (!g_present_args) MDIE("failed to create the present argument table: %s", ate.localizedDescription.UTF8String);
     for (int i = 0; i < 3; i++) {
-        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
+        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 12 options:MTLResourceStorageModeShared];
         if (!g_present_uv[i]) MDIE("failed to create present UV buffer[%d]", i);
         res_add(g_present_uv[i]);
     }
@@ -12706,6 +12707,28 @@ static int present_crop_rect(id<MTLTexture> src, const int crop[4], NSUInteger r
     }
     r[0] = crop[0]; r[1] = crop[1]; r[2] = crop[2]; r[3] = crop[3]; return 1;
 }
+// The Switch 2 NVN display plugin maps RGB10A2 to PQ and RGBA16F to linear 80-nit scanout.
+// A negotiated HDR display plus a compatible swapchain is required: an HDR-capable monitor alone must not reinterpret SDR frames.
+static int present_hdr_encoding(id<MTLTexture> src) {
+    if (!dm_hdr_requested() || !dm_hdr_advertised()) {
+        return 0;
+    }
+    if (src.pixelFormat == MTLPixelFormatRGB10A2Unorm || src.pixelFormat == MTLPixelFormatBGR10A2Unorm) {
+        return 1;
+    }
+    if (src.pixelFormat == MTLPixelFormatRGBA16Float) {
+        return 2;
+    }
+    return 0;
+}
+static void present_color_params(float *color, id<MTLTexture> src, id<MTLTexture> dst) {
+    uint16_t min_luminance, max_luminance;
+    dm_hdr_luminance_range(1, &min_luminance, &max_luminance);
+    color[0] = present_hdr_encoding(src);
+    color[1] = dm_hdr_requested() && dst.pixelFormat == MTLPixelFormatRGBA16Float;
+    color[2] = 0; // Reserved; matches Crop.color in present.metal.
+    color[3] = max_luminance;
+}
 static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4]) {
     NSUInteger r[4]; if (!present_crop_rect(src, crop, r)) return 0;
     NSUInteger cx = r[0], cy = r[1], cw = r[2], ch = r[3];
@@ -12727,9 +12750,10 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
     [en setViewport:vp];
     [en setRenderPipelineState:g_blit_pso]; [en setFragmentTexture:present_raw_src(src) atIndex:0]; [en setFragmentSamplerState:g_blit_samp atIndex:0];
-    float uv[8] = {(float)cx / src.width, (float)cy / src.height, (float)cw / src.width, (float)ch / src.height,
+    float uv[12] = {(float)cx / src.width, (float)cy / src.height, (float)cw / src.width, (float)ch / src.height,
                    (cx + 0.5f) / src.width, (cy + 0.5f) / src.height, (cx + cw - 0.5f) / src.width, (cy + ch - 0.5f) / src.height};
     if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
+    present_color_params(uv + 8, src, dst);
     [en setFragmentBytes:uv length:sizeof uv atIndex:0];
     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [en endEncoding];
@@ -12962,7 +12986,11 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     double dw = dst.width, dh = dst.height;
     MTLViewport vp = present_viewport(r[2], r[3], dw, dh);
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
-    id<MTLTexture> tex = present_raw_src(src), up = fx ? fx_encode(fx, cb, tex, r, vp, dst.pixelFormat, fx == &g_fx_present) : nil;
+    id<MTLTexture> tex = present_raw_src(src);
+    id<MTLTexture> up = nil;
+    if (fx && !present_hdr_encoding(src)) {
+        up = fx_encode(fx, cb, tex, r, vp, dst.pixelFormat, fx == &g_fx_present);
+    }
     if (up) { tex = up; r[0] = r[1] = 0; r[2] = up.width; r[3] = up.height; }   // the scaled picture, the viewport's size: drawn 1:1
     MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
     rp.colorAttachments[0].texture = dst;
@@ -12979,6 +13007,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     uv[0] = (float)cx / tw; uv[1] = (float)cy / th; uv[2] = (float)cw / tw; uv[3] = (float)ch / th;
     uv[4] = (cx + 0.5f) / tw; uv[5] = (cy + 0.5f) / th; uv[6] = (cx + cw - 0.5f) / tw; uv[7] = (cy + ch - 0.5f) / th;
     if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
+    present_color_params(uv + 8, src, dst);
     [g_present_args setAddress:uvb.gpuAddress atIndex:0];
     [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];
     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -12989,7 +13018,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
 // returns whether it was submitted. Completion reports the encoding kind, or PRESENT_FAILED on a GPU error. Resources remain resident and retained until GPU completion.
 static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTexture> out, void (^done)(int)) {
     id<MTL4CommandAllocator> al = [g_dev newCommandAllocator]; id<MTL4CommandBuffer> cb = [g_dev newCommandBuffer];
-    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 12 options:MTLResourceStorageModeShared];
     if (!al || !cb || !uvb) { MLOG("[RED] offscreen present: no command allocator or buffer"); return 0; }
     id<MTLTexture> raw = present_raw_src(src);
     fx_state fx = {0};
@@ -13086,6 +13115,20 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
 
     CAMetalLayer *layer = (__bridge CAMetalLayer *)front_metal_layer();
     if (!layer) return 0;
+    int hdr_mode = present_hdr_encoding(src);
+    dm_hdr_layer_metadata((__bridge void *)layer, hdr_mode != 0);
+    static int last_hdr_mode = -1;
+    if (last_hdr_mode != hdr_mode) {
+        const char *encoding = "SDR";
+        if (hdr_mode == 1) {
+            encoding = "Rec.2020 PQ";
+        } else if (hdr_mode == 2) {
+            encoding = "linear scRGB";
+        }
+        MLOG("present HDR: %s, drawable format %lu, optical unit %d nits", encoding,
+             (unsigned long)layer.pixelFormat, DM_HDR_LINEAR_UNIT);
+        last_hdr_mode = hdr_mode;
+    }
     if (g_present_layer_resident != layer) { [g_q4 addResidencySet:layer.residencySet]; g_present_layer_resident = layer; }
 #if TARGET_OS_OSX
     if (!layer.displaySyncEnabled) layer.displaySyncEnabled = YES;   // Windowed mode follows the display's vsync to prevent tearing

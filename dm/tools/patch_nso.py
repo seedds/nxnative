@@ -7,6 +7,7 @@
 #   svc #n, mrs cntpct_el0 → host gate (gate address taken from thread slot KGATE; once in C, gates.tsv is looked up by return point)
 #   sub sp, sp, xN      → xN rounded up to 16 first (Apple's kernel faults on a misaligned sp, Horizon does not; site_sp_align)
 #   ldxr rt,[rn]; cbnz rt,<it>; stxr ws,rk,[rn]; cbnz ws,<it> with no dmb after it (a test-and-set lock acquire with no acquire ordering) → ldaxr (acquire_lock_sites; the games ran on the Switch's Cortex-A57 without the ordering, Apple cores need it)
+#   the completer of Trinity's per-frame rendezvous: dmb ish between its flag store and its load of the state word (trinity_completer_sites; exactly one such function in a module, or no change)
 #   spin wait loops     → a copy whose back-edges pass a spin gate (the host yields there; a busy poll costs nothing on the Switch, see "Spin waits")
 #   Registered cuts (CUTS of the patch files, restricted by NSO build ID, see "Registered patches"): before rewriting, the original bytes are asserted one by one and any mismatch aborts; results are listed in <name>.cuts.tsv
 #   Function-matched cuts (MATCH_CUTS of the selected game's patches.py): unknown builds only, unique complete-function and direct-callee fingerprints, then original-byte assertions
@@ -600,6 +601,34 @@ def acquire_lock_sites(img, ranges):
 for o in acquire_lock_sites(IMG, CODE_RANGES):
     struct.pack_into('<I', IMG, o, struct.unpack_from('<I', IMG, o)[0] | 0x8000)   # ldxr → ldaxr
     stat('acquire_lock')
+def trinity_completer_sites(img, ranges):
+    """Offsets of the completer of Trinity's per-frame rendezvous (Game Freak; Pokémon Scarlet 1.0.0 main+0x28f872c, 4.0.0 main+0x2d0010c):
+      stp x29,x30,[sp,#-0x20]!; stp x20,x19,[sp,#0x10]; mov x29,sp; ldr x8,[x0,#imm]; mov w9,#1; strb w9,[x8,#A]; ldrb w9,[x8,#A+1]; cbz w9,..;
+      ldr x20,[x8,#B]; add x9,x20,#C; ldar w8,[x9]; cmp w8,#2; b.ne ..
+    It sets the release flag with the plain strb and returns without a wake if the state word (ldar) is 2. A load-acquire does not order an earlier plain store, so the flag can stay
+    invisible while main resets the state to 0, reads the flag as 0 and parks for good (GitHub issue #1250, docs/reference/threads.md). The frame holds only the saved registers, so nothing
+    in the function reads x29"""
+    out, needle = [], struct.pack('<II', 0x88DFFD28, 0x7100091F)   # ldar w8,[x9]; cmp w8,#2
+    for s, e in ranges:
+        o = img.find(needle, s, e)
+        while o >= 0:
+            f = o - 40
+            if o % 4 == 0 and f >= s and o + 12 <= e:
+                w = struct.unpack_from('<13I', img, f)
+                if w[:3] == (0xA9BE7BFD, 0xA9014FF4, 0x910003FD) and w[3] & 0xFFC003FF == 0xF9400008 and w[4] == 0x52800029 and w[5] & 0xFFC003FF == 0x39000109 and \
+                        w[6] & 0xFFC003FF == 0x39400109 and w[6] >> 10 & 0xFFF == (w[5] >> 10 & 0xFFF) + 1 and w[7] & 0xFF00001F == 0x34000009 and w[8] & 0xFFC003FF == 0xF9400114 and \
+                        w[9] & 0xFFC003FF == 0x91000289 and w[12] & 0xFF00001F == 0x54000001:
+                    out.append(f)
+            o = img.find(needle, o + 4, e)
+    return out
+def trinity_completer_barrier(img, f):
+    """The frame pointer's mov gives up its word: the ldr, the mov and the strb move up one and dmb ish follows the strb. Backtraces skip this frame, and nothing in it reads x29"""
+    struct.pack_into('<4I', img, f + 8, *struct.unpack_from('<3I', img, f + 12), 0xD5033BBF)
+trinity = trinity_completer_sites(IMG, CODE_RANGES)
+if len(trinity) > 1: print(f'[RED] {NAME}: {len(trinity)} functions have the shape of Trinity\'s rendezvous completer, so none gets its barrier: ' + ', '.join(hex(o) for o in trinity))
+elif trinity:
+    trinity_completer_barrier(IMG, trinity[0])
+    stat('trinity_completer')
 md_lite = Cs(CS_ARCH_ARM64, CS_MODE_ARM)   # no details: the x18 scan reads only the operand text
 R18 = re.compile(r'\b[xw]18\b')
 def x18_words(lo, hi):

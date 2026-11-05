@@ -137,6 +137,45 @@ static void lifecycle(void) {
     key(126, NO, 0); expect(state(), 0, 0, 0, 0, 0);
     input_release(); input_resume(); expect(state(), 0, 0, 0, 0, 0);
 }
+// Substitute the preferences boundary, not the startup code. No real domain is read.
+@interface StartupDefaults : NSObject
+@property(nonatomic) NSDictionary *values;
+@property(nonatomic) unsigned reads;
+@end
+@implementation StartupDefaults
+- (id)objectForKey:(NSString *)key { _reads++; return _values[key]; }
+@end
+static StartupDefaults *startupDefaults;
+static id standard_defaults(id self, SEL cmd) { (void)self; (void)cmd; return startupDefaults; }
+static void saved_preferences_startup(void) {
+    Method method = class_getClassMethod(NSUserDefaults.class, @selector(standardUserDefaults));
+    IMP previous = method_getImplementation(method); replace_method(method, (IMP)standard_defaults);
+    startupDefaults = [StartupDefaults new];
+    startupDefaults.values = @{@"players.controllers.v1": @[], @"players.keyboard.v1": @3, @"players.keyboard.mode.v1": @1};
+    setenv("DM_HID_PADS", "0", 1); // Legacy startup must not discover physical devices in this test.
+    setenv("DM_PLAYER_SETUP", "1", 1); unsetenv("DM_SAVED_CHOICES");
+    g_players = nil; pads_start();
+    assert(g_players && g_players.keyboardPlayer == 3 && player_mask == (1u << 3));
+    input_resume();
+    key(38, NO, 1); expect(player_state[3], DM_BTN_A, 0, 0, 0, 0); key(38, NO, 0);
+    input_release();
+    unsigned reads = startupDefaults.reads;
+    pads_start(); assert(startupDefaults.reads == reads); // Prepared routes win; never reload during play.
+    g_players = nil; setenv("DM_SAVED_CHOICES", "0", 1); pads_start(); assert(!g_players);
+    assert(startupDefaults.reads == reads);
+    unsetenv("DM_SAVED_CHOICES"); setenv("DM_PLAYER_SETUP", "0", 1); pads_start(); assert(!g_players);
+    assert(startupDefaults.reads == reads);
+    setenv("DM_PLAYER_SETUP", "1", 1);
+    for (NSDictionary *values in @[@{}, @{@"players.controllers.v1": @"invalid"}]) {
+        startupDefaults.values = values;
+        setenv("DM_PAD_MERGE", "1", 1); pads_start(); assert(!g_players && g_merge);
+        unsetenv("DM_PAD_MERGE"); setenv("DM_KBD_PLAYER", "own", 1);
+        pads_start(); assert(!g_players && g_kbd_own && pad_slot_mask(&g_slots) == 1);
+        unsetenv("DM_KBD_PLAYER");
+    }
+    unsetenv("DM_PLAYER_SETUP"); unsetenv("DM_HID_PADS");
+    replace_method(method, previous); startupDefaults = nil;
+}
 int main(void) {
     @autoreleasepool {
         replace_method(class_getClassMethod(NSCursor.class, @selector(setHiddenUntilMouseMoves:)), (IMP)cursor);
@@ -163,6 +202,7 @@ int main(void) {
         // Focus release now force-publishes neutral state for every configured player.
         for (int p = 0; p < DM_PLAYERS; p++) if (p != 3) expect(player_state[p], 0, 0, 0, 0, 0);
         input_release(); assert(activities == ended && !g_display_activity);
+        saved_preferences_startup();
         g_players = nil; g_win = nil; NSApp = nil;
         puts("front_mac input: keyboard axes, configured pad_set publication, release/resume passed");
     }

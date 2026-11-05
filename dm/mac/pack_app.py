@@ -87,6 +87,16 @@ def min_os(host):   # the host's deployment target (LC_BUILD_VERSION minos): the
     return m.group(1) if m else '14.0'
 
 
+def defined_exports(path):
+    text = run(['nm', '-arch', 'arm64', '-gU', path])
+    return {m.group(1) for line in text.splitlines() if (m := re.fullmatch(r'\s*[0-9a-fA-F]+\s+[A-TV-Z]\s+(\S+)\s*', line))}
+
+
+def saved_player_prefs(host):
+    """Advertise the executable's capability, not the packer's version or a UI string."""
+    return 'players.controllers.v1' if '_dm_mac_saved_player_prefs_v1' in defined_exports(host) else None
+
+
 def validate_host_library(host, library, title_id):
     """Inspect exports, never dlopen: loading a host can run its constructors.
 
@@ -97,11 +107,8 @@ def validate_host_library(host, library, title_id):
     """
     title_id = title_id.upper()
     if not re.fullmatch(r'[0-9A-F]{16}', title_id): raise SystemExit(f'invalid host library title ID: {title_id}')
-    def exports(path):
-        text = run(['nm', '-arch', 'arm64', '-gU', path])
-        return {m.group(1) for line in text.splitlines() if (m := re.fullmatch(r'\s*[0-9a-fA-F]+\s+[A-TV-Z]\s+(\S+)\s*', line))}
     expected = f'_dm_mac_host_abi_1_{title_id}'
-    host_symbols, library_symbols = exports(host), exports(library)
+    host_symbols, library_symbols = defined_exports(host), defined_exports(library)
     for path, symbols in ((host, host_symbols), (library, library_symbols)):
         if {s for s in symbols if s.startswith('_dm_mac_host_abi_')} != {expected}:
             raise SystemExit(f'host library ABI/profile mismatch at {path}: expected {expected}')
@@ -365,6 +372,12 @@ def pack(a):
     icon = bool(a.icon)
     if icon: step('icon'); make_icns(a.icon, res / 'AppIcon.icns')
     info = info_plist(a, minos, icon)
+    if prefs := saved_player_prefs(a.host):
+        info['DMPlayerPrefs'] = prefs
+        # Saved activation must work even without an optional launcher.json.
+        rules = info.setdefault('DMSettings', [])
+        if not any(r['env'] == 'DM_PLAYER_SETUP' for r in rules):
+            rules.append({'env': 'DM_PLAYER_SETUP', 'values': ['1', '0']})
     info['DMModuleFiles'] = [p.name for p in mods]
     commit = source_commit()
     if commit: info['DMCommit'] = commit

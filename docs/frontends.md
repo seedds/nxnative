@@ -77,10 +77,11 @@ DM_PLAYER_SETUP=1 /path/to/Game.app/Contents/MacOS/nxnative
 
 The embedded view and the guest use the same host process and retained controller
 objects; no device identities cross a process boundary. **Play** confirms the routes
-and starts the guest. Standalone hosts, apps without the library, headless runs and
-starts that bypass the launch window (including `DM_LAUNCHER=0` / `--no-launcher`)
-retain legacy automatic routing, even with `DM_PLAYER_SETUP=1`. When setup is not
-confirmed, `DM_PAD_MERGE` and `DM_KBD_PLAYER` retain their existing behavior.
+and starts the guest. Without a confirmed window, `DM_PLAYER_SETUP=1` can instead
+read [saved player assignments](#saved-player-assignments-on-mac), including on
+`DM_LAUNCHER=0` / `--no-launcher` starts. Missing or malformed controller preferences,
+`DM_SAVED_CHOICES=0`, or setup off retain legacy automatic routing and the existing
+`DM_PAD_MERGE` / `DM_KBD_PLAYER` behavior.
 
 - Only assigned connected sources appear in the overview. **Add input device** offers
   connected unassigned sources, including duplicate models and additional Joy-Con pairs. Press a controller button
@@ -157,10 +158,10 @@ Remember checked, and slot-only choices retain shared semantics. Malformed value
 ignored. Only **Play** commits checked Remember choices; Play with Remember unchecked
 clears these three preference keys. Quit, closing the window or turning setup off never
 saves preview edits or Forget actions. `DM_SAVED_CHOICES=0` skips loading these preferences
-and disables saving for that run. Preferences are per app and read only by the opt-in
-embedded setup, not by legacy routes or `--no-launcher` front ends. A shared
-external `--no-launcher` player-assignment interface is **not implemented**; these
-per-app preferences do not provide cross-game controller ordering.
+and disables saving for that run. Preferences are per app. The embedded window keeps
+the rules above; without a confirmed window, the opt-in saved routing below reads
+the same model and role preferences. A front end keeps any cross-game priority list
+in its own store and writes the resulting per-game choices before launch.
 
 The opt-in picker currently lists GameController sources only: raw HID-only gamepads
 cannot be assigned there and are not read during configured play. Disable player setup
@@ -179,7 +180,7 @@ Together / Separate selector remains specific to an extended OS-combined pair.
 **Arbitrary physical pair regrouping is unsupported**: GameController documents no Joy-Con
 split/unpair API, and remote-controller coalescing Info.plist keys do not provide one.
 Pair or unpair devices in the operating system yourself; the panel does not change Bluetooth
-pairing or any device configuration. Interactive controller/gameplay validation remains
+pairing or any device configuration. Interactive Joy-Con gameplay validation remains
 pending. Routing tests are native and windowless with fake controller profiles; the
 SwiftUI/AppKit integration test allocates a window but never shows or activates it.
 
@@ -198,6 +199,93 @@ Each app keeps the player's choices in its own preferences domain, its bundle ID
 - **Launch overrides are temporary.** A front end that starts the game with a variable in its environment overrides the saved choice for that start only. It writes the store only when the player means to keep the choice.
 - **`DM_SAVED_CHOICES=0`** (in the environment or an `env.txt`) starts with the tested defaults and leaves the saved choices as they are. **`DM_LAUNCHER=0`** only skips the settings screen (the iPhone's, or a Mac app's window): the saved choices still apply.
 - **A sandboxed front end** cannot write another app's preferences domain; this store is for front ends outside the App Sandbox, as NX2Apple is.
+
+### Saved player assignments on Mac
+
+**Capability.** A Mac app whose `Info.plist` has `DMPlayerPrefs` equal to
+`players.controllers.v1` supports the windowless route described here. The packer
+sets it only when the actual host executable defines `dm_mac_saved_player_prefs_v1`;
+it inspects symbols without loading or running the host. Offering `DM_PLAYER_SETUP`
+in `launcher.json` alone is not evidence of this capability: older builds offer
+the window's UI without windowless restoration. For a capable host, the packer also
+provides the saved activation rule in `DMSettings` when the optional settings list
+does not contain it, so activation works without a `launcher.json`.
+
+**Store and enable.** Write to the app's actual bundle ID, as for other saved choices.
+`players.controllers.v1` is a property-list array of at most 32 dictionaries, not a
+JSON string. Every dictionary contains all seven fields:
+
+| Field | Property-list type | Value |
+|---|---|---|
+| `vendor` | string | GameController `vendorName`, empty when absent |
+| `category` | string | GameController `productCategory`, empty when absent |
+| `player` | integer | `-1` disabled, `0` Player 1 through `7` Player 8 |
+| `role` | integer | `0` primary (own), `1` combined (share) |
+| `split` | integer or boolean | `0` whole; `1` only for category `Nintendo Switch Joy-Con (L/R)` |
+| `rightPlayer` | integer | Right half's target when split; otherwise `-1` |
+| `rightRole` | integer | Right half's role when split; otherwise `0` |
+
+Write numeric objects, not strings that look like numbers. `CFPreferencesSetAppValue`
+accepts the structured property list; synchronize writes and wait for success before
+launching the app. Keep `players.keyboard.v1` and `players.keyboard.mode.v1` unless
+the user chooses to change them. Their absence keeps the shared Player 1 keyboard.
+Enable routing with the string `"1"` at `launcher.DM_PLAYER_SETUP`, or the temporary
+launch environment `DM_PLAYER_SETUP=1`. The usual environment and `env.txt` precedence
+applies. `DM_SAVED_CHOICES=0` ignores all these preferences without deleting them.
+
+Without a prepared window, the host calls `DmMacPlayers.startSavedRouting:` and
+loads these choices from `NSUserDefaults.standardUserDefaults` in its own process.
+A missing array or any malformed dictionary retains the automatic path. An empty
+but valid array enables session routing with no initially configured models.
+The windowless mode never saves preferences, including session-generated routes.
+The window's Play/Remember behavior and its disabled late-arrival policy are unchanged.
+
+**Session routing.** A complete vendor/category pair restores only when one layout
+and one connected supported source match. Targets are zero-based and are never
+compacted or renumbered by the host. Configured targets remain reserved even before
+their model first connects and after it disconnects. A disconnected source releases
+its buttons and axes; a unique reconnect restores the session's target and roles.
+
+A model with no matching persisted profile first tries to restore a unique, complete
+session route. Otherwise it takes the lowest slot never reserved in this session.
+Its previous slots remain reserved even when incomplete or ambiguous identity prevents
+restoration. Identical unknown models can therefore join together or separately;
+neither arrival order renumbers an already assigned source. The keyboard reserves its
+slot when primary, but its default shared role
+allows a controller on Player 1. Exhausted reservations never evict a previous model:
+the new source stays disabled. Unsupported GameController profiles and raw HID-only
+devices do not gain a configured route.
+
+A matching disabled, incomplete, ambiguous or conflicting persisted profile never
+falls back to automatic allocation. Conflicting primary claims are blocked for the
+whole session, including an entire split profile if either half conflicts. During
+play, another identical model does not revoke an active route. If that model matches
+a persisted profile, the newcomer stays disabled; once ambiguous, that profile cannot
+restore without confirmation, which this mode does not offer. Unknown models instead
+receive fresh slots when their temporary routes cannot restore safely. Repeated
+reconnections with unclear identity can exhaust all eight reservations. Logs describe
+routes and refused assignments, but remain diagnostic text.
+
+A front end may calculate startup targets from its own priority list, omitting absent
+models and sending a known ambiguous model with `player=-1`. The host does not read
+that global list. A discovery snapshot can miss a late model; it then receives an
+unused slot rather than displacing someone already playing. Finder uses the last
+per-app choices written, not a fresh calculation of the front end's priority list.
+Writes affect the next start, not an already running game. Turning setup off leaves
+the stored layouts available to the window if the user enables it later.
+
+A front end must also account for a previously saved primary keyboard: assigning a
+controller as primary on that same slot is a conflict and disables that controller's
+profile. Do not claim the priority was applied without resolving or explaining this
+configuration. Configured routing ignores `DM_PAD_MERGE` and `DM_KBD_PLAYER`; raw
+HID-only devices remain outside this mode, which a front end should explain before
+enabling it for those devices.
+
+The game's supported npad IDs still decide which routed players it reads. A game
+supporting four players can ignore a newcomer routed to Player 5, even when a lower
+slot is reserved but disconnected. One-player games retain their existing merging
+of unsupported players into Player 1. Slot replacement and an in-game assignment UI
+are outside this interface.
 
 ### The cloud saves folder
 

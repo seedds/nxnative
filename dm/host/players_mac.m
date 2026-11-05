@@ -117,8 +117,10 @@ static DmPlayerState standard_state(GCPhysicalInputProfile *p) {
 @property(nonatomic, copy) NSString *assignmentError, *identifiedName;
 @property(nonatomic) NSUInteger nextNumber;
 @property(nonatomic) BOOL configuring;
+@property(nonatomic) BOOL savedRouting;
 @property(nonatomic) NSUserDefaults *preferences;
 @property(nonatomic) NSArray<NSDictionary *> *savedLayouts;
+@property(nonatomic) NSUInteger persistedLayoutCount;
 @property(nonatomic) NSInteger armedLayout;
 @property(nonatomic) NSMutableIndexSet *confirmationRequired, *discardedLayouts;
 @end
@@ -133,6 +135,30 @@ static DmPlayerState standard_state(GCPhysicalInputProfile *p) {
     return self;
 }
 - (NSArray *)sources { return [_entries copy]; }
+- (BOOL)startSavedRouting:(NSUserDefaults *)defaults {
+    if (_configuring || _hasConfigured || _savedRouting || _entries.count) return NO;
+    [self loadPreferences:defaults];
+    if (!_savedLayouts) return NO;
+    _persistedLayoutCount = _savedLayouts.count;
+    // Conflicting primary claims stay unresolved for this whole session, even
+    // when only one claimant is connected. The window's editable policy is unchanged.
+    NSUInteger owners[DM_PLAYERS] = {0};
+    if (valid(_keyboardPlayer) && _keyboardRole == DmPlayerOwn) owners[_keyboardPlayer]++;
+    for (NSDictionary *layout in _savedLayouts) {
+        NSInteger p = [layout[@"player"] integerValue], right = [layout[@"rightPlayer"] integerValue];
+        if (valid(p) && [layout[@"role"] integerValue] == DmPlayerOwn) owners[p]++;
+        if ([layout[@"split"] boolValue] && valid(right) && [layout[@"rightRole"] integerValue] == DmPlayerOwn) owners[right]++;
+    }
+    for (NSUInteger i = 0; i < _savedLayouts.count; i++) {
+        NSDictionary *layout = _savedLayouts[i];
+        NSInteger p = [layout[@"player"] integerValue], right = [layout[@"rightPlayer"] integerValue];
+        if ((valid(p) && owners[p] > 1 && [layout[@"role"] integerValue] == DmPlayerOwn) ||
+            ([layout[@"split"] boolValue] && valid(right) && owners[right] > 1 && [layout[@"rightRole"] integerValue] == DmPlayerOwn))
+            [_confirmationRequired addIndex:i];
+    }
+    _savedRouting = YES;
+    return YES;
+}
 - (void)loadPreferences:(NSUserDefaults *)defaults {
     self.preferences = defaults;
     id saved = [defaults objectForKey:@"players.controllers.v1"];
@@ -160,6 +186,7 @@ static DmPlayerState standard_state(GCPhysicalInputProfile *p) {
     }
 }
 - (void)savePreferences:(NSUserDefaults *)defaults {
+    if (_savedRouting) return;
     if (_keyboardPlayer >= -1 && _keyboardPlayer < DM_PLAYERS && (_keyboardRole == DmPlayerOwn || _keyboardRole == DmPlayerShare)) {
         [defaults setInteger:_keyboardPlayer forKey:@"players.keyboard.v1"];
         [defaults setInteger:_keyboardRole forKey:@"players.keyboard.mode.v1"];
@@ -171,9 +198,7 @@ static DmPlayerState standard_state(GCPhysicalInputProfile *p) {
         for (NSNumber *index in pending) if ([self source:s matchesLayout:_savedLayouts[index.unsignedIntegerValue]]) unresolved = YES;
         // An unconfirmed device must not replace its saved routes with the disabled preview.
         if (unresolved && s.savedLayoutIndex < 0 && !s.manuallyAssigned) continue;
-        NSDictionary *layout = @{@"vendor": s.controller.vendorName ?: @"", @"category": s.controller.productCategory ?: @"",
-            @"split": @(s.split), @"player": @(s.player), @"role": @(s.role),
-            @"rightPlayer": @(s.rightPlayer), @"rightRole": @(s.rightRole)};
+        NSDictionary *layout = [self layoutForSource:s];
         if ([self validSavedLayout:layout]) [layouts addObject:layout];
     }
     // Keep temporarily absent/unconfirmed devices rather than forgetting them on Play.
@@ -181,6 +206,11 @@ static DmPlayerState standard_state(GCPhysicalInputProfile *p) {
     // unresolved profiles until the user identifies one or explicitly chooses Forget.
     for (NSNumber *index in pending) [layouts addObject:_savedLayouts[index.unsignedIntegerValue]];
     if (layouts.count <= 32) [defaults setObject:layouts forKey:@"players.controllers.v1"];
+}
+- (NSDictionary *)layoutForSource:(DmPlayerSource *)s {
+    return @{@"vendor": s.controller.vendorName ?: @"", @"category": s.controller.productCategory ?: @"",
+        @"split": @(s.split), @"player": @(s.player), @"role": @(s.role),
+        @"rightPlayer": @(s.rightPlayer), @"rightRole": @(s.rightRole)};
 }
 - (BOOL)validSavedLayout:(id)item {
     if (![item isKindOfClass:NSDictionary.class]) return NO;
@@ -224,7 +254,7 @@ static DmPlayerState standard_state(GCPhysicalInputProfile *p) {
     return [NSString stringWithFormat:@"%@ → %@", name.length ? name : @"Controller", targets];
 }
 - (BOOL)restoreLayout:(NSUInteger)i source:(DmPlayerSource *)s {
-    if (!_configuring || i >= _savedLayouts.count || ![[self pendingLayoutIndexes] containsObject:@(i)] ||
+    if ((!_configuring && !_savedRouting) || i >= _savedLayouts.count || ![[self pendingLayoutIndexes] containsObject:@(i)] ||
         ![self source:s matchesLayout:_savedLayouts[i]] || s.savedLayoutIndex >= 0) return NO;
     NSDictionary *layout = _savedLayouts[i];
     NSInteger p = [layout[@"player"] integerValue], right = [layout[@"rightPlayer"] integerValue];
@@ -250,7 +280,7 @@ static DmPlayerState standard_state(GCPhysicalInputProfile *p) {
     return YES;
 }
 - (void)restoreUniqueLayouts {
-    if (!_configuring || _hasConfigured) return;
+    if ((!_configuring && !_savedRouting) || (_hasConfigured && !_savedRouting)) return;
     // Re-evaluate automatic bindings when another identical model arrives. Arrival
     // order is not identity. Once ambiguous, this saved route requires confirmation
     // for the rest of setup even if one matching device subsequently disconnects.
@@ -259,7 +289,7 @@ static DmPlayerState standard_state(GCPhysicalInputProfile *p) {
         for (DmPlayerSource *s in _entries) if ([self source:s matchesLayout:_savedLayouts[i]]) count++;
         if (count > 1) [_confirmationRequired addIndex:i];
     }
-    for (DmPlayerSource *s in _entries) if (s.automaticallyRestored && !s.manuallyAssigned &&
+    for (DmPlayerSource *s in _entries) if (!_savedRouting && s.automaticallyRestored && !s.manuallyAssigned &&
         s.savedLayoutIndex >= 0 && [_confirmationRequired containsIndex:(NSUInteger)s.savedLayoutIndex]) {
         s.player = s.rightPlayer = -1; s.split = NO; s.savedLayoutIndex = -1; s.automaticallyRestored = NO;
         [self logRoutes:@"ambiguous model; confirm saved setup" source:s];
@@ -275,6 +305,41 @@ static DmPlayerState standard_state(GCPhysicalInputProfile *p) {
             [layout[@"vendor"] length] && [layout[@"category"] length] && !candidate.manuallyAssigned &&
             [self restoreLayout:i source:candidate]) candidate.automaticallyRestored = YES;
     }
+}
+// Session-only copies of layouts reserve both configured targets and every newly
+// allocated slot. Disconnects release input, never these reservations. The persisted
+// array is untouched; an unknown model's unique reconnect uses the same restorer.
+- (void)assignNewSessionSources {
+    NSMutableArray *layouts = [_savedLayouts mutableCopy];
+    uint32_t reserved = valid(_keyboardPlayer) && _keyboardRole == DmPlayerOwn ? 1u << _keyboardPlayer : 0;
+    for (NSDictionary *layout in layouts) {
+        NSInteger p = [layout[@"player"] integerValue], right = [layout[@"rightPlayer"] integerValue];
+        if (valid(p)) reserved |= 1u << p;
+        if ([layout[@"split"] boolValue] && valid(right)) reserved |= 1u << right;
+    }
+    for (DmPlayerSource *s in _entries) {
+        if (valid(s.player)) reserved |= 1u << s.player;
+        if (s.split && valid(s.rightPlayer)) reserved |= 1u << s.rightPlayer;
+    }
+    for (DmPlayerSource *s in _entries) {
+        if (!controller_supported(s.controller) || s.savedLayoutIndex >= 0) continue;
+        BOOL matches = NO;
+        // Only persisted profiles can forbid fallback. A session-only model with
+        // ambiguous or incomplete identity may play on a fresh, never-used slot.
+        for (NSUInteger i = 0; i < _persistedLayoutCount; i++)
+            if ([self source:s matchesLayout:_savedLayouts[i]]) { matches = YES; break; }
+        if (matches) {
+            [self logRoutes:@"saved model unresolved (ambiguous, incomplete or conflicting); not used" source:s];
+            continue;
+        }
+        int p = 0; while (p < DM_PLAYERS && (reserved & (1u << p))) p++;
+        if (p == DM_PLAYERS) { [self logRoutes:@"no unused session player; not used" source:s]; continue; }
+        s.player = p; s.role = DmPlayerOwn; s.savedLayoutIndex = layouts.count; s.automaticallyRestored = YES;
+        [layouts addObject:[self layoutForSource:s]];
+        reserved |= 1u << p;
+        [self logRoutes:@"new session player" source:s];
+    }
+    _savedLayouts = [layouts copy];
 }
 - (BOOL)armSavedLayout:(NSUInteger)i {
     if (!_configuring || ![[self pendingLayoutIndexes] containsObject:@(i)]) return NO;
@@ -338,6 +403,7 @@ static DmPlayerState standard_state(GCPhysicalInputProfile *p) {
         }
     }
     [self restoreUniqueLayouts];
+    if (_savedRouting) [self assignNewSessionSources];
     if (_routesChanged) _routesChanged();
     [self read];
     if (_configuring) [self rebuild];
@@ -691,7 +757,7 @@ static DmPlayerState standard_state(GCPhysicalInputProfile *p) {
     _assignmentError = nil; [self changed:s]; return YES;
 }
 - (BOOL)beginConfiguration {
-    if (_configuring) return NO;
+    if (_configuring || _savedRouting) return NO;
     _configuring = YES; _choosing = NO; _keyboard = (DmPlayerState){0};
     _connectionObservers = [NSMutableArray new];
     __weak DmMacPlayers *weakSelf = self;
@@ -718,7 +784,7 @@ static DmPlayerState standard_state(GCPhysicalInputProfile *p) {
     [self read];
 }
 - (void)commitPreferences {
-    if (!_remember || !_preferences) return;
+    if (_savedRouting || !_remember || !_preferences) return;
     if (_remember.state == NSControlStateValueOn) [self savePreferences:_preferences];
     else for (NSString *key in @[@"players.controllers.v1", @"players.keyboard.v1", @"players.keyboard.mode.v1"])
         [_preferences removeObjectForKey:key];

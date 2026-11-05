@@ -27,7 +27,9 @@
 #include "home_quit.h"
 #include "home_quit_mac.h"
 #import "players_mac.h"
-static DmMacPlayers *g_players; // prepared in the launch window; retained for gameplay only with DM_PLAYER_SETUP=1
+static DmMacPlayers *g_players; // confirmed window or saved session routes, enabled by DM_PLAYER_SETUP=1
+// The packer inspects this defined export without loading or executing the host.
+__attribute__((used, visibility("default"))) const char dm_mac_saved_player_prefs_v1[] = "players.controllers.v1";
 #include <signal.h>
 #include <math.h>
 #include <sys/stat.h>
@@ -446,6 +448,12 @@ void dm_mac_players_finish(int play) {
 
 static void pads_start(void) {
     hq_start();
+    const char *setup = getenv("DM_PLAYER_SETUP"), *saved = getenv("DM_SAVED_CHOICES");
+    if (!g_players && setup && !strcmp(setup, "1") && (!saved || strcmp(saved, "0"))) {
+        DmMacPlayers *r = [DmMacPlayers new];
+        r.routeLog = ^(NSString *line) { LOG("players: %s", line.UTF8String); };
+        if ([r startSavedRouting:NSUserDefaults.standardUserDefaults]) g_players = r;
+    }
     if (g_players) {
         g_players.output = ^(int p, DmPlayerState s) {
             if (g_input_on) hq_poll();
@@ -477,7 +485,7 @@ static void pads_start(void) {
                 if ((s.player >= 0 && s.player < DM_PLAYERS) || (s.split && s.rightPlayer >= 0 && s.rightPlayer < DM_PLAYERS)) pad_keep_system_buttons(s.controller);
             pro_players_changed(nil);
         };
-        LOG("front end: using confirmed launch-window player setup");
+        LOG("front end: using player setup (confirmed window or saved session routes)");
         pads_changed(nil);
         hq_log_setting();
         // Configuration reads populated the model's caches before the output callbacks existed.

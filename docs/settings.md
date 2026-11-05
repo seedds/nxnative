@@ -93,7 +93,7 @@ A light tap from the phone when you press an on-screen button.
 
 ### Player setup
 
-Mac only, off by default. With a paired `dmhost.dylib`, turn on **Assign players** to show native player assignment inside the existing settings window, before **Play**. Only assigned connected sources have overview rows; **Add input device** offers unassigned sources and shows unsupported devices as unavailable. Each row has a **Controls** player menu and **Remove**, without horizontal scrolling. Targets list only active player IDs plus **New player** (lowest free slot, up to eight); removing a source never renumbers remaining assignments. Only existing players have summaries. **Play** confirms the session's routes and commits model preferences and keyboard choices when **Remember player setup** is checked; cancelling does not save them. `DM_SAVED_CHOICES=0` ignores and preserves those preferences. There is no second modal or in-game Local Players menu. Standalone hosts, apps without the library and starts bypassing this window keep automatic routing even with `DM_PLAYER_SETUP=1`. See [setup and limits](frontends.md#mac-local-player-setup-opt-in). Real UI and gameplay validation have not been run.
+Mac only, off by default. With a paired `dmhost.dylib`, turn on **Assign players** to show native player assignment inside the existing settings window, before **Play**. Only assigned connected sources have overview rows; **Add input device** offers unassigned sources and shows unsupported devices as unavailable. Each row has a **Controls** player menu and **Remove**, without horizontal scrolling. Targets list only active player IDs plus **New player** (lowest free slot, up to eight); removing a source never renumbers remaining assignments. Only existing players have summaries. **Play** confirms the session's routes and commits model preferences and keyboard choices when **Remember player setup** is checked; cancelling does not save them. `DM_SAVED_CHOICES=0` ignores and preserves those preferences. There is no second modal or in-game Local Players menu. Without a confirmed window, `DM_PLAYER_SETUP=1` reads valid saved controller layouts for read-only session routing, including an empty array. Missing or malformed layouts and `DM_SAVED_CHOICES=0` keep automatic routing. See [saved assignments](frontends.md#saved-player-assignments-on-mac) and [setup and limits](frontends.md#mac-local-player-setup-opt-in).
 
 ### Game rumble
 
@@ -263,7 +263,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Picture shape | `DM_SCREEN_ASPECT` | `1.43` the iPhone Duo's shape, `0` 16:9 |
 | Frame-rate counter | `DM_SHOW_FPS` | `1`, `0` |
 | Touch feedback | `DM_TOUCH_HAPTICS` | `1`, `0` |
-| Assign players (Mac) | `DM_PLAYER_SETUP` | `1` embeds assignment before Play when the paired host library and launch window are used; otherwise automatic assignment (`0`, default) |
+| Assign players (Mac) | `DM_PLAYER_SETUP` | `1` embeds assignment before Play with the paired host library, or reads saved session routes without the window; `0` (default) keeps automatic assignment |
 | Game rumble | `DM_RUMBLE` | `1`, `0` |
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
 | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |

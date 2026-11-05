@@ -131,6 +131,29 @@ class HostLibrary(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, 'executable mismatch'): pack_app.validate_host_library(host, library, TID)
 
 
+class SavedPlayerCapability(unittest.TestCase):
+    def test_only_a_defined_capability_export_counts(self):
+        for text, expected in (
+            ('0000000000001000 S _dm_mac_saved_player_prefs_v1', 'players.controllers.v1'),
+            ('                 U _dm_mac_saved_player_prefs_v1', None),
+            ('0000000000001000 S _players_controllers_v1', None),
+            ('', None),
+        ):
+            with self.subTest(text=text), mock.patch.object(pack_app, 'run', return_value=text):
+                self.assertEqual(pack_app.saved_player_prefs('/host'), expected)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'needs Mach-O clang and nm')
+    def test_real_export_inspection_never_executes_the_host(self):
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp); source, host = root / 'host.c', root / 'dmhost'
+            for capable in (False, True):
+                source.write_text('#include <stdlib.h>\n__attribute__((constructor)) static void never_run(void) { abort(); }\n'
+                    'const char ui_pref[] = "players.controllers.v1";\nint main(void) { return 0; }\n' +
+                    ('__attribute__((used, visibility("default"))) const char dm_mac_saved_player_prefs_v1[] = "players.controllers.v1";\n' if capable else ''))
+                subprocess.run(['xcrun', 'clang', '-arch', 'arm64', '-Wl,-dead_strip', '-o', host, source], check=True, capture_output=True)
+                self.assertEqual(pack_app.saved_player_prefs(host), 'players.controllers.v1' if capable else None)
+
+
 class Copy(unittest.TestCase):
     def test_argument_budget(self):
         # A small exec limit exercises long, multibyte paths and a large inherited environment without thousands of files.
@@ -187,6 +210,26 @@ class CloneProbe(unittest.TestCase):
 
 class PackReuse(unittest.TestCase):
     """Call the real pack entry point; only external compiler, icon and signing tools are faked. No host is run."""
+    def test_packed_player_capability_follows_the_actual_host(self):
+        self.pack()
+        info_path = Path(self.args.out) / 'Contents/Info.plist'
+        self.assertNotIn('DMPlayerPrefs', plistlib.loads(info_path.read_bytes()))
+        previous_run = pack_app.run
+        def capable_run(cmd):
+            text = previous_run(cmd)
+            if str(cmd[0]) == 'nm' and str(cmd[-1]) == self.args.host:
+                text += '\n0000000000001000 S _dm_mac_saved_player_prefs_v1\n'
+            return text
+        Path(self.args.host).write_bytes(b'capable host')
+        with mock.patch.object(pack_app, 'run', capable_run): self.pack()
+        self.assertEqual(plistlib.loads(info_path.read_bytes())['DMPlayerPrefs'], 'players.controllers.v1')
+        self.args.settings = None
+        with mock.patch.object(pack_app, 'run', capable_run): self.pack()
+        self.assertIn({'env': 'DM_PLAYER_SETUP', 'values': ['1', '0']}, plistlib.loads(info_path.read_bytes())['DMSettings'])
+        Path(self.args.host).write_bytes(b'older host again')
+        self.pack()
+        self.assertNotIn('DMPlayerPrefs', plistlib.loads(info_path.read_bytes()))
+
     def setUp(self):
         TEST_ROOT.mkdir(parents=True, exist_ok=True)
         self.tmp = Path(tempfile.mkdtemp(prefix='pack-reuse-', dir=TEST_ROOT)).resolve()
@@ -263,7 +306,7 @@ class PackReuse(unittest.TestCase):
 
     def test_optional_library_copy_sign_reuse_and_removal(self):
         self.pack()
-        self.assertFalse(any(c[0] == 'nm' for c in self.commands))
+        self.assertEqual([c for c in self.commands if c[0] == 'nm'], [['nm', '-arch', 'arm64', '-gU', self.args.host]])
         target = Path(self.args.out) / 'Contents/MacOS/dmhost.dylib'
         self.assertFalse(target.exists())
         library = self.tmp / 'custom-library.dylib'; library.write_bytes(b'host library')
@@ -540,6 +583,69 @@ class PackReuse(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == 'darwin' and shutil.which('codesign'), 'needs macOS (clang, codesign, sips, iconutil)')
 class App(unittest.TestCase):
+    def test_saved_player_preferences_reach_the_spawned_host(self):
+        """Real launcher/child and router, isolated preferences, no game entry point."""
+        root = self.tmp / 'saved-player-domain'; root.mkdir()
+        prefhome = root / 'preferences'; prefhome.mkdir()
+        domain = 'org.nxnative.tests.savedplayers.' + uuid.uuid4().hex
+        writer = root / 'writer.m'
+        writer.write_text(r'''#import <Foundation/Foundation.h>
+int main(int argc, char **argv) { @autoreleasepool {
+    CFStringRef domain = (__bridge CFStringRef)[NSString stringWithUTF8String:argv[1]];
+    if (argc == 3) {
+        NSDictionary *layout = @{ @"vendor": @"Test", @"category": @"Xbox One", @"player": @(atoi(argv[2])),
+            @"role": @0, @"split": @0, @"rightPlayer": @(-1), @"rightRole": @0 };
+        CFPreferencesSetAppValue(CFSTR("players.controllers.v1"), (__bridge CFPropertyListRef)@[layout], domain);
+        CFPreferencesSetAppValue(CFSTR("launcher.DM_PLAYER_SETUP"), CFSTR("1"), domain);
+    } else {
+        CFPreferencesSetAppValue(CFSTR("players.controllers.v1"), NULL, domain);
+        CFPreferencesSetAppValue(CFSTR("launcher.DM_PLAYER_SETUP"), NULL, domain);
+    }
+    return CFPreferencesAppSynchronize(domain) ? 0 : 2;
+} }
+''')
+        writer_bin = root / 'write-prefs'
+        subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-o', writer_bin, writer, '-framework', 'Foundation'], check=True, capture_output=True)
+        host = root / 'host.m'
+        host.write_text(r'''#import "players_mac.h"
+__attribute__((used, visibility("default"))) const char dm_mac_saved_player_prefs_v1[] = "players.controllers.v1";
+int main(void) { @autoreleasepool {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSArray *layouts = [defaults objectForKey:@"players.controllers.v1"];
+    id player = [layouts isKindOfClass:NSArray.class] ? [layouts.firstObject objectForKey:@"player"] : nil;
+    DmMacPlayers *r = [DmMacPlayers new];
+    BOOL started = [r startSavedRouting:defaults]; [r sync:@[]];
+    NSDictionary *report = @{ @"bundle": NSBundle.mainBundle.bundleIdentifier ?: @"",
+        @"numeric": @([player isKindOfClass:NSNumber.class]), @"player": player ?: @(-999),
+        @"started": @(started), @"enabled": @((getenv("DM_PLAYER_SETUP") && !strcmp(getenv("DM_PLAYER_SETUP"), "1"))) };
+    NSData *data = [NSJSONSerialization dataWithJSONObject:report options:0 error:NULL];
+    return [data writeToFile:[NSString stringWithUTF8String:getenv("ROUTE_REPORT")] atomically:YES] ? 0 : 2;
+} }
+''')
+        host_bin = root / 'dmhost'
+        subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-I', REPO / 'dm/host', '-o', host_bin, host,
+                        REPO / 'dm/host/players_mac.m', '-framework', 'Cocoa', '-framework', 'GameController'], check=True, capture_output=True)
+        settings = root / 'settings.json'
+        settings.write_text(json.dumps({'settings': [{'env': 'DM_PLAYER_SETUP', 'kind': 'toggle', 'on': '1', 'off': '0', 'default': '0'}]}))
+        a = types.SimpleNamespace(**vars(self.args))
+        a.host, a.out, a.bundle_id, a.settings, a.icon = str(host_bin), str(root / 'Prefs.app'), domain, str(settings), None
+        with contextlib.redirect_stdout(io.StringIO()): pack_app.pack(a)
+        self.assertEqual(plistlib.loads((Path(a.out) / 'Contents/Info.plist').read_bytes())['DMPlayerPrefs'], 'players.controllers.v1')
+        report = root / 'report.json'
+        env = dict(os.environ, CFFIXED_USER_HOME=str(prefhome))
+        try:
+            for target in (0, 1):
+                a.settings = str(settings) if target == 0 else None
+                with contextlib.redirect_stdout(io.StringIO()): pack_app.pack(a)
+                subprocess.run([writer_bin, domain, str(target)], env=env, check=True, capture_output=True)
+                proc = self.launch(app=Path(a.out), ROUTE_REPORT=str(report), CFFIXED_USER_HOME=str(prefhome))
+                output, _ = proc.communicate(timeout=30)
+                self.assertEqual(proc.returncode, 0, output.decode())
+                self.assertEqual(json.loads(report.read_text()), {'bundle': domain, 'numeric': True,
+                    'player': target, 'started': True, 'enabled': True})
+        finally:
+            subprocess.run([writer_bin, domain], env=env, check=True, capture_output=True)
+
     @classmethod
     def setUpClass(cls):
         cls.tmp = Path(tempfile.mkdtemp(dir=TEST_ROOT)).resolve()

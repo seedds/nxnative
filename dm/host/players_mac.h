@@ -68,4 +68,7 @@ typedef NS_ENUM(NSInteger, DmPlayerAssignment) {
 - (BOOL)forgetSavedLayout:(NSUInteger)index; // preview only; persisted only on Play
 - (void)loadPreferences:(NSUserDefaults *)defaults;
 - (void)savePreferences:(NSUserDefaults *)defaults;
+// Call before syncing any controllers. A valid array (including empty) enables
+// read-only session routing; missing/malformed layouts return NO for legacy routing.
+- (BOOL)startSavedRouting:(NSUserDefaults *)defaults;
 @end

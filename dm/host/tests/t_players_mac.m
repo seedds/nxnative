@@ -1075,7 +1075,182 @@ static void pro_controller_keeps_macos_button_names(void) {
         buttons[i].isPressed = NO; [r read]; zero(o, 0);
     }
 }
+static NSDictionary *sessionLayout(NSString *vendor, NSString *category, NSInteger player) {
+    return @{@"vendor": vendor, @"category": category, @"player": @(player), @"role": @0,
+        @"split": @0, @"rightPlayer": @(-1), @"rightRole": @0};
+}
+static VolatileDefaults *sessionDefaults(id layouts) {
+    NSString *suite = [@"nxnative.tests.saved-routing." stringByAppendingString:NSUUID.UUID.UUIDString];
+    VolatileDefaults *d = [[VolatileDefaults alloc] initWithSuiteName:suite]; d.domain = suite;
+    NSMutableDictionary *values = [@{@"unrelated": @"preserve", @"players.keyboard.v1": @0,
+        @"players.keyboard.mode.v1": @(DmPlayerShare)} mutableCopy];
+    if (layouts) values[@"players.controllers.v1"] = layouts;
+    [d setVolatileDomain:values forName:suite];
+    return d;
+}
+static TestController *namedController(NSString *vendor) {
+    TestController *c = controller(@"Xbox One"); c.vendorName = vendor; return c;
+}
+static void savedSessionRouting(void) {
+    VolatileDefaults *d = sessionDefaults(@[sessionLayout(@"A", @"Xbox One", 1), sessionLayout(@"B", @"Xbox One", 0)]);
+    NSDictionary *before = [[d volatileDomainForName:d.domain] copy];
+    Output *o = [Output new]; DmMacPlayers *r = router(o);
+    assert([r startSavedRouting:d] && ![r beginConfiguration]);
+    TestController *a = namedController(@"A"), *b = namedController(@"B"), *other = namedController(@"Other");
+    [r sync:@[gc(a)]]; assert(r.sources[0].player == 1 && o->mask == 3); // J1 is keyboard, not reassigned.
+    a.extendedGamepad.buttonA.isPressed = YES; [r read]; assert(o->state[1].buttons == DM_BTN_B);
+    [r sync:@[gc(a), gc(other)]]; assert(r.sources[1].player == 2); // B's absent J1 stays reserved.
+    [r sync:@[gc(a), gc(other), gc(b)]]; assert(r.sources[2].player == 0);
+    [r sync:@[gc(b), gc(other)]]; zero(o, 1); assert(o->mask == 5);
+    TestController *freshA = namedController(@"A");
+    [r sync:@[gc(b), gc(other), gc(freshA)]]; assert(r.sources[2].player == 1);
+    [r sync:@[gc(b), gc(freshA)]];
+    TestController *freshOther = namedController(@"Other");
+    [r sync:@[gc(freshOther), gc(freshA), gc(b)]];
+    assert(r.sources[2].player == 2); // The unknown model's session reservation survives disconnect too.
+    assert(r.keyboardPlayer == 0 && r.keyboardRole == DmPlayerShare);
+    [r savePreferences:d]; [r commitPreferences];
+    assert([[d volatileDomainForName:d.domain] isEqual:before]);
+    [d removeVolatileDomainForName:d.domain];
+}
+static void savedSessionEmptyAndExhausted(void) {
+    VolatileDefaults *d = sessionDefaults(@[]); NSDictionary *before = [[d volatileDomainForName:d.domain] copy];
+    Output *o = [Output new]; DmMacPlayers *r = router(o); assert([r startSavedRouting:d]);
+    TestController *first = namedController(@"first");
+    [r sync:@[gc(first)]]; assert(r.sources[0].player == 0);
+    [r sync:@[]];
+    [r sync:@[gc(namedController(@"first"))]]; assert(r.sources[0].player == 0);
+    [r sync:@[]];
+    for (int i = 1; i < DM_PLAYERS; i++) {
+        TestController *c = namedController([NSString stringWithFormat:@"model-%d", i]);
+        [r sync:@[gc(c)]]; assert(r.sources[0].player == i); // No replacement of the absent J1.
+        [r sync:@[]];
+    }
+    [r sync:@[gc(namedController(@"ninth"))]]; assert(r.sources[0].player == -1);
+    [r sync:@[gc(namedController(@"first"))]]; assert(r.sources[0].player == 0);
+    assert([[d volatileDomainForName:d.domain] isEqual:before]);
+    [d removeVolatileDomainForName:d.domain];
+}
+static void savedSessionDisabledAndAmbiguous(void) {
+    for (NSInteger player = -1; player <= 0; player++) {
+        VolatileDefaults *d = sessionDefaults(@[sessionLayout(@"Twin", @"Xbox One", player)]);
+        Output *o = [Output new]; DmMacPlayers *r = router(o); assert([r startSavedRouting:d]);
+        TestController *a = namedController(@"Twin"), *b = namedController(@"Twin");
+        [r sync:@[gc(a), gc(b)]]; assert(r.sources[0].player == -1 && r.sources[1].player == -1);
+        [r sync:@[gc(a)]]; assert(r.sources[0].player == -1); // Ambiguity is not erased by disconnecting a twin.
+        [r sync:@[gc(a), gc(namedController(@"Unknown"))]];
+        assert(r.sources[0].player == -1 && r.sources[1].player == (player < 0 ? 0 : 1));
+        [d removeVolatileDomainForName:d.domain];
+    }
+    VolatileDefaults *d = sessionDefaults(@[sessionLayout(@"Twin", @"Xbox One", 0)]);
+    DmMacPlayers *r = router([Output new]); assert([r startSavedRouting:d]);
+    TestController *a = namedController(@"Twin"), *b = namedController(@"Twin");
+    [r sync:@[gc(a)]]; assert(r.sources[0].player == 0);
+    [r sync:@[gc(a), gc(b)]]; assert(r.sources[0].player == 0 && r.sources[1].player == -1);
+    [r sync:@[gc(b)]]; assert(r.sources[0].player == -1); // Never promote the remaining twin.
+    [r sync:@[gc(b), gc(namedController(@"Twin"))]];
+    assert(r.sources[0].player == -1 && r.sources[1].player == -1);
+    [d removeVolatileDomainForName:d.domain];
+    d = sessionDefaults(@[sessionLayout(@"Off", @"Xbox One", -1)]);
+    r = router([Output new]); assert([r startSavedRouting:d]);
+    [r sync:@[gc(namedController(@"Off")), gc(namedController(@"New"))]];
+    assert(r.sources[0].player == -1 && r.sources[1].player == 0);
+    [d removeVolatileDomainForName:d.domain];
+}
+static void savedSessionUnknownIdentity(void) {
+    for (int together = 0; together < 2; together++) {
+        VolatileDefaults *d = sessionDefaults(@[]);
+        Output *o = [Output new]; DmMacPlayers *r = router(o); assert([r startSavedRouting:d]);
+        TestController *a = namedController(@"Unknown twin"), *b = namedController(@"Unknown twin");
+        if (!together) [r sync:@[gc(a)]];
+        [r sync:@[gc(a), gc(b)]];
+        assert(r.sources[0].player == 0 && r.sources[1].player == 1);
+        a.extendedGamepad.buttonA.isPressed = YES; [r read]; assert(o->state[0].buttons == DM_BTN_B);
+        [r sync:@[gc(b)]]; zero(o, 0); assert(r.sources[0].player == 1);
+        [r sync:@[gc(b), gc(namedController(@"Unknown twin"))]];
+        assert(r.sources[0].player == 1 && r.sources[1].player == 2); // No identity guess, no reservation stolen.
+        [r savePreferences:d]; assert([[d objectForKey:@"players.controllers.v1"] count] == 0);
+        [d removeVolatileDomainForName:d.domain];
+    }
+    for (NSString *missing in @[@"vendor", @"category"]) {
+        VolatileDefaults *d = sessionDefaults(@[]); DmMacPlayers *r = router([Output new]);
+        assert([r startSavedRouting:d]);
+        for (int i = 0; i <= DM_PLAYERS; i++) {
+            TestController *c = namedController(@"Unnamed");
+            if ([missing isEqualToString:@"vendor"]) c.vendorName = nil; else c.productCategory = nil;
+            [r sync:@[gc(c)]]; assert(r.sources[0].player == (i < DM_PLAYERS ? i : -1));
+            [r sync:@[]];
+        }
+        [d removeVolatileDomainForName:d.domain];
+        // An incomplete persisted profile still forbids fallback.
+        NSMutableDictionary *layout = [sessionLayout(@"Unnamed", @"Xbox One", 0) mutableCopy]; layout[missing] = @"";
+        d = sessionDefaults(@[layout]); r = router([Output new]); assert([r startSavedRouting:d]);
+        TestController *c = namedController(@"Unnamed");
+        if ([missing isEqualToString:@"vendor"]) c.vendorName = nil; else c.productCategory = nil;
+        [r sync:@[gc(c)]]; assert(r.sources[0].player == -1);
+        [d removeVolatileDomainForName:d.domain];
+    }
+}
+static void savedSessionConflictingReservations(void) {
+    for (int split = 0; split < 2; split++) {
+        NSMutableDictionary *a = [sessionLayout(@"A", split ? @"Nintendo Switch Joy-Con (L/R)" : @"Xbox One", 0) mutableCopy];
+        if (split) { a[@"split"] = @1; a[@"rightPlayer"] = @1; }
+        VolatileDefaults *d = sessionDefaults(@[a, sessionLayout(@"B", @"Xbox One", split ? 1 : 0)]);
+        DmMacPlayers *r = router([Output new]); assert([r startSavedRouting:d]);
+        TestController *first = controller(a[@"category"]); first.vendorName = @"A";
+        TestController *second = namedController(@"B");
+        [r sync:@[gc(first)]]; assert(r.sources[0].player == -1 && !r.sources[0].split);
+        [r sync:@[gc(first), gc(second)]]; assert(r.sources[1].player == -1);
+        [r sync:@[gc(second)]]; assert(r.sources[0].player == -1);
+        [r sync:@[gc(second), gc(first), gc(namedController(@"Other"))]];
+        assert(r.sources[0].player == -1 && r.sources[1].player == -1 && r.sources[2].player == (split ? 2 : 1));
+        [d removeVolatileDomainForName:d.domain];
+    }
+}
+static void savedSessionValidationAndConflict(void) {
+    for (id invalid in @[[NSNull null], @"array", @[@{}], @[@1],
+        @[sessionLayout(@"x", @"Xbox One", DM_PLAYERS)]]) {
+        VolatileDefaults *d = sessionDefaults(invalid == NSNull.null ? nil : invalid);
+        DmMacPlayers *r = router([Output new]); assert(![r startSavedRouting:d]);
+        [r sync:@[gc(namedController(@"x"))]]; assert(r.sources[0].player == -1);
+        [d removeVolatileDomainForName:d.domain];
+    }
+    NSMutableDictionary *bad = [sessionLayout(@"x", @"Xbox One", 0) mutableCopy]; bad[@"player"] = @"0";
+    VolatileDefaults *d = sessionDefaults(@[bad]);
+    assert(![router([Output new]) startSavedRouting:d]);
+    [d removeVolatileDomainForName:d.domain];
+    d = sessionDefaults(@[sessionLayout(@"Blocked", @"Xbox One", 0)]);
+    [d setObject:@(DmPlayerOwn) forKey:@"players.keyboard.mode.v1"];
+    DmMacPlayers *r = router([Output new]); assert([r startSavedRouting:d]);
+    [r sync:@[gc(namedController(@"Blocked")), gc(namedController(@"New"))]];
+    assert(r.sources[0].player == -1 && r.sources[1].player == 1 && r.keyboardRole == DmPlayerOwn);
+    [d removeVolatileDomainForName:d.domain];
+    d = sessionDefaults(@[sessionLayout(@"Same", @"Xbox One", 0), sessionLayout(@"Same", @"Xbox One", 1)]);
+    r = router([Output new]); assert([r startSavedRouting:d]);
+    [r sync:@[gc(namedController(@"Same"))]]; assert(r.sources[0].player == -1);
+    [d removeVolatileDomainForName:d.domain];
+}
+static void savedSessionSplitAndShared(void) {
+    NSMutableDictionary *pair = [sessionLayout(@"Pair", @"Nintendo Switch Joy-Con (L/R)", 1) mutableCopy];
+    pair[@"split"] = @1; pair[@"rightPlayer"] = @2;
+    VolatileDefaults *d = sessionDefaults(@[pair]);
+    Output *o = [Output new]; DmMacPlayers *r = router(o); assert([r startSavedRouting:d]);
+    TestController *c = controller(@"Nintendo Switch Joy-Con (L/R)"); c.vendorName = @"Pair";
+    [r sync:@[gc(c)]]; assert(r.sources[0].split && r.sources[0].player == 1 && r.sources[0].rightPlayer == 2);
+    [r sync:@[]]; assert(o->mask == 1);
+    [r sync:@[gc(c)]]; assert(r.sources[0].split && o->mask == 7);
+    [d removeVolatileDomainForName:d.domain];
+    NSMutableDictionary *share = [sessionLayout(@"Share", @"Xbox One", 0) mutableCopy]; share[@"role"] = @(DmPlayerShare);
+    d = sessionDefaults(@[sessionLayout(@"Own", @"Xbox One", 0), share]);
+    r = router([Output new]); assert([r startSavedRouting:d]);
+    [r sync:@[gc(namedController(@"Share")), gc(namedController(@"Own"))]];
+    assert(r.sources[0].player == 0 && r.sources[1].player == 0);
+    [d removeVolatileDomainForName:d.domain];
+}
 int main(void) { @autoreleasepool {
+    savedSessionRouting(); savedSessionEmptyAndExhausted(); savedSessionDisabledAndAmbiguous();
+    savedSessionUnknownIdentity(); savedSessionConflictingReservations();
+    savedSessionValidationAndConflict(); savedSessionSplitAndShared();
     pro_controller_keeps_macos_button_names();
     keyboard(); handoff(); full(); split(); hotplug(); assignmentActions(); identification(); unavailable(); configuration(); callbacks(); lifetimes(); preferences(); controllerPreferences(); standardNativeEvents(); standardProfiles();
     explicitAssignments(); ownedKeyboardHotplug(); playerSelection(); splitSelection(); routeChooser(); playerChoices(); newPlayerChoices();

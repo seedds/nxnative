@@ -92,7 +92,7 @@ enum {
     GL_INCR_WRAP = 0x8507, GL_DECR_WRAP, GL_TEXTURE_CUBE_MAP = 0x8513, GL_TEXTURE_CUBE_MAP_POSITIVE_X = 0x8515, GL_TEXTURE_CUBE_MAP_NEGATIVE_Z = 0x851a,
     GL_MAX_VERTEX_ATTRIBS = 0x8869, GL_MAX_TEXTURE_IMAGE_UNITS = 0x8872, GL_RGBA32F = 0x8814, GL_RGB32F, GL_RGBA16F = 0x881a, GL_RGB16F,
     GL_TEXTURE_COMPARE_MODE = 0x884c, GL_TEXTURE_COMPARE_FUNC,
-    GL_ARRAY_BUFFER = 0x8892, GL_ELEMENT_ARRAY_BUFFER, GL_DEPTH24_STENCIL8 = 0x88f0,
+    GL_ARRAY_BUFFER = 0x8892, GL_ELEMENT_ARRAY_BUFFER, GL_DEPTH24_STENCIL8 = 0x88f0, GL_UNIFORM_BUFFER = 0x8a11,
     GL_FRAGMENT_SHADER = 0x8b30, GL_VERTEX_SHADER, GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS = 0x8b4d, GL_SHADER_TYPE = 0x8b4f, GL_DELETE_STATUS = 0x8b80, GL_COMPILE_STATUS,
     GL_LINK_STATUS, GL_VALIDATE_STATUS, GL_INFO_LOG_LENGTH, GL_ATTACHED_SHADERS, GL_ACTIVE_UNIFORMS, GL_ACTIVE_UNIFORM_MAX_LENGTH, GL_SHADER_SOURCE_LENGTH,
     GL_ACTIVE_ATTRIBUTES, GL_ACTIVE_ATTRIBUTE_MAX_LENGTH, GL_SHADING_LANGUAGE_VERSION = 0x8b8c, GL_CURRENT_PROGRAM,
@@ -313,12 +313,19 @@ typedef struct { att_t col, depth, stencil; uint64_t gen; } fb_t;
 NAMES(fb_t, g_fbs, g_nfbs, g_capfbs)
 static fb_t *fb_of(GLuint n) { return n && n < g_nfbs ? g_fbs[n] : NULL; }
 
-typedef struct { uint8_t on, size, norm, div; GLenum type; GLsizei stride; uint64_t off; GLuint buf; } vattr_t;   // div: glVertexAttribDivisor (0 = per vertex)
-typedef struct { vattr_t a[16]; GLuint ebo; } vao_t;
+// vattr_t: an attribute as a draw reads it (on, format, and the buffer, offset, stride and divisor of its binding); div: 0 = per vertex; stride: bytes between elements,
+// 0 = every vertex reads the first element (GL's literal 0 of glBindVertexBuffer; glVertexAttribPointer turns its 0 into the packed size).
+// GL 4.3's separate format and binding (glVertexAttribFormat / glVertexAttribBinding / glBindVertexBuffer, which Fire Emblem: Shadow Dragon uses) keep the format's
+// relative offset (rel) and the binding index (bind: index + 1, 0 = the attribute's own, GL's default) apart; vb_apply folds them back into buf / off / stride / div.
+// glVertexAttribPointer is GL's shorthand for a format, the attribute's own binding and that binding's buffer, offset and stride; glVertexAttribDivisor puts the attribute
+// back on its own binding and sets that binding's divisor.
+typedef struct { uint8_t on, size, norm, div, bind; GLenum type; GLsizei stride; uint32_t rel; uint64_t off; GLuint buf; } vattr_t;
+typedef struct { GLuint buf; uint64_t off; GLsizei stride; uint8_t div; } vbind_t;
+typedef struct { vattr_t a[16]; vbind_t vb[16]; GLuint ebo; } vao_t;
 NAMES(vao_t, g_vaos, g_nvaos, g_capvaos)
 static vao_t g_vao0;   // the default vertex array (GL core has none, the compatibility profile does)
 
-typedef struct { GLenum type; char *src; size_t len; char key[17]; const shinfo *si; __strong id<MTLFunction> fn; int compiled; } shader_t;
+typedef struct { GLenum type; char *src; size_t len; char key[17]; const shinfo *si; __strong id<MTLFunction> fn; int compiled, del; } shader_t;   // del: glDeleteShader while attached to a program
 typedef struct { char name[48]; uint8_t type; uint16_t count; int32_t off[2]; uint16_t stride[2]; int slot[2]; int unit; } puni_t;   // [0] vertex, [1] fragment
 typedef struct { uint32_t vf[16]; uint16_t stride[16]; uint8_t div[16]; uint32_t cpf, dpf, spf; uint8_t blend, mask, bsrc, bdst, bsa, bda, eqc, eqa; } pkey_t;
 typedef struct { pkey_t k; void *pso; } pent_t;   // pso: a retained id<MTLRenderPipelineState>, NULL = failed
@@ -342,7 +349,7 @@ static prog_t *prog_of(GLuint n) { return n && n < g_nsps && g_sps[n] && g_sps[n
 // va: each attribute's current value (glVertexAttrib4f), what a vertex input reads when its array is disabled: LÖVE's VertexColor and ConstantColor
 #define NUNITS 96
 static struct {
-    GLuint array_buf, rb, fb, read_fb, prog, vao; int unit;
+    GLuint array_buf, uniform_buf, rb, fb, read_fb, prog, vao; int unit;
     struct { GLuint t2d, tcube, t3d, t2da; } units[NUNITS];
     float clear_c[4]; double clear_d; int clear_s;
     uint8_t cmask, dmask, depth, blend, cull, scissor, stencil, poffset, srgb;
@@ -755,6 +762,9 @@ static MTLVertexFormat vfmt_of(const vattr_t *a) {
     return MTLVertexFormatInvalid;
 }
 static int vtype_bytes(GLenum t) { return t == GL_FLOAT || t == GL_INT || t == GL_UNSIGNED_INT ? 4 : t == GL_HALF_FLOAT || t == GL_SHORT || t == GL_UNSIGNED_SHORT ? 2 : 1; }
+// What a draw's pipeline needs of an attribute: its format and its binding's stride and divisor. Stride 0 is a constant fetch (the first element for every vertex and
+// instance, as GL reads a binding of stride 0), which has no divisor
+static void vkey_set(pkey_t *k, int s, const vattr_t *a) { k->vf[s] = (uint32_t)vfmt_of(a); k->stride[s] = (uint16_t)a->stride; k->div[s] = a->stride ? a->div : 0; }
 static MTLBlendFactor bf_of(GLenum f) {
     switch (f) {
         case 0: return MTLBlendFactorZero; case 1: return MTLBlendFactorOne;
@@ -786,9 +796,12 @@ static id<MTLRenderPipelineState> pso_get(prog_t *p, const pkey_t *k) {
             int s = vs->a[i].slot;
             if (k->vf[s]) {
                 vd.attributes[s].format = (MTLVertexFormat)k->vf[s]; vd.attributes[s].offset = 0; vd.attributes[s].bufferIndex = 30 - s;
-                vd.layouts[30 - s].stride = k->stride[s];
-                if (k->div[s]) { vd.layouts[30 - s].stepFunction = MTLVertexStepFunctionPerInstance; vd.layouts[30 - s].stepRate = k->div[s]; }
-                else vd.layouts[30 - s].stepFunction = MTLVertexStepFunctionPerVertex;
+                if (!k->stride[s]) { vd.layouts[30 - s].stride = 16; vd.layouts[30 - s].stepFunction = MTLVertexStepFunctionConstant; vd.layouts[30 - s].stepRate = 0; }   // as a disabled array's: the layout's stride only has to hold an element
+                else {
+                    vd.layouts[30 - s].stride = k->stride[s];
+                    if (k->div[s]) { vd.layouts[30 - s].stepFunction = MTLVertexStepFunctionPerInstance; vd.layouts[30 - s].stepRate = k->div[s]; }
+                    else vd.layouts[30 - s].stepFunction = MTLVertexStepFunctionPerVertex;
+                }
             } else {   // a disabled array: the attribute's current value (glVertexAttrib4f; (0, 0, 0, 1) by default)
                 vd.attributes[s].format = MTLVertexFormatFloat4; vd.attributes[s].offset = 0; vd.attributes[s].bufferIndex = 30 - s;
                 vd.layouts[30 - s].stride = 16; vd.layouts[30 - s].stepFunction = MTLVertexStepFunctionConstant; vd.layouts[30 - s].stepRate = 0;
@@ -931,8 +944,7 @@ static int draw_setup(void) {
     for (int i = 0; i < vs->na; i++) {
         int s = vs->a[i].slot; vattr_t *a = &v->a[p->amap[s]];
         if (!a->on) continue;
-        k.vf[s] = (uint32_t)vfmt_of(a);
-        k.stride[s] = a->stride ? a->stride : a->size * vtype_bytes(a->type); k.div[s] = a->div;
+        vkey_set(&k, s, a);
         if (!k.vf[s] || (k.stride[s] & 3)) { RED1("vertex attribute %d: type %#x size %d stride %d not mapped", p->amap[s], a->type, a->size, a->stride); return 0; }
         buf_t *b = buf_of(a->buf);
         if (b && b->mb) continue;   // a vertex buffer: bound as it is
@@ -992,7 +1004,7 @@ static int draw_setup(void) {
               buf_t *b = buf_of(a->buf);
               const uint8_t *base = b && b->mb ? (const uint8_t *)b->mb.contents + a->off : a->buf ? NULL : (const uint8_t *)(uintptr_t)a->off;
               if (!base) { GLOG("   attribute %d: no data", gi); continue; }
-              size_t st = a->stride ? a->stride : a->size * vtype_bytes(a->type);
+              size_t st = (size_t)a->stride;
               char v[3][64]; for (int k = 0; k < 3; k++) { const float *f = (const float *)(base + k * st); char *o = v[k]; o += snprintf(o, 64, "(");
                 for (int c = 0; c < a->size && c < 4; c++) o += snprintf(o, 64 - (size_t)(o - v[k]), "%s%.4f", c ? " " : "", f[c]);
                 snprintf(o, 64 - (size_t)(o - v[k]), ")"); }
@@ -1287,14 +1299,30 @@ GL(glGetFloatv, void, GLenum p, GLfloat *v) {
 // ---------- Buffers and vertex arrays ----------
 GL(glGenBuffers, void, GLsizei n, GLuint *out) { for (GLsizei i = 0; i < n; i++) out[i] = name_new((void ***)&g_bufs, &g_nbufs, &g_capbufs, sizeof(buf_t)); }
 GL(glDeleteBuffers, void, GLsizei n, const GLuint *b) {
-    for (GLsizei i = 0; i < n; i++) { buf_t *x = buf_of(b[i]); if (!x) continue; x->mb = nil; free(x); g_bufs[b[i]] = NULL; if (S.array_buf == b[i]) S.array_buf = 0; if (cur_vao()->ebo == b[i]) cur_vao()->ebo = 0; }
+    for (GLsizei i = 0; i < n; i++) {
+        buf_t *x = buf_of(b[i]); if (!x) continue; x->mb = nil; free(x); g_bufs[b[i]] = NULL;
+        if (S.array_buf == b[i]) S.array_buf = 0; if (S.uniform_buf == b[i]) S.uniform_buf = 0; if (cur_vao()->ebo == b[i]) cur_vao()->ebo = 0;
+    }
 }
 GL(glBindBuffer, void, GLenum target, GLuint b) {
     if (target == GL_ARRAY_BUFFER) S.array_buf = b;
     else if (target == GL_ELEMENT_ARRAY_BUFFER) cur_vao()->ebo = b;
+    else if (target == GL_UNIFORM_BUFFER) S.uniform_buf = b;
     else RED1("glBindBuffer target %#x not implemented", target);
 }
-static buf_t *bound_buf(GLenum target) { return buf_of(target == GL_ARRAY_BUFFER ? S.array_buf : target == GL_ELEMENT_ARRAY_BUFFER ? cur_vao()->ebo : 0); }
+// The indexed uniform-buffer bindings are not kept: gl_shaders.py translates a shader only when its uniforms are the default block (a named block makes it refuse
+// the shader), so no translated shader reads one. Both calls also bind the generic target, which is what the game's later buffer calls on UNIFORM_BUFFER use.
+GL(glBindBufferRange, void, GLenum target, GLuint index, GLuint b, GLintptr off, GLsizeiptr size) {
+    (void)index; (void)off; (void)size;
+    if (target == GL_UNIFORM_BUFFER) S.uniform_buf = b; else RED1("glBindBufferRange target %#x not implemented", target);
+}
+GL(glBindBufferBase, void, GLenum target, GLuint index, GLuint b) {
+    (void)index;
+    if (target == GL_UNIFORM_BUFFER) S.uniform_buf = b; else RED1("glBindBufferBase target %#x not implemented", target);
+}
+static buf_t *bound_buf(GLenum target) {
+    return buf_of(target == GL_ARRAY_BUFFER ? S.array_buf : target == GL_ELEMENT_ARRAY_BUFFER ? cur_vao()->ebo : target == GL_UNIFORM_BUFFER ? S.uniform_buf : 0);
+}
 // Orphaning: data for a buffer a pending command buffer may still read goes into a new MTLBuffer, so draws already encoded keep the old contents
 GLB(glBufferData, void, GLenum target, GLsizeiptr size, const void *data, GLenum usage) {
     (void)usage;
@@ -1347,6 +1375,10 @@ typedef struct { uint64_t serial; } sync_t;
 GL(glFenceSync, void *, GLenum cond, GLbitfield flags) { (void)cond; (void)flags; sync_t *s = zalloc(sizeof *s); s->serial = g_serial; return s; }
 GL(glDeleteSync, void, void *s) { free(s); }
 GL(glWaitSync, void, void *s, GLbitfield flags, uint64_t timeout) { (void)s; (void)flags; (void)timeout; }   // a GPU-side wait: the command buffers run in order
+// glMemoryBarrier orders shader writes (images, storage buffers) and persistently mapped buffers against later commands. This layer has no shader writes, its buffers are
+// shared memory the GPU reads as the CPU left them, and its command buffers run in order: there is nothing to wait for (Fire Emblem: Shadow Dragon asks for
+// CLIENT_MAPPED_BUFFER_BARRIER_BIT every frame)
+GL(glMemoryBarrier, void, GLbitfield barriers) { (void)barriers; }
 GLB(glClientWaitSync, GLenum, void *sy, GLbitfield flags, uint64_t timeout_ns) {
     sync_t *s = sy;
     if (!s) return 0x911d;   // WAIT_FAILED
@@ -1365,11 +1397,41 @@ GL(glBindVertexArray, void, GLuint v) { S.vao = v; }
 GL(glEnableVertexAttribArray, void, GLuint i) { if (i < 16) cur_vao()->a[i].on = 1; }
 GL(glDisableVertexAttribArray, void, GLuint i) { if (i < 16) cur_vao()->a[i].on = 0; }
 GL(glEnableVertexArrayAttrib, void, GLuint vao, GLuint i) { vao_t *v = vao && vao < g_nvaos && g_vaos[vao] ? g_vaos[vao] : &g_vao0; if (i < 16) v->a[i].on = 1; }
+// An attribute takes its buffer, offset, stride and divisor from its binding, at its format's relative offset; every attribute on a binding follows a change to it
+static void vb_apply(vao_t *v, GLuint i) {
+    vattr_t *a = &v->a[i]; const vbind_t *b = &v->vb[a->bind ? a->bind - 1 : i];
+    a->buf = b->buf; a->off = b->off + a->rel; a->stride = b->stride; a->div = b->div;
+}
+static void vb_changed(vao_t *v, GLuint bi) { for (GLuint i = 0; i < 16; i++) if ((v->a[i].bind ? v->a[i].bind - 1u : i) == bi) vb_apply(v, i); }
+static void va_format(vattr_t *a, GLint size, GLenum type, uint32_t norm, uint32_t rel) { a->size = size == 0x80e1 ? 4 : size; a->type = type; a->norm = (norm & 0xff) != 0; a->rel = rel; }
 GL(glVertexAttribPointer, void, GLuint i, GLint size, GLenum type, uint32_t norm, GLsizei stride, const void *ptr) {
     if (i >= 16) { RED1("vertex attribute %u over 15", i); return; }
-    vattr_t *a = &cur_vao()->a[i]; a->size = size == 0x80e1 ? 4 : size; a->type = type; a->norm = (norm & 0xff) != 0; a->stride = stride; a->off = (uintptr_t)ptr; a->buf = S.array_buf;
+    vao_t *v = cur_vao(); va_format(&v->a[i], size, type, norm, 0); v->a[i].bind = 0;
+    // stride 0 means tightly packed: GL turns it into the format's size here, on the binding, so a later format of another attribute on it does not change it
+    v->vb[i].buf = S.array_buf; v->vb[i].off = (uintptr_t)ptr; v->vb[i].stride = stride ? stride : v->a[i].size * vtype_bytes(type);
+    vb_changed(v, i);
 }
-GL(glVertexAttribDivisor, void, GLuint i, GLuint d) { if (i < 16) cur_vao()->a[i].div = d > 255 ? 255 : (uint8_t)d; }
+GL(glVertexAttribDivisor, void, GLuint i, GLuint d) {
+    if (i >= 16) return;
+    vao_t *v = cur_vao(); v->a[i].bind = 0; v->vb[i].div = d > 255 ? 255 : (uint8_t)d; vb_changed(v, i);
+}
+GL(glVertexAttribFormat, void, GLuint i, GLint size, GLenum type, uint32_t norm, GLuint rel) {
+    if (i >= 16) { RED1("vertex attribute %u over 15", i); return; }
+    vao_t *v = cur_vao(); va_format(&v->a[i], size, type, norm, rel); vb_apply(v, i);
+}
+GL(glVertexAttribBinding, void, GLuint i, GLuint bi) {
+    if (i >= 16 || bi >= 16) { RED1("glVertexAttribBinding(%u, %u) over 15", i, bi); return; }
+    vao_t *v = cur_vao(); v->a[i].bind = (uint8_t)(bi + 1); vb_apply(v, i);
+}
+GL(glBindVertexBuffer, void, GLuint bi, GLuint b, GLintptr off, GLsizei stride) {
+    if (bi >= 16) { RED1("vertex buffer binding %u over 15", bi); return; }
+    // stride 0 is literal: every vertex reads the first element (vkey_set, pso_get)
+    vao_t *v = cur_vao(); v->vb[bi].buf = b; v->vb[bi].off = (uint64_t)off; v->vb[bi].stride = stride; vb_changed(v, bi);
+}
+GL(glVertexBindingDivisor, void, GLuint bi, GLuint d) {
+    if (bi >= 16) return;
+    vao_t *v = cur_vao(); v->vb[bi].div = d > 255 ? 255 : (uint8_t)d; vb_changed(v, bi);
+}
 GL(glVertexAttrib4f, void, GLuint i, GLfloat x, GLfloat y, GLfloat z, GLfloat w) { if (i < 16) { S.va[i][0] = x; S.va[i][1] = y; S.va[i][2] = z; S.va[i][3] = w; } }
 GL(glVertexAttrib4fv, void, GLuint i, const GLfloat *v) { if (i < 16) memcpy(S.va[i], v, sizeof S.va[i]); }
 
@@ -1716,15 +1778,34 @@ GL(glGetShaderiv, void, GLuint sh, GLenum p, GLint *v) {
         case GL_INFO_LOG_LENGTH: *v = 0; return;
         case GL_SHADER_TYPE: *v = s->type; return;
         case GL_SHADER_SOURCE_LENGTH: *v = (GLint)s->len + 1; return;
-        case GL_DELETE_STATUS: *v = 0; return;
+        case GL_DELETE_STATUS: *v = s->del; return;
     }
     RED1("glGetShaderiv(%#x) not implemented", p); *v = 0;
 }
 GL(glGetShaderInfoLog, void, GLuint sh, GLsizei size, GLsizei *len, GLchar *log) { (void)sh; if (len) *len = 0; if (log && size > 0) log[0] = 0; }
-GL(glDeleteShader, void, GLuint sh) { shader_t *s = shader_of(sh); if (!s) return; free(s->src); s->fn = nil; free(g_sps[sh]); g_sps[sh] = NULL; }
+// GL keeps a deleted shader while a program it is attached to exists: the program can still be linked with it, and the shader goes with the last glDetachShader (or glDeleteProgram)
+static int sh_attached(GLuint sh) {
+    for (GLuint n = 1; n < g_nsps; n++) { prog_t *p = prog_of(n); if (p && (p->vs == sh || p->fs == sh)) return 1; }
+    return 0;
+}
+static void sh_reap(GLuint sh) {
+    shader_t *s = shader_of(sh); if (!s || !s->del || sh_attached(sh)) return;
+    free(s->src); s->fn = nil; free(g_sps[sh]); g_sps[sh] = NULL;
+}
+GL(glDeleteShader, void, GLuint sh) { shader_t *s = shader_of(sh); if (!s) return; s->del = 1; sh_reap(sh); }
+// Desktop GL lets a program hold several shaders of a stage, linked together; the layer keeps one per stage, so attaching another replaces the one there, and a replaced
+// shader that was deleted goes at once
 GL(glAttachShader, void, GLuint pr, GLuint sh) {
     prog_t *p = prog_of(pr); shader_t *s = shader_of(sh); if (!p || !s) return;
-    if (s->type == GL_VERTEX_SHADER) p->vs = sh; else p->fs = sh;
+    GLuint *slot = s->type == GL_VERTEX_SHADER ? &p->vs : &p->fs, old = *slot;
+    *slot = sh;
+    if (old != sh) sh_reap(old);
+}
+// The link keeps what it was made from (the functions, the uniform tables): detaching a shader from a linked program does not unlink it
+GL(glDetachShader, void, GLuint pr, GLuint sh) {
+    prog_t *p = prog_of(pr); shader_t *s = shader_of(sh); if (!p || !s) return;
+    if (p->vs == sh) p->vs = 0; else if (p->fs == sh) p->fs = 0;
+    sh_reap(sh);
 }
 static void prog_clear(prog_t *p) {
     for (int i = 0; i < p->npc; i++) if (p->pc[i].pso) CFRelease(p->pc[i].pso);
@@ -1786,7 +1867,12 @@ GL(glGetProgramiv, void, GLuint pr, GLenum p, GLint *v) {
     }
     RED1("glGetProgramiv(%#x) not implemented", p); *v = 0;
 }
-GL(glDeleteProgram, void, GLuint pr) { prog_t *p = prog_of(pr); if (!p) return; prog_clear(p); free(g_sps[pr]); g_sps[pr] = NULL; if (S.prog == pr) S.prog = 0; }
+GL(glDeleteProgram, void, GLuint pr) {
+    prog_t *p = prog_of(pr); if (!p) return;
+    GLuint vs = p->vs, fs = p->fs;
+    prog_clear(p); free(g_sps[pr]); g_sps[pr] = NULL; if (S.prog == pr) S.prog = 0;
+    sh_reap(vs); sh_reap(fs);
+}
 GL(glUseProgram, void, GLuint pr) { S.prog = pr; }
 GL(glGetAttribLocation, GLint, GLuint pr, const GLchar *name) {
     prog_t *p = prog_of(pr); if (!p || !p->linked) return -1;

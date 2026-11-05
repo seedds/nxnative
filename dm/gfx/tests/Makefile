@@ -445,6 +445,9 @@ check_t_gl_imports: t_gl_imports
 	./t_gl_imports
 	./t_gl_imports --stubs
 gl-imports: check_t_gl_imports
+t_gl_vertex_binding: t_gl_vertex_binding.m ../gl/hle_gl.m ../../host/hle.c ../../host/hle.h $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_gl_vertex_binding.m ../../host/hle.c $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+check_t_gl_vertex_binding: RUN_ENV = MTL_DEBUG_LAYER=1
 check_t_vk_desc: RUN_ENV = MTL_DEBUG_LAYER=1
 # Float32 missing components retain float padding through integer shader inputs.
 t_float_pad: t_float_pad.m $(MTL_T_DEP)

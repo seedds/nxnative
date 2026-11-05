@@ -24,6 +24,14 @@ void dm_audio_reset(void) {}
 void dm_focus_set(int state) { (void)state; }
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
 void dm_gfx_suspend(int on) { (void)on; }
+void dm_cloud_saves_env(void) {}
+void dm_gamepad_arrange(UIView *view, DmLayout layout) { (void)view; (void)layout; }
+void dm_gamepad_opmode_changed(void) {}
+void dm_gamepad_touch_feedback(bool on) { (void)on; }
+void dm_haptics_set_enabled(int on) { (void)on; }
+int dm_opmode(void) { return 0; }
+void dm_set_opmode(int m) { (void)m; }
+int save_sync_flush(int timeout_ms) { (void)timeout_ms; return 1; }
 
 static NSMutableArray *checks;
 static void check(NSString *name, BOOL passed) {

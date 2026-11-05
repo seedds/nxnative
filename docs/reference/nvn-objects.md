@@ -693,3 +693,11 @@ Games read this count as a position in their own command memory and size their h
 ### `nvnPrivate0`, an inlined command-buffer fast path flag
 
 - `nvnPrivate0`, a new SDK 20 import, needs nothing: it is a flag in `sdk`'s bss that enables an inlined command-buffer fast path when the NVN driver sets it (it stays 0). Found on [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0, SDK 20.5.22).
+
+### Deferred releases repeatedly shift pending entries
+
+- **Symptom:** a large mixed queue of completed and pending GPU references stalls cleanup on the CPU.
+- **Cause:** removing each completed entry from the middle of an array repeatedly shifts the pending tail, with quadratic cost for interleaved fences.
+- **Fix:** partition the queue once under its existing mutex, then retire ready entries outside the lock in the original reverse order. Fence eligibility, keep-resident semantics and pending order are unchanged.
+- **Found on:** Ocarina of Time (Switch 2, #1299) scene-load investigation. This PR has synthetic lifetime validation, not an isolated gameplay FPS measurement.
+- **Check:** `t_deferred_release` queues 100,000 probes with alternating fences, verifies exact release/pending order and lifetimes, then drains the remaining fence and an empty queue.

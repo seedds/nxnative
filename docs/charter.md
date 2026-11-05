@@ -3,11 +3,13 @@
 > **If you read nothing else**
 > 1. **Start from the latest `main`, and look for existing work first**, every time: `git fetch` before a new branch or an issue (it may be fixed already), then pull requests and issues by game and area label and by title, active branches ([how](agents/06-dev-loop.md#0-before-you-start-existing-work-then-a-branch)).
 > 2. **Make your own work findable:** a draft pull request early, with the game's name and title ID in its title.
-> 3. **The base Macs decide:** a change is judged on an 8 GB M1 for Switch games and a 16 GB M2 for Switch 2 games, not on the Mac it was made on.
+> 3. **Don't make the base Macs worse:** a change that costs an 8 GB M1 (Switch games) or a 16 GB M2 (Switch 2 games) is a regression, even when it helps the Mac it was made on.
 > 4. **No regressions:** a gain on one Mac paid for by another is not a gain.
 > 5. **The bar rises with reach:** a change to one game shows that game; a change to a shared path shows more ([tiers](#pull-requests)).
 
 Many people work on nxnative, mostly through agents, usually on one game or subsystem at a time. This page says what the project is for, what a change must not break, and what to check first, so that work on one part does not cost another. [AGENTS.md](../AGENTS.md) links here; [06-dev-loop.md](agents/06-dev-loop.md) has the commands.
+
+**What this page does not ask.** You do not need a base Mac, and you do not need to work on low-spec performance. Bringing up games on whatever Mac you have, and features that use a fast Mac's headroom, are welcome. What is asked is narrower: shared code does not get worse on the base Macs, and a measurement names the Mac it was made on.
 
 Most of the work is agentic, which makes it cheap to start and easy to multiply. That is a strength when the sessions add up: each one knows what exists and what is under way, picks the piece that moves a goal, builds on what others have done, and leaves a record the next one can find.
 
@@ -15,7 +17,7 @@ Most of the work is agentic, which makes it cheap to start and easy to multiply.
 
 Play your own Switch and Switch 2 games on the iPhone, iPad and Mac by running the game's own code natively ([README](../README.md)), **as they play on the console**: same picture and sound, same feel in the hands, same pacing, same relation to real time.
 
-The project is the host, the rewriter, the shader chain and the tools that serve every game. A game is how a part of them is found and tested, not a goal of its own: a fix is done when it holds for every game it reaches.
+The project is the host, the rewriter, the shader chain and the tools that serve every game. Each game brought up finds and tests a part of them, and the general part of its fixes is what other games inherit: a fix is done when it holds for every game it reaches.
 
 ## Correctness
 
@@ -27,22 +29,22 @@ A game is correct when it plays as on the console, not only when it looks right:
 - **Input:** the console's own controllers (Joy-Con, Pro Controller, the Switch 2's) work with their buttons, motion and rumble, as do other controllers.
 - **Gameplay** at the console's speed: no fast-forward, no slow motion.
 
-## Goals
+## Targets for the shared code
 
-Challenging on purpose: they name the Macs the project is built for, so a change that helps a fast Mac and costs a slow one is seen as a cost.
+The bars the host, the translator, the tools and the defaults every game gets are measured against. They are not what each contributor must work on: they name the Macs most people play on, so that a shared change that helps a fast Mac and costs a slow one is seen as a cost.
 
 - **Every Switch game playable on an M1 Mac with 8 GB.** Benchmark: [Tears of the Kingdom](../dm/games/0100F2C0115B6000/README.md), recent and among the console's heaviest.
 - **Every Switch 2 game playable on an M2 Mac with 16 GB and a 10-core GPU**, settings lowered where needed (render scale, console mode, upscaler). Benchmark, once it plays: Ocarina of Time (Switch 2, `0400486024DEC000`), the most demanding Switch 2 game brought up so far.
 
 Where each game stands, and what holds it back on these Macs, is in its note ([games table](../dm/games/README.md#games)).
 
-**Playable:** correct as above from the start through normal play, no crash or hang, at the game's intended frame rate most of the time and evenly paced, no paging that stalls play, with settings the launcher offers. A game not there yet lists what stands in the way in its note; a change that moves a game away from it is a regression.
+**Playable** on a given Mac: correct as above from the start through normal play, no crash or hang, at the game's intended frame rate most of the time and evenly paced, no paging that stalls play, with settings the launcher offers. A game in the [games table](../dm/games/README.md#games) is playable on the Mac it was tested on; whether it is playable on the base Mac, and what stands in the way, goes in its note when known. A change that moves a game away from either is a regression.
 
 **Why it pays everywhere:** less CPU and GPU time a frame is longer battery life on every MacBook, iPhone and iPad; on Pro and Max Macs it is headroom for higher frame rates (120 fps where a game allows) and better upscaling; and what fits an 8 GB Mac is close to what fits a phone.
 
 ## Devices
 
-A change is judged on the lowest device of each platform it reaches, not on the device it was developed on.
+A change is judged by what it does on the lowest device of each platform it reaches, as well as on the device it was developed on: a gain there does not make up for a cost on the lowest.
 
 | Platform | Lowest supported |
 |---|---|
@@ -57,12 +59,11 @@ A change about speed, memory or power measured only above the floor says so, and
 
 ## Priorities
 
-When goals conflict, the earlier wins:
+When these conflict, the earlier wins. This is the order a conflict is decided in, not an order of whose work matters:
 
 1. **Correctness**, in every sense above, in a game that worked.
 2. **No regressions:** what worked keeps working, as smoothly and in as little memory, on every supported device.
 3. **Performance on the lowest devices:** pacing, frame rate, memory, load time, power.
-4. **New games**, through general fixes ([AGENTS.md](../AGENTS.md)).
 
 Performance is a goal in itself, not only for the lowest devices. Settings let each device find its own balance: a base Mac lowers the render scale, plays in handheld mode or turns off an extra, while a Pro or Max Mac uses the headroom for higher resolution, better upscaling or 120 fps. So a feature for faster Macs is welcome **when it leaves the slower ones as they were**: behind a setting or a switch, or scaled to the device. What is not acceptable is a gain on one class of Mac paid for by another, for example:
 

@@ -3,6 +3,13 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <QuartzCore/CAMetalDisplayLink.h>
 #import <MetalFX/MetalFX.h>
+// Xcode 26's headers do not declare these public macOS/iOS 27 setters. Calls remain under the OS 27 availability check below; this declaration only lets an older SDK build the host.
+@protocol DmTemporalScalerOffsets <NSObject>
+@property (nonatomic) NSUInteger colorContentOffsetX, colorContentOffsetY;
+@property (nonatomic) NSUInteger depthContentOffsetX, depthContentOffsetY;
+@property (nonatomic) NSUInteger motionContentOffsetX, motionContentOffsetY;
+@property (nonatomic) NSUInteger outputOffsetX, outputOffsetY;
+@end
 #undef I   // MetalFX brings in <complex.h>, whose I (the imaginary unit) would shadow the local tables named I below
 #import <ImageIO/ImageIO.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
@@ -2090,7 +2097,7 @@ static void pkg_absorb_take(NvPkg *pk, const tex_t *t) {
 // not say which images a shader will use atomically
 static inline int pf_r32i(MTLPixelFormat pf) { return pf == MTLPixelFormatR32Uint || pf == MTLPixelFormatR32Sint; }
 static MTLTextureUsage img_usage(const tex_t *t, MTLPixelFormat pf) {
-    if (!(t->d.flags & NVN_TEXTURE_FLAGS_IMAGE)) return 0;
+    if (!(t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) || fmt_compressed(t->d.format)) return 0;   // compressed images are read-only; block encoders write uncompressed aliases
     return MTLTextureUsageShaderWrite | (pf_r32i(pf) ? MTLTextureUsageShaderAtomic : 0);
 }
 // Metal leaves MTLTextureUsageShaderAtomic out of a texture's usage property (0x3 for a texture made with 0x23), so it cannot be read back: every shader-writable R32Uint / R32Sint
@@ -2515,23 +2522,28 @@ static id<MTLBuffer> up_big_src(uint64_t addr, uint64_t len, uint64_t *off) {
     res_add(buf); [g_up_keep addObject:buf]; *off = (uint64_t)addr - a;
     return buf;
 }
-// DM_NVN_TEX_MIP_SKIP=<pixels> (off by default; 1 = 512): a texture the CPU wrote, in a block-compressed format, 2D / 2D array / cube, with a mip chain and both sides at least that
-// many pixels, is made without its finest level: the guest's level l + 1 becomes the host's level l, at half the width and height, a quarter of the memory. A setting for devices
-// whose GPU memory cannot hold a game's textures whole (an 8 GB Mac or iPhone: PRAGMATA's 15,500 textures, 2.4 GB, which its shaders reach through the whole texture pool, so every
-// registered texture is made). Render targets and shader-written textures are never in such formats; views and copies of the skipped textures take the guest's level less the skip
-// (tex_mip_skipped), and a copy of the dropped level is skipped. Textures look blurrier up close; a shader that asks a texture's size gets the halved one
-static unsigned mip_skip_px(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_TEX_MIP_SKIP"); v = e ? atoi(e) : 0; if (v == 1) v = 512; if (v < 0) v = 0; if (v) MLOG("DM_NVN_TEX_MIP_SKIP: compressed CPU-written textures of %d pixels and more are made without their finest level", v); } return (unsigned)v; }
+// Optional compressed-texture quality reduction (#1319): omit 1..3 finest
+// levels of CPU-written 2D / array / cube mip chains meeting the pixel threshold.
+// Keep at least one level. Uploads retain the original coarser mip contents;
+// views, sparse clamps and copies translate guest levels to the remaining host
+// levels. Render targets and shader-written textures keep their storage. This
+// trades close-up texture detail for less texture storage; it is off by default.
+static unsigned mip_skip_px(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_TEX_MIP_SKIP"); v = e ? atoi(e) : 0; if (v == 1) v = 512; if (v < 0) v = 0; if (v) MLOG("DM_NVN_TEX_MIP_SKIP: compressed CPU-written textures of %d pixels and more are made without their configured finest mip levels", v); } return (unsigned)v; }
+static unsigned mip_skip_levels(void) { static unsigned n; if (!n) { const char *e = getenv("DM_NVN_TEX_MIP_LEVELS"); int v = e ? atoi(e) : 1; n = (unsigned)MAX(1, MIN(v, 3)); } return n; }
 static unsigned mip_skip(const tex_t *t, MTLTextureDescriptor *d) {
     unsigned px = mip_skip_px();
     if (!px || !fmt_compressed(t->d.format) || (d.usage & MTLTextureUsageShaderWrite) || d.mipmapLevelCount < 2) return 0;
     if (t->d.target != 1 && t->d.target != 4 && t->d.target != 8 && t->d.target != 9) return 0;
-    return MIN(d.width, d.height) >= px;
+    return MIN(d.width, d.height) >= px ? MIN(mip_skip_levels(), (unsigned)d.mipmapLevelCount - 1) : 0;
 }
 // How many finest levels a host texture of t lacks (DM_NVN_TEX_MIP_SKIP): the levels by which its width falls short of the guest's (3D textures are never skipped)
 static unsigned tex_mip_skipped(const tex_t *t, id<MTLTexture> m) {
-    unsigned k = 0; if (!t || !m || m.textureType == MTLTextureType3D) return 0;
-    while (k < 4 && MAX(t->d.width >> k, 1u) > m.width) k++;
-    return k;
+    unsigned px = mip_skip_px();
+    if (!px || !t || !m || !fmt_compressed(t->d.format) || t->d.levels < 2 || MIN(t->d.width, t->d.height) < px) return 0;
+    if (t->d.target != 1 && t->d.target != 4 && t->d.target != 8 && t->d.target != 9) return 0;
+    for (unsigned k = 1; k <= MIN(mip_skip_levels(), t->d.levels - 1); k++)
+        if (m.width == MAX(t->d.width >> k, 1u) && m.height == MAX(t->d.height >> k, 1u) && m.mipmapLevelCount == t->d.levels - k) return k;
+    return 0;
 }
 // A copy's guest level as the host texture's (tex_mip_skipped): 0 when the host lacks that level
 static int lv_host(const tex_t *t, id<MTLTexture> m, unsigned *level) { unsigned k = tex_mip_skipped(t, m); if (*level < k) return 0; *level -= k; return 1; }
@@ -2539,7 +2551,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     MTLTextureDescriptor *d = tex_desc(t, 1);
     if (!d) return nil;
     unsigned sk = stamp ? mip_skip(t, d) : 0;   // levels the host texture leaves out (mip_skip): the guest's level l + sk is its level l
-    if (sk) { d.width = MAX(d.width >> sk, 1u); d.height = MAX(d.height >> sk, 1u); d.mipmapLevelCount -= sk; static uint64_t n; n++; if (n <= 3 || !(n % 2000)) MLOG("DM_NVN_TEX_MIP_SKIP: %llu textures made without their finest level (ser=%llu %ux%u format %#x)", (unsigned long long)n, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format); }
+    if (sk) { d.width = MAX(d.width >> sk, 1u); d.height = MAX(d.height >> sk, 1u); d.mipmapLevelCount -= sk; static uint64_t n; n++; if (n <= 3 || !(n % 2000)) MLOG("DM_NVN_TEX_MIP_SKIP: %llu textures made without %u finest levels (ser=%llu %ux%u format %#x)", (unsigned long long)n, sk, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format); }
     d.usage |= keep & (MTLTextureUsageRenderTarget | MTLTextureUsagePixelFormatView);
     int rb_shift = rb_packed_shift(t->d.format);   // the RGB565 family is repacked into Metal's order on the CPU (rb_packed_shift)
     int direct = !sk && !rb_shift && stamp && direct_upload_on() && g_nvn_deswz_gpu && !(t->pool && nvn_sparse_pool(t->pool)) && nvn_deswz_gpu_direct_supported(&t->d);
@@ -2632,8 +2644,8 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
             if (nvn_deswizzle(&t->d, l, y, src, (uint8_t *)stg.contents + off, pitch)) { RED_ONCE(9, "deswizzle failed format %#x target %d", t->d.format, t->d.target); break; }
             if (rb_shift) rb_swap_rows((uint8_t *)stg.contents + off, pitch, rows, z, pitch, pitch * rows, rb_shift);
             if (zb && l - sk < 16) { const uint64_t *q = (const uint64_t *)((const uint8_t *)stg.contents + off); size_t nb = pitch * rows * z / 16;
-                for (size_t i = 0; i < nb; i++) g_zb[l] += !(q[2 * i] | q[2 * i + 1]);
-                g_zb_tot[l] += (uint32_t)nb; }
+                for (size_t i = 0; i < nb; i++) g_zb[l - sk] += !(q[2 * i] | q[2 * i + 1]);
+                g_zb_tot[l - sk] += (uint32_t)nb; }
             up_blit_add(stg, off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l - sk);
             off += pitch * rows * z;
         }
@@ -11966,10 +11978,11 @@ static void dlss_eval(const p_dlss *c) {
         sc.colorTexture = col; sc.depthTexture = dep; sc.motionTexture = mot; sc.outputTexture = out; sc.exposureTexture = expo;
         sc.inputContentWidth = iw; sc.inputContentHeight = ih;
         if (@available(macOS 27.0, iOS 27.0, *)) {   // the rectangles' corners: all at the origin on the game seen, so an older system loses nothing there
-            sc.colorContentOffsetX = (NSUInteger)a.base[DLSS_COLOR][0]; sc.colorContentOffsetY = (NSUInteger)a.base[DLSS_COLOR][1];
-            sc.depthContentOffsetX = (NSUInteger)a.base[DLSS_DEPTH][0]; sc.depthContentOffsetY = (NSUInteger)a.base[DLSS_DEPTH][1];
-            sc.motionContentOffsetX = (NSUInteger)a.base[DLSS_MOTION][0]; sc.motionContentOffsetY = (NSUInteger)a.base[DLSS_MOTION][1];
-            sc.outputOffsetX = (NSUInteger)a.base[DLSS_OUTPUT][0]; sc.outputOffsetY = (NSUInteger)a.base[DLSS_OUTPUT][1];
+            id<DmTemporalScalerOffsets> offsets = (id)sc;
+            offsets.colorContentOffsetX = (NSUInteger)a.base[DLSS_COLOR][0]; offsets.colorContentOffsetY = (NSUInteger)a.base[DLSS_COLOR][1];
+            offsets.depthContentOffsetX = (NSUInteger)a.base[DLSS_DEPTH][0]; offsets.depthContentOffsetY = (NSUInteger)a.base[DLSS_DEPTH][1];
+            offsets.motionContentOffsetX = (NSUInteger)a.base[DLSS_MOTION][0]; offsets.motionContentOffsetY = (NSUInteger)a.base[DLSS_MOTION][1];
+            offsets.outputOffsetX = (NSUInteger)a.base[DLSS_OUTPUT][0]; offsets.outputOffsetY = (NSUInteger)a.base[DLSS_OUTPUT][1];
         }
         sc.motionVectorScaleX = a.mv[0]; sc.motionVectorScaleY = a.mv[1];
         sc.jitterOffsetX = a.jitter[0]; sc.jitterOffsetY = a.jitter[1];

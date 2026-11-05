@@ -460,3 +460,9 @@ t_logic: t_logic.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_logic.m $(MTL_T_SRC) $(FW)
 check_t_logic: t_logic
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_logic.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_logic "$$work"
+
+t_texture_quality: t_texture_quality.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_texture_quality.m $(MTL_T_SRC) $(FW)
+check_t_texture_quality: t_texture_quality
+	DM_NVN_TEX_MIP_SKIP=0 MTL_DEBUG_LAYER=1 ./t_texture_quality
+	@for levels in 1 2 3; do DM_NVN_TEX_MIP_SKIP=512 DM_NVN_TEX_MIP_LEVELS=$$levels MTL_DEBUG_LAYER=1 ./t_texture_quality || exit $$?; done

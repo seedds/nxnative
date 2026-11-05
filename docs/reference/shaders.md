@@ -489,8 +489,8 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 - **Symptom:** `draw skipped: no render pipeline (vertex - fragment -)` in a game's final passes; shaders "not in the shader map", all from `agl_ndsr.pck`.
 - **Cause:** the pack's records start at +0x10 in one SDK's version and +0x14 in another's, by the words in its header (Donkey Kong Bananza 0x300, 0x6efeff, 0xc0000; [Splatoon Raiders](../../dm/games/0400380020056000/README.md) 0x40100, 0x80300, 0x90, 0x20c00).
-- **Fix:** `ndsr_shaders` in `shader_split.py` takes the start at which more of the first 16 records point at an NVN2 control section.
-- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md).
+- **Fix:** `ndsr_shaders` in `shader_split.py` took the start at which more of the first 16 records pointed at an NVN2 control section. It now walks the table one 4-byte word at a time from +0x10: a word that points at an NVN2 control section and is followed by a control-typed length (type 0, 3 or 6, at least 0x48 bytes) starts a shader's pair of pairs, any other word moves on by one. Both header sizes read the same as before, and so does a pack whose constant-data pairs sit between the shaders' pairs: The Legend of Zelda: Ocarina of Time's (Switch 2, SDK 22.2.8) `agl_ndsr_vr.pck` has one such pair after each shader, so every other control pair started in the middle of a record and the record walk read 21 of its 24 shaders. `test_split_ndsr_pairs.py` builds packs of both shapes.
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md); The Legend of Zelda: Ocarina of Time (its profile is in pull request #1299).
 
 ## Control sections and code
 

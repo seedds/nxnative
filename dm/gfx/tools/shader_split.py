@@ -210,14 +210,16 @@ def ndsr_shaders(d, label):
     The records start at +0x14 in Splatoon Raiders' pack, whose header has another word and other values (+4 0x40100, against 0x300 in Bananza's), so the start is the one whose first
     records point at control sections. Read from +0x10 the same pack gave no shader, the upscaler's draws were skipped and every 3D frame reached the window black"""
     if d[:4] != b'NDSR' or len(d) < 0x20: return []
-    def records_from(o):   # how many of the first records point at an NVN2 control section
-        return sum(1 for c, cl, _, _ in struct.iter_unpack('<4I', d[o:o + 16 * 16]) if c + 0x48 <= len(d) and nvn2_ctl(d[c:c + 0x48]))
-    out = []; o = max((0x10, 0x14), key=records_from); prog = None
+    out = []; o = 0x10; prog = None
     while o + 16 <= len(d):
         c, cl, k, _ = struct.unpack_from('<4I', d, o)
-        if not c and not cl: break
+        if not c and not cl and not k: break   # a zero record ends the table
+        # The entries are {offset, length << 4 | type} pairs (a shader's control pair, then its code pair). In Bananza's and Splatoon Raiders' packs every control pair starts a 16-byte
+        # record, read from +0x10 or +0x14; in agl_ndsr_vr.pck of The Legend of Zelda: Ocarina of Time (Switch 2, SDK 22.2.8) a constant-data pair sits between one shader's pairs and the
+        # next's, so every other control pair started in the middle of a record and the walk read 21 of its 24 shaders. This walk takes the table one 4-byte word at a time: a word that
+        # points at an NVN2 control section and is followed by a control-typed length starts a shader's two pairs, any other word moves on by one, so both layouts are read
+        if not (c + 0x48 <= len(d) and nvn2_ctl(d[c:c + 0x48]) and (cl & 0xf) in (0, 3, 6) and cl >> 4 >= 0x48): o += 4; continue
         o += 16
-        if not (c + 0x48 <= len(d) and nvn2_ctl(d[c:c + 0x48])): continue
         ctl = d[c:c + max(cl >> 4, 0x48)]
         code = d[k:k + struct.unpack_from('<I', ctl, 0x44)[0]]
         st = nvn2_stage(ctl, code)

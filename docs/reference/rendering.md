@@ -1435,3 +1435,24 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** the present reports the shape of the frame it draws, the valid rectangle of the presented texture, whenever its width / height changes (`nvn_mtl.m` `present_now` → `front.h` `front_picture_shape`; every graphics API presents there). The iOS front end lays the game's view out in that shape (`DmLayout.h` takes it as a parameter: the overlay, the split, Fill and the TV alike), so a 1.43:1 picture fills a 1.43:1 screen in Fit and touches are normalized on the picture as drawn; the Mac maps the mouse on the picture's own rectangle. A 16:9 game reports 16:9 and keeps its layout, and a size change of the same shape (1280x720 handheld, 1920x1080 docked) is not reported.
 - **Check:** the [Duo harness](../../dm/ios/tests/duo/README.md) tests the taller picture in Fit, in Fill and on a wider screen, and the production root view following a reported shape and returning to 16:9. Not yet run on a device.
 - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#screen-shape-dm_screen_aspect-current) and [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md#screen-shape-dm_screen_aspect-current) with `DM_SCREEN_ASPECT=1.43`.
+
+### Deferred release partition
+
+- **Symptom:** a large resource retirement batch stalls replay in `NSArray` removal, with hundreds of thousands of entries awaiting release.
+- **Cause:** removing one completed reference at a time shifts the still-pending tail repeatedly. A sample during the forest load spent most of its submission time in `defer_drain` and `memmove`.
+- **Fix:** snapshot the completed fence, partition ready and pending references in one walk under the queue lock, and release the ready objects outside it in the original reverse order. `t_deferred_release` checks 100,000 interleaved entries, including retention and release order.
+- **Found on:** The Legend of Zelda: Ocarina of Time 1.1.1.
+
+### Indirect mesh arguments
+
+- **Symptom:** `nvnCommandBufferDrawMeshTasksIndirect` was unimplemented and its GPU-driven draws were skipped.
+- **Cause:** the indirect buffer carries a count and a first-task index. A CPU read at recording time cannot see the GPU producer, and Metal expects three grid dimensions, without the first-task word.
+- **Fix:** the indirect conversion compute pass produces the Metal grid and a separate first-workgroup value for the task and mesh shaders. Convert after ending a pass that can land earlier writes; tag the conversion with that write epoch. `t_mesh_indirect` writes both a nonzero and a zero-work record on the GPU before replay converts them.
+- **Found on:** The Legend of Zelda: Ocarina of Time 1.1.1.
+
+### Atomic reinterpretation of RGBA8
+
+- **Symptom:** `image atomics on a texture Metal cannot run them on` when a shader's R32Uint image view is backed by an RGBA8 color texture.
+- **Cause:** Metal rejects shader-atomic usage on RGBA8 storage, even when a view reinterprets the texel as R32Uint. Substituting a sink discards the atomic writes.
+- **Fix:** for a private single-sampled 2D RGBA8 texture, preserve its texels through an RGBA8 view of integer storage made with atomic usage. Bind the integer image from the root backing and retain the color view for other uses. The heap remains resident while its views live. `t_image_usage` verifies that a color clear survives the upgrade and an atomic OR changes the bytes read through the color view.
+- **Found on:** The Legend of Zelda: Ocarina of Time 1.1.1.

@@ -1,9 +1,13 @@
-// Indirect draws Metal cannot take as they are: records converted to indexed indirect draws (nvn_mtl.m ixc_run)
+// Indirect draws Metal cannot take as they are (nvn_mtl.m ixc_run)
 #include <metal_stdlib>
 using namespace metal;
 struct ajob { device const uint *rec; device uint *args; uint prim, cap; };
 kernel void ixc_arrays(device const ajob *j [[buffer(0)]], uint i [[threadgroup_position_in_grid]]) {
-  device const uint *s = j[i].rec; uint n = s[0], c = j[i].prim == 7 ? n / 4 * 6 : n >= 3 ? (n - 2) * 3 : 0;
+  device const uint *s = j[i].rec;
+  if (j[i].prim == 0x40) { // DM_PRIM_MESH_TASKS: count, first task → grid XYZ and first workgroup uniform
+    device uint *d = j[i].args; d[0] = s[0]; d[1] = 1; d[2] = 1; d[3] = 0; d[4] = s[1]; return;
+  }
+  uint n = s[0], c = j[i].prim == 7 ? n / 4 * 6 : n >= 3 ? (n - 2) * 3 : 0;
   device uint *d = j[i].args; d[0] = min(c, j[i].cap); d[1] = s[1]; d[2] = 0; d[3] = s[2]; d[4] = s[3]; }
 struct ejob { device const uint *rec; device const uchar *ib; device uint *out; device uint *args; uint prim, isz, ilen, cap; };
 kernel void ixc_expand(constant ejob &j [[buffer(0)]], uint i [[thread_position_in_grid]]) {

@@ -326,12 +326,17 @@ static void defer_obj_unref(id obj) { defer_obj_release_ex(obj, 1); }
 static void defer_drain(void) { @autoreleasepool {
     NSMutableArray<NvDeferredRelease *> *ready = [NSMutableArray array];
     pthread_mutex_lock(&g_deferred_mu);
-    for (NSInteger i = g_deferred.count - 1; i >= 0; i--) {
-        NvDeferredRelease *d = g_deferred[(NSUInteger)i];
-        if (d->fence <= g_done) { [ready addObject:d]; [g_deferred removeObjectAtIndex:(NSUInteger)i]; }
+    // Retire in one linear partition. Removing each ready entry separately
+    // repeatedly moved the pending tail: Ocarina's scene load queued hundreds
+    // of thousands of references, spending minutes in NSArray's memmove.
+    NSMutableArray<NvDeferredRelease *> *pending = [NSMutableArray array];
+    uint64_t done = g_done;
+    for (NvDeferredRelease *d in g_deferred) {
+        [(d->fence <= done ? ready : pending) addObject:d];
     }
+    g_deferred = pending;
     pthread_mutex_unlock(&g_deferred_mu);
-    for (NvDeferredRelease *d in ready) {
+    for (NvDeferredRelease *d in ready.reverseObjectEnumerator) {
         id obj = d->object;
         if (!d->keep_resident && [obj conformsToProtocol:@protocol(MTLResource)]) {
             pthread_mutex_lock(&g_res_mu);
@@ -2157,6 +2162,10 @@ static MTLTextureUsage img_usage(const tex_t *t, MTLPixelFormat pf) {
 // Metal leaves MTLTextureUsageShaderAtomic out of a texture's usage property (0x3 for a texture made with 0x23), so it cannot be read back: every shader-writable R32Uint / R32Sint
 // texture the host makes has it (img_usage, tex_upgrade, dummy_img_atomic), and that is what this tests
 static int tex_atomic_capable(id<MTLTexture> base) { return pf_r32i(base.pixelFormat) && (base.usage & MTLTextureUsageShaderWrite); }
+static int tex_rgba_atomic_alias(id<MTLTexture> base) {
+    return base.pixelFormat == MTLPixelFormatRGBA8Unorm && base.textureType == MTLTextureType2D && base.sampleCount == 1
+        && base.storageMode == MTLStorageModePrivate && !base.buffer && !base.isSparse;
+}
 static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     uint32_t pf = 0; uint8_t swz[4];
     if (!nvn_fmt_to_mtl(t->d.format, &pf, swz) || !pf) { RED_ONCE(0, "texture format %#x has no Metal equivalent (first case)", t->d.format); return nil; }
@@ -2230,11 +2239,30 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextu
     d.arrayLength = base.arrayLength; d.mipmapLevelCount = base.mipmapLevelCount; d.sampleCount = base.sampleCount;
     d.storageMode = base.storageMode; d.cpuCacheMode = base.cpuCacheMode; d.hazardTrackingMode = base.hazardTrackingMode;
     d.resourceOptions = base.resourceOptions; d.usage = base.usage | add | (tex_atomic_capable(base) ? MTLTextureUsageShaderAtomic : 0);   // the usage property leaves the atomic usage out
+    BOOL reinterpret = (add & MTLTextureUsageShaderAtomic) && !pf_r32i(base.pixelFormat);
+    if (reinterpret && (!tex_rgba_atomic_alias(base) || !pf_r32i(view_pf) || [holder isKindOfClass:[NvPkg class]])) return asked;
     // A linear texture aliases the guest pool. Adding usage must keep that backing: a new standalone texture copies the old pixels once, but later GPU writes never reach the CPU map.
     id<MTLBuffer> backing = base.buffer;
-    id<MTLTexture> upgraded = backing ? [backing newTextureWithDescriptor:d offset:base.bufferOffset bytesPerRow:base.bufferBytesPerRow] : [g_dev newTextureWithDescriptor:d];
+    id<MTLTexture> upgraded;
+    if (reinterpret) {
+        // Metal rejects ShaderAtomic on RGBA8 storage. Put the same bytes in
+        // R32 storage and keep RGBA8 as the ordinary rendering/sampling view.
+        // The heap follows the raw texture's lifetime, including its views.
+        d.pixelFormat = view_pf; d.usage |= MTLTextureUsagePixelFormatView;
+        MTLSizeAndAlign sa = [g_dev heapTextureSizeAndAlignWithDescriptor:d];
+        MTLHeapDescriptor *hd = [MTLHeapDescriptor new]; hd.type = MTLHeapTypePlacement; hd.size = sa.size;
+        hd.storageMode = d.storageMode; hd.cpuCacheMode = d.cpuCacheMode; hd.hazardTrackingMode = d.hazardTrackingMode;
+        id<MTLHeap> heap = [g_dev newHeapWithDescriptor:hd];
+        id<MTLTexture> raw = [heap newTextureWithDescriptor:d offset:0];
+        upgraded = [raw newTextureViewWithPixelFormat:base.pixelFormat];
+        if (upgraded) {
+            NvImageHeap *owner = [NvImageHeap new]; owner->heap = heap; atomic_fetch_add(&g_image_heap_n, 1);
+            objc_setAssociatedObject(raw, &g_image_heap_owner_key, owner, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            res_add(raw);
+        }
+    } else upgraded = backing ? [backing newTextureWithDescriptor:d offset:base.bufferOffset bytesPerRow:base.bufferBytesPerRow] : [g_dev newTextureWithDescriptor:d];
     if (!upgraded) { RED_ONCE(45, "texture upgrade failed ser=%llu format %lu → %lu usage %#lx", t->serial, (unsigned long)base.pixelFormat, (unsigned long)view_pf, (unsigned long)d.usage); return base; }
-    res_add(upgraded);
+    if (!reinterpret) res_add(upgraded);
     id<MTLTexture> upgraded_view = nil;
     id<MTL4ComputeCommandEncoder> b = backing ? nil : blit();   // shared backing already contains the pixels; copying it onto itself would overlap
     NSUInteger slices = base.textureType == MTLTextureType3D ? 1 : base.arrayLength * (base.textureType == MTLTextureTypeCube || base.textureType == MTLTextureTypeCubeArray ? 6 : 1);
@@ -5456,7 +5484,8 @@ static id<MTLTexture> img_fit(int tid, id<MTLTexture> t, int dpf, uint64_t *rid)
     size_t n = mtl_pf_bytes(t.pixelFormat); int u = dpf == NVN_DPF_UINT, cls = dpf != NVN_DPF_FLOAT && mtl_pf_dpf(t.pixelFormat) != dpf;
     MTLPixelFormat pf = !cls ? t.pixelFormat : n == 1 ? (u ? MTLPixelFormatR8Uint : MTLPixelFormatR8Sint) : n == 2 ? (u ? MTLPixelFormatR16Uint : MTLPixelFormatR16Sint) : n == 4 ? (u ? MTLPixelFormatR32Uint : MTLPixelFormatR32Sint)
                       : n == 8 ? (u ? MTLPixelFormatRG32Uint : MTLPixelFormatRG32Sint) : n == 16 ? (u ? MTLPixelFormatRGBA32Uint : MTLPixelFormatRGBA32Sint) : MTLPixelFormatInvalid;
-    id<MTLTexture> base = t.parentTexture ? t.parentTexture : t;
+    id<MTLTexture> base = t; NSUInteger l0 = 0, s0 = 0;
+    while (base.parentTexture) { l0 += base.parentRelativeLevel; s0 += base.parentRelativeSlice; base = base.parentTexture; }
     if (pf == MTLPixelFormatInvalid || tid <= 0 || tid >= g_ntreg) {
         RED_ONCE(106, "image read as %s in the shader, texture of Metal format %lu (texture ID %d): no view of that class, bound as is (reads undefined)", u ? "uint" : "int", (unsigned long)t.pixelFormat, tid); return nil; }
     if (cls && !(base.usage & MTLTextureUsagePixelFormatView)) {   // made without the format-view usage (it costs lossless compression, so textures get it only when needed): upgraded before the next
@@ -5466,7 +5495,6 @@ static id<MTLTexture> img_fit(int tid, id<MTLTexture> t, int dpf, uint64_t *rid)
     treg_t *r = &g_treg[tid];
     if (r->im && r->im_of == (__bridge void *)t && ((__bridge id<MTLTexture>)r->im).pixelFormat == pf) { *rid = r->im_rid; return (__bridge id<MTLTexture>)r->im; }
     if (r->im) { defer_obj_unref((__bridge id)r->im); CFRelease(r->im); r->im = r->im_of = NULL; r->im_rid = 0; }
-    NSUInteger l0 = t.parentTexture ? t.parentRelativeLevel : 0, s0 = t.parentTexture ? t.parentRelativeSlice : 0;
     NSUInteger ns = t.textureType == MTLTextureType3D ? 1 : t.arrayLength * (t.textureType == MTLTextureTypeCube || t.textureType == MTLTextureTypeCubeArray ? 6 : 1);
     id<MTLTexture> v = [base newTextureViewWithPixelFormat:pf textureType:t.textureType levels:NSMakeRange(l0, t.mipmapLevelCount) slices:NSMakeRange(s0, ns)];
     if (!v) { RED_ONCE(107, "cannot create the image view of class %s (texture ID %d, Metal format %lu)", u ? "uint" : "int", tid, (unsigned long)t.pixelFormat); return nil; }
@@ -7977,7 +8005,8 @@ static void image_prepare(NvProg *pr, unsigned stages) {
             // The actual image binding is image intent too: some engines write a descriptor with RegisterTexture and use its handle in an image slot.
             tex_t image = g_treg[tid].t; image.d.flags |= NVN_TEXTURE_FLAGS_IMAGE; mtl_pool_gpu_written(image.pool);
             id<MTLTexture> base = tex_mtl(&image); sparse_gpu_wrote(&image); while (base.parentTexture) base = base.parentTexture;
-            int upgrade = base && !(base.usage & MTLTextureUsageShaderWrite);
+            int reinterpret = b->atom && b->dpf != NVN_DPF_FLOAT && tex_rgba_atomic_alias(base);
+            int upgrade = base && (!(base.usage & MTLTextureUsageShaderWrite) || reinterpret);
             os_unfair_lock_unlock(&g_rmu);
             if (!upgrade) continue;
             rp_end();
@@ -7986,8 +8015,12 @@ static void image_prepare(NvProg *pr, unsigned stages) {
             if (tid < g_ntreg && g_treg[tid].ok && !g_treg[tid].gone) {
                 image = g_treg[tid].t; image.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
                 base = tex_mtl(&image); while (base.parentTexture) base = base.parentTexture;
-                if (base && !(base.usage & MTLTextureUsageShaderWrite)) {
-                    tex_upgrade(&image, base, img_usage(&image, base.pixelFormat), base.pixelFormat);
+                reinterpret = b->atom && b->dpf != NVN_DPF_FLOAT && tex_rgba_atomic_alias(base);
+                if (base && (!(base.usage & MTLTextureUsageShaderWrite) || reinterpret)) {
+                    MTLTextureUsage use = img_usage(&image, base.pixelFormat);
+                    MTLPixelFormat format = base.pixelFormat;
+                    if (reinterpret) { use |= MTLTextureUsageShaderAtomic; format = b->dpf == NVN_DPF_UINT ? MTLPixelFormatR32Uint : MTLPixelFormatR32Sint; }
+                    tex_upgrade(&image, base, use, format);
                     args_dirty_all();
                 }
             }
@@ -8016,7 +8049,7 @@ static id<MTLTexture> dummy_img_atomic(int dtt, int dpf) {
     cache[dtt & 7][s] = t; res_add(t); return t;
 }
 static int img_atomic_ok(id<MTLTexture> t, const nvn_rbind *b) {
-    id<MTLTexture> base = t.parentTexture ? t.parentTexture : t;
+    id<MTLTexture> base = t; while (base.parentTexture) base = base.parentTexture;
     return pf_r32i(t.pixelFormat) && tex_atomic_capable(base) && t.textureType == (MTLTextureType)b->dtt && t.sampleCount == 1;
 }
 // Snapshot substitution for same-pass feedback sampling (registered by fb_prepare, used by encode_args; see the notes before draw)
@@ -10390,7 +10423,7 @@ typedef struct { uint64_t ind, ibuf; int32_t prim, itype; uint64_t args, ixb; ui
 static ixc_ent g_ixc[IXC_MAX]; static int g_ixc_n; static uint64_t g_ixc_epoch, g_ixc_sub, g_ixc_runs, g_ixc_splits;
 // The kernels: dm/gfx/msl/ixc.metal
 static int ixc_wanted(const p_draw *dw, const p_draw_idx *di) {
-    if (dw) return dw->ind && (dw->prim == 6 || dw->prim == 7);
+    if (dw) return dw->ind && (dw->prim == 6 || dw->prim == 7 || dw->prim == DM_PRIM_MESH_TASKS);
     return di->ind && (di->prim == 6 || di->prim == 7 || di->itype == 0);
 }
 static const ixc_ent *ixc_find(const p_draw *dw, const p_draw_idx *di) {
@@ -10409,6 +10442,11 @@ static void ixc_run(const p_draw *dw, const p_draw_idx *di) {
         for (int k = 0; k < 2 && lib; k++) { id<MTLFunction> f = [lib newFunctionWithName:k ? @"ixc_expand" : @"ixc_arrays"]; ps[k] = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil; }
         MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxBufferBindCount = 1; at = ps[0] && ps[1] ? rec_table([g_dev newArgumentTableWithDescriptor:ad error:&e]) : nil;
         if (!at) { failed = 1; MLOG("[RED] indirect draw conversion: cannot create the compute pipeline %s (indirect draws of quads / fans / 8-bit indices are skipped)", e.localizedDescription.UTF8String); return; } }
+    // Ending a pass and landing deferred inline writes can advance the
+    // epoch. Snapshot it after both, before this compute encoder opens.
+    if (g_enc) { g_ixc_splits++; PD("M %llu indirect draw conversion: render pass split here", g_stat_pass); rp_end(); }
+    ubd_land_compute();
+    if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     if (g_ixc_epoch != g_wr_epoch || g_ixc_sub != g_sub_serial || g_ixc_n > IXC_MAX - 8) { g_ixc_n = 0; g_ixc_epoch = g_wr_epoch; g_ixc_sub = g_sub_serial; }
     int n0 = g_ixc_n; ixc_take(dw, di);
     if (g_exec_next && g_ret_n <= 8) {   // Later draws in replay order (current list → callers → the rest of this submission), up to the next buffer write
@@ -10421,8 +10459,6 @@ static void ixc_run(const p_draw *dw, const p_draw_idx *di) {
             else if (x && ixc_wanted(NULL, x)) ixc_take(NULL, x);
         }
     }
-    if (g_enc) { g_ixc_splits++; PD("M %llu indirect draw conversion: render pass split here", g_stat_pass); rp_end(); }
-    if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     int n = g_ixc_n - n0, na = 0; if (n <= 0) return;
     typedef struct { uint64_t rec, args; uint32_t prim, cap; } ajob;
     typedef struct { uint64_t rec, ib, out, args; uint32_t prim, isz, ilen, cap; } ejob;
@@ -10431,8 +10467,12 @@ static void ixc_run(const p_draw *dw, const p_draw_idx *di) {
     id<MTL4ComputeCommandEncoder> ce = enc_c_begin(NULL); [ce setArgumentTable:at];
     for (int i = 0; i < n; i++) {
         ixc_ent *e = &g_ixc[n0 + i]; uint64_t rec, ib = 0; void *mb; uint64_t mo; e->args = 0;
-        if (!mtl_gpu_addr(e->ind, e->itype < 0 ? 16 : 20, &mb, &mo, &rec)) continue;
-        if (e->itype < 0) {   // DrawArraysIndirect quads / fans: the shared index buffers, one thread per record
+        if (!mtl_gpu_addr(e->ind, e->prim == DM_PRIM_MESH_TASKS ? 8 : e->itype < 0 ? 16 : 20, &mb, &mo, &rec)) continue;
+        if (e->prim == DM_PRIM_MESH_TASKS) {
+            if (rec & 3) continue;
+            e->args = ag + 32 * (uint64_t)i;
+            aj[na++] = (ajob){rec, e->args, DM_PRIM_MESH_TASKS, 0};
+        } else if (e->itype < 0) {   // DrawArraysIndirect quads / fans: the shared index buffers, one thread per record
             if (e->prim == 7) quad_ib_make(); else fan_ib_make();
             e->ixb = e->prim == 7 ? g_quad_gpu : g_fan_gpu; e->ixlen = (uint32_t)(e->prim == 7 ? g_quad_ib.length : g_fan_ib.length);
             aj[na++] = (ajob){rec, ag + 32 * (uint64_t)i, (uint32_t)e->prim, e->ixlen / 4}; e->args = ag + 32 * (uint64_t)i;
@@ -10450,14 +10490,17 @@ static void ixc_run(const p_draw *dw, const p_draw_idx *di) {
     if (na) { [at setAddress:ag + (uint64_t)n * 32 atIndex:0]; [ce setComputePipelineState:ps[0]]; [ce dispatchThreadgroups:MTLSizeMake((NSUInteger)na, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; }
     enc_c_end(ce);
     args_dirty_all();
-    if (!g_ixc_runs++) MLOG("indirect draw conversion: first time, %d draws (records for quads / fans / 8-bit indices become indexed indirect arguments in a compute pass before the render pass)", n);
+    if (!g_ixc_runs++) MLOG("indirect draw conversion: first time, %d draws (quads, fans, 8-bit indices or mesh tasks converted on the GPU before rendering)", n);
     else if (g_ixc_runs % 3600 == 0) MLOG("indirect draw conversion: %llu times, render pass split %llu times", (unsigned long long)g_ixc_runs, (unsigned long long)g_ixc_splits);
     // DM_NVN_IXCLOG=<n>: logs the first n conversions (record → arguments) once the GPU has run them
     static int lg = -1; if (lg < 0) { const char *v = getenv("DM_NVN_IXCLOG"); lg = v ? atoi(v) : 0; }
     for (int i = 0; i < n && lg > 0; i++) { const ixc_ent *e = &g_ixc[n0 + i]; if (!e->args) continue; lg--;
         const uint32_t *src = (const uint32_t *)(uintptr_t)e->ind, *arg = (const uint32_t *)((const uint8_t *)ab.contents + ao + 32 * (size_t)i);
         int prim = e->prim, it = e->itype; unsigned long long fr = (unsigned long long)atomic_load(&g_cur_frame), pass = g_stat_pass, splits = g_ixc_splits; id<MTLBuffer> keep = ab;
-        [g_commit_blocks addObject:^{ (void)keep; MLOG("indirect draw conversion frame %llu pass %llu: primitive %d index type %d record %u,%u,%u,%u → arguments %u,%u,%u,%d,%u (splits so far %llu)", fr, pass, prim, it, src[0], src[1], src[2], src[3], arg[0], arg[1], arg[2], (int)arg[3], arg[4], splits); }]; }
+        [g_commit_blocks addObject:^{ (void)keep;
+            if (prim == DM_PRIM_MESH_TASKS) MLOG("mesh indirect frame %llu pass %llu: %u workgroups from %u", fr, pass, arg[0], arg[4]);
+            else MLOG("indirect draw conversion frame %llu pass %llu: primitive %d index type %d record %u,%u,%u,%u → arguments %u,%u,%u,%d,%u (splits so far %llu)", fr, pass, prim, it, src[0], src[1], src[2], src[3], arg[0], arg[1], arg[2], (int)arg[3], arg[4], splits);
+        }]; }
 }
 // ---------- 8-bit indices written by the GPU earlier in the submission ----------
 // Metal has no 8-bit index type, so draw widens 8-bit indices to 16-bit on the CPU at replay. When a buffer write encoded earlier in this submission (copy / update / fill,

@@ -278,6 +278,10 @@ static void res_bytes_note(int64_t d) {
     g_res_bytes += d; if (g_res_bytes > g_res_bytes_peak) g_res_bytes_peak = g_res_bytes;
     if (ram && (uint64_t)g_res_bytes > next) { MLOG("[RED] residency set: %lld MB wired-to-be, %.0f%% of the Mac's %llu MB (next line at +1 GB)", (long long)(g_res_bytes >> 20), 100.0 * (double)g_res_bytes / (double)ram, (unsigned long long)(ram >> 20)); next += 1ull << 30; }
 }
+// Removed allocations stay referenced until the removal is committed (res_commit): a release right after res_remove (the deferred release, staging, arenas) freed an object
+// the residency set still listed until its next commit. Metal's validation layer then met a dead MTLGPUDebugBuffer in -[MTL4GPUDebugCommandBuffer applyResidencySets:]
+// at the next command-buffer commit (PRAGMATA, two runs under shader validation); Metal 4 applies a removal only at the set's commit, so the object must live until then in any case
+static __strong NSMutableArray *g_res_pending;
 static void res_add_at(id<MTLAllocation> allocation, int line) { @autoreleasepool {
     if (!allocation) return;
     // An indirectly addressed placed texture needs its heap resident. The heap owner below removes it only after the last texture/view has gone.
@@ -299,6 +303,7 @@ static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
     if (![g_res_objects containsObject:r]) { pthread_mutex_unlock(&g_res_mu); return; }
     [g_res removeAllocation:(id<MTLAllocation>)r];
     [g_res_objects removeObject:r];
+    if (!g_res_pending) g_res_pending = [NSMutableArray array]; [g_res_pending addObject:r];   // alive until the removal is committed (see g_res_pending)
     g_res_dirty = 1; g_rs_rm++; res_bytes_note(-(int64_t)r.allocatedSize);
     pthread_mutex_unlock(&g_res_mu);
 } }
@@ -371,8 +376,11 @@ static void res_limit_check(void) {
 static void res_commit(void) {
     pthread_mutex_lock(&g_res_mu);
     if (g_res_dirty) res_limit_check();
-    if (g_res_dirty) { uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); [g_res commit]; g_res_dirty = 0; g_rs_commits++; g_rs_commit_ns += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0; }
+    NSMutableArray *drop = nil;
+    if (g_res_dirty) { uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); [g_res commit]; g_res_dirty = 0; g_rs_commits++; g_rs_commit_ns += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0;
+        drop = g_res_pending; g_res_pending = nil; }
     pthread_mutex_unlock(&g_res_mu);
+    @autoreleasepool { [drop removeAllObjects]; drop = nil; }   // the committed removals' last references, released outside the lock
 }
 // What the residency set holds: totals by kind and the largest objects. At the first GPU out-of-memory error (the error names none of them), and for DM_CTL "restop" (hle_hid.c). The set holds
 // the game's pools (shared buffers over guest memory), textures, heaps and staging alike

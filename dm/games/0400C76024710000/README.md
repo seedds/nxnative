@@ -63,6 +63,7 @@ Through `DM_CTL`, silent (`DM_AUDIO=0`) and with `DM_FOCUS_KEEP=1`: press `A` ab
 - [Buffers in sparse pools bound through their physical pages](../../../docs/reference/nvn-objects.md#buffers-in-sparse-pools-bound-through-their-physical-pages): the title Earth and terrain read zeros.
 - [Pages and pool tables changed under live GPU work (sparse safe mode)](../../../docs/reference/nvn-objects.md#pages-and-pool-tables-changed-under-live-gpu-work-sparse-safe-mode): GPU page faults, a kernel panic and a 45 GB residency set at the tower ring.
 - [Swizzled uploads deswizzled on the CPU by default](../../../docs/reference/nvn-objects.md#swizzled-uploads-deswizzled-on-the-cpu-by-default): GPU hangs in the host's own upload batches at the tower ring.
+- [A residency-set member released before its removal is committed](../../../docs/reference/rendering.md#a-residency-set-member-released-before-its-removal-is-committed): crashes under Metal's shader validation.
 - [Integer add, subtract and multiply wrap](../../../docs/reference/shaders.md#integer-add-subtract-and-multiply-wrap): snorm8 bytes read with the next byte in them.
 - [A loop exit's subgroup block runs in the iteration that left](../../../docs/reference/shaders.md#a-loop-exits-subgroup-block-runs-in-the-iteration-that-left).
 - [64-bit image atomic max and min](../../../docs/reference/shaders.md#64-bit-image-atomic-max-and-min): the visibility buffer's 336 shaders.

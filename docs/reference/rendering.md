@@ -623,6 +623,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) 1.0.4 on an iPad mini 7 (A17 Pro), which presents three times before its first submission ([GitHub issue #626](https://github.com/seedds/nxnative/issues/626)). The reporter's Apple M4 test did not fault without the fix.
 - **Not checked:** the iPad with the fix.
 
+### A residency-set member released before its removal is committed
+
+- **Symptom:** under Metal's shader validation (`MTL_SHADER_VALIDATION=1`), a crash at a command-buffer commit in `-[MTL4GPUDebugCommandBuffer applyResidencySets:]` on a dead `MTLGPUDebugBuffer`; without validation, nothing visible, or a use-after-free GPU fault.
+- **Cause:** `res_remove` took an allocation out of the residency set and its callers released it right away (the deferred release, upload staging, arenas, readback buffers), but a Metal 4 residency set applies a removal only at its next commit: until then it still listed the freed object.
+- **Fix:** a removed allocation is kept (`g_res_pending`) until the removal is committed (`res_commit`), and released after it, outside the set's lock. For every game.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): two validation runs crashed at the next commit after about 100 s of the opening.
+- **Check:** `t_sparse_safe` case 16 (a removed buffer is alive until the commit, released after it).
+
 ### A CPU-written window texture resolved where the present is queued
 
 - **Symptom:** an abort at the first present: `[RED] upload batches belong to the submit thread only: up_begin called on thread 'nvn-present-link'`, with `pkg_upload`, `tex_mtl` and `present_now` in the backtrace.

@@ -227,6 +227,12 @@ int main(void) { @autoreleasepool {
       *(uint64_t *)g_csp_buf.contents = g_csp_seq - 3;   // the GPU finished the first two
       uint64_t u15 = csp_first_unfinished(41); CHECK("15 the dispatch in flight", u15 == g_csp_seq - 2 && !strcmp(g_csp[u15 % CSP_N].key, "cccc"));
       *(uint64_t *)g_csp_buf.contents = g_csp_seq; CHECK("15 all finished: none", csp_first_unfinished(41) == 0); g_csp_buf = nil; }
+    // 16. a removed allocation stays alive until the removal is committed (PRAGMATA under shader validation: a buffer released right after res_remove was still listed in the residency set)
+    { __weak id<MTLBuffer> wb16;
+      @autoreleasepool { id<MTLBuffer> b = [g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared]; wb16 = b; res_add(b); res_commit(); res_remove(b); b = nil; }
+      int alive; @autoreleasepool { alive = wb16 != nil; } CHECK("16 removed but not committed: still alive", alive);
+      @autoreleasepool { res_commit(); }
+      int gone; @autoreleasepool { gone = wb16 == nil; } CHECK("16 released once the removal is committed", gone); }
     // 4. off: the old behaviour (inaccessible pages after an unmap)
     g_vp_safe_test_off = 1;
     CHECK("map a run (safe off)", map_at(12u << 20, 1u << 20, 6u << 20));

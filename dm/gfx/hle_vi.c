@@ -93,10 +93,18 @@ HLE_FORCE("_ZN2nn2vi21QueryDisplayHdrStatusEPbPNS0_15HdrOutputFormatEPtPKNS0_7Di
     (void)disp; if (on) *on = 0; if (fmt) *fmt = 0; if (peak) *peak = 0; return RES_OK; }
 HLE_FORCE("_ZN2nn2vi25QueryDisplayHdrPaperWhiteEPtPKNS0_7DisplayE", "display HDR paper white: 203 nits (BT.2408); HDR is off", Result, h_vi_PaperWhite, uint16_t *nits, const void *disp) {
     (void)disp; if (nits) *nits = 203; return RES_OK; }
-HLE_FORCE("_ZN2nn2vi24QueryDisplayVrrSupportedEPbPKNS0_7DisplayE", "display VRR: not supported (fixed refresh rate)", Result, h_vi_VrrSupported, uint8_t *on, const void *disp) {
-    (void)disp; if (on) *on = 0; return RES_OK; }
-HLE_FORCE("_ZN2nn2vi23SetDisplayVrrCapabilityEPNS0_7DisplayEb", "display VRR capability: the host has no VRR", Result, h_vi_SetVrr, void *disp, unsigned on) {
-    (void)disp; (void)on; return RES_OK; }
+// VRR: supported only for a game whose profile has vrr on (or DM_VRR=1), on the Mac, with the window on a screen of 120 Hz or more, docked too (the Switch 2 has it handheld only);
+// the rate the game then asks for paces its frames (hle_nvn.c nvn_vrr_available, nvn_vrr_set)
+__attribute__((weak)) int nvn_vrr_available(void) { return 0; }   // hle_nvn.c; builds without NVN have no VRR
+__attribute__((weak)) void nvn_vrr_set(int fps) { (void)fps; }
+HLE_FORCE("_ZN2nn2vi24QueryDisplayVrrSupportedEPbPKNS0_7DisplayE", "display VRR: supported for a profile with vrr on, on a Mac screen of 120 Hz or more", Result, h_vi_VrrSupported, uint8_t *on, const void *disp) {
+    (void)disp; int v = nvn_vrr_available();
+    static atomic_int was = -1; if (atomic_exchange(&was, v) != v) LOG("vi::QueryDisplayVrrSupported: %s", v ? "yes (profile vrr on, or DM_VRR=1)" : "no (fixed refresh rate)");
+    if (on) *on = (uint8_t)v;
+    return RES_OK; }
+HLE_FORCE("_ZN2nn2vi23SetDisplayVrrCapabilityEPNS0_7DisplayEb", "display VRR capability: off clears the extended swap interval's rate", Result, h_vi_SetVrr, void *disp, unsigned on) {
+    (void)disp; if (!(on & 0xff)) nvn_vrr_set(0);
+    return RES_OK; }
 // The largest display buffer (vi2 through the SDK, sdk+0x5e10c0, which the host does not serve: Result 0x272 and the output left as the game set it). BufferMaxResolution is
 // 0 1280x720, 1 1920x1080, 2 2560x1440, 3 3840x2160 (Fire Emblem Fortune's Weave's own table, main+0x1abc2c0 / +0x1abc050). Fire Emblem Fortune's Weave sets 0 first, so the failed call
 // told it 720p: it chose its 1280x720 DLSS network and rendered at 640x360, and the host scaled that to the window. Answered as a Switch 2 would: in handheld mode its own 1920x1080
@@ -113,11 +121,14 @@ HLE_FORCE("_ZN2nn2vi31QueryDisplayBufferMaxResolutionEPNS0_19BufferMaxResolution
     static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("vi::QueryDisplayBufferMaxResolution: %dx%d (%s, display %dx%d)", k[r][0], k[r][1], dm_opmode() == 1 ? "docked" : "handheld", w, h);
     if (out) *out = r; return RES_OK;
 }
-// The extended swap interval asks for a presentation rate between whole vsync intervals (VRR); without VRR the swap interval NVN sets stays in effect
-HLE_FORCE("_ZN2nn2vi28SetLayerExtendedSwapIntervalEPNS0_5LayerEii", "layer extended swap interval: needs VRR, which the host has not; NVN's swap interval stays", Result, h_vi_ExtSwap,
+// The extended swap interval asks for a presentation rate between whole vsync intervals (VRR). Donkey Kong Bananza passes (1, frames a second), 40 to 60 (main+0x2049a8,
+// main+0x2038d0). With VRR answered as supported that rate paces presentation (hle_nvn.c); otherwise, or with another first argument, the swap interval NVN sets stays in effect
+HLE_FORCE("_ZN2nn2vi28SetLayerExtendedSwapIntervalEPNS0_5LayerEii", "layer extended swap interval: the rate paces presentation where VRR is answered as supported", Result, h_vi_ExtSwap,
           void *layer, int a, int b) {
-    (void)layer; static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("vi::SetLayerExtendedSwapInterval %d %d: no VRR on the host, the NVN swap interval stays", a, b); return RES_OK; }
-HLE_FORCE("_ZN2nn2vi30ClearLayerExtendedSwapIntervalEPNS0_5LayerE", "layer extended swap interval cleared", Result, h_vi_ExtSwapClear, void *layer) { (void)layer; return RES_OK; }
+    (void)layer; int use = nvn_vrr_available() && a == 1 && b > 0 && b <= 120;
+    static atomic_int once; if (!use && !atomic_exchange(&once, 1)) LOG("vi::SetLayerExtendedSwapInterval %d %d: not followed (%s), the NVN swap interval stays", a, b, nvn_vrr_available() ? "an unknown form" : "no VRR on the host");
+    nvn_vrr_set(use ? b : 0); return RES_OK; }
+HLE_FORCE("_ZN2nn2vi30ClearLayerExtendedSwapIntervalEPNS0_5LayerE", "layer extended swap interval cleared: the NVN swap interval paces again", Result, h_vi_ExtSwapClear, void *layer) { (void)layer; nvn_vrr_set(0); return RES_OK; }
 HLE_FORCE("_ZN2nn2vi35SetLayerNextHdrContentGamutMetadataEPNS0_5LayerENS0_15HdrContentGamutE", "layer HDR metadata: SDR output, nothing to apply", Result, h_vi_HdrGamut, void *layer, int g) {
     (void)layer; (void)g; return RES_OK; }
 HLE_FORCE("_ZN2nn2vi39SetLayerNextHdrToSdrToneMappingMetadataEPNS0_5LayerENS0_14HdrToneMappingE", "layer HDR metadata: SDR output, nothing to apply", Result, h_vi_HdrToneMap, void *layer, int m) {

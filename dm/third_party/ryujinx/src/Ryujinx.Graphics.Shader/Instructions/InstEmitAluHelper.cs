@@ -25,6 +25,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             return type switch
             {
+                IDstFmt.U8 => byte.MinValue,
+                IDstFmt.S8 => sbyte.MinValue,
                 IDstFmt.U16 => ushort.MinValue,
                 IDstFmt.S16 => short.MinValue,
                 IDstFmt.U32 => uint.MinValue,
@@ -37,6 +39,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             return type switch
             {
+                IDstFmt.U8 => byte.MaxValue,
+                IDstFmt.S8 => sbyte.MaxValue,
                 IDstFmt.U16 => ushort.MaxValue,
                 IDstFmt.S16 => short.MaxValue,
                 IDstFmt.U32 => uint.MaxValue,

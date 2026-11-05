@@ -51,9 +51,9 @@ def entries(src):
     return ents
 
 
-def file_identity(path):
+def file_identity(path):   # not st_dev: macOS numbers a volume when it mounts it, so a reboot moved the Data volume from 16777234 to 16777232 and a 24 GB image was packed again, 8 minutes over SMB
     s = os.stat(path)
-    return [s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns]
+    return [s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns]
 
 
 def source_digest(src, ents):
@@ -65,9 +65,11 @@ def source_digest(src, ents):
     return h.hexdigest()
 
 
-def reusable(dst, digest):   # whether dst is the image the stamp beside it says was made from inputs with this digest
-    try: return json.loads(Path(dst + '.inputs.json').read_text()) == {'source': digest, 'image': file_identity(dst)}
-    except (OSError, ValueError): return False
+def reusable(dst, digest):   # whether dst is the image the stamp beside it says was made from inputs with this digest; a stamp from before file_identity left st_dev out has it first
+    try:
+        stamp = json.loads(Path(dst + '.inputs.json').read_text())
+        return stamp['source'] == digest and stamp['image'][-4:] == file_identity(dst)
+    except (OSError, ValueError, KeyError, TypeError): return False
 
 
 def write(ents, dst, copy):

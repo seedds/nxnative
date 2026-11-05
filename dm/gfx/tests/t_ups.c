@@ -94,7 +94,7 @@ int main(void) {
     // Written images demote; image loads take render_scale entries after the textures
     CHECK(nvn_ups_img_writes(NVN_RB_IMG, 1, 0) && nvn_ups_img_writes(NVN_RB_IMG, 0, 1) && nvn_ups_img_writes(NVN_RB_IMGU, 1, 0), "a written or atomic image slot demotes its texture, its handle in an image slot or in a uniform buffer");
     CHECK(!nvn_ups_img_writes(NVN_RB_IMG, 0, 0) && !nvn_ups_img_writes(NVN_RB_TEX, 1, 0) && !nvn_ups_img_writes(NVN_RB_SBUFP, 1, 0), "read-only images, textures and buffers do not");
-    CHECK(nvn_ups_img_desc(NVN_RB_IMG, 0) && nvn_ups_img_desc(NVN_RB_IMG, 1) && !nvn_ups_img_desc(NVN_RB_IMG, 4) && !nvn_ups_img_desc(NVN_RB_TEX, 0), "single images are image descriptors; arrays and textures are not");
+    CHECK(nvn_ups_img_desc(NVN_RB_IMG, 0) && nvn_ups_img_desc(NVN_RB_IMG, 1) && nvn_ups_img_desc(NVN_RB_IMGU, 1) && !nvn_ups_img_desc(NVN_RB_IMG, 4) && !nvn_ups_img_desc(NVN_RB_TEX, 0), "single images are image descriptors, their handle in a slot or in a uniform buffer; arrays and textures are not");
 
     // The game's upscaler resolved by the host. Shape: KTGL's FSR-style pass binds a constant buffer, one sampled texture with its sampler and one written image
     { int ti = -1, oi = -1;
@@ -110,6 +110,8 @@ int main(void) {
       CHECK(!nvn_ups_bypass_shape(atom, 2, &ti, &oi), "an atomic image is a counter, not an output");
       nvn_rbind ubo_tex[3] = {{.kind = NVN_RB_TEXU, .n = 1}, {.kind = NVN_RB_TEX}, {.kind = NVN_RB_IMG, .rw = 1}};
       CHECK(!nvn_ups_bypass_shape(ubo_tex, 3, &ti, &oi), "a bindless texture beside the sampled one is a second input");
+      nvn_rbind ubo_img[2] = {{.kind = NVN_RB_TEX}, {.kind = NVN_RB_IMGU, .rw = 1, .n = 1}};
+      CHECK(!nvn_ups_bypass_shape(ubo_img, 2, &ti, &oi), "an output bound by a handle in a uniform buffer is not the shape: the resolve binds its output by slot");
       nvn_rbind no_tex[2] = {{.kind = NVN_RB_CBUF}, {.kind = NVN_RB_IMG, .rw = 1}};
       CHECK(!nvn_ups_bypass_shape(no_tex, 2, &ti, &oi), "no sampled texture: nothing to resample");
       nvn_rbind with_buf[4] = {{.kind = NVN_RB_SBUFP, .rw = 1}, {.kind = NVN_RB_TEX}, {.kind = NVN_RB_SUPPORT}, {.kind = NVN_RB_IMG, .rw = 1}};

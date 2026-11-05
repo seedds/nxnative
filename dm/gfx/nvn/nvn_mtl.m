@@ -8419,7 +8419,7 @@ static __unsafe_unretained NvShader *g_ups_fs;   // the fragment shader of the d
 // The fragment shader's descriptor count as the translator counts it for the vertex stage's offset: its non-array textures and its images (TextureBindingsManager's scale count)
 static int ups_frag_count(NvShader *fs) {
     int n = 0; if (!fs) return 0;
-    for (int i = 0; i < fs->rf.nb; i++) { const nvn_rbind *b = &fs->rf.b[i]; n += nvn_ups_tex_desc(b->kind, b->n) || b->kind == NVN_RB_IMG; }
+    for (int i = 0; i < fs->rf.nb; i++) { const nvn_rbind *b = &fs->rf.b[i]; n += nvn_ups_tex_desc(b->kind, b->n) || b->kind == NVN_RB_IMG || b->kind == NVN_RB_IMGU; }
     return n;
 }
 // The vector of a stage's draw: walks the bindings in argument order (the descriptor order) and takes each texture's factor from the registered texture it binds; the same slot
@@ -8453,7 +8453,7 @@ static void ups_vec_build(NvShader *sh, int nvn_stage, ups_vec *v) {
         const nvn_rbind *b = &sh->rf.b[i];
         if (!nvn_ups_img_desc(b->kind, b->n)) continue;
         int k = base + nt + ii++; if (k >= UPS_SB_ENTRIES) break;
-        int tid = b->reg < 32 ? (int)(S.img[nvn_stage][b->reg] & 0xfffff) : 0;
+        int tid = b->kind == NVN_RB_IMGU ? ubo_tex_id(ubo_handle(nvn_stage, b->reg, b->off)) : b->reg < 32 ? (int)(S.img[nvn_stage][b->reg] & 0xfffff) : 0;   // the same slot decoding as encode_args' IMG / IMGU branch
         if (tid <= 0 || tid >= g_ntreg || !g_treg[tid].ok) continue;
         void *tv = NULL; tex_fast_rid(tid, &tv); float f = ups_of(&g_treg[tid].t, (__bridge id<MTLTexture>)tv);
         if (f <= 1) continue;

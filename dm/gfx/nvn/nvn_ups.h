@@ -51,10 +51,11 @@ static inline int nvn_ups_img_writes(int kind, int rw, int atom) {
 }
 
 // Whether a reflection binding is an image descriptor of the translator's _usedImages list, which follows the texture descriptors in render_scale (TexturePass.cs: ImageLoad's
-// scale index is the count of non-array texture descriptors + the image's rank among the non-array images, in binding order). Only image loads are scaled there (stores and
-// atomics are not: IsImageInstructionWithScale), which is why a written image is demoted rather than given an entry
+// scale index is the count of non-array texture descriptors + the image's rank among the non-array images, in binding order). An image whose handle the game keeps in a uniform
+// buffer (IMGU) is in that list like a bindless texture (TEXU) is in the textures'. Only image loads are scaled there (stores and atomics are not: IsImageInstructionWithScale),
+// which is why a written image is demoted rather than given an entry
 static inline int nvn_ups_img_desc(int kind, int n) {
-    return kind == NVN_RB_IMG && n <= 1;
+    return (kind == NVN_RB_IMG || kind == NVN_RB_IMGU) && n <= 1;
 }
 
 // A region of the game's pixels → the scaled texture's. Offset and size are rounded separately (lround), so two regions of the same game size always get the same scaled size
@@ -109,7 +110,7 @@ static inline int nvn_ups_bypass_shape(const nvn_rbind *b, int nb, int *ti, int 
         int k = b[i].kind;
         if (k == NVN_RB_TEX && b[i].n <= 1 && t < 0) t = i;
         else if (k == NVN_RB_IMG && b[i].rw && !b[i].atom && b[i].n <= 1 && o < 0) o = i;
-        else if (k == NVN_RB_TEX || k == NVN_RB_TEXU || k == NVN_RB_TEXD || k == NVN_RB_TEXA || k == NVN_RB_TEXP || k == NVN_RB_TBUF || k == NVN_RB_IMG) return 0;
+        else if (k == NVN_RB_TEX || k == NVN_RB_TEXU || k == NVN_RB_TEXD || k == NVN_RB_TEXA || k == NVN_RB_TEXP || k == NVN_RB_TBUF || k == NVN_RB_TBUFU || k == NVN_RB_IMG || k == NVN_RB_IMGU) return 0;   // an image or buffer texture bound by a handle in a uniform buffer is another input or output: the resolve binds its two textures by slot
     }
     if (t < 0 || o < 0) return 0;
     *ti = t; *oi = o; return 1;

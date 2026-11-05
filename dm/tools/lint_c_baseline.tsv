@@ -91,7 +91,7 @@ dm/gfx/tests/t_unwritten_store.m	clang-analyzer-osx.cocoa.RetainCount	1
 dm/gfx/tests/t_upload_budget.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_view_swizzle.m	clang-analyzer-core.UndefinedBinaryOperatorResult	1
 dm/gfx/tests/t_view_swizzle.m	clang-analyzer-nullability.NullablePassedToNonnull	2
-dm/gfx/tests/t_view_swizzle.m	clang-analyzer-osx.cocoa.RetainCount	2
+dm/gfx/tests/t_view_swizzle.m	clang-analyzer-osx.cocoa.RetainCount	1
 dm/gfx/tests/t_xv.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_zskip.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_zskip.m	clang-analyzer-osx.cocoa.RetainCount	1

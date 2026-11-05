@@ -41,6 +41,7 @@ dm/gfx/nvn/nvn_mtl.m:warm_|prepare|prebuild|front_progress	present:pipeline_prep
 dm/gfx/nvn/nvn_mtl.m:pso_arch|arch_|pso_bundle	present:pipeline_archive	the pipeline archive
 dm/gfx/nvn/nvn_mtl.m:^tf_|xfb	shader:transform_feedback	transform feedback
 dm/gfx/nvn/nvn_mtl.m:^geo_|^gs_	shader:stage:gs	geometry shaders
+dm/gfx/nvn/nvn_geometry.inc:^mtk_	nvn:nvnCommandBufferDrawMeshTasks*	native task and mesh pipelines
 dm/gfx/nvn/nvn_mtl.m:^lo_|^lop_	nvn:nvnColorStateSetLogicOp	logic operations
 dm/gfx/nvn/nvn_mtl.m:prog_swrites|swrite_note	nvn:nvnCommandBufferBarrier	ordering barriers and shader writes in a draw pass
 dm/gfx/nvn/nvn_mtl.m:^at_|^atest_	nvn:nvnColorStateSetAlphaTest	the alpha test

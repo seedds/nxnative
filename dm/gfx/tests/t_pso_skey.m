@@ -66,6 +66,32 @@ int main(void) {
         pso_skey_from(&k2, vs, nil, 1, NULL, &b); pso_skey_hex(&b, hb); assert(pso_skey_parse(hb, &b) == 0);
         assert(b.k.chmask == (0xffu | 0xfu << 20) && b.k.blend_en == (1u | 1u << 5) && b.k.blend[1].src_rgb == 0 && b.k.blend[3].dst_a == 0);
     }
-    puts("PSO_SKEY OK 3 cases round-trip; one changed character differs, missing digits / illegal characters rejected; unused blend and mask state left out of the key");
+    // Native meshes preserve their render state without serializing function pointers.
+    {
+        NvShader *ms = [NvShader new], *fs = [NvShader new];
+        ms->stage = 4; fs->stage = 1; memcpy(ms->key, "mesh", 5); memcpy(fs->key, "frag", 5);
+        pso_key k = {.cfmt = {80, 0, 92}, .dfmt = 252, .samples = 4, .blend_en = 1, .chmask = 0xf0f, .a2c = 1};
+        k.blend[0].src_rgb = 1; k.blend[0].dst_rgb = 2;
+        pso_key_norm(&k, 0);
+        pso_skey stable, parsed; char hex[sizeof stable * 2 + 1];
+        pso_skey_from(&k, ms, fs, 0, NULL, &stable); pso_skey_hex(&stable, hex);
+        assert(pso_mesh_skey_parse(hex, &parsed) == 0 && !memcmp(&parsed, &stable, sizeof stable));
+        stable.k.attr_hi[0].fmt = 7; pso_skey_hex(&stable, hex);
+        assert(pso_mesh_skey_parse(hex, &parsed) == 0 && !parsed.k.attr_hi[0].fmt);
+        stable.k.attr_hi[0].fmt = 0;
+        stable.vs_stage = 0; pso_skey_hex(&stable, hex); assert(pso_mesh_skey_parse(hex, &parsed) < 0);
+        stable.vs_stage = 4;
+        stable.fs_stage = 3; pso_skey_hex(&stable, hex); assert(pso_mesh_skey_parse(hex, &parsed) < 0);
+        stable.fs_stage = 1;
+        stable.fz = 1; pso_skey_hex(&stable, hex); assert(pso_mesh_skey_parse(hex, &parsed) < 0);
+        stable.fz = 0;
+        stable.k.vs = (void *)1; pso_skey_hex(&stable, hex); assert(pso_mesh_skey_parse(hex, &parsed) < 0);
+        stable.k.vs = NULL;
+        stable.k.dfmt = 80; pso_skey_hex(&stable, hex); assert(pso_mesh_skey_parse(hex, &parsed) < 0);
+        pso_skey_from(&k, ms, nil, 0, NULL, &stable); pso_skey_hex(&stable, hex);
+        assert(pso_mesh_skey_parse(hex, &parsed) == 0 && !parsed.fs[0]);
+        assert(pso_mesh_skey_parse(hex + 1, &parsed) < 0);
+    }
+    puts("PSO_SKEY OK render and native mesh keys round-trip; malformed and incompatible rows rejected");
     return 0;
 }

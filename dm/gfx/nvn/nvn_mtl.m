@@ -7204,6 +7204,15 @@ static int pso_bundle_covers(NSArray<NSArray<NSString *> *> *pairs, NSString *wa
          found, probed, (bp_now() - t0) / 1e6, ok ? "" : ": the device builds them");
     return ok;
 }
+// The prebuild tool's workers: each waits on one synchronous compile, so as many as Metal's compiler runs at once (maximumConcurrentCompilationTaskCount); the device's active cores where Metal
+// does not say. Not hw.perflevel0: on the chips with three core levels that is only the Super cores (2 on an M6, 5 on an M5 Pro), which gave the tool 1 and 4 workers
+// (docs/reference/shaders.md, A prebuild pool sized from the Super cores). The prepare step keeps the active cores (no measurement on an iPhone, where this count is unread), the background pools a share of level 0
+static int compile_tasks(void) {
+    NSUInteger n = [(id)g_dev respondsToSelector:@selector(maximumConcurrentCompilationTaskCount)] ? g_dev.maximumConcurrentCompilationTaskCount : 0;
+    if (n >= 2) return (int)n;
+    int c = 0; size_t sz = sizeof c; if (sysctlbyname("hw.activecpu", &c, &sz, NULL, 0) || c < 2) c = 2;
+    return c;
+}
 // threads: workers; wait: run on the calling thread until done (the tool), else in the background. Returns the number of pairs, -1 when there is nothing to do
 static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
     shmap_load(); pso4_init();
@@ -7263,13 +7272,13 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
     return n;
 }
 // DM_PSO_PREBUILD=tool: the prebuild alone (the host's other environment as for a run: DM_NVN_SHMAP, DM_MSL_DIR, DM_SAVE or DM_PSO_ARCHIVE), then exit; DM_PSO_PREBUILD_DEPTH=zero for
-// a game that sets the near=0 depth mode, DM_PSO_PREBUILD_THREADS=<n> workers (default: the performance cores less one). Returns 0 when not asked for
+// a game that sets the near=0 depth mode, DM_PSO_PREBUILD_THREADS=<n> workers (default: compile_tasks). Returns 0 when not asked for
 int mtl_pso_prebuild_tool(void) {
     const char *e = getenv("DM_PSO_PREBUILD"); if (!e || strcmp(e, "tool")) return 0;
     setenv("DM_PSO_MANIFEST", "off", 1);   // no prewarm (loading the shader map starts it)
     mtl_init(); const char *z = getenv("DM_PSO_PREBUILD_DEPTH"); if (z && !strcmp(z, "zero")) atomic_store(&g_depth_zero, 1);
     int threads = getenv("DM_PSO_PREBUILD_THREADS") ? atoi(getenv("DM_PSO_PREBUILD_THREADS")) : 0;
-    if (threads <= 0) { int pc = 0; size_t sz = sizeof pc; if (sysctlbyname("hw.perflevel0.physicalcpu", &pc, &sz, NULL, 0) || pc <= 1) pc = 4; threads = pc - 1; }
+    if (threads <= 0) threads = compile_tasks();
     if (pso_prebuild(threads, 1, QOS_CLASS_USER_INITIATED) < 0) MLOG("pipeline prebuild: nothing to do (no archive, no shader_pairs.tsv, prebuilt.tsv says it is done, or the archive bundled with the app holds every base)");
     return 1;
 }

@@ -14995,7 +14995,14 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
 
 static CAMetalDisplayLink *g_link; static CFRunLoopRef g_link_rl; static int g_link_started;
 static int g_link_owns_layer, g_classic_busy;   // Under g_pq_mu: nextDrawable throws while the layer has the display link object attached, so the present thread that takes its own drawable and the display link object are mutually exclusive
-static int link_on(void) { return g_dm_present_link && !atomic_load(&g_rescue_mode) && g_link != nil; }
+// A covered Mac window (no part on screen): macOS fires its display link about once a second, so a game the link paces drops to a few frames a second (Star Fox:
+// 333 ms frames while the player typed in another app; Breath of the Wild stepped up to 3 vsyncs behind another window and stayed there). While the front end says
+// so, link_sync runs mode 0, as a rescue does: the present thread takes drawables itself and the acquire waits for the host's own clock at the present interval
+// (nvnWindowAcquireTexture in hle_nvn.c), the same frame step and targets as with the link. Visible again, the requested mode returns with a fresh stall clock.
+// Focus is not involved: the window may be covered while the game keeps focus (DM_FOCUS_KEEP) and in front while another app is active
+__attribute__((weak)) int front_window_covered(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
+static _Atomic int g_covered;   // link_sync's sample of front_window_covered; also read by link_on without g_pq_mu
+static int link_on(void) { return g_dm_present_link && !atomic_load(&g_rescue_mode) && !atomic_load(&g_covered) && g_link != nil; }
 // Screens whose refresh rate is not a multiple of the link's (144 or 165 Hz against 60 or 30): asked for 60 Hz, the system fires the link on every third refresh of a 165 Hz screen,
 // 55 Hz, and a game paced by the link runs at 55 fps (27.5 at 30). There the link runs at the screen's rate and only the refreshes nearest a steady clock of the wanted rate count as
 // ticks (g_link_vperiod, NvMetalDisplayLinkDelegate): 60 a second on average, each frame shown on the refreshes nearest its 1/60 s slot. DM_LINK_VTICK=0 keeps the system's choice.
@@ -15057,7 +15064,13 @@ static void link_sync(void) {   // Called every frame by the game's present thre
         g_rescue_mode = 0; g_stall_t0 = 0; __atomic_store_n(&g_link_tick_ns, now_ns(), __ATOMIC_RELAXED);
         MLOG("display link: rescue ended, trying pacing mode %d (frame %llu)", want, (unsigned long long)atomic_load(&g_cur_frame));
     }
-    if (g_rescue_mode) want = 0;
+    int cov = front_window_covered() != 0;
+    if (cov != atomic_load(&g_covered)) {
+        atomic_store(&g_covered, cov);
+        if (!cov) { g_stall_t0 = 0; __atomic_store_n(&g_link_tick_ns, now_ns(), __ATOMIC_RELAXED); }   // the link's silence while covered is not a stall
+        if (want) MLOG("display link: window %s (frame %llu)", cov ? "covered, presents follow the host's clock" : "visible, back to the display link", (unsigned long long)atomic_load(&g_cur_frame));
+    }
+    if (g_rescue_mode || cov) want = 0;
     pthread_mutex_unlock(&g_pq_mu);
     if (want && mtl_fps_target() == 30 && link_30hz()) want = 3;   // Power-saving mode: display link at 30 Hz
     if (want) front_screen_match(want == 3 ? 30 : want == 2 ? 120 : 60);
@@ -15308,7 +15321,8 @@ void mtl_present_wait(uint64_t tk) {
         pthread_cond_broadcast(&g_pq_cv);
         if (!g_stall_t0) { g_stall_t0 = last ? last : now; g_stall_drop = 0; g_stall_red = 0; g_stall_logged = 0; g_stall_n++; }
         g_stall_drop += n;
-        int active = dm_focus_now() == 1; uint64_t since = dm_focus_in_since(), from = g_stall_t0 > since ? g_stall_t0 : since;
+        // A covered window's link is silent until link_sync lets it go (front_window_covered): no stall of an active app, no rescue
+        int active = dm_focus_now() == 1 && !atomic_load(&g_covered); uint64_t since = dm_focus_in_since(), from = g_stall_t0 > since ? g_stall_t0 : since;
         uint64_t elapsed = now >= from ? now - from : 0;   // Focus can return after the earlier now sample, including while waiting for an in-flight present
         if (active && !g_stall_logged && elapsed >= STALL_NS) { g_stall_logged = 1;
             MLOG("display link silent for %.0f ms (active): dropping %llu queued frames not yet displayed, the game continues (stall #%llu; back to normal when the link returns)", (now - from) / 1e6, (unsigned long long)n, (unsigned long long)g_stall_n); }

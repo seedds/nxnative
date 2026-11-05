@@ -27,8 +27,8 @@ static void run_case(int format) {
     EXPECT("host texture resolved", 1, t != nil); if (!t) return;
     // NVN image stores use the shader image format, without sRGB conversion. A uint image view writes literal packed bytes.
     mtl_reg_tex(1, (const tex_t *)&tex, NULL); uint64_t rid;
-    mtl_sub_begin(); id<MTLTexture> image = img_fit(1, t, NVN_DPF_UINT, &rid);
-    if (!image) { img_fit_upgrade(); t = tex_mtl((const tex_t *)&tex); image = img_fit(1, t, NVN_DPF_UINT, &rid); }
+    mtl_sub_begin(); id<MTLTexture> image = img_fit(1, t, NVN_DPF_UINT, t.textureType, &rid);
+    if (!image) { img_fit_upgrade(); t = tex_mtl((const tex_t *)&tex); image = img_fit(1, t, NVN_DPF_UINT, t.textureType, &rid); }
     mtl_wait(mtl_sub_commit(), 5000000000ull); EXPECT("production uint image view", 1, image != nil);
     NSError *err = nil; const char *src = "#include <metal_stdlib>\nusing namespace metal;\nkernel void fill(texture2d<uint,access::write> out [[texture(0)]], uint2 p [[thread_position_in_grid]]) { if(p.x<160&&p.y<90) out.write(uint4(0xff996633u,0,0,0),p); }\n";
     id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(src) options:nil error:&err]; if (!lib) { fprintf(stderr,"%s\n",err.description.UTF8String); abort(); }

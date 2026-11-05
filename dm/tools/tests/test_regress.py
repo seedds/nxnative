@@ -405,6 +405,20 @@ class Regress(unittest.TestCase):
             hashed.assert_called_once()   # a manifest of the current hashes is reused as it is
             self.assertTrue((out / 'b-v').is_dir())   # a revision from before shader_lib.py: its host reads only the folder
 
+    def test_chain_builds_share_the_players_one_file_cache(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); build = root / 'build'; g = NS(id='game', kind='nvn', folder=root, build=build)
+            new = root / 'new'; (new / 'dm/tools').mkdir(parents=True); (new / 'dm/tools/shader_cache.py').write_text('')
+            with patch.object(regress, 'ROOT', root):
+                own = regress.game_root(g)
+                self.assertEqual(regress.chain_cache(NS(path=new), g), own / 'cas.db')   # no player's build yet
+                old = build / 'shader/cache/cas/metallib/mac/ab'; old.mkdir(parents=True); (old / 'abcd.metallib').write_bytes(b'compiled')
+                self.assertEqual(regress.chain_cache(NS(path=new), g), build / 'shader/cache/cas.db')   # a cache from before it moves in
+                self.assertFalse((build / 'shader/cache/cas').exists())
+                s = regress.shader_cache.Store(build / 'shader/cache/cas.db'); self.addCleanup(s.close)
+                self.assertEqual(s.get('metallib/mac/abcd.metallib'), b'compiled')
+                self.assertEqual(regress.chain_cache(NS(path=root / 'revision-from-before'), g), own / 'cas')   # its dmsh_build.py wants a folder
+
     def test_a_chain_build_becomes_one_file_with_the_same_hashes(self):
         k = '0123456789abcdef'
         with tempfile.TemporaryDirectory() as td:

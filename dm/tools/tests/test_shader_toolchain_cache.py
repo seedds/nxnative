@@ -25,6 +25,7 @@ TOOLS = REPO / 'dm/gfx/tools'
 sys.path.insert(0, str(TOOLS))
 import dmsh_chain  # noqa: E402
 import dmsh_mtlcache  # noqa: E402
+import shader_cache  # noqa: E402
 
 spec = importlib.util.spec_from_file_location('nsp_toolchain_cache', REPO / 'scripts/build_ipa_from_nsp.py')
 assert spec and spec.loader
@@ -40,7 +41,7 @@ class ShaderCache(unittest.TestCase):
                        XC=['--msl'], MAC_RECORD='mac flags', IOSOUT=None, TARGETS={'mac'},
                        ios_metal=types.SimpleNamespace(RECORD='ios flags'), METAL_FP='tested Metal and SDK',
                        FACTS={}, MAP_ROWS={}, MAP_CONFLICT_ROWS={}, CODE_FP='source', PROFILE_ROWS=b'', PAIRS={},
-                       DUAL_WANT=set(), BF_WANT=set(), BF_STATS=collections.Counter(), CAS=str(root / 'cas'), out=str(root / 'out'),
+                       DUAL_WANT=set(), BF_WANT=set(), BF_STATS=collections.Counter(), STORE=shader_cache.Store(root / 'cas.db'), out=str(root / 'out'),
                        CHAIN='test-chain', clone=shutil.copyfile, shader_rule_source=lambda name: b'')
         (root / 'out').mkdir()
         names = {'tool_fingerprint', 'shader_key', 'cache_path', 'cache_outputs', 'restore_cache', 'publish_cache', 'atomic_json', 'cache_meta_path',
@@ -66,10 +67,10 @@ class ShaderCache(unittest.TestCase):
                 self.ns['METAL_FP'] = 'override Metal and SDK'
                 old = self.digest()
                 for target in ('mac', 'ios') if ios else ('mac',):
-                    d = Path(self.ns['cache_path'](old)) / target; d.mkdir(parents=True, exist_ok=True)
-                    (d / 'key_b.metallib').write_bytes(b'untested compiled library')
-                    (d / 'key_b.json').write_text('{}')
-                    if target == 'mac': (d / 'key_b.metal').write_text('MSL')
+                    d = self.ns['cache_path'](old) + '/' + target
+                    self.ns['STORE'].put(d + '/key_b.metallib', b'untested compiled library')
+                    self.ns['STORE'].put(d + '/key_b.json', b'{}')
+                    if target == 'mac': self.ns['STORE'].put(d + '/key_b.metal', b'MSL')
                 self.assertTrue(self.ns['restore_cache']('key', old))
                 self.ns['METAL_FP'] = 'tested Metal and SDK'
                 self.assertFalse(self.ns['restore_cache']('key', self.digest()))
@@ -78,7 +79,7 @@ class ShaderCache(unittest.TestCase):
         for ios in (False, True):
             for listed in (False, True):
                 with self.subTest(ios=ios, listed=listed):
-                    self.ns['CAS'] = str(Path(self.tmp.name) / f'cas-{ios}-{listed}')
+                    self.ns['STORE'] = shader_cache.Store(Path(self.tmp.name) / f'cas-{ios}-{listed}.db')
                     self.ns['IOSOUT'] = str(Path(self.tmp.name) / 'ios') if ios else None
                     self.ns['TARGETS'] = {'mac', 'ios'} if ios else {'mac'}
                     self.ns['DUAL_WANT'] = {'key'} if listed else set()
@@ -113,8 +114,8 @@ class ShaderCache(unittest.TestCase):
     def test_fetch_variants_do_not_restore_override_libraries(self):
         self.ns['METAL_FP'] = 'override Metal and SDK'
         old = self.ns['bf_digest']('same fetch MSL', 'key')
-        d = Path(self.ns['bf_cache_root'](old)); d.mkdir(parents=True)
-        (d / 'metal').write_text('same fetch MSL'); (d / 'mac.metallib').write_bytes(b'untested variant')
+        d = self.ns['bf_cache_root'](old)
+        self.ns['STORE'].put(d + '/metal', b'same fetch MSL'); self.ns['STORE'].put(d + '/mac.metallib', b'untested variant')
         self.ns['METAL_FP'] = 'tested Metal and SDK'
         current = self.ns['bf_digest']('same fetch MSL', 'key')
         self.assertFalse(self.ns['bf_cache_restore']('key', current, {}, str(Path(self.tmp.name) / 'fetch.metal')))
@@ -142,22 +143,27 @@ class ShaderCache(unittest.TestCase):
         self.ns['TARGETS'] = {'mac', 'ios'}
         self.assertFalse(self.ns['restore_cache']('key', 'digest'))
 
+    def test_an_entry_pruned_during_a_restore_is_a_miss(self):   # another build sharing the cache removed it after the look at its names
+        root = self.ns['cache_path']('digest')
+        for name, data in (('key_b.json', b'{}'), ('key_b.metal', b'MSL'), ('key_b.metallib', b'library')): self.ns['STORE'].put(f'{root}/mac/{name}', data)
+        real = self.ns['STORE'].get
+        self.ns['STORE'].get = lambda name: None if name.endswith('key_b.json') else real(name)
+        self.addCleanup(lambda: setattr(self.ns['STORE'], 'get', real))
+        self.assertFalse(self.ns['restore_cache']('key', 'digest'))
+
     def test_cache_without_analysis_source_is_a_miss(self):
         self.ns.update(TARGETS={'ios'}, IOSOUT=str(Path(self.tmp.name) / 'ios'))
-        root = Path(self.ns['cache_path']('digest'))
-        for label in ('mac', 'ios'):
-            (root / label).mkdir(parents=True)
-            (root / label / 'key_b.json').write_text('{}')
-        (root / 'ios/key_b.metallib').write_bytes(b'library')
+        root = self.ns['cache_path']('digest')
+        for label in ('mac', 'ios'): self.ns['STORE'].put(f'{root}/{label}/key_b.json', b'{}')
+        self.ns['STORE'].put(f'{root}/ios/key_b.metallib', b'library')
         self.assertFalse(self.ns['restore_cache']('key', 'digest'))
 
     def test_dual_target_cache_restores_only_requested_ios_libraries(self):
-        root = Path(self.ns['cache_path']('digest'))
+        root = self.ns['cache_path']('digest')
         for label in ('mac', 'ios'):
-            (root / label).mkdir(parents=True)
-            (root / label / 'key_b.json').write_text('{}')
-            (root / label / 'key_b.metallib').write_bytes(label.encode())
-        (root / 'mac/key_b.metal').write_text('MSL')
+            self.ns['STORE'].put(f'{root}/{label}/key_b.json', b'{}')
+            self.ns['STORE'].put(f'{root}/{label}/key_b.metallib', label.encode())
+        self.ns['STORE'].put(f'{root}/mac/key_b.metal', b'MSL')
         self.ns.update(TARGETS={'ios'}, IOSOUT=str(Path(self.tmp.name) / 'ios'))
         Path(self.ns['IOSOUT']).mkdir()
         self.assertTrue(self.ns['restore_cache']('key', 'digest'))
@@ -215,7 +221,7 @@ class ShaderCache(unittest.TestCase):
         (out / 'vertex_b.metallib').write_bytes(b'un-padded library')
         (out / 'vertex_b.json').write_text(json.dumps({'stage': 'vs', 'vs_pad': []}))
         self.ns['publish_cache']('vertex', 'digest', 'rule', 'source')
-        self.assertFalse(Path(self.ns['cache_meta_path']('vertex')).exists())
+        self.assertFalse(self.ns['STORE'].has(self.ns['cache_meta_path']('vertex')))
         self.assertFalse(self.ns['restore_cache']('vertex', 'digest'))
 
     def test_vertex_only_request_retains_padding_on_subsequent_full_cache_reuse(self):
@@ -330,7 +336,7 @@ class MetalPrefill(unittest.TestCase):
         self.root = Path(self.tmp.name); self.old = self.root / 'b-old'; self.old.mkdir()
         def compile_current(msl, air, lib): Path(lib).write_bytes(b'TESTED ' + Path(msl).read_bytes())
         with mock.patch.object(dmsh_mtlcache, 'compiler_id', return_value='tested compiler and SDK'):
-            self.cache = dmsh_mtlcache.Cache(str(self.root / 'cas'), {'mac': ('macosx', 'flags', compile_current)}, str(self.root))
+            self.cache = dmsh_mtlcache.Cache(shader_cache.Store(self.root / 'cas.db'), {'mac': ('macosx', 'flags', compile_current)}, str(self.root))
 
     def earlier_libraries(self, third_identity):
         for i in range(3):
@@ -347,7 +353,7 @@ class MetalPrefill(unittest.TestCase):
     def test_every_prefilled_library_requires_matching_compiler_identity(self):
         for identity in (None, 'other compiler'):
             with self.subTest(identity=identity):
-                if (self.root / 'cas').exists(): shutil.rmtree(self.root / 'cas')
+                self.cache.store = shader_cache.Store(self.root / f'cas-{identity}.db')
                 self.earlier_libraries(identity)
                 self.cache.fill(str(self.old))
                 result = self.root / 'result.metallib'
@@ -371,8 +377,7 @@ class MetalPrefill(unittest.TestCase):
         src = b'MSL'; msl = self.root / 'shader.metal'; msl.write_bytes(src)
         old_ident = hashlib.sha256(b'dmsh_mtlcache 1\0flags\0tested compiler and SDK').digest()
         digest = hashlib.sha256(old_ident + b'\0' + src).hexdigest()
-        old_path = self.root / 'cas/mac' / digest[:2] / (digest + '.metallib')
-        old_path.parent.mkdir(parents=True); old_path.write_bytes(b'WRONG OVERRIDE LIBRARY')
+        self.cache.store.put(f'metallib/mac/{digest}.metallib', b'WRONG OVERRIDE LIBRARY')
         result = self.root / 'result.metallib'; self.cache.compile('mac', str(msl), str(result))
         self.assertEqual(result.read_bytes(), b'TESTED MSL')
 

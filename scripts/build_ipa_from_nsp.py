@@ -40,6 +40,7 @@ import romfs as rfs
 import nso   # the code module loader: nso.Error is a damaged module (its file cut short or not what its header says)
 import tree_tar   # one file in place of a build's folders of many small files
 import shader_lib   # the shader libraries as one file, read in place
+import shader_cache   # the compile cache as one file, read in place
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pack_dump   # a folder of a game's files instead of NSPs
 import pack_nup   # a game in a NUP container instead of NSPs
@@ -2328,29 +2329,20 @@ def prune_stale_chains(sh, chain):
 
 
 def prune_shader_cache(sh, chain):
-    """Remove the per-shader cache entries (sh/cache/cas/shader/<digest>) the current chain's last full build did not use, with prune_stale_chains and under the same conditions (issue #1033).
+    """Remove the per-shader cache entries (shader/<digest> in sh/cache/cas.db) the current chain's last full build did not use, with prune_stale_chains and under the same conditions (issue #1033).
     A shader's digest covers the chain's code, so each chain change translated every shader again into a new entry and left the old ones: Tears of the Kingdom's held six sets for 28,669 shaders,
     11.85 GB of sources and reflection nothing read. The digests in use are listed by dmsh_build.py's full build in b-<chain>/_b_cas.txt beside the Mac outputs (every full build writes them);
-    cas/index cannot tell, since a cache hit does not rewrite it. No list (libraries from before the list): nothing goes. An entry newer than the list stays (regress.py's chain builds share this
+    index/ cannot tell, since a cache hit does not rewrite it. No list (libraries from before the list): nothing goes. An entry newer than the list stays (regress.py's chain builds share this
     cache and may publish meanwhile). The digests also cover the iOS compile convention, so a build of the other target translates again, as switching targets did before; the Metal compile cache
-    (cas/metallib) and the fetch variants (cas/variant) are keyed by the MSL and stay. Only names of 64 hex digits go. Removals that fail are one [RED] line, as for the libraries.
+    (metallib/) and the fetch variants (variant/) are keyed by the MSL and stay. Only names of 64 hex digits go. Removals that fail are one [RED] line, as for the libraries.
     Logs the space of the sources and reflection: an entry's libraries are clones of the compile cache's. Returns the number removed"""
     used = shader_lib.view(sh / 'cache' / f'b-{chain}') / '_b_cas.txt'
     try: keep, since = set(used.read_text().split()), used.stat().st_mtime
     except OSError: return 0
-    n = size = 0; failed = []
-    try: it = os.scandir(sh / 'cache' / 'cas' / 'shader')
-    except OSError: return 0
-    with it:
-        for e in it:
-            try:
-                if e.name in keep or not re.fullmatch(r'[0-9a-f]{64}', e.name) or not e.is_dir(follow_symlinks=False) or e.stat(follow_symlinks=False).st_mtime >= since: continue
-                if not n and not failed: say('removing the shader cache of other chain versions (the first time, up to half an hour for a large game on an external drive)')   # Tears of the Kingdom: 906,286 entries scanned in 18 minutes on a T7
-                b = sum(f.stat().st_size for f in Path(e.path).rglob('*') if f.is_file() and f.suffix != '.metallib')
-                rmtree(Path(e.path))
-            except OSError as x: failed.append(f'{e.path}: {x}'); continue
-            n += 1; size += b
-    if failed: say(f'[RED] could not remove {len(failed):,} old shader cache entries, the first {failed[0]}')
+    if not shader_cache.exists(sh / 'cache/cas.db'): return 0
+    store = shader_cache.Store(sh / 'cache/cas.db', say)
+    try: n, size = store.prune_shaders(keep, since)
+    finally: store.close()
     if n: say(f'removed old shader cache entries: {n:,} ({amount(size, "B")})')
     return n
 
@@ -2404,12 +2396,13 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     while the Mac sources and reflection carry a full build's stamp (inputs.tsv) for c1_full.tsv and cb_extent.tsv to name (chain_tables).
     Switching targets translates again (the per-shader keys include the iOS compile convention); the Metal compile cache (dmsh_mtlcache.py) reuses previously compiled MSL for that target.
     After success the libraries of other chain versions and the cache entries this chain's build did not use are removed (prune_stale_chains, prune_shader_cache), the libraries become one file each,
-    b-<chain>.img beside the folder's name, read in place (shader_lib.py), and the cache becomes one file, sh/cache/cas.tar (tree_tar.py), which only a build that runs dmsh_build.py unpacks: a reused step touches none of their files.
+    b-<chain>.img beside the folder's name, read in place (shader_lib.py), and the compile cache is one file, sh/cache/cas.db (shader_cache.py), read in place and into which a cache from before it moves: a reused step touches none of their files.
     seen (--seen-shaders, a Mac-only build): only those keys, into sh/partial/b-<chain>, emptied first, with its key inside; the full build's libraries, its key and the cache are left as they are, and the
     per-shader cache (DMSH_CAS) is the full build's, so a later full build reuses this work. It gets no stamp and no c1_full.tsv or cb_extent.tsv, on purpose: beside a stamp the host would take the tables'
     silence on a shader the partial build never saw as proof it is safe (no chain_tables, no shader_regressions, no pruning; the host logs the missing stamp in red at each start)
     pull: an iPhone build's ios_wants_pulling. False neither compiles the pulling libraries nor keeps them in its image; True does not reuse an image without them"""
-    ios, log, cas = sh / 'ios', logs / 'dmsh_build.log', sh / 'cache/cas'
+    ios, log, cas = sh / 'ios', logs / 'dmsh_build.log', sh / 'cache/cas.db'
+    shader_cache.adopt(sh / 'cache/cas', cas, say)
     PROG.stage('Mac shaders' if mac else 'iOS shaders')
     chain = chain_of(repo)
     out = sh / 'partial' if seen else sh / 'cache' if mac else ios
@@ -2425,7 +2418,7 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
         lost_pull = pull and not mac and not seen and shader_lib.left_out_pulling(libs)   # now this app reads them: --gpu, the profile's pso_mtl4, IOS_PULL or --prepare-xcode changed
         if lost_pull: say('the app now needs the pulling vertex libraries, which this image left out: building them')
         if shader_lib.has_library(libs) and note is not None and not lost_pull and (seen or chain_tables(py, repo, sh, env, logs, g, chain)):
-            if not seen: prune_stale_chains(sh, chain); prune_shader_cache(sh, chain); pack_libraries(sh, chain, None if mac else pull); tree_tar.pack(cas, say)   # folders from before the two files become them here
+            if not seen: prune_stale_chains(sh, chain); prune_shader_cache(sh, chain); pack_libraries(sh, chain, None if mac else pull)   # folders from before this become the one file here
             PROG.end(f'{note}, reused (inputs unchanged)'); return out
     else: key = None
     rmtree(kmac)
@@ -2446,8 +2439,6 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     if mac: del benv['IOSOUT']   # dmsh_build.py builds the iOS libraries only with IOSOUT
     elif pull is False: benv['DMSH_IOS_PULL'] = '0'   # nothing in this app reads them
     if seen: benv['DMSH_CAS'] = str(cas)
-    PROG.set(step='unpacking the shader cache')
-    tree_tar.unpack(cas, say)
     try: stale = None if seen else stale_shaders(py, repo, env, [sh / 'cache'] if mac else [sh / 'cache', ios] if keep_mac else [ios], chain, g)
     except Exception: stale = None   # a note never stops the build
     if stale:
@@ -2485,7 +2476,6 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     if not seen:   # last: a build that stopped before here keeps the old libraries and cache entries
         prune_stale_chains(sh, chain); prune_shader_cache(sh, chain); pack_libraries(sh, chain, None if mac else pull)
         if mac: rmtree(sh / 'partial')   # the whole library replaces a partial one; partial-keys.txt stays
-    tree_tar.pack(cas, say)
     return out
 
 

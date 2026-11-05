@@ -87,7 +87,8 @@ def load_module(name, path):   # a module from a file (another script, or a tool
 bench = load_module('bench', REPO / 'scripts/bench.py')
 shader_regressions = load_module('shader_regressions', REPO / 'dm/gfx/tools/shader_regressions.py')
 usage = load_module('usage', REPO / 'dm/tools/usage.py')   # usage manifests and change impact (regress.py usage / impact)
-tree_tar = load_module('tree_tar', REPO / 'dm/tools/tree_tar.py')   # the player's build keeps the compile cache this shares as one file
+tree_tar = load_module('tree_tar', REPO / 'dm/tools/tree_tar.py')   # a work folder's quiet folders as one file each, and an old revision's compile cache
+shader_cache = load_module('shader_cache', REPO / 'dm/tools/shader_cache.py')   # the player's build keeps the compile cache this shares as one file, read in place
 shader_lib = load_module('shader_lib', REPO / 'dm/tools/shader_lib.py')   # a chain build's libraries as one file, read in place
 rfs = shader_lib.romfs
 # Where they are depends on the machine (a drive with room for the trees and the games' NSP folders): set with --root / --games-dir or REGRESS_ROOT / REGRESS_GAMES, checked in main
@@ -414,6 +415,17 @@ def prune_chains(g):
     return gone
 
 
+def chain_cache(tree, g):
+    """The compile cache a chain build of this revision uses: the player's build's one file when there is one, which a cache from before it moves into first, else the work folder's. A revision from before
+    shader_cache.py wants a folder, regress/cas, kept as a tar between builds. Its chain key differs, as it covers dmsh_mtlcache.py, and its compiles are not shared"""
+    if not (tree.path / 'dm/tools/shader_cache.py').is_file(): return game_root(g) / 'cas'
+    shared, own = g.build / 'shader/cache/cas.db', game_root(g) / 'cas.db'
+    shader_cache.adopt(g.build / 'shader/cache/cas', shared, say)
+    if shared.is_file(): return shared
+    shader_cache.adopt(game_root(g) / 'cas', own, say)
+    return own
+
+
 def chain_lib(out):   # a chain build's library, to read: its folder or its one file
     return shader_lib.view(next(p for p in sorted(out.glob('b-*')) if not p.name.endswith('.part')))
 
@@ -443,20 +455,20 @@ def chain_build_locked(tree, g, a, v, inp, key, out):
     done = (out / 'built.ok').is_file()   # a build whose outputs are complete (a run stopped while hashing, or a build made by hand); its manifest is made again
     if g.kind == 'nvn':
         tools_dir = tree.path / 'dm/gfx/tools'
-        cas = g.build / 'shader/cache/cas'
-        env.update(XLATE=str(tools_dir / 'dmsh_xlate_bin/dmsh_xlate'), DMSH_CAS=str(cas if tree_tar.exists(cas) else game_root(g) / 'cas'))
+        cas = chain_cache(tree, g)
+        env.update(XLATE=str(tools_dir / 'dmsh_xlate_bin/dmsh_xlate'), DMSH_CAS=str(cas))
         entry = tools_dir / ('own_compilers.py' if (tools_dir / 'own_compilers.py').is_file() else 'dmsh_build.py')
         lib = out / f'b-{v}'
         if not done:
             say(f'  {g.id}: chain {v} (inputs {inp}) of {tree.id}: translating the shaders ({jobs} workers) → {out}')
-            if tree_tar.exists(cas): tree_tar.unpack(cas, say)
+            if cas.suffix != '.db': tree_tar.unpack(cas, say)
             rc, paused = run_heavy([sys.executable, entry, g.build / 'shader/pkg', out], log, tree.path, env, a, f'{g.id} shader build'); t0 += paused
             if rc or not (lib / '_b_build.json').is_file():
                 raise HarnessError(f'{g.id}: dmsh_build.py of {tree.id} failed (exit {rc}); last lines of {log}:\n' + ''.join(collections.deque(open(log, errors='replace'), maxlen=8)))
             prof = out / 'profile'; prof.mkdir(exist_ok=True)   # the tables the host reads beside the shader map, as this build made them
             for src in g.profile_dir(tree).glob('*.tsv'): shutil.copyfile(src, prof / src.name)
             (out / 'built.ok').write_text(f'{tree.id}\n')
-            tree_tar.pack(cas, say)
+            if cas.suffix != '.db': tree_tar.pack(cas, say)
         say(f'  {g.id}: hashing the outputs of chain {v}')
         shaders = nvn_manifest(lib, jobs)
     else:

@@ -121,6 +121,11 @@ class PackQuiet(unittest.TestCase):
         self.assertEqual((self.w / 'kept.tar').read_bytes(), b'mine')
         self.assertTrue((self.w / 'kept').is_dir()); self.assertTrue((self.w / 'regress').is_dir()); self.assertTrue((self.w / 'small').is_dir())
 
+    def test_a_virtual_environment_stays(self):   # scripts run it by its path, and nothing writes to it, so it looks untouched
+        self.folder('venv'); (self.w / 'venv/pyvenv.cfg').write_text('home = /x\n'); self.folder('py'); (self.w / 'py/pyvenv.cfg').write_text('home = /x\n')
+        self.assertEqual(self.run_old(), [])
+        self.assertTrue((self.w / 'venv').is_dir()); self.assertTrue((self.w / 'py').is_dir())
+
     def test_a_folder_with_a_recent_file_stays(self):
         self.folder('busy')
         self.assertEqual(tree_tar.pack_quiet(self.w, self.lines.append), [])   # 14 days: everything here is newer

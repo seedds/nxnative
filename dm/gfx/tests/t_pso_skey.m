@@ -62,7 +62,8 @@ int main(void) {
         pso_skey a, b; char ha[sizeof a * 2 + 1], hb[sizeof b * 2 + 1];
         pso_skey_from(&k1, vs, nil, 0, NULL, &a); pso_skey_from(&k2, vs, nil, 0, NULL, &b); assert(memcmp(&a, &b, sizeof a) != 0);
         pso_skey_hex(&a, ha); pso_skey_hex(&b, hb); assert(pso_skey_parse(ha, &a) == 0 && pso_skey_parse(hb, &b) == 0);
-        assert(memcmp(&a, &b, sizeof a) == 0 && a.k.blend[0].src_rgb == 1 && a.k.blend[0].dst_rgb == 2 && a.k.chmask == 0xff && a.k.blend_en == 1);
+        pso_skey_hex(&a, ha); pso_skey_hex(&b, hb);
+        assert(strcmp(ha, hb) == 0 && a.k.blend[0].src_rgb == 1 && a.k.blend[0].dst_rgb == 2 && a.k.chmask == 0xff && a.k.blend_en == 1);
         pso_skey_from(&k2, vs, nil, 1, NULL, &b); pso_skey_hex(&b, hb); assert(pso_skey_parse(hb, &b) == 0);
         assert(b.k.chmask == (0xffu | 0xfu << 20) && b.k.blend_en == (1u | 1u << 5) && b.k.blend[1].src_rgb == 0 && b.k.blend[3].dst_a == 0);
     }

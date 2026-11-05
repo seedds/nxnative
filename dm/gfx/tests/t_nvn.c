@@ -56,6 +56,143 @@ static size_t tex_size(int fmt, int w, int h, int flags, size_t *align) {
     return P(nvnTextureBuilderGetStorageSize)(&tb);
 }
 
+// NVN defaults are checked through public setters and getters, including reset
+// of previously assigned state; see docs/reference/nvn-objects.md.
+static void native_defaults(void) {
+    NVNmemoryPoolBuilder pb = {0}; uint8_t storage[16];
+    P(nvnMemoryPoolBuilderSetDevice)(&pb, &dev);
+    P(nvnMemoryPoolBuilderSetStorage)(&pb, storage, sizeof storage);
+    P(nvnMemoryPoolBuilderSetFlags)(&pb, NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_UNCACHED);
+    P(nvnMemoryPoolBuilderSetDefaults)(&pb);
+    EXPECT("pool defaults retain device", 1, P(nvnMemoryPoolBuilderGetDevice)(&pb) == &dev);
+    EXPECT("pool defaults clear storage", 1, P(nvnMemoryPoolBuilderGetMemory)(&pb) == NULL && P(nvnMemoryPoolBuilderGetSize)(&pb) == 0);
+    EXPECT("pool default flags CPU_NO_ACCESS/GPU_CACHED", 0x21, P(nvnMemoryPoolBuilderGetFlags)(&pb));
+
+    NVNsamplerBuilder sb = {0}; NVNsampler sampler = {0};
+    P(nvnSamplerBuilderSetDevice)(&sb, &dev);
+    P(nvnSamplerBuilderSetMinMagFilter)(&sb, NVN_MIN_FILTER_NEAREST_MIPMAP_LINEAR, NVN_MAG_FILTER_NEAREST);
+    P(nvnSamplerBuilderSetLodClamp)(&sb, -4.f, 8.f);
+    P(nvnSamplerBuilderSetDefaults)(&sb);
+    NVNminFilter min; NVNmagFilter mag; float lo, hi;
+    P(nvnSamplerBuilderGetMinMagFilter)(&sb, &min, &mag);
+    EXPECT("sampler default minification is linear", NVN_MIN_FILTER_LINEAR, min);
+    EXPECT("sampler default magnification is linear", NVN_MAG_FILTER_LINEAR, mag);
+    P(nvnSamplerBuilderGetLodClamp)(&sb, &lo, &hi);
+    EXPECT("sampler default LOD clamp is [0,1000]", 1, lo == 0.f && hi == 1000.f);
+    EXPECT("default sampler initializes", 1, P(nvnSamplerInitialize)(&sampler, &sb));
+    P(nvnSamplerGetMinMagFilter)(&sampler, &min, &mag);
+    P(nvnSamplerGetLodClamp)(&sampler, &lo, &hi);
+    EXPECT("sampler keeps default filtering and LOD", 1,
+           min == NVN_MIN_FILTER_LINEAR && mag == NVN_MAG_FILTER_LINEAR && lo == 0.f && hi == 1000.f);
+    P(nvnSamplerFinalize)(&sampler);
+
+    NVNtextureBuilder tb = {0};
+    P(nvnTextureBuilderSetDevice)(&tb, &dev);
+    P(nvnTextureBuilderSetSize3D)(&tb, 7, 9, 11); P(nvnTextureBuilderSetLevels)(&tb, 4);
+    P(nvnTextureBuilderSetDefaults)(&tb);
+    EXPECT("texture default width is unset", 0, P(nvnTextureBuilderGetWidth)(&tb));
+    EXPECT("texture default height is unset", 0, P(nvnTextureBuilderGetHeight)(&tb));
+    EXPECT("texture default depth is unset", 0, P(nvnTextureBuilderGetDepth)(&tb));
+    EXPECT("texture default has one level", 1, P(nvnTextureBuilderGetLevels)(&tb));
+
+    NVNmultisampleState ms = {0};
+    P(nvnMultisampleStateSetAlphaToCoverageDither)(&ms, 0);
+    P(nvnMultisampleStateSetDefaults)(&ms);
+    EXPECT("default alpha-to-coverage dither enabled", 1, P(nvnMultisampleStateGetAlphaToCoverageDither)(&ms));
+}
+
+static void builder_queries(void) {
+    // Builder setters/getters retain full pointer, size and offset values. No allocation
+    // or Initialize is needed to inspect a builder's proposed storage.
+    NVNdeviceBuilder db = {0}; NVNmemoryPool pool = {0}; uint8_t storage[16];
+    const size_t size = 0x200000080ull; const ptrdiff_t offset = 0x100000028ll;
+    P(nvnDeviceBuilderSetFlags)(&db, 0x40000002);
+    EXPECT("device builder flags round trip", 0x40000002, P(nvnDeviceBuilderGetFlags)(&db));
+    P(nvnDeviceBuilderSetDefaults)(&db);
+    EXPECT("device builder reset clears flags", 0, P(nvnDeviceBuilderGetFlags)(&db));
+    NVNmemoryPoolBuilder pb = {0};
+    P(nvnMemoryPoolBuilderSetDevice)(&pb, &dev); P(nvnMemoryPoolBuilderSetDefaults)(&pb);
+    P(nvnMemoryPoolBuilderSetStorage)(&pb, storage, size); P(nvnMemoryPoolBuilderSetFlags)(&pb, 0x24);
+    EXPECT("pool builder storage pointer round trip", 1, P(nvnMemoryPoolBuilderGetMemory)(&pb) == storage);
+    EXPECT("pool builder full 64-bit size", size, P(nvnMemoryPoolBuilderGetSize)(&pb));
+    EXPECT("pool builder flags round trip", 0x24, P(nvnMemoryPoolBuilderGetFlags)(&pb));
+    NVNbufferBuilder bb = {0};
+    P(nvnBufferBuilderSetDevice)(&bb, &dev); P(nvnBufferBuilderSetDefaults)(&bb);
+    P(nvnBufferBuilderSetStorage)(&bb, &pool, offset, size);
+    EXPECT("buffer builder retains device", 1, P(nvnBufferBuilderGetDevice)(&bb) == &dev);
+    EXPECT("buffer builder returns pool pointer", 1, P(nvnBufferBuilderGetMemoryPool)(&bb) == &pool);
+    EXPECT("buffer builder full 64-bit offset", offset, P(nvnBufferBuilderGetMemoryOffset)(&bb));
+    EXPECT("buffer builder full 64-bit size", size, P(nvnBufferBuilderGetSize)(&bb));
+    P(nvnBufferBuilderSetDefaults)(&bb);
+    EXPECT("buffer builder reset retains device", 1, P(nvnBufferBuilderGetDevice)(&bb) == &dev);
+    EXPECT("buffer builder reset clears storage", 1, P(nvnBufferBuilderGetMemoryPool)(&bb) == NULL &&
+           P(nvnBufferBuilderGetMemoryOffset)(&bb) == 0 && P(nvnBufferBuilderGetSize)(&bb) == 0);
+    NVNtextureBuilder tb = {0};
+    P(nvnTextureBuilderSetDevice)(&tb, &dev); P(nvnTextureBuilderSetDefaults)(&tb);
+    P(nvnTextureBuilderSetStorage)(&tb, &pool, offset); P(nvnTextureBuilderSetPackagedTextureData)(&tb, storage);
+    EXPECT("texture builder returns pool pointer", 1, P(nvnTextureBuilderGetMemoryPool)(&tb) == &pool);
+    EXPECT("texture builder full 64-bit offset", offset, P(nvnTextureBuilderGetMemoryOffset)(&tb));
+    EXPECT("texture builder packaged-data pointer", 1, P(nvnTextureBuilderGetPackagedTextureData)(&tb) == storage);
+    P(nvnTextureBuilderSetDepthStencilMode)(&tb, NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL);
+    EXPECT("texture builder stencil mode", NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL, P(nvnTextureBuilderGetDepthStencilMode)(&tb));
+    const int channels[][4] = {{1,0,5,2}, {0,0,0,0}};
+    for (unsigned i=0;i<2;i++) {
+        const int *c=channels[i]; NVNtextureSwizzle r=-1,g=-1,b=-1,a=-1;
+        P(nvnTextureBuilderSetSwizzle)(&tb,c[0],c[1],c[2],c[3]); P(nvnTextureBuilderGetSwizzle)(&tb,&r,&g,&b,&a);
+        EXPECT("texture builder swizzle round trip", 1, r==c[0] && g==c[1] && b==c[2] && a==c[3]);
+    }
+    P(nvnTextureBuilderSetDefaults)(&tb);
+    EXPECT("texture builder reset retains device", 1, P(nvnTextureBuilderGetDevice)(&tb) == &dev);
+    EXPECT("texture builder reset clears storage", 1, P(nvnTextureBuilderGetMemoryPool)(&tb) == NULL && P(nvnTextureBuilderGetMemoryOffset)(&tb) == 0);
+    EXPECT("texture builder reset clears packaged data", 1, P(nvnTextureBuilderGetPackagedTextureData)(&tb) == NULL);
+    EXPECT("texture builder reset selects depth", NVN_TEXTURE_DEPTH_STENCIL_MODE_DEPTH, P(nvnTextureBuilderGetDepthStencilMode)(&tb));
+    NVNtextureSwizzle r=-1,g=-1,b=-1,a=-1; P(nvnTextureBuilderGetSwizzle)(&tb,&r,&g,&b,&a);
+    EXPECT("texture builder reset restores RGBA", 1, r==2 && g==3 && b==4 && a==5);
+    NVNsamplerBuilder sb = {0}; P(nvnSamplerBuilderSetDevice)(&sb, &dev); P(nvnSamplerBuilderSetDefaults)(&sb);
+    EXPECT("sampler builder reset retains device", 1, P(nvnSamplerBuilderGetDevice)(&sb) == &dev);
+}
+
+static void pool_access(void) {
+    const size_t size=65536; const ptrdiff_t offset=4096;
+    uint8_t *mem=mmap(NULL,size,PROT_READ|PROT_WRITE,MAP_ANON|MAP_PRIVATE,-1,0);
+    if (mem==MAP_FAILED) abort();
+    const int flags[]={NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS, NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED, NVN_MEMORY_POOL_FLAGS_CPU_CACHED};
+    NVNmemoryPoolBuilder pb={0}; P(nvnMemoryPoolBuilderSetDevice)(&pb,&dev); P(nvnMemoryPoolBuilderSetDefaults)(&pb);
+    P(nvnMemoryPoolBuilderSetStorage)(&pb,mem,size);
+    NVNbufferBuilder bb={0}; P(nvnBufferBuilderSetDevice)(&bb,&dev); P(nvnBufferBuilderSetDefaults)(&bb);
+    for (unsigned i=0;i<3;i++) {
+        NVNmemoryPool pool={0}; NVNbuffer buf={0};
+        P(nvnMemoryPoolBuilderSetFlags)(&pb,flags[i]|NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
+        EXPECT("mapping test pool initializes",1,P(nvnMemoryPoolInitialize)(&pool,&pb));
+        P(nvnBufferBuilderSetStorage)(&bb,&pool,offset,512);
+        EXPECT("mapping test buffer initializes",1,P(nvnBufferInitialize)(&buf,&bb));
+        EXPECT("pool map respects CPU access",1,P(nvnMemoryPoolMap)(&pool)==(i ? mem : NULL));
+        EXPECT("buffer map respects CPU access and offset",1,P(nvnBufferMap)(&buf)==(i ? mem+offset : NULL));
+        EXPECT("GPU address survives CPU_NO_ACCESS",(uintptr_t)mem+offset,P(nvnBufferGetAddress)(&buf));
+        P(nvnBufferFinalize)(&buf); P(nvnMemoryPoolFinalize)(&pool);
+    }
+    NVNmemoryPool physical={0}, virtual_pool={0}; NVNbuffer buf;
+    P(nvnMemoryPoolBuilderSetFlags)(&pb,NVN_MEMORY_POOL_FLAGS_PHYSICAL|NVN_MEMORY_POOL_FLAGS_CPU_CACHED|NVN_MEMORY_POOL_FLAGS_GPU_NO_ACCESS);
+    EXPECT("physical backing pool initializes",1,P(nvnMemoryPoolInitialize)(&physical,&pb));
+    EXPECT("physical backing remains CPU-mappable",1,P(nvnMemoryPoolMap)(&physical)==mem);
+    P(nvnBufferBuilderSetStorage)(&bb,&physical,offset,512); memset(&buf,0xa5,sizeof buf);
+    EXPECT("physical pool cannot directly back a buffer",0,P(nvnBufferInitialize)(&buf,&bb));
+    EXPECT("failed physical-buffer init clears object",0,((const buf_t *)&buf)->magic);
+    P(nvnMemoryPoolBuilderSetFlags)(&pb,NVN_MEMORY_POOL_FLAGS_VIRTUAL|NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS|NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
+    P(nvnMemoryPoolBuilderSetStorage)(&pb,NULL,size);
+    EXPECT("virtual address pool initializes",1,P(nvnMemoryPoolInitialize)(&virtual_pool,&pb));
+    EXPECT("virtual address range is not a CPU mapping",1,P(nvnMemoryPoolMap)(&virtual_pool)==NULL);
+    P(nvnBufferBuilderSetStorage)(&bb,&virtual_pool,offset,512);
+    EXPECT("virtual pool can back a buffer",1,P(nvnBufferInitialize)(&buf,&bb));
+    EXPECT("unmapped virtual buffer has no CPU mapping",1,P(nvnBufferMap)(&buf)==NULL);
+    map_req map={&physical,0,0,size,0,0};
+    EXPECT("virtual pool maps physical backing",1,P(nvnMemoryPoolMapVirtual)(&virtual_pool,1,(const NVNmappingRequest *)&map));
+    EXPECT("mapped virtual pool still has no CPU mapping",1,P(nvnMemoryPoolMap)(&virtual_pool)==NULL);
+    EXPECT("mapped virtual buffer still has no CPU mapping",1,P(nvnBufferMap)(&buf)==NULL);
+    EXPECT("virtual mapping does not hide physical CPU mapping",1,P(nvnMemoryPoolMap)(&physical)==mem);
+    P(nvnBufferFinalize)(&buf); P(nvnMemoryPoolFinalize)(&virtual_pool); P(nvnMemoryPoolFinalize)(&physical); munmap(mem,size);
+}
+
 int main(void) {
     setenv("DM_NVN_COUNT", "1", 1);   // the call-count checks below need the counting trampolines (off by default)
     // Engine-native limiters have no FPS state page. Their launcher cap must
@@ -124,7 +261,9 @@ int main(void) {
     P(nvnDeviceGetInteger)(&dev, (NVNdeviceInfo)0x30, &v); EXPECT("newest GPU code minor", 16, v);
     P(nvnDeviceGetInteger)(&dev, (NVNdeviceInfo)0x2F, &v); EXPECT("oldest GPU code major", 1, v);
     P(nvnDeviceGetInteger)(&dev, (NVNdeviceInfo)0x31, &v); EXPECT("oldest GPU code minor", 5, v);
-    // The Switch 2 table (NVN2's own constants: the newest seen, SDK 21.4.4's, as an older sdk's own switch answers its older versions through dm_sdk_nvn2_item): its GPU code range and Ampere's limits, the host's 16 vertex slots, and the run-time items
+    native_defaults();
+    builder_queries(); pool_access();
+    // NVN2 GPU-code version range, 16 vertex bindings, 32 attributes, and runtime capabilities.
     EXPECT("NVN2: API 231.39", 231 * 100 + 39, g_devinfo2[0] * 100 + g_devinfo2[1]);
     EXPECT("NVN2: GPU code 201.0 to 201.20", 1, g_devinfo2[0x2E] == 201 && g_devinfo2[0x30] == 20 && g_devinfo2[0x2F] == 201 && g_devinfo2[0x31] == 0);
     EXPECT("NVN2: 1,024 compute threads, an unbounded dispatch width", 1, g_devinfo2[0x1F] == 1024 && g_devinfo2[0x20] == 2147483647);
@@ -284,6 +423,22 @@ int main(void) {
         fl_drop(poolmem, sizeof poolmem);
         EXPECT("flushed: the first pool's spans dropped", 0, (long long)g_nfl);
         P(nvnMemoryPoolBuilderSetStorage)(&pb, poolmem, sizeof poolmem);
+    }
+
+    // Buffer flushes name a subrange relative to the buffer, not to its memory pool.
+    {
+        NVNbufferBuilder bb = {0}; NVNbuffer buffer = {0};
+        P(nvnBufferBuilderSetDevice)(&bb, &dev); P(nvnBufferBuilderSetDefaults)(&bb);
+        P(nvnBufferBuilderSetStorage)(&bb, &pool, 0x4000, 0x400);
+        EXPECT("flush buffer initializes", 1, P(nvnBufferInitialize)(&buffer, &bb));
+        P(nvnBufferFlushMappedRange)(&buffer, 0x80, 0x40);
+        EXPECT("buffer flush includes both offsets", 1, nvn_flushed(poolmem + 0x4080, 0x40));
+        EXPECT("buffer flush excludes preceding byte", 0, nvn_flushed(poolmem + 0x407f, 1));
+        EXPECT("buffer flush excludes following byte", 0, nvn_flushed(poolmem + 0x40c0, 1));
+        EXPECT("buffer flush excludes unadjusted offset", 0, nvn_flushed(poolmem + 0x80, 0x40));
+        P(nvnBufferFlushMappedRange)(&buffer, 0x200, 0);
+        EXPECT("zero-length buffer flush adds no span", 0, nvn_flushed(poolmem + 0x4200, 1));
+        P(nvnBufferFinalize)(&buffer); fl_drop(poolmem, sizeof poolmem);
     }
 
     // 5. Command buffer: record uniform updates / events / counters / buffer copies / nested calls, with memory in 256 B segments to force multi-segment linking
@@ -925,14 +1080,18 @@ int main(void) {
     }
 
     // 7. Unimplemented functions: return 0, report a failure, report only once
-    // Use a function that is still unimplemented (nvnBufferBuilderSetDefaults, used before, was implemented later and crashes on NULL)
+    // Exercise a real thunk while installing a stub only for this test.
     unsigned ui = 0; while (strcmp(nvn_names[ui], "nvnBufferBuilderGetDevice")) ui++;
-    ((void (*)(void *))proc("nvnBufferBuilderGetDevice"))(NULL); ((void (*)(void *))proc("nvnBufferBuilderGetDevice"))(NULL);
+    void *saved_fn = nvn_slot[ui].fn; uint64_t before = nvn_slot[ui].cnt;
+    nvn_slot[ui].fn = (void *)nvn_unimpl_entry;
+    EXPECT("unimplemented function returns zero", 1, P(nvnBufferBuilderGetDevice)(NULL) == NULL);
+    P(nvnBufferBuilderGetDevice)(NULL);
     EXPECT("unimplemented function marked as reported ([RED]) after a call", 1, g_unimpl_seen[ui] > 0);
-    EXPECT("unimplemented function count 2", 2, nvn_slot[ui].cnt);
-    for (int i = 0; i < 254; i++) ((void (*)(void *))proc("nvnBufferBuilderGetDevice"))(NULL);   // the 256th call is where a one-byte count wrapped to 0, and the next call reported again
-    EXPECT("unimplemented function count 256", 256, nvn_slot[ui].cnt);
+    EXPECT("unimplemented function counted twice", 2, nvn_slot[ui].cnt - before);
+    for (int i = 0; i < 254; i++) P(nvnBufferBuilderGetDevice)(NULL);   // a one-byte count used to wrap on the 256th call
+    EXPECT("unimplemented function counted 256 times", 256, nvn_slot[ui].cnt - before);
     EXPECT("unimplemented function stays reported past 256 calls", 1, g_unimpl_seen[ui]);
+    nvn_slot[ui].fn = saved_fn;
 
     // 8. A texture buffer as 2D rows for wrapped 1D fetches (x & 0x3FFF, x >> 14; nvn_mtl.m tbuf_as_2d): full rows back to back, one short row rounded to the alignment
     {

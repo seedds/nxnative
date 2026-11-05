@@ -531,6 +531,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - red stub lines for NVN calls. → [NVN calls that were red stubs](../reference/nvn-objects.md#nvn-calls-that-were-red-stubs)
 - `nvnWindowGetPresentInterval`, `nvnCommandBufferSetCopyImageStride` missing. → [SDK 8 window and copy-stride entry points](../reference/nvn-objects.md#sdk-8-window-and-copy-stride-entry-points)
 - `[RED] texture bound to an image slot lacks the shader-write usage`, and compute image writes go to a dummy texture. → [Image bindings supply shader-write intent](../reference/nvn-objects.md#image-bindings-supply-shader-write-intent)
+- a Switch 2 load makes private textures and their tiled guest copies resident together. Bindless descriptor scans can also allocate fresh zero-filled textures for retired objects whose aliases have already been replaced, triggering more alias takeovers and table rebuilds. → [A raw address table pins CPU-only pools and revives retired textures](../reference/nvn-objects.md#a-raw-address-table-pins-cpu-only-pools-and-revives-retired-textures)
 
 ## Rendering
 
@@ -907,6 +908,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - geometry preparation dominates rendering CPU even after geometry passes have been batched; primitive assembly and capture-index deduplication repeat for unchanged meshes. → [Prepared geometry indices reused after byte comparison](../reference/shaders.md#prepared-geometry-indices-reused-after-byte-comparison)
 - geometry vertex-capture passes consume substantial GPU time before geometry compute or depth rasterization. → [Geometry capture initializes only missing words](../reference/shaders.md#geometry-capture-initializes-only-missing-words)
 - Apple's performance HUD (`DM_METAL_HUD=1`) says `Compiled 2 shaders. Total compilation time is 102.70ms. Consider adopting MTL4Compiler for more fine grained compilations` during play, with a dip in the frame-rate graph at that moment, for example when a new room first issues a scissored clear. → [The host's own shaders compiled from source at run time](../reference/shaders.md#the-hosts-own-shaders-compiled-from-source-at-run-time)
+- Xcode 26.5 cannot compile the macOS/iOS 27 temporal-scaler offset properties used by `dlss_eval`, even though the calls are guarded by OS availability. → [Temporal-scaler offset setters with older SDK headers](../reference/shaders.md#temporal-scaler-offset-setters-with-older-sdk-headers)
 
 ## Game state
 

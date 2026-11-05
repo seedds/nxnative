@@ -23,6 +23,7 @@
 
 #define R_TIMEOUT     0xEA01u   // Kernel module 1, description 117
 #define R_CANCELLED   0xEC01u   // 118
+#define R_OUT_OF_RANGE 0xEE01u  // 119
 #define R_BAD_HANDLE  0xE401u   // 114
 #define R_BAD_STATE   0xFA01u   // 125
 #define R_OUT_OF_RES  0xCE01u   // 103
@@ -30,6 +31,8 @@
 #define H_CUR_THREAD  0xFFFF8000u
 
 enum { O_FREE, O_THREAD, O_EVENT_R, O_EVENT_W };
+enum { MAX_SYNC_OBJECTS = 64 };
+typedef struct { void *obj; int type; } sync_ref_t;
 // Service-layer SystemEvent bindings (see hle_bind_system_event): guest SystemEventType address → the write-end handle of its kernel event.
 // An entry lives as long as that handle: CloseHandle on it removes the entry (se_unbind), so a SystemEvent destroyed and created again at the same address gets a new kernel event.
 // Entries used to stay forever: the second bind returned early, the new event was never created and signals went to the closed handle (or to whatever event reused its number).
@@ -68,7 +71,7 @@ typedef struct thr {
     struct thr *next;          // Wait chain
     struct thr *all;           // All-threads chain (for the state dump)
     int last_svc; uint64_t last_lr;
-    int closed;                // Handle closed: the object is freed only when this holds together with exited (Horizon: the thread object goes away with the last reference)
+    int closed, sync_refs;      // Reclaim only after handle close, thread exit and the final synchronization wait reference
     uint64_t nsvc;             // SVC count (for the state dump)
     uint64_t nyield, nyield_seen, nbackoff, nbackoff_seen;   // Yields (SleepThread 0/-1/-2) and those the back-off turned into short sleeps, with both counts at the last power report (dm_yield_top)
     uint64_t nspin, nspin_seen, spin_site; const char *spin_mod;   // Spin wait passes (dm_spin_wait; those that yield count in nyield too) and where the last one was
@@ -85,7 +88,7 @@ typedef struct thr {
     // SVC exit without G: bit 0 = inside an SVC, bit 1 = a pause was requested. The exit clears bit 0 with one compare-and-swap when bit 1 is clear, and takes G only otherwise;
     // the requester sets bit 1 and treats the thread as stopped only if bit 0 was set, so a thread it counts as stopped in an SVC cannot leave the SVC without G (svc_regs stays valid for GetThreadContext3)
     _Atomic int svc_state;
-    const uint32_t *whs; int whn;   // WaitSynchronization's handle array (guest memory, valid while the thread waits there): a signal wakes only waiters that hold the signalled object
+    const sync_ref_t *wobjs; int wn, widx;   // Retained objects and completed index, independent of handle reuse and guest memory
     int ctx_ok; uint64_t ctx_x[29], ctx_fp, ctx_lr, ctx_sp, ctx_pc; uint32_t ctx_pstate, ctx_fpcr, ctx_fpsr; __uint128_t ctx_v[32];
     pthread_cond_t pcv;
 } thr_t;
@@ -371,9 +374,9 @@ static void thread_exit(thr_t *t) {
     // No logging here: the exit happens on the guest thread's own stack (some are only a dozen or so KiB), and a printf with floating point would blow the stack (real-device smoke test: SIGBUS when LibcurlResolver exits, backtrace fprintf → __dtoa). Only the time is recorded, and it is printed later in the state dump
     pthread_mutex_lock(&G);
     t->exited = 1;
-    wake_sync_waiters(t);   // Synchronization waiters on this thread re-check
+    wake_sync_waiters(t);   // Complete synchronization waits on this thread
     pthread_setspecific(g_keythr, NULL);
-    if (t->closed) thr_free(t);
+    if (t->closed && !t->sync_refs) thr_free(t);
     pthread_mutex_unlock(&G);
     pthread_exit(NULL);
 }
@@ -564,27 +567,39 @@ uint32_t dm_guest_work_qos(unsigned *count) {
 }
 
 // ---------- Synchronization objects ----------
-static int sig_obj(uint32_t h, int *bad) {    // 1 = signaled (holding G)
+// Resolve and retain the whole list before checking readiness. A handle close
+// cannot destroy an object or redirect an existing wait to a reused slot.
+static int sync_open(uint32_t h, sync_ref_t *ref) {   // holding G; no pseudo-handles
     unsigned i = h - 0x1000;
-    if (h == H_CUR_THREAD) return 0;
-    if (i == 0 || i >= MAX_H) { *bad = 1; return 0; }
-    switch (g_h[i].type) {
-    case O_THREAD: return ((thr_t *)g_h[i].obj)->exited;
-    case O_EVENT_R: return ((event_t *)g_h[i].obj)->signaled;
-    default: *bad = 1; return 0;
+    if (i == 0 || i >= MAX_H) return 0;
+    if (g_h[i].type == O_THREAD) ((thr_t *)g_h[i].obj)->sync_refs++;
+    else if (g_h[i].type == O_EVENT_R) ((event_t *)g_h[i].obj)->refs++;
+    else return 0;
+    *ref = (sync_ref_t){g_h[i].obj, g_h[i].type};
+    return 1;
+}
+static void sync_close(sync_ref_t ref) {   // holding G
+    if (ref.type == O_THREAD) {
+        thr_t *t = ref.obj;
+        if (!--t->sync_refs && t->closed && t->exited) thr_free(t);
+    } else {
+        event_t *e = ref.obj;
+        if (!--e->refs) free(e);
     }
 }
-// A synchronization object became signaled (an event, or a thread that exited): wake the WaitSynchronization waiters whose handle set holds it, so they re-check (holding G).
-// It used to wake every such waiter on every signal; each then re-checked its handles and went back to sleep, a wake-up per waiting thread per signal
+static int sync_signaled(sync_ref_t ref) {   // holding G
+    return ref.type == O_THREAD ? ((thr_t *)ref.obj)->exited : ((event_t *)ref.obj)->signaled;
+}
+// Complete each registered wait under G: a clear before the waiter resumes
+// must not erase the notification that already made it runnable.
 static void wake_sync_waiters(const void *obj) {
     for (thr_t *w = g_wait; w; ) { thr_t *n = w->next;
-        if (w->wkind == 4) { int hit = !w->whs;
-            for (int i = 0; i < w->whn && !hit; i++) { unsigned k = w->whs[i] - 0x1000; hit = k > 0 && k < MAX_H && g_h[k].obj == obj; }
-            if (hit) wake(w, -1); }
+        if (w->wkind == 4)
+            for (int i = 0; i < w->wn; i++) if (w->wobjs[i].obj == obj) {
+                w->widx = i; wake(w, 0); break;
+            }
         w = n; }
 }
-
-static int64_t now_mono_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec * 1000000000ll + ts.tv_nsec; }
 void dm_guest_clock_advanced(void) {
     if (!dm_detclock_enabled()) return;
     pthread_mutex_lock(&G);
@@ -1117,8 +1132,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         event_t *e = num == 0x11 ? h_peek(h, O_EVENT_W) : num == 0x17 ? h_peek(h, O_EVENT_R)
                    : (h_peek(h, O_EVENT_W) ? h_peek(h, O_EVENT_W) : h_peek(h, O_EVENT_R));
         int64_t r = 0;
-        if (!e) { r = (num == 0x17 && h_peek(h, O_THREAD)) ? R_BAD_STATE : R_BAD_HANDLE;
-                  if (r == R_BAD_HANDLE) LOG("event SVC %#x invalid handle %#x", num, h); }
+        if (!e) { r = R_BAD_HANDLE; LOG("event SVC %#x invalid handle %#x", num, h); }
         else if (num == 0x11) { e->signaled = 1; wake_sync_waiters(e); }
         else if (num == 0x17 && !e->signaled) r = R_BAD_STATE;
         else e->signaled = 0;
@@ -1126,33 +1140,39 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         regs[0] = (uint64_t)r; return 1;
     }
     case 0x18: {  // WaitSynchronization(→w1 index; x1 handle array, w2 count, x3 timeout)
-        thr_t *t = cur(); const uint32_t *hs = (const uint32_t *)regs[1]; int n = (int)regs[2]; int64_t ns = poll_wait_begin((int64_t)regs[3]);
-        int64_t deadline = ns > 0 ? (dm_detclock_enabled() ? (int64_t)guest_ns() : now_mono_ns()) + ns : 0;
+        thr_t *t = cur(); int n = (int)regs[2]; int64_t ns = (int64_t)regs[3];
+        if (n < 0 || n > MAX_SYNC_OBJECTS) { regs[0] = R_OUT_OF_RANGE; regs[1] = 0; return 1; }
+        int64_t wait_ns = poll_wait_begin(ns);
+        uint32_t hs[MAX_SYNC_OBJECTS]; sync_ref_t objects[MAX_SYNC_OBJECTS];
+        if (n) memcpy(hs, (const void *)regs[1], n * sizeof *hs);
         pthread_mutex_lock(&G);
-        int64_t r; int idx = -1;
-        for (;;) {
-            if (t->cancel) { t->cancel = 0; r = R_CANCELLED; break; }
-            int bad = 0;
-            for (int i = 0; i < n && idx < 0; i++) if (sig_obj(hs[i], &bad)) idx = i;
-            if (bad) { r = R_BAD_HANDLE; break; }
-            if (idx >= 0) { r = 0; break; }
-            int64_t left = ns < 0 ? -1 : ns == 0 ? 0 : deadline - (dm_detclock_enabled() ? (int64_t)guest_ns() : now_mono_ns());
-            if (ns > 0 && left <= 0) { r = R_TIMEOUT; break; }
-            t->whs = hs; t->whn = n; int64_t br = block(t, 4, left); t->whs = NULL; t->whn = 0;
-            if (br == R_TIMEOUT) { r = R_TIMEOUT; break; }
+        int held = 0, idx = -1; int64_t r = R_BAD_HANDLE;
+        while (held < n && sync_open(hs[held], &objects[held])) held++;
+        if (held == n) {
+            for (int i = 0; i < n; i++) if (sync_signaled(objects[i])) { idx = i; break; }
+            // Ready objects, then a zero-time poll, precede pending cancellation.
+            if (idx >= 0) r = 0;
+            else if (!ns) r = R_TIMEOUT;
+            else if (t->cancel) { t->cancel = 0; r = R_CANCELLED; }
+            else {
+                t->wobjs = objects; t->wn = n; t->widx = -1;
+                r = block(t, 4, wait_ns); idx = t->widx;
+                t->wobjs = NULL; t->wn = 0;
+            }
         }
+        for (int i = 0; i < held; i++) sync_close(objects[i]);
         pthread_mutex_unlock(&G);
-        poll_wait_end((int64_t)regs[3], r);
+        poll_wait_end(ns, r);
         regs[0] = (uint64_t)r; regs[1] = idx >= 0 ? (uint64_t)idx : 0; return 1;
     }
     case 0x19: {  // CancelSynchronization(w0 thread)
         pthread_mutex_lock(&G);
         thr_t *t = h_get((uint32_t)regs[0], O_THREAD);
-        if (t) { t->cancel = 1; if (t->wkind == 4) wake(t, -1); }
+        if (t) { if (t->wkind == 4) wake(t, R_CANCELLED); else t->cancel = 1; }
         pthread_mutex_unlock(&G);
         regs[0] = t ? 0 : R_BAD_HANDLE; return 1;
     }
-    case 0x16: {  // CloseHandle(w0): an event is freed only when both ends are closed; after a thread handle is closed the slot is recycled, and the object is freed once the thread has also exited
+    case 0x16: {  // CloseHandle(w0): recycle the slot; synchronization waits retain their original objects
         pthread_mutex_lock(&G);
         unsigned i = (uint32_t)regs[0] - 0x1000;
         if (i > 0 && i < MAX_H && (g_h[i].type == O_EVENT_R || g_h[i].type == O_EVENT_W)) {
@@ -1163,7 +1183,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
             thr_t *t = g_h[i].obj;
             g_h[i].type = O_FREE; g_h[i].obj = NULL;
             t->closed = 1;
-            if (t->exited) thr_free(t);
+            if (t->exited && !t->sync_refs) thr_free(t);
         }
         pthread_mutex_unlock(&G);
         regs[0] = 0; return 1;

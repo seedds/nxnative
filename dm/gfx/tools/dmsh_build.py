@@ -711,8 +711,18 @@ def job_for(key, name, rec, w):
         extra['arch'] = 'sm86'
         # compute lays out its driver constants in c[0] per shader: the control section gives its push constants' words (+0xa9), counts its uniform buffer, storage
         # buffer, texture, separate texture and separate sampler entries (+0xb1, +0xb2, +0xb3, +0xb4, +0xb5; images, +0xb6, come last) and gives the size (+0xba);
-        # the translator maps them to c[24] and NVN's fixed tables (InstEmitAmpere.cs AMapC0). Graphics keeps NVN's tables
-        if stage == 'cs': extra['nvn2_cs'] = [rec[ci + 0xb1], rec[ci + 0xb2], rec[ci + 0xb3], struct.unpack_from('<H', rec, ci + 0xba)[0], rec[ci + 0xa9] * 4, rec[ci + 0xb4], rec[ci + 0xb5]]
+        # the translator maps them to c[24] and NVN's fixed tables (InstEmitAmpere.cs AMapC0). Graphics keeps NVN's tables.
+        # The push region is two blocks, each 16-byte aligned: +0xa9 words, then +0xaa words. Donkey Kong Bananza's compiler leaves +0xaa at 0 (its 138 layouts add up
+        # with +0xa9 alone), PRAGMATA's (control +0x08 = 0x11) uses both: all 6,856 of its compute layouts add up to the size at +0xba this way, none with either block
+        # alone. Both blocks are mapped to c[24] as one run (AMapC0); what the second holds is not known yet
+        if stage == 'cs':
+            al = lambda v: (v + 0xf) & ~0xf
+            ub, sb, tx, size = rec[ci + 0xb1], rec[ci + 0xb2], rec[ci + 0xb3], struct.unpack_from('<H', rec, ci + 0xba)[0]
+            st, sm, im = rec[ci + 0xb4], rec[ci + 0xb5], rec[ci + 0xb6]
+            push = al(rec[ci + 0xa9] * 4) + al(rec[ci + 0xaa] * 4)
+            if 0x10 + push + 0x10 * (ub + sb) + 8 * (tx + st + sm + im) != size:
+                print(f'[RED] {key}: NVN2 compute c0 layout does not add up to its size {size:#x}', file=sys.stderr)
+            extra['nvn2_cs'] = [ub, sb, tx, size, push, st, sm]
         if stage in ('ts', 'ms'):
             # A task or mesh shader: translated as compute, its SPH taken off and its stage memory in shared memory, then wrapped as the Metal stage function (dmsh_meshstage.py).
             # Graphics stages' c[0] and c[2] tables stay: the translator reads their addresses out of the code as for a vertex shader

@@ -60,6 +60,7 @@ The HDR output setting (Game section; Switch 2 games, Mac and iPhone) sets `DM_H
 - The window is BT.2020 PQ, and the scene is Display P3 linear before the encoder. The PQ encoder shader (`359ddaa5bb1e298e_b`) reads a 3x3 matrix from constant-buffer entries 17 to 19. That matrix is 203 times the Display P3 to BT.2020 conversion, within 0.00006 RMS. It is the same from the title screen through the mining tunnel, and the encoder is the only shader that writes the window in the captured frames. Read as P3, the window's pixels have no negative channels; read as BT.709, 16% do.
 - The game declares gamut 1 (`SetLayerNextHdrContentGamutMetadata`) for its SDR and HDR windows alike. The host drops the metadata calls and logs the first three of each.
 - The status answer's format is 1 with HDR on: this game's SDK sets on to (format == 1) and fails a format above 1 with 0x272 (`nn::vi::detail::DefaultDisplay::QueryHdrStatus`, sdk+0x55bd60; found in pull request #1249). The game imports none of the SDK's HDR status event calls.
+- It asks for the HDR status every frame (over 1,000 queries in 90 s at 30 fps), as Mario Kart World does, so it can follow the window to another screen, and queries the paper white (203 nits). With the layer's HDR10 metadata, in a window on the built-in screen of a MacBook Pro (M4 Pro, macOS 26.7.1), from the present call to on screen p50 per 300 frames: SDR 49.69 to 49.75 ms, HDR 49.58 to 49.65. Mode select reached either way, no `[RED]` line.
 - `present.metal` decodes the PQ codes to linear light (1.0 at the paper white) into an RGBA16Float layer in extended linear BT.2020, whose HDR10 metadata lets Core Animation map the highlights into the screen's headroom.
 
 ## Open
@@ -68,7 +69,7 @@ The HDR output setting (Game section; Switch 2 games, Mac and iPhone) sets `DM_H
 - HDR: the gamut metadata value 1 has no name in the SDK modules, so what the game tells the system is unconfirmed. The pixels do not depend on it.
 - HDR: the module holds a second row set for the same matrix, chosen by a flag bit in the function at main+0x7e3960. No captured frame used it, and its caller is not traced.
 - HDR: only the title screen and the first gameplay area were captured.
-- HDR: the peak (`DM_HDR_PEAK`, 1000) is the declared range. Whether this game asks for the status again, and so follows the window to another screen as Mario Kart World does, is not measured: its Mac app is on an older chain.
+- HDR: the peak (`DM_HDR_PEAK`, 1000) is the declared range.
 - HDR: the Mac look was judged by eye on one MacBook, with the host's earlier roll-off, not with the metadata. The iPhone path has not run on a device.
 - **Video decoding:** the guide movies are VP9 and play (a 180-picture clip on loop in the tutorial's panel, read back as NV12). The player also imports the VP8, H.264 and AV1 decoders: VP8 and H.264 are served too (checked by `t_codec_video` only), AV1 is not ([`nn::codec` video decoders taken over](../../../docs/reference/movies.md#nncodec-video-decoders-taken-over)).
 - **The gameplay picture:** the mining tunnel matches a YouTube capture of the same spot ([Rendering](#rendering) 7); nothing past the tunnel's first minute has been compared.

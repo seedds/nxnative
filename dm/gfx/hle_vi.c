@@ -125,7 +125,7 @@ HLE_FORCE("_ZN2nn2vi8FinalizeEv", "display service shutdown; the host has no vi 
 // game takes its HDR path (its window becomes HDR10: RGB10A2 with PQ values in BT.2020). On a screen without EDR it reports SDR, and the game keeps its own SDR picture.
 // The present decodes the PQ window to linear light; Core Animation maps it into the screen's headroom by the layer's HDR10 metadata (front_mac.m, front_ios.m)
 // The format is 1 with HDR on and 0 with it off: the SDK's own answer is on = (format == 1), and a format above 1 is an error, 0x272 (Donkey Kong Bananza v458752,
-// nn::vi::detail::DefaultDisplay::QueryHdrStatus, sdk+0x55bd60; found in pull request #1249). The peak (DM_HDR_PEAK, default 1000) is the extended luminance range the game declares (its metadata call, below).
+// nn::vi::detail::DefaultDisplay::QueryHdrStatus, sdk+0x55bd60; found in pull request #1249). The peak (DM_HDR_PEAK, default 1000) is the extended luminance range the game declares (its metadata call, below). Neither it nor the paper white has a launcher setting: they are what a console's HDR calibration would set
 // Donkey Kong Bananza boots its SDR window (0x25), queries the status, then makes an RGB10A2 window (0x3d) of PQ code values with SDR white at 203 nits.
 // Neither it nor Mario Kart World imports the SDK's HDR status event (CreateHdrStatusEvent and the rest), so a game learns of another screen only by asking again: the queries are counted in the log
 // A decimal number, clamped to 16 bits (the answers are 16-bit)

@@ -169,7 +169,8 @@ class Portable(unittest.TestCase):
             self.assertEqual(atomic.cross_args(XC, plain), XC)
             self.assertEqual(atomic.cross_args(XC, texel), XC[:2] + ['30100'] + XC[3:])
             self.assertEqual(XC[2], '20300')  # not changed in place
-            with self.assertRaises(ValueError): atomic.uses_image_atomics(module('zero.spv', [[0, 0]]))
+            # A zero-length instruction stops the walk. A module without the texel pointer's word is not walked, and spirv-cross, which runs next, rejects it
+            with self.assertRaises(ValueError): atomic.uses_image_atomics(module('zero.spv', [[0, 0], [(6 << 16) | 60, 1, 2, 3, 4, 5]]))
             not_spirv = Path(temp) / 'not.spv'; not_spirv.write_bytes(b'\0' * 20)
             with self.assertRaises(ValueError): atomic.uses_image_atomics(str(not_spirv))
 

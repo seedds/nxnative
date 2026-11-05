@@ -52,7 +52,7 @@ int main(void) {
     if (!atomic_load(&g_sig)) FAIL("no release event");
 
     // stopped with frames queued, a purge drops them
-    if (h_os_Write(stream, pcm, FRAMES) != FRAMES || h_os_Write(stream, pcm, FRAMES) != FRAMES) FAIL("write after playing");
+    for (int i = 0; i < 2; i++) if (h_os_Write(stream, pcm, FRAMES) != FRAMES) FAIL("write after playing");
     h_os_Stop(stream);
     if (h_os_State(stream) != OS_STOPPED) FAIL("stop");
     h_os_Purge(stream);

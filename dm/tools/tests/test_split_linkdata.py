@@ -36,6 +36,7 @@ class LinkdataIndex(unittest.TestCase):
             Path(d, 'LINKDATA.IDX').write_bytes(b''.join(struct.pack('<QQQQ', i * size, size, size, 0) for i in range(8)))
             Path(d, 'LINKDATA.BIN').write_bytes(bytes(8 * size))
             jobs = ss.linkdata_jobs(os.path.join(d, 'LINKDATA.BIN'), 'LINKDATA.BIN', parts=4)
+            assert jobs is not None
             self.assertEqual([j[2] for j in jobs], [(0, 2), (2, 4), (4, 6), (6, 8)])
 
 

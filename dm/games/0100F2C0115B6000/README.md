@@ -82,6 +82,7 @@ Game-specific findings. The general host changes they led to are listed under [F
 
 ## Found on this game
 
+- [A work folder holds millions of small files](../../../docs/reference/packing.md#a-work-folder-holds-millions-of-small-files): 8,893,028 files and 509 GB here.
 - [A game file whose extension is in capitals is not found](../../../docs/reference/packing.md#a-game-file-whose-extension-is-in-capitals-is-not-found) (2026-11-04, LNPANDY/NX2Apple#554): its `.NSP` stopped the build on a Mac.
 - [macOS Game Mode holds the GPU at its lowest clock](../../../docs/reference/frame-rate.md#macos-game-mode-holds-the-gpu-at-its-lowest-clock) (2026-11-04, #349): the Mac's fall to 30 fps at 338 MHz; a new Mac app opts out, a re-packed one needs the Game Overlay switch once.
 - [A regress run stops when another app takes the key window](../../../docs/reference/frame-rate.md#a-regress-run-stops-when-another-app-takes-the-key-window): the route's intermittent "hang" was the game paused out of focus (resolved).

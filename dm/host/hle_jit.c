@@ -107,6 +107,7 @@ typedef struct { char name[16]; uint64_t base, size, pre; } jit_region;
 // jit.tsv the requests by key (where each one's code lies in the image, its output and the output's host addresses to relocate) and jit.out the outputs
 typedef struct { char key[33]; uint64_t cmd, code_off, code_size, ro_off, ro_size, out_off, out_size; int ret; uint32_t nrel; uint64_t *rel_at, *rel_off; int *rel_mod; } jit_req;
 static jit_req *g_req; static int g_nreq; static const uint8_t *g_out; static size_t g_out_len; static uint64_t g_img_size, g_layout_rx, g_layout_ro;
+static void *jit_grow(void *p, size_t n) { void *q = realloc(p, n); if (!q) die("jit: out of memory"); return q; }
 static void jit_serve_load(const char *dir) {
     char path[1100]; snprintf(path, sizeof path, "%s/jit.tsv", dir);
     FILE *f = fopen(path, "r"); if (!f) die("jit: no %s", path);
@@ -119,7 +120,7 @@ static void jit_serve_load(const char *dir) {
         unsigned oe, oc, os2;
         if (sscanf(line, "outcode\t%u\t%x\t%x\t%x", &kc, &oe, &oc, &os2) == 4 && kc < 8) { g_outcode[kc].set = 1; g_outcode[kc].entries = oe; g_outcode[kc].count = oc; g_outcode[kc].size = os2; continue; }
         if (strncmp(line, "req\t", 4)) continue;
-        g_req = realloc(g_req, (size_t)(g_nreq + 1) * sizeof *g_req); jit_req *r = &g_req[g_nreq++]; memset(r, 0, sizeof *r);
+        g_req = jit_grow(g_req, (size_t)(g_nreq + 1) * sizeof *g_req); jit_req *r = &g_req[g_nreq++]; memset(r, 0, sizeof *r);
         char rel[16]; unsigned long long co, cs, roo, ros, oo, os; int off = 0;
         if (sscanf(line, "req\t%32s\t%llu\t%llx\t%llx\t%llx\t%llx\t%d\t%llx\t%llx\t%n", r->key, (unsigned long long *)&r->cmd, &co, &cs, &roo, &ros, &r->ret, &oo, &os, &off) < 9 || !off) die("%s: bad row", path);
         r->code_off = co; r->code_size = cs; r->ro_off = roo; r->ro_size = ros; r->out_off = oo; r->out_size = os;
@@ -128,7 +129,7 @@ static void jit_serve_load(const char *dir) {
             unsigned long long at, ro2; char nm[17]; int k = 0;
             if (sscanf(q, "%llx=%16[^+]+%llx%n", &at, nm, &ro2, &k) != 3) die("%s: bad relocation in %s", path, r->key);
             int mi = -1; if (strcmp(nm, "jit_rx")) { for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, nm)) mi = i; if (mi < 0) die("%s: relocation into %s, which is not loaded", path, nm); }
-            r->rel_at = realloc(r->rel_at, (r->nrel + 1) * 8); r->rel_off = realloc(r->rel_off, (r->nrel + 1) * 8); r->rel_mod = realloc(r->rel_mod, (r->nrel + 1) * sizeof(int));
+            r->rel_at = jit_grow(r->rel_at, (r->nrel + 1) * 8); r->rel_off = jit_grow(r->rel_off, (r->nrel + 1) * 8); r->rel_mod = jit_grow(r->rel_mod, (r->nrel + 1) * sizeof(int));
             r->rel_at[r->nrel] = at; r->rel_off[r->nrel] = ro2; r->rel_mod[r->nrel] = mi; r->nrel++;
             q += k; if (*q == ',') q++;
         }

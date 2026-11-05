@@ -28,6 +28,8 @@
 #include "motion_fusion.h"
 #include "pad_apple.h"
 #include "pad_slots.h"
+#include "controller_routes_ios.h"
+#import "ControllerSetup.h"
 #include <stdatomic.h>
 #import "DmLayout.h"
 #import "DmGameMenu.h"
@@ -35,12 +37,14 @@
 enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_LEFT, B_UP, B_RIGHT, B_DOWN, B_N };
 enum { C_NONE = 0, C_STICK, C_DPAD, C_FACE, C_BTN, C_GAME };   // which control a touch holds; C_GAME: none, the touch goes to the game's touch screen (finger slot << 8)
 
+static _Atomic int g_configuring;
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_touch_btn, g_shake_btn;
 static int32_t g_touch_lx, g_touch_ly, g_touch_rx, g_touch_ry;
 static void publish(void) {   // the touch gamepad and the shake; the host ORs them with player 1's controller and takes whichever stick is deflected more (hle_hid.c)
     pthread_mutex_lock(&g_mu);
-    dm_input_set(g_touch_btn | g_shake_btn, g_touch_lx, g_touch_ly, g_touch_rx, g_touch_ry);
+    if (!atomic_load(&g_configuring))
+        dm_input_set(g_touch_btn | g_shake_btn, g_touch_lx, g_touch_ly, g_touch_rx, g_touch_ry);
     pthread_mutex_unlock(&g_mu);
 }
 
@@ -133,6 +137,7 @@ static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 0 = 2
 int dm_opmode(void);   // hle_oe.c: 0 = handheld
 
 @interface DmGamepad : UIView
+- (void)usePhysicalPads:(BOOL)any;
 - (void)arrange:(DmLayout)layout;
 - (BOOL)menuTakes:(CGPoint)p;
 @end
@@ -144,7 +149,6 @@ int dm_opmode(void);   // hle_oe.c: 0 = handheld
 - (BOOL)pointInside:(CGPoint)p withEvent:(UIEvent *)e { DmGamepad *pad = (DmGamepad *)self.superview; return [pad menuTakes:[self convertPoint:p toView:pad]]; }
 @end
 static __weak DmGamepad *g_view;
-static void pads_start(void);   // Physical controllers, below
 
 @implementation DmGamepad {
     NSMapTable<UITouch *, NSNumber *> *_owner;     // touch → control (with the key for C_BTN or the stick for C_STICK, << 8)
@@ -224,7 +228,6 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
         [nc addObserver:self selector:@selector(padsChanged:) name:GCControllerDidConnectNotification object:nil];
         [nc addObserver:self selector:@selector(padsChanged:) name:GCControllerDidDisconnectNotification object:nil];
-        pads_start();
         [self padsChanged:nil];
         motion_start();
         phone_motion_start(self);
@@ -560,12 +563,46 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
 // gets its player back) and goes to dm_pad_set_player, and hle_hid.c reports player n on its own npad while the slot is held (dm_pad_players). Player 1's controller is ORed
 // with the touch gamepad; a one-player game that supports only No1 / Handheld still sees every controller as player 1 (hle_hid.c). Each player has its controller's rumble and
 // gyro; the phone's gyro is player 1's. With DM_PAD_MERGE=1 every controller is player 1, as before (the last one moved wins)
-static pad_slots g_slots;
-static GCController *g_held[DM_PLAYERS];   // the controller of each slot, kept alive while it holds it (the slot table keys on its pointer)
-static int g_merge;
+static dm_ios_routes g_routes;
+static NSArray<GCController *> *g_sources[DM_PLAYERS];
+static NSDictionary *g_overrides;
+
+static BOOL merge_automatic_pads(void) {
+    const char *value = getenv("DM_PAD_MERGE");
+    return value && atoi(value);
+}
+
+NSArray<NSDictionary<NSString *, id> *> *dm_ios_controller_snapshot(void) {
+    NSArray *devices = cs_update(GCController.controllers);
+    NSMutableArray *rows = [NSMutableArray arrayWithCapacity:devices.count];
+    for (NSDictionary *device in devices) {
+        NSString *key = device[@"id"];
+        NSDictionary *choice = g_overrides[key];
+        [rows addObject:@{@"id": key, @"name": device[@"name"],
+            @"player": choice[@"player"] ?: @(-1), @"style": choice[@"style"] ?: @"auto"}];
+    }
+    return rows;
+}
+NSString *dm_ios_controller_configure(NSArray<NSDictionary<NSString *, id> *> *choices) {
+    if (g_view) return @"Use Apply to change controllers during play.";
+    cs_update(GCController.controllers);
+    NSDictionary *next = nil;
+    NSString *error = ios_validate_overrides(choices, &next);
+    if (!error) g_overrides = next;
+    return error;
+}
+BOOL dm_ios_controller_identify(NSString *deviceID) {
+    cs_update(GCController.controllers);
+    return cs_identify(deviceID, dm_haptics_apple_identify);
+}
+
 static int32_t axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * 32767); }
 static void read_pad(GCExtendedGamepad *g) {
-    int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0) return;
+    if (atomic_load(&g_configuring)) return;
+    GCController *controller = g.controller;
+    int p = pad_slot_of(&g_routes.slots, (__bridge const void *)controller);
+    if (p < 0 && [g_sources[0] containsObject:controller]) p = 0;
+    if (p < 0) return;
     dm_haptics_apple_controller(p, g.controller);
     _Static_assert(DM_BTN_A == 1u << B_A && DM_BTN_B == 1u << B_B && DM_BTN_X == 1u << B_X && DM_BTN_Y == 1u << B_Y, "face button bits");
     uint64_t m = dm_pad_face(g);   // by position, a Nintendo pad by its labels
@@ -578,54 +615,156 @@ static void read_pad(GCExtendedGamepad *g) {
     dm_pad_set_player(p, m, axis(g.leftThumbstick.xAxis.value), axis(g.leftThumbstick.yAxis.value), axis(g.rightThumbstick.xAxis.value), axis(g.rightThumbstick.yAxis.value));
 }
 // Home and Capture: without this iOS takes them as system gestures (Home opens the Games overlay, Capture a screenshot); the app gives them no function
-static void pad_keep_system_buttons(GCController *c) { for (NSString *b in @[GCInputButtonHome, GCInputButtonShare]) c.physicalInputProfile.buttons[b].preferredSystemGestureState = GCSystemGestureStateDisabled; }
-static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
-static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
-static void pads_start(void) {
-    const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
-    LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : "each controller is a player of its own, the touch gamepad plays with player 1");
+static void pad_keep_system_buttons(GCController *c) {
+    c.handlerQueue = dispatch_get_main_queue();   // serialize input callbacks with slot changes
+    for (NSString *b in @[GCInputButtonHome, GCInputButtonShare])
+        c.physicalInputProfile.buttons[b].preferredSystemGestureState = GCSystemGestureStateDisabled;
 }
-// Called at start and on every connect / disconnect (gone: the controller that was just removed, nil otherwise); returns whether a controller is in use
-static BOOL pads_merged(GCController *gone) {
-    if (gone) { gone.extendedGamepad.valueChangedHandler = nil; dm_motion_detach(gone, 0); }
-    BOOL any = NO; int motion = 0;
-    for (GCController *c in GCController.controllers) if (c != gone && c.extendedGamepad) {
-        if (c.motion.hasRotationRate) motion = 1;
-        any = YES; pad_keep_system_buttons(c); c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; read_pad(g); };
-        dm_motion_attach(c, 0);   // every controller is player 1: the last one moved drives its six-axis sensor
-        read_pad(c.extendedGamepad);
+static NSArray<NSMutableArray<GCController *> *> *new_sources(void) {
+    NSMutableArray *sources = [NSMutableArray arrayWithCapacity:DM_PLAYERS];
+    for (int p = 0; p < DM_PLAYERS; p++) [sources addObject:[NSMutableArray new]];
+    return sources;
+}
+
+// Preview the routes that Apply will publish. Automatic pads keep the game's
+// legacy one-player merge, which counts as one player even with multiple pads.
+static NSDictionary *route_status(dm_ios_routes plan, NSArray<NSArray<GCController *> *> *sources, BOOL inGame) {
+    uint32_t styles = 0, ids = 0;
+    if (inGame) dm_pad_supported(&styles, &ids);
+    // Launch previews must not initialize the cached operation mode before
+    // the launcher's settings have been applied.
+    const char *mode = getenv("DM_OPMODE");
+    int operationMode = inGame ? dm_opmode() : mode ? atoi(mode) : DM_GAME_OPMODE;
+    BOOL handheld = !operationMode;
+    NSMutableDictionary *routes = [NSMutableDictionary new];
+    uint32_t ready = 0;
+    BOOL any = pad_slot_mask(&plan.slots) != 0;
+    for (int p = 0; p < DM_PLAYERS; p++) {
+        int slot = p;
+        if (p && !(ids & 0xfeu) && !(plan.manual >> p & 1) && inGame) slot = 0;
+        uint32_t style = plan.styles[slot];
+        uint32_t idBit = 1u << slot;
+        if (!style && !slot && handheld) { style = 2u; idBit = 1u << 8; }
+        if (!style) style = DM_STYLE_PRO;
+        BOOL accepted = (styles & style) && ((ids & idBit) || (!slot && !plan.styles[0]));
+        for (GCController *controller in sources[p]) {
+            NSString *key = [cs_devices allKeysForObject:controller].firstObject;
+            NSString *automaticStyle = !slot && handheld ? @"handheld" : @"pro";
+            routes[key] = @{@"player": @(slot + 1), @"ready": @(accepted), @"automaticStyle": automaticStyle,
+                @"recommendation": controller_recommended_style(styles, slot) ?: @""};
+            if (accepted) ready |= 1u << slot;
+        }
     }
-    if (!any || !motion) dm_motion_clear(0);   // the phone's gyro (if on) takes over from its next sample
-    if (!any) { dm_haptics_apple_controller(0, nil); dm_pad_set(0, 0, 0, 0, 0); }
-    return any;
+    BOOL touch = inGame && !any && (styles & (handheld ? 2u : DM_STYLE_PRO)) &&
+                 (ids & (handheld ? 1u << 8 : 1u));
+    NSMutableArray *types = [NSMutableArray new], *players = [NSMutableArray new];
+    const uint32_t externalStyles[] = {DM_STYLE_PRO, DM_STYLE_PAIR, DM_STYLE_LEFT, DM_STYLE_RIGHT};
+    for (size_t i = 0; i < sizeof externalStyles / sizeof externalStyles[0]; i++)
+        if (styles & externalStyles[i]) [types addObject:cs_style_name(externalStyles[i])];
+    for (int p = 0; p < DM_PLAYERS; p++) if (ids >> p & 1) [players addObject:@(p + 1)];
+    int minimum = 0, maximum = DM_PLAYERS;
+    if (inGame) dm_ios_controller_limits(&minimum, &maximum);
+    return @{@"minimum": @(minimum), @"maximum": @(maximum), @"styles": types, @"players": players,
+        @"ready": @(__builtin_popcount(ready) + touch), @"touch": @(touch), @"routes": routes};
 }
-static BOOL pads_slotted(GCController *gone) {
-    NSArray<GCController *> *now = GCController.controllers; char nb[16];
-    for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p] && (g_held[p] == gone || ![now containsObject:g_held[p]])) {
-        npad_name(p, nb, sizeof nb); LOG("controller '%s' disconnected: player %d (npad %s) is free", pad_name(g_held[p]), p + 1, nb);
-        g_held[p].extendedGamepad.valueChangedHandler = nil;
-        dm_motion_detach(g_held[p], p);   // player 1's: the phone's gyro (if on) takes over from its next sample
+
+NSDictionary<NSString *, id> *dm_ios_controller_status(NSArray<NSDictionary<NSString *, id> *> *choices, BOOL inGame) {
+    NSArray *rows = cs_update(GCController.controllers);
+    NSDictionary *next = nil;
+    NSString *error = ios_validate_overrides(choices, &next);
+    if (error) return @{@"error": error};
+    NSArray *sources = new_sources();
+    dm_ios_routes plan = ios_plan_routes(g_routes.slots, rows, next, merge_automatic_pads(), sources);
+    return route_status(plan, sources, inGame);
+}
+
+// Both hotplug and Apply use this transaction. Invalidate old callbacks before
+// attaching new ones, while keeping untouched devices' motion sources alive.
+static void publish_routes(dm_ios_routes plan, NSArray<NSMutableArray<GCController *> *> *sources) {
+    uint32_t layoutChanged = g_routes.manual ^ plan.manual, affected = layoutChanged;
+    for (int p = 0; p < DM_PLAYERS; p++) {
+        BOOL ownersChanged = (g_sources[p].count || sources[p].count) && ![g_sources[p] isEqualToArray:sources[p]];
+        if (g_routes.styles[p] != plan.styles[p]) layoutChanged |= 1u << p;
+        if (g_routes.styles[p] != plan.styles[p] || ownersChanged) affected |= 1u << p;
+    }
+    // Automatic hotplug has the same style notifications as dm_pad_players.
+    // Only a manual layout change needs an additional old-style notification.
+    dm_pad_reconfigure_reset(layoutChanged);
+    dm_pad_reconfigure_sources(affected & ~layoutChanged);
+    for (int p = 0; p < DM_PLAYERS; p++) if (affected >> p & 1) {
+        for (GCController *controller in g_sources[p]) {
+            controller.extendedGamepad.valueChangedHandler = nil;
+            dm_motion_detach(controller, p);
+        }
         dm_haptics_apple_controller(p, nil);
-        pad_slot_free(&g_slots, (__bridge const void *)g_held[p]); g_held[p] = nil;
-        dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
     }
-    for (GCController *c in now) if (c.extendedGamepad && c != gone && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) {
-        int p = pad_slot_take(&g_slots, (__bridge const void *)c, pad_name(c));
-        if (p < 0) { LOG("controller '%s' connected: all %d players are taken, not used", pad_name(c), DM_PLAYERS); continue; }
-        g_held[p] = c; pad_keep_system_buttons(c);
-        c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; read_pad(g); };
-        dm_motion_attach(c, p);
-        npad_name(p, nb, sizeof nb); LOG("controller '%s' connected: player %d (npad %s)%s", pad_name(c), p + 1, nb, c.motion.hasRotationRate ? ", with motion (gyro)" : "");
-        read_pad(c.extendedGamepad);
+    g_routes = plan;
+    for (int p = 0; p < DM_PLAYERS; p++) if (affected >> p & 1) {
+        g_sources[p] = [sources[p] copy];
+        dm_pad_style(p, plan.styles[p], plan.styles[p] && !dm_pad_is_joycon(sources[p].firstObject));
+        for (GCController *controller in sources[p]) {
+            pad_keep_system_buttons(controller);
+            controller.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *pad, GCControllerElement *element) {
+                (void)element;
+                read_pad(pad);
+            };
+            dm_motion_attach(controller, p);
+            dm_haptics_apple_controller(p, controller);
+            read_pad(controller.extendedGamepad);
+        }
     }
-    dm_pad_players(pad_slot_mask(&g_slots));
-    return pad_slot_mask(&g_slots) != 0;
+    dm_pad_players_ios(pad_slot_mask(&plan.slots), plan.manual);
 }
+
+NSString *dm_ios_controller_apply(NSArray<NSDictionary<NSString *, id> *> *choices) {
+    if (!g_view || !atomic_load(&g_configuring)) return @"Controller setup is unavailable.";
+    NSArray *rows = cs_update(GCController.controllers);
+    NSDictionary *next = nil;
+    NSString *error = ios_validate_overrides(choices, &next);
+    if (error) return error;
+    NSArray *sources = new_sources();
+    dm_ios_routes plan = ios_plan_routes(g_routes.slots, rows, next, merge_automatic_pads(), sources);
+    dm_pad_reconfigure_begin();
+    NSDictionary *status = route_status(plan, sources, YES);
+    int count = [status[@"ready"] intValue];
+    if (count < [status[@"minimum"] intValue] || count > [status[@"maximum"] intValue]) {
+        dm_pad_reconfigure_end();
+        return @"Assign the number of supported controllers this game requests.";
+    }
+    g_overrides = next;
+    publish_routes(plan, sources);
+    dm_pad_reconfigure_end();
+    [g_view usePhysicalPads:pad_slot_mask(&plan.slots) != 0];
+    return nil;
+}
+
 - (void)padsChanged:(NSNotification *)note {
-    GCController *c = note.object, *gone = [note.name isEqual:GCControllerDidDisconnectNotification] ? c : nil;
-    if (c && (!c.extendedGamepad || g_merge)) LOG("controller %s: %s%s", gone ? "disconnected" : "connected", pad_name(c), c.extendedGamepad ? "" : " (no extended gamepad profile: not used)");
-    BOOL any = g_merge ? pads_merged(gone) : pads_slotted(gone);
-    dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; self->_controls.hidden = any; [self reset]; });   // the touch gamepad hides while any controller is in use
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self padsChanged:note]; });
+        return;
+    }
+    NSMutableArray *connected = [GCController.controllers mutableCopy];
+    if ([note.name isEqual:GCControllerDidDisconnectNotification]) [connected removeObjectIdenticalTo:note.object];
+    NSArray *rows = cs_update(connected);
+    // An identity belongs to this connection. A reconnect takes the usual
+    // automatic route, including the slot history kept by pad_slots.
+    NSMutableDictionary *retained = [NSMutableDictionary new];
+    for (NSDictionary *row in rows) {
+        NSString *key = row[@"id"];
+        if (g_overrides[key]) retained[key] = g_overrides[key];
+    }
+    g_overrides = [retained copy];
+    NSArray *sources = new_sources();
+    dm_ios_routes plan = ios_plan_routes(g_routes.slots, rows, g_overrides, merge_automatic_pads(), sources);
+    dm_pad_reconfigure_begin();
+    publish_routes(plan, sources);
+    dm_pad_reconfigure_end();
+    [self usePhysicalPads:pad_slot_mask(&plan.slots) != 0];
+}
+- (void)usePhysicalPads:(BOOL)any {
+    _padOff = any;
+    _controls.hidden = any;
+    [self reset];
 }
 @end
 
@@ -640,6 +779,21 @@ void dm_gamepad_active(void) { dispatch_async(dispatch_get_main_queue(), ^{ for 
 void dm_gamepad_reset(void) {   // On resign active: release everything (a key held while switching away and released in background gets no "release")
     dispatch_async(dispatch_get_main_queue(), ^{ [g_view reset]; });
     pthread_mutex_lock(&g_mu); g_shake_btn = 0; pthread_mutex_unlock(&g_mu); publish();
-    if (g_merge) dm_pad_set(0, 0, 0, 0, 0);
-    else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
+    for (int p = 0; p < DM_PLAYERS; p++) if (g_sources[p].count) dm_pad_set_player(p, 0, 0, 0, 0, 0);
+}
+
+// Called by the UIKit coordinator. Keep system and physical input out of the
+// game while the sheet owns the screen, including the phone's shake shortcut.
+void dm_gamepad_set_configuring(BOOL open) {
+    atomic_store(&g_configuring, open);
+    dm_motion_suspend(open);
+    dm_haptics_suspend(DM_HAPTICS_CONTROLLER_SETUP, open);
+    g_view.userInteractionEnabled = !open;
+    if (open) {
+        [g_view reset];
+        pthread_mutex_lock(&g_mu);
+        g_shake_btn = 0;
+        pthread_mutex_unlock(&g_mu);
+        dm_input_quiesce();
+    } else dm_gamepad_active();
 }

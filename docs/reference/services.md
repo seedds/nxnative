@@ -270,6 +270,20 @@ Most service calls can be found before they crash, before the first boot or the 
 
 ## Input
 
+### Explicit controller types in a Mac game launch
+
+- **Symptom:** a motion game requires a Joy-Con, but the host reports every physical controller as FullKey or Handheld. The launch wrapper cannot identify the host's devices by controller name or list position, especially with two identical controllers.
+- **Cause:** the original front end assigned slots by connection order and the HID layer chose styles from display mode. Joy-Con readers were always disconnected, and their SL/SR bits and vibration channels were absent.
+- **Fix:** the engine owns a device registry before loading the game and sends session UUIDs over a private inherited socket to its launch window. Play validates and accepts explicit player/style choices before continuing with those same device objects. The Mac front end attaches each device's input, motion and haptics to the selected player. The HID layer exposes supported Pro, JoyDual, JoyLeft or JoyRight state, attributes, assignment, sensor and vibration handles. Single Joy-Con layout conversion preserves the relevant SL/SR bits. The game’s hold type selects the vertical or sideways mapping for a full-size Mac controller assigned as one Joy-Con. The startup protocol and limits are documented once in [frontends.md](../frontends.md). In-game editing uses the runtime mechanism below.
+- **Found on:** controller-type implementation requested for [Super Mario Party Jamboree](../../dm/games/0100965017338000/README.md). Automated coverage includes synthetic devices, the launch channel and host unit tests. The contributor reports testing all controller-configuration features on macOS and on an iPhone 16 running iOS 27; this is feature validation, not an exhaustive minigame or calibration survey.
+
+### Live controller reconfiguration on Mac and iOS
+
+- **Symptom:** a controller type can be chosen before launch, but cannot be changed from the running game or its controller-support applet. Moving a live device without clearing its old slot can leave pressed buttons, old motion or vibration on the wrong player.
+- **Cause:** the launch window runs in a separate wrapper process and previously passed choices only at startup. The controller applet returned the current count immediately, and individual HID atomics did not form a transaction across style, device, input, motion and vibration changes.
+- **Fix:** a native host sheet opens from Controllers → Configure Controllers… on Mac or the game's `ShowControllerSupport` hook on Mac and iOS. The guest waits outside the HID lock for Apply or Cancel, keeping the main queue free for UI and hotplug. Apply validates the draft, publishes changed slots under one recursive HID barrier, rejects queued motion from earlier assignment generations and defers style events until the complete configuration is visible. Unchanged GameController assignments retain their motion source. Cancel leaves the choice list unchanged. The startup wrapper does not become a runtime input broker. [The frontend contract](../frontends.md) describes the shared registry, supported-player count and remaining controller limitations.
+- **Found on:** requested for [Super Mario Party Jamboree](../../dm/games/0100965017338000/README.md#controller-type-configuration). Covered by fake native devices, both Mac native UI routes, cancellation, hotplug, duplicate-name swaps, queued motion rejection, vibration routing, and comparisons of default iOS routing against the original allocator. The contributor reports testing all features on macOS and an iPhone 16 running iOS 27. Automated checks of the upstream port are recorded separately from that device report; no exhaustive cross-game compatibility claim is made.
+
 ### Controller disconnect between style and player lookup
 
 - **Symptom:** clang reports a negative shift in `fill` or `vib_targets` (`hle_hid.c`).
@@ -296,7 +310,7 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** motion moves never happen; shaking does nothing (Super Mario Odyssey: cap throws by shaking).
 - **Cause:** the host handed out six-axis handles but reported no sensor.
-- **Fix:** it now reports one per connected controller: two for handheld or dual Joy-Cons, one otherwise, with the style, npad id and device in the handle. At rest the sensor lies flat: acceleration (0, 0, −1) G, no rotation, identity direction. Samples are 5 ms apart on the guest clock and numbered by time, so a history read returns the samples at those times. `DM_BTN_SHAKE` (`dm_input.h`: the iPhone shaken, Space on the Mac, `DM_KEYS` `Shake`) plays a side-to-side shake in whole cycles.
+- **Fix:** it reports one per connected controller, or two for dual Joy-Cons, with the SDK style index, npad id and device in the handle (FullKey and Handheld use device 2, JoyLeft 0, JoyRight 1, JoyDual 0 and 1). At rest the sensor lies flat: acceleration (0, 0, −1) G, no rotation, identity direction. Samples are 5 ms apart on the guest clock and numbered by time, so a history read returns the samples at those times. `DM_BTN_SHAKE` (`dm_input.h`: the iPhone shaken, Space on the Mac, `DM_KEYS` `Shake`) plays a side-to-side shake in whole cycles.
 - **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md): it reads all 16 history entries per sensor and ignores the count, like its npad history ([History reads fill every requested entry](#history-reads-fill-every-requested-entry)).
 - **Note:** find a game's swing detector by probing the accelerometer value it reads (`DM_PROBE=main:626248@x8+10` in Odyssey 1.4.1).
 

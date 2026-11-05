@@ -12,10 +12,17 @@ private func info(_ key: String) -> String? { Bundle.main.object(forInfoDictiona
 
 struct LauncherView: View {
     @ObservedObject var m: LauncherModel
+    @ObservedObject var controllers: ControllerSettingsModel
+    @State private var controllersOpen = false
     let done: (Bool) -> Void
     let fit: (CGFloat) -> Void
     @AppStorage("window.show") private var show = true
     @AppStorage("window.advanced") private var advanced = false
+
+    init(m: LauncherModel, controllers: ControllerSettingsModel = ControllerSettingsModel(), done: @escaping (Bool) -> Void, fit: @escaping (CGFloat) -> Void) {
+        self.m = m; self.controllers = controllers; self.done = done; self.fit = fit
+        controllers.operationMode = { m.values["DM_OPMODE"] }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -30,6 +37,12 @@ struct LauncherView: View {
             .padding([.horizontal, .top], 20)
             Form {
                 settingSections(basic: true)
+                if !m.sections(basic: true).contains("Controls") {
+                    Section("Controls") {
+                        Button("Configure controllers") { controllersOpen = true }
+                    }
+                }
+                if let error = controllers.error { Section { Text(error).foregroundStyle(.red) } }
                 CloudSavesSection()
                 Section {
                     DisclosureGroup("Advanced settings", isExpanded: $advanced) {}
@@ -55,10 +68,12 @@ struct LauncherView: View {
                 Spacer()
                 Button("Quit") { done(false) }
                 Button("Play") { done(true) }.keyboardShortcut(.defaultAction)
+                    .disabled(!controllers.ready || controllers.error != nil)
             }
             .padding(20)
         }
         .frame(minWidth: 520, idealWidth: 560)
+        .sheet(isPresented: $controllersOpen) { ControllerSettingsSheet(model: controllers) }
     }
 
     @ViewBuilder private func settingSections(basic: Bool) -> some View {
@@ -67,6 +82,9 @@ struct LauncherView: View {
             if !rows.isEmpty {
                 Section(section) {
                     ForEach(rows) { SettingRow(s: $0, m: m) }
+                    if section == "Controls" && basic {
+                        Button("Configure controllers") { controllersOpen = true }
+                    }
                 }
             }
         }
@@ -120,10 +138,11 @@ struct CloudSavesSection: View {
 
 private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let model: LauncherModel
+    let controllers: ControllerSettingsModel
     var window: NSWindow?
     var play = false
 
-    init(_ model: LauncherModel) { self.model = model }
+    init(_ model: LauncherModel, controllers: ControllerSettingsModel) { self.model = model; self.controllers = controllers }
 
     func applicationDidFinishLaunching(_ n: Notification) {
         let name = info("CFBundleName") ?? "Game"
@@ -138,7 +157,7 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         if let screen = w.screen ?? NSScreen.main {
             w.setFrameTopLeftPoint(NSPoint(x: screen.visibleFrame.midX - w.frame.width / 2, y: screen.visibleFrame.maxY))
         }
-        let host = NSHostingView(rootView: LauncherView(m: model, done: { [weak self] in self?.finish($0) }, fit: { [weak self] in self?.fit($0) }))
+        let host = NSHostingView(rootView: LauncherView(m: model, controllers: controllers, done: { [weak self] in self?.finish($0) }, fit: { [weak self] in self?.fit($0) }))
         host.sizingOptions = []   // the Form's measured scroll content owns the height, including after collapse
         w.contentView = host
         host.layoutSubtreeIfNeeded()
@@ -147,6 +166,7 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
     }
     func applicationDidBecomeActive(_ n: Notification) { window?.makeKeyAndOrderFront(nil) }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {   // ⌘Q, or a logout or restart: the app ends without the game (exit 0, as Quit)
+        controllers.cancel()
         fputs("launcher: quit without starting the game\n", stderr)
         return .terminateNow   // not terminateCancel, which a logout or restart takes as a refusal and stops
     }
@@ -160,6 +180,7 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
 
     func finish(_ play: Bool) {
         guard let w = window else { return }
+        if !play { controllers.cancel() }
         window = nil; self.play = play
         // The main thread blocks in launcher.c's waitpid once run() returns, so the window must leave the screen now: no fade-out (it runs on later run-loop passes),
         // and dmMacLauncher flushes the order-out (AppKit commits it at the end of a pass). Without both, the window stayed on screen, not responding, until the game ended
@@ -180,15 +201,16 @@ enum LauncherWindowLayout {
 
 // 1: Play (the window's settings are in the environment), 0: the player quit, 2: no window (no launcher.json, or "Show this window at launch" off): launcher.c applies the saved choices
 @_cdecl("dm_mac_launcher")
-public func dmMacLauncher() -> Int32 {
+public func dmMacLauncher(_ controllerFD: Int32) -> Int32 {
+    guard controllerFD >= 0 else { return 2 }
     guard let url = Bundle.main.resourceURL?.appendingPathComponent("dm/launcher.json"), let data = try? Data(contentsOf: url) else { return 2 }
     guard let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else { fputs("[RED] launcher: dm/launcher.json cannot be read; starting the game\n", stderr); return 2 }
-    if (UserDefaults.standard.object(forKey: "window.show") as? Bool) == false && !NSEvent.modifierFlags.contains(.option) {
-        fputs("launcher: settings window off (hold Option at launch to show it)\n", stderr)
-        return 2
-    }
+    // The wrapper's probe made the show/Option decision before starting the registry.
+    // Rechecking the key here would race with the player releasing Option.
     let model = LauncherModel(file.settings)
-    let app = NSApplication.shared, launcher = Launcher(model)
+    let controllers = ControllerSettingsModel(channel: controllerFD >= 0 ? ControllerLaunchChannel(fd: controllerFD) : nil)
+    pendingControllers = controllers
+    let app = NSApplication.shared, launcher = Launcher(model, controllers: controllers)
     app.setActivationPolicy(.regular)
     app.delegate = launcher
     fputs("launcher: \(file.settings.count) settings shown\n", stderr)
@@ -198,4 +220,26 @@ public func dmMacLauncher() -> Int32 {
     guard launcher.play else { fputs("launcher: quit without starting the game\n", stderr); return 0 }
     model.apply()
     return 1
+}
+
+// The wrapper asks before starting the engine's registry process, so skipping the launch
+// window retains the existing direct-host path. No game files are loaded by this probe.
+@_cdecl("dm_mac_launcher_will_show")
+public func dmMacLauncherWillShow() -> Int32 {
+    if (UserDefaults.standard.object(forKey: "window.show") as? Bool) == false && !NSEvent.modifierFlags.contains(.option) { return 0 }
+    guard let url = Bundle.main.resourceURL?.appendingPathComponent("dm/launcher.json"), let data = try? Data(contentsOf: url),
+          let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else { return 0 }
+    return 1
+}
+
+private var pendingControllers: ControllerSettingsModel?
+@_cdecl("dm_mac_controllers_start")
+public func dmMacControllersStart() -> Int32 {
+    if pendingControllers?.start() == true { return 1 }
+    NSApp.setActivationPolicy(.regular)
+    let alert = NSAlert()
+    alert.messageText = "Controller setup could not be applied"
+    alert.informativeText = "Check your connected controllers, then quit and open the game again."
+    alert.runModal()
+    return 0
 }

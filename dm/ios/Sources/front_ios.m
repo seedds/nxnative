@@ -14,11 +14,13 @@
 #include "haptics_apple.h"
 #include "save_sync.h"
 #import "CloudSaves.h"
+#import "ControllerSetup.h"
 
 void dm_gamepad_active(void);
 #import "DmLayout.h"
 #import "DmGameMenu.h"
 
+void dm_gamepad_set_configuring(BOOL open);
 void front_ios_boot(void);
 int front_ios_boot_ok(void);
 const char *front_ios_boot_message(void);   // main.m: why a build that keeps the game files off the IPA found none usable (NULL = the generic hint)
@@ -78,6 +80,11 @@ static void tv_attach(void);
 }
 @end
 
+// The same SwiftUI form is hosted over the game for both entry points.
+@interface DmControllerSetupHost : NSObject
++ (UIViewController *)makeControllerWithCompletion:(void (^)(BOOL applied))completion;
+@end
+
 @interface DmRootVC : UIViewController
 @property (nonatomic, strong) DmGameView *game;
 @property (nonatomic, strong) UIView *pad;
@@ -91,11 +98,40 @@ static void tv_attach(void);
 #if __has_include(<UIKit/UIHingeInteraction.h>)
 - (void)hingeChanged:(UIHinge *)hinge API_AVAILABLE(ios(27.1));
 #endif
+@property (nonatomic, strong) UIViewController *controllerSetup;
+@property (nonatomic, strong) NSMutableArray<void (^)(BOOL)> *controllerWaiters;
+@property (nonatomic) BOOL controllerClosing, controllerApplied;
+@property (nonatomic) int controllerMinimum, controllerMaximum;
 - (void)startGame;
+- (void)openControllerSetup:(int)minimum maximum:(int)maximum completion:(void (^)(BOOL))completion;
+- (void)finishControllerSetup:(BOOL)applied;
+- (void)completeControllerSetup;
+- (void)cancelControllerSetup;
+
 - (void)showFPS:(BOOL)on;
 @end
 static DmRootVC *g_root;
 static CGFloat g_picture_aspect = DM_PICTURE_16_9;   // the presented picture's width / height (front_picture_shape); main thread
+void dm_ios_controller_limits(int *minimum, int *maximum) {
+    *minimum = g_root.controllerMinimum;
+    *maximum = g_root.controllerMaximum;
+}
+static int controller_support(int minimum, int maximum) {
+    if (NSThread.isMainThread) return -1;
+    // The guest waits here without holding the HID lock. UIKit, hotplug and
+    // Apply run on the main thread, even while the game waits for the result.
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    __block BOOL applied = NO;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!g_root) { dispatch_semaphore_signal(done); return; }
+        [g_root openControllerSetup:minimum maximum:maximum completion:^(BOOL answer) {
+            applied = answer;
+            dispatch_semaphore_signal(done);
+        }];
+    });
+    dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+    return applied ? 1 : 0;
+}
 static void launcher_done(void) { [g_root startGame]; }
 @implementation DmRootVC
 - (void)loadView { self.view = [DmRootView new]; }
@@ -164,10 +200,80 @@ static void launcher_done(void) { [g_root startGame]; }
     [self.view addSubview:self.pad];
     const char *fps = getenv("DM_SHOW_FPS");
     [self showFPS:fps ? atoi(fps) != 0 : [[NSBundle.mainBundle objectForInfoDictionaryKey:@"DMShowFPS"] boolValue]];
+    dm_controller_support_hook = controller_support;
     [self.view setNeedsLayout]; [self.view layoutIfNeeded];
     UIApplication.sharedApplication.idleTimerDisabled = YES;
     tv_attach();   // a TV connected while the launcher showed
     front_ios_boot();
+}
+- (void)openControllerSetup:(int)minimum maximum:(int)maximum completion:(void (^)(BOOL))completion {
+    UIWindowScene *scene = self.viewIfLoaded.window.windowScene;
+    if (!self.pad || self.controllerClosing || !scene || scene.activationState != UISceneActivationStateForegroundActive ||
+        (self.presentedViewController && self.presentedViewController != self.controllerSetup)) {
+        if (completion) completion(NO);
+        return;
+    }
+    minimum = MAX(0, MIN(DM_PLAYERS, minimum));
+    maximum = maximum > 0 ? MIN(DM_PLAYERS, maximum) : DM_PLAYERS;
+    if (completion) {
+        if (!self.controllerWaiters) self.controllerWaiters = [NSMutableArray new];
+        [self.controllerWaiters addObject:[completion copy]];
+    }
+    if (self.controllerSetup) {
+        self.controllerMinimum = MAX(self.controllerMinimum, minimum);
+        self.controllerMaximum = MIN(self.controllerMaximum, maximum);
+        return;
+    }
+    self.controllerMinimum = minimum;
+    self.controllerMaximum = maximum;
+    __weak DmRootVC *weak = self;
+    UIViewController *setup = [DmControllerSetupHost makeControllerWithCompletion:^(BOOL applied) {
+        [weak finishControllerSetup:applied];
+    }];
+    setup.modalPresentationStyle = UIModalPresentationOverFullScreen;
+    self.controllerSetup = setup;
+    dm_gamepad_set_configuring(YES);
+    dm_applet_enter("controller configuration");
+    [self presentViewController:setup animated:NO completion:nil];
+    // A detached or transitioning root can refuse the presentation. There
+    // must still be a response to the game thread in that case.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.controllerSetup == setup && !setup.presentingViewController) [self cancelControllerSetup];
+    });
+}
+- (void)finishControllerSetup:(BOOL)applied {
+    UIViewController *setup = self.controllerSetup;
+    if (!setup || self.controllerClosing) return;
+    self.controllerClosing = YES;
+    self.controllerApplied = applied;
+    if (setup.presentingViewController) {
+        [setup dismissViewControllerAnimated:NO completion:^{
+            if (self.controllerSetup == setup) [self completeControllerSetup];
+        }];
+    } else {
+        [self completeControllerSetup];
+    }
+}
+- (void)completeControllerSetup {
+    if (!self.controllerSetup) return;
+    self.controllerSetup = nil;
+    self.controllerClosing = NO;
+    BOOL applied = self.controllerApplied;
+    NSArray<void (^)(BOOL)> *waiters = self.controllerWaiters;
+    self.controllerWaiters = nil;
+    dm_gamepad_set_configuring(NO);
+    dm_applet_leave();
+    for (void (^waiter)(BOOL) in waiters) waiter(applied);
+}
+- (void)cancelControllerSetup {
+    [self finishControllerSetup:NO];
+    // The dismissal callback may not run until the app returns from the
+    // background. Release any game request before iOS suspends the scene.
+    [self completeControllerSetup];
+}
+- (void)viewDidDisappear:(BOOL)animated {
+    [super viewDidDisappear:animated];
+    if (!self.view.window) [self cancelControllerSetup];
 }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
@@ -522,12 +628,13 @@ void front_ios_focus_event(int ev) {
     if (!g_layer) return;
     switch (ev) {
         case 0: dm_gamepad_reset(); dm_focus_set(2); break;
-        case 1: UIApplication.sharedApplication.idleTimerDisabled = NO; dm_focus_set(3); g_audio_bg = 1; front_ios_audio_apply(); guest_clock_freeze_for(1, 1); dm_gfx_suspend(1); save_sync_background(); break;
+        case 1: [g_root cancelControllerSetup]; UIApplication.sharedApplication.idleTimerDisabled = NO; dm_focus_set(3); g_audio_bg = 1; front_ios_audio_apply(); guest_clock_freeze_for(1, 1); dm_gfx_suspend(1); save_sync_background(); break;
         case 2: dm_gfx_suspend(0); guest_clock_freeze_for(1, 0); front_ios_audio_session(); g_audio_bg = 0; front_ios_audio_apply(); dm_focus_set(2); break;
         case 3:   // Becoming active again also ends an interruption whose "ended" never came (not every one sends it), and retries a session that would not activate on the way back
             UIApplication.sharedApplication.idleTimerDisabled = YES;
             if (g_audio_intr) { LOG("audio session: active again with no interruption-ended notice; resuming"); g_audio_intr = 0; g_session_off = 1; }
             if (g_session_off) front_ios_audio_session();
             front_ios_audio_apply(); dm_gamepad_active(); dm_focus_set(1); break;
+        case 4: [g_root cancelControllerSetup]; break;   // main scene disconnected
     }
 }

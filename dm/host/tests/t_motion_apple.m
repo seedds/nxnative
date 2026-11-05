@@ -18,10 +18,15 @@
 @end
 
 static int samples, cleared = -1, player;
+static uint64_t generation;
+uint64_t dm_pad_generation(int p) { (void)p; return generation; }
 static float acc[3], rot[3];
 void dm_motion_set(int p, const float a[3], const float w[3]) {
     samples++; player = p;
     for (int i = 0; i < 3; i++) { acc[i] = a[i]; rot[i] = w[i]; }
+}
+void dm_motion_set_generation(int p, uint64_t token, const float a[3], const float w[3]) {
+    if (token == generation) dm_motion_set(p, a, w);
 }
 void dm_motion_clear(int p) { cleared = p; }
 
@@ -41,6 +46,9 @@ int main(void) { @autoreleasepool {
     m.hasGravityAndUserAcceleration = NO; m.rotationRate = (GCRotationRate){0};
     m.valueChangedHandler((id)m);
     assert(samples == 2 && acc[2] == 0);   // Once real data arrives, a zero acceleration can be free fall.
+    GCMotionValueChangedHandler old = m.valueChangedHandler;
+    generation++; old((id)m);
+    assert(samples == 2);   // a queued callback from before a live reassignment cannot write to the old slot
     dm_motion_detach((id)c, 2);
     assert(!m.sensorsActive && !m.valueChangedHandler && cleared == 2);
     puts("t_motion_apple: passed");

@@ -326,6 +326,47 @@ static void add_engine(int p, int motor, NSString *target, CHHapticEngine *(^cre
     DmRumbleChannel *c = [DmRumbleChannel new]; c.createEngine = create; c.target = target; c.player = p; c.motor = motor;
     [channels[p] addObject:c];
 }
+// Identify works before game haptics are initialized and while the controller
+// sheet suspends them. Give the selected physical device a short separate pulse.
+BOOL dm_haptics_apple_identify(GCController *controller) {
+    static NSHashTable<GCController *> *signaling;
+    if (!signaling) signaling = [NSHashTable weakObjectsHashTable];
+    if ([signaling containsObject:controller]) return YES;
+    GCDeviceHaptics *haptics = controller.haptics;
+    if (haptics) {
+        CHHapticEvent *event = [[CHHapticEvent alloc] initWithEventType:CHHapticEventTypeHapticContinuous
+            parameters:@[[[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticIntensity value:1]]
+            relativeTime:0 duration:0.55];
+        CHHapticPattern *pattern = [[CHHapticPattern alloc] initWithEvents:@[event] parameters:@[] error:nil];
+        for (GCHapticsLocality locality in @[GCHapticsLocalityDefault, GCHapticsLocalityAll, GCHapticsLocalityHandles, GCHapticsLocalityLeftHandle, GCHapticsLocalityRightHandle]) {
+            CHHapticEngine *engine = [haptics createEngineWithLocality:locality];
+            if (!pattern || ![engine startAndReturnError:nil]) continue;
+            id<CHHapticPatternPlayer> player = [engine createPlayerWithPattern:pattern error:nil];
+            if ([player startAtTime:CHHapticTimeImmediate error:nil]) {
+                [signaling addObject:controller];
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 650 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+                    [player stopAtTime:CHHapticTimeImmediate error:nil];
+                    [engine stopWithCompletionHandler:nil];
+                    [signaling removeObject:controller];
+                });
+                return YES;
+            }
+            [engine stopWithCompletionHandler:nil];
+        }
+    }
+    GCDeviceLight *light = controller.light;
+    if (!light) return NO;
+    GCColor *previous = light.color;
+    GCColor *signal = [[GCColor alloc] initWithRed:1 green:0 blue:0.8];
+    light.color = signal;
+    [signaling addObject:controller];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 650 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        light.color = previous;
+        [signaling removeObject:controller];
+    });
+    return YES;
+}
+
 static void default_controller(int p, GCDeviceHaptics *h, NSTimeInterval retryAfter) {
     add_engine(p, -1, @"controller default", ^CHHapticEngine *(NSError **e) { (void)e; return [h createEngineWithLocality:GCHapticsLocalityDefault]; });
     channels[p].lastObject.retryAfter = retryAfter;

@@ -3,6 +3,13 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <QuartzCore/CAMetalDisplayLink.h>
 #import <MetalFX/MetalFX.h>
+// Xcode 26's headers do not declare these public macOS/iOS 27 setters. Calls remain under the OS 27 availability check below; this declaration only lets an older SDK build the host.
+@protocol DmTemporalScalerOffsets <NSObject>
+@property (nonatomic) NSUInteger colorContentOffsetX, colorContentOffsetY;
+@property (nonatomic) NSUInteger depthContentOffsetX, depthContentOffsetY;
+@property (nonatomic) NSUInteger motionContentOffsetX, motionContentOffsetY;
+@property (nonatomic) NSUInteger outputOffsetX, outputOffsetY;
+@end
 #undef I   // MetalFX brings in <complex.h>, whose I (the imaginary unit) would shadow the local tables named I below
 #import <ImageIO/ImageIO.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
@@ -891,6 +898,8 @@ static void treg_finish_submission(void);
 
 static uint64_t g_sub_serial;   // Submission index (used by the parallel precompile's 'predict only once per submission')
 static id<MTLTexture> g_ndve_decoded;   // colour conversion and final movie scale must belong to the same submission
+static uint64_t g_ndve_sub;
+static const uint8_t *g_ndve_skip_end;
 // The first submission: the prepare step (warm_start), before anything of it is encoded. No GPU work: the submit entry (hle_nvn.c) calls it outside the graphics gate
 void mtl_prepare(void) {
     if (!g_warm_started && prepare_on()) { mtl_init(); shmap_load(); }
@@ -898,7 +907,7 @@ void mtl_prepare(void) {
 static void sub_cut_begin(void);
 void mtl_sub_begin(void) {
     mtl_init(); g_sub_serial++; g_seg = 0; seg_clk_put(g_sclk); g_sclk = NULL; g_rc_npend = 0; g_rc_skip = 0;
-    g_ndve_decoded = nil;
+    g_ndve_decoded = nil; g_ndve_skip_end = NULL;
     sub_cut_begin();
     defer_drain();
     defer_reset();
@@ -10710,7 +10719,7 @@ static int lc_keeps(uint32_t op) {
     }
 }
 
-static void dispatch(const p_dispatch *dp);
+static void dispatch(const p_dispatch *dp, const uint8_t *next);
 static int up_mfx_wanted(NvShader *cs); static int up_mfx_encode(NvShader *cs);   // a game's upscaler through MetalFX (see up_mfx_encode)
 // ---------- Compute dispatches moved ahead of the render pass they would split (DM_NVN_CS_HOIST) ----------
 // Metal cannot run a compute dispatch inside a render pass, so a dispatch between two draws of one pass ends it, and on a tile-based GPU every attachment is stored and loaded again:
@@ -10834,7 +10843,7 @@ static void cs_hoist_try(NvProg *pr0, const p_draw *dw0, const p_draw_idx *di0) 
             if (csh_hit(wr, nwr, rd, nrd)) { g_csh_stop[3]++; break; }   // the draws before it read what it writes
             if (g_csh_n >= CSH_MAX) { g_csh_stop[4]++; break; }
             PD("H %llu dispatch %s moved ahead of the pass%s", g_stat_pass + 1, cs->key, depth ? " (samples the pass's depth, which no draw before it wrote)" : "");
-            dispatch(dp); g_csh_op[g_csh_n++] = q; g_csh_moved++; g_csh_depth += depth; moved++;
+            dispatch(dp, NULL); g_csh_op[g_csh_n++] = q; g_csh_moved++; g_csh_depth += depth; moved++;
             continue; }
         if (hq.op == OP_TF_STATE) { g_csh_stop[5]++; break; }   // saves/restores counters in GPU memory
         if (state_op(hq.op, aq)) continue;
@@ -11315,6 +11324,7 @@ static id<MTL4ComputeCommandEncoder> dispatch_enc(void) {
 // Ocarina's NDVE movie path converts NV12 to RGBA before reconstruction. The final
 // movie dispatch can scale that clean image directly into its normal output.
 static int ndve_direct_draw(NvShader *cs);
+static int ndve_scale(id<MTLTexture> in, id<MTLTexture> out, const tex_t *desc);
 static int ndve_direct_role(NvShader *cs) {
     static int enabled = -1;
     if (enabled < 0) {
@@ -11326,23 +11336,23 @@ static int ndve_direct_role(NvShader *cs) {
     if (!strcmp(cs->key, "4f41ccf24f163e0d_b")) return 2;
     return 0;
 }
-static id<MTLTexture> ndve_image(NvShader *cs, unsigned slot, tex_t *desc) {
-    int tid = (int)(S.img[5][slot] & 0xfffff);
+static id<MTLTexture> ndve_image(NvShader *cs, unsigned slot, uint64_t handle, tex_t *desc) {
+    int tid = (int)(handle & 0xfffff);
     const nvn_rbind *binding = NULL;
     for (int i = 0; i < cs->rf.nb; i++) {
-        const nvn_rbind *b = &cs->rf.b[i];
-        if (b->kind == NVN_RB_IMG && b->reg == slot && b->rw) {
-            binding = b;
-            break;
-        }
+        if (cs->rf.b[i].kind == NVN_RB_IMG && cs->rf.b[i].reg == slot && cs->rf.b[i].rw) binding = &cs->rf.b[i];
     }
     if (!binding || !tid) return nil;
+    // The replacement writes image 1 as a render target. Requiring shader-write
+    // usage here refused the first frame and ran the whole reconstruction chain.
+    nvn_rbind intent = *binding;
+    if (slot == 1) { intent.rw = 0; intent.atom = 0; }
     os_unfair_lock_lock(&g_rmu);
     id<MTLTexture> result = nil;
-    if (tid < g_ntreg && g_treg[tid].ok) {
+    if (tid < g_ntreg && g_treg[tid].ok && !g_treg[tid].gone) {
         int real = 0;
         uint64_t rid = 0;
-        result = img_binding(tid, binding, &rid, &real);
+        result = img_binding(tid, &intent, &rid, &real);
         if (!real) result = nil;
         if (result && desc) *desc = g_treg[tid].t;
     }
@@ -11350,7 +11360,60 @@ static id<MTLTexture> ndve_image(NvShader *cs, unsigned slot, tex_t *desc) {
     if (result.textureType != MTLTextureType2D || result.pixelFormat != MTLPixelFormatRGBA8Unorm || result.sampleCount != 1) return nil;
     return result;
 }
-static void dispatch(const p_dispatch *dp) {
+// The observed 1080p movie has twelve reconstruction dispatches writing intermediates
+// for the final dispatch. Accept only that contiguous sequence, and encode the
+// replacement before dropping any dispatch. The loop still replays all bindings.
+static void ndve_direct_chain(const uint8_t *p) {
+    static const char *const keys[] = {
+        "ba079f68ae288dba_b", "a8b4fb48fee0ccf8_b", "e2eebd7ba18fe35f_b",
+        "e6be82d835fbe4d3_b", "9442573ee4ace011_b", "0a56002cdc7e1fce_b",
+        "0a56002cdc7e1fce_b", "d15370a382630d4e_b", "e6be82d835fbe4d3_b",
+        "7f7ff0f36b54d90f_b", "a8b4fb48fee0ccf8_b", "5a7d69b067a7f011_b",
+        "4f41ccf24f163e0d_b",
+    };
+    uint64_t dst = S.img[5][1];
+    NvShader *cs = nil;
+    unsigned index = 0;
+    for (int count = 0; count < 128; count++, p += ((const op_hdr *)p)->size) {
+        const op_hdr *h = (const op_hdr *)p;
+        const void *a = p + sizeof *h;
+        switch (h->op) {
+            case OP_BIND_PROGRAM: {
+                const p_bind_program *b = a;
+                if (b->stages != 0x20 || !b->prog) return;
+                cs = prog_get(b->prog)->sh[5];
+                break;
+            }
+            case OP_BIND_IMG: {
+                const p_bind_handles *b = a;
+                if (b->stage != 5 || b->defer || b->first < 0 || b->n <= 0 ||
+                    b->first >= 32 || b->n > 32 - b->first) return;
+                if (b->first <= 1 && b->first + b->n > 1) dst = b->h[1 - b->first];
+                break;
+            }
+            case OP_BIND_SSBO: case OP_BIND_UBO: case OP_BIND_UBO_SMALL:
+            case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP:
+            case OP_PUSH_CONST: case OP_BARRIER: break;
+            case OP_DISPATCH: {
+                const p_dispatch *d = a;
+                if (d->ind || d->x <= 0 || d->y <= 0 || d->z != 1 || !cs ||
+                    strcmp(cs->key, keys[index])) return;
+                if (++index != sizeof keys / sizeof keys[0]) break;
+                tex_t desc = {0};
+                id<MTLTexture> out = ndve_image(cs, 1, dst, &desc);
+                if (ndve_scale(g_ndve_decoded, out, &desc)) {
+                    g_ndve_decoded = nil;
+                    g_ndve_skip_end = p;
+                    static int once;
+                    if (!once++) MLOG("NDVE movie: skipped %u reconstruction dispatches", index - 1);
+                }
+                return;
+            }
+            default: return;
+        }
+    }
+}
+static void dispatch(const p_dispatch *dp, const uint8_t *next) {
     zskip_clear();
     g_wr_epoch++; g_mdx_epoch++;
     if (!S.cprog) { RED_ONCE(27, "no program bound before the dispatch"); return; }
@@ -11363,11 +11426,7 @@ static void dispatch(const p_dispatch *dp) {
     if (!cs) { RED_ONCE(28, "the dispatched program has no compute shader (or it is not mapped)"); return; }
     int ndve = !dp->ind && dp->x && dp->y && dp->z == 1 ? ndve_direct_role(cs) : 0;
     if (ndve == 1) g_ndve_decoded = nil;
-    if (ndve == 2 && g_ndve_decoded) {
-        rp_flush();
-        image_prepare(program, 0x20);
-        if (ndve_direct_draw(cs)) return;
-    }
+    if (ndve == 2 && g_ndve_sub == g_sub_serial && g_ndve_decoded && ndve_direct_draw(cs)) return;
     const void *k = (__bridge const void *)cs;
     id<MTLComputePipelineState> ps = hm_get_id(&g_cps, &k);
     if (!ps) {
@@ -11424,7 +11483,11 @@ static void dispatch(const p_dispatch *dp) {
         enc_c_dispatch_indirect(ce, ig, MTLSizeMake(tg[0], tg[1], tg[2]));
     } else enc_c_dispatch(ce, MTLSizeMake(dp->x, dp->y, dp->z), MTLSizeMake(tg[0], tg[1], tg[2]));
     if (own) enc_c_end(ce);
-    if (ndve == 1) g_ndve_decoded = ndve_image(cs, 0, NULL);
+    if (ndve == 1) {
+        g_ndve_decoded = ndve_image(cs, 0, S.img[5][0], NULL);
+        g_ndve_sub = g_sub_serial;
+        if (next && g_ndve_decoded && !g_csh_n) ndve_direct_chain(next);
+    }
 }
 // GPU: texture -> buffer (row stride taken from SetCopyRowStride, layer stride from SetCopyImageStride, 0 = tightly packed)
 // A copy at a level the host texture lacks (more levels declared than its size holds, tex_desc) is skipped: Metal does not check the level of a blit
@@ -11746,12 +11809,18 @@ static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsign
 static int ndve_direct_draw(NvShader *cs) {
     id<MTLTexture> in = g_ndve_decoded;
     g_ndve_decoded = nil;
+    rp_flush();
+    image_prepare(prog_get(S.cprog), 0x20);
     tex_t desc = {0};
-    id<MTLTexture> out = ndve_image(cs, 1, &desc);
+    id<MTLTexture> out = ndve_image(cs, 1, S.img[5][1], &desc);
+    return ndve_scale(in, out, &desc);
+}
+static int ndve_scale(id<MTLTexture> in, id<MTLTexture> out, const tex_t *desc) {
     if (in.width != 1920 || in.height != 1080 || out.width != 2560 || out.height != 1440 ||
         !(out.usage & MTLTextureUsageRenderTarget)) return 0;
-    zskip_del(desc.serial);
-    sparse_gpu_wrote(&desc);
+    zskip_del(desc->serial);
+    sparse_gpu_wrote(desc);
+    mtl_pool_gpu_written(desc->pool);
     rp_end();
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     ubd_land_compute();
@@ -12008,10 +12077,11 @@ static void dlss_eval(const p_dlss *c) {
         sc.colorTexture = col; sc.depthTexture = dep; sc.motionTexture = mot; sc.outputTexture = out; sc.exposureTexture = expo;
         sc.inputContentWidth = iw; sc.inputContentHeight = ih;
         if (@available(macOS 27.0, iOS 27.0, *)) {   // the rectangles' corners: all at the origin on the game seen, so an older system loses nothing there
-            sc.colorContentOffsetX = (NSUInteger)a.base[DLSS_COLOR][0]; sc.colorContentOffsetY = (NSUInteger)a.base[DLSS_COLOR][1];
-            sc.depthContentOffsetX = (NSUInteger)a.base[DLSS_DEPTH][0]; sc.depthContentOffsetY = (NSUInteger)a.base[DLSS_DEPTH][1];
-            sc.motionContentOffsetX = (NSUInteger)a.base[DLSS_MOTION][0]; sc.motionContentOffsetY = (NSUInteger)a.base[DLSS_MOTION][1];
-            sc.outputOffsetX = (NSUInteger)a.base[DLSS_OUTPUT][0]; sc.outputOffsetY = (NSUInteger)a.base[DLSS_OUTPUT][1];
+            id<DmTemporalScalerOffsets> offsets = (id)sc;
+            offsets.colorContentOffsetX = (NSUInteger)a.base[DLSS_COLOR][0]; offsets.colorContentOffsetY = (NSUInteger)a.base[DLSS_COLOR][1];
+            offsets.depthContentOffsetX = (NSUInteger)a.base[DLSS_DEPTH][0]; offsets.depthContentOffsetY = (NSUInteger)a.base[DLSS_DEPTH][1];
+            offsets.motionContentOffsetX = (NSUInteger)a.base[DLSS_MOTION][0]; offsets.motionContentOffsetY = (NSUInteger)a.base[DLSS_MOTION][1];
+            offsets.outputOffsetX = (NSUInteger)a.base[DLSS_OUTPUT][0]; offsets.outputOffsetY = (NSUInteger)a.base[DLSS_OUTPUT][1];
         }
         sc.motionVectorScaleX = a.mv[0]; sc.motionVectorScaleY = a.mv[1];
         sc.jitterOffsetX = a.jitter[0]; sc.jitterOffsetY = a.jitter[1];
@@ -12443,8 +12513,13 @@ void mtl_exec(const uint8_t *p) {
             case OP_DRAW_TEX: draw_tex(a); break;
             case OP_CLEAR_TEX: clear_tex(a); break;
             case OP_DLSS: dlss_eval(a); break;
-            case OP_DISPATCH: if (g_csh_n && csh_take(p)) { PD("H %llu dispatch already run ahead of the pass", g_stat_pass); break; }
-                dispatch(a); break;
+            case OP_DISPATCH:
+                if (__builtin_expect(g_ndve_skip_end != NULL, 0)) {
+                    if (p == g_ndve_skip_end) g_ndve_skip_end = NULL;
+                    break;
+                }
+                if (g_csh_n && csh_take(p)) { PD("H %llu dispatch already run ahead of the pass", g_stat_pass); break; }
+                dispatch(a, p + h.size); break;
             case OP_BARRIER: { int32_t bits; memcpy(&bits, a, 4);   // ordered at the next draw pass (barrier_game); inside a pass with shader writes, the pass ends first (swrite_note); in one without, before its next write (prog_swrites)
                 int order = g_enc && (bits & (NVN_BARRIER_ORDER_PRIMITIVES_BIT | NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT)), split = order && g_pass_swrite;
                 PD("I %llu barrier bits %#x%s", g_stat_pass, bits, split ? ": ends the pass (shader writes)" : order ? " (render pass open; a later shader write is ordered after its draws)" : g_enc ? " (render pass open)" : "");

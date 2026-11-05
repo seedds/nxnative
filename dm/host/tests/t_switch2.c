@@ -133,6 +133,56 @@ int main(void) {
     CHECK(s2_map_parse("3,-2,1,6,-5,4", mp) && mp[0] == 3 && mp[1] == -2 && mp[2] == 1 && mp[3] == 6 && mp[4] == -5 && mp[5] == 4);
     CHECK(!s2_map_parse("1,2,3,4,5", mp) && !s2_map_parse("1,2,3,4,5,7", mp) && !s2_map_parse("1,2,3,4,5,0", mp) && !s2_map_parse("1,2,3,4,5,6,7", mp) && !s2_map_parse("x", mp) && !s2_map_parse(NULL, mp) && mp[0] == 3);
 
+    // Rumble: the frequency code is logarithmic (code 333 at 110 Hz, 96 an octave); 320 Hz is 0x1E1, the high-band default other drivers send
+    CHECK(s2_freq_code(110) == 333 && s2_freq_code(220) == 429 && s2_freq_code(160) == 385 && s2_freq_code(320) == 0x1E1);
+    CHECK(s2_freq_code(1) == 0 && s2_freq_code(1e6f) == 1023 && s2_freq_code(NAN) == 0 && fabsf(s2_freq_hz(429) - 220.f) < 0.01f);
+    // A sample: low frequency, low amplitude, high frequency, high amplitude, 10 bits each, little endian
+    s2_haptic hz = {385, 1023, 481, 1023}; uint8_t s5[5]; s2_haptic_pack(&hz, s5);
+    uint64_t packed = (uint64_t)s5[0] | (uint64_t)s5[1] << 8 | (uint64_t)s5[2] << 16 | (uint64_t)s5[3] << 24 | (uint64_t)s5[4] << 32;
+    CHECK((packed & 0x3FF) == 385 && (packed >> 10 & 0x3FF) == 1023 && (packed >> 20 & 0x3FF) == 481 && (packed >> 30 & 0x3FF) == 1023);
+    uint8_t pk[33]; CHECK(s2_rumble_packet(pk, &hz, &hz, 0xd) == 33 && pk[0] == 0 && pk[1] == 0x5d && pk[2] == s5[0] && pk[17] == 0x5d && pk[32] == s5[4]);
+    s2_haptic quiet = s2_haptic_from(0, 160, 0, 320); CHECK(!s2_haptic_on(&quiet) && quiet.lf_hz == 385 && quiet.hf_hz == 481);
+    s2_haptic full = s2_haptic_from(1, 160, 1, 320); CHECK(full.lf_amp == 1023 && full.hf_amp == 1023 && s2_haptic_on(&full));
+    s2_haptic wild = s2_haptic_from(5, 9000, -1, 0); CHECK(wild.lf_amp == 1023 && wild.lf_hz == s2_freq_code(9000) && wild.hf_amp == 0 && wild.hf_hz == 0);   // as the console codes them
+    s2_haptic nan = s2_haptic_from(NAN, NAN, 0.25f, INFINITY); CHECK(nan.lf_amp == 0 && nan.lf_hz == 0 && nan.hf_amp == 256 && nan.hf_hz == 1023);
+    // The console's rounding: truncate, then the nearer of that code and the next, in hertz (amplitude: in 0..1)
+    CHECK(s2_amp_code(0.25f) == 256 && s2_amp_code(0.5f) == 511 /* 511.5: a tie keeps the lower */ && s2_amp_code(0.0004f) == 0 && s2_amp_code(0.0006f) == 1 && s2_amp_code(2.f) == 1023 && s2_amp_code(-1.f) == 0);
+    CHECK(fabsf(s2_freq_hz(s2_freq_code(482.6f)) - 482.6f) <= fabsf(s2_freq_hz((uint16_t)(s2_freq_code(482.6f) + 1)) - 482.6f));
+    { s2_haptic three[3] = {hz, quiet, full}; uint8_t q5[5]; s2_haptic_pack(&quiet, q5);   // three samples, played in turn
+      CHECK(s2_rumble_packet3(pk, three, three, 2) == 33 && pk[1] == 0x72 && !memcmp(pk + 2, s5, 5) && !memcmp(pk + 7, q5, 5) && pk[17] == 0x72); }   // 0x40 | 3 samples << 4 | sequence
+    { float lo = 0.8f, hi = 0.7f; s2_rumble_cap(&lo, &hi); CHECK(fabsf(lo + hi - 0.98f) < 1e-5f && fabsf(lo / hi - 0.8f / 0.7f) < 1e-4f);   // over 1: scaled to 0.98 together
+      lo = 0.5f; hi = 0.1f; s2_rumble_cap(&lo, &hi); CHECK(fabsf(lo - 0.49f) < 1e-6f && fabsf(hi - 0.098f) < 1e-6f); }
+    // Which motor each controller plays: a pair's Joy-Cons their own side, a Joy-Con alone the stronger of both in each band, a Pro Controller 2 one per block
+    s2_haptic mot[2] = {{100, 500, 200, 10}, {150, 20, 250, 700}}, ra, rb;
+    memset(&pad, 0, sizeof pad); pad.left.have = pad.right.have = 1;
+    s2_rumble_pick(&pad, &pad.left, mot, &ra, &rb); CHECK(ra.lf_amp == 500 && rb.hf_amp == 10);
+    s2_rumble_pick(&pad, &pad.right, mot, &ra, &rb); CHECK(ra.lf_amp == 20 && ra.hf_amp == 700 && rb.hf_hz == 250);
+    pad.left.have = 0;
+    s2_rumble_pick(&pad, &pad.right, mot, &ra, &rb); CHECK(ra.lf_amp == 500 && ra.lf_hz == 100 && ra.hf_amp == 700 && ra.hf_hz == 250 && rb.lf_amp == 500);
+    memset(&pad, 0, sizeof pad); pad.pro.have = 1;
+    s2_rumble_pick(&pad, &pad.pro, mot, &ra, &rb); CHECK(ra.lf_amp == 500 && rb.lf_amp == 20);
+    CHECK(s2_rumble_motors(&pad, &pad.pro) == 3);
+    memset(&pad, 0, sizeof pad); pad.left.have = pad.right.have = 1;
+    CHECK(s2_rumble_motors(&pad, &pad.left) == 1 && s2_rumble_motors(&pad, &pad.right) == 2);
+    pad.left.have = 0; CHECK(s2_rumble_motors(&pad, &pad.right) == 3);
+    // Rumble timing: each value plays once, in the first 5 ms slot ending after it was set
+    {   const uint64_t ms = 1000000; s2_rumble_log lg; memset(&lg, 0, sizeof lg); s2_rumble_cursor c; memset(&c, 0, sizeof c);
+        s2_haptic on2[2] = {{385, 600, 481, 0}, {385, 0, 481, 0}}, off2[2] = {{385, 0, 481, 0}, {385, 0, 481, 0}}, r2[2] = {{385, 0, 481, 0}, {385, 900, 481, 0}};
+        s2_rumble_log_add(&lg, 101 * ms, on2); s2_rumble_log_add(&lg, 106 * ms, off2);   // a one-step pulse: on at 101 ms, off at 106 ms
+        s2_rumble_resync(&c, 120 * ms, 5 * ms); CHECK(c.end == 100 * ms);   // three slots up to 115 ms
+        unsigned got = 0; for (int k = 0; k < 3; k++) { s2_rumble_slot(&lg, &c, 1); got |= (unsigned)(c.now[0].lf_amp == 600) << k; }
+        CHECK(got == 1 && c.end == 115 * ms && c.next == 2);   // played in the first slot only: one sample, not until the packet's end
+        s2_rumble_log_add(&lg, 116 * ms, r2);   // only the right motor changes: no slot for a left Joy-Con of a pair
+        s2_rumble_slot(&lg, &c, 1); CHECK(c.next == 3 && c.now[1].lf_amp == 0 && c.end == 120 * ms);
+        s2_rumble_log_add(&lg, 121 * ms, on2); s2_rumble_log_add(&lg, 122 * ms, off2);   // two in one slot: the second waits for the next
+        s2_rumble_slot(&lg, &c, 3); CHECK(c.now[0].lf_amp == 600); s2_rumble_slot(&lg, &c, 3); CHECK(c.now[0].lf_amp == 0 && c.end == 130 * ms);
+        s2_rumble_slot(&lg, &c, 3); CHECK(c.now[0].lf_amp == 0 && c.end == 135 * ms);   // nothing new: the value before repeats
+        for (int i = 0; i < 10; i++) s2_rumble_log_add(&lg, (136 + i) * ms, i & 1 ? off2 : on2);   // a pile-up: no value waits more than five slots
+        for (int k = 0; k < 12; k++) s2_rumble_slot(&lg, &c, 3);
+        CHECK(c.next == lg.n);
+        s2_rumble_resync(&c, 1000 * ms, 5 * ms); CHECK(c.end == 980 * ms);   // a tick long after: starts again
+        s2_rumble_resync(&c, 1010 * ms, 5 * ms); CHECK(c.end == 980 * ms); }   // within a packet: the slots carry on
+
     // Home, A and B for the Home hold-to-quit prompt: Home from any of the pad's controllers, A and B from the right side
     memset(&pad, 0, sizeof pad); int ha = 0, hb = 0;
     pad.left.have = pad.right.have = 1; pad.left.r.buttons = 0xE0000000u; pad.right.r.buttons = 0xE0000000u | S2_HOME | S2_A;

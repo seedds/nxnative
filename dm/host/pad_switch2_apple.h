@@ -15,6 +15,7 @@
 // DM_SW2_GYRO_DPS=<degrees per second per count> adjust the motion axes and scale (switch2_proto.h s2_motion). The Pro Controller 2 is untested on hardware.
 #pragma once
 #include "switch2_proto.h"
+#include "hle_haptics.h"
 
 typedef struct s2_pad { s2_pad_state st; char name[48]; struct s2_pad *next; } s2_pad;
 
@@ -29,3 +30,7 @@ typedef struct {
 int dm_switch2_start(const dm_switch2_front *front);   // 1: started; 0: off (DM_SW2 is not 1, or the Info.plist has no Bluetooth usage description)
 void dm_switch2_active(int on);                         // focus lost (0): the sensors stop driving the game's; back (1): they continue
 s2_pad *dm_switch2_pads(void);                          // the pads, a list through next
+// Rumble: the sink for a player whose pad is a Switch 2 controller (dm_haptics_apple_set_sink(player, dm_switch2_rumble)). The game's two full-key motors, left and right, reach the
+// pad's controllers as s2_rumble_pick says: every value the game sets plays once, in its own 5 ms sample (switch2_proto.h, Rumble timing), three to a packet every 15 ms while they
+// buzz, then a few packets of silence (a write without response can be lost).
+void dm_switch2_rumble(const dm_haptic_state *state);

@@ -330,7 +330,7 @@ static void s2pad_attach(s2_pad *d) {
     int p = g_merge ? 0 : pad_slot_take(&g_slots, d, d->name); char nb[16];
     if (p < 0) { LOG("controller '%s' (Bluetooth) connected: all %d players are taken, not used", d->name, DM_PLAYERS); return; }
     npad_name(p, nb, sizeof nb); LOG("controller '%s' (Bluetooth) connected: player %d (npad %s)", d->name, p + 1, nb);
-    if (!g_merge) dm_pad_players(pad_slot_mask(&g_slots));
+    if (!g_merge) { dm_pad_players(pad_slot_mask(&g_slots)); dm_haptics_apple_set_sink(p, dm_switch2_rumble); }   // its rumble goes over Bluetooth, not to a Core Haptics engine
 }
 static void s2pad_detach(s2_pad *d) {   // d is already off g_s2pads
     if (g_merge) {
@@ -339,6 +339,7 @@ static void s2pad_detach(s2_pad *d) {   // d is already off g_s2pads
         return;
     }
     int p = pad_slot_free(&g_slots, d); char nb[16]; if (p < 0) return;
+    dm_haptics_apple_set_sink(p, NULL);
     npad_name(p, nb, sizeof nb); LOG("controller '%s' (Bluetooth) disconnected: player %d (npad %s) is free", d->name, p + 1, nb);
     dm_pad_set_player(p, 0, 0, 0, 0, 0);
     dm_pad_players(pad_slot_mask(&g_slots));

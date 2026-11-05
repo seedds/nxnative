@@ -32,6 +32,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             alu(0x111, InstName.F2i, AF2i64);
             alu(0x112, InstName.I2f, AI2f64);
             alu(0x045, InstName.I2f, AI2fp);
+            alu(0x043, InstName.F2i, AF2ip);
             alu(0x107, InstName.F2f, AFrnd);
             alu(0x104, InstName.F2f, AF2f);
             alu(0x03e, InstName.F2f, AF2fp);
@@ -364,6 +365,42 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand src = AGet(context, AOne(context, x, neg: false, abs: false));
 
             ASet(context, x, x.Bit(74) ? context.IConvertS32ToFP32(src) : context.IConvertU32ToFP32(src));
+        }
+
+        // F2IP.U8.F32.NTZ Rd, a, b, RZ (sm_86's float to integer convert and pack): a and b each rounded to an integer by F2I's mode (78..79: nearest even, floor, ceiling,
+        // truncation) and saturated to 0..255, NaN to 0, b in byte 0 and a in byte 1, the upper half zero; a = RZ leaves b alone in byte 0. The other fields follow F2I's:
+        // unsigned (72 clear), 8 bits (75..77 clear); 74 is set in every one met, the form NVIDIA prints .NTZ. The Legend of Zelda: Ocarina of Time's colour converters
+        // (99951da6e5cd38f5 +0x530 and nine others) quantize a block of BT.709 Y and CbCr values times 255 to the nearest, then join two results into four bytes with
+        // PRMT 0x5410 and store them: the pixels' bytes come out in x order only with b low. Its foliage mesh shaders (740e2b04db624fb1 +0x370 and seven others) convert one
+        // colour channel times 255 at a time with a = RZ and truncation (.TRUNC, 78..79 = 3), then shift the result by 16 or 24 into an RGBA8 word: b is in byte 0 there too.
+        // Any other encoding (a second form, C not RZ, other bits from 72 on) is refused rather than guessed
+        public static void AF2ip(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+
+            if (x.Form != 1 || x.Bits(40, 64) != 0 || x.Rc != RegisterConsts.RegisterZeroIndex || (x.Field(72, 96) & ~(3ul << 6)) != 1 << 2)
+            {
+                throw AFail(context, "F2IP other than .U8.F32.NTZ of two registers with RZ");
+            }
+
+            int round = x.Bits(78, 80);
+
+            Operand Byte(int reg)
+            {
+                Operand f = AGpr(reg);
+                Operand r = round switch
+                {
+                    0 => context.FPRound(f),
+                    1 => context.FPFloor(f),
+                    2 => context.FPCeiling(f),
+                    _ => context.FPTruncate(f),
+                };
+                Operand v = context.FPMinimum(context.FPMaximum(r, ConstF(0f)), ConstF(255f));
+
+                return context.ConditionalSelect(context.IsNan(f), Const(0), context.FP32ConvertToU32(v));
+            }
+
+            ASet(context, x, x.Ra == RegisterConsts.RegisterZeroIndex ? Byte(x.Rb) : context.BitwiseOr(context.ShiftLeft(Byte(x.Ra), Const(8)), Byte(x.Rb)));
         }
 
         // FRND: a float rounded to an integer value (78..80: nearest even, floor, ceiling, truncation)
@@ -852,8 +889,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (carries)
             {
-                ASetPred(context, o0, context.ICompareNotEqual(context.BitwiseAnd(carryCount, Const(1)), Const(0)), u);
-                ASetPred(context, o1, context.ICompareNotEqual(context.BitwiseAnd(carryCount, Const(2)), Const(0)), u);
+                // The first predicate is sum >= 2^32, the second sum >= 2 * 2^32 (Mesa NAK's OpIAdd3 fold, checked on hardware): the IADD3.X of the
+                // high word adds both, so a carry of 2 must set both, not only the second
+                ASetPred(context, o0, context.ICompareNotEqual(carryCount, Const(0)), u);
+                ASetPred(context, o1, context.ICompareLessUnsigned(Const(1), carryCount), u);
             }
         }
 
@@ -1115,10 +1154,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
             bool negInter = x.Bit(72);
             // B's negation (63) exists where B is a register, uniform register or constant in the 32 slot (forms 1, 5, 6)
             Operand srcB = AGet(context, b);
+            // As the intermediate: with .X the bitwise not, otherwise the two's complement ~B + 1, whose + 1 counts in the carry out (B = 0 carries;
+            // Mesa NAK's OpLea / OpLeaX folds, checked on hardware)
+            bool negB = x.Form is 1 or 5 or 6 && x.Bit(63);
 
-            if (x.Form is 1 or 5 or 6 && x.Bit(63))
+            if (negB)
             {
-                srcB = context.INegate(srcB);
+                srcB = context.BitwiseNot(srcB);
             }
 
             Operand lo = AGet(context, a);
@@ -1128,16 +1170,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
             {
                 t = context.ShiftLeft(lo, Const(shift));
             }
-            else if (shift == 0)
-            {
-                t = AGet(context, c);
-            }
             else
             {
-                t = context.BitwiseOr(context.ShiftLeft(AGet(context, c), Const(shift)), context.ShiftRightU32(lo, Const(32 - shift)));
+                // .SX32 (73): the high word is a's sign extension, not a source (LEA.HI.X.SX32 adds a sign-extended 32-bit index to a 64-bit address)
+                Operand hi = x.Bit(73) ? context.ShiftRightS32(lo, Const(31)) : AGet(context, c);
+                t = shift == 0 ? hi : context.BitwiseOr(context.ShiftLeft(hi, Const(shift)), context.ShiftRightU32(lo, Const(32 - shift)));
             }
 
-            int plusOne = 0;
+            int plusOne = negB && !ex ? 1 : 0;
 
             if (negInter)
             {
@@ -1145,14 +1185,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                 if (!ex)
                 {
-                    plusOne = 1;
+                    plusOne++;
                 }
             }
 
             Operand sum = context.IAdd(t, srcB);
             Operand carry = context.ICompareLessUnsigned(sum, t);
 
-            if (plusOne != 0)
+            for (int k = 0; k < plusOne; k++)
             {
                 Operand next = context.IAdd(sum, Const(1));
                 carry = context.BitwiseOr(carry, context.ICompareLessUnsigned(next, sum));
@@ -1247,7 +1287,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             bool u = AUniform(context);
             Operand src = AGet(context, AOne(context, x, u, neg: false, abs: false));
 
-            if (x.Bit(63))
+            // Bit 63 is the bitwise not only where B is a register, uniform register or constant (forms 1, 5, 6); in the immediate form it is the immediate's top bit
+            if (x.Bit(63) && x.Form is 1 or 5 or 6)
             {
                 src = context.BitwiseNot(src);
             }
@@ -1268,7 +1309,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             Operand src = AGet(context, AOne(context, x, u, neg: false, abs: false));
 
-            if (x.Bit(63))
+            // As POPC: bit 63 is the bitwise not only in forms 1, 5, 6 (the immediate's top bit in form 4)
+            if (x.Bit(63) && x.Form is 1 or 5 or 6)
             {
                 src = context.BitwiseNot(src);
             }
@@ -1413,8 +1455,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
             int lut0 = x.Bits(64, 67) | (x.Bits(72, 77) << 3);
             int lut1 = x.Bits(16, 24);
 
-            ASetPred(context, x.Bits(81, 84), APredLut(context, a, b, c, lut0), u);
-            ASetPred(context, x.Bits(84, 87), APredLut(context, a, b, c, lut1), u);
+            // Both results from the sources as they were: the first destination may be one of the sources (PLOP3.LUT P2, P0, P2, P0, P6, ...)
+            Operand r0 = APredLut(context, a, b, c, lut0);
+            Operand r1 = APredLut(context, a, b, c, lut1);
+            ASetPred(context, x.Bits(81, 84), r0, u);
+            ASetPred(context, x.Bits(84, 87), r1, u);
         }
 
         // A three-input boolean function by its truth table (bit (a << 2 | b << 1 | c) ... as LOP3: a = 0xf0, b = 0xcc, c = 0xaa)

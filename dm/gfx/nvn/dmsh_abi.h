@@ -75,7 +75,7 @@
 // Raw global memory: the translator reserves that table as a storage buffer under this constant buffer slot, which no game has (Ryujinx GlobalToStorage.GmemMapCbSlot), finds the pool
 // holding an address by a binary search over the table's starts and accesses the address plus the pool's delta through a physical storage buffer pointer
 #define DMSH_GMEM_MAP_CB_SLOT 0xFF
-#define DMSH_GMEM_MAP_ENTRIES 4096       // entries of the table (GlobalToStorage.GmemMapLog2 = 12), sorted by start: entry 0 is empty (start 0, end 0) and unused entries start at ~0
+#define DMSH_GMEM_MAP_ENTRIES 8192       // entries of the table (GlobalToStorage.GmemMapLog2 = 13), sorted by start: entry 0 is empty (start 0, end 0) and unused entries start at ~0
 #define DMSH_GMEM_MAP_ENTRY 32           // bytes of an entry: start, end (exclusive), delta (Metal GPU address minus guest address), then a 32-bit lookup hint and padding
 #define DMSH_GMEM_HINT_SHIFT 21         // one hint per 2 MiB guest address chunk, indexed by its low 12 bits. Hint: chunk in high 20 bits, nonzero entry index in low 12 bits
 // The write log is a bitmap of the entries in the exact pool table bound to the shader. Bit i in word i / 32 records a store or atomic through entry i.

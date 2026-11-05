@@ -49,6 +49,7 @@ typedef struct {
     uint32_t pend[CV_BUFS], phead, pcount;    // released, waiting for a picture
     vpx_image_t *held[CV_HOLD]; int64_t held_ts[CV_HOLD]; uint8_t held_eos[CV_HOLD]; int nheld;
     int eos_pending;
+    int skip, skip_done;   // DM_MOVIE_SKIP matched this decoder's movie: its first picture ends the stream, later packets are taken and dropped
 } cv_dec;
 
 static cv_dec *g_cv[16];
@@ -248,8 +249,21 @@ static void cv_open(cv_dec *d) {   // (re)creates the codec state: a new stream 
     d->vpx_ok = vpx_codec_dec_init(&d->vpx, d->codec == CV_VP8 ? vpx_codec_vp8_dx() : vpx_codec_vp9_dx(), &cfg, 0) == VPX_CODEC_OK;
     if (!d->vpx_ok) LOG("[RED] nn::codec %s decoder: libvpx init failed", k_cv_name[d->codec]);
 }
+// DM_MOVIE_SKIP=<part>[,<part>…] (1 or all = every movie): a movie whose file name (the .webm / .mp4 the game opened last, hle_fs.c) contains a part ends at its first picture, as if the
+// stream ended there. For long pre-rendered cutscenes a game will not let the player skip (The Legend of Zelda: Ocarina of Time's opening on a new game: about 6 minutes, and at 24 fps
+// on the Mac with its video enhancer, NDVE, on every picture). A looping movie (a title backdrop) restarts at every end, so name only the movies to skip
+void dm_last_movie(char *out, size_t n);
+static int movie_skipped(char *name, size_t n) {
+    const char *e = getenv("DM_MOVIE_SKIP"); dm_last_movie(name, n);
+    if (!e || !*e || !strcmp(e, "0")) return 0;
+    if (!strcmp(e, "1") || !strcmp(e, "all")) return 1;
+    char list[512]; snprintf(list, sizeof list, "%s", e);
+    for (char *sv = NULL, *p = strtok_r(list, ",", &sv); p; p = strtok_r(NULL, ",", &sv)) if (*p && *name && strstr(name, p)) return 1;
+    return 0;
+}
 static Result cv_dec_init(void *t, int codec, uint16_t w, uint16_t h, uint32_t in, uint32_t out, const void *csd, uint64_t csd_n) {
     cv_dec *d = calloc(1, sizeof *d);
+    { char mv[256]; d->skip = movie_skipped(mv, sizeof mv); LOG("[codec] movie %s%s", *mv ? mv : "(no movie file opened)", d->skip ? ": skipped (DM_MOVIE_SKIP), it ends at its first picture" : ""); }
     d->magic = CV_MAGIC; d->codec = codec; d->w = w; d->h = h; pthread_mutex_init(&d->mu, NULL);
     if (csd && csd_n && csd_n < (1u << 20)) { d->csd = malloc((size_t)csd_n); memcpy(d->csd, csd, (size_t)csd_n); d->csd_n = (size_t)csd_n; }
     cv_open(d);
@@ -347,6 +361,7 @@ static vpx_image_t *av1_to_i420(const mav1_picture *p) {   // the decoder's NV12
 static Result cv_dec_submit(uint64_t *out, void *t, const void *data, uint64_t size, int64_t ts, bool eos) {
     cv_dec *d = cv_of(t); if (!d) return CV_R(2004);
     pthread_mutex_lock(&d->mu);
+    if (d->skip_done) { *out = ++d->submits; pthread_mutex_unlock(&d->mu); return 0; }   // a skipped movie has ended: its packets are taken and dropped
     if (d->nheld >= CV_HOLD) { static int n; if (n++ < 4) LOG("[RED] nn::codec %s: a packet refused with %d pictures waiting for a released buffer", k_cv_name[d->codec], d->nheld); if (d->event) hle_clear_system_event(d->event); pthread_mutex_unlock(&d->mu); return CV_BUSY; }
     int got = 0;
     if (d->codec == CV_H264 && d->avc) {   // VideoToolbox reorders: pictures leave in presentation order, all of them at the end of the stream
@@ -364,6 +379,7 @@ static Result cv_dec_submit(uint64_t *out, void *t, const void *data, uint64_t s
         vpx_codec_iter_t it = NULL; const vpx_image_t *im;
         while ((im = vpx_codec_get_frame(&d->vpx, &it))) { vpx_image_t *c = img_copy(im); if (c) got += cv_hold(d, c, ts); }
     }
+    if (d->skip && got) { eos = true; d->skip_done = 1; }
     if (eos) { if (got) d->held_eos[d->nheld - 1] = 1; else d->eos_pending = 1; }
     *out = ++d->submits;
     drain(d, 1);

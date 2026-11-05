@@ -5,6 +5,7 @@
 // Paths look like "rom:/data/x". FileHandle / DirectoryHandle are 8 bytes passed by value, here they store the host fd (FH_OUT) / DIR*.
 // Struct layout follows the public Horizon ABI: DirectoryEntry = {char name[0x301], pad[3], s8 type, pad[3], s64 size} (0x310 bytes).
 #include "hle.h"
+#include <strings.h>
 #include <mach/mach.h>
 #include "front.h"
 #include <dirent.h>
@@ -784,6 +785,15 @@ HLE_FORCE("_ZN2nn2fs7UnmountEPKc", "fsp-srv; host mounts are permanent, a no-op;
 }
 
 // ---------- Files ----------
+// The movie file the game opened last (.webm / .mp4 / .mkv): a video decoder starts right after its player opens the file, so hle_codec_video.c names the movie by it (DM_MOVIE_SKIP)
+static pthread_mutex_t g_movie_mu = PTHREAD_MUTEX_INITIALIZER;
+static char g_movie[256];
+static void note_movie(const char *path) {
+    size_t n = path ? strlen(path) : 0;
+    if (n < 5 || !(strcasecmp(path + n - 5, ".webm") == 0 || strcasecmp(path + n - 4, ".mp4") == 0 || strcasecmp(path + n - 4, ".mkv") == 0)) return;
+    pthread_mutex_lock(&g_movie_mu); snprintf(g_movie, sizeof g_movie, "%s", path); pthread_mutex_unlock(&g_movie_mu);
+}
+void dm_last_movie(char *out, size_t n) { pthread_mutex_lock(&g_movie_mu); snprintf(out, n, "%s", g_movie); pthread_mutex_unlock(&g_movie_mu); }
 HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Result, h_fs_OpenFile, uint64_t *out, const char *path, int mode) { dm_thread_service_request();
     int mi; int64_t k;
     if (img_path(path, &mi, &k)) {
@@ -793,7 +803,7 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
         img_ent *ent = &g_mnt[mi].img->e[k];   // a damaged file is named once, at its first open
         if ((ent->flags & IMG_ENT_DAMAGED) && !(__atomic_fetch_or(&ent->flags, IMG_ENT_REPORTED, __ATOMIC_RELAXED) & IMG_ENT_REPORTED))
             LOG("[RED] fs %s failed the NCA's hash check when it was extracted (a damaged NSP, --allow-damaged); its bytes may be wrong", path);
-        *out = FH_OUT(IMG_HANDLE(mi, k));
+        *out = FH_OUT(IMG_HANDLE(mi, k)); note_movie(path);
         if (g_flag.fs) LOG("fs open [%.2fs] %s mode=%d → image entry %lld", (now_ns() - g_t0_ns) / 1e9, path, mode, (long long)k);
         return RES_OK;
     }
@@ -810,6 +820,7 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
       atomic_store(&g_ftxn[fd], token); }
     fslog_init();
     if (g_fslog && fd < 4096) { pthread_mutex_lock(&g_fslog_lock); free(g_fdpath[fd]); g_fdpath[fd] = strdup(path); pthread_mutex_unlock(&g_fslog_lock); }
+    note_movie(path);
     if (g_flag.fs) LOG("fs open [%.2fs] %s mode=%d → fd %d", (now_ns() - g_t0_ns) / 1e9, path, mode, fd);
     return RES_OK;
 }

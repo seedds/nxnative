@@ -783,7 +783,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
         // slot, which no constant buffer of the game has (dmsh_build.py turns it into DMSH_KIND_GMEM_MAP). 1 << GmemMapLog2 entries of GmemMapEntryWords words each,
         // {start lo, start hi, end lo, end hi, delta lo, delta hi, hint, 0}, sorted by start; entry 0 is empty (start 0, end 0) and unused entries start at ~0
         public const int GmemMapCbSlot = 0xff;
-        private const int GmemMapLog2 = 12;
+        private const int GmemMapLog2 = 13;   // 8,191 pools: Ocarina of Time (0400486024DEC000) has over 4,500 in Kokiri Forest
         private const int GmemMapEntryWords = 8;
         private const int GmemHintShift = 21;
 

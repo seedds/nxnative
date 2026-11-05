@@ -157,12 +157,46 @@ static void crash_gate(int sig) {
     if (none == me) _exit(128 + sig);
     for (;;) pause();
 }
+// A claimed fault runs its instruction again, so a claim that cannot help repeats forever: a file page that fails to come in (DM_GUEST_FILE: a read error, a page the file cannot give)
+// faults with SIGBUS as a dirty-tracker write fault does, and nvn_dirty.c claims every write fault on a page it ever tracked. So each thread counts its claims in a row that leave it where
+// it was: at the same address, with the same registers (x18 aside, which the kernel may change), and a pc the hook did not move (DM_GPU_READWATCH's emulated accesses move it, and count
+// 0); any other claim starts the count again. At g_claim_cap such claims the page is looked at, with vm_region_64 and vm_read_overwrite, which fail instead of faulting: when its
+// protection lets the access through and a byte of it still cannot be read, it does not come in, so the hooks are not asked again and the crash path is taken, with a line naming the
+// address, si_code and the count. Any other page was protected again between the accesses (one thread rewriting the same small texture every frame faults at the same address after each
+// upload, with the same registers when its code does not change them), or the game left it inaccessible: the count starts again and the hooks keep deciding, as before.
+// DM_FAULT_RETRY_CAP=<n> sets the cap, 0 turns it off; it is 256 with DM_GUEST_FILE=1 and off otherwise, so that without the guest file nothing changes. The counts are per thread
+// (__thread); crash_thread_init touches them first, since Darwin makes a thread's __thread block on its first use, with malloc, which a signal handler should not be the one to call
+static unsigned g_claim_cap;
+static pthread_key_t g_altstack_key;   // set on every thread that ran crash_thread_init (its alternate stack), which also made its __thread block
+static __thread void *t_claim_at; static __thread uint64_t t_claim_regs; static __thread unsigned t_claims;
+static uint64_t claim_regs(const ucontext_t *uc) {   // a hash of the registers at the fault, pc included
+    const __typeof__(uc->uc_mcontext->__ss) *s = &uc->uc_mcontext->__ss; uint64_t h = 0xcbf29ce484222325ull;
+    for (int i = 0; i < 29; i++) if (i != 18) h = (h ^ s->__x[i]) * 0x100000001b3ull;
+    uint64_t r[4] = {s->__fp, s->__lr, s->__sp, s->__pc}; for (int i = 0; i < 4; i++) h = (h ^ r[i]) * 0x100000001b3ull;
+    return h;
+}
+static int claim_no_page(void *a, int is_write) {   // the page's protection lets the access through, yet no byte of it can be read
+    vm_address_t ra = (vm_address_t)a; vm_size_t rs = 0; vm_region_basic_info_data_64_t info; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
+    if (vm_region_64(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS || ra > (vm_address_t)a) return 0;   // not mapped at all
+    if (!(info.protection & VM_PROT_READ) || (is_write && !(info.protection & VM_PROT_WRITE))) return 0;
+    uint8_t b; vm_size_t got = 0;
+    return vm_read_overwrite(mach_task_self(), (vm_address_t)a, 1, (vm_address_t)&b, &got) != KERN_SUCCESS || got != 1;
+}
 static void on_crash(int sig, siginfo_t *si, void *uc_) {
-    ucontext_t *uc = uc_;
+    ucontext_t *uc = uc_; unsigned stuck = 0;   // stuck: the claims in a row at a page that does not come in (g_claim_cap)
     if (sig == SIGTRAP && g_trap_hook && g_trap_hook(uc)) return;
     if (sig == SIGSEGV || sig == SIGBUS) {
         int is_write = (int)((uc->uc_mcontext->__es.__esr >> 6) & 1);   // The WnR bit of ESR
-        for (int i = 0; i < g_nfault_hook; i++) if (g_fault_hook[i](si->si_addr, is_write, uc)) return;
+        unsigned cap = g_claim_cap && pthread_getspecific(g_altstack_key) ? g_claim_cap : 0;   // only on a thread that ran crash_thread_init: no __thread block made here
+        uint64_t regs = cap ? claim_regs(uc) : 0, pc = uc->uc_mcontext->__ss.__pc;
+        if (cap && t_claims >= cap && si->si_addr == t_claim_at && regs == t_claim_regs) { if (claim_no_page(si->si_addr, is_write)) stuck = t_claims; else t_claims = 0; }
+        if (!stuck) for (int i = 0; i < g_nfault_hook; i++) if (g_fault_hook[i](si->si_addr, is_write, uc)) {
+            if (cap) {   // the claims in a row that leave the thread where it was
+                t_claims = uc->uc_mcontext->__ss.__pc != pc ? 0 : si->si_addr == t_claim_at && regs == t_claim_regs ? t_claims + 1 : 1;
+                t_claim_at = si->si_addr; t_claim_regs = regs;
+            }
+            return;
+        }
     }
     crash_gate(sig);
     // The stderr lock may be held by another thread (stuck or suspended): the fprintf below would hang with it, the time limit's SIGALRM could not end the run, and the log would get nothing.
@@ -170,6 +204,7 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
     for (int i = 0; ftrylockfile(stderr); i++) {
         if (i < 100) { usleep(10000); continue; }
         char b[256]; int n = snprintf(b, sizeof b, "[dm] CRASH sig=%d (stderr held for 1 s, no dump)", sig);
+        if (stuck) n += snprintf(b + n, sizeof b - n, " addr=%#llx si_code=%d claimed %u times in a row", (unsigned long long)(uintptr_t)si->si_addr, si->si_code, stuck);
         uint64_t at[2] = {uc->uc_mcontext->__ss.__pc, uc->uc_mcontext->__ss.__lr};
         for (int k = 0; k < 2; k++) { module_t *m = module_of((void *)at[k]);
             n += m ? snprintf(b + n, sizeof b - n, " %s=%s+%#llx", k ? "lr" : "pc", m->name, at[k] - (uint64_t)m->base) : snprintf(b + n, sizeof b - n, " %s=%#llx", k ? "lr" : "pc", at[k]); }
@@ -181,6 +216,8 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
     fprintf(stderr, "[dm] CRASH sig=%d", sig);
     off("addr", (uint64_t)si->si_addr); off("pc", uc->uc_mcontext->__ss.__pc); off("lr", uc->uc_mcontext->__ss.__lr);
     fprintf(stderr, " sp=%#llx\n", uc->uc_mcontext->__ss.__sp);
+    if (stuck) LOG("[RED] page fault at %p, si_code %d: the fault hooks claimed it %u times in a row with nothing changed, and the page cannot be read although its protection allows the access: it does not come in (a file page that fails to page in?), so it is not retried again",
+                   si->si_addr, si->si_code, stuck);
     for (int i = 0; i < 29; i++) fprintf(stderr, "x%d=%#llx%s", i, uc->uc_mcontext->__ss.__x[i], i % 6 == 5 ? "\n" : " ");
     fprintf(stderr, "\n");
     // What the registers point at: the first six words of each readable target (read with vm_read_overwrite, which fails instead of faulting); a word inside a module prints as a module offset, so an object's vtable names its class
@@ -212,17 +249,20 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
 }
 // The signal alternate stack is per thread: every guest thread must call this when it starts running (only then can the crash state be printed on the alternate stack on a stack overflow)
 // The alternate stack is released when the thread exits: the pthread key destructor is called at thread exit (disable the alternate stack first, then free). The game frequently starts short-lived threads, and without releasing each one leaks 64 KiB.
-static pthread_key_t g_altstack_key;
 static pthread_once_t g_altstack_once = PTHREAD_ONCE_INIT;
 static void altstack_free(void *p) { stack_t off = {.ss_flags = SS_DISABLE}; sigaltstack(&off, 0); free(p); }
 static void altstack_key_init(void) { if (pthread_key_create(&g_altstack_key, altstack_free)) die("altstack key"); }
 void crash_thread_init(void) {
     pthread_once(&g_altstack_once, altstack_key_init);
     if (pthread_getspecific(g_altstack_key)) return;                 // Repeated calls on the same thread do not allocate again
+    t_claims = 0;   // this thread's __thread block, made here rather than in the signal handler (the retry cap above), before the key that lets on_crash use it
     stack_t ss = {.ss_sp = malloc(65536), .ss_size = 65536}; sigaltstack(&ss, 0);
     pthread_setspecific(g_altstack_key, ss.ss_sp);
 }
 void crash_install(void) {
+    { const char *c = getenv("DM_FAULT_RETRY_CAP"), *gf = getenv("DM_GUEST_FILE");   // the cap on claims that leave a thread where it was (above): set before the handlers below are installed, which read it (on_crash, on threads with the alternate-stack key)
+      g_claim_cap = c && *c ? (atoi(c) > 0 ? (unsigned)atoi(c) : 0) : gf && atoi(gf) > 0 ? 256 : 0;
+      if (g_claim_cap) LOG("page fault hooks: a fault claimed %u times in a row with nothing changed, at a page that does not come in, takes the crash path (DM_FAULT_RETRY_CAP%s)", g_claim_cap, c && *c ? "" : ", on with DM_GUEST_FILE"); }
     crash_thread_init();
     struct sigaction sa = {.sa_sigaction = on_crash, .sa_flags = SA_SIGINFO | SA_ONSTACK};
     sigaction(SIGALRM, &sa, 0);

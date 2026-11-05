@@ -267,7 +267,7 @@ class StageMemory(Translated):
         self.assertRegex(self.msl(self.INPUT, self.KEEP_R19), r'as_type<float>\(_\d+\[12\]\)')
 
     def test_word_store_goes_to_the_outputs(self):   # 0x120 + 0x80
-        self.assertIn('0 + 416', self.msl(self.ATTRIBUTE))
+        self.assertRegex(self.msl(self.ATTRIBUTE), r'0u? \+ 416u?\b')   # unsigned: integer adds wrap (test_dmsh_ampere_alu.py WrappingMultiply)
 
     def test_the_zero_count_is_left_out(self):   # threads are not in step on Metal: it could land after the real count, and the stage memory starts at zero
         without = self.msl(self.COUNT)
@@ -353,8 +353,8 @@ class Shared(Translated):
         # 0xffffffff * 1 + {4000:1}: the low word carries, so the result is the product's high word + 4000 + 1 (these constants fold down to that sum)
         msl = self.msl(mov(7, 0xffffffff), mov(11, 1), mov(8, 1), mov(9, 4000), inst(*self.IMAD_HI), sts(0x20, 8))
         self.assertIn('._m1', msl)
-        self.assertRegex(msl, r'\+ 4000\b')
-        self.assertRegex(msl, r'\+ 1\b')
+        self.assertRegex(msl, r'\+ 4000u?\b')   # u: integer adds are emitted unsigned (they wrap; test_dmsh_ampere_alu.py WrappingMultiply)
+        self.assertRegex(msl, r'\+ 1u?\b')
 
     # 08faccfa2eaa7e01: ISETP.GE P0, R2, 0x20 sets the carry, then IMAD.X adds it. Dropped, the shader's 64-bit division gave 2 for 340 / 1
     ISETP_P0 = 0x000fe20003f06070, 0x000000200200780c

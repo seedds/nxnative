@@ -130,5 +130,25 @@ class Vote(Alu):
         self.assertIn('simd_any', self.kept(self.FSETP, self.VOTE, self.MOV_P0, srcs=(6, 19, 20)))
 
 
+
+class WrappingMultiply(Alu):
+    """IMAD.SHL.U32 (a multiply by a power of two) wraps modulo 2^32, as do IADD3 and every integer multiply. SPIRV-Cross wrote the translator's signed
+    OpIMul as int arithmetic, and signed overflow is undefined in MSL: the Metal compiler folded the signed byte extract (x * 256) >> 24 into x >> 16.
+    PRAGMATA 50e310abbb05e838 (+0x0220 IMAD.SHL.U32 R3, R4, 0x100, RZ; +0x0270 SHF.R.S32.HI R3, RZ, 0x18, R3) read byte 2 of its snorm8 words as
+    0xffffc05d instead of 0x5d (found by an offline differential check against a SASS reference model, and reproduced on the GPU). Integer add, subtract and multiply are
+    emitted on uint now, which wraps"""
+    IMAD = (0x045fe200078e00ff, 0x0000010013037824)   # IMAD.SHL.U32 R3, R19, 0x100, RZ (the game's +0x0220 with R19, the thread index, for R4)
+    SHF = (0x000fc40000011403, 0x00000018ff067819)    # SHF.R.S32.HI R6, RZ, 0x18, R3 (+0x0270, into R6, the stored register)
+
+    def test_multiply_is_unsigned(self):
+        msl = self.kept(self.IMAD, self.SHF, srcs=(19,))
+        self.assertRegex(msl, r'\* 256u')
+        self.assertNotRegex(msl, r'int \w+ = as_type<int>\([^;]*\) \* 256;')
+
+    def test_signed_shift_kept(self):
+        # the arithmetic shift stays signed (only the wrapping operations change type)
+        self.assertRegex(self.kept(self.IMAD, self.SHF, srcs=(19,)), r'int \w+ = _\d+ >> 24;')
+
+
 if __name__ == '__main__':
     unittest.main()

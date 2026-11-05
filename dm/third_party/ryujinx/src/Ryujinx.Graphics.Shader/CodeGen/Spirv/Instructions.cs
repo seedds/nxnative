@@ -172,7 +172,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
         private static OperationResult GenerateAdd(CodeGenContext context, AstOperation operation)
         {
-            return GenerateBinary(context, operation, context.Delegates.FAdd, context.Delegates.IAdd);
+            return GenerateBinary(context, operation, context.Delegates.FAdd, context.Delegates.IAdd, wrapping: true);
         }
 
         private static OperationResult GenerateAtomicAdd(CodeGenContext context, AstOperation operation)
@@ -1083,7 +1083,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
         private static OperationResult GenerateMultiply(CodeGenContext context, AstOperation operation)
         {
-            return GenerateBinary(context, operation, context.Delegates.FMul, context.Delegates.IMul);
+            return GenerateBinary(context, operation, context.Delegates.FMul, context.Delegates.IMul, wrapping: true);
         }
 
         private static OperationResult GenerateMultiplyHighS32(CodeGenContext context, AstOperation operation)
@@ -1233,7 +1233,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
         private static OperationResult GenerateSubtract(CodeGenContext context, AstOperation operation)
         {
-            return GenerateBinary(context, operation, context.Delegates.FSub, context.Delegates.ISub);
+            return GenerateBinary(context, operation, context.Delegates.FSub, context.Delegates.ISub, wrapping: true);
         }
 
         private static OperationResult GenerateSwizzleAdd(CodeGenContext context, AstOperation operation)
@@ -2198,11 +2198,16 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             return new OperationResult(AggregateType.S32, emitS(context.TypeS32(), context.GetS32(source)));
         }
 
+        // wrapping: an integer add, subtract or multiply, which the guest does modulo 2^32. Emitted on the unsigned type: SPIRV-Cross writes a signed
+        // OpIAdd / OpISub / OpIMul as int arithmetic, and in MSL (C++ rules) signed overflow is undefined, so the Metal compiler may assume it does not
+        // happen. It folded the signed byte extract (x * 256) >> 24 (IMAD.SHL.U32 then SHF.R.S32.HI) into x >> 16: PRAGMATA 50e310abbb05e838 read byte 2
+        // of its snorm8 words with byte 3 in it (found by an offline differential check against a SASS reference model). Unsigned arithmetic wraps
         private static OperationResult GenerateBinary(
             CodeGenContext context,
             AstOperation operation,
             Func<SpvInstruction, SpvInstruction, SpvInstruction, SpvInstruction> emitF,
-            Func<SpvInstruction, SpvInstruction, SpvInstruction, SpvInstruction> emitI)
+            Func<SpvInstruction, SpvInstruction, SpvInstruction, SpvInstruction> emitI,
+            bool wrapping = false)
         {
             IAstNode src1 = operation.GetSource(0);
             IAstNode src2 = operation.GetSource(1);
@@ -2228,6 +2233,10 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 }
 
                 return new OperationResult(AggregateType.FP32, result);
+            }
+            else if (wrapping)
+            {
+                return new OperationResult(AggregateType.U32, emitI(context.TypeU32(), context.GetU32(src1), context.GetU32(src2)));
             }
             else
             {

@@ -614,9 +614,11 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ### Dead-code removal dropped the inputs of atomics
 
-- **Cause:** Ryujinx's `Optimizer.RemoveNode` removes a dead node, then follows each source whose last use went away into the node that produced it. It did so even when that producer has side effects, such as an atomic or a call whose result is unused. Such a producer stays in the block, but its sources lost their uses, so the next dead-code pass deleted the chain that feeds it, and the atomic read undefined values.
-- **Fix:** general: `RemoveNode` follows only into producers without side effects (`HasSideEffects`). This follows MacNativeGames' translator patch 0002.
-- **Found on:** no game on hand so far. Rebuilding the chain changed no shader for this reason in Tears of the Kingdom, Breath of the Wild, Wonder, Scarlet or ANIMAL WELL (94,717 shaders); every MSL change was the early fragment tests attribute.
+- **Symptom:** a translated image load can use uninitialized coordinates after one result is discarded and another remains in use.
+- **Cause:** when `Optimizer.RemoveNode` removes the last use of a result, it may follow that result back into its producer and detach the producer's input uses. This is valid only if the producer can also be removed. A live sibling result keeps the producer in the block, where it still reads those inputs. The same applies to an atomic or a call with side effects.
+- **Fix:** use the existing `IsUnused` check for the producer before following it. It checks every destination and retains the side-effect protection added by MacNativeGames' translator patch 0002.
+- **Found on:** Ocarina of Time's two foliage simulation compute shaders with uninitialized coordinates in translated SPIR-V. The earlier atomic case did not change the translated output of 94,717 shaders from Tears of the Kingdom, Breath of the Wild, Wonder, Scarlet and ANIMAL WELL.
+- **Check:** `SurfaceLoadLiveness` in `dm/gfx/tests/test_dmsh_ampere_mem.py` uses synthetic instructions to exercise partial and complete image-load elimination and an atomic with an unused result.
 
 ### Position invariance across shaders
 

@@ -79,7 +79,7 @@ def loop_guard(msl):
 # as X*4 AND bounds-checked against a buffer size, then an element-0 load of a storage buffer) is specific to the miscompile; a legitimate element-0 read never computes and bounds-checks an offset it
 # does not use, so the rewrite leaves ordinary cp_sN._m0[0] reads untouched (62 of 1273 shaders that read a storage buffer at [0] match, in this game's cache).
 SBUF_SCALAR_INDEX = re.compile(
-    r'(int (\w+) = [^;\n]*\* 4;\s*'
+    r'(int (\w+) = [^;\n]*\* 4(?:u\))?;\s*'   # X * 4, or int(uint(X) * 4u) (wrapping multiply, 5eba12cf)
     r'bool \w+ = uint\(\2\) >= as_type<uint>\(\(\*spvDescriptorSet0\.cp_c\d+\)\._m0\[\d+\]\.z\);\s*'
     r'bool \w+ = !\w+;\s*'
     r'int \w+ = 0;\s*'
@@ -194,12 +194,13 @@ def hmma_msl(msl):
 # Mario Kart World's scenery lists (2ce9071c2f22d74f, 5fea9b7ddb30e8a8: `int a = -local; if (first) a = 1; int b = a; if (first) x[0] = 0; if (first) x[2] = b; ...`): the race took a different
 # block of trees out of the list at each rebuild. A guarded store left over that is not understood leaves the whole shader as it is. Returns the shader and [(storage binding's MSL name, word, value)]
 FIRST_STORE = re.compile(r'float (\w+) = as_type<float>\(gl_WorkGroupID\.x\);\s*float (\w+) = as_type<float>\(gl_LocalInvocationID\.x\);\s*int (\w+) = as_type<int>\(\1\) << (\d+);\s*'
-                         r'int (\w+) = ~as_type<int>\(\2\);\s*int (\w+) = \5 \+ 1;\s*bool (\w+) = \6 != \3;\s*')
+                         r'int (\w+) = ~as_type<int>\(\2\);\s*int (\w+) = (?:\5 \+ 1|int\(uint\(\5\) \+ 1u\));\s*bool (\w+) = \6 != \3;\s*')
+# (the + 1 in either spelling: signed, or the wrapping int(uint(b) + 1u) of xcheck-fixes 5eba12cf)
 # A local size with rows: the same test on y and x, and workgroup z zero (Mario Kart World's 0823b08c2027a38d, local size 8x8)
 FIRST_STORE_2D = re.compile(r'float (\w+) = as_type<float>\(gl_WorkGroupID\.y\);\s*float (\w+) = as_type<float>\(gl_LocalInvocationID\.y\);\s*float (\w+) = as_type<float>\(gl_LocalInvocationID\.x\);\s*'
                             r'float (\w+) = as_type<float>\(gl_WorkGroupID\.x\);\s*float (\w+) = as_type<float>\(gl_WorkGroupID\.z\);\s*'
-                            r'int (\w+) = as_type<int>\(\1\) << (\d+);\s*int (\w+) = ~as_type<int>\(\2\);\s*int (\w+) = \8 \+ 1;\s*bool (\w+) = \9 != \6;\s*'
-                            r'int (\w+) = as_type<int>\(\4\) << (\d+);\s*int (\w+) = ~as_type<int>\(\3\);\s*int (\w+) = \13 \+ 1;\s*bool (\w+) = \14 == \11;\s*'
+                            r'int (\w+) = as_type<int>\(\1\) << (\d+);\s*int (\w+) = ~as_type<int>\(\2\);\s*int (\w+) = (?:\8 \+ 1|int\(uint\(\8\) \+ 1u\));\s*bool (\w+) = \9 != \6;\s*'
+                            r'int (\w+) = as_type<int>\(\4\) << (\d+);\s*int (\w+) = ~as_type<int>\(\3\);\s*int (\w+) = (?:\13 \+ 1|int\(uint\(\13\) \+ 1u\));\s*bool (\w+) = \14 == \11;\s*'
                             r'bool (\w+) = !\10;\s*bool (\w+) = \15 && \16;\s*bool (\w+) = (?:as_type<int>\(\5\) == 0|0 == as_type<int>\(\5\));\s*bool (\w+) = \18 && \17;\s*(?:bool (\w+) = !\19;\s*)?')
 def first_store(msl, local):
     if not local or local[2:] != [1]: return msl, []
@@ -1106,8 +1107,9 @@ def drv_reads(src):
             else: dyn = True
         if offs or dyn: out[str(bank)] = {'vec4_offsets': sorted(offs), 'dynamic': dyn}
     # the sample position table read at the byte 0x620 + the sample index alone (Switch 2 GLSLC, one sample position per sample with no location grid: Orbitals' pixel shaders,
-    # PIXLD.MY_INDEX + 0x620, then the byte of that word), see unfillable
-    if out.get('0', {}).get('dynamic') and '[[sample_id]]' in src and re.search(r'= as_type<int>\(\w+\) \+ %d;' % abi.C0_SAMPLE_TABLE, src): out['0']['sample_table'] = True
+    # PIXLD.MY_INDEX + 0x620, then the byte of that word), see unfillable. Both spellings of the add: signed (`as_type<int>(x) + 1568`) and the translator's wrapping one
+    # since xcheck-fixes 5eba12cf (`int(as_type<uint>(x) + 1568u)`); missing the second lost sample_table on 65 PRAGMATA pixel shaders
+    if out.get('0', {}).get('dynamic') and '[[sample_id]]' in src and re.search(r'= (?:as_type<int>\(\w+\) \+ %d|int\(as_type<uint>\(\w+\) \+ %du\));' % (abi.C0_SAMPLE_TABLE, abi.C0_SAMPLE_TABLE), src): out['0']['sample_table'] = True
     return out
 
 SAMPLE_ROWS = [(abi.C0_SAMPLE_TABLE, abi.C0_SAMPLE_TABLE + abi.C0_SAMPLE_BYTES), (abi.C0_SAMPLE_INFO, abi.C0_SAMPLE_INFO + abi.C0_ROW)]   # c0: the pixel stage's sample position rows

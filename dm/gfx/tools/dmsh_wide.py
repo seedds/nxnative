@@ -22,6 +22,17 @@ import re
 _IDENT = r'_[0-9A-Za-z_]+'
 _BUF = r'[a-z]p_s\d+'   # storage buffer bindings: vp_ / fp_ / cp_ / gp_ ... s<n>
 _ADD = re.compile(r'^\s*int (' + _IDENT + r') = (' + _IDENT + r') \+ (-?\d+);\s*$')
+# the same sum as the translator writes it since xcheck-fixes 5eba12cf (wrapping add / subtract on uint): int(uint(b) + 4u), int(b - 4u) for a uint b
+_ADDU = re.compile(r'^\s*int (' + _IDENT + r') = int\((?:uint\((' + _IDENT + r')\)|(' + _IDENT + r')) ([+-]) (\d+)u\);\s*$')
+
+
+def _add(ln):   # (sum, value, signed constant) of an int sum line in either spelling, or None
+    m = _ADD.match(ln)
+    if m: return m.group(1), m.group(2), int(m.group(3))
+    m = _ADDU.match(ln)
+    if not m: return None
+    k = int(m.group(5)) * (-1 if m.group(4) == '-' else 1) & 0xffffffff
+    return m.group(1), m.group(2) or m.group(3), k - (1 << 32) if k >> 31 else k
 _IDX = re.compile(r'^\s*uint (' + _IDENT + r') = uint\(int\(uint\((' + _IDENT + r')\) >> uint\(2\)\)\);\s*$')
 _LOAD = re.compile(r'\(\*spvDescriptorSet0\.(' + _BUF + r')\)\._m0\[int\((' + _IDENT + r')\)\]')
 _RO = re.compile(r'^\s*const device ' + _IDENT + r'\* (' + _BUF + r') \[\[id\(\d+\)\]\];', re.M)
@@ -45,8 +56,8 @@ def wide_loads(msl):
     lines = msl.split('\n')
     adds, idx = {}, {}
     for ln in lines:
-        m = _ADD.match(ln)
-        if m: adds[m.group(1)] = (m.group(2), int(m.group(3))); continue
+        a = _add(ln)
+        if a: adds[a[0]] = (a[1], a[2]); continue
         m = _IDX.match(ln)
         if m: idx[m.group(1)] = m.group(2)
     words, block = {}, 0   # (block, buffer, value) → {byte offset: (line, match)}

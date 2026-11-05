@@ -189,6 +189,112 @@ static inline void s2_pad_ab(const s2_pad_state *p, int *a, int *b) {
     *a |= (m & S2_A) != 0; *b |= (m & S2_B) != 0;
 }
 
+// Rumble. Each controller lists its own vibration channel: the right Joy-Con 2's is S2_UUID_VIB_JOYCON_R, the left one's S2_UUID_VIB_JOYCON_L (it has no FA19B0FB; this one takes its
+// place in its channel list), the Pro Controller 2's S2_UUID_VIB_PRO (from the notes, untested). The report is a zero byte, then a 16-byte block per actuator (a Joy-Con 2 has one; the
+// Pro Controller 2's second block is its right grip): 0x40 | the number of samples (1 to 3) << 4 | a 4-bit sequence, then that many five-byte samples, played in turn (0x50 plays
+// only the first of three: the Switch 2's own encoder sets the count). A sample is two bands, low then high, each a 10-bit frequency code
+// and a 10-bit amplitude, 40 bits little endian. The frequency code is logarithmic, 96 steps an octave with code 333 at 110 Hz (about 9.9 Hz at 0, 16 kHz at 1023): the Switch 2's own
+// conversion from a game's VibrationValue. The amplitude is linear, 1023 at full. (An earlier reading of the code as plain hertz played every effect 3 to 5 times too low.)
+#define S2_UUID_VIB_JOYCON_R "FA19B0FB-CD1F-46A7-84A1-BBB09E00C149"
+#define S2_UUID_VIB_JOYCON_L "289326CB-A471-485D-A8F4-240C14F18241"
+#define S2_UUID_VIB_PRO      "CC483F51-9258-427D-A939-630C31F72B05"
+typedef struct { uint16_t lf_hz, lf_amp, hf_hz, hf_amp; } s2_haptic;   // *_hz: the frequency code (s2_freq_code), *_amp: 0..1023
+static inline void s2_haptic_pack(const s2_haptic *v, uint8_t out[5]) {
+    uint64_t x = (uint64_t)(v->lf_hz & 0x3FF) | (uint64_t)(v->lf_amp & 0x3FF) << 10 | (uint64_t)(v->hf_hz & 0x3FF) << 20 | (uint64_t)(v->hf_amp & 0x3FF) << 30;
+    for (int i = 0; i < 5; i++) out[i] = (uint8_t)(x >> (8 * i));
+}
+static inline float s2_freq_hz(uint16_t code) { return 110.f * exp2f(((float)code - 333.f) / 96.f); }
+// Hz to code as the console rounds it (checked against its own encoder on 200,000 random values): the hertz clamped to 9.935..16034, the code truncated, then of it and the next one
+// the one whose frequency is nearer
+static inline uint16_t s2_freq_code(float hz) {
+    if (!(hz >= 9.935f)) hz = 9.935f; if (hz > 16034.f) hz = 16034.f;
+    int c = (int)(96.f * log2f(hz) - 318.0105285644531f);
+    if (c > 0x3FE) return (uint16_t)(c > 0x3FF ? 0x3FF : c);
+    if (c < 0) c = 0;
+    return (uint16_t)(fabsf(s2_freq_hz((uint16_t)(c + 1)) - hz) < fabsf(s2_freq_hz((uint16_t)c) - hz) ? c + 1 : c);
+}
+// 0..1 to 0..1023 the same way: truncated, then the nearer of it and the next
+static inline uint16_t s2_amp_code(float a) {
+    if (!(a > 0.f)) a = 0.f; if (a > 1.f) a = 1.f;
+    int c = (int)(a * 1023.f); if (c > 0x3FE) return 0x3FF;
+    return (uint16_t)(fabsf((float)(c + 1) / 1023.f - a) < fabsf((float)c / 1023.f - a) ? c + 1 : c);
+}
+// The console's total-strength limit for one sample: both bands scaled by 0.98, or so that they add up to 0.98 when they add up to more than 1
+static inline void s2_rumble_cap(float *low, float *high) { float sum = *low + *high, k = sum > 1.f ? 0.98f / sum : 0.98f; *low *= k; *high *= k; }
+// A game's vibration (amplitudes 0..1, frequencies in Hz) as a sample, coded as the console codes it
+static inline s2_haptic s2_haptic_from(float amp_low, float freq_low, float amp_high, float freq_high) {
+    s2_haptic v = {s2_freq_code(freq_low), s2_amp_code(amp_low), s2_freq_code(freq_high), s2_amp_code(amp_high)};
+    return v;
+}
+static inline int s2_haptic_on(const s2_haptic *v) { return v->lf_amp || v->hf_amp; }
+// Three samples per block, each its own (HD rumble: the game's values at 5 ms steps instead of one value repeated); the header says three
+static inline size_t s2_rumble_packet3(uint8_t out[33], const s2_haptic first[3], const s2_haptic second[3], uint8_t seq) {
+    size_t o = 0; out[o++] = 0x00;
+    for (int blk = 0; blk < 2; blk++) { out[o++] = (uint8_t)(0x40 | 3 << 4 | (seq & 0x0F)); for (int i = 0; i < 3; i++) { s2_haptic_pack(blk ? &second[i] : &first[i], out + o); o += 5; } }
+    return o;
+}
+static inline size_t s2_rumble_packet(uint8_t out[33], const s2_haptic *first, const s2_haptic *second, uint8_t seq) {
+    uint8_t a[5], b[5]; s2_haptic_pack(first, a); s2_haptic_pack(second, b);
+    size_t o = 0; out[o++] = 0x00;
+    for (int blk = 0; blk < 2; blk++) { out[o++] = (uint8_t)(0x50 | (seq & 0x0F)); const uint8_t *src = blk ? b : a; for (int i = 0; i < 3; i++) { memcpy(out + o, src, 5); o += 5; } }
+    return o;
+}
+// What one controller of a pad plays from the player's two motors (m[0] left, m[1] right, the full-key handles): a Pro Controller 2 both, one per block (its two grips); a Joy-Con of
+// a pair its own side's, in both blocks; a Joy-Con alone (the whole pad, held sideways) the stronger of the two in each band
+static inline void s2_rumble_pick(const s2_pad_state *p, const s2_dev *dev, const s2_haptic m[2], s2_haptic *a, s2_haptic *b) {
+    if (dev == &p->pro) { *a = m[0]; *b = m[1]; return; }
+    int right = dev == &p->right;
+    if ((right ? p->left.have : p->right.have)) { *a = *b = m[right]; return; }
+    s2_haptic v = m[0];
+    if (m[1].lf_amp > v.lf_amp) { v.lf_amp = m[1].lf_amp; v.lf_hz = m[1].lf_hz; }
+    if (m[1].hf_amp > v.hf_amp) { v.hf_amp = m[1].hf_amp; v.hf_hz = m[1].hf_hz; }
+    *a = *b = v;
+}
+// The motors s2_rumble_pick reads for that controller: bit 0 left, bit 1 right
+static inline unsigned s2_rumble_motors(const s2_pad_state *p, const s2_dev *dev) {
+    if (dev == &p->pro) return 3;
+    int right = dev == &p->right;
+    return (right ? p->left.have : p->right.have) ? 1u << right : 3;
+}
+
+// Rumble timing. A game sets its vibration about every 5 ms and holds each value until the next, so a value set for one step is a 5 ms pulse; a packet's three samples are three
+// such 5 ms slots. Each value the game sets plays once, in the first slot that ends after it was set, so a one-step pulse stays one sample long and no value is skipped. Without it
+// a pulse lasts until the next packet (one to three samples), which doubles the energy of a run of short pulses. A slot with no new value repeats the one before. Values that pile
+// up (a game setting them faster than one per slot) wait their turn, but none waits more than S2_RUMBLE_BACKLOG slots: an older one is passed over for a newer one then.
+// The host records the player's values with their times (s2_rumble_log_add); each controller keeps its own place (s2_rumble_cursor) and takes its slots in time order.
+#define S2_RUMBLE_SLOT_NS 5000000ull
+#define S2_RUMBLE_BACKLOG 5
+#define S2_RUMBLE_LOG 64
+typedef struct { uint64_t t[S2_RUMBLE_LOG]; s2_haptic m[S2_RUMBLE_LOG][2]; uint64_t n; } s2_rumble_log;   // a player's values (both motors) and when each was set, oldest first
+typedef struct { uint64_t next, end; s2_haptic now[2]; } s2_rumble_cursor;   // the first value not yet played, the end of the last slot, what is playing
+static inline void s2_rumble_log_add(s2_rumble_log *l, uint64_t t, const s2_haptic m[2]) {
+    uint64_t i = l->n % S2_RUMBLE_LOG; l->t[i] = t; l->m[i][0] = m[0]; l->m[i][1] = m[1]; l->n++;
+}
+static inline int s2_haptic_same(const s2_haptic *a, const s2_haptic *b) { return a->lf_hz == b->lf_hz && a->lf_amp == b->lf_amp && a->hf_hz == b->hf_hz && a->hf_amp == b->hf_amp; }
+// The next slot (ending at c->end + one slot): the oldest value not yet played that was set before its end becomes what plays. A value that changes none of the motors this controller
+// plays (motors, s2_rumble_motors) takes no slot.
+static inline void s2_rumble_slot(const s2_rumble_log *l, s2_rumble_cursor *c, unsigned motors) {
+    uint64_t end = c->end += S2_RUMBLE_SLOT_NS, late = S2_RUMBLE_BACKLOG * S2_RUMBLE_SLOT_NS;
+    if (c->next > l->n) c->next = l->n;   // another player's log (the pad changed player): from its next value
+    else if (l->n - c->next > S2_RUMBLE_LOG) c->next = l->n - S2_RUMBLE_LOG;   // overwritten: start at the oldest kept
+    for (; c->next < l->n; c->next++) {
+        uint64_t i = c->next % S2_RUMBLE_LOG;
+        if (l->t[i] >= end) return;   // not set yet at this slot's end
+        if (c->next + 1 < l->n && l->t[(c->next + 1) % S2_RUMBLE_LOG] + late < end) continue;   // a newer one is also overdue: pass this one over
+        int changes = 0;
+        for (int k = 0; k < 2; k++) if (motors >> k & 1 && !s2_haptic_same(&l->m[i][k], &c->now[k])) changes = 1;
+        if (!changes) continue;
+        c->now[0] = l->m[i][0]; c->now[1] = l->m[i][1]; c->next++;
+        return;
+    }
+}
+// Where a controller's slots stand at time now (in the log's clock): its slots run on 5 ms at a time, the last one of a packet ending about lag before now, so every value set
+// within a slot is known when it is played. A cursor more than a packet behind or ahead of that (the first packet, or a tick that came late or early) starts again there.
+static inline void s2_rumble_resync(s2_rumble_cursor *c, uint64_t now, uint64_t lag) {
+    uint64_t want = now > lag + 3 * S2_RUMBLE_SLOT_NS ? now - lag - 3 * S2_RUMBLE_SLOT_NS : 0;   // where the first of three slots starts
+    if (c->end + 3 * S2_RUMBLE_SLOT_NS < want || c->end > want + 3 * S2_RUMBLE_SLOT_NS) c->end = want;
+}
+
 // The device whose motion sensor the pad uses: the Pro Controller 2; of two Joy-Cons the right one (want_right) or the left; of one, that one. NULL when none.
 static inline const s2_dev *s2_pad_motion_dev(const s2_pad_state *p, int want_right) {
     if (p->pro.have) return &p->pro;

@@ -65,7 +65,7 @@ No `patches.py`. `op_mode` stays docked: Odyssey only takes its motion moves in 
 
 General host and tool changes first needed here; each applies to every game:
 
-- **Switch 2 controllers over Bluetooth LE:** [Switch 2 controllers over Bluetooth LE](../../../docs/reference/services.md#switch-2-controllers-over-bluetooth-le): the cap throw by shaking with a Joy-Con 2 pair, from the right Joy-Con's sensor.
+- **Switch 2 controllers over Bluetooth LE:** [Switch 2 controllers over Bluetooth LE](../../../docs/reference/services.md#switch-2-controllers-over-bluetooth-le): the cap throw by shaking with a Joy-Con 2 pair, from the right Joy-Con's sensor, and rumble on both Joy-Cons.
 - **Chinese language aliases in both settings equality operators:** [Chinese language aliases in settings comparisons](../../../docs/reference/services.md#chinese-language-aliases-in-settings-comparisons).
 - **BAHS pairs omitted from vertex padding:** [Pixel shader inputs the vertex shader does not write](../../../docs/reference/shaders.md#pixel-shader-inputs-the-vertex-shader-does-not-write).
 - **Front end at `-O1`** (`dmsh_build.py` and `ios_metal.py`): [Front end at -O1: Apple's control-flow lowering](../../../docs/reference/shaders.md#front-end-at--o1-apples-control-flow-lowering).

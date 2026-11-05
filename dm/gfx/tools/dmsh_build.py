@@ -51,6 +51,24 @@ XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-textur
 # GX lighting takes max(0, NaN) from light directions left at zero, and the half of Mario its fill light faces came out white on the iPhone (GitHub issue 72; vk_shaders.py PRECISE)
 def precise(msl): return re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', msl)
 
+# Loop guard: every loop in a shader also ends once the function has run LOOP_CAP iterations in all, so a loop that never ends on the host (a wrong translation,
+# an uninitialized bound, a value the replay does not fill) cannot hang the GPU. On macOS a command buffer that never completes is not always reclaimed when the
+# process exits: PRAGMATA's first frames left one and the whole Mac stopped (WindowServer watchdog) minutes later, twice. One counter per function, so nested loops
+# cannot multiply past the cap; 2^18 iterations per invocation is far beyond what a frame's shader does (PRAGMATA's longest bounded loop: 255)
+LOOP_CAP = 1 << 18
+def loop_guard(msl):
+    lines, out = msl.split('\n'), []
+    cap = f'++dm_lg < {LOOP_CAP}u'
+    for i, l in enumerate(lines):
+        if l == '{' and i and lines[i - 1].rstrip().endswith(')'):   # a function body (SPIRV-Cross puts its brace alone in column 0; a struct's header does not end in ')')
+            out += [l, '    uint dm_lg = 0u; (void)dm_lg;']; continue
+        if (m := re.fullmatch(r'(\s*)\} while \((.*)\);\s*', l)): l = f'{m.group(1)}}} while (({m.group(2)}) && {cap});'
+        elif (m := re.fullmatch(r'(\s*)for \(;;\)\s*', l)): l = f'{m.group(1)}for (; {cap};)'
+        elif (m := re.fullmatch(r'(\s*)while \((.*)\)\s*', l)): l = f'{m.group(1)}while (({m.group(2)}) && {cap})'
+        elif (m := re.fullmatch(r'(\s*)for \(([^;]*);([^;]*);([^;]*)\)\s*', l)): l = f'{m.group(1)}for ({m.group(2)}; ({m.group(3).strip() or "true"}) && {cap};{m.group(4)})'
+        out.append(l)
+    return '\n'.join(out)
+
 # Ampere HMMA.16816 with an f16 accumulator (agl's upscaler networks, the NDVE video networks) reaches the MSL as calls of dmsh_hmma16816_f16(lane, block, A0..A3, B0, B1, C0, C1,
 # flags, A's LDSM address, A0..A3's offsets, A's row stride, out D1) → D0, the subgroup's 256-word block of the scratch shared memory as the last argument (InstEmitAmpereTensor.AHmma,
 # TensorPass, HelperFunctionManager.GenerateHmma16816F16). The translator's body computes D lane by lane from the block; here it becomes simdgroup_matrix code over the same block:
@@ -1433,7 +1451,7 @@ def geometry_finish(key, w, j, c1):
         dmsh_geometry.flatten_sets(spv)
         r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
         if r.returncode: return 'geometry MSL failed', r.stderr.strip()[:160], None
-        plain = dmsh_geometry.topology_pointer(pool_arrays(precise(dmsh_atomic.check_msl(r.stdout))))
+        plain = dmsh_geometry.topology_pointer(pool_arrays(loop_guard(precise(sbuf_scalar_index(dmsh_atomic.check_msl(r.stdout))))))
         src = dmsh_geometry.capture_input(plain)
         res = json.load(open(os.path.join(w, k + '.res.json')))
         refl = {'key': key + '_bg' + str(t), 'route': 'B', 'chain': CHAIN, 'dm_ctl': key,
@@ -1463,7 +1481,7 @@ def geometry_finish(key, w, j, c1):
             spv = os.path.join(w, k + '.reader.spv'); dmsh_geometry.flatten_sets(spv)
             r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
             if r.returncode: return 'geometry reader failed', r.stderr.strip()[:160], None
-            reader = vs_layer(vs_init(dmsh_geometry.reader(pool_arrays(precise(dmsh_atomic.check_msl(r.stdout))))))
+            reader = vs_layer(vs_init(dmsh_geometry.reader(pool_arrays(loop_guard(precise(sbuf_scalar_index(dmsh_atomic.check_msl(r.stdout))))))))
             analysis, full = vs_depth(reader)
             meta = {'key': key + '_bgv', 'route': 'B', 'chain': CHAIN, 'dm_ctl': key,
                     'stage': 'vs', 'entry': 'main0', 'entry_z': 'main0_z', 'msl_entry_kind': 'vertex',
@@ -1507,6 +1525,7 @@ def finish(key, w, j, c1):
     src = precise(src)   # min / max / clamp with Maxwell's NaN results (see precise)
     try: src = gather_offsets(src)   # four gathers instead of a wrapper's loop over their offsets (see gather_offsets)
     except ValueError as e: return 'gather offsets rewrite failed', str(e)[:160], None
+    src = loop_guard(src)   # no loop can run forever (see loop_guard)
     try: src = hmma_msl(src)   # Ampere HMMA through simdgroup_matrix (see hmma_msl)
     except ValueError as e: return 'HMMA rewrite failed', str(e)[:160], None
     try: src = pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)

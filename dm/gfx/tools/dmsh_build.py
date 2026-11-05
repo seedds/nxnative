@@ -258,6 +258,22 @@ def mac_compile(msl, air, lib):   # same interface as ios_metal.compile; the pre
 #   c2 C2_SAMP + 8 r: separate samplers (nvnCommandBufferBindSeparateSampler), slot r < C2_SEP_SLOTS
 #   c0 base + 0x10 r: storage buffer r (64-bit address, 32-bit size), base C0_SSBO_<stage> (the hull / domain stages' bases were never seen)
 TEX_BASE, IMG_BASE, IMG_SLOTS, SEPTEX_BASE, SEPTEX_SLOT0, SAMP_BASE = abi.C2_TEX, abi.C2_IMG, abi.C2_IMG_SLOTS, abi.C2_SEPTEX, abi.SEPTEX_SLOT0, abi.C2_SAMP
+def nvn2_cs_layout(ctl, key=''):
+    """An NVN2 compute shader's c[0] layout for the translator (AMapC0): [uniform buffers, storage buffers, textures, size, push constant bytes, separate textures,
+    separate samplers, images, the first push block's bytes]. The control section counts uniform buffers, storage buffers and textures at +0xb1..+0xb3, then separate
+    textures, separate samplers and images at +0xb4..+0xb6, which follow the textures in that order and map to NVN's c2 tables (+0x168, +0x568, +0x120; p****6's ddc8629,
+    as in PR 1275). The push region is two blocks, each 16-byte aligned: +0xa9 words, then +0xaa words. Donkey Kong Bananza's compiler leaves +0xaa at 0; PRAGMATA's uses
+    both, and all 6,856 of its compute layouts add up to the size at +0xba this way. The game pushes the two blocks on their own (nvnCommandBufferPushComputeConstants
+    block 0 and 1), which the host keeps as c[24] and c[25]. PRAGMATA's final composite (c9890d316e1b558d) reads its UI through a separate texture: taken as a combined
+    one it read slot 0 (no texture), and every frame reached the window black"""
+    al = lambda v: (v + 0xf) & ~0xf
+    ub, sb, tx, size = ctl[0xb1], ctl[0xb2], ctl[0xb3], struct.unpack_from('<H', ctl, 0xba)[0]
+    st, sm, im = ctl[0xb4], ctl[0xb5], ctl[0xb6]
+    push = al(ctl[0xa9] * 4) + al(ctl[0xaa] * 4)
+    if 0x10 + push + 0x10 * (ub + sb) + 8 * (tx + st + sm + im) != size:
+        print(f'[RED] {key}: NVN2 compute c0 layout does not add up to its size {size:#x}', file=sys.stderr)
+    return [ub, sb, tx, size, push, st, sm, im, al(ctl[0xa9] * 4)]
+
 SSBO = {'vs': abi.C0_SSBO_VS, 'cs': abi.C0_SSBO_CS, 'gs': abi.C0_SSBO_GS, 'ps': abi.C0_SSBO_PS, 'ts': abi.C0_SSBO_TS, 'ms': abi.C0_SSBO_MS}
 
 def record_index(path):   # → (an open descriptor, the offsets of the package's records and its end): record k is bytes offsets[k]..offsets[k + 1]
@@ -587,10 +603,9 @@ def job_for(key, name, rec, w):
         c1 = dmsh_ampere.c1_segment(rec[ci:], code)
         code = code[:dmsh_ampere.inst_len(rec[ci:])]
         extra['arch'] = 'sm86'
-        # compute lays out its driver constants in c[0] per shader: the control section gives its push constants' words (+0xa9), counts its uniform buffer, storage
-        # buffer and texture entries (+0xb1, +0xb2, +0xb3) and gives the size (+0xba); the translator maps them to c[24] and NVN's fixed tables (InstEmitAmpere.cs
+        # compute lays out its driver constants in c[0] per shader (nvn2_cs_layout); the translator maps them to c[24], c[25] and NVN's fixed tables (InstEmitAmpere.cs
         # AMapC0). Graphics keeps NVN's tables
-        if stage == 'cs': extra['nvn2_cs'] = [rec[ci + 0xb1], rec[ci + 0xb2], rec[ci + 0xb3], struct.unpack_from('<H', rec, ci + 0xba)[0], rec[ci + 0xa9] * 4]
+        if stage == 'cs': extra['nvn2_cs'] = nvn2_cs_layout(rec[ci:], key)
         if stage in ('ts', 'ms'):
             # A task or mesh shader: translated as compute, its SPH taken off and its stage memory in shared memory, then wrapped as the Metal stage function (dmsh_meshstage.py).
             # Graphics stages' c[0] and c[2] tables stay: the translator reads their addresses out of the code as for a vertex shader
@@ -910,6 +925,8 @@ def reflect(key, stage, msl, res):
                 e.update(kind=abi.KIND_GMEM_MAP, rw=any(re.search(r'operation "(Store|Atomic\w*)" traced to no storage buffer', n) for n in res.get('notes', ()))); continue
             if stage == 'cs' and off is not None and abi.C0_CS_UBO <= off < abi.C0_CS_UBO + abi.C0_ROW * abi.C0_CS_UBO_SLOTS and (off - abi.C0_CS_UBO) % abi.C0_ROW == 0:
                 e.update(kind=abi.KIND_UBO_PTR, reg=(off - abi.C0_CS_UBO) // abi.C0_ROW)   # compute-stage uniform slot r: address at c0[C0_CS_UBO + 0x10 r], read through global memory (checked against cs_lut_combine_c reading cb10[66])
+            elif b and abi.PUSH_BANK <= b['cb_slot'] < abi.PUSH_BANK + abi.PUSH_BLOCKS:   # the address is in a push constant block (PRAGMATA's compute shaders: 63fd81d7d44b5c74 reads three at c[25] + 0, + 0x10, + 0x20)
+                e.update(kind=abi.KIND_SBUF_PUSH, reg=b['cb_slot'] - abi.PUSH_BANK, off=b['cb_offset'] * 4)
             elif b and b['cb_slot'] >= 3:   # the address is in the game's own uniform buffer c[n] = uniform slot n - 3 (Monster Hunter Rise's compute shaders: c3 + 0x38); the replay reads it there
                 e.update(kind=abi.KIND_SBUF_UBO, reg=b['cb_slot'] - 3, off=b['cb_offset'] * 4)
             else: e['reg'] = (off - base) // abi.C0_ROW if off is not None and base is not None and 0 <= off - base < abi.C0_ROW * abi.C0_SSBO_SLOTS and (off - base) % abi.C0_ROW == 0 else None
@@ -1557,7 +1574,7 @@ for e, n in collections.Counter(u for x in ok for u in x['drv_unfillable']).most
 f1 = [b for x in ok for b in x['bindings'] if b.get('fetch1d')]
 print(f'1D integer fetches read as 2D rows of 16384 texels (a texture buffer there is bound as rows, nvn_mtl.m tbuf_as_2d): {len(f1)} bindings in {sum(any(b.get("fetch1d") for b in x["bindings"]) for x in ok)} shaders, '
       f'{sum(1 for b in f1 if b.get("fetch1d_size"))} of them also size-queried')
-SLOTK = {abi.KIND_CBUF, abi.KIND_SAMP, abi.KIND_SAMP_TEX, abi.KIND_TEX, abi.KIND_IMG, abi.KIND_TBUF, abi.KIND_SBUF, abi.KIND_UBO_PTR, abi.KIND_SBUF_UBO, abi.KIND_TEX_UBO, abi.KIND_SAMP_UBO, abi.KIND_SAMP_ID, abi.KIND_IMG_UBO, abi.KIND_TBUF_UBO}
+SLOTK = {abi.KIND_CBUF, abi.KIND_SAMP, abi.KIND_SAMP_TEX, abi.KIND_TEX, abi.KIND_IMG, abi.KIND_TBUF, abi.KIND_SBUF, abi.KIND_UBO_PTR, abi.KIND_SBUF_UBO, abi.KIND_SBUF_PUSH, abi.KIND_TEX_UBO, abi.KIND_SAMP_UBO, abi.KIND_SAMP_ID, abi.KIND_IMG_UBO, abi.KIND_TBUF_UBO}
 noreg = [x for x in ok if any(b['kind'] in SLOTK and b.get('reg') is None for b in x['bindings'])]
 unk = [x for x in ok if any(b['kind'] == abi.KIND_UNKNOWN for b in x['bindings'])]
 print(f'shaders with a binding whose slot was not decoded {len(noreg)}, with an unrecognized binding kind {len(unk)} (loading them at run time prints [RED] lines)')

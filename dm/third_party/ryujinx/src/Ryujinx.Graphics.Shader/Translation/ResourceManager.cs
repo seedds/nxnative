@@ -66,8 +66,9 @@ namespace Ryujinx.Graphics.Shader.Translation
             _stage = stage;
             _stagePrefix = GetShaderStagePrefix(stage);
 
-            // Constant buffer banks 0-17 (Maxwell's), and 24: NVN2's push constants (c[24])
-            _cbSlotToBindingMap = new SetBindingPair[25];
+            // Constant buffer banks 0-17 (Maxwell's), and 24-31: NVN2's push constant blocks, block n read as c[24 + n] (PRAGMATA reads c[25] and c[29],
+            // which the game fills with nvnCommandBufferPush*Constants block 1 and 5)
+            _cbSlotToBindingMap = new SetBindingPair[32];
             // Storage buffers the global-to-storage pass found: the stage's storage buffer table and, for compute, its uniform buffer address table (NVN 16 + 16 slots)
             _sbSlotToBindingMap = new SetBindingPair[32];
             _cbSlotToBindingMap.AsSpan().Fill(new(-1, -1));

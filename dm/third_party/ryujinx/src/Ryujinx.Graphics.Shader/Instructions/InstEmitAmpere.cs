@@ -277,6 +277,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
             int hb = sb + 0x10 * ssbos;
             int ib = hb + 8 * textures;
 
+            // Two push blocks (layout 8: the first block's bytes, 16-byte aligned; dmsh_build.py nvn2_cs_layout): the game pushes each one on its own (nvnCommandBufferPushComputeConstants
+            // block 0 and 1, the host's c[24] and c[25]). PRAGMATA's compute shaders keep their storage buffer addresses in the second (63fd81d7d44b5c74: c0 + 0x50.. with +0xa9 14,
+            // +0xaa 12); read from c[24] as one run, they took block 0's bytes as addresses and the GPU faulted
+            if (layout.Length >= 9 && offset >= 0x10 + layout[8] && offset < ub)
+            {
+                return (25, offset - 0x10 - layout[8]);
+            }
+
             if (offset >= 0x10 && offset < ub)
             {
                 return (24, offset - 0x10);
@@ -297,7 +305,28 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 return (2, 0x20 + (offset - hb));
             }
 
-            if (offset >= ib && offset < size)
+            // With the counts at control +0xb4..+0xb6 (layout 5..7, dmsh_build.py): the separate textures, then the separate samplers, then the images, each to NVN's
+            // table: c[2] + 0x168, + 0x568, + 0x120 (p****6's ddc8629; PRAGMATA's compute shaders, whose layouts add up to their size only with them)
+            if (layout.Length >= 8)
+            {
+                int ss = ib, sm = ss + 8 * layout[5], im = sm + 8 * layout[6], end = im + 8 * layout[7];
+
+                if (offset >= ss && offset < sm)
+                {
+                    return (2, 0x168 + (offset - ss));
+                }
+
+                if (offset >= sm && offset < im)
+                {
+                    return (2, 0x568 + (offset - sm));
+                }
+
+                if (offset >= im && offset < end)
+                {
+                    return (2, 0x120 + (offset - im));
+                }
+            }
+            else if (offset >= ib && offset < size)
             {
                 return (2, 0x120 + (offset - ib));
             }

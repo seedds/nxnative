@@ -931,6 +931,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** the swizzle is recorded (`OP_VP_SWIZZLE`) and applied at the draw as a viewport flipped about its centre, the same mapping. Facing is decided after the swizzle on the GPU as in Metal, so the winding stays. Other swizzles (axis exchanges, negated x / z / w) give a red line and are drawn unswizzled.
 - **Found on:** [Absolum](../../dm/games/0100A83022A22000/README.md) (FNA3D's NVN driver, `FNA3D_Driver_NVN.cpp`).
 
+### Black shapes on sprites when Unreal's GPU work runs late
+
+- **Symptom:** on an Unreal Engine game with a full GPU, moving sprites flicker black for a frame: cut straight across, or a whole silhouette in the sprite's outline. It follows GPU time against the frame budget, and goes away at 30 fps or with GPU time to spare. The black is already in the scene colour the base pass writes.
+- **Cause:** a race in the engine's NVN code. A dynamic buffer keeps `nvn.NumBufferedFrames` copies (3), and each write lock moves to the next one with no fence. The render thread can come round to a copy while draws queued for the GPU still read it. If that lands between a sprite's depth prepass and its base pass, the two see different vertices: the base pass tests depth `EQUAL`, draws nothing where they differ, and the cleared black stays.
+- **Fix:** a workaround, since the missing fence is in the game's code: the rewriter gives each dynamic buffer a fourth copy (`dm/tools/ue_ring.py`, called by `patch_nso.py`), with no build ID, on any main where its chain holds. A buffer has room for exactly 4. The variable itself cannot be set to 4: its other readers size fixed tables, and the deferred-delete table has room for 3, so only the constructor's load changes. Open: this adds one lock of margin and no fence, so a GPU further behind, or a buffer locked more than once a frame, can still reach a queued copy. A single comparison has been run (5 black frames against 0 at equal load), and hit counts vary between runs. The fallback is copying small vertex streams at encode, which gave 0 against 10 and 14 in a diagnostic build; it costs every game a copy per draw and does not cover index buffers.
+- **Found on:** [TRIANGLE STRATEGY](../../dm/games/0100CC80140F8000/README.md), [issue #1040](https://github.com/seedds/nxnative/issues/1040).
+
 ## Uniforms, copies and ordering
 
 ### Bindless handles read from guest memory directly

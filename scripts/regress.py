@@ -272,6 +272,10 @@ class Game:
 
     def profile_dir(self, tree):
         src = (self.build / 'profile' if self.derived else tree.path / 'dm/games') / self.id
+        if not self.derived and not (src / 'game.tsv').is_file() and (REPO / 'dm/games' / self.id / 'game.tsv').is_file():
+            # a game the revision does not know (its profile is new in the candidate: a bring-up PR): the baseline's chain translates its shaders with the candidate's profile,
+            # the same inputs, so the comparison is of the chains alone
+            src = REPO / 'dm/games' / self.id
         key = digest(sorted(p for p in src.glob('*') if p.is_file() and p.name != VALIDATED))[:16]   # validated.tsv records a result about the profile, it is not an input of it
         dst = game_root(self) / 'profiles' / key / self.id
         if not (dst / 'game.tsv').is_file(): shutil.copytree(src, dst, ignore=shutil.ignore_patterns(VALIDATED))

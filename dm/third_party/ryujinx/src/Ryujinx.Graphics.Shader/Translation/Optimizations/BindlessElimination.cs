@@ -10,6 +10,8 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
     {
         private const int NvnTextureBufferIndex = 2;   // nxnative: as BindlessToArray, see TryTableHandle
         private const int NvnSlotArrayLength = 32;      // nxnative: the arrays of GenerateBindlessAccess that are not indexed in the pools
+        private const int NvnSeparateSamplerBase = 0x568;   // nxnative: c[2]'s separate sampler table (dmsh_abi.h DMSH_C2_SAMP), 128 slots of 8 bytes; a word there is a sampler handle, never a texture's
+        private const int NvnSeparateSamplerEnd = NvnSeparateSamplerBase + 8 * 128;
 
         // nxnative: deferSeveral leaves the reads whose handle merges several c[2] handles to a second sweep (see TryTableHandle)
         public static void RunPass(BasicBlock block, ResourceManager resourceManager, IGpuAccessor gpuAccessor, bool deferSeveral = false)
@@ -66,6 +68,11 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
                     gpuAccessor.Log($"Failed to find handle source for bindless access of type \"{typeName}\".");
 
+                    if (Environment.GetEnvironmentVariable("DMSH_BINDLESS_TRACE") != null)   // nxnative: what the handle is made of, for a diagnosis (dmsh_xlate on one job)
+                    {
+                        Console.Error.WriteLine($"bindless {typeName} handle: {Describe(texOp.GetSource(0), 0)}");
+                    }
+
                     for (int destIndex = 0; destIndex < texOp.DestsCount; destIndex++)
                     {
                         block.Operations.AddBefore(node, new Operation(Instruction.Copy, texOp.GetDest(destIndex), OperandHelper.Const(0)));
@@ -112,9 +119,11 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     {
                         foreach (Operand sampler in PhiLeaves(orOp.GetSource(1)))
                         {
-                            if (IsTableWord(texture) && (IsTableWord(sampler) || (sampler.Type == OperandType.Constant && (sampler.Value & 0xfffff) == 0)))
+                            (Operand t, Operand sm) = IsSamplerWord(texture) && !IsSamplerWord(sampler) ? (sampler, texture) : (texture, sampler);   // either order, as TryConvertBindless
+
+                            if (IsTableWord(t) && (IsC2Word(sm) || (sm.Type == OperandType.Constant && (sm.Value & 0xfffff) == 0)))
                             {
-                                AddCandidate(found, texture, sampler);
+                                AddCandidate(found, t, sm);
                             }
                         }
                     }
@@ -236,9 +245,21 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             return combined;
         }
 
-        private static bool IsTableWord(Operand operand)
+        private static bool IsTableWord(Operand operand)   // a c[2] word that can name a texture (not one of the separate sampler table: a sampler word alone, on a path the read does not take, is no candidate)
+        {
+            return operand.Type == OperandType.ConstantBuffer && operand.GetCbufSlot() == NvnTextureBufferIndex && !IsSamplerWord(operand);
+        }
+
+        private static bool IsC2Word(Operand operand)
         {
             return operand.Type == OperandType.ConstantBuffer && operand.GetCbufSlot() == NvnTextureBufferIndex;
+        }
+
+        private static bool IsSamplerWord(Operand operand)
+        {
+            if (operand.Type != OperandType.ConstantBuffer || operand.GetCbufSlot() != NvnTextureBufferIndex) return false;
+            int offset = operand.GetCbufOffset() * 4;
+            return offset >= NvnSeparateSamplerBase && offset < NvnSeparateSamplerEnd;
         }
 
         private static void AddCandidate(List<(Operand Texture, Operand Sampler)> found, Operand texture, Operand sampler)
@@ -252,6 +273,34 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             }
 
             found.Add((texture, sampler));
+        }
+
+        // nxnative: an operand as text for DMSH_BINDLESS_TRACE: constant buffer words, constants, and operations with their sources, four levels deep
+        private static string Describe(Operand o, int depth)
+        {
+            if (o == null) return "null";
+            switch (o.Type)
+            {
+                case OperandType.ConstantBuffer: return $"c[{o.GetCbufSlot()}][0x{o.GetCbufOffset() * 4:x}]";
+                case OperandType.Constant: return $"0x{o.Value:x}";
+                case OperandType.Undefined: return "undefined";
+                case OperandType.Register: return $"r{o.Value}";
+            }
+            if (depth > 4) return "...";
+            if (o.AsgOp is PhiNode phi)
+            {
+                List<string> parts = new();
+                for (int i = 0; i < phi.SourcesCount; i++) parts.Add(Describe(phi.GetSource(i), depth + 1));
+                return "phi(" + string.Join(", ", parts) + ")";
+            }
+            if (o.AsgOp is Operation op)
+            {
+                List<string> parts = new();
+                for (int i = 0; i < op.SourcesCount; i++) parts.Add(Describe(op.GetSource(i), depth + 1));
+                string kind = op.StorageKind != StorageKind.None ? "." + op.StorageKind : "";
+                return $"{op.Inst}{kind}(" + string.Join(", ", parts) + ")";
+            }
+            return o.Type.ToString();
         }
 
         // The values a phi can take, through the phis it merges (each visited once).
@@ -465,6 +514,13 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 // Since this is a commutative operation, both are fine,
                 // and having a "canonical" representation simplifies some checks below.
                 if (src0.Type == OperandType.Constant && src1.Type != OperandType.Constant)
+                {
+                    (src0, src1) = (src1, src0);
+                }
+
+                // nxnative: the compiler ORs the two words in either order (Star Fox: the sampler word first in 62 pixel shaders, which named the sampler's word as the texture,
+                // a binding with no slot). A word in c[2]'s separate sampler table is the sampler, the other the texture
+                if (IsSamplerWord(src0) && !IsSamplerWord(src1))
                 {
                     (src0, src1) = (src1, src0);
                 }

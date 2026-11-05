@@ -121,9 +121,12 @@ def decode_ubo_tex(name):
     return (tb - 3, o0 * 4), (('id', o1) if ty == 3 else ('c2', o1 * 4) if ty and sb == 2 else (sb - 3, o1 * 4) if ty else (tb - 3, o0 * 4))
 
 def decode_ubo_img(name):
-    """An image whose handle the game keeps in its own uniform buffer (<stage>_i_cb<n>_<word>_<format>: Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]). Returns (uniform slot, byte offset)"""
+    """An image whose handle the game keeps in its own uniform buffer (<stage>_i_cb<n>_<word>_<format>: Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]; Orbitals' Unreal Engine 5.6
+    compute shaders read their images' handles from uniform slot 0 this way). An image handle names one image ID (low 20 bits), no sampler, so only handle type 0 occurs. Returns (uniform slot, byte offset)"""
     m = re.match(r'[a-z]+_i\w*?_cb(\d+)_([0-9A-F]+)', name)
-    return (int(m.group(1)) - 3, int(m.group(2), 16) * 4) if m and 3 <= int(m.group(1)) <= 16 else None
+    if not m or not 3 <= int(m.group(1)) <= 16: return None
+    h = int(m.group(2), 16)
+    return None if h >> 28 else (int(m.group(1)) - 3, (h & 0x3fff) * 4)
 
 def c2_array(name, ty):
     """An array of handles in the driver table c2 that the shader indexes at run time (Ryujinx's texture array from a buffer, here bank 2: <stage>_t<type>_cb<slots>_<handle>, declared
@@ -245,9 +248,17 @@ def reflect(key, stage, msl, res):
             if nm.endswith('Smplr') and us[0] == 'c2': e.update(kind=abi.KIND_SAMP_UBO, reg=ut[0], off=ut[1], soff=us[1], sreg=abi.SREG_C2)
             elif nm.endswith('Smplr'): e.update(kind=abi.KIND_SAMP_ID, reg=us[1]) if us[0] == 'id' else e.update(kind=abi.KIND_SAMP_UBO, reg=us[0], off=us[1], **({'soff': ut[1], 'sreg': ut[0]} if other else {}))
             elif 'texture_buffer' in ty: e.update(kind=abi.KIND_TBUF_UBO, reg=ut[0], off=ut[1])
-            else: e.update(kind=abi.KIND_TEX_UBO, reg=ut[0], off=ut[1], **({'soff': us[1], 'sreg': us[0]} if other else {}))
+            else:
+                e.update(kind=abi.KIND_TEX_UBO, reg=ut[0], off=ut[1], **({'soff': us[1], 'sreg': us[0]} if other else {}))
+                # a bindless 1D integer fetch the translator read as 2D rows of 16384 texels (the Ampere TLD path, InstEmitAmpereMem, as the Maxwell path already does): the slot-based
+                # res['fetch1d'] cannot name a bindless handle, so a bindless texture2d read by a 2D integer fetch (never a sample) is taken as such a wrapped read. A buffer texture bound here
+                # is then bound as those rows (nvn_refl f1d, nvn_mtl.m tbuf_as_2d); flagging a genuine 2D bindless fetch is harmless, as the host uses f1d only for a buffer texture
+                if re.fullmatch(r'texture2d<[^>]+>', ty) and re.search(r'\b%s\.read\(uint2\(' % re.escape(nm), msl):
+                    e['fetch1d'] = True
+                    if re.search(r'\b%s\.get_width\(' % re.escape(nm), msl): e['fetch1d_size'] = True   # also size-queried: a buffer texture of more than 16384 elements reports 16384 there
         elif decode_ubo_img(nm):
-            e.update(kind=abi.KIND_IMG_UBO, reg=decode_ubo_img(nm)[0], off=decode_ubo_img(nm)[1])   # pyright: ignore[reportOptionalSubscript]  (not None: tested above)
+            if ty.startswith('array<'): e.update(kind=abi.KIND_UNKNOWN)   # an array of them: not implemented in the replay layer
+            else: e.update(kind=abi.KIND_IMG_UBO, reg=decode_ubo_img(nm)[0], off=decode_ubo_img(nm)[1])   # pyright: ignore[reportOptionalSubscript]  (not None: tested above)
             if has_word(msl, nm + '.atomic_'): e['atomic'] = True   # as KIND_IMG below
         elif c2_array(nm, ty) is not None:   # an array of the driver table's handles (c2_array): the replay fills element k from the slot whose c2 word is at off + 8k
             off, soff = c2_array(nm, ty)   # pyright: ignore[reportGeneralTypeIssues]  (not None: tested above)
@@ -298,6 +309,9 @@ def drv_reads(src):
             if idx.isdigit(): offs.add(int(idx) * 16)
             else: dyn = True
         if offs or dyn: out[str(bank)] = {'vec4_offsets': sorted(offs), 'dynamic': dyn}
+    # the sample position table read at the byte 0x620 + the sample index alone (Switch 2 GLSLC, one sample position per sample with no location grid: Orbitals' pixel shaders,
+    # PIXLD.MY_INDEX + 0x620, then the byte of that word), see unfillable
+    if out.get('0', {}).get('dynamic') and '[[sample_id]]' in src and re.search(r'= as_type<int>\(\w+\) \+ %d;' % abi.C0_SAMPLE_TABLE, src): out['0']['sample_table'] = True
     return out
 
 SAMPLE_ROWS = [(abi.C0_SAMPLE_TABLE, abi.C0_SAMPLE_TABLE + abi.C0_SAMPLE_BYTES), (abi.C0_SAMPLE_INFO, abi.C0_SAMPLE_INFO + abi.C0_ROW)]   # c0: the pixel stage's sample position rows
@@ -310,7 +324,8 @@ def unfillable(dr, stage):
         # at 0x168 + 8i to test each light's handle); c0 is filled only in its tables and words above, so a computed index there may read what the replay does not write.
         # The one computed c0 index known is GLSLC's sample position lookup in a pixel shader: a byte of the table at 0x620, at an index made of the sample index (PIXLD.MYINDEX)
         # and the pixel's place in the location grid masked by the words of the 0x630 row, at most 15 (Metroid Prime Remastered: 30 of its 438 shaders that read the sample index)
-        if d['dynamic'] and bank == '0' and not (stage == 'ps' and abi.C0_SAMPLE_INFO in d['vec4_offsets']): bad.append(f'c{bank} dynamic index')
+        # Switch 2's GLSLC reads the table at 0x620 + the sample index without the grid row (drv_reads sample_table): at most 16 bytes, within the table
+        if d['dynamic'] and bank == '0' and not (stage == 'ps' and (abi.C0_SAMPLE_INFO in d['vec4_offsets'] or d.get('sample_table'))): bad.append(f'c{bank} dynamic index')
         for o in d['vec4_offsets']:
             # a read is a 16-byte row: overlapping any table is enough (Engage reads the c2+0x160 row for texture slot 0 at 0x168 in it)
             if not any(o < b and a < o + 16 for a, b in fill): bad.append(f'c{bank}+{o:#x}')

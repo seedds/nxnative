@@ -134,7 +134,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             InstRed op = context.GetOp<InstRed>();
 
-            (Operand addrLow, Operand addrHigh) = Get40BitsAddress(context, new Register(op.SrcA, RegisterType.Gpr), op.E, op.Imm20);
+            // nxnative: the 20-bit offset is signed, as for ATOM (Eden atomic_operations_global_memory.cpp AtomOffset: BitField<28, 20, s64>); upstream added it zero-extended
+            int sOffset = (op.Imm20 << 12) >> 12;
+
+            (Operand addrLow, Operand addrHigh) = Get40BitsAddress(context, new Register(op.SrcA, RegisterType.Gpr), op.E, sOffset);
 
             EmitAtomicOp(context, StorageKind.GlobalMemory, (AtomOp)op.RedOp, op.RedSize, addrLow, addrHigh, GetDest(op.SrcB));
         }

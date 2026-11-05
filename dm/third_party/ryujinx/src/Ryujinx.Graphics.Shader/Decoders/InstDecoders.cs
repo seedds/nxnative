@@ -260,9 +260,13 @@ namespace Ryujinx.Graphics.Shader.Decoders
 
     enum IDstFmt
     {
+        // nxnative: the 8-bit destinations (size field 0) were missing, so F2I.S8 / F2I.U8 decoded as no member and converted like U32: Donkey Kong Bananza's
+        // skinning shader a5431dcaaac8ed61 packs its tangents with F2I.S8.TRUNC, every negative component became 0 and the skin shading went NaN
+        U8 = 0,
         U16 = 1,
         U32 = 2,
         U64 = 3,
+        S8 = 4,
         S16 = 5,
         S32 = 6,
         S64 = 7,

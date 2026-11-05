@@ -255,7 +255,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 throw AFail(context, $"LDSM mode {mode} count {count}");
             }
 
-            Operand addr = context.IAdd(ALocalAddress(context, x, 32, stride: false), Const((int)x.SignedField(40, 64)));
+            Operand addr = context.IAdd(ALocalAddress(context, x, 32), Const((int)x.SignedField(40, 64)));
             int id = context.ResourceManager.SharedMemoryId;
             bool compute = context.TranslatorContext.Definitions.Stage == ShaderStage.Compute;
             Operand lane = compute ? null : ALaneId(context);

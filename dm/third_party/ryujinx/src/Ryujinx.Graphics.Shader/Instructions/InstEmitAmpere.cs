@@ -66,7 +66,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             X(AmpereOpcodes.Ret, InstName.Ret, InstEmit.ARet, B, writesRd: false);
             X(AmpereOpcodes.Call, InstName.Cal, InstEmit.ACall, B, writesRd: false);
             // ERRBAR 0x9ab, which follows a MEMBAR, only orders error reporting.
-            foreach (int op in new[] { 0x918, 0x91a, 0x945, 0x941, 0x942, 0x948, 0x9ab })
+            foreach (int op in new[] { 0x918, 0x91a, 0x945, 0x941, 0x942, 0x948, 0x9ab, 0x9af })   // 0x9af LDGDEPBAR: LDGSTS copies complete at once (ALdgsts)
             {
                 X(op, InstName.Nop, InstEmit.ANop, InstProps.None, writesRd: false);
             }
@@ -136,6 +136,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         UReg,
         Imm,
         Cbuf,
+        Bindless,   // a constant buffer word through a bindless handle in a uniform register pair (Bank: the register, Value: the byte offset)
     }
 
     readonly struct ASrc
@@ -249,7 +250,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             if (x.Bit(91))
             {
-                throw AFail(context, "constant buffer operand with its bank in a uniform register");
+                return new ASrc(AKind.Bindless, x.Bits(38, 54), x.Bits(32, 38), neg, abs);   // NAK sm70_encode.rs set_src_cb(32..59, 91): the handle register at 32..38
             }
 
             (int bank, int offset) = AMapC0(context, x.Bits(54, 59), x.Bits(38, 54));
@@ -266,6 +267,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
         // c[2] + 0x168 + 8 r, separate sampler r to c[2] + 0x568 + 8 r and image slot i to c[2] + 0x120 + 8 i (NVN's handle tables). Other offsets stay.
         private static (int Bank, int Offset) AMapC0(EmitterContext context, int bank, int offset)
         {
+            // Newer GLSLC (control +0x08 = 0x11, PRAGMATA) reads each graphics stage's storage buffer table from its own bank, 25 + stage (vertex 25, hull 26,
+            // domain 27, geometry 28, pixel 29): binding r at 0x10 r (address 64 bits, size 32 bits), the layout NVN's older compiler reads from c[0] at
+            // 0x110 + 0x100 stage (Donkey Kong Bananza: pixel at 0x510). Mapped there, where the host fills the tables and the storage buffer elimination finds them.
+            // The control section's blob at +0xc8 / +0xcc lists the entries a shader reads (its size is 0 exactly when the shader uses none of these banks)
+            if (bank >= 25 && bank <= 29)
+            {
+                return (0, 0x110 + 0x100 * (bank - 25) + offset);
+            }
+
             int[] layout = bank == 0 ? context.TranslatorContext.GpuAccessor.QueryAmpereComputeC0Layout() : null;
 
             if (layout == null || layout.Length < 5)
@@ -330,6 +340,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     return Register(s.Value, RegisterType.Uniform);
                 case AKind.Imm:
                     return Const(s.Value);
+                case AKind.Bindless:
+                    return ABindlessLoad(context, s.Bank, Const(s.Value));
                 default:
                     if ((s.Value & 3) != 0)
                     {
@@ -340,6 +352,28 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
+        // A word of a bindless constant buffer: the 64-bit handle in URh:URh+1 is the buffer's address / 16 in its low 45 bits and its size / 16 above (NVK
+        // nvk_nir_lower_descriptors.c, use_bindless_cbuf: (addr >> 4) | ((size >> 4) << 45), Turing to Ampere). Read as global memory, which the raw-pointer path
+        // moves to the host's copy; past the size it reads 0, as the hardware does
+        internal static Operand ABindlessLoad(EmitterContext context, int ur, Operand byteOffset)
+        {
+            if (ur == RegisterConsts.UniformZeroIndex)
+            {
+                return Const(0);
+            }
+
+            Operand hLo = Register(ur, RegisterType.Uniform), hHi = Register(ur + 1, RegisterType.Uniform);
+            Operand baseLo = context.ShiftLeft(hLo, Const(4));
+            Operand baseHi = context.BitwiseOr(context.ShiftLeft(context.BitwiseAnd(hHi, Const(0x1fff)), Const(4)), context.ShiftRightU32(hLo, Const(28)));
+            Operand size = context.ShiftLeft(context.ShiftRightU32(hHi, Const(13)), Const(4));
+            Operand inside = context.ICompareLessUnsigned(byteOffset, size);
+            Operand off = context.ConditionalSelect(inside, byteOffset, Const(0));
+            Operand lo = context.IAdd(baseLo, off);
+            Operand hi = context.IAdd(baseHi, context.ConditionalSelect(context.ICompareLessUnsigned(lo, baseLo), Const(1), Const(0)));
+
+            return context.ConditionalSelect(inside, context.Load(StorageKind.GlobalMemory, lo, hi), Const(0));
+        }
+
         // The upper word of a 64-bit operand pair.
         private static Operand AGetHigh(EmitterContext context, ASrc s)
         {
@@ -348,6 +382,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 AKind.Reg => s.Value == RegisterConsts.RegisterZeroIndex ? Const(0) : Register(s.Value + 1, RegisterType.Gpr),
                 AKind.UReg => s.Value == RegisterConsts.UniformZeroIndex ? Const(0) : Register(s.Value + 1, RegisterType.Uniform),
                 AKind.Imm => Const(s.Value < 0 ? -1 : 0),
+                AKind.Bindless => ABindlessLoad(context, s.Bank, Const(s.Value + 4)),
                 _ => Cbuf(s.Bank, (s.Value >> 2) + 1),
             };
         }

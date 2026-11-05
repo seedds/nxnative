@@ -189,6 +189,7 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         public int GetConstantBufferBinding(int slot)
         {
+            if ((uint)slot >= (uint)_cbSlotToBindingMap.Length) throw new System.IndexOutOfRangeException($"constant buffer slot {slot} is outside the {_cbSlotToBindingMap.Length} the translator maps");
             SetBindingPair setAndBinding = _cbSlotToBindingMap[slot];
             if (setAndBinding.Binding < 0)
             {

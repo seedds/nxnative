@@ -283,7 +283,9 @@ uint32_t dm_player_npad(int p) { return p <= 0 ? connected_id() : (uint32_t)p; }
 // Handheld, bit 9 Other: all of them until SetSupportedNpadIdType, as the hid service starts)
 static _Atomic uint32_t g_players = 1, g_ids_supported = 0x3ff;
 static uint32_t id_bit(uint32_t id) { return id < DM_PLAYERS ? 1u << id : id == NPAD_HANDHELD ? 1u << 8 : id == 0x10 ? 1u << 9 : 0; }
-static int reported(int p) { return p == 0 || (atomic_load(&g_players) >> p & 1 && atomic_load(&g_ids_supported) & id_bit((uint32_t)p)); }
+// Players past the last controller applet's maximum: a Switch disconnects the extra controllers when the applet closes with that many players (ctrl_support)
+static _Atomic int g_applet_cap = DM_PLAYERS;
+static int reported(int p) { return p == 0 || (p < atomic_load(&g_applet_cap) && atomic_load(&g_players) >> p & 1 && atomic_load(&g_ids_supported) & id_bit((uint32_t)p)); }
 // Players with a controller whose npad the game does not support. A one-player game (no npad past No1 supported) gets them as player 1, so any controller plays it; in a game for
 // fewer players than are connected (a fifth controller in a four-player game) they are not used, as on the Switch, where the system does not connect them
 static uint32_t unsupported_players(void) {
@@ -535,10 +537,19 @@ HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R assignment mode; ignored by
 // fewer players is an answer a Switch never gives: Mario Kart 8 Deluxe asks for two in 2P and opened the applet again every few frames on it (GitHub issue #550)
 #define RES_CTRL_CANCELED (202u | 3101u << 9)
 static Result ctrl_support(int32_t *info, const int8_t *arg) {
+    // An applet that takes more players than the last one lets the controllers it disconnected join again (they connect in the applet on a Switch)
+    int hi = arg ? (int)(uint8_t)arg[1] : 0;   // the applet's maximum, a player count (0 = none given)
+    if (hi > atomic_load(&g_applet_cap)) { atomic_store(&g_applet_cap, hi); for (int p = 0; p < DM_PLAYERS; p++) style_changed((uint32_t)p); }
     int count = 0; for (int p = 0; p < DM_PLAYERS; p++) count += reported(p);
     int canceled = arg && arg[0] > count;
     if (arg) LOG("hid controller applet: %d to %d players wanted, %d connected%s", arg[0], arg[1], count, canceled ? ": too few, closed as the player would (canceled)" : "");
-    if (arg && arg[1] > 0 && count > arg[1]) count = arg[1];
+    // More controllers than the maximum: on a Switch the applet keeps that many players and disconnects the others. Only capping the count left the extra ones connected,
+    // and PRAGMATA (1 to 1 players) opened the applet again every frame with a second controller connected
+    if (hi > 0 && count > hi) {
+        atomic_store(&g_applet_cap, hi); count = hi;
+        for (int p = hi; p < DM_PLAYERS; p++) style_changed((uint32_t)p);
+        LOG("hid controller applet: players %d and up disconnected, as the applet does for more controllers than its maximum", hi + 1);
+    }
     if (info) { info[0] = count; info[1] = (int32_t)connected_id(); }
     return canceled ? RES_CTRL_CANCELED : RES_OK;
 }

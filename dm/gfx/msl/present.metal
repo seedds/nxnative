@@ -4,7 +4,8 @@ using namespace metal;
 struct V { float4 p [[position]]; float2 uv; };
 vertex V vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); V o; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); o.uv = uv; return o; }
 // mode.x (nvn_mtl.m present_mode) says how the source is encoded: 0 as stored (a float source: linear BT.709); 1 a gamma-coded 8-bit BT.709 (sRGB) source for the extended-range BT.2020 layer (fs_linear converts it);
-// 2 an HDR10 source (the game's RGB10A2 window: SMPTE ST 2084 code values in BT.2020 primaries), where mode.y is the paper white in nits; 3 a gamma-coded 8-bit BT.709 (sRGB) source for the PQ layer (BT.2100 PQ, DM_HDR): fs encodes it as HDR10 at the paper white. mode.z and mode.w are unused.
+// 2 an HDR10 source (the game's RGB10A2 window: SMPTE ST 2084 code values in BT.2020 primaries), where mode.y is the paper white in nits; 3 a gamma-coded BT.709 (sRGB) source for the PQ layer (RGB10A2 in BT.2100 PQ, DM_HDR): fs encodes it as HDR10 at the paper white;
+// 4 a float source (linear BT.709) for the PQ layer, encoded the same way (untested: no local game presents a float window). mode.z and mode.w are unused.
 struct Crop { float4 rect; float4 edge; float4 mode; };
 // Linear BT.709 and BT.2020 (ITU-R BT.2087; each row sums to 1, so white stays white). Metal's float3x3 takes its columns.
 constant float3x3 kRec709To2020 = float3x3(float3(0.627404, 0.069097, 0.016391), float3(0.329283, 0.919540, 0.088013), float3(0.043313, 0.011362, 0.895595));
@@ -39,15 +40,17 @@ static inline float3 present_to_sdr_white(float3 c0) {
     float m = max(max(c.r, c.g), c.b);
     return m > 1.0 ? c * (1.0 / m) : c;
 }
-// The SDR drawable (gamma-coded 8-bit, BT.709; a screenshot): an HDR10 source at its paper white, its highlights brought to SDR white with their hue (present_to_sdr_white),
-// then converted to BT.709; a colour outside BT.709 is clipped
+// Every target but the float HDR layer. The PQ HDR layer (RGB10A2 in BT.2100 PQ): the game's HDR10 window as it is (mode 0), an SDR or float source encoded as HDR10 at the paper white
+// (modes 3, 4). The SDR drawable (gamma-coded 8-bit, BT.709; a screenshot): an HDR10 source at its paper white, its highlights brought to SDR white with their hue
+// (present_to_sdr_white), then converted to BT.709; a colour outside BT.709 is clipped
 fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) {
     float4 v = t.sample(s, clamp(in.uv * c.rect.zw + c.rect.xy, c.edge.xy, c.edge.zw));
-    if (c.mode.x > 2.5) v.rgb = present_linear_to_pq(kRec709To2020 * present_srgb_to_linear(v.rgb), c.mode.y);   // the PQ layer: an SDR source as HDR10 at the paper white
+    if (c.mode.x > 3.5) v.rgb = present_linear_to_pq(kRec709To2020 * clamp(v.rgb, 0.0, 65504.0), c.mode.y);     // the PQ layer: a float source (linear BT.709) as HDR10 at the paper white
+    else if (c.mode.x > 2.5) v.rgb = present_linear_to_pq(kRec709To2020 * present_srgb_to_linear(v.rgb), c.mode.y);   // the PQ layer: an SDR source as HDR10 at the paper white
     else if (c.mode.x > 1.5) v.rgb = present_linear_to_srgb(saturate(kRec2020To709 * present_to_sdr_white(present_pq_to_linear(v.rgb, c.mode.y))));
     return v;
 }
-// The HDR layer (RGBA16Float, extended linear BT.2020, DM_HDR=1): linear light, where 1.0 is the paper white. The layer carries HDR10 metadata (front_mac.m, front_ios.m), so
+// The float HDR layer (RGBA16Float, extended linear BT.2020, DM_HDR_LAYER=float; the PQ layer replaced it): linear light, where 1.0 is the paper white. The layer carries HDR10 metadata (front_mac.m, front_ios.m), so
 // Core Animation maps the values above 1.0 into the screen's headroom: they are written as they are
 fragment float4 fs_linear(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) {
     float4 v = t.sample(s, clamp(in.uv * c.rect.zw + c.rect.xy, c.edge.xy, c.edge.zw));

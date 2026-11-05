@@ -123,7 +123,7 @@ HLE_FORCE("_ZN2nn2vi8FinalizeEv", "display service shutdown; the host has no vi 
 // through null from SetLayerNextHdrContentGamutMetadata, main+0x2036f4). No VRR on the host, and SDR unless DM_HDR=1. Paper white is the BT.2408 reference, 203 nits (DM_HDR_PAPER_WHITE overrides it while HDR is on)
 // DM_HDR=1 is the HDR mode (Switch 2 games; the HDR output setting of the Mac and iOS launchers sets it): while the window's screen can show EDR (front_hdr_screen), the display reports HDR on, so the
 // game takes its HDR path (its window becomes HDR10: RGB10A2 with PQ values in BT.2020). On a screen without EDR it reports SDR, and the game keeps its own SDR picture.
-// The present decodes the PQ window to linear light; Core Animation maps it into the screen's headroom by the layer's HDR10 metadata (front_mac.m, front_ios.m)
+// The HDR layer takes the PQ window as it is (dm_hdr_layer_float below); Core Animation maps it into the screen's headroom by the layer's HDR10 metadata (front_mac.m, front_ios.m)
 // The format is 1 with HDR on and 0 with it off: the SDK's own answer is on = (format == 1), and a format above 1 is an error, 0x272 (Donkey Kong Bananza v458752,
 // nn::vi::detail::DefaultDisplay::QueryHdrStatus, sdk+0x55bd60; found in pull request #1249). The peak (DM_HDR_PEAK, default 1000) is the extended luminance range the game declares (its metadata call, below). Neither it nor the paper white has a launcher setting: they are what a console's HDR calibration would set
 // Donkey Kong Bananza boots its SDR window (0x25), queries the status, then makes an RGB10A2 window (0x3d) of PQ code values with SDR white at 203 nits.
@@ -141,6 +141,9 @@ __attribute__((weak)) void front_hdr_content_range(unsigned lo, unsigned hi) { (
 static float vi_paper_white_v;
 static void vi_paper_white_read(void) { const char *e = getenv("DM_HDR_PAPER_WHITE"); double v = e && *e ? strtod(e, NULL) : 203.0; vi_paper_white_v = (v >= 1.0 && v <= 65535.0) ? (float)v : 203.0f; }
 float dm_hdr_paper_white(void) { static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, vi_paper_white_read); return vi_paper_white_v; }   // pthread_once: every guest thread sees the value written before
+// The HDR layer of both front ends (front_mac.m, front_ios.m): RGB10A2 in BT.2100 PQ, which takes the game's HDR10 window as it is, unless DM_HDR_LAYER=float: the RGBA16Float extended linear
+// BT.2020 layer it replaced, which showed black blocks over flat areas on a MacBook Air M5 (docs/reference/rendering.md, the status query and the present for an HDR window)
+int dm_hdr_layer_float(void) { const char *e = getenv("DM_HDR_LAYER"); return e && !strcmp(e, "float"); }
 // Set once the game's status query has answered HDR on: its RGB10A2 window then holds PQ code values (present_mode, nvn_mtl.m); an RGB10A2 window of a game that never asked for HDR is not decoded.
 // It stays set when the window later moves to a screen without EDR: the game keeps its HDR window until it asks again, and the present still decodes it
 static _Atomic int g_vi_hdr_answered;

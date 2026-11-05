@@ -1,6 +1,7 @@
 // HDR output (DM_HDR=1): the status query's answer and the present's decode, on the GPU with closed-form expectations (no game, no window).
 // The vi answer: HDR on only while the window's screen can show EDR, format 1 with it (the SDK's on = format == 1), the decode latched once answered. The present: PQ code values
-// (an RGB10A2 window) decoded with 1.0 at the 203-nit paper white and written as they are above it (Core Animation maps them by the layer's HDR10 metadata), an 8-bit sRGB
+// (an RGB10A2 window) written as they are into the PQ layer (RGB10A2 in BT.2100 PQ) and SDR and float sources encoded for it at the paper white; for the float layer,
+// decoded with 1.0 at the 203-nit paper white and written as they are above it (Core Animation maps them by the layer's HDR10 metadata), an 8-bit sRGB
 // source converted to BT.2020, a screenshot of an HDR frame brought to SDR white with its hue, and a 10-bit window of a game
 // that never asked for HDR read as stored. hle_vi.c is linked beside this file; t_present_hdr_front.c stands in for the front end
 #include "../nvn/nvn_mtl.m"
@@ -56,6 +57,15 @@ static id<MTLTexture> src8(const uint8_t c[N][3]) {
     id<MTLTexture> t = [g_dev newTextureWithDescriptor:d]; uint8_t b[N * 4];
     for (int i = 0; i < N; i++) { b[4 * i] = c[i][0]; b[4 * i + 1] = c[i][1]; b[4 * i + 2] = c[i][2]; b[4 * i + 3] = 255; }
     [t replaceRegion:MTLRegionMake2D(0, 0, N, 1) mipmapLevel:0 withBytes:b bytesPerRow:sizeof b];
+    return t;
+}
+// An N x 1 RGBA16Float source of linear values (a float window)
+static id<MTLTexture> src16f(const float c[N][3]) {
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:N height:1 mipmapped:NO];
+    d.storageMode = MTLStorageModeShared; d.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> t = [g_dev newTextureWithDescriptor:d]; __fp16 h[N * 4];
+    for (int i = 0; i < N; i++) { for (int k = 0; k < 3; k++) h[4 * i + k] = (__fp16)c[i][k]; h[4 * i + 3] = 1; }
+    [t replaceRegion:MTLRegionMake2D(0, 0, N, 1) mipmapLevel:0 withBytes:h bytesPerRow:sizeof h];
     return t;
 }
 // The present of src into an N x 1 target of the given format; out gets RGB as floats (16-bit float targets), 0-1023 (RGB10A2, the PQ layer) or 0-255 (8-bit targets)
@@ -149,6 +159,11 @@ int main(void) { @autoreleasepool {
         ok = run(src8(c), MTLPixelFormatRGB10A2Unorm, o);
         CHECK("PQ layer: SDR white is the paper white (203 nits), black is code 0", ok && fabs(o[0][0] - pq_code(203)) <= 1.5 && fabs(o[0][2] - pq_code(203)) <= 1.5 && o[5][0] <= 1);
         CHECK("PQ layer: SDR mid grey 128 is its linear value at the paper white", ok && fabs(o[1][1] - pq_code(srgb_dec(128 / 255.0) * 203)) <= 1.5);
+        float f[N][3] = {{1, 1, 1}, {0.5f, 0.5f, 0.5f}, {4, 4, 4}, {0, 0, 0}, {-1, -1, -1}, {1, 1, 1}, {1, 1, 1}, {1, 1, 1}};
+        ok = run(src16f(f), MTLPixelFormatRGB10A2Unorm, o);
+        CHECK("PQ layer: a float source is linear light, 1.0 at the paper white, 4.0 at four times it, not decoded as sRGB", ok && fabs(o[0][1] - pq_code(203)) <= 1.5 && fabs(o[1][1] - pq_code(101.5)) <= 1.5 &&
+              fabs(o[2][1] - pq_code(812)) <= 1.5);
+        CHECK("PQ layer: a negative float value is black", ok && o[3][1] <= 1 && o[4][1] <= 1);
     }
     // A screenshot of an HDR frame (an 8-bit target): as an SDR screen shows it, highlights to SDR white with their hue, then BT.709
     {

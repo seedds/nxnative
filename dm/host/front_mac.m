@@ -40,8 +40,9 @@ static void front_hdr_screen_read(NSScreen *s) {
     int can = pot > 1.0;
     if (atomic_exchange(&g_hdr_screen, can) != can) LOG("front end: the window's screen %s EDR (%s, potential headroom %.2f)", can ? "can show" : "cannot show", s.localizedName.UTF8String, pot);
 }
-// The HDR layer's HDR10 metadata (CAEDRMetadata): Core Animation maps the layer's extended range into the screen's current headroom by it. 1.0 in the layer is the paper white
-// (opticalOutputScale), the range is the one the game declares (0 to 1000 nits until it says, hle_vi.c front_hdr_content_range). Chosen over a roll-off of the host's own: on
+// The HDR layer's HDR10 metadata (CAEDRMetadata): Core Animation maps the layer's range into the screen's current headroom by it. The range is the one the game declares
+// (0 to 1000 nits until it says, hle_vi.c front_hdr_content_range). opticalOutputScale (the paper white: 1.0 in the layer) applies to the float layer only (DM_HDR_LAYER=float):
+// for a normalized format such as the PQ layer's RGB10A2, Core Animation takes it as 10,000 (CAEDRMetadata.h), so PQ codes are absolute nits. Chosen over a roll-off of the host's own: on
 // Mario Kart World the two looked alike, reached the screen in the same time, and the system's follows brightness and the screen's modes as the rest of macOS does
 static int g_hdr_meta;   // the layer has the metadata (DM_HDR, and CAEDRMetadata is available)
 static _Atomic uint32_t g_hdr_range = 1000u << 16;   // the declared range: low nits in bits 0-15, high in 16-31
@@ -1360,17 +1361,14 @@ void front_run(void (*guest)(void)) {
         g_layer = [CAMetalLayer layer];
         g_layer.device = MTLCreateSystemDefaultDevice();
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-        // DM_HDR=1 (the HDR mode): an extended-range layer whatever the window's screen. The layer is BT.2020 (the game's HDR10 is BT.2020 with PQ;
-        // SDR content is converted from BT.709 in present.metal), in linear light (present.metal fs_linear), with HDR10 metadata: Core Animation maps the values above 1.0
-        // into the screen's headroom, and a screen without headroom shows the SDR range
+        // DM_HDR=1 (the HDR mode): an HDR layer whatever the window's screen, with HDR10 metadata: Core Animation maps the picture into the screen's headroom, and a screen without
+        // headroom shows the SDR range. The layer is RGB10A2 in BT.2100 PQ (hle_vi.c dm_hdr_layer_float): the game's HDR10 window goes in as it is, an SDR source is encoded as HDR10 at the
+        // paper white (nvn_mtl.m present_mode). DM_HDR_LAYER=float keeps the RGBA16Float extended linear BT.2020 layer (present.metal fs_linear), which showed black blocks with coloured
+        // squares in them over flat areas (Mario Kart World's water on the course map), now and then and after the window came back to the front, on a MacBook Air M5 (macOS 27.0.1)
         if (getenv("DM_HDR") && atoi(getenv("DM_HDR"))) {
-            // The layer takes the game's HDR10 window as it is: RGB10A2 in BT.2100 PQ (present_mode: an SDR source is encoded as HDR10). An RGBA16Float extended linear BT.2020 layer
-            // (DM_HDR_LAYER=float) showed black blocks with coloured squares in them over flat areas (Mario Kart World's water on the course map), now and then and after the window came back
-            // to the front, on a MacBook Air M5 (macOS 27.0.1, potential headroom 2): the frames the game drew and the host's own copies of them were clean, so the blocks appear after the present
-            int pq = !(getenv("DM_HDR_LAYER") && !strcmp(getenv("DM_HDR_LAYER"), "float"));
+            int pq = !dm_hdr_layer_float();
             g_layer.pixelFormat = pq ? MTLPixelFormatRGB10A2Unorm : MTLPixelFormatRGBA16Float;
             CGColorSpaceRef ecs = CGColorSpaceCreateWithName(pq ? kCGColorSpaceITUR_2100_PQ : kCGColorSpaceExtendedLinearITUR_2020);
-
             g_layer.colorspace = ecs; CGColorSpaceRelease(ecs);
             g_layer.wantsExtendedDynamicRangeContent = YES;
             if (CAEDRMetadata.available) { g_hdr_meta = 1; front_hdr_metadata(); }

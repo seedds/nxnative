@@ -61,9 +61,9 @@ static UILabel *front_ios_fps_label(void);
     l.drawableSize = CGSizeMake(self.bounds.size.width * l.contentsScale, self.bounds.size.height * l.contentsScale);
 }
 @end
-// DM_HDR=1 (the HDR mode; the Mac's layer is made in front_mac.m the same way): an extended-range layer, whatever the screen the game is shown on.
-// The layer is BT.2020 in linear light, where present.metal decodes the game's PQ and converts its SDR, with HDR10 metadata: Core Animation maps the values above 1.0 into the
-// screen's headroom. It is set before the game draws. A TV the picture moves to (tv_attach) keeps the layer
+// DM_HDR=1 (the HDR mode; the Mac's layer is made in front_mac.m the same way): an HDR layer, whatever the screen the game is shown on, with HDR10 metadata: Core Animation
+// maps the picture into the screen's headroom. It is RGB10A2 in BT.2100 PQ (hle_vi.c dm_hdr_layer_float): the game's HDR10 window goes in as it is, an SDR source is encoded as
+// HDR10 at the paper white (nvn_mtl.m present_mode); DM_HDR_LAYER=float keeps the RGBA16Float extended linear BT.2020 layer. It is set before the game draws. A TV the picture moves to (tv_attach) keeps the layer
 static UIScreen *g_edr_screen;   // the screen the layer was made for: the fallback while the layer is not on a window
 static CAMetalLayer *g_edr_layer;
 // Whether the game view's screen can show EDR at all (potentialEDRHeadroom above 1; hle_vi.c answers HDR only then): -1 until the first read, taken as yes. Read four
@@ -77,7 +77,7 @@ static void front_ios_hdr_screen_read(void) {
     int can = pot > 1.0;
     if (atomic_exchange(&g_hdr_screen, can) != can) LOG("front end: the game's screen %s EDR (potential headroom %.2f)", can ? "can show" : "cannot show", pot);
 }
-// The layer's HDR10 metadata (CAEDRMetadata), as on the Mac (front_mac.m front_hdr_metadata): 1.0 is the paper white, the range is the one the game declares
+// The layer's HDR10 metadata (CAEDRMetadata), as on the Mac (front_mac.m front_hdr_metadata): the range is the one the game declares; opticalOutputScale, the paper white, applies to the float layer only
 static int g_hdr_meta;   // the layer has the metadata (DM_HDR, and CAEDRMetadata is available)
 static _Atomic uint32_t g_hdr_range = 1000u << 16;   // the declared range: low nits in bits 0-15, high in 16-31
 static void front_ios_hdr_metadata(void) {   // main thread
@@ -95,15 +95,17 @@ static void front_ios_hdr_layer(CAMetalLayer *l, UIScreen *screen) {
     const char *e = getenv("DM_HDR");
     if (!e || !atoi(e)) return;
     CGFloat headroom = screen.potentialEDRHeadroom;   // 0 when the view has no screen yet
-    l.pixelFormat = MTLPixelFormatRGBA16Float;
-    CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearITUR_2020);
+    int pq = !dm_hdr_layer_float();
+    l.pixelFormat = pq ? MTLPixelFormatRGB10A2Unorm : MTLPixelFormatRGBA16Float;
+    CGColorSpaceRef cs = CGColorSpaceCreateWithName(pq ? kCGColorSpaceITUR_2100_PQ : kCGColorSpaceExtendedLinearITUR_2020);
     l.colorspace = cs; CGColorSpaceRelease(cs);
     l.wantsExtendedDynamicRangeContent = YES;
     g_edr_screen = screen; g_edr_layer = l; front_ios_hdr_screen_read();
     [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) { (void)t; front_ios_hdr_screen_read(); }];
     if (CAEDRMetadata.available) { g_hdr_meta = 1; front_ios_hdr_metadata(); }
     else LOG("[RED] front end: no EDR metadata on this device (CAEDRMetadata): values above the screen's headroom clip");
-    LOG("front end: HDR output on (DM_HDR): the layer is RGBA16Float in extended linear BT.2020%s; the screen's potential headroom %.2f", g_hdr_meta ? ", with HDR10 metadata" : "", headroom);
+    LOG("front end: HDR output on (DM_HDR): the layer is %s%s; the screen's potential headroom %.2f", pq ? "RGB10A2 in BT.2100 PQ" : "RGBA16Float in extended linear BT.2020 (DM_HDR_LAYER=float)",
+        g_hdr_meta ? ", with HDR10 metadata" : "", headroom);
 }
 static void tv_attach(void);
 

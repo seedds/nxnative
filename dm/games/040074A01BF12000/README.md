@@ -61,6 +61,7 @@ The HDR output setting (Game section; Switch 2 games, Mac and iPhone) sets `DM_H
 - The game declares gamut 1 (`SetLayerNextHdrContentGamutMetadata`) for its SDR and HDR windows alike. The host drops the metadata calls and logs the first three of each.
 - The status answer's format is 1 with HDR on: this game's SDK sets on to (format == 1) and fails a format above 1 with 0x272 (`nn::vi::detail::DefaultDisplay::QueryHdrStatus`, sdk+0x55bd60; found in pull request #1249). The game imports none of the SDK's HDR status event calls.
 - It asks for the HDR status every frame (over 1,000 queries in 90 s at 30 fps), as Mario Kart World does, so it can follow the window to another screen, and queries the paper white (203 nits). With the layer's HDR10 metadata, in a window on the built-in screen of a MacBook Pro (M4 Pro, macOS 26.7.1), from the present call to on screen p50 per 300 frames: SDR 49.69 to 49.75 ms, HDR 49.58 to 49.65. Mode select reached either way, no `[RED]` line.
+- The RGB10A2 PQ layer against the RGBA16Float one (`DM_HDR_LAYER=float`), same Mac, 90 s each in a window: the same HDR window (0x3d), present call to on screen p50 49.5 to 49.8 ms with either, no `[RED]` line ([the reference entry](../../../docs/reference/rendering.md#the-status-query-and-the-present-for-an-hdr-window)).
 - `present.metal` decodes the PQ codes to linear light (1.0 at the paper white) into an RGBA16Float layer in extended linear BT.2020, whose HDR10 metadata lets Core Animation map the highlights into the screen's headroom.
 
 ## Open

@@ -13516,7 +13516,8 @@ static void present_pipeline(MTLPixelFormat format) {
         id<MTLLibrary> lib = host_lib("present", &e);
         if (!lib) MDIE("present shader compile failed %s", e.localizedDescription.UTF8String);
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
-        // An extended-range layer (RGBA16Float, DM_HDR=1, BT.2020) takes the picture in linear light: fs_linear converts gamma-coded 8-bit BT.709 sources to BT.2020 and PQ-decodes HDR10 sources (present_encode and present_encode_m4 set the mode)
+        // The float HDR layer (RGBA16Float, extended linear BT.2020, DM_HDR_LAYER=float) takes the picture in linear light: fs_linear converts gamma-coded 8-bit BT.709 sources to BT.2020 and PQ-decodes HDR10 sources.
+        // Every other target, the PQ HDR layer (RGB10A2) included, is drawn by fs (present_encode and present_encode_m4 set the mode)
         pd.vertexFunction = [lib newFunctionWithName:@"vs"]; pd.fragmentFunction = [lib newFunctionWithName:format == MTLPixelFormatRGBA16Float ? @"fs_linear" : @"fs"];
         pd.colorAttachments[0].pixelFormat = format;
         g_blit_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
@@ -13578,10 +13579,13 @@ static int present_crop_rect(id<MTLTexture> src, const int crop[4], NSUInteger r
 __attribute__((weak)) int vi_hdr_answered(void) { return 0; }   // hle_vi.c; the graphics unit tests have no vi service
 static float present_mode(MTLPixelFormat src, MTLPixelFormat dst) {
     // An RGB10A2 window is PQ code values only once the game's status query has answered HDR on (vi_hdr_answered); any other RGB10A2 window is read as stored
-    // Not answered: an SDR 10-bit window, gamma-coded like the 8-bit ones, so it is decoded to linear light for an extended-range layer
-    // An RGB10A2 drawable is the Mac's HDR layer in BT.2100 PQ (front_mac.m): the game's HDR10 window goes in as it is; any other source is gamma-coded BT.709 and is encoded as HDR10 (mode 3)
-    if (dst == MTLPixelFormatRGB10A2Unorm) return src == MTLPixelFormatRGB10A2Unorm && vi_hdr_answered() ? 0.0f : 3.0f;
-    if (src == MTLPixelFormatRGB10A2Unorm) return vi_hdr_answered() ? 2.0f : (dst == MTLPixelFormatRGBA16Float ? 1.0f : 0.0f);
+    // Not answered: an SDR 10-bit window, gamma-coded like the 8-bit ones, so it is decoded to linear light for an HDR layer
+    int pq_win = src == MTLPixelFormatRGB10A2Unorm && vi_hdr_answered();
+    // The PQ HDR layer (RGB10A2 in BT.2100 PQ, front_mac.m and front_ios.m): the game's HDR10 window goes in as it is (0); a float source is linear BT.709, encoded as HDR10 (4);
+    // any other is gamma-coded BT.709, decoded and encoded as HDR10 (3), its white at the paper white either way
+    if (dst == MTLPixelFormatRGB10A2Unorm)
+        return pq_win ? 0.0f : src == MTLPixelFormatRGBA16Float || src == MTLPixelFormatRGBA32Float || src == MTLPixelFormatRG11B10Float || src == MTLPixelFormatRGB9E5Float ? 4.0f : 3.0f;
+    if (src == MTLPixelFormatRGB10A2Unorm) return pq_win ? 2.0f : (dst == MTLPixelFormatRGBA16Float ? 1.0f : 0.0f);
     if (dst != MTLPixelFormatRGBA16Float) return 0.0f;
     // Gamma-coded 8-bit sources. The sRGB-typed ones are sampled through a non-sRGB view (present_raw_src), so the shader reads gamma-coded values for them too
     return src == MTLPixelFormatRGBA8Unorm || src == MTLPixelFormatBGRA8Unorm || src == MTLPixelFormatRGBA8Unorm_sRGB || src == MTLPixelFormatBGRA8Unorm_sRGB ? 1.0f : 0.0f;
@@ -13861,7 +13865,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     float *uv = uvb.contents; NSUInteger tw = tex.width, th = tex.height, cx = r[0], cy = r[1], cw = r[2], ch = r[3];
     uv[0] = (float)cx / tw; uv[1] = (float)cy / th; uv[2] = (float)cw / tw; uv[3] = (float)ch / th;
     uv[4] = (cx + 0.5f) / tw; uv[5] = (cy + 0.5f) / th; uv[6] = (cx + cw - 0.5f) / tw; uv[7] = (cy + ch - 0.5f) / th;
-    // Crop.mode.x (present.metal): an extended-range BT.2020 layer decodes gamma-coded 8-bit BT.709 sources to linear light and converts them; HDR10 sources are PQ-decoded
+    // Crop.mode.x (present.metal present_mode): how the source is encoded, and so how it is converted for the target (the PQ or the float HDR layer, an SDR drawable, a screenshot)
     uv[8] = present_mode(src.pixelFormat, dst.pixelFormat); uv[9] = present_paper_white(); uv[10] = uv[11] = 0;
     if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
     [g_present_args setAddress:uvb.gpuAddress atIndex:0];

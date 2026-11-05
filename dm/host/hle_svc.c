@@ -2,13 +2,21 @@
 // Register convention: inputs w1.. / outputs w0=Result, x1=value (GetInfo / SetHeapSize), consistent with the public Horizon ABI.
 #include "dm.h"
 #include <sys/mman.h>
+#include <sys/mount.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <unistd.h>
 #include <sched.h>
 #include <time.h>
 #include <stdatomic.h>
 #include <mach/mach.h>
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+#include <os/proc.h>   // os_proc_available_memory
+#endif
 
 // Reserve one whole block of guest address space, partitioned the Horizon way (address values are the real addresses returned by the host's mmap).
 // It only takes address space, not memory.
@@ -20,6 +28,7 @@
 static uint8_t *g_as;              // ASLR region base = the whole block
 static size_t g_reserve;           // its size: RESERVE, or more with a DM_ALIAS_SIZE alias region
 static uint8_t *g_heap; static _Atomic size_t g_heap_cur; static size_t g_heap_cap;
+static size_t g_heap_seen;        // the largest heap opened so far: with the guest in files, SetHeapSize zeroes a heap that grows back below it
 // The address range lies entirely within the currently opened (readable and writable) part of the guest heap: such reads need no kernel trap to check, memcpy directly (used where guest memory is read every tick, such as diag.c tk_rd)
 int dm_guest_heap_readable(uint64_t a, size_t n) { uint64_t b = (uint64_t)(uintptr_t)g_heap; size_t cur = g_heap_cur; return g_heap && a >= b && n <= cur && a - b <= cur - n; }
 // The opened heap span for callers that address guest memory by region (hle_cheats.c region 1, like dmnt's heap extents): the
@@ -37,6 +46,148 @@ static uint8_t *g_stack; static size_t g_stack_cap;
 // The address lies in the guest address block (every guest thread stack is here: the game's own heap or the stack region); the big-stack entry (hle_bigstack.c) uses it to decide whether to switch stacks
 int dm_guest_as_contains(uintptr_t a) { uintptr_t b = (uintptr_t)g_as; return g_as && a >= b && a - b < g_reserve; }
 
+// A size switch: bytes (decimal or 0x hex), or whole K / M / G (DM_GUEST_FILE_CHUNK=1G); 0 when unset. At least min, in whole units of align
+static size_t env_size(const char *name, size_t min, size_t align) {
+    const char *s = getenv(name);
+    if (!s || !*s) return 0;
+    char *end; unsigned long long v = strtoull(s, &end, 0); int sh = 0;
+    switch (*end) { case 'G': case 'g': sh = 30; end++; break; case 'M': case 'm': sh = 20; end++; break; case 'K': case 'k': sh = 10; end++; break; default: break; }
+    if (*end || v > (~0ull >> sh) || (v << sh) < min || ((v << sh) & (align - 1)))
+        die("%s=%s: at least %zu MB, in whole %zu KB units (bytes, or whole K / M / G)", name, s, min >> 20, align >> 10);
+    return (size_t)(v << sh);
+}
+// The guest's memory in files (DM_GUEST_FILE): sparse files, unlinked at once, mapped shared over the reservation at the same addresses. File pages do not count in phys_footprint, the figure iOS
+// ends an app at, which otherwise charges every page the game has touched; they take the same memory while they stay in it, and the kernel can write them to the files when it needs the room, which it
+// cannot do with an iPhone app's anonymous pages. A page never written reads 0, and mprotect (dirty tracking), vm_remap (virtual pools) and Metal's no-copy buffers work on them as on anonymous pages.
+// The cost is disk: the files take up to what the game has touched, and the kernel writes them back as it does any file (Mario Kart World on a 16 GB Mac: 5.6 GB on disk and 8-10 GB of logical writes
+// in 5.5 minutes). So a game that fits stays anonymous: on iOS the files are on when the game's memory pool is larger than the room to the memory limit at start (guest_file_wanted), and on the Mac,
+// which can swap, only when asked. DM_GUEST_FILE=1 forces them on and 0 off.
+// DM_GUEST_FILE_CHUNK=<size> sets each file's size (default 1G, at least 64M, raised to make at most GF_MAX files; one file when it is not under the block's size). The stall at the system's periodic
+// flush, about every 30 s, grows with the file: threads touching the memory stalled 130-432 ms on an iPhone with one 20 GB file, and on a 16 GB M5 Mac with 1 GB touched up to 148 ms with one 20 GB
+// file and 4 ms with 20 files of 1 GB. A pool across two files still gets one no-copy Metal buffer (played on iPhones with 512 MB and 1 GB files; a refused buffer stops the host, mtl_pool_add).
+// Any failure leaves the guest anonymous, with a [RED] line: a file that cannot be made, unlinked, given class C on iOS (in a class that closes when the phone locks, its pages could not be read or
+// written out while it is locked), sized or mapped; and a disk with less free space than DM_GUEST_FILE_MIN_FREE (default 5G), on the Mac that and 8 GB, as it can swap instead. A file is unlinked before
+// it is sized, so one left behind holds nothing. guest_file_thread stops the game when the disk falls under the minimum later. What the game gives back only goes PROT_NONE in the files (guest_release)
+// and reads 0 when it is opened again (alias_initialize, SetHeapSize)
+int proc_pid_rusage(int pid, int flavor, rusage_info_t *buffer);   // libproc.h, which the iOS SDK does not have
+#define GF_MAX 1024
+static int g_gf_tab[GF_MAX];       // the files, open for reading and writing
+static int g_gf_n;                 // how many; 0 while the guest is anonymous. Set by mem_init_once, whose pthread_once orders it before every reader
+static uint64_t g_gf_min_free;     // DM_GUEST_FILE_MIN_FREE in bytes: the free space on the files' disk under which the game is stopped; 0 = never
+
+// Every second the free space on the files' disk (they all lie on one volume): under DM_GUEST_FILE_MIN_FREE the game is stopped (exit code 87; the memory watchdog's is 86, hle_nvn.c), before a full
+// disk leaves the kernel no room to write the guest's pages out, nor a phone's system any room. Every 10th second one line, [RED] under 2 GB free: what the disk cost so far and the footprint's parts
+static void *guest_file_thread(void *arg) {
+    (void)arg; const double G = 1073741824.0;
+    for (unsigned sec = 1;; sec++) {
+        sleep(1);
+        struct statfs fs; struct rusage_info_v4 ru; task_vm_info_data_t vi; mach_msg_type_number_t n = TASK_VM_INFO_COUNT; struct stat st;
+        int fs_ok = !fstatfs(g_gf_tab[0], &fs); double avail = fs_ok ? (double)fs.f_bavail * fs.f_bsize / G : -1, held = 0;
+        if (fs_ok && g_gf_min_free && (uint64_t)fs.f_bavail * fs.f_bsize < g_gf_min_free) {
+            LOG("[RED] [mem] guest file: %.1f GB free on its disk, under %.1f: stopping the game (the free space statfs gives, f_bavail, which leaves out space the system could purge)", avail, g_gf_min_free / G);
+            _exit(87);
+        }
+        if (sec % 10) continue;
+        for (int i = 0; i < g_gf_n; i++) if (!fstat(g_gf_tab[i], &st)) held += st.st_blocks * 512.0;
+        int ru_ok = !proc_pid_rusage(getpid(), RUSAGE_INFO_V4, (rusage_info_t *)&ru);
+        if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &n) != KERN_SUCCESS) memset(&vi, 0, sizeof vi);
+        LOG("%s[mem] guest file: %.2f GB allocated on disk; process read %.2f GB, %llu page-ins, logical writes %.2f GB; footprint %.2f GB (internal %.2f, compressed %.2f, peak so far %.2f), file pages mapped (external) %.2f GB; %.1f GB free on its disk",
+            avail >= 0 && avail < 2 ? "[RED] " : "", held / G, ru_ok ? ru.ri_diskio_bytesread / G : -1, ru_ok ? (unsigned long long)ru.ri_pageins : 0ull,
+            ru_ok ? ru.ri_logical_writes / G : -1, vi.phys_footprint / G, vi.internal / G, vi.compressed / G, ru_ok ? ru.ri_lifetime_max_phys_footprint / G : -1, vi.external / G, avail);
+    }
+    return NULL;
+}
+// Whether the guest goes in files: DM_GUEST_FILE when it is set, otherwise when the game's memory pool does not fit the room to the memory limit (room 0: no limit known, as on the Mac)
+static int guest_file_wanted(const char *e, uint64_t pool, uint64_t room) { return e && *e ? atoi(e) > 0 : room && pool > room; }
+// A new file of this process's own, never a link's target (O_EXCL, O_NOFOLLOW): one a dead process with the same number left is replaced
+static int guest_file_open(const char *path) {
+    const int fl = O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC;
+    for (int i = 0;; i++) {
+#if TARGET_OS_IPHONE
+        // Protection class C (PROTECTION_CLASS_C, which the SDK's headers do not name), whose key stays from the first unlock until the phone restarts; also the class an app's files get by default, hence the plain open
+        int fd = open_dprotected_np(path, fl, 3, 0, 0600);
+        if (fd < 0 && errno != EEXIST) fd = open(path, fl, 0600);
+#else
+        int fd = open(path, fl, 0600);
+#endif
+        if (fd >= 0 || errno != EEXIST || i) return fd;
+        unlink(path);
+    }
+}
+#if TARGET_OS_IPHONE
+// Class C or D, setting C while the file is empty when it has another one; 0 with the class in why otherwise
+static int guest_file_class(int fd, char *why, size_t nwhy) {
+    int was = fcntl(fd, F_GETPROTECTIONCLASS), cls = was, err = 0;
+    if (cls != 3 && cls != 4) {
+#ifdef F_SETPROTECTIONCLASS
+        err = fcntl(fd, F_SETPROTECTIONCLASS, 3) ? errno : 0;
+        cls = fcntl(fd, F_GETPROTECTIONCLASS);
+#else
+        err = ENOTSUP;   // an SDK without F_SETPROTECTIONCLASS
+#endif
+    }
+    if (cls == 3 || cls == 4) return 1;
+    snprintf(why, nwhy, "protection class %d, not C (3) or D (4), and %d after setting C (errno %d)", was, cls, err);
+    return 0;
+}
+#endif
+// The block in files of chunk bytes, the last one holding the rest: 1 with the files in g_gf_tab and mapped; 0 with why filled in, every file closed and the whole block anonymous PROT_NONE again, as reserved
+static int guest_files_map(const char *dir, size_t chunk, int n, struct statfs *fs, char *why, size_t nwhy) {
+    const double G = 1073741824.0; char path[1100]; int made = 0, ok = 1;
+    const char *sep = dir[0] && dir[strlen(dir) - 1] == '/' ? "" : "/";
+    for (int k = 0; ok && k < n; k++) {
+        snprintf(path, sizeof path, "%s%sguest-%d-%d.mem", dir, sep, (int)getpid(), k);
+        if ((g_gf_tab[k] = guest_file_open(path)) < 0) { snprintf(why, nwhy, "cannot create %s, errno %d", path, errno); ok = 0; break; }
+        made++;
+        if (unlink(path)) { snprintf(why, nwhy, "cannot unlink %s, errno %d", path, errno); ok = 0; break; }
+#if TARGET_OS_IPHONE
+        ok = guest_file_class(g_gf_tab[k], why, nwhy);
+#endif
+    }
+    if (ok && fstatfs(g_gf_tab[0], fs)) { snprintf(why, nwhy, "cannot read their disk's free space, errno %d", errno); ok = 0; }
+    if (ok) {
+#if TARGET_OS_IPHONE
+        uint64_t want = g_gf_min_free;   // under it guest_file_thread would stop the game at once
+#else
+        uint64_t want = g_gf_min_free + ((uint64_t)8 << 30);
+#endif
+        if ((uint64_t)fs->f_bavail * fs->f_bsize < want) { snprintf(why, nwhy, "%.1f GB free on their disk, under %.1f", (double)fs->f_bavail * fs->f_bsize / G, want / G); ok = 0; }
+    }
+    for (int k = 0; ok && k < n; k++) {
+        size_t sz = k == n - 1 ? g_reserve - (size_t)k * chunk : chunk; uint8_t *at = g_as + (size_t)k * chunk;
+        if (ftruncate(g_gf_tab[k], (off_t)sz)) { snprintf(why, nwhy, "cannot size file %d to %.2f GB, errno %d", k, sz / G, errno); ok = 0; }
+        else if (mmap(at, sz, PROT_NONE, MAP_SHARED | MAP_FIXED, g_gf_tab[k], 0) != at) { snprintf(why, nwhy, "cannot map file %d, errno %d", k, errno); ok = 0; }
+    }
+    if (ok) return 1;
+    for (int k = 0; k < made; k++) close(g_gf_tab[k]);
+    if (mmap(g_as, g_reserve, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0) != g_as) die("reserve guest AS again after DM_GUEST_FILE (errno %d)", errno);   // whatever the maps left there
+    return 0;
+}
+static void guest_file_init(void) {
+    const double G = 1073741824.0; const char *e = getenv("DM_GUEST_FILE"), *d = getenv("DM_GUEST_FILE_DIR"), *mf = getenv("DM_GUEST_FILE_MIN_FREE");
+#if TARGET_OS_IPHONE
+    uint64_t room = os_proc_available_memory();
+    int want = guest_file_wanted(e, DM_GAME_APP_POOL, room);
+    LOG("[mem] guest memory: memory pool %.2f GB, room to the memory limit %.2f GB, DM_GUEST_FILE %s: %s", DM_GAME_APP_POOL / G, room / G, e && *e ? e : "unset", want ? "in files" : "anonymous");
+#else
+    int want = guest_file_wanted(e, DM_GAME_APP_POOL, 0);
+#endif
+    if (!want) return;
+    g_gf_min_free = mf && *mf ? env_size("DM_GUEST_FILE_MIN_FREE", 0, 0x100000) : (uint64_t)5 << 30;
+    size_t chunk = env_size("DM_GUEST_FILE_CHUNK", (size_t)64 << 20, 0x100000); if (!chunk) chunk = (size_t)1 << 30;
+    if ((g_reserve + chunk - 1) / chunk > GF_MAX) chunk = ((g_reserve + GF_MAX - 1) / GF_MAX + 0xfffff) & ~(size_t)0xfffff;
+    int n = (int)((g_reserve + chunk - 1) / chunk); char dir[1024] = "", why[1400]; struct statfs fs;
+    if (d && *d) snprintf(dir, sizeof dir, "%s", d);
+    else if (!confstr(_CS_DARWIN_USER_TEMP_DIR, dir, sizeof dir)) { LOG("[RED] [mem] guest memory: anonymous (DM_GUEST_FILE: no temporary folder, errno %d)", errno); return; }
+    if (!guest_files_map(dir, chunk, n, &fs, why, sizeof why)) { LOG("[RED] [mem] guest memory: anonymous (DM_GUEST_FILE: %s)", why); return; }
+    g_gf_n = n;
+    LOG("[mem] guest memory: %d files of %.2f GB in %s (unlinked, sparse, shared), %.2f GB in all, on the %s volume, %.1f GB free on it", n, chunk / G, dir, g_reserve / G, fs.f_fstypename, (double)fs.f_bavail * fs.f_bsize / G);
+    if (strcmp(fs.f_fstypename, "apfs") || !(fs.f_flags & MNT_LOCAL)) LOG("[RED] [mem] guest file: not on a local APFS volume, where it may not be sparse, or be slow");
+    pthread_t th; int rc = pthread_create(&th, NULL, guest_file_thread, NULL);
+    if (!rc) pthread_detach(th);
+    else LOG("[RED] [mem] guest file: no thread to watch it (error %d): no 10-s line, and nothing stops the game when its disk fills", rc);
+}
+
 static void *alias_windows_thread(void *arg);
 static void *regions_thread(void *arg);
 static void mem_init_once(void) {
@@ -52,6 +203,7 @@ static void mem_init_once(void) {
     g_reserve = RESERVE - DM_GAME_MEM_ALIAS + alias;
     g_as = mmap(NULL, g_reserve, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (g_as == MAP_FAILED) die("reserve guest AS");
+    guest_file_init();
     // Fixed partition (all inside the reserved block): alias 2.875 GB, stack 256 MB, heap the remaining 1.625 GB.
     // In newer SDKs the AddressRegionManager always takes 0x3fe00000 (~1 GB) at the start of the alias region as its node area (sdk 0x134728) before handing out regions; with a 512 MB alias region the very first AllocateAddressRegion fails (0x1803).
     // SMBW also defines a 1792000 KB (1.75 GB) VirtualAddressMemory in HeapDef (System/HeapSize): it is subtracted from the memory pool before the heap is opened (SetHeapSize asks for only 0x5be00000),
@@ -188,12 +340,32 @@ static void alias_query(uint64_t addr, uint64_t *base, uint64_t *size, int *mapp
 // Give guest memory back to the system: a fresh inaccessible mapping over [lo, hi), whole host pages. mprotect(PROT_NONE) alone keeps every page resident and dirty, only
 // out of phys_footprint, and madvise(MADV_FREE) does nothing to pages that are not writable, though it returns 0 (1 GiB on the Mac: 1,024 MiB still resident and dirty; this: 0).
 // A memory pool's no-copy buffer over the range keeps the old pages for the GPU work still using it until the buffer goes. Returns 1 when the range now holds zero pages;
-// on failure the range is only inaccessible, with its old bytes
+// on failure the range is only inaccessible, with its old bytes.
+// With the guest in files (DM_GUEST_FILE), an anonymous mapping over the range would turn it into anonymous memory, which phys_footprint charges again as soon as the game maps
+// it back, so the files' range only goes PROT_NONE: its pages stay file pages, out of the footprint, which the kernel writes out when it needs the room;
+// they keep their old bytes, so the call returns 0 and alias_initialize zeroes them when they are mapped again
 static int guest_release(uintptr_t lo, uintptr_t hi) {
+    if (g_gf_n) {
+        if (mprotect((void *)lo, hi - lo, PROT_NONE)) die("guest_release mprotect %#lx+%#lx errno=%d", (unsigned long)lo, (unsigned long)(hi - lo), errno);
+        return 0;
+    }
     if (mmap((void *)lo, hi - lo, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0) != MAP_FAILED) return 1;
     static _Atomic int nred; if (atomic_fetch_add(&nred, 1) < 8) LOG("[RED] guest memory %#lx+%#lx not given back (errno %d): it stays resident", (unsigned long)lo, (unsigned long)(hi - lo), errno);
     if (mprotect((void *)lo, hi - lo, PROT_NONE)) die("guest_release mprotect %#lx+%#lx errno=%d", (unsigned long)lo, (unsigned long)(hi - lo), errno);
     return 0;
+}
+// Zero the 4 KB pages [a, a + n) over the files: one that reads 0 already is left as it is, since reading a hole maps a clean zero page and dirties nothing, where the memset would dirty it and the
+// kernel then write zeros back, as it would for all of a range the game mapped and unmapped without touching it
+static void guest_zero(uint8_t *a, uint64_t n) {
+    for (uint8_t *e = a + n; a < e; a += 4096) {
+        uint64_t w[8], any = 0;
+        for (size_t i = 0; !any && i < 4096; i += sizeof w) { memcpy(w, a + i, sizeof w); any = w[0] | w[1] | w[2] | w[3] | w[4] | w[5] | w[6] | w[7]; }
+        if (any) memset(a, 0, 4096);
+    }
+}
+static void alias_zero(uint64_t p, uint64_t q) {
+    if (g_gf_n) guest_zero(g_alias + (p << 12), (q - p) << 12);
+    else memset(g_alias + (p << 12), 0, (q - p) << 12);
 }
 // Initialize holes using the OLD commit bitmap. Fresh anonymous host pages stay
 // lazy; after any exposure, even an untouched 4 KiB sibling may hold stale bytes.
@@ -209,12 +381,12 @@ static void alias_initialize(uint64_t off, size_t size) {
                 uint64_t host = q / ratio, stop = (host + 1) * ratio;
                 if (stop > next) stop = next;
                 if (!(g_alias_exposed[host >> 6] & (UINT64_C(1) << (host & 63)))) {
-                    if (clear < q) memset(g_alias + (clear << 12), 0, (q - clear) << 12);
+                    if (clear < q) alias_zero(clear, q);
                     clear = stop;
                 }
                 q = stop;
             }
-            if (clear < next) memset(g_alias + (clear << 12), 0, (next - clear) << 12);
+            if (clear < next) alias_zero(clear, next);
         }
         p = next;
     }
@@ -483,6 +655,9 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         if (size > g_heap_cur) rc = mprotect(g_heap + g_heap_cur, size - g_heap_cur, PROT_READ | PROT_WRITE);
         else if (size < g_heap_cur) (void)guest_release((uintptr_t)g_heap + size, (uintptr_t)g_heap + g_heap_cur);
         if (rc) die("SetHeapSize mprotect failed: req=%#zx errno=%d", size, errno);
+        // With the guest in files a heap given back kept its old bytes (guest_release): one that grows back over them reads 0 there, as the fresh mapping reads without the files
+        if (size > g_heap_cur && g_heap_seen > g_heap_cur && g_gf_n) guest_zero(g_heap + g_heap_cur, (size < g_heap_seen ? size : g_heap_seen) - g_heap_cur);
+        if (size > g_heap_seen) g_heap_seen = size;
         if (g_flag.svc) LOG("SetHeapSize %#zx -> base %p mprotect=%d errno=%d", size, g_heap, rc, errno);
         else if (size > g_heap_cur) LOG("[mem] heap %.2f GB (heap region %.2f GB)", size / 1073741824.0, g_heap_cap / 1073741824.0);
         g_heap_cur = size;

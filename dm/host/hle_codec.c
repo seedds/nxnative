@@ -162,7 +162,11 @@ HLE_FORCE("_ZN2nn5codec29InitializeHardwareOpusDecoderEPNS0_23HardwareOpusDecode
     if (r) { free(d->work); free(d->soft); free(d); return r; }
     d->m = m; d->ch = ch;
     pthread_mutex_lock(&m->lock);
-    if (m->ndec == m->cap) { m->cap *= 2; if (!(m->dec = realloc(m->dec, (size_t)m->cap * sizeof *m->dec))) die("Opus manager realloc"); }
+    if (m->ndec == m->cap) {
+        m->cap *= 2; opus_dec **next = realloc(m->dec, (size_t)m->cap * sizeof *m->dec);
+        if (!next) die("Opus manager realloc");
+        m->dec = next;
+    }
     m->dec[m->ndec++] = d;
     pthread_mutex_unlock(&m->lock);
     objmap_put(gd, d);

@@ -98,7 +98,7 @@ dm/gfx/tests/t_zskip.m	clang-analyzer-osx.cocoa.RetainCount	1
 dm/gfx/vk/hle_vk.m	bugprone-suspicious-memory-comparison	1
 dm/gfx/vk/hle_vk.m	bugprone-suspicious-realloc-usage	2
 dm/gfx/vk/hle_vk.m	clang-analyzer-core.uninitialized.Assign	1
-dm/gfx/vk/hle_vk.m	clang-analyzer-security.ArrayBound	2
+dm/gfx/vk/hle_vk.m	clang-analyzer-security.ArrayBound	1
 dm/gfx/vk/hle_vk.m	clang-analyzer-unix.Malloc	1
 dm/gfx/vk/hle_vk.m	misc-misplaced-const	5
 dm/host/haptics_apple.m	clang-analyzer-nullability.NullablePassedToNonnull	1

@@ -220,10 +220,15 @@ void dm_oe_execute(int index, const void *param, size_t n) {
     if (pf && *pf) {
         FILE *fp = fopen(pf, "rb"); char *rows2 = NULL;
         if (fp) {
-            fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
-            tsv = calloc(1, (size_t)sz + 1); rows2 = calloc(1, (size_t)sz + 1);
-            if (fread(tsv, 1, (size_t)sz, fp) != (size_t)sz) tsv[0] = 0;
-            memcpy(rows2, tsv, (size_t)sz); fclose(fp);
+            long sz;
+            if (fseek(fp, 0, SEEK_END) || (sz = ftell(fp)) < 0 || fseek(fp, 0, SEEK_SET)) LOG("[RED] oe::ExecuteProgram: cannot seek DM_PROGRAMS %s", pf);
+            else {
+                tsv = calloc(1, (size_t)sz + 1); rows2 = calloc(1, (size_t)sz + 1);
+                if (!tsv || !rows2) die("oe::ExecuteProgram: cannot allocate the program table");
+                if (fread(tsv, 1, (size_t)sz, fp) != (size_t)sz) tsv[0] = 0;
+                memcpy(rows2, tsv, (size_t)sz);
+            }
+            fclose(fp);
         } else LOG("[RED] oe::ExecuteProgram: cannot read DM_PROGRAMS %s", pf);
         if (tsv && (have = prog_plan_make(tsv, index, &P, param, n))) LOG("oe::ExecuteProgram(%d, %zu bytes of parameters:%s): this program ends, %s starts", index, n, hex, P.exe);
         else if (rows2) {

@@ -11,7 +11,7 @@ uint64_t now_ns(void) { return 0; }
 void dm_audio_suspend(int on) { (void)on; }   // stubs for the bg item of DM_OE_SCRIPT (hle_audio.c / hle_os.c / hle_nvn.c)
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
 void dm_gfx_suspend(int on) { (void)on; }
-void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg) { (void)why; (void)then; (void)arg; }   // oe::ExecuteProgram, which this test does not call
+void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg) { (void)why; (void)arg; _exit(then ? 1 : 0); }   // the program-table child ends here, without starting a game
 void dm_host_shutdown(const char *why) { (void)why; }
 // The notification event (hle_thread.c binds a kernel event): the unit test only tracks whether it is signalled
 static int ev_bound, ev_sig;
@@ -59,8 +59,22 @@ static int child_burst(int kind) {
     int st; if (waitpid(p, &st, 0) != p) return 0;
     return WIFEXITED(st) && WEXITSTATUS(st) == 0;
 }
+static int program_table(const char *path) {
+    fflush(stdout); pid_t p = fork(); if (p < 0) return 0;
+    if (!p) {
+        alarm(5); unsetenv("DM_EXEC_OUT"); setenv("DM_PROGRAMS", path, 1);
+        dm_oe_execute(0, NULL, 0); _exit(2);
+    }
+    int st; return waitpid(p, &st, 0) == p && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
 int main(void) {
     unsetenv("DM_OE_SCRIPT"); reset();
+    CHECK(program_table("/dev/null"), "empty program table ends without an executable handoff");
+    int pfd[2];
+    if (pipe(pfd)) return 1;
+    char pipe_path[64]; snprintf(pipe_path, sizeof pipe_path, "/dev/fd/%d", pfd[0]);
+    CHECK(program_table(pipe_path), "non-seekable program table ends without a read or executable handoff");
+    close(pfd[0]); close(pfd[1]);
     CHECK(h_oe_InactivityMode() == 0 && !h_oe_InactivityExtQ(), "inactivity extension starts disabled");
     h_oe_InactivityExtSafe(1);
     CHECK(h_oe_InactivityMode() == 1 && h_oe_InactivityExtQ(), "normal inactivity extension is mode 1");

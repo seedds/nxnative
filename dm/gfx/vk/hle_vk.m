@@ -1235,7 +1235,7 @@ static id<MTLBlitCommandEncoder> blit(rs_t *s, uint32_t op) {
 // The occlusion query running counts the render encoder there is, each from a slot of its own in the submit's visibility buffer. It may have begun outside a render pass (Vulkan lets a query span
 // from before a pass to after it: Super Mario 3D All-Stars' Sunshine, Hagi's GX) and a pass's encoder may be split for a copy: every encoder started while it runs gets a slot
 static void occ_start(rs_t *s) {
-    subq_t *q = s->sq; if (!s->aq || !s->re) return;
+    subq_t *q = s->sq; if (!q || !s->aq || !s->re) return;
     if (q->nvis == q->cap) { RED1("occlusion query: more encoders than the visibility buffer has slots"); return; }
     q->occ[q->nvis] = (occ_t){s->aq, s->aq_first, q->nvis};
     [s->re setVisibilityResultMode:MTLVisibilityResultModeCounting offset:q->nvis * 8]; q->nvis++;

@@ -531,6 +531,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - red stub lines for NVN calls. → [NVN calls that were red stubs](../reference/nvn-objects.md#nvn-calls-that-were-red-stubs)
 - `nvnWindowGetPresentInterval`, `nvnCommandBufferSetCopyImageStride` missing. → [SDK 8 window and copy-stride entry points](../reference/nvn-objects.md#sdk-8-window-and-copy-stride-entry-points)
 - `[RED] texture bound to an image slot lacks the shader-write usage`, and compute image writes go to a dummy texture. → [Image bindings supply shader-write intent](../reference/nvn-objects.md#image-bindings-supply-shader-write-intent)
+- walls, floors and props vanish and come back from frame to frame in Assassin's Creed II (the Abstergo elevator corridor, the background of Ezio's birth scene); the log has `image buffer texture at pool offset …, below Metal's 16-byte alignment`. Forcing occlusion queries visible (`DM_NVN_VIS_ALL=1`) does not help. → [Image buffer textures below Metal's 16-byte alignment](../reference/nvn-objects.md#image-buffer-textures-below-metals-16-byte-alignment)
 
 ## Rendering
 

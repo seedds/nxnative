@@ -22,6 +22,7 @@ dm/games/*/bench.tsv	-	a benchmark route
 dm/games/*/usage.tsv	-	a usage manifest
 dm/games/*	profile	one game's profile
 scripts/build_ipa_from_nsp.py	*:*	packing: every game's build
+scripts/pack_nup.py	*:*	NUP packing: games built from NUP containers
 scripts/bench.py	-	the benchmark
 scripts/push_romfs.sh	*:*	RomFS transfer: every game's iOS build
 scripts/regress.py	-	the regression harness

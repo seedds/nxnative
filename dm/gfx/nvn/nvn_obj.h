@@ -131,7 +131,7 @@ typedef struct { const prog_t *prog; int32_t stages; } p_bind_program;
 // 24 for blend, multisample and depth-stencil, instead of 40 for all. Readers take that kind's size from bytes. Games size display-list heaps by GetCommandMemoryUsed: Super Mario Odyssey's
 // "DisplayList" GPU heap (62 MB, a bump allocator, main+0x5e8280) filled while a kingdom loaded with 40-byte state binds (39% of its bytes), and every display list after that got no memory
 typedef struct { int32_t kind; uint8_t bytes[0x18]; } p_bind_state;
-typedef struct { int32_t first, n; uint32_t st[16]; } p_bind_vattr;
+typedef struct { int32_t first, n; uint32_t st[32]; } p_bind_vattr;
 typedef struct { int32_t first, n; vs_st st[16]; } p_bind_vstream;
 typedef struct { int32_t first, n; NVNbufferRange r[16]; } p_bind_vbuf;
 // Games measure scratch recordings to size resource heaps. Keep a single bounded binding at 24 bytes including its header (the native vertex-buffer command is 24 bytes).
@@ -227,12 +227,13 @@ uint64_t mtl_drawable_ns_take(void);   // Take and zero: cumulative ns spent wai
 void mtl_bw(uint64_t *load, uint64_t *store, uint64_t *full_rw_passes);   // Cumulative attachment load / store bytes, cumulative number of full load-store passes
 uint64_t mtl_udc_saved_bytes(void);                                      // Write-back bytes actually saved by DM_NVN_UNWRITTEN_DC
 int mtl_has_window(void);
-int mtl_fps_target(void);                                   // target frame rate 30 / 60 (power-saving mode, DM_FPS, the game itself asking for 30)
+int mtl_fps_target(void);                                   // target frame rate 30 / 60 / 120 (power-saving mode, DM_FPS, the game itself asking for 30, the 120 fps setting)
 int mtl_warm_wait(int timeout_ms);
 int mtl_link_active(void);
 int mtl_link_wait_tick(int vsyncs, uint64_t timeout_ns);   // vsyncs = the game's present interval
 int mtl_link_wait_ticks(int ticks, uint64_t timeout_ns);   // the same in the display link's own ticks
 int mtl_link_rate(void);   // the display link's rate: 120, 60 or 30 Hz
+void mtl_link_mode_set(int mode);   // the display link's pacing mode (DM_PRESENT_LINK's values), applied at the next present
 double mtl_presented_time(uint64_t n);
 int mtl_link_tick(uint64_t n, double *target, double *lead_ms, int *ticks, double *gap_ms);   // the display-link tick that took the n-th present (0 = none: no display link, or not taken yet)
 int mtl_link_stalled(void);   // the display link is silent (background, occluded window, a stall) and queued frames are dropped instead of shown

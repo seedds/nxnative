@@ -171,13 +171,21 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, res);
         }
 
+        // .FTZ (bit 80 of FSET and FSETP, after the comparison's 76..80, Mesa NAK's layout). Without it a sum of weights that NVIDIA flushes to zero passes a "!= 0" guard and its reciprocal
+        // overflows: Mario Kart World's deferred lighting (635061c90d75a8d1) normalises its four depth-weighted half-resolution samples by 1 / sum only where sum != 0, and the NaN came out
+        // of a min(x, 1.0) as a fully lit dot. The arithmetic's own .FTZ stays dropped: Metal has no denormal mode, and a flush on every FADD, FMUL and FFMA would cost far more than it can show
+        private static Operand AFtz(EmitterContext context, AmpereOp x, Operand v)
+        {
+            return x.Bit(80) ? FlushDenormal(context, v) : v;
+        }
+
         // FSET Rd, a, b: 1.0 where (a cmp b) bop P (87..90) holds, else 0.0
         public static void AFset(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
             (ASrc a, ASrc b) = ASecond(context, x);
 
-            Operand res = GetFPComparison(context, (FComp)x.Bits(76, 80), AFloat(context, a), AFloat(context, b));
+            Operand res = GetFPComparison(context, (FComp)x.Bits(76, 80), AFtz(context, x, AFloat(context, a)), AFtz(context, x, AFloat(context, b)));
             res = GetPredLogicalOp(context, (BoolOp)x.Bits(74, 76), res, APred(context, x, 87, 90));
 
             ASet(context, x, context.ConditionalSelect(res, ConstF(1), Const(0)));
@@ -189,7 +197,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             (ASrc a, ASrc b) = ASecond(context, x);
 
-            Operand cmp = GetFPComparison(context, (FComp)x.Bits(76, 80), AFloat(context, a), AFloat(context, b));
+            Operand cmp = GetFPComparison(context, (FComp)x.Bits(76, 80), AFtz(context, x, AFloat(context, a)), AFtz(context, x, AFloat(context, b)));
             Operand p = APred(context, x, 87, 90);
             BoolOp bop = (BoolOp)x.Bits(74, 76);
 

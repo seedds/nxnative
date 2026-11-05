@@ -44,6 +44,7 @@ With a save past the first play, the lobby is taken over and the ninja door, the
 
 ## Open
 
+- **Current (2026-11-05):** the translator deletes 8 bindless accesses in 8 shaders (8 compute; imageBuffer 8), whose results read 0: `3eaae8b8ee375fe5` `489db391bdb163fb` `57544fe4faabdbb4` `87cb94b7e948b11e` `8da5b05a68d52418` `cab2268aedc32039` `ebc7b166dc15d2d9` `fb6158465905aaf5`. The cause is not traced, and whether a route reaches them is not known. [Losses a shader build reports](../../../docs/reference/shaders.md#losses-a-shader-build-reports).
 - The iPhone: no IPA has been built or tested. See [Memory](#memory).
 - The sound was not heard. The runs were muted; a `DM_AUDIO_DUMP` of 160 s through the opening holds the game's mix, with signal in every 10 s window (peak 29,489).
 - A window was not tested: every run was headless (`DM_WINDOW=0`).

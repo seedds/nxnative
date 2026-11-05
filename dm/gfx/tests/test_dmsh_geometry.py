@@ -570,6 +570,26 @@ def mesh_fixture(out):
     Path(out, 'reads.json').write_text(json.dumps(reads))
 
 
+class PointSize(unittest.TestCase):
+    def drop(self, src):
+        builder = Path(dmsh_geometry.__file__).with_name('dmsh_build.py').read_text()
+        node = next(n for n in ast.parse(builder).body if isinstance(n, ast.FunctionDef) and n.name == 'drop_point_size')
+        ns = {'re': re, 'sys': sys}
+        exec(ast.get_source_segment(builder, node), ns)
+        return ns['drop_point_size'](src)
+
+    def test_a_write_goes(self):
+        self.assertNotIn('PointSize', self.drop('vertex main0l_out main0_l(uint i [[vertex_id]])\n{\n    main0l_out out = {};\n    out.gl_PointSize = 1.0;\n    return out;\n}\n'))
+
+    def test_a_reference_takes_a_local(self):
+        # The translated body is a function of its own, which writes the output through its argument: that argument has no member to name in an entry point without the point size
+        out = self.drop('vertex main0l_out main0_l(uint i [[vertex_id]])\n{\n    main0l_out out = {};\n    _88(out.gl_Position, out.gl_PointSize);\n    return out;\n}\n'
+                        'vertex main0l_out main0_lz(uint i [[vertex_id]])\n{\n    main0l_out out = {};\n    _88(out.gl_Position, out.gl_PointSize);\n    return out;\n}\n')
+        self.assertNotIn('out.gl_PointSize', out)
+        self.assertEqual(out.count('float dmsh_point_size = 1.0;'), 2)
+        self.assertEqual(out.count('_88(out.gl_Position, dmsh_point_size);'), 2)
+
+
 if __name__ == '__main__':
     if len(sys.argv) == 3 and sys.argv[1] == '--fixture': mesh_fixture(sys.argv[2]); sys.exit(0)
     unittest.main()

@@ -18,6 +18,8 @@
 #   archive.tsv      what was built: architectures, OS minimum, toolchain, bases (for people and logs; the host does not read it)
 # Each archive is made again only when its compiler inputs change (key.<arch> in the work folder): the complete pipeline configuration without library locations,
 # the referenced libraries' bytes, architecture, platform, minimum OS and metal-tt version. Chain/profile stamps are validated and refreshed independently.
+# More bases than --batch-size are compiled in sequential groups (batches.<arch>/<index>/ in the work folder, each cached by its own inputs) and merged with metal-pack: one metal-tt on
+# Super Mario Odyssey's 32,864 bases runs an 8 GB Mac out of paging space (docs/reference/shaders.md, Bounded groups for the offline pipeline compiler). The output is the same single file.
 # Usage: pso_offline.py --msl <b-<chain> folder> --out <folder> --work <folder> [--game <id>] [--pairs <shader_pairs.tsv> [--pairs <pso_pairs.tsv>]] [--gpu g18p[,g17p]]
 #          [--depth gl|zero] [--platform ios|macos] [--os-min 27.0] [--script-only] [--batch-size N]
 #   --game: the profile (DM_GAMES_DIR as for game.py) whose shader_pairs.tsv and pso_pairs.tsv are the pairs, and whose depth_mode key the depth mode, unless --pairs / --depth say;
@@ -30,6 +32,7 @@ import argparse, filecmp, hashlib, json, os, shutil, struct, subprocess, sys, ti
 from pathlib import Path
 
 LAYER = b'render_target_array_index'
+BATCH = 1000   # bases per metal-tt run: Odyssey's largest compiler lifetime footprint at this size was 2.065 GiB on an 8 GB M2
 COLOUR = ('pixel_format', 'write_mask', 'blending_state', 'alpha_blend_operation', 'rgb_blend_operation', 'destination_alpha_blend_factor', 'destination_rgb_blend_factor',
           'source_alpha_blend_factor', 'source_rgb_blend_factor')
 
@@ -239,6 +242,8 @@ def compile_batches(lib_dir, bases, work, part, arch, platform, osmin, toolchain
     Other workloads and compiler versions can have different resource use.
     """
     pieces = []; total = (len(bases) + batch_size - 1) // batch_size
+    for old in (work / f'batches.{arch}').glob('[0-9]*'):   # the groups of a longer list than this one
+        if int(old.name) > total: shutil.rmtree(old)
     for index, start in enumerate(range(0, len(bases), batch_size), 1):
         group = bases[start:start + batch_size]
         print(f'pso_offline: {arch}: batch {index}/{total}: {len(group)} bases, compiling or checking cache', flush=True)
@@ -270,7 +275,7 @@ def main(argv=None):
     ap.add_argument('--platform', choices=('ios', 'macos'), default='ios')
     ap.add_argument('--os-min', help='minimum OS of the archives (default: iOS, the SDK\'s major version; macOS, this Mac\'s)')
     ap.add_argument('--script-only', action='store_true', help='write the script and the stamp, run no metal-tt')
-    ap.add_argument('--batch-size', type=int, default=0, help='experimental: compile sequential groups of at most N bases and merge with metal-pack (0: one compiler invocation)')
+    ap.add_argument('--batch-size', type=int, default=BATCH, help=f'compile sequential groups of at most N bases and merge with metal-pack, when there are more (default {BATCH}; 0: one compiler invocation)')
     a = ap.parse_args(argv)
     if a.batch_size < 0: ap.error('--batch-size must be zero or positive')
     if a.game:
@@ -312,7 +317,7 @@ def main(argv=None):
         kf.unlink(missing_ok=True); dst.unlink(missing_ok=True)
         part = work / f'{arch}.mtl4a.partial'; part.unlink(missing_ok=True)
         t1 = time.time(); print(f'pso_offline: {arch}: metal-tt, {len(bases)} bases (minutes) ...', flush=True)
-        if a.batch_size:
+        if a.batch_size and len(bases) > a.batch_size:
             compile_batches(lib_dir, bases, work, part, arch, a.platform, osmin, tv, a.batch_size)
         else:
             compile_archive(js, part, work, arch, a.platform, osmin, len(bases))

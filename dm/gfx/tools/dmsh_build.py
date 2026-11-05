@@ -7,13 +7,14 @@
 # from its Mac outputs. One output directory per game: the chain version is the same for every game   Environment: DM_GAME=game profile (required, dm/games/<id>), XLATE=path to the translation tool (default the in-repo dmsh_xlate_bin), DMSH_CAS=content-addressed cache dir (default <output cache dir>/cas), DMSH_PREFILL=Mac library root[=iOS library root] (separated by :, their b-*/ go into the MSL-keyed compile cache first; sibling b-*/ always do), J=concurrency
 # Build output: <key>_b.metallib, <key>_b.json (replay reflection, including drv_reads, the runtime read offsets into driver segments c0 / c2), <key>_b.metal (MSL)
 # Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
-# Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately)
+# Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately);
+# a [RED] line per shader that built but lost something (shader_regressions.report_losses), which does not change the exit status
 import inspect, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, collections, threading, concurrent.futures as cf
 import dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_pch, dmsh_vin, dmsh_pull, dmsh_side, dmsh_mesh, dmsh_ampere, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_pch, dmsh_vin, dmsh_pull, dmsh_side, dmsh_mesh, dmsh_ampere, shader_regressions, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
 _bad = tool_lock.check_tools()
 if _bad: sys.exit('\n'.join('[RED] translation chain tools do not match the lock file: ' + b for b in _bad) + '\n(if the tools changed, run tool_lock.py --update-lock and commit the lock file; if the translator just was not rebuilt, rebuild it)')
 CHAIN = dmsh_chain.version(); out = os.path.join(out, 'b-' + CHAIN)
@@ -587,9 +588,9 @@ def job_for(key, name, rec, w):
         code = code[:dmsh_ampere.inst_len(rec[ci:])]
         extra['arch'] = 'sm86'
         # compute lays out its driver constants in c[0] per shader: the control section gives its push constants' words (+0xa9), counts its uniform buffer, storage
-        # buffer and texture entries (+0xb1, +0xb2, +0xb3) and gives the size (+0xba); the translator maps them to c[24] and NVN's fixed tables (InstEmitAmpere.cs
-        # AMapC0). Graphics keeps NVN's tables
-        if stage == 'cs': extra['nvn2_cs'] = [rec[ci + 0xb1], rec[ci + 0xb2], rec[ci + 0xb3], struct.unpack_from('<H', rec, ci + 0xba)[0], rec[ci + 0xa9] * 4]
+        # buffer, texture, separate texture and separate sampler entries (+0xb1, +0xb2, +0xb3, +0xb4, +0xb5; images, +0xb6, come last) and gives the size (+0xba);
+        # the translator maps them to c[24] and NVN's fixed tables (InstEmitAmpere.cs AMapC0). Graphics keeps NVN's tables
+        if stage == 'cs': extra['nvn2_cs'] = [rec[ci + 0xb1], rec[ci + 0xb2], rec[ci + 0xb3], struct.unpack_from('<H', rec, ci + 0xba)[0], rec[ci + 0xa9] * 4, rec[ci + 0xb4], rec[ci + 0xb5]]
         if stage in ('ts', 'ms'):
             # A task or mesh shader: translated as compute, its SPH taken off and its stage memory in shared memory, then wrapped as the Metal stage function (dmsh_meshstage.py).
             # Graphics stages' c[0] and c[2] tables stay: the translator reads their addresses out of the code as for a vertex shader
@@ -685,6 +686,24 @@ def vs_discard(src):
     if not m: raise ValueError('vertex shader has no main0 entry for rasterizer discard')
     return '\nvertex void main0_discard(' + m.group(1) + ')\n{' + src[m.end():].replace('return out;', 'return;')
 
+def attributes(src):
+    """The vertex attribute declarations, as matches of (type, name, location). Searched only in the lines from the first to the last: from any word of a 220 KB source the pattern costs 9 ms"""
+    i, j = src.find('[[attribute('), src.rfind('[[attribute(')
+    if i < 0: return []
+    end = src.find('\n', j)
+    return list(re.finditer(r'(\w+)\s+(\w+)\s*\[\[attribute\((\d+)\)\]\]', src[src.rfind('\n', 0, i) + 1:end if end >= 0 else len(src)]))
+
+def in_word(src, i):   # whether a word character comes just before src[i]
+    return i > 0 and (src[i - 1] == '_' or src[i - 1].isalnum())
+
+def has_word(src, text):
+    """Whether text, which starts with a word character, is in src with no word character before it: re.search(r'\\b' + text, src) found as text. A pattern that starts with \\b has no literal prefix to skip to"""
+    i = src.find(text)
+    while i >= 0:
+        if not in_word(src, i): return True
+        i = src.find(text, i + 1)
+    return False
+
 def raster_facts(stage, src):
     """Static facts needed for the runtime proof that the load can be skipped (full-coverage first draw) (nvn_mtl.m first_draw_covers):
         Vertex: whether position x / y / z are taken unchanged from the .x / .y / .z of one and the same vertex attribute (w is the constant 1 or the same attribute's .w), with no branches and no clip distances in the main function - if so, pos_attr = attribute slot;
@@ -700,7 +719,7 @@ def raster_facts(stage, src):
     body = re.search(r'\bvertex\s+\w+\s+\w+\s*\(.*?\)\s*\{(.*)\}\s*$', src, re.S)   # the main function is the last function in the file
     if not body or re.search(r'\b(if|for|while|switch|do)\b|clip_distance|ClipDistance', body.group(1)): return {'pos_attr': -1, **scr}
     b = body.group(1)
-    attr = {m.group(2): int(m.group(3)) for m in re.finditer(r'(\w+)\s+(\w+)\s*\[\[attribute\((\d+)\)\]\]', src)}
+    attr = {m.group(2): int(m.group(3)) for m in attributes(src)}
     var = {m.group(1): (m.group(2), m.group(3)) for m in re.finditer(r'float\s+(_\w+)\s*=\s*in\.(\w+)\.([xyzw]);', b)}
     last = {}
     for m in re.finditer(r'out\.gl_Position\.([xyzw])\s*=\s*([^;]+);', b): last[m.group(1)] = m.group(2).strip()
@@ -765,6 +784,11 @@ def decode_ubo_tex(name):
     o0, o1, ty = h & 0x3fff, (h >> 14) & 0x3fff, h >> 28
     if not 3 <= tb <= 16 or ty not in (0, 1, 3) or (ty == 1 and not 3 <= sb <= 16): return None
     return (tb - 3, o0 * 4), (('id', o1) if ty == 3 else (sb - 3, o1 * 4) if ty else (tb - 3, o0 * 4))
+
+def decode_ubo_img(name):
+    """An image whose handle the game keeps in its own uniform buffer (<stage>_i_cb<n>_<word>_<format>: Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]). Returns (uniform slot, byte offset)"""
+    m = re.match(r'[a-z]+_i\w*?_cb(\d+)_([0-9A-F]+)', name)
+    return (int(m.group(1)) - 3, int(m.group(2), 16) * 4) if m and 3 <= int(m.group(1)) <= 16 else None
 
 def c2_array(name, ty):
     """An array of handles in the driver table c2 that the shader indexes at run time (Ryujinx's texture array from a buffer, here bank 2: <stage>_t<type>_cb<slots>_<handle>, declared
@@ -850,9 +874,13 @@ def reflect(key, stage, msl, res):
             e.update(kind=abi.KIND_SBUF, index=int(re.fullmatch(r'[a-z]+_s(\d+)', nm).group(1)))
         elif decode_ubo_tex(nm[:-5] if nm.endswith('Smplr') else nm):   # bindless: the handle is in a uniform buffer (reg = uniform slot, off = byte offset)
             ut, us = decode_ubo_tex(nm[:-5] if nm.endswith('Smplr') else nm)
-            if nm.endswith('Smplr'): e.update(kind=abi.KIND_SAMP_ID, reg=us[1]) if us[0] == 'id' else e.update(kind=abi.KIND_SAMP_UBO, reg=us[0], off=us[1])
-            elif 'texture_buffer' in ty: e.update(kind=abi.KIND_UNKNOWN)   # bindless typed buffer: not implemented in the replay layer
-            else: e.update(kind=abi.KIND_TEX_UBO, reg=ut[0], off=ut[1])
+            other = () if us[0] == 'id' or us == ut else (ut, us)   # handle type 1: the word of the other half, which the host ORs in (the compiler puts texture and sampler words in either order)
+            if nm.endswith('Smplr'): e.update(kind=abi.KIND_SAMP_ID, reg=us[1]) if us[0] == 'id' else e.update(kind=abi.KIND_SAMP_UBO, reg=us[0], off=us[1], **({'soff': ut[1], 'sreg': ut[0]} if other else {}))
+            elif 'texture_buffer' in ty: e.update(kind=abi.KIND_TBUF_UBO, reg=ut[0], off=ut[1])
+            else: e.update(kind=abi.KIND_TEX_UBO, reg=ut[0], off=ut[1], **({'soff': us[1], 'sreg': us[0]} if other else {}))
+        elif decode_ubo_img(nm):
+            e.update(kind=abi.KIND_IMG_UBO, reg=decode_ubo_img(nm)[0], off=decode_ubo_img(nm)[1])   # pyright: ignore[reportOptionalSubscript]  (not None: tested above)
+            if has_word(msl, nm + '.atomic_'): e['atomic'] = True   # as KIND_IMG below
         elif c2_array(nm, ty) is not None:   # an array of the driver table's handles (c2_array): the replay fills element k from the slot whose c2 word is at off + 8k
             off, soff = c2_array(nm, ty)   # pyright: ignore[reportGeneralTypeIssues]  (not None: tested above)
             e.update(kind=abi.KIND_SAMP_C2A if nm.endswith('Smplr') else abi.KIND_TEX_C2A, off=off, **({'soff': soff} if soff is not None else {}))
@@ -863,11 +891,11 @@ def reflect(key, stage, msl, res):
             if not d: e.update(kind=abi.KIND_UNKNOWN)
             else: e.update(kind=abi.KIND_IMG if re.match(r'[a-z]+_i', nm) else (abi.KIND_TBUF if 'texture_buffer' in ty else abi.KIND_TEX), reg=d[0])
             # native texture atomics (dmsh_atomic.py): Metal allows them only on an R32Uint / R32Sint texture made with the shader-atomic usage, which the host checks for this slot
-            if e.get('kind') == abi.KIND_IMG and re.search(r'\b%s\.atomic_' % re.escape(nm), msl): e['atomic'] = True
+            if e.get('kind') == abi.KIND_IMG and has_word(msl, nm + '.atomic_'): e['atomic'] = True
             # a 1D integer fetch the translator read as 2D rows of 16384 texels (Program.cs RecordTexelFetch1D): the host binds a texture buffer in this slot as such rows (nvn_mtl.m tbuf_as_2d)
             if e.get('kind') == abi.KIND_TEX and e.get('reg') in res.get('fetch1d', ()):
                 e['fetch1d'] = True
-                if re.search(r'\b%s\.get_width\(' % re.escape(nm), msl): e['fetch1d_size'] = True   # also size-queried: a texture buffer of more than 16384 elements reports 16384 there
+                if has_word(msl, nm + '.get_width('): e['fetch1d_size'] = True   # also size-queried: a texture buffer of more than 16384 elements reports 16384 there
         binds.append(e)
     # Storage buffers: SPIR-V binding number → c0 offset → NVN storage buffer slot (c0 base SSBO[stage], C0_ROW bytes per slot)
     base = SSBO.get(stage)   # storage buffer base for the hull / domain stages has not been measured: a storage buffer there is reported with no slot
@@ -934,7 +962,7 @@ def int_inputs(src):
     """Inputs that a vertex shader only uses as integers (under a float declaration every use is an as_type<int/uint> bit cast, or a plain copy) → {location: 'uint'}.
     Maxwell does no type conversion when reading vertex attribute registers: the bit pattern of integer formats (bone indices R8UI / RG8UI / RGBA8UI etc.) goes into the register as is and the shader uses it as an integer.
     The answer table has no attribute types (the machine code does not say them), so the translator's attribute type queries all defaulted to float: Metal converts the integer format to a float value, and after the bit cast it is garbage - every bone index is wrong and skinned models (the characters) are stretched into streaks or thrown off screen."""
-    ins = {m.group(2): int(m.group(3)) for m in re.finditer(r'(\w+)\s+(\w+)\s*\[\[attribute\((\d+)\)\]\]', src)}
+    ins = {m.group(2): int(m.group(3)) for m in attributes(src)}
     i = src.find('vertex main0_out main0(')
     if i < 0: return {}
     body = src[i:]; out = {}
@@ -1019,6 +1047,21 @@ def vs_base_instance(src):
         return m.group(0) if '[[base_instance]]' in m.group(0) else m.group(0)[:-1] + ', uint gl_BaseInstance [[base_instance]])'
     return re.sub(r'\bvertex\s+\w+\s+main0\s*\((?:[^()]|\([^()]*\))*\)', add, src)   # the parameter list, whose attributes hold parentheses ([[buffer(0)]])
 
+def drop_point_size(src):
+    """Take the point size output out of vertex functions whose output struct no longer has it. A write goes; where the translated body takes the output by reference (_88(out.gl_Position, out.gl_PointSize)), that function still needs something to write, so the
+    vertex function gets a local float for it"""
+    src = re.sub(r'\n    out\.gl_PointSize = [^;\n]*;', '', src)
+    while 'out.gl_PointSize' in src:
+        use = src.find('out.gl_PointSize')
+        a = [m for m in re.finditer(r'\bvertex\s+\w+\s+\w+\s*\(', src) if m.start() < use]
+        if not a: sys.exit('[RED] a point size output used outside a vertex function')
+        b, depth = src.find('{', a[-1].end()), 0
+        for e in range(b, len(src)):
+            depth += src[e] == '{'; depth -= src[e] == '}'
+            if not depth: break
+        src = src[:b + 1] + '\n    float dmsh_point_size = 1.0;' + src[b + 1:e].replace('out.gl_PointSize', 'dmsh_point_size') + src[e:]
+    return src
+
 def vs_layer(src):
     """A vertex shader that writes the layer (render_target_array_index) loses the point size output. The translator writes gl_PointSize = 1.0 in every vertex shader; Metal builds a pipeline
     whose vertex function writes the layer only with an input primitive class, and one that writes a point size only with the point class (or none), so with both no pipeline can be built.
@@ -1027,7 +1070,7 @@ def vs_layer(src):
     i = src.find('struct main0_out\n{\n'); j = src.find('\n};', i)
     if i < 0 or j < 0 or '[[render_target_array_index]]' not in src[i:j] or '[[point_size]]' not in src[i:j]: return src
     src = src[:i] + re.sub(r'\n    float gl_PointSize \[\[point_size\]\];', '', src[i:j], count=1) + src[j:]
-    return re.sub(r'\n    out\.gl_PointSize = [^;\n]*;', '', src)
+    return drop_point_size(src)
 
 def gs_slice(spv):
     """A geometry shader that only picks the layer: triangles in, at most 3 vertices out, each vertex copying its input position and the input components it passes on, and gl_Layer taking the
@@ -1081,7 +1124,7 @@ def vs_layer_entry(full):
             depth += full[e] == '{'; depth -= full[e] == '}'
             if not depth: break
         fn = full[a.start():e + 1].replace('main0_out', 'main0l_out').replace(f' {ep}(', f' {new}(', 1)
-        fn = re.sub(r'\n    out\.gl_PointSize = [^;\n]*;', '', fn)
+        fn = drop_point_size(fn)
         add += '\n' + fn.replace('return out;', f'out.gl_Layer = as_type<uint>(out.{name}.{comp});\n    return out;') + '\n'
     return full + add, {'loc': locs[name], 'comp': comp}
 
@@ -1145,9 +1188,10 @@ def fs_uint(src):
     # The hardware writes an output's bits to an integer target whatever the shader computed, so main0_u is right for any pixel shader; only those that look like integer writers get one
     # (the library stays small): an output from integer bits, nothing but constants (a clear drawn into an integer target, 35e1865e313f0553 writes 0 into Luigi's Mansion 3's R32Uint target),
     # or nothing but flat stage inputs passed through (the bits its vertex or mesh stage wrote: Mario Kart World's dcb0504c844f1ecc copies a primitive's id into an R8Uint target)
-    from_int = {nm for nm in cols if re.search(r'\bout\.%s(?:\.\w+)? = as_type<float\d?>\(' % nm, src)}
-    writes = [m.group(1) for nm in cols for m in re.finditer(r'\bout\.%s(?:\.\w+)? = ([^;]+);' % nm, src)]
-    flat = set(re.findall(r'\b(\w+) \[\[user\(locn\d+\), flat\]\]', src))
+    stores = [m for m in re.finditer(r'out\.(\w+)(?:\.\w+)? = ([^;]+);', src) if m.group(1) in cols and not in_word(src, m.start())]   # one pass over the text, not one for each output and each question
+    from_int = {m.group(1) for m in stores if re.match(r'as_type<float\d?>\(', m.group(2))}
+    writes = [m.group(2) for m in stores]
+    flat = set(re.findall(r'\b(\w+) \[\[user\(locn\d+\), flat\]\]', src)) if ', flat]]' in src else ()
     def passed(w):   # a flat input, or a local that holds one
         w = w.strip(); d = re.fullmatch(r'\w+', w) and re.search(r'\bfloat\d? %s = (in\.\w+(?:\.\w+)?);' % w, src)
         i = re.fullmatch(r'in\.(\w+)(?:\.\w+)?', d[1] if d else w)
@@ -1370,7 +1414,7 @@ def finish(key, w, j, c1):
     fu, fmask = fs_uint(src) if j['stage'] == 'ps' else (None, 0)   # the integer-output entry points (see fs_uint); the analysis below uses the source with only main0
     fd = fs_dual(src) if j['stage'] == 'ps' and key in DUAL_WANT else None   # the dual-source entry point (see fs_dual), from the source with only main0
     if fu or fd: plain = src; open(msl, 'w').write((fu or src) + (fd or ''))
-    side = {}
+    side, lost = {}, []
     def compile_targets():   # the selected targets from the same MSL (MSL identical to one compiled before takes that library, dmsh_mtlcache.py)
         if j['stage'] == 'ps': side.clear(); side.update(ps_libraries(key, msl, open(msl).read())); return
         if 'mac' in TARGETS: MTL.compile('mac', msl, lib)
@@ -1378,6 +1422,7 @@ def finish(key, w, j, c1):
     try: compile_targets()
     except subprocess.CalledProcessError as e:
         if not lay and not fu and not fd: return 'metal failed', str(e)[:160], None
+        lost = [name for name, extra in (('layer', lay), ('integer output', fu), ('dual source', fd)) if extra]   # kept in the reflection, as a cache hit compiles nothing: every build reports it (shader_regressions.report_losses)
         open(msl, 'w').write(plain); lay = fu = fd = None   # the layer, integer-output and dual-source entry points are extras: a library that does not build with them is built without
         try: compile_targets()
         except subprocess.CalledProcessError as e: return 'metal failed', str(e)[:160], None
@@ -1391,12 +1436,12 @@ def finish(key, w, j, c1):
             'entry': entry.group(2) if entry else 'main0', 'msl_entry_kind': entry.group(1) if entry else None, **({'entry_z': 'main0_z', 'entry_geometry_capture': 'main0_gs'} if j['stage'] == 'vs' else {}),
             **({'entry_discard': 'main0_discard'} if discard else {}),
             **({'entry_tf': 'main0_tf', 'tf_strides': [e['stride'] if e else 0 for e in j['tf']]} if j.get('tf') else {}),
-            **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u'} if fu else {}), **({'entry_m': 'main0_m', 'uint_mask_m': fmask} if fu and fmask else {}), **({'entry_d': 'main0_d'} if fd else {}),
+            **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u'} if fu else {}), **({'entry_m': 'main0_m', 'uint_mask_m': fmask} if fu and fmask else {}), **({'entry_d': 'main0_d'} if fd else {}), **({'entries_lost': lost} if lost else {}),
             **({'first_store': [{'reg': next(b['reg'] for b in binds if b['msl_name'] == n), 'word': w, 'value': v} for n, w, v in first]} if first else {}),
             **({'tg_spill': spill} if spill else {}),
             'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr, mesh['kind'] if mesh else j['stage']),
             'bindings': binds,
-            'vertex_inputs': [{'location': int(m.group(2)), 'msl_type': m.group(1)} for m in re.finditer(r'(\w+)\s+\w+\s*\[\[attribute\((\d+)\)\]\]', src)],
+            'vertex_inputs': [{'location': int(m.group(3)), 'msl_type': m.group(1)} for m in attributes(src)],
             'raster': raster_facts(j['stage'], src), 'vs_pad': pad}
     if j['stage'] == 'vs': full = open(msl).read(); vin_finish(key, full, refl); pull_finish(key, full, refl)   # the shadow-input and pulling libraries (dmsh_vin.py, dmsh_pull.py), from the source with every entry point
     refl.update(side)   # the alpha test and logic operation entry points (ps_libraries)
@@ -1512,7 +1557,7 @@ for e, n in collections.Counter(u for x in ok for u in x['drv_unfillable']).most
 f1 = [b for x in ok for b in x['bindings'] if b.get('fetch1d')]
 print(f'1D integer fetches read as 2D rows of 16384 texels (a texture buffer there is bound as rows, nvn_mtl.m tbuf_as_2d): {len(f1)} bindings in {sum(any(b.get("fetch1d") for b in x["bindings"]) for x in ok)} shaders, '
       f'{sum(1 for b in f1 if b.get("fetch1d_size"))} of them also size-queried')
-SLOTK = {abi.KIND_CBUF, abi.KIND_SAMP, abi.KIND_SAMP_TEX, abi.KIND_TEX, abi.KIND_IMG, abi.KIND_TBUF, abi.KIND_SBUF, abi.KIND_UBO_PTR, abi.KIND_SBUF_UBO, abi.KIND_TEX_UBO, abi.KIND_SAMP_UBO, abi.KIND_SAMP_ID}
+SLOTK = {abi.KIND_CBUF, abi.KIND_SAMP, abi.KIND_SAMP_TEX, abi.KIND_TEX, abi.KIND_IMG, abi.KIND_TBUF, abi.KIND_SBUF, abi.KIND_UBO_PTR, abi.KIND_SBUF_UBO, abi.KIND_TEX_UBO, abi.KIND_SAMP_UBO, abi.KIND_SAMP_ID, abi.KIND_IMG_UBO, abi.KIND_TBUF_UBO}
 noreg = [x for x in ok if any(b['kind'] in SLOTK and b.get('reg') is None for b in x['bindings'])]
 unk = [x for x in ok if any(b['kind'] == abi.KIND_UNKNOWN for b in x['bindings'])]
 print(f'shaders with a binding whose slot was not decoded {len(noreg)}, with an unrecognized binding kind {len(unk)} (loading them at run time prints [RED] lines)')
@@ -1521,6 +1566,7 @@ nt = collections.Counter(nn.split(' (')[0] for x in ok for nn in x['notes'] if n
 for e, n in nt.most_common(8): print(f'  queries without an answer {n:5d}  {e}')
 tm = collections.Counter(nn[len('translator: '):] for x in ok for nn in x['notes'] if nn.startswith('translator: '))   # the translator's own messages (dmsh_xlate Log): bindless reads resolved or removed, invalid encodings
 for e, n in tm.most_common(12): print(f'  translator {n:6d} in {sum(e in [nn[len("translator: "):] for nn in x["notes"]] for x in ok):5d} shaders  {e}')
+shader_regressions.report_losses(ok)
 json.dump([{'key': r[0], 'st': r[1], 'err': r[2]} for r in res], open(os.path.join(out, '_b_build.json'), 'w'), ensure_ascii=False)
 if not want:   # a full build: the stamp, then the c1 guard and uniform read extent tables from these Mac outputs, into the profile folder (the host takes them only beside this stamp)
     # The per-shader cache entries this build used (cas/shader/<digest>), which the NSP script keeps when it prunes the others (prune_shader_cache). Only beside the Mac outputs:

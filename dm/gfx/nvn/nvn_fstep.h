@@ -47,6 +47,7 @@ typedef struct {
     int ramp;                 // set by the caller (kept): 1 = a probe's grace is renewed while its frames keep getting cheaper (FSTEP_RAMP; the host's DM_FSTEP_PROBE_RAMP)
     double pa, pb; int plate, ptotal;   // the current grace window: the cost of its first and second halves (sums), its late frames; grace frames this probe has taken in all
     double hold, since;       // vsyncs a trial waits for after a step up; vsyncs since the last step up
+    int per_vsync;            // set by the caller: the ticks a 1/60 s vsync is (0 = 1). At 120 fps the unit is 1/120 s (hle_nvn.c fps_high), and the waits between trials stay the same real time
     double shown_slack;       // vsyncs a frame on time may show longer than k (set by the caller): one refresh on screens whose rate is not a multiple of 60; the cost keeps FSTEP_LATE
     int screen;               // set by the caller before each call, then cleared: 0 = judge lateness by shown and cost; 1 = the screen showed a recent frame on time, 2 = late. With present
                               // snapshots (nvn_mtl.m) the game runs ahead of the screen and a frame that runs long is absorbed, so only what the screen shows counts
@@ -66,10 +67,11 @@ static inline int nvn_fstep_same(const nvn_fstep *s) { return s->cref > 0 && s->
 // VFR override; 0 = none), which the host then holds as it is; slow: the CPU runs below its speed for reasons other than heat, so a cost above k − 1 is no evidence
 // against kmin (probes). Returns the step for the next frame; s->k is how long that frame stays on screen
 static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int kmin, int kmax, int fixed, int slow) {
+    const double hold0 = FSTEP_HOLD0 * (s->per_vsync ? s->per_vsync : 1), hold_max = FSTEP_HOLD_MAX * (s->per_vsync ? s->per_vsync : 1);
     if (kmin < 1) kmin = 1;
     if (kmax > FSTEP_MAX) kmax = FSTEP_MAX;
     if (kmax < kmin) kmax = kmin;
-    if (!s->hold) s->hold = FSTEP_HOLD0;
+    if (!s->hold) s->hold = hold0;
     if (fixed > 0) {   // the game's own step: speed is right by construction, nothing to pay back
         s->k = s->step = fixed < FSTEP_MAX ? fixed : FSTEP_MAX;
         s->debt = 0; s->late_run = s->fit_run = s->trial = s->probe = s->grace = 0; s->run = 0;
@@ -100,7 +102,7 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     if (kmin != s->ckmin) {   // another cap: its run starts over, and what held it before comes back
         if (s->ckmin >= 1 && s->ckmin <= FSTEP_MAX) {
             // A cap can end a sustained run before any hitch saved its cost. Short runs keep the earlier proven reference.
-            if (s->run >= FSTEP_HOLD_MAX && s->crun > 0) s->cref = s->crun;
+            if (s->run >= hold_max && s->crun > 0) s->cref = s->crun;
             s->cref_at[s->ckmin] = s->cref;
         }
         s->ckmin = kmin; s->run = s->crun = 0; s->cref = kmin <= FSTEP_MAX ? s->cref_at[kmin] : 0;
@@ -117,11 +119,11 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
         int want = (int)ceil(cost - 0.05);
         if (want < s->k + 1) want = s->k + 1;
         if (want > kmax) want = kmax;
-        if (s->trial || (s->probe == 2 && s->since < FSTEP_HOLD_MAX)) { s->failed++; s->trial = 0; s->hold = s->hold * 2 < FSTEP_HOLD_MAX ? s->hold * 2 : FSTEP_HOLD_MAX; }
-        else if (s->probe == 2) s->hold = FSTEP_HOLD0;   // the probe's run at kmin lasted
-        if (held == kmin && s->run >= FSTEP_HOLD_MAX) s->cref = s->crun;   // kmin held 8 s at this cost
+        if (s->trial || (s->probe == 2 && s->since < hold_max)) { s->failed++; s->trial = 0; s->hold = s->hold * 2 < hold_max ? s->hold * 2 : hold_max; }
+        else if (s->probe == 2) s->hold = hold0;   // the probe's run at kmin lasted
+        if (held == kmin && s->run >= hold_max) s->cref = s->crun;   // kmin held 8 s at this cost
         s->k = want; s->ups++; s->late_run = s->fit_run = 0; s->since = 0; s->probe = 0;
-    } else if (s->trial && !grace && !--s->trial) { if (s->probe) { s->probe = 2; s->since = 0; } else s->hold = FSTEP_HOLD0; }   // the trial held (a probe's run at kmin is judged at the next step up)
+    } else if (s->trial && !grace && !--s->trial) { if (s->probe) { s->probe = 2; s->since = 0; } else s->hold = hold0; }   // the trial held (a probe's run at kmin is judged at the next step up)
     if (!late) s->fit_run = s->k > kmin && cost <= FSTEP_FIT * (s->k - 1) ? s->fit_run + 1 : 0;
     if (s->fit_run >= FSTEP_RUN && s->since >= s->hold && !s->trial) { s->k--; s->downs++; s->trial = FSTEP_RUN; s->fit_run = 0; }
     else if ((slow || nvn_fstep_same(s)) && s->k > kmin && s->since >= s->hold && !s->trial) {   // probe: straight to kmin, so the controller sees the whole deadline

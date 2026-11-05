@@ -20,7 +20,7 @@ A Switch 2 game: update v65536 over the base game, SDK 21.4.4 built for the Swit
 
 ## Shaders
 
-27,155 of 27,195 build. The 40 that do not (current): 12 compute shaders on instruction 0x2be, 10 on 0x301, 8 on 0xf8c, 6 on 0x38c, 1 on 0x481, one vertex shader on 0x927 (NigoProc), and 2 compute shaders of `agl_technique_pfx` that Metal refuses (`bracket nesting level exceeded`). The game asks for one of them at boot, `fa072659664b2d38` in `agl_common`, and the dispatch is skipped, with no effect seen so far.
+27,192 of 27,195 build on chain `9bb5d8678204`. The 3 that do not (current): 1 on instruction 0x481, and 2 compute shaders of `agl_technique_pfx` that Metal refuses (`bracket nesting level exceeded`). `fa072659664b2d38` in `agl_common`, which the game asks for at boot, builds now.
 
 ## Rendering
 
@@ -43,6 +43,7 @@ The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots i
 
 ## Found on this game
 
+- [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles): NigoProc's `800215a0f8d0c44d` is a mesh shader, and every pack stopped until its row was split again ([issue #1263](https://github.com/seedds/nxnative/issues/1263)).
 - [Storage words read one by one](../../../docs/reference/shaders.md#storage-words-read-one-by-one): the lit pass on an M1, 70 → 16 ms.
 - [A blocked audio device start freezes the game](../../../docs/reference/audio.md#a-blocked-audio-device-start-freezes-the-game) when the selected HDMI device refuses to play.
 

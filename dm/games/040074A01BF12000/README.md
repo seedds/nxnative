@@ -67,6 +67,7 @@ Each step below stopped the boot before its fix:
 ## Found on this game
 
 - [A depth clear over the whole target with a partial stencil mask](../../../docs/reference/rendering.md#a-depth-clear-over-the-whole-target-with-a-partial-stencil-mask): 22.8 MB of depth and stencil loaded a frame for a stencil mask of 1 (resolved).
+- [No Game language row in an app packed from a NUP or a dump](../../../docs/reference/packing.md#no-game-language-row-in-an-app-packed-from-a-nup-or-a-dump): reported by testers; this folder's dump has no control data.
 - Everything under [Boot](#boot-mac) is new: the first Switch 2 game here.
 - [Ampere shader code (Switch 2)](../../../docs/reference/shaders.md#ampere-shader-code-switch-2): the translator's Ampere frontend, its scoreboard model and the IPA / texture / load semantics found on this game's menu (green boxes instead of text; no text); the tensor instructions, NVN2 compute's c[0] layout and push constants, MUFU SIN / COS in turns, and the storage base rule found in its gameplay.
 - [The Switch 2's order inside a GOB](../../../docs/reference/nvn-objects.md#the-switch-2s-order-inside-a-gob): the textures from its files.
@@ -90,3 +91,4 @@ Each step below stopped the boot before its fix:
 - [Upsample pass reading the level above the one it renders](../../../docs/reference/rendering.md#upsample-pass-reading-the-level-above-the-one-it-renders): the stage intro's neon letters came out fat and filled, the bloom's upsample reading a sharper level through the view of the levels below (PR #1073).
 - [Present snapshots: the game's swapchain texture free at once](../../../docs/reference/frame-rate.md#present-snapshots-the-games-swapchain-texture-free-at-once): at the 30 fps cap with snapshots on it ran 43-65 fps of game time (fast-forward) and dropped about 110 of every 300 frames (PR #1073).
 - [Submissions handed to the GPU in segments](../../../docs/reference/frame-rate.md#submissions-handed-to-the-gpu-in-segments): a submission drawing into the target it inherited left those draws out of the segment's draw count (PR #1073).
+- [A deferred write under a false guard](../../../docs/reference/shaders.md#a-deferred-write-under-a-false-guard): DK and Pauline bright white between Hilltop's rocks, from terrain captured into the environment cube with a placeholder material (issue #1100; fixed by the translator change found on Yoshi and the Mysterious Book, spot not revisited, reporter's test asked).

@@ -147,6 +147,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** an image slot the shader declares as uint / int now gets a view of the same texel size in that class (`img_fit` in `nvn_mtl.m`). The format-view usage costs lossless compression, so a texture gets it only when a shader needs such a view: it is upgraded (copied into a texture with the usage) before the next draw pass opens, as the copy cannot run inside the draw's own pass; until then that one draw reads it as before.
 - **Found on:** [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md): the last passes have no render target; fragment shaders composite each UI layer into the window texture with image stores, blending in software (`uirender.tec`, `4cf1975ed1e36590`).
 
+### Buffer textures behind handles in uniform buffers, and rows of finalized descriptors
+
+- **Symptom:** flat-coloured objects with no texture detail in an otherwise correct scene: the UVs and colours a vertex factory fetches from buffers read 0. Then `texture buffers bound as 2D rows … N times, about N made` in the log, a Metal texture for nearly every bind.
+- **Cause:** with a handle in a uniform buffer the build has no descriptor to ask, so a buffer texture there is declared 2D and read [in rows](#buffer-textures-read-by-1d-integer-fetches-row-wrap); only slots the translator recorded got the row form. And the rows were kept with the texture object, while Unreal Engine 5.4 finalizes its buffer texture objects and keeps using the registered IDs, as the API allows. Comparing the texture's address in the cache missed as well, as new descriptors view the same memory.
+- **Fix:** any `NVN_RB_TEXU` declared 2D takes the row form for a buffer texture. Rows of a finalized object are kept by what they view (`g_tb2_gone`: buffer, offset, length, format), emptied with the pools.
+- **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): 13.1 million views made for 13.2 million binds became 1.08 million, with frame times unchanged at 16.7 ms.
+
 ### Buffer textures read by 1D integer fetches (row wrap)
 
 - **Symptom:** `texture type mismatch: shader declares 2, texture is 9`; the slot read 0.
@@ -726,6 +733,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Note:** how the steel-blue ground was traced, since two steps misled: where the ground was missing nothing wrote the depth (reversed-Z, cleared to 0), the lighting takes depth 0 for sky and paints the fog colour, and the never-cleared G-buffer colour targets kept an old image there (cobblestones of a mesh under the terrain, which from the map camera showed through the gaps like a road). A `HILITE` colour over the gap was stale too (the never-cleared albedo), and the end-of-frame depth showed 0 there. Recomputing every draw's clip positions from `CBDUMP` data showed that no draw of the shader reached the gap; then the side pass's layer, which showed only scattered tiles of the river, led to the vertex format. Ruled out on the way: depth clamp (Metal's clip and clamp modes gave the same depth), the pass without a depth attachment (142595 is a screen-space decal pass: it samples the depth and writes albedo and normals), polygon offset (none), dropped draws.
 - **Note:** to confirm in Three Houses: 64-pixel rectangles in the albedo where decals land. The decal pass (`417a523053457352`, slots 16 and 18) and the lighting (`094a2d11253f126c`, `f54830a75e07e14a`, slots 18–20) read their decal and light lists from texture buffers that the translation declared `texture2d`, because those handles have no PC type (`texture type mismatch: shader declares 2, texture is 9`); skipping the decal pass removed the rectangles. Since row wrap ([Buffer textures read by 1D integer fetches (row wrap)](#buffer-textures-read-by-1d-integer-fetches-row-wrap), general) they read the real lists: slot 18 holds 1,052,640 elements, 65 rows. On the Mac prologue route the torches and burning houses now light the battle map and the close-up ground (they lit nothing before), and the blood decals take the scene's light instead of showing as dark blue patches. The rectangles did not appear on that route in either build (no 64-pixel structure in the close-up frames), so the scene where they were seen still has to be checked.
 
+### More than 16 vertex attributes
+
+- **Symptom:** `[RED] BindVertexAttribState n=17`, tens of thousands of times, and a scene that draws wrong or not at all: the bind was refused, so the draws kept the previous layout.
+- **Cause:** NVN has 16 vertex attributes and NVN2 32, and every table in the host held 16.
+- **Fix:** the attribute tables hold 32 (`p_bind_vattr`, the replay's state), and so does the answer to the device query. The pipeline key keeps the first 16 where they were and adds `attr_hi` at its end, so a prewarm row written before reads as 0 (`pso_skey_parse`); `dmsh_pull.py` and `dmsh_vin.py` leave out such shaders as they did, and they take the ordinary path. Vertex bindings stay 16.
+- **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): Unreal Engine 5.4's vertex factories use attribute 16 on stream 6.
+
 ### Vertex formats Metal lacks
 
 - **Symptom:** `vertex attribute format … not mapped` (printed once).
@@ -955,6 +969,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Encoding thread:** with `DM_NVN_ENC_THREAD` (the iOS default) the replay's command buffer is the recording's stand-in, which has none of MetalFX's calls: the host stopped at the first evaluation (`deferred encoding: DmRecCB has no stand-in for -useResidencySet:`). The scaler's state and its encode are a block run on the encoding thread with the real command buffer (`rec_cb_block` in `nvn_rec.h`), as for [a game's own upscaler](#a-games-own-upscaler-drawn-by-metalfx). Check: `make -C dm/gfx/tests GAME=040074A01BF12000 check_t_dlss_mfx` (two evaluations through one scaler in a submission, the thread off and on). Not run on a game with the thread.
 - **Open:** the jitter's sign has not been checked and the bias mask is only logged; no ghosting has been seen.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): `gfxa::TaskDLSS`, 1024x576 to 2048x1152.
+
+### The DLSS network resized
+
+- **Symptom:** `[RED] NVN unimplemented function called: nvnDlssNetworkResize (x0=… x1=0x300 x2=0x1b0)` at the title.
+- **Cause:** NVN2 lets a game resize a DLSS network instead of making a new one. The replay takes each evaluation's sizes from its parameters and textures, so the network keeps nothing of it.
+- **Fix:** `nvnDlssNetworkResize` succeeds, logging the first size (`hle_nvn.c`).
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md): 768x432, once; its evaluations run 768x432 to 768x432.
 
 ### A game's own upscaler drawn by MetalFX
 

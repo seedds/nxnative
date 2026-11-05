@@ -6,6 +6,7 @@ A graphical app that packs games, keeps a library of them or starts them is a pr
 - [The settings list](#the-settings-list)
 - [Starting a game](#starting-a-game)
 - [An app that hosts the engine](#an-app-that-hosts-the-engine)
+- [Following main](#following-main)
 - [What a front end cannot see yet](#what-a-front-end-cannot-see-yet)
 
 ## Building: the NSP script
@@ -19,7 +20,7 @@ With `--progress json` it asks nothing and writes one JSON object per line on st
 | `stage` | `k`, `n` (stage k of n), `name`, `step` | a stage starts; `n` can grow during the build (a provisional profile's heap check) |
 | `step` | `k`, `name`, `step` | a new step within the stage; its count starts again |
 | `progress` | `k`, `name`, `step`, `done`, `total`, `unit` (`''`, `'B'` for bytes, `'files'`, …), `est` (the total is an estimate), `note`, `frac` (0 to 0.99, or `null` when the work cannot be counted), `eta` (seconds or `null`), `elapsed` | the count changes; at most every 0.5 s while only the count moves |
-| `stage_end` | `k`, `name`, `ok`, `summary`, `elapsed` | a stage ends |
+| `stage_end` | `k`, `name`, `ok`, `summary`, `elapsed`; `warn` (`true`, only when the stage finished without what it makes, with `ok` true: a pipeline archive that failed, so the app is packed without one) | a stage ends |
 | `shaders_stale` | `reason` (`'chain'`: libraries of another translation chain `DMSH_CHAIN`; `'inputs'`: the profile's shader inputs differ from the library's stamp `inputs.tsv`), `old` (the chain folders `b-<V>` or the stamp's digest), `new` (`b-<V>` now or the digest now), `count` (base libraries scheduled: one per current shader key and selected target, including cache restores) | once per shader step, before rebuilding after a chain or profile change; interrupted chain rebuilds still report it until the selected targets have stamped libraries. A step that reuses its libraries, or has none cached for its targets, sends none. A `say` with the same news follows |
 | `say` | `msg` | a message; one starting with `[RED] ` is an error |
 
@@ -105,6 +106,31 @@ An app that links the host and the front end's game view into its own process (a
 
 - **`front_progress_hook`**: draws the prepare step's progress ("Preparing shaders", "Preparing pipelines") instead of the front end's screen. With a window, it gets each call's title, done and total on the main thread; the title is `NULL` when the step ends.
 - **`dm_set_game_image_header`** (iOS): names the image that carries the game's rewritten modules, when the app links them into a framework it `dlopen`s from its signed bundle instead of into its executable. Call it with that image's mach header before `dm_host_preload_start`. Only the module sections are read from it.
+
+## Following main
+
+nxnative has no releases or tags: a front end pins a commit and moves it forward. Between the commit it has (`A`) and the one it moves to (`B`), two things say what changed for it.
+
+**What git shows.** These need no note from anyone, and no commit adds one:
+
+| What changed | The command |
+|---|---|
+| This page, the settings list's schema, the settings a game can offer | `git log -p A..B -- docs/frontends.md docs/launcher.schema.json dm/games/settings.tsv` |
+| The NSP script's options | `git diff A..B -- scripts/build_ipa_from_nsp.py \| grep add_argument` |
+| The environment switches, with each one's class (`switch`, `path`, `diagnostic`) | `git diff A..B -- docs/env_switches.tsv` |
+| The shader chain: each game's shaders are rebuilt at its next build, which the `shaders_stale` event reports | `git log --oneline A..B -- dm/gfx/nvn/dmsh_chain.h` |
+
+**What only the author can say.** A commit a front end has to act on, in a way the commands above do not show, says so in a line of its own in its message, one line per thing, and `git log A..B --grep='^Front-ends:'` finds them:
+
+```
+Front-ends: break: what stopped working, and what to do about it
+Front-ends: interface: an existing variable, argument, event, field or path that now means something else
+Front-ends: new: a kind of input or game, or a requirement, that a front end could offer or has to meet
+```
+
+Most commits have none, and commits from before this section have none either. A line is the author's knowledge, so its absence is no proof that nothing changed.
+
+**Data a player already has moves by itself.** When a change makes the host read saves or other kept data differently, the host carries the old form forward, as with [saves named before backslash paths](reference/services.md#saves-named-before-backslash-paths): a front end has nothing to patch, and a player of nxnative's own apps gets the same fix.
 
 ## What a front end cannot see yet
 

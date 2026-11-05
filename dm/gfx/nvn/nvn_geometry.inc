@@ -321,7 +321,7 @@ static geo_access geo_access_of(NvProg *pr, NvShader *gs) {
                 const p_bind_buf *u=b->kind==NVN_RB_SBUFP?&S.ssbo[st][b->reg]:&S.ubo[st][b->reg];
                 int write=b->kind==NVN_RB_SBUFP && b->rw && !(sh->sb_ro>>b->reg&1);
                 geo_access_add(&a,u->addr,b->kind==NVN_RB_CBUF?cb_len(sh,b->reg,u->size):u->size,write);
-            } else if (b->kind==NVN_RB_SBUFU || b->kind==NVN_RB_IMG || b->kind==NVN_RB_TBUF) a.unknown=1;
+            } else if (b->kind==NVN_RB_SBUFU || b->kind==NVN_RB_IMG || b->kind==NVN_RB_IMGU || b->kind==NVN_RB_TBUF || b->kind==NVN_RB_TBUFU) a.unknown=1;
         }
     }
     return a;
@@ -415,7 +415,7 @@ static NSObject *g_pso_mesh_building;
 static id<MTLRenderPipelineState> geo_mesh_pso_for(NvProg *pr, id<MTLFunction> fn, int run) {
     NvShader *vs = pr->sh[0], *fs = pr->sh[1];
     pso_key k; pso_key_fill(&k, vs, fs, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, 0);
-    memset(k.attr, 0, sizeof k.attr); memset(k.stream, 0, sizeof k.stream);   // the pipeline pulls its streams: no vertex layout in it
+    memset(k.attr, 0, sizeof k.attr); memset(k.attr_hi, 0, sizeof k.attr_hi); memset(k.stream, 0, sizeof k.stream);   // the pipeline pulls its streams: no vertex layout in it
     k.fsfn = (__bridge void *)fn;
     os_unfair_lock_lock(&g_pso_mesh_lock); id ps = hm_get_id(&g_pso_mesh, &k);
     if (!ps) { if (!g_pso_mesh_building) g_pso_mesh_building = [NSObject new]; hm_put_id(&g_pso_mesh, &k, g_pso_mesh_building); }
@@ -558,7 +558,7 @@ static NSObject *g_pso_mtk_building;
 static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     NvShader *ts = g_mtk.ts, *ms = g_mtk.ms, *fs = raster->sh[1];
     pso_key k; pso_key_fill(&k, ms, fs, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, 0);
-    memset(k.attr, 0, sizeof k.attr); memset(k.stream, 0, sizeof k.stream);
+    memset(k.attr, 0, sizeof k.attr); memset(k.attr_hi, 0, sizeof k.attr_hi); memset(k.stream, 0, sizeof k.stream);
     k.fsfn = (__bridge void *)(ts ? ts->fn : ms->fn);   // with ms in the key's vertex place: the task shader is the third of the pipeline's functions
     os_unfair_lock_lock(&g_pso_mtk_lock); id ps = hm_get_id(&g_pso_mtk, &k);
     if (!ps) { if (!g_pso_mtk_building) g_pso_mtk_building = [NSObject new]; hm_put_id(&g_pso_mtk, &k, g_pso_mtk_building); }

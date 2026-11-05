@@ -11,6 +11,7 @@ A Switch 2 game: v131072, SDK 22.2.0 built for the Switch 2 (`Ounce`), NVN2 API 
 | `pad_layout full` | `game.tsv` | the game asks for most of the controller at once |
 | `zip_store .zst:.mp4:.webm:.metallib` | `game.tsv` | the RomFS's files are compressed already |
 | `fps_target 60` | `game.tsv` | the host writes 60 into the game's target frame rate, which the rewriter finds by its readers in any build; see [Frame rate](#frame-rate) |
+| `fps_max 120` | `game.tsv` | **Frame rate** offers 120 on the Mac: speed measured below; see [Frame rate](#frame-rate) |
 
 No `render_cond`: not tried, and nothing has called for it so far.
 
@@ -39,6 +40,10 @@ All 16,888 translate (current). One shader has 10 texture handles the translator
 - The rewriter finds the field by those readers and the store of 30, with no build ID ([A target frame rate the game steps by](../../../docs/reference/frame-rate.md#a-target-frame-rate-the-game-steps-by); `dm/tools/fps_target.py`: 55 of the 59 readers have the pattern it matches, `FPS_TARGET_PTR 0x21e60d8`, `FPS_TARGET_FIELD 0x1dc` in main's fixups), and the host writes the profile's `fps_target` there on every present where it differs (`hle_fpslock.c`, "target frame rate"). The game then asks for interval 1 itself. On an M4 Pro the battle map holds frame time p50 16.7 ms, p95 17.1 ms, about 2 frames of 300 dropped, in a window. Headless with the found field (2026-11-03, M4 Pro, A every 0.8 s from the title into gameplay): the game sets interval 1 → 2, the host writes 30 → 60, the game sets interval 2 → 1 (`main+0x5d1c8`), p50 16.6-16.7 ms through frame 7200.
 - `DM_FPS_TARGET=30` (the settings window's Frame rate) writes 30, menus included, where the game itself chose 60.
 - Not measured: game speed at 60 against 30 over the same route (the player saw battles at 60 with nothing reported fast).
+- **Current: 120 fps on the Mac when chosen** ([120 fps follows the frame step](../../../docs/reference/frame-rate.md#120-fps-follows-the-frame-step)). The present (`main+0x649920`) still asks for interval 1, as 60 / min(60, 120) = 1, and all 60 reads of the target found through the global are floats, so the step takes 0.5. Nothing ties this to a build: the rewriter finds the field in any main, and `fps_max` is not gated. v131072 is the only version tested. The target follows what fits, so frames at 60 step by 1.0 and the game keeps its speed; before that, the same field at a fixed 120 would have run a 70 fps scene at 58%.
+  - Speed: from one save on a battle map, the same timed cursor holds (0.3, 0.5 and 1 s, then back) at 120 and 60 stop at the same place on all eight shots: the best match between each pair is a shift of zero pixels (2026-11-04, M6, headless). The user played at 120 and saw the speed as right. The holds are in whole tiles and the rest was judged by eye, so a difference of a few percent would not show.
+  - Frame rate: on the map, headless, 107-119 fps with 96-100% of frames at 120 per 1,800 frames (frame time p50 8.3 ms, GPU 5.5 ms, about 840 draws). In the window on the prototype, without the fallback, most of the user's session held 106-117 fps at 600-990 draws, and 65-72 fps where the GPU took 12-13 ms; that stretch would now run at 60. Added lag of 12 ms a frame holds a steady 60 with the target at 60. In a window the host picks the 120 Hz display link by itself (open: the frame rate of this build in a window; the one short run had two other games running on the Mac and measured nothing).
+  - Known: `game::telop::ListResultMenuItemBase` (`main+0x17885f8`) adds max(int(step), 1) to a timer each update, 8 times that while an input flag is set, so its In / Out timer runs at double speed at 120. It is a results list's menu item, a matter of looks, and is left as it is (a cut would tie this to the build). Systems that ignore the step altogether would also run fast; none has been seen so far.
 
 ## Driving it on the Mac
 
@@ -64,6 +69,7 @@ Keyboard in a window: J K U I are A B X Y, WASD the left stick, Shift + arrows t
 - [Bindless shaders taken as depth readers](../../../docs/reference/rendering.md#bindless-shaders-taken-as-depth-readers): the battle maps' decals split the G-buffer pass about 31 times a frame.
 - [System applets opened by `Show…` calls](../../../docs/reference/services.md#system-applets-opened-by-show-calls): a null read in `nn::applet::CreateLibraryApplet` at the title about 100 s in, the strap guide overload with a `StrapGuideArg`.
 - [A target frame rate the game steps by](../../../docs/reference/frame-rate.md#a-target-frame-rate-the-game-steps-by): gameplay at 60 fps.
+- [120 fps follows the frame step](../../../docs/reference/frame-rate.md#120-fps-follows-the-frame-step).
 - [AV1 movies through SDK 22's decoder](../../../docs/reference/movies.md#av1-movies-through-sdk-22s-decoder).
 - [The Joy-Con mouse pointer](../../../docs/reference/services.md#the-joy-con-mouse-pointer) and [The display's largest buffer](../../../docs/reference/services.md#the-displays-largest-buffer).
 - [The output device notification under its SDK 21 and 22 name](../../../docs/reference/audio.md#the-output-device-notification-under-its-sdk-21-and-22-name): an abort at start without it.

@@ -502,11 +502,18 @@ def paks(romfs):
     """Every pak under the RomFS"""
     return sorted(os.path.join(dp, f) for dp, _, fs in os.walk(romfs) for f in fs if f.endswith('.pak'))
 
+def inline_in_containers(path):
+    """Whether the containers in a pak's folder hold its cooked packages with their shaders inline: export bundles, the only part shader_split.py ue_legacy_jobs reads and only from this folder, and
+    no shader libraries, which every Unreal Engine 5 container with shared shader code has beside its export bundles (FINAL FANTASY RESONANCE)"""
+    folder = os.path.dirname(os.path.abspath(path))
+    tocs = [t for t in io_tocs(folder) if os.path.dirname(t.path) == folder]
+    return any(t.export_bundles() for t in tocs) and not any(t.of_type(IO_SHADER_LIBRARY) for t in tocs)
+
 def inline_shaders(path):
     """Whether a pak keeps its shaders inline in its cooked packages rather than in shader code archives: every legacy pak (DRAGON QUEST XI S), and a version 11 pak whose directory index
-    names cooked packages (.uexp) and no .ushaderbytecode (OCTOPATH TRAVELER II: bShareMaterialShaderCode off), or the global shader cache and no .ushaderbytecode (Mario & Luigi: Brothership: the same
-    setting with IoStore on, the cooked packages in the container beside the pak). FINAL FANTASY RESONANCE's pak holds configs only (its shaders are in its IoStore
-    container) and Octopath Traveler 0's index is encrypted (reading it takes main's key; it holds the archives): neither counts"""
+    names no .ushaderbytecode and either cooked packages (.uexp; OCTOPATH TRAVELER II: bShareMaterialShaderCode off) or the global shader cache with the cooked packages in the containers beside the pak
+    (inline_in_containers; Mario & Luigi: Brothership and Yoshi and the Mysterious Book: the same setting with IoStore on). FINAL FANTASY RESONANCE's pak names the global shader cache too, but its
+    shaders are in its container's shader libraries, and Octopath Traveler 0's index is encrypted (reading it takes main's key; it holds the archives): neither counts"""
     with open(path, 'rb') as f:
         enc, ioff, isz, _, ver = footer(f)
         if ver in LEGACY: return True
@@ -515,7 +522,7 @@ def inline_shaders(path):
         if r.take('<i'): r.take('<QQ'); r.raw(20)
         if not r.take('<i'): return False
         doff, dsz = r.take('<QQ'); d = read_range(f, doff, dsz, path)
-    return b'.ushaderbytecode\0' not in d and (b'.uexp\0' in d or b'GlobalShaderCache-' in d)
+    return b'.ushaderbytecode\0' not in d and (b'.uexp\0' in d or (b'GlobalShaderCache-' in d and inline_in_containers(path)))
 
 def unreal_paks(romfs, inline=None):
     """The paks under the RomFS that Unreal wrote (its magic in the footer; inline None = any, True = those whose shaders are inline in the cooked packages, False = the others, inline_shaders):

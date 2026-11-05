@@ -625,6 +625,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10, `ListAllUsers`); [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md) (`PushOpenUsers`); [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) (the friends calls); [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (the Nintendo Account request); [Pokémon Sword](../../dm/games/0100ABF008968000/README.md) (SDK 7, `pdm`); [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: the friend requests); [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3: `LoadCachedNintendoAccountInfo`).
 - **Note:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md)'s `account::OpenPreselectedUser` and `account::GetLastOpenedUser` are in [SDK calls that open a system service through sm](#sdk-calls-that-open-a-system-service-through-sm); SDK 6's `OpenPreselectedUser` in [SDK 6's `account::OpenPreselectedUser` returns a Result](#sdk-6s-accountopenpreselecteduser-returns-a-result); SDK 4's `GetBlockedUserList` without a `Uid` in [SDK 4's `friends::GetBlockedUserList` without a `Uid`](#sdk-4s-friendsgetblockeduserlist-without-a-uid); the save thumbnail calls in [Directory, file data cache and save-thumbnail calls](#directory-file-data-cache-and-save-thumbnail-calls).
 
+### Creating an ssl context needs no network
+
+- **Symptom:** the game ends right after `nnMain`, with a crash in its own cleanup on an object it had not created yet (DRAGON QUEST BUILDERS 2: `CRASH sig=11 addr=0x60db0` at `main+0x2676c8`, x0 = 0, the callers `main+0x85210` and `main+0x7fabf8`). No red line.
+- **Cause:** `ssl::Context::Create` failed in the host's offline stubs. A context is a session of the console's own ssl service, so it succeeds on Horizon with no network; only a connection needs one. The game's online library treats the failure as fatal, and its startup (`main+0x84a60`) returns false.
+- **Fix:** `Context::Create` and `Context::Destroy` succeed and connect to nothing (`hle_net.c`). `Connection::Create` and the rest still fail, as they do with no network.
+- **Found on:** [DRAGON QUEST BUILDERS 2](../../dm/games/010042000A986000/README.md) (SDK 5.4.0). 53 of 82 games surveyed import the call.
+
 ### The local user's profile image
 
 - **Symptom:** `Break#1 reason=0 Result=0` right after the first save is created, then exit 42; the stack has `nn::diag::detail::OnAssertionFailure` under `nn::image::JpegDecoder::Decode` (`sdk+0x394e4`), called from the game (Burnout Paradise Remastered, SDK 9.3).
@@ -668,6 +675,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** play report calls met entering the save select (3D World); undefined `nn::ldn::` / `nn::socket::` imports with no hook, found from the import list before they were met (Big Brain Academy).
 - **Fix:** hooked (`hle_net.c`, `hle_offline.c`): the `nifm` IP queries with SDK 10's `socket::InAddr` / `in_addr` mangling; `prepo::AddSessionId` / `AddInternetConnectionStatus`; `ldn::GetNetworkConfig`; SDK 11's socket overloads with plain `sockaddr` / `int` arguments (`Connect`, `Accept`, `GetSockName`, `Get` / `SetSockOpt`, `Fcntl`, `Recv`, `Send`).
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10: `nifm`, `prepo`); [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3: LDN, sockets).
+
+### SDK 21 socket initialization and overloads
+
+- **Symptom:** `[RED] sf: the game connects to service bsd:u itself, which the host does not serve` (and bsd:s, bsd:a) at the game's first socket call, then the game's own abort: Star Fox's `vsocket.nintendo.cpp:148` logs `socket: 4` and stops. With only the connection cut, the game's HTTP thread aborted a few seconds in: its event loop's `poll` returned -1 with errno 14 (EFAULT), and the loop tolerates only EINTR (`main+0xbe2efc4`).
+- **Cause:** SDK 21 inlines `nn::socket::Initialize(const Config &)` into the game and connects to the bsd services from `nn::socket::internal::Initialize(int)`, past the host's cut. nnmusl's `poll` then has no socket state and fails. Its socket functions also come in overloads with plain `sockaddr`, `ShutdownMethod`, `Read` / `Write`, a `GetHostEntByName(const char *)` without options and `SetAllocator(MemoryResource *)`, and `nifm::GetCurrentIpConfig` takes IPv4 and IPv6 configurations with their counts.
+- **Fix:** `internal::Initialize` is cut as the plain `Initialize` is, the C library's `poll` goes to the host's `Poll`, the overloads fail as the others do (`hle_net.c`), and `GetCurrentIpConfig` reports no configuration (`hle_offline.c`). `Poll` no longer fails on a descriptor the host never made, which only a garbage value can be: it reports nothing ready at the timeout, as a console's does for a socket with nothing to say. The game logs `socket: No error information` and goes on offline.
+- **Open:** the host refuses `nn::socket::EventFd`, so the HTTP thread polls without a wake-up, and with a garbage descriptor beside it. Harmless offline.
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md).
 
 ### Bluetooth LE at boot
 
@@ -986,12 +1001,26 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `nn::chat::Initialize` (ready, no chat), `IsChatting` (no) and `SetScreenSharingMode` (nobody to share with) are hooked (`hle_misc.c`). Another GameChat call a game imports needs a hook of its own: each of the SDK's calls checks a count only its own `Initialize` raises, and aborts otherwise. Also hooked: `AttachToRoomInfoChangedEvent` (bound, never signaled), and the camera video storage, local and remote. SDK 22.2.0 (`sdk+0x6b43c0`) checks 32 to 1920 by 32 to 1080 pixels, 1 to 4 images and a page-aligned buffer, and zeroes the 0xe0-byte storage type. With no camera each image is a blank native image of that size, zeroed memory with room for 16 bytes a pixel (`hle_codec_video.c` `dm_native_image_blank`), so the game's NVN textures on them (`nvnTextureInitializeFromNativeImage`) are made as on a decoded picture ([AV1 movies through SDK 22's decoder](movies.md#av1-movies-through-sdk-22s-decoder)). The storage type keeps their handles, and the game's buffer is one page that stays unused.
 - **Found on:** [Hyrule Warriors: Age of Imprisonment](../../dm/games/04003F40232DE000/README.md). The room event and the camera storage: [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0 (three local images of 384x216 at boot), from pull request #1116 (that build is not run here).
 
+### GameChat queries from the title screen (SDK 21)
+
+- **Symptom:** `CRASH sig=11 addr=0 pc=sdk+0x6be4d4` in `nn::chat::GetChattingUid()`, from the game's title screen code.
+- **Cause:** SDK 21 games ask the chat library who is chatting, for the room, the sharing key, the virtual camera, the members' audio levels and the camera streams; the SDK's versions read the service object `Initialize` would have made.
+- **Fix:** hooked as "no chat" (`hle_misc.c`): a zero Uid, `GetRoomInfo` fails (with `RES_FAIL`, the chat library's real result not being known), the sharing and virtual camera calls succeed and keep nothing, the camera streaming calls succeed and stream nothing, the next-image requests fail, no audio levels.
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md): 33 `nn::chat` imports.
+
 ### The camera through the graphics system
 
 - **Symptom:** `nn::diag abort` in `gs::sdk::CheckGraphicsSystemInitialized`, or a failed `camera::sdk::CreateCameraContext` (0x3af3), at boot.
 - **Cause:** the Switch 2's camera (a USB camera, for GameChat) is a session the SDK asks the graphics system's user session (`gsv`) for. The host never opens that session, and the SDK's check that its graphics system is booted reads a flag only the SDK's own graphics boot sets.
 - **Fix:** `CheckGraphicsSystemInitialized` passes (`hle_nv.c`): the host's graphics layer is up from the start. `CreateCameraContext` gives a host session (`hle_sf.c`), a 32-bit handle (SDK 22.2.0 `sdk+0x2c42c0` writes it), that answers as a console with no camera. Every command fails with 0xdc4, except command 21, the camera's event, which copies the read end of a kernel event that never fires (`hle_thread.c` `hle_new_event`) in the response's special header. The game is said to take 0xdc4 from command 3, opening the camera, as "no camera"; any other error aborts.
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0, from pull request #1116, not checked here (that build is not on this Mac): the meaning of 0xdc4 and the commands are inferred there from the game's code. `t_sf` checks the session's answers.
+
+### The camera commands of SDK 21's own camera module
+
+- **Symptom:** with the camera session answering 0xdc4 to every command, Star Fox logs `This platform does not support the camera function.` (its `vwebcam.switch2.cpp:997`) and dereferences a null on the way out (`main+0xba54e4c`); with 0x7c4 to every command its module aborts in `Initialize` (subsdk3+0x1ef4) or `Finalize` (subsdk3+0x200c).
+- **Cause:** the game ships its own camera module (`subsdk3`, `nn::camera`) and sorts the results itself. `Initialize` sends command 3 with the device name `Default` and takes success or 0xdc4, the latter passed to the game as "no camera support", a path a console with a camera port never takes; `QueryDeviceConnection` (command 29, a DeviceRequest) reads 0x7c4 as `No camera device detected.`; `Finalize` sends command 4 and aborts on any failure; the connection event is command 21.
+- **Fix:** `camera_answer` (`hle_sf.c`) answers commands 3 and 4 with success, 21 with an event that never fires, and the others, 29 among them, with 0x7c4, so the game sees a console whose camera port has nothing plugged in. `nn::applet::BeginUsingCameraResource` / `EndUsingCameraResource` (the module takes the applet's camera resource) and `nn::camera::sdk::DestroyCameraContext` succeed too; the SDK's versions read service objects the host never made. The client also ends the session with an HIPC Close (message type 2), answered with the closed-session result 0xf601 (`hle_sf.c`); before that it logged `[RED] sf: camera: HIPC message type 2 not served`. Mario Kart World 1.8.0, whose reading of 0xdc4 the old answer followed, is not re-tested here.
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md).
 
 ### Whether the language selection is limited
 

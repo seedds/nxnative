@@ -170,6 +170,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `tbuf_as_2d` (`nvn_mtl.m`) views a 32-bit integer buffer in a slot declared float as the float format of the same size (`tbuf_view_format`), so the shader reads the stored bits.
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md). No visible change in its tutorial area.
 
+### Integer textures read through float slots
+
+- **Symptom:** none visible on an M6, where at most 0.23 % of pixels differ between paired runs. GitHub issue #783 reports wrong light offsets on an M2.
+- **Cause:** as for [buffer textures](#integer-buffer-textures-read-through-float-slots), but for a 2D texture: with no type answer the translator declares it float, and the shader takes the fetched bits back with `as_type<int>`. The answer table cannot say otherwise, because the format is known only at bind time.
+- **Fix:** `tex_float_fit` (`nvn_mtl.m`) binds the float view of the same size (`tbuf_view_format`) in a slot declared float. A texture made without the format-view usage is upgraded before the next draw pass (`img_fit_upgrade`). 32-bit formats only: a smaller integer format has no float view that keeps its bits.
+- **Found on:** [Metroid Prime Remastered](../../dm/games/010012101468C000/README.md): the clustered lighting's R32Uint light grid (`fde1a3e769219a77` and the other world materials). Reported and fixed by nobz226.
+- **Check:** `t_int_float_view` reads small integers (denormal floats), NaN patterns and negatives through the R32Float view in a compute shader and takes back every bit.
+
 ### Buffer textures at offsets below 16 bytes
 
 - **Symptom:** particle effects drawn at the wrong scale or place, or flickering, where the particle data is a buffer texture at a pool offset that is not a multiple of 16; log line `buffer texture at pool offset …, below Metal's 16-byte alignment`.
@@ -209,6 +217,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `nvn_tex.c` `sparse_tile_h` gives such a texture its tile's block height; a packaged layout still wins.
 - **Found on:** [OCTOPATH TRAVELER](../../dm/games/010057D006492000/README.md) (Unreal Engine 4.18 flags its streamed and CPU-loaded textures sparse).
 - **Check:** the map's guest bytes deswizzled in Python at 1 to 32 GOBs read right only at 8; a 512×512 RGBA8 sprite sheet only at 16; [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md)'s packaged ASTC 6×6 textures (16 bytes per block) carry 8 in their layout. The 1- and 2-byte heights follow the same tile shapes and were not seen.
+
+### Sparse 3D textures take the standard 3D tile
+
+- **Symptom:** none visible on an M6 on the Frigate Orpheon's deck. Laid out 1 GOB high, the mapped tiles of a streamed 3D texture fall in scattered places, so lookups read zero in the holes; GitHub issue #783 reports a black gunship hull in the opening on an M2.
+- **Cause:** a sparse 3D texture without a packaged layout took the automatic layout (1 GOB high, 32 GOBs deep). Its 64 KB tile is the standard 3D shape: 64x32x32, 32x32x32, 32x32x16, 32x16x16 and 16x16x16 blocks for 1, 2, 4, 8 and 16 bytes per block.
+- **Fix:** `nvn_tex.c` `sparse_tile_h3`, `sparse_tile_d3` give such a texture its tile's block height and depth when level 0 is at least one tile in each direction; a packaged layout still wins, and a smaller texture keeps the automatic layout. `nvnTextureBuilderGetSparseTileLayout` answers the same shape.
+- **Found on:** [Metroid Prime Remastered](../../dm/games/010012101468C000/README.md): its six 512x256x368 lighting volumes map the same tile indices whichever shape the host reports (256x32x16 or 128x64x16 texels for BC1), so the game's layout is fixed. With this shape BC1's tiles 5-7 and 9-11 of a 16-slice slab and BC6H's 10-15 and 18-23 are the same texels, 128..512 x 64..192. With 1-GOB blocks they were two different patchworks. Reported and fixed by nobz226.
+- **Check:** `t_sparse_layout` fills those tiles of both formats and decodes exactly that box, in exactly that slab, plus the tile shapes of 1, 2, 4 and 8 bytes per block. Only 8 and 16 bytes per block were seen in a game; the others follow the same table. Metal cannot confirm the shape: `sparseTileSizeWithTextureType:` gives a 3D texture the 2D tile with depth 1.
 
 ### Sparse textures of 8- and 16-byte blocks: blocks at most 8 GOBs high
 
@@ -969,6 +985,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Encoding thread:** with `DM_NVN_ENC_THREAD` (the iOS default) the replay's command buffer is the recording's stand-in, which has none of MetalFX's calls: the host stopped at the first evaluation (`deferred encoding: DmRecCB has no stand-in for -useResidencySet:`). The scaler's state and its encode are a block run on the encoding thread with the real command buffer (`rec_cb_block` in `nvn_rec.h`), as for [a game's own upscaler](#a-games-own-upscaler-drawn-by-metalfx). Check: `make -C dm/gfx/tests GAME=040074A01BF12000 check_t_dlss_mfx` (two evaluations through one scaler in a submission, the thread off and on). Not run on a game with the thread.
 - **Open:** the jitter's sign has not been checked and the bias mask is only logged; no ghosting has been seen.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): `gfxa::TaskDLSS`, 1024x576 to 2048x1152.
+
+### The DLSS network resized
+
+- **Symptom:** `[RED] NVN unimplemented function called: nvnDlssNetworkResize (x0=… x1=0x300 x2=0x1b0)` at the title.
+- **Cause:** NVN2 lets a game resize a DLSS network instead of making a new one. The replay takes each evaluation's sizes from its parameters and textures, so the network keeps nothing of it.
+- **Fix:** `nvnDlssNetworkResize` succeeds, logging the first size (`hle_nvn.c`).
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md): 768x432, once; its evaluations run 768x432 to 768x432.
 
 ### A game's own upscaler drawn by MetalFX
 

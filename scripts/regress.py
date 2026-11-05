@@ -30,7 +30,7 @@
 # 1. Chain (static): the game's shaders translated by each revision's chain (dmsh_build.py through own_compilers.py; a Vulkan game: vk_shaders.py), compared shader by shader: built or failed
 #    (newly failing by the rule of dm/gfx/tools/shader_regressions.py, which the NSP script applies to one game's previous build; a new shader that fails is listed apart),
 #    the SHA-256 of the MSL (<key>_b.metal), of the reflection (<key>_b.json without its chain fields) and of the variant libraries (_bf, _bv, _bp, _bg*). A build is kept per chain version,
-#    shader package, profile inputs and compilers (<NSP folder>/<id>-work/regress/chain/<key>/), so a revision whose chain did not change costs nothing, and dmsh_build.py uses the build's own shader cache (DMSH_CAS), so MSL
+#    shader package, profile inputs and compilers (<NSP folder>/<id>-work/regress/chain/<key>/; only the few used last stay, prune_chains), so a revision whose chain did not change costs nothing, and dmsh_build.py uses the build's own shader cache (DMSH_CAS), so MSL
 #    that did not change is not compiled again. Then the vertex / pixel interface of every pipeline base pso_offline.py would put into the pipeline archive (shader_pairs.tsv and
 #    pso_pairs.tsv): a pixel shader input [[user(locnN)]] the vertex shader does not write, or writes with another type, makes metal-tt refuse the whole archive (GitHub issue #283).
 # 2. Smoke (runtime): the game in the Mac host (window, no audio), from a copy of the route's save, with the route's buttons, under a watchdog: the frame it must reach, crash (exit status,
@@ -67,8 +67,8 @@
 #          "prepare_s", "prebuild": {"secs", "pairs", "built", "archived", "failed", "done", "hang"}, "fps", "frame_p50", "frame_p99", "frame_max", "dropped", "over_budget",
 #          "peak_footprint_mb", "red": {normalized text: count}, "shots": {<s>: {"dhash"}}, "secs", "modules", "host",
 #          "pipeline": {"depth_profile": "gl"|"zero", "depth_runtime": ["gl"|"zero"], "stamp_mismatch": bool} (NVN only; no depth observation = [])}
-#   status per game, worst first: ERROR (the harness could not check it), NEW-FAIL (something that worked in the baseline fails: a shader, the interface check, a crash, a hang, the frame
-#   not reached), REGRESSION (new [RED] lines, a screenshot beyond the tolerance, frame time, memory or prepare time worse beyond it), CHANGED (MSL or numbers differ, nothing worse),
+#   status per game, worst first: ERROR (the harness could not check it), NEW-FAIL (something that worked in the baseline fails: a shader, a shader that builds but lost more than in the
+#   baseline (a deleted bindless access, extra entry points: shader_regressions.losses), the interface check, a crash, a hang, the frame not reached), REGRESSION (new [RED] lines, a screenshot beyond the tolerance, frame time, memory or prepare time worse beyond it), CHANGED (MSL or numbers differ, nothing worse),
 #   PASS. "known" lists failures the baseline has too (they do not fail the check).
 # Exit status: 0 = no regression, 1 = a regression (NEW-FAIL or REGRESSION) in some game, 2 = a harness error (and no regression found).
 import argparse, collections, concurrent.futures as cf, ctypes, datetime, fcntl, hashlib, importlib.util, json, os, re, shutil, signal, struct, subprocess, sys, time, traceback
@@ -87,6 +87,7 @@ def load_module(name, path):   # a module from a file (another script, or a tool
 bench = load_module('bench', REPO / 'scripts/bench.py')
 shader_regressions = load_module('shader_regressions', REPO / 'dm/gfx/tools/shader_regressions.py')
 usage = load_module('usage', REPO / 'dm/tools/usage.py')   # usage manifests and change impact (regress.py usage / impact)
+tree_tar = load_module('tree_tar', REPO / 'dm/tools/tree_tar.py')   # the player's build keeps the compile cache this shares as one file
 # Where they are depends on the machine (a drive with room for the trees and the games' NSP folders): set with --root / --games-dir or REGRESS_ROOT / REGRESS_GAMES, checked in main
 ROOT = Path(os.environ.get('REGRESS_ROOT', ''))
 GAMES = Path(os.environ.get('REGRESS_GAMES', ''))
@@ -272,6 +273,10 @@ class Game:
 
     def profile_dir(self, tree):
         src = (self.build / 'profile' if self.derived else tree.path / 'dm/games') / self.id
+        if not self.derived and not (src / 'game.tsv').is_file() and (REPO / 'dm/games' / self.id / 'game.tsv').is_file():
+            # a game the revision does not know (its profile is new in the candidate: a bring-up PR): the baseline's chain translates its shaders with the candidate's profile,
+            # the same inputs, so the comparison is of the chains alone
+            src = REPO / 'dm/games' / self.id
         key = digest(sorted(p for p in src.glob('*') if p.is_file() and p.name != VALIDATED))[:16]   # validated.tsv records a result about the profile, it is not an input of it
         dst = game_root(self) / 'profiles' / key / self.id
         if not (dst / 'game.tsv').is_file(): shutil.copytree(src, dst, ignore=shutil.ignore_patterns(VALIDATED))
@@ -357,6 +362,10 @@ def chain_key(tree, g, tools):
     return v, inp, f'{g.kind}-{v}-{inp}-{hashlib.sha256((tools + side + sources).encode()).hexdigest()[:16]}'
 
 
+CHAIN_KEEP, CHAIN_KEEP_HOURS = 3, 24   # prune_chains
+WORK_FOLDERS = set()   # the work folders of the games this run built chains for: main packs their quiet folders (tree_tar.pack_quiet) at its end
+
+
 def chain_build(tree, g, a):
     """The game's shaders built into its NSP work folder's regress/chain/<key>/ (reused when its manifest is there): → manifest"""
     v, inp, key = chain_key(tree, g, a.tools_fp)
@@ -366,7 +375,41 @@ def chain_build(tree, g, a):
         try: fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             say(f'  {g.id}: another process is building chain {key}: waiting for it'); fcntl.flock(lk, fcntl.LOCK_EX)
-        return chain_build_locked(tree, g, a, v, inp, key, out)
+        built = chain_build_locked(tree, g, a, v, inp, key, out)
+    WORK_FOLDERS.add(game_root(g).parent)
+    prune_chains(g)
+    return built
+
+
+def prune_chains(g):
+    """Remove the game's chain builds beyond the CHAIN_KEEP used last, which a later check that needs one builds again (its compile cache saves most of that): Tears of the Kingdom held 45, Breath of the Wild 57,
+    each a library for each of 28,669 shaders. Kept too: any used in the last CHAIN_KEEP_HOURS (another session's game may be running from it, holding no lock) and those of the newest
+    CHAIN_KEEP stored baselines. A build's <key>.lock is rewritten at each use, so its time is the last use. A build being made holds its lock and stays. Only names of the form chain_key gives go"""
+    root = game_root(g) / 'chain'
+    def used(p):
+        lock = p.with_name(p.name + '.lock')
+        return max(p.stat().st_mtime, lock.stat().st_mtime if lock.exists() else 0)
+    try: builds = sorted((p for p in root.iterdir() if p.is_dir() and re.fullmatch(r'(nvn|vk|gl)-[0-9a-f]+-.+', p.name)), key=used, reverse=True)
+    except OSError: return []
+    keep = {p.name for p in builds[:CHAIN_KEEP]} | {p.name for p in builds if time.time() - used(p) < CHAIN_KEEP_HOURS * 3600}
+    try: stored = sorted((game_root(g) / 'baselines').glob('*/chain.json'), key=lambda p: p.stat().st_mtime, reverse=True)[:CHAIN_KEEP]
+    except OSError: stored = []
+    for f in stored:
+        try: keep.add(json.loads(f.read_text())['key'])
+        except (OSError, ValueError, KeyError): pass
+    old, gone = [p for p in builds if p.name not in keep], []
+    if old: say(f'  {g.id}: removing {len(old)} old chain builds (kept: the {CHAIN_KEEP} used last)')
+    for p in old:
+        lock = p.with_name(p.name + '.lock')
+        try:
+            with open(lock, 'a') as lk:
+                try: fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError: continue
+                shutil.rmtree(p)
+                lock.unlink(missing_ok=True)
+            gone.append(p.name)
+        except OSError as e: say(f'  [RED] {g.id}: could not remove the old chain build {p}: {e}')
+    return gone
 
 
 def chain_build_locked(tree, g, a, v, inp, key, out):
@@ -389,17 +432,19 @@ def chain_build_locked(tree, g, a, v, inp, key, out):
     if g.kind == 'nvn':
         tools_dir = tree.path / 'dm/gfx/tools'
         cas = g.build / 'shader/cache/cas'
-        env.update(XLATE=str(tools_dir / 'dmsh_xlate_bin/dmsh_xlate'), DMSH_CAS=str(cas if cas.is_dir() else game_root(g) / 'cas'))
+        env.update(XLATE=str(tools_dir / 'dmsh_xlate_bin/dmsh_xlate'), DMSH_CAS=str(cas if tree_tar.exists(cas) else game_root(g) / 'cas'))
         entry = tools_dir / ('own_compilers.py' if (tools_dir / 'own_compilers.py').is_file() else 'dmsh_build.py')
         lib = out / f'b-{v}'
         if not done:
             say(f'  {g.id}: chain {v} (inputs {inp}) of {tree.id}: translating the shaders ({jobs} workers) → {out}')
+            if tree_tar.exists(cas): tree_tar.unpack(cas, say)
             rc, paused = run_heavy([sys.executable, entry, g.build / 'shader/pkg', out], log, tree.path, env, a, f'{g.id} shader build'); t0 += paused
             if rc or not (lib / '_b_build.json').is_file():
                 raise HarnessError(f'{g.id}: dmsh_build.py of {tree.id} failed (exit {rc}); last lines of {log}:\n' + ''.join(collections.deque(open(log, errors='replace'), maxlen=8)))
             prof = out / 'profile'; prof.mkdir(exist_ok=True)   # the tables the host reads beside the shader map, as this build made them
             for src in g.profile_dir(tree).glob('*.tsv'): shutil.copyfile(src, prof / src.name)
             (out / 'built.ok').write_text(f'{tree.id}\n')
+            tree_tar.pack(cas, say)
         say(f'  {g.id}: hashing the outputs of chain {v}')
         shaders = nvn_manifest(lib, jobs)
     else:
@@ -423,7 +468,7 @@ def chain_build_locked(tree, g, a, v, inp, key, out):
     return m, out
 
 
-NVN_HASHES = 2   # how nvn_manifest hashes; a reused manifest of another number is hashed again from its outputs (2: variant reflections without the chain stamps)
+NVN_HASHES = 3   # how nvn_manifest hashes; a reused manifest of another number is hashed again from its outputs (2: variant reflections without the chain stamps; 3: each shader's losses)
 
 
 def refl_canon(p):
@@ -439,6 +484,13 @@ def refl_hash(p):
     return j and hashlib.sha256(j).hexdigest()[:16]
 
 
+def refl_losses(p):
+    """{deleted: {type: the accesses the translator deleted}, lost: {name: 1 for each entry point the library built without}}, each only when there are some (shader_regressions.losses)"""
+    try: deleted, lost = shader_regressions.losses(json.loads(Path(p).read_bytes()))
+    except (OSError, ValueError): return {}
+    return {**({'deleted': dict(deleted)} if deleted else {}), **({'lost': dict(lost)} if lost else {})}
+
+
 def nvn_manifest(lib, jobs):
     """{key: {st, err, msl, refl, var}} from dmsh_build.py's report and outputs"""
     files = collections.defaultdict(list)
@@ -450,7 +502,7 @@ def nvn_manifest(lib, jobs):
         k = r['key']; names = sorted(files.get(k, ()))
         e = {'st': r['st'], **({'err': r['err'][:160]} if r['st'] != 'ok' else {})}
         if (lib / f'{k}_b.metal').is_file(): e['msl'] = sha256_file(lib / f'{k}_b.metal').hexdigest()[:16]
-        if (lib / f'{k}_b.json').is_file(): e['refl'] = refl_hash(lib / f'{k}_b.json')
+        if (lib / f'{k}_b.json').is_file(): e.update(refl=refl_hash(lib / f'{k}_b.json'), **refl_losses(lib / f'{k}_b.json'))
         var = [n for n in names if n not in (f'{k}_b.metal', f'{k}_b.json', f'{k}_b.metallib')]
         if var:
             h = hashlib.sha256()
@@ -559,7 +611,31 @@ def chain_diff(b, c):
         cb = (ci or {}).get('bad', [])
         out['interface'] = {'baseline': len((bi or {}).get('bad', [])), 'candidate': len(cb), 'checked': (ci or {}).get('checked'),
                             'new': [x for x in cb if sig(x) not in old], 'known': [x for x in cb if sig(x) in old][:50]}
+    out['losses'] = loss_diff(bs, cs)
     return out
+
+
+LOSS_TEXT = {'deleted': 'bindless accesses the translator deleted', 'lost': 'extra entry points the library built without'}
+
+
+def loss_diff(bs, cs):
+    """The shaders that lost more than in the baseline, shader by shader, not by totals: a fix in one shader must not hide a new loss in another. A shader new in the candidate starts from none."""
+    def total(m, kind): return sum(sum(e.get(kind, {}).values()) for e in m.values())
+    out = {}
+    for kind in LOSS_TEXT:
+        rose = [k for k, e in sorted(cs.items()) if any(n > bs.get(k, {}).get(kind, {}).get(t, 0) for t, n in e.get(kind, {}).items())]
+        out[kind] = {'baseline': total(bs, kind), 'candidate': total(cs, kind), 'rose': len(rose), 'held': sum(1 for e in cs.values() if e.get(kind)) - len(rose),
+                     'keys': [{'key': k, 'baseline': bs.get(k, {}).get(kind, {}), 'candidate': cs[k][kind]} for k in rose[:200]]}
+    return out
+
+
+def loss_levels(loss, levels, known):
+    """A rise is NEW-FAIL; the losses the baseline has too are known (the game notes list them), and fewer of them is CHANGED"""
+    for kind, text in LOSS_TEXT.items():
+        x = loss[kind]
+        if x['rose']: levels['NEW-FAIL'].append(f"{x['rose']} shaders with more {text} than in the baseline")
+        if x['held']: known.append(f"{x['held']} shaders with {text}")
+        if x['candidate'] < x['baseline']: levels['CHANGED'].append(f"{text}: {x['baseline']} → {x['candidate']}")
 
 
 def build_summary(m):
@@ -1215,6 +1291,7 @@ def cmd_check(a, smoke=True):
             if cd['newly_passing']: levels['CHANGED'].append(f"{len(cd['newly_passing'])} shaders newly build")
             if cd['changed']['shaders']: levels['CHANGED'].append(f"{cd['changed']['shaders']} shaders changed (MSL {cd['changed']['msl']}, reflection {cd['changed']['reflection']}, variants {cd['changed']['variants']})")
             if cd['added'] or cd['removed']: levels['CHANGED'].append(f"shaders added {cd['added']}, removed {cd['removed']}")
+            loss_levels(cd['losses'], levels, gr['known'])
             itf = cd.get('interface')
             if itf and itf['new']: levels['NEW-FAIL'].append(f"{len(itf['new'])} new pipeline bases with a pixel input the vertex shader does not write (metal-tt refuses the archive)")
             if itf and itf['known']: gr['known'].append(f"{itf['candidate'] - len(itf['new'])} pipeline bases with a pixel input the vertex shader does not write (as in the baseline: GitHub issue #283)")
@@ -1544,6 +1621,8 @@ def report_md(rep):
         ch = g.get('chain', {})
         for x in ch.get('newly_failing', [])[:30]: L.append(f"  - newly failing `{x['key']}` {x['status']}: {x['error'][:120]}")
         for x in ch.get('added_failing', [])[:30]: L.append(f"  - new shader failing `{x['key']}` {x['status']}: {x['error'][:120]}")
+        for kind, text in LOSS_TEXT.items():
+            for x in (ch.get('losses') or {}).get(kind, {}).get('keys', [])[:30]: L.append(f"  - more {text} `{x['key']}`: {x['baseline'] or 'none'} → {x['candidate']}")
         if ch.get('changed', {}).get('keys'): L.append('  - changed shaders: ' + ', '.join(f'`{k}`' for k in ch['changed']['keys'][:40]) + (' …' if ch['changed']['shaders'] > 40 else ''))
         itf = ch.get('interface') or {}
         for x in (itf.get('new', []) + itf.get('known', []))[:20]:
@@ -1640,7 +1719,9 @@ def main():
         a.jobs = a.jobs or os.cpu_count() or 8
         a.tools_fp = toolchain_fp()
         free = check_disk(a.min_free_gb, clean=True); say(f'internal disk: {free:.1f} GB free; root {ROOT}; {a.jobs} workers')
-        return {'baseline': cmd_baseline, 'check': cmd_check, 'usage': cmd_usage, 'chain': lambda a: cmd_check(a, smoke=False), 'capture': cmd_capture, 'replay': cmd_replay}[a.cmd](a)
+        rc = {'baseline': cmd_baseline, 'check': cmd_check, 'usage': cmd_usage, 'chain': lambda a: cmd_check(a, smoke=False), 'capture': cmd_capture, 'replay': cmd_replay}[a.cmd](a)
+        for w in sorted(WORK_FOLDERS): tree_tar.pack_quiet(w, say)   # at the end: nothing is measuring here any more
+        return rc
     except HarnessError as e:
         print(f'[RED] regress.py: {e}', file=sys.stderr); return 2
 

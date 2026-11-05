@@ -29,6 +29,8 @@ No rendering key: what the game needed beyond the profile is general ([Found on 
 ## Current
 
 - `vertex attribute format 0x27 (8 / 16-bit integer) feeds a float input` (RGBA8UI): converted on the CPU at replay, as for [Need for Speed: Hot Pursuit Remastered](../010029B0118E8000/README.md); no visible effect.
+- **Open: the orange floor strips on the Frigate's deck are missing on an M6** ([GitHub issue #783](https://github.com/seedds/nxnative/issues/783); reported as orange noise on an M2 and in Ryujinx on a Mac). They are alpha-tested in the depth pre-pass (`4b87459ed2e526f3`, `bc7e3ae479c4bffa`: discard where mask² × instance alpha < 0.25) and coloured with depth `EQUAL` (`5bb21ce49ca5ba6b`, `df351b403930b318`). Every pixel is discarded, so the buffer keeps the floor's depth, the strip's colour draw is nearer than the buffer by more than 16 ulps, and `EQUAL` fails. Depth is not the cause: with the discard removed, plain `EQUAL` draws the whole strip, and lowering the threshold to 0.20 draws nothing. Unknown: whether the mask (ASTC 5×5) or the instance alpha (attribute 2's `w`) reads wrong, or the game means to hide them; not compared with the Switch. Loosening `EQUAL` to `LEQUAL` draws them, but only by bypassing the alpha test.
+- **Open: Samus fully black in a Tallon IV room** (the same issue, on an iPad, with a build from before the lean geometry path kept the layer). She is lit on the Frigate's deck on main; there is no save past the Frigate to test Tallon IV.
 - A translucent cyan panel with a grid stands between two red lights where Samus lands, and fills the left of the view as she walks past it: drawn in the 3D scene, apparently one of the Frigate's holograms; not compared with the Switch.
 
 ## Mac routes
@@ -44,6 +46,8 @@ General host and tool changes first needed here; each applies to every game:
 - **Little-endian RFRM forms, `TOCC` resource lists and GLSLC's extra control data** (`rfrm_order`, `rfrm_shaders`, `snvn_records`): [shaders.md](../../../docs/reference/shaders.md#snvn-program-records-in-retro-studios-rfrm-forms).
 - **The sample index (`PIXLD.MYINDEX`) and the pixel stage's sample position rows of `c0`** (translator, `SAMPLE_ROWS`, `c0_sample_rows`, `nvnProgramSetSampleShading`): [shaders.md](../../../docs/reference/shaders.md#pixel-c0--0x620-the-sample-index-and-glslcs-sample-position-table).
 - **Image stores of vertex shaders drawn with rasterizer discard** (`vs_writes`): [rendering.md](../../../docs/reference/rendering.md#rasterizer-discard-preserves-vertex-storage-writes).
+- **Sparse 3D textures take the standard 3D tile** (`sparse_tile_h3`, `sparse_tile_d3`): [rendering.md](../../../docs/reference/rendering.md#sparse-3d-textures-take-the-standard-3d-tile).
+- **Integer textures read through float slots** (`tex_float_fit`): [rendering.md](../../../docs/reference/rendering.md#integer-textures-read-through-float-slots).
 
 ## Open
 

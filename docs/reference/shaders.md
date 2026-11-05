@@ -425,9 +425,10 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ### Unreal Engine 5.6 IoStore shader libraries
 
+- **Symptom:** `[RED] the shader split found no shaders in main or the RomFS`, the split's log ending in `shaders: 0`, and no `UE shader decode` step, on a game whose container holds shader libraries and whose pak names `GlobalShaderCache-`: from 2026-11-04 until [issue #1277](https://github.com/seedds/nxnative/issues/1277) was fixed, such a pak counted as inline.
 - **How it is stored:** the desktop renderer (`SF_GLSL_SWITCH`) with the same `LSLG` records, but no archive in the pak: the two libraries are IoStore shader libraries in `FFRS-Switch.ucas`, whose shader groups are Oodle-compressed as a whole ([01](../agents/01-extract.md)). Each shader entry packs its frequency (bits 0–3), group (4–33) and offset in the group's decoded bytes (from bit 34), and a shader runs to the next one's offset.
-- **Reader:** `uepak.py` writes them out as version 2 archives, so the split reads them as any other.
-- **Found on:** [FINAL FANTASY RESONANCE](../../dm/games/0100606026F12000/README.md) (Unreal Engine 5.6.1): 73,496 unique shaders (9,253 vertex, 61,305 pixel, 2,934 compute, 4 geometry).
+- **Reader:** `uepak.py` writes them out as version 2 archives, so the split reads them as any other. The pak beside them can name the global shader cache as [an inline game's does](#unreal-engine-427-shaders-inline-in-iostore-export-bundles), so that name alone does not tell the two apart: `inline_in_containers` does, by the shader libraries.
+- **Found on:** [FINAL FANTASY RESONANCE](../../dm/games/0100606026F12000/README.md) (Unreal Engine 5.6.1): 73,496 unique shaders (9,253 vertex, 61,305 pixel, 2,934 compute, 4 geometry). The symptom on its [Asian release](../../dm/games/0100B8A026F14000/README.md#found-on-this-game).
 
 ### IoStore patch containers keep their shader groups in the base container
 
@@ -460,7 +461,7 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 - **Symptom:** `the RomFS has Unreal paks, but none … holds a shader code archive` from the NSP script, on a game with a `.pak` beside a `.utoc` and `.ucas`.
 - **How it is stored:** the same inline records as [the paks' `.uexp` files](#unreal-engine-427-shaders-inline-in-cooked-packages-lz4), `bShareMaterialShaderCode` being off, with IoStore on as well: the cooked packages are the container's export bundles (chunk type 2 in Unreal 4.27's numbering, TOC version 3), Oodle-compressed block by block, and the pak beside it keeps everything else, the global shader cache (`Engine/GlobalShaderCache-SF_GLSL_SWITCH.bin`) too. The pak's directory has neither `.ushaderbytecode` nor `.uexp`, so it was taken for one with archives.
-- **Reader:** `uepak.py` `inline_shaders` also takes the global shader cache with no `.ushaderbytecode` as inline, and `shader_split.py` `ue_legacy_jobs` then also reads the export bundles of the containers beside such a pak, the newest copy of each chunk ID (`mount_order`), through the game's own Oodle in the host's tool mode. Bulk data chunks are skipped. `Toc.names` reads the container's directory index, so a shader's label names its package, as for a pak, and `shader_groups` works the same way.
+- **Reader:** `uepak.py` `inline_shaders` also takes the global shader cache with no `.ushaderbytecode` as inline when the containers in the pak's folder hold export bundles and no [shader libraries](#unreal-engine-56-iostore-shader-libraries) (`inline_in_containers`; with neither a `.uexp` nor such a container the NSP script stops rather than read the global shaders alone), and `shader_split.py` `ue_legacy_jobs` then also reads the export bundles of the containers beside such a pak, the newest copy of each chunk ID (`mount_order`), through the game's own Oodle in the host's tool mode. Bulk data chunks are skipped. `Toc.names` reads the container's directory index, so a shader's label names its package, as for a pak, and `shader_groups` works the same way.
 - **Found on:** [Mario & Luigi: Brothership](../../dm/games/01006D0017F7A000/README.md): 45,824 unique shaders from 8.8 GB of export bundles in 39 s.
 
 ### Unreal Engine 5.4 shaders for the Switch 2

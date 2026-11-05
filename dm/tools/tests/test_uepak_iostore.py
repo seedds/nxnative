@@ -231,7 +231,37 @@ class IoStore(unittest.TestCase):
         return str(self.romfs / 'Game.pak')
 
     def test_inline_shaders_with_the_cooked_packages_in_a_container(self):
+        container(self.romfs, 'Game.utoc', [(chunk_id(1, uepak.IO_EXPORT_BUNDLE_427), b'b'), (chunk_id(2, 3), b'bulk')], version=3)   # Mario & Luigi: Brothership
         self.assertTrue(uepak.inline_shaders(self.inline_pak()))
+        container(self.romfs, 'Game.utoc', [(chunk_id(1, uepak.IO_EXPORT_BUNDLE), b'b'), (chunk_id(2, 2), b'bulk')], version=6)   # Yoshi and the Mysterious Book
+        self.assertTrue(uepak.inline_shaders(self.inline_pak()))
+
+    def resonance(self, *patch_chunks):
+        """FINAL FANTASY RESONANCE's layout: the pak names the global shader cache, the container has export bundles and the shader libraries, global.utoc only script objects"""
+        bundle = (chunk_id(1, uepak.IO_EXPORT_BUNDLE), b'b')
+        container(self.romfs, 'Game.utoc', [bundle] if patch_chunks else [bundle, (LIB, b'l'), (GROUP, b'g')], version=8)
+        container(self.romfs, 'global.utoc', [(chunk_id(4, 5), b's')], version=8)
+        if patch_chunks: container(self.romfs, 'Game_0_P.utoc', list(patch_chunks), version=8)
+        return self.inline_pak()
+
+    def test_a_pak_beside_shader_libraries_is_not_inline(self):
+        pak = self.resonance()
+        self.assertFalse(uepak.inline_shaders(pak))
+        self.assertEqual(uepak.unreal_paks(str(self.romfs), inline=False), [pak])   # the NSP script's decode step runs (profile_guess.build_sources: ue_decode)
+        self.assertEqual(uepak.unreal_paks(str(self.romfs), inline=True), [])   # and its ue_legacy does not
+        self.assertEqual(ss.ue_legacy_jobs([(pak, 'Game.pak'), (str(self.romfs / 'Game.utoc'), 'Game.utoc')]), ([], set()))
+
+    def test_a_pak_beside_shader_libraries_in_a_patch_container_is_not_inline(self):
+        self.assertFalse(uepak.inline_shaders(self.resonance((LIB, b'l'))))
+
+    def test_a_global_cache_with_no_export_bundles_the_split_reads_is_not_inline(self):
+        """Taken as inline, the split would read the global shaders alone and report no loss; not inline, the NSP script stops at "none … holds a shader code archive\""""
+        pak = self.inline_pak()
+        self.assertFalse(uepak.inline_shaders(pak))   # no container
+        container(self.romfs / 'Other', 'Game.utoc', [(chunk_id(1, uepak.IO_EXPORT_BUNDLE), b'b')], version=8)
+        self.assertFalse(uepak.inline_shaders(pak))   # one in another folder: ue_legacy_jobs reads only the pak's own
+        container(self.romfs, 'Game.utoc', [(chunk_id(4, 5), b's')], version=8)
+        self.assertFalse(uepak.inline_shaders(pak))   # one without export bundles
 
     def test_a_pak_with_an_archive_or_only_configs_is_not_inline(self):
         self.assertFalse(uepak.inline_shaders(self.inline_pak(('Engine/GlobalShaderCache-X.bin', 'ShaderArchive-Global-X.ushaderbytecode'))))

@@ -3,6 +3,13 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <QuartzCore/CAMetalDisplayLink.h>
 #import <MetalFX/MetalFX.h>
+// Xcode 26's headers do not declare these public macOS/iOS 27 setters. Calls remain under the OS 27 availability check below; this declaration only lets an older SDK build the host.
+@protocol DmTemporalScalerOffsets <NSObject>
+@property (nonatomic) NSUInteger colorContentOffsetX, colorContentOffsetY;
+@property (nonatomic) NSUInteger depthContentOffsetX, depthContentOffsetY;
+@property (nonatomic) NSUInteger motionContentOffsetX, motionContentOffsetY;
+@property (nonatomic) NSUInteger outputOffsetX, outputOffsetY;
+@end
 #undef I   // MetalFX brings in <complex.h>, whose I (the imaginary unit) would shadow the local tables named I below
 #import <ImageIO/ImageIO.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
@@ -648,6 +655,26 @@ static int big_new(big_pool *b, uintptr_t lo, uintptr_t hi, uintptr_t end, uint6
     g_pools[g_npool++] = (pool_ent){lo < b->lo ? b->lo : lo, hi > b->hi ? b->hi : hi, lo, buf, buf.gpuAddress, b->mem, 0, clock_gettime_nsec_np(CLOCK_MONOTONIC), end > b->hi ? b->hi : end, unk};
     [g_keep addObject:buf];
     return g_npool - 1;
+}
+// Once raw-address shaders need a whole-pool mapping, chunks and their older
+// replacements are redundant. Retire them after the submissions using them finish.
+static void big_full(big_pool *b) {   // caller holds g_mu
+    if (b->full) return;
+    int full = big_new(b, b->a, b->b, b->b, 0);
+    if (full < 0) return;
+    b->full = full + 1;
+    for (int i = 0; i < g_npool;) {
+        pool_ent *p = &g_pools[i];
+        if (p->key != b->mem || i == b->full - 1) { i++; continue; }
+        [g_keep removeObject:p->buf]; defer_obj_release(p->buf);
+        if (p->res) g_pool_res_n--;
+        g_pools[i] = g_pools[--g_npool];
+        if (i < g_npool) big_moved(i);
+    }
+    for (id<MTLBuffer> old in b->old) defer_obj_release(old);
+    [b->old removeAllObjects];
+    memset(b->chunk, 0, (((b->b - b->a) >> 24) + 1) * sizeof *b->chunk);
+    g_plast = -1; g_pidx_ok = 0;
 }
 // The entry of a large pool for [addr, addr + len): the chunk of its stride, made or lengthened to reach as far as asked; -1 past the pool's end
 static int big_lookup(big_pool *b, uint64_t addr, uint64_t len) {
@@ -8018,7 +8045,7 @@ static uint64_t gmem_map_gpu(void) {
     for (int k = 1; k < DMSH_GMEM_MAP_ENTRIES; k++) memset(t + (size_t)k * DMSH_GMEM_MAP_ENTRY, 0xff, 8);
     int n = 1, over = 0; uint64_t end = 0;
     pthread_mutex_lock(&g_mu);
-    for (int k = 0; k < g_nbig; k++) if (!g_big[k].full) { int n = big_new(&g_big[k], g_big[k].a, g_big[k].b, g_big[k].b, 0); if (n >= 0) g_big[k].full = n + 1; }   // the pool table reaches all of a large pool
+    for (int k = 0; k < g_nbig; k++) big_full(&g_big[k]);   // the pool table reaches all of a large pool
     gen = atomic_load(&g_pool_gen); pidx_sort();
     for (int k = 0; k < g_npool; k++) {
         pool_ent *p = &g_pools[g_pidx[k]];
@@ -11940,10 +11967,11 @@ static void dlss_eval(const p_dlss *c) {
         sc.colorTexture = col; sc.depthTexture = dep; sc.motionTexture = mot; sc.outputTexture = out; sc.exposureTexture = expo;
         sc.inputContentWidth = iw; sc.inputContentHeight = ih;
         if (@available(macOS 27.0, iOS 27.0, *)) {   // the rectangles' corners: all at the origin on the game seen, so an older system loses nothing there
-            sc.colorContentOffsetX = (NSUInteger)a.base[DLSS_COLOR][0]; sc.colorContentOffsetY = (NSUInteger)a.base[DLSS_COLOR][1];
-            sc.depthContentOffsetX = (NSUInteger)a.base[DLSS_DEPTH][0]; sc.depthContentOffsetY = (NSUInteger)a.base[DLSS_DEPTH][1];
-            sc.motionContentOffsetX = (NSUInteger)a.base[DLSS_MOTION][0]; sc.motionContentOffsetY = (NSUInteger)a.base[DLSS_MOTION][1];
-            sc.outputOffsetX = (NSUInteger)a.base[DLSS_OUTPUT][0]; sc.outputOffsetY = (NSUInteger)a.base[DLSS_OUTPUT][1];
+            id<DmTemporalScalerOffsets> offsets = (id)sc;
+            offsets.colorContentOffsetX = (NSUInteger)a.base[DLSS_COLOR][0]; offsets.colorContentOffsetY = (NSUInteger)a.base[DLSS_COLOR][1];
+            offsets.depthContentOffsetX = (NSUInteger)a.base[DLSS_DEPTH][0]; offsets.depthContentOffsetY = (NSUInteger)a.base[DLSS_DEPTH][1];
+            offsets.motionContentOffsetX = (NSUInteger)a.base[DLSS_MOTION][0]; offsets.motionContentOffsetY = (NSUInteger)a.base[DLSS_MOTION][1];
+            offsets.outputOffsetX = (NSUInteger)a.base[DLSS_OUTPUT][0]; offsets.outputOffsetY = (NSUInteger)a.base[DLSS_OUTPUT][1];
         }
         sc.motionVectorScaleX = a.mv[0]; sc.motionVectorScaleY = a.mv[1];
         sc.jitterOffsetX = a.jitter[0]; sc.jitterOffsetY = a.jitter[1];

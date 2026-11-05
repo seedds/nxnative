@@ -693,3 +693,11 @@ Games read this count as a position in their own command memory and size their h
 ### `nvnPrivate0`, an inlined command-buffer fast path flag
 
 - `nvnPrivate0`, a new SDK 20 import, needs nothing: it is a flag in `sdk`'s bss that enables an inlined command-buffer fast path when the NVN driver sets it (it stays 0). Found on [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0, SDK 20.5.22).
+
+### Whole-pool mappings leave obsolete chunks resident
+
+- **Symptom:** a large pool keeps both its contiguous raw-address mapping and earlier overlapping chunks resident.
+- **Cause:** `gmem_map_gpu` adds the whole-pool buffer without retiring the chunk entries or older chunk replacements. They remain referenced for the parent pool's lifetime.
+- **Fix:** after whole-map creation succeeds, remove obsolete entries and queue their buffers through the existing fence-deferred release. Repair the moved entries' chunk/full indices, clear obsolete chunk indices and invalidate address caches. A refused whole mapping leaves existing chunks intact.
+- **Found on:** Ocarina of Time scene-load memory investigation (#1299). This complements #1319's earlier retirement of replaced chunks; it does not change chunk thresholds or raw-address exposure policy.
+- **Check:** `t_pool_retire` covers two large pools, a separate small pool, a lengthened chunk, consolidation, fence-delayed residency removal, repaired lookups and a GPU copy from the surviving whole mapping. No isolated game-memory or FPS saving is claimed.

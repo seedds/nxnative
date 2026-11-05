@@ -73,6 +73,18 @@ The game may also write into an NVN object directly, without an NVN call, throug
 - **Fix:** such a pool gets an address range of its own at `MemoryPoolInitialize` (reserved, inaccessible: 64 GB on the Mac, at most 1 GB on iOS), and each mapping request `vm_remap`s the physical pages over its part of the range, so virtual addresses read and write the same memory, as the GPU's page table does. Each run of mapped pages is registered with the replay like a pool of its own and rebuilt when a request joins or splits runs (`vpool_*` in `hle_nvn.c`). Mario's 128 MB pool, mapped whole onto one physical pool, keeps the alias. The log reports the mapped high-water mark per 128 MB.
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md).
 
+### Buffers in sparse pools bound through their physical pages
+
+- **Symptom:** a draw or dispatch reads zeros from a buffer in a sparse pool, though the CPU and one-word lookups see the data; for a mesh draw, nothing drawn (instance records of id 0 and size 0).
+- **Cause:** a zero-copy Metal buffer made over a sparse pool's virtual range ([Sparse virtual pools built from separate physical pools](#sparse-virtual-pools-built-from-separate-physical-pools)) does not see the physical pages `vm_remap` later puts under it. A lookup larger than one page bound that buffer, or, where the mapped part was one virtual run in more than one physical piece, an older and larger pool entry. Also, the pool's run table held 1,024 runs, and when it was full `vrun_set` took the runs a new mapping merged with out of the lookup and never put the merged run back.
+- **Fix:**
+  - A lookup of more than one page inside a sparse pool binds the physical pool's own buffer at the matching offset when the mapped part of the range is one contiguous physical piece (unmapped pages may follow); `DM_NVN_SPARSE_PHYS=0` turns it off.
+  - When it is one virtual run in several pieces, the lookup is cut to the mapped length and bound through the run's own zero-copy buffer, which `vrun_set` makes after the run's last remap; `DM_NVN_SPARSE_RUN=0` turns it off. A large lookup that is not redirected logs its pieces, once per address.
+  - The run table holds 16,384 runs, and a full one leaves the lookup untouched (`DM_NVN_VRUN_MAX` sets a smaller cap for A/B runs).
+  - Lookups of one page or less are never redirected, so the redirect needs the binding's size: graphics storage buffers from push constants carry theirs ([NVN2 push constants: the block word picks the block](#nvn2-push-constants-the-block-word-picks-the-block)).
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): the title's Earth read an 80 MB buffer of zeros, and the terrain's mesh shader its 80 MB instance buffer (448 KB mapped, in two pieces).
+- **Check:** `t_sparse_buf` (1,500 separate runs, a contiguous redirect, a two-piece run read by a GPU blit, a piece after a hole that is not taken as a run); it fails with `DM_NVN_VRUN_MAX=1024` or `DM_NVN_SPARSE_RUN=0`.
+
 ### Virtual pools of one texture each, mapped before and after the texture
 
 - **Symptom:** `[RED] MapVirtual: non-contiguous mapping (true sparse) not implemented`, on small virtual pools; streamed textures black or missing (OCTOPATH TRAVELER's village ground and plants).
@@ -313,7 +325,7 @@ Games read this count as a position in their own command memory and size their h
   - `DM_NVN_GPU_WATCHDOG` (seconds, default 4) ends the process when a command buffer has not completed, before more work queues behind it. A ring of (fence, kind, shader key) per draw and dispatch (`wk_note`) lets the watchdog and a failed command buffer name that submission's shaders (`wk_dump`).
   - GPU-written dispatch counts are clamped (65535 per dimension, 2^22 threadgroups in all; `DM_NVN_DISPATCH_CLAMP=0` turns it off).
   - A SyncWait of a second or more prints `[RED] SyncWait timed out on fence N: committed M, completed K` (fence ≤ committed: the GPU did not finish).
-- **Found on:** [Orbitals](../../dm/games/040004F027560000/README.md#found-on-this-game) and PRAGMATA (not in the games table).
+- **Found on:** [Orbitals](../../dm/games/040004F027560000/README.md#found-on-this-game) and [PRAGMATA](../../dm/games/0400C76024710000/README.md).
 
 ### The game's SyncWait wakes on the GPU's own signal of its fence
 
@@ -770,3 +782,12 @@ Games read this count as a position in their own command memory and size their h
 - **Cause:** `nvnMemoryPoolFinalize` on a game thread dropped the pool's textures from the CPU-written set (`cpu_tex_drop_pool`) before it marked the pool's texture IDs gone under `g_rmu` (`treg_drop_pool_views`). A pool walk on the submit thread holds `g_rmu` and visits every registered ID; one of that pool's IDs reached in between was not gone, its pool's magic was still set, and its texture was no longer CPU-written, so `tex_mtl_` skipped the packaged path and returned the texture table's entry as it was: the `NvPkg` wrapper of the upload, not an `MTLTexture`. `tex_by_id`'s first message to it threw.
 - **Fix:** general (`nvn_mtl.m` `mtl_alias_drop_pool`). The IDs are marked gone first: a walk holding `g_rmu` either finishes while the classification is still there or finds the ID gone and takes `tex_made`, which unwraps the `NvPkg`. `t_cpu_tex --metal` (`finalize_during_walk`) finalizes a pool on another thread while it holds `g_rmu`: with the old order the classification was gone and `tex_mtl` handed out the `NvPkg`.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), from two players' reports on PR #1299 and PR #1420 (an M3 Max 412 s into Kokiri Forest after a save; an M4 Pro in the Deku Tree after about 40 minutes). PR #1420 found where the `NvPkg` escaped.
+
+### NVN2 push constants: the block word picks the block
+
+- **Symptom:** compute shaders read their storage buffer addresses as 0 and write into the dummy buffer, a GPU memset writes into another shader's buffer, draws read buffer sizes as addresses (`[RED]` lines with addresses such as 0x40000 or 0x2000000 at push + 0x8), and pixel shaders' storage buffers stay on the dummy.
+- **Cause:** `nvnCommandBufferPush*Constants` takes a block word before the offset, which the host ignored: every push was stored at its offset in one block. The offsets count from the start of the named block.
+  - Compute: NVN2 lays out two push blocks in `c0` ([NVN2 compute `c0` with two push blocks](shaders.md#nvn2-compute-c0-with-two-push-blocks)); the second, the storage buffer table, is pushed with word 1, and was stored over the first.
+  - Graphics: block k (1..5) is constant bank 24 + k, one stage's storage buffer table (vertex 25, hull 26, domain 27, geometry 28, pixel 29), which the translator reads at `c0 + 0x110 + 0x100 (k − 1)` (`AMapC0`). Stored in the first block, these tables overwrote the push constants.
+- **Fix:** compute block 1 is kept apart: each shader's first-block size is taken from its control section at `SetShaders` (`prog_push0`), and its `c[24]` view (`push_view`) is the first block followed by the second; the `c[24]` binding and the storage buffer addresses kept in push constants (`sbufu_addr`) read through it. A pushed graphics table's rows {address, size} become that stage's storage buffer bindings, as `nvnCommandBufferBindStorageBuffer` sets them (hull goes to the mesh stage, where RE Engine's mesh shaders read it; domain has no host stage), so the bindings, the `c0` fill and hazard tracking all see address and size. `DM_NVN_PUSH_BLOCKS=0` restores the old placement; the first 32 distinct push shapes (stage group, block, offset, size) are logged.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): block words 0..5 (compute 0 and 1, graphics 0, 1, 2 and 5); `eef9b5086c9bcb68` and `f0cb7fbfc411f868` read address 0 at every dispatch, and the memset `0ec5481e336c2ea6` wrote to a stale address.

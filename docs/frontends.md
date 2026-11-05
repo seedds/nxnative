@@ -107,6 +107,10 @@ An app that links the host and the front end's game view into its own process (a
 - **`front_progress_hook`**: draws the prepare step's progress ("Preparing shaders", "Preparing pipelines") instead of the front end's screen. With a window, it gets each call's title, done and total on the main thread; the title is `NULL` when the step ends.
 - **`dm_set_game_image_header`** (iOS): names the image that carries the game's rewritten modules, when the app links them into a framework it `dlopen`s from its signed bundle instead of into its executable. Call it with that image's mach header before `dm_host_preload_start`. Only the module sections are read from it.
 
+## Native LAN play on Mac
+
+LAN is opt-in; existing launches remain offline. A front end can offer a peer IPv4 field and start an existing NVN Mac build through `scripts/run_mac_lan.py <build> --peer <other Mac IPv4>`, with `--app` for the regular game app when it is not found automatically. `--username <name>` sets the host account nickname through `DM_NICK` for that launch; it keeps the same user ID and save. The launcher selects the route's local source, preserves saves and graphics settings, and keeps the compiled host and shader runtime together. See [LAN play on Mac](development.md#lan-play-on-mac) for direct environment controls, routed VPNs, portable kit packaging and limitations. This implements native IPv4 LAN sockets, not LDN room infrastructure or Nintendo online services.
+
 ## Following main
 
 nxnative has no releases or tags: a front end pins a commit and moves it forward. Between the commit it has (`A`) and the one it moves to (`B`), two things say what changed for it.

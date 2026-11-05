@@ -1670,6 +1670,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Team Sonic Racing](../../dm/games/010092B0091D0000/README.md#found-on-this-game) (resolved).
 - **Check:** `test_nsp_mac.py` (`test_ios_after_mac_keeps_mac_libraries`, `test_ios_after_mac_of_another_chain`).
 
+### A portable host needs its matching shader runtime
+
+- **Symptom:** a game that works through its regular app logs `shader ... failed to load: build the shaders with dm/gfx/tools/dmsh_build.py first` when launched through a separately supplied host.
+- **Cause:** that final line is generic: `shader_load` can fail on a missing library or reflection, a Metal load error, a chain mismatch or another reflection error. The preceding line identifies the failure. A host selects `<DM_MSL_DIR>/b-<DMSH_CHAIN>` and checks reflection's chain; the same ROM does not make shaders built by different source revisions interchangeable. A development cache can also lack libraries that remain in a packaged app. The reported second Mac's underlying Metal/path error has not been provided, so its exact cause remains open.
+- **Fix:** a portable LAN kit can carry its tested host's runtime: `runtime/shaders/b-<chain>/` with `.metallib`, reflection `.json` and `inputs.tsv`, plus `runtime/tables/<title ID>/` with the matching shader map and tables. `scripts/run_mac_lan.py` selects both together when using the bundled host. The selected build still supplies modules, RomFS and fonts, and its shader cache is not modified. An explicitly selected external host uses its build's shader assets instead.
+- **Check:** launcher tests cover runtime path selection even when the build cache is absent, external-host selection, the regular app save and unchanged game input paths. The reported shader's packaged library and reflection load on an Apple M4 Pro. On 2026-11-05 the user confirmed that the second Mac, an M1 Pro, ran several multiplayer rounds after receiving the portable runtime.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#experimental-lan-play), shader `4841d29d86cd486b`, SDK 21.4.0.
+
 ### Old shader library folders grew a game's build folder with each chain change
 
 - **Symptom:** the build folder of a game (`<id>_build/shader/`) gains about 2 GB for Breath of the Wild with every upstream update that changes the shader chain: after two updates `shader/cache` held `b-157e1b96c8da` (2.1 GB) and `b-a78f966a7b38` (2.3 GB) besides the current one, and the next build added a third.

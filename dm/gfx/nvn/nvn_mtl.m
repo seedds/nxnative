@@ -6779,7 +6779,7 @@ static void cps_harvest(MTL4ComputePipelineDescriptor *d, int compact) {
     dispatch_async(cps_harvest_q(), ^{ @autoreleasepool {
         NSError *ce = nil;
         if (arch_capture_cs(d, &ce)) { if (compact) g_compacted++; arch_note_new(); }
-        else MLOG("[RED] compute pipeline %s: the Metal 4 compiler refused it (%s): not kept in the pipeline archive", d.computeFunctionDescriptor ? [(MTL4LibraryFunctionDescriptor *)d.computeFunctionDescriptor name].UTF8String : "?",
+        else MLOG("[RED] compute pipeline %s: the Metal 4 compiler refused it (%s): not kept in the pipeline archive", d.computeFunctionDescriptor ? [(MTL4LibraryFunctionDescriptor *)d.computeFunctionDescriptor name].UTF8String : "(unnamed)",
                   ce ? ce.localizedDescription.UTF8String : "no error given");
     } });
 }

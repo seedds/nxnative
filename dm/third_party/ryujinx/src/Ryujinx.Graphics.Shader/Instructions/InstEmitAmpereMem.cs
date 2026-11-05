@@ -744,6 +744,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 int n0 = coords + (isArray || offset ? 1 : 0);
                 (List<Operand> a, List<Operand> b) = ATexBlocks(context, x, n0, 2 * coords);
 
+                if (bindless)
+                {
+                    sources.Add(boundHandle);
+                }
+
                 sources.AddRange(a.GetRange(0, coords));
 
                 if (Sample1DAs2D && (type & SamplerType.Mask) == SamplerType.Texture1D)

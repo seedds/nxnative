@@ -1046,6 +1046,21 @@ def vs_base_instance(src):
         return m.group(0) if '[[base_instance]]' in m.group(0) else m.group(0)[:-1] + ', uint gl_BaseInstance [[base_instance]])'
     return re.sub(r'\bvertex\s+\w+\s+main0\s*\((?:[^()]|\([^()]*\))*\)', add, src)   # the parameter list, whose attributes hold parentheses ([[buffer(0)]])
 
+def drop_point_size(src):
+    """Take the point size output out of vertex functions whose output struct no longer has it. A write goes; where the translated body takes the output by reference (_88(out.gl_Position, out.gl_PointSize)), that function still needs something to write, so the
+    vertex function gets a local float for it"""
+    src = re.sub(r'\n    out\.gl_PointSize = [^;\n]*;', '', src)
+    while 'out.gl_PointSize' in src:
+        use = src.find('out.gl_PointSize')
+        a = [m for m in re.finditer(r'\bvertex\s+\w+\s+\w+\s*\(', src) if m.start() < use]
+        if not a: sys.exit('[RED] a point size output used outside a vertex function')
+        b, depth = src.find('{', a[-1].end()), 0
+        for e in range(b, len(src)):
+            depth += src[e] == '{'; depth -= src[e] == '}'
+            if not depth: break
+        src = src[:b + 1] + '\n    float dmsh_point_size = 1.0;' + src[b + 1:e].replace('out.gl_PointSize', 'dmsh_point_size') + src[e:]
+    return src
+
 def vs_layer(src):
     """A vertex shader that writes the layer (render_target_array_index) loses the point size output. The translator writes gl_PointSize = 1.0 in every vertex shader; Metal builds a pipeline
     whose vertex function writes the layer only with an input primitive class, and one that writes a point size only with the point class (or none), so with both no pipeline can be built.
@@ -1054,7 +1069,7 @@ def vs_layer(src):
     i = src.find('struct main0_out\n{\n'); j = src.find('\n};', i)
     if i < 0 or j < 0 or '[[render_target_array_index]]' not in src[i:j] or '[[point_size]]' not in src[i:j]: return src
     src = src[:i] + re.sub(r'\n    float gl_PointSize \[\[point_size\]\];', '', src[i:j], count=1) + src[j:]
-    return re.sub(r'\n    out\.gl_PointSize = [^;\n]*;', '', src)
+    return drop_point_size(src)
 
 def gs_slice(spv):
     """A geometry shader that only picks the layer: triangles in, at most 3 vertices out, each vertex copying its input position and the input components it passes on, and gl_Layer taking the
@@ -1108,7 +1123,7 @@ def vs_layer_entry(full):
             depth += full[e] == '{'; depth -= full[e] == '}'
             if not depth: break
         fn = full[a.start():e + 1].replace('main0_out', 'main0l_out').replace(f' {ep}(', f' {new}(', 1)
-        fn = re.sub(r'\n    out\.gl_PointSize = [^;\n]*;', '', fn)
+        fn = drop_point_size(fn)
         add += '\n' + fn.replace('return out;', f'out.gl_Layer = as_type<uint>(out.{name}.{comp});\n    return out;') + '\n'
     return full + add, {'loc': locs[name], 'comp': comp}
 

@@ -2392,6 +2392,8 @@ uint64_t mtl_sub_commit(void) {
 
 uint64_t mtl_completed_fence(void) { return atomic_load_explicit(&g_done,memory_order_acquire); }
 uint64_t mtl_last_fence(void) { return g_fence; }
+// A SyncWait that timed out: where the fence stands against what was committed and what the GPU completed (fence > committed: never submitted; else the GPU did not finish)
+void mtl_fence_report(uint64_t fence) { MLOG("[RED] SyncWait timed out on fence %llu: committed %llu, completed %llu, last commit error %d", (unsigned long long)fence, (unsigned long long)g_fence, (unsigned long long)g_done, (int)atomic_load(&g_last_commit_error)); }
 int mtl_last_commit_error(void) { return atomic_load(&g_last_commit_error); }
 
 static int fast_wake(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_FAST_WAKE"); v = !(e && !strcmp(e, "0")); MLOG("game SyncWaits wake on the GPU's signal of the fence%s (DM_NVN_FAST_WAKE)", v ? "" : ": off, on the feedback handler"); } return v; }

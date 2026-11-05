@@ -111,7 +111,7 @@ int main(void) { @autoreleasepool {
     @autoreleasepool {
         NvShader *c1 = shader_load(@"c1_b", 5, 0), *c2 = shader_load(@"c2_b", 5, 0), *c3 = shader_load(@"c3_b", 5, 0), *cc = shader_load(@"cc_b", 5, 0); NSError *err = nil;
         EXPECT("compute: shaders loaded", 1, c1 && c2 && c3 && cc);
-        uint64_t a0 = g_cps_arch, b0 = g_cps_built;
+        uint64_t a0 = g_cps_arch, b0 = g_cps_built; int n0 = g_arch_new;
         EXPECT("compute: a pipeline", 1, c1 && cps_new(c1->fn, &err) != nil);
         EXPECT("compute: a second pipeline", 1, c2 && cps_new(c2->fn, &err) != nil);
         EXPECT("compute: both from the bundle", a0 + 2, g_cps_arch);
@@ -120,6 +120,8 @@ int main(void) { @autoreleasepool {
         EXPECT("compute not in the map: a pipeline", 1, c3 && cps_new(c3->fn, &err) != nil);
         EXPECT("compute with constants, not in the map: built", b0 + 2, g_cps_built);
         EXPECT("compute with constants, not in the map: not from the bundle", a0 + 2, g_cps_arch);
+        dispatch_sync(cps_harvest_q(), ^{});
+        EXPECT("compute not in the map: captured into this device's archive, the one with constants not", n0 + 1, g_arch_new);
     }
     // A separate output forces one base per compiler invocation, then metal-pack merges both for this GPU.
     NSString *batched = [root stringByAppendingPathComponent:@"batched"];

@@ -1129,6 +1129,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): its deferred lighting `635061c90d75a8d1` normalises four depth-weighted half-resolution samples by `1 / sum` only where `FSETP.NEU.FTZ` says the sum is not zero. No Switch 1 game has shown the symptom; Maxwell's comparisons follow for the same semantics (the flag is on all of them in the 8 Switch 1 games counted).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`CompareFtz`, on the game's encoding) and `test_dmsh_maxwell_ftz.py`.
 
+### Float add atomics
+
+- **Symptom:** `Invalid reduction type: F32FtzRn` in the shader build's translator notes. In the game, a value that shaders sum on the GPU stays 0: Ocarina of Time's outdoor scenes washed out to near white, with fog over everything and a huge glare at a doorway, while interiors looked right.
+- **Cause:** `EmitAtomicOp` handled integer sizes only and logged any other, dropping the instruction: RED and ATOMG `.ADD.F32.FTZ.RN` left no trace in the shader. The IR has no float atomic.
+- **Fix:** general: `EmitAtomicAddF32` in `InstEmitMemory.cs` adds through a compare-and-swap loop of the word, flushing denormals as `.FTZ` does. `GlobalToStorage` lowers the load and the exchange as any others, to a storage buffer or through the pool table.
+- **Found on:** Ocarina of Time (Switch 2, `0400486024DEC000`, PR #1299): 416 instructions in 34 shaders. 12 are agl's analysis compute shaders (`sky_analyze`, `probe_analyze`, `cube_map_probe_analyze`, `shadow_analyze`, `inner_mask_analyze`, `local_depth_shadow_analyze`), dispatched every frame outdoors; the other 22 are `pick_final_color` and `var3` of two material shaders. Only those 12 rebuilt on the old app brought the colours back at one spot; not confirmed in a full build.
+- **Check:** `RedF32` in `dm/gfx/tests/test_dmsh_ampere_mem.py`, on the game's encoding.
+
 ### Barrier moves around warp shuffles
 
 - **Symptom:** `Ampere instruction f55 at 0x… (000fe20000000000000000001a0f7f55) is not implemented` in the shader build; those shaders are left out.

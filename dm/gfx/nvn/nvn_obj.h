@@ -20,7 +20,7 @@ typedef struct { uint32_t magic; NVNdevice *dev; uint64_t submits; int origin_ll
 
 typedef struct { NVNdevice *dev; void *mem; uint64_t size; uint32_t flags; } pool_builder_t;  FITS(pool_builder_t, NVNmemoryPoolBuilder);
 // A virtual pool (flags 0x200) keeps its sparse state in vp (hle_nvn.c struct vpool, NULL for an aliased one); vmode: 0 not mapped yet, 1 aliased onto one physical pool, 2 sparse
-// gpu_written: a render target, a shader image, a texture clear or a copy into a texture has been recorded in it (mtl_pool_gpu_written)
+// gpu_written: a render target, a shader image, a texture clear or a copy into a texture has been recorded in it (mtl_tex_gpu_written, which keeps the ranges)
 typedef struct { uint32_t magic, flags; uint8_t *mem; uint64_t size; struct vpool *vp; int vmode; _Atomic int gpu_written; } pool_t;   FITS(pool_t, NVNmemoryPool);
 
 typedef struct { const pool_t *pool; int64_t off; int32_t n; } dpool_t;                       // Texture / sampler descriptor pool

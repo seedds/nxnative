@@ -38,6 +38,33 @@ static void retired_classification(void) {
     mtl_alias_drop_pool(&pools[1]);
     CHECK(!tex_cpu_written(b.serial) && !tex_cpu_written(late.serial) && !g_cpu_tex_retired.n, "pool cleanup removes all retired classifications");
 }
+// A pool that holds both kinds: an uncompressed texture is kept from its storage only where the GPU wrote that storage (Ocarina of Time's height tiles beside textures the GPU writes)
+static void gpu_written_ranges(void) {
+    enum { LEN = 4 << 20, FAR = 2 << 20 };
+    uint8_t *mem = mmap(NULL, LEN, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (mem == MAP_FAILED) abort();
+    memset(mem, 0x5a, LEN);
+    static pool_t pool = {.magic=MAGIC('P','O','O','L'), .flags=NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED}; pool.mem = mem; pool.size = LEN;
+    tex_t a = {.magic=MAGIC('T','E','X',0), .serial=nvn_new_serial(), .pool=&pool, .mem=mem}, b = a; b.serial = nvn_new_serial(); b.mem = mem + FAR; b.off = FAR;
+    a.d = b.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=NVN_FORMAT_R32F, .width=260, .height=260, .depth=1, .levels=1, .samples=1};
+    nvn_tex_layout(&a.d, &a.L); b.L = a.L;
+    mtl_tex_gpu_written(&pool, mem + FAR, a.L.size);
+    CHECK(tex_cpu_content(&a), "a texture beside what the GPU wrote is taken from its storage, in a pool the GPU writes");
+    CHECK(!tex_cpu_content(&b), "the one over it is not");
+    atomic_store(&g_pool_gpuw_new, 1); cpu_unc_drop();
+    CHECK(nvn_hm_get(&g_cpu_unc, &a.serial) != NULL, "a write elsewhere in the pool leaves it taken");
+    mtl_tex_gpu_written(&pool, mem + 16, 16); cpu_unc_drop();
+    CHECK(!nvn_hm_get(&g_cpu_unc, &a.serial) && !g_cpu_unc_lo.n && !g_cpu_unc_sz.n, "a write over its storage ends that");
+    CHECK(gpuw_overlaps((uint64_t)(uintptr_t)mem + 20, (uint64_t)(uintptr_t)mem + 21) && !gpuw_overlaps((uint64_t)(uintptr_t)mem + 32, (uint64_t)(uintptr_t)mem + 64), "the ranges are exact");
+    uint64_t base = (uint64_t)(uintptr_t)mem; uint32_t n = g_ngpuw;
+    CHECK(gpuw_add(base + 8, base + 40) && g_ngpuw == n && !gpuw_add(base + 20, base + 30), "ranges merge, and one inside another is nothing new");
+    gpuw_add(base + 100, base + 200); gpuw_drop(base + 120, base + 130);
+    CHECK(gpuw_overlaps(base + 110, base + 111) && gpuw_overlaps(base + 150, base + 151) && !gpuw_overlaps(base + 125, base + 126), "dropping the middle of a range leaves both ends");
+    cpu_tex_drop_pool(&pool);
+    CHECK(!gpuw_overlaps(base, base + LEN), "a pool that goes takes its ranges along");
+    mtl_tex_gpu_written(&pool, NULL, 0);
+    CHECK(gpuw_overlaps(base + LEN - 1, base + LEN), "no range given: the whole pool");
+    cpu_tex_drop_pool(&pool); munmap(mem, LEN);
+}
 static void descriptor_replacement(void) {
     tex_t a = {.serial=nvn_new_serial()}, b = {.serial=nvn_new_serial()};
     mtl_tex_init(&a); mtl_tex_init(&b);
@@ -127,7 +154,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     tex_t z = {0}; mtl_tex_cpu_written(&z);
     CHECK(mtl_cpu_tex_count() == N - 2, "a texture with no serial is not recorded");
     for (int i=0;i<N;i++) mtl_tex_release(&t[i]);
-    retired_classification(); descriptor_replacement();
+    retired_classification(); descriptor_replacement(); gpu_written_ranges();
     if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); finalized_upload(0); finalized_upload(1); }
     printf("t_cpu_tex: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

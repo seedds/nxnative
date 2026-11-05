@@ -624,7 +624,18 @@ def shader_map_entries(d):
     that many {i32 length, code, i32 raw size, u8 frequency}. A table is found by a first entry's stream and proved by its two counts and by the walk over all its entries, as a stream's two first bytes
     turn up inside other data. → [(offset of the code, length, raw size, frequency)] of the tables that hold"""
     out, end = [], 0
-    for m in OODLE_BLOCK.finditer(d):
+    # UE4's package summary contains offsets and export descriptions, not shader
+    # code. Those integers can mimic a one-entry table (including an Oodle
+    # prefix). Respect TotalHeaderSize; split .uasset/.umap files end there,
+    # while a package with inline exports continues after it. Legacy version -7
+    # stores GUID/int32 custom versions after the three version words.
+    if len(d) >= 28 and d[:8] == b'\xc1\x83\x2a\x9e\xf9\xff\xff\xff':
+        count = int.from_bytes(d[20:24], 'little')
+        at = 24 + 20 * count
+        if at + 4 <= len(d):
+            header = int.from_bytes(d[at:at + 4], 'little')
+            if at + 4 <= header <= len(d): end = header
+    for m in OODLE_BLOCK.finditer(d, end):
         i = m.start()
         if i < end or i < 12: continue
         count = int.from_bytes(d[i - 8:i - 4], 'little'); hashes = i - 8 - 20 * count

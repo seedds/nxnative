@@ -464,6 +464,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Reader:** `uepak.py` `inline_shaders` also takes the global shader cache with no `.ushaderbytecode` as inline when the containers in the pak's folder hold export bundles and no [shader libraries](#unreal-engine-56-iostore-shader-libraries) (`inline_in_containers`; with neither a `.uexp` nor such a container the NSP script stops rather than read the global shaders alone), and `shader_split.py` `ue_legacy_jobs` then also reads the export bundles of the containers beside such a pak, the newest copy of each chunk ID (`mount_order`), through the game's own Oodle in the host's tool mode. Bulk data chunks are skipped. `Toc.names` reads the container's directory index, so a shader's label names its package, as for a pak, and `shader_groups` works the same way.
 - **Found on:** [Mario & Luigi: Brothership](../../dm/games/01006D0017F7A000/README.md): 45,824 unique shaders from 8.8 GB of export bundles in 39 s.
 
+### Package summary integers mistaken for Oodle shader tables
+
+- **Symptom:** the shader split reports `the game's decoder in the Mac host failed on a 8 → 30650 byte stream`, with `asked to decode Legacy compressor; not supported!`, and leaves out otherwise readable pak jobs.
+- **Cause:** the Oodle shader-table detector also scanned the package summary of split Unreal 4 packages. Export descriptions and offsets there can satisfy its two count checks and mimic a one-entry table: an eight-byte integer beginning `8C 0B` is not an Oodle stream. The real shaders are in the separate exports, not the summary.
+- **Fix:** `uepak.shader_map_entries` reads `TotalHeaderSize` from a version -7 package summary, after its GUID/int32 custom-version array, and starts its scan beyond that boundary. A split `.uasset` or `.umap` ends there; a combined package still scans its exports. Raw export bundles and global shader caches retain their existing scan. The parser tests cover metadata that mimics a table, custom versions, and an actual table after the summary.
+- **Found on:** [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md), update 1.1.1: six summary files match the old detector, aborting four batched jobs. With the summary excluded the full split reads every job and restores all 13,980 shaders (11,832 before the fix).
+
 ### Unreal Engine 5.4 shaders for the Switch 2
 
 - **Symptom:** `shaders: 0` from the split, with no red line, on a game whose pak holds `Engine/GlobalShaderCache-SP_GLSL_SAGE.bin` (`Sage` is the engine's name for the platform).

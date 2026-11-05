@@ -225,6 +225,19 @@ class IoStore(unittest.TestCase):
         self.assertEqual(uepak.shader_map_entries(t[:-30]), [])   # its second entry runs past the end
         self.assertEqual(uepak.shader_map_entries(struct.pack('<I', 9) + t[4:]), [])   # the two counts differ
 
+    def test_package_summary_metadata_is_not_shader_code(self):
+        # An export offset in OCTOPATH TRAVELER II's split package summaries
+        # happens to look like a complete one-entry Oodle shader table.
+        fake = self.table([(b'\x8c\x0b' + bytes(6), 30650, 0)])
+        for customs in (0, 2):
+            prefix = struct.pack('<I5i', 0x9e2a83c1, -7, 0, 0, 0, customs) + bytes(20 * customs)
+            summary = prefix + struct.pack('<I', len(prefix) + 4 + len(fake)) + fake
+            self.assertEqual(uepak.shader_map_entries(summary), [])
+            # A combined package still scans exports beyond TotalHeaderSize.
+            real = self.table([(b'\x8c\x0a' + b'A' * 10, 40, 3)])
+            at = len(summary) + 4 + 20 + 4 + 4
+            self.assertEqual(uepak.shader_map_entries(summary + real), [(at, 12, 40, 3)])
+
     def inline_pak(self, names=('Engine/GlobalShaderCache-SF_GLSL_SWITCH.bin',)):
         pak11(self.romfs / 'Game.pak', names)
         (self.romfs / 'Game.ucas').write_bytes(b'')

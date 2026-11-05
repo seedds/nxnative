@@ -52,6 +52,7 @@ In event dialogue, hold X to fast-forward; A advances and confirms the default a
 - [ADR-relative jump tables with 64-bit bounds](../../../docs/reference/rewriter.md#adr-relative-jump-tables-with-64-bit-bounds): the main module's `cmp x9,#4` exposed the shared recognizer's width assumption. The fix follows register-copy provenance and accepts either comparison width.
 
 - [Partial vertex builds missing paired pixel sources](../../../docs/reference/shaders.md#partial-vertex-builds-missing-paired-pixel-sources): fifteen startup-cache vertices lacked the paired pixel inputs' default outputs. The general dependency and cache-publication fix rebuilds them before the Mac archive is packed.
+- [Handles built under a guard the read's guard cannot be tied to](../../../docs/reference/shaders.md#handles-built-under-a-guard-the-reads-guard-cannot-be-tied-to): 2,633 of its 69,924 shaders change, 1,780 of them read a texture word with no sampler word. Not run.
 
 ## Open
 

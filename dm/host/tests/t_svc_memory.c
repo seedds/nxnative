@@ -460,6 +460,22 @@ static void release_fallback(void) {
     assert(!resize(0) && !g_heap_cur);
     fail_mmap = 0;
 }
+// A heap given back reads 0 when it grows again: a fresh mapping in anonymous memory, and SetHeapSize's zeroing with the guest in files (DM_GUEST_FILE), where the pages keep their bytes
+// The rule that puts the guest in files: the switch when it is set, otherwise a pool over a known room to the memory limit
+static void file_rule(void) {
+    const uint64_t G = 1ull << 30, pool9 = 9 * G, pool3 = 0xCD500000;
+    assert(guest_file_wanted(NULL, pool9, 8 * G) && guest_file_wanted("", pool9, 6 * G));   // Mario Kart World's pool on an 8 and a 6 GiB limit
+    assert(!guest_file_wanted(NULL, pool9, 12 * G) && !guest_file_wanted(NULL, pool3, 6 * G));   // it fits an iPad's 12 GiB; a Switch game's pool fits 6
+    assert(!guest_file_wanted(NULL, pool9, 0));   // no limit known: the Mac
+    assert(!guest_file_wanted("0", pool9, 8 * G) && guest_file_wanted("1", pool3, 12 * G) && guest_file_wanted("1", pool3, 0));
+}
+static void heap_regrow(void) {
+    assert(!resize(4 * 1024 * 1024));
+    memset((void *)(heap + 3 * 1024 * 1024), 0x5a, P);
+    assert(!resize(2 * 1024 * 1024) && !resize(4 * 1024 * 1024));
+    for (size_t i = 0; i < P; ++i) assert(((uint8_t *)heap)[3 * 1024 * 1024 + i] == 0);
+    assert(!resize(0));
+}
 // Exercise the real host helper through SDK-shaped test entry points. Its stack
 // allocation must reach MapMemory as guest backing and outlive SDK copyback.
 #include "../hle_guestthread.c"
@@ -516,7 +532,7 @@ int main(int argc, char **argv) {
     for (unsigned i = 0; i < 8; ++i) assert(!pthread_create(&threads[i], NULL, init_worker, &addresses[i]));
     for (unsigned i = 0; i < 8; ++i) { assert(!pthread_join(threads[i], NULL)); assert(addresses[i] == addresses[0]); }
     alias = addresses[0]; stack = info(I_StackAddr); heap = info(I_HeapAddr);
-    lazy_commit(); alias_lifecycle(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); concurrency(); fragmented_queries();
+    lazy_commit(); alias_lifecycle(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); file_rule(); heap_regrow(); concurrency(); fragmented_queries();
     guest_helper();
     if (!DM_GAME_MEM_MAP_LIMIT) metadata_limit();
 #ifdef TEST_REAL_DIRTY
@@ -536,6 +552,6 @@ int main(int argc, char **argv) {
     assert(image_bytes() == 0x10000000);
     g_nmod = 0;
     free(g_alias_bits); free(g_alias_exposed); assert(!munmap(g_as, RESERVE));
-    printf("memory SVCs passed (map limit=%d, host page=%d)\n", DM_GAME_MEM_MAP_LIMIT, memory_getpagesize());
+    printf("memory SVCs passed (map limit=%d, host page=%d, guest files %d)\n", DM_GAME_MEM_MAP_LIMIT, memory_getpagesize(), g_gf_n);
     return 0;
 }

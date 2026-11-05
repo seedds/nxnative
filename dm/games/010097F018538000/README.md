@@ -40,6 +40,7 @@ Update 1.0.6.1267 (v3080192) over the base game, SDK 20.5.29. Unity 6000.0.52f1 
 ## Found on this game
 
 - [Unity compute kernels with no code](../../../docs/reference/shaders.md#unity-compute-kernels-with-no-code): 11 of 142 kernels in `Data/resources.assets` have none, which cost the split the whole file.
+- [Handles built under a guard the read's guard cannot be tied to](../../../docs/reference/shaders.md#handles-built-under-a-guard-the-reads-guard-cannot-be-tied-to): 364 of its 22,072 shaders change, 319 of them read a texture word with no sampler word (mostly `Jungle_Dave_Uber`). None drew in the sampled frames of a run from `save_d1boat`, so no picture was compared.
 
 ## Open
 

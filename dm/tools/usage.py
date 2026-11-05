@@ -12,8 +12,11 @@
 # Impact: the changed functions of a git range (hunks mapped to the C / Objective-C / Python function around them), widened to their callers in the host (a call graph made by
 # a scanner, not a compiler), the NVN entry points (NVN(...) in hle_nvn.c) and HLE symbols ({"symbol", fn} tables) among those callers, and the coarse rules of
 # dm/tools/impact_map.tsv (a file, or a function in it, → usage rows) → the games whose manifests hold any of them; games without a manifest are unknown.
-import collections, fnmatch, json, re, subprocess
+import collections, fnmatch, json, os, re, subprocess, sys
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import shader_lib
 
 REPO = Path(__file__).resolve().parents[2]
 NOTE_SKIP = ('not in the answer table',)
@@ -50,9 +53,9 @@ MSL_TAGS = [
 
 
 def shader_features(lib):
-    """{feature: number of shaders} of one chain build's b-<V> folder"""
+    """{feature: number of shaders} of one chain build's b-<V> library, a folder or one file"""
     c = collections.Counter()
-    for j in sorted(Path(lib).glob('*_b.json')):
+    for j in sorted(shader_lib.view(lib).glob('*_b.json')):
         try: r = json.loads(j.read_bytes())
         except ValueError: continue
         f = {'stage:' + str(r.get('stage'))}

@@ -170,6 +170,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `tbuf_as_2d` (`nvn_mtl.m`) views a 32-bit integer buffer in a slot declared float as the float format of the same size (`tbuf_view_format`), so the shader reads the stored bits.
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md). No visible change in its tutorial area.
 
+### Integer textures read through float slots
+
+- **Symptom:** none visible on an M6, where at most 0.23 % of pixels differ between paired runs. GitHub issue #783 reports wrong light offsets on an M2.
+- **Cause:** as for [buffer textures](#integer-buffer-textures-read-through-float-slots), but for a 2D texture: with no type answer the translator declares it float, and the shader takes the fetched bits back with `as_type<int>`. The answer table cannot say otherwise, because the format is known only at bind time.
+- **Fix:** `tex_float_fit` (`nvn_mtl.m`) binds the float view of the same size (`tbuf_view_format`) in a slot declared float. A texture made without the format-view usage is upgraded before the next draw pass (`img_fit_upgrade`). 32-bit formats only: a smaller integer format has no float view that keeps its bits.
+- **Found on:** [Metroid Prime Remastered](../../dm/games/010012101468C000/README.md): the clustered lighting's R32Uint light grid (`fde1a3e769219a77` and the other world materials). Reported and fixed by nobz226.
+- **Check:** `t_int_float_view` reads small integers (denormal floats), NaN patterns and negatives through the R32Float view in a compute shader and takes back every bit.
+
 ### Buffer textures at offsets below 16 bytes
 
 - **Symptom:** particle effects drawn at the wrong scale or place, or flickering, where the particle data is a buffer texture at a pool offset that is not a multiple of 16; log line `buffer texture at pool offset …, below Metal's 16-byte alignment`.
@@ -209,6 +217,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `nvn_tex.c` `sparse_tile_h` gives such a texture its tile's block height; a packaged layout still wins.
 - **Found on:** [OCTOPATH TRAVELER](../../dm/games/010057D006492000/README.md) (Unreal Engine 4.18 flags its streamed and CPU-loaded textures sparse).
 - **Check:** the map's guest bytes deswizzled in Python at 1 to 32 GOBs read right only at 8; a 512×512 RGBA8 sprite sheet only at 16; [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md)'s packaged ASTC 6×6 textures (16 bytes per block) carry 8 in their layout. The 1- and 2-byte heights follow the same tile shapes and were not seen.
+
+### Sparse 3D textures take the standard 3D tile
+
+- **Symptom:** none visible on an M6 on the Frigate Orpheon's deck. Laid out 1 GOB high, the mapped tiles of a streamed 3D texture fall in scattered places, so lookups read zero in the holes; GitHub issue #783 reports a black gunship hull in the opening on an M2.
+- **Cause:** a sparse 3D texture without a packaged layout took the automatic layout (1 GOB high, 32 GOBs deep). Its 64 KB tile is the standard 3D shape: 64x32x32, 32x32x32, 32x32x16, 32x16x16 and 16x16x16 blocks for 1, 2, 4, 8 and 16 bytes per block.
+- **Fix:** `nvn_tex.c` `sparse_tile_h3`, `sparse_tile_d3` give such a texture its tile's block height and depth when level 0 is at least one tile in each direction; a packaged layout still wins, and a smaller texture keeps the automatic layout. `nvnTextureBuilderGetSparseTileLayout` answers the same shape.
+- **Found on:** [Metroid Prime Remastered](../../dm/games/010012101468C000/README.md): its six 512x256x368 lighting volumes map the same tile indices whichever shape the host reports (256x32x16 or 128x64x16 texels for BC1), so the game's layout is fixed. With this shape BC1's tiles 5-7 and 9-11 of a 16-slice slab and BC6H's 10-15 and 18-23 are the same texels, 128..512 x 64..192. With 1-GOB blocks they were two different patchworks. Reported and fixed by nobz226.
+- **Check:** `t_sparse_layout` fills those tiles of both formats and decodes exactly that box, in exactly that slab, plus the tile shapes of 1, 2, 4 and 8 bytes per block. Only 8 and 16 bytes per block were seen in a game; the others follow the same table. Metal cannot confirm the shape: `sparseTileSizeWithTextureType:` gives a 3D texture the 2D tile with depth 1.
 
 ### Sparse textures of 8- and 16-byte blocks: blocks at most 8 GOBs high
 
@@ -914,6 +930,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Cause:** the game keeps NVN's lower-left window origin (handled as for Link's Awakening, [Lower-left window origin](#lower-left-window-origin)) and, twice a frame, sets viewport 0's swizzle with `nvnCommandBufferSetViewportSwizzles` to (x, −y, z, w), which negates clip-space y: how a renderer with OpenGL heritage flips its picture.
 - **Fix:** the swizzle is recorded (`OP_VP_SWIZZLE`) and applied at the draw as a viewport flipped about its centre, the same mapping. Facing is decided after the swizzle on the GPU as in Metal, so the winding stays. Other swizzles (axis exchanges, negated x / z / w) give a red line and are drawn unswizzled.
 - **Found on:** [Absolum](../../dm/games/0100A83022A22000/README.md) (FNA3D's NVN driver, `FNA3D_Driver_NVN.cpp`).
+
+### Black shapes on sprites when Unreal's GPU work runs late
+
+- **Symptom:** on an Unreal Engine game with a full GPU, moving sprites flicker black for a frame: cut straight across, or a whole silhouette in the sprite's outline. It follows GPU time against the frame budget, and goes away at 30 fps or with GPU time to spare. The black is already in the scene colour the base pass writes.
+- **Cause:** a race in the engine's NVN code. A dynamic buffer keeps `nvn.NumBufferedFrames` copies (3), and each write lock moves to the next one with no fence. The render thread can come round to a copy while draws queued for the GPU still read it. If that lands between a sprite's depth prepass and its base pass, the two see different vertices: the base pass tests depth `EQUAL`, draws nothing where they differ, and the cleared black stays.
+- **Fix:** a workaround, since the missing fence is in the game's code: the rewriter gives each dynamic buffer a fourth copy (`dm/tools/ue_ring.py`, called by `patch_nso.py`), with no build ID, on any main where its chain holds. A buffer has room for exactly 4. The variable itself cannot be set to 4: its other readers size fixed tables, and the deferred-delete table has room for 3, so only the constructor's load changes. Open: this adds one lock of margin and no fence, so a GPU further behind, or a buffer locked more than once a frame, can still reach a queued copy. A single comparison has been run (5 black frames against 0 at equal load), and hit counts vary between runs. The fallback is copying small vertex streams at encode, which gave 0 against 10 and 14 in a diagnostic build; it costs every game a copy per draw and does not cover index buffers.
+- **Found on:** [TRIANGLE STRATEGY](../../dm/games/0100CC80140F8000/README.md), [issue #1040](https://github.com/seedds/nxnative/issues/1040).
 
 ## Uniforms, copies and ordering
 

@@ -4,17 +4,17 @@
 # Source of query answers: the answer table in the game profile, dm/games/<id>/shader_facts.tsv (dmsh_facts.py) - texture types, vertex attribute / fragment output component types, compute thread group size and shared memory.
 # Usage: dmsh_build.py <Switch package dir> <output cache dir> [key...] (no keys = all); build output is actually written to <output cache dir>/b-<chain version>/ (same for IOSOUT), for the chain version see dmsh_chain.py.
 # A full build (no keys) also stamps both directories with the game and the digest of its profile inputs (inputs.tsv) and writes the profile's c1_full.tsv and cb_extent.tsv (c1_guard.py, cb_extent.py)
-# from its Mac outputs. One output directory per game: the chain version is the same for every game   Environment: DM_GAME=game profile (required, dm/games/<id>), XLATE=path to the translation tool (default the in-repo dmsh_xlate_bin), DMSH_CAS=content-addressed cache dir (default <output cache dir>/cas), DMSH_PREFILL=Mac library root[=iOS library root] (separated by :, their b-*/ go into the MSL-keyed compile cache first; sibling b-*/ always do), J=concurrency
+# from its Mac outputs. One output directory per game: the chain version is the same for every game   Environment: DM_GAME=game profile (required, dm/games/<id>), XLATE=path to the translation tool (default the in-repo dmsh_xlate_bin), DMSH_CAS=the compile cache, one file (shader_cache.py; default <output cache dir>/cas.db), DMSH_PREFILL=Mac library root[=iOS library root] (separated by :, their b-*/ go into the MSL-keyed compile cache first; sibling b-*/ always do), J=concurrency
 # Build output: <key>_b.metallib, <key>_b.json (replay reflection, including drv_reads, the runtime read offsets into driver segments c0 / c2), <key>_b.metal (MSL)
 # Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately);
 # a [RED] line per shader that built but lost something (shader_regressions.report_losses), which does not change the exit status
-import inspect, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, collections, threading, concurrent.futures as cf
+import atexit, inspect, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, collections, threading, concurrent.futures as cf
 import dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_pch, dmsh_vin, dmsh_pull, dmsh_side, dmsh_mesh, dmsh_ampere, shader_regressions, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_pch, dmsh_vin, dmsh_pull, dmsh_side, dmsh_mesh, dmsh_ampere, shader_regressions, shader_cache, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
 _bad = tool_lock.check_tools()
 if _bad: sys.exit('\n'.join('[RED] translation chain tools do not match the lock file: ' + b for b in _bad) + '\n(if the tools changed, run tool_lock.py --update-lock and commit the lock file; if the translator just was not rebuilt, rebuild it)')
 CHAIN = dmsh_chain.version(); out = os.path.join(out, 'b-' + CHAIN)
@@ -33,6 +33,7 @@ TARGETS = {t.strip() for t in (os.environ.get('DMSH_TARGETS') or ('mac,ios' if I
 if not TARGETS or not TARGETS <= {'mac', 'ios'}: sys.exit(f'[RED] DMSH_TARGETS takes mac and/or ios: {",".join(sorted(TARGETS)) or "empty"}')
 if 'ios' in TARGETS and not IOSOUT: sys.exit('[RED] DMSH_TARGETS asks for iOS libraries without IOSOUT')
 if 'ios' not in TARGETS: IOSOUT = None   # every side library, cache, cleanup and stamp follows the same selection
+IOS_PULL = os.environ.get('DMSH_IOS_PULL') != '0'   # DMSH_IOS_PULL=0: no iOS pulling libraries, when nothing in the app reads them (the NSP script's ios_wants_pulling). The reflection is the same: its 'pull' comes from the variant, not from the compile
 if IOSOUT:
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../ios/tools')); import ios_metal
     IOSOUT = os.path.join(IOSOUT, 'b-' + CHAIN); os.makedirs(IOSOUT, exist_ok=True)
@@ -232,7 +233,8 @@ def border_emu(msl):
         twin = f'spvDescriptorSet0.{m.group(2)}{abi.BORDER_TWIN}'
         msl = msl[:m.start()] + f'dm_bs({msl[m.start():i]}, spvDescriptorSet0.{abi.BORDER_MEMBER}, {bit[m.group(2)]}u, spvDescriptorSet0.{m.group(1)}, {twin}, {args})' + msl[i:]
     return msl.replace('using namespace metal;\n', 'using namespace metal;\n' + BORDER_HELPERS, 1)
-CAS =os.environ.get('DMSH_CAS', os.path.join(cache_root, 'cas'))
+STORE = shader_cache.Store(os.environ.get('DMSH_CAS', os.path.join(cache_root, 'cas.db')))
+atexit.register(STORE.close)   # folds its log into the one file
 CAS_LOCKS, CAS_LOCKS_GUARD = {}, threading.Lock()
 PRE_STATS = collections.Counter()
 # -fpreserve-invariance: vertex positions are marked [[invariant]], but without this flag Metal does not promise that two different shaders compute the same expression to the same value; on Maxwell the same multiply-adds always agree.
@@ -304,8 +306,8 @@ def shader_key(key, name, rec):
 def pair_keyed(digest, pixel_digests):   # a vertex shader's key with its pixel shaders' keys (vs_pad)
     return hashlib.sha256((digest + '\0' + ','.join(pixel_digests)).encode()).hexdigest()
 
-def cache_meta_path(key): return os.path.join(CAS, 'index', key + '.json')
-def cache_path(digest): return os.path.join(CAS, 'shader', digest)
+def cache_meta_path(key): return f'index/{key}.json'
+def cache_path(digest): return f'shader/{digest}'
 CAS_USED = '_b_cas.txt'   # in the Mac library directory b-<V>/: the cache_path digests of its last full build, one per line
 
 def cache_outputs(key, digest, cached=False):
@@ -315,10 +317,10 @@ def cache_outputs(key, digest, cached=False):
         # fin(), paired vertex padding and the profile tables also need these on an iOS-only cache hit.
         required = [key + '_b.json'] + ([key + '_b.metal'] if label == 'mac' else [])
         if label in TARGETS: required.append(key + '_b.metallib')
-        base = os.path.join(root, label) if cached else directory
+        have = STORE.names(f'{root}/{label}/') if cached else set()
         names = required + [key + s + ext for s in ('_bg0', '_bg1', '_bg2', '_bg3', '_bg4', '_bgv', '_bl0', '_bl1', '_bl3') for ext in ('.metallib', '.json', '.metal')
                             if (label == 'mac' or ext != '.metal') and (ext != '.metallib' or label in TARGETS)]
-        found = [n for n in names if os.path.exists(os.path.join(base, n))]
+        found = [n for n in names if (f'{root}/{label}/{n}' in have if cached else os.path.exists(os.path.join(directory, n)))]
         if not all(n in found for n in required): return None
         files[label] = found
     return root, files
@@ -330,19 +332,21 @@ def restore_cache(key, digest):
     for label, names in files.items():
         directory = out if label == 'mac' else IOSOUT
         for name in names:
-            src = os.path.join(root, label, name); dst = os.path.join(directory, name)
+            src = f'{root}/{label}/{name}'; dst = os.path.join(directory, name)
             if name.endswith('.json'):
+                data = STORE.get(src)
+                if data is None: return False   # pruned by another build since the look above: a miss, which builds it
                 tmp = dst + '.tmp-' + str(os.getpid()) + '-' + str(threading.get_ident())
-                with open(tmp, 'wb') as f: f.write(re.sub(rb'("chain"\s*:\s*")[^"]*"', rb'\g<1>' + CHAIN.encode() + b'"', open(src, 'rb').read(), count=1))
+                with open(tmp, 'wb') as f: f.write(re.sub(rb'("chain"\s*:\s*")[^"]*"', rb'\g<1>' + CHAIN.encode() + b'"', data, count=1))
                 os.replace(tmp, dst)
-            else: clone(src, dst)
+            elif not STORE.to_file(src, dst): return False
     return True
 
 def cache_lookup(key, digest, rule_fp, code_fp):
     with CAS_LOCKS_GUARD: lock = CAS_LOCKS.setdefault(('shader', key), threading.Lock())
     with lock:
         if restore_cache(key, digest): PRE_STATS['hit'] += 1; return True, 'hit'
-        old = json.load(open(cache_meta_path(key))) if os.path.exists(cache_meta_path(key)) else None
+        old = json.loads(STORE.get(cache_meta_path(key)) or b'null')
         if old and old.get('code_fp') != code_fp: reason = 'code fingerprint changed: all rebuilt'
         elif old and old.get('rule_fp') != rule_fp: reason = 'rule changed'
         else: reason = 'new key'
@@ -354,15 +358,15 @@ def publish_cache(key, digest, rule_fp, code_fp):
     found = cache_outputs(key, digest)
     if not found: return
     root, files = found
-    for label, names in files.items():
-        d = os.path.join(root, label); os.makedirs(d, exist_ok=True)
-        for name in names: clone(os.path.join(out if label == 'mac' else IOSOUT, name), os.path.join(d, name))
-        for name in names:
-            if name.endswith('.json'):
+    with STORE.batch():   # a stop leaves the whole entry or none of it
+        for label, names in files.items():
+            for name in names:
                 src = os.path.join(out if label == 'mac' else IOSOUT, name)
-                value = json.load(open(src)); value.pop('fetch', None); value.pop('vin', None); value.pop('pull', None); value.pop('alpha', None); value.pop('logic', None)   # the side libraries are made again from the restored MSL (fetch_finish, vin_finish, pull_finish, alpha_finish, logic_finish)
-                atomic_json(os.path.join(d, name), value)
-    atomic_json(cache_meta_path(key), {'digest': digest, 'rule_fp': rule_fp, 'code_fp': code_fp})
+                if name.endswith('.json'):
+                    value = json.load(open(src)); value.pop('fetch', None); value.pop('vin', None); value.pop('pull', None); value.pop('alpha', None); value.pop('logic', None)   # the side libraries are made again from the restored MSL (fetch_finish, vin_finish, pull_finish, alpha_finish, logic_finish)
+                    STORE.put(f'{root}/{label}/{name}', json.dumps(value, ensure_ascii=False, indent=1).encode())
+                else: STORE.put_file(f'{root}/{label}/{name}', src)
+        STORE.put(cache_meta_path(key), json.dumps({'digest': digest, 'rule_fp': rule_fp, 'code_fp': code_fp}).encode())
 
 BF_STATS = collections.Counter()
 
@@ -375,24 +379,25 @@ def bf_digest(msl, key):
     h.update(b'\0bf-want\0' + (b'1' if key in BF_WANT else b'0'))
     return h.hexdigest()
 
-def bf_cache_root(digest): return os.path.join(CAS, 'variant', digest)
+def bf_cache_root(digest): return f'variant/{digest}'
 
 def bf_cache_restore(key, digest, fmeta, fmsl):
     root = bf_cache_root(digest)
     names = ['metal'] + (['mac.metallib'] if 'mac' in TARGETS else []) + (['ios.metallib'] if IOSOUT else [])
-    if not all(os.path.exists(os.path.join(root, n)) for n in names): return False
-    clone(os.path.join(root, 'metal'), fmsl)
-    if 'mac' in TARGETS: clone(os.path.join(root, 'mac.metallib'), os.path.join(out, key + '_bf.metallib'))
-    if IOSOUT: clone(os.path.join(root, 'ios.metallib'), os.path.join(IOSOUT, key + '_bf.metallib'))
+    if not all(STORE.has(f'{root}/{n}') for n in names): return False
+    STORE.to_file(f'{root}/metal', fmsl)
+    if 'mac' in TARGETS: STORE.to_file(f'{root}/mac.metallib', os.path.join(out, key + '_bf.metallib'))
+    if IOSOUT: STORE.to_file(f'{root}/ios.metallib', os.path.join(IOSOUT, key + '_bf.metallib'))
     BF_STATS['hit'] += 1
     return True
 
 def bf_cache_publish(digest, fmsl, maclib, ioslib, fmeta):
-    root = bf_cache_root(digest); os.makedirs(root, exist_ok=True)
-    clone(fmsl, os.path.join(root, 'metal'))
-    if maclib: clone(maclib, os.path.join(root, 'mac.metallib'))
-    if IOSOUT: clone(ioslib, os.path.join(root, 'ios.metallib'))
-    atomic_json(os.path.join(root, 'fetch.json'), fmeta)
+    root = bf_cache_root(digest)
+    with STORE.batch():
+        STORE.put_file(f'{root}/metal', fmsl)
+        if maclib: STORE.put_file(f'{root}/mac.metallib', maclib)
+        if IOSOUT: STORE.put_file(f'{root}/ios.metallib', ioslib)
+        STORE.put(f'{root}/fetch.json', json.dumps(fmeta, ensure_ascii=False, indent=1).encode())
 
 def write_refl(key, refl):
     for target, d in (('mac', out),) + ((('ios', IOSOUT),) if IOSOUT else ()):
@@ -463,7 +468,7 @@ def pull_finish(key, full, refl):
     msl = os.path.join(w, key + '_bp.metal'); open(msl, 'w').write(v)
     try:
         if 'mac' in TARGETS: MTL.compile('mac', msl, libs[0])
-        if IOSOUT: MTL.compile('ios', msl, libs[1])
+        if IOSOUT and IOS_PULL: MTL.compile('ios', msl, libs[1])
     except subprocess.CalledProcessError as e:
         PULL_STATS['failed'] += 1; print(f'[RED] {key}: the pulling library does not compile ({str(e)[:120]}): its pipelines are always built for the draw\'s vertex layout', flush=True)
         drop(); return refl
@@ -1476,7 +1481,7 @@ for _d in [out] + ([IOSOUT] if IOSOUT else []):
     if (not want or STAMP_BEFORE != INPUTS) and os.path.exists(os.path.join(_d, dmsh_chain.STAMP)): os.unlink(os.path.join(_d, dmsh_chain.STAMP))
     if not want and os.path.exists(os.path.join(_d, CAS_USED)): os.unlink(os.path.join(_d, CAS_USED))   # written again at the end, with the stamp
 w = tempfile.mkdtemp(prefix='dmsh_', dir=os.environ.get('WORK'))
-MTL = dmsh_mtlcache.Cache(os.path.join(CAS, 'metallib'), {'mac': ('macosx', MAC_RECORD, mac_compile), **({'ios': ('iphoneos', ios_metal.RECORD, ios_metal.compile)} if IOSOUT else {})}, w)
+MTL = dmsh_mtlcache.Cache(STORE, {'mac': ('macosx', MAC_RECORD, mac_compile), **({'ios': ('iphoneos', ios_metal.RECORD, ios_metal.compile)} if IOSOUT else {})}, w)
 # first take the libraries earlier chain versions left on disk: the b-*/ beside the output (iOS: the folder of the same name) and the roots DMSH_PREFILL lists
 for _spec in [cache_root + ('=' + os.path.dirname(IOSOUT) if IOSOUT else '')] + [x for x in os.environ.get('DMSH_PREFILL', '').split(os.pathsep) if x]:
     _mac, _, _ios = _spec.partition('=')

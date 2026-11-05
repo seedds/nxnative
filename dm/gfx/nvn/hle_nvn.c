@@ -1588,6 +1588,11 @@ static void power_line(uint64_t frame) {
         if (fs_ != pfs || fr != pfr || ft != pft) LOG("[nvn] same-pass feedback up to frame %llu, per frame: %.1f snapshots taken, %.1f draws reused one, %.1f read the tile (%.1f waited for their pipeline)",
             frame, (fs_ - pfs) / nf, (fr - pfr) / nf, (ft - pft) / nf, (fw - pfw) / nf);
         pfs = fs_; pfr = fr; pft = ft; pfw = fw;
+        void mtl_fb_split_stats(uint64_t[3], uint64_t[2]); static uint64_t psb[3], pdp[2]; uint64_t sb[3], dp[2]; mtl_fb_split_stats(sb, dp);   // which earlier read ended a pass (fb_prepare)
+        if (memcmp(sb, psb, sizeof sb) || memcmp(dp, pdp, sizeof dp)) LOG("[nvn] passes ended before a write to an attachment an earlier draw read, up to frame %llu, per frame: colour %.1f, depth named by a slot or handle %.1f, "
+            "depth only a pool or dynamic shader could read %.1f; pool shaders drawn with a depth attachment whose tables could hold it %.1f, could not %.1f (DM_NVN_FB_DPOOL)",
+            frame, (sb[0] - psb[0]) / nf, (sb[1] - psb[1]) / nf, (sb[2] - psb[2]) / nf, (dp[0] - pdp[0]) / nf, (dp[1] - pdp[1]) / nf);
+        memcpy(psb, sb, sizeof sb); memcpy(pdp, dp, sizeof dp);
         char tc[400]; dm_thread_cpu(tc, sizeof tc, s);
         LOG("[nvn] threads up to frame %llu: CPU %s", frame, tc); }
     else { char yt[192], rs[400], tc[400]; dm_yield_top(yt, sizeof yt); mtl_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); }   // the first call only takes the baselines

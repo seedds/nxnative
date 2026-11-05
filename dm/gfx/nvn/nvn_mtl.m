@@ -10088,7 +10088,9 @@ void ms_after(void) {
 // DM_NVN_FB_SNAP=0 none, all a fresh snapshot for every draw sampling an attachment of its pass (diagnostic); DM_NVN_FB_TILE=0 no tile reads
 static int g_fb_mode = -1;   // 0 none, 1 writers with reuse until a barrier, 2 every sampling draw, fresh
 static uint64_t g_fb_bar, g_fb_reuse, g_fb_split;   // game barriers so far (OP_BARRIER with bits); draws that reused a snapshot; passes ended before a write to an attachment an earlier draw read
-static uint64_t g_fb_pass = UINT64_MAX; static uint32_t g_fb_wmask, g_fb_rmask, g_fb_dread;   // the current Metal render pass: color attachments written so far, sampled directly; a draw has read its depth attachment (or could have: bindless)
+static uint64_t g_fb_split_by[3], g_fb_dpool[2];   // those passes by cause: a colour attachment, the depth attachment named by a slot or handle, the depth attachment only a pool or dynamic shader could read; pool shaders drawn with a depth attachment whose tables could hold it [0] or could not [1] (fb_depth_reader)
+enum { FB_DR_SEEN = 1, FB_DR_POOL = 2 };   // g_fb_dread: a slot or handle of an earlier draw named the depth attachment; an earlier pool or dynamic shader could have read it
+static uint64_t g_fb_pass = UINT64_MAX; static uint32_t g_fb_wmask, g_fb_rmask, g_fb_dread;   // the current Metal render pass: color attachments written so far, sampled directly; a draw has read its depth attachment, or could have (FB_DR_*)
 typedef struct { uint64_t ser, bar, sub, use; int lv, sl; __strong id<MTLTexture> snap; } fb_cache_t;   // use: when it was last taken or reused (g_fbc_use)
 static fb_cache_t g_fbc[8]; static uint64_t g_fbc_use;
 static int fb_mode(void) {
@@ -10206,6 +10208,50 @@ static int fb_texu_reads(NvShader *fs, uint64_t ser) {
             if (s == ser) return 1; } }
     return 0;
 }
+// A pool shader (TEXP) reads through a table of every ID registered from the bound base up (pool_gpu), so it can read the depth attachment only through an ID over its storage.
+// DM_NVN_FB_DPOOL=1 counts a pool shader as a depth reader only when its tables could hold one (fb_pool_meets); 0 (the default) every pool shader, as before; ab: the two in turn
+// (DM_AB). Off by default: in Ocarina of Time the table of every pool draw with a depth attachment holds a view of the depth texture itself, so it ends no fewer passes there,
+// and a table without such an ID costs a walk of every registered ID
+static int g_fb_dpool_m = -1;   // sw_mode's value (tests set it)
+static int fb_dpool_mode(void) { if (g_fb_dpool_m < 0) g_fb_dpool_m = sw_mode("DM_NVN_FB_DPOOL", 0); return g_fb_dpool_m; }
+// Where a texture's storage lies in guest memory, [*lo, *hi). 0 when that is not known, which callers take as overlapping anything: no address, or a pool that is sparse (its pages
+// can map any physical page) or not mapped yet, or a virtual pool mapped elsewhere since the texture was made. Storage is compared rather than serials, so that an alias or a view of
+// the same memory counts. Caller holds g_rmu (a registered ID's pool is live then: finalizing it marks the ID gone first)
+static int tex_span(const tex_t *t, uint64_t *lo, uint64_t *hi) {
+    const pool_t *p = t->pool;
+    if (!t->mem || (p && (nvn_sparse_pool(p) || p->mem + t->off != t->mem))) return 0;
+    *lo = (uint64_t)(uintptr_t)t->mem; *hi = *lo + (t->L.size ? t->L.size : 1); return 1;
+}
+// The first ID from base up whose storage meets [lo, hi) or is not known (tex_span), 0 if none: the pool tables a draw binds hold nothing else. Every type is taken, though a
+// table holds only its binding's. No ID is resolved to its texture (pool_gpu does that for the IDs it takes). One walk per registration generation, base and range, as a frame
+// binds one pool for many draws; a pool finalized since only turns IDs into the dummy, so a kept answer errs towards a reader. Caller holds g_rmu
+static struct { uint64_t reg, lo, hi; int base, id; } g_fb_dpc[4]; static unsigned g_fb_dpc_next;
+static int fb_pool_meets(int base, uint64_t lo, uint64_t hi) {
+    uint64_t rg = atomic_load(&g_reg_gen);
+    for (int i = 0; i < 4; i++) if (g_fb_dpc[i].reg == rg && g_fb_dpc[i].base == base && g_fb_dpc[i].lo == lo && g_fb_dpc[i].hi == hi) return g_fb_dpc[i].id;
+    int hit = 0;
+    for (int id_ = MAX(base, 1); id_ < g_ntreg && !hit; id_++) { const treg_t *r = &g_treg[id_]; uint64_t a, b;
+        if (r->ok && !r->gone && (!tex_span(&r->t, &a, &b) || (a < hi && lo < b))) hit = id_; }
+    g_fb_dpc[g_fb_dpc_next++ % 4] = (__typeof__(g_fb_dpc[0])){rg, lo, hi, base, hit};
+    return hit;
+}
+// Whether this draw could read its depth attachment through a texture chosen at replay (fb_prepare checks the slots): FB_DR_POOL through a pool or dynamic array, FB_DR_SEEN when
+// a handle in a uniform buffer names it (fb_texu_reads)
+static uint32_t fb_depth_reader(NvShader *fs) {
+    if (fs->rf.dyn) return FB_DR_POOL;
+    if (fs->rf.pool) {
+        if (!sw_on(fb_dpool_mode())) return FB_DR_POOL;
+        int texp = 0; for (int i = 0; i < fs->rf.nb && !texp; i++) texp = fs->rf.b[i].kind == NVN_RB_TEXP;
+        uint64_t lo, hi, ser = 0; int id_ = 0, known;
+        os_unfair_lock_lock(&g_rmu); known = tex_span(R.rt.depth, &lo, &hi); if (texp && known && (id_ = fb_pool_meets(S.tex_base, lo, hi))) ser = g_treg[id_].t.serial; os_unfair_lock_unlock(&g_rmu);
+        int reads = texp && (!known || id_); g_fb_dpool[!reads]++;
+        if (reads && g_fb_dpool[0] == 1) MLOG("same-pass feedback sampling: pool shader %s counts as a reader of depth attachment ser=%llu: %s %d (ser=%llu)", fs->key, (unsigned long long)R.rt.depth->serial,
+                                              known ? "its pool table can hold it through ID" : "its storage address is not known, ID", id_, (unsigned long long)ser);
+        if (reads) return FB_DR_POOL;
+    }
+    return fs->rf.bindless && fb_texu_reads(fs, R.rt.depth->serial) ? FB_DR_SEEN : 0;
+}
+void mtl_fb_split_stats(uint64_t by[3], uint64_t dpool[2]) { memcpy(by, g_fb_split_by, sizeof g_fb_split_by); memcpy(dpool, g_fb_dpool, sizeof g_fb_dpool); }   // the periodic line (hle_nvn.c)
 // Called before the draw opens its render pass: if a snapshot is needed, end the current render pass, copy the snapshot (or reuse a valid one) and register the substitution (used by this draw's argument encoding)
 static void fb_prepare(NvProg *pr) {
     g_draw_seq++; g_fb_n = 0;
@@ -10215,11 +10261,11 @@ static void fb_prepare(NvProg *pr) {
     fb_pass_sync();
     uint32_t wm = 0;   // the attachments this draw writes
     for (int k = 0; k < R.rt.n && k < 8; k++) if (R.rt.color[k] && ((S.chmask.mask >> (4 * k)) & 0xf) && (fs->rf.color_known ? fs->rf.color_mask >> k & 1 : 1)) wm |= 1u << k;
-    if (g_enc && (wm & g_fb_rmask)) { g_fb_split++; rp_end(); fb_pass_sync(); }   // an earlier draw of this pass read an attachment this one writes: it must not see these writes
+    if (g_enc && (wm & g_fb_rmask)) { g_fb_split++; g_fb_split_by[0]++; rp_end(); fb_pass_sync(); }   // an earlier draw of this pass read an attachment this one writes: it must not see these writes
     int dsw = R.rt.depth && ((S.ds.dt && S.ds.dw) || (S.ds.st && (S.st_wmask[0] || S.st_wmask[1]) && (S.ds.fail_f != NVN_STENCIL_OP_KEEP || S.ds.zfail_f != NVN_STENCIL_OP_KEEP || S.ds.zpass_f != NVN_STENCIL_OP_KEEP
         || S.ds.fail_b != NVN_STENCIL_OP_KEEP || S.ds.zfail_b != NVN_STENCIL_OP_KEEP || S.ds.zpass_b != NVN_STENCIL_OP_KEEP)));
-    if (g_enc && dsw && g_fb_dread) { g_fb_split++; rp_end(); fb_pass_sync(); }   // the same for its depth and stencil (see rtc_on)
-    if (R.rt.depth && !g_fb_dread && (fs->rf.pool || fs->rf.dyn || (fs->rf.bindless && fb_texu_reads(fs, R.rt.depth->serial)))) g_fb_dread = 1;
+    if (g_enc && dsw && g_fb_dread) { g_fb_split++; g_fb_split_by[g_fb_dread & FB_DR_SEEN ? 1 : 2]++; rp_end(); fb_pass_sync(); }   // the same for its depth and stencil (see rtc_on)
+    if (R.rt.depth && !g_fb_dread) g_fb_dread = fb_depth_reader(fs);
     uint64_t tile[4]; int ntile = fb_tile_plan(pr, wm, tile);
     for (int i = 0; i < fs->rf.nb && g_fb_n < 4; i++) {
         const nvn_rbind *b = &fs->rf.b[i];
@@ -10229,7 +10275,7 @@ static void fb_prepare(NvProg *pr) {
         int tid = (int)(handle & 0xfffff); if (!tid) continue;
         os_unfair_lock_lock(&g_rmu); uint64_t ser = tid < g_ntreg && g_treg[tid].ok ? g_treg[tid].t.serial : 0; os_unfair_lock_unlock(&g_rmu);
         if (!ser) continue;
-        if (R.rt.depth && R.rt.depth->serial == ser) g_fb_dread = 1;
+        if (R.rt.depth && R.rt.depth->serial == ser) g_fb_dread |= FB_DR_SEEN;
         for (int k = 0; k < R.rt.n && k < 8 && g_fb_n < 4; k++) { if (!R.rt.color[k] || R.rt.color[k]->serial != ser) continue;
             if (!image && (tile[b->reg >> 6] >> (b->reg & 63) & 1)) { PD("N %llu same-pass feedback sampling: slot %d reads attachment %d ser=%llu from the tile", g_stat_pass + !g_enc, b->reg, k, (unsigned long long)ser); continue; }   // fb_tile_plan
             uint64_t aser; int lv, sl; rt_sub(&R.rt, k, &aser, &lv, &sl);

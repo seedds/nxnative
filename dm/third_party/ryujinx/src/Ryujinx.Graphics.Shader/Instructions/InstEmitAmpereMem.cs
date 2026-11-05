@@ -143,16 +143,20 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (stage != null)
             {
-                // A task or mesh shader's stage input (QueryAmpereStageMemory). Mode 0x78: its workgroup's number; 0x38: a word of the payload its task wrote, [Ra + offset];
-                // 0xb8: a word it wrote itself with 0x927's mode 0xb8 (Ocarina of Time's task shader 5d3a096025e375a1 reads its payload back in a later thread)
+                // A task or mesh shader's stage input (QueryAmpereStageMemory). Mode 0x78: its workgroup's number; 0x38: a word of the payload its task wrote, [Ra + offset].
+                // The mode's bits as nvdisasm names them: 0x80 .O (the output area), 0x40 .SKEW, 0x30 .ATTR, 0x08 .32. So 0xf8 (ISBERD.O.ATTR.SKEW.32) and 0xb8 (.O.ATTR.32)
+                // read back a word the shader's own ISBEWR of the same mode wrote: a mesh shader's attributes, a task's payload (AStageOut). PRAGMATA's mesh shaders
+                // 5aab38bb5ba67ef7 and 28ef097c07ceb429 read the x, y and w of each triangle's three positions back this way and swap two of its indices by the sign of
+                // their determinant (a mirrored instance's winding). Ocarina of Time's task shader 5d3a096025e375a1 reads its payload back with 0xb8 in a later thread
                 int mode = x.Bits(72, 80);
 
-                if (mode != 0x78 && mode != 0x38 && mode != 0xb8)
+                if (mode != 0x78 && mode != 0x38 && mode != 0xf8 && mode != 0xb8)
                 {
                     throw AFail(context, $"ISBERD mode {mode:x2} in a task or mesh shader");
                 }
 
-                Operand addr = mode == 0x78 ? Const(stage[0]) : context.IAdd(AGpr(x.Ra), Const(stage[mode == 0xb8 ? 2 : 1] + (int)x.SignedField(40, 64)));
+                int baseOffset = mode switch { 0x38 => stage[1], 0xf8 or 0xb8 => stage[2], _ => 0 };
+                Operand addr = mode == 0x78 ? Const(stage[0]) : context.IAdd(AGpr(x.Ra), Const(baseOffset + (int)x.SignedField(40, 64)));
                 EmitLoad(context, StorageKind.SharedMemory, LsSize2.B32, addr, x.Rd, 0);
                 return;
             }

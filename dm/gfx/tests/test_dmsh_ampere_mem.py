@@ -139,6 +139,38 @@ class GuardedWrites(Translated):
         self.assertEqual(msl.count('.sample('), 1)
 
 
+class OneHandleTwoShapes(Translated):
+    # One handle (R16 = c3[0x28] under P4; R16 |= c3[0x70]) read by a 2D TEX and by a 2D array TEX, each result atomically added to an image so both stay: PRAGMATA's material pixel
+    # shaders (dcc904c2f0950fb4 and 7 others) read c6[0x38] | c0[0x410] so. The binding was declared with the type of the read that registered it last, the array, and the 2D read gave its
+    # two coordinates to the arrayed image: invalid SPIR-V, and "vector component access exceeds type 'float2'" in the MSL (the layer read as .z of the 2D coordinate). Either order now
+    # declares the array, and the 2D read takes layer 0
+    HANDLE = [(0x040fe20003f85070, 0x000000070800780c), (0x000fc60000000f00, 0x00c00a0000104a02), (0x000fc600078efcff, 0x00c01c0010107a12)]
+    TEX_2D = [(0x00014200049e03ff, 0x380000100e127361), (0x020ea200001ee000, 0x00000c12030c7593)]   # TEX 2D R18 through R16, added to the image
+    TEX_ARRAY = [(0x00014200049e03ff, 0xa80000100c147361), (0x020ea200001ee000, 0x00000c14030c7593)]   # TEX 2D array (dimension 5, no .SCR: layer, x, y in R12..R14) R20 through R16
+
+    def reads(self, *parts):
+        msl = self.translate(b''.join(inst(*c) for part in (self.HANDLE, *parts, [EXIT]) for c in part))
+        self.assertEqual(re.findall(r'(texture2d(?:_array)?)<float> cp_t_cb262147_1007000A\b', msl), ['texture2d_array'])
+        self.assertEqual(msl.count('cp_t_cb262147_1007000A.sample('), 2)
+        widths = {name: int(n or 1) for n, name in re.findall(r'\bfloat(\d?) (_\d+) =', msl)}
+        for name, comp in re.findall(r'\b(_\d+)\.([xyzw])\b', msl):
+            if name in widths:
+                self.assertLess('xyzw'.index(comp), widths[name], f'{name}.{comp} of a float{widths[name]}')   # no coordinate component beyond its vector
+        self.assertEqual(len(re.findall(r'cp_t_cb262147_1007000ASmplr, (_\d+)\.xy, uint\(rint\(\1\.z\)\)', msl)), 2)   # both reads give the array a layer
+        if os.environ.get('DMSH_TEST_METAL') == '1':
+            with tempfile.TemporaryDirectory(prefix='ampere_mem_') as d:
+                src = Path(d) / 'k.metal'; src.write_text(msl)
+                r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-std=metal3.1', '-c', str(src), '-o', str(Path(d) / 'k.air')], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+        return msl
+
+    def test_2d_read_then_array_read(self):
+        self.reads(self.TEX_2D, self.TEX_ARRAY)
+
+    def test_array_read_then_2d_read(self):
+        self.reads(self.TEX_ARRAY, self.TEX_2D)
+
+
 class Suatom(Translated):
     def test_handle_in_the_games_uniform_buffer(self):   # Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]: the same word 12, in bank 3
         msl = self.translate(inst(SUATOM[0], SUATOM[1] | 3 << 54) + inst(*EXIT))

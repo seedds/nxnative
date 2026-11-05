@@ -344,7 +344,20 @@ namespace Ryujinx.Graphics.Shader.Translation
 
             if (dict.TryGetValue(info, out TextureMeta existingMeta))
             {
-                dict[info] = MergeTextureMeta(meta, existingMeta);
+                TextureMeta merged = MergeTextureMeta(meta, existingMeta);
+
+                // nxnative: one handle read both as a texture and as an array of the same shape (PRAGMATA's material pixel shaders: c6[0x38] | c0[0x410] read 2D in two
+                // branches and 2D array with derivatives in a third, 8 shaders). The binding's declared type was the type of the instruction that registered it last, and when that
+                // was the array read the 2D reads gave two coordinates to an arrayed image: invalid SPIR-V, and in the MSL "vector component access exceeds type 'float2'" (the layer
+                // read as .z of the 2D coordinate). Declared as the array, the other reads take layer 0 (TexturePass.InsertArrayLayer): the host gives an array binding a one-layer
+                // view of a 2D texture, and a 2D binding layer 0 of an array, so the 2D reads see what they saw before and the array read now gets its layer
+                if (!isImage && arrayLength == 1 && accurateType && existingMeta.AccurateType && (existingMeta.Type ^ type) == SamplerType.Array)
+                {
+                    merged.Type = existingMeta.Type | SamplerType.Array;
+                    meta.Type = merged.Type;
+                }
+
+                dict[info] = merged;
                 setIndex = existingMeta.Set;
                 binding = existingMeta.Binding;
             }
@@ -640,6 +653,19 @@ namespace Ryujinx.Graphics.Shader.Translation
         public int FindImageDescriptorIndex(int binding)
         {
             return FindDescriptorIndex(GetImageDescriptors(), binding);
+        }
+
+        // nxnative: the type the texture binding is declared with (the shader's resource declaration), for TexturePass.InsertArrayLayer
+        public bool TryGetDeclaredTextureType(int setIndex, int binding, out SamplerType type)
+        {
+            if (Properties.Textures.TryGetValue(new SetBindingPair(setIndex, binding), out TextureDefinition definition))
+            {
+                type = definition.Type;
+                return true;
+            }
+
+            type = SamplerType.None;
+            return false;
         }
 
         public bool IsArrayOfTexturesOrImages(int binding, bool isImage)

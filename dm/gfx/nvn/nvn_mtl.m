@@ -745,7 +745,19 @@ static int mtl_addr_known(uint64_t addr, uint64_t len) {
     pthread_mutex_lock(&g_mu); int ok = big_of(addr) >= 0 || pool_find(addr, len) >= 0; pthread_mutex_unlock(&g_mu);
     return ok;
 }
+uint64_t nvn_sparse_phys(uint64_t a, uint64_t n, uint64_t *mapped);
+// DM_NVN_SPARSE_PHYS=0: a lookup of more than one page inside a sparse pool goes through the virtual range's buffers as before (see nvn_sparse_phys)
+static uint64_t sparse_redirect(uint64_t addr, uint64_t *lenp) {   // may shorten *lenp to the mapped part
+    uint64_t len = *lenp;
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_SPARSE_PHYS"); on = !e || atoi(e); if (!on) MLOG("DM_NVN_SPARSE_PHYS=0: lookups in sparse pools are not redirected"); }
+    if (!on || len <= 0x1000) return addr;
+    uint64_t mp = 0, p = nvn_sparse_phys(addr, len, &mp); if (!p) return addr;
+    *lenp = mp;
+    static int lines; if (lines < 8) { lines++; MLOG("sparse pool lookup %#llx+%#llx → its physical pages at %#llx", (unsigned long long)addr, (unsigned long long)len, (unsigned long long)p); }
+    return p;
+}
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
+    addr = sparse_redirect(addr, &len);
     const pc_ent *c = pc_get(addr, len);
     if (c) { *buf = (__bridge void *)c->buf; *off = addr - c->base; return 1; }
     int ok = 0;
@@ -756,6 +768,7 @@ int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     return ok;
 }
 int mtl_gpu_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_t *gpu) {
+    addr = sparse_redirect(addr, &len);
     const pc_ent *c = pc_get(addr, len);
     if (c) { *buf = (__bridge void *)c->buf; *off = addr - c->base; *gpu = c->gpu + *off; return 1; }
     int ok = 0;

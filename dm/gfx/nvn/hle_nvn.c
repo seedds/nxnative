@@ -2251,7 +2251,7 @@ _Static_assert(sizeof(map_req) == 0x28, "NVNmappingRequest");
 // sparse. OCTOPATH TRAVELER (Unreal Engine 4) gives each streamed texture a virtual pool of its own (0x20000 to 0x560000 bytes, flags 0x2a1), creates the texture in it, maps its mip
 // tail from a 4 MB physical pool and later the higher mips from other pages of it, after writing their texels there on the CPU: aliased, the texture had no storage (created before any
 // mapping) and the later mappings were refused (`[RED] MapVirtual: non-contiguous mapping`). A pool larger than the application pool is sparse from the start
-enum { NVRUN = 1024, VPT_LEAF = 512 };   // a page-table leaf covers 2 MB
+enum { NVRUN = 16384, VPT_LEAF = 512 };   // a page-table leaf covers 2 MB. NVRUN: mapped runs per sparse pool (PRAGMATA maps one 1 GB pool in more than 1024 pieces by its title screen)
 typedef struct { const uint8_t *phys; uint64_t gen; } vpte;
 struct vpool { const pool_t *pool; uint8_t *base; uint64_t len, size, top; int nrun; struct { uint64_t lo, hi; } run[NVRUN]; vpte **pt; struct vlog_ent *log; _Atomic uint64_t nlog; };   // len: reserved; size: the pool's; top: highest mapped end so far (logged per 128 MB)
 struct vlog_ent { uint64_t off, len; };   // a mapping request: the pool's change log (nvn_sparse_log_read), kept once a placement sparse texture asks for it
@@ -2291,18 +2291,28 @@ static void vpool_drop(pool_t *o) {   // caller holds g_vp_mu
 }
 static void vpool_release(pool_t *o) { pthread_mutex_lock(&g_vp_mu); vpool_drop(o); pthread_mutex_unlock(&g_vp_mu); }
 // Mapped runs of a sparse pool: [lo, hi) sorted, disjoint, adjacent runs merged. Caller holds g_vp_mu
+// DM_NVN_VRUN_MAX=<n>: a smaller run table (A/B against the 1024 of before). When the table is full, the request changes nothing: before, the runs a new mapping
+// merged with were taken out of the host's pool lookup and the merged run never put back, so buffers in them resolved to another range (PRAGMATA's title terrain
+// read an empty instance buffer through its mesh stage)
+static int vrun_cap(void) { static int c; if (!c) { const char *e = getenv("DM_NVN_VRUN_MAX"); c = e && atoi(e) > 0 && atoi(e) < NVRUN ? atoi(e) : NVRUN; } return c; }
 static void vrun_set(struct vpool *v, uint64_t lo, uint64_t hi, int mapped) {
-    uint64_t nl[NVRUN][2]; int nn = 0; uint64_t mlo = lo, mhi = hi;
-    for (int k = 0; k < v->nrun; k++) {
+    static uint64_t nl[NVRUN + 2][2]; int nn = 0, cap = vrun_cap(); uint64_t mlo = lo, mhi = hi;   // caller holds g_vp_mu
+    for (int k = 0; k < v->nrun; k++) {   // the new list first, with no effect on the lookup
         uint64_t a = v->run[k].lo, b = v->run[k].hi;
-        if (b < lo || a > hi || (!mapped && (b == lo || a == hi))) { if (nn < NVRUN) { nl[nn][0] = a; nl[nn][1] = b; nn++; } continue; }   // untouched (an unmap leaves adjacent runs alone)
-        mtl_pool_del(v->base + a);
+        if (b < lo || a > hi || (!mapped && (b == lo || a == hi))) { if (nn <= cap) { nl[nn][0] = a; nl[nn][1] = b; } nn++; continue; }   // untouched (an unmap leaves adjacent runs alone)
         if (mapped) { if (a < mlo) mlo = a; if (b > mhi) mhi = b; continue; }   // joins the new run
-        if (a < lo && nn < NVRUN) { nl[nn][0] = a; nl[nn][1] = lo; nn++; mtl_pool_add(v->base + a, lo - a); }   // what the unmap leaves on either side
-        if (b > hi && nn < NVRUN) { nl[nn][0] = hi; nl[nn][1] = b; nn++; mtl_pool_add(v->base + hi, b - hi); }
+        if (a < lo) { if (nn <= cap) { nl[nn][0] = a; nl[nn][1] = lo; } nn++; }   // what the unmap leaves on either side
+        if (b > hi) { if (nn <= cap) { nl[nn][0] = hi; nl[nn][1] = b; } nn++; }
     }
-    if (mapped && nn < NVRUN) { nl[nn][0] = mlo; nl[nn][1] = mhi; nn++; mtl_pool_add(v->base + mlo, mhi - mlo); }
-    if (nn == NVRUN) LOG("[RED] virtual pool %p: more than %d separate mapped runs", (const void *)v->pool, NVRUN);
+    if (mapped) { if (nn <= cap) { nl[nn][0] = mlo; nl[nn][1] = mhi; } nn++; }
+    if (nn > cap) { static int lines; if (lines++ < 8) LOG("[RED] virtual pool %p: more than %d separate mapped runs; mapping request [%#llx, %#llx) not tracked", (const void *)v->pool, cap, (unsigned long long)lo, (unsigned long long)hi); return; }
+    for (int k = 0; k < v->nrun; k++) {   // then the lookup: old runs out, new ones in
+        uint64_t a = v->run[k].lo, b = v->run[k].hi;
+        if (b < lo || a > hi || (!mapped && (b == lo || a == hi))) continue;
+        mtl_pool_del(v->base + a);
+        if (!mapped) { if (a < lo) mtl_pool_add(v->base + a, lo - a); if (b > hi) mtl_pool_add(v->base + hi, b - hi); }
+    }
+    if (mapped) mtl_pool_add(v->base + mlo, mhi - mlo);
     for (int a = 1; a < nn; a++) for (int b = a; b > 0 && nl[b][0] < nl[b - 1][0]; b--) { uint64_t t0 = nl[b][0], t1 = nl[b][1]; nl[b][0] = nl[b - 1][0]; nl[b][1] = nl[b - 1][1]; nl[b - 1][0] = t0; nl[b - 1][1] = t1; }
     v->nrun = nn; for (int k = 0; k < nn; k++) { v->run[k].lo = nl[k][0]; v->run[k].hi = nl[k][1]; }
 }
@@ -2812,6 +2822,36 @@ static struct vpool *vpool_at(const void *pool, uint64_t a) {   // caller holds 
 }
 int nvn_sparse_pool(const void *pool) { return pool && ((const pool_t *)pool)->vp; }   // no lock: set at Initialize, cleared at the first mapping (an aliased pool) or Finalize; called per texture lookup
 uint64_t nvn_sparse_gen(void) { return atomic_load(&g_vp_gen); }
+// The physical address behind [a, a + n) of a sparse virtual pool, when every page of it is mapped, contiguously, from one physical range; 0 otherwise (or outside sparse pools).
+// A buffer the GPU reads whole across many separately remapped pieces gets a zero-copy buffer over the virtual range, which on the Mac does not see the pages remapped under it
+// (PRAGMATA's mesh stage instance buffer, 80 MB in a 1 GB sparse pool mapped in 64 KB pieces, read as zeros while the CPU and one-word lookups saw the records): nvn_mtl.m binds
+// the physical pool's own buffer at that offset instead. A one-entry cache per caller thread, keyed by the mapping generation
+uint64_t nvn_sparse_phys(uint64_t a, uint64_t n, uint64_t *mapped) {
+    if (!n || !__atomic_load_n(&g_nvp, __ATOMIC_ACQUIRE)) return 0;
+    static __thread uint64_t ca, cn, cg, cp, cm; uint64_t gen = atomic_load(&g_vp_gen);
+    if (ca == a && cn == n && cg == gen) { *mapped = cm; return cp; }
+    uint64_t m = 0;
+    uint64_t res = 0; pthread_mutex_lock(&g_vp_mu);
+    for (int k = 0; k < g_nvp; k++) { const struct vpool *v = g_vp[k]; uint64_t base = (uint64_t)(uintptr_t)v->base;
+        if (a < base || a >= base + v->len) continue;
+        uint64_t o = a - base;
+        if (o + n > v->size || (o & 0xFFF)) { static int l1; if (n >= (1u << 20) && l1++ < 6) LOG("[nvn] sparse lookup %#llx+%#llx not redirected: past the pool's size %#llx or unaligned (offset %#llx)", (unsigned long long)a, (unsigned long long)n, (unsigned long long)v->size, (unsigned long long)o); break; }
+        const vpte *t0 = vpt_get(v, o); if (!t0 || !t0->phys) { static int l2; if (n >= (1u << 20) && l2++ < 6) LOG("[nvn] sparse lookup %#llx+%#llx not redirected: its first page is unmapped", (unsigned long long)a, (unsigned long long)n); break; }
+        const uint8_t *p0 = t0->phys; int ok = 1; uint64_t q = 0x1000;   // contiguous while mapped; after the first unmapped page nothing may be mapped (the GPU reads only what is)
+        for (; q < n; q += 0x1000) { const vpte *t = vpt_get(v, o + q); if (!t || !t->phys) break; if (t->phys != p0 + q) { ok = 0; break; } }
+        m = q < n ? q : n;
+        for (uint64_t r = q; ok && r < n; r += 0x1000) { const vpte *t = vpt_get(v, o + r); if (t && t->phys) ok = 0; }
+        if (ok) res = (uint64_t)(uintptr_t)p0;
+        else if (n >= (1u << 20)) { static int lines; if (lines < 12) { lines++;   // why a large lookup is not redirected: its pieces
+            int pieces = 1, holes = 0; uint64_t mappedp = 0; const uint8_t *prev = NULL;
+            for (uint64_t r = 0; r < n; r += 0x1000) { const vpte *t = vpt_get(v, o + r); const uint8_t *ph = t ? t->phys : NULL; if (ph) mappedp++; else holes++;
+                if (r && ph && prev && ph != prev + 0x1000) pieces++; if (r && ph && !prev) pieces++; prev = ph; }
+            LOG("[nvn] sparse lookup %#llx+%#llx not redirected: %llu of %llu pages mapped, %d contiguous pieces, first break at +%#llx (phys %p)", (unsigned long long)a, (unsigned long long)n,
+                (unsigned long long)mappedp, (unsigned long long)(n >> 12), pieces, (unsigned long long)q, (const void *)p0); } }
+        break; }
+    pthread_mutex_unlock(&g_vp_mu);
+    ca = a; cn = n; cg = gen; cp = res; cm = m; *mapped = m; return res;
+}
 uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n) {
     pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); uint64_t miss = 0;
     if (!v) { pthread_mutex_unlock(&g_vp_mu); memset(dst, 0, n); return n; }

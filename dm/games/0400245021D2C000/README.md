@@ -13,7 +13,7 @@ A Switch 2 game: update v131072 (Ver. 1.0.2 on its title screen), SDK 20.5.15 bu
 | `depth_mode zero` | `game.tsv` | the game sets near = 0, so pipeline bases made offline use `main0_z` |
 | `pad_layout full` | `game.tsv` | a 3D field and both triggers in use |
 
-`subsdk0` (NVIDIA's DLSS library, 41 MB) and `subsdk1` (CUDA) are not loaded: `main` takes nothing from them that the host does not supply. There is no `tex_dyn_slots`: of the 1,519 shaders of the playtests, only the 3 under [Shaders](#shaders) have a read whose handle the translator could not trace.
+`subsdk0` (NVIDIA's DLSS library, 41 MB) and `subsdk1` (CUDA) are not loaded: `main` takes nothing from them that the host does not supply. There is no `tex_dyn_slots`: the translator traces every read's handle in the 1,519 shaders of the playtests.
 
 ## Files
 
@@ -24,7 +24,8 @@ A Switch 2 game: update v131072 (Ver. 1.0.2 on its title screen), SDK 20.5.15 bu
 
 - 133,154 in [`shader_map.tsv`](shader_map.tsv) (45,614 vertex, 60,840 pixel, 21,654 compute, 5,041 mesh, 5 geometry), split in 76 s: [Unreal Engine 5.4 shaders for the Switch 2](../../../docs/reference/shaders.md#unreal-engine-54-shaders-for-the-switch-2).
 - The runs here used a partial Mac library of the keys the playtests asked for, listed in [`shader_seen.tsv`](shader_seen.tsv) (1,519, of which 395 come from [PR 1261](https://github.com/seedds/nxnative/pull/1261)'s runs through part of the second level) ([Building selected Mac shaders](../../../docs/development.md#building-selected-mac-shaders)), which takes about a minute to build. A full build is not estimated yet; Pokopia's similar map came to about 6 hours on an M4 Pro. All of the listed shaders translate. With no stamp the host logs a red line at each start and every c1 takes its own 64 KiB.
-- Open: 3 pixel shaders (`6f91c450371a880c`, `c132ee1a17f37080`, `cbd80cb96ad38a61`) lose 5 texture reads to `Failed to find handle source`: their results are 0. Two of them contain 0x364. The cause is not traced, and whether it shows in a picture is unknown.
+- Resolved: 3 pixel shaders of the playtests lost 5 texture reads, [handles built under a guard](../../../docs/reference/shaders.md#handles-built-under-a-guard-the-reads-guard-cannot-be-tied-to), 130 reads in 78 shaders of the whole map. `6f91c450371a880c` (`MM_Masked_SingleLayerWater`) and `c132ee1a17f37080` (`M_HoneyPoolB`) each lost a gather through a register (0x364) of the depth behind the water, c3 +0x18 | +0x68. Both draw on Chapter 1's page, and with the gather's result 0 the pool's water surface there is darker and has no foam. `cbd80cb96ad38a61`, a global lighting pass that draws at the title, lost 3 reads, with no difference in the title's picture. `03be149072c3a673` (`MI_SingleLayerWater_PansySanA`), which draws in the first habitat, read c3 +0x18 with no sampler word; that change was not compared in a picture. Across the map, 189 reads in 152 shaders had that form.
+- Resolved: the uniform vote 0x886 writes UP, not P: [VOTEU writes the uniform predicate](../../../docs/reference/shaders.md#voteu-writes-the-uniform-predicate). The handles above do not depend on it, and which pictures it reaches is still unknown.
 - Open: SURED.MAX.U64 (33,550 uses in the map, Nanite's visibility buffer) is refused at translation, so those shaders are left out. The first chapter does not ask for them. `SageEngine.ini` sets `r.Nanite.*`, so another level might.
 
 ## Frame rate
@@ -51,6 +52,7 @@ From `save_ref`: at 72 s `A`, 8 s later `A`, 14 s later the book is open at Chap
 
 ## Open
 
+- Current, on chain 1df0f6cd2b57: Chapter 1's page with the pool's water fixed, and the first habitat plays with no new red line.
 - Current, on chain 9bb5d8678204: the first habitat's picture and frame times are as on 3dd02e581c0c, the pause menu's blurred background included. The black background seen there earlier did not come back on this route.
 - Reported by [PR 1261](https://github.com/seedds/nxnative/pull/1261), not run here: the first level and part of the second work; "Who's there?" has the game's picture behind it on a Switch 2, never black; on the second level the red lines `program has no vertex shader`, `dispatched program has no compute shader`, `image read as float` (format 13) and a geometry shader `502dcf1ce20751aa_b` with no vertex shader.
 - The second level on the 5 GB block (see [Memory](#memory)), later chapters, the picture against a Switch 2, listening to the sound (audio opens and starts with no red line), the `.webm` staff roll, Nanite.
@@ -69,3 +71,5 @@ From `save_ref`: at 72 s `A`, 8 s later `A`, 14 s later the book is open at Chap
 - [Ampere forms with a handle in a register, and SURED's other operations](../../../docs/reference/shaders.md#ampere-forms-with-a-handle-in-a-register-and-sureds-other-operations).
 - [TXD through a uniform register kept no handle](../../../docs/reference/shaders.md#txd-through-a-uniform-register-kept-no-handle): reads deleted in 14,079 shaders the playtests have not reached.
 - [Layer entry points with the point size passed by reference](../../../docs/reference/shaders.md#layer-entry-points-with-the-point-size-passed-by-reference): 38 vertex shaders without them.
+- [Handles built under a guard the read's guard cannot be tied to](../../../docs/reference/shaders.md#handles-built-under-a-guard-the-reads-guard-cannot-be-tied-to): the water on Chapter 1's page.
+- [VOTEU writes the uniform predicate](../../../docs/reference/shaders.md#voteu-writes-the-uniform-predicate): 7,560 of its shaders change, no picture does so far; in the keys asked in play only `cbd80cb96ad38a61`, whose uniform registers under the vote are unused.

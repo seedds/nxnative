@@ -59,13 +59,32 @@ def precise(msl): return re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', m
 # an uninitialized bound, a value the replay does not fill) cannot hang the GPU. On macOS a command buffer that never completes is not always reclaimed when the
 # process exits: PRAGMATA's first frames left one and the whole Mac stopped (WindowServer watchdog) minutes later, twice. One counter per function, so nested loops
 # cannot multiply past the cap; 2^18 iterations per invocation is far beyond what a frame's shader does (PRAGMATA's longest bounded loop: 255)
+# A loop whose body holds a barrier (threadgroup_barrier / simdgroup_barrier, at any depth) counts on a counter of its own instead (dm_lg1, dm_lg2, ..., declared with dm_lg at the
+# top of its function and never reset, so it still bounds every pass through that loop in all). The shared counter is per thread: the barrier-free loops in and before such a loop
+# run per-thread trip counts (a thread-strided copy loop over N items gives the threads up to one iteration more or less each), so once the cap was reached, threads of one
+# threadgroup left a barrier loop at different iterations and the others waited at its barrier for ever, which Metal does not recover from. A barrier loop's own trip count is the
+# same for every thread of the group (the shader's barriers would be wrong on the Switch otherwise), so its own counter ends it on the same iteration for all of them.
+# PRAGMATA's cloth solver 6f364b25e417234a: an outer do { ... } while (--iterations != 0) with a barrier in it and in the batch loop inside it, with stride-1024 / stride-256 copy
+# and constraint loops before and inside: if the iteration count it reads is 0 (data the host did not fill), the loop wraps and only the guard ends it, and the first
+# gameplay frame's compute submission never completed
 LOOP_CAP = 1 << 18
+_LOOP_HEAD = re.compile(r'(\s*)(?:do|for \(.*\)|while \(.*\))\s*')
+_BARRIER = re.compile(r'\b(?:threadgroup|simdgroup)_barrier\s*\(')
 def loop_guard(msl):
     lines, out = msl.split('\n'), []
-    cap = f'++dm_lg < {LOOP_CAP}u'
+    fn_head = lambda i: lines[i] == '{' and i and lines[i - 1].rstrip().endswith(')')   # a function body (SPIRV-Cross puts its brace alone in column 0; a struct's header does not end in ')')
+    own, fn_own, fn = {}, {}, None   # own: the line rewritten (a do loop's closing line, else its header) -> its counter; fn_own: a function's brace line -> its loops' counters
     for i, l in enumerate(lines):
-        if l == '{' and i and lines[i - 1].rstrip().endswith(')'):   # a function body (SPIRV-Cross puts its brace alone in column 0; a struct's header does not end in ')')
-            out += [l, '    uint dm_lg = 0u; (void)dm_lg;']; continue
+        if fn_head(i): fn = i; continue
+        if fn is None or not (m := _LOOP_HEAD.fullmatch(l)): continue
+        ind = len(m.group(1))
+        end = next((j for j in range(i + 1, len(lines)) if lines[j][ind:ind + 1] == '}' and not lines[j][:ind].strip()), None)   # SPIRV-Cross indents each block by 4: the body closes at the header's column
+        if end is None or not any(_BARRIER.search(x) for x in lines[i + 1:end]): continue
+        name = f'dm_lg{len(own) + 1}'; own[end if l.strip() == 'do' else i] = name; fn_own.setdefault(fn, []).append(name)
+    for i, l in enumerate(lines):
+        if fn_head(i):
+            out += [l, '    uint dm_lg = 0u; (void)dm_lg;' + ''.join(f' uint {n} = 0u; (void){n};' for n in fn_own.get(i, ()))]; continue
+        cap = f'++{own.get(i, "dm_lg")} < {LOOP_CAP}u'
         if (m := re.fullmatch(r'(\s*)\} while \((.*)\);\s*', l)): l = f'{m.group(1)}}} while (({m.group(2)}) && {cap});'
         elif (m := re.fullmatch(r'(\s*)for \(;;\)\s*', l)): l = f'{m.group(1)}for (; {cap};)'
         elif (m := re.fullmatch(r'(\s*)while \((.*)\)\s*', l)): l = f'{m.group(1)}while (({m.group(2)}) && {cap})'

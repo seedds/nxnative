@@ -84,6 +84,17 @@ class HalfImmediate(Alu):
         self.assertRegex(msl, r'\b2\.0\b')
 
 
+class I2fImmediate(Alu):
+    """I2F.F16 Rd, imm (form 4): bits 60..62 are the top of the 32-bit immediate, not a byte select. nvdisasm reads 000e620000200c00fffffffe000f7906 as I2F.F16 R15, -0x2
+    (PRAGMATA 0cea2c520ed3ab04, here into R6); it was refused as a byte select of a 32-bit source"""
+    I2F = (0x000e620000200c00, 0xfffffffe00067906)
+
+    def test_negative_immediate_to_a_half(self):
+        msl = self.kept(self.I2F)
+        self.assertRegex(msl, r'float\(-2\)|-2\.0')
+        self.assertIn('half2', msl)
+
+
 class CompareFtz(Alu):
     """FSETP / FSET .FTZ (bit 80): a denormal operand compares as zero, as on NVIDIA; Apple's GPUs keep denormals. Mario Kart World's deferred lighting 635061c90d75a8d1
     normalises its four depth-weighted samples by 1 / sum only where FSETP.NEU.FTZ says sum != 0: a denormal sum passed, its reciprocal overflowed, and the NaN came out

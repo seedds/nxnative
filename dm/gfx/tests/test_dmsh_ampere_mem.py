@@ -243,6 +243,54 @@ class Sured(Translated):
         self.assertIn('SURED form', str(e.exception))
 
 
+class SuatomCas(Translated):
+    """SUATOM.D.3D.CAS RZ, [R0], R6 (0x595): PRAGMATA's 50fece0d891feba4 (000fe200001ee000a000080600ff7595, handle c0 word 8; here word 12, image slot 1): compare R6, new value R7"""
+    CAS = (0x000fe200001ee000, 0xa0000c0600ff7595)
+
+    def test_compare_and_swap_on_a_3d_image(self):
+        msl = self.translate(b''.join((mov(0, 5), mov(1, 2), mov(2, 3), mov(6, 9), mov(7, 4), inst(*self.CAS), inst(*EXIT))), atomics=True)
+        self.assertIn('texture3d<uint, access::read_write>', msl)
+        self.assertRegex(msl, r'atomic_compare_exchange_weak\(uint3\(\w+\), &\w+, 4u\)')   # new value R7 = 4
+        self.assertRegex(msl, r'\w+\.x = 9u;')   # expected value R6 = 9
+
+    def test_a_predicate_result_is_refused(self):
+        self.assertIn('SUATOM.CAS with a predicate result', self.refused(inst(self.CAS[0] & ~(7 << 17), self.CAS[1]) + inst(*EXIT)))
+
+
+@unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
+class IpaOffset(unittest.TestCase):
+    """IPA.PASS.OFFSET (sample location 2 at 76..78) in a pixel shader: PRAGMATA's 4a9d4507eea6c837 reads w and its barycentric coordinates (a[0x3b4], NAK_ATTR_BARY_COORD_X)
+    at its sample's offset from the pixel centre. Its SPH (one colour output), PIXLD.MY_INDEX R1 as the offset register, then IPA.OFFSET R0, a[0x3b4], R1 and R2, a[0x7c], R1"""
+    SPH = bytes.fromhex('82540c0000000000000000000000000000000000000000802a0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000028ffff000000000000')
+    PIXLD = (0x000e6200000ec000, 0x0000000000017925)
+    BARY_X = (0x000ee200000e20ed | 0x3f << 52, 0x0000000100007326)
+    W = (0x000e6200000e201f | 0x3f << 52, 0x0000000100027326)
+
+    def msl(self, *code):
+        with tempfile.TemporaryDirectory(prefix='ampere_ipa_') as d:
+            work = Path(d); (work / 'k.bin').write_bytes(self.SPH + bytes(0x30) + b''.join(inst(*c) for c in code) + inst(*EXIT))
+            (work / 'jobs.json').write_text(json.dumps([dict(key='k', stage='ps', arch='sm86', code=str(work / 'k.bin'), tex={}, img={}, attr={}, fout={}, debug=True)]))
+            r = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(work / 'jobs.json'), d], capture_output=True, text=True)
+            self.assertTrue((work / 'k.spv').exists(), r.stdout + r.stderr)
+            sys.path.insert(0, str(TOOLS)); import dmsh_geometry
+            dmsh_geometry.flatten_sets(work / 'k.spv')
+            r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300', '--msl-argument-buffers', str(work / 'k.spv')], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return r.stdout
+
+    def test_barycentric_coordinates_are_metals(self):   # they read as 0 before (no attribute map entry)
+        self.assertIn('[[barycentric_coord, center_perspective]]', self.msl(self.PIXLD, self.BARY_X, self.W))
+
+    def test_value_at_the_offset_from_the_derivatives(self):   # the offset's halves as signed 12-bit numbers of 1/4096 pixel
+        msl = self.msl(self.PIXLD, self.BARY_X, self.W)
+        self.assertIn('dfdx(', msl); self.assertIn('dfdy(', msl)
+        self.assertIn('extract_bits', msl); self.assertIn('0.000244140625', msl)
+
+    def test_without_an_offset_no_derivatives(self):
+        msl = self.msl(self.PIXLD, (self.BARY_X[0] & ~(3 << 12), self.BARY_X[1]), (self.W[0] & ~(3 << 12), self.W[1]))
+        self.assertNotIn('dfdx(', msl)
+
+
 class StageMemory(Translated):
     """A task or mesh shader's stage memory in shared memory, on the game's encodings (job stage_memory: workgroup 0, input 0x10, outputs 0x120, primitives 0x400)"""
     MEMORY = dict(stage_memory=[0, 0x10, 0x120, 0x400], shared=0x800)
@@ -276,6 +324,12 @@ class StageMemory(Translated):
 
     def test_a_byte_goes_through_its_word_atomically(self):   # neighbouring threads write neighbouring bytes
         self.assertIn('atomic_compare_exchange', self.msl(self.INDEX))
+
+    # ISBERD.O.ATTR.SKEW.32 R19, [RZ + 0x80] (mode 0xf8): PRAGMATA's mesh shaders read their own attribute outputs back (5aab38bb5ba67ef7 +0x16d0, there R8, [R18 + 0x180])
+    OUTPUT_READ = (0x000fe2000000f800, 0x00008000ff137923)
+
+    def test_output_read_back_is_at_the_outputs(self):   # 0x120 + 0x80, the word the mode 0xf8 store at the same offset writes
+        self.assertRegex(self.msl(self.OUTPUT_READ, self.KEEP_R19), r'as_type<float>\(_\d+\[104\]\)')
 
     def test_outside_a_task_or_mesh_shader_it_is_refused(self):
         with self.assertRaises(AssertionError) as e: self.translate(inst(*self.PAYLOAD) + inst(*EXIT))

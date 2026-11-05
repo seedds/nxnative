@@ -7,6 +7,7 @@
 //   3 another image: a list whose identity row names another image size is refused with no read at all;
 //   4 malformed: a stamp-less list with a garbage row is refused (no read); a stamped list tolerates a garbage row and reads exactly its valid range row.
 // All expected values are hand-written from the image layout and Horizon semantics, not computed by calling the implementation under test.
+#include <ftw.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -56,15 +57,21 @@ static char *rom_build(const char *root) {   // writes the image and returns its
     memcpy(img + 32 + BIG + 2 + DIG, e, sizeof e);
     memcpy(img + 32 + BIG + 2 + DIG + sizeof e, "dataabcd", 8);
     char *ip = malloc(1100); snprintf(ip, 1100, "%s/rom.img", root);
-    FILE *f = fopen(ip, "wb"); fwrite(img, 1, sizeof img, f); fclose(f);
+    FILE *f = fopen(ip, "wb"); if (!f) { free(ip); return NULL; }
+    fwrite(img, 1, sizeof img, f); fclose(f);
     return ip;
 }
 
+static int remove_entry(const char *path, const struct stat *sb, int type, struct FTW *ftw) { (void)sb; (void)type; (void)ftw; return remove(path); }
 static char *slurp(const char *p, size_t *out) {
     FILE *f = fopen(p, "rb"); if (!f) { *out = 0; return NULL; }
-    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
-    char *b = malloc((size_t)n + 1); size_t k = fread(b, 1, (size_t)n, f); fclose(f);
-    b[k] = 0; *out = k; return b;
+    long n = -1;
+    if (!fseek(f, 0, SEEK_END)) n = ftell(f);   // -1: a file that cannot seek or be read
+    if (n >= 0 && !fseek(f, 0, SEEK_SET)) {
+        char *b = malloc((size_t)n + 1); size_t k = n ? fread(b, 1, (size_t)n, f) : 0; fclose(f);
+        b[k] = 0; *out = k; return b;
+    }
+    fclose(f); *out = 0; return NULL;
 }
 // The list is read back whole and compared with the expectation; on a miss its exact contents are printed
 static int list_eq(const char *p, const char *want) {
@@ -84,11 +91,11 @@ int main(void) {
     const char *ph = getenv("DM_PHASE"); int phase = ph ? atoi(ph) : 0;
     if (phase < 1 || phase > 4) { fprintf(stderr, "DM_PHASE=1..4 must name the phase (make fs-prefetch runs them in order)\n"); return 2; }
     unsetenv("DM_FS_RECORD"); unsetenv("DM_FS_PREFETCH");   // the mount hook must stay out: the drives here are set by the test, not by the environment
-    char root[1024], save[1100], list[1100], *ip;
+    char root[1024], save[1100], list[1100], *ip = NULL;
     const char *sp = getenv("TMPDIR"); snprintf(root, sizeof root, "%s/t_fs_prefetch.XXXXXX", sp ? sp : "/private/tmp");
     if (!mkdtemp(root)) { perror("mkdtemp"); return 1; }
     snprintf(save, sizeof save, "%s/save", root); mkdir(save, 0755);
-    ip = rom_build(root);
+    ip = rom_build(root); if (!ip) { CHECK(0, "the phase's fixture could not write the image into the temp tree"); goto done; }
     setenv("DM_ROMFS", ip, 1); setenv("DM_SAVE", save, 1); setenv("DM_FS_PREFETCH_RATE", "0", 1);   // the walk uncapped: no sleep, and the read lengths stay exact
     const char *shared = getenv("DM_FS_USER");
     if (shared && *shared) strlcpy(list, shared, sizeof list); else snprintf(list, sizeof list, "%s/fs_user.tsv", root);   // direct runs default beside the scratch root; the recipe's phases 1 and 2 pass one shared file
@@ -102,7 +109,8 @@ int main(void) {
         // A folder-backed read has an ordinary fd, whose high bits also decode to mount zero.
         CHECK(mount("folder", save, 0) == RES_OK, "mount a folder beside the tracked image");
         char folder_file[1200]; snprintf(folder_file, sizeof folder_file, "%s/plain", save);
-        FILE *plain = fopen(folder_file, "wb"); memset(buf, 'F', BIG); fwrite(buf, 1, BIG, plain); fclose(plain);
+        FILE *plain = fopen(folder_file, "wb"); if (!plain) { free(buf); goto no_wr; }
+        memset(buf, 'F', BIG); fwrite(buf, 1, BIG, plain); fclose(plain);
         CHECK(read_file("folder:/plain", 0, buf, BIG), "read a folder-backed file while image recording is on");
         CHECK(list_eq(list, "image\t123066\n"), "folder reads never enter the image's range list");
         CHECK(read_file("rom:/data/a", 0, buf, BIG) && buf[0] == 'A' && buf[BIG / 2] == 'A' && buf[BIG - 1] == 'A', "the layout: a reads 100 KiB of 'A' in full");
@@ -135,7 +143,8 @@ int main(void) {
         free(before); free(after); free(buf);
     } else if (phase == 3) {                                     // ---------- phase 3: the list of another image ----------
         char p[1300]; snprintf(p, sizeof p, "%s/other.tsv", root);
-        FILE *f = fopen(p, "w"); fputs("image\t123999\n" ROW_A, f); fclose(f);   // a plausible list of another version's image
+        FILE *f = fopen(p, "w"); if (!f) goto no_wr;
+        fputs("image\t123999\n" ROW_A, f); fclose(f);   // a plausible list of another version's image
         setenv("DM_FS_USER", p, 1);
         CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK, "mount this run's image");
         atomic_store(&g_fsimgrack, 0); atomic_store(&g_fsrng_on, 1);
@@ -147,14 +156,16 @@ int main(void) {
         CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK, "mount the image");
         atomic_store(&g_fsimgrack, 0); atomic_store(&g_fsrng_on, 1);
         char p[1300]; snprintf(p, sizeof p, "%s/nostamp.tsv", root);
-        FILE *f = fopen(p, "w"); fputs("this line is not a row\n" ROW_A, f); fclose(f);   // a range row with no identity row, plus a garbage row
+        FILE *f = fopen(p, "w"); if (!f) goto no_wr;
+        fputs("this line is not a row\n" ROW_A, f); fclose(f);   // a range row with no identity row, plus a garbage row
         setenv("DM_FS_USER", p, 1);
         g_track = 1; g_track_n = 0;
         fs_prefetch_main((void *)(intptr_t)g_mnt[0].img->fd);
         g_track = 0;
         CHECK(g_track_n == 0, "a stamp-less list with a garbage row is refused without one read (got %d)", g_track_n);
         char q[1300]; snprintf(q, sizeof q, "%s/stamped.tsv", root);
-        f = fopen(q, "w"); fputs("image\t123066\nthis line is not a row\n" ROW_D, f); fclose(f);   // the stamp decides: one garbage row in the middle
+        f = fopen(q, "w"); if (!f) goto no_wr;
+        fputs("image\t123066\nthis line is not a row\n" ROW_D, f); fclose(f);   // the stamp decides: one garbage row in the middle
         setenv("DM_FS_USER", q, 1);
         g_track = 1; g_track_n = 0;
         fs_prefetch_main((void *)(intptr_t)g_mnt[0].img->fd);
@@ -163,8 +174,12 @@ int main(void) {
               "a stamped list tolerates its garbage row and reads exactly the valid row's bytes (got %d reads)", g_track_n);
     }
 
+    goto done;
+no_wr:
+    CHECK(0, "the phase's fixture could not write a file into the temp tree");
+done:
     free(ip);
-    char cmd[1200]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", root); system(cmd);
+    nftw(root, remove_entry, 16, FTW_DEPTH | FTW_PHYS);   // clean temp tree, no shell
     printf("phase %d: == %d checks, %d failed ==\n", phase, checks, fails);
     return fails != 0;
 }

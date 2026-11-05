@@ -191,7 +191,14 @@ namespace Ryujinx.Graphics.Shader.Translation
                     }
                 }
 
-                functions[index] = new(context.GetOperations());
+                Operation[] operations = context.GetOperations();
+
+                if (index == 0 && translatorContext.Stage == ShaderStage.Compute)
+                {
+                    operations = BarrierExits.Apply(operations);   // nxnative: no thread leaves before a barrier (see BarrierExits)
+                }
+
+                functions[index] = new(operations);
             }
 
             return functions;

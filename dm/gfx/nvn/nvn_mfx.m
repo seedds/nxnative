@@ -45,6 +45,7 @@ id<MTLResidencySet> mfx_residency(void) { return nil; }
 int mfx_frame_prepare(double frame_s, unsigned busy) { (void)frame_s; (void)busy; return -1; }
 void mfx_frame_skip(void) {}
 void mfx_frame_ui_lost(int why) { (void)why; }
+void mfx_ui_repair(id<MTLTexture> canvas) { (void)canvas; }
 NSArray *mfx_frame_encode(id<MTL4CommandBuffer> cb, int slot, id<MTL4CounterHeap> heap, NSUInteger stamp) { (void)cb; (void)slot; (void)heap; (void)stamp; return nil; }
 void mfx_note_gpu(double ms) { (void)ms; }
 void mfx_history_reset(void) {}
@@ -63,8 +64,9 @@ static struct {
     id<MTLTexture> scene[2], ui, mv, out[MFX_OUT], outv[MFX_OUT];
     id<MTLTexture> pdepth; uint64_t pdepth_frame;   // the previous interpolated frame's depth (copied after its motion), and its g.frames
     id<MTLResidencySet> rs;
-    id<MTLComputePipelineState> mv_ps;
-    id<MTL4ArgumentTable> mv_args[MFX_OUT];
+    id<MTLComputePipelineState> mv_ps, fix_ps;
+    id<MTL4ArgumentTable> mv_args[MFX_OUT], fix_args[MFX_OUT];
+    __strong id<MTLTexture> repair;   // mfx_ui_repair: the canvas this frame's UI layer is corrected from
     id<MTLBuffer> mv_par[MFX_OUT];
     id<MTLFence> fence;
     int cur;                       // scene[cur] is written by this frame
@@ -78,7 +80,7 @@ static struct {
     double mv_prev_yaw;
     id<MTLTexture> last_depth;     // for mfx_dump
     int last_slot;
-    uint64_t frames, made, skip_input, skip_first, skip_cut, skip_busy, miss[4], skip_ui, ui_why[3];   // miss: scene, camera, depth, UI; ui_why: mfx_frame_ui_lost's reasons
+    uint64_t frames, made, skip_input, skip_first, skip_cut, skip_busy, miss[4], skip_ui, ui_why[3], ui_fixed;   // miss: scene, camera, depth, UI; ui_why: mfx_frame_ui_lost's reasons
     double gpu_ms[300]; int ngpu;   // GPU time of the last interpolations (MetalFX part)
     double last_prepare_s, dt;      // time of the previous game frame's prepare; this pair's interval (MetalFX deltaTime)
 } g;
@@ -151,7 +153,7 @@ static void ensure_out(id<MTLDevice> dev, NSUInteger w, NSUInteger h, MTLPixelFo
     MTLTextureUsage rt = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     for (int i = 0; i < 2; i++) g.scene[i] = mk(fmt, w, h, MTLTextureUsageShaderRead);   // blit copies of the canvas
     g.scene_fmt = fmt;
-    g.ui = mk(MTLPixelFormatRGBA16Float, w, h, rt);
+    g.ui = mk(MTLPixelFormatRGBA16Float, w, h, rt | MTLTextureUsageShaderWrite);   // written by the game's draws and by mfx_ui_fix
     for (int i = 0; i < MFX_OUT; i++) {
         g.out[i] = mk(MTLPixelFormatRGBA8Unorm_sRGB, w, h, MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget | MTLTextureUsagePixelFormatView);
         g.outv[i] = [g.out[i] newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm];
@@ -199,6 +201,12 @@ static void ensure_fi(NSUInteger iw, NSUInteger ih) {
             // itself: no motion on screen. Still: within the 3x3 range of the previous depth there (1 % margin) where that
             // depth is continuous (a slope), and within 1 % of one of the nine where it is not (an edge: the range of Link
             // and the land behind him would take in any distance between them)
+            // the UI layer against the finished canvas: 4/1023 leaves the rounding of the 10-bit canvas against the 16-bit layer alone
+            "kernel void mfx_ui_fix(texture2d<float, access::read> c [[texture(0)]], texture2d<float, access::read> s [[texture(1)]], texture2d<float, access::read_write> u [[texture(2)]], uint2 g [[thread_position_in_grid]]) {\n"
+            "  if (g.x >= c.get_width() || g.y >= c.get_height()) return;\n"
+            "  float4 l = u.read(g); float3 want = c.read(g).rgb, got = saturate(l.rgb + s.read(g).rgb * (1.0 - saturate(l.a)));\n"
+            "  if (any(abs(want - got) > 4.0 / 1023.0)) u.write(float4(want, 1.0), g);\n"
+            "}\n"
             "kernel void mfx_mv(depth2d<float, access::read> d [[texture(0)]], texture2d<float, access::write> mv [[texture(1)]],\n"
             "                   depth2d<float, access::read> pd [[texture(2)]], constant P &p [[buffer(0)]], uint2 g [[thread_position_in_grid]]) {\n"
             "  if (g.x >= uint(p.size.x) || g.y >= uint(p.size.y)) return;\n"
@@ -226,9 +234,13 @@ static void ensure_fi(NSUInteger iw, NSUInteger ih) {
         id<MTLFunction> fn = lib ? [lib newFunctionWithName:@"mfx_mv"] : nil;
         g.mv_ps = fn ? [g.dev newComputePipelineStateWithFunction:fn error:&e] : nil;
         if (!g.mv_ps) MDIE("motion vector kernel: %s", e.localizedDescription.UTF8String);
+        id<MTLFunction> ffn = [lib newFunctionWithName:@"mfx_ui_fix"];
+        g.fix_ps = ffn ? [g.dev newComputePipelineStateWithFunction:ffn error:&e] : nil;
+        if (!g.fix_ps) MDIE("UI layer repair kernel: %s", e.localizedDescription.UTF8String);
         MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxBufferBindCount = 1; ad.maxTextureBindCount = 3;
         for (int i = 0; i < MFX_OUT; i++) {
             g.mv_args[i] = [g.dev newArgumentTableWithDescriptor:ad error:&e]; if (!g.mv_args[i]) MDIE("argument table: %s", e.localizedDescription.UTF8String);
+            g.fix_args[i] = [g.dev newArgumentTableWithDescriptor:ad error:&e]; if (!g.fix_args[i]) MDIE("argument table: %s", e.localizedDescription.UTF8String);
             g.mv_par[i] = [g.dev newBufferWithLength:256 options:MTLResourceStorageModeShared]; [g.rs addAllocation:g.mv_par[i]];
         }
         [g.rs commit];
@@ -267,6 +279,7 @@ static int camera_cut(void) {
 void mfx_frame_skip(void) {   // no command buffer free: nothing of this frame is computed, the next pair starts fresh
     g.frames++; g.scene_ok = g.cam_ok = 0; g.depth = nil; g.prev_ok = g.hist_ok = 0; g.skip_busy++;
 }
+void mfx_ui_repair(id<MTLTexture> canvas) { g.repair = canvas && canvas.usage & MTLTextureUsageShaderRead && canvas.width == g.out_w && canvas.height == g.out_h ? canvas : nil; }
 void mfx_frame_ui_lost(int why) {
     g.frames++; g.scene_ok = g.cam_ok = 0; g.depth = nil; g.prev_ok = g.hist_ok = 0; g.skip_ui++;
     for (int i = 0; i < 3; i++) g.ui_why[i] += why >> i & 1;
@@ -312,6 +325,13 @@ NSArray *mfx_frame_encode(id<MTL4CommandBuffer> cb, int s, id<MTL4CounterHeap> h
     [g.mv_args[s] setTexture:g.pdepth.gpuResourceID atIndex:2];
     id<MTL4ComputeCommandEncoder> e = [cb computeCommandEncoder];
     [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];   // the game's frame is done
+    id<MTLTexture> repair = g.repair; g.repair = nil;
+    if (repair) {
+        [g.fix_args[s] setTexture:repair.gpuResourceID atIndex:0]; [g.fix_args[s] setTexture:g.scene[g.cur].gpuResourceID atIndex:1]; [g.fix_args[s] setTexture:g.ui.gpuResourceID atIndex:2];
+        [e setComputePipelineState:g.fix_ps]; [e setArgumentTable:g.fix_args[s]];
+        [e dispatchThreads:MTLSizeMake(g.out_w, g.out_h, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+        g.ui_fixed++;
+    }
     [e setComputePipelineState:g.mv_ps]; [e setArgumentTable:g.mv_args[s]];
     [e dispatchThreads:MTLSizeMake(depth.width, depth.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
     [e updateFence:g.fence afterEncoderStages:MTLStageDispatch];
@@ -333,7 +353,7 @@ NSArray *mfx_frame_encode(id<MTL4CommandBuffer> cb, int s, id<MTL4CounterHeap> h
     // bindings through completion, while the configuration cache retains only
     // the interpolator, not old scene/pool textures between configurations.
     NSArray *resources = @[fi, fi.colorTexture, fi.prevColorTexture, depth,
-                           g.mv, g.ui, g.out[s], g.mv_par[s], g.pdepth];
+                           g.mv, g.ui, g.out[s], g.mv_par[s], g.pdepth, repair ? repair : g.ui];
     fi.colorTexture = nil; fi.prevColorTexture = nil; fi.depthTexture = nil;
     fi.motionTexture = nil; fi.uiTexture = nil; fi.outputTexture = nil;
     if (heap) [cb writeTimestampIntoHeap:heap atIndex:stamp + 1];
@@ -428,11 +448,11 @@ static double gpu_pct(double q) {
     return a[(int)(q * (n - 1))];
 }
 void mfx_stats(char *out, size_t n) {
-    snprintf(out, n, "interpolated %llu of %llu game frames (MetalFX GPU p50 %.2f / p95 %.2f ms; frame interval %.1f ms); not interpolated: missing input %llu (scene %llu camera %llu depth %llu UI %llu), first frame / history reset %llu, camera cut %llu, command buffer busy %llu, UI outside the UI layer %llu (presented texture %llu, copy not made %llu, merged pass %llu)",
+    snprintf(out, n, "interpolated %llu of %llu game frames (MetalFX GPU p50 %.2f / p95 %.2f ms; frame interval %.1f ms); not interpolated: missing input %llu (scene %llu camera %llu depth %llu UI %llu), first frame / history reset %llu, camera cut %llu, command buffer busy %llu, UI outside the UI layer %llu (presented texture %llu, copy not made %llu, merged pass %llu), layer repaired from the canvas %llu",
              (unsigned long long)g.made, (unsigned long long)g.frames, gpu_pct(0.5), gpu_pct(0.95), g.dt * 1e3, (unsigned long long)g.skip_input, (unsigned long long)g.miss[0], (unsigned long long)g.miss[1],
              (unsigned long long)g.miss[2], (unsigned long long)g.miss[3],
              (unsigned long long)g.skip_first, (unsigned long long)g.skip_cut, (unsigned long long)g.skip_busy,
-             (unsigned long long)g.skip_ui, (unsigned long long)g.ui_why[0], (unsigned long long)g.ui_why[1], (unsigned long long)g.ui_why[2]);
+             (unsigned long long)g.skip_ui, (unsigned long long)g.ui_why[0], (unsigned long long)g.ui_why[1], (unsigned long long)g.ui_why[2], (unsigned long long)g.ui_fixed);
 }
 
 #endif  // TARGET_OS_VISION

@@ -28,6 +28,9 @@ void mfx_frame_skip(void);
 // instead of prepare, when some of this frame's UI did not reach the UI layer (why: bit 0 drawn into the presented texture after the canvas copy, bit 1 a UI copy not made yet, bit 2 a merged
 // pass): a frame between it and the previous one would show the scene without that UI (a HUD element blinking at half strength), so none is made and the next pair starts fresh
 void mfx_frame_ui_lost(int why);
+// Before mfx_frame_encode, when a draw's blend read the scene under it: on this frame's UI layer, a pixel that scene + layer does not reproduce takes the finished canvas's colour, opaque. That
+// pixel holds its game frame's value on the frame between, instead of showing the scene without the effect (a band blinking over the bright sky behind it)
+void mfx_ui_repair(id<MTLTexture> canvas);
 // Keep the returned resources alive until this command buffer's GPU completion.
 // Cached interpolators drop their public texture bindings after encoding.
 NSArray *mfx_frame_encode(id<MTL4CommandBuffer> cb, int slot, id<MTL4CounterHeap> heap, NSUInteger stamp);   // heap: timestamps at stamp / stamp+1 around MetalFX (may be nil)

@@ -3136,6 +3136,13 @@ static void mfx_note_swap(const tex_t *t) {   // a presented texture (the canvas
     g_mfx.swap_w = t->d.width; g_mfx.swap_h = t->d.height;
 }
 static int fz_active(void);   // a merged render pass is open (g_fz, defined further on)
+// A blend the UI layer cannot hold: its result depends on the destination beyond "over" or adding (a draw multiplying what is under it, Breath of the Wild's quest banner). On the canvas
+// it works on the scene, on attachment 7 on the nearly empty layer, and a premultiplied layer cannot multiply the interpolated scene. An advanced blend mode reads the destination too
+static int mfx_blend_reads_dst(const blend_st *b) {
+    int s = b->src_rgb, d = b->dst_rgb;
+    return b->adv || s == NVN_BLEND_FUNC_DST_COLOR || s == NVN_BLEND_FUNC_ONE_MINUS_DST_COLOR || s == NVN_BLEND_FUNC_DST_ALPHA || s == NVN_BLEND_FUNC_ONE_MINUS_DST_ALPHA || s == NVN_BLEND_FUNC_SRC_ALPHA_SATURATE ||
+           !(d == NVN_BLEND_FUNC_ZERO || d == NVN_BLEND_FUNC_ONE || d == NVN_BLEND_FUNC_ONE_MINUS_SRC_ALPHA);
+}
 static int mfx_to_swap(uint64_t serial) { for (int i = 0; i < g_mfx.nswap; i++) if (g_mfx.swap[i] == serial) return 1; return 0; }
 static void mfx_pass_setup(MTL4RenderPassDescriptor *pd, int clear_only) {
     g_mfx.pass_mfx = 0;
@@ -8947,6 +8954,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     if (g_mfx.pass_mfx || g_mfx.role) {   // frame interpolation: every draw into the canvas after the scene copy also goes to the UI layer
         int r = g_mfx.pass_mfx ? (S.color.blend_en & 1 ? MFX_ROLE_UI : MFX_ROLE_UI_OPAQUE) : 0;
         if (r != g_mfx.role) { g_mfx.role = r; g_pso_dirty = 1; }
+        if (r == MFX_ROLE_UI && mfx_blend_reads_dst(&S.blend[0])) g_mfx.ui_lost |= 8;   // its result depends on the scene under it: the UI layer cannot hold it, mfx_ui_repair corrects the layer from the canvas
     }
     if (g_mfx.want_cam) mfx_take_camera();
     if (skip_d) { g_stat_ds_omit++; if (mode == 3) g_stat_s_only++; else if (mode == 4) g_stat_d_only++; }
@@ -11088,15 +11096,16 @@ static int mfx_present_frame(const tex_t *t, double period) { @autoreleasepool {
     pthread_mutex_lock(&g_pq_mu);
     for (uint64_t k = g_pq_done + 1; k <= g_pq_in; k++) { const pq_item *q = &g_pq[(k - 1) % PQ]; if (q->interp >= 0) busy |= 1u << q->interp; }
     pthread_mutex_unlock(&g_pq_mu);
-    if (a >= 0 && g_mfx.ui_lost && (++g_mfx.lost <= 3 || g_mfx.lost % 100 == 0))
+    if (a >= 0 && (g_mfx.ui_lost & 7) && (++g_mfx.lost <= 3 || g_mfx.lost % 100 == 0))
         MLOG("[mfx] %llu frames whose UI is not all in the UI layer so far (game frame %llu:%s%s%s): no frame between it and the previous one", (unsigned long long)g_mfx.lost, (unsigned long long)atomic_load(&g_cur_frame),
              g_mfx.ui_lost & 1 ? " drawn into the presented texture after the canvas copy" : "", g_mfx.ui_lost & 2 ? " a UI copy not made yet" : "", g_mfx.ui_lost & 4 ? " a merged pass" : "");
-    int slot = a < 0 ? (mfx_frame_skip(), -1) : g_mfx.ui_lost ? (mfx_frame_ui_lost(g_mfx.ui_lost), -1) : mfx_frame_prepare(period, busy);   // no command buffer free: nothing to compute
+    int slot = a < 0 ? (mfx_frame_skip(), -1) : g_mfx.ui_lost & 7 ? (mfx_frame_ui_lost(g_mfx.ui_lost & 7), -1) : mfx_frame_prepare(period, busy);   // no command buffer free: nothing to compute
     NSArray *keep = nil;
     if (slot >= 0) {
         {
             if (!cb) { cb = g_mfx_cb[a]; [g_mfx_alloc[a] reset]; [cb beginCommandBufferWithAllocator:g_mfx_alloc[a]]; }
             mfx_residency_once();
+            if (g_mfx.ui_lost & 8) mfx_ui_repair(canvas);   // this frame's layer is corrected from the finished canvas, in the same encode
             keep = mfx_frame_encode(cb, slot, nil, 0);
         }
     }
@@ -11112,7 +11121,7 @@ static int mfx_present_frame(const tex_t *t, double period) { @autoreleasepool {
         if (keep && mfx_dump_due()) { while (atomic_load(&g_mfx_busy[a])) usleep(200); mfx_dump((long)atomic_load(&g_cur_frame), nil, nil); }   // DM_MFX_DUMP (diagnostic): waits for the GPU
     }
     g_mfx.scene_done = g_mfx.ui_cleared = g_mfx.depth_done = g_mfx.want_cam = g_mfx.ready = g_mfx.swap_draws = g_mfx.ui_lost = 0; g_mfx.canvas_tex = nil;
-    if (++g_mfx.frames % 300 == 0) { char b[320]; mfx_stats(b, sizeof b); MLOG("[mfx] up to frame %llu: %s", (unsigned long long)atomic_load(&g_cur_frame), b); }
+    if (++g_mfx.frames % 300 == 0) { char b[512]; mfx_stats(b, sizeof b); MLOG("[mfx] up to frame %llu: %s", (unsigned long long)atomic_load(&g_cur_frame), b); }
     return slot;
 } }
 static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4], uint64_t ev_val) {

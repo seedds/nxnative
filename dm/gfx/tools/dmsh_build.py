@@ -1431,10 +1431,13 @@ def spv_single_lane(path):
     if any(op(x) in (65, 66) and len(x) > 3 and x[3] in bptr for x in ins): return False
     uint = next((x[1] for x in ins if op(x) == 21 and x[2:4] == [32, 0]), None); boolt = next((x[1] for x in ins if op(x) == 20), None)
     uvec4 = next((x[1] for x in ins if op(x) == 23 and x[2] == uint and x[3] == 4), None)
-    if uint is None or boolt is None or uvec4 is None: return False
+    if uint is None or boolt is None: return False
     bound = hdr[3]; c = {}
+    # a module with no uvec4 type gets one for the mask constants (PRAGMATA's domain shaders 859225c91a5fe2b2 and f1ad8f78c6c1551e read only the lane ID and have none)
+    vec = [] if uvec4 is not None else [[23 | 4 << 16, bound, uint, 4]]
+    if uvec4 is None: uvec4 = bound; bound += 1
     for nm in ('zero', 'one', 'zero4', 'one4', 'true'): c[nm] = bound; bound += 1
-    consts = [[43 | 4 << 16, uint, c['zero'], 0], [43 | 4 << 16, uint, c['one'], 1], [44 | 7 << 16, uvec4, c['zero4'], c['zero'], c['zero'], c['zero'], c['zero']],
+    consts = vec + [[43 | 4 << 16, uint, c['zero'], 0], [43 | 4 << 16, uint, c['one'], 1], [44 | 7 << 16, uvec4, c['zero4'], c['zero'], c['zero'], c['zero'], c['zero']],
               [44 | 7 << 16, uvec4, c['one4'], c['one'], c['zero'], c['zero'], c['zero']], [41 | 3 << 16, boolt, c['true']]]
     out, placed = [], False
     for x in ins:
@@ -1559,7 +1562,9 @@ def finish(key, w, j, c1):
             return 'ok', '', refl
         try: return geometry_finish(key, w, j, c1)
         except (ValueError, subprocess.CalledProcessError) as e: return 'geometry failed', str(e)[:160], None
-    if j['stage'] == 'vs': spv_single_lane(os.path.join(w, key + '.spv'))   # one-lane subgroups (see spv_single_lane)
+    # one-lane subgroups (see spv_single_lane): vertex functions, and the post-tessellation vertex functions domain shaders become, have no SIMD-group attributes in Metal
+    # (SPIRV-Cross: "Subgroup builtins are not available in this type of function"; PRAGMATA's domain shaders 859225c91a5fe2b2 and f1ad8f78c6c1551e read SR_LANEID)
+    if j['stage'] in ('vs', 'ds'): spv_single_lane(os.path.join(w, key + '.spv'))
     r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, os.path.join(w, key + '.spv')), os.path.join(w, key + '.spv'), '--output', msl], capture_output=True, text=True)
     if r.returncode: return 'MSL failed', r.stderr.strip()[:160], None
     src = open(msl).read()

@@ -149,13 +149,15 @@ HLE_FORCE("_ZN2nn2vi21QueryDisplayHdrStatusEPbPNS0_15HdrOutputFormatEPtPKNS0_7Di
           uint8_t *on, uint32_t *fmt, uint16_t *peak, const void *disp) {
     (void)disp;
     if (!vi_hdr_on()) { if (on) *on = 0; if (fmt) *fmt = 0; if (peak) *peak = 0; return RES_OK; }
-    int hdr = front_hdr_screen() != 0;
+    // DM_HDR=2 answers HDR whatever the screen: on a screen without headroom Core Animation maps the HDR picture down instead of the game drawing its own SDR one (on Mario Kart World, more saturated than its SDR)
+    static int forced = -1; if (forced < 0) { const char *e = getenv("DM_HDR"); forced = e && atoi(e) == 2; }
+    int hdr = forced || front_hdr_screen() != 0;
     uint32_t p = vi_env_u32("DM_HDR_PEAK", 1000);
     // Logged when the answer changes, and at the 1st, 2nd, 10th, 100th and 1000th query: whether the game asks again (and so can follow the window to another screen)
     static atomic_int queries, last = -1;
     int n = atomic_fetch_add(&queries, 1) + 1, was = atomic_exchange(&last, hdr);
     if (was != hdr || n == 1 || n == 2 || n == 10 || n == 100 || n == 1000)
-        LOG("[nvn2-hdr] vi::QueryDisplayHdrStatus (query %d): %s", n, hdr ? "HDR on, format 1" : "SDR (DM_HDR is on, but the window's screen cannot show EDR)");
+        LOG("[nvn2-hdr] vi::QueryDisplayHdrStatus (query %d): %s", n, hdr ? (forced && !front_hdr_screen() ? "HDR on, format 1 (DM_HDR=2: on a screen without EDR)" : "HDR on, format 1") : "SDR (DM_HDR is on, but the window's screen cannot show EDR)");
     if (hdr) atomic_store(&g_vi_hdr_answered, 1);
     if (on) *on = (uint8_t)hdr; if (fmt) *fmt = (uint32_t)hdr; if (peak) *peak = hdr ? (uint16_t)p : 0; return RES_OK; }
 HLE_FORCE("_ZN2nn2vi25QueryDisplayHdrPaperWhiteEPtPKNS0_7DisplayE", "display HDR paper white: 203 nits (BT.2408) unless DM_HDR_PAPER_WHITE", Result, h_vi_PaperWhite, uint16_t *nits, const void *disp) {

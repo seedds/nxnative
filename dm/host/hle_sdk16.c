@@ -196,6 +196,13 @@ HLE_FORCE("_ZN2nn2pl16IsRunningOnOunceEv", "running on Switch 2: no", unsigned, 
 // The Legend of Zelda: Breath of the Wild (SDK 20): asks for the shared fonts to be loaded before querying their state; the host's stand-in fonts are there on demand. VR mode (the Labo VR goggles): the host never enters VR; the query is always false,
 // and BeginVrMode returns what the SDK's own returns when pctl::CheckStereoVisionPermission refuses (hle_misc.c), 0xd08e (BotW's sdk+0x412970; Super Smash Bros. Ultimate tests it with cbz); EndVrMode is a no-op
 HLE_FORCE("_ZN2nn2pl21RequestSharedFontLoadENS0_14SharedFontTypeE", "request shared font load; the stand-in font is always available, no-op", void, h_pl_ReqLoad, int type) { (void)type; }
+// SDK 22's request to load the Switch 1 shared fonts into a buffer of the game's (SDK 22.2.8 sdk+0x5a3ab0: a transfer memory of 0x1300000 bytes over it, handed to the platform shared
+// resource manager through the pl service, which the host does not serve, then the buffer kept in a global; any failure aborts). The Legend of Zelda: Ocarina of Time allocates the 19 MB
+// and calls it at start (main+0x3782c20), then asks for the fonts with GetSharedFontLoadState / Address / Size, which the host answers with its stand-in fonts: the buffer is left as it is
+HLE_FORCE("_ZN2nn2pl17RequestLoadNxFontEPvm", "load the Switch 1 shared fonts into the game's buffer; the host's stand-in fonts are answered from host memory, no-op", void, h_pl_ReqNxFont,
+          void *buf, size_t size) {
+    (void)buf; LOG("shared font: RequestLoadNxFont (%#zx bytes) → the stand-in fonts, the game's buffer unused", size);
+}
 HLE_FORCE("_ZN2nn2pl8IsVrModeEv", "VR mode: no", unsigned, h_pl_IsVr, void) { return 0; }
 HLE_FORCE("_ZN2nn2pl11BeginVrModeEv", "enter VR mode (through am); the host does not: stereo vision not permitted", Result, h_pl_BeginVr, void) { LOG("pl::BeginVrMode (the host does not enter VR)"); return 0xd08e; }
 HLE_FORCE("_ZN2nn2pl9EndVrModeEv", "leave VR mode (through am)", void, h_pl_EndVr, void) {}

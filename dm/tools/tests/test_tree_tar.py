@@ -102,9 +102,9 @@ class PackQuiet(unittest.TestCase):
         for i in range(files): (d / f'f{i}').write_text('x')
         return self.w / name
 
-    def run_old(self, **k):   # now is what the folders' ctimes are, which a test cannot set: ask for a quiet time of less than a moment
-        time.sleep(0.05)
-        return tree_tar.pack_quiet(self.w, self.lines.append, days=0.0000001, **k)
+    def run_old(self, **k):   # ctimes cannot be backdated: observe the real folders a month later instead
+        with mock.patch.object(tree_tar.time, 'time', return_value=time.time() + 30 * 86400):
+            return tree_tar.pack_quiet(self.w, self.lines.append, **k)
 
     def test_packs_a_quiet_folder_and_keeps_its_attributes(self):
         d = self.folder('issue1')

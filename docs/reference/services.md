@@ -691,6 +691,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `hle_offline.c` takes over the BLE calls the game reaches without a device: `InitializeBle` connects to nothing, the five `AcquireBle…Event` calls bind an event that never fires, scan parameter, scan start and `ConnectToGattServer` fail, scan stop succeeds, and the scan result and connection lists are empty. The GATT calls after a connect are never reached.
 - **Found on:** [Pokémon Violet](../../dm/games/01008F6008C5E000/README.md) 3.0.1 (`v720896`, a derived profile), on an M3, macOS 27.2: the opening plays through. Not checked: 1.0.0 (the registered build), Pokémon Scarlet 3.0.1.
 
+### Eventfds served offline
+
+- **Symptom:** at boot, `game called nn::diag abort: Result 0, call site sdk+0xb8fe8` from `__assert_fail`, under a function of the game's that reads a comma-separated list of names (`"all"`) and compares each with a table holding `poll` and `none`: gRPC's event engine choice (`grpc_event_engine_init`), in Nintendo's online library (NPLN). Threads `npln-grpc default-executor` and `nn.npln.Worker` exist.
+- **Cause:** the host failed every `nn::socket` call with ENETDOWN, `EventFd` included. An eventfd is not networking: a 64-bit counter that a write adds to and a read takes, which wakes a thread; Horizon's bsd service serves it with no network. gRPC's poll engine needs one as its wakeup descriptor: its check (`EventFd(0, 0)`, then close) failed, `grpc_has_wakeup_fd` read 0, every engine's initializer returned null, and gRPC asserted.
+- **Fix:** `hle_net.c` serves eventfds: descriptors 512–575 (under select's 1024; the host makes no other descriptor), Linux's semantics (a read takes the counter, or 1 with the semaphore flag; an empty nonblocking read fails with EAGAIN; a write past 2^64−2 waits or fails), Horizon's flags (1 semaphore, 4 nonblocking; gRPC passes 6), `Poll` / `Select` readiness with waits in slices of at most 100 ms, `Fcntl`'s `F_GETFL` / `F_SETFL` with `O_NONBLOCK`, and `Close`. A failure sets the socket error code (FreeBSD numbers) and the C library's `errno` through the guest's `__errno_location` (Linux numbers: gRPC compares with 11 and 4). Every other socket call still fails as offline.
+- **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_net_eventfd`: the counter, the semaphore flag, EAGAIN in both error numbers, poll and select readiness, a poll woken by another thread's write, `O_NONBLOCK`, close, and other descriptors still failing.
+- **Found on:** The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, SDK 22.2.8, a provisional profile; no note yet): with the fix it boots to its title screen.
+
 ### Network requests stay on hold before they settle
 
 - **Symptom:** the boot sits at a black loading screen for good, CPU nearly idle, every thread waiting, about 1 boot in 6 (3 in 4 with four Mac hosts at once); the title movie is never opened, and the save files are never probed.

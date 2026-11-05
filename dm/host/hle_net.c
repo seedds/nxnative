@@ -2,6 +2,9 @@
 // Cuts: nifm reports no network; socket only hooks up Initialize (returns success, creates no session), the rest of socket/ssl/friends are hooked up as failures when they come into use.
 #include "hle.h"
 #include <stdatomic.h>
+#include <errno.h>
+#include <pthread.h>
+#include <time.h>
 
 HLE_FORCE("_ZN2nn6socket10InitializeERKNS0_6ConfigE", "connects to the bsd socket service; offline, creates no session (cut)", Result, h_socket_Initialize, const void *cfg) { (void)cfg; return RES_OK; }
 // SDK 21 (Star Fox) inlines nn::socket::Initialize(const Config &) into the game, and the service connection is this call
@@ -44,35 +47,129 @@ static int sk_fail(void) { t_skerr = SK_ENETDOWN; return -1; }
 // collector (IL2CPP's, hle_thread.c) only once the hook returns, and the caller can still see a shutdown
 void dm_guest_sleep_ns(int64_t ns);
 static int sk_idle(int64_t ms) { dm_guest_sleep_ns((ms < 0 ? 100 : ms) * 1000000); return 0; }
-typedef struct { int32_t fd; int16_t events, revents; } sk_pollfd;
-// A descriptor the host never made (it creates no socket): Star Fox's HTTP thread polls two with a zero timeout, its wake-up eventfd that failed (-1) and a garbage one, and takes any failure
-// but EINTR as fatal (main+0xbe2efc4). On a console a socket with nothing to say reports no event at the timeout, so that is the answer for every descriptor: nothing ready, the timeout
-// waited out, 0. Failing with ENETDOWN here made the loop abort
-int dm_sk_poll(void *fds, uint64_t n, int ms) {   // also hle_offline.c's plain pollfd form
-    sk_pollfd *p = fds;
-    for (uint64_t i = 0; i < n; i++) if (p[i].fd >= 0) {
-        static int once; if (!once++) LOG("socket: Poll of %llu descriptors with one the host never made (fd %d, events %#x; %d ms): nothing ready at the timeout", (unsigned long long)n, p[i].fd, p[i].events, ms);
-        break;
+
+// ---------- eventfd: a local counter, not networking, so it is served offline as well ----------
+// nn::socket::EventFd is Linux's eventfd on the bsd service: a 64-bit counter that write adds to and read takes (all of it, or 1 with the semaphore flag), readable while
+// it is not zero. On a console it works with no network. gRPC (in Nintendo's online library, NPLN) wakes its poller through one: The Legend of Zelda: Ocarina of Time
+// (0400486024DEC000) starts that library at boot, its poll engine's initializer (main+0x21f1280) found no wakeup fd while every socket call failed, no engine started and
+// gRPC aborted (main+0x21f0c7c). Descriptors 512..575: below select's 1024, and the host makes no other descriptor. Flags as Horizon numbers them (gRPC passes 6:
+// nonblocking + close-on-exec); fcntl's O_NONBLOCK, F_GETFL and F_SETFL are FreeBSD's. A failed read or write also sets the C library's errno, which gRPC reads
+// (Linux numbers: EAGAIN 11, EINTR 4), beside the socket error code
+enum { EFD_BASE = 512, EFD_MAX = 64, EFD_SEMAPHORE = 1, EFD_NONBLOCK = 4, SK_O_NONBLOCK = 4, SK_F_GETFD = 1, SK_F_SETFD = 2, SK_F_GETFL = 3, SK_F_SETFL = 4 };
+enum { SK_EBADF = 9, SK_EAGAIN = 35, SK_EINVAL = 22, LIBC_EBADF = 9, LIBC_EAGAIN = 11, LIBC_EINVAL = 22 };
+enum { SK_POLLIN = 1, SK_POLLOUT = 4, SK_POLLRDNORM = 0x40, SK_POLLWRNORM = 4 };
+static struct { int used, nonblock, sem; uint64_t count; } g_efd[EFD_MAX];
+static pthread_mutex_t g_efd_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_efd_cv = PTHREAD_COND_INITIALIZER;   // broadcast on every change of a counter
+static int efd_slot(int fd) { int i = fd - EFD_BASE; return i >= 0 && i < EFD_MAX && g_efd[i].used ? i : -1; }   // caller holds g_efd_mu
+static int efd_err(int sk, int libc) {   // -1 with the socket error code and the guest's errno
+    static int *(*loc)(void); t_skerr = sk;
+    if (!loc) loc = guest_sym("__errno_location");
+    if (loc) *loc() = libc;
+    return -1;
+}
+static int efd_wait(int64_t ms) {   // waits for a change of any counter, at most ms (< 0: 100 ms, as an endless wait, sk_idle); 0 when the time is up. Caller holds g_efd_mu
+    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+    int64_t ns = ts.tv_nsec + (ms < 0 || ms > 100 ? 100 : ms) * 1000000;
+    ts.tv_sec += ns / 1000000000; ts.tv_nsec = ns % 1000000000;
+    return pthread_cond_timedwait(&g_efd_cv, &g_efd_mu, &ts) != ETIMEDOUT;
+}
+static int efd_close(int fd) {   // 1 when fd was an eventfd (now closed)
+    pthread_mutex_lock(&g_efd_mu); int i = efd_slot(fd); if (i >= 0) g_efd[i].used = 0; pthread_mutex_unlock(&g_efd_mu);
+    return i >= 0;
+}
+static int efd_fcntl(int fd, int cmd, long arg, int *out) {   // 1 when fd was an eventfd (*out: the result)
+    pthread_mutex_lock(&g_efd_mu); int i = efd_slot(fd);
+    if (i >= 0) {
+        if (cmd == SK_F_GETFL) *out = g_efd[i].nonblock ? SK_O_NONBLOCK : 0;
+        else if (cmd == SK_F_SETFL) { g_efd[i].nonblock = (arg & SK_O_NONBLOCK) != 0; *out = 0; }
+        else if (cmd == SK_F_GETFD || cmd == SK_F_SETFD) *out = 0;   // close-on-exec: no exec here
+        else *out = efd_err(SK_EINVAL, LIBC_EINVAL);
     }
-    for (uint64_t i = 0; i < n; i++) p[i].revents = 0;
-    return sk_idle(ms);
+    pthread_mutex_unlock(&g_efd_mu); return i >= 0;
+}
+HLE_FORCE("_ZN2nn6socket7EventFdEmNS0_12EventFdFlagsE", "eventfd: a local counter (no network needed)", int, h_sk_EventFd, uint64_t v, int f) {
+    pthread_mutex_lock(&g_efd_mu); int i = 0;
+    while (i < EFD_MAX && g_efd[i].used) i++;
+    if (i < EFD_MAX) { g_efd[i].used = 1; g_efd[i].count = v; g_efd[i].nonblock = (f & EFD_NONBLOCK) != 0; g_efd[i].sem = (f & EFD_SEMAPHORE) != 0; }
+    pthread_mutex_unlock(&g_efd_mu);
+    if (i == EFD_MAX) { LOG("[RED] eventfd: more than %d open", EFD_MAX); return efd_err(24, 24); }   // EMFILE
+    { static _Atomic int once; if (!atomic_exchange(&once, 1)) LOG("eventfd: served by the host (first: descriptor %d, flags %#x)", EFD_BASE + i, f); }
+    return EFD_BASE + i;
+}
+HLE_FORCE("_ZN2nn6socket11EventFdReadEiPm", "eventfd: takes the counter (or 1 with the semaphore flag)", int, h_sk_EventFdRead, int fd, uint64_t *v) {
+    pthread_mutex_lock(&g_efd_mu); int i;
+    while ((i = efd_slot(fd)) >= 0 && !g_efd[i].count && !g_efd[i].nonblock) efd_wait(-1);
+    int r = i < 0 ? -2 : !g_efd[i].count ? -1 : 0;
+    if (!r) { uint64_t take = g_efd[i].sem ? 1 : g_efd[i].count; g_efd[i].count -= take; if (v) *v = take; pthread_cond_broadcast(&g_efd_cv); }
+    pthread_mutex_unlock(&g_efd_mu);
+    return r == -2 ? efd_err(SK_EBADF, LIBC_EBADF) : r ? efd_err(SK_EAGAIN, LIBC_EAGAIN) : 0;
+}
+HLE_FORCE("_ZN2nn6socket12EventFdWriteEim", "eventfd: adds to the counter", int, h_sk_EventFdWrite, int fd, uint64_t v) {
+    pthread_mutex_lock(&g_efd_mu); int i;
+    if (v == UINT64_MAX) { pthread_mutex_unlock(&g_efd_mu); return efd_err(SK_EINVAL, LIBC_EINVAL); }
+    while ((i = efd_slot(fd)) >= 0 && g_efd[i].count > UINT64_MAX - 1 - v && !g_efd[i].nonblock) efd_wait(-1);
+    int r = i < 0 ? -2 : g_efd[i].count > UINT64_MAX - 1 - v ? -1 : 0;
+    if (!r) { g_efd[i].count += v; pthread_cond_broadcast(&g_efd_cv); }
+    pthread_mutex_unlock(&g_efd_mu);
+    return r == -2 ? efd_err(SK_EBADF, LIBC_EBADF) : r ? efd_err(SK_EAGAIN, LIBC_EAGAIN) : 0;
+}
+
+typedef struct { int32_t fd; int16_t events, revents; } sk_pollfd;
+static int efd_ready(int i, int ev) {   // the poll events an eventfd has now. Caller holds g_efd_mu
+    return (ev & (SK_POLLIN | SK_POLLRDNORM) & (g_efd[i].count ? ~0 : 0)) | (ev & (SK_POLLOUT | SK_POLLWRNORM) & (g_efd[i].count < UINT64_MAX - 1 ? ~0 : 0));
+}
+// Poll: eventfds are waited on (in slices of at most 100 ms, as an endless wait, sk_idle). A descriptor the host never made (it creates no socket) reports no event: Star Fox's HTTP
+// thread polls two with a zero timeout, its wake-up eventfd that failed (-1) and a garbage one, and takes any failure but EINTR as fatal (main+0xbe2efc4). On a console a socket with
+// nothing to say reports no event at the timeout, so that is the answer for every such descriptor: nothing ready, the timeout waited out, 0. Failing with ENETDOWN here made the loop abort
+int dm_sk_poll(void *fds, uint64_t n, int ms) {   // also hle_offline.c's plain pollfd form
+    sk_pollfd *p = fds; int any = 0;
+    pthread_mutex_lock(&g_efd_mu);
+    for (uint64_t i = 0; i < n; i++) if (p[i].fd >= 0) {
+        if (efd_slot(p[i].fd) >= 0) { any = 1; continue; }
+        static int once; if (!once++) LOG("socket: Poll of %llu descriptors with one the host never made (fd %d, events %#x; %d ms): nothing ready at the timeout", (unsigned long long)n, p[i].fd, p[i].events, ms);
+    }
+    if (!any) { pthread_mutex_unlock(&g_efd_mu); for (uint64_t i = 0; i < n; i++) p[i].revents = 0; return sk_idle(ms); }
+    int ready;
+    for (int64_t left = ms;;) {
+        ready = 0;
+        for (uint64_t i = 0; i < n; i++) { int k = p[i].fd >= 0 ? efd_slot(p[i].fd) : -1; p[i].revents = (int16_t)(k >= 0 ? efd_ready(k, p[i].events) : 0); ready += p[i].revents != 0; }
+        if (ready || !left || !efd_wait(left)) break;   // ready, a zero timeout, or a slice passed with no change
+        if (left > 0) left = left > 100 ? left - 100 : 0;
+    }
+    pthread_mutex_unlock(&g_efd_mu);
+    return ready;
 }
 int dm_sk_select(int nfds, const uint64_t *r, const uint64_t *w, const uint64_t *e, const int64_t *tv) {   // fd_set: 1024 bits; timeval: {i64 seconds, i64 microseconds}
-    const uint64_t *sets[3] = {r, w, e};
-    for (int k = 0; k < 3; k++) for (int fd = 0; sets[k] && fd < nfds && fd < 1024; fd++) if (sets[k][fd >> 6] >> (fd & 63) & 1) return sk_fail();
-    return sk_idle(tv ? tv[0] * 1000 + tv[1] / 1000 : -1);
+    uint64_t *sets[3] = {(uint64_t *)r, (uint64_t *)w, (uint64_t *)e}, want[3][16] = {{0}}; int any = 0;
+    if (nfds > 1024) nfds = 1024;
+    pthread_mutex_lock(&g_efd_mu);
+    for (int k = 0; k < 3; k++) for (int fd = 0; sets[k] && fd < nfds; fd++) if (sets[k][fd >> 6] >> (fd & 63) & 1) {
+        if (efd_slot(fd) < 0) { pthread_mutex_unlock(&g_efd_mu); return sk_fail(); }
+        want[k][fd >> 6] |= 1ull << (fd & 63); any = 1;
+    }
+    pthread_mutex_unlock(&g_efd_mu);
+    int64_t ms = tv ? tv[0] * 1000 + tv[1] / 1000 : -1;
+    if (!any) return sk_idle(ms);
+    sk_pollfd p[EFD_MAX * 3]; int np = 0, ev[3] = {SK_POLLIN, SK_POLLOUT, 0};
+    for (int k = 0; k < 3; k++) for (int fd = 0; fd < nfds; fd++) if (want[k][fd >> 6] >> (fd & 63) & 1 && np < EFD_MAX * 3) p[np++] = (sk_pollfd){fd, (int16_t)ev[k], 0};
+    int got = dm_sk_poll(p, (uint64_t)np, (int)ms);
+    if (got < 0) return got;
+    for (int k = 0; k < 3; k++) if (sets[k]) for (int fd = 0; fd < nfds; fd++) if (want[k][fd >> 6] >> (fd & 63) & 1) sets[k][fd >> 6] &= ~(1ull << (fd & 63));
+    for (int i = 0; i < np; i++) if (p[i].revents) { int k = p[i].events == SK_POLLIN ? 0 : 1; sets[k][p[i].fd >> 6] |= 1ull << (p[i].fd & 63); }
+    return got;
 }
 SKF("_ZN2nn6socket6SocketENS0_6FamilyENS0_4TypeENS0_8ProtocolE", h_sk_Socket, int a, int b, int c) { (void)a; (void)b; (void)c; return sk_fail(); }
 SKF("_ZN2nn6socket4BindEiPKNS0_8SockAddrEj", h_sk_Bind, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket7ConnectEiPKNS0_8SockAddrEj", h_sk_Connect, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket6ListenEii", h_sk_Listen, int s, int n) { (void)s; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket6AcceptEiPNS0_8SockAddrEPj", h_sk_Accept, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
-SKF("_ZN2nn6socket5CloseEi", h_sk_Close, int s) { (void)s; return sk_fail(); }
+SKF("_ZN2nn6socket5CloseEi", h_sk_Close, int s) { return efd_close(s) ? 0 : sk_fail(); }
 SKF("_ZN2nn6socket11GetPeerNameEiPNS0_8SockAddrEPj", h_sk_GetPeerName, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket11GetSockNameEiPNS0_8SockAddrEPj", h_sk_GetSockName, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket10GetSockOptEiNS0_5LevelENS0_6OptionEPvPj", h_sk_GetSockOpt, int s, int l, int o, void *v, unsigned *n) { (void)s; (void)l; (void)o; (void)v; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket10SetSockOptEiNS0_5LevelENS0_6OptionEPKvj", h_sk_SetSockOpt, int s, int l, int o, const void *v, unsigned n) { (void)s; (void)l; (void)o; (void)v; (void)n; return sk_fail(); }
-SKF("_ZN2nn6socket5FcntlEiNS0_12FcntlCommandEz", h_sk_Fcntl, int s, int c) { (void)s; (void)c; return sk_fail(); }
+SKF("_ZN2nn6socket5FcntlEiNS0_12FcntlCommandEz", h_sk_Fcntl, int s, int c, long a) { int r; return efd_fcntl(s, c, a, &r) ? r : sk_fail(); }
 // SDK 21 overloads Star Fox imports: plain sockaddr, the ShutdownMethod enum, Read / Write and a name lookup without options; SetAllocator keeps nothing, as no session is created
 SKF("_ZN2nn6socket11GetPeerNameEiP8sockaddrPj", h_sk_GetPeerName21, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket8ShutdownEiNS0_14ShutdownMethodE", h_sk_Shutdown21, int s, int how) { (void)s; (void)how; return sk_fail(); }
@@ -85,9 +182,6 @@ SKF("_ZN2nn6socket4PollEPNS0_6PollFdEmi", h_sk_Poll, void *f, unsigned long n, i
 // to the host's Poll too
 SKF("poll", h_libc_Poll, void *f, unsigned long n, int t) { return dm_sk_poll(f, n, t); }
 SKF("_ZN2nn6socket6SelectEiPNS0_5FdSetES2_S2_PNS0_7TimeValE", h_sk_Select, int n, void *r, void *w, void *e, void *t) { return dm_sk_select(n, r, w, e, t); }
-SKF("_ZN2nn6socket7EventFdEmNS0_12EventFdFlagsE", h_sk_EventFd, unsigned long v, int f) { (void)v; (void)f; return sk_fail(); }
-SKF("_ZN2nn6socket11EventFdReadEiPm", h_sk_EventFdRead, int s, unsigned long *v) { (void)s; (void)v; return sk_fail(); }
-SKF("_ZN2nn6socket12EventFdWriteEim", h_sk_EventFdWrite, int s, unsigned long v) { (void)s; (void)v; return sk_fail(); }
 SKF("_ZN2nn6socket17ResolverGetOptionEPNS0_14ResolverOptionENS0_17ResolverOptionKeyE", h_sk_ResGet, void *o, int k) { (void)o; (void)k; return sk_fail(); }
 SKF("_ZN2nn6socket17ResolverSetOptionERKNS0_14ResolverOptionE", h_sk_ResSet, const void *o) { (void)o; return sk_fail(); }
 HLE_FORCE("_ZN2nn6socket4RecvEiPvmNS0_7MsgFlagE", "bsd socket service (cut)", long, h_sk_Recv, int s, void *b, unsigned long n, int f) { (void)s; (void)b; (void)n; (void)f; return sk_fail(); }
@@ -103,12 +197,12 @@ HLE_FORCE("_ZN2nn6socket12GetLastErrorEv", "socket error code kept by the host",
 SKF("nnsocketSocket", h_nsk_Socket, int a, int b, int c) { (void)a; (void)b; (void)c; return sk_fail(); }
 SKF("nnsocketBind", h_nsk_Bind, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("nnsocketConnect", h_nsk_Connect, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return sk_fail(); }
-SKF("nnsocketClose", h_nsk_Close, int s) { (void)s; return sk_fail(); }
+SKF("nnsocketClose", h_nsk_Close, int s) { return efd_close(s) ? 0 : sk_fail(); }
 SKF("nnsocketGetPeerName", h_nsk_GetPeerName, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("nnsocketGetSockName", h_nsk_GetSockName, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("nnsocketGetSockOpt", h_nsk_GetSockOpt, int s, int l, int o, void *v, unsigned *n) { (void)s; (void)l; (void)o; (void)v; (void)n; return sk_fail(); }
 SKF("nnsocketSetSockOpt", h_nsk_SetSockOpt, int s, int l, int o, const void *v, unsigned n) { (void)s; (void)l; (void)o; (void)v; (void)n; return sk_fail(); }
-SKF("nnsocketFcntl", h_nsk_Fcntl, int s, int c) { (void)s; (void)c; return sk_fail(); }
+SKF("nnsocketFcntl", h_nsk_Fcntl, int s, int c, long a) { int r; return efd_fcntl(s, c, a, &r) ? r : sk_fail(); }
 SKF("nnsocketPoll", h_nsk_Poll, void *f, unsigned long n, int t) { return dm_sk_poll(f, n, t); }
 SKF("nnsocketResolverGetOption", h_nsk_ResGet, void *o, int k) { (void)o; (void)k; return sk_fail(); }
 SKF("nnsocketResolverSetOption", h_nsk_ResSet, const void *o) { (void)o; return sk_fail(); }

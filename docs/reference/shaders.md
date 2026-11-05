@@ -492,6 +492,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `ndsr_shaders` in `shader_split.py` takes the start at which more of the first 16 records point at an NVN2 control section.
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md).
 
+### The movie library's NDVE shader pack
+
+- **Symptom:** a movie decodes (`[codec] AV1 decoder 1: first picture …`), then `[RED] shader … is not in the shader map` and `the dispatched program has no compute shader`, and the movie's layer stays black while the UI over it draws (a title logo on black). The dumped shaders (`DM_NVN_SHDUMP`) have 72-byte keys' control sections and are in no BNSH, BAHS or module.
+- **Cause:** SDK 22's movie library keeps its GPU programs (the decoder's colour conversion among them) in `Movie/Ndve/Ndve-Nvn2-vid_seq5.dat.zs`: an `NDVE` file of raw NVN2 programs. Most are laid out as a control section (version 0x14 at +8) with its code area at the section plus +0x30, +0x44 bytes long; two (0x11 at +8, no code offset) are named only by an `NDSR` record table in the header at +0x28, whose records have the NDSR pack's form ([above](#the-ndsr-packs-record-start)) but sit among records of other sizes. The split had no reader for it, and its prefilter dropped the file, which holds no BNSH or BAHS.
+- **Fix:** `ndve_shaders` in `shader_split.py` reads both: sections by their magic, and the table word by word for records that point at an NVN2 section whose +0x44 matches the code length. Each section runs up to its code area and has the NVN2 layout (stage +0x56, thread group +0x58), all compute. The prefilter lets `NDVE` files through. A profile names the folder in `shader_groups` (`/Movie/=movie`).
+- **Check:** `dm/gfx/tests/test_ndve.py`: raw and table-named programs, the key without the offset word, a file that is not a pack, and `scan_blob`.
+- **Found on:** The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, SDK 22.2.8, a provisional profile; no note yet): 22 programs, 11 of them used by the title movie (AV1 1920×1080). With them the title screen shows its movie behind the logo and menu.
+
 ## Control sections and code
 
 ### Code area and control section layout

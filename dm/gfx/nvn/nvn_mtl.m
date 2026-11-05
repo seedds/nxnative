@@ -1506,7 +1506,8 @@ static uint64_t gpu_ticks(void) { uint64_t g = guest_ns(); if (!g) { struct time
 // so a game that waits for the fence reads one submission's reports together; a segment whose feedback has not arrived by then takes the last segment's times
 #define SEG_CLK_N 1024
 struct seg_clk { _Atomic int refs; _Atomic uint64_t t[SEG_CLK_N][2]; };   // per submission (g_sclk, allocated at its first cut): guest ns of each cut segment's GPU start / end (0 = no feedback yet)
-static int seg_ts(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_GPU_TS"); v = e && *e ? !strcmp(e, "segment") : DM_GAME_GPU_TS_SEGMENT; MLOG("counter timestamps: %s (profile key gpu_timestamps; DM_NVN_GPU_TS=segment / submission)", v ? "GPU start / end time of their segment" : "one time for the whole submission"); } return v; }
+static int g_seg_gaps;   // DM_NVN_GPU_TS=segment_gaps: segment times keep the GPU's idle gaps between segments (see seg_gap_before)
+static int seg_ts(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_GPU_TS"); g_seg_gaps = e && !strcmp(e, "segment_gaps"); v = e && *e ? !strcmp(e, "segment") || g_seg_gaps : DM_GAME_GPU_TS_SEGMENT; MLOG("counter timestamps: %s (profile key gpu_timestamps; DM_NVN_GPU_TS=segment / submission)", v ? "GPU start / end time of their segment" : "one time for the whole submission"); } return v; }
 static void seg_clk_put(seg_clk *c) { if (c && atomic_fetch_sub(&c->refs, 1) == 1) free(c); }
 static uint64_t gpu_s_guest_ns(double s) {   // a feedback GPU time (seconds on the mach absolute time base) on the guest clock; 0 when unknown
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
@@ -1514,10 +1515,25 @@ static uint64_t gpu_s_guest_ns(double s) {   // a feedback GPU time (seconds on 
     if (s <= 0 || !g || at > now || now - at > g) return 0;
     return g - (now - at);
 }
+// The GPU idles between segments while the host translates and commits the next one; a Switch GPU runs a submission's commands without such gaps. A game that times its GPU work as
+// the difference of two reports (agl's dynamic resolution: Mario Kart World, Donkey Kong Bananza, Splatoon Raiders) read the gaps as GPU work, saw its budget exceeded at times and stepped its
+// resolution down and up again from frame to frame: thin distant geometry flickered (Mario Kart World's mountains and bridges, on the title screen already; GitHub issue #1290 for Splatoon Raiders).
+// So each segment's times move back by the idle gaps before it in the submission (a segment with no feedback yet ends the sum); DM_NVN_GPU_TS=segment_gaps keeps them
+static uint64_t seg_gap_before(seg_clk *sc, uint32_t seg, uint32_t last, uint64_t c0) {
+    uint64_t gap = 0, prev_end = 0;
+    for (uint32_t i = 0; i <= seg && i <= last && i < SEG_CLK_N; i++) {
+        uint64_t st = i < last ? atomic_load(&sc->t[i][0]) : c0, en = i < last ? atomic_load(&sc->t[i][1]) : 0;
+        if (!st) break;
+        if (prev_end && st > prev_end) gap += st - prev_end;
+        prev_end = en;
+    }
+    return gap;
+}
 static uint64_t rep_ticks(const post_op *o, seg_clk *sc, uint32_t last, uint64_t c0, uint64_t c1) {   // the time a counter report records (614.4 MHz); c0 / c1: the last segment's GPU start / end on the guest clock
     int top = o->type == 0x10; uint64_t ns = 0;
     if (sc && o->seg < last && o->seg < SEG_CLK_N) ns = atomic_load(&sc->t[o->seg][!top]);
     if (!ns) ns = top ? c0 : c1;
+    if (ns && sc && !g_seg_gaps) { uint64_t gap = seg_gap_before(sc, o->seg < last ? o->seg : last, last, c0); if (gap < ns) ns -= gap; }
     return ns ? nvn_timestamp_from_ns(ns) : gpu_ticks();
 }
 

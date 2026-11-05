@@ -425,6 +425,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** with the pointer over the game, a controller button or the keyboard hides it; moving the mouse shows it; over the title bar, or with another app active, it stays.
 - **Found on:** every game on the Mac (general); [PR #584](https://github.com/seedds/nxnative/pull/584).
 
+### Pro Controller clone read as raw HID: buttons out of place, short sticks, chasing lights
+
+- **Symptom:** on the Mac, a Pro Controller clone read as a raw HID pad (a PowerA NANO pairs over Bluetooth as `Lic Pro Controller`, HID vendor and product 0) has its buttons in the wrong places, a full stick push does not run (it reads 61 to 74%), and its four lights keep running in a chase.
+- **Cause:** such a pad's report descriptor is Nintendo's, and it stays in the Pro Controller's simple report `0x3F`. That report numbers its buttons differently from the default 8BitDo map, carries its sticks raw (the NANO's rest 9 and 11% off centre and reach about 0.78 of the axis from there), and the pad chases its lights until a console gives it a player.
+- **Fix (resolved):** buttons that come in report `0x3F` take that report's numbering, read from the device's elements and not from its name or vendor. `pad_hid_raw_axis` measures each of its axes from its first value and scales it by the reach seen so far, which starts at 0.7 and only grows: a full push reads 99 to 100%. The pad gets its player on its lights (`pad_hid_lights`: subcommand `0x30` of output report `0x01`; the NANO answers `80 30` in report `0x21` and stays in report `0x3F`). `DM_HID_LOG=1` and `DM_HID_MAP` work as for any raw HID pad. The NANO reaches this path because GameController never lists it ([PR #859](https://github.com/seedds/nxnative/pull/859) reads pads of other vendors as raw HID).
+- **Limits:** report `0x3F` carries no motion, and this path sends the pad no rumble, so such a pad has no gyro or rumble here.
+- **Found on:** a PowerA NANO over Bluetooth on macOS 27.2; it is not specific to a game. Played in [FINAL FANTASY RESONANCE](../../dm/games/0100606026F12000/README.md): buttons, full-tilt running and the player light.
+
 ### Mac display sleep during controller play
 
 - **Symptom:** the Mac dims or turns off its display and can reach the lock screen while the player is using a controller, in a window or in fullscreen.

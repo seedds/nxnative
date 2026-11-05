@@ -63,8 +63,8 @@ def find(img, text_end, ro_off, data_off, name):
     """(main's offset of the TAutoConsoleVariable registered under name, reason), or (None, why not); why starts '[RED] ' when the name is registered at more than one object"""
     word = lambda a: struct.unpack_from('<I', img, a)[0]
     objs = set()
-    for z in (2, 4):   # TCHAR: UTF-16 (UE 4.2x and 5), UTF-32 (older Switch builds)
-        pat = name.encode('utf-16-le' if z == 2 else 'utf-32-le') + b'\0' * z
+    for z in (1, 2, 4):   # TCHAR: UTF-8 (Hogwarts Legacy's UE 4.27), UTF-16 (UE 4.2x and 5), UTF-32 (older Switch builds)
+        pat = name.encode({1: 'utf-8', 2: 'utf-16-le', 4: 'utf-32-le'}[z]) + b'\0' * z
         s = img.find(pat, ro_off, data_off)
         while s >= 0:
             if s % z == 0:

@@ -7,6 +7,7 @@
 
 // Redirect only this translation unit, and only while the CPU budget cases run.
 static int test_budget_active;
+static void (*test_event_completion)(void);
 static struct {
     uint64_t now, event_elapsed, event_ms, event_fence;
     int event_calls, event_success, cond_calls;
@@ -37,6 +38,7 @@ static int test_pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mu
     test_budget.event_fence = value;
     test_budget.event_ms = milliseconds;
     test_budget.now += test_budget.event_elapsed;
+    if (test_event_completion) test_event_completion();
     return test_budget.event_success;
 }
 @end
@@ -191,6 +193,7 @@ static void hoists(id<MTLLibrary> lib) {
     CHECK("offset sampled storage splits merged pass",draw_samples_rt(drawpr));
     mtl_pool_del(mem); free(mem);
 }
+static void feedback_without_signal(void) { post_complete(1, 0, 0); }
 static void wait_budgets(void) {
     id<MTLSharedEvent> saved_event = g_ev;
     uint64_t saved_done = g_done, saved_fence = g_fence;
@@ -215,9 +218,9 @@ static void wait_budgets(void) {
         {"zero timeout", 0, 0, 0, 0, 0},
         {"sub-ms timeout", 999999, 0, 0, 0, 0},
         {"one ms exhausted", 1000000, 1000000, 1, 0, 0},
-        {"infinite sentinel keeps one hour per stage", UINT64_MAX, hour, 3600000, hour, 1},
-        {"finite hour plus 20 ms retains 20 ms", hour + 20000000, hour, 3600000, 20000000, 1},
-        {"finite two hours keeps fallback hour clamp", 2 * hour + 20000000, hour, 3600000, hour, 1},
+        {"infinite sentinel rechecks after 100 ms", UINT64_MAX, 100000000, 100, hour, 1},
+        {"finite hour retains its remaining budget", hour + 20000000, 100000000, 100, hour - 80000000, 1},
+        {"finite two hours keeps fallback hour clamp", 2 * hour + 20000000, 100000000, 100, hour, 1},
     };
     int sites[] = {WS_SYNC, WS_SYNC_NEWEST, WS_ACQ};
     for (unsigned si = 0; si < sizeof sites / sizeof *sites; si++) {
@@ -253,6 +256,14 @@ static void wait_budgets(void) {
         CHECK("CPU event is visible before successful return", event == 47 && g_done == 1
             && g_postr[1].claimed && !g_postr[1].ops);
         CHECK("successful early wait skips feedback wait", test_budget.event_calls == 1 && !test_budget.cond_calls);
+        g_done = 0;
+        g_postr[1] = (post_rec){.fence = 1, .claimed = 1};
+        test_budget = (typeof(test_budget)){.now = 1999750000, .event_elapsed = 100000000};
+        test_event_completion = feedback_without_signal;
+        CHECK("feedback releases an infinite wait when the GPU event never signals", mtl_wait_at(1, UINT64_MAX, WS_ACQ));
+        CHECK("unsignaled GPU event waits at most 100 ms before seeing feedback",
+            test_budget.event_calls == 1 && test_budget.event_ms == 100 && !test_budget.cond_calls);
+        test_event_completion = NULL;
     }
     test_budget_active = 0; memset(&test_budget, 0, sizeof test_budget);
     g_ev = saved_event; g_done = saved_done; g_fence = saved_fence; g_postr[1] = saved_post;

@@ -421,3 +421,11 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Cause:** the thread that acquires the window (here the render thread) runs under a time-constraint policy whose computation the host re-declares every 120 frames; it was 1.25 × the 90th percentile of that thread's CPU time per frame. This render thread needs 1.9–2.0 ms a frame with one or two frames in 120 near 4.4 ms, against 2.5 ms declared, and each frame past the declaration stalled the thread. Probes on both threads' waits showed the main thread's waits; adding probes slowed the render thread and the stalls vanished, and `DM_RT=0` or a fixed `DM_RT_COMP=5` / `10` removed them too (99th percentile 18–21 ms) at the same CPU energy.
 - **Fix:** the declaration also covers 1.1 × the window's peak (`rt_comp_tick` in `hle_nvn.c`): 5.6 ms here, 60.0 fps, 99th percentile 21 ms.
 - **Found on:** [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md), in the Asylum cell.
+
+### A failed GPU event holds a completed fence wait
+
+- **Symptom:** rendering freezes after GPU command errors, with the main thread in `IOSurfaceSharedEvent waitUntilSignaledValue:timeoutMS:` although commit feedback has completed its fence.
+- **Cause:** the fast fence wait could block for one hour on a GPU event. A rejected command buffer completed through its feedback handler, but the queue's event remained at zero, so that wait could not see the published completion.
+- **Fix:** the fast event wait is bounded to 100 ms before rechecking completion and using the feedback condition variable. Finite waits retain their original total timeout budget.
+- **Found on:** Ocarina of Time (Switch 2, #1299), after a gameplay GPU memory fault. The GPU fault itself remains open.
+- **Check:** `make -C dm/gfx/tests GAME=0400C3F00006E000 perf-order-cpu` checks a completion callback with an unsignaled event, finite timeout budgets, and both fast-wait and feedback paths.

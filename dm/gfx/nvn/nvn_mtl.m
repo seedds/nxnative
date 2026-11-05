@@ -757,7 +757,13 @@ static id<MTLBuffer> nocopy_buf(uintptr_t a, uintptr_t b, const char *what) {
     atomic_fetch_add(&g_nc_made, 1);
     return [g_dev newBufferWithBytesNoCopy:(void *)a length:b - a options:MTLResourceStorageModeShared deallocator:nil];
 }
-void mtl_pool_add(const void *mem, uint64_t size) {
+// Storing a new buffer into a pool entry's __unsafe_unretained field makes ARC retain + autorelease it (objc_retainAutorelease) on the calling thread. That thread is a game thread
+// (MapVirtual, pool initialize) whose autorelease pool never drains, so every pool and sparse-run buffer stayed alive after its release, until the thread ended: PRAGMATA's hg29 kept 6033
+// finalized pool buffers alive, 263 GB of GPU address space (a sparse run grown in 4 MB steps left a whole-run buffer behind at every step), and hg28's page fault was inside one of
+// them (alive, out of the residency set). The functions that make entries therefore drain their own pool (t_sparse_safe 20)
+static void mtl_pool_add_(const void *mem, uint64_t size);
+void mtl_pool_add(const void *mem, uint64_t size) { @autoreleasepool { mtl_pool_add_(mem, size); } }
+static void mtl_pool_add_(const void *mem, uint64_t size) {
     mtl_init(); g_reg_gen++;
     uintptr_t pg = (uintptr_t)getpagesize(), lo = (uintptr_t)mem, hi = lo + size;
     uintptr_t a = lo & ~(pg - 1), b = (hi + pg - 1) & ~(pg - 1);
@@ -837,7 +843,7 @@ static void pidx_sort(void) {
     for (int i = 0; i < g_npool; i++) g_pidx[i] = i;
     qsort(g_pidx, (size_t)g_npool, sizeof *g_pidx, pidx_cmp); g_pidx_ok = 1;
 }
-static int big_new(big_pool *b, uintptr_t lo, uintptr_t hi, uintptr_t end, uint64_t unk) {   // caller holds g_mu: a new entry for [lo, end) of the pool, looked up for addresses in [lo, hi)
+static int big_new(big_pool *b, uintptr_t lo, uintptr_t hi, uintptr_t end, uint64_t unk) { @autoreleasepool {   // caller holds g_mu: a new entry for [lo, end) of the pool, looked up for addresses in [lo, hi); its own pool (mtl_pool_add)
     id<MTLBuffer> buf = nocopy_buf(lo, end, "large-pool chunk");
     if (!buf) { MLOG("[RED] memory pool %p: the zero-copy buffer over %#lx..%#lx was refused", b->mem, (unsigned long)lo, (unsigned long)end); return -1; }
     if (g_npool == g_cap) { g_cap = g_cap ? g_cap * 2 : 64; g_pools = realloc_or_die(g_pools, g_cap * sizeof *g_pools, "the memory pool table"); }
@@ -845,7 +851,7 @@ static int big_new(big_pool *b, uintptr_t lo, uintptr_t hi, uintptr_t end, uint6
     g_pools[g_npool++] = (pool_ent){lo < b->lo ? b->lo : lo, hi > b->hi ? b->hi : hi, lo, buf, buf.gpuAddress, b->mem, 0, clock_gettime_nsec_np(CLOCK_MONOTONIC), end > b->hi ? b->hi : end, unk};
     [g_keep addObject:buf];
     return g_npool - 1;
-}
+} }
 // The entry of a large pool for [addr, addr + len): the chunk of its stride, made or lengthened to reach as far as asked; -1 past the pool's end
 static uint64_t g_pool_extends;   // mtl_pool_extend
 static uint64_t g_big_retired;   // large-pool chunk buffers retired: lengthened, or superseded by the whole-pool entry

@@ -17,6 +17,14 @@ uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(label, c) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s (line %d)\n", label, __LINE__); } } while (0)
 static pool_t g_phys, g_sparse;
+static int map_at(uint64_t voff, uint64_t size, int64_t poff);
+static __weak id<MTLBuffer> t20_w[8]; static uint8_t *t20_base; static dispatch_semaphore_t t20_done, t20_end; static int t20_ok = 1;
+static void *t20_body(void *arg) {   // case 20: a run grown a step at a time on a thread with no autorelease pool of its own
+    (void)arg; uint64_t B = 800u << 20;
+    for (int i = 0; i < 8; i++) { t20_ok &= map_at(B + (uint64_t)i * 0x10000, 0x10000, (14u << 20) + (uint64_t)i * 0x10000);
+        void *mb = NULL; uint64_t mo = 0; t20_ok &= mtl_addr((uint64_t)(uintptr_t)(t20_base + B), 4, &mb, &mo); t20_w[i] = (__bridge id<MTLBuffer>)mb; }
+    dispatch_semaphore_signal(t20_done); dispatch_semaphore_wait(t20_end, DISPATCH_TIME_FOREVER); return NULL;
+}
 static int map_at(uint64_t voff, uint64_t size, int64_t poff) {   // poff < 0: unmap
     map_req r = {.phys = poff < 0 ? NULL : (NVNmemoryPool *)&g_phys, .poff = poff < 0 ? 0 : poff, .voff = (int64_t)voff, .size = size};
     return h_nvnMemoryPoolMapVirtual((NVNmemoryPool *)&g_sparse, 1, (const NVNmappingRequest *)&r);
@@ -233,6 +241,15 @@ int main(void) { @autoreleasepool {
       int alive; @autoreleasepool { alive = wb16 != nil; } CHECK("16 removed but not committed: still alive", alive);
       @autoreleasepool { res_commit(); }
       int gone; @autoreleasepool { gone = wb16 == nil; } CHECK("16 released once the removal is committed", gone); }
+    // 20. the same on a guest-like thread with no autorelease pool that drains (MapVirtual runs on the game's threads): an object autoreleased there stays alive until the thread
+    // ends, so the old run buffers must not be autoreleased on the way (checked while the thread still lives)
+    { t20_base = base; t20_done = dispatch_semaphore_create(0); t20_end = dispatch_semaphore_create(0); pthread_t th;
+      pthread_create(&th, NULL, t20_body, NULL); dispatch_semaphore_wait(t20_done, DISPATCH_TIME_FOREVER);
+      atomic_store(&g_done, g_fence + 2); @autoreleasepool { defer_drain(); res_commit(); }
+      int gone = 1, last; @autoreleasepool { for (int i = 0; i + 1 < 8; i++) gone &= t20_w[i] == nil; last = t20_w[7] != nil; }
+      CHECK("20 grown on a thread with no draining pool", t20_ok);
+      CHECK("20 every replaced run buffer released while that thread lives", gone); CHECK("20 the current one alive", last);
+      dispatch_semaphore_signal(t20_end); pthread_join(th, NULL); }
     // 4. off: the old behaviour (inaccessible pages after an unmap)
     g_vp_safe_test_off = 1;
     CHECK("map a run (safe off)", map_at(12u << 20, 1u << 20, 6u << 20));

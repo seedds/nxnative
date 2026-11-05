@@ -25,6 +25,8 @@ int front_screen_variable_refresh(void);
 int front_hdr_screen(void);
 void front_hdr_content_range(unsigned lo, unsigned hi);
 float dm_hdr_paper_white(void);   // hle_vi.c: the paper white in nits (DM_HDR_PAPER_WHITE, default 203), the luminance the picture's SDR white has
+int dm_hdr_mode(void);            // hle_vi.c: the HDR mode, 0 off, 1 by the screen, 2 on any screen (DM_HDR at start)
+void dm_hdr_set_mode(int m);      // hle_vi.c: change it while the game runs (the iOS in-game menu); the game switches its window on its next status query
 int dm_hdr_layer_float(void);     // hle_vi.c: DM_HDR_LAYER=float, the RGBA16Float extended linear BT.2020 layer; else RGB10A2 in BT.2100 PQ
 // The frame rate the display link paces the game at (60, 30, 120; nvn_mtl.m link_sync): in fullscreen, a screen whose refresh rate is not a multiple of it is switched, while the game runs,
 // to a mode of the same size whose rate is, and back when the window leaves fullscreen or that screen (front_mac.m; none on iOS). Called from the present thread

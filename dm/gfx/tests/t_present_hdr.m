@@ -13,7 +13,7 @@ module_t *g_mod; int g_nmod;
 void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 extern int t_hdr_screen; extern unsigned t_hdr_lo, t_hdr_hi;
-int vi_hdr_answered(void);
+int vi_hdr_answered(void); int dm_hdr_mode(void); void dm_hdr_set_mode(int m);
 static int checks, failed;
 #define CHECK(name, ok) do { int pass_ = !!(ok); checks++; failed += !pass_; printf("%s: %s\n", name, pass_ ? "PASS" : "FAIL"); } while (0)
 
@@ -123,6 +123,19 @@ int main(void) { @autoreleasepool {
         CHECK("the paper white is 203 nits", pw == 203);
         range(NULL, 0, 1000);
         CHECK("the declared extended range reaches the front end (0..1000)", t_hdr_lo == 0 && t_hdr_hi == 1000);
+    }
+
+    // HDR output changed while the game runs (the iOS in-game menu, dm_hdr_set_mode): the next status query follows, DM_HDR=1 having been read at start
+    {
+        uint8_t on = 9; uint32_t fmt = 9; uint16_t peak = 9;
+        int m0 = dm_hdr_mode();
+        dm_hdr_set_mode(0); status(&on, &fmt, &peak, NULL);
+        CHECK("turned off while the game runs: the next query answers SDR (on 0, format 0, peak 0)", m0 == 1 && dm_hdr_mode() == 0 && on == 0 && fmt == 0 && peak == 0);
+        dm_hdr_set_mode(1); status(&on, &fmt, &peak, NULL);
+        CHECK("turned on again: HDR on, format 1, peak 1000", on == 1 && fmt == 1 && peak == 1000);
+        t_hdr_screen = 0; dm_hdr_set_mode(2); status(&on, &fmt, &peak, NULL);
+        CHECK("mode 2 (DM_HDR=2): HDR on a screen without EDR too", on == 1 && fmt == 1);
+        dm_hdr_set_mode(1); t_hdr_screen = 1;
     }
 
     const double nits[N] = {0, 0.1, 10, 80, 203, 500, 1000, 10000};

@@ -130,8 +130,23 @@ HLE_FORCE("_ZN2nn2vi8FinalizeEv", "display service shutdown; the host has no vi 
 // Neither it nor Mario Kart World imports the SDK's HDR status event (CreateHdrStatusEvent and the rest), so a game learns of another screen only by asking again: the queries are counted in the log
 // A decimal number, clamped to 16 bits (the answers are 16-bit)
 static uint32_t vi_env_u32(const char *name, uint32_t def) { const char *e = getenv(name); if (!e || !*e) return def; unsigned long v = strtoul(e, NULL, 10); return v > 65535 ? 65535 : (uint32_t)v; }
-// DM_HDR is read the way the front ends read it (atoi: the value 1 or any non-zero number is on), and for Switch 2 games only (dm_sdk_ounce): a Switch 1 game answers SDR
-static int vi_hdr_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_HDR"); v = e && *e && atoi(e) != 0 && dm_sdk_ounce(); } return v; }
+// The HDR mode: 0 off, 1 HDR while the window's screen can show EDR, 2 HDR on any screen. DM_HDR is read the way the front ends read it (atoi: 2, or any other non-zero
+// number for 1) when first asked; the front end changes it while the game runs (dm_hdr_set_mode: the iOS in-game menu), and the game, which asks for its status every frame,
+// switches its window on its next query, as when the window moves to another screen. For Switch 2 games only (dm_sdk_ounce): a Switch 1 game answers SDR
+static _Atomic int g_vi_hdr_mode = -1;   // -1 until DM_HDR is read
+static _Atomic int g_vi_hdr_live;        // the mode was changed while the game runs: its SDR answers are logged too
+int dm_hdr_mode(void) {
+    int m = atomic_load(&g_vi_hdr_mode);
+    if (m >= 0) return m;
+    const char *e = getenv("DM_HDR"); int v = e && *e ? atoi(e) : 0, unread = -1;
+    atomic_compare_exchange_strong(&g_vi_hdr_mode, &unread, v == 2 ? 2 : v != 0);   // a mode set meanwhile by the front end wins
+    return atomic_load(&g_vi_hdr_mode);
+}
+void dm_hdr_set_mode(int m) {
+    m = m == 2 ? 2 : m != 0;
+    if (atomic_exchange(&g_vi_hdr_mode, m) != m) { atomic_store(&g_vi_hdr_live, 1); LOG("[nvn2-hdr] HDR output %s while the game runs", m == 2 ? "on any screen" : m ? "on" : "off"); }
+}
+static int vi_hdr_on(void) { return dm_hdr_mode() && dm_sdk_ounce(); }
 // Whether the window's screen can show EDR (its potential headroom is above 1): the front end reads it before the guest starts and whenever the window's screen changes (front_mac.m, front_ios.m).
 // No front end (a windowless run): taken as yes, so DM_HDR alone decides
 __attribute__((weak)) int front_hdr_screen(void) { return 1; }
@@ -151,16 +166,17 @@ int vi_hdr_answered(void) { return atomic_load(&g_vi_hdr_answered); }
 HLE_FORCE("_ZN2nn2vi21QueryDisplayHdrStatusEPbPNS0_15HdrOutputFormatEPtPKNS0_7DisplayE", "display HDR status: SDR output, or HDR on with DM_HDR=1 on a screen that can show EDR", Result, h_vi_HdrStatus,
           uint8_t *on, uint32_t *fmt, uint16_t *peak, const void *disp) {
     (void)disp;
-    if (!vi_hdr_on()) { if (on) *on = 0; if (fmt) *fmt = 0; if (peak) *peak = 0; return RES_OK; }
+    int mode = dm_sdk_ounce() ? dm_hdr_mode() : 0;
+    if (!mode && !atomic_load(&g_vi_hdr_live)) { if (on) *on = 0; if (fmt) *fmt = 0; if (peak) *peak = 0; return RES_OK; }   // off from the start: SDR, not logged
     // DM_HDR=2 answers HDR whatever the screen: on a screen without headroom Core Animation maps the HDR picture down instead of the game drawing its own SDR one (on Mario Kart World, more saturated than its SDR)
-    static int forced = -1; if (forced < 0) { const char *e = getenv("DM_HDR"); forced = e && atoi(e) == 2; }
-    int hdr = forced || front_hdr_screen() != 0;
+    int forced = mode == 2, hdr = mode && (forced || front_hdr_screen() != 0);
     uint32_t p = vi_env_u32("DM_HDR_PEAK", 1000);
     // Logged when the answer changes, and at the 1st, 2nd, 10th, 100th and 1000th query: whether the game asks again (and so can follow the window to another screen)
     static atomic_int queries, last = -1;
     int n = atomic_fetch_add(&queries, 1) + 1, was = atomic_exchange(&last, hdr);
     if (was != hdr || n == 1 || n == 2 || n == 10 || n == 100 || n == 1000)
-        LOG("[nvn2-hdr] vi::QueryDisplayHdrStatus (query %d): %s", n, hdr ? (forced && !front_hdr_screen() ? "HDR on, format 1 (DM_HDR=2: on a screen without EDR)" : "HDR on, format 1") : "SDR (DM_HDR is on, but the window's screen cannot show EDR)");
+        LOG("[nvn2-hdr] vi::QueryDisplayHdrStatus (query %d): %s", n, hdr ? (forced && !front_hdr_screen() ? "HDR on, format 1 (DM_HDR=2: on a screen without EDR)" : "HDR on, format 1")
+            : mode ? "SDR (DM_HDR is on, but the window's screen cannot show EDR)" : "SDR (HDR output turned off while the game runs)");
     if (hdr) atomic_store(&g_vi_hdr_answered, 1);
     if (on) *on = (uint8_t)hdr; if (fmt) *fmt = (uint32_t)hdr; if (peak) *peak = hdr ? (uint16_t)p : 0; return RES_OK; }
 HLE_FORCE("_ZN2nn2vi25QueryDisplayHdrPaperWhiteEPtPKNS0_7DisplayE", "display HDR paper white: 203 nits (BT.2408) unless DM_HDR_PAPER_WHITE", Result, h_vi_PaperWhite, uint16_t *nits, const void *disp) {

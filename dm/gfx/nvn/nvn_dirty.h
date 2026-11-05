@@ -18,3 +18,9 @@ int nvn_dirty_since_span(const void *span, const void *addr, size_t len, uint64_
 void nvn_dirty_stats(uint64_t *faults, uint64_t *preps);           // Cumulative: number of page faults triggered by game writes, number of pages unprotected before host writes
 void nvn_dirty_mp_stats(uint64_t *calls, uint64_t *pages, uint64_t *ns);   // Cumulative: this module's mprotect call count, pages covered, time spent
 void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total); // Currently live slots, slot table high-water mark, total number of registrations
+// Released texture pages (DM_NVN_TEX_DEDUPE, nvn_dirty.c): a page's bytes in a file and its memory given back, put back by any access (the page-fault hook) or nvn_dirty_restore
+int nvn_dirty_dedupe_open(const char *dir);                        // the dedupe file in dir (unlinked at once); 0 = ok
+int nvn_dirty_dedupe_on(void);                                     // the file is open
+size_t nvn_dirty_release(const void *addr, size_t len, uint64_t stamp, int (*ok)(void *ctx, uintptr_t lo, uintptr_t hi), void *ctx, int *skip);   // release the protected pages unwritten since stamp; bytes released
+void nvn_dirty_restore(const void *addr, size_t len);              // put back every released page of the range (before the GPU may read it)
+void nvn_dirty_dedupe_stats(uint64_t *gone, uint64_t *released, uint64_t *back, uint64_t *reread, uint64_t *raced, uint64_t *failed, uint64_t *file);

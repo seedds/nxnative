@@ -771,31 +771,6 @@ NVN(nvnQueueBuilderSetDefaults, void, NVNqueueBuilder *b) {
     NVNdevice *dev = QB(b)->dev; memset(b, 0, sizeof(queue_builder_t)); QB(b)->dev = dev;
     QB(b)->cmd_sz = 65536; QB(b)->comp_sz = 262144; QB(b)->ctl_sz = 16384; QB(b)->flush = 4096;   // Device defaults
 }
-// NVN2 (Switch 2): a program takes its shaders from a builder. The builder is the game's memory, of a size this host does not know; this stays in its first 24 bytes (the game's array of shader
-// data sits right below it on the stack, so the object is at least that). The array stays the game's until the program is initialized from the builder
-typedef struct { NVNdevice *d; const NVNshaderData *sd; int n; int pad; } prog_builder_t;
-NVN_NOPROTO(nvnProgramBuilderSetDefaults, void, void *b) { memset(b, 0, sizeof(prog_builder_t)); }
-NVN_NOPROTO(nvnProgramBuilderSetDevice, void, void *b, NVNdevice *d) { ((prog_builder_t *)b)->d = d; }
-NVN_NOPROTO(nvnProgramBuilderGetDevice, NVNdevice *, const void *b) { return ((const prog_builder_t *)b)->d; }
-NVN_NOPROTO(nvnProgramBuilderSetShaders, void, void *b, int n, const NVNshaderData *sd) { ((prog_builder_t *)b)->n = n; ((prog_builder_t *)b)->sd = sd; }
-NVN_NOPROTO(nvnProgramBuilderGetShaderCount, int, const void *b) { return ((const prog_builder_t *)b)->n; }
-NVN_NOPROTO(nvnProgramInitializeFromBuilder, NVNboolean, NVNprogram *p, const void *b) {
-    const prog_builder_t *s = b;
-    h_nvnProgramInitialize(p, s->d);
-    return s->n ? h_nvnProgramSetShaders(p, s->n, s->sd) : 1;
-}
-// NVN2 command buffer modes with nothing to do on Metal. Open: what recording mode 1 asks of the driver (the signature comes from the game's calls)
-NVN_NOPROTO(nvnCommandBufferSetRecordingMode, void, NVNcommandBuffer *c, int m) { (void)c; (void)m; }
-NVN_NOPROTO(nvnCommandBufferSetComputeOverlapMode, void, NVNcommandBuffer *c, int m) { (void)c; (void)m; }
-// Variable rate shading lowers cost, not content, and stencil cull criteria only tune early culling: with neither, every pixel shades and the stencil test still decides
-NVN_NOPROTO(nvnCommandBufferBindShadingRateImage, void, NVNcommandBuffer *c, const void *t) { (void)c; (void)t; }
-NVN_NOPROTO(nvnCommandBufferShadingRateImagePalette, void, NVNcommandBuffer *c, int i, int v) { (void)c; (void)i; (void)v; }
-NVN_NOPROTO(nvnCommandBufferSetStencilCullCriteria, void, NVNcommandBuffer *c, int f, int m) { (void)c; (void)f; (void)m; }
-// Mario Kart World sets modes 0 and 1. What a nonzero mode does is open
-NVN_NOPROTO(nvnCommandBufferSetGeometryProcessingMode, void, NVNcommandBuffer *c, int m) { (void)c; static int once; if (m && !once++) LOG("[RED] SetGeometryProcessingMode: mode %d ignored", m); }
-// NVN2: a queue may name a primary queue it works beside. The host has one Metal queue order, so nothing to keep
-NVN_NOPROTO(nvnQueueBuilderSetPrimaryQueue, void, NVNqueueBuilder *b, NVNqueue *q) { (void)b; (void)q; }
-NVN_NOPROTO(nvnQueueBuilderGetPrimaryQueue, NVNqueue *, const NVNqueueBuilder *b) { (void)b; return NULL; }
 NVN(nvnQueueBuilderSetDevice, void, NVNqueueBuilder *b, NVNdevice *d) { QB(b)->dev = d; }
 NVN(nvnQueueBuilderSetFlags, void, NVNqueueBuilder *b, int f) { QB(b)->flags = f; }
 NVN(nvnQueueBuilderSetCommandMemorySize, void, NVNqueueBuilder *b, size_t n) { QB(b)->cmd_sz = n; }
@@ -2460,12 +2435,17 @@ typedef struct { NVNdevice *dev; const NVNshaderData *sd; int n; } prog_builder_
 NVN_NOPROTO(nvnProgramBuilderSetDefaults, void, void *b) { memset(b, 0, sizeof(prog_builder_t)); }
 NVN_NOPROTO(nvnProgramBuilderSetDevice, void, void *b, NVNdevice *d) { ((prog_builder_t *)b)->dev = d; }
 NVN_NOPROTO(nvnProgramBuilderSetShaders, void, void *b, int n, const NVNshaderData *sd) { ((prog_builder_t *)b)->n = n; ((prog_builder_t *)b)->sd = sd; }
+NVN_NOPROTO(nvnProgramBuilderGetDevice, NVNdevice *, const void *b) { return ((const prog_builder_t *)b)->dev; }
+NVN_NOPROTO(nvnProgramBuilderGetShaderCount, int, const void *b) { return ((const prog_builder_t *)b)->n; }
 NVN_NOPROTO(nvnProgramInitializeFromBuilder, NVNboolean, NVNprogram *p, const void *b) {
     const prog_builder_t *o = (const prog_builder_t *)b;
     return h_nvnProgramInitialize(p, o->dev) && (!o->n || h_nvnProgramSetShaders(p, o->n, o->sd));
 }
 // A queue NVN2 ties to a primary queue (Donkey Kong Bananza's second queue): the host executes every queue's submits in order on its one Metal queue, so the tie needs no work
 NVN_NOPROTO(nvnQueueBuilderSetPrimaryQueue, void, NVNqueueBuilder *b, NVNqueue *primary) { (void)b; (void)primary; }
+NVN_NOPROTO(nvnQueueBuilderGetPrimaryQueue, NVNqueue *, const NVNqueueBuilder *b) { (void)b; return NULL; }
+NVN_NOPROTO(nvnCommandBufferBindShadingRateImage, void, NVNcommandBuffer *c, const void *t) { (void)c; (void)t; }
+NVN_NOPROTO(nvnCommandBufferShadingRateImagePalette, void, NVNcommandBuffer *c, int i, int v) { (void)c; (void)i; (void)v; }
 
 // NVN2's Z-cull compression hint for 32-bit float depth: Metal's depth buffers keep their own compression, so there is nothing to set (Fire Emblem Fortune's Weave)
 NVN_NOPROTO(nvnCommandBufferSetZCullZF32CompressionEnable, void, NVNcommandBuffer *c, uint32_t on) { (void)c; (void)on; }

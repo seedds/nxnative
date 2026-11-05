@@ -551,7 +551,7 @@ static void geo_mesh_encode(id<MTLRenderCommandEncoder> en_) {
 // pixel stage alone, a program of its own as a geometry draw's raster stage is, so it takes the render pass and the pixel stage's state like any draw; mtk_pso gives its pipeline and
 // mtk_encode binds the two stages and draws. The mesh stage shares the vertex stage's table, as geo_mesh_encode's does, and a task shader has the object stage's; both read the
 // draw's first workgroup at buffer 29. A pipeline is built in the background and its draws are left out until it is ready, as for a geometry mesh pipeline
-static struct { int on, miss; NvShader *ts, *ms; uint32_t first, count; uint64_t ind, ind_first; } g_mtk;   // ind: an indirect draw's threadgroups, ind_first: where the GPU finds its first
+static struct { int on, miss; NvShader *ts, *ms; uint32_t first, count; uint64_t args; } g_mtk;   // args != 0: an indirect draw's converted record (mti_run): {first, 0, 0, 0, x, y, z, raw count}
 static void draw_(const p_draw *dw, const p_draw_idx *di);
 static uint64_t g_mtk_n, g_mtk_wait;
 static nvn_hmap g_pso_mtk = {.klen = sizeof(pso_key)}; static os_unfair_lock g_pso_mtk_lock = OS_UNFAIR_LOCK_INIT;
@@ -591,43 +591,113 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
 static void mtk_encode(id<MTLRenderCommandEncoder> en_) {
     id<MTL4RenderCommandEncoder> en = (id<MTL4RenderCommandEncoder>)en_; NvShader *ts = g_mtk.ts, *ms = g_mtk.ms;
     [en setArgumentTable:g_vt atStages:MTLRenderStageMesh];
-    uint64_t first_gpu = g_mtk.ind_first;
-    if (!g_mtk.ind) { id<MTLBuffer> b; size_t o = arena_alloc(16, &b); memcpy((uint8_t *)b.contents + o, &g_mtk.first, 4); first_gpu = b.gpuAddress + o; }
+    uint64_t fa = g_mtk.args;   // an indirect draw: its first workgroup is the converted record's first word, written on the GPU (mti_run)
+    if (!fa) { id<MTLBuffer> b; size_t o = arena_alloc(16, &b); memcpy((uint8_t *)b.contents + o, &g_mtk.first, 4); fa = b.gpuAddress + o; }
     if (ts) { [en setArgumentTable:g_ot atStages:MTLRenderStageObject]; g_args_dirty[3] = 1; encode_args(en, ts, 3, 0);
-              if (rec_on()) rec_table_op(RO_T_ADDR, g_ot, first_gpu, DMSH_MESH_FIRST_SLOT); else [g_ot setAddress:first_gpu atIndex:DMSH_MESH_FIRST_SLOT]; }
+              if (rec_on()) rec_table_op(RO_T_ADDR, g_ot, fa, DMSH_MESH_FIRST_SLOT); else [g_ot setAddress:fa atIndex:DMSH_MESH_FIRST_SLOT]; }
     g_args_dirty[4] = 1; encode_args(en, ms, 4, 1);
-    enc_r_vbuf(en, DMSH_MESH_FIRST_SLOT, first_gpu);
-    if (g_mtk.ind) [en drawMeshThreadgroupsWithIndirectBuffer:g_mtk.ind threadsPerObjectThreadgroup:MTLSizeMake(ts ? ts->mesh_threads : 1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(ms->mesh_threads, 1, 1)];
-    else [en drawMeshThreadgroups:MTLSizeMake(g_mtk.count, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(ts ? ts->mesh_threads : 1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(ms->mesh_threads, 1, 1)];
+    enc_r_vbuf(en, DMSH_MESH_FIRST_SLOT, fa);
+    MTLSize to = MTLSizeMake(ts ? ts->mesh_threads : 1, 1, 1), tm = MTLSizeMake(ms->mesh_threads, 1, 1);
+    if (g_mtk.args) [en drawMeshThreadgroupsWithIndirectBuffer:g_mtk.args + 16 threadsPerObjectThreadgroup:to threadsPerMeshThreadgroup:tm];
+    else [en drawMeshThreadgroups:MTLSizeMake(g_mtk.count, 1, 1) threadsPerObjectThreadgroup:to threadsPerMeshThreadgroup:tm];
 }
-// DrawMeshTasksIndirect: {count, first}, which the game's culling writes earlier in the submission, while Metal's indirect mesh draw takes {x, y, z}. mdx_run copies the count to a {count, 1, 1} on the
-// GPU, before the render pass and for every such draw up to the next write, and the shader reads first from the record. Reading the record on the CPU instead took a wait for the GPU at each hazard:
-// 73 % of the submit thread in Ocarina of Time's Kokiri Forest, frames of 90 ms and more against 25 ms of GPU work
+// ---------- DrawMeshTasksIndirect ----------
+// The record {count, instances, first, base instance} is written by GPU culling earlier in the frame, and Metal's indirect mesh draw reads {x, y, z} threadgroups, so a compute pass
+// converts each record in the frame arena before the render pass, as ixc_run does for quads and fans: {first, 0, 0, 0} (the mesh stage's buffer DMSH_MESH_FIRST_SLOT), then {count, 1, 1}
+// 16 bytes on. The first such draw converts itself and every DrawMeshTasksIndirect after it up to the next buffer write outside a render pass, so only a draw met inside an open render pass
+// with no conversion yet splits that pass. A mesh draw's own storage writes do not make the conversions stale (the culling that writes the records is compute).
+// DM_NVN_MESH_INDIRECT: unset or 1 this layout; nv the {count, first} layout of VkDrawMeshTasksIndirectCommandNV; 0 drops these draws (as before). DM_NVN_MESH_INDIRECT_CAP: a record
+// with more workgroups draws nothing (default 2^20). DM_NVN_MESHLOG=<n>: logs the first n records and their conversions once the GPU has run them
+#define MTI_MAX 256
+typedef struct { uint64_t ind, args; } mti_ent;   // args 0: the record could not be converted
+static mti_ent g_mti[MTI_MAX]; static int g_mti_n; static uint64_t g_mti_epoch, g_mti_sub, g_mti_runs, g_mti_splits, g_mti_draws;
+static int mti_mode(void) {   // 0 off, 1 {count, first}, 2 {count, instances, first, base instance}
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_NVN_MESH_INDIRECT"); v = !e || !*e || !strcmp(e, "1") ? 2 : !strcmp(e, "nv") ? 1 : 0;
+        MLOG("DrawMeshTasksIndirect: %s (DM_NVN_MESH_INDIRECT=%s)", v == 2 ? "records {count, instances, first, base instance} converted on the GPU" : v == 1 ? "records {count, first} converted on the GPU" : "draws dropped", e ? e : "unset"); }
+    return v;
+}
+static const mti_ent *mti_find(uint64_t ind) {
+    if (g_mti_epoch != g_wr_epoch || g_mti_sub != g_sub_serial) return NULL;
+    for (int i = 0; i < g_mti_n; i++) if (g_mti[i].ind == ind) return &g_mti[i];
+    return NULL;
+}
+static void mti_take(uint64_t ind) { if (g_mti_n < MTI_MAX && !mti_find(ind)) g_mti[g_mti_n++] = (mti_ent){ind, 0}; }
+static void mti_run(uint64_t ind) {
+    static id<MTLComputePipelineState> ps; static id<MTL4ArgumentTable> at; static int failed; static uint32_t cap;
+    if (failed) return;
+    if (!at) { NSError *e = nil; id<MTLLibrary> lib = host_lib("ixc", &e); id<MTLFunction> f = lib ? [lib newFunctionWithName:@"mti_args"] : nil;
+        ps = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil;
+        MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxBufferBindCount = 1; at = ps ? rec_table([g_dev newArgumentTableWithDescriptor:ad error:&e]) : nil;
+        if (!at) { failed = 1; MLOG("[RED] DrawMeshTasksIndirect: cannot create the conversion pipeline %s (these draws are dropped)", e.localizedDescription.UTF8String); return; }
+        const char *c = getenv("DM_NVN_MESH_INDIRECT_CAP"); cap = c ? (uint32_t)strtoul(c, NULL, 0) : 1u << 20; }
+    if (g_mti_epoch != g_wr_epoch || g_mti_sub != g_sub_serial || g_mti_n > MTI_MAX - 8) { g_mti_n = 0; g_mti_epoch = g_wr_epoch; g_mti_sub = g_sub_serial; }
+    int n0 = g_mti_n; mti_take(ind);
+    if (g_exec_next && g_ret_n <= 8) {   // later DrawMeshTasksIndirect in replay order, up to the next buffer write (as ixc_run)
+        fz_cursor cur = {.p = g_exec_next, .ret_n = g_ret_n}; memcpy(cur.ret, g_ret, sizeof(*g_ret) * (size_t)g_ret_n);
+        const uint8_t *q; op_hdr h; const void *a;
+        for (int guard = 0; guard < 200000 && g_mti_n < MTI_MAX && fz_next(&cur, &q, &h, &a); guard++) {
+            if (h.op == OP_DISPATCH || h.op == OP_COPY_B2B || h.op == OP_UPDATE_UB || h.op == OP_CLEAR_BUF || h.op == OP_COPY_T2B) break;
+            p_draw dt; const p_draw *d = h.op == OP_DRAW ? draw_rec(a, h.size, &dt) : NULL;
+            if (d && d->prim == DM_PRIM_MESH_TASKS && d->ind) mti_take(d->ind);
+        }
+    }
+    if (g_enc) { g_mti_splits++; PD("M %llu DrawMeshTasksIndirect conversion: render pass split here", g_stat_pass); rp_end(); }
+    if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    int n = g_mti_n - n0, nj = 0; if (n <= 0) return;
+    typedef struct { uint64_t rec, out; uint32_t first_word, cap; } mjob;
+    id<MTLBuffer> ab; size_t ao = arena_alloc((size_t)n * (32 + sizeof(mjob)), &ab); uint64_t ag = ab.gpuAddress + ao;   // n converted records (32 bytes apart), then the jobs
+    mjob *mj = (mjob *)((uint8_t *)ab.contents + ao + (size_t)n * 32);
+    uint32_t fw = mti_mode() == 1 ? 1 : 2;
+    for (int i = 0; i < n; i++) {
+        mti_ent *e = &g_mti[n0 + i]; void *mb; uint64_t mo, rec; e->args = 0;
+        if (!mtl_gpu_addr(e->ind, fw == 1 ? 8 : 16, &mb, &mo, &rec)) { RED_ONCE(156, "DrawMeshTasksIndirect skipped: record address %#llx is in no memory pool", (unsigned long long)e->ind); continue; }
+        mj[nj++] = (mjob){rec, ag + 32 * (uint64_t)i, fw, cap}; e->args = ag + 32 * (uint64_t)i;
+    }
+    if (!nj) return;
+    id<MTL4ComputeCommandEncoder> ce = enc_c_begin(NULL); [ce setArgumentTable:at];
+    [at setAddress:ag + (uint64_t)n * 32 atIndex:0]; [ce setComputePipelineState:ps];
+    [ce dispatchThreadgroups:MTLSizeMake((NSUInteger)nj, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    enc_c_end(ce);
+    args_dirty_all();
+    if (!g_mti_runs++) MLOG("DrawMeshTasksIndirect: first conversion, %d draws (records become indirect mesh arguments in a compute pass before the render pass; cap %u workgroups)", nj, cap);
+    else if (g_mti_runs % 3600 == 0) MLOG("DrawMeshTasksIndirect: %llu conversions, %llu draws, render pass split %llu times", (unsigned long long)g_mti_runs, (unsigned long long)g_mti_draws, (unsigned long long)g_mti_splits);
+    static int lg = -1; if (lg < 0) { const char *v = getenv("DM_NVN_MESHLOG"); lg = v ? atoi(v) : 0; }
+    for (int i = 0; i < n && lg > 0; i++) { const mti_ent *e = &g_mti[n0 + i]; if (!e->args) continue; lg--;
+        const uint32_t *src = (const uint32_t *)(uintptr_t)e->ind, *arg = (const uint32_t *)((const uint8_t *)ab.contents + ao + 32 * (size_t)i);
+        unsigned long long fr = (unsigned long long)atomic_load(&g_cur_frame), pass = g_stat_pass, rid = (unsigned long long)e->ind; id<MTLBuffer> keep = ab;
+        uint32_t e0 = src[0], e1 = src[1], e2 = src[2], e3 = src[3];   // the record as the CPU sees it now: last frame's GPU values, if the same address is reused
+        [g_commit_blocks addObject:^{ (void)keep; MLOG("DrawMeshTasksIndirect frame %llu pass %llu record %#llx: %u %u %u %u (at encode %u %u %u %u) → first %u, groups %u x %u x %u (raw count %u)",
+            fr, pass, rid, src[0], src[1], src[2], src[3], e0, e1, e2, e3, arg[0], arg[4], arg[5], arg[6], arg[7]); }]; }
+}
+// DrawMeshTasksIndirect: the record is converted on the GPU before the render pass (mti_run), for every such draw up to the next write. Reading the record on the CPU instead took a wait for
+// the GPU at each hazard: 73 % of the submit thread in Ocarina of Time's Kokiri Forest, frames of 90 ms and more against 25 ms of GPU work
 static void mesh_tasks_draw(const p_draw *dw) {
     if (!S.prog || (!dw->ind && dw->count <= 0)) return;
+    if (dw->ind && !mti_mode()) { RED_ONCE(154, "DrawMeshTasksIndirect dropped (DM_NVN_MESH_INDIRECT=0)"); return; }
     __unsafe_unretained NvProg *pr = prog_get(S.prog);
     NvShader *ts = pr ? pr->sh[3] : nil, *ms = pr ? pr->sh[4] : nil;
     if (ts && ts->mesh_kind != 1) ts = nil;
     if (!ms || ms->mesh_kind != 2 || !ms->fn || (ts ? !ts->fn : !ms->mesh_notask)) {
         RED_ONCE(150, "DrawMeshTasks without its task and mesh shaders (task %s mesh %s): draw skipped", ts ? ts->key : "-", ms ? ms->key : "-"); return; }
+    const mti_ent *mi = NULL;   // an indirect draw: its record converted before the render pass (mti_run)
+    if (dw->ind) { if (!(mi = mti_find(dw->ind))) { mti_run(dw->ind); mi = mti_find(dw->ind); } if (!mi || !mi->args) return; }
     image_prepare(pr, 1u << 3 | 1u << 4);
     if (g_nubd && (g_enc || ubd_lazy()) && ((ts && ubd_conflict_sh(ts, 3)) || ubd_conflict_sh(ms, 4))) { g_ubd_conflicts++; rp_end(); ubd_land(); }   // as draw_ does for its stages
     NvProg *raster = pr->geo_lean_raster;   // the pixel stage alone
     if (!raster || raster->sh[1] != pr->sh[1] || raster->sh[0]) { raster = [NvProg new]; raster->sh[1] = pr->sh[1]; pr->geo_lean_raster = raster; }
-    uint64_t ind = 0, ind_first = 0;
-    if (dw->ind) { void *mb; uint64_t mo;
-        if (!mdx_find(dw->ind, dw->ind, &ind)) { mdx_run(dw, NULL); if (!mdx_find(dw->ind, dw->ind, &ind)) ind = 0; }
-        if (!ind || !mtl_gpu_addr(dw->ind, 8, &mb, &mo, &ind_first)) { RED_ONCE(154, "DrawMeshTasksIndirect record at %#llx is in no memory pool: draw skipped", (unsigned long long)dw->ind); return; }
-        ind_first += 4; }
-    g_mtk.on = 1; g_mtk.miss = 0; g_mtk.ts = ts; g_mtk.ms = ms; g_mtk.first = (uint32_t)dw->first; g_mtk.count = (uint32_t)dw->count;
-    g_mtk.ind = ind; g_mtk.ind_first = ind_first;
+    g_mtk.on = 1; g_mtk.miss = 0; g_mtk.ts = ts; g_mtk.ms = ms; g_mtk.first = (uint32_t)dw->first; g_mtk.count = (uint32_t)dw->count; g_mtk.args = mi ? mi->args : 0;
     g_geo_program = raster;
     p_draw triangle = {.prim = 4, .count = 3, .instances = 1};
     draw_(&triangle, NULL);
-    g_geo_program = nil; g_mtk.on = 0; args_dirty_all();
+    g_geo_program = nil; g_mtk.on = 0; g_mtk.args = 0; args_dirty_all();
     if (g_mtk.miss) { g_mtk_wait++; return; }
     swrite_note(pr); g_wr_epoch++;
-    if (!g_mtk_n++) MLOG("task / mesh: first draw, task %s mesh %s fragment %s, %u workgroups from %u%s", ts ? ts->key : "-", ms->key, pr->sh[1] ? pr->sh[1]->key : "-", g_mtk.count, g_mtk.first, ind ? " (indirect)" : "");
+    if (g_mti_epoch == g_wr_epoch - 1) g_mti_epoch = g_wr_epoch;   // this draw's own storage writes leave the indirect conversions valid (see mti_run)
+    if (mi) g_mti_draws++;
+    if (!g_mtk_n++) MLOG("task / mesh: first draw, task %s mesh %s fragment %s, %s", ts ? ts->key : "-", ms->key, pr->sh[1] ? pr->sh[1]->key : "-",
+                         mi ? "indirect (the GPU reads the workgroup count)" : [NSString stringWithFormat:@"%u workgroups from %u", g_mtk.count, g_mtk.first].UTF8String);
+    if (mi) { static int once; if (!once++) MLOG("DrawMeshTasksIndirect: first draw, task %s mesh %s fragment %s, record %#llx", ts ? ts->key : "-", ms->key, pr->sh[1] ? pr->sh[1]->key : "-", (unsigned long long)dw->ind); }
 }
 static uint64_t g_geo_mesh_n, g_geo_mesh_wait;   // mesh draws; draws the compute path drew while their mesh pipeline was built
 static int geo_mesh_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {

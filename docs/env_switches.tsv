@@ -143,6 +143,7 @@ DM_NVN_ENC_THREAD	player	`1` runs the replay's Metal encoding on a thread of its
 DM_NVN_FAST_WAKE	switch	`0` makes the game's `SyncWait`s wake on the commit feedback handler instead of the GPU's own signal of the fence (on by default)
 DM_NVN_FB_SNAP	switch	Draws that sample a colour attachment of their own render pass: unset, those that write it (or follow a write in the pass) read a snapshot, reused until the game's next barrier; `0` none; `all` a fresh snapshot for every draw that samples one (slow, diagnostic, no tile reads)
 DM_NVN_FB_TILE	switch	`0` makes such draws that sample the attachment at their own pixel (a projective sample at the vertex shader's screen varying) read a snapshot too, instead of the tile
+DM_NVN_FLOAT_VIEW	diagnostic	
 DM_NVN_FLUSH_FILL	switch	`0` starts a new GPU texture in a CPU-writable pool as zeros; by default one whose storage the game flushed before its first use is filled from that storage once
 DM_NVN_FRAMES	diagnostic	`=<N>` prints the NVN call table frame by frame for the first N frames (default 3)
 DM_NVN_FUSE_CHECK	diagnostic	`=1` checks pass merging in the same frame: renders the merged passes again apart and logs the comparison of the attachments every time
@@ -170,6 +171,9 @@ DM_NVN_LINEAR_PFV	diagnostic	`0`: linear 32-bit integer textures are made withou
 DM_NVN_LOADPROBE	diagnostic	`=1`, `2` or `3`: attachments whose load is skipped are cleared to a sentinel colour (`3` NaN; `1` NaN for float formats) and the sentinel pixels left at pass end are counted (should be 0)
 DM_NVN_LOG	diagnostic	`=1` logs the creation of NVN objects
 DM_NVN_MAGSCAN	diagnostic	`=<fs key>[:every[:phase]]`: device self-check that reads each pass's colour attachments every `every` frames (default 30) and logs `[mag]` lines for solid magenta 16×16 blocks or non-finite pixels
+DM_NVN_MESHLOG	diagnostic	`=<n>` logs the first n DrawMeshTasksIndirect records and their conversions once the GPU has run them
+DM_NVN_MESH_INDIRECT	switch	`0` drops DrawMeshTasksIndirect, as before; `nv` reads the records as {count, first}; unset or `1` reads NVN2's {count, instances, first, base instance} records, converted on the GPU before the pass
+DM_NVN_MESH_INDIRECT_CAP	switch	`=<n>`: a DrawMeshTasksIndirect record with more workgroups than n draws nothing (default 2^20)
 DM_NVN_NO_ARGREUSE	diagnostic	`1`: every draw encodes its argument tables again instead of reusing the previous draw's when its bindings are unchanged (an A/B for flicker that the reuse could cause)
 DM_NVN_PASSDUMP	diagnostic	`=<f>`, `<f1>-<f2>` or `every:<n>`: logs every render pass of those frames (attachments, clears, shader keys, bindings, draw state, presents) for the `tbdr_*.py` tools
 DM_NVN_PASSDUMP_ALL	diagnostic	`=1` makes `DM_NVN_PASSDUMP` record every draw and binding change, not only the first per pass and stage, including copies and inline uniform updates
@@ -197,6 +201,8 @@ DM_NVN_SKIP_FS	diagnostic	`=<fragment key>[,…]` (up to 16) drops all draws of 
 DM_NVN_SKIP_SMALL	diagnostic	`=<width>` drops all draws whose target width is at most that, to measure the cost of tiny render passes; the picture is wrong
 DM_NVN_SLICE_MERGE	switch	`0` keeps passes into other layers of one array or cube texture level apart (on by default: they run as one layered pass)
 DM_NVN_SNAPRAW	diagnostic	`=1` makes `DM_NVN_TEXDUMP` also save each target's raw bytes, with a text header line, since converting an HDR target to an 8-bit image truncates
+DM_NVN_SPARSE_PHYS	diagnostic	
+DM_NVN_SPARSE_RUN	diagnostic	
 DM_NVN_SPARSE_TILES	switch	`0` makes a sparse texture of 64 MB or more whole, as before; by default it is a Metal placement sparse texture with only the mapped tiles backed
 DM_NVN_STORAGE_FIRST_USE	switch	`0` keeps a sampled block-compressed texture in a CPU-writable pool to the one-time fill instead of making it CPU-written when its storage holds data at first use (on by default; `tex_cpu_content`), to measure it
 DM_NVN_T2T_FROM	diagnostic	`=<frame>`: `DM_NVN_T2T_TRACE` records copies only from that frame on (default 0)
@@ -228,6 +234,7 @@ DM_NVN_VCONV_CHECK	diagnostic	`=1` scans the indices again at every reuse of a c
 DM_NVN_VCONV_CPU	switch	`=1` converts integer vertex inputs fed formats of another class on the CPU, as before, instead of through the shader's shadow inputs (`<key>_bv`)
 DM_NVN_VCONV_RANGE	switch	`0` / `1` overrides the profile's `vconv_range`: CPU vertex conversion only over the vertices each draw reads instead of the whole bound range
 DM_NVN_VLOG	diagnostic	Set: logs each NVN memory pool as it is created (address, memory, size, flags) with a backtrace
+DM_NVN_VRUN_MAX	diagnostic	
 DM_NVN_VSDUMP	path	Output file for post-vertex captures; used with DM_NVN_VSDUMP_KEY and the frame/count bounds
 DM_NVN_VSDUMP_FROM	diagnostic	First presented frame eligible for a post-vertex capture (default 0)
 DM_NVN_VSDUMP_KEY	diagnostic	Vertex key to capture, or `*` for all eligible vertex shaders; storage-writing shaders are excluded

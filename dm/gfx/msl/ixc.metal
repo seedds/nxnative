@@ -19,3 +19,11 @@ kernel void dpc_clamp(device const djob *j [[buffer(0)]]) {
   uint x = min(j->rec[0], j->maxdim), y = min(j->rec[1], j->maxdim), z = min(j->rec[2], j->maxdim);
   bool ok = (ulong)x * y * z <= j->maxtotal;
   j->out[0] = ok ? x : 0u; j->out[1] = ok ? y : 0u; j->out[2] = ok ? z : 0u; }
+// DrawMeshTasksIndirect (nvn_geometry.inc mti_run): the guest record {count, instances, first, base instance} (or {count, first} with DM_NVN_MESH_INDIRECT=nv) becomes
+// {first, 0, 0, 0} for the mesh stage's first-workgroup buffer, then MTLDispatchThreadgroupsIndirectArguments {count, 1, 1} 16 bytes on. The count is capped: a count the GPU
+// wrote from bad data would otherwise draw for ever
+struct mjob { device const uint *rec; device uint *out; uint first_word, cap; };
+kernel void mti_args(device const mjob *j [[buffer(0)]], uint i [[threadgroup_position_in_grid]]) {
+  device const uint *s = j[i].rec; device uint *d = j[i].out; uint n = s[0];
+  d[0] = s[j[i].first_word]; d[1] = 0u; d[2] = 0u; d[3] = 0u;
+  d[4] = n <= j[i].cap ? n : 0u; d[5] = 1u; d[6] = 1u; d[7] = n; }

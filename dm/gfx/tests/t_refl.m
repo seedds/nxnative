@@ -36,6 +36,24 @@ int main(void) { @autoreleasepool {
         check("stored image: 3D texture type", MTLTextureType3D, r.b[1].dtt);
         check("stored image: no atomic flag", 0, r.b[1].atom);
     }
+    {   // an image whose handle the game keeps in its uniform buffer (Orbitals' cp_i_cb3_<word>_: dmsh_build.py decode_ubo_img), including a buffer image and an atomic one; an array of them is refused
+        NSDictionary *j = @{@"route": @"B", @"bindings": @[
+            @{@"kind": @"img_ubo", @"reg": @0, @"off": @32, @"arg_id": @0, @"msl_name": @"cp_i_cb3_8_", @"msl_type": @"texture2d<float, access::write>"},
+            @{@"kind": @"img_ubo", @"reg": @0, @"off": @0, @"arg_id": @1, @"msl_name": @"cp_i_cb3_0_", @"msl_type": @"texture_buffer<uint, access::read_write>", @"atomic": @YES},
+            @{@"kind": @"img_ubo", @"reg": @2, @"off": @8, @"arg_id": @2, @"msl_name": @"cp_i_cb5_2_", @"msl_type": @"texture3d<float, access::read>"}]};
+        check("image from a uniform buffer: conversion succeeds", 0, nvn_refl_from_json(j, &r, err, sizeof err));
+        check("image from a uniform buffer: IMGU kind", NVN_RB_IMGU, r.b[0].kind);
+        check("image from a uniform buffer: slot", 0, r.b[0].reg); check("image from a uniform buffer: byte offset", 32, r.b[0].off);
+        check("image from a uniform buffer: 2D", MTLTextureType2D, r.b[0].dtt); check("image from a uniform buffer: written", 1, r.b[0].rw);
+        check("image from a uniform buffer: bindless", 1, r.bindless);
+        check("buffer image from a uniform buffer: type", MTLTextureTypeTextureBuffer, r.b[1].dtt); check("buffer image from a uniform buffer: atomic", 1, r.b[1].atom);
+        check("buffer image from a uniform buffer: unsigned", NVN_DPF_UINT, r.b[1].dpf);
+        check("read-only image from a uniform buffer: slot 2 + 8", 2 * 1000 + 8, r.b[2].reg * 1000 + r.b[2].off); check("read-only image from a uniform buffer: not written", 0, r.b[2].rw);
+        NSDictionary *k = @{@"route": @"B", @"bindings": @[@{@"kind": @"img_ubo", @"arg_id": @0, @"off": @0, @"msl_name": @"cp_i_cb3_0_", @"msl_type": @"texture2d<float, access::write>"}]};
+        check("image from a uniform buffer without a slot: refused", 1, nvn_refl_from_json(k, &r, err, sizeof err));
+        NSDictionary *a = @{@"route": @"B", @"bindings": @[@{@"kind": @"img_ubo", @"reg": @0, @"arg_id": @0, @"off": @0, @"msl_name": @"cp_i_cb3_0_", @"msl_type": @"array<texture2d<float, access::write>, 4>"}]};
+        check("array of images from a uniform buffer: refused", 1, nvn_refl_from_json(a, &r, err, sizeof err));
+    }
     {   // readable-tile calls (dmsh_fetch.py): one at an interpolated output, one projective, one at the pixel position times c[6].xy (frag_pos, Splatoon Raiders' ink stamps)
         NSDictionary *j = @{@"route": @"B", @"stage": @"ps", @"bindings": @[], @"fetch": @{@"calls": @[@{@"fc": @0, @"tex_reg": @1, @"varying_locn": @3},
             @{@"fc": @1, @"tex_reg": @2, @"varying_locn": @4, @"proj": @1}, @{@"fc": @2, @"tex_reg": @3, @"frag_pos": @[@[@0, @6, @0], @[@0, @6, @1]]}]}};

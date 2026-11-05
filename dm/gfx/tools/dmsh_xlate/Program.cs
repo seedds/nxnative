@@ -43,7 +43,15 @@ static class SwshXlate
         public static Dictionary<int, SamplerType> ImageTypesOf(ShaderProgram p)
         {
             var types = new Dictionary<int, SamplerType>();
-            foreach (var im in p.Info.Images) if (im.CbufSlot == 2 || im.CbufSlot < 0) types[im.HandleIndex] = im.Type & (SamplerType.Mask | SamplerType.Array);
+            // Any uniform slot: NVN2's bound handles are words of the compute stage's (cp_i_cb3_<word>_). A handle word two images give different types is left unanswered
+            var clash = new HashSet<int>();
+            foreach (var im in p.Info.Images)
+            {
+                SamplerType ty = im.Type & (SamplerType.Mask | SamplerType.Array);
+                if (types.TryGetValue(im.HandleIndex, out SamplerType had) && had != ty) clash.Add(im.HandleIndex);
+                types[im.HandleIndex] = ty;
+            }
+            foreach (int h in clash) types.Remove(h);
             return types;
         }
         // The same for a texture (Princess Peach: Showtime!'s size query on a volume it also samples, 1,463 of its shaders). A handle ORs a texture word and a sampler word, and the query's has
@@ -110,7 +118,10 @@ static class SwshXlate
         {
             int slot = Slot(handle, cbufSlot, false), islot = Slot(handle, cbufSlot, true);
             string t = (slot >= 0 ? Get("tex", slot) : null) ?? (islot >= 0 ? Get("img", islot) : null);
-            if (t == null && islot >= 0 && cbufSlot < 0)
+            // NVN2 keeps bound handles as words of the compute stage's uniform slot (cp_t_cb3_<word>), not c2 rows, so the texture and image slot numbers say
+            // nothing there: a texture and an image with the same handle word are one descriptor. Orbitals' (Unreal Engine 5.6) volumetric lightmap remap (cs_global #34) asks the size of the 3D indirection volume it writes as cp_i_cb3_0_;
+            // typed 2D, the host bound a zero 2D texture, every thread returned at its bounds check and the remap never ran: the level got no indirect light (about half its brightness)
+            if (t == null && cbufSlot < 0)
             {
                 if (_imageTypes != null && _imageTypes.TryGetValue(handle, out SamplerType it)) { Notes.Add($"texture handle {handle:X} is image slot {islot}: type {it} from the shader's image instructions"); return it; }
                 ImageQueryGuessed = true;

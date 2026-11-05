@@ -128,7 +128,15 @@
 - **Fix:** `prune_chains` in `scripts/regress.py` removes chain builds after each chain step, beyond the 3 used last, any used within 24 hours and those of the 3 newest stored baselines; a check that needs one builds it again. `tree_tar.pack_quiet` packs each other top-level folder untouched for 14 days, with 100 files or more, into `<name>.tar` at the end of an NSP script or `regress.py` run. These tars keep extended attributes, so a RomFS folder's case-collision names survive, and `tar --xattrs -xf` restores them (plain `tar -xf` does not). It frees no space beyond the chain builds: a folder of APFS clones can take more as a tar, so each tar must fit with 20 GB to spare. A player's NSP folder has no work folder.
 - **Found on:** [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game).
 
+### Shader libraries in an application bundle hold hundreds of thousands of small files
+
+- **Symptom:** copying a packaged Mac application (`.app`) to an external drive (e.g. exFAT/USB SSD) or network share is extremely slow or hangs Finder when canceled, even when the application size is only a few gigabytes.
+- **Cause:** games with large shader sets have over 100,000 loose `.metallib` and `.json` files in `Contents/Resources/msl/b-<chain>/`, thrashing filesystem metadata, directory blocks, and inodes on external and non-APFS volumes.
+- **Fix:** `--msl-archive` bundles shader libraries, reflection JSONs, and inputs stamp into a single indexed binary archive (`b-<chain>.pak`) using the 16-byte aligned NXMSLPAK container (`dm/tools/msl_pak.py`). The host (`nvn_mtl.m`) memory-maps the archive and performs zero-copy binary search lookups (`bsearch`) directly into `dispatch_data_t` without extracting files to disk. When the option is omitted or no archive is present, the host falls back to reading loose directory files as before.
+- **Found on:** BALL x PIT (`010086A022444000`), update 1.301 (v458752): 117,918 shader files in `Contents/Resources/msl/` reduced to 1 archive file.
+
 ### The zstd command given a path inside the image
+
 
 - **Symptom:** the NSP script stops at the shader split of a registered profile with `[RED] 13744 file(s) could not be read, their shaders are left out (first: AI/FileEntry/FileEntry.Product.100.byml.zs: CalledProcessError: Command ['zstd', '-d', '-c', '-q', '…/extract/v0/RomFS.img/AI/…'] returned non-zero exit status 1.)`.
 - **Cause:** `shader_split.py`'s `unzs` read a `.zs` file through `romfs.open`, which reads inside the image, but then handed its path to the `zstd` command, which can only open real files (`Not a directory`).

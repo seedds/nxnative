@@ -4345,6 +4345,73 @@ static os_unfair_lock g_rmu = OS_UNFAIR_LOCK_INIT;
 // ---------- Shader mapping table: Switch control section hash → PC metallib (produced by dm/gfx/tools/shader_map.py) ----------
 static NSMutableDictionary<NSString *, NSString *> *g_shmap;
 static NSString *g_shmap_path, *g_msl_dir;
+
+// ---------- NXMSLPAK: Single indexed archive support for shader libraries and reflection ----------
+typedef struct __attribute__((packed)) {
+    uint32_t name_offset;
+    uint32_t name_len;
+    uint64_t data_offset;
+    uint64_t data_len;
+} msl_pak_entry;
+
+typedef struct {
+    const uint8_t *base;
+    size_t size;
+    uint32_t count;
+    const msl_pak_entry *entries;
+    const char *strings;
+} msl_pak_t;
+
+static msl_pak_t g_msl_pak;
+
+static int msl_pak_cmp(const void *key, const void *elem) {
+    const char *name = (const char *)key;
+    const msl_pak_entry *e = (const msl_pak_entry *)elem;
+    const char *entry_name = g_msl_pak.strings + e->name_offset;
+    return strcmp(name, entry_name);
+}
+
+static void msl_pak_open(NSString *path) {
+    int fd = open(path.fileSystemRepresentation, O_RDONLY);
+    if (fd < 0) return;
+    struct stat st;
+    if (fstat(fd, &st) || st.st_size < 32) { close(fd); return; }
+    size_t sz = (size_t)st.st_size;
+    void *m = mmap(NULL, sz, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (m == MAP_FAILED) return;
+    const uint8_t *b = (const uint8_t *)m;
+    if (memcmp(b, "NXMSLPAK", 8) != 0) { munmap(m, sz); return; }
+    uint32_t ver = *(const uint32_t *)(b + 8);
+    if (ver != 1) { munmap(m, sz); return; }
+    uint32_t count = *(const uint32_t *)(b + 16);
+    uint64_t idx_off = *(const uint64_t *)(b + 20);
+    if (idx_off >= sz || idx_off + (uint64_t)count * sizeof(msl_pak_entry) > sz) { munmap(m, sz); return; }
+    g_msl_pak.base = b;
+    g_msl_pak.size = sz;
+    g_msl_pak.count = count;
+    g_msl_pak.entries = (const msl_pak_entry *)(b + idx_off);
+    g_msl_pak.strings = (const char *)(b + idx_off + (uint64_t)count * sizeof(msl_pak_entry));
+    MLOG("shader package archive loaded: %s (%u entries, %.1f MB)", path.UTF8String, count, sz / 1048576.0);
+}
+
+static const void *msl_pak_lookup(const char *name, size_t *out_len) {
+    if (!g_msl_pak.base || !g_msl_pak.count || !name) return NULL;
+    const msl_pak_entry *found = (const msl_pak_entry *)bsearch(name, g_msl_pak.entries, g_msl_pak.count, sizeof(msl_pak_entry), msl_pak_cmp);
+    if (!found) return NULL;
+    if (found->data_offset + found->data_len > g_msl_pak.size) return NULL;
+    if (out_len) *out_len = (size_t)found->data_len;
+    return g_msl_pak.base + found->data_offset;
+}
+
+static NSData *msl_read_data(NSString *path) {
+    NSString *name = path.lastPathComponent;
+    size_t len = 0;
+    const void *data = msl_pak_lookup(name.UTF8String, &len);
+    if (data) return [NSData dataWithBytesNoCopy:(void *)data length:len freeWhenDone:NO];
+    return [NSData dataWithContentsOfFile:path];
+}
+
 static NSString *exe_rel(const char *rel) {
     char buf[4096]; uint32_t n = sizeof buf;
     if (_NSGetExecutablePath(buf, &n)) return nil;
@@ -4375,10 +4442,19 @@ static void shmap_read(void) {
     const char *m = getenv("DM_MSL_DIR");
     // Library directory = <DM_MSL_DIR or default cache>/b-<translation chain version>: the version comes from dm/gfx/nvn/dmsh_chain.h (tools/dmsh_chain.py), one for every game; a host built from an old source tree only accepts libraries of the old version
     g_msl_dir = [NSString stringWithFormat:@"%@/b-%s", m ? @(m) : [NSString stringWithFormat:@"%s%s/build/cache/metal_shader_cache", getenv("DM_ROOT") ?: getenv("HOME"), getenv("DM_ROOT") ? "" : "/dm-work"], DMSH_CHAIN];
-    if (![NSFileManager.defaultManager fileExistsAtPath:g_msl_dir]) MLOG("[RED] shader library directory %s does not exist: translation chain version %s of this source tree has not been built yet (dm/gfx/tools/dmsh_build.py)", g_msl_dir.UTF8String, DMSH_CHAIN);
+    NSString *pak_path = [g_msl_dir stringByAppendingPathExtension:@"pak"];
+    if ([NSFileManager.defaultManager fileExistsAtPath:pak_path]) msl_pak_open(pak_path);
+    else {
+        NSString *inner_pak = [g_msl_dir stringByAppendingPathComponent:@"archive.pak"];
+        if ([NSFileManager.defaultManager fileExistsAtPath:inner_pak]) msl_pak_open(inner_pak);
+    }
+    if (!g_msl_pak.base && ![NSFileManager.defaultManager fileExistsAtPath:g_msl_dir]) MLOG("[RED] shader library directory %s does not exist: translation chain version %s of this source tree has not been built yet (dm/gfx/tools/dmsh_build.py)", g_msl_dir.UTF8String, DMSH_CHAIN);
     // The library's stamp (inputs.tsv, written by a full dmsh_build.py run): the game and the digest of the profile inputs it was built from. The chain version is the same for every
     // game and every state of a profile's tables, so the stamp is what ties c1_full.tsv / cb_extent.tsv to these libraries: each names the inputs of the library it was made from
-    NSString *stamp = [NSString stringWithContentsOfFile:[g_msl_dir stringByAppendingPathComponent:@"inputs.tsv"] encoding:NSUTF8StringEncoding error:nil], *st_game = nil, *st_inputs = nil;
+    size_t stamp_len = 0;
+    const void *stamp_bytes = msl_pak_lookup("inputs.tsv", &stamp_len);
+    NSString *stamp = stamp_bytes ? [[NSString alloc] initWithBytes:stamp_bytes length:stamp_len encoding:NSUTF8StringEncoding]
+                                  : [NSString stringWithContentsOfFile:[g_msl_dir stringByAppendingPathComponent:@"inputs.tsv"] encoding:NSUTF8StringEncoding error:nil], *st_game = nil, *st_inputs = nil;
     for (NSString *ln in [stamp componentsSeparatedByString:@"\n"]) {
         NSArray *c = [ln componentsSeparatedByString:@"\t"];
         if (c.count == 2 && [c[0] isEqual:@"game"]) st_game = c[1]; else if (c.count == 2 && [c[0] isEqual:@"inputs"]) st_inputs = c[1];
@@ -4538,6 +4614,14 @@ static void pso_user_record(const char *fmt, ...) {
 // while the default soft limit of an iOS process is 256; new shaders created in other acts raise it further). Here the file is mapped into memory and closed immediately, and the library is built from the in-memory data; the mapping is released when the library's data object is freed
 static __thread int t_lib_layer;
 static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) {
+    NSString *name = path.lastPathComponent;
+    size_t pak_len = 0;
+    const void *pak_m = msl_pak_lookup(name.UTF8String, &pak_len);
+    if (pak_m) {
+        t_lib_layer = memmem(pak_m, pak_len, "render_target_array_index", 25) != NULL;
+        dispatch_data_t d = dispatch_data_create(pak_m, pak_len, nil, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+        return [g_dev newLibraryWithData:d error:err];
+    }
     int fd = open(path.fileSystemRepresentation, O_RDONLY); struct stat st;
     if (fd < 0 || fstat(fd, &st) || st.st_size <= 0) { if (fd >= 0) close(fd); if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"cannot open %@", path]}]; return nil; }
     size_t len = (size_t)st.st_size; void *m = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0); close(fd);
@@ -4621,7 +4705,7 @@ static id<MTLFunction> fn_dev(id<MTLFunction> f) {
 // layer: a vertex shader's layer entry points (entry_layer / entry_layer_z, which also write the layer) instead of main0 / main0_z, for a program whose geometry shader is a slice writer (prog_fold_gs)
 static NvShader *shader_load(NSString *pc, int stage, int layer) {
     NSError *e = nil;
-    NSData *jd = [NSData dataWithContentsOfFile:[NSString stringWithFormat:@"%@/%@.json", g_msl_dir, pc]];
+    NSData *jd = msl_read_data([NSString stringWithFormat:@"%@/%@.json", g_msl_dir, pc]);
     NSDictionary *j = jd ? [NSJSONSerialization JSONObjectWithData:jd options:0 error:nil] : nil;
     if (j && stage == 2 && [j[@"gs_slice"] isKindOfClass:[NSDictionary class]] && [j[@"chain"] isEqual:@DMSH_CHAIN]) {   // a slice-writing geometry shader has no library: a stub prog_fold_gs replaces
         NvShader *o = [NvShader new]; o->stage = 2; o->lay_loc = -1; strlcpy(o->key, pc.UTF8String, sizeof o->key);
@@ -7123,7 +7207,7 @@ static MTL4FunctionDescriptor *pre_fn(id<MTLLibrary> lib, NSString *name) {   //
     if (!f.functionConstantsDictionary.count) return ld;
     MTL4SpecializedFunctionDescriptor *sd = [MTL4SpecializedFunctionDescriptor new]; sd.functionDescriptor = ld; sd.constantValues = [MTLFunctionConstantValues new]; return sd;
 }
-static NSDictionary *pre_json(NSString *key) { NSData *d = [NSData dataWithContentsOfFile:[NSString stringWithFormat:@"%@/%@_b.json", g_msl_dir, key]]; return d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil; }
+static NSDictionary *pre_json(NSString *key) { NSData *d = msl_read_data([NSString stringWithFormat:@"%@/%@_b.json", g_msl_dir, key]); return d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil; }
 // The base of one pair as the draws make it (pso_desc_pull / pso_desc), or nil when the pair is left to the draws. Call inside an autorelease pool
 static MTL4RenderPipelineDescriptor *pre_desc(NSString *vk, NSString *fk, int zero) {
     NSDictionary *vj = pre_json(vk), *fj = pre_json(fk);

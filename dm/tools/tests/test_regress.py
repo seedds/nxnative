@@ -368,7 +368,7 @@ class Regress(unittest.TestCase):
             (out / 'manifest.json').write_text(json.dumps({'kind': 'nvn', 'interface': {'bad': []}}))
             current = {'bad': [{'vs': 'new-pair'}]}
             with patch.object(regress, 'ROOT', root), patch.object(regress, 'chain_key', return_value=('v', 'i', 'key')), patch.object(regress, 'interface_check', return_value=current) as check:
-                manifest, _ = regress.chain_build(NS(), g, NS(tools_fp='', jobs=1))
+                manifest, _ = regress.chain_build(NS(path=root), g, NS(tools_fp='', jobs=1))
             check.assert_called_once()
             self.assertEqual(manifest['interface'], current)
 
@@ -398,11 +398,29 @@ class Regress(unittest.TestCase):
             fresh = {'k': {'st': 'ok', 'var': 'new'}}
             with patch.object(regress, 'ROOT', root), patch.object(regress, 'chain_key', return_value=('v', 'i', 'key')), \
                     patch.object(regress, 'interface_check', return_value={'bad': []}), patch.object(regress, 'nvn_manifest', return_value=fresh) as hashed:
-                manifest, _ = regress.chain_build(NS(), g, NS(tools_fp='', jobs=1))
+                manifest, _ = regress.chain_build(NS(path=root), g, NS(tools_fp='', jobs=1))
                 self.assertEqual((manifest['shaders'], manifest['hashes']), (fresh, regress.NVN_HASHES))
                 self.assertEqual(json.loads((out / 'manifest.json').read_text())['hashes'], regress.NVN_HASHES)
-                regress.chain_build(NS(), g, NS(tools_fp='', jobs=1))
+                regress.chain_build(NS(path=root), g, NS(tools_fp='', jobs=1))
             hashed.assert_called_once()   # a manifest of the current hashes is reused as it is
+            self.assertTrue((out / 'b-v').is_dir())   # a revision from before shader_lib.py: its host reads only the folder
+
+    def test_a_chain_build_becomes_one_file_with_the_same_hashes(self):
+        k = '0123456789abcdef'
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); g = NS(id='game', kind='nvn', folder=root)
+            out = regress.game_root(g) / 'chain/key'; lib = out / 'b-v'; lib.mkdir(parents=True)
+            (lib / '_b_build.json').write_text(json.dumps([{'key': k, 'st': 'ok', 'err': ''}]))
+            (lib / f'{k}_b.metal').write_text('kernel void main0() {}'); (lib / f'{k}_b.metallib').write_bytes(b'lib')
+            (lib / f'{k}_b.json').write_text(json.dumps({'chain': 'v', 'bindings': []})); (lib / f'{k}_bp.metallib').write_bytes(b'pull')
+            folder = regress.nvn_manifest(lib, 1)
+            (out / 'manifest.json').write_text(json.dumps({'kind': 'nvn', 'shaders': folder, 'hashes': regress.NVN_HASHES, 'interface': {'bad': []}}))
+            tree = root / 'tree'; (tree / 'dm/tools').mkdir(parents=True); (tree / 'dm/tools/shader_lib.py').write_text('')
+            with patch.object(regress, 'ROOT', root), patch.object(regress, 'chain_key', return_value=('v', 'i', 'key')), patch.object(regress, 'interface_check', return_value={'bad': []}):
+                regress.chain_build(NS(path=tree), g, NS(tools_fp='', jobs=1))
+            self.assertFalse(lib.exists()); self.assertTrue((out / 'b-v.img').is_file())
+            self.assertEqual(regress.nvn_manifest(regress.shader_lib.view(lib), 1), folder)
+            self.assertEqual(str(regress.chain_lib(out)), str(out / 'b-v.img'))
 
     def test_smoke_requires_prebuild_and_screenshots(self):
         route = {'reach': (100, 10.0), 'shots': [8]}

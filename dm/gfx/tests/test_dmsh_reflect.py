@@ -56,6 +56,12 @@ class StorageBuffers(unittest.TestCase):
                 got = bindings(stage, [base, base + 15 * 16], [0, 0])
                 self.assertEqual([b['reg'] for b in got], [0, 15])
 
+    def test_mesh_tables_of_either_slot(self):   # a mesh shader compiled for the mesh stage's slot (0x710) or, as PRAGMATA's, for the hull stage's (0x210)
+        for base in (dmsh_abi.C0_SSBO_MS, dmsh_abi.C0_SSBO_MS_HULL):
+            with self.subTest(base=hex(base)):
+                got = bindings('ms', [base + 4 * 16, base], [0, 1])
+                self.assertEqual([b['reg'] for b in got], [4, 0])
+
     def test_unknown_or_unaligned_offsets_stay_unresolved(self):
         self.assertIsNone(bindings('gs', [0x414], [1])[0]['reg'])
         self.assertIsNone(bindings('hs', [0x410], [1])[0]['reg'])

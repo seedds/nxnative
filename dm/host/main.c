@@ -166,7 +166,24 @@ void dm_host_preload_start(int argc, char **argv) {
     pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 8 << 20);
     if (pthread_create(&g_pre.th, &a, preload_thread, NULL)) die("dm_host_preload_start: cannot start the thread");
 }
+#if defined(__APPLE__) && !defined(DM_IOS)
+#include "mac_host.h"
+// Static markers let the packer reject a different profile/ABI without executing the library.
+#ifdef DM_MAC_PROFILE_SYMBOL
+__attribute__((used, visibility("default"))) const char DM_MAC_PROFILE_SYMBOL = 0;
+#endif
+#ifndef DM_GAME_PROFILE_ID
+#define DM_GAME_PROFILE_ID DM_GAME_ID
+#endif
+const char *dm_mac_host_identity(void) { return DM_MAC_HOST_ABI ":" DM_GAME_PROFILE_ID; }
+#ifdef DM_MAC_HOST_LIBRARY
+__attribute__((used, visibility("default"))) const char DM_MAC_EXECUTABLE_SHA_SYMBOL = 0;
+#define main dm_mac_host_entry
+#endif
+#endif
 int main(int argc, char **argv) {
+    front_hud_env(); // the in-process launcher has now applied settings, before any Metal tool/device
+    { void dm_memstat_start(void); dm_memstat_start(); }   // Library diagnostics begin only after Play; standalone / iOS constructors already started them.
     { int mtl_pso_prebuild_tool(void); if (mtl_pso_prebuild_tool()) return 0; }   // DM_PSO_PREBUILD=tool: the pipeline archive's prebuild alone, no game (nvn_mtl.m)
     if (getenv("DM_PRELOAD")) dm_host_preload_start(argc, argv);   // Exercise the early-start path on Mac (on iOS it is called from the App's main())
     if (atomic_load(&g_pre.started)) {

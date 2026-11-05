@@ -29,7 +29,7 @@ NOP = 0xd503201f
 def align(v, a=PAGE): return (v + a - 1) // a * a
 
 
-def read(path) -> dict:   # load adds the record's key
+def read(path) -> dict[str, str | int | tuple[int, ...] | bytes | dict[str, tuple[int, int, int]] | None]:   # load adds the record's key
     b = open(path, 'rb').read()
     if b[:4] != b'DMJ5': sys.exit(f'[RED] {path}: not a capture of this format (rewrite it with the current host)')
     cmd, = struct.unpack_from('<I', b, 4)

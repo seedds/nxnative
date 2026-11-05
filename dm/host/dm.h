@@ -6,6 +6,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <mach-o/ldsyms.h>
+
+// Section tables belong to the host image, not the launcher when the Mac host is a dylib.
+#ifdef DM_MAC_HOST_LIBRARY
+#define DM_HOST_IMAGE_HEADER (&_mh_dylib_header)
+#else
+#define DM_HOST_IMAGE_HEADER (&_mh_execute_header)
+#endif
 #include "game_profile.h"   // constants of the current game profile (generated from dm/games/<id>/game.tsv, chosen by the Makefile's GAME)
 
 // Explicit host work does not occupy a guest core (Metal submission, or a blocked native codec lock). A contended host mutex must count as blocked: a signal's same-core handoff

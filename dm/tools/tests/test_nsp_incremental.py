@@ -824,6 +824,75 @@ class LayerShaders(Base):
                             go(); self.assertEqual(len(runs), before + int(own))
 
 
+class MacHostLibrary(Base):
+    def setUp(self):
+        super().setUp()
+        self.repo = self.tmp / 'repo'
+        for d in nsp.HOST_DIRS: (self.repo / d).mkdir(parents=True, exist_ok=True)
+        self.source = self.repo / 'dm/host/main.c'; self.source.write_text('host source')
+        self.header = self.repo / f'dm/host/gen/{TID:016X}/game_profile.h'
+        self.header.parent.mkdir(parents=True); self.header.write_text('profile')
+        self.out = self.tmp / 'build with spaces/tools/dmhost'
+        self.lib = self.out.with_name('dmhost.dylib')
+        self.commands = []
+        self.host_bytes = b'executable'
+        for cm in (mock.patch.object(nsp, 'apple_silicon', return_value=True),
+                   mock.patch.object(nsp, 'run', side_effect=self.compile),
+                   mock.patch.object(nsp.subprocess, 'run', return_value=mock.Mock(stdout='clang -O1 -o dmhost main.c -framework Cocoa', stderr=''))):
+            cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
+
+    def compile(self, cmd, log, **kwargs):
+        if '-o' not in cmd: return   # generated profile and libvpx
+        self.commands.append(cmd)
+        Path(cmd[cmd.index('-o') + 1]).write_bytes(b'library' if '-dynamiclib' in cmd else self.host_bytes)
+
+    def go(self, library=True):
+        return nsp.build_mac_host(self.repo, self.out, {}, self.tmp, game.Game(self.src), library=library)
+
+    def test_mac_only_build_has_no_library_cost_and_app_adds_it(self):
+        self.assertEqual(self.go(library=False), self.out)
+        self.assertEqual(len(self.commands), 1); self.assertFalse(self.lib.exists())
+        self.go(); self.go()
+        self.assertEqual(len(self.commands), 2)
+        cmd = self.commands[-1]
+        self.assertIn('-DDM_MAC_HOST_LIBRARY', cmd)
+        self.assertIn('-DDM_MAC_EXECUTABLE_SHA_SYMBOL=dm_mac_host_executable_sha256_' + nsp.hashlib.sha256(self.out.read_bytes()).hexdigest(), cmd)
+        self.assertEqual(cmd[cmd.index('-o') + 1], self.lib)
+        self.assertIn('main.c', cmd); self.assertIn('Cocoa', cmd)
+
+    def test_sources_profile_and_missing_library_invalidate_library(self):
+        self.go()
+        for p in (self.source, self.header):
+            before = len(self.commands); p.write_text(p.read_text() + ' changed')
+            self.go(); self.go()
+            self.assertEqual(len(self.commands), before + 2)
+        self.lib.unlink(); before = len(self.commands)
+        self.go(); self.go()
+        self.assertEqual(len(self.commands), before + 1)
+
+    def test_library_pair_uses_actual_executable_not_only_source_key(self):
+        self.go(); before = len(self.commands)
+        self.out.write_bytes(b'other host')   # A replaced executable invalidates upstream's decoder provenance, even with the same source-input key.
+        self.assertIsNone(nsp.decoder_host_key(self.out))
+        self.host_bytes = b'rebuilt executable'
+        self.go(); self.go()
+        self.assertEqual(len(self.commands), before + 2)   # rebuild the executable, then pair the library to its actual new bytes
+        self.assertEqual(self.out.read_bytes(), self.host_bytes)
+        self.assertIsNotNone(nsp.decoder_host_key(self.out))
+        self.assertIn('-DDM_MAC_EXECUTABLE_SHA_SYMBOL=dm_mac_host_executable_sha256_' + nsp.hashlib.sha256(self.host_bytes).hexdigest(), self.commands[-1])
+
+    def test_failed_library_build_does_not_leave_reusable_key(self):
+        self.go(); self.source.write_text('changed')
+        def fail(cmd, log, **kw):
+            if '-dynamiclib' in cmd: raise nsp.BuildError('library compile failed')
+            self.compile(cmd, log, **kw)
+        with mock.patch.object(nsp, 'run', side_effect=fail):
+            with self.assertRaisesRegex(nsp.BuildError, 'library compile failed'): self.go()
+        self.assertFalse(self.lib.with_name('dmhost.dylib.key').exists())
+        before = len(self.commands); self.go(); self.go()
+        self.assertEqual(len(self.commands), before + 1)
+
+
 class MacApp(Base):
     def test_packer_reports_reuse_and_first_pack_steps(self):
         t = self.tmp; out = t / 'Game.app'; packs = []
@@ -834,7 +903,7 @@ class MacApp(Base):
             (out / 'Contents/MacOS/dmhost').write_bytes(b'host')
             if len(packs) == 1: on_line('step: launcher and host (clones of the game files)')
             on_line(f'app: {out}' + (', reused (inputs unchanged)' if len(packs) > 1 else ''))
-        with mock.patch.object(nsp, 'run', side_effect=pack):
+        with mock.patch.object(nsp, 'run', side_effect=pack), mock.patch.object(nsp, 'build_mac_host') as build_host:
             for i in range(2):
                 result = nsp.mac_app(sys.executable, REPO, out, TID, t, self.ex, t / 'patched', t / 'host', t / 'font', t / 'shader', None, 'vulkan', 'en-US',
                                      game.Game(self.src), 'Game', '1.0.0', 'org.nxnative.test', None, '', {}, t)
@@ -842,6 +911,9 @@ class MacApp(Base):
                 if i: nsp.PROG.end.assert_called_with('Game.app, reused (inputs unchanged)')
                 else: nsp.PROG.set.assert_called_with(step='launcher and host (clones of the game files)')
         self.assertEqual(len(packs), 2)   # pack_app owns the reuse decision and sidecar key
+        self.assertEqual(build_host.call_count, 2)
+        self.assertTrue(build_host.call_args.kwargs['library'])
+        for cmd in packs: self.assertEqual(cmd[cmd.index('--host-library') + 1], t / 'dmhost.dylib')
 
 
 class GlslcCapture(Base):

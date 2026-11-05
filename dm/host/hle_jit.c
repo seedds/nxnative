@@ -119,7 +119,9 @@ static void jit_serve_load(const char *dir) {
         unsigned oe, oc, os2;
         if (sscanf(line, "outcode\t%u\t%x\t%x\t%x", &kc, &oe, &oc, &os2) == 4 && kc < 8) { g_outcode[kc].set = 1; g_outcode[kc].entries = oe; g_outcode[kc].count = oc; g_outcode[kc].size = os2; continue; }
         if (strncmp(line, "req\t", 4)) continue;
-        g_req = realloc(g_req, (size_t)(g_nreq + 1) * sizeof *g_req); jit_req *r = &g_req[g_nreq++]; memset(r, 0, sizeof *r);
+        jit_req *req = realloc(g_req, ((size_t)g_nreq + 1) * sizeof *g_req);
+        if (!req) die("%s: cannot allocate JIT request", path);
+        g_req = req; jit_req *r = &g_req[g_nreq]; memset(r, 0, sizeof *r);
         char rel[16]; unsigned long long co, cs, roo, ros, oo, os; int off = 0;
         if (sscanf(line, "req\t%32s\t%llu\t%llx\t%llx\t%llx\t%llx\t%d\t%llx\t%llx\t%n", r->key, (unsigned long long *)&r->cmd, &co, &cs, &roo, &ros, &r->ret, &oo, &os, &off) < 9 || !off) die("%s: bad row", path);
         r->code_off = co; r->code_size = cs; r->ro_off = roo; r->ro_size = ros; r->out_off = oo; r->out_size = os;
@@ -128,10 +130,20 @@ static void jit_serve_load(const char *dir) {
             unsigned long long at, ro2; char nm[17]; int k = 0;
             if (sscanf(q, "%llx=%16[^+]+%llx%n", &at, nm, &ro2, &k) != 3) die("%s: bad relocation in %s", path, r->key);
             int mi = -1; if (strcmp(nm, "jit_rx")) { for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, nm)) mi = i; if (mi < 0) die("%s: relocation into %s, which is not loaded", path, nm); }
-            r->rel_at = realloc(r->rel_at, (r->nrel + 1) * 8); r->rel_off = realloc(r->rel_off, (r->nrel + 1) * 8); r->rel_mod = realloc(r->rel_mod, (r->nrel + 1) * sizeof(int));
+            size_t nr = (size_t)r->nrel + 1;
+            uint64_t *rel_at = realloc(r->rel_at, nr * sizeof *r->rel_at);
+            if (!rel_at) die("%s: cannot allocate relocation positions for %s", path, r->key);
+            r->rel_at = rel_at;
+            uint64_t *rel_off = realloc(r->rel_off, nr * sizeof *r->rel_off);
+            if (!rel_off) die("%s: cannot allocate relocation offsets for %s", path, r->key);
+            r->rel_off = rel_off;
+            int *rel_mod = realloc(r->rel_mod, nr * sizeof *r->rel_mod);
+            if (!rel_mod) die("%s: cannot allocate relocation modules for %s", path, r->key);
+            r->rel_mod = rel_mod;
             r->rel_at[r->nrel] = at; r->rel_off[r->nrel] = ro2; r->rel_mod[r->nrel] = mi; r->nrel++;
             q += k; if (*q == ',') q++;
         }
+        g_nreq++;
     }
     free(line); fclose(f);
     snprintf(path, sizeof path, "%s/jit.out", dir);

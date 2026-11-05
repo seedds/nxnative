@@ -7,7 +7,8 @@
 # launcher.json: the game's launcher settings, dm/games/settings.py, which the settings window and Mac front ends show),
 # plus AppIcon.icns from the game's icon (sips, iconutil) and the Info.plist keys the launcher reads (DMTitleID, DMRomfsMarker, DMLanguage).
 # The large folders are APFS clones (cp -c) when the app is on the same APFS volume as the build, so they take no space; plain copies otherwise.
-# Signing: the inner host first, then the bundle (codesign --force --sign <identity>; '-' = ad-hoc), without the hardened runtime: the host maps the game's code executable, which the hardened
+# --host-library optionally adds the exact host executable's ABI/profile-matched dylib as Contents/MacOS/dmhost.dylib (checked through defined exports, never loaded).
+# Signing: the inner host and optional dylib first, then the bundle (codesign --force --sign <identity>; '-' = ad-hoc), without the hardened runtime: the host maps the game's code executable, which the hardened
 # runtime refuses without entitlements, and so the app cannot be notarized. The bundle is stripped of its "._name" files first: on exFAT (an external drive for the build or the app) every
 # file's extended attributes live in such a file beside it, and codesign reads each one as a code object that is not signed, which fails the whole bundle.
 # Usage: pack_app.py <out.app> --host <dmhost> --patched <dir> --romfs <image or dir> --msl <dir> --tables <profile dir> --font <dir> --title-id <id> --name <name> [options]
@@ -86,14 +87,47 @@ def min_os(host):   # the host's deployment target (LC_BUILD_VERSION minos): the
     return m.group(1) if m else '14.0'
 
 
+def defined_exports(path):
+    text = run(['nm', '-arch', 'arm64', '-gU', path])
+    return {m.group(1) for line in text.splitlines() if (m := re.fullmatch(r'\s*[0-9a-fA-F]+\s+[A-TV-Z]\s+(\S+)\s*', line))}
+
+
+def saved_player_prefs(host):
+    """Advertise the executable's capability, not the packer's version or a UI string."""
+    return 'players.controllers.v1' if '_dm_mac_saved_player_prefs_v1' in defined_exports(host) else None
+
+
+def validate_host_library(host, library, title_id):
+    """Inspect exports, never dlopen: loading a host can run its constructors.
+
+    Both artifacts identify their ABI/profile with a defined global marker.
+    The library also embeds the SHA-256 of its companion executable, generated
+    after that executable is linked. Ad-hoc bundle signing preserves its existing
+    executable signature so the embedded complete-file digest remains valid.
+    """
+    title_id = title_id.upper()
+    if not re.fullmatch(r'[0-9A-F]{16}', title_id): raise SystemExit(f'invalid host library title ID: {title_id}')
+    expected = f'_dm_mac_host_abi_1_{title_id}'
+    host_symbols, library_symbols = defined_exports(host), defined_exports(library)
+    for path, symbols in ((host, host_symbols), (library, library_symbols)):
+        if {s for s in symbols if s.startswith('_dm_mac_host_abi_')} != {expected}:
+            raise SystemExit(f'host library ABI/profile mismatch at {path}: expected {expected}')
+    required = {'_dm_mac_host_identity', '_dm_mac_host_entry', '_dm_mac_players_view', '_dm_mac_players_finish'}
+    if missing := required - library_symbols:
+        raise SystemExit(f'host library missing exports at {library}: {", ".join(sorted(missing))}')
+    paired = '_dm_mac_host_executable_sha256_' + digest(host)
+    if {s for s in library_symbols if s.startswith('_dm_mac_host_executable_sha256_')} != {paired}:
+        raise SystemExit(f'host library executable mismatch at {library}: rebuild it for {host}')
+
+
 def swift_sources():   # the settings window, with the iOS launcher's model and rows
     return [HERE / 'Launcher.swift', HERE.parent / 'ios/Sources/LauncherSettings.swift', HERE.parent / 'ios/Sources/LauncherRow.swift']
 
 
 def build_launcher(out, minos, clang, swiftc, sdk):   # launcher.c's main and the host's cloud-save code (its send after the host exits), linked by swiftc with the settings window (no Swift main: -parse-as-library)
     with tempfile.TemporaryDirectory(dir=out.parents[3]) as t:
-        objs = [Path(t) / 'launcher.o', Path(t) / 'save_sync.o']
-        for obj, src in zip(objs, (HERE / 'launcher.c', HERE.parent / 'host/save_sync.c')):
+        objs = [Path(t) / 'launcher.o', Path(t) / 'save_sync.o', Path(t) / 'save_cleanup.o']
+        for obj, src in zip(objs, (HERE / 'launcher.c', HERE.parent / 'host/save_sync.c', HERE / 'save_cleanup.c')):
             run([clang, '-isysroot', sdk, '-arch', 'arm64', f'-mmacosx-version-min={minos}', '-O2', '-Wall', '-I', HERE.parent / 'host', '-c', '-o', obj, src])
         run([swiftc, '-sdk', sdk, '-target', f'arm64-apple-macos{minos}', '-O', '-swift-version', '5', '-parse-as-library', '-module-cache-path', Path(t) / 'module-cache',
              '-o', out, *swift_sources(), *objs, '-framework', 'CoreFoundation', '-framework', 'AppKit', '-framework', 'SwiftUI'])
@@ -149,16 +183,26 @@ def strip_detritus(app):   # the "._name" files a copy from or onto an exFAT vol
                 except OSError: pass   # a ._ file the volume maps to the attributes of the file it belongs to: gone with them
 
 
-def sign(app, identity, codesign):   # the inner host first, then the bundle (its resources and the launcher); no --options runtime (see the top)
+def sign(app, identity, codesign):   # nested code, then the bundle; preserve a paired host's valid ad-hoc signature
     strip_detritus(app)   # before codesign reads the bundle, so that a build folder or an output folder on exFAT is not a signing failure
     host = app / 'Contents/MacOS/dmhost'
-    for target in (host, app):
+    library = app / 'Contents/MacOS/dmhost.dylib'
+    paired = digest(host) if library.is_file() else None
+    targets = (host, library, app) if paired else (host, app)
+    if paired and identity == '-':
+        # arm64 ld already signs the executable. Re-signing changes its bytes and
+        # invalidates the exact executable digest compiled into the companion dylib.
+        run([codesign, '--verify', '--strict', host])
+        targets = (library, app)
+    for target in targets:
         try: run([codesign, '--force', '--sign', identity, target])
         except SystemExit as e:
             if not any(s in str(e) for s in ('detritus', '._', 'not signed at all')): raise
             subprocess.run(['xattr', '-cr', str(app)], capture_output=True)   # Finder information or resource forks on copied files: codesign refuses them
             strip_detritus(app)
             run([codesign, '--force', '--sign', identity, target])
+        if paired and digest(host) != paired:
+            raise SystemExit('signing changed the paired host executable: sign the host before building its companion library')
     strip_detritus(app)   # codesign sets an attribute on what it signs, which is a "._name" file again on exFAT: the signature still verifies without it, and a later --force would refuse it
 
 
@@ -202,7 +246,7 @@ def selected_inputs(a):
     tables = [Path(a.tables) / n for n in TABLES if (Path(a.tables) / n).is_file()]
     pairs = Path(a.pso_pairs) if a.pso_pairs and not any(p.name == 'pso_pairs.tsv' for p in tables) else None
     fonts = sorted(p for p in Path(a.font).glob('*.ttf') if not detritus(p.name))
-    files = [Path(a.host)] + mods + msls + pso + tables + fonts + ([pairs] if pairs else [])
+    files = [Path(a.host)] + ([Path(a.host_library)] if getattr(a, 'host_library', None) else []) + mods + msls + pso + tables + fonts + ([pairs] if pairs else [])
     files += [Path(p) for p in (a.env_file, a.settings, a.icon) if p]
     for p in files:
         if not p.is_file(): raise SystemExit(f'no input file at {p}')
@@ -250,8 +294,8 @@ def pack(a):
         previous = json.loads(key_file.read_text())
     except (OSError, ValueError): previous = None
     try:
-        a = argparse.Namespace(**vars(a))
-        for name in ('out', 'host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'env_file', 'settings', 'icon', 'html'):
+        a = argparse.Namespace(**({'host_library': None} | vars(a)))
+        for name in ('out', 'host', 'host_library', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'env_file', 'settings', 'icon', 'html'):
             if getattr(a, name): setattr(a, name, str(Path(getattr(a, name)).resolve()))
         mods, msls, pso, tables, pairs, fonts, files = selected_inputs(a)
         # --program: the other programs of a game of several programs (index, rewritten modules, RomFS, shader libraries, tables, offline pages; tab-separated), which go in beside the first's as one app
@@ -261,6 +305,7 @@ def pack(a):
             pa = argparse.Namespace(**{**vars(a), 'patched': patched, 'romfs': prom, 'msl': pmsl, 'tables': ptab, 'pso': None, 'pso_pairs': None, 'aoc': None, 'marker': None})
             pmods, pmsls, _, ptables, _, _, pfiles = selected_inputs(pa)
             programs.append((n, Path(prom), Path(pmsl), Path(phtml), pmods, pmsls, ptables)); files += pfiles
+        if a.host_library: validate_host_library(a.host, a.host_library, a.title_id)
         clang = Path(run(['xcrun', '--find', 'clang']).strip()).resolve()
         swiftc = Path(run(['xcrun', '--find', 'swiftc']).strip())   # not resolved: the driver is a link to swift-frontend, which acts by its name
         sdk = Path(run(['xcrun', '--sdk', 'macosx', '--show-sdk-path']).strip()).resolve()
@@ -269,7 +314,9 @@ def pack(a):
         if not codesign: raise SystemExit('codesign is not available')
         codesign = Path(codesign).resolve()
         minos = min_os(a.host)
-        sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'tools/romfs.py'] + swift_sources()
+        sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE / 'save_cleanup.c', HERE / 'save_cleanup.h', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'tools/romfs.py'] + swift_sources()
+        host_api = HERE.parent / 'host/mac_host.h'
+        if host_api.is_file(): sources.append(host_api)   # the launcher's optional in-process host contract
         inputs = {'options': vars(a), 'files': [(str(p), p.stat().st_mode, digest(p), os.readlink(p) if p.is_symlink() else None) for p in files + sources],
                   'trees': [(p, inventory(Path(p))) for p in (a.romfs, a.aoc, a.html, *(str(x[1]) for x in programs), *(str(x[3]) for x in programs)) if p and Path(p).exists()],
                   'tools': [[str(c), c.stat().st_mode, c.stat().st_size, c.stat().st_mtime_ns, c.stat().st_ctime_ns, run([c, '--version']).strip()] for c in (clang, swiftc)] + [
@@ -298,6 +345,7 @@ def pack(a):
     step(f'launcher and host ({"clones" if clone["romfs"] else "copies"} of the game files)')
     build_launcher(mac / EXE, minos, clang, swiftc, sdk)
     shutil.copy(a.host, mac / 'dmhost')   # data and mode, not the build's extended attributes (copy2 would carry them into the app)
+    if a.host_library: shutil.copy(a.host_library, mac / 'dmhost.dylib')
     copy(mods, dm, clone['mods'])
     if tables: copy(tables, dm, False)
     if pairs: shutil.copyfile(pairs, dm / 'pso_pairs.tsv')   # the split's copy, for a profile without the table
@@ -324,6 +372,12 @@ def pack(a):
     icon = bool(a.icon)
     if icon: step('icon'); make_icns(a.icon, res / 'AppIcon.icns')
     info = info_plist(a, minos, icon)
+    if prefs := saved_player_prefs(a.host):
+        info['DMPlayerPrefs'] = prefs
+        # Saved activation must work even without an optional launcher.json.
+        rules = info.setdefault('DMSettings', [])
+        if not any(r['env'] == 'DM_PLAYER_SETUP' for r in rules):
+            rules.append({'env': 'DM_PLAYER_SETUP', 'values': ['1', '0']})
     info['DMModuleFiles'] = [p.name for p in mods]
     commit = source_commit()
     if commit: info['DMCommit'] = commit
@@ -351,6 +405,7 @@ def parse(argv):
     ap = argparse.ArgumentParser(prog='pack_app.py', description='Pack a self-contained Mac app of a game')
     ap.add_argument('out', help='the app (<name>.app)')
     ap.add_argument('--host', required=True, help='the Mac host built for the profile')
+    ap.add_argument('--host-library', help='optional Mac host dylib built for this exact host executable and profile (packed as Contents/MacOS/dmhost.dylib)')
     ap.add_argument('--patched', required=True, help='the rewritten modules (patch_nso.py output)')
     ap.add_argument('--romfs', required=True, help='the RomFS of the packed version')
     ap.add_argument('--msl', required=True, help='the Mac shader libraries: <shader>/cache/b-<chain>, or a Vulkan or GL game\'s <shader>/vk or gl')

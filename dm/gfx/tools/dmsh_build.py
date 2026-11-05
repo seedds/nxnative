@@ -1603,6 +1603,24 @@ def geometry_finish(key, w, j, c1):
     return 'ok', '', base
 
 
+TG_FENCE_DECL = re.compile(r'\bthreadgroup\s+(?:spvUnsafeArray<[^;&]*?>|[A-Za-z_][\w<>, ]*?)\s*&?\s*(\w+)\s*(?:\[[^\]]*\])?\s*[;,)]')
+TG_FENCE = 'atomic_thread_fence(mem_flags::mem_threadgroup, memory_order_seq_cst, thread_scope_simdgroup);'
+def tg_fence(src):
+    """A store to threadgroup memory followed by a load of another lane's word, with no barrier between them (Ampere compilers rely on lockstep warps for small
+    scans, e.g. Unreal's GPU radix sort downsweep d032ce5090303e01 at 0x2eb0: STS / LDS [x-4] / STS / LDS [x-8]): for one thread the load and the earlier store do not
+    alias, so Metal moves the load above the store and reads another lane's old value (Orbitals: Niagara's sorted index list wrong every frame, beams and particles broken).
+    A simdgroup-scope memory fence after each threadgroup store keeps the order; it is not an execution barrier, so it is safe in divergent code. Only kernels with a
+    threadgroup array are touched"""
+    names = {m.group(1) for m in TG_FENCE_DECL.finditer(src) if m.group(1) not in ('operator',)}
+    if not names: return src
+    store = re.compile(r'^(\s*)(?:%s)\s*\[[^\n;]*\]\s*=(?!=)[^\n]*;\s*$' % '|'.join(map(re.escape, sorted(names))))
+    out = []
+    for ln in src.split('\n'):
+        out.append(ln)
+        m = store.match(ln)
+        if m: out.append(m.group(1) + TG_FENCE)
+    return '\n'.join(out)
+
 def finish(key, w, j, c1):
     name, k = loc[key]
     msl = os.path.join(w, key + '.metal'); lib = os.path.join(out, key + '_b.metallib')
@@ -1642,6 +1660,7 @@ def finish(key, w, j, c1):
     try: src = pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)
     except ValueError as e: return 'pool rewrite failed', str(e)[:160], None
     src = dmsh_wide.wide_loads(src)   # storage words the translator split, read whole again (see dmsh_wide.py)
+    src = tg_fence(src)   # warp-synchronous shared memory: a simdgroup-scope fence after each threadgroup store (see tg_fence)
     src = border_emu(src); open(msl, 'w').write(src)   # border colours Metal lacks (see border_emu)
     first, spill = [], 0
     mesh = j.get('mesh_stage')

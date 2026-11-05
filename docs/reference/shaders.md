@@ -1402,6 +1402,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
   - `dmsh_build.py` `loop_guard`: every loop also ends once its function has run 2^18 iterations in all (the longest bounded loop seen: 255). A loop with a barrier in its body counts on a counter of its own, so the cap ends it on the same iteration for every thread of the threadgroup.
 - **Found on:** Orbitals (`040004F027560000`) and PRAGMATA (not in the games table): GPU hangs that needed a restart.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_barrier_exits.py` and `python3 dm/gfx/tests/test_dmsh_loop_guard.py`.
+### Warp-synchronous shared memory without a barrier
+
+- **Symptom:** a compute shader's small scan or sort over shared memory gives wrong results on the Mac: Niagara's sorted particle list is wrong every frame (broken beams, particles drawn in the wrong order), and one-frame flashes of a view.
+- **Cause:** Ampere compilers drop the barrier in scans whose lanes run in lockstep: Unreal's GPU radix sort downsweep stores a word (STS), loads the neighbouring lane's (LDS `[x-4]`), adds and stores again, with no BAR between them. In the MSL the load and the thread's own earlier store do not alias, so Metal may move the load above the store, and the lane reads its neighbour's old value. A Metal reproduction of the downsweep sorted 12 of 100 keys.
+- **Fix:** `dmsh_build.py` `tg_fence` puts a simdgroup-scope memory fence (`atomic_thread_fence(mem_threadgroup, seq_cst, thread_scope_simdgroup)`), not an execution barrier, after each store to a threadgroup array, so it is safe in divergent code. Only kernels with a threadgroup array are touched (about 7.5% of Orbitals' shaders). `tg_spill` runs after it, so a fence on an array moved to device memory orders device memory too.
+- **Found on:** Orbitals (`040004F027560000`): the GPU sort downsweep `d032ce5090303e01` (181 fences): 100 of 100 keys sorted with the fence. With only the fenced downsweep swapped into the library the beams were right (by eye); with the fence in every shader, three 80-frame samples of stage 2 had 0 flash views, against 22 in 80 on the build before (which also lacked the split texture / sampler handle fix).
+- **Check:** `python3 dm/gfx/tests/test_dmsh_tg_fence.py` (the rewrite, the fence's scope after `tg_spill`, and, with the Metal compiler, that both compile).
 
 ### Barrier moves around warp shuffles
 

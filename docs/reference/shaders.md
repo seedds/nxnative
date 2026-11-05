@@ -640,6 +640,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md#files-and-shaders), [issue #276](https://github.com/seedds/nxnative/issues/276): the float body of `alRenderMaterialUber` (fragment `007d7e411ef14ebd`, 16,227 `if`s in one function) took 24.6 minutes and 17.3 MB of `g13s` code at `-O2`, 31 s and 1.3 MB at `-O1`. Its `-O1` graph still goes past the budget (642), at that small cost.
 - **Check:** random samples of archive bases from seven games (Odyssey, Tears of the Kingdom, Breath of the Wild, Kirby, Luigi's Mansion 3, Wonder, Pikmin 4; 22 to 400 each) compile at `-O1` to vertex and fragment code within a few percent of `-O2` (Odyssey 400 bases: −0.9% / +0.01%; TotK: +0.1% / −1.0%; Kirby: −3.1% / +0.07%), with no `Max Unstruct ID` note at either level, and the front end is faster. Odyssey's full `g13s` archive of 32,864 bases builds in 15.6 minutes (exit 0); its Cap Kingdom frames 4,200 to 6,600 match `-O2` except for scattered differences of at most 3 of 255 in three of nine frames, and their GPU time per frame (`DM_NVN_GPUPROF=every:150`, three runs each on an M-series `g18g`) has medians of 4.76 to 5.05 ms at `-O1` and 4.75 to 4.83 ms at `-O2`, within run-to-run noise.
 
+### Bracket nesting past the front end's 256
+
+- **Symptom:** the shader build prints `fatal error: bracket nesting level exceeded maximum of 256` and `<key>.metal: does not compile`, and the shader is left out.
+- **Cause:** a translated expression nests deeper than the Metal front end's default limit of 256 brackets. Ocarina of Time's compute shaders `1f78730053feb036` and `e172bd7ec218ab8e` (3.5 MB of MSL each) reach 259.
+- **Fix:** every library compile passes `-fbracket-depth=1024` (`dmsh_build.py` `METAL_DEPTH`, `ios_metal.py` `DEPTH`). A source within the old limit compiles to the same bytes with the flag, on macOS and iOS. Like the precompiled header, the flag is not in the compile records, so the Metal cache keeps every library already compiled.
+- **Found on:** Ocarina of Time (Switch 2, `0400486024DEC000`, PR #1299); both shaders now compile.
+- **Check:** `test_shader_pch.py` (`BracketDepth`: 300 nested brackets fail without the flag and compile with it, the test shaders' bytes are unchanged, and both builds take the same depth).
+
 ### min, max and clamp with a NaN operand
 
 - **Symptom:** the half of Mario facing the camera's left was white (GitHub issue 72, on an iPhone).

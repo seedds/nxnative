@@ -115,6 +115,13 @@ check_t_perf_order: t_perf_order
 	MTL_DEBUG_LAYER=1 ./t_perf_order
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_perf_order
 	DM_NVN_FAST_WAKE=0 DM_NVN_SLICE_MERGE=0 DM_NVN_CS_HOIST=0 MTL_DEBUG_LAYER=1 ./t_perf_order
+# Failed GPU work named (DM_TEST_GPU_HANG, set by the test): the segment that hung, its shader keys and the segment before it; with the encode thread too, which labels through its record
+t_gpu_hang_names: t_gpu_hang_names.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_gpu_hang_names.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_gpu_hang_names
+check_t_gpu_hang_names: t_gpu_hang_names
+	MTL_DEBUG_LAYER=1 ./t_gpu_hang_names
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_gpu_hang_names
 t_link_ticks: t_link_ticks.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_link_ticks.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 t_cpu_tex: t_cpu_tex.m $(MTL_T_DEP)

@@ -1129,6 +1129,23 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `gp_begin` records the encoder it stamped, and `gp_end` ignores any other encoder, so the open pass keeps its label until its own end.
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) with `DM_NVN_GPUPROF=every:300` on the Mac (issue #531; one run in four, about frame 23,000). `t_gpuprof` ends an upload encoder inside a profiled pass; it runs in CPU CI. Not rerun in the game.
 
+### Failed GPU work named by its command buffer
+
+- **Symptom:** a GPU hang or page fault shows in the log only as `[RED] segment command buffer execution error: Error Domain=MTL4CommandQueueErrorDomain Code=1 "(null)"` with `kIOGPUCommandBufferCallbackErrorHang` (or `…PageFault`) nested in it: no frame, segment, pass or shader, so a hang minutes into a game could not be traced to a shader without a rerun.
+- **Cause:** Metal 4 reports a GPU error only as the error of the commit's feedback; it has no counterpart of Metal 3's encoder execution status. The feedback handlers of the main command buffers kept nothing of what their command buffer held.
+- **Fix:** each main command buffer (a segment, `sub_cut`; the last segment, `mtl_sub_commit`; a count wait, `mdi_wait`) is labelled `f<frame> s<segment> p<first pass>-<last pass>` for Xcode's GPU captures and Instruments, and its entry keeps the same with its fence, its draws and dispatches, and the keys of the game's shaders they ran, each once, the first 32 (`cbn_close`, `cbn_sh` in `nvn_mtl.m`). The entry goes with the command buffer's feedback handler, so a hang reported seconds later, after hundreds more segments, still names it; a ring keeps the last 256 for the ones before it. A command buffer whose error is its own, not an innocent victim's (`kIOGPUCommandBufferCallbackErrorInnocentVictim`), prints a header and then its entry and the three before it, oldest first:
+
+  ```
+  [RED] failed GPU work: main command buffer #2 f7 s1 p2-2 caused a GPU hang; the game's shaders it and the command buffers before it ran, oldest first (v vertex, f fragment, …):
+  [RED]   #1 f7 s0 p1-1 (segment of fence 1): draws 2, dispatches 0; v:a0a0a0a0a0a0a0a1 f:a0a0a0a0a0a0a0a2
+  [RED]   #2 f7 s1 p2-2 (segment of fence 1): draws 1, dispatches 1; c:c0c0c0c0c0c0c0c3 v:b0b0b0b0b0b0b0b1 f:b0b0b0b0b0b0b0b2  <- failed
+  ```
+
+  The header says `caused a GPU hang`, `caused a GPU page fault`, `ran out of GPU memory`, or `was ignored` when macOS revoked the GPU access (then the command buffers before it are the last the GPU ran). An entry is printed once while the ring holds it, an ignored command buffer only the first time (every later one is ignored too), and at most 8 headers a run. Shaders past the first 32 of a command buffer are counted (`+N more`); `DM_NVN_CUT=1` gives one segment per pass. The segment tagging follows the hang log on lunks's branch for [#1326](https://github.com/seedds/nxnative/issues/1326), which named Ocarina of Time's hung task shaders with `DM_NVN_CUT=1`. It is always on: about 2 ns a draw, 10 ns a program's first draw in a command buffer and 180 ns a command buffer for the label and the copies of its entry (M4). `DM_TEST_GPU_HANG=<n>` makes the nth main command buffer report a hang while its work runs; `t_gpu_hang_names` checks with it that the hung segment is named with its shader keys and the one before it, and that innocent victims print nothing, an entry prints once, an ignored command buffer once, and a hang reported after the ring has gone round is still named.
+- **Found on:** The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, v131072) on a Mac ([GitHub issue #1326](https://github.com/seedds/nxnative/issues/1326); its profile is in [pull request #1299](https://github.com/seedds/nxnative/pull/1299)): a GPU hang about 7 minutes in, after the pool table had grown, logged only as `kIOGPUCommandBufferCallbackErrorHang`.
+- **Check:** in Ocarina of Time (lunks's pool-table branch with this change, windowed), `DM_TEST_GPU_HANG=8000` named main command buffer #8000 at frame 1155 and listed the three before it with the game's shader keys: one segment with 14 dispatches of 11 compute shaders and a draw.
+- **Not checked:** a real hang or page fault with this change; only the imitation.
+
 ## Conditional rendering and queries
 
 ### Conditional rendering evaluated at replay

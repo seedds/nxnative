@@ -1717,6 +1717,83 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
     }
     pthread_mutex_lock(&g_mu); if (fence > g_done) g_done = fence; pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu);
 }
+// Failed GPU work, named (cbn_: command buffer names; issue #1326): Metal 4 reports a GPU hang or page fault only as the error of the commit (it has no counterpart of Metal 3's encoder execution status), so the
+// log said "segment command buffer execution error" and nothing of the frame, the passes or the shaders, and a hang minutes into a game could not be traced without a rerun.
+// Each main command buffer (a segment, sub_cut; the last segment, mtl_sub_commit; a count wait, mdi_wait) is labelled f<frame> s<segment> p<first pass>-<last pass> for GPU traces,
+// and its entry keeps the same with the keys of the game's shaders its draws and dispatches ran, each once (cbn_sh), the first CBN_KEYS of them. The entry goes with the command
+// buffer's feedback handler (captured by value), so a hang reported seconds later, after hundreds more segments, still names it; a ring keeps the last CBN_RING for the ones before
+// it. A command buffer that comes back with an error of its own (not an innocent victim of another's) prints its entry and the CBN_BEFORE before it, oldest first; an entry prints
+// once, and an ignored command buffer (macOS revoked the GPU access: every later one comes back so) only the first time. The segment tagging follows lunks's DM_NVN_HANGLOG, which
+// named agl's hung task shaders of #1326 with DM_NVN_CUT=1 (one pass a segment). It is kept always: when nothing fails it costs a compare per shader of each draw and two copies of
+// the entry per command buffer
+enum { CBN_RING = 256, CBN_KEYS = 32, CBN_BEFORE = 3, CBN_DUMPS = 8 };
+typedef struct { uint64_t serial, printed, frame, fence, p0, p1, draws; uint32_t seg, dispatches, nkeys, more; char why, stage[CBN_KEYS], key[CBN_KEYS][24]; } cbn_entry;   // why: s segment, e last segment, w count wait
+static cbn_entry g_cbn_ring[CBN_RING], g_cbn = {.serial = 1};   // g_cbn: the command buffer being encoded (submit thread only)
+static os_unfair_lock g_cbn_lk = OS_UNFAIR_LOCK_INIT;   // the ring: the submit thread writes an entry, feedback handlers read and mark them
+static uint64_t g_cbn_pass0, g_cbn_draw0;
+static _Atomic uint64_t g_cbn_test;   // DM_TEST_GPU_HANG
+static _Atomic int g_cbn_dumps;
+static void cbn_key(const char *key, const char *builtin, char stage) {
+    if (g_cbn.nkeys >= CBN_KEYS) { g_cbn.more++; return; }
+    g_cbn.stage[g_cbn.nkeys] = stage; strlcpy(g_cbn.key[g_cbn.nkeys++], key[0] ? key : builtin ? builtin : "unkeyed", sizeof *g_cbn.key);
+}
+static void cbn_label(const cbn_entry *e, char *b, size_t n) {
+    int o = e->p1 >= e->p0 ? snprintf(b, n, "f%llu s%u p%llu-%llu", (unsigned long long)e->frame, e->seg, (unsigned long long)e->p0, (unsigned long long)e->p1)
+                           : snprintf(b, n, "f%llu s%u no pass", (unsigned long long)e->frame, e->seg);
+    if (e->why == 'w' && o > 0 && (size_t)o < n) snprintf(b + o, n - o, " count wait");
+}
+// The command buffer being encoded ends here: label it, keep its entry, start the next. Returns the entry, which its feedback handler keeps for cbn_failed
+static cbn_entry cbn_close(char why, uint32_t seg, uint64_t fence) {
+    cbn_entry *e = &g_cbn; uint64_t s = e->serial;
+    if (s == 1) { const char *t = getenv("DM_TEST_GPU_HANG"); if (t && atoll(t) > 0) { atomic_store(&g_cbn_test, (uint64_t)atoll(t)); MLOG("DM_TEST_GPU_HANG=%s: main command buffer #%s reports a GPU hang (its work still runs)", t, t); } }
+    e->why = why; e->seg = seg; e->fence = fence; e->frame = atomic_load(&g_cur_frame); e->p0 = g_cbn_pass0 + 1; e->p1 = g_stat_pass; e->draws = g_stat_draw - g_cbn_draw0;
+    char l[64]; cbn_label(e, l, sizeof l); NSString *label = @(l);
+    rec_cb_block(g_cb, ^(id<MTL4CommandBuffer> cb) { cb.label = label; });   // on the encode thread's real command buffer when encoding is deferred (DmRecCB has no setLabel)
+    os_unfair_lock_lock(&g_cbn_lk); g_cbn_ring[s % CBN_RING] = *e; os_unfair_lock_unlock(&g_cbn_lk);
+    cbn_entry done = *e;
+    e->serial = s + 1; e->nkeys = e->more = e->dispatches = 0; g_cbn_pass0 = g_stat_pass; g_cbn_draw0 = g_stat_draw;
+    return done;
+}
+// DM_TEST_GPU_HANG=n (for testing): the nth main command buffer reports a hang in the shape of #1326's first log (the GPU runs it as usual), so the names can be checked without a hang
+static NSError *cbn_test_error(void) {
+    NSError *hang = [NSError errorWithDomain:MTL4CommandQueueErrorDomain code:MTL4CommandQueueErrorTimeout userInfo:@{NSLocalizedDescriptionKey: @"DM_TEST_GPU_HANG: Caused GPU Hang Error (00000003:kIOGPUCommandBufferCallbackErrorHang)",
+                                                                                                                       NSUnderlyingErrorKey: [NSError errorWithDomain:@"IOGPUCommandQueueErrorDomain" code:3 userInfo:nil]}];
+    return [NSError errorWithDomain:MTL4CommandQueueErrorDomain code:MTL4CommandQueueErrorTimeout userInfo:@{NSUnderlyingErrorKey: hang, NSMultipleUnderlyingErrorsKey: @[hang]}];
+}
+static void cbn_print(const cbn_entry *e, int failed) {
+    char keys[CBN_KEYS * 28 + 32] = ""; size_t o = 0;
+    for (uint32_t i = 0; i < e->nkeys && o < sizeof keys; i++) o += (size_t)snprintf(keys + o, sizeof keys - o, " %c:%s", e->stage[i], e->key[i]);
+    if (e->more && o < sizeof keys) snprintf(keys + o, sizeof keys - o, " (+%u more)", e->more);
+    char l[64]; cbn_label(e, l, sizeof l);
+    MLOG("[RED]   #%llu %s (%s of fence %llu): draws %llu, dispatches %u;%s%s", (unsigned long long)e->serial, l, e->why == 'e' ? "last segment" : e->why == 'w' ? "count wait" : "segment",
+         (unsigned long long)e->fence, (unsigned long long)e->draws, e->dispatches, e->nkeys ? keys : " no game shaders", failed ? "  <- failed" : "");
+}
+// A main command buffer's feedback (any thread): nothing to do unless it failed. Metal 4 nests the command buffer's own error under a timeout with no text (#1332); its description
+// holds the whole chain, as the innocent-victim test in mtl_sub_commit reads it
+static void cbn_failed(const cbn_entry *me, NSError *err) {
+    uint64_t s = me->serial; int test = s == atomic_load_explicit(&g_cbn_test, memory_order_relaxed);
+    if (!err && !test) return;
+    NSString *d = (err ?: cbn_test_error()).description;
+    if ([d containsString:@"InnocentVictim"]) return;   // discarded for another command buffer's error: its work is not the cause
+    int revoked = [d containsString:@"SubmissionsIgnored"];
+    static _Atomic int revoked_once; if (revoked && atomic_exchange(&revoked_once, 1)) return;
+    if (atomic_fetch_add(&g_cbn_dumps, 1) >= CBN_DUMPS) return;
+    const char *kind = [d containsString:@"ErrorHang"] ? "caused a GPU hang" : [d containsString:@"PageFault"] ? "caused a GPU page fault" : [d containsString:@"OutOfMemory"] ? "ran out of GPU memory"
+                     : revoked ? "was ignored: macOS revoked the GPU access, so the command buffers before it are the last the GPU ran" : "failed";
+    cbn_entry got[CBN_BEFORE + 1]; int state[CBN_BEFORE + 1];   // the ones before it from the ring, then this one: 0 no longer in the ring, 1 to print, 2 printed before
+    int n = (int)MIN(s - 1, (uint64_t)CBN_BEFORE); uint64_t first = s - (uint64_t)n;   // numbers start at 1
+    os_unfair_lock_lock(&g_cbn_lk);
+    for (int i = 0; i <= n; i++) { cbn_entry *r = &g_cbn_ring[(first + i) % CBN_RING]; int kept = r->serial == first + i;
+        state[i] = kept && r->printed == r->serial ? 2 : kept || i == n; if (kept) r->printed = r->serial; if (state[i] == 1) got[i] = i == n ? *me : *r; }
+    os_unfair_lock_unlock(&g_cbn_lk);
+    char l[64]; cbn_label(me, l, sizeof l);
+    MLOG("[RED] failed GPU work: main command buffer #%llu %s%s %s%s; the game's shaders it and the command buffers before it ran, oldest first (v vertex, f fragment, g geometry, h hull, d domain, t task, m mesh, c compute):",
+         (unsigned long long)s, l, state[n] == 2 ? " (listed above)" : "", kind, test ? " (imitated by DM_TEST_GPU_HANG)" : "");
+    for (int i = 0; i <= n; i++) {
+        if (state[i] == 1) cbn_print(&got[i], i == n);
+        else if (!state[i]) MLOG("[RED]   #%llu: no longer in the ring (it keeps the last %d command buffers)", (unsigned long long)(first + i), CBN_RING);
+    }
+}
 uint64_t mtl_sub_commit(void) {
     lc_land();   // clears still waiting (the command list ends with them)
     defer_fallback();   // Deferred merged pass: at the end of the submission there are still P draws not replayed (the normal path never gets here)
@@ -1738,12 +1815,14 @@ uint64_t mtl_sub_commit(void) {
     uint64_t gpu_f = atomic_load(&g_cur_frame); gpu_tag_begin(gpu_f);
     NSString *cctx = @(cctx_snap());
     seg_clk *sc = g_sclk; uint32_t seg_last = g_seg; g_sclk = NULL;
+    cbn_entry cbn = cbn_close('e', seg_last, fence);
     pthread_mutex_lock(&g_post_mu);
     if (!atomic_load(&pr->claimed) && pr->fence) MDIE("post ring: the writes of fence %llu never ran", (unsigned long long)pr->fence);
     pr->n = n; pr->ops = ops; pr->sc = sc; pr->seg_last = seg_last; pr->t_commit = guest_ns(); atomic_store(&pr->claimed, 0); atomic_store(&pr->fence, fence);
     pthread_mutex_unlock(&g_post_mu);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
         gpu_tag_done(gpu_f, cb.GPUStartTime, cb.GPUEndTime);
+        cbn_failed(&cbn, cb.error);
         if (ws_on()) ws_fb(fence, cb.GPUEndTime);
         uint64_t c0 = 0, c1 = 0; if (seg_ts()) { c0 = gpu_s_guest_ns(cb.GPUStartTime); c1 = gpu_s_guest_ns(cb.GPUEndTime); }
         if (cb.error) { atomic_store(&g_last_commit_error, 1); res_top_once(cb.error); static int n, nv; int victim = [cb.error.description containsString:@"InnocentVictim"]; if (victim ? nv++ < 1 : n++ < 8) MLOG("[RED] command buffer error details fence=%llu: %s | GPU %.3f→%.3f", (unsigned long long)fence, cb.error.description.UTF8String, cb.GPUStartTime, cb.GPUEndTime); if (!victim) MLOG("[RED] state of the failed submission fence=%llu: %s", (unsigned long long)fence, cctx.UTF8String); MLOG("[RED] command buffer execution error: %s", cb.error.localizedDescription.UTF8String); }
@@ -4453,6 +4532,7 @@ static void shmap_read(void) {
     NSMutableDictionary *geo_mesh;   // a vertex shader's mesh entries by lean kernel key (geo_mesh_fn; NSNull: none)
     uint8_t up_mfx;   // a compute shader that is the game's own upscaler (DM_GAME_UPSCALER_KEYS, from the shader map): 0 not decided, 1 drawn by MetalFX when DM_UPSCALER=metalfx, 2 not one or one its colour keeps (up_mfx_wanted)
     uint8_t up_color;   // such a shader's colour, from its code at load with DM_UPSCALER=metalfx (up_mfx_color; UP_COLOR_UNREAD otherwise)
+    uint64_t cbn_seen;   // the main command buffer whose entry last took this shader's key (cbn_sh)
     int gs_loc, lay_loc; char gs_comp, lay_comp;   // a slice-writing geometry shader (no function: the layer comes from input gs_loc.gs_comp) / a vertex shader with layer entry points writing output lay_loc.lay_comp (dmsh_build.py gs_slice, vs_layer_entry); -1 = none
     // The argument buffer encoded last time
     id<MTLBuffer> ab_buf; uint64_t ab_gpu; size_t ab_off; uint64_t ab_pass; uint32_t ab_binst; uint64_t ab_pgen;   // ab_pass: serial of the render pass that encoded this argument block - reused only within the same pass (the arena holding a block from another pass / another submission may already have been reclaimed and rewritten); ab_pgen: g_psnap_gen when it was encoded (pools, pool_gpu)
@@ -4470,6 +4550,12 @@ static void shmap_read(void) {
 #include "nvn_feedback.h"
 @interface NvProg : NSObject { @public NvShader *sh[6]; char gs_miss[17]; NvProg *geo_raster, *geo_lean_raster; int8_t c_sw, c_iw, c_img; } @end   // c_sw / c_iw / c_img: prog_swrites, udc_note_draw's image write, image_prepare's written image slots; + 1 once known (the shaders are fixed once made)   // geo_raster: GS output reader paired with this program's fragment stage; geo_lean_raster: its own vertex and fragment stages (a lean passthrough kernel)
 @implementation NvProg @end
+// A shader the command buffer being encoded runs (failed GPU work, cbn_close): its key goes into the entry once, at the cost of one compare at each later use
+static inline void cbn_sh(NvShader *s, char stage) {
+    if (!s || s->cbn_seen == g_cbn.serial) return;
+    s->cbn_seen = g_cbn.serial; cbn_key(s->key, s->builtin, s->mesh_kind == 1 ? 't' : s->mesh_kind == 2 ? 'm' : stage);
+}
+static inline void cbn_prog(NvProg *p) { if (p) for (int i = 0; i < 6; i++) cbn_sh(p->sh[i], "vfghdc"[i]); }
 // Warm-up entry: built in the background, waiting to be taken by the submit thread. vs / fs are strong references (in pso they are only raw pointers, and the background dictionary is released when the task ends)
 @interface WarmItem : NSObject { @public int kind, record; NSString *key, *vs_key, *fs_key; NvShader *shader, *vs, *fs; pso_key pso; id<MTLFunction> fsfn; id object; } @end   // record: a prefetched library, written to the prewarm lists when claimed (shader_get's lines)
 @implementation WarmItem @end
@@ -10504,8 +10590,10 @@ static void mdi_wait(void) {
     rp_end(); ubd_land();
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     up_flush(); res_commit();
+    cbn_entry cbn = cbn_close('w', g_seg, g_fence + 1);   // a command buffer of its own: the draws before the wait are not the next segment's
     [g_cb endCommandBuffer];
-    rec_commit(g_cb, nil);
+    MTL4CommitOptions *o = [MTL4CommitOptions new]; [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) { cbn_failed(&cbn, cb.error); }];
+    rec_commit(g_cb, o);
     if (!g_mdi_ev) g_mdi_ev = [g_dev newSharedEvent];
     rec_signal(g_mdi_ev, ++g_mdi_v); rec_drain();
     uint64_t w0 = ws_t0(); int ok = [g_mdi_ev waitUntilSignaledValue:g_mdi_v timeoutMS:10000]; if (ws_on()) ws_put(WS_MDI, w0, 1);
@@ -10923,6 +11011,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     g_mdxc.next = NULL;
     if (!S.prog) { RED_ONCE(18, "no program bound before the draw"); PD("Z %llu draw skipped: no program bound", g_stat_pass + !g_enc); return; }
     __unsafe_unretained NvProg *pr = g_geo_program ? g_geo_program : prog_get(S.prog);
+    cbn_prog(pr); if (g_mtk.on) { cbn_sh(g_mtk.ts, 't'); cbn_sh(g_mtk.ms, 'm'); } else if (g_geo_mesh.on) cbn_sh(g_geo_mesh.lean, 'g');   // a task / mesh or geometry mesh draw comes through a raster program of its pixel stage
     image_prepare(pr, 0x1f);
     draw_gs_check(pr);   // a geometry stage left with no function (see prog_fold_gs)
     if (!g_geo_program && S.rast_discard && S.tf_on) { tf_draw(pr, dw, di); return; }
@@ -11319,6 +11408,7 @@ static void dispatch(const p_dispatch *dp) {
     if (dp->ind) { static int once; if (!once++) MLOG("indirect dispatch: first time (the GPU reads the threadgroup counts from %#llx)", (unsigned long long)dp->ind); }
     NvShader *cs = prog_get(S.cprog)->sh[5];
     if (!cs) { RED_ONCE(28, "the dispatched program has no compute shader (or it is not mapped)"); return; }
+    cbn_sh(cs, 'c'); g_cbn.dispatches++;
     const void *k = (__bridge const void *)cs;
     id<MTLComputePipelineState> ps = hm_get_id(&g_cps, &k);
     if (!ps) {
@@ -12054,9 +12144,11 @@ static void sub_cut(void) {
     uint64_t f = atomic_load(&g_cur_frame); gpu_tag_begin(f);
     uint32_t k = g_seg++; seg_clk *sc = NULL;   // reports encoded so far keep this segment's GPU times (seg_ts)
     if (seg_ts()) { if (!g_sclk) { g_sclk = calloc(1, sizeof *g_sclk); atomic_store(&g_sclk->refs, 1); } sc = g_sclk; atomic_fetch_add(&sc->refs, 1); }
+    cbn_entry cbn = cbn_close('s', k, g_fence + 1);
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
         gpu_tag_done(f, cb.GPUStartTime, cb.GPUEndTime);
+        cbn_failed(&cbn, cb.error);
         if (sc) { if (k < SEG_CLK_N) { atomic_store(&sc->t[k][0], gpu_s_guest_ns(cb.GPUStartTime)); atomic_store(&sc->t[k][1], gpu_s_guest_ns(cb.GPUEndTime)); } seg_clk_put(sc); }
         if (cb.error) { atomic_store(&g_last_commit_error, 1); static int k; if (k++ < 8) MLOG("[RED] segment command buffer execution error: %s", cb.error.description.UTF8String); res_top_once(cb.error); }
     }];

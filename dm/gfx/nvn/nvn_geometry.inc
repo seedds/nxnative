@@ -871,6 +871,7 @@ static void geo_capture_one(id<MTL4RenderCommandEncoder> re, const geo_job *j) {
     else enc_r_draw_instanced(re, MTLPrimitiveTypePoint, j->dw.first, j->dw.count, j->dw.instances, j->first_instance);
 }
 static void geo_gs_one(id<MTL4ComputeCommandEncoder> ce, const geo_job *j) {
+    cbn_prog(j->pr);   // the draw's own stages: a run is encoded after its draws, and its raster draw has only the output reader and the pixel stage
     g_draw_binst = j->first_instance;
     g_geo_bind[0] = j->input; g_geo_bind[1] = j->output; g_geo_bind[2] = j->raw; g_geo_bind[3] = j->info; g_geo_bind[4] = j->map;
     args_dirty_all(); encode_args(ce, j->gs, 2, 0); enc_c_pso(ce, j->gs->geo_pso);

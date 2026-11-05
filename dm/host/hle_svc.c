@@ -109,6 +109,37 @@ static uint8_t g_seen[256];
 static struct { uint64_t base, size, src; uint32_t state; } g_map[MAX_MAP];
 static int g_nmap;
 static pthread_mutex_t g_map_lock = PTHREAD_MUTEX_INITIALIZER;
+// Transfer-memory handles occupy their own range, outside thread and service
+// handles. All references, mappings and borrowed ranges share g_map_lock.
+#define TM_HANDLE_BASE 0xe0000u
+#define TM_HANDLES 512
+struct dm_transfer_memory {
+    uint64_t base, size;
+    unsigned permission, refs, mapped;
+    struct dm_transfer_memory *next;
+};
+static dm_transfer_memory *g_tm_handles[TM_HANDLES], *g_tm_live;
+static void transfer_release_locked(dm_transfer_memory *m) {
+    if (--m->refs) return;
+    dm_transfer_memory **p = &g_tm_live;
+    while (*p != m) p = &(*p)->next;
+    *p = m->next; free(m);
+}
+uint32_t dm_transfer_map(uint32_t handle, size_t size, unsigned permission, dm_transfer_memory **out, const void **data) {
+    unsigned i = handle - TM_HANDLE_BASE;
+    pthread_mutex_lock(&g_map_lock);
+    dm_transfer_memory *m = i < TM_HANDLES ? g_tm_handles[i] : NULL;
+    uint32_t result = !m ? 0xe401 : size != m->size ? 0xca01 : permission != m->permission || m->mapped ? 0xfa01 : 0;
+    if (!result) { m->refs++; m->mapped = 1; *out = m; *data = (const void *)(uintptr_t)m->base; }
+    pthread_mutex_unlock(&g_map_lock);
+    return result;
+}
+void dm_transfer_unmap(dm_transfer_memory *m) {
+    if (!m) return;
+    pthread_mutex_lock(&g_map_lock);
+    m->mapped = 0; transfer_release_locked(m);
+    pthread_mutex_unlock(&g_map_lock);
+}
 // A hole-free read / write of guest heap bytes for the cheat VM (hle_cheats.c): under g_map_lock no concurrent SetHeapSize
 // can mprotect the span away between the bounds check and the copy (both hold this same lock), so a live heap address cannot
 // turn into a fault while the cheat VM touches it. Both return 0 when every byte was inside the currently opened (readable
@@ -234,6 +265,8 @@ static uint32_t map_arguments(uint64_t dst, uint64_t src, uint64_t size) {
 static int map_source_busy(uint64_t addr, uint64_t size) { // g_map_lock held; nonwrapping ranges
     for (int i = 0; i < g_nmap; ++i)
         if (addr < g_map[i].src + g_map[i].size && g_map[i].src < addr + size) return 1;
+    for (dm_transfer_memory *m = g_tm_live; m; m = m->next)
+        if (addr < m->base + m->size && m->base < addr + size) return 1;
     return 0;
 }
 // Loader text/patch seals use 16 KiB boundaries, independently of host page size.
@@ -268,10 +301,7 @@ static int map_source_backed(uint64_t src, uint64_t size) {
 int svc_nro_deactivate(module_t *m) {
     pthread_mutex_lock(&g_map_lock);
     uint64_t base = (uintptr_t)m->base;
-    for (int i = 0; i < g_nmap; i++)
-        if (g_map[i].src < base + m->size && base < g_map[i].src + g_map[i].size) {
-            pthread_mutex_unlock(&g_map_lock); return 0;
-        }
+    if (map_source_busy(base, m->size)) { pthread_mutex_unlock(&g_map_lock); return 0; }
     m->loaded = 0;
     pthread_mutex_unlock(&g_map_lock); return 1;
 }
@@ -284,6 +314,16 @@ static void map_source_query(uint64_t addr, uint64_t *base, uint64_t *size, uint
             if (src > lower) lower = src;
             if (end - lo < upper) upper = end - lo;
             *attr = 1; *perm = 0; // Locked / IsBorrowed, not PermissionLocked (bit 4)
+        } else if (end <= addr && end > lower) lower = end;
+        else if (src > addr && src - lo < upper) upper = src - lo;
+        remaining = upper - (lower - lo); lo = lower;
+    }
+    for (dm_transfer_memory *m = g_tm_live; m; m = m->next) {
+        uint64_t src = m->base, end = src + m->size, lower = lo, upper = remaining;
+        if (addr >= src && addr < end) {
+            if (src > lower) lower = src;
+            if (end - lo < upper) upper = end - lo;
+            *attr = 1; *perm = m->permission;
         } else if (end <= addr && end > lower) lower = end;
         else if (src > addr && src - lo < upper) upper = src - lo;
         remaining = upper - (lower - lo); lo = lower;
@@ -456,8 +496,40 @@ int svc_thread(int num, uint64_t *regs);   // hle_thread.c: thread and synchroni
 uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
     { void hlecount_svc(int); hlecount_svc(num); }   // DM_HLECOUNT: svc counts by number
     mem_init();
+    if (num == 0x16 && (uint32_t)regs[0] - TM_HANDLE_BASE < TM_HANDLES) {
+        unsigned i = (uint32_t)regs[0] - TM_HANDLE_BASE;
+        pthread_mutex_lock(&g_map_lock);
+        dm_transfer_memory *m = g_tm_handles[i]; g_tm_handles[i] = NULL;
+        if (m) transfer_release_locked(m);
+        pthread_mutex_unlock(&g_map_lock);
+        regs[0] = m ? 0 : 0xe401; return regs[0];
+    }
     if (svc_thread(num, regs)) return regs[0];
     switch (num) {
+    case 0x15: { // CreateTransferMemory(→w1 handle; x1 address, x2 size, w3 owner permission)
+        uint64_t addr = regs[1], size = regs[2]; unsigned perm = (uint32_t)regs[3];
+        uint32_t result = addr & 0xfff ? 0xcc01 : !size || (size & 0xfff) ? 0xca01 : size > UINT64_MAX - addr ? 0xd401 :
+                          perm != 0 && perm != 1 && perm != 3 ? 0xd801 : 0;
+        regs[1] = 0;
+        if (result) { regs[0] = result; return result; }
+        pthread_mutex_lock(&g_map_lock);
+        unsigned slot = 0; while (slot < TM_HANDLES && g_tm_handles[slot]) slot++;
+        if (map_source_busy(addr, size) || !map_source_backed(addr, size)) result = 0xd401;
+        else if (slot == TM_HANDLES) result = 0xce01;
+        else {
+            dm_transfer_memory *m = calloc(1, sizeof *m);
+            if (!m) result = 0xce01;
+            else {
+                // As with borrowed stack pages, 4 KiB guest permissions are
+                // tracked logically: revoking an Apple 16 KiB page could revoke
+                // unrelated allocations and the host service's own access.
+                *m = (dm_transfer_memory){addr, size, perm, 1, 0, g_tm_live};
+                g_tm_handles[slot] = g_tm_live = m; regs[1] = TM_HANDLE_BASE + slot;
+            }
+        }
+        pthread_mutex_unlock(&g_map_lock);
+        regs[0] = result; return result;
+    }
     case 0x01: {  // SetHeapSize(out_addr*, size)  → x1 = heap base
         size_t size = regs[1];
         // Larger than the heap region: ResultOutOfMemory (0xD001), as Horizon's KPageTable::SetHeapSize returns. nn::os::SetMemoryHeapSize turns only that, 103 and LimitReached into

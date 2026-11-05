@@ -1039,6 +1039,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md): 10,177 instructions in 7,590 programs. The fix made no visible difference in its tutorial area.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
 
+### I2F and F2F directed rounding
+
+- **Symptom:** integer division results one off for some operands (the compiler's 32-bit division takes its reciprocal from `I2F.U32.RP`), or a half one ulp off (an overflow giving infinity instead of the largest finite value) after `F2F.F16.F32.RM` / `.RP` / `.RZ`.
+- **Cause:** the rounding field (78..79: `.RM` 1, `.RP` 2, `.RZ` 3) was decoded but not applied: I2F and the pack of F2F round to nearest. For a 32-bit integer above 2^24, I2F rounded to nearest is one ulp off the directed result about half the time. A first fix of F2F also met the optimizer's `PropagatePack`, which takes an unpack of a pack for the packed float itself (dropping the half's rounding).
+- **Fix:** `AI2f` (32-bit source, 32-bit float) and `AF2f` (F32 to F16) in `InstEmitAmpereAlu.cs` compare the rounded result with the exact value (the integer converted back, exact below 2^31 / 2^32; the half read back through a mask) and step its bits to the neighbour `ADirected` picks. Narrow integer sources are exact; I2F to a half keeps rounding to nearest.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`DirectedRounding`: two fail on `main`). A GPU cross-check against an exact reference (one rounding, IEEE directed modes; NAK's hardware test for F2F.F16.F32.RZ's overflow): I2F 45 mismatches in 300, none with the fix; F2F 25-31 in 300, 6 left, all with results at or below 0x050d (half subnormals and the smallest normals, where the GPU's own conversion differs). Also left: FRND / F2I of a 32-bit subnormal (FLOOR of a tiny negative is -1 on NVIDIA; the GPU flushes it to zero).
+- **Found on:** cross-checking the translator against nvdisasm and a reference interpreter; no game run.
+
 ### A guarded load whose destination is its address
 
 - **Symptom:** none in the log: everything drawn with an engine's scene data lands on the first instance's transform, or at nothing. In the MSL, a bounds-checked read has a constant index (`vp_s2._m0[0]`) just after a comparison of the register it should use.

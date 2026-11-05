@@ -98,7 +98,6 @@ def choose_split(img, text_end, lo, hi, words, starts):
         elif x[2] == 'short' and abs(x[3] - x[0]) > 0: short.append((min(x[0], x[3]), max(x[0], x[3])))
     short.sort()
     import bisect
-    ends = [b for _, b in short]
     for F in cand[:4000]:
         if F % PAGE and by_page.get(F & ~0xFFF): continue
         # a short reference crosses F when its lower end is below F and its upper end at or above it; short ranges are at most 1 MB, so look at those starting within 1 MB below
@@ -116,13 +115,11 @@ def shift(img, segments, F, G, md, words=None):
     if not 8 <= F < text_end or F % 4: raise Error(f'split {F:#x} not in the text')
     f = lambda a: a + G if a >= F else a
     N = bytearray(img[:F]) + bytearray(G) + bytearray(img[F:])
-    u32 = lambda o: struct.unpack_from('<I', N, f(o))[0]
     def put32(o, v): struct.pack_into('<I', N, f(o), v)
     def put_s32(o, v):
         if not -(1 << 31) <= v < 1 << 31: raise Error(f'{o:#x}: {v:#x} does not fit 32 bits')
         struct.pack_into('<i', N, f(o), v)
     def put64(o, v): struct.pack_into('<Q', N, f(o), v)
-    u64 = lambda o: struct.unpack_from('<Q', N, f(o))[0]
 
     # ---- text: PC-relative instructions across F ----
     if words is None: words = pcrel_words(img, code_ranges(img, text_end, md))
@@ -138,7 +135,7 @@ def shift(img, segments, F, G, md, words=None):
     # Veneers: a single B each, shared by the branches to one target that reach it: the low pool grows up from F, the high pool down from F + G; a branch takes the
     # first of (its target's low veneer, its high veneer, a new low one, a new high one) that both legs reach
     def reach(a, b): return -REACH <= b - a < REACH
-    low, high, nl, nh, use = {}, {}, 0, 0, []
+    low, high, nl, nh = {}, {}, 0, 0
     for pc, w, t in far:
         v = next((v for v in (low.get(t), high.get(t)) if v is not None and reach(f(pc), v)), None)
         if v is None:
@@ -231,6 +228,7 @@ def shift(img, segments, F, G, md, words=None):
             return t, sz
         o = ehs + 4
         eh_frame, s = fix_ptr(o, penc, ehs); o += s
+        if eh_frame is None: raise Error('eh_frame_hdr names no eh_frame')
         cnt, s = nso_code._read(img, o, cenc, ehs); o += s
         for _ in range(cnt):
             _, s = fix_ptr(o, tenc, ehs); o += s
@@ -297,6 +295,7 @@ def relocated(img, F, G):
         for k in range(tags.get(35, 0) // 8):
             e = struct.unpack_from('<Q', img, tags[36] + 8 * k)[0]
             if not e & 1: locs = [e]; where = e + 8
+            elif where is None: raise Error('RELR starts with a bitmap')
             else: locs = [where + 8 * (i - 1) for i in range(1, 64) if e >> i & 1]; where += 63 * 8
             for L in locs: out[finv(L)] = ('r', finv(struct.unpack_from('<Q', img, L)[0]))
     return out
@@ -317,10 +316,13 @@ if __name__ == '__main__':
     bad = 0
     for pc, w, kind, t in pcrel_words(m.image, code_ranges(m.image, m.text_end, md)):
         w2 = struct.unpack_from('<I', N, f(pc))[0]; d = decode(w2, f(pc))
+        if d is None: bad += 1; continue   # no longer a PC-relative instruction
         if kind == 'adrp': ok = d[1] == (f(t) if t >= F else t) if t != (F & ~0xFFF) else True
         elif kind == 'b':
             t2 = d[1]
-            if F <= t2 < F + G: t2 = decode(struct.unpack_from('<I', N, t2)[0], t2)[1]
+            if F <= t2 < F + G:   # through a veneer
+                v = decode(struct.unpack_from('<I', N, t2)[0], t2)
+                t2 = v[1] if v else None
             ok = t2 == f(t)
         else: ok = d[1] == f(t)
         bad += not ok

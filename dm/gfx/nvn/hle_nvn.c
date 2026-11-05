@@ -664,7 +664,7 @@ NVN(nvnProgramFinalize, void, NVNprogram *p) {
     mtl_prog_release((prog_t *)p); ((prog_t *)p)->magic = 0; pk_drop(p);
 }
 // a program's per-stage keys (side table: guest NVNprogram address → host object; bit i of ok = stage i computed)
-typedef struct { uint8_t key[6][8]; uint8_t ok; } prog_keys_t;
+typedef struct { uint8_t key[6][8]; uint8_t ok; uint8_t pw[6]; } prog_keys_t;   // pw: NVN2 control +0xa9 + 1 (0: not an NVN2 section), taken at SetShaders (prog_push0)
 static pthread_mutex_t g_pk_mu = PTHREAD_MUTEX_INITIALIZER; static CFMutableDictionaryRef g_pk;   // a dedicated table (keys not shared with other side tables)
 static prog_keys_t *pk_get(const void *p, int make) {
     pthread_mutex_lock(&g_pk_mu);
@@ -721,6 +721,11 @@ int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
     memcpy(key, k->key[st], 8);
     return 1;
 }
+int prog_push0(const prog_t *p, unsigned st) {
+    if (st >= p->nstage) return -1;
+    pthread_mutex_lock(&g_pk_mu); prog_keys_t *k = g_pk ? (prog_keys_t *)CFDictionaryGetValue(g_pk, p) : NULL; int w = k ? k->pw[st] : 0; pthread_mutex_unlock(&g_pk_mu);
+    return w ? (((w - 1) * 4 + 0xf) & ~0xf) : -1;
+}
 NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData *sd) {
     prog_t *o = (prog_t *)p;
     if (n < 0 || n > 6) { LOG("[RED] ProgramSetShaders stage count %d", n); return 0; }
@@ -733,6 +738,7 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
     k->ok = 0;
     for (int i = 0; i < n; i++) {
         if (keys_hash(&sd[i], 1, k->key[i])) k->ok |= (uint8_t)(1u << i);
+        k->pw[i] = sd[i].control && nvn2_ctl(sd[i].control) ? (uint8_t)(((const uint8_t *)sd[i].control)[0xa9] + 1) : 0;
         // Diagnostic: trace the loader of selected shader keys (comma-separated hex).
         if (trace && (k->ok & (1u << i))) {
             char key[17]; for (int j = 0; j < 8; j++) snprintf(key + j * 2, 3, "%02x", k->key[i][j]);
@@ -2698,10 +2704,25 @@ NVN_NOPROTO(nvnCommandBufferEvaluateDlss, void, NVNcommandBuffer *c, const dlss_
 // NVN2 push constants: (command buffer, a word seen 0, byte offset, size, data). The bytes form a constant block of the graphics stages or of compute, which their shaders read
 // as c[24] (DMSH_PUSH_BANK; NVN2 compute's own c0 layout starts with them, which the translator maps there). Donkey Kong Bananza's upscaler pushes (1 / w, 1 / h, w, h) of its
 // target for its graphics passes, and two integer rectangles (source, destination) for its compute network
+// The word before the offset (w) picks the block (NVN2 compute's c0 layout has two, control +0xa9 and +0xaa words, each 16-byte aligned; dmsh_build.py nvn2_cs), and the
+// offset is within it. PRAGMATA pushes its compute shaders' storage buffer tables (the second block) with w = 1 and offsets from 0: stored at the push block's start they
+// landed over the first block, and every shader whose first block is not empty read its addresses from bytes no push had written: eef9b5086c9bcb68 / f0cb7fbfc411f868
+// (+0xa9 = 14, table at c24 + 0x40) read 0 at every dispatch, 0ec5481e336c2ea6 (+0xa9 = 1, a memset) a stale 0x2000000100000 or another shader's buffer. The replay keeps the
+// blocks apart and joins them per shader (nvn_mtl.m push_view). DM_NVN_PUSH_BLOCKS=0: every push at its offset in one block, as before
+static int push_blocks(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PUSH_BLOCKS"); v = !(e && !strcmp(e, "0")); } return v; }
 static void push_const(NVNcommandBuffer *c, int compute, uint64_t w, uint64_t off, uint64_t n, const void *data) {
-    if (w) { static int once; if (!once++) LOG("[RED] push constants with the word before the offset %#llx: its meaning is not known", (unsigned long long)w); }
+    { enum { PCL = 32 }; static struct { uint8_t c, w; uint16_t off; uint32_t n; } seen[PCL]; static int ns; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; int log = 0;
+      pthread_mutex_lock(&mu); int i = 0; for (; i < ns; i++) if (seen[i].c == compute && seen[i].w == w && seen[i].off == off && seen[i].n == n) break;
+      if (i == ns && ns < PCL) { seen[ns].c = (uint8_t)compute; seen[ns].w = (uint8_t)w; seen[ns].off = (uint16_t)off; seen[ns].n = (uint32_t)n; ns++; log = 1; } pthread_mutex_unlock(&mu);
+      if (log) LOG("[nvn] push constants: %s block word %llu, offset %#llx, %llu bytes (first of this shape; %d shapes logged at most)", compute ? "compute" : "graphics", (unsigned long long)w, (unsigned long long)off, (unsigned long long)n, PCL); }
+    // Graphics: block word k = 1..5 is constant bank 24 + k, the storage buffer table of one stage (vertex 25, hull 26 (where PRAGMATA's mesh shaders sit), domain 27, geometry 28,
+    // pixel 29), which the translator reads at c0 + 0x110 + 0x100 (k - 1) (InstEmitAmpere.cs AMapC0) and the replay fills from these bytes (nvn_mtl.m, the c0 fill). PRAGMATA pushes
+    // its pixel shaders' tables with k = 5, its vertex shaders' with 1 and its mesh shaders' with 2, offsets from 0: in the first block they overwrote c24 + 0 .. (an index at 0,
+    // a table address at 8, a count at 0x14, floats from 0x18), so its draws read their storage buffers through sizes taken for addresses (0x40000, 0x2000000, ... at c24 + 8)
+    int block = push_blocks() && w <= (compute ? 1u : 5u) ? (int)w : 0;
+    if (w && !block) { static int once; if (!once++) LOG("[RED] push constants with the word before the offset %#llx (%s): put at the offset in the first block", (unsigned long long)w, compute ? "compute" : "graphics"); }
     if (off + n > DMSH_PUSH_SIZE || !data) { static int k; if (k++ < 8) LOG("[RED] push constants at %#llx + %#llx: beyond the host's %#x-byte block, dropped", (unsigned long long)off, (unsigned long long)n, DMSH_PUSH_SIZE); return; }
-    p_push_const *r = RECN(c, OP_PUSH_CONST, p_push_const, data, n); r->compute = (uint16_t)compute; r->offset = (uint16_t)off; r->size = (uint32_t)n; memcpy(r->data, data, n);
+    p_push_const *r = RECN(c, OP_PUSH_CONST, p_push_const, data, n); r->compute = (uint8_t)compute; r->block = (uint8_t)block; r->offset = (uint16_t)off; r->size = (uint32_t)n; memcpy(r->data, data, n);
 }
 NVN_NOPROTO(nvnCommandBufferPushGraphicsConstants, void, NVNcommandBuffer *c, uint64_t w, uint64_t off, uint64_t n, const void *data) { push_const(c, 0, w, off, n, data); }
 NVN_NOPROTO(nvnCommandBufferPushComputeConstants, void, NVNcommandBuffer *c, uint64_t w, uint64_t off, uint64_t n, const void *data) { push_const(c, 1, w, off, n, data); }

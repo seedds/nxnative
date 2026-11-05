@@ -4762,7 +4762,7 @@ static void shmap_read(void) {
 }
 
 @interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, discard_fn, fn_u, fn_m, fn_d, geo_fn; uint8_t mask_m;   // fn_u: the integer-output entry point (dmsh_build.py fs_uint), for pipelines whose colour attachments are all unsigned integer (pso_desc); fn_m: the mixed one, its outputs in mask_m unsigned integer; fn_d: the dual-source one (dmsh_build.py fs_dual)
-    uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, layer_out; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
+    uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, layer_out; const char *builtin; uint64_t logged; int16_t push0p1; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
     uint32_t geo_vertices, geo_invocations, geo_output, geo_stride, geo_index_stride;
     uint8_t mesh_kind, mesh_notask; uint16_t mesh_threads, mesh_payload;   // an NVN2 task (1) or mesh (2) shader, a mesh shader with no task, its workgroup's threads, its payload's bytes (dmsh_meshstage.py)
     id<MTLComputePipelineState> geo_pso; int geo_pso_failed, cps_failed;   // cps_failed: Metal refused this compute shader's pipeline (dispatch): its dispatches are skipped without asking again
@@ -5213,7 +5213,7 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
         int st = stage_of(stage);
         NvShader *sh = st >= 0 ? shader_get([k stringByAppendingString:@"_b"], st) : nil;
         if (sh) o->sh[st] = sh; else MLOG("[RED] shader %s (%s) failed to load: build the shaders with dm/gfx/tools/dmsh_build.py first", k.UTF8String, stage.UTF8String);
-        if (sh && st == 5) up_mfx_read_color(sh, &p->sd[i]);
+        if (sh && st == 5) { up_mfx_read_color(sh, &p->sd[i]); int p0 = prog_push0(p, i); if (p0 >= 0) sh->push0p1 = (int16_t)(p0 + 1); }
         if (!sh && st == 2) strlcpy(o->gs_miss, k.UTF8String, sizeof o->gs_miss);
     }
     prog_fold_gs(o);   // a slice-writing geometry shader: the vertex shader's layer entry points instead
@@ -5925,7 +5925,8 @@ static struct {
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
     p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; int depth_clamp; uint8_t vp_sw[16][4];   // vp_sw: viewport swizzles XOR the identity (p_vp_swizzle)
     float blend_color[4], alpha_ref; int64_t copy_stride, copy_img_stride;   // alpha_ref: SetAlphaRef (at_bind)
-    uint8_t push[2][DMSH_PUSH_SIZE];   // NVN2 push constants of the graphics stages and of compute (p_push_const), bound as c[24]
+    uint8_t push[2][DMSH_PUSH_SIZE], push_b1[2][DMSH_PUSH_SIZE]; uint8_t push_b1_set[2];   // push_b1: compute's second block (p_push_const block 1, hle_nvn.c push_const), joined per shader by push_view
+    uint8_t gbank[5][DMSH_PUSH_SIZE];   // graphics push blocks 1..5 = constant banks 25..29, the stages' storage buffer tables (OP_PUSH_CONST turns their rows into storage buffer bindings)   // NVN2 push constants of the graphics stages and of compute (p_push_const), bound as c[24]
     p_tf_bind tf[4]; int tf_on, rast_discard;   // capture buffers and enables; byte offsets and captured count stay on the GPU (nvn_feedback.inc)
     int tex_base, samp_base;   // host-table bases of the texture / sampler pool bound (OP_SET_TEX_POOL / OP_SET_SAMP_POOL), for handles read at replay from uniform buffers (encode_args)
 } S;
@@ -8711,6 +8712,23 @@ static uint32_t ubo_handle(int stage, int reg, int off) { uint32_t h; ubo_read(s
 // The handle a TEXU / SAMPU binding reads: a word, or two the shader ORs (handle type 1), which hold the texture and the sampler in either order. Unreal Engine 5.4's lighting shaders on the Switch 2 put the
 // shared sampler's word first, so its G-buffer textures read as ID 0 from the first word alone: the dummy, and a black scene
 static uint32_t ubo_bind_handle(int stage, const nvn_rbind *b) { uint32_t h = ubo_handle(stage, b->reg, b->off); if (b->soff) h |= ubo_handle(stage, b->sreg, b->soff - 1); return h; }
+// The c[24] bytes a shader reads: the first push-constant block, and from the shader's own first-block size (control +0xa9 words, 16-byte aligned) the second block, which
+// the game pushes with block word 1 and offsets from 0 (hle_nvn.c push_const). A shader whose layout is not known, or a stage group that never pushed a second block, reads
+// the first block alone, as before
+static const uint8_t *push_view(int stage, const NvShader *sh, uint8_t tmp[DMSH_PUSH_SIZE]) {
+    int g = stage == 5 ? 1 : 0, p0 = sh ? sh->push0p1 - 1 : -1;
+    if (!S.push_b1_set[g] || g != 1 || p0 < 0 || p0 > DMSH_PUSH_SIZE) return S.push[g];
+    memcpy(tmp, S.push[g], p0); memcpy(tmp + p0, S.push_b1[g], DMSH_PUSH_SIZE - p0);
+    return tmp;
+}
+// The GPU address of a storage buffer the game keeps in memory (NVN_RB_SBUFU): in its uniform slot reg at off, or for reg DMSH_PUSH_BANK - 3 in NVN2's push constants (c[24], which no
+// game uniform slot reaches: PRAGMATA's compute shaders keep their storage buffer addresses there, dmsh_build.py nvn2_cs), read through the shader's push_view
+static uint64_t sbufu_addr(int stage, const NvShader *sh, const nvn_rbind *b) {
+    uint64_t addr = 0;
+    if (b->reg == DMSH_PUSH_BANK - 3) { uint8_t tmp[DMSH_PUSH_SIZE]; if (b->off + 8 <= DMSH_PUSH_SIZE) memcpy(&addr, push_view(stage, sh, tmp) + b->off, 8); }
+    else ubo_read(stage, b->reg, b->off, 8, &addr);
+    return addr;
+}
 // A handle read from a uniform buffer names IDs of the pools bound when the draw runs: as bound handles are moved at recording (hle_nvn.c bind_handles), these take the bases here (0 = none)
 static int ubo_tex_id(uint32_t h) { int t = (int)(h & 0xfffff); return t ? t + S.tex_base : 0; }
 static int ubo_samp_id(uint32_t h) { int s = (int)(h >> 20); return s ? s + S.samp_base : 0; }
@@ -9060,9 +9078,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
         } else if (b->kind == NVN_RB_SBUFU) {   // B: a storage buffer whose GPU address the game keeps in its own uniform buffer (Monster Hunter Rise's compute shaders: c3 + 0x38); read like a bindless handle
             // Its address in NVN2's push constants (c[24], uniform "slot" DMSH_PUSH_BANK - 3, which no game uniform slot reaches): read from the pushed bytes (PRAGMATA's
             // compute shaders keep their storage buffer addresses there, dmsh_build.py nvn2_cs)
-            uint64_t addr = 0;
-            if (reg == DMSH_PUSH_BANK - 3) { if (b->off + 8 <= DMSH_PUSH_SIZE) memcpy(&addr, S.push[nvn_stage == 5 ? 1 : 0] + b->off, 8); }
-            else ubo_read(nvn_stage, reg, b->off, 8, &addr);
+            uint64_t addr = sbufu_addr(nvn_stage, sh, b);
             void *mb; uint64_t mo, gpu;
             if (addr && mtl_gpu_addr(addr, 1, &mb, &mo, &gpu)) { slots[aid] = gpu; USE((__bridge id<MTLBuffer>)mb, b->rw ? MTLResourceUsageRead | MTLResourceUsageWrite : MTLResourceUsageRead); if (b->rw) sbw_note(addr, sbw_len(0, mb, mo), SBW_GPU); }   // size not known
             else { slots[aid] = dummy_buf_gpu(); USE(dummy_buf(), MTLResourceUsageRead); }
@@ -9081,7 +9097,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             USE(support_buf(), MTLResourceUsageRead);
         } else if (b->kind == NVN_RB_PUSH) {   // NVN2 push constants (c[24]): the stage group's current block
             id<MTLBuffer> db; size_t doff = arena_alloc(DMSH_PUSH_SIZE, &db);
-            memcpy(g_cur_arena->cpu + doff, S.push[nvn_stage == 5 ? 1 : 0], DMSH_PUSH_SIZE);
+            { uint8_t tmp[DMSH_PUSH_SIZE]; memcpy(g_cur_arena->cpu + doff, push_view(nvn_stage, sh, tmp), DMSH_PUSH_SIZE); }
             slots[aid] = g_cur_arena->gpu + doff; USE(db, MTLResourceUsageRead);
         } else if (b->kind == NVN_RB_DRV0 || b->kind == NVN_RB_DRV2) {
             // NVN driver constant segments: those proven unread by static analysis at packaging time are supplied as 0; those read are filled on the spot from the current bindings - c0 = storage buffer table (base + 0x10 r: address 64 bits, size 32 bits),
@@ -9438,7 +9454,17 @@ static int state_op(uint32_t op, const void *a) {
         case OP_VP_SWIZZLE: { const p_vp_swizzle *b = a; memcpy(S.vp_sw[b->first], b->sw, 4 * (size_t)b->n); break; }
         case OP_BLEND_COLOR: memcpy(S.blend_color, ((const p_blend_color *)a)->rgba, 16); break;
         case OP_ALPHA_REF: S.alpha_ref = ((const p_alpha_ref *)a)->ref; break;   // data for at_bind, not part of the pipeline
-        case OP_PUSH_CONST: { const p_push_const *b = a; memcpy(S.push[b->compute ? 1 : 0] + b->offset, b->data, b->size);
+        case OP_PUSH_CONST: { const p_push_const *b = a; int g = b->compute ? 1 : 0;
+            // Graphics block k = constant bank 24 + k: stage k - 1's storage buffer table, entry r at 0x10 r = {address 64 bits, size 32 bits}, the rows NVN's BindStorageBuffer
+            // fills on the Switch 1 (the translator maps bank 25 + s to c0 + 0x110 + 0x100 s, InstEmitAmpere.cs AMapC0). Its rows become the stage's storage buffer bindings, so the
+            // bindings, the c0 fill and the hazard tracking all see them. Bank 26 (the hull stage's) belongs to the mesh stage here: PRAGMATA's mesh shaders were compiled for
+            // the hull slot (dmsh_build.py ssbo_base); the domain stage's has no host stage
+            if (!g && b->block) { int k = b->block - 1, st = k == 0 ? 0 : k == 1 ? 4 : k == 3 ? 2 : k == 4 ? 1 : -1;
+                memcpy(S.gbank[k] + b->offset, b->data, b->size);
+                if (st >= 0) for (unsigned r = b->offset / DMSH_C0_ROW; r < 16 && (r + 1) * DMSH_C0_ROW <= b->offset + b->size; r++) {
+                    p_bind_buf e = {st, (int32_t)r, 0, 0}; uint32_t n; memcpy(&e.addr, S.gbank[k] + DMSH_C0_ROW * r, 8); memcpy(&n, S.gbank[k] + DMSH_C0_ROW * r + 8, 4); e.size = n;
+                    if (memcmp(&S.ssbo[st][r], &e, sizeof e)) { S.ssbo[st][r] = e; g_args_dirty[st] = 1; } } }
+            else { if (b->block) S.push_b1_set[g] = 1; memcpy((b->block ? S.push_b1[g] : S.push[g]) + b->offset, b->data, b->size); }
             for (int st = 0; st < 6; st++) if ((st == 5) == (b->compute != 0)) g_args_dirty[st] = 1; break; }
         case OP_COPY_STRIDE: { const p_copy_stride *cs = a; if (cs->image) S.copy_img_stride = cs->stride; else S.copy_stride = cs->stride; break; }
         case OP_TF_BIND: { const p_tf_bind *b = a; if (b->index >= 0 && b->index < 4) S.tf[b->index] = *b; break; }

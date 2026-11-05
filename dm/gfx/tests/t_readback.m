@@ -344,6 +344,83 @@ static void stale_pools(void) {
     h_nvnMemoryPoolFinalize(mp2); munmap(phys, len); free(mp); free(mp2); free(sp);
 }
 
+// A texture the host uploads from its storage, filled by GPU copies a level of a layer at a time, as Star Fox streams its textures into BC7 arrays: each copy's bytes are written into
+// the storage and, on the GPU, into the host texture, so none of them uploads the texture again (pkg_copy_absorb); a CPU write into it still does, before a copy, after one, and
+// between a copy's write into the storage and its absorption. Every level of every layer holds one byte value, so its layout does not matter
+void crash_install(void);
+static void copy_stream(void) { @autoreleasepool {
+    crash_install();   // the game's writes into protected storage go through the page-fault hook, as in production
+    enum { W = 64, LAYERS = 4, LEVELS = 3, POOL = 1 << 20, OFF = 0x11000, SRC = 0x80000, OUT = 0xC0000 };   // OFF: 4 KB into a 16 KB host page, whose first 4 KB is other data
+    void *mem = NULL; if (posix_memalign(&mem, getpagesize(), POOL)) abort(); memset(mem, 0, POOL);
+    uint8_t *m = mem;
+    pool_t pool = {.magic=MAGIC('P','O','O','L'), .mem=mem, .size=POOL}; mtl_pool_add(mem, POOL); nvn_dirty_add_range(mem, POOL);
+    NVNtextureBuilder tb; h_nvnTextureBuilderSetDefaults(&tb); h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_2D_ARRAY);
+    h_nvnTextureBuilderSetWidth(&tb, W); h_nvnTextureBuilderSetHeight(&tb, W); h_nvnTextureBuilderSetDepth(&tb, LAYERS); h_nvnTextureBuilderSetLevels(&tb, LEVELS);
+    h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
+    NVNpackagedTextureLayout lay = {{1, 0, 0, 0, 7, 0, 1, 0}}; h_nvnTextureBuilderSetPackagedTextureLayout(&tb, &lay);
+    h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&pool, OFF);
+    NVNtexture arr; EXPECT("streamed array init", 1, h_nvnTextureInitialize(&arr, &tb));
+    const tex_t *t = (const tex_t *)&arr;
+    EXPECT("streamed array fits before the copy source", 1, OFF + t->L.size <= SRC);
+    memset(m + OFF, 0x11, t->L.size);
+    uint64_t lo[LAYERS][LEVELS], hi[LAYERS][LEVELS];
+    for (int z = 0; z < LAYERS; z++) for (int l = 0; l < LEVELS; l++) nvn_tex_level_range(t, (unsigned)l, (unsigned)z, &lo[z][l], &hi[z][l]);
+    tex_mtl(t);
+    uint64_t r0 = g_pkg_reuploads, a0 = g_pkg_copy_absorbs;
+    memset(m + OFF + lo[3][0], 0x77, hi[3][0] - lo[3][0]);   // the game writes layer 3's level 0 before the copies: uploaded once, at the first copy's lookup
+    NVNcommandBuffer cmd; EXPECT("stream command init", 1, h_nvnCommandBufferInitialize(&cmd, NULL));
+    h_nvnCommandBufferAddCommandMemory(&cmd, (const NVNmemoryPool *)&pool, 0, 65536);
+    h_nvnCommandBufferBeginRecording(&cmd);
+    h_nvnCommandBufferSetCopyRowStride(&cmd, 0); h_nvnCommandBufferSetCopyImageStride(&cmd, 0);
+    size_t so = SRC, oo = OUT, out_at[LAYERS][LEVELS];
+    for (int z = 0; z < 3; z++) for (int l = 0; l < LEVELS; l++) {   // layers 0-2, every level, one copy each
+        int w = W >> l; NVNtextureView v; h_nvnTextureViewSetDefaults(&v); h_nvnTextureViewSetLevels(&v, l, 1);
+        memset(m + so, 0x40 + z * 8 + l, (size_t)w * w * 4);
+        NVNcopyRegion r = {0, 0, z, w, w, 1}; h_nvnCommandBufferCopyBufferToTexture(&cmd, (NVNbufferAddress)(m + so), &arr, &v, &r, 0);
+        so += (size_t)w * w * 4;
+    }
+    for (int z = 0; z < LAYERS; z++) for (int l = 0; l < LEVELS; l++) {   // the host texture's content, read on the GPU
+        int w = W >> l; NVNtextureView v; h_nvnTextureViewSetDefaults(&v); h_nvnTextureViewSetLevels(&v, l, 1);
+        NVNcopyRegion r = {0, 0, z, w, w, 1}; out_at[z][l] = oo; memset(m + oo, 0xEE, (size_t)w * w * 4);
+        h_nvnCommandBufferCopyTextureToBuffer(&cmd, &arr, &v, &r, (NVNbufferAddress)(m + oo), 0);
+        oo += (size_t)w * w * 4;
+    }
+    NVNsync sync; h_nvnSyncInitialize(&sync, NULL);
+    h_nvnCommandBufferFenceSync(&cmd, &sync, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
+    NVNcommandHandle h = h_nvnCommandBufferEndRecording(&cmd);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); mtl_exec((const uint8_t *)h); mtl_sub_commit();
+    int wait = h_nvnSyncWait(&sync, 5000000000ull); EXPECT("stream fence wait", 1, wait == 0 || wait == 1);
+    EXPECT("stream GPU success", 0, mtl_last_commit_error());
+    EXPECT("9 copies into a texture uploaded from its storage: one re-upload (the CPU write before them)", 1, (int)(g_pkg_reuploads - r0));
+    EXPECT("... and the 9 copies taken without one", 9, (int)(g_pkg_copy_absorbs - a0));
+    int bad = 0;
+    for (int z = 0; z < LAYERS; z++) for (int l = 0; l < LEVELS; l++) {
+        int w = W >> l; uint8_t want = z < 3 ? (uint8_t)(0x40 + z * 8 + l) : l ? 0x11 : 0x77;
+        for (size_t i = 0; i < (size_t)w * w * 4; i++) bad += m[out_at[z][l] + i] != want;
+        for (uint64_t i = lo[z][l]; i < hi[z][l]; i++) bad += m[OFF + i] != want;   // the storage too (each level holds one value: layout padding as well)
+    }
+    EXPECT("host texture and storage hold every copy and the CPU write, every byte", 0, bad);
+    uint64_t r1 = g_pkg_reuploads; m[OFF + lo[0][2] + 5] = 0x99; tex_mtl(t);
+    EXPECT("a CPU write after the copies: uploaded again", 1, (int)(g_pkg_reuploads - r1));
+    // Inside a copy: its bytes written into the storage, then a CPU write elsewhere in the texture before the absorption (another thread, during the replay): not absorbed, uploaded
+    NvPkg *pk = tex_get(t->serial); id<MTLTexture> host = tex_mtl(t); EXPECT("streamed array is a packaged record", 1, [pk isKindOfClass:[NvPkg class]] && host == pk->tex);
+    NVNcopyRegion r1v = {0, 0, 0, W / 2, W / 2, 1}; uint8_t lvl1[(W / 2) * (W / 2) * 4]; memset(lvl1, 0x55, sizeof lvl1);
+    EXPECT("mirror of a level 1 copy into layer 0", 0, nvn_tex_mirror_b2t(t, 1, 0, &r1v, lvl1, (W / 2) * 4, sizeof lvl1));
+    m[OFF + lo[2][0] + 3] = 0x66;
+    EXPECT("a CPU write beside the copy's level: not absorbed", 0, pkg_copy_absorb(t, host, 1, 0, 1));
+    uint64_t r2 = g_pkg_reuploads; tex_mtl(t); EXPECT("... uploaded at the next use", 1, (int)(g_pkg_reuploads - r2));
+    // Other data in the texture's first host page written (a neighbour): the texture's own bytes there are unchanged, so a copy elsewhere is absorbed; a write into them is not
+    host = tex_mtl(t); m[OFF - 0x800] = 0x12;
+    EXPECT("mirror of a level 1 copy into layer 2", 0, nvn_tex_mirror_b2t(t, 1, 2, &r1v, lvl1, (W / 2) * 4, sizeof lvl1));
+    EXPECT("a neighbour's write in the shared first page: absorbed", 1, pkg_copy_absorb(t, host, 1, 2, 1));
+    uint64_t r3 = g_pkg_reuploads; EXPECT("... not uploaded again", 1, tex_mtl(t) == host && g_pkg_reuploads == r3);
+    EXPECT("mirror of a level 1 copy into layer 1", 0, nvn_tex_mirror_b2t(t, 1, 1, &r1v, lvl1, (W / 2) * 4, sizeof lvl1));
+    m[OFF + 0x100] ^= 0xff;   // layer 0's level 0, in the shared first page: the texture's own bytes
+    EXPECT("a CPU write into the texture's bytes in its first page: not absorbed", 0, pkg_copy_absorb(t, host, 1, 1, 1));
+    tex_mtl(t); EXPECT("... uploaded at the next use", 1, (int)(g_pkg_reuploads - r3));
+    h_nvnTextureFinalize(&arr); nvn_dirty_remove_range(mem); mtl_pool_del(mem); free(mem);
+} }
+
 int main(void) { @autoreleasepool {
     alarm(60); if (setvbuf(stdout, NULL, _IONBF, 0)) abort();   // GPU, callback and pthread failures must not leave the check target hanging.
     mtl_init();
@@ -445,6 +522,7 @@ int main(void) { @autoreleasepool {
     stale_pools();
     packed_copies(NVN_FORMAT_RGB565, 500); packed_copies(NVN_FORMAT_RGB5A1, 501); packed_copies(NVN_FORMAT_RGB5, 502); packed_copies(NVN_FORMAT_RGBA4, 503);
     mirror_completion();
+    copy_stream();
     readback_pool();
     printf("READBACK cases=%d failed=%d\n", cases, failed); return failed != 0;
 } }

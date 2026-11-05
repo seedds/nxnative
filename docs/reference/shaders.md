@@ -1192,6 +1192,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Note:** three of four of these HMMAs start an output tile, with C = 0. A variant for those calls that neither stores nor loads C (`simdgroup_multiply` first) was measured and not kept: 0.767 against 0.820 ns a warp-HMMA (6 %) in an isolated loop of the build's two bodies on an M4 Pro, about 0.04 ms of the upscaler's 1.6-1.9 ms a frame, and no measurable change in the game.
 - **Open:** LDSM and MOVM (27 and 72 a shader) are still emulated with shuffles (314 left in the upscaler, whose floor without them is about 0.3 ms); loading A and B straight from LDSM's source and keeping D as matrices between HMMAs (0.65 ns an HMMA) needs the translator to follow LDSM → MOVM → HMMA → HMMA chains.
 
+### LDSM reads rows other lanes stored
+
+- **Symptom:** a Switch 2 movie or network output has dotted streaks: every other pixel of a few hundred rows wrong, mostly green and magenta, in other places each run, while its source is clean. Ocarina of Time's title movie after its NDVE filter (texture 6231, before agl's upscaler).
+- **Cause:** a warp stores tiles to shared memory (STS) and reads them back with LDSM, with no BAR between them. The Switch runs a warp's shared-memory accesses in order. Metal orders another lane's threadgroup store and this lane's load only through a barrier, and its compiler moved them past each other. The wrong pixels are mostly at odd x, the high halves of packed pairs.
+- **Fix:** `InstEmitAmpereTensor.ALdsm` puts a subgroup barrier (`Instruction.SubgroupBarrier`, `simdgroup_barrier(mem_flags::mem_threadgroup)`) before its loads and another after them, so that no lane's next store reaches the rows before every lane has read them. LDSM is warp-collective, so the whole SIMD-group reaches both. A SIMD-group-scope fence after each store, with no execution barrier, left about 3,800 such pixels a frame.
+- **Check:** `test_dmsh_ampere_mem.py` `Shared.test_ldsm_reads_between_subgroup_barriers`. In the game, pixels of 6231 that differ from both vertical neighbours while those agree: 6,700-14,000 a frame before, 71-86 after (the YUV source: 40-58). The GPU time is unchanged.
+- **Found on:** The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, profile in #1299): the movie library's NDVE shaders, five of which (`ba079f68ae288dba`, `a8b4fb48fee0ccf8`, `e6be82d835fbe4d3`, `7f7ff0f36b54d90f`, `5a7d69b067a7f011`) have no BAR between their STS and LDSM.
+
 ### Driver-segment reads outside fragment shaders
 
 - **Symptom:** a vertex or compute shader reads zeros from NVN's driver segment `c0`.

@@ -261,6 +261,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
             int id = context.ResourceManager.SharedMemoryId;
             Operand[] results = new Operand[count];
 
+            // nxnative: LDSM reads rows that other lanes of the warp stored (STS) just before, with no BAR between (the agl networks of Ocarina of Time's movie
+            // filter); the warp's shared memory accesses are in order on the Switch, while Metal orders another lane's threadgroup store and this load only through
+            // a barrier, and the compiler moved them past each other: every other pixel of a few rows wrong (the high halves). LDSM is warp-collective (the whole warp
+            // runs it), so a subgroup barrier before its loads and one after (no lane's next store over the rows before all have read them) is safe
+            context.SubgroupBarrier();
+
             for (int m = 0; m < count; m++)
             {
                 if (mode == 0)
@@ -285,6 +291,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     results[m] = context.BitwiseOr(h[0], context.ShiftLeft(h[1], Const(16)));
                 }
             }
+
+            context.SubgroupBarrier();
 
             for (int m = 0; m < count && x.Rd + m < RegisterConsts.RegisterZeroIndex; m++)
             {

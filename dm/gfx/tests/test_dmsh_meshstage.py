@@ -69,6 +69,29 @@ class Facts(unittest.TestCase):
         lay, size = ms.memory(i)
         self.assertEqual(lay[2], 0x10 + 0x80); self.assertEqual(lay[3], lay[2] + 4 * 6 * 0x80); self.assertEqual(size, lay[3] + 4 + 3 * 64)
 
+    def test_primitive_system_value_has_room(self):
+        # PRAGMATA 5aab38bb5ba67ef7 (and 493 more): 128 vertices of a position, 126 primitives, a per-primitive SPH enabling only the primitive array id (0x35 bit 0).
+        # Its code writes vertex v at (v / 32) * 0x200 + 0x80 * c and primitive p's id at 0x800 + (p / 32) * 0x80 + 4 * (p % 32) from the outputs: the id must not
+        # reach the primitive bytes (before, the count byte was 0x893, inside primitive 0's id, so every workgroup drew nothing)
+        area = sph(0xf0) + sph(0x01)
+        i = ms.info(control(7, payload=128, max_v=128, max_p=126, prim_at=0x80), area)
+        self.assertEqual((i['primitive'], i['primitive_system']), ([], 1))
+        lay, size = ms.memory(i)
+        self.assertEqual(lay[2], 0x90); self.assertEqual(lay[3], 0x90 + 0x800 + 4 * 0x80)
+        last_id = lay[2] + 0x800 + (125 // 32) * 0x80 + 4 * (125 % 32)
+        self.assertLess(last_id + 4, lay[3] + 1)
+        src = ms.to_stage(KERNEL % (size // 4, lay[3] // 4), i)
+        self.assertIn('uint b = 36u + (n / 32u) * 128u + n % 32u;', src)   # the vertex blocks keep their 0x200 bytes
+        self.assertIn(f'uint np = min(_23[{lay[3] // 4}] >> 24, 126u);', src)
+        self.assertIn(f'uint at = {lay[3] + 4}u + n;', src)
+
+    def test_without_per_primitive_components_unchanged(self):   # the same shader without a per-primitive SPH keeps the layout it had
+        i = ms.info(control(7, payload=128, max_v=128, max_p=126), sph(0xf0))
+        self.assertEqual(ms.memory(i), ([0, 0x10, 0x90, 0x890], 0x890 + 4 + 3 * 126 + 2))
+
+    def test_system_values_of_an_sph(self):
+        self.assertEqual(ms.sph_system(sph(0xf1)), [8]); self.assertEqual(ms.sph_system(sph(0xf0)), [])
+
     def test_largest_of_the_game_fits_metal(self):   # c34e01565dac1124: 256 vertices, 192 primitives
         i = ms.info(control(7, max_v=256, max_p=192), sph(0xf0, b'\x00\x0f'))
         self.assertLessEqual(ms.memory(i)[1], ms.METAL_MAX_SHARED)
@@ -136,10 +159,18 @@ class Stage(unittest.TestCase):
         self.assertIn('_23[0] = dm_first[0] + dm_tg;', src)
         self.assertNotIn('[[payload]]', src)
 
-    def test_per_primitive_outputs(self):
+    def test_per_primitive_outputs(self):   # the primitive blocks follow all four vertex blocks (36 + 4 * 6 * 32 words), one component each
         src = self.mesh(primitive=True)[0]
         self.assertIn('metal::mesh<dm_vertex_t, dm_prim_t,', src)
-        self.assertRegex(src, r'p\.p0 = float4\(as_type<float>\(_23\[b \+ 192u\]\), 0\.0, 0\.0, 1\.0\);')   # after the six vertex components
+        self.assertIn('uint b = 804u + (n / 32u) * 32u + n % 32u;', src)
+        self.assertRegex(src, r'p\.p0 = float4\(as_type<float>\(_23\[b \+ 0u\]\), 0\.0, 0\.0, 1\.0\);')
+
+    def test_per_primitive_attribute_after_the_system_values(self):   # a primitive id (0x35 bit 0) and generic 0's x: p0 is the block's second component
+        area = sph(0xf0, b'\x30') + sph(0x01, b'\x01')
+        i = ms.info(control(7, payload=128, max_v=128, max_p=64, prim_at=0x80), area)
+        src = ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4), i)
+        self.assertIn('uint b = 804u + (n / 32u) * 64u + n % 32u;', src)
+        self.assertRegex(src, r'p\.p0 = float4\(as_type<float>\(_23\[b \+ 32u\]\), 0\.0, 0\.0, 1\.0\);')
 
     def local_word(self):   # a private variable spirv-cross initializes ahead of the stage memory: the last entry of a raw global memory lookup (GlobalToStorage.TryGenerateRawStorageOp)
         i = ms.info(control(7, payload=128, max_v=128, max_p=64), sph(0xf0, b'\x30'))

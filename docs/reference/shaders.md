@@ -1064,7 +1064,7 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Symptom:** `[RED] <key>: the translator deleted N bindless accesses` in the build ([Losses a shader build reports](#losses-a-shader-build-reports); `Failed to find handle source for bindless access` in its reflection's notes), for a shader with TXD through a uniform register (0xf6c). The MSL has no gradient sample, and what it read comes back 0.
 - **Cause:** a bindless read takes its handle as source 0. `ATex` adds it in every other form, but TXD has a branch of its own, which left it out. BindlessElimination then took the first coordinate for the handle, found no source for it and deleted the read.
 - **Fix:** the TXD branch adds the handle first, as the others do.
-- **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): in 14,079 of its 133,154 shaders, none of them among the 1,519 the playtests asked for, so no route has shown it in a picture. Found by [PR 1261](https://github.com/seedds/nxnative/pull/1261).
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md): 281 of its pixel shaders, the characters' fur shells, which drew as black scribbles until the read came back (`DMSH_BINDLESS_TRACE=1` on a `dmsh_xlate` job prints what a refused handle is made of, which is how it was found); [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): in 14,079 of its 133,154 shaders, none of them among the 1,519 the playtests asked for, so no route has shown it in a picture. Found by [PR 1261](https://github.com/seedds/nxnative/pull/1261).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
 
 ### Layer entry points with the point size passed by reference
@@ -1143,13 +1143,6 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `ATex` and `ATxq` in `InstEmitAmpereMem.cs`. The same bring-up adds, from their encodings in the game: 0x301 BREV and 0x2be its uniform form, 0x311 F2I.U64, 0x312 I2F of a 64-bit pair, 0x38c ATOMS, 0x38d ATOMS.CAS (Rd is 1 when it swapped, not the old value: the game's only use is a retry loop until Rd == 1), 0x992 MEMBAR, 0x9ab ERRBAR, and the carry out of IMAD.WIDE.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): 902 shaders had the wrong register at first; all 16,888 translate now. [Splatoon Raiders](../../dm/games/0400380020056000/README.md) lists 0x2be, 0x301 and 0x38c among its refused instructions; it has not been rebuilt with this.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
-
-### TXD through a uniform-register handle
-
-- **Symptom:** `Ampere instruction f6c at 0x… is not implemented` in 294 of a game's 2,828 shaders (pixel shaders with explicit derivatives).
-- **Cause:** 0xf6c is TXD with its texture handle in a uniform register at bits 40..46, the form 0xf60 is for TEX; the translator knew TXD only as 0xb6c.
-- **Fix:** `InstEmitAmpereMem.cs` registers 0xf6c and reads its handle as 0xf60's, then decodes the rest as 0xb6c (chain change). The handle has to lead the operation's sources, as it does for a bindless TEX: the first version put only the coordinates there, so the bindless elimination read the first coordinate (a float) as the handle, logged `Failed to find handle source for bindless access of type "texture2DArray"` (765 reads in 281 of the game's pixel shaders, the fur shells among them) and replaced each read by 0. `DMSH_BINDLESS_TRACE=1` on a `dmsh_xlate` job prints what a refused handle is made of (phis, operations and their sources), which is how this one was found.
-- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md) (294 of its 2,828 shaders, then the 281 pixel shaders whose reads were dropped). Open there: 3 shaders still do not translate, opcodes 0x925 (2) and 0x21b (1); the SURED form 0310e000 and 0xf63 (TLD4 by the same uniform-register form) translate since main's changes for Yoshi and the Mysterious Book.
 
 ### A handle pair ORed sampler word first
 

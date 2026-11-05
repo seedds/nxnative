@@ -15,7 +15,7 @@ A Switch 2 game: update v131072 over the base game, SDK 21.4.4 built for the Swi
 
 No `render_cond`: not tried.
 
-What the host needed for it, all general (the reference entries are linked under *Found on this game*): SDK 21's socket initialization against host bsd sessions and the C library's `poll` routed to the host; SDK 21's hardware Opus decoder manager on the SDK's software decoder; SDK 21's output streams on the host's AudioOut; 33 GameChat calls answered as "no chat"; the camera module's commands answered as a console with no camera plugged in; `nvnDlssNetworkResize`; the translator's TXD through a uniform-register handle.
+What the host needed for it, all general (the reference entries are linked under *Found on this game*): SDK 21's socket initialization against host bsd sessions and the C library's `poll` routed to the host; SDK 21's hardware Opus decoder manager on the SDK's software decoder; SDK 21's output streams on the host's AudioOut; 33 GameChat calls answered as "no chat"; the camera module's commands answered as a console with no camera plugged in; `nvnDlssNetworkResize`; the translator's TXD through a uniform-register handle (0xf6c, also fixed on main meanwhile).
 
 ## Files
 
@@ -38,7 +38,7 @@ What the host needed for it, all general (the reference entries are linked under
 - [GameChat queries from the title screen (SDK 21)](../../../docs/reference/services.md#gamechat-queries-from-the-title-screen-sdk-21): a null read in `nn::chat::GetChattingUid`.
 - [The camera commands of SDK 21's own camera module](../../../docs/reference/services.md#the-camera-commands-of-sdk-21s-own-camera-module): the game's own camera module, a console with no camera plugged in.
 - [The DLSS network resized](../../../docs/reference/rendering.md#the-dlss-network-resized): `nvnDlssNetworkResize`.
-- [TXD through a uniform-register handle](../../../docs/reference/shaders.md#txd-through-a-uniform-register-handle): 294 shaders did not translate, then 281 pixel shaders (the fur shells) read 0.
+- [TXD through a uniform register kept no handle](../../../docs/reference/shaders.md#txd-through-a-uniform-register-kept-no-handle): 281 pixel shaders (the fur shells) read 0, the same fix taken in from PR 1261 meanwhile.
 - [A handle pair ORed sampler word first](../../../docs/reference/shaders.md#a-handle-pair-ored-sampler-word-first): 62 pixel shaders.
 
 ## Open

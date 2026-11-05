@@ -71,6 +71,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x593, InstName.Suatom, ASuatom, N);
             x(0x59f, InstName.Sured, ASured, N, writesRd: false);
             x(0x394, InstName.SuatomB, ASuatom, N);
+            x(0x595, InstName.SuatomCas, ASuatomCas, N);
+            x(0x396, InstName.SuatomCasB, ASuatomCas, N);
             x(0xb1d, InstName.Bar, ABar, N, writesRd: false);
             x(0x992, InstName.Membar, AMembar, N, writesRd: false);
             x(0x9ab, InstName.Membar, AErrbar, N, writesRd: false);
@@ -599,6 +601,37 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, (SuatomOp)x.Bits(87, 91), (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, 0, x.Rd, false, isBindless: false, compareAndSwap: false, cbufSlot: cbufSlot);
+        }
+
+        // SUATOM.CAS Rd, [Ra], Rb (0x595, the handle in a constant buffer at 40..59 as SUATOM's; 0x396 with it in a register at 64..72, NAK sm70_encode.rs OpSuAtom
+        // AtomOp::CmpExch): the compare value in Rb and the new one in Rb + 1 (NAK AtomCmpSrc::Packed, "cmpr coming first"), the dimension at 61..64, the size at 73..76, the
+        // predicate result at 81..84. nvdisasm: 000fe200001ee000a000080600ff7595 is SUATOM.D.3D.CAS.STRONG.GPU.IGN RZ, [R0], R6, 0x0, 0x8 (PRAGMATA's compute shader
+        // 50fece0d891feba4 adds a float to a 3D image texel with SULD, FADD into R7 and one compare-and-swap, its result discarded)
+        public static void ASuatomCas(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+
+            if (x.Bits(81, 84) != 7)
+            {
+                throw AFail(context, "SUATOM.CAS with a predicate result");
+            }
+
+            SuatomSize size = (SuatomSize)x.Bits(73, 76);
+
+            if (size is not (SuatomSize.U32 or SuatomSize.S32))
+            {
+                throw AFail(context, $"SUATOM.CAS size {size}");
+            }
+
+            if (x.Opcode == 0x396)
+            {
+                EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, 0, size, 0, x.Ra, x.Rb, x.Bits(64, 72), x.Rd, false, isBindless: true, compareAndSwap: true);
+                return;
+            }
+
+            (int handle, int cbufSlot) = ATexHandle(context, x);
+
+            EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, 0, size, handle, x.Ra, x.Rb, 0, x.Rd, false, isBindless: false, compareAndSwap: true, cbufSlot: cbufSlot);
         }
 
         // SURED [Ra], Rb (0x59f): SUATOM's reduction, no result: the same fields (handle 40..59, dimension 61..64, size 73..76, operation 87..91), Rd unused.

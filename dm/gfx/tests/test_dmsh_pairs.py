@@ -107,7 +107,7 @@ class Pairing(unittest.TestCase):
 
     def test_vertex_cache_depends_on_extra_pairs_and_pixel_code(self):
         self.ns.update(FACTS={}, MAP_ROWS={}, MAP_CONFLICT_ROWS={}, TOOL_FP=b'tools', CODE_FP='code',
-                       PROFILE_ROWS=b'', DUAL_WANT=set(), shader_rule_source=lambda name: b'')
+                       PROFILE_ROWS=b'', DUAL_WANT=set(), UINT_WANT=set(), shader_rule_source=lambda name: b'')
         key = self.ns['shader_key']
         v1 = key('v', 'pkg.bin', b'vertex')
         self.ns['PAIRS']['v'].remove('f6')

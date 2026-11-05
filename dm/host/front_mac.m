@@ -1508,3 +1508,32 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
     snprintf(out, out_cap, "%s", text.UTF8String);
     return 1;
 }
+
+// GPU lost (front.h): macOS runs none of the game's GPU work any more and nothing is drawn again. In full screen the frozen game held the whole screen (#1326: WindowServer froze for 40 s
+// and its watchdog killed it), so the window leaves full screen first and the alert comes once it has, or after 3 s if it has not. Then the app quits as ⌘Q does
+void front_gpu_lost(void) {
+    if (!g_layer) die("GPU access revoked: macOS runs none of this process's GPU work any more");
+    LOG("front end: the GPU no longer runs the game's work; telling the player and quitting");
+    dispatch_async(dispatch_get_main_queue(), ^{
+        __block int told = 0;
+        void (^tell)(void) = ^{
+            if (told++) return;
+            NSAlert *a = [NSAlert new];
+            a.alertStyle = NSAlertStyleCritical;
+            a.messageText = [@"The GPU stopped running " stringByAppendingString:@(DM_GAME_NAME)];   // @(): the name is UTF-8, which %s would not read as such
+            a.informativeText = [NSString stringWithFormat:@"After a GPU error, macOS stopped running the game's GPU work, so nothing more can be drawn and the game quits. The log has the details. "
+                                                           "Please report it on GitHub with python3 scripts/bug_report.py %@, which collects the log.", @(DM_GAME_ID)];
+            [a addButtonWithTitle:@"Quit"];
+            // An app opened in the background would leave the alert behind other apps' windows, and DM_WINDOW_TOP's floating game window would cover it
+            [NSApp activateIgnoringOtherApps:YES];
+            [a layout]; NSWindow *game = g_win; if (game && a.window.level <= game.level) a.window.level = game.level + 1;
+            [a runModal];
+            [NSApp terminate:nil];   // as ⌘Q
+        };
+        NSWindow *win = g_win;
+        if (!(win.styleMask & NSWindowStyleMaskFullScreen)) { tell(); return; }
+        [NSNotificationCenter.defaultCenter addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; tell(); }];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), tell);
+        [win toggleFullScreen:nil];
+    });
+}

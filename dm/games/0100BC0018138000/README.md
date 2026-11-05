@@ -32,14 +32,17 @@ Update 1.0.1 (v65536) over the base game, SDK 14.3.1. Unity 2021.3.15f1 IL2CPP w
 - Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform mac` and use its printed command.
 - From a fresh save: the opening movie plays by itself. A skips it to the title, then A on the title and on the menu, A on the difficulty (Normal is selected). The new-game cutscene follows; presses of Plus, A and a held B went to it and it reached Bowser's Keep within about a minute, without showing which of them, if any, skipped it. Press A through the dialogue.
 - In the corridor, **Up walks up and to the left**. Walking towards the far door pans the camera to the door with Mario out of frame (not a fault: the HUD comes back and he is there once he moves). After the second pan a scene put him back on the carpet and a Terrapin came to life and roamed; touching it starts the battle. In battle A attacks.
+- From a save on Mushroom Way (`saves/mushroom_way` in the NSP folder, [`smoke.tsv`](smoke.tsv)): A at the title, the menu and the file, and Mario stands on the path with a Goomba just below him. Holding the stick down walks into it, and the battle against three Goombas opens in a sunlit arena; A twice attacks.
 
 ## Found on this game
 
+- Mushroom Way's battle ground and lower foliage were nearly black, Mario and the UI lit: the baked shadowmask is RGBA4, and its channels read reversed: [RGBA4 textures in Metal's channel order](../../../docs/reference/rendering.md#rgba4-textures-in-metals-channel-order). Checked from a copied save at Mushroom Way: a Goomba battle dark on the host before the fix, lit after it, with an attack played, windowless and muted.
 - The first NSP script run prebuilt its pipeline archive at the default depth mode: [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree). The check boots now set the key.
 - Calls `nvnCommandBufferSetSubpixelPrecisionBias` and `nvnCommandBufferSetConservativeRasterDilate` repeatedly (thousands of times in six minutes) without turning conservative rasterization on, on the route tested: see [Conservative rasterization remains unimplemented](../../../docs/reference/rendering.md#conservative-rasterization-remains-unimplemented).
 
 ## Open
 
+- **Current (2026-11-05):** the translator deletes 20 bindless accesses in 4 shaders (4 pixel; texture2D 20), whose results read 0: `0918eb68f1a71924` `220a6f463d1b1588` `768ad53b637e9686` `8027369dadd26a36`. The cause is not traced, and whether a route reaches them is not known. [Losses a shader build reports](../../../docs/reference/shaders.md#losses-a-shader-build-reports).
 - Everything past the first battle's first attack: the rest of the game, party members, a save and its load. This was a short test on purpose.
 - Nobody has watched it in motion or listened to it: the checks are single frames and the log. Sound is checked only in the log (one AudioOut with 6 channels; a few underruns of 5 ms, under the load above). Input has gone only through `DM_CTL`, not a controller or the keyboard.
 - iPhone and iPad runtime validation; no IPA has been built. Memory there is the first thing to watch.

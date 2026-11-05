@@ -5,6 +5,8 @@
 #include <pthread.h>
 #include <time.h>
 #include <errno.h>
+#include <spawn.h>
+#include <sys/wait.h>
 static uint64_t test_now = 10000000000ull;
 static unsigned test_waits, test_spurious;
 static int test_silent;
@@ -22,6 +24,9 @@ static int test_pthread_cond_timedwait(pthread_cond_t *, pthread_mutex_t *, cons
 #undef pthread_cond_timedwait
 #undef clock_gettime
 #define g_ft g_ft_hle
+#undef DM_GAME_FPS_MAX
+static int test_fps_max = 120;
+#define DM_GAME_FPS_MAX test_fps_max
 #include "../nvn/hle_nvn.c"
 #undef g_ft
 void *front_metal_layer(void) { return NULL; }
@@ -61,7 +66,22 @@ static void acquire_ticks(int hz, int display, int interval, double want, const 
     printf("%s: %.2f ticks per acquire (expected %.2f)\n", label, got, want);
     CHECK(got == want, label);
 }
-int main(void) { @autoreleasepool {
+// Present snapshots (mtl_snap_on, fixed for the process: run as "t_link_ticks snap"): the acquire takes the display link's wait as without them, the ring slot wait only on top.
+// It used to wait for a free slot alone, and the link frees slots by dropping frames, so a game ran ahead of its present interval (Donkey Kong Bananza at the 30 fps cap: 43-65 fps).
+// While the link is stalled the slot time paces instead (no link wait)
+static int snap_case(void) {
+    setenv("DM_RT", "0", 1); setenv("DM_PRESENT_SNAP", "2", 1); setenv("DM_FPS_TARGET", "0", 1);
+    g_dm_present_link = 1; g_link = (CAMetalDisplayLink *)[NSObject new]; g_link_mode = 1;
+    CHECK(mtl_snap_on() && mtl_link_active() && !mtl_link_stalled(), "snapshots on, the link active and ticking");
+    acquire_ticks(60, 0, 2, 2, "snapshots: game interval 2 waits two ticks of a 60 Hz link");
+    acquire_ticks(60, 0, 1, 1, "snapshots: game interval 1 waits one tick");
+    g_stall_t0 = 1;
+    acquire_ticks(60, 0, 2, 0, "snapshots with the link stalled: no link wait");
+    g_stall_t0 = 0;
+    printf("t_link_ticks snap: %d checks, %d failed\n", checks, failed); return failed != 0;
+}
+int main(int argc, char **argv) { @autoreleasepool {
+    if (argc > 1 && !strcmp(argv[1], "snap")) return snap_case();
     setenv("DM_RT", "0", 1); setenv("DM_PRESENT_SNAP", "0", 1);
     // Test uncapped display pacing independently of the selected game's default.
     setenv("DM_FPS_TARGET", "0", 1);
@@ -92,6 +112,24 @@ int main(void) { @autoreleasepool {
     state[0] = 30;
     acquire_ticks(120, 1, 1, 4, "the 30 fps frame step keeps two 60 Hz vsyncs");
     dm_fps_state = NULL;
+    // 120 fps: the frame step's hold is in ticks of 1/120 s, whatever interval the game asks for, and the target the host writes follows it
+    setenv("DM_FPS_TARGET", "120", 1); g_present_cap = -1; g_fps_high = -1;
+    CHECK(fps_high(), "a game checked at 120 takes the 120 fps target");
+    atomic_store(&g_high_cap, 120); atomic_store(&g_fs_k, 1);
+    acquire_ticks(120, 0, 2, 1, "120 fps: hold 1 is one tick, whatever interval the game asks for");
+    CHECK(nvn_game_fps() == 120 && nvn_fps_high_now() == 120, "120 fps: hold 1 sets a target of 120");
+    atomic_store(&g_fs_k, 2);
+    acquire_ticks(120, 0, 1, 2, "120 fps: hold 2 is two ticks");
+    CHECK(nvn_fps_high_now() == 60, "120 fps: hold 2 sets a target of 60, so the game's step doubles with the time on screen");
+    atomic_store(&g_high_cap, 60); g_link_mode = 1;
+    acquire_ticks(120, 0, 1, 1, "a screen below 120 Hz: hold 2 is one tick of a 60 Hz link");
+    CHECK(nvn_game_fps() == 60, "a screen below 120 Hz configures a 60 Hz link");
+    g_link_mode = 2; test_fps_max = 60; g_present_cap = -1; g_fps_high = -1;
+    CHECK(!fps_high(), "a game not checked at 120 does not take it");
+    atomic_store(&g_fs_k, 0);
+    acquire_ticks(60, 0, 1, 2, "a game not checked at 120 presents at 60");
+    CHECK(nvn_game_fps() == 60, "a game not checked at 120 reports 60");
+    test_fps_max = 120; setenv("DM_FPS_TARGET", "0", 1); g_present_cap = -1; g_fps_high = -1;
     g_link_mode = 1;
     CHECK(mtl_link_rate() == 60, "a 60 Hz link reports 60");
     a = per_wait(0, 1);
@@ -111,5 +149,7 @@ int main(void) { @autoreleasepool {
     CHECK(g_link_tick_n == tick && test_now - start == 5000000ull, "timeout reaches its deadline without inventing ticks");
     test_silent = 0;
     CHECK(mtl_link_wait_ticks(2, 10000000ull) && g_link_tick_n - tick == 2, "ticks resume from the last successful wait after timeout");
+    pid_t pid; int st = 1; extern char **environ;   // the snapshot cases in a process of their own (mtl_snap_on is decided once)
+    CHECK(!posix_spawn(&pid, argv[0], NULL, NULL, (char *[]){argv[0], "snap", NULL}, environ) && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && !WEXITSTATUS(st), "the snapshot cases pass");
     printf("t_link_ticks: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

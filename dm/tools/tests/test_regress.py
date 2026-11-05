@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # scripts/regress.py: the parts that need no game, GPU or git revision: the MSL interface reader (GitHub issue #283), the [RED] normalization, the routes, and the comparisons
-import importlib.util, json, tempfile, unittest
+import fcntl, importlib.util, json, os, tempfile, time, unittest
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -176,6 +176,78 @@ class Regress(unittest.TestCase):
         self.assertEqual(d['changed']['msl'], 1); self.assertEqual(d['changed']['keys'], ['d'])
         self.assertEqual([x['vs'] for x in d['interface']['new']], ['w']); self.assertEqual(len(d['interface']['known']), 1)
 
+    def test_nvn_manifest_reads_losses_from_the_reflection(self):   # a cache hit translates nothing, so only the reflection knows
+        k = '0123456789abcdef'
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            (d / '_b_build.json').write_text(json.dumps([{'key': k, 'st': 'ok'}, {'key': 'f' * 16, 'st': 'ok'}]))
+            handle = 'translator: Failed to find handle source for bindless access of type "texture2D".'
+            (d / f'{k}_b.json').write_text(json.dumps({'key': k + '_b', 'entries_lost': ['layer'], 'notes': [handle, handle, 'translator: Bindless handle taken from the one c[2] handle among its phi inputs.']}))
+            (d / f'{"f" * 16}_b.json').write_text(json.dumps({'key': 'f' * 16 + '_b', 'notes': []}))
+            m = regress.nvn_manifest(d, 1)
+        self.assertEqual((m[k]['deleted'], m[k]['lost']), ({'texture2D': 2}, {'layer': 1}))
+        self.assertNotIn('deleted', m['f' * 16]); self.assertNotIn('lost', m['f' * 16])
+
+    def loss(self, base, cand):
+        return regress.chain_diff({'shaders': {k: {'st': 'ok', **e} for k, e in base.items()}}, {'shaders': {k: {'st': 'ok', **e} for k, e in cand.items()}})['losses']
+
+    def test_new_deleted_read_is_caught(self):
+        x = self.loss({'a': {}}, {'a': {'deleted': {'texture2D': 1}}})['deleted']
+        self.assertEqual((x['baseline'], x['candidate'], x['rose'], x['held']), (0, 1, 1, 0))
+        self.assertEqual(x['keys'], [{'key': 'a', 'baseline': {}, 'candidate': {'texture2D': 1}}])
+
+    def test_new_lost_entry_is_caught(self):
+        x = self.loss({'a': {'lost': {'integer output': 1}}}, {'a': {'lost': {'integer output': 1, 'layer': 1}}})['lost']
+        self.assertEqual((x['rose'], x['held']), (1, 0))
+        self.assertEqual(x['keys'][0]['candidate'], {'integer output': 1, 'layer': 1})
+
+    def test_known_losses_do_not_fail(self):
+        same = {'a': {'deleted': {'texture2D': 26}, 'lost': {'layer': 1}}}
+        for kind, x in self.loss(same, same).items():
+            self.assertEqual((x['rose'], x['held'], x['keys']), (0, 1, []), kind)
+
+    def test_a_fix_elsewhere_does_not_hide_a_new_loss(self):   # the totals fall from 5 to 2, and b still lost one more
+        x = self.loss({'a': {'deleted': {'texture2D': 5}}, 'b': {}}, {'a': {'deleted': {'texture2D': 1}}, 'b': {'deleted': {'texture2D': 1}}})['deleted']
+        self.assertEqual((x['baseline'], x['candidate'], x['rose'], x['held']), (5, 2, 1, 1))
+        self.assertEqual(x['keys'][0]['key'], 'b')
+
+    def test_another_type_is_another_access(self):
+        self.assertEqual(self.loss({'a': {'deleted': {'texture2D': 1}}}, {'a': {'deleted': {'textureCube': 1}}})['deleted']['rose'], 1)
+
+    def test_new_shader_with_a_loss_is_caught(self):
+        self.assertEqual(self.loss({}, {'n': {'deleted': {'texture2D': 1}}})['deleted']['rose'], 1)
+
+    def test_loss_levels(self):
+        def grade(base, cand):
+            levels, known = regress.collections.defaultdict(list), []
+            regress.loss_levels(self.loss(base, cand), levels, known)
+            return levels, known
+        levels, known = grade({'a': {}}, {'a': {'deleted': {'texture2D': 1}}})
+        self.assertIn('1 shaders with more bindless accesses the translator deleted than in the baseline', levels['NEW-FAIL']); self.assertEqual(known, [])
+        levels, known = grade({'a': {'lost': {'layer': 1}}}, {'a': {'lost': {'layer': 1}}})
+        self.assertEqual(levels['NEW-FAIL'], []); self.assertEqual(known, ['1 shaders with extra entry points the library built without'])
+        levels, known = grade({'a': {'deleted': {'texture2D': 3}}}, {'a': {'deleted': {'texture2D': 1}}})
+        self.assertEqual(levels['NEW-FAIL'], []); self.assertEqual(levels['CHANGED'], ['bindless accesses the translator deleted: 3 → 1'])
+
+    def test_check_fails_on_a_new_loss_and_the_report_names_the_shader(self):
+        with tempfile.TemporaryDirectory() as td, ExitStack() as stack:
+            root = Path(td)
+            a = NS(baseline='base', candidate='cand', no_smoke=True, rewrite=False, quick=False)
+            stack.enter_context(patch.object(regress, 'Tree', return_value=NS(id='tree')))
+            stack.enter_context(patch.object(regress, 'select', return_value=[NS(id='game', name='game')]))
+            stack.enter_context(patch.object(regress, 'rewriter_key', return_value='same'))
+            baseline = {'kind': 'nvn', 'ok': 1, 'total': 1, 'failed': 0, 'shaders': {'0123456789abcdef': {'st': 'ok'}}}
+            candidate = {'kind': 'nvn', 'ok': 1, 'total': 1, 'failed': 0, 'shaders': {'0123456789abcdef': {'st': 'ok', 'lost': {'layer': 1}}}}
+            stack.enter_context(patch.object(regress, 'chain_build', side_effect=[(baseline, root), (candidate, root)]))
+            stack.enter_context(patch.object(regress, 'new_report', return_value={'games': {}}))
+            finish = stack.enter_context(patch.object(regress, 'finish', return_value=1))
+            stack.enter_context(patch.object(regress, 'say'))
+            regress.cmd_check(a)
+            gr = finish.call_args.args[0]['games']['game']
+            self.assertEqual(gr['status'], 'NEW-FAIL')
+            md = regress.report_md({'baseline': None, 'candidate': None, 'command': 'chain', 'mode': 'chain', 'status': 'NEW-FAIL', 'machine': {'chip': 'x', 'macos': 'x', 'xcode': 'x'}, 'secs': 1, 'games': {'game': {'secs': {}, **gr}}})
+            self.assertIn('`0123456789abcdef`', md); self.assertIn('extra entry points', md)
+
     def test_smoke_diff(self):
         route = {'reach': (100, 30.0)}
         shot = {'dhash': '0f0f0f0f0f0f0f0f', 'rgb16': '10' * 768}
@@ -271,6 +343,23 @@ class Regress(unittest.TestCase):
             self.assertEqual(chain.call_count, 4)
             hosts.assert_not_called(); smoke.assert_not_called()
             self.assertEqual([g['status'] for g in finish.call_args.args[0]['games'].values()], ['PASS', 'PASS'])
+
+    def test_prune_chains(self):   # the 3 used last, the recent and the stored baselines' stay; a build in use and other names are never touched
+        with tempfile.TemporaryDirectory() as td:
+            g = NS(id='game', kind='nvn', folder=Path(td)); root = regress.game_root(g) / 'chain'; root.mkdir(parents=True); old = time.time() - 30 * 86400
+            def build(i, when):
+                p = root / f'nvn-{i:012x}-in-k'; p.mkdir(); (p / 'f').write_text('x'); (root / f'{p.name}.lock').write_text('')
+                os.utime(root / f'{p.name}.lock', (when, when)); os.utime(p, (when, when)); return p
+            builds = [build(i, old - i * 3600) for i in range(8)]
+            recent = build(99, time.time() - 3600)
+            (root / 'mine').mkdir()
+            b = regress.game_root(g) / 'baselines/abc'; b.mkdir(parents=True); (b / 'chain.json').write_text(json.dumps({'key': builds[6].name}))
+            with open(root / f'{builds[7].name}.lock', 'a') as held, patch.object(regress, 'say'):
+                fcntl.flock(held, fcntl.LOCK_EX)
+                gone = regress.prune_chains(g)
+            self.assertEqual(sorted(gone), sorted(p.name for p in builds[2:6]))   # builds[0:2] and recent are the 3 used last, 6 is a baseline's, 7 is held
+            self.assertEqual(sorted(p.name for p in root.iterdir() if p.is_dir()), sorted(['mine', recent.name, builds[0].name, builds[1].name, builds[6].name, builds[7].name]))
+            self.assertFalse((root / f'{builds[2].name}.lock').exists())
 
     def test_reused_chain_rechecks_current_interface(self):
         with tempfile.TemporaryDirectory() as td:

@@ -170,6 +170,19 @@ class ShaderCache(unittest.TestCase):
         exec(compile(ast.Module(body=functions, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), self.ns)
         return self.ns['build_keys'](want, locations, pairs)
 
+    def test_package_records_are_read_from_the_file_at_their_offsets(self):
+        # record_index keeps no package in memory (GitHub issue #1036); record k is still the bytes from its marker to the next one, the last to the end
+        node = next(n for n in self.tree.body if isinstance(n, ast.FunctionDef) and n.name == 'record_index')
+        ns: dict[str, Any] = dict(os=os, re=re, mmap=__import__('mmap'))
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
+        recs = [b'BTCDBTCD' + b'\x01' * 40, b'BTCDBTCD' + b'\x02' * 7, b'BTCDBTCD' + b'\x03' * 100]
+        path = Path(self.tmp.name) / 'pkg.bin'
+        for data, want in ((b'header' + b''.join(recs), recs), (b'', [])):
+            path.write_bytes(data)
+            fd, offs = ns['record_index'](str(path))
+            try: self.assertEqual([os.pread(fd, offs[k + 1] - offs[k], offs[k]) for k in range(len(offs) - 1)], want)
+            finally: os.close(fd)
+
     def test_partial_selection_adds_known_pairs_and_full_selection_keeps_every_shader(self):
         locations = {'vertex': None, 'pixel': None, 'other': None}
         pairs = {'vertex': {'pixel', 'not-in-package'}}
@@ -362,6 +375,30 @@ class MetalPrefill(unittest.TestCase):
         old_path.parent.mkdir(parents=True); old_path.write_bytes(b'WRONG OVERRIDE LIBRARY')
         result = self.root / 'result.metallib'; self.cache.compile('mac', str(msl), str(result))
         self.assertEqual(result.read_bytes(), b'TESTED MSL')
+
+    def test_a_library_cut_from_another_source_does_not_prefill(self):   # its .metal is the plain source, and its library came from the compile unit (dmsh_side.py)
+        self.earlier_libraries(self.cache.ident['mac'].hex())
+        (self.old / f'{2:016x}_b.metallib').write_bytes(b'CUT FROM ANOTHER SOURCE'); (self.old / f'{2:016x}_bx.metallib').write_bytes(b'SIDE')
+        notes = self.cache.fill(str(self.old))
+        self.assertEqual(self.cache.stats['mac', 'filled'], 2, notes)
+
+    def test_compile_split_keeps_both_pieces(self):
+        msl = self.root / 'unit.metal'; msl.write_bytes(b'UNIT'); a, b = self.root / 'a.metallib', self.root / 'b.metallib'
+        split = lambda lib: (lib[:6], lib[6:])
+        self.cache.compile_split('mac', str(msl), str(a), str(b), split)
+        self.assertEqual((a.read_bytes(), b.read_bytes()), (b'TESTED', b' UNIT'))
+        self.assertEqual(self.cache.stats['mac', 'compiled'], 1)
+        a.unlink(); b.unlink()
+        self.cache.compile_split('mac', str(msl), str(a), str(b), lambda lib: self.fail('a second compile'))
+        self.assertEqual((a.read_bytes(), b.read_bytes()), (b'TESTED', b' UNIT'))
+        self.assertEqual(self.cache.stats['mac', 'reused'], 1)
+
+    def test_compile_split_failure_leaves_nothing(self):
+        msl = self.root / 'unit.metal'; msl.write_bytes(b'UNIT'); a, b = self.root / 'a.metallib', self.root / 'b.metallib'
+        def refuse(lib): raise ValueError('not a library')
+        with self.assertRaises(ValueError): self.cache.compile_split('mac', str(msl), str(a), str(b), refuse)
+        self.assertEqual(sorted(p.name for p in self.root.glob('a.metallib*')), [])
+        self.assertFalse(b.exists()); self.assertEqual(self.cache.stats['mac', 'compiled'], 0)
 
 
 if __name__ == '__main__':

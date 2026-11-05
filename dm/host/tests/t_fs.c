@@ -6,7 +6,8 @@
 //   (4) DM_TEST_FS_FAIL=write:N:errno makes only the Nth save write fail, with writes before and after proceeding normally; that transaction's Commit is rejected, the committed version is unchanged, and the front end receives one notification;
 //      the next transaction commits normally, and the final save = the content of the next transaction;
 //   (5) remounting discards uncommitted content;
-//   (8) a save folder that cannot clone (ENOTSUP: HFS+, exFAT) mounts read-only and tells the front end; recursive deletes unlink symlinks and never empty their targets.
+//   (8) a save folder that cannot clone (ENOTSUP: HFS+, exFAT) mounts read-only and tells the front end; recursive deletes unlink symlinks and never empty their targets;
+//   (9) a save whose names hold backslashes (a host from before backslash paths) moves to today's names at mount, a taken name kept as it is.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -72,6 +73,8 @@ int main(void) {
     mkdir(rom, 0755); mkdir(overlay, 0755); mkdir(rdata, 0755); mkdir(odata, 0755);
     snprintf(fn, sizeof fn, "%s/same", rdata); put(fn, "base"); snprintf(fn, sizeof fn, "%s/same", odata); put(fn, "overlay"); snprintf(fn, sizeof fn, "%s/base", rdata); put(fn, "only-base"); snprintf(fn, sizeof fn, "%s/over", odata); put(fn, "only-overlay");
     setenv("DM_ROMFS", rom, 1); setenv("DM_ROMFS_OVERLAY", overlay, 1); CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK, "mount RomFS with two layers (base + overlay)");
+    size_t rom_cache = 0; CHECK(h_fs_QueryRomCacheIdx(&rom_cache, 0) == RES_OK && rom_cache == 0x1000, "SDK 19: the cache size overload with a program index");
+    CHECK(h_fs_MountRomIdx("rom2", 0, NULL, 0) == RES_OK && read_fs("rom2:/data/base", got, sizeof got) && !strcmp(got, "only-base"), "SDK 19: MountRom with a program index mounts the RomFS");
     CHECK(read_fs("rom:/data/same", got, sizeof got) && !strcmp(got, "overlay"), "the overlay file wins"); CHECK(read_fs("rom:/data/base", got, sizeof got) && !strcmp(got, "only-base"), "falls back to the base when the overlay lacks the file");
     uint64_t rh; CHECK(h_fs_OpenFile(&rh, "rom:/data/same", MODE_WRITE) == RES_FAIL, "the two-layer mount refuses writes");
     CHECK(read_fs("rom:\\data\\over", got, sizeof got) && !strcmp(got, "only-overlay") && read_fs("rom:\\data\\base", got, sizeof got) && !strcmp(got, "only-base"), "backslashes separate as slashes do, in both layers");
@@ -284,6 +287,45 @@ int main(void) {
         g_sdk_cache_mounted = 1; g_sdk_no_is_mounted = 1; h_fs_Unmount("cache");
         CHECK(g_sdk_unmounts == 1 && g_sdk_cache_mounted, "an SDK without an IsMounted symbol: no blind Unmount");
         t_guest_sym = NULL;
+    }
+
+    printf("⑨ saves named by a host before backslash paths\n");
+    {   char old[1100], q[1300], r[1300]; struct stat ost; uint64_t h = 0; DirectoryEntry de[32]; int64_t cnt = 0;
+        snprintf(old, sizeof old, "%s/oldsave", root); mkdir(old, 0755);
+        setenv("DM_SAVE", old, 1);
+#define OLD(rel) (snprintf(q, sizeof q, "%s/%s", old, rel), q)
+        put(OLD("\\savedata0.bin"), "one");                               // save:\savedata0.bin
+        put(OLD("\\sub\\deep.bin"), "deep");                              // save:\sub\deep.bin: one file in the root, its folder never made
+        mkdir(OLD("\\dir"), 0755); put(OLD("\\dir/in"), "in");            // save:\dir then save:\dir/in: a folder, as the old host made it
+        put(OLD("\\dir\\f"), "f");                                        // save:\dir\f: beside that folder, not in it
+        mkdir(OLD("plain"), 0755); put(OLD("plain/\\x"), "x");            // deeper in an ordinary folder
+        put(OLD("both.bin"), "new"); put(OLD("\\both.bin"), "old");       // the game wrote a new save under today's host: that one stays what it reads
+        mkdir(OLD("m"), 0755); put(OLD("m/b"), "mb"); put(OLD("m/same"), "newer");
+        mkdir(OLD("\\m"), 0755); put(OLD("\\m/a"), "ma"); put(OLD("\\m/same"), "older");   // a folder with both names: merged, a taken name kept
+        put(OLD("foo"), "small"); put(OLD("\\Foo"), "big");               // differs only in case, which Horizon's paths tell apart
+        put(OLD("\\..\\up"), "up");                                       // would leave the save
+        put(OLD("keep"), "kept");
+        g_nmnt = 0;
+        CHECK(h_fs_MountSave("save", NULL) == RES_OK && !g_mnt[0].ro, "the save mounts");
+        CHECK(read_fs("save:\\savedata0.bin", got, sizeof got) && !strcmp(got, "one") && read_fs("save:/savedata0.bin", got, sizeof got) && !strcmp(got, "one"), "save:\\savedata0.bin finds the old file");
+        CHECK(same(OLD("savedata0.bin"), "one") && lstat(OLD("\\savedata0.bin"), &ost), "the committed save has the new name and not the old");
+        CHECK(read_fs("save:\\sub\\deep.bin", got, sizeof got) && !strcmp(got, "deep"), "a file with its folder in its name gets the folder");
+        CHECK(read_fs("save:/dir/in", got, sizeof got) && !strcmp(got, "in") && read_fs("save:/dir/f", got, sizeof got) && !strcmp(got, "f") && lstat(OLD("\\dir"), &ost), "a folder and a file that named it become one folder");
+        CHECK(read_fs("save:/plain/x", got, sizeof got) && !strcmp(got, "x"), "a name deeper in the save");
+        CHECK(read_fs("save:/both.bin", got, sizeof got) && !strcmp(got, "new") && same(OLD("\\both.bin"), "old"), "a taken name is not overwritten, and the old file stays");
+        CHECK(read_fs("save:/m/a", got, sizeof got) && !strcmp(got, "ma") && read_fs("save:/m/b", got, sizeof got) && !strcmp(got, "mb") && read_fs("save:/m/same", got, sizeof got) && !strcmp(got, "newer") && same(OLD("\\m/same"), "older"), "folders merge, and a taken name in them stays too");
+        CHECK(read_fs("save:/Foo", got, sizeof got) && !strcmp(got, "big") && read_fs("save:/foo", got, sizeof got) && !strcmp(got, "small"), "names that differ in case stay two files");
+        snprintf(r, sizeof r, "%s/up", root); CHECK(same(OLD("\\..\\up"), "up") && lstat(r, &ost), "a name with .. stays where it is");
+        CHECK(read_fs("save:/keep", got, sizeof got) && !strcmp(got, "kept"), "an ordinary name is untouched");
+        CHECK(h_fs_OpenDirectory(&h, "save:/", DIRMODE_FILE) == RES_OK && h_fs_ReadDirectory(&cnt, de, h, 32) == RES_OK, "the root lists");
+        int foo = 0, Foo = 0; for (int64_t i = 0; i < cnt; i++) { foo += !strcmp(de[i].name, "foo"); Foo += !strcmp(de[i].name, "Foo"); }
+        CHECK(foo == 1 && Foo == 1, "the listing shows foo and Foo");
+        CHECK(h_fs_DeleteFile("save:/savedata0.bin") == RES_OK && h_fs_Commit("save") == RES_OK, "the game erases the moved file and commits");
+        g_nmnt = 0;
+        CHECK(h_fs_MountSave("save", NULL) == RES_OK && h_fs_OpenFile(&h, "save:/savedata0.bin", MODE_READ) != RES_OK, "an erased file stays erased at the next mount");
+        CHECK(read_fs("save:/both.bin", got, sizeof got) && !strcmp(got, "new") && read_fs("save:/m/a", got, sizeof got) && !strcmp(got, "ma"), "a second mount changes nothing else");
+#undef OLD
+        g_nmnt = 0;
     }
 
     char cmd[1200]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", root); system(cmd);

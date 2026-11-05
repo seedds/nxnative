@@ -1,4 +1,4 @@
-// Texture copies drawn as a render pass: colour, depth and stencil (nvn_mtl.m copy_t2t_draw)
+// Texture copies drawn as a render pass: colour (float and integer), depth and stencil (nvn_mtl.m copy_t2t_draw)
 #include <metal_stdlib>
 using namespace metal;
 struct V { float4 p [[position]]; };
@@ -12,3 +12,8 @@ fragment D fsd(V in [[stage_in]], depth2d<float> t [[texture(0)]], sampler s [[s
 struct DS { float d [[depth(any)]]; uint s [[stencil]]; };
 fragment DS fsds(V in [[stage_in]], depth2d<float> t [[texture(0)]], texture2d<uint> ts [[texture(1)]], constant float4 *p [[buffer(0)]]) {
   float2 st = p[0].xy + (in.p.xy - p[1].xy) * p[0].zw; DS o; o.d = t.read(uint2(st)); o.s = ts.read(uint2(st)).r; return o; }
+// integer formats (resolution upscaling): the nearest source texel, no filtering
+fragment uint4 fsu(V in [[stage_in]], texture2d<uint> t [[texture(0)]], constant float4 *p [[buffer(0)]]) {
+  float2 st = p[0].xy + (in.p.xy - p[1].xy) * p[0].zw; return t.read(uint2(st)); }
+fragment int4 fsi(V in [[stage_in]], texture2d<int> t [[texture(0)]], constant float4 *p [[buffer(0)]]) {
+  float2 st = p[0].xy + (in.p.xy - p[1].xy) * p[0].zw; return t.read(uint2(st)); }

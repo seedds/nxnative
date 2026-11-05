@@ -4684,7 +4684,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     // faster than through simdgroup_matrix; other GPUs, and DM_NVN_HMMA_TENSOR=0, keep <key>_b. A tensor library that does not load falls back to it
     if ([j[@"hmma_tensor"] isKindOfClass:NSString.class] && hmma_tensor_on()) {
         lib = lib_from_file([NSString stringWithFormat:@"%@/%@.metallib", g_msl_dir, j[@"hmma_tensor"]], &e);
-        if (!lib) MLOG("[RED] shader %s: tensor library %s did not load (%s), simdgroup_matrix kept", pc.UTF8String, [j[@"hmma_tensor"] UTF8String], e ? e.localizedDescription.UTF8String : "?");
+        if (!lib) MLOG("[RED] shader %s: tensor library %s did not load (%s), simdgroup_matrix kept", pc.UTF8String, [j[@"hmma_tensor"] UTF8String], e ? e.localizedDescription.UTF8String : "no error");
         e = nil;
     }
     if (!lib) lib = lib_from_file(lp, &e);

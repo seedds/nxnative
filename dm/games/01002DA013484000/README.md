@@ -35,6 +35,7 @@ The work folder is `<NSP folder>/01002DA013484000-work`, with `boot.sh`, `ctl.sh
 
 General host changes first needed here; each applies to every game:
 
+- **The shader libraries as one file, read in place** (`shader_lib.py`, `msl_image.h`): [Shader libraries take a file per shader variant](../../../docs/reference/packing.md#shader-libraries-take-a-file-per-shader-variant). Measured here: the route from `save_ref` to the file list, 6,600 frames from the folder and from the image, with no `[RED]` line in either and pictures alike.
 - **Logic operations on normalized targets** (`dmsh_logic.py` `dm_logic_norm`, `nvn_mtl.m` `lop_key`, `unorm_chan_masks`): [Logic operations through a library of its own](../../../docs/reference/rendering.md#logic-operations-through-a-library-of-its-own).
 - **Plain gzip around a shader archive** (`shader_split.py` `ungzip`): [Gzip-wrapped shader archives](../../../docs/reference/shaders.md#gzip-wrapped-shader-archives).
 - **`.vert` and `.frag` files count as run-time GLSL only as text** (`profile_guess.py` `glsl_text`): [Encrypted `.vert` and `.frag` files](../../../docs/reference/shaders.md#encrypted-vert-and-frag-files-are-no-run-time-glsl).

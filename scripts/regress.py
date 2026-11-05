@@ -88,6 +88,8 @@ bench = load_module('bench', REPO / 'scripts/bench.py')
 shader_regressions = load_module('shader_regressions', REPO / 'dm/gfx/tools/shader_regressions.py')
 usage = load_module('usage', REPO / 'dm/tools/usage.py')   # usage manifests and change impact (regress.py usage / impact)
 tree_tar = load_module('tree_tar', REPO / 'dm/tools/tree_tar.py')   # the player's build keeps the compile cache this shares as one file
+shader_lib = load_module('shader_lib', REPO / 'dm/tools/shader_lib.py')   # a chain build's libraries as one file, read in place
+rfs = shader_lib.romfs
 # Where they are depends on the machine (a drive with room for the trees and the games' NSP folders): set with --root / --games-dir or REGRESS_ROOT / REGRESS_GAMES, checked in main
 ROOT = Path(os.environ.get('REGRESS_ROOT', ''))
 GAMES = Path(os.environ.get('REGRESS_GAMES', ''))
@@ -169,7 +171,7 @@ def git(*a, cwd=REPO):
 
 def sha256_file(p, h=None):
     h = h or hashlib.sha256()
-    with open(p, 'rb') as f:
+    with rfs.open(p, 'rb') as f:
         while chunk := f.read(1 << 20): h.update(chunk)
     return h
 
@@ -412,18 +414,28 @@ def prune_chains(g):
     return gone
 
 
+def chain_lib(out):   # a chain build's library, to read: its folder or its one file
+    return shader_lib.view(next(p for p in sorted(out.glob('b-*')) if not p.name.endswith('.part')))
+
+
+def pack_chain(tree, lib):
+    """The chain build's libraries as one file, once this run has read what it needs from them. A revision from before shader_lib.py has a host that reads only the folder (its chain key differs:
+    the key covers c1_guard.py and cb_extent.py). A host of another session running from the folder goes on from the image"""
+    if (tree.path / 'dm/tools/shader_lib.py').is_file(): shader_lib.pack(lib, say)
+
+
 def chain_build_locked(tree, g, a, v, inp, key, out):
     jobs = a.jobs
     mf = out / 'manifest.json'
     if mf.is_file():
         m = json.loads(mf.read_text()); m['secs'] = 0
-        lib = out / f'b-{v}'
+        lib = shader_lib.view(out / f'b-{v}')
         if g.kind == 'nvn' and m.get('hashes') != NVN_HASHES and (lib / '_b_build.json').is_file():   # made by an older nvn_manifest: its hashes would not compare with this one's
             say(f'  {g.id}: hashing the outputs of chain {v} again (manifest hashes {m.get("hashes", 1)} → {NVN_HASHES})')
             m['shaders'] = nvn_manifest(lib, jobs); m['hashes'] = NVN_HASHES
             mf.write_text(json.dumps({k: x for k, x in m.items() if k != 'secs'}, indent=0))
         # The archive planner and depth mode can change without changing the translation chain.
-        if g.kind == 'nvn': m['interface'] = interface_check(tree, g, out)
+        if g.kind == 'nvn': m['interface'] = interface_check(tree, g, out); pack_chain(tree, out / f'b-{v}')
         return m, out
     out.mkdir(parents=True, exist_ok=True); tmp = game_root(g) / 'tmp'; tmp.mkdir(exist_ok=True)
     env = dotnet_env(g.env(tree)); env.update(WORK=str(tmp), TMPDIR=str(tmp) + '/', J=str(jobs))
@@ -464,6 +476,7 @@ def chain_build_locked(tree, g, a, v, inp, key, out):
     if g.kind == 'vk': m['build_failed'] = rc != 0
     if g.kind == 'nvn': m['interface'] = interface_check(tree, g, out); m['hashes'] = NVN_HASHES
     mf.write_text(json.dumps(m, indent=0))
+    if g.kind == 'nvn': pack_chain(tree, out / f'b-{v}')
     m['secs'] = m['build_secs']
     return m, out
 
@@ -473,7 +486,7 @@ NVN_HASHES = 3   # how nvn_manifest hashes; a reused manifest of another number 
 
 def refl_canon(p):
     """A reflection's JSON without the chain stamps (chain, chain_metal, chain_compiler), which every chain change rewrites; None when it does not read"""
-    try: j = json.loads(Path(p).read_bytes())
+    try: j = json.loads(rfs.Path(p).read_bytes())
     except (OSError, ValueError): return None
     for k in ('chain', 'chain_metal', 'chain_compiler'): j.pop(k, None)
     return json.dumps(j, sort_keys=True).encode()
@@ -486,7 +499,7 @@ def refl_hash(p):
 
 def refl_losses(p):
     """{deleted: {type: the accesses the translator deleted}, lost: {name: 1 for each entry point the library built without}}, each only when there are some (shader_regressions.losses)"""
-    try: deleted, lost = shader_regressions.losses(json.loads(Path(p).read_bytes()))
+    try: deleted, lost = shader_regressions.losses(json.loads(rfs.Path(p).read_bytes()))
     except (OSError, ValueError): return {}
     return {**({'deleted': dict(deleted)} if deleted else {}), **({'lost': dict(lost)} if lost else {})}
 
@@ -494,7 +507,7 @@ def refl_losses(p):
 def nvn_manifest(lib, jobs):
     """{key: {st, err, msl, refl, var}} from dmsh_build.py's report and outputs"""
     files = collections.defaultdict(list)
-    for n in os.listdir(lib):
+    for n in rfs.os.listdir(lib):
         m = re.match(r'([0-9a-f]{16})_b', n)
         if m: files[m.group(1)].append(n)
     rows = json.loads((lib / '_b_build.json').read_text())
@@ -556,7 +569,7 @@ def interface_check(tree, g, out):
     """The shader pairs of shader_pairs.tsv and pso_pairs.tsv whose pixel shader reads a [[user(locnN)]] input that the vertex shader does not write, or writes with another type,
     among the pipeline bases pso_offline.py would put into the archive (the tree's pso_offline.plan, run on those pairs only: it reads every library): metal-tt refuses such a
     pipeline, and one refused pipeline fails the whole archive (GitHub issue #283). The entry points are pso_offline's: the reflection's entry (entry_z for a near = 0 game)"""
-    lib = next(out.glob('b-*')); chain = lib.name[2:]
+    lib = chain_lib(out); chain = shader_lib.name_of(lib)[2:]
     prof = g.profile_dir(tree)
     pairs = [prof / 'shader_pairs.tsv', prof / 'pso_pairs.tsv' if (prof / 'pso_pairs.tsv').is_file() else g.build / 'shader/pso_pairs.tsv']
     po = tree.path / 'dm/gfx/tools/pso_offline.py'
@@ -1501,7 +1514,7 @@ def cmd_usage(a):
         rows = collections.Counter()
         if g.kind == 'nvn':
             ff = art['lib'] / 'features.json'
-            if not ff.is_file(): say(f'  {g.id}: shader features of chain {art["manifest"]["chain"]}'); ff.write_text(json.dumps(usage.shader_features(next(art['lib'].glob('b-*')))))
+            if not ff.is_file(): say(f'  {g.id}: shader features of chain {art["manifest"]["chain"]}'); ff.write_text(json.dumps(usage.shader_features(chain_lib(art['lib']))))
             for k, n in json.loads(ff.read_text()).items(): rows['shader', k] = n
         for ln in (g.profile_dir(tree) / 'game.tsv').read_text().splitlines():
             if ln and not ln.startswith('#') and '\t' in ln: rows['key', ln.split('\t')[0]] = 1

@@ -31,6 +31,9 @@
 import argparse, filecmp, hashlib, json, os, shutil, struct, subprocess, sys, time
 from pathlib import Path
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
+import romfs, shader_lib   # the libraries may be one file (shader_lib.py), read in place; metal-tt alone needs files of its own (real_libraries)
+
 LAYER = b'render_target_array_index'
 BATCH = 1000   # bases per metal-tt run: Odyssey's largest compiler lifetime footprint at this size was 2.065 GiB on an 8 GB M2
 COLOUR = ('pixel_format', 'write_mask', 'blending_state', 'alpha_blend_operation', 'rgb_blend_operation', 'destination_alpha_blend_factor', 'destination_rgb_blend_factor',
@@ -65,7 +68,7 @@ def stamp(chain, zero, text):
 def functions(path):
     """{entry name: declares function constants} of a .metallib, from its header: the function list (NAME tags) and each function's public metadata (a CNST tag lists its constants).
     Raises ValueError on a file it cannot read"""
-    with open(path, 'rb') as f: b = f.read(1 << 20)
+    with romfs.open(path, 'rb') as f: b = f.read(1 << 20)
     if b[:4] != b'MTLB' or len(b) < 0x58: raise ValueError(f'{path}: not a Metal library')
     fo, _, po, ps = struct.unpack_from('<QQQQ', b, 0x18)
     def tags(p, end):
@@ -89,7 +92,7 @@ def functions(path):
 
 def plan(lib_dir, chain, pairs, zero):
     """The bases the archive holds: [(vertex library, vertex entry, pixel library, pixel entry)], the pairs left to the device (function constants), and counts of the pairs left out"""
-    lib_dir = Path(lib_dir); js, fns, layer = {}, {}, {}
+    lib_dir = romfs.Path(lib_dir); js, fns, layer = {}, {}, {}
     def refl(key):
         if key not in js:
             try: js[key] = json.loads((lib_dir / f'{key}_b.json').read_bytes())
@@ -152,7 +155,7 @@ def library_digest(lib_dir, bases):
     for name in sorted({lib for vl, _, fl, _ in bases for lib in (vl, fl)}):
         h.update(name.encode() + b'\0')
         lib = hashlib.sha256()
-        with open(Path(lib_dir) / f'{name}.metallib', 'rb') as f:
+        with romfs.open(os.path.join(lib_dir, f'{name}.metallib'), 'rb') as f:
             while chunk := f.read(1 << 20): lib.update(chunk)
         h.update(lib.digest())
     return h.hexdigest()
@@ -218,6 +221,19 @@ def compile_archive(js, part, work, arch, platform, osmin, count):
         sys.exit(f'[RED] pso_offline: metal-tt failed for {arch} (exit {r.returncode}){full}: {log_path.read_text()[-2000:]}')
 
 
+def real_libraries(lib_dir, bases, work):
+    """Where metal-tt finds the bases' libraries: it takes file paths, so the libraries of one file get a temporary folder of what this compile reads, which clear_real_libraries removes after it.
+    An archive whose key still holds compiles nothing and gets none"""
+    if os.path.isdir(lib_dir): return lib_dir
+    real = Path(work) / 'libraries'; shutil.rmtree(real, ignore_errors=True); real.mkdir(parents=True)
+    for name in sorted({lib for vl, _, fl, _ in bases for lib in (vl, fl)}):
+        with romfs.open(os.path.join(lib_dir, f'{name}.metallib'), 'rb') as f, open(real / f'{name}.metallib', 'wb') as o: shutil.copyfileobj(f, o)
+    return real
+
+
+def clear_real_libraries(work): shutil.rmtree(Path(work) / 'libraries', ignore_errors=True)
+
+
 def compile_batch(lib_dir, bases, work, arch, platform, osmin, toolchain):
     """Cache one bounded group by its actual libraries and descriptors; also used for an isolated pilot."""
     work.mkdir(parents=True, exist_ok=True)
@@ -229,7 +245,9 @@ def compile_batch(lib_dir, bases, work, arch, platform, osmin, toolchain):
     if dst.is_file() and dst.stat().st_size and kf.is_file() and kf.read_text().strip() == key: return dst, True
     kf.unlink(missing_ok=True)
     part = work / f'{arch}.mtl4a.partial'
+    write_script(js, script(real_libraries(lib_dir, bases, work), bases))
     compile_archive(js, part, work, arch, platform, osmin, len(bases))
+    clear_real_libraries(work)
     os.replace(part, dst); kf.write_text(key + '\n')
     return dst, False
 
@@ -286,8 +304,8 @@ def main(argv=None):
         if a.depth not in ('gl', 'zero'): sys.exit(f'[RED] pso_offline: {g.id}: depth_mode must be gl or zero: {a.depth}')
     if not a.pairs: sys.exit('[RED] pso_offline: no pair lists (--pairs or --game)')
     a.depth = a.depth or 'gl'
-    lib_dir, out, work = Path(a.msl), Path(a.out), Path(a.work)
-    chain = lib_dir.name[2:] if lib_dir.name.startswith('b-') else sys.exit(f'[RED] pso_offline: {lib_dir} is not a b-<chain version> folder')
+    lib_dir, out, work = shader_lib.view(a.msl), Path(a.out), Path(a.work)
+    chain = shader_lib.name_of(lib_dir)[2:] if shader_lib.name_of(lib_dir).startswith('b-') else sys.exit(f'[RED] pso_offline: {lib_dir} is not a b-<chain version> folder')
     archs = sorted({arch_name(x) for x in a.gpu.split(',') if x.strip()})
     if not archs: sys.exit('[RED] pso_offline: no GPU architecture (--gpu)')
     text = pair_text(a.pairs)
@@ -320,7 +338,9 @@ def main(argv=None):
         if a.batch_size and len(bases) > a.batch_size:
             compile_batches(lib_dir, bases, work, part, arch, a.platform, osmin, tv, a.batch_size)
         else:
+            write_script(js, script(real_libraries(lib_dir, bases, work), bases))
             compile_archive(js, part, work, arch, a.platform, osmin, len(bases))
+            clear_real_libraries(work)
         os.replace(part, dst); kf.write_text(key + '\n')
         print(f'pso_offline: {arch}: {dst.stat().st_size / 2**20:.0f} MB in {time.time() - t1:.0f} s')
     for f in out.glob('*.mtl4a'):   # architectures no longer asked for

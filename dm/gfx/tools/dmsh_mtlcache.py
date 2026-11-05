@@ -8,7 +8,9 @@
 # Filling from earlier builds: every imported library must record the current compiler identity and flags in its reflection. Legacy libraries without that identity are not imported.
 # A fresh compile of two shaders per stage also checks their bytes. Each folder is read once per compiler identity (filled.json remembers its number of libraries).
 # Not part of the chain version (dmsh_chain.py): the cache never changes an output, it only skips recompiling one. Change FORMAT when what it stores changes.
-import os, re, json, shutil, ctypes, hashlib, threading, subprocess, collections
+import os, re, sys, json, shutil, ctypes, hashlib, threading, subprocess, collections
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
+import romfs, shader_lib   # the libraries of an earlier build may be one file (shader_lib.py), read in place
 
 FORMAT = b'dmsh_mtlcache 2'   # earlier prefill could misclassify an unsampled library from another compiler
 OUTPUT = re.compile(r'[0-9a-f]{16}_b\.metal')   # a shader's MSL in dmsh_build.py's outputs: <key>_b.metal
@@ -18,6 +20,13 @@ _clonefile = getattr(ctypes.CDLL(None, use_errno=True), 'clonefile', None)   # A
 def clone(src, dst):
     tmp = f'{dst}.tmp-{os.getpid()}-{threading.get_ident()}'
     if _clonefile is None or _clonefile(os.fsencode(src), os.fsencode(tmp), 0) != 0: shutil.copyfile(src, tmp)
+    os.replace(tmp, dst)
+
+
+def copy_in(src, dst):   # clone, from a file that may lie inside a library's image
+    if os.path.isfile(src): return clone(src, dst)
+    tmp = f'{dst}.tmp-{os.getpid()}-{threading.get_ident()}'
+    with romfs.open(src, 'rb') as f, open(tmp, 'wb') as o: shutil.copyfileobj(f, o)
     os.replace(tmp, dst)
 
 
@@ -80,31 +89,39 @@ class Cache:
         """None if folder d was built with the current convention and compiler, else why not"""
         rec, picks = self.targets[target][1], collections.defaultdict(list)
         for stem in stems:
-            try: j = json.load(open(os.path.join(d, stem + '.json')))
+            try: j = json.loads(romfs.open(os.path.join(d, stem + '.json'), 'rb').read())
             except (OSError, ValueError): return f'no readable {stem}.json'
             if j.get('chain_metal') != rec: return f'built with "{j.get("chain_metal")}"'
             if j.get('chain_compiler') != self.ident[target].hex(): return f'{stem} has a different or unrecorded Metal compiler'
             if len(picks[j.get('stage')]) < 2: picks[j.get('stage')].append(stem)
         for stem in (s for v in picks.values() for s in v):
             tmp = os.path.join(self.work, f'mtlcache-check-{target}.metallib')
-            try: self._compile(target, os.path.join(mac_dir, stem + '.metal'), tmp)
+            msl = os.path.join(mac_dir, stem + '.metal')
+            inside = mac_dir.endswith('.img')   # the compiler is then given a file of its own, which goes with the check
+            if inside:
+                copy_in(msl, os.path.join(self.work, f'mtlcache-check-{stem}.metal')); msl = os.path.join(self.work, f'mtlcache-check-{stem}.metal')
+            try: self._compile(target, msl, tmp)
             except subprocess.CalledProcessError: return f'{stem}.metal does not compile now'
-            same = open(tmp, 'rb').read() == open(os.path.join(d, stem + '.metallib'), 'rb').read(); os.unlink(tmp)
+            finally:
+                if inside: os.unlink(msl)
+            same = open(tmp, 'rb').read() == romfs.open(os.path.join(d, stem + '.metallib'), 'rb').read(); os.unlink(tmp)
             if not same: return f'a fresh compile of {stem}.metal differs from its library'
         return None
 
     def fill(self, mac_dir, ios_dir=None, targets=None):
         """Takes the libraries of an earlier build: mac_dir = its Mac b-<chain>/ folder, ios_dir = the iOS folder of the same chain (or None). Returns the lines to print"""
+        mac_dir, ios_dir = str(shader_lib.view(mac_dir)), ios_dir and str(shader_lib.view(ios_dir))
+        if not romfs.os.path.isdir(mac_dir): return []   # a stopped pack's .part beside the libraries
         stamp_file = os.path.join(self.root, 'filled.json')
         try: stamps = json.load(open(stamp_file))
         except (OSError, ValueError): stamps = {}
-        names = set(os.listdir(mac_dir))   # a library with a side library was cut from another source than its .metal (compile_split, dmsh_side.py), and a compile of that source is never asked for
+        names = set(romfs.os.listdir(mac_dir))   # a library with a side library was cut from another source than its .metal (compile_split, dmsh_side.py), and a compile of that source is never asked for
         stems = sorted(n[:-6] for n in names if OUTPUT.fullmatch(n) and n[:-6] + 'x.metallib' not in names)   # not an AppleDouble ._<name> (exFAT / FAT drives)
         todo, notes = {}, []
         for target, d in (('mac', mac_dir), ('ios', ios_dir)):
             if targets is not None and target not in targets: continue   # checking an earlier build compiles samples too
-            if target not in self.targets or not d or not os.path.isdir(d): continue
-            libs = names if d == mac_dir else set(os.listdir(d))
+            if target not in self.targets or not d or not romfs.os.path.isdir(d): continue
+            libs = names if d == mac_dir else set(romfs.os.listdir(d))
             have = [s for s in stems if s + '.metallib' in libs]; key = self.ident[target].hex() + ':' + os.path.realpath(d)
             if not have or stamps.get(key) == len(have): continue
             why = self._check(target, d, have, mac_dir)
@@ -115,11 +132,11 @@ class Cache:
         for stem in stems:
             ts = [t for t, (d, have) in todo.items() if stem in have]
             if not ts: continue
-            src = open(os.path.join(mac_dir, stem + '.metal'), 'rb').read()
+            src = romfs.open(os.path.join(mac_dir, stem + '.metal'), 'rb').read()
             for t in ts:
                 p = self.path(t, src)
                 if os.path.exists(p): continue
-                os.makedirs(os.path.dirname(p), exist_ok=True); clone(os.path.join(todo[t][0], stem + '.metallib'), p); added[t] += 1
+                os.makedirs(os.path.dirname(p), exist_ok=True); copy_in(os.path.join(todo[t][0], stem + '.metallib'), p); added[t] += 1
         for t, (d, have) in todo.items():
             self.count((t, 'filled'), added[t]); notes.append(f'Metal cache: {added[t]} {t} libraries added from {d} ({len(have)} there)')
         os.makedirs(self.root, exist_ok=True)

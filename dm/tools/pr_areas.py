@@ -22,7 +22,8 @@ AREAS = [   # label, color, description, paths (regular expression, matched from
 ]
 CHAIN = ('shader chain', 'b60205', "The shader translation chain (DMSH_CHAIN): a change rebuilds every game's shaders")   # its files: chain_paths()
 GAME_COLOR, NEW_GAME = 'f9d0c4', ('new game', 'd93f0b', 'A game main has no profile for yet: a pull request adding one, or an issue about one')
-KINDS = {'bug': ('d73a4a', "Something isn't working"), 'enhancement': ('a2eeef', 'New feature or request')}   # issue_areas.py only, with NEW_GAME
+KINDS = {'bug': ('d73a4a', "Something isn't working"), 'enhancement': ('a2eeef', 'New feature or request'),
+         'test request': ('5319e7', 'A request to play a change on one of the lowest supported devices (docs/charter.md)')}   # issue_areas.py only, with NEW_GAME
 
 
 def automatic(name):   # a label this file or issue_areas.py adds, so it says nothing about whether someone has read the issue (triage_report.py)

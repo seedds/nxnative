@@ -31,7 +31,7 @@ body:
     id: commit
     attributes:
       label: nxnative commit
-      description: "`git rev-parse --short HEAD` in the checkout you built from (or the date you downloaded it)."
+      description: "`git rev-parse --short HEAD` in the checkout you built from (or the date you downloaded it). Try the latest `main` first (`git fetch origin`, rebuild from `origin/main`): the problem may be fixed already."
       placeholder: 4639c511
     validations:
       required: true

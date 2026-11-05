@@ -29,7 +29,7 @@ WORDS = {   # area → words in the title (regular expression, any case)
 }
 AREA_LABELS = {a[0]: a[1:3] for a in pr_areas.AREAS} | {pr_areas.CHAIN[0]: pr_areas.CHAIN[1:]}
 KIND_LABELS = pr_areas.KINDS | {pr_areas.NEW_GAME[0]: pr_areas.NEW_GAME[1:]}
-FORMS = {'What happened': 'bug', 'What is missing': 'enhancement', 'Survey and what happened': 'new game'}   # a heading only that form has (.github/ISSUE_TEMPLATE) → its kind
+FORMS = {'What happened': 'bug', 'What is missing': 'enhancement', 'Survey and what happened': 'new game', 'What to test': 'test request'}   # a heading only that form has (.github/ISSUE_TEMPLATE) → its kind
 TITLE_KINDS = {   # kind → how a title without a form starts (regular expression, any case)
     'enhancement': r'^((scope )?proposal|feature request|suggestion|design|roadmap)\s*:|^feat\(',
     'new game': r'^(request:|\[patch\]|\[bring-?up\])',

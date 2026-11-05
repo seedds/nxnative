@@ -914,6 +914,10 @@ HLE_FORCE("_ZN2nn3hid23GetActualVibrationValueEPNS0_14VibrationValueERKNS0_21Vib
     uint32_t targets = h ? vib_targets(*h) : 0;
     *v = targets ? dm_haptics_actual(__builtin_ctz(targets), *h >> 16 & 1) : (dm_vibration){0, 160, 0, 320};
 }
+// Forced vibration sessions (BeginPermitVibrationSession / EndPermitVibrationSession on IHidServer, so rumble continues while the controller applet is open; Super Mario Party calls
+// EndForcedVibrationSession at boot, main+0x5d5038, and the SDK's own call reads the null hid service proxy at sdk+0x3526bc): the host shows no applet UI, so both are no-ops
+HLE_FORCE("_ZN2nn3hid27BeginForcedVibrationSessionEv", "forced vibration session: no-op on the host", void, h_hid_BeginForcedVib, void) {}
+HLE_FORCE("_ZN2nn3hid25EndForcedVibrationSessionEv", "forced vibration session: no-op on the host", void, h_hid_EndForcedVib, void) {}
 
 // Poké Ball Plus (Palma, Pokémon Sword / Shield, SDK 7.3.2): the host has none. The SDK's own calls reach the hid service (SetPalmaBoostMode, the first, at start-up: a null read in
 // hid::detail::SetPalmaBoostMode, sdk+0x238eb0). No npad reports the Palma style, so the game never gets a connection handle; every call on a handle fails as for a handle that is not

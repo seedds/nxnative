@@ -1,0 +1,40 @@
+# Game profile of Super Mario Party (Switch, update 1.1.0). Plays on the Mac
+# Format: see dm/games/README.md
+# NintendoWare Bezel Engine 1.21.1, SDK 9.4.0: nearly all of RomFS is in Bezel Engine archives (.bea, zstd entries);
+# the shaders are BNSH in their .bfsha / .bnsh entries (the engine's own in System.nxonnx32.bea). The boards, modes and minigames are 20 NROs (nro/NX_Master, one NRR)
+
+# ---- Identity ----
+title_id	010036B0034E4000
+program_id	010036B0034E4000
+
+# ---- App ----
+name	Super Mario Party
+ipa	SuperMarioParty.ipa
+app_category	public.app-category.board-games
+
+# ---- Versions ----
+build	v131072	1.1.0	main=fb321c86b35aa9755d6e42baa5e5d540	subsdk0=f92af17ed915be68a70ed0b46ed256cd	subsdk1=8bdabfabc6964cd9e55b7079659f51f1	sdk=014256a5d58180219805a7d05fba02e4
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = GLSLC, imported and never called; subsdk1 = NintendoSDK_movie)
+modules	main subsdk0 subsdk1 sdk
+romfs_marker	Archive/bdr001.nxonnx32.bea
+zip_store	.bea:.bfstm:.metallib
+
+# ---- Memory ----
+# The NPDM declares 0 MB of system resource, so IsVirtualAddressMemoryEnabled is false and nninitStartup sets a heap of pool − used memory: a 3.14 GB heap in the 4 GB layout
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/Archive/=archive /stream/=stream /nro/=nro /.nrr/=nrr
+shader_note	Super Mario Party shaders
+
+# ---- Mode ----
+# the NVN depth mode the game sets (nvnDeviceSetDepthMode near = 0): the prebuilt pipeline bases take the main0_z vertex entries
+depth_mode	zero

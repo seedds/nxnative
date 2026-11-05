@@ -347,7 +347,7 @@ Under a game, "60 fps with 1.2.0" means it runs at 60 fps (30 on the console) wi
 <tr>
 <td align="center" valign="top" width="33%"><img src="docs/images/star-fox.jpg" width="256" alt="Star Fox"><br><small><b><a href="dm/games/0400E88025B1A000/README.md">Star Fox</a></b><br>Switch 2, Mac only, from a NUP</small></td>
 <td align="center" valign="top" width="33%"><img src="docs/images/kirby-air-riders.jpg" width="256" alt="Kirby Air Riders"><br><small><b><a href="dm/games/040077201BE50000/README.md">Kirby Air Riders</a></b><br>Switch 2, Mac only, from a NUP</small></td>
-<td></td>
+<td align="center" valign="top" width="33%"><img src="docs/images/super-mario-party.jpg" width="256" alt="Super Mario Party"><br><small><b><a href="dm/games/010036B0034E4000/README.md">Super Mario Party</a></b></small></td>
 </tr>
 </table>
 <!-- end of gallery -->

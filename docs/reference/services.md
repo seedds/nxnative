@@ -378,6 +378,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `hle_hid.c` answers it. On Horizon a device is mounted when the npad's connected controller has the handle's style and an actuator on that side; the host reports it mounted when the channel has an output, as `GetVibrationDeviceInfo` reports the device.
 - **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) 1.4.1, entering a Sand Kingdom pipe (`main+0x5d3150` asks for each handle of a controller whether any is mounted; GitHub issue #715). No other local game imports it. [Kirby Air Riders](../../dm/games/040077201BE50000/README.md) calls the Switch 2's form, `IsOunceVibrationDeviceMounted`, for its handles soon after boot, answered the same way. It crashed a run with a window, and no headless run; why only that one was not checked.
 
+### Forced vibration sessions
+
+- **Symptom:** at boot, `[RED] sf: the game connects to service hid itself, which the host does not serve`, then `CRASH sig=11 addr=0` in `hid::detail::EndPermitVibrationSession` (`sdk+0x3526bc` in SDK 9.4.0), under `hid::EndForcedVibrationSession` (`sdk+0x35db20`, called from `main+0x5d5038`).
+- **Cause:** `nn::hid::BeginForcedVibrationSession` and `EndForcedVibrationSession` (`BeginPermitVibrationSession` / `EndPermitVibrationSession` on `IHidServer`, which let vibration continue while the controller applet is open) had no host hooks, so the SDK's own calls opened the `hid` service, which `sm` refuses (`0xe15`), and read the null service proxy.
+- **Fix:** `hle_hid.c` hooks `BeginForcedVibrationSession` and `EndForcedVibrationSession` as no-ops (the host shows no controller applet UI); `t_hid` covers both.
+- **Found on:** [Super Mario Party](../../dm/games/010036B0034E4000/README.md) 1.1.0 (SDK 9.4.0).
+
 ### Vibration handles before a controller is reported
 
 - **Symptom:** `DM_RUMBLE_LOG=1` shows the game's startup handle request answered with none, then every vibration value sent to handle 0 and reaching no output for the whole session, although a controller with haptics (a DualSense on the Mac) is connected. A game that rumbles would stay silent.

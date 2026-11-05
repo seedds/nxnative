@@ -197,6 +197,7 @@ static void t_vibration(void) {
     CHECK(!h_hid_VibPermit() && h_hid_VibHandles(h, 2, &id, STYLE_HANDHELD) == 2, "rumble disabled: not permitted, but the handles exist, as on a Switch");
     dm_haptics_set_enabled(1);
     CHECK(h_hid_VibPermit(), "rumble turned on while the game runs: the handles it took work");
+    h_hid_BeginForcedVib(); h_hid_EndForcedVib();
 }
 
 static void *vibration_sender(void *arg) {

@@ -5391,6 +5391,30 @@ static id<MTLTexture> img_fit(int tid, id<MTLTexture> t, int dpf, uint64_t *rid)
     r->im = (void *)CFBridgingRetain(v); r->im_of = (__bridge void *)t; r->im_rid = v.gpuResourceID._impl;
     *rid = r->im_rid; return v;
 }
+// A 32-bit integer texture in a slot the shader declares float: a shader with no type answer declares float (the answer table cannot say: the texture's format is known only here), and Metroid Prime
+// Remastered's clustered lighting (fde1a3e769219a77 and the other world materials) fetches its R32Uint light grid through it and takes the bits back with as_type<int>. Reading an integer texture through
+// a float declaration is undefined in Metal: an M6 happens to hand the bits over (no visible change), an M2 was reported to read wrong light offsets (GitHub issue #783). The slot gets the float view of
+// the same size, whose read hands the stored bits over unchanged, as texture buffers do (tbuf_view_format). A texture made without the format-view usage is upgraded before the next draw pass
+// (img_fit_upgrade); until then it is bound as is. Caller holds g_rmu
+static id<MTLTexture> tex_float_fit(int tid, id<MTLTexture> t, uint64_t *rid) {
+    MTLPixelFormat pf = tbuf_view_format(t.pixelFormat, NVN_DPF_FLOAT);
+    if (pf == t.pixelFormat || tid <= 0 || tid >= g_ntreg || t.textureType == MTLTextureTypeTextureBuffer) return nil;
+    id<MTLTexture> base = t.parentTexture ? t.parentTexture : t;
+    if (!(base.usage & MTLTextureUsagePixelFormatView)) {
+        int seen = 0; for (int i = 0; i < g_imfit_npend; i++) seen |= g_imfit_pend[i] == tid;
+        if (!seen && g_imfit_npend < 16) g_imfit_pend[g_imfit_npend++] = tid;
+        return nil; }
+    treg_t *r = &g_treg[tid];
+    if (r->im && r->im_of == (__bridge void *)t && ((__bridge id<MTLTexture>)r->im).pixelFormat == pf) { *rid = r->im_rid; return (__bridge id<MTLTexture>)r->im; }
+    if (r->im) { defer_obj_unref((__bridge id)r->im); CFRelease(r->im); r->im = r->im_of = NULL; r->im_rid = 0; }
+    NSUInteger l0 = t.parentTexture ? t.parentRelativeLevel : 0, s0 = t.parentTexture ? t.parentRelativeSlice : 0;
+    NSUInteger ns = t.textureType == MTLTextureType3D ? 1 : t.arrayLength * (t.textureType == MTLTextureTypeCube || t.textureType == MTLTextureTypeCubeArray ? 6 : 1);
+    id<MTLTexture> v = [base newTextureViewWithPixelFormat:pf textureType:t.textureType levels:NSMakeRange(l0, t.mipmapLevelCount) slices:NSMakeRange(s0, ns) swizzle:t.swizzle];
+    if (!v) { RED_ONCE(100, "cannot create the float view of an integer texture (texture ID %d, Metal format %lu)", tid, (unsigned long)t.pixelFormat); return nil; }
+    { static int once; if (!once++) MLOG("integer texture sampled as float: first case texture ID %d Metal format %lu read through format %lu", tid, (unsigned long)t.pixelFormat, (unsigned long)pf); }
+    r->im = (void *)CFBridgingRetain(v); r->im_of = (__bridge void *)t; r->im_rid = v.gpuResourceID._impl;
+    *rid = r->im_rid; return v;
+}
 static inline __attribute__((always_inline)) uint64_t tex_fast_rid(int tid, void **out) {
     uint64_t ep = treg_ep();   // first, as in tex_fast
     if (tid > 0 && tid < g_ntreg && g_treg[tid].ok && g_treg[tid].view && g_treg[tid].view_ser == ep && (!g_treg[tid].view_pkg || g_treg[tid].view_dirty == nvn_dirty_now())) { if (out) *out = g_treg[tid].view; return g_treg[tid].view_rid; }
@@ -8191,6 +8215,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
                 // no view fits, and one side is a buffer texture (Octopath Traveler 0: a buffer texture left in a slot a shader reads as a cube): reads of it are undefined, so the slot reads 0
                 else if (t.textureType == MTLTextureTypeTextureBuffer || (MTLTextureType)b->dtt == MTLTextureTypeTextureBuffer) { tex_mis_note(sh, nvn_stage, b->kind == NVN_RB_TEX ? reg : -1, tid, t, (MTLTextureType)b->dtt, "a buffer texture: the slot reads 0 (dummy)"); t = nil; }
                 else tex_mis_note(sh, nvn_stage, b->kind == NVN_RB_TEX ? reg : -1, tid, t, (MTLTextureType)b->dtt, "bound as is"); }
+            if (t && b->dpf == NVN_DPF_FLOAT && mtl_pf_dpf(t.pixelFormat) != NVN_DPF_FLOAT) { uint64_t r2 = 0; id<MTLTexture> v = tex_float_fit(tid, t, &r2); if (v) { t = v; trid = r2; } }   // see tex_float_fit
             if (!t) { t = dummy_tex(b->dtt, b->dpf); trid = g_dummy_tex_rid[b->dtt % DMY_NT][b->dpf & 3]; }
             else if (b->dtt == (uint8_t)MTLTextureTypeTextureBuffer) t = tbuf_shadow(t, &trid);   // see tbuf_shadow
             slots[aid] = trid;

@@ -81,6 +81,12 @@ static int sparse_of(const nvn_texdesc *d) { return (d->flags & 0x20) && !(d->fl
 // height: Yoshi's Crafted World's 192×160 DXT5 loading icon (12 × 5 GOBs) is laid out in 4 GOBs, its 384×384 DXT1 textures (12 GOBs wide, 96 block rows) in 16; read with 8, the icon lost
 // its right half and bottom to the padding
 static int sparse_tile_h(unsigned bpb) { return bpb == 1 ? 5 : bpb == 2 || bpb == 4 ? 4 : bpb == 8 || bpb == 16 ? 3 : -1; }
+// A sparse 3D texture without a packaged layout whose level 0 is at least one tile wide, high and deep takes the standard 3D shape of its 64 KB tile: 64x32x32 / 32x32x32 / 32x32x16 / 32x16x16 / 16x16x16
+// blocks for 1 / 2 / 4 / 8 / 16 bytes per block, so its blocks are 4 / 4 / 4 / 2 / 2 GOBs high and 32 / 32 / 16 / 16 / 16 GOBs deep (log2 below; -1 for other block sizes). Metroid Prime Remastered's lighting
+// volumes (512x256x368 BC1 and BC6H, streamed around the player) map the same tile indices whatever the host's tile layout says, so its layout is fixed: with this shape BC1's tiles 5-7 and 9-11 of a 16-slice
+// slab and BC6H's 10-15 and 18-23 are the same texels (128..512 x 64..192); laid out 1 GOB high they were two different patchworks (GitHub issue #783). Seen for 8 and 16 bytes per block; the others follow the same table
+static int sparse_tile_h3(unsigned bpb) { return bpb == 1 || bpb == 2 || bpb == 4 ? 2 : bpb == 8 || bpb == 16 ? 1 : -1; }
+static int sparse_tile_d3(unsigned bpb) { return bpb == 1 || bpb == 2 ? 5 : bpb == 4 || bpb == 8 || bpb == 16 ? 4 : -1; }
 // The block height that shapes a sparse texture's 64 KB tiles: the standard one for its block size, or its own when it has a packaged layout or another block size
 static unsigned tile_shape_h(const nvn_texdesc *d, unsigned dpl, fmt_t t, unsigned tileH) {
     return dpl == 2 && !d->pkg_block_h && sparse_tile_h(t.bpb) >= 0 ? (unsigned)sparse_tile_h(t.bpb) : tileH;
@@ -151,6 +157,8 @@ void nvn_tex_layout(const nvn_texdesc *d, nvn_texlayout *o) {
         if (dpl == 3) tileD = pl >> 4;
     } else if (dpl == 2 && sparse_of(d) && sparse_tile_h(t.bpb) >= 0 && blk(w * sx, t.bw) * t.bpb >= (128u >> sparse_tile_h(t.bpb)) * 64
                && blk(h * sy, t.bh) >= 8u << sparse_tile_h(t.bpb)) tileH = (unsigned)sparse_tile_h(t.bpb);
+    else if (dpl == 3 && sparse_of(d) && sparse_tile_h3(t.bpb) >= 0 && blk(w * sx, t.bw) * t.bpb >= (128u >> (sparse_tile_h3(t.bpb) + sparse_tile_d3(t.bpb))) * 64
+             && blk(h * sy, t.bh) >= 8u << sparse_tile_h3(t.bpb) && z >= 1u << sparse_tile_d3(t.bpb)) { tileH = (unsigned)sparse_tile_h3(t.bpb); tileD = (unsigned)sparse_tile_d3(t.bpb); }
     else if (dpl == 2) { uint32_t ah = blk(h * sy, t.bh); tileH = pick_tile(ah * 3 / 16); }
     else if (dpl == 3) tileD = pick_tile(z + z / 2);
     uint64_t ls = layer_bytes(d, dpl, layered, w, h, z, tileH, tileD, t);

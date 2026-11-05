@@ -347,6 +347,7 @@ Games read this count as a position in their own command memory and size their h
   - `DM_NVN_GPU_WATCHDOG` (seconds, default 4) ends the process when a command buffer has not completed, before more work queues behind it. A ring of (fence, kind, shader key) per draw and dispatch (`wk_note`) lets the watchdog and a failed command buffer name that submission's shaders (`wk_dump`).
   - GPU-written dispatch counts are clamped (65535 per dimension, 2^22 threadgroups in all; `DM_NVN_DISPATCH_CLAMP=0` turns it off).
   - A SyncWait of a second or more prints `[RED] SyncWait timed out on fence N: committed M, completed K` (fence ≤ committed: the GPU did not finish).
+  - To name the kernel of a fault or hang in a compute-only submission (where `wk_dump` names a dozen): `DM_NVN_BREADCRUMB=1` (diagnostic, off) writes a GPU-written sequence number after every compute dispatch (an encoder's dispatches serialized, so not for timing); at the first command-buffer error that is not an innocent victim, and at the watchdog, `[RED] breadcrumb fence=N: the dispatch in flight when the GPU stopped` names the first dispatch without its mark, then the ones after it. `DM_NVN_POOLDUMP=<file>` writes where the memory pools sit in GPU addresses at the same moments, to place a fault address from a gpuEvent report. Check: `t_sparse_safe` case 15.
 - **Found on:** [Orbitals](../../dm/games/040004F027560000/README.md#found-on-this-game) and [PRAGMATA](../../dm/games/0400C76024710000/README.md).
 
 ### The game's SyncWait wakes on the GPU's own signal of its fence

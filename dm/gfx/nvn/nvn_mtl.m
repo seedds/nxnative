@@ -147,6 +147,39 @@ static void wk_dump(uint64_t fence) {   // the distinct shaders recorded for thi
         if (o < (int)sizeof line - 40) o += snprintf(line + o, sizeof line - o, " %c:%.16s%s", g_wk[i].kind, key, f == fence ? "" : "(prev)"); }
     MLOG("[RED] shaders of the failed submission fence=%llu (%d records, %d distinct, newest first; v/f draw, c dispatch):%s", (unsigned long long)fence, n, ns, line);
 }
+// DM_NVN_BREADCRUMB=1 (diagnostic, off; also DM_NVN_CS_PROGRESS=1): which compute dispatch of a submission that faults or never completes was in flight. Every compute dispatch gets a
+// sequence number (this ring keeps its key, threadgroups and indirect address); after it, its encoder waits for its dispatches (a barrier) and copies the number into a shared word
+// (csp_mark, at the end of dispatch). At the first command-buffer error that is not an innocent victim, and at the GPU watchdog, csp_dump reads the word: the first dispatch of the
+// failed fence after the last number written is the one running or faulting when the GPU stopped. The barrier serializes an encoder's dispatches, so this finds a fault or a hang; it
+// does not time anything. Found for PRAGMATA, whose faulting and hanging submissions are compute-only and name a dozen kernels (wk_dump) with no culprit
+enum { CSP_N = 4096 };
+static struct { uint64_t seq, fence, ind; const char *key; uint32_t x, y, z; const volatile uint32_t *cnt; } g_csp[CSP_N];   // cnt: the indirect counts' bytes, read when dumped
+static uint64_t g_csp_seq; static __strong id<MTLBuffer> g_csp_buf;
+static int csp_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_CS_PROGRESS"), *b = getenv("DM_NVN_BREADCRUMB"); v = (e && *e && strcmp(e, "0")) || (b && *b == '1');
+    if (v) MLOG("DM_NVN_BREADCRUMB: a GPU-written progress mark after every compute dispatch (dispatches serialized within an encoder)"); } return v; }
+// The first dispatch of fence or later whose progress mark the GPU has not written (0: none): with the marks serialized, the one running or faulting when the GPU stopped
+static uint64_t csp_first_unfinished(uint64_t fence) {
+    if (!g_csp_buf) return 0;
+    uint64_t last = *(volatile uint64_t *)g_csp_buf.contents, top = g_csp_seq;
+    for (uint64_t s = last + 1; s <= top; s++) { if (top - s >= CSP_N) continue; if (g_csp[s % CSP_N].seq == s && g_csp[s % CSP_N].fence >= fence) return s; }
+    return 0;
+}
+static void csp_dump(uint64_t fence) {
+    if (!csp_on() || !g_csp_buf) return;
+    uint64_t last = *(volatile uint64_t *)g_csp_buf.contents, top = g_csp_seq;
+    { uint64_t u = csp_first_unfinished(fence); if (u) MLOG("[RED] breadcrumb fence=%llu: the dispatch in flight when the GPU stopped: #%llu %.16s", (unsigned long long)fence, (unsigned long long)u, g_csp[u % CSP_N].key ? g_csp[u % CSP_N].key : "-"); }
+    const char *lk = last && top - last < CSP_N ? g_csp[last % CSP_N].key : NULL;
+    MLOG("[RED] compute progress: the last dispatch the GPU finished is #%llu (%.16s, fence %llu); dispatches encoded up to #%llu", (unsigned long long)last, lk ? lk : "-",
+         lk ? (unsigned long long)g_csp[last % CSP_N].fence : 0ull, (unsigned long long)top);
+    int shown = 0;
+    for (uint64_t s = last + 1; s <= top && shown < 16; s++) { if (top - s >= CSP_N) continue; const typeof(g_csp[0]) *r = &g_csp[s % CSP_N];
+        if (r->seq != s || r->fence < fence) continue;
+        char ind[96] = ""; if (r->ind) snprintf(ind, sizeof ind, " (indirect, counts at %#llx now %u x %u x %u before the clamp)", (unsigned long long)r->ind,
+                                                 r->cnt ? r->cnt[0] : 0, r->cnt ? r->cnt[1] : 0, r->cnt ? r->cnt[2] : 0);
+        MLOG("[RED] compute progress: %s #%llu %.16s fence %llu threadgroups %ux%ux%u%s", shown ? "then" : "not finished:", (unsigned long long)s, r->key ? r->key : "-",
+             (unsigned long long)r->fence, r->x, r->y, r->z, ind);
+        shown++; }
+}
 static int g_cut_copy;                          // a buffer → texture copy was encoded since the last commit: the next pass boundary commits the segment (sub_cut)
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
@@ -2023,6 +2056,7 @@ static void *gpu_watchdog_main(void *arg) {
                  (unsigned long long)(done + 1), (now - t) / 1e9, (unsigned long long)f, (int)atomic_load(&g_last_commit_error));
             wk_dump(done + 1);   // the shaders of the stuck submission (a hang reports no error of its own)
             pool_dump(done + 1);  // and, with DM_NVN_POOLDUMP, where the pools' buffers sit in GPU addresses
+            csp_dump(done + 1);  // and, with DM_NVN_BREADCRUMB, the dispatch that did not finish
             fflush(stderr); fflush(stdout); _exit(70);
         }
     }
@@ -2069,7 +2103,7 @@ uint64_t mtl_sub_commit(void) {
         gpu_tag_done(gpu_f, cb.GPUStartTime, cb.GPUEndTime);
         if (ws_on()) ws_fb(fence, cb.GPUEndTime);
         uint64_t c0 = 0, c1 = 0; if (seg_ts()) { c0 = gpu_s_guest_ns(cb.GPUStartTime); c1 = gpu_s_guest_ns(cb.GPUEndTime); }
-        if (cb.error) { atomic_store(&g_last_commit_error, 1); res_top_once(cb.error); static int n, nv; int victim = [cb.error.description containsString:@"InnocentVictim"]; if (victim ? nv++ < 1 : n++ < 8) MLOG("[RED] command buffer error details fence=%llu: %s | GPU %.3f→%.3f", (unsigned long long)fence, cb.error.description.UTF8String, cb.GPUStartTime, cb.GPUEndTime); if (!victim) { MLOG("[RED] state of the failed submission fence=%llu: %s", (unsigned long long)fence, cctx.UTF8String); if (n <= 8) wk_dump(fence); } MLOG("[RED] command buffer execution error: %s", cb.error.localizedDescription.UTF8String); }
+        if (cb.error) { atomic_store(&g_last_commit_error, 1); res_top_once(cb.error); static int n, nv; int victim = [cb.error.description containsString:@"InnocentVictim"]; if (victim ? nv++ < 1 : n++ < 8) MLOG("[RED] command buffer error details fence=%llu: %s | GPU %.3f→%.3f", (unsigned long long)fence, cb.error.description.UTF8String, cb.GPUStartTime, cb.GPUEndTime); if (!victim) { MLOG("[RED] state of the failed submission fence=%llu: %s", (unsigned long long)fence, cctx.UTF8String); if (n <= 8) wk_dump(fence); { static _Atomic int bc; if (!atomic_exchange(&bc, 1)) { pool_dump(fence); csp_dump(fence); } } }   /* the first guilty error: where the pools sit (DM_NVN_POOLDUMP) and the dispatch in flight (DM_NVN_BREADCRUMB) */ MLOG("[RED] command buffer execution error: %s", cb.error.localizedDescription.UTF8String); }
         char where[64]; snprintf(where, sizeof where, "fence %llu, its last command buffer", (unsigned long long)fence); cbs_feedback(cbs, cb.error, where);
         post_complete(fence, c0, c1);
         defer_drain();
@@ -12506,6 +12540,16 @@ static int dpc_clamp_enc(id ce, uint64_t rec, __strong id<MTLBuffer> *ob, size_t
     [e barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:resource_vis()];
     return 1;
 }
+// DM_NVN_BREADCRUMB (see csp_dump): after the dispatch just encoded, wait for the encoder's dispatches and write its sequence number where the error and watchdog dumps read it
+static void csp_mark(id ce, const NvShader *cs, const p_dispatch *dp) {
+    if (!g_csp_buf) { g_csp_buf = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared]; memset(g_csp_buf.contents, 0, 256); res_add(g_csp_buf); res_commit(); }
+    uint64_t seq = ++g_csp_seq; typeof(g_csp[0]) *r = &g_csp[seq % CSP_N];
+    r->key = cs->key; r->x = (uint32_t)dp->x; r->y = (uint32_t)dp->y; r->z = (uint32_t)dp->z; r->ind = dp->ind; r->fence = atomic_load(&g_fence) + 1;
+    void *mb; uint64_t mo; r->cnt = dp->ind && mtl_addr(dp->ind, 12, &mb, &mo) && ((__bridge id<MTLBuffer>)mb).contents ? (const volatile uint32_t *)((const uint8_t *)((__bridge id<MTLBuffer>)mb).contents + mo) : NULL; r->seq = seq;
+    __strong id<MTLBuffer> ab; size_t ao = arena_alloc(8, &ab); memcpy(g_cur_arena->cpu + ao, &seq, 8);
+    [(id<MTL4ComputeCommandEncoder>)ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageBlit visibilityOptions:resource_vis()];
+    [(id<MTL4ComputeCommandEncoder>)ce copyFromBuffer:ab sourceOffset:ao toBuffer:g_csp_buf destinationOffset:0 size:8];
+}
 static void dispatch(const p_dispatch *dp) {
     zskip_clear();
     g_wr_epoch++; g_mdx_epoch++;
@@ -12578,6 +12622,7 @@ static void dispatch(const p_dispatch *dp) {
             [(id<MTL4ComputeCommandEncoder>)ce barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:resource_vis()]; }
         enc_c_dispatch_indirect(ce, ig, MTLSizeMake(tg[0], tg[1], tg[2]));
     } else enc_c_dispatch(ce, MTLSizeMake(dp->x, dp->y, dp->z), MTLSizeMake(tg[0], tg[1], tg[2]));
+    if (csp_on()) csp_mark(ce, cs, dp);
     if (own) enc_c_end(ce);
 }
 // GPU: texture -> buffer (row stride taken from SetCopyRowStride, layer stride from SetCopyImageStride, 0 = tightly packed)

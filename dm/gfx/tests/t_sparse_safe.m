@@ -220,6 +220,13 @@ int main(void) { @autoreleasepool {
       CHECK("14 the end of the submission makes a new table", g_gmem_buf != t0 && g_gmem_patched == p1 && w2 == g_gmem_buf.gpuAddress);
       CHECK("14 the segment's table is untouched", !memcmp(snap, t0.contents, sizeof snap));
     }
+    // 15. breadcrumbs (DM_NVN_BREADCRUMB): the first dispatch of the failed fence without its GPU-written mark is the one in flight
+    { g_csp_buf = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared]; memset(g_csp_buf.contents, 0, 256);
+      const char *keys[5] = {"aaaa", "bbbb", "cccc", "dddd", "eeee"};
+      for (int i = 0; i < 5; i++) { uint64_t seq = ++g_csp_seq; g_csp[seq % CSP_N].seq = seq; g_csp[seq % CSP_N].key = keys[i]; g_csp[seq % CSP_N].fence = i < 2 ? 40 : 41; }
+      *(uint64_t *)g_csp_buf.contents = g_csp_seq - 3;   // the GPU finished the first two
+      uint64_t u15 = csp_first_unfinished(41); CHECK("15 the dispatch in flight", u15 == g_csp_seq - 2 && !strcmp(g_csp[u15 % CSP_N].key, "cccc"));
+      *(uint64_t *)g_csp_buf.contents = g_csp_seq; CHECK("15 all finished: none", csp_first_unfinished(41) == 0); g_csp_buf = nil; }
     // 4. off: the old behaviour (inaccessible pages after an unmap)
     g_vp_safe_test_off = 1;
     CHECK("map a run (safe off)", map_at(12u << 20, 1u << 20, 6u << 20));

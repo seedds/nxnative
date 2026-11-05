@@ -34,7 +34,8 @@ int main(void) { @autoreleasepool {
     int all = 1; for (uint64_t serial = 99400; serial < extra; serial++) all &= tex_get(serial) == upgraded;
     CHECK(all, "every shared serial at the growth threshold sees the replacement");
     CHECK(tex_get(b.serial) == upgraded, "other live serial sees the replacement");
-    CHECK(tex_get(ghost.serial) == upgraded, "finalized serial sees the replacement");
+    // A finalized serial over a shared texture takes no ghost entry (tex_mtl_): it resolves through the sharing table, which the upgrade has updated
+    CHECK(tex_get(ghost.serial) == nil && tex_mtl(&ghost) == upgraded, "finalized serial sees the replacement");
     CHECK(!alias_has(old) && alias_has(upgraded), "sharing membership follows the replacement");
     uint32_t pixels[16]; for (int i = 0; i < 16; i++) pixels[i] = 0x44332211u;
     id<MTLBuffer> src = [g_dev newBufferWithBytes:pixels length:sizeof pixels options:MTLResourceStorageModeShared]; res_add(src);

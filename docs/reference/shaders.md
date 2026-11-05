@@ -717,11 +717,12 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:**
   - `shader_split.py` names the stages `ts` and `ms`, as `task` and `mesh` in the shader map.
   - `dmsh_build.py` translates one as compute, its SPH taken off, with its stage memory in shared memory at the offsets `dmsh_meshstage.memory` gives (job `stage_memory`, `AIsberd` and `AStageOut` in `InstEmitAmpereMem.cs`). A byte store goes through the shared memory's byte store, a compare-and-swap on its word, as neighbouring threads write neighbouring bytes.
+  - ISBERD with the payload store's own mode (0xb8) reads back a payload word the task wrote, at the same offset in the outputs.
   - On the console a workgroup of 32 threads is one warp, so the zero count each thread writes first cannot pass the count one thread writes later. Metal's threads run in no such step, and a late zero would erase the count: that store is left out, and the wrapper starts the stage memory at zero.
   - `dmsh_meshstage.to_stage` wraps the kernel as a Metal `[[object]]` or `[[mesh]]` function: it fills the inputs, calls the kernel's body (whose early returns come back to it) and hands the outputs over. A mesh shader has `main0` and `main0_z` for the two depth conventions, as a vertex shader does.
   - The host keeps these stages in the tessellation stages' places, 3 and 4 (`hle_nvn.c` `st_host`, `nvn_mtl.m` `gfx_stage_bits`): a program has mesh shaders or tessellation, never both. `nvn_geometry.inc` `mesh_tasks_draw` draws through `draw_` with the pixel stage alone, on a mesh pipeline built in the background; the mesh stage shares the vertex stage's argument table, as a geometry mesh draw does, and a task shader has the object stage's. Their storage buffer tables in `c0` are at 0x670 and 0x770: [Task and mesh draws reading the dummy buffer](#task-and-mesh-draws-reading-the-dummy-buffer).
 - **Not done:** `DrawMeshTasks3D` and the indirect and multi-draw forms have no game yet to show their arguments, so they stay red. A task or mesh shader with shared memory of its own (LDS, STS, ATOMS) is refused at build time: it would lie over the stage memory and the control section does not give its size. No game's does.
-- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): 7 task and 18 mesh shaders, which draw its bushes and grass. All 11 pipelines its first race makes build, and the race holds 60 fps with them. The facts of pull request #983 were checked against the game's code and hold, except its storage buffer table offsets.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): 7 task and 18 mesh shaders, which draw its bushes and grass. All 11 pipelines its first race makes build, and the race holds 60 fps with them. The facts of pull request #983 were checked against the game's code and hold, except its storage buffer table offsets. The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, no profile yet): its agl task shader `5d3a096025e375a1` stores a payload word at +0x10 and reads it back (ISBERD mode 0xb8), which stopped the shader as an unknown mode before.
 - **Check:** `python3 dm/gfx/tests/test_dmsh_meshstage.py` (the stages compile for macOS and iOS where the Metal compiler is installed), `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (`StageMemory`).
 
 ### Task and mesh draws reading the dummy buffer
@@ -1103,6 +1104,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
   - UP2UR (0x883): `URd = UP0 ? 1 : 0`. The game's one encoding (URZ, mask 1) is accepted; any other stops the shader.
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
+
+### F2IP: two floats into two bytes
+
+- **Symptom:** `Ampere instruction 243 at 0x… is not implemented` in the shader build; the compute shader is left out and its dispatches skipped.
+- **Cause:** sm_86's F2IP (9-bit opcode 0x043, register form 0x243) converts two floats to integers and packs them; the decoder had no entry for it. The one form met, F2IP.U8.F32.NTZ Rd, a, b, RZ, has F2I's fields: unsigned (72 clear), 8 bits (75..77 clear), round to nearest (78..80 clear), and bit 74 set.
+- **Fix:** `AF2ip` in `InstEmitAmpereAlu.cs`: each source rounded to the nearest integer (ties to even), saturated to 0..255 and NaN to 0, b in byte 0 and a in byte 1, the upper half zero. The games' shaders join two results into four bytes with PRMT 0x5410 and store them, and the bytes come out in pixel order only with b low. Any other encoding (another form, C not RZ, other bits from 72 on) stops the shader.
+- **Found on:** The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, no profile yet): 28 F2IPs in 10 compute shaders that convert a picture into BT.709 Y and CbCr bytes (`99951da6e5cd38f5`, `aaa785ced92a88ef` and eight larger ones). With it, 42,320 of its 42,321 shaders translate; the one left (`68bbe98b3bfd9876`, agl_common) has data in place of code, as in [Splatoon Raiders](../../dm/games/0400380020056000/README.md).
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`F2ip`: the game's encoding on live registers, the byte order and the encodings refused; `UimadImmediateC`: UIMAD with its immediate in C, another of the game's forms).
 
 ### Comparisons with .FTZ
 

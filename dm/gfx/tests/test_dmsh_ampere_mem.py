@@ -188,6 +188,8 @@ class StageMemory(Translated):
     COUNT_ZERO = (0x000fe20000008800, 0x000003ffff007927)  # 0x927 [RZ + 3], RZ, mode 0x88: every thread clears the count first
     COUNT = (0x0001e20000008800, 0x00000307ff007927)       # 0x927 [RZ + 3], R7, mode 0x88: the thread with the count
     INDEX = (0x0001e20000008000, 0x0000040605057927)       # 0x927 [R5 + 4], R6, mode 0x80: an index byte
+    OWN_PAYLOAD = (0x000fe2000000b800, 0x00001000ff057923)  # ISBERD R5, [RZ + 0x10], mode 0xb8: the payload word this task wrote (Ocarina of Time's 5d3a096025e375a1 +0x80, its write barrier left out)
+    KEEP_R5 = (0x0041e8000000b800, 0x00002005ff007927)     # 0x927 [RZ + 0x20], R5, mode 0xb8
 
     def msl(self, *code):
         return self.translate(b''.join(inst(*c) for c in code) + inst(*EXIT), **self.MEMORY)
@@ -197,6 +199,9 @@ class StageMemory(Translated):
 
     def test_input_is_at_its_offset(self):   # 0x10 + 0x20
         self.assertRegex(self.msl(self.INPUT, self.KEEP_R19), r'as_type<float>\(_\d+\[12\]\)')
+
+    def test_own_payload_is_read_from_the_outputs(self):   # 0x120 + 0x10
+        self.assertRegex(self.msl(self.OWN_PAYLOAD, self.KEEP_R5), r'as_type<float>\(_\d+\[76\]\)')
 
     def test_word_store_goes_to_the_outputs(self):   # 0x120 + 0x80
         self.assertIn('0 + 416', self.msl(self.ATTRIBUTE))

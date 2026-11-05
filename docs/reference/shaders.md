@@ -242,6 +242,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Reader:** `kpka_jobs` maps the PAKs, takes the newest copy of each path, peeks at 4 decompressed bytes and inflates only SDF entries (`sdf_shaders`).
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md): 63,111 shaders (30,233 vertex, 21,475 pixel, 11,271 compute, 53 geometry, 33 hull, 46 domain) and 102,345 pairs, in 5 s with 12 jobs.
 
+### Colour management shaders in RE Engine OCIO resources
+
+- **Symptom:** the 3D scene is drawn and lit, but every frame reaches the window black under a correct UI: the tonemap pass is `draw skipped: no render pipeline (vertex - fragment -)`, with `[RED] shader … is not in the shader map` (four keys), `program has no vertex shader` and `the dispatched program has no compute shader`. The dumped shaders (`DM_NVN_SHDUMP`) are in no SDF, in `main` or in the raw RomFS image.
+- **Cause:** the tonemap and the other colour transforms are not in the SDF definitions but in RE Engine's colour management resources (`OCIO`, the OpenColorIO transforms with their matrices and LUTs), zstd-compressed PAK entries the reader did not inflate, as it inflated only `SDF\0` entries. Each holds NVN2 shaders: control sections of 0xe0 bytes (their own length at +0x30), each directly followed by its code area (+0x44 long). Vertex shaders come first, and the pixel shaders after one draw with it.
+- **Fix:** `kpka_shaders` inflates `OCIO` entries too, and `ocio_shaders` takes their shaders by the control magic, checks them like any NVN2 shader, and pairs each pixel shader with the last vertex shader before it. They go into packages of their own (`*_ocio.bin`, `group`), so a profile built before the reader keeps every other shader's package index, and so its cache key: the new split is purely additive.
+- **Found on:** PRAGMATA (0400C76024710000, Switch 2; no profile in the repository yet): 5 OCIO entries in `re_chunk_000.pak`, 65 shaders each, 139 distinct (113 pixel, 24 compute, 2 vertex), all new to the map; among them the tonemap programs (vertex f6658e3c09d9600a with pixel 5367453d98983dab or 90ed98203b676c4f) and compute 2ceb3ec288321a37.
+
 ### Shader records in Snowdrop SDF data slices
 
 - **Symptom:** the split finds no shaders in a RomFS made of `.sdfdata`, `.sdftoc` and `.sdfver` files.

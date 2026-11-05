@@ -20,7 +20,8 @@
 #   · G2S (Koei Tecmo's KTGL, Hyrule Warriors: Age of Calamity): GLSLC compiler outputs inside the IDRK entries of the RDB data files (zlib in chunks), see idrk_shaders;
 #       ROMANCE OF THE THREE KINGDOMS 8 REMAKE's newer RDB keeps them in .fdata files (a PDRK header, then IDRK entries of zlib or LZ4 chunks)
 #   · SPKG (the older KTGL of Fire Emblem: Three Houses): shader packages of G2S containers, loose and inside the LINKDATA archive DATA0.bin / DATA1.bin, see kt_shaders and linkdata_jobs
-#   · SDF (Capcom's RE Engine, Monster Hunter Rise): shader definitions inside the PAK archives (KPKA, entries zstd / deflate compressed), only the newest copy of each path, see kpka_jobs and sdf_shaders
+#   · SDF (Capcom's RE Engine, Monster Hunter Rise): shader definitions inside the PAK archives (KPKA, entries zstd / deflate compressed), only the newest copy of each path, see kpka_jobs and sdf_shaders;
+#       its colour management resources (OCIO, the tonemap) keep NVN2 shaders of their own, see ocio_shaders
 #   · Trinity packs (Game Freak, Pokémon Legends: Z-A): BNSH inside the files of arc/data.trpfs (Oodle Mermaid, decoded by the game's own decoder in the Mac host), see trpfs_jobs and trinity_shaders
 #   · SPK (Capcom's MT Framework, The Great Ace Attorney Chronicles): the shader package inside an ARC archive (zlib entries), code area + control section per shader, see mtarc_members and mtspk_shaders
 #   · BEA (NintendoWare Bezel Engine archives, Big Brain Academy: Brain vs. Brain): BNSH in the .bfsha entries of the archives (zstd entries), see bea_members
@@ -700,11 +701,39 @@ def sdf_shaders(d, label):
             out.append((f'{label}#SDF#var{i}', st, ctl, code))
     return out
 
+OCIO = b'OCIO'
+def ocio_shaders(d, label):
+    """RE Engine's colour management resources ('OCIO', PRAGMATA: 5 in the PAK view, 65 shaders each, 139 distinct): the OpenColorIO transforms (matrices, LUTs) and the programs that apply them,
+    the tonemap among them; no SDF holds these shaders. Their NVN2 control sections (0xe0 bytes, the section's own length at +0x30) lie in the resource's data, each directly followed by its
+    code area (+0x44 long); no offset in the resource was found to point at them, so they are taken by the control magic and checked as every other NVN2 shader is.
+    Vertex shaders come first and the pixel shaders after them use it (PRAGMATA's tonemap programs: vertex f6658e3c09d9600a with pixel 5367453d98983dab or 90ed98203b676c4f),
+    so a pixel shader is paired with the last vertex shader before it; compute shaders stand alone"""
+    out = []; vs = None; used = True
+    for m in re.finditer(re.escape(CTL_MAGIC + b'\xc9\0\0\0'), d):
+        o = m.start()
+        if o + NVN2_KEY_CTL > len(d): continue
+        own, ncode = struct.unpack_from('<I', d, o + 0x30)[0], struct.unpack_from('<I', d, o + 0x44)[0]
+        if not NVN2_KEY_CTL <= own < 0x10000 or o + own + ncode > len(d): continue
+        ctl, code = d[o:o + own], d[o + own:o + own + ncode]
+        st = nvn2_stage(ctl, code)
+        if not st or check(label, st, ctl, code): continue
+        if st == 'vs':
+            if vs and not used: out.append((f'{label}#OCIO@{vs[0]:#x}', 'vs') + vs[1:])   # a vertex shader no pixel shader follows
+            vs, used = (o, ctl, code), False; continue
+        if st == 'ps' and vs: where = f'{label}#OCIO#var{o:#x}'; out.append((where, 'vs') + vs[1:]); used = True   # var_pairs pairs the stages of one '#var' label
+        else: where = f'{label}#OCIO@{o:#x}'
+        out.append((where, st, ctl, code))
+    if vs and not used: out.append((f'{label}#OCIO@{vs[0]:#x}', 'vs') + vs[1:])
+    return out
+
 def kpka_shaders(path, rel, ents, out):
     from romfs import mmap
     with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
         for e in ents:
-            if e[3] >= 0x10 and kpka_data(d, e, 4) == b'SDF\0': out.extend(sdf_shaders(kpka_data(d, e), f'/{rel}#{e[0]:016x}'))
+            if e[3] < 0x10: continue
+            head = kpka_data(d, e, 4)
+            if head == b'SDF\0': out.extend(sdf_shaders(kpka_data(d, e), f'/{rel}#{e[0]:016x}'))
+            elif head == OCIO: out.extend(ocio_shaders(kpka_data(d, e), f'/{rel}#{e[0]:016x}'))
 
 PKZL, PGDAT = b'pkzl', b'DAT\0'
 PG_STAGES = {b'VSO\0': 'vs', b'HSO\0': 'hs', b'DSO\0': 'ds', b'GSO\0': 'gs', b'PSO\0': 'ps', b'CSO\0': 'cs'}
@@ -2788,6 +2817,9 @@ def group(label):
     if label.startswith('main'): return 'main'
     for k, g in GROUPS:   # the profile's shader_groups, first match wins
         if k in label: return g
+    # RE Engine's colour management shaders (ocio_shaders) in packages of their own: they came after the game's SDF shaders had been built, and among the other packages' shaders,
+    # which are ordered by source, they would have moved the index (and so the cache key) of most of them
+    if '#OCIO' in label: return 'ocio'
     return 'other'
 
 def ps_inputs(code):
@@ -3220,9 +3252,9 @@ def main():
     for name, rr in recs.items():
         with open(os.path.join(pkg, name), 'wb') as f: f.write(b''.join(rr))
     with open(mapout, 'w') as f:
-        kinds = ' / '.join(k for k, hit in (('BNSH / BAHS', any('#BNSH@' in r[4] or '#BAHS@' in r[4] for r in rows)), ('Unity Shader', any('#var' in r[4] and '#PMAP@' not in r[4] and '#BNSH@' not in r[4] and '#MSHD#' not in r[4] and '#SDF#' not in r[4] and '#GLSLC@' not in r[4] and '#SNVN@' not in r[4] for r in rows)),
+        kinds = ' / '.join(k for k, hit in (('BNSH / BAHS', any('#BNSH@' in r[4] or '#BAHS@' in r[4] for r in rows)), ('Unity Shader', any('#var' in r[4] and '#PMAP@' not in r[4] and '#BNSH@' not in r[4] and '#MSHD#' not in r[4] and '#SDF#' not in r[4] and '#OCIO#' not in r[4] and '#GLSLC@' not in r[4] and '#SNVN@' not in r[4] for r in rows)),
                                             ('Retro Studios SNVN', any('#SNVN@' in r[4] for r in rows)),
-                                            ('phx PMAP', any('#PMAP@' in r[4] for r in rows)), ('MSHD', any('#MSHD#' in r[4] for r in rows)), ('GLSLC', any('#GLSLC@' in r[4] for r in rows)), ('RE Engine SDF', any('#SDF#' in r[4] for r in rows)),
+                                            ('phx PMAP', any('#PMAP@' in r[4] for r in rows)), ('MSHD', any('#MSHD#' in r[4] for r in rows)), ('GLSLC', any('#GLSLC@' in r[4] for r in rows)), ('RE Engine SDF', any('#SDF#' in r[4] for r in rows)), ('RE Engine OCIO', any('#OCIO' in r[4] for r in rows)),
                                             ('MT Framework SPK', any('#MTSPK@' in r[4] for r in rows)), ('MonoGame MGFX', any('#MGFX@' in r[4] for r in rows)),
                                             ('PlatinumGames shader objects', any('#PGSO' in r[4] for r in rows)),
                                             ('Snowdrop shader objects', any('#SNOWDROP@' in r[4] for r in rows)),

@@ -4618,6 +4618,7 @@ static id<MTLFunction> fn_dev(id<MTLFunction> f) {
         return dev->fn;
     }
 }
+static id<MTLComputePipelineState> cps_new(id<MTLFunction> f, NSError **e);   // a compute shader's pipeline: from the archive bundled with the app, else built
 // layer: a vertex shader's layer entry points (entry_layer / entry_layer_z, which also write the layer) instead of main0 / main0_z, for a program whose geometry shader is a slice writer (prog_fold_gs)
 static NvShader *shader_load(NSString *pc, int stage, int layer) {
     NSError *e = nil;
@@ -6746,6 +6747,29 @@ static void pso4_init(void) {
     });
 }
 static int pso4_compiler(void) { pso4_init(); return g_comp4 != nil; }   // render pipelines go through the Metal 4 compiler (fn_spec)
+// Compute pipelines from the archive bundled with the app: it holds one per compute shader of the shader map and of the prewarm list's C rows (pso_offline.py), made from <key>_b's
+// function alone. A compute pipeline depends on nothing else here: the MTLDevice builds it from the function (newComputePipelineStateWithFunction, no threadgroup size or other
+// option; the dispatch gives the threadgroup size), so the lookup names the function alone too, by the descriptor shader_load noted (fn4_note). Not looked up: a function with
+// constants (fn_lib_spec specializes it through its library) and the embedded kernels, which have no note. A miss costs a lookup of a fraction of a millisecond; the pipeline is
+// then built as before. g_cps_arch / g_cps_built: compute pipelines taken from the bundle / built (the prewarm's last lines)
+static _Atomic uint64_t g_cps_arch, g_cps_built;
+static id<MTLComputePipelineState> cps_bundle(id<MTLFunction> f) {
+    pso4_init();
+    if (!g_arch_bundle || !f) return nil;
+    MTL4FunctionDescriptor *fd = fn4_of(f);
+    if (![fd isKindOfClass:MTL4LibraryFunctionDescriptor.class]) return nil;
+    MTL4ComputePipelineDescriptor *d = [MTL4ComputePipelineDescriptor new]; d.computeFunctionDescriptor = fd;
+    id<MTLComputePipelineState> ps = [g_arch_bundle newComputePipelineStateWithDescriptor:d error:nil];
+    if (ps) atomic_fetch_add(&g_cps_arch, 1);
+    return ps;
+}
+static id<MTLComputePipelineState> cps_new(id<MTLFunction> f, NSError **e) {
+    id<MTLComputePipelineState> ps = cps_bundle(f);
+    if (ps) return ps;
+    ps = [g_dev newComputePipelineStateWithFunction:f error:e];
+    if (ps) atomic_fetch_add(&g_cps_built, 1);
+    return ps;
+}
 // Writes one flush period's captures as the next file of the archive, on g_arch_q once every compile in the period has returned; g_arch_flush_ok: the last one wrote its file
 static int g_arch_flush_ok;
 static void arch_compact_finish(void);
@@ -7085,6 +7109,9 @@ void mtl_pso_line(char *o, size_t n) {
     o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, "; draws that waited:");
     for (int i = 0; i < 5; i++) if (g_pw_n[i] > pn[i]) o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, " %s %llu / %.1f ms,", g_pw_why[i], (unsigned long long)(g_pw_n[i] - pn[i]), (g_pw_ns[i] - pns[i]) / 1e6);
     memcpy(pn, g_pw_n, sizeof pn); memcpy(pns, g_pw_ns, sizeof pns);
+    static uint64_t pca, pcb; uint64_t ca = g_cps_arch, cb = g_cps_built;   // compute pipelines (cps_new)
+    if (ca > pca || cb > pcb) snprintf(o + o2, n > o2 ? n - o2 : 0, "; compute pipelines from the archive bundled with the app %llu, built %llu", (unsigned long long)(ca - pca), (unsigned long long)(cb - pcb));
+    pca = ca; pcb = cb;
 }
 
 // ---- Prebuild: the base of every shader pair of the game, into the pipeline archive ----
@@ -7492,7 +7519,7 @@ static void warm_task(WarmTask *t) {
             g_warm_done++; return;
         }
         if (t->kind == 2) {
-            NvShader *cs = warm_shader(t->key, 5); NSError *e = nil; id ps = cs ? [g_dev newComputePipelineStateWithFunction:cs->fn error:&e] : nil;
+            NvShader *cs = warm_shader(t->key, 5); NSError *e = nil; id ps = cs ? cps_new(cs->fn, &e) : nil;
             if (cs && !ps) MLOG("[RED] background compute pipeline creation failed: %s", e.localizedDescription.UTF8String);
             if (ps) { WarmItem *item = [WarmItem new]; item->kind = 2; item->key = t->key; item->shader = cs; item->object = ps; warm_enqueue(item); g_warm_cps++; }
             g_warm_done++; return;
@@ -7523,6 +7550,7 @@ static void warm_finish(void) {
          (unsigned long long)g_warm_shaders, (unsigned long long)g_warm_rps, (unsigned long long)g_warm_skip_fz, (unsigned long long)g_warm_cps, (bp_now() - g_warm_t0) / 1e6, (unsigned long long)g_warm_skip_stale);
     if (g_comp4) MLOG("pipeline bases so far: %llu compiled, %llu from the archive, %llu reused (%.1f ms for the bases); %llu specializations, %llu pipelines without a base (MTLDevice)",
                       (unsigned long long)g_pb_built, (unsigned long long)g_pb_archived, (unsigned long long)g_pb_reused, g_pb_base_ns / 1e6, (unsigned long long)g_pb_spec, (unsigned long long)g_pb_legacy);
+    if (g_arch_bundle) MLOG("compute pipelines so far: %llu from the archive bundled with the app, %llu built", (unsigned long long)g_cps_arch, (unsigned long long)g_cps_built);
     // All warm tasks have joined. WarmItems retain published shaders until the submit thread claims them.
     // Drop negative results too: demand loading keeps its existing retry behavior, independent of the warm dictionary.
     g_warm_dict = nil; g_warm_loads = nil;
@@ -11246,7 +11274,7 @@ static void dispatch(const p_dispatch *dp) {
     id<MTLComputePipelineState> ps = hm_get_id(&g_cps, &k);
     if (!ps) {
         if (cs->cps_failed) return;   // the same function fails the same way: asked again at every dispatch, Mario Kart World's refused shaders took 3,138 pipeline builds in 60 s
-        NSError *e = nil; uint64_t bt = bp_now(); ps = [g_dev newComputePipelineStateWithFunction:cs->fn error:&e];
+        NSError *e = nil; uint64_t bt = bp_now(); ps = cps_new(cs->fn, &e);
         g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
         if (!ps) { cs->cps_failed = 1; MLOG("[RED] failed to create compute pipeline for %s: %s (its dispatches are skipped)", cs->key, e.localizedDescription.UTF8String); return; }
         pso_record("C\t%s\n", cs->key);

@@ -1568,6 +1568,15 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** Cruis'n Blast (0100B41013C82000, version 1.0.7; no profile in this repository), on a Mac with 366 MB free.
 - **Check:** `dm/tools/tests/test_pso_offline.py` (`test_low_disk_space_stops_before_metal_tt`).
 
+### Compute pipelines compiled at first use
+
+- **Symptom:** a game without a recorded prewarm list (a provisional profile) stalls at its first dispatches while Metal compiles their compute pipelines. The Mac app's pipeline archive held render bases only (`archive.tsv`: `bases`), whatever the shader map listed.
+- **Cause:** a compute pipeline was only ever built on the device, through the `MTLDevice` (`newComputePipelineStateWithFunction`), at its first dispatch or from the prewarm's `C` rows, and a provisional profile's `pso_manifest.tsv` has none. Yet such a pipeline depends on nothing but its function: the host passes no threadgroup size or other option (the dispatch gives the threadgroup size), so it can be compiled offline for every compute shader of the shader map.
+- **Fix:** `pso_offline.py` adds a compute pipeline descriptor that names the function alone for the `<key>_b` of every compute shader: the prewarm list's `C` rows first, then the map's rows of stage `compute`; shaders with function constants are left out (the host specializes them). They compile in groups of their own (`batches.<arch>/c<index>/`, 16 a group, `--jobs` groups at a time), cached by their inputs and merged with the bases. The host looks `<key>_b` up in the bundled archive first (`cps_new`) and builds it on a miss; the prewarm's last lines count both.
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md) (v131072, with a provisional profile before this repository had one), chain `ae59da13e481`, on an M5 Pro, measured on a fork with other host changes: 233 compute shaders give 233 compute pipelines beside 3 bases, a 35 MB archive. Built in 16 groups, 7 at a time, in 268 s, against 453 s as one `metal-tt` run (842 and 829 s of CPU; both at background priority, with load averages of 19-26 from other jobs); unchanged inputs reuse it in 0.3 s. Two headless boots of 90 s to the title took all 7 of their compute pipelines from it and built none, with no watchdog stop.
+- **Check:** `dm/tools/tests/test_pso_offline.py` (`Compute`, `test_compute_pipelines_are_groups_of_their_own`, `test_compute_pipelines_alone_make_an_archive`); `t_pso_bundle` builds an archive with compute shaders and checks that a map's shaders come from it and that a shader with constants or outside the map is built.
+- **Open:** iOS archives get the compute pipelines too (`build_ipa.sh`), not measured on a device.
+
 ### The device's prewarm list unread without a seed list
 
 - **Symptom:** `[RED] pipeline prewarm: seed list does not exist: …/pso_manifest.tsv` at every start, no `pipeline prewarm list …/pso_user.tsv` line, and the same compile stalls every session in places already visited, while `pso_user.tsv` keeps growing; the pipeline archive gains files every start and is never compacted (Donkey Kong Bananza: 88 files, 7 s to open them).

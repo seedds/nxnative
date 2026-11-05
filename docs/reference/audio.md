@@ -310,7 +310,7 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Symptom:** at boot, `[RED] sf: the game connects to service auddmg:u itself, which the host does not serve`, then `game called nn::diag abort: Result 0xa99` in the sdk (`nn::audio::detail::ListVirtualInputDevices`).
 - **Cause:** SDK 22's virtual input devices (the Switch 2's microphone routing) are listed through the `auddmg:u` service, which the SDK's own client connects to ([services the game connects to itself](../../dm/host/hle_sf.c)). `nn::audio::ListVirtualInputDevices` had no hook, so the SDK's code ran and aborted on the refused connection.
 - **Fix:** `hle_audio.c` answers `ListVirtualInputDevices` with no devices, as `ListAudioIns` ([above](#no-audio-input-devices)): the host has no microphone.
-- **Found on:** The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, SDK 22.2.8, a provisional profile; no note yet), which lists them at boot.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), which lists them at boot.
 
 ### `OpenAudioOut` without a release event (SDK 22)
 

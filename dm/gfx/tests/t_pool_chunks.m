@@ -74,7 +74,15 @@ int main(void) { @autoreleasepool {
     free(lin);
     mtl_tex_release(&t);
     // Raw global memory: the table reaches all of it, and lookups then have the whole pool
-    mtl_sub_begin(); CHECK("pool table made", gmem_map_gpu() != 0); finish();
+    mtl_sub_begin(); id<MTLBuffer> old_map = gmem_map(); CHECK("pool table made", old_map != nil); finish();
+    const uint64_t *ranges = old_map.contents;
+    uint64_t chunk = (base + 900 * MB) >> DMSH_GMEM_HINT_SHIFT;
+    size_t hint_word = (chunk % DMSH_GMEM_MAP_ENTRIES) * (DMSH_GMEM_MAP_ENTRY / sizeof(uint32_t)) + 6;
+    uint32_t hint = ((const uint32_t *)old_map.contents)[hint_word];
+    unsigned entry = hint % DMSH_GMEM_MAP_ENTRIES;
+    const uint64_t *range = ranges + entry * (DMSH_GMEM_MAP_ENTRY / sizeof *ranges);
+    CHECK("the hint names its chunk and pool", entry && hint / DMSH_GMEM_MAP_ENTRIES == chunk);
+    CHECK("the entire hinted chunk lies within its pool range", range[0] <= chunk << DMSH_GMEM_HINT_SHIFT && range[1] >= (chunk + 1) << DMSH_GMEM_HINT_SHIFT);
     CHECK("the whole pool has an entry", g_big[0].full > 0 && g_pools[g_big[0].full - 1].end == base + GB);
     CHECK("lookups take it", look(base + 900 * MB, 4096).length == GB);
     // A smaller pool is one buffer, and the removal of the large one takes all its entries
@@ -86,6 +94,12 @@ int main(void) { @autoreleasepool {
     CHECK("only the small pool's entry is left of those added", g_npool == pools0 + 1);
     CHECK("the small pool still answers, its entry moved", look((uint64_t)(uintptr_t)small + 20, 16).length == 64 * MB);
     CHECK("the large pool's addresses do not", !mtl_gpu_addr(base + 100, 4, &mb, &mo, &gpu));
+    mtl_sub_begin(); id<MTLBuffer> new_map = gmem_map(); CHECK("pool table rebuilt", new_map && new_map != old_map); finish();
+    id<MTLBuffer> log = [g_dev newBufferWithLength:GML_BYTES options:MTLResourceStorageModeShared];
+    memset(log.contents, 0, GML_BYTES);
+    ((uint32_t *)log.contents)[entry / 32] = 1u << (entry % 32);
+    gml_read(log, old_map, -1, 0);
+    CHECK("a completed bitmap resolves its entry in the original map", g_gml_n == 1 && g_gml_lo[0] == range[0] && g_gml_hi[0] == range[1]);
     mtl_pool_del(small); mtl_drain();
     printf("t_pool_chunks: %d checks, %d failed\n", checks, failed); return failed != 0;
 }}

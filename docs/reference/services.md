@@ -681,8 +681,15 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** `[RED] sf: the game connects to service bsd:u itself, which the host does not serve` (and bsd:s, bsd:a) at the game's first socket call, then the game's own abort: Star Fox's `vsocket.nintendo.cpp:148` logs `socket: 4` and stops. With only the connection cut, the game's HTTP thread aborted a few seconds in: its event loop's `poll` returned -1 with errno 14 (EFAULT), and the loop tolerates only EINTR (`main+0xbe2efc4`).
 - **Cause:** SDK 21 inlines `nn::socket::Initialize(const Config &)` into the game and connects to the bsd services from `nn::socket::internal::Initialize(int)`, past the host's cut. nnmusl's `poll` then has no socket state and fails. Its socket functions also come in overloads with plain `sockaddr`, `ShutdownMethod`, `Read` / `Write`, a `GetHostEntByName(const char *)` without options and `SetAllocator(MemoryResource *)`, and `nifm::GetCurrentIpConfig` takes IPv4 and IPv6 configurations with their counts.
 - **Fix:** `internal::Initialize` is cut as the plain `Initialize` is, the C library's `poll` goes to the host's `Poll`, the overloads fail as the others do (`hle_net.c`), and `GetCurrentIpConfig` reports no configuration (`hle_offline.c`). `Poll` no longer fails on a descriptor the host never made, which only a garbage value can be: it reports nothing ready at the timeout, as a console's does for a socket with nothing to say. The game logs `socket: No error information` and goes on offline.
-- **Open:** the host refuses `nn::socket::EventFd`, so the HTTP thread polls without a wake-up, and with a garbage descriptor beside it. Harmless offline.
+- **Resolved:** the host refused `nn::socket::EventFd`, so the HTTP thread polled without a wake-up, and with a garbage descriptor beside it; [eventfds are served offline](#eventfds-served-offline) now.
 - **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md).
+
+### An asynchronous play report opens prepo:u
+
+- **Symptom:** `[RED] sf: the game connects to service prepo:u itself, which the host does not serve`, then `nn::diag` aborts with Result `0xe15` at the gameplay transition.
+- **Cause:** `PlayReport::Send(Uid const&)` gets a service session. Its nontrivial `AsyncContext` return uses the caller's result address in `x8`. The caller waits on the returned context's completion event, then reads its result and destroys it.
+- **Fix:** `hle_offline.c` calls the guest SDK's `AsyncContext(Result)` constructor in that storage with success. The SDK provides an already-signalled completion event for this context and destroys it without an IPC object. Report submission follows the existing offline policy.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (`sdk+0x5aae10` in `PlayReportImpl::Send`).
 
 ### Bluetooth LE at boot
 
@@ -697,7 +704,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** the host failed every `nn::socket` call with ENETDOWN, `EventFd` included. An eventfd is not networking: a 64-bit counter that a write adds to and a read takes, which wakes a thread; Horizon's bsd service serves it with no network. gRPC's poll engine needs one as its wakeup descriptor: its check (`EventFd(0, 0)`, then close) failed, `grpc_has_wakeup_fd` read 0, every engine's initializer returned null, and gRPC asserted.
 - **Fix:** `hle_net.c` serves eventfds: descriptors 512–575 (under select's 1024; the host makes no other descriptor), Linux's semantics (a read takes the counter, or 1 with the semaphore flag; an empty nonblocking read fails with EAGAIN; a write past 2^64−2 waits or fails), Horizon's flags (1 semaphore, 4 nonblocking; gRPC passes 6), `Poll` / `Select` readiness with waits in slices of at most 100 ms, `Fcntl`'s `F_GETFL` / `F_SETFL` with `O_NONBLOCK`, and `Close`. A failure sets the socket error code (FreeBSD numbers) and the C library's `errno` through the guest's `__errno_location` (Linux numbers: gRPC compares with 11 and 4). Every other socket call still fails as offline.
 - **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_net_eventfd`: the counter, the semaphore flag, EAGAIN in both error numbers, poll and select readiness, a poll woken by another thread's write, `O_NONBLOCK`, close, and other descriptors still failing.
-- **Found on:** The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, SDK 22.2.8, a provisional profile; no note yet): with the fix it boots to its title screen.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): with the fix it boots to its title screen.
 
 ### Network requests stay on hold before they settle
 

@@ -70,6 +70,9 @@ KEY_SKIP = tuple(int(x, 0) for x in GAME.get('shader_key_skip', '0+0').split('+'
 
 CTL_MAGIC, GFX_MAGIC, CS_MAGIC = bytes.fromhex('34127698'), bytes.fromhex('78563412'), bytes.fromhex('79563412')
 STAGES = ['vs', 'hs', 'ds', 'gs', 'ps', 'cs']
+# An NVN2 BNSH program has stage slots past those six: 7 holds the task shader and 8 the mesh shader (The Legend of Zelda: Ocarina of Time's Model and Foliage .bfsha,
+# 1,699 task and 1,739 mesh shaders; read from the six slots alone, every mesh-shaded draw was missing from the map and dropped). Slot 6 has not been seen used
+NVN2_SLOTS = [None, None, None]
 SPH_STAGE = {1: 'vs', 2: 'hs', 3: 'ds', 4: 'gs', 5: 'ps'}
 def sph_stage(code):
     """A graphics code area's stage from its SPH word 0: shader type in bits 10..13. Catherine: Full Body's GLSLC (SDK 8.2.1, GPU code version 1.15) writes 0 there in every vertex shader
@@ -152,10 +155,18 @@ def bnsh_shaders(d, base, label):
     for v in range(nvar):
         prog = field(d, '<Q', base + pvar + 0x40 * v + 0x10, f'{where} variation {v}')[0]
         if not prog: continue
-        for si, st in enumerate(STAGES):
+        for si in range(len(STAGES) + len(NVN2_SLOTS)):
+            st = STAGES[si] if si < len(STAGES) else NVN2_SLOTS[si - len(STAGES)]
             sc = field(d, '<Q', base + prog + 8 + 8 * si, f'{where} variation {v} program')[0]
             if not sc: continue
-            pctl, pcode, ncode, nctl = field(d, '<QQII', base + sc + 8, f'{where} variation {v} {st}')
+            if st is not None:
+                pctl, pcode, ncode, nctl = field(d, '<QQII', base + sc + 8, f'{where} variation {v} {st}')
+            else:   # past the six NVN stages: a slot only an NVN2 program has, taken when it holds an NVN2 control section (an NVN program's words there are not stage records)
+                if base + sc + 0x20 > len(d): continue
+                pctl, pcode, ncode, nctl = struct.unpack_from('<QQII', d, base + sc + 8)
+                if not (0x48 <= nctl < 0x10000 and base + pctl + nctl <= len(d) and base + pcode + ncode <= len(d)) or not nvn2_ctl(d[base + pctl:base + pctl + nctl]): continue
+                st = nvn2_stage(d[base + pctl:base + pctl + nctl], d[base + pcode:base + pcode + ncode])
+                if st not in ('ts', 'ms'): red(f'{where} variation {v}: NVN2 stage slot {si} holds a {st} shader, not a task or mesh shader')
             ctl, code = span(d, base + pctl, nctl, f'{where} variation {v} {st} control section'), span(d, base + pcode, ncode, f'{where} variation {v} {st} code area')
             why = check(label, st, ctl, code)
             if why: red(f'{label} BNSH @{base:#x} variation {v} {st}: {why}')

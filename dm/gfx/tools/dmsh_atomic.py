@@ -59,3 +59,24 @@ def check_msl(source):
     if 'tomic' in source and _EMULATED.search(source):   # (both alternatives hold the word; the pattern alone tries every character of the source)
         raise ValueError('image atomics emulated through a raw pointer; they must be native texture atomics (MSL 3.1)')
     return source
+
+
+_RAW_LOG_OR = '''
+inline uint dmsh_raw_log_or(device atomic_uint* slot, uint bit) {
+    uint found = atomic_load_explicit(slot, memory_order_relaxed);
+    if (found & bit) return found;
+    return atomic_fetch_or_explicit(slot, bit, memory_order_relaxed);
+}
+'''
+
+
+def raw_log_or(source, binding):
+    """Read a previously set write-log bit without contending for an atomic update."""
+    # Log bits only change from 0 to 1 during GPU execution. An OR of a bit
+    # already set can return the loaded value without issuing a write.
+    atomic_or = (r'\batomic_fetch_or_explicit\((\(device atomic_uint\*\)&' + re.escape(binding) +
+                 r'\._m0\[[^\]\n]+\], [^\n;]+?), memory_order_relaxed\)')
+    rewritten, count = re.subn(atomic_or, r'dmsh_raw_log_or(\1)', source)
+    if not count:
+        return source
+    return rewritten.replace('using namespace metal;', 'using namespace metal;\n' + _RAW_LOG_OR, 1)

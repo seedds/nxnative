@@ -169,6 +169,14 @@ The game may also write into an NVN object directly, without an NVN call, throug
 - **Fix:** dead serials go to a 512-entry table (`tex_put`, `g_ghost`; the memory line's `finalized textures still referenced`).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (the HUD captures, the 640×360 buffers; found while fixing GitHub issue #9).
 
+### A bindless pool churns finalized textures within a submission
+
+- **Symptom:** Metal runs out of memory during a busy scene transition. The renderer repeatedly rebuilds the texture pool for handles traced to no slot. The residency set accumulates textures while the deferred-release queue grows within one submission.
+- **Cause:** a pool walk resolves the copied descriptors of textures whose API objects have been finalized. When more than 512 of them are touched, the ghost ring evicts earlier entries. The next walk creates their Metal backing again even though the GPU still needs the earlier versions for draws already encoded in this submission.
+- **Fix:** keep a submission-local reference to finalized textures resolved during encoding. The ghost ring stays bounded, and eviction does not drop the texture's active lookup or residency. At commit, overflow backing retires behind the GPU fence. Bindless tables containing transient views are rebuilt for the next submission, as those views also retire at commit.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_cpu_tex` walks 528 finalized descriptors twice in one submission and checks that both walks use the same textures without a second upload, then checks that the temporary references are cleared at commit.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
 ### A replay's own objects take serials above a capture's
 
 - **Symptom:** `nvn_replay` aborts on a game's capture with `-[NvProg width]: unrecognized selector` (from `rt_dims`) or `-[NvProg mipmapLevelCount]`: a render target resolves to a program.

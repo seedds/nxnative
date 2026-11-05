@@ -329,6 +329,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 
 ## CPU cost and pacing
 
+### A full-frame shader overflows the raw write log
+
+- **Symptom:** `[RED] raw global memory: a write log ran out of slots` while the AV1 title movie plays at about 21 fps. A relaxed GPU timestamp may put part of the movie dispatches' time before the compute encoder's reported start.
+- **Cause:** the movie shaders write through loaded pointers across full image planes. The page log repeatedly probes occupied slots with atomic compare-and-swap, and every raw pointer access searches the pool table. A Metal System Trace shows sustained compute activity through the apparent idle interval.
+- **Fix:** [Raw global memory uses tagged lookup hints and a pool bitmap](shaders.md#global-memory-at-an-address-loaded-from-memory). The bitmap fits every entry, and the GPU only issues the atomic OR when its bit is still clear.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
 ### Arena buffer ownership on allocation
 
 - **Symptom:** autorelease work takes a measurable share of replay time, with temporary arena-buffer ownership traffic a few times per draw.

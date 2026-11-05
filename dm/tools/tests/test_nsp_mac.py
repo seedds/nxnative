@@ -173,8 +173,8 @@ class Nvn(Base):
 
     def test_cli_tidies_the_work_folder_after_a_build_that_succeeded(self):
         folder = self.sh.parent / 'nsp'; (folder / '0100000000000000-work').mkdir(parents=True); (folder / 'notes-work').mkdir()
-        def built(args): nsp.NSP_FOLDER = folder
-        def failed(args): nsp.NSP_FOLDER = folder; raise nsp.BuildError('stopped')
+        def built(args): nsp.NSP_FOLDER = folder   # type: ignore[attr-defined]  # nsp is importlib-loaded: pyright knows no attributes on its ModuleType
+        def failed(args): nsp.NSP_FOLDER = folder; raise nsp.BuildError('stopped')   # type: ignore[attr-defined]
         with mock.patch.object(nsp, 'parse_args'), mock.patch.object(nsp.PROG, 'say'), mock.patch.object(nsp.tree_tar, 'pack_quiet') as tidy:
             with mock.patch.object(nsp, 'main', failed): self.assertEqual(nsp.cli([]), 1)
             tidy.assert_not_called()

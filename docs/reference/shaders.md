@@ -1039,6 +1039,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md): 10,177 instructions in 7,590 programs. The fix made no visible difference in its tutorial area.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
 
+### Global memory: descriptors, ATOMG.CAS, INC / DEC
+
+- **Symptom:** a global load, store or atomic at the wrong address in code that uses `desc[URb][Ra.64]` (the descriptor's value added to the address); a shader with `ATOMG.CAS` refused (`Ampere instruction 3a9 ... is not implemented`); an `ATOMG.INC` / `ATOMG.DEC` / `RED.INC` / `RED.DEC` with no effect.
+- **Cause:** `AGlobalAddress` added the uniform register in every uniform form. nvdisasm (sm_86) names two forms: `[Ra.64+URb]`, where URb is part of the address, and `desc[URb][Ra.64]` (bit 76 of LDG / STG, bit 71 of ATOMG / RED), where it is a memory descriptor (the compiler's cache policy) and the address is Ra.64 alone. Unreal Engine 5.4's bounded read (`LDG.!P0 R5, [R5 + UR4]`, `GuardedWrites`) is the first form and is unchanged. Opcode 0x3a9 was not registered; INC and DEC have no case in `EmitAtomicOp`.
+- **Fix:** `AGlobalAddress` takes the form's descriptor bit; `AAtomgCas` (0x3a9, 32 bits: Rb expected, Rc at 64 the new value, the old value returned); `AGlobalIncDec`, a compare-and-swap loop as ATOMS's, for ATOMG and RED.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`GlobalMemory`: the three fail on `main`). A GPU cross-check of 300 LDG / STG / ATOMG / RED from an nvdisasm-validated corpus (sm_86 and sm_80 compiled code), as one-thread compute shaders through a gmem_map the harness builds as the host does (`dmsh_abi.h` `DMSH_GMEM_MAP_*`), production options: 135 identical to 300. Which forms NVN's compiler emits for games is not known here: the descriptor form is CUDA's usual one, and no game note in this repository shows it.
+- **Found on:** cross-checking the translator against nvdisasm and a reference interpreter; no game run.
+
 ### A guarded load whose destination is its address
 
 - **Symptom:** none in the log: everything drawn with an engine's scene data lands on the first instance's transform, or at nothing. In the MSL, a bounds-checked read has a constant index (`vp_s2._m0[0]`) just after a comparison of the register it should use.

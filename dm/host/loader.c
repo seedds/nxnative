@@ -312,6 +312,12 @@ void dm_fps_state_apply(void) {
     const char *rs = getenv("DM_RENDER_SCALE"); float sc = 1.0f;
     if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.5f && sc <= 1.0f)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.5 to 1.0; keeping the game's size", rs); sc = 1.0f; } else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", g_fps_mod, sc); }
     memcpy(dm_fps_state + 0x10, &sc, sizeof sc);
+    // Scene resolution scale (StarFox's patches.py: the stub at main+0xb4498ac): the share of the target the game renders its scene at, in place of the scale from its settings
+    // (0.5 docked, 0.83 handheld). DM_RESOLUTION_SCALE, 0.25 to 1.0; 0 or unset = the game's own. Only builds with that stub read it
+    const char *qs = getenv("DM_RESOLUTION_SCALE"); float q = 0;
+    if (qs && *qs) { char *end; q = strtof(qs, &end); if (end == qs || *end || !(q == 0 || (q >= 0.25f && q <= 1.0f))) { LOG("[RED] DM_RESOLUTION_SCALE=%s: must be 0 or 0.25 to 1.0; keeping the game's scale", qs); q = 0; }
+                     else if (q > 0) LOG("%s: scene rendered at %.2f of the target (DM_RESOLUTION_SCALE; only builds with that stub follow it)", g_fps_mod, q); }
+    memcpy(dm_fps_state + 0xa0, &q, sizeof q);
     // Screen shape: DM_SCREEN_ASPECT, the screen's width / height between 1.3 and 1.77, makes the builds with screen-shape stubs
     // (Breath of the Wild 1.9.0's patches.py) render that shape: the output keeps its width (1920) and takes the height that gives the ratio, a multiple of 48 so the
     // 2/3-size layout space (1280 wide) stays whole: 1.43 → 1920x1344 and 1280x896. State +0x48 u32 output height, +0x4c u32 layout height, +0x50 its float; 0 = 16:9

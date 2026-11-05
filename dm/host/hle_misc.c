@@ -306,8 +306,13 @@ HLE_FORCE("_ZN2nn4chat21FinalizeVirtualCameraEPNS0_17VirtualCameraTypeE", "GameC
 HLE_FORCE("_ZN2nn4chat19EnableVirtualCameraEPNS0_17VirtualCameraTypeE", "GameChat virtual camera enabled: nothing to show it to", Result, h_chat_VcamOn, void *cam) { (void)cam; return RES_OK; }
 HLE_FORCE("_ZN2nn4chat20DisableVirtualCameraEPNS0_17VirtualCameraTypeE", "GameChat virtual camera disabled", Result, h_chat_VcamOff, void *cam) { (void)cam; return RES_OK; }
 HLE_FORCE("_ZN2nn4chat43SetVirtualCameraContainPhotographedContentsEPNS0_17VirtualCameraTypeEb", "GameChat virtual camera flag: kept nowhere", void, h_chat_VcamPhoto, void *cam, unsigned on) { (void)cam; (void)on; }
-HLE_FORCE("_ZN2nn4chat34GetVirtualCameraNativeWindowHandleEPKNS0_17VirtualCameraTypeE", "GameChat virtual camera window: none", uint64_t, h_chat_VcamWindow, const void *cam) {
-    (void)cam; static int once; if (!once++) LOG("chat: GetVirtualCameraNativeWindowHandle: no window (0)"); return 0;
+// The virtual camera's window: Star Fox makes an NVN window of it (main+0xba540a0, no check for 0) and presents its avatar picture into it, in its avatar settings. The host shows
+// every window it is given; this one is the host's off-screen native window, whose NVN windows drop their frames and do not pace the game (dm_native_window_offscreen, hle_nvn.c)
+static char g_vcam_native;
+int dm_native_window_offscreen(const void *native) { return native == &g_vcam_native; }
+HLE_FORCE("_ZN2nn4chat34GetVirtualCameraNativeWindowHandleEPKNS0_17VirtualCameraTypeE", "GameChat virtual camera window: an off-screen one (nobody receives it)", uint64_t, h_chat_VcamWindow,
+          const void *cam) {
+    (void)cam; return (uint64_t)(uintptr_t)&g_vcam_native;
 }
 HLE_FORCE("_ZN2nn4chat25StartLocalCameraStreamingEv", "GameChat local camera streaming: no camera, nothing streams", Result, h_chat_LocalStart, void) { return RES_OK; }
 HLE_FORCE("_ZN2nn4chat24StopLocalCameraStreamingEv", "GameChat local camera streaming stopped", Result, h_chat_LocalStop, void) { return RES_OK; }

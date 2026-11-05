@@ -226,6 +226,8 @@ void hid_keys_init(void) {
 //   saves a host texture's level 0 raw, every slice (a cube's six faces, a 3D texture's depth slices) (nvn_mtl.m dm_gfx_texraw), "drag <x0> <y0> <x1> <y1> [seconds=0.3]" moves one finger in a straight line between the two normalized picture
 //   points over that time and lifts it (the touch screen's pans and swipes, hle_touch.c gesture_sample), "dump" logs what each guest thread waits on and the graphics wait points
 //   (crash_dump_now, as the iOS app's DM_LOG_PORT dump; scripts/regress.py asks for it before stopping a hung game), "program <n>" makes oe::ExecuteProgram(n) with no parameters (a multi-program application's way between its programs, headless), "webshot <path>" saves the offline page shown as a PNG, "#…" is ignored.
+//   "p<n>:<keys>" (p2 … p8) presses on player n's controller instead, connecting it on its first press (local multiplayer without a second controller: Orbitals, two players).
+//   "both:<keys>" presses on players 1 and 2 together for the hold (Orbitals' "hold B to skip" wants both players: lines run one after another, so two lines never overlap).
 //   Look at a screen, decide, press, look again: menus whose timing moves from run to run (loading) need no blind timed script
 static void *ctl_main(void *arg) {
     const char *path = arg; long off = 0; char line[1100];
@@ -261,8 +263,25 @@ static void *ctl_main(void *arg) {
                     for (int i = 0; i <= n; i++) { dm_touch t = {0, x0 + (x1 - x0) * (float)i / (float)n, y0 + (y1 - y0) * (float)i / (float)n}; dm_touch_script(&t, 1); usleep((useconds_t)(s * 1e6f / (float)n)); }
                     dm_touch_script(NULL, 0); continue;
                 }
-                key_step st = {0, 0.15, 0}; char *h = strchr(line, '~'); if (h) { *h = 0; st.hold = atof(h + 1); }
-                parse_keys(line, &st);
+                int pn = 0, both = 0; char *keys = line;   // "p<n>:<keys>": player n's controller (connected from its first press on), for scripted runs of local multiplayer
+                if (line[0] == 'p' && line[1] >= '2' && line[1] <= '8' && line[2] == ':') { pn = line[1] - '1'; keys = line + 3; }
+                else if (!strncmp(line, "both:", 5)) { both = 1; keys = line + 5; }   // players 1 and 2 at the same time (a press held on one pad blocks this thread, so two lines never overlap)
+                key_step st = {0, 0.15, 0}; char *h = strchr(keys, '~'); if (h) { *h = 0; st.hold = atof(h + 1); }
+                parse_keys(keys, &st);
+                if (both) {
+                    void dm_ctl_connect_player(int p); dm_ctl_connect_player(1);
+                    LOG("DM_CTL: players 1+2 press %#llx (hold %.2f s)", (unsigned long long)st.btn, st.hold);
+                    script_set(st.btn, st.lx, st.ly, st.rx, st.ry); dm_pad_set_player(1, st.btn, st.lx, st.ly, st.rx, st.ry);
+                    usleep((useconds_t)(st.hold * 1e6));
+                    script_set(0, 0, 0, 0, 0); dm_pad_set_player(1, 0, 0, 0, 0, 0);
+                    continue;
+                }
+                if (pn) {
+                    void dm_ctl_connect_player(int p); dm_ctl_connect_player(pn);
+                    LOG("DM_CTL: player %d press %#llx (hold %.2f s)", pn + 1, (unsigned long long)st.btn, st.hold);
+                    dm_pad_set_player(pn, st.btn, st.lx, st.ly, st.rx, st.ry); usleep((useconds_t)(st.hold * 1e6)); dm_pad_set_player(pn, 0, 0, 0, 0, 0);
+                    continue;
+                }
                 LOG("DM_CTL: press %#llx (hold %.2f s)", (unsigned long long)st.btn, st.hold);
                 if (st.tap) { dm_touch t = {0, st.tx, st.ty}; dm_touch_script(&t, 1); }
                 script_set(st.btn, st.lx, st.ly, st.rx, st.ry); usleep((useconds_t)(st.hold * 1e6)); script_set(0, 0, 0, 0, 0);
@@ -383,14 +402,22 @@ static void note_merged(void) {   // logs the players whose npad the game does n
         else LOG("hid: player %d's controller is not used: the game supports no npad %d", p + 1, p);
     }
 }
+static _Atomic uint32_t g_ctl_players, g_front_players = 1;   // players DM_CTL connected ("p2:…"), on top of the front end's controllers
 void dm_pad_players(uint32_t mask) {
-    mask = (mask | 1u) & ((1u << DM_PLAYERS) - 1);
+    atomic_store(&g_front_players, mask);
+    mask = (mask | 1u | atomic_load(&g_ctl_players)) & ((1u << DM_PLAYERS) - 1);
     uint32_t old = atomic_exchange(&g_players, mask);
     for (int p = 1; p < DM_PLAYERS; p++) if ((old ^ mask) >> p & 1) {
         if (!(mask >> p & 1)) dm_pad_set_player(p, 0, 0, 0, 0, 0);   // a controller that went away leaves nothing pressed
         if (atomic_load(&g_ids_supported) & id_bit((uint32_t)p)) style_changed((uint32_t)p);
     }
     note_merged();
+}
+
+void dm_ctl_connect_player(int p) {
+    if (p <= 0 || p >= DM_PLAYERS || atomic_fetch_or(&g_ctl_players, 1u << p) >> p & 1) return;
+    LOG("DM_CTL: player %d's controller connected (a full key controller on No%d)", p + 1, p + 1);
+    dm_pad_players(atomic_load(&g_front_players));
 }
 
 // DM_REC=<file>: player 1's physical input (keyboard / touch, its controller and the controllers merged into it, as fill reads them) written as DM_KEYS steps, so a run plays again
@@ -1133,6 +1160,8 @@ TOUCH(1) TOUCH(2) TOUCH(3) TOUCH(4) TOUCH(5) TOUCH(6) TOUCH(7) TOUCH(8) TOUCH(9)
 // Gestures: recognized from the same touch points (hle_touch.c gesture_fill), so only in handheld mode too
 int gesture_fill(void *out, int n, uint64_t now_ns);
 HLE_FORCE("_ZN2nn3hid17InitializeGestureEv", "connect to the hid gesture recognizer; the host recognizes gestures from the touch points", void, h_hid_InitGesture, void) {}
+// The two-argument version of newer SDKs (PRAGMATA, SDK 20), as InitializeTouchScreen(int, int): unhooked, the sdk connects to the hid service, which the host does not serve (sm 0xe15 abort)
+HLE_FORCE("_ZN2nn3hid17InitializeGestureEii", "connect to the hid gesture recognizer (two-argument version); the host recognizes gestures from the touch points", void, h_hid_InitGesture2, int a, int b) { (void)a; (void)b; }
 HLE_FORCE("_ZN2nn3hid16GetGestureStatesEPNS0_12GestureStateEi", "gesture states, newest first (handheld mode: recognized from the touch points; console mode: none)", int, h_hid_Gestures, void *out, int n) {
     keys_sync();
     return dm_opmode() == 0 ? gesture_fill(out, n, now_ns()) : 0;

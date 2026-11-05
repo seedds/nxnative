@@ -1,4 +1,4 @@
-// Strong focus and fullscreen hooks override the graphics layer's weak, always-active test defaults.
+// Strong focus, fullscreen and window-covered hooks override the graphics layer's weak, always-active test defaults.
 #include <stdint.h>
 extern int test_focus;
 extern uint64_t test_focus_since;
@@ -8,3 +8,5 @@ extern int test_fullscreen;
 int front_fullscreen(void) { return test_fullscreen; }
 extern int test_variable_refresh;
 int front_screen_variable_refresh(void) { return test_variable_refresh; }
+extern int test_covered;
+int front_window_covered(void) { return test_covered; }

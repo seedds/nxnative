@@ -51,17 +51,28 @@ class Builder(unittest.TestCase):
     def test_off_by_default_and_with_another_value(self):
         for value in (None, '0', 'yes'):
             env = {k: v for k, v in os.environ.items() if k != 'DM_EXPERIMENTAL_BUILDER'} | ({'DM_EXPERIMENTAL_BUILDER': value} if value else {})
-            with self.subTest(value=value): self.assertIsNone(nsp.nxb_tool('nxb', env))
+            with self.subTest(value=value): self.assertIsNone(nsp.nxb_tool('extract', env))
         self.assertEqual(self.said, [], 'off says nothing')
 
-    def test_the_binaries_beside_nxb_or_in_the_folder(self):
-        self.assertEqual(nsp.nxb_tool('nxb'), self.nxb)
-        self.assertEqual(nsp.nxb_tool('nxb', dict(os.environ, NXB_BIN=str(self.bin))), self.nxb, 'NXB_BIN may name the folder')
-        self.assertIsNone(nsp.nxb_tool('nxb-split'))
-        self.assertIn('nxb-split is missing: the standard builder runs this stage', self.text())
-        self.assertIsNone(nsp.nxb_tool('nxb', dict(os.environ, NXB_BIN=str(self.t / 'gone'))))
+    def test_a_stage_binary_beside_nxb_else_its_subcommand(self):
+        self.assertEqual(nsp.nxb_tool('split'), [self.nxb, 'split'], 'one binary: the stage is its subcommand')
+        split = tool(self.bin, 'nxb-split', 'sys.exit(0)')
+        self.assertEqual(nsp.nxb_tool('split'), [split], 'a stage binary of its own goes first')
+        self.assertEqual(nsp.nxb_tool('split', dict(os.environ, NXB_BIN=str(self.bin))), [split], 'NXB_BIN may name the folder')
+        self.assertEqual(self.said, [])
+        self.assertIsNone(nsp.nxb_tool('split', dict(os.environ, NXB_BIN=str(self.t / 'gone'))))
         self.assertIn('NXB_BIN does not name the nxb binary', self.text())
-        self.said.clear(); nsp.nxb_tool('nxb-split'); self.assertEqual(self.said, [], 'a note once per build')
+        empty = self.t / 'empty'; empty.mkdir()
+        self.assertIsNone(nsp.nxb_tool('split', dict(os.environ, NXB_BIN=str(empty))))
+        self.assertIn('the standard builder runs every stage', self.text())
+        self.said.clear(); nsp.nxb_tool('split', dict(os.environ, NXB_BIN=str(empty))); self.assertEqual(self.said, [], 'a note once per build')
+
+    def test_a_subcommand_nxb_does_not_have_falls_back(self):   # the one-binary nxb of a release without the stage: its usage error, exit 2
+        tool(self.bin, 'nxb', "print('nxb: extract: not implemented yet', file=sys.stderr); sys.exit(2)")
+        tmp = self.t / 'v0.partial'
+        self.assertFalse(nsp.nxb_extract(self.t / 'k', pfs0(self.t / 'g.nsp', ['a.cnmt.nca']), None, tmp, self.logs, 'v0', APP, None))
+        self.assertIn('exit code 2', self.text())
+        self.assertIn('the standard builder runs it', self.text())
 
     def extraction(self, body, marker='marker.txt'):
         src = self.t / 'src'; src.mkdir(exist_ok=True); (src / 'marker.txt').write_text('x')

@@ -426,7 +426,7 @@ def free_gb(p):
 
 # ---- The experimental builder (nxbuild) ----
 # DM_EXPERIMENTAL_BUILDER=1 with NXB_BIN=<the nxb binary, or its folder>: the stages nxbuild reproduces byte for byte run through its binaries beside nxb (the extraction:
-# nxb-extract; the shader split: nxb-split). This script stays the driver: the stage names, the events, the work folder and the reuse keys are the same. A stage nxbuild does
+# nxb-extract, or nxb extract; the shader split: nxb-split, or nxb split). This script stays the driver: the stage names, the events, the work folder and the reuse keys are the same. A stage nxbuild does
 # not support (exit code NXB_UNSUPPORTED, or any other failure), a case it is not given (XCI, NSZ, merged packages, DLC, captures, a provisional or derived profile) and an
 # output that fails the checks below run the standard way, with a note in the log. Without the variable nothing changes.
 NXB_UNSUPPORTED = 4   # nxbuild's exit code for "not supported yet": nothing it wrote is an output (nxbuild's docs/integration-requests.md)
@@ -437,15 +437,17 @@ def nxb_note(msg):   # one note per message and build: a missing binary is named
     if msg not in _nxb_noted: _nxb_noted.add(msg); say(f'experimental builder: {msg}')
 
 
-def nxb_tool(name, env=None):
-    """The nxbuild binary name (nxb-extract, nxb-split) beside NXB_BIN when the experimental builder is on, else None"""
+def nxb_tool(sub, env=None):
+    """The command of nxbuild's stage sub (extract, split) when the experimental builder is on, else None: its own binary nxb-<sub> beside NXB_BIN when there is one
+    (nxbuild's first releases), else the nxb binary's subcommand ([nxb, sub], one binary for every stage)"""
     env = os.environ if env is None else env
     if env.get('DM_EXPERIMENTAL_BUILDER') != '1': return None
     where = Path(os.path.expanduser(env.get('NXB_BIN', '')))
     if not env.get('NXB_BIN') or not where.exists(): nxb_note(f'NXB_BIN does not name the nxb binary ({env.get("NXB_BIN", "")!r}): the standard builder runs every stage'); return None
-    tool = (where if where.is_dir() else where.parent) / name
-    if tool.is_file() and os.access(tool, os.X_OK): return tool
-    nxb_note(f'{tool} is missing: the standard builder runs this stage'); return None
+    folder = where if where.is_dir() else where.parent
+    for cmd in ([folder / f'nxb-{sub}'], [folder / 'nxb', sub]):
+        if cmd[0].is_file() and os.access(cmd[0], os.X_OK): return cmd
+    nxb_note(f'no nxb in {folder}: the standard builder runs every stage'); return None
 
 
 def nxb_run(cmd, log, what):
@@ -468,7 +470,7 @@ def nxb_run(cmd, log, what):
 def nxb_extract(keys, base, upd, tmp, logs, name, app, marker):
     """The extraction of one version through nxb-extract into tmp (the layout nx_extract writes: ExeFS/, RomFS.img, control.nacp, icon.jpg). True when its output passed the checks;
     False leaves no tmp, for nx_extract. Only plain NSPs of one title: an XCI, NSZ or merged package, another program or a damaged NSP go the standard way"""
-    tool = nxb_tool('nxb-extract')
+    tool = nxb_tool('extract')
     if not tool: return False
     def plain(p):
         try: return p.suffix.lower() == '.nsp' and is_package(p) and not is_merged(p) and not any(n.lower().endswith('.ncz') for n in package_names(p))
@@ -477,7 +479,7 @@ def nxb_extract(keys, base, upd, tmp, logs, name, app, marker):
         nxb_note(f'extract {name}: an XCI, NSZ or merged package, --program or --allow-damaged is not supported yet, the standard builder runs it'); return False
     log, scratch = logs / f'nxb_extract_{name}.log', tmp.with_name(tmp.name + '.nxb-base')
     rmtree(tmp); rmtree(scratch)
-    cmd = [tool, '--keys', keys, '--base', base] + (['--out', scratch, '--update', upd, tmp, '--updates-only'] if upd and upd != base else ['--out', tmp])
+    cmd = [*tool, '--keys', keys, '--base', base] + (['--out', scratch, '--update', upd, tmp, '--updates-only'] if upd and upd != base else ['--out', tmp])
     ok = nxb_run(cmd, log, f'extract {name}')
     rmtree(scratch)
     if ok:
@@ -498,13 +500,13 @@ def nxb_split(roms, mains, tmp, names, logs, g):
     """The shader split through nxb-split into tmp/pkg and tmp/tables (shader_split.py's outputs). Returns the text the caller reads from shader_split.py's log (its 'shaders: N' line),
     or None for shader_split.py, with tmp emptied again. Taken only when the tables it wrote have the data rows of the profile's (pso_pairs.tsv too where the profile has one): a reader
     nxbuild lacks shows there. The caller passes only builds with a registered profile and no DLC, captures, NROs or decoder"""
-    tool = nxb_tool('nxb-split')
+    tool = nxb_tool('split')
     if not tool: return None
     dirs = [Path(m).parent.parent for m in mains]
     if any(Path(r) != d / 'RomFS.img' or Path(m) != d / 'ExeFS' / 'main' for r, m, d in zip(roms, mains, dirs)) or not (g.dir / 'game.tsv').is_file():
         nxb_note('shader split: the inputs are not RomFS images of extractions, the standard builder runs it'); return None
     log, t = logs / 'nxb_split.log', tmp / 'tables'
-    ok = nxb_run([tool, '--game', g.dir / 'game.tsv', '--pkg', tmp / 'pkg', '--map', t / names[0], '--facts', t / names[1], '--pairs', t / names[2], '--pso-pairs', t / 'pso_pairs.tsv', *dirs],
+    ok = nxb_run([*tool, '--game', g.dir / 'game.tsv', '--pkg', tmp / 'pkg', '--map', t / names[0], '--facts', t / names[1], '--pairs', t / names[2], '--pso-pairs', t / 'pso_pairs.tsv', *dirs],
                  log, 'shader split')
     if ok:
         bad = [ln for ln in log.read_text(errors='replace').splitlines() if ln.startswith('[RED]')]

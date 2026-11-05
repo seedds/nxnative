@@ -1322,7 +1322,7 @@ def vs_depth(src):
     single = src[:m.start()] + gl
     return single, single + '\n' + re.sub(r'\bmain0\s*\(', 'main0_z(', body, count=1)
 
-def int_outputs(src, body, cols):
+def int_outputs(src, body, cols, follow=False):
     """The colour outputs that hold integers, not float bits. The translator keeps registers in integer locals, so a float colour also reaches its output as as_type<float>(_n), with _n =
     as_type<int>(<a float>) somewhere above; Kirby Star Allies' G-buffer shaders write all four of colour 0 to 2 that way, and only colour 2 goes to an integer target (RGBA8Uint, its material bits:
     constants, shifts and ORs). So each write is followed back through the locals: a value computed by an integer operation or a small integer constant counts as integer, the bits of a computed
@@ -1346,7 +1346,13 @@ def int_outputs(src, body, cols):
     for nm in cols:
         k = set()
         for w in re.findall(r'\bout\.%s(?:\.\w+)? = ([^;]+);' % nm, body):
-            w = w.strip(); a = re.fullmatch(r'as_type<float\d?>\((.*)\)', w)
+            w = w.strip()
+            # a float local with one definition stands for that definition: PRAGMATA's visibility-buffer pixel shaders (a9c1f9ea0c76a54c) write colour 0 into an RG32Uint target as
+            # float _604 = as_type<float>(int(gl_PrimitiveID)); out.m_52.x = _604; (and the depth's float bits in .y)
+            for _ in range(8 if follow else 0):
+                if not (re.fullmatch(r'_\d+', w) and types.get(w, '').startswith('float') and len(defs[w]) == 1): break
+                w = defs[w][0]
+            a = re.fullmatch(r'as_type<float\d?>\((.*)\)', w)
             if a: k |= kinds(a[1].strip(), set())
             elif re.fullmatch(r'-?[0-9.]+(?:e[-+]?\d+)?f?', w): k |= {'int'} if 0 < abs(float(w.rstrip('f'))) < 1.17549e-38 else set()
             else: k.add('float')
@@ -1378,9 +1384,14 @@ def fs_uint(src):
         w = w.strip(); d = re.fullmatch(r'\w+', w) and re.search(r'\bfloat\d? %s = (in\.\w+(?:\.\w+)?);' % w, src)
         i = re.fullmatch(r'in\.(\w+)(?:\.\w+)?', d[1] if d else w)
         return bool(i and i[1] in flat)
-    body = src[m.start():]; body = body[:body.find('return out;') + 1 or len(body)]
+    body = src[m.start():]; whole = body[:body.rfind('return out;') + 1 or len(body)]; body = body[:body.find('return out;') + 1 or len(body)]
     ints = int_outputs(src, body, cols)
-    if not from_int and not ints and not (writes and (all(re.fullmatch(r'-?[0-9.]+f?|float\d\([-0-9., ]*\)', w.strip()) for w in writes) or all(passed(w) for w in writes))): return None, 0
+    plain = writes and (all(re.fullmatch(r'-?[0-9.]+f?|float\d\([-0-9., ]*\)', w.strip()) for w in writes) or all(passed(w) for w in writes))
+    if not from_int and not ints and not plain:   # nothing found up to the first return: look again to the last one (an early discard return comes before the writes that matter) and through float locals
+        # (PRAGMATA's 403 visibility-buffer pixel shaders, a9c1f9ea0c76a54c: float _604 = as_type<float>(int(gl_PrimitiveID)); out.m_52.x = _604; into RG32Uint, after a discard's return).
+        # Only here, so every shader that had its entry points keeps them as they were
+        ints = int_outputs(src, whole, cols, follow=True)
+    if not from_int and not ints and not plain: return None, 0
     uty = lambda ty: 'u' + ty.replace('float', 'int')   # float4 → uint4, float → uint
     def entry(sfx, as_uint):   # main0 again as main0_<sfx>, returning the outputs in as_uint as the unsigned integer vectors of their bits (dmsh_fetch.py cuts the source at main0_out_u)
         struct = f'struct main0_out_{sfx}\n{{\n' + ''.join(f'    {uty(cols[nm]) if nm in as_uint else ty} {nm} {at};\n' for ty, nm, at in mem) + '};\n\n'

@@ -161,6 +161,7 @@ DM_NVN_INDLOG	diagnostic	`=<n>`: the first n indirect draws (and those of pass-d
 DM_NVN_IXCLOG	diagnostic	`=<n>` logs the first n indirect draw and dispatch conversions (record to arguments) once the GPU has run them
 DM_NVN_KEYDUMP	diagnostic	`=<fs key>[:n[:every]]`: for up to n draws of that fragment shader (default 6), logs the pass dump binding lines plus vertex formats, vertex streams and uniform values; meant for devices
 DM_NVN_LAZY_CLEAR	switch	`0` makes clears with no draw after them open a pass of their own, as before; by default they wait to become the load action of the next pass on that target
+DM_NVN_LINEAR_PFV	diagnostic	`0`: linear 32-bit integer textures are made without the format-view usage (as before), for an A/B
 DM_NVN_LOADPROBE	diagnostic	`=1`, `2` or `3`: attachments whose load is skipped are cleared to a sentinel colour (`3` NaN; `1` NaN for float formats) and the sentinel pixels left at pass end are counted (should be 0)
 DM_NVN_LOG	diagnostic	`=1` logs the creation of NVN objects
 DM_NVN_MAGSCAN	diagnostic	`=<fs key>[:every[:phase]]`: device self-check that reads each pass's colour attachments every `every` frames (default 30) and logs `[mag]` lines for solid magenta 16×16 blocks or non-finite pixels
@@ -191,6 +192,7 @@ DM_NVN_STORAGE_FIRST_USE	switch	`0` keeps a sampled block-compressed texture in 
 DM_NVN_T2T_FROM	diagnostic	`=<frame>`: `DM_NVN_T2T_TRACE` records copies only from that frame on (default 0)
 DM_NVN_T2T_TRACE	diagnostic	`=<W>x<H>:<file>`: after each copy into an RGBA16F texture of that size, copies the result into a trace buffer on the GPU timeline; 240 entries are written to the file
 DM_NVN_TBDR	switch	`=1` turns on the replay's TBDR pass optimizations (store / load elision, pass merging, same-target continuation); off by default since bindless textures defeat their read inference
+DM_NVN_TBUF_PFV	diagnostic	`0`: 32-bit integer buffer textures are made without the format-view usage (as before), for an A/B
 DM_NVN_TEXCPU	diagnostic	`=1` logs non-packaged (non-swizzled) textures in CPU-visible pools
 DM_NVN_TEXDUMP	diagnostic	`=<frame>:<path>`, `size=<W>x<H>:<path>` or `layers=<n>:<path>`: saves every colour render target of that frame as PNG (`%d` = serial × 100 + layer × 10 + level)
 DM_NVN_TEXINFO	diagnostic	`=<W>x<H>` logs storage and description of every texture of that size on first use, registration and initialization (pool, flags, packaged, non-zero bytes, swizzles)

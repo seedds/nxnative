@@ -35,3 +35,6 @@ DM_PSO_PREBUILD	toggle	-	1	gfxapi:nvn	Performance	Pipeline prebuild	The first st
 DM_NVN_ENC_THREAD	toggle	-	1|DM_GAME_ENC_THREAD	gfxapi:nvn	Performance	Encode thread
 DM_FPS_HOLD	toggle	on/off	DM_GAME_FPS_HOLD	DM_GAME_FPS_TARGET!=0	Performance	Hold frames when late
 DM_METAL_HUD	toggle	-	0	always	Performance	Performance HUD
+DM_AUDIO_LATENCY	choice	standard=Standard,low=Low	standard	always	Performance	Audio latency	Low asks the audio device for 16-frame buffers (about 0.3 ms) instead of about 5 ms. The device calls back far more often: a little more CPU, and a game that already clicks may click more.
+DM_AUDIO_OUT	choice	matrix=Original matrix,sys=System downmix,wide=Wide stereo,binaural=Binaural	matrix	always	Performance	Audio output	How a 5.1 game's sound reaches the stereo device: the host's own mix, the system's downmix, a wide speaker mix, or a binaural (headphone) mix. Original matrix is the tested default.
+DM_AUDIO_HP_AUTO	toggle	-	1	platform:mac	Performance	Headphone auto-switch	With Wide stereo or Binaural, follow headphone plug and unplug. A mode you picked outside those two is never changed.

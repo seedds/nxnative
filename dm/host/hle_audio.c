@@ -3,6 +3,7 @@
 //       iOS defaults to real audio output (the product must have sound), tests that want silence set DM_AUDIO=0 explicitly; Mac defaults to the silent sink (replay / gate checks are silent), DM_AUDIO=1 for real audio output.
 // The contents of AudioOut / AudioOutBuffer / AudioOutParameter are read and written only through the interfaces below; the host defines its own internal layout and only writes the front part of the structs (AudioOut: the SDK's own fields, au_info).
 #include "hle.h"
+#include "audio_sys.h"
 #include <AudioToolbox/AudioToolbox.h>
 #include <TargetConditionals.h>
 #include <dispatch/dispatch.h>
@@ -16,7 +17,7 @@ enum { AU_IDLE, AU_STARTING, AU_CANCELED, AU_WAIT_CALLBACK };
 typedef struct { void *ptr; uint64_t cap, size; } gbuf;     // The first 24 bytes written into the guest AudioOutBuffer
 #define QMAX 64
 #define RELMAX QMAX                    // Released max = number of in-flight buffers (the game must take a buffer back before it can append again), same limit as pending
-typedef struct { uint64_t calls, count, qsum, underruns, zero_bytes; uint32_t fmin, fmax; } audio_stats;
+typedef struct { uint64_t calls, count, qsum, underruns, zero_bytes; uint32_t fmin, fmax; int mode; uint64_t arm_fail; uint32_t ring_max; } audio_stats;
 typedef struct {
     pthread_mutex_t m;
     void *event;                       // Guest SystemEvent: signaled whenever a buffer is released
@@ -38,7 +39,14 @@ typedef struct {
     int id;                            // open sequence number (#N in the log; tells simultaneous outputs apart, e.g. Engage's Wwise and Unity's built-in FMOD)
     int nlog;                          // Start / Stop / Close lines logged so far (at most 32 per output)
     _Atomic uint64_t under_n, under_b; // underruns: times the pending queue was empty when the callback needed data / zero-filled bytes
+    _Atomic uint64_t arm_fail;         // device blocks folded by the host because the mode's device gave nothing
+    void *arm;                         // the output mode's device (audio_sys.h), built while the unit is stopped; NULL = the host's own fold
+    int armMode;                       // AM_*: what a->arm actually is - the render callback branches on this, never on g_mode
+    unsigned slice;                    // the AUSM device's fixed frames per render: the device's own tick (arm_slice_for)
+    int16_t *ring; unsigned ringPos, ringEnd;   // a rendered AUSM slice, handed out across callbacks until it runs out
+    int16_t *mixbuf;                   // one slice of guest 5.1 pulled for the AUSM device
     uint64_t st_calls, st_count, st_qsum, st_u0, st_ub0; uint32_t st_fmin, st_fmax;   // callback-owned accumulators
+    uint64_t st_af0; uint32_t st_ring; // this window's arm-fail baseline and banked-frames maximum, for the statistics snapshot
     audio_stats st_report; _Atomic int st_pending; // one snapshot, consumed by the watchdog or Close under g_aos_lock
     _Atomic uint64_t cb_n;             // device callbacks of this output (the watchdog's evidence that the device still plays it)
     uint64_t wd_n, wd_t;               // watchdog: callback count last seen and when it last moved (under g_aos_lock)
@@ -126,28 +134,187 @@ static void pull(aout *a, uint8_t *dst, uint64_t n) {
     }
 }
 
-// A six-channel output (front-left front-right center LFE back-left back-right) goes to the device as stereo, downmixed here with the audio renderer's default Q15 coefficients (hle_audren.c):
-// Core Audio's own 6 → 2 mapping keeps only the front pair, so voices on the center (Luigi's Mansion 3) and the back channels were silent. The queue still takes all six guest channels,
-// in blocks through a stack buffer (no allocation in the real-time callback)
+// A six-channel output (front-left front-right center LFE back-left back-right) goes to the device as stereo.
+// Mode 0 folds it here with the audio renderer's default Q15 coefficients (hle_audren.c); modes 1-3 hand the
+// fold to a system device instead (audio_sys.h). Core Audio's own 6 → 2 mapping picks the front-left and
+// front-right by role (gain 1.0) and drops the centre - dialogue - and the back channels; under the usual
+// MPEG_5_1_A order that pair happens to be the first two slots, so voices on the center (Luigi's Mansion 3)
+// and the back channels were silent. The queue still takes all six guest channels, in blocks through a stack
+// buffer (no allocation in the real-time callback)
 static int device_channels(const aout *a) { return a->ch == 6 ? 2 : a->ch; }
+
+// ---- Output modes (DM_AM_* in hle.h): which fold a 5.1 output's device gets ----
+// 0 is the host's own Q15 fold below, the tested default; the devices for 1-3 live in audio_sys.m. Every
+// device is built while the output's unit is stopped (au_create, or dm_audio_set_mode under g_aos_lock), so
+// a rebuild never runs against the render callback. A device that cannot build - the spatial mixer is a
+// per-OS component - or that produces nothing leaves the output on mode 0's fold: quieter, never silent.
+enum { AM_MATRIX = 0, AM_SYSCONV = 1, AM_WIDE = 2, AM_BINAURAL = 3, AM_N = 4 };
+enum { CH_TAG = 0, MIXMAX = 4096 };   // the guest channel order declares as MPEG_5_1_A; MIXMAX caps a mode device's slice (audio_sys.m's MAXSLICE)
+static const int g_ch[6] = { 0, 1, 2, 3, 4, 5 };   // which interleaved slot carries each role (front-left, front-right, centre, LFE, back-left, back-right): the order the fold and its comment assume
+static const char *const AM_NAME[AM_N] = { "matrix", "system downmix", "wide stereo", "binaural" };
+static _Atomic int g_mode;               // the published mode; arms are rebuilt to match under g_aos_lock
+static _Atomic uint32_t g_au_frames;     // the device tick the Mac's hardware last granted (au_buffer); iOS derives its tick from DM_AUDIO_LATENCY
+#if !TARGET_OS_IPHONE
+// The Mac's output routing (audio_route_mac.m) overrides this weak default and starts following the default
+// output device when the first Apple-side device builds (any non-matrix arm, mode 1 included; the routing
+// itself only ever switches between the two spatial modes). The unit tests do not link that module and run
+// the no-op; iOS has none of the hardware queries involved and never calls it.
+__attribute__((weak)) void dm_audio_route_init(void) { }
+#endif
+
+// Mode 0's fold, applied to n frames the queue has already handed over: six interleaved channels in, stereo out
+static void q15_fold(const int16_t *in, int16_t *out, uint64_t n) {
+    enum { CF = 32768, CC = 23167, CL = 8224, CB = 23167 };
+    for (uint64_t i = 0; i < n; i++) {
+        const int16_t *p = in + 6 * i;
+        int64_t c = (int64_t)p[2] * CC + (int64_t)p[3] * CL;
+        int64_t l = ((int64_t)p[0] * CF + c + (int64_t)p[4] * CB) >> 15;
+        int64_t r = ((int64_t)p[1] * CF + c + (int64_t)p[5] * CB) >> 15;
+        *out++ = (int16_t)(l > 32767 ? 32767 : l < -32768 ? -32768 : l);
+        *out++ = (int16_t)(r > 32767 ? 32767 : r < -32768 ? -32768 : r);
+    }
+}
 static void pull_device(aout *a, uint8_t *dst, uint64_t bytes) {
     if (a->ch != 6) { pull(a, dst, bytes); return; }
-    enum { BLOCK = 128, CF = 32768, CC = 23167, CL = 8224, CB = 23167 };
+    // The branch follows what the output's arm is, never the global mode: the arm and its type are rebuilt
+    // together while the unit is stopped (dm_audio_set_mode), so a callback can never pair a new mode number
+    // with the previous mode's device. The pull itself - one continuous byte cursor, whole blocks released -
+    // is the same for every mode and every buffer tier: the modes change the fold, not the rhythm.
+    enum { BLOCK = 128 };
     int16_t scratch[BLOCK * 6], *out = (int16_t *)dst;
     uint64_t frames = bytes / (2 * sizeof *out);
-    while (frames) {
-        uint64_t n = frames < BLOCK ? frames : BLOCK;
-        pull(a, (uint8_t *)scratch, n * 6 * sizeof *scratch);
-        for (uint64_t i = 0; i < n; i++) {
-            const int16_t *p = scratch + 6 * i;
-            int64_t c = (int64_t)p[2] * CC + (int64_t)p[3] * CL;
-            int64_t l = ((int64_t)p[0] * CF + c + (int64_t)p[4] * CB) >> 15;
-            int64_t r = ((int64_t)p[1] * CF + c + (int64_t)p[5] * CB) >> 15;
-            *out++ = (int16_t)(l > 32767 ? 32767 : l < -32768 ? -32768 : l);
-            *out++ = (int16_t)(r > 32767 ? 32767 : r < -32768 ? -32768 : r);
+    if (a->armMode == AM_MATRIX || !a->arm) {
+        while (frames) {
+            uint64_t n = frames < BLOCK ? frames : BLOCK;
+            pull(a, (uint8_t *)scratch, n * 6 * sizeof *scratch);
+            q15_fold(scratch, out, n); out += 2 * n; frames -= n;
         }
-        frames -= n;
+        return;
     }
+    if (a->armMode == AM_SYSCONV) {
+        while (frames) {
+            uint64_t n = frames < BLOCK ? frames : BLOCK;
+            pull(a, (uint8_t *)scratch, n * 6 * sizeof *scratch);
+            if (dm_conv_run(a->arm, scratch, (unsigned)n, out) != (int)n) {   // the device gave nothing this time: fold here, nothing goes silent
+                atomic_fetch_add_explicit(&a->arm_fail, 1, memory_order_relaxed);
+                q15_fold(scratch, out, n);
+            }
+            out += 2 * n; frames -= n;
+        }
+        return;
+    }
+    // The spatial mixer renders one fixed slice per call (audio_sys.m). A callback that asks for more hands
+    // out whole slices and pulls fresh ones; whatever a render produced beyond the callback's tick stays
+    // banked in a->ring and goes out first next time. The slice is the device's own tick (au_buffer's
+    // read-back; 16 under the low-latency tier), never the last callback's size: a device switch's transient
+    // tick would pin every later slice to itself and keep banking the difference as added latency.
+    while (frames) {
+        if (a->ringPos < a->ringEnd) {
+            uint64_t n = frames < (uint64_t)(a->ringEnd - a->ringPos) ? frames : (uint64_t)(a->ringEnd - a->ringPos);
+            memcpy(out, a->ring + 2 * a->ringPos, (size_t)n * 4); out += 2 * n; a->ringPos += (unsigned)n; frames -= n;
+            continue;
+        }
+        a->ringPos = a->ringEnd = 0;
+        pull(a, (uint8_t *)a->mixbuf, (uint64_t)a->slice * 12);
+        if (dm_ausm_run(a->arm, a->mixbuf, a->slice, a->ring) == (int)a->slice) a->ringEnd = a->slice;
+        else {   // the device gave nothing this slice: fold it here, nothing goes silent
+            atomic_fetch_add_explicit(&a->arm_fail, 1, memory_order_relaxed);
+            q15_fold(a->mixbuf, a->ring, a->slice); a->ringEnd = a->slice;
+        }
+    }
+    if (a->ringEnd - a->ringPos > a->st_ring) a->st_ring = a->ringEnd - a->ringPos;   // rendered but unheard this window: the added-latency readout
+}
+
+// The AUSM device renders exactly this many frames per call, so the slice is the device's own tick: a whole
+// slice goes out in the same callback that pulled it and nothing banks in steady state. On the Mac that is
+// what au_buffer's read-back says the hardware granted; iOS has no read-back, and its session tick is the
+// 5 ms request's 240 frames, or 16 under the low-latency tier. Never the last callback's size: a device
+// switch produces a few oversized transient ticks, and a slice pinned to one would over-pull every later
+// callback and keep banking the difference.
+static unsigned arm_slice_for(void) {
+    UInt32 df = atomic_load_explicit(&g_au_frames, memory_order_relaxed);
+#if TARGET_OS_IPHONE
+    if (!df) { const char *lat = getenv("DM_AUDIO_LATENCY"); df = lat && !strcmp(lat, "low") ? 16 : RATE / 200; }
+#endif
+    if (!df || df > MIXMAX) df = RATE / 200;
+    return df < 16 ? 16 : df;
+}
+static void arm_free(aout *a) {
+    if (a->arm) { if (a->armMode == AM_SYSCONV) dm_conv_close(a->arm); else dm_ausm_close(a->arm); a->arm = NULL; }
+    free(a->ring); a->ring = NULL;
+    free(a->mixbuf); a->mixbuf = NULL;
+    a->ringPos = a->ringEnd = 0; a->slice = 0; a->armMode = AM_MATRIX;
+}
+static void arm_build(aout *a, int mode) {
+    arm_free(a);   // tolerate any previous state: rebuilds reuse the output, and a half-built device must not leak
+    if (mode == AM_MATRIX) return;
+    a->slice = arm_slice_for();
+    if (mode == AM_SYSCONV) {
+        if (!(a->arm = dm_conv_open(g_ch, CH_TAG, RATE))) { LOG("[RED] audio: the system downmix did not build (%s): this output stays on the host's own fold", dm_arm_last_err()); return; }
+    } else {
+        if (!(a->arm = dm_ausm_open(g_ch, CH_TAG, mode == AM_BINAURAL, a->slice))) { LOG("[RED] audio: the spatial mixer did not build (%s): this output stays on the host's own fold", dm_arm_last_err()); return; }
+        if (!(a->ring = malloc((size_t)a->slice * 4)) || !(a->mixbuf = malloc((size_t)a->slice * 12))) { LOG("[RED] audio: the spatial mixer's buffers did not allocate: this output stays on the host's own fold"); arm_free(a); return; }
+    }
+    a->armMode = mode;
+#if !TARGET_OS_IPHONE
+    static _Atomic int route_once;
+    if (!atomic_exchange(&route_once, 1)) dm_audio_route_init();   // from here on the Mac can follow headphone plug / unplug between the two spatial modes
+#endif
+}
+// Which mode the first 5.1 output opens with. DM_DBG_AUDIO_MODE forces the number for single-variable tests;
+// otherwise the launcher's Audio output (DM_AUDIO_OUT) decides; anything unreadable falls back to the host's
+// own fold with a [RED] line - the tested default is never abandoned silently.
+static int mode_pick(void) {
+    const char *d = getenv("DM_DBG_AUDIO_MODE");
+    int m = d ? atoi(d) : AM_MATRIX;
+    if (!d) {
+        const char *e = getenv("DM_AUDIO_OUT");
+        if (e && *e) {
+            if (!strcmp(e, "matrix")) m = AM_MATRIX;
+            else if (!strcmp(e, "sys")) m = AM_SYSCONV;
+            else if (!strcmp(e, "wide")) m = AM_WIDE;
+            else if (!strcmp(e, "binaural")) m = AM_BINAURAL;
+            else { LOG("[RED] audio: unknown Audio output \"%s\": using the host's own fold", e); return AM_MATRIX; }
+        }
+    }
+    if (m < 0 || m >= AM_N) { LOG("[RED] audio: no output mode %d: using the host's own fold", m); return AM_MATRIX; }
+    return m;
+}
+static void mode_init(void) { static _Atomic int once; if (atomic_exchange(&once, 1)) return; atomic_store(&g_mode, mode_pick()); }
+int dm_audio_mode(void) { return atomic_load_explicit(&g_mode, memory_order_relaxed); }
+const char *dm_audio_mode_name(void) { int m = dm_audio_mode(); return m >= 0 && m < AM_N ? AM_NAME[m] : "?"; }
+static void au_halt(aout *a);
+static void null_start(aout *a);
+static void au_request_start(aout *a);
+// Stop each playing 5.1 output, rebuild its device for m, publish m and start the output again - in that
+// order, under g_aos_lock; the restart itself runs on the host worker, with the silent sink covering the gap
+// the way Start does. While stopped, no callback runs, so the rebuild never races the real-time thread;
+// the callbacks themselves branch on the output's own arm (pull_device), so a stale view of g_mode cannot
+// pair a new mode number with the previous mode's device. Outputs that play no 5.1 into a device, or that
+// already carry m's device, are left alone: a stereo game must not hear a stop/start on a mode switch.
+void dm_audio_set_mode(int m) {
+    if (m < 0 || m >= AM_N) { LOG("[RED] audio: no output mode %d: staying on %s", m, dm_audio_mode_name()); return; }
+    int old = atomic_load_explicit(&g_mode, memory_order_relaxed);
+    pthread_mutex_lock(&g_aos_lock);
+    for (int i = 0; i < AOMAX; i++) {
+        aout *a = g_aos[i];
+        if (!a || !a->au || a->ch != 6 || a->armMode == m) continue;
+        // Act on the consumer (aout.backend), not the state bits: a stalled output's silent sink is consuming
+        // while state reads STARTED, and a second consumer over it would race the single-consumer queue. A
+        // start that Stop or Close canceled (AU_CANCELED on a BK_NONE backend) is being torn down by its own
+        // worker: no consumer, no new sink - the arm is rebuilt alone and the worker finishes its course.
+        if (a->backend != BK_NONE || a->start_phase == AU_STARTING || a->start_phase == AU_WAIT_CALLBACK) {
+            au_halt(a);   // stop the unit, cancel any start in flight
+            if (a->backend != BK_NULL) null_start(a);   // the silent sink consumes while the restart is in flight
+            arm_build(a, m);   // the device is rebuilt while the unit is stopped
+            au_request_start(a);   // AudioOutputUnitStart runs on the host worker, off this lock (issue #1030's discipline)
+        } else {
+            arm_build(a, m);   // nothing is consuming: rebuilt while stopped; Start or the resume picks it up
+        }
+    }
+    atomic_store_explicit(&g_mode, m, memory_order_release);
+    pthread_mutex_unlock(&g_aos_lock);
+    LOG("audio: output mode %s -> %s", old >= 0 && old < AM_N ? AM_NAME[old] : "?", AM_NAME[m]);
 }
 
 static _Atomic uint64_t g_render_calls;   // Cumulative sound card callbacks (lifecycle verification: must keep growing after resume)
@@ -163,10 +330,11 @@ static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioT
         if (!a->st_calls || frames < a->st_fmin) a->st_fmin = frames; if (frames > a->st_fmax) a->st_fmax = frames; a->st_qsum += qd;
         a->st_count++;
         if (++a->st_calls % 2000 == 0 && !atomic_load_explicit(&a->st_pending, memory_order_acquire)) {
-            uint64_t un = atomic_load(&a->under_n), ubb = atomic_load(&a->under_b);
-            a->st_report = (audio_stats){a->st_calls, a->st_count, a->st_qsum, un - a->st_u0, ubb - a->st_ub0, a->st_fmin, a->st_fmax};
+            uint64_t un = atomic_load(&a->under_n), ubb = atomic_load(&a->under_b), af = atomic_load_explicit(&a->arm_fail, memory_order_relaxed);
+            a->st_report = (audio_stats){a->st_calls, a->st_count, a->st_qsum, un - a->st_u0, ubb - a->st_ub0, a->st_fmin, a->st_fmax,
+                                         atomic_load_explicit(&g_mode, memory_order_relaxed), af - a->st_af0, a->st_ring};
             atomic_store_explicit(&a->st_pending, 1, memory_order_release);
-            a->st_fmin = ~0u; a->st_fmax = 0; a->st_qsum = a->st_count = 0; a->st_u0 = un; a->st_ub0 = ubb;
+            a->st_fmin = ~0u; a->st_fmax = 0; a->st_qsum = a->st_count = 0; a->st_u0 = un; a->st_ub0 = ubb; a->st_af0 = af; a->st_ring = 0;
         } }
     if (atomic_load_explicit(&a->hold_device, memory_order_acquire)) {
         memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize);
@@ -178,8 +346,9 @@ static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioT
 }
 #if !TARGET_OS_IPHONE
 // Mac DefaultOutput's default 512 device frames can exceed the PCM a game has queued, producing zero-filled gaps.
-// Request about 5 ms of device frames, as front_ios.m asks of the iOS audio session; reapply on device or output-rate changes within the supported range.
-// DM_DBG_AU_FRAMES=N asks N frames instead (1024 = the iOS default, which reproduces the crackling)
+// Standard tier: request about 5 ms of device frames, as front_ios.m asks of the iOS audio session; reapply on device or output-rate changes, within the supported range.
+// Low tier (DM_AUDIO_LATENCY=low): request 16 device frames (about 0.3 ms at 48 kHz) instead, still clamped to the supported range; the player opts in, and the device then calls back several times as often.
+// DM_DBG_AU_FRAMES=N asks for exactly N frames instead, unclamped, for single-variable tests (1024 = the tick an iOS session left at its default grants, which reproduces the crackling the 5 ms request fixed)
 static void au_buffer(AudioUnit au, const char *why) {
     AudioDeviceID device = kAudioObjectUnknown; UInt32 sz = sizeof device;
     if (AudioUnitGetProperty(au, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &device, &sz) || device == kAudioObjectUnknown) return;
@@ -187,9 +356,14 @@ static void au_buffer(AudioUnit au, const char *why) {
     OSStatus st = AudioUnitGetProperty(au, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &df, &sz);
     if (st || !(df.mSampleRate > 0)) { LOG("[RED] audio device buffer: cannot read the output sample rate (status %d)", (int)st); return; }
     const char *e = getenv("DM_DBG_AU_FRAMES");
-    UInt32 fr = e ? (UInt32)atoi(e) : (UInt32)(df.mSampleRate / 200 + 0.5);
+    int clamp = 1; UInt32 fr;
+    if (e) { fr = (UInt32)atoi(e); clamp = 0; }   // the diagnostic arm takes its raw value, as before
+    else {
+        const char *lat = getenv("DM_AUDIO_LATENCY");
+        fr = lat && !strcmp(lat, "low") ? 16 : (UInt32)(df.mSampleRate / 200 + 0.5);
+    }
     AudioValueRange range; sz = sizeof range;
-    if (!e && !AudioUnitGetProperty(au, kAudioDevicePropertyBufferFrameSizeRange, kAudioUnitScope_Global, 0, &range, &sz)) {
+    if (clamp && !AudioUnitGetProperty(au, kAudioDevicePropertyBufferFrameSizeRange, kAudioUnitScope_Global, 0, &range, &sz)) {
         if (fr < range.mMinimum) fr = (UInt32)range.mMinimum;
         if (fr > range.mMaximum) fr = (UInt32)range.mMaximum;
     }
@@ -198,6 +372,7 @@ static void au_buffer(AudioUnit au, const char *why) {
     st = AudioUnitGetProperty(au, kAudioDevicePropertyBufferFrameSize, kAudioUnitScope_Global, 0, &actual, &sz);
     if (st || actual != fr) st = AudioUnitSetProperty(au, kAudioDevicePropertyBufferFrameSize, kAudioUnitScope_Global, 0, &fr, sizeof fr);
     if (!st) { sz = sizeof actual; st = AudioUnitGetProperty(au, kAudioDevicePropertyBufferFrameSize, kAudioUnitScope_Global, 0, &actual, &sz); }
+    if (!st) atomic_store_explicit(&g_au_frames, actual, memory_order_relaxed);   // the mode devices' slice follows the tick the hardware actually granted
     LOG("%saudio device buffer: %u frames at %.0f Hz%s (requested %u, status %d)", st ? "[RED] " : "", actual, df.mSampleRate, why ? why : "", fr, (int)st);
 }
 static void au_device_changed(void *ctx, AudioUnit au, AudioUnitPropertyID id, AudioUnitScope scope, AudioUnitElement el) {
@@ -243,6 +418,7 @@ static OSStatus au_create(aout *a) {
     if (!st) st = AudioUnitSetProperty(a->au, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &cb, sizeof cb);
     if (!st) st = AudioUnitInitialize(a->au);
     if (st) { au_dispose(a->au); a->au = NULL; }
+    else if (a->ch == 6) arm_build(a, atomic_load_explicit(&g_mode, memory_order_relaxed));   // the Mac's tick was read back above (iOS derives it from DM_AUDIO_LATENCY in arm_slice_for); a device that does not build leaves mode 0's fold
     return st;
 }
 // OpenAudioOut runs on the game's thread, and creating the AudioUnit takes about 24 KB of stack (measured on the Mac: component lookup, instance, Initialize), more than some game threads have
@@ -290,6 +466,7 @@ static void au_replace(aout *a) {
     a->reset_pending = 0;
 }
 static void aout_free(aout *a) {
+    arm_free(a);
     if (a->au) au_dispose(a->au);
     dispatch_release(a->notify_sem);
     if (a->rel_sem) dispatch_release(a->rel_sem);
@@ -341,9 +518,10 @@ static int stats_take(aout *a, audio_report *r) {
 }
 static void stats_log(const audio_report *r) {
     const audio_stats *s = &r->stats;
-    LOG("audio #%d device callbacks %llu: %u–%u frames each, %.1f blocks queued on average at callback; in these %llu, %llu underruns, %.1f ms zero-padded", r->id,
+    LOG("audio #%d device callbacks %llu: %u–%u frames each, %.1f blocks queued on average at callback; in these %llu, %llu underruns, %.1f ms zero-padded, mode %s, %llu device fallbacks, banked up to %u frames", r->id,
         (unsigned long long)s->calls, s->fmin, s->fmax, (double)s->qsum / s->count, (unsigned long long)s->count,
-        (unsigned long long)s->underruns, s->zero_bytes / (2.0 * r->ch) / (RATE / 1000.0));
+        (unsigned long long)s->underruns, s->zero_bytes / (2.0 * r->ch) / (RATE / 1000.0),
+        s->mode >= 0 && s->mode < AM_N ? AM_NAME[s->mode] : "?", (unsigned long long)s->arm_fail, s->ring_max);
 }
 static void stats_drain(void) {
     audio_report reports[AOMAX]; int n = 0;
@@ -413,6 +591,7 @@ static Result au_open_at(void *g, void *ev, const char *name, const uint8_t *par
     if (rate && rate != RATE) die("AudioOut sample rate %d not supported (48 kHz only)", rate);
     aout *a = calloc(1, sizeof *a);
     const char *mute = getenv("DM_AUDIO_MUTE"); a->mute = mute && atoi(mute);
+    mode_init();   // the 5.1 fold's mode: read once per process, before any unit can build its device
     pthread_mutex_init(&a->m, NULL); a->event = ev; a->ch = ch;
     atomic_init(&a->state, STATE_STOPPED); atomic_init(&a->vol, 0x3f800000u);
     atomic_init(&a->q_head, 0); atomic_init(&a->q_tail, 0);

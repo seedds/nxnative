@@ -2629,6 +2629,13 @@ NVN_NOPROTO(nvnCommandBufferEvaluateDlss, void, NVNcommandBuffer *c, const dlss_
         o->tex[k] = tex_snap(o, SNAP_OFF(p_dlss), k, p->tex[k], (uint64_t)__builtin_return_address(0));
         memcpy(o->base[k], p->base[k], sizeof o->base[k]);
     }
+    {   // the sizes, logged when they change (8 lines at most): the scene's size and what the network makes of it
+        static int last[4], lines; int a = p->tex[DLSS_OUTPUT] ? (int)CTX(p->tex[DLSS_OUTPUT])->d.width : 0, b = p->tex[DLSS_OUTPUT] ? (int)CTX(p->tex[DLSS_OUTPUT])->d.height : 0;
+        if ((p->iw != last[0] || p->ih != last[1] || a != last[2] || b != last[3]) && lines < 8) {
+            last[0] = p->iw; last[1] = p->ih; last[2] = a; last[3] = b; lines++;
+            LOG("[nvn] DLSS evaluation %dx%d into a %dx%d output (network %dx%d)", p->iw, p->ih, a, b, n->w, n->h);
+        }
+    }
     o->net = (uint64_t)(uintptr_t)n; o->iw = p->iw; o->ih = p->ih; o->ow = n->w; o->oh = n->h; o->flags = n->flags;
     memcpy(o->mv, p->mv, sizeof o->mv); memcpy(o->jitter, p->jitter, sizeof o->jitter); o->pre_exposure = p->pre_exposure; o->reset = p->reset != 0;
 }

@@ -70,11 +70,20 @@ HLE_FORCE("_ZN2nn2vi32GetDefaultDisplayPanelIdentifierEPNS0_15PanelIdentifierE",
     memset(out, 0, 0x18); return RES_OK;
 }
 // The Great Ace Attorney Chronicles (SDK 10) lists up to 10 displays before opening the default one (main+0x808f08) and does not read the list. DisplayInfo is 0x60 bytes:
-//   name[0x40], bool has a layer limit at +0x40, then u64 layer count limit, largest layer width and height. One display, "Default", as Horizon lists for an application
-HLE_FORCE("_ZN2nn2vi12ListDisplaysEPNS0_11DisplayInfoEi", "list displays; the host has one, \"Default\"", int, h_vi_ListDisp, void *out, int n) {
+//   name[0x40], bool has a layer limit at +0x40, then u64 layer count limit, largest layer width and height. One display, "Default", as Horizon lists for an application.
+// The largest layer is the largest picture the display shows now: 1920x1080 on a Switch 1 (its TV output and its panel's 1280x720 alike), and on a Switch 2 the largest display
+// buffer (QueryDisplayBufferMaxResolution below: its 1080p screen handheld, docked up to 4K by the TV). Star Fox makes its output that size (the window manager stores it at
+// main+0xba66a78; its output is the smaller of it and the largest buffer, main+0xb448874), so the Switch 1 answer held it at 1920x1080 on a 4K screen, where its data's scale
+// (render.resolution_scale_console 0.5) gives a 1920x1080 scene for a 3840x2160 output
+static uint32_t buf_max(int *dw, int *dh);
+static const int k_buf_max[4][2] = {{1280, 720}, {1920, 1080}, {2560, 1440}, {3840, 2160}};
+HLE_FORCE("_ZN2nn2vi12ListDisplaysEPNS0_11DisplayInfoEi", "list displays; the host has one, \"Default\", with the largest picture it shows now as its largest layer", int, h_vi_ListDisp, void *out, int n) {
     if (n <= 0 || !out) return 0;
     uint8_t *p = out; memset(p, 0, 0x60); strcpy((char *)p, "Default");
-    p[0x40] = 1; uint64_t lim[3] = {1, 1920, 1080}; memcpy(p + 0x48, lim, sizeof lim);
+    p[0x40] = 1; uint64_t lim[3] = {1, 1920, 1080};
+    if (dm_sdk_ounce()) { int w, h; uint32_t r = buf_max(&w, &h); lim[1] = (uint64_t)k_buf_max[r][0]; lim[2] = (uint64_t)k_buf_max[r][1]; }
+    memcpy(p + 0x48, lim, sizeof lim);
+    static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("vi::ListDisplays: Default, largest layer %llux%llu", (unsigned long long)lim[1], (unsigned long long)lim[2]);
     return 1;
 }
 HLE_FORCE("_ZN2nn2vi12DestroyLayerEPNS0_5LayerE", "destroy layer; host static object", void, h_vi_DestroyLayer, void *layer) { (void)layer; }
@@ -101,14 +110,17 @@ HLE_FORCE("_ZN2nn2vi23SetDisplayVrrCapabilityEPNS0_7DisplayEb", "display VRR cap
 __attribute__((weak)) int front_display_pixels(int *w, int *h) { (void)w; (void)h; return 0; }   // front_mac.m, front_ios.m; graphics unit tests have none
 HLE_FORCE("_ZN2nn2vi31QueryDisplayBufferMaxResolutionEPNS0_19BufferMaxResolutionEPKNS0_7DisplayE", "largest display buffer: the Switch 2's screen handheld, the host display's docked",
           Result, h_vi_BufMaxRes, uint32_t *out, const void *disp) {
-    (void)disp; static const int k[4][2] = {{1280, 720}, {1920, 1080}, {2560, 1440}, {3840, 2160}};
+    (void)disp; int w, h; uint32_t r = buf_max(&w, &h);
+    static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("vi::QueryDisplayBufferMaxResolution: %dx%d (%s, display %dx%d)", k_buf_max[r][0], k_buf_max[r][1], dm_opmode() == 1 ? "docked" : "handheld", w, h);
+    if (out) *out = r; return RES_OK;
+}
+static uint32_t buf_max(int *dw, int *dh) {   // the index into k_buf_max, and the display's pixels (0 x 0 when not known)
     uint32_t r = 1; int w = 0, h = 0;
     if (dm_opmode() == 1 && front_display_pixels(&w, &h)) {
         if (w < h) { int t = w; w = h; h = t; }
-        r = 0; for (uint32_t i = 0; i < 4; i++) if (w >= k[i][0] && h >= k[i][1]) r = i;
+        r = 0; for (uint32_t i = 0; i < 4; i++) if (w >= k_buf_max[i][0] && h >= k_buf_max[i][1]) r = i;
     }
-    static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("vi::QueryDisplayBufferMaxResolution: %dx%d (%s, display %dx%d)", k[r][0], k[r][1], dm_opmode() == 1 ? "docked" : "handheld", w, h);
-    if (out) *out = r; return RES_OK;
+    *dw = w; *dh = h; return r;
 }
 // The extended swap interval asks for a presentation rate between whole vsync intervals (VRR); without VRR the swap interval NVN sets stays in effect
 HLE_FORCE("_ZN2nn2vi28SetLayerExtendedSwapIntervalEPNS0_5LayerEii", "layer extended swap interval: needs VRR, which the host has not; NVN's swap interval stays", Result, h_vi_ExtSwap,

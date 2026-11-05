@@ -625,6 +625,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10, `ListAllUsers`); [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md) (`PushOpenUsers`); [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) (the friends calls); [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (the Nintendo Account request); [Pokémon Sword](../../dm/games/0100ABF008968000/README.md) (SDK 7, `pdm`); [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: the friend requests); [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3: `LoadCachedNintendoAccountInfo`).
 - **Note:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md)'s `account::OpenPreselectedUser` and `account::GetLastOpenedUser` are in [SDK calls that open a system service through sm](#sdk-calls-that-open-a-system-service-through-sm); SDK 6's `OpenPreselectedUser` in [SDK 6's `account::OpenPreselectedUser` returns a Result](#sdk-6s-accountopenpreselecteduser-returns-a-result); SDK 4's `GetBlockedUserList` without a `Uid` in [SDK 4's `friends::GetBlockedUserList` without a `Uid`](#sdk-4s-friendsgetblockeduserlist-without-a-uid); the save thumbnail calls in [Directory, file data cache and save-thumbnail calls](#directory-file-data-cache-and-save-thumbnail-calls).
 
+### Creating an ssl context needs no network
+
+- **Symptom:** the game ends right after `nnMain`, with a crash in its own cleanup on an object it had not created yet (DRAGON QUEST BUILDERS 2: `CRASH sig=11 addr=0x60db0` at `main+0x2676c8`, x0 = 0, the callers `main+0x85210` and `main+0x7fabf8`). No red line.
+- **Cause:** `ssl::Context::Create` failed in the host's offline stubs. A context is a session of the console's own ssl service, so it succeeds on Horizon with no network; only a connection needs one. The game's online library treats the failure as fatal, and its startup (`main+0x84a60`) returns false.
+- **Fix:** `Context::Create` and `Context::Destroy` succeed and connect to nothing (`hle_net.c`). `Connection::Create` and the rest still fail, as they do with no network.
+- **Found on:** [DRAGON QUEST BUILDERS 2](../../dm/games/010042000A986000/README.md) (SDK 5.4.0). 53 of 82 games surveyed import the call.
+
 ### The local user's profile image
 
 - **Symptom:** `Break#1 reason=0 Result=0` right after the first save is created, then exit 42; the stack has `nn::diag::detail::OnAssertionFailure` under `nn::image::JpegDecoder::Decode` (`sdk+0x394e4`), called from the game (Burnout Paradise Remastered, SDK 9.3).

@@ -544,9 +544,9 @@ def kt_shaders(d, label, out):
     if d[:4] == b'SARC' or b'BNSH\0\0\0\0' in d: scan_blob(d, label, out)
 
 def linkdata_index(path):
-    """The index beside a LINKDATA archive, or None: Three Houses' DATA0.bin beside DATA1.bin, Pokemon Pokopia's LI_C0_R.IDX beside LD_C0_R.BIN (247 MB, 12,298 records, 700 GLSLC outputs: the same records and chunks)"""
+    """The index beside a LINKDATA archive, or None: Three Houses' DATA0.bin beside DATA1.bin, Pokemon Pokopia's LI_C0_R.IDX beside LD_C0_R.BIN (247 MB, 12,298 records, 700 GLSLC outputs: the same records and chunks), DRAGON QUEST BUILDERS 2's LINKDATA.IDX beside LINKDATA.BIN (1.1 GB, 59,193 records)"""
     name = os.path.basename(path)
-    idx = 'DATA0.bin' if name == 'DATA1.bin' else 'LI_' + name[3:-4] + '.IDX' if name.startswith('LD_') and name.endswith('.BIN') else None
+    idx = 'DATA0.bin' if name == 'DATA1.bin' else 'LINKDATA.IDX' if name == 'LINKDATA.BIN' else 'LI_' + name[3:-4] + '.IDX' if name.startswith('LD_') and name.endswith('.BIN') else None
     idx = idx and os.path.join(os.path.dirname(path), idx)
     return idx if idx and os.path.exists(idx) else None
 

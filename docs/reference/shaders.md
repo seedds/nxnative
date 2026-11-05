@@ -160,7 +160,8 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Reader:** `kt_shaders` inflates every LINKDATA entry and loose `*.gz` / `*.spkg` file ([01](../agents/01-extract.md)), takes every GLSLC output that passes the triple check, and scans its SARCs for BNSH; `DATA1.bin` is split into 64 scan jobs by entry range (`linkdata_jobs`).
 - **Symptom:** 24 shaders before the control-length fix, 1,355 after.
 - **Cause:** its GLSLC (output version 0x1d.2) writes the 0x848 / 0x850-byte controls and headerless compute code described in the RDB entry, which `glslc_shaders` used to drop. A few outputs of version 0x1d.0 keep something else at control +0x20 (odd values such as 0x136b), so a control length must be a multiple of 4; the section-header reading now takes 8 of them ([GLSLC outputs read through their section headers](#glslc-outputs-read-through-their-section-headers)).
-- **Found on:** [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) (the older KTGL).
+- **Index names:** the archive and its index are `DATA1.bin` + `DATA0.bin` (Three Houses), `LD_<name>.BIN` + `LI_<name>.IDX` ([KTGL on NVN2](#ktgl-on-nvn2-switch-2-glslc-outputs-and-ld_--li_-linkdata)) or `LINKDATA.BIN` + `LINKDATA.IDX` (DRAGON QUEST BUILDERS 2: 1.1 GB, 59,193 entries). `linkdata_index` names each. With a name it does not know, the archive is scanned as one plain file and nothing inside its compressed entries is found: the split reported 130 shaders against 2,107 with the index, and the host printed `is not in the shader map` once the 3D scenes began.
+- **Found on:** [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) (the older KTGL), [DRAGON QUEST BUILDERS 2](../../dm/games/010042000A986000/README.md).
 
 ### KTGL on NVN2: Switch 2 GLSLC outputs and LD_ / LI_ LINKDATA
 

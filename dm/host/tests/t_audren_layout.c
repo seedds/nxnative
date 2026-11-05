@@ -21,6 +21,7 @@ void dm_pcmout_start(void *k) { (void)k; }
 int dm_pcmout_append(void *k, void *b) { (void)k; (void)b; return 0; }
 void *dm_pcmout_released(void *k) { (void)k; return NULL; }
 void dm_pcmout_wait(void *k, int ms) { (void)k; (void)ms; }
+int dm_audio_spatial(void) { return 0; }   // stereo output, as without DM_AUDIO_SPATIAL
 void hle_bind_system_event(void *ev, int ac) { (void)ev; (void)ac; }
 uint32_t hle_dup_readable_handle(uint32_t h) { return h; }
 
@@ -181,8 +182,8 @@ static void test_two_renderers(void) {
     int32_t quiet[2 * 160] = {0}, loud[2 * 160], out[2 * 240];
     for (int i = 0; i < 2 * 160; i++) loud[i] = 20000;
     memset(g_ar, 0, sizeof g_ar);
-    assert(up_3_2(&g_ar[0], loud, 160, out) == 240);
-    assert(up_3_2(&g_ar[1], quiet, 160, out) == 240);
+    assert(up_3_2(&g_ar[0], loud, 160, 2, out) == 240);
+    assert(up_3_2(&g_ar[1], quiet, 160, 2, out) == 240);
     for (int i = 0; i < 2 * 240; i++) assert(out[i] == 0);
     memset(g_ar, 0, sizeof g_ar);
 }

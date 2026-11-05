@@ -70,6 +70,7 @@ Keyboard in a window: J K U I are A B X Y, WASD the left stick, Shift + arrows t
 - [System applets opened by `Show…` calls](../../../docs/reference/services.md#system-applets-opened-by-show-calls): a null read in `nn::applet::CreateLibraryApplet` at the title about 100 s in, the strap guide overload with a `StrapGuideArg`.
 - [A target frame rate the game steps by](../../../docs/reference/frame-rate.md#a-target-frame-rate-the-game-steps-by): gameplay at 60 fps.
 - [120 fps follows the frame step](../../../docs/reference/frame-rate.md#120-fps-follows-the-frame-step).
+- [Spatial audio through the system renderer on the Mac](../../../docs/reference/audio.md#spatial-audio-through-the-system-renderer-on-the-mac-dm_audio_spatial): its 5.1 on AirPods, Control Center's Spatial Audio control.
 - [AV1 movies through SDK 22's decoder](../../../docs/reference/movies.md#av1-movies-through-sdk-22s-decoder).
 - [The Joy-Con mouse pointer](../../../docs/reference/services.md#the-joy-con-mouse-pointer) and [The display's largest buffer](../../../docs/reference/services.md#the-displays-largest-buffer).
 - [The output device notification under its SDK 21 and 22 name](../../../docs/reference/audio.md#the-output-device-notification-under-its-sdk-21-and-22-name): an abort at start without it.

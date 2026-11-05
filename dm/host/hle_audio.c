@@ -8,6 +8,9 @@
 #include <dispatch/dispatch.h>
 #include <stdatomic.h>
 #include <unistd.h>
+#if !TARGET_OS_IPHONE
+#include "audio_sys_mac.h"
+#endif
 
 enum { FMT_PCM16 = 2, STATE_STARTED = 0, STATE_STOPPED = 1, RATE = 48000 };
 enum { BK_NONE, BK_AU, BK_NULL };   // what is consuming an output's queue right now (aout.backend)
@@ -16,7 +19,7 @@ enum { AU_IDLE, AU_STARTING, AU_CANCELED, AU_WAIT_CALLBACK };
 typedef struct { void *ptr; uint64_t cap, size; } gbuf;     // The first 24 bytes written into the guest AudioOutBuffer
 #define QMAX 64
 #define RELMAX QMAX                    // Released max = number of in-flight buffers (the game must take a buffer back before it can append again), same limit as pending
-typedef struct { uint64_t calls, count, qsum, underruns, zero_bytes; uint32_t fmin, fmax; } audio_stats;
+typedef struct { uint64_t calls, count, qsum, underruns, zero_bytes, late; uint32_t fmin, fmax; int sys; } audio_stats;
 typedef struct {
     pthread_mutex_t m;
     void *event;                       // Guest SystemEvent: signaled whenever a buffer is released
@@ -27,6 +30,8 @@ typedef struct {
     gbuf *rel[RELMAX]; _Atomic uint32_t rel_head, rel_tail; // Released: written by the output side, read by the game side
     uint64_t pos;                      // Bytes already played of the current block
     AudioUnit au;
+    void *sys;                         // Mac spatial audio: the system renderer feeding on this six-channel queue instead of an AudioUnit (audio_sys_mac.m; NULL: au, stereo downmix)
+    uint64_t sys_late0;                // its late-feed count at the last stats snapshot
     int start_phase, reset_pending, mute;   // a reset during start replaces the unit after the call returns
     int closed;                             // Close returned while a start was in flight: that start's worker frees the output
     _Atomic int hold_device;               // callbacks output silence until the silent sink has joined
@@ -150,11 +155,26 @@ static void pull_device(aout *a, uint8_t *dst, uint64_t bytes) {
     }
 }
 
+// Spatial audio (Mac, opt-in): DM_AUDIO_SPATIAL=1 hands a six-channel output to macOS as 5.1 (audio_sys_mac.m, AVSampleBufferAudioRenderer) instead of the stereo downmix above, so the system
+// spatializes it for the current output (AirPods head tracking included) and Control Center's Spatial Audio control applies; unset or 0 the downmix. A renderer that cannot be made
+// leaves the output on the downmix. DM_AUDIO_SPATIAL_LEAD_MS: the feed's margin over the device's own delay (default 50 ms: Control Center's Fixed mode renders later than the device's
+// reported delay; Fortune's Weave on AirPods Pro 2: garbled at 20, a hiss on top at 35, clean at 50; Off and Head Tracked were clean at 35)
+static int spatial_mode(void) {
+#if TARGET_OS_IPHONE
+    return 0;
+#else
+    static _Atomic int mode = -1;
+    int m = atomic_load_explicit(&mode, memory_order_relaxed);
+    if (m < 0) { const char *e = getenv("DM_AUDIO_SPATIAL"); m = e && atoi(e) > 0; atomic_store_explicit(&mode, m, memory_order_relaxed); }
+    return m;
+#endif
+}
+int dm_audio_spatial(void) { return spatial_mode(); }   // hle_audren.c: whether the in-process renderer hands over all six channels
+
 static _Atomic uint64_t g_render_calls;   // Cumulative sound card callbacks (lifecycle verification: must keep growing after resume)
 uint64_t dm_audio_render_calls(void) { return atomic_load_explicit(&g_render_calls, memory_order_relaxed); }
-static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioTimeStamp *ts, UInt32 bus, UInt32 frames, AudioBufferList *bl) {
-    (void)f; (void)ts; (void)bus; (void)frames;
-    aout *a = ctx;
+// Each device callback (or system renderer block): counted for the watchdog and the lifecycle check, and the periodic stats
+static void cb_account(aout *a, UInt32 frames) {
     atomic_fetch_add_explicit(&g_render_calls, 1, memory_order_relaxed); atomic_fetch_add_explicit(&a->cb_n, 1, memory_order_relaxed);
     {
         // At each 2000-callback checkpoint publish a snapshot for the watchdog: LOG takes a stdio lock and must never run here or in the release-event notifier.
@@ -164,10 +184,19 @@ static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioT
         a->st_count++;
         if (++a->st_calls % 2000 == 0 && !atomic_load_explicit(&a->st_pending, memory_order_acquire)) {
             uint64_t un = atomic_load(&a->under_n), ubb = atomic_load(&a->under_b);
-            a->st_report = (audio_stats){a->st_calls, a->st_count, a->st_qsum, un - a->st_u0, ubb - a->st_ub0, a->st_fmin, a->st_fmax};
+            uint64_t late = 0;
+#if !TARGET_OS_IPHONE
+            if (a->sys) { uint64_t l = dm_sys_audio_late(a->sys); late = l - a->sys_late0; a->sys_late0 = l; }
+#endif
+            a->st_report = (audio_stats){a->st_calls, a->st_count, a->st_qsum, un - a->st_u0, ubb - a->st_ub0, late, a->st_fmin, a->st_fmax, a->sys != NULL};
             atomic_store_explicit(&a->st_pending, 1, memory_order_release);
             a->st_fmin = ~0u; a->st_fmax = 0; a->st_qsum = a->st_count = 0; a->st_u0 = un; a->st_ub0 = ubb;
         } }
+}
+static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioTimeStamp *ts, UInt32 bus, UInt32 frames, AudioBufferList *bl) {
+    (void)f; (void)ts; (void)bus;
+    aout *a = ctx;
+    cb_account(a, frames);
     if (atomic_load_explicit(&a->hold_device, memory_order_acquire)) {
         memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize);
     } else {
@@ -215,7 +244,60 @@ static void au_dispose(AudioUnit au) {
 #endif
     AudioUnitUninitialize(au); AudioComponentInstanceDispose(au);
 }
+#if !TARGET_OS_IPHONE
+// The system renderer's feeder (its own queue) takes one block of all six channels
+static void sys_pull(void *ctx, int16_t *dst, uint32_t frames) {
+    aout *a = ctx;
+    cb_account(a, frames);
+    if (atomic_load_explicit(&a->hold_device, memory_order_acquire)) memset(dst, 0, (size_t)frames * 6 * sizeof *dst);   // the silent sink still consumes: the first block tells the watchdog the device plays
+    else {
+        pull(a, (uint8_t *)dst, (uint64_t)frames * 6 * sizeof *dst);
+        if (a->mute) memset(dst, 0, (size_t)frames * 6 * sizeof *dst);
+    }
+}
+static void sys_create(aout *a) {
+    a->sys = NULL;
+    if (a->ch != 6 || !spatial_mode()) return;
+    const char *e = getenv("DM_AUDIO_SPATIAL_LEAD_MS"); int margin = e ? atoi(e) : 50; if (margin < 0) margin = 0;
+    char err[128] = "";
+    a->sys = dm_sys_audio_create(a->id, sys_pull, a, margin, err, sizeof err);
+    if (!a->sys) LOG("[RED] audio #%d spatial: %s: stereo downmix", a->id, err);
+    else LOG("audio #%d spatial: 5.1 to the system (AVSampleBufferAudioRenderer), fed %d ms ahead of the output's own delay", a->id, margin);
+}
+#endif
+// The output's device: an AudioUnit, or (Mac spatial audio) the system renderer
+static int has_dev(const aout *a) { return a->au || a->sys; }
+static OSStatus dev_start(aout *a) {
+#if !TARGET_OS_IPHONE
+    if (a->sys) {
+        double delay = 0;
+        if (dm_sys_audio_start(a->sys, &delay)) {   // the renderer failed (its audio service went away): a new one
+            dm_sys_audio_dispose(a->sys); sys_create(a);
+            if (!a->sys || dm_sys_audio_start(a->sys, &delay)) return -1;
+        }
+        static _Atomic int said; if (!atomic_exchange(&said, 1)) LOG("audio #%d spatial: playing, output delay %.1f ms", a->id, delay);
+        return noErr;
+    }
+#endif
+    return a->au ? AudioOutputUnitStart(a->au) : -1;
+}
+static void dev_stop(aout *a) {
+#if !TARGET_OS_IPHONE
+    if (a->sys) { dm_sys_audio_stop(a->sys); return; }
+#endif
+    AudioOutputUnitStop(a->au);
+}
+static void dev_dispose(aout *a) {
+#if !TARGET_OS_IPHONE
+    if (a->sys) { dm_sys_audio_dispose(a->sys); a->sys = NULL; }
+#endif
+    if (a->au) { au_dispose(a->au); a->au = NULL; }
+}
 static OSStatus au_create(aout *a) {
+#if !TARGET_OS_IPHONE
+    sys_create(a);
+    if (a->sys) { a->au = NULL; return noErr; }   // the system renderer stands in for the AudioUnit
+#endif
     AudioComponentDescription d = {.componentType = kAudioUnitType_Output,
 #if TARGET_OS_IPHONE
                                    .componentSubType = kAudioUnitSubType_RemoteIO,
@@ -271,7 +353,7 @@ static void null_stop(aout *a) { atomic_store_explicit(&a->null_run, 0, memory_o
 static void au_halt(aout *a) {
     if (a->start_phase == AU_STARTING) a->start_phase = AU_CANCELED;
     if (a->backend == BK_AU || a->start_phase == AU_WAIT_CALLBACK) {
-        AudioOutputUnitStop(a->au);
+        dev_stop(a);
         a->start_phase = AU_IDLE;
         if (a->backend == BK_AU) a->backend = BK_NONE;
     }
@@ -284,13 +366,14 @@ static void au_retry(aout *a, uint64_t now) {
     a->retry_at = now + (uint64_t)a->retry_ms * 1000000;
 }
 static void au_replace(aout *a) {
+    if (a->sys) { a->reset_pending = 0; return; }   // the iOS media services reset; the system renderer is Mac only
     au_dispose(a->au);
     OSStatus st = au_create(a);
     if (st) LOG("[RED] audio #%d: no AudioUnit after the media services reset (status %d): this output stays silent", a->id, (int)st);
     a->reset_pending = 0;
 }
 static void aout_free(aout *a) {
-    if (a->au) au_dispose(a->au);
+    dev_dispose(a);
     dispatch_release(a->notify_sem);
     if (a->rel_sem) dispatch_release(a->rel_sem);
     pthread_mutex_destroy(&a->m); free(a);
@@ -299,16 +382,16 @@ static void aout_free(aout *a) {
 // own start is in flight. Stop/suspend cancel it without waiting; Close leaves the unit and the output to this worker.
 static void au_start_device(void *p) {
     aout *a = p;
-    OSStatus st = AudioOutputUnitStart(a->au);
+    OSStatus st = dev_start(a);
     pthread_mutex_lock(&g_aos_lock);
     if (a->closed) {   // unregistered by Close, which no other path reaches: stop and free outside the lock
         pthread_mutex_unlock(&g_aos_lock);
-        if (!st) AudioOutputUnitStop(a->au);
+        if (!st) dev_stop(a);
         aout_free(a);
         return;
     }
     if (a->start_phase == AU_CANCELED) {
-        if (!st) AudioOutputUnitStop(a->au);
+        if (!st) dev_stop(a);
         a->start_phase = AU_IDLE;
         if (a->reset_pending) au_replace(a);
     } else if (st) {
@@ -321,7 +404,7 @@ static void au_start_device(void *p) {
     pthread_mutex_unlock(&g_aos_lock);
 }
 static void au_request_start(aout *a) {
-    if (!a->au || g_suspended || a->start_phase != AU_IDLE) return;
+    if (!has_dev(a) || g_suspended || a->start_phase != AU_IDLE) return;
     a->start_phase = AU_STARTING;
     dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), a, au_start_device);
 }
@@ -330,7 +413,9 @@ static void au_request_start(aout *a) {
 // After 200 ms without a callback the silent sink takes over (the game's audio keeps its real-time pace) and the AudioUnit is retried after 1, 2, 4, 8 s. A late wake-up of the watchdog itself (the whole process was stopped) only restarts the count.
 // The time is read under g_aos_lock: the startup helper stamps wd_t under it too, and a watchdog time read before the lock was older than the stamp of an AudioUnit the return from the background had just
 // started (DRAGON QUEST VII Reimagined on an iPhone: "has not called back for 18446744073662 ms", a restart of a running AudioUnit)
-enum { WD_TICK_MS = 50, WD_STALL_MS = 200 };
+// The system renderer (DM_AUDIO_SPATIAL) gets 1 s: it rides out the system's own clock holds itself (audio_sys_mac.m), but each start blocks its feeder 120-180 ms inside the first
+// enqueue, so with 200 ms the watchdog's own restart tripped it again, 3 to 5 restarts in a row per Control Center mode change (Fortune's Weave; each reset the menu's options)
+enum { WD_TICK_MS = 50, WD_STALL_MS = 200, WD_STALL_SYS_MS = 1000 };
 typedef struct { audio_stats stats; int id, ch; } audio_report;
 // Both consumers hold g_aos_lock. A local copy owns every log argument, so a slow log cannot hold up registry changes or retain a closed output.
 static int stats_take(aout *a, audio_report *r) {
@@ -341,9 +426,12 @@ static int stats_take(aout *a, audio_report *r) {
 }
 static void stats_log(const audio_report *r) {
     const audio_stats *s = &r->stats;
-    LOG("audio #%d device callbacks %llu: %u–%u frames each, %.1f blocks queued on average at callback; in these %llu, %llu underruns, %.1f ms zero-padded", r->id,
+    char late[96] = "";   // the system renderer's feed that fell behind the device's delay (DM_AUDIO_SPATIAL): its blocks were skipped, a gap
+    if (s->sys) snprintf(late, sizeof late, s->late ? " (system renderer blocks); %llu late feeds (raise DM_AUDIO_SPATIAL_LEAD_MS)" : " (system renderer blocks); 0 late feeds",
+                         (unsigned long long)s->late);
+    LOG("%saudio #%d device callbacks %llu: %u–%u frames each, %.1f blocks queued on average at callback; in these %llu, %llu underruns, %.1f ms zero-padded%s", s->late ? "[RED] " : "", r->id,
         (unsigned long long)s->calls, s->fmin, s->fmax, (double)s->qsum / s->count, (unsigned long long)s->count,
-        (unsigned long long)s->underruns, s->zero_bytes / (2.0 * r->ch) / (RATE / 1000.0));
+        (unsigned long long)s->underruns, s->zero_bytes / (2.0 * r->ch) / (RATE / 1000.0), late);
 }
 static void stats_drain(void) {
     audio_report reports[AOMAX]; int n = 0;
@@ -359,7 +447,7 @@ static void *au_watchdog(void *p) {
         pthread_mutex_lock(&g_aos_lock);
         uint64_t t = now_ns(), gap = t - last; last = t;
         for (int i = 0; i < AOMAX; i++) {
-            aout *a = g_aos[i]; if (!a || !a->au) continue;
+            aout *a = g_aos[i]; if (!a || !has_dev(a)) continue;
             uint64_t n = atomic_load_explicit(&a->cb_n, memory_order_relaxed);
             if (a->start_phase == AU_WAIT_CALLBACK) {
                 if (n != a->wd_n) {
@@ -371,7 +459,7 @@ static void *au_watchdog(void *p) {
                 } else if (gap > 4ull * WD_TICK_MS * 1000000) a->wd_t = t;
                 else if (t - a->wd_t >= 1000000000ull) {
                     if (!a->stalled) LOG("[RED] audio #%d: no device callback after start; continuing on the silent sink", a->id);
-                    AudioOutputUnitStop(a->au); a->start_phase = AU_IDLE; au_retry(a, t);
+                    dev_stop(a); a->start_phase = AU_IDLE; au_retry(a, t);
                 }
                 continue;
             }
@@ -382,9 +470,9 @@ static void *au_watchdog(void *p) {
             if (a->backend != BK_AU) continue;
             if (gap > 4ull * WD_TICK_MS * 1000000 || n != a->wd_n) {
                 a->wd_n = n; a->wd_t = t;
-            } else if (t - a->wd_t > WD_STALL_MS * 1000000ull) {
+            } else if (t - a->wd_t > (a->sys ? WD_STALL_SYS_MS : WD_STALL_MS) * 1000000ull) {
                 LOG("[RED] audio #%d: the device has not called back for %.0f ms while playing: the silent sink stands in, retrying the AudioUnit", a->id, (t - a->wd_t) / 1e6);
-                AudioOutputUnitStop(a->au); a->backend = BK_NONE; null_start(a);
+                dev_stop(a); a->backend = BK_NONE; null_start(a);
                 au_retry(a, t);
             }
         }
@@ -733,7 +821,7 @@ void dm_audio_suspend(int on) {
         g_suspended = on;
         for (int i = 0; i < AOMAX; i++) {
             aout *a = g_aos[i];
-            if (!a || !a->au) continue;
+            if (!a || !has_dev(a)) continue;
             // While suspended the silent sink consumes in real time instead: otherwise buffers are no longer released, the FMOD output thread waits forever and the game's audio pacing stalls (same for an incoming call interruption)
             if (on) {
                 au_halt(a);
@@ -748,7 +836,7 @@ void dm_audio_suspend(int on) {
 void dm_audio_reset(void) {
     pthread_mutex_lock(&g_aos_lock);
     for (int i = 0; i < AOMAX; i++) {
-        aout *a = g_aos[i]; if (!a || !a->au) continue;
+        aout *a = g_aos[i]; if (!a || !has_dev(a)) continue;
         au_halt(a);
         if (a->backend == BK_NONE && atomic_load(&a->state) == STATE_STARTED) null_start(a);
         if (a->start_phase == AU_CANCELED) a->reset_pending = 1;

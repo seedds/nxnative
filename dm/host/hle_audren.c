@@ -10,7 +10,7 @@
 //      The local SDK uses a different command format whose storage can exceed the service's budget; that backend storage is supplied by the host. Explicit CPU renderers keep the SDK contract;
 //   2. A render thread (a guest thread started by the host): renders one frame whenever the output hands back a 5 ms buffer, so pacing follows the sound card clock;
 //   3. Takes over AudioRendererImpl::ExecuteAudioRendererRendering (reached through the PLT): generates commands and runs CommandListProcessor like the original,
-//      then finds the DeviceSink command in the command list (a no-op for the CPU processor) and clamps its input mix buffers (int32 holding 16-bit range) to int16 stereo for AudioOut (hle_audio.c).
+//      then finds the DeviceSink command in the command list (a no-op for the CPU processor) and clamps its input mix buffers (int32 holding 16-bit range) to int16 stereo for AudioOut (hle_audio.c, or all six channels under Mac spatial audio, DM_AUDIO_SPATIAL).
 // Command list format (SDK 16): header +0x04 command count, +0x08 mix buffer address, +0x10 buffer count, +0x14 samples per frame, +0x18 sample rate, commands from +0x20;
 //   each command +0x00 magic 0xcafebabe, +0x04 enabled, +0x05 command ID (DeviceSink = 0x13), +0x06 size; DeviceSink +0x128 upsampler buffer, +0x130 input count, +0x134 input indices (s16).
 #include "hle.h"
@@ -27,6 +27,7 @@ void dm_pcmout_start(void *k);
 int dm_pcmout_append(void *k, void *b);
 void *dm_pcmout_released(void *k);
 void dm_pcmout_wait(void *k, int ms);
+int dm_audio_spatial(void);
 
 // P_SIZE: bytes of the game's AudioRendererParameter copied before the two fields are changed. SDK 16's struct is 0x38 bytes; SDK 8's (Link's Awakening) has one more word,
 // its revision at +0x38: copying only 0x38 left the revision uninitialized and the SDK rejected it (CheckValidRevision, Result 0x499). The SDK reads only its own size of the copy
@@ -93,15 +94,22 @@ typedef struct {
     uint8_t *sys;                            // its AudioRenderSystem, from its first render or update (ar_of_sys)
     _Atomic int open;
     void *render_tt;                         // the render thread (ThreadType from dm_guest_thread_spawn): Close joins it before the SDK tears the renderer down
-    int16_t frame[FRAME_MAX * 2]; int frame_n;   // the latest frame (stereo int16)
+    int16_t frame[FRAME_MAX * 6]; int frame_n;   // the latest frame (int16, out_ch() channels interleaved)
     _Atomic uint64_t frames, nonsilent, updates, renders, catchups;
     uint64_t last_r; int updated;            // the render count at the last update, once there was one
-    int16_t cq[CQ][FRAME_MAX * 2]; int cq_n[CQ]; _Atomic uint32_t cq_head, cq_tail;   // output queue of catch-up frames
+    int16_t cq[CQ][FRAME_MAX * 6]; int cq_n[CQ]; _Atomic uint32_t cq_head, cq_tail;   // output queue of catch-up frames
     pthread_mutex_t cq_mu; pthread_cond_t cq_cv;   // the render thread signals each frame it takes off the queue (catch-up pacing)
     int sink_logged;
-    int32_t up_buf[2 * (15 + FRAME_MAX)]; uint32_t up_pos;   // up_3_2's last samples and position
+    int32_t up_buf[6 * (15 + FRAME_MAX)]; uint32_t up_pos;   // up_3_2's last samples and position (out_ch() channels)
 } ar_t;
 static ar_t g_ar[AR_MAX];
+// Output channels: 2 (the DeviceSink downmixed to stereo here), or 6 under Mac spatial audio (hle_audio.c hands the 5.1 bed to the system). Fixed for the process: it sizes the queued frames
+static int out_ch(void) {
+    static _Atomic int n;
+    int v = atomic_load_explicit(&n, memory_order_relaxed);
+    if (!v) { v = dm_audio_spatial() ? 6 : 2; atomic_store_explicit(&n, v, memory_order_relaxed); }
+    return v;
+}
 static pthread_mutex_t g_ar_mu = PTHREAD_MUTEX_INITIALIZER;   // the slots' handle and sys fields
 static __thread ar_t *t_ar;                  // the renderer this render thread drives
 static int ar_index(const ar_t *a) { return (int)(a - g_ar); }
@@ -124,8 +132,9 @@ typedef struct { void *ptr; uint64_t cap, size; } gbuf;       // same as the fro
 static void render_main(void *arg) {
     ar_t *a = arg; t_ar = a;
     void (*exec)(void *, void *) = gsym("_ZN2nn5audio29ExecuteAudioRendererRenderingENS0_19AudioRendererHandleE");
-    void *out = dm_pcmout_open(2);
-    static int16_t data[NBUF][FRAME_MAX * 2]; static gbuf bufs[NBUF]; gbuf *free_list[NBUF]; int nfree = NBUF;
+    const int och = out_ch();
+    void *out = dm_pcmout_open(och);
+    static int16_t data[NBUF][FRAME_MAX * 6]; static gbuf bufs[NBUF]; gbuf *free_list[NBUF]; int nfree = NBUF;
     for (int i = 0; i < NBUF; i++) { bufs[i] = (gbuf){data[i], sizeof data[i], 0}; free_list[i] = &bufs[i]; }
     dm_pcmout_start(out);
     LOG("audren: render thread %d started (%d buffers in flight, paced by the output)", ar_index(a), NBUF);
@@ -143,8 +152,9 @@ static void render_main(void *arg) {
         else { a->frame_n = 0; exec(a->handle[0], a->handle[1]); src = a->frame; got = a->frame_n; }   // SDK: generate commands → CPU processing (output taken in the host takeover) → signal the game's renderer event
         int n = got ? got : 240;
         gbuf *b = free_list[--nfree];
-        if (got) memcpy(b->ptr, src, (size_t)n * 4); else memset(b->ptr, 0, (size_t)n * 4);
-        b->size = (uint64_t)n * 4;
+        size_t bytes = (size_t)n * 2 * (size_t)och;
+        if (got) memcpy(b->ptr, src, bytes); else memset(b->ptr, 0, bytes);
+        b->size = bytes;
         if (!dm_pcmout_append(out, b)) free_list[nfree++] = b;
     }
     dm_pcmout_close(out);   // the output would otherwise keep its sound card callback or silent sink running and hold one of the AudioOut slots after the renderer closes
@@ -306,7 +316,7 @@ HLE_FORCE("_ZN2nn5audio6server16UpsamplerManager8AllocateEv", "upsampler for a D
     return mgr ? orig(mgr) : NULL;
 }
 enum { RS_T = 16 };
-static uint32_t up_3_2(ar_t *a, const int32_t *in, uint32_t n, int32_t *out) {
+static uint32_t up_3_2(ar_t *a, const int32_t *in, uint32_t n, int nc, int32_t *out) {   // nc interleaved channels, the same for every call (out_ch)
     static float h[3][RS_T]; int32_t *buf = a->up_buf; uint32_t pos = a->up_pos;   // pos: the next output's position in thirds of an input sample, from the frame start
     if (!h[0][RS_T / 2 - 1]) {
         for (int p = 0; p < 3; p++) {
@@ -319,15 +329,18 @@ static uint32_t up_3_2(ar_t *a, const int32_t *in, uint32_t n, int32_t *out) {
             for (int k = 0; k < RS_T; k++) h[p][k] = (float)(w[k] / sum);
         }
     }
-    memcpy(buf + 2 * (RS_T - 1), in, (size_t)n * 8);   // the frame after the last RS_T - 1 samples of the one before (copied first: out may be in)
+    memcpy(buf + nc * (RS_T - 1), in, (size_t)n * (size_t)nc * 4);   // the frame after the last RS_T - 1 samples of the one before (copied first: out may be in)
     uint32_t m = 0;
     for (; pos < 3 * n; pos += 2, m++) {
-        const int32_t *x = buf + 2 * (pos / 3); const float *c = h[pos % 3]; float l = 0, r = 0;
-        for (int k = 0; k < RS_T; k++) { l += c[k] * (float)x[2 * k]; r += c[k] * (float)x[2 * k + 1]; }
-        out[2 * m] = (int32_t)lrintf(l); out[2 * m + 1] = (int32_t)lrintf(r);
+        const int32_t *x = buf + nc * (pos / 3); const float *c = h[pos % 3];
+        for (int j = 0; j < nc; j++) {
+            float acc = 0;
+            for (int k = 0; k < RS_T; k++) acc += c[k] * (float)x[nc * k + j];
+            out[nc * m + j] = (int32_t)lrintf(acc);
+        }
     }
     a->up_pos = pos - 3 * n;
-    memmove(buf, buf + 2 * n, (RS_T - 1) * 8);
+    memmove(buf, buf + nc * n, (size_t)(RS_T - 1) * (size_t)nc * 4);
     return m;
 }
 static int capture(ar_t *a, const uint8_t *cl, size_t len, int16_t *dst) {
@@ -394,19 +407,26 @@ static int capture(ar_t *a, const uint8_t *cl, size_t len, int16_t *dst) {
             // Input buffers: the mix buffers the DeviceSink inputs name, at the renderer's rate (with CPU rendering the SDK makes no upsampler, below)
             const int32_t *ch[6]; uint32_t k = nin > 6 ? 6 : nin;
             for (uint32_t j = 0; j < k; j++) ch[j] = mix + (size_t)in[j] * samples;
-            // Channel order front-left front-right center LFE back-left back-right; 6 → 2 with the system default downmix coefficients (front 1.0, center 0.707, LFE 0.251, back 0.707, Q15)
+            // Channel order front-left front-right center LFE back-left back-right; 6 → 2 with the system default downmix coefficients (front 1.0, center 0.707, LFE 0.251, back 0.707, Q15).
+            // Under spatial audio all six go out as they are (a sink with fewer inputs fills the fronts, the rest silent), and the system places them
             enum { CF = 32768, CC = 23167, CL = 8224, CB = 23167 };
-            static int32_t st[FRAME_MAX * 2];   // the stereo downmix before clamping (capture runs under g_render_mu)
-            for (uint32_t s = 0; s < samples; s++) {
+            const int och = out_ch();
+            static int32_t st[FRAME_MAX * 6];   // the output before clamping (capture runs under g_render_mu)
+            for (uint32_t s = 0; s < samples && och == 6; s++) {
+                int32_t *o = st + 6 * s;
+                for (uint32_t j = 0; j < 6; j++) o[j] = j < k ? ch[j][s] : 0;
+                if (k == 1) o[1] = o[0];
+            }
+            for (uint32_t s = 0; s < samples && och == 2; s++) {
                 int32_t l, r;
                 if (k >= 6) { int64_t c = (int64_t)ch[2][s] * CC + (int64_t)ch[3][s] * CL;
                               l = (int32_t)(((int64_t)ch[0][s] * CF + c + (int64_t)ch[4][s] * CB) >> 15); r = (int32_t)(((int64_t)ch[1][s] * CF + c + (int64_t)ch[5][s] * CB) >> 15); }
                 else { l = ch[0][s]; r = k > 1 ? ch[1][s] : l; }
                 st[2 * s] = l; st[2 * s + 1] = r;
             }
-            uint32_t nout = rate == 48000 ? samples : up_3_2(a, st, samples, st);
+            uint32_t nout = rate == 48000 ? samples : up_3_2(a, st, samples, och, st);
             uint64_t loud = 0;
-            for (uint32_t s = 0; s < 2 * nout; s++) {
+            for (uint32_t s = 0; s < (uint32_t)och * nout; s++) {
                 int32_t v = st[s]; v = v > 32767 ? 32767 : v < -32768 ? -32768 : v;
                 dst[s] = (int16_t)v; loud |= (uint64_t)v;
             }
@@ -418,7 +438,7 @@ static int capture(ar_t *a, const uint8_t *cl, size_t len, int16_t *dst) {
     }
     return 0;
 }
-// Render one frame (generate commands + CPU processing); dst = output (stereo int16, *nout samples). The two callers (render thread, catch-up) are serialized by a host lock: they share one command buffer.
+// Render one frame (generate commands + CPU processing); dst = output (int16, out_ch() channels, *nout frames). The two callers (render thread, catch-up) are serialized by a host lock: they share one command buffer.
 // One lock over all renderers: the header layout is worked out once from whichever list comes first, by trying each layout in turn (capture); a frame takes hundredths of a millisecond (0.02 ms mean)
 static pthread_mutex_t g_render_mu = PTHREAD_MUTEX_INITIALIZER;
 // SDK 20's AudioRenderSystem (The Legend of Zelda: Breath of the Wild 1.9.0) has another layout: the member functions for mode / device / command buffer are inlined (sdk+0x22a70c ExecuteAudioRendererRendering:

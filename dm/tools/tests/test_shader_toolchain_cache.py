@@ -279,6 +279,24 @@ class ShaderCache(unittest.TestCase):
         self.assertEqual(stream['mac']['key_b.metallib'](), b'METALLIB_DATA')
         self.assertIn(b'"chain": "test-chain"', stream['mac']['key_b.json'])
 
+    def test_publish_cache_from_direct_stream(self):
+        digest = self.digest()
+        stream = {'mac': {
+            'key_b.json': json.dumps({'chain': 'test-chain', 'stage': 'ps', 'alpha': {'entries': ['a']}}).encode(),
+            'key_b.metallib': lambda: b'STREAMED_METALLIB',
+        }, 'ios': {}}
+        (Path(self.ns['out']) / 'key_b.metal').write_text('STREAMED_MSL')
+        self.ns['CACHED_STREAM'] = stream
+        self.ns['CACHED_STREAM_LOCK'] = threading.Lock()
+        self.ns['publish_cache']('key', digest, 'rule', 'source')
+        (Path(self.ns['out']) / 'key_b.metal').unlink()
+        stream['mac'].clear()
+        self.assertTrue(self.ns['restore_cache']('key', digest))
+        self.assertEqual(stream['mac']['key_b.metal'], b'STREAMED_MSL')
+        self.assertEqual(stream['mac']['key_b.metallib'](), b'STREAMED_METALLIB')
+        restored_json = json.loads(stream['mac']['key_b.json'])
+        self.assertNotIn('alpha', restored_json)
+
 
 class TargetSelection(unittest.TestCase):
     def test_mesh_compiles_only_requested_targets(self):

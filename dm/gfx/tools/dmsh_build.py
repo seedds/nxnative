@@ -350,15 +350,17 @@ CAS_USED = '_b_cas.txt'   # in the Mac library directory b-<V>/: the cache_path 
 
 def cache_outputs(key, digest, cached=False):
     root = cache_path(digest); files = {}
+    stream = globals().get('CACHED_STREAM') if not cached else None
     for label, directory in (('mac', out), ('ios', IOSOUT)):
         if not directory: continue
         # fin(), paired vertex padding and the profile tables also need these on an iOS-only cache hit.
         required = [key + '_b.json'] + ([key + '_b.metal'] if label == 'mac' else [])
         if label in TARGETS: required.append(key + '_b.metallib')
         have = STORE.names(f'{root}/{label}/') if cached else set()
+        in_stream = set(stream.get(label, ())) if stream is not None else set()
         names = required + [key + s + ext for s in ('_bg0', '_bg1', '_bg2', '_bg3', '_bg4', '_bgv', '_bl0', '_bl1', '_bl3') for ext in ('.metallib', '.json', '.metal')
                             if (label == 'mac' or ext != '.metal') and (ext != '.metallib' or label in TARGETS)]
-        found = [n for n in names if (f'{root}/{label}/{n}' in have if cached else os.path.exists(os.path.join(directory, n)))]
+        found = [n for n in names if (f'{root}/{label}/{n}' in have if cached else (n in in_stream or os.path.exists(os.path.join(directory, n))))]
         if not all(n in found for n in required): return None
         files[label] = found
     return root, files
@@ -403,18 +405,26 @@ def cache_lookup(key, digest, rule_fp, code_fp):
         PRE_STATS['miss'] += 1; PRE_STATS[reason] += 1; return False, reason
 
 def publish_cache(key, digest, rule_fp, code_fp):
+    stream = globals().get('CACHED_STREAM')
+    mac_stream = stream.get('mac', {}) if stream is not None else {}
     # Paired pixel MSL is an input to vs_pad; a diagnostic build without it must not cache an incomplete vertex shader under a complete dependency key.
-    if any(not os.path.isfile(os.path.join(out, ps + '_b.metal')) for ps in PAIRS.get(key, ())): return
+    if any(not (ps + '_b.metal' in mac_stream or os.path.isfile(os.path.join(out, ps + '_b.metal'))) for ps in PAIRS.get(key, ())): return
     found = cache_outputs(key, digest)
     if not found: return
     root, files = found
     with STORE.batch():   # a stop leaves the whole entry or none of it
         for label, names in files.items():
+            t_stream = stream.get(label, {}) if stream is not None else {}
             for name in names:
                 src = os.path.join(out if label == 'mac' else IOSOUT, name)
+                in_mem = t_stream.get(name)
                 if name.endswith('.json'):
-                    value = json.load(open(src)); value.pop('fetch', None); value.pop('vin', None); value.pop('pull', None); value.pop('alpha', None); value.pop('logic', None)   # the side libraries are made again from the restored MSL (fetch_finish, vin_finish, pull_finish, alpha_finish, logic_finish)
+                    raw = (in_mem() if callable(in_mem) else in_mem) if in_mem is not None else open(src, 'rb').read()
+                    value = json.loads(raw); value.pop('fetch', None); value.pop('vin', None); value.pop('pull', None); value.pop('alpha', None); value.pop('logic', None)   # the side libraries are made again from the restored MSL (fetch_finish, vin_finish, pull_finish, alpha_finish, logic_finish)
                     STORE.put(f'{root}/{label}/{name}', json.dumps(value, ensure_ascii=False, indent=1).encode())
+                elif in_mem is not None:
+                    raw = in_mem() if callable(in_mem) else in_mem
+                    STORE.put(f'{root}/{label}/{name}', raw.encode('utf-8') if isinstance(raw, str) else raw)
                 else: STORE.put_file(f'{root}/{label}/{name}', src)
         STORE.put(cache_meta_path(key), json.dumps({'digest': digest, 'rule_fp': rule_fp, 'code_fp': code_fp}).encode())
 
@@ -1105,10 +1115,16 @@ def vs_pad(key, src):
     offline on its own without knowing what the next stage reads, and Metal requires every pixel shader input to be a vertex output: 331 of 9043 pairs failed to link and their draws were skipped
     (over 10,000 "Fragment input(s) user(locnN) ... not written by vertex shader" in one iPhone session after the opening course). Returns (new source, padded locations); pairs whose pixel MSL cannot be read are skipped."""
     want = set()
+    stream = globals().get('CACHED_STREAM')
+    mac_stream = stream.get('mac', {}) if stream is not None else {}
     for ps in PAIRS.get(key, ()):
         fn = os.path.join(out, ps + '_b.metal')
         if os.path.exists(fn):
             with open(fn) as f: want |= {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', f.read())}
+        elif ps + '_b.metal' in mac_stream:
+            m = mac_stream[ps + '_b.metal']
+            text = m if isinstance(m, str) else m.decode('utf-8')
+            want |= {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', text)}
     miss = sorted(want - {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', src)})
     i = src.find('struct main0_out\n{\n'); j = src.find('\n};', i); k = src.find('main0_out out = {};')
     if not miss or i < 0 or j < 0 or k < 0: return src, []

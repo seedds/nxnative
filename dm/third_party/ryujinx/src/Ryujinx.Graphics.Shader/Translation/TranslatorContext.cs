@@ -160,6 +160,25 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         internal int GetDepthRegister()
         {
+            if (Options.Flags.HasFlag(TranslationFlags.Ampere))
+            {
+                // nxnative: Ampere gives every enabled color target four registers, whichever of its components the header enables
+                // (the color outputs are read from the same layout, EmitterContext.cs), and the depth register follows them. Counting
+                // only the enabled components put it too low for a target with fewer than four: Mario Kart World's depth pyramid
+                // (3738806f0474308c) enables only x of color target 2 and took R2 as its depth instead of R5.
+                int targets = 0;
+
+                for (int rtIndex = 0; rtIndex < 8; rtIndex++)
+                {
+                    if ((Definitions.OmapTargets & (0xf << (rtIndex * 4))) != 0)
+                    {
+                        targets++;
+                    }
+                }
+
+                return targets * 4 + 1;
+            }
+
             // The depth register is always two registers after the last color output.
             return BitOperations.PopCount((uint)Definitions.OmapTargets) + 1;
         }

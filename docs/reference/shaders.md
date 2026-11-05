@@ -1120,6 +1120,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
 
+### Fragment depth register of Ampere shaders
+
+- **Symptom:** light glows, particles or fog that should stop at a wall are drawn through it (Mario Kart World at night: the headlight and lamp glows show through the buildings), with the depth-tested passes after a depth-pyramid pass looking at a wrong depth.
+- **Cause:** a fragment shader that writes depth keeps it in the register after the colour outputs. On Maxwell those are the enabled components, so the depth register is `PopCount(OmapTargets) + 1`. On Ampere every enabled colour target takes four registers whichever of its components the header enables (the colour outputs are read from the same layout in `EmitterContext.cs`), so the register is `4 * enabled targets + 1`. A shader that enables fewer than four components of its target read the wrong register: the depth pyramid `3738806f0474308c` of Mario Kart World enables only x of colour target 2 and took R2, a linear depth, as `gl_FragDepth` instead of R5 (the `gather.w` result, `_71` in its MSL). Metal clamps a depth above 1 to 1, so the pyramid kept the far plane everywhere.
+- **Fix:** `GetDepthRegister` (`TranslatorContext.cs`) counts the colour targets with any enabled component on Ampere and takes `targets * 4 + 1`; Maxwell and Pascal keep the old count. A change of the translator is a new chain version (`DMSH_CHAIN`), so every Ampere shader is rebuilt; only those that write depth differ (about 40 in Mario Kart World).
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#found-on-this-game) 1.8.0.
+- **Check:** open (no unit test: the translator tests build compute shaders and have no fragment header with an output map). In a rebuilt `3738806f0474308c_b.metal` the pyramid's `gl_FragDepth` output is the `gather.w` value, not a register holding the linear depth.
+
 ### Comparisons with .FTZ
 
 - **Symptom:** single bright dots at thin far geometry (railings, track edges), changing frame to frame as the camera moves, already in the lit picture before anti-aliasing. Most of them come from another cause (below).

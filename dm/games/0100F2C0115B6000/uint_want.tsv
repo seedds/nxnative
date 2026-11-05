@@ -1,0 +1,3 @@
+# Pixel shaders that get the integer entry point main0_u beside their float main0 (dm/gfx/tools/dmsh_build.py fs_uint): key, one per line
+# e3fb0bb58a691e10 (material bfsha BNSH@0xd64000 variation 28): the Recall and Ultrahand mask. It computes floats, and is drawn into Recall's R16Float mask and Ultrahand's R8Uint one, so it needs both
+e3fb0bb58a691e10

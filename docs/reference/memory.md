@@ -61,6 +61,13 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Fix:** a request larger than the heap region returns 0xD001 (`hle_svc.c`, svc 0x1). The search then settles on 3.09 GB, the pool less the rewritten modules (the same LimitReached check as before).
 - **Found on:** [Donkey Kong Country: Tropical Freeze](../../dm/games/0100C1F0051B6000/README.md) (SDK 4.4.0).
 
+### The heap check grows the block around the profile's alias region
+
+- **Symptom:** a provisional profile's heap check reports "the heap request did not fit; set mem_reserve", the build finishes, and the game still stops at its first run: `SetHeapSize OOM: req 0x18ce00000 > cap 0xb8000000`, then `CRASH sig=10` (SIGBUS) in `nninitStartup` on the heap it never got.
+- **Cause:** when the block has not even 1 GB left for the alias region beside the requested heap region, `profile_guess.py` `heap_signals` grew `mem_reserve` to 256 MB + 1 GB + the stack region + the heap region, as if the alias region were 1 GB, but set only `mem_reserve`. The heap region is what follows the profile's alias region and stacks (`hle_svc.c` `mem_init`), so a guessed alias region above 1 GB came off the heap region: the Switch 2 guess for a game with a system resource, 4.375 GB (`0x118000000`), left a 6.20 GB request 2.88 GB.
+- **Fix:** the grown block keeps the profile's alias region (at least 1 GB, as before): `mem_reserve` = 256 MB + max(`mem_alias`, 1 GB) + `mem_stack` + the request rounded up to 128 MB. A profile whose alias region is 1 GB or less gets the same keys as before. `test_profile_guess.py` (`HeapSignals`) checks the layout the keys give. A profile stamped by the old check keeps its keys: delete its `# heap check:` line, or set `mem_reserve` by hand.
+- **Found on:** The Legend of Zelda: Ocarina of Time (Switch 2, 0400486024DEC000, update v131072, SDK 22.2.8), GitHub issue #1361: `mem_reserve 0x1f0000000` from the old check, `0x2c8000000` now (a 6.25 GB heap region beside the 4.375 GB alias region).
+
 ### `nninitStartup`'s heap only without virtual address memory
 
 - Not needed in the end for [Ace Attorney Investigations Collection](../../dm/games/010005501E68C000/README.md) (1.0.0.2, SDK 17.5.3): the process heap of pull request #16. `nninitStartup` calls `SetMemoryHeapSize` / `AllocateMemoryBlock` only without virtual address memory, and nothing else in `main` calls them ([Virtual address memory follows the NPDM's system resource](#virtual-address-memory-follows-the-npdms-system-resource)).

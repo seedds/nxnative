@@ -295,6 +295,42 @@ static inline void s2_rumble_resync(s2_rumble_cursor *c, uint64_t now, uint64_t 
     if (c->end + 3 * S2_RUMBLE_SLOT_NS < want || c->end > want + 3 * S2_RUMBLE_SLOT_NS) c->end = want;
 }
 
+// A Joy-Con on its own (a Joy-Con style npad, dm_joy_set): its own buttons as NpadButtons, rail buttons included (DM_BTN_LSL..RSR), and its own stick, -32767..32767
+static inline uint64_t s2_joy_buttons(uint32_t b, int right) {
+    uint64_t m = 0;
+    if (!right) {
+        if (b & S2_LEFT) m |= DM_BTN_LEFT; if (b & S2_UP) m |= DM_BTN_UP; if (b & S2_RIGHT) m |= DM_BTN_RIGHT; if (b & S2_DOWN) m |= DM_BTN_DOWN;
+        if (b & S2_L) m |= DM_BTN_L; if (b & S2_ZL) m |= DM_BTN_ZL; if (b & S2_MINUS) m |= DM_BTN_MINUS; if (b & S2_LSTICK) m |= DM_BTN_LS;
+        if (b & S2_SL_L) m |= DM_BTN_LSL; if (b & S2_SR_L) m |= DM_BTN_LSR;
+    } else {
+        if (b & S2_A) m |= DM_BTN_A; if (b & S2_B) m |= DM_BTN_B; if (b & S2_X) m |= DM_BTN_X; if (b & S2_Y) m |= DM_BTN_Y;
+        if (b & S2_R) m |= DM_BTN_R; if (b & S2_ZR) m |= DM_BTN_ZR; if (b & S2_PLUS) m |= DM_BTN_PLUS; if (b & S2_RSTICK) m |= DM_BTN_RS;
+        if (b & S2_SL_R) m |= DM_BTN_RSL; if (b & S2_SR_R) m |= DM_BTN_RSR;
+    }
+    return m;
+}
+static inline void s2_joy_stick(const s2_dev *d, int right, int32_t out[2]) {
+    float x, y; s2_cal_apply(&d->cal[0], right ? d->r.rx : d->r.lx, right ? d->r.ry : d->r.ly, S2_DEADZONE, &x, &y);
+    out[0] = (int32_t)lrintf(x * DM_STICK_MAX); out[1] = (int32_t)lrintf(y * DM_STICK_MAX);
+}
+
+// How Joy-Cons play, chosen on the controllers as on a Switch's Change Grip/Order screen, but held for S2_GESTURE_NS so that play cannot do it by accident:
+// SL and SR of a Joy-Con that is in a pair: it leaves the pair and plays alone, held sideways (S2_GESTURE_SPLIT); L of a left Joy-Con alone and R of a right one alone, both held:
+// the two play as one pair (S2_GESTURE_JOIN, both must have held it for the whole time). The player lights show the new players.
+#define S2_GESTURE_NS 3000000000ull
+enum { S2_GESTURE_NONE, S2_GESTURE_SPLIT, S2_GESTURE_JOIN };
+static inline int s2_gesture(uint32_t b, int right, int paired) {
+    uint32_t rails = right ? (S2_SL_R | S2_SR_R) : (S2_SL_L | S2_SR_L);
+    if (paired) return (b & rails) == rails ? S2_GESTURE_SPLIT : S2_GESTURE_NONE;
+    return (b & (right ? S2_R : S2_L)) && !(b & rails) ? S2_GESTURE_JOIN : S2_GESTURE_NONE;
+}
+typedef struct { int kind, done; uint64_t since; } s2_hold;   // the gesture held now, since when, and whether it has acted
+// Returns 1 while kind has been held S2_GESTURE_NS without a break
+static inline int s2_hold_update(s2_hold *h, int kind, uint64_t now) {
+    if (kind != h->kind) { h->kind = kind; h->since = now; h->done = 0; }
+    return kind != S2_GESTURE_NONE && now - h->since >= S2_GESTURE_NS;
+}
+
 // The device whose motion sensor the pad uses: the Pro Controller 2; of two Joy-Cons the right one (want_right) or the left; of one, that one. NULL when none.
 static inline const s2_dev *s2_pad_motion_dev(const s2_pad_state *p, int want_right) {
     if (p->pro.have) return &p->pro;

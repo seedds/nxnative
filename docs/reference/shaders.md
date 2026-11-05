@@ -1059,6 +1059,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `ATex` maps them to the bound forms, `ASured` takes the operation. Open: SURED.MAX.U64 (33,550 uses, Nanite's visibility buffer) is still refused, as the host has no 64-bit image atomics; the game does not reach those shaders so far.
 - **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md). Its shaders' jump tables also ran past their code on two compute shaders (`ArgumentOutOfRangeException`, in `GetCode`): an address past the code is now no code, which ends the table as the decoder expected.
 
+### Ampere BMSK and the read of a covered pixel
+
+- **Symptom:** `Ampere instruction 21b at … is not implemented` (`…0405721b`) or `Ampere instruction 925 at 0x0 is not implemented` (`040e0200000e4000 …7925`) in the build.
+- **Cause:** 0x21b, beside SGXT's 0x21a, is BMSK: a mask of b bits from bit a. Star Fox's `58046f286de779e1` takes it from two bytes of a word, ANDs it with the value shifted by the same a and hands the result to an atomic, a bit field written into a word. 0x925 has no name in the tables at hand (the part of CuAssembler's sm_80 table read so far; Mesa's NAK encoder could not be fetched); what it reads comes from its two shaders, quad efficiency views. They rebuild its value at the quad's three other pixels through SHFL and FSWZADD and add the four: one indexes a 4-entry palette with the sum minus 1, so a shaded pixel's sum is at least 1, and the other draws 0.03125 + 0.15625 sum in red. So it is 1 for a covered pixel and 0 for a helper invocation.
+- **Fix:** `ABmsk` follows PTX's `bmsk` definition, its `.W` at bit 75 as SGXT's (only the clamping form has been seen). `APixelCovered` loads a new `IoVariable.HelperInvocation`, Metal's `simd_is_helper_thread()`, as an integer; any other form of 0x925 stays refused (chain change). `test_dmsh_ampere_mem.py` covers both.
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md): 1 compute and 2 pixel shaders, none asked for in play so far, so neither instruction has run. Neither opcode is in the shaders of Donkey Kong Bananza, Splatoon Raiders, Mario Tennis Fever or Pokopia.
+
 ### TXD through a uniform register kept no handle
 
 - **Symptom:** `[RED] <key>: the translator deleted N bindless accesses` in the build ([Losses a shader build reports](#losses-a-shader-build-reports); `Failed to find handle source for bindless access` in its reflection's notes), for a shader with TXD through a uniform register (0xf6c). The MSL has no gradient sample, and what it read comes back 0.

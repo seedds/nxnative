@@ -94,6 +94,53 @@ class Suatom(Translated):
         self.assertRegex(msl, r'uint \w+ = [^;]*atomic_fetch_add')
 
 
+class Bmsk(Translated):
+    """BMSK (Star Fox's 58046f286de779e1 +0x5a0, on registers the atomic reads): a mask of b bits from bit a. The form with c[4] sources keeps it from folding"""
+    MOVS = inst(0x000fe20000000f00, 0x0100000000037a02) + inst(0x000fe20000000f00, 0x0100010000047a02)   # R3 = c4[0], R4 = c4[4]
+    BMSK = (0x000fe40000000000, 0x000000040303721b)   # BMSK R3, R3, R4: clamping
+    WRAP = (0x000fe40000000800, 0x000000040303721b)   # the same, .W
+
+    def msl(self, op):
+        return self.translate(self.MOVS + inst(*op) + inst(*SUATOM) + inst(*EXIT))
+
+    def test_a_clamping_mask_tests_its_operands(self):
+        self.assertGreaterEqual(self.msl(self.BMSK).count('>= 32u'), 3)   # a + b, a, b
+
+    def test_a_wrapping_mask_tests_only_their_sum(self):
+        self.assertEqual(self.msl(self.WRAP).count('>= 32u'), 1)
+
+
+@unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
+class PixelCovered(unittest.TestCase):
+    """0x925 as Star Fox's quad efficiency views encode it (826168691af2e211 +0x0): 1 for a covered pixel, 0 for a helper invocation"""
+    COVERED = (0x040e0200000e4000, 0x0000000000007925)
+    OTHER = (0x040e0200000e8000, 0x0000000000007925)   # bits 78..80 = 2, not seen
+    SPH = struct.pack('<32I', *([0x000c5482] + [0] * 4 + [0xb0000000] + [0] * 12 + [0xf] + [0] * 13))   # the game's: writes colour 0
+
+    def run_job(self, op):
+        with tempfile.TemporaryDirectory(prefix='ampere_px_') as d:
+            work = Path(d); (work / 'k.bin').write_bytes(self.SPH + inst(*op) + inst(*EXIT))
+            (work / 'jobs.json').write_text(json.dumps([dict(key='k', stage='ps', arch='sm86', code=str(work / 'k.bin'), tex={}, img={}, attr={}, fout={}, debug=True)]))
+            r = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(work / 'jobs.json'), d], capture_output=True, text=True)
+            if not (work / 'k.spv').exists(): return None, r.stdout + r.stderr
+            sys.path.insert(0, str(TOOLS)); import dmsh_geometry
+            dmsh_geometry.flatten_sets(work / 'k.spv')
+            m = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300', '--msl-argument-buffers', str(work / 'k.spv')], capture_output=True, text=True)
+            self.assertEqual(m.returncode, 0, m.stderr)
+            return m.stdout, r.stdout + r.stderr
+
+    def test_reads_the_helper_invocation(self):
+        msl, log = self.run_job(self.COVERED)
+        self.assertIsNotNone(msl, log)
+        self.assertIn('simd_is_helper_thread()', msl)
+        self.assertRegex(msl, r'\? 0 : 1;')   # helper 0, covered 1
+
+    def test_another_form_is_refused(self):
+        msl, log = self.run_job(self.OTHER)
+        self.assertIsNone(msl)
+        self.assertIn('0x925 form 2', log)
+
+
 class MufuF16(Translated):
     """MUFU.F16 (Splatoon Raiders' upscaler network): the source is the half bits 60..61 select (bit 62 its abs, as in every B slot), the result the low half"""
     LOG2_HIGH = (0x000fe60000000e00, 0x5000000c000c7308)   # MUFU.F16.LOG2 R12, |R12.H1|: the game's encoding (c1b8edc09e3313b1 +0x5970) on the register the atomic reads

@@ -73,6 +73,7 @@ General changes first needed here; each applies to every game:
 
 ## Open
 
+- **Current (2026-11-05):** the translator deletes 22 bindless accesses in 22 shaders (22 compute; imageBuffer 22), whose results read 0: `0117c7c8fbb6a5f2` `1ca3816f389a18ce` `4361dbbe8797c4da` `43bbad1ccaa23ea7` `55d9bc02a957cfc0` `58ebebab3418e50d` `632d83ffd8db2071` `6a89a43f0576e2b2` `73c08353f5d37896` `7acf11f6ad2d5919` `855ea5d0afce0e9b` `997096cef1c7b5f6` `ac980d4c676534bc` `ace307c991c69468` `b0786eaacfe8e5e5` `b407c64ae334d810` `c25e6888e5ff5949` `c4ef1679388f7ce1` `c7db95be19f06c62` `e00fb401a551b766` `e3a0dc30ae36ab4f` `f73848747856be53`. The cause is not traced, and whether a route reaches them is not known. [Losses a shader build reports](../../../docs/reference/shaders.md#losses-a-shader-build-reports).
 - Past the first battle: nothing is tested. No IPA, no iPhone run.
 - The sound has not been listened to, and no route was found to make Unreal's renderer sound.
 - The update: see [Versions](#versions).

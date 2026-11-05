@@ -43,6 +43,7 @@ Update 1.0.6.1267 (v3080192) over the base game, SDK 20.5.29. Unity 6000.0.52f1 
 
 ## Open
 
+- **Current (2026-11-05):** the translator deletes 32 bindless accesses in 2 shaders (2 pixel; texture2D 32), whose results read 0: `74cb82b3eb27955d` `dab363d965d1374a`. The cause is not traced, and whether a route reaches them is not known. `74cb82b3eb27955d` lost 17 before `84dea698`, the float comparisons that honour .FTZ, and 30 since; why is not traced. [Losses a shader build reports](../../../docs/reference/shaders.md#losses-a-shader-build-reports).
 - The five DLC notices return on every start, even with a save. Whether the Switch does the same, or something the game stores does not persist here, was not looked into.
 - iPhone and iPad runtime validation; no IPA has been built.
 - Sound is not checked: every run was windowless with the silent sink. Input has gone only through `DM_CTL`, not a controller or the keyboard.

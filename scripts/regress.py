@@ -67,8 +67,8 @@
 #          "prepare_s", "prebuild": {"secs", "pairs", "built", "archived", "failed", "done", "hang"}, "fps", "frame_p50", "frame_p99", "frame_max", "dropped", "over_budget",
 #          "peak_footprint_mb", "red": {normalized text: count}, "shots": {<s>: {"dhash"}}, "secs", "modules", "host",
 #          "pipeline": {"depth_profile": "gl"|"zero", "depth_runtime": ["gl"|"zero"], "stamp_mismatch": bool} (NVN only; no depth observation = [])}
-#   status per game, worst first: ERROR (the harness could not check it), NEW-FAIL (something that worked in the baseline fails: a shader, the interface check, a crash, a hang, the frame
-#   not reached), REGRESSION (new [RED] lines, a screenshot beyond the tolerance, frame time, memory or prepare time worse beyond it), CHANGED (MSL or numbers differ, nothing worse),
+#   status per game, worst first: ERROR (the harness could not check it), NEW-FAIL (something that worked in the baseline fails: a shader, a shader that builds but lost more than in the
+#   baseline (a deleted bindless access, extra entry points: shader_regressions.losses), the interface check, a crash, a hang, the frame not reached), REGRESSION (new [RED] lines, a screenshot beyond the tolerance, frame time, memory or prepare time worse beyond it), CHANGED (MSL or numbers differ, nothing worse),
 #   PASS. "known" lists failures the baseline has too (they do not fail the check).
 # Exit status: 0 = no regression, 1 = a regression (NEW-FAIL or REGRESSION) in some game, 2 = a harness error (and no regression found).
 import argparse, collections, concurrent.futures as cf, ctypes, datetime, fcntl, hashlib, importlib.util, json, os, re, shutil, signal, struct, subprocess, sys, time, traceback
@@ -423,7 +423,7 @@ def chain_build_locked(tree, g, a, v, inp, key, out):
     return m, out
 
 
-NVN_HASHES = 2   # how nvn_manifest hashes; a reused manifest of another number is hashed again from its outputs (2: variant reflections without the chain stamps)
+NVN_HASHES = 3   # how nvn_manifest hashes; a reused manifest of another number is hashed again from its outputs (2: variant reflections without the chain stamps; 3: each shader's losses)
 
 
 def refl_canon(p):
@@ -439,6 +439,13 @@ def refl_hash(p):
     return j and hashlib.sha256(j).hexdigest()[:16]
 
 
+def refl_losses(p):
+    """{deleted: {type: the accesses the translator deleted}, lost: {name: 1 for each entry point the library built without}}, each only when there are some (shader_regressions.losses)"""
+    try: deleted, lost = shader_regressions.losses(json.loads(Path(p).read_bytes()))
+    except (OSError, ValueError): return {}
+    return {**({'deleted': dict(deleted)} if deleted else {}), **({'lost': dict(lost)} if lost else {})}
+
+
 def nvn_manifest(lib, jobs):
     """{key: {st, err, msl, refl, var}} from dmsh_build.py's report and outputs"""
     files = collections.defaultdict(list)
@@ -450,7 +457,7 @@ def nvn_manifest(lib, jobs):
         k = r['key']; names = sorted(files.get(k, ()))
         e = {'st': r['st'], **({'err': r['err'][:160]} if r['st'] != 'ok' else {})}
         if (lib / f'{k}_b.metal').is_file(): e['msl'] = sha256_file(lib / f'{k}_b.metal').hexdigest()[:16]
-        if (lib / f'{k}_b.json').is_file(): e['refl'] = refl_hash(lib / f'{k}_b.json')
+        if (lib / f'{k}_b.json').is_file(): e.update(refl=refl_hash(lib / f'{k}_b.json'), **refl_losses(lib / f'{k}_b.json'))
         var = [n for n in names if n not in (f'{k}_b.metal', f'{k}_b.json', f'{k}_b.metallib')]
         if var:
             h = hashlib.sha256()
@@ -559,7 +566,31 @@ def chain_diff(b, c):
         cb = (ci or {}).get('bad', [])
         out['interface'] = {'baseline': len((bi or {}).get('bad', [])), 'candidate': len(cb), 'checked': (ci or {}).get('checked'),
                             'new': [x for x in cb if sig(x) not in old], 'known': [x for x in cb if sig(x) in old][:50]}
+    out['losses'] = loss_diff(bs, cs)
     return out
+
+
+LOSS_TEXT = {'deleted': 'bindless accesses the translator deleted', 'lost': 'extra entry points the library built without'}
+
+
+def loss_diff(bs, cs):
+    """The shaders that lost more than in the baseline, shader by shader, not by totals: a fix in one shader must not hide a new loss in another. A shader new in the candidate starts from none."""
+    def total(m, kind): return sum(sum(e.get(kind, {}).values()) for e in m.values())
+    out = {}
+    for kind in LOSS_TEXT:
+        rose = [k for k, e in sorted(cs.items()) if any(n > bs.get(k, {}).get(kind, {}).get(t, 0) for t, n in e.get(kind, {}).items())]
+        out[kind] = {'baseline': total(bs, kind), 'candidate': total(cs, kind), 'rose': len(rose), 'held': sum(1 for e in cs.values() if e.get(kind)) - len(rose),
+                     'keys': [{'key': k, 'baseline': bs.get(k, {}).get(kind, {}), 'candidate': cs[k][kind]} for k in rose[:200]]}
+    return out
+
+
+def loss_levels(loss, levels, known):
+    """A rise is NEW-FAIL; the losses the baseline has too are known (the game notes list them), and fewer of them is CHANGED"""
+    for kind, text in LOSS_TEXT.items():
+        x = loss[kind]
+        if x['rose']: levels['NEW-FAIL'].append(f"{x['rose']} shaders with more {text} than in the baseline")
+        if x['held']: known.append(f"{x['held']} shaders with {text}")
+        if x['candidate'] < x['baseline']: levels['CHANGED'].append(f"{text}: {x['baseline']} → {x['candidate']}")
 
 
 def build_summary(m):
@@ -1215,6 +1246,7 @@ def cmd_check(a, smoke=True):
             if cd['newly_passing']: levels['CHANGED'].append(f"{len(cd['newly_passing'])} shaders newly build")
             if cd['changed']['shaders']: levels['CHANGED'].append(f"{cd['changed']['shaders']} shaders changed (MSL {cd['changed']['msl']}, reflection {cd['changed']['reflection']}, variants {cd['changed']['variants']})")
             if cd['added'] or cd['removed']: levels['CHANGED'].append(f"shaders added {cd['added']}, removed {cd['removed']}")
+            loss_levels(cd['losses'], levels, gr['known'])
             itf = cd.get('interface')
             if itf and itf['new']: levels['NEW-FAIL'].append(f"{len(itf['new'])} new pipeline bases with a pixel input the vertex shader does not write (metal-tt refuses the archive)")
             if itf and itf['known']: gr['known'].append(f"{itf['candidate'] - len(itf['new'])} pipeline bases with a pixel input the vertex shader does not write (as in the baseline: GitHub issue #283)")
@@ -1544,6 +1576,8 @@ def report_md(rep):
         ch = g.get('chain', {})
         for x in ch.get('newly_failing', [])[:30]: L.append(f"  - newly failing `{x['key']}` {x['status']}: {x['error'][:120]}")
         for x in ch.get('added_failing', [])[:30]: L.append(f"  - new shader failing `{x['key']}` {x['status']}: {x['error'][:120]}")
+        for kind, text in LOSS_TEXT.items():
+            for x in (ch.get('losses') or {}).get(kind, {}).get('keys', [])[:30]: L.append(f"  - more {text} `{x['key']}`: {x['baseline'] or 'none'} → {x['candidate']}")
         if ch.get('changed', {}).get('keys'): L.append('  - changed shaders: ' + ', '.join(f'`{k}`' for k in ch['changed']['keys'][:40]) + (' …' if ch['changed']['shaders'] > 40 else ''))
         itf = ch.get('interface') or {}
         for x in (itf.get('new', []) + itf.get('known', []))[:20]:

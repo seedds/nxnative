@@ -69,6 +69,7 @@ General host changes first needed here; each applies to every game:
 - **Rewriter:** text before the first FDE as one function (`func_of`) and long functions analysed in pieces (`pieces`): [Code before the first unwind entry is one function](../../../docs/reference/rewriter.md#code-before-the-first-unwind-entry-is-one-function), [Long functions analysed in pieces](../../../docs/reference/rewriter.md#long-functions-analysed-in-pieces).
 - **Bindless reads through a phi that also carries non-handle values** (the vendored translator's `TryTableHandle`): [Bindless reads whose handle phi also carries other values](../../../docs/reference/shaders.md#bindless-reads-whose-handle-phi-also-carries-other-values).
 - **Buffer texture views below the 16-byte alignment read through an aligned copy** (`tbuf_shadow`): [Buffer textures at offsets below 16 bytes](../../../docs/reference/rendering.md#buffer-textures-at-offsets-below-16-bytes).
+- **Spatial audio on the built-in speakers** (`SYS_BUILTIN_MS`): [Spatial audio through the system renderer on the Mac](../../../docs/reference/audio.md#spatial-audio-through-the-system-renderer-on-the-mac-dm_audio_spatial): its six-channel AudioOut as 5.1, on AirPods and on the built-in speakers, which play later than they report.
 
 ## Open
 

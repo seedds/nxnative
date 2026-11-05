@@ -12,7 +12,7 @@
 
 static dm_switch2_front g_front;
 static s2_pad *g_pads;
-static int g_verbose, g_motion_right = 1, g_motion = 1, g_active = 1;
+static int g_verbose, g_motion_right = 1, g_motion = 1, g_active = 1, g_joy = 1;   // g_joy: each Joy-Con reported on its own (not with DM_PAD_MERGE)
 static float g_gyro = S2_GYRO_RAD;
 static int8_t g_map[6];
 static int g_map_set;               // DM_SW2_MAP overrides the per-layout maps
@@ -61,6 +61,14 @@ static const char *s2_kind(uint16_t pid) { return pid == S2_PID_PRO ? "Pro Contr
 static s2_dev *s2_dev_of(s2_pad *p, uint16_t pid) { return pid == S2_PID_PRO ? &p->st.pro : pid == S2_PID_JOYCON_L ? &p->st.left : &p->st.right; }
 static int s2_pad_empty(const s2_pad *p) { return !p->st.pro.have && !p->st.left.have && !p->st.right.have; }
 static int s2_player(s2_pad *p) { return p && g_front.player ? g_front.player(p) : -1; }
+static int s2_blocked(void) { return !g_active || (g_front.blocked && g_front.blocked()); }
+// Which Joy-Cons a pad holds, to the npad layer (dm_joy_attach): a Pro Controller 2 is 0
+static void s2_sync_sides(s2_pad *p) {
+    int pl = g_joy ? s2_player(p) : -1; if (pl < 0) return;
+    dm_joy_attach(pl, p->st.pro.have ? 0 : (uint32_t)((p->st.left.have ? 1 : 0) | (p->st.right.have ? 2 : 0)));
+}
+static void s2_joy_release(int pl, int side) { if (g_joy && pl >= 0) { dm_joy_set(pl, side, 0, 0, 0); dm_motion_clear_joy(pl, side); } }
+static void s2_pad_unlink(s2_pad *p) { s2_pad **link = &g_pads; while (*link && *link != p) link = &(*link)->next; if (*link) *link = p->next; }
 static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has the other one alone; anything else starts a pad
     if (pid != S2_PID_PRO)
         for (s2_pad *p = g_pads; p; p = p->next)
@@ -78,6 +86,7 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     s2_cal _cal[2];
     NSTimer *_tick; uint64_t _reports; BOOL _handshaken; s2_rest _rest;
     CBCharacteristic *_vib; uint8_t _vseq; int _offLeft; s2_rumble_cursor _rcur;   // _rcur: where this controller is in its player's rumble log
+    s2_hold _hold;   // the choosing gesture this Joy-Con holds now (s2_gesture)
 }
 - (instancetype)initWith:(CBPeripheral *)p pid:(uint16_t)pid use:(int)use {
     if ((self = [super init])) { _peripheral = p; _pid = pid; _use = use; p.delegate = self; _queue = [NSMutableArray new]; s2_cal_default(&_cal[0]); s2_cal_default(&_cal[1]); }
@@ -100,12 +109,13 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
         int player = s2_player(p);
         s2_dev *d = s2_dev_of(p, _pid); memset(d, 0, sizeof *d);
         if (player >= 0) dm_motion_clear_hid(player);
+        if (_pid != S2_PID_PRO) s2_joy_release(player, _pid == S2_PID_JOYCON_R);
         if (s2_pad_empty(p)) {
-            s2_pad **link = &g_pads; while (*link && *link != p) link = &(*link)->next;
-            if (*link) *link = p->next;
+            if (player >= 0 && g_joy) dm_joy_attach(player, 0);
+            s2_pad_unlink(p);
             if (g_front.detach) g_front.detach(p);
             free(p);
-        } else if (g_front.read) g_front.read(p);
+        } else { s2_sync_sides(p); if (g_front.read) g_front.read(p); }
     }
 }
 // ---- commands: one in flight (the controller has one reply channel) ----
@@ -216,6 +226,7 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
         if (g_front.attach) g_front.attach(p);
         if (s2_player(p) < 0) { LOG("[sw2] %s: no free player, not used", s2_kind(_pid)); [self fail:@"all players are taken"]; return; }
     } else if (g_front.read) g_front.read(p);
+    s2_sync_sides(p);
     LOG("[sw2] %s connected: player %d%s", s2_kind(_pid), s2_player(p) + 1, fresh ? "" : " (joined the Joy-Con already there)");
     [self setLEDs:nil];
     [_peripheral setNotifyValue:YES forCharacteristic:_inp];
@@ -256,12 +267,60 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     if (g_verbose && _reports % 33 == 1)
         LOG("[sw2] %s: buttons 0x%08x sticks %u,%u %u,%u accel %d,%d,%d gyro %d,%d,%d battery %u mV", s2_kind(_pid), r.buttons, r.lx, r.ly, r.rx, r.ry, r.raw[0], r.raw[1], r.raw[2], r.raw[3], r.raw[4], r.raw[5], r.battery_mv);
     if (g_front.read) g_front.read(_pad);
-    int player = s2_player(_pad);
-    if (g_motion && g_active && player >= 0 && s2_pad_motion_dev(&_pad->st, g_motion_right) == dev) {
+    int player = s2_player(_pad), blocked = s2_blocked();
+    if (g_motion && !blocked && player >= 0 && s2_pad_motion_dev(&_pad->st, g_motion_right) == dev) {
         const int8_t *map = g_map_set ? g_map : s2_pad_map(&_pad->st, dev);
         float acc[3], rot[3]; s2_motion(r.raw, map, _rest.have ? _rest.bias : NULL, g_gyro, acc, rot);
         dm_motion_set_hid(player, acc, rot, now_ns());
     }
+    if (_pid == S2_PID_PRO || !g_joy || player < 0) return;
+    int right = _pid == S2_PID_JOYCON_R;
+    if (!blocked) {   // the Joy-Con's own buttons, stick and sensor, in its own frame (upright: the pair's map)
+        int32_t st[2]; s2_joy_stick(dev, right, st);
+        dm_joy_set(player, right, s2_joy_buttons(r.buttons, right), st[0], st[1]);
+        if (g_motion) { float acc[3], rot[3]; s2_motion(r.raw, g_map_set ? g_map : s2_map_pair, _rest.have ? _rest.bias : NULL, g_gyro, acc, rot); dm_motion_set_joy(player, right, acc, rot, now_ns()); }
+    }
+    [self gesture:r.buttons right:right];
+}
+// SL + SR held on a Joy-Con of a pair: it plays alone. L on a left one alone and R on a right one alone, held together: they pair (switch2_proto.h, s2_gesture)
+- (void)gesture:(uint32_t)b right:(int)right {
+    s2_pad *p = _pad; int paired = p->st.left.have && p->st.right.have;
+    if (!s2_hold_update(&_hold, s2_gesture(b, right, paired), now_ns()) || _hold.done) return;
+    if (_hold.kind == S2_GESTURE_SPLIT) { _hold.done = 1; [self leavePair]; return; }
+    for (S2Session *o in g_sessions.allValues) {   // the partner: the other side, alone, holding its own L or R as long
+        if (o == self || !o->_live || !o->_pad || o->_pid == _pid || o->_pid == S2_PID_PRO || o->_pad->st.left.have == o->_pad->st.right.have) continue;
+        if (o->_hold.kind != S2_GESTURE_JOIN || o->_hold.done || now_ns() - o->_hold.since < S2_GESTURE_NS) continue;
+        _hold.done = o->_hold.done = 1;
+        S2Session *mover = s2_player(_pad) > s2_player(o->_pad) ? self : o, *stay = mover == self ? o : self;
+        [mover joinPadOf:stay];
+        return;
+    }
+}
+- (void)leavePair {
+    s2_pad *old = _pad; int was = s2_player(old), side = _pid == S2_PID_JOYCON_R;
+    s2_pad *p = calloc(1, sizeof *p); if (!p) return;
+    snprintf(p->name, sizeof p->name, "%s", "Joy-Con 2");
+    s2_dev *d = s2_dev_of(old, _pid), *nd = s2_dev_of(p, _pid); *nd = *d; memset(d, 0, sizeof *d);
+    s2_joy_release(was, side); s2_sync_sides(old); if (g_front.read) g_front.read(old);
+    p->next = g_pads; g_pads = p; _pad = p;
+    if (g_front.attach) g_front.attach(p);
+    if (s2_player(p) < 0) {   // no free player: back into the pair
+        LOG("[sw2] %s: no free player to play alone, it stays in the pair", s2_kind(_pid));
+        s2_pad_unlink(p); *d = *nd; _pad = old; free(p); s2_sync_sides(old); return;
+    }
+    s2_sync_sides(p); if (g_front.read) g_front.read(p);
+    LOG("[sw2] %s plays alone now: player %d (SL + SR held); the other Joy-Con stays player %d", s2_kind(_pid), s2_player(p) + 1, was + 1);
+    [self setLEDs:nil];
+}
+- (void)joinPadOf:(S2Session *)stay {
+    s2_pad *old = _pad, *into = stay->_pad; int was = s2_player(old), side = _pid == S2_PID_JOYCON_R;
+    s2_dev *d = s2_dev_of(old, _pid), *nd = s2_dev_of(into, _pid); *nd = *d; memset(d, 0, sizeof *d);
+    s2_joy_release(was, side);
+    if (was >= 0) { dm_motion_clear_hid(was); if (g_joy) dm_joy_attach(was, 0); }
+    s2_pad_unlink(old); if (g_front.detach) g_front.detach(old); free(old);
+    _pad = into; s2_sync_sides(into); if (g_front.read) g_front.read(into);
+    LOG("[sw2] %s and %s play as one pair now: player %d (L + R held)", s2_kind(stay->_pid), s2_kind(_pid), s2_player(into) + 1);
+    [self setLEDs:nil];
 }
 // ---- CBPeripheralDelegate ----
 - (void)peripheral:(CBPeripheral *)p didDiscoverServices:(NSError *)e {
@@ -349,7 +408,7 @@ static void s2_session_closed(S2Session *s) { [s teardown]; [g_sessions removeOb
 
 void dm_switch2_active(int on) {
     g_active = on;
-    if (!on) for (s2_pad *p = g_pads; p; p = p->next) { int pl = s2_player(p); if (pl >= 0) dm_motion_clear_hid(pl); }
+    if (!on) for (s2_pad *p = g_pads; p; p = p->next) { int pl = s2_player(p); if (pl >= 0) { dm_motion_clear_hid(pl); s2_joy_release(pl, 0); s2_joy_release(pl, 1); } }
 }
 
 static S2Central *g_delegate;
@@ -376,6 +435,7 @@ int dm_switch2_start(const dm_switch2_front *front) {
     }
     g_front = *front;
     e = getenv("DM_SW2_VERBOSE"); g_verbose = e && atoi(e);
+    e = getenv("DM_PAD_MERGE"); g_joy = !(e && atoi(e));   // merged, every pad is player 1: no pad holds a game's Joy-Cons apart
     e = getenv("DM_SW2_MOTION"); g_motion = !e || atoi(e);
     e = getenv("DM_SW2_MOTION_SIDE"); g_motion_right = !(e && (e[0] == 'L' || e[0] == 'l'));
     e = getenv("DM_SW2_MAP"); if (e && !(g_map_set = s2_map_parse(e, g_map))) LOG("[sw2] DM_SW2_MAP is not six numbers of 1..6 (signs allowed), like -1,-2,-3,4,5,6: using the built-in maps");

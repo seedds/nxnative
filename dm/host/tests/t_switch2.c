@@ -183,6 +183,19 @@ int main(void) {
         s2_rumble_resync(&c, 1000 * ms, 5 * ms); CHECK(c.end == 980 * ms);   // a tick long after: starts again
         s2_rumble_resync(&c, 1010 * ms, 5 * ms); CHECK(c.end == 980 * ms); }   // within a packet: the slots carry on
 
+    // A Joy-Con on its own: its side's buttons with the rail buttons as NpadButtons 24..27
+    CHECK(s2_joy_buttons(S2_A | S2_SL_R | S2_SR_R | S2_UP, 1) == (DM_BTN_A | DM_BTN_RSL | DM_BTN_RSR));
+    CHECK(s2_joy_buttons(S2_UP | S2_SL_L | S2_A, 0) == (DM_BTN_UP | DM_BTN_LSL));
+    // The choosing gestures, held three seconds: SL + SR on a Joy-Con of a pair splits it; L (left) or R (right) on one alone joins; a short or broken hold does nothing
+    CHECK(s2_gesture(S2_SL_R | S2_SR_R, 1, 1) == S2_GESTURE_SPLIT && s2_gesture(S2_SL_R, 1, 1) == S2_GESTURE_NONE && s2_gesture(S2_SL_L | S2_SR_L, 0, 1) == S2_GESTURE_SPLIT);
+    CHECK(s2_gesture(S2_SL_R | S2_SR_R, 1, 0) == S2_GESTURE_NONE && s2_gesture(S2_R, 1, 0) == S2_GESTURE_JOIN && s2_gesture(S2_L, 0, 0) == S2_GESTURE_JOIN);
+    CHECK(s2_gesture(S2_R, 1, 1) == S2_GESTURE_NONE && s2_gesture(S2_L | S2_SL_L, 0, 0) == S2_GESTURE_NONE && s2_gesture(S2_R, 0, 0) == S2_GESTURE_NONE);
+    s2_hold hold = {0}; uint64_t t0 = 5000000000ull;
+    CHECK(!s2_hold_update(&hold, S2_GESTURE_SPLIT, t0) && !s2_hold_update(&hold, S2_GESTURE_SPLIT, t0 + 2900000000ull));
+    CHECK(s2_hold_update(&hold, S2_GESTURE_SPLIT, t0 + S2_GESTURE_NS) && hold.kind == S2_GESTURE_SPLIT && !hold.done);
+    CHECK(!s2_hold_update(&hold, S2_GESTURE_NONE, t0 + 3100000000ull) && !s2_hold_update(&hold, S2_GESTURE_SPLIT, t0 + 3200000000ull));   // let go: it starts again
+    CHECK(!s2_hold_update(&hold, S2_GESTURE_SPLIT, t0 + 6100000000ull) && s2_hold_update(&hold, S2_GESTURE_SPLIT, t0 + 6200000000ull));
+
     // Home, A and B for the Home hold-to-quit prompt: Home from any of the pad's controllers, A and B from the right side
     memset(&pad, 0, sizeof pad); int ha = 0, hb = 0;
     pad.left.have = pad.right.have = 1; pad.left.r.buttons = 0xE0000000u; pad.right.r.buttons = 0xE0000000u | S2_HOME | S2_A;

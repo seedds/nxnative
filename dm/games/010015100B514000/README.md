@@ -100,6 +100,7 @@ Game-specific findings; the general host changes they led to are listed under [F
 
 ## Found on this game
 
+- **Joy-Cons as dual or single npads:** [Joy-Cons as dual or single npads](../../../docs/reference/services.md#joy-cons-as-dual-or-single-npads): choosing two players splits a Joy-Con 2 pair through the controller applet, one sideways Joy-Con each.
 - [Offline pipeline archive missing for the device GPU](../../../docs/reference/shaders.md#offline-pipeline-archive-missing-for-the-device-gpu): archive targets can follow profile metadata while iOS Metal 4 remains opt-in; [the probe above](#offline-pipeline-archive-probe) records the build evidence and open device checks.
 General host changes first needed here; each applies to every game:
 

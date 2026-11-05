@@ -448,6 +448,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - the submit thread's CPU samples dominated by `mtl_addr` / `mtl_gpu_addr` (vertex buffers in `draw`, uniform buffers in `encode_args`). → [Address to memory pool lookups by binary search](../reference/frame-rate.md#address-to-memory-pool-lookups-by-binary-search)
 - gameplay has low CPU clocks, large render submission wall time compared with thread CPU time, and default QoS (`0x15`) on the main guest thread while workers report user-interactive (`0x21`). → [Main guest thread keeps inherited default QoS](../reference/frame-rate.md#main-guest-thread-keeps-inherited-default-qos)
 - stalls of 30–60 ms about once a second, at 30 fps and at 60 (99th percentile 63–127 ms); the main thread waits 20–34 ms for the render thread once a second. → [Time-constraint computation declared below the thread's peaks](../reference/frame-rate.md#time-constraint-computation-declared-below-the-threads-peaks)
+- rendering freezes after GPU command errors, with the main thread in `IOSurfaceSharedEvent waitUntilSignaledValue:timeoutMS:` although commit feedback has completed its fence. → [A failed GPU event holds a completed fence wait](../reference/frame-rate.md#a-failed-gpu-event-holds-a-completed-fence-wait)
 
 ## NVN objects
 

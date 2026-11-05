@@ -1160,11 +1160,11 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ### VOTEU writes the uniform predicate
 
-- **Symptom:** no wrong picture seen so far. In the MSL, a shader with a 0x886 vote has `if (false)` and `false ? a : b` where a uniform predicate guards a value or a branch, and a lane guard on the same number reads `simd_all` or `simd_any` of its own predicate.
+- **Symptom:** in Orbitals, Niagara mesh particles drawn as flat blobs in wrong colours (purple, cyan, a huge orange), always the same meshes, with GPU instance culling on; the particle data the draw reads is sane. In the other games no wrong picture seen so far. In the MSL, a shader with a 0x886 vote has `if (false)` and `false ? a : b` where a uniform predicate guards a value or a branch, and a lane guard on the same number reads `simd_all` or `simd_any` of its own predicate.
 - **Cause:** the destination at bits 81..84 of 0x886 is the uniform predicate UPd: nvdisasm prints `@!P1 VOTEU.ANY UP2, P2` for `0x000000000104010000000000003f9886` (CuAssembler's sm_86 records), and NAK encodes `OpVote` with a uniform destination as 0x886 and a lane one as 0x806, with its source and guard always lane predicates. The translator wrote the lane predicate of that number for both. An unwritten predicate reads false, so a uniform guard on the vote never held, and the lane predicate of that number became the subgroup's vote. Across Yoshi and the Mysterious Book, Pokémon Pokopia and The Legend of Zelda: Ocarina of Time, 14,960 of the 17,889 votes that name a destination are next read as a uniform predicate, through a uniform guard, UPLOP3, USEL or PLOP3's uniform source (bit 67), and the 2,929 next read as a lane predicate all have an earlier lane writer. 0x806's next readers are all lane reads.
 - **Fix:** `AVote` writes UPd for 0x886 (`dm/gfx/tests/test_dmsh_ampere_alu.py`, class `Vote`). No other instruction in CuAssembler's sm_86 tables has a uniform predicate destination without already being registered as uniform.
-- **Reach:** every shader with such a vote changes: 7,560 translated of 9,231 in Yoshi (the rest stop at SURED, both ways), all 471 in Pokopia, 321 translated of 329 in Ocarina of Time; none in Mario Kart World, Fire Emblem: Fortune's Weave or Donkey Kong Bananza's 5,219 surveyed. Before, 1,815, 454 and 284 of them had a guard folded to a constant. In the shaders read, the vote is on a value that is one per draw, such as `c3[87].z != 11`, so the old code goes wrong only where that vote is true. Open: no played scene has shown such a vote. In Pokopia's first area the one changed pixel shader drawn, the full-screen `075fd7285c64b798`, has all 7 votes false and no mixed subgroup (a build that turns the frame red where one fires stayed untinted over a walk, and its control, forced on, was red all over), so the picture is unchanged there. In Yoshi's 1,124 keys asked in play, the one changed shader, `cbd80cb96ad38a61`, votes on a uniform buffer value and the uniform registers it guards are unused.
-- **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md), [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md).
+- **Reach:** every shader with such a vote changes: 7,560 translated of 9,231 in Yoshi (the rest stop at SURED, both ways), all 471 in Pokopia, 321 translated of 329 in Ocarina of Time; none in Mario Kart World, Fire Emblem: Fortune's Weave or Donkey Kong Bananza's 5,219 surveyed. Before, 1,815, 454 and 284 of them had a guard folded to a constant. In the shaders read, the vote is on a value that is one per draw, such as `c3[87].z != 11`, so the old code goes wrong only where that vote is true. Open: no played scene of those games has shown such a vote. In Pokopia's first area the one changed pixel shader drawn, the full-screen `075fd7285c64b798`, has all 7 votes false and no mixed subgroup (a build that turns the frame red where one fires stayed untinted over a walk, and its control, forced on, was red all over), so the picture is unchanged there. In Yoshi's 1,124 keys asked in play, the one changed shader, `cbd80cb96ad38a61`, votes on a uniform buffer value and the uniform registers it guards are unused.
+- **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md), [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md), [Orbitals](../../dm/games/040004F027560000/README.md#found-on-this-game). In Orbitals the vote reaches a picture: Unreal's load-balanced instance culling (`FBuildInstanceIdBufferAndCommandsFromPrimitiveIdsCs`, `a958e514cc3f4431`, +0x3290) runs `VOTEU.ANY UP0, P1; @UP0 USHF.L.U32 UR6, UR4, 0x1c` and ORs UR6 into every instance ID it writes for compaction. With UP0 unwritten, UR6 kept a byte offset from earlier in the shader (0x4, 0x8), the IDs named other particles, and order-preserved Niagara mesh draws (the homing missile's thruster mesh `2dab9fff04ddd58a`) fetched past the emitter's count. A GPU replay of the culling dispatch with its captured inputs gave the wrong instance IDs bit for bit, and IDs 12614..12623, correct, with the fix; in game no blob in 12 screenshots of stage 2 with order preservation on (before, `r.InstanceCulling.AllowInstanceOrderPreservation=0` avoided the compaction path). 442 Orbitals shaders have a VOTEU to a uniform predicate other than UPT.
 
 ### TXD through a uniform register kept no handle
 
@@ -1180,7 +1180,8 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Cause:** the compiler builds a handle in a register under a guard (`R = word`; `R |= sampler word`) and reads through it under a guard of its own. The register's phi then merges the handle, its first word and what the register held before. `Utils.FindLastOperation` picks the phi's input only when both guards are the same operand in the same branch form, which misses `!UP0` with UP0 the vote of `P0` against a read under `!P0`, `P4` against a read under `P5 = P4 && !P1`, and `P6` against a read past `BRA.!P6`. `TryTableHandle` then took only c2 words, so a handle in another bank was deleted. In a register with no earlier value the first word's phi is (undefined, word): `FindLastOperation`'s rule that the one defined source of such a phi is its value was also applied to that phi inside the outer phi, so the first word came back as the whole handle.
 - **Fix:** in the vendored translator. `TryTableHandle` also takes a texture word ORed with a sampler word of the same bank or a constant sampler from any constant buffer, including when only the OR's source is a phi and the handle is not. A word of a game's uniform buffer alone is no candidate, as it may be other data, so the first word and a float left in the register drop out without a look at the guards. A c2 word alone that an ORed candidate also takes is that handle on its way, not a second candidate, which also saves a read chosen at run time. `FindLastOperation` applies the undefined rule only to the phi it was asked about. Proving the guards equal instead would take a boolean prover over predicate logic and the vote's meaning. A chain change.
 - **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): of 128,113 translated shaders, 130 reads in 78 were deleted (the pool's water surface on Chapter 1's page) and 189 reads in 152 bound the texture word alone. SPIR-V of every shader against the translator before: those 230 change there; 364 of 22,072 in [DAVE THE DIVER](../../dm/games/010097F018538000/README.md) and 2,633 of 69,924 in [DRAGON QUEST I & II HD-2D Remake](../../dm/games/0100D7C01F254000/README.md), of which 319 and 1,780 bound the texture word alone and the others lose a second read; 16 of 13,980 in [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md), a second read. None of Fire Emblem Fortune's Weave's 16,888, nor of Blasphemous, NieR:Automata, Return of the Obra Dinn, Catherine: Full Body and FINAL FANTASY X/X-2. Only Yoshi's water was compared in a picture. FINAL FANTASY RESONANCE's 26 reads with [no c2 word](#bindless-reads-whose-handle-phi-also-carries-other-values) may be this form, not checked: its shaders are not split on disk.
-- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (the three guard forms, an unguarded OR, and a c2 handle read once).
+- **Note:** when these rules find no candidate, a second pass takes a word of any constant buffer alone, or a texture word ORed with a sampler word of another bank, since the read is deleted otherwise. Unreal Engine 5.6 on the Switch 2 builds such handles ([Orbitals](../../dm/games/040004F027560000/README.md#found-on-this-game)). A shader the first pass finds a handle in translates as with these rules alone.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (the three guard forms, an unguarded OR, a c2 handle read once, and the second pass's two forms).
 
 ### Layer entry points with the point size passed by reference
 
@@ -1236,6 +1237,44 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `dmsh_build.py` `tg_fence` puts a simdgroup-scope memory fence (`atomic_thread_fence(mem_threadgroup, seq_cst, thread_scope_simdgroup)`), not an execution barrier, after each store to a threadgroup array, so it is safe in divergent code. Only kernels with a threadgroup array are touched (about 7.5% of Orbitals' shaders). `tg_spill` runs after it, so a fence on an array moved to device memory orders device memory too.
 - **Found on:** [Orbitals](../../dm/games/040004F027560000/README.md#found-on-this-game): the GPU sort downsweep `d032ce5090303e01` (181 fences): 100 of 100 keys sorted with the fence. With only the fenced downsweep swapped into the library the beams were right (by eye); with the fence in every shader, three 80-frame samples of stage 2 had 0 flash views, against 22 in 80 on the build before (which also lacked the split texture / sampler handle fix).
 - **Check:** `python3 dm/gfx/tests/test_dmsh_tg_fence.py` (the rewrite, the fence's scope after `tg_spill`, and, with the Metal compiler, that both compile).
+
+### Ampere instructions of Unreal Engine 5.6's Switch 2 shaders
+
+- **Symptom:** most of a game's shaders are left out of the build: `Ampere instruction f60 at 0x… is not implemented`, then 361, 593 (`SUATOM` with its handle in bank 3), 2be, 364, 301, 38c, 925, 59f, 394 and others. The game draws black backgrounds and missing effects.
+- **Cause:** Unreal Engine 5.6's Switch 2 shaders use Ampere forms the translator had no entry for:
+  - TEX / TLD / TLD4 / TXD / TXQ with the handle in a uniform register (bit 91, opcodes with 0x400) or in a register after the operands (`.B`, bit 59);
+  - SUATOM and SURED with the handle in another bank or a register, SUST.B;
+  - images whose handle is in the game's own uniform buffer (`cp_i_cb3_*`);
+  - ATOMS, ATOMS.POPC.INC, ATOMG.CAS;
+  - BREV / UBREV, FRND.F16, MUFU.TANH, LDGSTS / LDGDEPBAR, F2FP.MERGE_C, PIXLD.MY_INDEX;
+  - NVN2's per-stage storage buffer banks 25..29;
+  - bindless constant buffers.
+- **Fix:** each form in `InstEmitAmpere*.cs`, with its encoding taken from a game and checked against Eden's Ampere frontend and NAK's encoder where they have it. Also:
+  - the TXD derivative order, I2F / I2FP `.RZ`, the FSWZADD sign and the SHFL.UP clamp;
+  - IMAD.WIDE's carry out, the MEMBAR scope, and LDL / STL without the shared stride;
+  - Ampere results kept on predicated paths;
+  - a bindless 1D integer fetch read as 2D rows (`fetch1d` on a `tex_ubo` binding, `nvn_mtl.m` `tbuf_as_2d`).
+
+  A 64-bit SURED is refused, not faked.
+- **Found on:** [Orbitals](../../dm/games/040004F027560000/README.md#shaders): 3,712 of 23,432 shaders translated on the translator of 2026-11-01, 23,432 with these.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` and `test_dmsh_ampere_alu.py`.
+
+### Compute threads that return before a barrier
+
+- **Symptom:** the GPU stays at 100% after a dispatch, and `[RED] SyncWait timed out on fence N` follows. The Mac's WindowServer stops minutes later, because a Metal command buffer that never completes is not reclaimed when the process exits.
+- **Cause:** Ampere lets a thread that has exited leave the workgroup's barriers; Metal requires every thread of a threadgroup at each `threadgroup_barrier`. Separately, a loop whose bound comes from GPU data that went wrong does not end.
+- **Fix:**
+  - `BarrierExits.cs`: a compute thread that returns before a barrier keeps arriving at the later barriers instead.
+  - `dmsh_build.py` `loop_guard`: every loop also ends once its function has run 2^18 iterations in all (the longest bounded loop seen: 255).
+- **Found on:** [Orbitals](../../dm/games/040004F027560000/README.md#found-on-this-game) and PRAGMATA (not in the games table): GPU hangs that needed a restart.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_control_flow.py`.
+
+### NVN2 compute `c0` with two push blocks
+
+- **Symptom:** NVN2 compute shaders read their uniform, storage or handle words, or the second block of their push constants, from the wrong place in `c0`; `[RED] <key>: NVN2 compute c0 layout does not add up to its size` in the build.
+- **Cause:** the push region in front of the entries is two 16-byte aligned blocks, the +0xa9 words then the +0xaa words. Newer GLSLC (control +0x08 = 0x11) fills both; Donkey Kong Bananza's leaves +0xaa at 0. Read as +0xa9 alone, every entry after the push constants is looked for the second block's size too early. The handle runs after them are [NVN2 compute's separate handles in c[0]](#nvn2-computes-separate-handles-in-c0); their places also follow p\*\*\*\*6's ddc8629.
+- **Fix:** `dmsh_build.py` (job `nvn2_cs`) adds up the two blocks, and reports a layout whose push blocks, entries and four handle runs (images, +0xb6, included) do not add up to the size at +0xba. On the host, a storage buffer whose address is kept in the push constants (`c[24]`, `NVN_RB_SBUFU` at `DMSH_PUSH_BANK - 3`) is read from the pushed bytes.
+- **Found on:** PRAGMATA's 6,856 compute layouts (not in the games table) add up only this way; [Orbitals](../../dm/games/040004F027560000/README.md#found-on-this-game)' compute shaders take the same layout.
 
 ### Barrier moves around warp shuffles
 
@@ -1396,6 +1435,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Cause:** the replay reads handles on the CPU, and a write queued earlier in the submission has not landed yet.
 - **Fix:** inline uniform updates keep where their data sits, so the handle is read from the newest one covering it (`pend_read`). The old limit of 256 writes per submission, after which every address counted as written, is gone: pending writes are now indexed by 4 KB page (8,192 per submission).
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) (it queues more than 256 writes per submission).
+
+### A scalar storage-buffer load that lost its index
+
+- **Symptom:** a 3D background or scene drawn black, every instance at the same place: GPUScene's upload scattered every primitive to slot 0.
+- **Cause:** the translated MSL of a scalar storage-buffer load computes and bounds-checks its offset, but indexes element 0.
+- **Fix:** `dmsh_build.py` `sbuf_scalar_index` gives such a load its index back.
+- **Found on:** [Orbitals](../../dm/games/040004F027560000/README.md#found-on-this-game): the GPUScene upload compute shaders; the title's 3D background.
 
 ### Storage buffer addresses in the game's own uniform buffer
 

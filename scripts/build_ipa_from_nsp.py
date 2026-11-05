@@ -38,6 +38,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dm/tools"))
 import romfs as rfs
 import nso   # the code module loader: nso.Error is a damaged module (its file cut short or not what its header says)
+import tree_tar   # one file in place of a build's folders of many small files
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pack_dump   # a folder of a game's files instead of NSPs
 import pack_nup   # a game in a NUP container instead of NSPs
@@ -2313,11 +2314,12 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     sh/mac-b-<chain>.key (not in sh/cache, whose b-* entries dmsh_build.py reads as library folders). Each target writes only its own key (an iOS build that keeps a Mac build's libraries, both); either is taken only
     while the Mac sources and reflection carry a full build's stamp (inputs.tsv) for c1_full.tsv and cb_extent.tsv to name (chain_tables).
     Switching targets translates again (the per-shader keys include the iOS compile convention); the Metal compile cache (dmsh_mtlcache.py) reuses previously compiled MSL for that target.
-    After success the libraries of other chain versions and the cache entries this chain's build did not use are removed (prune_stale_chains, prune_shader_cache).
+    After success the libraries of other chain versions and the cache entries this chain's build did not use are removed (prune_stale_chains, prune_shader_cache), and the cache becomes one file,
+    sh/cache/cas.tar (tree_tar.py), which only a build that runs dmsh_build.py unpacks: a reused step touches none of its files.
     seen (--seen-shaders, a Mac-only build): only those keys, into sh/partial/b-<chain>, emptied first, with its key inside; the full build's libraries, its key and the cache are left as they are, and the
     per-shader cache (DMSH_CAS) is the full build's, so a later full build reuses this work. It gets no stamp and no c1_full.tsv or cb_extent.tsv, on purpose: beside a stamp the host would take the tables'
     silence on a shader the partial build never saw as proof it is safe (no chain_tables, no shader_regressions, no pruning; the host logs the missing stamp in red at each start)"""
-    ios, log = sh / 'ios', logs / 'dmsh_build.log'
+    ios, log, cas = sh / 'ios', logs / 'dmsh_build.log', sh / 'cache/cas'
     PROG.stage('Mac shaders' if mac else 'iOS shaders')
     chain = chain_of(repo)
     out = sh / 'partial' if seen else sh / 'cache' if mac else ios
@@ -2331,7 +2333,7 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
         note = next((n for k in ((kmac,) if seen else (kmac, kf) if mac else (kf,)) if (n := reused(k, key)) is not None), None)
         # the libraries are the last build's, so are tables that name their stamp; a missing or stale one is made from that build's Mac outputs, and without them the step runs again
         if next(libs.glob('*_b.metallib'), None) and note is not None and (seen or chain_tables(py, repo, sh, env, logs, g, chain)):
-            if not seen: prune_stale_chains(sh, chain); prune_shader_cache(sh, chain)
+            if not seen: prune_stale_chains(sh, chain); prune_shader_cache(sh, chain); tree_tar.pack(cas, say)   # a cache folder from before cas.tar becomes one file here
             PROG.end(f'{note}, reused (inputs unchanged)'); return out
     else: key = None
     rmtree(kmac)
@@ -2350,7 +2352,9 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     benv = dict(env, XLATE=str(xlate), IOSOUT=str(ios), DMSH_TARGETS='mac' if mac else 'mac,ios' if keep_mac else 'ios')
     if ALLOW_OTHER_METAL: benv['DM_ALLOW_OTHER_METAL'] = '1'
     if mac: del benv['IOSOUT']   # dmsh_build.py builds the iOS libraries only with IOSOUT
-    if seen: benv['DMSH_CAS'] = str(sh / 'cache/cas')
+    if seen: benv['DMSH_CAS'] = str(cas)
+    PROG.set(step='unpacking the shader cache')
+    tree_tar.unpack(cas, say)
     try: stale = None if seen else stale_shaders(py, repo, env, [sh / 'cache'] if mac else [sh / 'cache', ios] if keep_mac else [ios], chain, g)
     except Exception: stale = None   # a note never stops the build
     if stale:
@@ -2385,6 +2389,7 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     if not seen:   # last: a build that stopped before here keeps the old libraries and cache entries
         prune_stale_chains(sh, chain); prune_shader_cache(sh, chain)
         if mac: rmtree(sh / 'partial')   # the whole library replaces a partial one; partial-keys.txt stays
+    tree_tar.pack(cas, say)
     return out
 
 
@@ -3138,8 +3143,11 @@ def main(args=None):
         return
     watch = IpaWatch(repo, work / 'ipa', out_ipa)
     PROG.stage('app build', poll=watch.poll, step='starting')   # build_ipa.sh's "pack IPA" line starts the stage "IPA pack"
+    xcode_data = work / 'ipa/build/ios/pkg/dd'   # one file between builds (tree_tar.py); the app in it goes into the IPA, so it is packed after
+    tree_tar.unpack(xcode_data, say)
     run(['bash', repo / 'dm/ios/tools/build_ipa.sh', out_ipa], logs / 'build_ipa.log', env=ipa_env, on_line=watch.line)
     if not out_ipa.is_file(): raise BuildError(f'no IPA at {out_ipa}')
+    tree_tar.pack(xcode_data, say)
     PROG.end(f'{out_ipa.name}, {amount(out_ipa.stat().st_size, "B")}')
     rmtree(work / 'tmp')
     if not keep:

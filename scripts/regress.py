@@ -87,6 +87,7 @@ def load_module(name, path):   # a module from a file (another script, or a tool
 bench = load_module('bench', REPO / 'scripts/bench.py')
 shader_regressions = load_module('shader_regressions', REPO / 'dm/gfx/tools/shader_regressions.py')
 usage = load_module('usage', REPO / 'dm/tools/usage.py')   # usage manifests and change impact (regress.py usage / impact)
+tree_tar = load_module('tree_tar', REPO / 'dm/tools/tree_tar.py')   # the player's build keeps the compile cache this shares as one file
 # Where they are depends on the machine (a drive with room for the trees and the games' NSP folders): set with --root / --games-dir or REGRESS_ROOT / REGRESS_GAMES, checked in main
 ROOT = Path(os.environ.get('REGRESS_ROOT', ''))
 GAMES = Path(os.environ.get('REGRESS_GAMES', ''))
@@ -393,17 +394,19 @@ def chain_build_locked(tree, g, a, v, inp, key, out):
     if g.kind == 'nvn':
         tools_dir = tree.path / 'dm/gfx/tools'
         cas = g.build / 'shader/cache/cas'
-        env.update(XLATE=str(tools_dir / 'dmsh_xlate_bin/dmsh_xlate'), DMSH_CAS=str(cas if cas.is_dir() else game_root(g) / 'cas'))
+        env.update(XLATE=str(tools_dir / 'dmsh_xlate_bin/dmsh_xlate'), DMSH_CAS=str(cas if tree_tar.exists(cas) else game_root(g) / 'cas'))
         entry = tools_dir / ('own_compilers.py' if (tools_dir / 'own_compilers.py').is_file() else 'dmsh_build.py')
         lib = out / f'b-{v}'
         if not done:
             say(f'  {g.id}: chain {v} (inputs {inp}) of {tree.id}: translating the shaders ({jobs} workers) → {out}')
+            if tree_tar.exists(cas): tree_tar.unpack(cas, say)
             rc, paused = run_heavy([sys.executable, entry, g.build / 'shader/pkg', out], log, tree.path, env, a, f'{g.id} shader build'); t0 += paused
             if rc or not (lib / '_b_build.json').is_file():
                 raise HarnessError(f'{g.id}: dmsh_build.py of {tree.id} failed (exit {rc}); last lines of {log}:\n' + ''.join(collections.deque(open(log, errors='replace'), maxlen=8)))
             prof = out / 'profile'; prof.mkdir(exist_ok=True)   # the tables the host reads beside the shader map, as this build made them
             for src in g.profile_dir(tree).glob('*.tsv'): shutil.copyfile(src, prof / src.name)
             (out / 'built.ok').write_text(f'{tree.id}\n')
+            tree_tar.pack(cas, say)
         say(f'  {g.id}: hashing the outputs of chain {v}')
         shaders = nvn_manifest(lib, jobs)
     else:

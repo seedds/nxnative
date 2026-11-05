@@ -441,6 +441,8 @@ t_image_primitive_id: t_image_primitive_id.m $(MTL_T_DEP)
 t_tbuf_pfv: t_tbuf_pfv.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_tbuf_pfv.m $(MTL_T_SRC) $(FW)
 check_t_tbuf_pfv: RUN_ENV = MTL_DEBUG_LAYER=1
+t_pso_intbits: t_pso_intbits.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_intbits.m $(MTL_T_SRC) $(FW)
 t_unwritten_store: t_unwritten_store.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_unwritten_store.m $(MTL_T_SRC) $(FW)
 check_t_unwritten_store: RUN_ENV = MTL_DEBUG_LAYER=1

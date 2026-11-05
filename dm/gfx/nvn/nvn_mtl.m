@@ -10280,12 +10280,14 @@ static void ubp_check(uint64_t lo, uint64_t hi, const uint8_t *sh) {
 // red line when the remembered answer was wrong
 typedef struct { __unsafe_unretained NvShader *sh; uint32_t gen, pend_gen; int npend, pend_over, sbw_over; uint64_t ver, sbw_gen, gw_ver; } ubdc_ent;
 static ubdc_ent g_ubdc[6]; static uint64_t g_ubdc_hits, g_ubdc_wrong;
+static int ubdc_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_UBDC"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_UBDC=0: uniform conflict answers are not remembered"); } return v; }
 static int ubdc_check(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_UBDC_CHECK"); v = e && atoi(e); if (v) MLOG("DM_NVN_UBDC_CHECK=1: remembered uniform conflict answers checked against the walk"); } return v; }
 static int ubd_conflict_sh_(NvShader *sh, int st);
 static int ubd_conflict_sh(NvShader *sh, int st) {
     ubdc_ent k; memset(&k, 0, sizeof k);   // padding zeroed: compared whole
     k.sh = sh; k.gen = S.ubgen[st]; k.pend_gen = g_pend_gen; k.npend = g_npend; k.pend_over = g_pend_over; k.sbw_over = g_sbw_over; k.ver = g_ubd_ver; k.sbw_gen = g_sbw_gen; k.gw_ver = g_gw_ver;
     ubdc_ent *c = &g_ubdc[st];
+    if (!ubdc_on()) return ubd_conflict_sh_(sh, st);
     int hit = k.gen && !ubp_check_on() && !memcmp(c, &k, sizeof k);
     if (hit && !ubdc_check()) { g_ubdc_hits++; return 0; }
     int r = ubd_conflict_sh_(sh, st);

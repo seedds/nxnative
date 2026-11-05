@@ -109,6 +109,23 @@ class GuardedWrites(Translated):
         self.assertIn('.gather(', msl)
         self.assertIn('cp_t_cb262147_10068006', msl)
 
+    # When none of those rules finds a handle, a second pass takes a word of any constant buffer alone, or a texture word ORed with a sampler word of another bank: Unreal Engine 5.6 on the
+    # Switch 2 (Orbitals) builds handles both ways. Main's first pass deletes these reads
+    def test_a_uniform_buffer_word_alone_is_taken_when_nothing_else_is(self):
+        # R16 = 5; P5 = P4 && !P1; if (P4) R16 = c3[0x28]; TEX.P5 through R16, with no OR: the phi takes 5 and the word
+        code = [(0x000fe20000000f00, 0x0000000500107802), (0x040fe20003f85070, 0x000000070800780c), (0x000fc40003f25070, 0x000000040800780c), (0x000fe40000fa8170, 0x000000000000781c),
+                (0x000fc60000000f00, 0x00c00a0000104a02),
+                (0x00014200049e03ff, 0x380000100e125361), (0x020ea200001ee000, 0x00000c12030c7593), EXIT]
+        msl = self.translate(b''.join(inst(*c) for c in code))
+        self.assertIn('.sample(', msl)
+
+    def test_a_sampler_word_of_another_bank_is_taken_when_nothing_else_is(self):
+        # As the guarded-implication case above, with the sampler word in c4: if (P4) R16 = c3[0x28]; if (P4) R16 |= c4[0x70]; TEX.P5 through R16. One read, through both words
+        code = [(0x040fe20003f85070, 0x000000070800780c), (0x000fc40003f25070, 0x000000040800780c), (0x000fe40000fa8170, 0x000000000000781c), (0x000fc60000000f00, 0x00c00a0000104a02),
+                (0x000fc600078efcff, 0x01001c0010104a12), (0x00014200049e03ff, 0x380000100e125361), (0x020ea200001ee000, 0x00000c12030c7593), EXIT]
+        msl = self.translate(b''.join(inst(*c) for c in code))
+        self.assertEqual(msl.count('.sample('), 1)
+
 
 class Suatom(Translated):
     def test_handle_in_the_games_uniform_buffer(self):   # Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]: the same word 12, in bank 3

@@ -1414,6 +1414,13 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 return GetBaseAddressCbWithOffset(src1, src2, constOffset);
             }
 
+            // nxnative: c[1] holds the shader's immediates, never a buffer address (see GetBaseAddressCbWithOffset): when both operands are constant buffers and the second one is c[1],
+            // the base is the first one (Donkey Kong Bananza's lowered compute kernels: c0[ptr] + c1[0] + k). The rule above covers a c0 first operand; this one any other bank
+            if (src1.Type == OperandType.ConstantBuffer && src2.Type == OperandType.ConstantBuffer && src2.GetCbufSlot() == 1 && src1.GetCbufSlot() != 1)
+            {
+                return GetBaseAddressCbWithOffset(src1, src2, constOffset);
+            }
+
             if (src1.Type != OperandType.ConstantBuffer ||
                 (src1.Type == OperandType.ConstantBuffer && src2.Type == OperandType.ConstantBuffer) ||
                 (src2.Type == OperandType.ConstantBuffer && src2.GetCbufSlot() == DriverReservedCb))
@@ -1454,6 +1461,14 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             {
                 int sbCbSlot = baseAddress.GetCbufSlot();
                 int sbCbOffset = baseAddress.GetCbufOffset();
+
+                // nxnative: c[1] is the shader's own constants (GLSLC's immediates), never a buffer address. It is chosen here when the real base comes from memory (a pointer the
+                // shader loaded, Donkey Kong Bananza's particle compute programs: c[1][0] = 0x20 added to it); no slot can be decoded for it and the host refused the shader. Not found,
+                // the access reads 0 / is dropped, as Eden does for a constant whose live value is not a mapped address (IsCbufStorageBufferPointer)
+                if (sbCbSlot == 1)
+                {
+                    return SearchResult.NotFound;
+                }
 
                 // We require the offset to be aligned to 1 word (64 bits),
                 // since the address size is 64-bit and the GPU only supports aligned memory access.

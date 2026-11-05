@@ -98,6 +98,26 @@ kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0
         self.assertEqual((t['kind'], t['elem'], t['reg'], t['off'], t['arg_id'], t.get('soff')), (abi.KIND_TEX_HTAB, 'texture2d_array<float>', 1, 0, 0, 0x570))
         self.assertEqual((s['kind'], s['reg'], s['off'], s['arg_id'], s['soff'], s['sreg']), (abi.KIND_SAMP_HTAB, 1, 0, 1, 0x570, abi.SREG_C2))
 
+    def test_images_from_a_uniform_buffer(self):   # Orbitals' compute shaders: image handles in uniform slot 0 (c[3]), one with a format, one atomic; a driver-table image keeps its slot
+        msl = """struct spvDescriptorSetBuffer0
+{
+    texture2d<float, access::write> cp_i_cb3_8_ [[id(0)]];
+    texture_buffer<uint, access::read_write> cp_i_cb3_0_ [[id(1)]];
+    texture3d<float, access::write> cp_i_cb5_1A_rgba16f [[id(2)]];
+    texture2d<uint, access::write> cp_i_cb2_48_rg32ui [[id(3)]];
+};
+
+kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]])
+{
+    spvDescriptorSet0.cp_i_cb3_0_.atomic_fetch_add(0u, 1u);
+}
+"""
+        b = {e['msl_name']: e for e in NS['reflect']('k', 'cs', msl, {'sbufs': []})}
+        self.assertEqual({k: (e['kind'], e.get('reg'), e.get('off'), e.get('atomic', False)) for k, e in b.items()},
+                         {'cp_i_cb3_8_': (abi.KIND_IMG_UBO, 0, 32, False), 'cp_i_cb3_0_': (abi.KIND_IMG_UBO, 0, 0, True),
+                          'cp_i_cb5_1A_rgba16f': (abi.KIND_IMG_UBO, 2, 0x68, False), 'cp_i_cb2_48_rg32ui': (abi.KIND_IMG, 0, None, False)})
+        self.assertIsNone(NS['decode_ubo_img']('cp_t_cb3_8'))
+
     def test_unreadable_member(self):
         with self.assertRaises(ValueError): NS['reflect']('k', 'ps', MSL.replace('raster_order_group(0)', 'raster_order_group'), {'sbufs': []})
 

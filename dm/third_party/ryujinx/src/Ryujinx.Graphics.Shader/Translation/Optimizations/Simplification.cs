@@ -13,7 +13,11 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             switch (operation.Inst)
             {
                 case Instruction.Add:
-                    TryEliminateBinaryOpCommutative(operation, 0);
+                    if (!TryEliminateHalfWordRecombine(operation))
+                    {
+                        TryEliminateBinaryOpCommutative(operation, 0);
+                    }
+
                     break;
 
                 case Instruction.BitwiseAnd:
@@ -29,7 +33,11 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     break;
 
                 case Instruction.BitwiseOr:
-                    TryEliminateBitwiseOr(operation);
+                    if (!TryEliminateHalfWordRecombine(operation))
+                    {
+                        TryEliminateBitwiseOr(operation);
+                    }
+
                     break;
 
                 case Instruction.CompareNotEqual:
@@ -45,7 +53,16 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     break;
 
                 case Instruction.Multiply:
-                    TryEliminateBinaryOpCommutative(operation, 1);
+                    // nxnative: integer x * 0 == 0 (the XMAD expansion of a multiply by a 16-bit constant leaves one, see TryEliminateHalfWordRecombine)
+                    if (IsConstEqual(operation.GetSource(0), 0) || IsConstEqual(operation.GetSource(1), 0))
+                    {
+                        operation.TurnIntoCopy(Const(0));
+                    }
+                    else
+                    {
+                        TryEliminateBinaryOpCommutative(operation, 1);
+                    }
+
                     break;
 
                 case Instruction.ShiftLeft:
@@ -153,6 +170,37 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             }
         }
 
+        private static bool TryEliminateHalfWordRecombine(Operation operation)
+        {
+            // nxnative: ((x >> 16) << 16) + (x & 0xFFFF) == x (also with |). It is what the XMAD sequence of x * 1 reduces to once x.lo * 0 folds away: Donkey Kong Bananza's
+            // lowered compute kernels (04702b3dc0bc9cde) compute their buffer addresses as c0[ptr] * 1 + c1[0] + k, and the global-to-storage pass could not see c0[ptr] through it
+
+            Operand x = operation.GetSource(0);
+            Operand y = operation.GetSource(1);
+
+            for (int pass = 0; pass < 2; pass++)
+            {
+                if (x.AsgOp is Operation shlOp && shlOp.Inst == Instruction.ShiftLeft && IsConstEqual(shlOp.GetSource(1), 16) &&
+                    shlOp.GetSource(0).AsgOp is Operation shrOp && shrOp.Inst == Instruction.ShiftRightU32 && IsConstEqual(shrOp.GetSource(1), 16) &&
+                    y.AsgOp is Operation andOp && andOp.Inst == Instruction.BitwiseAnd)
+                {
+                    Operand value = shrOp.GetSource(0);
+
+                    if ((IsSameValue(andOp.GetSource(0), value) && IsConstEqual(andOp.GetSource(1), 0xFFFF)) ||
+                        (IsSameValue(andOp.GetSource(1), value) && IsConstEqual(andOp.GetSource(0), 0xFFFF)))
+                    {
+                        operation.TurnIntoCopy(value);
+
+                        return true;
+                    }
+                }
+
+                (x, y) = (y, x);
+            }
+
+            return false;
+        }
+
         private static void TryEliminateBinaryOpY(Operation operation, int comparand)
         {
             Operand x = operation.GetSource(0);
@@ -221,6 +269,17 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             Operand source = operation.GetSource(srcIndex);
 
             operation.TurnIntoCopy(source);
+        }
+
+        private static bool IsSameValue(Operand a, Operand b)
+        {
+            if (a == b)
+            {
+                return true;
+            }
+
+            return a.Type == OperandType.ConstantBuffer && b.Type == OperandType.ConstantBuffer &&
+                   a.GetCbufSlot() == b.GetCbufSlot() && a.GetCbufOffset() == b.GetCbufOffset();
         }
 
         private static bool IsConstEqual(Operand operand, int comparand)

@@ -556,6 +556,42 @@ static void layout_order(void) {
     assert(info(I_AliasAddr) == info(I_StackAddr) + info(I_StackSize));
     assert(info(I_AliasAddr) + info(I_AliasSize) == info(I_AslrAddr) + info(I_AslrSize));
     assert(info(I_AslrAddr) == (uint64_t)(uintptr_t)g_as && info(I_AslrSize) == g_reserve);
+static uint32_t transfer(uintptr_t addr, size_t size, unsigned permission, uint32_t expected) {
+    uint64_t regs[32] = {0, addr, size, permission};
+    svc_dispatch(0x15, regs, 0); assert(regs[0] == expected);
+    if (expected) assert(!regs[1]);
+    return (uint32_t)regs[1];
+}
+static void transfer_memory(void) {
+    assert(!resize(4 * 1024 * 1024));
+    uintptr_t base = heap + 3 * 1024 * 1024;
+    transfer(base + 1, P, 0, 0xcc01); transfer(base, 0, 0, 0xca01);
+    transfer(base, P - 1, 0, 0xca01); transfer(base, P, 2, 0xd801);
+    transfer(UINTPTR_MAX - P + 1, 2 * P, 0, BAD);
+    transfer(base + 4 * 1024 * 1024, P, 0, BAD);
+    uint32_t handle = transfer(base, P, 0, 0);
+    expect(base, base, P, 5, 1, 0);
+    assert(!map_source_busy(base - P, P)); transfer(base, P, 0, BAD);
+    assert(resize(2 * 1024 * 1024) == BAD);
+    assert(map(stack, base, P) == BAD && call(2, base, P, 3) == BAD);
+    dm_transfer_memory *memory = NULL; const void *data = NULL;
+    assert(dm_transfer_map(handle + 1, P, 0, &memory, &data) == 0xe401);
+    assert(dm_transfer_map(handle, P / 2, 0, &memory, &data) == 0xca01);
+    assert(dm_transfer_map(handle, P, 1, &memory, &data) == 0xfa01);
+    *(uint8_t *)base = 0x72;
+    assert(!dm_transfer_map(handle, P, 0, &memory, &data) && *(uint8_t *)data == 0x72);
+    dm_transfer_memory *other; const void *other_data;
+    assert(dm_transfer_map(handle, P, 0, &other, &other_data) == 0xfa01);
+    assert(!call(0x16, handle, 0, 0));
+    assert(call(0x16, handle, 0, 0) == 0xe401);
+    assert(dm_transfer_map(handle, P, 0, &other, &other_data) == 0xe401);
+    assert(resize(2 * 1024 * 1024) == BAD && *(uint8_t *)data == 0x72);
+    uint32_t replacement = transfer(base + P, P, 1, 0); assert(replacement == handle);
+    expect(base + P, base + P, P, 5, 1, 1);
+    dm_transfer_unmap(memory); assert(!call(0x16, replacement, 0, 0));
+    expect(base, heap, 4 * 1024 * 1024, 5, 0, 3);
+    assert(!g_tm_live && !resize(0));
+    puts("PASS: transfer memory validation, borrowed ranges, mapping and close lifetime");
 }
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--heap-probe")) {
@@ -580,7 +616,7 @@ int main(int argc, char **argv) {
 #endif
     layout_order();
     lazy_commit(); alias_lifecycle(); device_shared_refused(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); file_rule(); heap_regrow(); concurrency(); fragmented_queries();
-    guest_helper();
+    guest_helper(); transfer_memory();
     if (!DM_GAME_MEM_MAP_LIMIT) metadata_limit();
 #ifdef TEST_REAL_DIRTY
     dirty_integration();

@@ -78,6 +78,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Add(map, 0x2fc, AggregateType.S32, IoVariable.VertexId, StagesMask.Vertex, StagesMask.None);
             Add(map, 0x300, AggregateType.Vector4 | AggregateType.FP32, IoVariable.TextureCoord, StagesMask.TessellationGeometryFragment, StagesMask.VertexTessellationGeometry);
             Add(map, 0x3a0, AggregateType.Array | AggregateType.S32, IoVariable.ViewportMask, StagesMask.Fragment, StagesMask.VertexTessellationGeometry);
+            // nxnative: the barycentric coordinates (NAK nak_private.h NAK_ATTR_BARY_COORD_NO_PERSP 0x3a8, NAK_ATTR_BARY_COORD 0x3b4): PRAGMATA's pixel shader 4a9d4507eea6c837
+            // tests whether its sample lies in the triangle with a[0x3b4] and a[0x3b8]; without an entry they read as 0
+            Add(map, 0x3a8, AggregateType.Vector3 | AggregateType.FP32, IoVariable.BaryCoordNoPersp, StagesMask.Fragment, StagesMask.None);
+            Add(map, 0x3b4, AggregateType.Vector3 | AggregateType.FP32, IoVariable.BaryCoord, StagesMask.Fragment, StagesMask.None);
             Add(map, 0x3fc, AggregateType.Bool, IoVariable.FrontFacing, StagesMask.Fragment, StagesMask.None);
 
             return map.AsReadOnly();

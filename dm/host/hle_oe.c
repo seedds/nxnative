@@ -219,12 +219,14 @@ void dm_oe_execute(int index, const void *param, size_t n) {
     const char *pf = getenv("DM_PROGRAMS");
     if (pf && *pf) {
         FILE *fp = fopen(pf, "rb"); char *rows2 = NULL;
-        if (fp) {
-            fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
+        long sz = fp && !fseek(fp, 0, SEEK_END) ? ftell(fp) : -1;   // -1: no file, or one that cannot seek
+        if (sz >= 0) {
+            fseek(fp, 0, SEEK_SET);
             tsv = calloc(1, (size_t)sz + 1); rows2 = calloc(1, (size_t)sz + 1);
             if (fread(tsv, 1, (size_t)sz, fp) != (size_t)sz) tsv[0] = 0;
-            memcpy(rows2, tsv, (size_t)sz); fclose(fp);
+            memcpy(rows2, tsv, (size_t)sz);
         } else LOG("[RED] oe::ExecuteProgram: cannot read DM_PROGRAMS %s", pf);
+        if (fp) fclose(fp);
         if (tsv && (have = prog_plan_make(tsv, index, &P, param, n))) LOG("oe::ExecuteProgram(%d, %zu bytes of parameters:%s): this program ends, %s starts", index, n, hex, P.exe);
         else if (rows2) {
             LOG("[RED] oe::ExecuteProgram(%d, %zu bytes of parameters:%s): this application has no such program here; its first program starts instead", index, n, hex);

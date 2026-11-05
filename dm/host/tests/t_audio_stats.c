@@ -95,6 +95,7 @@ int main(void) {
     stats_drain();
     CHECK(wait_for(report_done), "accumulated callback statistics are eventually reported");
     CHECK(strstr(lines[0], "device callbacks 2000: 1\xe2\x80\x93" "2 frames") && strstr(lines[0], "1.0 blocks queued") && strstr(lines[0], "in these 2000, 0 underruns, 0.0 ms"), "first report preserves frame range, queue depth and underrun fields");
+    CHECK(strstr(lines[0], ", mode matrix, 0 device fallbacks, banked up to 0 frames"), "the report appends the mode and the mode device's window counters");
     CHECK(strstr(lines[1], "device callbacks 4000:") && strstr(lines[1], "in these 2000,"), "next pending snapshot is preserved");
     CHECK(strstr(lines[2], "device callbacks 10000:") && strstr(lines[2], "in these 6000,"), "a full mailbox merges later windows without losing their counts");
     h_au_Close(out);

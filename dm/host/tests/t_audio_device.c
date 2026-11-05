@@ -223,7 +223,7 @@ static void blocked_start(void *out) {
 }
 
 int main(void) {
-    setenv("DM_AUDIO", "1", 1); unsetenv("DM_DBG_AU_FRAMES");
+    setenv("DM_AUDIO", "1", 1); unsetenv("DM_DBG_AU_FRAMES"); unsetenv("DM_AUDIO_LATENCY");
     unit.device = 1; unit.rate = 48000; unit.range = (AudioValueRange){15, 4096}; unit.frames = 512;
     uint32_t out[16] = {0}; uint8_t prm[16]; h_au_InitParam(prm);
     check_open_publication = 1;
@@ -257,6 +257,27 @@ int main(void) {
     changed(kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0); assert(unit.frames == 1024);
     unit.device = 4; unit.rate = 44100; changed(kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0); assert(unit.frames == 1024);
     unsetenv("DM_DBG_AU_FRAMES");
+
+    // The Audio latency setting's low tier asks for 16 frames, clamped to the device's range like the
+    // default request is; `standard` resolves exactly like an unset variable (the launcher saves defaults too).
+    setenv("DM_AUDIO_LATENCY", "low", 1);
+    unit.device = 1; unit.rate = 48000; unit.range = (AudioValueRange){15, 4096};
+    changed(kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0);
+    assert(unit.frames == 16);
+    unit.rate = 44100; changed(kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0);
+    assert(unit.frames == 16);   // an absolute frame count, not derived from the rate
+    unit.range.mMinimum = 256; changed(kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0);
+    assert(unit.frames == 256);   // the low tier is a production path: clamped, unlike the diagnostic arm
+    unit.range.mMinimum = 15; changed(kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0);
+    assert(unit.frames == 16);
+    setenv("DM_AUDIO_LATENCY", "standard", 1);
+    unit.rate = 48000; changed(kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0);
+    assert(unit.frames == 240);
+    setenv("DM_DBG_AU_FRAMES", "1024", 1);
+    unit.rate = 44100; changed(kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0);
+    assert(unit.frames == 1024);   // the diagnostic arm still overrides the setting
+    unsetenv("DM_DBG_AU_FRAMES"); unsetenv("DM_AUDIO_LATENCY");
+
     unsigned before = unit.writes; unit.device = kAudioObjectUnknown;
     changed(kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0); assert(unit.writes == before);
     unit.device = 1;

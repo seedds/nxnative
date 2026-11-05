@@ -73,6 +73,26 @@ class HalfSwizzle(Alu):
         self.assertEqual(read, {'x'}, msl)
 
 
+class HalfCompareFtz(Alu):
+    """HSETP2 / HSET2 .FTZ (bit 80): a subnormal half compares as zero, as FSETP.FTZ's float does (CompareFtz). The lanes are unpacked to 32-bit floats, where a half's
+    subnormals are normal, so the half's own bound (2^-14) flushes them. Encodings built from the sm_86 oracle corpus and checked with nvdisasm"""
+    HSETP2 = (0x000fca0003f14000, 0x0000001413007234)      # HSETP2.GT.FTZ.AND P0, PT, R19, R20, PT
+    HSETP2_NO = (0x000fca0003f04000, 0x0000001413007234)   # HSETP2.GT.AND P0, PT, R19, R20, PT
+    HSET2 = (0x000fe20003814080, 0x0000001413067233)       # HSET2.BF.GT.FTZ.AND R6, R19, R20, PT
+    BOUND = re.compile(r'6\.10351\d*e-05')
+
+    def test_hsetp2_flushes_both_operands(self):   # only P0 (the low lanes) is read: the high lanes' comparison goes to PT and is dropped with its flushes
+        msl = self.kept(self.HSETP2, (0x000fe40000000000, 0x0000001413067208), srcs=(19, 20))
+        self.assertEqual(len(self.BOUND.findall(msl)), 2, msl)
+
+    def test_hset2_flushes_both_lanes_of_both_operands(self):
+        msl = self.kept(self.HSET2, srcs=(19, 20))
+        self.assertEqual(len(self.BOUND.findall(msl)), 4, msl)
+
+    def test_without_ftz_compares_as_is(self):
+        self.assertFalse(self.BOUND.search(self.kept(self.HSETP2_NO, (0x000fe40000000000, 0x0000001413067208), srcs=(19, 20))))
+
+
 class CompareFtz(Alu):
     """FSETP / FSET .FTZ (bit 80): a denormal operand compares as zero, as on NVIDIA; Apple's GPUs keep denormals. Mario Kart World's deferred lighting 635061c90d75a8d1
     normalises its four depth-weighted samples by 1 / sum only where FSETP.NEU.FTZ says sum != 0: a denormal sum passed, its reciprocal overflowed, and the NaN came out

@@ -1047,6 +1047,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`HalfSwizzle`: the three fail on `main`), and `test_dmsh_ampere_mem.py`'s `MufuF16`. A GPU cross-check of 900 HADD2 / HMUL2 / HFMA2 from an nvdisasm-validated sm_86 corpus against an exact binary16 reference (one rounding, FMA included) went from 86 mismatches on constant swizzles to none; what is left is `.FTZ` on subnormals, `.FMZ` (0 times infinity) and `.RELU` on NaN (canonical NaN in PTX's documentation), which the translator does not model.
 - **Found on:** cross-checking the translator against nvdisasm and a reference interpreter; no game run.
 
+### HSETP2 / HSET2 .FTZ
+
+- **Symptom:** a half comparison with `.FTZ` on a subnormal operand passes where NVIDIA's fails (or the reverse): `HSET2.BF.GT.FTZ R6, R19, RZ` gives 1.0 for a positive subnormal half, 0 on NVIDIA.
+- **Cause:** bit 80 of HSETP2 and HSET2 was dropped. `AFtz` (FSETP / FSET) does not fit: the half lanes are unpacked to 32-bit floats, where a half's subnormals are normal, so `FlushDenormal`'s bound never flushes them.
+- **Fix:** `AHalfFtz` in `InstEmitAmpereTensor.cs` flushes each lane under the half's own bound (2^-14) before the comparison. The arithmetic's `.FTZ` stays dropped, as for 32-bit floats.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`HalfCompareFtz`: two fail on `main`). The GPU cross-check with subnormal and zero inputs: 4 HSETP2 / HSET2 mismatches in 400, none with the fix; HMNMX2's `.FTZ` (a subnormal result kept) is left as is.
+- **Found on:** cross-checking the translator against nvdisasm and a reference interpreter (NAK's `OpHSetP2` gives the `.H_AND` reading the translator already has); no game run.
+
 ### A guarded load whose destination is its address
 
 - **Symptom:** none in the log: everything drawn with an engine's scene data lands on the first instance's transform, or at nothing. In the MSL, a bounds-checked read has a constant index (`vp_s2._m0[0]`) just after a comparison of the register it should use.

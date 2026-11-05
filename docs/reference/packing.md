@@ -17,6 +17,20 @@
 - **Not known from the file:** whether the update is the whole game. The flag does not promise it (the spec says such an update needs a matching base elsewhere), and an update holding only changed files would pack and then fail at boot, after a full shader build. The scripts print that the update is taken as the whole game. Measured: both NUPs at hand have an update RomFS that holds every path of its base (Age of Imprisonment: 2,065 base files, 2,153 in the update, none missing; Yoshi and the Mysterious Book: 147 and 147, none missing).
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md). Reproduced with its base dump repackaged by the reference tool as a standalone-update fixture; this checks packaging, not the reported 1.8.0's contents or gameplay. Synthetic tests cover both entry points, both forms of no base, multiple versions, control data, DLC and incomplete updates.
 
+### A NUP or a dump of a game with no profile stops before the survey
+
+- **Symptom:** `[RED] a NUP packs only a game with a profile, and <title ID> has none: the survey that makes a provisional profile reads NSPs`, or the same line for a dump folder ([issue #1265](https://github.com/seedds/nxnative/issues/1265)). A folder holding `exefs/` and `romfs/` directly, or only `updates/<version>/`, was not taken for a dump at all: the script asks for `prod.keys`, then stops with `no NSP with a readable title ID`.
+- **Cause:** the survey and the build ID lookup (`same_build`) ran `nx_extract --manifest`, which reads NSPs. `pack_dump.is_dump` asked for `base/exefs/main.npdm`.
+- **Fix:** each source leaves the same files for the survey: `survey_nup` reads the newest version from the container (its ExeFS, a RomFS manifest in `nx_extract`'s format: path, size, first 32 bytes, `Nup.head` inflating only those; the NROs whole and the control data), and `survey_dump` from the folder, whose name names the game, as a dump has no control data. `same_build` reads main from the container or the folder. A dump may have no `base/` when an update's folder holds code and a RomFS, and `exefs/` and `romfs/` directly in the folder, as `nup extract` writes them, count as `base/`: version 0, so a profile that registers another version packs them from a derived profile.
+- **Found on:** Star Fox (`0400E88025B1A000`, update v131072; no profile in the repository then), The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, issue #1265) and [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md), whose dump holds `updates/131072/` alone.
+
+### A provisional profile of a Switch 2 game shows no SDK and a Switch 1 memory pool
+
+- **Symptom:** the survey of a Switch 2 game says `SDK: ?` and `no SDK version string found`, and its provisional profile has `app_pool 0xCD500000`.
+- **Cause:** the SDK version pattern did not take the variant the Switch 2's SDKs name (`NintendoSdk_nnSdk-Generic_21_4_4`), and `guess` had one pool, a 4 GB Switch's.
+- **Fix:** the pattern takes the variant, and an `sdk` built for the Switch 2 (`spec: Ounce`, as `dm_sdk_ounce` reads it) gets the 9 GB pool every Switch 2 profile has. Open: only the pool changes; a game with system resource keeps the 5 GB block (Star Fox's profile has 21 GB with a 16 GB alias region), so a provisional profile may still not fit and needs the bring-up.
+- **Found on:** Star Fox and Kirby Air Riders (`040077201BE50000`; no profile), read from their NUP and extraction; first reported with [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md).
+
 ## Build tools
 
 ### Homebrew .NET is on PATH but apphosts cannot find the runtime
@@ -238,6 +252,13 @@
 - **Cause:** `scan_nsps` gave each file one title ID: its first ticket's, else its name's tag. A merged package holds a ticket per title in any order, so it counted as the base game or as the update, never as both, and its DLC was never seen. `nx_extract` then read the update from a separate update NSP only.
 - **Fix:** a package whose file table (an NSP's PFS0, an XCI's secure HFS0 partition) holds more than one `*.cnmt.nca` is asked for its content metas, `nx_extract <prod.keys> --contents <package>` (one `content <type> <title ID> <version>` line each), and counts as each Application, Patch and AddOnContent it lists, with the versions from the metas. The one file is then given to `nx_extract` as both the base game and the update: `OpenNsp` keeps the NCAs that the Application content meta lists for the base and the Patch content meta's for the update, both of the application being packed (`--app`), and `--aoc <package> <out> <DLC title ID>` takes one DLC's data NCA by its title ID. The extraction estimate, the progress total and the NSZ conversion count the file once. When the content metas cannot be read, a `[RED]` line says so and the package counts by its ticket as before. A DLC NSP that bundles several DLC is read the same way.
 - **Found on:** Mario Kart 8 Deluxe (0100152000022000, no profile here) from one merged NSP, in NX2Apple ([PR #842](https://github.com/seedds/nxnative/pull/842), [LNPANDY/NX2Apple#376](https://github.com/LNPANDY/NX2Apple/issues/376)). Checked with Balatro's update NSP and base NSP merged into one PFS0: it scans as base v0 and update v851968, and `nx_extract` given it as base and update writes the same ExeFS, control data and RomFS manifest as the two separate NSPs. Applies to every game.
+
+### A derived profile leaves out a module that moved to another slot
+
+- **Symptom:** a version a profile was not brought up on crashes at its first movie: `UNIMPL _ZN5movie9ExtractorC1ENS_13ContainerTypeE`, then `CRASH sig=11` ([issue #1211](https://github.com/seedds/nxnative/issues/1211)). The derived profile's `modules` has only `main sdk`.
+- **Cause:** `derive_profile` could only take modules out of the profile's list, but a module's slot belongs to a build, not to a game: Absolum's movie module is `subsdk2` in 1.1.2, where `subsdk0` is NVIDIA's Vulkan driver, and `subsdk0` in 1.2.1.
+- **Fix:** `derive_profile` adds what `profile_guess.main_modules` finds: a module the list leaves out that exports something `main` imports, which no listed module and no host hook supplies, and never a GPU driver. It shares this with `nro_modules` (`modules_supplying`). The added module goes in the version's `build` row too, since the host loads what the row names. Checked on 9 games' real modules with their registered lists: nothing is added (Super Mario Galaxy 2's GLSLC and `nn::pcm`, which the host supplies, stay out), and each of the 7 subsdks taken out of a list comes back. A registered build keeps its row: the rule runs only when a profile is derived.
+- **Found on:** [Absolum](../../dm/games/0100A83022A22000/README.md) 1.2.1, from the reporter's logs: with the module added by hand the game reached gameplay at 60 fps. No 1.2.1 files on this Mac: not run here.
 
 ### A derived profile loads only the modules its version ships
 

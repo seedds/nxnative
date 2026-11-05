@@ -138,3 +138,8 @@ dm/host/motion_pro_mac.h	hle:*SixAxisSensor*	Mac Pro Controller raw motion trans
 dm/host/front.h	present:*	the front end
 dm/ios/*	*:*	the iOS app
 dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Translation/Transforms/GeometryToCompute.cs	shader:stage:gs	geometry compute input and output lowering
+
+dm/host/hle_prepo.c	hle:*hipc*SendSyncRequest*	native play-report requests, transfer memory and completion events
+dm/host/hle_sf.c	hle:*hipc*	service connection, typed requests, sessions and copied handles
+dm/host/sf_service.h	hle:*hipc*SendSyncRequest*	typed service request and reply ABI shared by host sessions
+dm/host/hle.h	hle:*	common host service ABI and guest application identity

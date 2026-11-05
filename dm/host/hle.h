@@ -10,6 +10,7 @@ typedef struct { const char *name; void *fn; } hle_ent;
     static ret cname(__VA_ARGS__)
 
 typedef uint32_t Result;   // nn::Result: w0, 0 = success
+#define DM_GUEST_PROCESS_ID 0x80u   // one guest application: applet identity and authenticated HIPC sender
 #define RES_OK 0u
 #define RES_FAIL 0x2A2u      // Generic failure (cut features such as networking uniformly return this)
 

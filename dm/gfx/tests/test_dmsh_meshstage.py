@@ -103,6 +103,14 @@ class Stage(unittest.TestCase):
     def test_memory_starts_at_zero(self):   # the count byte relies on it (InstEmitAmpereMem.cs AStageOut)
         self.assertIn('_23[i] = 0u;', self.task()[0])
 
+    def test_loop_guard_counter_before_the_stage_memory(self):   # dmsh_build.py loop_guard runs first: its counter comes before the array and stays in the body
+        i = ms.info(control(6), bytes(0x80))
+        src = (KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][2] // 4 + 1)).replace('{\n    threadgroup', '{\n    uint dm_lg = 0u; (void)dm_lg;\n    threadgroup', 1)
+        out = ms.to_stage(src, i)
+        body = out[out.index('void dm_stage_body('):]
+        self.assertIn('uint dm_lg = 0u; (void)dm_lg;', body[:body.index('\n}')])
+        self.assertIn('[[object]] void main0(', out)
+
     def test_mesh_has_both_depth_conventions(self):
         src, _ = self.mesh()
         gl, z = src.split('[[mesh]] void main0_z(')

@@ -426,3 +426,19 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Fix:** none in the host, and none needed for a folder on the internal disk. To measure memory without this, put a copy of the archive on the internal disk and point `DM_PSO_ARCHIVE` at it. A game's work folders are on an external drive by rule, so a figure from such a run includes the archive. Closing archives after the prewarm could get the memory back on an external drive; that was not tried, because later draws look their bases up in them and it would help only that setup.
 - **Found on:** [Kirby Star Allies](../../dm/games/01007E3006DDA000/README.md): the same stage route gave a footprint of 5,109 MB with its 1.13 GB archive on the external drive and 4,013 MB on the internal disk. Opening the archive took 858 ms against 1,626 ms, and long frames were the same (30 against 29). iOS was not measured.
 
+
+### GPU out of memory on an 8 GB Mac: the residency set passes Metal's working set
+
+- **Symptom:** command buffers fail with `Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)`, then `Discarded (victim of GPU error/recovery)`; the log's first `[RED] GPU out of memory` report has the residency set near Metal's recommended working set (5,461 MB on an 8 GB Mac). The submit thread then waits in `IOGPUCommandQueueSubmitCommandBuffers`, and WindowServer can hit its watchdog (the desktop session restarts).
+- **Cause:** what the residency set wires, counted per allocation:
+  - a large pool's chunk that a longer one replaced stayed resident until the pool went, so a 48 MB and a 96 MB chunk at one base both counted;
+  - a pool under 512 MB was wired whole as soon as anything in it was bound;
+  - a pool walk for handles traced to no slot made a Metal texture for every registered texture ID before it compared the type, so a cube-texture walk uploaded every texture the game had registered;
+  - and the textures themselves: when shaders read 2D textures through the whole pool, every registered texture is needed.
+- **Fix:**
+  - a replaced chunk is retired as a freed pool's buffer is, once the submissions that may use it complete (`big_lookup`);
+  - pools of 128 MB and more are wrapped in chunks (`BIG_MIN`);
+  - the walk skips IDs whose descriptor cannot be of the walked type (`ttype_apart`);
+  - `DM_NVN_TEX_MIP_SKIP=1` (off by default) makes CPU-written compressed textures of 512 pixels and more without their finest level, a quarter of the memory; views, copies and a sparse texture's level clamp take the guest's level less the skip.
+  - Two diagnostics: the out-of-memory report gives the distinct pages under the shared buffers and texture memory by pixel format; `DM_NVN_RES_LIMIT_MB=<MB>` stops the game gracefully, with that report, before the set reaches the limit.
+- **Found on:** PRAGMATA (0400C76024710000, no profile in `dm/games` yet), on an 8 GB M1 MacBook Air. Its opening load reached 5.2 GB in the set: 2.45 GB of textures (15,500, all registered for its whole-pool 2D reads) and 2.37 GB of shared buffers. With the chunk and pool changes and the mip skip, the same load peaked at 4.28 GB, and the game went on to its opening scene.

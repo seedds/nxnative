@@ -227,6 +227,11 @@ int main(void) { @autoreleasepool {
     char dir[] = "/tmp/t_pso_warm.XXXXXX"; if (!mkdtemp(dir)) return 1;
     mtl_init();
     if (!fixtures(@(dir))) { fprintf(stderr, "failed to compile synthetic shader fixtures\n"); [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil]; return 1; }
+    // The compile pools: the device lets the Metal compiler run more compiles at once, and the prepare step has as many workers as it runs, unless DM_PSO_PREPARE_THREADS says
+    EXPECT("concurrent compilation maximized", 1, g_dev.shouldMaximizeConcurrentCompilation);
+    unsetenv("DM_PSO_PREPARE_THREADS");
+    EXPECT("prepare workers: Metal's concurrent compiles", g_dev.maximumConcurrentCompilationTaskCount, prepare_workers());
+    setenv("DM_PSO_PREPARE_THREADS", "3", 1); EXPECT("prepare workers: DM_PSO_PREPARE_THREADS", 3, prepare_workers()); unsetenv("DM_PSO_PREPARE_THREADS");
     singleflight(@(dir));
     scenario(@(dir), 0); scenario(@(dir), 1);
     const char *mode = getenv("DM_PSO_MTL4");

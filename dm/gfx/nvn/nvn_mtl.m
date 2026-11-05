@@ -425,6 +425,10 @@ void mtl_init(void) {
     g_dev = MTLCreateSystemDefaultDevice();
     if (!g_dev) MDIE("no Metal device");
     if (!g_dev.hasUnifiedMemory) MDIE("needs a unified-memory device (zero-copy memory pools)");
+#if !TARGET_OS_IPHONE
+    // More of the Metal compiler's threads for this process (macOS only, default off; WWDC25 254): the compile pools take their size from maximumConcurrentCompilationTaskCount (compile_tasks)
+    if ([g_dev respondsToSelector:@selector(setShouldMaximizeConcurrentCompilation:)]) g_dev.shouldMaximizeConcurrentCompilation = YES;
+#endif
     g_q = [g_dev newCommandQueue];
     // A device without Metal 4 (the paravirtualized GPU of a virtual Mac, such as GitHub's macos-26 runner: no residency set, no MTL4CommandQueue) cannot run the NVN layer. The GL and
     // Vulkan layers draw on classic queues of their own and need only the device (mtl_device_classic): there the classic part starts and presents are dropped, which is all a
@@ -7204,6 +7208,17 @@ static int pso_bundle_covers(NSArray<NSArray<NSString *> *> *pairs, NSString *wa
          found, probed, (bp_now() - t0) / 1e6, ok ? "" : ": the device builds them");
     return ok;
 }
+// The workers of a pool that compiles as fast as it can (the prebuild tool, the prepare step): each waits on one synchronous compile, so as many as Metal's compiler runs at once
+// (maximumConcurrentCompilationTaskCount, which shouldMaximizeConcurrentCompilation may raise on the Mac, mtl_init; WWDC25 254); the device's active cores where Metal does not say.
+// Donkey Kong Bananza's 21,225 pairs in the prebuild tool (M5 Pro: 14, with the flag or without): 187-272 s on 14 workers, 393-452 s on the 4 it had (the performance cores less one); the flag
+// alone made no difference beyond the noise (docs/reference/shaders.md, Compile pools smaller than Metal's compiler). The background pools (pp_bg_queue, pso_prebuild_bg) stay a
+// share of the performance cores: they run beside the game's frames
+static int compile_tasks(void) {
+    NSUInteger n = [(id)g_dev respondsToSelector:@selector(maximumConcurrentCompilationTaskCount)] ? g_dev.maximumConcurrentCompilationTaskCount : 0;
+    if (n >= 2) return (int)n;
+    int c = 0; size_t sz = sizeof c; if (sysctlbyname("hw.activecpu", &c, &sz, NULL, 0) || c < 2) c = 2;
+    return c;
+}
 // threads: workers; wait: run on the calling thread until done (the tool), else in the background. Returns the number of pairs, -1 when there is nothing to do
 static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
     shmap_load(); pso4_init();
@@ -7263,13 +7278,13 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
     return n;
 }
 // DM_PSO_PREBUILD=tool: the prebuild alone (the host's other environment as for a run: DM_NVN_SHMAP, DM_MSL_DIR, DM_SAVE or DM_PSO_ARCHIVE), then exit; DM_PSO_PREBUILD_DEPTH=zero for
-// a game that sets the near=0 depth mode, DM_PSO_PREBUILD_THREADS=<n> workers (default: the performance cores less one). Returns 0 when not asked for
+// a game that sets the near=0 depth mode, DM_PSO_PREBUILD_THREADS=<n> workers (default: compile_tasks). Returns 0 when not asked for
 int mtl_pso_prebuild_tool(void) {
     const char *e = getenv("DM_PSO_PREBUILD"); if (!e || strcmp(e, "tool")) return 0;
     setenv("DM_PSO_MANIFEST", "off", 1);   // no prewarm (loading the shader map starts it)
     mtl_init(); const char *z = getenv("DM_PSO_PREBUILD_DEPTH"); if (z && !strcmp(z, "zero")) atomic_store(&g_depth_zero, 1);
     int threads = getenv("DM_PSO_PREBUILD_THREADS") ? atoi(getenv("DM_PSO_PREBUILD_THREADS")) : 0;
-    if (threads <= 0) { int pc = 0; size_t sz = sizeof pc; if (sysctlbyname("hw.perflevel0.physicalcpu", &pc, &sz, NULL, 0) || pc <= 1) pc = 4; threads = pc - 1; }
+    if (threads <= 0) threads = compile_tasks();
     if (pso_prebuild(threads, 1, QOS_CLASS_USER_INITIATED) < 0) MLOG("pipeline prebuild: nothing to do (no archive, no shader_pairs.tsv, prebuilt.tsv says it is done, or the archive bundled with the app holds every base)");
     return 1;
 }
@@ -7556,8 +7571,7 @@ static int prepare_on(void) {
 }
 static int prepare_workers(void) {
     const char *e = getenv("DM_PSO_PREPARE_THREADS"); int n = e ? atoi(e) : 0;
-    if (n <= 0) { size_t sz = sizeof n; if (sysctlbyname("hw.activecpu", &n, &sz, NULL, 0) || n < 2) n = 2; }
-    return n;
+    return n > 0 ? n : compile_tasks();
 }
 static void warm_prepare(NSArray<WarmTask *> *tasks, long lines) {
     int workers = prepare_workers(); long n = (long)tasks.count;

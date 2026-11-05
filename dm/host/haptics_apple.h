@@ -4,4 +4,5 @@
 #include "hle_haptics.h"
 void dm_haptics_apple_init(void);
 void dm_haptics_apple_controller(int player, GCController *controller);
+void dm_haptics_apple_controller_locality(int player, GCController *controller, GCHapticsLocality locality);
 void dm_haptics_apple_shutdown(void);

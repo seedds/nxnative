@@ -169,7 +169,7 @@ class Nvn(Base):
         for n in ('cas', 'b-notahexchain', 'b-0123456789abcd', 'mine'): (self.sh / 'cache' / n).mkdir()
         (self.sh / 'cache' / 'b-ffffffffffff').write_text('a file, not a library folder')
         self.build(False)
-        self.assertEqual(sorted(p.name for p in (self.sh / 'cache').iterdir()), sorted(['b-0123456789abcd', 'b-ffffffffffff', 'b-notahexchain', f'b-{CHAIN}.img', 'cas.tar', 'mine']))
+        self.assertEqual(sorted(p.name for p in (self.sh / 'cache').iterdir()), sorted(['b-0123456789abcd', 'b-ffffffffffff', 'b-notahexchain', f'b-{CHAIN}.img', 'mine']))   # an empty old cache's folder goes
 
     def test_a_folder_from_before_becomes_one_file_without_a_build(self):   # a reused step: nothing is translated again
         self.build(True); lib = self.sh / 'cache' / f'b-{CHAIN}'
@@ -243,52 +243,56 @@ class Nvn(Base):
             with mock.patch.object(nsp, 'main'): self.assertEqual(nsp.cli([]), 0)
         self.assertEqual([c.args[0].name for c in tidy.call_args_list], ['0100000000000000-work'])
 
-    def test_cache_is_one_file_between_builds(self):   # a folder from before cas.tar is packed even by a reused build; a build that runs takes it back
-        self.build(False); self.cas(LIVE)
+    def test_a_cache_from_before_moves_into_the_one_file(self):   # even by a reused build, and a build that runs never finds a folder
+        self.build(False)
+        old = self.sh / 'cache/cas/metallib/mac/ab'; old.mkdir(parents=True); (old / 'abcd.metallib').write_bytes(b'compiled')
         self.build(False)
         self.assertEqual(self.ran, [])
-        self.assertFalse((self.sh / 'cache/cas').exists()); self.assertTrue((self.sh / 'cache/cas.tar').is_file())
+        self.assertFalse((self.sh / 'cache/cas').exists())
+        self.assertEqual(self.store().get('metallib/mac/abcd.metallib'), b'compiled')
         (self.sh / 'ios' / f'b-{CHAIN}.key').unlink()
         seen = []
         real = nsp.run
         def looks(cmd, log, env=None, cwd=None, on_line=None):
-            seen.append(sorted(p.name for p in (self.sh / 'cache/cas/shader').iterdir()))
+            seen.append((self.sh / 'cache/cas').exists())
             return real(cmd, log, env=env, cwd=cwd, on_line=on_line)
         with mock.patch.object(nsp, 'run', looks): self.build(False)
-        self.assertEqual(seen, [[LIVE]])
-        self.assertFalse((self.sh / 'cache/cas').exists()); self.assertTrue((self.sh / 'cache/cas.tar').is_file())
+        self.assertEqual(seen, [False])
 
-    def entries(self):   # the cache's entries, as the next build that runs would read them
-        nsp.tree_tar.unpack(self.sh / 'cache/cas')
-        return self.sh / 'cache/cas/shader'
+    def store(self):
+        s = nsp.shader_cache.Store(self.sh / 'cache/cas.db'); self.addCleanup(s.close)
+        return s
 
-    def cas(self, *names, when=0):   # cache entries with a source and a library (a clone of the compile cache's), last changed at when
+    def entries(self):   # the shaders the cache holds, as the next build that runs would read them
+        return {n.split('/')[1] for n in self.store().names('shader/')}
+
+    def cas(self, *names, when=0):   # cache entries with a source and a library, last changed at when
+        s = self.store()
         for n in names:
-            d = self.sh / 'cache/cas/shader' / n / 'mac'; d.mkdir(parents=True)
-            (d / 'k_b.metal').write_bytes(b'm' * 100); (d / 'k_b.metallib').write_bytes(b'l' * 1000)
-            nsp.os.utime(d.parent, (when, when))
+            s.put(f'shader/{n}/mac/k_b.metal', b'm' * 100 + n.encode()[:0], when); s.put(f'shader/{n}/mac/k_b.metallib', b'l' * 1000, when)
+        s.close()
 
     def test_prune_shader_cache(self):   # entries the build did not list go once it succeeded; a listed one, one newer than the list and other names stay; only the sources count
         self.cas(LIVE, OLD, 'notadigest')
         said = []
         with mock.patch.object(nsp, 'say', said.append): self.build(False)
-        self.entries(); self.cas(NEW, when=nsp.time.time() + 3600)   # published by another build sharing the cache after this one's list
-        self.assertEqual(sorted(p.name for p in (self.sh / 'cache/cas/shader').iterdir()), sorted([LIVE, NEW, 'notadigest']))
+        self.cas(NEW, when=nsp.time.time() + 3600)   # published by another build sharing the cache after this one's list
+        self.assertEqual(self.entries(), {LIVE, NEW, 'notadigest'})
         self.assertEqual([m for m in said if 'shader cache entries' in m], ['removed old shader cache entries: 1 (0.1 KB)'])
         self.cas(OLD); said.clear()   # a reused build prunes too
         with mock.patch.object(nsp, 'say', said.append): self.build(False)
-        self.assertEqual(self.ran, []); self.assertFalse((self.entries() / OLD).exists()); self.assertTrue((self.entries() / NEW).exists())
+        self.assertEqual(self.ran, []); self.assertNotIn(OLD, self.entries()); self.assertIn(NEW, self.entries())
 
     def test_prune_shader_cache_needs_success_and_the_list(self):   # a failed build, or libraries from before the list, keep every entry
         self.build(False); self.cas(OLD)
         (self.sh / 'ios' / f'b-{CHAIN}.key').unlink()   # not reused: the step runs, and fails
         def failing(cmd, log, env=None, cwd=None, on_line=None): raise nsp.BuildError('translator failed')
         with mock.patch.object(nsp, 'run', failing), self.assertRaises(nsp.BuildError): self.build(False)
-        self.assertTrue((self.sh / 'cache/cas/shader' / OLD).exists())
-        self.build(False); self.assertFalse((self.entries() / OLD).exists())
+        self.assertIn(OLD, self.entries())
+        self.build(False); self.assertNotIn(OLD, self.entries())
         nsp.shader_lib.expand(self.sh / 'cache' / f'b-{CHAIN}'); (self.sh / 'cache' / f'b-{CHAIN}' / '_b_cas.txt').unlink(); self.cas(OLD)
         self.build(False)
-        self.assertEqual(self.ran, []); self.assertTrue((self.entries() / OLD).exists())
+        self.assertEqual(self.ran, []); self.assertIn(OLD, self.entries())
 
     def test_no_stamp(self):   # Mac libraries no full build stamped (an interrupted one): no table can name them, so neither key reuses them
         self.build(False)

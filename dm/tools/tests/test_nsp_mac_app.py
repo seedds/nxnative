@@ -875,7 +875,7 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
             self.assertEqual(len(self.ran), 1, self.ran)   # own_compilers.py alone
             cmd, env = self.ran[0]
             self.assertEqual(cmd[2:], [str(self.sh / 'pkg'), str(self.sh / 'partial'), a, b])
-            self.assertEqual((env['DMSH_CAS'], env['DMSH_TARGETS']), (str(self.sh / 'cache/cas'), 'mac')); self.assertNotIn('IOSOUT', env)
+            self.assertEqual((env['DMSH_CAS'], env['DMSH_TARGETS']), (str(self.sh / 'cache/cas.db'), 'mac')); self.assertNotIn('IOSOUT', env)
             self.assertFalse(old.exists()); self.assertTrue((self.sh / f'partial/b-{self.CHAIN}/k_b.metallib').is_file())
             self.assertFalse((self.sh / f'partial/b-{self.CHAIN}/inputs.tsv').exists()); self.assertFalse((self.tmp / 'c1_full.tsv').exists())   # no stamp: unlisted shaders are not proven safe
             self.assertEqual(self.build([a, b]), self.sh / 'partial'); self.assertEqual(self.ran, [])   # reused

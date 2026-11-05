@@ -1078,10 +1078,14 @@ static inline void enc_r_vbuf(id<MTL4RenderCommandEncoder> e, NSUInteger i, uint
 static inline void enc_r_args(id<MTL4RenderCommandEncoder> e, MTLRenderStages s, uint64_t gpu, NSUInteger i) {
     if (s == MTLRenderStageVertex) enc_r_vbuf(e, i, gpu); else if (rec_on()) rec_table_op(RO_T_ADDR, g_ft, gpu, i); else [g_ft setAddress:gpu atIndex:i];
 }
-static inline void enc_r_draw(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger v, NSUInteger n) { [e drawPrimitives:p vertexStart:v vertexCount:n]; }
-static inline void enc_r_draw_instanced(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger v, NSUInteger n, NSUInteger i, NSUInteger b) { [e drawPrimitives:p vertexStart:v vertexCount:n instanceCount:i baseInstance:b]; }
+// A draw split by fragment output (osplit_prep, the profile's split_outputs): the pipelines it goes as, one draw each, then the whole draw's pipeline bound again; 0 = drawn as is
+// (draw clears it after every draw). Direct draws only
+static int g_osplit_n; static __unsafe_unretained id<MTLRenderPipelineState> g_osplit_ps[8], g_osplit_whole;
+#define OSPLIT_EACH(e, call) do { if (!g_osplit_n) { call; break; } for (int o_ = 0; o_ < g_osplit_n; o_++) { enc_r_pso(e, g_osplit_ps[o_]); call; } enc_r_pso(e, g_osplit_whole); } while (0)
+static inline void enc_r_draw(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger v, NSUInteger n) { OSPLIT_EACH(e, [e drawPrimitives:p vertexStart:v vertexCount:n]); }
+static inline void enc_r_draw_instanced(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger v, NSUInteger n, NSUInteger i, NSUInteger b) { OSPLIT_EACH(e, [e drawPrimitives:p vertexStart:v vertexCount:n instanceCount:i baseInstance:b]); }
 static inline void enc_r_draw_indirect(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, uint64_t gpu) { [e drawPrimitives:p indirectBuffer:gpu]; }
-static inline void enc_r_draw_indexed(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger n, MTLIndexType t, uint64_t gpu, NSUInteger len, NSUInteger i, NSInteger bv, NSUInteger bi) { [e drawIndexedPrimitives:p indexCount:n indexType:t indexBuffer:gpu indexBufferLength:len instanceCount:i baseVertex:bv baseInstance:bi]; }
+static inline void enc_r_draw_indexed(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger n, MTLIndexType t, uint64_t gpu, NSUInteger len, NSUInteger i, NSInteger bv, NSUInteger bi) { OSPLIT_EACH(e, [e drawIndexedPrimitives:p indexCount:n indexType:t indexBuffer:gpu indexBufferLength:len instanceCount:i baseVertex:bv baseInstance:bi]); }
 static inline void enc_r_draw_indexed_indirect(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, MTLIndexType t, uint64_t gpu, NSUInteger len, uint64_t ind) { [e drawIndexedPrimitives:p indexType:t indexBuffer:gpu indexBufferLength:len indirectBuffer:ind]; }
 static void ubd_land_compute(void);
 static inline id<MTL4ComputeCommandEncoder> enc_c_begin(MTLComputePassDescriptor *d) { (void)d; ubd_land_compute(); id<MTL4ComputeCommandEncoder> e = [g_cb computeCommandEncoder]; [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_ct]; gp_begin(e, 'C', nil); return e; }
@@ -10815,8 +10819,151 @@ static void draw_multi(const p_multi_draw *m) {
     g_mdx_range = NULL;
     g_mdxc.next = NULL;
 }
+// ---------- A fragment shader's colour outputs drawn one at a time (profile key split_outputs) ----------
+// A draw whose fragment shader the profile names (split_outputs, DM_GAME_SPLIT_OUTPUTS: 16-digit keys) goes as one draw per colour output in the same pass, each with the shader
+// specialized to that output and a write mask on that output's attachment alone; the draw's own pipeline is bound again after the pieces (OSPLIT_EACH in the enc_r_draw wrappers).
+// It is for a shader whose outputs share no work and whose threads are long. Mario Kart World's cube-map prefilter (4744589bb8f9f7dd, Drive's GearPassShader) writes the six faces
+// of one mip level from one full-screen draw, 32 explicit-LOD cube samples per face; its 2x2 to 8x8 levels then run a few long threads, about 75 us a pass on an M1 Pro whatever
+// the size. As six draws, Metal runs the six short threads side by side: three chains a frame took 1.71 and 1.74 ms instead of 2.29 (in-process A/B, two races).
+// The specialized copy is the shader's MSL (<key>_b.metal beside its library) with each line that writes an output guarded by function constant OSPLIT_FC, so each piece's compile
+// drops the other outputs' work; the write masks alone keep the result right. It is compiled once in the background with the flags of the shader build (preserved invariance;
+// relaxed math on iOS), its pipelines are built in the background too, and until both are there the draw goes whole. A draw also goes whole wherever drawing it in pieces could
+// differ: shader writes (made once per piece), depth or stencil state, blending, a logic operation, the alpha test or alpha to coverage, a pulling stand-in pipeline, and the
+// replay's own rewrites of a draw (readable-tile merges, slice-merged passes, geometry programs, layer-writing vertex shaders, feedback tile reads, visibility queries); each
+// reason is logged once. DM_NVN_SPLIT_OUTPUTS=0 turns it off, =ab alternates it with the DM_AB phases, =<key>,... names other fragment shaders instead of the profile's
+enum { OSPLIT_FC = 90, OSPLIT_SH = 8, OSPLIT_PP = 16 };
+static struct { char key[24]; int state; id<MTLLibrary> lib; id<MTLFunction> fn[8]; uint32_t outs; } g_osplit_sh[OSPLIT_SH];   // state 1 compiling, 2 ready, 3 stays whole
+static struct { pso_key k; char vs[24]; id<MTLRenderPipelineState> ps[8]; int done; } g_osplit_pp[OSPLIT_PP];   // done 1 building, 2 built, 3 failed
+static int g_osplit_nsh, g_osplit_npp; static os_unfair_lock g_osplit_lock = OS_UNFAIR_LOCK_INIT;
+static char g_osplit_keys[8][17]; static int g_osplit_nk = -1, g_osplit_sw;
+// Whether draws of fragment shader key (16 digits, then the library suffix) go in pieces now: named by the profile or DM_NVN_SPLIT_OUTPUTS, and the switch on in this DM_AB phase
+static int osplit_named(const char *key) {
+    if (g_osplit_nk < 0) {
+        const char *e = getenv("DM_NVN_SPLIT_OUTPUTS"); int ab = e && !strncmp(e, "ab", 2), off = e && !strcmp(e, "0");
+        const char *src = off ? "" : e && *e && !ab ? e : DM_GAME_SPLIT_OUTPUTS;
+        g_osplit_nk = 0;
+        for (const char *q = src; *q && g_osplit_nk < 8; ) { size_t n = strcspn(q, ",");
+            if (n == 16 && strspn(q, "0123456789abcdef") >= 16) { memcpy(g_osplit_keys[g_osplit_nk], q, 16); g_osplit_keys[g_osplit_nk++][16] = 0; }
+            else MLOG("[RED] DM_NVN_SPLIT_OUTPUTS: %.*s is not a 16-digit fragment shader key; left out", (int)n, q);
+            q += n; if (*q) q++; }
+        g_osplit_sw = !g_osplit_nk ? 0 : ab ? sw_mode("DM_NVN_SPLIT_OUTPUTS", 0) : 1;
+        if (g_osplit_nk) MLOG("split outputs (profile key split_outputs%s): draws of %d fragment shader(s), %s%s, go as one draw per colour output", e && *e && !ab ? ", replaced by DM_NVN_SPLIT_OUTPUTS" : "",
+            g_osplit_nk, g_osplit_keys[0], g_osplit_nk > 1 ? " and others" : "");
+    }
+    if (!g_osplit_nk || !sw_on(g_osplit_sw)) return 0;
+    for (int i = 0; i < g_osplit_nk; i++) if (!strncmp(key, g_osplit_keys[i], 16)) return 1;
+    return 0;
+}
+// The MSL src with every line that writes a colour output of <entry>_out guarded by function constant OSPLIT_FC (unset or -1 keeps every output); *outs = the colour
+// indices the struct declares. nil when the struct is not found, has fewer than two colour outputs, or a line writes a member that is not a colour (depth, sample mask)
+static NSString *osplit_msl(NSString *src, NSString *entry, uint32_t *outs) {
+    NSRange r = [src rangeOfString:[NSString stringWithFormat:@"struct %@_out", entry]];
+    if (r.location == NSNotFound || [src containsString:[NSString stringWithFormat:@"function_constant(%d)", OSPLIT_FC]]) return nil;
+    NSRange end = [src rangeOfString:@"};" options:0 range:NSMakeRange(r.location, src.length - r.location)]; if (end.location == NSNotFound) return nil;
+    NSString *body = [src substringWithRange:NSMakeRange(r.location, end.location - r.location)];
+    NSMutableDictionary<NSString *, NSNumber *> *col = [NSMutableDictionary dictionary]; uint32_t decl = 0;
+    NSRegularExpression *mx = [NSRegularExpression regularExpressionWithPattern:@"(\\w+)\\s*\\[\\[color\\((\\d+)\\)" options:0 error:nil];
+    for (NSTextCheckingResult *m in [mx matchesInString:body options:0 range:NSMakeRange(0, body.length)]) { int c = [[body substringWithRange:[m rangeAtIndex:2]] intValue];
+        if (c < 0 || c > 7) return nil;
+        col[[body substringWithRange:[m rangeAtIndex:1]]] = @(c); decl |= 1u << c; }
+    if (__builtin_popcount(decl) < 2) return nil;
+    NSMutableString *o = [NSMutableString stringWithCapacity:src.length + 4096];
+    [o appendString:[src substringToIndex:r.location]];
+    [o appendFormat:@"constant int dm_output_only_fc [[function_constant(%d)]];\nconstant int dm_output_only = is_function_constant_defined(dm_output_only_fc) ? dm_output_only_fc : -1;\n\n", OSPLIT_FC];
+    NSRegularExpression *wx = [NSRegularExpression regularExpressionWithPattern:@"^(\\s*)out\\.(\\w+)" options:0 error:nil];
+    __block int bad = 0, guarded = 0;
+    [[src substringFromIndex:r.location] enumerateLinesUsingBlock:^(NSString *ln, BOOL *stop) {
+        NSTextCheckingResult *m = [wx firstMatchInString:ln options:0 range:NSMakeRange(0, ln.length)];
+        if (!m) { [o appendFormat:@"%@\n", ln]; return; }
+        NSNumber *c = col[[ln substringWithRange:[m rangeAtIndex:2]]]; if (!c) { bad = 1; *stop = YES; return; }
+        [o appendFormat:@"%@if (dm_output_only < 0 || dm_output_only == %d) %@\n", [ln substringWithRange:[m rangeAtIndex:1]], c.intValue, [ln substringFromIndex:[m rangeAtIndex:1].length]]; guarded++; }];
+    if (bad || !guarded) return nil;
+    *outs = decl; return o;
+}
+static void osplit_load(int i, NvShader *fs) {   // background: the guarded copy of fs's MSL, compiled, and one function per colour output
+    NSString *key = @(fs->key), *entry = fs->fn.name, *path = [NSString stringWithFormat:@"%@/%@.metal", g_msl_dir, key];
+    int abi = fs->rf.nb ? fs->rf.abi : -1; NSUInteger alen = fs->arg_len;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSError *e = nil; const char *why = NULL; uint32_t outs = 0; double t0 = CFAbsoluteTimeGetCurrent();
+        NSString *src = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil], *msl = src ? osplit_msl(src, entry, &outs) : nil;
+        id<MTLLibrary> lib = nil; id<MTLFunction> fn[8] = {nil};
+        if (!src) why = "no MSL beside its library";
+        else if (!msl) why = "its colour outputs were not found, or it writes another kind of output";
+        else { MTLCompileOptions *o = [MTLCompileOptions new]; o.preserveInvariance = YES;
+#if TARGET_OS_IPHONE
+            o.mathMode = MTLMathModeRelaxed;
+#endif
+            if (!(lib = [g_dev newLibraryWithSource:msl options:o error:&e])) why = "the guarded copy did not compile"; }
+        for (int c = 0; c < 8 && lib && !why; c++) if (outs >> c & 1) {
+            MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new]; [cv setConstantValue:&c type:MTLDataTypeInt atIndex:OSPLIT_FC];
+            if (!(fn[c] = fn_spec(lib, entry, cv, &e))) why = "no entry point in the guarded copy";
+            else if (abi >= 0 && [fn[c] newArgumentEncoderWithBufferIndex:abi].encodedLength != alen) why = "its argument buffer differs from the shader's"; }
+        os_unfair_lock_lock(&g_osplit_lock);
+        if (!why) { g_osplit_sh[i].lib = lib; g_osplit_sh[i].outs = outs; for (int c = 0; c < 8; c++) g_osplit_sh[i].fn[c] = fn[c]; }
+        g_osplit_sh[i].state = why ? 3 : 2;
+        os_unfair_lock_unlock(&g_osplit_lock);
+        if (why) MLOG("[RED] split outputs: fragment shader %s stays whole: %s%s%s", key.UTF8String, why, e ? ": " : "", e ? e.localizedDescription.UTF8String : "");
+        else MLOG("split outputs: fragment shader %s guarded per colour output (%#x; MSL compiled in %.0f ms)", key.UTF8String, outs, (CFAbsoluteTimeGetCurrent() - t0) * 1000); });
+}
+// Sets the current draw to go in pieces (g_osplit_n, which the enc_r_draw wrappers use) when it may and its pieces are built; 1 = split. Called just before a direct draw is
+// encoded. cur_pull: the draw's pipeline is a pulling stand-in; whole: the draw's pipeline, bound again after the pieces
+static int osplit_prep(NvProg *pr, int cur_pull, id<MTLRenderPipelineState> whole) {
+    __unsafe_unretained NvShader *vs = pr ? pr->sh[0] : nil, *fs = pr ? pr->sh[1] : nil;
+    if (!fs || !vs || !osplit_named(fs->key)) return 0;
+    static const char *const whys[] = {"", "pulling stand-in pipeline", "readable-tile merge", "slice-merged pass", "visibility query", "geometry program", "layer-writing vertex shader",
+        "feedback tile read", "depth test", "depth write", "stencil test", "rasterizer discard", "diagnostic fragment", "shader writes", "alpha test", "logic operation", "blending",
+        "alpha to coverage", "fewer than two outputs drawn", "no table slot left"};
+    static uint32_t why_seen;
+#define OSPLIT_NO(w) do { int w_ = (w); if (!(why_seen >> w_ & 1)) { why_seen |= 1u << w_; MLOG("split outputs: a draw of %s goes whole: %s (first in pass %llu; colour formats %u %u %u %u %u %u %u %u, " \
+        "channel mask %#x, blend %#x)", fs->key, whys[w_], g_stat_pass, g_pass.cfmt[0], g_pass.cfmt[1], g_pass.cfmt[2], g_pass.cfmt[3], g_pass.cfmt[4], g_pass.cfmt[5], g_pass.cfmt[6], \
+        g_pass.cfmt[7], (unsigned)S.chmask.mask, (unsigned)S.color.blend_en); } return 0; } while (0)
+    int why = cur_pull ? 1 : g_fz.active ? 2 : g_sm_pass ? 3 : g_vis_counting ? 4 : g_geo_program ? 5 : vs->layer_out ? 6 : (g_fb_tseq == g_draw_seq && g_fb_tfn) ? 7
+            : S.ds.dt ? 8 : S.ds.dw ? 9 : S.ds.st ? 10 : S.rast_discard ? 11 : ms_fs_override(fs) ? 12 : prog_swrites(pr) ? 13 : 0;
+    if (why) OSPLIT_NO(why);
+    int i = 0;
+    os_unfair_lock_lock(&g_osplit_lock);
+    for (; i < g_osplit_nsh; i++) if (!strcmp(g_osplit_sh[i].key, fs->key)) break;
+    int st = i < g_osplit_nsh ? g_osplit_sh[i].state : 0;
+    if (!st && i < OSPLIT_SH) { strlcpy(g_osplit_sh[i].key, fs->key, sizeof g_osplit_sh[i].key); g_osplit_sh[i].state = 1; g_osplit_nsh++; }
+    os_unfair_lock_unlock(&g_osplit_lock);
+    if (!st && i >= OSPLIT_SH) OSPLIT_NO(19);
+    if (!st) osplit_load(i, fs);
+    if (st != 2) return 0;
+    pso_key k; pso_key_fill(&k, vs, fs, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, 0);
+    if (k.atest || k.logic || k.blend_en || k.a2c) OSPLIT_NO(k.atest ? 14 : k.logic ? 15 : k.blend_en ? 16 : 17);
+    uint32_t outs = 0; int n = 0;
+    for (int c = 0; c < 8; c++) if (g_osplit_sh[i].outs >> c & 1 && k.cfmt[c] && (k.chmask >> (4 * c) & 0xf)) { outs |= 1u << c; n++; }
+    if (n < 2) OSPLIT_NO(18);
+    static int last; int j = last < g_osplit_npp && !memcmp(&g_osplit_pp[last].k, &k, sizeof k) && !strcmp(g_osplit_pp[last].vs, vs->key) ? last : -1;
+    for (int q = 0; j < 0 && q < g_osplit_npp; q++) if (!memcmp(&g_osplit_pp[q].k, &k, sizeof k) && !strcmp(g_osplit_pp[q].vs, vs->key)) j = q;   // by the vertex shader's key too: k holds pointers
+    if (j < 0) {   // the first draw with this pipeline: its pieces are built in the background
+        if (g_osplit_npp >= OSPLIT_PP) OSPLIT_NO(19);
+        j = g_osplit_npp++; g_osplit_pp[j].k = k; strlcpy(g_osplit_pp[j].vs, vs->key, sizeof g_osplit_pp[j].vs); g_osplit_pp[j].done = 1;
+        MTLRenderPipelineDescriptor *d[8] = {nil};
+        for (int c = 0; c < 8; c++) if (outs >> c & 1) { pso_key kc = k; kc.fsfn = (__bridge void *)g_osplit_sh[i].fn[c]; kc.chmask = k.chmask & (0xfu << (4 * c)); d[c] = pso_desc(&kc, vs, fs, g_osplit_sh[i].fn[c], 0); }
+        NSArray *ds = @[d[0] ?: NSNull.null, d[1] ?: NSNull.null, d[2] ?: NSNull.null, d[3] ?: NSNull.null, d[4] ?: NSNull.null, d[5] ?: NSNull.null, d[6] ?: NSNull.null, d[7] ?: NSNull.null];
+        NSString *key = @(fs->key); int jj = j;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            id<MTLRenderPipelineState> ps[8] = {nil}; int ok = 1; NSError *e = nil; double t0 = CFAbsoluteTimeGetCurrent();
+            for (int c = 0; c < 8 && ok; c++) if (ds[c] != NSNull.null && !(ps[c] = pso_build(ds[c], &e))) ok = 0;
+            os_unfair_lock_lock(&g_osplit_lock);
+            for (int c = 0; c < 8; c++) g_osplit_pp[jj].ps[c] = ps[c];
+            g_osplit_pp[jj].done = ok ? 2 : 3;
+            os_unfair_lock_unlock(&g_osplit_lock);
+            if (!ok) MLOG("[RED] split outputs: a pipeline of %s did not build (its draws stay whole): %s", key.UTF8String, e ? e.localizedDescription.UTF8String : "no error");
+            else MLOG("split outputs: the %d pipelines of a draw of %s built in %.0f ms", __builtin_popcount(outs), key.UTF8String, (CFAbsoluteTimeGetCurrent() - t0) * 1000); });
+        return 0;
+    }
+#undef OSPLIT_NO
+    last = j;
+    os_unfair_lock_lock(&g_osplit_lock); int done = g_osplit_pp[j].done; os_unfair_lock_unlock(&g_osplit_lock);
+    if (done != 2) return 0;
+    g_osplit_n = 0; for (int c = 0; c < 8; c++) if (outs >> c & 1) g_osplit_ps[g_osplit_n++] = g_osplit_pp[j].ps[c];
+    g_osplit_whole = whole;
+    return 1;
+}
 static void draw_(const p_draw *dw, const p_draw_idx *di);
-static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); if (dw && dw->prim == DM_PRIM_MESH_TASKS) mesh_tasks_draw(dw); else draw_(dw, di); cp_end(5, start); }
+static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); if (dw && dw->prim == DM_PRIM_MESH_TASKS) mesh_tasks_draw(dw); else draw_(dw, di); g_osplit_n = 0; cp_end(5, start); }
 static void draw_(const p_draw *dw, const p_draw_idx *di) {
     g_draw_binst = (uint32_t)(dw ? dw->base_instance : di ? di->base_instance : 0);   // c0 + 0x644 of the stages that read the driver segment (encode_args)
     if (passdump()) { NvProg *p = g_geo_program ? g_geo_program : S.prog ? prog_get(S.prog) : nil;
@@ -11105,6 +11252,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         else enc_r_draw_indexed_indirect(en, mp, MTLIndexTypeUInt32, g_geo_indices, g_geo_index_bytes, g_geo_args);
         return;
     }
+    if (!((dw && dw->ind) || (di && di->ind)) && (dw ? dw->count : di->count)) osplit_prep(pr, cur_pull, ps);   // split_outputs: a direct draw may go as one draw per colour output
     // A draw with 0 primitives (the game does send count=0) draws no pixels, so skip encoding; Metal requires the count to be non-zero, otherwise the validation layer aborts on the spot (measured on the camp / wilderness / combat pages)
     if ((dw && dw->ind) || (di && di->ind)) {   // DrawArraysIndirect / DrawElementsIndirect: NVN's argument records {count, instances, first, base instance} and {count, instances, first index,
         // base vertex, base instance} have the layouts of MTLDrawPrimitivesIndirectArguments and MTLDrawIndexedPrimitivesIndirectArguments; quads, fans and 8-bit indices use the converted ones (ixc_run)

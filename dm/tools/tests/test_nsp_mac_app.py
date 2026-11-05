@@ -329,6 +329,22 @@ class PackReuse(unittest.TestCase):
         (self.tmp / 'split.tsv').write_bytes(b'new split'); self.assert_repacked()
         self.assertEqual(target.read_bytes(), b'new split')
 
+    def test_split_outputs_sources_go_beside_the_libraries(self):   # --msl-source: the MSL nvn_mtl.m osplit_load compiles at run time; no other .metal goes in
+        k = '4744589bb8f9f7dd'
+        (self.tmp / f'msl/{k}_b.metal').write_bytes(b'msl'); (self.tmp / 'msl/0123456789abcdef_b.metal').write_bytes(b'other')
+        self.args.msl_source = [k]; self.pack()
+        lib = Path(self.args.out) / 'Contents/Resources/msl/msl'
+        self.assertEqual((lib / f'{k}_b.metal').read_bytes(), b'msl')
+        self.assertFalse((lib / '0123456789abcdef_b.metal').exists())
+        (self.tmp / f'msl/{k}_b.metal').write_bytes(b'new msl'); self.assert_repacked()
+        self.assertEqual((lib / f'{k}_b.metal').read_bytes(), b'new msl')
+        for keys in (['fedcba9876543210'], [k + '_b'], [k.upper()]):   # no such source; not a bare 16-digit key
+            with self.subTest(keys=keys):
+                self.args.msl_source = keys
+                with self.assertRaises(SystemExit): self.pack()
+                self.assertFalse(self.key.exists())
+                self.assertFalse(Path(self.args.out + '.partial').exists())
+
     def test_missing_selected_inputs_fail_before_reuse_or_partial_creation(self):
         self.pack()
         for name in ('dmhost', 'patched/main.fixups.tsv', 'msl/k.metallib', 'romfs/marker', 'pso/prebuilt.tsv', 'env.txt', 'icon.jpg',
@@ -733,7 +749,8 @@ class Script(unittest.TestCase):
             (out / 'Contents/MacOS').mkdir(parents=True); (out / 'Contents/MacOS/dmhost').write_bytes(b'x')
             on_line('step: launcher and host (clones of the game files)')
             on_line(f'app: {out}')
-        g = types.SimpleNamespace(table=lambda n: tmp / 'profile' / n, get={'app_category': 'public.app-category.games', 'romfs_marker': 'a/b'}.get)
+        g = types.SimpleNamespace(table=lambda n: tmp / 'profile' / n, get={'app_category': 'public.app-category.games', 'romfs_marker': 'a/b',
+                                                                      **({'split_outputs': kw['split']} if kw.get('split') else {})}.get)
         g.id = '01008CF01BAAC000'
         self.prog = mock.Mock()
         with mock.patch.object(nsp, 'run', fake_run), mock.patch.object(nsp, 'PROG', self.prog), mock.patch.object(nsp, 'chain_of', lambda repo: '0123456789ab'), \
@@ -742,7 +759,7 @@ class Script(unittest.TestCase):
                         kw.get('aoc'), gfx, 'en-US', g, 'Game', '1.0.0', 'org.nxnative.01008cf01baac000', None, kw.get('sign', ''), {}, tmp, gpus=kw.get('gpus', ''))
         self.pso_cmd = next((c for c in ran if c[1].endswith('pso_offline.py')), None)   # before the packer
         self.settings_cmd = next(c for c in ran if c[1].endswith('dm/games/settings.py'))
-        c = ran[-1]; return {c[i]: c[i + 1] for i in range(3, len(c) - 1) if c[i].startswith('--')}, tmp
+        c = self.pack_full = ran[-1]; return {c[i]: c[i + 1] for i in range(3, len(c) - 1) if c[i].startswith('--')}, tmp
 
     def test_pack_command(self):
         o, tmp = self.pack_cmd('nvn')
@@ -753,11 +770,14 @@ class Script(unittest.TestCase):
         o, tmp = self.pack_cmd('nvn')
         self.assertEqual((o['--msl'], o['--romfs'], o['--tables'], o['--title-id'], o['--sign'], o['--marker']),
                          (str(tmp / 'shader/cache/b-0123456789ab'), str(tmp / 'ex/RomFS'), str(tmp / 'profile'), TID, '-', 'a/b'))
-        self.assertNotIn('--aoc', o); self.assertNotIn('--icon', o)
+        self.assertNotIn('--aoc', o); self.assertNotIn('--icon', o); self.assertNotIn('--msl-source', o)
         self.assertNotIn('--pso', o)   # no shader pairs: no pipeline archive
         self.assertEqual(o['--settings'], str(tmp / 'app/launcher.json'))   # the launcher settings the Mac front end reads, without the iPhone's own switches
         self.assertEqual(self.settings_cmd[2:], ['01008CF01BAAC000', str(tmp / 'patched'), str(tmp / 'ex/control.nacp'), str(tmp / 'app/launcher.json')])
         self.assertEqual((self.settings_env['SETTINGS_PLATFORM'], self.settings_env['GFXAPI'], self.settings_env['DM_LANG']), ('mac', 'nvn', 'en-US'))
+        self.pack_cmd('nvn', split='4744589bb8f9f7dd 0123456789abcdef')   # split_outputs: each shader's MSL goes in for the split to compile
+        c = self.pack_full; self.assertEqual([c[i + 1] for i in range(len(c) - 1) if c[i] == '--msl-source'], ['4744589bb8f9f7dd', '0123456789abcdef'])
+        self.pack_cmd('vulkan', split='4744589bb8f9f7dd'); self.assertNotIn('--msl-source', self.pack_full)   # the split is the NVN layer's
         o, tmp = self.pack_cmd('vulkan', aoc=Path('/x/aoc'), sign='Developer ID Application: X (T)')
         self.assertEqual((o['--msl'], o['--aoc'], o['--sign']), (str(tmp / 'shader/vk'), '/x/aoc', 'Developer ID Application: X (T)'))
 

@@ -1,5 +1,6 @@
 # dm/games/game.py's profile-key validation, on a synthetic profile: pso_gpu (the GPU architectures the app's offline pipeline archive is made for, beside pso_mtl4) takes, none and no others,
-# and a profile without the key generates its header unchanged; the game's upscaler shaders (the launcher's Game's upscaler) are the compute shaders its shader map found in agl_ndsr.pck
+# and a profile without the key generates its header unchanged; the game's upscaler shaders (the launcher's Game's upscaler) are the compute shaders its shader map found in agl_ndsr.pck;
+# split_outputs takes up to 8 bare 16-digit fragment shader keys
 from pathlib import Path
 import os
 import subprocess
@@ -38,6 +39,24 @@ class PsoGPU(unittest.TestCase):
             rc, out = header(rows)
             self.assertNotEqual(rc, 0, rows)
             self.assertIn(': pso_gpu takes 1-4 whitespace-separated GPU architectures', out, rows)
+
+
+class SplitOutputs(unittest.TestCase):
+    def test_keys(self):
+        for rows, want in (('', '""'), ('split_outputs\t4744589bb8f9f7dd\n', '"4744589bb8f9f7dd"'),
+                           ('split_outputs\t4744589bb8f9f7dd 0123456789abcdef\n', '"4744589bb8f9f7dd,0123456789abcdef"')):
+            with tempfile.TemporaryDirectory() as d:
+                Path(d, ID).mkdir()
+                (Path(d, ID) / 'game.tsv').write_text(TSV + rows)
+                subprocess.run([sys.executable, str(GAME), 'header', ID, str(Path(d, ID) / 'game.h')], env={**os.environ, 'DM_GAMES_DIR': d}, check=True, capture_output=True)
+                self.assertIn(f'#define DM_GAME_SPLIT_OUTPUTS {want}', (Path(d, ID) / 'game.h').read_text().splitlines(), rows)
+
+    def test_rejected(self):
+        for rows in ('split_outputs\t4744589bb8f9f7dd_b\n', 'split_outputs\t4744589BB8F9F7DD\n', 'split_outputs\t4744589bb8f9f7\n',   # the bare 16 digits, lower case
+                     'split_outputs\t4744589bb8f9f7dd,0123456789abcdef\n', 'split_outputs\t' + ' '.join(['0123456789abcdef'] * 9) + '\n'):
+            rc, out = header(rows)
+            self.assertNotEqual(rc, 0, rows)
+            self.assertIn(': split_outputs takes 1-8 whitespace-separated 16-digit fragment shader keys', out, rows)
 
 
 

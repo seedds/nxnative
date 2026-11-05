@@ -19,7 +19,7 @@ class NroPack(unittest.TestCase):
         self.repo = self.tmp / 'repo'; self.exe = self.tmp / 'game/ExeFS'; self.rom = self.exe.parent / 'RomFS'
         self.exe.mkdir(parents=True); self.rom.mkdir(); (self.exe / 'main').write_bytes(b'NSO0' + bytes(0x50))
         (self.rom / 'game.nrr').write_bytes(b'registered')
-        for f in ('dm/tools/nro_collect.py', 'dm/tools/nso_syms.py', 'dm/tools/patch_nso.py', 'dm/tools/nso_code.py', 'dm/tools/nso_asm.py', 'dm/tools/nso_match.py', 'dm/tools/sdk_patches.py', 'dm/gfx/tools/smash_arc.py'):
+        for f in ('dm/tools/nro_collect.py', 'dm/tools/nso_syms.py', 'dm/tools/patch_nso.py', 'dm/tools/nso_code.py', 'dm/tools/nso_shift.py', 'dm/tools/nso_asm.py', 'dm/tools/nso_match.py', 'dm/tools/sdk_patches.py', 'dm/gfx/tools/smash_arc.py'):
             p = self.repo / f; p.parent.mkdir(parents=True, exist_ok=True); p.write_text('v1')
         self.out = self.tmp / 'patched_test'; self.logs = self.tmp / 'logs'; self.logs.mkdir()
         self.g = types.SimpleNamespace(words=lambda k: ['main'], modules_in=lambda folder: ['main'])

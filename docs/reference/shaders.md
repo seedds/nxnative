@@ -1830,3 +1830,11 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `t_host_msl` loads every library, with a swizzled `newLibraryWithSource:` that counts 0 calls, and finds all 24 clear functions. `t_builtin`, `t_geometry` and `t_deswz_gpu` use the built libraries.
 - **Build inputs:** Mac libraries use `MACOS_MIN` from `dm/mac/min_os.mk`, matching the host's deployment target; otherwise a newer SDK emits libraries older supported Macs cannot load and the host falls back to runtime compilation. Every build rechecks the compiler, SDK, deployment target and source contents, reusing the header only when all match. Installing the Metal toolchain after a source-only build therefore regenerates the libraries without a clean build.
 - **Build callers:** the NSP packer and regression harness generate the Mac header before checking their cached host executables, and include it in the host fingerprint. The standalone iOS compile check generates the iPhone header before its dry run, as the app build does. A dry run alone does not generate either header.
+
+### NDVE network shaders need bounded archive parsing
+
+- **Symptom:** video-enhancement shaders are missing from a shader split, or a byte-pattern scan pairs data with an unrelated control header.
+- **Cause:** NDVE v5 wraps a separate NDSR pack and network archive. Magic bytes alone do not describe member boundaries or weight/control/code ownership.
+- **Fix:** validate the outer version, parameter-table extent and declared member lengths, the trailing `1ALR` index, non-overlapping archive members and each network's weight and shader ranges. Require a valid compute control header and matching code length. Discover the format in loose and compressed files. NDSR entry-walk improvements remain separate (#1388).
+- **Found on:** Ocarina of Time video-enhancement investigation (#1299); this supplies the structured archive reader, without adding the game profile.
+- **Check:** `test_ndve_bounded.py` uses synthetic archives to check discovery, key preservation, loose/compressed scanning and rejection of truncated, overlapping or inconsistent records.

@@ -48,6 +48,89 @@ int main(int argc, char **argv) {
 '''
 
 
+class HostLibrary(unittest.TestCase):
+    """The packer checks defined exports without executing either artifact."""
+    def symbols(self, title=TID, abi=1, sha='a' * 64):
+        return '\n'.join('0000000000001000 T ' + s for s in (
+            f'_dm_mac_host_abi_{abi}_{title}', '_dm_mac_host_identity', '_dm_mac_host_entry',
+            '_dm_mac_players_view', '_dm_mac_players_finish', '_dm_mac_host_executable_sha256_' + sha))
+
+    def validate(self, host=None, library=None, title=TID):
+        with mock.patch.object(pack_app, 'run', side_effect=[host if host is not None else self.symbols(), library if library is not None else self.symbols()]) as run, \
+             mock.patch.object(pack_app, 'digest', return_value='a' * 64), mock.patch.object(pack_app.ctypes, 'CDLL', side_effect=AssertionError('must not load a host')):
+            pack_app.validate_host_library('/host', '/library', title)
+            self.assertEqual(run.call_args_list, [mock.call(['nm', '-arch', 'arm64', '-gU', '/host']), mock.call(['nm', '-arch', 'arm64', '-gU', '/library'])])
+
+    def test_matching_exports_and_lowercase_input_title(self):
+        self.validate(title=TID.lower())
+
+    def test_mismatched_profile_or_abi_on_either_artifact(self):
+        for symbols in (self.symbols(title='0100000000000000'), self.symbols(abi=2), '',
+                        self.symbols() + '\n0000000000001000 D _dm_mac_host_abi_1_0100000000000000'):
+            for artifact in ('host', 'library'):
+                with self.subTest(artifact=artifact, symbols=symbols), self.assertRaisesRegex(SystemExit, 'ABI/profile mismatch'):
+                    self.validate(**{artifact: symbols})
+
+    def test_undefined_exports_do_not_count(self):
+        for name in ('_dm_mac_host_abi_1_' + TID, '_dm_mac_host_entry'):
+            symbols = self.symbols().replace('0000000000001000 T ' + name, '                 U ' + name)
+            with self.subTest(name=name), self.assertRaises(SystemExit): self.validate(library=symbols)
+
+    def test_all_entry_points_required(self):
+        for name in ('_dm_mac_host_identity', '_dm_mac_host_entry', '_dm_mac_players_view', '_dm_mac_players_finish'):
+            with self.subTest(name=name), self.assertRaisesRegex(SystemExit, 'missing exports'):
+                self.validate(library=self.symbols().replace('0000000000001000 T ' + name, ''))
+
+    def test_exact_executable_hash_required(self):
+        for symbols in (self.symbols(sha='b' * 64), self.symbols().replace('_dm_mac_host_executable_sha256_', '_other_'),
+                        self.symbols() + '\n0000000000001000 D _dm_mac_host_executable_sha256_' + 'b' * 64):
+            with self.subTest(symbols=symbols), self.assertRaisesRegex(SystemExit, 'executable mismatch'):
+                self.validate(library=symbols)
+
+    def test_invalid_title(self):
+        with mock.patch.object(pack_app, 'run') as run, self.assertRaisesRegex(SystemExit, 'invalid host library title ID'):
+            pack_app.validate_host_library('/host', '/library', 'not-a-title')
+        run.assert_not_called()
+
+    def test_changed_signing_identity_cannot_silently_break_the_pair(self):
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            app = Path(tmp) / 'Pair.app'; mac = app / 'Contents/MacOS'; mac.mkdir(parents=True)
+            host = mac / 'dmhost'; host.write_bytes(b'original signed host')
+            (mac / 'dmhost.dylib').write_bytes(b'paired library')
+            def resign(cmd):
+                if '--sign' in cmd and cmd[-1] == host: host.write_bytes(b're-signed host')
+            with mock.patch.object(pack_app, 'run', side_effect=resign), self.assertRaisesRegex(SystemExit, 'signing changed the paired host'):
+                pack_app.sign(app, 'another signing identity', 'codesign')
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'needs Mach-O clang and nm')
+    def test_real_macho_without_loading_constructor(self):
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            t = Path(tmp); host, library = t / 'dmhost', t / 'arbitrary-name.dylib'
+            marker = 'const char dm_mac_host_abi_1_' + TID + ' = 0;\n'
+            (t / 'host.c').write_text(marker + 'int main(void) { return 0; }\n')
+            subprocess.run(['xcrun', 'clang', '-arch', 'arm64', '-o', host, t / 'host.c'], check=True, capture_output=True)
+            (t / 'library.c').write_text(marker + 'const char dm_mac_host_executable_sha256_' + pack_app.digest(host) + ' = 0;\n'
+                '#include <stdlib.h>\n__attribute__((constructor)) static void never_load(void) { abort(); }\n'
+                'const char *dm_mac_host_identity(void) { return "1:' + TID + '"; }\n'
+                'int dm_mac_host_entry(int argc, char **argv) { return argc; }\n'
+                'void *dm_mac_players_view(void *view) { return view; }\nvoid dm_mac_players_finish(int result) {}\n')
+            subprocess.run(['xcrun', 'clang', '-arch', 'arm64', '-dynamiclib', '-o', library, t / 'library.c'], check=True, capture_output=True)
+            pack_app.validate_host_library(host, library, TID)
+            app = t / 'Pair.app'; mac = app / 'Contents/MacOS'; mac.mkdir(parents=True)
+            host = host.rename(mac / 'dmhost'); library = library.rename(mac / 'dmhost.dylib')
+            shutil.copyfile(host, mac / 'nxnative')
+            (app / 'Contents/Info.plist').write_bytes(plistlib.dumps({
+                'CFBundleExecutable': 'nxnative', 'CFBundleIdentifier': 'org.nxnative.pair-test', 'CFBundlePackageType': 'APPL'}))
+            before = pack_app.digest(host)
+            pack_app.sign(app, '-', shutil.which('codesign'))
+            self.assertEqual(pack_app.digest(host), before, 'signing must preserve the executable hash embedded in its library')
+            pack_app.validate_host_library(host, library, TID)
+            subprocess.run(['codesign', '--verify', '--deep', '--strict', app], check=True, capture_output=True)
+            (t / 'host.c').write_text(marker + 'int main(void) { return 1; }\n')
+            subprocess.run(['xcrun', 'clang', '-arch', 'arm64', '-o', host, t / 'host.c'], check=True, capture_output=True)
+            with self.assertRaisesRegex(SystemExit, 'executable mismatch'): pack_app.validate_host_library(host, library, TID)
+
+
 class Copy(unittest.TestCase):
     def test_argument_budget(self):
         # A small exec limit exercises long, multibyte paths and a large inherited environment without thousands of files.
@@ -118,7 +201,8 @@ class PackReuse(unittest.TestCase):
             'font/nintendo_ext.ttf': b'font', 'aoc/1/data': b'dlc', 'pso/gpu.mtl4a': b'archive',
             'pso/prebuilt.tsv': b'prebuilt', 'pso/rest_pairs.tsv': b'rest', 'pso/archive.tsv': b'index',
             'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'source/launcher.c': b'launcher',
-            'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader',
+            'source/save_cleanup.c': b'cleanup', 'source/save_cleanup.h': b'cleanup api',
+            'host/romfs_image.h': b'validator', 'host/mac_host.h': b'host api', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader',
             'source/Launcher.swift': b'window', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows',
         }
         for n in pack_app.TABLES: files['profile/' + n] = n.encode()
@@ -140,6 +224,7 @@ class PackReuse(unittest.TestCase):
             name = Path(cmd[0]).name
             if self.failed_tool == name and (name not in ('clang', 'swiftc') or '-o' in cmd): raise SystemExit('fixture ' + name + ' failed')
             if name == 'otool': return 'cmd LC_BUILD_VERSION\n minos 14.0\n'
+            if name == 'nm': return HostLibrary().symbols(sha=pack_app.digest(self.args.host))
             if name == 'xcrun':
                 if '--find' in cmd: return str(self.swiftc if 'swiftc' in cmd else self.clang) + '\n'
                 if '--show-sdk-path' in cmd: return str(self.sdk) + '\n'
@@ -176,6 +261,41 @@ class PackReuse(unittest.TestCase):
         self.assertTrue(any('--sign' in c for c in self.commands))
         self.assertTrue(self.key.is_file())
 
+    def test_optional_library_copy_sign_reuse_and_removal(self):
+        self.pack()
+        self.assertFalse(any(c[0] == 'nm' for c in self.commands))
+        target = Path(self.args.out) / 'Contents/MacOS/dmhost.dylib'
+        self.assertFalse(target.exists())
+        library = self.tmp / 'custom-library.dylib'; library.write_bytes(b'host library')
+        self.args.host_library = str(library)
+        self.assert_repacked()
+        self.assertEqual(target.read_bytes(), library.read_bytes())
+        self.assertEqual(sorted(p.name for p in target.parent.iterdir()), ['dmhost', 'dmhost.dylib', 'nxnative'])
+        signed = [Path(c[-1]).name for c in self.commands if '--sign' in c]
+        self.assertEqual(signed, ['dmhost.dylib', 'Game.app.partial'])
+        self.assertEqual([Path(c[-1]).name for c in self.commands if '--verify' in c], ['dmhost'])
+        self.assert_reused()
+        library.write_bytes(b'new host library'); self.assert_repacked(); self.assert_reused()
+        other = self.tmp / 'other-library.dylib'; shutil.copy2(library, other)
+        self.args.host_library = str(other); self.assert_repacked()
+        self.args.host_library = None; self.assert_repacked()
+        self.assertFalse(target.exists())
+
+    def test_library_validation_failure_keeps_old_app_and_drops_key(self):
+        self.pack()
+        before = pack_app.inventory(Path(self.args.out))
+        self.args.host_library = str(self.tmp / 'missing.dylib')
+        with self.assertRaisesRegex(SystemExit, 'no input file'): self.pack()
+        self.assertFalse(self.key.exists())
+        library = self.tmp / 'bad.dylib'; library.write_bytes(b'bad library'); self.args.host_library = str(library)
+        for output in ('', HostLibrary().symbols(sha='b' * 64)):
+            real_run = pack_app.run
+            def bad_exports(cmd, output=output, real_run=real_run): return output if cmd[0] == 'nm' else real_run(cmd)
+            with mock.patch.object(pack_app, 'run', bad_exports), self.assertRaises(SystemExit): self.pack()
+            self.assertFalse(self.key.exists())
+            self.assertEqual(pack_app.inventory(Path(self.args.out)), before)
+            self.assertFalse(Path(self.args.out + '.partial').exists())
+
     def test_retargeted_input_symlink_repacks(self):
         msl = self.tmp / 'msl'
         for name in ('left.metallib', 'right.metallib'): (msl / name).write_bytes(b'same library')
@@ -198,8 +318,9 @@ class PackReuse(unittest.TestCase):
         names = ['dmhost', 'patched/main.patched.bin', 'patched/main.fixups.tsv', 'patched/main.gates.tsv', 'patched/main.cuts.tsv',
                  'patched/main.obs.tsv', 'patched/nro.tsv', 'msl/k.metallib', 'msl/k.json', 'msl/inputs.tsv', 'font/nintendo_ext.ttf',
                  'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/archive.tsv', 'env.txt', 'icon.jpg', 'source/launcher.c',
+                 'source/save_cleanup.c', 'source/save_cleanup.h',
                  'source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift',   # the settings window's sources
-                 'host/save_sync.c', 'host/save_sync.h']   # the cloud-save code the launcher links (its send after the host exits)
+                 'host/mac_host.h', 'host/save_sync.c', 'host/save_sync.h']   # the host contract and cloud-save code the launcher links (its send after the host exits)
         names += ['profile/' + n for n in pack_app.TABLES]
         for name in names:
             with self.subTest(name=name):
@@ -258,7 +379,9 @@ class PackReuse(unittest.TestCase):
         self.assertEqual(s[s.index('-o') + 1], str(Path(self.args.out).resolve().with_name('Game.app.partial') / 'Contents/MacOS/nxnative'))
         self.assertIn(c[c.index('-o') + 1], s)   # launcher.c's object, with its main
         sync = next(c for c in self.commands if Path(c[0]).name == 'clang' and '-o' in c and c[-1].endswith('save_sync.c'))
-        self.assertIn(sync[sync.index('-o') + 1], s)   # save_sync.c's object: the launcher sends the save once the host has exited
+        self.assertIn(sync[sync.index('-o') + 1], s)   # shared post-death save sender
+        cleanup = next(c for c in self.commands if Path(c[0]).name == 'clang' and '-o' in c and c[-1].endswith('save_cleanup.c'))
+        self.assertIn(cleanup[cleanup.index('-o') + 1], s)   # native host's separate death watcher
         self.assertEqual([Path(x).name for x in s if x.endswith('.swift')], ['Launcher.swift', 'LauncherSettings.swift', 'LauncherRow.swift'])
 
     def test_selected_file_modes_and_file_additions_and_removals_invalidate(self):
@@ -737,15 +860,18 @@ class Script(unittest.TestCase):
         g.id = '01008CF01BAAC000'
         self.prog = mock.Mock()
         with mock.patch.object(nsp, 'run', fake_run), mock.patch.object(nsp, 'PROG', self.prog), mock.patch.object(nsp, 'chain_of', lambda repo: '0123456789ab'), \
-             mock.patch.object(nsp, 'mac_gpu_arch', lambda *a: 'applegpu_g14s'), mock.patch.object(nsp, 'say', self.said.append):
+             mock.patch.object(nsp, 'mac_gpu_arch', lambda *a: 'applegpu_g14s'), mock.patch.object(nsp, 'say', self.said.append), \
+             mock.patch.object(nsp, 'build_mac_host', return_value=tmp / 'dmhost.dylib') as build_host:
             nsp.mac_app(sys.executable, REPO, out, 0x01008CF01BAAC000, tmp, tmp / 'ex', tmp / 'patched', tmp / 'dmhost', tmp / 'font', tmp / 'shader/cache' if gfx == 'nvn' else tmp / 'shader',
                         kw.get('aoc'), gfx, 'en-US', g, 'Game', '1.0.0', 'org.nxnative.01008cf01baac000', None, kw.get('sign', ''), {}, tmp, gpus=kw.get('gpus', ''))
+        build_host.assert_called_once_with(REPO, tmp / 'dmhost', {}, tmp, g, library=True)
         self.pso_cmd = next((c for c in ran if c[1].endswith('pso_offline.py')), None)   # before the packer
         self.settings_cmd = next(c for c in ran if c[1].endswith('dm/games/settings.py'))
         c = ran[-1]; return {c[i]: c[i + 1] for i in range(3, len(c) - 1) if c[i].startswith('--')}, tmp
 
     def test_pack_command(self):
         o, tmp = self.pack_cmd('nvn')
+        self.assertEqual(o['--host-library'], str(tmp / 'dmhost.dylib'))
         self.assertNotIn('--pso-pairs', o)   # no split copy
         (tmp / 'shader').mkdir(); (tmp / 'shader/pso_pairs.tsv').write_text('v\tf\n')
         o, tmp2 = self.pack_cmd('nvn', work=tmp)
@@ -926,9 +1052,11 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
                 o = Path(cmd[cmd.index('--out') + 1]); o.mkdir(parents=True, exist_ok=True); (o / 'applegpu_g14s.mtl4a').write_bytes(b'a')
             if on_line: (self.tmp / 'G.app/Contents/MacOS').mkdir(parents=True, exist_ok=True); (self.tmp / 'G.app/Contents/MacOS/dmhost').write_bytes(b'x')
         (self.tmp / 'shader_pairs.tsv').write_text('v\tf\n')
-        with mock.patch.object(nsp, 'run', fake_run), mock.patch.object(nsp, 'mac_gpu_arch', lambda *a: 'applegpu_g14s'):
+        with mock.patch.object(nsp, 'run', fake_run), mock.patch.object(nsp, 'mac_gpu_arch', lambda *a: 'applegpu_g14s'), \
+             mock.patch.object(nsp, 'build_mac_host', return_value=self.tmp / 'dmhost.dylib') as build_host:
             nsp.mac_app(sys.executable, REPO, self.tmp / 'G.app', 0x01008CF01BAAC000, self.tmp, self.tmp / 'ex', self.tmp / 'patched', self.tmp / 'dmhost', self.tmp / 'font', self.sh / 'partial',
                         None, 'nvn', 'en-US', self.g, 'Game', '1.0.0', 'org.x', None, '', {}, self.tmp)
+        build_host.assert_called_once_with(REPO, self.tmp / 'dmhost', {}, self.tmp, self.g, library=True)
         lib = str(self.sh / f'partial/b-{self.CHAIN}')
         pso = next(c for c in ran if c[1].endswith('pso_offline.py')); pack = ran[-1]
         self.assertEqual(pso[pso.index('--msl') + 1], lib); self.assertEqual(pack[pack.index('--msl') + 1], lib)

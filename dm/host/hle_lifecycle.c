@@ -28,4 +28,15 @@ void dm_term_install(void) {
     src = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, SIGTERM, 0, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0));
     dispatch_source_set_event_handler(src, ^{ dm_host_shutdown("SIGTERM"); });
     dispatch_resume(src);
+#ifdef DM_MAC_HOST_LIBRARY
+    // The standalone launcher forwards these to its child. In-process launches own them directly.
+    static dispatch_source_t other[2];
+    const int signals[] = {SIGINT, SIGHUP};
+    for (int i = 0; i < 2; i++) {
+        signal(signals[i], SIG_IGN);
+        other[i] = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, signals[i], 0, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0));
+        dispatch_source_set_event_handler(other[i], ^{ dm_host_shutdown("launcher signal"); });
+        dispatch_resume(other[i]);
+    }
+#endif
 }

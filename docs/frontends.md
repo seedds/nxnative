@@ -13,6 +13,8 @@ A graphical app that packs games, keeps a library of them or starts them is a pr
 
 `scripts/build_ipa_from_nsp.py <NSP folder>` builds one game: an IPA by default, a Mac app with `--platform mac-app`, at the path `-o` names. Its options are in [The packing script in detail](development.md#the-packing-script-in-detail) and `--help`.
 
+For the optional same-process Mac host, build `make -C dm/host GAME=<title ID> dmhost.dylib` and pass `--host-library dm/host/dmhost.dylib` alongside `--host dm/host/dmhost` to `dm/mac/pack_app.py` (plus its usual game-resource arguments). The library is optional; it must match the host executable's SHA-256, profile and bridge ABI. The Mac-app packing script supplies this pair; omitting the library retains child-process startup.
+
 With `--progress json` it asks nothing and writes one JSON object per line on stdout. Every object has `ev` (the event) and `t` (Unix time, seconds):
 
 | `ev` | Fields | When |
@@ -51,7 +53,7 @@ A built app carries the settings its game supports, as the iPhone app's settings
 
 ## Starting a game
 
-**A Mac app** is started like any app, or by running its `Contents/MacOS/nxnative` with the chosen settings in its environment (`DM_FPS_TARGET=30`, …). The launcher there runs the host as a child, forwards SIGTERM, SIGINT and SIGHUP to it and exits with its exit code. A variable already in the environment wins; then come `~/Library/Application Support/nxnative/<title ID>/env.txt` and the bundle's `dm/env.txt`, one `KEY=VALUE` per line ([A Mac app](development.md#a-mac-app)). The save is in `save/` in that Application Support folder; the log is `~/Library/Logs/nxnative/<title ID>.log`, the previous run's `<title ID>.prev.log`. The title ID is `DMTitleID` in the app's `Info.plist`.
+**A Mac app** is started like any app, or by running its `Contents/MacOS/nxnative` with the chosen settings in its environment (`DM_FPS_TARGET=30`, …). Without a host library, the launcher runs the host as a child, forwards SIGTERM, SIGINT and SIGHUP to it and exits with its exit code. With the paired `dmhost.dylib` and a player setup confirmed by Play, it runs the host in the same process; otherwise it retains child-process startup. With cloud saves enabled, the same-process host starts a separate, UI-free cleanup helper before entering the game. It watches process death with kqueue and flushes committed saves only after all host threads have stopped, including after a fatal crash or forced process termination. Child-process startup keeps the launcher as the post-death sender. Neither mode can send during a system shutdown that also stops the sender; unsent committed saves remain local for the next start. A variable already in the environment wins; then come `~/Library/Application Support/nxnative/<title ID>/env.txt` and the bundle's `dm/env.txt`, one `KEY=VALUE` per line ([A Mac app](development.md#a-mac-app)). The save is in `save/` in that Application Support folder; the log is `~/Library/Logs/nxnative/<title ID>.log`, the previous run's `<title ID>.prev.log`. The title ID is `DMTitleID` in the app's `Info.plist`.
 
 A Mac app shows its own settings window before the game, drawn from its `launcher.json` and keeping its choices in the same store ([Saved choices](#saved-choices), [The Mac settings window](settings.md#the-mac-settings-window)). It shows a variable the launch environment or an `env.txt` sets as fixed. A front end that draws the settings itself starts the app with `DM_LAUNCHER=0` in its environment (or `--no-launcher` on its command line) to skip the window. The saved choices still apply, so a front end that writes them gets the same game as the window would.
 
@@ -60,6 +62,126 @@ A Mac game quits when the player holds a controller's Home button for 2 seconds 
 Settings a player chose in a front end and wants kept, also for a start from Finder or the Dock, go in the app's saved choices ([Saved choices](#saved-choices)), not in its environment.
 
 **An IPA** is installed by the player (sideloading); its own settings screen starts the game. Lines in the app's `Documents/env.txt` win over that screen ([Settings in a file](settings.md#settings-in-a-file)). The save and `log.txt` are in the app's Documents folder.
+
+## Mac local-player setup (opt-in)
+
+Enable **Assign players** under **Controls** in the existing Mac SwiftUI launch window.
+A native AppKit `NSView` is embedded there before **Play**; no second modal or
+**Local Players…** menu is offered. It is off by default and requires the paired
+`dmhost.dylib` described above. Scope is tracked upstream in
+[issue #878](https://github.com/seedds/nxnative/issues/878). For example:
+
+```sh
+DM_PLAYER_SETUP=1 /path/to/Game.app/Contents/MacOS/nxnative
+```
+
+The embedded view and the guest use the same host process and retained controller
+objects; no device identities cross a process boundary. **Play** confirms the routes
+and starts the guest. Standalone hosts, apps without the library, headless runs and
+starts that bypass the launch window (including `DM_LAUNCHER=0` / `--no-launcher`)
+retain legacy automatic routing, even with `DM_PLAYER_SETUP=1`. When setup is not
+confirmed, `DM_PAD_MERGE` and `DM_KBD_PLAYER` retain their existing behavior.
+
+- Only assigned connected sources appear in the overview. **Add input device** offers
+  connected unassigned sources, including duplicate models and additional Joy-Con pairs. Press a controller button
+  to highlight its named row (including Left Joy-Con / Right Joy-Con when separate).
+  Keyboard presses highlight the keyboard row too. Numbers distinguish identical models
+  within this session; they are never saved identities.
+  Extended profiles and standard profiles exposing an analog Direction Pad, four face
+  buttons and both shoulders are supported. Other profiles appear as unavailable and
+  cannot supply input or count as players.
+- The player count and live source summaries come first: **1 player**, followed by
+  **Player 1: Pro Controller #1 + Keyboard**, means both inputs control the same player.
+  Every active row has only its device name, a **Controls** player menu and **Remove**.
+  The compact panel fits the launcher's minimum width without horizontal scrolling;
+  each Joy-Con pair's Together / Separate selector sits beside its pair label.
+  The player menu lists only active player IDs and **New player**, which allocates the
+  lowest unused slot (up to the host's eight-player limit). There are no empty Player 2–8
+  placeholders. Removing a source updates the choices but never renumbers other assignments;
+  pending menu actions retain their actual player IDs, not mutable list positions.
+  A game can support fewer players (Mario supports four); this does not change host routing.
+  Add a source from the
+  chooser or remove it back to the chooser; active player rows and summaries follow the routes,
+  with no blank player summaries. Selecting an existing player explicitly combines inputs;
+  **New player** gives that source a separate player. For example, the default Pro Controller
+  and Keyboard both control Player 1 (one player). Choose Keyboard **New player** to get
+  Player 2 (two players); choose Keyboard **Player 1** to combine them again (one player).
+  Left and Right Joy-Con use the same menu: choose the same player for combined input,
+  or **New player** for each half to play separately.
+  Internally each player allows at most one primary source; target selection derives
+  that role automatically, preserving an existing primary source on re-selection.
+  Direct low-level conflicting assignments are still rejected without changing routes.
+  Combined inputs merge buttons and use the more-deflected stick. The game's
+  supported npad IDs still determine which players it can actually use; the host's
+  existing always-present player-1/scripted-input compatibility remains unchanged.
+- A logical **Nintendo Switch Joy-Con (L/R)** source offers **Together / Separate**
+  for every connected pair, not just the first pair. Separate shows named **Left Joy-Con**
+  and **Right Joy-Con** rows, each with a **Controls** target menu and **Remove**.
+  This is app-local **split INPUT**, not physical unpairing. Hold L rotated counterclockwise
+  and R clockwise. Each becomes that player's left stick: L maps `(x, y)` to `(-y, x)`,
+  R to `(y, -x)`. L's original D-pad down/left/right/up becomes A/B/X/Y; R's original
+  Nintendo X/A/Y/B becomes A/B/X/Y.
+  Since SL/SR may be unavailable, each side's exposed shoulder/trigger becomes L/R;
+  minus/plus becomes Plus, and stick click
+  becomes left-stick click. Only exposed controls are available: no invented SL/SR,
+  independent motion, or rumble for split sources. Whole sources retain normal controls;
+  motion/rumble is assigned only when a player has one unambiguous whole controller.
+- Connect/disconnect updates the embedded view live. Before **Play**, new supported
+  devices never take another primary source's slot. Selected routes stay fixed until the
+  user changes them; disconnecting other devices never renumbers them. During play a newly connected or reconnected
+  device starts disabled; there is no in-game reassignment UI in this scope. Disconnect, reassignment,
+  disabling and loss of window focus release routed inputs, including shared-player inputs.
+  Guest input stays suspended during setup, even if focus changes.
+  Connect, disconnect, assignment and confirmation log named routes with side, target
+  and own/shared/off state; confirmation also logs the final per-player summaries.
+  There is no per-frame route logging.
+
+**Persistence and limits.** The router keeps strong controller references in this host
+process. **Remember player setup** saves model preferences, not physical-device identities:
+GameController has no documented stable device UUID, and `playerIndex` is not an identity.
+`players.controllers.v1` in the host app's NSUserDefaults contains each supported gamepad's
+vendor name, product category, player/role and optional split/right-side player/role.
+A route restores automatically only when both descriptions are nonempty and exactly one
+saved profile and one connected source match. Identical or incomplete models stay disabled:
+choose **Identify controller to restore** on the desired saved row, then press a button on
+that controller. Stick motion and releases do not confirm. Labels distinguish main and
+combined inputs. A second matching model arriving during setup invalidates an automatic
+match; that route then requires confirmation, even if the second device disconnects.
+Explicitly confirmed/manual routes are not reassigned by later arrivals.
+
+Missing/unconfirmed saved profiles are retained. **Forget** explicitly removes a pending
+profile from the preview; it is not deleted from preferences until Play. The keyboard keeps
+its numeric `players.keyboard.v1` (`-1` Not used, `0` Player 1 through `7` Player 8) and
+`players.keyboard.mode.v1` (`0` own, `1` shared) keys; legacy keyboard-only choices keep
+Remember checked, and slot-only choices retain shared semantics. Malformed values are
+ignored. Only **Play** commits checked Remember choices; Play with Remember unchecked
+clears these three preference keys. Quit, closing the window or turning setup off never
+saves preview edits or Forget actions. `DM_SAVED_CHOICES=0` skips loading these preferences
+and disables saving for that run. Preferences are per app and read only by the opt-in
+embedded setup, not by legacy routes or `--no-launcher` front ends. A shared
+external `--no-launcher` player-assignment interface is **not implemented**; these
+per-app preferences do not provide cross-game controller ordering.
+
+The opt-in picker currently lists GameController sources only: raw HID-only gamepads
+cannot be assigned there and are not read during configured play. Disable player setup
+to use the upstream raw HID fallback with automatic player slots. The picker never
+fabricates a GameController identity for a raw HID device.
+
+macOS may expose Joy-Cons individually or as an OS-combined L/R controller. Individual
+Joy-Cons can expose the standard `GCGamepad` shape instead of `GCExtendedGamepad`.
+The picker reads that shape through the supported `GCPhysicalInputProfile` dictionaries
+and native element callbacks: its analog Direction Pad is movement, its standard face-button
+positions map to Switch A/B/X/Y, shoulders to L/R and Menu to Plus. Apple's standard
+profile already normalizes the sideways layout, so it is not rotated a second time.
+Absent right-stick, trigger, motion and rumble capabilities are not invented. These
+individual sources can be selected independently or routed to the same player; the
+Together / Separate selector remains specific to an extended OS-combined pair.
+**Arbitrary physical pair regrouping is unsupported**: GameController documents no Joy-Con
+split/unpair API, and remote-controller coalescing Info.plist keys do not provide one.
+Pair or unpair devices in the operating system yourself; the panel does not change Bluetooth
+pairing or any device configuration. Interactive controller/gameplay validation remains
+pending. Routing tests are native and windowless with fake controller profiles; the
+SwiftUI/AppKit integration test allocates a window but never shows or activates it.
 
 ## Saved choices
 

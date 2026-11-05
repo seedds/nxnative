@@ -1,6 +1,12 @@
 // The launcher's storage (LauncherSettings.swift LauncherModel), run by test_launcher_storage.py on macOS: only choices that differ from the game's default are
 // stored, Reset to tested defaults followed by Play forgets the choices, an env file's values are kept. Arguments: the iOS and the Mac launcher.json of Breath of the Wild (settings.py, GFXAPI=nvn)
 import Foundation
+
+// The standalone test has no launcher.c or host dylib.
+@_cdecl("dm_launcher_players_view")
+func launcherPlayersViewStub(_ enabled: Int32) -> UnsafeMutableRawPointer? { nil }
+@_cdecl("dm_launcher_players_finish")
+func launcherPlayersFinishStub(_ play: Int32) {}
 @main struct Check {
     static func main() {
         var failed = 0

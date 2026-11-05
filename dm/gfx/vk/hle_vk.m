@@ -1280,7 +1280,8 @@ static void begin_rp(rs_t *s, const c_brp *c) {
         }
     }
     if (!rp->ncol && rp->depth < 0) { d.renderTargetWidth = fb->w; d.renderTargetHeight = fb->h; d.defaultRasterSampleCount = 1; }
-    if (s->sq && s->sq->vis) d.visibilityResultBuffer = s->sq->vis;
+    // Replay always has a submission context; only its visibility buffer is optional (no occlusion queries).
+    if (s->sq->vis) d.visibilityResultBuffer = s->sq->vis;
     s->rpd = d; s->re = [s->cb renderCommandEncoderWithDescriptor:d];
     s->applied = NULL; s->rt_w = w; s->rt_h = h;
     // Dynamic viewport and scissor persist across render passes within a command buffer, as in Vulkan; the render target's size stands in only until the game sets them.
@@ -1743,7 +1744,7 @@ VKB(vkQueuePresentKHR, VkResult, VkQueue q, const VkPresentInfoKHR *pi) {
 static void *vk_lookup(const char *name) {
     static const hle_ent *sec; static unsigned long sz;
     if (!name || strncmp(name, "vk", 2)) return NULL;
-    if (!sec) sec = (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swhle", &sz);
+    if (!sec) sec = (const hle_ent *)getsectiondata(DM_HOST_IMAGE_HEADER, "__DATA", "swhle", &sz);
     void *fn = NULL; size_t n = strlen(name);
     for (int pass = 0; pass < 2 && !fn; pass++) {
         size_t len = pass ? n - 3 : n;

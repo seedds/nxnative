@@ -1465,10 +1465,11 @@ def decoder_host_key(host):
     return None
 
 
-def build_mac_host(repo, out, env, logs, g):
+def build_mac_host(repo, out, env, logs, g, library=False):
     """The Mac host for the profile, built into out: dm/host's own compile line (make -n) with the output moved, since make takes no target path with spaces and dm/host/dmhost may be another build's.
     Reused when the compile line and its inputs (the source files of HOST_DIRS, the chain header dm/gfx/nvn/dmsh_chain.h among them, the profile header make generates, libvpx, dav1d and the third-party headers, the compiler
-    and the macOS SDK) are as at the last build into out. The host runs the game's own arm64 code natively, so an Intel Mac stops here (GitHub issue #54)"""
+    and the macOS SDK) are as at the last build into out. With library=True (mac-app only), also build the sibling dmhost.dylib from that compile line, paired with the actual executable's SHA256.
+    The host runs the game's own arm64 code natively, so an Intel Mac stops here (GitHub issue #54)"""
     if not apple_silicon(): raise BuildError('this step boots the game in the Mac host, which runs the game\'s own arm64 code natively: it needs a Mac with Apple silicon, and this Mac has an Intel processor')
     host = repo / 'dm/host'
     run(['make', '-s', f'GAME={g.id}', f'gen/{g.id}/game_profile.h', 'gen/vpx/libvpx.a', 'gen/dav1d/libdav1d.a', 'host_msl'], logs / 'mac_host_make.log', env=env, cwd=host)
@@ -1486,14 +1487,24 @@ def build_mac_host(repo, out, env, logs, g):
     # Retain every other host build input, including any other header content. Bind the identity to the built binary so a replaced/custom host cannot inherit it.
     chain_text = re.sub(r'(?m)^#define DMSH_CHAIN "[^"]*"$', '#define DMSH_CHAIN "<chain>"', chain.read_text()) if chain.is_file() else None
     decoder = fingerprint('oodle-host-v1', common, ('files', [p for p in srcs if p != chain]), chain_text)
-    if out.is_file() and reused(kf, key) is not None and decoder_host_key(out) == decoder: return out
-    rmtree(kf); out.parent.mkdir(parents=True, exist_ok=True)
-    run(cmd, logs / 'mac_host_build.log', env=env, cwd=host)
-    record = out.with_name(out.name + '.decoder.json')
-    part = record.with_suffix('.json.partial')
-    part.write_text(json.dumps({'format': 1, 'binary': fingerprint(('files', [out])), 'inputs': decoder}) + '\n')
-    os.replace(part, record)
-    kf.write_text(f'{key}\n')
+    if not (out.is_file() and reused(kf, key) is not None and decoder_host_key(out) == decoder):
+        rmtree(kf); out.parent.mkdir(parents=True, exist_ok=True)
+        run(cmd, logs / 'mac_host_build.log', env=env, cwd=host)
+        record = out.with_name(out.name + '.decoder.json')
+        part = record.with_suffix('.json.partial')
+        part.write_text(json.dumps({'format': 1, 'binary': fingerprint(('files', [out])), 'inputs': decoder}) + '\n')
+        os.replace(part, record)
+        kf.write_text(f'{key}\n')
+    if library:
+        dylib = out.with_name('dmhost.dylib'); lkf = dylib.with_name(dylib.name + '.key')
+        digest = hashlib.sha256(out.read_bytes()).hexdigest()
+        lcmd = cmd.copy(); lcmd[lcmd.index('-o') + 1] = dylib
+        lcmd += ['-dynamiclib', '-DDM_MAC_HOST_LIBRARY', f'-DDM_MAC_EXECUTABLE_SHA_SYMBOL=dm_mac_host_executable_sha256_{digest}']
+        lkey = fingerprint(key, lcmd)
+        if not (dylib.is_file() and reused(lkf, lkey) is not None):
+            rmtree(lkf)
+            run(lcmd, logs / 'mac_host_library_build.log', env=env, cwd=host)
+            lkf.write_text(f'{lkey}\n')
     return out
 
 
@@ -2671,11 +2682,12 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
     (other_programs), which go in beside the first's as one app. control: the control.nacp that lists the game's languages (languages_control), by default the packed version's"""
     lib = msl / (f'b-{chain_of(repo)}' if gfx == 'nvn' else 'vk' if gfx == 'vulkan' else 'gl')
     pso = mac_pso(py, repo, work, lib, g, gpus, env, logs) if gfx == 'nvn' and g.table('shader_pairs.tsv').is_file() else None   # a stage of its own, before the app's
-    PROG.stage('Mac app', step='starting')
+    PROG.stage('Mac app', step='building the host library')
+    build_mac_host(repo, host, env, logs, g, library=True)
     # The launcher settings the IPA carries (dm/games/settings.py), without the iPhone's own switches: the app's settings window and Mac front ends show them (docs/frontends.md)
     settings = work / 'app/launcher.json'; settings.parent.mkdir(parents=True, exist_ok=True)
     run([py, repo / 'dm/games/settings.py', g.id, patched, control or game / 'control.nacp', settings], logs / 'mac_settings.log', env=dict(env, GFXAPI=gfx, SETTINGS_PLATFORM='mac', DM_LANG=lang))
-    cmd = [py, repo / 'dm/mac/pack_app.py', out, '--host', host, '--patched', patched, '--romfs', rfs.source(game), '--msl', lib, '--tables', g.table('shader_map.tsv').parent,
+    cmd = [py, repo / 'dm/mac/pack_app.py', out, '--host', host, '--host-library', host.with_name('dmhost.dylib'), '--patched', patched, '--romfs', rfs.source(game), '--msl', lib, '--tables', g.table('shader_map.tsv').parent,
            '--font', font, '--title-id', f'{app:016X}', '--name', name, '--bundle-id', bundle_id, '--lang', lang, '--sign', sign or '-']
     split_pairs = work / 'shader/pso_pairs.tsv'   # the split's copy of pso_pairs.tsv, for a profile without the table (as mac_run's DM_PSO_PAIRS)
     for opt, v in (('--version', version), ('--category', g.get('app_category')), ('--marker', g.get('romfs_marker')), ('--aoc', aoc), ('--icon', icon),

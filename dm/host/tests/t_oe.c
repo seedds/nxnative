@@ -11,7 +11,16 @@ uint64_t now_ns(void) { return 0; }
 void dm_audio_suspend(int on) { (void)on; }   // stubs for the bg item of DM_OE_SCRIPT (hle_audio.c / hle_os.c / hle_nvn.c)
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
 void dm_gfx_suspend(int on) { (void)on; }
-void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg) { (void)why; (void)then; (void)arg; }   // oe::ExecuteProgram, which this test does not call
+static int exec_test;
+static const char *exec_expected, *exec_cwd;
+void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg) {
+    (void)why;
+    if (exec_test) {
+        const prog_plan *p = arg;
+        int ok = exec_expected ? then == prog_exec && !strcmp(p->exe, exec_expected) && !strcmp(p->arg, "modules") && !strcmp(p->cwd, exec_cwd) : then == NULL;
+        _exit(ok ? 0 : 1); // inspect the plan, never exec a program or enter the shutdown pause
+    }
+}
 void dm_host_shutdown(const char *why) { (void)why; }
 // The notification event (hle_thread.c binds a kernel event): the unit test only tracks whether it is signalled
 static int ev_bound, ev_sig;
@@ -59,7 +68,58 @@ static int child_burst(int kind) {
     int st; if (waitpid(p, &st, 0) != p) return 0;
     return WIFEXITED(st) && WEXITSTATUS(st) == 0;
 }
+// Exercise ExecuteProgram itself with real stdio, including a pipe whose seek and tell fail.
+static void execute_fault_exit(int sig) { _exit(128 + sig); } // report old-code faults as test failures without crash reports
+static int execute_case(const char *path, int index, const char *expected, const char *cwd) {
+    fflush(stdout); pid_t p = fork(); if (p < 0) return 0;
+    if (!p) {
+        child_kind = 4; signal(SIGABRT, execute_fault_exit); signal(SIGSEGV, execute_fault_exit); signal(SIGBUS, execute_fault_exit); signal(SIGALRM, abort_exit); alarm(10);
+        exec_test = 1; exec_expected = expected; exec_cwd = cwd;
+        unsetenv("DM_EXEC_OUT"); setenv("DM_PROGRAMS", path, 1);
+        const unsigned char param[] = {0x12, 0x00, 0x34};
+        dm_oe_execute(index, param, sizeof param);
+        _exit(2);
+    }
+    int st; return waitpid(p, &st, 0) == p && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+static void execute_tests(void) {
+    char dir[] = "/private/tmp/t_oe_programs_XXXXXX";
+    if (!mkdtemp(dir)) { CHECK(0, "create program-table fixture"); return; }
+    char path[512], launch[512], rows[2048];
+    snprintf(path, sizeof path, "%s/programs.tsv", dir);
+    snprintf(launch, sizeof launch, "%s/launch_param.bin", dir);
+    snprintf(rows, sizeof rows, "0\texe=first\targ=modules\tcwd=%s\n1\texe=second\targ=modules\tcwd=%s\n", dir, dir);
+    FILE *fp = fopen(path, "wb");
+    int wrote = fp && fwrite(rows, 1, strlen(rows), fp) == strlen(rows);
+    if (fp) fclose(fp);
+    CHECK(wrote && execute_case(path, 1, "second", dir), "valid program table selects the requested program");
+    unsigned char param[4] = {0}; fp = fopen(launch, "rb");
+    size_t n = fp ? fread(param, 1, sizeof param, fp) : 0; if (fp) fclose(fp);
+    CHECK(n == 3 && param[0] == 0x12 && param[1] == 0 && param[2] == 0x34, "selected program receives the exact launch bytes");
+    CHECK(wrote && execute_case(path, 9, "first", dir), "missing program still falls back to program zero");
+    fp = fopen(launch, "rb"); n = fp ? fread(param, 1, sizeof param, fp) : 1; if (fp) fclose(fp);
+    CHECK(n == 0, "fallback receives no launch parameters");
+    fp = fopen(path, "wb"); if (fp) fclose(fp);
+    CHECK(execute_case(path, 1, NULL, dir), "empty table ends without a program handoff");
+    unlink(path);
+    CHECK(execute_case(path, 1, NULL, dir), "missing table ends without a program handoff");
+    int fd[2];
+    if (pipe(fd)) CHECK(0, "create non-seekable table fixture");
+    else {
+        int sent = write(fd[1], rows, strlen(rows)) == (ssize_t)strlen(rows); close(fd[1]);
+        snprintf(path, sizeof path, "/dev/fd/%d", fd[0]);
+        fp = fopen(path, "rb");
+        CHECK(fp && fseek(fp, 0, SEEK_END) != 0 && ftell(fp) == -1, "real pipe reports failed seek and negative tell");
+        if (fp) fclose(fp);
+        CHECK(sent && execute_case(path, 1, NULL, dir), "non-seekable table rejects failed sizing without an oversized read");
+        char unread[2048]; ssize_t left = read(fd[0], unread, sizeof unread);
+        CHECK(left == (ssize_t)strlen(rows) && !memcmp(unread, rows, strlen(rows)), "failed sizing leaves the stream unread");
+        close(fd[0]);
+    }
+    unlink(launch); rmdir(dir);
+}
 int main(void) {
+    execute_tests();
     unsetenv("DM_OE_SCRIPT"); reset();
     CHECK(h_oe_InactivityMode() == 0 && !h_oe_InactivityExtQ(), "inactivity extension starts disabled");
     h_oe_InactivityExtSafe(1);

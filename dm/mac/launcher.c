@@ -1,6 +1,7 @@
-// Mac app launcher (CFBundleExecutable of the .app that dm/mac/pack_app.py packs): sets the host's environment from the bundle, then runs the Mac host (Contents/MacOS/dmhost) as a child.
-// The host is not exec'ed: macOS privacy checks (TCC) attribute a child's file access to the app that launched it, while a launcher that hands its process over (a shell script exec'ing
-// dmhost) gets EPERM on every open on a removable volume, with no prompt, signed or not. The launcher forwards SIGTERM / SIGINT / SIGHUP to the host and returns its exit code.
+// Mac app launcher (CFBundleExecutable of the .app that dm/mac/pack_app.py packs): sets the host's environment from the bundle. Confirmed native player setup runs the paired
+// Contents/MacOS/dmhost.dylib in this process; otherwise Contents/MacOS/dmhost remains a child. Neither path execs over the launcher:
+// macOS privacy checks (TCC) attribute a child's file access to the app that launched it, while a launcher that hands its process over (a shell script exec'ing
+// dmhost) gets EPERM on every open on a removable volume, with no prompt, signed or not. In child mode the launcher forwards SIGTERM / SIGINT / SIGHUP and returns its exit code.
 // Bundle layout: Resources/romfs.img (the game's RomFS image; legacy romfs/ also supported), Resources/msl/<b-chain | vk | gl> (the Mac shader libraries), Resources/aoc/<index> (DLC), Resources/pso (the pipeline archive made
 // offline, handed to the host as DM_PSO_BUNDLE as the iOS app's main.m does), Resources/dm (the rewritten modules, the shader tables and pairs, font/, env.txt). Saves, the pipeline list and temporary files go to ~/Library/Application Support/nxnative/<title ID>/, the host's output to ~/Library/Logs/nxnative/<title ID>.log
 // (the previous run's kept as <title ID>.prev.log). Environment switches: one KEY=VALUE per line in <Application Support folder>/env.txt, then Resources/dm/env.txt (the first one wins; neither
@@ -13,6 +14,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <ctype.h>
 #include <errno.h>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
@@ -26,10 +28,43 @@
 #include <unistd.h>
 #include "romfs_image.h"
 #include "save_sync.h"
+#include "mac_host.h"
+#include "save_cleanup.h"
 
 extern char **environ;
 int dm_mac_launcher(void);   // Launcher.swift: 1 = Play (the settings are in the environment), 0 = the player quit, 2 = no window (apply the saved choices here)
 static pid_t g_child;
+static void *g_host_library;
+static int (*g_host_entry)(int, char **);
+static void *(*g_players_view)(void);
+static void (*g_players_finish)(int);
+static int g_players_prepared;
+
+// Explicit bridge: Swift never looks up arbitrary images or hands controller identities across processes.
+void *dm_launcher_players_view(int enabled) {
+    if (!enabled || !g_players_view) { g_players_prepared = 0; if (g_players_finish) g_players_finish(0); return NULL; }
+    void *view = g_players_view();
+    g_players_prepared = view != NULL;
+    return view;
+}
+void dm_launcher_players_finish(int play) { if (g_players_finish) g_players_finish(play); }
+
+static int load_host_library(const char *contents, const char *id) {
+    char path[PATH_MAX], expected[128];
+    snprintf(path, sizeof path, "%s/MacOS/dmhost.dylib", contents);
+    if (access(path, F_OK)) return 0; // old apps retain their child-process startup
+    g_host_library = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (!g_host_library) { fprintf(stderr, "[RED] launcher: cannot load bundled host: %s\n", dlerror()); return -1; }
+    const char *(*identity)(void) = dlsym(g_host_library, "dm_mac_host_identity");
+    g_host_entry = dlsym(g_host_library, "dm_mac_host_entry");
+    g_players_view = dlsym(g_host_library, "dm_mac_players_view");
+    g_players_finish = dlsym(g_host_library, "dm_mac_players_finish");
+    snprintf(expected, sizeof expected, "%s:%s", DM_MAC_HOST_ABI, id);
+    if (!identity || !g_host_entry || !g_players_view || !g_players_finish || strcmp(identity(), expected)) {
+        fprintf(stderr, "[RED] launcher: bundled host ABI/profile mismatch; pack this app again\n"); return -1;
+    }
+    return 1;
+}
 static char *g_file_keys, *g_launch_keys;   // the variables the env files set, and the settings the launch environment set (DM_ENV_FILE_KEYS, DM_ENV_LAUNCH_KEYS)
 
 static void add_key(char **list, const char *k) {   // a space-separated list of names
@@ -161,6 +196,8 @@ static void programs_table(const char *contents, const char *res, const char *su
 }
 
 int main(int argc, char **argv) {
+    int cleanup = dm_save_cleanup_main(argc, argv);
+    if (cleanup >= 0) return cleanup; // no bundle, UI, host library or log rotation in helper mode
     char self[PATH_MAX], exe[PATH_MAX]; uint32_t n = sizeof self;
     if (_NSGetExecutablePath(self, &n) || !realpath(self, exe)) return 1;
     char contents[PATH_MAX], res[PATH_MAX], host[PATH_MAX], dm[PATH_MAX], romfs[PATH_MAX], p[PATH_MAX];
@@ -198,12 +235,16 @@ int main(int argc, char **argv) {
     snprintf(p, sizeof p, "%s/env.txt", dm); env_file(p);
     setenv("DM_ENV_FILE_KEYS", g_file_keys ? g_file_keys : "", 1); setenv("DM_ENV_LAUNCH_KEYS", g_launch_keys ? g_launch_keys : "", 1);
     free(g_file_keys); free(g_launch_keys);
+    // Loading only registers host tables: no preload, guest, GPU or save access before Play.
+    int loaded = load_host_library(contents, id);
+    if (loaded < 0) return 1;
     int window = !(getenv("DM_LAUNCHER") && !strcmp(getenv("DM_LAUNCHER"), "0"));
     for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--no-launcher")) window = 0;
     if (!window) fprintf(stderr, "launcher: no settings window (DM_LAUNCHER=0 or --no-launcher)\n");
     int shown = window ? dm_mac_launcher() : 2;
-    if (!shown) return 0;   // Quit: no game
+    if (!shown) { dm_launcher_players_finish(0); return 0; } // Quit: no game
     if (shown == 2) saved_choices();
+    dm_launcher_players_finish(shown == 1); // bypasses keep legacy automatic routing
     cloud_saves_folder();
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_SAVE", save, 0); setenv("DM_TEMP", temp, 0);
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);
@@ -215,10 +256,20 @@ int main(int argc, char **argv) {
     setenv("DM_WINDOW", "1", 0); setenv("DM_AUDIO", "1", 0);
     programs_table(contents, res, sup);
     if (chdir(sup)) { fprintf(stderr, "[RED] launcher: cannot enter %s\n", sup); return 1; }
+    char *host_argv[] = {host, dm, NULL};
+    const char *setup = getenv("DM_PLAYER_SETUP");
+    if (loaded && shown == 1 && g_players_prepared && setup && !strcmp(setup, "1")) {
+        int err = dm_save_cleanup_start(exe, id);
+        if (err) {
+            fprintf(stderr, "[RED] launcher: cannot start post-death save cleanup: %s; game not started\n", strerror(err));
+            return 1;
+        }
+        // Only the helper syncs after NOTE_EXIT, when every host sender thread is gone.
+        return g_host_entry(2, host_argv);
+    }
     struct sigaction sa = {.sa_handler = forward};   // no SA_RESTART: waitpid below sees EINTR and waits again
     sigemptyset(&sa.sa_mask);
     sigaction(SIGTERM, &sa, NULL); sigaction(SIGINT, &sa, NULL); sigaction(SIGHUP, &sa, NULL);
-    char *host_argv[] = {host, dm, NULL};
     int err = posix_spawn(&g_child, host, NULL, NULL, host_argv, environ);
     if (err) { fprintf(stderr, "[RED] launcher: cannot start %s: %s\n", host, strerror(err)); return 1; }
     int status;

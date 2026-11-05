@@ -7,6 +7,7 @@ import struct
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
@@ -127,6 +128,60 @@ class Builder(unittest.TestCase):
         args = (self.t / 'args').read_text()
         self.assertIn(f'--update {upd} {tmp} --updates-only', args)
         self.assertFalse(tmp.with_name('v1.partial.nxb-base').exists(), 'the base\'s scratch folder goes')
+
+    def nup(self, body, kind=None, version=0, marker='marker.txt'):   # a NUP (stand-in: the path and the version's package) through nxb-extract --nup
+        src = self.t / 'src'; src.mkdir(exist_ok=True); (src / 'marker.txt').write_text('x')
+        romfs_image.pack(src, self.t / 'image.img')
+        if body: tool(self.bin, 'nxb-extract', body.replace('IMAGE', repr(str(self.t / 'image.img'))))   # None: the stand-in stays as it is
+        path = self.t / 'game.nup'
+        if not path.exists(): path.write_bytes(b'NUP\1')
+        ex = self.t / 'work' / 'extract'; ex.mkdir(parents=True, exist_ok=True)
+        k = SimpleNamespace(kind=nsp.pack_nup.UPDATE if version else nsp.pack_nup.BASE, version=version)
+        return nsp.nxb_extract_nup(ex, f'v{version}', k, None, APP, SimpleNamespace(path=path), marker), ex / f'v{version}'
+
+    NUP_WRITES = ("a = sys.argv; ver = a[a.index('--version') + 1]; out = Path(a[a.index('--work') + 1]) / 'extract' / ('v' + ver); (out / 'ExeFS').mkdir(parents=True); (out / 'ExeFS/main').write_bytes(b'NSO0')\n"
+                  "shutil.copyfile(IMAGE, out / 'RomFS.img'); aoc = Path(a[a.index('--work') + 1]) / 'aoc'; aoc.mkdir(); (aoc / '1.img').write_bytes(b'dlc')\n"
+                  "print('{app} version ' + ver + ': game.nup (update ' + ver + ')')")
+
+    def test_a_nup_is_handed_over_with_its_version_and_no_discarded_image(self):
+        ok, dst = self.nup(self.NUP_WRITES.format(app=f'{APP:016X}') + f"\nPath({str(self.t / 'args')!r}).write_text(' '.join(sys.argv[1:]))", version=131072)
+        self.assertTrue(ok, self.text())
+        args = (self.t / 'args').read_text()
+        self.assertIn(f'--nup {self.t / "game.nup"} --work {self.t / "work" / "nxb_nup_v131072.partial"} --version 131072', args)
+        self.assertNotIn('--discard-images', args)
+        self.assertTrue((dst / 'RomFS.img').is_file() and (dst / 'ExeFS' / 'main').is_file())
+        self.assertTrue((self.t / 'work' / 'aoc' / '1.img').is_file(), 'the DLC images come from the same run')
+        self.assertFalse((self.t / 'work' / 'nxb_nup_v131072.partial').exists())
+        self.assertIn('extracted v131072 with nxb-extract', self.text())
+
+    def test_a_nup_base_is_version_zero_and_an_unchanged_nup_is_reused(self):
+        body = self.NUP_WRITES.format(app=f'{APP:016X}') + f"\nPath({str(self.t / 'runs')!r}).open('a').write('x')"
+        ok, dst = self.nup(body)
+        self.assertTrue(ok, self.text())
+        self.assertTrue(ok and (dst / 'RomFS.img').is_file())
+        self.said.clear()
+        ok, _ = self.nup(None)
+        self.assertTrue(ok)
+        self.assertEqual((self.t / 'runs').read_text(), 'x', 'the second call did not run nxb-extract again')
+        self.assertIn('reusing it', self.text())
+
+    def test_a_nup_falls_back_on_unsupported_failure_or_a_bad_output(self):
+        for body, why in (('sys.exit(4)', 'not supported yet'), ('sys.exit(3)', 'exit code 3'), (self.NUP_WRITES.format(app='0100000000001000'), 'failed the checks'),
+                          (self.NUP_WRITES.format(app=f'{APP:016X}').replace("(out / 'ExeFS/main').write_bytes(b'NSO0')", 'pass'), 'failed the checks')):
+            with self.subTest(why=why, body=body[:30]):
+                self.said.clear(); nsp._nxb_noted.clear()
+                ok, dst = self.nup(body)
+                self.assertFalse(ok)
+                self.assertFalse(dst.exists(), 'pack_nup starts from what it finds: nothing of nxb-extract stays')
+                self.assertFalse((self.t / 'work' / 'nxb_nup_v0.partial').exists())
+                self.assertIn(why, self.text())
+                self.assertIn('the standard builder runs it', self.text())
+
+    def test_a_nup_without_the_builder_runs_the_standard_way(self):
+        with mock.patch.dict(os.environ, {'DM_EXPERIMENTAL_BUILDER': '0'}):
+            ok, dst = self.nup(self.NUP_WRITES.format(app=f'{APP:016X}'))
+        self.assertFalse(ok)
+        self.assertFalse(dst.exists())
 
     def split(self, rows):
         tool(self.bin, 'nxb-split', "a = sys.argv; o = lambda k: Path(a[a.index(k) + 1])\n"

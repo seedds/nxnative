@@ -66,6 +66,19 @@ def precise(msl): return re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', m
 LOOP_CAP = 1 << 18
 _LOOP_HEAD = re.compile(r'(\s*)(?:do|for \(.*\)|while \(.*\))\s*')
 _BARRIER = re.compile(r'\b(?:threadgroup|simdgroup)_barrier\s*\(')
+_MEMBAR = 'threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture);'
+def membar_fence(msl):
+    """MEMBAR as a fence, not a barrier. The translator turns BAR.SYNC into OpControlBarrier (workgroup scope; SPIRV-Cross prints threadgroup_barrier(mem_flags::mem_threadgroup)) and
+    MEMBAR.GPU / .SYS into OpMemoryBarrier at device scope (Ryujinx CodeGen/Spirv/Instructions.cs GenerateMemoryBarrier), which SPIRV-Cross prints as a threadgroup_barrier with device,
+    threadgroup and texture memory: an execution barrier the Switch code does not have. Where the threads of a group are not converged it waits for threads that never come.
+    PRAGMATA's GPU culling queue 12a52b683eec95c1 has no BAR.SYNC at all, only MEMBAR.SC.GPU; ERRBAR (0x5f10), which became two such barriers inside its persistent work loop;
+    35 of the 62 kernels its boots skip had them (17 with no BAR.SYNC). Each becomes the fence it is, atomic_thread_fence at device scope, sequentially consistent; two in a row
+    (MEMBAR.SC and ERRBAR) become one. Runs before loop_guard, so a loop left with no barrier counts on the function's shared counter."""
+    if _MEMBAR not in msl: return msl
+    fence = 'atomic_thread_fence(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture, memory_order_seq_cst, thread_scope_device);   // MEMBAR (membar_fence)'
+    msl = re.sub(r'^([ \t]*)' + re.escape(_MEMBAR) + r'\n\1' + re.escape(_MEMBAR) + r'$', lambda m: m[1] + _MEMBAR, msl, flags=re.M)
+    return msl.replace(_MEMBAR, fence)
+
 def loop_guard(msl):
     lines, out = msl.split('\n'), []
     fn_head = lambda i: lines[i] == '{' and i and lines[i - 1].rstrip().endswith(')')   # a function body (SPIRV-Cross puts its brace alone in column 0; a struct's header does not end in ')')
@@ -1614,7 +1627,7 @@ def finish(key, w, j, c1):
     src = precise(src)   # min / max / clamp with Maxwell's NaN results (see precise)
     try: src = gather_offsets(src)   # four gathers instead of a wrapper's loop over their offsets (see gather_offsets)
     except ValueError as e: return 'gather offsets rewrite failed', str(e)[:160], None
-    src = loop_guard(src)   # no loop can run forever (see loop_guard)
+    src = loop_guard(membar_fence(src))   # MEMBAR as a fence (see membar_fence); no loop can run forever (see loop_guard)
     try: src = hmma_msl(src)   # Ampere HMMA through simdgroup_matrix (see hmma_msl)
     except ValueError as e: return 'HMMA rewrite failed', str(e)[:160], None
     try: src = pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)

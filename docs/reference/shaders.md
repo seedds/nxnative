@@ -949,6 +949,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md#rendering): 4,558 of its 27,155 shaders change. On an M1 in the opening dialogue scene, the lit pass's median GPU time went from 70.2 to 15.6 ms and the frame's from 91.5 to 30.1 ms (`DM_NVN_GPUPROF=every:60`, 15 and 35 profiled frames in the scene); the 40 shaders that did not build before are the only ones that fail.
 - **Check:** `python3 dm/gfx/tests/test_dmsh_wide.py`.
 
+### Adjacent raw global memory reads
+
+- **Symptom:** a compute shader spends time repeating the pool lookup for adjacent words whose address was loaded from memory.
+- **Cause:** the translator splits a wide load into 32-bit words. Each raw word then calls the scalar pool resolver. The bound-storage `wide_loads` pass sees direct buffer indices, while these words are calls to a helper.
+- **Fix:** the experimental `DMSH_RAW_LOAD_QUADS=1` build option enables `raw_load_quads` for ordinary Ampere compute shaders. It verifies the scalar helper and its reflected pool table. Four reads in order can share the lookup when the address words describe offsets 0, 4, 8 and 12 of one base and only local address copies separate the reads. The first address must resolve to a range that contains all 16 bytes before the next start, including when ranges overlap. Both guest and translated addresses must be aligned to four bytes with room for the whole span. Other inputs use the original scalar resolver for each word.
+- **Found on:** The Legend of Zelda: Ocarina of Time v131072, measured with the local Switch 2 profile in Kokiri Forest. An upstream profile for the base game is in [draft PR #1299](https://github.com/seedds/nxnative/pull/1299).
+- **Check:** `python3 dm/gfx/tests/test_dmsh_wide.py RawLoadQuads` checks both fixed table sizes, the unsigned carry and the fallback to the original source on unrecognized code. The option is off by default and changes the shader chain and cache keys. Use the same option for `dmsh_chain.py --header`, the shader build and the host build.
+
 ## Bindings and handles
 
 - **Note:** the layout of NVN's driver segments `c0` and `c2` (the handle tables, the storage and uniform buffer tables, the words the host fills) and the binding kinds of the reflection JSON have one definition, `dm/gfx/nvn/dmsh_abi.h`. The host includes it (`nvn_mtl.m`, `nvn_refl.m`, `nvn_obj.h`); `dmsh_build.py` reads it through `dm/gfx/tools/dmsh_abi.py`, which stops on any line it cannot read. Both files are part of the chain version. `dm/tools/tests/test_dmsh_abi.py` checks that the tables fit together, that the host converts every kind the build may write, that the translator's own copy of the `c2` layout (`Program.cs`) agrees, and that the values do not come back as literals in the host or the build. The entries below cite the offsets.

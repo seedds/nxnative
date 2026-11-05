@@ -2,6 +2,7 @@
 """NVN2 task and mesh shaders as Metal stage functions (dmsh_meshstage.py), on the shape of Mario Kart World's: the control section's facts, the SPH's outputs, the stage memory's layout
 and the wrapper's entry points. When the Metal compiler is installed, the stages compile for macOS and iOS."""
 from pathlib import Path
+import os
 import shutil
 import struct
 import subprocess
@@ -184,6 +185,39 @@ class Stage(unittest.TestCase):
         self.assertRegex(body, r'void dm_stage_body\([^)]*\)\n\{\n    uint _9 = 0u;\n    _5\(_9\);')
         self.assertNotIn('_9', entries)
 
+    def test_primitive_id_handed_to_metal(self):
+        # PRAGMATA 5aab38bb5ba67ef7: its per-primitive SPH enables only the primitive id (0x35 bit 0), which its code writes as (cluster << 7) | p and its fragment shader
+        # 6c475973 reads as gl_PrimitiveID (the visibility buffer's cluster bits). The primitive gets it as its [[primitive_id]], from the first primitive block's first component
+        # (36 + 4 * 4 * 32 words: the four vertex blocks of a position)
+        area = sph(0xf0) + sph(0x01)
+        i = ms.info(control(7, payload=128, max_v=128, max_p=126, prim_at=0x80), area)
+        self.assertEqual(i['primitive_builtins'], [8])
+        src = ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4), i)
+        self.assertIn('struct dm_prim_t {\n    uint dm_pid [[primitive_id]];\n};', src)
+        self.assertIn('metal::mesh<dm_vertex_t, dm_prim_t, 128, 126,', src)
+        self.assertEqual(src.count('uint b = 548u + (n / 32u) * 32u + n % 32u;'), 2)   # both depth conventions
+        self.assertEqual(src.count('p.dm_pid = _23[b + 0u];'), 2)
+        self.assertEqual(src.count('dm_out.set_primitive(n, p);'), 2)
+
+    def test_primitive_id_beside_an_attribute(self):   # the id first, generic 0's x after it in the block
+        area = sph(0xf0, b'\x30') + sph(0x01, b'\x01')
+        i = ms.info(control(7, payload=128, max_v=128, max_p=64, prim_at=0x80), area)
+        src = ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4), i)
+        self.assertIn('    uint dm_pid [[primitive_id]];\n    float4 p0 [[user(locn0)]];\n', src)
+        self.assertIn('p.dm_pid = _23[b + 0u];', src)
+        self.assertRegex(src, r'p\.p0 = float4\(as_type<float>\(_23\[b \+ 32u\]\), 0\.0, 0\.0, 1\.0\);')
+
+    def test_layer_and_viewport_keep_room_only(self):   # 0x35 bits 1 and 2: room in the block, no Metal output (no game's mesh shader writes them)
+        i = ms.info(control(7, payload=128, max_v=128, max_p=64, prim_at=0x80), sph(0xf0) + sph(0x07))
+        self.assertEqual((i['primitive_system'], i['primitive_builtins']), (3, [8, 9, 10]))
+        src = ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4), i)
+        self.assertNotIn('render_target_array_index', src); self.assertNotIn('viewport_array_index', src)
+        self.assertIn('uint b = 548u + (n / 32u) * 96u + n % 32u;', src)
+
+    def test_no_primitive_id_without_its_bit(self):   # a mesh shader without per-primitive components hands Metal no primitive: its fragment reads Metal's own index
+        src = self.mesh()[0]
+        self.assertNotIn('dm_prim_t', src); self.assertNotIn('[[primitive_id]]', src)
+
     def test_past_metal_refused(self):
         with self.assertRaises(ValueError): self.mesh(vertices=300)
 
@@ -197,13 +231,67 @@ class Stage(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('xcrun') and subprocess.run(['xcrun', '-sdk', 'macosx', '-f', 'metal'], capture_output=True).returncode == 0, 'no Metal compiler')
     def test_compiles(self):
-        cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0], self.local_word()]
+        i = ms.info(control(7, payload=128, max_v=128, max_p=126, prim_at=0x80), sph(0xf0) + sph(0x01, b'\x01'))   # the primitive id and an attribute
+        cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0], ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4), i), self.local_word()]
         with tempfile.TemporaryDirectory() as d:
             for n, src in enumerate(cases):
                 f = Path(d, f's{n}.metal'); f.write_text(src)
                 for sdk, target in (('macosx', 'air64-apple-macos15.0'), ('iphoneos', 'air64-apple-ios18.0')):
                     r = subprocess.run(['xcrun', '-sdk', sdk, 'metal', '-target', target, '-c', str(f), '-o', str(f.with_suffix('.air'))], capture_output=True, text=True)
                     self.assertEqual(r.returncode, 0, f'{sdk} case {n}: {r.stderr[-1500:]}')
+
+
+# The fragment stage reads the mesh's [[primitive_id]]: a mesh function from to_stage whose body writes two full-screen triangles with the ids 1000 + 77 and 1000 + 99 (the
+# second drawn last), and a fragment function that returns its [[primitive_id]] into an R32Uint target. Metal's own index would read 1
+GPU_KERNEL = HEAD + """
+kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]], uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]])
+{
+    threadgroup spvUnsafeArray<uint, %(words)d> _23;
+    if (gl_LocalInvocationID.x != 0u) return;
+    float4 pos[3] = { float4(-1.0, -1.0, 0.5, 1.0), float4(3.0, -1.0, 0.5, 1.0), float4(-1.0, 3.0, 0.5, 1.0) };
+    for (uint v = 0u; v < 3u; v++) for (uint c = 0u; c < 4u; c++) _23[%(out)du + c * 32u + v] = as_type<uint>(pos[v][c]);
+    _23[%(pid)du] = 1077u; _23[%(pid)du + 1u] = 1099u;
+    _23[%(count)du] = 2u << 24;
+    _23[%(count)du + 1u] = 0x00020100u; _23[%(count)du + 2u] = 0x00000201u;
+}
+fragment uint fs(uint id [[primitive_id]]) { return id; }
+"""
+GPU_HOST = r"""
+#import <Metal/Metal.h>
+#include <stdio.h>
+int main(int argc, char **argv) { @autoreleasepool {
+    id<MTLDevice> d = MTLCreateSystemDefaultDevice(); NSError *e = nil;
+    id<MTLLibrary> lib = [d newLibraryWithURL:[NSURL fileURLWithPath:@(argv[1])] error:&e]; if (!lib) { printf("library: %s\n", e.description.UTF8String); return 1; }
+    MTLMeshRenderPipelineDescriptor *m = [MTLMeshRenderPipelineDescriptor new]; m.meshFunction = [lib newFunctionWithName:@"main0_z"]; m.fragmentFunction = [lib newFunctionWithName:@"fs"];
+    m.colorAttachments[0].pixelFormat = MTLPixelFormatR32Uint;
+    id<MTLRenderPipelineState> ps = [d newRenderPipelineStateWithMeshDescriptor:m options:0 reflection:nil error:&e]; if (!ps) { printf("pipeline: %s\n", e.description.UTF8String); return 1; }
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint width:4 height:4 mipmapped:NO];
+    td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModeShared; id<MTLTexture> t = [d newTextureWithDescriptor:td];
+    id<MTLBuffer> b = [d newBufferWithLength:256 options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> cb = [[d newCommandQueue] commandBuffer]; MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor new];
+    rp.colorAttachments[0].texture = t; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp]; [en setRenderPipelineState:ps];
+    for (int k = 0; k < 31; k++) [en setMeshBuffer:b offset:0 atIndex:k];
+    [en drawMeshThreadgroups:MTLSizeMake(1, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(32, 1, 1)];
+    [en endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    uint32_t px[16]; [t getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 4) mipmapLevel:0];
+    for (int i = 0; i < 16; i++) printf("%u ", px[i]); printf("\n"); return 0; } }
+"""
+
+
+@unittest.skipUnless(os.environ.get('DMSH_TEST_GPU') == '1' and shutil.which('xcrun'), 'set DMSH_TEST_GPU=1 (draws on the GPU)')
+class PrimitiveIdOnTheGpu(unittest.TestCase):
+    def test_fragment_reads_the_mesh_shaders_id(self):
+        i = ms.info(control(7, payload=128, max_v=32, max_p=2, prim_at=0x80), sph(0xf0) + sph(0x01))
+        lay, size = ms.memory(i); out = lay[2] // 4; pfirst = ms.attributes(i)[1]
+        src = ms.to_stage(GPU_KERNEL % {'words': size // 4, 'out': out, 'pid': out + pfirst, 'count': lay[3] // 4}, i)
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d, 'm.metal'); f.write_text(src); lib = Path(d, 'm.metallib'); host = Path(d, 'h.m'); host.write_text(GPU_HOST); exe = Path(d, 'h')
+            r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', str(f), '-o', str(lib)], capture_output=True, text=True); self.assertEqual(r.returncode, 0, r.stderr[-1500:])
+            r = subprocess.run(['clang', '-fobjc-arc', '-framework', 'Metal', '-framework', 'Foundation', str(host), '-o', str(exe)], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr[-1500:])
+            r = subprocess.run([str(exe), str(lib)], capture_output=True, text=True); self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(r.stdout.split(), ['1099'] * 16)
 
 
 class IntegerPassThrough(unittest.TestCase):

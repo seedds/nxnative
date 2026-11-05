@@ -232,6 +232,23 @@ int nvn_dirty_since_cached(const void **span, const void *addr, size_t len, uint
 }
 int nvn_dirty_since_span(const void *span, const void *addr, size_t len, uint64_t stamp) { return nvn_dirty_since_cached(&span, addr, len, stamp); }
 int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp) { return nvn_dirty_since_span(NULL, addr, len, stamp); }
+// A page counts unless it holds a byte of an excepted range: the host wrote those pages itself (a GPU copy's bytes written into the storage, nvn_mtl.m pkg_copy_absorb), and the caller
+// judges any other write into them (none can be told from the host's own by the page's generation)
+size_t nvn_dirty_since_except(const void *span, const void *addr, size_t len, uint64_t stamp, const uintptr_t (*ex)[2], int nex, uintptr_t *first) {
+    if (!len) return 0;
+    range_t *r = (range_t *)span; uintptr_t a = (uintptr_t)addr;
+    if (!r || !atomic_load_explicit(&r->live, memory_order_acquire) || a < r->base || a + len > r->end) r = find_span(a, len);
+    if (!r) return SIZE_MAX;
+    uintptr_t p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift; size_t n = 0;
+    for (uintptr_t i = p; i <= q; i++) {
+        if (atomic_load(&r->gen[i]) <= stamp) continue;
+        uintptr_t lo = r->base + (i << g_shift), hi = lo + g_pg; int mine = 0;
+        for (int k = 0; k < nex && !mine; k++) mine = ex[k][0] < hi && ex[k][1] > lo;
+        if (mine) continue;
+        if (!n++ && first) *first = lo < a ? a : lo;
+    }
+    return n;
+}
 void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total) {
     int n = atomic_load(&g_nr), active = 0;
     for (int i = 0; i < n; i++) active += live_at(i) != 0;

@@ -130,6 +130,35 @@ static void reuse_case(NvProg *pr) {
     printf("feedback reuse: %s\n", before == failed ? "PASS" : "FAIL");
     mtl_tex_release(&source);
 }
+// Bloom reconstructs from higher-numbered mips. The substitution must retain
+// those levels and their contents, even while the destination is a lower mip.
+static void mip_case(NvProg *pr) {
+    tex_t source = {.magic=MAGIC('T','E','X',0), .serial=99810};
+    source.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=NVN_FORMAT_RGBA8,
+        .width=8, .height=8, .depth=1, .levels=4, .samples=1};
+    MTLTextureDescriptor *d = tex_desc(&source, 0); d.storageMode = MTLStorageModeShared;
+    id<MTLTexture> original = [g_dev newTextureWithDescriptor:d]; res_add(original);
+    mtl_tex_init(&source); serial_put(source.serial, original); mtl_reg_tex(680, &source, NULL);
+    uint8_t colors[4][4] = {{255,0,0,255},{0,255,0,255},{0,0,255,255},{255,255,0,255}};
+    for (NSUInteger level=0; level<4; level++) {
+        NSUInteger w=8>>level; uint8_t bytes[256];
+        for (NSUInteger i=0; i<w*w; i++) memcpy(bytes+i*4, colors[level], 4);
+        [original replaceRegion:MTLRegionMake2D(0,0,w,w) mipmapLevel:level withBytes:bytes bytesPerRow:w*4];
+    }
+    state_reset(); memset(&R,0,sizeof R); mtl_sub_begin();
+    R.has_rt=1; R.rt.n=1; R.rt.color[0]=&source;
+    R.rt.cview[0].set_levels=1; R.rt.cview[0].base_level=1;
+    S.tex[1][0]=680; pr->sh[1]->rf.b[0].reg=0;
+    fb_prepare(pr);
+    CHECK(g_fb_n==1 && g_fb_use[0].mipmapLevelCount==4, "upsampling preserves all mip indices");
+    id<MTLBuffer> result=[g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared]; res_add(result);
+    if (g_fb_n==1) for (NSUInteger level=0; level<4; level++)
+        enc_b_copy_texture_buffer(blit(),g_fb_use[0],0,level,MTLOriginMake(0,0,0),MTLSizeMake(1,1,1),result,level*256,256,256);
+    CHECK(mtl_wait(mtl_sub_commit(),5000000000ull), "mip snapshot GPU submission completed");
+    CHECK(!mtl_last_commit_error(), "mip snapshot has no GPU error");
+    for(int level=0;level<4;level++) CHECK(!memcmp((uint8_t*)result.contents+level*256,colors[level],4), "mip snapshot preserves each source level color");
+    mtl_tex_release(&source);
+}
 int main(void) { @autoreleasepool {
     setenv("DM_NVN_TBDR", "0", 1);
     mtl_init(); NSError *error = nil;
@@ -153,6 +182,7 @@ int main(void) { @autoreleasepool {
     const int slots[] = {0, 128, 255};
     for (int i = 0; i < 3; i++) slot_case(pr, pipeline, slots[i], i);
     reuse_case(pr);
+    mip_case(pr);
     printf("feedback snapshot: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

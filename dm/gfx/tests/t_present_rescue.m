@@ -27,6 +27,8 @@
 #undef CAMetalDisplayLink
 static uint64_t test_now;
 int test_focus = 1;
+int test_visible = 1;
+uint64_t test_visible_since;
 int test_fullscreen;
 int test_variable_refresh;
 uint64_t test_focus_since;
@@ -38,7 +40,7 @@ uint64_t now_ns(void) { return test_now; }
 static int checks, failed;
 #define CHECK(name, ok) do { int pass = !!(ok); checks++; failed += !pass; printf("%s: %s\n", name, pass ? "PASS" : "FAIL"); } while (0)
 static void reset(void) {
-    test_now = 10000000000ull; test_focus = 1; test_focus_since = 0;
+    test_now = 10000000000ull; test_focus = 1; test_focus_since = 0; test_visible = 1; test_visible_since = 0;
     g_dm_present_link = 1; g_rescue_mode = 0; g_rescue_back_ns = 3000000000ull; g_rescue_n = 0;
     g_link_tick_ns = test_now - 1000000000ull; g_stall_t0 = g_link_tick_ns;
     g_stall_logged = g_stall_red = 0; g_stall_drop = 0;
@@ -67,6 +69,12 @@ static void thresholds(void) {
     test_focus = 3; wait_frame(); CHECK("background time does not trigger rescue", !g_rescue_mode);
     test_focus = 1; test_focus_since = test_now; wait_frame(); CHECK("foreground starts a fresh grace period", !g_rescue_mode);
     test_now += 500000000ull; wait_frame(); CHECK("500 ms active after foreground triggers rescue", g_rescue_mode == 1);
+    reset(); test_visible = 0; wait_frame();
+    CHECK("covered key window does not trigger rescue or active-stall errors", !g_rescue_mode && !g_stall_logged && !g_stall_red);
+    test_visible_since = test_now; test_visible = 1; wait_frame();
+    CHECK("uncover starts a fresh watchdog grace period", !g_rescue_mode);
+    test_now += 500000000ull; wait_frame();
+    CHECK("a visible genuinely silent link still triggers rescue", g_rescue_mode == 1);
     reset(); test_focus_since = test_now + 1; wait_frame();
     CHECK("a newer focus timestamp cannot underflow the grace period", !g_rescue_mode);
 }

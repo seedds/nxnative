@@ -352,3 +352,11 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Cause:** the thread that acquires the window (here the render thread) runs under a time-constraint policy whose computation the host re-declares every 120 frames; it was 1.25 × the 90th percentile of that thread's CPU time per frame. This render thread needs 1.9–2.0 ms a frame with one or two frames in 120 near 4.4 ms, against 2.5 ms declared, and each frame past the declaration stalled the thread. Probes on both threads' waits showed the main thread's waits; adding probes slowed the render thread and the stalls vanished, and `DM_RT=0` or a fixed `DM_RT_COMP=5` / `10` removed them too (99th percentile 18–21 ms) at the same CPU energy.
 - **Fix:** the declaration also covers 1.1 × the window's peak (`rt_comp_tick` in `hle_nvn.c`): 5.6 ms here, 60.0 fps, 99th percentile 21 ms.
 - **Found on:** [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md), in the Asylum cell.
+
+### Covered key windows do not trigger display-link rescue
+
+- **Symptom:** fullscreen Space transitions log a silent active display link, repeatedly enter rescue, and extend retry backoff to 60 seconds.
+- **Cause:** macOS reports the game window covered before it resigns key status; the watchdog checked focus alone. The Bananza session repeatedly logs window-covered before active-stall and rescue, with focus loss later.
+- **Fix:** publish window visibility and its last restoration time atomically from AppKit. Active-stall detection requires visibility and starts a new grace period on uncover. Existing frame-ticket release remains unchanged. This prevents false rescue; it does not establish that every gameplay frame-rate drop is resolved.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md), macOS fullscreen on M5 Max.
+- **Validation:** `t_present_rescue` covers a covered but still-focused window, uncover, and a genuinely silent link after uncover; 82 checks pass.

@@ -1,3 +1,4 @@
+#include <stdatomic.h>
 // Mac front end: with DM_WINDOW=1 open a window (CAMetalLayer, for the graphics backend to present frames) + keyboard and controllers → dm_input; the guest runs on a large-stack thread instead and the main thread belongs to AppKit.
 // Without DM_WINDOW: the guest runs directly on the current thread, behaving the same as with no front end (windowless tests use this).
 // The window is fullscreen-capable (the green button and ⌃⌘F); DM_FULLSCREEN=1 starts it that way. ⌘Q quits; the left mouse button is the touchscreen.
@@ -15,6 +16,7 @@
 #include "dm.h"
 #include "dm_input.h"
 #include "front.h"
+#include "../gfx/nvn/nvn_hdr.h"
 #include "hle.h"
 #include "pad_slots.h"
 #include "haptics_apple.h"
@@ -38,7 +40,8 @@ int front_screen_max_fps(void) { return g_screen_fps; }
 static _Atomic int g_screen_variable_refresh;
 int front_screen_variable_refresh(void) { return g_screen_variable_refresh; }
 static void screen_refresh(NSScreen *screen) {   // main thread: refresh capabilities of the current screen and mode, including a mode change without moving the window
-    if (!screen) return;
+    if (!screen) { dm_hdr_display(0); return; }
+    dm_hdr_configure_layer((__bridge void *)g_layer, screen.maximumPotentialExtendedDynamicRangeColorComponentValue);
     g_screen_fps = (int)screen.maximumFramesPerSecond;
     g_screen_variable_refresh = screen.minimumRefreshInterval > 0 && screen.maximumRefreshInterval > screen.minimumRefreshInterval;
 }
@@ -49,6 +52,12 @@ int front_fullscreen(void) { return g_fullscreen; }   // nvn_mtl.m link_latency:
 // the frame interval jumping between them. In fullscreen, a screen whose rate is not a multiple of the game's switches to the mode of the same size with the highest rate that is (144 → 120 Hz
 // for 60 and 30 fps), for this app only: macOS switches it back when the host quits, crashes included, and leaving fullscreen or that screen switches it back at once. A window keeps the
 // screen's rate, because the switch changes the whole screen for every app and most external screens go black for a second or more. A screen with no such mode keeps the virtual ticks
+// Visibility is independent of key-window focus during Space transitions. Publish it
+// to the present watchdog without reading AppKit objects from its worker thread.
+static _Atomic int g_present_visible = 1;
+static _Atomic uint64_t g_present_visible_since;
+int front_present_visible(void) { return atomic_load(&g_present_visible); }
+uint64_t front_present_visible_since(void) { return atomic_load(&g_present_visible_since); }
 static NSWindow *g_win; static _Atomic int g_match_want;   // the game's window; the frame rate to match (0 = not known yet), written by the present thread only
 static CGDirectDisplayID g_match_id; static CGDisplayModeRef g_match_orig;   // main thread: the screen this host switched and its own mode (NULL = none switched)
 static double mode_hz(CGDisplayModeRef m) { double hz = CGDisplayModeGetRefreshRate(m); return hz > 0 ? hz : 0; }   // 0 = not known (older built-in screens report none)
@@ -1212,6 +1221,8 @@ void front_run(void (*guest)(void)) {
         if (getenv("DM_WINDOW_TOP") && atoi(getenv("DM_WINDOW_TOP"))) { win.level = NSFloatingWindowLevel; [win orderFrontRegardless]; LOG("front end: window kept in front (DM_WINDOW_TOP)"); }
         [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidChangeOcclusionStateNotification object:win queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
             (void)n; static int vis = -1; int v = (win.occlusionState & NSWindowOcclusionStateVisible) != 0; if (v == vis) return; vis = v;
+            if (v) atomic_store(&g_present_visible_since, now_ns());
+            atomic_store(&g_present_visible, v);
             if (v) LOG("front end: window visible"); else LOG("front end: window covered (its display link fires about once a second: frame times measure nothing)"); }];
         // Main menu: AppKit runs ⌘ shortcuts only through menu items, so ⌘Q quits and ⌃⌘F toggles fullscreen from here (AppKit shows the item as Globe-F and keeps ⌃⌘F as a hidden twin)
         NSMenu *bar = [NSMenu new], *app = [NSMenu new], *wm = [[NSMenu alloc] initWithTitle:@"Window"];

@@ -59,6 +59,8 @@ t_dirty_retire_race: t_dirty_retire_race.c ../nvn/nvn_dirty.c ../../host/crash.c
 	clang $(CFLAGS) -o $@ t_dirty_retire_race.c ../../host/crash.c
 t_host_msl: t_host_msl.m ../nvn/host_msl.m ../nvn/host_msl.h $(MSL_H)
 	clang -O1 -g -Wall -I$(dir $(MSL_H)) -fobjc-arc -o $@ t_host_msl.m ../nvn/host_msl.m -framework Metal -framework Foundation
+t_present_hdr: t_present_hdr.m ../nvn/host_msl.m ../nvn/nvn_hdr.c ../nvn/nvn_hdr_layer.m ../nvn/nvn_hdr.h $(MSL_H)
+	clang -O1 -g -Wall -I$(dir $(MSL_H)) -fobjc-arc -o $@ t_present_hdr.m ../nvn/host_msl.m ../nvn/nvn_hdr.c ../nvn/nvn_hdr_layer.m -framework Metal -framework Foundation -framework QuartzCore -framework CoreGraphics
 t_builtin: t_builtin.m ../nvn/nvn_builtin.h ../nvn/host_msl.m $(MSL_H)
 	clang -O1 -g -Wall -I$(dir $(MSL_H)) -fobjc-arc -o $@ t_builtin.m ../nvn/host_msl.m -framework Metal -framework Foundation
 t_vin: t_vin.m
@@ -169,6 +171,7 @@ t_present_alloc: t_present_alloc.m $(MTL_T_DEP)
 .PHONY: check_t_present_alloc
 check_t_present_alloc: t_present_alloc
 	MTL_DEBUG_LAYER=1 ./t_present_alloc
+	MTL_DEBUG_LAYER=1 ./t_present_alloc classic
 t_present_snap: t_present_snap.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_present_snap.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 .PHONY: check_t_present_snap

@@ -7,6 +7,9 @@
 #import <AVFAudio/AVFAudio.h>
 #include <errno.h>
 #include "front.h"
+#include "native_display.h"
+#include <string.h>
+#include "../../gfx/nvn/nvn_hdr.h"
 #include "hle.h"
 #include "dm.h"
 #include "haptics_apple.h"
@@ -21,6 +24,49 @@ int front_ios_boot_ok(void);
 const char *front_ios_boot_message(void);   // main.m: why a build that keeps the game files off the IPA found none usable (NULL = the generic hint)
 const char *front_ios_device_check(void);   // main.m: why this device cannot run the games (its GPU has no BC textures; NULL = supported); makes the first Metal device
 bool dm_show_launcher(void *view_controller, void (*done)(void));   // Launcher.swift: false = no launcher (no dm/launcher.json, or DM_LAUNCHER=0)
+
+// Scene geometry is frozen before guest entry for the build-verified DISPLAY
+// camera/render-target hooks. Later scene changes need restart; never resize live resources.
+static int native_display_enabled(void) {
+    const char *value = getenv("BANANZA_NATIVE_DISPLAY");
+    return value && !strcmp(value, "1");
+}
+static void native_display_publish_root(UIView *root) {
+    if (!native_display_enabled()) return;
+    UIScreen *screen = root.window.windowScene.screen;
+    if (!screen || !dm_native_display_publish(root.bounds.size.width, root.bounds.size.height, screen.scale)) return;
+    dm_native_display_request request;
+    dm_native_display_render render;
+    static uint64_t logged_generation;
+    if (dm_native_display_snapshot(&request) && dm_native_display_frozen(&render) &&
+        request.generation != render.scene.generation && request.generation != logged_generation) {
+        logged_generation = request.generation;
+        LOG("native display: scene changed to %.0fx%.0f points at %.2fx; restart required to adopt geometry (startup %ux%u retained)",
+            request.width_points, request.height_points, request.scale, render.width, render.height);
+    }
+}
+static void native_display_freeze_root(UIView *root) {
+    if (!native_display_enabled()) return;
+    native_display_publish_root(root);
+    uint32_t height = 0;
+    const char *value = getenv("BANANZA_RENDER_HEIGHT");
+    if (value && *value) {
+        char *end = NULL;
+        errno = 0;
+        unsigned long parsed = strtoul(value, &end, 10);
+        if (errno || *end || *value == '-' || parsed > UINT32_MAX)
+            LOG("native display: invalid BANANZA_RENDER_HEIGHT; using default height");
+        else height = (uint32_t)parsed;
+    }
+    dm_native_display_render render;
+    if (dm_native_display_freeze(height, &render)) {
+        LOG("native display: scene %.0fx%.0f points at %.2fx (%ux%u pixels), configured startup render %ux%u aspect %.6f (frozen until restart)",
+            render.scene.width_points, render.scene.height_points, render.scene.scale,
+            render.scene.pixel_width, render.scene.pixel_height, render.width, render.height, render.aspect);
+    } else {
+        LOG("native display: no valid window scene at boot; startup geometry unavailable");
+    }
+}
 
 static CAMetalLayer *g_layer;
 static void front_ios_power_watch(void);
@@ -43,6 +89,12 @@ static UILabel *front_ios_fps_label(void);
 - (void)didMoveToWindow {   // the phone's screen or a TV's (DmTVSceneDelegate): render at that screen's pixels
     [super didMoveToWindow];
     UIScreen *s = self.window.windowScene.screen; if (!s) return;
+    dm_hdr_configure_layer((__bridge void *)self.layer, s.potentialEDRHeadroom);
+    LOG("HDR display: requested %d, available %d, current headroom %.3f, potential %.3f, brightness %.3f, layer format %lu, EDR %d, metadata %d",
+        dm_hdr_requested(), dm_hdr_query(), s.currentEDRHeadroom, s.potentialEDRHeadroom, s.brightness,
+        (unsigned long)((CAMetalLayer *)self.layer).pixelFormat,
+        ((CAMetalLayer *)self.layer).wantsExtendedDynamicRangeContent,
+        ((CAMetalLayer *)self.layer).EDRMetadata != nil);
     self.layer.contentsScale = s.nativeScale; [self setNeedsLayout];
 }
 - (void)layoutSubviews {
@@ -112,12 +164,14 @@ static void launcher_done(void) { [g_root startGame]; }
     [self.view setNeedsLayout]; [self.view layoutIfNeeded];
     UIApplication.sharedApplication.idleTimerDisabled = YES;
     tv_attach();   // a TV connected while the launcher showed
+    native_display_freeze_root(self.view);
     front_ios_boot();
 }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
+    native_display_publish_root(self.view);
     CGRect b = self.view.bounds; if (!self.game) return;
-    if (self.game.superview == self.view) self.game.frame = fit_16_9(b);   // on a TV the TV's view lays it out
+    if (self.game.superview == self.view) self.game.frame = native_display_enabled() ? b : fit_16_9(b);   // on a TV the TV's view lays it out
     if (self.fps) {   // the top row's free stretch: right of DmGamepad.m's L3 key (102 + 17 of its units from the safe edge), level with − / + (22 units down); u is its unit
         CGRect s = UIEdgeInsetsInsetRect(b, self.view.safeAreaInsets); CGFloat u = MIN(b.size.height / 430.0, 1.3);
         self.fps.frame = CGRectMake(floor(CGRectGetMinX(s) + 130 * u), floor(CGRectGetMinY(s) + 22 * u - 11), 64, 22);

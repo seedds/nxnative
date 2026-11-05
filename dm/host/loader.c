@@ -10,6 +10,7 @@
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include "hle.h"
+#include "native_display.h"
 
 module_t *g_mod;
 int g_nmod;
@@ -259,6 +260,7 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "TEXT_END")) m->text_end = v;
         else if (!strcmp(key, "RO_OFF")) m->ro_off = v;
         else if (!strcmp(key, "DATA_OFF")) m->data_off = v;
+        else if (!strcmp(key, "DISPLAY_STATE_OFF")) m->display_state_off = v;
         else if (!strcmp(key, "FPS_STATE_OFF")) m->fps_state_off = v;
         else if (!strcmp(key, "UE_MALLOC_VT")) m->ue_malloc_vt = v;
         else if (!strcmp(key, "UE_MALLOC_SLOT")) m->ue_malloc_slot = (unsigned)v;
@@ -308,6 +310,90 @@ void dm_fps_state_apply(void) {
     char cap[32]; snprintf(cap, sizeof cap, ", capped at %d fps", t);
     LOG("%s: frame step %s%s (%s)", g_fps_mod, !t ? "as the game sets it" : "in whole vsyncs decided by the host", t ? cap : "", e ? "DM_FPS_TARGET" : "game profile fps_target");
 }
+// Build-ID-specific DISPLAY callbacks alone emit this metadata. The record shares
+// the writable startup page with frame-step state, at a non-overlapping offset.
+static uint8_t *g_display_state;
+static const char *g_display_mod;
+static void install_display_state(module_t *m) {
+    uint64_t off = m->display_state_off;
+    if (m->key_page_off > UINT64_MAX - 0x4100 || off != m->key_page_off + 0x4100 ||
+        off > m->size || m->size - off < 32 ||
+        (m->patch_off > 0 && off + 32 > (uint64_t)m->patch_off) ||
+        (m->back_off && off + 32 > m->back_off))
+        die("%s: display state record out of range", m->name);
+    if (g_display_state) die("%s: multiple display state records", m->name);
+    g_display_state = m->base + off;
+    g_display_mod = m->name;
+}
+void dm_display_state_apply(void) {
+    if (!g_display_state) return;
+    memset(g_display_state, 0, 32);
+    const char *enabled = getenv("BANANZA_NATIVE_DISPLAY");
+    dm_native_display_render render;
+    int requested = enabled && !strcmp(enabled, "1");
+#if !TARGET_OS_IPHONE
+    // Optional desktop output resolution, keeping the game's original 16:9 aspect.
+    // This changes build-verified display dimensions, not NDSR's internal ratio;
+    // actual scene pass sizes must be measured independently of the output size.
+    const char *mac_height = getenv("BANANZA_MAC_RENDER_HEIGHT");
+    int mac_configured = 0;
+    if (mac_height && *mac_height) {
+        char *end = NULL;
+        errno = 0;
+        unsigned long height = strtoul(mac_height, &end, 10);
+        if (!errno && mac_height[0] >= '0' && mac_height[0] <= '9' && !*end &&
+            height >= DM_NATIVE_RENDER_HEIGHT_MIN && height <= DM_NATIVE_RENDER_HEIGHT_MAX) {
+            mac_configured = dm_native_display_publish(16, 9, 1) &&
+                dm_native_display_freeze((uint32_t)height, &render);
+            requested |= mac_configured;
+            if (mac_configured) LOG("native display: Mac output requested %ux%u (BANANZA_MAC_RENDER_HEIGHT); internal NDSR ratio unchanged", render.width, render.height);
+        } else LOG("native display: invalid BANANZA_MAC_RENDER_HEIGHT; expected integer 360..2160");
+    }
+    if (!requested) return;
+    // Explicit smoke-test input for the iOS camera geometry on Mac. Normal Mac
+    // sessions publish no scene and keep the game's original display dimensions.
+    const char *test_scene = getenv("BANANZA_TEST_SCENE");
+    if (!mac_configured && test_scene && *test_scene) {
+        char *separator = NULL, *end = NULL;
+        errno = 0;
+        unsigned long width = strtoul(test_scene, &separator, 10);
+        int valid = !errno && test_scene[0] >= '0' && test_scene[0] <= '9' &&
+            separator != test_scene && *separator == 'x';
+        unsigned long height = 0;
+        if (valid) {
+            errno = 0;
+            height = strtoul(separator + 1, &end, 10);
+            valid = !errno && separator[1] >= '0' && separator[1] <= '9' &&
+                end != separator + 1 && !*end && width >= 1 && width <= 65535 &&
+                height >= 1 && height <= 65535;
+        }
+        uint32_t render_height = 0;
+        const char *height_env = getenv("BANANZA_RENDER_HEIGHT");
+        if (height_env && *height_env) {
+            char *height_end = NULL;
+            errno = 0;
+            unsigned long parsed = strtoul(height_env, &height_end, 10);
+            if (!errno && !*height_end && *height_env != '-' && parsed <= UINT32_MAX)
+                render_height = (uint32_t)parsed;
+            else LOG("native display: invalid BANANZA_RENDER_HEIGHT; using default height");
+        }
+        if (valid && dm_native_display_publish(width, height, 1) && dm_native_display_freeze(render_height, &render))
+            LOG("native display: Mac test-only scene %s enabled (BANANZA_TEST_SCENE)", test_scene);
+        else LOG("native display: invalid BANANZA_TEST_SCENE; expected WIDTHxHEIGHT in points");
+    }
+#else
+    if (!requested) return;
+#endif
+    if (!dm_native_display_frozen(&render)) return;
+    float aspect = (float)render.aspect;
+    memcpy(g_display_state + 4, &render.width, 4);
+    memcpy(g_display_state + 8, &render.height, 4);
+    memcpy(g_display_state + 16, &aspect, 4);
+    uint32_t one = 1;
+    // Guest threads have not started; publish enabled only after all payload fields.
+    memcpy(g_display_state, &one, 4);
+    LOG("%s: startup display state enabled, %ux%u aspect %.6f", g_display_mod, render.width, render.height, aspect);
+}
 static void install_key_page(module_t *m) {
     if (m->key_page_off + m->key_page_size > m->size) die("%s: key page out of range", m->name);
     uint64_t *page = (uint64_t *)(m->base + m->key_page_off);
@@ -316,6 +402,7 @@ static void install_key_page(module_t *m) {
     for (int k = 0; k < KEY_N; k++) if (!page[m->key_idx[k]]) die("%s: key page entry %d is 0 (host key not created) -- the game would read TSD slot 0", m->name, k);
     if (mprotect(m->base + m->key_page_off, m->key_page_size, PROT_READ)) die("%s key page mprotect", m->name);
     if (m->fps_state_off) install_fps_state(m);
+    if (m->display_state_off) install_display_state(m);
 }
 
 static void register_gates(module_t *m, const char *dir) {

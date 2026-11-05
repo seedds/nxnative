@@ -72,11 +72,30 @@ static int bad_pixels(id<MTLTexture> t, uint8_t left, uint8_t right) {
     if (bad) { printf("first row:"); for (int i = 0; i < 8; i++) printf(" %u", p[4 * i]); printf(" (want %u x4, %u x4)\n", left, right); }
     return bad;
 }
-int main(void) { @autoreleasepool {
+int main(int argc, char **argv) { @autoreleasepool {
     alarm(30); setbuf(stdout, NULL);
     setenv("DM_PRESENT_HZ", "0", 1);
     mtl_init();
     g_test_layer = offscreen_layer(); g_layers = [NSMutableArray new];
+    if (argc > 1 && !strcmp(argv[1], "classic")) {
+        tex_t a = source(91001, 50, 150);
+        id<MTLSharedEvent> gate = [g_dev newSharedEvent];
+        [g_q4 waitForEvent:gate value:1];
+        id<CAMetalDrawable> dr = drawable();
+        CHECK("classic present submitted", present_classic_drawable(tex_mtl(&a), dr, NULL, 0, 1));
+        pthread_mutex_lock(&g_pq_mu);
+        struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec++;
+        while (g_pq_inflight && pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts) != ETIMEDOUT) {}
+        CHECK("classic read waits for Metal 4 producer", g_pq_inflight == 1 && g_pq_done == 0);
+        pthread_mutex_unlock(&g_pq_mu);
+        gate.signaledValue = 1;
+        pthread_mutex_lock(&g_pq_mu); clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec += 5;
+        while (g_pq_inflight && pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts) != ETIMEDOUT) {}
+        CHECK("classic completion releases the source ticket", !g_pq_inflight && g_pq_done == 1);
+        pthread_mutex_unlock(&g_pq_mu);
+        CHECK("classic drawable contains its own frame", bad_pixels(dr.texture, 50, 150) == 0);
+        printf("classic handoff: %d checks, %d failed\n", checks, failed); return failed != 0;
+    }
     // Display-link mode without a link thread: link_sync sees a started link that is not there yet, the present thread leaves the queue to the callback
     g_dm_present_link = 1; g_link_started = 1; g_link_owns_layer = 1; g_delegate = [NvMetalDisplayLinkDelegate new];
     tex_t a = source(91001, 50, 150), b = source(91002, 100, 100), c = source(91003, 200, 200);

@@ -50,6 +50,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | malloc region 60 GB → 4 GB and its first arena | address space | gap | judgement | 1 | [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md) | Monolith's own allocator; its constants span two functions (a multi-function rule). The cause, an iPhone's address space, is a platform limit |
 | `build` → `game` | PhysX completion task release | race | gap | judgement | 1 | [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) | a lifetime race in the game's own completion task (its release slot serves this one vtable) |
 | `build` → `game` | render intervals, the forced-interval flag and the render-wait timeout | frame rate | gap | judgement | 1 | [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) | the game's own tables, flag and timeout |
+| `build` → `game` | Startup display dimensions, project-camera aspect and uniform UI fit | rendering | gap | checked: v458752 main disassembly and camera ownership, 2026-11-01; original-byte assertions and 2076 AArch64 emulation cases, including DrawInfo vtable exclusion and register preservation; onscreen layer DrawInfo ownership confirmed by runtime probes; paired projection restoration tested; Mac open/closed geometry visually validates title, loading, HUD, full background coverage and Skill selection anchors | 1 | [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) | The game fixes its window and project camera to 16:9. The main DrawInfo projection fits UI uniformly with vertical inset during Calculate, preserving CPU coordinates. Reviewed full-canvas picture extents cover the extra height. Only reviewed offsets in v458752 are supported; function matching for other builds is not implemented. |
 | `build` → `game` | task ring push and pop barriers | race | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | a data race in the game's own task ring |
 | `build` → `game` | UE3's GMalloc setup skipped, the host allocator in (hle_uemalloc.c) | address space | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | UE3 inlines the allocator's constructor into the GMalloc setup and has its own vtable layout (25 slots, 32-bit sizes), so the Unreal 4/5 discovery does not apply |
 | `build` → `game` | unused 272-byte slot pool: 4,194,304 → 65,536 slots | address space | gap | judgement | 1 | [Mario + Rabbids® Sparks of Hope](../../dm/games/0100317013770000/README.md) | Sparks of Hope's own init (Kingdom Battle has none) |
@@ -70,34 +71,35 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 ## Summary
 
-| Game | Cuts | Gates | Frame-step sites | Function-matched rules | Host rows | Binding |
-|---|---|---|---|---|---|---|
-| [ASTRAL CHAIN](#astral-chain) | 0 | 0 | 112 | 0 | 0 | `build` → `game` |
-| [Batman: Arkham Knight](#batman-arkham-knight) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
-| [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
-| [EA SPORTS FC 27](#ea-sports-fc-27) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
-| [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](#final-fantasy-crystal-chronicles-remastered-edition) | 8 | 0 | 0 | 0 | 0 | `build` → `engine` |
-| [FINAL FANTASY TACTICS - The Ivalice Chronicles](#final-fantasy-tactics---the-ivalice-chronicles) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
-| [Fire Emblem Engage](#fire-emblem-engage) | 1 | 0 | 0 | 0 | 0 | `build` → `engine` |
-| [Fire Emblem: Three Houses](#fire-emblem-three-houses) | 12 | 0 | 0 | 0 | 0 | `build` → `game`, `build` → `host` |
-| [Hyrule Warriors: Age of Calamity](#hyrule-warriors-age-of-calamity) | 0 | 0 | 3 | 0 | 0 | `build` → `game` |
-| [Luigi's Mansion 3](#luigis-mansion-3) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
-| [Mario + Rabbids Kingdom Battle](#mario--rabbids-kingdom-battle) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
-| [Mario + Rabbids® Sparks of Hope](#mario--rabbids-sparks-of-hope) | 7 | 0 | 0 | 0 | 0 | `build` → `game` ×2 |
-| [Monster Hunter Rise](#monster-hunter-rise) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
-| [Need For Speed™ Hot Pursuit Remastered](#need-for-speed-hot-pursuit-remastered) | 1 | 0 | 0 | 0 | 5 | `build` → `game`, `build` → `engine` |
-| [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](#nierautomata-the-end-of-yorha-edition-010056b015fe8000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
-| [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](#nierautomata-the-end-of-yorha-edition-0100b8e016f76000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
-| [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | `build` → `game` |
-| [Pokémon Brilliant Diamond](#pokémon-brilliant-diamond) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
-| [Subnautica](#subnautica) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
-| [Subnautica: Below Zero](#subnautica-below-zero) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
-| [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
-| [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
-| [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 5 | 0 | 0 | `build` → `game` ×2 |
-| [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
-| [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `build` → `game` |
-| [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
+| Game | Cuts | Gates | Frame-step sites | Display sites | Function-matched rules | Host rows | Binding |
+|---|---|---|---|---|---|---|---|
+| [ASTRAL CHAIN](#astral-chain) | 0 | 0 | 112 | 0 | 0 | 0 | `build` → `game` |
+| [Batman: Arkham Knight](#batman-arkham-knight) | 8 | 0 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
+| [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [Donkey Kong Bananza](#donkey-kong-bananza) | 0 | 0 | 0 | 10 | 0 | 0 | `build` → `game` |
+| [EA SPORTS FC 27](#ea-sports-fc-27) | 0 | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
+| [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](#final-fantasy-crystal-chronicles-remastered-edition) | 8 | 0 | 0 | 0 | 0 | 0 | `build` → `engine` |
+| [FINAL FANTASY TACTICS - The Ivalice Chronicles](#final-fantasy-tactics---the-ivalice-chronicles) | 2 | 0 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [Fire Emblem Engage](#fire-emblem-engage) | 1 | 0 | 0 | 0 | 0 | 0 | `build` → `engine` |
+| [Fire Emblem: Three Houses](#fire-emblem-three-houses) | 12 | 0 | 0 | 0 | 0 | 0 | `build` → `game`, `build` → `host` |
+| [Hyrule Warriors: Age of Calamity](#hyrule-warriors-age-of-calamity) | 0 | 0 | 3 | 0 | 0 | 0 | `build` → `game` |
+| [Luigi's Mansion 3](#luigis-mansion-3) | 0 | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
+| [Mario + Rabbids Kingdom Battle](#mario--rabbids-kingdom-battle) | 6 | 0 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [Mario + Rabbids® Sparks of Hope](#mario--rabbids-sparks-of-hope) | 7 | 0 | 0 | 0 | 0 | 0 | `build` → `game` ×2 |
+| [Monster Hunter Rise](#monster-hunter-rise) | 0 | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
+| [Need For Speed™ Hot Pursuit Remastered](#need-for-speed-hot-pursuit-remastered) | 1 | 0 | 0 | 0 | 0 | 5 | `build` → `game`, `build` → `engine` |
+| [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](#nierautomata-the-end-of-yorha-edition-010056b015fe8000) | 8 | 0 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
+| [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](#nierautomata-the-end-of-yorha-edition-0100b8e016f76000) | 8 | 0 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
+| [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | 0 | `build` → `game` |
+| [Pokémon Brilliant Diamond](#pokémon-brilliant-diamond) | 0 | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
+| [Subnautica](#subnautica) | 1 | 0 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [Subnautica: Below Zero](#subnautica-below-zero) | 1 | 0 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 0 | 1 | 0 | `game` |
+| [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 0 | 2 | 0 | `game` |
+| [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 5 | 0 | 0 | 0 | `build` → `game` ×2 |
+| [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | 0 | `build` → `game` |
+| [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | 0 | `build` → `game` |
 
 ## Games
 
@@ -253,6 +255,24 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **1.0.3 `main`** `df3766a2…` ([patches.py:10](../../dm/games/01004AB00A260000/patches.py#L10))
   - cut `+0x706fa4`: frame limiter target: mov w1,#30 → mov w1,#60 (main+0x707090 sleeps out 1000 / fps ms since the last frame)
   - cut `+0x667904`: frame update step: ldr s8,[x8,#0x6ec] (1/30) → ldr s8,[x8,#0x834] (1/60), passed to main+0x6a337c
+
+### Donkey Kong Bananza
+
+[Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md), `040074A01BF12000`, [patches.py](../../dm/games/040074A01BF12000/patches.py).
+
+- **`build` → `game`**, rendering, gap, checked: v458752 main disassembly and camera ownership, 2026-11-01; original-byte assertions and 2076 AArch64 emulation cases, including DrawInfo vtable exclusion and register preservation; onscreen layer DrawInfo ownership confirmed by runtime probes; paired projection restoration tested; Mac open/closed geometry visually validates title, loading, HUD, full background coverage and Skill selection anchors: Startup display dimensions, project-camera aspect and uniform UI fit. The game fixes its window and project camera to 16:9. The main DrawInfo projection fits UI uniformly with vertical inset during Calculate, preserving CPU coordinates. Reviewed full-canvas picture extents cover the extra height. Only reviewed offsets in v458752 are supported; function matching for other builds is not implemented.
+
+- **3.2.0 `main`** `e25c90c1…` ([patches.py:253](../../dm/games/040074A01BF12000/patches.py#L253))
+  - startup display `+0x47188`: root Calculate projection Y fit with paired restoration; offscreen cameras unchanged
+  - startup display `+0x47194`: root Calculate projection Y fit with paired restoration; offscreen cameras unchanged
+  - startup display `+0x2f8440`: reviewed full-canvas background pictures cover native height; UI coordinates remain authored
+  - startup display `+0x45d560`: startup window-scene dimensions; zero state preserves original dimensions
+  - startup display `+0x45d570`: startup window-scene dimensions; zero state preserves original dimensions
+  - startup display `+0x5399c0`: startup window-scene dimensions; zero state preserves original dimensions
+  - startup display `+0x5399d8`: startup window-scene dimensions; zero state preserves original dimensions
+  - startup display `+0x539cc8`: startup window-scene dimensions; zero state preserves original dimensions
+  - startup display `+0x5bf770`: startup window-scene dimensions; zero state preserves original dimensions
+  - startup display `+0x5bf780`: startup window-scene dimensions; zero state preserves original dimensions
 
 ### EA SPORTS FC 27
 

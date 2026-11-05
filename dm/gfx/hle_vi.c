@@ -2,6 +2,7 @@
 // Host: returns host static objects; when hooking up Metal, the native window corresponds to the front end's CAMetalLayer (front_metal_layer()).
 #include "../host/hle.h"
 #include <stdatomic.h>
+#include "nvn/nvn_hdr.h"
 
 static struct { uint32_t magic; } g_display = {0x50534944}, g_layer = {0x5259414c};
 static struct { uint32_t magic; void *layer; } g_native = {0x4e49574e, 0};
@@ -77,13 +78,16 @@ HLE_FORCE("_ZN2nn2vi8FinalizeEv", "display service shutdown; the host has no vi 
 
 // ---------- Switch 2 SDKs: HDR, VRR and extended swap intervals ----------
 // The SDK's versions check the display against its own default display object and forward the layer to vi2, whose layer object the host never made (Donkey Kong Bananza: a call
-// through null from SetLayerNextHdrContentGamutMetadata, main+0x2036f4). The host's output is SDR at a fixed refresh rate: no HDR output, no VRR, and the layer metadata has
-// nothing to apply to. HdrOutputFormat 0 is SDR; paper white is the BT.2408 reference, 203 nits, read only when HDR is on
-HLE_FORCE("_ZN2nn2vi21QueryDisplayHdrStatusEPbPNS0_15HdrOutputFormatEPtPKNS0_7DisplayE", "display HDR status: SDR output (the host presents SDR)", Result, h_vi_HdrStatus,
+// through null from SetLayerNextHdrContentGamutMetadata, main+0x2036f4). HDR is opt-in and requires a capable display and the float EDR present path.
+// Bananza's SDK 20.5.19 QueryHdrStatus (sdk+0x55bd60) defines on=(format==1), accepts only formats 0/1. The virtual HDR mastering display is 1000 nits; Core Animation tone maps it to the screen.
+HLE_FORCE("_ZN2nn2vi21QueryDisplayHdrStatusEPbPNS0_15HdrOutputFormatEPtPKNS0_7DisplayE", "display HDR status: EDR capability of the current host screen", Result, h_vi_HdrStatus,
           uint8_t *on, uint32_t *fmt, uint16_t *peak, const void *disp) {
-    (void)disp; if (on) *on = 0; if (fmt) *fmt = 0; if (peak) *peak = 0; return RES_OK; }
-HLE_FORCE("_ZN2nn2vi25QueryDisplayHdrPaperWhiteEPtPKNS0_7DisplayE", "display HDR paper white: 203 nits (BT.2408); HDR is off", Result, h_vi_PaperWhite, uint16_t *nits, const void *disp) {
-    (void)disp; if (nits) *nits = 203; return RES_OK; }
+    (void)disp; int enabled = dm_hdr_query();
+    if (on) *on = enabled; if (fmt) *fmt = enabled ? 1 : 0; if (peak) *peak = enabled ? DM_HDR_MASTERING_PEAK : 0;
+    static int last = -1; if (last != enabled) { LOG("vi HDR: %s, virtual peak %d nits, paper white %d nits", enabled ? "enabled (EDR display)" : "off", enabled ? DM_HDR_MASTERING_PEAK : 0, DM_HDR_PAPER_WHITE); last = enabled; }
+    return RES_OK; }
+HLE_FORCE("_ZN2nn2vi25QueryDisplayHdrPaperWhiteEPtPKNS0_7DisplayE", "display HDR paper white: 203 nits (BT.2408)", Result, h_vi_PaperWhite, uint16_t *nits, const void *disp) {
+    (void)disp; if (nits) *nits = DM_HDR_PAPER_WHITE; return RES_OK; }
 HLE_FORCE("_ZN2nn2vi24QueryDisplayVrrSupportedEPbPKNS0_7DisplayE", "display VRR: not supported (fixed refresh rate)", Result, h_vi_VrrSupported, uint8_t *on, const void *disp) {
     (void)disp; if (on) *on = 0; return RES_OK; }
 HLE_FORCE("_ZN2nn2vi23SetDisplayVrrCapabilityEPNS0_7DisplayEb", "display VRR capability: the host has no VRR", Result, h_vi_SetVrr, void *disp, unsigned on) {
@@ -93,11 +97,11 @@ HLE_FORCE("_ZN2nn2vi28SetLayerExtendedSwapIntervalEPNS0_5LayerEii", "layer exten
           void *layer, int a, int b) {
     (void)layer; static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("vi::SetLayerExtendedSwapInterval %d %d: no VRR on the host, the NVN swap interval stays", a, b); return RES_OK; }
 HLE_FORCE("_ZN2nn2vi30ClearLayerExtendedSwapIntervalEPNS0_5LayerE", "layer extended swap interval cleared", Result, h_vi_ExtSwapClear, void *layer) { (void)layer; return RES_OK; }
-HLE_FORCE("_ZN2nn2vi35SetLayerNextHdrContentGamutMetadataEPNS0_5LayerENS0_15HdrContentGamutE", "layer HDR metadata: SDR output, nothing to apply", Result, h_vi_HdrGamut, void *layer, int g) {
-    (void)layer; (void)g; return RES_OK; }
-HLE_FORCE("_ZN2nn2vi39SetLayerNextHdrToSdrToneMappingMetadataEPNS0_5LayerENS0_14HdrToneMappingE", "layer HDR metadata: SDR output, nothing to apply", Result, h_vi_HdrToneMap, void *layer, int m) {
+HLE_FORCE("_ZN2nn2vi35SetLayerNextHdrContentGamutMetadataEPNS0_5LayerENS0_15HdrContentGamutE", "layer HDR content gamut", Result, h_vi_HdrGamut, void *layer, int g) {
+    (void)layer; dm_hdr_gamut(g); return RES_OK; }
+HLE_FORCE("_ZN2nn2vi39SetLayerNextHdrToSdrToneMappingMetadataEPNS0_5LayerENS0_14HdrToneMappingE", "layer HDR-to-SDR policy: Core Animation maps the HDR mastering display to the output screen", Result, h_vi_HdrToneMap, void *layer, int m) {
     (void)layer; (void)m; return RES_OK; }
-HLE_FORCE("_ZN2nn2vi52SetLayerNextHdrExtendedContentLuminanceRangeMetadataEPNS0_5LayerEtt", "layer HDR metadata: SDR output, nothing to apply", Result, h_vi_HdrExtLum,
-          void *layer, uint32_t lo, uint32_t hi) { (void)layer; (void)lo; (void)hi; return RES_OK; }
-HLE_FORCE("_ZN2nn2vi52SetLayerNextHdrStandardContentLuminanceRangeMetadataEPNS0_5LayerEtt", "layer HDR metadata: SDR output, nothing to apply", Result, h_vi_HdrStdLum,
-          void *layer, uint32_t lo, uint32_t hi) { (void)layer; (void)lo; (void)hi; return RES_OK; }
+HLE_FORCE("_ZN2nn2vi52SetLayerNextHdrExtendedContentLuminanceRangeMetadataEPNS0_5LayerEtt", "layer HDR extended luminance range", Result, h_vi_HdrExtLum,
+          void *layer, uint32_t lo, uint32_t hi) { (void)layer; dm_hdr_luminance(1, (uint16_t)lo, (uint16_t)hi); return RES_OK; }
+HLE_FORCE("_ZN2nn2vi52SetLayerNextHdrStandardContentLuminanceRangeMetadataEPNS0_5LayerEtt", "layer HDR standard luminance range", Result, h_vi_HdrStdLum,
+          void *layer, uint32_t lo, uint32_t hi) { (void)layer; dm_hdr_luminance(0, (uint16_t)lo, (uint16_t)hi); return RES_OK; }

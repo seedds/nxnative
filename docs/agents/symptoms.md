@@ -367,6 +367,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - the submit thread's CPU samples dominated by `mtl_addr` / `mtl_gpu_addr` (vertex buffers in `draw`, uniform buffers in `encode_args`). → [Address to memory pool lookups by binary search](../reference/frame-rate.md#address-to-memory-pool-lookups-by-binary-search)
 - gameplay has low CPU clocks, large render submission wall time compared with thread CPU time, and default QoS (`0x15`) on the main guest thread while workers report user-interactive (`0x21`). → [Main guest thread keeps inherited default QoS](../reference/frame-rate.md#main-guest-thread-keeps-inherited-default-qos)
 - stalls of 30–60 ms about once a second, at 30 fps and at 60 (99th percentile 63–127 ms); the main thread waits 20–34 ms for the render thread once a second. → [Time-constraint computation declared below the thread's peaks](../reference/frame-rate.md#time-constraint-computation-declared-below-the-threads-peaks)
+- fullscreen Space transitions log a silent active display link, repeatedly enter rescue, and extend retry backoff to 60 seconds. → [Covered key windows do not trigger display-link rescue](../reference/frame-rate.md#covered-key-windows-do-not-trigger-display-link-rescue)
 
 ## NVN objects
 
@@ -577,6 +578,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - in a capture run every program links with no uniforms; the game's first `Shader:send` raises a Lua error and, on the Switch, its error handler quits (Any Lua error quits a LÖVE game). → [GL shaders put together at run time and captured](../reference/rendering.md#gl-shaders-put-together-at-run-time-and-captured)
 - an image-only fragment draw's writes disappear from the subresource also bound as its color attachment when the pass ends; other image layers retain their writes. → [Image stores into an attachment of their own pass](../reference/rendering.md#image-stores-into-an-attachment-of-their-own-pass)
 - read-only depth/stencil attachments are written back after every pass, and the periodic unwritten-store savings counter remains zero with the default configuration. → [Unwritten attachment stores without lookahead](../reference/rendering.md#unwritten-attachment-stores-without-lookahead)
+- blocky halos around Bananza's gold deposits and emissive objects at 4K output. → [Bloom upsampling retains higher mip levels](../reference/rendering.md#bloom-upsampling-retains-higher-mip-levels)
 
 ## Shaders
 

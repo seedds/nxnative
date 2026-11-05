@@ -333,3 +333,11 @@ coverage:
 	rm -rf $(B)/cov/prof
 	LLVM_PROFILE_FILE="$(call cov_profile,$(B)/cov)" $(MAKE) -i B=$(B)/cov SAN="$(COV_FLAGS)" run
 	@$(call cov_export,$(B)/cov)
+
+# Scene requests stay coherent across threads; startup rendering stays frozen.
+$(B)/t_native_display: t_native_display.c ../native_display.c ../native_display.h | $(B)
+	$(CLANG) -std=c11 -O1 -Wall -Wextra -Werror -pthread -I.. -o $@ t_native_display.c ../native_display.c -lm
+.PHONY: native-display
+run: native-display
+native-display: $(B)/t_native_display
+	@for height in 0 1 360 720 1080 2160 4294967295; do $(B)/t_native_display $$height || exit 1; $(B)/t_native_display $$height closed || exit 1; done

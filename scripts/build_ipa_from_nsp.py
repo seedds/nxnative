@@ -2593,6 +2593,12 @@ def main(args=None):
         except ValueError as e: raise BuildError(str(e)) from e
     # the app version is the packed game's display version: the update's control data when an update is packed (nx_extract saves it next to the RomFS), else the base game's
     app_version = nacp.version(game / 'control.nacp') or nacp.version(base / 'control.nacp')
+    if not app_version and not build_mismatch(game, pkg_ver, g):
+        # Dump folders may omit control data. Only a matching registered build
+        # with a numeric display version can supply the bundle version.
+        registered_version = g.builds().get(pkg_ver, {}).get('display', '')
+        if re.fullmatch(r'\d+(?:\.\d+){0,2}', registered_version):
+            app_version = registered_version
     if mac_pack and not (args.out or OUT_IPA): out_ipa = work.parent / f'{mac_app_name(app_name)}{"-provisional" if shadowed else ""}.app'
     if not mac or mac_pack: say(f'app name: {app_name}; version: {app_version or "1.0"}; bundle ID: {bundle_id}' + (f'; app: {out_ipa}' if mac_pack else ''))
     # the game language: Horizon gives the game one of the languages its control data lists (the packed version's, which an update may extend), so the one packed must be among them
@@ -2641,6 +2647,9 @@ def main(args=None):
         pkey = split_shaders(py, repo, [rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, oodle, dlc_roms, derive_dlc, derive_compute)
         ios = build_shaders(py, repo, sh, xlate, env, logs, g, pkey, mac)
     icon = next((d / 'icon.jpg' for d in (game, base) if (d / 'icon.jpg').exists()), None)   # the game icon nx_extract saved from the control data (English, icon.jpg); the packed version's first, then the base game's
+    if env.get('DM_ICON'):   # also applies to Mac apps and dumps without control data
+        icon = Path(os.path.expanduser(env['DM_ICON'])).resolve()
+        if not icon.is_file(): raise BuildError(f'app icon not found: {icon}')
     motion = MOTION if args.motion is None else args.motion
     env_file = build_env_file(work, args.env_file or DM_ENV_FILE, motion)
     if not motion: say('motion (gyro): off, DM_MOTION=0 is built in (on the iPhone, DM_MOTION=1 in the app\'s Documents/env.txt turns it back on)')

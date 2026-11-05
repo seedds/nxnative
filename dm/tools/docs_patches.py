@@ -258,9 +258,9 @@ def page():
         m = mods.get(g.id)
         if not m and g.id not in host_games: continue
         text = files[g.id].read_text() if m else ''
-        cuts, obs, fs, mc, caps = (getattr(m, k, {}) for k in ('CUTS', 'OBS', 'FRAME_STEP', 'MATCH_CUTS', 'CAPABILITIES'))
-        bids = list(dict.fromkeys([*cuts, *obs, *fs, *caps, *sorted(host_games.get(g.id, ()))]))
-        n_fs = 0; lines = [f'### {name(g)}', '', f'{note(g)}, `{g.id}`' + (f', {link(files[g.id])}' if m else '') + '.', '']
+        cuts, obs, fs, display, mc, caps = (getattr(m, k, {}) for k in ('CUTS', 'OBS', 'FRAME_STEP', 'DISPLAY', 'MATCH_CUTS', 'CAPABILITIES'))
+        bids = list(dict.fromkeys([*cuts, *obs, *fs, *display, *caps, *sorted(host_games.get(g.id, ()))]))
+        n_fs = n_display = 0; lines = [f'### {name(g)}', '', f'{note(g)}, `{g.id}`' + (f', {link(files[g.id])}' if m else '') + '.', '']
         es = list(bound(m, rel(files[g.id]), own=True)) if m else []
         for b in sorted(host_games.get(g.id, ())):
             for _, _, _, e in host.get(b, []):
@@ -282,6 +282,9 @@ def page():
                 for off, why in sites: lines.append(f'  - frame step `+{off:#x}`: {why}')
                 if fold: lines += ['', '  </details>', '']
                 if scale: lines.append('  - render scale stub (the launcher offers DM_RENDER_SCALE)')
+            if bid in display:
+                sites, _ = frame_step_sites(display[bid]); n_display += len(sites)
+                for off, why in sites: lines.append(f'  - startup display `+{off:#x}`: {why}')
             if caps.get(bid): lines.append(f'  - launcher capabilities: {", ".join(caps[bid])}')
             for p, n, what, _ in host.get(bid, []): lines.append(f'  - host {link(p, n)}: {what}')
         for module, rules in mc.items():
@@ -292,7 +295,7 @@ def page():
         n_host = sum(len(host.get(b, [])) for b in bids)
         kinds = {}
         for e in es: kinds[arrow(e)] = kinds.get(arrow(e), 0) + 1
-        summary.append(f'| [{name(g)}](#{slug(name(g))}) | {sum(map(len, cuts.values()))} | {sum(map(len, obs.values()))} | {n_fs} | '
+        summary.append(f'| [{name(g)}](#{slug(name(g))}) | {sum(map(len, cuts.values()))} | {sum(map(len, obs.values()))} | {n_fs} | {n_display} | '
                        f'{sum(len(v) for v in mc.values())} | {n_host} | {", ".join(k + (f" ×{n}" if n > 1 else "") for k, n in kinds.items())} |')
 
     orphans = [f'- {short(bid)}: {link(p, n)}: {what}' for bid, rows in host.items() if bid not in builds for p, n, what, _ in rows]
@@ -356,7 +359,7 @@ def page():
          '| Now → goal | Patch | Purpose | Status | Evidence | Games | Where | Why |', '|---|---|---|---|---|---|---|---|',
          *[f'| {arrow(e)} | {e["what"]} | {e["purpose"]} | {status(e)} | {checked(e)} | {len(ids) or "—"} | {"; ".join(w)} | {e["why"]} |' for e, w, ids in gaps], '',
          '## Summary', '',
-         '| Game | Cuts | Gates | Frame-step sites | Function-matched rules | Host rows | Binding |', '|---|---|---|---|---|---|---|',
+         '| Game | Cuts | Gates | Frame-step sites | Display sites | Function-matched rules | Host rows | Binding |', '|---|---|---|---|---|---|---|---|',
          *summary, '',
          '## Games', '', *sections,
          '## SDK cuts', '',

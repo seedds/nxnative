@@ -18,6 +18,7 @@
 #include <os/proc.h>   // os_proc_available_memory: for the memory readout line
 #endif
 #include "nvn_mtl.h"
+#include "nvn_hdr.h"
 #include "nvn_obj.h"
 #include "../tex/nvn_fmt_mtl.h"
 #include "../tex/nvn_deswizzle.h"
@@ -462,7 +463,7 @@ void mtl_init(void) {
     g_present_args = [g_dev newArgumentTableWithDescriptor:pad error:&ate];
     if (!g_present_args) MDIE("failed to create the present argument table: %s", ate.localizedDescription.UTF8String);
     for (int i = 0; i < 3; i++) {
-        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
+        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 12 options:MTLResourceStorageModeShared];
         if (!g_present_uv[i]) MDIE("failed to create present UV buffer[%d]", i);
         res_add(g_present_uv[i]);
     }
@@ -9200,14 +9201,15 @@ static int fb_mode(void) {
 }
 static inline void fb_pass_sync(void) { uint64_t p = g_stat_pass + !g_enc; if (p != g_fb_pass) { g_fb_pass = p; g_fb_wmask = g_fb_rmask = g_fb_dread = 0; } }
 // The snapshot of an attachment's level and layer: the cached one (valid: *fresh = 0) or a texture to copy into (*fresh = 1; the entry is then valid from this barrier and submission on)
-static fb_cache_t *fb_snap(uint64_t ser, int lv, int sl, MTLPixelFormat pf, NSUInteger w, NSUInteger h, int force, int *fresh) {
+static fb_cache_t *fb_snap(uint64_t ser, int lv, int sl, MTLPixelFormat pf, NSUInteger w, NSUInteger h, NSUInteger levels, int force, int *fresh) {
     fb_cache_t *e = NULL;
     for (int i = 0; i < 8 && !e; i++) if (g_fbc[i].snap && g_fbc[i].ser == ser && g_fbc[i].lv == lv && g_fbc[i].sl == sl) e = &g_fbc[i];
-    if (e && (e->snap.pixelFormat != pf || e->snap.width != w || e->snap.height != h)) { defer_obj_release(e->snap); e->snap = nil; }
+    if (e && (e->snap.pixelFormat != pf || e->snap.width != w || e->snap.height != h || e->snap.mipmapLevelCount != levels)) { defer_obj_release(e->snap); e->snap = nil; }
     if (e && e->snap && !force && e->bar == g_fb_bar && e->sub == g_sub_serial) { *fresh = 0; return e; }
     if (!e) { e = &g_fbc[g_fbc_next]; g_fbc_next = (g_fbc_next + 1) & 7;
-        if (e->snap && (e->snap.pixelFormat != pf || e->snap.width != w || e->snap.height != h)) { defer_obj_release(e->snap); e->snap = nil; } }
+        if (e->snap && (e->snap.pixelFormat != pf || e->snap.width != w || e->snap.height != h || e->snap.mipmapLevelCount != levels)) { defer_obj_release(e->snap); e->snap = nil; } }
     if (!e->snap) { MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf width:w height:h mipmapped:NO];
+        d.mipmapLevelCount = levels;
         d.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView; d.storageMode = MTLStorageModePrivate;
         e->snap = [g_dev newTextureWithDescriptor:d]; if (!e->snap) { e->ser = 0; return NULL; } res_add(e->snap); }   // full queue barriers separate a copy from the draws that read the earlier content
     e->ser = ser; e->lv = lv; e->sl = sl; e->bar = g_fb_bar; e->sub = g_sub_serial; *fresh = 1; return e;
@@ -9241,6 +9243,28 @@ static void fb_prepare(NvProg *pr) {
             NSUInteger tn = t.textureType == MTLTextureType2DArray || t.textureType == MTLTextureTypeCubeArray || t.textureType == MTLTextureType2DMultisampleArray ? t.arrayLength * (t.textureType == MTLTextureTypeCubeArray ? 6 : 1) : t.textureType == MTLTextureTypeCube ? 6 : 1;
             if (ts + tn <= (NSUInteger)sl || ts > (NSUInteger)sl) continue;   // nor its layer: not feedback
             if (g_fb_mode == 1 && !((wm | g_fb_wmask) >> k & 1)) { g_fb_rmask |= 1u << k; continue; }   // nothing in this pass has written it so far: read directly
+            // A 2D chain may be traversed in either direction. Bloom upsampling renders
+            // level n while reading n+1; truncating the view below n silently clamps that
+            // read to n-1. Snapshot the complete sampled view, retaining relative LODs.
+            if (t.mipmapLevelCount > 1 && t.textureType == MTLTextureType2D && tn == 1 && t.sampleCount == 1) {
+                int fresh;
+                fb_cache_t *e = fb_snap(ser, -(int)tl - 1, (int)ts, t.pixelFormat, t.width, t.height, t.mipmapLevelCount, g_fb_mode == 2, &fresh);
+                if (!e) continue;
+                if (fresh) {
+                    if (g_enc) rp_end();
+                    id<MTL4ComputeCommandEncoder> be = blit();
+                    for (NSUInteger level = 0; level < t.mipmapLevelCount; level++)
+                        enc_b_copy_texture(be, base, ts, tl + level, MTLOriginMake(0, 0, 0),
+                            MTLSizeMake(MAX(t.width >> level, 1ul), MAX(t.height >> level, 1ul), 1), e->snap, 0, level, MTLOriginMake(0, 0, 0));
+                }
+                if (!g_enc) fb_pass_sync();
+                id<MTLTexture> use = [e->snap newTextureViewWithPixelFormat:t.pixelFormat textureType:t.textureType
+                    levels:NSMakeRange(0, t.mipmapLevelCount) slices:NSMakeRange(0, 1) swizzle:t.swizzle];
+                if (!use) { RED_ONCE(108, "same-pass feedback sampling: cannot create mip-chain snapshot view"); continue; }
+                if (g_fb_use[g_fb_n] && g_fb_use[g_fb_n] != use) defer_obj_unref(g_fb_use[g_fb_n]);
+                g_fb_src[g_fb_n] = t; g_fb_use[g_fb_n] = use; g_fb_rid[g_fb_n] = use.gpuResourceID._impl; g_fb_n++;
+                continue;
+            }
             // Mip-chain passes (render level n while the view covers the chain, sampling a lower level): the draw samples a view of the levels below n instead, with the same base and
             // so the same level numbers. Sampling the full view read the attachment's level too: a linear mip filter fetches the next level even at weight 0, and on Apple's GPUs an
             // attached level read through a texture holds no defined data. Donkey Kong Bananza's environment cube (128x128, 8 levels, R11G11B10F, levels 1..7 each drawn from the one
@@ -9260,7 +9284,7 @@ static void fb_prepare(NvProg *pr) {
                 RED_ONCE(80, "same-pass feedback sampling: the sampled view is not a single-level 2D view of the attachment's level and layer (type %lu levels %lu+%lu layer %lu, attachment level %d layer %d, shader %s); left as is", (unsigned long)t.textureType, (unsigned long)tl, (unsigned long)t.mipmapLevelCount, (unsigned long)ts, lv, sl, fs->key);
                 continue; }
             NSUInteger w = MAX(base.width >> lv, 1ul), h = MAX(base.height >> lv, 1ul); int fresh;
-            fb_cache_t *e = fb_snap(ser, lv, sl, base.pixelFormat, w, h, g_fb_mode == 2, &fresh); if (!e) continue;
+            fb_cache_t *e = fb_snap(ser, lv, sl, base.pixelFormat, w, h, 1, g_fb_mode == 2, &fresh); if (!e) continue;
             id<MTLTexture> snap = e->snap;
             if (fresh) {
                 if (g_enc) rp_end();
@@ -11562,6 +11586,20 @@ static int present_crop_rect(id<MTLTexture> src, const int crop[4], NSUInteger r
     }
     r[0] = crop[0]; r[1] = crop[1]; r[2] = crop[2]; r[3] = crop[3]; return 1;
 }
+// The Switch 2 NVN display plugin maps RGB10A2 to PQ and RGBA16F to linear 80-nit scanout.
+// A negotiated HDR display plus a compatible swapchain is required: an HDR-capable monitor alone must not reinterpret SDR frames.
+static int present_hdr_encoding(id<MTLTexture> src) {
+    if (!dm_hdr_requested() || !dm_hdr_advertised()) return 0;
+    if (src.pixelFormat == MTLPixelFormatRGB10A2Unorm || src.pixelFormat == MTLPixelFormatBGR10A2Unorm) return 1;
+    if (src.pixelFormat == MTLPixelFormatRGBA16Float) return 2;
+    return 0;
+}
+static void present_color_params(float *v, id<MTLTexture> src, id<MTLTexture> dst) {
+    uint16_t lo, hi; dm_hdr_luminance_range(1, &lo, &hi);
+    v[0] = present_hdr_encoding(src);
+    v[1] = dm_hdr_requested() && dst.pixelFormat == MTLPixelFormatRGBA16Float;
+    v[2] = 0; v[3] = hi;
+}
 static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4]) {
     NSUInteger r[4]; if (!present_crop_rect(src, crop, r)) return 0;
     NSUInteger cx = r[0], cy = r[1], cw = r[2], ch = r[3];
@@ -11583,9 +11621,10 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
     [en setViewport:vp];
     [en setRenderPipelineState:g_blit_pso]; [en setFragmentTexture:present_raw_src(src) atIndex:0]; [en setFragmentSamplerState:g_blit_samp atIndex:0];
-    float uv[8] = {(float)cx / src.width, (float)cy / src.height, (float)cw / src.width, (float)ch / src.height,
+    float uv[12] = {(float)cx / src.width, (float)cy / src.height, (float)cw / src.width, (float)ch / src.height,
                    (cx + 0.5f) / src.width, (cy + 0.5f) / src.height, (cx + cw - 0.5f) / src.width, (cy + ch - 0.5f) / src.height};
     if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
+    present_color_params(uv + 8, src, dst);
     [en setFragmentBytes:uv length:sizeof uv atIndex:0];
     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [en endEncoding];
@@ -11666,7 +11705,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     double dw = dst.width, dh = dst.height;
     MTLViewport vp = present_viewport(r[2], r[3], dw, dh);
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
-    id<MTLTexture> tex = present_raw_src(src), up = fx ? fx_encode(fx, cb, tex, r, vp, dst.pixelFormat, fx == &g_fx_present) : nil;
+    id<MTLTexture> tex = present_raw_src(src), up = fx && !present_hdr_encoding(src) ? fx_encode(fx, cb, tex, r, vp, dst.pixelFormat, fx == &g_fx_present) : nil;
     if (up) { tex = up; r[0] = r[1] = 0; r[2] = up.width; r[3] = up.height; }   // the scaled picture, the viewport's size: drawn 1:1
     MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
     rp.colorAttachments[0].texture = dst;
@@ -11683,6 +11722,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     uv[0] = (float)cx / tw; uv[1] = (float)cy / th; uv[2] = (float)cw / tw; uv[3] = (float)ch / th;
     uv[4] = (cx + 0.5f) / tw; uv[5] = (cy + 0.5f) / th; uv[6] = (cx + cw - 0.5f) / tw; uv[7] = (cy + ch - 0.5f) / th;
     if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
+    present_color_params(uv + 8, src, dst);
     [g_present_args setAddress:uvb.gpuAddress atIndex:0];
     [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];
     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -11693,7 +11733,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
 // returns whether it was submitted. Completion reports the encoding kind, or PRESENT_FAILED on a GPU error. Resources remain resident and retained until GPU completion.
 static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTexture> out, void (^done)(int)) {
     id<MTL4CommandAllocator> al = [g_dev newCommandAllocator]; id<MTL4CommandBuffer> cb = [g_dev newCommandBuffer];
-    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 12 options:MTLResourceStorageModeShared];
     if (!al || !cb || !uvb) { MLOG("[RED] offscreen present: no command allocator or buffer"); return 0; }
     id<MTLTexture> raw = present_raw_src(src);
     fx_state fx = {0};
@@ -11731,6 +11771,55 @@ static void present_gpu_note(double s, int fx) {
     n[fx] = 0;
 }
 static double g_link_it_tin;   // Enqueue time of the frame the display-link callback is presenting (read and written only on the display-link thread)
+// Diagnostic isolation of drawable handoff: keep the game's Metal 4 rendering, but hand
+// the drawable to Core Animation through a classic command buffer. The shared event
+// orders the cross-queue read; AcquireTexture still waits for this read to complete.
+// This is not a default or a workaround: compare temporal/block corruption on device.
+static int present_classic_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *e = getenv("DM_TEST_PRESENT_CLASSIC"); enabled = e && atoi(e) != 0;
+        if (enabled) MLOG("DM_TEST_PRESENT_CLASSIC: diagnostic classic drawable handoff (game rendering remains Metal 4; bilinear present)");
+    }
+    return enabled;
+}
+static int present_classic_drawable(id<MTLTexture> src, id<CAMetalDrawable> dr, const int crop[4], double period, uint64_t ticket) {
+    // Diagnostic only: isolate the drawable duration hint from the unchanged
+    // guest/acquire pacing when investigating stationary-scene GPU slowdown.
+    static int no_duration = -1;
+    if (no_duration < 0) {
+        const char *e = getenv("DM_TEST_PRESENT_NO_DURATION");
+        no_duration = e && atoi(e) != 0;
+        if (no_duration) MLOG("DM_TEST_PRESENT_NO_DURATION: classic present without minimum duration; guest pacing unchanged");
+    }
+    if (no_duration) period = 0;
+    static id<MTLSharedEvent> ready;
+    if (!ready) ready = [g_dev newSharedEvent];
+    id<MTLCommandBuffer> cb = [g_q commandBuffer];
+    cb.label = @"Diagnostic classic present";
+    [g_q4 signalEvent:ready value:ticket];
+    [cb encodeWaitForEvent:ready value:ticket];
+    if (!present_encode(cb, src, dr.texture, crop)) return 0;
+    [dr addPresentedHandler:^(id<MTLDrawable> d) {
+        CFTimeInterval tt = d.presentedTime;
+        g_pres[ticket % PRING] = (pres_ent){ticket, tt > 0 ? tt : -1};
+    }];
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
+        if (c.error) MLOG("[RED] classic display command buffer error: %s", c.error.description.UTF8String);
+        pthread_mutex_lock(&g_pq_mu);
+        if (ticket > g_pq_done) g_pq_done = ticket;
+        g_pq_inflight--; present_gpu_note(c.GPUEndTime - c.GPUStartTime, 0);
+        pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
+    }];
+#if TARGET_OS_SIMULATOR
+    (void)period; [cb presentDrawable:dr];
+#else
+    if (period > 0) [cb presentDrawable:dr afterMinimumDuration:period]; else [cb presentDrawable:dr];
+#endif
+    pthread_mutex_lock(&g_pq_mu); g_pq_inflight++; pthread_mutex_unlock(&g_pq_mu);
+    [cb commit];
+    return 1;
+}
 static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts) {
     if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
     g_present_n++;
@@ -11785,6 +11874,9 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
 
     CAMetalLayer *layer = (__bridge CAMetalLayer *)front_metal_layer();
     if (!layer) return 0;
+    dm_hdr_layer_metadata((__bridge void *)layer, present_hdr_encoding(src) != 0);
+    static int last_hdr_mode = -1; int hdr_mode = present_hdr_encoding(src);
+    if (last_hdr_mode != hdr_mode) { MLOG("present HDR: %s, drawable format %lu, optical unit 80 nits", hdr_mode == 1 ? "Rec.2020 PQ" : hdr_mode == 2 ? "linear scRGB" : "SDR", (unsigned long)layer.pixelFormat); last_hdr_mode = hdr_mode; }
     if (g_present_layer_resident != layer) { [g_q4 addResidencySet:layer.residencySet]; g_present_layer_resident = layer; }
 #if TARGET_OS_OSX
     if (!layer.displaySyncEnabled) layer.displaySyncEnabled = YES;   // Windowed mode follows the display's vsync to prevent tearing
@@ -11795,6 +11887,9 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     id<CAMetalDrawable> dr = supplied ? supplied : [layer nextDrawable];
     if (!supplied) g_drawable_ns += now_ns() - dt0;
     if (!dr) return 0;
+    // The display-link path releases source tickets at commit, which is only safe on
+    // its single queue. This cross-queue diagnostic requires DM_PRESENT_LINK=0.
+    if (present_classic_enabled() && !supplied) return present_classic_drawable(src, dr, crop, period, ticket);
     int alloc_i = (int)(ticket % 3);
     if (g_present_alloc_fence[alloc_i]) {
         pthread_mutex_lock(&g_pq_mu);
@@ -11887,6 +11982,9 @@ static uint64_t g_rescue_back_at, g_rescue_back_ns = 3000000000ull, g_rescue_n;
 // but it is not counted as stuck and no failure is reported; the stall is measured from the later of "the most recent callback / the most recent activation" (A16 logs: 8–17 seconds inactive and 17 seconds in the background were both reported as "stuck in foreground")
 __attribute__((weak)) int dm_focus_now(void) { return 1; }   // The host's hle_oe.c provides the strong definition; when graphics unit tests do not link the host it is treated as always active
 __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
+// A covered macOS window can remain key while its display link is throttled.
+__attribute__((weak)) int front_present_visible(void) { return 1; }
+__attribute__((weak)) uint64_t front_present_visible_since(void) { return 0; }
 @implementation NvMetalDisplayLinkDelegate
 - (void)metalDisplayLink:(CAMetalDisplayLink *)link needsUpdate:(CAMetalDisplayLinkUpdate *)update {
     (void)link;
@@ -12247,7 +12345,10 @@ void mtl_present_wait(uint64_t tk) {
         pthread_cond_broadcast(&g_pq_cv);
         if (!g_stall_t0) { g_stall_t0 = last ? last : now; g_stall_drop = 0; g_stall_red = 0; g_stall_logged = 0; g_stall_n++; }
         g_stall_drop += n;
-        int active = dm_focus_now() == 1; uint64_t since = dm_focus_in_since(), from = g_stall_t0 > since ? g_stall_t0 : since;
+        int active = dm_focus_now() == 1 && front_present_visible();
+        uint64_t since = dm_focus_in_since(), visible_since = front_present_visible_since();
+        if (visible_since > since) since = visible_since;
+        uint64_t from = g_stall_t0 > since ? g_stall_t0 : since;
         uint64_t elapsed = now >= from ? now - from : 0;   // Focus can return after the earlier now sample, including while waiting for an in-flight present
         if (active && !g_stall_logged && elapsed >= STALL_NS) { g_stall_logged = 1;
             MLOG("display link silent for %.0f ms (active): dropping %llu queued frames not yet displayed, the game continues (stall #%llu; back to normal when the link returns)", (now - from) / 1e6, (unsigned long long)n, (unsigned long long)g_stall_n); }

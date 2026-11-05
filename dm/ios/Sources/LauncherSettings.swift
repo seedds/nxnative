@@ -104,11 +104,14 @@ final class LauncherModel: ObservableObject {
         }
     }
 
-    // DM_LAUNCHER=0: no screen, but the saved choices still apply (only DM_SAVED_CHOICES=0 ignores them); nothing is written
+    // DM_LAUNCHER=0 skips the screen, not its effective settings. Defaults are not
+    // stored, and a bundle's default can differ from the host's unset-env fallback
+    // (Bananza output height: launcher 2008, host 720). Do not change saved storage.
     func applySaved() {
         for s in settings where !fixed.contains(s.env) {
             let v = values[s.env] ?? s.def
-            if !s.isDefault(v) { setenv(s.env, v, 1); fputs("launcher: \(s.env)=\(v) (saved choice)\n", stderr) }
+            setenv(s.env, v, 1)
+            fputs("launcher: \(s.env)=\(v) (\(s.isDefault(v) ? "default" : "saved choice"))\n", stderr)
         }
     }
 }

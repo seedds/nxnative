@@ -195,10 +195,20 @@ int main(void) {
         for (int soft = VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1) ? 0 : 1; soft < 2; soft++) {
             setenv("DM_AV1_DAV1D", soft ? "1" : "0", 1);
             mav1 *a = mav1_new(); assert(!strcmp(mav1_backend(a), soft ? "dav1d" : "VideoToolbox"));
-            mav1_picture pic; assert(mav1_decode(a, av1, sizeof av1, &pic) == 1 && pic.w == 64 && pic.h == 64 && pic.matrix == 1 && !pic.full_range);   // no matrix in the stream: BT.601 at 64 lines
+            mav1_picture pic; assert((mav1_decode(a, av1, sizeof av1, &pic) == 1 || mav1_drain(a, &pic)) && pic.w == 64 && pic.h == 64 && pic.matrix == 1 && !pic.full_range);   // no matrix in the stream: BT.601 at 64 lines; dav1d's frame threads give a lone frame's picture at the end of the stream
             for (int y = 0; y < 64; y++) for (int x = 0; x < 64; x++) assert(abs(pic.y[(size_t)y * pic.ystride + x] - 81) <= 4);
             for (int y = 0; y < 32; y++) for (int x = 0; x < 64; x += 2) { assert(abs(pic.uv[(size_t)y * pic.uvstride + x] - 90) <= 6); assert(abs(pic.uv[(size_t)y * pic.uvstride + x + 1] - 240) <= 6); }
             mav1_reset(a); assert(mav1_decode(a, delimiter, sizeof delimiter, &pic) == 0);   // a new stream: nothing until its sequence header
+            mav1_free(a);
+        }
+        {   // dav1d decodes frames in parallel: a picture can come some packets after its own and two can come together, the end of the stream gives the rest, and each keeps its
+            // packet's timestamp, in order
+            setenv("DM_AV1_DAV1D", "1", 1);
+            mav1 *a = mav1_new(); mav1_picture pic; int64_t seen[24]; int ns = 0;
+            for (int i = 0; i < 20; i++)
+                if (mav1_decode_ts(a, av1, sizeof av1, 1000 * (int64_t)i, &pic) == 1) do { assert(ns < 24 && pic.w == 64); seen[ns++] = pic.ts; } while (mav1_next(a, &pic));
+            while (mav1_drain(a, &pic)) { assert(ns < 24 && pic.w == 64); seen[ns++] = pic.ts; }
+            assert(ns == 20); for (int i = 0; i < 20; i++) assert(seen[i] == 1000 * (int64_t)i);
             mav1_free(a);
         }
         unsetenv("DM_AV1_DAV1D");

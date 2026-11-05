@@ -423,7 +423,7 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 
 - **Symptom:** a game ends stuck after `[RED] GPU out of memory`, or the Mac itself freezes until the power button; on an 8 GB Mac, WindowServer's watchdog restarts the desktop. Now: `[RED] GPU memory guard: ... stopping the game before the driver cannot wire more`, the report of what the residency set holds, and an alert before the app quits.
 - **Cause:** GPU memory is wired, and the driver refuses to wire past `recommendedMaxWorkingSetSize`: IOGPUScheduler's `freeToWireMemory` fails there (aCidcOde, GitHub issue #1326). The submit thread then waits in the kernel, where the process cannot be killed: 7 minutes in that report. Nothing in the host looked at the working set.
-- **Fix:** `res_commit` (`nvn_mtl.m`) looks before each commit. It reads the larger of the set's `allocatedSize`, which leaves out what was never committed (measured: +0 MB for a new 64 MB texture until its commit), and the device's `currentAllocatedSize`, which counts it from its creation.
+- **Fix:** `res_commit` (`nvn_mtl.m`) looks before each commit, at the larger of what the commit would leave and the device's `currentAllocatedSize`. The set's `allocatedSize` leaves out what was never committed (measured: +0 MB for a new 64 MB texture until its commit), so what `res_add` added since counts too. The device's size counts a resource from its creation, in a set or not.
   - From 80% of the working set the submit thread lets go of what can go, at most every 30 frames (`guard_evict`): idle sharing entries nothing holds, finished deferred releases, finished spares, the staging the upload slots keep.
   - From 95% it first waits for that to land, then looks again. Still over: `guard_stop` logs the report (by kind, distinct pages under the shared buffers, textures by format, the largest objects) and calls `front_gpu_memory_stop`. The Mac app closes the graphics gate (`dm_gfx_suspend`), so no more GPU work grows what is held, leaves full screen, shows an alert and quits as ⌘Q does, so the launcher's work after the game runs. Without a window the host takes its graceful exit.
   - A commit that adds to the set is not made at all at the working set itself. Commits that only remove go through.
@@ -432,6 +432,14 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Found on:** The Legend of Zelda: Ocarina of Time (0400486024DEC000, profile in PR #1299); PRAGMATA on an 8 GB Mac (PR #1319).
 - **Check:** `t_res_guard`. In a game, a low `DM_NVN_RES_LIMIT_MB` ends the run with the report and exit code 0.
 - **Note:** the working set counts pools too, shared buffers over guest memory that add no bytes: a game's numbers look larger than its footprint. A 16 GB Mac has less margin: the report shows what filled it.
+
+### A game that stops submitting piles up retired pool buffers
+
+- **Symptom:** out of focus, with the picture still and the sound on, GPU allocated climbs at hundreds of MB a second with the residency set flat and swap following; back in focus the game stays frozen with no GPU error. The `memory up to frame` lines show a sawtooth of GPU allocated, 10 to 30 GB, with the set flat.
+- **Cause:** a retired pool buffer waits for the fence of the next submission, and only a submission's feedback drains the deferred queue. A game may stop submitting while its other threads go on: Ocarina of Time out of focus blocks its main thread in `oe::PopNotificationMessage` (main+0x3bc0354), and its streaming threads remade a run of about 10 MB of a virtual pool 70 times a second (`vrun_set`): 770 MB a second in the queue, and 6.7 GB of swap in 20 s, zero-copy as the buffers are.
+- **Fix:** a pool's buffer retired with no submission open waits only for what was committed (`mtl_pool_del`), and the guard's 100 ms timer drains the queue while no feedback is due (`defer_idle`). The timer runs with the guard off too.
+- **Found on:** The Legend of Zelda: Ocarina of Time (0400486024DEC000, profile in PR #1299).
+- **Check:** `t_res_guard`. In a game, `DM_CTL focus 2`, 30 s, `focus 1`: GPU allocated stays flat and the game goes on.
 
 ### A pipeline archive on an external drive is read into memory
 

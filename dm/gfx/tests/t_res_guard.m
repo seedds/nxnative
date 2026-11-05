@@ -30,14 +30,17 @@ static void levels(void) {
     CHECK(g_guard.stop == 950ull << 20 && g_guard.evict == 800ull << 20 && g_guard.wall == g_dev.recommendedMaxWorkingSetSize, "DM_NVN_RES_LIMIT_MB sets the stop and the eviction level under it");
     setenv("DM_NVN_RES_LIMIT_MB", "0", 1); memset(&g_guard, 0, sizeof g_guard);
 }
-// The set's own size leaves out what was never committed: the device's counts it from its creation, and that is what the check before the commit needs
+// The set's own size leaves out what was never committed, and the check before the commit needs it; the device's has what no set holds too
 static void commits(void) {
     id<MTLBuffer> a = [g_dev newBufferWithLength:64 << 20 options:MTLResourceStorageModePrivate], b = [g_dev newBufferWithLength:64 << 20 options:MTLResourceStorageModePrivate];
     res_add(a); res_commit();
-    uint64_t now = g_dev.currentAllocatedSize, set = g_res.allocatedSize;
+    uint64_t set = g_res.allocatedSize;
+    CHECK(atomic_load(&g_guard_set) == set, "after a commit the guard has the set's size");
+    uint64_t before = guard_used(); id<MTLBuffer> outside = [g_dev newBufferWithLength:256 << 20 options:MTLResourceStorageModePrivate];
+    CHECK(atomic_load(&g_guard_set) == set && guard_used() >= before + (256 << 20) && outside, "the device's size counts what no set holds");
     res_add(b);
     CHECK(g_res.allocatedSize == set, "an addition is not in the set's size before its commit");
-    CHECK(guard_used(g_res.allocatedSize) >= now, "the device's size counts it already");
+    CHECK(atomic_load(&g_guard_set) >= set + (64 << 20), "the guard has it already");
     g_guard.evict = 1; g_guard.stop = 2; g_guard.wall = 3;   // anything is past these
     res_commit();
     CHECK(g_res_dirty && g_res_grew && g_res.allocatedSize == set, "a commit that adds is not made past the working set");
@@ -89,6 +92,21 @@ static void stop(void) {
     atomic_store(&g_guard_lv, GUARD_STOP); guard_act(g_fence); guard_tick();
     CHECK(stops == 1, "once");
 }
+// A game out of focus submits nothing while its threads remake virtual pool runs: each old buffer goes with no fence to wait for, and the timer drains them. With a submission open it waits for it
+static void idle_pool_buffers(void) {
+    static uint8_t mem[1 << 16] __attribute__((aligned(16384))); settle();
+    mtl_pool_add(mem, sizeof mem);
+    __weak id<MTLBuffer> w; pthread_mutex_lock(&g_mu); for (int i = 0; i < g_npool; i++) if (g_pools[i].key == mem) w = g_pools[i].buf; pthread_mutex_unlock(&g_mu);
+    CHECK(w != nil, "the pool has its buffer");
+    mtl_pool_del(mem); guard_tick();
+    CHECK(!w, "between submissions a retired pool buffer goes at the next tick");
+    mtl_pool_add(mem, sizeof mem);
+    pthread_mutex_lock(&g_mu); for (int i = 0; i < g_npool; i++) if (g_pools[i].key == mem) w = g_pools[i].buf; pthread_mutex_unlock(&g_mu);
+    mtl_sub_begin(); mtl_pool_del(mem); guard_tick();
+    CHECK(w != nil, "with a submission open it stays");
+    mtl_sub_commit(); mtl_drain(); defer_drain();
+    CHECK(!w, "and goes behind that submission");
+}
 // A submit thread stuck in the driver holds the residency lock: the timer takes the game down without it. Run in a process of its own, as the stop happens once
 static void stuck(void) {
     g_guard.evict = 1; g_guard.stop = 2; g_guard.wall = UINT64_MAX;
@@ -105,7 +123,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     setenv("DM_NVN_RES_LIMIT_MB", "0", 1);   // this test sets the levels itself
     mtl_init();
     if (argc > 1) stuck();
-    else { levels(); commits(); eviction(); stop(); }
+    else { levels(); commits(); eviction(); idle_pool_buffers(); stop(); }
     printf("t_res_guard: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

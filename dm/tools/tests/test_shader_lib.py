@@ -119,6 +119,36 @@ class States(Base):
         shader_lib.remove_image(self.lib); shader_lib.remove_image(self.lib)
         self.assertEqual(os.listdir(self.root), [])
 
+    def test_pack_with_cached_entries(self):
+        # Packing directly from in-memory / callable cached entries with zero folder on disk
+        cached = {
+            'inputs.tsv': b'# head\ngame\t0100\ninputs\tabc\n',
+            'k_b.metallib': lambda: b'compiled_metallib',
+            'k_b.json': b'{"stage": "vs"}',
+            'k_b.metal': b'vertex void main0() {}',
+        }
+        self.assertTrue(shader_lib.pack(self.lib, self.said.append, cached=cached))
+        self.assertFalse(self.lib.exists())
+        self.assertTrue(self.image.is_file())
+        v = shader_lib.view(self.lib)
+        self.assertEqual((v / 'k_b.metallib').read_bytes(), b'compiled_metallib')
+        self.assertEqual((v / 'k_b.json').read_bytes(), b'{"stage": "vs"}')
+        self.assertEqual((v / 'k_b.metal').read_bytes(), b'vertex void main0() {}')
+        self.assertEqual(shader_lib.read_stamp(self.lib)['inputs'], 'abc')
+
+    def test_pack_with_folder_and_cached_entries(self):
+        # Loose folder files take precedence over cached entries and folder is removed
+        self.folder(stamp=True, k_b__metallib=b'disk_lib')
+        cached = {
+            'k_b.metallib': b'cached_lib',
+            'extra_b.metallib': b'extra_cached',
+        }
+        self.assertTrue(shader_lib.pack(self.lib, self.said.append, cached=cached))
+        self.assertFalse(self.lib.exists())
+        v = shader_lib.view(self.lib)
+        self.assertEqual((v / 'k_b.metallib').read_bytes(), b'disk_lib')
+        self.assertEqual((v / 'extra_b.metallib').read_bytes(), b'extra_cached')
+
 
 class LeaveOutPulling(Base):
     def names(self): return sorted(p.name for p in shader_lib.view(self.lib).iterdir())

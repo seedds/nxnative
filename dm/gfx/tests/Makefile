@@ -460,3 +460,7 @@ t_logic: t_logic.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_logic.m $(MTL_T_SRC) $(FW)
 check_t_logic: t_logic
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_logic.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_logic "$$work"
+
+t_raw_residency: t_raw_residency.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_raw_residency.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_raw_residency: RUN_ENV = MTL_DEBUG_LAYER=1

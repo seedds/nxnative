@@ -1830,3 +1830,10 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `t_host_msl` loads every library, with a swizzled `newLibraryWithSource:` that counts 0 calls, and finds all 24 clear functions. `t_builtin`, `t_geometry` and `t_deswz_gpu` use the built libraries.
 - **Build inputs:** Mac libraries use `MACOS_MIN` from `dm/mac/min_os.mk`, matching the host's deployment target; otherwise a newer SDK emits libraries older supported Macs cannot load and the host falls back to runtime compilation. Every build rechecks the compiler, SDK, deployment target and source contents, reusing the header only when all match. Installing the Metal toolchain after a source-only build therefore regenerates the libraries without a clean build.
 - **Build callers:** the NSP packer and regression harness generate the Mac header before checking their cached host executables, and include it in the host fingerprint. The standalone iOS compile check generates the iPhone header before its dry run, as the app build does. A dry run alone does not generate either header.
+
+### Temporal-scaler offset setters with older SDK headers
+
+- **Symptom:** Xcode 26.5 cannot compile the macOS/iOS 27 temporal-scaler offset properties used by `dlss_eval`, even though the calls are guarded by OS availability.
+- **Cause:** an availability check does not provide declarations absent from the compiling SDK.
+- **Fix:** declare the setter-only Objective-C protocol and send the same selectors under the existing OS 27 check. This changes the compile-time declaration, not the scaler's work or shader output.
+- **Found on:** the NVN memory fixture build on macOS 26.5.2, Xcode 26.5. The non-origin temporal-scaler path was not run.

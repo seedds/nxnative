@@ -46,6 +46,29 @@ class HalfImmediate(Alu):
         self.assertRegex(msl, r'\b2\.0\b')
 
 
+class SharedAtomics(Alu):
+    """ATOMS.INC / ATOMS.DEC (operations 3 and 4) had no case in EmitAtomicOp: the result was the constant 0 and shared memory was not touched. They are a compare-and-swap loop.
+    ATOMS.CAS with bit 87 clear is CUDA's atomicCAS: Rd is the old value; CAST (87) and CAST.SPIN (87, 88) keep Rd = 1 when the swap happened. A GPU cross-check of 400 shared
+    accesses against a reference (one thread, production options): INC / DEC / CAS 84 mismatches, none with the fix. Encodings built from the sm_86 oracle corpus, checked with nvdisasm"""
+    INC = (0x000fe20001800000, 0x000000141306738c)    # ATOMS.INC R6, [R19], R20
+    DEC = (0x000fe20002000000, 0x000000141306738c)    # ATOMS.DEC R6, [R19], R20
+    CAS = (0x000fe20000000015, 0x000000141306738d)    # ATOMS.CAS R6, [R19], R20, R21
+    SPIN = (0x000fe20001800015, 0x000000141306738d)   # ATOMS.CAST.SPIN R6, [R19], R20, R21
+
+    def test_inc_is_a_compare_and_swap_loop(self):
+        self.assertIn('atomic_compare_exchange', self.kept(self.INC, srcs=(19, 20)))
+
+    def test_dec_is_a_compare_and_swap_loop(self):
+        self.assertIn('atomic_compare_exchange', self.kept(self.DEC, srcs=(19, 20)))
+
+    def test_cas_gives_the_old_value(self):   # the success test of CAST.SPIN is not there
+        cas, spin = self.kept(self.CAS, srcs=(19, 20, 21)), self.kept(self.SPIN, srcs=(19, 20, 21))
+        self.assertIn('atomic_compare_exchange', cas)
+        success = r'bool _\d+ = int\(_\d+\) =='   # the old value compared with the expected one (not the swap loop's own test)
+        self.assertRegex(spin, success)
+        self.assertNotRegex(cas, success)
+
+
 class CompareFtz(Alu):
     """FSETP / FSET .FTZ (bit 80): a denormal operand compares as zero, as on NVIDIA; Apple's GPUs keep denormals. Mario Kart World's deferred lighting 635061c90d75a8d1
     normalises its four depth-weighted samples by 1 / sum only where FSETP.NEU.FTZ says sum != 0: a denormal sum passed, its reciprocal overflowed, and the NaN came out

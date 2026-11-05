@@ -1039,6 +1039,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md): 10,177 instructions in 7,590 programs. The fix made no visible difference in its tutorial area.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
 
+### ATOMS.INC / ATOMS.DEC, and ATOMS.CAS's result
+
+- **Symptom:** a shared-memory counter that never moves (`ATOMS.INC`, `ATOMS.DEC`: CUDA's atomicInc / atomicDec, the old value read as 0); a lock-free update on shared memory that loops or takes a wrong branch after `ATOMS.CAS` (its result 0 or 1 instead of the old value).
+- **Cause:** `AAtoms` hands operations 3 and 4 to `EmitAtomicOp`, which has no case for them: it logs "Invalid atomic operation" and gives the constant 0, with no access. `AAtomsCas` gave every compare-and-swap CAST.SPIN's result; nvdisasm names three forms by bit 87 (CAS clear, CAST set, CAST.SPIN with bit 88 too), and a plain CAS gives the old value (PTX `atom.cas`).
+- **Fix:** INC (`old >= b ? 0 : old + 1`) and DEC (`old == 0 || old > b ? b : old - 1`) are a compare-and-swap loop in `AAtoms`; `AAtomsCas` gives the old value when bit 87 is clear, 1 / 0 for CAST and CAST.SPIN as before (Fire Emblem Fortune's Weave's retry loop).
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`SharedAtomics`: the three fail on `main`). A GPU cross-check of 400 LDS / STS / ATOMS from an nvdisasm-validated sm_86 corpus, run as one-thread compute shaders with the production options (debug and reduced on, MSL 2.3), against a reference: 84 mismatches (all INC, DEC and CAS) to none; the same on encodings from real compiled code.
+- **Found on:** cross-checking the translator against nvdisasm and a reference interpreter; no game run. Also seen with `debug: false` (the AST optimizer, off by default): a shared store of 8 or 16 bits makes the translator throw, and an ATOMS whose result goes to RZ is dropped.
+
 ### A guarded load whose destination is its address
 
 - **Symptom:** none in the log: everything drawn with an engine's scene data lands on the first instance's transform, or at nothing. In the MSL, a bounds-checked read has a constant index (`vp_s2._m0[0]`) just after a comparison of the register it should use.

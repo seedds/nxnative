@@ -1,4 +1,4 @@
-// The mode devices of audio_sys.h, implemented on AVAudioConverter (mode 1) and the spatial mixer (modes 2/3).
+// The mode devices of audio_sys.h, implemented on AVAudioConverter (mode 1) and the spatial mixer (mode 2).
 // Everything a device needs is built at open time; the per-callback calls only copy and convert, so a call
 // never allocates on the real-time thread. Whether the spatial mixer exists at all is a per-OS question: an
 // open that fails is answered by the caller's fallback to its own fold, not by an error to the player.
@@ -89,7 +89,7 @@ static OSStatus ausm_input(void *ref, AudioUnitRenderActionFlags *fl, const Audi
     a->inPos += n;
     return noErr;
 }
-void *dm_ausm_open(const int *role, int tag, int binaural, unsigned slice) {
+void *dm_ausm_open(const int *role, int tag, unsigned slice) {
     AudioComponentDescription cd = { kAudioUnitType_Mixer, kAudioUnitSubType_SpatialMixer, kAudioUnitManufacturer_Apple, 0, 0 };
     AudioComponent comp = AudioComponentFindNext(NULL, &cd);
     if (!comp) { ARMERR("the spatial mixer component is missing on this OS"); return NULL; }
@@ -101,9 +101,12 @@ void *dm_ausm_open(const int *role, int tag, int binaural, unsigned slice) {
     a->obl = malloc(sizeof(AudioBufferList) + sizeof(AudioBuffer) * 2); a->obl->mNumberBuffers = 2;
     for (int i = 0; i < 2; i++) { a->obl->mBuffers[i].mNumberChannels = 1; a->obl->mBuffers[i].mDataByteSize = (UInt32)(a->slice * sizeof(float)); a->obl->mBuffers[i].mData = a->obuf[i]; }
     OSStatus e; UInt32 one = 1, mf = (UInt32)a->slice;
-    UInt32 alg = binaural ? kSpatializationAlgorithm_HRTF : kSpatializationAlgorithm_EqualPowerPanning;
+    // kSpatializationAlgorithm_UseOutputType is the value AVFoundation names Auto: the mixer picks the
+    // highest-quality algorithm for the hardware it renders to (an HRTF bed on headphones, panning on
+    // speakers), and its SpatialMixerOutputType stays at the default so the render follows the actual
+    // output device - the reason nothing here watches for headphones.
+    UInt32 alg = kSpatializationAlgorithm_UseOutputType;
     UInt32 src = kSpatialMixerSourceMode_AmbienceBed;                     // explicit: the default leaves a multi-channel bed unspatialized
-    UInt32 outType = binaural ? kSpatialMixerOutputType_Headphones : kSpatialMixerOutputType_BuiltInSpeakers;
     AudioStreamBasicDescription s = { .mSampleRate = 48000, .mFormatID = kAudioFormatLinearPCM,
         .mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagsNativeEndian | kAudioFormatFlagIsNonInterleaved,
         .mFramesPerPacket = 1, .mBytesPerFrame = sizeof(float), .mBytesPerPacket = sizeof(float), .mBitsPerChannel = 32 };
@@ -113,12 +116,11 @@ void *dm_ausm_open(const int *role, int tag, int binaural, unsigned slice) {
     SET(kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &mf, sizeof mf);   // one fixed slice for the instance's life: the caller banks whole slices around it
     s.mChannelsPerFrame = 2; SET(kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &s, sizeof s);
     AudioChannelLayout st = { .mChannelLayoutTag = kAudioChannelLayoutTag_Stereo };
-    SET(kAudioUnitProperty_AudioChannelLayout, kAudioUnitScope_Output, 0, &st, sizeof st);        // the output is stereo either way; the binaural label describes the render, it does not request more channels
+    SET(kAudioUnitProperty_AudioChannelLayout, kAudioUnitScope_Output, 0, &st, sizeof st);        // the output is stereo either way; the spatial render describes itself, it does not request more channels
     s.mChannelsPerFrame = 6; SET(kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &s, sizeof s);
     SET(kAudioUnitProperty_AudioChannelLayout, kAudioUnitScope_Input, 0, acl, (UInt32)aclSz);
     SET(kAudioUnitProperty_SpatializationAlgorithm, kAudioUnitScope_Input, 0, &alg, sizeof alg);
     SET(kAudioUnitProperty_SpatialMixerSourceMode, kAudioUnitScope_Input, 0, &src, sizeof src);
-    SET(kAudioUnitProperty_SpatialMixerOutputType, kAudioUnitScope_Global, 0, &outType, sizeof outType);
     AURenderCallbackStruct rcs = { ausm_input, a };
     SET(kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &rcs, sizeof rcs);
     free(acl); acl = NULL;

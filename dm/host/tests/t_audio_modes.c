@@ -60,8 +60,8 @@ int dm_conv_run(void *h, const int16_t *in, unsigned frames, int16_t *out) {
 }
 void dm_conv_close(void *h) { (void)h; conv_close_n++; }
 const char *dm_arm_last_err(void) { return "mocked device error"; }
-void *dm_ausm_open(const int *role, int tag, int binaural, unsigned slice) {
-    (void)role; (void)tag; (void)binaural; (void)slice;
+void *dm_ausm_open(const int *role, int tag, unsigned slice) {
+    (void)role; (void)tag; (void)slice;
     ausm_open_n++; mode_at_ausm_open = atomic_load_explicit(&g_mode, memory_order_relaxed);
     return ausm_fail_open ? NULL : &ausm_handle;
 }
@@ -163,16 +163,17 @@ int main(void) {
 
     // 1) The picker: setting words, the diagnostic number, the override and both fallbacks.
     CHECK(mode_pick() == AM_MATRIX, "no setting: the host's own fold");
-    setenv("DM_AUDIO_OUT", "wide", 1); CHECK(mode_pick() == AM_WIDE, "Audio output wide");
-    setenv("DM_AUDIO_OUT", "binaural", 1); CHECK(mode_pick() == AM_BINAURAL, "Audio output binaural");
+    setenv("DM_AUDIO_OUT", "spatial", 1); CHECK(mode_pick() == AM_SPATIAL, "Audio output spatial");
+    setenv("DM_AUDIO_OUT", "wide", 1); CHECK(mode_pick() == AM_SPATIAL, "Audio output wide, a name the one spatial mode still accepts");
+    setenv("DM_AUDIO_OUT", "binaural", 1); CHECK(mode_pick() == AM_SPATIAL, "Audio output binaural, likewise");
     setenv("DM_AUDIO_OUT", "sys", 1); CHECK(mode_pick() == AM_SYSCONV, "Audio output sys");
     setenv("DM_AUDIO_OUT", "matrix", 1); CHECK(mode_pick() == AM_MATRIX, "Audio output matrix");
     setenv("DM_AUDIO_OUT", "louder", 1); CHECK(mode_pick() == AM_MATRIX, "an unknown Audio output word falls back with a [RED] line");
     unsetenv("DM_AUDIO_OUT");
-    setenv("DM_DBG_AUDIO_MODE", "3", 1); CHECK(mode_pick() == AM_BINAURAL, "the diagnostic mode number");
+    setenv("DM_DBG_AUDIO_MODE", "2", 1); CHECK(mode_pick() == AM_SPATIAL, "the diagnostic mode number");
     setenv("DM_DBG_AUDIO_MODE", "9", 1); CHECK(mode_pick() == AM_MATRIX, "an unknown diagnostic number falls back");
     setenv("DM_DBG_AUDIO_MODE", "-1", 1); CHECK(mode_pick() == AM_MATRIX, "a negative diagnostic number falls back");
-    setenv("DM_DBG_AUDIO_MODE", "0", 1); setenv("DM_AUDIO_OUT", "wide", 1);
+    setenv("DM_DBG_AUDIO_MODE", "0", 1); setenv("DM_AUDIO_OUT", "spatial", 1);
     CHECK(mode_pick() == AM_MATRIX, "the diagnostic arm overrides the Audio output setting");
     unsetenv("DM_DBG_AUDIO_MODE"); unsetenv("DM_AUDIO_OUT");
 
@@ -205,15 +206,15 @@ int main(void) {
       CHECK(atomic_load(&a.arm_fail) == 0, "a healthy converter never counts fallbacks");
       arm_free(&a); }
     ausm_fail_open = 1;
-    { aout a = {.ch = 6}; arm_build(&a, AM_WIDE);
+    { aout a = {.ch = 6}; arm_build(&a, AM_SPATIAL);
       CHECK(!a.arm && a.armMode == AM_MATRIX && atomic_load(&a.arm_fail) == 0, "a spatial mixer that cannot build leaves the host's own fold"); }
     ausm_fail_open = 0;
 
     // 3) The slice: the device's own tick, floored at 16, never the last callback's size.
     atomic_store(&g_au_frames, 16);
-    { aout a = {.ch = 6}; arm_build(&a, AM_WIDE); CHECK(a.slice == 16, "the slice follows the granted tick (16 under the low-latency tier)"); }
+    { aout a = {.ch = 6}; arm_build(&a, AM_SPATIAL); CHECK(a.slice == 16, "the slice follows the granted tick (16 under the low-latency tier)"); }
     atomic_store(&g_au_frames, 512);
-    { aout a = {.ch = 6}; arm_build(&a, AM_WIDE);
+    { aout a = {.ch = 6}; arm_build(&a, AM_SPATIAL);
       CHECK(a.slice == 512, "the slice follows the granted tick");
       static int16_t in[273 * 6], out[273 * 2];
       gbuf b = {in, sizeof in, sizeof in};
@@ -223,9 +224,9 @@ int main(void) {
       au_render(&a, NULL, NULL, 0, 273, &bl);
       CHECK(a.slice == 512, "an oversized transient callback never becomes the slice"); }
     atomic_store(&g_au_frames, 8);
-    { aout a = {.ch = 6}; arm_build(&a, AM_WIDE); CHECK(a.slice == 16, "the slice floors at 16"); }
+    { aout a = {.ch = 6}; arm_build(&a, AM_SPATIAL); CHECK(a.slice == 16, "the slice floors at 16"); }
     atomic_store(&g_au_frames, 0);
-    { aout a = {.ch = 6}; arm_build(&a, AM_WIDE); CHECK(a.slice == RATE / 200, "without a granted tick the slice is the standard 5 ms"); }
+    { aout a = {.ch = 6}; arm_build(&a, AM_SPATIAL); CHECK(a.slice == RATE / 200, "without a granted tick the slice is the standard 5 ms"); }
 
     // 4) The banked slice: whole 16-frame slices delivered across callback sizes 100/16/5/240/273 with nothing
     //    repeated, dropped or reordered - the arbitrary-callback-size case the fixed-tick devices must survive,
@@ -238,7 +239,7 @@ int main(void) {
       gbuf b = {big_in, sizeof big_in, sizeof big_in};
       atomic_init(&a.state, STATE_STARTED); atomic_init(&a.vol, 0x3f800000u);
       a.q[0] = &b; atomic_init(&a.q_tail, 1);
-      arm_build(&a, AM_WIDE);
+      arm_build(&a, AM_SPATIAL);
       CHECK(a.slice == 16, "the banked run builds on the 16-frame slice");
       static const unsigned ticks[] = {100, 16, 5, 240, 273};
       unsigned done = 0;
@@ -281,7 +282,7 @@ int main(void) {
     CHECK(a51->backend == BK_AU && !atomic_load(&a51->hold_device), "the watchdog joined the real unit off the silent sink");
     unsigned stops0 = unit.stops, starts0 = unit.starts;
     ausm_open_n = 0; ausm_close_n = 0; mode_at_ausm_open = -1;
-    static const int modes[] = {AM_WIDE, AM_BINAURAL, AM_MATRIX};
+    static const int modes[] = {AM_SPATIAL, AM_MATRIX};
     for (unsigned s = 0; s < sizeof modes / sizeof *modes; s++) {
         dm_audio_set_mode(modes[s]);
         // Wait for the worker's WAIT_CALLBACK (which stamps the watchdog's callback baseline in the same
@@ -291,27 +292,26 @@ int main(void) {
         CHECK(unit.stops == stops0 + s + 1 && unit.starts == starts0 + s + 1, "every switch stops and starts the playing output once, the start on the host worker");
         if (s == 0) {
             CHECK(ausm_open_n == 1 && mode_at_ausm_open == AM_MATRIX, "the device builds while the old mode is still published: the switch lands after the rebuild");
-            CHECK(atomic_load(&g_mode) == AM_WIDE && !strcmp(dm_audio_mode_name(), "wide stereo"), "the new mode is published, with its name");
-            CHECK(a51->armMode == AM_WIDE && a51->arm && a51->slice == 240, "the 5.1 output carries the new device at the granted tick");
+            CHECK(atomic_load(&g_mode) == AM_SPATIAL && !strcmp(dm_audio_mode_name(), "spatial (auto)"), "the new mode is published, with its name");
+            CHECK(a51->armMode == AM_SPATIAL && a51->arm && a51->slice == 240, "the 5.1 output carries the new device at the granted tick");
             CHECK(a51->backend == BK_NULL && atomic_load(&a51->hold_device), "the silent sink covers the restart gap");
             CHECK(a2->armMode == AM_MATRIX && !a2->arm, "a stereo output is neither stopped nor given a device");
         }
-        if (s == 1) CHECK(ausm_open_n == 2 && ausm_close_n == 1, "switching spatial modes closes the previous device, not leaked");
-        if (s == 2) CHECK(a51->armMode == AM_MATRIX && !a51->arm && ausm_close_n == 2, "back to the host's own fold frees the device");
+        if (s == 1) CHECK(a51->armMode == AM_MATRIX && !a51->arm && ausm_close_n == 1, "back to the host's own fold frees the device");
         au_render(a51, NULL, NULL, 0, 16, &jbl);
         for (int i = 0; i < 2000 && a51->backend != BK_AU; i++) usleep(1000);
         CHECK(a51->backend == BK_AU, "the restarted unit takes the output back");
     }
     unsigned stops_before = unit.stops;
     dm_audio_set_mode(AM_MATRIX);
-    CHECK(unit.stops == stops_before && ausm_close_n == 2, "a mode the output already carries changes nothing");
+    CHECK(unit.stops == stops_before && ausm_close_n == 1, "a mode the output already carries changes nothing");
     // Suspended: the silent sink is the consumer, so the arm is rebuilt and no start runs until the resume.
     dm_audio_suspend(1);
     CHECK(unit.stops == stops_before + 1 && a51->backend == BK_NULL && a2->backend == BK_NULL, "suspend stops the real unit and hands both outputs to the silent sink");
     int opens_at = ausm_open_n; unsigned starts_susp = unit.starts;
-    dm_audio_set_mode(AM_WIDE);
+    dm_audio_set_mode(AM_SPATIAL);
     usleep(50000);
-    CHECK(unit.starts == starts_susp && ausm_open_n == opens_at + 1 && a51->armMode == AM_WIDE, "a suspended output's arm is rebuilt, and no start runs until the resume");
+    CHECK(unit.starts == starts_susp && ausm_open_n == opens_at + 1 && a51->armMode == AM_SPATIAL, "a suspended output's arm is rebuilt, and no start runs until the resume");
     dm_audio_suspend(0);
     for (int i = 0; i < 2000 && (a51->start_phase != AU_WAIT_CALLBACK || a2->start_phase != AU_WAIT_CALLBACK); i++) usleep(1000);
     CHECK(unit.starts == starts_susp + 2, "the resume restarts both outputs' units on the host worker");
@@ -323,7 +323,7 @@ int main(void) {
     for (int i = 0; i < 2000 && a51->backend != BK_NONE; i++) usleep(1000);
     CHECK(a51->backend == BK_NONE, "stop leaves no consumer on the output");
     dm_audio_set_mode(AM_MATRIX);
-    CHECK(unit.stops == stops_before + 2 && unit.starts == starts_susp + 2 && ausm_open_n == opens_at + 1 && ausm_close_n == 3, "a stopped output's arm is rebuilt without a stop or a start");
+    CHECK(unit.stops == stops_before + 2 && unit.starts == starts_susp + 2 && ausm_open_n == opens_at + 1 && ausm_close_n == 2, "a stopped output's arm is rebuilt without a stop or a start");
     dm_audio_set_mode(-1);
     CHECK(atomic_load(&g_mode) == AM_MATRIX && a51->armMode == AM_MATRIX, "an unknown mode number changes nothing");
     CHECK(!strcmp(dm_audio_mode_name(), "matrix"), "the name follows the mode in effect");

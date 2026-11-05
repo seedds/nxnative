@@ -17,8 +17,8 @@ GAME_H = gen/$(GAME)/game_profile.h
 include ../mac/min_os.mk
 CFLAGS=-O1 -g -Wall -Wno-unused-function -mmacosx-version-min=$(MACOS_MIN)
 # Service-layer takeover hle_*.c files are included by wildcard: adding a file does not touch this line (avoids merge conflicts)
-# The two named .m entries besides memstat.m/haptics_apple.m are deliberate: audio_sys.m serves both platforms, audio_route_mac.m is Mac-only (its _mac name keeps it out of iOS)
-SRC=main.c loader.c hle.c crash.c probe.c thread.c save_sync.c memstat.m haptics_apple.m audio_sys.m audio_route_mac.m $(sort $(wildcard hle_*.c)) front_mac.m web_apple.m entry.S
+# The named .m entry besides memstat.m/haptics_apple.m is deliberate: audio_sys.m serves both platforms (the spatial bed included), so it needs no per-OS split
+SRC=main.c loader.c hle.c crash.c probe.c thread.c save_sync.c memstat.m haptics_apple.m audio_sys.m $(sort $(wildcard hle_*.c)) front_mac.m web_apple.m entry.S
 # NVN null device + nn::vi + the Vulkan layer (dm/gfx/)
 # Sources under dm/gfx, dm/gfx/nvn, dm/gfx/tex, dm/gfx/vk and dm/gfx/gl are included by wildcard (tests/ and metal/ do not go into the host): adding a file does not touch this line
 GFX=$(sort $(wildcard ../gfx/*.c ../gfx/nvn/*.c ../gfx/nvn/*.m ../gfx/nvn/*.S ../gfx/tex/*.c ../gfx/tex/*.m ../gfx/vk/*.m ../gfx/gl/*.m))

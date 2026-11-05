@@ -146,6 +146,8 @@ save-sync: $(B)/t_save_sync $(B)/t_save_sync_metadata
 # hle_audio.c's mode devices live in ../audio_sys.m (Objective-C): every test that compiles hle_audio.c links it and its frameworks
 $(B)/t_audio: t_audio.c ../hle_audio.c ../audio_sys.m ../audio_sys.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -fobjc-arc -o $@ t_audio.c ../audio_sys.m ../hle_bigstack.c -framework AudioToolbox -framework AVFoundation -framework CoreAudio -framework CoreFoundation
+$(B)/t_output_stream: t_output_stream.c ../hle_audio.c ../audio_sys.m ../audio_sys.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -fobjc-arc -o $@ t_output_stream.c ../audio_sys.m ../hle_bigstack.c -framework AudioToolbox -framework AVFoundation -framework CoreAudio -framework CoreFoundation
 $(B)/t_audio_spsc: t_audio_spsc.c ../hle_audio.c ../audio_sys.m ../audio_sys.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -fobjc-arc -o $@ t_audio_spsc.c ../audio_sys.m ../hle_bigstack.c -framework AudioToolbox -framework AVFoundation -framework CoreAudio -framework CoreFoundation
 $(B)/t_audio_stats: t_audio_stats.c ../hle_audio.c ../audio_sys.m ../audio_sys.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
@@ -163,10 +165,6 @@ $(B)/t_audio_spsc_tsan: t_audio_spsc.c ../hle_audio.c ../audio_sys.m ../audio_sy
 $(B)/t_audio_modes: t_audio_modes.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../audio_sys.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_audio_modes.c ../hle_bigstack.c -framework AudioToolbox
 run: $(B)/t_audio_modes
-# The route's decisions (the first verdict, wide <-> binaural, the never-overridden modes, the off switch) with the verdict forced and dm_audio_set_mode/mode/name stubbed: no audio hardware, no hle_audio.c
-$(B)/t_audio_route: t_audio_route.m ../audio_route_mac.m ../audio_route_mac.h ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -fobjc-arc -o $@ t_audio_route.m -framework CoreAudio -framework Foundation
-run: $(B)/t_audio_route
 run: $(B)/t_fpslock
 $(B)/t_fpslock: t_fpslock.c ../hle_fpslock.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wno-unused-function $(GINC) -o $@ t_fpslock.c

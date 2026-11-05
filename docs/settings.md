@@ -5,7 +5,7 @@ The screen before the game starts shows the settings the game supports. A settin
 - [Tested defaults](#tested-defaults)
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
-- [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Audio latency](#audio-latency), [Audio output](#audio-output), [Headphone auto-switch](#headphone-auto-switch), [Reset to tested defaults](#reset-to-tested-defaults)
+- [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Audio latency](#audio-latency), [Audio output](#audio-output), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [In-game menu](#in-game-menu)
 - [TV](#tv)
@@ -211,11 +211,7 @@ How long the audio device's own buffer is. **Standard** keeps the tested request
 
 ### Audio output
 
-How a 5.1 game's sound reaches the stereo device. **Original matrix** folds the six channels with the host's own coefficients — the tested default. **System downmix** hands the fold to the system's converter. **Wide stereo** renders the six channels through the spatial mixer's equal-power bed, which spreads the rear channels over the speakers; **Binaural** renders the same bed with HRTF, made for headphones. A mode whose device the system does not offer (or that produces nothing) falls back to the original matrix, so a game never goes silent; the log's `audio #N device callbacks` line reports the mode in effect and any fallbacks. The choice composes with Audio latency: any mode works at either buffer size.
-
-### Headphone auto-switch
-
-With **Audio output** set to Wide stereo or Binaural, the Mac follows headphone plug and unplug: headphones choose Binaural, speakers choose Wide stereo. It is Mac-only, and it never touches a mode you picked outside those two. The switch follows the hardware from the start; turn it off to keep the mode you picked.
+How a 5.1 game's sound reaches the stereo device. **Original matrix** folds the six channels with the host's own coefficients — the tested default. **System downmix** hands the fold to the system's converter. **Auto (system)** renders the six channels through one spatial-mixer bed with `kSpatializationAlgorithm_UseOutputType` — the value AVFoundation calls Auto: the mixer itself renders for the output hardware it sees, an HRTF bed on headphones and panning over the speakers, so there is no headphone watching and nothing to switch. A mode whose device the system does not offer (or that produces nothing) falls back to the original matrix, so a game never goes silent; the log's `audio #N device callbacks` line reports the mode in effect and any fallbacks. The choice composes with Audio latency: any mode works at either buffer size.
 
 ### Reset to tested defaults
 
@@ -285,7 +281,6 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Hold frames when late | `DM_FPS_HOLD` | `on`, `off` |
 | Performance HUD | `DM_METAL_HUD` | `1`, `0` |
 | Audio latency | `DM_AUDIO_LATENCY` | `standard` about 5 ms, `low` 16-frame buffers |
-| Audio output | `DM_AUDIO_OUT` | `matrix`, `sys`, `wide`, `binaural` |
-| Headphone auto-switch (Mac) | `DM_AUDIO_HP_AUTO` | `1`, `0` |
+| Audio output | `DM_AUDIO_OUT` | `matrix`, `sys`, `spatial` |
 
 `DM_LAUNCHER=0` skips the settings screen; the choices you saved there still apply. `DM_SAVED_CHOICES=0` starts with the tested defaults and keeps your saved choices for later. How the settings are listed for each game: [dm/games/settings.tsv](../dm/games/settings.tsv).

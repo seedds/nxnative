@@ -7,6 +7,7 @@
 #include <signal.h>
 #include <unistd.h>
 void hlecount_flush(void); void dm_rec_finish(void);
+__attribute__((weak)) void front_controller_shutdown(void) {}
 void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg) {
     static _Atomic int once; if (atomic_exchange(&once, 1)) return;
     uint64_t t0 = now_ns(); LOG("received %s: graceful exit", why);
@@ -15,6 +16,7 @@ void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg) {
     hlecount_flush();                               // DM_HLECOUNT: _exit does not run atexit, write a copy here
     dm_rec_finish();                                // DM_REC: the held state and the buffered steps (hle_hid.c)
     dm_cheats_exit();                               // a clean exit: no safe mode for the cheats at the next launch (atexit does not run either)
+    front_controller_shutdown();
     dm_audio_suspend(1);
     dm_gfx_suspend(1);
     LOG("graceful exit done (%.3f s)", (now_ns() - t0) / 1e9);

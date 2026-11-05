@@ -1227,8 +1227,11 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             SpvInstruction one = context.Constant(context.TypeFP32(), 1.0f);
             SpvInstruction minusOne = context.Constant(context.TypeFP32(), -1.0f);
             SpvInstruction zero = context.Constant(context.TypeFP32(), 0.0f);
-            SpvInstruction xLut = context.ConstantComposite(v4float, one, minusOne, one, zero);
-            SpvInstruction yLut = context.ConstantComposite(v4float, one, one, minusOne, one);
+            // nxnative: FSWZADD's per-lane operations are ADD = -a - b, SUBR = a - b, SUB = b - a, MOV2 = -b (as Eden's fswzadd_lut_a / _b and nouveau's DFDX lowering,
+            // which passes the SHFL.BFLY partner as a and the lane's own value as b). The old tables were the negation of these, so every quad derivative built from
+            // FSWZADD (Donkey Kong Bananza's TXD gradients, masks 0x99 / 0xa5 after SHFL.BFLY 1 / 2) came out with the wrong sign
+            SpvInstruction xLut = context.ConstantComposite(v4float, minusOne, one, minusOne, zero);
+            SpvInstruction yLut = context.ConstantComposite(v4float, minusOne, minusOne, one, minusOne);
 
             SpvInstruction three = context.Constant(context.TypeU32(), 3);
 

@@ -11,11 +11,12 @@ import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name == 'hmma_msl')
-            or (isinstance(n, ast.Assign) and any(getattr(t, 'id', None) == 'HMMA_BODY' for t in n.targets))]
+selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in ('hmma_msl', 'hmma_tensor_msl'))
+            or (isinstance(n, ast.Assign) and any(getattr(t, 'id', None) in ('HMMA_BODY', 'HMMA_SIMDGROUP', 'HMMA_TENSOR', 'HMMA_TENSOR_INCLUDES') for t in n.targets))]
 scope = {'re': re}
 exec(compile(ast.Module(body=selected, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), scope)
 hmma_msl = scope['hmma_msl']
+hmma_tensor_msl = scope['hmma_tensor_msl']
 
 HEAD = '''#include <metal_stdlib>
 #include <simd/simd.h>
@@ -128,6 +129,14 @@ class HmmaRewrite(unittest.TestCase):
         src = HEAD + KERNEL.replace('dmsh_hmma16816_f16(l, blk, a0, a1, a2, a3, b0, b1, c0, c1, d1, scr)', 'a0')
         self.assertEqual(hmma_msl(src), src)
 
+    def test_tensor_variant(self):   # <key>_bt: the same block, the product through Metal 4 tensor operations
+        out = hmma_tensor_msl(hmma_msl(HEAD + HELPER + KERNEL))
+        self.assertNotIn('simdgroup_multiply_accumulate(', out)
+        self.assertIn('matmul2d<mm, metal::execution_simdgroup>().run(ta, tb, tc);', out)
+        self.assertIn('#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>', out)
+        self.assertIn('return as_type<int>(d0);', out)
+        self.assertIsNone(hmma_tensor_msl(HEAD + KERNEL.replace('dmsh_hmma16816_f16(l, blk, a0, a1, a2, a3, b0, b1, c0, c1, d1, scr)', 'a0')))
+
     def test_unexpected_signature_refused(self):
         with self.assertRaises(ValueError):
             hmma_msl(HEAD + HELPER.replace('thread const int& _42970, ', ''))
@@ -135,10 +144,14 @@ class HmmaRewrite(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which('xcrun') and shutil.which('clang'), 'needs Xcode')
 class HmmaOnGpu(unittest.TestCase):
-    def test_matches_reference(self):
+    def test_matches_reference(self): self.run_on_gpu(hmma_msl(HEAD + HELPER + KERNEL))
+
+    def test_tensor_matches_reference(self): self.run_on_gpu(hmma_tensor_msl(hmma_msl(HEAD + HELPER + KERNEL)))
+
+    def run_on_gpu(self, msl):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
-            (d / 'h.metal').write_text(hmma_msl(HEAD + HELPER + KERNEL))
+            (d / 'h.metal').write_text(msl)
             subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', str(d / 'h.metal'), '-o', str(d / 'h.air')], check=True)
             subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(d / 'h.air'), '-o', str(d / 'h.metallib')], check=True)
             (d / 'run.m').write_text(RUNNER)

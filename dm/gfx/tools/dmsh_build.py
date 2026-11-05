@@ -75,6 +75,18 @@ HMMA_BODY = '''{
     %(d1)s = as_type<%(dt)s>(d1);
     return as_type<%(rt)s>(d0);
 }'''
+# The same product through Metal 4's tensor operations (MetalPerformancePrimitives matmul2d, one SIMD-group) over the same block: on a GPU with neural accelerators (Apple10, M5)
+# they run there. Extents are (columns, rows): A (k 16, m 16), B (k 16, n 8) transposed, C (n 8, m 16). A second library, <key>_bt (hmma_tensor_msl), holds it; the host loads it
+# on Apple10 GPUs only (nvn_mtl.m shader_load), so other GPUs keep simdgroup_matrix. On an M5: 1.57 ns a SIMD-group against 1.84, and Donkey Kong Bananza's upscaler 3.82 → 3.00 ms
+HMMA_SIMDGROUP = HMMA_BODY[HMMA_BODY.index('    simdgroup_half8x8 a00'):HMMA_BODY.index('ulong2(0, 8));\n    simdgroup_barrier') + len('ulong2(0, 8));')]
+HMMA_TENSOR = '''    {
+        metal::tensor<threadgroup half, metal::extents<int32_t, 16, 16>, metal::tensor_inline> ta(h, metal::extents<int32_t, 16, 16>());
+        metal::tensor<threadgroup half, metal::extents<int32_t, 16, 8>, metal::tensor_inline> tb(h + 256, metal::extents<int32_t, 16, 8>());
+        metal::tensor<threadgroup half, metal::extents<int32_t, 8, 16>, metal::tensor_inline> tc(h + 384, metal::extents<int32_t, 8, 16>());
+        constexpr auto mm = mpp::tensor_ops::matmul2d_descriptor(16, 8, 16, false, true, false, mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+        mpp::tensor_ops::matmul2d<mm, metal::execution_simdgroup>().run(ta, tb, tc);
+    }'''
+HMMA_TENSOR_INCLUDES = '#include <metal_tensor>\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n'
 # A store only the very first invocation of a dispatch makes (a compute shader's preamble: `if (-local.x == workgroup.x << log2(local size)) buffer[k] = value`). Hoian_Proc in Splatoon Raiders resets its append counter
 # that way, with the other invocations adding to the counter at their end, hundreds of instructions later. On the Switch the first workgroup starts ahead of them. Apple's GPUs start workgroups in no order: a workgroup that had appended before
 # the reset lost its plants to the next one's, a different few each frame, and they flickered. So the store leaves the shader and the host makes it, in order, before the dispatch (the reflection's first_store, nvn_mtl.m). Only this exact
@@ -187,6 +199,10 @@ def hmma_msl(msl):
         if depth == 0: break
     else: raise ValueError('dmsh_hmma16816_f16: body not closed')
     return msl[:start] + HMMA_BODY % v + msl[i + 1:]
+def hmma_tensor_msl(msl):   # the <key>_bt source: hmma_msl's output with the product through Metal 4 tensor operations (see HMMA_TENSOR); None for a shader with no HMMA
+    if HMMA_SIMDGROUP not in msl: return None
+    if msl.count(HMMA_SIMDGROUP) != 1 or '#include <metal_stdlib>\n' not in msl: raise ValueError('dmsh_hmma16816_f16: unexpected rewritten body')
+    return msl.replace(HMMA_SIMDGROUP, HMMA_TENSOR).replace('#include <metal_stdlib>\n', '#include <metal_stdlib>\n' + HMMA_TENSOR_INCLUDES, 1)
 # Border colours: Maxwell's sampler takes any RGBA border colour, Metal's only transparent black, opaque black or opaque white, and the host's sampler gets the nearest of them
 # (nvn_border.h). A filtered sample is linear in the border colour, r = Σ w·texel + w_border·B, so two samples through samplers that differ only in their border colour give the rest:
 # with Metal colours Bn (the sampler) and Bw (its twin), r = s_n + (s_w - s_n)·k, k = (B - Bn) / (Bw - Bn) per channel. Each sampler member a shader samples gets a twin member
@@ -316,7 +332,7 @@ def cache_outputs(key, digest, cached=False):
         required = [key + '_b.json'] + ([key + '_b.metal'] if label == 'mac' else [])
         if label in TARGETS: required.append(key + '_b.metallib')
         base = os.path.join(root, label) if cached else directory
-        names = required + [key + s + ext for s in ('_bg0', '_bg1', '_bg2', '_bg3', '_bg4', '_bgv', '_bl0', '_bl1', '_bl3') for ext in ('.metallib', '.json', '.metal')
+        names = required + [key + s + ext for s in ('_bg0', '_bg1', '_bg2', '_bg3', '_bg4', '_bgv', '_bl0', '_bl1', '_bl3', '_bt') for ext in ('.metallib', '.json', '.metal')
                             if (label == 'mac' or ext != '.metal') and (ext != '.metallib' or label in TARGETS)]
         found = [n for n in names if os.path.exists(os.path.join(base, n))]
         if not all(n in found for n in required): return None
@@ -1427,6 +1443,13 @@ def finish(key, w, j, c1):
         try: compile_targets()
         except subprocess.CalledProcessError as e: return 'metal failed', str(e)[:160], None
     clone(msl, os.path.join(out, key + '_b.metal'))
+    tensor = None   # the HMMA product through Metal 4 tensor operations, a library of its own for Apple10 GPUs (see HMMA_TENSOR); a shader that does not build with it keeps only <key>_b
+    try: tsrc = hmma_tensor_msl(open(msl).read()) if 'mac' in TARGETS else None
+    except ValueError as e: return 'HMMA rewrite failed', str(e)[:160], None
+    if tsrc:
+        tmsl = os.path.join(w, key + '_bt.metal'); open(tmsl, 'w').write(tsrc)
+        try: MTL.compile('mac', tmsl, os.path.join(out, key + '_bt.metallib')); tensor = key + '_bt'
+        except subprocess.CalledProcessError: pass
     entry = re.search(r'(vertex|fragment|kernel)\s+\S+\s+(\w+)\s*\(', src)
     dr = drv_reads(src)
     try: binds = reflect(key, mesh['kind'] if mesh else j['stage'], src, res)
@@ -1442,7 +1465,7 @@ def finish(key, w, j, c1):
             'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr, mesh['kind'] if mesh else j['stage']),
             'bindings': binds,
             'vertex_inputs': [{'location': int(m.group(3)), 'msl_type': m.group(1)} for m in attributes(src)],
-            'raster': raster_facts(j['stage'], src), 'vs_pad': pad}
+            'raster': raster_facts(j['stage'], src), 'vs_pad': pad, **({'hmma_tensor': tensor} if tensor else {})}
     if j['stage'] == 'vs': full = open(msl).read(); vin_finish(key, full, refl); pull_finish(key, full, refl)   # the shadow-input and pulling libraries (dmsh_vin.py, dmsh_pull.py), from the source with every entry point
     refl.update(side)   # the alpha test and logic operation entry points (ps_libraries)
     write_refl(key, refl)

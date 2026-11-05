@@ -1176,6 +1176,15 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Note:** three of four of these HMMAs start an output tile, with C = 0. A variant for those calls that neither stores nor loads C (`simdgroup_multiply` first) was measured and not kept: 0.767 against 0.820 ns a warp-HMMA (6 %) in an isolated loop of the build's two bodies on an M4 Pro, about 0.04 ms of the upscaler's 1.6-1.9 ms a frame, and no measurable change in the game.
 - **Open:** LDSM and MOVM (27 and 72 a shader) are still emulated with shuffles (314 left in the upscaler, whose floor without them is about 0.3 ms); loading A and B straight from LDSM's source and keeping D as matrices between HMMAs (0.65 ns an HMMA) needs the translator to follow LDSM → MOVM → HMMA → HMMA chains.
 
+### Ampere HMMA through Metal 4 tensor operations on Apple10 GPUs
+
+- **Symptom:** on an M5, Donkey Kong Bananza's own upscaler (agl's NDSR, `DM_UPSCALER=game`) still takes about a quarter of the GPU frame docked: 3.1-4.7 ms of 12-14 ms, with its HMMAs already through [simdgroup_matrix](#ampere-hmma-through-simdgroup_matrix).
+- **Cause:** `simdgroup_matrix` runs on the GPU's shader cores. Apple10 GPUs (M5) also have neural accelerators in each core, which Metal 4 reaches only through tensor operations (`MetalPerformancePrimitives`, `mpp::tensor_ops::matmul2d`).
+- **Fix:** `dmsh_build.py` builds a second library for each shader with HMMA, `<key>_bt` (`hmma_tensor_msl`, `HMMA_TENSOR`): the same scratch block, with the product as one `matmul2d` 16x8x16 of one SIMD-group over threadgroup tensors (A row-major, B transposed, C / D in place). The reflection names it (`hmma_tensor`), and `shader_load` takes it on a GPU of the Apple10 family (`DM_NVN_HMMA_TENSOR=0` keeps `<key>_b`); other GPUs, and iOS, which gets no `_bt`, are unchanged. A library that fails to build or load leaves `<key>_b`.
+- **Check:** `dm/gfx/tests/test_dmsh_hmma.py`: the tensor variant's rewrite, and on the Mac's GPU against the same CPU reference of `mma.m16n8k16` as the simdgroup body.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) on a MacBook M5 (16 GB, macOS 27): a microbenchmark of the helper's block round trip, 1.57 ns a SIMD-group per HMMA against 1.84 for simdgroup_matrix; in game with `DM_NVN_GPUPROF`, the same five frames of one route docked, the upscaler encoder 3.00 ms on average against 3.82 (−21 %), its share of the frame's GPU time 25 % against 29 %. Not measured on another Apple10 GPU; earlier GPUs do not take it.
+- **Open:** the pipeline prebuild and the prewarm were not changed; whether they build the `_bt` functions on an Apple10 GPU, or leave those pipelines to compile at first use (24 compute pipelines in Bananza), is not checked. iOS (A19, also Apple10) gets no `_bt` yet. LDSM / MOVM shuffles remain as above.
+
 ### Driver-segment reads outside fragment shaders
 
 - **Symptom:** a vertex or compute shader reads zeros from NVN's driver segment `c0`.

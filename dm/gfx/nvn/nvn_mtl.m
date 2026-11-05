@@ -4619,6 +4619,12 @@ static id<MTLFunction> fn_dev(id<MTLFunction> f) {
     }
 }
 // layer: a vertex shader's layer entry points (entry_layer / entry_layer_z, which also write the layer) instead of main0 / main0_z, for a program whose geometry shader is a slice writer (prog_fold_gs)
+static int hmma_tensor_on(void) {   // DM_NVN_HMMA_TENSOR: unset or 1 = on an Apple10 GPU, 0 = never (see shader_load)
+    static int v = -1;
+    if (v < 0) { const char *x = getenv("DM_NVN_HMMA_TENSOR"); v = !(x && !strcmp(x, "0")) && [g_dev supportsFamily:MTLGPUFamilyApple10];
+        MLOG("HMMA: %s", v ? "Metal 4 tensor operations (<key>_bt libraries, Apple10 GPU)" : "simdgroup_matrix"); }
+    return v;
+}
 static NvShader *shader_load(NSString *pc, int stage, int layer) {
     NSError *e = nil;
     NSData *jd = [NSData dataWithContentsOfFile:[NSString stringWithFormat:@"%@/%@.json", g_msl_dir, pc]];
@@ -4630,7 +4636,15 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     }
     if (stage == 2 && !j) return nil;   // missing geometry translation: the caller's red line says so
     NSString *lp = [NSString stringWithFormat:@"%@/%@.metallib", g_msl_dir, pc];
-    id<MTLLibrary> lib = lib_from_file(lp, &e);
+    id<MTLLibrary> lib = nil;
+    // Ampere HMMA through Metal 4 tensor operations (dmsh_build.py HMMA_TENSOR): a GPU with neural accelerators in its cores (Apple10, M5) runs agl's upscaler networks there, about a fifth
+    // faster than through simdgroup_matrix; other GPUs, and DM_NVN_HMMA_TENSOR=0, keep <key>_b. A tensor library that does not load falls back to it
+    if ([j[@"hmma_tensor"] isKindOfClass:NSString.class] && hmma_tensor_on()) {
+        lib = lib_from_file([NSString stringWithFormat:@"%@/%@.metallib", g_msl_dir, j[@"hmma_tensor"]], &e);
+        if (!lib) MLOG("[RED] shader %s: tensor library %s did not load (%s), simdgroup_matrix kept", pc.UTF8String, [j[@"hmma_tensor"] UTF8String], e ? e.localizedDescription.UTF8String : "?");
+        e = nil;
+    }
+    if (!lib) lib = lib_from_file(lp, &e);
     if (!lib || !j) { MLOG("[RED] failed to load shader %s: %s", pc.UTF8String, e ? e.localizedDescription.UTF8String : "no reflection json"); return nil; }
     if (![j[@"chain"] isEqual:@DMSH_CHAIN]) { MLOG("[RED] shader %s has translation chain version %s, but this host expects %s", pc.UTF8String, [[j[@"chain"] description] UTF8String], DMSH_CHAIN); return nil; }
     if (layer && !j[@"entry_layer"]) { MLOG("[RED] vertex shader %s has no layer entry points", pc.UTF8String); return nil; }

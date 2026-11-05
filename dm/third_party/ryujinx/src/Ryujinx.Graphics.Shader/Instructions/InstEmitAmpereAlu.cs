@@ -852,8 +852,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (carries)
             {
-                ASetPred(context, o0, context.ICompareNotEqual(context.BitwiseAnd(carryCount, Const(1)), Const(0)), u);
-                ASetPred(context, o1, context.ICompareNotEqual(context.BitwiseAnd(carryCount, Const(2)), Const(0)), u);
+                // The first predicate is sum >= 2^32, the second sum >= 2 * 2^32 (Mesa NAK's OpIAdd3 fold, checked on hardware): the IADD3.X of the
+                // high word adds both, so a carry of 2 must set both, not only the second
+                ASetPred(context, o0, context.ICompareNotEqual(carryCount, Const(0)), u);
+                ASetPred(context, o1, context.ICompareLessUnsigned(Const(1), carryCount), u);
             }
         }
 
@@ -1115,10 +1117,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
             bool negInter = x.Bit(72);
             // B's negation (63) exists where B is a register, uniform register or constant in the 32 slot (forms 1, 5, 6)
             Operand srcB = AGet(context, b);
+            // As the intermediate: with .X the bitwise not, otherwise the two's complement ~B + 1, whose + 1 counts in the carry out (B = 0 carries;
+            // Mesa NAK's OpLea / OpLeaX folds, checked on hardware)
+            bool negB = x.Form is 1 or 5 or 6 && x.Bit(63);
 
-            if (x.Form is 1 or 5 or 6 && x.Bit(63))
+            if (negB)
             {
-                srcB = context.INegate(srcB);
+                srcB = context.BitwiseNot(srcB);
             }
 
             Operand lo = AGet(context, a);
@@ -1128,16 +1133,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
             {
                 t = context.ShiftLeft(lo, Const(shift));
             }
-            else if (shift == 0)
-            {
-                t = AGet(context, c);
-            }
             else
             {
-                t = context.BitwiseOr(context.ShiftLeft(AGet(context, c), Const(shift)), context.ShiftRightU32(lo, Const(32 - shift)));
+                // .SX32 (73): the high word is a's sign extension, not a source (LEA.HI.X.SX32 adds a sign-extended 32-bit index to a 64-bit address)
+                Operand hi = x.Bit(73) ? context.ShiftRightS32(lo, Const(31)) : AGet(context, c);
+                t = shift == 0 ? hi : context.BitwiseOr(context.ShiftLeft(hi, Const(shift)), context.ShiftRightU32(lo, Const(32 - shift)));
             }
 
-            int plusOne = 0;
+            int plusOne = negB && !ex ? 1 : 0;
 
             if (negInter)
             {
@@ -1145,14 +1148,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                 if (!ex)
                 {
-                    plusOne = 1;
+                    plusOne++;
                 }
             }
 
             Operand sum = context.IAdd(t, srcB);
             Operand carry = context.ICompareLessUnsigned(sum, t);
 
-            if (plusOne != 0)
+            for (int k = 0; k < plusOne; k++)
             {
                 Operand next = context.IAdd(sum, Const(1));
                 carry = context.BitwiseOr(carry, context.ICompareLessUnsigned(next, sum));
@@ -1247,7 +1250,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             bool u = AUniform(context);
             Operand src = AGet(context, AOne(context, x, u, neg: false, abs: false));
 
-            if (x.Bit(63))
+            // Bit 63 is the bitwise not only where B is a register, uniform register or constant (forms 1, 5, 6); in the immediate form it is the immediate's top bit
+            if (x.Bit(63) && x.Form is 1 or 5 or 6)
             {
                 src = context.BitwiseNot(src);
             }
@@ -1268,7 +1272,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             Operand src = AGet(context, AOne(context, x, u, neg: false, abs: false));
 
-            if (x.Bit(63))
+            // As POPC: bit 63 is the bitwise not only in forms 1, 5, 6 (the immediate's top bit in form 4)
+            if (x.Bit(63) && x.Form is 1 or 5 or 6)
             {
                 src = context.BitwiseNot(src);
             }
@@ -1413,8 +1418,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
             int lut0 = x.Bits(64, 67) | (x.Bits(72, 77) << 3);
             int lut1 = x.Bits(16, 24);
 
-            ASetPred(context, x.Bits(81, 84), APredLut(context, a, b, c, lut0), u);
-            ASetPred(context, x.Bits(84, 87), APredLut(context, a, b, c, lut1), u);
+            // Both results from the sources as they were: the first destination may be one of the sources (PLOP3.LUT P2, P0, P2, P0, P6, ...)
+            Operand r0 = APredLut(context, a, b, c, lut0);
+            Operand r1 = APredLut(context, a, b, c, lut1);
+            ASetPred(context, x.Bits(81, 84), r0, u);
+            ASetPred(context, x.Bits(84, 87), r1, u);
         }
 
         // A three-input boolean function by its truth table (bit (a << 2 | b << 1 | c) ... as LOP3: a = 0xf0, b = 0xcc, c = 0xaa)

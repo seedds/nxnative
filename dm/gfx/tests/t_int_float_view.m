@@ -16,7 +16,7 @@ int main(void) { @autoreleasepool {
     failed += tbuf_view_format(MTLPixelFormatR32Sint, NVN_DPF_FLOAT) != MTLPixelFormatR32Float;
     failed += tbuf_view_format(MTLPixelFormatRG16Uint, NVN_DPF_FLOAT) != MTLPixelFormatRG16Uint;   // no float format of that size keeps its bits
     failed += tbuf_view_format(MTLPixelFormatR32Uint, NVN_DPF_UINT) != MTLPixelFormatR32Uint;
-    id<MTLDevice> dev = MTLCreateSystemDefaultDevice(); id<MTLCommandQueue> q = [dev newCommandQueue]; NSError *e = nil;
+    id<MTLDevice> dev = MTLCreateSystemDefaultDevice(); if (!dev) return 2; id<MTLCommandQueue> q = [dev newCommandQueue]; NSError *e = nil;
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint width:8 height:1 mipmapped:NO];
     d.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView; d.storageMode = MTLStorageModeShared;
     id<MTLTexture> t = [dev newTextureWithDescriptor:d]; [t replaceRegion:MTLRegionMake2D(0, 0, 8, 1) mipmapLevel:0 withBytes:words bytesPerRow:32];

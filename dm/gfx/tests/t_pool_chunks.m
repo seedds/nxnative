@@ -75,6 +75,9 @@ int main(void) { @autoreleasepool {
     mtl_tex_release(&t);
     // Raw global memory: the table reaches all of it, and lookups then have the whole pool
     mtl_sub_begin(); CHECK("pool table made", gmem_map_gpu() != 0); finish();
+    CHECK("no buffer address taken in the pool: the table does not take it whole", !g_big[0].full);
+    mtl_pool_buffer_addr(mem, GB);   // nvnMemoryPoolGetBufferAddress
+    mtl_sub_begin(); CHECK("pool table made again", gmem_map_gpu() != 0); finish();
     CHECK("the whole pool has an entry", g_big[0].full > 0 && g_pools[g_big[0].full - 1].end == base + GB);
     CHECK("lookups take it", look(base + 900 * MB, 4096).length == GB);
     // A smaller pool is one buffer, and the removal of the large one takes all its entries

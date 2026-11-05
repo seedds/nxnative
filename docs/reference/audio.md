@@ -301,9 +301,39 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 ### No audio input devices
 
 - **Symptom:** SDL3's audio driver lists the input devices (AudioIn) when its audio starts. `[RED] sf: the game connects to service audren:u itself`, then `nn::diag abort: Result 0xe15` under `audio::AcquireAudioDeviceNotificationForInput` (`sdk+0x5633c`).
-- **Cause:** the host has no microphone. The input device-change notification goes through the audio device service, like the output one the host answers.
+- **Cause:** the legacy AudioIn path has no capture backend. The input device-change notification goes through the audio device service, like the output one the host answers. The separate [sysmix input path](#microphone-input-through-audsmxu) supports host microphones.
 - **Fix:** `ListAudioIns` reports none, both opens fail, and the calls that need an open AudioIn answer without touching the game's object (`hle_audio.c`). `AcquireAudioDeviceNotificationForInput` binds an event that is never signaled and returns 0x499 when acquired again, as the SDK does with a flag of its own (SDK 13.3.0 `sdk+0x56300`: `+0x851`, the output's `+0x852`; `hle_audren.c`).
 - **Found on:** [Absolum](../../dm/games/0100A83022A22000/README.md) (SDK 18.3.2, FNA on .NET NativeAOT with SDL3; one boot each); [Portal 2](../../dm/games/0100ABD01785C000/README.md) (SDK 13.3.0: its audio thread at start, `main+0x19f37c`).
+
+### Virtual audio devices
+
+- **Symptom:** `[RED] sf: the game connects to service auddmg:u itself, which the host does not serve`, followed by `nn::diag` abort Result `0xa99` in `nn::audio::detail::ListVirtualInputDevices`.
+- **Cause:** The virtual device manager runs through CMIF and returns a child interface. The earlier host service replies could only return zeroed output and a copied event handle. These devices are logical routes: the manager enumerates its registry without checking physical microphones, unlike [AudioIn enumeration](#no-audio-input-devices).
+- **Fix:** `hle_sf.c` decodes inline arguments and MapAlias descriptors, authenticates SendPid with the guest identity used by `GetAppletResourceUserId`, and owns child objects. A non-domain child is a moved session handle; a domain child is an object ID. Duplicated sessions share object state; final close releases it. `hle_auddmg.c` implements the user manager factory and the queries below. Enumeration returns 256-byte padded records, respects capacity and the shared process selector, and leaves unused records untouched. Known hidden routes remain queryable by exact name. Malformed requests and unknown commands return errors rather than successful zeroed replies.
+- **Found on:** Ocarina (`0400486024DEC000`), using an external provisional profile. A Mac diagnostic boot completes the factory and input enumeration. It has no registered playable profile yet.
+- **Check:** `t_auddmg` has synthetic wire fixtures for names, buffer boundaries, format validation, exact error results, process authentication, selector sharing and teardown. `t_sf` covers child move handles, domain object IDs, duplication and malformed packets; both pass under ASan/UBSan. The Mac host builds. A regression check selected Ocarina, Animal Crossing (`olsc:u`) and Mario Kart World (camera); the latter two have no local Mac build, so the harness exits 2. Ocarina's full shader build is still running and it has no smoke route; this is startup validation, not gameplay validation.
+- **Open:** legacy AudioIn, output sysmix streams, free-space/clock notification modes and device-change notifications remain unsupported. The named input routes share the default microphone; dedicated voice processing and karaoke routing are not implemented. iPhone hardware and full game capture remain unvalidated.
+
+| User command | Query | Implemented result |
+|---|---|---|
+| 0 | ListVirtualDeviceNames | Output: `MainAudioOut`; input selector 1: `MainAudioIn`, `RawAudioIn`; selector 2 also exposes `VoiceChatIn` |
+| 100 | GetDefaultVirtualDeviceName | `MainAudioOut` or `MainAudioIn`, exactly one 256-byte output record |
+| 200 | IsVirtualDeviceAvailable | Result success for an exact registered name/functionality pair |
+| 300 | IsVirtualDeviceFormatSupported | Sample format 2–5, channels 1/2/6, rate 16000/32000/44100/48000; an error on each invalid field |
+| 401 | GetVirtualDeviceProfile | Exact 0x228-byte record: names, format, node ID at +0x210, 10 ms period at +0x218, mixer ID at +0x220 |
+| 700 / 800 | AttachStream / DetachStream | Start/stop an owned sysmix input on the default host microphone |
+| 1000 | GetVirtualDeviceStreamFormat | PCM16 (2), two input or six output channels, 48000 Hz |
+
+### Microphone input through `audsmx:u`
+
+- **Symptom:** `[RED] sf: the game connects to service audsmx:u itself, which the host does not serve`, followed by Result `0xe15` in `InputStreamImpl::Open`.
+- **Cause:** InputStream uses a domain-based mixer service and reads captured PCM directly from a process-shared ring. Device enumeration alone cannot supply that data. Its device profile must also return a valid **mixer** ID at +0x220; the node ID at +0x210 is a different field.
+- **Fix:** `hle_audsmx.c` implements the user factory (SendPid and copied current-process handle), creation of up to seven owned input streams, open/close, state and filled-frame events, gain ramps and renaming. `auddmg` attachment starts capture; detachment drains callbacks before returning. Closing the final stream reference disposes capture before releasing its ring and events. The guest retains reading, purging and statistics; the host supplies the producer side of the ring.
+- **Data:** `audio_input_ring.h` publishes interleaved PCM and the producer cursor with release ordering. The consumer cursor is at work +0x44, producer cursor at +0x1004, PCM at +0x1040 (or +0x10c0 with timestamps). One slot stays empty. Overflow drops incoming frames and increments the producer counter without moving the guest's reader. Formats are signed Q15, Q23 in 32 bits, Q31, and float; channels 1/2/6 and rates 16000/32000/44100/48000. The default mono microphone is replicated into the requested logical channels.
+- **Apple backend:** `capture_apple.m` uses AudioQueue to convert the default input to mono float at the requested rate. Sample processing runs on a serial dispatch queue, outside the hardware render thread. Permission is requested only when capture starts; denial/device failure returns an error. Mac CLI, Mac app and iOS app metadata include `NSMicrophoneUsageDescription`. On iPhone, active inputs select PlayAndRecord (speaker by default, Bluetooth HFP allowed); otherwise the session uses Playback. Backgrounding and interruptions stop capture, and foregrounding, route changes and media-service resets recreate it. No recording file is made by the host.
+- **Found on:** Ocarina (`0400486024DEC000`), using an external provisional profile. `OpenInputStream` opens both 48 kHz mono, 4,800-frame streams. Game microphone behavior and gameplay remain unvalidated.
+- **Check:** `t_audsmx` exercises domain IPC, ownership, validation, PCM conversion, gain and events; `t_audio_input_ring` covers wraparound, overflow and invalid cursors, both with ASan/UBSan. The explicit `make -C dm/host/tests GAME=<id> capture-device` hardware test received 96,480 nonzero samples and passed stop/suspend/resume/reset. `capture-service` consumed 57,600 frames (49,854 nonzero) through the actual microphone, service and shared ring, including wraparound and detach/close. The service, Apple backend and iOS front end compile against iPhoneOS 27.2 targeting iOS 26. iPhone hardware capture has not been tested.
+- **Open:** legacy AudioIn, output sysmix streams, free-space/clock notification modes and device-change notifications remain unsupported. The named input routes share the default microphone; dedicated voice processing and karaoke routing are not implemented. iPhone hardware and full game capture remain unvalidated.
 
 ### `OpenAudioOut` without a release event (SDK 22)
 

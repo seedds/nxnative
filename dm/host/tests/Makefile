@@ -42,6 +42,9 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_preempt --all-peers
 	$(B)/t_pctl
 	$(B)/t_sf
+	$(B)/t_auddmg
+	$(B)/t_audio_input_ring
+	$(B)/t_audsmx
 	$(B)/t_time
 	$(B)/t_shared_font
 	$(B)/t_system_event
@@ -67,6 +70,25 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_nro
 	$(B)/t_symbols
 run: $(B)/t_nro
+run: $(B)/t_audio_input_ring
+run: $(B)/t_audsmx
+$(B)/t_audsmx: t_audsmx.c ../hle_audsmx.c ../hle_auddmg.c ../hle_sf.c ../sf_service.h ../capture_apple.h ../audio_input_ring.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function $(GINC) -o $@ t_audsmx.c
+$(B)/t_audio_input_ring: t_audio_input_ring.c ../audio_input_ring.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -o $@ t_audio_input_ring.c
+# Build these with run (and in its compile database); invoke them only explicitly:
+# they open the microphone and may display the OS permission dialog.
+run: $(B)/t_capture_apple $(B)/t_audsmx_capture
+$(B)/t_capture_apple: t_capture_apple.m ../capture_apple.m ../capture_apple.h ../dm.h $(GAME_H) ../../mac/host-info.plist | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -fobjc-arc $(GINC) -o $@ t_capture_apple.m ../capture_apple.m -framework Foundation -framework AVFAudio -framework AudioToolbox -Wl,-sectcreate,__TEXT,__info_plist,../../mac/host-info.plist
+.PHONY: capture-device
+capture-device: $(B)/t_capture_apple
+	$(B)/t_capture_apple --microphone
+$(B)/t_audsmx_capture: t_audsmx_capture.m ../hle_audsmx.c ../audio_input_ring.h ../sf_service.h ../capture_apple.m ../capture_apple.h ../dm.h $(GAME_H) ../../mac/host-info.plist | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fobjc-arc $(GINC) -o $@ t_audsmx_capture.m ../hle_audsmx.c ../capture_apple.m -framework Foundation -framework AVFAudio -framework AudioToolbox -Wl,-sectcreate,__TEXT,__info_plist,../../mac/host-info.plist
+.PHONY: capture-service
+capture-service: $(B)/t_audsmx_capture
+	$(B)/t_audsmx_capture --microphone
 run: $(B)/t_symbols
 $(B)/t_symbols: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_symbols.c
@@ -182,8 +204,11 @@ $(B)/t_altstack: t_altstack.c t_altstack_stub.c ../crash.c ../dm.h $(GAME_H) | $
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_altstack.c t_altstack_stub.c ../crash.c
 $(B)/t_pctl: t_pctl.c ../hle_misc.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_pctl.c
-$(B)/t_sf: t_sf.c ../hle_sf.c ../hle.h ../dm.h $(GAME_H) | $(B)
+$(B)/t_sf: t_sf.c ../hle_sf.c ../hle_auddmg.c ../sf_service.h ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_sf.c
+run: $(B)/t_auddmg
+$(B)/t_auddmg: t_auddmg.c ../hle_sf.c ../hle_auddmg.c ../sf_service.h ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_auddmg.c
 $(B)/t_shared_font: t_shared_font.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_shared_font.c
 run: $(B)/t_nv

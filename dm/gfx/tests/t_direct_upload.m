@@ -51,6 +51,7 @@ static void run(int target,unsigned width,unsigned height,unsigned layers,unsign
     mtl_tex_release(&t);mtl_drain();mtl_alias_drop_pool(&pool);nvn_dirty_remove_range(mem);mtl_pool_del(mem);mtl_drain();free(mem);free(expected);
 }
 int main(void){@autoreleasepool{
+    setenv("DM_NVN_DESWZ_GPU","1",1);   // the GPU deswizzle path is opt-in
     mtl_init();CHECK("direct utility pipeline loads",g_nvn_deswz_gpu&&nvn_deswz_gpu_direct_supported(&(nvn_texdesc){.target=9,.format=NVN_FORMAT_RGBA16F,.width=16,.height=16,.depth=768,.levels=5,.samples=1}));
     nvn_texdesc d={.target=4,.format=NVN_FORMAT_RGBA16F,.width=16,.height=16,.depth=32,.levels=5};
     d.format=NVN_FORMAT_RGBA8;CHECK("other formats stay on the bit-copy path",!nvn_deswz_gpu_direct_supported(&d));d.format=NVN_FORMAT_RGBA16F;d.width=65;CHECK("large images retain compression policy",!nvn_deswz_gpu_direct_supported(&d));d.width=16;d.flags=NVN_TEXTURE_FLAGS_LINEAR;CHECK("linear images are excluded",!nvn_deswz_gpu_direct_supported(&d));

@@ -591,9 +591,12 @@ void mtl_init(void) {
     }
     g_ev = [g_dev newSharedEvent];
     g_keep = [NSMutableArray array];
-    { const char *e = getenv("DM_NVN_DESWZ_GPU"); g_nvn_deswz_gpu = (!e || atoi(e)) && nvn_deswz_gpu_init(g_dev) == 0; if (e && !atoi(e)) MLOG("DM_NVN_DESWZ_GPU=0: swizzled textures deswizzled on the CPU"); }   // 0: the CPU path for every upload (from #1319)
+    // DM_NVN_DESWZ_GPU=1 (opt-in): swizzled texture uploads are deswizzled by the deswizzle compute kernels in the upload batches; default: on the CPU. PRAGMATA's tower-ring scene
+    // hung the GPU (a CDM kill, in three runs) inside our own upload batches, and with the CPU path (every run since) the scene ran through. The guilty job is not named yet, and the
+    // bounds checks (nvn_deswz_check, the kernels' src_len / dst_len) did not catch it, so the GPU path stays off until it is
+    { const char *e = getenv("DM_NVN_DESWZ_GPU"); g_nvn_deswz_gpu = e && atoi(e) && nvn_deswz_gpu_init(g_dev) == 0; if (!(e && atoi(e))) MLOG("swizzled textures deswizzled on the CPU (DM_NVN_DESWZ_GPU=1: on the GPU)"); }
     dm_res_report_register(mtl_res_counts);
-    if (!g_nvn_deswz_gpu && !(getenv("DM_NVN_DESWZ_GPU") && !atoi(getenv("DM_NVN_DESWZ_GPU")))) MLOG("[RED] GPU deswizzle init failed; swizzled textures fall back to the CPU");
+    if (!g_nvn_deswz_gpu && getenv("DM_NVN_DESWZ_GPU") && atoi(getenv("DM_NVN_DESWZ_GPU"))) MLOG("[RED] GPU deswizzle init failed; swizzled textures fall back to the CPU");
     MLOG("Metal device %s", g_dev.name.UTF8String);
     udc_selftest();
 }

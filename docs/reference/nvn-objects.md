@@ -379,6 +379,14 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game), reported in [PR #261](https://github.com/seedds/nxnative/pull/261).
 - **Check:** `t_tex` compares both directions against the byte-address formula for 1,029 deterministic layouts, including 1D/2D/3D, arrays/cubes, packaged block dimensions, sparse mip tails, 1/2/3/4/6/8/12/16-byte formats, padded pitches and partial segments. All 5,334 checks pass, including under AddressSanitizer and UBSan. A local arm64 Mac comparison against the old implementation, Apple clang 21 at the host's `-O1`, measured 7.4–7.7 GB/s before and 35.1–37.6 GB/s after (4.6–5.1x) across 1024x1024 sparse ASTC 6x6, 2048x2048 BC7, 1920x1080 RGBA8 and 1280x720 RGBA16F. Each result is the median of seven runs copying about 128 MiB, with implementation order alternated. This is a CPU microbenchmark; no new gameplay run here.
 
+### Swizzled uploads deswizzled on the CPU by default
+
+- **Symptom:** a GPU hang or page fault inside an upload command buffer (`[RED] upload command buffer execution error`, a CDM kill in the gpuEvent report, macOS restarting the GPU), with the game's own submissions idle; with `DM_NVN_DESWZ_GPU=0` the same scene runs through.
+- **Cause:** open. The host's GPU deswizzle jobs (`dm/gfx/tex/nvn_deswizzle_gpu.m`, `deswz.metal`) run in the upload batches; one of them hung or faulted the GPU at the same scene in several runs. The range checks before the dispatch and in the kernels ([Pages and pool tables changed under live GPU work](#pages-and-pool-tables-changed-under-live-gpu-work-sparse-safe-mode)) did not catch it, and the job is not named yet.
+- **Fix** (a workaround while the cause is open): swizzled textures are deswizzled on the CPU unless `DM_NVN_DESWZ_GPU=1`; textures in sparse pools always were. This costs CPU time per upload in every game that uploads swizzled textures (not measured on games other than the one below).
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): the tower-ring cutscene of the opening (three runs hung or faulted in upload batches with the GPU path; none since with the CPU path).
+- **Check:** the Metal tests still cover the GPU path: `t_deswz_gpu` runs the kernels directly and `t_direct_upload` sets the switch.
+
 ### The Switch 2's order inside a GOB
 
 - **Symptom:** a Switch 2 game's textures from its files keep their shapes but break up along every edge: misplaced 4×4 blocks (16-byte pieces) in a regular weave, invisible in flat areas. Normal maps make lit surfaces look woven; opacity masks punch holes.

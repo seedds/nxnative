@@ -1582,13 +1582,26 @@ def plain_digest(k):   # a paired pixel shader's key, also when it is not built 
     return shader_key(k, *rec_of(k)) if k in loc else 'missing'
 for key in keys:
     if PAIRS.get(key): digests[key] = pair_keyed(digests[key], [plain_digest(p) for p in sorted(PAIRS[key])])
-for key in keys:
+def report_progress(step, done, total, note=''):
+    try:
+        tmp = os.path.join(w, '.progress.tmp')
+        with open(tmp, 'w') as f:
+            json.dump({'step': step, 'done': done, 'total': total, 'note': note}, f)
+        os.replace(tmp, os.path.join(w, '.progress'))
+    except OSError: pass
+
+for i, key in enumerate(keys, 1):
     name = loc[key][0]
     rule_fps[key] = hashlib.sha256(shader_rule_source(name) + ','.join(sorted(PAIRS.get(key, ()))).encode()).hexdigest()   # the vertex shader must be rebuilt when its pairs change (vs_pad)
     hit, cache_reasons[key] = cache_lookup(key, digests[key], rule_fps[key], CODE_FP)
     if hit: cache_hits.add(key)
     else: jobs[key], c1s[key] = job_for(key, name, rec_of(key)[1], w)
+    if i % 250 == 0 or i == len(keys):
+        report_progress('cache check', i, len(keys), note=f'{len(cache_hits):,} cached')
 misses = [key for key in keys if key not in cache_hits]
+if misses:
+    try: os.unlink(os.path.join(w, '.progress'))
+    except OSError: pass
 chunks = [misses[i::NJ] for i in range(NJ)]
 def xl(ch):
     jp = os.path.join(w, f'job_{abs(hash(ch[0]))}.json'); json.dump([jobs[k] for k in ch], open(jp, 'w'))
@@ -1599,27 +1612,45 @@ for r in xr:
     for ln in r.stderr.splitlines():
         m = re.match(r'\[RED\] (\w+): (.*)', ln)
         if m: xerr[m.group(1)] = m.group(2)[:160]
+FIN_LOCK = threading.Lock()
+FIN_DONE = 0
+FIN_T0 = 0.0
+
+def report_fin():
+    global FIN_DONE, FIN_T0
+    with FIN_LOCK:
+        FIN_DONE += 1
+        d = FIN_DONE
+        now = time.monotonic()
+        if d % 50 == 0 or now - FIN_T0 >= 0.25 or d == len(keys):
+            FIN_T0 = now
+            report_progress('compiling' if misses else 'finishing', d, len(keys),
+                            note=f'{len(misses):,} not cached' if misses else '')
+
 def fin(key):
-    if key in cache_hits:
-        if DIRECT_STREAM:
-            refl = json.loads(CACHED_STREAM['mac'][key + '_b.json'])
-            m = CACHED_STREAM['mac'].get(key + '_b.metal')
-            src = (m if isinstance(m, str) else m.decode('utf-8')) if refl['stage'] in ('ps', 'vs') and m else ''
-        else:
-            refl = json.load(open(os.path.join(out, key + '_b.json')))
-            src = open(os.path.join(out, key + '_b.metal')).read() if refl['stage'] in ('ps', 'vs') else ''
-        if refl['stage'] == 'vs': write_refl(key, pull_finish(key, src, vin_finish(key, src, refl)))
-        if refl['stage'] == 'ps':
-            metal_path = os.path.join(out, key + '_b.metal')
-            if DIRECT_STREAM and not os.path.exists(metal_path):
-                metal_path = os.path.join(w, key + '_b.metal')
-                open(metal_path, 'w').write(src)
-            refl.update(ps_libraries(key, metal_path, src))
-        return key, 'ok', '', fetch_finish(key, src, refl)
-    if key in xerr or not os.path.exists(os.path.join(w, key + '.spv')): return key, 'translation failed', xerr.get(key, 'no spv'), None
-    result = (key,) + finish(key, w, jobs[key], c1s[key])
-    if result[1] == 'ok': publish_cache(key, digests[key], rule_fps[key], CODE_FP)
-    return result
+    try:
+        if key in cache_hits:
+            if DIRECT_STREAM:
+                refl = json.loads(CACHED_STREAM['mac'][key + '_b.json'])
+                m = CACHED_STREAM['mac'].get(key + '_b.metal')
+                src = (m if isinstance(m, str) else m.decode('utf-8')) if refl['stage'] in ('ps', 'vs') and m else ''
+            else:
+                refl = json.load(open(os.path.join(out, key + '_b.json')))
+                src = open(os.path.join(out, key + '_b.metal')).read() if refl['stage'] in ('ps', 'vs') else ''
+            if refl['stage'] == 'vs': write_refl(key, pull_finish(key, src, vin_finish(key, src, refl)))
+            if refl['stage'] == 'ps':
+                metal_path = os.path.join(out, key + '_b.metal')
+                if DIRECT_STREAM and not os.path.exists(metal_path):
+                    metal_path = os.path.join(w, key + '_b.metal')
+                    open(metal_path, 'w').write(src)
+                refl.update(ps_libraries(key, metal_path, src))
+            return key, 'ok', '', fetch_finish(key, src, refl)
+        if key in xerr or not os.path.exists(os.path.join(w, key + '.spv')): return key, 'translation failed', xerr.get(key, 'no spv'), None
+        result = (key,) + finish(key, w, jobs[key], c1s[key])
+        if result[1] == 'ok': publish_cache(key, digests[key], rule_fps[key], CODE_FP)
+        return result
+    finally:
+        report_fin()
 with cf.ThreadPoolExecutor(NJ) as ex:   # two phases: paired vertex shaders read their pixel shaders' MSL (vs_pad), so they go last
     res = list(ex.map(fin, [k for k in keys if k not in PAIRS])) + list(ex.map(fin, [k for k in keys if k in PAIRS]))
 # Passthrough geometry as mesh shaders (dmsh_mesh.py): <vertex key>_<geometry key>_m3 for each pair in the profile's geo_mesh.tsv whose two libraries exist; the host

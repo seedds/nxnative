@@ -2282,6 +2282,18 @@ class ShaderWatch:
             self.w = max((d for d in self.tmp.glob('dmsh_*') if d.stat().st_birthtime >= self.t0 - 2), key=lambda d: d.stat().st_birthtime, default=None)
         try: ext = collections.Counter(os.path.splitext(x)[1] for x in os.listdir(self.w)) if self.w else collections.Counter()
         except OSError: ext = collections.Counter()
+        if self.w:
+            pf = self.w / '.progress'
+            try:
+                prog = json.loads(pf.read_text())
+                step = prog.get('step')
+                done = prog.get('done')
+                total = prog.get('total')
+                note = prog.get('note', '')
+                if step and done is not None and total:
+                    if step in ('compiling', 'finishing'): self.t1 = self.t1 or time.time()
+                    return {'step': step, 'done': done, 'total': total, 'unit': 'shaders', 'note': note}
+            except (OSError, ValueError, json.JSONDecodeError): pass
         if self.t1 is None:
             self.hits |= self.written(self.pos.keys() - self.hits, self.t0 - 2)
             if len(self.hits) + ext['.bin'] < self.n and not ext['.spv'] and not ext['.metal']:

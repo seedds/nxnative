@@ -98,9 +98,34 @@ class F2ip(Alu):
         self.assertEqual(source(low), {'gl_WorkGroupID'}, msl)
 
     def test_other_encodings_are_refused(self):
-        for hi in (self.F2IP[0] & ~0xffffff00, self.F2IP[0] | 1 << 8, self.F2IP[0] & ~0xff | 7):   # bit 74 clear, bit 72 set (signed), C = R7
+        for hi in (self.F2IP[0] & ~0xffffff00, self.F2IP[0] | 1 << 8, self.F2IP[0] & ~0xff | 7, self.F2IP[0] | 1 << 16):   # bit 74 clear, 72 set (signed), C = R7, 80 set
             with self.subTest(hi=hex(hi)), self.assertRaises(AssertionError):
                 self.kept(s2r(4, 0x21), (hi, self.F2IP[1]))
+
+
+class F2ipTruncate(Alu):
+    """F2IP.U8.F32.NTZ.TRUNC Rd, RZ, b, RZ (78..79 = 3, F2I's rounding field): Ocarina of Time's foliage mesh shader 740e2b04db624fb1 has F2IP R5, RZ, R5, RZ at +0x370, a
+    colour channel times 255 that it then shifts by 16 into an RGBA8 word; here it is on R6 and R5. The other rounding modes are the same field (no game encoding met)"""
+    GAME = (0x000fe4000000c4ff, 0x00000005ff057243)
+    F2IP = (GAME[0], GAME[1] & ~0xff0000 | 6 << 16)
+
+    def msl(self, hi=GAME[0]):   # b (R5) from SR_CTAID.X
+        return self.kept(s2r(5, 0x25), (hi, self.F2IP[1]))
+
+    def test_truncates_b_into_byte_0(self):
+        msl = self.msl()
+        self.assertEqual(len(re.findall(r'\btrunc\(', msl)), 1, msl)
+        self.assertNotIn('rint(', msl)
+        self.assertEqual(len(re.findall(r'\bisnan\(', msl)), 1, msl)
+        self.assertEqual(len(re.findall(r'\bmin\([^;]*255\.0\)', msl)), 1, msl)
+        self.assertNotRegex(msl, r'<< 8;')   # a = RZ: byte 1 stays zero
+
+    def test_floor_and_ceiling(self):
+        for mode, fn in ((1, 'floor'), (2, 'ceil')):
+            with self.subTest(mode=mode):
+                msl = self.msl(self.GAME[0] & ~(3 << 14) | mode << 14)
+                self.assertEqual(len(re.findall(rf'\b{fn}\(', msl)), 1, msl)
+                self.assertNotIn('trunc(', msl)
 
 
 class UimadImmediateC(Alu):

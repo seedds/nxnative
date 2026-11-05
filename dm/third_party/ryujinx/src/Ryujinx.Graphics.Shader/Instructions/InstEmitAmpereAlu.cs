@@ -367,29 +367,40 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, x.Bit(74) ? context.IConvertS32ToFP32(src) : context.IConvertU32ToFP32(src));
         }
 
-        // F2IP.U8.F32.NTZ Rd, a, b, RZ (sm_86's float to integer convert and pack): a and b each rounded to the nearest integer (ties to even) and saturated to 0..255, NaN to 0,
-        // b in byte 0 and a in byte 1, the upper half zero. The fields follow F2I's: unsigned (72 clear), 8 bits (75..77 clear), round to nearest (78..80 clear); 74 is set in
-        // every one met, the form NVIDIA prints .NTZ. The Legend of Zelda: Ocarina of Time's colour converters (99951da6e5cd38f5 +0x530 and nine others) quantize a block of
-        // BT.709 Y and CbCr values times 255 this way, then join two results into four bytes with PRMT 0x5410 and store them: the pixels' bytes come out in x order only
-        // with b low. Any other encoding (a second form, C not RZ, other bits from 72 on) is refused rather than guessed
+        // F2IP.U8.F32.NTZ Rd, a, b, RZ (sm_86's float to integer convert and pack): a and b each rounded to an integer by F2I's mode (78..79: nearest even, floor, ceiling,
+        // truncation) and saturated to 0..255, NaN to 0, b in byte 0 and a in byte 1, the upper half zero; a = RZ leaves b alone in byte 0. The other fields follow F2I's:
+        // unsigned (72 clear), 8 bits (75..77 clear); 74 is set in every one met, the form NVIDIA prints .NTZ. The Legend of Zelda: Ocarina of Time's colour converters
+        // (99951da6e5cd38f5 +0x530 and nine others) quantize a block of BT.709 Y and CbCr values times 255 to the nearest, then join two results into four bytes with
+        // PRMT 0x5410 and store them: the pixels' bytes come out in x order only with b low. Its foliage mesh shaders (740e2b04db624fb1 +0x370 and seven others) convert one
+        // colour channel times 255 at a time with a = RZ and truncation (.TRUNC, 78..79 = 3), then shift the result by 16 or 24 into an RGBA8 word: b is in byte 0 there too.
+        // Any other encoding (a second form, C not RZ, other bits from 72 on) is refused rather than guessed
         public static void AF2ip(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
 
-            if (x.Form != 1 || x.Bits(40, 64) != 0 || x.Rc != RegisterConsts.RegisterZeroIndex || x.Field(72, 96) != 1 << 2)
+            if (x.Form != 1 || x.Bits(40, 64) != 0 || x.Rc != RegisterConsts.RegisterZeroIndex || (x.Field(72, 96) & ~(3ul << 6)) != 1 << 2)
             {
                 throw AFail(context, "F2IP other than .U8.F32.NTZ of two registers with RZ");
             }
 
+            int round = x.Bits(78, 80);
+
             Operand Byte(int reg)
             {
                 Operand f = AGpr(reg);
-                Operand v = context.FPMinimum(context.FPMaximum(context.FPRound(f), ConstF(0f)), ConstF(255f));
+                Operand r = round switch
+                {
+                    0 => context.FPRound(f),
+                    1 => context.FPFloor(f),
+                    2 => context.FPCeiling(f),
+                    _ => context.FPTruncate(f),
+                };
+                Operand v = context.FPMinimum(context.FPMaximum(r, ConstF(0f)), ConstF(255f));
 
                 return context.ConditionalSelect(context.IsNan(f), Const(0), context.FP32ConvertToU32(v));
             }
 
-            ASet(context, x, context.BitwiseOr(context.ShiftLeft(Byte(x.Ra), Const(8)), Byte(x.Rb)));
+            ASet(context, x, x.Ra == RegisterConsts.RegisterZeroIndex ? Byte(x.Rb) : context.BitwiseOr(context.ShiftLeft(Byte(x.Ra), Const(8)), Byte(x.Rb)));
         }
 
         // FRND: a float rounded to an integer value (78..80: nearest even, floor, ceiling, truncation)

@@ -99,7 +99,7 @@ def _quiet_size(folder, since):   # (files, bytes) under folder; None as soon as
     return n, size
 
 
-def pack_quiet(work, say=print, days=QUIET_DAYS, min_files=QUIET_MIN_FILES):
+def pack_quiet(work, say=print, days: float = QUIET_DAYS, min_files=QUIET_MIN_FILES):
     """Each top-level folder of a game's work folder (<NSP folder>/<id>-work) untouched for days becomes <name>.tar, `tar --xattrs -xf <name>.tar -C <name>` in a new folder bringing it back:
     what agents and investigations leave there, hundreds of thousands of files nothing reads again. regress/ is regress.py's own, and a folder of few files is left readable.
     An existing <name>.tar is never overwritten. The tar must fit on the drive beside the folder, with QUIET_FREE to spare. Returns the names packed"""

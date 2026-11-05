@@ -173,12 +173,11 @@ class Nvn(Base):
 
     def test_cli_tidies_the_work_folder_after_a_build_that_succeeded(self):
         folder = self.sh.parent / 'nsp'; (folder / '0100000000000000-work').mkdir(parents=True); (folder / 'notes-work').mkdir()
-        def built(args): nsp.NSP_FOLDER = folder
-        def failed(args): nsp.NSP_FOLDER = folder; raise nsp.BuildError('stopped')
-        with mock.patch.object(nsp, 'parse_args'), mock.patch.object(nsp.PROG, 'say'), mock.patch.object(nsp.tree_tar, 'pack_quiet') as tidy:
+        def failed(args): raise nsp.BuildError('stopped')
+        with mock.patch.object(nsp, 'NSP_FOLDER', folder), mock.patch.object(nsp, 'parse_args'), mock.patch.object(nsp.PROG, 'say'), mock.patch.object(nsp.tree_tar, 'pack_quiet') as tidy:   # NSP_FOLDER as main leaves it
             with mock.patch.object(nsp, 'main', failed): self.assertEqual(nsp.cli([]), 1)
             tidy.assert_not_called()
-            with mock.patch.object(nsp, 'main', built): self.assertEqual(nsp.cli([]), 0)
+            with mock.patch.object(nsp, 'main'): self.assertEqual(nsp.cli([]), 0)
         self.assertEqual([c.args[0].name for c in tidy.call_args_list], ['0100000000000000-work'])
 
     def test_cache_is_one_file_between_builds(self):   # a folder from before cas.tar is packed even by a reused build; a build that runs takes it back

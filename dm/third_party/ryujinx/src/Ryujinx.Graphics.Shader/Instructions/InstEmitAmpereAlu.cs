@@ -177,6 +177,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
             // The predicate (87..90) picks the minimum where it holds
             Operand res = context.ConditionalSelect(APred(context, x, 87, 90), context.FPMinimum(srcA, srcB), context.FPMaximum(srcA, srcB));
 
+            // .NAN (81): a pair with a NaN gives the canonical NaN instead of the other operand (Eglantine 43ab1ee42c)
+            if (x.Bit(81))
+            {
+                res = context.ConditionalSelect(context.BitwiseOr(context.IsNan(srcA), context.IsNan(srcB)), Const(0x7fffffff), res);
+            }
+
             ASet(context, x, res);
         }
 
@@ -747,9 +753,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
             {
                 // .IS / .ISL, as Maxwell's (InstEmitMemory.Ldc): the bank is the instruction's plus Ra's upper half, the offset Ra's lower half plus the instruction's.
                 // Hyrule Warriors: Age of Imprisonment's vertex shader cc679c7b4d3e703c reads c[1][(vertex index % 5) * stride] this way, and its pixel shader
-                // 059a0a910ff87a26 c[1][0x60 + R12 * scale]: the compiler adds 0x10000 to the offset. The bank is chosen at run time among the banks the shader
-                // can reach (ARuntimeBanks); a run-time bank 0 in a compute shader is not remapped (AMapC0).
-                Operand ra = Register(x.Ra, RegisterType.Gpr);
+                // 059a0a910ff87a26 c[1][0x60 + R12 * scale]: the compiler adds 0x10000 to the offset. PRAGMATA's LDC.64.IS c[0x0][R16+0x8] (3 vertex and 78 compute
+                // shaders) is the same: R16 = index * stride + 0x10000, a c1 array. The bank is chosen at run time among the banks the shader can reach
+                // (ARuntimeBanks); a run-time bank 0 is not remapped (AMapC0).
+                Operand ra = x.Ra == RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Ra, RegisterType.Gpr);
                 Operand slot = context.IAdd(Const(x.Bits(54, 59)), context.ShiftRightU32(ra, Const(16)));
 
                 ALoadConstant(context, x, slot, context.BitwiseAnd(ra, Const(0xffff)), (int)x.SignedField(38, 54), uniform: false, ARuntimeBanks(context, x.Bits(54, 59)));
@@ -803,6 +810,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
         // shader's other constant reads name. A bank outside them reads 0, as in Ryujinx's Maxwell path for an unbound one. c0 is left out: the host fills the
         // driver segment only at offsets known when the shader is built, and a shader indexing it at run time is not loaded (dmsh_build.py unfillable), which
         // took pixel shader 059a0a910ff87a26 (it reads c0 elsewhere) out with its indexed c1 read
+        // c0 stays out also when the instruction names it: every LDC .IS in PRAGMATA (3 vertex, 78 compute shaders) has bank field 0 with 0x10000 in Ra, so it reads c1;
+        // a c0 candidate would add a run-time c0 read no instance takes (and, at a compute shader's run-time index, one AMapC0's NVN2 remap cannot follow)
         private static uint ARuntimeBanks(EmitterContext context, int bank)
         {
             uint banks = 1u << 1 | 1u << bank;

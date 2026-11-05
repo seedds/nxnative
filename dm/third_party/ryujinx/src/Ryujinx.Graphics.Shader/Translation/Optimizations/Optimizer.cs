@@ -391,10 +391,9 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     {
                         Debug.Assert(src.AsgOp != null);
 
-                        // nxnative (from MacNativeGames' translator patch 0002, after Ryujinx_Optime 01a1e37f): follow only into a producer that will be removed
-                        // itself. One with side effects (an atomic, a call) stays in the block when its result is unused, so its sources are still live; dropping
-                        // their uses here let the next dead-code pass delete the chain that feeds it, and the atomic then read undefined values.
-                        if (!HasSideEffects(src.AsgOp))
+                        // Follow only producers that can themselves be removed. Side effects or another live result of a multi-result operation
+                        // keep all of its inputs live, even when the result we just detached has no remaining uses.
+                        if (IsUnused(src.AsgOp))
                         {
                             nodes.Enqueue(src.AsgOp);
                         }

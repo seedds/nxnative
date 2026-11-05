@@ -780,17 +780,20 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
         }
 
         // nxnative: the memory pool table the host binds for raw global memory (dmsh_abi.h DMSH_GMEM_MAP_*): a storage buffer reserved under this sentinel constant buffer
-        // slot, which no constant buffer of the game has (dmsh_build.py turns it into DMSH_KIND_GMEM_MAP). 1 << GmemMapLog2 entries of GmemMapEntryWords words each,
+        // slot, which no constant buffer of the game has (dmsh_build.py turns it into DMSH_KIND_GMEM_MAP). A host-sized power-of-two table of GmemMapEntryWords words each,
         // {start lo, start hi, end lo, end hi, delta lo, delta hi, 0, 0}, sorted by start; entry 0 is empty (start 0, end 0) and unused entries start at ~0
         public const int GmemMapCbSlot = 0xff;
-        private const int GmemMapLog2 = 12;
+        // Entry 0's delta low word stores the host's power-of-two entry count.
+        private const int GmemMapCountWord = 4;
         private const int GmemMapEntryWords = 8;
 
         // nxnative: the write log (dmsh_abi.h DMSH_GMEM_LOG_*), reserved under the same sentinel slot at offset 1: the set of guest pages (address >> 12) the stores and atomics wrote,
         // as an open-addressing hash set of 1 << GmemLogLog2 words from word 1 (0 = empty), word 0 set when a page found no free slot in GmemLogProbes tries. The host cannot know where
         // a store through a loaded pointer lands before the GPU runs it; it learns the pages from the log. A set, not a list: one draw of Donkey Kong Bananza stores 7,325 times into a few dozen pages
         private const int GmemLogCbOffset = 1;
-        private const int GmemLogLog2 = 10;
+        // Image-processing kernels can write a whole 4K/8K surface through loaded pointers: 1,024 pages overflowed on NDVE's 2560x1440 output. 8,192 entries are 32 KiB per active dispatch
+        // and keep the same exact 4 KiB-page semantics, rather than coarsening addresses and potentially merging two pools that share a larger granule.
+        private const int GmemLogLog2 = 13;
         private const int GmemLogProbes = 8;
 
         // nxnative: a global memory access whose address the search traced to no storage buffer, an address the shader loaded from memory (Donkey Kong Bananza: gsys's vertex
@@ -851,11 +854,15 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             }
 
             // The last entry whose start is at or below the address (entry 0 starts at 0, so there always is one)
-            Operand index = Const(0);
+            Operand index = Local();
+            Operand step = Local();
+            context.Copy(index, Const(0));
+            context.Copy(step, context.ShiftRightU32(MapWord(Const(0), GmemMapCountWord), Const(1)));
+            Operand lblSearch = Label();
+            context.MarkLabel(lblSearch);
 
-            for (int step = 1 << (GmemMapLog2 - 1); step != 0; step >>= 1)
             {
-                Operand candidate = context.IAdd(index, Const(step));
+                Operand candidate = context.IAdd(index, step);
                 Operand entry = context.IMultiply(candidate, Const(GmemMapEntryWords));
                 Operand startLow = MapWord(entry, 0);
                 Operand startHigh = MapWord(entry, 1);
@@ -864,8 +871,11 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     context.ICompareLessUnsigned(startHigh, addrHigh),
                     context.BitwiseAnd(context.ICompareEqual(startHigh, addrHigh), context.ICompareLessOrEqualUnsigned(startLow, addrLow)));
 
-                index = context.ConditionalSelect(atOrBelow, candidate, index);
+                context.Copy(index, context.ConditionalSelect(atOrBelow, candidate, index));
+                context.Copy(step, context.ShiftRightU32(step, Const(1)));
             }
+
+            context.BranchIfTrue(lblSearch, context.ICompareNotEqual(step, Const(0)));
 
             Operand found = context.IMultiply(index, Const(GmemMapEntryWords));
             Operand endLow = MapWord(found, 2);

@@ -75,14 +75,14 @@
 // Raw global memory: the translator reserves that table as a storage buffer under this constant buffer slot, which no game has (Ryujinx GlobalToStorage.GmemMapCbSlot), finds the pool
 // holding an address by a binary search over the table's starts and accesses the address plus the pool's delta through a physical storage buffer pointer
 #define DMSH_GMEM_MAP_CB_SLOT 0xFF
-#define DMSH_GMEM_MAP_ENTRIES 4096       // entries of the table (GlobalToStorage.GmemMapLog2 = 12), sorted by start: entry 0 is empty (start 0, end 0) and unused entries start at ~0
+#define DMSH_GMEM_MAP_ENTRIES 4096       // minimum power-of-two table size; entry 0's delta stores the actual entry count
 #define DMSH_GMEM_MAP_ENTRY 32           // bytes of an entry: start, end (exclusive) and delta (the pool's Metal GPU address minus its guest address), 64 bits each, then 8 bytes of padding
 // Where such a store or atomic lands is known only when the GPU runs it, so each one also puts its guest page (address >> 12) in a write log, reserved under the same slot at offset 1
 // (Ryujinx GlobalToStorage.GmemLogCbOffset, GmemLogLog2): 32-bit words, word 0 set when a page found no free slot, then a hash set of 1 << DMSH_GMEM_LOG_LOG2 pages (0 = empty).
 // The host learns the pages from it
 #define DMSH_KIND_GMEM_LOG "gmem_log"    // that write log: the host gives each draw or dispatch its own, cleared (nvn_mtl.m gml_take)
 #define DMSH_GMEM_LOG_CB_OFFSET 1
-#define DMSH_GMEM_LOG_LOG2 10
+#define DMSH_GMEM_LOG_LOG2 13          // 8,192 pages / 32 KiB: enough for image-sized raw-pointer writes without coarsening pool identity
 
 // A pool binding points at a buffer the host keeps (nvn_mtl.m pool_gpu): a 32-bit bound n (the highest index the shader may read), then from DMSH_POOL_HEAD one 8-byte resource ID per ID
 #define DMSH_POOL_HEAD 8                 // bytes before element 0 of a pool buffer

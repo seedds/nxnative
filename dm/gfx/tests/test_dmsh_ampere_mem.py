@@ -32,6 +32,38 @@ class Translated(unittest.TestCase):
             return r.stdout
 
 
+class SurfaceLoadLiveness(Translated):
+    # S2R R4, SR_TID.X and S2R R5, SR_TID.Y; SULD.2D RGBA R8, [R4], image slot 0.
+    COORDS = inst(0x000fe20000002100, 0x0000000000047919) + inst(0x000fe20000002200, 0x0000000000057919)
+    LOAD = inst(0x000fe200001e0f00, 0x60000a0004087b97)
+
+    @staticmethod
+    def dead_add(src):
+        # IADD3 R16, R<src>, 1, RZ, where R16 is unused.
+        return inst(0x000fe20007ffe0ff, 0x0000000100107810 | src << 24)
+
+    def test_a_dead_component_does_not_kill_the_loads_coordinates(self):
+        for dead, live in ((8, 11), (11, 8)):
+            with self.subTest(dead=dead, live=live):
+                # SUST.2D R [RZ], R<live>, image slot 1.
+                store = inst(0x000fe20000100100, 0x60000c00ff007b9b | live << 32)
+                msl = self.translate(self.COORDS + self.LOAD + self.dead_add(dead) + store + inst(*EXIT))
+                self.assertIn('.read(', msl)
+                self.assertIn('.write(', msl)
+                self.assertIn('gl_LocalInvocationID.x', msl)
+                self.assertIn('gl_LocalInvocationID.y', msl)
+
+    def test_a_load_with_all_components_dead_is_eliminated(self):
+        msl = self.translate(self.COORDS + self.LOAD + self.dead_add(8) + self.dead_add(11) + inst(*EXIT))
+        self.assertNotIn('.read(', msl)
+
+    def test_a_dead_atomic_result_preserves_the_atomic_and_its_address(self):
+        address = inst(0x000fe20000002100, 0x0000000000037919)  # S2R R3, SR_TID.X
+        msl = self.translate(address + inst(*SUATOM) + self.dead_add(12) + inst(*EXIT))
+        self.assertIn('atomic_fetch_add', msl)
+        self.assertIn('gl_LocalInvocationID.x', msl)
+
+
 class GuardedWrites(Translated):
     P0 = (0x000fda0003f06070, 0x00c0060005007a0c)   # P0 = R5 >= c3[0x18], R5 an instruction's own
     MOV_R5 = (0x000fe20000000f00, 0x0100000000057a02)   # R5 = c4[0]
@@ -230,6 +262,8 @@ class StageMemory(Translated):
     COUNT_ZERO = (0x000fe20000008800, 0x000003ffff007927)  # 0x927 [RZ + 3], RZ, mode 0x88: every thread clears the count first
     COUNT = (0x0001e20000008800, 0x00000307ff007927)       # 0x927 [RZ + 3], R7, mode 0x88: the thread with the count
     INDEX = (0x0001e20000008000, 0x0000040605057927)       # 0x927 [R5 + 4], R6, mode 0x80: an index byte
+    OWN_PAYLOAD = (0x000fe2000000b800, 0x00001000ff057923)  # ISBERD R5, [RZ + 0x10], mode 0xb8: the payload word this task wrote (Ocarina of Time's 5d3a096025e375a1 +0x80, its write barrier left out)
+    KEEP_R5 = (0x0041e8000000b800, 0x00002005ff007927)     # 0x927 [RZ + 0x20], R5, mode 0xb8
 
     def msl(self, *code):
         return self.translate(b''.join(inst(*c) for c in code) + inst(*EXIT), **self.MEMORY)
@@ -239,6 +273,9 @@ class StageMemory(Translated):
 
     def test_input_is_at_its_offset(self):   # 0x10 + 0x20
         self.assertRegex(self.msl(self.INPUT, self.KEEP_R19), r'as_type<float>\(_\d+\[12\]\)')
+
+    def test_own_payload_is_read_from_the_outputs(self):   # 0x120 + 0x10
+        self.assertRegex(self.msl(self.OWN_PAYLOAD, self.KEEP_R5), r'as_type<float>\(_\d+\[76\]\)')
 
     def test_word_store_goes_to_the_outputs(self):   # 0x120 + 0x80
         self.assertIn('0 + 416', self.msl(self.ATTRIBUTE))
@@ -289,6 +326,64 @@ def mov(rd, value):   # MOV Rd, imm32: values the tests can see in the output
 
 def sts(offset, rb):   # STS.U32 [RZ + offset], Rb: keeps its result
     return inst(0x000fe80000000800, offset << 40 | rb << 32 | 0xff << 24 | 0x7388)
+
+
+def ctrl(wb=7, wait=0, stall=2):   # an instruction's control bits, high word: stall, yield, write barrier wb, no read barrier, waiting on the barriers in wait
+    return (stall | 1 << 4 | wb << 5 | 7 << 8 | wait << 11) << 41
+
+
+class RawGlobal(Translated):
+    """A load at an address the shader loaded from memory, which no storage buffer holds (GlobalToStorage.TryGenerateRawStorageOp): it goes through the host's pool table
+    (dmsh_abi.h DMSH_GMEM_MAP_*), a binary search over as many entries as entry 0 says (word 4), however many the pools need. t_gmem_raw runs it on the GPU against the host's table (--fixture)"""
+    ULDC = (0x000fe40000000a00, 0x0000100000067ab9)                      # ULDC.64 UR6, c[0][0x40]: storage slot 0 with this job's c0 layout (3 uniform buffers, 1 storage buffer)
+    ADDR_LO = (0x000fe2000f8e00ff, 0x00000006ff027e24)                   # IMAD.U32 R2, RZ, RZ, UR6
+    ADDR_HI = (0x001fca000f8e00ff, 0x00000007ff037e24)                   # IMAD.U32 R3, RZ, RZ, UR7
+    LDG_PTR = (ctrl(wb=2) | 0x1e1b00, 0x0000000002047381)                # LDG.E.64 R4, [R2.64]: the address, from storage slot 0
+    LDG_RAW = (ctrl(wb=3, wait=0b100) | 0x1e1900, 0x0000000004067381)    # LDG.E R6, [R4.64]: at that address
+    STORE = (ctrl(wait=0b1000, stall=4) | 0x900, 0x0000080602007386)     # STG.E [R2.64 + 8], R6: what it read, at word 2 of storage slot 0
+
+    def msl(self):
+        code = b''.join(inst(*c) for c in (self.ULDC, self.ADDR_LO, self.ADDR_HI, self.LDG_PTR, self.LDG_RAW, self.STORE)) + inst(*EXIT)
+        return self.translate(code, nvn2_cs=[3, 1, 0, 0x50, 0])
+
+    def has(self, msl, pattern): self.assertTrue(re.search(pattern, msl), f'no {pattern} in the raw access function')   # not the whole source in the message
+
+    def test_the_search_takes_the_tables_count(self):   # a loop of log2(count) steps from word 4 of entry 0, not 12 steps over a table of 4,096
+        msl = self.msl()
+        self.has(msl, r'= 0 \+ 4;')
+        self.has(msl, r'\bdo\s*\{[^}]*>> uint\(1\)[^}]*\} while \(')
+        self.assertFalse(re.search(r'\b2048u?\b', msl), 'an unrolled search over 4,096 entries')
+
+    def test_the_bindings_are_the_ones_t_gmem_raw_fills(self):   # storage slot 0 written at word 2 [[id(0)]], the pool table [[id(1)]]
+        msl = self.msl()
+        self.has(msl, r'device _\d+\* cp_s0 \[\[id\(0\)\]\];\s*(const )?device _\d+\* cp_s1 \[\[id\(1\)\]\];')
+        self.has(msl, r'cp_s0\)\._m0\[2\] = ')
+
+    def cas_msl(self):
+        # R4:R5 is a loaded pointer; compare with 5, swap 9, store the old value in slot 0.
+        cas = (ctrl(wb=3, wait=0b100) | 0x1ee10b, 0x0000000a040673a9)
+        code = b''.join(inst(*c) for c in (self.ULDC, self.ADDR_LO, self.ADDR_HI, self.LDG_PTR))
+        code += mov(10, 5) + mov(11, 9) + inst(*cas) + inst(*self.STORE) + inst(*EXIT)
+        return self.translate(code, nvn2_cs=[3, 1, 0, 0x50, 0])
+
+    def test_global_compare_swap_keeps_expected_replacement_and_result(self):
+        msl = self.cas_msl()
+        self.assertIn('atomic_compare_exchange', msl)
+        self.assertRegex(msl, r'int (\w+) = 5;\s+int (\w+) = 9;\s+int \w+ = \w+\([^,]+, [^,]+, \1, \2,')
+
+
+def raw_fixture(out):
+    """<out>/raw.metallib: RawGlobal's shader, compiled as the build compiles (dmsh_build.py MAC_METAL), for t_gmem_raw. Exit code 77 when the translator does not run"""
+    xlate = os.environ.get('DMSH_TEST_XLATE')
+    if not xlate or subprocess.run([xlate, '--source-sha'], capture_output=True).returncode: sys.exit(77)
+    msl = Path(out) / 'raw.metal'; msl.write_text(RawGlobal('test_the_search_takes_the_tables_count').msl())
+    air = Path(out) / 'raw.air'
+    subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', str(msl), '-o', str(air)], check=True)
+    subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(air), '-o', str(Path(out) / 'raw.metallib')], check=True)
+    msl = Path(out) / 'cas.metal'; msl.write_text(RawGlobal('test_global_compare_swap_keeps_expected_replacement_and_result').cas_msl())
+    air = Path(out) / 'cas.air'
+    subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', str(msl), '-o', str(air)], check=True)
+    subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(air), '-o', str(Path(out) / 'cas.metallib')], check=True)
 
 
 class Shared(Translated):
@@ -502,4 +597,5 @@ class Pokopia(Translated):
 
 
 if __name__ == '__main__':
+    if len(sys.argv) == 3 and sys.argv[1] == '--fixture': raw_fixture(sys.argv[2]); sys.exit(0)
     unittest.main()

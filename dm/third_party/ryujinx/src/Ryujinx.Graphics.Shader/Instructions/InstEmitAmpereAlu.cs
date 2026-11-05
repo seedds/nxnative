@@ -87,6 +87,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x204, InstName.R2p, AR2p, N, writesRd: false);
             x(0x803, InstName.P2r, AP2r, N);
             x(0x203, InstName.P2r, AP2r, N);
+            x(0x243, InstName.F2i, APackedF2i, N);
             x(0x81c, InstName.Psetp, APlop3, N, writesRd: false);
             x(0x89c, InstName.Psetp, APlop3, N, uniform: true, writesRd: false);
             x(0x806, InstName.Vote, AVote, N);
@@ -285,6 +286,28 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 Operand r = Register(x.Rd, RegisterType.Gpr);
                 context.Copy(r, signed ? context.IClampS32(r, Const(-128), Const(127)) : context.IClampU32(r, Const(0), Const(255)));
             }
+        }
+
+        // F2IP.U8.TRUNC Rd, RZ, b: truncate one F32 to an unsigned byte after clamping it to [0, 255]. Ocarina of Time's foliage mesh shaders use this exact
+        // 0x243 form to pack generated foliage data. The two-register 0x000004ff form rounds to nearest, with b in byte 0 and a in byte 1 (nxnative PR 1300).
+        public static void APackedF2i(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+
+            if (x.Bits(40, 64) != 0 || (x.Bits(64, 96) != 0x0000c4ff && x.Bits(64, 96) != 0x000004ff) || (x.Bits(64, 96) == 0x0000c4ff && x.Ra != RegisterConsts.RegisterZeroIndex))
+            {
+                throw AFail(context, "packed float-to-byte mode");
+            }
+
+            Operand Byte(int reg)
+            {
+                Operand src = Register(reg, RegisterType.Gpr);
+                Operand rounded = x.Bit(78) ? context.FPTruncate(src) : context.FPRound(src);
+                rounded = context.FPMinimum(context.FPMaximum(rounded, ConstF(0)), ConstF(255));
+                return context.ConditionalSelect(context.IsNan(src), Const(0), context.FP32ConvertToU32(rounded));
+            }
+            Operand low = Byte(x.Rb);
+            ASet(context, x, x.Ra == RegisterConsts.RegisterZeroIndex ? low : context.BitwiseOr(low, context.ShiftLeft(Byte(x.Ra), Const(8))));
         }
 
         // I2F: source signed (74) and size (84..86), destination size (75..77), byte / half select of a narrow source (60..62)

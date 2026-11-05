@@ -1,6 +1,5 @@
-// Host service sessions (hle_sf.c) without a guest: a CMIF request on a served service (olsc:u) succeeds with zeroed output and no special header; the camera context of the Switch 2
-// (nn::camera::sdk::CreateCameraContext) is a host session with no camera: Initialize's command 3 and Finalize's 4 succeed, 21 copies an event's read end to the client in the special header,
-// and the device commands (QueryDeviceConnection's 29, any other) fail with 0x7c4, "no camera device" (Star Fox's camera module and its game code read it so; the earlier 0xdc4 read as "no camera support")
+// Host service sessions (hle_sf.c) without a guest: a CMIF request on a served service (olsc:u, prepo:u) succeeds with zeroed output and no special header; the camera context of the Switch 2
+// (nn::camera::sdk::CreateCameraContext) is a host session with no camera: every command fails with 0xdc4 except 21, which copies an event's read end to the client in the special header
 #include "../hle.h"
 #undef HLE_FORCE
 #define HLE_FORCE(mangled, why, ret, cname, ...) static ret cname(__VA_ARGS__)
@@ -22,6 +21,10 @@ int main(void) {
     CHECK(h_sf_Connect(&h, "olsc:u") == RES_OK && h, "olsc:u is served");
     CHECK(request(h, m, 0) == RES_OK, "olsc:u request");
     CHECK(!(m[1] >> 31) && m[4] == 0x4f434653 && m[6] == RES_OK, "olsc:u: success, no special header, SFCO at +0x10");
+    uint32_t prepo = 0;
+    CHECK(h_sf_Connect(&prepo, "prepo:u") == RES_OK && prepo, "prepo:u is served");
+    CHECK(request(prepo, m, 0) == RES_OK, "prepo:u request");
+    CHECK(!(m[1] >> 31) && m[4] == 0x4f434653 && m[6] == RES_OK, "prepo:u telemetry request succeeds with zeroed output");
     CHECK(h_sf_Connect(&h, "chat:u") == 0xe15u, "a service the host does not serve is not registered");
 
     uint32_t cam = 0;
@@ -38,7 +41,7 @@ int main(void) {
     CHECK(h_sf_Dup(&dup, cam) == RES_OK && dup && dup != cam, "a duplicate of the camera session");
     CHECK(request(dup, m, 5) == RES_OK && m[6] == 0x7c4u, "the duplicate answers as the camera");
     CHECK(request(dup, m, 4) == RES_OK && m[6] == RES_OK, "finalizing the camera library: success");
-    h_sf_Close(dup); h_sf_Close(cam); h_sf_Close(h);
+    h_sf_Close(dup); h_sf_Close(cam); h_sf_Close(prepo); h_sf_Close(h);
     printf("t_sf: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

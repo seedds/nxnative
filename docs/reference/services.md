@@ -51,8 +51,9 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** abort in `sm::Initialize` under `sf::hipc::InitializeHipcServiceResolution`, right after the first frames (from `main+0x5b8198`).
 - **Cause:** `main` links its own clients of `olsc:u` (cloud save data backup settings) and `npns` (push notifications), which talk HIPC through `sm` and `svcSendSyncRequest`. For each user the game asks whether backup is on and switches it off where it is (`main+0x2809c8c`); a failed connect aborts as well.
-- **Fix:** `hle_sf.c` takes over the SDK's HIPC client entry points (`InitializeHipcServiceResolution`, `ConnectToHipcService`, `SendSyncRequest`, `CloseClientSessionHandle` and the control requests `QueryPointerBufferSize`, `ConvertSessionToDomain`, `DuplicateSession(Ex)`): a service it serves (`olsc:u`, the capture services below) gets a host session, and every request on it succeeds with zeroed output, which reads as backup off for every user. Any other name is refused with a red line, as `sm` refuses a service nobody registered (`npns` was never connected). `DM_SF_TRACE=1` dumps each request.
+- **Fix:** `hle_sf.c` takes over the SDK's HIPC client entry points (`InitializeHipcServiceResolution`, `ConnectToHipcService`, `SendSyncRequest`, `CloseClientSessionHandle` and the control requests `QueryPointerBufferSize`, `ConvertSessionToDomain`, `DuplicateSession(Ex)`): a service it serves (`olsc:u`, `prepo:u`, and the capture services below) gets a host session, and every request on it succeeds with zeroed output. This reads as backup off for `olsc:u`; for `prepo:u`, telemetry reports are discarded and never sent. Any other name is refused with a red line, as `sm` refuses a service nobody registered (`npns` was never connected). `DM_SF_TRACE=1` dumps each request.
 - **Capture services:** Super Smash Bros. Ultimate links clients of `caps:su` and `caps:u` (screenshots and clips) and aborts with `Result=0xe15` when `sm` refuses them at the start of its single-player mode. The host has no album, so `caps:su`, `caps:u`, `caps:a`, `caps:c`, `caps:sc` and `caps:ss` get host sessions too: a list reads as empty and a save does nothing.
+- **Telemetry service:** Ocarina of Time links a `prepo:u` client and aborts with `Result=0xe15` when it is not registered. The host serves it as a no-op session so telemetry calls succeed with zeroed output and nothing is transmitted.
 - **Found on:** [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) (SDK 20.5.4); [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (capture services).
 
 ## SDK names that changed between versions
@@ -683,6 +684,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `internal::Initialize` is cut as the plain `Initialize` is, the C library's `poll` goes to the host's `Poll`, the overloads fail as the others do (`hle_net.c`), and `GetCurrentIpConfig` reports no configuration (`hle_offline.c`). `Poll` no longer fails on a descriptor the host never made, which only a garbage value can be: it reports nothing ready at the timeout, as a console's does for a socket with nothing to say. The game logs `socket: No error information` and goes on offline.
 - **Open:** the host refuses `nn::socket::EventFd`, so the HTTP thread polls without a wake-up, and with a garbage descriptor beside it. Harmless offline.
 - **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md).
+
+### Local `eventfd` while network sockets are offline
+
+- **Symptom:** a Switch 2 title aborts during bundled gRPC initialization with Result 0. Its poll-strategy selector has no usable engine; immediately before it, the `poll` engine's capability probe called `nn::socket::EventFd(0, 0)` and got `-1/ENETDOWN`.
+- **Cause:** the offline socket layer failed every socket-family call. `eventfd` is not network access: it is an in-process counter used to wake a poll loop. gRPC disables its poll engine when that counter cannot be created, even though the title does not need an online connection.
+- **Fix:** `hle_net.c` provides private guest eventfd handles with the FreeBSD/Horizon semaphore, nonblocking and close-on-exec flags, counter read/write, close, stale-handle generations, and readiness in `Poll`. Ordinary sockets still fail offline with `ENETDOWN`; the blocking read and poll paths return to the guest scheduler while waiting. `t_net_eventfd` covers the capability probe, counter and semaphore behavior, poll timeout, close and stale handles.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (SDK 22.2.8): after the fix the `npln-grpc` timer and executor threads start and the title reaches its frame loop.
 
 ### Bluetooth LE at boot
 

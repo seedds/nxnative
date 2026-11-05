@@ -29,6 +29,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x98e, InstName.Red, ARed, N, writesRd: false);
             x(0x9a8, InstName.Atom, AAtomg, N);
             x(0x3a8, InstName.Atom, AAtomg, N);
+            x(0x3a9, InstName.AtomCas, AAtomgCas, N);
             x(AmpereOpcodes.Ldl, InstName.Ldl, ALdLocalShared, N);
             x(0x984, InstName.Lds, ALdLocalShared, N);
             x(0x387, InstName.Stl, AStLocalShared, N, writesRd: false);
@@ -130,15 +131,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (stage != null)
             {
-                // A task or mesh shader's stage input (QueryAmpereStageMemory). Mode 0x78: its workgroup's number; 0x38: a word of the payload its task wrote, [Ra + offset]
+                // 0x78 reads the workgroup number, 0x38 the input payload, and 0xb8 the payload this task wrote.
                 int mode = x.Bits(72, 80);
 
-                if (mode != 0x78 && mode != 0x38)
+                if (mode != 0x78 && mode != 0x38 && mode != 0xb8)
                 {
                     throw AFail(context, $"ISBERD mode {mode:x2} in a task or mesh shader");
                 }
 
-                Operand addr = mode == 0x78 ? Const(stage[0]) : context.IAdd(AGpr(x.Ra), Const(stage[1] + (int)x.SignedField(40, 64)));
+                Operand addr = mode == 0x78 ? Const(stage[0]) : context.IAdd(AGpr(x.Ra), Const((mode == 0xb8 ? stage[2] : stage[1]) + (int)x.SignedField(40, 64)));
                 EmitLoad(context, StorageKind.SharedMemory, LsSize2.B32, addr, x.Rd, 0);
                 return;
             }
@@ -357,6 +358,19 @@ namespace Ryujinx.Graphics.Shader.Instructions
         }
 
         // ATOMG Rd, [Ra + UR + offset], Rb: operation 87..91; the uniform form keeps Ra's pair bit at 70
+        // ATOMG.CAS returns the old value: compare Rb and replace it with Rc at the global address.
+        public static void AAtomgCas(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            if (x.Bits(73, 76) > 1 || x.Bit(91))
+            {
+                throw AFail(context, $"ATOMG.CAS type {x.Bits(73, 76)} or uniform address");
+            }
+            (Operand lo, Operand hi) = AGlobalAddress(context, x, 72, 64, 0);
+            Operand result = context.AtomicCompareAndSwap(StorageKind.GlobalMemory, lo, hi, AGpr(x.Rb), AGpr(x.Rc));
+            ASet(context, x, result);
+        }
+
         public static void AAtomg(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);

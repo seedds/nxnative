@@ -62,7 +62,7 @@ static void image_case(int explicit_image) { @autoreleasepool {
     CHECK(rid == image.gpuResourceID._impl, "image argument names the real view");
     os_unfair_lock_unlock(&g_rmu);
     mtl_sub_commit(); mtl_drain();
-    uint16_t pixels[64]; read_level(upgraded, 0, pixels);
+    uint16_t pixels[64] = {0}; read_level(upgraded, 0, pixels);
     int same = 1; for (int i = 0; i < 64; i++) same &= pixels[i] == 0x3800; CHECK(same, "upgrade preserves the clear from the pass it ended");
     read_level(upgraded, 1, pixels); same = 1; for (int i = 0; i < 16; i++) same &= pixels[i] == 0x3a00; CHECK(same, "upgrade preserves the other mip");
     NSError *error = nil;
@@ -76,8 +76,40 @@ static void image_case(int explicit_image) { @autoreleasepool {
     read_level(tex_mtl(&alias), 1, pixels); same = 1; for (int i = 0; i < 16; i++) same &= pixels[i] == (i == 5 ? 0x3400 : 0x3a00);
     CHECK(same, "sampled alias sees the image write and untouched pixels");
 } }
+static void atomic_alias_case(void) { @autoreleasepool {
+    tex_t t = {.magic=MAGIC('T','E','X',0), .serial=99600, .off=4u<<20,
+               .d={.target=NVN_TEXTURE_TARGET_2D, .format=NVN_FORMAT_RGBA8, .flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE,
+                   .width=4, .height=4, .depth=1, .levels=1, .samples=1}};
+    nvn_tex_layout(&t.d, &t.L); mtl_tex_init(&t);
+    id<MTLTexture> original = tex_mtl(&t); CHECK(original.pixelFormat == MTLPixelFormatRGBA8Unorm, "original has a color format");
+    mtl_sub_begin(); memset(&R, 0, sizeof R); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &t;
+    R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(4/255.0, 3/255.0, 2/255.0, 1/255.0);
+    CHECK(rp_begin() != nil, "clear the original RGBA8 surface");
+    NvProg *program = [NvProg new]; NvShader *shader = [NvShader new]; program->sh[5] = shader;
+    shader->rf.nb = 1; shader->rf.b[0] = (nvn_rbind){.kind=NVN_RB_IMG, .dtt=MTLTextureType2D, .dpf=NVN_DPF_UINT, .reg=0, .rw=1, .atom=1};
+    mtl_reg_image(603, &t, NULL); S.img[5][0] = 603; image_prepare(program, 0x20);
+    id<MTLTexture> rgba = tex_mtl(&t); uint64_t rid; int real;
+    os_unfair_lock_lock(&g_rmu); id<MTLTexture> atomic = img_binding(603, &shader->rf.b[0], &rid, &real); os_unfair_lock_unlock(&g_rmu);
+    CHECK(rgba.pixelFormat == MTLPixelFormatRGBA8Unorm && rgba.parentTexture.pixelFormat == MTLPixelFormatR32Uint, "RGBA8 rendering kept on atomic storage");
+    CHECK(real && img_atomic_ok(atomic, &shader->rf.b[0]), "R32 view is a real atomic image");
+    mtl_sub_commit(); mtl_drain();
+    if (!real || !img_atomic_ok(atomic, &shader->rf.b[0])) return;
+    NSError *error = nil; MTLCompileOptions *options = [MTLCompileOptions new]; options.languageVersion = MTLLanguageVersion3_1;
+    id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nkernel void stamp(texture2d<uint, access::read_write> t [[texture(0)]]) { t.atomic_fetch_or(uint2(0), 0x10203040u); }" options:options error:&error];
+    id<MTLComputePipelineState> pipeline = lib ? [g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"stamp"] error:&error] : nil;
+    CHECK(pipeline != nil, "native atomic shader compiled"); if (!pipeline) return;
+    id<MTLBuffer> result = [g_dev newBufferWithLength:4 options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> cb = q_cb(); id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:pipeline]; [enc setTexture:atomic atIndex:0];
+    [enc dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)]; [enc endEncoding];
+    id<MTLBlitCommandEncoder> copy = [cb blitCommandEncoder];
+    [copy copyFromTexture:rgba sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(1,1,1)
+                  toBuffer:result destinationOffset:0 destinationBytesPerRow:4 destinationBytesPerImage:4];
+    [copy endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    CHECK(cb.status == MTLCommandBufferStatusCompleted && *(uint32_t *)result.contents == 0x11223344u, "RGBA8 read sees preserved clear bits and the atomic OR");
+} }
 int main(void) { @autoreleasepool {
-    mtl_init(); image_case(0); image_case(1);
+    mtl_init(); image_case(0); image_case(1); atomic_alias_case();
     printf("explicit image usage: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

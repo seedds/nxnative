@@ -92,5 +92,21 @@ class Vote(Alu):
         self.assertIn('simd_any', self.kept(self.FSETP, self.VOTE, self.MOV_P0, srcs=(6, 19, 20)))
 
 
+class PackedFloatToByte(Alu):
+    """F2IP.U8.TRUNC R6, RZ, R19, the packed conversion in Ocarina of Time's Kokiri Forest foliage mesh shaders."""
+    F2IP = (0x000fe4000000c4ff, 0x00000013ff067243)
+    TWO_REGISTERS = (0x000fc400000004ff, 0x000000132c067243)
+
+    def test_clamps_and_converts_the_source(self):
+        msl = self.kept(self.F2IP, srcs=(19,))
+        self.assertIn('255.0', msl)
+        self.assertRegex(msl, r'uint\(')
+
+    def test_two_register_form_packs_both_bytes(self):
+        msl = self.kept(self.TWO_REGISTERS, srcs=(19, 44))
+        self.assertIn('255.0', msl)
+        self.assertIn('<< 8', msl)
+
+
 if __name__ == '__main__':
     unittest.main()

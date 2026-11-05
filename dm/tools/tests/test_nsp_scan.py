@@ -46,6 +46,71 @@ class Scan(unittest.TestCase):
         self.assertEqual(nsp.scan_nsps(self.tmp)[1]['base'], base)
         self.assertEqual(self.said, [])
 
+    def test_extension_in_any_letter_case(self):   # `Game [id].NSP` (a download, a card dump): glob('*.nsp') missed it on every POSIX system, a case-insensitive Mac volume too (LNPANDY/NX2Apple#554)
+        base = self.tmp / f'Game [{APP:016X}][v0].NSP'; pfs0(base, [f'{APP:016x}0000000000000011.tik'])
+        upd = self.tmp / f'Update [{APP | 0x800:016X}][v65536].Nsp'; pfs0(upd, [])
+        dlc = self.tmp / f'DLC [{APP + 0x1001:016X}].XCI'; dlc.write_bytes(bytes(0x100) + b'HEAD' + bytes(0x100))
+        app, fam = nsp.scan_nsps(self.tmp)
+        self.assertEqual((app, fam['base'], [p for _, p in fam['updates']], [p for _, _, p in fam['dlc']]), (APP, base, [upd], [dlc]))
+
+    def test_compressed_extension_in_capitals_counts(self):   # its conversion: test_nsp_nsz
+        nsz = self.tmp / f'Game [{APP:016X}].NSZ'; pfs0(nsz, [f'{APP:016x}0000000000000011.tik'])
+        self.assertEqual(nsp.scan_nsps(self.tmp)[1]['base'], nsz)
+
+    def test_package_beside_a_compressed_one_wins_in_any_letter_case(self):   # read from the listing: Game.nsp, which with_suffix would look for, is not on a case-sensitive volume
+        for packed, compressed in (('.NSP', '.NSZ'), ('.NSP', '.nsz'), ('.nsp', '.NSZ'), ('.XCI', '.XCZ')):
+            with self.subTest(packed=packed, compressed=compressed):
+                self.said.clear()
+                base = self.tmp / f'Game [{APP:016X}]{packed}'; pfs0(base, [f'{APP:016x}0000000000000011.tik'])
+                nsz = self.tmp / f'Game [{APP:016X}]{compressed}'; pfs0(nsz, [f'{APP:016x}0000000000000011.tik'])
+                self.assertEqual(nsp.scan_nsps(self.tmp)[1]['base'], base)
+                self.assertEqual(self.said, [f'skipping {nsz.name}: {base.name} is beside it'])
+                base.unlink(); nsz.unlink()
+
+    def test_folder_named_like_a_package_is_not_one(self):
+        (self.tmp / 'old.nsp').mkdir()
+        base = self.tmp / f'Game [{APP:016X}].nsp'; pfs0(base, [f'{APP:016x}0000000000000011.tik'])
+        self.assertEqual(nsp.scan_nsps(self.tmp)[1]['base'], base)
+
+    def test_nup_in_capitals(self):
+        nup = self.tmp / 'Game.NUP'; nup.write_bytes(b'NUP\0')
+        self.assertEqual(nsp.nup_file(self.tmp), nup)
+        (self.tmp / '._Game.NSP').write_bytes(b'\0\x05\x16\x07')   # an AppleDouble file is not a package
+        self.assertEqual(nsp.nup_file(self.tmp), nup)
+        pfs0(self.tmp / 'Game.NSP', ['x.nca'])
+        self.assertIsNone(nsp.nup_file(self.tmp))   # a package in capitals counts as a package, so no NUP is looked for
+
+    def test_dump_with_a_package_in_capitals_beside_it(self):
+        (self.tmp / 'base/exefs').mkdir(parents=True); (self.tmp / 'base/romfs').mkdir(); (self.tmp / 'base/exefs/main.npdm').write_bytes(b'x')
+        self.assertTrue(nsp.dump_folder(self.tmp))
+        pfs0(self.tmp / 'Game.NSP', ['x.nca'])
+        self.assertFalse(nsp.dump_folder(self.tmp))   # the package is what the player asked for
+
+    def test_missing_final_name_terminator(self):
+        for extension in ('.nsp', '.nsz'):
+            with self.subTest(extension=extension):
+                base = self.tmp / ('base' + extension)
+                names = [f'{APP:016x}0000000000000011.tik', 'last.nca']
+                pfs0(base, names)
+                data = bytearray(base.read_bytes())
+                struct.pack_into('<I', data, 8, struct.unpack_from('<I', data, 8)[0] - 1)
+                base.write_bytes(data[:-1])
+                before = base.read_bytes()
+                self.assertEqual(nsp.pfs0_names(base), names)
+                self.assertEqual(nsp.title_of(base), APP)
+                self.assertEqual(base.read_bytes(), before)
+
+    def test_invalid_name_table_is_rejected(self):
+        base = self.tmp / 'base.nsp'
+        pfs0(base, ['last.nca'])
+        data = bytearray(base.read_bytes())
+        for broken in (data[:12], data[:-2]):
+            base.write_bytes(broken)
+            with self.assertRaises(nsp.BuildError): nsp.pfs0_names(base)
+        struct.pack_into('<I', data, 16 + 16, 0xffffffff)
+        base.write_bytes(data)
+        with self.assertRaises(nsp.BuildError): nsp.pfs0_names(base)
+
 
 class TitleFromPackage(unittest.TestCase):
     """A package with neither a ticket nor a [title ID] in its name (a standard-crypto dump, a repack: LNPANDY/NX2Apple#177) is asked for its title ID. The reader itself (nx_extract --title,
@@ -183,6 +248,26 @@ class Merged(unittest.TestCase):
         with mock.patch.object(nsp, 'build_nx_extract', lambda *a: 'nx'), mock.patch.object(nsp, 'run', fake_run), nsp.package_title_reader(REPO, keys, {}) as read:
             self.assertEqual(read.contents(self.tmp / 'm.nsp'), self.CONTENTS)
             self.assertEqual(calls, [['nx', keys, '--contents', self.tmp / 'm.nsp']])
+
+    def test_keys_too_old_stop_before_the_packages_are_read(self):   # nx_extract --keys: every package once, a merged one too; its red line becomes the stop, other failures are left to later steps
+        keys, m, upd, calls = self.tmp / 'prod.keys', self.tmp / 'm.nsz', self.tmp / 'u.nsp', []
+        fam = {'base': m, 'updates': [(1507328, m), (1572864, upd)], 'dlc': [(APP + 0x1001, 65536, m)]}
+        old = ('[RED] m.nsz (and 1 more files): prod.keys has no key_area_key_application_10 (master key 10, which came with firmware 17.0.0): the keys are older than the game; '
+               'dump prod.keys again from a console on firmware 17.0.0 or later')
+        def fake_run(cmd, log, env=None, cwd=None, on_line=None, ok=()):
+            calls.append((cmd, ok)); log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text(self.out + '\n')
+            if self.broken: raise nsp.BuildError('nx_extract exit code 134')
+        with mock.patch.object(nsp, 'build_nx_extract', lambda *a: 'nx'), mock.patch.object(nsp, 'run', fake_run), nsp.package_title_reader(REPO, keys, {}) as read:
+            self.out, self.broken = 'the keys open all 2 packages', False
+            read.check_keys(fam)
+            self.assertEqual(calls[0][0], ['nx', keys, '--keys', m, upd]); self.assertIn(6, calls[0][1])
+            self.out = old
+            with self.assertRaisesRegex(nsp.BuildError, r'^m\.nsz \(and 1 more files\): prod\.keys has no key_area_key_application_10 .* firmware 17\.0\.0 or later$'): read.check_keys(fam)
+            self.out, self.broken = 'Unhandled exception. System.IO.IOException', True
+            read.check_keys(fam)
+        with mock.patch.object(nsp.shutil, 'which', lambda *a, **k: None), nsp.package_title_reader(REPO, keys, {}) as read:
+            read.check_keys(fam)   # no dotnet: the steps that need it say so
 
 
 if __name__ == '__main__':

@@ -27,6 +27,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl.Instructions
             Add(Instruction.Add,                      InstType.OpBinaryCom,    "+",               2);
             Add(Instruction.Ballot,                   InstType.Special);
             Add(Instruction.Barrier,                  InstType.CallNullary,    "barrier");
+            Add(Instruction.SubgroupBarrier,          InstType.CallNullary,    "subgroupBarrier");
             Add(Instruction.BitCount,                 InstType.CallUnary,      "bitCount");
             Add(Instruction.BitfieldExtractS32,       InstType.CallTernary,    "bitfieldExtract");
             Add(Instruction.BitfieldExtractU32,       InstType.CallTernary,    "bitfieldExtract");

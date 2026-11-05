@@ -50,10 +50,18 @@ SDK 6.4.0 boots, one each:
 - **Resolved: SIGBUS in `__vfprintf` under `aoc_load`, from `h_aoc_Count`** (a store to `0x…67ff0`, right below a page of the guest thread's stack): the first add-on content query lists `DM_AOC_DIR` and logs, a few KB of stack, and the game asks from a thread with little left. `aoc::CountAddOnContent` and `ListAddOnContent` now run on the big host stack (`HLE_FORCE_BIG`, `hle_misc.c`).
 - `vi::CreateLayer(w, h)` keeps the layer's size for the window surface.
 
+## Saves
+
+- Three slots, `save:/savedata/NNNN.bin` (843,600 bytes, starting with the version 19) and `slot_NNNN.bin` (720 bytes: a title, then at +0xc0 one text line of the data the slot screen shows, at +0x2c8 the POSIX time), with `system_data.bin` beside them. A save mounts, writes both files and commits on a thread of its own.
+- The slot line, `19, 843600, 184, …`, is written at `main+0x125684` and split on commas at `main+0x129c90`. A slot whose first three fields differ counts as broken (`main+0x124e6c`). The slot check reads no account ID. Open: a save imported from another emulator has not been tried here (the reporter's MeloNX save showed the same NO DATA); a copied save folder loads.
+- **Resolved ([issue #769](https://github.com/seedds/nxnative/issues/769)): every slot showed NO DATA.** Files, reading and validation were all right: the record was valid at boot, and Continue was offered. The save manager's busy byte stayed set, so every later slot read was refused and the screen took a stale status: [File system calls are service requests](../../../docs/reference/threads.md#file-system-calls-are-service-requests). Its other effect was the terms of service at every boot, as the system data save was refused too.
+
 ## Mac routes
 
 - A fresh save reaches EDEN with `DM_KBD=Taiga DM_KEYS="f2000:A*26/200,f7300:Right,f7400:A,f7600:A,f7800:Right,f7850:A,f8100:A*39/250,f9000:Plus*15/600,f18000:Down*3/1200,f18100:A*3/1200,f21700:Left*300/250,f21800:A*300/250"` (the title, the privacy policy, the DigiLab: Cyber Sleuth, no options, A through the opening chat; the login form comes at frame 18,500 to 19,700).
 - The name is a field of that form: A opens the keyboard, and the game's name screen stays up about 500 frames after the text arrives, where another A opens it again, so Down and A come 1,200 frames apart. The login prompt defaults to No, hence Left before each A from there; EDEN at about frame 22,500.
+- Saving works anywhere once the character is free (after the EDEN chat, about frame 27,500): X opens the Digivice, Up selects Save (the S icon), A opens the slots. A on a slot saves; another A closes the message.
+- At the title with a save: A (past the title), A on Continue, which is preselected. With no `system_data.bin` the terms come first, three A presses.
 
 ## Found on this game
 
@@ -63,6 +71,7 @@ General host changes first needed here; each applies to every game:
 - **MVGL archives** (`dm/gfx/tools/mvgl.py`).
 - **Loader census** (`dm/tools/loader_census.py`) and the `graphics gl` guess in `profile_guess.py`: [02, NVN surface](../../../docs/agents/02-survey.md#nvn-surface).
 - **Add-on content queries on the big host stack** (`HLE_FORCE_BIG`): [Add-on content queries on a small guest stack](../../../docs/reference/services.md#add-on-content-queries-on-a-small-guest-stack).
+- **File system calls end a same-core handoff:** [File system calls are service requests](../../../docs/reference/threads.md#file-system-calls-are-service-requests).
 
 ## Open
 

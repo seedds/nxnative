@@ -1,0 +1,9 @@
+# From the save in run/: the title, then A through Single Player, Grand Prix, the character, the kart, the Mushroom Cup, 50cc and "Start Grand Prix?" (the cup's opening movie starts at
+# about 56 s), and A held to drive the first race from 120 s. No screenshots: the race differs from run to run (karts, items, weather). 200 s: on a 16 GB Mac the race swapped from about 160 s before placement sparse tiles were shared by physical memory
+save	run
+keys	28:A*12/2,120:A~9.5*8/10
+secs	200
+quick	60
+reach	6000@190
+window	150	40
+hang	30

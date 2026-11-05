@@ -1,0 +1,44 @@
+# Fire Emblem Fortune's Weave (Switch 2, v131072). Plays on the Mac: see README.md
+# Intelligent Systems' engine on NintendoWare (G3d / Ui2d / Vfx / Atk), PhysX 5.6, SDK 22.2.0, NVN2 (Ampere shaders); modules main + subsdk2 (movie) + sdk. subsdk0 (DLSS) and subsdk1 (CUDA) are not loaded: main imports nothing from them.
+# Packed from a dump folder with scripts/pack_dump.py. Shaders: Shaders/*.bfsha.zst (zstd of FSHA).
+
+# ---- Identity ----
+title_id	04007EF01F8AE000
+program_id	04007EF01F8AE000
+
+# ---- App ----
+name	Fire Emblem Fortune's Weave
+ipa	FireEmblemFortunesWeave.ipa
+app_category	public.app-category.role-playing-games
+pad_layout	full
+
+# ---- Versions ----
+build	v131072	v131072	main=db93b0125f4850601d61c3edde012f8e	subsdk2=7d73f8e808341683306a4425a4989ed5	sdk=5b1602f3a2965f44ab13124cadbdf148
+package	v131072
+shader_versions	v131072
+
+# ---- Frame rate ----
+# 60 fps (30 in gameplay as shipped): the game's graphics object holds its target frame rate (60 for the title and menus, 30 for gameplay) and steps the game by 60 / target. The
+# rewriter finds the field by its readers in any build (dm/tools/fps_target.py), the host writes the target there (hle_fpslock.c), and the game asks for present interval 1 itself.
+# DM_FPS_TARGET=30 holds 30 everywhere, menus included
+# 120 fps on the Mac when chosen (Frame rate): the step 60.0 / target takes 0.5, the present still asks for interval 1, and the host falls back to 60 when frames do not fit (README.md, Frame rate)
+fps_target	60
+fps_max	120
+
+# ---- Files ----
+modules	main subsdk2 sdk
+romfs_marker	Fs.bin.zst
+zip_store	.zst:.mp4:.webm:.metallib
+
+# ---- Memory ----
+# The Switch 2 leaves games 9 GB of its 12 GB (Donkey Kong Bananza's figure, not measured here). The NPDM declares 64 MB of system resource, so virtual address memory is on.
+# 256 MB in front + alias region + 256 MB stack region + heap region: Splatoon Raiders' split as a starting point, to be measured
+mem_reserve	0x550000000
+mem_alias	0x400000000
+mem_stack	0x10000000
+app_pool	0x240000000
+sys_resource	0x4000000
+
+# ---- Shader split (shader_split.py) ----
+shader_groups	/Shaders/=shader /Effect/=effect /Layout/=layout
+shader_note	Fire Emblem Fortune's Weave shaders

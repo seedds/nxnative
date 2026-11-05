@@ -24,7 +24,7 @@ static int lib(NSString *dir, NSString *name, NSString *src) {   // <dir>/<name>
 static void reset_counts(void) { g_pre_done = g_pre_built = g_pre_archived = g_pre_skipped = g_pre_failed = 0; }
 
 int main(void) { @autoreleasepool {
-    char tmp[] = "/tmp/t_pso_bundle.XXXXXX"; if (!mkdtemp(tmp)) abort();
+    char tmp[PATH_MAX]; snprintf(tmp, sizeof tmp, "%s/t_pso_bundle.XXXXXX", getenv("TMPDIR") ?: "/tmp"); if (!mkdtemp(tmp)) abort();
     NSString *root = @(tmp), *msl = [root stringByAppendingFormat:@"/msl/b-%s", DMSH_CHAIN], *tables = [root stringByAppendingPathComponent:@"tables"];
     NSString *bundle = [root stringByAppendingPathComponent:@"bundle"], *arch = [root stringByAppendingPathComponent:@"archive"];
     // A magic number alone cannot establish an archive: these are the known crash inputs, checked without calling Metal.
@@ -98,6 +98,22 @@ int main(void) { @autoreleasepool {
     shmap_load(); pso4_init();
     EXPECT("bundle: opened", 1, g_arch_bundle != nil);
     EXPECT("bundle: first among the files without a vertex layout", 1, g_arch4p.count && g_arch4p[0] == g_arch_bundle);
+    // A separate output forces one base per compiler invocation, then metal-pack merges both for this GPU.
+    NSString *batched = [root stringByAppendingPathComponent:@"batched"];
+    if (sh([NSString stringWithFormat:@"python3 %@ --platform macos --gpu %@ --msl %@ --pairs %@/shader_pairs.tsv --out %@ --work %@/batch-work --batch-size 1 > %@/pso_batched.log 2>&1",
+            tool, gpu, msl, tables, batched, root, root])) {
+        NSString *log = [NSString stringWithContentsOfFile:[root stringByAppendingPathComponent:@"pso_batched.log"] encoding:NSUTF8StringEncoding error:nil];
+        fprintf(stderr, "batched pso_offline.py failed:\n%s\n", log.UTF8String); return 1;
+    }
+    NSString *batchPath = [batched stringByAppendingFormat:@"/%@.mtl4a", gpu];
+    EXPECT("batched archive: container accepted", 1, arch_file_ok(batchPath));
+    id<MTL4Archive> batchArchive = arch_file_ok(batchPath) ? [g_dev newArchiveWithURL:[NSURL fileURLWithPath:batchPath] error:nil] : nil;
+    EXPECT("batched archive: opened", 1, batchArchive != nil);
+    EXPECT("batched archive: first group's base", 1, [batchArchive newRenderPipelineStateWithDescriptor:pre_desc(@"v1", @"f1", 0) error:nil] != nil);
+    EXPECT("batched archive: second group's base", 1, [batchArchive newRenderPipelineStateWithDescriptor:pre_desc(@"v1", @"f2", 0) error:nil] != nil);
+    EXPECT("batched archive: absent depth entry stays absent", 0, [batchArchive newRenderPipelineStateWithDescriptor:pre_desc(@"v1", @"f1", 1) error:nil] != nil);
+    EXPECT("batched archive: full coverage stamp preserved", 1, [[NSString stringWithContentsOfFile:[batched stringByAppendingPathComponent:@"prebuilt.tsv"] encoding:NSUTF8StringEncoding error:nil]
+            isEqualToString:[NSString stringWithContentsOfFile:[bundle stringByAppendingPathComponent:@"prebuilt.tsv"] encoding:NSUTF8StringEncoding error:nil]]);
     // its stamp matches: only the pair with function constants is built here
     reset_counts();
     EXPECT("covered: one pair built on the device", 1, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));

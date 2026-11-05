@@ -16,7 +16,7 @@ static int cases, failed;
 #define EXPECT(n,w,v) do { int a=(w), b=(v); cases++; printf("%s expected %d -> got %d %s\n",n,a,b,a==b?"PASS":"FAIL"); failed+=a!=b; } while (0)
 static void run_case(int format) {
     void *mem = NULL; if (posix_memalign(&mem, getpagesize(), 262144)) abort(); memset(mem, 0, 262144);
-    pool_t pool = {.mem=mem, .size=262144, .flags=0x24}; mtl_pool_add(mem, 262144);
+    pool_t pool = {.magic=MAGIC('P','O','O','L'), .mem=mem, .size=262144, .flags=0x24}; mtl_pool_add(mem, 262144);
     NVNtextureBuilder tb; NVNtexture tex; h_nvnTextureBuilderSetDefaults(&tb); h_nvnTextureBuilderSetWidth(&tb, 160);
     h_nvnTextureBuilderSetHeight(&tb, 90); h_nvnTextureBuilderSetFormat(&tb, format);
     h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_LINEAR); h_nvnTextureBuilderSetStride(&tb, 640);
@@ -40,11 +40,11 @@ static void run_case(int format) {
     uint8_t *map = (uint8_t *)h_nvnMemoryPoolMap((const NVNmemoryPool *)&pool) + 65536; int bad = 0;
     static const uint8_t want[] = {51,102,153,255}; for(int i=0;i<160*90;i++) bad += memcmp(map+i*4,want,4) != 0;
     EXPECT("GPU image writes -> CPU pool map, 14400 literal pixels", 0, bad);
-    h_nvnTextureFinalize(&tex); mtl_pool_del(mem); free(mem);
+    h_nvnTextureFinalize(&tex); mtl_pool_del(mem); mtl_alias_drop_pool(&pool); free(mem);   // as nvnMemoryPoolFinalize: the next case's pool object has the same address
 }
 static void render_target_stride_case(void) {
     void *mem = NULL; if (posix_memalign(&mem, getpagesize(), 65536)) abort(); memset(mem, 0, 65536);
-    pool_t pool = {.mem=mem, .size=65536, .flags=0x24}; mtl_pool_add(mem, 65536);
+    pool_t pool = {.magic=MAGIC('P','O','O','L'), .mem=mem, .size=65536, .flags=0x24}; mtl_pool_add(mem, 65536);
     NVNtextureBuilder tb; NVNtexture tex; h_nvnTextureBuilderSetDefaults(&tb);
     h_nvnTextureBuilderSetWidth(&tb, 16); h_nvnTextureBuilderSetHeight(&tb, 16);
     h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
@@ -70,7 +70,7 @@ static void render_target_stride_case(void) {
 }
 static void scaled_copy_case(void) {
     void *mem = NULL; if (posix_memalign(&mem, getpagesize(), 262144)) abort(); memset(mem, 0, 262144);
-    pool_t pool = {.mem=mem, .size=262144, .flags=0x24}; mtl_pool_add(mem, 262144);
+    pool_t pool = {.magic=MAGIC('P','O','O','L'), .mem=mem, .size=262144, .flags=0x24}; mtl_pool_add(mem, 262144);
     NVNtextureBuilder tb; NVNtexture dst; h_nvnTextureBuilderSetDefaults(&tb); h_nvnTextureBuilderSetWidth(&tb, 160);
     h_nvnTextureBuilderSetHeight(&tb, 90); h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8_SRGB);
     h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_LINEAR); h_nvnTextureBuilderSetStride(&tb, 640);

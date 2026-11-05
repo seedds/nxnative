@@ -1,4 +1,4 @@
-"""Offer the resolution control only when the rewritten build supports it."""
+"""Offer the resolution control only when the rewritten build supports it, and the game's upscaler choice only to games whose shader map holds their own upscaler (agl's NDSR network: game.py upscaler_keys)."""
 from pathlib import Path
 import sys,tempfile,unittest
 from unittest.mock import patch
@@ -19,5 +19,24 @@ class ResolutionSetting(unittest.TestCase):
                 fps=next(s for s in rows if s['env']=='DM_FPS_TARGET')
                 self.assertEqual(fps['default'],'60')
                 self.assertEqual(fps['options'],[['30','30 fps'],['60','60 fps']])
+
+class FrameRateOption(unittest.TestCase):
+    def test_120_only_on_the_mac_for_a_game_checked_at_that_speed(self):
+        with tempfile.TemporaryDirectory() as tmp,patch.object(settings.nacp,'languages',return_value=['en-US']):
+            (Path(tmp)/'main.fixups.tsv').write_text('')
+            for gid,platform,has in [('04007EF01F8AE000','mac',True),('04007EF01F8AE000','ios',False),('010056B015FE8000','mac',False)]:   # Fortune's Weave (fps_max 120), NieR:Automata (none)
+                with patch.dict(settings.os.environ,{'SETTINGS_PLATFORM':platform}):
+                    fps=next(s for s in settings.build(gid,tmp,'unused')['settings'] if s['env']=='DM_FPS_TARGET')
+                self.assertEqual(fps['default'],'60',gid)
+                self.assertEqual(fps['options'],[['30','30 fps'],['60','60 fps']]+([['120','120 fps']] if has else []),(gid,platform))
+
+class UpscalerSetting(unittest.TestCase):
+    def test_only_for_games_naming_their_upscaler(self):
+        with tempfile.TemporaryDirectory() as tmp,patch.object(settings.nacp,'languages',return_value=['en-US']):
+            (Path(tmp)/'main.fixups.tsv').write_text('')
+            for gid,shown in [('040074A01BF12000',True),('010056B015FE8000',False)]:   # Donkey Kong Bananza (its NDSR network), NieR:Automata (none)
+                up=[s for s in settings.build(gid,tmp,'unused')['settings'] if s['env']=='DM_UPSCALER']
+                self.assertEqual(bool(up),shown,gid)
+                if up:self.assertEqual((up[0]['default'],up[0]['options']),('game',[['game',"Game's own"],['metalfx','MetalFX']]))
 
 if __name__=='__main__':unittest.main()

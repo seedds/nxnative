@@ -7,7 +7,7 @@ using static Ryujinx.Graphics.Shader.IntermediateRepresentation.OperandHelper;
 
 namespace Ryujinx.Graphics.Shader.Decoders
 {
-    static class Decoder
+    static partial class Decoder
     {
         private class Context
         {
@@ -371,6 +371,11 @@ namespace Ryujinx.Graphics.Shader.Decoders
                 indexed = opIpa.Idx;
             }
 
+            SetUserAttributeUses(definitions, context, offset, count, isStore, indexed, perPatch);
+        }
+
+        private static void SetUserAttributeUses(ShaderDefinitions definitions, Context context, int offset, int count, bool isStore, bool indexed, bool perPatch)
+        {
             if (indexed)
             {
                 if (isStore)
@@ -500,6 +505,11 @@ namespace Ryujinx.Graphics.Shader.Decoders
 
         public static bool IsUnconditionalBranch(ref InstOp op)
         {
+            if (op.IsAmpere)
+            {
+                return op.Props.HasFlag(InstProps.Bra) && IsUnconditionalAmpere(new AmpereOp(op));
+            }
+
             return IsUnconditional(ref op) && op.Props.HasFlag(InstProps.Bra);
         }
 

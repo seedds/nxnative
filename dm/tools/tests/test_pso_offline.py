@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import tracemalloc
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
@@ -106,11 +107,13 @@ class Plan(unittest.TestCase):
         self.shader('fs', {}, {'_b': [('main0', False)]})
         self.shader('fsc', {}, {'_b': [('main0', True)]})
         self.shader('fsx', {'entry': 'main1'}, {'_b': [('main0', False)]})
-        pairs = [('pull', 'fs'), ('plain', 'fs'), ('inputs', 'fs'), ('layer', 'fs'), ('other', 'fs'), ('nolib', 'fs'), ('pull', 'fsc'), ('pull', 'fsx'), ('pull', 'gone'), ('pull', 'fs')]
+        self.shader('fsp', {'raster': {'primitive_id': 1}}, {'_b': [('main0', False)]})   # reads the primitive ID: no base
+        pairs = [('pull', 'fs'), ('plain', 'fs'), ('inputs', 'fs'), ('layer', 'fs'), ('other', 'fs'), ('nolib', 'fs'), ('pull', 'fsc'), ('pull', 'fsx'), ('pull', 'gone'), ('pull', 'fs'),
+                 ('plain', 'fsp')]
         bases, rest, left = po.plan(self.d, CHAIN, pairs, False)
         self.assertEqual(bases, [('pull_bp', 'main0', 'fs_b', 'main0'), ('plain_b', 'main0', 'fs_b', 'main0')])
         self.assertEqual(rest, [('pull', 'fsc')])
-        self.assertEqual(left, {'reflection': 2, 'stage inputs': 1, 'library': 1, 'layer': 1, 'entry': 1})
+        self.assertEqual(left, {'reflection': 2, 'stage inputs': 1, 'library': 1, 'layer': 1, 'primitive ID': 1, 'entry': 1})
         bases, _, _ = po.plan(self.d, CHAIN, pairs[:2], True)   # near = 0: the entry_z entries
         self.assertEqual(bases, [('pull_bp', 'main0_z', 'fs_b', 'main0'), ('plain_b', 'main0_z', 'fs_b', 'main0')])
 
@@ -144,10 +147,11 @@ class Build(unittest.TestCase):
         (self.prof / 'game.tsv').write_text('title_id\t0100000000001000\nname\tTest\ndepth_mode\tzero\n')
         (self.prof / 'shader_pairs.tsv').write_text('# pairs\nv\tf\nv\tc\n')
         self.out, self.work, self.calls = self.t / 'out', self.t / 'work', []
+        self.compiler = 'AIR-TT 1.0'
 
     def fake_run(self, cmd, **kw):
         cmd = [str(c) for c in cmd]
-        if '-version' in cmd: return subprocess.CompletedProcess(cmd, 0, 'AIR-TT 1.0\n', '')
+        if '-version' in cmd: return subprocess.CompletedProcess(cmd, 0, self.compiler + '\n', '')
         if '--show-sdk-version' in cmd: return subprocess.CompletedProcess(cmd, 0, '27.1\n', '')
         self.calls.append(cmd); Path(cmd[cmd.index('-o') + 1]).write_bytes(b'archive ' + cmd[cmd.index('-arch') + 1].encode())
         return subprocess.CompletedProcess(cmd, 0)
@@ -156,6 +160,37 @@ class Build(unittest.TestCase):
         args = ['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), *extra]
         with mock.patch.object(po.subprocess, 'run', self.fake_run), mock.patch.dict(os.environ, DM_GAMES_DIR=str(self.prof.parent)), contextlib.redirect_stdout(io.StringIO()):
             return po.main(args)
+
+    def test_large_script_memory_and_compatible_archive_key(self):
+        # Share the two synthetic library files but give every base a distinct entry pair.
+        bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(512)]
+        at_compile = []
+        compiler = self.fake_run
+        def measure(cmd, **kwargs):
+            if '-o' in cmd:
+                at_compile.append(tracemalloc.get_traced_memory()[0])
+            return compiler(cmd, **kwargs)
+        with mock.patch.object(po, 'plan', return_value=(bases, [], {})), mock.patch.object(self, 'fake_run', measure):
+            tracemalloc.start()
+            try:
+                self.main('--os-min', '27.0')
+                peak = tracemalloc.get_traced_memory()[1]
+            finally:
+                tracemalloc.stop()
+        path = self.work / 'bases.mtl4-json'
+        self.assertFalse((self.work / 'bases.mtl4-json.partial').exists())
+        self.assertLess(peak, 3 * path.stat().st_size, 'serializing descriptors must not retain multiple full JSON buffers')
+        self.assertEqual(len(at_compile), 1)
+        self.assertLess(at_compile[0], path.stat().st_size, 'the compiler only needs the script on disk')
+        config = json.loads(path.read_bytes())
+        self.assertEqual(len(config['pipeline_descriptors']['render_pipeline_descriptors']), len(bases))
+        # Keys from earlier builds must continue to hit. Only library locations are normalized.
+        for lib in config['libraries']:
+            lib['path'] = lib['label'] + '.metallib'
+        inputs = dict(format=1, configuration=config, libraries=po.library_digest(self.lib, bases),
+                      arch='applegpu_g18p', platform='ios', os_min='27.0', toolchain=self.compiler)
+        expected = hashlib.sha256(json.dumps(inputs, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        self.assertEqual((self.work / 'key.applegpu_g18p').read_text().strip(), expected)
 
     def test_build_reuse_and_stamp(self):
         self.assertEqual(self.main('--gpu', 'g18p'), 0)
@@ -176,10 +211,83 @@ class Build(unittest.TestCase):
         self.assertEqual(self.main('--gpu', 'g17p', '--os-min', '26.0'), 0)   # another minimum: built again; g18p no longer asked for: removed
         self.assertEqual(self.calls[-1][7], '26.0')
         self.assertEqual(sorted(p.name for p in self.out.glob('*.mtl4a')), ['applegpu_g17p.mtl4a'])
-        (self.prof / 'shader_pairs.tsv').write_text('v\tf\n')   # other pairs: built again, no pair left to the device
+        (self.prof / 'shader_pairs.tsv').write_text('v\tf\n')   # only a device-specialized pair removed: offline bases unchanged
         self.assertEqual(self.main('--gpu', 'g17p', '--os-min', '26.0'), 0)
-        self.assertEqual(len(self.calls), 4)
+        self.assertEqual(len(self.calls), 3)
         self.assertFalse((self.out / 'rest_pairs.tsv').exists())
+
+    def test_chain_move_reuses_binary_and_refreshes_metadata_for_both_platforms(self):
+        for platform in ('macos', 'ios'):
+            with self.subTest(platform=platform):
+                self.out, self.work = self.t / f'out-{platform}', self.t / f'work-{platform}'
+                args = ('--platform', platform, '--os-min', '27.0')
+                self.main(*args)
+                archive = self.out / 'applegpu_g18p.mtl4a'
+                identity = archive.stat().st_ino, archive.stat().st_mtime_ns, archive.read_bytes()
+                before = len(self.calls)
+                chain = 'fedcba987654' if platform == 'macos' else 'abcdef012345'
+                moved = self.t / platform / f'b-{chain}'
+                shutil.copytree(self.lib, moved)
+                for p in moved.glob('*_b.json'):
+                    j = json.loads(p.read_text()); j['chain'] = chain; p.write_text(json.dumps(j))
+                (moved / 'inputs.tsv').write_text('game\tX\ninputs\tupdated-profile\n')
+                self.lib = moved
+                self.assertEqual(self.main(*args), 0)
+                self.assertEqual(len(self.calls), before, 'chain-only move must not invoke metal-tt')
+                self.assertEqual((archive.stat().st_ino, archive.stat().st_mtime_ns, archive.read_bytes()), identity)
+                self.assertEqual((self.out / 'prebuilt.tsv').read_text(), po.stamp(chain, True, (self.prof / 'shader_pairs.tsv').read_bytes()))
+                self.assertIn(str(moved), (self.work / 'bases.mtl4-json').read_text())
+
+    def test_metadata_only_changes_reuse_but_refresh_runtime_lists(self):
+        self.main()
+        (self.lib / 'inputs.tsv').write_text('game\tX\ninputs\tnew-profile\n')
+        pairs = b'# changed comment\nv\tf\nv\tf\n'
+        (self.prof / 'shader_pairs.tsv').write_bytes(pairs)
+        self.main()
+        self.assertEqual(len(self.calls), 1)
+        self.assertFalse((self.out / 'rest_pairs.tsv').exists())
+        self.assertEqual((self.out / 'prebuilt.tsv').read_text(), po.stamp(CHAIN, True, pairs))
+
+    def test_pipeline_entry_and_descriptor_changes_rebuild(self):
+        self.main()
+        self.main('--depth', 'gl')
+        self.assertEqual(len(self.calls), 2)
+        original = po.script
+        def changed(lib_dir, bases):
+            config = original(lib_dir, bases)
+            config['pipeline_descriptors']['render_pipeline_descriptors'][0]['raster_sample_count'] = 4
+            return config
+        with mock.patch.object(po, 'script', changed):
+            self.main('--depth', 'gl')
+            self.assertEqual(len(self.calls), 3)
+            self.main('--depth', 'gl')
+            self.assertEqual(len(self.calls), 3)
+
+    def test_platform_minimum_and_compiler_changes_rebuild(self):
+        self.main('--platform', 'ios', '--os-min', '27.0')
+        self.main('--platform', 'macos', '--os-min', '27.0')
+        self.assertEqual(len(self.calls), 2)
+        self.main('--platform', 'macos', '--os-min', '26.0')
+        self.assertEqual(len(self.calls), 3)
+        self.compiler = 'AIR-TT 2.0'
+        self.main('--platform', 'macos', '--os-min', '26.0')
+        self.assertEqual(len(self.calls), 4)
+
+    def test_missing_archive_and_legacy_key_rebuild(self):
+        self.main()
+        (self.out / 'applegpu_g18p.mtl4a').unlink()
+        self.main()
+        self.assertEqual(len(self.calls), 2)
+        (self.work / 'key.applegpu_g18p').write_text('legacy-cache-key\n')
+        self.main()
+        self.assertEqual(len(self.calls), 3)
+
+    def test_stale_reflection_cannot_reuse_archive(self):
+        self.main()
+        p = self.lib / 'v_b.json'
+        j = json.loads(p.read_text()); j['chain'] = 'stale'; p.write_text(json.dumps(j))
+        with self.assertRaises(SystemExit): self.main()
+        self.assertEqual(len(self.calls), 1)
 
     def test_macos_takes_this_macs_major_version(self):   # not the SDK's: Xcode 27.1's SDK is 27.0 on macOS 26.6, which cannot open a 27.0 archive (GitHub issue #673)
         def run(cmd, **kw):
@@ -197,10 +305,11 @@ class Build(unittest.TestCase):
         with self.assertRaises(SystemExit): self.main('--script-only')
 
     def test_profile_archives_match_observed_depth(self):
-        # Issue #758 and its seven-game follow-up: these builds' NVN calls select near=0 (evidence in each game note).
+        # Issue #758 and its seven-game follow-up, then four found by reading the NSP script's check boots: these builds' NVN calls select near=0 (evidence in each game note).
         # Exercise the real profiles through the builder with synthetic pairs: an omitted key must not quietly build main0.
         profiles = ('01008CF01BAAC000', '010089C01E9CA000', '010056B015FE8000', '01007BB017812000',
-                    '01003E601E324000', '010020400E1C2000', '0100429011144000', '010014C011146000')
+                    '01003E601E324000', '010020400E1C2000', '0100429011144000', '010014C011146000',
+                    '0100ACD0163D0000', '010040801A4C8000', '0100C49025D3E000', '0100A3900C3E2000')
         for gid in profiles:
             with self.subTest(game=gid):
                 self.main('--game', gid, '--pairs', str(self.prof / 'shader_pairs.tsv'), '--script-only')
@@ -254,6 +363,108 @@ class Build(unittest.TestCase):
             po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work)])
         self.assertEqual(list(self.out.glob('*.mtl4a')), [])
 
+    def batched_runner(self, fail_compile=None, fail_merge=False):
+        original = self.fake_run
+        observed = []
+        def run(cmd, **kw):
+            cmd = [str(c) for c in cmd]
+            if 'metal-pack' in cmd:
+                pieces = [Path(p) for p in cmd if p.endswith('.mtl4a')]
+                observed.append(('merge', len(pieces)))
+                Path(cmd[cmd.index('-o') + 1]).write_bytes(b''.join(p.read_bytes() for p in pieces))
+                return subprocess.CompletedProcess(cmd, 1 if fail_merge else 0)
+            if 'metal-tt' in cmd and '-o' in cmd:
+                js = next(Path(p) for p in cmd if p.endswith('.mtl4-json'))
+                config = json.loads(js.read_text())
+                names = [f['name'] for f in config['function_descriptors']['library_function_descriptors'] if f['library'] == 'lib:v_bp']
+                observed.append(('compile', names))
+                if fail_compile in names:
+                    Path(cmd[cmd.index('-o') + 1]).write_bytes(b'partial')
+                    return subprocess.CompletedProcess(cmd, 1)
+            return original(cmd, **kw)
+        return run, observed
+
+    def test_batched_archive_reuses_pilot_and_normal_archive_key(self):
+        bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(5)]
+        runner, observed = self.batched_runner()
+        with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})):
+            # An isolated pilot is the exact cache entry the complete build will consume.
+            with mock.patch.object(po.subprocess, 'run', runner), contextlib.redirect_stdout(io.StringIO()):
+                po.compile_batch(self.lib, bases[:2], self.work/'batches.applegpu_g18p/00001', 'applegpu_g18p', 'ios', '27.0', self.compiler)
+            self.main('--batch-size', '2', '--os-min', '27.0')
+            self.assertEqual(observed, [('compile',['vertex0','vertex1']),('compile',['vertex2','vertex3']),('compile',['vertex4']),('merge',3)])
+            before = list(observed)
+            self.main('--os-min', '27.0')
+            self.assertEqual(observed, before, 'the normal packer must reuse the complete merged archive')
+            self.assertIn('bases\t5\n', (self.out/'archive.tsv').read_text())
+
+    def test_batch_failure_preserves_completed_work_and_publishes_nothing(self):
+        bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(5)]
+        runner, observed = self.batched_runner(fail_compile='vertex2')
+        with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})), self.assertRaises(SystemExit):
+            self.main('--batch-size','2','--os-min','27.0')
+        self.assertEqual(observed, [('compile',['vertex0','vertex1']),('compile',['vertex2','vertex3'])])
+        self.assertFalse((self.out/'prebuilt.tsv').exists())
+        self.assertFalse((self.work/'key.applegpu_g18p').exists())
+        self.assertFalse(list(self.out.glob('*.mtl4a')))
+        self.assertFalse(list(self.work.rglob('*.partial')))
+        first = self.work/'batches.applegpu_g18p/00001/applegpu_g18p.mtl4a'
+        self.assertTrue(first.is_file()); identity = first.stat().st_mtime_ns
+        runner, observed = self.batched_runner()
+        with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})):
+            self.main('--batch-size','2','--os-min','27.0')
+        self.assertEqual(first.stat().st_mtime_ns, identity)
+        self.assertEqual(observed, [('compile',['vertex2','vertex3']),('compile',['vertex4']),('merge',3)])
+
+    def test_merge_failure_never_publishes_partial_archive(self):
+        bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(3)]
+        runner, _ = self.batched_runner(fail_merge=True)
+        with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})), self.assertRaises(SystemExit):
+            self.main('--batch-size','2','--os-min','27.0')
+        self.assertFalse(list(self.out.glob('*.mtl4a')))
+        self.assertFalse((self.out/'prebuilt.tsv').exists())
+        self.assertFalse((self.work/'key.applegpu_g18p').exists())
+        self.assertFalse(list(self.work.rglob('*.partial')))
+        runner, observed = self.batched_runner()
+        with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})):
+            self.main('--batch-size','2','--os-min','27.0')
+        self.assertEqual(observed, [('merge',2)])
+
+    def test_groups_are_the_default_above_the_batch_size(self):
+        bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(3)]
+        for size, want in ((2, [('merge', 2)]), (3, [])):   # more bases than a group: groups, merged; as many: one compiler run, no merge
+            shutil.rmtree(self.work, ignore_errors=True); shutil.rmtree(self.out, ignore_errors=True)
+            runner, observed = self.batched_runner()
+            with mock.patch.object(po, 'BATCH', size), mock.patch.object(po, 'plan', return_value=(bases, [], {})), mock.patch.object(self, 'fake_run', runner):
+                self.main('--os-min', '27.0')
+            self.assertEqual([x for x in observed if x[0] == 'merge'], want)
+            self.assertTrue((self.out / 'applegpu_g18p.mtl4a').is_file())
+        shutil.rmtree(self.work); shutil.rmtree(self.out)
+        runner, observed = self.batched_runner()
+        with mock.patch.object(po, 'BATCH', 2), mock.patch.object(po, 'plan', return_value=(bases, [], {})), mock.patch.object(self, 'fake_run', runner):
+            self.main('--os-min', '27.0', '--batch-size', '0')   # 0: one compiler run
+        self.assertEqual(observed, [('compile', ['vertex0', 'vertex1', 'vertex2'])])
+
+    def test_groups_of_a_longer_list_are_removed(self):
+        bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(4)]
+        runner, _ = self.batched_runner()
+        with mock.patch.object(po, 'plan', return_value=(bases, [], {})), mock.patch.object(self, 'fake_run', runner):
+            self.main('--batch-size', '1', '--os-min', '27.0')
+        groups = self.work / 'batches.applegpu_g18p'
+        self.assertEqual(sorted(d.name for d in groups.iterdir()), ['00001', '00002', '00003', '00004'])
+        with mock.patch.object(po, 'plan', return_value=(bases[:2], [], {})), mock.patch.object(self, 'fake_run', runner):
+            self.main('--batch-size', '1', '--os-min', '27.0')
+        self.assertEqual(sorted(d.name for d in groups.iterdir()), ['00001', '00002'])
+
+    def test_only_changed_batch_is_recompiled(self):
+        bases = [('v_bp', f'vertex{i}', 'f_b', 'main0') for i in range(5)]
+        runner, observed = self.batched_runner()
+        with mock.patch.object(self, 'fake_run', runner), mock.patch.object(po, 'plan', return_value=(bases, [], {})):
+            self.main('--batch-size','2','--os-min','27.0')
+            observed.clear(); bases[0] = ('v_bp','changed','f_b','main0')
+            self.main('--batch-size','2','--os-min','27.0')
+        self.assertEqual(observed, [('compile',['changed','vertex1']),('merge',3)])
+
     def test_low_disk_space_stops_before_metal_tt(self):   # Cruis'n Blast: a full volume made metal-tt fail with only "applegpu-nt command failed"
         self.work.mkdir(parents=True); (self.work / 'translate-0001').write_bytes(b'x'); (self.work / 'a.airp').write_bytes(b'x')
         with mock.patch.object(po.shutil, 'disk_usage', return_value=shutil._ntuple_diskusage(1 << 40, 1 << 40, 300 << 20)), self.assertRaises(SystemExit) as e: self.main()
@@ -281,6 +492,30 @@ class Build(unittest.TestCase):
         text, left = self.failed_run(10 << 30)
         self.assertNotIn('out of disk space', text); self.assertIn('metal-tt failed', text)
         self.assertFalse({'translate-0001', 'a.airp'} & left)
+
+
+class IpaFallback(unittest.TestCase):
+    """build_ipa.sh's own archive step with a pso_offline.py that fails: a [RED] line, no archive folder, and the build goes on (an optimization: the device builds the bases)"""
+
+    def step(self, python):
+        lines = (REPO / 'dm/ios/tools/build_ipa.sh').read_text().splitlines()
+        i = next(n for n, ln in enumerate(lines) if ln.startswith('if [ "$GFXAPI" = nvn ] && [ -n "$GPUS" ]'))
+        j = next(n for n, ln in enumerate(lines) if n > i and ln.startswith('else [ "$GFXAPI" != nvn ]'))
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / 'bin').mkdir(); stub = Path(d) / 'bin/python3'; stub.write_text('#!/bin/sh\n' + python); stub.chmod(0o755)
+            (Path(d) / 'shader_pairs.tsv').write_text('v\tf\n')
+            env = dict(os.environ, PATH=f'{d}/bin:{os.environ["PATH"]}', W=d, GD=d, GAME='G', DM='dm', MSL_IOS='m', V='0', GPUS='g18p', GFXAPI='nvn')
+            script = 'die() { echo "FAIL: $*"; exit 1; }\nt() { echo "$*"; }\nDM_PSO_IOS_MIN=\n' + '\n'.join(lines[i:j]) + '\nfi\necho "PSO=[$PSO]"\n[ -d "$W/build/ios/pso/bundle" ] && echo folder\necho went on\n'
+            return subprocess.run(['bash', '-c', 'set -u\n' + script], env=env, capture_output=True, text=True).stdout
+
+    def test_failed_archive_is_a_warning(self):
+        out = self.step('mkdir -p "$W/build/ios/pso/bundle"; echo half; exit 1\n')
+        self.assertIn('[RED] pipeline archive: pso_offline.py failed', out); self.assertIn('PSO=[]', out); self.assertNotIn('folder', out); self.assertIn('went on', out)
+        self.assertNotIn('FAIL', out)
+
+    def test_made_archive_goes_into_the_app(self):
+        out = self.step('mkdir -p "$W/build/ios/pso/bundle"; exit 0\n')
+        self.assertNotIn('[RED]', out); self.assertIn('/build/ios/pso/bundle]', out); self.assertIn('folder', out)
 
 
 class Default(unittest.TestCase):

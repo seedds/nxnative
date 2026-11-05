@@ -55,6 +55,7 @@ In event dialogue, hold X to fast-forward; A advances and confirms the default a
 
 ## Open
 
+- **Current (2026-11-05):** the translator deletes 10 bindless accesses in 10 shaders (10 compute; imageBuffer 10), whose results read 0: `08a37eff25e35607` `18abd6819ecb05f9` `26d65361a4fc3610` `68aecb72b90656c1` `6d2fbbde6a82695a` `9d6bacdac6670b56` `a5ebd76a602a7330` `bae8be26dec7cad0` `f5a1a7a2683dcfbc` `feee28affb25def5`. The cause is not traced, and whether a route reaches them is not known. [Losses a shader build reports](../../../docs/reference/shaders.md#losses-a-shader-build-reports).
 - Visual replay and memory measurement with the full libraries.
 - Both games' combat and later areas. Ten shader records carry the translator's unresolved `imageBuffer` handle-source diagnostic; those paths were not played.
 - Gameplay speed comparison at 30 and 60 fps, and memory stability after loading both games.

@@ -40,7 +40,7 @@ class ShaderCache(unittest.TestCase):
                        XC=['--msl'], MAC_RECORD='mac flags', IOSOUT=None, TARGETS={'mac'},
                        ios_metal=types.SimpleNamespace(RECORD='ios flags'), METAL_FP='tested Metal and SDK',
                        FACTS={}, MAP_ROWS={}, MAP_CONFLICT_ROWS={}, CODE_FP='source', PROFILE_ROWS=b'', PAIRS={},
-                       BF_WANT=set(), BF_STATS=collections.Counter(), CAS=str(root / 'cas'), out=str(root / 'out'),
+                       DUAL_WANT=set(), BF_WANT=set(), BF_STATS=collections.Counter(), CAS=str(root / 'cas'), out=str(root / 'out'),
                        CHAIN='test-chain', clone=shutil.copyfile, shader_rule_source=lambda name: b'')
         (root / 'out').mkdir()
         names = {'tool_fingerprint', 'shader_key', 'cache_path', 'cache_outputs', 'restore_cache', 'publish_cache', 'atomic_json', 'cache_meta_path',
@@ -73,6 +73,42 @@ class ShaderCache(unittest.TestCase):
                 self.assertTrue(self.ns['restore_cache']('key', old))
                 self.ns['METAL_FP'] = 'tested Metal and SDK'
                 self.assertFalse(self.ns['restore_cache']('key', self.digest()))
+
+    def test_dual_source_membership_change_rejects_cached_library(self):
+        for ios in (False, True):
+            for listed in (False, True):
+                with self.subTest(ios=ios, listed=listed):
+                    self.ns['CAS'] = str(Path(self.tmp.name) / f'cas-{ios}-{listed}')
+                    self.ns['IOSOUT'] = str(Path(self.tmp.name) / 'ios') if ios else None
+                    self.ns['TARGETS'] = {'mac', 'ios'} if ios else {'mac'}
+                    self.ns['DUAL_WANT'] = {'key'} if listed else set()
+                    old = self.digest()
+                    reflection = {'stage': 'ps', 'entry_d': 'main0_d' if listed else None}
+                    for directory in (self.ns['out'], self.ns['IOSOUT']) if ios else (self.ns['out'],):
+                        assert directory is not None
+                        output = Path(directory); output.mkdir(exist_ok=True)
+                        (output / 'key_b.metal').write_text('synthetic MSL')
+                        (output / 'key_b.metallib').write_bytes(b'dual' if listed else b'ordinary')
+                        (output / 'key_b.json').write_text(json.dumps(reflection))
+                    self.ns['publish_cache']('key', old, 'rule', 'source')
+                    self.assertTrue(self.ns['restore_cache']('key', old))
+                    self.assertEqual(json.loads((Path(self.ns['out']) / 'key_b.json').read_text())['entry_d'],
+                                     reflection['entry_d'])
+                    self.ns['DUAL_WANT'] = set() if listed else {'key'}
+                    self.assertFalse(self.ns['restore_cache']('key', self.digest()),
+                                     'a membership change must not restore the opposite entry-point variant')
+
+    def test_unrelated_dual_source_changes_preserve_shader_key(self):
+        original = self.digest()
+        self.ns['DUAL_WANT'] = {'another-pixel'}
+        self.assertEqual(self.digest(), original)
+        self.ns['DUAL_WANT'] = {'key'}
+        listed = self.digest()
+        self.assertNotEqual(listed, original)
+        self.ns['DUAL_WANT'] = {'another-pixel', 'key'}
+        self.assertEqual(self.digest(), listed)
+        self.ns['DUAL_WANT'] = set()
+        self.assertEqual(self.digest(), original)
 
     def test_fetch_variants_do_not_restore_override_libraries(self):
         self.ns['METAL_FP'] = 'override Metal and SDK'
@@ -133,6 +169,19 @@ class ShaderCache(unittest.TestCase):
         self.assertEqual(len(functions), 1, 'the partial build needs its paired-pixel dependency selection')
         exec(compile(ast.Module(body=functions, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), self.ns)
         return self.ns['build_keys'](want, locations, pairs)
+
+    def test_package_records_are_read_from_the_file_at_their_offsets(self):
+        # record_index keeps no package in memory (GitHub issue #1036); record k is still the bytes from its marker to the next one, the last to the end
+        node = next(n for n in self.tree.body if isinstance(n, ast.FunctionDef) and n.name == 'record_index')
+        ns: dict[str, Any] = dict(os=os, re=re, mmap=__import__('mmap'))
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
+        recs = [b'BTCDBTCD' + b'\x01' * 40, b'BTCDBTCD' + b'\x02' * 7, b'BTCDBTCD' + b'\x03' * 100]
+        path = Path(self.tmp.name) / 'pkg.bin'
+        for data, want in ((b'header' + b''.join(recs), recs), (b'', [])):
+            path.write_bytes(data)
+            fd, offs = ns['record_index'](str(path))
+            try: self.assertEqual([os.pread(fd, offs[k + 1] - offs[k], offs[k]) for k in range(len(offs) - 1)], want)
+            finally: os.close(fd)
 
     def test_partial_selection_adds_known_pairs_and_full_selection_keeps_every_shader(self):
         locations = {'vertex': None, 'pixel': None, 'other': None}
@@ -326,6 +375,30 @@ class MetalPrefill(unittest.TestCase):
         old_path.parent.mkdir(parents=True); old_path.write_bytes(b'WRONG OVERRIDE LIBRARY')
         result = self.root / 'result.metallib'; self.cache.compile('mac', str(msl), str(result))
         self.assertEqual(result.read_bytes(), b'TESTED MSL')
+
+    def test_a_library_cut_from_another_source_does_not_prefill(self):   # its .metal is the plain source, and its library came from the compile unit (dmsh_side.py)
+        self.earlier_libraries(self.cache.ident['mac'].hex())
+        (self.old / f'{2:016x}_b.metallib').write_bytes(b'CUT FROM ANOTHER SOURCE'); (self.old / f'{2:016x}_bx.metallib').write_bytes(b'SIDE')
+        notes = self.cache.fill(str(self.old))
+        self.assertEqual(self.cache.stats['mac', 'filled'], 2, notes)
+
+    def test_compile_split_keeps_both_pieces(self):
+        msl = self.root / 'unit.metal'; msl.write_bytes(b'UNIT'); a, b = self.root / 'a.metallib', self.root / 'b.metallib'
+        split = lambda lib: (lib[:6], lib[6:])
+        self.cache.compile_split('mac', str(msl), str(a), str(b), split)
+        self.assertEqual((a.read_bytes(), b.read_bytes()), (b'TESTED', b' UNIT'))
+        self.assertEqual(self.cache.stats['mac', 'compiled'], 1)
+        a.unlink(); b.unlink()
+        self.cache.compile_split('mac', str(msl), str(a), str(b), lambda lib: self.fail('a second compile'))
+        self.assertEqual((a.read_bytes(), b.read_bytes()), (b'TESTED', b' UNIT'))
+        self.assertEqual(self.cache.stats['mac', 'reused'], 1)
+
+    def test_compile_split_failure_leaves_nothing(self):
+        msl = self.root / 'unit.metal'; msl.write_bytes(b'UNIT'); a, b = self.root / 'a.metallib', self.root / 'b.metallib'
+        def refuse(lib): raise ValueError('not a library')
+        with self.assertRaises(ValueError): self.cache.compile_split('mac', str(msl), str(a), str(b), refuse)
+        self.assertEqual(sorted(p.name for p in self.root.glob('a.metallib*')), [])
+        self.assertFalse(b.exists()); self.assertEqual(self.cache.stats['mac', 'compiled'], 0)
 
 
 if __name__ == '__main__':

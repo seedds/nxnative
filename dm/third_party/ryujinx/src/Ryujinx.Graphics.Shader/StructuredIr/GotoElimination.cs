@@ -35,7 +35,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                     }
                     while (!DirectlyRelated(drBlock, lBlock, drLevel, lLevel));
 
-                    MoveOutward(stmt, gLevel, drLevel);
+                    MoveOutward(gotos, index, stmt, gLevel, drLevel);
 
                     gBlock = drBlock;
                     gLevel = drLevel;
@@ -61,7 +61,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                 {
                     if (gLevel > lLevel)
                     {
-                        MoveOutward(stmt, gLevel, lLevel);
+                        MoveOutward(gotos, index, stmt, gLevel, lLevel);
                     }
                     else
                     {
@@ -164,7 +164,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
             stmt.IsLoop = false;
         }
 
-        private static void MoveOutward(GotoStatement stmt, int gLevel, int lLevel)
+        private static void MoveOutward(GotoStatement[] gotos, int index, GotoStatement stmt, int gLevel, int lLevel)
         {
             AstBlock origin = ParentBlock(stmt.Goto);
 
@@ -230,7 +230,11 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
 
                     IAstNode last = block == lBlock && !stmt.IsLoop ? stmt.Label : null;
 
-                    AstBlock newBlock = Enclose(block, AstBlockType.Else, null, Next(stmt.Goto), last);
+                    // Without the else, what follows goes in an if (Enclose above), which a goto can jump into, as this one may on its
+                    // way to its label or an earlier one in this if may. Into an else it can only with a loop around the if and the else,
+                    // which closes where the else does: Splatoon Raiders' uber shaders, with their switches one after another, came out as
+                    // 26 such loops nested around the whole program (it has no jump back), which Metal's compilers cannot finish.
+                    AstBlock newBlock = HasGotoInto(gotos, index, child, block, Next(stmt.Goto), last) ? null : Enclose(block, AstBlockType.Else, null, Next(stmt.Goto), last);
 
                     if (newBlock != null)
                     {
@@ -240,6 +244,45 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                     }
                 }
             }
+        }
+
+        // Whether the goto at index, or one not yet eliminated inside source, has its label among block's statements from first up to last
+        private static bool HasGotoInto(GotoStatement[] gotos, int index, AstBlock source, AstBlock block, IAstNode first, IAstNode last)
+        {
+            HashSet<IAstNode> range = [];
+
+            for (IAstNode node = first; node != last && node != null; node = Next(node))
+            {
+                range.Add(node);
+            }
+
+            // Gotos are in program order, and those not yet eliminated have not moved: the ones inside source come right before this one.
+            for (int other = index; other == index || (other >= 0 && IsInside(gotos[other].Goto, source)); other--)
+            {
+                IAstNode label = gotos[other].Label;
+
+                while (label != null && label.Parent != block)
+                {
+                    label = label.Parent;
+                }
+
+                if (label != null && range.Contains(label))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsInside(IAstNode node, AstBlock block)
+        {
+            while (node != null && node != block)
+            {
+                node = node.Parent;
+            }
+
+            return node != null;
         }
 
         private static void MoveInward(GotoStatement stmt)

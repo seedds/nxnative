@@ -28,13 +28,21 @@ GLSLC_MAGIC = b'\x91\x68\x86\x19'   # GLSLC compiler outputs (shader_split.py gl
 GL_SRC = rb'\0#version [0-9]'      # a GLSL source string as dm/gfx/tools/gl_shaders.py takes it from main (Balatro's main has none, only glslang's messages that start with '#version:')
 GL_FILES = ('.mvgl', '.vert', '.frag')   # the RomFS files gl_shaders.py reads GLSL from
 APP_POOL = 0xCD500000               # the application memory pool of a 4 GB Switch (3285 MiB), what every profile but Engage's reports
+OUNCE_POOL = 0x240000000            # a Switch 2 game's (9 GB of 12 GB, not measured; Donkey Kong Bananza's heaps do not fit in a Switch 1 pool)
 MiB = 1 << 20
+SDK_VERSION = re.compile(rb'(?i)NintendoSDK_nnSdk-(?:[a-z]+_)?([0-9_]+)')   # SDK 12 spells it NintendoSdk_, SDK 16 NintendoSDK_; the Switch 2's SDKs name a variant (nnSdk-Generic_22_2_0, loader.c dm_sdk_major)
 
 
 def glsl_sources(img):
     """Complete embedded GLSL strings, rather than a compiler's language preamble. Snowdrop ships a #version header with typedefs but no entry point, even when it uses only archived shaders.
     Three Houses embeds nine complete boot shaders. NRO callers that assemble shaders dynamically are detected separately by their glslcCompile import (build_sources)."""
     return sum(bool(re.search(rb'\bvoid\s+main\s*\(', s)) for s in re.findall(rb'#version [^\0]*', img))
+
+
+def glsl_text(head):
+    """Whether a file's first bytes can be GLSL source: text, with no control byte. Turrican Anthology Vol. I's shaders/*.vert and *.frag are, and it hands them to glslcCompile. Skyward Sword HD's
+    Shaders/Dummy.vert and Dummy.frag are AES-CTR ciphertext (7.99 bits per byte) that its main decrypts and compiles only when Shaders.arc.gz lacks a program, so their extension says nothing."""
+    return bool(head) and not re.search(rb'[\x00-\x08\x0b\x0e-\x1f\x7f]', head)
 
 
 def nso(path):
@@ -80,7 +88,7 @@ def aarch64(path):   # main.npdm's flags (META +0xc) bit 0, Is64BitInstruction; 
 def facts_of(exefs, romfs):
     """What the profile rules (and the survey report) need from a game's code modules and RomFS"""
     exefs = Path(exefs)
-    F = {'mods': {}, 'markers': {}, 'sdkver': set(), 'comps': set(), 'unity': set(), 'glslc': 0, 'glsl_src': 0, 'gl_names': 0, 'gl_src': 0, 'sysres': 0, 'program': None}
+    F = {'mods': {}, 'ounce': False, 'markers': {}, 'sdkver': set(), 'comps': set(), 'unity': set(), 'glslc': 0, 'glsl_src': 0, 'gl_names': 0, 'gl_src': 0, 'sysres': 0, 'program': None}
     for p in sorted(exefs.iterdir()):
         with open(p, 'rb') as f:
             if f.read(4) != b'NSO0': continue
@@ -90,7 +98,8 @@ def facts_of(exefs, romfs):
         m = F['mods'][p.name] = {'bid': bid, 'sizes': szs, 'bss': bss, 'far': end > 0x7000000,   # far: the patch area goes before the base (patch_nso.py FAR), the bss counts as used memory (hle_svc.c big_bss_bytes)
                                  'imports': {s for s, defined, _ in syms if not defined}, 'exports': {s for s, defined, bind in syms if defined and bind in (1, 2)},
                                  'comps': {c.decode().rsplit('-', 1)[0] for c in re.findall(rb'NintendoSDK_(?!nnSdk)\w+-[0-9_]+', img)}}
-        F['sdkver'] |= {v.decode() for v in re.findall(rb'(?i)NintendoSDK_nnSdk-([0-9_]+)', img)}   # SDK 12 spells it NintendoSdk_, SDK 16 NintendoSDK_
+        F['sdkver'] |= {v.decode() for v in SDK_VERSION.findall(img)}
+        if p.name == 'sdk': F['ounce'] = b'spec: Ounce' in img   # built for the Switch 2 (loader.c dm_sdk_ounce)
         F['comps'] |= {c.decode() for c in re.findall(rb'SDK MW\+Nintendo\+([\w]+-[0-9_]+)', img)}
         for pat, name in MARKERS:
             if pat in img: F['markers'].setdefault(name, []).append(p.name)
@@ -148,18 +157,19 @@ def guess(F, hooks=None):
     # Memory: the guest block is 256 MB in front + alias region + stack region + heap region (hle_svc.c mem_init)
     giant = sum(m['bss'] for n, m in mods.items() if n in keep and m['far'])
     heap_api = HEAP_API in imp
+    pool = OUNCE_POOL if F.get('ounce') else APP_POOL
     if F['sysres']:   # virtual address memory: Engage's 5 GB block. With a heap, the heap check moves the alias / heap split once it sees the heap the game asks for (Wonder, Tears of the Kingdom);
         # without one the game maps everything in the alias region itself (Hollow Knight: Silksong's Unity 6 through AllocateAddressRegion / AllocateMemoryPages, 1.5 GB in its first room;
         # Absolum's and Pokémon Legends: Z-A's StandardAllocator), which a 256 MB alias region cannot hold
-        mem = (0x140000000, 0x118000000, APP_POOL, f'the NPDM declares {F["sysres"] // MiB} MB of system resource (virtual address memory) and main ' +
+        mem = (0x140000000, 0x118000000, pool, f'the NPDM declares {F["sysres"] // MiB} MB of system resource (virtual address memory) and main ' +
                ('sets a heap: a 5 GB block with a large alias region; the heap check sizes the heap region from the heap the game asks for' if heap_api else
                 'never sets a heap: a 5 GB block with a 4.375 GB alias region, where the game maps its memory itself'))
     else:
-        heap = max(0x10000000, -(-(APP_POOL - 64 * MiB - giant) // 0x10000000) * 0x10000000) if heap_api else 0x10000000
-        mem = (0x30000000 + heap, 0x10000000, APP_POOL,
+        heap = max(0x10000000, -(-(pool - 64 * MiB - giant) // 0x10000000) * 0x10000000) if heap_api else 0x10000000
+        mem = (0x30000000 + heap, 0x10000000, pool,
                ('main sets a heap of at most the pool − 64 MB' + (f' − {giant // MiB} MB of bss (counted as used memory)' if giant else '') + f': a {heap // MiB} MB heap region')
                if heap_api else 'main never sets a heap (its memory is its own bss): a 256 MB heap region')
-    G['mem_reserve'] = (f'{mem[0]:#x}', mem[3]); G['mem_alias'] = (f'{mem[1]:#x}', ''); G['mem_stack'] = ('0x10000000', ''); G['app_pool'] = (f'{mem[2]:#X}'.replace('0X', '0x'), '')
+    G['mem_reserve'] = (f'{mem[0]:#x}', mem[3]); G['mem_alias'] = (f'{mem[1]:#x}', ''); G['mem_stack'] = ('0x10000000', ''); G['app_pool'] = (f'{mem[2]:#X}'.replace('0X', '0x'), 'the sdk is built for the Switch 2 (spec: Ounce): its 9 GB pool' if F.get('ounce') else '')
     G['sys_resource'] = (f'{F["sysres"]:#x}', f'the NPDM declares {F["sysres"] // MiB} MB of system resource' + ('' if F['sysres'] else
                          ': IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)'))
 
@@ -191,23 +201,44 @@ def nro_modules(exefs, nros, modules, hooks=None):
     imports, and the NROs are in the RomFS, which the survey does not extract. Portal (Source engine, 28 NROs) plays its movies in video_nx.nro through NintendoSDK_movie (subsdk2)
     and initializes GLSLC (subsdk0) from materialsystem.nro and video_nx.nro; left out, movie::Extractor's constructor was a stub and the first movie crashed.
     A symbol a loaded module or another NRO defines, or the host supplies, needs nothing; NVIDIA's GPU drivers stay out as in guess()"""
-    exefs, hooks = Path(exefs), host_hooks() if hooks is None else hooks
     want, have = set(), set()
     for p in nros.values():
         for s, defined, bind in nso_syms.dynsyms(Path(p).read_bytes()):
             if not defined: want.add(s)
             elif bind in (1, 2): have.add(s)
-    exp = {}
-    for p in sorted(exefs.iterdir()):
+    return modules_supplying(exefs, want - have, modules, hooks)
+
+
+def main_modules(exefs, modules, hooks=None):
+    """The subsdks a hand-written list leaves out that main imports from, {module: kind}: a module's slot is not fixed across a game's versions. Absolum's movie module is subsdk2 in 1.1.2, where
+    subsdk0 is NVIDIA's Vulkan driver, and subsdk0 in 1.2.1: a profile derived from 1.1.2's list left it out, and movie::Extractor's constructor was a stub (issue #1211). Reads nothing with no other module there"""
+    exefs = Path(exefs)
+    if not nso_files(exefs, skip=modules): return {}
+    want = {s for s, defined, _ in nso_syms.dynsyms(nso(exefs / 'main')[0]) if not defined}
+    return modules_supplying(exefs, want, modules, hooks)
+
+
+def nso_files(exefs, skip=()):   # the code modules in a folder, in name order
+    out = []
+    for p in sorted(Path(exefs).iterdir()):
+        if p.name in skip or p.name == 'rtld' or not p.is_file(): continue
         with open(p, 'rb') as f:
-            if f.read(4) != b'NSO0': continue
+            if f.read(4) == b'NSO0': out.append(p)
+    return out
+
+
+def modules_supplying(exefs, want, modules, hooks=None):   # the modules left out of the list that export a symbol of want which no listed module and no host hook supplies, {module: kind}, in load order; never a GPU driver
+    hooks = host_hooks() if hooks is None else hooks
+    exp = {}
+    for p in nso_files(exefs):
         img = nso(p)[0]
         exp[p.name] = {'exports': {s for s, defined, bind in nso_syms.dynsyms(img) if defined and bind in (1, 2)},
                        'comps': {c.decode().rsplit('-', 1)[0] for c in re.findall(rb'NintendoSDK_(?!nnSdk)\w+-[0-9_]+', img)}}
+    have = set(hooks)
     for m in modules: have |= exp.get(m, {}).get('exports', set())
-    want -= have | hooks
+    want = want - have
     return {m: kind(e) for m, e in sorted(exp.items(), key=lambda x: load_order(x[0]))
-            if m not in modules and m != 'rtld' and want & e['exports'] and kind(e) not in GPU_DRIVERS}
+            if m not in modules and want & e['exports'] and kind(e) not in GPU_DRIVERS}
 
 
 # ---- Shader sources: decided from the game files at every build, not kept in the profile (scripts/build_ipa_from_nsp.py; shader_split.py reads what those steps write) ----
@@ -228,11 +259,17 @@ def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_pa
     NROs draw with NVN (materialsystem.nro and video_nx.nro import nvnBootstrapLoader) and call glslcCompile; the GLSLC outputs it ships (nxcontent/nvsb in game.zip) are read by the split"""
     vk = sum(1 for s in imports if re.match(r'vk[A-Z]', s) and s != 'vkGetInstanceProcAddr'); vulkan = bool(vk) and 'nvnBootstrapLoader' not in imports
     nro_nvn = 'nvnBootstrapLoader' in nro_imports
-    gl = not vulkan and not nro_nvn and 'eglCreateWindowSurface' in imports and bool(gl_names)
+    # A main that imports nvnBootstrapLoader and compiles its own GLSL with GLSLC draws with NVN even when it also imports EGL and names glShaderSource: Rayman 30th Anniversary
+    # Edition (Digital Eclipse, SDK 20) links both paths, never calls EGL on the Mac, and compiles the GLSL in its .shader files with subsdk2's glslcCompile; taken for OpenGL, it
+    # got no GLSLC capture and drew nothing (black screen, sound and input working)
+    own_glslc = 'nvnBootstrapLoader' in imports and 'glslcCompile' in imports and bool(glsl_src) and bool(glslc_mods)
+    gl = not vulkan and not nro_nvn and 'eglCreateWindowSurface' in imports and bool(gl_names) and not own_glslc
     nro_glslc = not vulkan and not gl and 'glslcCompile' in nro_imports and bool(glslc_mods)
     return {'graphics': ('vulkan', f'main imports {vk} Vulkan functions and not nvnBootstrapLoader: the host\'s Vulkan layer (dm/gfx/vk/hle_vk.m)') if vulkan else
                         ('gl', 'main imports EGL and names glShaderSource: it renders with OpenGL and compiles GLSL, the host\'s GL layer (dm/gfx/gl/hle_gl.m)') if gl else
-                        ('nvn', 'the NROs the game loads import nvnBootstrapLoader' if nro_nvn and 'nvnBootstrapLoader' not in imports else 'main imports nvnBootstrapLoader'),
+                        ('nvn', 'the NROs the game loads import nvnBootstrapLoader' if nro_nvn and 'nvnBootstrapLoader' not in imports else
+                                'main imports nvnBootstrapLoader and compiles its GLSL with GLSLC; its EGL and glShaderSource are left unused (Rayman 30th Anniversary Edition)' if own_glslc and 'eglCreateWindowSurface' in imports and gl_names else
+                                'main imports nvnBootstrapLoader'),
             'vk_capture': (vulkan and not spirv, 'no SPIR-V file in the RomFS: the game generates its shaders at run time (Super Mario Galaxy), captured by booting it on the Mac'),
             'gl_capture': (gl and not gl_src and not gl_files, 'no GLSL source in the RomFS or main: the game puts its shaders together at run time (LÖVE: Balatro), captured by booting it on the Mac'),
             'glslc_capture': (not vulkan and not gl and bool(glsl_src or romfs_glsl) and 'glslcCompile' in imports and bool(glslc_mods) or nro_glslc,
@@ -246,7 +283,7 @@ def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_pa
                             f'{oodle_gfpak} Game Freak GFPAK archive(s) with Oodle Kraken entries (Pokémon Legends: Arceus)' if oodle_gfpak else
                             f'{oodle_ue3} Unreal Engine 3 package(s) with Oodle-compressed chunks (Batman: Arkham Knight, its combined shader cache among them)') + ', Oodle-compressed: the shader split decodes them with the game\'s own decoder in the Mac host (dm/host/hle_oodle.c DM_OODLE_SERVE)'),
             'ue_legacy': (not vulkan and not gl and bool(legacy_paks), f'{legacy_paks} Unreal pak(s) with the shaders inline in the cooked packages (legacy, version 4, UE 4.18: DRAGON QUEST XI S, LZ5, decoded by the game\'s own decoder in the Mac host, dm/host/hle_oodle.c DM_OODLE_SERVE; '
-                          'version 11 without shader code archives, UE 4.27: OCTOPATH TRAVELER II, Zlib): the shader split reads them file by file')}
+                          'version 11 without shader code archives, UE 4.27: OCTOPATH TRAVELER II, Zlib, or with the cooked packages in an IoStore container beside it: Mario & Luigi: Brothership, Oodle): the shader split reads them file by file')}
 
 
 def romfs_nro_imports(romfs):   # the names the loose NROs in a RomFS import (the modules a game loads at run time with nn::ro: Portal's 28 Source engine modules in nro/)
@@ -262,6 +299,16 @@ def romfs_nro_imports(romfs):   # the names the loose NROs in a RomFS import (th
 UE3_TAG = bytes.fromhex('c1832a9e')   # an Unreal package's tag (shader_split.py ue3_package)
 
 
+def romfs_glsl_files(romfs):
+    """The RomFS's .vert / .frag files that hold GLSL as text (glsl_text)"""
+    n = 0
+    for d, _, names in os.walk(romfs):
+        for name in names:
+            if name.lower().endswith(('.vert', '.frag')):
+                with open(Path(d) / name, 'rb') as f: n += glsl_text(f.read(4096))
+    return n
+
+
 def build_sources(exefs, romfs, modules):
     """shader_sources from an extraction (its ExeFS and RomFS folders) and the modules the profile loads"""
     exefs = Path(exefs); main = nso(exefs / 'main')[0]
@@ -269,7 +316,7 @@ def build_sources(exefs, romfs, modules):
     nro_imp = romfs_nro_imports(romfs)
     defines = lambda m: (exefs / m).exists() and any(s == 'glslcCompile' and defined for s, defined, _ in nso_syms.dynsyms(nso(exefs / m)[0]))
     # GLSL source files in the RomFS that the game compiles itself with GLSLC (Turrican Anthology Vol. I: shaders/*.vert / *.frag, no GLSL string in main)
-    romfs_glsl = sum(1 for _, _, names in os.walk(romfs) for n in names if n.lower().endswith(('.vert', '.frag'))) if 'glslcCompile' in imports and not glsl_src else 0
+    romfs_glsl = romfs_glsl_files(romfs) if 'glslcCompile' in imports and not glsl_src else 0
     glslc_mods = [m for m in modules if m != 'main' and (glsl_src or romfs_glsl) and 'glslcCompile' in imports and defines(m)]
     if 'glslcCompile' in nro_imp:   # an NRO compiles (Portal's materialsystem.nro): the GLSLC module is one nro_modules adds to a provisional profile, so any of the ExeFS's counts
         glslc_mods = sorted({*glslc_mods, *(p.name for p in exefs.iterdir() if p.name.startswith('subsdk') and defines(p.name))}, key=load_order)
@@ -430,6 +477,17 @@ def mem_used(patched, modules):
 
 
 # ---- The heap check (scripts/build_ipa_from_nsp.py heap_check): host log lines → profile keys ----
+def depth_signal(log, g):
+    """{'depth_mode': (value, reason)} when a check boot's host log shows the game setting a depth mode the profile does not say; g is the profile the run used. Only the game's own calls count
+    (hle_nvn.c nvnDeviceSetDepthMode, the last one): the [nvn-mtl] lines also report the host's reset to GL at device init. No call means unknown, not GL: the boot may have stopped before the
+    game's NVN setup, so the profile stays as it is. Super Mario RPG sets near = 0 within seconds, and its 24 minute prebuild at the default mode gave an archive where 0 of 34 lookups hit"""
+    calls = re.findall(r'\[nvn\] depth mode near=(0|-w)(?![\w-])', log)
+    if not calls: return {}
+    seen = 'zero' if calls[-1] == '0' else 'gl'
+    if seen == g.get('depth_mode', 'gl'): return {}
+    return {'depth_mode': (seen, f'the game calls nvnDeviceSetDepthMode with near = {"0" if seen == "zero" else "-w"} in the check boot: the pipeline bases made before it runs are made for that mode')}
+
+
 def heap_signals(log, g):
     """{key: (value, reason)} from a heap-check run's host log (hle_svc.c SetHeapSize); g is the profile the run used"""
     out = {}

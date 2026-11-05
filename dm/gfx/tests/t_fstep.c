@@ -19,6 +19,18 @@ static void run(sim *m, int n, double w, int kmin, int kmax, int fixed) {
 }
 
 int main(void) {
+    {   // 120 fps (hle_nvn.c fps_high): kmin 1, kmax 2, in ticks of 1/120 s. The target follows the hold, so a hold above what frames take is the game at the right speed
+        sim m = {0}; m.s.per_vsync = 2;
+        run(&m, 120, 0.7, 1, 2, 0); check(m.s.k == 1, "120 fps: frames of 5.8 ms hold 120");
+        check(m.s.hold == FSTEP_HOLD0 * 2, "120 fps: the wait before a trial is the same real time");
+        run(&m, 10, 1.6, 1, 2, 0); check(m.s.k == 2, "120 fps: frames of 13 ms step down to 60");
+        run(&m, 600, 1.6, 1, 2, 0); check(m.s.k == 2, "120 fps: they stay at 60 while they do not fit");
+        run(&m, 60, 4.0, 1, 2, 0); check(m.s.k == 2, "120 fps: 33 ms frames stop at 60, never a longer hold");
+        run(&m, 1200, 0.7, 1, 2, 0); check(m.s.k == 1, "120 fps: frames that fit return to 120");
+        sim c = {0}; c.s.per_vsync = 2;
+        run(&c, 120, 0.7, 1, 2, 0); run(&c, 30, 0.7, 2, 2, 0); check(c.s.k == 2, "120 fps: a cap of 60 (a movie, a 60 Hz screen) holds two ticks");
+        run(&c, 120, 0.7, 1, 2, 0); check(c.s.k == 1, "120 fps: the cap's end returns to 120");
+    }
     char b[160];
     {   sim m = {0}; run(&m, 600, 0.5, 1, 3, 0);
         check(m.s.k == 1 && m.s.ups == 0 && m.s.paid == 0 && m.game == m.real, "steady 60: hold 1, step 1, game time = real time");
@@ -308,6 +320,45 @@ int main(void) {
         }
         sim m = {0}; m.s.shown_slack = 60.0 / 165; run(&m, 60, 0.5, 1, 3, 0); run(&m, 300, 1.32, 1, 3, 0);
         check(m.s.k == 2, "  the slack does not hide work: 22 ms frames still step to hold 2");
+    }
+    {   // A controller that raises the clock slowly (the Mac): the probe's frames at hold 1 start at 1.5 vsyncs and get 0.6% cheaper each frame, so they fit only after about 52 frames.
+        // Without the ramp rule the probe fails after its 30 grace frames and 3 late ones; with it (nvn_fstep.ramp) the grace is renewed while the frames keep getting cheaper and the probe holds
+        for (int ramp = 0; ramp <= 1; ramp++) {
+            sim m = {0}; run(&m, 60, 0.5, 1, 3, 0); run(&m, 300, 1.3, 1, 3, 0); m.slow = 1; m.s.ramp = ramp;
+            int at1 = 0, first_len = -1;
+            for (int i = 0; i < 400; i++) {
+                double w = m.s.k == 1 ? fmax(0.6, 1.5 * pow(0.994, at1)) : 1.2;
+                run(&m, 1, w, 1, 3, 0);
+                if (m.s.k == 1) at1++; else if (at1 && first_len < 0) first_len = at1;
+            }
+            if (!ramp) {
+                snprintf(b, sizeof b, "slowed, the clock rises slowly: without the ramp rule the probe fails after grace + 3 frames (%d frames at hold 1, failed %llu)", first_len, (unsigned long long)m.s.failed);
+                check(first_len == FSTEP_GRACE + 3 && m.s.failed >= 1, b);
+            } else {
+                snprintf(b, sizeof b, "  with it the grace is renewed twice and the probe holds (k %d, probes %llu, failed %llu, grace frames %d)", m.s.k, (unsigned long long)m.s.probes, (unsigned long long)m.s.failed, m.s.ptotal);
+                check(m.s.k == 1 && m.s.probes == 1 && m.s.failed == 0 && m.s.probe == 2 && m.s.trial == 0 && m.s.ptotal == 3 * FSTEP_GRACE && first_len < 0, b);
+                snprintf(b, sizeof b, "  its late frames are paid back: game time %.0f against real time %.2f (debt %.2f)", m.game, m.real, m.s.debt);
+                check(m.real - m.game - m.s.debt > -1.01 && m.real - m.game - m.s.debt < 1.01 && m.s.dropped == 0, b);
+            }
+        }
+    }
+    {   // The ramp rule with a cost that does not fall (1.5 flat), one that falls and then stops short of the hold (1.6 down to 1.3), and one that keeps falling but never reaches it (3.0 at 0.5% a frame):
+        // the probe lasts grace + 3, two windows + 3, and FSTEP_PROBE_MAX + 3 frames
+        static const char *const what[] = {"ramp rule, the cost does not fall: the probe lasts its grace + 3 late frames as before (%d frames at hold 1)",
+                                           "  the cost falls, then holds at 1.3: one more window, then the probe fails (%d frames at hold 1)",
+                                           "  the cost keeps falling without reaching the hold: the grace ends at FSTEP_PROBE_MAX (%d frames at hold 1, failed %llu)"};
+        static const int want[] = {FSTEP_GRACE + 3, 2 * FSTEP_GRACE + 3, FSTEP_PROBE_MAX + 3};
+        for (int c = 0; c < 3; c++) {
+            sim m = {0}; run(&m, 60, 0.5, 1, 3, 0); run(&m, 300, 1.3, 1, 3, 0); m.slow = 1; m.s.ramp = 1;
+            int at1 = 0, first_len = -1;
+            for (int i = 0; i < 600 && first_len < 0; i++) {
+                double w = m.s.k != 1 ? 1.2 : c == 0 ? 1.5 : c == 1 ? fmax(1.3, 1.6 * pow(0.99, at1)) : 3.0 * pow(0.995, at1);
+                run(&m, 1, w, 1, 3, 0);
+                if (m.s.k == 1) at1++; else if (at1 && first_len < 0) first_len = at1;
+            }
+            snprintf(b, sizeof b, what[c], first_len, (unsigned long long)m.s.failed);
+            check(first_len == want[c] && m.s.k == 2 && m.s.failed == 1, b);
+        }
     }
     printf("== %d checks, %d failed ==\n", checks, fail);
     return fail != 0;

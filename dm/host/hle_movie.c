@@ -10,6 +10,7 @@
 #include "vpx/vpx_decoder.h"
 #include "vpx/vp8dx.h"
 #include "hle_movie_avc.h"   // H.264 on VideoToolbox
+#include "hle_movie_yuv.h"   // md_nv12 / md_rgba, shared with hle_codec_video.c
 #include <AudioToolbox/AudioToolbox.h>   // AAC
 // Vorbis (movie audio tracks, Link's Awakening): stb_vorbis, built into this file (dm/third_party/stb_vorbis); only its push-data API, floats out
 #define STB_VORBIS_NO_STDIO
@@ -85,8 +86,11 @@ typedef struct {
     mavc *avc; int avc_drain; int64_t drain_pts; // H.264 (hle_movie_avc.c); avc_drain: the end-of-stream packet's output had a picture; the pictures still queued leave one per free slot, then an empty output with the
                                                  // end-of-stream flag and the packet's time (drain_pts)
     vpx_codec_ctx_t vpx; int vpx_on, red_dec, red_img;
+    int vpx_cs, vpx_full;   // the colour matrix (vpx_color_space_t) and range of the last VP8 / VP9 picture, for md_format
+    uint8_t *bgra; size_t bgra_cap;              // native-texture mode: the picture with red and blue swapped, for a BGRA8 / BGRX8 client texture (md_out_tex)
     // Vorbis: the identification and setup headers from Configure's MediaData ("csd-0", "csd-1", as with Android's MediaCodec), the decoder (opened at the first packet), channels / rate, Ogg page sequence
     uint8_t *vhdr[2]; int vhdr_n[2]; stb_vorbis *vb; int ch, rate; uint32_t ogg_seq; int64_t ogg_gran; int red_vb;
+    int16_t *hold; size_t hold_n, hold_cap; int vb_prev;   // decoded samples (interleaved values) not handed out yet, and the last packet's blocksize, 0 at a stream's start (md_vorbis)
     // AAC (Monster Hunter Rise's movies): AudioToolbox's converter, opened at the first packet from the AudioSpecificConfig (Configure's csd-0, kept in vhdr[0]); the packet being fed
     AudioConverterRef aac; const uint8_t *aac_pkt; UInt32 aac_pkt_n; AudioStreamPacketDescription aac_desc;
     uint64_t dec_n, dec_ns, dec_max;            // decode timing (on the host thread, per packet)
@@ -115,17 +119,24 @@ static struct {
 static _Atomic uint64_t g_movie_pic_ns;   // when a video decoder last handed out a picture (0 = stopped since)
 int dm_movie_playing(void) { uint64_t t = atomic_load_explicit(&g_movie_pic_ns, memory_order_relaxed); return t && now_ns() - t < MD_PLAYING_NS; }
 static void *msym(const char *n) { void *p = guest_sym(n); if (!p) die("movie: missing SDK symbol %s", n); return p; }
+// SDK 1.3.1 exports mutable Buffer getters. Both overloads take the same this pointer.
+static void *buffer_getter(const char *const_name, const char *mutable_name) {
+    void *p = guest_sym(const_name);
+    if (!p) p = guest_sym(mutable_name);
+    if (!p) die("movie: missing SDK symbol %s or %s", const_name, mutable_name);
+    return p;
+}
 static void md_syms(void) {
     if (G.signal) return;
     G.set_data = msym("_ZN5movie6Buffer18SetDataAndCapacityEPvm");
     G.set_range = msym("_ZN5movie6Buffer8SetRangeEii");
-    G.data = msym("_ZNK5movie6Buffer4DataEv");
-    G.cap = msym("_ZNK5movie6Buffer8CapacityEv");
+    G.data = buffer_getter("_ZNK5movie6Buffer4DataEv", "_ZN5movie6Buffer4DataEv");
+    G.cap = buffer_getter("_ZNK5movie6Buffer8CapacityEv", "_ZN5movie6Buffer8CapacityEv");
     G.set_i32 = msym("_ZN5movie9MediaData8SetInt32EPKci");
     G.set_rect = msym("_ZN5movie9MediaData7SetRectEPKciiii");
     G.find_i32 = msym("_ZNK5movie9MediaData9FindInt32EPKcPi");
     G.find_buf = msym("_ZNK5movie9MediaData10FindBufferEPKcPPNS_6BufferE");
-    G.size = msym("_ZNK5movie6Buffer4SizeEv");
+    G.size = buffer_getter("_ZNK5movie6Buffer4SizeEv", "_ZN5movie6Buffer4SizeEv");
     G.signal = msym("_ZN2nn2os11SignalEventEPNS0_9EventTypeE");
 }
 static mdec_t *md_of(void **self) { return self ? (mdec_t *)self[1] : NULL; }
@@ -227,7 +238,7 @@ static void md_dims(const mdec_t *d, int *w, int *h, int *stride, int *slice) {
 enum { MDJ_NONE, MDJ_DECODE, MDJ_CLOSE, MDJ_QUIT, MDJ_TAKE };
 static int md_threads(void) { long n = sysconf(_SC_NPROCESSORS_ONLN); return n >= 8 ? 4 : 2; }
 // I420 → NV12 (stride = width, plane height = height); a smaller picture is padded with black, a larger one cropped
-static void md_nv12(const vpx_image_t *im, uint8_t *dst, int w, int h) {
+void md_nv12(const vpx_image_t *im, uint8_t *dst, int w, int h) {
     int cw = (int)im->d_w < w ? (int)im->d_w : w, ch = (int)im->d_h < h ? (int)im->d_h : h;
     if (cw < w || ch < h) { memset(dst, 16, (size_t)w * h); memset(dst + (size_t)w * h, 128, (size_t)w * h / 2); }
     for (int y = 0; y < ch; y++) memcpy(dst + (size_t)y * w, im->planes[0] + (size_t)y * im->stride[0], cw);
@@ -241,7 +252,7 @@ static void md_nv12(const vpx_image_t *im, uint8_t *dst, int w, int h) {
     }
 }
 // I420 → RGBA (native texture mode): by the colour space and range the picture declares (VP9 colour config; when undeclared BT.709 from 720 lines up, else BT.601), 16-bit fixed point; a smaller picture is padded with black, a larger one cropped
-static void md_rgba(const vpx_image_t *im, uint8_t *dst, int w, int h) {
+void md_rgba(const vpx_image_t *im, uint8_t *dst, int w, int h) {
     int full = im->range == VPX_CR_FULL_RANGE, b709 = im->cs == VPX_CS_BT_709 || (im->cs == VPX_CS_UNKNOWN && h >= 720);
     double ky = full ? 1.0 : 255.0 / 219.0, kc = full ? 1.0 : 255.0 / 224.0;
     double rv = b709 ? 1.5748 : 1.402, gu = b709 ? 0.1873 : 0.3441, gv = b709 ? 0.4681 : 0.7141, bu = b709 ? 1.8556 : 1.772;
@@ -280,6 +291,7 @@ static int md_vpx(mdec_t *d, const uint8_t *p, int n, int slot) {
     while ((im = vpx_codec_get_frame(&d->vpx, &it))) last = im;
     if (!last) return 0;
     if (last->fmt != VPX_IMG_FMT_I420) { if (!d->red_img++) LOG("[RED] movie: %s picture format %#x is not I420 (4:2:0 8-bit), outputting a black frame", codec, last->fmt); return 0; }
+    d->vpx_cs = last->cs; d->vpx_full = last->range == VPX_CR_FULL_RANGE;
     if ((int)last->d_w != d->w || (int)last->d_h != d->h) { if (!d->red_img++) LOG("[RED] movie: %s picture %u×%u does not match the output %d×%d (first case), cropping / padding with black", codec, last->d_w, last->d_h, d->w, d->h); }
     int rgba = d->fmt == MD_FMT_ABGR;
     size_t need = (size_t)d->w * d->h * (rgba ? 4 : 3) / (rgba ? 1 : 2);
@@ -318,22 +330,45 @@ static int md_vorbis_open(mdec_t *d) {
     LOG("[movie] Vorbis: %d channels %d Hz", d->ch, d->rate);
     return 1;
 }
+// Up to vals kept values go into the output slot; 0 when none are kept
+static int md_vorbis_emit(mdec_t *d, int slot, size_t vals) {
+    if (vals > d->hold_n) vals = d->hold_n;
+    if (!vals) return 0;
+    size_t need = vals * sizeof *d->hold;
+    if (d->out[slot].cap < need) { free(d->out[slot].frm); d->out[slot].frm = malloc(need); d->out[slot].cap = need; }
+    memcpy(d->out[slot].frm, d->hold, need);
+    d->out[slot].bytes = need; d->hold_n -= vals;
+    if (d->hold_n) memmove(d->hold, d->hold + vals, d->hold_n * sizeof *d->hold);
+    return 1;
+}
+// A packet's blocksize, from the mode number after its type bit (at most 6 bits, so within the first byte); 0 for a mode the stream does not have
+static int md_vorbis_blocksize(const stb_vorbis *f, const uint8_t *p, int n) {
+    if (n < 1) return 0;
+    int mode = p[0] >> 1 & ((1 << ilog(f->mode_count - 1)) - 1);
+    return mode < f->mode_count ? f->blocksize[f->mode_config[mode].blockflag] : 0;
+}
 // one packet → PCM16 interleaved in the slot; returns 1 when there are samples (the first packet of a stream only primes the overlap and gives none)
+// stb_vorbis ends a packet's samples at its window's right_start, which depends on the next window, while the specification ends them at the window's centre. With blocksizes 256 / 2048, a long window
+// before a short one gives 1,472 samples, not 1,024, and the short one 128, not 576. The total is the same, but an output no longer matches the time of the next packet, and Smash's movie player played
+// whole blocks of silence around each change. So the samples are kept here and each packet leaves with (previous blocksize + its blocksize) / 4 of them, as with Android's MediaCodec.
+// Samples still kept after the last packet lie past the centre of its window: the specification has none there, so they are dropped
 static int md_vorbis(mdec_t *d, const uint8_t *p, int n, int slot) {
     if (!d->vb && !md_vorbis_open(d)) return 0;
     if (n >= 65025) { if (!d->red_vb++) LOG("[RED] movie: Vorbis packet of %d bytes, larger than a page", n); return 0; }
     uint8_t *page = malloc((size_t)n + 27 + 255); if (!page) return 0;
     size_t len = ogg_page(d, page, p, n, 0);
+    int cur = md_vorbis_blocksize(d->vb, p, n), prev = d->vb_prev;
+    if (cur) d->vb_prev = cur;
     int ch = 0, ns = 0; float **pcm = NULL;
     stb_vorbis_decode_frame_pushdata(d->vb, page, (int)len, &ch, &pcm, &ns); free(page);
     if (ns <= 0 || ch <= 0 || !pcm) return 0;
     d->ogg_gran += ns;
-    size_t need = (size_t)ns * ch * 2;
-    if (d->out[slot].cap < need) { free(d->out[slot].frm); d->out[slot].frm = malloc(need); d->out[slot].cap = need; }
-    int16_t *o = (int16_t *)d->out[slot].frm;
+    size_t vals = (size_t)ns * ch;
+    if (d->hold_cap < d->hold_n + vals) { int16_t *h = realloc(d->hold, (d->hold_n + vals) * sizeof *h); if (!h) return 0; d->hold = h; d->hold_cap = d->hold_n + vals; }
+    int16_t *o = d->hold + d->hold_n;
     for (int i = 0; i < ns; i++) for (int c = 0; c < ch; c++) { float v = pcm[c][i] * 32767.0f; o[i * ch + c] = (int16_t)(v > 32767.0f ? 32767 : v < -32768.0f ? -32768 : v); }
-    d->out[slot].bytes = need;
-    return 1;
+    d->hold_n += vals;
+    return md_vorbis_emit(d, slot, (size_t)((prev + cur) / 4) * ch);
 }
 // ---------- AAC ----------
 // The demuxer hands over raw AAC frames (1024 samples each) and the AudioSpecificConfig in csd-0. AudioToolbox takes the configuration as an MPEG-4 ES descriptor (the magic cookie built
@@ -523,6 +558,14 @@ HLE_FORCE("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatE", "mov
     h_movie_Decoder(self, type, fmt == 3 ? MD_FMT_NV12 : fmt == 2 ? MD_FMT_ABGR : fmt, 1, 0);
     mdec_t *d = md_of(self); if (d) d->out_align = 0x20;
 }
+// The base-object constructors: a game can reach C2 with no C1 (Mario Tennis Aces, NintendoSDK_movie 4.5.0: C1 is a thunk of 8 bytes, mov w4,#0; b C2, GitHub issue #1131). Left to the SDK, the guest's
+// constructor put a DecoderImpl there, and h_movie_Configure read its vtable as the host's decoder and branched to 0. The class has no virtual bases, so both constructors do the same
+HLE_FORCE("_ZN5movie7DecoderC2ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeEi", "movie decoder (base-object constructor): host implementation", void, h_movie_Decoder_C2,
+          void **self, int type, int fmt, int mode, int prio) { h_movie_Decoder(self, type, fmt, mode, prio); }
+HLE_FORCE("_ZN5movie7DecoderC2ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeE", "movie decoder (SDK 4, base-object constructor): host implementation", void, h_movie_Decoder4_C2,
+          void **self, int type, int fmt, int mode) { h_movie_Decoder4(self, type, fmt, mode); }
+HLE_FORCE("_ZN5movie7DecoderC2ENS_11DecoderTypeENS_19DecoderOutputFormatE", "movie decoder (SDK 3, base-object constructor): host implementation", void, h_movie_Decoder3_C2,
+          void **self, int type, int fmt) { h_movie_Decoder3(self, type, fmt); }
 static void md_free(void **self) {
     mdec_t *d = md_of(self); if (!d) return;
     md_defer_drop(d);
@@ -534,7 +577,7 @@ static void md_free(void **self) {
     pthread_join(d->wk, NULL);
     for (int i = 0; i < MD_NIN; i++) free(d->in[i]);
     for (int k = 0; k < MD_NOUT; k++) free(d->out[k].frm);
-    free(d->vhdr[0]); free(d->vhdr[1]);
+    free(d->bgra); free(d->vhdr[0]); free(d->vhdr[1]); free(d->hold);
     pthread_mutex_destroy(&d->mu); pthread_mutex_destroy(&d->dmu); pthread_mutex_destroy(&d->wmu); pthread_cond_destroy(&d->wcv); free(d);
 }
 HLE_FORCE("_ZN5movie7DecoderD2Ev", "movie decoder destructor: frees the host object", void, h_movie_DecD2, void **self) { md_free(self); }
@@ -594,7 +637,7 @@ static void md_reset(mdec_t *d, int close) {
     // control thread flushes to loop an activity preview, and sends them after the flush (SendInputBufferForDecode claims them back). Those are withheld for a while (h_movie_AcqIn)
     uint64_t now = now_ns();
     for (int i = 0; i < MD_NIN; i++) { d->infree[i] = i; d->instale[i] = d->inown[i] ? now : 0; d->inown[i] = 0; }
-    d->ninfree = MD_NIN; d->noutq = 0; d->npend = 0; d->avc_drain = 0; d->in_eos = 0;
+    d->ninfree = MD_NIN; d->noutq = 0; d->npend = 0; d->avc_drain = 0; d->in_eos = 0; d->hold_n = 0; d->vb_prev = 0;
     // a flush keeps each slot's last picture: the same game reads an output it acquired before the flush right after it (a black frame in the loop otherwise)
     for (int i = 0; i < MD_NOUT; i++) { d->out[i].used = 0; d->out[i].cli = 0; d->out[i].rnd = 0; if (close) d->out[i].pic = 0; }
     pthread_mutex_unlock(&d->mu);
@@ -711,6 +754,13 @@ static void md_format(mdec_t *d, void *md) {
     // every chroma row was read from the first one (a grey movie with vertical bands). The picture size again, as the SDK's DecoderImpl::GetOutputBufferFormatFromDecoder
     // (SDK 19 subsdk0+0x121f50) also sets it
     G.set_i32(md, "nv12-uv-stride", stride); G.set_i32(md, "nv12-width", w); G.set_i32(md, "nv12-height", h);
+    // The picture's colour space, as DecoderImpl::GetOutputBufferFormatFromDecoder (SDK 4 subsdk0+0x2d8c60) sets it: the hardware decoder's hw-buf-ColorSpace / 32 + 1, 1 to 5. Kirby Star Allies' player
+    // (main+0x1529f8) indexes its YUV → RGB matrices with it: 1 BT.601 limited range, 2 BT.601 full, 3 BT.709 limited, 4 BT.709 full, 5 BT.601 limited; anything else, an unset key too, selects an
+    // all-zero matrix, which drew its movies black. By the rule md_rgba uses: what the stream declares, undeclared BT.709 from 720 lines up. VideoToolbox's H.264 pictures are always video range (open_session)
+    int b709, full = 0;
+    if (d->avc) b709 = mavc_bt709(d->avc, h);
+    else { b709 = d->vpx_cs == VPX_CS_BT_709 || (d->vpx_cs == VPX_CS_UNKNOWN && h >= 720); full = d->vpx_full; }
+    G.set_i32(md, "nv12-colorspace", (b709 ? 3 : 1) + full);
 }
 HLE_FORCE("_ZN5movie7Decoder15GetOutputFormatEPNS_9MediaDataE", "movie decoder: output format (NV12)", int, h_movie_OutFmt, void **self, void *md) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;
@@ -766,11 +816,21 @@ static int md_out_tex(mdec_t *d, int i, void *buf) {
     if (!p || cap < 8) { LOG("[RED] movie: client buffer in native-texture mode is %zu bytes, needs 8 (a texture object)", cap); return 0x100b; }
     void *tex = p; int tw = 0, th = 0, f = nvn_host_write_texture(tex, NULL, 0, 0, 0, &tw, &th);
     if (f < 0) { LOG("[RED] movie: buffer data %p in native-texture mode is not a texture object", tex); return 0x100b; }
-    if (f != 0x25 && f != 0x38 && f != 0x6d && f != 0x37 && !d->red_img++) LOG("[RED] movie: client texture format %#x is not RGBA8 / RGBX8 (sRGB included), writing in RGBA byte order", f);   // Metroid Dread: RGBX8_SRGB
+    int bgr = f >= 0x99 && f <= 0x9C;   // BGRX8, BGRA8 and their sRGB forms (TRIANGLE STRATEGY): the SDK's consumer draws into the texture on the GPU, so the bytes follow its format
+    if (f != 0x25 && f != 0x38 && f != 0x6d && f != 0x37 && !bgr && !d->red_img++) LOG("[RED] movie: client texture format %#x is not RGBA8 / RGBX8 / BGRA8 / BGRX8 (sRGB included), writing in RGBA byte order", f);   // Metroid Dread: RGBX8_SRGB
     int w = d->w < tw ? d->w : tw, h = d->h < th ? d->h : th;
     // No picture (an end-of-stream output): nothing is drawn and the texture keeps the last frame, as the SDK's consumer has no frame to draw. A black frame here flashed at the
     // end of every loop of Big Brain Academy: Brain vs. Brain's activity previews, which read the end-of-stream output's buffer
-    if (d->out[i].pic && d->out[i].frm) nvn_host_write_texture(tex, d->out[i].frm, w, h, (size_t)d->w * 4, NULL, NULL);
+    if (d->out[i].pic && d->out[i].frm) {
+        const uint8_t *src = d->out[i].frm;
+        if (bgr) {   // into a copy: the slot's picture stays RGBA for another GetOutputBuffer of the same slot
+            size_t n = (size_t)d->w * h * 4;
+            if (d->bgra_cap < n) { free(d->bgra); d->bgra = malloc(n); d->bgra_cap = n; }
+            for (size_t k = 0; k < n; k += 4) { d->bgra[k] = src[k + 2]; d->bgra[k + 1] = src[k + 1]; d->bgra[k + 2] = src[k]; d->bgra[k + 3] = src[k + 3]; }
+            src = d->bgra;
+        }
+        nvn_host_write_texture(tex, src, w, h, (size_t)d->w * 4, NULL, NULL);
+    }
     void *sy = G.nvn_sync ? G.nvn_sync(buf) : NULL; if (sy && nvn_host_signal_sync(sy) && !d->red_dec++) LOG("[RED] movie: the buffer's sync object %p is not an NVNsync", sy);
     MD_TRACE(d, 12, "GetOutputBuffer index %d → texture %p (%d×%d format %#x)%s", i, tex, tw, th, f, d->out[i].pic ? "" : " (no picture: the texture keeps its last frame)");
     // The SDK's texture mode returns the output index here: DecoderImpl::GetOutputBuffer calls CopyOutputBufferToClientTextureAndRelease (MediaCodec::renderOutputBufferAndRelease),

@@ -1,4 +1,5 @@
 """NSP script reuse across derived and provisional builds. Real fingerprints and mock tool runs; no game files, keys or Xcode needed."""
+import collections
 import importlib.util
 import json
 import os
@@ -10,8 +11,8 @@ import unittest
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(REPO / 'dm/games')); sys.path.insert(0, str(REPO / 'dm/tools'))
-import game, nacp, profile_guess
+sys.path.insert(0, str(REPO / 'dm/games')); sys.path.insert(0, str(REPO / 'dm/tools')); sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
+import dmsh_chain, game, nacp, profile_guess
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
 nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
 nsp.pg, nsp.nacp = profile_guess, nacp   # main sets them
@@ -28,6 +29,22 @@ def control(path, disp):   # control.nacp with the display version at 0x3060
     path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(bytes(0x3060) + disp.encode().ljust(0x10, b'\0') + bytes(0xa0))
 
 
+class ProvisionalVersionSelection(unittest.TestCase):
+    def test_stale_base_profile_never_silently_ignores_update(self):
+        with self.assertRaisesRegex(nsp.BuildError, "profile-out.*Refusing to silently"):
+            nsp.provisional_version({"v0": None, "v983040": None}, {"v0": {}}, "", Path("cached-profile"))
+
+    def test_explicit_base_selection_is_preserved(self):
+        self.assertEqual(nsp.provisional_version({"v0": None, "v983040": None}, {"v0": {}}, "v0", Path("cached-profile")), "v0")
+
+    def test_selected_update_must_be_available(self):
+        with self.assertRaisesRegex(nsp.BuildError, "not in the input folder"):
+            nsp.provisional_version({"v0": None}, {"v0": {}, "v983040": {}}, "v983040", Path("cached-profile"))
+
+    def test_current_profile_uses_numeric_newest_input(self):
+        self.assertEqual(nsp.provisional_version({"v0": None, "v9": None, "v10": None}, {"v0": {}, "v9": {}, "v10": {}}, "", Path("cached-profile")), "v10")
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()).resolve(); self.addCleanup(shutil.rmtree, self.tmp)
@@ -41,7 +58,9 @@ class Base(unittest.TestCase):
         self.ex = self.tmp / 'extract/v65536'; nso(self.ex / 'ExeFS/main', BID2); control(self.ex / 'control.nacp', '1.1.0')
         (self.ex / 'RomFS').mkdir(); (self.ex / 'RomFS/a.bin').write_bytes(b'romfs')
         self.pdir = self.tmp / 'derived' / f'{TID:016X}'
-        for cm in (mock.patch.dict(os.environ, {'DM_GAMES_DIR': str(self.tmp / 'games')}), mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'say', lambda m: None)):
+        self.imported = {}   # what main imports from modules the list leaves out (profile_guess.main_modules, with its own tests: these NSOs are headers only)
+        for cm in (mock.patch.dict(os.environ, {'DM_GAMES_DIR': str(self.tmp / 'games')}), mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'say', lambda m: None),
+                   mock.patch.object(nsp.pg, 'main_modules', lambda exefs, mods: self.imported)):
             cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
 
     def derive(self, ver='v65536', mods=('main',), app=None):
@@ -72,6 +91,51 @@ class DeriveProfile(Base):
         self.assert_kept()
         self.assertEqual(game.Game(self.pdir).builds()['v65536']['main'], BID2)
         self.assertEqual(self.derive(), '1.1.0'); self.assert_kept()   # still kept on a third run
+
+    def test_a_module_the_version_does_not_ship_is_left_out(self):   # Mario Kart World 1.0.0 has no subsdk1, which the 1.8.0 profile loads
+        (self.src / 'game.tsv').write_text((self.src / 'game.tsv').read_text().replace('modules\tmain\n', 'modules\tmain subsdk1 sdk\n'))
+        nso(self.ex / 'ExeFS/sdk', BID)
+        self.derive(mods=('main', 'subsdk1', 'sdk'))
+        g = game.Game(self.pdir)
+        self.assertEqual(g.words('modules'), ['main', 'sdk'])
+        self.assertIn('# this version ships no subsdk1', (self.pdir / 'game.tsv').read_text())
+        self.assertNotIn('subsdk1', g.builds()['v65536'])
+        nso(self.ex / 'ExeFS/subsdk1', BID2); self.derive(mods=('main', 'subsdk1', 'sdk'))   # a version that ships it keeps the profile's list
+        self.assertEqual(game.Game(self.pdir).words('modules'), ['main', 'subsdk1', 'sdk'])
+
+    def test_a_module_main_imports_that_the_list_leaves_out_is_added(self):   # Absolum: subsdk2 was the movie module in 1.1.2; 1.2.1 ships it as subsdk0, and no subsdk2 (issue #1211)
+        (self.src / 'game.tsv').write_text((self.src / 'game.tsv').read_text().replace('modules\tmain\n', 'modules\tmain subsdk2 sdk\n'))
+        nso(self.ex / 'ExeFS/sdk', BID); nso(self.ex / 'ExeFS/subsdk0', 'ee' * 16); nso(self.ex / 'ExeFS/subsdk1', 'ff' * 16)
+        self.imported = {'subsdk0': 'NintendoSDK_movie'}
+        self.derive(mods=('main', 'subsdk2', 'sdk'))
+        g = game.Game(self.pdir); text = (self.pdir / 'game.tsv').read_text()
+        self.assertEqual(g.words('modules'), ['main', 'subsdk0', 'sdk'])
+        self.assertEqual(g.build_modules()[BID2], ['main', 'subsdk0', 'sdk'])   # the host loads what the row names; subsdk1 stays out
+        self.assertIn('# this version ships no subsdk2', text)
+        self.assertIn('# main imports from subsdk0 (NintendoSDK_movie), which the profile does not list', text)
+        self.assertEqual(g.builds()['v65536']['subsdk0'], 'ee' * 16)
+        self.assertNotIn('subsdk1', g.builds()['v65536'])
+
+    def test_nothing_imported_keeps_the_list(self):
+        (self.src / 'game.tsv').write_text((self.src / 'game.tsv').read_text().replace('modules\tmain\n', 'modules\tmain sdk\n'))
+        nso(self.ex / 'ExeFS/sdk', BID); nso(self.ex / 'ExeFS/subsdk0', 'ee' * 16)
+        self.derive(mods=('main', 'sdk'))
+        g = game.Game(self.pdir)
+        self.assertEqual(g.words('modules'), ['main', 'sdk'])
+        self.assertNotIn('# main imports', (self.pdir / 'game.tsv').read_text())
+        self.assertNotIn('subsdk0', g.builds()['v65536'])
+
+    def test_shader_tables_alone_add_no_module(self):
+        self.imported = {'subsdk0': 'NintendoSDK_movie'}
+        nsp.derive_profile(game.Game(self.src), self.pdir, 'v65536', self.ex, ['main'], shader_only=True)
+        self.assertEqual(game.Game(self.pdir).words('modules'), ['main'])
+
+    def test_the_same_profile_in_another_checkout_keeps_later_stages(self):
+        self.derive(); self.later_stages()
+        other = self.tmp / 'checkout2' / 'games' / f'{TID:016X}'; shutil.copytree(self.src, other)   # the repository cloned again, or a front end's own copy of it
+        nsp.derive_profile(game.Game(other), self.pdir, 'v65536', self.ex, ['main'])
+        self.assert_kept()
+        self.assertNotIn(str(self.tmp), (self.pdir / 'game.tsv').read_text())
 
     def test_changed_inputs_derive_again(self):
         changes = {
@@ -211,6 +275,45 @@ class DeriveProfile(Base):
             with self.assertRaisesRegex(OSError, 'interrupted replace'):
                 nsp.heap_check(REPO, self.ex, self.tmp / 'patched', self.tmp / 'work', {}, logs, g)
         self.assertEqual(g.table('game.tsv').read_bytes(), before)
+
+    def check_boot(self, name, log):   # a check on the derived profile, whose boot writes this log; the profile after it
+        logs = self.tmp / 'logs'; logs.mkdir(exist_ok=True); patched = self.tmp / 'work/patched_v65536'
+        def boot(*args): (logs / f'{name}_check.log').write_text(log); return 0
+        with mock.patch.object(nsp, 'build_mac_host'), mock.patch.object(nsp, 'boot_mac', side_effect=boot):
+            if name == 'heap': return nsp.heap_check(REPO, self.ex, patched, self.tmp / 'work', {}, logs, game.Game(self.pdir))
+            return nsp.region_check(REPO, self.ex, patched, self.tmp / 'work', {}, logs, game.Game(self.pdir))
+
+    def test_a_check_boot_sets_the_depth_mode_the_game_calls(self):   # before the prebuild reads it (Super Mario RPG: 0 of 34 lookups hit an archive made at the default mode)
+        with (self.src / 'game.tsv').open('a') as f: f.write('mem_alias\t0x80000000\nmem_reserve\t0x140000000\nmem_stack\t0x10000000\napp_pool\t0x40000000\n')
+        for name in ('heap', 'region'):
+            with self.subTest(check=name):
+                self.derive()
+                self.assertEqual(self.check_boot(name, '>>> nnMain\n').get('depth_mode', 'none'), 'none')   # no call: unknown, not GL
+                g = self.check_boot(name, '>>> nnMain\n[dm] [nvn] depth mode near=0 (as D3D / Metal)\n')
+                self.assertEqual(g.get('depth_mode'), 'zero')
+                self.assertEqual(g.get('mem_alias'), '0x80000000')   # the keys around it stay
+                g = self.check_boot(name, '>>> nnMain\n')   # a later boot that stops earlier keeps what an earlier one saw
+                self.assertEqual(g.get('depth_mode'), 'zero')
+                self.assertEqual([k for k, _ in g.rows].count('depth_mode'), 1)
+                (self.pdir / 'game.tsv').unlink()   # the next check derives afresh
+
+    def test_depth_mode_is_no_shader_input(self):   # a check that sets it must not schedule the game's shaders again
+        self.derive(); before = dmsh_chain.inputs(game.Game(self.pdir))
+        g = nsp.set_keys(game.Game(self.pdir), {'depth_mode': ('zero', 'seen')}, 'Address region check')
+        self.assertEqual(dmsh_chain.inputs(g), before)
+
+    def test_a_provisional_profile_moves_to_dm_games_with_its_shader_inputs(self):   # Super Mario RPG: "(provisional profile)" in the note scheduled all 82,032 libraries again for identical shaders
+        F = {'romfs': {'dirs': collections.Counter(), 'extb': {}, 'exts': {}, 'extc': {}, 'biggest': (0, 'big.bin')}, 'sdk': '14', 'program': None, 'mods': {'main': {'bid': BID}}}
+        pdir = self.tmp / 'provisional' / f'{TID:016X}'
+        with mock.patch.object(nsp.pg, 'guess', return_value={'modules': ('main', '')}):
+            nsp.write_profile(pdir, TID, {'F': F, 'name': 'Some Game', 'survey': 'survey.md', 'version': 'v0', 'display': '1.0.0'})
+        g = game.Game(pdir)
+        self.assertEqual(g.get('shader_note'), 'Some Game shaders')
+        self.assertIn('Provisional game profile', g.table('game.tsv').read_text())   # the file still says what it is, in a comment
+        moved = self.tmp / 'moved' / f'{TID:016X}'; shutil.copytree(pdir, moved)
+        text = [l for l in (moved / 'game.tsv').read_text().splitlines() if not l.startswith('#')]   # a registered profile's own comments
+        (moved / 'game.tsv').write_text('\n'.join(text) + '\n')
+        self.assertEqual(dmsh_chain.inputs(game.Game(moved)), dmsh_chain.inputs(g))
 
     def test_region_stamp_follows_the_rewrite(self):   # a derived build is checked once per rewrite: a new cut checks again, a reused derivation keeps the stamp
         with (self.src / 'game.tsv').open('a') as f: f.write('mem_alias\t0x80000000\n')   # every profile has one (the host is built with it)
@@ -396,8 +499,8 @@ class SplitShaders(Base):
 
     def table(self, n): return self.tables[n] if hasattr(self, 'tables') else f'# split header\n{n}\t{self.rows}\n'
 
-    def go(self, g, own=True, oodle=None, dlc_roms=(), derive_dlc=None, derive_compute=None):
-        return nsp.split_shaders(sys.executable, self.repo, [self.ex / 'RomFS'], [self.ex / 'ExeFS/main'], self.pkg, {}, self.logs, g, own, oodle, dlc_roms, derive_dlc, derive_compute)
+    def go(self, g, own=True, oodle=None, dlc_roms=(), derive_dlc=None, derive_compute=None, env=None):
+        return nsp.split_shaders(sys.executable, self.repo, [self.ex / 'RomFS'], [self.ex / 'ExeFS/main'], self.pkg, env or {}, self.logs, g, own, oodle, dlc_roms, derive_dlc, derive_compute)
 
     def compute_addition(self):
         self.tables = {'shader_map.tsv': 'vs_data.bin\t0\tvertex\tbase\t/original\ncs_data.bin\t0\tcompute\tadded\t/assets#Compute#run.0\n',
@@ -426,7 +529,7 @@ class SplitShaders(Base):
             self.assertEqual(derived.table(n).read_text(), self.tables[n])
         self.assertEqual(self.go(g, own=False, derive_compute=promote), first)
         self.assertEqual((self.splits, promote.call_count), (1, 2))
-        (self.repo / 'dm/gfx/tools/shader_split.py').write_text('new reader')
+        (self.repo / 'dm/gfx/tools/shader_split.py').write_text('reader_version = 2')
         self.go(g, own=False, derive_compute=promote)
         self.assertEqual((self.splits, promote.call_count), (2, 3))
         verifier = self.tmp / 'comparison-v2.py'; verifier.write_text('changed comparison code')
@@ -516,6 +619,82 @@ class SplitShaders(Base):
         k2 = self.go(g)
         self.assertEqual((self.splits, k2), (1, k1))   # the key stored after the tables were written: the second run sees the same inputs
 
+    def test_translation_and_profile_metadata_changes_keep_extraction(self):
+        g = self.own(); before = self.go(g)
+        for name in ('dmsh_build.py', 'dmsh_chain.py', 'pso_offline.py', 'unrelated_reader.py'):
+            (self.repo / 'dm/gfx/tools' / name).write_text('version = 2\n')
+            self.assertEqual(self.go(g), before)
+            self.assertEqual(self.splits, 1, name)
+        for name in ('README.md', 'bf_want.tsv', 'shader_facts.tsv.notes', 'dmsh_chain.h'):
+            g.table(name).write_text('changed\n')
+            self.assertEqual(self.go(g), before)
+            self.assertEqual(self.splits, 1, name)
+        g = nsp.set_keys(g, {'mem_used': ('0x4800000', ''), 'nvn_all_pulling': ('1', '')}, 'Runtime settings')
+        self.assertEqual(self.go(g), before)
+        self.assertEqual(self.splits, 1)
+
+    def test_transitive_reader_dependency_changes_reextract(self):
+        (self.repo / 'dm/gfx/tools/shader_split.py').write_text('import reader\n')
+        (self.repo / 'dm/gfx/tools/reader.py').write_text('from reader_bits import FORMAT\n')
+        helper = self.repo / 'dm/tools/reader_bits.py'; helper.parent.mkdir(parents=True)
+        helper.write_text('FORMAT = 1\n')
+        g = self.own(); self.go(g)
+        helper.write_text('FORMAT = 2\n')
+        self.go(g); self.assertEqual(self.splits, 2)
+        helper.unlink()
+        self.go(g); self.assertEqual(self.splits, 3)
+
+    def test_extraction_settings_and_auxiliary_modules_reextract(self):
+        g = self.own(); self.go(g)
+        for i, (key, value) in enumerate((('shader_groups', 'foo=bar'), ('shader_note', 'Other sources'), ('shader_key_skip', '0x770+0x78'), ('modules', 'main sdk')), 2):
+            g = nsp.set_keys(g, {key: (value, '')}, 'Extraction setting')
+            self.go(g); self.assertEqual(self.splits, i)
+        nso(self.ex / 'ExeFS/sdk', BID)
+        self.go(g); self.assertEqual(self.splits, 6)
+        nso(self.ex / 'ExeFS/sdk', BID2)
+        self.go(g); self.assertEqual(self.splits, 7)
+
+    def test_capture_overrides_are_inputs(self):
+        g = self.own()
+        for setting, suffix in (('DM_GLSLC_CAPTURE', '.glslc'), ('DM_UE_SHADERS', '.ushaderbytecode')):
+            with self.subTest(setting=setting):
+                capture = self.tmp / setting; capture.mkdir()
+                file = capture / ('a' + suffix); file.write_bytes(b'first shader')
+                env = {setting: str(capture)}
+                self.go(g, env=env); before = self.splits
+                file.write_bytes(b'new shader')
+                self.go(g, env=env); self.assertEqual(self.splits, before + 1)
+                self.go(g, env=env); self.assertEqual(self.splits, before + 1)
+                moved = self.tmp / f'{setting}-moved'; shutil.copytree(capture, moved)   # the same files elsewhere: its contents are the input, not its location
+                self.go(g, env={setting: str(moved)}); self.assertEqual(self.splits, before + 1)
+
+    def test_missing_or_modified_package_is_not_reused(self):
+        g = self.own(); self.go(g)
+        output = self.pkg / 'main.bin'
+        output.unlink()
+        self.go(g); self.assertEqual(self.splits, 2)
+        self.assertEqual(output.read_bytes(), b'derived')
+        output.write_bytes(b'corrupt')
+        self.go(g); self.assertEqual(self.splits, 3)
+        self.assertEqual(output.read_bytes(), b'derived')
+
+    def test_verified_decoder_rebuild_reuses_but_binary_edits_do_not(self):
+        g = self.own()
+        host = self.tmp / 'decoder-host'; host.write_bytes(b'host with old chain')
+        modules = self.tmp / 'patched'; modules.mkdir()
+        module = modules / 'main.patched.bin'; module.write_bytes(b'code')
+        def provenance():
+            host.with_name(host.name + '.decoder.json').write_text(json.dumps({'format': 1, 'binary': nsp.fingerprint(('files', [host])), 'inputs': 'a' * 64}))
+        decoder = lambda: {'DM_OODLE_HOST': str(host), 'DM_OODLE_MODULES': str(modules)}
+        provenance(); self.go(g, oodle=decoder)
+        host.write_bytes(b'host with new chain'); provenance()
+        self.go(g, oodle=decoder); self.assertEqual(self.splits, 1)
+        host.write_bytes(b'externally replaced')   # the old provenance no longer describes these bytes
+        self.go(g, oodle=decoder); self.assertEqual(self.splits, 2)
+        before = module.stat()
+        module.write_bytes(b'edit'); os.utime(module, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.go(g, oodle=decoder); self.assertEqual(self.splits, 3)
+
     def test_redumped_inputs_invalidate_only_own_split(self):
         for n in self.NAMES[:3]: (self.src / n).write_text(self.table(n))
         captures = [self.ex / 'glslc_capture/a.glslc', self.ex / 'ue_shaders/a.ushaderbytecode']
@@ -543,8 +722,7 @@ class SplitShaders(Base):
         self.assertEqual(decoder.call_count, 6)
 
     def test_own_profile_changes_split_again(self):
-        changes = {'game.tsv': lambda g: nsp.set_keys(g, {'mem_used': ('0x4800000', '')}, 'After the rewrite'),
-                   'manual table': lambda g: g.table('shader_facts_manual.tsv').write_text('k\t{"manual": 3}\n'),
+        changes = {'manual table': lambda g: g.table('shader_facts_manual.tsv').write_text('k\t{"manual": 3}\n'),
                    'main': lambda g: nso(self.ex / 'ExeFS/main', 'ef' * 16),
                    'RomFS': lambda g: (self.ex / 'RomFS/b.bin').write_bytes(b'more'),
                    'tool': lambda g: (self.repo / 'dm/gfx/tools/shader_split.py').write_text('v2')}
@@ -614,6 +792,10 @@ class SplitShaders(Base):
         pairs = self.pkg.with_name('pso_pairs.tsv'); pairs.unlink()
         self.go(g, own=False)
         self.assertEqual(self.splits, 2)
+        self.assertEqual(pairs.read_text(), self.table('pso_pairs.tsv'))
+        pairs.write_text('corrupt\tpair\n')
+        self.go(g, own=False)
+        self.assertEqual(self.splits, 3)
         self.assertEqual(pairs.read_text(), self.table('pso_pairs.tsv'))
 
     def test_derived_rerun_is_incremental(self):   # the whole derived path of a second run: derive, prepare, rewrite keys, split
@@ -689,6 +871,85 @@ class MacApp(Base):
                 if i: nsp.PROG.end.assert_called_with('Game.app, reused (inputs unchanged)')
                 else: nsp.PROG.set.assert_called_with(step='launcher and host (clones of the game files)')
         self.assertEqual(len(packs), 2)   # pack_app owns the reuse decision and sidecar key
+
+
+class GlslcCapture(Base):
+    def test_the_capture_boot_presses_a(self):   # Crash Team Racing Nitro-Fueled compiles its run-time programs only after its title screen has had a button press
+        g = game.Game(self.src); ex = self.tmp / 'extract/v0'; (ex / 'RomFS').mkdir(parents=True); logs = self.tmp / 'logs'; logs.mkdir()
+        out = bytearray(0x48); out[:4] = b'\x91\x68\x86\x19'; out[0x44:0x48] = (0x48).to_bytes(4, 'little')   # a whole GLSLC output: its magic and its own length
+        seen = {}
+        def boot(host, patched, henv, rd, log, secs, done):
+            seen.update(henv); cap = Path(henv['DM_GLSLC_CAPTURE']); cap.mkdir(parents=True); (cap / '0123456789abcdef.glslc').write_bytes(out); return None
+        with mock.patch.object(nsp, 'build_mac_host'), mock.patch.object(nsp, 'boot_mac', side_effect=boot), mock.patch.object(nsp, 'PROG'):
+            nsp.capture_glslc(REPO, {'v0': ex}, 'v0', self.tmp / 'patched', self.tmp / 'work', {}, logs, g)
+        self.assertEqual(seen['DM_KEYS'], nsp.GLSLC_KEYS)
+        self.assertTrue(nsp.GLSLC_KEYS.startswith('5:A'))   # the first press comes well within the run (GLSLC_SECS)
+        self.assertEqual(sorted(p.name for p in (ex / 'glslc_capture').iterdir()), ['0123456789abcdef.glslc'])
+
+
+class GlslcCacheCoverage(Base):
+    KEY = '0123456789abcdef'
+
+    def capture(self, rc=None, observed=True, required=False, partial=False, capture_error=False):
+        work, logs = self.tmp / 'work', self.tmp / 'logs'; logs.mkdir(exist_ok=True)
+        def boot(host, patched, env, rd, log, secs, done):
+            shmap = Path(env['DM_NVN_SHMAP'])
+            if required:
+                self.assertEqual(shmap, self.src / 'shader_map.tsv')
+            else:
+                self.assertEqual(shmap.read_text(), '# GLSLC capture: observe submitted shaders\n')
+            if partial:
+                cap = Path(env['DM_GLSLC_CAPTURE'])
+                cap.mkdir()
+                (cap / 'aaaaaaaaaaaaaaaa.glslc').write_bytes(b'partial output')
+            text = f'[dm] [nvn-mtl] [RED] shader {self.KEY} is not in the shader map\n' if observed else ''
+            if capture_error:
+                text += '[dm] [RED] glslc: unknown output header\n'
+            log.write_text(text)
+            return rc
+        with mock.patch.object(nsp, 'build_mac_host', return_value=work / 'dmhost'), mock.patch.object(nsp, 'boot_mac', side_effect=boot):
+            return nsp.capture_glslc(REPO, {'v65536': self.ex}, 'v65536', work / 'patched', work, {}, logs, game.Game(self.src))
+
+    def test_surviving_boot_defers_to_offline_coverage(self):
+        observed = self.capture()
+        self.assertEqual(observed, {self.KEY})
+        (self.src / 'shader_map.tsv').write_text(f'pkg.bin\t0\tvertex\t{self.KEY}\t/cache#GLSLC@0x80\n')
+        nsp.check_glslc_coverage(observed, game.Game(self.src))
+
+    def test_empty_capture_still_fails_without_boot_evidence(self):
+        for rc in (139, 0):
+            with self.subTest(rc=rc), self.assertRaisesRegex(nsp.BuildError, 'captured only 0'):
+                self.capture(rc=rc)
+        for kwargs in ({'observed': False}, {'partial': True}, {'capture_error': True}):
+            with self.subTest(**kwargs), self.assertRaisesRegex(nsp.BuildError, 'captured only 0'):
+                self.capture(**kwargs)
+
+    def test_registered_capture_requirements_are_not_relaxed(self):
+        (self.src / 'shader_map.tsv').write_text(f'pkg.bin\t0\tvertex\t{self.KEY}\t/glslc_capture/aaaaaaaaaaaaaaaa.glslc#GLSLC@0x0\n')
+        with self.assertRaisesRegex(nsp.BuildError, 'profile needs 1'):
+            self.capture(required=True)
+
+    def test_missing_offline_key_and_no_observations_fail(self):
+        for observed, msg in (({self.KEY}, 'observed shaders absent'), (set(), 'no submitted shader keys')):
+            with self.subTest(observed=observed), self.assertRaisesRegex(nsp.BuildError, msg):
+                nsp.check_glslc_coverage(observed, game.Game(self.src))
+
+
+class JitBootDone(unittest.TestCase):
+    def test_needs_the_boot_code_and_ten_seconds_with_nothing_new(self):
+        with tempfile.TemporaryDirectory() as t, mock.patch.object(nsp.time, 'time', return_value=100.0) as now:
+            part = Path(t); done = nsp.jit_boot_done(part)
+            self.assertFalse(done())   # nothing captured yet
+            (part / 'small.jit').write_bytes(b'x'); now.return_value = 200.0
+            self.assertFalse(done())   # a request, but not the boot code
+            (part / 'boot.jit').write_bytes(bytes((1 << 20) + 1)); now.return_value = 201.0
+            self.assertFalse(done())   # the boot code, just now
+            now.return_value = 211.0
+            self.assertFalse(done())
+            now.return_value = 211.5
+            self.assertTrue(done())
+            (part / 'late.jit').write_bytes(b'x')
+            self.assertFalse(done())   # something new starts the wait again
 
 
 if __name__ == '__main__': unittest.main()

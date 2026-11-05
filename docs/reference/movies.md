@@ -10,6 +10,13 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Cause:** the SDK movie library's hardware decoder opens nvdrv directly.
 - **Fix:** the host takes over `movie::Decoder` (`hle_movie.c`, [`movie::Decoder` taken over as a MediaCodec-style protocol](#moviedecoder-taken-over-as-a-mediacodec-style-protocol)); nvdrv opens fail (`hle_nvdrv.c`).
 
+### SDK 1 movie buffer getters
+
+- **Symptom:** constructing a movie decoder aborts with `FATAL movie: missing SDK symbol _ZNK5movie6Buffer4DataEv`.
+- **Cause:** SDK 1.3.1 exports `movie::Buffer::Data()`, `Capacity()` and `Size()` as non-const methods. Looking up only the const overloads misses the symbols in `subsdk0`.
+- **Fix:** resolve each getter by the const name first, then by its non-const name. The decoder still requires all three; it uses the guest's methods to read the buffer without assuming its layout.
+- **Found on:** [Ultra Street Fighter II: The Final Challengers (#960)](https://github.com/seedds/nxnative/issues/960).
+
 ### `movie::Decoder` taken over as a MediaCodec-style protocol
 
 - **Symptom:** the game waits forever at a movie (Engage's 94 s opening `S01F.webm`; frames keep presenting, nothing happens).
@@ -25,6 +32,13 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Fix:** the host now sets everything the SDK's `DecoderImpl::GetOutputBufferFormatFromDecoder` (SDK 19 `subsdk0+0x121f50`) does: also `nv12-uv-stride`, the luma (Y) stride as for any NV12 picture, `nv12-width` and `nv12-height` (`md_format` in `hle_movie.c`).
 - **Found on:** [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (the grey picture); [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md) (SDK 8.2.1, CRI middleware; one boot: the crash).
 
+### `nv12-colorspace` picks the game's YUV matrix
+
+- **Symptom:** a movie decodes and its sound plays, but the picture is black: `DM_MOVIE_TRACE=1` shows pictures coming out, the pass dump shows the two planes uploaded and one quad drawn, and the uniform block of the conversion shader (`DM_NVN_CBDUMP`) is all zeros.
+- **Cause:** the host's output format had no `nv12-colorspace`. The SDK's `DecoderImpl::GetOutputBufferFormatFromDecoder` sets it (SDK 4.4.1 `subsdk0+0x2d8c60`) to the hardware decoder's `hw-buf-ColorSpace` / 32 + 1, from 1 to 5. A player can index its matrices with it: Kirby Star Allies' (`main+0x1529f8`) copies a 64-byte block chosen by the value, 1 and 5 BT.601 limited range, 2 BT.601 full, 3 BT.709 limited, 4 BT.709 full, and for anything else, an unset key's 0 too, an all-zero block.
+- **Fix:** `md_format` sets the key from the stream, by the rule native-texture output already uses for its own conversion: the matrix the stream declares (the H.264 format description's `YCbCrMatrix`, the VP9 colour config), undeclared BT.709 from 720 lines up. H.264 pictures are reported as limited range, since VideoToolbox gives video range NV12 whatever the stream's range; VP8 and VP9 report the stream's range.
+- **Found on:** [Kirby Star Allies](../../dm/games/01007E3006DDA000/README.md): the opening movie and the movie after the first file start.
+
 ### SDK 4's `movie::Decoder` constructor without a priority
 
 - **Symptom:** a call through a null pointer in the host's `movie::Decoder::Configure` right after `nnMain` starts the logos.
@@ -38,6 +52,13 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Cause:** SDK 3.5.1's constructor is `Decoder(DecoderType, DecoderOutputFormat)` (`_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatE`, `subsdk1+0x2de630`: it builds `DecoderImpl(type, format)`), a third form after [SDK 4's](#sdk-4s-moviedecoder-constructor-without-a-priority): the SDK built its own decoder, as on SDK 4. That SDK has no decoder mode: its decoders work on the CPU. And its output formats are numbered one lower than later SDKs': `DecoderImpl` keeps the format at +0xdc and the type at +0xe0, `ConvertDecoderOutputFormat` (`subsdk1+0x2dd16c`) converts format 2 to ARGB and copies format 3 out as NV12 with stride = width, the UV rows right after the Y rows, and `GetOutputBufferSize` (`subsdk1+0x2dcde8`) gives w × h × 4 for 2 and w × h × 1.5 for 3; format 1 is PCM16 as later. Its `GetOutputBufferSize` also puts 0x20, an alignment, in the second output, where SDK 4 and later put the decoder mode (Metroid Dread `subsdk0+0x11f308`: `str w8,[x2]` with the mode, 1 for the CPU).
 - **Fix:** the two-argument constructor is taken over as a CPU-mode decoder (mode 1) with format 3 as NV12 and 2 as ABGR (`h_movie_Decoder3` in `hle_movie.c`), and its decoders report 0x20 as `GetOutputBufferSize`'s second output (`out_align`). The host's NV12 already has the SDK 3 layout (`md_nv12`).
 - **Found on:** [Hyrule Warriors: Definitive Edition](../../dm/games/0100AE00096EA000/README.md) (SDK 3.5.1, H.264 MP4 movies through its own player): the title's background and the opening movie play.
+
+### The base-object constructors of `movie::Decoder`
+
+- **Symptom:** `CRASH sig=11 addr=0 pc=0` with `lr=h_movie_Configure+…`, as the first movie starts.
+- **Cause:** the host took over only `movie::Decoder`'s complete-object constructors (`C1`). A game that reaches the base-object constructor (`C2`) ran the SDK's: Mario Tennis Aces' SDK 4.5.0 has a `C1` of two instructions (`mov w4,#0; b C2`). The object then held a guest `DecoderImpl`, whose vtable pointer `Configure` read as the host's decoder.
+- **Fix:** `hle_movie.c` takes over the three `C2` forms as well. The class has no virtual bases, so both constructors do the same.
+- **Found on:** Mario Tennis Aces (`0100BDE00862A000`, no profile; [issue #1131](https://github.com/seedds/nxnative/issues/1131), found and tested by its reporter).
 
 ### The complete-object destructor
 
@@ -85,6 +106,13 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Fix:** a released slot now goes on with a drain too, and the end-of-stream packet's own output takes the first queued picture (`jflush`), so no black picture shows before a movie's last frames (`hle_movie.c`).
 - **Found on:** [AI: THE SOMNIUM FILES](../../dm/games/010089B00D09C000/README.md) (Unity 2017.4: the 6 s Spike Chunsoft logo `StreamingAssets/Movie/al_titel_cl_sc_1k_30.mp4`, H.264 High, before the title).
 - **Note:** the audio decoder was never affected: AAC has no reorder queue.
+
+### H.264 loops retain presentation order when timestamps restart
+
+- **Symptom:** a looping tutorial loses B-frame presentation order after the first loop, without a `Flush` or end-of-stream packet.
+- **Cause:** the reorder queue sorted every picture by PTS alone. When the next loop restarted PTS at its IDR, the previous loop's high-PTS tail stayed behind the new pictures and occupied their reorder lookahead.
+- **Fix:** `hle_movie_avc.c` identifies an IDR once per access unit and tags the synchronous decode callback with its coded-sequence number. The queue sorts by sequence, then PTS; pictures from a completed sequence can leave without waiting for more lookahead. The current sequence retains its existing depth, EOS drains all pictures, and `Flush` discards the queue and resets sequence tracking. PTS values are unchanged.
+- **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md), reported with source by zatteogit in [issue #889](https://github.com/seedds/nxnative/issues/889). The synthetic `t_movie_avc` regression feeds both Annex B and length-prefixed packets through the production parser and callback wiring, checking distinct picture identities over repeated loops, short sequences, Flush and EOS. It substitutes decompression. Separately, x264 B-frame clips (a single IDR with 3 or 1 B-frames, and 12-frame GOPs) looped three times through real VideoToolbox had 123 of 180 pictures in the wrong position before the fix and none after. Gameplay and playback rate were not checked on this code; the reporter's replay of the game's tracks and gameplay test ran on a modified local checkout. The existing fixed reorder depth and IDR `no_output_of_prior_pics_flag` handling are unchanged.
 
 ### No picture carries the end-of-stream flag
 
@@ -187,6 +215,13 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Fix** (`hle_movie.c`, `md_rendered`): a slot written into the client's texture is kept until the client releases it, or, for a client that has never released a rendered slot itself (Super Mario Party Jamboree, Metroid Prime 4: Beyond), until its next `GetOutputBuffer`. A decoder learns which kind its client is at the client's first release of a rendered slot; the earlier slots are returned under the same lock that checks them.
 - **Found on:** TSUKIHIME -A piece of blue glass moon- (010057A01E4D4000, no profile here; [GitHub issue #700](https://github.com/seedds/nxnative/issues/700): its prologue, a 1080p H.264 movie, `type 1 output 3 mode 2`) and [Metroid Dread](../../dm/games/010093801237C000/README.md#movies), whose movies jumped the same way (15 times in 75 s on the Mac before, none after).
 
+### A BGRA8 client texture gets its movie with red and blue swapped
+
+- **Symptom:** `[RED] movie: client texture format 0x9a is not RGBA8 / RGBX8 (sRGB included), writing in RGBA byte order`; a native-texture movie plays in the wrong colours, warm lamps blue.
+- **Cause:** the SDK's consumer draws the decoded picture into the client's texture on the GPU, so it comes out right in any colour format. The host writes the bytes on the CPU, and wrote them in RGBA order whatever the texture's format was.
+- **Fix** (`hle_movie.c`, `md_out_tex`): for BGRX8, BGRA8 and their sRGB forms (NVN formats 0x99 to 0x9C), the picture goes through a per-decoder copy with red and blue swapped. The slot's own picture stays RGBA, as a slot can be read twice.
+- **Found on:** [TRIANGLE STRATEGY](../../dm/games/0100CC80140F8000/README.md) (the title screen's background movies; BGRA8).
+
 ## Demuxers and codecs
 
 ### `movie::Extractor` runs natively
@@ -217,12 +252,54 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 
 - Movie sound in [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) (SDK 8.2.0): the decoder is asked for type 5 (Vorbis) with output format 1 (PCM16); see the other entries in this file and `hle_movie.c`.
 
+### Vorbis output lengths at a window change
+
+- **Symptom:** a movie with a Vorbis track starts clean, then crackles and stutters. The log has no underrun and no red line, and with `DM_AUDIO_DUMP` the game's mix has exact zeros in whole 512-sample blocks (mostly one or two at a time, 11 to 21 ms).
+- **Cause:** at a change of window size `stb_vorbis` splits the samples differently from the specification: it ends a packet's samples at its window's `right_start`, which depends on the next window, not at the window's centre. With blocksizes 256 / 2048, a long window before a short one gave 1,472 samples instead of 1,024, and the short one 128 instead of 576. The total is the same, but those outputs did not match the distance to the next packet's time.
+- **Fix:** `md_vorbis` keeps the decoded samples and each packet leaves with (previous blocksize + its blocksize) / 4 of them, the rest going with the next. The blocksizes come from the packets' mode numbers. Samples still kept after the last packet lie past the centre of its window, where the specification has none, so they are dropped. Handing out longer merged outputs instead was tried and made the sound much worse: the game's buffers are 8,192 bytes, and the outputs no longer matched the packets' times.
+- **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (13.0.5, Mac: [#768](https://github.com/seedds/nxnative/issues/768)).
+
 ### Vorbis sound stops for good after a Flush
 
 - **Symptom:** a movie with a Vorbis track plays its first seconds with sound; after the game flushes and restarts it (a seek, a loop, or the app losing and regaining focus) the picture goes on but the sound does not come back, for the rest of the movie. The log shows `[movie] Flush`, `Flush`, `Start`, `Start` and no more `GetOutputBuffer … → PCM` lines. With `DM_AUDIO_DUMP`, the game's mix is real audio up to the flush and exact zeros from then on, so the AudioUnit is not at fault (0 underruns).
 - **Cause:** `h_movie_Flush` called `stb_vorbis_flush_pushdata` on the Vorbis decoder, which puts it into its page search mode. The packets `md_vorbis` hands it afterwards (each wrapped as one whole Ogg page) gave no sample: in a test on a generated stream, none of the next 100 packets did, whether the stream went on or started again from its first packet.
 - **Fix:** a Flush closes the Vorbis decoder, and the next packet opens it again from the headers (`md_vorbis_open`), as at the start of a stream. `t_movie_vpx` builds a small Vorbis stream, flushes twice and checks that the same samples come again.
 - **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (13.0.5, iPhone: the opening movie, after the app lost focus once. [#505](https://github.com/seedds/nxnative/issues/505) reported the same silence and was closed after a reinstall, with the app having been backgrounded once in the silent session).
+
+## The Switch 2's decoder API
+
+### `nn::codec` video decoders taken over
+
+- **Symptom:** a Switch 2 game crashes when a movie starts: `nn::codec::video::Initialize` faults in the SDK (Donkey Kong Bananza: `sdk+0x2de99c`, after its first punch, when the guide movie starts), and before that `nv::InitCheck` aborts ([`hle_nv.c`](../../dm/gfx/hle_nv.c)). Later, when a second movie starts: `game called nn::diag abort: Result 0` in `nn::os::ClearSystemEvent` or `TryWaitSystemEvent` on the decoder's event.
+- **Cause:** the Switch 2's SDK decodes video through `nn::codec` (H.264, AV1, VP8, VP9 decoders over a decoder service, decoder image pools, NV12 / RGBA readback), not `movie::Decoder`; every call goes to a service the host does not serve.
+- **Fix:** `dm/host/hle_codec_video.c` takes the API over: VP8 and VP9 decoded with libvpx (the YUV conversions of `hle_movie.c`, `hle_movie_yuv.h`), H.264 with VideoToolbox (`hle_movie_avc.c`, its NV12 pictures kept as I420, the parameter sets an Initialize overload passes given to it first). The four decoder types (`Vp8`, `Vp9`, `H264`, `Av1DecoderType`) have one layout, their event at +8 in the SDK, so one host decoder serves them (`cv_dec_*`, each family's entry points by their SDK names), `Unregister…DecoderBuffer` included. The protocol as the SDK implements it (sdk 20.5.19 Ounce): one image pool per output picture, registered with the decoder under an index; registering puts the index in an 8-deep queue of acquirable buffers with a signalled sync handle. `Release…OutputBuffer` gives the buffer to the decoder to fill and puts it back in the queue at once, with a new sync handle that signals when a picture is in it; `Acquire…OutputBuffer` takes the oldest (description 3604 when the queue is empty). `Get…OutputBufferProperties` gives size, time and end of stream once the buffer is filled (3604 until then). `Submit…InputBuffer` takes a packet (3603 while the decoder cannot take more, the client retries after the submission-ready event). On the host, packets decode on the submitting thread; pictures go into released buffers in release order, up to 4 wait for one. The sync handles are the host's (16 bytes: magic, decoder, index, generation): `nn::gs::TryWaitNativeSync` answers them, and so do sync point events (`nn::syncpt::sdk`, whose library the graphics initialisation sets up, which the host replaces: `CreateSyncPointEvent` jumped through a null table). A sync point event holds a SystemEvent the host binds, linked into the client's MultiWait by the SDK's own `nn::os::InitializeMultiWaitHolder`, and is signalled when its buffer is filled. The decoder's submission-ready event lives in the decoder type and goes with the decoder: `FinalizeVp9Decoder` destroys it, as the SDK does. Kept, it stayed in the host's table of bound SystemEvents, so the next decoder made in the same memory, which the game had cleared, was not given an event, and `nn::os::ClearSystemEvent` / `TryWaitSystemEvent` aborted on the uninitialised one (Donkey Kong Bananza, about four minutes in, when its second movie starts: two `nn::diag` aborts with Result 0, from `main+0xe1a71c` and `main+0x18793a0`).
+- **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_codec_video` (AddressSanitizer and UBSan): the buffer queue and its results, sync handles and sync point events, NV12 / RGBA readback of a synthetic VP9 key frame, packets refused while 4 pictures wait, end of stream, flush, a pool finalized while its buffer is still registered, a decoder finalized and made again in the same cleared memory, a VP8 key frame, a 64×64 H.264 baseline key frame decoded by VideoToolbox (ffmpeg's libx264, SEI removed), an unregistered buffer and AV1's refused Initialize.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md): 101 guide movies (`Movie/*.webm`, VP9 960×540, no sound); its player reads the pictures as NV12 (`ReadDecoderOutputImageNv12`, output format 3).
+- **Open:** AV1 (no decoder on the host: Initialize fails with a red line, so a client takes its error path instead of reaching the service), encrypted input, native image handles (the GPU route of decoded pictures), alias pools and the readback of part of a picture are not served (each prints a red line once). No game here plays VP8 or H.264 through this API yet: those paths are checked by the test only. Donkey Kong Bananza's player imports all four decoders; its movies are VP9.
+
+### The submission-ready event counted as packets
+
+- **Symptom:** a movie stays black with the game waiting behind it, the decoder made and no `first picture` line (`Submit…InputBuffer` never called). Or `[RED] nn::codec VP9: Corrupt frame detected`, then `Keyframe / intra-only frame required`, each time about 6 s into a movie or after skipping in one.
+- **Cause:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md)'s player sends one packet per signal of the event it counts, and ignores `DecodeAsync`'s result (`nro0+0xd16130`), so each signal has to mean room for a packet. The host signalled at `Initialize`, which the player clears and drops while it is not started, and then only at releases. So nothing came after `Start`, and it never sent a packet. With a signal at `Start`, it then got one per release while a seek held back the samples, its count grew, and the host's refusal of a packet with 4 pictures waiting lost a frame for good: libvpx found everything after it corrupt until the next key frame.
+- **Fix:** `Start…Decoder` signals (`cv_dec_start`). After that the event rises when a packet was taken or room came back, not at every release (`drain`), and goes down at 4 pictures waiting, while packets are refused only at 12 (`CV_READY`, `CV_HOLD`), so a signal in flight still finds room.
+- **Check:** `t_codec_video`.
+- **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md), every movie.
+
+### AV1 movies through SDK 22's decoder
+
+- **Symptom:** a crash in `nn::codec::video::InitializeAv1DecoderByTransferMemory` when a movie starts.
+- **Cause:** SDK 22 initializes its decoders by transfer or remote memory, with stack arguments, and the game's movies are AV1 decoded into native images: linear textures it makes over the output pool's memory with `nvnNativeImage*` and `nvnTextureInitializeFromNativeImage`.
+- **Fix:** `hle_codec_video.c` takes the SDK 22 forms and the native images (16 KB aligned, 64-byte stride); `hle_movie_av1.c` decodes on VideoToolbox, building the av1C record from the stream's sequence header. VideoToolbox's AV1 decoder is hardware only (M3 and A17 Pro and later). Elsewhere, for a stream VideoToolbox refuses, or with `DM_AV1_DAV1D=1`, dav1d decodes ([`dm/third_party/dav1d`](../../dm/third_party/dav1d/README.md), 1.5.4 with its arm64 assembly, built by `dm/host/Makefile` into `gen/dav1d/libdav1d.a`). Its planar pictures are handed over as NV12, 10- and 12-bit streams shifted to 8 bits. A stream with no colour matrix is taken as BT.601 below 720 lines and BT.709 from there, as VideoToolbox does. Pictures cannot be left black instead: the game's movie module aborts on a decoder that does not initialize (`movie::detail::InitializeDecoderByTransferMemory`, `subsdk2+0xf9b4` in Fire Emblem Fortune's Weave).
+- **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_codec_video` (AddressSanitizer and UBSan), which covers the AV1 and SDK 22 forms, native images and the av1C record, and decodes a 64x64 AV1 key frame (SVT-AV1) on each backend the Mac has, read back as NV12.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): 82 movies in WebM at 2560x1440; the opening's 3,301 pictures play. On #957's branch, VideoToolbox and dav1d gave the same pictures, bit for bit, over the opening's first 600 (about 450 pictures a second each on an M3 Pro), and a tester's M1 Pro played the first two movies through dav1d, smooth and in sync ([seedds/nxnative#927](https://github.com/seedds/nxnative/issues/927)).
+
+### SDK 19's decoder forms
+
+- **Symptom:** an abort in `nn::codec` (the SDK's own decoder client, which opens a service the host does not have) when a movie starts in a game built with SDK 19 for the Switch 2.
+- **Cause:** SDK 19 names three calls differently from SDK 20 and 22. Initialize by remote memory takes two sizes before the picture size (`…DecoderEPNS0_14Vp9DecoderTypeEmmttj…`). The output buffer properties take a `nn::movie::ColorSpace*` before the time, nine arguments with the index in the first stack slot. The preference has a second form, `nn::codec::sdk::MakeDecodeImagePreferenceForCompat` (fewer output formats, `sdk+0x2c6040`), which the game chooses per decoder (`main+0x19e7860`).
+- **Fix:** `hle_codec_video.c` takes them for VP9, VP8, AV1 and H.264 into the same host decoder. The colour space is written as 0: the 32-bit value the SDK fills in from the service. The game does not read it near either call (`main+0x19e63d4`, `+0x19e702c`), and it converts the NV12 pictures it reads itself.
+- **Check:** `t_codec_video` initializes a VP9 decoder by SDK 19's remote memory form and reads a picture's properties through the nine-argument form.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md)'s base game (SDK 19.3.3 Ounce; its movie player is in `main`), from its imports: the Mushroom Cup's opening (VP9, 2560x1440) decodes with them.
 
 ## Movie players
 

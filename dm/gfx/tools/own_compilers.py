@@ -21,7 +21,7 @@ def metal_version(sdk):   # as tool_lock.tools_now records it: the first line of
     r = subprocess.run(['xcrun', '-sdk', sdk, 'metal', '--version'], capture_output=True, text=True)
     return (r.stdout.splitlines() or ['missing'])[0]
 
-def selected_xcode():   # ' (selected: Xcode 27.2 in /Applications/Xcode.app/Contents/Developer)', '' when it cannot be read; both tools follow DEVELOPER_DIR as xcrun does
+def selected_xcode():   # ' (selected: Xcode 27.3 in /Applications/Xcode.app/Contents/Developer)', '' when it cannot be read; both tools follow DEVELOPER_DIR as xcrun does
     try:
         dev = subprocess.run(['xcode-select', '-p'], capture_output=True, text=True).stdout.strip()
         ver = (subprocess.run(['xcodebuild', '-version'], capture_output=True, text=True).stdout.splitlines() or [''])[0]

@@ -144,7 +144,7 @@ class Image:
             self.fingerprints[start] = hashlib.sha256(json.dumps([body, refs], separators=(',', ':')).encode()).hexdigest()
         return self.fingerprints[start]
 
-    def recipe(self, offset, old, new, name):
+    def recipe(self, offset, old, new, name) -> dict:
         """Prepare a rule from a reviewed cut; the caller must validate another build."""
         starts = [s for s, e in self.functions.items() if s <= offset and offset + len(bytes.fromhex(old)) <= e]
         if len(starts) != 1: raise MatchError('cut must belong to exactly one complete unwind function')

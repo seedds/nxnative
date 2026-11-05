@@ -1172,9 +1172,10 @@ NVN(nvnCommandBufferDrawArrays, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, 
 // issues a Metal indirect draw from the pool buffer instead of reading it at record or replay time (nvn_mtl.m draw)
 // NVN2 mesh shading: count task workgroups from first, or mesh workgroups in a program with no task shader (nvn_geometry.inc mesh_tasks_draw)
 NVN_NOPROTO(nvnCommandBufferDrawMeshTasks, void, NVNcommandBuffer *c, int first, int count) { rec_draw(c, (p_draw){DM_PRIM_MESH_TASKS, first, count, 1, 0, 0}); }
-// DrawMeshTasksIndirect: as DrawMeshTasks, with the workgroup count and the first workgroup in a record at ind that GPU culling usually writes earlier in the frame. The hardware runs it as an
-// indirect DrawArrays under its mesh control (Eden's NX2 notes, row 89: the draw's vertex count is the workgroup count), so the record has DrawArraysIndirect's layout {count, instances,
-// first, base instance}. PRAGMATA draws its whole 3D scene this way and no direct mesh draw at all; Ocarina of Time's culling writes zeros at record time (nvn_geometry.inc mti_run converts the record on the GPU)
+// DrawMeshTasksIndirect: as DrawMeshTasks, with a record at ind that GPU culling usually writes earlier in the frame. It was read as DrawArraysIndirect's {count, instances, first,
+// base instance} (Eden's NX2 notes, row 89: the draw's vertex count is the workgroup count), which took PRAGMATA's {c, 1, 1} records as first = 1 and drew its cluster lists one
+// slot late (the title terrain flicker). The host now reads each record type it has proven ({c, 1, 1}, {c, 0, 1}: c workgroups from 0) and keeps the old reading for the others
+// (nvn_geometry.inc mti_run, DM_NVN_MESH_INDIRECT). PRAGMATA draws its whole 3D scene this way and no direct mesh draw at all; Ocarina of Time's culling writes zeros at record time
 NVN_NOPROTO(nvnCommandBufferDrawMeshTasksIndirect, void, NVNcommandBuffer *c, NVNbufferAddress ind) { rec_draw(c, (p_draw){DM_PRIM_MESH_TASKS, 0, 0, 1, 0, ind}); }
 // Variable rate shading: the image, its palettes and their mode ask the hardware to shade some tiles at a coarser rate. Metal's render passes have no per-tile rate (a rasterization rate
 // map resamples the whole target), and shading every pixel is the most a rate can ask, so these change no result but its sharpness: nothing is recorded

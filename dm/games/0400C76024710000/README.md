@@ -46,7 +46,7 @@ Through `DM_CTL`, silent (`DM_AUDIO=0`) and with `DM_FOCUS_KEEP=1`: press `A` ab
 
 - [SDF definitions in RE Engine PAKs](../../../docs/reference/shaders.md#sdf-definitions-in-re-engine-paks): KPKA 4.2 and the Switch 2 SDF form.
 - [Colour management shaders in RE Engine OCIO resources](../../../docs/reference/shaders.md#colour-management-shaders-in-re-engine-ocio-resources): every frame black under the UI.
-- [Indirect mesh draws (`DrawMeshTasksIndirect`)](../../../docs/reference/rendering.md#indirect-mesh-draws-drawmeshtasksindirect): no 3D at all.
+- [Indirect mesh draws (`DrawMeshTasksIndirect`)](../../../docs/reference/rendering.md#indirect-mesh-draws-drawmeshtasksindirect): no 3D at all, then the title's moon terrain flicker (the record read per type).
 - [Mesh shaders compiled for the hull slot read the hull stage's storage buffer table](../../../docs/reference/shaders.md#mesh-shaders-compiled-for-the-hull-slot-read-the-hull-stages-storage-buffer-table).
 - [Mesh shader per-primitive system values: the primitive count overwritten, the primitive id lost](../../../docs/reference/shaders.md#mesh-shader-per-primitive-system-values-the-primitive-count-overwritten-the-primitive-id-lost): the terrain drew nothing, then shaded from the wrong clusters.
 - [NVN2 push constants: the block word picks the block](../../../docs/reference/nvn-objects.md#nvn2-push-constants-the-block-word-picks-the-block): buffers on the dummy, a GPU memset into another shader's buffer.

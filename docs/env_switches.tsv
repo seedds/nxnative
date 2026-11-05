@@ -177,7 +177,7 @@ DM_NVN_LOADPROBE	diagnostic	`=1`, `2` or `3`: attachments whose load is skipped 
 DM_NVN_LOG	diagnostic	`=1` logs the creation of NVN objects
 DM_NVN_MAGSCAN	diagnostic	`=<fs key>[:every[:phase]]`: device self-check that reads each pass's colour attachments every `every` frames (default 30) and logs `[mag]` lines for solid magenta 16×16 blocks or non-finite pixels
 DM_NVN_MESHLOG	diagnostic	`=<n>` logs the first n DrawMeshTasksIndirect records and their conversions once the GPU has run them
-DM_NVN_MESH_INDIRECT	switch	`0` drops DrawMeshTasksIndirect, as before; `nv` reads the records as {count, first}; unset or `1` reads NVN2's {count, instances, first, base instance} records, converted on the GPU before the pass
+DM_NVN_MESH_INDIRECT	switch	DrawMeshTasksIndirect's record reading: unset, `1` or `auto` per record type: {c, 1, 1} and {c, 0, 1} (PRAGMATA's title and near-scene records, proven) as c workgroups from 0, any other record as {count, instances, first, base instance} (first = word 2), each type logged once as `[RED] DrawMeshTasksIndirect record type`; `draw` that old reading for every record; `nv` the {count, first} layout of VkDrawMeshTasksIndirectCommandNV; `0` drops these draws
 DM_NVN_MESH_INDIRECT_CAP	switch	`=<n>`: a DrawMeshTasksIndirect record with more workgroups than n draws nothing (default 2^20)
 DM_NVN_NO_ARGREUSE	diagnostic	`1`: every draw encodes its argument tables again instead of reusing the previous draw's when its bindings are unchanged (an A/B for flicker that the reuse could cause)
 DM_NVN_PASSDUMP	diagnostic	`=<f>`, `<f1>-<f2>` or `every:<n>`: logs every render pass of those frames (attachments, clears, shader keys, bindings, draw state, presents) for the `tbdr_*.py` tools

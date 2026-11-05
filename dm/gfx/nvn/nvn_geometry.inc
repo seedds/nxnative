@@ -602,19 +602,28 @@ static void mtk_encode(id<MTLRenderCommandEncoder> en_) {
     else [en drawMeshThreadgroups:MTLSizeMake(g_mtk.count, 1, 1) threadsPerObjectThreadgroup:to threadsPerMeshThreadgroup:tm];
 }
 // ---------- DrawMeshTasksIndirect ----------
-// The record {count, instances, first, base instance} is written by GPU culling earlier in the frame, and Metal's indirect mesh draw reads {x, y, z} threadgroups, so a compute pass
-// converts each record in the frame arena before the render pass, as ixc_run does for quads and fans: {first, 0, 0, 0} (the mesh stage's buffer DMSH_MESH_FIRST_SLOT), then {count, 1, 1}
-// 16 bytes on. The first such draw converts itself and every DrawMeshTasksIndirect after it up to the next buffer write outside a render pass, so only a draw met inside an open render pass
-// with no conversion yet splits that pass. A mesh draw's own storage writes do not make the conversions stale (the culling that writes the records is compute).
-// DM_NVN_MESH_INDIRECT: unset or 1 this layout; nv the {count, first} layout of VkDrawMeshTasksIndirectCommandNV; 0 drops these draws (as before). DM_NVN_MESH_INDIRECT_CAP: a record
-// with more workgroups draws nothing (default 2^20). DM_NVN_MESHLOG=<n>: logs the first n records and their conversions once the GPU has run them
+// The record is written by GPU culling earlier in the frame, and Metal's indirect mesh draw reads {x, y, z} threadgroups, so a compute pass converts each record in the frame arena before
+// the render pass, as ixc_run does for quads and fans: {first, w1, w2, w3} (the mesh stage's buffer DMSH_MESH_FIRST_SLOT), then {count, 1, 1} 16 bytes on. The first such draw converts
+// itself and every DrawMeshTasksIndirect after it up to the next buffer write outside a render pass, so only a draw met inside an open render pass with no conversion yet splits that pass.
+// A mesh draw's own storage writes do not make the conversions stale (the culling that writes the records is compute).
+// The reading of a record, per type (auto, the default): PRAGMATA's culling writes {c, 1, 1} (the title terrain) and {c, 0, 1} (the near scenes); read as DrawArraysIndirect's
+// {count, instances, first, base instance}, word 2 = 1 became first = 1, and the terrain mesh shader 5aab38bb, which reads its cluster list at list base + workgroup number, drew
+// slots 1..c instead of 0..c-1: every frame the cluster in slot 0 (a different one each frame, the list comes from a persistent queue) was not drawn and the last workgroup read one
+// slot past the list, a stale entry. The title's lunar terrain flickered (16 of 46 frames with a cluster-sized hole; 0 of 46 read from 0). Those two types are c workgroups from 0.
+// The third type its record filler writes, {c, 4, 1, 1}, keeps the old reading: read from 0 too, the New Game opening broke (shards, a 20,855-workgroup software-rasterizer
+// dispatch, a GPU hang), so its meaning is open. Reading every record as a grid {x, y, z} lost the near-scene terrain ({c, 0, 1} is no workgroups). Each record type is logged once
+// ([RED] DrawMeshTasksIndirect record type) with the reading it got.
+// DM_NVN_MESH_INDIRECT: unset, 1 or auto this reading; draw the {count, instances, first, base instance} reading for every record (A/B); nv the {count, first} layout of
+// VkDrawMeshTasksIndirectCommandNV; 0 drops these draws. DM_NVN_MESH_INDIRECT_CAP: a record with more workgroups draws nothing (default 2^20). DM_NVN_MESHLOG=<n>: logs the first n
+// records and their conversions once the GPU has run them
 #define MTI_MAX 256
 typedef struct { uint64_t ind, args; } mti_ent;   // args 0: the record could not be converted
 static mti_ent g_mti[MTI_MAX]; static int g_mti_n; static uint64_t g_mti_epoch, g_mti_sub, g_mti_runs, g_mti_splits, g_mti_draws;
-static int mti_mode(void) {   // 0 off, 1 {count, first}, 2 {count, instances, first, base instance}
+static int mti_mode(void) {   // 0 off, 1 {count, first}, 2 {count, instances, first, base instance}, 5 auto (per record type)
     static int v = -1;
-    if (v < 0) { const char *e = getenv("DM_NVN_MESH_INDIRECT"); v = !e || !*e || !strcmp(e, "1") ? 2 : !strcmp(e, "nv") ? 1 : 0;
-        MLOG("DrawMeshTasksIndirect: %s (DM_NVN_MESH_INDIRECT=%s)", v == 2 ? "records {count, instances, first, base instance} converted on the GPU" : v == 1 ? "records {count, first} converted on the GPU" : "draws dropped", e ? e : "unset"); }
+    if (v < 0) { const char *e = getenv("DM_NVN_MESH_INDIRECT"); v = !e || !*e || !strcmp(e, "1") || !strcmp(e, "auto") ? 5 : !strcmp(e, "draw") ? 2 : !strcmp(e, "nv") ? 1 : 0;
+        MLOG("DrawMeshTasksIndirect: %s (DM_NVN_MESH_INDIRECT=%s)", v == 5 ? "records {c, 1, 1} / {c, 0, 1} as c workgroups from 0, any other record as {count, instances, first, base instance} (auto), converted on the GPU"
+             : v == 2 ? "records {count, instances, first, base instance} converted on the GPU" : v == 1 ? "records {count, first} converted on the GPU" : "draws dropped", e ? e : "unset"); }
     return v;
 }
 static const mti_ent *mti_find(uint64_t ind) {
@@ -648,7 +657,7 @@ static void mti_run(uint64_t ind) {
     typedef struct { uint64_t rec, out; uint32_t first_word, cap; } mjob;
     id<MTLBuffer> ab; size_t ao = arena_alloc((size_t)n * (32 + sizeof(mjob)), &ab); uint64_t ag = ab.gpuAddress + ao;   // n converted records (32 bytes apart), then the jobs
     mjob *mj = (mjob *)((uint8_t *)ab.contents + ao + (size_t)n * 32);
-    uint32_t fw = mti_mode() == 1 ? 1 : 2;
+    uint32_t fw = mti_mode() == 1 ? 1 : mti_mode() == 2 ? 2 : 0xfffffffdu;
     for (int i = 0; i < n; i++) {
         mti_ent *e = &g_mti[n0 + i]; void *mb; uint64_t mo, rec; e->args = 0;
         if (!mtl_gpu_addr(e->ind, fw == 1 ? 8 : 16, &mb, &mo, &rec)) { RED_ONCE(156, "DrawMeshTasksIndirect skipped: record address %#llx is in no memory pool", (unsigned long long)e->ind); continue; }
@@ -669,6 +678,18 @@ static void mti_run(uint64_t ind) {
         uint32_t e0 = src[0], e1 = src[1], e2 = src[2], e3 = src[3];   // the record as the CPU sees it now: last frame's GPU values, if the same address is reused
         [g_commit_blocks addObject:^{ (void)keep; MLOG("DrawMeshTasksIndirect frame %llu pass %llu record %#llx: %u %u %u %u (at encode %u %u %u %u) → first %u, groups %u x %u x %u (raw count %u)",
             fr, pass, rid, src[0], src[1], src[2], src[3], e0, e1, e2, e3, arg[0], arg[4], arg[5], arg[6], arg[7]); }]; }
+    static int types_full; if (mti_mode() == 5 && !types_full) {   // auto: each record type (words 1-3 at GPU time, of a non-empty record) once, with the reading it got
+        id<MTLBuffer> keep = ab; const uint8_t *base = (const uint8_t *)ab.contents + ao; unsigned long long fr = (unsigned long long)atomic_load(&g_cur_frame); int cnt = n;
+        uint64_t *inds = malloc((size_t)n * sizeof *inds); if (inds) for (int i = 0; i < n; i++) inds[i] = g_mti[n0 + i].args ? g_mti[n0 + i].ind : 0;
+        if (inds) [g_commit_blocks addObject:^{ (void)keep;
+            static uint32_t seen[32][3]; static int ns; static os_unfair_lock sl = OS_UNFAIR_LOCK_INIT; os_unfair_lock_lock(&sl);
+            for (int i = 0; i < cnt; i++) { if (!inds[i]) continue; const uint32_t *arg = (const uint32_t *)(base + 32 * (size_t)i); if (!arg[7]) continue;
+                int q = 0; for (; q < ns; q++) if (seen[q][0] == arg[1] && seen[q][1] == arg[2] && seen[q][2] == arg[3]) break;
+                if (q < ns) continue; if (ns == 32) { types_full = 1; break; }
+                seen[ns][0] = arg[1]; seen[ns][1] = arg[2]; seen[ns][2] = arg[3]; ns++;
+                MLOG("[RED] DrawMeshTasksIndirect record type {c, %u, %u, %u} (first seen frame %llu at %#llx, c = %u): %s", arg[1], arg[2], arg[3], fr, (unsigned long long)inds[i], arg[7],
+                     arg[0] == 0 ? "c workgroups from 0" : "the old reading, first = word 2"); }
+            os_unfair_lock_unlock(&sl); free(inds); }]; }
 }
 // DrawMeshTasksIndirect: the record is converted on the GPU before the render pass (mti_run), for every such draw up to the next write. Reading the record on the CPU instead took a wait for
 // the GPU at each hazard: 73 % of the submit thread in Ocarina of Time's Kokiri Forest, frames of 90 ms and more against 25 ms of GPU work

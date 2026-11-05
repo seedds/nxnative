@@ -1079,6 +1079,15 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
 
+### Comparisons with .FTZ
+
+- **Symptom:** single bright dots at thin far geometry (railings, track edges), changing frame to frame as the camera moves, already in the lit picture before anti-aliasing. Most of them come from another cause (below).
+- **Cause:** a float comparison has an .FTZ flag (Ampere: FSET and FSETP bit 80, after the comparison at 76..80; Maxwell: FSETP bit 47, FSET bit 55, FCMP bit 47): on NVIDIA a denormal operand compares as zero. The translator decoded it and dropped it, and Apple's GPUs keep fp32 denormals. A guard like `sum != 0` before `1 / sum` then lets a denormal sum through: its reciprocal overflows, the products give NaN, and a `min(x, 1.0)` (`precise::`, see [min, max and clamp with a NaN operand](#min-max-and-clamp-with-a-nan-operand)) turns it into 1.0, a fully lit pixel.
+- **Fix:** a comparison flushes each operand where the flag is set: `|x| < FLT_MIN ? 0 : x` (`FlushDenormal`, `InstEmitAluHelper.cs`, from `AFset` / `AFsetp` and from Maxwell's `EmitFset`, `EmitFsetp` and `EmitFcmp`, which flushes only the source it compares). An immediate or RZ needs no code.
+- **Limit:** only the comparisons. The compilers set .FTZ on nearly every float instruction of every shader, so it is in effect a mode of the whole shader, and Metal has none (`MTLCompileOptions` has math modes, no denormal control). Flushing the arithmetic would be about 3.3 million more sites in Mario Kart World, so its FADD, FMUL and FFMA keep denormals. Four denormal weights can still add up to a normal sum, which NVIDIA sees as zero; it stays finite, so it makes no NaN.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): its deferred lighting `635061c90d75a8d1` normalises four depth-weighted half-resolution samples by `1 / sum` only where `FSETP.NEU.FTZ` says the sum is not zero. No Switch 1 game has shown the symptom; Maxwell's comparisons follow for the same semantics (the flag is on all of them in the 8 Switch 1 games counted).
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`CompareFtz`, on the game's encoding) and `test_dmsh_maxwell_ftz.py`.
+
 ### Barrier moves around warp shuffles
 
 - **Symptom:** `Ampere instruction f55 at 0x… (000fe20000000000000000001a0f7f55) is not implemented` in the shader build; those shaders are left out.

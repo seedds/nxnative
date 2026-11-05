@@ -328,7 +328,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 throw AFail(context, "I2F size");
             }
 
-            int select = x.Bits(60, 62);
+            // In the immediate form (4) bits 32..63 are the immediate itself, so 60..62 are its top bits, not a select: nvdisasm reads 000e620000200c00fffffffe000f7906 as
+            // I2F.F16 R15, -0x2 (PRAGMATA 0cea2c520ed3ab04, b1b18486119a5612, f7d2cce8f20873c3), and an immediate with a narrow source size is an illegal encoding
+            int select = x.Form == 4 ? 0 : x.Bits(60, 62);
 
             if (select != 0 && srcSize == 2)
             {

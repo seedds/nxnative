@@ -67,8 +67,7 @@ DM_GUEST_FILE_CHUNK	switch	`=<size>` (whole MB, K / M / G; default 1G, at least 
 DM_GUEST_FILE_DIR	path	Folder for `DM_GUEST_FILE`'s files (default the user's temporary folder; the iOS app sets it to `NSTemporaryDirectory()`)
 DM_GUEST_FILE_MIN_FREE	switch	`=<size>` (whole MB, K / M / G; default 5G, `0` never): with `DM_GUEST_FILE=1`, the game is stopped (exit code 87) when the guest files' disk has less free space than that
 DM_GUEST_SPAWN_TEST	diagnostic	`=1` runs a self-test before `nnMain`: a host-started guest thread does SDK malloc / free and locks an `nn::os` mutex, and the result is logged; `=2` also keeps a resident thread
-DM_HDR	player	`1` turns on HDR output for Switch 2 games (the Mac and iOS settings row; any non-zero value; `0` or unset is SDR). The status query answers HDR, so the game makes its RGB10A2 PQ window, and the layer is extended-range BT.2020. Measured on Donkey Kong Bananza, and on Mario Kart World to its title.
-DM_HDR_FMT	diagnostic	`=<n>` (decimal) the HDR output format that `DM_HDR` reports (a guess: default 1; other values are untested)
+DM_HDR	player	`1` turns on HDR output for Switch 2 games (the Mac and iOS settings row; any non-zero value; `0` or unset is SDR). While the window's screen can show EDR, the status query answers HDR, so the game makes its RGB10A2 PQ window; on a screen without EDR it answers SDR. The layer is extended-range BT.2020 either way. Measured on Donkey Kong Bananza, and on Mario Kart World to its title.
 DM_HDR_PAPER_WHITE	diagnostic	`=<nits>` the paper white: the answer to `vi::QueryDisplayHdrPaperWhite` while HDR is on, and the level a PQ window's SDR white decodes to in the HDR layer (1 to 65535, read once; default 203)
 DM_HDR_PEAK	diagnostic	`=<n>` the peak that `DM_HDR` reports (decimal, 16-bit; default 1000, the extended luminance range the game declares)
 DM_HID_LOG	diagnostic	`1` logs the HID button usage number of each button pressed on a raw HID gamepad (`pad_hid_mac.h`), to write a `DM_HID_MAP`
@@ -243,6 +242,7 @@ DM_PRESENT_HZ	switch	`=<N>`: the frequency of presentation pacing (default 60); 
 DM_PRESENT_INTERVAL	switch	`display` presents one frame per display-link tick whatever interval the game sets; `game` follows the game's present interval (default: the profile's `present_interval`)
 DM_PRESENT_LATENCY	switch	`=1` or `2`: overrides the display link's preferred frame latency for every screen and window mode; larger positive values use 2 (default 2 in variable-refresh fullscreen, 1 otherwise)
 DM_PRESENT_LINK	switch	Present pacing: `0` acquires the drawable itself, `1` (the default) presents on a 60 Hz display link, `2` uses a 120 Hz display link with a frame every other tick
+DM_PRESENT_SHOWN	diagnostic	`1` logs, every 300 frames, how long the system took to put frames on screen (the drawable's presented time): from the present call and from the display-link tick it was meant for, p50, p90 and max, with the frames it dropped and whether the layer has EDR metadata
 DM_PRESENT_SNAP	player	`=<n>`: present snapshots, a ring of n host textures (2 to 4; `1` = 2) the presents are copied to so the game's swapchain texture is free at once; `0` off (default: the profile's `present_snap`)
 DM_PRESENT_UPSCALE	player	`metalfx` scales a picture smaller than its rectangle on the screen through MetalFX's spatial scaler; `off` (the default) scales it bilinearly
 DM_PREV_PROGRAM	switch	What `oe::GetPreviousProgramIndex` answers (default -1, started from HOME); `oe::ExecuteProgram` sets it for the program it starts

@@ -31,14 +31,30 @@
 #include <sys/stat.h>
 
 static CAMetalLayer *g_layer;
-// The screen's current EDR headroom (NSScreen maximumExtendedDynamicRangeColorComponentValue, the current value; the potential one is only a ceiling): read four times a second
-// on the main thread while the HDR layer is on, and taken by the present (front_edr_headroom; nvn_mtl.m present_headroom). 1.0 without a headroom
-static _Atomic uint32_t g_edr_bits = 0x3f800000u;
-float front_edr_headroom(void) { uint32_t b = atomic_load(&g_edr_bits); float h; memcpy(&h, &b, sizeof h); return h; }
-static void front_edr_read(NSScreen *s) {
-    float h = (float)s.maximumExtendedDynamicRangeColorComponentValue;
-    if (!(h >= 1.0f)) h = 1.0f;
-    uint32_t b; memcpy(&b, &h, sizeof b); atomic_store(&g_edr_bits, b);
+// Whether the window's screen can show EDR at all (its potential headroom is above 1; hle_vi.c answers HDR only then): -1 until the first read, taken as yes.
+// Read four times a second on the main thread while the HDR layer is on, so it follows the window to another screen (an external SDR monitor beside the built-in XDR screen)
+static _Atomic int g_hdr_screen = -1;
+int front_hdr_screen(void) { return atomic_load(&g_hdr_screen) != 0; }
+static void front_hdr_screen_read(NSScreen *s) {
+    double pot = s.maximumPotentialExtendedDynamicRangeColorComponentValue;
+    int can = pot > 1.0;
+    if (atomic_exchange(&g_hdr_screen, can) != can) LOG("front end: the window's screen %s EDR (%s, potential headroom %.2f)", can ? "can show" : "cannot show", s.localizedName.UTF8String, pot);
+}
+// The HDR layer's HDR10 metadata (CAEDRMetadata): Core Animation maps the layer's extended range into the screen's current headroom by it. 1.0 in the layer is the paper white
+// (opticalOutputScale), the range is the one the game declares (0 to 1000 nits until it says, hle_vi.c front_hdr_content_range). Chosen over a roll-off of the host's own: on
+// Mario Kart World the two looked alike, reached the screen in the same time, and the system's follows brightness and the screen's modes as the rest of macOS does
+static int g_hdr_meta;   // the layer has the metadata (DM_HDR, and CAEDRMetadata is available)
+static _Atomic uint32_t g_hdr_range = 1000u << 16;   // the declared range: low nits in bits 0-15, high in 16-31
+static void front_hdr_metadata(void) {   // main thread
+    uint32_t r = atomic_load(&g_hdr_range);
+    g_layer.EDRMetadata = [CAEDRMetadata HDR10MetadataWithMinLuminance:(float)(r & 0xffff) maxLuminance:(float)(r >> 16) opticalOutputScale:dm_hdr_paper_white()];
+}
+void front_hdr_content_range(unsigned lo, unsigned hi) {
+    if (!g_hdr_meta || hi <= lo || hi > 65535) return;
+    uint32_t r = lo | hi << 16;
+    if (atomic_exchange(&g_hdr_range, r) == r) return;
+    LOG("front end: HDR10 metadata: the game's range %u..%u nits", lo, hi);
+    dispatch_async(dispatch_get_main_queue(), ^{ front_hdr_metadata(); });
 }
 static uint64_t g_btn;
 static int g_w, g_a, g_s, g_d;
@@ -1345,16 +1361,19 @@ void front_run(void (*guest)(void)) {
         g_layer.device = MTLCreateSystemDefaultDevice();
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
         // DM_HDR=1 (the HDR mode): an extended-range layer whatever the window's screen. The layer is BT.2020 (the game's HDR10 is BT.2020 with PQ;
-        // SDR content is converted from BT.709 in present.metal), in linear light (present.metal fs_linear). Values above 1.0 roll off into the screen's current headroom (front_edr_read);
-        // a screen without headroom gives the SDR picture: the largest channel of a highlight goes to SDR white
+        // SDR content is converted from BT.709 in present.metal), in linear light (present.metal fs_linear), with HDR10 metadata: Core Animation maps the values above 1.0
+        // into the screen's headroom, and a screen without headroom shows the SDR range
         if (getenv("DM_HDR") && atoi(getenv("DM_HDR"))) {
             g_layer.pixelFormat = MTLPixelFormatRGBA16Float;
             CGColorSpaceRef ecs = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearITUR_2020);
             g_layer.colorspace = ecs; CGColorSpaceRelease(ecs);
             g_layer.wantsExtendedDynamicRangeContent = YES;
-            LOG("front end: HDR output on (DM_HDR): the window's layer is RGBA16Float in extended linear BT.2020; the screen's headroom %.2f now, at most %.2f", (win.screen ?: NSScreen.mainScreen).maximumExtendedDynamicRangeColorComponentValue, (win.screen ?: NSScreen.mainScreen).maximumPotentialExtendedDynamicRangeColorComponentValue);
-            front_edr_read(win.screen ?: NSScreen.mainScreen);
-            [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) { (void)t; front_edr_read(win.screen ?: NSScreen.mainScreen); }];
+            if (CAEDRMetadata.available) { g_hdr_meta = 1; front_hdr_metadata(); }
+            else LOG("[RED] front end: no EDR metadata on this Mac (CAEDRMetadata): values above the screen's headroom clip");
+            LOG("front end: HDR output on (DM_HDR): the window's layer is RGBA16Float in extended linear BT.2020%s; the screen's headroom %.2f now, at most %.2f", g_hdr_meta ? ", with HDR10 metadata" : "",
+                (win.screen ?: NSScreen.mainScreen).maximumExtendedDynamicRangeColorComponentValue, (win.screen ?: NSScreen.mainScreen).maximumPotentialExtendedDynamicRangeColorComponentValue);
+            front_hdr_screen_read(win.screen ?: NSScreen.mainScreen);
+            [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) { (void)t; front_hdr_screen_read(win.screen ?: NSScreen.mainScreen); }];
         }
         g_layer.contentsScale = win.backingScaleFactor;
         // Apple's HUD over the game (frame rate, frame and GPU time, memory): front_hud_env turns it on before the first device. The layer's developerHUDProperties

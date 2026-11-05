@@ -81,7 +81,11 @@ Resolved on the base game, on chain `d5fe9ae8bfba` (M6, 16 GB, another session's
 With the HDR output setting (`DM_HDR=1`), on the base game to the title screen on the Mac:
 
 - Like [Donkey Kong Bananza](../040074A01BF12000/README.md#hdr-output), the game boots an RGBA8 window (format 0x25), queries `vi::QueryDisplayHdrStatus`, then makes an RGB10A2 window (0x3d). It declares the same luminance ranges, SDR 0 to 203 nits and extended 0 to 1000, and sets no content gamut before the title.
-- The present decodes the window as PQ. A screenshot through `DM_NVN_SHOT_OUT` (decoded to SDR) shows the title with its colours and crop, and highlights above SDR white clipped, as SDR has no room for them. No new `[RED]` line with it on.
+- The present decodes the window as PQ. A screenshot through `DM_NVN_SHOT_OUT` (decoded to SDR) shows the title with its colours and crop. No new `[RED]` line with it on.
+- It asks for the HDR status every frame (over 1,000 queries in 80 s) and queries the paper white (203 nits). Its window moved to an SDR monitor (a Dell P3424WEB), the next query answered SDR and the game made its SDR window (0x25) again; moved back to the built-in screen, its HDR window (0x3d).
+- Its declared extended range is 0 to 1000 nits while it makes the HDR window, then 0 to 1801 at the title.
+- Brighter than SDR, by the game's own grade: its title logo, the same image in both modes, is about 1.8 times brighter in linear light and more saturated in the decoded screenshot. That fits its SDR colours taken as Display P3 and drawn near 360 nits.
+- The host's own highlight roll-off against Core Animation's mapping by the layer's HDR10 metadata, which replaced it ([the reference entry](../../../docs/reference/rendering.md#the-status-query-and-the-present-for-an-hdr-window)): side by side on the built-in screen they looked alike. In a window on the built-in screen of a MacBook Pro (M4 Pro, macOS 26.7.1), 80 s to the title each, `DM_PRESENT_SHOWN=1`. From the present call to on screen, p50 per 300 frames: SDR 49.58 to 49.68 ms, the host's roll-off 49.53 to 49.61, Core Animation 49.52 to 49.59. Every frame reached the display-link tick it was meant for (p50 within 0.03 ms), and each dropped 0 to 3 of 300 frames. The metadata adds no frame here.
 
 ## Driving it on the Mac
 
@@ -99,7 +103,7 @@ Update 1.8.0 (v917504, SDK 21.4.0) is not on this Mac. Pull request #1116 ported
 - **Mesh draws:** `DrawMeshTasks3D` and the indirect forms are not implemented; no run reached them.
 - `649e36162cad9e79`, a foliage shader with an 8x8 local size, keeps a first-invocation race: its setup loops over a uniform's count, so [the host cannot make it as stores](../../../docs/reference/shaders.md#a-store-only-a-dispatchs-first-invocation-makes). Its list's count read 0 in every one of 7,350 traced title frames, so the race had nothing to act on there; whether that list should be empty is not known.
 - The engine class screen offers 50, 100 and 150cc in this build.
-- **HDR:** only the title was run with HDR on. The window's primaries are taken to be BT.2020, as on Donkey Kong Bananza, but are not measured here, and the picture on an EDR screen has not been judged.
+- **HDR:** only the title was run with HDR on. The window's primaries are taken to be BT.2020, as on Donkey Kong Bananza, but are not measured here. On an EDR screen the picture looked slightly brighter than SDR (by eye, one MacBook Pro). Fullscreen is not timed.
 
 ## Found on this game
 

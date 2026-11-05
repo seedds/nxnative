@@ -47,6 +47,11 @@ uint64_t mtl_last_fence(void);                       // Fence value of the most 
 int mtl_wait(uint64_t fence, uint64_t timeout_ns);   // Returns 1 when the GPU has completed up to fence, 0 on timeout
 int mtl_wait_acq(uint64_t fence, uint64_t timeout_ns);   // the same for a sync WindowAcquireTexture handed out (its own line in the wait ledger, DM_NVN_WAITS)
 void mtl_finish(void);                               // Wait for all submitted commands to complete
+uint64_t mtl_done_fence(void);                       // the newest fence the GPU has completed (and its CPU-visible effects published)
+int64_t mtl_up_seq_now(void); int mtl_up_busy_through(int64_t seq);   // upload batches: the newest begun; one begun at or before seq still open or running
+void mtl_pool_update_begin(void); void mtl_pool_update_end(void);   // around a sparse run update (vrun_set): lookups and the pool table see it whole
+int mtl_pool_extend(const void *mem, uint64_t size);  // a large pool grown at its end keeps its entry and buffers (0: not a large pool, delete and add it)
+int mtl_sparse_safe(void);                           // DM_NVN_SPARSE_SAFE (default on): zero-copy ranges checked before IOGPU wires them; sparse pools keep pages under live buffers (hle_nvn.c vpool_map)
 void mtl_drain(void);                                // Wait for all commands on the queue (including presents) to complete: submit an empty command buffer and wait for it
 void mtl_xv_window_tex(uint64_t serial);   // Register a window (swapchain) texture: the cross-submit validity ledger never collects it
 // External producers (the Vulkan layer, dm/gfx/vk): the shared Metal device; a serial for one of their textures; present it once their event reaches ev_val (ticket for mtl_present_wait)

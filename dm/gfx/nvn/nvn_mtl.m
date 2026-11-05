@@ -236,6 +236,15 @@ enum { RS_SITES = 16 }; static struct { int line; uint64_t n, bytes; } g_rs_site
 #define res_add(r) res_add_at((r), __LINE__)
 // Both run on guest threads too (pool_res from mtl_addr, uploads), whose implicit autorelease pools never drain; containsObject: / removeObject: on a weak NSHashTable leave the object
 // autoreleased in the calling thread's pool (measured in a standalone test: the object outlived its last strong reference until the thread ended), so each has a pool of its own
+// The residency set's size against the Mac's memory (caller holds g_res_mu): every buffer in it is wired, and a set past what the kernel can wire makes IOGPU's descriptor prepare fail
+// (kIOReturnNoMemory). PRAGMATA's tower-ring hang ended in a kernel panic in IOGPUFamily on such a failure (PRAGMATA's note). A RED line each time the
+// set grows past another GB beyond half of the physical memory
+static int64_t g_res_bytes, g_res_bytes_peak;
+static void res_bytes_note(int64_t d) {
+    static uint64_t ram, next; if (!ram) { size_t l = sizeof ram; sysctlbyname("hw.memsize", &ram, &l, NULL, 0); next = ram / 2; }
+    g_res_bytes += d; if (g_res_bytes > g_res_bytes_peak) g_res_bytes_peak = g_res_bytes;
+    if (ram && (uint64_t)g_res_bytes > next) { MLOG("[RED] residency set: %lld MB wired-to-be, %.0f%% of the Mac's %llu MB (next line at +1 GB)", (long long)(g_res_bytes >> 20), 100.0 * (double)g_res_bytes / (double)ram, (unsigned long long)(ram >> 20)); next += 1ull << 30; }
+}
 static void res_add_at(id<MTLAllocation> allocation, int line) { @autoreleasepool {
     if (!allocation) return;
     // An indirectly addressed placed texture needs its heap resident. The heap owner below removes it only after the last texture/view has gone.
@@ -247,6 +256,7 @@ static void res_add_at(id<MTLAllocation> allocation, int line) { @autoreleasepoo
     [g_res addAllocation:(id<MTLAllocation>)r];
     [g_res_objects addObject:r];
     g_res_dirty = 1;
+    res_bytes_note((int64_t)r.allocatedSize);
     pthread_mutex_unlock(&g_res_mu);
 } }
 static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
@@ -256,7 +266,7 @@ static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
     if (![g_res_objects containsObject:r]) { pthread_mutex_unlock(&g_res_mu); return; }
     [g_res removeAllocation:(id<MTLAllocation>)r];
     [g_res_objects removeObject:r];
-    g_res_dirty = 1; g_rs_rm++;
+    g_res_dirty = 1; g_rs_rm++; res_bytes_note(-(int64_t)r.allocatedSize);
     pthread_mutex_unlock(&g_res_mu);
 } }
 @interface NvImageHeap : NSObject { @public id<MTLHeap> heap; } @end
@@ -294,8 +304,40 @@ static void res_check(id r, const char *what, int reg) {
         MLOG("[RED] missing residency #%d: %s slot %d %s %p (parent chain %d deep) allocated %lu B storage mode %lu%s", nbad, what, reg, is_tex ? "texture" : "buffer", (__bridge void *)a, hops, (unsigned long)a.allocatedSize, (unsigned long)a.storageMode,
              t ? [NSString stringWithFormat:@" format %lu %lux%lu type %lu usage %#lx", (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.textureType, (unsigned long)t.usage].UTF8String : ""); }
 }
+// DM_NVN_RES_LIMIT_MB (a test guard, off unless set; as #1319's): before a commit would make the residency set larger than that, report what it holds and end the process at once
+// (exit 72), committing nothing more: a set the kernel cannot wire made IOGPU's prepare fail (kIOReturnNoMemory) and the kernel panic in its error path (PRAGMATA, 24 GB Mac, 2026-11-05).
+// Ending without the commit is the safe side: work already submitted only uses what was committed before. Caller holds g_res_mu
+static void res_top(const char *why);
+// The machine's wired memory (host_statistics64: wire_count pages), what IOGPU's prepare runs out of; the residency set's own size counts pages twice where buffers overlap
+uint64_t sys_wired_bytes(void) {
+    vm_statistics64_data_t vs; mach_msg_type_number_t n = HOST_VM_INFO64_COUNT;
+    static mach_port_t host; if (!host) host = mach_host_self();
+    if (host_statistics64(host, HOST_VM_INFO64, (host_info64_t)&vs, &n) != KERN_SUCCESS) return 0;
+    return (uint64_t)vs.wire_count * (uint64_t)vm_kernel_page_size;
+}
+static uint64_t g_wired_peak;
+// DM_NVN_WIRED_LIMIT_MB (a test guard, off unless set): the same as DM_NVN_RES_LIMIT_MB below, on the machine's wired memory (checked at most every 20 ms before a commit)
+static void wired_limit_check(void) {
+    static long lim = -1; static uint64_t next; if (lim < 0) { const char *e = getenv("DM_NVN_WIRED_LIMIT_MB"); lim = e ? atol(e) : 0; if (lim > 0) MLOG("DM_NVN_WIRED_LIMIT_MB=%ld: the process ends before the Mac's wired memory grows past it (now %llu MB)", lim, (unsigned long long)(sys_wired_bytes() >> 20)); }
+    if (lim <= 0) return;
+    uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); if (now < next) return; next = now + 20000000ull;
+    uint64_t w = sys_wired_bytes(); if (w > g_wired_peak) g_wired_peak = w;
+    if ((w >> 20) <= (uint64_t)lim) return;
+    MLOG("[RED] the Mac's wired memory %llu MB passed DM_NVN_WIRED_LIMIT_MB=%ld (residency set %llu MB): ending the process before the commit (exit 73)", (unsigned long long)(w >> 20), lim, (unsigned long long)(g_res.allocatedSize >> 20));
+    pthread_mutex_unlock(&g_res_mu); res_top("[RED] wired limit"); fflush(stderr); fflush(stdout); _exit(73);
+}
+static void res_limit_check(void) {
+    wired_limit_check();
+    static long lim = -1; if (lim < 0) { const char *e = getenv("DM_NVN_RES_LIMIT_MB"); lim = e ? atol(e) : 0; if (lim > 0) MLOG("DM_NVN_RES_LIMIT_MB=%ld: the process ends before the residency set grows past it", lim); }
+    if (lim <= 0) return;
+    uint64_t mb = g_res.allocatedSize >> 20;
+    if (mb <= (uint64_t)lim) return;
+    MLOG("[RED] residency set %llu MB would pass DM_NVN_RES_LIMIT_MB=%ld: ending the process before the commit (exit 72)", (unsigned long long)mb, lim);
+    pthread_mutex_unlock(&g_res_mu); res_top("[RED] residency limit"); fflush(stderr); fflush(stdout); _exit(72);
+}
 static void res_commit(void) {
     pthread_mutex_lock(&g_res_mu);
+    if (g_res_dirty) res_limit_check();
     if (g_res_dirty) { uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); [g_res commit]; g_res_dirty = 0; g_rs_commits++; g_rs_commit_ns += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0; }
     pthread_mutex_unlock(&g_res_mu);
 }
@@ -340,7 +382,16 @@ void mtl_res_stats(char *out, size_t n) {
     pthread_mutex_unlock(&g_res_mu);
 }
 
-@interface NvDeferredRelease : NSObject { @public id object; uint64_t fence; int keep_resident; } @end
+// An upload batch (deswizzles and copies on its own command buffer) reads pool buffers it looked up (mtl_addr) without holding them, and it may be committed, and complete, after
+// the submission whose fence a retired object waits for: a PRAGMATA page fault at the tower ring was an upload command buffer's (kIOGPUCommandBufferCallbackErrorPageFault). A retired object
+// also waits for every upload batch begun before it was retired (slot busy from up_begin to its completion): up_batches_through(seq) = one of them is still open or running
+static unsigned g_up_seq; static _Atomic int g_up_alloc_busy[3]; static _Atomic int64_t g_up_slot_seq[3];
+int64_t mtl_up_seq_now(void) { return (int64_t)g_up_seq - 1; }   // the newest upload batch begun (-1: none); with mtl_up_busy_through for hle_nvn.c's deferred unmaps
+int mtl_up_busy_through(int64_t seq);
+static int up_batches_through(int64_t seq);
+int mtl_up_busy_through(int64_t seq) { return up_batches_through(seq); }
+static int up_batches_through(int64_t seq) { if (seq < 0) return 0; for (int k = 0; k < 3; k++) if (atomic_load(&g_up_alloc_busy[k]) && atomic_load(&g_up_slot_seq[k]) <= seq) return 1; return 0; }
+@interface NvDeferredRelease : NSObject { @public id object; uint64_t fence; int keep_resident; int64_t up_seq; } @end   // up_seq: the newest upload batch begun when it was retired (-1: none)
 @implementation NvDeferredRelease @end
 static NSMutableArray<NvDeferredRelease *> *g_deferred;
 static pthread_mutex_t g_deferred_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -351,7 +402,7 @@ static pthread_mutex_t g_deferred_mu = PTHREAD_MUTEX_INITIALIZER;
 // after the transparency chain's in-place composite swapped the storage of two textures, each of the two live textures was removed once this way, and afterwards they are used as attachments and sampled every frame as usual - the GPU accesses non-resident memory.
 static void defer_obj_release_ex(id obj, int keep_resident) {
     if (!obj) return;
-    NvDeferredRelease *d = [NvDeferredRelease new]; d->object = obj; d->fence = g_fence + 1; d->keep_resident = keep_resident;
+    NvDeferredRelease *d = [NvDeferredRelease new]; d->object = obj; d->fence = g_fence + 1; d->keep_resident = keep_resident; d->up_seq = (int64_t)g_up_seq - 1;
     pthread_mutex_lock(&g_deferred_mu);
     if (!g_deferred) g_deferred = [NSMutableArray array];
     [g_deferred addObject:d];
@@ -367,8 +418,8 @@ static void defer_drain(void) { @autoreleasepool {
     pthread_mutex_lock(&g_deferred_mu);
     // One pass that keeps the rest: removing each from the middle moved the whole tail, quadratic in the queue, which a scene load fills (PR 1444 saw minutes in memmove)
     uint64_t done = g_done; NSMutableArray<NvDeferredRelease *> *keep = nil;
-    for (NvDeferredRelease *d in g_deferred) if (d->fence <= done) { [ready addObject:d]; }
-    if (ready.count) { keep = [NSMutableArray arrayWithCapacity:g_deferred.count - ready.count]; for (NvDeferredRelease *d in g_deferred) if (d->fence > done) [keep addObject:d]; g_deferred = keep; }
+    for (NvDeferredRelease *d in g_deferred) if (d->fence <= done && !up_batches_through(d->up_seq)) { [ready addObject:d]; }
+    if (ready.count) { keep = [NSMutableArray arrayWithCapacity:g_deferred.count - ready.count]; for (NvDeferredRelease *d in g_deferred) if (!(d->fence <= done && !up_batches_through(d->up_seq))) [keep addObject:d]; g_deferred = keep; }
     pthread_mutex_unlock(&g_deferred_mu);
     for (NvDeferredRelease *d in ready) {
         id obj = d->object;
@@ -540,9 +591,9 @@ void mtl_init(void) {
     }
     g_ev = [g_dev newSharedEvent];
     g_keep = [NSMutableArray array];
-    g_nvn_deswz_gpu = nvn_deswz_gpu_init(g_dev) == 0;
+    { const char *e = getenv("DM_NVN_DESWZ_GPU"); g_nvn_deswz_gpu = (!e || atoi(e)) && nvn_deswz_gpu_init(g_dev) == 0; if (e && !atoi(e)) MLOG("DM_NVN_DESWZ_GPU=0: swizzled textures deswizzled on the CPU"); }   // 0: the CPU path for every upload (from #1319)
     dm_res_report_register(mtl_res_counts);
-    if (!g_nvn_deswz_gpu) MLOG("[RED] GPU deswizzle init failed; swizzled textures fall back to the CPU");
+    if (!g_nvn_deswz_gpu && !(getenv("DM_NVN_DESWZ_GPU") && !atoi(getenv("DM_NVN_DESWZ_GPU")))) MLOG("[RED] GPU deswizzle init failed; swizzled textures fall back to the CPU");
     MLOG("Metal device %s", g_dev.name.UTF8String);
     udc_selftest();
 }
@@ -623,9 +674,45 @@ static void pool_res(int i) {
 // pools' buffers do at shared pages; GPU addresses are not contiguous across them, so a lookup must say how far it reads. One that does not know (length 1: an indirect draw's index buffer, a raw storage
 // address) gets BIG_UNKNOWN past its address. Raw global memory, whose pool table the shader walks by itself, takes the whole pool: big_full
 enum { BIG_MIN = 512u << 20, BIG_S = 16u << 20, BIG_UNKNOWN = 64u << 20, BIG_MAX = 32 };
-typedef struct { uintptr_t lo, hi, a, b; const void *mem; int *chunk, full; NSMutableArray *old; } big_pool;   // chunk: stride → g_pools index + 1; full: the whole pool's entry + 1; old: buffers a longer chunk replaced, alive with the pool
+typedef struct { uintptr_t lo, hi, a, b; const void *mem; int *chunk, full; NSMutableArray *old; NSMutableArray *seg; uint64_t *segend; int nseg; } big_pool;   // seg: the pool table's own buffers over the pool, one per BIG_SEG (gmem_map_gpu, big_segments)   // chunk: stride → g_pools index + 1; full: the whole pool's entry + 1; old: buffers a longer chunk replaced, alive with the pool
 static big_pool g_big[BIG_MAX]; static int g_nbig;
 static int big_of(uint64_t addr) { for (int i = 0; i < g_nbig; i++) if (addr >= g_big[i].lo && addr < g_big[i].hi) return i; return -1; }
+// DM_NVN_SPARSE_SAFE (default on; 0 = off): never hand IOGPU a zero-copy range it cannot wire. PRAGMATA's tower-ring hang was a GPU page fault (BIF0, read) and one run ended in a
+// kernel panic inside IOGPUFamily's memory descriptor prepare (kIOReturnNoMemory, then a NULL dereference in the kernel). Every zero-copy buffer is made here: its pages are checked first
+// (mach VM regions): a range with a hole or a page that cannot be read is refused with a RED line instead of being passed to the kernel; pages the dirty tracker has write-protected are
+// made writable first through its host pre-write hook (they count as written, so what is uploaded from them is uploaded again). The sparse pools' side is in hle_nvn.c (vpool_map)
+int g_vp_safe_test_off;   // t_sparse_safe: the old behaviour, for its last case
+int mtl_sparse_safe(void) { static int v = -1; if (g_vp_safe_test_off) return 0; if (v < 0) { const char *e = getenv("DM_NVN_SPARSE_SAFE"); v = !e || strcmp(e, "0"); MLOG("DM_NVN_SPARSE_SAFE=%d: %s", v, v ? "zero-copy ranges are checked before IOGPU wires them; sparse unmaps keep their pages; mapping changes under pages the GPU may use wait for it" : "off (pages change under live buffers as before)"); } return v; }
+static _Atomic uint64_t g_nc_made, g_nc_refused, g_nc_unprot;
+static __thread int t_nc_refused;   // the last nocopy_buf refused the range (no retry helps)
+static int nocopy_check(uintptr_t a, uintptr_t b, const char *what) {   // 1: every page of [a, b) is mapped and readable
+    int ro = 0, bad = 0; char why[160] = "";
+    for (vm_address_t r = a; r < b && !bad; ) {
+        vm_address_t q = r; vm_size_t rs = 0; vm_region_basic_info_data_64_t vi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
+        if (vm_region_64(mach_task_self(), &q, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&vi, &cnt, &obj) != KERN_SUCCESS || q > r) { bad = 1; snprintf(why, sizeof why, "no mapping at %#lx", (unsigned long)r); break; }
+        if (!(vi.protection & VM_PROT_READ)) { bad = 1; snprintf(why, sizeof why, "%#lx+%#lx has protection %d", (unsigned long)q, (unsigned long)rs, vi.protection); break; }
+        if (!(vi.protection & VM_PROT_WRITE)) ro = 1;
+        r = q + rs;
+    }
+    if (bad) { static _Atomic int lines; atomic_fetch_add(&g_nc_refused, 1); if (atomic_fetch_add(&lines, 1) < 16) MLOG("[RED] zero-copy %s %#lx..%#lx refused (DM_NVN_SPARSE_SAFE): %s", what, (unsigned long)a, (unsigned long)b, why); return 0; }
+    if (ro) { dm_guest_write_prepare((void *)a, b - a); atomic_fetch_add(&g_nc_unprot, 1); }
+    return 1;
+}
+// Whether every page of [a, b) is mapped writable: a write-protected page is one the dirty tracking watches, and nocopy_check's dm_guest_write_prepare counts it as written
+static int range_writable(uintptr_t a, uintptr_t b) {
+    for (vm_address_t r = a; r < b; ) {
+        vm_address_t q = r; vm_size_t rs = 0; vm_region_basic_info_data_64_t vi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
+        if (vm_region_64(mach_task_self(), &q, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&vi, &cnt, &obj) != KERN_SUCCESS || q > r || !(vi.protection & VM_PROT_WRITE)) return 0;
+        r = q + rs;
+    }
+    return 1;
+}
+static id<MTLBuffer> nocopy_buf(uintptr_t a, uintptr_t b, const char *what) {
+    t_nc_refused = 0;
+    if (mtl_sparse_safe() && !nocopy_check(a, b, what)) { t_nc_refused = 1; return nil; }
+    atomic_fetch_add(&g_nc_made, 1);
+    return [g_dev newBufferWithBytesNoCopy:(void *)a length:b - a options:MTLResourceStorageModeShared deallocator:nil];
+}
 void mtl_pool_add(const void *mem, uint64_t size) {
     mtl_init(); g_reg_gen++;
     uintptr_t pg = (uintptr_t)getpagesize(), lo = (uintptr_t)mem, hi = lo + size;
@@ -633,17 +720,17 @@ void mtl_pool_add(const void *mem, uint64_t size) {
     static int chunks = -1; if (chunks < 0) { const char *e = getenv("DM_NVN_POOL_CHUNKS"); chunks = !e || atoi(e); }
     if (size >= BIG_MIN && chunks) {
         pthread_mutex_lock(&g_mu); int k = g_nbig < BIG_MAX ? g_nbig : -1;
-        if (k >= 0) { int *ch = calloc(((b - a) >> 24) + 1, sizeof *ch); if (!ch) MDIE("pool chunk table"); g_big[g_nbig++] = (big_pool){lo, hi, a, b, mem, ch, 0, [NSMutableArray array]};
+        if (k >= 0) { int *ch = calloc(((b - a) >> 24) + 1, sizeof *ch); if (!ch) MDIE("pool chunk table"); g_big[g_nbig++] = (big_pool){lo, hi, a, b, mem, ch, 0, [NSMutableArray array], [NSMutableArray array], NULL, 0};
             g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1); g_pool_adds++; atomic_fetch_add(&g_big_n, 1); }
         pthread_mutex_unlock(&g_mu);
         if (k >= 0) { static int nl; if (nl++ < 8) MLOG("memory pool %p+%llu MB: in chunks, wired as far as lookups reach", mem, (unsigned long long)(size >> 20)); return; }
     }
-    id<MTLBuffer> buf = [g_dev newBufferWithBytesNoCopy:(void *)a length:b - a options:MTLResourceStorageModeShared deallocator:nil];
+    id<MTLBuffer> buf = nocopy_buf(a, b, "pool");
     // Pokémon Legends: Z-A: twice on the Mac a small pool's buffer was refused although its pages were one read-write VM region, both times while another heavy job (a shader compile,
     // a second game instance) took the machine's memory; every run on an idle machine created all of them. Wiring the pages may fail under memory pressure: retry for up to about 2 s
-    for (int t = 0; !buf && t < 12; t++) {
+    for (int t = 0; !buf && !t_nc_refused && t < 12; t++) {
         usleep(10000u << (t < 4 ? t : 4));
-        buf = [g_dev newBufferWithBytesNoCopy:(void *)a length:b - a options:MTLResourceStorageModeShared deallocator:nil];
+        buf = nocopy_buf(a, b, "pool");
         if (buf) MLOG("[RED] memory pool %p+%#llx: the zero-copy buffer was refused, created at retry %d", mem, (unsigned long long)size, t + 1);
     }
     if (!buf) {   // say what the pages looked like: every VM region over the range, with its protection (an unmapped page in the range is the usual cause)
@@ -688,6 +775,8 @@ void mtl_pool_del(const void *mem) {
             i--; }
     if (bg >= 0) {
         for (id<MTLBuffer> b in g_big[bg].old) defer_obj_release(b);
+        for (id b in g_big[bg].seg) if (b != (id)[NSNull null]) defer_obj_release(b);
+        free(g_big[bg].segend);
         free(g_big[bg].chunk); g_big[bg] = g_big[--g_nbig]; g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1); atomic_fetch_sub(&g_big_n, 1);
     }
     }
@@ -705,7 +794,7 @@ static void pidx_sort(void) {
     qsort(g_pidx, (size_t)g_npool, sizeof *g_pidx, pidx_cmp); g_pidx_ok = 1;
 }
 static int big_new(big_pool *b, uintptr_t lo, uintptr_t hi, uintptr_t end, uint64_t unk) {   // caller holds g_mu: a new entry for [lo, end) of the pool, looked up for addresses in [lo, hi)
-    id<MTLBuffer> buf = [g_dev newBufferWithBytesNoCopy:(void *)lo length:end - lo options:MTLResourceStorageModeShared deallocator:nil];
+    id<MTLBuffer> buf = nocopy_buf(lo, end, "large-pool chunk");
     if (!buf) { MLOG("[RED] memory pool %p: the zero-copy buffer over %#lx..%#lx was refused", b->mem, (unsigned long)lo, (unsigned long)end); return -1; }
     if (g_npool == g_cap) { g_cap = g_cap ? g_cap * 2 : 64; g_pools = realloc_or_die(g_pools, g_cap * sizeof *g_pools, "the memory pool table"); }
     g_pidx_ok = 0; atomic_fetch_add(&g_pool_gen, 1);
@@ -714,6 +803,55 @@ static int big_new(big_pool *b, uintptr_t lo, uintptr_t hi, uintptr_t end, uint6
     return g_npool - 1;
 }
 // The entry of a large pool for [addr, addr + len): the chunk of its stride, made or lengthened to reach as far as asked; -1 past the pool's end
+static uint64_t g_pool_extends;   // mtl_pool_extend
+static uint64_t g_big_retired;   // large-pool chunk buffers retired: lengthened, or superseded by the whole-pool entry
+// Once a large pool has its whole-pool entry (gmem_map_gpu: the pool table reaches all of it), every lookup returns that entry (big_lookup), so its stride chunks are only extra
+// zero-copy buffers over the same pages, all still in the residency set: they go through deferred release. Caller holds g_mu
+static void big_drop_chunks(big_pool *b) {
+    int full = b->full - 1; if (full < 0) return;
+    for (int i = 0; i < g_npool; ) {
+        if (g_pools[i].key != b->mem || i == full) { i++; continue; }
+        id<MTLBuffer> ob = g_pools[i].buf; [g_keep removeObject:ob]; defer_obj_release(ob); if (g_pools[i].res) g_pool_res_n--; g_big_retired++;
+        g_pools[i] = g_pools[--g_npool]; g_pidx_ok = 0; g_plast = -1;
+        if (g_npool == full) full = i;   // the whole-pool entry moved into this place
+        if (i < g_npool) big_moved(i);
+    }
+    memset(b->chunk, 0, (((b->b - b->a) >> 24) + 1) * sizeof *b->chunk); b->full = full + 1;
+    for (id<MTLBuffer> o in b->old) defer_obj_release(o);
+    [b->old removeAllObjects];
+    atomic_fetch_add(&g_pool_gen, 1); g_reg_gen++;
+}
+// The pool table's view of a large pool: buffers of its own, one per BIG_SEG of the pool (each reaching BIG_SEG_PAD past its segment, so a vector read at the end stays inside), made
+// resident when the table is built, and kept when the pool grows at its end (mtl_pool_extend): only a new or lengthened last segment is made. It used to take one buffer over the whole pool
+// (big_new full): PRAGMATA's sparse run at 0x630000000 grows by every MapVirtual, its pool was deleted and added again each time, and every table rebuild made and wired a new ~950 MB
+// buffer over the same pages, 71 of them, 43 GB of residency in 300 frames (PRAGMATA). Caller holds g_mu
+enum { BIG_SEG = 64u << 20, BIG_SEG_PAD = 1u << 20 };
+static uint64_t g_big_seg_made;
+static void big_segments(big_pool *b) {
+    int need = (int)((b->b - b->a + BIG_SEG - 1) / BIG_SEG);
+    if (need > b->nseg) { b->segend = realloc_or_die(b->segend, (size_t)need * sizeof *b->segend, "the large-pool segment table"); for (int k = b->nseg; k < need; k++) { b->segend[k] = 0; [b->seg addObject:[NSNull null]]; } b->nseg = need; }
+    for (int k = 0; k < need; k++) {
+        uintptr_t lo = b->a + (uintptr_t)k * BIG_SEG, hi = MIN(lo + BIG_SEG, b->b), end = MIN(hi + BIG_SEG_PAD, b->b);
+        if (b->segend[k] >= end) continue;
+        id<MTLBuffer> nb = nocopy_buf(lo, end, "pool-table segment"); if (!nb) continue;
+        id ob = b->seg[(NSUInteger)k]; if (ob != (id)[NSNull null]) defer_obj_release(ob);
+        b->seg[(NSUInteger)k] = nb; b->segend[k] = end; res_add(nb); g_big_seg_made++;
+    }
+}
+// A large pool's storage grew at its end (a sparse run joined by the mapping after it): the pool keeps its entry, chunks and table segments; lookups and the table reach the new part.
+// Only for a large pool; 0 = not one (the caller deletes and adds it again)
+int mtl_pool_extend(const void *mem, uint64_t size) {
+    pthread_mutex_lock(&g_mu); int k = 0; for (; k < g_nbig; k++) if (g_big[k].mem == mem) break;
+    if (k == g_nbig || (uintptr_t)mem + size < g_big[k].hi) { pthread_mutex_unlock(&g_mu); return 0; }
+    big_pool *b = &g_big[k]; uintptr_t pg = (uintptr_t)getpagesize(), hi = (uintptr_t)mem + size, nb = (hi + pg - 1) & ~(pg - 1);
+    size_t on = ((b->b - b->a) >> 24) + 1, nn = ((nb - b->a) >> 24) + 1;
+    if (nn > on) { b->chunk = realloc_or_die(b->chunk, nn * sizeof *b->chunk, "pool chunk table"); memset(b->chunk + on, 0, (nn - on) * sizeof *b->chunk); }
+    b->hi = hi; b->b = nb;
+    if (b->full) { int f = b->full - 1; id<MTLBuffer> ob = g_pools[f].buf; [g_keep removeObject:ob]; defer_obj_release(ob); if (g_pools[f].res) g_pool_res_n--;   // an old whole-pool entry no longer covers it
+        g_pools[f] = g_pools[--g_npool]; if (f < g_npool) big_moved(f); b->full = 0; }
+    g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1); g_reg_gen++; g_pool_extends++;
+    pthread_mutex_unlock(&g_mu); return 1;
+}
 static int big_lookup(big_pool *b, uint64_t addr, uint64_t len) {
     if (addr + len > b->hi) return -1;
     if (b->full) return b->full - 1;
@@ -723,8 +861,9 @@ static int big_lookup(big_pool *b, uint64_t addr, uint64_t len) {
     uintptr_t have = i >= 0 ? g_pools[i].end : 0;
     if (i >= 0 && (have >= b->hi || have >= addr + want)) return i;
     int n = big_new(b, lo, lo + BIG_S, end, end >= b->b ? 1 : BIG_UNKNOWN); if (n < 0) return -1;
-    if (i >= 0) {   // lengthened: what is encoded with the shorter chunk keeps it, resident, until the pool goes
-        [b->old addObject:g_pools[i].buf]; [g_keep removeObject:g_pools[i].buf]; g_pools[n].res = 0; if (g_pools[i].res) g_pool_res_n--;
+    if (i >= 0) {   // lengthened: the shorter chunk goes through deferred release (out of the residency set once the work encoded with it has completed; argument blocks holding its
+        // address are rebuilt, g_reg_gen). It used to stay resident until the pool went: PRAGMATA's opening load stacked such buffers over the same pages (10.4 GB in the set)
+        id<MTLBuffer> ob = g_pools[i].buf; [g_keep removeObject:ob]; defer_obj_release(ob); g_reg_gen++; g_big_retired++; g_pools[n].res = 0; if (g_pools[i].res) g_pool_res_n--;
         g_pools[i] = g_pools[n]; g_npool--; n = i;
     }
     b->chunk[k] = n + 1;
@@ -777,16 +916,22 @@ static int run_lookup(uint64_t key, uint64_t addr, uint64_t len, void **buf, uin
     if (i < 0) { static int l; if (l++ < 8) MLOG("[RED] sparse pool run %#llx: no pool entry of its own holds %#llx+%#llx; looked up as before", (unsigned long long)key, (unsigned long long)addr, (unsigned long long)len); }
     return i >= 0;
 }
+// A sparse run's pool entries are replaced in steps (vrun_set: the old runs deleted, the merged run added, one pool generation each), and a lookup or a pool table built between
+// the steps saw the run missing: PRAGMATA's raw global-memory misses were all in a run whose entry had been added 30 ms after the dispatch's table was built (the table then had a hole).
+// vrun_set holds this across the whole update; the address lookups' slow path and the pool table's rebuild take it before g_mu, so they see the runs before or after, never between
+static pthread_mutex_t g_pool_upd_mu = PTHREAD_MUTEX_INITIALIZER;
+void mtl_pool_update_begin(void) { pthread_mutex_lock(&g_pool_upd_mu); }
+void mtl_pool_update_end(void) { pthread_mutex_unlock(&g_pool_upd_mu); }
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     uint64_t rk; addr = sparse_redirect(addr, &len, &rk);
     if (rk && run_lookup(rk, addr, len, buf, off, NULL)) return 1;
     const pc_ent *c = pc_get(addr, len);
     if (c) { *buf = (__bridge void *)c->buf; *off = addr - c->base; return 1; }
     int ok = 0;
-    pthread_mutex_lock(&g_mu);
+    pthread_mutex_lock(&g_pool_upd_mu); pthread_mutex_lock(&g_mu);
     int i = pool_find(addr, len);
     if (i >= 0) { pool_res(i); pc_put(i, addr); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; ok = 1; }
-    pthread_mutex_unlock(&g_mu);
+    pthread_mutex_unlock(&g_mu); pthread_mutex_unlock(&g_pool_upd_mu);
     return ok;
 }
 int mtl_gpu_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_t *gpu) {
@@ -795,10 +940,10 @@ int mtl_gpu_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_
     const pc_ent *c = pc_get(addr, len);
     if (c) { *buf = (__bridge void *)c->buf; *off = addr - c->base; *gpu = c->gpu + *off; return 1; }
     int ok = 0;
-    pthread_mutex_lock(&g_mu);
+    pthread_mutex_lock(&g_pool_upd_mu); pthread_mutex_lock(&g_mu);
     int i = pool_find(addr, len);
     if (i >= 0) { pool_res(i); pc_put(i, addr); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; *gpu = g_pools[i].gpu + *off; ok = 1; }
-    pthread_mutex_unlock(&g_mu);
+    pthread_mutex_unlock(&g_mu); pthread_mutex_unlock(&g_pool_upd_mu);
     return ok;
 }
 
@@ -986,6 +1131,7 @@ static void up_owner_check(const char *where) {
 // Old-queue command buffers (readback / diagnostics / present; to be deleted once M4-4 and M4-5 are migrated away): uploads are already on the Metal 4 queue, and there is no ordering guarantee between the two queues -
 // wait for the upload to complete after flushing it, and only then can the old queue read the upload result (mtl_read_texels waited first and flushed afterwards, the readback beat the upload, 4 failures on t_nvn upload content)
 static void up_wait_zero(_Atomic int *v, int site);
+static void cstg_put(id<MTLBuffer> b); static int cstg_owned(id o);   // pooled CPU upload staging (before pkg_upload_)
 static id<MTLCommandBuffer> q_cb(void) { if (on_sub_thread()) { up_flush(); rec_drain(); up_wait_zero(&g_up_pending, WS_OLDQ); } return [g_q commandBuffer]; }
 static post_op *g_post; static int g_npost, g_postcap;
 // One autorelease pool per submission: submissions run on a guest thread (long-lived, no run loop, never drains the implicit pool), so objects autoreleased in the Metal replay
@@ -1843,10 +1989,25 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
     pthread_mutex_lock(&g_mu); if (fence > g_done) g_done = fence; pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu);
 }
 static _Atomic int g_seg_inflight;   // main command buffers committed and not reported back yet (sub_cut)
+static void gmem_commit_patch(void); static uint64_t g_gmem_patched; static void gmem_slot_note(uint64_t *w); static uint64_t gmem_repointed(void);   // pool tables filled again at commit (gmem_commit_patch)
 // GPU watchdog: a committed command buffer that has not completed within DM_NVN_GPU_WATCHDOG seconds (default 4; 0 turns it off) ends the process at once, before
 // more work is queued behind it. Committed Metal work cannot be cancelled and exiting does not recall it (Apple, developer forums 839155), so this only keeps a hang
 // from growing: PRAGMATA's first real frame left a command buffer that never completed nor reported an error, and twice the Mac's WindowServer stopped minutes later
 static _Atomic uint64_t g_commit_ns[256];
+// DM_NVN_POOLDUMP=<file>: at the GPU watchdog, every memory pool entry's guest range and the GPU range of its zero-copy buffer, and the live buffers of freed pools (their deferred
+// release still pending), so a GPU page-fault address from a later macOS report (/Library/Logs/DiagnosticReports/gpuEvent-*.ips, bif0_fault.address) can be placed. g_mu is only
+// tried: the thread holding it may be the stuck one
+static void pool_dump(uint64_t fence) {
+    const char *path = getenv("DM_NVN_POOLDUMP"); if (!path || !*path) return;
+    FILE *f = fopen(path, "w"); if (!f) return;
+    int locked = pthread_mutex_trylock(&g_mu) == 0;
+    fprintf(f, "# fence %llu, g_mu %s; kind\tguest lo\tguest hi\tgpu lo\tgpu hi\tresident\n", (unsigned long long)fence, locked ? "held" : "NOT held (racy)");
+    for (int i = 0; i < g_npool; i++) { const pool_ent *e = &g_pools[i]; uint64_t len = e->buf ? e->buf.length : 0;
+        fprintf(f, "pool\t%#lx\t%#lx\t%#llx\t%#llx\t%d\n", (unsigned long)e->lo, (unsigned long)e->hi, (unsigned long long)e->gpu, (unsigned long long)(e->gpu + len), e->res); }
+    if (g_dead_pools) for (id<MTLBuffer> b in g_dead_pools.allObjects) fprintf(f, "dead\t%p\t%#lx\t%#llx\t%#llx\t-\n", b.contents, (unsigned long)((uintptr_t)b.contents + b.length), (unsigned long long)b.gpuAddress, (unsigned long long)(b.gpuAddress + b.length));
+    if (locked) pthread_mutex_unlock(&g_mu);
+    fclose(f); MLOG("[RED] memory pools at the watchdog written to %s (DM_NVN_POOLDUMP)", path);
+}
 static void *gpu_watchdog_main(void *arg) {
     uint64_t limit = (uint64_t)(uintptr_t)arg;
     for (;;) {
@@ -1858,6 +2019,7 @@ static void *gpu_watchdog_main(void *arg) {
             MLOG("[RED] GPU watchdog: fence %llu committed %.1f s ago has not completed (committed up to %llu, last commit error %d); exiting so no more work is queued behind it (DM_NVN_GPU_WATCHDOG)",
                  (unsigned long long)(done + 1), (now - t) / 1e9, (unsigned long long)f, (int)atomic_load(&g_last_commit_error));
             wk_dump(done + 1);   // the shaders of the stuck submission (a hang reports no error of its own)
+            pool_dump(done + 1);  // and, with DM_NVN_POOLDUMP, where the pools' buffers sit in GPU addresses
             fflush(stderr); fflush(stdout); _exit(70);
         }
     }
@@ -1880,6 +2042,7 @@ uint64_t mtl_sub_commit(void) {
     up_flush();
     g_cut_copy = 0;
     treg_finish_submission();   // Late descriptor views retire behind this submission's fence.
+    gmem_commit_patch();   // the raw global-memory pool table follows the pools changed while this submission was encoded
     uint64_t fence = g_fence + 1; gpu_watchdog_note(fence); g_fence = fence;   // the commit time first, so the watchdog never sees the fence without it
     gw_commit(fence);
     if (g_vis_ring_i >= 0) g_vis_ring[g_vis_ring_i].fence = fence;
@@ -1926,6 +2089,7 @@ uint64_t mtl_sub_commit(void) {
 uint64_t mtl_last_fence(void) { return g_fence; }
 // A SyncWait that timed out: where the fence stands against what was committed and what the GPU completed (fence > committed: never submitted; else the GPU did not finish)
 void mtl_fence_report(uint64_t fence) { MLOG("[RED] SyncWait timed out on fence %llu: committed %llu, completed %llu, last commit error %d", (unsigned long long)fence, (unsigned long long)g_fence, (unsigned long long)g_done, (int)atomic_load(&g_last_commit_error)); }
+uint64_t mtl_done_fence(void) { return atomic_load(&g_done); }
 int mtl_last_commit_error(void) { return atomic_load(&g_last_commit_error); }
 
 static int fast_wake(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_FAST_WAKE"); v = !(e && !strcmp(e, "0")); MLOG("game SyncWaits wake on the GPU's signal of the fence%s (DM_NVN_FAST_WAKE)", v ? "" : ": off, on the feedback handler"); } return v; }
@@ -1982,7 +2146,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[157];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[158];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -2180,7 +2344,7 @@ static void tex_put(uint64_t k, id o) {   // serials from 2^62 up are external t
 // ps: its placement sparse texture (NvSparse, sparse_make), which tex is: mapped and uploaded tile by tile (sparse_sync)
 // edge: the uploaded bytes of the storage's first and last host pages where other data shares them (pkg_edges_take)
 @implementation NvPkg
-- (void)dealloc { res_remove(tex); if (spare) res_remove(spare); free(edge[0]); free(edge[1]); }
+- (void)dealloc { defer_obj_release(tex); if (spare) defer_obj_release(spare); free(edge[0]); free(edge[1]); }   // out of the residency set after the submitted work and the upload batches begun so far (an upload into it may be queued)
 @end
 // Packaged textures by storage and description. Engines make many texture objects over one texture's bytes, each with a serial of its own: Ocarina of Time's 32,768 registered IDs name 3,607 storages,
 // 2.0 GB, and an upload per serial took 6 GB, past what a 16 GB Mac can keep wired once the pools are added. A new serial with the same storage and description takes the same NvPkg, so its
@@ -2538,7 +2702,7 @@ static void up_flush(void) {
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     atomic_fetch_add(&g_up_pending, 1);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
-        if (f.error) { MLOG("[RED] upload command buffer execution error: %s", f.error.description.UTF8String); res_top_once(f.error); }
+        if (f.error) { MLOG("[RED] upload command buffer execution error: %s", f.error.description.UTF8String); res_top_once(f.error); static _Atomic int pd; if (!atomic_exchange(&pd, 1)) { pool_dump(0); nvn_deswz_ring_dump(); } }   // DM_NVN_POOLDUMP: the first error (a page fault) gets the pools
         if (f.error || fake_lost) {
             os_unfair_lock_lock(&g_up_lost_lk); if (!g_up_lost) g_up_lost = [NSHashTable weakObjectsHashTable]; for (id d in dsts) [g_up_lost addObject:d]; int n = (int)g_up_lost.allObjects.count; atomic_store(&g_up_lost_n, n); os_unfair_lock_unlock(&g_up_lost_lk);
             pthread_mutex_lock(&g_smu); g_ser_gen++; pthread_mutex_unlock(&g_smu);   // Make the view cache of every texture ID take the slow path once (on a cache hit tex_mtl is not passed through and this record is not seen)
@@ -2547,7 +2711,7 @@ static void up_flush(void) {
         double d = f.GPUEndTime - f.GPUStartTime;
         if (d > 0) atomic_fetch_add(&g_upload_gpu_ns, (uint64_t)(d * 1e9));
         @autoreleasepool {
-            for (id<MTLResource> obj in staging) res_remove(obj);
+            for (id<MTLResource> obj in staging) { if (cstg_owned(obj)) cstg_put((id<MTLBuffer>)obj); else res_remove(obj); }   // pooled CPU staging stays resident for its next use
             [staging removeAllObjects];
             [views removeAllObjects];   // upload-only integer views share their targets' residency
             res_commit();
@@ -2582,7 +2746,7 @@ static void up_begin(void) {
     // block, and its RHI thread waited for good inside nvnQueueSubmitCommands (q_cb drains before it waits for the same reason)
     if (atomic_load(&g_up_alloc_busy[slot])) rec_publish();
     up_wait_zero(&g_up_alloc_busy[slot], WS_UPALLOC);
-    atomic_store(&g_up_alloc_busy[slot], 1); g_up_cur_slot = slot;
+    atomic_store(&g_up_slot_seq[slot], (int64_t)g_up_seq - 1); atomic_store(&g_up_alloc_busy[slot], 1); g_up_cur_slot = slot;
     g_up_batch_bytes = 0; g_up_over_used = 0;
     [g_up_alloc4[slot] reset];
     g_up_cb = [g_dev newCommandBuffer];
@@ -2657,13 +2821,13 @@ static id<MTLBuffer> up_alloc(size_t n, size_t *off) {
 // Deswizzle parameter blocks: 64 bytes per cell, cut sequentially from a 64 KB shared-storage block; a full block is replaced by a new one, and the old block is released lazily by fence
 static id<MTLBuffer> g_up_pblock; static size_t g_up_pblock_off;
 static id<MTLBuffer> up_param_alloc(size_t *off) {
-    if (!g_up_pblock || g_up_pblock_off + 64 > g_up_pblock.length) {
+    if (!g_up_pblock || g_up_pblock_off + 128 > g_up_pblock.length) {   // 128 per block: the deswizzle parameters with their bounds (76 bytes)
         if (g_up_pblock) defer_obj_release(g_up_pblock);
         g_up_pblock = [g_dev newBufferWithLength:64 << 10 options:MTLResourceStorageModeShared];
         if (!g_up_pblock) MDIE("failed to create the deswizzle parameter block");
         res_add(g_up_pblock); g_up_pblock_off = 0;
     }
-    *off = g_up_pblock_off; g_up_pblock_off += 64;
+    *off = g_up_pblock_off; g_up_pblock_off += 128;
     return g_up_pblock;
 }
 static void up_blit_add_at(id<MTLBuffer> src, size_t off, size_t row, size_t image, MTLSize size,
@@ -2753,11 +2917,42 @@ static id<MTLBuffer> up_big_src(uint64_t addr, uint64_t len, uint64_t *off) {
     pthread_mutex_unlock(&g_mu);
     if (!in || !len) return nil;
     uintptr_t pg = (uintptr_t)getpagesize(), a = (uintptr_t)addr & ~(pg - 1), b = ((uintptr_t)addr + len + pg - 1) & ~(pg - 1);
-    id<MTLBuffer> buf = [g_dev newBufferWithBytesNoCopy:(void *)a length:b - a options:MTLResourceStorageModeShared deallocator:nil];
+    // Not over write-protected pages in sparse safe mode: nocopy_buf would make them writable, which the dirty tracking counts as a write, so the texture uploaded from them
+    // would read as changed at its next use and be uploaded again, every time (t_direct_upload). The usual lookup's buffer is made once
+    if (mtl_sparse_safe() && !range_writable(a, b)) return nil;
+    id<MTLBuffer> buf = nocopy_buf(a, b, "upload source");
     if (!buf) return nil;
     res_add(buf); [g_up_keep addObject:buf]; *off = (uint64_t)addr - a;
     return buf;
 }
+// Staging of the CPU upload path (sparse textures, repacked formats): reused instead of a new shared buffer per upload, and bounded. DM_NVN_CSTG_MB (default 512): at most that much
+// CPU staging in flight; past it the open upload batch is committed and the earlier ones waited for. Buffers come back to the free list when their batch completes (up_flush's handler)
+static NSMutableArray<id<MTLBuffer>> *g_cstg_free; static NSHashTable *g_cstg_own; static os_unfair_lock g_cstg_lk = OS_UNFAIR_LOCK_INIT;
+static uint64_t g_cstg_free_bytes, g_cstg_reused, g_cstg_waits; static _Atomic uint64_t g_cstg_inflight;
+static uint64_t g_reup_waited, g_reup_new;   // DM_NVN_REUP_WAIT_MS (tex_mtl's re-upload)
+static void cstg_put(id<MTLBuffer> b) {   // an upload batch that used b has completed
+    os_unfair_lock_lock(&g_cstg_lk);
+    atomic_fetch_sub(&g_cstg_inflight, b.length);
+    int keep = g_cstg_free_bytes + b.length <= (256u << 20) && g_cstg_free.count < 64; if (keep) { [g_cstg_free addObject:b]; g_cstg_free_bytes += b.length; }
+    os_unfair_lock_unlock(&g_cstg_lk);
+    if (!keep) res_remove(b);
+}
+static id<MTLBuffer> cstg_get(size_t n) {
+    static long cap = -1; if (cap < 0) { const char *e = getenv("DM_NVN_CSTG_MB"); cap = (e ? atol(e) : 512) << 20; }
+    size_t want = (n + (1u << 20) - 1) & ~(size_t)((1u << 20) - 1);
+    if (cap > 0 && atomic_load(&g_cstg_inflight) && atomic_load(&g_cstg_inflight) + want > (uint64_t)cap) {   // bounded: let the earlier batches finish first
+        g_cstg_waits++; up_flush(); up_wait_zero(&g_up_pending, WS_UPZERO);
+    }
+    id<MTLBuffer> b = nil;
+    os_unfair_lock_lock(&g_cstg_lk);
+    if (!g_cstg_free) { g_cstg_free = [NSMutableArray array]; g_cstg_own = [NSHashTable weakObjectsHashTable]; }
+    for (NSUInteger i = 0; i < g_cstg_free.count; i++) { id<MTLBuffer> c = g_cstg_free[i]; if (c.length >= want && c.length <= 2 * want) { b = c; [g_cstg_free removeObjectAtIndex:i]; g_cstg_free_bytes -= c.length; g_cstg_reused++; break; } }
+    os_unfair_lock_unlock(&g_cstg_lk);
+    if (!b) { b = [g_dev newBufferWithLength:want options:MTLResourceStorageModeShared]; os_unfair_lock_lock(&g_cstg_lk); [g_cstg_own addObject:b]; os_unfair_lock_unlock(&g_cstg_lk); }
+    atomic_fetch_add(&g_cstg_inflight, b.length);
+    return b;
+}
+static int cstg_owned(id o) { os_unfair_lock_lock(&g_cstg_lk); int r = g_cstg_own && [g_cstg_own containsObject:o]; os_unfair_lock_unlock(&g_cstg_lk); return r; }
 static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture> reuse, MTLTextureUsage keep) {
     MTLTextureDescriptor *d = tex_desc(t, 1);
     if (!d) return nil;
@@ -2803,7 +2998,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
                 int ok=1;
                 for(unsigned l=0;l<d.mipmapLevelCount;l++) {
                     size_t poff;id<MTLBuffer> params=up_param_alloc(&poff);
-                    if(nvn_deswz_gpu_direct_m4(g_up_ce,g_up_ct,params,poff,(__bridge id<MTLBuffer>)mb,mo,&t->d,l,view)){ok=0;break;}
+                    { int rc = nvn_deswz_gpu_direct_m4(g_up_ce,g_up_ct,params,poff,(__bridge id<MTLBuffer>)mb,mo,&t->d,l,view); if (rc) { ok=0; break; } }   // -2 (bounds): the staged path below checks it again
                     g_direct_dispatches++;
                 }
                 if(ok){[g_up_texs addObject:mt];g_direct_uploads++;if(!g_cb)up_flush();return mt;}
@@ -2815,13 +3010,13 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         size_t stg_off;
         id<MTLBuffer> stg = up_alloc(total ? total : 16, &stg_off);
         if (upsrc) { uint64_t mo2; id<MTLBuffer> u2 = up_big_src((uint64_t)t->mem, t->L.size, &mo2); if (u2) { upsrc = u2; mb = (__bridge void *)u2; mo = mo2; } }   // up_alloc may have flushed the batch that held the first one
-        size_t off = 0; int enc_ok = g_up_ce != nil, nb0 = g_nup_blits;
+        size_t off = 0; int enc_ok = g_up_ce != nil, nb0 = g_nup_blits, dz_skip = 0;   // dz_skip: a job the bounds check refused: this upload is skipped (no CPU fallback: the same bad range)
         for (unsigned l = 0; enc_ok && l < d.mipmapLevelCount; l++) {
             uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
             size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (h + bh - 1) / bh;
             for (unsigned y = 0; y < layers; y++) {
                 size_t poff; id<MTLBuffer> params = up_param_alloc(&poff);   // Metal 4 has no setBytes: the parameter block of each deswizzle is cut from a shared block (no new GPU buffer each time)
-                if (nvn_deswz_gpu_encode_m4(g_up_ce, g_up_ct, params, poff, (__bridge id<MTLBuffer>)mb, mo, &t->d, l, y, stg, stg_off + off, pitch)) { enc_ok = 0; break; }
+                { int rc = nvn_deswz_gpu_encode_m4(g_up_ce, g_up_ct, params, poff, (__bridge id<MTLBuffer>)mb, mo, &t->d, l, y, stg, stg_off + off, pitch); if (rc == -2) { enc_ok = 0; dz_skip = 1; break; } if (rc) { enc_ok = 0; break; } }
                 up_blit_add(stg, stg_off + off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l);
                 off += pitch * rows * z;
             }
@@ -2831,6 +3026,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
             if (!g_cb) up_flush();
             return mt;
         }
+        if (dz_skip) { g_nup_blits = nb0; if (!g_cb) up_flush(); RED_ONCE(157, "texture ser=%llu %ux%u format %#x: an upload was skipped (deswizzle bounds; see the [RED] deswizzle job refused lines)", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format); return mt; }
         g_nup_blits = nb0;   // Roll back the copies already recorded for this texture: the already-encoded deswizzle only writes the staging area and is harmless; this texture takes the CPU path below instead
         if (!g_cb) up_flush();
         RED_ONCE(41, "GPU deswizzle does not support format %#x target %d; falling back to the CPU", t->d.format, t->d.target);
@@ -2842,8 +3038,8 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         if (!(part = malloc(t->L.size ? t->L.size : 1))) MDIE("sparse texture copy of %llu bytes failed", (unsigned long long)t->L.size);
         nvn_sparse_copy(t->pool, part, (uint64_t)(uintptr_t)t->mem, t->L.size); src = part;
     }
+    id<MTLBuffer> stg = cstg_get(total ? total : 16);   // pooled, bounded (may flush and wait for earlier upload batches)
     up_begin();
-    id<MTLBuffer> stg = [g_dev newBufferWithLength:total ? total : 16 options:MTLResourceStorageModeShared];
     res_add(stg); [g_up_keep addObject:stg];
     size_t off = 0;
     int zb = zblock_on() && t->d.format >= 0x79 && t->d.format <= 0x94; if (zb) { g_zb_ser = t->serial; g_zb_n = (int)MIN(d.mipmapLevelCount, 16u); memset(g_zb, 0, sizeof g_zb); memset(g_zb_tot, 0, sizeof g_zb_tot); }
@@ -3626,7 +3822,13 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
             // Pool content changed (streamed assets written into the same storage, a movie frame): switch to another texture, as in-flight draws still read the old one. That is the spare
             // when the GPU is done with it (see NvPkg), else a new one; the old one becomes the spare (pkg_upload_ made nt resident)
             id<MTLTexture> reuse = nil;
-            if (pk->spare) { pthread_mutex_lock(&g_mu); uint64_t done = g_done; pthread_mutex_unlock(&g_mu); if (pk->spare_fence <= done && pk->spare.usage == pk->tex.usage) reuse = pk->spare; }
+            if (pk->spare) { pthread_mutex_lock(&g_mu); uint64_t done = g_done; pthread_mutex_unlock(&g_mu);
+                // DM_NVN_REUP_WAIT_MS (default 100; 0 = off): a large texture's spare still in use by committed work is waited for (bounded) rather than replaced by a new texture. PRAGMATA's
+                // opening re-uploads its sparse textures (17-32 MB) every frame while the GPU runs 2-3 frames behind: a new texture each time, the spare deferred, 40 GB of textures added
+                // in 300 frames and the Mac out of memory (PRAGMATA's opening)
+                static long rw = -1; if (rw < 0) { const char *e = getenv("DM_NVN_REUP_WAIT_MS"); rw = e ? atol(e) : 100; }
+                if (pk->spare_fence > done && rw > 0 && t->L.size >= (4u << 20) && pk->spare_fence <= g_fence) { if (mtl_wait(pk->spare_fence, (uint64_t)rw * 1000000ull)) g_reup_waited++; done = atomic_load(&g_done); }
+                if (pk->spare_fence <= done && pk->spare.usage == pk->tex.usage) reuse = pk->spare; else if (t->L.size >= (4u << 20)) g_reup_new++; }
             uint64_t st, vg = nvn_sparse_gen(); id<MTLTexture> nt = pkg_upload(t, &st, reuse, pk->tex.usage);
             if (nt) { id<MTLTexture> old = pk->tex; pk->tex = nt;
                 if (pk->spare && pk->spare != nt) defer_obj_release(pk->spare);   // still in use, or of another shape: retired as before
@@ -3756,6 +3958,11 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     snprintf(avail, sizeof avail, "%llu MB", (unsigned long long)(os_proc_available_memory() >> 20));
 #endif
     MLOG("memory up to frame %llu: resident %llu MB, GPU allocated %llu MB, deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u (%u of them unreferenced; evicted with pools %llu, on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total, finalized textures still referenced %u (small table, %llu put in total); headroom to the system memory limit %s", frame, rss_mb, gpu, nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, aorph, (unsigned long long)g_alias_evicted, (unsigned long long)g_alias_taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, nghost, (unsigned long long)ghost_puts, avail);
+    uint64_t dq_n = 0, dq_b = 0; pthread_mutex_lock(&g_deferred_mu); for (NvDeferredRelease *d in g_deferred) { dq_n++; id o = d->object; if ([o respondsToSelector:@selector(allocatedSize)]) dq_b += [(id<MTLAllocation>)o allocatedSize]; } pthread_mutex_unlock(&g_deferred_mu);
+    MLOG("memory safety up to frame %llu: deferred releases waiting %llu (%llu MB); re-uploads that waited for their spare %llu (%llu still made a new texture); CPU staging pooled %llu MB, reused %llu, waited %llu",
+         frame, (unsigned long long)dq_n, (unsigned long long)(dq_b >> 20), (unsigned long long)g_reup_waited, (unsigned long long)g_reup_new, (unsigned long long)(g_cstg_free_bytes >> 20), (unsigned long long)g_cstg_reused, (unsigned long long)g_cstg_waits);
+    MLOG("memory safety up to frame %llu: residency set %lld MB (peak %lld MB); zero-copy buffers made %llu, refused %llu (DM_NVN_SPARSE_SAFE), over write-protected pages made writable first %llu; large-pool chunk buffers retired %llu, large pools extended in place %llu, pool-table segments made %llu, pool tables filled again at commit %llu, argument words pointed at a newer table %llu; system wired %llu MB",
+         frame, (long long)(g_res_bytes >> 20), (long long)(g_res_bytes_peak >> 20), (unsigned long long)atomic_load(&g_nc_made), (unsigned long long)atomic_load(&g_nc_refused), (unsigned long long)atomic_load(&g_nc_unprot), (unsigned long long)g_big_retired, (unsigned long long)g_pool_extends, (unsigned long long)g_big_seg_made, (unsigned long long)g_gmem_patched, (unsigned long long)gmem_repointed(), (unsigned long long)(sys_wired_bytes() >> 20));
     { void mtl_vc_stats(unsigned *, uint64_t *, uint64_t *), mtl_tb2_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); uint64_t mtl_tex_mis_count(void); unsigned vn; uint64_t vh, vm, tb, tm, tf, tc, tcb;
       mtl_vc_stats(&vn, &vh, &vm); mtl_tb2_stats(&tb, &tm, &tf, &tc, &tcb);
       MLOG("texture views by texture (vc_get): %u textures hold cached views; %llu views reused, %llu made in total; texture buffers bound as 2D rows for wrapped 1D fetches %llu times, %llu made, %llu failed, %llu copied into aligned rows (%llu MB) "
@@ -8611,26 +8818,40 @@ static uint64_t support_gpu(void) { static uint64_t gpu; if (!gpu) gpu = support
 // pool wraps the guest's own pages, so any pool holding an address gives its GPU address), unused entries starting at ~0. Rebuilt when the pools change; the replaced table goes through
 // deferred release, so submissions encoded with it keep it. Only pools something gave an address in are listed (mtl_pool_addressed), each made resident, as the shader may reach any of them
 static id<MTLBuffer> g_gmem_buf; static uint64_t g_gmem_gen;
-static id<MTLBuffer> gmem_map(void) {
+static uint64_t g_gmem_first_fence;   // the submission that first bound the current table; tables filled again at commit (gmem_commit_patch)
+static uint64_t gmem_build(id<MTLBuffer> reuse) {   // reuse: fill that table again in place (gmem_commit_patch), else a new one
     uint64_t gen = atomic_load(&g_pool_gen);
-    if (g_gmem_buf && g_gmem_gen == gen) return g_gmem_buf;
-    id<MTLBuffer> b = [g_dev newBufferWithLength:DMSH_GMEM_MAP_ENTRIES * DMSH_GMEM_MAP_ENTRY options:MTLResourceStorageModeShared];
+    if (!reuse && g_gmem_buf && g_gmem_gen == gen) return g_gmem_buf.gpuAddress;
+    id<MTLBuffer> b = reuse ? reuse : [g_dev newBufferWithLength:DMSH_GMEM_MAP_ENTRIES * DMSH_GMEM_MAP_ENTRY options:MTLResourceStorageModeShared];
     uint8_t *t = (uint8_t *)b.contents; memset(t, 0, b.length);
     for (int k = 1; k < DMSH_GMEM_MAP_ENTRIES; k++) memset(t + (size_t)k * DMSH_GMEM_MAP_ENTRY, 0xff, 8);
     int n = 1, over = 0; uint64_t end = 0;
-    pthread_mutex_lock(&g_mu);
-    for (int k = 0; k < g_nbig; k++) if (!g_big[k].full && addr_meets(g_big[k].lo, g_big[k].hi)) { int n = big_new(&g_big[k], g_big[k].a, g_big[k].b, g_big[k].b, 0); if (n >= 0) g_big[k].full = n + 1; }   // the pool table reaches all of a large pool
+    pthread_mutex_lock(&g_pool_upd_mu); pthread_mutex_lock(&g_mu);
+    for (int k = 0; k < g_nbig; k++) if (addr_meets(g_big[k].lo, g_big[k].hi)) big_segments(&g_big[k]);   // a large pool through its own segments (big_segments), not its lookup chunks; only one the driver gave addresses in (addr_meets)
     gen = atomic_load(&g_pool_gen); pidx_sort();
+    typedef struct { uint64_t lo, hi, delta; } gent;
+    static gent *ge; static int gcap; int ng = 0;
     for (int k = 0; k < g_npool; k++) {
         pool_ent *p = &g_pools[g_pidx[k]];
         if (!addr_meets(p->lo, p->hi)) continue;
+        if (big_of(p->lo) >= 0 && p->key == g_big[big_of(p->lo)].mem) continue;   // a large pool's chunk: the pool's segments stand for it
         if (!p->res) { res_add(p->buf); p->res = 1; g_pool_res_n++; }
-        uint64_t lo = MAX((uint64_t)p->lo, end), hi = p->hi;
+        if (ng == gcap) { gcap = gcap ? 2 * gcap : 1024; ge = realloc_or_die(ge, (size_t)gcap * sizeof *ge, "the pool table entries"); }
+        ge[ng++] = (gent){p->lo, p->hi, p->gpu - p->base};
+    }
+    for (int k = 0; k < g_nbig; k++) { big_pool *bp = &g_big[k]; if (!addr_meets(bp->lo, bp->hi)) continue;
+        for (int q = 0; q < bp->nseg; q++) { id sb = bp->seg[(NSUInteger)q]; if (sb == (id)[NSNull null]) continue;
+            uint64_t lo = bp->a + (uint64_t)q * BIG_SEG, hi = MIN(lo + BIG_SEG, (uint64_t)bp->hi); if (lo < bp->lo) lo = bp->lo; if (lo >= hi) continue;
+            if (ng == gcap) { gcap = gcap ? 2 * gcap : 1024; ge = realloc_or_die(ge, (size_t)gcap * sizeof *ge, "the pool table entries"); }
+            ge[ng++] = (gent){lo, hi, ((id<MTLBuffer>)sb).gpuAddress - (bp->a + (uint64_t)q * BIG_SEG)}; } }
+    qsort_b(ge, (size_t)ng, sizeof *ge, ^int(const void *x, const void *y) { uint64_t a = ((const gent *)x)->lo, b = ((const gent *)y)->lo; return a < b ? -1 : a > b; });
+    for (int k = 0; k < ng; k++) {
+        uint64_t lo = MAX(ge[k].lo, end), hi = ge[k].hi;
         if (lo >= hi) continue;
         if (n == DMSH_GMEM_MAP_ENTRIES) { over++; continue; }
-        uint64_t e[3] = {lo, hi, p->gpu - p->base}; memcpy(t + (size_t)n++ * DMSH_GMEM_MAP_ENTRY, e, sizeof e); end = hi;
+        uint64_t e[3] = {lo, hi, ge[k].delta}; memcpy(t + (size_t)n++ * DMSH_GMEM_MAP_ENTRY, e, sizeof e); end = hi;
     }
-    pthread_mutex_unlock(&g_mu);
+    pthread_mutex_unlock(&g_mu); pthread_mutex_unlock(&g_pool_upd_mu);
     // Each 2 MiB chunk wholly inside an entry gets a hint, so most accesses skip the binary search. A colliding chunk replaces the hint and the shader's tag check sends the other to the search
     for (int k = 1; k < n; k++) {
         const uint64_t *e = (const uint64_t *)(t + (size_t)k * DMSH_GMEM_MAP_ENTRY);
@@ -8642,12 +8863,42 @@ static id<MTLBuffer> gmem_map(void) {
     }
     if (over) RED_ONCE(140, "raw global memory: %d more memory pools than the %d entries of the pool table; addresses in them are not reached", over, DMSH_GMEM_MAP_ENTRIES - 1);
     res_add(b); res_commit();
+    if (reuse) { g_gmem_gen = gen; g_gmem_patched++; return b.gpuAddress; }
     if (g_gmem_buf) defer_obj_release(g_gmem_buf);
-    g_gmem_buf = b; g_gmem_gen = gen;
+    g_gmem_buf = b; g_gmem_gen = gen; g_gmem_first_fence = g_fence + 1;
     { static int said; if (!said++) MLOG("raw global memory: pool table of %d ranges (pool generation %llu), rebuilt whenever a pool comes or goes", n - 1, (unsigned long long)gen); }
-    return b;
+    return b.gpuAddress;
 }
-static uint64_t gmem_map_gpu(void) { return gmem_map().gpuAddress; }
+static uint64_t gmem_map_gpu(void) { return gmem_build(nil); }
+static id<MTLBuffer> gmem_map(void) { gmem_build(nil); return g_gmem_buf; }   // the current table's buffer (gml_take)
+// The pool table is a snapshot taken when a dispatch is encoded, and the game maps sparse pages on its own threads while a submission is being encoded (PRAGMATA: about 60 % of
+// MapVirtual calls overlapped an encode, in a replay of its mapping events); a dispatch then read the newly mapped pages as 0 (raw global-memory misses: the cluster list). At commit, if the pools changed
+// since the table was built and only this submission binds it (it was built in this submission), it is filled again in place: the GPU has not started reading it. A table that
+// earlier submissions still bind is left alone (the next dispatch builds a new one)
+// Every argument-block word of this submission that holds a pool table's address (encode_args_): at commit they are pointed at a table that has the pools as they are now, so a
+// dispatch encoded before a MapVirtual on another thread still finds the pages that call mapped (the remaining misses after the in-place refill: tables built in an earlier
+// submission and reused in this one). Only this submission's words: the GPU has not read them yet
+static uint64_t **g_gmem_slots; static int g_gmem_nslots, g_gmem_cslots; static uint64_t g_gmem_repointed;
+static uint64_t gmem_repointed(void) { return g_gmem_repointed; }
+static void gmem_slot_note(uint64_t *w) { if (g_gmem_nslots == g_gmem_cslots) { g_gmem_cslots = g_gmem_cslots ? 2 * g_gmem_cslots : 256; g_gmem_slots = realloc_or_die(g_gmem_slots, (size_t)g_gmem_cslots * sizeof *g_gmem_slots, "the pool table slot list"); } g_gmem_slots[g_gmem_nslots++] = w; }
+static void gmem_commit_patch(void) {
+    int n = g_gmem_nslots; g_gmem_nslots = 0;
+    if (!g_gmem_buf || atomic_load(&g_pool_gen) == g_gmem_gen) {   // the current table is up to date: still point this submission's words at it (some may hold an older table)
+        uint64_t a = g_gmem_buf ? g_gmem_buf.gpuAddress : 0; for (int i = 0; i < n && a; i++) if (*g_gmem_slots[i] != a) { *g_gmem_slots[i] = a; g_gmem_repointed++; }
+        return; }
+    uint64_t a = g_gmem_first_fence == g_fence + 1 ? gmem_build(g_gmem_buf) : gmem_build(nil);   // built in this submission: filled again in place; else a new one (the old one stays for the earlier submissions)
+    for (int i = 0; i < n; i++) if (*g_gmem_slots[i] != a) { *g_gmem_slots[i] = a; g_gmem_repointed++; }
+    if (g_gmem_first_fence != g_fence + 1) g_gmem_first_fence = g_fence + 1;
+}
+// A segment of this submission goes to the GPU before the submission ends (sub_cut every DM_NVN_CUT draws, an indirect-count wait): it may read the current pool table from now
+// on, so the table is brought up to date and its words pointed at it first, as at the end, and then counts as bound by an earlier submission: a later refill builds a new table
+// instead of rewriting this one in place while the GPU searches it (PRAGMATA: a BIF0 page fault at a compute read near 0, rows rewritten under a running binary search)
+static void gmem_segment_commit(void) {
+    static int off = -1; if (off < 0) { const char *e = getenv("DM_NVN_GMEM_SEG"); off = e && *e == '0'; if (off) MLOG("DM_NVN_GMEM_SEG=0: the pool table may be filled again in place after a segment commit (as before)"); }
+    if (off || !g_gmem_buf) return;
+    gmem_commit_patch();
+    g_gmem_first_fence = 0;   // in flight: the next change makes a new table
+}
 // Where those stores land is known only once the GPU has run them, while the host's uniform shadows and its CPU reads of guest memory must not miss a GPU write (sbw / gw). Counted as a
 // write anywhere, they refused every shadow of the submission and of the next ones: Donkey Kong Bananza's tunnel ran at 70 ms a frame, 4,533 passes a frame ended to land deferred updates.
 // So each store also sets the bit of its pool table entry in a write log (DMSH_KIND_GMEM_LOG, a bitmap), each draw or dispatch with such stores gets its own log from a small pool, and the
@@ -8941,7 +9192,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
         return 1;
     }
     NSUInteger arg_len = sh->arg_len ? sh->arg_len : sh->ae.encodedLength;
-    uint64_t slots[NVN_REFL_MAXARG]; memset(slots, 0, arg_len < sizeof slots ? arg_len : sizeof slots);   // only the bytes that are copied out (they used to be zeroed in full, before the reuse check too)
+    uint64_t slots[NVN_REFL_MAXARG]; memset(slots, 0, arg_len < sizeof slots ? arg_len : sizeof slots); int gmem_aid = -1;   // only the bytes that are copied out (they used to be zeroed in full, before the reuse check too)
     #define USE(r, u) do { (void)(u); if (__builtin_expect(g_res_check_on, 0)) res_check((r), sh->key, reg); } while (0)
     // DM_NVN_PASSDUMP: on the first new encode per pass per stage, records the shader key (K) and the actual source of each binding (B: UBO address / length / first 4 floats, texture ID and serial, or "dummy")
     static uint64_t bl_pass[6]; static int bl_all = -1; if (bl_all < 0) bl_all = getenv("DM_NVN_PASSDUMP_ALL") != NULL;   // Record on every new encode (otherwise only the first time per pass per stage)
@@ -9137,7 +9388,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             slots[aid] = (sh->c1buf ? sh->c1_gpu : zero_bank_gpu()) + (sh->c1buf ? sh->c1off : 0);
             USE(cb, MTLResourceUsageRead);
         } else if (b->kind == NVN_RB_GMEM) {   // B: the memory pool table for addresses traced to no storage buffer (gmem_map_gpu)
-            slots[aid] = gmem_map_gpu();
+            slots[aid] = gmem_map_gpu(); gmem_aid = aid;   // gmem_aid: patched at commit if the pools change before it (gmem_commit_patch)
             if (bl) PD("B %llu st%d gmem %s", g_stat_pass, nvn_stage, b->rw ? "rw" : "ro");
         } else if (b->kind == NVN_RB_GMEML) {   // B: the write log of those stores; their writes are noted as gml_take learned them
             slots[aid] = gml_take(gmem_map());   // the table of this encode: the pool table's binding made it just before or just after, under the same g_pool_gen unless a pool came in between (a bit then names an entry of the newer table, one more reason a late pool is checked)
@@ -9217,6 +9468,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
     os_unfair_lock_unlock(&g_rmu);
     id<MTLBuffer> ab; size_t off = arena_alloc(arg_len, &ab);
     memcpy(g_cur_arena->cpu + off, slots, arg_len);   // the arena arena_alloc took it from (no contents message: see ubo_read)
+    if (gmem_aid >= 0) gmem_slot_note((uint64_t *)(void *)(g_cur_arena->cpu + off) + gmem_aid);
     bind_args(en, nvn_stage, metal_vertex, ab, g_cur_arena->gpu + off, off, sh->rf.abi);
     sh->ab_buf = ab; sh->ab_gpu = g_cur_arena->gpu + off; sh->ab_off = off; sh->ab_pass = g_pass.serial; sh->ab_binst = g_draw_binst; sh->ab_pgen = g_psnap_gen; g_args_dirty[nvn_stage] = 0;
     g_stat_args_enc++;
@@ -11407,7 +11659,7 @@ static id<MTLSharedEvent> g_mdi_ev; static uint64_t g_mdi_v, g_mdi_waits, g_mdi_
 static void mdi_wait(void) {
     rp_end(); ubd_land();
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
-    up_flush(); res_commit();
+    up_flush(); gmem_segment_commit(); res_commit();
     [g_cb endCommandBuffer];
     rec_commit(g_cb, nil);
     if (!g_mdi_ev) g_mdi_ev = [g_dev newSharedEvent];
@@ -13052,6 +13304,7 @@ static void sub_cut(void) {
         if (cb.error) { atomic_store(&g_last_commit_error, 1); static int k; if (k++ < 8) MLOG("[RED] segment command buffer execution error: %s", cb.error.description.UTF8String); res_top_once(cb.error); }
         char where[64]; snprintf(where, sizeof where, "fence %llu, segment %u", (unsigned long long)cbs_fence, k); cbs_feedback(cbs, cb.error, where);
     }];
+    gmem_segment_commit();   // the pool table this segment may read is final before the GPU sees it
     res_commit();
     [g_cb endCommandBuffer];
     rec_commit(g_cb, o);
@@ -13987,7 +14240,9 @@ static up_mfx_scaler *up_mfx_scaler_for(NSUInteger iw, NSUInteger ih, NSUInteger
     for (int i = 0; i < UP_MFX_SCALERS; i++) if (!memcmp(g_up_mfx[i].key, key, sizeof key)) return g_up_mfx[i].refused ? NULL : &g_up_mfx[i];
     up_mfx_scaler *e = &g_up_mfx[g_up_mfx_next++ % UP_MFX_SCALERS];   // dynamic resolution moves the input: a few sizes stay made
     if (e->read && e->read != e->out) defer_obj_unref(e->read);
-    if (e->in) { res_remove(e->in); defer_obj_release(e->in); } if (e->out) { res_remove(e->out); defer_obj_release(e->out); }   // a recorded scale still holds them
+    // A recorded scale still holds them: retired through the deferred release only, which takes them out of the residency set once the submissions that used them
+    // completed (they used to leave it at once, before the queued scale had run); the scaler object too, whose own resources the queued scale reads
+    if (e->in) defer_obj_release(e->in); if (e->out) defer_obj_release(e->out); if (e->sc) defer_obj_unref(e->sc);
     *e = (up_mfx_scaler){.key = {iw, ih, ow, oh, (NSUInteger)srgb}, .refused = 1};
     NSError *err = nil; uint64_t t0 = now_ns();
     if (!g_fx_comp) g_fx_comp = [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&err];

@@ -2252,7 +2252,7 @@ _Static_assert(sizeof(map_req) == 0x28, "NVNmappingRequest");
 // tail from a 4 MB physical pool and later the higher mips from other pages of it, after writing their texels there on the CPU: aliased, the texture had no storage (created before any
 // mapping) and the later mappings were refused (`[RED] MapVirtual: non-contiguous mapping`). A pool larger than the application pool is sparse from the start
 enum { NVRUN = 16384, VPT_LEAF = 512 };   // a page-table leaf covers 2 MB. NVRUN: mapped runs per sparse pool (PRAGMATA maps one 1 GB pool in more than 1024 pieces by its title screen)
-typedef struct { const uint8_t *phys; uint64_t gen; } vpte;
+typedef struct { const uint8_t *phys; uint64_t gen; uint32_t live; } vpte;   // live (DM_NVN_SPARSE_SAFE): the page has been mapped and may still be under a zero-copy buffer the GPU uses
 struct vpool { const pool_t *pool; uint8_t *base; uint64_t len, size, top; int nrun; struct { uint64_t lo, hi; } run[NVRUN]; vpte **pt; struct vlog_ent *log; _Atomic uint64_t nlog; };   // len: reserved; size: the pool's; top: highest mapped end so far (logged per 128 MB)
 struct vlog_ent { uint64_t off, len; };   // a mapping request: the pool's change log (nvn_sparse_log_read), kept once a placement sparse texture asks for it
 enum { VLOG_N = 4096 };
@@ -2281,21 +2281,45 @@ static uint8_t *vpool_reserve(pool_t *o) {   // → the reserved range, or NULL
     if (o->vmode == 2) LOG("[nvn] virtual pool %p (%#llx bytes, flags %#x): sparse, own address range %p+%#llx, physical pages are remapped into it", (const void *)o, (unsigned long long)o->size, o->flags, a, (unsigned long long)len);
     return a;
 }
+// DM_NVN_SPARSE_SAFE: a dropped pool's reservation is unmapped once the work submitted so far has completed: its runs' buffers leave the residency set only at their deferred
+// release (fence last + 1), and inaccessible pages under a resident buffer are what IOGPU's prepare and the GPU fault on (found by replaying the host's mapping events on the CPU).
+// Caller holds g_vp_mu; worked through with the deferred unmaps (vunmap_run)
+static struct { uint8_t *base; uint64_t len, fence; int64_t up; } g_vmun[256]; static int g_nvmun;
+static void vmunmap_defer(uint8_t *base, uint64_t len) {
+    if (g_nvmun == 256) { mtl_finish(); for (int i = 0; i < g_nvmun; i++) munmap(g_vmun[i].base, g_vmun[i].len); g_nvmun = 0; }   // full: wait and release them all
+    g_vmun[g_nvmun++] = (typeof(g_vmun[0])){base, len, mtl_last_fence() + 1, mtl_up_seq_now()};
+}
+static void vmunmap_run(void) { uint64_t done = mtl_done_fence(); for (int i = 0; i < g_nvmun; ) { if (g_vmun[i].fence <= done && !mtl_up_busy_through(g_vmun[i].up)) { munmap(g_vmun[i].base, g_vmun[i].len); g_vmun[i] = g_vmun[--g_nvmun]; } else i++; } }
 static void vpool_drop(pool_t *o) {   // caller holds g_vp_mu
     struct vpool *v = o->vp; if (!v) return;
     for (int k = 0; k < v->nrun; k++) mtl_pool_del(v->base + v->run[k].lo);
-    munmap(v->base, v->len);
+    if (mtl_sparse_safe()) vmunmap_defer(v->base, v->len); else munmap(v->base, v->len);   // the runs' buffers stay resident until their deferred release, after the next submission
     for (uint64_t l = 0; l < (v->size + (2u << 20) - 1) >> 21; l++) free(v->pt[l]);
     for (int i = 0; i < g_nvp; i++) if (g_vp[i] == v) { g_vp[i] = g_vp[--g_nvp]; break; }
     free(v->pt); free(v->log); free(v); o->vp = NULL;
 }
-static void vpool_release(pool_t *o) { pthread_mutex_lock(&g_vp_mu); vpool_drop(o); pthread_mutex_unlock(&g_vp_mu); }
+static _Atomic uint64_t g_vp_kept, g_vp_waits;   // DM_NVN_SPARSE_SAFE: unmaps that kept their pages; mapping changes that waited for the GPU first
+// Pool finalize: the reservation goes (munmap) with its runs' buffers. With DM_NVN_SPARSE_SAFE the GPU finishes the work submitted so far first: the buffers' deferred release
+// keeps them alive for that work, but not the pages under them
+static void vunmap_run(int all); static int g_nvun;   // the deferred unmaps (below)
+static void vpool_release(pool_t *o) { if (mtl_sparse_safe() && o->vp && o->vp->nrun) { mtl_finish(); atomic_fetch_add(&g_vp_waits, 1); } pthread_mutex_lock(&g_vp_mu); if (g_nvun) vunmap_run(0); vpool_drop(o); pthread_mutex_unlock(&g_vp_mu); }
+static const vpte *vpt_get(const struct vpool *v, uint64_t o);
+// DM_NVN_SPARSE_SAFE: does a mapping request put new pages under pages mapped before (vm_remap overwriting what a live buffer may wrap)? Caller holds g_vp_mu
+static int vpool_overwrites(const struct vpool *v, const map_req *r) {
+    if (!r->phys || r->voff < 0 || (uint64_t)r->voff + r->size > v->size) return 0;
+    for (uint64_t o = 0; o < r->size; o += 0x1000) { const vpte *e = vpt_get(v, (uint64_t)r->voff + o); if (e && e->live) return 1; }
+    return 0;
+}
 // Mapped runs of a sparse pool: [lo, hi) sorted, disjoint, adjacent runs merged. Caller holds g_vp_mu
 // DM_NVN_VRUN_MAX=<n>: a smaller run table (A/B against the 1024 of before). When the table is full, the request changes nothing: before, the runs a new mapping
 // merged with were taken out of the host's pool lookup and the merged run never put back, so buffers in them resolved to another range (PRAGMATA's title terrain
 // read an empty instance buffer through its mesh stage)
 static int vrun_cap(void) { static int c; if (!c) { const char *e = getenv("DM_NVN_VRUN_MAX"); c = e && atoi(e) > 0 && atoi(e) < NVRUN ? atoi(e) : NVRUN; } return c; }
+static void vrun_set_(struct vpool *v, uint64_t lo, uint64_t hi, int mapped);
 static void vrun_set(struct vpool *v, uint64_t lo, uint64_t hi, int mapped) {
+    mtl_pool_update_begin(); vrun_set_(v, lo, hi, mapped); mtl_pool_update_end();   // lookups and the pool table see the runs before or after, never between
+}
+static void vrun_set_(struct vpool *v, uint64_t lo, uint64_t hi, int mapped) {
     static uint64_t nl[NVRUN + 2][2]; int nn = 0, cap = vrun_cap(); uint64_t mlo = lo, mhi = hi;   // caller holds g_vp_mu
     for (int k = 0; k < v->nrun; k++) {   // the new list first, with no effect on the lookup
         uint64_t a = v->run[k].lo, b = v->run[k].hi;
@@ -2306,13 +2330,15 @@ static void vrun_set(struct vpool *v, uint64_t lo, uint64_t hi, int mapped) {
     }
     if (mapped) { if (nn <= cap) { nl[nn][0] = mlo; nl[nn][1] = mhi; } nn++; }
     if (nn > cap) { static int lines; if (lines++ < 8) LOG("[RED] virtual pool %p: more than %d separate mapped runs; mapping request [%#llx, %#llx) not tracked", (const void *)v->pool, cap, (unsigned long long)lo, (unsigned long long)hi); return; }
+    int grown = 0;   // the merged run is the run that started at mlo, grown at its end by pages it did not hold (only new pages: a buffer over remapped ones would read the old ones)
     for (int k = 0; k < v->nrun; k++) {   // then the lookup: old runs out, new ones in
         uint64_t a = v->run[k].lo, b = v->run[k].hi;
         if (b < lo || a > hi || (!mapped && (b == lo || a == hi))) continue;
+        if (mapped && a == mlo && lo >= b && mtl_pool_extend(v->base + a, mhi - mlo)) { grown = 1; continue; }
         mtl_pool_del(v->base + a);
         if (!mapped) { if (a < lo) mtl_pool_add(v->base + a, lo - a); if (b > hi) mtl_pool_add(v->base + hi, b - hi); }
     }
-    if (mapped) mtl_pool_add(v->base + mlo, mhi - mlo);
+    if (mapped && !grown) mtl_pool_add(v->base + mlo, mhi - mlo);   // a large pool grown at its end keeps its entry (mtl_pool_extend)
     for (int a = 1; a < nn; a++) for (int b = a; b > 0 && nl[b][0] < nl[b - 1][0]; b--) { uint64_t t0 = nl[b][0], t1 = nl[b][1]; nl[b][0] = nl[b - 1][0]; nl[b][1] = nl[b - 1][1]; nl[b - 1][0] = t0; nl[b - 1][1] = t1; }
     v->nrun = nn; for (int k = 0; k < nn; k++) { v->run[k].lo = nl[k][0]; v->run[k].hi = nl[k][1]; }
 }
@@ -2325,7 +2351,35 @@ static void vpt_set(struct vpool *v, uint64_t voff, uint64_t size, const uint8_t
         vpte **l = &v->pt[(voff + o) >> 21];
         if (!*l && !phys) continue;   // never mapped: stays unmapped
         if (!*l && !(*l = calloc(VPT_LEAF, sizeof **l))) die("sparse pool page table allocation failed");
-        (*l)[((voff + o) >> 12) & (VPT_LEAF - 1)] = (vpte){phys ? phys + o : NULL, gen};
+        vpte *e = &(*l)[((voff + o) >> 12) & (VPT_LEAF - 1)]; *e = (vpte){phys ? phys + o : NULL, gen, phys ? 1u : e->live};
+    }
+}
+static const vpte *vpt_get(const struct vpool *v, uint64_t o);
+// DM_NVN_SPARSE_SAFE: a sparse unmap keeps its pages until the work submitted so far has completed (the fence after which the run's zero-copy buffer leaves the residency set, deferred
+// release), then makes them inaccessible as before, unless a newer request has mapped them meanwhile (the page table's generation has moved on). Until then a mapping over them waits for the
+// GPU first (vpool_overwrites); after it, they are plain unmapped pages again (no wait). Caller holds g_vp_mu. The queue is worked through on later MapVirtual calls and at pool finalize
+enum { VUNMAP_N = 4096 };
+static struct { struct vpool *v; uint64_t off, len, gen, fence; int64_t up; } g_vun[VUNMAP_N];   // up: the newest upload batch begun at the unmap (a deswizzle may read the pages through the run's buffer) static int g_nvun;
+static _Atomic uint64_t g_vp_released, g_vp_unmap_lost;
+static void vunmap_defer(struct vpool *v, uint64_t off, uint64_t len) {
+    if (g_nvun == VUNMAP_N) { atomic_fetch_add(&g_vp_unmap_lost, 1); return; }   // full: these pages stay kept (safe; a later mapping over them waits)
+    g_vun[g_nvun++] = (typeof(g_vun[0])){v, off, len, atomic_load(&g_vp_gen), mtl_last_fence() + 1, mtl_up_seq_now()};
+}
+static void vunmap_run(int all) {   // caller holds g_vp_mu; all: the pool is going (the GPU has finished, see vpool_release)
+    uint64_t done = mtl_done_fence(), pg = (uint64_t)getpagesize();
+    for (int i = 0; i < g_nvun; ) {
+        if (!all && (g_vun[i].fence > done || mtl_up_busy_through(g_vun[i].up))) { i++; continue; }   // and the upload batches begun before the unmap
+        struct vpool *v = g_vun[i].v; uint64_t off = g_vun[i].off, len = g_vun[i].len, gen = g_vun[i].gen;
+        int alive = 0; for (int k = 0; k < g_nvp && !alive; k++) alive = g_vp[k] == v;
+        g_vun[i] = g_vun[--g_nvun];
+        if (!alive) continue;
+        for (uint64_t a = (off + pg - 1) & ~(pg - 1); a + pg <= off + len && a + pg <= v->len; a += pg) {   // whole host pages only, none mapped since
+            int ok = 1; for (uint64_t q = 0; q < pg && ok; q += 0x1000) { vpte *e = (vpte *)vpt_get(v, a + q); ok = !e || (!e->phys && e->gen <= gen); }
+            if (!ok) continue;
+            if (mmap(v->base + a, pg, PROT_NONE, MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0) == MAP_FAILED) continue;
+            for (uint64_t q = 0; q < pg; q += 0x1000) { vpte *e = (vpte *)vpt_get(v, a + q); if (e) e->live = 0; }
+            atomic_fetch_add(&g_vp_released, 1);
+        }
     }
 }
 static int vpool_map(struct vpool *v, const map_req *r) {   // caller holds g_vp_mu; → 0 on failure
@@ -2341,6 +2395,13 @@ static int vpool_map(struct vpool *v, const map_req *r) {   // caller holds g_vp
         static _Atomic uint64_t n; if (!atomic_fetch_add(&n, 1)) LOG("[nvn] virtual pool %p: a request %s (%s %#llx+%#llx) is kept in the page table only: textures read it, the GPU cannot address it (later cases are not logged)",
                                                                    (const void *)v->pool, (uint64_t)r->voff + r->size > v->len ? "beyond the reservation" : "not aligned to the host page", r->phys ? "map" : "unmap", (unsigned long long)r->voff, (unsigned long long)r->size);
         return 1;
+    }
+    if (!r->phys && mtl_sparse_safe()) {   // unmap, DM_NVN_SPARSE_SAFE: the pages stay as they are (the page table says unmapped, so textures read 0). A zero-copy buffer made over them
+        // (the run's, a large chunk, an alias) may still be in the residency set or in submitted work until its deferred release; inaccessible pages under it are a GPU page fault, or a
+        // failed IOGPU prepare when it is wired again (PRAGMATA's tower-ring hang and the kernel panic that followed it)
+        atomic_fetch_add(&g_vp_kept, 1);
+        vrun_set(v, (uint64_t)r->voff, (uint64_t)r->voff + r->size, 0);
+        vunmap_defer(v, (uint64_t)r->voff, r->size); return 1;
     }
     if (!r->phys) {   // unmap: inaccessible pages again
         if (mmap((void *)to, r->size, PROT_NONE, MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0) == MAP_FAILED) { LOG("[RED] virtual pool unmap %#lx+%#llx failed (errno %d)", (unsigned long)to, (unsigned long long)r->size, errno); return 0; }
@@ -2365,6 +2426,13 @@ NVN(nvnMemoryPoolMapVirtual, NVNboolean, NVNmemoryPool *p, int n, const NVNmappi
         else o->vmode = 2;
     }
     struct vpool *v = o->vmode == 2 ? vpool_of(o) : NULL; int ok = 1;
+    if (g_nvun) vunmap_run(0);   // DM_NVN_SPARSE_SAFE: pages kept by earlier unmaps whose work has completed
+    if (g_nvmun) vmunmap_run();   // and reservations of dropped pools
+    if (v && mtl_sparse_safe()) {   // new pages over ones mapped before: the GPU may still read the old ones through a buffer made over them, so let the submitted work finish first
+        int over = 0; for (int i = 0; i < n && !over; i++) over = vpool_overwrites(v, &r[i]);
+        if (over) { pthread_mutex_unlock(&g_vp_mu); mtl_finish(); uint64_t w = atomic_fetch_add(&g_vp_waits, 1) + 1; pthread_mutex_lock(&g_vp_mu); v = o->vmode == 2 ? vpool_of(o) : NULL;
+            if (w == 1 || w % 256 == 0) LOG("[nvn] DM_NVN_SPARSE_SAFE: %llu mapping requests over pages that may be under a live buffer waited for the GPU first (%llu unmaps deferred, %llu host pages released after their work, %d still queued, %llu kept for good: queue full)", (unsigned long long)w, (unsigned long long)atomic_load(&g_vp_kept), (unsigned long long)atomic_load(&g_vp_released), g_nvun, (unsigned long long)atomic_load(&g_vp_unmap_lost)); }
+    }
     for (int i = 0; v && i < n && ok; i++) ok = vpool_map(v, &r[i]);
     pthread_mutex_unlock(&g_vp_mu);
     if (v) return (NVNboolean)ok;

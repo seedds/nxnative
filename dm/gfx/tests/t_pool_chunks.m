@@ -80,11 +80,11 @@ int main(void) { @autoreleasepool {
     mtl_pool_addressed((void *)0x1000, 0x1000); mtl_pool_addressed((void *)0x3000, 0x1000); mtl_pool_addressed((void *)0x2000, 0x1000); CHECK("touching ranges merge", g_naddr == 1 && g_addr[0].lo == 0x1000 && g_addr[0].hi == 0x4000);
     mtl_pool_addressed((void *)0x2000, 0x100); CHECK("a covered range adds nothing", g_naddr == 1);
     mtl_pool_addressed((void *)0x8000, 0x1000); CHECK("a separate range", g_naddr == 2 && addr_meets(0x8800, 0x8900) && !addr_meets(0x5000, 0x6000) && addr_meets(0x3fff, 0x5000) && !addr_meets(0x4000, 0x5000));
-    // Once one is given out, the table reaches all of it, and lookups then have the whole pool
+    // Once one is given out, the table reaches all of it through its segments; lookups keep their chunks
     mtl_pool_addressed((void *)(uintptr_t)(base + 900 * MB), 4096);
     mtl_sub_begin(); CHECK("pool table made again", gmem_map_gpu() != 0); finish();
-    CHECK("the whole pool has an entry", g_big[0].full > 0 && g_pools[g_big[0].full - 1].end == base + GB);
-    CHECK("lookups take it", look(base + 900 * MB, 4096).length == GB);
+    CHECK("the table reaches it through the pool's own segments, not a whole-pool entry", g_big[0].full == 0 && g_big[0].nseg > 0);   // big_segments
+    CHECK("lookups still take chunks", look(base + 900 * MB, 4096).length < GB);
     // The lookup hint of a 2 MiB chunk: tagged with the chunk, names the entry holding all of it, and a chunk only partly inside has none of its own
     {
         const uint8_t *map = (const uint8_t *)gmem_map().contents;

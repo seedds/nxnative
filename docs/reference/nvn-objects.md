@@ -85,6 +85,28 @@ The game may also write into an NVN object directly, without an NVN call, throug
 - **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): the title's Earth read an 80 MB buffer of zeros, and the terrain's mesh shader its 80 MB instance buffer (448 KB mapped, in two pieces).
 - **Check:** `t_sparse_buf` (1,500 separate runs, a contiguous redirect, a two-piece run read by a GPU blit, a piece after a hole that is not taken as a run); it fails with `DM_NVN_VRUN_MAX=1024` or `DM_NVN_SPARSE_RUN=0`.
 
+### Pages and pool tables changed under live GPU work (sparse safe mode)
+
+- **Symptom:** a GPU page fault (`gpuEvent-*.ips` in `/Library/Logs/DiagnosticReports` with a `bif0_fault` read, `[RED] command buffer execution error` with `PageFault`, macOS restarting the GPU minutes later) or a kernel panic in IOGPUFamily's memory descriptor prepare (`kIOReturnNoMemory`, then a NULL dereference), in a game that maps sparse pages while it runs. Before it, the residency set and the Mac's wired memory may grow by tens of gigabytes.
+- **Cause:** the host changed memory that submitted GPU work could still reach:
+  - a sparse unmap made the pages inaccessible at once, while a zero-copy buffer over them (the run's own, a large pool's chunk, an alias) stayed in the residency set until its deferred release; a mapping over live pages, or a pool's finalize, did the same;
+  - a sparse run's pool entries were replaced in steps, and a lookup or a pool table built in between saw the run missing;
+  - the raw global-memory pool table, a snapshot taken when a dispatch was encoded, missed pages mapped during the encode, and once it was filled again in place at the end of the submission, under segments the GPU was already running (a lookup that lands on a half-written row resolves to a wrong address);
+  - retired objects waited for the submission's fence, but an upload batch reads pool buffers it looked up without holding them and may complete later;
+  - large pools wired new whole-pool or chunk buffers each time a run grew, and re-uploaded textures and their staging piled up faster than the GPU released them.
+- **Fix** (`DM_NVN_SPARSE_SAFE`, default on; `hle_nvn.c` `vpool_*` / `vrun_set`, `nvn_mtl.m` `nocopy_buf`, `gmem_map_gpu`, `gmem_commit_patch`, `gmem_segment_commit`):
+  - an unmap keeps its pages until the work submitted before it, and the upload batches begun before it, have completed; a mapping over pages a live buffer may wrap waits for the GPU first; a dropped pool's reservation is unmapped after its runs' buffers have left the residency set;
+  - every zero-copy buffer is checked first: a range with a hole or an unreadable page is refused with a `[RED]` line instead of reaching IOGPU, and write-protected pages are made writable;
+  - a run's update holds a lock the lookups' slow path and the table rebuild take too, so they see the runs before or after it;
+  - at commit, a pool table built in the submission is filled again if the pools changed, or a new one is built and every argument word of the submission that holds a table address is pointed at it; before each segment commit the table is brought up to date and then counts as in flight, so it is never rewritten under the GPU (`DM_NVN_GMEM_SEG=0` is the old behaviour);
+  - retired objects also wait for every upload batch begun before them;
+  - a large pool grown at its end keeps its entry (`mtl_pool_extend`), the table reaches it through 64 MB segments kept across growth, and superseded chunks are retired;
+  - a re-uploaded texture waits, bounded, for its spare (`DM_NVN_REUP_WAIT_MS`, default 100), and the CPU upload staging is pooled and bounded (`DM_NVN_CSTG_MB`, default 512);
+  - the GPU deswizzle checks each job's ranges before the dispatch and in the kernels;
+  - test guards, off unless set: `DM_NVN_RES_LIMIT_MB` and `DM_NVN_WIRED_LIMIT_MB` end the process before a commit would pass them; `DM_NVN_POOLDUMP=<file>` writes where the pools sit in GPU addresses, so a fault address from a gpuEvent report can be placed.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): the tower-ring cutscene of the opening (page faults, a kernel panic, a residency set of 45 GB; the table made 71 whole-pool buffers of one growing run resident in 300 frames, and the re-uploads added 40 GB of textures).
+- **Check:** `t_sparse_safe` (CPU only, no command buffer committed): kept and deferred unmaps, refused zero-copy ranges, retired chunks, pooled staging, pool entries through joins, holes, growth and unmap + map, upload-batch waits, the table refilled and re-pointed at commit and kept under a committed segment, deswizzle bounds. Open: [PRAGMATA](../../dm/games/0400C76024710000/README.md#open) still meets intermittent compute page faults near the tower ring.
+
 ### Virtual pools of one texture each, mapped before and after the texture
 
 - **Symptom:** `[RED] MapVirtual: non-contiguous mapping (true sparse) not implemented`, on small virtual pools; streamed textures black or missing (OCTOPATH TRAVELER's village ground and plants).

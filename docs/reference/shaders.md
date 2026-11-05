@@ -453,6 +453,12 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Reader:** `uepak.py` writes them out as version 2 archives, so the split reads them as any other. The pak beside them can name the global shader cache as [an inline game's does](#unreal-engine-427-shaders-inline-in-iostore-export-bundles), so that name alone does not tell the two apart: `inline_in_containers` does, by the shader libraries.
 - **Found on:** [FINAL FANTASY RESONANCE](../../dm/games/0100606026F12000/README.md) (Unreal Engine 5.6.1): 73,496 unique shaders (9,253 vertex, 61,305 pixel, 2,934 compute, 4 geometry). The symptom on its [Asian release](../../dm/games/0100B8A026F14000/README.md#found-on-this-game).
 
+### Unreal Engine 5.6 Switch 2 shader records
+
+- **How it is stored:** the Switch 2 renderer (`SF_GLSL_SWITCH2`) keeps its shaders in IoStore shader libraries as Unreal Engine 5.6's desktop one does, but each decoded record has the `LSLG` layout without `LSLG` and its stage tag: a header with a hash and the shader's source name, u32 code length, the code area (the Switch 2's 0x80-byte header and Ampere code), u32 control length, the NVN2 control section (magic 0x98761234, version 0xc9) and a 22-byte tail. The stage is the archive entry's frequency.
+- **Reader:** `uepak.py` `nvn2_record` takes the control section where the lengths agree (the code may hold the magic's bytes too) and the code area's length from control +0x44, checked against the word in front of it; `shader_split.py` takes the stage from the entry's frequency when the record has no tag. Unreal Engine 5.4's Switch 2 records (`sage_record`) are a different layout.
+- **Found on:** Orbitals (`040004F027560000`, Unreal Engine 5.6.1; its profile comes in a later PR): 40,995 records, 23,432 unique shaders (3,415 compute, 3,556 vertex, 16,459 pixel, 2 geometry). Before, the split stopped at the first record: `shader 0 is not an LSLG record`.
+
 ### IoStore patch containers keep their shader groups in the base container
 
 - **Symptom:** `ValueError: …/Glow-Switch_0_P.utoc: shader group 0 has no chunk` from `uepak.py io_archive` while the NSP script decodes the shaders (`decode_ue_shaders`, after `[4/8] UE shader decode`).

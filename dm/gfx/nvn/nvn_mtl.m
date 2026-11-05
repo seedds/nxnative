@@ -8793,6 +8793,13 @@ static void c0_sample_rows(uint8_t *d, uint32_t samples) {
     }
     uint32_t info[4] = { samples - 1, (uint32_t)__builtin_ctz(samples), 0, 0 };
     memcpy(d + DMSH_C0_SAMPLE_TABLE, table[samples], DMSH_C0_SAMPLE_BYTES); memcpy(d + DMSH_C0_SAMPLE_INFO, info, sizeof info);
+    // NVN2's GLSLC reads each nibble as a signed offset from the pixel centre in 1/16 pixel, not from its corner: gl_SamplePosition is ((byte ^ 0x88) & 15) / 16 - 0.5 per nibble
+    // (PRAGMATA 9c045635fda5ae99, 213 of its pixel shaders), and IPA.OFFSET takes byte << 8 as is, a signed 12-bit offset from the centre (NAK load_barycentric_offset subtracts
+    // 2048 from a corner-relative u4 << 8 itself; PRAGMATA 4a9d4507eea6c837 does not). So the corner-relative table, 0x88 for one sample, put every sample in the corner on NVN2.
+    // DM_NVN_SAMPLE_CENTRED=0 keeps the old table (A/B)
+    static int centred = -1;
+    if (centred < 0) { const char *e = getenv("DM_NVN_SAMPLE_CENTRED"); centred = dm_sdk_ounce() && !(e && !strcmp(e, "0")); }
+    if (centred) for (uint32_t i = 0; i < DMSH_C0_SAMPLE_BYTES; i++) d[DMSH_C0_SAMPLE_TABLE + i] ^= 0x88;
 }
 static uint64_t g_geo_bind[5];
 // Which game shaders a failed command buffer encoded. A GPU fault's error names no pass or shader (Metal 4's commit feedback has only the error and two times), and a fault does not always stop

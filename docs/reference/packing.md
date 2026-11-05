@@ -17,6 +17,13 @@
 - **Not known from the file:** whether the update is the whole game. The flag does not promise it (the spec says such an update needs a matching base elsewhere), and an update holding only changed files would pack and then fail at boot, after a full shader build. The scripts print that the update is taken as the whole game. Measured: both NUPs at hand have an update RomFS that holds every path of its base (Age of Imprisonment: 2,065 base files, 2,153 in the update, none missing; Yoshi and the Mysterious Book: 147 and 147, none missing).
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md). Reproduced with its base dump repackaged by the reference tool as a standalone-update fixture; this checks packaging, not the reported 1.8.0's contents or gameplay. Synthetic tests cover both entry points, both forms of no base, multiple versions, control data, DLC and incomplete updates.
 
+### A NUP of a game with no profile stops before the survey
+
+- **Symptom:** `[RED] a NUP packs only a game with a profile, and <title ID> has none: the survey that makes a provisional profile reads NSPs` ([issue #1265](https://github.com/seedds/nxnative/issues/1265)).
+- **Cause:** the survey and the build ID lookup (`same_build`) ran `nx_extract --manifest`, which reads NSPs.
+- **Fix:** `survey_nup` reads the newest version from the container: its ExeFS, a RomFS manifest in `nx_extract`'s format (path, size, first 32 bytes; `Nup.head` inflates only those), the NROs whole and the control data. `same_build` reads main from the container. A dump folder still needs a profile.
+- **Found on:** Star Fox (`0400E88025B1A000`, update v131072; no profile in the repository) and The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, issue #1265).
+
 ## Build tools
 
 ### Homebrew .NET is on PATH but apphosts cannot find the runtime

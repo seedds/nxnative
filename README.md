@@ -75,7 +75,7 @@ Controls, saves and settings: [Playing](docs/playing.md).
 
 ### Switch 2 games
 
-A Switch 2 game is built from one [NUP](https://github.com/a55uka/nup) container (a `.nup` file) or a folder of its files, not from NSPs. Neither needs `prod.keys`, and both work only for a game this project already has a profile for, such as the Switch 2 games in the [gallery](#games). You get a Mac app; iPhone and iPad are untested.
+A Switch 2 game is built from one [NUP](https://github.com/a55uka/nup) container (a `.nup` file) or a folder of its files, not from NSPs. Neither needs `prod.keys`. A game this project has no profile for is surveyed and gets a provisional profile, as NSPs do ([Port another game](docs/development.md#port-another-game)), which may not boot. You get a Mac app; iPhone and iPad are untested.
 
 **From a `.nup` file**, which holds the base game, its updates and DLC in one file. Give the file, or a folder that holds it:
 
@@ -102,7 +102,7 @@ A NUP without the base game also works, when its base package is empty or it has
 python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza --platform mac-app
 ```
 
-The app has no icon, because the folder holds none. To turn such a folder into a NUP: `nup pack ~/Games/DonkeyKongBananza game.nup`.
+An update's folder alone will do (no `base/`), and so will `exefs/` and `romfs/` directly in the folder, as `nup extract` writes them, which count as `base/`. The app has no icon, because the folder holds none. To turn such a folder into a NUP: `nup pack ~/Games/DonkeyKongBananza game.nup`.
 
 ## Games
 

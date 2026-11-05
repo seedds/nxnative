@@ -563,6 +563,7 @@ class Default(unittest.TestCase):
         start = script.index("    gpus = (args.gpu or PSO_GPUS).strip()")
         end = script.index("    ipa_env['DM_PSO_GPUS'] = gpus", start)
         block = '\n'.join(line[4:] for line in script[start:end].splitlines())
+        block = script[script.index('def ios_gpus('):script.index('def ios_wants_pulling(')] + block   # the choice itself, which the shader step shares
         for p4, pg, expected in [('on', '', 'g18p'), ('on', 'g18p   applegpu_g19p', 'g18p,applegpu_g19p'),
                                  ('off', '', 'none'), ('off', 'g19p', 'none')]:
             for explicit, setting in [('', ''), ('g17p', ''), ('none', ''), ('', 'g16p')]:

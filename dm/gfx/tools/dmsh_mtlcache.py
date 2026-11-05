@@ -31,9 +31,9 @@ def compiler_id(sdk):
 
 
 class Cache:
-    def __init__(self, store, targets, work):
-        """store: shader_cache.Store; targets: {name: (sdk, record, compile)}, compile(msl, air, lib) as ios_metal.compile; work: a folder for temporary .air files"""
-        self.store, self.targets, self.work = store, targets, work
+    def __init__(self, store, targets, work, sink=None):
+        """store: shader_cache.Store; targets: {name: (sdk, record, compile)}, compile(msl, air, lib) as ios_metal.compile; work: a folder for temporary .air files; sink: optional callable(target, filename, data_or_fn)"""
+        self.store, self.targets, self.work, self.sink = store, targets, work, sink
         self.ident = {t: hashlib.sha256(FORMAT + b'\0' + rec.encode() + b'\0' + compiler_id(sdk).encode()).digest() for t, (sdk, rec, _) in targets.items()}
         self.stats, self.lock = collections.Counter(), threading.Lock()
 
@@ -56,16 +56,31 @@ class Cache:
     def compile(self, target, msl, lib):
         """msl → lib for target: a clone of the library that the same source compiled to before, or a compile (then kept). Raises CalledProcessError as the compile does"""
         p = self.path(target, open(msl, 'rb').read())
+        if self.sink is not None and self.store.has(p):
+            self.sink(target, os.path.basename(lib), lambda s=p: self.store.get(s))
+            self.count((target, 'reused')); return
         if self.store.to_file(p, lib): self.count((target, 'reused')); return
         tmp = f'{lib}.tmp-{os.getpid()}-{threading.get_ident()}'
         self._compile(target, msl, tmp)
-        os.replace(tmp, lib)
-        self.store.put_file(p, lib); self.count((target, 'compiled'))
+        if self.sink is not None:
+            with open(tmp, 'rb') as f: data = f.read()
+            self.sink(target, os.path.basename(lib), data)
+            self.store.put(p, data)
+            try: os.unlink(tmp)
+            except OSError: pass
+        else:
+            os.replace(tmp, lib)
+            self.store.put_file(p, lib)
+        self.count((target, 'compiled'))
 
     def compile_split(self, target, msl, a, b, split):
         """msl → two libraries cut from its one compile, split(the library's bytes) → (a's bytes, b's bytes): clones of what the same source gave before, or a compile (then both kept, not the whole
         library, so an output stays a clone as compile's are). Raises CalledProcessError as the compile does, and what split raises"""
         p = self.path(target, open(msl, 'rb').read()); q = p[:-len('.metallib')] + '_x.metallib'
+        if self.sink is not None and self.store.has(p) and self.store.has(q):
+            self.sink(target, os.path.basename(a), lambda s=p: self.store.get(s))
+            self.sink(target, os.path.basename(b), lambda s=q: self.store.get(s))
+            self.count((target, 'reused')); return
         if self.store.has(p) and self.store.has(q):
             self.store.to_file(p, a); self.store.to_file(q, b); self.count((target, 'reused')); return
         whole = f'{a}.tmp-{os.getpid()}-{threading.get_ident()}'
@@ -73,10 +88,15 @@ class Cache:
         try:
             with open(whole, 'rb') as f: pieces = split(f.read())
         finally: os.unlink(whole)
-        for lib, data in zip((a, b), pieces):
-            with open(whole, 'wb') as f: f.write(data)
-            os.replace(whole, lib)
-        with self.store.batch(): self.store.put_file(q, b); self.store.put_file(p, a)
+        if self.sink is not None:
+            self.sink(target, os.path.basename(a), pieces[0])
+            self.sink(target, os.path.basename(b), pieces[1])
+            with self.store.batch(): self.store.put(p, pieces[0]); self.store.put(q, pieces[1])
+        else:
+            for lib, data in zip((a, b), pieces):
+                with open(whole, 'wb') as f: f.write(data)
+                os.replace(whole, lib)
+            with self.store.batch(): self.store.put_file(q, b); self.store.put_file(p, a)
         self.count((target, 'compiled'))
 
     def _check(self, target, d, stems, mac_dir):

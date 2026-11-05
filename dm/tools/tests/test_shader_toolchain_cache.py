@@ -261,6 +261,24 @@ class ShaderCache(unittest.TestCase):
         self.assertEqual({p.name: json.loads(p.read_text()) if p.suffix == '.json' else p.read_bytes() for p in out.iterdir()}, expected)
         self.assertEqual(json.loads((out / (vertex + '_b.json')).read_text())['vs_pad'], [7])
 
+    def test_restore_cache_direct_stream(self):
+        digest = self.digest()
+        root = self.ns['cache_path'](digest)
+        self.ns['STORE'].put(f'{root}/mac/key_b.json', b'{"chain": "old", "stage": "vs"}')
+        self.ns['STORE'].put(f'{root}/mac/key_b.metallib', b'METALLIB_DATA')
+        self.ns['STORE'].put(f'{root}/mac/key_b.metal', b'MSL_DATA')
+        stream = {'mac': {}, 'ios': {}}
+        self.ns['CACHED_STREAM'] = stream
+        self.ns['CACHED_STREAM_LOCK'] = threading.Lock()
+        self.assertTrue(self.ns['restore_cache']('key', digest))
+        self.assertEqual(os.listdir(self.ns['out']), [])
+        self.assertIn('key_b.json', stream['mac'])
+        self.assertIn('key_b.metal', stream['mac'])
+        self.assertIn('key_b.metallib', stream['mac'])
+        self.assertEqual(stream['mac']['key_b.metal'], b'MSL_DATA')
+        self.assertEqual(stream['mac']['key_b.metallib'](), b'METALLIB_DATA')
+        self.assertIn(b'"chain": "test-chain"', stream['mac']['key_b.json'])
+
 
 class TargetSelection(unittest.TestCase):
     def test_mesh_compiles_only_requested_targets(self):
@@ -404,6 +422,42 @@ class MetalPrefill(unittest.TestCase):
         with self.assertRaises(ValueError): self.cache.compile_split('mac', str(msl), str(a), str(b), refuse)
         self.assertEqual(sorted(p.name for p in self.root.glob('a.metallib*')), [])
         self.assertFalse(b.exists()); self.assertEqual(self.cache.stats['mac', 'compiled'], 0)
+
+    def test_compile_with_sink(self):
+        sink_results = {}
+        def sink(target, filename, data_or_fn):
+            sink_results[filename] = data_or_fn() if callable(data_or_fn) else data_or_fn
+        cache = dmsh_mtlcache.Cache(self.cache.store, self.cache.targets, self.cache.work, sink=sink)
+        msl = self.root / 'stream.metal'; msl.write_bytes(b'STREAM')
+        dest = self.root / 'stream.metallib'
+        cache.compile('mac', str(msl), str(dest))
+        self.assertFalse(dest.exists())   # no loose file written to dest
+        self.assertEqual(sink_results['stream.metallib'], b'TESTED STREAM')
+        self.assertEqual(cache.stats['mac', 'compiled'], 1)
+        # Second call hits cache and delivers callable without writing to disk
+        sink_results.clear()
+        cache.compile('mac', str(msl), str(dest))
+        self.assertFalse(dest.exists())
+        self.assertEqual(sink_results['stream.metallib'], b'TESTED STREAM')
+        self.assertEqual(cache.stats['mac', 'reused'], 1)
+
+    def test_compile_split_with_sink(self):
+        sink_results = {}
+        def sink(target, filename, data_or_fn):
+            sink_results[filename] = data_or_fn() if callable(data_or_fn) else data_or_fn
+        cache = dmsh_mtlcache.Cache(self.cache.store, self.cache.targets, self.cache.work, sink=sink)
+        msl = self.root / 'split_stream.metal'; msl.write_bytes(b'SPLIT')
+        a, b = self.root / 'a.metallib', self.root / 'b.metallib'
+        split = lambda lib: (lib[:6], lib[6:])
+        cache.compile_split('mac', str(msl), str(a), str(b), split)
+        self.assertFalse(a.exists()); self.assertFalse(b.exists())
+        self.assertEqual((sink_results['a.metallib'], sink_results['b.metallib']), (b'TESTED', b' SPLIT'))
+        self.assertEqual(cache.stats['mac', 'compiled'], 1)
+        sink_results.clear()
+        cache.compile_split('mac', str(msl), str(a), str(b), split)
+        self.assertFalse(a.exists()); self.assertFalse(b.exists())
+        self.assertEqual((sink_results['a.metallib'], sink_results['b.metallib']), (b'TESTED', b' SPLIT'))
+        self.assertEqual(cache.stats['mac', 'reused'], 1)
 
 
 if __name__ == '__main__':

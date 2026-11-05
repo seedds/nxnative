@@ -268,6 +268,13 @@ STORE = shader_cache.Store(os.environ.get('DMSH_CAS', os.path.join(cache_root, '
 atexit.register(STORE.close)   # folds its log into the one file
 CAS_LOCKS, CAS_LOCKS_GUARD = {}, threading.Lock()
 PRE_STATS = collections.Counter()
+DIRECT_STREAM = os.environ.get('DMSH_DIRECT_STREAM', '1') == '1'
+CACHED_STREAM = {'mac': {}, 'ios': {}}
+CACHED_STREAM_LOCK = threading.Lock()
+
+def sink_entry(target, filename, data_or_fn):
+    with CACHED_STREAM_LOCK:
+        CACHED_STREAM[target][filename] = data_or_fn
 # -fpreserve-invariance: vertex positions are marked [[invariant]], but without this flag Metal does not promise that two different shaders compute the same expression to the same value; on Maxwell the same multiply-adds always agree.
 # Super Mario Odyssey draws a depth pre-pass with alRenderDepthOnly, then the G-buffer with another vertex shader and depth test less-or-equal: a hair off and the test failed, leaving those pixels with old content (Cap Kingdom's ground in 32x32 blocks)
 # -O1: the front end's -O2 (CorrelatedValuePropagation, then SimplifyCFG) folds the translated shaders' repeated tests of one value into switches whose cases jump past their own join.
@@ -360,6 +367,7 @@ def restore_cache(key, digest):
     found = cache_outputs(key, digest, cached=True)
     if not found: return False
     root, files = found
+    stream = globals().get('CACHED_STREAM')
     for label, names in files.items():
         directory = out if label == 'mac' else IOSOUT
         for name in names:
@@ -367,9 +375,20 @@ def restore_cache(key, digest):
             if name.endswith('.json'):
                 data = STORE.get(src)
                 if data is None: return False   # pruned by another build since the look above: a miss, which builds it
-                tmp = dst + '.tmp-' + str(os.getpid()) + '-' + str(threading.get_ident())
-                with open(tmp, 'wb') as f: f.write(re.sub(rb'("chain"\s*:\s*")[^"]*"', rb'\g<1>' + CHAIN.encode() + b'"', data, count=1))
-                os.replace(tmp, dst)
+                adjusted = re.sub(rb'("chain"\s*:\s*")[^"]*"', rb'\g<1>' + CHAIN.encode() + b'"', data, count=1)
+                if stream is not None:
+                    with CACHED_STREAM_LOCK: stream[label][name] = adjusted
+                else:
+                    tmp = dst + '.tmp-' + str(os.getpid()) + '-' + str(threading.get_ident())
+                    with open(tmp, 'wb') as f: f.write(adjusted)
+                    os.replace(tmp, dst)
+            elif stream is not None:
+                if name.endswith('.metal'):
+                    data = STORE.get(src)
+                    if data is None: return False
+                    with CACHED_STREAM_LOCK: stream[label][name] = data
+                else:
+                    with CACHED_STREAM_LOCK: stream[label][name] = (lambda s=src: STORE.get(s))
             elif not STORE.to_file(src, dst): return False
     return True
 
@@ -416,9 +435,15 @@ def bf_cache_restore(key, digest, fmeta, fmsl):
     root = bf_cache_root(digest)
     names = ['metal'] + (['mac.metallib'] if 'mac' in TARGETS else []) + (['ios.metallib'] if IOSOUT else [])
     if not all(STORE.has(f'{root}/{n}') for n in names): return False
-    STORE.to_file(f'{root}/metal', fmsl)
-    if 'mac' in TARGETS: STORE.to_file(f'{root}/mac.metallib', os.path.join(out, key + '_bf.metallib'))
-    if IOSOUT: STORE.to_file(f'{root}/ios.metallib', os.path.join(IOSOUT, key + '_bf.metallib'))
+    stream = globals().get('CACHED_STREAM')
+    if stream is not None:
+        with CACHED_STREAM_LOCK:
+            if 'mac' in TARGETS: stream['mac'][key + '_bf.metallib'] = (lambda s=f'{root}/mac.metallib': STORE.get(s))
+            if IOSOUT: stream['ios'][key + '_bf.metallib'] = (lambda s=f'{root}/ios.metallib': STORE.get(s))
+    else:
+        STORE.to_file(f'{root}/metal', fmsl)
+        if 'mac' in TARGETS: STORE.to_file(f'{root}/mac.metallib', os.path.join(out, key + '_bf.metallib'))
+        if IOSOUT: STORE.to_file(f'{root}/ios.metallib', os.path.join(IOSOUT, key + '_bf.metallib'))
     BF_STATS['hit'] += 1
     return True
 
@@ -431,8 +456,14 @@ def bf_cache_publish(digest, fmsl, maclib, ioslib, fmeta):
         STORE.put(f'{root}/fetch.json', json.dumps(fmeta, ensure_ascii=False, indent=1).encode())
 
 def write_refl(key, refl):
+    stream = globals().get('CACHED_STREAM')
     for target, d in (('mac', out),) + ((('ios', IOSOUT),) if IOSOUT else ()):
-        atomic_json(os.path.join(d, key + '_b.json'), MTL.with_compiler(target, refl))
+        compiled_refl = MTL.with_compiler(target, refl)
+        if stream is not None:
+            with CACHED_STREAM_LOCK:
+                stream[target][key + '_b.json'] = json.dumps(compiled_refl, ensure_ascii=False, indent=1).encode()
+        else:
+            atomic_json(os.path.join(d, key + '_b.json'), compiled_refl)
 
 def fetch_finish(key, src, refl):
     if refl['stage'] != 'ps': return refl
@@ -1531,7 +1562,7 @@ for _d in [out] + ([IOSOUT] if IOSOUT else []):
     if (not want or STAMP_BEFORE != INPUTS) and os.path.exists(os.path.join(_d, dmsh_chain.STAMP)): os.unlink(os.path.join(_d, dmsh_chain.STAMP))
     if not want and os.path.exists(os.path.join(_d, CAS_USED)): os.unlink(os.path.join(_d, CAS_USED))   # written again at the end, with the stamp
 w = tempfile.mkdtemp(prefix='dmsh_', dir=os.environ.get('WORK'))
-MTL = dmsh_mtlcache.Cache(STORE, {'mac': ('macosx', MAC_RECORD, mac_compile), **({'ios': ('iphoneos', ios_metal.RECORD, ios_metal.compile)} if IOSOUT else {})}, w)
+MTL = dmsh_mtlcache.Cache(STORE, {'mac': ('macosx', MAC_RECORD, mac_compile), **({'ios': ('iphoneos', ios_metal.RECORD, ios_metal.compile)} if IOSOUT else {})}, w, sink=sink_entry if DIRECT_STREAM else None)
 # first take the libraries earlier chain versions left on disk: the b-*/ beside the output (iOS: the folder of the same name) and the roots DMSH_PREFILL lists
 for _spec in [cache_root + ('=' + os.path.dirname(IOSOUT) if IOSOUT else '')] + [x for x in os.environ.get('DMSH_PREFILL', '').split(os.pathsep) if x]:
     _mac, _, _ios = _spec.partition('=')
@@ -1570,10 +1601,20 @@ for r in xr:
         if m: xerr[m.group(1)] = m.group(2)[:160]
 def fin(key):
     if key in cache_hits:
-        refl = json.load(open(os.path.join(out, key + '_b.json')))
-        src = open(os.path.join(out, key + '_b.metal')).read() if refl['stage'] in ('ps', 'vs') else ''
+        if DIRECT_STREAM:
+            refl = json.loads(CACHED_STREAM['mac'][key + '_b.json'])
+            m = CACHED_STREAM['mac'].get(key + '_b.metal')
+            src = (m if isinstance(m, str) else m.decode('utf-8')) if refl['stage'] in ('ps', 'vs') and m else ''
+        else:
+            refl = json.load(open(os.path.join(out, key + '_b.json')))
+            src = open(os.path.join(out, key + '_b.metal')).read() if refl['stage'] in ('ps', 'vs') else ''
         if refl['stage'] == 'vs': write_refl(key, pull_finish(key, src, vin_finish(key, src, refl)))
-        if refl['stage'] == 'ps': refl.update(ps_libraries(key, os.path.join(out, key + '_b.metal'), src))
+        if refl['stage'] == 'ps':
+            metal_path = os.path.join(out, key + '_b.metal')
+            if DIRECT_STREAM and not os.path.exists(metal_path):
+                metal_path = os.path.join(w, key + '_b.metal')
+                open(metal_path, 'w').write(src)
+            refl.update(ps_libraries(key, metal_path, src))
         return key, 'ok', '', fetch_finish(key, src, refl)
     if key in xerr or not os.path.exists(os.path.join(w, key + '.spv')): return key, 'translation failed', xerr.get(key, 'no spv'), None
     result = (key,) + finish(key, w, jobs[key], c1s[key])
@@ -1641,8 +1682,21 @@ if not want:   # a full build: the stamp, then the c1 guard and uniform read ext
     os.replace(os.path.join(out, CAS_USED + '.tmp'), os.path.join(out, CAS_USED))
     for _d in [out] + ([IOSOUT] if IOSOUT else []): dmsh_chain.write_stamp(_d, GAME.id, INPUTS)
     print(f'library stamp: game {GAME.id}, inputs {INPUTS}', flush=True)
+    if DIRECT_STREAM:
+        import shader_lib
+        shader_lib.pack(out, cached=CACHED_STREAM['mac'])
+        if IOSOUT: shader_lib.pack(IOSOUT, cached=CACHED_STREAM['ios'])
     for _tool, _table in (('c1_guard.py', 'c1_full.tsv'), ('cb_extent.py', 'cb_extent.tsv')):
         _r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), _tool), out, str(GAME.table(_table))], capture_output=True, text=True)
         if _r.returncode: sys.exit(f'[RED] {_tool} failed ({_r.returncode}): {_r.stderr.strip()[-500:]}')
         print(f'{_table}: {(_r.stdout.strip().splitlines() or [""])[-1]}', flush=True)
-elif STAMP_BEFORE != INPUTS: print(f'no library stamp: the profile\'s inputs changed since the last full build ({STAMP_BEFORE} → {INPUTS}), and a partial build does not rebuild the rest', flush=True)
+elif STAMP_BEFORE != INPUTS:
+    if DIRECT_STREAM:
+        import shader_lib
+        shader_lib.pack(out, cached=CACHED_STREAM['mac'])
+        if IOSOUT: shader_lib.pack(IOSOUT, cached=CACHED_STREAM['ios'])
+    print(f'no library stamp: the profile\'s inputs changed since the last full build ({STAMP_BEFORE} → {INPUTS}), and a partial build does not rebuild the rest', flush=True)
+elif DIRECT_STREAM:
+    import shader_lib
+    shader_lib.pack(out, cached=CACHED_STREAM['mac'])
+    if IOSOUT: shader_lib.pack(IOSOUT, cached=CACHED_STREAM['ios'])

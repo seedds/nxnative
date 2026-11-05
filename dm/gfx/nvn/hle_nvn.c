@@ -808,6 +808,12 @@ NVN(nvnQueueBuilderGetQueueMemorySize, size_t, const NVNqueueBuilder *b) {
     return (o->cmd_sz + o->comp_sz + o->ctl_sz + 4095) & ~(size_t)4095;
 }
 NVN(nvnQueueBuilderSetQueueMemory, void, NVNqueueBuilder *b, void *m, size_t n) { QB(b)->mem = m; QB(b)->mem_sz = n; }
+// The builder's sizes read back (NVNboolean nvnQueueBuilderGet*MemorySize(const NVNqueueBuilder *, int *size)): PRAGMATA (SDK 20, RE Engine) asks for each after setting them and
+// aborts in its own check (nn::diag at main+0x7169400) when they come back unanswered. The host keeps no ray-tracing queue memory: its size reads 0
+NVN_NOPROTO(nvnQueueBuilderGetCommandMemorySize, NVNboolean, const NVNqueueBuilder *b, int *n) { if (n) *n = (int)QB(b)->cmd_sz; return 1; }
+NVN_NOPROTO(nvnQueueBuilderGetComputeMemorySize, NVNboolean, const NVNqueueBuilder *b, int *n) { if (n) *n = (int)QB(b)->comp_sz; return 1; }
+NVN_NOPROTO(nvnQueueBuilderGetControlMemorySize, NVNboolean, const NVNqueueBuilder *b, int *n) { if (n) *n = (int)QB(b)->ctl_sz; return 1; }
+NVN_NOPROTO(nvnQueueBuilderGetRayTracingMemorySize, NVNboolean, const NVNqueueBuilder *b, int *n) { (void)b; if (n) *n = 0; return 1; }
 NVN(nvnQueueInitialize, NVNboolean, NVNqueue *q, const NVNqueueBuilder *b) {
     NVNdevice *d = ((const queue_builder_t *)b)->dev;
     // NVN emits SET_WINDOW_ORIGIN / FLIP_Y into the queue's initial GPU state.
@@ -1410,6 +1416,11 @@ NVN(nvnWindowBuilderSetTextures, void, NVNwindowBuilder *b, int n, NVNtexture *c
 }
 NVN(nvnWindowBuilderSetPresentInterval, void, NVNwindowBuilder *b, int v) { WB(b)->interval = v; }
 NVN(nvnWindowBuilderGetPresentInterval, int, const NVNwindowBuilder *b) { return WB(b)->interval; }   // Yoshi and the Mysterious Book (Unreal Engine 5.4) reads it back
+NVN(nvnWindowBuilderGetNativeWindow, NVNnativeWindow, const NVNwindowBuilder *b) { return ((const win_builder_t *)b)->native; }
+NVN_NOPROTO(nvnWindowBuilderGetDevice, NVNdevice *, const NVNwindowBuilder *b) { return ((const win_builder_t *)b)->dev; }
+NVN_NOPROTO(nvnWindowBuilderGetNumTextures, int, const NVNwindowBuilder *b) { return ((const win_builder_t *)b)->ntex; }
+NVN_NOPROTO(nvnWindowBuilderGetTexture, NVNtexture *, const NVNwindowBuilder *b, int i) { const win_builder_t *w = (const win_builder_t *)b; return i >= 0 && i < w->ntex ? w->tex[i] : NULL; }
+NVN_NOPROTO(nvnWindowBuilderGetNumActiveTextures, int, const NVNwindowBuilder *b) { return ((const win_builder_t *)b)->ntex; }   // the host rotates through all of them (SetNumActiveTextures)
 NVN(nvnWindowInitialize, NVNboolean, NVNwindow *w, const NVNwindowBuilder *b) {
     const win_builder_t *s = (const win_builder_t *)b; win_t *o = (win_t *)w;
     memset(o, 0, sizeof *o); o->magic = MAGIC('W', 'I', 'N', 'D'); o->native = s->native; o->ntex = s->ntex; o->interval = s->interval;
@@ -2524,6 +2535,8 @@ NVN(nvnDeviceSetIntermediateShaderCache, void, NVNdevice *d, int n) { (void)d; (
 // Window: number of active swapchain textures (the host rotates through the count given at creation; logged once)
 NVN_NOPROTO(nvnWindowBuilderSetNumActiveTextures, void, NVNwindowBuilder *b, int n) { (void)b; ONCE_LOG("WindowBuilderSetNumActiveTextures %d (the host rotates through the SetTextures count)", n); }
 NVN_NOPROTO(nvnWindowSetNumActiveTextures, void, NVNwindow *w, int n) { (void)w; ONCE_LOG("WindowSetNumActiveTextures %d (the host rotates through the SetTextures count)", n); }
+NVN_NOPROTO(nvnWindowGetNumActiveTextures, int, const NVNwindow *w) { return ((const win_t *)w)->ntex; }   // PRAGMATA; the host rotates through all of them
+NVN_NOPROTO(nvnWindowGetNumTextures, int, const NVNwindow *w) { return ((const win_t *)w)->ntex; }
 
 // Command buffer memory usage: record bytes written in this recording (accumulated across segments; the host does not use control memory, always 0); the memory callback switch is ignored.
 // It used to be cur - begin: once a recording overflowed into a host segment, cur is in host memory (an address below the guest begin) and it returned 0. SMBW asks for this value after recording each material setup handle,
@@ -2904,6 +2917,9 @@ NVN(nvnCommandBufferSetViewportSwizzles, void, NVNcommandBuffer *c, int first, i
     for (int i = 0; i < n; i++) for (int k = 0; k < 4; k++) r->sw[i][k] = (uint8_t)((s[4 * i + k] ^ 2 * k) & 7);
 }
 NVN(nvnCommandBufferSetAlphaRef, void, NVNcommandBuffer *c, float r) { REC(c, OP_ALPHA_REF, p_alpha_ref)->ref = r; }
+// Float render targets' blend clamping (SDK 20; PRAGMATA sets it at start): Metal blends float targets unclamped, so it is taken as the unclamped default for now
+NVN_NOPROTO(nvnCommandBufferSetFloatBlendClamp, void, NVNcommandBuffer *c, int on) { (void)c; static int logged; if (on && !logged++) LOG("[nvn] nvnCommandBufferSetFloatBlendClamp(%d): float blending stays unclamped on Metal", on); }
+NVN_NOPROTO(nvnCommandBufferSetProvokingVertexMode, void, NVNcommandBuffer *c, int mode) { (void)c; static int logged; if (mode && !logged++) LOG("[nvn] nvnCommandBufferSetProvokingVertexMode(%d): Metal keeps the first vertex as the provoking one", mode); }   // PRAGMATA
 NVN(nvnCommandBufferSetLineWidth, void, NVNcommandBuffer *c, float w) { (void)c; if (w != 1.0f) ONCE_LOG("SetLineWidth %.2f: Metal has only 1-pixel lines", w); }
 NVN(nvnCommandBufferSetPointSize, void, NVNcommandBuffer *c, float s) { (void)c; (void)s; ONCE_LOG("SetPointSize: the point size comes from the shader"); }
 NVN(nvnCommandBufferSetPrimitiveRestart, void, NVNcommandBuffer *c, uint32_t en, int idx) { *REC(c, OP_PRIM_RESTART, p_prim_restart) = (p_prim_restart){(en & 0xff) != 0, (uint32_t)idx}; }

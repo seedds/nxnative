@@ -63,9 +63,20 @@ uint64_t dm_nvn_frame_count(void);
 HLE_FORCE("_ZN2nn2vi20GetLatestFrameNumberEPmPKNS0_5LayerE", "the layer's latest frame number: the frames presented so far", Result, h_vi_FrameNo, uint64_t *out, const void *layer) {
     (void)layer; *out = dm_nvn_frame_count(); return RES_OK;
 }
-HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the layer's frame history: none kept, 0 entries", int, h_vi_FrameHist, void *out, int n, const void *layer) {
-    (void)out; (void)layer; static int once; if (!once++) LOG("vi::ListFrameHistory (%d entries asked): the host keeps no frame history, 0 returned", n);
-    return 0;
+// The layer's frame history (Switch 2 SDKs). Unreal Engine 5.6's Switch 2 RHI paces its game thread by it: its vsync thread (Orbitals, main+0x15403c0) waits for each vsync, asks
+// ListFrameHistory(NULL, 0) for the count, then for that many 0x28-byte FrameInfo entries, takes the first whose u64 at +0 is 2 and, when its u64 frame number at +8 is newer than the last
+// one seen, queues a flip record with the two tick counts at +0x18 and +0x20 (converted to seconds) for its frame sync. With no history the game thread's FrameSync waited for ever after the
+// third frame: nothing was presented after 1 s, every thread idle (launches r03-r07). The host has no compositor: one entry, the latest presented frame, both times the current tick.
+// What kind 2 and the field at +0x10 mean is read off that one consumer, not off vi2 (firmware 0400000000000063): [open]
+uint64_t guest_ticks(void);
+HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the layer's frame history: the latest presented frame", int, h_vi_FrameHist, void *out, int n, const void *layer) {
+    (void)layer; uint64_t f = dm_nvn_frame_count();
+    static int once; if (!once++) LOG("vi::ListFrameHistory: one entry, the latest presented frame (kind 2, frame number, present ticks)");
+    if (!f) return 0;
+    if (!out || n <= 0) return 1;
+    uint64_t *e = out, t = guest_ticks(); memset(e, 0, 0x28);
+    e[0] = 2; e[1] = f; e[3] = t; e[4] = t;
+    return 1;
 }
 // Rhythm Heaven Groove (SDK 21) asks for the built-in panel's identity at start (main+0xa9a4); the SDK's version calls through the vi service object the host never made (SIGSEGV at +0x20).
 //   The game reads a u32 kind and, when it is 2 or more, 0x14 more bytes that it hands on; any other answer makes it hand on zeros. The host has no panel: an all-zero identifier, kind 0

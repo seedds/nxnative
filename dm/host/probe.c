@@ -358,7 +358,15 @@ static void watch_install(void) {
                pthread_t t; pthread_create(&t, NULL, poll_run, NULL); pthread_detach(t); } }
     const char *e = getenv("DM_PROBE_WATCH"); if (!e) return;
     char *end; g_wheap = !strncmp(e, "heap+", 5);
-    uint64_t at = strtoull(e + (g_wheap ? 5 : 0), &end, 16); g_wlen = *end == '+' ? strtoull(end + 1, 0, 16) : 8;
+    uint64_t at; const char *colon = strchr(e, ':');
+    if (colon && !g_wheap) {   // <module>:<offset>[+<length>]: the module's load address differs from run to run, so the watch resolves it here
+        char name[40]; size_t nl = (size_t)(colon - e); if (nl >= sizeof name) die("DM_PROBE_WATCH: module name too long");
+        memcpy(name, e, nl); name[nl] = 0; module_t *m = NULL;
+        for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, name)) m = &g_mod[i];
+        if (!m) die("DM_PROBE_WATCH: no such module %s", name);
+        at = (uint64_t)m->base + strtoull(colon + 1, &end, 16);
+    } else at = strtoull(e + (g_wheap ? 5 : 0), &end, 16);
+    g_wlen = *end == '+' ? strtoull(end + 1, 0, 16) : 8;
     if ((!at && !g_wheap) || !g_wlen) die("DM_PROBE_WATCH format: [heap+]<address>[+<length>] (hex)");
     g_wpsz = (uint64_t)getpagesize();
     if ((at & (g_wpsz - 1)) + g_wlen > g_wpsz) die("DM_PROBE_WATCH: the watched bytes must lie in one host page");

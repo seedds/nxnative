@@ -248,7 +248,7 @@ DM_PROBE_HEAPRAW	diagnostic	Set: the probes' heap walk also prints the heap obje
 DM_PROBE_HEAPWORDS	diagnostic	Set: the probes' heap walk also prints each used block's first two words
 DM_PROBE_LIMIT	diagnostic	Maximum printed hits per guest probe; 0 or absent leaves the count unlimited
 DM_PROBE_POLL	diagnostic	`=<address>[+<length>]` (hex, 4 bytes by default, up to 8): a host thread spins on the bytes and on each change snapshots every thread's pc, lr and frames, for writes the watch misses
-DM_PROBE_WATCH	diagnostic	`=<address>[+<length>]` (hex, 8 bytes by default): write-protects that host page and reports who writes these bytes, without a debugger
+DM_PROBE_WATCH	diagnostic	`=<address>[+<length>]` or `=<module>:<offset>[+<length>]` (hex, 8 bytes by default; the module form resolves the module's load address, which differs from run to run): write-protects that host page and reports who writes these bytes, without a debugger
 DM_PROBE_X2	diagnostic	`=<bytes>` (hex): probe hits also dump that many bytes of the memory x2 points to
 DM_PROGRAM	switch	`=<index>`: the program of a game of several programs that a host over their profiles runs (default 0; `main.c` `dm_game_cur`)
 DM_PROGRAMS	path	Table of a game's programs on the Mac (`programs.tsv`: index, host, modules, run folder, environment): `oe::ExecuteProgram` starts the named one in this process's place; the NSP script's run command and the Mac app set it

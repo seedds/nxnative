@@ -91,6 +91,23 @@ def loop_guard(msl):
         elif (m := re.fullmatch(r'(\s*)for \(([^;]*);([^;]*);([^;]*)\)\s*', l)): l = f'{m.group(1)}for ({m.group(2)}; ({m.group(3).strip() or "true"}) && {cap};{m.group(4)})'
         out.append(l)
     return '\n'.join(out)
+# Workaround for a translator bug we cannot fix at its source (the prebuilt Ryujinx shader DLL, dmsh_xlate_bin; only its driver Program.cs is in-tree): a SCALAR load of a
+# storage buffer whose byte offset is computed and bounds-checked, but then indexed at element 0 instead of offset>>2. The SPIR-V emits `OFF = idx*4; if (uint(OFF) < size) v = buf._m0[0];`
+# where the computed OFF is stored and bounds-checked against the buffer's size (cp_cN._m0[K].z) but the OpAccessChain uses a constant 0 (confirmed in <key>.spv: `OpAccessChain %cp_s0 %int_0 %int_0`),
+# while the SAME shader's vector loads index correctly (`... >> 2` then a dynamic index). Found on Orbitals (040004F027560000): the UE5.6 GPUScene upload compute shaders f0db173d46f9cdc5
+# (PrimitiveSceneData, 704-byte/44-float4 records) and da5435fda42d9fb1 (InstanceSceneData) read the destination PrimitiveId from PrimitiveUploadIndices[PrimitiveIndex]; with the index lost to 0,
+# every uploaded primitive scattered to PrimitiveId 0's slot, so the LocalToWorld for all other primitives stayed zero -> gl_Position.w = 0 -> degenerate quad -> black 3D backgrounds. Restoring the
+# index (buf._m0[int(uint(OFF) >> uint(2))]) refilled PrimitiveSceneData (dumped 2/93 -> 65/93 populated records, the background primitive's transform now correct). The signature (an offset computed
+# as X*4 AND bounds-checked against a buffer size, then an element-0 load of a storage buffer) is specific to the miscompile; a legitimate element-0 read never computes and bounds-checks an offset it
+# does not use, so the rewrite leaves ordinary cp_sN._m0[0] reads untouched (62 of 1273 shaders that read a storage buffer at [0] match, in this game's cache).
+SBUF_SCALAR_INDEX = re.compile(
+    r'(int (\w+) = [^;\n]*\* 4;\s*'
+    r'bool \w+ = uint\(\2\) >= as_type<uint>\(\(\*spvDescriptorSet0\.cp_c\d+\)\._m0\[\d+\]\.z\);\s*'
+    r'bool \w+ = !\w+;\s*'
+    r'int \w+ = 0;\s*'
+    r'if \(\w+\)\s*\{\s*'
+    r'\w+ \w+ = as_type<\w+>\(\(\*spvDescriptorSet0\.cp_s\d+\)\._m0\[)0(\]\);)', re.M)
+def sbuf_scalar_index(msl): return SBUF_SCALAR_INDEX.sub(r'\g<1>int(uint(\2) >> uint(2))\g<3>', msl)
 
 # Ampere HMMA.16816 with an f16 accumulator (agl's upscaler networks, the NDVE video networks) reaches the MSL as calls of dmsh_hmma16816_f16(lane, block, A0..A3, B0, B1, C0, C1,
 # flags, A's LDSM address, A0..A3's offsets, A's row stride, out D1) → D0, the subgroup's 256-word block of the scratch shared memory as the last argument (InstEmitAmpereTensor.AHmma,
@@ -1570,7 +1587,7 @@ def geometry_finish(key, w, j, c1):
         dmsh_geometry.flatten_sets(spv)
         r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
         if r.returncode: return 'geometry MSL failed', r.stderr.strip()[:160], None
-        plain = dmsh_geometry.topology_pointer(pool_arrays(loop_guard(precise(dmsh_atomic.check_msl(r.stdout)))))
+        plain = dmsh_geometry.topology_pointer(pool_arrays(loop_guard(precise(sbuf_scalar_index(dmsh_atomic.check_msl(r.stdout))))))
         src = dmsh_geometry.capture_input(plain)
         res = json.load(open(os.path.join(w, k + '.res.json')))
         refl = {'key': key + '_bg' + str(t), 'route': 'B', 'chain': CHAIN, 'dm_ctl': key,
@@ -1600,7 +1617,7 @@ def geometry_finish(key, w, j, c1):
             spv = os.path.join(w, k + '.reader.spv'); dmsh_geometry.flatten_sets(spv)
             r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
             if r.returncode: return 'geometry reader failed', r.stderr.strip()[:160], None
-            reader = vs_layer(vs_init(dmsh_geometry.reader(pool_arrays(loop_guard(precise(dmsh_atomic.check_msl(r.stdout)))))))
+            reader = vs_layer(vs_init(dmsh_geometry.reader(pool_arrays(loop_guard(precise(sbuf_scalar_index(dmsh_atomic.check_msl(r.stdout))))))))
             analysis, full = vs_depth(reader)
             meta = {'key': key + '_bgv', 'route': 'B', 'chain': CHAIN, 'dm_ctl': key,
                     'stage': 'vs', 'entry': 'main0', 'entry_z': 'main0_z', 'msl_entry_kind': 'vertex',
@@ -1659,6 +1676,7 @@ def finish(key, w, j, c1):
             src = open(msl).read()
     try: src = dmsh_atomic.check_msl(src)
     except ValueError as e: return 'image atomic MSL failed', str(e), None
+    src = sbuf_scalar_index(src)   # restore the index of scalar storage-buffer loads the translator emitted at element 0 (see sbuf_scalar_index)
     src = precise(src)   # min / max / clamp with Maxwell's NaN results (see precise)
     try: src = gather_offsets(src)   # four gathers instead of a wrapper's loop over their offsets (see gather_offsets)
     except ValueError as e: return 'gather offsets rewrite failed', str(e)[:160], None

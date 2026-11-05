@@ -1364,14 +1364,19 @@ void front_run(void (*guest)(void)) {
         // SDR content is converted from BT.709 in present.metal), in linear light (present.metal fs_linear), with HDR10 metadata: Core Animation maps the values above 1.0
         // into the screen's headroom, and a screen without headroom shows the SDR range
         if (getenv("DM_HDR") && atoi(getenv("DM_HDR"))) {
-            g_layer.pixelFormat = MTLPixelFormatRGBA16Float;
-            CGColorSpaceRef ecs = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearITUR_2020);
+            // The layer takes the game's HDR10 window as it is: RGB10A2 in BT.2100 PQ (present_mode: an SDR source is encoded as HDR10). An RGBA16Float extended linear BT.2020 layer
+            // (DM_HDR_LAYER=float) showed black blocks with coloured squares in them over flat areas (Mario Kart World's water on the course map), now and then and after the window came back
+            // to the front, on a MacBook Air M5 (macOS 27.0.1, potential headroom 2): the frames the game drew and the host's own copies of them were clean, so the blocks appear after the present
+            int pq = !(getenv("DM_HDR_LAYER") && !strcmp(getenv("DM_HDR_LAYER"), "float"));
+            g_layer.pixelFormat = pq ? MTLPixelFormatRGB10A2Unorm : MTLPixelFormatRGBA16Float;
+            CGColorSpaceRef ecs = CGColorSpaceCreateWithName(pq ? kCGColorSpaceITUR_2100_PQ : kCGColorSpaceExtendedLinearITUR_2020);
+
             g_layer.colorspace = ecs; CGColorSpaceRelease(ecs);
             g_layer.wantsExtendedDynamicRangeContent = YES;
             if (CAEDRMetadata.available) { g_hdr_meta = 1; front_hdr_metadata(); }
             else LOG("[RED] front end: no EDR metadata on this Mac (CAEDRMetadata): values above the screen's headroom clip");
             if (atoi(getenv("DM_HDR")) == 2) win.title = [win.title stringByAppendingString:@" (DM_HDR=2: HDR on any screen)"];   // told apart from the setting's DM_HDR=1
-            LOG("front end: HDR output on (DM_HDR): the window's layer is RGBA16Float in extended linear BT.2020%s; the screen's headroom %.2f now, at most %.2f", g_hdr_meta ? ", with HDR10 metadata" : "",
+            LOG("front end: HDR output on (DM_HDR): the window's layer is %s%s; the screen's headroom %.2f now, at most %.2f", pq ? "RGB10A2 in BT.2100 PQ" : "RGBA16Float in extended linear BT.2020 (DM_HDR_LAYER=float)", g_hdr_meta ? ", with HDR10 metadata" : "",
                 (win.screen ?: NSScreen.mainScreen).maximumExtendedDynamicRangeColorComponentValue, (win.screen ?: NSScreen.mainScreen).maximumPotentialExtendedDynamicRangeColorComponentValue);
             front_hdr_screen_read(win.screen ?: NSScreen.mainScreen);
             [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) { (void)t; front_hdr_screen_read(win.screen ?: NSScreen.mainScreen); }];

@@ -4,7 +4,7 @@ using namespace metal;
 struct V { float4 p [[position]]; float2 uv; };
 vertex V vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); V o; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); o.uv = uv; return o; }
 // mode.x (nvn_mtl.m present_mode) says how the source is encoded: 0 as stored (a float source: linear BT.709); 1 a gamma-coded 8-bit BT.709 (sRGB) source for the extended-range BT.2020 layer (fs_linear converts it);
-// 2 an HDR10 source (the game's RGB10A2 window: SMPTE ST 2084 code values in BT.2020 primaries), where mode.y is the paper white in nits. mode.z and mode.w are unused.
+// 2 an HDR10 source (the game's RGB10A2 window: SMPTE ST 2084 code values in BT.2020 primaries), where mode.y is the paper white in nits; 3 a gamma-coded 8-bit BT.709 (sRGB) source for the PQ layer (BT.2100 PQ, DM_HDR): fs encodes it as HDR10 at the paper white. mode.z and mode.w are unused.
 struct Crop { float4 rect; float4 edge; float4 mode; };
 // Linear BT.709 and BT.2020 (ITU-R BT.2087; each row sums to 1, so white stays white). Metal's float3x3 takes its columns.
 constant float3x3 kRec709To2020 = float3x3(float3(0.627404, 0.069097, 0.016391), float3(0.329283, 0.919540, 0.088013), float3(0.043313, 0.011362, 0.895595));
@@ -27,6 +27,12 @@ static inline float3 present_pq_to_linear(float3 e, float paper) {
     float3 den = max(c2 - c3 * ep, float3(1e-6));
     return 10000.0 * pow(num / den, float3(1.0 / m1)) / paper;
 }
+// SMPTE ST 2084 inverse EOTF: linear light where 1.0 is the paper white, to code values (10000 nits = 1.0). pow() gets a positive base (the library is built with fast math)
+static inline float3 present_linear_to_pq(float3 l, float paper) {
+    const float m1 = 0.1593017578125, m2 = 78.84375, c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
+    float3 ym = pow(max(l * (paper / 10000.0), float3(1e-30)), float3(m1));
+    return pow((c1 + c2 * ym) / (1.0 + c3 * ym), float3(m2));
+}
 // A highlight brought to SDR white as an SDR screen shows it: the largest channel goes to 1.0 and the others scale with it, so the hue holds (a screenshot of an HDR frame)
 static inline float3 present_to_sdr_white(float3 c0) {
     float3 c = clamp(c0, -65504.0, 65504.0);   // finite: an infinite channel would give inf * 0 below
@@ -37,7 +43,8 @@ static inline float3 present_to_sdr_white(float3 c0) {
 // then converted to BT.709; a colour outside BT.709 is clipped
 fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) {
     float4 v = t.sample(s, clamp(in.uv * c.rect.zw + c.rect.xy, c.edge.xy, c.edge.zw));
-    if (c.mode.x > 1.5) v.rgb = present_linear_to_srgb(saturate(kRec2020To709 * present_to_sdr_white(present_pq_to_linear(v.rgb, c.mode.y))));
+    if (c.mode.x > 2.5) v.rgb = present_linear_to_pq(kRec709To2020 * present_srgb_to_linear(v.rgb), c.mode.y);   // the PQ layer: an SDR source as HDR10 at the paper white
+    else if (c.mode.x > 1.5) v.rgb = present_linear_to_srgb(saturate(kRec2020To709 * present_to_sdr_white(present_pq_to_linear(v.rgb, c.mode.y))));
     return v;
 }
 // The HDR layer (RGBA16Float, extended linear BT.2020, DM_HDR=1): linear light, where 1.0 is the paper white. The layer carries HDR10 metadata (front_mac.m, front_ios.m), so

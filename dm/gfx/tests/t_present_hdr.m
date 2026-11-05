@@ -58,7 +58,7 @@ static id<MTLTexture> src8(const uint8_t c[N][3]) {
     [t replaceRegion:MTLRegionMake2D(0, 0, N, 1) mipmapLevel:0 withBytes:b bytesPerRow:sizeof b];
     return t;
 }
-// The present of src into an N x 1 target of the given format; out gets RGB as floats (16-bit float targets) or 0-255 (8-bit targets)
+// The present of src into an N x 1 target of the given format; out gets RGB as floats (16-bit float targets), 0-1023 (RGB10A2, the PQ layer) or 0-255 (8-bit targets)
 static int run(id<MTLTexture> src, MTLPixelFormat fmt, double out[N][3]) {
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:fmt width:N height:1 mipmapped:NO];
     d.storageMode = MTLStorageModeShared; d.usage = MTLTextureUsageRenderTarget;
@@ -69,6 +69,9 @@ static int run(id<MTLTexture> src, MTLPixelFormat fmt, double out[N][3]) {
     if (fmt == MTLPixelFormatRGBA16Float) {
         __fp16 h[N * 4]; [dst getBytes:h bytesPerRow:sizeof h fromRegion:MTLRegionMake2D(0, 0, N, 1) mipmapLevel:0];
         for (int i = 0; i < N; i++) for (int k = 0; k < 3; k++) out[i][k] = h[4 * i + k];
+    } else if (fmt == MTLPixelFormatRGB10A2Unorm) {   // the PQ layer: 10-bit code values
+        uint32_t w[N]; [dst getBytes:w bytesPerRow:sizeof w fromRegion:MTLRegionMake2D(0, 0, N, 1) mipmapLevel:0];
+        for (int i = 0; i < N; i++) for (int k = 0; k < 3; k++) out[i][k] = w[i] >> (10 * k) & 0x3ff;
     } else {
         uint8_t b[N * 4]; [dst getBytes:b bytesPerRow:sizeof b fromRegion:MTLRegionMake2D(0, 0, N, 1) mipmapLevel:0];
         for (int i = 0; i < N; i++) for (int k = 0; k < 3; k++) out[i][k] = b[4 * i + k];
@@ -136,6 +139,16 @@ int main(void) { @autoreleasepool {
         CHECK("SDR white is 1.0 in the HDR layer, the paper white the HDR window has", ok && near(o[0][0], 1.0, 0.002, 0) && near(o[0][2], 1.0, 0.002, 0));
         CHECK("SDR mid grey 128 decodes to its linear value", ok && near(o[1][1], srgb_dec(128 / 255.0), 0.003, 1e-4));
         CHECK("SDR red is BT.709 red in BT.2020 (0.6274, 0.0691, 0.0164)", ok && near(o[2][0], 0.627404, 0.003, 0) && near(o[2][1], 0.069097, 0.01, 1e-4) && near(o[2][2], 0.016391, 0.02, 1e-4));
+    }
+    // The PQ layer (RGB10A2 in BT.2100 PQ, the Mac's default HDR layer): the game's HDR10 window goes in as it is, an 8-bit sRGB source is encoded as HDR10 with its white at the paper white
+    {
+        int ok = run(src10(grey), MTLPixelFormatRGB10A2Unorm, o), bad = 0;
+        for (int i = 0; ok && i < N; i++) for (int k = 0; k < 3; k++) bad += fabs(o[i][k] - grey[i][k]) > 0.5;
+        CHECK("PQ layer: the HDR10 window's code values are written as they are", ok && !bad);
+        uint8_t c[N][3] = {{255, 255, 255}, {128, 128, 128}, {255, 0, 0}, {0, 255, 0}, {0, 0, 255}, {0, 0, 0}, {64, 64, 64}, {255, 255, 255}};
+        ok = run(src8(c), MTLPixelFormatRGB10A2Unorm, o);
+        CHECK("PQ layer: SDR white is the paper white (203 nits), black is code 0", ok && fabs(o[0][0] - pq_code(203)) <= 1.5 && fabs(o[0][2] - pq_code(203)) <= 1.5 && o[5][0] <= 1);
+        CHECK("PQ layer: SDR mid grey 128 is its linear value at the paper white", ok && fabs(o[1][1] - pq_code(srgb_dec(128 / 255.0) * 203)) <= 1.5);
     }
     // A screenshot of an HDR frame (an 8-bit target): as an SDR screen shows it, highlights to SDR white with their hue, then BT.709
     {

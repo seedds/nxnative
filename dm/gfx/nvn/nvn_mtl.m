@@ -13579,6 +13579,8 @@ __attribute__((weak)) int vi_hdr_answered(void) { return 0; }   // hle_vi.c; the
 static float present_mode(MTLPixelFormat src, MTLPixelFormat dst) {
     // An RGB10A2 window is PQ code values only once the game's status query has answered HDR on (vi_hdr_answered); any other RGB10A2 window is read as stored
     // Not answered: an SDR 10-bit window, gamma-coded like the 8-bit ones, so it is decoded to linear light for an extended-range layer
+    // An RGB10A2 drawable is the Mac's HDR layer in BT.2100 PQ (front_mac.m): the game's HDR10 window goes in as it is; any other source is gamma-coded BT.709 and is encoded as HDR10 (mode 3)
+    if (dst == MTLPixelFormatRGB10A2Unorm) return src == MTLPixelFormatRGB10A2Unorm && vi_hdr_answered() ? 0.0f : 3.0f;
     if (src == MTLPixelFormatRGB10A2Unorm) return vi_hdr_answered() ? 2.0f : (dst == MTLPixelFormatRGBA16Float ? 1.0f : 0.0f);
     if (dst != MTLPixelFormatRGBA16Float) return 0.0f;
     // Gamma-coded 8-bit sources. The sRGB-typed ones are sampled through a non-sRGB view (present_raw_src), so the shader reads gamma-coded values for them too

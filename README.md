@@ -65,6 +65,16 @@ The IPA appears in the game's folder. The first build takes 30–60 minutes and 
 
 To play on the Mac instead, add `--platform mac-app`: you get a Mac app of the game to open from Finder. All options: [The packing script in detail](docs/development.md#the-packing-script-in-detail).
 
+### LAN play on Mac
+
+Experimental native LAN play is available for games with a LAN mode. Mario Kart World has been played between M1 Pro and M4 Pro Macs over a routed site-to-site VPN. Build the same game version from this checkout on both Macs, then run:
+
+```sh
+python3 scripts/run_mac_lan.py /path/to/0400C3F00006E000_build --peer OTHER_MAC_IP
+```
+
+Use the other Mac's reachable IPv4 address. Add `--username "Racer One"` to choose the in-game account nickname. The launcher keeps the regular app's save and graphics choices and shows live output. For a dialog-based start, double-click `scripts/start_mac_lan.command`. Both players select their own build, enter each other's IP and choose their own username, remembered locally. See [LAN setup, portable kits and troubleshooting](docs/development.md#lan-play-on-mac). Wireless Play (LDN) and Nintendo online services are not implemented.
+
 ### Install
 
 Install the IPA on your iPhone or iPad with a sideloading tool such as AltStore, Sideloadly or LiveContainer. If your tool offers **Increased Memory Limit**, turn it on: the bigger games need it.

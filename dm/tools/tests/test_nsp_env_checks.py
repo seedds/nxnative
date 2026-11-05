@@ -37,6 +37,23 @@ def fake_capstone(major):   # the installed capstone's version does not matter t
     return types.SimpleNamespace(__version__=f'{major}.0.0', cs_version=lambda: (major, 0, major << 8))
 
 
+class AppleSilicon(unittest.TestCase):
+    def test_sysctl_detects_silicon_even_under_rosetta(self):
+        with mock.patch.object(nsp.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '1\n')), \
+                mock.patch.object(nsp.platform, 'machine', return_value='x86_64'):
+            self.assertTrue(nsp.apple_silicon())
+
+    def test_restricted_sysctl_falls_back_to_native_architecture(self):
+        for machine, expected in (('arm64', True), ('aarch64', True), ('x86_64', False)):
+            with self.subTest(machine=machine), mock.patch.object(nsp.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, '')), \
+                    mock.patch.object(nsp.platform, 'machine', return_value=machine):
+                self.assertEqual(nsp.apple_silicon(), expected)
+
+    def test_explicit_intel_result_is_respected(self):
+        with mock.patch.object(nsp.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '0\n')):
+            self.assertFalse(nsp.apple_silicon())
+
+
 class Prereqs(unittest.TestCase):
     def check(self, mac=False, which=lambda *a, **k: '/x', capstone=5, **kw):
         calls = []

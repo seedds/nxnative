@@ -1,7 +1,29 @@
-// Networking and peripheral system services (out of scope: online play, local wireless, friends, telemetry, SSL) as seen through newer SDKs: all made "unavailable", the game takes its offline branch.
+// Legacy service entry points. LDN, friends, telemetry and SSL remain offline; socket and NIFM IPv4 hooks use the host network when DM_LAN is enabled.
 // Only entry points that go to a service are hooked; library functions that only read and write the game's own buffers (prepo Add / Array / Struct, err ErrorResultVariant, friends getters, socket byte-order conversion) keep running in the SDK.
 // Return convention as in hle_friends.c: Result returns RES_FAIL ("saved / submitted" kinds return RES_OK so the game does not retry); bool returns false; events get a bound SystemEvent that never fires.
 #include "hle.h"
+#include <sys/socket.h>
+#include <fcntl.h>
+#include <unistd.h>
+int dm_nifm_ipv4(uint32_t *ip, uint32_t *mask);
+long dm_sk_sendto(int fd, const void *buf, size_t len, int flags, const void *address, socklen_t address_len);
+int dm_sk_finish_int(int result);
+long dm_sk_finish(long result);
+int dm_sk_errno(void);
+Result dm_sk_initialize(void);
+int dm_sk_name(int fd, void *address, socklen_t *length, int peer);
+int dm_sk_setsockopt(int fd, int level, int option, const void *value, socklen_t length);
+int dm_sk_getsockopt(int fd, int level, int option, void *value, socklen_t *length);
+long dm_sk_recv(int fd, void *buf, size_t len, int flags);
+int dm_sk_socket(int family, int type, int protocol);
+long dm_sk_recvfrom(int fd, void *buf, size_t len, int flags, void *address, socklen_t *length);
+int dm_sk_fcntl(int fd, int cmd, long arg);
+int dm_sk_bind(int fd, const void *address, socklen_t length);
+int dm_sk_listen(int fd, int backlog);
+int dm_sk_connect(int fd, const void *address, socklen_t length);
+int dm_sk_accept(int fd, void *address, socklen_t *length);
+long dm_sk_sendmsg(int fd, const void *message, int flags);
+long dm_sk_recvmsg(int fd, void *message, int flags);
 
 static _Alignas(16) uint8_t g_ev_ldn[0x100];
 
@@ -60,34 +82,36 @@ HLE_FORCE("_ZN2nn9bluetooth16GetBleScanResultEPNS0_13BleScanResultEi", "BLE scan
 HLE_FORCE("_ZN2nn9bluetooth24GetBleConnectionInfoListEPNS0_17BleConnectionInfoEi", "BLE connections (cut): 0", int, h_bt_ConnList, void *out, int max) { (void)out; (void)max; return 0; }
 HLE_FORCE("_ZN2nn9bluetooth19ConnectToGattServerERKNS0_7AddressE", "BLE connect (cut)", Result, h_bt_Connect, const void *a) { (void)a; return RES_FAIL; }
 
-// ---------- socket: offline. Initialization succeeds (the network library's global init depends on it), every later operation fails with errno = ENETDOWN ----------
-enum { SK_ENETDOWN = 50, SK_EAI_FAIL = 4 };
-HLE_FORCE("_ZN2nn6socket10InitializeEPvmmi", "connects to the bsd socket service; offline, creates no session (cut)", Result, h_sk_Init4, void *mem, uint64_t sz, uint64_t alloc, int conc) { (void)mem; (void)sz; (void)alloc; (void)conc; return RES_OK; }
+// ---------- socket: older SDK overloads over host BSD sockets ----------
+enum { SK_EAI_FAIL = 4 };
+HLE_FORCE("_ZN2nn6socket10InitializeEPvmmi", "connects to the bsd socket service; offline, creates no session (cut)", Result, h_sk_Init4, void *mem, uint64_t sz, uint64_t alloc, int conc) { (void)mem; (void)sz; (void)alloc; (void)conc; return dm_sk_initialize(); }
 HLE_FORCE("_ZN2nn6socket8FinalizeEv", "pairs with Initialize (cut)", Result, h_sk_Fini, void) { return RES_OK; }
-HLE_FORCE("_ZN2nn6socket12GetLastErrnoEv", "offline: ENETDOWN", int, h_sk_Errno, void) { return SK_ENETDOWN; }
-HLE_FORCE("_ZN2nn6socket6SocketEiii", "offline (cut): -1", int, h_sk_Socket3i, int a, int b, int c) { (void)a; (void)b; (void)c; return -1; }
-HLE_FORCE("_ZN2nn6socket8ShutdownEii", "offline (cut)", int, h_sk_Shutdown, int s, int h) { (void)s; (void)h; return -1; }
-HLE_FORCE("_ZN2nn6socket4BindEiPK8sockaddrj", "offline (cut)", int, h_sk_Bind, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return -1; }
-int dm_sk_poll(void *fds, uint64_t n, int ms);   // hle_net.c: nothing to wait on → the timeout passes, 0; else -1
+HLE_FORCE("_ZN2nn6socket12GetLastErrnoEv", "host socket error for this thread", int, h_sk_Errno, void) { return dm_sk_errno(); }
+HLE_FORCE("_ZN2nn6socket6SocketEiii", "native host BSD socket", int, h_sk_Socket3i, int a, int b, int c) { return dm_sk_socket(a, b, c); }
+HLE_FORCE("_ZN2nn6socket8ShutdownEii", "native BSD shutdown", int, h_sk_Shutdown, int s, int h) { return dm_sk_finish_int(shutdown(s, h)); }
+HLE_FORCE("_ZN2nn6socket4BindEiPK8sockaddrj", "native host BSD socket bind", int, h_sk_Bind, int s, const void *a, unsigned n) { return dm_sk_bind(s, a, n); }
+int dm_sk_poll(void *fds, uint64_t n, int ms);   // hle_net.c: native LAN poll, or the offline empty-set wait
 int dm_sk_select(int nfds, const uint64_t *r, const uint64_t *w, const uint64_t *e, const int64_t *tv);
-HLE_FORCE("_ZN2nn6socket4PollEP6pollfdmi", "offline: waits out the timeout when there is nothing to wait on, else fails", int, h_sk_Poll, void *p, uint64_t n, int t) { return dm_sk_poll(p, n, t); }
+HLE_FORCE("_ZN2nn6socket4PollEP6pollfdmi", "native LAN poll; offline empty sets wait out their timeout", int, h_sk_Poll, void *p, uint64_t n, int t) { return dm_sk_poll(p, n, t); }
 // SDK 4's Select with plain fd_set / timeval (Dark Souls Remastered)
-HLE_FORCE("_ZN2nn6socket6SelectEiP6fd_setS2_S2_P7timeval", "offline: waits out the timeout when there is nothing to wait on, else fails", int, h_sk_Select2, int n, void *r, void *w, void *e, void *t) { return dm_sk_select(n, r, w, e, t); }
-HLE_FORCE("_ZN2nn6socket6SendToEiPKvmiPK8sockaddrj", "offline (cut)", long, h_sk_SendTo, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { (void)s; (void)b; (void)n; (void)f; (void)a; (void)al; return -1; }
-HLE_FORCE("_ZN2nn6socket6SendToEiPKvmNS0_7MsgFlagEPKNS0_8SockAddrEj", "offline (cut)", long, h_sk_SendTo2, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { (void)s; (void)b; (void)n; (void)f; (void)a; (void)al; return -1; }
-HLE_FORCE("_ZN2nn6socket8RecvFromEiPvmiP8sockaddrPj", "offline (cut)", long, h_sk_RecvFrom2, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { (void)s; (void)b; (void)n; (void)f; (void)a; (void)al; return -1; }
-HLE_FORCE("_ZN2nn6socket11GetAddrInfoEPKcS2_PK8addrinfoPPS3_", "name resolution (cut): EAI_FAIL", int, h_sk_Gai2, const char *h, const char *s, const void *hint, void **res) { (void)h; (void)s; (void)hint; if (res) *res = NULL; return SK_EAI_FAIL; }
+HLE_FORCE("_ZN2nn6socket6SelectEiP6fd_setS2_S2_P7timeval", "native LAN select; offline empty sets wait out their timeout", int, h_sk_Select2, int n, void *r, void *w, void *e, void *t) { return dm_sk_select(n, r, w, e, t); }
+HLE_FORCE("_ZN2nn6socket6SendToEiPKvmiPK8sockaddrj", "native host BSD datagram send with configured peer relay", long, h_sk_SendTo, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { return dm_sk_sendto(s, b, n, f, a, al); }
+HLE_FORCE("_ZN2nn6socket6SendToEiPKvmNS0_7MsgFlagEPKNS0_8SockAddrEj", "native host BSD datagram send with configured broadcast peer relay", long, h_sk_SendTo2, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { return dm_sk_sendto(s, b, n, f, a, al); }
+HLE_FORCE("_ZN2nn6socket8RecvFromEiPvmiP8sockaddrPj", "native host BSD datagram receive", long, h_sk_RecvFrom2, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { return dm_sk_recvfrom(s, b, n, f, a, (socklen_t *)al); }
+HLE_FORCE("_ZN2nn6socket11GetAddrInfoEPKcS2_PK8addrinfoPPS3_", "name resolution (cut): EAI_FAIL", int, h_sk_Gai2, const char *h, const char *s, const void *hint, void **res) { if (getenv("DM_LAN_TRACE")) LOG("LAN resolver unavailable: %s:%s", h ?: "(null)", s ?: "(null)"); (void)hint; if (res) *res = NULL; return SK_EAI_FAIL; }
 HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEP8addrinfo", "pairs with GetAddrInfo (cut)", void, h_sk_FreeAi2, void *ai) { (void)ai; }
 HLE_FORCE("_ZN2nn6socket11GAIStrErrorENS0_7AiErrnoE", "resolver error text", const char *, h_sk_GaiStr, int e) { (void)e; return "network unavailable"; }
 // SDK 11's overloads with plain sockaddr / int arguments (Big Brain Academy: Brain vs. Brain, through Pia)
-HLE_FORCE("_ZN2nn6socket7ConnectEiPK8sockaddrj", "offline (cut)", int, h_sk_Connect2, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return -1; }
-HLE_FORCE("_ZN2nn6socket6AcceptEiP8sockaddrPj", "offline (cut)", int, h_sk_Accept2, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return -1; }
-HLE_FORCE("_ZN2nn6socket11GetSockNameEiP8sockaddrPj", "offline (cut)", int, h_sk_GetSockName2, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return -1; }
-HLE_FORCE("_ZN2nn6socket10GetSockOptEiiiPvPj", "offline (cut)", int, h_sk_GetSockOpt2, int s, int l, int o, void *v, unsigned *n) { (void)s; (void)l; (void)o; (void)v; (void)n; return -1; }
-HLE_FORCE("_ZN2nn6socket10SetSockOptEiiiPKvj", "offline (cut)", int, h_sk_SetSockOpt2, int s, int l, int o, const void *v, unsigned n) { (void)s; (void)l; (void)o; (void)v; (void)n; return -1; }
-HLE_FORCE("_ZN2nn6socket5FcntlEiiz", "offline (cut)", int, h_sk_Fcntl2, int s, int c) { (void)s; (void)c; return -1; }
-HLE_FORCE("_ZN2nn6socket4RecvEiPvmi", "offline (cut)", long, h_sk_Recv2, int s, void *b, unsigned long n, int f) { (void)s; (void)b; (void)n; (void)f; return -1; }
-HLE_FORCE("_ZN2nn6socket4SendEiPKvmi", "offline (cut)", long, h_sk_Send2, int s, const void *b, unsigned long n, int f) { (void)s; (void)b; (void)n; (void)f; return -1; }
+HLE_FORCE("_ZN2nn6socket7ConnectEiPK8sockaddrj", "native host BSD socket connect", int, h_sk_Connect2, int s, const void *a, unsigned n) { return dm_sk_connect(s, a, n); }
+HLE_FORCE("_ZN2nn6socket6AcceptEiP8sockaddrPj", "native host BSD socket accept", int, h_sk_Accept2, int s, void *a, unsigned *n) { return dm_sk_accept(s, a, (socklen_t *)n); }
+HLE_FORCE("_ZN2nn6socket11GetSockNameEiP8sockaddrPj", "native BSD socket name", int, h_sk_GetSockName2, int s, void *a, unsigned *n) { return dm_sk_name(s, a, (socklen_t *)n, 0); }
+HLE_FORCE("_ZN2nn6socket10GetSockOptEiiiPvPj", "native BSD socket option", int, h_sk_GetSockOpt2, int s, int l, int o, void *v, unsigned *n) { return dm_sk_getsockopt(s, l, o, v, (socklen_t *)n); }
+HLE_FORCE("_ZN2nn6socket10SetSockOptEiiiPKvj", "native BSD socket option", int, h_sk_SetSockOpt2, int s, int l, int o, const void *v, unsigned n) { return dm_sk_setsockopt(s, l, o, v, n); }
+HLE_FORCE("_ZN2nn6socket5FcntlEiiz", "native host BSD socket descriptor flags", int, h_sk_Fcntl2, int s, int c, long arg) {
+    return dm_sk_fcntl(s, c, arg);
+}
+HLE_FORCE("_ZN2nn6socket4RecvEiPvmi", "native host BSD socket receive", long, h_sk_Recv2, int s, void *b, unsigned long n, int f) { return dm_sk_recv(s, b, n, f); }
+HLE_FORCE("_ZN2nn6socket4SendEiPKvmi", "native host BSD socket send", long, h_sk_Send2, int s, const void *b, unsigned long n, int f) { return dm_sk_finish(send(s, b, n, f)); }
 
 // ---------- irsensor: the Joy-Con IR camera (Big Brain Academy: Brain vs. Brain's input layer makes one per controller). The host has none: every camera is unconnected,
 // processors cannot run and report no states. The default-config getters and MakeRect only fill the game's structs and keep running in the SDK ----------
@@ -125,14 +149,19 @@ HLE_FORCE("_ZN2nn3ssl14BuiltInManager22GetBuiltInCertificatesEPPNS0_26BuiltInCer
 // ---------- nifm / nsd: offline ----------
 HLE_FORCE("_ZN2nn4nifm19SetLocalNetworkModeEb", "offline: the local network mode switch is ignored", void, h_nifm_LocalMode, unsigned on) { (void)on; }
 HLE_FORCE("_ZN2nn4nifm27SubmitNetworkRequestAndWaitEv", "offline: the network request is not submitted (returns at once, IsNetworkAvailable is always false)", void, h_nifm_SubmitWait, void) {}
-HLE_FORCE("_ZN2nn4nifm22GetCurrentIpConfigInfoEP7in_addrS2_S2_S2_S2_", "offline: no IP configuration", Result, h_nifm_IpCfg, uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d, uint32_t *e) {
-    uint32_t *p[5] = {a, b, c, d, e}; for (int i = 0; i < 5; i++) if (p[i]) *p[i] = 0; return RES_FAIL;
+HLE_FORCE("_ZN2nn4nifm22GetCurrentIpConfigInfoEP7in_addrS2_S2_S2_S2_", "host IPv4 configuration for LAN play", Result, h_nifm_IpCfg, uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d, uint32_t *e) {
+    uint32_t mask = 0; int found = dm_nifm_ipv4(a, &mask);
+    if (getenv("DM_LAN_TRACE")) LOG("LAN GetCurrentIpConfigInfo (plain): found %d, mask %#x", found, mask);
+    if (b) *b = mask; if (c) *c = 0; if (d) *d = 0; if (e) *e = 0;
+    return found ? RES_OK : RES_FAIL;
 }
 // SDK 10's functions of the same name take socket::InAddr / in_addr, exactly the other way round from the generation above and in hle_net.c (Super Mario 3D World + Bowser's Fury)
-HLE_FORCE("_ZN2nn4nifm22GetCurrentIpConfigInfoEPNS_6socket6InAddrES3_S3_S3_S3_", "offline: no IP configuration (SDK 10 overload)", Result, h_nifm_IpCfg10, uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d, uint32_t *e) {
-    uint32_t *p[5] = {a, b, c, d, e}; for (int i = 0; i < 5; i++) if (p[i]) *p[i] = 0; return RES_FAIL;
+HLE_FORCE("_ZN2nn4nifm22GetCurrentIpConfigInfoEPNS_6socket6InAddrES3_S3_S3_S3_", "host IPv4 configuration for LAN play (SDK 10 overload)", Result, h_nifm_IpCfg10, uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d, uint32_t *e) {
+    uint32_t mask = 0; int found = dm_nifm_ipv4(a, &mask);
+    if (b) *b = mask; if (c) *c = 0; if (d) *d = 0; if (e) *e = 0;
+    return found ? RES_OK : RES_FAIL;
 }
-HLE_FORCE("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEP7in_addr", "offline: no IP (SDK 10 overload)", Result, h_nifm_GetIp10, uint32_t *a) { if (a) *a = 0; return RES_FAIL; }
+HLE_FORCE("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEP7in_addr", "host primary IPv4 address (SDK 10 overload)", Result, h_nifm_GetIp10, uint32_t *a) { return dm_nifm_ipv4(a, NULL) ? RES_OK : RES_FAIL; }
 // SDK 21 (Star Fox): the IPv4 and IPv6 configurations at once, with their counts
 HLE_FORCE("_ZN2nn4nifm18GetCurrentIpConfigEPNS0_10Ipv4ConfigEPiPNS0_10Ipv6ConfigES3_ii", "offline: no IP configuration (SDK 21 overload)", Result, h_nifm_IpCfg21,
           void *v4, int *n4, void *v6, int *n6, int c4, int c6) { (void)v4; (void)v6; (void)c4; (void)c6; if (n4) *n4 = 0; if (n6) *n6 = 0; return RES_FAIL; }
@@ -184,12 +213,12 @@ HLE_FORCE("_ZN2nn3web11ShowWebPageEPNS0_18WebPageReturnValueERKNS0_14ShowWebPage
 // Octopath Traveler 0 imports the offline HTML page applet too (pages shipped in the game's HTML document NCA, which the host does not extract)
 
 // ---------- C interface (nnsocket* / nnssl*): offline as well. The arguments are all in registers and the host does not look at them ----------
-HLE_FORCE("nnsocketAccept", "offline (cut)", int, h_c_sk_Accept, void) { return -1; }
-HLE_FORCE("nnsocketListen", "offline (cut)", int, h_c_sk_Listen, void) { return -1; }
-HLE_FORCE("nnsocketRecvMsg", "offline (cut)", int, h_c_sk_RecvMsg, void) { return -1; }
-HLE_FORCE("nnsocketSendMsg", "offline (cut)", int, h_c_sk_SendMsg, void) { return -1; }
-HLE_FORCE("nnsocketShutdown", "offline (cut)", int, h_c_sk_Shutdown, void) { return -1; }
-HLE_FORCE("nnsocketGetAddrInfo", "name resolution (cut): EAI_FAIL", int, h_c_sk_Gai, const char *h, const char *s, const void *hint, void **res) { (void)h; (void)s; (void)hint; if (res) *res = NULL; return SK_EAI_FAIL; }
+HLE_FORCE("nnsocketAccept", "native host BSD socket accept", int, h_c_sk_Accept, int s, void *a, unsigned *n) { return dm_sk_accept(s, a, (socklen_t *)n); }
+HLE_FORCE("nnsocketListen", "native host BSD socket listen", int, h_c_sk_Listen, int s, int n) { return dm_sk_listen(s, n); }
+HLE_FORCE("nnsocketRecvMsg", "native host BSD socket receive message", long, h_c_sk_RecvMsg, int s, void *m, int f) { return dm_sk_recvmsg(s, m, f); }
+HLE_FORCE("nnsocketSendMsg", "native host BSD socket send message", long, h_c_sk_SendMsg, int s, const void *m, int f) { return dm_sk_sendmsg(s, m, f); }
+HLE_FORCE("nnsocketShutdown", "native BSD shutdown", int, h_c_sk_Shutdown, int s, int h) { return dm_sk_finish_int(shutdown(s, h)); }
+HLE_FORCE("nnsocketGetAddrInfo", "name resolution (cut): EAI_FAIL", int, h_c_sk_Gai, const char *h, const char *s, const void *hint, void **res) { if (getenv("DM_LAN_TRACE")) LOG("LAN nnsocketGetAddrInfo: %s:%s", h ?: "(null)", s ?: "(null)"); (void)hint; if (res) *res = NULL; return SK_EAI_FAIL; }
 HLE_FORCE("nnsocketFreeAddrInfo", "pairs with GetAddrInfo (cut)", void, h_c_sk_FreeAi, void *ai) { (void)ai; }
 HLE_FORCE("nnsocketGAIStrError", "resolver error text", const char *, h_c_sk_GaiStr, int e) { (void)e; return "network unavailable"; }
 

@@ -15006,6 +15006,12 @@ static CAFrameRateRange link_range(int mode) {
 // both machines, for one more frame of input lag in variable-refresh fullscreen only. Fixed-rate screens do not need this workaround (#822). Why the system misses at 16 ms,
 // and why a fixed-rate screen still has about 20 ms more presentation delay with the link at either latency, remain open (docs/reference/frame-rate.md)
 __attribute__((weak)) int front_fullscreen(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
+// A rescue's retry waits while macOS reports the window covered (front_window_covered). A display link made while the window was covered, after the rescue invalidated the layer's
+// first one, kept presenting at about 30 Hz for the rest of the run once the window was visible again, though its range asked for 60 and the game for interval 1: four Donkey Kong
+// Bananza camp runs on an M4 Pro's ProMotion screen in variable-refresh fullscreen, and two of an older host where the frame step then stepped to 15-20 fps; reproduced by covering
+// the window 3.9 s (rescue at 0.5 s, retry at 3.5 s, visible 60 ms later). A link made while the window was visible and covered later, the first link of a run made while covered,
+// and the same order on a fixed-rate screen came back at the full rate. Why macOS keeps that link slow is not known (open, docs/reference/frame-rate.md); the retry makes none then
+__attribute__((weak)) int front_window_covered(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
 __attribute__((weak)) int front_screen_variable_refresh(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
 // CAMetalDisplayLink accepts only 1 or 2. Compare its readback with the supported request, or an oversized override rewrites and logs every frame.
 static int link_latency(void) { return g_present_latency > 0 ? MIN(g_present_latency, 2) : front_fullscreen() && front_screen_variable_refresh() ? 2 : 1; }
@@ -15038,7 +15044,9 @@ static void link_sync(void) {   // Called every frame by the game's present thre
     pthread_mutex_lock(&g_pq_mu);
     int want = g_dm_present_link;
     if (want < 0 || want > 2) { g_dm_present_link = applied == 3 ? 1 : applied; pthread_mutex_unlock(&g_pq_mu); return; }
-    if (g_rescue_mode && (want != g_rescue_mode || now_ns() >= g_rescue_back_at)) {
+    int retry = g_rescue_mode && now_ns() >= g_rescue_back_at, covered = retry && front_window_covered();
+    if (covered) { static uint64_t told; if (told != g_rescue_n) { told = g_rescue_n; MLOG("display link: the window is covered, the rescue goes on until it is visible again (rescue #%llu)", (unsigned long long)g_rescue_n); } }
+    if (g_rescue_mode && (want != g_rescue_mode || (retry && !covered))) {
         g_rescue_mode = 0; g_stall_t0 = 0; __atomic_store_n(&g_link_tick_ns, now_ns(), __ATOMIC_RELAXED);
         MLOG("display link: rescue ended, trying pacing mode %d (frame %llu)", want, (unsigned long long)atomic_load(&g_cur_frame));
     }

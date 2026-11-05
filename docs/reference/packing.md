@@ -47,6 +47,13 @@
 - **Fix:** `metallib()` runs from the files' common folder with relative paths and an absolute output path, so the command length no longer depends on the work folder's name.
 - **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md), with its dump in a folder named after both games of the cartridge. Applies to every Vulkan game's shader step.
 
+### The split shader tables differ from a game profile's
+
+- **Symptom:** the shader split stops with `the split shader tables differ from game profile <id>'s`, on the game version the profile registers.
+- **Cause:** the check compares the split's data rows with the profile's byte for byte, so it stops for either of two reasons: other game files, or a change to `shader_split.py` that reads the same files differently. A profile's tables can only be split again where its game files are, so continuous integration cannot catch the second reason.
+- **Fix:** the error shows each differing table's row counts and its first row on each side. For a splitter change, check that the new rows are right, then copy the tables from `shader/pkg.partial/tables` in the build folder into the profile. A change to the splitter's output also needs the other profiles it reaches split again.
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md) ([issue #1263](https://github.com/seedds/nxnative/issues/1263)): [NVN2 task and mesh shaders](shaders.md#nvn2-task-and-mesh-shaders) moved one row from vertex to mesh. Donkey Kong Bananza, Pokemon Pokopia and Hyrule Warriors: Age of Imprisonment were checked and hold no such shader; Fire Emblem Fortune's Weave was not checked, as no dump was at hand.
+
 ## IPA archives
 
 ### A streamed file changes size and the IPA fails its CRC check

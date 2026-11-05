@@ -6,7 +6,7 @@ The screen before the game starts shows the settings the game supports. A settin
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
-- [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
+- [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode), [Render resolution](#render-resolution), [Upscaler at higher render resolutions](#upscaler-at-higher-render-resolutions)
 - [In-game menu](#in-game-menu)
 - [TV](#tv)
 - [Settings in a file](#settings-in-a-file)
@@ -221,6 +221,14 @@ Turn off **Show this window at launch** to start the game at once with your choi
 
 **Window** or **Fullscreen**: how the game's window opens. ⌃⌘F or the green button changes it while you play. In an `env.txt`: `DM_FULLSCREEN=1` or `0`.
 
+### Render resolution
+
+**1×**, **1.5×** or **2×** (NVN games): the game draws its 3D at that multiple of its own size, so edges are sharper on a Retina or 4K screen, for more GPU time and memory. It is not [Upscaling](#upscaling), which scales the finished picture to the screen. The game's **Render Resolution** menu changes the same choice while you play; it applies at the next launch. In an `env.txt`: `DM_UPSCALE=1.5` or `2`.
+
+### Upscaler at higher render resolutions
+
+Some games draw their 3D below their output size and enlarge it themselves (Hyrule Warriors: Age of Imprisonment draws at up to 1600x900 and upscales to 1920x1080). At a render resolution above 1× that 3D is already larger than the game's output, and the game's own upscaler, built for its smaller picture, blurs it. **Resolved by the app**, the default, writes the game's upscaled picture from the larger render instead (filtered down to the game's output size), so the picture is sharper than at 1×; the game's sharpening and interface run unchanged on it. **Game's own** keeps the game's upscaler, to compare. At 1× the setting changes nothing. In an `env.txt`: `DM_UPSCALE_GAME=bypass` or `keep`.
+
 ### Cloud saves folder
 
 **Choose a folder…** picks the iCloud Drive folder the game's save is synced through, the one the iPhone app chose in its launcher's **Cloud saves**, or the game's own folder inside it, named after its title ID ([Cloud saves](#cloud-saves)); **Turn off** stops it. Off by default. macOS may ask once whether the app may open iCloud Drive; if the game log says `this app may not open iCloud Drive`, allow it in System Settings › Privacy & Security › Files and Folders. In an `env.txt`: `DM_SAVE_SYNC=<folder>`, or `DM_SAVE_SYNC=icloud` for iCloud Drive › nxnative Saves; the window then shows it fixed.
@@ -266,6 +274,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |
 | Upscaling | `DM_PRESENT_UPSCALE` | `off`, `metalfx` |
 | Game's upscaler | `DM_UPSCALER` | `game`, `metalfx` |
+| Upscaler at 1.5× / 2× | `DM_UPSCALE_GAME` | `bypass`, `keep` |
 | Frame buffering | `DM_PRESENT_SNAP` | `1`, `0` |
 | Metal 4 pipelines | `DM_PSO_MTL4` | `1`, `0` |
 | Pipeline prebuild | `DM_PSO_PREBUILD` | `1`, `0` |

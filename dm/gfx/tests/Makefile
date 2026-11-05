@@ -81,6 +81,8 @@ t_cover: t_cover.c ../nvn/nvn_cover.h
 	clang -O1 -Wall -o $@ t_cover.c
 t_pace: t_pace.c ../nvn/nvn_pace.h
 	clang -O1 -Wall -o $@ t_pace.c
+t_ups: t_ups.c ../nvn/nvn_ups.h ../nvn/nvn_refl.h ../nvn/include/nvn.h
+	clang -O1 -Wall -I../nvn -o $@ t_ups.c
 t_timestamp: t_timestamp.c ../nvn/nvn_timestamp.h
 	$(CC) -std=c11 -O2 -g -Wall -Wextra -Werror -o $@ $<
 t_fstep: t_fstep.c ../nvn/nvn_fstep.h
@@ -422,6 +424,15 @@ check_t_upscaler_mfx: t_upscaler_mfx
 	DM_NVN_ENC_THREAD=0 DM_UPSCALER=metalfx ./t_upscaler_mfx
 	DM_NVN_ENC_THREAD=1 DM_UPSCALER=metalfx ./t_upscaler_mfx
 	MTL_DEBUG_LAYER=1 ./t_upscaler_mfx
+# Resolution upscaling: a game's own upscaler resolved by the host (DM_UPSCALE_GAME): at 2x with each filter, on the encoding thread, under Metal validation, and at 1x (nothing resolved)
+t_ups_resolve: t_ups_resolve.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_ups_resolve.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_ups_resolve
+check_t_ups_resolve: t_ups_resolve
+	DM_NVN_ENC_THREAD=0 DM_UPSCALE=2 ./t_ups_resolve
+	DM_NVN_ENC_THREAD=1 DM_UPSCALE=2 ./t_ups_resolve
+	MTL_DEBUG_LAYER=1 DM_UPSCALE=2 ./t_ups_resolve
+	./t_ups_resolve
 # NVN2's DLSS on MetalFX's temporal scaler, with and without the encoding thread (MetalFX encodes into the real command buffer; validation stops its Metal 4 scalers, as above)
 t_dlss_mfx: t_dlss_mfx.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_dlss_mfx.m $(MTL_T_SRC) $(FW)

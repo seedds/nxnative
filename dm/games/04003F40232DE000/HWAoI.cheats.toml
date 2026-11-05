@@ -1,0 +1,64 @@
+# Version-independent cheats for nxnative (scripts/cheat_anchor.py, format 1).
+# Imported from 659CB288B5C5B2B4.txt on 2026-11-04 with the code of build 659CB288B5C5B2B4. Compile it for a build with
+#   cheat_anchor.py compile <this file> --nso <that build's ExeFS/main> -o <cheats folder>
+# The anchors at the end are the tool's; the cheats can be edited (names, sections, notes, values, "ask").
+
+format = 1
+title = "04003F40232DE000"
+authored = "659CB288B5C5B2B4"
+
+[[cheats]]
+name = "One hit kill"
+patch = [
+  { at = "cave", new = "7103205F" },
+  { at = "cave+0x4", new = "540001C2" },
+  { at = "cave+0x8", new = "F94002C9" },
+  { at = "cave+0xC", new = "5289630A" },
+  { at = "cave+0x10", new = "72A0344A" },
+  { at = "cave+0x14", new = "F86A6929" },
+  { at = "cave+0x18", new = "914DD129" },
+  { at = "cave+0x1C", new = "9110C129" },
+  { at = "cave+0x20", new = "52800E8A" },
+  { at = "cave+0x24", new = "9BAA2449" },
+  { at = "cave+0x28", new = "7940B929" },
+  { at = "cave+0x2C", new = "36100089" },
+  { at = "cave+0x30", new = "1E202008" },
+  { at = "cave+0x34", new = "54000045" },
+  { at = "cave+0x38", new = "1E214040" },
+  { at = "cave+0x3C", new = "1E202820" },
+  { at = "cave+0x40", new = "1E232020" },
+  { at = "cave+0x44", new = "b:s_11C5DA4" },
+  { at = "s_11C5DA0", new = "b:cave" },
+]
+
+[[cheats]]
+name = "Infinite health"
+patch = [
+  { at = "cave+0x60", new = "36100088" },
+  { at = "cave+0x64", new = "1E212000" },
+  { at = "cave+0x68", new = "54000045" },
+  { at = "cave+0x6C", new = "1E204020" },
+  { at = "cave+0x70", new = "1E232000" },
+  { at = "cave+0x74", new = "b:s_11C5DC4" },
+  { at = "s_11C5DC0", new = "b:cave+0x60" },
+]
+
+[anchors.cave]
+pad = 0xE40
+authored = "0x1ED71C0"
+
+[anchors.s_11C5DA4]
+code = { old = "1E214C85", size = 0x654, at = 0xC4, fp = "0e1d2f5313cdf63401abbb83e317f2aabff00e11beecec465a32f3f17f4bf1d5", body = "d6d5c7c4f2a35d027cce5fc15e751f58cba3780dc149639ba829ffd698df5956", window = "BD405662 7940BA68 1E232020 1E202820 1E214C85 1E212040 1E22CCAA 1E232040 1E224C69", wat = 4, wkey = 4, wunique = true }
+authored = "0x11C5DA4"
+
+[anchors.s_11C5DA0]
+code = { old = "1E202820", size = 0x654, at = 0xC0, fp = "0e1d2f5313cdf63401abbb83e317f2aabff00e11beecec465a32f3f17f4bf1d5", body = "d6d5c7c4f2a35d027cce5fc15e751f58cba3780dc149639ba829ffd698df5956", window = "BD404E61 BD405662 7940BA68 1E232020 1E202820 1E214C85 1E212040 1E22CCAA 1E232040", wat = 4, wkey = 5, wunique = true }
+authored = "0x11C5DA0"
+
+[anchors.s_11C5DC4]
+code = { old = "1E204C83", size = 0x654, at = 0xE4, fp = "0e1d2f5313cdf63401abbb83e317f2aabff00e11beecec465a32f3f17f4bf1d5", body = "d6d5c7c4f2a35d027cce5fc15e751f58cba3780dc149639ba829ffd698df5956", window = "1E224C69 BD00526A 37180008 1E232000 1E204C83 1E222000 1E224C68 36000008 1E202108", wat = 4, wkey = 6, wunique = true }
+authored = "0x11C5DC4"
+
+[anchors.s_11C5DC0]
+code = { old = "1E232000", size = 0x654, at = 0xE0, fp = "0e1d2f5313cdf63401abbb83e317f2aabff00e11beecec465a32f3f17f4bf1d5", body = "d6d5c7c4f2a35d027cce5fc15e751f58cba3780dc149639ba829ffd698df5956", window = "1E232040 1E224C69 BD00526A 37180008 1E232000 1E204C83 1E222000 1E224C68 36000008", wat = 4, wkey = 2, wunique = true }
+authored = "0x11C5DC0"

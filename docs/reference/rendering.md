@@ -147,6 +147,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** an image slot the shader declares as uint / int now gets a view of the same texel size in that class (`img_fit` in `nvn_mtl.m`). The format-view usage costs lossless compression, so a texture gets it only when a shader needs such a view: it is upgraded (copied into a texture with the usage) before the next draw pass opens, as the copy cannot run inside the draw's own pass; until then that one draw reads it as before.
 - **Found on:** [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md): the last passes have no render target; fragment shaders composite each UI layer into the window texture with image stores, blending in software (`uirender.tec`, `4cf1975ed1e36590`).
 
+### Buffer textures behind handles in uniform buffers, and rows of finalized descriptors
+
+- **Symptom:** flat-coloured objects with no texture detail in an otherwise correct scene: the UVs and colours a vertex factory fetches from buffers read 0. Then `texture buffers bound as 2D rows … N times, about N made` in the log, a Metal texture for nearly every bind.
+- **Cause:** with a handle in a uniform buffer the build has no descriptor to ask, so a buffer texture there is declared 2D and read [in rows](#buffer-textures-read-by-1d-integer-fetches-row-wrap); only slots the translator recorded got the row form. And the rows were kept with the texture object, while Unreal Engine 5.4 finalizes its buffer texture objects and keeps using the registered IDs, as the API allows. Comparing the texture's address in the cache missed as well, as new descriptors view the same memory.
+- **Fix:** any `NVN_RB_TEXU` declared 2D takes the row form for a buffer texture. Rows of a finalized object are kept by what they view (`g_tb2_gone`: buffer, offset, length, format), emptied with the pools.
+- **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): 13.1 million views made for 13.2 million binds became 1.08 million, with frame times unchanged at 16.7 ms.
+
 ### Buffer textures read by 1D integer fetches (row wrap)
 
 - **Symptom:** `texture type mismatch: shader declares 2, texture is 9`; the slot read 0.
@@ -162,6 +169,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Cause:** with no type answer the translator declares a fetched texture float. KTGL keeps its light and decal lists in 32-bit integer buffers and takes the fetched bits back with `as_type<int>`. Reading an integer texture through a float declaration is undefined in Metal.
 - **Fix:** `tbuf_as_2d` (`nvn_mtl.m`) views a 32-bit integer buffer in a slot declared float as the float format of the same size (`tbuf_view_format`), so the shader reads the stored bits.
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md). No visible change in its tutorial area.
+
+### Integer textures read through float slots
+
+- **Symptom:** none visible on an M6, where at most 0.23 % of pixels differ between paired runs. GitHub issue #783 reports wrong light offsets on an M2.
+- **Cause:** as for [buffer textures](#integer-buffer-textures-read-through-float-slots), but for a 2D texture: with no type answer the translator declares it float, and the shader takes the fetched bits back with `as_type<int>`. The answer table cannot say otherwise, because the format is known only at bind time.
+- **Fix:** `tex_float_fit` (`nvn_mtl.m`) binds the float view of the same size (`tbuf_view_format`) in a slot declared float. A texture made without the format-view usage is upgraded before the next draw pass (`img_fit_upgrade`). 32-bit formats only: a smaller integer format has no float view that keeps its bits.
+- **Found on:** [Metroid Prime Remastered](../../dm/games/010012101468C000/README.md): the clustered lighting's R32Uint light grid (`fde1a3e769219a77` and the other world materials). Reported and fixed by nobz226.
+- **Check:** `t_int_float_view` reads small integers (denormal floats), NaN patterns and negatives through the R32Float view in a compute shader and takes back every bit.
 
 ### Buffer textures at offsets below 16 bytes
 
@@ -202,6 +217,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `nvn_tex.c` `sparse_tile_h` gives such a texture its tile's block height; a packaged layout still wins.
 - **Found on:** [OCTOPATH TRAVELER](../../dm/games/010057D006492000/README.md) (Unreal Engine 4.18 flags its streamed and CPU-loaded textures sparse).
 - **Check:** the map's guest bytes deswizzled in Python at 1 to 32 GOBs read right only at 8; a 512×512 RGBA8 sprite sheet only at 16; [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md)'s packaged ASTC 6×6 textures (16 bytes per block) carry 8 in their layout. The 1- and 2-byte heights follow the same tile shapes and were not seen.
+
+### Sparse 3D textures take the standard 3D tile
+
+- **Symptom:** none visible on an M6 on the Frigate Orpheon's deck. Laid out 1 GOB high, the mapped tiles of a streamed 3D texture fall in scattered places, so lookups read zero in the holes; GitHub issue #783 reports a black gunship hull in the opening on an M2.
+- **Cause:** a sparse 3D texture without a packaged layout took the automatic layout (1 GOB high, 32 GOBs deep). Its 64 KB tile is the standard 3D shape: 64x32x32, 32x32x32, 32x32x16, 32x16x16 and 16x16x16 blocks for 1, 2, 4, 8 and 16 bytes per block.
+- **Fix:** `nvn_tex.c` `sparse_tile_h3`, `sparse_tile_d3` give such a texture its tile's block height and depth when level 0 is at least one tile in each direction; a packaged layout still wins, and a smaller texture keeps the automatic layout. `nvnTextureBuilderGetSparseTileLayout` answers the same shape.
+- **Found on:** [Metroid Prime Remastered](../../dm/games/010012101468C000/README.md): its six 512x256x368 lighting volumes map the same tile indices whichever shape the host reports (256x32x16 or 128x64x16 texels for BC1), so the game's layout is fixed. With this shape BC1's tiles 5-7 and 9-11 of a 16-slice slab and BC6H's 10-15 and 18-23 are the same texels, 128..512 x 64..192. With 1-GOB blocks they were two different patchworks. Reported and fixed by nobz226.
+- **Check:** `t_sparse_layout` fills those tiles of both formats and decodes exactly that box, in exactly that slab, plus the tile shapes of 1, 2, 4 and 8 bytes per block. Only 8 and 16 bytes per block were seen in a game; the others follow the same table. Metal cannot confirm the shape: `sparseTileSizeWithTextureType:` gives a 3D texture the 2D tile with depth 1.
 
 ### Sparse textures of 8- and 16-byte blocks: blocks at most 8 GOBs high
 
@@ -726,6 +749,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Note:** how the steel-blue ground was traced, since two steps misled: where the ground was missing nothing wrote the depth (reversed-Z, cleared to 0), the lighting takes depth 0 for sky and paints the fog colour, and the never-cleared G-buffer colour targets kept an old image there (cobblestones of a mesh under the terrain, which from the map camera showed through the gaps like a road). A `HILITE` colour over the gap was stale too (the never-cleared albedo), and the end-of-frame depth showed 0 there. Recomputing every draw's clip positions from `CBDUMP` data showed that no draw of the shader reached the gap; then the side pass's layer, which showed only scattered tiles of the river, led to the vertex format. Ruled out on the way: depth clamp (Metal's clip and clamp modes gave the same depth), the pass without a depth attachment (142595 is a screen-space decal pass: it samples the depth and writes albedo and normals), polygon offset (none), dropped draws.
 - **Note:** to confirm in Three Houses: 64-pixel rectangles in the albedo where decals land. The decal pass (`417a523053457352`, slots 16 and 18) and the lighting (`094a2d11253f126c`, `f54830a75e07e14a`, slots 18–20) read their decal and light lists from texture buffers that the translation declared `texture2d`, because those handles have no PC type (`texture type mismatch: shader declares 2, texture is 9`); skipping the decal pass removed the rectangles. Since row wrap ([Buffer textures read by 1D integer fetches (row wrap)](#buffer-textures-read-by-1d-integer-fetches-row-wrap), general) they read the real lists: slot 18 holds 1,052,640 elements, 65 rows. On the Mac prologue route the torches and burning houses now light the battle map and the close-up ground (they lit nothing before), and the blood decals take the scene's light instead of showing as dark blue patches. The rectangles did not appear on that route in either build (no 64-pixel structure in the close-up frames), so the scene where they were seen still has to be checked.
 
+### More than 16 vertex attributes
+
+- **Symptom:** `[RED] BindVertexAttribState n=17`, tens of thousands of times, and a scene that draws wrong or not at all: the bind was refused, so the draws kept the previous layout.
+- **Cause:** NVN has 16 vertex attributes and NVN2 32, and every table in the host held 16.
+- **Fix:** the attribute tables hold 32 (`p_bind_vattr`, the replay's state), and so does the answer to the device query. The pipeline key keeps the first 16 where they were and adds `attr_hi` at its end, so a prewarm row written before reads as 0 (`pso_skey_parse`); `dmsh_pull.py` and `dmsh_vin.py` leave out such shaders as they did, and they take the ordinary path. Vertex bindings stay 16.
+- **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): Unreal Engine 5.4's vertex factories use attribute 16 on stream 6.
+
 ### Vertex formats Metal lacks
 
 - **Symptom:** `vertex attribute format … not mapped` (printed once).
@@ -901,6 +931,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** the swizzle is recorded (`OP_VP_SWIZZLE`) and applied at the draw as a viewport flipped about its centre, the same mapping. Facing is decided after the swizzle on the GPU as in Metal, so the winding stays. Other swizzles (axis exchanges, negated x / z / w) give a red line and are drawn unswizzled.
 - **Found on:** [Absolum](../../dm/games/0100A83022A22000/README.md) (FNA3D's NVN driver, `FNA3D_Driver_NVN.cpp`).
 
+### Black shapes on sprites when Unreal's GPU work runs late
+
+- **Symptom:** on an Unreal Engine game with a full GPU, moving sprites flicker black for a frame: cut straight across, or a whole silhouette in the sprite's outline. It follows GPU time against the frame budget, and goes away at 30 fps or with GPU time to spare. The black is already in the scene colour the base pass writes.
+- **Cause:** a race in the engine's NVN code. A dynamic buffer keeps `nvn.NumBufferedFrames` copies (3), and each write lock moves to the next one with no fence. The render thread can come round to a copy while draws queued for the GPU still read it. If that lands between a sprite's depth prepass and its base pass, the two see different vertices: the base pass tests depth `EQUAL`, draws nothing where they differ, and the cleared black stays.
+- **Fix:** a workaround, since the missing fence is in the game's code: the rewriter gives each dynamic buffer a fourth copy (`dm/tools/ue_ring.py`, called by `patch_nso.py`), with no build ID, on any main where its chain holds. A buffer has room for exactly 4. The variable itself cannot be set to 4: its other readers size fixed tables, and the deferred-delete table has room for 3, so only the constructor's load changes. Open: this adds one lock of margin and no fence, so a GPU further behind, or a buffer locked more than once a frame, can still reach a queued copy. A single comparison has been run (5 black frames against 0 at equal load), and hit counts vary between runs. The fallback is copying small vertex streams at encode, which gave 0 against 10 and 14 in a diagnostic build; it costs every game a copy per draw and does not cover index buffers.
+- **Found on:** [TRIANGLE STRATEGY](../../dm/games/0100CC80140F8000/README.md), [issue #1040](https://github.com/seedds/nxnative/issues/1040).
+
 ## Uniforms, copies and ordering
 
 ### Bindless handles read from guest memory directly
@@ -955,6 +992,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Encoding thread:** with `DM_NVN_ENC_THREAD` (the iOS default) the replay's command buffer is the recording's stand-in, which has none of MetalFX's calls: the host stopped at the first evaluation (`deferred encoding: DmRecCB has no stand-in for -useResidencySet:`). The scaler's state and its encode are a block run on the encoding thread with the real command buffer (`rec_cb_block` in `nvn_rec.h`), as for [a game's own upscaler](#a-games-own-upscaler-drawn-by-metalfx). Check: `make -C dm/gfx/tests GAME=040074A01BF12000 check_t_dlss_mfx` (two evaluations through one scaler in a submission, the thread off and on). Not run on a game with the thread.
 - **Open:** the jitter's sign has not been checked and the bias mask is only logged; no ghosting has been seen.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): `gfxa::TaskDLSS`, 1024x576 to 2048x1152.
+
+### The DLSS network resized
+
+- **Symptom:** `[RED] NVN unimplemented function called: nvnDlssNetworkResize (x0=… x1=0x300 x2=0x1b0)` at the title.
+- **Cause:** NVN2 lets a game resize a DLSS network instead of making a new one. The replay takes each evaluation's sizes from its parameters and textures, so the network keeps nothing of it.
+- **Fix:** `nvnDlssNetworkResize` succeeds, logging the first size (`hle_nvn.c`).
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md): 768x432, once; its evaluations run 768x432 to 768x432.
 
 ### A game's own upscaler drawn by MetalFX
 

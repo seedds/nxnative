@@ -239,6 +239,30 @@ class ImageStaging(unittest.TestCase):
             self.assertTrue(romfs_image.same_identity((app / 'romfs.id').read_text(), romfs_image.identity(image)))   # the slim build names the image it needs
             environment.pop('DM_COPY_ROMFS'); stage(); self.assertTrue((app / 'romfs.img').is_file()); self.assertFalse((app / 'romfs.id').exists())
 
+    def test_one_library_file_is_staged_as_it_is(self):   # an NVN game's libraries (dm/tools/shader_lib.py), and the folder of a build from before them, each replacing the other
+        import romfs_image
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve(); ios = root / 'xcode'; (ios / 'Gen').mkdir(parents=True)
+            (ios / 'tools').symlink_to(REPO / 'dm/ios/tools', target_is_directory=True)
+            (ios / 'Gen/dm.xcconfig').touch()
+            source = root / 'source'; source.mkdir(); (source / 'marker').write_text('resource')
+            image = root / 'RomFS.img'; romfs_image.pack(source, image)
+            header = root / 'dmsh_chain.h'; header.write_text('#define DMSH_CHAIN "abc"\n')
+            shaders = root / 'shaders'; shaders.mkdir(); packed = shaders / 'b-abc.img'; packed.write_bytes(b'library file')
+            folder = root / 'old/b-abc'; folder.mkdir(parents=True); (folder / 'k_b.metallib').write_text('loose')
+            app = root / 'products/Game.app'
+            environment = dict(os.environ, SRCROOT=str(ios), TARGET_BUILD_DIR=str(app.parent), UNLOCALIZED_RESOURCES_FOLDER_PATH=app.name, PLATFORM_NAME='iphoneos')
+            def stage(libraries):
+                with patch.object(sys, 'argv', ['gen_resources.py', str(ios), str(image), 'marker', str(libraries), 'b-abc', '', str(root / 'dd'), str(header)]):
+                    gen_resources.main()
+                result = subprocess.run(['bash', str(ios / 'tools/stage_resources.sh')], env=environment, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            stage(packed)
+            self.assertEqual([p.name for p in (app / 'msl').iterdir()], ['b-abc.img']); self.assertEqual((app / 'msl/b-abc.img').read_bytes(), b'library file')
+            packed.write_bytes(b'newer'); stage(packed); self.assertEqual((app / 'msl/b-abc.img').read_bytes(), b'newer')
+            stage(folder); self.assertEqual([p.name for p in (app / 'msl').iterdir()], ['b-abc']); self.assertEqual((app / 'msl/b-abc/k_b.metallib').read_text(), 'loose')
+            stage(packed); self.assertEqual([p.name for p in (app / 'msl').iterdir()], ['b-abc.img'])
+
 
 if __name__ == '__main__':
     unittest.main()

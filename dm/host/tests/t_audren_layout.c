@@ -14,6 +14,7 @@ void *objmap_del(const void *key) { (void)key; return NULL; }
 void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stack) { (void)fn; (void)arg; (void)prio; (void)stack; return NULL; }
 void dm_guest_thread_join(void *tt) { (void)tt; }
 uint64_t now_ns(void) { return 0; }
+module_t *module_of(const void *p) { (void)p; return NULL; }
 void *dm_pcmout_open(int ch) { (void)ch; return NULL; }
 void dm_pcmout_close(void *k) { (void)k; }
 void dm_pcmout_start(void *k) { (void)k; }
@@ -69,7 +70,7 @@ static void test_headers(void) {
     }
     g_hdr6 = g_hdr21 = 0;
     int16_t out[FRAME_MAX * 2];
-    for (size_t n = 0; n < 0x20; n++) assert(capture(list, n, out) == 0);
+    for (size_t n = 0; n < 0x20; n++) assert(capture(&g_ar[0], list, n, out) == 0);
 }
 
 static void test(int sdk, int incomplete) {
@@ -81,12 +82,12 @@ static void test(int sdk, int incomplete) {
     // An empty startup list must not choose a layout either.
     size_t n = build(sdk, NCMD);
     *(uint32_t *)(list + 4) = 0;
-    assert(capture(list, 0x20, out) == 0);
+    assert(capture(&g_ar[0], list, 0x20, out) == 0);
     if (incomplete) {
         // The third command is zeroed, as Mario Kart 8 Deluxe's first list was. Several such frames must leave detection open.
         n = build(sdk, NCMD);
         memset(list + 0x20 + 2 * 0x40, 0, 0x40);
-        for (int i = 0; i < 3; i++) assert(capture(list, n, out) == 0);
+        for (int i = 0; i < 3; i++) assert(capture(&g_ar[0], list, n, out) == 0);
         assert(!g_hdr6 && !g_hdr21 && !g_sink4);
     }
     if (sdk == 5) {
@@ -94,19 +95,19 @@ static void test(int sdk, int incomplete) {
         memset(list, 0, sizeof list);
         *(uint32_t *)(list + 4) = 2; *(const int32_t **)(list + 8) = mix; *(uint32_t *)(list + 0x14) = SAMPLES; *(uint32_t *)(list + 0x18) = 48000;
         uint8_t *q = put(list + 0x20, 5, 0x14, 0x14); q = put(q, 5, 0xa, 0x28);
-        assert(capture(list, (size_t)(q - list), out) == 0);
+        assert(capture(&g_ar[0], list, (size_t)(q - list), out) == 0);
         assert(!g_hdr6 && !g_hdr21 && !g_sink4);
     }
 
     // SDK 21 starts with short valid lists: detect its header before the first full list's sink scan.
     n = build(sdk, sdk == 21 ? 2 : NCMD);
-    int got = capture(list, n, out);
+    int got = capture(&g_ar[0], list, n, out);
     assert(g_hdr6 == (sdk <= 6) && g_hdr21 == (sdk == 21) && g_sink4 == (sdk <= 5) && g_sink5 == (sdk == 5));
     assert(g_sink_id == (sdk <= 5 ? 0xf : sdk == 6 ? 0x10 : sdk == 21 ? 0x14 : 0x13));
     assert(got == SAMPLES);
     for (int s = 0; s < SAMPLES; s++) assert(out[2 * s] == 1000 && out[2 * s + 1] == -1000);
     n = build(sdk, NCMD);
-    assert(capture(list, n, out) == SAMPLES);   // detection stays valid for later full frames
+    assert(capture(&g_ar[0], list, n, out) == SAMPLES);   // detection stays valid for later full frames
 }
 
 // Malformed lists after layout selection must leave the histogram/sink scan pending
@@ -116,7 +117,7 @@ static void test_malformed(int sdk, int bad) {
     int16_t out[FRAME_MAX * 2];
     size_t n = build(sdk, NCMD);
     *(uint32_t *)(list + 4) = 1;
-    assert(capture(list, 0x20 + 0x40, out) == 0);   // select the layout without a sink or histogram
+    assert(capture(&g_ar[0], list, 0x20 + 0x40, out) == 0);   // select the layout without a sink or histogram
     int sink_id = g_sink_id;
     n = build(sdk, NCMD);
     if (bad < 2) memset(list + 0x20 + (size_t)bad * 0x40, 0, 0x40);
@@ -126,7 +127,7 @@ static void test_malformed(int sdk, int bad) {
     FILE *log = tmpfile(); assert(log);
     fflush(stderr); int saved = dup(STDERR_FILENO); assert(saved >= 0);
     assert(dup2(fileno(log), STDERR_FILENO) >= 0);
-    int got = capture(list, n, out);
+    int got = capture(&g_ar[0], list, n, out);
     fflush(stderr); assert(dup2(saved, STDERR_FILENO) >= 0); close(saved);
     char text[2048]; assert(fseek(log, 0, SEEK_SET) == 0); size_t bytes = fread(text, 1, sizeof text - 1, log); text[bytes] = 0; fclose(log);
     assert(got == 0);
@@ -138,11 +139,11 @@ static void test_malformed(int sdk, int bad) {
     // A subsequent valid full list still discovers the SDK 4/5 sink and yields stereo.
     n = build(sdk, NCMD);
     for (int i = 0; i < SAMPLES; i++) { mix[i] = 700; mix[SAMPLES + i] = -900; }
-    assert(capture(list, n, out) == SAMPLES);
+    assert(capture(&g_ar[0], list, n, out) == SAMPLES);
     for (int i = 0; i < SAMPLES; i++) assert(out[2 * i] == 700 && out[2 * i + 1] == -900);
     // Validation also applies after the histogram has already been logged.
     *(uint32_t *)(list + 4) = NCMD + 1; memset(list + n, 0, 0x40);
-    assert(capture(list, n + 0x40, out) == 0);
+    assert(capture(&g_ar[0], list, n + 0x40, out) == 0);
 }
 
 static void test_histogram(void) {
@@ -156,7 +157,7 @@ static void test_histogram(void) {
     FILE *log = tmpfile(); assert(log);
     fflush(stderr); int saved = dup(STDERR_FILENO); assert(saved >= 0);
     assert(dup2(fileno(log), STDERR_FILENO) >= 0);
-    int16_t out[FRAME_MAX * 2]; assert(capture(cl, len, out) == 0);
+    int16_t out[FRAME_MAX * 2]; assert(capture(&g_ar[0], cl, len, out) == 0);
     fflush(stderr); assert(dup2(saved, STDERR_FILENO) >= 0); close(saved);
     char text[2048]; assert(fseek(log, 0, SEEK_SET) == 0); size_t bytes = fread(text, 1, sizeof text - 1, log); text[bytes] = 0; fclose(log);
     const char *hist = strstr(text, "by command ID:"); assert(hist);
@@ -166,7 +167,28 @@ static void test_histogram(void) {
     free(cl);
 }
 
+// Two renderers open at once: an SDK call that names only the system finds its own renderer, and a system not seen yet is the one open renderer whose system is not known
+static void test_two_renderers(void) {
+    uint8_t x, y, z; memset(g_ar, 0, sizeof g_ar);
+    g_ar[0].handle[0] = &x; g_ar[1].handle[0] = &y;
+    assert(ar_of_sys(&z) == NULL);   // two unknown: not a guess
+    g_ar[0].sys = &x;
+    assert(ar_of_sys(&x) == &g_ar[0]);
+    assert(ar_of_sys(&y) == &g_ar[1] && g_ar[1].sys == &y);
+    assert(ar_of_sys(&y) == &g_ar[1]);
+    assert(ar_of_sys(&z) == NULL);   // no renderer left to be it
+    // The 3:2 upsampler's history is each renderer's own: frames of one do not reach the other's output
+    int32_t quiet[2 * 160] = {0}, loud[2 * 160], out[2 * 240];
+    for (int i = 0; i < 2 * 160; i++) loud[i] = 20000;
+    memset(g_ar, 0, sizeof g_ar);
+    assert(up_3_2(&g_ar[0], loud, 160, out) == 240);
+    assert(up_3_2(&g_ar[1], quiet, 160, out) == 240);
+    for (int i = 0; i < 2 * 240; i++) assert(out[i] == 0);
+    memset(g_ar, 0, sizeof g_ar);
+}
+
 int main(int argc, char **argv) {
+    test_two_renderers();
     if (argc == 2 && !strcmp(argv[1], "--histogram")) { test_histogram(); return 0; }
     if (argc == 2 && !strcmp(argv[1], "--malformed")) { test_malformed(16, 0); return 0; }
     test_headers();

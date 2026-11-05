@@ -212,9 +212,8 @@ int front_web_touch(void) { return g_touch; }
 
 static NSString *json(NSString *s) {   // a JavaScript string literal
     NSData *d = [NSJSONSerialization dataWithJSONObject:@[s ?: @""] options:0 error:nil];
-    if (!d) return @"";
-    NSString *a = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
-    return [a substringWithRange:NSMakeRange(1, a.length - 2)];
+    NSString *a = d ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] : nil;
+    return a ? [a substringWithRange:NSMakeRange(1, a.length - 2)] : @"\"\"";   // a string the serializer refuses reads as empty
 }
 static NSString *mime(NSString *ext) {
     NSDictionary *m = @{@"html": @"text/html", @"htm": @"text/html", @"css": @"text/css", @"js": @"text/javascript", @"json": @"application/json", @"png": @"image/png",
@@ -288,7 +287,7 @@ static NSString *mime(NSString *ext) {
     NSString *f = [_dir stringByAppendingPathComponent:rel]; NSData *d = nil;
     if ([rel isEqualToString:@"__dm_font/nintendo_ext.ttf"]) {   // the Nintendo extension font (button icons): the host's stand-in, as the shared font service gives it (hle_sdk16.c)
         const char *e = getenv("DM_SHARED_FONT_EXT"), *fd = getenv("DM_FONT_DIR");
-        f = (e ? @(e) : fd ? [@(fd) stringByAppendingPathComponent:@"nintendo_ext.ttf"] : nil) ?: @"";   // @() is nil for a path that is not UTF-8
+        f = (e ? @(e) : fd ? [@(fd) stringByAppendingPathComponent:@"nintendo_ext.ttf"] : nil) ?: @"";   // @"": no path, or one that is not UTF-8, is not found
         d = [NSData dataWithContentsOfFile:f];
     } else if (rel.length && ![rel containsString:@".."] && [f hasPrefix:_dir]) {
         d = [NSData dataWithContentsOfFile:f];
@@ -302,8 +301,7 @@ static NSString *mime(NSString *ext) {
     NSHTTPURLResponse *r = [[NSHTTPURLResponse alloc] initWithURL:u statusCode:d ? 200 : 404 HTTPVersion:@"HTTP/1.1"
                                                      headerFields:@{@"Content-Type": mime(f.pathExtension), @"Content-Length": [NSString stringWithFormat:@"%lu", (unsigned long)d.length]}];
     if (!d) LOG("[RED] web: the page asked for %s, which its document does not have", u.absoluteString.UTF8String);
-    if (!r) { [t didFailWithError:[NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorBadURL userInfo:nil]]; return; }
-    [t didReceiveResponse:r]; [t didReceiveData:d ?: [NSData data]]; [t didFinish];
+    [t didReceiveResponse:r]; [t didReceiveData:d ?: [NSData data]]; [t didFinish];   // NOLINT(clang-analyzer-nullability.NullablePassedToNonnull): the request's own URL and a constant status line always make a response
 }
 
 - (void)webView:(WKWebView *)wv decidePolicyForNavigationAction:(WKNavigationAction *)a decisionHandler:(void (^)(WKNavigationActionPolicy))done {
@@ -374,9 +372,7 @@ int front_web_open(const char *dir, const char *path, const char *callback, int 
         front_web_attach(box);
         [box place];
         NSString *q = [p stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLFragmentAllowedCharacterSet];
-        NSURL *url = q ? [NSURL URLWithString:[@"dmweb://doc/" stringByAppendingString:q]] : nil;
-        if (url) [box.web loadRequest:[NSURLRequest requestWithURL:url]];
-        else LOG("[RED] web: no URL names the document %s", p.UTF8String);
+        [box.web loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:[@"dmweb://doc/" stringByAppendingString:q ?: @""]]]];   // NOLINT(clang-analyzer-nullability.NullablePassedToNonnull): percent-encoded, it always parses; a path that does not encode reaches the [RED] line of a page not found
         if (!hidden) { box.shown = YES; g_touch = 1; [box setHiddenState:NO]; [box startInput]; }
     });
     return 0;

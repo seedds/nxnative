@@ -32,6 +32,13 @@ class Json(unittest.TestCase):
     def events(self, ev=None):
         return [e for e in map(json.loads, self.out.getvalue().splitlines()) if ev in (None, e['ev'])]
 
+    def test_warned_stage_end(self):   # a stage that finished without what it makes (the pipeline archive): ok, with a warn flag the launcher can show
+        self.prog.plan(2)
+        self.prog.stage('Pipeline archive'); self.prog.end('failed, the app is packed without one', warn=True)
+        self.prog.stage('pack'); self.prog.end('done')
+        e = self.events('stage_end')
+        self.assertEqual([(x['ok'], x.get('warn')) for x in e], [(True, True), (True, None)])
+
     def test_events(self):
         self.prog.plan(2)
         self.prog.stage('extract Pokémon', step='reading', done=0, total=10, unit='files', est=True)
@@ -209,6 +216,9 @@ class HumanModes(unittest.TestCase):
             text = out.getvalue()
             self.assertIn('message', text)
             self.assertIn('✓ [1/1] compile', text)
+            with contextlib.redirect_stdout(io.StringIO()) as out2:
+                prog = nsp.Progress(mode); prog.plan(1); prog.stage('archive'); prog.end('failed', warn=True); prog.close()
+            self.assertIn('⚠ [1/1] archive', out2.getvalue())
             self.assertEqual('\r' in text, mode == 'bar')
             self.assertEqual(ticker is None, mode == 'off')
 

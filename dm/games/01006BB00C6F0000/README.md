@@ -72,6 +72,7 @@ General host changes first needed here; each applies to every game:
 - **The DeviceSink found by its size** (`capture` in `hle_audren.c`), the SDK 8 parameter size, `oe` notifications, the npad style event: [SDK 8: command IDs numbered differently](../../../docs/reference/audio.md#sdk-8-command-ids-numbered-differently), [SDK 8's longer `AudioRendererParameter`](../../../docs/reference/audio.md#sdk-8s-longer-audiorendererparameter), [The oe notification event and its queue](../../../docs/reference/threads.md#the-oe-notification-event-and-its-queue), [Npad style set update event](../../../docs/reference/services.md#npad-style-set-update-event).
 - **Jump tables checked on another register** (`jump_offsets`): [Offset jump tables with the bounds check on another register](../../../docs/reference/rewriter.md#offset-jump-tables-with-the-bounds-check-on-another-register).
 - **Racy crashes under CPU load and observation gates**: [05, Racy crashes](../../../docs/agents/05-debugging.md#racy-crashes-load-trace-gates).
+- **Saves from before backslash paths** (it names its files `save:\savedata0.bin`): [Saves named before backslash paths](../../../docs/reference/services.md#saves-named-before-backslash-paths).
 
 ## Open
 

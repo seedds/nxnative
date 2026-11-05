@@ -222,21 +222,25 @@ static void lock_find(void) {
 // Without one, and without a frame step state page, nothing makes the game follow the cap, so the graphics layer keeps the game's own present interval (hle_nvn.c fps_present_cap):
 // presenting at a cap the game does not step by runs a fixed-step game fast or slow (Tears of the Kingdom 1.4.2 at 2x with DM_FPS_TARGET=60)
 int dm_fps_lock_engine(void) { pthread_once(&g_found, lock_find); return nrow || nier || fb.n; }
+int nvn_fps_high_now(void);   // hle_nvn.c
 void dm_fps_lock_tick(void) {
     dynamic_resolution_tick();   // separate from the FPS cap
-    static int state = -2, nlog[NLOCKS + 4], target; static const char *src;
+    static int state = -2, nlog[NLOCKS + 4], target, high; static const char *src;
     if (state == -1) return;
     if (state == -2) {
         state = -1; pthread_once(&g_found, lock_find);
         if (!nrow && !nier && !fb.n && !ue_missing) return;
         const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET; src = e ? "DM_FPS_TARGET" : "game profile fps_target";
-        if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; leaving the game's frame limit", e); t = 0; }
+        if (t != 0 && t != 30 && t != 60 && t != 120) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30, 60 or 120; leaving the game's frame limit", e); t = 0; }
+        if (t == 120 && DM_GAME_FPS_MAX < 120) { LOG("[RED] DM_FPS_TARGET=120: this game's speed at 120 fps is not checked (profile fps_max); running at 60"); t = 60; }
+        high = t == 120;
         if (t && ue_missing) LOG("[RED] main: Unreal %s not found by the rewriter (ue_cvar.py NAMES; game profile ue_fps_cvar): the game's own frame limit stays", DM_GAME_UE_FPS_CVAR);
         if (!nrow && !nier && !fb.n) return;
         if (!t) { for (int r = 0; r < nrow; r++) LOG("main: %s left as the game sets it (%s)", rows[r]->what, src); if (nier) LOG("main: NieR frame interval left as the game sets it (%s)", src);
                   if (fb.n) LOG("main: Frostbite simulation rate left as the game sets it (%s)", src); return; }
         target = t; state = 0;
     }
+    if (high) target = nvn_fps_high_now();   // 120 while frames fit, else 60: the game's step stays what the screen shows (hle_nvn.c fps_high)
     if (nier) {
         // NieR:Automata US/EU 1.0.3 (3c10ec35c5ef4c3686b4053afb0e58e7):
         // - [base + 0x192be00] points to the NVN graphics device object whose +0x9c160 holds the present interval (1 = 60 FPS, 2 = 30 FPS),
@@ -244,7 +248,7 @@ void dm_fps_lock_tick(void) {
         // Resolution policy is applied independently above, so 30/60 FPS does
         // not implicitly enable or disable the native resolution controller.
         uint64_t p = 0; static int nlog_nier;
-        uint32_t want = (uint32_t)(60 / target), want_mode = want - 1, cur_mode = 0;
+        uint32_t want = target > 60 ? 1 : (uint32_t)(60 / target), want_mode = want - 1, cur_mode = 0;
         if (rd((uint64_t)(uintptr_t)(base + display + 0x504), &cur_mode, sizeof cur_mode) && cur_mode != want_mode && (cur_mode == 0 || cur_mode == 1)) {
             uint32_t *dst = (uint32_t *)(uintptr_t)(base + display + 0x504);
             dm_guest_write_prepare(dst, sizeof *dst);
@@ -295,7 +299,7 @@ void dm_fps_lock_tick(void) {
                 snprintf(was, sizeof was, "%u", cur);
             } else {
                 int fps = L->kind == FPS_I32;
-                want = fps ? (uint32_t)target : 60 / (uint32_t)target;
+                want = fps ? (uint32_t)target : target > 60 ? 1 : 60 / (uint32_t)target;   // above 60 the display link paces it: a vsync count stays 1
                 if (cur == want || cur < (fps ? 10u : 1u) || cur > (fps ? 120u : 4u)) continue;
                 snprintf(was, sizeof was, "%u", cur);
             }

@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/games'))
@@ -96,6 +97,65 @@ class UnrealMemory(unittest.TestCase):
         # mem_init puts the modules before the alias region, then stacks and the heap.
         heap = reserve - 0x10000000 - alias - stack
         self.assertGreaterEqual(heap, 128 * pg.MiB)
+
+
+class ModulesLeftOut(unittest.TestCase):
+    """main_modules and nro_modules: which modules a list leaves out are needed, read from each module's symbols (a symbol: (name, defined, bind))"""
+    def setUp(self):
+        td = tempfile.TemporaryDirectory(); self.addCleanup(td.cleanup)
+        self.dir = Path(td.name)
+        self.syms = {}
+        for cm in (mock.patch.object(pg, 'nso', lambda p: (self.syms[Path(p).name][0], '', [], 0)), mock.patch.object(pg.nso_syms, 'dynsyms', lambda img: next((s for i, s in self.syms.values() if i == img), []))):
+            cm.start(); self.addCleanup(cm.stop)
+
+    def module(self, name, imports=(), exports=(), comp=b''):
+        self.syms[name] = (name.encode() + b'\0' + comp, [(s, False, 1) for s in imports] + [(s, True, 1) for s in exports])
+        (self.dir / name).write_bytes(b'NSO0')
+
+    def test_a_module_main_imports_from_is_added(self):   # Absolum 1.2.1: the movie module moved to subsdk0
+        self.module('main', ['_ZN5movie9ExtractorC1Ev', 'nvnBootstrapLoader'])
+        self.module('sdk', exports=['nvnBootstrapLoader'])
+        self.module('subsdk0', exports=['_ZN5movie9ExtractorC1Ev'], comp=b'NintendoSDK_movie-20_5_29')
+        self.assertEqual(pg.main_modules(self.dir, ['main', 'sdk'], hooks=set()), {'subsdk0': 'NintendoSDK_movie'})
+        self.assertEqual(pg.main_modules(self.dir, ['main', 'subsdk0', 'sdk'], hooks=set()), {})   # listed already
+
+    def test_what_is_supplied_adds_nothing(self):
+        self.module('main', ['f', 'g'])
+        self.module('sdk', exports=['f'])
+        self.module('subsdk0', exports=['f', 'g'], comp=b'NintendoSDK_movie-20_5_29')
+        self.assertEqual(pg.main_modules(self.dir, ['main', 'sdk'], hooks={'g'}), {})   # sdk has f, the host g (GLSLC and nn::pcm under Super Mario Galaxy 2)
+
+    def test_gpu_drivers_and_rtld_stay_out(self):
+        self.module('main', ['eglGetDisplay', 'rtld_f'])
+        self.module('rtld', exports=['rtld_f'])
+        self.module('sdk')
+        self.module('subsdk1', exports=['eglGetDisplay'], comp=b'NintendoSDK_OpenGL-20_5_29')
+        self.assertEqual(pg.main_modules(self.dir, ['main', 'sdk'], hooks=set()), {})
+
+    def test_no_other_module_reads_nothing(self):   # the common case: a profile that lists every module, read no further than the first bytes
+        (self.dir / 'main').write_bytes(b'NSO0'); (self.dir / 'main.npdm').write_bytes(b'META')
+        self.assertEqual(pg.main_modules(self.dir, ['main'], hooks=set()), {})
+
+    def test_nro_modules_still_adds_what_an_nro_imports(self):   # Portal's video_nx.nro and the movie module; a symbol another NRO defines needs nothing
+        self.module('main'); self.module('sdk')
+        self.module('subsdk2', exports=['m'], comp=b'NintendoSDK_movie-20_5_29')
+        self.module('subsdk3', exports=['n'], comp=b'NintendoSDK_movie-20_5_29')
+        for name, syms in (('a.nro', [('m', False, 1), ('n', False, 1)]), ('b.nro', [('n', True, 1)])):
+            self.syms[name] = (name.encode(), syms); (self.dir / name).write_bytes(name.encode())
+        nros = {n: self.dir / n for n in ('a.nro', 'b.nro')}
+        self.assertEqual(pg.nro_modules(self.dir, nros, ['main', 'sdk'], hooks=set()), {'subsdk2': 'NintendoSDK_movie'})
+
+
+class Switch2(unittest.TestCase):
+    FACTS = {'mods': {'main': {'imports': {pg.HEAP_API}, 'bss': 0, 'far': False}}, 'romfs': {'root': set(), 'exts': {}}, 'sysres': 0}
+
+    def test_pool(self):   # Donkey Kong Bananza's profile: a 9 GB pool, and a heap region that holds it
+        keys = pg.guess(dict(self.FACTS, ounce=True), hooks=set())
+        self.assertEqual((keys['app_pool'][0], keys['mem_reserve'][0]), ('0x240000000', '0x270000000'))
+        self.assertEqual(pg.guess(self.FACTS, hooks=set())['app_pool'][0], '0xCD500000')
+
+    def test_sdk_variant(self):   # nnSdk-Generic_22_2_0 (Fire Emblem Fortune's Weave)
+        self.assertEqual(pg.SDK_VERSION.findall(b'NintendoSdk_nnSdk-Generic_22_2_0\0NintendoSDK_nnSdk-16_2_0\0'), [b'22_2_0', b'16_2_0'])
 
 
 

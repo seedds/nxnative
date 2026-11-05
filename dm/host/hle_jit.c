@@ -107,7 +107,7 @@ typedef struct { char name[16]; uint64_t base, size, pre; } jit_region;
 // jit.tsv the requests by key (where each one's code lies in the image, its output and the output's host addresses to relocate) and jit.out the outputs
 typedef struct { char key[33]; uint64_t cmd, code_off, code_size, ro_off, ro_size, out_off, out_size; int ret; uint32_t nrel; uint64_t *rel_at, *rel_off; int *rel_mod; } jit_req;
 static jit_req *g_req; static int g_nreq; static const uint8_t *g_out; static size_t g_out_len; static uint64_t g_img_size, g_layout_rx, g_layout_ro;
-static void *jit_grow(void *p, size_t n) { void *q = realloc(p, n); if (!q) die("jit: out of memory loading the requests (%zu bytes)", n); return q; }   // realloc that keeps nothing NULL
+static void *jit_grow(void *p, size_t n) { void *q = realloc(p, n); if (!q) die("jit: out of memory"); return q; }
 static void jit_serve_load(const char *dir) {
     char path[1100]; snprintf(path, sizeof path, "%s/jit.tsv", dir);
     FILE *f = fopen(path, "r"); if (!f) die("jit: no %s", path);

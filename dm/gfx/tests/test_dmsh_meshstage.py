@@ -183,7 +183,7 @@ fragment main0_out main0(main0_in in [[stage_in]])
         tools = Path(__file__).resolve().parents[1] / 'tools'
         tree = ast.parse((tools / 'dmsh_build.py').read_text())
         scope = {'re': re, 'collections': __import__('collections')}
-        exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('fs_uint', 'int_outputs')], type_ignores=[]), 'dmsh_build.py', 'exec'), scope)
+        exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('fs_uint', 'int_outputs', 'in_word')], type_ignores=[]), 'dmsh_build.py', 'exec'), scope)
         cls.fs_uint = staticmethod(scope['fs_uint'])
 
     def test_flat_input_through_a_local(self):

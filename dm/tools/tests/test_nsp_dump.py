@@ -66,6 +66,28 @@ class Scan(Base):
         shutil.rmtree(d / f'updates/{VER}/romfs')
         self.assertFalse(pack_dump.is_dump(d))
 
+    def test_update_alone(self):   # an update's folder is the whole game, so a dump may have no base/ (Fire Emblem Fortune's Weave)
+        d = self.dump.parent / 'update'; version(d / f'updates/{VER}')
+        self.assertTrue(nsp.dump_folder(d))
+        self.assertEqual(pack_dump.scan(d), (TID, {VER: d / f'updates/{VER}'}, {}))
+        app, fam = nsp.scan_dump(d)
+        self.assertIsNone(fam['base'])
+        self.assertEqual(nsp.nsp_versions(fam, {}), {f'v{VER}': d / f'updates/{VER}'})
+
+    def test_title_id_of_the_newest_whole_update(self):
+        d = self.dump.parent / 'updates2'; version(d / f'updates/{VER}'); (d / f'updates/{VER + 1}/romfs').mkdir(parents=True)
+        self.assertEqual(pack_dump.scan(d)[0], TID)
+
+    def test_flat_folder_is_the_base_game(self):   # exefs/ and romfs/ directly in the folder, as nup extract writes them (issue #1265)
+        d = self.dump.parent / 'flat'; version(d)
+        self.assertTrue(nsp.dump_folder(d))
+        self.assertEqual(pack_dump.scan(d), (TID, {}, {}))
+        app, fam = nsp.scan_dump(d)
+        self.assertEqual((app, fam['base']), (TID, d))
+        self.assertEqual(nsp.nsp_versions(fam, {}), {'v0': None})
+        (d / 'base/exefs').mkdir(parents=True); (d / 'base/romfs').mkdir(); (d / 'base/exefs/main.npdm').write_bytes(npdm(TID + 0x2000))
+        self.assertEqual(pack_dump.scan(d)[0], TID + 0x2000)   # base/ wins
+
     def test_refuses(self):
         (self.dump / 'dlc/0100000000000000/romfs').mkdir(parents=True)
         with self.assertRaisesRegex(pack_dump.Error, 'is not a DLC of'): pack_dump.scan(self.dump)
@@ -140,10 +162,54 @@ class Main(Base):
         with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), self.assertRaisesRegex(nsp.BuildError, 'which holds'):
             nsp.main(nsp.parse_args([str(self.dump), '--title-id', '0100000000010000']))
 
-    def test_no_profile_refused(self):
-        d = self.dump.parent / 'unknown'; version(d / 'base', tid=0x0400000000000000)
-        with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), self.assertRaisesRegex(nsp.BuildError, 'has none'):
+    def surveyed(self, d):   # the real survey on a dump with no profile: this NPDM is a 32-bit program's, which stops it right after the code modules and the manifest
+        with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), mock.patch.object(nsp, 'WORK_DIR', ''), mock.patch.object(nsp, 'PROD_KEYS', ''), \
+             mock.patch.object(nsp, 'check_capstone'), mock.patch.object(nsp.shutil, 'which', return_value='/usr/bin/dotnet'), mock.patch.object(nsp, 'say'), \
+             mock.patch.object(nsp, 'build_nx_extract', side_effect=AssertionError('built nx_extract')), mock.patch.object(nsp, 'ask', side_effect=AssertionError('asked for something')), \
+             self.assertRaisesRegex(nsp.BuildError, rf'{d.name} \(0400000000000000\) is a 32-bit'):
             nsp.main(nsp.parse_args([str(d)]))
+        self.assertTrue((d / '0400000000000000_survey/extract/ExeFS/main').is_file())
+
+    def test_no_profile_surveyed(self):   # it used to stop: the survey read NSPs only. The folder names the game, as a dump has no control data
+        d = self.dump.parent / 'unknown'; version(d / 'base', tid=0x0400000000000000); self.surveyed(d)
+
+    def test_update_alone_surveyed(self):
+        d = self.dump.parent / 'update'; version(d / f'updates/{VER}', tid=0x0400000000000000); self.surveyed(d)
+
+    def test_flat_folder_surveyed(self):
+        d = self.dump.parent / 'flat'; version(d, tid=0x0400000000000000); self.surveyed(d)
+
+
+class Survey(Base):
+    def test_files_as_the_manifest_pass_leaves_them(self):
+        src = self.dump.parent / 'v'; version(src, marker='a.bin')
+        nro = b'\0' * 16 + b'NRO0' + b'x' * 300
+        (src / 'romfs/nro').mkdir(); (src / 'romfs/nro/m.NRO').write_bytes(nro)
+        out = self.dump.parent / 'out'
+        self.assertEqual(nsp.survey_dump(src, out), 2)
+        self.assertEqual((out / 'ExeFS/main').read_bytes(), b'code')
+        self.assertFalse((out / 'ExeFS/.listing').exists())
+        rows = (out / 'romfs_manifest.tsv').read_text().splitlines()
+        self.assertEqual(rows[0], nsp.MANIFEST_HEAD.rstrip('\n'))
+        self.assertEqual(sorted(rows[1:]), sorted([f'/dir/a.bin\t4\t{b"data".hex()}', f'/nro/m.NRO\t{len(nro)}\t{nro[:32].hex()}']))
+        self.assertEqual((out / 'romfs_nro/nro/m.NRO').read_bytes(), nro)
+
+    def test_a_version_without_code_or_romfs_stops(self):
+        src = self.dump.parent / 'v'; (src / 'romfs').mkdir(parents=True)
+        with self.assertRaisesRegex(nsp.BuildError, 'no exefs/main.npdm and romfs'): nsp.survey_dump(src, self.dump.parent / 'out')
+
+    def test_same_build_reads_main_from_the_folders(self):   # a known build under another title ID: the newest update's main, then the base game's; an update with no code is passed over
+        def nso(bid): return b'NSO0' + bytes(0x3c) + bytes.fromhex(bid) + bytes(0x50)
+        d = self.dump.parent / 'alias'; version(d / 'base', main=nso('ab' * 16)); version(d / f'updates/{VER}', main=nso('cd' * 16))
+        app, fam = nsp.scan_dump(d)
+        seen, prof = [], mock.Mock(id='P', builds=lambda: {'v0': {'main': 'ab' * 16}})
+        games = mock.Mock(by_build=lambda bid: seen.append(bid) or (prof if bid == 'ab' * 16 else None))
+        with mock.patch.dict(sys.modules, {'game': games}), mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'build_nx_extract', side_effect=AssertionError('built nx_extract')):
+            self.assertEqual(nsp.same_build(d, app, fam, None, REPO, {}), (prof, 'v0', 'ab' * 16))
+            self.assertEqual(seen, ['cd' * 16, 'ab' * 16])
+            shutil.rmtree(d / f'updates/{VER}/exefs'); seen.clear()
+            self.assertEqual(nsp.same_build(d, app, fam, None, REPO, {}), (prof, 'v0', 'ab' * 16))
+            self.assertEqual(seen, ['ab' * 16])
 
 
 if __name__ == '__main__':

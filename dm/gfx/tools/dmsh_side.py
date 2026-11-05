@@ -17,8 +17,10 @@ _ENTRY = re.compile(r'^((?:\[\[[^\]]*\]\]\s*)?)fragment\s+(\w+)\s+(\w+)\s*\(', r
 def _close(src, i, o, c):
     """the index after the bracket closing the one opened just before i, -1 when there is none"""
     depth = 1
-    while depth and i < len(src): depth += (src[i] == o) - (src[i] == c); i += 1
-    return i if not depth else -1
+    for m in re.compile(re.escape(o) + '|' + re.escape(c)).finditer(src, i):   # from bracket to bracket: a loop over the characters of a whole function body took 10 ms a shader
+        depth += 1 if m.group() == o else -1
+        if not depth: return m.end()
+    return -1
 
 
 def _params(s):   # a parameter list's parameters: commas inside <>, () or [] do not separate

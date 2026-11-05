@@ -185,6 +185,7 @@ static int img_path(const char *p, int *mi, int64_t *k) {
     }
     return 0;
 }
+static void save_old_names(const char *from, const char *to);
 static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     pthread_once(&g_txn_lock_once, txn_locks_init);
     PATH_LOCK(); pthread_mutex_lock(&g_lock);
@@ -208,6 +209,7 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     } else if (txn) {
         char work[1100], neu[1100]; snprintf(work, sizeof work, "%s.work", dir); snprintf(neu, sizeof neu, "%s.new", dir);
         mkdir(dir, 0755);
+        save_old_names(dir, dir);   // after the cloud's save came in (it may hold such names too), and under the locks the cloud sender's clone takes (dm_fs_clone_committed)
         const char *why = NULL;
         if (!access(work, F_OK) && rm_tree(work)) why = "cannot clear the work directory left over from last time";
         else if (!access(neu, F_OK) && rm_tree(neu)) why = "cannot clear the .new left over from last time";
@@ -418,6 +420,50 @@ static int set_guest_name(const char *hp, const char *path) {
     if (strcmp(physical, guest)) return setxattr(hp, FS_GUEST_NAME, guest, strlen(guest), 0, XATTR_NOFOLLOW);
     if (!removexattr(hp, FS_GUEST_NAME, XATTR_NOFOLLOW) || errno == ENOATTR) return 0;
     return -1;
+}
+// Hosts before fwd_slashes took a backslash in a save path as part of the name: save:\savedata0.bin is the file "\savedata0.bin", and save:\dir\f the file "\dir\f" in the save's root.
+// Such a name can no longer be reached, so the save reads as empty. At each mount of a committed save, every entry with one moves to the name the game asks for today: entries in from go to
+// to, folders on the way are made, and a folder that already exists there is merged. A rename keeps the contents and is atomic, and a kill partway is finished by the next mount, so this needs
+// no transaction and no record of what was done. An entry whose new name is taken (the game wrote a new save since), or that would leave its folder (".."), stays as it is.
+static void save_old_names(const char *from, const char *to) {
+    DIR *d = opendir(from); if (!d) return;
+    char **names = NULL; size_t count = 0, cap = 0; struct dirent *e;   // read first: a directory that changes while it is read can skip entries
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if (count == cap) { char **w = realloc(names, (cap = cap ? cap * 2 : 16) * sizeof *names); if (!w) break; names = w; }
+        if (!(names[count] = strdup(e->d_name))) break;
+        count++;
+    }
+    closedir(d);
+    int same = !strcmp(from, to);
+    for (size_t i = 0; i < count; i++) {
+        char src[1280], dst[1280], guest[0x301], part[0x301] = ""; struct stat st, ds;
+        snprintf(src, sizeof src, "%s/%s", from, names[i]);
+        if (lstat(src, &st) || !guest_name(from, names[i], guest, sizeof guest)) continue;
+        int isdir = S_ISDIR(st.st_mode);
+        if (same && !strchr(guest, '\\')) { if (isdir) save_old_names(src, src); continue; }   // nearly every entry: no lookup in a folder that may be large
+        strlcpy(dst, to, sizeof dst);
+        int ok = 1;
+        for (const char *s = guest; ok && *s; ) {
+            while (*s == '\\') s++;
+            size_t k = strcspn(s, "\\"); if (!k) break;
+            memcpy(part, s, k); part[k] = 0; s += k;
+            while (*s == '\\') s++;
+            ok = strcmp(part, ".") && strcmp(part, "..") && path_component(dst, sizeof dst, part, 1, 0);
+            if (ok && *s) {   // a folder on the way
+                if (!lstat(dst, &ds)) ok = S_ISDIR(ds.st_mode);
+                else ok = !mkdir(dst, 0755) && !set_guest_name(dst, part);
+            }
+        }
+        if (!ok) LOG("save: %s stays as it is: it has no place under today's path rules", src);
+        else if (lstat(dst, &ds)) {
+            if (rename(src, dst) || set_guest_name(dst, part)) LOG("save: %s could not become %s (errno=%d)", src, dst, errno);
+            else { LOG("save: %s is now %s (a name from a host before backslashes separated paths)", src, dst); if (isdir) save_old_names(dst, dst); }
+        } else if (isdir && S_ISDIR(ds.st_mode)) { save_old_names(src, dst); rmdir(src); }   // rmdir refuses a folder that still holds an entry that stayed
+        else LOG("save: %s stays as it is: %s already exists (the game cannot see the old one)", src, dst);
+    }
+    for (size_t i = 0; i < count; i++) free(names[i]);
+    free(names);
 }
 static Result err_res(const char *op, const char *path) {
     if (errno == ENOENT || errno == ENOTDIR) { if (g_flag.fs) LOG("fs %s not found: %s", op, path); return RES_PATH_NOT_FOUND; }   // Logged under DM_FS=1 (the game often probes with "not found", not logged by default)

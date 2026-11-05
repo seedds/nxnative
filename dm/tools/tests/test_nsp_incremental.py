@@ -58,7 +58,9 @@ class Base(unittest.TestCase):
         self.ex = self.tmp / 'extract/v65536'; nso(self.ex / 'ExeFS/main', BID2); control(self.ex / 'control.nacp', '1.1.0')
         (self.ex / 'RomFS').mkdir(); (self.ex / 'RomFS/a.bin').write_bytes(b'romfs')
         self.pdir = self.tmp / 'derived' / f'{TID:016X}'
-        for cm in (mock.patch.dict(os.environ, {'DM_GAMES_DIR': str(self.tmp / 'games')}), mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'say', lambda m: None)):
+        self.imported = {}   # what main imports from modules the list leaves out (profile_guess.main_modules, with its own tests: these NSOs are headers only)
+        for cm in (mock.patch.dict(os.environ, {'DM_GAMES_DIR': str(self.tmp / 'games')}), mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'say', lambda m: None),
+                   mock.patch.object(nsp.pg, 'main_modules', lambda exefs, mods: self.imported)):
             cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
 
     def derive(self, ver='v65536', mods=('main',), app=None):
@@ -100,6 +102,33 @@ class DeriveProfile(Base):
         self.assertNotIn('subsdk1', g.builds()['v65536'])
         nso(self.ex / 'ExeFS/subsdk1', BID2); self.derive(mods=('main', 'subsdk1', 'sdk'))   # a version that ships it keeps the profile's list
         self.assertEqual(game.Game(self.pdir).words('modules'), ['main', 'subsdk1', 'sdk'])
+
+    def test_a_module_main_imports_that_the_list_leaves_out_is_added(self):   # Absolum: subsdk2 was the movie module in 1.1.2; 1.2.1 ships it as subsdk0, and no subsdk2 (issue #1211)
+        (self.src / 'game.tsv').write_text((self.src / 'game.tsv').read_text().replace('modules\tmain\n', 'modules\tmain subsdk2 sdk\n'))
+        nso(self.ex / 'ExeFS/sdk', BID); nso(self.ex / 'ExeFS/subsdk0', 'ee' * 16); nso(self.ex / 'ExeFS/subsdk1', 'ff' * 16)
+        self.imported = {'subsdk0': 'NintendoSDK_movie'}
+        self.derive(mods=('main', 'subsdk2', 'sdk'))
+        g = game.Game(self.pdir); text = (self.pdir / 'game.tsv').read_text()
+        self.assertEqual(g.words('modules'), ['main', 'subsdk0', 'sdk'])
+        self.assertEqual(g.build_modules()[BID2], ['main', 'subsdk0', 'sdk'])   # the host loads what the row names; subsdk1 stays out
+        self.assertIn('# this version ships no subsdk2', text)
+        self.assertIn('# main imports from subsdk0 (NintendoSDK_movie), which the profile does not list', text)
+        self.assertEqual(g.builds()['v65536']['subsdk0'], 'ee' * 16)
+        self.assertNotIn('subsdk1', g.builds()['v65536'])
+
+    def test_nothing_imported_keeps_the_list(self):
+        (self.src / 'game.tsv').write_text((self.src / 'game.tsv').read_text().replace('modules\tmain\n', 'modules\tmain sdk\n'))
+        nso(self.ex / 'ExeFS/sdk', BID); nso(self.ex / 'ExeFS/subsdk0', 'ee' * 16)
+        self.derive(mods=('main', 'sdk'))
+        g = game.Game(self.pdir)
+        self.assertEqual(g.words('modules'), ['main', 'sdk'])
+        self.assertNotIn('# main imports', (self.pdir / 'game.tsv').read_text())
+        self.assertNotIn('subsdk0', g.builds()['v65536'])
+
+    def test_shader_tables_alone_add_no_module(self):
+        self.imported = {'subsdk0': 'NintendoSDK_movie'}
+        nsp.derive_profile(game.Game(self.src), self.pdir, 'v65536', self.ex, ['main'], shader_only=True)
+        self.assertEqual(game.Game(self.pdir).words('modules'), ['main'])
 
     def test_the_same_profile_in_another_checkout_keeps_later_stages(self):
         self.derive(); self.later_stages()

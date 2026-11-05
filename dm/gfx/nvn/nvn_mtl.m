@@ -2258,13 +2258,18 @@ static void pkg_absorb_take(NvPkg *pk, const tex_t *t) {
 // Usage an NVN image takes: shader writes, and for R32Uint / R32Sint the shader-atomic usage too, since Metal runs texture atomics only on such textures (dummy_img_atomic) and NVN does
 // not say which images a shader will use atomically
 static inline int pf_r32i(MTLPixelFormat pf) { return pf == MTLPixelFormatR32Uint || pf == MTLPixelFormatR32Sint; }
+// 64-bit texture atomics (texture2d<ulong>::atomic_max / atomic_min, MSL 3.1; dmsh_atomic.wide_atomics): Metal runs them on an RG32Uint texture made with the shader-atomic usage,
+// on Apple GPU family 9 (M3 / A17 Pro and later). PRAGMATA's visibility buffer (SURED.D.2D.MAX.U64, depth << 32 | ID) is an NVN RG32UI image. Older GPUs have no 64-bit texture
+// atomic at all (the pipeline does not build there), so their RG32Uint textures keep the usage they had
+static int dev_atomic64(void) { static int v = -1; if (v < 0 && g_dev) v = [g_dev supportsFamily:MTLGPUFamilyApple9] ? 1 : 0; return v > 0; }
+static inline int pf_atomic(MTLPixelFormat pf) { return pf_r32i(pf) || (pf == MTLPixelFormatRG32Uint && dev_atomic64()); }
 static MTLTextureUsage img_usage(const tex_t *t, MTLPixelFormat pf) {
     if (!(t->d.flags & NVN_TEXTURE_FLAGS_IMAGE)) return 0;
-    return MTLTextureUsageShaderWrite | (pf_r32i(pf) ? MTLTextureUsageShaderAtomic : 0);
+    return MTLTextureUsageShaderWrite | (pf_atomic(pf) ? MTLTextureUsageShaderAtomic : 0);
 }
 // Metal leaves MTLTextureUsageShaderAtomic out of a texture's usage property (0x3 for a texture made with 0x23), so it cannot be read back: every shader-writable R32Uint / R32Sint
-// texture the host makes has it (img_usage, tex_upgrade, dummy_img_atomic), and that is what this tests
-static int tex_atomic_capable(id<MTLTexture> base) { return pf_r32i(base.pixelFormat) && (base.usage & MTLTextureUsageShaderWrite); }
+// texture the host makes has it (img_usage, tex_upgrade, dummy_img_atomic), and on Apple GPU family 9 every shader-writable RG32Uint one, and that is what this tests
+static int tex_atomic_capable(id<MTLTexture> base) { return pf_atomic(base.pixelFormat) && (base.usage & MTLTextureUsageShaderWrite); }
 // Metal runs texture atomics only on R32Uint / R32Sint storage, while NVN takes them on any 32-bit format through an R32 image: Ocarina of Time's NDSR upscaler ORs into an RGBA8 target (d17eefaff4f0bc23).
 // Such a texture moves to R32 storage, the same bytes, with its own format as a view for rendering and sampling (tex_upgrade). Not packaged textures: those are the guest's bytes, uploaded
 static int tex_atomic_alias(id<MTLTexture> base) {
@@ -8484,12 +8489,12 @@ static void image_prepare(NvProg *pr, unsigned stages) {
 }
 // Image atomics run natively on the image's own texture (dmsh_atomic.py), so they and every other access of the image see the same texels: a block-linear image's Metal texture as
 // much as a linear one's pool memory. They used to go through a raw pointer beside the texture, which for a block-linear image (a deswizzled copy) could only be a scratch buffer
-// nothing read, and a 3D image's did not compile. Metal allows texture atomics only on an R32Uint / R32Sint texture made with the shader-atomic usage (img_usage); any other
+// nothing read, and a 3D image's did not compile. Metal allows texture atomics only on an R32Uint / R32Sint texture (64-bit ones on RG32Uint, pf_atomic) made with the shader-atomic usage (img_usage); any other
 // texture in an atomic slot is replaced by an atomic-capable write sink, logged red, rather than left to the GPU's undefined behaviour
-static id<MTLTexture> dummy_img_atomic(int dtt, int dpf) {
-    static __strong id<MTLTexture> cache[8][2];
-    int s = dpf == NVN_DPF_SINT; id<MTLTexture> t = cache[dtt & 7][s]; if (t) return t;
-    MTLPixelFormat pf = s ? MTLPixelFormatR32Sint : MTLPixelFormatR32Uint;
+static id<MTLTexture> dummy_img_atomic(int dtt, int dpf, int wide) {   // wide: a 64-bit atomic's sink (RG32Uint; nvn_rbind atom 2)
+    static __strong id<MTLTexture> cache[8][3];
+    int s = wide && dev_atomic64() ? 2 : dpf == NVN_DPF_SINT; id<MTLTexture> t = cache[dtt & 7][s]; if (t) return t;
+    MTLPixelFormat pf = s == 2 ? MTLPixelFormatRG32Uint : s ? MTLPixelFormatR32Sint : MTLPixelFormatR32Uint;
     MTLTextureUsage u = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageShaderAtomic;
     if ((MTLTextureType)dtt == MTLTextureTypeTextureBuffer) {
         MTLTextureDescriptor *d = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:pf width:16 resourceOptions:MTLResourceStorageModePrivate usage:u];
@@ -8504,7 +8509,8 @@ static id<MTLTexture> dummy_img_atomic(int dtt, int dpf) {
 }
 static int img_atomic_ok(id<MTLTexture> t, const nvn_rbind *b) {
     id<MTLTexture> base = t; while (base.parentTexture) base = base.parentTexture;   // a view of a view: a descriptor of R32 over a texture moved to R32 storage has its colour view as parent (tex_upgrade)
-    return pf_r32i(t.pixelFormat) && tex_atomic_capable(base) && t.textureType == (MTLTextureType)b->dtt && t.sampleCount == 1;
+    int fmt = b->atom == 2 ? t.pixelFormat == MTLPixelFormatRG32Uint && dev_atomic64() : pf_r32i(t.pixelFormat);   // atom 2: 64-bit atomics (texture2d<ulong>), see pf_atomic
+    return fmt && tex_atomic_capable(base) && t.textureType == (MTLTextureType)b->dtt && t.sampleCount == 1;
 }
 // Snapshot substitution for same-pass feedback sampling (registered by fb_prepare, used by encode_args; see the notes before draw)
 static uint64_t g_draw_seq, g_fb_seq, g_fb_count; static int g_fb_n, g_fb_rebind;
@@ -8961,7 +8967,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
                 if (real) { id<MTLTexture> base = t; while (base.parentTexture) base = base.parentTexture;
                     RED_ONCE(93, "image atomics on a texture Metal cannot run them on (shader %s stage %d slot %d texture ID %d: Metal format %lu of base format %lu, type %lu for %u, %s): they go to a write sink",
                              sh->key, nvn_stage, reg, tid, (unsigned long)t.pixelFormat, (unsigned long)base.pixelFormat, (unsigned long)t.textureType, b->dtt, base.usage & MTLTextureUsageShaderWrite ? "shader-writable" : "not shader-writable"); }
-                t = dummy_img_atomic(b->dtt, b->dpf); trid = t.gpuResourceID._impl; real = 0;
+                t = dummy_img_atomic(b->dtt, b->dpf, b->atom == 2); trid = t.gpuResourceID._impl; real = 0;
             } else if (b->atom && !(sh->logged & 2)) { sh->logged |= 2; static int nlog; const tex_t *tt = tid < g_ntreg && g_treg[tid].ok ? &g_treg[tid].t : NULL;
                 if (tt && nlog++ < 8) MLOG("shader %s (stage %d): image atomics on image slot %d, texture ID %d (target %d, %s, %llu bytes)", sh->key, nvn_stage, reg, tid, (int)tt->d.target,
                                            tt->d.target == NVN_TEXTURE_TARGET_BUFFER || (tt->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) ? "linear" : "block-linear", (unsigned long long)tt->L.size); }

@@ -39,7 +39,7 @@ typedef struct {
     uint16_t soff;           // TEXA / SAMPA: c2 byte of a separate sampler word ORed into every element's handle (handle type 1), 0 = none; TEXU / SAMPU: byte of the other word ORed into the handle (handle type 1) + 1, in uniform slot sreg (DMSH_SREG_C2: SAMPU's sampler is the word at that c2 byte), 0 = none
     uint8_t sreg;
     uint8_t f1d;             // TEX: read by 1D integer fetches as 2D rows of 16384 texels (dmsh_build.py "fetch1d"): a buffer texture here is bound as such rows (nvn_mtl.m tbuf_as_2d)
-    uint8_t atom;            // IMG: the shader runs image atomics on it (dmsh_build.py "atomic"): the texture must allow Metal's texture atomics (nvn_mtl.m dummy_img_atomic)
+    uint8_t atom;            // IMG: the shader runs image atomics on it (dmsh_build.py "atomic"): the texture must allow Metal's texture atomics (nvn_mtl.m dummy_img_atomic); 2: 64-bit ones (texture2d<ulong>, an RG32Uint texture: pf_atomic)
     uint8_t bw;              // SAMP / SAMPT / SAMPU / SAMPI: a twin sampler for border colours (dmsh_build.py border_emu), its bit in the BORDER block + 1; 0 = an ordinary sampler binding
 } nvn_rbind;
 typedef struct {

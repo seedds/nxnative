@@ -617,8 +617,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 throw AFail(context, $"SURED operation {op}");
             }
 
-            // 64-bit reductions (Nanite's visibility buffer, SURED.MAX.U64) are refused, not faked as 32-bit ones
-            if ((SuatomSize)x.Bits(73, 76) is not (SuatomSize.U32 or SuatomSize.S32))
+            // 64-bit reductions: only U64 MAX / MIN, which EmitSuatom writes as Metal's 64-bit texture atomics (it refuses the rest); other sizes are refused, not faked
+            // as 32-bit ones
+            if ((SuatomSize)x.Bits(73, 76) is not (SuatomSize.U32 or SuatomSize.S32 or SuatomSize.U64))
             {
                 throw AFail(context, $"SURED form {x.Bits(64, 96):x8} (size {(SuatomSize)x.Bits(73, 76)})");
             }

@@ -780,10 +780,12 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
         }
 
         // nxnative: the memory pool table the host binds for raw global memory (dmsh_abi.h DMSH_GMEM_MAP_*): a storage buffer reserved under this sentinel constant buffer
-        // slot, which no constant buffer of the game has (dmsh_build.py turns it into DMSH_KIND_GMEM_MAP). 1 << GmemMapLog2 entries of GmemMapEntryWords words each,
-        // {start lo, start hi, end lo, end hi, delta lo, delta hi, 0, 0}, sorted by start; entry 0 is empty (start 0, end 0) and unused entries start at ~0
+        // slot, which no constant buffer of the game has (dmsh_build.py turns it into DMSH_KIND_GMEM_MAP). Entries of GmemMapEntryWords words each,
+        // {start lo, start hi, end lo, end hi, delta lo, delta hi, 0, 0}, sorted by start; entry 0 is empty (start 0, end 0) and unused entries start at ~0.
+        // The host sizes the table to its pools: a power of two of entries, at least DMSH_GMEM_MAP_ENTRIES, the count in entry 0's delta low word (GmemMapCountWord), which no
+        // lookup uses. A fixed 4,096 entries left the pools past them out (Ocarina of Time loads its save with about 4,100 to 4,500 pools), and the shaders that read their addresses got zeros
         public const int GmemMapCbSlot = 0xff;
-        private const int GmemMapLog2 = 12;
+        private const int GmemMapCountWord = 4;
         private const int GmemMapEntryWords = 8;
 
         // nxnative: the write log (dmsh_abi.h DMSH_GMEM_LOG_*), reserved under the same sentinel slot at offset 1: the set of guest pages (address >> 12) the stores and atomics wrote,
@@ -850,12 +852,17 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 return context.Load(StorageKind.StorageBuffer, mapBinding, Const(0), context.IAdd(entry, Const(word)));
             }
 
-            // The last entry whose start is at or below the address (entry 0 starts at 0, so there always is one)
-            Operand index = Const(0);
+            // The last entry whose start is at or below the address (entry 0 starts at 0, so there always is one): a binary search over the host's count of entries, a power of two,
+            // log2 of it steps. A count of 0 or 1 makes one step that stays at entry 0 (no pool)
+            Operand index = Local();
+            Operand step = Local();
+            context.Copy(index, Const(0));
+            context.Copy(step, context.ShiftRightU32(MapWord(Const(0), GmemMapCountWord), Const(1)));
+            Operand lblSearch = Label();
+            context.MarkLabel(lblSearch);
 
-            for (int step = 1 << (GmemMapLog2 - 1); step != 0; step >>= 1)
             {
-                Operand candidate = context.IAdd(index, Const(step));
+                Operand candidate = context.IAdd(index, step);
                 Operand entry = context.IMultiply(candidate, Const(GmemMapEntryWords));
                 Operand startLow = MapWord(entry, 0);
                 Operand startHigh = MapWord(entry, 1);
@@ -864,8 +871,11 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     context.ICompareLessUnsigned(startHigh, addrHigh),
                     context.BitwiseAnd(context.ICompareEqual(startHigh, addrHigh), context.ICompareLessOrEqualUnsigned(startLow, addrLow)));
 
-                index = context.ConditionalSelect(atOrBelow, candidate, index);
+                context.Copy(index, context.ConditionalSelect(atOrBelow, candidate, index));
+                context.Copy(step, context.ShiftRightU32(step, Const(1)));
             }
+
+            context.BranchIfTrue(lblSearch, context.ICompareNotEqual(step, Const(0)));
 
             Operand found = context.IMultiply(index, Const(GmemMapEntryWords));
             Operand endLow = MapWord(found, 2);

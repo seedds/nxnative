@@ -2,6 +2,8 @@
 # and a profile without the key generates its header unchanged; the game's upscaler shaders (the launcher's Game's upscaler) are the compute shaders its shader map found in agl_ndsr.pck
 from pathlib import Path
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -57,6 +59,44 @@ def macros(shader_map):
         if shader_map is not None: (Path(d, ID) / 'shader_map.tsv').write_text(shader_map)
         subprocess.run([sys.executable, str(GAME), 'header', ID, str(Path(d, ID) / 'game.h')], env={**os.environ, 'DM_GAMES_DIR': d}, check=True, capture_output=True)
         return [l for l in (Path(d, ID) / 'game.h').read_text().splitlines() if 'UPSCALER' in l]
+
+
+class JoyconSideways(unittest.TestCase):
+    def test_committed_profile_macros(self):
+        # Enumerate repository paths, never external/derived profiles from the environment.
+        profiles = sorted((REPO / 'dm/games').glob('*/game.tsv'))
+        self.assertIn('0100152000022000', [p.parent.name for p in profiles])
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d) / 'game.h'
+            for profile in profiles:
+                with self.subTest(game=profile.parent.name):
+                    subprocess.run([sys.executable, str(GAME), 'header', str(profile.parent), str(output)],
+                                   check=True, capture_output=True)
+                    expected = int(profile.parent.name == '0100152000022000')
+                    text = output.read_text()
+                    lines = [line for line in text.splitlines() if line.startswith('#define DM_GAME_JOYCON_SIDEWAYS ')]
+                    if '#define DM_GAME_MULTI 1' in text:
+                        self.assertEqual(lines, ['#define DM_GAME_JOYCON_SIDEWAYS (dm_game_cur()->joycon_sideways)'])
+                        values = re.findall(r'\.joycon_sideways = ([01])\b', text)
+                        self.assertTrue(values, 'every program must have an explicit sideways policy')
+                        self.assertEqual(set(values), {str(expected)})
+                    else:
+                        self.assertEqual(lines, [f'#define DM_GAME_JOYCON_SIDEWAYS {expected}'])
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'the production Mac frontend requires the macOS SDK')
+    def test_host_and_frontend_accept_runtime_multi_program_policy(self):
+        clang = shutil.which('clang')
+        if not clang: self.skipTest('clang is not available')
+        with tempfile.TemporaryDirectory() as d:
+            subprocess.run([sys.executable, str(GAME), 'header', '010049900F546000', str(Path(d) / 'game_profile.h')],
+                           check=True, capture_output=True)
+            self.assertIn('#define DM_GAME_PROFILE_ID "010049900F546000"', (Path(d) / 'game_profile.h').read_text())
+            result = subprocess.run([clang, '-fsyntax-only', '-fobjc-arc', '-Werror', '-Wno-deprecated-declarations',
+                                     '-Wno-unused-but-set-variable', '-DDM_MAC_HOST_LIBRARY',
+                                     '-DDM_MAC_EXECUTABLE_SHA_SYMBOL=test_executable_sha',
+                                     '-I', d, '-I', str(REPO / 'dm/host'),
+                                     str(REPO / 'dm/host/main.c'), str(REPO / 'dm/host/front_mac.m')], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class UpscalerKeys(unittest.TestCase):

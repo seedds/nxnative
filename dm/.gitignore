@@ -1,4 +1,5 @@
 host/dmhost
+host/dmhost.dylib
 host/dmhost_*
 host/*.dSYM/
 *.bin

@@ -15,7 +15,7 @@ void dm_input_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t 
 uint64_t dm_input_samples(void);   // Cumulative number of times the game has sampled the controller
 // The cheat VM's key mask (hle_cheats.c): every input source's button bits (0..15 in the enum above) ORed and the
 // merged axes' eight stick-direction bits (16..23), one flat bitset; no latches are consumed (the game's own reads
-// keep them). The NpadButton SL / SR bits (24 / 25) never fire: no input source of this host reports them
+// keep them). Raw single-Joy rail inputs are not included in this legacy cheat mask
 uint64_t dm_cheats_keys(void);
 // Physical controller path (Mac / iOS GameController): stored separately from keyboard / touch and scripted input (DM_KEYS / DM_CTL); when the game reads player 1,
 // buttons are ORed bitwise and each stick axis takes whichever source is deflected more. All 0 when no controller is connected.
@@ -24,6 +24,19 @@ uint64_t dm_cheats_keys(void);
 #define DM_PLAYERS 8   // npads No1..No8; player 1 is the Handheld npad in handheld mode (DM_OPMODE=0)
 void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry);
 void dm_pad_set_player(int player, uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry);   // player 0..DM_PLAYERS-1 (player 1..8)
+// Requested native style (FullKey=1, JoyLeft=8, JoyRight=16), FullKey by default.
+// Single-Joy input is logical horizontal ABXY + left stick; bits 24/25 are actual SL/SR,
+// not aliases for L/R (native RightSL/RightSR become bits 26/27). The left-stick click
+// becomes the native side's click. Both halves publish logical Plus for menu: JoyLeft
+// converts it to native Minus (also accepting actual Minus); FullKey fallback keeps Plus.
+// L/ZL/Minus or R/ZR/Plus otherwise retain native meanings.
+// Only explicit JoyLeft/Right requests negotiate the supported mask: fall back to supported
+// FullKey, otherwise disconnect. Default / explicit FullKey ignores the mask as before.
+// Rail-mode sources publish raw SL/SR plus faces/axes, with normal shoulders unset; native
+// Joy states do not invent physical L/R. FullKey / Handheld translates raw SL/SR to L/R.
+// Keep keyboard routes FullKey. HID's one-player merged sources force an explicit single-Joy
+// request to supported FullKey, otherwise disconnect. Handheld and hold preference are unaffected.
+void dm_pad_style_player(int p, uint32_t style);
 void dm_pad_players(uint32_t mask);   // bit p: player p + 1 has a controller; player 1 always counts as connected (the keyboard, the touch gamepad, DM_KEYS)
 // Live controller motion (hle_hid.c, motion_fusion.h): player 0..DM_PLAYERS-1's gyro and accelerometer as GameController reports them, acceleration in G (gravity direction,
 // (0, 0, -1) face up) and rotation rate in rad/s, in Apple's controller frame. While samples keep coming the player's six-axis sensor follows the controller; dm_motion_clear stops it

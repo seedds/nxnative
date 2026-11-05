@@ -102,7 +102,7 @@ static void *memstat_thread(void *p) {
     return NULL;
 }
 
-__attribute__((constructor)) static void memstat_start(void) {
+static void memstat_start(void) {
     const char *p = getenv("DM_MEMSTAT");
     if (!p || !*p) return;
     char *path = strdup(p);
@@ -144,7 +144,7 @@ static void *thrcpu_thread(void *p) {
     }
     return NULL;
 }
-__attribute__((constructor)) static void thrcpu_start(void) {
+static void thrcpu_start(void) {
     const char *p = getenv("DM_THRCPU");
     if (!p || !*p) return;
     char *spec = strdup(p);
@@ -153,3 +153,21 @@ __attribute__((constructor)) static void thrcpu_start(void) {
 #endif
     pthread_t th; pthread_create(&th, NULL, thrcpu_thread, spec); pthread_detach(th);
 }
+
+static void diagnostics_start(void) {
+    memstat_start();
+    thrcpu_start();
+}
+
+// A library is loaded to show settings before Play: no workers, files or Metal
+// until host entry, when the launcher's final environment is available.
+void dm_memstat_start(void) {
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, diagnostics_start);
+}
+
+#ifndef DM_MAC_HOST_LIBRARY
+__attribute__((constructor)) static void diagnostics_ctor(void) {
+    dm_memstat_start();   // Preserve standalone / iOS startup timing.
+}
+#endif

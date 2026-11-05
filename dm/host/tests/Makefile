@@ -57,6 +57,7 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_pad_apple
 	$(B)/t_home_quit
 	$(B)/t_home_quit_mac
+	$(B)/t_players_mac
 	$(B)/t_motion_pro
 	$(B)/t_motion_pro_mac
 	TMPDIR="$(abspath $(B))" $(B)/t_hid
@@ -66,6 +67,12 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	TMPDIR="$(abspath $(B))" $(B)/t_cheats $(QUIET)
 	$(B)/t_nro
 	$(B)/t_symbols
+run: jit
+$(B)/t_jit: t_jit.c ../hle_jit.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_jit.c
+.PHONY: jit
+jit: $(B)/t_jit
+	$(B)/t_jit
 run: $(B)/t_nro
 run: $(B)/t_symbols
 $(B)/t_symbols: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h $(GAME_H) | $(B)
@@ -211,6 +218,28 @@ $(B)/t_home_quit: t_home_quit.c ../home_quit.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_home_quit.c
 $(B)/t_home_quit_mac: t_home_quit_mac.m ../home_quit_mac.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -I.. -o $@ t_home_quit_mac.m -framework Cocoa -framework QuartzCore
+run: $(B)/t_players_mac
+$(B)/t_players_mac: t_players_mac.m ../players_mac.m ../players_mac.h ../pad_apple.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -I.. -o $@ t_players_mac.m ../players_mac.m -framework Cocoa -framework GameController
+.PHONY: players-mac
+players-mac: $(B)/t_players_mac
+	$(B)/t_players_mac
+# Full frontend inclusion with windowless OS boundaries; no GUI, GPU or preferences.
+run: front-mac-input
+$(B)/t_front_mac_input: t_front_mac_input.m ../front_mac.m ../players_mac.m ../players_mac.h ../pad_apple.h ../pad_hid_mac.h ../home_quit.h ../home_quit_mac.h ../motion_apple.h ../motion_pro_mac.h ../dm_input.h ../front.h ../dm.h ../hle.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -Wno-deprecated-declarations -Wno-unused-but-set-variable -I.. $(GINC) -Wl,-dead_strip -o $@ t_front_mac_input.m ../players_mac.m -framework Cocoa -framework QuartzCore -framework Metal -framework GameController -framework IOKit
+.PHONY: front-mac-input
+front-mac-input: $(B)/t_front_mac_input
+	$(B)/t_front_mac_input
+.PHONY: joycon-rails
+joycon-rails: $(B)/t_joycon_rails $(B)/t_joycon_rails_mac
+	$(B)/t_joycon_rails
+	$(B)/t_joycon_rails_mac
+run: joycon-rails
+$(B)/t_joycon_rails: t_joycon_rails.c ../joycon_rails.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -fsanitize=address,undefined -o $@ t_joycon_rails.c
+$(B)/t_joycon_rails_mac: t_joycon_rails_mac.m ../joycon_rails_mac.h ../joycon_rails.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -o $@ t_joycon_rails_mac.m -framework Foundation -framework GameController -framework IOKit
 run: $(B)/t_motion_pro $(B)/t_motion_pro_mac
 $(B)/t_motion_pro: t_motion_pro.c ../motion_pro.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -fsanitize=address,undefined -o $@ t_motion_pro.c

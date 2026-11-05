@@ -8,12 +8,46 @@ import AppKit
 import QuartzCore
 import SwiftUI
 
+// launcher.c owns the optional host dylib and the returned view. Never change the environment
+// to preview a setting; finish is called by C after the UI returns and saved choices are applied.
+@_silgen_name("dm_launcher_players_view")
+private func dmLauncherPlayersView(_ enabled: Int32) -> UnsafeMutableRawPointer?
+@_silgen_name("dm_launcher_players_finish")
+private func dmLauncherPlayersFinish(_ play: Int32)
+
+enum LauncherPlayers {
+    static func enabled(_ model: LauncherModel, environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        (model.values["DM_PLAYER_SETUP"] ?? environment["DM_PLAYER_SETUP"]) == "1"
+    }
+
+    static func view(enabled: Bool) -> NSView? {
+        guard let pointer = dmLauncherPlayersView(enabled ? 1 : 0) else { return nil }
+        return Unmanaged<NSView>.fromOpaque(pointer).takeUnretainedValue()
+    }
+}
+
+// The compact native panel fits the launcher's minimum width; the Form scrolls vertically.
+private struct LauncherPlayersView: NSViewRepresentable {
+    let panel: NSView
+
+    func makeNSView(context: Context) -> NSView { panel }
+
+    func updateNSView(_ view: NSView, context: Context) {}
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSView, context: Context) -> CGSize? {
+        // Measure constraints only. Forcing AppKit layout here can lay out the ancestor
+        // NSHostingView again while SwiftUI is measuring it (AttributeGraph abort).
+        return nsView.fittingSize
+    }
+}
+
 private func info(_ key: String) -> String? { Bundle.main.object(forInfoDictionaryKey: key) as? String }
 
 struct LauncherView: View {
     @ObservedObject var m: LauncherModel
     let done: (Bool) -> Void
     let fit: (CGFloat) -> Void
+    @State private var playersView: NSView?
     @AppStorage("window.show") private var show = true
     @AppStorage("window.advanced") private var advanced = false
 
@@ -31,6 +65,12 @@ struct LauncherView: View {
             Form {
                 settingSections(basic: true)
                 CloudSavesSection()
+                if let panel = playersView {
+                    Section("Players") {
+                        LauncherPlayersView(panel: panel)
+                            .frame(minWidth: 430, maxWidth: .infinity)
+                    }
+                }
                 Section {
                     DisclosureGroup("Advanced settings", isExpanded: $advanced) {}
                 }
@@ -59,6 +99,9 @@ struct LauncherView: View {
             .padding(20)
         }
         .frame(minWidth: 520, idealWidth: 560)
+        .onChange(of: LauncherPlayers.enabled(m), initial: true) { _, enabled in
+            playersView = LauncherPlayers.view(enabled: enabled)
+        }
     }
 
     @ViewBuilder private func settingSections(basic: Bool) -> some View {

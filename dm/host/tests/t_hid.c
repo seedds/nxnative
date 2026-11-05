@@ -84,6 +84,18 @@ static void t_npads(void) {
     g_mode = 1; dm_pad_players(0);
     CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_FULLKEY && h_hid_GetStyle(&(uint32_t){1}) == 0 && h_hid_GetStyle(&(uint32_t){NPAD_HANDHELD}) == 0, "one player: No1 only");
     CHECK(dm_player_npad(0) == 0 && dm_player_npad(1) == 1 && dm_player_npad(7) == 7, "player n on No n docked");
+    const uint32_t unmapped[] = {1, DM_PLAYERS, 0x10, NPAD_HANDHELD, UINT32_MAX};
+    const uint32_t styles[] = {STYLE_FULLKEY, STYLE_HANDHELD, STYLE_JOYLEFT, STYLE_JOYRIGHT};
+    for (unsigned i = 0; i < sizeof unmapped / sizeof *unmapped; i++) {
+        CHECK(player_of(unmapped[i]) < 0, "unmapped npad has no player index");
+        for (unsigned j = 0; j < sizeof styles / sizeof *styles; j++) {
+            NpadState empty; memset(&empty, 0xff, sizeof empty);
+            fill(&empty, unmapped[i], styles[j]);
+            CHECK(!empty.attributes && !empty.buttons && !empty.lx && !empty.ly && !empty.rx && !empty.ry,
+                  "unmapped npad reads remain disconnected without indexing player input");
+        }
+        CHECK(!vib_targets(((unmapped[i] & 0xffu) << 8) | 3u), "unmapped vibration handle has no player target");
+    }
     dm_input_set(DM_BTN_X, 100, 0, 0, 0); dm_pad_set(DM_BTN_A, -200, 0, 0, 0);
     CHECK(buttons_of(0, STYLE_FULLKEY) == (DM_BTN_X | DM_BTN_A) && lx_of(0) == -200, "keyboard and player 1's controller are ORed, the stick deflected more wins");
     dm_input_set(0, 0, 0, 0, 0); dm_pad_set(0, 0, 0, 0, 0); buttons_of(0, STYLE_FULLKEY);
@@ -490,6 +502,175 @@ static void t_motion_hid(void) {
     dm_pad_players(1); g_phone_mode = -1;
 }
 
+static void t_single_joy(void) {
+    g_mode = 1; ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3); dm_pad_players(3);
+    h_hid_SetStyles(1u << 2);   // JoyDual only: legacy FullKey must still be reported.
+    NpadState legacy;
+    CHECK(!atomic_load(&g_pad_style[1]) && style_of(1) == STYLE_FULLKEY, "default FullKey ignores unsupported-style mask");
+    fill(&legacy, 1, STYLE_FULLKEY);
+    CHECK(legacy.attributes & ATTR_CONNECTED, "default FullKey remains connected with JoyDual-only mask");
+    dm_pad_style_player(1, STYLE_FULLKEY);
+    fill(&legacy, 1, STYLE_FULLKEY);
+    CHECK(style_of(1) == STYLE_FULLKEY && (legacy.attributes & ATTR_CONNECTED), "explicit FullKey remains connected with JoyDual-only mask");
+    h_hid_SetStyles(STYLE_FULLKEY | STYLE_JOYLEFT | STYLE_JOYRIGHT);
+    dm_input_set(0, 0, 0, 0, 0); script_set(0, 0, 0, 0, 0);
+    dm_pad_set_player(1, 0, 0, 0, 0, 0);
+    NpadState s; uint32_t id = 1; int ev;
+    h_hid_BindStyleEv(&id, &ev, 0); g_signals = 0;
+    dm_pad_style_player(1, STYLE_JOYLEFT);
+    CHECK(style_of(id) == STYLE_JOYLEFT && g_signals == 1 && g_signalled == &ev, "native JoyLeft selected and style event fired");
+    dm_pad_style_player(1, STYLE_JOYLEFT);
+    CHECK(g_signals == 1, "same style does not signal");
+    h_hid_HoldType(1);
+    CHECK(h_hid_GetHold() == 1, "horizontal hold reported");
+    const uint64_t logical[] = {DM_BTN_A, DM_BTN_B, DM_BTN_X, DM_BTN_Y};
+    const uint64_t left[] = {DM_BTN_DOWN, DM_BTN_LEFT, DM_BTN_RIGHT, DM_BTN_UP};
+    const uint64_t right[] = {DM_BTN_X, DM_BTN_A, DM_BTN_Y, DM_BTN_B};
+    for (int side = 0; side < 2; side++) {
+        uint32_t style = side ? STYLE_JOYRIGHT : STYLE_JOYLEFT;
+        dm_pad_style_player(1, style);
+        CHECK(h_hid_GetJoyAssign(&id) == 1, "native single-Joy assignment");
+        for (int i = 0; i < 4; i++) {
+            dm_pad_set_player(1, logical[i], 12000, -20000, 30000, 30000);
+            fill(&s, id, style);
+            CHECK((s.buttons & 0xffff) == (side ? right[i] : left[i]), "logical horizontal face maps to native device button");
+            CHECK(side ? (!s.lx && !s.ly && s.rx == 20000 && s.ry == 12000) :
+                         (s.lx == -20000 && s.ly == -12000 && !s.rx && !s.ry), "inverse horizontal rotation uses only native side's stick");
+            CHECK((s.buttons & 0xff0000) == (side ? 1u << 22 : 1u << 16), "stick pseudo-buttons derived after native rotation");
+            CHECK(s.attributes == (ATTR_CONNECTED | (side ? ATTR_RIGHT_CONN : ATTR_LEFT_CONN)), "only the real Joy side is connected, not wired");
+            dm_pad_set_player(1, 0, 0, 0, 0, 0); fill(&s, id, style);
+            CHECK(!s.buttons && !s.lx && !s.ly && !s.rx && !s.ry, "Joy buttons and axes release");
+        }
+        dm_pad_set_player(1, DM_BTN_PLUS, 0, 0, 0, 0); fill(&s, id, style);
+        CHECK(s.buttons == (side ? DM_BTN_PLUS : DM_BTN_MINUS), "logical Plus menu maps to the native side's menu");
+        dm_pad_set_player(1, 0, 0, 0, 0, 0); fill(&s, id, style);
+        dm_pad_set_player(1, DM_BTN_MINUS, 0, 0, 0, 0); fill(&s, id, style);
+        CHECK(s.buttons == (side ? 0 : DM_BTN_MINUS), "actual Minus remains native left menu");
+        dm_pad_set_player(1, 0, 0, 0, 0, 0); fill(&s, id, style);
+        dm_pad_set_player(1, DM_BTN_LS | DM_BTN_ZL | DM_BTN_ZR | DM_BTN_PLUS | DM_BTN_MINUS, -18000, 22000, 0, 0);
+        fill(&s, id, style);
+        CHECK((s.buttons & 0xffff) == (side ? DM_BTN_RS | DM_BTN_ZR | DM_BTN_PLUS : DM_BTN_LS | DM_BTN_ZL | DM_BTN_MINUS), "click and native side trigger/menu preserved, absent side dropped");
+        h_hid_HoldType(0);
+        NpadState vertical; fill(&vertical, id, style);
+        CHECK(s.buttons == vertical.buttons && s.lx == vertical.lx && s.ly == vertical.ly && s.rx == vertical.rx && s.ry == vertical.ry, "hold preference leaves native device coordinates unchanged");
+        h_hid_HoldType(1);
+        for (int rail = 0; rail < 2; rail++) {
+            dm_pad_set_player(1, 1ull << (24 + rail), 12000, -20000, 0, 0);
+            fill(&s, id, style);
+            CHECK((s.buttons & ((15ull << 24) | DM_BTN_L | DM_BTN_R)) == (1ull << (24 + rail + 2 * side)), "raw rail sets only native rail, not physical shoulders");
+            CHECK(side ? (!s.lx && !s.ly && s.rx == 20000 && s.ry == 12000) :
+                         (s.lx == -20000 && s.ly == -12000 && !s.rx && !s.ry), "rail press preserves native axes");
+            dm_pad_set_player(1, 0, 0, 0, 0, 0); fill(&s, id, style);
+            CHECK(!s.buttons, "native raw rail releases");
+        }
+        dm_pad_set_player(1, (3ull << 24) | DM_BTN_L | DM_BTN_R, 0, 0, 0, 0);
+        fill(&s, id, style);
+        CHECK((s.buttons & (15ull << 24)) == (3ull << (side ? 26 : 24)), "actual SL/SR translated to native side rail bits");
+        CHECK((s.buttons & (DM_BTN_L | DM_BTN_R)) == (side ? DM_BTN_R : DM_BTN_L), "canonical shoulder is not a rail button");
+        dm_pad_set_player(1, DM_BTN_L | DM_BTN_R, 0, 0, 0, 0); fill(&s, id, style);
+        CHECK(!(s.buttons & (15ull << 24)), "no rails synthesized from canonical shoulders");
+        h_hid_HoldType(0); fill(&s, id, style);
+        CHECK(h_hid_GetHold() == 0 && !(s.buttons & (15ull << 24)), "hold metadata does not relabel native button bits");
+        h_hid_HoldType(1);
+        fill(&s, id, STYLE_FULLKEY); CHECK(!s.attributes && !s.buttons, "Joy is not also connected as FullKey");
+        dm_pad_set_player(1, 0, 0, 0, 0, 0); fill(&s, id, style);
+        dm_pad_set_player(1, 1ull << 24, 0, 0, 0, 0);
+        dm_pad_set_player(1, 0, 0, 0, 0, 0);
+        NpadState history[2];
+        int n = side ? h_hid_StatesJoyRight(history, 2, &id) : h_hid_StatesJoyLeft(history, 2, &id);
+        CHECK(n == 2 && history[0].buttons == (1ull << (side ? 26 : 24)) && history[1].sampling == history[0].sampling - 1, "short actual SL press latched in native history");
+        if (side) h_hid_StateJoyRight(&s, &id); else h_hid_StateJoyLeft(&s, &id);
+        CHECK(!s.buttons, "native current-state overload consumes and releases rail latch");
+    }
+    g_signals = 0;
+    h_hid_SetStyles(STYLE_FULLKEY);
+    CHECK(style_of(id) == STYLE_FULLKEY && g_signals == 1, "unsupported requested Joy falls back to supported FullKey with event");
+    dm_pad_style_player(1, STYLE_JOYLEFT);
+    CHECK(g_signals == 1, "request changes without actual style change do not signal");
+    dm_pad_set_player(1, DM_BTN_A | DM_BTN_PLUS, 123, 456, 789, 1000); fill(&s, id, STYLE_FULLKEY);
+    CHECK((s.buttons & 0xffff) == (DM_BTN_A | DM_BTN_PLUS) && s.lx == 123 && s.ly == 456 && s.rx == 789 && s.ry == 1000, "FullKey fallback keeps logical Plus and unchanged axes");
+    dm_pad_set_player(1, 0, 0, 0, 0, 0); fill(&s, id, STYLE_FULLKEY);
+    for (int side = 0; side < 2; side++) {
+        dm_pad_style_player(1, side ? STYLE_JOYRIGHT : STYLE_JOYLEFT);
+        for (int rail = 0; rail < 2; rail++) {
+            dm_pad_set_player(1, (1ull << (24 + rail)) | DM_BTN_A, 123, 456, 789, 1000);
+            fill(&s, id, STYLE_FULLKEY);
+            CHECK(s.buttons == (DM_BTN_A | (rail ? DM_BTN_R : DM_BTN_L)), "unsupported single fallback translates actual SL/SR to canonical shoulder only");
+            CHECK(s.lx == 123 && s.ly == 456 && s.rx == 789 && s.ry == 1000, "rail fallback preserves FullKey axes");
+            dm_pad_set_player(1, 0, 0, 0, 0, 0); fill(&s, id, STYLE_FULLKEY);
+            CHECK(!s.buttons, "fallback raw rail releases");
+        }
+    }
+    dm_pad_style_player(1, STYLE_JOYLEFT);
+    h_hid_SetStyles(STYLE_JOYRIGHT);
+    CHECK(!style_of(id) && g_signals == 2, "no supported requested or FullKey style disconnects");
+    h_hid_SetStyles(STYLE_JOYLEFT);
+    CHECK(style_of(id) == STYLE_JOYLEFT && g_signals == 3, "supporting requested style reconnects with event");
+    h_hid_SetStyles(STYLE_JOYLEFT); CHECK(g_signals == 3, "same supported styles do not signal");
+    g_mode = 0; dm_pad_style_player(0, STYLE_JOYRIGHT);
+    CHECK(style_of(NPAD_HANDHELD) == STYLE_HANDHELD, "handheld unchanged even when requested style unsupported");
+    for (int mode = 0; mode < 2; mode++) {
+        g_mode = mode; dm_pad_style_player(0, STYLE_FULLKEY);
+        for (int rail = 0; rail < 2; rail++) {
+            dm_pad_set((1ull << (24 + rail)) | DM_BTN_B, 123, 456, 789, 1000);
+            fill(&s, connected_id(), mode ? STYLE_FULLKEY : STYLE_HANDHELD);
+            CHECK(s.buttons == (DM_BTN_B | (rail ? DM_BTN_R : DM_BTN_L)), "shared FullKey / Handheld translates raw rail without exposing native rails");
+            CHECK(s.lx == 123 && s.ly == 456 && s.rx == 789 && s.ry == 1000, "shared raw rail preserves axes");
+            dm_pad_set(0, 0, 0, 0, 0); fill(&s, connected_id(), mode ? STYLE_FULLKEY : STYLE_HANDHELD);
+            CHECK(!s.buttons, "shared raw rail releases");
+        }
+    }
+    g_mode = 1; dm_pad_style_player(0, STYLE_FULLKEY);
+    dm_pad_players(1); fill(&s, id, STYLE_JOYLEFT);
+    CHECK(!s.attributes && !s.buttons, "removed Joy is disconnected");
+    g_signals = 0; dm_pad_style_player(1, STYLE_JOYRIGHT);
+    CHECK(!g_signals, "style request on disconnected player does not signal");
+    dm_pad_style_player(-1, STYLE_JOYLEFT); dm_pad_style_player(DM_PLAYERS, STYLE_JOYLEFT);
+    dm_pad_style_player(1, STYLE_FULLKEY); h_hid_SetStyles(0xffffffffu); h_hid_HoldType(0);
+    atomic_store(&g_style_ev[1], NULL);
+}
+
+static void t_single_joy_merged(void) {
+    g_mode = 1; dm_pad_players(1); ids((uint32_t[]){0, 1}, 2);
+    h_hid_SetStyles(STYLE_FULLKEY | STYLE_JOYLEFT);
+    dm_input_set(0, 0, 0, 0, 0); script_set(0, 0, 0, 0, 0);
+    dm_pad_set(0, 0, 0, 0, 0);
+    dm_pad_style_player(0, STYLE_JOYLEFT); dm_pad_style_player(1, STYLE_FULLKEY);
+    uint32_t id = 0; int ev; NpadState s;
+    h_hid_BindStyleEv(&id, &ev, 0);
+    // Test both ways a Pro source enters/leaves HID's one-player merge: ids and connection mask.
+    for (int by_ids = 0; by_ids < 2; by_ids++) {
+        if (by_ids) { ids((uint32_t[]){0, 1}, 2); dm_pad_players(3); }
+        else ids((uint32_t[]){0}, 1);
+        g_signals = 0; uint64_t epoch = dm_haptics_epoch(0);
+        CHECK(style_of(0) == STYLE_JOYLEFT, "unmerged player zero selects native left");
+        if (by_ids) ids((uint32_t[]){0}, 1); else dm_pad_players(3);
+        CHECK(style_of(0) == STYLE_FULLKEY && g_signals == 1 && g_signalled == &ev, "merged Pro forces player zero FullKey and signals style event");
+        CHECK(dm_haptics_epoch(0) != epoch, "merge clears player zero haptics");
+        dm_pad_set(DM_BTN_PLUS, 123, 456, 0, 0);
+        dm_pad_set_player(1, DM_BTN_B, 0, 0, 21000, -22000);
+        fill(&s, 0, STYLE_FULLKEY);
+        CHECK((s.buttons & 0xffff) == (DM_BTN_PLUS | DM_BTN_B) && s.lx == 123 && s.ly == 456 && s.rx == 21000 && s.ry == -22000, "merged FullKey keeps Plus and Pro right stick without native conversion");
+        fill(&s, 0, STYLE_JOYLEFT);
+        CHECK(!s.attributes && !s.buttons, "merged player is not also native left");
+        epoch = dm_haptics_epoch(0);
+        if (by_ids) ids((uint32_t[]){0, 1}, 2); else dm_pad_players(1);
+        CHECK(style_of(0) == STYLE_JOYLEFT && g_signals == 2, "unmerge restores native player zero with event");
+        CHECK(dm_haptics_epoch(0) != epoch, "unmerge clears player zero haptics");
+        fill(&s, 0, STYLE_JOYLEFT);
+        CHECK((s.buttons & 0xffff) == DM_BTN_MINUS && !s.rx && !s.ry, "unmerged left converts logical menu to Minus");
+        dm_pad_set(0, 0, 0, 0, 0); fill(&s, 0, STYLE_JOYLEFT);
+    }
+    dm_pad_players(1); ids((uint32_t[]){0}, 1); h_hid_SetStyles(STYLE_JOYLEFT);
+    g_signals = 0; dm_pad_players(3);
+    CHECK(!style_of(0) && g_signals == 1, "merged native request disconnects without supported FullKey");
+    dm_pad_players(1);
+    CHECK(style_of(0) == STYLE_JOYLEFT && g_signals == 2, "unmerge reconnects native without FullKey support");
+    atomic_store(&g_style_ev[0], NULL);
+    dm_pad_style_player(0, STYLE_FULLKEY); h_hid_SetStyles(0xffffffffu);
+    ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3);
+}
+
 int main(void) {
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
     t_slots();
@@ -513,6 +694,8 @@ int main(void) {
         CHECK(!h_hid_NmouseEnable(5, 1) && !h_hid_NmousePos(5, 0, 0), "an unknown handle does not");
         CHECK(!h_hid_NmouseState(NULL, merged) && !h_hid_NmouseNpad(&npad, merged) && npad == 9, "no state and no controller behind the merged handle");
     }
+    t_single_joy();
+    t_single_joy_merged();
     printf("hid players: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

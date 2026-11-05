@@ -4,6 +4,14 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 
 ## Guest layout
 
+### A generated Mac app's alias region is too small
+
+- **Symptom:** a generated Mac app crashes at startup after an address reservation fails with `0x1803`, even though the build's address region check reports a larger reach.
+- **Cause:** the Mac app used the profile's alias region, which is sized for the iPhone's limited address space. The region check ran with a 64 GiB alias region and reported what it observed, but did not change the Mac app's reservation.
+- **Fix:** the NSP script gives generated Mac apps an alias region of at least 64 GiB, without reducing a larger profile region. This reserves virtual address space, not 64 GiB of physical memory; the host keeps the profile's heap and stack sizes. An explicit `DM_ALIAS_SIZE` in the build's environment file, the player's environment file, or the launch environment takes precedence. iOS and `--platform mac` keep their previous defaults. A failed or skipped region check does not prove that a game fits either layout.
+- **Found on:** Trails in the Sky 2nd Chapter 1.0.4 (01007A2027548000): the profile's 2.375 GiB alias region failed at startup. The region check reached +12.27 GiB; a 64 GiB alias reached `nnMain` and ran for 30 seconds. Gameplay and longer runs remain unverified.
+- **Limit:** the host reserves the alias region plus the profile's other guest regions as one contiguous block, so the total exceeds 64 GiB. This reservation may fail when the Mac lacks a large enough contiguous range. A larger alias can also change the game's allocations and the host's automatic allocator caps; explicit profile caps still apply. The region check observes only early boot and does not establish later requirements or iOS compatibility.
+
 ### Partitioning the guest block between alias region, stacks and heap
 
 - **Symptom:** large resources silently skipped, later a null deref where the resource is used; also visible as `SetHeapSize` asking for much less than the pool.

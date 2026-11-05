@@ -2596,14 +2596,22 @@ def env_file_pairs(path):   # an environment file's switches (one KEY=VALUE per 
     return out
 
 
-def build_env_file(work, env_file, motion):
-    """The environment file the build bakes in (the iOS app's bundled dm/env.txt, the Mac app's, the Mac run command's switches): the --env-file / DM_ENV_FILE one as it is, or, for a build
-    without motion (MOTION / --no-motion), its switches plus DM_MOTION=0 in <id>_build/build_env.txt"""
-    if motion: return env_file
+def build_env_file(work, env_file, motion, mac_app_profile=None):
+    """Prepare the switches bundled with a build or printed in the Mac run command."""
+    if motion and mac_app_profile is None: return env_file
     pairs = env_file_pairs(env_file) if env_file else {}
-    pairs['DM_MOTION'] = '0'
+    fallback = None
+    if mac_app_profile is not None and 'DM_ALIAS_SIZE' not in pairs:
+        fallback = f'{max(SWITCH_ALIAS, int(mac_app_profile.get("mem_alias"), 0)):#x}'
+    if motion and fallback is None: return env_file
     f = work / 'build_env.txt'
-    f.write_text(''.join(f'{k}={v}\n' for k, v in pairs.items()))
+    if motion:
+        text = Path(os.path.expanduser(env_file)).read_text(errors='replace') if env_file else ''
+        f.write_text(text + ('\n' if text and not text.endswith('\n') else '') + f'DM_ALIAS_SIZE={fallback}\n')
+    else:
+        if fallback is not None: pairs['DM_ALIAS_SIZE'] = fallback
+        pairs['DM_MOTION'] = '0'
+        f.write_text(''.join(f'{k}={v}\n' for k, v in pairs.items()))
     return str(f)
 
 
@@ -3138,7 +3146,7 @@ def main(args=None):
     motion = MOTION if args.motion is None else args.motion
     jit = uses_jit(game / 'ExeFS')
     if jit and not mac and not mac_pack: capture_jit(py, repo, game, patched, work, env, logs, g)   # the iPhone runs no code made at run time: it serves the plugin's output from an image
-    env_file = build_env_file(work, args.env_file or DM_ENV_FILE, motion)
+    env_file = build_env_file(work, args.env_file or DM_ENV_FILE, motion, g if mac_pack else None)
     if not motion: say('motion (gyro): off, DM_MOTION=0 is built in (on the iPhone, DM_MOTION=1 in the app\'s Documents/env.txt turns it back on)')
     if mac_pack:   # a Mac app: the Mac host, then the app packed from it and the build's files
         if getattr(args, 'in_programs', None) is not None:   # a program of the game: the app its first program's build packs takes these

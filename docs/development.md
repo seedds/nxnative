@@ -564,6 +564,8 @@ What step 1 does not cover yet (GitHub issue #402): a replay that equals the liv
 
 `--platform mac-app` (`PLATFORM = 'mac-app'` in Spyder) builds everything `--platform mac` builds, then packs a Mac app of the game with `dm/mac/pack_app.py`. The app is `<NSP folder>/<game name>.app` (a `:` or `/` in the name becomes ` - `); `-o` names another path ending in `.app`. Open it from Finder, from any folder: it does not need the build folder or the drive it is on. Like the Mac host, it needs a Mac with Apple silicon. Its name, version and bundle ID are the IPA's: the game name and display version from the control data, and `org.nxnative.<title ID>`. Its icon is the game's icon as `AppIcon.icns` (`sips`, `iconutil`).
 
+The generated Mac app reserves at least 64 GiB for its alias region, or the profile's larger region. This is virtual address space, not an allocation of physical RAM. `DM_ALIAS_SIZE` in `--env-file`, the player's `env.txt`, or the launch environment overrides it. The separate `--platform mac` command and iOS builds retain their profile defaults. A skipped or incomplete region check does not establish that the game fits ([memory](reference/memory.md#a-generated-mac-apps-alias-region-is-too-small)).
+
 The bundle holds what the IPA holds, with the Mac's shader libraries:
 
 ```

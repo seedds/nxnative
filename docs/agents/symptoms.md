@@ -98,6 +98,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Memory and address space
 
+- a generated Mac app crashes at startup after an address reservation fails with `0x1803`, even though the build's address region check reports a larger reach. → [A generated Mac app's alias region is too small](../reference/memory.md#a-generated-mac-apps-alias-region-is-too-small)
 - large resources silently skipped, later a null deref where the resource is used; also visible as `SetHeapSize` asking for much less than the pool. → [Partitioning the guest block between alias region, stacks and heap](../reference/memory.md#partitioning-the-guest-block-between-alias-region-stacks-and-heap)
 - an `nn::diag` abort with Result 0 under `nn::os::detail::ThreadManager::CreateThread` → `ThreadManagerImplByHorizon::MapAliasStack`, on some boots and not on others, with no `MapMemory refused` line. → [Thread stacks placed at random in the stack region](../reference/memory.md#thread-stacks-placed-at-random-in-the-stack-region)
 - `SetHeapSize OOM: req 0x600000 > cap 0`, followed by an SDK abort in `nninitStartup` on the first provisional boot. → [Provisional Unreal layout leaves no heap](../reference/memory.md#provisional-unreal-layout-leaves-no-heap)

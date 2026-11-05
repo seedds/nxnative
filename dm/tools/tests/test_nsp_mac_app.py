@@ -176,6 +176,18 @@ class PackReuse(unittest.TestCase):
         self.assertTrue(any('--sign' in c for c in self.commands))
         self.assertTrue(self.key.is_file())
 
+    def test_generated_alias_size_invalidates_reuse(self):
+        profile = types.SimpleNamespace(get=lambda key: '0x80000000')
+        self.args.env_file = nsp.build_env_file(self.tmp, str(self.tmp / 'env.txt'), True, profile)
+        self.pack(); self.assert_reused()
+        bundled = Path(self.args.out) / 'Contents/Resources/dm/env.txt'
+        self.assertEqual(nsp.env_file_pairs(bundled)['DM_ALIAS_SIZE'], '0x1000000000')
+        profile.get = lambda key: '0x1400000000'
+        self.args.env_file = nsp.build_env_file(self.tmp, str(self.tmp / 'env.txt'), True, profile)
+        self.assert_repacked()
+        self.assertEqual(nsp.env_file_pairs(bundled)['DM_ALIAS_SIZE'], '0x1400000000')
+        self.assert_reused()
+
     def test_retargeted_input_symlink_repacks(self):
         msl = self.tmp / 'msl'
         for name in ('left.metallib', 'right.metallib'): (msl / name).write_bytes(b'same library')
@@ -464,6 +476,26 @@ class App(unittest.TestCase):
             k, _, v = ln.partition('='); out[k] = v
         return out
 
+    def test_alias_size_launcher_precedence(self):
+        profile = types.SimpleNamespace(get=lambda key: '0x80000000')
+        a = types.SimpleNamespace(**vars(self.args))
+        a.out = str(self.tmp / 'Alias.app'); a.icon = None
+        a.env_file = nsp.build_env_file(self.tmp, '', True, profile)
+        with contextlib.redirect_stdout(io.StringIO()): pack_app.pack(a)
+        player = self.tmp / f'home/Library/Application Support/nxnative/{TID}/env.txt'
+        player.parent.mkdir(parents=True, exist_ok=True)
+        player.unlink(missing_ok=True)
+        try:
+            for player_value, launch_value, expected in ((None, None, '0x1000000000'), ('0x2000', None, '0x2000'), ('0x2000', '0x3000', '0x3000')):
+                with self.subTest(player=player_value, launch=launch_value):
+                    if player_value: player.write_text(f'DM_ALIAS_SIZE={player_value}\n')
+                    p = self.launch(app=Path(a.out), DM_ALIAS_SIZE=launch_value) if launch_value else self.launch(app=Path(a.out))
+                    output = p.communicate(timeout=30)[0]
+                    self.assertEqual(p.returncode, 7, output)
+                    self.assertEqual(self.host_run()['DM_ALIAS_SIZE'], expected)
+        finally:
+            player.unlink(missing_ok=True)
+
     def test_layout(self):
         c = self.app / 'Contents'
         self.assertFalse(self.app.with_name(self.app.name + '.partial').exists())
@@ -705,6 +737,42 @@ class App(unittest.TestCase):
             pack_app.pack(a)
         self.assertTrue((self.tmp / 'Copy.app/Contents/Resources/romfs/region_common/audio/edward.bfsar').is_file())
         self.assertFalse((self.tmp / 'Copy.app/Contents/stale').exists()); self.assertFalse((self.tmp / 'Copy.app/Contents/Resources/AppIcon.icns').exists())
+
+
+class BuildEnvironment(unittest.TestCase):
+    def test_alias_defaults_explicit_override_and_motion(self):
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as d:
+            work = Path(d); env = work / 'input.txt'
+            for profile_size, expected in (('0x80000000', '0x1000000000'), ('0x1000000000', '0x1000000000'), ('0x1400000000', '0x1400000000')):
+                profile = types.SimpleNamespace(get=lambda key, size=profile_size: size)
+                for motion in (True, False):
+                    with self.subTest(profile=profile_size, motion=motion):
+                        env.write_text('DM_OTHER=yes\nDM_MOTION=1\n')
+                        result = nsp.build_env_file(work, str(env), motion, profile)
+                        pairs = nsp.env_file_pairs(result)
+                        self.assertEqual(pairs['DM_ALIAS_SIZE'], expected)
+                        self.assertEqual(pairs['DM_OTHER'], 'yes')
+                        self.assertEqual(pairs['DM_MOTION'], '1' if motion else '0')
+                        env.write_text('DM_ALIAS_SIZE=0x1234\n')
+                        self.assertEqual(nsp.env_file_pairs(nsp.build_env_file(work, str(env), motion, profile))['DM_ALIAS_SIZE'], '0x1234')
+
+    def test_motion_on_preserves_env_file_order_and_comments(self):
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as d:
+            work = Path(d); env = work / 'input.txt'
+            text = '# player input\nDM_X=first\nDM_X=second'
+            env.write_text(text)
+            profile = types.SimpleNamespace(get=lambda key: '0x80000000')
+            result = nsp.build_env_file(work, str(env), True, profile)
+            self.assertEqual(Path(result).read_text(), text + '\nDM_ALIAS_SIZE=0x1000000000\n')
+            env.write_text(text + '\nDM_ALIAS_SIZE=0x1234\n')
+            self.assertEqual(nsp.build_env_file(work, str(env), True, profile), str(env))
+
+    def test_non_app_builds_keep_existing_environment_behavior(self):
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as d:
+            work = Path(d); env = work / 'input.txt'; env.write_text('DM_OTHER=yes\n')
+            self.assertEqual(nsp.build_env_file(work, str(env), True), str(env))
+            self.assertEqual(nsp.build_env_file(work, '', True), '')
+            self.assertEqual(nsp.env_file_pairs(nsp.build_env_file(work, str(env), False)), {'DM_OTHER': 'yes', 'DM_MOTION': '0'})
 
 
 class Script(unittest.TestCase):

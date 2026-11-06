@@ -67,7 +67,9 @@ def own_shared(code):
     return any(struct.unpack_from('<H', code, o)[0] & 0xfff in (0x984, 0x388, 0x988, 0x38c, 0x98c, 0xf8c) for o in range(0, len(code) - 15, 16))
 
 
-_KERNEL = re.compile(r'kernel\s+void\s+main0\s*\(((?:[^()]|\([^()]*\))*)\)\s*\{\s*threadgroup\s+spvUnsafeArray<uint,\s*(\d+)>\s+(\w+);\n')
+# The kernel, its parameters, the thread variables spirv-cross declares ahead of the threadgroup memory (a private variable's initializer: GlobalToStorage.TryGenerateRawStorageOp's last entry,
+# uint _N = 0u;), and its stage memory, the first threadgroup array
+_KERNEL = re.compile(r'kernel\s+void\s+main0\s*\(((?:[^()]|\([^()]*\))*)\)\s*\{\s*((?:(?!threadgroup\b)[^\n{};]+;\n\s*)*)threadgroup\s+spvUnsafeArray<uint,\s*(\d+)>\s+(\w+);\n')
 _NAME = re.compile(r'(\w+)\s*(?:\[\[.*\]\])?$')
 _THREAD = re.compile(r'(uint3?)\s+(\w+)\s*\[\[(thread_position_in_threadgroup|threadgroup_position_in_grid)\]\]$')
 
@@ -104,11 +106,13 @@ def to_stage(msl, i):
     kind = i['kind']
     m = _KERNEL.search(msl)
     if not m: raise ValueError(f'{kind}: no kernel main0 starting with its stage memory')
-    params, words, mem = _params(m[1]), int(m[2]), m[3]
+    params, local, words, mem = _params(m[1]), m[2].strip(), int(m[3]), m[4]
     names = [_name(p) for p in params]
     plain = [re.sub(r'\s*\[\[.*\]\]$', '', p) for p in params]
-    # The kernel's body, called with the stage memory the wrapper owns: its early returns (a thread with nothing to write) come back to the wrapper's copy of the outputs
-    src = msl[:m.start()] + f'static inline __attribute__((always_inline)) void dm_stage_body({", ".join(plain + [f"threadgroup spvUnsafeArray<uint, {words}>& {mem}"])})\n{{\n' + msl[m.end():]
+    # The kernel's body, called with the stage memory the wrapper owns: its early returns (a thread with nothing to write) come back to the wrapper's copy of the outputs. Its thread variables
+    # stay in it: one call a thread, as the kernel ran
+    src = (msl[:m.start()] + f'static inline __attribute__((always_inline)) void dm_stage_body({", ".join(plain + [f"threadgroup spvUnsafeArray<uint, {words}>& {mem}"])})\n{{\n' +
+           (f'    {local}\n' if local else '') + msl[m.end():])
     call = f'dm_stage_body({", ".join(names + [mem])});'
     # The thread's and the threadgroup's numbers: the kernel's parameters where it has them (an attribute may appear once in a function), else parameters of the wrapper's own
     own = {t[3]: t[2] + ('.x' if t[1] == 'uint3' else '') for t in map(_THREAD.match, params) if t}

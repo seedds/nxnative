@@ -293,6 +293,14 @@ HLE_FORCE("_ZN2nn2oe22SetCpuOverclockEnabledEb", "CPU overclock switch (through 
 HLE_FORCE("_ZN2nn2oe23GetCurrentGraphicsScaleEv", "graphics scale (Switch 2, through am): 0 handheld, 1 console", int, h_oe_GfxScale, void) { return opmode() == 1; }
 HLE_FORCE("_ZN2nn2oe42SetGraphicsScaleChangedNotificationEnabledEb", "graphics scale change notification (Switch 2, through am); the scale changes only with the operation mode",
           void, h_oe_GfxScaleNotify, unsigned on) { (void)on; }
+// The GPU time the application used between two ticks (Switch 2 SDKs; Nintendo Switch 2 Welcome Tour asks each frame, main+0x30a83c). The SDK's own (gs::sdk::QueryApplicationGpuTimeSpan)
+// locks the gs graphics server's context, which the host does not have (null in os::SdkMutexType::Lock, as SetGraphicsFrameLengthMode below). The host has no per-application GPU
+// accounting: success and 0 (the game reads the span only on success)
+HLE_FORCE("_ZN2nn2oe27QueryApplicationGpuTimeSpanEPNS_8TimeSpanEmm", "application GPU time between two ticks: 0, no accounting on the host", Result, h_oe_GpuTimeSpan, int64_t *out, uint64_t from, uint64_t to) {
+    static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("oe::QueryApplicationGpuTimeSpan %#llx..%#llx: 0 (the host has no per-application GPU time)", (unsigned long long)from, (unsigned long long)to);
+    if (out) *out = 0;
+    return RES_OK;
+}
 // The frame length the game aims at (Switch 2 SDKs): oe::SetGraphicsTargetFrameRate maps up to 59 fps to mode 1, up to 119 to mode 2 and above to mode 3, SetGraphicsTargetFrameRateAuto
 // to mode 0, and both call this, which locks the gs graphics server's context and sends it the mode. The host has no graphics server (nv::InitializeGraphics), so the context is null and
 // the lock crashed: Hyrule Warriors: Age of Imprisonment sets 60 / its present interval at boot (main+0x1e5d244). The host paces by the window's present interval, so the mode is only noted

@@ -548,6 +548,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `SetLayerCrop` only records the crop for the present ([The NVN present crops by the vi layer crop](rendering.md#the-nvn-present-crops-by-the-vi-layer-crop)); `DestroyLayer`, `CloseDisplay` and `vi::Finalize` are host no-ops. Also hooked: `vi::GetIndirectImageMemoryRequirement` (asked by the inline keyboard's `GetImageMemoryRequirement`, [The inline keyboard as a resident library applet](#the-inline-keyboard-as-a-resident-library-applet)); `vi::ListDisplays` (one display, "Default"; the game lists 10 into a stack buffer and does not read them, `main+0x808f08`), found from the import list before it was met. `vi::OpenDisplay("Default")` returns the same static display as `OpenDefaultDisplay`, so applications can open the name returned by `ListDisplays` without entering the SDK's absent service client.
 - **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) (SDK 8.2.0); [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10: `vi::GetIndirectImageMemoryRequirement`); [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: `vi::ListDisplays`); Alien: Isolation (SDK 8.2.0: `vi::OpenDisplay`).
 
+### `vi::InitializeWithVrrLfcEnabled`
+
+- **Symptom:** a null read at boot in `nn::os::SdkMutexType::Lock` under `nn::vi::InitializeWithVrrLfcEnabled`.
+- **Cause:** a Switch 2 SDK's start of the display service with VRR low-framerate compensation allowed. Run as the SDK has it, it sets up vi2 over the display service and takes a mutex the absent service never set up.
+- **Fix:** hooked as the host's `vi::Initialize`, which does nothing: the host has no vi service and no VRR (`QueryDisplayVrrSupported`) (`hle_vi.c`).
+- **Found on:** [Nintendo Switch 2 Welcome Tour](../../dm/games/040057C02159A000/README.md).
+
 ### Layer HDR metadata
 
 - **Symptom:** `CRASH sig=11 addr=0 pc=0` with the link register just after a call to a `vi::SetLayerNextHdr…` or `vi::ClearLayerNextHdr…` function.
@@ -1009,6 +1016,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `InitializeNmouse`, `GetNmouseHandles` (none), the button configuration calls and the merged pointer's calls (a handle with no states) are hooked (`hle_hid.c`). SDK 21's forms too: `InitializeNmouse` with a pointer type, the pointer range, movement area and restriction (kept or dropped), the USB mouse's button configuration and handle (none), and the calls on a handle, which return the SDK's bool (SDK 22.2.0 `sdk+0x6d5510`: its result is success): the merged handle 0 takes the pointer settings and has no state and no controller; any other handle is unknown.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md), [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md). SDK 21's forms: [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0 at boot, from pull request #1116 (that build is not run here).
 
+### The newest Joy-Con mouse sensor state and a Nintendo application's scene id
+
+- **Symptom:** a null read in `nn::hid::detail::GetJcmsState` each frame, or in the hid client under `nn::hid::SetSceneIdForPrivateApp` as a scene starts.
+- **Cause:** `GetJcmsState` (the newest state alone) reads the hid service's ring, which the host does not map. `SetSceneIdForPrivateApp`, which Nintendo's own applications call at each scene's start, connects to the hid service. `GetMousePointerSpeedScale` (the system's mouse speed setting) was not hooked either.
+- **Fix:** `GetJcmsState` gives a cleared state (sampling number 0, no movement, attributes 0: not connected), as `GetJcmsStates` gives none; `SetSceneIdForPrivateApp` is logged, as nothing reads it; `GetMousePointerSpeedScale` gives the default, 1 (`hle_hid.c`).
+- **Found on:** [Nintendo Switch 2 Welcome Tour](../../dm/games/040057C02159A000/README.md): its scene modules and its cursor.
+
 ### GameShare guest displays
 
 - **Symptom:** a crash at boot in `nn::vi` under `nn::streamplay::CreateIndividualDisplays`.
@@ -1057,6 +1071,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** `SetGraphicsTargetFrameRate` maps up to 59 fps to mode 1, up to 119 to mode 2 and above to mode 3 (`SetGraphicsTargetFrameRateAuto` to mode 0) and calls `SetGraphicsFrameLengthMode`, which locks the gs graphics server's context and sends it the mode. The host has no graphics server, so the context is null.
 - **Fix:** `SetGraphicsFrameLengthMode` is hooked and logs the mode once per change; both `oe` paths reach it. The host paces by the window's present interval (`hle_oe.c`).
 - **Found on:** [Hyrule Warriors: Age of Imprisonment](../../dm/games/04003F40232DE000/README.md): 60 / its present interval at boot.
+
+### The application's GPU time span
+
+- **Symptom:** a null read in `nn::os::SdkMutexType` under `nn::gs::sdk::QueryApplicationGpuTimeSpan`, after the first frame.
+- **Cause:** a Switch 2 game can ask each frame for the GPU time it used between two ticks (`nn::oe::QueryApplicationGpuTimeSpan`). The SDK's own locks the gs graphics server's context, as `SetGraphicsFrameLengthMode` does, and the host has no graphics server.
+- **Fix:** hooked: success and a span of 0, logged once. The host has no GPU time per application, and the game reads the span only on success (`hle_oe.c`).
+- **Found on:** [Nintendo Switch 2 Welcome Tour](../../dm/games/040057C02159A000/README.md) (`main+0x30a83c`).
 
 ### The display's largest buffer
 

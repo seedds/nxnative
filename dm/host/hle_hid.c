@@ -694,6 +694,15 @@ HLE_FORCE("_ZN2nn3hid9StartJcmsERKNS0_10JcmsHandleE", "Joy-Con mouse sensor: no 
 HLE_FORCE("_ZN2nn3hid8StopJcmsERKNS0_10JcmsHandleE", "Joy-Con mouse sensor: no sensor on the host", void, h_hid_JcmsStop, const uint32_t *h) { (void)h; }
 HLE_FORCE("_ZN2nn3hid13GetJcmsStatesEPNS0_9JcmsStateEiRKNS0_10JcmsHandleE", "Joy-Con mouse sensor states: none (no sensor on the host)",
           int, h_hid_JcmsStates, void *out, int n, const uint32_t *h) { (void)out; (void)n; (void)h; return 0; }
+// The newest state alone (Nintendo Switch 2 Welcome Tour reads it each frame; the SDK's own reads the hid service's ring, which the host does not map: a null read in
+// hid::detail::GetJcmsState): with no sensor, a cleared state (sampling number 0, no movement, attributes 0: not connected)
+HLE_FORCE("_ZN2nn3hid12GetJcmsStateEPNS0_9JcmsStateERKNS0_10JcmsHandleE", "Joy-Con mouse sensor state: cleared (no sensor on the host)",
+          void, h_hid_JcmsState, void *out, const uint32_t *h) { (void)h; if (out) memset(out, 0, 32); }
+// Nintendo's own applications tell the hid service which scene they show (Nintendo Switch 2 Welcome Tour's scene modules, at each module's start); the host has no hid service and
+// nothing reads it, so it is only logged (the SDK's own connects to hid itself and reads null)
+HLE_FORCE("_ZN2nn3hid23SetSceneIdForPrivateAppEi", "scene id for a Nintendo application: logged, nothing reads it", void, h_hid_SceneId, int id) { LOG("hid: SetSceneIdForPrivateApp %d", id); }
+// The system setting for the mouse pointer's speed (System Settings, Mouse): the default, 1
+HLE_FORCE("_ZN2nn3hid25GetMousePointerSpeedScaleEv", "mouse pointer speed setting: the default, 1.0", float, h_hid_MouseSpeed, void) { return 1.0f; }
 // The Switch 2's pointer on top of those sensors (Nmouse; Fire Emblem Fortune's Weave initializes it at boot with the 1920x1080 screen it maps the pointer to, main+0x650a24). InitializeNmouse opens the
 // hid service as InitializeJcms does (its Result aborts: sdk+0x6d5340). No controller of the host has the sensor, so there are no handles, and the calls on a handle have nothing to do
 HLE_FORCE("_ZN2nn3hid16InitializeNmouseEPvmii", "Joy-Con mouse pointer: no hid service; no sensor on the host", void, h_hid_NmouseInit, void *work, uint64_t size, int w, int h) { (void)work; (void)size; (void)w; (void)h; }

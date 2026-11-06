@@ -131,6 +131,7 @@ static pthread_mutex_t g_qmu = PTHREAD_MUTEX_INITIALIZER, g_done_mu = PTHREAD_MU
 static pthread_cond_t g_done_cv = PTHREAD_COND_INITIALIZER;
 static _Atomic uint64_t g_n_draw, g_n_pass, g_n_submit, g_n_copy, g_n_pso, g_mem_bytes;
 static _Atomic uint64_t g_gpu_ns;   // the GPU time of the frames since the last frame record, summed over their command buffers: they can overlap, so it is not wall time
+static _Atomic uint64_t g_frames;   // presents so far (vkQueuePresentKHR, frame_end): the index of the frame in progress; a submission is tagged with it (subq_t.frame)
 
 // Shader table (<DM_MSL_DIR>/vk/vk_shaders.tsv): resource kind u / b / t / s / c, its (set, binding) in the game's SPIR-V and the Metal slot it was moved to;
 // kind p is the push-constant block (set and binding 0), whose bytes are set straight into its buffer slot
@@ -1198,7 +1199,7 @@ VK(vkCmdPipelineBarrier, void, VkCommandBuffer cb, VkPipelineStageFlags s, VkPip
 // Queries of one submit: its event value (the ticket every query it writes gets) and, when it has occlusion queries, a visibility buffer that every render pass
 // of the submit counts into (one 8-byte slot per BeginQuery), copied to the pools when the submit completes
 typedef struct { VkQueryPool q; uint32_t idx, slot; } occ_t;
-typedef struct { uint64_t v; id<MTLBuffer> vis; uint32_t nvis, cap; occ_t *occ; } subq_t;
+typedef struct { uint64_t v; id<MTLBuffer> vis; uint32_t nvis, cap; occ_t *occ; uint64_t frame; } subq_t;   // frame: g_frames when the submission was made (DM_VK_DONTCARE=ab)
 typedef struct {
     id<MTLCommandBuffer> cb; id<MTLRenderCommandEncoder> re; id<MTLBlitCommandEncoder> be;
     VkPipeline pipe, applied; uint32_t rt_w, rt_h;
@@ -1258,56 +1259,111 @@ static void resume_rp(rs_t *s) {
 // (t_vk_dontcare; docs/reference/rendering.md, "Attachments opened with LOAD_OP_DONT_CARE")
 // DM_VK_DONTCARE=colour loads colour only, depth and stencil start undefined; =none maps every DONT_CARE back to DontCare, colour included, the mapping before colour
 // loaded (A/B and oracle runs). Unset is all. CLEAR and LOAD are never affected.
+// =ab:<m>,<m>[,...] (m is none, colour or all; 2 to 4 of them) with DM_AB=<frames> runs the modes in turn in one process: frame f is in phase f / DM_AB and phase p runs
+// mode list[p % n], so the GPU cost of the modes is measured in the same scene and thermal state (cross-process GPU times at low load are not comparable: the GPU clock follows
+// the load). The layer replays at vkQueueSubmit, so a submission is tagged with the frame in progress (g_frames) and every pass of it takes that frame's phase: one submission
+// never mixes modes. An [ab] line per phase (dc_ab_report) has the format of nvn_mtl.m's, which dm/tools/gpuprof.py --ab reads
 // Read once at the first pass; -1 means not read, so a test can set the mode before one (t_vk_dontcare resets it to DC_ALL between cases)
-enum { DC_NONE, DC_COLOUR, DC_ALL };
-static int g_vk_dontcare = -1;
-static int dontcare_mode(void) {
-    if (g_vk_dontcare < 0) {
-        g_vk_dontcare = DC_ALL;
-        const char *v = getenv("DM_VK_DONTCARE");
-        if (v) {
-            if (!strcmp(v, "all")) g_vk_dontcare = DC_ALL;
-            else if (!strcmp(v, "colour")) g_vk_dontcare = DC_COLOUR;
-            else if (!strcmp(v, "none")) g_vk_dontcare = DC_NONE;
-            else RED1("DM_VK_DONTCARE=%s: expected all, colour or none; using the default", v);
-        }
+enum { DC_NONE, DC_COLOUR, DC_ALL, DC_AB };
+enum { DC_MAXAB = 4, DC_RING = 64 };
+static _Atomic int g_vk_dontcare = -1;
+static uint8_t g_dc_ab[DC_MAXAB]; static int g_dc_ab_n; static long g_dc_ab_len;   // the modes of DC_AB, in phase order, and DM_AB
+static const char *const g_dc_name[] = {"none", "colour", "all"};
+// The modes of an ab list, or 0 entries when it is malformed
+static int dc_parse_ab(const char *s, uint8_t out[DC_MAXAB]) {
+    int n = 0;
+    for (;;) {
+        size_t len = strcspn(s, ","); int m = -1;
+        for (int i = 0; i < DC_AB; i++) if (strlen(g_dc_name[i]) == len && !strncmp(s, g_dc_name[i], len)) m = i;
+        if (m < 0 || n == DC_MAXAB) return 0;
+        out[n++] = (uint8_t)m;
+        if (!s[len]) return n;
+        s += len + 1;
     }
-    return g_vk_dontcare;
 }
-static MTLLoadAction dc_load(VkAttachmentLoadOp o, int colour) {
+static int dontcare_mode(void) {
+    int m = atomic_load_explicit(&g_vk_dontcare, memory_order_acquire);
+    if (m >= 0) return m;
+    m = DC_ALL;
+    const char *v = getenv("DM_VK_DONTCARE");
+    if (v) {
+        if (!strcmp(v, "all")) m = DC_ALL;
+        else if (!strcmp(v, "colour")) m = DC_COLOUR;
+        else if (!strcmp(v, "none")) m = DC_NONE;
+        else if (!strncmp(v, "ab:", 3)) {
+            const char *e = getenv("DM_AB"); char *ee = NULL; long len = e ? strtol(e, &ee, 10) : 0; uint8_t l[DC_MAXAB] = {0}; int n = dc_parse_ab(v + 3, l);
+            if (e && (ee == e || *ee)) len = 0;   // "2junk" or "" is no phase length
+            if (n < 2) RED1("DM_VK_DONTCARE=%s: expected ab:<m>,<m>[,...], two to four of none, colour, all; using the default", v);
+            else if (len <= 0) RED1("DM_VK_DONTCARE=%s needs DM_AB=<frames>, the length of a phase; using the default", v);
+            else {
+                memcpy(g_dc_ab, l, sizeof l); g_dc_ab_n = n; g_dc_ab_len = len; m = DC_AB;
+                VLOG("DM_VK_DONTCARE=%s: the modes alternate every %ld frames (phase 0 runs %s)", v, len, g_dc_name[l[0]]);
+            }
+        }
+        else RED1("DM_VK_DONTCARE=%s: expected all, colour, none or ab:<m>,<m>[,...]; using the default", v);
+    }
+    atomic_store_explicit(&g_vk_dontcare, m, memory_order_release);
+    return m;
+}
+// The mode a pass of a submission made in frame <frame> runs with (m is dontcare_mode())
+static inline int dc_pass_mode(int m, uint64_t frame) { return m == DC_AB ? g_dc_ab[(frame / (uint64_t)g_dc_ab_len) % (uint64_t)g_dc_ab_n] : m; }
+static MTLLoadAction dc_load(VkAttachmentLoadOp o, int colour, int m) {
     if (o == VK_ATTACHMENT_LOAD_OP_CLEAR) return MTLLoadActionClear;
     if (o == VK_ATTACHMENT_LOAD_OP_LOAD) return MTLLoadActionLoad;
-    int m = dontcare_mode();
     return (colour ? m != DC_NONE : m == DC_ALL) ? MTLLoadActionLoad : MTLLoadActionDontCare;
 }
+// Per frame of a DM_VK_DONTCARE=ab run, at [frame % DC_RING]: the GPU time of its submissions (completion handlers), the attachment bytes loaded and stored and the passes
+// begun (begin_rp). Ring slots are read and cleared DC_AB_LATE frames after the frame, when its command buffers have completed
+static _Atomic uint64_t g_dc_gpu[DC_RING], g_dc_ld[DC_RING], g_dc_st[DC_RING], g_dc_np[DC_RING];
+// The bytes of an attachment's pass-wide image (framebuffer size x format x samples), what a Load or Store action moves between tile memory and the image
+static uint64_t dc_att_bytes(VkFramebuffer fb, VkFormat fmt, id<MTLTexture> t) { const fmt_t *f = fmt_of(fmt); return f ? (uint64_t)fb->w * fb->h * f->bytes * t.sampleCount : 0; }
 static MTLStoreAction store_a(VkAttachmentStoreOp o) { return o == VK_ATTACHMENT_STORE_OP_DONT_CARE ? MTLStoreActionDontCare : MTLStoreActionStore; }
 static void begin_rp(rs_t *s, const c_brp *c) {
     end_blit(s);
     end_rp(s, 1); s->cut = 0;
     VkRenderPass rp = c->rp; VkFramebuffer fb = c->fb;
     MTLRenderPassDescriptor *d = [MTLRenderPassDescriptor renderPassDescriptor];
+    int dm = dontcare_mode(), ab = dm == DC_AB; dm = dc_pass_mode(dm, s->sq->frame);   // fixed here for the whole pass (resume_rp loads everything)
+    uint64_t ld = 0, st = 0;   // DM_VK_DONTCARE=ab: the bytes the pass's load and store actions move, as begun (a pass split for a copy is counted once)
     uint32_t w = fb->w, h = fb->h;
     for (uint32_t i = 0; i < rp->ncol; i++) {
         int a = rp->col[i]; if (a < 0 || (uint32_t)a >= fb->n) continue;
         const ratt *at = &rp->att[a]; MTLRenderPassColorAttachmentDescriptor *ca = d.colorAttachments[i];
         ca.texture = fb->v[a]->tex; w = umin(w, (uint32_t)ca.texture.width); h = umin(h, (uint32_t)ca.texture.height);
-        ca.loadAction = dc_load(at->load, 1);
+        ca.loadAction = dc_load(at->load, 1, dm);
         s->st_col[i] = store_a(at->store); ca.storeAction = MTLStoreActionUnknown;
         if (at->load == VK_ATTACHMENT_LOAD_OP_CLEAR && (uint32_t)a < c->nclear) { const float *f = c->clear[a].color.float32; ca.clearColor = MTLClearColorMake(f[0], f[1], f[2], f[3]); }
         int r = rp->res[i];
-        if (r >= 0 && (uint32_t)r < fb->n) { ca.resolveTexture = fb->v[r]->tex; s->st_col[i] = at->store == VK_ATTACHMENT_STORE_OP_DONT_CARE ? MTLStoreActionMultisampleResolve : MTLStoreActionStoreAndMultisampleResolve; }
+        id<MTLTexture> rt = nil;
+        if (r >= 0 && (uint32_t)r < fb->n) { rt = ca.resolveTexture = fb->v[r]->tex; s->st_col[i] = at->store == VK_ATTACHMENT_STORE_OP_DONT_CARE ? MTLStoreActionMultisampleResolve : MTLStoreActionStoreAndMultisampleResolve; }
+        if (ab) {
+            uint64_t b = dc_att_bytes(fb, at->fmt, ca.texture);
+            if (ca.loadAction == MTLLoadActionLoad) ld += b;
+            if (s->st_col[i] == MTLStoreActionStore || s->st_col[i] == MTLStoreActionStoreAndMultisampleResolve) st += b;
+            if (rt) st += dc_att_bytes(fb, at->fmt, rt);   // the resolve writes the single-sample image too
+        }
     }
     if (rp->depth >= 0 && (uint32_t)rp->depth < fb->n) {
         int a = rp->depth; const ratt *at = &rp->att[a]; const fmt_t *f = fmt_of(at->fmt); id<MTLTexture> t = fb->v[a]->tex;
         w = umin(w, (uint32_t)t.width); h = umin(h, (uint32_t)t.height);
         if (fmt_has_depth(f)) {
-            d.depthAttachment.texture = t; d.depthAttachment.loadAction = dc_load(at->load, 0); s->st_d = store_a(at->store); d.depthAttachment.storeAction = MTLStoreActionUnknown;
+            d.depthAttachment.texture = t; d.depthAttachment.loadAction = dc_load(at->load, 0, dm); s->st_d = store_a(at->store); d.depthAttachment.storeAction = MTLStoreActionUnknown;
             if ((uint32_t)a < c->nclear) d.depthAttachment.clearDepth = c->clear[a].depthStencil.depth;
         }
         if (fmt_has_stencil(f)) {
-            d.stencilAttachment.texture = t; d.stencilAttachment.loadAction = dc_load(at->sload, 0); s->st_s = store_a(at->sstore); d.stencilAttachment.storeAction = MTLStoreActionUnknown;
+            d.stencilAttachment.texture = t; d.stencilAttachment.loadAction = dc_load(at->sload, 0, dm); s->st_s = store_a(at->sstore); d.stencilAttachment.storeAction = MTLStoreActionUnknown;
             if ((uint32_t)a < c->nclear) d.stencilAttachment.clearStencil = c->clear[a].depthStencil.stencil;
         }
+        if (ab) {
+            uint64_t b = dc_att_bytes(fb, at->fmt, t); int dl = fmt_has_depth(f) && d.depthAttachment.loadAction == MTLLoadActionLoad, sl = fmt_has_stencil(f) && d.stencilAttachment.loadAction == MTLLoadActionLoad;
+            int ds = fmt_has_depth(f) && s->st_d == MTLStoreActionStore, ss = fmt_has_stencil(f) && s->st_s == MTLStoreActionStore;
+            if (dl || sl) ld += b;
+            if (ds || ss) st += b;
+        }
+    }
+    if (ab) {
+        size_t k = s->sq->frame % DC_RING;
+        atomic_fetch_add_explicit(&g_dc_ld[k], ld, memory_order_relaxed); atomic_fetch_add_explicit(&g_dc_st[k], st, memory_order_relaxed); atomic_fetch_add_explicit(&g_dc_np[k], 1, memory_order_relaxed);
     }
     if (!rp->ncol && rp->depth < 0) { d.renderTargetWidth = fb->w; d.renderTargetHeight = fb->h; d.defaultRasterSampleCount = 1; }
     if (s->sq->vis) d.visibilityResultBuffer = s->sq->vis;
@@ -1598,6 +1654,7 @@ VKB(vkQueueSubmit, VkResult, VkQueue q, uint32_t n, const VkSubmitInfo *si, VkFe
         pthread_mutex_lock(&g_qmu);
         id<MTLCommandBuffer> cb = [g_q commandBuffer];
         subq_t *sq = zalloc(sizeof *sq); sq->v = g_ev_val + 1; uint32_t nsplit = 0;
+        sq->frame = atomic_load_explicit(&g_frames, memory_order_relaxed); int ab = dontcare_mode() == DC_AB;   // every pass of this submission takes the phase of this frame
         for (uint32_t i = 0; i < n; i++)   // occlusion queries need a visibility buffer before the first render pass is encoded
             for (uint32_t j = 0; j < si[i].commandBufferCount; j++) {
                 VkCommandBuffer c = si[i].pCommandBuffers[j];
@@ -1619,7 +1676,11 @@ VKB(vkQueueSubmit, VkResult, VkQueue q, uint32_t n, const VkSubmitInfo *si, VkFe
         [cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
             if (c.error) { static int k; if (k++ < 20) LOG("[vk] [RED] command buffer error (submission %llu): %s", (unsigned long long)v, c.error.localizedDescription.UTF8String); }
             g_done_ns[v % DONE_RING] = now_ns();
-            if (c.GPUStartTime > 0 && c.GPUEndTime > 0) atomic_fetch_add(&g_gpu_ns, (uint64_t)((c.GPUEndTime - c.GPUStartTime) * 1e9));   // the frame line's GPU time: this frame's command buffers, summed
+            if (c.GPUStartTime > 0 && c.GPUEndTime > 0) {   // the frame line's GPU time: this frame's command buffers, summed
+                uint64_t ns = (uint64_t)((c.GPUEndTime - c.GPUStartTime) * 1e9);
+                atomic_fetch_add(&g_gpu_ns, ns);
+                if (ab) atomic_fetch_add_explicit(&g_dc_gpu[sq->frame % DC_RING], ns, memory_order_relaxed);   // the A/B phases' per-frame GPU time
+            }
             if (sq->nvis) {   // a query that spans several encoders has a slot in each
                 const uint64_t *r = sq->vis.contents;
                 for (uint32_t k = 0; k < sq->nvis; k++) sq->occ[k].q->val[sq->occ[k].idx] = 0;
@@ -1745,10 +1806,42 @@ VKB(vkAcquireNextImageKHR, VkResult, VkDevice d, VkSwapchainKHR sc, uint64_t tim
     if (f) atomic_store(&f->val, 0);
     *idx = i; return VK_SUCCESS;
 }
-static uint64_t g_frames;
+// The [ab] lines of DM_VK_DONTCARE=ab: a phase is reported once its frames' GPU times have arrived, DC_AB_LATE frames after its last frame, from the last three quarters of its
+// frames (the first quarter is left out while the GPU clock and the frame step settle): p50 / p90 / mean of the GPU time and of the frame time, and per frame the attachment
+// traffic and passes. All frames of the phase count for the traffic, which does not wait for the clock
+enum { DC_AB_LATE = 8, DC_AB_MAXF = 4096 };
+static float g_dc_gms[DC_AB_MAXF], g_dc_fms[DC_AB_MAXF], g_dc_ftms[DC_RING];   // the phase's samples, and each frame's time between presents
+static int g_dc_nf; static long g_dc_ph = -1; static uint64_t g_dc_sum[3], g_dc_nfr;   // frames in g_dc_gms; the phase so far; load bytes, store bytes, passes; all its frames
+static int dc_flt_cmp(const void *a, const void *b) { float x = *(const float *)a, y = *(const float *)b; return x < y ? -1 : x > y; }
+static void dc_ab_report(long ph) {
+    int skip = g_dc_nf / 4, m = g_dc_nf - skip; if (m < 1) return;
+    float *g = malloc(sizeof(float) * (size_t)m), *fr = malloc(sizeof(float) * (size_t)m); double gs = 0, fs = 0;
+    for (int i = 0; i < m; i++) { g[i] = g_dc_gms[skip + i]; fr[i] = g_dc_fms[skip + i]; gs += g[i]; fs += fr[i]; }
+    qsort(g, (size_t)m, sizeof *g, dc_flt_cmp); qsort(fr, (size_t)m, sizeof *fr, dc_flt_cmp);
+    double nf = g_dc_nfr ? (double)g_dc_nfr : 1;
+    VLOG("[ab] phase %ld VK_DONTCARE=%s: %d frames, GPU p50 %.2f / p90 %.2f / mean %.2f ms, frame p50 %.2f / p90 %.2f / mean %.2f ms; per frame: attachments load %.0f MB store %.0f MB, passes %.1f",
+         ph, g_dc_name[g_dc_ab[ph % g_dc_ab_n]], m, g[m / 2], g[m * 9 / 10], gs / m, fr[m / 2], fr[m * 9 / 10], fs / m,
+         (double)g_dc_sum[0] / nf / 1048576.0, (double)g_dc_sum[1] / nf / 1048576.0, (double)g_dc_sum[2] / nf);
+    free(g); free(fr);
+}
+static void dc_ab_frame(uint64_t fi) {   // frame fi has been presented: its time, and the frame DC_AB_LATE before it
+    static uint64_t prev; uint64_t now = now_ns();
+    g_dc_ftms[fi % DC_RING] = prev ? (float)((double)(now - prev) / 1e6) : 0;   // the first frame has no earlier present to measure from and is left out
+    prev = now;
+    if (fi < DC_AB_LATE) return;
+    uint64_t k = fi - DC_AB_LATE; size_t i = k % DC_RING; long ph = (long)(k / (uint64_t)g_dc_ab_len);
+    if (ph != g_dc_ph) {
+        if (g_dc_ph >= 0) dc_ab_report(g_dc_ph);
+        g_dc_ph = ph; g_dc_nf = 0; g_dc_nfr = 0; memset(g_dc_sum, 0, sizeof g_dc_sum);
+    }
+    float gms = (float)((double)atomic_exchange(&g_dc_gpu[i], 0) / 1e6), fms = g_dc_ftms[i];
+    g_dc_sum[0] += atomic_exchange(&g_dc_ld[i], 0); g_dc_sum[1] += atomic_exchange(&g_dc_st[i], 0); g_dc_sum[2] += atomic_exchange(&g_dc_np[i], 0); g_dc_nfr++;
+    if (fms > 0 && g_dc_nf < DC_AB_MAXF) { g_dc_gms[g_dc_nf] = gms; g_dc_fms[g_dc_nf] = fms; g_dc_nf++; }
+}
 static void frame_end(void) {
     static uint64_t pd, pp, ps, pc;
-    uint64_t f = ++g_frames, dr = g_n_draw, pa = g_n_pass, su = g_n_submit, co = g_n_copy;
+    uint64_t f = atomic_fetch_add(&g_frames, 1) + 1, dr = g_n_draw, pa = g_n_pass, su = g_n_submit, co = g_n_copy;
+    if (dontcare_mode() == DC_AB) dc_ab_frame(f - 1);
     if (f <= 3 || f % 300 == 0) {
         uint64_t nf = f <= 3 ? 1 : 300, gpu = atomic_exchange(&g_gpu_ns, 0);   // the frames' command buffers, summed: they can overlap
         VLOG("frame %llu: draws %llu, passes %llu, submits %llu, copies %llu (since the last record, %llu frames); GPU %.2f ms/frame, pipelines so far %llu, buffer memory %.1f MB",

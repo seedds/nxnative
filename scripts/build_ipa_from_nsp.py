@@ -1477,7 +1477,7 @@ def capture_nro(py, repo, exe_dir, out, nro_dir, env, logs, g, provisional):
     PROG.add(2); PROG.stage('NRO capture', step='building the Mac host')   # and the rewrite again
     work = out.parent
     host = build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
-    cap, rd, log = nro_dir / 'capture.partial', work / 'tmp/nro_run', logs / 'nro_capture.log'
+    cap, rd, log = nro_dir / 'capture.partial', work / f'{TMP}/nro_run', logs / 'nro_capture.log'
     rmtree(cap); rmtree(rd); cap.mkdir(parents=True)
     for d in ('save', 'temp'): (rd / d).mkdir(parents=True)
     PROG.set(step='booting the game')
@@ -1617,7 +1617,7 @@ def capture_glslc(repo, dirs, pkg_ver, patched, work, env, logs, g):
     if todo != [pkg_ver]: raise BuildError(f'the run-time shader capture runs the packed version {pkg_ver}\'s code; {", ".join(v for v in todo if v != pkg_ver)} needs a capture of its own')
     PROG.set(step='building the Mac host')
     host = build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
-    d = dirs[pkg_ver]; cap, rd, log = d / 'glslc_capture.partial', work / 'tmp/glslc_run', logs / 'glslc_capture.log'
+    d = dirs[pkg_ver]; cap, rd, log = d / 'glslc_capture.partial', work / f'{TMP}/glslc_run', logs / 'glslc_capture.log'
     rmtree(cap); rmtree(rd)
     for s in ('save', 'temp'): (rd / s).mkdir(parents=True)
     # Only builds with no required captures can prove offline coverage. An empty map exposes submitted keys even if a previous split knows them.
@@ -1685,7 +1685,7 @@ def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g):
         PROG.end('reused'); return
     t0, total, host = time.time(), 0, None
     for v, d in todo.items():
-        jd, rd, log = work / f'tmp/ue_job_{v}', work / 'tmp/ue_run', logs / f'ue_decode_{v}.log'
+        jd, rd, log = work / f'{TMP}/ue_job_{v}', work / f'{TMP}/ue_run', logs / f'ue_decode_{v}.log'
         rmtree(jd); rmtree(rd)
         for s in ('save', 'temp'): (rd / s).mkdir(parents=True)
         dec = None
@@ -1781,7 +1781,7 @@ def capture_jit(py, repo, d, patched, work, env, logs, g):
         c = caps / name
         if any(c.glob('*.jit')): continue
         if host is None: PROG.set(step='building the Mac host'); host = build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
-        part, rd, log = caps / f'{name}.partial', work / 'tmp/jit_run', logs / f'jit_{name}.log'
+        part, rd, log = caps / f'{name}.partial', work / f'{TMP}/jit_run', logs / f'jit_{name}.log'
         rmtree(part); rmtree(rd); part.mkdir(parents=True)
         for x in ('save', 'temp', 'msl'): (rd / x).mkdir(parents=True)
         henv = dict(env, DM_ROMFS=str(rfs.source(d)), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_MSL_DIR=str(d.parent.parent / 'shader'), DM_JIT_CAPTURE=str(part))
@@ -1813,7 +1813,7 @@ def capture_shaders(repo, d, patched, work, env, logs, g, api):
         say(f'reusing the captured run-time shaders: {out}'); PROG.end('reused'); return out
     PROG.set(step='building the Mac host')
     host = build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
-    cap, rd, log = d / f'{api}_capture.partial', work / f'tmp/{api}_run', logs / f'{api}_capture.log'
+    cap, rd, log = d / f'{api}_capture.partial', work / f'{TMP}/{api}_run', logs / f'{api}_capture.log'
     rmtree(cap); rmtree(rd); cap.mkdir(parents=True)
     for x in ('save', 'temp', 'msl'): (rd / x).mkdir(parents=True)
     # everything the run writes stays in <id>_build (DM_ROOT is already there): a fresh save and temporary storage, an empty shader library folder (pipelines fail, the game still creates every shader)
@@ -1947,7 +1947,7 @@ def heap_check(repo, d, patched, work, env, logs, g):
     HEAP_CHECK_NNMAIN_SECS in nnMain without one (Engage sets none): a few seconds. A boot that resized the heap region (mem_alias / mem_reserve) is followed by another on the new
     layout, up to HEAP_CHECK_ROUNDS, since the checks behind the request (the app pool's, mem_used) run only once it fits. The keys go into the profile (profile_guess.py heap_signals), which is stamped"""
     PROG.stage('heap check')
-    host, rd, log = work / 'tools/dmhost', work / 'tmp/heap_run', logs / 'heap_check.log'
+    host, rd, log = work / 'tools/dmhost', work / f'{TMP}/heap_run', logs / 'heap_check.log'
     # Up to HEAP_CHECK_ROUNDS boots: a heap request that did not fit the heap region stops the first one there (mem_alias / mem_reserve set), and only the next boot reaches the app pool
     # check behind it (Pokémon FireRed / LeafGreen 2026: a 3.15 GB heap plus 102 MB of modules over the 3.2 GB pool, which mem_used then covers)
     set_all, hows, t0 = {}, [], time.time()
@@ -2010,7 +2010,7 @@ def region_check(repo, d, patched, work, env, logs, g):
     by hand, which it checks instead (Absolum: 2.56 GB from its first seconds; 2.5 and 2.72 GB both play). Others are reported, not changed: the fix depends on who lays the region out. A derived profile gets it too: its build has none of the registered builds' fixed-address cuts, only the function-matched ones
     (Super Smash Bros. Ultimate 13.0.1, GitHub issue #375), so a region those cuts shrank shows here before the IPA aborts on an iPhone. The profile is stamped"""
     PROG.stage('address regions')
-    host, rd, log, table = work / 'tools/dmhost', work / 'tmp/region_run', logs / 'region_check.log', logs / 'regions.tsv'
+    host, rd, log, table = work / 'tools/dmhost', work / f'{TMP}/region_run', logs / 'region_check.log', logs / 'regions.tsv'
     PROG.set(step='building the Mac host'); build_mac_host(repo, host, env, logs, g)
     rmtree(rd); table.unlink(missing_ok=True)
     for x in ('save', 'temp', 'msl'): (rd / x).mkdir(parents=True)

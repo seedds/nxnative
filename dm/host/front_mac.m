@@ -173,17 +173,27 @@ static void pad_set(int p, uint64_t m, int32_t lx, int32_t ly, int32_t rx, int32
 }
 static void hq_poll(void);
 static home_quit g_hq;   // the Home button's hold and quit prompt (home_quit.h): while the prompt is open the controllers' input goes to it, not to the game
+static int g_press_to_join;   // DM_PAD_PRESS_TO_JOIN=1, below pad_read
+static int pad_join(const void *owner, const char *name);
+static const char *pad_name(GCController *c);
+static void pro_players_changed(GCController *gone);
+static int pad_is_twin(GCController *c);
 static void pad_read(GCExtendedGamepad *g) {
     if (!g_input_on) return;
     hq_poll(); if (hq_blocks_input(g_hq.phase)) return;
-    int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0) return;
-    dm_haptics_apple_controller(p, g.controller);
+    int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller);
+    if (p < 0 && (!g_press_to_join || pad_is_twin(g.controller))) return;   // a model read from its HID reports: GameController's controller of it stays unread
     uint64_t m = dm_pad_face(g);   // by position, a Nintendo pad by its labels
     #define K(btn, bit) if (btn.isPressed) m |= bit
     K(g.leftShoulder, DM_BTN_L); K(g.rightShoulder, DM_BTN_R); K(g.leftTrigger, DM_BTN_ZL); K(g.rightTrigger, DM_BTN_ZR);
     K(g.buttonMenu, DM_BTN_PLUS); K(g.buttonOptions, DM_BTN_MINUS); K(g.leftThumbstickButton, DM_BTN_LS); K(g.rightThumbstickButton, DM_BTN_RS);   // nil on pads without them: not pressed
     K(g.dpad.left, DM_BTN_LEFT); K(g.dpad.up, DM_BTN_UP); K(g.dpad.right, DM_BTN_RIGHT); K(g.dpad.down, DM_BTN_DOWN);
     #undef K
+    if (p < 0) {   // DM_PAD_PRESS_TO_JOIN=1: it joins at its first button
+        GCController *c = g.controller; if (!m || (p = pad_join((__bridge const void *)c, pad_name(c))) < 0) return;
+        g_held[p] = c; dm_motion_attach(c, p); pro_players_changed(nil);
+    }
+    dm_haptics_apple_controller(p, g.controller);
     pad_set(p, m, pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value), pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value));
 }
 // Home and Capture: without this macOS takes them as system gestures (Home opens the Games app). Capture has no function in the host, Home quits when it is held (hq_poll).
@@ -200,6 +210,15 @@ static void pro_players_changed(GCController *gone) {
         count++; player = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)c);
     }
     dm_motion_pro_players(count, player);
+}
+// DM_PAD_PRESS_TO_JOIN=1: a controller is no player until one of its buttons is pressed, then it is the lowest player free, as a console's "press a button" screen.
+// Whatever the port, the order of connection or the link (Bluetooth has no port), and for identical pads too: so the players pick their own order. Not with DM_PAD_MERGE
+static int pad_join(const void *owner, const char *name) {
+    int p = pad_slot_take_lowest(&g_slots, owner, name); char nb[16];
+    if (p < 0) { LOG("controller '%s': a button pressed, but all %d players are taken", name, DM_PLAYERS); return -1; }
+    npad_name(p, nb, sizeof nb); LOG("controller '%s': a button pressed: player %d (npad %s)", name, p + 1, nb);
+    dm_pad_players(pad_slot_mask(&g_slots));
+    return p;
 }
 static void pads_changed(GCController *gone);
 static void pads_changed_now(void) { pads_changed(nil); }
@@ -373,6 +392,12 @@ static void pads_changed(GCController *gone) {
     }
     for (GCController *c in now) if (c.extendedGamepad && c != gone && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) {
         if (pad_is_twin(c)) { pad_keep_system_buttons(c); c.extendedGamepad.valueChangedHandler = nil; continue; }   // Home and Capture still stay out of macOS's hands; no input from it
+        if (g_press_to_join) {   // a player at its first button (pad_read)
+            pad_keep_system_buttons(c);
+            if (!c.extendedGamepad.valueChangedHandler) LOG("controller '%s' connected: press a button to play (DM_PAD_PRESS_TO_JOIN)", pad_name(c));
+            c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; pad_read(g); };
+            continue;
+        }
         int p = pad_slot_take(&g_slots, (__bridge const void *)c, pad_name(c));
         if (p < 0) { LOG("controller '%s' connected: all %d players are taken, not used", pad_name(c), DM_PLAYERS); continue; }
         g_held[p] = c; pad_keep_system_buttons(c);
@@ -431,12 +456,14 @@ static void input_resume(void) {
 // Raw HID gamepads (pad_hid_mac.h): a player slot each, as a GameController controller, named by the device's product name
 static void hidpad_read(hid_pad *d) {
     if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
-    int p = g_merge ? 0 : pad_slot_of(&g_slots, d); if (p < 0) return;
+    int p = g_merge ? 0 : pad_slot_of(&g_slots, d);
+    if (p < 0 && (!g_press_to_join || !(d->is_pro ? d->pro_m : pad_hid_buttons(&d->st)) || (p = pad_join(d, d->name)) < 0)) return;   // DM_PAD_PRESS_TO_JOIN=1: joins at its first button
     if (d->is_pro) { pad_set(p, d->pro_m, d->pro_s[0], d->pro_s[1], d->pro_s[2], d->pro_s[3]); return; }
     int32_t s[4]; pad_hid_sticks(&d->st, s);
     pad_set(p, pad_hid_buttons(&d->st), s[0], s[1], s[2], s[3]);
 }
 static void hidpad_attach(hid_pad *d) {
+    if (g_press_to_join && !g_merge) { LOG("controller '%s' (HID) connected: press a button to play (DM_PAD_PRESS_TO_JOIN)", d->name); hidpad_read(d); return; }
     int p = g_merge ? 0 : pad_slot_take(&g_slots, d, d->name); char nb[16];
     if (p < 0) { LOG("controller '%s' (HID) connected: all %d players are taken, not used", d->name, DM_PLAYERS); return; }
     npad_name(p, nb, sizeof nb); LOG("controller '%s' (HID) connected: player %d (npad %s)", d->name, p + 1, nb);
@@ -554,10 +581,12 @@ static void hq_close(void) {
 static void pads_start(void) {
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
     e = getenv("DM_KBD_PLAYER"); g_kbd_own = !g_merge && e && !strcmp(e, "own");
+    e = getenv("DM_PAD_PRESS_TO_JOIN"); g_press_to_join = !g_merge && e && atoi(e);
     static const char kbd = 0;
     if (g_kbd_own) pad_slot_take(&g_slots, &kbd, "keyboard");   // holds player 1 for good
     LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : g_kbd_own ? "the keyboard is player 1, each controller a player of its own from player 2 on (DM_KBD_PLAYER=own)"
                                                                            : "each controller is a player of its own, the keyboard plays with player 1");
+    if (g_press_to_join) LOG("front end: a controller becomes a player at its first button press, the lowest player free (DM_PAD_PRESS_TO_JOIN)");
     hq_start();
     pads_changed(nil);
     hq_log_setting();

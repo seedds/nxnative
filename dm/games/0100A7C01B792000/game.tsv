@@ -1,0 +1,46 @@
+# Minecraft Dungeons II (Switch update 1.1.3.0 over a sparse base game), SDK 20.5.15, Unreal Engine 5 (desktop SF_GLSL_SWITCH renderer, IoStore), NVN, Wwise, Havok.
+# Started from the NSP script's provisional profile; brought up on the Mac with tex_dyn_slots added (README.md).
+
+# ---- Identity ----
+title_id	0100A7C01B792000
+program_id	0100A7C01B792000
+
+# ---- App ----
+name	Minecraft Dungeons II
+ipa	MinecraftDungeonsII.ipa
+app_category	public.app-category.action-games
+
+# ---- Versions ----
+build	v131072	1.1.3.0	main=c6b32f4d3d4243ff190b082b4f6aea18	subsdk0=3904a8dee6801472d56bd4921378df27	sdk=190030518b5d64e5d87b84bc54661af9
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Dungeons/Content/Paks/Dungeons-Switch.ucas
+zip_store	.cache:.headers:.mp4:.pak:.ttf:.txt:.ucas:.utoc:.metallib
+
+# ---- Memory ----
+# Unreal: nninitStartup reserves a 62 GB address region and its FMallocBinned3 takes 37 GB of it, so a 64 GB alias region for the bring-up on the Mac. The rewriter cuts the allocator in any Unreal 4 / 5 main (dm/tools/ue_malloc.py) and gives the region what the alias region has room for (dm/tools/ue_region.py), so an iPhone takes a smaller guest block, as Octopath Traveler 0's profile (docs/reference/memory.md)
+mem_reserve	0x1028000000
+mem_alias	0x1000000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 20 MB of system resource
+sys_resource	0x1400000
+
+# ---- Shader split ----
+# the decoded shader code archives: the engine's global shaders and the game's material shaders
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_note	Minecraft Dungeons II shaders
+
+# ---- Address region check ----
+# the game calls nvnDeviceSetDepthMode with near = 0 in the check boot: the pipeline bases made before it runs are made for that mode
+depth_mode	zero
+
+# address regions: 2026-11-06, in its first 15 s in nnMain the game's regions reach alias +62.06 GB, within the profile's 64.00 GB alias region (what it takes later in play is not measured here) (rewrite 0d61bf36eb4f)
+
+# ---- Shaders ----
+# 2 particle vertex shaders (210d8abb3b9996c5, d1c8e612ec7462b6) pick a buffer texture at run time: their only c2 reads are texture table words 0x170-0x188 and sampler table words 0x568 / 0x578
+tex_dyn_slots	on

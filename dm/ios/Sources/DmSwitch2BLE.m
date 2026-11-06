@@ -92,6 +92,7 @@ typedef NS_ENUM(NSInteger, DS2Stage) {
 @property (nonatomic) NSUInteger reports;
 @property (nonatomic) uint16_t battery_mv;
 @property (nonatomic) int battery_percent;
+@property (nonatomic) int charging;
 @property (nonatomic) int rssi;
 - (instancetype)initWithPeripheral:(CBPeripheral *)p queue:(dispatch_queue_t)q;
 - (void)beginHandshake;
@@ -156,7 +157,8 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
     ds2_dev *_devSlot;                          // the pad's member this session feeds once joined; NULL before the handshake finishes
     BOOL _rumble, _verbose;
     uint8_t _rumbleSeq;
-    uint64_t _lastWrite, _lastReport;
+    uint64_t _lastWrite, _lastReport, _lastFindLED;
+    uint64_t _findUntil;                            // while set (ms of monotonic time), the 50 ms tick serves the find chase
     _Atomic int _lfAmp, _lfHz, _hfAmp, _hfHz;       // written by the haptics thread
     uint64_t _rumbleHoldUntil;
 }
@@ -279,11 +281,14 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
     }];
 }
 
-- (void)setPlayerLEDs:(void (^)(BOOL))done {
-    int player = self.slot + 1;
-    uint8_t pattern = player >= 1 && player <= 8 ? ds2_led_pattern[player - 1] : 0x01;
+- (void)ledPattern:(uint8_t)pattern completion:(void (^)(BOOL))done {
     uint8_t p[4] = {pattern, 0, 0, 0};
     [self command:DS2_CMD_LEDS sub:DS2_SUB_LEDS_SET payload:[NSData dataWithBytes:p length:4] completion:^(NSData *r) { if (done) done(r != nil); }];
+}
+
+- (void)setPlayerLEDs:(void (^)(BOOL))done {
+    int player = self.slot >= 0 ? self.slot + 1 : 1;
+    [self ledPattern:player >= 1 && player <= 8 ? ds2_led_pattern[player - 1] : 0x01 completion:done];
 }
 
 - (void)setFeature:(uint8_t)sub completion:(void (^)(BOOL))done {
@@ -400,9 +405,11 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
     // The member's report lands in its pad, which composes the whole pad from every member and drives the gamepad slot.
     ds2_dev *dev = _devSlot ?: &_dev;
     dev->r = r;
+    self.charging = r.battery_current > 0;
     if (_verbose && self.reports % 90 == 1)
-        LOG("switch2: slot %d reports=%lu buttons=0x%08x sticks=%u,%u %u,%u battery=%umV", self.slot + 1,
-            (unsigned long)self.reports, r.buttons, r.lx, r.ly, r.rx, r.ry, r.battery_mv);
+        LOG("switch2: slot %d reports=%lu buttons=0x%08x sticks=%u,%u %u,%u battery=%umV %dmA%s imu=%.1fC", self.slot + 1,
+            (unsigned long)self.reports, r.buttons, r.lx, r.ly, r.rx, r.ry, r.battery_mv, r.battery_current,
+            r.battery_current > 0 ? " (charging)" : "", 25.f + r.temperature_raw / 127.f);
     [self.pad reportFrom:self];
 }
 
@@ -441,6 +448,25 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
     [self rumbleLow:lo lfHz:l->frequency_low high:hi hfHz:h->frequency_high];
 }
 
+// The motor tone the find mode pulses: a mid-strong two-band tone. The write goes straight to the characteristic and is skipped on a GameCube.
+- (void)writeFindPulse {
+    if (self.pid == DS2_PID_NSO_GAMECUBE) return;
+    ds2_vibration v = {0x80, 0x280, 0x100, 0x280};
+    uint8_t packet[40];
+    size_t n = ds2_motor_packet(packet, &v, self->_rumbleSeq++, self.pid == DS2_PID_PRO_2 ? 2 : 1);
+    CBCharacteristic *m = [self ch:[self rumbleUUID]];
+    if (m) {
+        [self.peripheral writeValue:[NSData dataWithBytes:packet length:n] forCharacteristic:m type:CBCharacteristicWriteWithoutResponse];
+        _lastWrite = ds2_now();
+    }
+}
+
+// Find mode: for a few seconds the player LEDs run one at a time and the motors pulse, so the controller is known among four dark ones.
+- (void)startFind {
+    if (!self.done) return;
+    _findUntil = ds2_now() + 4000000000ull;
+}
+
 // ---- Maintenance ----
 
 - (void)startMaintenance {
@@ -455,6 +481,15 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
 - (void)maintain {
     if (!self.done) return;
     uint64_t t = ds2_now();
+    // The find chase: LEDs one at a time at 10 Hz, a motor pulse every 0.5 s (not on a GameCube), and the keep-alive is covered by these writes.
+    if (t < _findUntil) {
+        if (t - _lastFindLED >= 100000000ull) {
+            _lastFindLED = t;
+            [self ledPattern:(uint8_t)(1 << ((t / 150000000ull) & 3)) completion:nil];
+        }
+        if (t % 500000000ull < 50000000ull) [self writeFindPulse];
+        return;
+    }
     int lfA = atomic_load(&_lfAmp), lfF = atomic_load(&_lfHz);
     int hfA = atomic_load(&_hfAmp), hfF = atomic_load(&_hfHz);
     BOOL active = lfA > 0 || hfA > 0 || t < _rumbleHoldUntil;
@@ -541,6 +576,7 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
     float _deadzone;
     BOOL _motion;
     uint64_t _glMask, _grMask;
+    uint8_t _gcHeld;    // the NSO GameCube pad's trigger hold threshold, report counts (DM_SW2_GC_TRIGGER)
     int _slot;   // -1 until the pad claims a player
 }
 
@@ -554,6 +590,9 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
         e = getenv("DM_PAD_GL"); _glMask = ds2_btn_from_str(e);
         e = getenv("DM_PAD_GR"); _grMask = ds2_btn_from_str(e);
         if (_glMask || _grMask) LOG("switch2: back buttons GL=0x%llx GR=0x%llx (the Pro Controller 2's back buttons)", (unsigned long long)_glMask, (unsigned long long)_grMask);
+        int held = DS2_TRIGGER_HELD;
+        if ((e = getenv("DM_SW2_GC_TRIGGER")) && *e) held = atoi(e);
+        _gcHeld = held < 0 ? 0 : held > 255 ? 255 : held;
     }
     return self;
 }
@@ -629,7 +668,7 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
 - (void)drive {
     if (_slot < 0 || !_members.count) return;
     uint64_t buttons; int32_t st[4];
-    if (!ds2_pad_input(&_state, _deadzone, _glMask, _grMask, &buttons, st)) return;
+    if (!ds2_pad_input(&_state, _deadzone, _gcHeld, _glMask, _grMask, &buttons, st)) return;
     dm_pad_set_player(_slot, buttons, st[0], st[1], st[2], st[3]);
     if (!_motion) return;
     ds2_dev *dev = ds2_pad_motion_dev(&_state);
@@ -665,6 +704,11 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
     [[DmSwitch2BLE shared] padEnded:self];
 }
 
+// Find mode on every member: each half's LEDs run the same chase and their motors pulse (rumble only on the HD models).
+- (void)find {
+    for (DmSwitch2Session *m in _members) [m startFind];
+}
+
 // The pad's rumble: a full member takes both bands as they come; a pair follows the console's split, the left half the low band, the right half
 // the high band (say the same tone to both and the actuator answers from its own half). A GameCube pad's member is never motor-written.
 - (void)rumbleFrom:(const dm_haptic_state *)s {
@@ -682,6 +726,8 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
     }
 }
 
+// The pad's own test rumble: on a pair, the console's split (the left half the low band, the right half the high band); a full pad member takes
+// both; a GameCube pad stays silent (its member's own write is skipped in the session too).
 - (void)testRumble {
     dm_haptic_state s = {0};
     s.player = _slot >= 0 ? _slot : 0;
@@ -892,6 +938,7 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
             info->player = s.slot + 1;
             info->battery_percent = s.battery_percent;
             info->battery_mv = s.battery_mv;
+            info->charging = s.charging;
             info->rssi = s.rssi;
             info->connected = s.done;
         }
@@ -906,6 +953,17 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
             if (p.slot + 1 != player) continue;
             [p endAllSessions:^(DmSwitch2Session *s) { [self sessionEnded:s]; }];
             return;
+        }
+    });
+}
+
+- (void)findPlayer:(int)player {
+    dispatch_async(_q, ^{
+        for (DS2Pad *p in self->_pads) {
+            if (p.slot + 1 == player) {
+                [p find];
+                return;
+            }
         }
     });
 }
@@ -949,4 +1007,8 @@ void dm_switch2_disconnect(int player) {
 
 void dm_switch2_test_rumble(int player) {
     @autoreleasepool { [[DmSwitch2BLE shared] testRumblePlayer:player]; }
+}
+
+void dm_switch2_find(int player) {
+    @autoreleasepool { [[DmSwitch2BLE shared] findPlayer:player]; }
 }

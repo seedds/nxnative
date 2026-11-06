@@ -99,6 +99,7 @@ private struct Switch2ControllerItem: Identifiable {
     let player: Int
     let batteryPercent: Int
     let batteryMv: Int
+    let charging: Bool
     let rssi: Int
     let connected: Bool
 }
@@ -219,6 +220,11 @@ private struct ControllersSection: View {
                             }
                         }
                         Spacer()
+                        if c.charging {
+                            Image(systemName: "bolt.fill")
+                                .foregroundStyle(.yellow)
+                                .accessibilityLabel("Charging")   // the battery reading next to it stays present
+                        }
                         if c.batteryPercent >= 0 {
                             HStack(spacing: 4) {
                                 Text("\(c.batteryPercent)%")
@@ -232,6 +238,12 @@ private struct ControllersSection: View {
                     HStack {
                         Button("Test Rumble") {
                             dm_switch2_test_rumble(Int32(c.player))
+                        }
+                        .font(.footnote)
+                        .buttonStyle(.bordered)
+
+                        Button("Find") {
+                            dm_switch2_find(Int32(c.player))
                         }
                         .font(.footnote)
                         .buttonStyle(.bordered)
@@ -306,11 +318,12 @@ private struct ControllersSection: View {
             let name = withUnsafeBytes(of: r.name) { String(cString: $0.baseAddress!.assumingMemoryBound(to: CChar.self)) }
             let serial = withUnsafeBytes(of: r.serial) { String(cString: $0.baseAddress!.assumingMemoryBound(to: CChar.self)) }
             items.append(Switch2ControllerItem(
-                name: name.isEmpty ? "Pro Controller 2" : name,
+                name: name,
                 serial: serial,
                 player: Int(r.player),
                 batteryPercent: Int(r.battery_percent),
                 batteryMv: Int(r.battery_mv),
+                charging: r.charging != 0,
                 rssi: Int(r.rssi),
                 connected: r.connected
             ))

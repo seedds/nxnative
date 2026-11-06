@@ -30,6 +30,7 @@ DM_PAD_GR	choice	none=None,b=B (Sprint / Cancel),a=A (Jump / Confirm),y=Y,x=X,ls
 DM_SW2_DEADZONE	range	0:120:5	40	always	Controls	Switch 2 deadzone	Centre deadzone of Switch 2 sticks in raw counts
 DM_SW2_MOTION	toggle	-	0	always	Controls	Switch 2 motion	Experimental six-axis gyro and accelerometer input for Switch 2 Pro Controller
 DM_SW2_RUMBLE	toggle	-	1	always	Controls	Switch 2 rumble	HD rumble on Switch 2 Pro Controller
+DM_SW2_GC_TRIGGER	range	0:255:16	64	always	Controls	GameCube trigger	Travel at which the NSO GameCube pad's analog triggers act as pressed, in report counts
 DM_RUMBLE	toggle	-	1	always	Controls	Game rumble		level=basic
 DM_RUMBLE_GAIN	range	0:3:0.1	1.0	always	Controls	Rumble strength		needs=DM_RUMBLE=1
 DM_RUMBLE_MIN	range	0:0.9:0.05	0	always	Controls	Rumble cutoff

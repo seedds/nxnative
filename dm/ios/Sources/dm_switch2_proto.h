@@ -83,6 +83,9 @@ typedef struct {
     uint16_t lx, ly, rx, ry;    // packed 12-bit pairs, as reported
     int16_t accel[3], gyro[3];  // raw little-endian counts
     uint16_t battery_mv;
+    int16_t battery_current;    // signed, + charging (feature mask 0x20)
+    uint8_t charge_state;       // at 0x21; enumeration not published, charge signing above is the usable signal
+    int16_t temperature_raw;    // IMU die temperature at 0x2E: degrees C = 25 + raw / 127 (switch2mac's protocol notes, citing Switch2Connect)
     uint8_t trigger_l, trigger_r;   // the NSO GameCube pad's analog triggers at 0x3C / 0x3D; other models leave them unparsed (0)
 } ds2_report;
 
@@ -100,6 +103,8 @@ static inline int ds2_report_parse(const uint8_t *d, size_t n, ds2_report *r) {
     r->battery_mv = ds2_u16(d + 0x1F);
     r->accel[0] = ds2_s16(d + 0x30); r->accel[1] = ds2_s16(d + 0x32); r->accel[2] = ds2_s16(d + 0x34);
     r->gyro[0] = ds2_s16(d + 0x36); r->gyro[1] = ds2_s16(d + 0x38); r->gyro[2] = ds2_s16(d + 0x3A);
+    if (n >= 0x30) r->temperature_raw = ds2_s16(d + 0x2E);
+    if (n >= 0x24) { r->battery_current = ds2_s16(d + 0x22); r->charge_state = d[0x21]; }
     if (n >= 0x3E) { r->trigger_l = d[0x3C]; r->trigger_r = d[0x3D]; }
     return 1;
 }
@@ -297,22 +302,23 @@ typedef struct {
 typedef struct { ds2_dev pro, left, right; } ds2_pad_state;
 
 // The NSO GameCube pad's analog triggers are the only analog ones (report offsets 0x3C / 0x3D, 0 to 255). The Nintendo Switch maps them onto
-// the Npad's digital ZL / ZR, so a hold counts past a quarter travel; the depth itself is lost (dm_pad_set_player carries buttons and sticks only).
+// the Npad's digital ZL / ZR, so a hold counts past a travel threshold (one quarter by default, DM_SW2_GC_TRIGGER);
+// the depth itself is lost (dm_pad_set_player carries buttons and sticks only).
 #define DS2_TRIGGER_HELD 64
 
-static inline uint64_t ds2_gamecube_buttons(uint32_t b, uint8_t trigger_l, uint8_t trigger_r) {
+static inline uint64_t ds2_gamecube_buttons(uint32_t b, uint8_t trigger_l, uint8_t trigger_r, uint8_t held) {
     uint64_t m = ds2_buttons(b);
-    if (trigger_l >= DS2_TRIGGER_HELD) m |= DM_BTN_L;
-    if (trigger_r >= DS2_TRIGGER_HELD) m |= DM_BTN_R;
+    if (trigger_l >= held) m |= DM_BTN_L;
+    if (trigger_r >= held) m |= DM_BTN_R;
     return m;
 }
 
 // One device's buttons: a Joy-Con held on its own is used sideways; two together are a Pro Controller, each with its own half of the buttons.
-static inline uint64_t ds2_dev_buttons(const ds2_dev *dev, int alone, uint64_t gl_mask, uint64_t gr_mask) {
+static inline uint64_t ds2_dev_buttons(const ds2_dev *dev, int alone, uint64_t gl_mask, uint64_t gr_mask, uint8_t gc_held) {
     if (dev->pid == DS2_PID_JOYCON2_L || dev->pid == DS2_PID_JOYCON2_R)
         return ds2_joycon_buttons(dev->r.buttons, alone);
     if (dev->pid == DS2_PID_NSO_GAMECUBE)
-        return ds2_gamecube_buttons(dev->r.buttons, dev->r.trigger_l, dev->r.trigger_r);
+        return ds2_gamecube_buttons(dev->r.buttons, dev->r.trigger_l, dev->r.trigger_r, gc_held);
     return ds2_buttons_mapped(dev->r.buttons, gl_mask, gr_mask);
 }
 
@@ -338,12 +344,12 @@ static inline void ds2_dev_stick(const ds2_dev *dev, float dead, int which, int3
 // The pad's buttons and sticks (-32767..32767, y up: the dm_pad_set_player shape): a full pad member's as they are; two Joy-Con halves together
 // are a Pro Controller (the left's stick the left stick, the right's the right); one half alone is held sideways, its stick the left stick.
 // Returns 0 when the pad holds no controller.
-static inline int ds2_pad_input(const ds2_pad_state *p, float dead, uint64_t gl_mask, uint64_t gr_mask,
+static inline int ds2_pad_input(const ds2_pad_state *p, float dead, uint8_t gc_held, uint64_t gl_mask, uint64_t gr_mask,
                                 uint64_t *buttons, int32_t st[4]) {
     st[0] = st[1] = st[2] = st[3] = 0;
     uint64_t m = 0;
     #define DS2_MERGE(dev, alone, which) do { \
-        if ((dev)->have) { m |= ds2_dev_buttons(dev, alone, gl_mask, gr_mask); \
+        if ((dev)->have) { m |= ds2_dev_buttons(dev, alone, gl_mask, gr_mask, gc_held); \
             int32_t t[4] = {0, 0, 0, 0}; ds2_dev_stick(dev, dead, which, t); \
             for (int i = 0; i < 4; i++) st[i] |= t[i]; } } while (0)
     if (p->pro.have) DS2_MERGE(&p->pro, 0, -1);

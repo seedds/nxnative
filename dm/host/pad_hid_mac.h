@@ -44,7 +44,8 @@ static void hidpad_found(void *ctx, IOReturn result, void *sender, IOHIDDeviceRe
     NSNumber *vendor = (__bridge NSNumber *)IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDVendorIDKey)), *product = (__bridge NSNumber *)IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDProductIDKey));
     int vid = vendor.intValue, pid = product.intValue;
     hid_pad *d = calloc(1, sizeof *d); if (!d) { LOG("[RED] HID gamepad: cannot allocate device state"); return; }
-    pad_hid_init(&d->st, getenv("DM_HID_MAP"));
+    const char *ab = getenv("DM_PAD_AB");
+    pad_hid_init(&d->st, getenv("DM_HID_MAP"), ab && !strcmp(ab, "xbox"));   // DM_PAD_AB=xbox swaps the default A and B
     NSString *name = (__bridge NSString *)IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDProductKey));
     snprintf(d->name, sizeof d->name, "%s", name.UTF8String ?: "HID gamepad");
     NSArray *els = CFBridgingRelease(IOHIDDeviceCopyMatchingElements(hid, NULL, kIOHIDOptionsTypeNone));

@@ -4,6 +4,7 @@
 
 typedef void (*NVNT_nvnDeviceBuilderSetDefaults)(NVNdeviceBuilder*);
 typedef void (*NVNT_nvnDeviceBuilderSetFlags)(NVNdeviceBuilder*, int);
+typedef int (*NVNT_nvnDeviceBuilderGetFlags)(const NVNdeviceBuilder*);
 typedef NVNboolean (*NVNT_nvnDeviceInitialize)(NVNdevice*, const NVNdeviceBuilder*);
 typedef void (*NVNT_nvnDeviceFinalize)(NVNdevice*);
 typedef void (*NVNT_nvnDeviceSetDebugLabel)(NVNdevice*, const char*);
@@ -77,7 +78,8 @@ typedef void (*NVNT_nvnMemoryPoolBuilderSetDevice)(NVNmemoryPoolBuilder*, NVNdev
 typedef void (*NVNT_nvnMemoryPoolBuilderSetDefaults)(NVNmemoryPoolBuilder*);
 typedef void (*NVNT_nvnMemoryPoolBuilderSetStorage)(NVNmemoryPoolBuilder*, void*, size_t);
 typedef void (*NVNT_nvnMemoryPoolBuilderSetFlags)(NVNmemoryPoolBuilder*, int);
-typedef void (*NVNT_nvnMemoryPoolBuilderGetMemory)(const NVNmemoryPoolBuilder*);
+typedef NVNdevice* (*NVNT_nvnMemoryPoolBuilderGetDevice)(const NVNmemoryPoolBuilder*);
+typedef void* (*NVNT_nvnMemoryPoolBuilderGetMemory)(const NVNmemoryPoolBuilder*);
 typedef size_t (*NVNT_nvnMemoryPoolBuilderGetSize)(const NVNmemoryPoolBuilder*);
 typedef NVNmemoryPoolFlags (*NVNT_nvnMemoryPoolBuilderGetFlags)(const NVNmemoryPoolBuilder*);
 typedef NVNboolean (*NVNT_nvnMemoryPoolInitialize)(NVNmemoryPool*, const NVNmemoryPoolBuilder*);
@@ -109,7 +111,8 @@ typedef int (*NVNT_nvnSamplerPoolGetSize)(const NVNsamplerPool*);
 typedef void (*NVNT_nvnBufferBuilderSetDevice)(NVNbufferBuilder*, NVNdevice*);
 typedef void (*NVNT_nvnBufferBuilderSetDefaults)(NVNbufferBuilder*);
 typedef void (*NVNT_nvnBufferBuilderSetStorage)(NVNbufferBuilder*, NVNmemoryPool*, ptrdiff_t, size_t);
-typedef NVNmemoryPool (*NVNT_nvnBufferBuilderGetMemoryPool)(const NVNbufferBuilder*);
+typedef NVNdevice* (*NVNT_nvnBufferBuilderGetDevice)(const NVNbufferBuilder*);
+typedef NVNmemoryPool* (*NVNT_nvnBufferBuilderGetMemoryPool)(const NVNbufferBuilder*);
 typedef ptrdiff_t (*NVNT_nvnBufferBuilderGetMemoryOffset)(const NVNbufferBuilder*);
 typedef size_t (*NVNT_nvnBufferBuilderGetSize)(const NVNbufferBuilder*);
 typedef NVNboolean (*NVNT_nvnBufferInitialize)(NVNbuffer*, const NVNbufferBuilder*);
@@ -146,6 +149,7 @@ typedef void (*NVNT_nvnTextureBuilderSetPackagedTextureLayout)(NVNtextureBuilder
 typedef void (*NVNT_nvnTextureBuilderSetStride)(NVNtextureBuilder*, ptrdiff_t);
 typedef void (*NVNT_nvnTextureBuilderSetGLTextureName)(NVNtextureBuilder*, uint32_t);
 typedef NVNstorageClass (*NVNT_nvnTextureBuilderGetStorageClass)(const NVNtextureBuilder*);
+typedef NVNdevice* (*NVNT_nvnTextureBuilderGetDevice)(const NVNtextureBuilder*);
 typedef NVNtextureFlags (*NVNT_nvnTextureBuilderGetFlags)(const NVNtextureBuilder*);
 typedef NVNtextureTarget (*NVNT_nvnTextureBuilderGetTarget)(const NVNtextureBuilder*);
 typedef int (*NVNT_nvnTextureBuilderGetWidth)(const NVNtextureBuilder*);
@@ -161,7 +165,7 @@ typedef ptrdiff_t (*NVNT_nvnTextureBuilderGetStride)(const NVNtextureBuilder*);
 typedef void (*NVNT_nvnTextureBuilderGetSparseTileLayout)(const NVNtextureBuilder*, NVNtextureSparseTileLayout*);
 typedef uint32_t (*NVNT_nvnTextureBuilderGetGLTextureName)(const NVNtextureBuilder*);
 typedef size_t (*NVNT_nvnTextureBuilderGetZCullStorageSize)(const NVNtextureBuilder*);
-typedef NVNmemoryPool (*NVNT_nvnTextureBuilderGetMemoryPool)(const NVNtextureBuilder*);
+typedef NVNmemoryPool* (*NVNT_nvnTextureBuilderGetMemoryPool)(const NVNtextureBuilder*);
 typedef ptrdiff_t (*NVNT_nvnTextureBuilderGetMemoryOffset)(const NVNtextureBuilder*);
 typedef void (*NVNT_nvnTextureViewSetDefaults)(NVNtextureView*);
 typedef void (*NVNT_nvnTextureViewSetLevels)(NVNtextureView*, int, int);
@@ -220,6 +224,7 @@ typedef void (*NVNT_nvnSamplerBuilderSetBorderColorui)(NVNsamplerBuilder*, const
 typedef void (*NVNT_nvnSamplerBuilderSetMaxAnisotropy)(NVNsamplerBuilder*, float);
 typedef void (*NVNT_nvnSamplerBuilderSetReductionFilter)(NVNsamplerBuilder*, NVNsamplerReduction);
 typedef void (*NVNT_nvnSamplerBuilderSetLodSnap)(NVNsamplerBuilder*, float);
+typedef NVNdevice* (*NVNT_nvnSamplerBuilderGetDevice)(const NVNsamplerBuilder*);
 typedef void (*NVNT_nvnSamplerBuilderGetMinMagFilter)(const NVNsamplerBuilder*, NVNminFilter*, NVNmagFilter*);
 typedef void (*NVNT_nvnSamplerBuilderGetWrapMode)(const NVNsamplerBuilder*, NVNwrapMode*, NVNwrapMode*, NVNwrapMode*);
 typedef void (*NVNT_nvnSamplerBuilderGetLodClamp)(const NVNsamplerBuilder*, float*, float*);
@@ -481,7 +486,6 @@ typedef void (*NVNT_nvnCommandBufferWaitEvent)(NVNcommandBuffer*, const NVNevent
 typedef void (*NVNT_nvnCommandBufferSignalEvent)(NVNcommandBuffer*, const NVNevent*, NVNeventSignalMode, NVNeventSignalLocation, int, uint32_t);
 
 // Names without a prototype in the header (newer interfaces): they can only get named stubs
-//   nvnDeviceBuilderGetFlags
 //   nvnQueueBuilderSetQueuePriority
 //   nvnQueueBuilderGetQueuePriority
 //   nvnQueueBuilderGetDevice
@@ -502,13 +506,9 @@ typedef void (*NVNT_nvnCommandBufferSignalEvent)(NVNcommandBuffer*, const NVNeve
 //   nvnWindowGetNumTextures
 //   nvnProgramSetShadersExt
 //   nvnProgramSetSampleShading
-//   nvnMemoryPoolBuilderGetDevice
-//   nvnBufferBuilderGetDevice
-//   nvnTextureBuilderGetDevice
 //   nvnTextureBuilderGetPackagedTextureLayout
 //   nvnTextureBuilderGetRawStorageClass
 //   nvnTextureGetRawStorageClass
-//   nvnSamplerBuilderGetDevice
 //   nvnCommandBufferSetCommandMemoryCallbackEnabled
 //   nvnCommandBufferSetColorReductionEnable
 //   nvnCommandBufferSetColorReductionThresholds

@@ -1119,6 +1119,8 @@ typedef void (*PFNNVNDEBUGCALLBACKPROC)(NVNdebugCallbackSource source, NVNdebugC
 typedef void (*PFNNVNWALKDEBUGDATABASECALLBACKPROC)(void*, void*);
 
 typedef void (*PFNNVNDEVICEBUILDERSETDEFAULTSPROC)(NVNdeviceBuilder*);
+// Builder queries return storage and object pointers; see docs/reference/nvn-objects.md.
+typedef int (*PFNNVNDEVICEBUILDERGETFLAGSPROC)(const NVNdeviceBuilder*);
 typedef void (*PFNNVNDEVICEBUILDERSETFLAGSPROC)(NVNdeviceBuilder*, int);
 typedef NVNboolean (*PFNNVNDEVICEINITIALIZEPROC)(NVNdevice*, const NVNdeviceBuilder*);
 typedef void (*PFNNVNDEVICEFINALIZEPROC)(NVNdevice*);
@@ -1197,7 +1199,8 @@ typedef void (*PFNNVNMEMORYPOOLBUILDERSETDEVICEPROC)(NVNmemoryPoolBuilder*, NVNd
 typedef void (*PFNNVNMEMORYPOOLBUILDERSETDEFAULTSPROC)(NVNmemoryPoolBuilder*);
 typedef void (*PFNNVNMEMORYPOOLBUILDERSETSTORAGEPROC)(NVNmemoryPoolBuilder*, void*, size_t);
 typedef void (*PFNNVNMEMORYPOOLBUILDERSETFLAGSPROC)(NVNmemoryPoolBuilder*, int);
-typedef void (*PFNNVNMEMORYPOOLBUILDERGETMEMORYPROC)(const NVNmemoryPoolBuilder*);
+typedef NVNdevice* (*PFNNVNMEMORYPOOLBUILDERGETDEVICEPROC)(const NVNmemoryPoolBuilder*);
+typedef void* (*PFNNVNMEMORYPOOLBUILDERGETMEMORYPROC)(const NVNmemoryPoolBuilder*);
 typedef size_t (*PFNNVNMEMORYPOOLBUILDERGETSIZEPROC)(const NVNmemoryPoolBuilder*);
 typedef NVNmemoryPoolFlags (*PFNNVNMEMORYPOOLBUILDERGETFLAGSPROC)(const NVNmemoryPoolBuilder*);
 typedef NVNboolean (*PFNNVNMEMORYPOOLINITIALIZEPROC)(NVNmemoryPool*, const NVNmemoryPoolBuilder*);
@@ -1235,7 +1238,8 @@ typedef void (*PFNNVNBUFFERBUILDERSETDEVICEPROC)(NVNbufferBuilder*, NVNdevice*);
 typedef void (*PFNNVNBUFFERBUILDERSETDEFAULTSPROC)(NVNbufferBuilder*);
 typedef void (*PFNNVNBUFFERBUILDERSETSTORAGEPROC)(NVNbufferBuilder*, NVNmemoryPool*, ptrdiff_t,
                                                   size_t);
-typedef NVNmemoryPool (*PFNNVNBUFFERBUILDERGETMEMORYPOOLPROC)(const NVNbufferBuilder*);
+typedef NVNdevice* (*PFNNVNBUFFERBUILDERGETDEVICEPROC)(const NVNbufferBuilder*);
+typedef NVNmemoryPool* (*PFNNVNBUFFERBUILDERGETMEMORYPOOLPROC)(const NVNbufferBuilder*);
 typedef ptrdiff_t (*PFNNVNBUFFERBUILDERGETMEMORYOFFSETPROC)(const NVNbufferBuilder*);
 typedef size_t (*PFNNVNBUFFERBUILDERGETSIZEPROC)(const NVNbufferBuilder*);
 typedef NVNboolean (*PFNNVNBUFFERINITIALIZEPROC)(NVNbuffer*, const NVNbufferBuilder*);
@@ -1295,7 +1299,8 @@ typedef void (*PFNNVNTEXTUREBUILDERGETSPARSETILELAYOUTPROC)(const NVNtextureBuil
                                                             NVNtextureSparseTileLayout*);
 typedef uint32_t (*PFNNVNTEXTUREBUILDERGETGLTEXTURENAMEPROC)(const NVNtextureBuilder*);
 typedef size_t (*PFNNVNTEXTUREBUILDERGETZCULLSTORAGESIZEPROC)(const NVNtextureBuilder*);
-typedef NVNmemoryPool (*PFNNVNTEXTUREBUILDERGETMEMORYPOOLPROC)(const NVNtextureBuilder*);
+typedef NVNdevice* (*PFNNVNTEXTUREBUILDERGETDEVICEPROC)(const NVNtextureBuilder*);
+typedef NVNmemoryPool* (*PFNNVNTEXTUREBUILDERGETMEMORYPOOLPROC)(const NVNtextureBuilder*);
 typedef ptrdiff_t (*PFNNVNTEXTUREBUILDERGETMEMORYOFFSETPROC)(const NVNtextureBuilder*);
 typedef void (*PFNNVNTEXTUREVIEWSETDEFAULTSPROC)(NVNtextureView*);
 typedef void (*PFNNVNTEXTUREVIEWSETLEVELSPROC)(NVNtextureView*, int, int);
@@ -1359,6 +1364,7 @@ typedef int (*PFNNVNTEXTUREGETSTORAGESIZEPROC)(const NVNtexture*);
 typedef NVNboolean (*PFNNVNTEXTURECOMPAREPROC)(const NVNtexture*, const NVNtexture*);
 typedef uint64_t (*PFNNVNTEXTUREGETDEBUGIDPROC)(const NVNtexture*);
 typedef void (*PFNNVNSAMPLERBUILDERSETDEVICEPROC)(NVNsamplerBuilder*, NVNdevice*);
+typedef NVNdevice* (*PFNNVNSAMPLERBUILDERGETDEVICEPROC)(const NVNsamplerBuilder*);
 typedef void (*PFNNVNSAMPLERBUILDERSETDEFAULTSPROC)(NVNsamplerBuilder*);
 typedef void (*PFNNVNSAMPLERBUILDERSETMINMAGFILTERPROC)(NVNsamplerBuilder*, NVNminFilter,
                                                         NVNmagFilter);

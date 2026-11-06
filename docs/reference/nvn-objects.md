@@ -42,7 +42,25 @@ The game may also write into an NVN object directly, without an NVN call, throug
 - **Fix:** the host never reports a ZCull storage size of 0 (`hle_nvn.c` `zcull_size`).
 - **Found on:** [Cuphead](../../dm/games/0100A5C00D162000/README.md). Found by tracking the allocator from observation gates (`OBS` in its `patches.py`) on its free-list push and after its map insert, checking at every event that each block allocated so far was still in the game's map.
 
+## Builder and state defaults
+
+### Native NVN defaults
+
+- **Symptom:** a default sampler selects mipmaps unexpectedly; builder reset loses the assigned device or reports different initial state from native NVN.
+- **Cause:** `SamplerBuilderSetDefaults` used OpenGL's minification filter and minimum LOD. Pool defaults cleared the device and left flags zero; texture dimensions started at one; alpha-to-coverage dithering started disabled.
+- **Fix:** use NVN's defaults in `hle_nvn.c`: linear minification and magnification without mip filtering, LOD clamp `[0, 1000]`; pool flags `CPU_NO_ACCESS | GPU_CACHED` (`0x21`), cleared storage and size, preserved device; unset texture dimensions (`0`) with one mip level; alpha-to-coverage dither enabled. The dither change fixes state readback; it does not add a Metal dithering implementation.
+- **Found on:** synthetic public-entry-point tests in `t_nvn.c`; no game-specific visual result is claimed.
+- **Check:** `t_nvn.c` resets previously assigned state, preserves the pool's device, and checks sampler initialization and public state getters against explicit expected defaults.
+
 ## Memory pools
+
+### CPU mappings and physical backing pools
+
+- **Symptom:** `MemoryPoolMap` or `BufferMap` returns a writable pointer for a CPU-inaccessible or virtual GPU range; a buffer initializes directly on a physical backing pool.
+- **Cause:** the host used the same address for CPU access, GPU storage and virtual aliases. The existing [CPU-inaccessible pool check](#map-of-a-pool-without-cpu-access-returns-null) did not separately exclude virtual ranges, and buffer initialization accepted physical backing pools directly. A virtual pool keeps a GPU address but no CPU mapping; its physical backing can have a CPU mapping of its own.
+- **Fix:** a shared `pool_cpu_map` excludes `CPU_NO_ACCESS` and `VIRTUAL` pools. `BufferMap` adds the buffer offset only to a non-null CPU mapping. `BufferInitialize` rejects `PHYSICAL` pools and clears the host object on failure, matching native initialization. The backing pointers used internally by Metal and virtual mapping remain available.
+- **Found on:** synthetic mapping and initialization tests in `t_nvn.c`; no game-specific crash is claimed.
+- **Check:** `t_nvn.c` covers both mapping entry points with a nonzero buffer offset, GPU addressing of CPU-inaccessible storage, physical backing's CPU mapping, and virtual pools before and after mapping physical pages.
 
 ### Heaps cut from a pool at alignment relative to its GPU address
 
@@ -434,6 +452,14 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md), GitHub issue #52 (Mac and iPhone). The sky is precomputed atmospheric scattering: each frame a pass (`08fe25061d583637`, `uking_pass_shader.sharcb`) turns a 256×32×16 RGBA16F 3D table of in-scattered light into a 256×256 sky map, which the sky draw (`8110c74078548172`) and the materials' aerial perspective sample. The table and two 2D ones (transmittance 256×64, irradiance 64×64) come from `System/KSys/sky.skybin` in `Pack/Bootup_Graphics.pack` (1,212,416 bytes, the three textures' storage back to back). The game makes a `CPU_CACHED | GPU_CACHED` pool for each texture, creates the textures, copies the file's data in with `memcpy` and flushes (`main+0x1257d50`, once, at the sky's setup; the flush goes through `main+0xebf4c4`, which flushes only CPU-cached pools). With zeros the sky had no scattered light: only the clouds and the sun's colour were left. In the Great Plateau save the fill covers that one texture; the flushes (about 15 a frame) merge into about 530 ranges, and frame times did not change. DRAGON QUEST XI S (title, free play, menus; 300 s) filled none.
 - **Note:** `DM_NVN_TEXRAW=212,214` (all zero) and `DM_NVN_TEXINFO=256x32` (`storage 1048576 bytes non-zero 781567` at first use, `swizzled=0`) showed it.
 
+### Buffer flushes publish the corresponding pool range
+
+- **Symptom:** a CPU-cached buffer holds texture pixels, but a texture sharing its storage reads back as zeros after `nvnBufferFlushMappedRange`.
+- **Cause:** the host treated the buffer flush as a no-op because memory is unified. Metal textures can be separate copies of that memory, and the no-op bypassed both first-use flush tracking and the existing texture-upload tracking. A buffer flush names a subrange relative to its buffer, so it must add the buffer offset before forwarding the range to the pool.
+- **Fix:** forward buffer flushes to the pool flush with `buffer.poolOffset + requestedOffset` and the original size. This uses the existing pool lifetime, virtual-pool and upload rules.
+- **Found on:** the ABI audit's synthetic Metal readback, with nonzero buffer and flush offsets. Before the fix, the pool-flush control uploaded the pixels and the buffer-flush case returned zeros; after the fix both return the CPU-written pixels.
+- **Check:** `t_nvn.c` checks the exact range boundaries and a zero-length flush. `t_cpu_tex --metal` compares an unflushed cached storage image, a pool flush and a buffer flush through a GPU texture-to-buffer copy, then checks pool finalization retires the flush range. The test writes block-linear storage directly, without `TextureWriteTexels` or a packaged layout that would bypass the failure. Its `IMAGE` flag excludes the newer automatic first-use CPU-content inference, so each result tests explicit flush publication.
+
 ### Storage of a CPU-uncached pool at first use
 
 - **Symptom:** magenta (ASTC's error colour) where UI images belong: a title logo and menu panels, while the 3D scene and the text draw; `DM_NVN_ZBLOCK=1` reports nothing (the textures are not uploaded on the CPU at all); `DM_NVN_TEXINFO=WxH` shows storage holding data at first use (`non-zero …`) in a pool with flags 0x22 (`CPU_UNCACHED | GPU_CACHED`).
@@ -650,6 +676,14 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** the getters read the packed state objects (`hle_nvn.c`); the multisample setters the host lacked (alpha-to-coverage dither, raster samples, coverage modulation and coverage-to-colour) are recorded in fields `ms_st` already had.
 - **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md) (19.3.11, Game Freak's Trinity engine; one boot).
 
+### Builder queries return pointers and retained state
+
+- **Symptom:** querying a configured builder logs `[RED] NVN unimplemented function called`, returns a null storage/device pointer, or reports the wrong size, flags or sampling mode.
+- **Cause:** ten pure queries were still stubs; the pool/offset and texture-swizzle getters already worked. The header also declared `MemoryPoolBuilderGetMemory` as returning `void`, and the buffer/texture builder `GetMemoryPool` queries as returning an entire `NVNmemoryPool`. Those declarations do not describe native NVN's single-register pointer returns.
+- **Fix:** correct the declarations in `include/nvn.h` and regenerate `nvn_protos.h`. Implement device-builder flags; memory-pool builder device, memory, size and flags; buffer-builder device; texture-builder device, packaged-data pointer and depth/stencil mode; sampler-builder device. Each reads the existing state, including device preservation and cleared storage after `SetDefaults`. Existing pool/offset and texture-swizzle queries are retained. All-zero explicit channels remain distinct from the default RGBA mapping.
+- **Found on:** synthetic public-entry-point tests in `t_nvn.c`; no game-specific validation is claimed.
+- **Check:** `t_nvn.c` invokes the generated, signature-checked API types through the public procedure lookup. Its unimplemented-entry test temporarily installs the stub in a real dispatch slot and restores it, so adding a real implementation no longer breaks that test.
+
 ### Device getters that were red stubs
 
 - **Fix:** `nvnDeviceGetWindowOriginMode` and `nvnDeviceGetDepthMode` were red stubs: the game sets neither mode and reads both. `nvnDeviceGetTexelFetchHandle` returns the texture ID with sampler 0.
@@ -665,7 +699,7 @@ Games read this count as a position in their own command memory and size their h
 
 - **Symptom:** `[RED] NVN unimplemented function called: nvnTextureBuilderGetMemoryOffset`, then `nvnTextureBuilderGetRawStorageClass`.
 - **Cause:** the renderer reads a texture builder's storage back before it initializes the texture; the host had the texture's getters (`nvnTextureGetMemoryPool` / `Offset` / `RawStorageClass`) but not the builders'.
-- **Fix:** the texture, buffer and event builders return the pool and offset `SetStorage` stored (the pool getters return its address, as `nvnTextureGetMemoryPool` does; the header the prototypes come from declares the builders' by value, so they are `NVN_NOPROTO`), and the texture builder's raw storage class is the texture's (1): it only names the page kind a virtual pool maps (`NVNmappingRequest.storageClass`), which the host's virtual pools do not distinguish.
+- **Fix:** the texture, buffer and event builders return the pool and offset `SetStorage` stored (the pool getters return its address, as `nvnTextureGetMemoryPool` does; the [buffer and texture query declarations are now corrected](#builder-queries-return-pointers-and-retained-state); event queries still use `NVN_NOPROTO`), and the texture builder's raw storage class is the texture's (1): it only names the page kind a virtual pool maps (`NVNmappingRequest.storageClass`), which the host's virtual pools do not distinguish.
 - **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) (SDK 22, Frostbite's NVN renderer NRO).
 
 ### `Map` of a pool without CPU access returns NULL

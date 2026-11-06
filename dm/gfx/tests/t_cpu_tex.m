@@ -103,6 +103,47 @@ static void finalized_upload(int write_after_record) {
     CHECK(!tex_cpu_written(serial), "pool finalization drops retired CPU classification");
     defer_drain(); munmap(mem,len);
 }
+// A CPU write published through a buffer must be visible to a texture sharing its
+// storage. Compare no flush, a direct pool flush, and a buffer-relative flush.
+static void flushed_buffer_upload(int flush_kind) {
+    const size_t len = 262144, buffer_off = 65536, flush_off = 4096, output_off = 131072;
+    uint8_t *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED) abort();
+    NVNmemoryPool pool = {0}; NVNmemoryPoolBuilder pb = {0};
+    h_nvnMemoryPoolBuilderSetDefaults(&pb); h_nvnMemoryPoolBuilderSetStorage(&pb, mem, len);
+    h_nvnMemoryPoolBuilderSetFlags(&pb, NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
+    CHECK(h_nvnMemoryPoolInitialize(&pool, &pb), "flush test pool initialized");
+    NVNbufferBuilder bb = {0}; NVNbuffer buffer = {0};
+    h_nvnBufferBuilderSetDefaults(&bb); h_nvnBufferBuilderSetStorage(&bb, &pool, buffer_off, 32768);
+    CHECK(h_nvnBufferInitialize(&buffer, &bb), "flush test buffer initialized at nonzero pool offset");
+    NVNtextureBuilder tb = {0}; NVNtexture tex = {0};
+    h_nvnTextureBuilderSetDefaults(&tb); h_nvnTextureBuilderSetWidth(&tb, 4); h_nvnTextureBuilderSetHeight(&tb, 4);
+    // Storage images may be GPU-written, so their contents are not inferred from
+    // CPU storage at first use. Only an explicit flush publishes this upload.
+    h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_IMAGE);
+    h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8); h_nvnTextureBuilderSetStorage(&tb, &pool, buffer_off + flush_off);
+    CHECK(h_nvnTextureInitialize(&tex, &tb), "flush test texture initialized without packaged layout");
+    uint8_t pixels[64], zeros[64] = {0}; for (int i=0;i<64;i++) pixels[i]=(uint8_t)(i+32);
+    const tex_t *t = (const tex_t *)&tex;
+    // Write block-linear bytes directly; TextureWriteTexels would bypass the flush path.
+    CHECK(nvn_swizzle(&t->d, 0, 0, pixels, 16, mem + buffer_off + flush_off) == 0, "CPU pixels swizzled into buffer storage");
+    if (flush_kind == 1) h_nvnMemoryPoolFlushMappedRange(&pool, buffer_off + flush_off, t->L.size);
+    if (flush_kind == 2) h_nvnBufferFlushMappedRange(&buffer, flush_off, t->L.size);
+    NVNcommandBuffer cmd; CHECK(h_nvnCommandBufferInitialize(&cmd, NULL), "flush test command buffer initialized");
+    h_nvnCommandBufferAddCommandMemory(&cmd, &pool, 0, buffer_off); h_nvnCommandBufferBeginRecording(&cmd);
+    NVNcopyRegion region = {0,0,0,4,4,1};
+    h_nvnCommandBufferCopyTextureToBuffer(&cmd, &tex, NULL, &region, (uint64_t)mem + output_off, 0);
+    NVNcommandHandle handle = h_nvnCommandBufferEndRecording(&cmd);
+    state_reset(); memset(&R,0,sizeof R); mtl_sub_begin(); mtl_exec((const uint8_t *)handle);
+    CHECK(mtl_wait(mtl_sub_commit(),5000000000ull), "flushed storage GPU readback completed");
+    CHECK(!mtl_last_commit_error(), "flushed storage readback has no GPU error");
+    CHECK(!memcmp(mem + output_off, flush_kind ? pixels : zeros, sizeof pixels),
+          flush_kind == 2 ? "buffer flush publishes texture pixels to Metal" :
+          flush_kind == 1 ? "pool flush publishes texture pixels to Metal" : "unflushed cached storage does not trigger first-use upload");
+    h_nvnCommandBufferFinalize(&cmd); h_nvnTextureFinalize(&tex); h_nvnBufferFinalize(&buffer); h_nvnMemoryPoolFinalize(&pool);
+    CHECK(!nvn_flushed(mem + buffer_off + flush_off, 1), "pool finalization retires buffer flush ranges");
+    defer_drain(); munmap(mem,len);
+}
 int main(int argc, const char **argv) { @autoreleasepool {
     enum { N = 6442, BASE = 1000 };
     static tex_t t[N];
@@ -137,6 +178,6 @@ int main(int argc, const char **argv) { @autoreleasepool {
     own.serial = 900002; mtl_tex_init(&own); moved = own; own.magic = 0; mtl_tex_release(&moved);
     CHECK(!nvn_hm_get(&g_tex_live, &moved.serial), "a copy outliving the object it was initialized in ends the texture");
     retired_classification(); descriptor_replacement();
-    if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); finalized_upload(0); finalized_upload(1); }
+    if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); finalized_upload(0); finalized_upload(1); for (int i=0;i<3;i++) flushed_buffer_upload(i); }
     printf("t_cpu_tex: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

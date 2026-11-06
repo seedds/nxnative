@@ -100,12 +100,13 @@ def build_launcher(out, minos, clang, swiftc, sdk):   # launcher.c's main and th
              '-o', out, *swift_sources(), *objs, '-framework', 'CoreFoundation', '-framework', 'AppKit', '-framework', 'SwiftUI'])
 
 
-def make_icns(jpg, out):   # the game's icon (256x256 JPEG) at every size an .icns holds
+def make_icns(jpg, out):   # the game's icon (256x256 JPEG) at every size an .icns holds. A file sips cannot read stops the pack, the same words as build_ipa.sh
     with tempfile.TemporaryDirectory(dir=out.parent) as t:
         s = Path(t) / 'AppIcon.iconset'; s.mkdir()
         for n in ICON_SIZES:
             for k, suffix in ((1, ''), (2, '@2x')):
-                run(['sips', '-s', 'format', 'png', '-z', n * k, n * k, jpg, '--out', s / f'icon_{n}x{n}{suffix}.png'])
+                try: run(['sips', '-s', 'format', 'png', '-z', n * k, n * k, jpg, '--out', s / f'icon_{n}x{n}{suffix}.png'])
+                except SystemExit as e: raise SystemExit(f'sips: cannot convert the icon {jpg}') from e
         run(['iconutil', '-c', 'icns', s, '-o', out])
 
 

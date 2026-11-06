@@ -2770,6 +2770,24 @@ def mac_pso(py, repo, work, lib, g, gpus, env, logs):
     return out
 
 
+def sips_reads(path):   # build_ipa.sh accepts an icon only when sips can read it. Without sips the pack's own sips is what fails
+    if not shutil.which('sips'): return True
+    return subprocess.run(['sips', '-g', 'format', str(path)], capture_output=True).returncode == 0
+
+
+def app_icon(game, base, say=lambda _line: None):
+    """The image the app is given: DM_ICON when sips can read it, else icon.jpg beside the packed version, then beside the base game.
+    A set DM_ICON that is missing or unreadable is a warning and that icon.jpg is used (build_ipa.sh does the same). A default icon.jpg sips cannot read still stops the pack."""
+    default = next((d / 'icon.jpg' for d in (game, base) if (d / 'icon.jpg').is_file()), None)
+    given = os.environ.get('DM_ICON', '').strip()
+    if not given: return default
+    p = Path(os.path.expanduser(given))
+    if p.is_file() and sips_reads(p): return p.resolve()
+    why = 'not found' if not p.is_file() else 'cannot be read'
+    say(f'DM_ICON {given} {why}: using {default}' if default else f'DM_ICON {given} {why}: no icon.jpg to use instead')
+    return default
+
+
 def mac_app_name(name):   # the app's file name: the game name with the characters Finder shows otherwise (':' and '/') as ' - '
     return re.sub(r'\s*[:/]\s*', ' - ', name).strip(' .-') or 'nxnative'
 
@@ -3172,7 +3190,7 @@ def main(args=None):
         if observed_glslc is not None: check_glslc_coverage(observed_glslc, g)
         seen = seen_keys(g, sh, seen_logs(work, app)) if seen_shaders else None
         ios = build_shaders(py, repo, sh, xlate, env, logs, g, pkey, mac, seen, None if mac else ios_wants_pulling(g, ios_gpus((args.gpu or PSO_GPUS).strip(), g), prepare_xcode, env))
-    icon = next((d / 'icon.jpg' for d in (game, base) if (d / 'icon.jpg').exists()), None)   # the game icon nx_extract saved from the control data (English, icon.jpg); the packed version's first, then the base game's
+    icon = app_icon(game, base, say)   # DM_ICON when sips can read it, else icon.jpg (the packed version's, then the base game's)
     motion = MOTION if args.motion is None else args.motion
     jit = uses_jit(game / 'ExeFS')
     if jit and not mac and not mac_pack: capture_jit(py, repo, game, patched, work, env, logs, g)   # the iPhone runs no code made at run time: it serves the plugin's output from an image
@@ -3183,7 +3201,8 @@ def main(args=None):
             rmtree(work / 'tmp'); return {'patched': patched, 'romfs': rfs.source(game), 'msl': ios / (f'b-{chain_of(repo)}' if gfx == 'nvn' else 'vk' if gfx == 'vulkan' else 'gl'), 'tables': g.table('shader_map.tsv').parent, 'html': game / 'html', 'gfx': gfx}
         host, font = mac_host(py, repo, work, env, logs, g)
         programs = other_programs(args, g)
-        if not icon: say(('no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') + '; the app\'s icon will be blank' if dump else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the app\'s icon will be blank')
+        if icon: say(f'app icon: {icon}')
+        else: say(('no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') + '; the app\'s icon will be blank' if dump else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the app\'s icon will be blank')
         mac_app(py, repo, out_ipa, app, work, game, patched, host, font, ios, aoc, gfx, lang, g, app_name, app_version, bundle_id, icon, args.mac_sign or MAC_SIGN, env, logs, env_file,
                 (args.gpu or PSO_GPUS).strip(), programs, control)
         rmtree(work / 'tmp')

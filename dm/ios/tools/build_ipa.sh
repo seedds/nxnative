@@ -163,9 +163,14 @@ if [ "$GFXAPI" = vulkan ]; then MSLDIR=vk; elif [ "$GFXAPI" = gl ]; then MSLDIR=
 mkdir -p Gen/dm/font && cp "${STD_FONT:-/System/Library/Fonts/Supplemental/Arial Unicode.ttf}" Gen/dm/font/standard.ttf || die "copy standard font (STD_FONT=a TTF)"
 "${FONT_PY:-python3}" "$DM/tools/make_ext_font.py" Gen/dm/font/nintendo_ext.ttf > /dev/null || die "make_ext_font.py (pip install fonttools, or FONT_PY=python with fontTools)"
 # App icon: the game's own icon (icon.jpg saved from the control data by nx_extract, the English 256x256 one). DM_ICON can point at another image; by default the icon.jpg next to the RomFS is used.
-# It is scaled to a 1024x1024 PNG in the asset catalog Gen/Assets.xcassets (a single-size app icon; actool generates the other sizes); with neither, no icon is set and the home-screen icon is blank.
+# A DM_ICON that is missing or that sips cannot read is a warning and the icon.jpg is used. It is scaled to a 1024x1024 PNG in the asset catalog Gen/Assets.xcassets (a single-size app icon; actool generates the other sizes); with neither, no icon is set and the home-screen icon is blank.
 # The catalog is always created (the project always lists it, see project.yml); without an icon it stays empty and DM_APPICON is not set
-ICON=${DM_ICON:-$(dirname "$ROMFS")/icon.jpg}
+DEFAULT=$(dirname "$ROMFS")/icon.jpg
+ICON=${DM_ICON:-$DEFAULT}
+if [ -n "${DM_ICON:-}" ] && [ "$DM_ICON" != "$DEFAULT" ]; then
+  if [ ! -f "$DM_ICON" ]; then t "DM_ICON $DM_ICON not found: using $DEFAULT"; ICON=$DEFAULT
+  elif ! sips -g format "$DM_ICON" >/dev/null 2>&1; then t "DM_ICON $DM_ICON cannot be read: using $DEFAULT"; ICON=$DEFAULT; fi
+fi
 mkdir -p Gen/Assets.xcassets && printf '{"info":{"author":"xcode","version":1}}\n' > Gen/Assets.xcassets/Contents.json || die "asset catalog"
 if [ -f "$ICON" ]; then
   AI=Gen/Assets.xcassets/AppIcon.appiconset; mkdir -p "$AI" || die "mkdir $AI"

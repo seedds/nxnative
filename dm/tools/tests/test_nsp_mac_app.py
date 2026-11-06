@@ -746,6 +746,35 @@ class Script(unittest.TestCase):
         self.settings_cmd = next(c for c in ran if c[1].endswith('dm/games/settings.py'))
         c = ran[-1]; return {c[i]: c[i + 1] for i in range(3, len(c) - 1) if c[i].startswith('--')}, tmp
 
+    def test_dm_icon(self):
+        with tempfile.TemporaryDirectory() as t, mock.patch.object(nsp, 'sips_reads', side_effect=lambda p: not Path(p).read_bytes().startswith(b'not')):
+            root = Path(t)
+            game, base = root / 'v', root / 'base'
+            game.mkdir(); base.mkdir()
+            (base / 'icon.jpg').write_bytes(b'base')
+            self.assertEqual(nsp.app_icon(game, base), base / 'icon.jpg')
+            (game / 'icon.jpg').write_bytes(b'game')
+            self.assertEqual(nsp.app_icon(game, base), game / 'icon.jpg')
+            given = root / 'mine.png'; given.write_bytes(b'mine')
+            with mock.patch.dict(os.environ, {'DM_ICON': str(given)}):
+                self.assertEqual(nsp.app_icon(game, base), given.resolve())
+            notes = []
+            with mock.patch.dict(os.environ, {'DM_ICON': str(root / 'missing.png')}):
+                self.assertEqual(nsp.app_icon(game, base, notes.append), game / 'icon.jpg')
+            self.assertIn('not found', notes[0]); self.assertIn(str(game / 'icon.jpg'), notes[0])
+            bad = root / 'bad.jpg'; bad.write_bytes(b'not an image'); notes.clear()
+            with mock.patch.dict(os.environ, {'DM_ICON': str(bad)}):
+                self.assertEqual(nsp.app_icon(game, base, notes.append), game / 'icon.jpg')
+            self.assertIn('cannot be read', notes[0]); self.assertIn(str(game / 'icon.jpg'), notes[0])
+
+    def test_sips_rejects_an_unreadable_icon(self):   # build_ipa.sh: sips ... || die "sips: cannot convert the icon $ICON"
+        if not shutil.which('sips'): self.skipTest('needs sips')
+        with tempfile.TemporaryDirectory() as t:
+            bad = Path(t) / 'icon.jpg'
+            bad.write_text('not an image')
+            with self.assertRaisesRegex(SystemExit, f'sips: cannot convert the icon {bad}'):
+                pack_app.make_icns(str(bad), Path(t) / 'AppIcon.icns')
+
     def test_pack_command(self):
         o, tmp = self.pack_cmd('nvn')
         self.assertNotIn('--pso-pairs', o)   # no split copy

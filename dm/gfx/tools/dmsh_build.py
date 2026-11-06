@@ -2,14 +2,17 @@
 # Route B offline build: original Switch shaders → SPIR-V (dmsh_xlate, the Ryujinx translator) → spirv-cross MSL → metallib + replay reflection JSON.
 # No translation at runtime (iOS has no JIT): build output goes into the shader cache directory, file name = Switch control segment key (dm_ctl_sha16, same as column 4 of shader_map.tsv) + "_b".
 # Source of query answers: the answer table in the game profile, dm/games/<id>/shader_facts.tsv (dmsh_facts.py) - texture types, vertex attribute / fragment output component types, compute thread group size and shared memory.
-# Usage: dmsh_build.py <Switch package dir> <output cache dir> [key...] (no keys = all); build output is actually written to <output cache dir>/b-<chain version>/ (same for IOSOUT), for the chain version see dmsh_chain.py.
+# Usage: dmsh_build.py <Switch package dir> <output cache dir> [key...] (no keys = all); build output is the image <output cache dir>/b-<chain version>.img (same for IOSOUT; dm/tools/shader_lib.py), for the chain version see dmsh_chain.py.
+# The folder b-<chain version>/ beside it holds only the shaders in flight: a finished shader's files go into the shader cache (cas.db, under stage/), and the image is written from there
+# at the end (publish_library), so a build, stopped or not, leaves a few files and not one per shader output (Octopath Traveler 0, stopped in its compile: 68,230 files). The translator's
+# working files go into a folder per batch of shaders, removed when the batch is done; a working folder whose build is gone is removed at the next start (sweep_work).
 # A full build (no keys) also stamps both directories with the game and the digest of its profile inputs (inputs.tsv) and writes the profile's c1_full.tsv and cb_extent.tsv (c1_guard.py, cb_extent.py)
 # from its Mac outputs. One output directory per game: the chain version is the same for every game   Environment: DM_GAME=game profile (required, dm/games/<id>), XLATE=path to the translation tool (default the in-repo dmsh_xlate_bin), DMSH_CAS=the compile cache, one file (shader_cache.py; default <output cache dir>/cas.db), DMSH_PREFILL=Mac library root[=iOS library root] (separated by :, their b-*/ go into the MSL-keyed compile cache first; sibling b-*/ always do), J=concurrency
 # Build output: <key>_b.metallib, <key>_b.json (replay reflection, including drv_reads, the runtime read offsets into driver segments c0 / c2), <key>_b.metal (MSL)
 # Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately);
 # a [RED] line per shader that built but lost something (shader_regressions.report_losses), which does not change the exit status
-import atexit, inspect, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, collections, threading, concurrent.futures as cf
+import atexit, inspect, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, time, collections, threading, concurrent.futures as cf
 import dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
@@ -37,8 +40,9 @@ IOS_PULL = os.environ.get('DMSH_IOS_PULL') != '0'   # DMSH_IOS_PULL=0: no iOS pu
 if IOSOUT:
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../ios/tools')); import ios_metal
     IOSOUT = os.path.join(IOSOUT, 'b-' + CHAIN); os.makedirs(IOSOUT, exist_ok=True)
+import shader_lib, romfs   # dm/tools (on the path shader_regressions puts it): the library's image, which this build writes (publish_library)
 for _d in [out] + ([IOSOUT] if IOSOUT else []):   # one chain version serves every game, so b-<V>/ alone does not keep two games' libraries apart
-    _g = dmsh_chain.read_stamp(_d).get('game')
+    _g = shader_lib.read_stamp(_d).get('game')
     if _g and _g != GAME.id: sys.exit(f'[RED] {_d} holds the shader libraries of game {_g}, not {GAME.id}: give each game its own output directory')
 MAP = str(GAME.table('shader_map.tsv'))
 BF_WANT_FILE = str(GAME.table('bf_want.tsv'))
@@ -391,6 +395,63 @@ def cache_meta_path(key): return f'index/{key}.json'
 def cache_path(digest): return f'shader/{digest}'
 CAS_USED = '_b_cas.txt'   # in the Mac library directory b-<V>/: the cache_path digests of its last full build, one per line
 
+# A finished shader's outputs are staged in the cache, under a name of this output folder's, and leave the disk (commit); the image is written from them at the end (publish_library).
+# A stopped build leaves them there, and the next build of this folder clears them first: its shaders come back from the cache entries publish_cache wrote
+STAGE = 'stage/' + hashlib.sha256(os.path.realpath(out).encode()).hexdigest()[:16]
+def label_dir(label) -> str: return out if label == 'mac' else IOSOUT or ''   # '' when this build makes no iPhone libraries
+
+def output(label, name):
+    """An output file's bytes: on disk while its shader is in flight, else staged; for a partial build, a shader it does not build is read from the image it builds on. None when there is none"""
+    try:
+        if label_dir(label):
+            with open(os.path.join(label_dir(label), name), 'rb') as f: return f.read()
+    except FileNotFoundError: pass
+    data = STORE.get(f'{STAGE}/{label}/{name}')   # put before its file is removed (commit), so a file gone meanwhile is found here
+    if data is not None or not want: return data
+    m = OUT_KEY.match(name); old = OLD_IMAGE.get(label)
+    if old is None or not m or m.group(1) in want: return None   # a key this build makes has no older outputs: the start removed them
+    try: return (old / name).read_bytes()
+    except OSError: return None
+
+def output_of(label, name) -> bytes:   # an output its shader has just written or restored: there is one
+    data = output(label, name)
+    if data is None: raise FileNotFoundError(f'{label}/{name}: no such output')
+    return data
+
+def commit(key='', names=None):
+    """A finished shader's files (<key>_*, or the names given) into the cache's stage and off the disk. A file the cache could not take (a full drive) stays on disk, where publish_library finds it too"""
+    with STORE.batch():
+        for label in ('mac', 'ios'):
+            d = label_dir(label)
+            if not d: continue
+            for n in (names if names is not None else [n for n in os.listdir(d) if n.startswith(key + '_')]):
+                p = os.path.join(d, n)
+                if n.startswith('.') or '.tmp' in n or not os.path.isfile(p): continue
+                STORE.put_file(f'{STAGE}/{label}/{n}', p)
+                if not STORE.full: os.unlink(p)
+
+def publish_library(label):
+    """The library's image <dir>.img from the staged outputs and the files left on disk (these win), and for a partial build the image it builds on, less the outputs of the keys it built
+    (and its stamp, when the profile's inputs changed). Then the folder and the staged entries go. When the image cannot be written, the staged outputs go back into the folder, which works as it is"""
+    d = label_dir(label); image = shader_lib.image_of(d); prefix = f'{STAGE}/{label}/'
+    files = {}
+    old = OLD_IMAGE.get(label)
+    if old is not None:
+        for p in old.iterdir():
+            m = OUT_KEY.match(p.name)
+            if (m and m.group(1) in want) or (p.name == dmsh_chain.STAMP and STAMP_BEFORE != INPUTS): continue
+            files[p.name] = str(p)
+    for n in STORE.names(prefix): files[n[len(prefix):]] = (lambda n=n: STORE.get(n))
+    for n in os.listdir(d):
+        if not n.startswith('.') and '.tmp' not in n and os.path.isfile(os.path.join(d, n)): files[n] = os.path.join(d, n)
+    try: shader_lib.write(files, image)
+    except (OSError, ValueError) as e:
+        print(f'[RED] could not write {image}, the library stays the folder {d}: {e}', flush=True)
+        for n in STORE.names(prefix): STORE.to_file(n, os.path.join(d, n[len(prefix):]))
+        return
+    STORE.delete_prefix(prefix)
+    shutil.rmtree(d, ignore_errors=True)
+
 def cache_outputs(key, digest, cached=False):
     root = cache_path(digest); files = {}
     for label, directory in (('mac', out), ('ios', IOSOUT)):
@@ -423,10 +484,10 @@ def restore_cache(key, digest):
             elif not STORE.to_file(src, dst): return False
     return True
 
-def cache_lookup(key, digest, rule_fp, code_fp):
+def cache_lookup(key, digest, rule_fp, code_fp):   # whether the cache holds the shader's outputs; they are restored when the shader is finished (fin), so they are on disk only while it is in flight
     with CAS_LOCKS_GUARD: lock = CAS_LOCKS.setdefault(('shader', key), threading.Lock())
     with lock:
-        if restore_cache(key, digest): PRE_STATS['hit'] += 1; return True, 'hit'
+        if cache_outputs(key, digest, cached=True): PRE_STATS['hit'] += 1; return True, 'hit'
         old = json.loads(STORE.get(cache_meta_path(key)) or b'null')
         if old and old.get('code_fp') != code_fp: reason = 'code fingerprint changed: all rebuilt'
         elif old and old.get('rule_fp') != rule_fp: reason = 'rule changed'
@@ -435,7 +496,7 @@ def cache_lookup(key, digest, rule_fp, code_fp):
 
 def publish_cache(key, digest, rule_fp, code_fp):
     # Paired pixel MSL is an input to vs_pad; a diagnostic build without it must not cache an incomplete vertex shader under a complete dependency key.
-    if any(not os.path.isfile(os.path.join(out, ps + '_b.metal')) for ps in PAIRS.get(key, ())): return
+    if any(output('mac', ps + '_b.metal') is None for ps in PAIRS.get(key, ())): return
     found = cache_outputs(key, digest)
     if not found: return
     root, files = found
@@ -1125,9 +1186,8 @@ def vs_pad(key, src):
     (over 10,000 "Fragment input(s) user(locnN) ... not written by vertex shader" in one iPhone session after the opening course). Returns (new source, padded locations); pairs whose pixel MSL cannot be read are skipped."""
     want = set()
     for ps in PAIRS.get(key, ()):
-        fn = os.path.join(out, ps + '_b.metal')
-        if os.path.exists(fn):
-            with open(fn) as f: want |= {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', f.read())}
+        data = output('mac', ps + '_b.metal')   # finished before this vertex shader (fin's phases), so staged in the cache by now
+        if data is not None: want |= {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', data.decode())}
     miss = sorted(want - {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', src)})
     i = src.find('struct main0_out\n{\n'); j = src.find('\n};', i); k = src.find('main0_out out = {};')
     if not miss or i < 0 or j < 0 or k < 0: return src, []
@@ -1568,31 +1628,75 @@ def finish(key, w, j, c1):
 keys = build_keys(want, loc, PAIRS)
 if want: want = set(keys)   # dependency outputs are cleaned too, so a failed pixel build cannot leave old MSL for padding
 NJ = int(os.environ.get('J', '8'))
-os.makedirs(out, exist_ok=True)
+BATCH = 4 * NJ   # shaders translated and finished together: the next batch is translated while this one is finished, and a shader's working files go when it is (fin).
+# Minecraft Dungeons II, 15,826 shaders: at most 3,279 files under the build folder with batches of 256 removed whole, 68,230 before batches (Octopath Traveler 0's stopped build)
 # A full build starts from no shader outputs, a partial one from none of the keys it builds, so what a run leaves is what it built: every output is restored from the cache anyway.
 # The chain version is the same whatever the profile's tables, so a key that left the map, a shader that no longer builds or a variant no longer made would keep an old library.
-# The stamp goes too, and a full build writes it at the end; a partial build keeps it only while it names the profile's current inputs
+# The stamp goes too, and a full build writes it at the end; a partial build keeps it only while it names the profile's current inputs.
+# A full build also removes the image (as the NSP script does before it): a stopped build leaves no library, rather than one with old shaders for those it had not reached. A partial build
+# builds on the image (OLD_IMAGE), less the outputs of the keys it builds, which publish_library leaves out
 OUT_KEY = re.compile(r'([0-9a-f]{16})_b')
-STAMP_BEFORE = dmsh_chain.read_stamp(out).get('inputs')
-for _d in [out] + ([IOSOUT] if IOSOUT else []):
-    for _n in os.listdir(_d):
+STAMP_BEFORE = shader_lib.read_stamp(out).get('inputs')
+OLD_IMAGE = {}
+for _label, _d in (('mac', out), ('ios', IOSOUT)):
+    if not _d: continue
+    if not want:
+        shutil.rmtree(_d, ignore_errors=True); shader_lib.remove_image(_d)
+    elif os.path.isfile(shader_lib.image_of(_d)): OLD_IMAGE[_label] = romfs.Path(shader_lib.image_of(_d))
+    os.makedirs(_d, exist_ok=True)
+    for _n in os.listdir(_d):   # a partial build over a folder (an older chain's, or one a stopped build left)
         _m = OUT_KEY.match(_n)
-        if _m and (not want or _m.group(1) in want): os.unlink(os.path.join(_d, _n))
-    if (not want or STAMP_BEFORE != INPUTS) and os.path.exists(os.path.join(_d, dmsh_chain.STAMP)): os.unlink(os.path.join(_d, dmsh_chain.STAMP))
-    if not want and os.path.exists(os.path.join(_d, CAS_USED)): os.unlink(os.path.join(_d, CAS_USED))   # written again at the end, with the stamp
-w = tempfile.mkdtemp(prefix='dmsh_', dir=os.environ.get('WORK'))
+        if _m and _m.group(1) in want: os.unlink(os.path.join(_d, _n))
+    if STAMP_BEFORE != INPUTS and os.path.exists(os.path.join(_d, dmsh_chain.STAMP)): os.unlink(os.path.join(_d, dmsh_chain.STAMP))
+STORE.delete_prefix(STAGE + '/')   # what a stopped build of this folder staged
+
+def sweep_work(root):
+    """The working folders (dmsh_*) a build left that is no longer running: each holds the process ID of its build (pid), one from before that is taken after a day.
+    Octopath Traveler 0's build, stopped in its compile, left 38,376 files there, and every later build made another folder beside it"""
+    for d in (os.path.join(root, n) for n in os.listdir(root) if n.startswith('dmsh_')) if os.path.isdir(root) else ():
+        try:
+            with open(os.path.join(d, 'pid')) as f: pid = int(f.read())
+            try: os.kill(pid, 0); continue   # its build runs
+            except ProcessLookupError: pass
+            except PermissionError: continue
+        except (OSError, ValueError):
+            try:
+                if time.time() - os.stat(d).st_mtime < 86400: continue
+            except OSError: continue
+        shutil.rmtree(d, ignore_errors=True)
+_work = os.environ.get('WORK') or tempfile.gettempdir()
+sweep_work(_work)
+w = tempfile.mkdtemp(prefix='dmsh_', dir=_work)
+with open(os.path.join(w, 'pid'), 'w') as _f: _f.write(str(os.getpid()))
 MTL = dmsh_mtlcache.Cache(STORE, {'mac': ('macosx', MAC_RECORD, mac_compile), **({'ios': ('iphoneos', ios_metal.RECORD, ios_metal.compile)} if IOSOUT else {})}, w)
-# first take the libraries earlier chain versions left on disk: the b-*/ beside the output (iOS: the folder of the same name) and the roots DMSH_PREFILL lists
+# first take the libraries earlier chain versions left on disk: the b-*/ and b-*.img beside the output (iOS: the folder of the same name) and the roots DMSH_PREFILL lists
 for _spec in [cache_root + ('=' + os.path.dirname(IOSOUT) if IOSOUT else '')] + [x for x in os.environ.get('DMSH_PREFILL', '').split(os.pathsep) if x]:
     _mac, _, _ios = _spec.partition('=')
     for _b in sorted(os.listdir(_mac)) if os.path.isdir(_mac) else []:
-        if _b.startswith('b-') and os.path.realpath(os.path.join(_mac, _b)) != os.path.realpath(out):
+        if _b.startswith('b-') and os.path.realpath(shader_lib.folder_of(os.path.join(_mac, _b))) != os.path.realpath(out):
             for _ln in MTL.fill(os.path.join(_mac, _b), os.path.join(_ios, _b) if _ios else None, targets=TARGETS): print(_ln, flush=True)
+
+# Progress for the NSP script (DMSH_PROGRESS: a small JSON file it reads, build_ipa_from_nsp.py ShaderWatch), written at most every half second
+PROGRESS = os.environ.get('DMSH_PROGRESS')
+_prog = {'t': 0.0, 'lock': threading.Lock()}
+def progress(step, done, total, force=False, **extra):
+    if not PROGRESS: return
+    with _prog['lock']:
+        now = time.time()
+        if not force and now - _prog['t'] < 0.5: return
+        _prog['t'] = now
+        try:
+            with open(PROGRESS + '.tmp', 'w') as f: json.dump({'step': step, 'done': done, 'total': total, **extra}, f)
+            os.replace(PROGRESS + '.tmp', PROGRESS)
+        except OSError: pass
+
 packs, jobs, c1s = {}, {}, {}
+packs_lock = threading.Lock()
 digests, rule_fps, cache_reasons, cache_hits = {}, {}, {}, set()
 def rec_of(key):   # → (package name, the shader's record), read from the package each time and not kept (see record_index)
     name, k = loc[key]
-    if name not in packs: packs[name] = record_index(os.path.join(dm_dir, name))
+    with packs_lock:
+        if name not in packs: packs[name] = record_index(os.path.join(dm_dir, name))
     fd, offs = packs[name]
     return name, os.pread(fd, offs[k + 1] - offs[k], offs[k])
 for key in keys: digests[key] = shader_key(key, *rec_of(key))
@@ -1601,45 +1705,78 @@ def plain_digest(k):   # a paired pixel shader's key, also when it is not built 
     return shader_key(k, *rec_of(k)) if k in loc else 'missing'
 for key in keys:
     if PAIRS.get(key): digests[key] = pair_keyed(digests[key], [plain_digest(p) for p in sorted(PAIRS[key])])
-for key in keys:
+for i, key in enumerate(keys):
     name = loc[key][0]
     rule_fps[key] = hashlib.sha256(shader_rule_source(name) + ','.join(sorted(PAIRS.get(key, ()))).encode()).hexdigest()   # the vertex shader must be rebuilt when its pairs change (vs_pad)
     hit, cache_reasons[key] = cache_lookup(key, digests[key], rule_fps[key], CODE_FP)
     if hit: cache_hits.add(key)
-    else: jobs[key], c1s[key] = job_for(key, name, rec_of(key)[1], w)
-misses = [key for key in keys if key not in cache_hits]
-chunks = [misses[i::NJ] for i in range(NJ)]
-def xl(ch):
-    jp = os.path.join(w, f'job_{abs(hash(ch[0]))}.json'); json.dump([jobs[k] for k in ch], open(jp, 'w'))
-    return subprocess.run([XLATE, jp, w], capture_output=True, text=True)
-with cf.ThreadPoolExecutor(NJ) as ex: xr = list(ex.map(xl, [c for c in chunks if c]))
+    progress('cache check', i + 1, len(keys), cached=len(cache_hits))
+NMISS = sum(1 for k in keys if k not in cache_hits)
 xerr = {}
-for r in xr:
+def xlate_errors(r):
     for ln in r.stderr.splitlines():
         m = re.match(r'\[RED\] (\w+): (.*)', ln)
         if m: xerr[m.group(1)] = m.group(2)[:160]
-def fin(key):
-    if key in cache_hits:
-        refl = json.load(open(os.path.join(out, key + '_b.json')))
-        src = open(os.path.join(out, key + '_b.metal')).read() if refl['stage'] in ('ps', 'vs') else ''
-        if refl['stage'] == 'vs': write_refl(key, pull_finish(key, src, vin_finish(key, src, refl)))
-        if refl['stage'] == 'ps': refl.update(ps_libraries(key, os.path.join(out, key + '_b.metal'), src))
-        return key, 'ok', '', fetch_finish(key, src, refl)
-    if key in xerr or not os.path.exists(os.path.join(w, key + '.spv')): return key, 'translation failed', xerr.get(key, 'no spv'), None
-    result = (key,) + finish(key, w, jobs[key], c1s[key])
-    if result[1] == 'ok': publish_cache(key, digests[key], rule_fps[key], CODE_FP)
-    return result
-with cf.ThreadPoolExecutor(NJ) as ex:   # two phases: paired vertex shaders read their pixel shaders' MSL (vs_pad), so they go last
-    res = list(ex.map(fin, [k for k in keys if k not in PAIRS])) + list(ex.map(fin, [k for k in keys if k in PAIRS]))
+def translate(batch):
+    """A batch's misses translated into a working folder of its own (removed once the batch is finished) → that folder"""
+    wb = tempfile.mkdtemp(prefix='batch_', dir=w)
+    miss = [k for k in batch if k not in cache_hits]
+    for k in miss: jobs[k], c1s[k] = job_for(k, loc[k][0], rec_of(k)[1], wb)
+    def xl(ch):
+        jp = os.path.join(wb, f'job_{abs(hash(ch[0]))}.json'); json.dump([jobs[k] for k in ch], open(jp, 'w'))
+        return subprocess.run([XLATE, jp, wb], capture_output=True, text=True)
+    with cf.ThreadPoolExecutor(NJ) as ex:
+        for r in ex.map(xl, [c for c in (miss[i::NJ] for i in range(NJ)) if c]): xlate_errors(r)
+    return wb
+def restored(key, wb):
+    """A cache hit's outputs back on disk while it is finished. When another build pruned them since the look (cache_lookup), the shader is translated now, in the batch's folder: False"""
+    if restore_cache(key, digests[key]): return True
+    PRE_STATS['hit'] -= 1; PRE_STATS['miss'] += 1; PRE_STATS['pruned meanwhile'] += 1
+    jobs[key], c1s[key] = job_for(key, loc[key][0], rec_of(key)[1], wb)
+    jp = os.path.join(wb, f'job1_{key}.json'); json.dump([jobs[key]], open(jp, 'w'))
+    xlate_errors(subprocess.run([XLATE, jp, wb], capture_output=True, text=True))
+    return False
+DONE = collections.Counter()
+def fin(key, wb):
+    try:
+        if key in cache_hits and restored(key, wb):
+            refl = json.loads(output_of('mac', key + '_b.json'))
+            src = output_of('mac', key + '_b.metal').decode() if refl['stage'] in ('ps', 'vs') else ''
+            if refl['stage'] == 'vs': write_refl(key, pull_finish(key, src, vin_finish(key, src, refl)))
+            if refl['stage'] == 'ps': refl.update(ps_libraries(key, os.path.join(out, key + '_b.metal'), src))
+            return key, 'ok', '', fetch_finish(key, src, refl)
+        if key in xerr or not os.path.exists(os.path.join(wb, key + '.spv')): return key, 'translation failed', xerr.get(key, 'no spv'), None
+        result = (key,) + finish(key, wb, jobs[key], c1s[key])
+        if result[1] == 'ok': publish_cache(key, digests[key], rule_fps[key], CODE_FP)
+        return result
+    finally:
+        commit(key)
+        with os.scandir(wb) as it:   # its working files (<key>.bin / .spv / .res.json / .metal, the geometry variants' <key>_g<n>.*, job1_<key>.json)
+            for e in it:
+                if e.name.startswith((key, 'job1_' + key)) and e.is_file(): os.unlink(e.path)
+        with _prog['lock']: DONE['n'] += 1; n = DONE['n']
+        progress('compiling', n, len(keys), cached=len(cache_hits), misses=NMISS)
+# Two phases: paired vertex shaders read their pixel shaders' MSL (vs_pad), so they go last, in batches of their own. The next batch is translated while this one is finished
+batches = [b[i:i + BATCH] for b in ([k for k in keys if k not in PAIRS], [k for k in keys if k in PAIRS]) for i in range(0, len(b), BATCH)]
+res = []
+with cf.ThreadPoolExecutor(1) as tx, cf.ThreadPoolExecutor(NJ) as ex:
+    nxt = tx.submit(translate, batches[0]) if batches else None
+    for i, batch in enumerate(batches):
+        assert nxt is not None
+        wb = nxt.result()
+        nxt = tx.submit(translate, batches[i + 1]) if i + 1 < len(batches) else None
+        res += list(ex.map(lambda k, wb=wb: fin(k, wb), batch))
+        shutil.rmtree(wb, ignore_errors=True)
 # Passthrough geometry as mesh shaders (dmsh_mesh.py): <vertex key>_<geometry key>_m3 for each pair in the profile's geo_mesh.tsv whose two libraries exist; the host
 # draws a lean triangle-list geometry draw with it when its pair has one, and through the compute path otherwise (nvn_geometry.inc geo_mesh_draw)
 MESH_STATS = collections.Counter()
 def mesh_finish(pair):
     vk, gk = pair
-    srcs = [os.path.join(out, n) for n in (vk + '_b.metal', gk + '_bl3.metal', gk + '_bl3.json')]
-    libs = [os.path.join(out, f'{vk}_{gk}_m3.metallib')] + ([os.path.join(IOSOUT, f'{vk}_{gk}_m3.metallib')] if IOSOUT else [])
-    if not all(os.path.exists(p) for p in srcs): MESH_STATS['missing a library'] += 1; return
-    try: msl = dmsh_mesh.compose(open(srcs[0]).read(), open(srcs[1]).read(), json.load(open(srcs[2]))['geometry']['capture_reads'])
+    vs, gs, gj = (output('mac', n) for n in (vk + '_b.metal', gk + '_bl3.metal', gk + '_bl3.json'))   # staged by now
+    name = f'{vk}_{gk}_m3.metallib'
+    libs = [os.path.join(out, name)] + ([os.path.join(IOSOUT, name)] if IOSOUT else [])
+    if vs is None or gs is None or gj is None: MESH_STATS['missing a library'] += 1; return
+    try: msl = dmsh_mesh.compose(vs.decode(), gs.decode(), json.loads(gj)['geometry']['capture_reads'])
     except ValueError as e: MESH_STATS['not composed'] += 1; print(f'[RED] mesh {vk} {gk}: {e}', flush=True); return
     path = os.path.join(w, f'{vk}_{gk}_m3.metal'); open(path, 'w').write(msl)
     try:
@@ -1647,6 +1784,10 @@ def mesh_finish(pair):
         if IOSOUT: MTL.compile('ios', path, libs[1])
         MESH_STATS['built'] += 1
     except subprocess.CalledProcessError as e: MESH_STATS['failed to compile'] += 1; print(f'[RED] mesh {vk} {gk}: does not compile ({str(e)[:120]})', flush=True)
+    finally:
+        try: os.unlink(path)
+        except FileNotFoundError: pass
+        commit(names=[name])
 _mesh = GAME.table('geo_mesh.tsv')
 if _mesh.exists():
     with cf.ThreadPoolExecutor(NJ) as ex: list(ex.map(mesh_finish, [tuple(ln.split()[:2]) for ln in _mesh.read_text().splitlines() if ln.strip() and not ln.startswith('#')]))
@@ -1691,6 +1832,13 @@ if not want:   # a full build: the stamp, then the c1 guard and uniform read ext
     os.replace(os.path.join(out, CAS_USED + '.tmp'), os.path.join(out, CAS_USED))
     for _d in [out] + ([IOSOUT] if IOSOUT else []): dmsh_chain.write_stamp(_d, GAME.id, INPUTS)
     print(f'library stamp: game {GAME.id}, inputs {INPUTS}', flush=True)
+# The libraries' images, from what this build staged (and for a partial build the images it builds on): the folders go, and what reads a library from here on reads the image
+for _label in ('mac', 'ios'):
+    if label_dir(_label): publish_library(_label)
+if PROGRESS:
+    try: os.unlink(PROGRESS)
+    except FileNotFoundError: pass
+if not want:
     for _tool, _table in (('c1_guard.py', 'c1_full.tsv'), ('cb_extent.py', 'cb_extent.tsv')):
         _r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), _tool), out, str(GAME.table(_table))], capture_output=True, text=True)
         if _r.returncode: sys.exit(f'[RED] {_tool} failed ({_r.returncode}): {_r.stderr.strip()[-500:]}')

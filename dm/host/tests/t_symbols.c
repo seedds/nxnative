@@ -22,6 +22,8 @@ static uint8_t *test_section(const struct mach_header_64 *mh, const char *seg, c
 #include "../loader.c"
 #undef getsectiondata
 
+void mtl_present_screen(uint32_t w, uint32_t h) { (void)w; (void)h; }   // symbol-index tests have no display
+
 struct dm_flags g_flag;
 uint64_t unimpl_stubs[MAX_STUB];
 uint64_t now_ns(void) { return 0; }

@@ -76,6 +76,7 @@ int main(void) { @autoreleasepool {
     alarm(30); setbuf(stdout, NULL);
     setenv("DM_PRESENT_HZ", "0", 1);
     mtl_init();
+    mtl_present_screen(8, 8);   // square fixture: test allocator ownership independently of the game profile
     g_test_layer = offscreen_layer(); g_layers = [NSMutableArray new];
     // Display-link mode without a link thread: link_sync sees a started link that is not there yet, the present thread leaves the queue to the callback
     g_dm_present_link = 1; g_link_started = 1; g_link_owns_layer = 1; g_delegate = [NvMetalDisplayLinkDelegate new];

@@ -1,6 +1,7 @@
 // Synthetic modules exercise real relocation and nn::ro calls; no game files or executable guest code required.
 #include "../loader.c"
 void dm_thread_service_connect(void) {}   // threads started so far have nothing to wait for here
+void mtl_present_screen(uint32_t w, uint32_t h) { (void)w; (void)h; }   // loader aspect updates have no display in this relocation-only fixture
 #include "../hle_ro.c"
 #include <assert.h>
 #include <stddef.h>

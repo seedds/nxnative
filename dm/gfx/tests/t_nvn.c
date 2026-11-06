@@ -379,6 +379,15 @@ int main(void) {
         P(nvnCommandBufferEndRecording)(&c2);
         memcpy(&rh, m, sizeof rh); d = draw_idx_rec(m + 8, rh.size, &dt);
         EXPECT("indirect draw keeps its address", 0x20000, d->ind);
+        // GPU-produced arguments are opaque while recording: preserve all 64 bits
+        // without reading the address before replay consumes it.
+        const uint64_t mesh_indirect_address = 0x123456789abc0000ull;
+        P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&c2);
+        ((void (*)(NVNcommandBuffer *, NVNbufferAddress))proc("nvnCommandBufferDrawMeshTasksIndirect"))(&c2, mesh_indirect_address);
+        P(nvnCommandBufferEndRecording)(&c2);
+        p_draw mt; memcpy(&rh, m, sizeof rh); const p_draw *md = draw_rec(m + 8, rh.size, &mt);
+        EXPECT("indirect mesh-task draw preserves its 64-bit argument address", mesh_indirect_address, md->ind);
+        EXPECT("indirect mesh-task draw records as a mesh-task draw", DM_PRIM_MESH_TASKS, md->prim);
         // A single texture bind keeps its handle 16 bytes into the command, where a game that patches recorded commands writes a new one (Luigi's Mansion 3: base + GetCommandMemoryUsed + 0x10)
         P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&c2);
         size_t at = P(nvnCommandBufferGetCommandMemoryUsed)(&c2);

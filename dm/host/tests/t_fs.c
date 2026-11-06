@@ -159,6 +159,28 @@ int main(void) {
         f = fopen(ip, "wb"); fwrite(img, 1, 39 + 50, f); fclose(f);   // cut off inside the index, as a copy stopped partway
         CHECK(!img_open(ip), "a cut-off image is refused");
     }
+    printf("RomFS image: a .zs file that is not a zstd stream\n");   // /data/x.zs = a zstd frame's magic, /data/y.zs = zeros (Ocarina of Time's NUP: three textures begin with 12 KB of zeros)
+    {   uint8_t img[32 + 12 + 4 * 24 + 12] = {0}; uint64_t hd[3] = {44, 4 * 24 + 12, 4};
+        img_ent e[4] = {{1, 1, 0, 0, 0, 0}, {2, 2, 0, 4, 0, 0}, {32, 6, 4, 4, 1, 0}, {38, 6, 8, 4, 1, 0}};
+        memcpy(img, "DMROMFS1", 8); memcpy(img + 8, hd, sizeof hd); memcpy(img + 32, "\x28\xb5\x2f\xfd\x01\x02", 6); memcpy(img + 44, e, sizeof e); memcpy(img + 44 + sizeof e, "datax.zsy.zs", 12);
+        char ip[1100]; snprintf(ip, sizeof ip, "%s/zs.img", root); FILE *f = fopen(ip, "wb"); fwrite(img, 1, sizeof img, f); fclose(f);
+        g_nmnt = 0; setenv("DM_ROMFS", ip, 1); unsetenv("DM_ROMFS_OVERLAY"); CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK, "mount the image");
+        uint64_t h; size_t n = 0; char b[8] = {0}; int32_t t = -1;
+        CHECK(h_fs_OpenFile(&h, "rom:/data/x.zs", MODE_READ) == RES_OK && h_fs_ReadFile(&n, h, 0, b, 6) == RES_OK && n == 6 && !memcmp(b, "\x28\xb5\x2f\xfd", 4), "a zstd stream opens and reads"); h_fs_CloseFile(h);
+        CHECK(h_fs_GetEntryType(&t, "rom:/data/x.zs") == RES_OK && t == ENT_FILE, "and is a file");
+        CHECK(h_fs_GetEntryType(&t, "rom:/data/y.zs") == RES_PATH_NOT_FOUND, "a .zs file of zeros is not found by its entry type");
+        CHECK(h_fs_OpenFile(&h, "rom:/data/y.zs", MODE_READ) == RES_PATH_NOT_FOUND && h_fs_OpenFile(&h, "rom:/data/y.zs", MODE_READ) == RES_PATH_NOT_FOUND, "nor opens, also the second time");
+        CHECK(g_mnt[0].img->e[3].flags == (IMG_ENT_ZCHECKED | IMG_ENT_BADZSTD) && g_mnt[0].img->e[2].flags == IMG_ENT_ZCHECKED, "checked once each, in memory");
+        g_nmnt = 0;
+        // a substitute named for it (the profile's romfs_substitute, here DM_ROMFS_SUBST): served in its place, also when the check ran before (the flags stay)
+        setenv("DM_ROMFS_SUBST", "data/q.zs=data/x.zs data/y.zs=data/x.zs", 1); CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK, "mount again with a substitute");
+        memset(b, 0, sizeof b); n = 0;
+        CHECK(h_fs_OpenFile(&h, "rom:/data/y.zs", MODE_READ) == RES_OK && h_fs_ReadFile(&n, h, 0, b, 8) == RES_OK && n == 6 && !memcmp(b, "\x28\xb5\x2f\xfd\x01\x02", 6), "the damaged file reads as its substitute"); h_fs_CloseFile(h);
+        CHECK(h_fs_GetEntryType(&t, "rom:/data/y.zs") == RES_OK && t == ENT_FILE, "and is a file");
+        setenv("DM_ROMFS_SUBST", "data/y.zs=data/none.zs", 1);
+        CHECK(h_fs_OpenFile(&h, "rom:/data/y.zs", MODE_READ) == RES_PATH_NOT_FOUND, "a substitute that is not in the image: not found");
+        unsetenv("DM_ROMFS_SUBST"); g_nmnt = 0;
+    }
     snprintf(save, sizeof save, "%s/save", root); snprintf(work, sizeof work, "%s.work", save);
     mkdir(save, 0755); snprintf(p, sizeof p, "%s/a", save); put(p, "old");
     setenv("DM_SAVE", save, 1); setenv("DM_TEST_FS_FAIL", "write:5:28", 1);   // the 5th save write fails, errno 28 = ENOSPC

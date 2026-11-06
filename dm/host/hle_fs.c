@@ -784,6 +784,62 @@ HLE_FORCE("_ZN2nn2fs7UnmountEPKc", "fsp-srv; host mounts are permanent, a no-op;
 }
 
 // ---------- Files ----------
+// A RomFS image file named *.zs that does not begin with a zstd frame (or a skippable frame) cannot be decompressed. Such a file is served as the substitute the profile key
+// romfs_substitute names for it (<damaged path>=<substitute path> pairs, image paths without the mount; DM_ROMFS_SUBST replaces the profile's list), else answered "path not found", as a file
+// the dump lacks; one [RED] line names it. Ocarina of Time (Switch 2), the NUP at hand: Tex/CmnTex_Map_Soil_FairyFountain_Floor_D_Nrm.bntx.zs, Tex/Rock_WaterTemple_Gate_M_01_Nrm.bntx.zs and
+// Tex/RBake_Scene_GanonStage_G_2_1_d0_t0.bntx.zs begin with 12 KB of zeros (the container's SHA-256 of them matches: they were so when it was packed; whether a retail copy has them is not known). Served as stored, the fairy fountain model that uses
+// the first (Model/Land_FairyFountain_Base_A.Land_FairyFountain_Base_A_01.bfres) failed to load, and the OptimizeChangeBanc thread (main+0xf7a0) asked for it again about 22 times a second for
+// the whole session: its pass over the 852 entries of the area never ended "all done", so it never went back to its 16 ms sleep (one core, ~980 ms/s, on the Mac and the iPad), and a
+// ParallelDecompThread decompressed the 2.4 MB model each time (~750 ms/s). "Not found" fails the model the same way (the game then asks for the .bntx, also missing); the game's own 1x1 flat
+// normal map (Tex/Dummy_Flat_Normal_CmnTex_Chara_DetailMap_Nrm.bntx.zs) in its place loads the model once, and both threads go idle: Mac CPU 412% -> 180% (medians of 5-minute runs).
+// Checked once per entry, at its first open or entry type (4 bytes); DM_ROMFS_ZSTD_CHECK=0 serves such files as stored
+#define IMG_ENT_ZCHECKED 4   // in memory only: the zstd head check has run for this entry
+#define IMG_ENT_BADZSTD 8    // in memory only: ... and found no zstd frame at the start
+#ifndef DM_GAME_ROMFS_SUBST
+#define DM_GAME_ROMFS_SUBST ""
+#endif
+static int64_t img_subst(mount_t *m, const char *path, const char **donor, int *dlen) {   // the substitute entry for a damaged path (-1: none named, or not in the image)
+    const char *c = strchr(path, ':'), *rest = c ? c + 1 : path, *s = getenv("DM_ROMFS_SUBST");
+    while (*rest == '/') rest++;
+    if (!s) s = DM_GAME_ROMFS_SUBST;
+    size_t rl = strlen(rest);
+    while (*s) {
+        while (*s == ' ' || *s == '\t') s++;
+        const char *end = s + strcspn(s, " \t"), *eq = memchr(s, '=', (size_t)(end - s));
+        if (eq && (size_t)(eq - s) == rl && !memcmp(s, rest, rl)) {
+            char d[1024]; snprintf(d, sizeof d, "/%.*s", (int)(end - eq - 1), eq + 1);
+            if (donor) { *donor = eq + 1; *dlen = (int)(end - eq - 1); }
+            int64_t k = img_find(m->img, d);
+            return k > 0 && m->img->e[k].type ? k : -1;
+        }
+        s = end;
+    }
+    return -1;
+}
+// The entry to serve for entry k: k itself, a damaged file's substitute, or -1 (answered "not found")
+static int64_t img_serve(mount_t *m, int64_t k, const char *path) {
+    img_ent *ent = &m->img->e[k];
+    const char *nm = m->img->names + ent->name;
+    if (!ent->type || ent->nlen <= 3 || memcmp(nm + ent->nlen - 3, ".zs", 3)) return k;   // other files keep their flags as they are
+    uint8_t f = __atomic_load_n(&ent->flags, __ATOMIC_ACQUIRE);
+    if (f & IMG_ENT_ZCHECKED) return f & IMG_ENT_BADZSTD ? img_subst(m, path, NULL, NULL) : k;
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_ROMFS_ZSTD_CHECK"); on = !(e && *e == '0'); }
+    int bad = 0; int64_t r = k;
+    if (on && ent->b >= 4) {
+        uint8_t h[4];
+        if (romfs_image_read(m->img->fd, h, 4, (off_t)ent->a)) {
+            uint32_t mg = (uint32_t)h[0] | (uint32_t)h[1] << 8 | (uint32_t)h[2] << 16 | (uint32_t)h[3] << 24;
+            bad = mg != 0xFD2FB528u && (mg & 0xFFFFFFF0u) != 0x184D2A50u;
+            if (bad) {
+                const char *d = NULL; int dl = 0; r = img_subst(m, path, &d, &dl);
+                if (r >= 0) LOG("[RED] fs %s is not a zstd stream (begins %02x %02x %02x %02x; damaged): served as %.*s (romfs_substitute)", path, h[0], h[1], h[2], h[3], dl, d);
+                else LOG("[RED] fs %s is not a zstd stream (begins %02x %02x %02x %02x; damaged): answered \"not found\"%s (DM_ROMFS_ZSTD_CHECK=0 serves it as stored)", path, h[0], h[1], h[2], h[3], d ? ", its substitute is not in the image" : "");
+            }
+        }
+    }
+    __atomic_fetch_or(&ent->flags, (uint8_t)(IMG_ENT_ZCHECKED | (bad ? IMG_ENT_BADZSTD : 0)), __ATOMIC_RELEASE);
+    return r;
+}
 HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Result, h_fs_OpenFile, uint64_t *out, const char *path, int mode) { dm_thread_service_request();
     int mi; int64_t k;
     if (img_path(path, &mi, &k)) {
@@ -793,6 +849,7 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
         img_ent *ent = &g_mnt[mi].img->e[k];   // a damaged file is named once, at its first open
         if ((ent->flags & IMG_ENT_DAMAGED) && !(__atomic_fetch_or(&ent->flags, IMG_ENT_REPORTED, __ATOMIC_RELAXED) & IMG_ENT_REPORTED))
             LOG("[RED] fs %s failed the NCA's hash check when it was extracted (a damaged NSP, --allow-damaged); its bytes may be wrong", path);
+        if ((k = img_serve(&g_mnt[mi], k, path)) < 0) return RES_PATH_NOT_FOUND;
         *out = FH_OUT(IMG_HANDLE(mi, k));
         if (g_flag.fs) LOG("fs open [%.2fs] %s mode=%d → image entry %lld", (now_ns() - g_t0_ns) / 1e9, path, mode, (long long)k);
         return RES_OK;
@@ -982,7 +1039,7 @@ HLE_FORCE("_ZN2nn2fs10RenameFileEPKcS2_", "fsp-srv → rename(2)", Result, h_fs_
 HLE_FORCE("_ZN2nn2fs15RenameDirectoryEPKcS2_", "fsp-srv → rename(2) of a directory", Result, h_fs_RenameDir, const char *from, const char *to) { dm_thread_service_request(); return rename_entry(from, to); }
 HLE_FORCE("_ZN2nn2fs12GetEntryTypeEPNS0_18DirectoryEntryTypeEPKc", "fsp-srv → stat(2)", Result, h_fs_GetEntryType, int32_t *out, const char *path) { dm_thread_service_request();
     int mi; int64_t k;
-    if (img_path(path, &mi, &k)) { if (k < 0) return err_res("stat", path); *out = g_mnt[mi].img->e[k].type ? ENT_FILE : ENT_DIR; return RES_OK; }
+    if (img_path(path, &mi, &k)) { if (k < 0) return err_res("stat", path); if (img_serve(&g_mnt[mi], k, path) < 0) return RES_PATH_NOT_FOUND; *out = g_mnt[mi].img->e[k].type ? ENT_FILE : ENT_DIR; return RES_OK; }   // a damaged .zs without a substitute is "not found" here too (img_serve)
     HP(path); struct stat st;
     if (stat(hp, &st)) return err_res("stat", hp);
     *out = S_ISDIR(st.st_mode) ? ENT_DIR : ENT_FILE; return RES_OK;

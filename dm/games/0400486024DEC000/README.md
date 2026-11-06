@@ -20,6 +20,8 @@ A Switch 2 game: update v131072, SDK 22.2.8 (`Ounce`). Nintendo EPD's engine (se
 
 One [NUP container](../../../docs/development.md#the-packing-script-in-detail) of 25.6 GB: `scripts/pack_nup.py` unpacks it to `extract/v131072/`. The RomFS keeps most files as zstd with dictionaries from `Pack/ZsDic.pack.zs`. The movies are AV1.
 
+The NUP at hand has three damaged files: `Tex/CmnTex_Map_Soil_FairyFountain_Floor_D_Nrm.bntx.zs`, `Tex/Rock_WaterTemple_Gate_M_01_Nrm.bntx.zs` and `Tex/RBake_Scene_GanonStage_G_2_1_d0_t0.bntx.zs` begin with 12 KB of zeros (the container's SHA-256 of them matches, so they were so when it was packed; whether a retail copy has them is not known; the other 102,182 `.zs` files begin with a zstd frame). The first kept the Kokiri Forest fairy fountain model from ever loading: the `OptimizeChangeBanc` thread asked for it ~22 times a second all session (one core) and a `ParallelDecompThread` decompressed its 2.4 MB each time (~0.75 core). The profile key `romfs_substitute` serves them as the game's 1x1 flat normal map (the Ganon stage bake as its neighbour cell's): Mac CPU 412% → 180%, frame p95 21.9 → 18.8 ms ([A `.zs` file that is not a zstd stream](../../../docs/reference/packing.md#a-zs-file-that-is-not-a-zstd-stream)).
+
 ## Shaders
 
 - About 42,850 in [`shader_map.tsv`](shader_map.tsv), including 500 mesh and 20 task shaders in the BNSH programs ([Task and mesh shaders in BNSH](../../../docs/reference/shaders.md#task-and-mesh-shaders-in-bnsh-and-indirect-mesh-draws)), and the movie library's in an NDVE pack ([`nn::ndve`](../../../docs/reference/shaders.md#nnndves-movie-enhancement-file)).

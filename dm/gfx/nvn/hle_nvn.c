@@ -2899,8 +2899,10 @@ uint64_t nvn_sparse_gen(void) { return atomic_load(&g_vp_gen); }
 static uint64_t sparse_phys2(uint64_t a, uint64_t n, uint64_t *mapped, uint64_t *vrun) {
     if (vrun) *vrun = 0;
     if (!n || !__atomic_load_n(&g_nvp, __ATOMIC_ACQUIRE)) return 0;
-    static __thread uint64_t ca, cn, cg, cp, cm, cv; uint64_t gen = atomic_load(&g_vp_gen);
-    if (ca == a && cn == n && cg == gen) { *mapped = cm; if (vrun) *vrun = cv; return cp; }
+    // 8 lookups kept per caller thread, valid for one mapping generation: PRAGMATA's submit thread asks for three 32-80 MB ranges in turn at the draws that bind them; with one
+    // entry every call missed and walked the range's page table page by page (8,192-20,480 pages), the host's hottest function in a CPU sample of the New Game opening
+    enum { SPC = 8 }; static __thread uint64_t ca[SPC], cn[SPC], cg[SPC], cp[SPC], cm[SPC], cv[SPC]; static __thread unsigned cnext; uint64_t gen = atomic_load(&g_vp_gen);
+    for (unsigned i = 0; i < SPC; i++) if (ca[i] == a && cn[i] == n && cg[i] == gen) { *mapped = cm[i]; if (vrun) *vrun = cv[i]; return cp[i]; }
     uint64_t m = 0, vr = 0;
     uint64_t res = 0; pthread_mutex_lock(&g_vp_mu);
     for (int k = 0; k < g_nvp; k++) { const struct vpool *v = g_vp[k]; uint64_t base = (uint64_t)(uintptr_t)v->base;
@@ -2932,7 +2934,7 @@ static uint64_t sparse_phys2(uint64_t a, uint64_t n, uint64_t *mapped, uint64_t 
               LOG("[nvn]   pieces:%s", t); } } }
         break; }
     pthread_mutex_unlock(&g_vp_mu);
-    ca = a; cn = n; cg = gen; cp = res; cm = m; cv = vr; *mapped = m; if (vrun) *vrun = vr; return res;
+    { unsigned i = cnext++ % SPC; ca[i] = a; cn[i] = n; cg[i] = gen; cp[i] = res; cm[i] = m; cv[i] = vr; } *mapped = m; if (vrun) *vrun = vr; return res;
 }
 uint64_t nvn_sparse_phys(uint64_t a, uint64_t n, uint64_t *mapped) { return sparse_phys2(a, n, mapped, NULL); }
 // [a, a + n) of a sparse pool whose mapped part is one run of the pool's virtual range from a, possibly in several physical pieces, with nothing mapped after it: → the run's

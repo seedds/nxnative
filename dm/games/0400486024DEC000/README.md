@@ -61,6 +61,10 @@ Run headless, `DM_CTL` at a control file. The work folder has `boot.sh <secs> <l
 
 From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. From `save_ref`: at about 58 s `A~0.2`, 5 s later `A~0.2` (Load), 30 s later three `A~0.1` 3 s apart, then 12 s to the bridge outside Link's house. There `LUp~3.5`, `A~0.2` (Climb Down) and `LDown~4` three or four times reach the village floor.
 
+## Ultrawide
+
+The game sizes its output from fixed 2560x1440 (docked) constants, so a 21:9 screen showed a 16:9 picture with bars. Building with `DM_ULTRAWIDE=<width>x<height>` (the screen, e.g. `3440x1440`) registers cuts for main e0f3ccfaf50065ae ([patches.py](patches.py)) that give the output size, the render sizes and the output resolution table widths from the screen's ratio at the game's own heights. The 3D view takes its aspect from the render size, so the view widens (Hor+) and nothing is stretched; the HUD and subtitles stay centred, movies stay 16:9 in the middle. Checked on a CB342CK at 3440x1440 (Mac mini M4 Pro, v131072): swap chain 3440x1440, WindowCrop 2752x1152 (2.389:1), title screen, the opening and Link's house fill the screen. Start it with `DM_FULLSCREEN=1` (and `DM_SCREEN=<name>` when the ultrawide is not the main screen).
+
 ## Open
 
 - Current: against a frame of console video of Navi's close-up the picture matches: hair and sign within 1–2 % in red and green. The causes, each general: [float atomics](../../../docs/reference/shaders.md#float-atomics-in-storage-memory) (too bright, yellow skin, a pale veil: the exposure read back from buffers that stayed 0), the terrain's CPU-written maps (holes, wrong materials; the profile keys above), [the gather offsets](../../../docs/reference/shaders.md#texturegatheroffsets-and-a-loop-over-its-offsets) (the dotted rows in blurred areas, born in the NDSR upscaler, three pictures from one input), and [image atomics on RGBA8](../../../docs/reference/shaders.md#image-atomics-on-a-32-bit-colour-texture) (the anti-aliasing's blend weights).

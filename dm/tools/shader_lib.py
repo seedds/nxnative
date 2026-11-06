@@ -11,7 +11,8 @@
 # (a full drive) is one [RED] line, not an error: the build is done, and the folder works.
 # An iPhone library may leave out the pulling vertex libraries when nothing will read them (pack's leave_out), which the marker PULLING_LEFT_OUT inside it says: the build that needs them compiles them,
 # and pack_ipa.py refuses to pack such an image for an app that needs them, which would fail only on the device.
-# Not part of the translation chain: it decides no output (dmsh_chain.py), and dmsh_build.py still writes a folder.
+# Not part of the translation chain: it decides no output (dmsh_chain.py). dmsh_build.py writes the image itself (write, from the outputs it staged in the shader cache), and its folder holds
+# only the shaders in flight; pack is for a folder an older chain's dmsh_build.py wrote (regress.py builds old revisions) or a build stopped before that.
 # Usage: shader_lib.py pack <lib>                      the folder into the image
 #        shader_lib.py expand <lib>                    the image back into a folder, only for a host from before this change
 #        shader_lib.py path <lib>                      what to read: the folder or the image
@@ -71,7 +72,8 @@ def _names(folder):
 
 
 def write(files, dst):
-    """files: {name: path to read (a romfs path may name a file inside an image) or the bytes} → the image dst, by way of dst.part. A stopped write leaves only the .part, and an image is whole or absent"""
+    """files: {name: path to read (a romfs path may name a file inside an image), the bytes, or a function returning them (read only when its file is written: dmsh_build.py's outputs staged in the
+    shader cache, so that no library is held in memory whole)} → the image dst, by way of dst.part. A stopped write leaves only the .part, and an image is whole or absent"""
     part = dst + '.part'
     names = sorted((n.encode() for n in files))
     ents, off = [], romfs.HEAD.size
@@ -81,7 +83,10 @@ def write(files, dst):
             off += -off % ALIGN
             out.seek(off)
             n, source = 0, files[name.decode()]
+            if callable(source): source = source()
+            if source is None: raise OSError(f'{name.decode()}: no bytes to write')
             if isinstance(source, bytes): out.write(source); n = len(source)
+            elif not isinstance(source, (str, os.PathLike)): raise TypeError(f'{name.decode()}: {type(source).__name__} is not a path, bytes or a function')
             else:
                 with romfs.open(source, 'rb') as f:
                     while b := f.read(8 << 20): out.write(b); n += len(b)

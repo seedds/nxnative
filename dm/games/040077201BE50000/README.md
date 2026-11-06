@@ -55,7 +55,7 @@ Moving objects get their ambient light from eight values per object in a storage
 - A crash seen once in dozens of runs, in a run slowed by another game on the same GPU: the game's own wait at `main+0x2ecff24` (`ldarb` on a thread object at +0x285, in a loop that sleeps between reads) read an alias page just unmapped, right after `[mem] alias region mapped` fell. Not caused by the host's page protection, which does not unmap; whether the host unmaps earlier than Horizon would is not known.
 - The 12x12 cube the vertex shader mixes with the probe values holds 4 to 27 with `tex_flush_upload`, and read zeros without it.
 - [The guard band cull's](../../../docs/reference/shaders.md#a-guard-band-cull-in-every-vertex-shader-0x80d) real meaning, and the vertex output at `a[0x5c]` that 4,771 vertex shaders write and the translator drops (probably a shading rate, not checked).
-- `[RED] nn::codec VP9: a packet refused with 12 pictures waiting for a released buffer` (4 lines at the first movie); the movies seen play.
+- `nn::codec VP9: busy (result 3603), a packet refused with 12 pictures waiting for a released buffer` (4 lines at the first movie, a red line until [a refusal was known to be no fault](../../../docs/reference/movies.md#the-submission-ready-event-counted-as-packets)); the movies seen play.
 - A `pso_manifest.tsv` has not been recorded, so the first race compiles pipelines as it goes.
 - What `nvnTextureViewCompare`'s return value means is taken from its name.
 - City Trial played by hand, Road Trip, online, the base game, iOS: not tested.

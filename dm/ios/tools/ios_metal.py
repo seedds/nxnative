@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../
 METAL = ['xcrun', '-sdk', 'iphoneos', 'metal', '-c', '-O1', '-mios-version-min=18.0', '-fmetal-math-mode=relaxed', '-fpreserve-invariance']
 METALLIB = ['xcrun', '-sdk', 'iphoneos', 'metallib']
 RECORD = ' '.join(METAL) + '; ' + ' '.join(METALLIB)                                # Written into json chain.metal
+DEPTH = ['-fbracket-depth=1024']   # more nested brackets than the front end's 256 (as dmsh_build.py's METAL_DEPTH): no output changes with it, so RECORD does not name it
 
 @functools.cache
 def _lookup(sdk, name):
@@ -33,5 +34,5 @@ def metal(cmd, msl, air):   # a metal command up to its source (METAL, MAC_METAL
     dmsh_pch.compile(argv, msl, air, env)
 
 def compile(msl, air, lib):
-    metal(METAL, msl, air)
+    metal(METAL + DEPTH, msl, air)
     run([*METALLIB, air, '-o', lib])

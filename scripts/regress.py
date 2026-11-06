@@ -463,14 +463,14 @@ def chain_build_locked(tree, g, a, v, inp, key, out):
             say(f'  {g.id}: chain {v} (inputs {inp}) of {tree.id}: translating the shaders ({jobs} workers) → {out}')
             if cas.suffix != '.db': tree_tar.unpack(cas, say)
             rc, paused = run_heavy([sys.executable, entry, g.build / 'shader/pkg', out], log, tree.path, env, a, f'{g.id} shader build'); t0 += paused
-            if rc or not (lib / '_b_build.json').is_file():
+            if rc or not (shader_lib.view(lib) / '_b_build.json').is_file():   # a folder (an older revision's dmsh_build.py) or the image a newer one writes
                 raise HarnessError(f'{g.id}: dmsh_build.py of {tree.id} failed (exit {rc}); last lines of {log}:\n' + ''.join(collections.deque(open(log, errors='replace'), maxlen=8)))
             prof = out / 'profile'; prof.mkdir(exist_ok=True)   # the tables the host reads beside the shader map, as this build made them
             for src in g.profile_dir(tree).glob('*.tsv'): shutil.copyfile(src, prof / src.name)
             (out / 'built.ok').write_text(f'{tree.id}\n')
             if cas.suffix != '.db': tree_tar.pack(cas, say)
         say(f'  {g.id}: hashing the outputs of chain {v}')
-        shaders = nvn_manifest(lib, jobs)
+        shaders = nvn_manifest(shader_lib.view(lib), jobs)
     else:
         say(f'  {g.id}: vk_shaders.py {v} of {tree.id} → {out}')
         msl = out / 'msl'; shutil.rmtree(msl, ignore_errors=True); msl.mkdir()

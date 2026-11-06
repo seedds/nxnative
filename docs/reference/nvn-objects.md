@@ -206,6 +206,14 @@ The game may also write into an NVN object directly, without an NVN call, throug
 
 ## Command memory
 
+### Bound render targets outlive command recordings
+
+- **Symptom:** `texture object no longer valid`, followed by `CRASH sig=10` in `nvn_sparse_pool` through `sparse_gpu_wrote` and `attach`. In Rhythm Heaven Groove's frog stage, the supposed texture contained a texture handle followed by an `OP_DRAW_IDX` record.
+- **Cause:** `tex_snap` stores a texture description inside the command recording. The queue's `R.rt` kept pointers to those descriptions across submissions, even after the recording had completed and its memory could be reused. A write watch caught `nvnCommandBufferBindTexture` replacing a valid snapshot at the same address; the next render pass read the new command bytes as a texture and memory-pool pointer. Checking the texture's magic in `tex_mtl` did not protect the subsequent sparse-pool lookup.
+- **Fix:** `rt_preserve_bound` copies the still-bound color and depth descriptions into fixed storage owned by the queue after CPU replay, before the submission can publish completion. The standalone replay path has its own storage. Already-owned descriptions are reused; all sources are read before any destination is written, so reordered or aliased targets remain intact. Views and subresource selections stay with `R.rt`. No texels are copied, no texture is reloaded, and Metal objects retain their existing fence-based lifetimes.
+- **Check:** `t_rt_lifetime` reuses completed command memory through the NVN interface and checks real color/depth readback. It covers bindings inherited by a later submission, alternating queues, a nested command list, mip/layer views, depth-only targets and the eighth color attachment, with synchronous and deferred Metal encoding. The inherited-target case crashed before the fix.
+- **Found on:** [Rhythm Heaven Groove](../../dm/games/0100D9F01D474000/README.md#rendering), base 1.0.0, `kaeru` (localized name labels `I_KAERU_00` and `I_KAERU_01`).
+
 ### Control memory capacity queries
 
 - **Symptom:** `[RED] NVN unimplemented function called: nvnCommandBufferGetControlMemoryFree` (or `…GetControlMemorySize`) once, after the game gives a command buffer control memory.
@@ -240,6 +248,14 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** the host now keeps 16 bytes (one JUMP), lets the END take a segment's last bytes, and links only recordings that have records, so a JUMP only stands where a record of 16 bytes or more was to go and never writes past what `GetCommandMemoryUsed` reported (`OP_RESERVE` in `hle_nvn.c`; `t_nvn` "slotted lists").
 - **Note:** to read such a crash, `x8` holds the jump-table target of the previous record's case, and the registers a callee saved below `sp` give the previous replay pointer (`x19`) and payload (`x26`).
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) (1.4.3, GitHub issue #61).
+
+### Copy strides are command buffer state
+
+- **Symptom:** a jump to pc=0 on a worker thread, with the backtrace `0x0` ← `cmd_alloc_keep` ← `h_nvnCommandBufferCopyBufferToTexture` and `lr` in the game's `main`, just after the instruction that called the game's command memory callback.
+- **Cause:** `SetCopyRowStride` and `SetCopyImageStride` were recorded as 24-byte `OP_COPY_STRIDE` commands. In NVN they are command buffer state that a copy reads when it is recorded (`GetCopyRowStride` reads them back), and setting them uses no command memory. A game that sizes one upload's command memory for the driver ran out on the host. nn::gfx's `CommandBuffer` (the NVN backend) always installs its own callback (`main+0x31be0` in Smash) and calls the out-of-command-memory or out-of-control-memory handler the game set (`+0xd0` / `+0xd8` of the object). The game never sets a handler on a command buffer that should never run out, so the callback called address 0. Smash records each texture upload from a stack command buffer with 0x100 bytes of command memory (`main+0x3664960` and `main+0x3794430`): the two strides (48 bytes), then the copy (200 bytes with its texture snapshot, plus 16 kept for a JUMP) came to 264 bytes.
+- **Fix:** the strides are fields of `cmd_t` (`copy_row`, `copy_image`), set and read back by `Set`/`GetCopy*Stride` without a record. A buffer ↔ texture copy carries them after its texture snapshot (`p_copy_strides`, `rec_copy` in `hle_nvn.c`) only when one is set, so a copy with tight strides keeps its size. The replay reads them from the record (`copy_strides` in `nvn_obj.h`); `OP_COPY_STRIDE` is still replayed from older captures, and the capture layout gained a line, so an older replayer refuses a new capture. `t_nvn` (5c) records Smash's sequence in 256 bytes with a callback that counts any call.
+- **Note:** the game's `nu::VirtualAllocHook` / `nu::VirtualFreeHook` are undefined weak imports bound to 0 at boot, as Horizon's rtld binds them. Every one of their 6,155 call sites in Smash's `main` tests the GOT entry first, so they were not the null call.
+- **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md#rendering) 13.0.5 on the iPhone, opening Adventure (World of Light).
 
 ### Recorded commands patched in place by the game (`OP_BIND_TEX1`)
 
@@ -736,3 +752,10 @@ Games read this count as a position in their own command memory and size their h
 - **Cause:** the engine copies an `NVNtexture` by value and finalizes the copy, while the original stays in use. The host keyed the texture by serial, so finalizing the copy deleted the host texture of the original, and its next use uploaded it again.
 - **Fix:** general (`nvn_mtl.m` `mtl_tex_release`). The registry keeps the address of the object that was initialized, and a finalize is ignored when that owner still holds the texture's magic and serial (read with `vm_read_overwrite`, as the owner's memory may be gone). `t_cpu_tex` checks both orders.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
+### Freeing a memory pool during a texture ID walk
+
+- **Symptom:** the host stops with `NSInvalidArgumentException: -[NvPkg buffer]: unrecognized selector sent to instance` under `tex_by_id` (via `pool_entry`, `pool_gpu`, `encode_args_`, `draw_`, `mesh_tasks_draw`); not a GPU hang, no `kIOGPU` errors. It came after minutes of play, right after a save or at a scene change.
+- **Cause:** `nvnMemoryPoolFinalize` on a game thread dropped the pool's textures from the CPU-written set (`cpu_tex_drop_pool`) before it marked the pool's texture IDs gone under `g_rmu` (`treg_drop_pool_views`). A pool walk on the submit thread holds `g_rmu` and visits every registered ID; one of that pool's IDs reached in between was not gone, its pool's magic was still set, and its texture was no longer CPU-written, so `tex_mtl_` skipped the packaged path and returned the texture table's entry as it was: the `NvPkg` wrapper of the upload, not an `MTLTexture`. `tex_by_id`'s first message to it threw.
+- **Fix:** general (`nvn_mtl.m` `mtl_alias_drop_pool`). The IDs are marked gone first: a walk holding `g_rmu` either finishes while the classification is still there or finds the ID gone and takes `tex_made`, which unwraps the `NvPkg`. `t_cpu_tex --metal` (`finalize_during_walk`) finalizes a pool on another thread while it holds `g_rmu`: with the old order the classification was gone and `tex_mtl` handed out the `NvPkg`.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), from two players' reports on PR #1299 and PR #1420 (an M3 Max 412 s into Kokiri Forest after a save; an M4 Pro in the Deku Tree after about 40 minutes). PR #1420 found where the `NvPkg` escaped.

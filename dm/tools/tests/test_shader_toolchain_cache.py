@@ -26,6 +26,9 @@ sys.path.insert(0, str(TOOLS))
 import dmsh_chain  # noqa: E402
 import dmsh_mtlcache  # noqa: E402
 import shader_cache  # noqa: E402
+sys.path.insert(0, str(REPO / 'dm/tools'))
+import romfs  # noqa: E402
+import shader_lib  # noqa: E402
 
 spec = importlib.util.spec_from_file_location('nsp_toolchain_cache', REPO / 'scripts/build_ipa_from_nsp.py')
 assert spec and spec.loader
@@ -42,10 +45,12 @@ class ShaderCache(unittest.TestCase):
                        ios_metal=types.SimpleNamespace(RECORD='ios flags'), METAL_FP='tested Metal and SDK',
                        FACTS={}, MAP_ROWS={}, MAP_CONFLICT_ROWS={}, CODE_FP='source', PROFILE_ROWS=b'', PAIRS={},
                        DUAL_WANT=set(), BF_WANT=set(), BF_STATS=collections.Counter(), STORE=shader_cache.Store(root / 'cas.db'), out=str(root / 'out'),
-                       CHAIN='test-chain', clone=shutil.copyfile, shader_rule_source=lambda name: b'')
+                       CHAIN='test-chain', clone=shutil.copyfile, shader_rule_source=lambda name: b'',
+                       STAGE='stage/test', want=set(), OUT_KEY=re.compile(r'([0-9a-f]{16})_b'), OLD_IMAGE={}, shader_lib=shader_lib, romfs=romfs, shutil=shutil,
+                       STAMP_BEFORE=None, INPUTS='inputs')
         (root / 'out').mkdir()
         names = {'tool_fingerprint', 'shader_key', 'cache_path', 'cache_outputs', 'restore_cache', 'publish_cache', 'atomic_json', 'cache_meta_path',
-                 'bf_digest', 'bf_cache_root', 'bf_cache_restore', 'vs_pad'}
+                 'bf_digest', 'bf_cache_root', 'bf_cache_restore', 'vs_pad', 'label_dir', 'output', 'commit', 'publish_library'}
         tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
         self.tree = tree
         nodes: list[ast.stmt] = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
@@ -204,7 +209,7 @@ class ShaderCache(unittest.TestCase):
         (out / (pixel + '_bf.metallib')).write_bytes(b'stale dependency variant')
         # Execute the real selection and cleanup block, stopping before temporary jobs or tools start.
         start = next(i for i, n in enumerate(self.tree.body) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'keys' for t in n.targets))
-        end = next(i for i, n in enumerate(self.tree.body) if i > start and isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'w' for t in n.targets))
+        end = next(i for i, n in enumerate(self.tree.body) if i > start and isinstance(n, ast.FunctionDef) and n.name == 'sweep_work')   # not the sweep of the working folders
         self.ns.update(want={vertex}, loc=locations, PAIRS=pairs, INPUTS='inputs')
         exec(compile(ast.Module(body=self.tree.body[start:end], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), self.ns)
         self.assertEqual(self.ns['want'], {vertex, pixel})
@@ -247,10 +252,13 @@ class ShaderCache(unittest.TestCase):
             self.ns['publish_cache'](key, key + '-digest', 'rule', 'source')
             return key, 'ok', '', refl
 
-        phase = next(n for n in self.tree.body if isinstance(n, ast.With) and any(
-            isinstance(s, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'res' for t in s.targets) for s in n.body))
-        self.ns.update(cf=cf, NJ=1, keys=keys, fin=finish_key)
-        exec(compile(ast.Module(body=[phase], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), self.ns)
+        # the batches, then the loop that translates and finishes them (the translator and fin substituted)
+        start = next(i for i, n in enumerate(self.tree.body) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'batches' for t in n.targets))
+        end = next(i for i, n in enumerate(self.tree.body) if i > start and isinstance(n, ast.With)) + 1
+        work = Path(self.tmp.name) / 'work'
+        def translate(batch): work.mkdir(exist_ok=True); return str(work)
+        self.ns.update(cf=cf, NJ=1, BATCH=1, keys=keys, fin=lambda key, wb: finish_key(key), translate=translate)
+        exec(compile(ast.Module(body=self.tree.body[start:end], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), self.ns)
         self.assertEqual(built, [pixel, vertex])
         self.assertIn('dm_pad7 [[user(locn7)]]', (out / (vertex + '_b.metal')).read_text())
         expected = {p.name: json.loads(p.read_text()) if p.suffix == '.json' else p.read_bytes() for p in out.iterdir()}
@@ -260,6 +268,46 @@ class ShaderCache(unittest.TestCase):
             self.assertTrue(self.ns['restore_cache'](key, key + '-digest'))
         self.assertEqual({p.name: json.loads(p.read_text()) if p.suffix == '.json' else p.read_bytes() for p in out.iterdir()}, expected)
         self.assertEqual(json.loads((out / (vertex + '_b.json')).read_text())['vs_pad'], [7])
+
+
+    def test_finished_shaders_leave_the_disk_and_the_image_holds_them(self):
+        # commit moves a finished shader's files into the cache's stage; output reads them back; publish_library writes the image and removes the folder and the stage
+        out, a, b = Path(self.ns['out']), '1' * 16, '2' * 16
+        for key in (a, b):
+            (out / (key + '_b.metal')).write_text(key + ' source'); (out / (key + '_b.metallib')).write_bytes(key.encode())
+        (out / (a + '_b.metal.tmp-1-2')).write_text('a write in progress')   # not a finished file: stays
+        self.ns['commit'](a)
+        self.assertEqual(sorted(p.name for p in out.iterdir()), sorted([a + '_b.metal.tmp-1-2', b + '_b.metal', b + '_b.metallib']))
+        self.assertEqual(self.ns['output']('mac', a + '_b.metal'), (a + ' source').encode())   # from the stage
+        self.assertEqual(self.ns['output']('mac', b + '_b.metal'), (b + ' source').encode())   # still on disk
+        self.assertIsNone(self.ns['output']('mac', '3' * 16 + '_b.metal'))
+        (out / 'inputs.tsv').write_text('game\tid\ninputs\tinputs\n')
+        self.ns['publish_library']('mac')
+        self.assertFalse(out.exists())
+        self.assertEqual(self.ns['STORE'].names('stage/'), set())
+        img = shader_lib.view(out)
+        self.assertEqual(sorted(p.name for p in img.iterdir()), sorted([a + '_b.metal', a + '_b.metallib', b + '_b.metal', b + '_b.metallib', 'inputs.tsv']))
+        self.assertEqual((img / (a + '_b.metallib')).read_bytes(), a.encode())
+
+    def test_partial_build_keeps_the_image_less_the_keys_it_builds(self):
+        out, built, kept = Path(self.ns['out']), '1' * 16, '2' * 16
+        shader_lib.write({built + '_b.metal': b'old', built + '_bf.metallib': b'old variant', kept + '_b.metal': b'kept', 'inputs.tsv': b'game\tid\ninputs\told\n'},
+                         shader_lib.image_of(str(out)))
+        self.ns.update(want={built}, OLD_IMAGE={'mac': romfs.Path(shader_lib.image_of(str(out)))}, STAMP_BEFORE='old', INPUTS='new')
+        self.assertIsNone(self.ns['output']('mac', built + '_b.metal'), 'a key this build makes has no older outputs')
+        self.assertEqual(self.ns['output']('mac', kept + '_b.metal'), b'kept')
+        (out / (built + '_b.metal')).write_text('new'); self.ns['commit'](built)
+        self.ns['publish_library']('mac')
+        img = shader_lib.view(out)
+        self.assertEqual({p.name: p.read_bytes() for p in img.iterdir()}, {built + '_b.metal': b'new', kept + '_b.metal': b'kept'})   # the old variant and the stale stamp are gone
+
+    def test_an_image_that_cannot_be_written_leaves_a_whole_folder(self):
+        out, key = Path(self.ns['out']), '1' * 16
+        (out / (key + '_b.metal')).write_text('source'); self.ns['commit'](key)
+        self.ns['shader_lib'] = types.SimpleNamespace(image_of=shader_lib.image_of, write=mock.Mock(side_effect=OSError('No space left on device')))
+        self.ns['publish_library']('mac')
+        self.assertEqual((out / (key + '_b.metal')).read_text(), 'source')
+        self.assertFalse(os.path.exists(shader_lib.image_of(str(out))))
 
 
 class TargetSelection(unittest.TestCase):
@@ -275,14 +323,19 @@ class TargetSelection(unittest.TestCase):
                 with self.subTest(targets=targets):
                     compile_target = mock.Mock()
                     compose = mock.Mock(return_value='mesh source')
+                    def output(label, name, td=td):
+                        p = Path(td) / name
+                        return p.read_bytes() if p.is_file() else None
                     ns: dict[str, Any] = dict(os=os, json=json, subprocess=subprocess, out=td, w=td, TARGETS=targets,
                               IOSOUT=str(ios) if 'ios' in targets else None, MESH_STATS=collections.Counter(),
-                              MTL=types.SimpleNamespace(compile=compile_target), dmsh_mesh=types.SimpleNamespace(compose=compose))
+                              MTL=types.SimpleNamespace(compile=compile_target), dmsh_mesh=types.SimpleNamespace(compose=compose),
+                              output=output, commit=mock.Mock())
                     exec(compile(ast.Module(body=[function], type_ignores=[]), '<mesh targets>', 'exec'), ns)
                     ns['mesh_finish'](('vertex', 'geometry'))
                     compose.assert_called_once_with('vertex source', 'geometry source', [36])
                     self.assertEqual([call.args[0] for call in compile_target.call_args_list], [t for t in ('mac', 'ios') if t in targets])
                     self.assertEqual(ns['MESH_STATS']['built'], 1)
+                    ns['commit'].assert_called_once_with(names=['vertex_geometry_m3.metallib'])   # its library staged as a shader's outputs are
 
     def selection(self, env):
         tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())

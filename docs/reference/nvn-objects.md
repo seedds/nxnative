@@ -366,6 +366,28 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** `nvn_tex.c` recognizes either flag for linear sizing and excludes both from block-linear level offsets, GOB columns and sparse layout. `nvn_deswizzle_geom` rejects both. `tex_linear` uses the same calculated row pitch, including implicit alignment, as `GetStorageSize`. Render-target rows align to 128 bytes; ordinary linear rows align to 32. Explicit strides are preserved. `t_tex` covers the layout and `t_linear_readback` checks a GPU clear against padded CPU-visible rows.
 - **Found on:** [Persona 5 Royal](../../dm/games/01005CA01580E000/README.md#rendering): a 16x16 RGBA8 target with flags `0x44` and stride 128 needs 2 KB; block-linear sizing returned 1 KB.
 
+### Linear textures a device cannot view on their pool's buffer
+
+- **Symptom:** on an iPhone only, a scene's backgrounds are solid magenta and magenta frames flash, while the Mac is right. The log has `[RED] linear texture offset … / row pitch 32 not aligned to 64 bytes; created as a private texture (CPU writes invisible)`, then `[RED] deswizzle failed format 0x25 target 1`.
+- **Cause:** Metal makes a texture on a buffer only at `minimumLinearTextureAlignmentForPixelFormat`, and the minimum depends on the device: 64 bytes for RGBA8 on an A18 Pro, less on the Macs here. Ordinary linear rows align to 32 bytes ([the entry above](#linear-render-target-storage-without-the-linear-flag)), so an 8×8 RGBA8 linear texture has 32-byte rows. `tex_linear` refused it, and the texture became a private one. Its first fill (`tex_init_fill` → `pkg_upload_`) went through the block-linear deswizzler, which rejects linear storage, so it stayed empty and never saw the CPU's writes.
+- **Fix:** `linear_fit` (`nvn_mtl.m`) tells a linear texture that no view can take apart from one that is not linear. `tex_mtl_` makes such a texture a CPU-written packaged one, uploaded at its first use on the submit thread and again after CPU writes to its pages, when the GPU does not render or store into it (`linear_cpu_only`: `LINEAR` without `LINEAR_RENDER_TARGET` or `IMAGE`). The storage then holds its content, as for the other uploaded textures:
+  - `pkg_upload_` copies it by rows of its stride instead of deswizzling it, with no GPU deswizzle or large-pool staging buffer;
+  - a GPU copy into it is written into the storage too (`tex_storage_dst`; `write_region_linear` in `hle_nvn.c`), so the next upload carries it;
+  - `mtl_read_texels` reads it from the storage by the same rows, on whatever thread asks. So a read before its first use does not make it a private texture of zeros, and a read after a CPU write does not upload it off the submit thread.
+  Textures that a view can take are unchanged.
+- **Limits:** a linear render target or image that no view can take stays a private texture. Its first fill now takes its storage, but the CPU's later writes do not reach it (`[RED] linear texture … rows of 32 bytes no view can take, a private texture the CPU's writes do not reach`).
+- **Check:** on a Mac, `DM_TBUF_ALIGN=64` reproduces the phone's alignment for these textures too. `make -C dm/gfx/tests GAME=<id> check_t_linear_readback` runs with it, on 6×6 RGBA8 textures in a pool made through NVN (write-tracked, as a game's):
+  - a `LINEAR` one with 32-byte rows is not a view. Its first upload and `nvnTextureReadTexels` hold its pixels at the storage's stride. After an NVN copy into it, a read on another thread has the copied rows. After a CPU write, it has that row as well, and the next upload carries both;
+  - the same with 64-byte rows stays a view;
+  - one read on another thread before its first use has its pixels, and is still uploaded at that first use;
+  - an `IMAGE | LINEAR` one with 32-byte rows stays a GPU texture, filled at the stride.
+  Each part is needed:
+  - without the storage read, the reads come back empty;
+  - without `linear_cpu_only`, the image is made CPU-written;
+  - reading the resolved host texture instead uploads it on the reading thread after the CPU write, and `up_owner_check` stops the test.
+  Copying the rows at the pixel pitch fails 5 of 6 rows. Axiom Verge's opening logs `linear texture ser=28 8x8 format 0x25 flags 0x10: offset 0x3f8000 / row pitch 32 not aligned to 64 bytes` and `CPU-written texture ser=28 …`, the same on the Mac with the switch and on both iOS devices without it. On the Mac its picture matches a run without the switch.
+- **Found on:** Axiom Verge 1.0.3 (`0100052004384000`, SDK 4.4.0, MonoGame; its profile is a separate change) on an iPhone 16 Pro Max, iOS 26.0: the opening's sky and mountains are magenta. Its 8×8 RGBA8 linear textures sit in a `CPU_UNCACHED` pool. An iPad Pro with an M4 asks for 64 bytes on iPadOS 26.0 as well, while macOS 27.0 on an M4 Pro asks for 16. With the fix, both iOS devices log the four textures as uploaded, and the iPhone's opening is right.
+
 ### Textures written with `nvnTextureWriteTexels`
 
 - **Symptom:** video frames, or a game's built-in default textures, are all zero.

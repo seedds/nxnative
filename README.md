@@ -31,6 +31,13 @@ Community projects build on nxnative with Mac apps that turn your games into app
 - [NxNative Launcher](https://github.com/rennan101/nxnative_Launcher)
 - [LumaNX](https://github.com/Xc1Ym/LumaNX)
 
+### Game bring-ups by the community
+
+Forks that carry a Switch 2 game's own work on nxnative's engine, maintained by their authors with their game notes and tutorials. Questions and bugs about them go to their own pages.
+
+- **[kartnative](https://github.com/pahorema/kartnative)** — Mario Kart World's bring-up: its sparse texture checks, first-sample terrain tiles and the `mem_map_limit` memory plan are its work, and the settings the host continues to use carry its numbers.
+- **[plumber-racer-2](https://github.com/cheemu21/plumber-racer-2)** — Mario Kart World 1.0.0 on iPhone and Mac, with an install tutorial, touch racing controls and the file-backed memory recipe; a whole cup on an iPhone 18 Pro in LiveContainer at about 3.9 GB.
+
 ### Build from the command line
 
 You need a Mac with macOS 26.6 or later, [Xcode](https://developer.apple.com/download/all/?q=Xcode%2027.2) 27.2, [Homebrew](https://brew.sh) and Python 3.12 or newer (an arm64 one, not an Intel Homebrew's). An iPhone build also needs Xcode's iOS platform (Xcode → Settings → Components).

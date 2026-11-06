@@ -24,7 +24,7 @@ The layer was written for this game (Super Mario Galaxy extended it later: [0100
 
 - 74 SPIR-V files in `Content/EffectsForgeSwitch` (`.vert` / `.frag`; the `.shader` files list each program's pair). `romfs_marker` is `Content/EffectsForgeSwitch/Default.vert`.
 - `dm/gfx/tools/vk_shaders.py <RomFS> <shader dir> [--ios <dir>]` translates them with SPIRV-Cross into `<dir>/vk/`: one library, and a table of the Metal slot each (set, binding) moved to. The game hands the same words to `vkCreateShaderModule`, so the host finds each shader by the hash of its SPIR-V.
-- **Packing:** for a Vulkan game the NSP script runs `vk_shaders.py` (Mac and iOS libraries in `<id>_build/shader/vk` and `shader/ios/vk`) in place of the NVN shader split and chain build, and `build_ipa.sh` ships `$MSL_IOS/vk` instead of the NVN chain libraries (`GFXAPI`). The NVN shader tables stay empty.
+- **Packing:** for a Vulkan game the NSP script runs `vk_shaders.py` (Mac and iOS libraries in `<id>_build/shader.noindex/vk` and `shader.noindex/ios/vk`) in place of the NVN shader split and chain build, and `build_ipa.sh` ships `$MSL_IOS/vk` instead of the NVN chain libraries (`GFXAPI`). The NVN shader tables stay empty.
 
 ## Services
 

@@ -113,12 +113,13 @@ class BugReport(unittest.TestCase):
         b = self.nsp / f'{TID}_build'
         for sub in ('cache/b-0123456789ab', 'ios/b-abcdef012345'):
             (b / 'shader' / sub).mkdir(parents=True)
+        (b / 'shader.noindex/cache/b-fedcba987654').mkdir(parents=True)   # the NSP script's name since, beside a folder it has not moved yet
         with mock.patch.object(br, 'git_state', return_value='unrelated-commit'), mock.patch.object(br, 'chain_version', return_value='unrelated-chain'):
             code, out = self.run_main(str(self.nsp))
         self.assertEqual(code, 0)
         report = zipfile.ZipFile(out).read('report.md').decode()
         self.assertIn('## nxnative commit\nunknown (not recorded by the build)', report)
-        for folder in ('shader/cache/b-0123456789ab', 'shader/ios/b-abcdef012345', 'shader/b-deadbeef0001'):
+        for folder in ('shader/cache/b-0123456789ab', 'shader/ios/b-abcdef012345', 'shader/b-deadbeef0001', 'shader.noindex/cache/b-fedcba987654'):
             self.assertIn(folder, report)
 
     def test_home_redacted(self):

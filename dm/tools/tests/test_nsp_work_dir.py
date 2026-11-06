@@ -55,6 +55,12 @@ class WorkDir(unittest.TestCase):
         self.assertEqual(self.plan(), (self.nsps / f'{TID:016X}_build', self.nsps / ipa))
         self.assertIsNone(self.nsz_work)
 
+    def test_shader_folder_from_before_moves_first(self):   # before any step reads it, so the next build reuses its libraries and cache
+        old = self.nsps / f'{TID:016X}_build' / 'shader'; (old / 'cache').mkdir(parents=True); (old / 'pkg.key').write_text('key\n')
+        build, _ = self.plan()
+        self.assertFalse(old.exists())
+        self.assertEqual((build / nsp.SHADER / 'pkg.key').read_text(), 'key\n'); self.assertTrue((build / nsp.SHADER / 'cache').is_dir())
+
     def test_option_moves_the_build_folder_and_the_default_ipa(self):
         ipa = profile_ipa()
         out = self.tmp / 'builds' / 'mine'

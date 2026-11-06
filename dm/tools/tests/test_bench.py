@@ -25,6 +25,13 @@ class Bench(unittest.TestCase):
             self.assertEqual(s['fps'], 100.0); self.assertEqual(s['frame_p50'], 10.0); self.assertEqual(s['frame_p99'], 10.0); self.assertEqual(s['frame_max'], 50.0)
             self.assertEqual(s['over_budget'], 1)   # only the 50 ms frame is longer than 1.5 × 8.33 ms
 
+    def test_shader_folder(self):   # the NSP script's shader.noindex, or the shader/ of a build folder it has not built in since it took that name
+        with tempfile.TemporaryDirectory() as d:
+            build = Path(d)
+            self.assertEqual(bench.shader_folder(build), build / 'shader.noindex')
+            (build / 'shader').mkdir(); self.assertEqual(bench.shader_folder(build), build / 'shader')
+            (build / 'shader.noindex').mkdir(); self.assertEqual(bench.shader_folder(build), build / 'shader.noindex')
+
     def test_percentile(self):
         xs = list(range(1, 101))
         self.assertEqual(bench.pct(xs, 50), 50); self.assertEqual(bench.pct(xs, 99), 99); self.assertEqual(bench.pct(xs, 100), 100); self.assertIsNone(bench.pct([], 50))

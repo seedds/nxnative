@@ -14,7 +14,7 @@ On the Mac: the logos, the title, the privacy policy, the DigiLab story choice, 
 | `mem_used 0x4a00000` (74 MB) | `game.tsv` | the rewritten modules are larger than the default 64 MB of used memory |
 | No NVN shader tables | `game.tsv` `shader_note` | no NVN shaders: `gl_shaders.py` writes the GL library and its table, not the profile |
 | The GL path | `main`'s imports | `profile_guess.py` gives `graphics gl` when `main` imports `eglCreateWindowSurface` and names `glShaderSource`; of the 22 games extracted ([rendering.md](../../../docs/reference/rendering.md#telling-a-gl-game-from-an-nvn-or-vulkan-one) says), only Digimon does |
-| glslang | packing | for a GL game the NSP script runs `gl_shaders.py` in place of the NVN shader split and chain build (Mac and iOS libraries in `<id>_build/shader/gl` and `shader/ios/gl`); it needs `brew install glslang` |
+| glslang | packing | for a GL game the NSP script runs `gl_shaders.py` in place of the NVN shader split and chain build (Mac and iOS libraries in `<id>_build/shader.noindex/gl` and `shader.noindex/ios/gl`); it needs `brew install glslang` |
 
 No `pad_layout`: the virtual gamepad starts in the 2D layout (the default).
 

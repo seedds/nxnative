@@ -39,7 +39,7 @@ body:
     id: chain
     attributes:
       label: Shader chain version
-      description: "`grep DMSH_CHAIN dm/gfx/nvn/dmsh_chain.h` in the checkout used to build, or the `b-<version>` folder under the Mac app's `Contents/Resources/msl/` (`<title ID>_build/shader/cache/` for a Mac build, `shader/ios/` for iOS)."
+      description: "`grep DMSH_CHAIN dm/gfx/nvn/dmsh_chain.h` in the checkout used to build, or the `b-<version>` folder under the Mac app's `Contents/Resources/msl/` (`<title ID>_build/shader.noindex/cache/` for a Mac build, `shader.noindex/ios/` for iOS; `shader/` in a build folder from before that name)."
       placeholder: 5cddc47253ab
     validations:
       required: true

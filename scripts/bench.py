@@ -4,7 +4,7 @@
 # Variants run the same route with other settings, in turn and repeated, so two hosts or two sets of switches compare under the same load; a screenshot after the measurement
 # window of every run shows whether a variant changes the picture without stalling a measured frame.
 # Usage: python3 scripts/bench.py <id>_build folder [options]   (the folder the NSP script made with --platform mac: tools/dmhost, the rewritten modules, the extracted RomFS,
-#   shader/cache and font; the game's title ID is the folder name's start). -h lists the options. Exit code 0 when every run gave frames, 1 otherwise.
+#   shader.noindex/cache and font; the game's title ID is the folder name's start). -h lists the options. Exit code 0 when every run gave frames, 1 otherwise.
 #   --route <name>: a route of the game's profile (dm/games/<id>/bench.tsv); the first one by default. --save <folder>: the save the route starts from (default <id>_build/run/save);
 #   each run gets a copy, the folder itself is not changed. --variant 'label:KEY=VALUE,KEY=VALUE': a variant (repeatable; KEY host=<path> runs another host binary, msl=<folder>
 #   other Mac shader libraries, shmap=<file> another shader map (with the c1_full.tsv / cb_extent.tsv of those libraries beside it), patched=<folder> other rewritten modules,
@@ -28,6 +28,13 @@ def fail(msg):
 def newest(paths):   # the newest version folder (v<number>) of a glob
     vs = sorted((p for p in paths if re.fullmatch(r'v\d+', p.name.removeprefix('patched_'))), key=lambda p: int(p.name.removeprefix('patched_')[1:]))
     return vs[-1] if vs else None
+
+
+SHADER_FOLDERS = ('shader.noindex', 'shader')   # the NSP script's shader folder (its SHADER), then its name in a build folder no build has run in since
+
+
+def shader_folder(build):
+    return next((build / n for n in SHADER_FOLDERS if (build / n).is_dir()), build / SHADER_FOLDERS[0])
 
 
 def routes(gid):
@@ -85,7 +92,7 @@ def run_one(a, gid, build, var, route, out, lock):
     prof = build / 'profile' / gid if (build / 'profile' / gid / 'game.tsv').is_file() else REPO / 'dm/games' / gid
     out.mkdir(parents=True, exist_ok=True); save, temp = out / 'save', out / 'temp'
     shutil.rmtree(save, ignore_errors=True); shutil.copytree(a.save, save); temp.mkdir(exist_ok=True)
-    env.update(DM_ROOT=str(build), DM_ROMFS=str(romfs), DM_SAVE=str(save), DM_TEMP=str(temp), DM_MSL_DIR=str(var.get('msl') or build / 'shader/cache'),
+    env.update(DM_ROOT=str(build), DM_ROMFS=str(romfs), DM_SAVE=str(save), DM_TEMP=str(temp), DM_MSL_DIR=str(var.get('msl') or shader_folder(build) / 'cache'),
                DM_FONT_DIR=str(build / 'font'), DM_NVN_SHMAP=str(var.get('shmap') or prof / 'shader_map.tsv'), DM_WINDOW='1', DM_AUDIO='0', DM_KEYS=route['keys'],
                DM_NVN_TSV=str(out / 'frames.tsv'), DM_NVN_TSV_CALLS='0', DM_CTL=str(out / 'ctl'), DM_METAL_HUD='0' if a.no_hud else '1')
     if (build / 'pso/mac').is_dir(): env.setdefault('DM_PSO_BUNDLE', str(build / 'pso/mac'))   # the offline pipeline archive the Mac app bundles (launcher.c sets it there); without it an NVN game rebuilds every base before its first frame

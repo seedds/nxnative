@@ -32,7 +32,7 @@ ALLOWED = (
     '<NSP folder>/<title ID>_build/logs/*.log and *.txt (the NSP script\'s step logs; regular text files directly in logs/, nothing else under the NSP folder)',
     'the file given with --ios-log (a text file other than .keys)',
     '~/Library/Logs/DiagnosticReports/ crash reports (.ips, .crash) of dmhost or the app, the newest 3 of the last 7 days',
-    'Info.plist of the app (a few keys), game.tsv of the profile (name and build rows), dm/gfx/nvn/dmsh_chain.h, the names of the b-<V> folders in the app\'s Contents/Resources/msl/ or the build\'s shader/, shader/cache/ and shader/ios/',
+    'Info.plist of the app (a few keys), game.tsv of the profile (name and build rows), dm/gfx/nvn/dmsh_chain.h, the names of the b-<V> folders in the app\'s Contents/Resources/msl/ or the build\'s shader.noindex/ (shader/ before it took that name), its cache/ and its ios/',
 )
 
 HEX = r'[0-9a-fA-F]'
@@ -138,7 +138,7 @@ def chain_version():
 def shader_dirs(app, build):
     """Available library folder names only; a build may retain several old chains, so none establishes the chain the player ran."""
     root = app if app else build
-    dirs = [app / 'Contents/Resources/msl'] if app else [build / s for s in ('shader', 'shader/cache', 'shader/ios')] if build else []
+    dirs = [app / 'Contents/Resources/msl'] if app else [build / f / s for f in ('shader.noindex', 'shader') for s in ('', 'cache', 'ios')] if build else []
     found = []
     for d in dirs:
         if d.is_symlink() or not d.is_dir(): continue

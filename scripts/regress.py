@@ -251,7 +251,8 @@ class Game:
         self.name = re.sub(r'\s*\[[0-9A-Fa-f]{16}\]\s*$', '', folder.name)
         self.patched = bench.newest(build.glob('patched_v*'))
         self.ver = self.patched.name.removeprefix('patched_') if self.patched else None
-        self.kind = 'nvn' if (build / 'shader/pkg').is_dir() else 'vk' if (build / 'shader/vk').is_dir() else 'gl' if (build / 'shader/gl').is_dir() else None
+        self.shader = bench.shader_folder(build)
+        self.kind = 'nvn' if (self.shader / 'pkg').is_dir() else 'vk' if (self.shader / 'vk').is_dir() else 'gl' if (self.shader / 'gl').is_dir() else None
         # The build's own profile runs instead of dm/games' only when it is derived (the NSP script's <id>.derived.key beside it: a version the game's profile was not brought up
         # on) or the game has no profile here (a provisional one). A provisional profile the NSP script left from before the game's profile was added would test its guesses
         own = build / 'profile' / self.id
@@ -270,7 +271,7 @@ class Game:
         prof = self.profile_dir(tree)
         env.update(DM_GAMES_DIR=str(prof.parent), DM_GAMES_FIRST='1')
         if self.kind == 'nvn' and not (prof / 'pso_pairs.tsv').is_file():
-            pairs = self.build / 'shader/pso_pairs.tsv'
+            pairs = self.shader / 'pso_pairs.tsv'
             if pairs.is_file(): env['DM_PSO_PAIRS'] = str(pairs)
         return env
 
@@ -346,10 +347,10 @@ def chain_key(tree, g, tools):
     if g.kind == 'nvn':
         v, inp = json.loads(tree.py("import sys, json; sys.path.insert(0, 'dm/gfx/tools'); import dmsh_chain as c; g = c.load_game(); print(json.dumps([c.version(), c.inputs(g)]))", g.env(tree)))
         side = digest([tree.path / 'dm/gfx/tools' / f for f in ('c1_guard.py', 'cb_extent.py', 'dmsh_mtlcache.py', 'dmsh_pch.py', 'own_compilers.py', 'tool_lock.py')] + [tree.path / 'dm/games/game.py'])
-        pkg = g.build / 'shader/pkg'
+        pkg = g.shader / 'pkg'
         sources = digest(sorted(p for p in pkg.rglob('*') if p.is_file()), root=pkg)
         pairs = g.profile_dir(tree) / 'pso_pairs.tsv'
-        if not pairs.is_file(): pairs = g.build / 'shader/pso_pairs.tsv'
+        if not pairs.is_file(): pairs = g.shader / 'pso_pairs.tsv'
         side += digest([pairs])
     elif g.kind == 'vk':
         v, inp = digest([tree.path / 'dm/gfx/tools/vk_shaders.py'])[:12], g.ver
@@ -419,8 +420,8 @@ def chain_cache(tree, g):
     """The compile cache a chain build of this revision uses: the player's build's one file when there is one, which a cache from before it moves into first, else the work folder's. A revision from before
     shader_cache.py wants a folder, regress/cas, kept as a tar between builds. Its chain key differs, as it covers dmsh_mtlcache.py, and its compiles are not shared"""
     if not (tree.path / 'dm/tools/shader_cache.py').is_file(): return game_root(g) / 'cas'
-    shared, own = g.build / 'shader/cache/cas.db', game_root(g) / 'cas.db'
-    shader_cache.adopt(g.build / 'shader/cache/cas', shared, say)
+    shared, own = g.shader / 'cache/cas.db', game_root(g) / 'cas.db'
+    shader_cache.adopt(g.shader / 'cache/cas', shared, say)
     if shared.is_file(): return shared
     shader_cache.adopt(game_root(g) / 'cas', own, say)
     return own
@@ -462,7 +463,7 @@ def chain_build_locked(tree, g, a, v, inp, key, out):
         if not done:
             say(f'  {g.id}: chain {v} (inputs {inp}) of {tree.id}: translating the shaders ({jobs} workers) → {out}')
             if cas.suffix != '.db': tree_tar.unpack(cas, say)
-            rc, paused = run_heavy([sys.executable, entry, g.build / 'shader/pkg', out], log, tree.path, env, a, f'{g.id} shader build'); t0 += paused
+            rc, paused = run_heavy([sys.executable, entry, g.shader / 'pkg', out], log, tree.path, env, a, f'{g.id} shader build'); t0 += paused
             if rc or not (lib / '_b_build.json').is_file():
                 raise HarnessError(f'{g.id}: dmsh_build.py of {tree.id} failed (exit {rc}); last lines of {log}:\n' + ''.join(collections.deque(open(log, errors='replace'), maxlen=8)))
             prof = out / 'profile'; prof.mkdir(exist_ok=True)   # the tables the host reads beside the shader map, as this build made them
@@ -583,7 +584,7 @@ def interface_check(tree, g, out):
     pipeline, and one refused pipeline fails the whole archive (GitHub issue #283). The entry points are pso_offline's: the reflection's entry (entry_z for a near = 0 game)"""
     lib = chain_lib(out); chain = shader_lib.name_of(lib)[2:]
     prof = g.profile_dir(tree)
-    pairs = [prof / 'shader_pairs.tsv', prof / 'pso_pairs.tsv' if (prof / 'pso_pairs.tsv').is_file() else g.build / 'shader/pso_pairs.tsv']
+    pairs = [prof / 'shader_pairs.tsv', prof / 'pso_pairs.tsv' if (prof / 'pso_pairs.tsv').is_file() else g.shader / 'pso_pairs.tsv']
     po = tree.path / 'dm/gfx/tools/pso_offline.py'
     if not po.is_file(): return {'checked': 0, 'note': 'no pso_offline.py in this revision', 'bad': []}
     mod = load_module('pso_offline_' + tree.id.replace('-', '_'), po)
@@ -973,7 +974,7 @@ def run_env(g, art, route, outdir, a):
                DM_WINDOW='1', DM_WINDOW_TOP='1', DM_FOCUS_KEEP='1', DM_AUDIO='0', DM_METAL_HUD='0' if a.no_hud else '1', DM_CTL=str(outdir / 'ctl'), TMPDIR=str(game_root(g) / 'tmp') + '/')
     if g.kind == 'nvn':
         env.update(DM_NVN_SHMAP=str(prof / 'shader_map.tsv'), DM_NVN_TSV=str(outdir / 'frames.tsv'), DM_NVN_TSV_CALLS='0')
-        if not (prof / 'pso_pairs.tsv').is_file() and (g.build / 'shader/pso_pairs.tsv').is_file(): env['DM_PSO_PAIRS'] = str(g.build / 'shader/pso_pairs.tsv')
+        if not (prof / 'pso_pairs.tsv').is_file() and (g.shader / 'pso_pairs.tsv').is_file(): env['DM_PSO_PAIRS'] = str(g.shader / 'pso_pairs.tsv')
     if (g.build / 'aoc').is_dir(): env['DM_AOC_DIR'] = str(g.build / 'aoc')
     for kv in a.env: k, _, v = kv.partition('='); env[k] = v
     return env, src_save

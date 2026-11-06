@@ -749,9 +749,9 @@ class Script(unittest.TestCase):
     def test_pack_command(self):
         o, tmp = self.pack_cmd('nvn')
         self.assertNotIn('--pso-pairs', o)   # no split copy
-        (tmp / 'shader').mkdir(); (tmp / 'shader/pso_pairs.tsv').write_text('v\tf\n')
+        (tmp / nsp.SHADER).mkdir(); (tmp / nsp.SHADER / 'pso_pairs.tsv').write_text('v\tf\n')
         o, tmp2 = self.pack_cmd('nvn', work=tmp)
-        self.assertEqual(o['--pso-pairs'], str(tmp / 'shader/pso_pairs.tsv'))   # the profile has no pso_pairs.tsv: the split's copy goes in
+        self.assertEqual(o['--pso-pairs'], str(tmp / nsp.SHADER / 'pso_pairs.tsv'))   # the profile has no pso_pairs.tsv: the split's copy goes in
         o, tmp = self.pack_cmd('nvn')
         self.assertEqual((o['--msl'], o['--romfs'], o['--tables'], o['--title-id'], o['--sign'], o['--marker']),
                          (str(tmp / 'shader/cache/b-0123456789ab'), str(tmp / 'ex/RomFS'), str(tmp / 'profile'), TID, '-', 'a/b'))

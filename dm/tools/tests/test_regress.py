@@ -407,15 +407,15 @@ class Regress(unittest.TestCase):
 
     def test_chain_builds_share_the_players_one_file_cache(self):
         with tempfile.TemporaryDirectory() as td:
-            root = Path(td); build = root / 'build'; g = NS(id='game', kind='nvn', folder=root, build=build)
+            root = Path(td); build = root / 'build'; g = NS(id='game', kind='nvn', folder=root, build=build, shader=build / 'shader.noindex')
             new = root / 'new'; (new / 'dm/tools').mkdir(parents=True); (new / 'dm/tools/shader_cache.py').write_text('')
             with patch.object(regress, 'ROOT', root):
                 own = regress.game_root(g)
                 self.assertEqual(regress.chain_cache(NS(path=new), g), own / 'cas.db')   # no player's build yet
-                old = build / 'shader/cache/cas/metallib/mac/ab'; old.mkdir(parents=True); (old / 'abcd.metallib').write_bytes(b'compiled')
-                self.assertEqual(regress.chain_cache(NS(path=new), g), build / 'shader/cache/cas.db')   # a cache from before it moves in
-                self.assertFalse((build / 'shader/cache/cas').exists())
-                s = regress.shader_cache.Store(build / 'shader/cache/cas.db'); self.addCleanup(s.close)
+                old = g.shader / 'cache/cas/metallib/mac/ab'; old.mkdir(parents=True); (old / 'abcd.metallib').write_bytes(b'compiled')
+                self.assertEqual(regress.chain_cache(NS(path=new), g), g.shader / 'cache/cas.db')   # a cache from before it moves in
+                self.assertFalse((g.shader / 'cache/cas').exists())
+                s = regress.shader_cache.Store(g.shader / 'cache/cas.db'); self.addCleanup(s.close)
                 self.assertEqual(s.get('metallib/mac/abcd.metallib'), b'compiled')
                 self.assertEqual(regress.chain_cache(NS(path=root / 'revision-from-before'), g), own / 'cas')   # its dmsh_build.py wants a folder
 
@@ -523,17 +523,17 @@ class Regress(unittest.TestCase):
 
     def test_chain_key_tracks_shader_package_and_split_pairs(self):
         with tempfile.TemporaryDirectory() as td:
-            root = Path(td); pkg = root / 'shader/pkg'; pkg.mkdir(parents=True)
+            root = Path(td); pkg = root / 'shader.noindex/pkg'; pkg.mkdir(parents=True)
             shader = pkg / 'a.bin'; shader.write_bytes(b'original')
             prof = root / 'profile'; prof.mkdir()
             g = regress.Game(root, root / ('0' * 16 + '_build'))
-            g.build, g.id, g.kind, g.derived = root, 'game', 'nvn', False
+            g.build, g.shader, g.id, g.kind, g.derived = root, pkg.parent, 'game', 'nvn', False
             tree = NS(path=root, py=lambda *args: '["chain", "inputs"]')
             with patch.object(g, 'profile_dir', return_value=prof):
                 original = regress.chain_key(tree, g, 'tools')[2]
                 shader.write_bytes(b'changed')
                 changed = regress.chain_key(tree, g, 'tools')[2]
-                (root / 'shader/pso_pairs.tsv').write_text('vertex\tfragment\n')
+                (g.shader / 'pso_pairs.tsv').write_text('vertex\tfragment\n')
                 paired = regress.chain_key(tree, g, 'tools')[2]
             self.assertNotEqual(original, changed)
             self.assertNotEqual(changed, paired)

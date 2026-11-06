@@ -5,13 +5,19 @@
 #include "../hle.h"
 #include <assert.h>
 #include <sys/wait.h>
+#include <unistd.h>
 #include "../hle_audren.c"
 
 enum { SAMPLES = 240, NMIX = 8, NCMD = 6 };
 // test_renderer_blocks: the renderer each appended block came from; the output holds what it is given and plays none of it
 static int blocks_on; static gbuf *blocks[AR_MAX][NBUF]; static int blocks_n[AR_MAX];
 static void blocks_exec(void *obj, void *state);
-void *guest_sym(const char *name) { return blocks_on && strstr(name, "ExecuteAudioRendererRendering") ? (void *)blocks_exec : NULL; }
+// test_update_lock: the module's functions by name
+static struct { const char *name; void *p; } lock_syms[4];
+void *guest_sym(const char *name) {
+    for (size_t i = 0; i < sizeof lock_syms / sizeof *lock_syms; i++) if (lock_syms[i].name && !strcmp(lock_syms[i].name, name)) return lock_syms[i].p;
+    return blocks_on && strstr(name, "ExecuteAudioRendererRendering") ? (void *)blocks_exec : NULL;
+}
 void *objmap_get(const void *key) { (void)key; return NULL; }
 void objmap_put(const void *key, void *value) { (void)key; (void)value; }
 void *objmap_del(const void *key) { (void)key; return NULL; }
@@ -218,7 +224,55 @@ static void test_renderer_blocks(void) {
     memset(g_ar, 0, sizeof g_ar);
 }
 
+// The update lock is read off Update, else off UpdateImpl; a miss keeps the caller's offset and is a red line. Built from prologues of the forms the SDKs have (`bl` into a PLT stub or straight to the function)
+enum { F_UPDATE, F_IMPL = 16, F_STUB = 32, F_TICK = 36, F_SDK_LOCK, F_OS_LOCK, F_CODE };
+static uint32_t lock_code[F_CODE];
+static void *lock_got __attribute__((aligned(8)));
+static void lock_fn(int at, int off, int target) {   // pacibsp; add x19, x0, #off; mov x20, x0; mov x0, x19; bl target (no add: bl target first, as the tick call of SDK 19's Update)
+    uint32_t *f = lock_code + at; int n = 0;
+    f[n++] = 0xd503237fu;
+    if (off >= 0) { f[n++] = 0x91000000u | (uint32_t)off << 10 | 19; f[n++] = 0xaa0003e0u | 20; f[n++] = 0xaa0003e0u | 19u << 16; }
+    f[n] = 0x94000000u | ((uint32_t)(target - at - n) & 0x3ffffffu);
+}
+static int lock_read(size_t *off, int *os_mutex, const char **red) {   // update_lock with its log caught in *red: NULL when it printed none
+    static char log[256]; memset(log, 0, sizeof log);
+    fflush(stderr); int saved = dup(2); FILE *t = tmpfile(); assert(saved >= 0 && t); dup2(fileno(t), 2);
+    int r = update_lock(off, os_mutex);
+    fflush(stderr); dup2(saved, 2); close(saved); assert(!fseek(t, 0, SEEK_SET)); assert(fread(log, 1, sizeof log - 1, t) < sizeof log); fclose(t);
+    *red = strstr(log, "[RED] audren: no update lock"); return r;
+}
+static void test_update_lock(void) {
+    const uint64_t got = (uint64_t)&lock_got, stub = (uint64_t)(lock_code + F_STUB);
+    const uint64_t pages = ((got & ~0xfffull) - (stub & ~0xfffull)) >> 12;
+    lock_code[F_STUB] = 0x90000010u | (uint32_t)(pages & 3) << 29 | (uint32_t)((pages >> 2) & 0x7ffff) << 5;   // adrp x16, the GOT's page
+    lock_code[F_STUB + 1] = 0xf9400211u | (uint32_t)(got & 0xfff) / 8 << 10;   // ldr x17, [x16, #the slot]
+    lock_got = lock_code + F_SDK_LOCK;
+    lock_syms[0].name = "_ZN2nn2os12SdkMutexType4LockEv"; lock_syms[0].p = lock_code + F_SDK_LOCK;
+    lock_syms[1].name = "_ZN2nn2os9LockMutexEPNS0_9MutexTypeE"; lock_syms[1].p = lock_code + F_OS_LOCK;
+    lock_syms[2].name = "_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm"; lock_syms[2].p = lock_code + F_UPDATE;
+    lock_syms[3].name = "_ZN2nn5audio6server17AudioRenderSystem10UpdateImplEPvmS3_mPKvm"; lock_syms[3].p = lock_code + F_IMPL;
+    size_t off; int os; const char *red;
+    // before SDK 19: Update locks, through the PLT, and it wins over a lock in UpdateImpl
+    lock_fn(F_UPDATE, 0x1f0, F_STUB); lock_fn(F_IMPL, 0x2d8, F_STUB);
+    off = 1; os = 1; assert(lock_read(&off, &os, &red) && off == 0x1f0 && !os && !red);
+    lock_got = lock_code + F_OS_LOCK;   // nn::os::LockMutex
+    off = 1; os = 0; assert(lock_read(&off, &os, &red) && off == 0x1f0 && os == 1 && !red);
+    lock_got = lock_code + F_SDK_LOCK;
+    // from SDK 19: Update's first call is the tick, and UpdateImpl has the lock: +0x2d8 in SDK 22, whatever the caller guessed
+    lock_fn(F_UPDATE, -1, F_TICK);
+    off = 0x2d0; os = 0; assert(lock_read(&off, &os, &red) && off == 0x2d8 && !os && !red);
+    lock_fn(F_IMPL, 0x2d0, F_SDK_LOCK);   // SDK 19–21, a straight bl
+    off = 1; os = 0; assert(lock_read(&off, &os, &red) && off == 0x2d0 && !os && !red);
+    // neither locks first, or an SDK without UpdateImpl: the guess stays and the log says so
+    lock_fn(F_IMPL, 0x2d8, F_TICK);
+    off = 0x2d0; os = 0; assert(!lock_read(&off, &os, &red) && off == 0x2d0 && !os && red);
+    memset(&lock_syms[3], 0, sizeof lock_syms[3]);
+    off = 0x1f0; os = 0; assert(!lock_read(&off, &os, &red) && off == 0x1f0 && !os && red);
+    memset(lock_syms, 0, sizeof lock_syms);
+}
+
 int main(int argc, char **argv) {
+    test_update_lock();
     test_two_renderers();
     test_renderer_blocks();
     if (argc == 2 && !strcmp(argv[1], "--histogram")) { test_histogram(); return 0; }
@@ -237,6 +291,6 @@ int main(int argc, char **argv) {
         assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
     test_histogram();
-    puts("audren layout: renderers' own blocks, bounded histograms, malformed-list rejection, unaligned and truncated headers, SDK 4/5/6/16/21 stereo PCM and empty/incomplete startup recovery passed");
+    puts("audren layout: update lock read off Update or UpdateImpl, renderers' own blocks, bounded histograms, malformed-list rejection, unaligned and truncated headers, SDK 4/5/6/16/21 stereo PCM and empty/incomplete startup recovery passed");
     return 0;
 }

@@ -50,6 +50,14 @@ fragment main0_out main0(main0_in in [[stage_in]], constant spvDescriptorSetBuff
 
 
 class Regress(unittest.TestCase):
+    def test_rewrite_worker_policy_changes_the_regression_key(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            helper = root / 'dm/tools/rewrite_jobs.py'; helper.parent.mkdir(parents=True)
+            before = regress.rewriter_key(NS(path=root))
+            helper.write_text('def workers(limit): return limit\n')
+            self.assertNotEqual(before, regress.rewriter_key(NS(path=root)))
+
     def test_impact_without_machine_paths(self):
         env = {k: v for k, v in regress.os.environ.items() if k not in ('REGRESS_ROOT', 'REGRESS_GAMES')}
         with tempfile.TemporaryDirectory() as td:

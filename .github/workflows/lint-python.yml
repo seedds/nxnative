@@ -41,8 +41,10 @@ jobs:
           cache-dependency-path: .github/requirements/lint.txt
       - name: Install the pinned tools
         run: python -m pip install -r .github/requirements/lint.txt
-      - name: Base branch's baseline (pull requests)
+      - name: Pull request base revision's baseline
         if: github.event_name == 'pull_request'
-        run: git fetch --no-tags --depth=1 origin "$GITHUB_BASE_REF"
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git fetch --no-tags --depth=1 origin "$PR_BASE_SHA"
       - name: ruff and pyright against the baseline
         run: python dm/tools/lint_python.py ${{ github.event_name == 'pull_request' && '--against FETCH_HEAD' || '' }}

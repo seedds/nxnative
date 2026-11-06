@@ -619,10 +619,12 @@ def sage_record(s):
     return bytes(s[:c - 4]).rstrip(b'\0').rsplit(b'\0', 1)[-1].decode('latin1'), s[k:k + nctl], s[c:c + ncode]
 
 OODLE_BLOCK = re.compile(b'\x8c[\x06\x0a\x0b\x0c]')   # the first bytes of a stream: Kraken, Mermaid, Selkie, Leviathan
-def shader_map_entries(d):
-    """The entries of the FShaderMapResourceCode tables in a cooked package or global shader cache of Unreal Engine 5 whose shaders Oodle compressed: a count, that many 20-byte hashes, the count again, then
-    that many {i32 length, code, i32 raw size, u8 frequency}. A table is found by a first entry's stream and proved by its two counts and by the walk over all its entries, as a stream's two first bytes
-    turn up inside other data. → [(offset of the code, length, raw size, frequency)] of the tables that hold"""
+def shader_map_entries(d, proved=None):
+    """The entries of the FShaderMapResourceCode tables in a cooked package or global shader cache whose shaders Oodle compressed: a count, that many 20-byte hashes, the count again, then
+    that many {i32 length, code, i32 raw size, u8 frequency}. A table is found by a first entry's stream and held by its two counts and by the walk over all its entries, as a stream's two first bytes
+    turn up inside other data. That is no proof: an entry of a package's export list reads as a one-entry table (OCTOPATH TRAVELER II: name number 1, flags 8, then the 8 bytes of the size 0xb8c and
+    the offset 30650). So proved(first row), when given, has the last word, as a decode has for the other streams of a blind scan, and a table it refuses hides nothing that lies inside it.
+    → [(offset of the code, length, raw size, frequency)] of the tables that hold"""
     out, end = [], 0
     for m in OODLE_BLOCK.finditer(d):
         i = m.start()
@@ -637,7 +639,7 @@ def shader_map_entries(d):
             raw, f = int.from_bytes(d[q:q + 4], 'little'), d[q + 4]
             if not n <= raw <= 1 << 28 or f > 15: break
             rows.append((p + 4, n, raw, f)); p = q + 5
-        if len(rows) == count: out += rows; end = p
+        if len(rows) == count and (proved is None or proved(rows[0])): out += rows; end = p
     return out
 
 if __name__ == '__main__':

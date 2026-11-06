@@ -781,21 +781,20 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
         // nxnative: the memory pool table the host binds for raw global memory (dmsh_abi.h DMSH_GMEM_MAP_*): a storage buffer reserved under this sentinel constant buffer
         // slot, which no constant buffer of the game has (dmsh_build.py turns it into DMSH_KIND_GMEM_MAP). 1 << GmemMapLog2 entries of GmemMapEntryWords words each,
-        // {start lo, start hi, end lo, end hi, delta lo, delta hi, 0, 0}, sorted by start; entry 0 is empty (start 0, end 0) and unused entries start at ~0
+        // {start lo, start hi, end lo, end hi, delta lo, delta hi, hint, 0}, sorted by start; entry 0 is empty (start 0, end 0) and unused entries start at ~0
         public const int GmemMapCbSlot = 0xff;
-        private const int GmemMapLog2 = 12;
+        private const int GmemMapLog2 = 13;
         private const int GmemMapEntryWords = 8;
+        private const int GmemHintShift = 21;
 
-        // nxnative: the write log (dmsh_abi.h DMSH_GMEM_LOG_*), reserved under the same sentinel slot at offset 1: the set of guest pages (address >> 12) the stores and atomics wrote,
-        // as an open-addressing hash set of 1 << GmemLogLog2 words from word 1 (0 = empty), word 0 set when a page found no free slot in GmemLogProbes tries. The host cannot know where
-        // a store through a loaded pointer lands before the GPU runs it; it learns the pages from the log. A set, not a list: one draw of Donkey Kong Bananza stores 7,325 times into a few dozen pages
+        // nxnative: the write log (dmsh_abi.h DMSH_GMEM_LOG_*), reserved under the same sentinel slot at offset 1: a bitmap of the table entries the stores and atomics wrote through. The host
+        // cannot know where a store through a loaded pointer lands before the GPU runs it, and it only wants the pools. Read first: a bit is set once, so nearly every store of a shader
+        // that writes a whole frame costs a load, not an atomic (Ocarina of Time's movie compute ran at 41 ms a frame on a hash set of pages, which also ran out of slots)
         private const int GmemLogCbOffset = 1;
-        private const int GmemLogLog2 = 10;
-        private const int GmemLogProbes = 8;
 
         // nxnative: a global memory access whose address the search traced to no storage buffer, an address the shader loaded from memory (Donkey Kong Bananza: gsys's vertex
         // shader that resets the terrain's indirect draw records reads each record's address from a storage buffer). Ryujinx drops such an access (a load reads 0). Here it
-        // goes to the address itself: a branchless binary search finds the host's pool holding it, the address moves by that pool's delta (its Metal GPU address minus its
+        // goes to the address itself: a tagged hint for its 2 MiB chunk, else a branchless binary search, finds the host's pool holding it, the address moves by that pool's delta (its Metal GPU address minus its
         // guest address) and is accessed through a physical storage buffer pointer. An address in no pool is still dropped
         private static bool TryGenerateRawStorageOp(
             GtsContext gtsContext,
@@ -850,6 +849,19 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 return context.Load(StorageKind.StorageBuffer, mapBinding, Const(0), context.IAdd(entry, Const(word)));
             }
 
+            // The hint of the address's 2 MiB chunk names an entry holding the whole chunk (dmsh_abi.h DMSH_GMEM_HINT_SHIFT). An address too high for the tag searches
+            Operand chunk = context.BitwiseOr(context.ShiftLeft(addrHigh, Const(32 - GmemHintShift)), context.ShiftRightU32(addrLow, Const(GmemHintShift)));
+            Operand indexMask = Const((1 << GmemMapLog2) - 1);
+            Operand hint = MapWord(context.IMultiply(context.BitwiseAnd(chunk, indexMask), Const(GmemMapEntryWords)), 6);
+            Operand hintIndex = context.BitwiseAnd(hint, indexMask);
+            Operand hintFits = context.BitwiseAnd(
+                context.BitwiseAnd(context.ICompareNotEqual(hintIndex, Const(0)), context.ICompareEqual(context.ShiftRightU32(hint, Const(GmemMapLog2)), chunk)),
+                context.ICompareLessUnsigned(addrHigh, Const(1 << (GmemHintShift - GmemMapLog2))));
+            Operand selected = Local();
+            Operand lblFound = Label();
+            context.Copy(selected, hintIndex);
+            context.BranchIfTrue(lblFound, hintFits);
+
             // The last entry whose start is at or below the address (entry 0 starts at 0, so there always is one)
             Operand index = Const(0);
 
@@ -867,7 +879,9 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 index = context.ConditionalSelect(atOrBelow, candidate, index);
             }
 
-            Operand found = context.IMultiply(index, Const(GmemMapEntryWords));
+            context.Copy(selected, index);
+            context.MarkLabel(lblFound);
+            Operand found = context.IMultiply(selected, Const(GmemMapEntryWords));
             Operand endLow = MapWord(found, 2);
             Operand endHigh = MapWord(found, 3);
 
@@ -880,20 +894,12 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             if (writes)
             {
-                // A page in a pool is never 0 (the guest's first page is not mapped), so 0 marks an empty slot
-                Operand page = context.BitwiseOr(context.ShiftLeft(addrHigh, Const(20)), context.ShiftRightU32(addrLow, Const(12)));
-                Operand hash = context.ShiftRightU32(context.IMultiply(page, Const(unchecked((int)0x9e3779b1))), Const(32 - GmemLogLog2));
-
+                Operand word = context.ShiftRightU32(selected, Const(5));
+                Operand bit = context.ShiftLeft(Const(1), context.BitwiseAnd(selected, Const(31)));
                 Operand lblLogged = Label();
 
-                for (int probe = 0; probe < GmemLogProbes; probe++)
-                {
-                    Operand slot = context.IAdd(context.BitwiseAnd(context.IAdd(hash, Const(probe)), Const((1 << GmemLogLog2) - 1)), Const(1));
-                    Operand old = context.AtomicCompareAndSwap(StorageKind.StorageBuffer, logBinding, Const(0), slot, Const(0), page);
-                    context.BranchIfTrue(lblLogged, context.BitwiseOr(context.ICompareEqual(old, Const(0)), context.ICompareEqual(old, page)));
-                }
-
-                context.Store(StorageKind.StorageBuffer, logBinding, Const(0), Const(0), Const(1));
+                context.BranchIfTrue(lblLogged, context.ICompareNotEqual(context.BitwiseAnd(context.Load(StorageKind.StorageBuffer, logBinding, Const(0), word), bit), Const(0)));
+                context.AtomicOr(StorageKind.StorageBuffer, logBinding, Const(0), word, bit);
                 context.MarkLabel(lblLogged);
             }
 

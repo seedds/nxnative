@@ -62,6 +62,14 @@ Run headless, `DM_CTL` at a control file. The work folder has `boot.sh <secs> <l
 
 From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. From `save_ref`: at about 58 s `A~0.2`, 5 s later `A~0.2` (Load), 30 s later three `A~0.1` 3 s apart, then 12 s to the bridge outside Link's house. There `LUp~3.5`, `A~0.2` (Climb Down) and `LDown~4` three or four times reach the village floor.
 
+## HDR output
+
+With the HDR output setting, on the Mac app to the opening movie (M4 Pro, macOS 26.7.1, chain `cfcc3a82c78b`, 2026-11-06):
+
+- Like [Donkey Kong Bananza](../040074A01BF12000/README.md#hdr-output), the game boots an RGBA8 window (format 0x25, 2560x1440), queries `vi::QueryDisplayHdrStatus`, then makes an RGB10A2 window (0x3d). It asks every frame (1,000 queries in 38 s) and queries the paper white (203 nits).
+- It declares SDR 0 to 203 nits and extended 0 to 710, gamut 0 and tone mapping 0. No new `[RED]` line with HDR on.
+- On an LG HDR 4K monitor with HDR off in macOS (potential headroom 1.00), `DM_HDR=1` answered SDR and the game kept its RGBA8 window. `DM_HDR=2` (HDR on any screen) made it switch. Not run on a screen with EDR, and the picture was not compared between the modes.
+
 ## Open
 
 - Resolved: the build left 9 shaders out. Six foliage compute shaders used `ATOMG.CAS` ([Global memory: descriptors, ATOMG.CAS, INC / DEC](../../../docs/reference/shaders.md#global-memory-descriptors-atomgcas-inc--dec)); `1f78730053feb036` and `e172bd7ec218ab8e` nest 259 brackets ([Bracket nesting past the front end's 256](../../../docs/reference/shaders.md#bracket-nesting-past-the-front-ends-256)); `68bbe98b3bfd9876` (`Ampere instruction 481 at 0x0`) and five more map rows were no shaders at all ([A control section's words read as a BAHS entry](../../../docs/reference/shaders.md#a-control-sections-words-read-as-a-bahs-entry)), now gone from the map. None of the eight real ones was used on the walk to Kokiri Forest.
@@ -87,6 +95,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 - [Pool shaders taken as depth readers](../../../docs/reference/rendering.md#pool-shaders-taken-as-depth-readers): about 80 extra passes a frame, and half the frames over budget.
 - [A pipeline archive on an external drive is read into memory](../../../docs/reference/memory.md#a-pipeline-archive-on-an-external-drive-is-read-into-memory): 3.5 GB of swapped memory, now mapped.
 - [A texture in a sparse pool came out CPU-written at its first use](../../../docs/reference/memory.md#a-texture-in-a-sparse-pool-came-out-cpu-written-at-its-first-use): found by the unit test, on this profile's `tex_dirty_upload`.
+- [The status query and the present for an HDR window](../../../docs/reference/rendering.md#the-status-query-and-the-present-for-an-hdr-window): the same HDR window as Donkey Kong Bananza.
 - [`EventFd` needs no network](../../../docs/reference/services.md#eventfd-needs-no-network)
 - [No virtual audio input devices (SDK 22)](../../../docs/reference/audio.md#no-virtual-audio-input-devices-sdk-22)
 - [`nn::ndve`'s movie enhancement file](../../../docs/reference/shaders.md#nnndves-movie-enhancement-file)

@@ -638,6 +638,15 @@ int main(void) {
     EXPECT("sync signaled after acquire (0)", 0, P(nvnSyncWait)(&s2, 0));
     unsigned bi = 0; while (strcmp(nvn_names[bi], "nvnCommandBufferBarrier")) bi++;
     EXPECT("Barrier count = 4 frames × 5", 20, nvn_slot[bi].cnt);
+    {   // An off-screen window (a native window no display shows, dm_native_window_offscreen: GameChat's virtual camera): its frames are dropped and are not the game's frames
+        NVNwindow off; P(nvnWindowInitialize)(&off, &wb); ((win_t *)&off)->offscreen = 1;
+        uint64_t f0 = dm_nvn_frame_count(); int oi[3];
+        for (int f = 0; f < 3; f++) { P(nvnWindowAcquireTexture)(&off, &s2, &oi[f]); P(nvnQueuePresentTexture)(&q, &off, oi[f]); }
+        EXPECT("off-screen window rotates 0,1,0", 0x010, oi[0] << 8 | oi[1] << 4 | oi[2]);
+        EXPECT("off-screen presents are not frames", 1, dm_nvn_frame_count() == f0);
+        EXPECT("off-screen acquire sync signaled (0)", 0, P(nvnSyncWait)(&s2, 0));
+        EXPECT("a window of the display's native window is on screen", 0, ((win_t *)&win)->offscreen);
+    }
 
     // 6b. Readback: pixel (x,y) = {x*16+y, y*16+x, 0x55, 0xAA} (expected values computed directly from the formula)
     {

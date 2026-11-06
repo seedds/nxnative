@@ -71,6 +71,10 @@ int main(void) {
         linit(local, 4000, 216, 3, NULL, n);
         CHECK(blanks_live == 0 && !limg(local, 0), "a size out of the SDK's range makes no image");
     }
+    // GameChat's virtual camera window: the host's off-screen native window, not 0 (Star Fox makes an NVN window of any handle)
+    uint64_t (*vwin)(const void *) = hook("_ZN2nn4chat34GetVirtualCameraNativeWindowHandleEPKNS0_17VirtualCameraTypeE");
+    if (vwin) { uint64_t nw = vwin(NULL); CHECK(nw && dm_native_window_offscreen((const void *)(uintptr_t)nw), "the virtual camera's native window is the off-screen one"); }
+    CHECK(!dm_native_window_offscreen(NULL), "a display's native window is not off-screen");
     CHECK(unexpected == 0, "no guest symbol lookup or event binding");
     printf("pctl: %d checks, %d failed\n", checks, fails);
     return fails != 0;

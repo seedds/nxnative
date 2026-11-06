@@ -27,7 +27,17 @@ There is no game-specific patch, and only v131072's build row: the base game, v0
 
 ## The picture
 
-Every 3D target is 768x432 from the first frame of the title to the tutorial: MetalFX stands in for DLSS at 768x432 to 768x432, the game's NDSR compute networks take that to 1536x864, and the result reaches the 3840x2160 swap chain, whose top-left 1920x1080 holds the picture. The game's own defaults give the reason for the figure, not the cause: `render.dynres_min_scale_x` is 0.5 and `max` 1.0, so 768x432 is the minimum of a 1536x864 base, at 6 to 11 ms of GPU time a frame on the M4 Pro. `gpu_timestamps segment` changes nothing. Whether a console stays there too is not known.
+The scene's size, measured with probes (`DM_PROBE_FP`, `DM_PROBE_POLL=as+…`): the renderer (`main+0xb447300`) takes a target and multiplies it by a scale it reads from its settings at `main+0xb4498a8`, `render.resolution_scale_console` 0.5 docked or `render.resolution_scale_handheld` 0.83. It runs DLSS at that size, as anti-aliasing (input = output: `nvnDlssNetworkResize` from `main+0xb75a440`, an output texture of that size), and its NDSR compute networks take the picture to the target. Docked, the target is the window's size (`[obj+0x400]`), or an override at `[obj+0x428]` that the window manager writes right after it reads the graphics scale: 1536x864, 0.8 of 1920x1080, at graphics scale 1. Hence 768x432 (1536x864 x 0.5). Two host answers made it small, each in a pull request of its own: the graphics scale, 1 docked where the full GPU share is 0 (#1304: 960x540), and the display's largest layer, 1920x1080 where a docked Switch 2 on a 4K screen outputs 4K (#1305: 1920x1080 on a 4K screen). Handheld it renders at 1600x900.
+
+**Resolution** (`DM_RESOLUTION_SCALE`, the launcher's Game's own / 75 % / 100 %) replaces that scale in both modes: `patches.py`, a stub at `main+0xb4498ac` in the back patch area (main's text is 189 MB, beyond the front area's reach: `ctx.area`), state +0xa0, offered through the `RESOLUTION_SCALE` capability of build `a7730d0f`. At 0.75 and 1.0 the game evaluates no DLSS. Measured on an M1 Pro, docked, graphics scale 0, 1080p target, 300 s from boot into the tutorial's flight:
+
+| Scale | Scene | Flight: frame p50 | Flight: GPU p50 / p95 | Cinematic (30 fps): GPU p50 |
+|---|---|---|---|---|
+| Game's own (0.5) | 960x540 | 16.7 ms | 10–11 / 15–16 ms | 22–24 ms |
+| 0.75 | 1440x810 | 16.7 ms | 9–11 / 17–19 ms | 17–18 ms |
+| 1.0 | 1920x1080 | 16.7 ms | 9–11 / 16–17 ms | 19 ms |
+
+At 1.0 Peppy's close-up (frame 3,000) shows the fur and whiskers sharply that 0.5 blurs.
 
 ## Driving it on the Mac
 
@@ -35,6 +45,7 @@ Every 3D target is 768x432 from the first frame of the title to the tutorial: Me
 
 ## Found on this game
 
+- The avatar settings present the virtual camera's picture into an NVN window of their own; the host makes it an off-screen window: [GameChat queries from the title screen (SDK 21)](../../../docs/reference/services.md#gamechat-queries-from-the-title-screen-sdk-21).
 - [SDK 21 socket initialization and overloads](../../../docs/reference/services.md#sdk-21-socket-initialization-and-overloads) and [Socket `Poll` and `Select` with nothing to wait on](../../../docs/reference/services.md#socket-poll-and-select-with-nothing-to-wait-on): the game's HTTP thread aborted on a failed `poll`.
 - [SDK 21's OutputStream on a virtual output device](../../../docs/reference/audio.md#sdk-21s-outputstream-on-a-virtual-output-device) and [SDK 21's hardware Opus decoder manager](../../../docs/reference/audio.md#sdk-21s-hardware-opus-decoder-manager): its voice and music.
 - [GameChat queries from the title screen (SDK 21)](../../../docs/reference/services.md#gamechat-queries-from-the-title-screen-sdk-21): a null read in `nn::chat::GetChattingUid`.
@@ -47,8 +58,9 @@ Every 3D target is 768x432 from the first frame of the title to the tutorial: Me
 
 ## Open
 
-- [The picture](#the-picture): why the 3D stays at 768x432.
+- [The picture](#the-picture): 768x432 docked until #1304 and #1305 are in; the Resolution setting raises the scene above the game's own scale.
 - `[RED] DLSS: the game's bias mask (a reactive mask for MetalFX) is not passed on`.
 - The game's wake-up eventfd fails (the host refuses `nn::socket::EventFd`), so its HTTP thread polls without a wake-up; harmless offline.
-- A `pso_manifest.tsv` has not been recorded; `render_cond` not tried; the later levels and combat, and iOS, not tested.
+- The campaign was played through its last level, Venom 2, on a Mac (32 GB) with #1304, #1305, #1308 and #1310 in a test build. Without #1310, the GPU ran out of memory at the load of Venom 2's second part (`map_andross`), after 69 minutes of play: the residency set held 972 textures, 23.8 GB, against a recommended working set of 25.5 GB, and every upload batch after that was dropped, so the screen stayed black. Each scene change had uploaded 60 to 86 of the streamed BC7 arrays again, 4 to 5 GB in one frame. On the same route through Venom 2's first part, #1310 removed those uploads: 0 instead of 20 to 26, at about 1.4 GB each. With that build, the player got through the second part. Scripted runs did not reach it, so the memory there was not measured.
+- A `pso_manifest.tsv` has not been recorded; `render_cond` not tried; iOS not tested.
 - Mario Kart World 1.8.0 has not been run with the camera answers changed for this game.

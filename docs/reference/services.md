@@ -1013,6 +1013,8 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** `CRASH sig=11 addr=0 pc=sdk+0x6be4d4` in `nn::chat::GetChattingUid()`, from the game's title screen code.
 - **Cause:** SDK 21 games ask the chat library who is chatting, for the room, the sharing key, the virtual camera, the members' audio levels and the camera streams; the SDK's versions read the service object `Initialize` would have made.
 - **Fix:** hooked as "no chat" (`hle_misc.c`): a zero Uid, `GetRoomInfo` fails (with `RES_FAIL`, the chat library's real result not being known), the sharing and virtual camera calls succeed and keep nothing, the camera streaming calls succeed and stream nothing, the next-image requests fail, no audio levels.
+- **The virtual camera's window:** a picture the game draws itself (Star Fox's avatar, in its avatar settings), which GameChat would send as the player's camera. The game makes an NVN window of `GetVirtualCameraNativeWindowHandle`'s answer (`main+0xba540a0`, with no check for 0) and presents into it, and the host shows every window it is given, over the game's picture. The handle is the host's off-screen native window (`dm_native_window_offscreen`): an NVN window on it drops its frames, its acquire does not wait for the display, and its presents are not the game's frames (`hle_nvn.c`). `t_pctl` checks the handle, `t_nvn` the window.
+- **Also seen:** the chat library's own failure for a service call that fails is 0x4e2 (module 0xe2; `sdk+0x6c1194`, its audio stream calls), a candidate for `GetRoomInfo`'s answer.
 - **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md): 33 `nn::chat` imports.
 
 ### The camera through the graphics system

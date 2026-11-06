@@ -556,6 +556,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - `[RED] NVN unimplemented function called` for each. → [`nvnTextureBuilderGetViewOffset`, `nvnTextureViewCompare`, `nvnBlendStateSetAdvancedNormalizedDst`](../reference/nvn-objects.md#nvntexturebuildergetviewoffset-nvntextureviewcompare-nvnblendstatesetadvancednormalizeddst)
 - a pool walk makes gigabytes of textures from far fewer images: Ocarina of Time's 32,768 IDs name 3,607 storages, and one texture per ID came to 2 GB. → [Texture IDs of one storage share one packaged texture](../reference/nvn-objects.md#texture-ids-of-one-storage-share-one-packaged-texture)
 - thousands of first uploads a frame in a scene whose textures do not change: Ocarina of Time, about 15,000 a frame. → [Finalizing a copy of a texture object](../reference/nvn-objects.md#finalizing-a-copy-of-a-texture-object)
+- the host stops with `NSInvalidArgumentException: -[NvPkg buffer]: unrecognized selector sent to instance` under `tex_by_id` (via `pool_entry`, `pool_gpu`, `encode_args_`, `draw_`, `mesh_tasks_draw`); not a GPU hang, no `kIOGPU` errors. It came after minutes of play, right after a save or at a scene change. → [Freeing a memory pool during a texture ID walk](../reference/nvn-objects.md#freeing-a-memory-pool-during-a-texture-id-walk)
 
 ## Rendering
 

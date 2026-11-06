@@ -2,7 +2,7 @@
 """Ampere ALU instructions through the offline translator (dmsh_xlate, arch sm86), on registers the translator cannot fold, their result stored to shared memory so
 that it is kept: BREV, and HADD2 / HMUL2 with an immediate (test_dmsh_ampere_mem.py's Pokopia class has those two on constants, a negative immediate's sign, F2FP.MERGE_C,
 F2I from a half, UP2UR, MEMBAR and ERRBAR). Needs DMSH_TEST_XLATE (the translator) like the other translator tests."""
-import sys, unittest
+import re, sys, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_dmsh_ampere_mem import EXIT, Translated, inst
@@ -169,6 +169,67 @@ class WrappingMultiply(Alu):
         # the arithmetic shift stays signed (only the wrapping operations change type)
         self.assertRegex(self.kept(self.IMAD, self.SHF, srcs=(19,)), r'int \w+ = _\d+ >> 24;')
 
+
+class SingleInstructionSemantics(Alu):
+    """Constant inputs the translator folds, the result stored (R6). Found by sw2_tools/xcheck's per-instruction tester (xcheck.py insn: single instructions with
+    nvdisasm-checked encodings run on the GPU against an interpreter on Mesa NAK's folds); each encoding below was checked with nvdisasm 13.4 (sm_86).
+    - SETP's two results: Pd1 reads the accumulator P as it was, also when Pd0 is P (Pd1 was computed after Pd0 had been written).
+    - IMAD has no negation of B: bit 63 (B a register, constant or uniform register) and bit 75 (B the 64-slot register of forms 2, 3, 7) are not printed
+      by nvdisasm and are not modifiers; B was negated.
+    - I2F's directed roundings (.RM / .RP, and every one to F16) were rounded to nearest; F2FP.PACK_AB.RZ and F2F.F16.F32's .RM / .RP / .RZ too (65520 became
+      infinity, not 65504)."""
+    SEL_P0 = (0x000fc200040000ff, 0x00000001ff067807)   # SEL R6, RZ, 0x1, !P0: R6 = P0 ? 1 : 0
+    P2_TRUE = (0x000fc20003f42070, 0x000000ffff00720c)  # ISETP.EQ.U32.AND P2, PT, RZ, RZ, PT: P2 = true
+
+    def stored(self, *code):
+        m = re.findall(r'\] = (\w+);', self.kept(*code))
+        return m[-1] if m else None
+
+    def test_isetp_second_result_reads_the_old_accumulator(self):
+        isetp = (0x000fc2000104507f, 0x000000ffffff720c)   # ISETP.NE.U32.AND P2, P0, RZ, RZ, P2: P2 = false AND P2, P0 = true AND the old P2 (true)
+        self.assertEqual(self.stored(self.P2_TRUE, isetp, self.SEL_P0), '1u')
+
+    def test_fsetp_second_result_reads_the_old_accumulator(self):
+        fsetp = (0x000fc200010450ff, 0x000000ffffff720b)   # FSETP.NE.AND P2, P0, RZ, RZ, P2
+        self.assertEqual(self.stored(self.P2_TRUE, fsetp, self.SEL_P0), '1u')
+
+    MOV_R5_3 = (0x000fc20000000fff, 0x00000003ff057802)  # MOV R5, 0x3
+
+    def test_imad_bit_63_is_no_negation(self):
+        imad = (0x000fc200078e02ff, 0x8000000505067224)    # IMAD R6, R5, R5, RZ with bit 63 set: 9, not -9
+        self.assertEqual(self.stored(self.MOV_R5_3, imad), '9u')
+
+    def test_imad_bit_75_of_the_c_slot_forms_is_no_negation(self):
+        imad = (0x000fc200078e0a05, 0x0000000105067424)    # IMAD R6, R5, R5, 0x1 (form 2) with bit 75 set: 10, not -8
+        self.assertEqual(self.stored(self.MOV_R5_3, imad), '10u')
+
+    def test_i2f_rounds_toward_plus_infinity(self):
+        mov = (0x000fc20000000fff, 0x8839e130ff057802)     # MOV R5, 0x8839e130 (-2009472720)
+        i2f = (0x000fc200002094ff, 0x00000005ff067306)     # I2F.RP R6, R5: -2009472640.0 (0xceef8c3d, truncated), not the nearest -2009472768.0
+        msl = self.kept(mov, i2f)
+        self.assertNotRegex(msl, r'float\(-2009472720\)')    # the conversion to nearest
+        self.assertIn('spvFindUMSB', msl)                     # the bits under the 24 kept cleared (the truncation, which RP is for a negative value)
+
+    def test_i2f_to_half_rounds_toward_zero(self):
+        mov = (0x000fc20000000fff, 0xbae909efff057802)     # MOV R5, 0xbae909ef
+        i2f = (0x000fc2000020c8ff, 0x00000005ff067306)     # I2F.F16.U32.RZ R6, R5: 65504 (0x7bff), not infinity
+        msl = self.kept(mov, i2f)
+        self.assertRegex(msl, r'uint\(_\d+\) < uint\(_\d+\);')   # the magnitude of the half compared with that of the value it came from, as bits
+        self.assertIn('4294967295u)', msl)                     # and the half stepped down one where it came out larger
+
+    def test_f2f_to_half_rounds_toward_plus_infinity(self):
+        mov = (0x000fc20000000fff, 0x00800000ff057802)     # MOV R5, 0x800000 (FLT_MIN)
+        f2f = (0x000fc200002088ff, 0x00000005ff067304)     # F2F.F16.F32.RP R6, R5: the smallest half denormal (0x0001), not 0
+        msl = self.kept(mov, f2f)
+        self.assertRegex(msl, r'_\d+ < 8388608;')           # the half's value key below FLT_MIN's bits (0x800000): an integer compare (Metal's fast math
+        self.assertIn('+ 1u)', msl)                         # folded the float one), and the half stepped up
+
+    def test_f2fp_rz_overflow_is_the_largest_half(self):
+        mov = (0x000fc20000000fff, 0x477ff000ff057802)     # MOV R5, 0x477ff000 (65520.0)
+        f2fp = (0x000fc200000180ff, 0x00000005ff06723e)    # F2FP.PACK_AB.RZ R6, RZ, R5: 0x00007bff (65504), not 0x7c00
+        msl = self.kept(mov, f2fp)
+        self.assertIn('1199566848u < uint(', msl)   # 65520.0's bits (0x477ff000) against the half's magnitude
+        self.assertIn('4294967295u)', msl)
 
 if __name__ == '__main__':
     unittest.main()

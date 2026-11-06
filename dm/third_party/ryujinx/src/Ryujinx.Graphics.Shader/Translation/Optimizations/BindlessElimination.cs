@@ -13,7 +13,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
         private const int NvnSeparateSamplerBase = 0x568;   // nxnative: c[2]'s separate sampler table (dmsh_abi.h DMSH_C2_SAMP), 128 slots of 8 bytes; a word there is a sampler handle, never a texture's
         private const int NvnSeparateSamplerEnd = NvnSeparateSamplerBase + 8 * 128;
 
-        // nxnative: deferSeveral leaves the reads whose handle merges several c[2] handles to a second sweep (see TryTableHandle)
+        // nxnative: deferSeveral leaves the reads whose handle merges several constant buffer handles to a second sweep (see TryTableHandle)
         public static void RunPass(BasicBlock block, ResourceManager resourceManager, IGpuAccessor gpuAccessor, bool deferSeveral = false)
         {
             // We can turn a bindless into regular access by recognizing the pattern
@@ -93,14 +93,18 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
         // when none does, the path that got there does not use the result, and the last one is taken. The caller converts this operation as usual.
         // Every use of a handle shares one binding, typed by the instructions that read it, so a candidate that other reads use as a texture of another shape (a 2D array
         // where this read is 2D: two of Unreal's global pixel shaders in FINAL FANTASY RESONANCE) would make the read invalid and is left out. Those reads are converted in a
-        // second sweep (deferSeveral), once every other read has registered its texture
+        // second sweep (deferSeveral), once every other read has registered its texture.
+        // A game's own uniform buffer holds other data than handles, so a word of it alone is no handle here, but a texture word ORed with a sampler word of its bank or a constant sampler is one: Unreal
+        // Engine 5.4 on the Switch 2 keeps its handles in c[3] and builds them under a guard (R = c[3][a]; R |= c[3][b]) for a read under a guard Utils.FindLastOperation cannot tie to it: !UP0
+        // and !P0 with UP0 the vote of P0, P4 and P5 with P5 = P4 && !P1, and P6 and a branch over !P6. The phi then also takes the handle's first word and what the register held before.
+        // With the OR unguarded the phi lies on its source, not on the handle
         private enum TableHandle { None, Set, Deferred }
 
         private static TableHandle TryTableHandle(BasicBlock block, ResourceManager resourceManager, IGpuAccessor gpuAccessor, TextureOperation texOp, LinkedListNode<INode> node, bool deferSeveral)
         {
             Operand handle = texOp.GetSource(0);
 
-            if (handle.AsgOp is not PhiNode || IsBindlessHandleAllowed(handle))
+            if (handle.AsgOp is not PhiNode and not Operation { Inst: Instruction.BitwiseOr } || IsBindlessHandleAllowed(handle))
             {
                 return TableHandle.None;   // GenerateBindlessAccess takes it, as before (a choice among c[2] words: the dynamic handle arrays of tex_dyn_slots)
             }
@@ -121,7 +125,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                         {
                             (Operand t, Operand sm) = IsSamplerWord(texture) && !IsSamplerWord(sampler) ? (sampler, texture) : (texture, sampler);   // either order, as TryConvertBindless
 
-                            if (IsTableWord(t) && (IsC2Word(sm) || (sm.Type == OperandType.Constant && (sm.Value & 0xfffff) == 0)))
+                            if (t.Type == OperandType.ConstantBuffer && !IsSamplerWord(t) && (IsSameBankWord(sm, t) || (sm.Type == OperandType.Constant && (sm.Value & 0xfffff) == 0)))
                             {
                                 AddCandidate(found, t, sm);
                             }
@@ -133,6 +137,9 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     return TableHandle.None;   // a handle loaded from memory or an input is a real bindless access (GenerateBindlessAccess)
                 }
             }
+
+            // A word alone that an ORed candidate also takes is that handle on its way (R = word; R |= other word), not a handle of its own
+            found = found.FindAll(candidate => candidate.Sampler != null || !found.Exists(other => other.Sampler != null && (other.Texture.Value == candidate.Texture.Value || other.Sampler.Value == candidate.Texture.Value && other.Sampler.Type == OperandType.ConstantBuffer)));
 
             if (found.Count > 1)
             {
@@ -146,7 +153,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     return TableHandle.Deferred;
                 }
 
-                found = found.FindAll(candidate => resourceManager.GetTextureTypes(NvnTextureBufferIndex, candidate.Texture.GetCbufOffset(), texOp.Inst.IsImage())
+                found = found.FindAll(candidate => resourceManager.GetTextureTypes(candidate.Texture.GetCbufSlot(), candidate.Texture.GetCbufOffset(), texOp.Inst.IsImage())
                     .TrueForAll(type => SameShape(type, texOp.Type)));
             }
 
@@ -211,8 +218,8 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             }
 
             gpuAccessor.Log(found.Count == 1
-                ? "Bindless handle taken from the one c[2] handle among its phi inputs."
-                : $"Bindless handle chosen at run time among {found.Count} c[2] handles of its phi inputs.");
+                ? "Bindless handle taken from the one constant buffer handle among its phi inputs."
+                : $"Bindless handle chosen at run time among {found.Count} constant buffer handles of its phi inputs.");
 
             return TableHandle.Set;
         }
@@ -250,16 +257,16 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             return operand.Type == OperandType.ConstantBuffer && operand.GetCbufSlot() == NvnTextureBufferIndex && !IsSamplerWord(operand);
         }
 
-        private static bool IsC2Word(Operand operand)
-        {
-            return operand.Type == OperandType.ConstantBuffer && operand.GetCbufSlot() == NvnTextureBufferIndex;
-        }
-
         private static bool IsSamplerWord(Operand operand)
         {
             if (operand.Type != OperandType.ConstantBuffer || operand.GetCbufSlot() != NvnTextureBufferIndex) return false;
             int offset = operand.GetCbufOffset() * 4;
             return offset >= NvnSeparateSamplerBase && offset < NvnSeparateSamplerEnd;
+        }
+
+        private static bool IsSameBankWord(Operand operand, Operand word)
+        {
+            return operand.Type == OperandType.ConstantBuffer && operand.GetCbufSlot() == word.GetCbufSlot();
         }
 
         private static void AddCandidate(List<(Operand Texture, Operand Sampler)> found, Operand texture, Operand sampler)

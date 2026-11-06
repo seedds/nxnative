@@ -13,7 +13,7 @@ case "$APP" in /*.app) ;; *) die "Unexpected app resource destination: $APP";; e
 resource_dm=$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve().parents[2])' "$0")
 check_program() {   # RomFS, marker, shader libraries, shader folder
     python3 "$resource_dm/tools/romfs.py" "$1" "$2" || die "Game files unavailable: $1/$2"
-    [ -d "$3" ] || die "Shader libraries unavailable: $3"
+    [ -d "$3" ] || [ -f "$3" ] || die "Shader libraries unavailable: $3"
     # The host is compiled from the repository's current sources and loads only msl/b-<its chain version>: after a chain change (a pull, dmsh_chain.py --header) the prepared shaders are another chain's
     case "$4" in b-*)
         [ -f "$DM_RESOURCE_CHAIN_H" ] || die "No chain version header: $DM_RESOURCE_CHAIN_H (a project prepared before the chain version moved to dm/gfx/nvn: prepare the game again, build_ipa_from_nsp.py --prepare-xcode)"
@@ -43,6 +43,14 @@ sync_dir() {   # source folder, destination folder
     if [ ! -d "$2" ] || [ -z "$(ls -A "$2" 2>/dev/null)" ]; then mkdir -p "$2"; /bin/cp -cRp -- "$1/." "$2/" || die "copy $1 to $2"
     else /usr/bin/rsync -a --delete -- "$1/" "$2/" || die "sync $1 to $2"; fi
 }
+sync_libraries() {   # shader libraries (a folder, or an NVN game's one file: dm/tools/shader_lib.py), the app's msl folder for them, their name there
+    if [ -f "$1" ]; then
+        rm -rf "${2:?}/$3"; mkdir -p "$2"
+        if [ -f "$2/$3.img" ]; then /usr/bin/rsync -a -- "$1" "$2/$3.img"; else /bin/cp -cp -- "$1" "$2/$3.img" || die "copy $1"; fi
+    else
+        rm -f "${2:?}/$3.img"; sync_dir "$1" "$2/$3"
+    fi
+}
 sync_romfs() {   # the RomFS (an image file or a folder), the app folder it goes in
     if [ -f "$1" ]; then
         if [ -f "$2/romfs.img" ]; then /usr/bin/rsync -a -- "$1" "$2/romfs.img"; else /bin/cp -cp -- "$1" "$2/romfs.img" || die "copy $1"; fi
@@ -57,16 +65,16 @@ if [ -n "$DM_RESOURCE_PROGRAMS" ]; then
     rm -rf "$APP/romfs" "$APP/romfs.img" "$APP/romfs.id" "$APP/html" "$APP/jit"   # one program's, from a project prepared for one program
     keep=' '
     while IFS=$'\t' read -r pn romfs marker shaders msldir; do
-        mkdir -p "$APP/p$pn" "$APP/msl/p$pn/$msldir"
+        mkdir -p "$APP/p$pn"
         sync_romfs "$romfs" "$APP/p$pn"
-        sync_dir "$shaders" "$APP/msl/p$pn/$msldir"
-        for old in "$APP/msl/p$pn/"*; do [ "$old" = "$APP/msl/p$pn/$msldir" ] || rm -rf "$old"; done
+        sync_libraries "$shaders" "$APP/msl/p$pn" "$msldir"
+        for old in "$APP/msl/p$pn/"*; do case "$old" in "$APP/msl/p$pn/$msldir"|"$APP/msl/p$pn/$msldir.img") ;; *) rm -rf "$old";; esac; done
         beside_romfs "$romfs" "$APP/p$pn"
         keep="$keep p$pn "
     done < <(prog_rows)
     for old in "$APP"/p[0-9]* "$APP/msl/"*; do [ -e "$old" ] || continue; case "$keep" in *" $(basename "$old") "*) ;; *) rm -rf "$old";; esac; done
 else
-mkdir -p "$APP/msl/$DM_RESOURCE_MSLDIR"
+mkdir -p "$APP/msl"
 # DM_COPY_ROMFS=NO: the game files stay out of the app (main.m takes Documents/romfs first, copied there once): a reinstall then sends the code and shaders, not the whole game
 if [ "${DM_COPY_ROMFS:-YES}" = NO ]; then
     rm -rf "$APP/romfs" "$APP/romfs.img" "$APP/romfs.id"
@@ -75,9 +83,9 @@ if [ "${DM_COPY_ROMFS:-YES}" = NO ]; then
         python3 -I "$resource_dm/tools/romfs_image.py" --identity "$DM_RESOURCE_ROMFS" "${DM_RESOURCE_TITLE:-}" "${DM_RESOURCE_VERSION:-}" "${DM_RESOURCE_BUILD:-}" > "$APP/romfs.id" || die "identity of $DM_RESOURCE_ROMFS"
     fi
 else sync_romfs "$DM_RESOURCE_ROMFS" "$APP"; fi
-sync_dir "$DM_RESOURCE_SHADERS" "$APP/msl/$DM_RESOURCE_MSLDIR"
+sync_libraries "$DM_RESOURCE_SHADERS" "$APP/msl" "$DM_RESOURCE_MSLDIR"
 for old in "$APP/msl/"*; do
-    [ "$old" = "$APP/msl/$DM_RESOURCE_MSLDIR" ] || rm -rf "$old"
+    case "$old" in "$APP/msl/$DM_RESOURCE_MSLDIR"|"$APP/msl/$DM_RESOURCE_MSLDIR.img") ;; *) rm -rf "$old";; esac
 done
 beside_romfs "$DM_RESOURCE_ROMFS" "$APP"
 for old in "$APP"/p[0-9]*; do [ -d "$old" ] && rm -rf "$old"; done   # the programs of a project prepared for several

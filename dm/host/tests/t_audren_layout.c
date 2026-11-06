@@ -7,7 +7,11 @@
 #include <sys/wait.h>
 #include "../hle_audren.c"
 
-void *guest_sym(const char *name) { (void)name; return NULL; }
+enum { SAMPLES = 240, NMIX = 8, NCMD = 6 };
+// test_renderer_blocks: the renderer each appended block came from; the output holds what it is given and plays none of it
+static int blocks_on; static gbuf *blocks[AR_MAX][NBUF]; static int blocks_n[AR_MAX];
+static void blocks_exec(void *obj, void *state);
+void *guest_sym(const char *name) { return blocks_on && strstr(name, "ExecuteAudioRendererRendering") ? (void *)blocks_exec : NULL; }
 void *objmap_get(const void *key) { (void)key; return NULL; }
 void objmap_put(const void *key, void *value) { (void)key; (void)value; }
 void *objmap_del(const void *key) { (void)key; return NULL; }
@@ -18,13 +22,18 @@ module_t *module_of(const void *p) { (void)p; return NULL; }
 void *dm_pcmout_open(int ch) { (void)ch; return NULL; }
 void dm_pcmout_close(void *k) { (void)k; }
 void dm_pcmout_start(void *k) { (void)k; }
-int dm_pcmout_append(void *k, void *b) { (void)k; (void)b; return 0; }
+int dm_pcmout_append(void *k, void *b) {
+    (void)k;
+    if (!blocks_on) return 0;
+    int r = ar_index(t_ar); blocks[r][blocks_n[r]++] = b;
+    if (blocks_n[r] == NBUF) atomic_store(&t_ar->open, 0);
+    return 1;
+}
 void *dm_pcmout_released(void *k) { (void)k; return NULL; }
 void dm_pcmout_wait(void *k, int ms) { (void)k; (void)ms; }
 void hle_bind_system_event(void *ev, int ac) { (void)ev; (void)ac; }
 uint32_t hle_dup_readable_handle(uint32_t h) { return h; }
 
-enum { SAMPLES = 240, NMIX = 8, NCMD = 6 };
 static int32_t mix[NMIX * SAMPLES];
 _Alignas(8) static uint8_t list[0x20 + NCMD * 0x148];
 static uint8_t *put(uint8_t *q, int sdk, int id, int size) {
@@ -187,8 +196,31 @@ static void test_two_renderers(void) {
     memset(g_ar, 0, sizeof g_ar);
 }
 
+// Issue #1336: AudioOut queues a block's pointer and copies its samples when the sound card asks, so a block is the renderer's own until it comes back released.
+// Renderer 0 queues all its blocks and none plays; renderer 1 then renders (blocks_exec marks each frame with its renderer) and renderer 0's blocks must still hold its samples
+static void blocks_exec(void *obj, void *state) {
+    (void)obj; (void)state;
+    for (int i = 0; i < SAMPLES * 2; i++) t_ar->frame[i] = (int16_t)(ar_index(t_ar) + 1);
+    t_ar->frame_n = SAMPLES;
+}
+static void test_renderer_blocks(void) {
+    blocks_on = 1;
+    for (int r = 0; r < 2; r++) { atomic_store(&g_ar[r].open, 1); render_main(&g_ar[r]); }
+    blocks_on = 0;
+    for (int r = 0; r < 2; r++) {
+        assert(blocks_n[r] == NBUF);
+        for (int i = 0; i < NBUF; i++) {
+            const int16_t *s = blocks[r][i]->ptr;
+            assert(blocks[r][i]->size == SAMPLES * 4);
+            for (int j = 0; j < SAMPLES * 2; j++) assert(s[j] == r + 1);
+        }
+    }
+    memset(g_ar, 0, sizeof g_ar);
+}
+
 int main(int argc, char **argv) {
     test_two_renderers();
+    test_renderer_blocks();
     if (argc == 2 && !strcmp(argv[1], "--histogram")) { test_histogram(); return 0; }
     if (argc == 2 && !strcmp(argv[1], "--malformed")) { test_malformed(16, 0); return 0; }
     test_headers();
@@ -205,6 +237,6 @@ int main(int argc, char **argv) {
         assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
     test_histogram();
-    puts("audren layout: bounded histograms, malformed-list rejection, unaligned and truncated headers, SDK 4/5/6/16/21 stereo PCM and empty/incomplete startup recovery passed");
+    puts("audren layout: renderers' own blocks, bounded histograms, malformed-list rejection, unaligned and truncated headers, SDK 4/5/6/16/21 stereo PCM and empty/incomplete startup recovery passed");
     return 0;
 }

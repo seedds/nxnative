@@ -85,16 +85,20 @@ HMMA_BODY = '''{
     } else if (!areuse) {
         simdgroup_load(am[0], h, 16, ulong2(0, 0)); simdgroup_load(am[1], h, 16, ulong2(8, 0)); simdgroup_load(am[2], h, 16, ulong2(0, 8)); simdgroup_load(am[3], h, 16, ulong2(8, 8));
     }
-    simdgroup_half8x8 b0, b1;
+    // C and D in the call's own matrices: a slot is read only for a chain's C (cslot) and written only for its D (dslot). A call outside every chain has slot 0 in its
+    // flags (no slot bits); working in acc[0..1] it overwrote the accumulator a chain held there between its two calls (Ocarina of Time's agl_ndsr_vr networks: 2,515 such
+    // calls in 30 shaders, dotted rows across fog and light, GitHub issue #1537). The flags are constants at each inlined call, so the copies cost nothing
+    simdgroup_half8x8 b0, b1, c0, c1;
     simdgroup_load(b0, h + 256, 16, ulong2(0, 0), true); simdgroup_load(b1, h + 256, 16, ulong2(8, 0), true);
-    if (czero) { simdgroup_multiply(acc[k], am[0], b0); simdgroup_multiply(acc[k + 1], am[2], b0); }
+    if (czero) { simdgroup_multiply(c0, am[0], b0); simdgroup_multiply(c1, am[2], b0); }
     else {
-        if (!cslot) { simdgroup_load(acc[k], h + 384, 8, ulong2(0, 0)); simdgroup_load(acc[k + 1], h + 384, 8, ulong2(0, 8)); }
-        simdgroup_multiply_accumulate(acc[k], am[0], b0, acc[k]); simdgroup_multiply_accumulate(acc[k + 1], am[2], b0, acc[k + 1]);
+        if (cslot) { c0 = acc[k]; c1 = acc[k + 1]; }
+        else { simdgroup_load(c0, h + 384, 8, ulong2(0, 0)); simdgroup_load(c1, h + 384, 8, ulong2(0, 8)); }
+        simdgroup_multiply_accumulate(c0, am[0], b0, c0); simdgroup_multiply_accumulate(c1, am[2], b0, c1);
     }
-    simdgroup_multiply_accumulate(acc[k], am[1], b1, acc[k]); simdgroup_multiply_accumulate(acc[k + 1], am[3], b1, acc[k + 1]);
-    if (dslot) { simdgroup_barrier(mem_flags::mem_threadgroup); %(d1)s = 0; return 0; }
-    simdgroup_store(acc[k], h + 384, 8, ulong2(0, 0)); simdgroup_store(acc[k + 1], h + 384, 8, ulong2(0, 8));
+    simdgroup_multiply_accumulate(c0, am[1], b1, c0); simdgroup_multiply_accumulate(c1, am[3], b1, c1);
+    if (dslot) { acc[k] = c0; acc[k + 1] = c1; simdgroup_barrier(mem_flags::mem_threadgroup); %(d1)s = 0; return 0; }
+    simdgroup_store(c0, h + 384, 8, ulong2(0, 0)); simdgroup_store(c1, h + 384, 8, ulong2(0, 8));
     simdgroup_barrier(mem_flags::mem_threadgroup);
     uint d0 = s[192 + g * 4 + t], d1 = s[192 + (g + 8) * 4 + t];
     simdgroup_barrier(mem_flags::mem_threadgroup);

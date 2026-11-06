@@ -1561,7 +1561,14 @@ misses = [key for key in keys if key not in cache_hits]
 chunks = [misses[i::NJ] for i in range(NJ)]
 def xl(ch):
     jp = os.path.join(w, f'job_{abs(hash(ch[0]))}.json'); json.dump([jobs[k] for k in ch], open(jp, 'w'))
-    return subprocess.run([XLATE, jp, w], capture_output=True, text=True)
+    r = subprocess.run([XLATE, jp, w], capture_output=True, text=True)
+    try: os.unlink(jp)
+    except OSError: pass
+    for k in ch:
+        if jobs[k]['stage'] != 'gs':
+            try: os.unlink(os.path.join(w, k + '.bin'))
+            except OSError: pass
+    return r
 with cf.ThreadPoolExecutor(NJ) as ex: xr = list(ex.map(xl, [c for c in chunks if c]))
 xerr = {}
 for r in xr:
@@ -1569,16 +1576,29 @@ for r in xr:
         m = re.match(r'\[RED\] (\w+): (.*)', ln)
         if m: xerr[m.group(1)] = m.group(2)[:160]
 def fin(key):
-    if key in cache_hits:
-        refl = json.load(open(os.path.join(out, key + '_b.json')))
-        src = open(os.path.join(out, key + '_b.metal')).read() if refl['stage'] in ('ps', 'vs') else ''
-        if refl['stage'] == 'vs': write_refl(key, pull_finish(key, src, vin_finish(key, src, refl)))
-        if refl['stage'] == 'ps': refl.update(ps_libraries(key, os.path.join(out, key + '_b.metal'), src))
-        return key, 'ok', '', fetch_finish(key, src, refl)
-    if key in xerr or not os.path.exists(os.path.join(w, key + '.spv')): return key, 'translation failed', xerr.get(key, 'no spv'), None
-    result = (key,) + finish(key, w, jobs[key], c1s[key])
-    if result[1] == 'ok': publish_cache(key, digests[key], rule_fps[key], CODE_FP)
-    return result
+    try:
+        if key in cache_hits:
+            refl = json.load(open(os.path.join(out, key + '_b.json')))
+            src = open(os.path.join(out, key + '_b.metal')).read() if refl['stage'] in ('ps', 'vs') else ''
+            if refl['stage'] == 'vs': write_refl(key, pull_finish(key, src, vin_finish(key, src, refl)))
+            if refl['stage'] == 'ps': refl.update(ps_libraries(key, os.path.join(out, key + '_b.metal'), src))
+            return key, 'ok', '', fetch_finish(key, src, refl)
+        if key in xerr or not os.path.exists(os.path.join(w, key + '.spv')): return key, 'translation failed', xerr.get(key, 'no spv'), None
+        result = (key,) + finish(key, w, jobs[key], c1s[key])
+        if result[1] == 'ok': publish_cache(key, digests[key], rule_fps[key], CODE_FP)
+        return result
+    finally:
+        if key not in cache_hits:
+            for ext in ('.spv', '.res.json', '.metal', '.bin'):
+                try: os.unlink(os.path.join(w, key + ext))
+                except OSError: pass
+            for t in range(5):
+                for ext in ('.spv', '.res.json', '.reader.spv'):
+                    try: os.unlink(os.path.join(w, f'{key}_g{t}{ext}'))
+                    except OSError: pass
+            for extra in (f'job1_{key}.json', f'{key}_geometry.json'):
+                try: os.unlink(os.path.join(w, extra))
+                except OSError: pass
 with cf.ThreadPoolExecutor(NJ) as ex:   # two phases: paired vertex shaders read their pixel shaders' MSL (vs_pad), so they go last
     res = list(ex.map(fin, [k for k in keys if k not in PAIRS])) + list(ex.map(fin, [k for k in keys if k in PAIRS]))
 # Passthrough geometry as mesh shaders (dmsh_mesh.py): <vertex key>_<geometry key>_m3 for each pair in the profile's geo_mesh.tsv whose two libraries exist; the host
@@ -1597,6 +1617,9 @@ def mesh_finish(pair):
         if IOSOUT: MTL.compile('ios', path, libs[1])
         MESH_STATS['built'] += 1
     except subprocess.CalledProcessError as e: MESH_STATS['failed to compile'] += 1; print(f'[RED] mesh {vk} {gk}: does not compile ({str(e)[:120]})', flush=True)
+    finally:
+        try: os.unlink(path)
+        except OSError: pass
 _mesh = GAME.table('geo_mesh.tsv')
 if _mesh.exists():
     with cf.ThreadPoolExecutor(NJ) as ex: list(ex.map(mesh_finish, [tuple(ln.split()[:2]) for ln in _mesh.read_text().splitlines() if ln.strip() and not ln.startswith('#')]))

@@ -223,8 +223,15 @@ void hid_keys_init(void) {
 //   points over that time and lifts it (the touch screen's pans and swipes, hle_touch.c gesture_sample), "dump" logs what each guest thread waits on and the graphics wait points
 //   (crash_dump_now, as the iOS app's DM_LOG_PORT dump; scripts/regress.py asks for it before stopping a hung game), "program <n>" makes oe::ExecuteProgram(n) with no parameters (a multi-program application's way between its programs, headless), "webshot <path>" saves the offline page shown as a PNG, "#…" is ignored.
 //   Look at a screen, decide, press, look again: menus whose timing moves from run to run (loading) need no blind timed script
+// A path that starts with "~/" (DM_CTL's own, and those of shot, texdump, texraw, memdump and webshot) is under $HOME: on iOS the app's data container, whose absolute path changes
+// from launch to launch, so Documents/env.txt cannot name a file in it otherwise
+static const char *ctl_home(const char *p, char *buf, size_t n) {
+    const char *h = getenv("HOME");
+    if (p[0] == '~' && p[1] == '/' && h) { snprintf(buf, n, "%s/%s", h, p + 2); return buf; }
+    return p;
+}
 static void *ctl_main(void *arg) {
-    const char *path = arg; long off = 0; char line[1100];
+    const char *path = arg; long off = 0; char line[1100], hp[1100];
     if (getenv("DM_PREV_PROGRAM")) {   // oe::ExecuteProgram started this program in the last one's place: that program acted on what the file holds
         FILE *f0 = fopen(path, "r"); if (f0) { if (!fseek(f0, 0, SEEK_END)) off = ftell(f0); fclose(f0); }
     }
@@ -237,18 +244,18 @@ static void *ctl_main(void *arg) {
                 if (!n || line[0] == '#') continue;
                 if (!strcmp(line, "dump")) { crash_dump_now("DM_CTL dump"); continue; }
                 if (!strncmp(line, "program ", 8)) { void dm_oe_execute(int index, const void *param, size_t n); LOG("DM_CTL: oe::ExecuteProgram(%d)", atoi(line + 8)); dm_oe_execute(atoi(line + 8), NULL, 0); continue; }
-                if (!strncmp(line, "webshot ", 8)) { void front_web_shot(const char *path); front_web_shot(line + 8); continue; }
-                if (!strncmp(line, "shot ", 5)) { dm_gfx_shot_at(1, line + 5); LOG("DM_CTL: screenshot of the next frame → %s", line + 5); continue; }
+                if (!strncmp(line, "webshot ", 8)) { void front_web_shot(const char *path); front_web_shot(ctl_home(line + 8, hp, sizeof hp)); continue; }
+                if (!strncmp(line, "shot ", 5)) { const char *p = ctl_home(line + 5, hp, sizeof hp); dm_gfx_shot_at(1, p); LOG("DM_CTL: screenshot of the next frame → %s", p); continue; }
                 if (!strncmp(line, "texlist ", 8)) { void dm_gfx_texlist(int target); dm_gfx_texlist(atoi(line + 8)); continue; }
                 if (!strcmp(line, "restop")) { void dm_gfx_restop(void); dm_gfx_restop(); continue; }   // what the residency set holds (nvn_mtl.m res_top)
-                if (!strncmp(line, "texraw ", 7)) { void dm_gfx_texraw(uint64_t serial, const char *path); char *e2; uint64_t s = strtoull(line + 7, &e2, 10); while (*e2 == ' ') e2++; dm_gfx_texraw(s, e2); continue; }
+                if (!strncmp(line, "texraw ", 7)) { void dm_gfx_texraw(uint64_t serial, const char *path); char *e2; uint64_t s = strtoull(line + 7, &e2, 10); while (*e2 == ' ') e2++; dm_gfx_texraw(s, ctl_home(e2, hp, sizeof hp)); continue; }
                 if (!strncmp(line, "peek ", 5)) { void dm_ctl_peek(uint64_t a, int n); char *e2; uint64_t a = strtoull(line + 5, &e2, 16); dm_ctl_peek(a, (int)strtol(e2, NULL, 0)); continue; }
                 if (!strncmp(line, "memdump ", 8)) { void dm_ctl_memdump(uint64_t a, uint64_t n, const char *path); char *e2, *e3; uint64_t a = strtoull(line + 8, &e2, 16), n = strtoull(e2, &e3, 0);
-                                                     while (*e3 == ' ') e3++; dm_ctl_memdump(a, n, e3); continue; }
+                                                     while (*e3 == ' ') e3++; dm_ctl_memdump(a, n, ctl_home(e3, hp, sizeof hp)); continue; }
                 if (!strncmp(line, "cvari ", 6)) { void dm_ctl_cvar_i32(uint64_t off, int32_t v); char *e2; uint64_t off = strtoull(line + 6, &e2, 16); dm_ctl_cvar_i32(off, (int32_t)strtol(e2, NULL, 0)); continue; }
                 if (!strncmp(line, "cvarf ", 6)) { void dm_ctl_cvar_f32(uint64_t off, float v); char *e2; uint64_t off = strtoull(line + 6, &e2, 16); dm_ctl_cvar_f32(off, strtof(e2, NULL)); continue; }
                 if (!strncmp(line, "env ", 4)) { char *eq = strchr(line + 4, '='); if (eq) { *eq = 0; setenv(line + 4, eq + 1, 1); LOG("DM_CTL: env %s=%s", line + 4, eq + 1); } continue; }
-                if (!strncmp(line, "texdump ", 8)) { void dm_gfx_texdump_next(const char *path); dm_gfx_texdump_next(line + 8); LOG("DM_CTL: colour targets of the next frame → %s (as DM_NVN_TEXDUMP)", line + 8); continue; }
+                if (!strncmp(line, "texdump ", 8)) { void dm_gfx_texdump_next(const char *path); const char *p = ctl_home(line + 8, hp, sizeof hp); dm_gfx_texdump_next(p); LOG("DM_CTL: colour targets of the next frame → %s (as DM_NVN_TEXDUMP)", p); continue; }
                 if (!strncmp(line, "passdump ", 9)) { void dm_gfx_passdump_next(long n); dm_gfx_passdump_next(atol(line + 9)); LOG("DM_CTL: passes of the next %ld frames (as DM_NVN_PASSDUMP)", atol(line + 9)); continue; }
                 if (!strncmp(line, "drag ", 5)) {   // one finger, a step every 8 ms
                     float x0, y0, x1, y1, s = 0.3f; if (sscanf(line + 5, "%f %f %f %f %f", &x0, &y0, &x1, &y1, &s) < 4) { LOG("[RED] DM_CTL drag wants x0 y0 x1 y1 [seconds]"); continue; }
@@ -272,6 +279,7 @@ static void *ctl_main(void *arg) {
 }
 static void ctl_start(void) {
     const char *e = getenv("DM_CTL"); if (!e || !*e) return;
+    char hp[1100]; e = ctl_home(e, hp, sizeof hp);
     pthread_t th; if (!pthread_create(&th, NULL, ctl_main, strdup(e))) { pthread_detach(th); LOG("DM_CTL: reading key presses and screenshot requests from %s", e); }
 }
 

@@ -2197,7 +2197,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[158];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[159];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -6216,6 +6216,79 @@ static size_t arena_alloc(size_t n, __strong id<MTLBuffer> *buf) {
     }
     size_t off = g_cur_arena->used; g_cur_arena->used += n; *buf = g_cur_arena->buf; return off;
 }
+// ---------- Frame-frozen copies of CPU-written read-only storage buffers ----------
+// The host's GPU, idle between submissions, runs a submission at once; the console's is still busy with the frame's earlier passes. PRAGMATA submits its light culling
+// (which reads the light array through an address kept in its push constants, NVN_RB_SBUFU), rewrites the light array from the CPU about 2 ms later, and submits the
+// lighting (which reads it as a storage binding, NVN_RB_SBUFP) four submissions later: on the host the culling saw the old lights and the lighting the new ones, and
+// wherever the game had moved a light to another slot the ground lost it (the New Game flyover's dark patch, twice every 1.5 s of game time). On the console both
+// see the new array. Here, a frozen range is copied once per guest frame, at its first read-only binding in that frame (either kind), and every read-only binding of it
+// in the frame reads that copy: the frame's readers agree (they see the lights as they were when the first of them was submitted, one frame behind the console at worst).
+// DM_NVN_SB_FREEZE=1 (every qualifying read-only storage binding) or =<shader key prefix> (that shader's): forced (=0 off); unset: the profile's sb_freeze. DM_NVN_SB_FREEZE_AUTO=1: only ranges caught
+// changing under a submission: a read-only storage binding (1 B .. 256 KB, CPU-readable) on probation (its first binding, then every 64th submission) keeps a copy
+// made at encode, compared with memory when the submission completes; a difference freezes the range from then on (a RED line names it). Both off by default. A range a
+// shader binds writable stops being frozen. Copies come from a ring of buffers per range, reused once the GPU has passed their last use
+enum { SBF_MAX = 256u << 10, SBF_RANGES = 64, SBF_PROBES = 256, SBF_BUFS = 6, SBF_PROBE_EVERY = 64 };
+typedef struct { uint64_t lo, n, frame, gpu, wframe; int cur, dead; void *buf[SBF_BUFS]; uint64_t fence[SBF_BUFS]; } sbf_range;   // wframe: a frame with a writable binding of it (read from memory then)
+typedef struct { uint64_t lo, n, last; int seen; } sbf_probe;
+static sbf_range g_sbf[SBF_RANGES]; static _Atomic int g_sbf_n; static sbf_probe g_sbfp[SBF_PROBES]; static int g_sbfp_n;
+static uint64_t g_sbf_copies, g_sbf_bytes, g_sbf_redirects;
+static pthread_mutex_t g_sbf_mu = PTHREAD_MUTEX_INITIALIZER;   // only for the probes' completion handlers adding ranges
+// The profile's sb_freeze (DM_GAME_SB_FREEZE: off, auto, all or a shader key prefix) when the switches are unset
+static const char *sbf_profile(void) { const char *p = DM_GAME_SB_FREEZE; return !strcmp(p, "off") ? NULL : !strcmp(p, "all") ? "1" : p; }
+static int sbf_force(const char *key) {
+    static int on = -1; static char k[24];
+    if (on < 0) { const char *e = getenv("DM_NVN_SB_FREEZE"); if (!e && sbf_profile() && strcmp(sbf_profile(), "auto")) e = sbf_profile(); on = e && *e && strcmp(e, "0"); if (on && strcmp(e, "1")) snprintf(k, sizeof k, "%s", e);
+        if (on) MLOG("DM_NVN_SB_FREEZE=%s: read-only storage buffers%s%s are read from one copy per frame, made at their first binding in the frame", e, k[0] ? " of shader " : "", k); }
+    return on && (!k[0] || (key && !strncmp(key, k, strlen(k))));
+}
+static int sbf_auto(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_SB_FREEZE_AUTO"); if (!e && sbf_profile() && !strcmp(sbf_profile(), "auto")) e = "1"; on = e && *e && strcmp(e, "0"); if (on) MLOG("DM_NVN_SB_FREEZE_AUTO=1: read-only storage ranges the CPU changes under a submission are read from one copy per frame"); } return on; }
+static int sbf_any(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_SB_FREEZE"); if (!e && sbf_profile() && strcmp(sbf_profile(), "auto")) e = sbf_profile(); on = (e && *e && strcmp(e, "0")) || sbf_auto(); } return on; }
+static sbf_range *sbf_find(uint64_t addr) { int n = atomic_load(&g_sbf_n); for (int i = 0; i < n; i++) if (!g_sbf[i].dead && addr >= g_sbf[i].lo && addr < g_sbf[i].lo + g_sbf[i].n) return &g_sbf[i]; return NULL; }
+static sbf_range *sbf_add(uint64_t lo, uint64_t n, const char *why, const char *key) {   // on the encoding thread, or under g_sbf_mu from a completion handler
+    sbf_range *r = sbf_find(lo); if (r) return r;
+    pthread_mutex_lock(&g_sbf_mu); int k = atomic_load(&g_sbf_n); if (k == SBF_RANGES) { pthread_mutex_unlock(&g_sbf_mu); RED_ONCE(158, "DM_NVN_SB_FREEZE: the table of %d frozen ranges is full; %#llx+%#llx is read from memory", SBF_RANGES, (unsigned long long)lo, (unsigned long long)n); return NULL; }
+    r = &g_sbf[k]; memset(r, 0, sizeof *r); r->lo = lo; r->n = n; r->frame = ~0ull; r->wframe = ~0ull; atomic_store(&g_sbf_n, k + 1); pthread_mutex_unlock(&g_sbf_mu);
+    MLOG("%s read-only storage %#llx+%#llx (shader %s): read from one copy per frame from now on", why, (unsigned long long)lo, (unsigned long long)n, key ? key : "-");
+    return r;
+}
+// A writable binding over a frozen range: the GPU may write it this frame, so this frame's later readers read memory (the range stays frozen for the next frames).
+// The first 8 are logged with the binder (DM_NVN_SB_FREEZE)
+static void sbf_written(uint64_t addr, uint64_t size, const char *key, int stage, const char *kind) {
+    if (!atomic_load(&g_sbf_n)) return; sbf_range *r = sbf_find(addr); if (!r) return;
+    uint64_t fr = atomic_load(&g_cur_frame); r->wframe = fr; if (r->frame == fr) r->frame = ~0ull;   // this frame: memory from here on
+    static int nl; if (nl++ < 8) MLOG("[RED] storage %#llx+%#llx bound writable on frame %llu by shader %s stage %d (%s at %#llx, size %s%#llx): read from memory this frame",
+        (unsigned long long)r->lo, (unsigned long long)r->n, (unsigned long long)fr, key ? key : "-", stage, kind, (unsigned long long)addr, size ? "" : "unknown, ", (unsigned long long)size);
+}
+// The GPU address a read-only storage binding at addr reads: the frame's copy of a frozen range (made now if this is the frame's first), else 0 (memory as before)
+static uint64_t sbf_read(uint64_t addr, __unsafe_unretained id<MTLBuffer> *usebuf) {
+    sbf_range *r = sbf_find(addr); if (!r) return 0;
+    uint64_t fr = atomic_load(&g_cur_frame);
+    if (r->wframe == fr) return 0;   // a writable binding of it this frame (sbf_written)
+    if (r->frame != fr) {
+        int pick = -1; for (int i = 0; i < SBF_BUFS && pick < 0; i++) { int j = (r->cur + 1 + i) % SBF_BUFS; if (!r->buf[j] || r->fence[j] <= g_done) pick = j; }
+        if (pick < 0) { static int nl; if (nl++ < 8) MLOG("[RED] storage frame copy %#llx: all %d copies still in use by the GPU; memory is read this frame", (unsigned long long)r->lo, SBF_BUFS); return 0; }
+        if (!r->buf[pick]) { id<MTLBuffer> b = [g_dev newBufferWithLength:(NSUInteger)r->n options:MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked]; if (!b) return 0; res_add(b); r->buf[pick] = (void *)CFBridgingRetain(b); }
+        id<MTLBuffer> b = (__bridge id<MTLBuffer>)r->buf[pick];
+        if (!nvn_host_readable(r->lo, r->n)) return 0;
+        memcpy(b.contents, (const void *)(uintptr_t)r->lo, (size_t)r->n);
+        r->cur = pick; r->frame = fr; r->gpu = b.gpuAddress; g_sbf_copies++; g_sbf_bytes += r->n;
+    }
+    r->fence[r->cur] = g_fence + 1; g_sbf_redirects++;
+    *usebuf = (__bridge id<MTLBuffer>)r->buf[r->cur];
+    return r->gpu + (addr - r->lo);
+}
+// A read-only storage binding of known size (NVN_RB_SBUFP): register it when forced, or put it on probation (DM_NVN_SB_FREEZE_AUTO)
+static void sbf_note(const char *key, uint64_t lo, uint64_t n) {
+    if (!n || n > SBF_MAX || sbf_find(lo)) return;
+    if (sbf_force(key)) { if (nvn_host_readable(lo, n)) sbf_add(lo, n, "DM_NVN_SB_FREEZE:", key); return; }
+    if (!sbf_auto() || !nvn_host_readable(lo, n)) return;
+    sbf_probe *p = NULL; for (int i = 0; i < g_sbfp_n; i++) if (g_sbfp[i].lo == lo && g_sbfp[i].n == n) { p = &g_sbfp[i]; break; }
+    if (!p) { if (g_sbfp_n == SBF_PROBES) return; p = &g_sbfp[g_sbfp_n++]; p->lo = lo; p->n = n; p->seen = 0; p->last = 0; }
+    if (p->seen && (p->last == g_fence + 1 || g_fence + 1 < p->last + SBF_PROBE_EVERY)) return;
+    p->seen = 1; p->last = g_fence + 1;
+    NSData *enc = [NSData dataWithBytes:(const void *)(uintptr_t)lo length:(NSUInteger)n]; char k8[17]; snprintf(k8, sizeof k8, "%s", key ? key : "-"); NSString *ks = @(k8);
+    [g_commit_blocks addObject:^{ if (memcmp(enc.bytes, (const void *)(uintptr_t)lo, (size_t)n)) sbf_add(lo, n, "[RED] DM_NVN_SB_FREEZE_AUTO: changed on the CPU while a submission reading it was in flight:", ks.UTF8String); }];
+}
 
 // ---------- Draw state ----------
 static struct {
@@ -9422,16 +9495,24 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             }
         } else if (b->kind == NVN_RB_SBUFP || b->kind == NVN_RB_UBOP) {   // B: storage buffers / compute-stage uniforms are device pointers; the address is taken by NVN slot
             const p_bind_buf *u = reg < 16 ? (b->kind == NVN_RB_UBOP ? &S.ubo[nvn_stage][reg] : &S.ssbo[nvn_stage][reg]) : NULL;
-            void *mb; uint64_t mo, gpu;
-            if (u && u->addr && mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu)) { slots[aid] = gpu; USE((__bridge id<MTLBuffer>)mb, b->rw ? MTLResourceUsageRead | MTLResourceUsageWrite : MTLResourceUsageRead); if (b->rw && b->kind == NVN_RB_SBUFP && !(reg < 32 && (sh->sb_ro >> reg & 1))) sbw_note(u->addr, sbw_len(u->size, mb, mo), SBW_GPU); }   // cb_extent.tsv: slots the shader never writes
+            void *mb; uint64_t mo, gpu, fg = 0; __unsafe_unretained id<MTLBuffer> fb = nil;
+            if (b->kind == NVN_RB_SBUFP && u && u->addr && sbf_any()) {   // DM_NVN_SB_FREEZE: a CPU-written range read from the frame's copy (sbf_read)
+                if (b->rw && !(reg < 32 && (sh->sb_ro >> reg & 1))) sbf_written(u->addr, u->size, sh->key, nvn_stage, "storage binding");
+                else { sbf_note(sh->key, u->addr, u->size); fg = sbf_read(u->addr, &fb); } }
+            if (fg) { slots[aid] = fg; USE(fb, MTLResourceUsageRead); }
+            else if (u && u->addr && mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu)) { slots[aid] = gpu; USE((__bridge id<MTLBuffer>)mb, b->rw ? MTLResourceUsageRead | MTLResourceUsageWrite : MTLResourceUsageRead); if (b->rw && b->kind == NVN_RB_SBUFP && !(reg < 32 && (sh->sb_ro >> reg & 1))) sbw_note(u->addr, sbw_len(u->size, mb, mo), SBW_GPU); }   // cb_extent.tsv: slots the shader never writes
             else { slots[aid] = dummy_buf_gpu(); USE(dummy_buf(), MTLResourceUsageRead); }
             if (bl) PD("B %llu st%d sbufp reg%d %s addr=%#llx size=%llu %s", g_stat_pass, nvn_stage, reg, u && u->addr ? "real" : "dummy", u ? (unsigned long long)u->addr : 0ull, u ? (unsigned long long)u->size : 0ull, b->rw ? "rw" : "ro");
         } else if (b->kind == NVN_RB_SBUFU) {   // B: a storage buffer whose GPU address the game keeps in its own uniform buffer (Monster Hunter Rise's compute shaders: c3 + 0x38); read like a bindless handle
             // Its address in NVN2's push constants (c[24], uniform "slot" DMSH_PUSH_BANK - 3, which no game uniform slot reaches): read from the pushed bytes (PRAGMATA's
             // compute shaders keep their storage buffer addresses there, dmsh_build.py nvn2_cs)
             uint64_t addr = sbufu_addr(nvn_stage, sh, b);
-            void *mb; uint64_t mo, gpu;
-            if (addr && mtl_gpu_addr(addr, 1, &mb, &mo, &gpu)) { slots[aid] = gpu; USE((__bridge id<MTLBuffer>)mb, b->rw ? MTLResourceUsageRead | MTLResourceUsageWrite : MTLResourceUsageRead); if (b->rw) sbw_note(addr, sbw_len(0, mb, mo), SBW_GPU); }   // size not known
+            void *mb; uint64_t mo, gpu, fg = 0; __unsafe_unretained id<MTLBuffer> fb = nil;
+            if (addr && atomic_load(&g_sbf_n)) {   // DM_NVN_SB_FREEZE: the frame's copy of a frozen range (the light culling's read of PRAGMATA's light array)
+                if (b->rw) sbf_written(addr, 0, sh->key, nvn_stage, "address in a uniform / push constant");
+                else fg = sbf_read(addr, &fb); }
+            if (fg) { slots[aid] = fg; USE(fb, MTLResourceUsageRead); }
+            else if (addr && mtl_gpu_addr(addr, 1, &mb, &mo, &gpu)) { slots[aid] = gpu; USE((__bridge id<MTLBuffer>)mb, b->rw ? MTLResourceUsageRead | MTLResourceUsageWrite : MTLResourceUsageRead); if (b->rw) sbw_note(addr, sbw_len(0, mb, mo), SBW_GPU); }   // size not known
             else { slots[aid] = dummy_buf_gpu(); USE(dummy_buf(), MTLResourceUsageRead); }
             if (bl) PD("B %llu st%d sbufu reg%d+%#x addr=%#llx %s", g_stat_pass, nvn_stage, reg, b->off, (unsigned long long)addr, b->rw ? "rw" : "ro");
         } else if (b->kind == NVN_RB_C1) {      // B: the shader's own constant segment, built when the shader is fetched

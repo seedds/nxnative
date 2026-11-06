@@ -161,6 +161,19 @@ def bnsh_shaders(d, base, label):
             why = check(label, st, ctl, code)
             if why: red(f'{label} BNSH @{base:#x} variation {v} {st}: {why}')
             out.append((f'{label}#BNSH@{base:#x}#var{v}', st, ctl, code))
+        # NVN2's task and mesh stages follow, at +0x40 and +0x48 of the program (Ocarina of Time's foliage and models: Shader/Foliage*.bfsha, Model*.bfsha, drawn by DrawMeshTasksIndirect). An older BNSH's
+        # program ends before them, so only a pointer to a control section of that stage counts
+        for off, st, stage in ((0x40, 'ts', 6), (0x48, 'ms', 7)):
+            if base + prog + off + 8 > len(d): continue
+            sc = struct.unpack_from('<Q', d, base + prog + off)[0]
+            if not sc or base + sc + 0x20 > len(d): continue
+            pctl, pcode, ncode, nctl = struct.unpack_from('<QQII', d, base + sc + 8)
+            if not 0x48 <= nctl < 0x10000 or base + pctl + nctl > len(d) or base + pcode + ncode > len(d): continue
+            ctl, code = d[base + pctl:base + pctl + nctl], d[base + pcode:base + pcode + ncode]
+            if not nvn2_ctl(ctl) or len(ctl) <= 0x56 or ctl[0x56] != stage: continue
+            why = check(label, st, ctl, code)
+            if why: red(f'{label} BNSH @{base:#x} variation {v} {st}: {why}')
+            out.append((f'{label}#BNSH@{base:#x}#var{v}', st, ctl, code))
     return out
 
 def nvn2_stage(ctl, code):   # an NVN2 shader's stage: compute, task and mesh by the control section's stage byte (+0x56: 5, 6, 7; a task or mesh shader's SPH reads as vertex or domain), else the SPH at the code area's start (no code header)
@@ -216,9 +229,10 @@ def ndsr_shaders(d, label):
     out = []; o = max((0x10, 0x14), key=records_from); prog = None
     while o + 16 <= len(d):
         c, cl, k, _ = struct.unpack_from('<4I', d, o)
-        if not c and not cl: break
+        if not (c or cl or k or _): break
+        # Entries are 8 bytes, a shader's control and code areas two of them, so data entries can shift the next shader by 8 (the second network of Ocarina of Time's NDVE file: u32 offset, u32 length << 4 | type)
+        if not (c + 0x48 <= len(d) and nvn2_ctl(d[c:c + 0x48])): o += 8; continue
         o += 16
-        if not (c + 0x48 <= len(d) and nvn2_ctl(d[c:c + 0x48])): continue
         ctl = d[c:c + max(cl >> 4, 0x48)]
         code = d[k:k + struct.unpack_from('<I', ctl, 0x44)[0]]
         st = nvn2_stage(ctl, code)
@@ -227,6 +241,24 @@ def ndsr_shaders(d, label):
         out.append((where, st, ctl, code))
         if st == 'vs': prog = where
         elif st == 'ps' and prog: BAHS_VAR[prog] = BAHS_VAR[where] = f'{label}#NDSR#{prog.rsplit("@", 1)[1]}'; prog = None
+    return out
+
+def ndve_shaders(d, label):
+    """nn::ndve's movie enhancement file (Ocarina of Time's Movie/Ndve/Ndve-Nvn2-vid_seq5.dat.zs: the roulibr compute networks that upscale its AV1 movies). 'NDVE', +0xc u32 length of the NDSR pack,
+    +0x14 u32 count, count 8-byte model records (a kind, a float scale), then the NDSR pack, whose offsets count from its own start, then the networks: their tables (u32 count, 1, u32 table
+    length, u32, then per shader u32 control offset, control length, code length, 0) give the same shaders as the control sections themselves, each naming its own length (+0x30) and its code
+    area's (+0x44), the code area right behind it. Without this file the movies' dispatches had no compute shader"""
+    if len(d) < 0x18: return []
+    pack = 0x18 + 8 * struct.unpack_from('<I', d, 0x14)[0]; nets = pack + struct.unpack_from('<I', d, 0xc)[0]
+    out = ndsr_shaders(d[pack:nets], label)
+    c = d.find(CTL_MAGIC, nets)
+    while c >= 0:
+        if not c & 3 and c + 0x48 <= len(d) and nvn2_ctl(d[c:c + 0x48]):
+            own, n = struct.unpack_from('<I', d, c + 0x30)[0], struct.unpack_from('<I', d, c + 0x44)[0]
+            ctl, code = d[c:c + own], d[c + own:c + own + n]
+            st = nvn2_stage(ctl, code)
+            if st and len(code) == n and not check(label, st, ctl, code): out.append((f'{label}#NDVE@{c:#x}', st, ctl, code))
+        c = d.find(CTL_MAGIC, c + 4)
     return out
 
 BAHS_VAR = {}   # BAHS entry label → the program variation it belongs to (bahs_variations; var_pairs pairs by it)
@@ -2604,6 +2636,7 @@ def scan_blob(d, label, out, depth=0, left=None):
         return
     if d[:4] == b'BAHS': out.extend(bahs_shaders(d, label)); return
     if d[:4] == b'NDSR': out.extend(ndsr_shaders(d, label)); return
+    if d[:4] == b'NDVE': out.extend(ndve_shaders(d, label)); return
     if shaders := sead_prim_shaders(d, label): out.extend(shaders); return
     if d[:len(TFXO)] == TFXO: out.extend(tfxo_shaders(d, label)); return
     if d[:4] == b'MSHD': out.extend(mshd_shaders(d, label)); return
@@ -2913,7 +2946,7 @@ def scan_file_in(args):
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), 'defer'
         return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
-    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
+    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
     else:
         scan_blob(d, '/' + rel, found)
         # whole GLSLC outputs in a file no other reader takes (FINAL FANTASY TACTICS - The Ivalice Chronicles: its engine's technique files, resources_nx/…/shader/*.tec, 261 outputs beside

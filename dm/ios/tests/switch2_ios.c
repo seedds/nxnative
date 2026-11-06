@@ -74,22 +74,36 @@ int main(void) {
     CHECK(ds2_motor_packet(b, &v, 3, 1) == 17);
     CHECK(ds2_motor_packet(f, &v, 3, 2) == 33 && f[0] == 0 && f[1] == 0x53 && f[17] == 0x53);
 
+    // The report's environment fields, built by hand into the recorded shape: battery current +320 (charging), charge state, die temperature,
+    // the GameCube pad's analog triggers, and the buttons
+    memset(b, 0, sizeof b);
+    b[4] = 0x08;   // A
+    b[0x1F] = 0x10; b[0x20] = 0x0F;          // 3856 mV
+    b[0x21] = 0x01;                          // charge state
+    b[0x22] = 0x40; b[0x23] = 0x01;          // current +320 (little-endian, signed): charging
+    b[0x2E] = 127; b[0x2F] = 0;              // temperature raw 127: 26 degrees C
+    b[0x3C] = 63; b[0x3D] = 64;              // triggers: left at 63, right just past it
+    CHECK(ds2_report_parse(b, 0x40, &r) && r.buttons == DS2_BTN_A && r.battery_mv == 3856 && r.battery_current == 320 && r.charge_state == 1 && r.temperature_raw == 127);
+    CHECK(ds2_gamecube_buttons(r.buttons, r.trigger_l, r.trigger_r, 64) == (DM_BTN_A | DM_BTN_R));
+    CHECK(ds2_gamecube_buttons(r.buttons, r.trigger_l, r.trigger_r, 63) == (DM_BTN_A | DM_BTN_L | DM_BTN_R));   // the threshold is the setting's
+    CHECK(ds2_report_parse(b, 0x3F, &r) && r.battery_current == 320 && r.trigger_r == 64);   // a 63-byte report carries the same fields
+
     // Pads
     ds2_pad_state pad; uint64_t m; int32_t st[4];
     pad_clear(&pad);
-    CHECK(!ds2_pad_input(&pad, 40.f, 0, 0, &m, st) && !ds2_pad_motion_dev(&pad));
+    CHECK(!ds2_pad_input(&pad, 40.f, 64, 0, 0, &m, st) && !ds2_pad_motion_dev(&pad));
     // A Pro Controller 2: its own buttons (GL / GR remapped here to B / A for the check), both sticks
     pad_clear(&pad);
     pad_default(&pad.pro, DS2_PID_PRO_2);
     pad.pro.r.buttons = DS2_BTN_A | DS2_BTN_ZL | DS2_BTN_GL; pad.pro.r.lx = 3248; pad.pro.r.ly = 2048; pad.pro.r.rx = 2048; pad.pro.r.ry = 1448;
-    CHECK(ds2_pad_input(&pad, 40.f, DM_BTN_B, DM_BTN_A, &m, st) && m == (DM_BTN_A | DM_BTN_ZL | DM_BTN_B));
+    CHECK(ds2_pad_input(&pad, 40.f, 64, DM_BTN_B, DM_BTN_A, &m, st) && m == (DM_BTN_A | DM_BTN_ZL | DM_BTN_B));
     CHECK(st[0] == 32767 && st[1] == 0 && st[2] == 0 && st[3] == -(int32_t)lrintf(600.f / 1200.f * 32767.f));
     CHECK(ds2_pad_motion_dev(&pad) == &pad.pro);
     // An NSO GameCube pad: its analog triggers act as digital L / R past a quarter travel
     pad_clear(&pad);
     pad_default(&pad.pro, DS2_PID_NSO_GAMECUBE);
     pad.pro.r.buttons = DS2_BTN_A; pad.pro.r.trigger_l = 63; pad.pro.r.trigger_r = 64;
-    CHECK(ds2_pad_input(&pad, 40.f, 0, 0, &m, st) && m == (DM_BTN_A | DM_BTN_R));
+    CHECK(ds2_pad_input(&pad, 40.f, 64, 0, 0, &m, st) && m == (DM_BTN_A | DM_BTN_R));
     // Two Joy-Con halves: the left's d-pad and stick, the right's face buttons and stick; a rail button is not a shoulder in a pair
     pad_clear(&pad);
     pad_default(&pad.left, DS2_PID_JOYCON2_L);
@@ -97,21 +111,21 @@ int main(void) {
     pad.left.r.buttons = DS2_BTN_UP | DS2_BTN_L | DS2_BTN_SL_L; pad.left.r.lx = 848; pad.left.r.ly = 2048;
     pad.right.r.buttons = DS2_BTN_B | DS2_BTN_ZR | DS2_BTN_PLUS; pad.right.r.rx = 2048; pad.right.r.ry = 3248;
     pad.left.r.rx = pad.left.r.ry = 4095; pad.right.r.lx = pad.right.r.ly = 4095;   // the other field of a Joy-Con's report is not its stick
-    CHECK(ds2_pad_input(&pad, 40.f, 0, 0, &m, st) && m == (DM_BTN_UP | DM_BTN_L | DM_BTN_B | DM_BTN_ZR | DM_BTN_PLUS));
+    CHECK(ds2_pad_input(&pad, 40.f, 64, 0, 0, &m, st) && m == (DM_BTN_UP | DM_BTN_L | DM_BTN_B | DM_BTN_ZR | DM_BTN_PLUS));
     CHECK(st[0] == -32767 && st[1] == 0 && st[2] == 0 && st[3] == 32767);
     CHECK(ds2_pad_motion_dev(&pad) == &pad.right);
     // One right half alone is held sideways: its rail buttons are the shoulders, its stick (the right field, the stick-1 calibration) the left stick
     pad_clear(&pad);
     pad_default(&pad.right, DS2_PID_JOYCON2_R);
     pad.right.r.buttons = DS2_BTN_B | DS2_BTN_ZR | DS2_BTN_PLUS | DS2_BTN_SL_R; pad.right.r.rx = 2048; pad.right.r.ry = 3248;
-    CHECK(ds2_pad_input(&pad, 40.f, 0, 0, &m, st) && m == (DM_BTN_B | DM_BTN_ZR | DM_BTN_PLUS | DM_BTN_L));
+    CHECK(ds2_pad_input(&pad, 40.f, 64, 0, 0, &m, st) && m == (DM_BTN_B | DM_BTN_ZR | DM_BTN_PLUS | DM_BTN_L));
     CHECK(st[0] == 0 && st[1] == 32767 && st[2] == 0 && st[3] == 0);
     CHECK(ds2_pad_motion_dev(&pad) == &pad.right);
     // One left half alone, sideways: d-pad and L / ZL, stick left, SL and SR both shoulders
     pad_clear(&pad);
     pad_default(&pad.left, DS2_PID_JOYCON2_L);
     pad.left.r.buttons = DS2_BTN_UP | DS2_BTN_L | DS2_BTN_SL_L | DS2_BTN_SR_L; pad.left.r.lx = 848; pad.left.r.ly = 2048;
-    CHECK(ds2_pad_input(&pad, 40.f, 0, 0, &m, st) && m == (DM_BTN_UP | DM_BTN_L | DM_BTN_R) && st[0] == -32767 && st[2] == 0 && st[3] == 0);
+    CHECK(ds2_pad_input(&pad, 40.f, 64, 0, 0, &m, st) && m == (DM_BTN_UP | DM_BTN_L | DM_BTN_R) && st[0] == -32767 && st[2] == 0 && st[3] == 0);
 
     // Motion, the per-form maps. A right Joy-Con 2 held upright, still: gravity +1 G on raw z, which is the Switch frame's (0, 0, -1)
     int16_t raw[6] = {100, 200, 4096, 10, 20, 30}; float acc[3], rot[3];

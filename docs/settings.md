@@ -4,7 +4,7 @@ The screen before the game starts shows the settings the game supports. A settin
 
 - [Tested defaults](#tested-defaults)
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
-- [Controls](#controls): [Touch feedback](#touch-feedback), [Left back button](#left-back-button), [Right back button](#right-back-button), [Switch 2 deadzone](#switch-2-deadzone), [Switch 2 motion](#switch-2-motion), [Switch 2 rumble](#switch-2-rumble), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
+- [Controls](#controls): [Touch feedback](#touch-feedback), [Left back button](#left-back-button), [Right back button](#right-back-button), [Switch 2 deadzone](#switch-2-deadzone), [Switch 2 motion](#switch-2-motion), [Switch 2 rumble](#switch-2-rumble), [GameCube trigger](#gamecube-trigger), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [In-game menu](#in-game-menu)
@@ -112,6 +112,10 @@ Six-axis motion sensor input (gyroscope and accelerometer) from a Switch 2 contr
 ### Switch 2 rumble
 
 The vibration of a Switch 2 controller (on by default). A pair of Joy-Con 2 rumbles through both halves, the left the low band and the right the high band like the console's split; the NSO GameCube pad stays silent, because it has no rumble actuator and its motor lane must not be written.
+
+### GameCube trigger
+
+The travel at which the NSO GameCube pad's analog triggers act as pressed, 0 to 255 in report counts (a quarter travel by default).
 
 ### Game rumble
 

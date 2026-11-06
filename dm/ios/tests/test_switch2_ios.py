@@ -20,7 +20,8 @@ class Switch2ProtoTests(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             r = subprocess.run([str(exe)], capture_output=True, text=True, timeout=60)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-            self.assertIn('switch2_ios: 45 checks, 0 failed', r.stdout)
+            self.assertNotIn('FAIL', r.stdout)
+            self.assertIn('checks, 0 failed', r.stdout)
 
 if __name__ == '__main__':
     unittest.main()

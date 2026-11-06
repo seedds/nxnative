@@ -326,9 +326,10 @@ DM_SPIN_POLL	switch	`=<µs>`: how long a spin-gate wait polls before it sleeps w
 DM_SVC	diagnostic	`=1` logs memory SVCs (`SetHeapSize`, `MapMemory`, `Map`/`UnmapPhysicalMemory`) with their addresses and sizes
 DM_SW2_BOND_MAC	diagnostic	`=<aa:bb:cc:dd:ee:ff>` sends the four `0x15` bond commands so a Switch 2 Pro Controller wakes toward this host address; off by default, because iOS exposes no public way to read the iPhone's own Bluetooth address
 DM_SW2_DEADZONE	player	`=<counts>` centre deadzone of a Switch 2 controller's sticks in raw 12-bit counts (default 40; `DmSwitch2BLE.m`)
+DM_SW2_GC_TRIGGER	player	`=<counts>` travel at which the NSO GameCube pad's analog triggers act as pressed, in report counts 0-255 (default 64, a quarter travel; `DmSwitch2BLE.m`)
 DM_SW2_MOTION	switch	`1` publishes a Switch 2 controller's IMU to the six-axis sensor; off by default (the Joy-Con 2's frame and its pair and half forms are measured on hardware in PR 1346; the Pro Controller 2's own is not)
 DM_SW2_RUMBLE	switch	`0` turns off HD rumble on a Switch 2 controller (on by default; the NSO GameCube pad has no rumble and is silent)
-DM_SW2_VERBOSE	diagnostic	`=1` logs one Switch 2 controller's input sample every 90 reports (buttons, sticks, battery)
+DM_SW2_VERBOSE	diagnostic	`=1` logs one Switch 2 controller's input sample every 90 reports (buttons, sticks, battery, charge, IMU temperature)
 DM_SYMCHECK	diagnostic	`=1` checks every hashed module symbol lookup against a linear search and logs a red line for each mismatch
 DM_TBUF_ALIGN	diagnostic	`=<bytes>` uses that value as the linear-texture alignment when it is larger than the device's `minimumLinearTextureAlignmentForPixelFormat`, for buffer textures and for linear textures on a pool's buffer: a Mac can then reproduce a phone's larger alignment (a 64-byte one fails the buffers and linear textures a device with 64 bytes cannot view), to check `tbuf_as_2d`'s aligned-row copy and the upload of unaligned linear textures (`linear_fit`)
 DM_TEAM_ID	switch	Apple team ID for the per-game Xcode project, used when `--team-id` / `TEAM_ID` is not given; `build_ipa.sh` uses the placeholder `0000000000` (unsigned) when unset

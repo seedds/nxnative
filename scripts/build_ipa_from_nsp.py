@@ -3036,7 +3036,10 @@ def main(args=None):
     say(f'work folder (extracted game files in extract/, {"kept for the next build" if keep else "deleted after the IPA is built"}): {work}')
     xlate = repo / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate'
     # DM_GAME picks the profile; DM_ROOT / WORK point at <id>_build: the tools' default paths and temporary directories all stay inside it
-    env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / 'tmp'))
+    work_tmp = os.environ.get('WORK') or str(work / 'tmp')
+    Path(work_tmp).mkdir(parents=True, exist_ok=True)
+    env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=work_tmp)
+    if os.environ.get('WORK'): say(f'scratch folder (WORK): {work_tmp}')
     logs = work / 'logs'
     check_prereqs(env, xlate, mac)
     picks = pick_nsps(fam, have, versions)

@@ -460,3 +460,10 @@ t_logic: t_logic.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_logic.m $(MTL_T_SRC) $(FW)
 check_t_logic: t_logic
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_logic.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_logic "$$work"
+
+t_late_texture: t_late_texture.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_late_texture.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_late_texture: RUN_ENV = MTL_DEBUG_LAYER=1
+
+t_sparse_map: t_sparse_map.c ../nvn/nvn_tex.c ../nvn/nvn_tex.h ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle.h
+	clang $(CFLAGS) -o $@ t_sparse_map.c ../nvn/nvn_tex.c ../tex/nvn_deswizzle.c

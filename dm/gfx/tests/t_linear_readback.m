@@ -25,6 +25,7 @@ static void run_case(int format) {
     printf("LINEAR format=%#x Metal=%lu minimumAlignment=%lu bufferBacked=%d row=640\n", format, (unsigned long)t.pixelFormat,
         (unsigned long)[g_dev minimumLinearTextureAlignmentForPixelFormat:t.pixelFormat], t.buffer != nil);
     EXPECT("host texture resolved", 1, t != nil); if (!t) return;
+    EXPECT("linear backing belongs to the current pool", 1, t.buffer && (uint8_t *)t.buffer.contents + t.bufferOffset == (uint8_t *)mem + 65536);
     // NVN image stores use the shader image format, without sRGB conversion. A uint image view writes literal packed bytes.
     mtl_reg_tex(1, (const tex_t *)&tex, NULL); uint64_t rid;
     mtl_sub_begin(); id<MTLTexture> image = img_fit(1, t, NVN_DPF_UINT, &rid);
@@ -66,7 +67,7 @@ static void render_target_stride_case(void) {
         for (int x=64;x<128;x++) padding += ((uint8_t *)mem)[y*128+x]!=0;
     }
     EXPECT("linear target clear uses padded rows", 0, bad); EXPECT("linear target leaves row padding alone", 0, padding);
-    h_nvnTextureFinalize(&tex); mtl_pool_del(mem); free(mem);
+    h_nvnTextureFinalize(&tex); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool); free(mem);
 }
 static void scaled_copy_case(void) {
     void *mem = NULL; if (posix_memalign(&mem, getpagesize(), 262144)) abort(); memset(mem, 0, 262144);
@@ -92,7 +93,7 @@ static void scaled_copy_case(void) {
     static const uint8_t want[]={255,0,0,255}; int bad=0; for(int i=0;i<160*90;i++)bad+=memcmp(map+i*4,want,4)!=0;
     EXPECT("scaled render copy -> CPU pool map, 14400 literal red pixels",0,bad);
     EXPECT("scaled destination keeps pool backing",1,tex_mtl((const tex_t *)&dst).buffer!=nil);
-    h_nvnTextureFinalize(&dst); mtl_tex_release(&src); mtl_pool_del(mem); free(mem);
+    h_nvnTextureFinalize(&dst); mtl_tex_release(&src); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool); free(mem);
 }
 int main(void) { @autoreleasepool { mtl_init(); run_case(NVN_FORMAT_RGBA8); run_case(NVN_FORMAT_RGBA8_SRGB);
     render_target_stride_case();

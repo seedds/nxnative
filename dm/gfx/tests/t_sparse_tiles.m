@@ -4,6 +4,12 @@
 // write through one place shows at the other, a drawn tile keeps its content for the next place until the CPU writes its memory or its pool's Finalize gives it back, an undrawn one goes back with
 // its last place and each new place reads the memory (the CPU's fill behind a GPU-written place, the GPU's write to the memory as a buffer), a tile cut by the level's edge shares nothing, and a
 // new pool over the same memory never finds the old pool's tile.
+// Exercise dirty uploads independently of the selected game's default.
+#include "game_profile.h"
+#undef DM_GAME_TEX_FLUSH_UPLOAD
+#define DM_GAME_TEX_FLUSH_UPLOAD 1
+#undef DM_GAME_TEX_DIRTY_UPLOAD
+#define DM_GAME_TEX_DIRTY_UPLOAD 1
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
@@ -92,6 +98,15 @@ int main(void) { @autoreleasepool {
     (void)resolve(&tx); CHECK("no request: nothing looked at", ps->seq == seq && g_sp_live == live0 + 3);
     // A mapping elsewhere in the pool leaves the texture's tiles alone
     map_at(T->L.size + (1u << 20), TILE, 8 * TILE, 1); (void)resolve(&tx); CHECK("a request past the texture", g_sp_live == live0 + 3 && ps->seq != seq);
+    // Partial unmapping retains the Metal tile and zeroes only the missing guest pages.
+    map_at(0, 0x4000, 0, 0);
+    (void)resolve(&tx);
+    CHECK("partly mapped tile remains resident", ps->slot[0] != 0);
+    uint8_t partial[TILE];
+    nvn_sparse_copy(&g_sparse, partial, (uint64_t)(uintptr_t)T->mem, TILE);
+    uint32_t expected[TILE / 4], wb, rows;
+    CHECK("decode partial tile", !nvn_deswizzle_tile(&T->d, 0, 0, 0, partial, (uint8_t *)expected, TW * 4, &wb, &rows));
+    CHECK("partial tile preserves mapped bytes and zeroes holes", same(m, 0, 0, 0, TW, TW, expected, TW));
     // Unmapped
     map_at(0, TILE, 0, 0); (void)resolve(&tx); CHECK("an unmapped tile gives its heap tile back", !ps->slot[0] && g_sp_live == live0 + 2 && !kept_for(phys, plen));
     // That memory at two other places: one heap tile
@@ -117,14 +132,14 @@ int main(void) { @autoreleasepool {
         map_at(7 * TILE, TILE, 0, 0); (void)resolve(&tx);
         free(wp);
     }
-    // Rewritten in place while mapped: uploaded again at the next look a second on
+    // Rewritten in place while mapped: uploaded again at the next look, without waiting a frame
     uint64_t w0 = nvn_dirty_sparse_writes();
     uint32_t *fresh = malloc((size_t)W * W * 4); memcpy(fresh, lin[0], (size_t)W * W * 4);
     for (unsigned y = TW; y < 2 * TW; y++) for (unsigned x = 2 * TW; x < 3 * TW; x++) fresh[(size_t)y * W + x] = x ^ (y << 12);
     nvn_texdesc one = T->d; uint8_t *st2 = malloc(T->L.size); CHECK("swizzle", !nvn_swizzle(&one, 0, 0, fresh, (size_t)W * 4, st2));
     dm_guest_write_prepare(phys + 2 * TILE, TILE); memcpy(phys + 2 * TILE, st2 + t1 * TILE, TILE);   // as a host write; a game's write faults into the same path
     CHECK("the write shows", nvn_dirty_sparse_writes() != w0);
-    atomic_fetch_add(&g_cur_frame, 60); (void)resolve(&tx);
+    (void)resolve(&tx);
     CHECK("the rewritten tile is uploaded again", same(m, 0, 2 * TW, TW, TW, TW, fresh, W));
     // More requests than the log holds: the texture is looked at whole
     for (int i = 0; i < VLOG_N + 8; i++) map_at(5 * TILE, TILE, 16 * TILE, i & 1);   // ends mapped when VLOG_N + 8 is odd, unmapped when even
@@ -141,7 +156,10 @@ int main(void) { @autoreleasepool {
     CHECK("its tile is mapped", g_sp_live == live1 + 1);
     CHECK("nothing uploaded", g_bp_up_bytes == nblit);
     map_at((1ull << 30) + 3 * TILE, TILE, 20 * TILE, 0); (void)resolve(&gx);
-    NvSparse *gs = objc_getAssociatedObject(g, &g_sp_key);
+    // CPU-upload profiles can keep a render-capable texture in NvPkg until it is actually written.
+    id holder = tex_get(((const tex_t *)&gx)->serial);
+    NvPkg *gp = [holder isKindOfClass:[NvPkg class]] ? holder : nil;
+    NvSparse *gs = gp ? gp->ps : objc_getAssociatedObject(g, &g_sp_key);
     CHECK("and unmapped, not drawn: its heap tile goes back", gs && !gs->slot[3] && g_sp_live == live1);
     // The CPU filled a page; a GPU-written place of it is looked at first, then a packaged one, which reads the memory
     dm_guest_write_prepare(phys + 24 * TILE, TILE); memcpy(phys + 24 * TILE, store, TILE);
@@ -191,5 +209,40 @@ int main(void) { @autoreleasepool {
     CHECK("the pool again", h_nvnMemoryPoolInitialize((NVNmemoryPool *)&g_phys, (const NVNmemoryPoolBuilder *)&again));
     map_at(11 * TILE, TILE, 32 * TILE, 1); (void)resolve(&tx);
     CHECK("the new pool's content, not the old one's", same_at(m, 11 * TW, 0, TW, TW, lin[0], W, TW, 0));
+    h_nvnTextureFinalize(&ex);
+    h_nvnTextureFinalize(&sx);
+    h_nvnTextureFinalize(&gx);
+    h_nvnTextureFinalize(&tx);
+    holder = nil;
+    gp = nil;
+    pk = nil;
+    ps = nil;
+    gs = nil;
+    em = nil;
+    m = nil;
+    g = nil;
+    h_nvnMemoryPoolFinalize((NVNmemoryPool *)&g_sparse);
+    h_nvnMemoryPoolFinalize((NVNmemoryPool *)&g_phys);
+    // Retirement waits for a real queue fence; an empty submission need not advance it.
+    id<MTLBuffer> tick = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared];
+    res_add(tick);
+    for (int i = 0; i < 4; i++) {
+        mtl_sub_begin();
+        enc_b_copy_buffer(blit(), tick, 0, tick, 128, 4);
+        finish();
+        defer_drain();
+    }
+    unsigned live_heaps = 0;
+    for (id h in g_sp_heaps) {
+        live_heaps += h != [NSNull null];
+    }
+    CHECK("empty sparse heaps retire", live_heaps == 0);
+    for (unsigned l = 0; l < LEVELS; l++) {
+        free(lin[l]);
+    }
+    free(store);
+    free(fresh);
+    free(st2);
+    munmap(phys, plen);
     printf("t_sparse_tiles: %d checks, %d failed\n", checks, failed); return failed != 0;
 }}

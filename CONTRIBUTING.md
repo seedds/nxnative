@@ -18,7 +18,7 @@ Never commit or attach game files, keys, title keys or anything extracted from a
 
 ## Before you start
 
-- **Read the [charter](docs/charter.md)**, at least its five-line summary: what the project is for, the base Macs a change is judged on, and what counts as a regression.
+- **Read the [charter](docs/charter.md)**, at least its five-line summary: what the project is for, the Macs a measurement should name, and what counts as a regression.
 - **Look for existing work first, every time**: open and merged pull requests and issues by the game's label (`game: <title ID>`) and area label, by the game's name and title ID in titles, and the active branches ([how, with or without `gh`](docs/agents/06-dev-loop.md#0-before-you-start-existing-work-then-a-branch)). Many people work on the same games, mostly through agents that don't see each other: build on what is there, or ask its author.
 - **Make your work findable**: open a draft pull request early, with the game's name and title ID in its title (`Star Fox (0400E88025B1A000): …`), and link the issue it belongs to.
 - Read [AGENTS.md](AGENTS.md): it lists where to start for each kind of task, and the rules for profiles, per-build knowledge and the shader translation chain.

@@ -1,21 +1,23 @@
 # Charter
 
+This page is for agent-driven work on nxnative. Most changes here are written by agents, started by many people who do not see each other's sessions, and an agent knows only what it reads. [AGENTS.md](../AGENTS.md) sends every session here first, so that each one knows what the project is for, what already exists, and what a change must not break before it starts.
+
 > **If you read nothing else**
 > 1. **Start from the latest `main`, and look for existing work first**, every time: `git fetch` before a new branch or an issue (it may be fixed already), then pull requests and issues by game and area label and by title, active branches ([how](agents/06-dev-loop.md#0-before-you-start-existing-work-then-a-branch)).
 > 2. **Make your own work findable:** a draft pull request early, with the game's name and title ID in its title.
-> 3. **Don't make the base Macs worse:** a change that costs an 8 GB M1 (Switch games) or a 16 GB M2 (Switch 2 games) is a regression, even when it helps the Mac it was made on.
-> 4. **No regressions:** a gain on one Mac paid for by another is not a gain.
+> 3. **Correctness first, and no regressions:** a regression is what worked and now breaks, or what got slower or bigger for nothing in return. A change that makes a game more correct is not a regression because it costs speed; it states the cost.
+> 4. **Name the device:** a measurement says the device it was made on, and a cost known on the base Macs, the iPhone or the iPad is stated, not hidden.
 > 5. **The bar rises with reach:** a change to one game shows that game; a change to a shared path shows more ([tiers](#pull-requests)).
 
-Many people work on nxnative, mostly through agents, usually on one game or subsystem at a time. This page says what the project is for, what a change must not break, and what to check first, so that work on one part does not cost another. [AGENTS.md](../AGENTS.md) links here; [06-dev-loop.md](agents/06-dev-loop.md) has the commands.
+Sessions usually work on one game or subsystem at a time; this page is what keeps work on one part from costing another. [06-dev-loop.md](agents/06-dev-loop.md) has the commands.
 
-**What this page does not ask.** You do not need a base Mac, and you do not need to work on low-spec performance. Bringing up games on whatever Mac you have, and features that use a fast Mac's headroom, are welcome. What is asked is narrower: shared code does not get worse on the base Macs, and a measurement names the Mac it was made on.
+**What this page does not ask.** You do not need a base Mac, you do not owe a test on one, and you do not need to work on low-spec performance. Bringing up games on whatever Mac you have, and features that use a fast Mac's headroom, are welcome. What is asked is narrower: a measurement names the Mac it was made on, and a cost you know of on other Macs is written down so someone can weigh it or work on it.
 
-Most of the work is agentic, which makes it cheap to start and easy to multiply. That is a strength when the sessions add up: each one knows what exists and what is under way, picks the piece that moves a goal, builds on what others have done, and leaves a record the next one can find.
+Agent sessions are cheap to start and easy to multiply. That is a strength when they add up: each one knows what exists and what is under way, picks the piece that moves a goal, builds on what others have done, and leaves a record the next one can find.
 
 ## Aim
 
-Play your own Switch and Switch 2 games on the iPhone, iPad and Mac by running the game's own code natively ([README](../README.md)), **as they play on the console**: same picture and sound, same feel in the hands, same pacing, same relation to real time.
+Play your own Switch and Switch 2 games on the iPhone, iPad and Mac by running the game's own code natively ([README](../README.md)), **as they play on the console**: same picture and sound, same feel in the hands, same pacing, same relation to real time; and, where a device has the headroom, better than the console: higher resolution, better upscaling, higher frame rates where a game allows them.
 
 The project is the host, the rewriter, the shader chain and the tools that serve every game. Each game brought up finds and tests a part of them, and the general part of its fixes is what other games inherit: a fix is done when it holds for every game it reaches.
 
@@ -29,46 +31,45 @@ A game is correct when it plays as on the console, not only when it looks right:
 - **Input:** the console's own controllers (Joy-Con, Pro Controller, the Switch 2's) work with their buttons, motion and rumble, as do other controllers.
 - **Gameplay** at the console's speed: no fast-forward, no slow motion.
 
-## Targets for the shared code
+## Reference devices
 
-The bars the host, the translator, the tools and the defaults every game gets are measured against. They are not what each contributor must work on: they name the Macs most people play on, so that a shared change that helps a fast Mac and costs a slow one is seen as a cost.
+Two Macs stand for the base machines most people play on ([appendix](#appendix-the-macs-people-play-on)): an **M1 with 8 GB** for Switch games and an **M2 with 16 GB and a 10-core GPU** for Switch 2 games. They are where low-spec optimization aims, where testers report, and what "the base Macs" means on this page. They are not a promise that every game fits them, and not a bar a change must clear: some games are heavy on any hardware (Star Fox leans on DLSS and runs a neural network for its camera), and a game that needs more Mac than these is a property of that game, not a failure of the shared code.
 
-- **Every Switch game playable on an M1 Mac with 8 GB.** Benchmark: [Tears of the Kingdom](../dm/games/0100F2C0115B6000/README.md), recent and among the console's heaviest.
-- **Every Switch 2 game playable on an M2 Mac with 16 GB and a 10-core GPU**, settings lowered where needed (render scale, console mode, upscaler). Benchmark, once it plays: Ocarina of Time (Switch 2, `0400486024DEC000`), the most demanding Switch 2 game brought up so far.
+**The iPhone and iPad are not fast Macs.** The lowest the README supports, an iPhone 15 Pro, has 8 GB, and iOS ends an app that goes past its memory limit (higher with a sideloading tool's Increased Memory Limit, still well short of the device's memory). It runs on battery and slows down when it heats up over a long session. The host, the translator and the tools run on these devices as they do on the Mac, so a shared change's cost in memory or CPU time reaches them whatever Mac it was made on. That is a reason to measure memory on a phone, or ask for a test there, when a shared change grows it.
 
-Where each game stands, and what holds it back on these Macs, is in its note ([games table](../dm/games/README.md#games)).
+Useful benchmarks for optimization work: [Tears of the Kingdom](../dm/games/0100F2C0115B6000/README.md) on the 8 GB M1, recent and among the Switch's heaviest; Ocarina of Time (Switch 2, `0400486024DEC000`) on the 16 GB M2, once it plays.
 
-**Playable** on a given Mac: correct as above from the start through normal play, no crash or hang, at the game's intended frame rate most of the time and evenly paced, no paging that stalls play, with settings the launcher offers. A game in the [games table](../dm/games/README.md#games) is playable on the Mac it was tested on; whether it is playable on the base Mac, and what stands in the way, goes in its note when known. A change that moves a game away from either is a regression.
+**Playable** on a given device: correct as above from the start through normal play, no crash or hang, at the game's intended frame rate most of the time and evenly paced, no paging that stalls play, with settings the launcher offers. A game in the [games table](../dm/games/README.md#games) is playable on the device it was tested on. Whether it is playable on a reference Mac, an iPhone or an iPad, and what stands in the way, goes in its note when known.
 
-**Why it pays everywhere:** less CPU and GPU time a frame is longer battery life on every MacBook, iPhone and iPad; on Pro and Max Macs it is headroom for higher frame rates (120 fps where a game allows) and better upscaling; and what fits an 8 GB Mac is close to what fits a phone.
+**Why performance pays everywhere:** less CPU and GPU time a frame is longer battery life on every MacBook, iPhone and iPad; on Pro and Max Macs it is headroom for higher frame rates and better upscaling; and what fits an 8 GB Mac is close to what fits a phone.
 
 ## Devices
 
-A change is judged by what it does on the lowest device of each platform it reaches, as well as on the device it was developed on: a gain there does not make up for a cost on the lowest.
+A change is judged on the device it was developed on, which it names. What it does on the devices below, when someone has measured it, is stated beside that.
 
-| Platform | Lowest supported |
+| Platform | Lowest supported or reference |
 |---|---|
 | iPhone | iPhone 15 Pro (A17 Pro, 8 GB), the README's floor |
 | iPad | M1 iPad |
-| Mac, Switch games | M1, 8 GB (a Switch has 4 GB) |
-| Mac, Switch 2 games | M2, 16 GB, 10-core GPU (a Switch 2 has 12 GB). An M1 with 16 GB or more may also get there, with fewer GPU cores |
+| Mac, Switch games | M1, 8 GB, reference (a Switch has 4 GB) |
+| Mac, Switch 2 games | M2, 16 GB, 10-core GPU, reference (a Switch 2 has 12 GB). Some Switch 2 games may need more |
 
 Most Macs people play on are base chips with 8 or 16 GB: about two thirds of Apple silicon Macs on Steam, and a third or more likely still 8 GB ([appendix](#appendix-the-macs-people-play-on)). CPU and GPU share that memory, so memory is the limit these Macs meet first.
 
-A change about speed, memory or power measured only above the floor says so, and is not called a gain for everyone.
+A change about speed, memory or power measured on one Mac says so, and is not called a gain for everyone.
 
 ## Priorities
 
 When these conflict, the earlier wins. This is the order a conflict is decided in, not an order of whose work matters:
 
-1. **Correctness**, in every sense above, in a game that worked.
-2. **No regressions:** what worked keeps working, as smoothly and in as little memory, on every supported device.
-3. **Performance on the lowest devices:** pacing, frame rate, memory, load time, power.
+1. **Correctness**, in every sense above. A change that makes the host or the translator do what the console does wins even when it is slower or takes more memory. It states the cost it measured; a cheaper way to be equally correct is welcome afterwards, as a change of its own.
+2. **No regressions:** what worked keeps working ([below](#what-counts-as-a-regression)).
+3. **Performance, on every device:** pacing, frame rate, memory, load time, power on the base Macs, and better than the console where a device has the headroom.
 
-Performance is a goal in itself, not only for the lowest devices. Settings let each device find its own balance: a base Mac lowers the render scale, plays in handheld mode or turns off an extra, while a Pro or Max Mac uses the headroom for higher resolution, better upscaling or 120 fps. So a feature for faster Macs is welcome **when it leaves the slower ones as they were**: behind a setting or a switch, or scaled to the device. What is not acceptable is a gain on one class of Mac paid for by another, for example:
+Settings let each device find its own balance: a base Mac lowers the render scale, plays in handheld mode or turns off an extra, while a Pro or Max Mac uses the headroom for higher resolution, better upscaling or 120 fps. A feature for faster Macs fits best behind a setting or scaled to the device. When a performance change helps one class of Mac and costs another, the pull request says both, and the maintainers decide if the cost is large. Costs worth looking for before they land:
 
-- a cache or buffer sized for a 24 GB Mac that pushes every 16 GB Mac into paging;
-- a path tuned on a Pro or Max chip that drops every base chip from 60 to 30 fps;
+- a cache or buffer sized for a 24 GB Mac that pushes 16 GB Macs into paging;
+- a path tuned on a Pro or Max chip that drops base chips from 60 to 30 fps;
 - a default that helps one chip's GPU clock and costs the others' battery.
 
 Not goals unless the maintainers decide otherwise: features a console lacks (save states, rewind), 32-bit ARM games, online play.
@@ -77,7 +78,7 @@ Not goals unless the maintainers decide otherwise: features a console lacks (sav
 
 Game support is welcome; everyone wants their favourite game working. The project also asks for work that serves every game:
 
-- **Optimization:** CPU per frame on the submit path, memory, pacing, load times, power, measured on the lowest devices.
+- **Optimization:** CPU per frame on the submit path, memory, pacing, load times, power, on the base Macs or on fast ones.
 - **Shared correctness:** a host service, translator instruction or replay rule fixed for every game that uses it.
 - **Measurement:** smoke routes and baselines for your games, and regression reports on games other than your own.
 - **Testing on a low-spec device:** no code needed (below).
@@ -85,23 +86,17 @@ Game support is welcome; everyone wants their favourite game working. The projec
 
 When you bring up a game, the general part of each fix is what lasts; say which other games it reaches.
 
-## Testing on the lowest devices
+## Testing on low-spec devices
 
-Few contributors own the lowest device of each platform. A pull request whose result depends on one asks with a **Test request on a low-spec device** issue (the form in `.github/ISSUE_TEMPLATE`): what to run, where, and what to report. Anyone who owns such a device can answer in a few minutes.
-
-A request does not hold a pull request forever: if no report has come after a week, the pull request goes ahead saying it was measured only above the floor, and the maintainers decide. The same holds for a review the tier asks for.
+Few contributors own a base Mac or the lowest iPhone, and no one is asked to buy one. Anyone who wants a change tried on one, its author or anyone else, can open a **Test request on a low-spec device** issue (the form in `.github/ISSUE_TEMPLATE`): what to run, where, and what to report. Anyone who owns such a device can answer in a few minutes. A pull request does not wait for an answer; a report that arrives later is a finding like any other.
 
 ## What counts as a regression
 
-Whatever `scripts/regress.py check` reports as `NEW-FAIL` or `REGRESSION` against the merge base (shaders, crashes, hangs, the route's frame, new `[RED]` lines, screenshots, frame time, memory, prepare time), and beyond what it sees:
+**Something that worked and now breaks:** a shader, a crash or hang, the route's frame, a new `[RED]` line, the picture, a game's clock, a controller's buttons, motion or rumble, its speed changed from the console's, or a game that was playable on a Mac and no longer is. Whatever `scripts/regress.py check` reports as `NEW-FAIL` against the merge base is one, as are its new `[RED]` lines and a screenshot that is wrong rather than fixed.
 
-- **Smoothness:** frame-time p95 or late frames worse in a played scene, even when the median holds.
-- **Memory:** resident memory higher in a played scene on the lowest Mac or iPhone.
-- **CPU per frame:** time added to the submit thread, the limit of several Switch 2 games on base Macs, even when a faster Mac hides it.
-- **Time, input, gameplay:** a game's clock, a controller's buttons, motion or rumble, or its speed changed from the console's.
-- **A default changed for every game** without the evidence below.
+**Something that got slower or bigger for nothing in return:** frame time, frame-time p95 or late frames in a played scene, resident memory, CPU time on the submit thread, prepare time, power, on the device measured. `regress.py check` reports these beyond its tolerances as `REGRESSION`. When the change buys correctness or a feature, it is a cost, not a regression: the pull request states it with its reason.
 
-A regression accepted on purpose is stated in the pull request with its cost and reason; the maintainers decide.
+**A default changed for every game** without the evidence [below](#changes-that-apply-to-every-game).
 
 ## Before starting work
 
@@ -115,13 +110,13 @@ A regression accepted on purpose is stated in the pull request with its cost and
 
 A new or removed default, or behaviour switched for every game (Game Mode, a timing source, barriers, a cache size, a thread priority), needs:
 
-- evidence from more than the device it was developed on: a report from another device class, at best the lowest ([test request](#testing-on-the-lowest-devices)), or a statement that only one device was measured and a default that can be changed back per game;
+- evidence from more than the device it was developed on: a report from another device class ([test request](#testing-on-low-spec-devices)), or a statement that only one device was measured and a default that can be changed back per game;
 - a switch that restores the old behaviour, listed in [env_switches.tsv](env_switches.tsv), unless the old behaviour was wrong;
 - an entry in [decisions.md](decisions.md): the choice, evidence, cost, and what would reverse it. A decision is reversed by a new entry with evidence, not by a commit that flips it back.
 
 ## Pull requests
 
-[06-dev-loop.md](agents/06-dev-loop.md#7-before-you-open-a-pull-request) lists the checks by what a change touches. Every pull request also states: one change and its reach; the devices measured on, and whether the lowest was among them; before and after numbers from the same device and scene for a change about speed, memory or power (p95 with the median); what was not checked.
+[06-dev-loop.md](agents/06-dev-loop.md#7-before-you-open-a-pull-request) lists the checks by what a change touches. Every pull request also states: one change and its reach; the devices measured on; before and after numbers from the same device and scene for a change about speed, memory or power (p95 with the median); what was not checked.
 
 The bar rises with reach and risk. The pull request's labels say most of it; [06-dev-loop.md](agents/06-dev-loop.md#which-tier) has the full guide to judging it:
 
@@ -129,13 +124,13 @@ The bar rises with reach and risk. The pull request's labels say most of it; [06
 |---|---|---|
 | **Narrow** | only `game: …`, `docs`, or a tool few games use | the game played; the tests that apply |
 | **Shared** | `host`, `nvn`, `vulkan`, `opengl`, `textures`, `rewriter`, `packing` | `regress.py impact`, and `regress.py check` on the games it names that the author has |
-| **Wide or risky** | `shader chain`; or a change to replay ordering and barriers, threads and synchronization, memory layout, a default for every game; or several areas at once | the above on more games (each API and engine family it reaches, and the benchmarks), a test request on the lowest devices, a maintainer's review, and a switch to turn the new path off |
+| **Wide or risky** | `shader chain`; or a change to replay ordering and barriers, threads and synchronization, memory layout, a default for every game; or several areas at once | the above on more games (each API and engine family it reaches, and the benchmarks), a maintainer's review, and a switch to turn the new path off |
 
-When in doubt, take the higher tier. A wide pull request that can be split is split. One that cannot lands off by default behind a switch, and is turned on in a pull request of its own once played on the benchmarks and the lowest devices.
+When in doubt, take the higher tier. A wide pull request that can be split is split. One that cannot lands off by default behind a switch, and is turned on in a pull request of its own once played on more than one class of device.
 
 ## Future work
 
-**Regression runs on the base Macs, every day.** Most of the machinery exists: 21 games have a scripted smoke route (`dm/games/<id>/smoke.tsv`), Tears of the Kingdom among them, and `scripts/regress.py check` plays them, comparing frame time, memory, `[RED]` lines and screenshots with a baseline. What is missing is running it where it matters and keeping the result: an 8 GB M1 and a 16 GB M2 that run the benchmarks' routes nightly on `main` and on each wide pull request, a route for Ocarina of Time once it plays, and somewhere to publish the numbers so that "it feels slower" becomes a dated line to bisect.
+**Regression runs on the base Macs, every day.** Most of the machinery exists: 21 games have a scripted smoke route (`dm/games/<id>/smoke.tsv`), Tears of the Kingdom among them, and `scripts/regress.py check` plays them, comparing frame time, memory, `[RED]` lines and screenshots with a baseline. What is missing is running it on the base Macs and keeping the result, so that no contributor has to own one: an 8 GB M1 and a 16 GB M2 that run the benchmarks' routes nightly on `main` and on each wide pull request, a route for Ocarina of Time once it plays, and somewhere to publish the numbers so that "it feels slower" becomes a dated line to bisect.
 
 ## Appendix: the Macs people play on
 

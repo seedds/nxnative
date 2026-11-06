@@ -1,10 +1,10 @@
 name: Test request on a low-spec device
-description: Ask someone with one of the lowest supported devices to run a change or a build and report how it plays
+description: Ask someone with a base Mac or another low-spec device to run a change or a build and report how it plays
 body:
   - type: markdown
     attributes:
       value: |
-        Most contributors measure on the device they have, often a fast Mac. The [charter](https://github.com/seedds/nxnative/blob/main/docs/charter.md#devices) judges a change on the lowest supported device of each platform it reaches. Use this form to ask someone who owns one to try a change: a quick played check, before and after.
+        Most contributors measure on the device they have, often a fast Mac. No one has to own a base Mac ([charter](https://github.com/seedds/nxnative/blob/main/docs/charter.md#devices)); this form asks someone who owns one, and wants to help, to try a change: a quick played check, before and after. A pull request does not wait for an answer.
         A tester needs their own copy of the game. Never attach or ask for game files, keys or anything extracted from a game.
   - type: input
     id: change
@@ -28,8 +28,8 @@ body:
       description: The device class the result matters on. Pick every one that applies.
       multiple: true
       options:
-        - Mac M1, 8 GB (the Switch game floor)
-        - Mac M2, 16 GB, 10-core GPU (the Switch 2 game floor)
+        - Mac M1, 8 GB (Switch game reference)
+        - Mac M2, 16 GB, 10-core GPU (Switch 2 game reference)
         - Another 8 GB or 16 GB base-chip Mac (M1 to M4)
         - iPhone 15 Pro or Pro Max (8 GB)
         - M1 iPad

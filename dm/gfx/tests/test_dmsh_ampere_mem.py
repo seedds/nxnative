@@ -382,6 +382,16 @@ class Shared(Translated):
         msl = self.msl(mov(3, 0x40), inst(*self.LDSM_MT88), sts(0x20, 20))
         self.assertIn('spvSubgroupShuffle(8.96831', msl)   # the address 0x40 as a float's bits; scaled, it would be 0x100 (3.5873e-43)
 
+    # LDSM reads rows other lanes stored, often with no BAR before it (Ocarina of Time's movie networks and its scene's compute: dotted rows, other places each run): a SIMD-group
+    # barrier before its reads, so the stores have landed, and one after, so no lane's next store reaches the rows before every lane has read them (GitHub issue #1537, PR #1376)
+    def test_ldsm_reads_between_subgroup_barriers(self):
+        msl = self.msl(mov(3, 0x40), inst(*self.LDSM_MT88), sts(0x20, 20))
+        barriers = [m.start() for m in re.finditer(r'simdgroup_barrier\(mem_flags::mem_threadgroup\)', msl)]
+        reads = [m.start() for m in re.finditer(r'spvSubgroupShuffle\(', msl)]
+        store = msl.index('[8] = ')   # the STS after it: byte 0x20, word 8
+        self.assertEqual(len(barriers), 2, msl)
+        self.assertTrue(reads and barriers[0] < reads[0] and reads[-1] < barriers[1] < store, msl)
+
 
 class Pokopia(Translated):
     """Pokemon Pokopia's encodings, on the register the atomic reads: F2FP.MERGE_C (22,886 shaders), F2I from a half (1,067), MEMBAR with ERRBAR (144)"""

@@ -261,6 +261,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand g = compute ? null : context.ShiftRightU32(lane, Const(2));
             Operand t = compute ? null : context.BitwiseAnd(lane, Const(3));
 
+            // nxnative: LDSM reads rows that other lanes of the warp stored (STS) just before, often with no BAR between them (Ocarina of Time's NDVE movie networks and its
+            // scene's compute). On the Switch a warp's shared memory accesses are in order; Metal orders another lane's threadgroup store and this lane's load only through a
+            // barrier, and its compiler moves them past each other: dotted rows, every other pixel of a few rows wrong (the high halves of packed pairs), in other places each run.
+            // LDSM is warp-collective (the whole warp runs it), so a subgroup barrier before its reads (the stores have landed) and one after (no lane's next store reaches the
+            // rows before every lane has read them) is safe. In a compute shader the barriers bracket the MatrixLoads, so they bracket the per-lane code TensorPass puts in their
+            // place; TensorPass does not count a subgroup barrier as a shared memory write, so an HMMA still reads its A straight from where the LDSM read it
+            context.SubgroupBarrier();
+
             // nxnative: in a compute shader, one MatrixLoad a matrix (sources: shared memory id, mode, row address, matrix), which TensorPass lowers to the same per-lane code
             // (LdsmLane) once it knows whether the HMMAs it feeds read their A straight from where it reads (Ampere HMMA through simdgroup_matrix). One destination each:
             // the optimizer's dead code removal takes an operation whose destination nothing reads as dead, sources included
@@ -270,6 +278,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                 context.Copy(Register(x.Rd + m, RegisterType.Gpr), result);
             }
+
+            context.SubgroupBarrier();
         }
 
         // LDSM per lane: lane L's register of matrix m (g = L / 4, t = L % 4), from the row addresses (bytes in shared memory `id`) the lanes hold in addr

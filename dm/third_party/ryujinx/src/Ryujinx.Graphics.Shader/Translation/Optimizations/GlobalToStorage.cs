@@ -849,6 +849,34 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 return context.Load(StorageKind.StorageBuffer, mapBinding, Const(0), context.IAdd(entry, Const(word)));
             }
 
+            Operand AtOrBelow(Operand high, Operand low)   // the address is at or above {low, high}
+            {
+                return context.BitwiseOr(
+                    context.ICompareLessUnsigned(high, addrHigh),
+                    context.BitwiseAnd(context.ICompareEqual(high, addrHigh), context.ICompareLessOrEqualUnsigned(low, addrLow)));
+            }
+
+            Operand Below(Operand high, Operand low)   // the address is below {low, high}
+            {
+                return context.BitwiseOr(
+                    context.ICompareLessUnsigned(addrHigh, high),
+                    context.BitwiseAnd(context.ICompareEqual(addrHigh, high), context.ICompareLessUnsigned(addrLow, low)));
+            }
+
+            Operand selected = Local();
+            Operand lblFound = Label();
+            Operand lblChosen = Label();
+
+            // The entry this helper chose last in this invocation, if it holds the address: a shader reads a structure word after word from one pool, so all but the first access of a run
+            // choose the entry the first one chose (Ocarina of Time's foliage mesh shader 73dc0b90c4082e43, 135 reads, took 10.9 ms of a 683x384 frame). The table's ranges are disjoint
+            // (nvn_mtl.m gmem_map), so the search below would choose the same entry, and the host binds one table for a whole draw or dispatch. The word starts at 0, the empty entry
+            int lastBinding = resourceManager.AddRawLastEntryMemory();
+            Operand last = context.Load(StorageKind.LocalMemory, lastBinding);
+            Operand lastEntry = context.IMultiply(last, Const(GmemMapEntryWords));
+            Operand lastHolds = context.BitwiseAnd(AtOrBelow(MapWord(lastEntry, 1), MapWord(lastEntry, 0)), Below(MapWord(lastEntry, 3), MapWord(lastEntry, 2)));
+            context.Copy(selected, last);
+            context.BranchIfTrue(lblChosen, lastHolds);
+
             // The hint of the address's 2 MiB chunk names an entry holding the whole chunk (dmsh_abi.h DMSH_GMEM_HINT_SHIFT). An address too high for the tag searches
             Operand chunk = context.BitwiseOr(context.ShiftLeft(addrHigh, Const(32 - GmemHintShift)), context.ShiftRightU32(addrLow, Const(GmemHintShift)));
             Operand indexMask = Const((1 << GmemMapLog2) - 1);
@@ -857,8 +885,6 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             Operand hintFits = context.BitwiseAnd(
                 context.BitwiseAnd(context.ICompareNotEqual(hintIndex, Const(0)), context.ICompareEqual(context.ShiftRightU32(hint, Const(GmemMapLog2)), chunk)),
                 context.ICompareLessUnsigned(addrHigh, Const(1 << (GmemHintShift - GmemMapLog2))));
-            Operand selected = Local();
-            Operand lblFound = Label();
             context.Copy(selected, hintIndex);
             context.BranchIfTrue(lblFound, hintFits);
 
@@ -869,28 +895,19 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             {
                 Operand candidate = context.IAdd(index, Const(step));
                 Operand entry = context.IMultiply(candidate, Const(GmemMapEntryWords));
-                Operand startLow = MapWord(entry, 0);
-                Operand startHigh = MapWord(entry, 1);
-
-                Operand atOrBelow = context.BitwiseOr(
-                    context.ICompareLessUnsigned(startHigh, addrHigh),
-                    context.BitwiseAnd(context.ICompareEqual(startHigh, addrHigh), context.ICompareLessOrEqualUnsigned(startLow, addrLow)));
-
-                index = context.ConditionalSelect(atOrBelow, candidate, index);
+                index = context.ConditionalSelect(AtOrBelow(MapWord(entry, 1), MapWord(entry, 0)), candidate, index);
             }
 
             context.Copy(selected, index);
             context.MarkLabel(lblFound);
+            context.Store(StorageKind.LocalMemory, lastBinding, selected);
             Operand found = context.IMultiply(selected, Const(GmemMapEntryWords));
-            Operand endLow = MapWord(found, 2);
-            Operand endHigh = MapWord(found, 3);
-
-            Operand inPool = context.BitwiseOr(
-                context.ICompareLessUnsigned(addrHigh, endHigh),
-                context.BitwiseAnd(context.ICompareEqual(addrHigh, endHigh), context.ICompareLessUnsigned(addrLow, endLow)));
-
             Operand lblSkip = Label();
-            context.BranchIfFalse(lblSkip, inPool);
+            context.BranchIfFalse(lblSkip, Below(MapWord(found, 3), MapWord(found, 2)));   // an address in no pool: the entry below it ends below it
+
+            // The last entry's range held it, or the hint's or the search's entry does
+            context.MarkLabel(lblChosen);
+            found = context.IMultiply(selected, Const(GmemMapEntryWords));
 
             if (writes)
             {

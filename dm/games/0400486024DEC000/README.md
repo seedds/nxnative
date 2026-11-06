@@ -77,6 +77,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 
 ## Found on this game
 
+- [Raw global memory lookups that start from their last entry](../../../docs/reference/shaders.md#raw-global-memory-lookups-that-start-from-their-last-entry): the foliage, vertex and compute shaders read structures word by word through loaded addresses; about 2 ms less GPU a frame at the spawn point.
 - [The GPU idles with the next command buffer already committed](../../../docs/reference/frame-rate.md#the-gpu-idles-with-the-next-command-buffer-already-committed): the 25-40 ms frames.
 - [Pool tables and readback buffers made anew each frame](../../../docs/reference/memory.md#pool-tables-and-readback-buffers-made-anew-each-frame): about 1,500 residency changes per 300 frames.
 - [Pool shaders taken as depth readers](../../../docs/reference/rendering.md#pool-shaders-taken-as-depth-readers): about 80 extra passes a frame, and half the frames over budget.

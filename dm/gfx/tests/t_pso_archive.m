@@ -4,7 +4,7 @@
 // Metal 4 descriptor keeps the MTLDevice path; pso_key_norm drops what no pipeline depends on; compaction merges the files the prewarm took bases from into one despite a
 // mid-prewarm flush, and a compaction that did not finish is not tried again on the same system build; depth-only draws write depth; concurrent colour variants compile
 // one base; archive flushes preserve unrelated compiler state; a function with function constants is specialized by its pipeline's descriptor, not through its library,
-// and an MTLDevice pipeline gets it specialized
+// and an MTLDevice pipeline gets it specialized; the descriptor for a specialization is the caller's whether the driver returns it retained or autoreleased
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -253,6 +253,38 @@ static void capture_preserves_foreign_folder(void) {
     if (proxy->created && [NSFileManager.defaultManager fileExistsAtPath:proxy->fixture])
         EXPECT("foreign capture: test-owned fixture removed", 1, [NSFileManager.defaultManager removeItemAtPath:proxy->fixture error:nil]);
 }
+// Stand-ins for a base pipeline's newRenderPipelineDescriptorForSpecialization: one returns the descriptor retained, as its name promises (macOS 27.0), the other autoreleased,
+// as iOS 26.0's driver does. Plain functions, so ARC's naming convention does not decide what they return
+static __weak MTL4RenderPipelineDescriptor *g_spec_made;
+static void *spec_retained(id self, SEL cmd) { (void)self; (void)cmd; MTL4RenderPipelineDescriptor *d = [MTL4RenderPipelineDescriptor new]; g_spec_made = d; return (void *)CFBridgingRetain(d); }
+static void *spec_autoreleased(id self, SEL cmd) { (void)self; (void)cmd; MTL4RenderPipelineDescriptor *d = [MTL4RenderPipelineDescriptor new]; g_spec_made = d; return (void *)CFAutorelease(CFBridgingRetain(d)); }
+// spec_desc owns the descriptor either way: it outlives every pool once returned (no over-release; the warm task's pool crashed on iOS 26.0) and goes away once dropped (no leak),
+// on the first call, which finds out how the driver returns it, and on later ones
+static void spec_desc_ownership(void) {
+    SEL sel = @selector(newRenderPipelineDescriptorForSpecialization);
+    const char *names[2] = {"retained", "autoreleased"}; IMP imps[2] = {(IMP)spec_retained, (IMP)spec_autoreleased};
+    for (int k = 0; k < 2; k++) {
+        Class c = objc_allocateClassPair(NSObject.class, k ? "TSpecBaseAutoreleased" : "TSpecBaseRetained", 0);
+        if (!c) { fprintf(stderr, "spec descriptor %s: no stand-in class\n", names[k]); failed++; continue; }
+        class_addMethod(c, sel, imps[k], "@@:"); objc_registerClassPair(c);
+        id base = [c new]; _Atomic int own = 0;
+        for (int call = 0; call < 2; call++) {
+            char name[96];
+            __weak MTL4RenderPipelineDescriptor *kept;   // not w: EXPECT declares its own
+            @autoreleasepool {
+                MTL4RenderPipelineDescriptor *s;
+                @autoreleasepool { s = spec_desc(base, &own); }
+                kept = s;
+                snprintf(name, sizeof name, "spec descriptor %s, call %d: the caller's after its pools", names[k], call + 1);
+                EXPECT(name, 1, s != nil && s == g_spec_made);
+            }
+            snprintf(name, sizeof name, "spec descriptor %s, call %d: freed once dropped", names[k], call + 1);
+            EXPECT(name, 1, kept == nil);
+            snprintf(name, sizeof name, "spec descriptor %s, call %d: ownership found", names[k], call + 1);
+            EXPECT(name, k + 1, atomic_load(&own));
+        }
+    }
+}
 int main(int argc, char **argv) { @autoreleasepool {
     if (!mkdtemp(archive_cache_root)) abort();
     atexit(archive_cache_cleanup);
@@ -451,6 +483,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         EXPECT("constants: the vertex function given to it is specialized once", 1, fn_dev(cv) != cv && fn_dev(cv) == fn_dev(cv));
         EXPECT("constants: a function without constants is its own", 1, fn_dev(cd.fragmentFunction) == cd.fragmentFunction);
     }
+    spec_desc_ownership();
     capture_preserves_foreign_folder();
     [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
     printf("t_pso_archive: %d checks, %d failed\n", checks, failed);

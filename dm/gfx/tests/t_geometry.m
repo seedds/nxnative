@@ -19,6 +19,14 @@ static id<MTLLibrary> library(NSString *source) {
 static void assembly(void) {
     uint32_t a[]={10,11,12,13,UINT32_MAX,20,21,22}, out[32];
     uint32_t want[]={10,11,12,12,11,13,20,21,22};
+    {   // a ribbon's sparse IDs (a side number in bit 16): lo-based map, sorted unique IDs, positions
+        uint32_t ids[]={7,8,9,0x10007,0x10008}, map[]={0,0x10000,1,0x10001,2}, pos[5]={0};
+        EXPECT("capture runs",2,nvn_geo_capture_runs(ids,5));
+        EXPECT("capture runs of nothing",0,nvn_geo_capture_runs(ids,0));
+        EXPECT("compact map",1,nvn_geo_compact_map(map,5,7,ids,5,pos));
+        EXPECT("position of the first",0,pos[0]); EXPECT("position in the second run",3,pos[1]); EXPECT("position back in the first",1,pos[2]); EXPECT("second run's second",4,pos[3]); EXPECT("last",2,pos[4]);
+        uint32_t absent[]={3}; EXPECT("a value not in the list",0,nvn_geo_compact_map(absent,1,7,ids,5,pos));
+    }
     EXPECT("strip count",9,nvn_geo_assemble(5,a,8,1,UINT32_MAX,NULL,0));
     EXPECT("strip write",9,nvn_geo_assemble(5,a,8,1,UINT32_MAX,out,32));
     EXPECT("strip winding and restart",0,memcmp(out,want,sizeof want));

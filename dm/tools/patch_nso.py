@@ -200,6 +200,16 @@ UE_REGION, UE_REGION_REG, UE_REGION_X1, ue_region_why = ue_region.find(bytes(IMG
 if UE_REGION is not None: print(f'{NAME}: {ue_region_why}')
 elif ue_region_why.startswith('[RED] '): print(f'[RED] {NAME}: {ue_region_why[6:]}: the engine asks for its whole default region')
 
+# ---- Unreal's NVN dynamic buffers (main: dm/tools/ue_ring.py finds the load of their copy count, without a build ID) ----
+# Each write lock moves to the next copy with no fence, and a ring of 3 can come round to a copy that queued draws still read: one more copy widens the margin (a workaround: GitHub issue #1040)
+import ue_ring
+UE_RING, UE_RING_OLD, UE_RING_NEW, ue_ring_why = ue_ring.find(bytes(IMG), TEXT_END, RO_OFF, DATA_OFF) if NAME == 'main' else (None, None, None, '')
+if UE_RING is not None:
+    cuts.append((UE_RING, struct.pack('<I', UE_RING_OLD).hex(), struct.pack('<I', UE_RING_NEW).hex(), f'{ue_ring_why} (ue_ring.py)'))
+    struct.pack_into('<I', IMG, UE_RING, UE_RING_NEW)
+    print(f'{NAME}: {ue_ring_why}')
+elif ue_ring_why.startswith('[RED] '): print(f'[RED] {NAME}: {ue_ring_why[6:]}: its dynamic buffers keep 3 copies')
+
 md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
 patch = bytearray(); fix = []; gates = []; stats = {}
 patch_front, patch_back, PATCH_BASE = patch, bytearray(), PATCH_OFF   # the area emit() writes into and its offset: the front one unless TWO puts a site in the back one
@@ -1762,7 +1772,7 @@ else:
     open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
 import hashlib
 with open(os.path.join(outdir, 'build_src.sha256'), 'w') as f:   # the same for every module: the rewriter and every patch file, by path from dm/tools
-    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, ue_cvar.__file__, ue_malloc.__file__, fps_target.__file__, ue_region.__file__, snowdrop_pools.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
+    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, ue_cvar.__file__, ue_malloc.__file__, fps_target.__file__, ue_region.__file__, ue_ring.__file__, snowdrop_pools.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
 with open(P('fixups.tsv'), 'w') as f:
     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
     if FAR: f.write(f'# IMAGE_SIZE\t{IMAGE_SIZE:#x}\n# FILE_IMAGE_LEN\t{FILE_IMAGE_LEN:#x}\n')   # patch area before the base (negative PATCH_OFF): whole image size, length of the image part of the file

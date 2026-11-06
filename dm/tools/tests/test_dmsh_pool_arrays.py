@@ -72,6 +72,27 @@ class Reflect(unittest.TestCase):
         self.assertEqual((b['fp_s_cb0_40000000']['kind'], b['fp_s_cb0_40000000']['arg_id']), (abi.KIND_SAMP_POOL, 3))
         self.assertEqual((b['fp_i_cb2_48_rg32ui']['kind'], b['fp_i_cb2_48_rg32ui']['reg'], b['fp_i_cb2_48_rg32ui']['arg_id']), (abi.KIND_IMG, 0, 36))
 
+    def test_table_of_uniform_handles(self):   # Kirby Air Riders' light probes: texture words in c[4] at element 390, the sampler word at c2 byte 0x570; the index stays the element's
+        src = '''struct spvDescriptorSetBuffer0
+{
+    array<texture2d_array<float>, 8192> cp_t2da_cb196612_10570000 [[id(0)]];
+    array<sampler, 8192> cp_t2da_cb196612_10570000Smplr [[id(8192)]];
+    array<texture2d<float>, 32> fp_t2d_cb14_0 [[id(16384)]];
+};
+
+kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]])
+{
+    float3 v = spvDescriptorSet0.cp_t2da_cb196612_10570000[_7].sample(spvDescriptorSet0.cp_t2da_cb196612_10570000Smplr[_7], p, 0u, level(0.0)).xyz;
+}
+'''
+        out = NS['pool_arrays'](src)
+        self.assertIn('(&spvDescriptorSet0.cp_t2da_cb196612_10570000->e[0])[min(uint(_7), spvDescriptorSet0.cp_t2da_cb196612_10570000->n)]', out)
+        self.assertIn('array<texture2d<float>, 32> fp_t2d_cb14_0 [[id(2)]];', out)   # a pointer takes one ID; an array of 32 stays an array (nothing in the game's buffers is that short now but images and buffer textures)
+        b = {e['msl_name']: e for e in NS['reflect']('k', 'cs', out, {'sbufs': []})}
+        t, s = b['cp_t2da_cb196612_10570000'], b['cp_t2da_cb196612_10570000Smplr']
+        self.assertEqual((t['kind'], t['elem'], t['reg'], t['off'], t['arg_id'], t.get('soff')), (abi.KIND_TEX_HTAB, 'texture2d_array<float>', 1, 0, 0, 0x570))
+        self.assertEqual((s['kind'], s['reg'], s['off'], s['arg_id'], s['soff'], s['sreg']), (abi.KIND_SAMP_HTAB, 1, 0, 1, 0x570, abi.SREG_C2))
+
     def test_unreadable_member(self):
         with self.assertRaises(ValueError): NS['reflect']('k', 'ps', MSL.replace('raster_order_group(0)', 'raster_order_group'), {'sbufs': []})
 

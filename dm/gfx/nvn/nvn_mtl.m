@@ -250,13 +250,23 @@ static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
 static char g_image_heap_owner_key;
 // DM_RES_CHECK=1 (diagnostic): if textures / buffers the shader accesses through the argument block are not in the residency set, print the first 40 (textures are attributed to the actual allocation via parent texture / underlying buffer)
 static int g_res_check_on;
+// It also keeps the submission that last bound each texture or buffer, for defer_drain: an object retired behind an earlier fence than a binding's goes while that binding is on the GPU, which this
+// check cannot see at the binding (it is still in the set then). A texture gone that way faults or, with its resource ID reused, reads another texture, measured on an M4 Pro: a freed texture's resource ID went to the next texture made
+static NSMapTable *g_res_last_use; static uint64_t g_res_late;
+static void res_use_note(id o, const char *what) {
+    if (!g_res_last_use) g_res_last_use = [NSMapTable weakToStrongObjectsMapTable];
+    [g_res_last_use setObject:@[@(g_fence + 1), @(what)] forKey:o];
+}
 static void res_check(id r, const char *what, int reg) {
     static int nbad;
-    if (!g_res_check_on || !r || nbad >= 40) return;
+    if (!g_res_check_on || !r) return;
+    pthread_mutex_lock(&g_res_mu); res_use_note(r, what); pthread_mutex_unlock(&g_res_mu);
+    if (nbad >= 40) return;
     int is_tex = [r conformsToProtocol:@protocol(MTLTexture)], is_buf = [r conformsToProtocol:@protocol(MTLBuffer)];
     if (!is_tex && !is_buf) return;   // Samplers etc. are not allocations
     id<MTLResource> a = r; int hops = 0;
     if (is_tex) { id<MTLTexture> t = (id<MTLTexture>)a; while (t.parentTexture) { t = t.parentTexture; hops++; } a = t.buffer ? (id<MTLResource>)t.buffer : (id<MTLResource>)t; }
+    if (a != r) { pthread_mutex_lock(&g_res_mu); res_use_note(a, what); pthread_mutex_unlock(&g_res_mu); }
     pthread_mutex_lock(&g_res_mu); int ok = [g_res_objects containsObject:a.heap ? (id)a.heap : a]; pthread_mutex_unlock(&g_res_mu);
     if (!ok) { nbad++; id<MTLTexture> t = is_tex ? (id<MTLTexture>)r : nil;
         MLOG("[RED] missing residency #%d: %s slot %d %s %p (parent chain %d deep) allocated %lu B storage mode %lu%s", nbad, what, reg, is_tex ? "texture" : "buffer", (__bridge void *)a, hops, (unsigned long)a.allocatedSize, (unsigned long)a.storageMode,
@@ -334,6 +344,11 @@ static void defer_drain(void) { @autoreleasepool {
     pthread_mutex_unlock(&g_deferred_mu);
     for (NvDeferredRelease *d in ready) {
         id obj = d->object;
+        if (g_res_check_on) { pthread_mutex_lock(&g_res_mu); NSArray *u = [g_res_last_use objectForKey:obj]; pthread_mutex_unlock(&g_res_mu);
+            CFIndex refs = CFGetRetainCount((__bridge CFTypeRef)obj);   // d, obj and the array's enumeration hold some; a released object has nobody else
+            if (u && [u[0] unsignedLongLongValue] > d->fence && (!d->keep_resident || refs <= 3) && g_res_late++ < 40) {
+                int is_tex = [obj conformsToProtocol:@protocol(MTLTexture)]; id<MTLTexture> t = is_tex ? obj : nil;
+                MLOG("[RED] released too early #%llu: %s %p (%lux%lu format %lu) retired behind fence %llu, bound by shader %s in submission %llu; %s, references %ld", (unsigned long long)g_res_late, is_tex ? "texture" : "object", (__bridge void *)obj, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat, (unsigned long long)d->fence, [u[1] UTF8String], [u[0] unsignedLongLongValue], d->keep_resident ? "reference dropped" : "out of the residency set", (long)refs); } }
         if (!d->keep_resident && [obj conformsToProtocol:@protocol(MTLResource)]) {
             pthread_mutex_lock(&g_res_mu);
             int registered = [g_res_objects containsObject:obj];
@@ -1667,6 +1682,9 @@ int mtl_gpu_span(uint64_t f, uint64_t *t0, uint64_t *t1) {
 }
 static void rp_flush(void);
 static const char *cctx_snap(void);   // What is in this submission (printed into the failure line on error; defined before mtl_exec)
+typedef struct cbs_list cbs_list;   // The game's shaders one command buffer encoded (defined before encode_args)
+static cbs_list *cbs_take(void);
+static void cbs_feedback(cbs_list *l, NSError *err, const char *where);
 static void lc_land(void);
 // A submission's CPU-side writes at its end (events, samples-passed and counter reports): run once, by its feedback handler or, when a game's SyncWait wakes on the
 // GPU's own signal of the fence first, by that waiter (DM_NVN_FAST_WAKE, on by default): the feedback handler comes 0.26 ms after the GPU end on an M2 Max
@@ -1737,6 +1755,7 @@ uint64_t mtl_sub_commit(void) {
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; for (dispatch_block_t block in commit_blocks) block(); }];
     uint64_t gpu_f = atomic_load(&g_cur_frame); gpu_tag_begin(gpu_f);
     NSString *cctx = @(cctx_snap());
+    cbs_list *cbs = cbs_take();
     seg_clk *sc = g_sclk; uint32_t seg_last = g_seg; g_sclk = NULL;
     pthread_mutex_lock(&g_post_mu);
     if (!atomic_load(&pr->claimed) && pr->fence) MDIE("post ring: the writes of fence %llu never ran", (unsigned long long)pr->fence);
@@ -1747,6 +1766,7 @@ uint64_t mtl_sub_commit(void) {
         if (ws_on()) ws_fb(fence, cb.GPUEndTime);
         uint64_t c0 = 0, c1 = 0; if (seg_ts()) { c0 = gpu_s_guest_ns(cb.GPUStartTime); c1 = gpu_s_guest_ns(cb.GPUEndTime); }
         if (cb.error) { atomic_store(&g_last_commit_error, 1); res_top_once(cb.error); static int n, nv; int victim = [cb.error.description containsString:@"InnocentVictim"]; if (victim ? nv++ < 1 : n++ < 8) MLOG("[RED] command buffer error details fence=%llu: %s | GPU %.3f→%.3f", (unsigned long long)fence, cb.error.description.UTF8String, cb.GPUStartTime, cb.GPUEndTime); if (!victim) MLOG("[RED] state of the failed submission fence=%llu: %s", (unsigned long long)fence, cctx.UTF8String); MLOG("[RED] command buffer execution error: %s", cb.error.localizedDescription.UTF8String); }
+        char where[64]; snprintf(where, sizeof where, "fence %llu, its last command buffer", (unsigned long long)fence); cbs_feedback(cbs, cb.error, where);
         post_complete(fence, c0, c1);
         defer_drain();
     }];
@@ -4454,6 +4474,7 @@ static void shmap_read(void) {
     uint8_t up_mfx;   // a compute shader that is the game's own upscaler (DM_GAME_UPSCALER_KEYS, from the shader map): 0 not decided, 1 drawn by MetalFX when DM_UPSCALER=metalfx, 2 not one or one its colour keeps (up_mfx_wanted)
     uint8_t up_color;   // such a shader's colour, from its code at load with DM_UPSCALER=metalfx (up_mfx_color; UP_COLOR_UNREAD otherwise)
     int gs_loc, lay_loc; char gs_comp, lay_comp;   // a slice-writing geometry shader (no function: the layer comes from input gs_loc.gs_comp) / a vertex shader with layer entry points writing output lay_loc.lay_comp (dmsh_build.py gs_slice, vs_layer_entry); -1 = none
+    uint64_t cbs_seen; uint32_t cbs_runs;   // the command buffer that listed this shader last, and how many have (cbs_note)
     // The argument buffer encoded last time
     id<MTLBuffer> ab_buf; uint64_t ab_gpu; size_t ab_off; uint64_t ab_pass; uint32_t ab_binst; uint64_t ab_pgen;   // ab_pass: serial of the render pass that encoded this argument block - reused only within the same pass (the arena holding a block from another pass / another submission may already have been reclaimed and rewritten); ab_pgen: g_psnap_gen when it was encoded (pools, pool_gpu)
     id<MTLLibrary> bflib; int bflib_tried; NSMutableDictionary<NSString *, id<MTLFunction>> *bffn;   // bflib: readable-tile version <key>_bf (merge B step 2)
@@ -5322,20 +5343,22 @@ static inline __attribute__((always_inline)) void *tex_fast(int tid) {
 }
 // The texture type the shader declares differs from the one the descriptor gives: use a compatible view. Maxwell sample instructions carry their own dimension, and a non-array instruction reading a 2D array texture reads layer 0;
 // on Metal a 2D array bound to a texture2d argument is a type mismatch with undefined reads (measured: one fixed value). Super Mario 3D World + Bowser's Fury creates its pre-lighting buffer as a one-layer 2D array
-// and the deferred lighting shader samples it as 2D: the ambient light of the whole picture became one colour, washed out white. Supports 2D array <-> 2D, 2D array -> cube / cube array and cube -> 2D (its first face); a 2D texture in a cube or 3D slot reads zero; any other mismatch is reported once. Caller holds g_rmu
+// and the deferred lighting shader samples it as 2D: the ambient light of the whole picture became one colour, washed out white. A 2D texture in a cube or 3D slot reads zero; any other mismatch is reported once. Caller holds g_rmu
 #define DMY_NT 10   // one dummy per MTLTextureType value, 1D (0) to TextureBuffer (9)
 static id<MTLTexture> dummy_tex(int dtt, int dpf); static uint64_t g_dummy_tex_rid[DMY_NT][4];
 static id<MTLTexture> tex_fit(int tid, id<MTLTexture> t, MTLTextureType want, uint64_t *rid) {
     MTLTextureType have = t.textureType; NSUInteger ns = 0;
-    if (want == MTLTextureType2D && have == MTLTextureType2DArray) ns = 1;
-    else if (want == MTLTextureType2DArray && have == MTLTextureType2D) ns = 1;
-    else if (want == MTLTextureTypeCube && have == MTLTextureType2DArray && t.arrayLength >= 6) ns = 6;
-    else if (want == MTLTextureTypeCubeArray && have == MTLTextureType2DArray && t.arrayLength >= 6) ns = t.arrayLength / 6 * 6;
-    else if (want == MTLTextureTypeCube && have == MTLTextureTypeCubeArray) ns = 6;   // a cube array read as a cube: the first cube
-    // A cube read as 2D: Maxwell keeps a cube's faces as six layers, and a non-array sample reads layer 0, as for a 2D array. Atelier Ryza DX leaves cube textures in slots that
-    // its draws read as 2D (a compute shader of CLC.g1s, the PBB materials' pixel shaders, the river's vertex shader), a different texture from run to run: the face-0 view makes
-    // those reads defined instead of a type mismatch
-    else if (want == MTLTextureType2D && have == MTLTextureTypeCube) ns = 1;
+    // 2D, 2D array, cube and cube array are all layers to Maxwell, which keeps a cube's faces as six of them; the declared type only says how many layers the view takes. Measured on an M4 Pro, a
+    // mismatched cube reads face 0 in every direction through a cube array argument and layer 0 at every index through a 2D array argument (Splatoon Raiders binds a cube view in a slot its sky-like
+    // shader declares as a cube array, index 0); the view reads every face. A cube read as 2D is face 0, as a non-array sample of a 2D array is layer 0 (Atelier Ryza DX leaves cube textures in
+    // slots that its draws read as 2D, a different texture from run to run). A Metal cube's arrayLength is 1 and a cube array's counts cubes
+    NSUInteger layers = have == MTLTextureType2D ? 1 : have == MTLTextureType2DArray ? t.arrayLength : have == MTLTextureTypeCube || have == MTLTextureTypeCubeArray ? t.arrayLength * 6 : 0;
+    if (layers) {
+        if (want == MTLTextureType2D) ns = 1;
+        else if (want == MTLTextureType2DArray) ns = layers;
+        else if (want == MTLTextureTypeCube && layers >= 6) ns = 6;   // a cube array read as a cube: the first cube
+        else if (want == MTLTextureTypeCubeArray && layers >= 6) ns = layers / 6 * 6;
+    }
     // A one-layer 2D texture in a cube slot has no cube view (Pokémon Legends: Z-A binds one to a cube sampler on its character creation screen, a placeholder for an environment map): the zero cube,
     // a defined read, instead of a type mismatch whose reads are undefined. The same for a 2D array of fewer than 6 layers, which is how the host holds some 2D textures (Mario Kart 8 Deluxe binds
     // an NVN 2D texture, format 0x44, at slot 10 of two pixel shaders that declare a cube there, as a race loads)
@@ -5739,7 +5762,7 @@ static int prog_swrites(NvProg *pr) {
 static void order_note(NvProg *pr) {   // after each draw of the pass: does it read memory in a stage after the vertex stage (anything bound there but samplers and driver data)
     for (int st = 1; pr && st < 6 && !g_pass_late_res; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
         for (int i = 0; i < sh->rf.nb; i++) { int k = sh->rf.b[i].kind;
-            if (k != NVN_RB_SAMP && k != NVN_RB_SAMPT && k != NVN_RB_SAMPU && k != NVN_RB_SAMPI && k != NVN_RB_SAMPD && k != NVN_RB_SAMPA && k != NVN_RB_SAMPP && k != NVN_RB_SUPPORT && k != NVN_RB_C1 && k != NVN_RB_DRV0 && k != NVN_RB_DRV2 && k != NVN_RB_PUSH) { g_pass_late_res = 1; break; } } }
+            if (k != NVN_RB_SAMP && k != NVN_RB_SAMPT && k != NVN_RB_SAMPU && k != NVN_RB_SAMPI && k != NVN_RB_SAMPD && k != NVN_RB_SAMPA && k != NVN_RB_SAMPP && k != NVN_RB_SAMPH && k != NVN_RB_SUPPORT && k != NVN_RB_C1 && k != NVN_RB_DRV0 && k != NVN_RB_DRV2 && k != NVN_RB_PUSH) { g_pass_late_res = 1; break; } } }
 }
 // A draw that writes, after an ordering barrier in a pass whose earlier draws did not write (g_pass_order): when those draws read memory only in their vertex stage, or the barrier
 // orders only primitives (whose fragments NVN leaves unordered too), a barrier inside the pass from the vertex stage to the stages that write keeps the pass and its attachments (the
@@ -8170,6 +8193,63 @@ static uint32_t ubo_bind_handle(int stage, const nvn_rbind *b) { uint32_t h = ub
 // A handle read from a uniform buffer names IDs of the pools bound when the draw runs: as bound handles are moved at recording (hle_nvn.c bind_handles), these take the bases here (0 = none)
 static int ubo_tex_id(uint32_t h) { int t = (int)(h & 0xfffff); return t ? t + S.tex_base : 0; }
 static int ubo_samp_id(uint32_t h) { int s = (int)(h >> 20); return s ? s + S.samp_base : 0; }
+// A SAMPU binding's sampler ID: from its handle, or the separate sampler word of the driver table (sreg DMSH_SREG_C2, whose IDs are moved already, as the words TEXA / SAMPA read)
+static int sampu_id(int stage, const nvn_rbind *b, int k) {
+    if (b->soff && b->sreg == DMSH_SREG_C2) return (int)(c2_handle(stage, b->soff - 1u) >> 20);
+    return k < 0 ? ubo_samp_id(ubo_bind_handle(stage, b)) : ubo_samp_id(ubo_handle(stage, b->reg, b->off + 8 * k));
+}
+// A table of the handles in one of the game's uniform buffers, which a shader indexes at run time (element k = the handle at off + 8k): nothing tells how many the game keeps there, and the argument
+// buffer has one pointer for it, so the table is as long as the last handle the buffer holds. Kirby Air Riders keeps 197 handles up to element 392 in a 4,096-element buffer, and 34,000 textures
+// registered: only those a table names are made here, where pool_gpu's walk over every ID took 16 GB and most of the frame. A table is looked at again in each pass, and rebuilt when the handles or the
+// registered IDs have changed. Caller holds g_rmu, as for pool_gpu
+#define HTAB_SNAPS 64
+typedef struct { __strong id<MTLBuffer> buf; uint64_t gpu, reg, sgen, pass, addr; uint8_t *copy; uint64_t *ser; uint32_t bytes, cap, n; int samp, dtt, dpf, tb, sb, c2s; } htab_snap;   // ser: each element's texture serial, for fb_texu_reads
+static htab_snap g_htab[HTAB_SNAPS], *g_htab_last; static unsigned g_htab_next;
+static uint64_t g_stat_htab_builds; static double g_stat_htab_ms;
+static uint64_t htab_gpu(int stage, const nvn_rbind *b, __unsafe_unretained id<MTLBuffer> *out) {
+    int samp = b->kind == NVN_RB_SAMPH, reg = b->reg;
+    const p_bind_buf *u = reg < 16 ? &S.ubo[stage][reg] : NULL;
+    uint64_t addr = u ? u->addr + b->off : 0, rg = atomic_load(&g_reg_gen), sg = atomic_load(&g_ser_gen);
+    uint32_t bytes = u && u->addr && u->size > b->off ? (uint32_t)MIN(u->size - b->off, 65536u) : 0;
+    int c2s = samp && b->soff && b->sreg == DMSH_SREG_C2 ? sampu_id(stage, b, 0) : -1;
+    htab_snap *p = NULL, *free_ = NULL;
+    for (int i = 0; i < HTAB_SNAPS && !p; i++) { htab_snap *q = &g_htab[i];
+        if (!q->buf) { if (!free_) free_ = q; }
+        else if (q->addr == addr && q->samp == samp && q->dtt == b->dtt && q->dpf == b->dpf && q->tb == S.tex_base && q->sb == S.samp_base && q->c2s == c2s) p = q; }
+    if (p && p->pass == g_pass.serial && p->reg == rg && p->sgen == sg && p->bytes == bytes) { g_htab_last = p; *out = p->buf; return p->gpu; }
+    static uint8_t now[65536];
+    bytes &= ~7u; memset(now, 0, bytes); for (uint32_t i = 0; i < bytes; i += 4096) ubo_read(stage, reg, b->off + i, MIN(bytes - i, 4096u), now + i);
+    if (p && p->reg == rg && p->sgen == sg && p->bytes == bytes && !memcmp(p->copy, now, bytes)) { p->pass = g_pass.serial; g_htab_last = p; *out = p->buf; return p->gpu; }
+    uint64_t t0 = mach_absolute_time();
+    if (!p) { p = free_ ? free_ : &g_htab[g_htab_next++ % HTAB_SNAPS]; if (p->buf) defer_obj_release(p->buf); uint8_t *keep = p->copy; uint64_t *ks = p->ser; uint32_t cap = p->cap; *p = (htab_snap){0}; p->copy = keep; p->ser = ks; p->cap = cap; }
+    uint32_t n = 0; const uint32_t *w = (const uint32_t *)now;
+    for (uint32_t k = bytes / 8; k > 0 && !n; k--) if (w[(k - 1) * 2]) n = k;
+    uint64_t dummy = samp ? dummy_samp_rid() : (dummy_tex(b->dtt, b->dpf) ? g_dummy_tex_rid[b->dtt % DMY_NT][b->dpf & 3] : 0);
+    if (p->cap < bytes) { free(p->copy); free(p->ser); p->copy = malloc(bytes ? bytes : 8); p->ser = malloc(bytes ? bytes : 8); p->cap = bytes; }
+    static uint64_t e[8193];
+    for (uint32_t k = 0; k < n; k++) { uint64_t r = 0; p->ser[k] = 0;
+        if (samp) { int sid = c2s >= 0 ? c2s : ubo_samp_id(w[k * 2]); if (sid > 0 && sid < g_nsreg && g_sreg_ok[sid] && samp_fast(sid)) r = g_srid[sid]; }
+        else { int tid = ubo_tex_id(w[k * 2]); if (tid > 0 && tid < g_ntreg && g_treg[tid].ok && (g_treg[tid].view || (!g_treg[tid].gone && tex_storage_live(&g_treg[tid].t)))) {   // as for the samplers: other data, not a handle
+                void *tv = NULL; uint64_t tr = tex_fast_rid(tid, &tv); __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
+                if (t && t.textureType != (MTLTextureType)b->dtt) { uint64_t r2 = 0; t = tex_fit_elem(tid, t, (MTLTextureType)b->dtt, &r2); tr = t ? r2 : 0; }   // a handle the shader does not pick here may be another kind
+                if (t) { r = tr; p->ser[k] = g_treg[tid].t.serial; } } }
+        e[k] = r ? r : dummy; }
+    e[n] = dummy;
+    memcpy(p->copy, now, bytes);
+    // Registrations come many times a frame and rarely touch a table: the same elements keep the buffer, and argument blocks that hold it
+    if (p->buf && p->n == n && !memcmp((uint8_t *)p->buf.contents + DMSH_POOL_HEAD, e, 8 * (size_t)(n + 1))) { p->reg = rg; p->sgen = sg; p->pass = g_pass.serial; p->bytes = bytes; g_htab_last = p; *out = p->buf; return p->gpu; }
+    id<MTLBuffer> buf = [g_dev newBufferWithLength:DMSH_POOL_HEAD + 8 * (size_t)(n + 1) options:MTLResourceStorageModeShared];
+    uint8_t *c = buf.contents; *(uint32_t *)c = n; memcpy(c + DMSH_POOL_HEAD, e, 8 * (size_t)(n + 1));
+    res_add(buf);
+    if (p->buf) defer_obj_release(p->buf);
+    p->buf = buf; p->gpu = buf.gpuAddress; p->reg = rg; p->sgen = sg; p->pass = g_pass.serial; p->addr = addr; p->bytes = bytes; p->n = n; p->samp = samp; p->dtt = b->dtt; p->dpf = b->dpf; p->tb = S.tex_base; p->sb = S.samp_base; p->c2s = c2s;
+    g_psnap_gen++;
+    static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
+    double ms = (double)(mach_absolute_time() - t0) * tb.numer / tb.denom / 1e6; g_stat_htab_ms += ms;
+    if (g_stat_htab_builds++ < 16 || g_stat_htab_builds % 1000 == 0)
+        MLOG("table of a uniform buffer's handles: %s of %u elements from slot %d +%#x, built in %.3f ms (%llu builds, %.0f ms in all)", samp ? "samplers" : "textures", n, reg, b->off, ms, (unsigned long long)g_stat_htab_builds, g_stat_htab_ms);
+    g_htab_last = p; *out = buf; return p->gpu;
+}
 int dm_sdk_ounce(void);
 static uint32_t g_dispatch_dim[3];   // the current dispatch's workgroup counts (driver segment c0 + 0x200 for compute, and c0 + 4 on NVN2)
 static uint32_t g_draw_binst;   // the current draw's base instance (draw), for c0 + 0x644
@@ -8193,14 +8273,72 @@ static void c0_sample_rows(uint8_t *d, uint32_t samples) {
     memcpy(d + DMSH_C0_SAMPLE_TABLE, table[samples], DMSH_C0_SAMPLE_BYTES); memcpy(d + DMSH_C0_SAMPLE_INFO, info, sizeof info);
 }
 static uint64_t g_geo_bind[5];
+// Which game shaders a failed command buffer encoded. A GPU fault's error names no pass or shader (Metal 4's commit feedback has only the error and two times), and a fault does not always stop
+// the game (Splatoon Raiders, issue #1289: survivable page faults every minute or so before the fatal one), so what the failures have in common narrows the suspects. Each command buffer keeps the
+// list of the shaders it encoded, each once. On an error this command buffer caused, the list is printed, then the shaders of all such failures so far, most often failed first, each as
+// `key failed/ran`: in how many failed command buffers, of how many that encoded it. A shader that runs everywhere has a low ratio. Counts rather than an intersection: one failure with another
+// cause would empty an intersection for good. A victim of another's fault and a submission refused after one ran nothing of their own and do not count. The list leaves out the host's own passes
+// and the kernels of geometry emulation, so a fault there shows no shader standing out. Only the submit thread adds to the list; the feedback handlers print, under g_cbs_mu
+enum { CBS_KEY = sizeof ((NvShader *)0)->key, CBS_SHOW = 200, CBS_RANK = 30, CBS_REPORTS = 16 };
+typedef struct { char key[CBS_KEY]; uint32_t runs; } cbs_ent;   // runs: command buffers that had encoded it, this one included
+struct cbs_list { uint32_t n; cbs_ent e[]; };
+typedef struct { char key[CBS_KEY]; uint32_t failed, runs; } cbs_tally_ent;
+static cbs_ent *g_cbs; static uint32_t g_cbs_n, g_cbs_cap; static uint64_t g_cbs_serial = 1;
+static pthread_mutex_t g_cbs_mu = PTHREAD_MUTEX_INITIALIZER; static cbs_tally_ent *g_cbs_tally; static uint32_t g_cbs_tally_n, g_cbs_tally_cap; static uint64_t g_cbs_failures;
+static inline void cbs_note(NvShader *sh) {
+    if (sh->cbs_seen == g_cbs_serial) return;
+    sh->cbs_seen = g_cbs_serial; sh->cbs_runs++;
+    if (g_cbs_n == g_cbs_cap) { g_cbs_cap = g_cbs_cap ? g_cbs_cap * 2 : 256; g_cbs = realloc_or_die(g_cbs, g_cbs_cap * sizeof *g_cbs, "the command buffer's shader list"); }
+    cbs_ent *e = &g_cbs[g_cbs_n++]; memcpy(e->key, sh->key, CBS_KEY); e->runs = sh->cbs_runs;
+}
+static cbs_list *cbs_take(void) {   // the list of the command buffer about to be committed; the next one starts empty
+    cbs_list *l = malloc(sizeof *l + g_cbs_n * sizeof *g_cbs);
+    if (l) { l->n = g_cbs_n; if (g_cbs_n) memcpy(l->e, g_cbs, g_cbs_n * sizeof *g_cbs); }
+    g_cbs_n = 0; g_cbs_serial++;
+    return l;
+}
+static int cbs_tally_cmp(const void *pa, const void *pb) {   // most often failed first, then the rarer
+    const cbs_tally_ent *x = pa, *y = pb;
+    return x->failed != y->failed ? (x->failed > y->failed ? -1 : 1) : x->runs != y->runs ? (x->runs < y->runs ? -1 : 1) : strcmp(x->key, y->key);
+}
+static void cbs_tally_add(const cbs_list *l) {   // caller holds g_cbs_mu
+    for (uint32_t i = 0; i < l->n; i++) { cbs_tally_ent *t = NULL;
+        for (uint32_t k = 0; k < g_cbs_tally_n && !t; k++) if (!strcmp(g_cbs_tally[k].key, l->e[i].key)) t = &g_cbs_tally[k];
+        if (!t) {
+            if (g_cbs_tally_n == g_cbs_tally_cap) { g_cbs_tally_cap = g_cbs_tally_cap ? g_cbs_tally_cap * 2 : 256; g_cbs_tally = realloc_or_die(g_cbs_tally, g_cbs_tally_cap * sizeof *g_cbs_tally, "the failed command buffers' shader counts"); }
+            t = &g_cbs_tally[g_cbs_tally_n++]; memcpy(t->key, l->e[i].key, CBS_KEY); t->failed = 0; }
+        t->failed++; t->runs = l->e[i].runs; }
+}
+static void cbs_report(const cbs_list *l, const char *where, uint64_t nth) {   // caller holds g_cbs_mu
+    uint32_t show = l->n < CBS_SHOW ? l->n : CBS_SHOW, rank = g_cbs_tally_n < CBS_RANK ? g_cbs_tally_n : CBS_RANK;
+    size_t room = (show + rank) * (CBS_KEY + 24) + 64; char *b = malloc(room), *e = b; if (!b) return;
+    *b = 0; for (uint32_t i = 0; i < show; i++) e += snprintf(e, room - (size_t)(e - b), "%s%s", i ? " " : "", l->e[i].key);
+    if (l->n > show) snprintf(e, room - (size_t)(e - b), " and %u more", l->n - show);
+    MLOG("[RED] game shaders of failed command buffer #%llu (%s): %u: %s", (unsigned long long)nth, where, l->n, l->n ? b : "none");
+    qsort(g_cbs_tally, g_cbs_tally_n, sizeof *g_cbs_tally, cbs_tally_cmp);
+    e = b; *b = 0; for (uint32_t i = 0; i < rank; i++) e += snprintf(e, room - (size_t)(e - b), "%s%s %u/%u", i ? ", " : "", g_cbs_tally[i].key, g_cbs_tally[i].failed, g_cbs_tally[i].runs);
+    MLOG("[RED] game shaders by failed/ran over %llu failed of %llu command buffers: %s", (unsigned long long)nth, (unsigned long long)g_cbs_serial - 1, rank ? b : "none");
+    free(b);
+}
+static void cbs_feedback(cbs_list *l, NSError *err, const char *where) {   // from a command buffer's feedback handler; owns l
+    if (err && l) { NSString *d = err.description;
+        if (![d containsString:@"InnocentVictim"] && ![d containsString:@"SubmissionsIgnored"]) {
+            pthread_mutex_lock(&g_cbs_mu);
+            uint64_t nth = ++g_cbs_failures;
+            cbs_tally_add(l);
+            if (nth <= CBS_REPORTS) cbs_report(l, where, nth);
+            pthread_mutex_unlock(&g_cbs_mu);
+        } }
+    free(l);
+}
 static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex);
-static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) { AP_B; int r = encode_args_(en, sh, nvn_stage, metal_vertex); AP_E(3); return r; }
+static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) { cbs_note(sh); AP_B; int r = encode_args_(en, sh, nvn_stage, metal_vertex); AP_E(3); return r; }
 static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) {
     if (nvn_stage == 1 && !metal_vertex && sh->has_alpha && atest_on()) at_bind(en);   // also for a shader without bindings
     if (nvn_stage == 1 && !metal_vertex && sh->has_logic && lop_on()) lo_bind(en);
     if (!sh->ae) return 1;
     args_sync_dirty();
-    if (!passdump() && !g_args_dirty[nvn_stage] && sh->ab_buf && sh->ab_pass == g_pass.serial && nvn_stage != 5 && !(sh->rf.drv_read[0] && sh->ab_binst != g_draw_binst) && !(sh->rf.pool && sh->ab_pgen != g_psnap_gen)) {
+    if (!passdump() && !g_args_dirty[nvn_stage] && sh->ab_buf && sh->ab_pass == g_pass.serial && nvn_stage != 5 && !(sh->rf.drv_read[0] && sh->ab_binst != g_draw_binst) && !((sh->rf.pool || sh->rf.htab) && sh->ab_pgen != g_psnap_gen)) {
         bind_args(en, nvn_stage, metal_vertex, sh->ab_buf, sh->ab_gpu, sh->ab_off, sh->rf.abi);
         g_stat_args_reuse++;
         return 1;
@@ -8243,7 +8381,8 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             USE((__bridge id<MTLBuffer>)mb, MTLResourceUsageRead);
         } else if (b->kind == NVN_RB_SAMPU && b->n) {   // the samplers of an array of handles in a uniform buffer: element k = the sampler ID of the handle at the array's base + 8k (see the textures below)
             for (int k = 0; k < b->n; k++) {   // only registered IDs are looked up: most elements are other data the shader never picks as a handle
-                int sid = ubo_samp_id(ubo_handle(nvn_stage, reg, b->off + 8 * k)); if (sid >= g_nsreg || !g_sreg_ok[sid]) sid = 0;
+                int sid = sampu_id(nvn_stage, b, k); if (sid >= g_nsreg || !g_sreg_ok[sid]) sid = 0;
+                if (bl && (sid || (b->soff && b->sreg == DMSH_SREG_C2 && !k))) PD("B %llu st%d sampu [%d] sid=%d%s", g_stat_pass, nvn_stage, k, sid, b->soff && b->sreg == DMSH_SREG_C2 ? " from c2" : "");
                 __unsafe_unretained id<MTLSamplerState> ss = sid ? (__bridge id<MTLSamplerState>)samp_fast(sid) : nil;
                 slots[aid + k] = sid && sid < g_nsreg && g_srid[sid] ? g_srid[sid] : dummy_samp_rid();
                 USE(ss ? ss : dummy_samp(), MTLResourceUsageRead);
@@ -8262,7 +8401,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             }
             if (!(sh->logged & 4)) { sh->logged |= 4; static int nlog; if (nlog++ < 32) MLOG("shader %s (stage %d): an array of %d handles in uniform slot %d, elements %#llx hold textures", sh->key, nvn_stage, b->n, reg, (unsigned long long)real); }
         } else if (b->kind == NVN_RB_SAMP || b->kind == NVN_RB_SAMPT || b->kind == NVN_RB_SAMPU || b->kind == NVN_RB_SAMPI) {   // SAMPT: the sampler part of a combined handle (texture ID | sampler ID << 20); SAMPU: the same, with the handle in a uniform buffer
-            int sid = b->kind == NVN_RB_SAMPU ? ubo_samp_id(ubo_bind_handle(nvn_stage, b)) :
+            int sid = b->kind == NVN_RB_SAMPU ? sampu_id(nvn_stage, b, -1) :
                       b->kind == NVN_RB_SAMPI ? (int)reg : b->kind == NVN_RB_SAMPT ? (reg < NTEX ? (int)(S.tex[nvn_stage][reg] >> 20) : 0) : reg < 128 ? (int)(S.samp[nvn_stage][reg] >> 20) : 0;   // SAMPI: a sampler ID the shader names as a constant
             __unsafe_unretained id<MTLSamplerState> ss = sid ? (__bridge id<MTLSamplerState>)samp_fast(sid) : nil;
             if (b->bw && ss && g_sview_w[sid]) {   // a twin (dmsh_build.py border_emu) of a sampler whose border colour Metal lacks: the shader corrects its samples
@@ -8347,6 +8486,11 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             slots[aid] = b->kind == NVN_RB_SAMPP ? pool_gpu(1, 0, 0, S.samp_base, &pb) : pool_gpu(0, b->dtt, b->dpf, S.tex_base, &pb);
             USE(pb, MTLResourceUsageRead);
             if (bl) PD("B %llu st%d %s pool base %d", g_stat_pass, nvn_stage, b->kind == NVN_RB_SAMPP ? "sampler" : "texture", b->kind == NVN_RB_SAMPP ? S.samp_base : S.tex_base);
+        } else if (b->kind == NVN_RB_TEXH || b->kind == NVN_RB_SAMPH) {   // a table of a uniform buffer's handles (see htab_gpu)
+            __unsafe_unretained id<MTLBuffer> pb = nil;
+            slots[aid] = htab_gpu(nvn_stage, b, &pb);
+            USE(pb, MTLResourceUsageRead);
+            if (bl) PD("B %llu st%d %s table of uniform slot %d +%#x", g_stat_pass, nvn_stage, b->kind == NVN_RB_SAMPH ? "sampler" : "texture", reg, b->off);
         } else if (b->kind == NVN_RB_TEXA) {   // an array of the driver table's handles that the shader indexes at run time (nvn_refl.h): element k = the texture of the c2 word at off + 8k
             uint64_t real = 0;                  // (elements past 63 are not in the log's mask)
             for (int k = 0; k < b->n; k++) {
@@ -10230,6 +10374,9 @@ void mtl_fb_stats(uint64_t *snaps, uint64_t *reused, uint64_t *tile, uint64_t *w
 // decals are bindless and write depth; taking every bindless shader as a depth reader ended the pass before each of them (about 30 passes a frame, each loading and storing four targets)
 static int fb_texu_reads(NvShader *fs, uint64_t ser) {
     for (int i = 0; i < fs->rf.nb; i++) { const nvn_rbind *b = &fs->rf.b[i]; if (b->kind == NVN_RB_TEXA) return 1;   // handles in a c2 table: not read here, so a bindless shader with one stays a reader (a TEXA-only shader is not one, as before)
+        if (b->kind == NVN_RB_TEXH) { __unsafe_unretained id<MTLBuffer> pb = nil; int hit = 0;   // a table of a uniform buffer's handles: its serials
+            os_unfair_lock_lock(&g_rmu); htab_gpu(1, b, &pb); for (uint32_t k = 0; k < g_htab_last->n && !hit; k++) hit = g_htab_last->ser[k] == ser; os_unfair_lock_unlock(&g_rmu);
+            if (hit) return 1; continue; }
         if (b->kind != NVN_RB_TEXU) continue;
         for (int k = 0; k < (b->n ? b->n : 1); k++) {
             int tid = ubo_tex_id(b->n ? ubo_handle(1, b->reg, b->off + 8 * k) : ubo_bind_handle(1, b));
@@ -11648,7 +11795,7 @@ static void copy_b2t(const p_copy_b2t *c) {
 
 // Texture copies a blit cannot do -- a format change, a scaled region or a mirrored one (MIRROR_X / MIRROR_Y) (Link's Awakening converts its 1408x792 RG11B10F scene to RGBA16F every frame; Super Mario 3D World scales 1920x1080 to 1280x720
 // when leaving the title): one render pass per layer that draws the source region into the destination region, nearest or (LINEAR_FILTER) bilinear. Float, unorm and sRGB formats only, 2D / 2D array,
-// destinations that can be render targets; anything else returns 0 and keeps the red line. Depth (Depth32Float / Depth32Float_Stencil8 into the same format) is drawn by writing depth from the fragment shader,
+// destinations that can be render targets; anything else returns 0 and keeps the red line. Depth (Depth32Float / Depth32Float_Stencil8 / Depth16Unorm into the same format; Kirby Air Riders halves a 4096x4096 Depth16Unorm shadow map) is drawn by writing depth from the fragment shader,
 // always nearest, and stencil is written from the fragment shader too ([[stencil]] export, read through an X32_Stencil8 view of the source). Link's Awakening halves its depth-stencil buffer twice
 // (1920x1080 → 960x540 → 480x270) and its depth-of-field mask pass only writes where stencil bit 1 is clear: with the stencil left as the new texture's undefined content, the mask kept its
 // clear value 1.0 (full blur) everywhere and the whole picture was out of focus. Without a stencil view the stencil is cleared to 0 instead
@@ -11665,7 +11812,7 @@ static int fmt_int_or_ds(MTLPixelFormat f) {
 static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds, const NVNcopyRegion *sr, const NVNcopyRegion *dr, int linear, int mirror) {
     static NSMutableDictionary<NSNumber *, id<MTLRenderPipelineState>> *pso; static id<MTLFunction> vf, ff, fd, fds; static id<MTLSamplerState> samp[2]; static id<MTL4ArgumentTable> at; static id<MTLDepthStencilState> dss, dss_s; static int failed;
     if (failed || sr->width <= 0 || sr->height <= 0 || dr->width <= 0 || dr->height <= 0) return 0;
-    int depth = (s.pixelFormat == MTLPixelFormatDepth32Float || s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) && d.pixelFormat == s.pixelFormat, stencil = depth && d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8;
+    int depth = (s.pixelFormat == MTLPixelFormatDepth32Float || s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 || s.pixelFormat == MTLPixelFormatDepth16Unorm) && d.pixelFormat == s.pixelFormat, stencil = depth && d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8;
     if (!depth && (fmt_int_or_ds(s.pixelFormat) || fmt_int_or_ds(d.pixelFormat))) return 0;
     if (mtl_fmt_block(d.pixelFormat) || !(d.usage & MTLTextureUsageRenderTarget) || s.sampleCount > 1 || d.sampleCount > 1) return 0;
     if (!pso) {
@@ -12085,11 +12232,13 @@ static void sub_cut(void) {
     uint64_t f = atomic_load(&g_cur_frame); gpu_tag_begin(f);
     uint32_t k = g_seg++; seg_clk *sc = NULL;   // reports encoded so far keep this segment's GPU times (seg_ts)
     if (seg_ts()) { if (!g_sclk) { g_sclk = calloc(1, sizeof *g_sclk); atomic_store(&g_sclk->refs, 1); } sc = g_sclk; atomic_fetch_add(&sc->refs, 1); }
+    cbs_list *cbs = cbs_take(); uint64_t cbs_fence = g_fence + 1;
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
         gpu_tag_done(f, cb.GPUStartTime, cb.GPUEndTime);
         if (sc) { if (k < SEG_CLK_N) { atomic_store(&sc->t[k][0], gpu_s_guest_ns(cb.GPUStartTime)); atomic_store(&sc->t[k][1], gpu_s_guest_ns(cb.GPUEndTime)); } seg_clk_put(sc); }
         if (cb.error) { atomic_store(&g_last_commit_error, 1); static int k; if (k++ < 8) MLOG("[RED] segment command buffer execution error: %s", cb.error.description.UTF8String); res_top_once(cb.error); }
+        char where[64]; snprintf(where, sizeof where, "fence %llu, segment %u", (unsigned long long)cbs_fence, k); cbs_feedback(cbs, cb.error, where);
     }];
     res_commit();
     [g_cb endCommandBuffer];
@@ -12795,15 +12944,28 @@ static id<MTLTexture> present_raw_src(id<MTLTexture> src) {
     if (!v) { RED_ONCE(69, "present: cannot create a non-sRGB view of the sRGB swapchain texture (format %lu); presenting the decoded values", (unsigned long)src.pixelFormat); return src; }
     return v;
 }
-// The rectangle of the canvas (dw x dh) the picture (cw x ch) is drawn into: the picture's aspect ratio kept and centred, black bars in the rest (no stretching when the screen's ratio
+// The rectangle of the canvas (dw x dh) the picture (pw x ph) is drawn into: the picture's aspect ratio kept and centred, black bars in the rest (no stretching when the screen's ratio
 // differs from the game's, e.g. iPhone about 19.5:9 against the game's 16:9); when the ratios differ by under 1 % (the remainder from a game width that is a multiple of 8 in the
 // full-screen setup, e.g. 1952x900 against 2868x1320 differs by 0.17 %) the whole canvas, leaving no border of a few pixels
-static MTLViewport present_viewport(double cw, double ch, double dw, double dh) {
-    double s = fmin(dw / cw, dh / ch);
-    MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
-    if (fabs((dw / dh) / (cw / ch) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
+static MTLViewport present_viewport(double pw, double ph, double dw, double dh) {
+    double s = fmin(dw / pw, dh / ph);
+    MTLViewport vp = {floor((dw - pw * s) / 2), floor((dh - ph * s) / 2), round(pw * s), round(ph * s), 0, 1};
+    if (fabs((dw / dh) / (pw / ph) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
     return vp;
 }
+// The shape the picture is shown in, whatever part of the texture it comes from. The Switch's compositor stretches a buffer's crop to the layer, so a crop only picks texels: Super
+// Mario Galaxy 2 draws its storybook cutscenes anamorphically into 1200x960 of a 1920x1080 swapchain (800x640 handheld). The layer fills the display, 16:9, unless the game sized it
+// (vi::CreateLayer with a size, hle_vi.c). A screen taller than 16:9 (DM_SCREEN_ASPECT, loader.c) counts only for a texture of its shape: only builds with screen-shape stubs render it.
+static _Atomic uint64_t g_layer_shape, g_screen_shape;   // w | h << 32, 0 = none
+void mtl_present_layer(uint32_t w, uint32_t h) { atomic_store(&g_layer_shape, (uint64_t)w | (uint64_t)h << 32); }
+void mtl_present_screen(uint32_t w, uint32_t h) { atomic_store(&g_screen_shape, (uint64_t)w | (uint64_t)h << 32); }
+static void present_shape(id<MTLTexture> src, double *w, double *h) {
+    uint64_t v = atomic_load(&g_screen_shape);
+    if (v && fabs(((double)src.width / src.height) / ((double)(uint32_t)v / (double)(v >> 32)) - 1) < 0.01) { *w = src.width; *h = src.height; return; }
+    v = atomic_load(&g_layer_shape);
+    *w = v ? (double)(uint32_t)v : 1920; *h = v ? (double)(v >> 32) : 1080;
+}
+static MTLViewport present_fit(id<MTLTexture> src, double dw, double dh) { double w, h; present_shape(src, &w, &h); return present_viewport(w, h, dw, dh); }
 // The valid source rectangle of a present (x, y, width, height; the crop of nvnWindowSetCrop, zero = the whole texture); 0 when it lies outside the texture
 static int present_crop_rect(id<MTLTexture> src, const int crop[4], NSUInteger r[4]) {
     r[0] = 0; r[1] = 0; r[2] = src.width; r[3] = src.height;
@@ -12824,7 +12986,7 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     present_pipeline(dst.pixelFormat);
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     double dw = dst.width, dh = dst.height;
-    MTLViewport vp = present_viewport(cw, ch, dw, dh);
+    MTLViewport vp = present_fit(src, dw, dh);
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
     static double last_vp[4];   // Log one line when the viewport changes (used by the real-device screen-level acceptance screen_check.py to check the aspect ratio)
     if (memcmp(last_vp, &vp, sizeof last_vp)) { memcpy(last_vp, &vp, sizeof last_vp);
@@ -13068,7 +13230,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     NSUInteger r[4]; if (!present_crop_rect(src, crop, r)) return 0;
     present_pipeline(dst.pixelFormat);
     double dw = dst.width, dh = dst.height;
-    MTLViewport vp = present_viewport(r[2], r[3], dw, dh);
+    MTLViewport vp = present_fit(src, dw, dh);
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
     id<MTLTexture> tex = present_raw_src(src), up = fx ? fx_encode(fx, cb, tex, r, vp, dst.pixelFormat, fx == &g_fx_present) : nil;
     if (up) { tex = up; r[0] = r[1] = 0; r[2] = up.width; r[3] = up.height; }   // the scaled picture, the viewport's size: drawn 1:1
@@ -13151,9 +13313,8 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if (!src) { RED_ONCE(8, "present texture could not get an MTLTexture"); return 0; }
     // The picture's shape for the front end's layout (front.h front_picture_shape): reported when its width / height changes by more than 0.1 %, not on a size change of the same
     // shape (1280x720 handheld, 1920x1080 docked)
-    { static double last; NSUInteger r[4];
-      if (present_crop_rect(src, crop, r) && r[2] && r[3]) { double a = (double)r[2] / r[3];
-          if (fabs(a - last) > last * 0.001) { last = a; MLOG("present: picture shape %lux%lu (%.3f:1) for the front end's layout", (unsigned long)r[2], (unsigned long)r[3], a); front_picture_shape((int)r[2], (int)r[3]); } } }
+    { static double last; double w, h; present_shape(src, &w, &h); double a = w / h;
+      if (fabs(a - last) > last * 0.001) { last = a; MLOG("present: picture shape %.0fx%.0f (%.3f:1) for the front end's layout", w, h, a); front_picture_shape((int)w, (int)h); } }
     // A texture made on first resolution joins the residency set (res_add), which a submission commits; a window texture presented before any submission has used it was still
     // outside the committed set when the display command buffer sampled it. Super Smash Bros. Ultimate presents its window texture in its first frames before drawing into it:
     // the display queue page-faulted (kIOGPUCommandBufferCallbackErrorPageFault) and macOS then ignored every later command buffer of the process, so the window stayed pink

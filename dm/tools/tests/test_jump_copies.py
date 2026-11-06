@@ -21,7 +21,7 @@ from nso_asm import ADRP, ADDI, ADDR, B, BEQ, BLR, BR, NOP
 tree = ast.parse((TOOLS / 'patch_nso.py').read_text())
 IMG = bytearray(0x5000); tabjumps = {}; jumps = {}   # the globals the recognizers read: the module image and the jump tables resolved so far in the function
 scope = {'re': re, 'struct': struct, 'ARM64_OP_IMM': ARM64_OP_IMM, 'IMG': IMG, 'tabjumps': tabjumps, 'jumps': jumps}
-exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'written_w', 'writes_reg', 'writes_reg_any', 'half_count', 'copied_base', 'table_base', 'table_cands', 'forward_table_base', 'check_before_copy', 'jump_offsets', 'jump_adr_offsets', 'jump_zero_extended', 'jump_masked_pred', 'jump_masked_not')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
+exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'written_w', 'writes_reg', 'null_base', 'writes_reg_any', 'half_count', 'copied_base', 'table_base', 'table_cands', 'forward_table_base', 'check_before_copy', 'jump_offsets', 'jump_adr_offsets', 'jump_zero_extended', 'jump_masked_pred', 'jump_masked_not')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
 
 
 def mov(dst, src, wide=True): return (0xaa0003e0 if wide else 0x2a0003e0) | src << 16 | dst
@@ -219,6 +219,35 @@ class IndexChangedAfterCheck(unittest.TestCase):
         md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
         ins = list(md.disasm(struct.pack('<' + 'I' * len(words), *words), 0))
         self.assertEqual(scope['jump_offsets'](ins, 8, copy_first=True), targets)
+
+
+class NullPageBase(unittest.TestCase):
+    """A write of a page-zero constant into the table base reaches no load of a working game: the walk for the base's writers goes past it (Cuphead 1.3.7 main+0x59dc90, issue #1532)"""
+    TABLE = 0x4040
+    TARGETS = [36 + i * 4 for i in range(5)]
+
+    def run_site(self, other, before_add=False):
+        # adrp/add x4; <other> (a block of another loop: <write of w4>; b exit); cmp w18,#4; b.hi; ldrsw x18,[x4,x18,lsl #2]; add x18,x18,x4; br x18
+        base = [ADRP(4, 0, self.TABLE), other, ADDI(4, 4, self.TABLE & 0xfff)] if before_add else [ADRP(4, 0, self.TABLE), ADDI(4, 4, self.TABLE & 0xfff), other]
+        words = base + [B(12, 36), 0x7100001f | 4 << 10 | 18 << 5, bhi(20, 36), 0xb8a07800 | 18 << 16 | 4 << 5 | 18, ADDR(18, 18, 4), BR(18)] + [RET] * 5
+        for i, target in enumerate(self.TARGETS): struct.pack_into('<i', IMG, self.TABLE + 4 * i, target - self.TABLE)
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
+        ins = list(md.disasm(struct.pack('<' + 'I' * len(words), *words), 0))
+        self.assertEqual(len(ins), len(words))
+        return scope['jump_offsets'](ins, 8)
+
+    def test_page_zero_constants_are_passed(self):
+        for word in (0x52800024, 0xd2800004, 0x2a1f03e4, 0x52800000 | 0xfec << 5 | 4):   # mov w4,#1; mov x4,#0; mov w4,wzr; mov w4,#0xfec (the 5 entries end at 0x1000)
+            with self.subTest(word=hex(word)):
+                self.assertEqual(self.run_site(word), self.TARGETS)
+
+    def test_other_writes_still_end_the_chain(self):
+        for word in (0x52800000 | 0xff0 << 5 | 4, 0x52840004, mov(4, 0, False), 0x12800004):   # mov w4,#0xff0 (past the page); mov w4,#0x2000; mov w4,w0; mov w4,#-1
+            with self.subTest(word=hex(word)):
+                self.assertIsNone(self.run_site(word))
+
+    def test_a_constant_the_add_reads_is_the_base(self):
+        self.assertIsNone(self.run_site(0x52800024, before_add=True))   # adrp x4; mov w4,#1; add x4,x4,#lo: the add builds the base from the 1
 
 
 class ForwardBase(unittest.TestCase):

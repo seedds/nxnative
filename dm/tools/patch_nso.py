@@ -247,6 +247,14 @@ def written_w(p):
 def writes_reg(p, reg):
     """Whether p changes the general-purpose register reg (xN or wN): a write of wN clears the upper half of xN too, and a compare only sets the flags"""
     return p.mnemonic not in ('cmp', 'cmn', 'tst') and 'w' + reg[1:] in written_w(p)
+def null_base(p, n):
+    """Whether p sets a table base to a constant inside page zero, so that a table load of n entries through it reads that page. Horizon never maps page zero, so the load would fault on the
+    console too: no path of a working game carries such a write to the load, and a walk back for the base's writer chain goes past it. Cuphead 1.3.7 main+0x59dc90 (Unity 2017.4) interleaves
+    four dispatch loops that share registers: x12 is the base of one (adrp + add at +0x59dba4) and the constant 1 of another (mov w12,#1 at +0x59dbdc, whose block leaves by b to its own
+    dispatch), kept apart only by the value of w8. Since the walks see a write of wN (e5620b1a), that mov ended the chain and the site stopped at the jump table assertion (issue #1532)"""
+    if p.mnemonic != 'mov' or len(p.operands) != 2: return False
+    v = 0 if p.op_str.endswith(('wzr', 'xzr')) else p.operands[1].imm if p.operands[1].type == ARM64_OP_IMM else None
+    return v is not None and 0 <= v and v + 4 * n <= 0x1000
 def writes_reg_any(p, regs):
     """writes_reg for a set of wN names"""
     return p.mnemonic not in ('cmp', 'cmn', 'tst') and bool(written_w(p) & regs)
@@ -800,6 +808,7 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
     k = insl.index(ld); lo = page = None
     for p in reversed(insl[max(0, k - 256):k]):   # the writer chain of the table base
         if not writes_reg(p, rb): continue
+        if lo is None and null_base(p, n): continue   # page zero as the base: it reaches no load of a working game
         if lo is None and p.mnemonic == 'add' and re.fullmatch(rf'{rb}, {rb}, #(0x[0-9a-f]+|\d+)', p.op_str): lo = int(p.op_str.split('#')[1], 0); continue
         if lo is not None and p.mnemonic == 'adrp' and p.op_str.startswith(rb + ','): page = p.operands[1].imm
         break

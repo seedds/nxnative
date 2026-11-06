@@ -128,6 +128,14 @@ To enroll a cut for any game's own module:
 - **Found on:** [Blasphemous](../../dm/games/0100698009C6E000/README.md), `main+0xae95f8`, ten table-relative targets.
 - **Check:** `dm/tools/tests/test_jump_copies.py` covers the exact table extent, base clobbers, incoming edges, undecodable targets and out-of-image tables. The extracted function resolves to the ten targets read directly from its table.
 
+### A table base register that another loop holds a small constant in
+
+- **Symptom:** `AssertionError: jump table 59dc90` in `patch_nso.py` on Cuphead 1.3.7 `main`, a build its profile names, since e5620b1a.
+- **Cause:** the function interleaves four dispatch loops that share registers. `x12` is the base of one (`adrp x12` + `add x12,x12,#0xa54` at `+0x59dba4`) and the constant 1 of another (`mov w12,#1` at `+0x59dbdc`, in a block that leaves by `b` to its own dispatch); only the value of `w8` keeps the paths apart. `jump_offsets` walks the base's writers back in address order. Since e5620b1a it sees a write of `wN` as a write of the base (correctly), so the walk met the `mov` first and gave up, and no later form takes the site.
+- **Fix:** general (`patch_nso.py` `null_base`): before the walk has found the base's `add`, a write of a constant that puts the table inside page zero (`mov` of an immediate or of `wzr` / `xzr`, the constant plus 4 bytes an entry at most 0x1000) is passed. Horizon never maps page zero, so the load would fault through that value on the console too: no path of a working game carries it to the load. Any other writer still ends the chain, and a constant between the `adrp` and the `add` is the base's own input.
+- **Found on:** [Cuphead](../../dm/games/0100A5C00D162000/README.md) 1.3.7 `main+0x59dc90` (GitHub issue #1532). Its ten targets are instructions of the function, and three of them are the same as those of the two sibling tables in `x15` and `x17` that the rewriter already took.
+- **Check:** `dm/tools/tests/test_jump_copies.py` `NullPageBase` (fails on the rewriter before). The other modules on hand rewrite byte-identically.
+
 ### Offset tables relative to an adr
 
 - **Symptom:** `jump table <addr>` assertion, entries relative to an `adr`.

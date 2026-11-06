@@ -217,6 +217,23 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, context.ConditionalSelect(APred(context, x, 87, 90), AFloat(context, a), AFloat(context, b)));
         }
 
+        // The angle in radians of an argument in turns, from its fraction alone: NVIDIA reduces the turns exactly, while 2pi x in 32 bits loses x's fraction as x grows
+        // (an animation's sin(time * speed) drifted by 1e-4 after a few thousand turns). An infinity gives inf - inf = NaN, as MUFU.SIN / COS of an infinity does
+        private static Operand ATurns(EmitterContext context, Operand x)
+        {
+            return context.FPMultiply(context.FPSubtract(x, context.FPFloor(x)), ConstF(2f * MathF.PI));
+        }
+
+        // MUFU.TANH (op 9, sm_75 and later; nvdisasm names it): 1 - 2 / (e^2x + 1), which gives +-1 at either end and keeps a NaN; below 2^-10 x itself (tanh x = x - x^3 / 3,
+        // closer than the formula's cancellation there). PTX documents tanh.approx.f32 to about 2^-11 relative error
+        private static Operand ATanh(EmitterContext context, Operand x)
+        {
+            Operand e = context.FPExponentB2(context.FPMultiply(x, ConstF(2f * 1.44269504f)));
+            Operand t = context.FPSubtract(ConstF(1f), context.FPDivide(ConstF(2f), context.FPAdd(e, ConstF(1f))));
+
+            return context.ConditionalSelect(context.FPCompareLess(context.FPAbsolute(x), ConstF(0.0009765625f)), x, t);
+        }
+
         public static void AMufu(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
@@ -234,8 +251,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             res = x.Bits(74, 80) switch
             {
-                0 => context.FPCosine(context.FPMultiply(res, ConstF(2f * MathF.PI))),   // Volta and later: the argument is in turns (the compiler multiplies by 1 / 2pi first,
-                1 => context.FPSine(context.FPMultiply(res, ConstF(2f * MathF.PI))),     // NAK lowers fsin / fcos the same way); Maxwell's came through RRO instead
+                0 => context.FPCosine(ATurns(context, res)),   // Volta and later: the argument is in turns (the compiler multiplies by 1 / 2pi first,
+                1 => context.FPSine(ATurns(context, res)),     // NAK lowers fsin / fcos the same way); Maxwell's came through RRO instead
                 2 => context.FPExponentB2(res),
                 3 => context.FPLogarithmB2(res),
                 4 => context.FPReciprocal(res),
@@ -243,6 +260,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 6 => context.UnpackDouble2x32High(context.FPReciprocal(context.PackDouble2x32(Const(0), res), Instruction.FP64)),
                 7 => context.UnpackDouble2x32High(context.FPReciprocalSquareRoot(context.PackDouble2x32(Const(0), res), Instruction.FP64)),
                 8 => context.FPSquareRoot(res),
+                9 => ATanh(context, res),
                 int op => throw AFail(context, $"MUFU op {op}"),
             };
 

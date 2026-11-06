@@ -1124,6 +1124,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md): 10,177 instructions in 7,590 programs. The fix made no visible difference in its tutorial area.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
 
+### MUFU.SIN / COS argument reduction, and MUFU.TANH
+
+- **Symptom:** a periodic effect that drifts as its argument grows (an animation's `sin(time * speed)` off by about 1e-4 after a few thousand turns); a shader with `MUFU.TANH` refused (`MUFU op 9`).
+- **Cause:** since sm_70 MUFU.SIN and COS take turns, which NVIDIA reduces exactly. The translator multiplied the turns by 2pi in 32 bits, losing their fraction as they grew. Op 9 of MUFU is TANH (nvdisasm, sm_75 and later), not handled.
+- **Fix:** `ATurns` in `InstEmitAmpereAlu.cs` takes the angle from `x - floor(x)` (exact in 32 bits); `ATanh` computes `1 - 2 / (e^2x + 1)`, and `x` itself below 2^-10.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`MufuTurns`: the three fail on `main`). A GPU cross-check of 1,500 MUFU against `sin(2pi frac x)` and the other functions in double precision, with tolerances from PTX's `.approx` error bounds: 42 mismatches and 69 refusals (TANH) to 7-11, which are the sine / cosine of an infinity (0 instead of NaN: Metal's fast math) and EX2 results below 2^-126 (flushed by the GPU).
+- **Found on:** cross-checking the translator against nvdisasm and a reference interpreter; no game run.
+
 ### A guarded load whose destination is its address
 
 - **Symptom:** none in the log: everything drawn with an engine's scene data lands on the first instance's transform, or at nothing. In the MSL, a bounds-checked read has a constant index (`vp_s2._m0[0]`) just after a comparison of the register it should use.

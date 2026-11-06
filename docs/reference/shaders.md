@@ -569,10 +569,10 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ### Program keys computed inside `nvnProgramSetShaders`
 
-- **Symptom:** shaders reported missing at random, and their dumped control sections are garbage (Unity).
-- **Cause:** NVN lets the caller free a program's control section once `nvnProgramSetShaders` returns; Unity does, and the host used to hash it at the first draw, so keys computed later hashed freed memory.
-- **Fix:** the keys are now computed inside `SetShaders` (`hle_nvn.c` `prog_key`). Mario calls `SetShaders` for some programs with a code address that is not mapped yet, so a stage whose code is not in a registered memory pool at that moment is hashed at its first draw, as before.
-- **Found on:** [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md) and Unity games in general (the source names no other); [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (the unmapped code addresses).
+- **Symptom:** shaders reported missing at random, and their dumped control sections are garbage (Unity). Also: about 130 `[RED] shader … is not in the shader map` keys a boot, nearly all different from run to run, all single-stage programs, with `program has no vertex shader`, and every frame the same picture of grey noise; with `DM_NVN_SHDUMP` set the game draws correctly.
+- **Cause:** NVN lets the caller free a program's control section once `nvnProgramSetShaders` returns; Unity does, and the host used to hash it at the first draw, so keys computed later hashed freed memory. The keys were then computed in `SetShaders` but kept by the NVNprogram's address, and Unity 2018.4 copies an NVNprogram after `SetShaders` and draws with the copy: the copy had no keys at its address, so its stages were hashed at the first draw again, from the freed section. `DM_NVN_SHDUMP` hid it, as it points every stage at a host copy of its section.
+- **Fix:** the keys are computed inside `SetShaders` (`hle_nvn.c` `prog_key`) and belong to the program's serial, which a copy carries; the address table only caches the lookup. A serial's record stays as long as the process (a copy can outlive the program it was made from). Mario calls `SetShaders` for some programs with a code address that is not mapped yet, so a stage whose code is not in a registered memory pool at that moment is hashed at its first draw, from a host copy of its control section that `SetShaders` keeps.
+- **Found on:** [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md) and Unity games in general (the source names no other); [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (the unmapped code addresses); Ori and the Will of the Wisps (`01008DD013200000`, Unity 2018.4.24f1, 1.2.1: the program copies, 135 stages a boot; no profile yet).
 
 ### Control sections shared among shaders that differ only in their compile information
 

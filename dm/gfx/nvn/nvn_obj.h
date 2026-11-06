@@ -284,3 +284,5 @@ void mtl_prog_forget(const prog_t *p);   // program finalize, submit lock held: 
 uint64_t nvn_new_serial(void);
 // Serials handed out from now on are above s (dm/gfx/tests/nvn_replay.m: the objects of a capture keep the live run's serials)
 void nvn_serial_floor(uint64_t s);
+uint64_t mtl_pkg_copy_absorbs(void);
+int nvn_tex_level_range(const tex_t *t, unsigned level, unsigned layer, uint64_t *lo, uint64_t *hi);

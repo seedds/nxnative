@@ -20,9 +20,8 @@ static uint8_t *test_section(const struct mach_header_64 *mh, const char *seg, c
 #define getsectiondata test_section
 #include "../hle.c"
 #include "../loader.c"
+void mtl_present_screen(uint32_t w, uint32_t h) { (void)w; (void)h; }   // loader.c: a screen taller than 16:9; no renderer here
 #undef getsectiondata
-
-void mtl_present_screen(uint32_t w, uint32_t h) { (void)w; (void)h; }   // symbol-index tests have no display
 
 struct dm_flags g_flag;
 uint64_t unimpl_stubs[MAX_STUB];

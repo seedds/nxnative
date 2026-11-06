@@ -284,8 +284,7 @@ static void res_check(id r, const char *what, int reg) {
 }
 // GPU memory guard. GPU memory is wired, and the driver refuses to wire past Metal's working set (recommendedMaxWorkingSetSize: IOGPUScheduler freeToWireMemory fails there). The submit thread
 // then waits in the kernel, where nothing can kill the process: GitHub issue #1326 ended with a Mac frozen until the power button, PR #1319's 8 GB Mac with WindowServer's watchdog. So every commit
-// of the residency set looks first. The set's own allocatedSize counts only what was committed; the device's currentAllocatedSize counts a resource from its creation, so it is the one that sees a
-// burst before the driver does. From about 80% of the working set the submit thread lets go of what can go (guard_evict); from about 95%, if that was not enough, the game stops: a [RED] line says
+// of the residency set looks first, by the set's own allocatedSize, which counts what has been committed. From about 80% of the working set the submit thread lets go of what can go (guard_evict); from about 95%, if that was not enough, the game stops: a [RED] line says
 // what the set holds and the front end leaves full screen and quits (front_gpu_memory_stop). A commit that adds to the set past the working set itself is not made at all. Callers of res_commit
 // can hold g_mu, so it only reads the sizes and leaves a level for the submit thread (guard_act). A stuck submit thread never comes back to look, so a 100 ms timer reads them too (guard_tick).
 // DM_NVN_RES_LIMIT_MB: =<MB> stops at that size instead (a low one tests this), =0 turns the guard off. On iOS the system ends a process for its footprint long before this, and no front end has
@@ -295,7 +294,8 @@ static struct { uint64_t evict, stop, wall; } g_guard;   // bytes, all 0 with th
 static _Atomic int g_guard_lv;   // the highest level met since the submit thread last looked (guard_act)
 static _Atomic uint64_t g_guard_set;   // the residency set's size at the last commit: the timer does not read the set, whose lock a stuck commit holds
 static int guard_level(uint64_t used) { return !g_guard.stop ? GUARD_OK : used >= g_guard.wall ? GUARD_WALL : used >= g_guard.stop ? GUARD_STOP : used >= g_guard.evict ? GUARD_EVICT : GUARD_OK; }
-static uint64_t guard_used(uint64_t set) { return MAX(set, (uint64_t)g_dev.currentAllocatedSize); }
+// The set's own size: currentAllocatedSize counts each no-copy buffer in full however many cover the same pages
+static uint64_t guard_used(uint64_t set) { return set; }
 static void guard_raise(int lv) { int cur = atomic_load(&g_guard_lv); while (lv > cur && !atomic_compare_exchange_weak(&g_guard_lv, &cur, lv)) {} }
 static void guard_act(uint64_t fence);
 static void res_commit(void) {

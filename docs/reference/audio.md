@@ -349,6 +349,13 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Fix:** `hle_codec.c` keeps the manager in host state (its pointer in that first word) and decodes with the `sdk`'s software `OpusDecoder`: Enqueue queues the packet and takes an I/O buffer, Execute decodes every waiting packet on the caller's thread and signals the event, Dequeue hands back a frame and its buffer. So a request is never "executing". A packet the decoder refuses completes as 20 ms of silence, with a red line. `ResetHardwareOpusDecoder` and `FinalizeHardwareOpusDecoder` serve both interfaces.
 - **Found on:** Xenoblade Chronicles 2, Nintendo Switch 2 Edition (`0400E95004038001`) (SDK 21.4.4: a mono manager of 128 decoders and 255 I/O buffers, a stereo one of 72 and 160, 48 kHz, 20 ms frames); [Star Fox](../../dm/games/0400E88025B1A000/README.md) (the same figures).
 
+### One key for the two forms of the Opus decoder
+
+- **Symptom:** `CRASH sig=11 addr=0` in `h_codec_HwOpusFini`, the first time the game finalizes a decoder.
+- **Cause:** the older interface keeps the software state in `objmap` under the game's decoder object, and SDK 21's manager form its own record under the same key. `opus_mgr_dec_fini` told them apart by a field at +0x10, 0 in the software state as far as Star Fox had shown, but the work buffer's size in this one. It read the state as a record, so a pointer in it became the manager.
+- **Fix:** a manager's decoder is kept under the object + 1 (`OPUS_MGR_KEY`), so the look-up itself says which form it is; `GetHardwareOpusDecoderSampleRate` and `ChannelCount` now also read a manager's decoder correctly.
+- **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md) (SDK 20.5.26, 48 kHz stereo, the older form).
+
 ## Timing and catch-up
 
 ### At least one rendered frame between two updates

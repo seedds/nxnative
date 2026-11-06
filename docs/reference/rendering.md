@@ -1012,6 +1012,19 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** `t_image_primitive_id` draws four full-screen triangles that store into the layer of their primitive ID through the host's draw path (an attachment-less pass, a metallib loaded as game shaders are). Each of the four layers holds its own primitive's value; without the flag, layers 1 to 3 stay empty (macOS 27.0.1, M3 Pro). `test_pso_offline.py` checks that such a pair is left out.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): `b6726be4afc44691`.
 
+### A specialization descriptor iOS 26.0 returns autoreleased
+
+- **Symptom:** with Metal 4 pipelines on (`DM_PSO_MTL4=1`), the iOS app crashes before its first frame, right after `pipeline prewarm list … lines`: `CRASH sig=11 pc=objc_release+0x10`, `bt: objc_autoreleasePoolPop warm_task __warm_prepare_block_invoke`, on several prepare workers at once. The Mac runs the same pipelines.
+- **Cause:** `newRenderPipelineDescriptorForSpecialization` promises a +1 object by its name, so ARC releases it once at the end of `pso_build_ex`. On iOS 26.0 (23A341) the driver returns it autoreleased. On an iPad Pro M4 the method is `-[AGXG16GFamilyRenderPipeline newRenderPipelineDescriptorForSpecialization]` in `AGXMetalG16G_B0`. So ARC's release freed it, and the warm task's pool released it again. Under LLDB on the iPad:
+  - the descriptor sits in the autorelease pool when the call returns (`_objc_autoreleasePoolPrint`);
+  - `NSZombieEnabled=YES` reports `-[MTL4RenderPipelineDescriptor release]: message sent to deallocated instance`.
+  That one release freed it, so the driver keeps no reference of its own. macOS 27.0 (26A428, M4 Pro) returns it retained. There, the direct call made the same prewarm's 34 specializations without a crash.
+- **Fix:** `spec_desc` (`nvn_mtl.m`) finds out on its first call how the driver returns the descriptor. A weak reference survives the call's own autorelease pool only if the caller owns the descriptor. After that it takes the descriptor the way the driver gives it, so the caller owns exactly one reference either way. The answer holds for the process: every base comes from the one device's compiler or its archives. The `pipeline bases so far` line names it: `their descriptors returned retained` or `returned autoreleased`. `t_pso_stall` specializes through it too.
+- **Check:** `make -C dm/gfx/tests GAME=01005CA01580E000 check_t_pso_archive` runs `spec_desc` against two stand-in bases, one that returns the descriptor retained and one that returns it autoreleased. On the first call and on later ones, the descriptor outlives every pool and is freed once dropped. The previous direct call dies on the autoreleased stand-in. Axiom Verge with `DM_PSO_MTL4=1`:
+  - on the iPad, it crashed on every start before the fix. Now it runs at 60 fps: the cold start compiled 18 bases and made 25 specializations, and later starts take the bases from the archive. The log says `returned autoreleased`;
+  - on the Mac, it says `returned retained`.
+- **Found on:** Axiom Verge 1.0.3 (`0100052004384000`, its profile a separate change) with the launcher's **Metal 4 pipelines** on: an iPhone 16 Pro Max (iOS 26.0, LiveContainer) and an iPad Pro 11-inch (M4, iPadOS 26.0, from Xcode and in LiveContainer) crashed the same way.
+
 ### NVN2's DLSS on MetalFX
 
 - **Symptom:** a Switch 2 game calls `nvnCommandBufferEvaluateDlss` and its builder functions, which the host did not have.

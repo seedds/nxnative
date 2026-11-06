@@ -74,6 +74,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Pairing:** control sections are shared between programs, so pair by entry, never by searching for code near a control.
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (BAHS version 9).
 
+### A control section's words read as a BAHS entry
+
+- **Symptom:** the shader build fails one agl or terrain shader no run ever asks for, with `Ampere instruction 481 at 0x0 (000000000000000000000000020c0481) is not implemented` (a vertex shader's SPH read as an instruction); in the map, a shader whose control stage disagrees with its code (a compute control with a vertex SPH, a pixel control with a vertex SPH) and whose stored control section is longer than the file's real ones (0x200, 0x1100, 0x1400 against 0xe0). Also: no `pso_pairs.tsv` rows from a file whose lowest such entry hides its binary array.
+- **Cause:** `bahs_shaders` finds the entries by scanning the table area 4 bytes at a time. An NVN2 control section's +0x38..+0x47 (instruction length, c1 start and end, code length: `L, 0, L, L`) reads as an entry `{code offset L, 0, control size L, control L bytes on}`. When L is a multiple of 0x100 and a later program's control section lies L bytes on, every check passes: the shader pairs that control with whatever code lies at L in the code region. `bahs_variations` finds the binary array at the lowest entry taken minus 0x18, so such an entry below the real ones also hid that file's variation pairs.
+- **Fix:** an entry that lies inside a control section another entry names, measured by that section's own length (`ctl_len`, 0x48 key bytes for NVN2) rather than the length an entry claims, is dropped. Whether a false entry's section is genuine does not matter, as its first 0x48 bytes are a real control section.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): six such shaders in `agl_common`, `agl_technique`, `agl_technique_pfx` and `tera_common`, none of them ever loaded; one failed the build. `tera_common` gave 175 variation pairs once its false entry was gone. [Splatoon Raiders](../../dm/games/0400380020056000/README.md)' map holds the same three agl keys (`68bbe98b3bfd9876`, `18be578dfdaaffa0`, `7a4936fccf82094e`); it, Mario Kart World and Donkey Kong Bananza need their tables split again.
+- **Check:** `dm/tools/tests/test_split_bahs_entries.py` (two programs and the false entry between them, taken on `main`).
+
 ### Zstd files recognised by their magic
 
 - **Symptom:** `shader_split.py` finds 0 shaders in a RomFS of zstd files named `.zst`.
@@ -709,6 +717,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md#files-and-shaders), [issue #276](https://github.com/seedds/nxnative/issues/276): the float body of `alRenderMaterialUber` (fragment `007d7e411ef14ebd`, 16,227 `if`s in one function) took 24.6 minutes and 17.3 MB of `g13s` code at `-O2`, 31 s and 1.3 MB at `-O1`. Its `-O1` graph still goes past the budget (642), at that small cost.
 - **Check:** random samples of archive bases from seven games (Odyssey, Tears of the Kingdom, Breath of the Wild, Kirby, Luigi's Mansion 3, Wonder, Pikmin 4; 22 to 400 each) compile at `-O1` to vertex and fragment code within a few percent of `-O2` (Odyssey 400 bases: −0.9% / +0.01%; TotK: +0.1% / −1.0%; Kirby: −3.1% / +0.07%), with no `Max Unstruct ID` note at either level, and the front end is faster. Odyssey's full `g13s` archive of 32,864 bases builds in 15.6 minutes (exit 0); its Cap Kingdom frames 4,200 to 6,600 match `-O2` except for scattered differences of at most 3 of 255 in three of nine frames, and their GPU time per frame (`DM_NVN_GPUPROF=every:150`, three runs each on an M-series `g18g`) has medians of 4.76 to 5.05 ms at `-O1` and 4.75 to 4.83 ms at `-O2`, within run-to-run noise.
 
+### Bracket nesting past the front end's 256
+
+- **Symptom:** the shader build prints `fatal error: bracket nesting level exceeded maximum of 256` and `<key>.metal: does not compile`, and the shader is left out.
+- **Cause:** a translated expression nests deeper than the Metal front end's default limit of 256 brackets. Ocarina of Time's compute shaders `1f78730053feb036` and `e172bd7ec218ab8e` (3.5 MB of MSL each) reach 259.
+- **Fix:** every library compile passes `-fbracket-depth=1024` (`dmsh_build.py` `METAL_DEPTH`, `ios_metal.py` `DEPTH`). A source within the old limit compiles to the same bytes with the flag, on macOS and iOS. Like the precompiled header, the flag is not in the compile records, so the Metal cache keeps every library already compiled.
+- **Found on:** Ocarina of Time (Switch 2, `0400486024DEC000`, PR #1299); both shaders now compile.
+- **Check:** `test_shader_pch.py` (`BracketDepth`: 300 nested brackets fail without the flag and compile with it, the test shaders' bytes are unchanged, and both builds take the same depth).
+
 ### min, max and clamp with a NaN operand
 
 - **Symptom:** the half of Mario facing the camera's left was white (GitHub issue 72, on an iPhone).
@@ -1123,6 +1139,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `AHfma2` in `InstEmitAmpereAlu.cs`. The lane order comes from Eden-NS2's fix (checked there against Switch 2 footage), not from a shader that proves it here.
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md): 10,177 instructions in 7,590 programs. The fix made no visible difference in its tutorial area.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
+
+### Global memory: descriptors, ATOMG.CAS, INC / DEC
+
+- **Symptom:** a global load, store or atomic at the wrong address in code that uses `desc[URb][Ra.64]` (the descriptor's value added to the address); a shader with `ATOMG.CAS` refused (`Ampere instruction 3a9 ... is not implemented`); an `ATOMG.INC` / `ATOMG.DEC` / `RED.INC` / `RED.DEC` with no effect.
+- **Cause:** `AGlobalAddress` added the uniform register in every uniform form. nvdisasm (sm_86) names two forms: `[Ra.64+URb]`, where URb is part of the address, and `desc[URb][Ra.64]` (bit 76 of LDG / STG, bit 71 of ATOMG / RED), where it is a memory descriptor (the compiler's cache policy) and the address is Ra.64 alone. Unreal Engine 5.4's bounded read (`LDG.!P0 R5, [R5 + UR4]`, `GuardedWrites`) is the first form and is unchanged. Opcode 0x3a9 was not registered; INC and DEC have no case in `EmitAtomicOp`.
+- **Fix:** `AGlobalAddress` takes the form's descriptor bit; `AAtomgCas` (0x3a9, 32 bits: Rb expected, Rc at 64 the new value, the old value returned); `AGlobalIncDec`, a compare-and-swap loop as ATOMS's, for ATOMG and RED.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`GlobalMemory`: the three fail on `main`). A GPU cross-check of 300 LDG / STG / ATOMG / RED from an nvdisasm-validated corpus (sm_86 and sm_80 compiled code), as one-thread compute shaders through a gmem_map the harness builds as the host does (`dmsh_abi.h` `DMSH_GMEM_MAP_*`), production options: 135 identical to 300. Which forms NVN's compiler emits for games is not known here: the descriptor form is CUDA's usual one, and no game note in this repository shows it.
+- **Found on:** cross-checking the translator against nvdisasm and a reference interpreter; no game run.
 
 ### A guarded load whose destination is its address
 

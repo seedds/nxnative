@@ -29,6 +29,7 @@ Ranking: nest estimate, with an unbounded loop counted as UNBOUNDED_RANK (below 
 memory is what every list walk does; the 2D nest clamped only to the viewport is the runaway shape), then atomics in the body.
 """
 import re, struct, time, bisect
+from typing import Any, cast
 
 NO_DEADLINE = float('inf')
 
@@ -85,55 +86,55 @@ _BIN = [('||',), ('&&',), ('|',), ('^',), ('&',), ('==', '!='), ('<', '<=', '>',
 
 
 class _P:
-    def __init__(s, toks): s.t = toks; s.i = 0
+    def __init__(self, toks): self.t = toks; self.i = 0
 
-    def peek(s): return s.t[s.i] if s.i < len(s.t) else ('end', None)
+    def peek(self): return self.t[self.i] if self.i < len(self.t) else ('end', None)
 
-    def eat(s, v=None):
-        t = s.peek()
+    def eat(self, v=None):
+        t = self.peek()
         if v is not None and t != ('op', v): raise ValueError(f'expected {v}, got {t}')
-        s.i += 1; return t
+        self.i += 1; return t
 
-    def expr(s):
-        c = s.binary(0)
-        if s.peek() == ('op', '?'):
-            s.eat(); a = s.expr(); s.eat(':'); b = s.expr(); return ('tern', c, a, b)
+    def expr(self):
+        c = self.binary(0)
+        if self.peek() == ('op', '?'):
+            self.eat(); a = self.expr(); self.eat(':'); b = self.expr(); return ('tern', c, a, b)
         return c
 
-    def binary(s, lv):
-        if lv == len(_BIN): return s.unary()
-        a = s.binary(lv + 1)
-        while s.peek()[0] == 'op' and s.peek()[1] in _BIN[lv]:
-            op = s.eat()[1]; b = s.binary(lv + 1); a = ('bin', op, a, b)
+    def binary(self, lv):
+        if lv == len(_BIN): return self.unary()
+        a = self.binary(lv + 1)
+        while self.peek()[0] == 'op' and self.peek()[1] in _BIN[lv]:
+            op = self.eat()[1]; b = self.binary(lv + 1); a = ('bin', op, a, b)
         return a
 
-    def unary(s):
-        t = s.peek()
+    def unary(self):
+        t = self.peek()
         if t[0] == 'op' and t[1] in ('-', '!', '~', '*', '&', '+'):
-            s.eat(); return ('un', t[1], s.unary())
-        return s.postfix(s.primary())
+            self.eat(); return ('un', t[1], self.unary())
+        return self.postfix(self.primary())
 
-    def primary(s):
-        t = s.eat()
+    def primary(self):
+        t = self.eat()
         if t[0] == 'num': return ('num', t[1])
         if t[0] == 'id': return ('id', t[1])
         if t == ('op', '('):
-            e = s.expr(); s.eat(')'); return e
+            e = self.expr(); self.eat(')'); return e
         raise ValueError(f'unexpected {t}')
 
-    def postfix(s, e):
+    def postfix(self, e):
         while True:
-            t = s.peek()
+            t = self.peek()
             if t == ('op', '('):
-                s.eat(); args = []
-                if s.peek() != ('op', ')'):
-                    args.append(s.expr())
-                    while s.peek() == ('op', ','): s.eat(); args.append(s.expr())
-                s.eat(')'); e = ('call', e, args)
+                self.eat(); args = []
+                if self.peek() != ('op', ')'):
+                    args.append(self.expr())
+                    while self.peek() == ('op', ','): self.eat(); args.append(self.expr())
+                self.eat(')'); e = ('call', e, args)
             elif t == ('op', '['):
-                s.eat(); ix = s.expr(); s.eat(']'); e = ('idx', e, ix)
+                self.eat(); ix = self.expr(); self.eat(']'); e = ('idx', e, ix)
             elif t in (('op', '.'), ('op', '->')):
-                s.eat(); f = s.eat(); e = ('mem', e, f[1])
+                self.eat(); f = self.eat(); e = ('mem', e, f[1])
             else: return e
 
 
@@ -173,106 +174,106 @@ _CASTS = {'int', 'uint', 'float', 'half', 'short', 'ushort', 'char', 'uchar', 'l
 
 class Func:
     """one function: its assignments (name -> rhs list), threadgroup arrays, the helpers that read memory"""
-    def __init__(s, body, tg, data_helpers, deadline=NO_DEADLINE):
-        s.body = body; s.tg = tg; s.dh = data_helpers
-        s.asg = _assigns(body)
-        s.defs = {}
-        s.at = {}; s.pos = [p for l, r, p in s.asg]   # by name: (rhs, position) in source order; positions (sorted) for slicing a loop's assignments
-        for l, r, p in s.asg: s.at.setdefault(l, []).append((r, p))
-        for l, r, p in s.asg: s.defs.setdefault(l, []).append(r)
-        s.src_memo = {}; s.ub_memo = {}; s.z_memo = {}; s.deadline = deadline
-        s.types = {n: t for t, n in re.findall(r'\b(int|uint|float|bool|half)\s+(_\w+)\s*=', body)}
-        s.tg_re = re.compile(r'\b(?:' + '|'.join(map(re.escape, sorted(tg))) + r')\[') if tg else None
+    def __init__(self, body, tg, data_helpers, deadline=NO_DEADLINE):
+        self.body = body; self.tg = tg; self.dh = data_helpers
+        self.asg = _assigns(body)
+        self.defs = {}
+        self.at = {}; self.pos = [p for l, r, p in self.asg]   # by name: (rhs, position) in source order; positions (sorted) for slicing a loop's assignments
+        for l, r, p in self.asg: self.at.setdefault(l, []).append((r, p))
+        for l, r, p in self.asg: self.defs.setdefault(l, []).append(r)
+        self.src_memo = {}; self.ub_memo = {}; self.z_memo = {}; self.deadline = deadline
+        self.types = {n: t for t, n in re.findall(r'\b(int|uint|float|bool|half)\s+(_\w+)\s*=', body)}
+        self.tg_re = re.compile(r'\b(?:' + '|'.join(map(re.escape, sorted(tg))) + r')\[') if tg else None
 
-    def kinds_of_text(s, r):
+    def kinds_of_text(self, r):
         k = set()
         if _DEVRD.search(r): k.add('dev')
         if _DEVAT.search(r): k.add('atomic')
         if _IMGRD.search(r) or _IMGAT.search(r): k.add('img')
-        if s.tg_re is not None and s.tg_re.search(r): k.add('shared')
+        if self.tg_re is not None and self.tg_re.search(r): k.add('shared')
         if 'cp_c' in r: k.add('cbuf')
         if _IMGDIM.search(r): k.add('imgdim')
         if _TID.search(r): k.add('tid')
         for m in _CALL.finditer(r):
-            if m.group(1) in s.dh: k.add('gmem' if s.dh[m.group(1)] == 'gmem' else 'dev')
+            if m.group(1) in self.dh: k.add('gmem' if self.dh[m.group(1)] == 'gmem' else 'dev')
         return k
 
-    def sources(s, text, limit=6000):
+    def sources(self, text, limit=6000):
         """source kinds of an expression through the function's assignments (BFS; memo by expression text)"""
-        if text in s.src_memo: return set(s.src_memo[text])
-        r = s._sources(text, limit); s.src_memo[text] = r
+        if text in self.src_memo: return set(self.src_memo[text])
+        r = self._sources(text, limit); self.src_memo[text] = r
         return set(r)
 
-    def _sources(s, text, limit):
-        out = s.kinds_of_text(text); seen = set(); todo = list(set(_ID.findall(text)))
+    def _sources(self, text, limit):
+        out = self.kinds_of_text(text); seen = set(); todo = list(set(_ID.findall(text)))
         while todo and len(seen) < limit:
-            if len(seen) & 255 == 0: s.tick()
+            if len(seen) & 255 == 0: self.tick()
             x = todo.pop()
             if x in seen: continue
             seen.add(x)
-            for r in s.defs.get(x, ()):
-                out |= s.kinds_of_text(r)
+            for r in self.defs.get(x, ()):
+                out |= self.kinds_of_text(r)
                 for y in _ID.findall(r):
                     if y not in seen: todo.append(y)
         if todo: out.add('deep')
         return out
 
     # ---- the value with every loaded word 0 (a pool-table miss): the zero-input trip count (OoT 99280b7b: (min(n, 256) - 1) >> 5 = 2^27 - 1)
-    def tick(s):
+    def tick(self):
         """the analysis budget (data_loops budget=): over it, TimeoutError (34 of Orbitals' compute kernels took over 30 s each in the checker)"""
-        if s.deadline != NO_DEADLINE and time.monotonic() > s.deadline: raise TimeoutError('data_sized_loop: over its budget')
+        if self.deadline != NO_DEADLINE and time.monotonic() > self.deadline: raise TimeoutError('data_sized_loop: over its budget')
 
-    def zval_var(s, name, depth, stack):
-        if name not in s.z_memo: s.tick()
-        if name in s.z_memo: return s.z_memo[name]
+    def zval_var(self, name, depth, stack):
+        if name not in self.z_memo: self.tick()
+        if name in self.z_memo: return self.z_memo[name]
         if name in stack or depth > 64: return None
-        rs = s.defs.get(name)
+        rs = self.defs.get(name)
         if not rs: return None
         stack.add(name); vals = []
         for r in rs:          # phi copies: known only when every definition gives the same value (which one reaches the loop is control flow:
-            try: vals.append(s.zval(parse(r), depth + 1, stack))   # Orbitals 09c51649's entry value 0x3f000000u is replaced in a branch)
+            try: vals.append(self.zval(parse(r), depth + 1, stack))   # Orbitals 09c51649's entry value 0x3f000000u is replaced in a branch)
             except (ValueError, RecursionError, ZeroDivisionError, OverflowError): vals.append(None)
         v = vals[0] if vals and all(x is not None and x == vals[0] for x in vals) else None
         stack.discard(name)
-        t = s.types.get(name)
+        t = self.types.get(name)
         if v is not None and t in ('int', 'uint'): v = _wrap(v, t)
-        s.z_memo[name] = v
+        self.z_memo[name] = v
         return v
 
-    def zval(s, e, depth=0, stack=None):
+    def zval(self, e, depth=0, stack=None):
         """concrete value (Python int or float) with data = 0, ids = 0; None when unknown (constant buffers, parameters)"""
         if stack is None: stack = set()
         k = e[0]
         if k == 'num': return int(e[1]) if float(e[1]).is_integer() and e[1] >= 0 and not isinstance(e[1], bool) else e[1]
         if k == 'id':
             n = e[1]
-            if n.startswith('gl_') or n.startswith('dm_'): return 0
+            if n.startswith(('gl_', 'dm_')): return 0
             if n == 'true': return 1
             if n == 'false': return 0
-            return s.zval_var(n, depth, stack)
+            return self.zval_var(n, depth, stack)
         if k in ('idx', 'mem'):
             t = unparse(e)
             if 'cp_c' in t: return None      # a uniform: unknown (a made-up value bit-cast to an int gave PRAGMATA a320142c a 1.1G 'trip')
             if k == 'mem' and re.fullmatch(r'[xyzw]{1,4}|[rgba]{1,4}', e[2]):
-                return s.zval(e[1], depth + 1, stack) if e[1][0] == 'id' else 0
+                return self.zval(e[1], depth + 1, stack) if e[1][0] == 'id' else 0
             return 0          # a load: 0
         if k == 'tern':
-            c = s.zval(e[1], depth + 1, stack)
+            c = self.zval(e[1], depth + 1, stack)
             if c is None: return None
-            return s.zval(e[2] if c else e[3], depth + 1, stack)
+            return self.zval(e[2] if c else e[3], depth + 1, stack)
         if k == 'un':
-            a = s.zval(e[2], depth + 1, stack)
+            a = self.zval(e[2], depth + 1, stack)
             if a is None: return None
             if e[1] == '-': return -a
             if e[1] == '!': return int(not a)
             if e[1] == '~': return ~int(a)
             return a
         if k == 'bin':
-            a = s.zval(e[2], depth + 1, stack)
+            a = self.zval(e[2], depth + 1, stack)
             if a is None: return None
             if e[1] == '&&' and not a: return 0
             if e[1] == '||' and a: return 1
-            b = s.zval(e[3], depth + 1, stack)
+            b = self.zval(e[3], depth + 1, stack)
             if b is None: return None
             op = e[1]
             if op in ('&&', '||'): return int(bool(b))
@@ -289,8 +290,8 @@ class Func:
             return int({'<': a < b, '<=': a <= b, '>': a > b, '>=': a >= b, '==': a == b, '!=': a != b}[op])
         if k == 'call':
             f = _fname(e[1])
-            if f in s.dh: return 0      # a pool-table / memory helper: a miss reads 0
-            args = [s.zval(x, depth + 1, stack) for x in e[2]]
+            if f in self.dh: return 0      # a pool-table / memory helper: a miss reads 0
+            args = [self.zval(x, depth + 1, stack) for x in e[2]]
             if f and f.startswith('.'):
                 return IMGDIM_EST if f.startswith('.get_') else 0      # an image read: 0
             if any(x is None for x in args): return None
@@ -314,23 +315,23 @@ class Func:
         return None
 
     # ---- an upper bound of a value: (bound, label); label names the clamp that set it ('' = a constant)
-    def ub_var(s, name, depth, stack):
-        if name not in s.ub_memo: s.tick()
-        if name in s.ub_memo: return s.ub_memo[name]
+    def ub_var(self, name, depth, stack):
+        if name not in self.ub_memo: self.tick()
+        if name in self.ub_memo: return self.ub_memo[name]
         if name in stack or depth > 48: return INF, 'loop-carried' if name in stack else 'deep'
-        rs = s.defs.get(name)
+        rs = self.defs.get(name)
         if not rs: return INF, 'param'
         stack.add(name); best = (-INF, '')
         for r in rs:
-            try: v = s.ub(parse(r), depth + 1, stack)
+            try: v = self.ub(parse(r), depth + 1, stack)
             except (ValueError, RecursionError): v = (INF, 'unparsed')
             if v[0] > best[0]: best = v
             if best[0] == INF: break
         stack.discard(name)
-        s.ub_memo[name] = best
+        self.ub_memo[name] = best
         return best
 
-    def ub(s, e, depth=0, stack=None):
+    def ub(self, e, depth=0, stack=None):
         if stack is None: stack = set()
         k = e[0]
         if k == 'num': return e[1], ''
@@ -338,29 +339,29 @@ class Func:
             n = e[1]
             if n.startswith('gl_'): return TID_EST, n
             if n in ('true', 'false'): return 1, ''
-            return s.ub_var(n, depth, stack)
+            return self.ub_var(n, depth, stack)
         if k in ('idx', 'mem'):
             t = unparse(e)
             if 'cp_c' in t: return UNIFORM_EST, pretty_cbuf(_cbuf_text(e))
-            if k == 'mem' and re.fullmatch(r'[xyzw]{1,4}|[rgba]{1,4}', e[2]): return s.ub(e[1], depth + 1, stack)
-            return INF, 'data' if (_DEVRD.search(t) or (s.tg_re and s.tg_re.search(t))) else 'mem'
+            if k == 'mem' and re.fullmatch(r'[xyzw]{1,4}|[rgba]{1,4}', e[2]): return self.ub(e[1], depth + 1, stack)
+            return INF, 'data' if (_DEVRD.search(t) or (self.tg_re and self.tg_re.search(t))) else 'mem'
         if k == 'tern':
-            a = s.ub(e[2], depth + 1, stack); b = s.ub(e[3], depth + 1, stack)
+            a = self.ub(e[2], depth + 1, stack); b = self.ub(e[3], depth + 1, stack)
             return a if a[0] >= b[0] else b
         if k == 'un':
             if e[1] in ('!',): return 1, ''
-            if e[1] in ('*', '+', '&'): return s.ub(e[2], depth + 1, stack)
+            if e[1] in ('*', '+', '&'): return self.ub(e[2], depth + 1, stack)
             if e[1] == '-' and e[2][0] == 'num': return -e[2][1], ''
             return U32, 'neg'           # -x as a uint (wraps): up to 2^32
         if k == 'bin':
             op = e[1]
             if op in ('||', '&&', '==', '!=', '<', '<=', '>', '>='): return 1, ''
-            a = s.ub(e[2], depth + 1, stack)
+            a = self.ub(e[2], depth + 1, stack)
             if op == '-': return a
             k_ = _const(e[3])
             if op in ('>>', '/') and k_ is not None and k_ >= 1:
                 return (a[0] / (2 ** k_ if op == '>>' else k_)), a[1] or op
-            b = s.ub(e[3], depth + 1, stack)
+            b = self.ub(e[3], depth + 1, stack)
             if op == '&': return a if a[0] <= b[0] else b
             if op == '%': return b
             if op == '+': return min(a[0] + b[0], U32), a[1] or b[1]      # uint wraps: x - 1 is written x + 4294967295u (0 - 1 = 2^32 - 1)
@@ -371,13 +372,13 @@ class Func:
         if k == 'call':
             f = _fname(e[1]); args = e[2]
             if f in ('min', 'fmin'):
-                vs = [s.ub(a, depth + 1, stack) for a in args]; return min(vs, key=lambda v: v[0])
+                vs = [self.ub(a, depth + 1, stack) for a in args]; return min(vs, key=lambda v: v[0])
             if f in ('max', 'fmax', 'select'):
-                vs = [s.ub(a, depth + 1, stack) for a in args[:2]]; return max(vs, key=lambda v: v[0])
+                vs = [self.ub(a, depth + 1, stack) for a in args[:2]]; return max(vs, key=lambda v: v[0])
             if f == 'clamp' and len(args) == 3:
-                a = s.ub(args[0], depth + 1, stack); b = s.ub(args[2], depth + 1, stack); return a if a[0] <= b[0] else b
+                a = self.ub(args[0], depth + 1, stack); b = self.ub(args[2], depth + 1, stack); return a if a[0] <= b[0] else b
             if f in _CASTS or (f and re.fullmatch(r'u?(?:int|short|char)[234]?|float[234]?|half[234]?', f)):
-                vs = [s.ub(a, depth + 1, stack) for a in args] or [(INF, 'cast')]; return max(vs, key=lambda v: v[0])
+                vs = [self.ub(a, depth + 1, stack) for a in args] or [(INF, 'cast')]; return max(vs, key=lambda v: v[0])
             if f and f.startswith('.get_'): return IMGDIM_EST, unparse(e[1]).split('.')[-1] + '()'
             if f == 'abs' and args and args[0][0] == 'num': return abs(args[0][1]), ''
             return INF, f'call {f}'
@@ -485,7 +486,7 @@ def data_loops(src, gmem_bufs=(), cbuf_unbounded=False, budget=None):
             if not exits: continue
             dep = {l: set(_ID.findall(' '.join(rs))) for l, rs in defs.items()}
 
-            def closure(ids):
+            def closure(ids, dep=dep):
                 seen = set(ids); todo = list(ids)
                 while todo:
                     x = todo.pop()
@@ -499,7 +500,7 @@ def data_loops(src, gmem_bufs=(), cbuf_unbounded=False, budget=None):
             for t in texts:
                 try: e = parse(t)
                 except (ValueError, RecursionError): continue
-                stack = [e]
+                stack: list[Any] = [e]
                 while stack:
                     x = stack.pop()
                     if not isinstance(x, tuple): continue
@@ -552,7 +553,7 @@ def data_loops(src, gmem_bufs=(), cbuf_unbounded=False, budget=None):
                     if best is None or (cand['data'], cand['est']) > (best['data'], best['est']): best = cand
                 # several exits: the loop ends at the first one reached, but which compare decides an exit through flag words (OoT 99280b7b:
                 # bit 0 of `(i*32 + lane >= n) | (i + 1 > m) << 1`, masked & 2) is not tracked: the largest estimate is taken (worst case)
-                r = best
+                r = cast(dict[str, Any], best)   # set: cmps is not empty
             else:
                 # a loop-carried value halved each iteration (x = x >> k, x / 2^k) that the exit tests: a binary search (the translator's pool-table
                 # lookup), at most 32 iterations
@@ -562,8 +563,8 @@ def data_loops(src, gmem_bufs=(), cbuf_unbounded=False, budget=None):
                     continue
                 srcs = set()
                 for x in exits: srcs |= F.sources(x)
-                r = dict(kind='exit', bound=' || '.join(x.strip() for x in exits)[:160], start='', op='', step=0, est=INF, clamp='exit on data', zero_trip=None,
-                         sources=sorted(srcs - {'deep'}), data=bool(srcs & DATA))
+                r = cast(dict[str, Any], dict(kind='exit', bound=' || '.join(x.strip() for x in exits)[:160], start='', op='', step=0, est=INF, clamp='exit on data', zero_trip=None,
+                         sources=sorted(srcs - {'deep'}), data=bool(srcs & DATA)))
             r.update(fn=name, line=loc, atomic=atom, span=(o, c), li=li, loop=k, site_line=base + body[:c].count('\n') + 1 if k == 'do' else loc,
                      bound_full=r.pop('value_expr', ''))
             r['why'] = 'data' if r['data'] else 'cbuf' if cbuf_unbounded and 'cbuf' in r['sources'] and r['est'] >= U32 / 2 else ''

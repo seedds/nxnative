@@ -249,7 +249,7 @@ def transform(msl, key, stage='compute', only=None, values=None):
                 ins = ('' if not l[o + 1:c].strip() else ', ') + 'dm_hg, dm_hgcap'
                 l = l[:c] + ins + l[c:]; pos = m.end()
         if chosen(i):
-            def site(m):
+            def site(m, i=i):   # called by the sub below, on this line
                 nonlocal n
                 n += 1
                 sites.append((n, m.group(1), fn_at.get(i), None))

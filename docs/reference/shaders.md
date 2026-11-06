@@ -139,6 +139,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `shader_split.py` reads zip archives member by member in parallel ranges (`zip_jobs` / `zip_shaders`; `zipfile`), each member scanned like a loose file, whole GLSLC outputs included. `profile_guess.py` `shader_sources` asks for the run-time GLSLC capture when an NRO the game loads imports `glslcCompile` and a subsdk defines it (`glslc_capture`). Portal's map: 242 keys from the `.nvsb` files and 13 from the capture, 229 vertex and pixel pairs.
 - **Found on:** [Portal](../../dm/games/01007BB017812000/README.md). No other profile's RomFS has a zip archive holding shaders.
 
+### PMAP records in phx's PDAT archives
+
+- **Symptom:** a Switch 2 game whose split finds no shader: the RomFS holds `Asset/assets_a000.dat` (magic `PDAT`, 16.6 GB) and `Asset/assets.cat` (magic `PARC`, a table of 64-bit ID hashes), and the first boot stops on `cannot read the shader map`.
+- **Cause:** the engine's namespace is `phx`, its platform layer `Aurora`. Its records are flatbuffers with a four-letter tag at +4 (`PMAP`, `PMTR`, `PANM`, `PMSH`, `PSHD`, ...), nearly all of them one zstd frame each, unencrypted. A `PMAP` record is one program: its control sections (NVN2, 0xe0 to 0x128 bytes, their length at +0x30) lie 8-aligned, each directly followed by its code area (control +0x44 bytes). 19,143 are vertex + pixel, 85 add a geometry shader and 8,071 are one compute shader. A record too small to shrink is stored as it is (one, a compute shader).
+- **Fix:** `pdat_jobs` and `pdat_shaders` in `shader_split.py`: a byte range of the archive per job, every zstd frame whose decoded tag is `PMAP`, and control sections outside any frame. The catalog is not read. A frame's first block can be 128 KB, and zstd gives no output before it has the whole block, so the tag check feeds it that much: fed 4 KB, 21,962 of 27,540 shaders were silently left out. A loose `.ndsr` file also never reached `ndsr_shaders` (the prefilter for loose files did not know its magic); it does now: `Bin/Nvn2-upper_left.ndsr`, 28 shaders, in Star Fox's and Bananza's record layout from +0x10.
+- **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md): 27,568 shaders, 13,078 pixel, 8,092 compute, 6,322 vertex and 76 geometry.
+
 ### LZ4-chained zip members behind a VZIP preamble, and shader binaries of one stage
 
 - **Symptom:** a Switch 2 game's RomFS is one `data.zip` that does not start with a zip's local header, zipfile reads a member of it only to stop on `Bad CRC-32`, and the split finds no shader: every member is listed as stored, yet most are smaller on disk than their file size.
@@ -464,6 +471,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Reader:** `uepak.py` `inline_shaders` also takes the global shader cache with no `.ushaderbytecode` as inline when the containers in the pak's folder hold export bundles and no [shader libraries](#unreal-engine-56-iostore-shader-libraries) (`inline_in_containers`; with neither a `.uexp` nor such a container the NSP script stops rather than read the global shaders alone), and `shader_split.py` `ue_legacy_jobs` then also reads the export bundles of the containers beside such a pak, the newest copy of each chunk ID (`mount_order`), through the game's own Oodle in the host's tool mode. Bulk data chunks are skipped. `Toc.names` reads the container's directory index, so a shader's label names its package, as for a pak, and `shader_groups` works the same way.
 - **Found on:** [Mario & Luigi: Brothership](../../dm/games/01006D0017F7A000/README.md): 45,824 unique shaders from 8.8 GB of export bundles in 39 s.
 
+### An entry of a package's export list read as an Oodle shader table
+
+- **Symptom:** the shader split reports `the game's decoder in the Mac host failed on a 8 → 30650 byte stream`, the host's output says `asked to decode Legacy compressor; not supported!`, and a run of the NSP script stops with `file(s) could not be read` (a provisional profile goes on without those shaders).
+- **Cause:** `uepak.shader_map_entries` scans every Unreal file for a stream's two first bytes and holds a table by its two counts and its walk. An export of a split package's summary can pass all of that as a one-entry table: name number 1 is the count, flags 8 the stream's length, the 8-byte size `0xb8c` (`8C 0B`, then zeros) the stream, the offset 30650 the raw size. `ue_inline_shaders` then took the decoder's refusal as fatal, where its zlib and LZ4 scans take it as no stream, and the failure cost the whole job, about 1/64 of the pak's bytes, not the one file.
+- **Fix:** the decode is the proof. `ue_inline_shaders` passes `shader_map_entries` a check of each table's first entry: a stream the decoder refuses, a stored one that is no record, or a game whose `main` has no decoder at all makes it no table, and it hides nothing inside its span. A stream that decodes to exactly its raw size is a real one, so a record of another layout stays red, as do a later entry that fails and a host that dies. `ue_packages` reads each package of a job on its own, so one that does not read costs itself. Nothing depends on the summary's layout, so this holds for every package version and for `.uexp` files and export bundles too.
+- **Found on:** [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md), update 1.1.1, by PR #1333: six summary files matched, four jobs were lost, 11,832 of 13,980 shaders were left (the PR's measurement). The scan came with [Unreal Engine 5.4's tables](#unreal-engine-54-shaders-for-the-switch-2), so every game with inline Unreal shaders was exposed.
+
 ### Unreal Engine 5.4 shaders for the Switch 2
 
 - **Symptom:** `shaders: 0` from the split, with no red line, on a game whose pak holds `Engine/GlobalShaderCache-SP_GLSL_SAGE.bin` (`Sage` is the engine's name for the platform).
@@ -750,6 +764,22 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
   - the vendored translator then emits the input primitive at each return of the shader (`EmitterContext.PrepareForReturn`) with every attribute the shader does not write: it is translated without the next stage, against the fixed 144-word input map. It skips the primitive when the shader wrote a viewport mask of 0, and the mask starts at all viewports (`Translator.EmitOutputsInitialization`);
   - `geometry_finish` in `dmsh_build.py` takes the output vertex count and primitive class of such a shader from the input topology (the header declares one vertex of a triangle strip).
 - **Found on:** [NieR:Automata The End of YoRHa Edition](../../dm/games/010056B015FE8000/README.md): `IndexBuildIndependent_{b,x}{cw,ccw}.gso` are the depth prepass, one draw per mesh, and each also writes the mesh's culled index list and its count for the shading pass's indexed indirect draws.
+
+### The topology table passed to a helper function
+
+- **Symptom:** `[geometry failed]  missing geometry topology buffer` in the build, then `[RED] shader … (geometry) failed to load` and those draws skipped.
+- **Cause:** when a block is reached from several places, SPIRV-Cross makes it a function and passes the table `trb_data` as a parameter. `topology_pointer` expected the one declaration in the argument buffer and only reads through it.
+- **Fix:** it rewrites every declaration, the parameter too, and reads with or without the descriptor set in front.
+- **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md): 26 of its 76 geometry shaders.
+- **Check:** `test_dmsh_geometry.py` (`TopologyPointer`).
+
+### A captured draw's vertex IDs far apart
+
+- **Symptom:** the host's memory watchdog closes the game (at 28.3 GB on Kirby Air Riders, whose Switch 2 has 9 GB), with the Metal heap full of frame arena blocks of 36 or 72 MB; it comes on quickly in a scene full of ribbons.
+- **Cause:** a geometry capture sized its vertex space by the range of the draw's vertex IDs. Kirby Air Riders draws ribbons with 144 instances and vertex IDs spread over 65,537 or 131,073, so a draw of few real vertices asked 36 or 72 MB of scratch, per draw, every frame.
+- **Fix:** `geo_prep` (`nvn_geometry.inc`) compacts a sparse draw when that saves at least `GEO_COMPACT_MIN` (1 MB): the vertices actually used are captured in contiguous runs (`nvn_geo_capture_runs`), one capture per run, and the geometry stage reads through a map from the original ID to the compact one (`nvn_geo_compact_map`). Up to `GEO_COMPACT_RUNS` runs; a kernel that keeps its original addressing has the original map.
+- **Check:** `t_geometry` checks the runs, the map and a draw through both.
+- **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md): resident from 28.3 GB (and closed) to about 10 GB through a race.
 
 ### Geometry passthrough and viewport masks in compute
 
@@ -1057,8 +1087,8 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 - **Symptom:** `Ampere instruction f63` (or `f6c`, `364`, `367`) `is not implemented`, or `SURED form 0310e000`, in the build.
 - **Cause:** 0xf60 and 0x361 were known for TEX. The same pairs exist for the others: 0xf63 and 0xf6c are TLD4 and TXD through a uniform register at 40..46, 0x364 and 0x367 are TLD4 and TLD through a register, the first of the second source block, each otherwise laid out as its bound form. 0x364's meaning was inferred from these siblings, and its use agrees: Yoshi's single-layer water converts each of its four results as a device Z (`c4[66]`), which only a gather of a depth texture gives. SURED takes SUATOM's operation field (87..91): MAX, OR and MIN on 32 bits turn up.
-- **Fix:** `ATex` maps them to the bound forms, `ASured` takes the operation. Open: SURED.MAX.U64 (33,550 uses, Nanite's visibility buffer) is still refused, as the host has no 64-bit image atomics; the game does not reach those shaders so far.
-- **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md). Its shaders' jump tables also ran past their code on two compute shaders (`ArgumentOutOfRangeException`, in `GetCode`): an address past the code is now no code, which ends the table as the decoder expected.
+- **Fix:** `ATex` maps them to the bound forms, `ASured` takes the operation. TMML has the same pair, 0xf69 and 0x36a (Kirby Air Riders' cube map LOD, 4,776 pixel shaders), with a binding of its own only when the handle is bound by its slot. Open: SURED.MAX.U64 (33,550 uses, Nanite's visibility buffer) is still refused, as the host has no 64-bit image atomics; the game does not reach those shaders so far.
+- **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md) (TMML); [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md). Its shaders' jump tables also ran past their code on two compute shaders (`ArgumentOutOfRangeException`, in `GetCode`): an address past the code is now no code, which ends the table as the decoder expected.
 
 ### Ampere BMSK and the read of a covered pixel
 
@@ -1108,6 +1138,15 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Not counted yet:** the translator's other messages that lose something: `Shader instruction … is not implemented` and `Failed to find targets for BRX instruction`, which the build summary still counts among its translator lines.
 - **Found on:** the 79 games with a library on the Mac (2026-11-05, those shaders rebuilt on the current chain): 1,984 deleted accesses in 964 shaders of 13 games, the most in [Ghost Trick](../../dm/games/010029B018432000/README.md) (1,030 in 616) and [Super Monkey Ball Banana Rumble](../../dm/games/010031F019294000/README.md) (490 in 245), and [FINAL FANTASY RESONANCE](../../dm/games/0100606026F12000/README.md) has 26 by its note. No shader built without its extra entry points when rebuilt (65 of Sparks of Hope's, which look as if they did, could not be: its package is not on the Mac): the 25 compiles that failed in the logs were all [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md)'s, before the point size fix. Each game's note lists its own. A listed loss is not proved harmless: none has been traced to a picture.
 - **Check:** `python3 dm/tools/tests/test_shader_regressions.py Losses`, `python3 dm/tools/tests/test_regress.py Regress`.
+
+### A guard band cull in every vertex shader (0x80d)
+
+- **Symptom:** `Ampere instruction 80d ... (000fc80003fe0000c43211110000780d) is not implemented` for every vertex shader of the game, so nothing draws.
+- **Cause:** the compiler ends the position's computation with a test of its own. FSETP sets P0..P5 where x, y or z lies beyond +/- w times the system registers 30 and 31, which nothing else reads: a guard band. Two 0x80d follow, immediate 0xc4321111 with no predicate result, then immediate 0x80000000 with a result, and that predicate guards an EXIT before the shader writes its position and outputs. All 6,319 vertex shaders hold this once; no other game's do. What the instruction reads is not known: it is inferred from what surrounds it, and no other instruction reads its result.
+- **Fix:** `AGuardCull` in `InstEmitAmpereAlu.cs`: the result is false, so no vertex leaves early. Every vertex writes its outputs and clipping does the rest, as for a shader without this; only the optimization is lost. Any other form of 0x80d stops the shader.
+- **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md).
+- **Open:** the instruction's real meaning. A vertex output at `a[0x5c]`, written by 4,771 vertex shaders (`Attribute offset 0x5C is not valid`), is dropped; it has no known meaning either.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
 
 ### Ampere instructions new in Pokémon Pokopia
 
@@ -1361,8 +1400,24 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 - **Symptom:** the host stops at the shader's first load: `unexpected argument buffer layout: encodedLength=640 maxAid=48`.
 - **Cause:** a loop reads one handle per light from the game's uniform buffer at a computed offset; Ryujinx's texture array from a buffer indexes it by the handle's byte offset ÷ 8 (an NVN handle is 64-bit, the shader computes `(word >> 2) << 1 | (word & 3) >> 1`). The build reads the name as one bindless texture (`tex_ubo`, offset 0), so the argument buffer was 32 entries longer than the reflection said.
-- **Fix:** the host's reflection reader takes the array length from the MSL type, and the replay fills element k from the handle at byte 8k of that uniform slot (`NVN_RB_TEXU` / `SAMPU` with `n`); elements whose bytes are not a registered texture or sampler ID read the dummy, silently. No chain change: the build already wrote the array type.
+- **Fix:** the host's reflection reader takes the array length from the MSL type, and the replay fills element k from the handle at byte 8k of that uniform slot (`NVN_RB_TEXU` / `SAMPU` with `n`); elements whose bytes are not a registered texture or sampler ID read the dummy, silently. No chain change: the build already wrote the array type. Sampled textures have since moved to [a table the replay builds](#a-table-of-handles-longer-than-the-array); this form remains for images and buffer textures.
 - **Found on:** [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md): the reflection shaders (`reflection.bfsha`: `array<texture2d<float>, 32> fp_t2d_cb14_0` and its samplers), c14 (uniform slot 11). The first run showed elements 0–3, 6 and 8–12 holding textures, among them the shader's fixed handles at +8, +16 and +24 and the lights' from +64.
+
+### A table of handles longer than the array
+
+- **Symptom:** characters and other moving objects have almost no ambient light: lit only from where the sun reaches, black underneath, while the scenery around them is right. Nothing is red. On Kirby Air Riders a dark red Kirby on a bright course, where the game's own tutorial movie shows him bright pink.
+- **Cause:** an [array of handles in a uniform buffer](#an-array-of-handles-in-a-uniform-buffer) was declared with 32 elements and its index clamped to the last, but the game's table is longer. Kirby Air Riders' compute shader `f59db619b5c0be33` traces each object's eight light probe values from atlases named in c[4], and its index was 390 for the player's objects: clamped to element 31, which held nothing, so the eight values were black and the vertex shaders that read them lit the character with nothing. Objects whose probes happened to sit under element 32 were lit. The table has 197 handles up to element 392, in a buffer of 4,096, and nothing in the shader tells how long it is.
+- **Fix:** a chain change. `Program.cs` `QueryTextureArrayLengthFromBuffer` gives a game's uniform buffer 8,192 elements (64 KB of 8-byte handles), `dmsh_build.py` `pool_arrays` turns such an array and its samplers into pointers with a run-time bound, and the replay builds the table from the buffer (`nvn_mtl.m` `htab_gpu`), as long as the last handle, looking again in each pass and keeping the buffer when the elements are the same. Images and buffer textures stay arrays of 32, bound element by element. Reading these handles through [the pools](#texture-handles-from-game-memory-index-the-pools) instead gave the same picture and cost too much: the walk over 65,824 IDs made all 34,000 of the game's registered textures, 16 GB resident against 9.7, and 9 to 25 fps against 60.
+- **Check:** `test_dmsh_pool_arrays.py` checks the rewrite and the reflection.
+- **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md): most of its lit materials and light probes.
+
+### An array of uniform-buffer handles with its sampler word in c2
+
+- **Symptom:** `reflection conversion failed: B binding fp_t2ds_cb196614_10570000 has no resolved slot number`, then `failed to load`; those draws are skipped, and the scene is dark or black where it is lit by them.
+- **Cause:** handle type 1 on [an array of handles in a uniform buffer](#an-array-of-handles-in-a-uniform-buffer): the texture words in the game's c[6], one separate sampler word in the driver table (slots 0x30006: the high half is bank + 1, so bank 2; word 0x15c, c2 byte 0x570). `decode_ubo_tex` took only a uniform buffer for that word.
+- **Fix:** `decode_ubo_tex` answers ('c2', byte), the reflection gives the sampler `sreg` `DMSH_SREG_C2`, and the replay takes every element's sampler from that c2 word (`sampu_id`), whose IDs are moved already, as those of `NVN_RB_SAMPA`.
+- **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md): about 5,700 pixel and compute shaders, its shadows and lights.
+- **Check:** `test_dmsh_reflect.py` (`UniformArraysWithDriverSampler`).
 
 ### A table of handles past the array's length
 

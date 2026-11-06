@@ -64,10 +64,13 @@
 #define DMSH_KIND_SAMP_UBO "samp_ubo"    // bindless: the sampler handle is in uniform slot reg at byte off
 #define DMSH_KIND_IMG_UBO "img_ubo"      // bindless: the image handle is in uniform slot reg at byte off
 #define DMSH_KIND_TBUF_UBO "tbuf_ubo"    // bindless: the handle of a buffer texture is in uniform slot reg at byte off
+#define DMSH_SREG_C2 255                 // a samp_ubo's sreg: its other word, the sampler's, is the driver table's at c2 byte soff, not in a uniform buffer
 #define DMSH_KIND_TEX_C2A "tex_c2a"      // an array of c2 handles the shader indexes at run time: element k = the texture whose c2 word lies at off + 8 k
 #define DMSH_KIND_SAMP_C2A "samp_c2a"    // the same for samplers
 #define DMSH_KIND_TEX_POOL "tex_pool"    // the game's texture pool, indexed by the handle's texture ID (a handle traced to no slot; dmsh_build.py pool_arrays): elem = the element type
 #define DMSH_KIND_SAMP_POOL "samp_pool"  // the sampler pool, indexed by the handle's sampler ID
+#define DMSH_KIND_TEX_HTAB "tex_htab"    // a table the host builds of the handles in uniform slot reg from byte off, element k = the handle at off + 8k (nvn_mtl.m htab_gpu), laid out as a pool: elem = the element type
+#define DMSH_KIND_SAMP_HTAB "samp_htab"  // its samplers; soff and sreg as DMSH_KIND_SAMP_UBO's
 #define DMSH_KIND_BORDER "border"        // the shader's border colour block (dmsh_build.py border_emu): a mask of the samplers to correct, then each one's factors
 
 #define DMSH_KIND_GMEM_MAP "gmem_map"    // the memory pool table for global memory the translator traced to no storage buffer (an address the shader loaded from memory): the host binds its table (nvn_mtl.m gmem_map)

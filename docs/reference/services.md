@@ -432,6 +432,12 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** with the pointer over the game, a controller button or the keyboard hides it; moving the mouse shows it; over the title bar, or with another app active, it stays.
 - **Found on:** every game on the Mac (general); [PR #584](https://github.com/seedds/nxnative/pull/584).
 
+### A pad GameController claims but never delivers
+- **Symptom:** a controller macOS has paired does nothing in a Mac game, with no `controller '<name>'` line in the log at all: neither GameController's `connected: player` nor the raw HID pad's `(HID) connected`. Seen with an 8BitDo Ultimate 2C Wireless over Bluetooth (vendor 0x2DC8, product 0x301B, a BLE HID gamepad) on macOS 27.2; the same pad is read fine by an IOHIDManager.
+- **Cause:** `pad_hid_mac.h` leaves every device `+[GCController supportsHIDDevice:]` says YES to for GameController, so that no controller is read twice. For this pad GameController says YES and then publishes no `GCController`, in the game and in any other process with a run loop, so neither path read it.
+- **Fix:** a claimed device gets 1.5 s; when no `GCController` whose `vendorName` is the device's product string has appeared by then, the device is read raw after all, with a log line that says so. A device that goes away during the wait is only released. `DM_HID_CLAIMED=raw` skips the wait, `DM_HID_CLAIMED=gc` restores the old behaviour.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (Switch 2, M5 Max, macOS 27.2): after the change `controller '8BitDo Ultimate 2C Wireless' (HID) connected: player 1 (npad 0)`, the pad playing with 8BitDo's default numbering.
+
 ### Mac display sleep during controller play
 
 - **Symptom:** the Mac dims or turns off its display and can reach the lock screen while the player is using a controller, in a window or in fullscreen.

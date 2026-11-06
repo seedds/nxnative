@@ -250,10 +250,11 @@ class StageMemory(Translated):
     def test_the_zero_count_is_left_out(self):   # threads are not in step on Metal: it could land after the real count, and the stage memory starts at zero
         without = self.msl(self.COUNT)
         with_zero = self.msl(self.COUNT_ZERO, self.COUNT)
-        self.assertEqual(without.count('atomic_compare_exchange'), with_zero.count('atomic_compare_exchange'))
+        self.assertEqual(without.count('atomic_fetch_or'), with_zero.count('atomic_fetch_or'))
 
-    def test_a_byte_goes_through_its_word_atomically(self):   # neighbouring threads write neighbouring bytes
-        self.assertIn('atomic_compare_exchange', self.msl(self.INDEX))
+    def test_a_byte_goes_through_its_word_atomically(self):   # neighbouring threads write neighbouring bytes: an atomic AND clears the byte and an atomic OR sets it (no compare-and-swap loop)
+        msl = self.msl(self.INDEX)
+        self.assertIn('atomic_fetch_and', msl); self.assertIn('atomic_fetch_or', msl); self.assertNotIn('atomic_compare_exchange', msl)
 
     def test_outside_a_task_or_mesh_shader_it_is_refused(self):
         with self.assertRaises(AssertionError) as e: self.translate(inst(*self.PAYLOAD) + inst(*EXIT))

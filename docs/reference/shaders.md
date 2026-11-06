@@ -817,6 +817,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#sky-panels), [issue #1186](https://github.com/seedds/nxnative/issues/1186).
 - **Check:** `python3 -m unittest dm/tools/tests/test_dmsh_abi.py`.
 
+### Stage memory byte stores through a compare-and-swap loop
+
+- **Symptom:** a mesh shader's draws cost GPU time out of all proportion to what they draw: in Kokiri Forest the pass that follows the opaque pass took 8.3-8.6 ms a frame on an M3 Pro, at 854x480 as at 1440x810, and the profile shows it as a gap before that pass or as its duration (the pass's start stamp is written after its vertex stage, where Metal runs the object and mesh stages). With the mesh draws dropped (`DM_NVN_SKIP_MESH=1`) the frame went from 25 to 18 ms, and with their bodies emptied, 16 ms: not the groups' launch, their code.
+- **Cause:** a task or mesh shader writes its primitive indices and count as bytes (0x927 modes 0x80 and 0x88), which go through the translator's shared memory byte store, `SharedStore8`: a compare-and-swap loop on the word (`GenerateSharedStore`, from upstream Ryujinx). The 32 lanes write neighbouring bytes, so four lanes contend for each word and the loop runs about four times a store, with a divergent retry each time; Ocarina of Time's foliage mesh shaders have ten such stores a lane, over tens of thousands of workgroups a frame. On the console the warp's byte stores coalesce in hardware.
+- **Fix:** `GenerateSharedStore` (`HelperFunctionManager.cs`) clears the field with an atomic AND and sets it with an atomic OR. Lanes writing other bytes of the word commute with both, so the word ends as the loop left it, without retries. Two lanes writing the same byte at once get a mix of their values where the loop gave one of the two; the hardware's order between them is undefined as well. The same helper serves 16-bit stores and the shared memory of compute shaders. A chain change.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (`StageMemory`: the byte store has the two atomics and no compare-and-swap).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game): the foliage pass from 8.3-8.6 to 3.5-4.0 ms on an M3 Pro, and the game's resolution controller then holds 1440x810 at 48 fps where it held 854x480 at 36-40 (its 39 forest mesh shaders rebuilt by hand first, then the chain).
+
 ### Geometry shaders with no Metal stage
 
 - **Symptom:** a geometry shader fails to compile with `unknown main0_out`: SPIRV-Cross writes `unknown main0_out main0()` for the geometry stage, and the shader does not build.

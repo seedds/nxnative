@@ -1480,6 +1480,8 @@ def finish(key, w, j, c1):
     fu, fmask = fs_uint(src) if j['stage'] == 'ps' else (None, 0)   # the integer-output entry points (see fs_uint); the analysis below uses the source with only main0
     fd = fs_dual(src) if j['stage'] == 'ps' and key in DUAL_WANT else None   # the dual-source entry point (see fs_dual), from the source with only main0
     if fu or fd: plain = src; open(msl, 'w').write((fu or src) + (fd or ''))
+    final = open(msl).read(); rr = dmsh_wide.raw_ranges(final)   # raw global memory lookups reuse the range they last chose (see dmsh_wide.py raw_ranges)
+    if rr is not final: open(msl, 'w').write(rr)
     side, lost = {}, []
     def compile_targets():   # the selected targets from the same MSL (MSL identical to one compiled before takes that library, dmsh_mtlcache.py)
         if j['stage'] == 'ps': side.clear(); side.update(ps_libraries(key, msl, open(msl).read())); return
@@ -1489,7 +1491,7 @@ def finish(key, w, j, c1):
     except subprocess.CalledProcessError as e:
         if not lay and not fu and not fd: return 'metal failed', str(e)[:160], None
         lost = [name for name, extra in (('layer', lay), ('integer output', fu), ('dual source', fd)) if extra]   # kept in the reflection, as a cache hit compiles nothing: every build reports it (shader_regressions.report_losses)
-        open(msl, 'w').write(plain); lay = fu = fd = None   # the layer, integer-output and dual-source entry points are extras: a library that does not build with them is built without
+        open(msl, 'w').write(dmsh_wide.raw_ranges(plain)); lay = fu = fd = None   # the layer, integer-output and dual-source entry points are extras: a library that does not build with them is built without
         try: compile_targets()
         except subprocess.CalledProcessError as e: return 'metal failed', str(e)[:160], None
     clone(msl, os.path.join(out, key + '_b.metal'))

@@ -73,3 +73,78 @@ def wide_loads(msl):
         indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
         lines[i] = ''.join(indent + d + '\n' for d in pre) + ln
     return '\n'.join(lines)
+
+
+# Raw global memory that reuses the range its last lookup found (raw_ranges, the last step before dmsh_build.py compiles a shader).
+#
+# A word whose address the translator traced to no storage buffer goes through a helper GlobalToStorage.TryGenerateRawStorageOp writes (spirv-cross keeps it a function):
+#
+#     static inline __attribute__((always_inline))
+#     int _56(thread const int& lo, thread const int& hi, const device _27& cp_s3)
+#     {
+#         ... the hint of the address's 2 MiB chunk ...      int sel = hint_index;
+#         if (!hint_fits) { ... the unrolled binary search ...  sel = index; }
+#         int row = sel * 8;  ... the end check, the delta, the read ...
+#     }
+#
+# called once for each 32-bit word, and a shader reads a structure word after word from one range. Ocarina of Time's foliage mesh shader (73dc0b90c4082e43, 135 such reads)
+# took 10.9 ms of a 683x384 frame. Each call site gets the cache of the function it is in, a range {start, end, entry}: an address inside the range the last lookup chose takes
+# that entry without the hint or the search; everything after (the end check, the delta, the read or write) is unchanged. The GMEM map's ranges are disjoint (nvn_mtl.m gmem
+# map), so an address inside an entry's range is that entry's in the search too, and a cache lives in one invocation, so the table cannot change under it.
+_RAW_HELPER = re.compile(r'(?m)^static inline __attribute__\(\(always_inline\)\)\nint (_\d+)\(thread const int& (_\d+), thread const int& (_\d+), '
+                         r'((?:const )?device _\d+& ([a-z]p_s\d+))\)\n\{\n')
+_RAW_CACHE = 'struct dm_raw_range { ulong s; ulong e; int i; };   // the range the last raw global memory lookup chose (dmsh_wide.py raw_ranges)\n\n'
+
+
+def _raw_helper(msl, m):
+    """The helper with its search behind the cache, and where it ends; None when it is not the shape above."""
+    name, lo, hi, param, table = m.groups()
+    end = msl.index('\n}\n', m.end())
+    body = msl[m.end():end].split('\n')
+    i = next((k for k in range(len(body) - 2) if re.fullmatch(r'    int _\d+ = _\d+;', body[k]) and re.fullmatch(r'    if \(!_\d+\)', body[k + 1])
+              and body[k + 2] == '    {'), None)
+    if i is None: return None
+    sel, hint = re.fullmatch(r'    int (_\d+) = (_\d+);', body[i]).groups()
+    close = next((k for k in range(i + 3, len(body)) if body[k] == '    }'), None)
+    if close is None or close + 1 >= len(body) or not re.fullmatch(r'    int _\d+ = ' + sel + r' \* 8;', body[close + 1]): return None
+    new = ([f'    ulong _ra = as_type<ulong>(uint2(uint({lo}), uint({hi})));', f'    int {sel};',
+            f'    if (_ra - _rr.s < _rr.e - _rr.s) {sel} = _rr.i;', '    else', '    {']
+           + ['    ' + ln for ln in body[:i]] + [f'        {sel} = {hint};'] + ['    ' + ln for ln in body[i + 1:close + 1]]
+           + [f'        int _rw = {sel} * 8;',
+              f'        _rr.s = as_type<ulong>(uint2({table}._m0[_rw], {table}._m0[_rw + 1])); _rr.e = as_type<ulong>(uint2({table}._m0[_rw + 2], {table}._m0[_rw + 3])); _rr.i = {sel};',
+              '    }'] + body[close + 1:])
+    head = msl[m.start():m.end()].replace(f'{param})\n{{\n', f'{param}, thread dm_raw_range& _rr)\n{{\n')
+    return name, head + '\n'.join(new), end
+
+
+def _close_paren(s, i):
+    depth = 0
+    for j in range(i, len(s)):
+        depth += (s[j] == '(') - (s[j] == ')')
+        if depth == 0: return j
+    raise ValueError('unbalanced parentheses')
+
+
+def raw_ranges(msl):
+    if 'reinterpret_cast<' not in msl: return msl
+    helpers, out, pos = [], [], 0
+    for m in _RAW_HELPER.finditer(msl):
+        r = _raw_helper(msl, m)
+        if not r: return msl   # a shape this does not know: the shader stays as it is
+        name, text, end = r
+        out += [msl[pos:m.start()], text]; pos = end
+        helpers.append(name)
+    if not helpers: return msl
+    src = ''.join(out) + msl[pos:]
+    opens = [m.start() for m in re.finditer(r'(?m)^\{$', src)]   # function bodies open at column 0
+    edits, decl = [], {}
+    for name in helpers:
+        for m in re.finditer(r'(?<![\w.])' + name + r'\(', src):
+            if src.startswith('int ' + name + '(', src.rfind('\n', 0, m.start()) + 1): continue   # its definition
+            edits.append((_close_paren(src, m.end() - 1), f', _rr{name}'))
+            decl.setdefault(max(p for p in opens if p < m.start()), set()).add(name)
+    if not edits: return msl
+    for at, names in decl.items(): edits.append((at + 2, ''.join(f'    dm_raw_range _rr{n} = {{0ul, 0ul, 0}};\n' for n in sorted(names))))
+    for at, text in sorted(edits, key=lambda e: -e[0]): src = src[:at] + text + src[at:]
+    first = src.index('static inline __attribute__((always_inline))\nint ' + helpers[0] + '(')
+    return src[:first] + _RAW_CACHE + src[first:]

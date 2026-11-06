@@ -88,10 +88,28 @@ class Facts(unittest.TestCase):
 
     def test_without_per_primitive_components_unchanged(self):   # the same shader without a per-primitive SPH keeps the layout it had
         i = ms.info(control(7, payload=128, max_v=128, max_p=126), sph(0xf0))
-        self.assertEqual(ms.memory(i), ([0, 0x10, 0x90, 0x890], 0x890 + 4 + 3 * 126 + 2))
+        lay, size = ms.memory(i); self.assertEqual((lay[:4], size), ([0, 0x10, 0x90, 0x890], 0x890 + 4 + 3 * 126 + 2))   # [4..6]: the vertex records (test_mesh_vertex_records)
 
     def test_system_values_of_an_sph(self):
         self.assertEqual(ms.sph_system(sph(0xf1)), [8]); self.assertEqual(ms.sph_system(sph(0xf0)), [])
+
+    def test_mesh_vertex_records(self):   # PRAGMATA 6adf14e9a4100082's shape: 128 vertices of 6 components. Its non-skew attribute stores (mode 0xb8) name vertex records from
+        # the end of its own SoA area, 24 bytes a vertex: [4..6] tell the translator where (AosToSoa)
+        lay, _ = ms.memory(ms.info(control(7, payload=128, max_v=128, max_p=64), sph(0xf0, b'\x30')))
+        self.assertEqual(lay[4:], [lay[3] - lay[2], 6, 128 * 24])
+        lay, _ = ms.memory(ms.info(control(7, payload=128, max_v=128, max_p=128), sph(0xf0)))   # 4fcffc73d65dc1ed's shape: 4 components
+        self.assertEqual(lay[4:], [lay[3] - lay[2], 4, 128 * 16])
+        self.assertEqual(len(ms.memory(ms.info(control(6), bytes(0x80)))[0]), 4)   # a task's mode 0xb8 is its payload: no records
+
+    def test_vertex_record_to_soa_word(self):   # InstEmitAmpereMem.cs AosToSoa's arithmetic: v = w * ceil(2^18 / n) >> 18 is w / n for every record word a Metal mesh can have
+        for n in range(1, 33):
+            m = ((1 << 18) + n - 1) // n
+            for v in range(256):
+                for c in range(n):
+                    w = v * n + c; vv = (w * m) >> 18
+                    self.assertEqual((vv, w - vv * n), (v, c))
+        n = 6; m = ((1 << 18) + n - 1) // n; rel = 37 * 24 + 5 * 4; w = rel >> 2; v = (w * m) >> 18   # vertex 37, component 5: block 1, lane 5
+        self.assertEqual((v >> 5) * n * 0x80 + (v & 31) * 4 + (w - v * n) * 0x80, 0x300 + 5 * 4 + 5 * 0x80)
 
     def test_largest_of_the_game_fits_metal(self):   # c34e01565dac1124: 256 vertices, 192 primitives
         i = ms.info(control(7, max_v=256, max_p=192), sph(0xf0, b'\x00\x0f'))

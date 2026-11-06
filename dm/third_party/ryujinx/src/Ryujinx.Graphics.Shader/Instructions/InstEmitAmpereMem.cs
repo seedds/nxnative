@@ -1,6 +1,7 @@
 using Ryujinx.Graphics.Shader.Decoders;
 using Ryujinx.Graphics.Shader.IntermediateRepresentation;
 using Ryujinx.Graphics.Shader.Translation;
+using System;
 using System.Collections.Generic;
 using System.Numerics;
 using static Ryujinx.Graphics.Shader.Instructions.InstEmitAluHelper;
@@ -180,7 +181,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 }
 
                 int baseOffset = mode switch { 0x38 => stage[1], 0xf8 or 0xb8 => stage[2], _ => 0 };
-                Operand addr = mode == 0x78 ? Const(stage[0]) : context.IAdd(AGpr(x.Ra), Const(baseOffset + (int)x.SignedField(40, 64)));
+                Operand addr = mode == 0x78 ? Const(stage[0])
+                    : mode == 0xb8 && stage.Length >= 7 ? context.IAdd(Const(stage[2]), AosToSoa(context, context.IAdd(AGpr(x.Ra), Const((int)x.SignedField(40, 64))), stage))
+                    : context.IAdd(AGpr(x.Ra), Const(baseOffset + (int)x.SignedField(40, 64)));
                 EmitLoad(context, StorageKind.SharedMemory, LsSize2.B32, addr, x.Rd, 0);
                 return;
             }
@@ -213,8 +216,29 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             bool word = mode == 0xb8 || mode == 0xf8;
-            Operand addr = context.IAdd(AGpr(x.Ra), Const((word ? stage[2] : stage[3]) + (int)x.SignedField(40, 64)));
+            Operand addr = mode == 0xb8 && stage.Length >= 7
+                ? context.IAdd(Const(stage[2]), AosToSoa(context, context.IAdd(AGpr(x.Ra), Const((int)x.SignedField(40, 64))), stage))
+                : context.IAdd(AGpr(x.Ra), Const((word ? stage[2] : stage[3]) + (int)x.SignedField(40, 64)));
             EmitStore(context, StorageKind.SharedMemory, word ? LsSize2.B32 : LsSize2.U8, addr, x.Rb, 0);
+        }
+
+        // A mesh shader's attribute word by its non-skew address (ISBEWR / ISBERD .O.ATTR.32, mode 0xb8 in a mesh shader; in a task shader it is the payload). Besides the
+        // SoA blocks (.SKEW, mode 0xf8: per component 0x80 bytes for 32 vertices or primitives), a mesh shader may address its vertices as records: vertex v's n enabled
+        // components at aos + 4n * v + 4c, aos being the end of the SoA area. PRAGMATA's 6adf14e9a4100082, 4fcffc73d65dc1ed and c0e44513c35d209a write every vertex both
+        // ways, with the same values. A record word is the SoA word of vertex v, component c, so it goes there: the two writes coincide. Before, the record addresses ran past
+        // the SoA area over the primitive count and index bytes (stage[3]) and drew garbage triangles (white streaks over PRAGMATA's cockpit window). stage[4] = aos,
+        // stage[5] = n, stage[6] = the records' size (max vertices * 4n), from dmsh_meshstage.memory(); other addresses stay as they are. v = w / n as
+        // w * ceil(2^18 / n) >> 18, exact for w < 2^13 (256 vertices of 32 components)
+        private static Operand AosToSoa(EmitterContext context, Operand off, int[] stage)
+        {
+            int n = Math.Max(stage[5], 1);
+            Operand rel = context.ISubtract(off, Const(stage[4]));
+            Operand inside = context.ICompareLessUnsigned(rel, Const(stage[6]));
+            Operand w = context.ShiftRightU32(rel, Const(2));
+            Operand v = context.ShiftRightU32(context.IMultiply(w, Const((int)(((1u << 18) + (uint)n - 1) / (uint)n))), Const(18));
+            Operand c = context.ISubtract(w, context.IMultiply(v, Const(n)));
+            Operand soa = context.IAdd(context.IAdd(context.IMultiply(context.ShiftRightU32(v, Const(5)), Const(n * 0x80)), context.ShiftLeft(context.BitwiseAnd(v, Const(31)), Const(2))), context.ShiftLeft(c, Const(7)));
+            return context.ConditionalSelect(inside, soa, off);
         }
 
         public static void ALepc(EmitterContext context)

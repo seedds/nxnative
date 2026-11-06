@@ -70,7 +70,10 @@ def memory(i):
         prim = out + attributes(i)[1] * 4 + blocks_of(i['max_p']) * per_primitive(i) * BLOCK * 4
     else:
         prim = out + blocks_of(max(i['max_v'], i['max_p'])) * max(len(i['vertex']), 1) * BLOCK * 4
-    return [WORKGROUP, INPUT, out, prim], prim + (4 + 3 * max(i['max_p'], 1) + 3 & ~3)
+    # [4..6]: the vertex records the non-skew attribute addresses (ISBEWR / ISBERD .O.ATTR.32, mode 0xb8) name, right after the SoA area: InstEmitAmpereMem.cs AosToSoa
+    # sends each to its SoA word (before, PRAGMATA 6adf14e9 / 4fcffc73 / c0e44513 wrote them over the primitive count and index bytes)
+    n = max(len(i['vertex']), 1)
+    return [WORKGROUP, INPUT, out, prim, prim - out, n, i['max_v'] * 4 * n], prim + (4 + 3 * max(i['max_p'], 1) + 3 & ~3)
 
 
 # The per-primitive system values a Metal mesh hands on, by their OMAP bit (attribute 0x40 + 4 * bit, NAK_ATTR_*): the primitive id (0x60). The fragment stage's [[primitive_id]] then

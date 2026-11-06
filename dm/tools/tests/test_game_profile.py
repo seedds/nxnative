@@ -116,3 +116,19 @@ class BuildModules(unittest.TestCase):
         r, text = self.run_game(self.ROWS.replace('subsdk1=', 'subsdk2='), 'header', ID, '{d}/game.h')
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn('{"' + 'd' * 32 + '", "main subsdk0 sdk"}', text)
+
+
+class PresentIntervalZero(unittest.TestCase):
+    def test_defaults_to_off(self):
+        rc, out = header('')
+        self.assertEqual(rc, 0)
+
+    def test_valid_on(self):
+        rc, out = header('present_interval_zero\ton\n')
+        self.assertEqual((rc, out), (0, ''))
+
+    def test_rejected_value(self):
+        rc, out = header('present_interval_zero\tinvalid\n')
+        self.assertNotEqual(rc, 0)
+        self.assertIn(': present_interval_zero must be on or off', out)
+

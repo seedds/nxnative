@@ -1214,6 +1214,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
 
+### ATOMG.CAS: a global compare-and-swap
+
+- **Symptom:** `Ampere instruction 3a9 at 0x… is not implemented` in a shader build; its compute library is missing.
+- **Cause:** the register form of Ampere ATOMG.CAS (`0x3a9`) had no emitter. The decoder also did not classify it as a store, unlike the uniform opcode `0x9a9`. The old word is returned in Rd, Ra is the address (a pair with bit 72), Rb is compared and Rc supplies the replacement. The predicate at 81..84 receives whether the comparison matched.
+- **Fix:** `AAtomgCas` in `InstEmitAmpereMem.cs` emits a 32-bit global compare-and-swap, copies the expected value before writing the destination, and returns the old word and comparison result. `DecoderAmpere.cs` marks its side effect so an unused returned word does not erase the write. Other sizes and the uniform form remain explicitly unsupported. This carries the focused implementation from `f6748a2d`; [PR 1414](https://github.com/seedds/nxnative/pull/1414) also covers CAS as part of broader global-addressing work.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): six `FoliageShader.sharcb` compute shaders, including `13002657609092b4` at 0x8c00, claim a hash slot with `CAS(slot, 0, index + 1)` and use the returned old value when it was already taken.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py AtomgCas`: returned old word, retained store with an unused return, and refusal of U64. All three fail on the pre-fix translator.
+
 ### Comparisons with .FTZ
 
 - **Symptom:** single bright dots at thin far geometry (railings, track edges), changing frame to frame as the camera moves, already in the lit picture before anti-aliasing. Most of them come from another cause (below).

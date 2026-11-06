@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import plistlib
 import shutil
+import shlex
 import signal
 import subprocess
 import sys
@@ -917,7 +918,9 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
         self.assertNotIn('tee', self.run_cmd()); self.assertNotIn('DM_PSO_ARCHIVE', self.run_cmd())
         stamp = self.tmp / 'run/pso_archive_partial/prebuilt.tsv'; stamp.parent.mkdir(parents=True); stamp.write_text('chain\n')
         cmd = self.run_cmd(partial=True)
-        self.assertTrue(cmd.endswith(f'2>&1 | tee {self.tmp}/run/host.log')); self.assertIn(f'DM_PSO_ARCHIVE={self.tmp}/run/pso_archive_partial', cmd); self.assertFalse(stamp.exists())
+        self.assertTrue(cmd.endswith(f'2>&1 | tee {shlex.quote(str(self.tmp / "run/host.log"))}'))
+        self.assertIn(f'DM_PSO_ARCHIVE={shlex.quote(str(self.tmp / "run/pso_archive_partial"))}', cmd)
+        self.assertFalse(stamp.exists())
 
     def test_pack_takes_the_partial_folder(self):   # the app and its pipeline archive read b-<chain> of the folder build_shaders returned
         ran = []

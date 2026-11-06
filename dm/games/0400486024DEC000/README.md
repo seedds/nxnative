@@ -77,6 +77,8 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 
 ## Found on this game
 
+- [ATOMG.CAS: a global compare-and-swap](../../../docs/reference/shaders.md#atomgcas-a-global-compare-and-swap): the full landing-revision build omitted six foliage compute libraries on opcode `0x3a9`.
+
 - [The GPU idles with the next command buffer already committed](../../../docs/reference/frame-rate.md#the-gpu-idles-with-the-next-command-buffer-already-committed): the 25-40 ms frames.
 - [Pool tables and readback buffers made anew each frame](../../../docs/reference/memory.md#pool-tables-and-readback-buffers-made-anew-each-frame): about 1,500 residency changes per 300 frames.
 - [Pool shaders taken as depth readers](../../../docs/reference/rendering.md#pool-shaders-taken-as-depth-readers): about 80 extra passes a frame, and half the frames over budget.
@@ -100,3 +102,26 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 - [Image atomics on a 32-bit colour texture](../../../docs/reference/shaders.md#image-atomics-on-a-32-bit-colour-texture)
 - [A host's own store in a fragment shader moves its depth test](../../../docs/reference/frame-rate.md#a-hosts-own-store-in-a-fragment-shader-moves-its-depth-test)
 - [Dead-code removal dropped a coordinate of a multi-output instruction](../../../docs/reference/shaders.md#dead-code-removal-dropped-a-coordinate-of-a-multi-output-instruction)
+
+
+## M3 Pro follow-up, 2026-11-06
+
+I tested update v131072 on an 11-core CPU / 14-core GPU M3 Pro with 36 GiB, macOS 27.2 (26B123), Xcode 27.2 (27B52), Metal 32023.922, on AC power with Low Power Mode off. This is separate from the M6 measurements above. My NUP's update main build ID is `e0f3ccfaf50065ae4ea01eb5aeb13b1a`; its base main is `33fa6c2c23848282a77e8b88a0a93f48`.
+
+The landed port at `6121fd75312cb4d1af404a01921d437741fea91e`, actual chain `adec7d81d970`, built 42,847/42,854 base libraries. Adding the focused 32-bit ATOMG.CAS implementation from [seedds's integration commit](https://github.com/stan69b/nxnative/commit/f6748a2d3fa7f238e8b5b1b9f0f9e6ff028e4e22) gives chain `4a7fcd2b71ee` and 42,853/42,854. All six recovered foliage keys, the remaining failure and the per-key comparison are recorded in [shader-comparison.json](validation-m3-20261106/shader-comparison.json). No prior successful key became a failure; all 42,823 successes from the original #1299 build also remain ready. The remaining key `68bbe98b3bfd9876` fails on opcode 481 at offset zero; its origin and runtime relevance are unknown to me. Copak731's [#1414](https://github.com/seedds/nxnative/pull/1414) covers broader descriptor and atomic work; this follow-up does not replace that work.
+
+The corrected host was built at `f66e644` after merging upstream `88c7e03`. The intervening merge changed no chain inputs or Ocarina shader-profile inputs; the host reports the expected chain. Both runs used the same original Kokiri Forest manual save and stationary camera, handheld mode, 2560x1440 window, profile-default serial encoding, Metal 4, bundled/user pipeline archives off, default Mac memory settings. Dynamic internal resolution was not fixed. No build/signing work or screenshot requests ran during the measured windows.
+
+| Source | Frame median ms | Frame p95 range ms | Host GPU median ms | Sampled footprint / GPU allocated MiB |
+| --- | ---: | ---: | ---: | ---: |
+| Landed main, chain adec7d81d970 | 57.64 | 91.83–92.54 | 57.07 | 8799 / 14579 |
+| Focused CAS, chain 4a7fcd2b71ee | 56.13 | 88.95–90.73 | 55.83 | 9212 / 14564 |
+
+Each median is the median of four separate 300-frame window medians, not a pooled 1200-frame percentile. [The eight raw timing rows](validation-m3-20261106/stationary.tsv) preserve this distinction. GPU timing is the host's reported value, not an independently measured span. Memory peaks are sampled through the measurement, and footprint overlaps GPU allocation; do not add them. This single sequential pair is not proof of a speedup or equal rendered work. The demonstrated result is six restored libraries with no shader-coverage regression. [Actual corrected game window](validation-m3-20261106/forest.jpg); black padding seen in internal captures is not present in the window.
+
+The actual Mac defaults were a 64 GiB virtual alias range, 8 GiB heap region, 6.20 GiB heap request and 9 GiB application mapping cap. The profile's 4 GiB alias applies to a different platform/probe path. The Metal API reports a 28.08 GiB recommended working set on this machine. I used a 16 GiB footprint / 22 GiB allocated-GPU guard and `DM_MEM_CAP_GB=16`; crossing the guard ends the test and is not evidence of a game OOM. The earlier conservative baseline attempt stopped at its 12.5 GiB allocated-GPU guard; the reported retry completed. Sound opened normally but was muted overnight, so audible quality is untested.
+
+Validation at the integrated revision: full host and Metal graphics suites passed; translator fixtures ran 253 tests (251 passed, 2 skipped), plus 40 GPU PrimitiveID cases; Python tools ran 1306 tests (1283 passed, 23 skipped). Python lint had 384 baseline findings and zero new; changed C fixture lint had zero findings above baseline. The full build's shader regression check reported zero regressions. The regression harness exited 2 because it found no prepared `--platform mac` game folder in the local game directory; the complete NUP build and manual test are separate evidence. I do not claim five-game or iOS coverage.
+
+
+My final CAS build ran for over 15 minutes, loaded the original forest save, accepted movement, completed the opening Saria conversation, opened Items/System menus and committed a new manual save. I then fully stopped the process, relaunched the app and loaded that new 06:01 manual save at the saved forest location, then verified camera input and movement. Both processes ended cleanly. The first run ended cleanly with host exit 0; its sampled peak was 10,049 MiB footprint / 15,382 MiB allocated GPU. The only red diagnostics on that run were four AV1 queue-full retry messages; no pool-table overflow, out-of-memory command-buffer error, forced-takeover abort or NvPkg selector exception was logged. This is a bounded route, not a claim that later gameplay is fixed. The old house/door/ladder route and matched TBDR repeats were on [my historical combined branch](https://github.com/appleforever11/nxnative/tree/codex/oot-community-fixes/dm/games/0400486024DEC000), and are not counted as final-main tests.

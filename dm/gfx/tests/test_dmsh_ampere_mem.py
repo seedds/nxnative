@@ -140,6 +140,29 @@ class Suatom(Translated):
         self.assertRegex(msl, r'uint \w+ = [^;]*atomic_fetch_add')
 
 
+class AtomgCas(Translated):
+    # ATOMG.E.CAS R0, [R0.64], R8, R9 (0x3a9), as Ocarina of Time's foliage compute shaders (FoliageShader.sharcb, e.g. 13002657609092b4 at 0x8c00) claim a hash slot: CAS(slot, 0, index + 1)
+    CAS = (0x000ea400001ee109, 0x00000008000073a9)
+    MOV_R8, MOV_R9 = (0x000fe20000000f00, 0x0100000000087a02), (0x000fe20000000f00, 0x0100010000097a02)   # R8 = c4[0], R9 = c4[4]
+    USE = (0x004ea200001ee000, 0x00000c00000c7593)   # SUATOM.ADD of R0 after waiting on the CAS, so its result stays
+
+    def test_a_compare_and_swap_returning_the_old_word(self):
+        msl = self.translate(b''.join(inst(*c) for c in (self.MOV_R8, self.MOV_R9, self.CAS, self.USE, EXIT)))
+        self.assertIn('atomic_compare_exchange', msl)
+
+    def test_an_unused_return_does_not_remove_the_store(self):
+        msl = self.translate(b"".join(inst(*c) for c in (self.MOV_R8, self.MOV_R9, self.CAS, EXIT)))
+        self.assertIn("atomic_compare_exchange", msl)
+
+    def test_64_bit_is_refused(self):   # size 2 (U64) at 73..76: the pairs are not read
+        code = inst(self.CAS[0] | 2 << 9, self.CAS[1]) + inst(*EXIT)
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / 'k.bin').write_bytes(code)
+            (Path(d) / 'jobs.json').write_text(json.dumps([dict(key='k', stage='cs', arch='sm86', code=str(Path(d) / 'k.bin'), tex={}, img={}, attr={}, fout={}, local=[32, 1, 1], nvn2_cs=[0, 0, 3, 0x40, 0])]))
+            r = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(Path(d) / 'jobs.json'), d], capture_output=True, text=True)
+        self.assertIn('ATOMG.CAS size U64', r.stdout + r.stderr)
+
+
 class Bmsk(Translated):
     """BMSK (Star Fox's 58046f286de779e1 +0x5a0, on registers the atomic reads): a mask of b bits from bit a. The form with c[4] sources keeps it from folding"""
     MOVS = inst(0x000fe20000000f00, 0x0100000000037a02) + inst(0x000fe20000000f00, 0x0100010000047a02)   # R3 = c4[0], R4 = c4[4]

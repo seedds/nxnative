@@ -26,13 +26,15 @@ int main(void) { @autoreleasepool {
         "vertex float4 vs(uint id [[vertex_id]]) { return float4(id == 1 ? 3.0 : -1.0, id == 2 ? 3.0 : -1.0, 0.0, 1.0); }\n"
         "fragment uint fs(float4 p [[position]], texture2d<float> t [[texture(0)]]) { return as_type<uint>(t.read(uint2(p.xy), 0).x); }\n" options:nil error:&e];
     if (!lib) { printf("shader source: %s\n", e.localizedDescription.UTF8String); return 1; }
-    id<MTLComputePipelineState> cp = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"cs"] error:&e];
+    id<MTLFunction> csf = [lib newFunctionWithName:@"cs"];
+    id<MTLComputePipelineState> cp = csf ? [dev newComputePipelineStateWithFunction:csf error:&e] : nil;
     MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = [lib newFunctionWithName:@"vs"]; pd.fragmentFunction = [lib newFunctionWithName:@"fs"]; pd.colorAttachments[0].pixelFormat = MTLPixelFormatR32Uint;
     id<MTLRenderPipelineState> rp = [dev newRenderPipelineStateWithDescriptor:pd error:&e];
     if (!cp || !rp) { printf("pipelines: %s\n", e.localizedDescription.UTF8String); return 1; }
     id<MTLBuffer> co = [dev newBufferWithLength:32 options:MTLResourceStorageModeShared], fo = [dev newBufferWithLength:32 options:MTLResourceStorageModeShared];
     MTLTextureDescriptor *rd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint width:8 height:1 mipmapped:NO]; rd.usage = MTLTextureUsageRenderTarget; rd.storageMode = MTLStorageModePrivate;
     id<MTLTexture> rt = [dev newTextureWithDescriptor:rd];
+    if (!t || !v || !co || !fo || !rt) { printf("textures or buffers not made\n"); return 1; }
     id<MTLCommandBuffer> cb = [q commandBuffer];
     id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder]; [ce setComputePipelineState:cp]; [ce setTexture:v atIndex:0]; [ce setBuffer:co offset:0 atIndex:0];
     [ce dispatchThreads:MTLSizeMake(8, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; [ce endEncoding];

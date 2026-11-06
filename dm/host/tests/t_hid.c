@@ -77,6 +77,11 @@ static void t_slots(void) {
     CHECK(pad_slot_take(&s, NULL, "x") == -1 && pad_slot_free(&s, NULL) == -1, "no owner, no slot");
     memset(&s, 0, sizeof s);   // DM_KBD_PLAYER=own: the keyboard holds player 1 for good
     CHECK(pad_slot_take(&s, &kbd, "keyboard") == 0 && pad_slot_take(&s, &a, "Xbox Wireless Controller") == 1, "with the keyboard on its own the first controller is player 2");
+    memset(&s, 0, sizeof s);
+    CHECK(pad_slot_assign(&s, &a, "same name", 5) == 5, "explicit assignment selects the requested slot");
+    CHECK(pad_slot_assign(&s, &b, "same name", 5) == -1 && pad_slot_of(&s, &a) == 5, "an occupied explicit slot is not stolen by a same-named device");
+    CHECK(pad_slot_assign(&s, &a, "same name", 2) == 2 && !s.owner[5], "moving an explicit owner releases its previous slot");
+    CHECK(pad_slot_assign(&s, &b, "same name", -1) == -1 && pad_slot_assign(&s, &b, "same name", DM_PLAYERS) == -1, "invalid explicit assignments do not take a slot");
 }
 
 static void t_npads(void) {
@@ -112,7 +117,7 @@ static void t_npads(void) {
     CHECK(h_hid_Strap() == RES_OK && h_hid_StrapArg(arg) == RES_OK, "both strap guide overloads answer as the player closing the guide");
     CHECK(applet_opens == 7 && applet_depth == 0, "every answer opened and closed its applet");
     arg[0] = 1;
-    CHECK(six_connected(0x0100 | 0) && !six_connected(0x0200 | 0), "player 2 has a six-axis sensor, No3 none");
+    CHECK(six_connected(0x20103) && !six_connected(0x20203), "player 2 has a six-axis sensor, No3 none");
 
     // A one-player game ({No1, Handheld}): player 2's controller plays as player 1, No2 reads as not connected
     g_signals = 0; ids((const uint32_t[]){0, NPAD_HANDHELD}, 2);
@@ -459,7 +464,7 @@ static void t_motion_live(void) {
 }
 static void t_motion_hid(void) {
     g_mode = 1; dm_pad_players(3); ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3); g_phone_mode = 0;
-    uint32_t h = 0; SixAxisState st;   // SixAxisSensorHandle uses the style bit index (FullKey = 0), unlike VibrationDeviceHandle's SDK style = 3.
+    uint32_t h = 0x20003; SixAxisState st;   // FullKey: SDK style 3, device 2.
     float flat[3] = {0, 0, -1}, tilted[3] = {.5f, 0, -.8660254f}, turn[3] = {0, 0, 2 * (float)M_PI};
     motion_now += 1000000000;
     dm_motion_clear(0);
@@ -490,6 +495,204 @@ static void t_motion_hid(void) {
     dm_pad_players(1); g_phone_mode = -1;
 }
 
+static void t_explicit(void) {
+    g_mode = 0; ids((uint32_t[]){0, 1, 2, NPAD_HANDHELD}, 4);
+    h_hid_SetStyles(0x1f);
+    dm_pad_explicit(1);
+    dm_pad_style(0, DM_STYLE_LEFT, 0); dm_pad_style(1, DM_STYLE_RIGHT, 0); dm_pad_style(2, DM_STYLE_PAIR, 0);
+    dm_pad_players(7);
+    CHECK(dm_player_npad(0) == 0 && !style_of(NPAD_HANDHELD), "explicit external controller uses No1 even in handheld mode");
+    CHECK(style_of(0) == STYLE_JOYLEFT && style_of(1) == STYLE_JOYRIGHT && style_of(2) == STYLE_JOYDUAL, "three players report their independently selected styles");
+    dm_input_set(0, 0, 0, 0, 0);
+    dm_pad_set_player(0, DM_BTN_A | DM_BTN_L | DM_BTN_R, 10000, -12000, 20000, 23000);
+    dm_pad_set_player(1, DM_BTN_B | DM_BTN_L | DM_BTN_R, -7000, 9000, 0, 0);
+    NpadState left, right, wrong;
+    fill(&left, 0, STYLE_JOYLEFT); fill(&right, 1, STYLE_JOYRIGHT); fill(&wrong, 0, STYLE_FULLKEY);
+    CHECK(left.buttons == (DM_BTN_RIGHT | DM_BTN_LEFT_SL | DM_BTN_LEFT_SR), "single left Joy-Con exposes direction buttons and both left SL/SR bits");
+    CHECK(right.buttons == (DM_BTN_B | DM_BTN_RIGHT_SL | DM_BTN_RIGHT_SR), "single right Joy-Con exposes face buttons and both right SL/SR bits");
+    CHECK(left.lx == 10000 && !left.rx && right.rx == -7000 && !right.lx, "the primary stick drives only the selected Joy-Con side");
+    // Game changes the hold type between reads while both pads stay held.
+    dm_pad_style(0, DM_STYLE_LEFT, 1); dm_pad_style(1, DM_STYLE_RIGHT, 1);
+    h_hid_HoldType(JOY_HOLD_HORIZONTAL);
+    fill(&left, 0, STYLE_JOYLEFT); fill(&right, 1, STYLE_JOYRIGHT);
+    CHECK(h_hid_GetHold() == JOY_HOLD_HORIZONTAL, "the game still reads back its horizontal hold type");
+    CHECK(left.lx == -12000 && left.ly == -10000 && left.buttons == (DM_BTN_DOWN | DM_BTN_LEFT_SL | DM_BTN_LEFT_SR),
+          "horizontal virtual left compensates with a clockwise turn");
+    CHECK(right.rx == -9000 && right.ry == -7000 && right.buttons == (DM_BTN_A | DM_BTN_RIGHT_SL | DM_BTN_RIGHT_SR),
+          "horizontal virtual right compensates with a counterclockwise turn");
+    dm_pad_style(1, DM_STYLE_RIGHT, 0);   // physical Joy-Con keeps the previous layout
+    fill(&right, 1, STYLE_JOYRIGHT);
+    CHECK(right.rx == -7000 && right.ry == 9000 && (right.buttons & DM_BTN_B), "physical Joy-Con bypasses hold compensation");
+    h_hid_HoldType(0);
+    fill(&left, 0, STYLE_JOYLEFT);
+    CHECK(left.lx == 10000 && left.ly == -12000 && (left.buttons & DM_BTN_RIGHT), "returning to vertical restores the layout immediately");
+    CHECK(left.attributes == (ATTR_CONNECTED | ATTR_LEFT_CONN) && right.attributes == (ATTR_CONNECTED | ATTR_RIGHT_CONN) && !wrong.attributes, "connection attributes and state reader match the chosen style");
+    CHECK(h_hid_GetJoyAssign(&(uint32_t){0}) == 1 && h_hid_GetJoyAssign(&(uint32_t){2}) == 0, "single and paired Joy-Con assignments are reported consistently");
+    uint32_t lh[2], rh[2], ph[2];
+    CHECK(h_hid_SixHandles(lh, 2, &(uint32_t){0}, STYLE_JOYLEFT) == 1 && lh[0] == 6, "left sensor uses SDK style 6 and device 0");
+    CHECK(h_hid_SixHandles(rh, 2, &(uint32_t){1}, STYLE_JOYRIGHT) == 1 && rh[0] == 0x10107, "right sensor uses SDK style 7 and device 1");
+    CHECK(h_hid_SixHandles(ph, 2, &(uint32_t){2}, STYLE_JOYDUAL) == 2 && ph[0] == 0x205 && ph[1] == 0x10205, "paired Joy-Con has two sensor handles on its own player");
+    dm_motion_clear(0); dm_motion_clear(1);
+    dm_motion_set(0, (float[]){0, 0, -1}, (float[]){1, 0, 0});
+    dm_motion_set(1, (float[]){0, -1, 0}, (float[]){0, 2, 0});
+    SixAxisState ls, rs;
+    CHECK(h_hid_SixStates(&ls, 1, lh) == 1 && h_hid_SixStates(&rs, 1, rh) == 1 && ls.acc[2] == -1 && rs.acc[1] == -1, "each Joy-Con sensor reads only its assigned player's motion");
+    CHECK(!six_connected(lh[0] | 1u << 16) && !six_connected(rh[0] & ~0x10000u), "handles for the other half are disconnected");
+    dm_haptics_init(vibration_sink, 1); dm_haptics_route(0, 1); dm_haptics_route(1, 1);
+    CHECK(h_hid_VibHandles(lh, 2, &(uint32_t){0}, STYLE_JOYLEFT) == 1 && lh[0] == 6, "left Joy-Con exposes only its left vibration channel");
+    CHECK(h_hid_VibHandles(rh, 2, &(uint32_t){1}, STYLE_JOYRIGHT) == 1 && rh[0] == 0x10107, "right Joy-Con exposes only its right vibration channel");
+    CHECK(vib_targets(lh[0]) == 1 && vib_targets(rh[0]) == 2, "vibration routes to the independently assigned players");
+    h_hid_SetStyles(STYLE_JOYRIGHT);
+    CHECK(!style_of(0) && style_of(1) == STYLE_JOYRIGHT, "a game cannot see a selected style it does not support");
+    h_hid_SetStyles(0x1f);
+    ids((uint32_t[]){0, NPAD_HANDHELD}, 2);
+    CHECK(!merged_players(), "explicit player 2 does not silently feed player 1 in a one-player game");
+    dm_pad_players(0);
+    CHECK(!style_of(0) && !six_connected(6), "disconnecting explicit player 1 disconnects its style and sensor");
+    dm_pad_explicit(0); for (int p = 0; p < DM_PLAYERS; p++) dm_pad_style(p, DM_STYLE_AUTO, 0);
+    dm_pad_players(1); g_mode = 1; h_hid_SetStyles(0xffffffffu);
+}
+
+static void t_ios_touch_fallback(void) {
+    g_mode = 0; h_hid_SetStyles(0x1f);
+    ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3);
+    dm_pad_players_ios(2, 0);
+    CHECK(style_of(NPAD_HANDHELD) == STYLE_HANDHELD && style_of(1) == STYLE_FULLKEY,
+          "automatic iOS assignments keep the legacy player 1 fallback");
+    dm_pad_style(1, DM_STYLE_RIGHT, 1); dm_pad_players_ios(2, 2);
+    CHECK(!style_of(NPAD_HANDHELD) && !style_of(0) && style_of(1) == STYLE_JOYRIGHT,
+          "a manual assignment to player 2 does not add a hidden touch player");
+    dm_pad_style(1, DM_STYLE_AUTO, 0); dm_pad_players_ios(0, 0);
+    CHECK(style_of(NPAD_HANDHELD) == STYLE_HANDHELD, "with no assigned controller the touch pad returns as handheld");
+    g_mode = 1;
+    CHECK(style_of(0) == STYLE_FULLKEY, "docked touch fallback uses the Pro slot");
+    h_hid_SetStyles(STYLE_JOYRIGHT);
+    CHECK(!style_of(0), "touch fallback is not counted for a Joy-Con-only game");
+
+    ids((uint32_t[]){0}, 1); h_hid_SetStyles(0x1f);
+    dm_pad_style(1, DM_STYLE_LEFT, 1); dm_pad_players_ios(7, 2);
+    CHECK(merged_players() == 4, "only untouched automatic pads still merge into player 1");
+    dm_pad_style(1, DM_STYLE_AUTO, 0); dm_pad_players(1); h_hid_SetStyles(0xffffffffu);
+}
+
+static void t_ios_automatic_compatibility(void) {
+    const uint32_t masks[] = {0, 1, 2, 3, 0xff};
+    const uint32_t supported_ids[] = {0, 1, 0x103, 0x3ff};
+    const uint32_t supported_styles[] = {0, STYLE_FULLKEY, STYLE_HANDHELD, 0x1f};
+    dm_pad_explicit(0);
+    for (int p = 0; p < DM_PLAYERS; p++) dm_pad_style(p, DM_STYLE_AUTO, 0);
+    for (g_mode = 0; g_mode <= 1; g_mode++) {
+        for (unsigned i = 0; i < sizeof supported_ids / sizeof supported_ids[0]; i++) {
+            atomic_store(&g_ids_supported, supported_ids[i]);
+            for (unsigned s = 0; s < sizeof supported_styles / sizeof supported_styles[0]; s++) {
+                h_hid_SetStyles(supported_styles[s]);
+                for (unsigned m = 0; m < sizeof masks / sizeof masks[0]; m++) {
+                    dm_pad_players_ios(masks[m], 0);
+                    uint32_t legacy_players = masks[m] | 1u, unsupported = 0;
+                    for (int p = 0; p < DM_PLAYERS; p++) {
+                        // Original iOS always reported the default Player 1.
+                        uint32_t id = p == 0 && !g_mode ? NPAD_HANDHELD : (uint32_t)p;
+                        int legacy_reported = !p || ((legacy_players >> p & 1u) && (supported_ids[i] >> p & 1u));
+                        uint32_t expected = legacy_reported ? (id == NPAD_HANDHELD ? STYLE_HANDHELD : STYLE_FULLKEY) & supported_styles[s] : 0;
+                        CHECK(style_of(id) == expected, "automatic iOS controller styles match the original HID behavior");
+                        if (p && (legacy_players >> p & 1u) && !legacy_reported) unsupported |= 1u << p;
+                    }
+                    uint32_t expected_merge = !(supported_ids[i] & 0xfeu) ? unsupported : 0;
+                    CHECK(merged_players() == expected_merge, "automatic iOS one-player merging matches the original HID behavior");
+                }
+            }
+        }
+    }
+    g_mode = 1;
+    atomic_store(&g_ids_supported, 0x3ff);
+    h_hid_SetStyles(0xffffffffu);
+    dm_pad_players(1);
+    g_signals = 0;
+    uint64_t generation = dm_pad_generation(0);
+    dm_pad_reconfigure_begin();
+    dm_pad_reconfigure_sources(1);
+    dm_pad_players_ios(1, 0);
+    dm_pad_reconfigure_end();
+    CHECK(dm_pad_generation(0) == generation + 1, "automatic source changes still invalidate queued motion");
+    CHECK(!g_signals, "an unchanged automatic controller layout emits no extra style event");
+    static uint8_t second[0x40];
+    h_hid_BindStyleEv(&(uint32_t){1}, second, 0);
+    dm_pad_reconfigure_begin();
+    dm_pad_reconfigure_sources(2);
+    dm_pad_players_ios(3, 0);
+    dm_pad_reconfigure_end();
+    CHECK(g_signals == 1, "connecting automatic player 2 emits exactly the original connection event");
+    dm_pad_players(1);
+}
+
+static int controller_hook_answer, controller_hook_calls, controller_hook_min, controller_hook_max;
+static int controller_hook(int minimum, int maximum) {
+    CHECK(applet_depth == 1, "native controller request stays within the applet focus lifetime");
+    controller_hook_calls++; controller_hook_min = minimum; controller_hook_max = maximum;
+    return controller_hook_answer;
+}
+static _Atomic int live_reader_started, live_reader_finished;
+static NpadState live_observed;
+static void *live_reader(void *unused) {
+    (void)unused; atomic_store(&live_reader_started, 1);
+    fill(&live_observed, 0, STYLE_JOYRIGHT);
+    atomic_store(&live_reader_finished, 1); return NULL;
+}
+static void t_live_apply(void) {
+    g_mode = 1; ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3); h_hid_SetStyles(0x1f);
+    dm_pad_explicit(1); dm_pad_style(0, DM_STYLE_PRO, 0); dm_pad_style(1, DM_STYLE_PRO, 0); dm_pad_players(3);
+    dm_input_set(0, 0, 0, 0, 0); script_set(0, 0, 0, 0, 0);
+    dm_pad_set_player(0, DM_BTN_A, 111, 0, 0, 0); dm_pad_set_player(0, 0, 0, 0, 0, 0);
+    uint64_t old = dm_pad_generation(0), unchanged = dm_pad_generation(1);
+    dm_motion_set_generation(0, old, (float[]){0, 0, -1}, (float[]){1, 0, 0});
+    dm_motion_set_generation(1, unchanged, (float[]){0, -1, 0}, (float[]){0, 2, 0});
+    dm_haptics_init(vibration_sink, 1); dm_haptics_route(0, 1); dm_haptics_route(1, 1);
+    h_hid_SendVib(&(uint32_t){3}, &(dm_vibration){.amplitude_low = .7f, .frequency_low = 160, .frequency_high = 320});
+    h_hid_SendVib(&(uint32_t){0x103}, &(dm_vibration){.amplitude_low = .6f, .frequency_low = 160, .frequency_high = 320});
+    dm_pad_reconfigure_begin(); dm_pad_reconfigure_end();
+    CHECK(dm_pad_generation(0) == old && dm_haptics_actual(0, 0).amplitude_low == .7f, "validation without a reset leaves active state unchanged");
+    dm_pad_reconfigure_begin(); dm_pad_reconfigure_reset(1);
+    pthread_t reader; pthread_create(&reader, NULL, live_reader, NULL);
+    while (!atomic_load(&live_reader_started)) sched_yield();
+    usleep(10000);
+    CHECK(!atomic_load(&live_reader_finished), "a guest state read waits until the complete live apply has been published");
+    dm_pad_style(0, DM_STYLE_RIGHT, 0); dm_pad_set_player(0, DM_BTN_B, 1234, 0, 0, 0); dm_pad_players(3);
+    dm_motion_set_generation(0, old, (float[]){1, 0, 0}, (float[]){9, 9, 9});
+    motion_state ms;
+    CHECK(!motion_live(0, &ms), "a queued gyro sample from the old slot owner is ignored");
+    CHECK(dm_pad_generation(1) == unchanged && motion_live(1, &ms) && ms.acc[1] == -1, "unchanged players retain their motion generation and source");
+    CHECK(dm_haptics_actual(0, 0).amplitude_low == 0 && dm_haptics_actual(1, 0).amplitude_low == .6f, "only reassigned players lose their old vibration values");
+    dm_pad_reconfigure_end(); pthread_join(reader, NULL);
+    CHECK(live_observed.attributes == (ATTR_CONNECTED | ATTR_RIGHT_CONN) && live_observed.buttons == DM_BTN_B && live_observed.rx == 1234, "a guest reader sees the complete new style and input without the old press latch");
+    dm_motion_set_generation(0, dm_pad_generation(0), (float[]){0, 0, -1}, (float[]){0, 1, 0});
+    CHECK(motion_live(0, &ms) && ms.acc[2] == -1, "the new controller generation supplies motion normally");
+    dm_motion_suspend(1);
+    CHECK(!motion_live(0, &ms) && !motion_live(1, &ms), "the controller sheet suppresses live motion for every player");
+    dm_motion_suspend(0);
+    CHECK(motion_live(1, &ms) && ms.acc[1] == -1, "closing the sheet restores motion on the same player");
+    dm_pad_set_player(0, DM_BTN_A, 0, 0, 0, 0); dm_pad_set_player(0, 0, 0, 0, 0, 0);
+    dm_input_set(DM_BTN_X, 0, 0, 0, 0); dm_input_quiesce();
+    NpadState state; fill(&state, 0, STYLE_JOYRIGHT);
+    CHECK(!state.buttons, "opening configuration discards physical held input and pending press edges");
+    dm_controller_support_hook = controller_hook;
+    int8_t arg[32] = {2, 4}; int32_t info[2];
+    controller_hook_answer = 0;
+    CHECK(h_hid_ShowCtrl(info, arg) == RES_CTRL_CANCELED, "native Cancel returns the controller applet's cancellation result");
+    CHECK(controller_hook_min == 2 && controller_hook_max == 4 && !applet_depth, "the game's player limits reach the native request and applet focus is restored");
+    controller_hook_answer = 1;
+    CHECK(h_hid_ShowCtrl0(arg) == RES_OK && controller_hook_calls == 2, "the no-result applet overload also waits for native Apply");
+    dm_controller_support_hook = NULL;
+    dm_pad_explicit(0); dm_pad_style(0, DM_STYLE_AUTO, 0); dm_pad_style(1, DM_STYLE_AUTO, 0); g_mode = 0; dm_pad_players(1);
+    static uint8_t handheld[0x40], external[0x40];
+    h_hid_BindStyleEv(&(uint32_t){NPAD_HANDHELD}, handheld, 0); h_hid_BindStyleEv(&(uint32_t){0}, external, 0);
+    g_signals = 0;
+    dm_pad_reconfigure_begin(); dm_pad_reconfigure_reset(1); dm_pad_explicit(1); dm_pad_style(0, DM_STYLE_PRO, 0); dm_pad_players(1);
+    CHECK(!g_signals, "style events are deferred while live Apply is incomplete");
+    dm_pad_reconfigure_end();
+    CHECK(g_signals == 2, "changing player 1 from handheld to external signals both npad style events once");
+    dm_pad_explicit(0); dm_pad_style(0, DM_STYLE_AUTO, 0); dm_pad_players(1); g_mode = 1; h_hid_SetStyles(0xffffffffu);
+}
+
 int main(void) {
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
     t_slots();
@@ -513,6 +716,10 @@ int main(void) {
         CHECK(!h_hid_NmouseEnable(5, 1) && !h_hid_NmousePos(5, 0, 0), "an unknown handle does not");
         CHECK(!h_hid_NmouseState(NULL, merged) && !h_hid_NmouseNpad(&npad, merged) && npad == 9, "no state and no controller behind the merged handle");
     }
+    t_explicit();
+    t_live_apply();
+    t_ios_touch_fallback();
+    t_ios_automatic_compatibility();
     printf("hid players: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

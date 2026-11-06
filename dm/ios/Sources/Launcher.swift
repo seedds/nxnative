@@ -96,6 +96,7 @@ private struct LauncherView: View {
     @ObservedObject var m: LauncherModel
     let play: () -> Void
     @State private var memory = os_proc_available_memory()
+    @State private var configuringControllers = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -120,7 +121,15 @@ private struct LauncherView: View {
                         if !rows.isEmpty {
                             Section(section) {
                                 ForEach(rows) { SettingRow(s: $0, m: m) }
+                                if section == "Controls" {
+                                    Button("Configure controllers") { configuringControllers = true }
+                                }
                             }
+                        }
+                    }
+                    if !m.sections.contains("Controls") {
+                        Section("Controls") {
+                            Button("Configure controllers") { configuringControllers = true }
                         }
                     }
                     Section {
@@ -144,6 +153,7 @@ private struct LauncherView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .sheet(isPresented: $configuringControllers) { ControllerSetupView() }
         .task {
             while !Task.isCancelled {
                 memory = os_proc_available_memory()

@@ -18,6 +18,7 @@
 #include "front.h"
 #include "hle.h"
 #include "pad_slots.h"
+#include "controller_setup_mac.h"
 #include "haptics_apple.h"
 #include "motion_apple.h"
 #include "motion_pro_mac.h"
@@ -29,10 +30,14 @@
 #include <math.h>
 #include <sys/stat.h>
 
+int front_controller_setup(int fd) { return cs_run(fd, dm_haptics_apple_identify); }
+
 static CAMetalLayer *g_layer;
 static uint64_t g_btn;
 static int g_w, g_a, g_s, g_d;
 static int g_rl, g_ru, g_rr, g_rd;   // arrow keys pressed with Shift held: the right stick (each goes back up as it went down, whatever Shift does meanwhile)
+static int g_controller_ui_active;
+static void controller_ui_refresh(void);
 static int g_input_on = 1;   // main thread: the game window is key, so its keyboard, mouse and controllers reach the game (input_release / input_resume)
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
@@ -210,6 +215,9 @@ static int merge_pads_left(GCController *gone) {
 }
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil on a connect)
 static void pads_changed(GCController *gone) {
+    NSMutableArray<GCController *> *now = [GCController.controllers mutableCopy];
+    if (gone) [now removeObject:gone];
+    cs_update(now);
     if (g_merge) {
         int any = 0;
         for (GCController *c in GCController.controllers) if (c.extendedGamepad && c != gone) {
@@ -219,10 +227,10 @@ static void pads_changed(GCController *gone) {
         }
         if (gone) dm_motion_detach(gone, 0);
         if (!any) { if (!g_hidpads) dm_pad_set(0, 0, 0, 0, 0); dm_haptics_apple_controller(0, nil); }   // a raw HID pad still plays player 1 (pad_hid_mac.h)
-        pro_players_changed(gone);
+        pro_players_changed(gone); controller_ui_refresh();
         return;
     }
-    NSArray<GCController *> *now = GCController.controllers; char nb[16];
+    char nb[16];
     for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p] && (g_held[p] == gone || ![now containsObject:g_held[p]])) {
         npad_name(p, nb, sizeof nb); LOG("controller '%s' disconnected: player %d (npad %s) is free", pad_name(g_held[p]), p + 1, nb);
         g_held[p].extendedGamepad.valueChangedHandler = nil;
@@ -231,17 +239,27 @@ static void pads_changed(GCController *gone) {
         pad_slot_free(&g_slots, (__bridge const void *)g_held[p]); g_held[p] = nil;
         dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
     }
+    // Reserve selected players before automatically assigning newly seen devices.
+    if (cs_explicit) [now sortUsingComparator:^NSComparisonResult(GCController *a, GCController *b) {
+        uint32_t style;
+        int ap = cs_player(a, &style), bp = cs_player(b, &style);
+        return (ap >= 0) == (bp >= 0) ? NSOrderedSame : ap >= 0 ? NSOrderedAscending : NSOrderedDescending;
+    }];
     for (GCController *c in now) if (c.extendedGamepad && c != gone && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) {
-        int p = pad_slot_take(&g_slots, (__bridge const void *)c, pad_name(c));
+        uint32_t style = DM_STYLE_AUTO;
+        int selected = cs_explicit ? cs_player(c, &style) : -1;
+        int p = cs_explicit && selected >= 0 ? pad_slot_assign(&g_slots, (__bridge const void *)c, pad_name(c), selected) : pad_slot_take(&g_slots, (__bridge const void *)c, pad_name(c));
+        if (cs_explicit && selected == -1) continue;
         if (p < 0) { LOG("controller '%s' connected: all %d players are taken, not used", pad_name(c), DM_PLAYERS); continue; }
         g_held[p] = c; pad_keep_system_buttons(c);
+        dm_pad_style(p, style, !dm_pad_is_joycon(c));
         c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; pad_read(g); };
         dm_motion_attach(c, p);
         npad_name(p, nb, sizeof nb); LOG("controller '%s' connected: player %d (npad %s)%s", pad_name(c), p + 1, nb, c.motion.hasRotationRate ? ", with motion (gyro)" : "");
         pad_read(c.extendedGamepad);
     }
     dm_pad_players(pad_slot_mask(&g_slots));
-    pro_players_changed(gone);
+    pro_players_changed(gone); controller_ui_refresh();
 }
 // Display sleep: macOS counts keyboard and mouse input as user activity, not a controller's, so in controller-only play the display dims and locks; the latency
 // activity in front_run keeps the system awake, not the display. While the game window is key the display stays awake (NSActivityIdleDisplaySleepDisabled);
@@ -280,6 +298,7 @@ static void input_release(void) {
     pads_release();
 }
 static void input_resume(void) {
+    if (g_controller_ui_active) return;
     display_awake(1);
     g_input_on = 1;
     dm_motion_pro_active(1);
@@ -293,6 +312,7 @@ static void hidpad_read(hid_pad *d) {
     pad_set(p, pad_hid_buttons(&d->st), s[0], s[1], s[2], s[3]);
 }
 static void hidpad_attach(hid_pad *d) {
+    if (cs_explicit) return;   // explicit choices include only devices shown in the launch window
     int p = g_merge ? 0 : pad_slot_take(&g_slots, d, d->name); char nb[16];
     if (p < 0) { LOG("controller '%s' (HID) connected: all %d players are taken, not used", d->name, DM_PLAYERS); return; }
     npad_name(p, nb, sizeof nb); LOG("controller '%s' (HID) connected: player %d (npad %s)", d->name, p + 1, nb);
@@ -389,7 +409,7 @@ static void hq_changed(hq_phase was, hq_phase now, GCController *holder) {
     }
 }
 static void hq_poll(void) {
-    static int busy; if (!g_hq_on || !g_win || busy) return;
+    static int busy; if (!g_hq_on || !g_win || busy || g_controller_ui_active) return;
     busy = 1;
     int home, a, b; GCController *holder = nil; hq_buttons(&home, &a, &b, &holder);
     double now = CACurrentMediaTime();
@@ -410,15 +430,64 @@ static void hq_close(void) {
 static void pads_start(void) {
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
     e = getenv("DM_KBD_PLAYER"); g_kbd_own = !g_merge && e && !strcmp(e, "own");
+    if (cs_explicit) {
+        g_merge = 0; dm_pad_explicit(1);
+        for (NSDictionary *choice in cs_choices.allValues)
+            if ([choice[@"player"] intValue] == 1) g_kbd_own = 0;
+        // Keep the chosen style even if a device disappears after Play but before this
+        // point. An absent explicit player 1 must not turn into a keyboard controller.
+        for (NSDictionary *choice in cs_choices.allValues) {
+            int player = [choice[@"player"] intValue];
+            if (player > 0) dm_pad_style(player - 1, cs_style(choice[@"style"]), 0);
+        }
+    }
     static const char kbd = 0;
     if (g_kbd_own) pad_slot_take(&g_slots, &kbd, "keyboard");   // holds player 1 for good
-    LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : g_kbd_own ? "the keyboard is player 1, each controller a player of its own from player 2 on (DM_KBD_PLAYER=own)"
+    LOG("front end: %s", cs_explicit ? "explicit controller players and types from the game launch window" : g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : g_kbd_own ? "the keyboard is player 1, each controller a player of its own from player 2 on (DM_KBD_PLAYER=own)"
                                                                            : "each controller is a player of its own, the keyboard plays with player 1");
     hq_start();
     pads_changed(nil);
     hq_log_setting();
     dm_motion_pro_start(pro_devices_changed);
     hidpad_start();
+}
+
+#include "controller_panel_mac.h"
+static DmControllerUI *g_controller_ui;
+
+#include "controller_assignment_apple.h"
+static NSArray<GCController *> *controller_devices(void) { return GCController.controllers; }
+static dm_controller_host controller_host(void) {
+    return (dm_controller_host){&g_slots, g_held, &g_merge, &g_kbd_own, controller_devices, dm_opmode, pad_read, pad_keep_system_buttons, pro_players_changed};
+}
+static NSDictionary *controller_state(void) { return controller_assignment_state(controller_host()); }
+static dm_controller_requirements controller_requirements(void) { return controller_assignment_requirements(controller_host()); }
+static NSString *controller_apply(NSArray *choices, int minimum, int maximum) {
+    uint32_t changed = 0;
+    NSString *error = controller_assignment_apply(controller_host(), choices, minimum, maximum, &changed);
+    if (!error) LOG("controller configuration applied live (changed players %#x)", changed);
+    return error;
+}
+static void controller_ui_refresh(void) {
+    if (!g_controller_ui.panel) return;
+    // Take the sheet's snapshot after the connection callback and its slot updates finish.
+    dispatch_async(dispatch_get_main_queue(), ^{ [g_controller_ui refresh]; });
+}
+static int controller_support(int minimum, int maximum) { return [g_controller_ui requestMinimum:minimum maximum:maximum]; }
+static void controller_ui_start(NSWindow *parent, NSMenu *bar) {
+    g_controller_ui = [DmControllerUI new]; g_controller_ui.parent = parent;
+    g_controller_ui.snapshot = ^{ return controller_state(); };
+    g_controller_ui.identify = ^BOOL(NSString *key) {
+        cs_update(GCController.controllers);
+        return cs_identify(key, dm_haptics_apple_identify);
+    };
+    g_controller_ui.requirements = ^{ return controller_requirements(); };
+    g_controller_ui.resolveChoices = ^NSArray *(NSArray *choices) { return controller_assignment_resolve(controller_host(), choices); };
+    g_controller_ui.applyChoices = ^NSString *(NSArray *choices, int minimum, int maximum) { return controller_apply(choices, minimum, maximum); };
+    g_controller_ui.didOpen = ^{ g_controller_ui_active = 1; hq_close(); input_release(); dm_input_quiesce(); };
+    g_controller_ui.didClose = ^{ g_controller_ui_active = 0; if (NSApp.isActive && g_win.isKeyWindow) input_resume(); };
+    dm_controller_menu_add(bar, g_controller_ui);
+    dm_controller_support_hook = controller_support;
 }
 
 // Mouse as a single-point touchscreen (front.h dm_touch_set): left button down / drag = finger 0, release = lifted. The content view takes the clicks,
@@ -1369,6 +1438,7 @@ void front_run(void (*guest)(void)) {
             dispatch_async(dispatch_get_main_queue(), ^{ [g_cheats_menu showPanel:nil]; });
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
+        controller_ui_start(win, bar);
         NSApp.mainMenu = bar;
         const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
         if (fs && strcmp(fs, "0")) {

@@ -58,6 +58,9 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_pad_apple
 	$(B)/t_home_quit
 	$(B)/t_home_quit_mac
+	$(B)/t_controller_setup_mac
+	$(B)/t_controller_panel_mac
+	$(B)/t_controller_assignment_mac
 	$(B)/t_motion_pro
 	$(B)/t_motion_pro_mac
 	TMPDIR="$(abspath $(B))" $(B)/t_hid
@@ -207,6 +210,15 @@ run: $(B)/t_motion_apple
 $(B)/t_motion_apple: t_motion_apple.m ../motion_apple.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -I.. -o $@ t_motion_apple.m -framework Foundation -framework GameController
 run: $(B)/t_pad_apple
+run: $(B)/t_controller_setup_mac
+run: $(B)/t_controller_panel_mac
+run: $(B)/t_controller_assignment_mac
+$(B)/t_controller_assignment_mac: t_controller_assignment_mac.m ../controller_routes_ios.h ../controller_assignment_apple.h ../controller_setup_mac.h ../controller_setup_apple.h ../controller_requirements_apple.h ../pad_slots.h ../motion_apple.h ../haptics_apple.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -o $@ t_controller_assignment_mac.m -framework AppKit -framework GameController
+$(B)/t_controller_panel_mac: t_controller_panel_mac.m ../controller_panel_mac.h ../controller_routes_ios.h ../controller_setup_apple.h ../controller_requirements_apple.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -o $@ t_controller_panel_mac.m -framework AppKit
+$(B)/t_controller_setup_mac: t_controller_setup_mac.m ../controller_setup_mac.h ../controller_setup_apple.h ../controller_requirements_apple.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -I.. -o $@ t_controller_setup_mac.m -framework Foundation -framework AppKit -framework GameController
 $(B)/t_pad_apple: t_pad_apple.m ../pad_apple.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -I.. -o $@ t_pad_apple.m -framework Foundation -framework GameController
 run: $(B)/t_home_quit $(B)/t_home_quit_mac
@@ -219,9 +231,9 @@ $(B)/t_motion_pro: t_motion_pro.c ../motion_pro.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -fsanitize=address,undefined -o $@ t_motion_pro.c
 $(B)/t_motion_pro_mac: t_motion_pro_mac.m ../motion_pro_mac.h ../motion_pro.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_motion_pro_mac.m -framework Foundation -framework GameController -framework IOKit
-$(B)/t_hid: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../dm_input.h ../hle.h ../dm.h $(GAME_H) | $(B)
+$(B)/t_hid: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../pad_style.h ../dm_input.h ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_hid.c ../hle_haptics.c
-$(B)/t_hid_tsan: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../dm_input.h ../hle.h ../dm.h $(GAME_H) | $(B)
+$(B)/t_hid_tsan: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../pad_style.h ../dm_input.h ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -fsanitize=thread -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_hid.c ../hle_haptics.c
 $(B)/t_haptics: t_haptics.c ../hle_haptics.c ../hle_haptics.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_haptics.c ../hle_haptics.c

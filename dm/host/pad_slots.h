@@ -31,6 +31,13 @@ static int pad_slot_free(pad_slots *s, const void *owner) {
     int p = pad_slot_of(s, owner); if (p >= 0) s->owner[p] = NULL;
     return p;
 }
+static inline int pad_slot_assign(pad_slots *s, const void *owner, const char *name, int player) {
+    if (!owner || player < 0 || player >= DM_PLAYERS || (s->owner[player] && s->owner[player] != owner)) return -1;
+    pad_slot_free(s, owner);
+    s->owner[player] = owner;
+    snprintf(s->last[player], sizeof s->last[player], "%s", name ? name : "");
+    return player;
+}
 static uint32_t pad_slot_mask(const pad_slots *s) {   // bit p: slot p is held
     uint32_t m = 0; for (int i = 0; i < DM_PLAYERS; i++) if (s->owner[i]) m |= 1u << i;
     return m;

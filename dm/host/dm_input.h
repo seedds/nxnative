@@ -8,6 +8,8 @@ enum {
     DM_BTN_LS = 1u << 4, DM_BTN_RS = 1u << 5, DM_BTN_L = 1u << 6, DM_BTN_R = 1u << 7,
     DM_BTN_ZL = 1u << 8, DM_BTN_ZR = 1u << 9, DM_BTN_PLUS = 1u << 10, DM_BTN_MINUS = 1u << 11,
     DM_BTN_LEFT = 1u << 12, DM_BTN_UP = 1u << 13, DM_BTN_RIGHT = 1u << 14, DM_BTN_DOWN = 1u << 15,
+    DM_BTN_LEFT_SL = 1u << 24, DM_BTN_LEFT_SR = 1u << 25,
+    DM_BTN_RIGHT_SL = 1u << 26, DM_BTN_RIGHT_SR = 1u << 27,
 };
 #define DM_BTN_SHAKE (1ull << 63)   // not an NpadButton: the controller is shaken while set (its six-axis sensor, hle_hid.c); never reaches the game's buttons
 #define DM_STICK_MAX 32767
@@ -15,16 +17,38 @@ void dm_input_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t 
 uint64_t dm_input_samples(void);   // Cumulative number of times the game has sampled the controller
 // The cheat VM's key mask (hle_cheats.c): every input source's button bits (0..15 in the enum above) ORed and the
 // merged axes' eight stick-direction bits (16..23), one flat bitset; no latches are consumed (the game's own reads
-// keep them). The NpadButton SL / SR bits (24 / 25) never fire: no input source of this host reports them
+// keep them). SL / SR bits (24..27) pass through when a source supplies them. Virtual single Joy-Con layout conversion happens in the game-facing state reader
 uint64_t dm_cheats_keys(void);
 // Physical controller path (Mac / iOS GameController): stored separately from keyboard / touch and scripted input (DM_KEYS / DM_CTL); when the game reads player 1,
 // buttons are ORed bitwise and each stick axis takes whichever source is deflected more. All 0 when no controller is connected.
 // dm_pad_set is player 1's controller (DM_BTN_SHAKE counts there only); dm_pad_set_player sets player n + 1's, which the game reads on its own npad (hle_hid.c) while
 // dm_pad_players has its bit set; a player whose npad the game does not support (SetSupportedNpadIdType) feeds player 1 instead, so a one-player game sees every controller
 #define DM_PLAYERS 8   // npads No1..No8; player 1 is the Handheld npad in handheld mode (DM_OPMODE=0)
+enum { DM_STYLE_AUTO = 0, DM_STYLE_PRO = 1, DM_STYLE_PAIR = 4, DM_STYLE_LEFT = 8, DM_STYLE_RIGHT = 16 };
+// Explicit game-facing styles. AUTO retains the platform's legacy docked / handheld behavior.
+// Called before guest startup, or inside a live reconfiguration transaction. Device ownership stays with the front end.
+// follow_hold adapts a full-size pad assigned as a single Joy-Con to the game's hold type.
+void dm_pad_style(int player, uint32_t style, int follow_hold);
+void dm_pad_explicit(int enabled);   // explicit player slots never merge into player 1
+uint32_t dm_pad_configured_style(int player);
+void dm_pad_supported(uint32_t *styles, uint32_t *ids);
+// A live reassignment holds this barrier across detach, state clearing and reattach.
+// Guest readers see either complete configuration. Only affected players lose motion history.
+void dm_pad_reconfigure_begin(void);
+void dm_pad_reconfigure_reset(uint32_t affected);
+void dm_pad_reconfigure_sources(uint32_t affected);   // invalidate sources without changing the reported controller layout
+void dm_pad_reconfigure_end(void);
+void dm_motion_suspend(int suspended);   // temporarily hide live motion while controller setup is open
+void dm_input_quiesce(void);   // discard physical buttons, sticks and press latches while a native input UI is open
+uint64_t dm_pad_generation(int player);
+void dm_motion_set_generation(int player, uint64_t generation, const float acc[3], const float rot[3]);
+// Frontends install the asynchronous native controller UI bridge before guest startup.
+// Returns 1 for Apply, 0 for Cancel, -1 when unavailable (legacy/headless behavior).
+extern int (*dm_controller_support_hook)(int minimum, int maximum);
 void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry);
 void dm_pad_set_player(int player, uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry);   // player 0..DM_PLAYERS-1 (player 1..8)
-void dm_pad_players(uint32_t mask);   // bit p: player p + 1 has a controller; player 1 always counts as connected (the keyboard, the touch gamepad, DM_KEYS)
+void dm_pad_players_ios(uint32_t mask, uint32_t manual);   // preserve automatic routing for slots without a manual override
+void dm_pad_players(uint32_t mask);   // bit p: player p + 1 has a controller; player 1 has keyboard / touch fallback unless an explicit physical controller was selected there
 // Live controller motion (hle_hid.c, motion_fusion.h): player 0..DM_PLAYERS-1's gyro and accelerometer as GameController reports them, acceleration in G (gravity direction,
 // (0, 0, -1) face up) and rotation rate in rad/s, in Apple's controller frame. While samples keep coming the player's six-axis sensor follows the controller; dm_motion_clear stops it
 void dm_motion_set(int player, const float acc[3], const float rot[3]);

@@ -261,6 +261,7 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
 - (void)sceneWillResignActive:(UIScene *)s { front_ios_focus_event(0); }
 - (void)sceneDidEnterBackground:(UIScene *)s { front_ios_focus_event(1); }
 - (void)sceneWillEnterForeground:(UIScene *)s { front_ios_focus_event(2); }
+- (void)sceneDidDisconnect:(UIScene *)s { front_ios_focus_event(4); }
 - (void)sceneDidBecomeActive:(UIScene *)s { front_ios_focus_event(3); }
 @end
 

@@ -86,7 +86,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0xabb, InstName.Ldc, AUldc, N, uniform: true);
             x(AmpereOpcodes.Ldc, InstName.Ldc, ALdc, N);
             x(0x582, InstName.Ldc, ALdc, N);
-            x(0x80d, InstName.Nop, ACsmtest, N, writesRd: false);   // CSMTEST (clip state machine), see ACsmtest   // bindless LDC (handle in a uniform register pair)
             x(0x822, InstName.Fswzadd, AFswzadd, N);
             x(0x804, InstName.R2p, AR2p, N, writesRd: false);
             x(0x204, InstName.R2p, AR2p, N, writesRd: false);
@@ -95,7 +94,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x883, InstName.P2r, AUp2ur, N, uniform: true);
             x(0x81c, InstName.Psetp, APlop3, N, writesRd: false);
             x(0x89c, InstName.Psetp, APlop3, N, uniform: true, writesRd: false);
-            x(0x80d, InstName.Isetp, AGuardCull, N, writesRd: false);
+            x(0x80d, InstName.Isetp, AGuardCull, N, writesRd: false);   // CSMTEST (clip state machine): Kirby's guard band cull, else ACsmtest
             x(0x806, InstName.Vote, AVote, N);
             x(0x886, InstName.Vote, AVote, N);
             x(0x389, InstName.Shfl, AShfl, N);
@@ -918,7 +917,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
         // 0x80d: what the compiler puts at the end of a vertex shader's position in Kirby Air Riders (all 6,319 of them, no other game's), its meaning inferred from what surrounds it. Before it, FSETP sets P0..P5 where x, y or z lies
         // beyond +/- w times the two system registers 30 and 31, which no other instruction reads: a guard band test. Then this twice: immediate 0xc4321111 with no predicate result, then immediate 0x80000000
         // whose result is the guard of an EXIT before the shader writes the position and its other outputs (P0 in 6,177, P1 in 142; no other instruction reads it). So a vertex is dropped early when the GPU knows its
-        // primitive cannot be seen. How it knows is not known, so the host never drops one: the result is false, the vertex writes its outputs, and clipping does the rest, as for a shader without this. Any other form stops the shader.
+        // primitive cannot be seen. How it knows is not known, so the host never drops one: the result is false, the vertex writes its outputs, and clipping does the rest, as for a shader without this. Every other form
+        // (PRAGMATA's CSMTEST.RA / .A with immediates such as 0x80000007, in vertex shaders of every kind) is the general clip state test, ACsmtest.
         public static void AGuardCull(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
@@ -928,7 +928,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (!plain || !(imm == 0xc4321111 && pd == RegisterConsts.PredicateTrueIndex && cmp == 0 || imm == 0x80000000 && cmp == 6))
             {
-                throw AFail(context, "a 0x80d not of the guard band cull");
+                ACsmtest(context);
+                return;
             }
 
             ASetPred(context, pd, Const(IrConsts.False), false);

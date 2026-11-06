@@ -46,6 +46,15 @@ class DeadChannel(Translated):
         self.assertNotRegex(msl, r'(?m)^\s+int (_\d+);\n\s+int _\d+ = \1;')
 
 
+class Csmtest(Alu):
+    """0x80d other than Kirby's guard band cull is CSMTEST, the clip state test (ACsmtest): PRAGMATA's vertex shaders hold this form (3,734 of them stopped translating when
+    main's guard band handler took the decoder slot). It translates in any stage, and its test never passes"""
+    CSMTEST = (0x000fc80003fe0000, 0x800000070000780d)   # PRAGMATA's form: immediate 0x80000007, Pd0 = Pd1 = PT, P = PT
+
+    def test_pragmata_form_translates(self):
+        self.assertIn('kernel', self.kept(self.CSMTEST))
+
+
 class Brev(Alu):
     BREV = (0x001e240000000000, 0x0000001300067301)   # BREV R6, R19 (Pokémon Pokopia 6e8db04c25a53d8c, whose destination is R3)
 

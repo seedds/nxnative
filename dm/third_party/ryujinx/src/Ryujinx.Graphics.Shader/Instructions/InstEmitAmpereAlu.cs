@@ -320,8 +320,55 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             ISrcFmt src = (ISrcFmt)((x.Bit(74) ? 4 : 0) | srcSize);
+            int rnd = x.Bits(78, 80);
+
+            // A 32-bit integer to a float with .RM / .RP / .RZ (78..79): the compiler's 32-bit division starts with I2F.U32.RP, so that its reciprocal estimate stays on
+            // the side its correction step expects. Rounded to nearest, a value above 2^24 came out one ulp off in about half the cases
+            if (srcSize == 2 && dstSize == 2 && rnd != 0)
+            {
+                bool signed = x.Bit(74);
+                Operand v = AGet(context, AOne(context, x, neg: false, abs: false));
+                Operand f = signed ? context.IConvertS32ToFP32(v) : context.IConvertU32ToFP32(v);
+                // f is an integer value, exact back in 32 bits unless it rounded up to 2^31 (signed) or 2^32, where it is above v anyway
+                Operand limit = ConstF(signed ? 2147483648f : 4294967296f);
+                Operand big = context.BitwiseNot(context.FPCompareLess(f, limit));
+                Operand back = signed ? context.FP32ConvertToS32(f) : context.FP32ConvertToU32(f);
+                Operand gt = context.BitwiseOr(big, signed ? context.ICompareGreater(back, v) : context.ICompareGreaterUnsigned(back, v));
+                Operand lt = context.BitwiseAnd(context.BitwiseNot(big), signed ? context.ICompareLess(back, v) : context.ICompareLessUnsigned(back, v));
+                ASet(context, x, ADirected(context, rnd, f, gt, lt, signed ? context.ICompareLess(v, Const(0)) : null));
+                return;
+            }
 
             EmitI2F(context, src, (DstFmt)dstSize, AGet(context, AOne(context, x, neg: false, abs: false)), (ByteSel)(select * (srcSize == 1 ? 2 : 1)), x.Rd, false, false);
+        }
+
+        // A result r rounded to nearest, moved to the directed rounding .RM (1), .RP (2) or .RZ (3) asks for, from how it compares with the exact value: gt (r is above it),
+        // lt (r is below it), neg (the value is negative; null: never). One step of a float's bits moves it to its neighbour of the same sign: + 1 away from zero, - 1 toward it.
+        // An overflow rounded to infinity steps back to the largest finite value (NAK's hardware test: F2F.F16.F32.RZ of 65536 is 0x7bff)
+        private static Operand ADirected(EmitterContext context, int rnd, Operand r, Operand gt, Operand lt, Operand neg)
+        {
+            Operand pos = neg == null ? null : context.BitwiseNot(neg);
+            Operand And(Operand a, Operand b) => a == null || b == null ? null : context.BitwiseAnd(a, b);
+            Operand away, toward;
+
+            switch (rnd)
+            {
+                case 2: away = neg == null ? lt : And(lt, pos); toward = And(lt, neg); break;   // RP: below the value, step up
+                case 1: away = And(gt, neg); toward = neg == null ? gt : And(gt, pos); break;   // RM: above the value, step down
+                default: away = null; toward = neg == null ? gt : context.BitwiseOr(And(gt, pos), And(lt, neg)); break;   // RZ: larger in magnitude, step toward zero
+            }
+
+            if (away != null)
+            {
+                r = context.ConditionalSelect(away, context.IAdd(r, Const(1)), r);
+            }
+
+            if (toward != null)
+            {
+                r = context.ConditionalSelect(toward, context.IAdd(r, Const(-1)), r);
+            }
+
+            return r;
         }
 
         // F2I.U64 Rd:Rd+1, b (F32): the layout of F2I. The compiler's 32-bit division takes its reciprocal this way: I2F, RCP, IADD 0x1ffffffe (2^64 and two ulps down), F2I.U64, then the high word
@@ -428,6 +475,19 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             EmitF2F(context, (DstFmt)srcSize, (DstFmt)dstSize, IntegerRound.Pass, src, x.Rd, s.Abs, s.Neg, false);
+
+            // F2F.F16.F32 .RM / .RP / .RZ (78..79): the pack rounds to nearest; the half read back (exact in 32 bits) tells which side of the float it fell.
+            // The read goes through a mask: the optimizer takes an unpack of a pack for the packed float itself (PropagatePack), which would skip the rounding
+            int rnd = x.Bits(78, 80);
+
+            if (srcSize == 2 && dstSize == 1 && rnd != 0 && x.Rd != RegisterConsts.RegisterZeroIndex)
+            {
+                Operand f = context.FPAbsNeg(src, s.Abs, s.Neg);
+                Operand rd = Register(x.Rd, RegisterType.Gpr);
+                Operand back = context.UnpackHalf2x16Low(context.BitwiseAnd(rd, Const(0xffff)));
+                Operand res = ADirected(context, rnd, rd, context.FPCompareLess(f, back), context.FPCompareLess(back, f), context.FPCompareLess(f, ConstF(0f)));
+                context.Copy(rd, res);
+            }
         }
 
         // F2FP.F16.F32.PACK_AB Rd, a, b: a to the high half, b to the low one.

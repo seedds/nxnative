@@ -11,6 +11,7 @@ module_t *g_mod; int g_nmod;                            // host symbols that cra
 void svc_thread_dump(void) {}
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; } // Tests use host-thread stacks.
 void dm_vi_layer_crop(int c[4]) { c[0] = c[1] = c[2] = c[3] = 0; }   // no vi layer crop in unit tests (hle_vi.c)
+void dm_vi_frame_queued(uint64_t frame) { (void)frame; }   // no vi layer frame history in this standalone NVN test
 void crash_install(void);
 void nvn_present_config(int hz, int display_mode);
 #include <fcntl.h>
@@ -393,16 +394,28 @@ int main(void) {
         EXPECT("control block size after grant", sizeof ctl, P(nvnCommandBufferGetControlMemorySize)(&c2));
         EXPECT("control block free after grant", sizeof ctl, P(nvnCommandBufferGetControlMemoryFree)(&c2));
         P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&c2);
+        unsetenv("DM_NVN_DRAW_ONE");
+        P(nvnCommandBufferDrawElementsBaseVertex)(&c2, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 36, 0x10000, 5);
+        P(nvnCommandBufferEndRecording)(&c2);
+        EXPECT("default indexed draw retains 40-byte record and 8-byte END", 0x30, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&c2);
+        setenv("DM_NVN_DRAW_ONE", "1", 1);
         P(nvnCommandBufferDrawElementsBaseVertex)(&c2, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 36, 0x10000, 5);
         NVNcommandHandle hd = P(nvnCommandBufferEndRecording)(&c2);
-        EXPECT("plain indexed draw recording: 0x28 + END", 0x30, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        EXPECT("single-instance indexed draw recording: 0x20 + END", 0x28, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
         EXPECT("recording uses no control memory", 0, P(nvnCommandBufferGetControlMemoryUsed)(&c2));
         EXPECT("control capacity remains available", sizeof ctl, P(nvnCommandBufferGetControlMemoryFree)(&c2));
         P(nvnCommandBufferAddControlMemory)(&c2, ctl, 128);
         EXPECT("new control block replaces capacity", 128, P(nvnCommandBufferGetControlMemoryFree)(&c2));
         op_hdr rh; memcpy(&rh, m, sizeof rh); p_draw_idx dt; const p_draw_idx *d = draw_idx_rec(m + 8, rh.size, &dt);
-        EXPECT("its handle is the draw record", 1, (const uint8_t *)hd == m && rh.op == OP_DRAW_IDX);
-        EXPECT("draw read back: count, base vertex, no indirect address", 1, d->count == 36 && d->base_vertex == 5 && d->ibuf == 0x10000 && !d->ind && !d->mdi_cnt);
+        EXPECT("its handle is the 32-byte direct indexed draw record", 1, (const uint8_t *)hd == m && rh.op == OP_DRAW_IDX && rh.size == 32);
+        EXPECT("draw read back: count, base vertex, one instance, no indirect address", 1, d->count == 36 && d->base_vertex == 5 && d->instances == 1 && !d->base_instance && d->ibuf == 0x10000 && !d->ind && !d->mdi_cnt);
+        P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&c2);
+        P(nvnCommandBufferDrawElementsInstanced)(&c2, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 36, 0x10000, 5, 7, 3);
+        P(nvnCommandBufferEndRecording)(&c2);
+        memcpy(&rh, m, sizeof rh); d = draw_idx_rec(m + 8, rh.size, &dt);
+        EXPECT("instanced/base-instance indexed draw keeps older full direct record", 1, rh.size == 40 && d->instances == 3 && d->base_instance == 7 && d->base_vertex == 5);
+        unsetenv("DM_NVN_DRAW_ONE");
         P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&c2); NVNcommandHandle he = P(nvnCommandBufferEndRecording)(&c2);
         memcpy(&rh, m, sizeof rh);
         EXPECT("empty recording: its END only", 8, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
@@ -441,6 +454,41 @@ int main(void) {
             poly_st pr; ds_st dr; ms_st mr; memcpy(&pr, s1->bytes, sizeof pr); memcpy(&dr, s2->bytes, sizeof dr); memcpy(&mr, s3->bytes, sizeof mr);
             EXPECT("the state records read back: kinds, cull, depth function, samples", 1, h1.op == OP_BIND_STATE && h1.size == 16 && s1->kind == 4 && pr.cull == NVN_FACE_BACK
                    && h2.op == OP_BIND_STATE && h2.size == 24 && s2->kind == 5 && dr.df == NVN_DEPTH_FUNC_GREATER && h3.op == OP_BIND_STATE && h3.size == 24 && s3->kind == 3 && mr.samples == 4); }
+        P(nvnCommandBufferFinalize)(&c2); P(nvnMemoryPoolFinalize)(&mp);
+    }
+    // A viewport or swizzle command only consumes the supplied count, not all 16
+    // possible entries. Both replay structs retain their original element stride.
+    {
+        static uint8_t m[4096] __attribute__((aligned(4096))); NVNmemoryPoolBuilder mb; NVNmemoryPool mp; NVNcommandBuffer c2;
+        P(nvnMemoryPoolBuilderSetDefaults)(&mb); P(nvnMemoryPoolBuilderSetStorage)(&mb, m, sizeof m); P(nvnMemoryPoolInitialize)(&mp, &mb);
+        P(nvnCommandBufferInitialize)(&c2, &dev);
+        P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&c2);
+        const float vp[] = {1.f, 2.f, 3.f, 4.f};
+        P(nvnCommandBufferSetViewports)(&c2, 5, 1, vp);
+        P(nvnCommandBufferEndRecording)(&c2);
+        EXPECT("one viewport uses 8+8+24+END", 48, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        op_hdr h; memcpy(&h, m, 8);
+        const p_viewports *vr = (const p_viewports *)(m + 8);
+        EXPECT("one viewport keeps original 6-float stride", 1,
+               h.op == OP_VIEWPORTS && h.size == 40 && vr->first == 5 && vr->n == 1 &&
+               !memcmp(vr->v[0], vp, sizeof vp) && vr->v[0][4] == 0 && vr->v[0][5] == 0);
+        P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 128, 512); P(nvnCommandBufferBeginRecording)(&c2);
+        const float vps[] = {1,2,3,4, 5,6,7,8, 9,10,11,12};
+        P(nvnCommandBufferSetViewports)(&c2, 3, 3, vps);
+        P(nvnCommandBufferEndRecording)(&c2);
+        EXPECT("three viewport records store only 3 entries", 96, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        memcpy(&h, m + 128, 8); vr = (const p_viewports *)(m + 136);
+        EXPECT("viewport array preserves 3 independent entries", 1,
+               h.op == OP_VIEWPORTS && h.size == 88 && vr->n == 3 &&
+               vr->v[0][0] == 1 && vr->v[1][0] == 5 && vr->v[2][3] == 12);
+        P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 512, 512); P(nvnCommandBufferBeginRecording)(&c2);
+        const NVNviewportSwizzle sw[] = {NVN_VIEWPORT_SWIZZLE_POSITIVE_X, NVN_VIEWPORT_SWIZZLE_POSITIVE_Y,
+            NVN_VIEWPORT_SWIZZLE_POSITIVE_Z, NVN_VIEWPORT_SWIZZLE_POSITIVE_W};
+        P(nvnCommandBufferSetViewportSwizzles)(&c2, 0, 1, sw);
+        P(nvnCommandBufferEndRecording)(&c2);
+        EXPECT("one viewport swizzle uses 8+8+4 rounded+END", 32, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        memcpy(&h, m + 512, 8);
+        EXPECT("swizzle record stores only one viewport", 1, h.op == OP_VP_SWIZZLE && h.size == 24);
         P(nvnCommandBufferFinalize)(&c2); P(nvnMemoryPoolFinalize)(&mp);
     }
     // Uniform bindings are measured into resource budgets too. A bounded binding needs
@@ -488,6 +536,44 @@ int main(void) {
         b = bind_buf_rec(rh.op, m + 520, &decoded);
         EXPECT("wide uniform decode preserves all 64 bits", 1,
                b->stage == NVN_SHADER_STAGE_COMPUTE && b->index == 3 && b->addr == UINT64_C(0xffff123456780000) && b->size == UINT64_C(0x100000001));
+        // Opt-in pair encodes two consecutive 16B bind payloads behind one 8B header.
+        // The last record remains independently decoded, and a command/query breaks pairing.
+        setenv("DM_NVN_UBO_PAIR", "1", 1);
+        P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 1024, 512); P(nvnCommandBufferBeginRecording)(&c2);
+        P(nvnCommandBufferBindUniformBuffer)(&c2, NVN_SHADER_STAGE_VERTEX, 3, UINT64_C(0xffeeddccbbaa0000), 64);
+        P(nvnCommandBufferBindUniformBuffer)(&c2, NVN_SHADER_STAGE_FRAGMENT, 7, UINT64_C(0xabcdef0123456000), 0);
+        P(nvnCommandBufferBindUniformBuffer)(&c2, NVN_SHADER_STAGE_VERTEX, 3, UINT64_C(0xabcd000000000000), UINT32_MAX);
+        P(nvnCommandBufferEndRecording)(&c2);
+        EXPECT("opt-in pairs save exactly 8B per two binds", 72, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        memcpy(&rh, m + 1024, sizeof rh);
+        EXPECT("paired uniform header size 40", 1, rh.op == OP_BIND_UBO_SMALL && rh.size == 40);
+        p_bind_buf pb0, pb1, pb2;
+        const p_bind_buf *v0 = bind_buf_rec(rh.op, m + 1032, &pb0);
+        const p_bind_buf *v1 = bind_buf_rec(rh.op, m + 1048, &pb1);
+        EXPECT("pair preserves ordered stages/slots and 64-bit addresses", 1,
+               v0->stage == NVN_SHADER_STAGE_VERTEX && v0->index == 3 && v0->addr == UINT64_C(0xffeeddccbbaa0000) && v0->size == 64 &&
+               v1->stage == NVN_SHADER_STAGE_FRAGMENT && v1->index == 7 && v1->addr == UINT64_C(0xabcdef0123456000) && v1->size == 0);
+        memcpy(&rh, m + 1064, sizeof rh); v0 = bind_buf_rec(rh.op, m + 1072, &pb2);
+        EXPECT("odd third bind remains a separate single record", 1,
+               rh.op == OP_BIND_UBO_SMALL && rh.size == 24 && v0->stage == NVN_SHADER_STAGE_VERTEX &&
+               v0->index == 3 && v0->addr == UINT64_C(0xabcd000000000000) && v0->size == UINT32_MAX);
+        memcpy(&end, m + 1088, sizeof end);
+        EXPECT("paired recording preserves END", 1, end.op == OP_END && end.size == 8);
+        P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 2048, 256); P(nvnCommandBufferBeginRecording)(&c2);
+        P(nvnCommandBufferBindUniformBuffer)(&c2, NVN_SHADER_STAGE_VERTEX, 0, 0x1000, 32);
+        (void)P(nvnCommandBufferGetCommandMemoryUsed)(&c2); // published offset prevents backpatching earlier record
+        P(nvnCommandBufferBindUniformBuffer)(&c2, NVN_SHADER_STAGE_VERTEX, 1, 0x2000, 32);
+        P(nvnCommandBufferEndRecording)(&c2);
+        EXPECT("intervening GetUsed forbids pairing", 56, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        memcpy(&rh, m + 2048, 8); EXPECT("first bind remains independent after query", 24, rh.size);
+        memcpy(&rh, m + 2072, 8); EXPECT("second bind remains independent after query", 24, rh.size);
+        P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 2560, 256); P(nvnCommandBufferBeginRecording)(&c2);
+        P(nvnCommandBufferBindUniformBuffer)(&c2, NVN_SHADER_STAGE_VERTEX, 0, 0x3000, 32);
+        P(nvnCommandBufferBindVertexBuffer)(&c2, 0, 0x4000, 64);
+        P(nvnCommandBufferBindUniformBuffer)(&c2, NVN_SHADER_STAGE_VERTEX, 1, 0x5000, 32);
+        P(nvnCommandBufferEndRecording)(&c2);
+        EXPECT("intervening vertex bind forbids pairing", 80, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        unsetenv("DM_NVN_UBO_PAIR");
         P(nvnCommandBufferFinalize)(&c2); P(nvnMemoryPoolFinalize)(&mp);
     }
     // One vertex range needs 8 header bytes plus 16 payload bytes; arrays and

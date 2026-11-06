@@ -176,12 +176,27 @@ typedef struct { float factor, units, clamp; } p_poly_offset;
 enum { DM_PRIM_MESH_TASKS = 0x40 };   // p_draw.prim of nvnCommandBufferDrawMeshTasks (first task or mesh workgroup, count): no NVN primitive has this value
 typedef struct { int32_t prim, first, count, instances, base_instance; uint64_t ind; uint64_t mdi_cnt; int32_t mdi_i, pad; } p_draw;   // instances 0 counts as 1; ind != 0: DrawArraysIndirect, the arguments are read by the GPU from that address; mdi_cnt != 0: draw mdi_i of an indirect-count multi-draw (drawn only while mdi_i < the u32 at mdi_cnt)
 typedef struct { int32_t prim, itype, count, base_vertex, base_instance, instances; uint64_t ibuf, ind; uint64_t mdi_cnt; int32_t mdi_i, pad; } p_draw_idx;   // ind != 0: DrawElementsIndirect, {count, instances, first index, base vertex, base instance} read by the GPU from that address; mdi_cnt: as in p_draw
+// A direct, single-instance indexed draw needs no instance/base-instance fields.
+// Keep its 64-bit index buffer address and all four required fields, but use a
+// 32-byte record (including the header) instead of the older 40-byte direct
+// form. Both layouts replay and relocate by the record's actual size.
+typedef struct { int32_t prim, itype, count, base_vertex; uint64_t ibuf; } p_draw_idx_one;
+_Static_assert(sizeof(p_draw_idx_one) == 24, "indexed draw single-instance record payload");
 // A draw record stops before ind unless it is an indirect draw or a multi-draw (hle_nvn.c rec_draw); read it with draw_rec / draw_idx_rec, which give the missing fields as 0.
 // Games size command memory by what nvnCommandBufferGetCommandMemoryUsed reports, so a plain draw must not take more of it than the real driver's commands do. Breath of the Wild
 // records each mesh's draw into a scratch command buffer and reserves that many bytes per mesh for the model's prerecorded draws, in the heap its resource size table sizes:
 // at 0x50 bytes per recorded draw (0x30 now, with its END) three models needed one 4 KB page more than their table entry, and loading them crashed (main+0x155a7a4)
 static inline const p_draw *draw_rec(const void *a, uint32_t size, p_draw *t) { if (size - 8 >= sizeof *t) return a; memset(t, 0, sizeof *t); memcpy(t, a, size - 8); return t; }
-static inline const p_draw_idx *draw_idx_rec(const void *a, uint32_t size, p_draw_idx *t) { if (size - 8 >= sizeof *t) return a; memset(t, 0, sizeof *t); memcpy(t, a, size - 8); return t; }
+static inline const p_draw_idx *draw_idx_rec(const void *a, uint32_t size, p_draw_idx *t) {
+    if (size == 8 + sizeof(p_draw_idx_one)) {
+        p_draw_idx_one s; memcpy(&s, a, sizeof s);
+        *t = (p_draw_idx){.prim = s.prim, .itype = s.itype, .count = s.count,
+                           .base_vertex = s.base_vertex, .instances = 1, .ibuf = s.ibuf};
+        return t;
+    }
+    if (size - 8 >= sizeof *t) return a;
+    memset(t, 0, sizeof *t); memcpy(t, a, size - 8); return t;
+}
 typedef struct { int32_t x, y, z; uint64_t caller, ind; } p_dispatch;   // caller: return address of the game call site (to locate the dispatcher); ind != 0: DispatchComputeIndirect, the group counts are read by the GPU from that address
 typedef struct { const dpool_t *pool; } p_set_pool;
 typedef struct { uint64_t src; const tex_t *tex; view_t view; uint8_t has_view; NVNcopyRegion r; int32_t flags; } p_copy_b2t;

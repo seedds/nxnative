@@ -85,8 +85,13 @@ int main(void) {
     p_bind_vbuf *vb = emit(&s0, OP_BIND_VBUF, offsetof(p_bind_vbuf, r) + 2 * sizeof(NVNbufferRange)); vb->n = 2; vb->r[0] = (NVNbufferRange){(uint64_t)(uintptr_t)pool_a + 0x100, 0x200}; vb->r[1] = (NVNbufferRange){(uint64_t)(uintptr_t)pool_b + 0x40, 0x10};
     p_bind_buf *ub = emit(&s0, OP_BIND_UBO, sizeof *ub); *ub = (p_bind_buf){1, 3, (uint64_t)(uintptr_t)pool_b + 0x800, 0x100};
     p_bind_ubo_small *us = emit(&s0, OP_BIND_UBO_SMALL, sizeof *us); *us = (p_bind_ubo_small){0, 2, 64, (uint64_t)(uintptr_t)pool_b + 0x1000};
+    p_bind_ubo_small *pair = emit(&s0, OP_BIND_UBO_SMALL, 2 * sizeof *pair);
+    pair[0] = (p_bind_ubo_small){0, 3, 96, (uint64_t)(uintptr_t)pool_b + 0x1100};
+    pair[1] = (p_bind_ubo_small){1, 7, 128, (uint64_t)(uintptr_t)pool_a + 0x1800};
     p_bind_handles *bh = emit(&s0, OP_BIND_TEX, offsetof(p_bind_handles, h) + 4 * 8); bh->stage = 1; bh->n = 4; bh->defer = 1; bh->src = (uint64_t)(uintptr_t)heap_handles;
     p_draw_idx *di = emit(&s0, OP_DRAW_IDX, sizeof *di); di->prim = 4; di->count = 3; di->ibuf = (uint64_t)(uintptr_t)pool_a + 0x3000; di->ind = (uint64_t)(uintptr_t)pool_a + 0x3100;
+    p_draw_idx_one *di1 = emit(&s0, OP_DRAW_IDX, sizeof *di1);
+    *di1 = (p_draw_idx_one){.prim = 4, .itype = 2, .count = 36, .base_vertex = 7, .ibuf = (uint64_t)(uintptr_t)pool_a + 0x3200};
     p_multi_draw *multi = emit(&s0, OP_MULTI_DRAW, sizeof *multi);
     *multi = (p_multi_draw){(uint64_t)(uintptr_t)pool_a + 0xf000, (uint64_t)(uintptr_t)pool_b, di->ibuf, -20, 1025, 4, 2};
     p_draw *dr = emit(&s0, OP_DRAW, offsetof(p_draw, ind)); dr->count = 3;   // a plain draw stops before ind (hle_nvn.c rec_draw)
@@ -122,7 +127,11 @@ int main(void) {
     CHECK(multi_layout && cap_layout_matches(lay, (size_t)(multi_layout - lay)), "the complete legacy record layout remains readable");
     const char *strides_layout = strstr(lay, "p_copy_strides");
     CHECK(strides_layout && cap_layout_matches(lay, (size_t)(strides_layout - lay)), "the layout before the copy strides' tail remains readable");
+    const char *pair_layout = strstr(lay, "op 49 p_bind_ubo_small pair");
+    CHECK(pair_layout && cap_layout_matches(lay, (size_t)(pair_layout - lay)), "pre-pair full layout remains readable");
     CHECK(cap_layout_matches(lay, strlen(lay)) && !cap_layout_matches(lay, strlen(lay) - 1), "accept the current layout, reject a truncated extension");
+    uint8_t invalid_pair[32] = {0};
+    CHECK(!cap_rec_fields(OP_BIND_UBO_SMALL, invalid_pair, 32, &enc, NULL), "invalid pair payload size refused");
     cap_put(&w, CAP_LAYT, 0, lay, strlen(lay), 0);
     for (int r = 0; r < nregs; r++) { uint8_t b[sizeof(cap_regn) + 65536]; cap_regn h = {(uint32_t)r, r == 2, regs[r].lo, regs[r].size};
         memcpy(b, &h, sizeof h); memcpy(b + sizeof h, (const void *)(uintptr_t)regs[r].lo, (size_t)regs[r].size); cap_put(&w, CAP_REGN, 1, b, sizeof h + regs[r].size, 1); }
@@ -163,8 +172,19 @@ int main(void) {
     CHECK(AT(0, vb, p_bind_vbuf).r[0].address == (uint64_t)(uintptr_t)new_base[0] + 0x100 && AT(0, vb, p_bind_vbuf).r[1].address == (uint64_t)(uintptr_t)new_base[1] + 0x40 && AT(0, vb, p_bind_vbuf).r[1].size == 0x10, "vertex buffers relocated");
     CHECK(AT(0, ub, p_bind_buf).addr == (uint64_t)(uintptr_t)new_base[1] + 0x800, "uniform buffer relocated");
     CHECK(AT(0, us, p_bind_ubo_small).addr == (uint64_t)(uintptr_t)new_base[1] + 0x1000, "compact uniform buffer relocated");
+    p_bind_ubo_small *relocated_pair = (p_bind_ubo_small *)(segbuf[0] + ((uint8_t *)pair - s0.p));
+    CHECK(relocated_pair[0].stage == 0 && relocated_pair[0].index == 3 && relocated_pair[0].size == 96 &&
+          relocated_pair[0].addr == (uint64_t)(uintptr_t)new_base[1] + 0x1100 &&
+          relocated_pair[1].stage == 1 && relocated_pair[1].index == 7 && relocated_pair[1].size == 128 &&
+          relocated_pair[1].addr == (uint64_t)(uintptr_t)new_base[0] + 0x1800,
+          "paired compact uniform buffers both relocate, retaining order and sizes");
     CHECK(AT(0, bh, p_bind_handles).src == (uint64_t)(uintptr_t)new_base[2] && !memcmp(new_base[2], heap_handles, sizeof heap_handles), "deferred handles: their own region, relocated");
     CHECK(AT(0, di, p_draw_idx).ibuf == (uint64_t)(uintptr_t)new_base[0] + 0x3000 && AT(0, di, p_draw_idx).ind == (uint64_t)(uintptr_t)new_base[0] + 0x3100, "index buffer and indirect arguments");
+    p_draw_idx_one moved_one = AT(0, di1, p_draw_idx_one);
+    p_draw_idx full_one; const p_draw_idx *single = draw_idx_rec(&moved_one, 8 + sizeof moved_one, &full_one);
+    CHECK(moved_one.ibuf == (uint64_t)(uintptr_t)new_base[0] + 0x3200 && single->count == 36 &&
+          single->base_vertex == 7 && single->instances == 1 && single->base_instance == 0 && !single->ind,
+          "single-instance 32-byte indexed draw relocates and replays without breaking legacy full records");
     p_multi_draw moved = AT(0, multi, p_multi_draw);
     CHECK(moved.ind == (uint64_t)(uintptr_t)new_base[0] + 0xf000 && moved.cnt == (uint64_t)(uintptr_t)new_base[1] &&
           moved.ibuf == (uint64_t)(uintptr_t)new_base[0] + 0x3000 && moved.stride == -20 && moved.max == 1025, "multi-draw relocation keeps the first record and the signed stride");

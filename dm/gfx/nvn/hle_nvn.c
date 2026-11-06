@@ -857,10 +857,19 @@ static void cs_dump(void) {   // Called once per frame (at present)
         (unsigned long long)f, g_cs.bytes / n / 1024.0, g_cs.recs / n, g_cs.grants / n, g_cs.grants ? g_cs.grant_bytes / (double)g_cs.grants / 1024.0 : 0, g_cs.grant_min / 1024.0, g_cs.grant_max / 1024.0, g_cs.cbs / n, g_cs.hostseg / n, g_cs.waste / n / 1024.0, top);
     int on = g_cs.on; memset(&g_cs, 0, sizeof g_cs); g_cs.on = on; g_cs.frame0 = f; pthread_mutex_unlock(&g_cs_mu);
 }
+// Opt-in lossless compacting of consecutive SINGLE uniform binds. Each ordinary host
+// bind has an 8-byte header and 16-byte payload (24 bytes); a paired record has
+// one header and TWO original 16-byte payloads (40 bytes = 2 x native 20 bytes).
+// The candidate is TLS, not part of the guest-owned cmd_t ABI. cmd_alloc_keep
+// invalidates it on every intervening recorded command, including segment JUMPs.
+static _Thread_local struct { cmd_t *c; uint8_t *record, *end; int valid; } g_ubo_pair;
+static int ubo_pair_on(void) { const char *v = getenv("DM_NVN_UBO_PAIR"); return v && !strcmp(v, "1"); }
+static void ubo_pair_invalidate(void) { g_ubo_pair.valid = 0; }
 static void put_hdr(uint8_t *p, uint32_t op, uint32_t size) { op_hdr h = {op, size}; memcpy(p, &h, sizeof h); if (op) cs_op(op, size); }
 // New segment: if the recording in progress has records, write a JUMP at the end of the old segment to link it. A recording with none yet starts in the new segment
 // (its first record is its handle), and the bytes at the old write position are not its own: after an END that took the last bytes there is no room there at all
 static void cmd_new_segment(cmd_t *o, uint8_t *mem, size_t n) {
+    ubo_pair_invalidate();
     uint8_t *start = align8(mem), *end = mem + n;
     if (o->recording == 1 && o->cur) { if (cs_on() && o->end > o->cur) { pthread_mutex_lock(&g_cs_mu); g_cs.waste += (uint64_t)(o->end - o->cur); pthread_mutex_unlock(&g_cs_mu); } put_hdr(o->cur, OP_JUMP, 16); memcpy(o->cur + 8, &start, 8);
         o->used += 16; }   // the JUMP also occupies guest memory of this recording: count it in used, so the game packing the next recording right behind by used does not overwrite it
@@ -935,6 +944,7 @@ NVN(nvnCommandBufferAddControlMemory, void, NVNcommandBuffer *c, void *m, size_t
 }
 // Get space for one record and keep `keep` bytes after it (OP_RESERVE, 0 for the END); if not enough, call back into the game per the NVN convention to add command memory
 static uint8_t *cmd_alloc_keep(cmd_t *o, uint32_t size, uint32_t keep) {
+    ubo_pair_invalidate();
     size = (size + 7) & ~7u;
     for (int tries = 0; !o->cur || o->cur + size + keep > o->end; tries++) {
         // The game's callback cannot supply enough (newer-SDK games hand out small chunks sized for real-device commands, or disable the callback and manage memory themselves): continue recording in a host segment instead of aborting
@@ -1006,6 +1016,8 @@ static void *rec(NVNcommandBuffer *c, uint32_t op, size_t payload) {
     uint32_t sz = (uint32_t)((8 + payload + 7) & ~(size_t)7);
     uint8_t *p = cmd_alloc(CB(c), sz); put_hdr(p, op, sz);
     memset(p + 8, 0, sz - 8);
+    if (op == OP_BIND_UBO_SMALL && ubo_pair_on())
+        g_ubo_pair = (typeof(g_ubo_pair)){ .c = CB(c), .record = p, .end = CB(c)->end, .valid = 1 };
     return p + 8;
 }
 #define REC(c, OP, T) ((T *)rec((c), (OP), sizeof(T)))
@@ -1014,7 +1026,19 @@ static void *rec(NVNcommandBuffer *c, uint32_t op, size_t payload) {
 #define RECN(c, OP, T, ARR, N) ((T *)rec((c), (OP), offsetof(T, ARR) + sizeof(((T *)0)->ARR[0]) * (size_t)(N)))
 // Draws carry the indirect / multi-draw fields (ind onwards) only when they use them: a plain indexed draw record is 0x28 bytes instead of 0x40 (nvn_obj.h draw_rec)
 static void rec_draw(NVNcommandBuffer *c, p_draw d) { size_t n = d.ind || d.mdi_cnt ? sizeof d : offsetof(p_draw, ind); memcpy(rec(c, OP_DRAW, n), &d, n); }
-static void rec_draw_idx(NVNcommandBuffer *c, p_draw_idx d) { size_t n = d.ind || d.mdi_cnt ? sizeof d : offsetof(p_draw_idx, ind); memcpy(rec(c, OP_DRAW_IDX, n), &d, n); }
+static void rec_draw_idx(NVNcommandBuffer *c, p_draw_idx d) {
+    // Opt-in until other games' direct recorded-command patching is surveyed.
+    // The default retains the exact old offsets; GetUsed always counts the
+    // real record bytes with either format.
+    const char *compact = getenv("DM_NVN_DRAW_ONE");
+    if (compact && !strcmp(compact, "1") && !d.ind && !d.mdi_cnt && !d.base_instance && d.instances == 1) {
+        p_draw_idx_one s = {d.prim, d.itype, d.count, d.base_vertex, d.ibuf};
+        memcpy(rec(c, OP_DRAW_IDX, sizeof s), &s, sizeof s);
+    } else {
+        size_t n = d.ind || d.mdi_cnt ? sizeof d : offsetof(p_draw_idx, ind);
+        memcpy(rec(c, OP_DRAW_IDX, n), &d, n);
+    }
+}
 static void copy_view(view_t *dst, uint8_t *has, const NVNtextureView *v) { *has = v != NULL; if (v) *dst = *(const view_t *)v; }
 // Records with textures snapshot the texture objects (0x80 bytes each, after the record struct) and replay reads the snapshots: an NVN command no longer depends on the API object once recorded, and the game may finalize, free or reuse it before submitting.
 // Unity (Engage) does so when it changes scenes; only the object pointer used to be recorded, and replay read other data (a texture 1869367126 high, a Metal assertion abort).
@@ -1062,7 +1086,10 @@ NVN(nvnCommandBufferClearDepthStencil, void, NVNcommandBuffer *c, float depth, u
 }
 NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, const float *v) {
     if (n < 0 || first + n > 16) { LOG("[RED] SetViewports first=%d n=%d", first, n); return; }
-    p_viewports *r = REC(c, OP_VIEWPORTS, p_viewports); r->first = first; r->n = n;
+    // Store only the initialized viewports, not the 16-entry maximum (400B).
+    // Preserve the original six-float stride so old recordings/captures replay
+    // unchanged, and record the 4 supplied floats per viewport as before.
+    p_viewports *r = RECN(c, OP_VIEWPORTS, p_viewports, v, n); r->first = first; r->n = n;
     for (int i = 0; i < n; i++) memcpy(r->v[i], v + 4 * i, 16);
 }
 NVN(nvnCommandBufferSetScissor, void, NVNcommandBuffer *c, int x, int y, int w, int h) { *REC(c, OP_SCISSOR, p_scissor) = (p_scissor){x, y, w, h}; }
@@ -1099,6 +1126,24 @@ NVN(nvnCommandBufferBindVertexBuffers, void, NVNcommandBuffer *c, int first, int
 static inline NVNshaderStage st_host(NVNshaderStage st) { return (unsigned)st == 6 ? 3 : (unsigned)st == 7 ? 4 : st; }
 NVN(nvnCommandBufferBindUniformBuffer, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNbufferAddress a, size_t n) { st = st_host(st);
     if ((unsigned)st < 6 && (unsigned)i < 16 && n <= UINT32_MAX) {
+        cmd_t *o = CB(c);
+        if (ubo_pair_on() && o->recording && g_ubo_pair.valid && g_ubo_pair.c == o &&
+            g_ubo_pair.end == o->end && g_ubo_pair.record + 24 == o->cur) {
+            op_hdr prev; memcpy(&prev, g_ubo_pair.record, sizeof prev);
+            // A preceding 40-byte pair cannot consume a third bind. The same segment
+            // must have room for 16 more bytes AND OP_RESERVE for the next JUMP.
+            if (prev.op == OP_BIND_UBO_SMALL && prev.size == 24 &&
+                o->cur && o->end >= o->cur && (size_t)(o->end - o->cur) >= 16 + OP_RESERVE) {
+                const p_bind_ubo_small next = {(uint16_t)st, (uint16_t)i, (uint32_t)n, a};
+                memcpy(o->cur, &next, sizeof next);
+                prev.size = 40; memcpy(g_ubo_pair.record, &prev, sizeof prev);
+                o->cur += sizeof next; o->used += sizeof next;
+                if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.bytes += sizeof next;
+                    g_cs.op_b[OP_BIND_UBO_SMALL] += sizeof next; pthread_mutex_unlock(&g_cs_mu); }
+                ubo_pair_invalidate();
+                return;
+            }
+        }
         *REC(c, OP_BIND_UBO_SMALL, p_bind_ubo_small) = (p_bind_ubo_small){(uint16_t)st, (uint16_t)i, (uint32_t)n, a}; return;
     }
     *REC(c, OP_BIND_UBO, p_bind_buf) = (p_bind_buf){st, i, a, n};
@@ -2527,12 +2572,13 @@ NVN_NOPROTO(nvnWindowSetNumActiveTextures, void, NVNwindow *w, int n) { (void)w;
 // command buffer and records every frame into it; its memory callback (main+0x9ca960) takes chunk start + used as the position the GPU has reached and frees the ring up to there when the frame's fence
 // signals. Counted per recording, the position stayed at one frame's size (about 18 KB), the ring never freed past it, and after the first 16 MB (about 15 s) the callback waited for ring space forever
 NVN(nvnCommandBufferGetCommandMemoryUsed, size_t, const NVNcommandBuffer *c) { const cmd_t *m = (const cmd_t *)c;
+    ubo_pair_invalidate();
     return m->begin ? (size_t)m->used : 0; }
 NVN(nvnCommandBufferGetControlMemoryUsed, size_t, const NVNcommandBuffer *c) { (void)c; return 0; }
 NVN(nvnCommandBufferGetControlMemoryFree, size_t, const NVNcommandBuffer *c) { return ((const cmd_t *)c)->ctl_size; }
 NVN(nvnCommandBufferGetControlMemorySize, size_t, const NVNcommandBuffer *c) { return ((const cmd_t *)c)->ctl_size; }
 // Size and free bytes of the command memory the game last added (DRAGON QUEST XI S, Unreal Engine 4.18): as in NVN, size = used + free; free is what is left in the current segment
-NVN(nvnCommandBufferGetCommandMemoryFree, size_t, const NVNcommandBuffer *c) { const cmd_t *m = (const cmd_t *)c; return m->cur && m->end > m->cur ? (size_t)(m->end - m->cur) : 0; }
+NVN(nvnCommandBufferGetCommandMemoryFree, size_t, const NVNcommandBuffer *c) { const cmd_t *m = (const cmd_t *)c; ubo_pair_invalidate(); return m->cur && m->end > m->cur ? (size_t)(m->end - m->cur) : 0; }
 NVN(nvnCommandBufferGetCommandMemorySize, size_t, const NVNcommandBuffer *c) { return h_nvnCommandBufferGetCommandMemoryUsed(c) + h_nvnCommandBufferGetCommandMemoryFree(c); }
 NVN_NOPROTO(nvnCommandBufferSetCommandMemoryCallbackEnabled, void, NVNcommandBuffer *c, uint32_t on) { (void)c; (void)on; }
 
@@ -2894,7 +2940,8 @@ NVN(nvnCommandBufferSetDepthClamp, void, NVNcommandBuffer *c, uint32_t en) { REC
 // Ignored, its whole picture came out upside down. The replay applies it to the viewport (draw in nvn_mtl.m)
 NVN(nvnCommandBufferSetViewportSwizzles, void, NVNcommandBuffer *c, int first, int n, const NVNviewportSwizzle *s) {
     if (n < 0 || first < 0 || first + n > 16) { LOG("[RED] SetViewportSwizzles first=%d n=%d", first, n); return; }
-    p_vp_swizzle *r = REC(c, OP_VP_SWIZZLE, p_vp_swizzle); r->first = first; r->n = n;
+    // The replay only reads sw[0..n): avoid reserving the other 16-n slots.
+    p_vp_swizzle *r = RECN(c, OP_VP_SWIZZLE, p_vp_swizzle, sw, n); r->first = first; r->n = n;
     for (int i = 0; i < n; i++) for (int k = 0; k < 4; k++) r->sw[i][k] = (uint8_t)((s[4 * i + k] ^ 2 * k) & 7);
 }
 NVN(nvnCommandBufferSetAlphaRef, void, NVNcommandBuffer *c, float r) { REC(c, OP_ALPHA_REF, p_alpha_ref)->ref = r; }

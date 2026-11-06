@@ -4,7 +4,13 @@ How to build and install a game: [README](../README.md#how-to-play).
 
 - **Settings:** a screen before the game starts sets frame rate, resolution, docked or handheld mode, language, rumble and more. Tap **Play**; your choices are remembered. What each one does: [Settings](settings.md).
 - **Saves and logs** are in the Files app, under the game's name: `save/` and `log.txt` (the previous run is `log.prev.txt`). When something goes wrong, send `log.txt`.
-- **Reinstalling:** some sideloading tools give a reinstalled app a new data folder. Copy `save/` and `pso_user.tsv` over from the old one to keep your progress.
+- **Reinstalling:** some sideloading tools give a reinstalled app a new data folder. With the game closed, copy the committed save folders from the old container (or keep your chosen save library and select it again after reinstall): `save/`, `save_device/` if present, and each `save.user-<ID>/` when using local users. Also copy `users.json` (or the roster you configured) so the new install recognizes those IDs. Copy `pso_user.tsv` to keep the recorded pipeline list. Leave the temporary `.work` and `.new` directories behind.
+
+## Local players
+
+In the built Mac or iPhone/iPad game launcher, choose **Create User…**, enter a name and press **Create**. When a rebuilt app uses the same title and data directory, the original **Player** loads the existing save automatically. Creating another player or renaming the original does not move that save. Choose **Who's playing?** before Play, or use **Rename User…** to change the selected player’s name. A rename keeps the same account and saves. Up to eight players can share a roster. Each has their own account saves; games can also keep device-wide data, such as a shared Animal Crossing island. Additional players’ personal saves stay local.
+
+Under **Local save location**, choose **Choose Folder…** to keep all players’ saves in one folder. Use a writable APFS folder accessible from this device. The app creates a folder per game. The first time you use a fresh destination for a game, it copies the committed saves and leaves the originals in place. An existing destination opens its own progress. **Use Default** reopens the app’s original saves. On Mac the folder preference is shared by the game apps; on iOS select the folder in each app that should use it. Cloud saves are a separate setting.
 
 ## Touch controls
 

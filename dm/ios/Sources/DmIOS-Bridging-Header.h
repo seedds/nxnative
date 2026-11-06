@@ -1,3 +1,4 @@
-// The Objective-C functions Launcher.swift and GameMenu.swift call (CloudSaves.h, DmGameMenu.h). project.yml points SWIFT_OBJC_BRIDGING_HEADER here.
+// Native APIs used by the Swift launcher and in-game menu.
 #import "CloudSaves.h"
 #import "DmGameMenu.h"
+#include "local_users.h"

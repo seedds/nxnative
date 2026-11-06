@@ -6,6 +6,79 @@ extension LauncherModel {
     func binding(_ s: Setting) -> Binding<String> { Binding(get: { self.values[s.env] ?? s.def }, set: { self.values[s.env] = $0 }) }
 }
 
+struct PlayerSection: View {
+    @ObservedObject var m: LauncherModel
+    @State private var editing = false
+    @State private var renameID: String?
+    @State private var nickname = ""
+    @State private var editError: String?
+
+    var body: some View {
+        if m.users.count > 1 || m.canEditUsers {
+            Section {
+                if m.users.count > 1 {
+                    Picker("Who's playing?", selection: $m.selectedUser) {
+                        ForEach(m.users) { user in Text(verbatim: user.label).tag(user.index) }
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(m.userLocked)
+                } else if let user = m.pickedUser {
+                    LabeledContent("Who's playing?", value: user.nickname)
+                }
+                if m.canEditUsers {
+                    HStack(spacing: 16) {
+                        Button("Create User…") { beginEdit(nil) }.disabled(!m.canCreateUser)
+                        if let user = m.pickedUser { Button("Rename User…") { beginEdit(user) } }
+                    }
+                    .buttonStyle(.borderless)
+                    .sheet(isPresented: $editing) { editor }
+                }
+            }
+        }
+    }
+
+    private func beginEdit(_ user: LauncherUser?) {
+        renameID = user?.id
+        nickname = user?.nickname ?? ""
+        editError = nil
+        editing = true
+    }
+
+    private func saveEdit() {
+        guard editing else { return }
+        editError = m.editUser(renameID: renameID, nickname: nickname)
+        if editError == nil { editing = false }
+    }
+
+    private var editor: some View {
+        NavigationStack {
+            Form {
+                TextField("Nickname", text: $nickname)
+                    .onSubmit(saveEdit)
+                    .onChange(of: nickname) { _, _ in editError = nil }
+                if let error = editError ?? (nickname.isEmpty ? nil : LauncherModel.nicknameProblem(nickname)) {
+                    Text(verbatim: error).foregroundStyle(.red)
+                }
+            }
+            .formStyle(.grouped)
+            .navigationTitle(renameID == nil ? "Create User" : "Rename User")
+#if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+#endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { editing = false } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(renameID == nil ? "Create" : "Save", action: saveEdit)
+                        .disabled(LauncherModel.nicknameProblem(nickname) != nil)
+                }
+            }
+        }
+#if os(macOS)
+        .frame(minWidth: 380, minHeight: 200)
+#endif
+    }
+}
+
 struct SettingRow: View {
     let s: Setting
     @ObservedObject var m: LauncherModel

@@ -1172,6 +1172,22 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`SharedAtomics`: the three fail on `main`). A GPU cross-check of 400 LDS / STS / ATOMS from an nvdisasm-validated sm_86 corpus, run as one-thread compute shaders with the production options (debug and reduced on, MSL 2.3), against a reference: 84 mismatches (all INC, DEC and CAS) to none; the same on encodings from real compiled code.
 - **Found on:** cross-checking the translator against nvdisasm and a reference interpreter; no game run. Also seen with `debug: false` (the AST optimizer, off by default): a shared store of 8 or 16 bits makes the translator throw, and an ATOMS whose result goes to RZ is dropped.
 
+### Half-pair swizzle on a constant, and .F32
+
+- **Symptom:** wrong values in the high lane of half-pair math that scales by one half of a uniform (`HMUL2 R37, R37.H0_H0, c[0x0] [0x168].H0_H0`), or a garbage operand where a half-pair operation reads a 32-bit float (`R20.F32`).
+- **Cause:** `AHalfLanes` took a constant operand as is, ignoring its swizzle (bits 60..61 in the 32 slot, where a constant lives), so `.H0_H0` / `.H1_H1` on a constant gave the high lane the constant's other half. Swizzle value 1 was read as `.H1_H1`; nvdisasm (sm_86) names it `.F32` in all three slots (A 74..75, the 32 slot 60..61, the 64 slot 81..82), the operand's own 32-bit float. Only an immediate has no swizzle: those bits are its own.
+- **Fix:** `AHalfLanes` in `InstEmitAmpereAlu.cs` applies the swizzle to constants and takes `.F32` as the float itself in both lanes (the lanes are computed in 32 bits already). MUFU.F16, whose bits 60..61 pick one half (`.H0` / `.H1`), keeps its own reading. `.F32`'s exact rounding on NVIDIA (whether the float is rounded to a half first) is not known; the float itself is the closer reading than its top 16 bits.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`HalfSwizzle`: the three fail on `main`), and `test_dmsh_ampere_mem.py`'s `MufuF16`. A GPU cross-check of 900 HADD2 / HMUL2 / HFMA2 from an nvdisasm-validated sm_86 corpus against an exact binary16 reference (one rounding, FMA included) went from 86 mismatches on constant swizzles to none; what is left is `.FTZ` on subnormals, `.FMZ` (0 times infinity) and `.RELU` on NaN (canonical NaN in PTX's documentation), which the translator does not model.
+- **Found on:** cross-checking the translator against nvdisasm and a reference interpreter; no game run.
+
+### HSETP2 / HSET2 .FTZ
+
+- **Symptom:** a half comparison with `.FTZ` on a subnormal operand passes where NVIDIA's fails (or the reverse): `HSET2.BF.GT.FTZ R6, R19, RZ` gives 1.0 for a positive subnormal half, 0 on NVIDIA.
+- **Cause:** bit 80 of HSETP2 and HSET2 was dropped. `AFtz` (FSETP / FSET) does not fit: the half lanes are unpacked to 32-bit floats, where a half's subnormals are normal, so `FlushDenormal`'s bound never flushes them.
+- **Fix:** `AHalfFtz` in `InstEmitAmpereTensor.cs` flushes each lane under the half's own bound (2^-14) before the comparison. The arithmetic's `.FTZ` stays dropped, as for 32-bit floats.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`HalfCompareFtz`: two fail on `main`). The GPU cross-check with subnormal and zero inputs: 4 HSETP2 / HSET2 mismatches in 400, none with the fix; HMNMX2's `.FTZ` (a subnormal result kept) is left as is.
+- **Found on:** cross-checking the translator against nvdisasm and a reference interpreter (NAK's `OpHSetP2` gives the `.H_AND` reading the translator already has); no game run.
+
 ### A guarded load whose destination is its address
 
 - **Symptom:** none in the log: everything drawn with an engine's scene data lands on the first instance's transform, or at nothing. In the MSL, a bounds-checked read has a constant index (`vp_s2._m0[0]`) just after a comparison of the register it should use.

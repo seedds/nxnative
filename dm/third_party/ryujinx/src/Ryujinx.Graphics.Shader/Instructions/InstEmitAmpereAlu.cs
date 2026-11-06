@@ -225,7 +225,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             // Splatoon Raiders' upscaler network (agl_ndsr.pck) takes powers of its packed halves with LOG2 and EXP2, then joins the results with PRMT 0x5410
             bool half = x.Bit(73);
             ASrc s = AOne(context, x);
-            Operand res = half ? AHalfLanes(context, s, x.Bits(60, 62))[0] : AFloat(context, s);
+            // MUFU.F16's bits 60..61 pick one half (nvdisasm: 0 .H0, 1 .H1), not a pair's swizzle (where 1 is .F32): the odd values read the high half, as they did
+            Operand res = half ? AHalfLanes(context, s, (x.Bits(60, 62) & 1) != 0 ? 3 : 2)[0] : AFloat(context, s);
 
             if (half && x.Bits(74, 80) is 6 or 7)
             {
@@ -488,18 +489,23 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
         // ---- packed halves ----
 
-        // A half-pair operand's two lanes after its swizzle (0 as is, 2 low twice, 3 high twice; 1 the high half of a scalar), abs / neg applied.
+        // A half-pair operand's two lanes after its swizzle (0 as is, 1 .F32: the 32-bit float itself in both lanes, 2 low twice, 3 high twice), abs / neg applied.
+        // A constant has its swizzle too (bits 60..61 in the 32 slot, nvdisasm: c[0x0] [0x168].H0_H0); only an immediate has none (those bits are its own)
         private static Operand[] AHalfLanes(EmitterContext context, ASrc s, int swizzle)
         {
             Operand v = AGet(context, s);
             Operand lo, hi;
 
-            if (s.Kind == AKind.Imm || s.Kind == AKind.Cbuf || swizzle == 0)
+            if (s.Kind == AKind.Imm || swizzle == 0)
             {
                 lo = context.UnpackHalf2x16Low(v);
                 hi = context.UnpackHalf2x16High(v);
             }
-            else if (swizzle is 1 or 3)
+            else if (swizzle == 1)
+            {
+                lo = hi = v;
+            }
+            else if (swizzle == 3)
             {
                 lo = hi = context.UnpackHalf2x16High(v);
             }

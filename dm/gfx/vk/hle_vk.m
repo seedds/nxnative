@@ -1280,7 +1280,7 @@ static void begin_rp(rs_t *s, const c_brp *c) {
         }
     }
     if (!rp->ncol && rp->depth < 0) { d.renderTargetWidth = fb->w; d.renderTargetHeight = fb->h; d.defaultRasterSampleCount = 1; }
-    if (s->sq && s->sq->vis) d.visibilityResultBuffer = s->sq->vis;
+    if (s->sq->vis) d.visibilityResultBuffer = s->sq->vis;
     s->rpd = d; s->re = [s->cb renderCommandEncoderWithDescriptor:d];
     s->applied = NULL; s->rt_w = w; s->rt_h = h;
     // Dynamic viewport and scissor persist across render passes within a command buffer, as in Vulkan; the render target's size stands in only until the game sets them.

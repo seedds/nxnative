@@ -42,6 +42,12 @@ static class P {
     static int Main(string[] a) {
         try { return Run(a); }
         catch (KeysMissing e) { Console.WriteLine($"[RED] {e.Message}"); return 6; }
+        // The tables a filesystem opens from fail the hash check (Mario & Luigi: Brothership's update: its Program NCA does not match its content ID): no file can be listed, so no file can be
+        // named or written as read. Exit code 3, as for damaged files, not an unhandled exception's stack trace
+        catch (HorizonResultException e) when (HashError(e)) {
+            Console.WriteLine("[RED] the NSP is damaged: a filesystem's own tables fail the NCA's hash check, so --allow-damaged cannot read it either: an incomplete copy or a broken download, which a SHA-256 of each NCA shows (its file name is the hash's first 16 bytes); copy or download it again");
+            return 3;
+        }
     }
 
     static int Run(string[] a) {

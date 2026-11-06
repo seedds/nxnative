@@ -11,8 +11,9 @@ Update 1.1.1 (`v262144`) over the base game, SDK 11.4.0. Game Freak's engine bet
 | `dual_want.tsv` | profile | two post-effect pixel shaders are blended with their output 1 as the second source ([A written secondary blend source](../../../docs/reference/rendering.md#a-written-secondary-blend-source-nvn-dual-source-blending)) |
 | `depth_mode zero` | `game.tsv` | the game sets the near=0 depth mode, so the pipeline bases made before it runs take the `main0_z` vertex entries |
 | `pad_layout full` | `game.tsv` | the 3D gamepad layout: the camera is on the right stick |
+| The capture demo's empty result | [`patches.py`](patches.py) `MATCH_CUTS` | a workaround for a null read in the game's own code, whose cause is open: [Crash in the capture demo](#crash-in-the-capture-demo) |
 
-No `patches.py`, and no host code keyed to this game.
+No host code keyed to this game.
 
 ## Bring-up
 
@@ -20,6 +21,18 @@ No `patches.py`, and no host code keyed to this game.
 - **Resolved: an abort on Metal's compiler queue** a few seconds into the language screen (`[AGX] Failed assertion "error == MTLCompilerErrorNoError"` in `findOrCreateComputeFastClearPipeline`, `MTLCompilerService` crash reports in `AGCLLVMStatelessFragmentObject::buildBlendFactor`), with or without the pipeline prebuild. The pipeline was `ha_post_effects.bnsh` variation 4 (`f4f36a03b0c6691d`): an RGBA16Float target blended with destination factor `SRC1_ALPHA`, the shader writing outputs 0 and 1. A temporary log of each blended attachment in `pso_desc` named it as the last pipeline before the abort. `DM_NVN_DUAL_WANT` then listed a second one, `ff45da02e225f961`, in the first minute.
 - `[RED] no render target could get an MTLTexture` once at boot ([Passes with no render target](../../../docs/reference/rendering.md#passes-with-no-render-target)); no other red line on the route below.
 - The NSP script's rewrite step was reused after the alignment rule was added: it keyed only the patch files that name one of the modules' builds ([The packing script in detail](../../../docs/development.md#the-packing-script-in-detail)).
+
+## Crash in the capture demo
+
+Open: the cause; the crash is worked around ([GitHub issue #712](https://github.com/seedds/nxnative/issues/712)).
+
+- **Symptom:** `CRASH sig=11 addr=0x118 pc=main+0x16e34fc lr=main+0x16e34ac` on `JobThread2`, x8 = 0, after 37 to 65 minutes of normal play on the Mac, with no `[RED]` line before it. Three reporters; the first lost all three sessions of one day to it. The backtrace is always `main+0x19d244c main+0x1cd25e0 main+0x1cceda8 main+0xace34c main+0x1bd9e9c`, and the last frame takes about 1 ms of GPU time.
+- **What the code does:** the capture demo task (`main+0x1ccf1a4`; `bin/demo/graphic/system_resource/capture/ob0201_00/anm/capture_animcfg.tracn`, `ThrowableObject`, `my_poke_ball`) builds a ball object and calls `main+0x19d2368`, which calls `main+0x16e33ec` on a 0x1d0-byte object held at `+0x130` of a 0x2e8-byte owner. That function locks the weak reference at `this+0x88` (`main+0x16e9e98`) and reads `[result + 0x118]` with no check. Two things give a null result: the reference itself is null, or its object is dead. The crash log cannot tell them apart.
+- **What was measured:** the object's constructor zeroes `+0x88` (`main+0x18954c4`, frame 4595 on the first load) and the field setup's state 0x18 fills it (`main+0x1877a4c` through `main+0x16dde90`, frame 4648): 53 frames with a null reference in that run. That state runs on whichever thread takes the job: the main thread in that run, `JobThread1` (frame 5548) in another. The part of the task that was read has no check for this. At the crash the main thread and `JobThread1` are parked in the job wait, so nothing else is running on that object at that instant. No host service is on the path.
+- **Not established:** which null path the crashes take; whether the owner is rebuilt for each scene (one reporter's single hit was followed by a new scene's textures). The likely reading is an order the game does not enforce between the task's own loading and the field setup, which the host's timing exposes. A fresh save does not reach the path: 9 minutes of the route below never called `main+0x19d2368`.
+- **Workaround:** `patches.py` returns the function's empty result (`{0, 0}` through x20) on both null paths, before it takes any reference. All 12 direct reads of the result (the ball's `+0x810`, `main+0x19cbcd0` to `main+0x19d1fac`) null-check it; three other places copy it as a reference (`main+0x19cc230`, `main+0x19d2074`, `main+0x19d257c`), whose users were not followed. The room for the check is two of the function's five identical blocks, so the abort stub stays. It is function-matched on 1.1.1 ([function-matched cuts](../../../docs/reference/rewriter.md#function-matched-cuts-for-unregistered-builds)); other builds are unchecked and get a red line if the function differs.
+- **Checked:** the rewriter matches the rule once and writes the five cuts, and the game then boots on the Mac to the field setup with no crash (200 s, on the disk's older shader libraries). The patched function run on the module's own bytes in a small interpreter: both null paths return `{0, 0}` with the stack and callee-saved registers restored, and never reach `main+0x16e34fc`; a live object goes on to `main+0x16e3420` as before. The issue's earlier form of the cuts, with the same effect, ran about 7 hours on the Mac with no crash, and the skip was seen once (id 1, frame 142020, followed by 55 minutes of play). These cuts have not met the path in play, and any visible effect on that one ball is unknown.
+- **To settle the cause:** `DM_PROBE=main:16e341c,main:16e3828` on a save with Poké Balls, with `DM_PROBE=main:16dde90` to see the order.
 
 ## Performance and memory
 
@@ -40,6 +53,7 @@ No `patches.py`, and no host code keyed to this game.
 
 General changes first needed here; each applies to every game:
 
+- **Function-matched cuts take branches inside the matched function, and read the trap word `0xe7ffdefe`** (`nso_match.py`): [Function-matched cuts](../../../docs/reference/rewriter.md#function-matched-cuts-for-unregistered-builds).
 - **The node area and 32 MB region alignment cuts of `sdk` `b39add63…`, and the SDK 11.4.0 implementation of the SDK-wide alignment patch** (`sdk_patches.py` `MATCH_CUTS`; the build's row was removed on 2026-10-29, as the rules give the same cuts): [1 GB alignment of regions of 1 GB and more](../../../docs/reference/memory.md#1-gb-alignment-of-regions-of-1-gb-and-more).
 - **Dual-source blending for NVN shaders** (`dmsh_build.py` `fs_dual`, `main0_d`, the profile's `dual_want.tsv`, `DM_NVN_DUAL_WANT`; `pso_desc` `pso_reads_src1`): [A written secondary blend source (NVN dual-source blending)](../../../docs/reference/rendering.md#a-written-secondary-blend-source-nvn-dual-source-blending).
 - **The NSP script's rewrite key always covers `sdk_patches.py`** (`patch_files`): [The packing script in detail](../../../docs/development.md#the-packing-script-in-detail).

@@ -42,6 +42,7 @@ Update 1.0.1 (v65536) over the base game, SDK 14.3.1. Unity 2021.3.15f1 IL2CPP w
 
 ## Open
 
+- **Current (2026-11-05):** the translator deletes 20 bindless accesses in 4 shaders (4 pixel; texture2D 20), whose results read 0: `0918eb68f1a71924` `220a6f463d1b1588` `768ad53b637e9686` `8027369dadd26a36`. The cause is not traced, and whether a route reaches them is not known. [Losses a shader build reports](../../../docs/reference/shaders.md#losses-a-shader-build-reports).
 - Everything past the first battle's first attack: the rest of the game, party members, a save and its load. This was a short test on purpose.
 - Nobody has watched it in motion or listened to it: the checks are single frames and the log. Sound is checked only in the log (one AudioOut with 6 channels; a few underruns of 5 ms, under the load above). Input has gone only through `DM_CTL`, not a controller or the keyboard.
 - iPhone and iPad runtime validation; no IPA has been built. Memory there is the first thing to watch.

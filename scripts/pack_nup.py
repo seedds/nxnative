@@ -4,7 +4,10 @@
 # A NUP holds the same packages as a dump folder (scripts/pack_dump.py): the base game, updates by version and DLC by title ID, each an exefs/ and romfs/ tree, its files stored raw or as one zstd
 # frame each, with a SHA-256 per file. Its files are not encrypted, so it needs no keys. Unlike a dump it may carry control data in each package's meta block: the NACP and the icon. Its name,
 # publisher and display version records are labels the packer typed (Hyrule Warriors: Age of Imprisonment's says "HWAoI"), not the console's: without a NACP the name comes from the profile.
-# The base package may be an empty placeholder (no code, title ID 0) when an update holds the whole game (Pokemon Pokopia's v655360): the title ID is the program ID of the code present.
+# A container may hold no base game, in two forms that mean the same: no base record, with standalone_update on every update (SPEC §3.1.2), or a base record with no files (title ID 0), as packers
+# leave when an update holds the whole game (Pokemon Pokopia's v655360). The title ID is then the program ID of the code present, there is no version 0, and the selected update needs its own ExeFS
+# and RomFS, taken as the whole game. The flag does not promise that (the spec says such an update needs a matching base elsewhere), and nothing in a container can prove it, so the scripts say so
+# (NO_BASE). What was measured: the update RomFS of both NUPs at hand holds every path of its base (Hyrule Warriors: Age of Imprisonment, Yoshi and the Mysterious Book).
 # Writes, under the build folder (<folder of the .nup>/<title ID>_build unless --work-dir names another):
 #   extract/v<version>/ExeFS/   the version's code modules
 #   extract/v<version>/RomFS.img   its RomFS as one image (dm/tools/romfs_image.py), written straight from the container: the RomFS is never unpacked into loose files
@@ -39,6 +42,7 @@ KINDS = ('base', 'update', 'addon', 'addon_update', 'system')
 STANDALONE = 1   # package flags bit 0: an update in a container without a base
 T_NACP, T_ICON, T_LICONS = 2, 3, 10
 ARTIFACTS = {b'.listing'}   # dump-tool files a producer may have kept (SPEC §6.3): not game files
+NO_BASE = 'no base game in this NUP: its update is taken as the whole game (if the game then stops on missing files, the update holds only what changed: pack a NUP with the base game)'
 
 
 class Package:
@@ -158,6 +162,18 @@ class Nup:
             write = bytearray.extend
         b = Buf(); self.copy(i, b); return bytes(b)
 
+    def head(self, i, n=32):   # file i's first n bytes (fewer for a shorter file), for a survey's RomFS manifest; not checked against the SHA-256, which covers the whole file
+        name, size, sha, eoff, esz, codec = self.files[i]
+        if codec == 0 or not size: return bytes(self.mm[eoff:eoff + min(n, size)])
+        if zstd is None: raise Error('reading a NUP needs the zstd module: compression.zstd (Python 3.14+) or pip install backports.zstd')
+        d, out, p = zstd.ZstdDecompressor(), b'', eoff
+        try:
+            while len(out) < min(n, size) and p < eoff + esz and not d.eof:
+                out += d.decompress(self.mm[p:min(p + (64 << 10), eoff + esz)], max_length=n - len(out)); p += 64 << 10
+                while len(out) < min(n, size) and not d.needs_input and not d.eof: out += d.decompress(b'', max_length=n - len(out))
+        except zstd.ZstdError as e: raise Error(f'{self.path}: {name.decode(errors="replace")}: {e}') from e
+        return out[:n]
+
 
 def program_id(npdm, where):   # the ACI0 program ID of an NPDM
     if npdm[:4] != b'META': raise Error(f'{where}: not an NPDM')
@@ -173,15 +189,15 @@ def is_nup(path):
 
 
 def scan(n):
-    """What a NUP holds: (title ID, base package, {update version: package}, {DLC title ID: package}), with the checks pack_dump.scan makes"""
+    """What a NUP holds: (title ID, base package or None, {update version: package}, {DLC title ID: package}), with the checks pack_dump.scan makes"""
     bases = [k for k in n.packages if k.kind == BASE]
-    if not bases:
-        raise Error(f'{n.path}: no base game, only ' + (', '.join(sorted({KINDS[k.kind] for k in n.packages}))) + ' packages: pack the base game and its update into one NUP')
-    base = bases[0]
     if len(bases) > 1: raise Error(f'{n.path}: {len(bases)} base packages')
-    # Dumps can leave an empty base placeholder and put the complete game in an update.
-    # Identify it from the code actually present; each selected version is checked by pack_version.
-    ids = {program_id(n.read(i), f'{k.name} exefs/main.npdm') for k in n.packages if k.kind in (BASE, UPDATE) and k.exefs != NO_DIR
+    updates = [k for k in n.packages if k.kind == UPDATE]
+    if not bases and (not updates or any(not k.flags & STANDALONE for k in updates)):
+        raise Error(f'{n.path}: no base game: pack the base game and its update into one NUP, or use updates marked standalone_update with complete exefs/ and romfs/')
+    base = bases[0] if bases and n.tree_bytes(bases[0].root) else None   # a base record with no files is no base game
+    # With no base the game is identified from the code actually present; each selected version is checked by pack_version.
+    ids ={program_id(n.read(i), f'{k.name} exefs/main.npdm') for k in n.packages if k.kind in (BASE, UPDATE) and k.exefs != NO_DIR
            if (i := n.child(k.exefs, b'main.npdm')) is not None}
     if not ids: raise Error(f'{n.path}: no exefs/main.npdm in the base or updates')
     if len(ids) != 1: raise Error(f'{n.path}: base and updates have different program IDs: ' + ', '.join(f'{pid:016X}' for pid in sorted(ids)))
@@ -263,8 +279,13 @@ def pick(tags, code):   # the record for a language code: the exact tag, then it
     return tags.get(code) or tags.get(code.split('-')[0])
 
 
-def control(k, out):   # the package's control data beside its ExeFS, as nx_extract saves it: control.nacp and icon.jpg (none of either when the package has none)
-    meta = k.meta()
+def app_package(n):   # the record that holds application metadata when no base game is there (SPEC §5.1): a base record with no files, as packers attach it there, else the first package
+    return next((k for k in n.packages if k.kind == BASE), n.packages[0])
+
+
+def control(k, out, fallback=None):   # the package's control data beside its ExeFS; what it lacks comes from fallback
+    meta = fallback.meta() if fallback is not None else {}
+    meta.update(k.meta())
     nacp_bytes = meta.get(T_NACP)
     icons = localized(meta.get(T_LICONS, b''))
     icon = meta.get(T_ICON) or pick(icons, 'en-US') or next(iter(icons.values()), None)
@@ -274,7 +295,7 @@ def control(k, out):   # the package's control data beside its ExeFS, as nx_extr
 
 
 def romfs_of(k, base):   # the RomFS folder a version runs with: its own, or the base game's for an update without one
-    d = k.romfs if k.romfs != NO_DIR else base.romfs
+    d = k.romfs if k.romfs != NO_DIR else base.romfs if base is not None else NO_DIR
     if d == NO_DIR: raise Error(f'{k.name}: no romfs/ in this package or the base game')
     return d
 
@@ -286,7 +307,7 @@ def pack_version(n, k, base, app, out, say=print):   # one version (the base pac
     out.mkdir(parents=True, exist_ok=True)
     exefs(n, k, out / 'ExeFS')
     pack(n, d, out / 'RomFS.img', say)
-    control(k, out)
+    control(k, out, app_package(n) if base is None else None)
 
 
 def pack_dlc(n, app, dlc, aoc, say=print):   # {DLC title ID: package} → aoc/<index>.img; images of DLC no longer in the container go
@@ -309,11 +330,14 @@ def main():
             app, base, vers, dlc = scan(n)
             ver = a.version if a.version is not None else max(vers, default=0)
             if ver and ver not in vers: raise Error(f'no update {ver} in {path.name} (have: {", ".join(map(str, sorted(vers))) or "none"})')
-            work = (a.work_dir or path.parent / f'{app:016X}_build').resolve()
+            k = vers[ver] if ver else base
+            if k is None: raise Error(f'{path.name}: no base game (version 0); choose a standalone update version')
+            if base is None: print(NO_BASE, flush=True)
+            work =(a.work_dir or path.parent / f'{app:016X}_build').resolve()
             out = work / 'extract' / f'v{ver}'
-            print(f'{app:016X} version {ver}: {(vers[ver] if ver else base).name}', flush=True)
+            print(f'{app:016X} version {ver}: {k.name}', flush=True)
             say = lambda s: print(s, flush=True)
-            pack_version(n, vers[ver] if ver else base, base, app, out, say)
+            pack_version(n, k, base, app, out, say)
             pack_dlc(n, app, dlc, work / 'aoc', say)
     except (Error, OSError) as e: sys.exit(f'[RED] {e}')
     print(f'done: {out}' + (f', {len(dlc)} DLC in {work / "aoc"}' if dlc else ''))

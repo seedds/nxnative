@@ -46,5 +46,6 @@ namespace Ryujinx.Graphics.Shader.IntermediateRepresentation
         VertexIndex,
         ViewportIndex,
         ViewportMask,
+        HelperInvocation,   // nxnative: at the end, so the others keep their numbers
     }
 }

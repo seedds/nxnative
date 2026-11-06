@@ -16,7 +16,14 @@ import dmsh_abi as abi
 NFB = 8
 
 def _once(msl, name):   # name is assigned exactly once in the source (its declaration): spirv-cross also declares variables first and assigns them in branches
-    return len(re.findall(r'(?<![\w.])%s = ' % re.escape(name), msl)) == 1
+    # Found as text, with a look at the character before: a pattern that starts with a lookbehind has no literal prefix to skip to, so re tries every character (4 ms each on Pokopia's 220 KB sources,
+    # and 24 calls a pixel shader made this 38% of the builder's Python, under the GIL, GitHub issue #1036)
+    text, n = name + ' = ', 0
+    i = msl.find(text)
+    while i >= 0:
+        if not i or not (msl[i - 1] in '._' or msl[i - 1].isalnum()): n += 1
+        i = msl.find(text, i + len(text))
+    return n == 1
 
 def _proj(msl, var, comp, locn):
     """var = in.m_X.<comp> / in.m_X.w, written as a product with 1.0 / w or as a quotient (each name assigned once) → m_X, or None"""

@@ -40,9 +40,11 @@ Update 1.0.6.1267 (v3080192) over the base game, SDK 20.5.29. Unity 6000.0.52f1 
 ## Found on this game
 
 - [Unity compute kernels with no code](../../../docs/reference/shaders.md#unity-compute-kernels-with-no-code): 11 of 142 kernels in `Data/resources.assets` have none, which cost the split the whole file.
+- [Handles built under a guard the read's guard cannot be tied to](../../../docs/reference/shaders.md#handles-built-under-a-guard-the-reads-guard-cannot-be-tied-to): 364 of its 22,072 shaders change, 319 of them read a texture word with no sampler word (mostly `Jungle_Dave_Uber`). None drew in the sampled frames of a run from `save_d1boat`, so no picture was compared.
 
 ## Open
 
+- **Current (2026-11-05):** the translator deletes 32 bindless accesses in 2 shaders (2 pixel; texture2D 32), whose results read 0: `74cb82b3eb27955d` `dab363d965d1374a`. The cause is not traced, and whether a route reaches them is not known. `74cb82b3eb27955d` lost 17 before `84dea698`, the float comparisons that honour .FTZ, and 30 since; why is not traced. [Losses a shader build reports](../../../docs/reference/shaders.md#losses-a-shader-build-reports).
 - The five DLC notices return on every start, even with a save. Whether the Switch does the same, or something the game stores does not persist here, was not looked into.
 - iPhone and iPad runtime validation; no IPA has been built.
 - Sound is not checked: every run was windowless with the silent sink. Input has gone only through `DM_CTL`, not a controller or the keyboard.

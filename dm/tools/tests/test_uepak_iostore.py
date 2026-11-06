@@ -297,4 +297,59 @@ class IoStore(unittest.TestCase):
         self.assertEqual(seen, [(raw, '/Game.utoc#Game/M_A.uasset')])
 
 
+def lslg_record(marker):
+    """A pixel shader record of the layout uepak.lslg accepts: header, code area, control section (0x880 bytes)."""
+    code, ctl = bytearray(0x40), bytearray(0x880)
+    code[0] = marker; ctl[:4] = bytes.fromhex('34127698'); struct.pack_into('<I', ctl, 0x704, len(code))
+    return b'LSLGSP' + bytes(2) + struct.pack('<I', len(code)) + code + struct.pack('<I', len(ctl)) + ctl + bytes(24)
+
+
+def oodle_stand_in(record):
+    """A Mermaid stream's header (8C 0A) in front of zlib, which the test decoder reads as Oodle."""
+    return b'\x8c\x0a' + zlib.compress(record)
+
+
+def decode_stand_in(data, size):
+    try: out = zlib.decompress(data[2:])
+    except zlib.error as e: raise ValueError(str(e)) from e
+    if len(out) != size: raise ValueError('size')
+    return out
+
+
+def shader_entry(stored, record, frequency=3):
+    """FShaderEntry as Unreal Engine 5.1 stores it inline: i32 code length, the code, i32 raw size, u8 frequency."""
+    return struct.pack('<i', len(stored)) + stored + struct.pack('<i', len(record)) + bytes([frequency])
+
+
+class InlineIoStore(unittest.TestCase):
+    """Unreal Engine 5.1 with bShareMaterialShaderCode off (DRAGON BALL Sparking! ZERO): no shader library, every shader inline in a package's export data."""
+    romfs: Path
+    setUp, run_job, shaders = IoStore.setUp, IoStore.run_job, IoStore.shaders
+
+    def test_inline_entries_of_the_current_packages_are_decoded_and_deduplicated(self):
+        old, kept, raw_kept, bulk = (lslg_record(m) for m in (1, 2, 3, 4))
+        not_lslg = b'not a shader record' * 8
+        look_alike = struct.pack('<i', 8) + b'\x8c\x0a' + bytes(6) + struct.pack('<i', 100) + b'\x03'
+        package_a, package_b = chunk_id(1, uepak.IO_EXPORT_BUNDLE), chunk_id(2, uepak.IO_EXPORT_BUNDLE)
+        container(self.romfs, 'Game.utoc', [(package_a, b'pad' + shader_entry(oodle_stand_in(old), old)),
+                                            (package_b, look_alike + shader_entry(oodle_stand_in(not_lslg), not_lslg) + shader_entry(raw_kept, raw_kept) + shader_entry(oodle_stand_in(kept), kept)),
+                                            (chunk_id(3, 2), shader_entry(oodle_stand_in(bulk), bulk))])
+        container(self.romfs, 'Game_0_P.utoc', [(package_a, shader_entry(oodle_stand_in(kept), kept))])
+        entries, records = self.run_job(decode=decode_stand_in)
+        self.assertEqual((len(entries), records), (1, 0))
+        self.assertEqual(entries[0]['compression'], 'IoStore inline, decoded')
+        self.assertIn('1 look-alike', entries[0]['path'])
+        self.assertEqual(sorted(self.shaders(entries[0])), sorted([kept, raw_kept]))
+
+    def test_ue427_numbering_is_not_read_as_ue5_export_data(self):
+        record = lslg_record(1)
+        container(self.romfs, 'Game.utoc', [(chunk_id(1, uepak.IO_EXPORT_BUNDLE), shader_entry(oodle_stand_in(record), record))], version=3)
+        self.assertEqual(self.run_job(decode=decode_stand_in), ([], 0))
+
+    def test_encrypted_packages_without_a_key_are_refused(self):
+        container(self.romfs, 'Game.utoc', [(chunk_id(1, uepak.IO_EXPORT_BUNDLE), b'x')], encrypted=True)
+        with self.assertRaisesRegex(ValueError, 'Game.utoc:.*encrypted.*main\'s key'):
+            self.run_job(decode=decode_stand_in)
+
+
 if __name__ == '__main__': unittest.main()

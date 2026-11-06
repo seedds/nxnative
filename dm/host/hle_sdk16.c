@@ -165,6 +165,8 @@ static size_t font_skip(void) {
 }
 HLE_FORCE("_ZN2nn2pl22GetSharedFontLoadStateENS0_14SharedFontTypeE", "shared font load state: loaded (1)", int, h_pl_LoadState, int type) { return font_get(type).p ? 1 : 0; }
 HLE_FORCE("_ZN2nn2pl20GetSharedFontAddressENS0_14SharedFontTypeE", "shared font address → BFTTF header (archive shared_font ttf: the TTF itself)", const void *, h_pl_Addr, int type) { const uint8_t *p = font_get(type).p; return p ? p + font_skip() : NULL; }
+// SDK 22's request to load the Switch 1 fonts into a buffer of the game's goes through the pl service, which the host does not serve, and any failure aborts (PR 1434): the stand-in fonts come from host memory, so the buffer is left as it is
+HLE_FORCE("_ZN2nn2pl17RequestLoadNxFontEPvm", "load the shared fonts into the game's buffer; the stand-in fonts need none of it", void, h_pl_ReqNxFont, void *buf, size_t size) { (void)buf; (void)size; }
 HLE_FORCE("_ZN2nn2pl17GetSharedFontSizeENS0_14SharedFontTypeE", "shared font size → 8-byte header + stand-in font file size (archive shared_font ttf: without the header)", size_t, h_pl_Size, int type) { font_t f = font_get(type); return f.p ? f.n - font_skip() : 0; }
 // Every shared font at once (Rhythm Heaven Groove, SDK 21): the SDK asks the pl service for GetSharedFontInOrderOfPriority and, when the fonts are loaded, fills min(count, max) SharedFontData {u32 type; const void *address; size_t size}
 //   (0x18 bytes) with the shared memory base + each font's offset (sdk+0x40f270), then returns whether they are loaded; the game retries every 10 ms until they are (main+0x501f04). The service's offsets point past each font's 8-byte

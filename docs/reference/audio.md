@@ -319,6 +319,13 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Fix:** `ListAudioIns` reports none, both opens fail, and the calls that need an open AudioIn answer without touching the game's object (`hle_audio.c`). `AcquireAudioDeviceNotificationForInput` binds an event that is never signaled and returns 0x499 when acquired again, as the SDK does with a flag of its own (SDK 13.3.0 `sdk+0x56300`: `+0x851`, the output's `+0x852`; `hle_audren.c`).
 - **Found on:** [Absolum](../../dm/games/0100A83022A22000/README.md) (SDK 18.3.2, FNA on .NET NativeAOT with SDL3; one boot each); [Portal 2](../../dm/games/0100ABD01785C000/README.md) (SDK 13.3.0: its audio thread at start, `main+0x19f37c`).
 
+### No virtual audio input devices (SDK 22)
+
+- **Symptom:** `[RED] sf: the game connects to service auddmg:u itself, which the host does not serve`, then `game called nn::diag abort: Result 0xa99` at `sdk+0x1f61ac` under `audio::ListVirtualInputDevices`.
+- **Cause:** the game lists the virtual input devices when its audio starts (`main+0xf48124`) and opens the first with `audio::OpenInputStream` if there is one. The list goes through a service the host does not serve.
+- **Fix:** `ListVirtualInputDevices` reports none (`hle_audio.c` `h_is_List`), and the game skips its input stream.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (SDK 22.2.8); Star Fox imports the same calls.
+
 ### `OpenAudioOut` without a release event (SDK 22)
 
 - **Symptom:** `game called nn::diag abort: Result 0xe15, call site sdk+0x1f8704`, i.e. inside `nn::audio::CreateAudioOutManagerByHipc+0xb4`, before any audio device opened.

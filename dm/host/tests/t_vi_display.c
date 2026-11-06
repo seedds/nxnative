@@ -11,6 +11,8 @@ static int layer(uint64_t *w, uint64_t *h) {
     uint8_t p[0x60]; int n = h_vi_ListDisp(p, 1); memcpy(w, p + 0x50, 8); memcpy(h, p + 0x58, 8);
     return n == 1 && !strcmp((char *)p, "Default") && p[0x40] == 1;
 }
+void mtl_present_layer(uint32_t w, uint32_t h) { (void)w; (void)h; }   // the shape of a sized layer: nothing in these checks presents
+
 int main(void) {
     struct { int mode, ounce, w, h; uint32_t buf; uint64_t lw, lh; const char *what; } c[] = {
         {1, 1, 5120, 2880, 3, 3840, 2160, "Switch 2 docked on a 5K screen: 4K buffer and layer"},

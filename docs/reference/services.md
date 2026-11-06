@@ -342,6 +342,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the console six-axis sensor (`hid::*SevenSixAxisSensor*`) reports zero states; more `nfp` calls are hooked: `AttachActivateEvent` / `AttachDeactivateEvent`, the two-argument `Mount`, `Unmount`, `GetCommonInfo`, `GetRegisterInfo`, `GetState`, `Finalize`. The host answers as a console with no amiibo.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0, SDK 20.5.22). [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) 1.2.1 already initialized `nn::nfp` at boot ([A game update imports SDK calls the base game did not](#a-game-update-imports-sdk-calls-the-base-game-did-not)).
 
+### `nfp`'s extended application area
+
+- **Symptom:** `[RED] sf: the game connects to service nfp:user itself`, then `game called nn::diag abort: Result 0xe15` under the game's own initialization (`main+0x115deb0`).
+- **Cause:** `nn::nfp::InitializeWithExtendedApplicationArea` is another entry to the library the host takes over, and was not hooked, nor were `GetExtendedApplicationArea`, `SetExtendedApplicationArea`, `GetExtendedApplicationAreaInfo` and `Restore`.
+- **Fix:** hooked as the rest: the same device that never finds a tag (`hle_sdk16.c`, checked in `t_nfc.c`).
+- **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md).
+
 ### NFC initialization beside the amiibo library
 
 - **Symptom:** selecting amiibo initializes `nfp`, then the game connects to the unserved `nfc:user` service and aborts in `nn::nfc::Initialize`.
@@ -369,7 +376,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** with rumble on, `[RED] sf: the game connects to service hid itself`, then `CRASH sig=11 addr=0` in `hid::detail::IsVibrationDeviceMounted` (`sdk+0x24254c` in SDK 7), under `hid::IsVibrationDeviceMounted`. With rumble off in the host's settings the game never asks.
 - **Cause:** the SDK's own call opens the hid service, which sm refuses (0xe15), and reads the null service object. Games ask only for handles `GetVibrationDeviceHandles` returned, which it returns none of with rumble off.
 - **Fix:** `hle_hid.c` answers it. On Horizon a device is mounted when the npad's connected controller has the handle's style and an actuator on that side; the host reports it mounted when the channel has an output, as `GetVibrationDeviceInfo` reports the device.
-- **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) 1.4.1, entering a Sand Kingdom pipe (`main+0x5d3150` asks for each handle of a controller whether any is mounted; GitHub issue #715). No other local game imports it.
+- **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) 1.4.1, entering a Sand Kingdom pipe (`main+0x5d3150` asks for each handle of a controller whether any is mounted; GitHub issue #715). No other local game imports it. [Kirby Air Riders](../../dm/games/040077201BE50000/README.md) calls the Switch 2's form, `IsOunceVibrationDeviceMounted`, for its handles soon after boot, answered the same way. It crashed a run with a window, and no headless run; why only that one was not checked.
 
 ### Vibration handles before a controller is reported
 
@@ -631,6 +638,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** `ssl::Context::Create` failed in the host's offline stubs. A context is a session of the console's own ssl service, so it succeeds on Horizon with no network; only a connection needs one. The game's online library treats the failure as fatal, and its startup (`main+0x84a60`) returns false.
 - **Fix:** `Context::Create` and `Context::Destroy` succeed and connect to nothing (`hle_net.c`). `Connection::Create` and the rest still fail, as they do with no network.
 - **Found on:** [DRAGON QUEST BUILDERS 2](../../dm/games/010042000A986000/README.md) (SDK 5.4.0). 53 of 82 games surveyed import the call.
+
+### `EventFd` needs no network
+
+- **Symptom:** `abort` under `grpc_init` at startup, with no red line: `game called nn::diag abort: Result 0, call site sdk+0xb8fe8`, backtrace `sdk+0xba138 sdk+0x7bd670 sdk+0x777f30 main+0x21f0c80`, just after `fs mount _npln:` (Ocarina of Time).
+- **Cause:** gRPC, which `nn::npln` links, wakes its pollers with `nn::socket::EventFd`. The host failed that with ENETDOWN, so gRPC found no wakeup descriptor, its poll engine's factory (`main+0x21f1280`) returned null and the engine selection called `abort` (`main+0x21f0c7c`). An event descriptor is local to the bsd service, so on Horizon it works with no network; only a connection needs one.
+- **Fix:** `EventFd`, `EventFdRead` and `EventFdWrite` are host counters, `Poll` waits on them with a condition variable and `Close` frees them (`hle_net.c`). `Socket` and the rest still fail, as they do with no network. An endless wait comes back with 0 after 100 ms, as it does with nothing to wait on.
+- **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_net_eventfd`.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (SDK 22.2.8).
 
 ### The local user's profile image
 

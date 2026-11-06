@@ -1937,10 +1937,10 @@ def smash_arc_shaders(path, rel, ents, out):
             if len(out) == n and b'\x91\x68\x86\x19' in b: out.extend(glslc_shaders(b, label, need=False))
 
 _OODLE = None
-def oodle(comp, n):
+def oodle_ask(comp, n):
     """The game's own decoder: OodleLZ_Decompress (Trinity's packs are Oodle Mermaid, Pokémon Legends: Arceus's GFPAK entries Oodle Kraken, and Oodle is linked into main), or LZ5_decompress_safe (DRAGON QUEST XI S's legacy Unreal paks):
     one Mac host per worker process in its tool mode (dm/host/hle_oodle.c, DM_OODLE_SERVE), fed over a pipe. DM_OODLE_HOST = the host, DM_OODLE_MODULES = the rewritten modules it loads
-    (the NSP script sets both for a game with Trinity packs, Oodle PKZ or GFPAK entries, or legacy Unreal paks, profile_guess.py shader_sources)"""
+    (the NSP script sets both for a game with Trinity packs, Oodle PKZ or GFPAK entries, or legacy Unreal paks, profile_guess.py shader_sources). → (the decoded bytes or None, the host is gone)"""
     global _OODLE
     if _OODLE is None:
         import tempfile
@@ -1953,9 +1953,28 @@ def oodle(comp, n):
         p.stdin.write(struct.pack('<QQ', len(comp), n)); p.stdin.write(comp); p.stdin.flush()
         got = struct.unpack('<Q', p.stdout.read(8))[0]
     except (BrokenPipeError, struct.error): got = None
-    if got != n:
-        err.seek(0); red(f'the game\'s decoder in the Mac host failed on a {len(comp)} → {n} byte stream; ---- host output ----\n' + err.read().decode(errors='replace')[-3000:])
-    return p.stdout.read(n)
+    if got == n: return p.stdout.read(n), False
+    return None, got != 0   # 0: the decoder refused the stream, and the host goes on
+
+def oodle_said():   # what the host wrote so far
+    assert _OODLE
+    _OODLE[1].seek(0)
+    return _OODLE[1].read().decode(errors='replace')
+
+def oodle_red(comp, n) -> NoReturn:
+    red(f'the game\'s decoder in the Mac host failed on a {len(comp)} → {n} byte stream; ---- host output ----\n' + oodle_said()[-3000:])
+
+def oodle(comp, n):
+    s, _ = oodle_ask(comp, n)
+    if s is None: oodle_red(comp, n)
+    return s
+
+def oodle_supposed(comp, n):
+    """A stream a blind scan only supposes (uepak.shader_map_entries): None when the decoder refuses it, or main has no decoder to refuse it (hle_oodle.c lzd_find: OCTOPATH TRAVELER's Unreal 4.18 links no
+    Oodle). A host that is gone for any other reason is red, as it says nothing about the stream"""
+    s, gone = oodle_ask(comp, n)
+    if gone and 'no streaming decoder to find' not in oodle_said(): oodle_red(comp, n)
+    return s
 
 def trinity_shaders(path, rel, packs, out):
     """A range of Trinity packs (trpfs_jobs). Pack table: 0 file hashes [u64], 1 files [{1 compression i8 (3 = Oodle; stored otherwise), 2 level u8, 3 length u64, 4 data [u8]}]; each file is scanned like a loose one"""
@@ -2051,20 +2070,30 @@ def ue_legacy_jobs(files, parts=64):
     return jobs, taken
 
 _PAKS = {}
+def ue_packages(items, out, shown=8):
+    """Cooked packages [(label, read() → bytes)] of one job, each scanned on its own: one that does not read costs that package, not the rest of its job (a job is about 1/64 of a pak's bytes, up to
+    thousands of files), and only the first few of a job get a line, as a host that is gone fails every package after it, each with its output.
+    → extra for scan_file's result: ('unreadable', the first reason, how many), or None"""
+    first, lost = '', 0
+    for label, read in items:
+        try: ue_inline_shaders(read(), label, out)
+        except (Exception, SystemExit) as e:   # red() is a SystemExit
+            why = unreadable_why(e, label); first = first or why; lost += 1
+            if lost <= shown: print(f'[RED] {why} (its shaders are left out)', flush=True)
+    return ('unreadable', first, lost) if lost else None
+
 def ue_legacy_shaders(path, rel, names, out):
     """Files of an Unreal pak with inline shaders (ue_legacy_jobs), each decoded block by block (Zlib and LZ4 in uepak.py; others with the game's own decoder, DRAGON QUEST XI S: LZ5) and scanned
-    for the shader records the engine keeps inline"""
+    for the shader records the engine keeps inline → ue_packages's extra"""
     pk = _PAKS.get(path) or _PAKS.setdefault(path, uepak.Pak(path))
-    for name in names:
-        d = pk.read(name, decode=oodle)
-        label = re.sub(r"^(\.\./)+", "", os.path.normpath(pk.mount + name))
-        ue_inline_shaders(d, f'/{rel}#{label}', out)
+    label = lambda name: re.sub(r"^(\.\./)+", "", os.path.normpath(pk.mount + name))
+    return ue_packages(((f'/{rel}#{label(name)}', lambda name=name: pk.read(name, decode=oodle)) for name in names), out)
 
 def ue_io_shaders(path, rel, chunks, out):
     """Export bundles of an IoStore container (ue_legacy_jobs), decoded with the game's own decoder as far as its blocks need it, and scanned as a pak's cooked packages are; labelled by the package's
-    path where the container has a directory index, so that shader_groups and the shader map read as for a pak"""
+    path where the container has a directory index, so that shader_groups and the shader map read as for a pak → ue_packages's extra"""
     t, names = _PAKS.get(path) or _PAKS.setdefault(path, (lambda k: (k, k.names()))(uepak.Toc(path)))
-    for i in chunks: ue_inline_shaders(t.read(i, decode=oodle), f'/{rel}#{names.get(i) or t.ids[i].hex()}', out)
+    return ue_packages(((f'/{rel}#{names.get(i) or t.ids[i].hex()}', lambda i=i: t.read(i, decode=oodle)) for i in chunks), out)
 
 ZLIB_HEAD = re.compile(b'\x78[\x01\x5e\x9c\xda]')
 def ue_inline_shaders(d, label, out):
@@ -2104,9 +2133,19 @@ def ue_inline_shaders(d, label, out):
             try: s = lz4.block.decompress(d[j:j + n], uncompressed_size=raw)
             except Exception: continue
             if len(s) == raw and s[:4] == b'LSLG': take(s, j); break
-    # Unreal Engine 5.4 for the Switch 2 (Yoshi and the Mysterious Book): the same tables of the shader map, the code in Oodle and an NVN2 record that has no LSLG (uepak.sage_record)
-    for at, n, raw, f in uepak.shader_map_entries(d):
-        s = d[at:at + n] if n == raw else oodle(bytes(d[at:at + n]), raw)
+    # Unreal Engine 5.4 for the Switch 2 (Yoshi and the Mysterious Book): the same tables of the shader map, the code in Oodle and an NVN2 record that has no LSLG (uepak.sage_record).
+    # A table is proved by its first entry, as the streams above are by their decode: a stream the decoder refuses, or a stored one that is no record, makes it no table. A stream that decodes to exactly
+    # its raw size is one, so a record of another layout stays red below, as does any later entry that fails
+    first = {}
+    def proved(row):
+        at, n, raw, _ = row
+        s = d[at:at + n] if n == raw else oodle_supposed(bytes(d[at:at + n]), raw)
+        if s is None or (n == raw and not uepak.sage_record(s)): return False
+        first[at] = s
+        return True
+    for at, n, raw, f in uepak.shader_map_entries(d, proved):
+        s = first.pop(at, None)
+        if s is None: s = d[at:at + n] if n == raw else oodle(bytes(d[at:at + n]), raw)
         rec = uepak.sage_record(s)
         if not rec: red(f'{label}: the shader record at {at:#x} (frequency {f}) is not a record of the known layout')
         _, ctl, code = rec; st = nvn2_stage(ctl, code)
@@ -2736,16 +2775,19 @@ def var_pairs(found):
         if g: var[g][st] = skey(ctl, code)
     return {(v['vs'], v['ps']) + (('prog',) if '#BAHS#prog' in g else ()) for g, v in var.items() if 'vs' in v and 'ps' in v}
 
+def unreadable_why(e, name):
+    why = str(e).removeprefix('[RED] ') if isinstance(e, SystemExit) else f'{type(e).__name__}: {e}'
+    return why if why.lstrip('/').startswith(name.lstrip('/')) else f'{name}: {why}'   # most red lines name the file already
+
 def scan_file(args):
-    """→ (relative path, {key: …}, pairs, extra); extra = this file's Unity type trees, 'defer' (no type tree, scanned again in the second pass), or ('unreadable', why).
+    """→ (relative path, {key: …}, pairs, extra); extra = this file's Unity type trees, 'defer' (no type tree, scanned again in the second pass), or ('unreadable', first reason, files left out).
     A file no reader can read (a format revision the reader does not know: its red line, or the exception it raised) is left out, and the split goes on: one such
     archive used to end the whole split with nothing written (PR #282: one of Mario Strikers: Battle League's 879 Next Level Games archives). main reports them"""
     try: return scan_file_in(args)
     except (Exception, SystemExit) as e:   # red() is a SystemExit
-        why = str(e).removeprefix('[RED] ') if isinstance(e, SystemExit) else f'{type(e).__name__}: {e}'
-        if not why.lstrip('/').startswith(args[1]): why = f'{args[1]}: {why}'   # most red lines name the file already
+        why = unreadable_why(e, args[1])
         print(f'[RED] {why} (its shaders are left out)', flush=True)
-        return args[1], {}, set(), ('unreadable', why)
+        return args[1], {}, set(), ('unreadable', why, 1)
 
 def scan_file_in(args):
     path, rel = args[:2]
@@ -2772,11 +2814,11 @@ def scan_file_in(args):
         zip_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and args[2][0] == UE_LEGACY:   # files of a legacy Unreal pak (ue_legacy_jobs)
-        ue_legacy_shaders(path, rel, args[2][1], found)
-        return rel, uniq_keys(found), var_pairs(found), trees
+        lost = ue_legacy_shaders(path, rel, args[2][1], found)
+        return rel, uniq_keys(found), var_pairs(found), lost or trees
     if len(args) > 2 and args[2][0] == UE_IO:   # export bundles of an IoStore container beside such a pak (ue_legacy_jobs)
-        ue_io_shaders(path, rel, args[2][1], found)
-        return rel, uniq_keys(found), var_pairs(found), trees
+        lost = ue_io_shaders(path, rel, args[2][1], found)
+        return rel, uniq_keys(found), var_pairs(found), lost or trees
     if len(args) > 2 and args[2][0] == FB_CAS:   # CompiledBytecode resources of a Frostbite cas file (frostbite_jobs)
         frostbite_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -2987,8 +3029,8 @@ def main():
         for rel, uniq, pr, extra in again:
             if extra == 'defer': red(f'{rel}: Unity serialized file without type trees, and no bundle has a Shader type tree of the same hash to borrow')
         results = [r for r in results if r[3] != 'defer'] + again
-    bad = [extra[1] for *_, extra in results if isinstance(extra, tuple)]
-    if bad: print(f'[RED] {len(bad)} file(s) could not be read, their shaders are left out (first: {bad[0]})', flush=True)   # build_ipa_from_nsp.py reads this line
+    bad = [extra for *_, extra in results if isinstance(extra, tuple)]
+    if bad: print(f'[RED] {sum(e[2] for e in bad)} file(s) could not be read, their shaders are left out (first: {bad[0][1]})', flush=True)   # build_ipa_from_nsp.py reads this line
     per_src = collections.Counter(); pairs = set()
     for rel, uniq, pr, _ in results:
         pairs |= pr

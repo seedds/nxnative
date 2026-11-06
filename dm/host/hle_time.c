@@ -130,6 +130,19 @@ HLE_FORCE("_ZN2nn4time48CalculateStandardUserSystemClockDifferenceByUserERKNS0_1
     if (!same_source(a, b, 0x08) || (a[0xcc] && b[0xcc])) return 0;
     return (snap64(b, 0x00) - snap64(a, 0x00)) * 1000000000;
 }
+// A periodic benefit (Tetris 99 2.5.0's daily reward, asked right after its first save at the title): the public entry aborts unless g_pStaticService, the time service session that
+// Initialize opens, is set (OnAssertionFailure from sdk+0x375b84 on its SDK 6.4 sdk), and the host's Initialize take-over opens none. The work is detail::'s: it compares the snapshots'
+// fields, CalculateSpanBetween and the user clock difference above, and asks the service only for a snapshot with automatic correction on (+0xcc), which host snapshots never have; so it runs in the SDK
+HLE_FORCE("_ZN2nn4time39ClaimPeriodicBenefitWithUserSystemClockEPNS0_27PeriodicBenefitClaimContextERKNS0_13ClockSnapshotERKNS_8TimeSpanES8_PKNS0_25CheckCalendarTimeCallbackE",
+          "periodic benefit claim (time service session check); the SDK's detail implementation compares the snapshots", uint64_t, h_time_ClaimBenefit,
+          void *ctx, const uint8_t *snap, const int64_t *max_penalty, const int64_t *acceptable, const void *callback) {
+    static uint64_t (*impl)(void *, const uint8_t *, const int64_t *, const int64_t *, const void *);
+    if (!impl && !(impl = guest_sym("_ZN2nn4time6detail39ClaimPeriodicBenefitWithUserSystemClockEPNS0_27PeriodicBenefitClaimContextERKNS0_13ClockSnapshotERKNS_8TimeSpanES9_PKNS0_25CheckCalendarTimeCallbackE")))
+        die("time: the sdk has ClaimPeriodicBenefitWithUserSystemClock but not its detail:: implementation");
+    uint64_t r = impl(ctx, snap, max_penalty, acceptable, callback);
+    LOG("time: periodic benefit claim → %u", (unsigned)r);
+    return r;
+}
 // The reverse: local calendar → absolute seconds (13 Sentinels). Around a daylight-saving switch one local time maps to 0 or 2 absolute seconds; the host's mktime gives one
 HLE_FORCE("_ZN2nn4time11ToPosixTimeEPiPNS0_9PosixTimeEiRKNS0_12CalendarTimeE",
           "time zone rules of the time service; uses the host mktime instead", Result, h_time_ToPosixTime, int *count, int64_t *out, int n, const CalendarTime *ct) {

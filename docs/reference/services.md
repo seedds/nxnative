@@ -862,6 +862,13 @@ Most service calls can be found before they crash, before the first boot or the 
   - The adjustable user clock (`time::AdjustableUserSystemClock::GetCurrentTime`, which the game's days follow) reads the time service's shared memory in the SDK (`MonotonicSystemClock::GetCurrentTime`, `sdk+0x4421cc`), which the host never maps, so it is the host's clock, as the user clock; `time::GetStandardSteadyClockCurrentTimePoint`, the free-function form of the steady clock ([Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) SDK 20.5.4, found in `main`'s imports before the first boot).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md), [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md).
 
+### A periodic benefit claim without the time service session
+
+- **Symptom:** `Break#1 reason=0 Result=0 svc at sdk+0x370f24` right after the first save at the title, with `bt: sdk+0x175f00 sdk+0x175fc4 sdk+0x176060 sdk+0x375b88 main+0x6ea74 …` (`diag::detail::OnAssertionFailure` called from `time::ClaimPeriodicBenefitWithUserSystemClock`).
+- **Cause:** the public `time::ClaimPeriodicBenefitWithUserSystemClock` (a once-a-day reward) asserts that `time::g_pStaticService`, the time service session `time::Initialize` opens, is set; the host takes over `Initialize` and opens none. The work is in `time::detail::ClaimPeriodicBenefitWithUserSystemClock`, which only compares the snapshots' fields through `CalculateSpanBetween` and `CalculateStandardUserSystemClockDifferenceByUser` (both host take-overs) and asks the service only for a snapshot with automatic correction on (`+0xcc`), which host snapshots never have.
+- **Fix:** an `HLE_FORCE` on the public entry calls the SDK's `detail::` implementation directly (`hle_time.c`), and logs `time: periodic benefit claim → <result>`.
+- **Found on:** Tetris 99 (010040600C5CE000) 2.5.0, SDK 6.4 (the same `sdk` module as [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md)), from a provisional profile: the claim returned 0, then 1 on the next check, and the title screen kept running for three minutes at about 56 fps.
+
 ### Hooks whose return type did not match the SDK
 
 - **Symptom:** a call the host answers reads as failed when it succeeded, or reads leftover register bits. Super Smash Bros. Ultimate refills the Spirit Board at every visit, since the elapsed time between two snapshots never reads as known.

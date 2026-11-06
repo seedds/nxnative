@@ -1387,15 +1387,28 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 - **Found on:** Re:ZERO -Starting Life in Another World- The Prophecy of the Throne (`01000B20117B8000`, SDK 9.5.0): the commands its frames record that the layer lacked.
 - **Check:** `t_vk_cmds` reads back a fill (both forms, `VK_WHOLE_SIZE`), an update, a resolve, a same-size blit and a refused scaled one, direct and indexed indirect draws, a dynamic blend constant, a draw and a fill in secondary buffers, events and 32- and 64-bit query copies. It does not compile against the layer without these commands.
 
+### Texel buffers translated as 2D textures
+
+- **Symptom:** with `MTL_DEBUG_LAYER=1` the first dispatch aborts: `incorrect type of texture (MTLTextureTypeTextureBuffer) bound at Texture binding at index 0 (expect MTLTextureType2D)`. Without validation, the shader reads garbage from the buffer.
+- **Cause:** spirv-cross emulates a uniform or storage texel buffer as a 2D texture 4096 texels wide (`spvTexelBufferCoord`) unless asked otherwise, while the layer binds a buffer view as a real buffer texture (`bview_tex`).
+- **Fix:** `vk_shaders.py` translates with `--msl-texture-buffer-native`, so the MSL declares `texture_buffer<T>` and reads it by index.
+- **Found on:** Re:ZERO -Starting Life in Another World- The Prophecy of the Throne (`01000B20117B8000`): its clustered-light kernel (`ClusteredLight.cs`) reads its lights from a texel buffer. It is the only one of the game's 41 modules that uses one.
+- **Check:** `test_vk_shaders.py` translates a compute shader that fetches from a texel buffer and checks that the MSL declares a `texture_buffer`; against the old flags it gets the 2D emulation.
+
 ### Barriers and events
 
-- **Model:** `vkCmdPipelineBarrier`, `vkCmdWaitEvents` and semaphores order nothing in the layer. That holds because one queue runs every submit and every command in recorded order, the device resources a command buffer writes are hazard-tracked by Metal between the passes and blits it encodes, and each encoder runs after the one before it.
+- **Model:** `vkCmdPipelineBarrier`, `vkCmdWaitEvents` and semaphores order nothing in the layer. One serial queue replays commands in order, and Metal tracks hazards between passes, blits and compute encoders. A dispatch runs outside a render pass, ending an open render encoder; consecutive dispatches share one compute encoder until a render or blit encoder begins.
+- **Argument buffers:** descriptor sets that exceed Metal's per-stage slots are encoded as argument buffers and re-encoded when their descriptor-set generation changes. They need argument-buffer tier 2; on a tier 1 device such a pipeline is refused and its draws or dispatches are counted as skipped. A sampler gets an argument-buffer twin only when a set encoded so uses it, because Apple limits the unique argument-buffer samplers per app (96 on iOS, 1024 or more on macOS).
 - **Events:** `vkSetEvent` / `vkResetEvent` change an event for the host at once; `vkCmdSetEvent` / `vkCmdResetEvent` change it when their submit has been replayed and read as set once that submit has completed (`vkGetEventStatus`, the same ticket as a fence).
 - **Limits:**
   - A GPU wait (`vkCmdWaitEvents`) on an event the host sets later is not honoured. The queue does not stop, so a command after the wait may read what the host has not written yet.
   - A barrier inside one render pass is not honoured either. Metal tracks hazards between encoders, not between the draws of one encoder, so a storage write a later draw of the same pass reads needs a memory barrier.
+  - A dependency from a dispatch to a draw inside one render pass, or between compute dispatches through untracked memory, is not honoured. Metal's encoder hazard tracking covers tracked resources between encoders, not these cases.
+  - Resources reachable only through an argument buffer must be declared with `useResources`; without it, Metal's hazard tracker does not know about them.
+  - Storage-image formats are advertised only when the device's Metal read-write texture tier supports them; sRGB, compressed and depth/stencil formats are not advertised.
   - A reset recorded in a command buffer shows to the host when its submit is replayed, which can be before the GPU reaches it.
   - A wait on an event that an earlier command of the queue sets is met by the queue's order. `t_vk_cmds` records a wait on an event nothing sets and checks that the queue continues.
+- **Check:** `make -C dm/gfx/tests GAME=010015100B514000 check_t_vk_compute check_t_vk_argbuf` covers dispatch ordering, argument-buffer residency, format support, lazy samplers and generation invalidation; `python3 -m unittest dm/tools/tests/test_vk_shaders.py` checks shader-table resource selection.
 
 ## OpenGL layer
 

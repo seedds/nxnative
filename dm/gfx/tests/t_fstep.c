@@ -175,7 +175,7 @@ int main(void) {
         for (int i = 0; i < 2000; i++) {
             double w = i < 600 ? 0.86 : i < 603 ? 1.25 : m.s.k >= 2 ? 1.5 : at1++ < 20 ? 1.5 : 0.86;
             stepped |= i >= 603 && m.s.k == 2;
-            m.slow = nvn_fstep_gpu_slowed(&g, w, m.s.k ? m.s.k : 1, 1, m.s.probe);
+            m.slow = nvn_fstep_gpu_slowed(&g, w, 0, m.s.k ? m.s.k : 1, 1, m.s.probe);
             run(&m, 1, w, 1, 3, 0);
         }
         snprintf(b, sizeof b, "GPU clock follows the hold (BotW): one probe back to hold 1 that holds (k %d, probes %llu, failed %llu)", m.s.k, (unsigned long long)m.s.probes, (unsigned long long)m.s.failed);
@@ -185,19 +185,43 @@ int main(void) {
     }
     {   // a heavier scene at the same clock: 0.86 at hold 1, then 1.12 (19 ms) for good, which is 1.3 times less than enough to call the GPU slowed
         sim m = {0}; nvn_fgpu g = {0};
-        for (int i = 0; i < 2000; i++) { double w = i < 600 ? 0.86 : 1.12; m.slow = nvn_fstep_gpu_slowed(&g, w, m.s.k ? m.s.k : 1, 1, m.s.probe); run(&m, 1, w, 1, 3, 0); }
+        for (int i = 0; i < 2000; i++) { double w = i < 600 ? 0.86 : 1.12; m.slow = nvn_fstep_gpu_slowed(&g, w, 0, m.s.k ? m.s.k : 1, 1, m.s.probe); run(&m, 1, w, 1, 3, 0); }
         check(m.s.k == 2 && m.s.probes == 0, "heavier scene, GPU 0.86 → 1.12 at hold 2: not slowed, no probe");
     }
     {   // a loading screen: the GPU at 0.03, then lag on the CPU steps to 2, where the GPU takes 0.17 (5.7 times as much but 3 ms): the CPU holds the frame back, not the GPU
         sim m = {0}; nvn_fgpu g = {0}; int slowed = 0;
-        for (int i = 0; i < 1200; i++) { double gp = i < 600 || m.s.k == 1 ? 0.03 : 0.17, w = i < 600 ? 0.5 : 1.3; m.slow = nvn_fstep_gpu_slowed(&g, gp, m.s.k ? m.s.k : 1, 1, m.s.probe); slowed |= m.slow; run(&m, 1, w, 1, 3, 0); }
+        for (int i = 0; i < 1200; i++) { double gp = i < 600 || m.s.k == 1 ? 0.03 : 0.17, w = i < 600 ? 0.5 : 1.3; m.slow = nvn_fstep_gpu_slowed(&g, gp, 0, m.s.k ? m.s.k : 1, 1, m.s.probe); slowed |= m.slow; run(&m, 1, w, 1, 3, 0); }
         check(m.s.k == 2 && !slowed && m.s.probes == 0, "GPU 0.03 → 0.17 under CPU lag: a GPU at 3 ms is not called slowed, no probe");
+    }
+    {   // Ocarina of Time on an M4 Air: the title and the loading screen run at hold 1 for 20 s (GPU 0.2 vsyncs, 30 draws); gameplay has 900 draws, 1.3 vsyncs at hold 1 and 1.4 at
+        // hold 2, where the clock is lower. The hold-1 reference measured other work: the GPU at hold 2 is not slowed, and no probe goes back to hold 1, which cannot hold
+        for (int known = 1; known >= 0; known--) {
+            sim m = {0}; nvn_fgpu g = {0}; int slowed = 0;
+            for (int i = 0; i < 3000; i++) {
+                int play = i >= 1200, k = m.s.k ? m.s.k : 1; double w = !play ? 0.2 : k >= 2 ? 1.4 : 1.3;
+                m.slow = nvn_fstep_gpu_slowed(&g, w, known ? (play ? 900 : 30) : 0, k, 1, m.s.probe); slowed |= play && m.slow;
+                run(&m, 1, play ? w : 0.5, 1, 3, 0);
+            }
+            if (known) { snprintf(b, sizeof b, "GPU reference from a loading screen (30 draws), gameplay at 900: not slowed, no probe (k %d, probes %llu, failed %llu)", m.s.k, (unsigned long long)m.s.probes, (unsigned long long)m.s.failed);
+                         check(m.s.k == 2 && !slowed && m.s.probes == 0, b); }
+            else { snprintf(b, sizeof b, "  without draw counts the same run is called slowed and probes (probes %llu, failed %llu)", (unsigned long long)m.s.probes, (unsigned long long)m.s.failed);
+                   check(slowed && m.s.probes > 0, b); }
+        }
+        sim m = {0}; nvn_fgpu g = {0}; int at1 = 0, stepped = 0;   // the same work at both holds is still a clock that fell (BotW above, with its draw counts)
+        for (int i = 0; i < 2000; i++) {
+            double w = i < 600 ? 0.86 : i < 603 ? 1.25 : m.s.k >= 2 ? 1.5 : at1++ < 20 ? 1.5 : 0.86;
+            stepped |= i >= 603 && m.s.k == 2;
+            m.slow = nvn_fstep_gpu_slowed(&g, w, i % 3 ? 4900 : 4700, m.s.k ? m.s.k : 1, 1, m.s.probe);
+            run(&m, 1, w, 1, 3, 0);
+        }
+        snprintf(b, sizeof b, "  the same draws at both holds (4,700-4,900): one probe back to hold 1 that holds (k %d, probes %llu)", m.s.k, (unsigned long long)m.s.probes);
+        check(stepped && m.s.k == 1 && m.s.probes == 1 && m.s.failed == 0, b);
     }
     {   // the GPU stays slow at hold 1 too: each probe fails, the reference stays the hold-1 time from before, and the probes spread out
         sim m = {0}; nvn_fgpu g = {0}; double last = 0, gaps[4]; int ng = 0; uint64_t probes = 0;
         for (int i = 0; i < 6000 && ng < 4; i++) {
             double w = i < 600 ? 0.86 : i < 603 ? 1.25 : 1.5;
-            m.slow = nvn_fstep_gpu_slowed(&g, w, m.s.k ? m.s.k : 1, 1, m.s.probe);
+            m.slow = nvn_fstep_gpu_slowed(&g, w, 0, m.s.k ? m.s.k : 1, 1, m.s.probe);
             run(&m, 1, w, 1, 3, 0);
             if (m.s.probes != probes) { probes = m.s.probes; gaps[ng++] = m.real - last; last = m.real; }
         }
@@ -293,7 +317,7 @@ int main(void) {
             int kmin = i >= 600 && i < rise ? 2 : 1, kmax = kmin == 2 ? 2 : 3, k = m.s.k ? m.s.k : kmin;
             since1 = k == 1 ? since1 + 1 : 0;
             double w = k >= 2 ? 1.5 : i < rise ? 0.86 : c == 2 ? 1.3 : since1 <= 10 || (c == 1 && i < rise + 60) ? 1.5 : 0.86;
-            m.slow = nvn_fstep_gpu_slowed(&g, w, k, kmin, m.s.probe);
+            m.slow = nvn_fstep_gpu_slowed(&g, w, 0, k, kmin, m.s.probe);
             run(&m, 1, w, kmin, kmax, 0);
             if (i == rise - 1) ups = m.s.ups;
             if (i >= n - 600) at1 += m.s.k == 1;

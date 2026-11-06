@@ -226,6 +226,13 @@ The game may also write into an NVN object directly, without an NVN call, throug
 - **Fix:** the hash is of the values, field by field, and a field at 0 adds nothing, so a field widened or added later keeps the hash of every shader that does not use it; `t_capture_live` pins the hash of one reflection. A capture records its hash kind (header `iface 2`), and `nvn_replay` refuses one of another kind with `capture again`: the captures made before have to be recorded again once.
 - **Found on:** the regression captures of [Breath of the Wild](../../dm/games/01007EF00011E000/README.md), [Pokemon Scarlet](../../dm/games/0100A3D008C5C000/README.md), [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) and [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (2026-10-30, all four refused at f5aee5aa).
 
+### A capture lists each large memory pool whole
+
+- **Symptom:** `nvn_replay` refuses a capture with `1025 captured pointers name no captured object or region` (Ocarina of Time, taken with `DM_NVN_GMEM_RES=0`). Every one was a texture field whose end lay past its region; all were kind-1 regions ("memory outside the pools") of 0x60000 to 0xf0000 bytes, with textures up to 0x900000.
+- **Cause:** a pool of `BIG_MIN` (128 MB) or more has no `g_pools` entry, only the 16 MB chunks touched so far, and a whole-pool entry only once the raw pool table lists it. `cap_pools` took the regions from `g_pools`, so the untouched part of a large pool was in no region, and `cap_enc_addr` encoded a texture there as small outside memory, sized by the first record that named it.
+- **Fix:** `cap_pools` lists each large pool (`g_big`) whole and leaves out the chunks inside it, for the regions and for `CAP_PADD`. A frame-600 capture of Ocarina of Time then has 2,481 regions and 0 addresses outside the pools, and replays without that error (the compare is a MISMATCH of 701 pixels, all in one 52x48 box, an animated loading element not chased). Cost: the large pools are saved whole, so the game's footprint rose from 3.8 to 11.3 GB during the capture (M2 Pro, 16 GB); a capture after a big scene load can be tight. Capture 924 MB (4.8 GB raw).
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
 ## Command memory
 
 ### Bound render targets outlive command recordings

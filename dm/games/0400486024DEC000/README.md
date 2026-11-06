@@ -114,3 +114,4 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 - [Image atomics on a 32-bit colour texture](../../../docs/reference/shaders.md#image-atomics-on-a-32-bit-colour-texture)
 - [A host's own store in a fragment shader moves its depth test](../../../docs/reference/frame-rate.md#a-hosts-own-store-in-a-fragment-shader-moves-its-depth-test)
 - [Dead-code removal dropped a coordinate of a multi-output instruction](../../../docs/reference/shaders.md#dead-code-removal-dropped-a-coordinate-of-a-multi-output-instruction)
+- [A capture lists each large memory pool whole](../../../docs/reference/nvn-objects.md#a-capture-lists-each-large-memory-pool-whole): the replay refused a capture with 1,025 pointers in no region; the untouched part of a large pool was saved as outside memory.

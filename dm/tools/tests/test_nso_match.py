@@ -16,6 +16,7 @@ import struct
 import sys
 import tempfile
 from types import SimpleNamespace
+from typing import cast
 import unittest
 from unittest.mock import patch
 
@@ -142,12 +143,16 @@ class Matching(unittest.TestCase):
     def test_replacement_branches_must_stay_inside_the_function(self):
         def cut(w): return (8, 'e00317aa', struct.pack('<I', w).hex(), 'heap')
         for target in (-8, 16):  # the function's first instruction and its last, from the cut at +8
-            rule = copy.deepcopy(self.rule); rule['cuts'][0] = cut(B(0, target)); validate(rule)
+            rule = copy.deepcopy(self.rule)
+            cast(list[tuple[int, str, str, str]], rule['cuts'])[0] = cut(B(0, target))
+            validate(rule)
         for target in (-12, 20):  # before the function and just past it
-            rule = copy.deepcopy(self.rule); rule['cuts'][0] = cut(B(0, target))
+            rule = copy.deepcopy(self.rule)
+            cast(list[tuple[int, str, str, str]], rule['cuts'])[0] = cut(B(0, target))
             with self.assertRaisesRegex(ValueError, 'PC-relative'): validate(rule)
         # The second word of a replacement counts from its own place
-        rule = copy.deepcopy(self.rule); rule['cuts'][0] = (8, 'e00317aa' + '00000014', struct.pack('<II', NOP, B(0, 16)).hex(), 'heap')
+        rule = copy.deepcopy(self.rule)
+        cast(list[tuple[int, str, str, str]], rule['cuts'])[0] = (8, 'e00317aa' + '00000014', struct.pack('<II', NOP, B(0, 16)).hex(), 'heap')
         with self.assertRaisesRegex(ValueError, 'PC-relative'): validate(rule)
 
     def test_trap_word_is_read_and_fingerprinted(self):

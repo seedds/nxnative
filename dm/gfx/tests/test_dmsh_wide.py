@@ -6,9 +6,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
-from dmsh_wide import wide_loads   # noqa: E402
+import dmsh_chain  # noqa: E402
+from dmsh_wide import raw_load_quads, wide_loads   # noqa: E402
 
 # Splatoon Raiders' Hoian_UBER (3e5a302ac52b73bf) as spirv-cross writes it, cut down: one light's words from fp_s3 at 80 * index + 16 .. 44, a written buffer,
 # and words in two blocks
@@ -126,6 +128,185 @@ class WideLoads(unittest.TestCase):
                 r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', m, '-o', os.path.join(d, name + '.air')],
                                    capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stderr)
+
+
+def raw_source(entries, hint_shift=0):
+    """Synthetic fixed-table helper and four words of a raw 128-bit load."""
+    prefix = '''
+struct _10 { uint _m0[1]; };
+struct spvDescriptorSetBuffer0
+{
+    device _10* cp_s5 [[id(7)]];
+};
+static inline __attribute__((always_inline))
+int _900(thread const int& _1, thread const int& _2, device _10& cp_s5)
+{
+'''
+    if hint_shift:
+        log = entries.bit_length() - 1
+        prefix += f'''    int _400 = _2 << {32 - hint_shift};
+    uint _401 = uint(int(uint(_1) >> uint({hint_shift})));
+    int _402 = _400 | int(_401);
+    int _403 = _402 & {entries - 1};
+    int _404 = _403 * 8;
+    int _405 = _404 + 6;
+    float _406 = as_type<float>(cp_s5._m0[_405]);
+    int _407 = as_type<int>(_406) & {entries - 1};
+    bool _408 = _407 != 0;
+    uint _409 = uint(int(uint(as_type<int>(_406)) >> uint({log})));
+    bool _410 = int(_409) == _402;
+    bool _411 = _408 && _410;
+    bool _412 = uint(_2) < {1 << (hint_shift - log)}u;
+    bool _413 = _411 && _412;
+    int _414 = _407;
+    if (!_413)
+    {{
+'''
+    next_id = 100
+    previous = '0'
+    for bit in reversed(range(entries.bit_length() - 1)):
+        probe, row, li, low, hi, high, less, equal, lo_le, tied, take, index = (
+            f'_{i}' for i in range(next_id, next_id + 12))
+        prefix += f'''    int {probe} = {previous} + {1 << bit};
+    int {row} = {probe} * 8;
+    int {li} = {row} + 0;
+    float {low} = as_type<float>(cp_s5._m0[{li}]);
+    int {hi} = {row} + 1;
+    float {high} = as_type<float>(cp_s5._m0[{hi}]);
+    bool {less} = as_type<uint>({high}) < uint(_2);
+    bool {equal} = as_type<int>({high}) == _2;
+    bool {lo_le} = as_type<uint>({low}) <= uint(_1);
+    bool {tied} = {equal} && {lo_le};
+    bool {take} = {less} || {tied};
+    int {index} = {take} ? {probe} : {previous};
+'''
+        previous = index
+        next_id += 12
+    if hint_shift:
+        prefix += f'''        _414 = {previous};
+    }}
+'''
+        previous = '_414'
+    prefix += f'''    int _310 = {previous} * 8;
+    int _311 = _310 + 2;
+    float _312 = as_type<float>(cp_s5._m0[_311]);
+    int _313 = _310 + 3;
+    float _314 = as_type<float>(cp_s5._m0[_313]);
+    bool _315 = uint(_2) < as_type<uint>(_314);
+    bool _316 = _2 == as_type<int>(_314);
+    bool _317 = uint(_1) < as_type<uint>(_312);
+    bool _318 = _316 && _317;
+    bool _319 = _315 || _318;
+    if (_319)
+    {{
+        int _320 = _310 + 4;
+        float _321 = as_type<float>(cp_s5._m0[_320]);
+        int _322 = _1 + as_type<int>(_321);
+        bool _323 = uint(_322) < uint(_1);
+        int _324 = int(_323);
+        int _325 = _310 + 5;
+        float _326 = as_type<float>(cp_s5._m0[_325]);
+        int _327 = _2 + as_type<int>(_326);
+        int _328 = _327 + _324;
+        uint _329 = *(reinterpret_cast<device uint*>(as_type<ulong>(uint2(uint(_322), uint(_328)))));
+        float _330 = as_type<float>(_329);
+        return as_type<int>(_330);
+    }}
+    return 0;
+}}
+kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]], uint id [[thread_position_in_grid]])
+{{
+    int _500 = int(id);
+    int _501 = 4;
+'''
+    for i, offset in enumerate((4, 8, 12)):
+        lo, wraps, carry, hi = (500 + 4 * (i + 1) + j for j in range(4))
+        prefix += f'''    int _{lo} = _500 + {offset};
+    bool _{wraps} = uint(_{lo}) < uint(_500);
+    int _{carry} = int(_{wraps});
+    int _{hi} = _501 + _{carry};
+'''
+    for i, (lo, hi) in enumerate(((500, 501), (504, 507), (508, 511), (512, 515))):
+        low, high, out = 600 + i * 3, 601 + i * 3, 602 + i * 3
+        prefix += f'''    int _{low} = _{lo};
+    int _{high} = _{hi};
+    int _{out} = _900(_{low}, _{high}, (*spvDescriptorSet0.cp_s5));
+'''
+    return prefix + '}\n'
+
+
+class RawLoadQuads(unittest.TestCase):
+    def test_opt_in_changes_chain(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(dmsh_chain.raw_load_quads())
+            command = [sys.executable, dmsh_chain.__file__]
+            original = subprocess.check_output(command)
+            os.environ['DMSH_RAW_LOAD_QUADS'] = '1'
+            self.assertTrue(dmsh_chain.raw_load_quads())
+            self.assertNotEqual(subprocess.check_output(command), original)
+
+    def test_known_layouts(self):
+        for entries in (4096, 8192):
+            with self.subTest(entries=entries):
+                stock = raw_source(entries)
+                result = raw_load_quads(stock, 5, entries, 32)
+                self.assertIn(f'index < {entries - 1}u ?', result)
+                self.assertIn('next > address + 15ul', result)
+                self.assertIn('end - address >= 16ul', result)
+                self.assertIn('dm_raw_load4(_600, _601, (*spvDescriptorSet0.cp_s5))', result)
+                for ident, component in zip((602, 605, 608, 611), 'xyzw'):
+                    self.assertIn(f'int _{ident} = _602_words.{component};', result)
+                self.assertEqual(result.count('return _900(low, high, table);'), 1)
+                self.assertEqual(result.count('_words = dm_raw_load4'), 1)
+                self.assertEqual(raw_load_quads(result, 5, entries, 32), result)
+
+    def test_unrecognized_layout_stays_scalar(self):
+        stock = raw_source(4096)
+        for slot, entries, entry_bytes in ((4, 4096, 32), (5, 8192, 32), (5, 4096, 16), (5, 7, 32)):
+            self.assertEqual(raw_load_quads(stock, slot, entries, entry_bytes), stock)
+        for old, new in (('uint _m0[1]', 'float _m0[1]'),
+                         ('device _10* cp_s5 [[id(7)]]', 'device _11* cp_s5 [[id(7)]]'),
+                         ('return 0;', 'return 1;'),
+                         ('< uint(_2);', '<= uint(_2);'),
+                         ('int _320 = _310 + 4;', 'int _320 = _310 + 5;')):
+            bad = stock.replace(old, new, 1)
+            self.assertNotEqual(bad, stock)
+            self.assertEqual(raw_load_quads(bad, 5, 4096, 32), bad)
+
+    def test_hinted_lookup_preserves_selection(self):
+        stock = raw_source(8192, 21)
+        result = raw_load_quads(stock, 5, 8192, 32, 21)
+        search = result.split('int dm_raw_find(', 1)[1].split('ulong dm_raw_word_pair(', 1)[0]
+        self.assertIn('bool _410 = int(_409) == _402;', search)
+        self.assertIn('if (!_413)', search)
+        self.assertIn('return _414;', search)
+        self.assertIn('return _900(low, high, table);', result)
+        self.assertIn('dm_raw_load4(_600, _601, (*spvDescriptorSet0.cp_s5))', result)
+        for old, new in (('_404 + 6;', '_404 + 7;'),
+                         ('int(_409) == _402', 'int(_409) != _402'),
+                         ('uint(_2) < 256u', 'uint(_2) <= 256u'),
+                         ('_414 = _255;', '_414 = _407;')):
+            bad = stock.replace(old, new, 1)
+            with self.subTest(change=new):
+                self.assertNotEqual(bad, stock)
+                self.assertEqual(raw_load_quads(bad, 5, 8192, 32, 21), bad)
+
+    def test_unproven_words_stay_scalar(self):
+        stock = raw_source(4096)
+        for old, new in (('int _504 = _500 + 4;', 'int _504 = _500 + 6;'),
+                         ('uint(_504) < uint(_500)', 'uint(_504) <= uint(_500)'),
+                         ('int _500 = int(id);', 'float _500 = float(id);'),
+                         ('int _603 = _504;', 'unknown_effect(_504);\n    int _603 = _504;'),
+                         ('int _603 = _504;', 'threadgroup_barrier(mem_flags::mem_device);\n    int _603 = _504;'),
+                         ('int _603 = _504;', 'table[0] = 7;\n    int _603 = _504;'),
+                         ('int _600 = _500;', 'int _999 = (_500 += 1);\n    int _600 = _500;'),
+                         ('int _600 = _500;', 'int _999 = unknown_effect(_500);\n    int _600 = _500;'),
+                         ('_900(_603, _604, (*spvDescriptorSet0.cp_s5))',
+                          '_900(_603, _604, (*spvDescriptorSet0.cp_s3))')):
+            bad = stock.replace(old, new, 1)
+            with self.subTest(change=new):
+                self.assertNotEqual(bad, stock)
+                self.assertEqual(raw_load_quads(bad, 5, 4096, 32), bad)
 
 
 if __name__ == '__main__':

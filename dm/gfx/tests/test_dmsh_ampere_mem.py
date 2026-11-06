@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Ampere instructions through the offline translator (dmsh_xlate, arch sm86): SUATOM (0x593), the image atomic Donkey Kong Bananza's agl technique compute shaders (agl_technique_pfx) take an
 append counter with; shared memory's scaled address, IMAD.HI and ATOMS.CAS; and the instructions tested on the atomic's result below. Needs DMSH_TEST_XLATE (the translator) like the other translator tests."""
-import json, os, re, struct, subprocess, sys, tempfile, unittest
+import json, os, re, shutil, struct, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
@@ -244,14 +244,19 @@ class Bmsk(Translated):
 
 @unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
 class PixelCovered(unittest.TestCase):
-    """0x925 as Star Fox's quad efficiency views encode it (826168691af2e211 +0x0): 1 for a covered pixel, 0 for a helper invocation"""
-    COVERED = (0x040e0200000e4000, 0x0000000000007925)
-    OTHER = (0x040e0200000e8000, 0x0000000000007925)   # bits 78..80 = 2, not seen
+    """PIXLD (0x925): COVMASK as Star Fox's quad efficiency views encode it (826168691af2e211 +0x0) is the pixel's coverage mask, Metal's [[sample_mask]] input (0 for a helper
+    invocation); MY_INDEX the sample index; the other values are refused"""
+    COVERED = (0x040e0200000e4000, 0x0000000000007925)    # PIXLD.COVMASK R0 (bits 78..80 = 1, no predicate result)
+    MY_INDEX = (0x040e0200000ec000, 0x0000000000007925)   # PIXLD.MY_INDEX R0 (3), Orbitals' encoding
+    COVERED_R1 = (0x040e0200000e4000, 0x0000000000017925)  # PIXLD.COVMASK R1
+    OTHER = (0x040e0200000e8000, 0x0000000000007925)   # bits 78..80 = 2 (CENTROID_OFFSET), not seen
+    MSCOUNT = (0x040e0200000e0000, 0x0000000000007925)   # 0
+    INNER_COVERAGE = (0x040e020000000000 | (0x38 + 4) << 14, 0x0000000000007925)   # 4, predicate output still PT (7 << 17)
     SPH = struct.pack('<32I', *([0x000c5482] + [0] * 4 + [0xb0000000] + [0] * 12 + [0xf] + [0] * 13))   # the game's: writes colour 0
 
-    def run_job(self, op):
+    def run_job(self, *ops):
         with tempfile.TemporaryDirectory(prefix='ampere_px_') as d:
-            work = Path(d); (work / 'k.bin').write_bytes(self.SPH + inst(*op) + inst(*EXIT))
+            work = Path(d); (work / 'k.bin').write_bytes(self.SPH + b''.join(inst(*op) for op in ops) + inst(*EXIT))
             (work / 'jobs.json').write_text(json.dumps([dict(key='k', stage='ps', arch='sm86', code=str(work / 'k.bin'), tex={}, img={}, attr={}, fout={}, debug=True)]))
             r = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(work / 'jobs.json'), d], capture_output=True, text=True)
             if not (work / 'k.spv').exists(): return None, r.stdout + r.stderr
@@ -261,16 +266,36 @@ class PixelCovered(unittest.TestCase):
             self.assertEqual(m.returncode, 0, m.stderr)
             return m.stdout, r.stdout + r.stderr
 
-    def test_reads_the_helper_invocation(self):
+    def test_reads_the_coverage_mask(self):
         msl, log = self.run_job(self.COVERED)
         self.assertIsNotNone(msl, log)
+        self.assertIn('uint gl_SampleMaskIn [[sample_mask]]', msl)
         self.assertIn('simd_is_helper_thread()', msl)
-        self.assertRegex(msl, r'\? 0 : 1;')   # helper 0, covered 1
+        m = re.search(r'float (_\d+) = as_type<float>\(int\(gl_SampleMaskIn\)\);', msl)
+        self.assertTrue(m, msl)
+        self.assertRegex(msl, r'\? 0 : as_type<int>\(' + m.group(1) + r'\);')   # helper 0, else the mask (1 for a covered pixel with no MSAA)
 
-    def test_another_form_is_refused(self):
-        msl, log = self.run_job(self.OTHER)
-        self.assertIsNone(msl)
-        self.assertIn('0x925 form 2', log)
+    def test_per_sample_keeps_the_whole_pixel_mask(self):
+        # with MY_INDEX the function runs per sample; COVMASK is still the whole pixel's mask (NAK masks it with 1 << sample id itself), so nothing ANDs the sample's bit in
+        msl, log = self.run_job(self.MY_INDEX, self.COVERED_R1)
+        self.assertIsNotNone(msl, log)
+        self.assertIn('[[sample_id]]', msl)
+        self.assertIn('[[sample_mask]]', msl)
+        self.assertNotRegex(msl, r'gl_SampleMaskIn\s*&|<<\s*gl_SampleID')
+
+    @unittest.skipUnless(shutil.which('xcrun'), 'needs xcrun metal')
+    def test_metal_compiles(self):
+        msl, log = self.run_job(self.MY_INDEX, self.COVERED_R1)
+        with tempfile.TemporaryDirectory(prefix='ampere_px_') as d:
+            (Path(d) / 'k.metal').write_text(msl)
+            r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-std=metal3.0', str(Path(d) / 'k.metal'), '-o', str(Path(d) / 'k.air')], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_other_forms_are_refused(self):
+        for op, v in ((self.OTHER, 2), (self.MSCOUNT, 0), (self.INNER_COVERAGE, 4)):
+            msl, log = self.run_job(op)
+            self.assertIsNone(msl)
+            self.assertIn(f'0x925 form {v}', log)
 
 
 class MufuF16(Translated):

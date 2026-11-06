@@ -719,7 +719,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
         // PIXLD Rd (0x925): a pixel value, 78..81 (NAK sm70_encode.rs OpPixLd, ir.rs PixVal: MSCOUNT 0, COVMASK 1, CENTROID_OFFSET 2, MY_INDEX 3, INNER_COVERAGE 4),
         // predicate output 81..84. Orbitals' pixel shaders read MY_INDEX (040e0200000ec0000000000000007925, PIXLD.MY_INDEX R0): the sample the fragment runs for,
-        // as Maxwell's PIXLD.MYINDEX (InstEmitMove.Pixld). 0x925 is registered to APixelCovered (InstEmitAmpereAlu.cs), which hands MY_INDEX here; the other values are refused
+        // as Maxwell's PIXLD.MYINDEX (InstEmitMove.Pixld). 0x925 is registered to APixelCovered (InstEmitAmpereAlu.cs), which reads COVMASK itself and hands MY_INDEX here; the other values are refused
         public static void APixld(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);

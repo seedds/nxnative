@@ -1223,8 +1223,31 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 - **Symptom:** `Ampere instruction 21b at … is not implemented` (`…0405721b`) or `Ampere instruction 925 at 0x0 is not implemented` (`040e0200000e4000 …7925`) in the build.
 - **Cause:** 0x21b, beside SGXT's 0x21a, is BMSK: a mask of b bits from bit a. Star Fox's `58046f286de779e1` takes it from two bytes of a word, ANDs it with the value shifted by the same a and hands the result to an atomic, a bit field written into a word. 0x925 has no name in the tables at hand (the part of CuAssembler's sm_80 table read so far; Mesa's NAK encoder could not be fetched); what it reads comes from its two shaders, quad efficiency views. They rebuild its value at the quad's three other pixels through SHFL and FSWZADD and add the four: one indexes a 4-entry palette with the sum minus 1, so a shaded pixel's sum is at least 1, and the other draws 0.03125 + 0.15625 sum in red. So it is 1 for a covered pixel and 0 for a helper invocation.
-- **Fix:** `ABmsk` follows PTX's `bmsk` definition, its `.W` at bit 75 as SGXT's (only the clamping form has been seen). `APixelCovered` loads a new `IoVariable.HelperInvocation`, Metal's `simd_is_helper_thread()`, as an integer; any other form of 0x925 stays refused (chain change). `test_dmsh_ampere_mem.py` covers both.
+- **Fix:** `ABmsk` follows PTX's `bmsk` definition, its `.W` at bit 75 as SGXT's (only the clamping form has been seen). `APixelCovered` loads a new `IoVariable.HelperInvocation`, Metal's `simd_is_helper_thread()`, as an integer; any other form of 0x925 stays refused (chain change). The instruction is PIXLD.COVMASK, now read from `[[sample_mask]]` ([next entry](#pixldcovmask-is-the-pixels-coverage-mask)). `test_dmsh_ampere_mem.py` covers both.
 - **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md): 1 compute and 2 pixel shaders, none asked for in play so far, so neither instruction has run. Neither opcode is in the shaders of Donkey Kong Bananza, Splatoon Raiders, Mario Tennis Fever or Pokopia.
+
+### PIXLD.COVMASK is the pixel's coverage mask
+
+- **Symptom:** on a multisampled target, a pixel shader's `gl_SampleMaskIn` (PIXLD.COVMASK) read 1 for every covered pixel, whatever samples the primitive covered. No game has shown this yet; on a single-sample target the value was already right.
+- **Cause:** 0x925 is PIXLD. Its pixel value is in bits 78..80 (Mesa NAK `sm70_encode.rs` `OpPixLd`, `ir.rs` `PixVal`: MSCOUNT 0, COVMASK 1, CENTROID_OFFSET 2, MY_INDEX 3, INNER_COVERAGE 4) and its predicate output in 81..83. The form `APixelCovered` read as "1 for a covered pixel, 0 for a helper invocation" ([previous entry](#ampere-bmsk-and-the-read-of-a-covered-pixel)) is COVMASK. NAK lowers `gl_SampleMaskIn` to it, and it is the coverage of the whole pixel, not just of the invocation: under sample shading NAK ANDs it with `1 << sample id` itself (`nak_nir_lower_fs_inputs.c`). So it is 1 only with one sample.
+- **Fix:** `APixelCovered` loads a new `IoVariable.SampleMask` (SPIR-V `SampleMask`, an array of one word; GLSL `gl_SampleMaskIn`). SPIRV-Cross makes it Metal's `uint gl_SampleMaskIn [[sample_mask]]`. A helper invocation still reads 0, since Metal leaves its mask unspecified.
+  - **Where Metal and NVN agree:**
+    - The value is the rasterizer's coverage before the depth test. Metal's post-depth form is `[[post_depth_coverage]]`, which the translation does not use.
+    - Alpha-to-coverage applies after the shader in both, so it is not in the value.
+    - In a per-sample function (one that also reads MY_INDEX), the value is still the whole pixel's mask. SPIRV-Cross adds no `& (1 << gl_SampleID)`, and Metal reportedly passes every covered sample (gpuweb issue 5457). NVIDIA's PIXLD.COVMASK does the same.
+  - **Not modelled:**
+    - The state set by `nvnCommandBufferSetSampleMask`. The host ignores it (`hle_nvn.c`), and Metal pipelines have no sample mask to AND in.
+    - Post-depth coverage.
+  - **Values left refused** (`0x925 form N`):
+    - MSCOUNT: the target's sample count. SPIR-V has no input for it, and Metal's `get_num_samples()` has no SPIR-V form; it would need a driver word.
+    - CENTROID_OFFSET.
+    - INNER_COVERAGE: conservative raster, which Metal does not have.
+- **Found on:** no game here. The packages of PRAGMATA (36,779 records, 157 PIXLD), Orbitals (23,432 records, 7) and Donkey Kong Bananza (22,852 records, 0) hold only MY_INDEX. Star Fox's two quad efficiency views (`46040940ce0fd49b`, `826168691af2e211`) read COVMASK; on a single-sample target they read what they read before.
+- **Check:** `test_dmsh_ampere_mem.py` `PixelCovered`:
+  - the `[[sample_mask]]` read and the helper's 0;
+  - that a per-sample function keeps the whole mask;
+  - that the MSL compiles;
+  - that the other values are refused.
 
 ### VOTEU writes the uniform predicate
 

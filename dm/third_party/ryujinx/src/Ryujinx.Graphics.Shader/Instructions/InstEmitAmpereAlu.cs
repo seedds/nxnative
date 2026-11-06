@@ -1621,9 +1621,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, context.BitwiseAnd(mask0, context.BitwiseNot(above)), u);
         }
 
-        // 0x925 Rd (78..80 = 1, no predicate result): 1 for a covered pixel, 0 for a helper invocation. No table at hand names it (PIXLD.COVERED, perhaps). What it reads comes from the two shaders
-        // that use it, Star Fox's quad efficiency views 46040940ce0fd49b and 826168691af2e211, which add it up over the quad through SHFL and FSWZADD: one takes sum - 1 as the index of a
-        // 4-entry palette, so a shaded pixel's sum is at least 1; the other draws 0.03125 + 0.15625 sum in red. Any other form stays refused
+        // 0x925 Rd (PIXLD, NAK sm70_encode.rs OpPixLd): the pixel value in 78..80 (MSCOUNT 0, COVMASK 1, CENTROID_OFFSET 2, MY_INDEX 3, INNER_COVERAGE 4), a predicate output in 81..83.
+        // MY_INDEX goes to APixld (InstEmitAmpereMem.cs). COVMASK (1) is the coverage mask of the whole pixel: the samples the primitive covers, one bit each (Mesa's NAK lowers
+        // gl_SampleMaskIn to it, and masks it with 1 << sample id itself under sample shading, nak_nir_lower_fs_inputs.c: "pixld.covmask returns the coverage mask for the entire
+        // pixel being shaded"). It is read here from Metal's [[sample_mask]] input (SPIR-V SampleMask, gl_SampleMaskIn): the rasterizer's coverage, before the depth test. With no
+        // MSAA that is 1 for a covered pixel, as before. A helper invocation covers no sample, so it reads 0 (Metal leaves a helper thread's mask unspecified). Not modelled: an
+        // NVN sample mask state (Metal's pipelines have none to AND in) and post-depth coverage. Star Fox's quad efficiency views (46040940ce0fd49b, 826168691af2e211) sum it over
+        // the quad through SHFL and FSWZADD; one takes sum - 1 as the index of a 4-entry palette, the other draws 0.03125 + 0.15625 sum in red. MSCOUNT (the render target's sample
+        // count: no SPIR-V input, Metal's get_num_samples() has no SPIR-V form), CENTROID_OFFSET and INNER_COVERAGE (conservative raster: none in Metal) stay refused
         public static void APixelCovered(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
@@ -1640,8 +1645,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             Operand helper = context.Load(StorageKind.Input, IoVariable.HelperInvocation);
+            Operand mask = context.Load(StorageKind.Input, IoVariable.SampleMask, null, Const(0));
 
-            ASet(context, x, context.ConditionalSelect(helper, Const(0), Const(1)), false);
+            ASet(context, x, context.ConditionalSelect(helper, Const(0), mask), false);
         }
 
         // ---- predicates ----

@@ -49,5 +49,6 @@ namespace Ryujinx.Graphics.Shader.IntermediateRepresentation
         HelperInvocation,   // nxnative: at the end, so the others keep their numbers
         BaryCoord,
         BaryCoordNoPersp,
+        SampleMask,   // nxnative: the fragment's coverage mask input (PIXLD.COVMASK), an array of one word as SPIR-V's SampleMask
     }
 }

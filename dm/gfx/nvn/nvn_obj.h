@@ -16,7 +16,7 @@ typedef struct { uint32_t magic, flags, origin, depth_mode; void *dbg_cb, *dbg_d
 
 typedef struct { NVNdevice *dev; uint32_t flags; uint64_t cmd_sz, comp_sz, ctl_sz, flush; void *mem; uint64_t mem_sz; } queue_builder_t;
 FITS(queue_builder_t, NVNqueueBuilder);
-typedef struct { uint32_t magic; NVNdevice *dev; uint64_t submits; int origin_ll; uint64_t serial; } queue_t;  FITS(queue_t, NVNqueue);
+typedef struct { uint32_t magic; NVNdevice *dev; uint64_t submits; int origin_ll; uint64_t serial; uint64_t lastf; } queue_t;  FITS(queue_t, NVNqueue);
 
 typedef struct { NVNdevice *dev; void *mem; uint64_t size; uint32_t flags; } pool_builder_t;  FITS(pool_builder_t, NVNmemoryPoolBuilder);
 // A virtual pool (flags 0x200) keeps its sparse state in vp (hle_nvn.c struct vpool, NULL for an aliased one); vmode: 0 not mapped yet, 1 aliased onto one physical pool, 2 sparse
@@ -55,6 +55,8 @@ typedef struct { uint32_t magic; samp_par p; } samp_t;                          
 
 // The per-stage shader keys are not kept in prog_t: the game's real NVNprogram may be smaller than the header's 0xC0 (growing prog_t corrupted the adjacent object in Mario); see prog_keys in hle_nvn.c
 typedef struct { uint32_t magic, nstage; NVNshaderData sd[6]; uint64_t serial; } prog_t;     FITS(prog_t, NVNprogram);   // serial: table key for the replay layer's resolved result
+// NVN2 (Switch 2) keeps programs in 0xa0 bytes: Donkey Kong Bananza initializes them 0xa0 apart (main+0x8aa1cc: programs at +0x18, +0xb8, +0x158)
+_Static_assert(sizeof(prog_t) <= 0xa0, "prog_t exceeds an NVN2 program");
 
 typedef struct { uint32_t magic, fenced; uint64_t fence; } sync_t;   /* fenced 2: by WindowAcquireTexture */                           FITS(sync_t, NVNsync);
 typedef struct { const pool_t *pool; int64_t off; } ev_builder_t;                             FITS(ev_builder_t, NVNeventBuilder);
@@ -63,7 +65,7 @@ typedef struct { uint32_t magic; volatile uint32_t *val; const pool_t *pool; int
 typedef struct { NVNdevice *dev; void *native; int32_t ntex, interval; NVNtexture *tex[4]; } win_builder_t;
 FITS(win_builder_t, NVNwindowBuilder);
 // avail[i]: time at which swapchain image i can be acquired again (ns, monotonic clock) = its display time + one present period; pace: target time of this window's present pacer
-typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4]; } win_t;   // ticket[i]: ticket of the most recent present of image i
+typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4], pfence[4]; } win_t;   // ticket[i]: ticket of the most recent present of image i
 FITS(win_t, NVNwindow);
 
 // Command buffer: commands are written into the command memory given by the game (AddCommandMemory), handle = segment start address; when it runs out, the game is called back for more memory
@@ -195,7 +197,7 @@ typedef struct { const tex_t *tex[DLSS_TEXTURES]; uint64_t net; int32_t iw, ih, 
 typedef struct { uint64_t addr, size; uint32_t value, _pad; } p_clear_buf;   // buffer filled with a 32-bit value (ClearBuffer)
 typedef struct { float rgba[4]; } p_blend_color;
 typedef struct { float ref; } p_alpha_ref;
-typedef struct { uint16_t compute, offset; uint32_t size; uint8_t data[]; } p_push_const;   // NVN2 push constants: the bytes at offset in the graphics or compute block (DMSH_PUSH_*)   // SetAlphaRef: the reference of the alpha test (ColorStateSetAlphaTest; nvn_mtl.m at_bind)
+typedef struct { uint8_t compute, block; uint16_t offset; uint32_t size; uint8_t data[]; } p_push_const;   // NVN2 push constants: the bytes at offset in the graphics or compute block (DMSH_PUSH_*)   // SetAlphaRef: the reference of the alpha test (ColorStateSetAlphaTest; nvn_mtl.m at_bind)
 typedef struct { int32_t index, pad; uint64_t addr, size; } p_tf_bind;   // BindTransformFeedbackBuffer(s): one record per buffer (index 0-3)
 typedef struct { int32_t what, pad; uint64_t ctl; } p_tf_state;          // what: 0 begin, 1 end, 2 pause, 3 resume; ctl = the game's 32-byte control buffer
 typedef struct { int32_t on; } p_rast_discard;
@@ -265,6 +267,7 @@ int nvn_tex_mirror_t2t(const tex_t *s, unsigned sl, unsigned ss, const NVNcopyRe
 // A program's per-stage shader key (hle_nvn.c): the first 8 bytes of sha256(first 0x880 bytes of the control section (its own length when shorter) + code area). Computed at SetShaders (NVN lets the caller free the control section once it returns, and Unity does);
 // a stage whose code area was not yet in any memory pool then is computed the first time it is asked for. Returns 0 = no such stage
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]);
+int prog_push0(const prog_t *p, unsigned stage);   // NVN2 compute: bytes of the first push-constant block (control +0xa9 words, 16-byte aligned), where the second starts; -1 unknown
 void nvn_ctl_lens(const void *control, uint32_t *nctl, uint32_t *ncode);   // a control section's bytes in the shader key and its code area's length (NVN or NVN2), hle_nvn.c
 void mtl_reg_samp(int id, const samp_par *p);
 void mtl_prog_release(prog_t *p);

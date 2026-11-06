@@ -396,7 +396,8 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                         // their uses here let the next dead-code pass delete the chain that feeds it, and the atomic then read undefined values.
                         // The same holds for a producer with another destination still in use: an image read whose .x is dead but whose .y is not stays, and following it
                         // lost its coordinate (Ocarina of Time's wind solver read a garbage y, and its velocity field oscillated, which made the grass flicker at 10 Hz).
-                        if (!HasSideEffects(src.AsgOp) && DestHasNoUses(src.AsgOp))
+                        // (#1343: IsUnused, the same test as the dead-code pass, which also requires a local destination.)
+                        if (IsUnused(src.AsgOp))
                         {
                             nodes.Enqueue(src.AsgOp);
                         }

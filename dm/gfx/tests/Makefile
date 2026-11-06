@@ -162,6 +162,10 @@ t_pool_chunks: t_pool_chunks.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_chunks.m $(MTL_T_SRC) $(FW)
 t_sparse_tiles: t_sparse_tiles.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_tiles.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+t_sparse_buf: t_sparse_buf.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_buf.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+t_sparse_safe: t_sparse_safe.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_safe.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 t_readback: t_readback.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_readback.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 .PHONY: check_t_readback
@@ -230,6 +234,9 @@ check_t_cpu_storage: RUN_ENV = MTL_DEBUG_LAYER=1
 t_initial_uncached: t_initial_uncached.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_initial_uncached.m $(MTL_T_SRC) $(FW)
 check_t_initial_uncached: RUN_ENV = MTL_DEBUG_LAYER=1
+t_block_alias: t_block_alias.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_block_alias.m $(MTL_T_SRC) $(FW)
+check_t_block_alias: RUN_ENV = MTL_DEBUG_LAYER=1
 t_upload_slots: t_upload_slots.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upload_slots.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_upload_slots
@@ -405,6 +412,11 @@ t_image_attachment_store: t_image_attachment_store.m $(MTL_T_DEP)
 check_t_image_attachment_store: RUN_ENV = MTL_DEBUG_LAYER=1
 t_image_primitive_id: t_image_primitive_id.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_primitive_id.m $(MTL_T_SRC) $(FW)
+t_tbuf_pfv: t_tbuf_pfv.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tbuf_pfv.m $(MTL_T_SRC) $(FW)
+check_t_tbuf_pfv: RUN_ENV = MTL_DEBUG_LAYER=1
+t_pso_intbits: t_pso_intbits.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_intbits.m $(MTL_T_SRC) $(FW)
 t_unwritten_store: t_unwritten_store.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_unwritten_store.m $(MTL_T_SRC) $(FW)
 check_t_unwritten_store: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -442,6 +454,9 @@ check_t_dlss_mfx: t_dlss_mfx
 t_image_usage: t_image_usage.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_usage.m $(MTL_T_SRC) $(FW)
 check_t_image_usage: RUN_ENV = MTL_DEBUG_LAYER=1
+t_image_atomic64: t_image_atomic64.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_image_atomic64.m $(MTL_T_SRC) $(FW)
+check_t_image_atomic64: RUN_ENV = MTL_DEBUG_LAYER=1
 t_stencil_view: t_stencil_view.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_stencil_view.m $(MTL_T_SRC) $(FW)
 check_t_stencil_view: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -470,3 +485,14 @@ t_logic: t_logic.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_logic.m $(MTL_T_SRC) $(FW)
 check_t_logic: t_logic
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_logic.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_logic "$$work"
+
+# Offline original/merged pixel shaders on identical GPU inputs, including integer bits and non-finite values.
+t_onelib: t_onelib.m
+	clang -O1 -g -Wall -fobjc-arc -o $@ $< -framework Metal -framework Foundation
+.PHONY: check_t_onelib
+check_t_onelib: t_onelib
+	DM_TEST_ONELIB=$(CURDIR)/t_onelib MTL_DEBUG_LAYER=1 python3 -m unittest test_dmsh_onelib.Numerical
+
+# MUFU.SIN / COS lowered from turns through the fraction (InstEmitAmpereAlu.cs ATurnsToRadians), on the GPU against a double-precision reference
+t_mufu_turns: t_mufu_turns.m
+	clang -O1 -g -Wall -fobjc-arc -o $@ t_mufu_turns.m -framework Metal -framework Foundation

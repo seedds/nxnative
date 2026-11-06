@@ -171,6 +171,8 @@ def header_one(g):
     if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.]{0,30}', ufc): sys.exit(f'{g.id}: ue_fps_cvar must be a console variable name: {ufc}')
     ps = g.get('present_snap', 'off')   # present snapshots by default (nvn_mtl.m mtl_snap_on; DM_PRESENT_SNAP and the iOS launcher's Frame buffering override it): on / off
     if ps not in ('on', 'off'): sys.exit(f'{g.id}: present_snap must be on or off: {ps}')
+    fpd = g.get('fb_pool_dread', 'on')   # a fragment shader that reaches the texture pool as an array or by dynamic slot counts as reading its pass's depth attachment, so a later depth-writing draw ends the pass (nvn_mtl.m fb_prepare; DM_NVN_FB_POOL_DREAD overrides): on / off
+    if fpd not in ('on', 'off'): sys.exit(f'{g.id}: fb_pool_dread must be on or off: {fpd}')
     p4 = g.get('pso_mtl4', 'off')   # render pipelines through MTL4Compiler on iOS by default, with the pipeline archive and hybrid pipelines (on by default on the Mac; DM_PSO_MTL4 overrides): on / off
     if p4 not in ('on', 'off'): sys.exit(f'{g.id}: pso_mtl4 must be on or off: {p4}')
     pg = g.words('pso_gpu', '')   # GPU architectures the app gets the pipeline archive made offline for (the NSP script's --gpu, build_ipa.sh): when pso_mtl4 is on the app gets these instead of the default g18p, the A19 / A19 Pro of the iPhone 17 family (e.g. 'applegpu_g19p' for a device of the family after it); unset → the default. Whitespace-separated tokens, with or without the applegpu_ prefix
@@ -191,6 +193,8 @@ def header_one(g):
     if sks and (not m or not 0x30 <= int(m[1], 0) or not 0 < int(m[2], 0) or int(m[1], 0) + int(m[2], 0) > 0x880 or (int(m[1], 0) < 0x760 and int(m[1], 0) + int(m[2], 0) > 0x700)):   # not over +0x700..+0x75f, the code area and compute fields the tools read
         sys.exit(f'{g.id}: shader_key_skip takes <offset>+<length> within the first 0x880 bytes of the control section, past its header (+0x30) and clear of +0x700..+0x75f: {sks}')
     sko, skl = (int(m[1], 0), int(m[2], 0)) if m else (0, 0)
+    sbf = g.get('sb_freeze', 'off')   # read-only storage the CPU rewrites mid-frame read from one copy per frame (nvn_mtl.m sbf_*): off / auto / all / a shader key prefix
+    if sbf not in ('off', 'auto', 'all') and not re.fullmatch(r'[0-9a-f]{4,16}', sbf): sys.exit(f'{g.id}: sb_freeze must be off, auto, all or a shader key prefix (hex): {sbf}')
     rcd = g.get('render_cond', 'off')   # NVN conditional rendering evaluated at replay, timestamp reports with counter 0 (nvn_mtl.m OP_RENDER_COND): on / off
     if rcd not in ('on', 'off'): sys.exit(f'{g.id}: render_cond must be on or off: {rcd}')
     tfu = g.get('tex_flush_upload', 'off')   # textures written by the CPU into a pool and published with nvnMemoryPoolFlushMappedRange are uploaded like packaged ones (hle_nvn.c): on / off
@@ -250,6 +254,7 @@ def header_one(g):
          f'#define DM_GAME_UE_TEXTURE_POOL {int(utp)}',
          f'#define DM_GAME_UE_FPS_CVAR {q(ufc)}',
          f'#define DM_GAME_PRESENT_SNAP {int(ps == "on")}',
+         f'#define DM_GAME_FB_POOL_DREAD {int(fpd == "on")}',
          f'#define DM_GAME_PSO_MTL4 {int(p4 == "on")}',
          f'#define DM_GAME_ENC_THREAD {int(et == "on")}',
          *([f'#define DM_GAME_SHARED_FONT_TTF {int(sf == "ttf")}'] if g.get('shared_font', '') else []),   # without the key the host decides by the SDK version (hle_sdk16.c)
@@ -259,6 +264,7 @@ def header_one(g):
          f'#define DM_GAME_TEX_FLUSH_UPLOAD {int(tfu == "on")}',
          f'#define DM_GAME_SHADER_KEY_SKIP_OFF {sko:#x}', f'#define DM_GAME_SHADER_KEY_SKIP_LEN {skl:#x}',
          f'#define DM_GAME_RENDER_COND {int(rcd == "on")}',
+         f'#define DM_GAME_SB_FREEZE "{sbf}"',
          f'#define DM_GAME_TEX_DIRTY_UPLOAD {int(tdu == "on")}',
          f'#define DM_GAME_TEX_DYN_SLOTS {int(tds == "on")}',
          f'#define DM_GAME_GPU_TS_SEGMENT {int(gts == "segment")}',

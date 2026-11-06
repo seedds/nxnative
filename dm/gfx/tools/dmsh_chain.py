@@ -11,10 +11,11 @@
 #       dmsh_chain.py --inputs        print the digest of the current game profile's inputs (DM_GAME), as b-<V>/inputs.tsv records it
 #       (checking the tools against dmsh_chain.lock, and rewriting it, is tool_lock.py's: the checks decide no output, so they are outside V and the shaders' cache keys)
 # Environment: XLATE_DEBUG / XLATE_REDUCED (same meaning as in dmsh_build.py, default 1 / 1; non-default options yield a different V, which the host will not load)
+#   DMSH_LOOPGUARD=off|auto: the profile key shader_loopguard for this build (loopguard below); like the key, a shader input, not part of V, so one host loads either library
 import os, sys, ast, hashlib
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HERE = os.path.dirname(os.path.abspath(__file__)); GFX = os.path.dirname(HERE); HOME = os.path.expanduser('~')
-FILES = ['tools/dmsh_chain.py', 'tools/dmsh_build.py', 'tools/dmsh_atomic.py', 'tools/dmsh_wide.py', 'tools/dmsh_fetch.py', 'tools/dmsh_vin.py', 'tools/dmsh_pull.py', 'tools/dmsh_pull.metal', 'tools/dmsh_alpha.py', 'tools/dmsh_logic.py', 'tools/dmsh_side.py', 'tools/dmsh_geometry.py', 'tools/dmsh_mesh.py', 'tools/dmsh_meshstage.py', 'tools/dmsh_facts.py', 'tools/dmsh_ampere.py', 'nvn/dmsh_abi.h', 'tools/dmsh_abi.py', 'tools/dmsh_xlate/Program.cs', 'tools/dmsh_xlate/dmsh_xlate.csproj', '../ios/tools/ios_metal.py', 'tools/dmsh_chain.lock']
+FILES = ['tools/dmsh_chain.py', 'tools/dmsh_build.py', 'tools/dmsh_atomic.py', 'tools/dmsh_wide.py', 'tools/dmsh_fetch.py', 'tools/dmsh_vin.py', 'tools/dmsh_pull.py', 'tools/dmsh_pull.metal', 'tools/dmsh_alpha.py', 'tools/dmsh_logic.py', 'tools/dmsh_side.py', 'tools/dmsh_geometry.py', 'tools/dmsh_mesh.py', 'tools/dmsh_meshstage.py', 'tools/dmsh_facts.py', 'tools/dmsh_ampere.py', 'tools/dmsh_loopdiag.py', 'tools/dmsh_dsl.py', 'nvn/dmsh_abi.h', 'tools/dmsh_abi.py', 'tools/dmsh_xlate/Program.cs', 'tools/dmsh_xlate/dmsh_xlate.csproj', '../ios/tools/ios_metal.py', 'tools/dmsh_chain.lock']
 # This target-specific lowering lives in the vendored translator. Include its
 # sources as well as the rebuilt DLL fingerprint; no old shader cache can bypass it.
 FILES += ['../third_party/ryujinx/src/Ryujinx.Graphics.Shader/' + f for f in (
@@ -57,8 +58,18 @@ def load_game():   # the current game profile (DM_GAME), only for what needs one
     sys.path.insert(0, os.path.join(GFX, '../games')); import game
     return game.load()
 
-def profile_rows(g):   # the profile keys that change how a shader is built (nvn_*, shader_*)
-    return ''.join(f'{k}\t{chr(9).join(v)}\n' for k, v in g.rows if k.startswith(('nvn_', 'shader_'))).encode()
+LOOPGUARD_MODES = ('off', 'auto')
+def loopguard(g):
+    """The automatic loop guard of a game's build (dmsh_loopdiag.py auto): DMSH_LOOPGUARD, else the profile's shader_loopguard, else off. auto: the data-sized loops of compute
+    kernels and task functions report through the host's debug buffer (DM_NVN_LOOPCAP) and behave as before while it is off"""
+    v = os.environ.get('DMSH_LOOPGUARD') or g.get('shader_loopguard', 'off')
+    if v not in LOOPGUARD_MODES: sys.exit(f'[RED] DMSH_LOOPGUARD / shader_loopguard takes {" or ".join(LOOPGUARD_MODES)}, not {v!r}')
+    return v
+
+def profile_rows(g):   # the profile keys that change how a shader is built (nvn_*, shader_*); DMSH_LOOPGUARD stands in for shader_loopguard when it differs from the profile's
+    env = os.environ.get('DMSH_LOOPGUARD'); over = env and env != g.get('shader_loopguard', 'off')
+    rows = ''.join(f'{k}\t{chr(9).join(v)}\n' for k, v in g.rows if k.startswith(('nvn_', 'shader_')) and not (over and k == 'shader_loopguard'))
+    return (rows + (f'shader_loopguard\t{loopguard(g)}\n' if over else '')).encode()
 
 def inputs(g):
     """Digest of a game profile's inputs to its shader library: the shader tables (a missing one counts as such) and the nvn_* / shader_* keys"""

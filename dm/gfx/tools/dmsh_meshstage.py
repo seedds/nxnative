@@ -8,8 +8,11 @@ Stage memory, in shared memory (memory()), all of it zero when the body starts:
   word 0        the workgroup's number (ISBERD mode 0x78): a task's is the draw's first task + its threadgroup, a mesh shader's with no task the draw's first + its threadgroup
   INPUT         the payload a mesh shader's task wrote (ISBERD mode 0x38). Its word 0 is the mesh workgroup's number among its task's launches, which the hardware puts there
   outputs       a task's payload (0xb8): its word 1 is the number of mesh workgroups to launch, its records start at +0x10
-                or a mesh shader's attributes (0xf8): blocks of 32 vertices and 32 primitives, each component 0x80 bytes (a word per vertex or primitive), the vertex components the
-                SPH's OMAP enables first, then the per-primitive SPH's
+                or a mesh shader's attributes (0xf8): the vertices' first, in blocks of 32 vertices with one 0x80-byte array (a word a vertex) per component the SPH's OMAP
+                enables, as many blocks as its most vertices need; then the primitives', in blocks of 32 primitives, one array per per-primitive component: the per-primitive
+                SPH's system values (OMAP 0x34 and 0x35 bits 0..3: primitive array id, layer, viewport, ...) before its generic attributes. Each takes its room; the
+                primitive id is handed to Metal as the primitive's [[primitive_id]] (PRIMITIVE_BUILTINS), which the fragment stage reads as NVN's gl_PrimitiveID. PRAGMATA's mesh shaders (5aab38bb5ba67ef7: 128 vertices, 4 components) write vertex v at (v / 32) * 0x200 + 0x80 * c and
+                a primitive id (0x35 bit 0) at 0x800 + (p / 32) * 0x80: without that room it lay over the primitive count byte, and every workgroup drew nothing
   primitives    a mesh shader's primitive bytes: the count at +3 (0x88), three index bytes a triangle from +4 (0x80)
 """
 import re
@@ -37,6 +40,12 @@ def sph_outputs(sph):
     return out
 
 
+def sph_system(sph):
+    """The system-value components an SPH's OMAP enables besides the position (byte 0x34, byte 0x35 bits 0..3), lowest bit first."""
+    bits = sph[0x34] | (sph[0x35] & 0xf) << 8
+    return [b for b in range(12) if bits >> b & 1]
+
+
 def info(ctl, area):
     """A task or mesh shader's facts from its control section and its whole code area (the SPH, the instructions, a mesh shader's second SPH): +0x58 its workgroup's threads, +0x5a its
     payload's bytes, +0x5e whether a mesh shader has a task, +0x60 / +0x62 a mesh shader's most vertices and primitives, +0x64 the offset of its per-primitive SPH where +0x68 bit 7 is set."""
@@ -47,7 +56,8 @@ def info(ctl, area):
         max_v, max_p = struct.unpack_from('<2H', ctl, 0x60)
         at = struct.unpack_from('<I', ctl, 0x64)[0] if ctl[0x68] & 0x80 else 0
         prim = sph_outputs(area[at:at + 0x80]) if at else []
-        out.update(task=bool(ctl[0x5e]), max_v=max_v, max_p=max_p, vertex=sph_outputs(area[:0x80]), primitive=[c for c in prim if c[0] is not None])
+        out.update(task=bool(ctl[0x5e]), max_v=max_v, max_p=max_p, vertex=sph_outputs(area[:0x80]), primitive=[c for c in prim if c[0] is not None],
+                   primitive_system=len(sph_system(area[at:at + 0x80])) if at else 0, primitive_builtins=sph_system(area[at:at + 0x80]) if at else [])
     return out
 
 
@@ -56,9 +66,41 @@ def memory(i):
     out = INPUT + (i['payload'] + 15 & ~15)
     if i['kind'] == 'ts':
         return [WORKGROUP, INPUT, out, out + i['payload']], out + (i['payload'] + 3 & ~3)
-    blocks = max(max(i['max_v'], i['max_p'], 1) + BLOCK - 1, 0) // BLOCK
-    prim = out + blocks * max(len(i['vertex']) + len(i['primitive']), 1) * BLOCK * 4
-    return [WORKGROUP, INPUT, out, prim], prim + (4 + 3 * max(i['max_p'], 1) + 3 & ~3)
+    if per_primitive(i):
+        prim = out + attributes(i)[1] * 4 + blocks_of(i['max_p']) * per_primitive(i) * BLOCK * 4
+    else:
+        prim = out + blocks_of(max(i['max_v'], i['max_p'])) * max(len(i['vertex']), 1) * BLOCK * 4
+    # [4..6]: the vertex records the non-skew attribute addresses (ISBEWR / ISBERD .O.ATTR.32, mode 0xb8) name, right after the SoA area: InstEmitAmpereMem.cs AosToSoa
+    # sends each to its SoA word (before, PRAGMATA 6adf14e9 / 4fcffc73 / c0e44513 wrote them over the primitive count and index bytes)
+    n = max(len(i['vertex']), 1)
+    return [WORKGROUP, INPUT, out, prim, prim - out, n, i['max_v'] * 4 * n], prim + (4 + 3 * max(i['max_p'], 1) + 3 & ~3)
+
+
+# The per-primitive system values a Metal mesh hands on, by their OMAP bit (attribute 0x40 + 4 * bit, NAK_ATTR_*): the primitive id (0x60). The fragment stage's [[primitive_id]] then
+# reads the value the mesh shader wrote, as NVN's gl_PrimitiveID does, and a vertex pipeline's fragment function (the same function) still reads Metal's own. The layer (0x64) and the
+# viewport (0x68) keep their room but are not handed on: no game's mesh shader is known to write them, and a layered mesh pass would need the host's layered-pass handling
+PRIMITIVE_BUILTINS = {8: ('dm_pid', 'primitive_id')}
+
+
+def primitive_builtins(i):
+    """[(the member's name, its Metal attribute, its component in a primitive block)] of the per-primitive system values the mesh function hands on."""
+    return [PRIMITIVE_BUILTINS[b] + (k,) for k, b in enumerate(i.get('primitive_builtins', [])) if b in PRIMITIVE_BUILTINS]
+
+
+def blocks_of(n):
+    """Blocks of 32 for n vertices or primitives (at least one)."""
+    return (max(n, 1) + BLOCK - 1) // BLOCK
+
+
+def per_primitive(i):
+    """A mesh shader's per-primitive components: its per-primitive system values, then its per-primitive attributes."""
+    return i.get('primitive_system', 0) + len(i['primitive'])
+
+
+def attributes(i):
+    """(words of a vertex block, words from the outputs to the first primitive block)"""
+    v = max(len(i['vertex']), 1) * BLOCK
+    return v, blocks_of(i['max_v']) * v
 
 
 def own_shared(code):
@@ -67,9 +109,12 @@ def own_shared(code):
     return any(struct.unpack_from('<H', code, o)[0] & 0xfff in (0x984, 0x388, 0x988, 0x38c, 0x98c, 0xf8c) for o in range(0, len(code) - 15, 16))
 
 
-# The kernel, its parameters, the thread variables spirv-cross declares ahead of the threadgroup memory (a private variable's initializer: GlobalToStorage.TryGenerateRawStorageOp's last entry,
-# uint _N = 0u;), and its stage memory, the first threadgroup array
-_KERNEL = re.compile(r'kernel\s+void\s+main0\s*\(((?:[^()]|\([^()]*\))*)\)\s*\{\s*((?:(?!threadgroup\b)[^\n{};]+;\n\s*)*)threadgroup\s+spvUnsafeArray<uint,\s*(\d+)>\s+(\w+);\n')
+# The kernel's head, through its stage memory array: SPIRV-Cross declares the array first, but dmsh_build.py loop_guard (which runs before to_stage) puts its counter
+# (uint dm_lg = 0u; (void)dm_lg;) as the body's first line, and spirv-cross declares a private variable's initializer ahead of it (GlobalToStorage.TryGenerateRawStorageOp's last entry, uint _N = 0u;),
+# so plain declarations before the array are taken along (group 2) and stay at the top of the body.
+# PRAGMATA's 539 mesh shaders all failed here when the array had to follow the brace
+_KERNEL = re.compile(r'kernel\s+void\s+main0\s*\(((?:[^()]|\([^()]*\))*)\)\s*\{[ \t]*\n((?:(?![ \t]*threadgroup\b)[ \t]+[^\n{}]*;[ \t]*\n)*?)'
+                     r'[ \t]*threadgroup\s+spvUnsafeArray<uint,\s*(\d+)>\s+(\w+);\n')
 _NAME = re.compile(r'(\w+)\s*(?:\[\[.*\]\])?$')
 _THREAD = re.compile(r'(uint3?)\s+(\w+)\s*\[\[(thread_position_in_threadgroup|threadgroup_position_in_grid)\]\]$')
 
@@ -106,13 +151,12 @@ def to_stage(msl, i):
     kind = i['kind']
     m = _KERNEL.search(msl)
     if not m: raise ValueError(f'{kind}: no kernel main0 starting with its stage memory')
-    params, local, words, mem = _params(m[1]), m[2].strip(), int(m[3]), m[4]
+    params, lead, words, mem = _params(m[1]), m[2], int(m[3]), m[4]
     names = [_name(p) for p in params]
     plain = [re.sub(r'\s*\[\[.*\]\]$', '', p) for p in params]
     # The kernel's body, called with the stage memory the wrapper owns: its early returns (a thread with nothing to write) come back to the wrapper's copy of the outputs. Its thread variables
     # stay in it: one call a thread, as the kernel ran
-    src = (msl[:m.start()] + f'static inline __attribute__((always_inline)) void dm_stage_body({", ".join(plain + [f"threadgroup spvUnsafeArray<uint, {words}>& {mem}"])})\n{{\n' +
-           (f'    {local}\n' if local else '') + msl[m.end():])
+    src = msl[:m.start()] + f'static inline __attribute__((always_inline)) void dm_stage_body({", ".join(plain + [f"threadgroup spvUnsafeArray<uint, {words}>& {mem}"])})\n{{\n' + lead + msl[m.end():]
     call = f'dm_stage_body({", ".join(names + [mem])});'
     # The thread's and the threadgroup's numbers: the kernel's parameters where it has them (an attribute may appear once in a function), else parameters of the wrapper's own
     own = {t[3]: t[2] + ('.x' if t[1] == 'uint3' else '') for t in map(_THREAD.match, params) if t}
@@ -137,15 +181,19 @@ def to_stage(msl, i):
     vertex, primitive = i['vertex'], i['primitive']
     max_v, max_p = i['max_v'], i['max_p']
     if max_v > METAL_MAX_VERTICES or max_p > METAL_MAX_PRIMITIVES: raise ValueError(f'ms: {max_v} vertices and {max_p} primitives exceed a Metal mesh')
-    stride = max(len(vertex) + len(primitive), 1) * BLOCK   # words of an attribute block
+    stride, pfirst = attributes(i)   # words of a vertex block; where the primitive blocks start
+    pstride, nsys = max(per_primitive(i), 1) * BLOCK, i.get('primitive_system', 0)   # words of a primitive block; its system values come first
     word = lambda comps, n: [f'{mem}[b + {comps[k] * BLOCK}u]' if comps[k] is not None else None for k in range(4)]
-    vm, pm = _members(vertex), {n: [c + len(vertex) if c is not None else None for c in v] for n, v in _members(primitive).items()}
+    vm, pm = _members(vertex), {n: [c + nsys if c is not None else None for c in v] for n, v in _members(primitive).items()}
+    pb = primitive_builtins(i)
     head += ('struct dm_vertex_t {\n    float4 position [[position]];\n' + ''.join(f'    float4 a{n} [[user(locn{n})]];\n' for n in vm if n is not None) + '};\n' +
-             ('struct dm_prim_t {\n' + ''.join(f'    float4 p{n} [[user(locn{n})]];\n' for n in pm) + '};\n' if pm else '') +
-             f'using dm_mesh_t = metal::mesh<dm_vertex_t, {"dm_prim_t" if pm else "void"}, {max_v}, {max_p}, metal::topology::triangle>;\n')
+             ('struct dm_prim_t {\n' + ''.join(f'    uint {name} [[{attr}]];\n' for name, attr, _ in pb) + ''.join(f'    float4 p{n} [[user(locn{n})]];\n' for n in pm) + '};\n'
+              if pm or pb else '') +
+             f'using dm_mesh_t = metal::mesh<dm_vertex_t, {"dm_prim_t" if pm or pb else "void"}, {max_v}, {max_p}, metal::topology::triangle>;\n')
     block = lambda v: f'{out}u + ({v} / {BLOCK}u) * {stride}u + {v} % {BLOCK}u'
+    pblock = lambda p: f'{out + pfirst}u + ({p} / {BLOCK}u) * {pstride}u + {p} % {BLOCK}u'
     sets = ''.join(f'        v.{"position" if n is None else f"a{n}"} = {_component(True, word(c, n))};\n' for n, c in vm.items())
-    psets = ''.join(f'        p.p{n} = {_component(True, word(c, n))};\n' for n, c in pm.items())
+    psets = ''.join(f'        p.{name} = {mem}[b + {k * BLOCK}u];\n' for name, _, k in pb) + ''.join(f'        p.p{n} = {_component(True, word(c, n))};\n' for n, c in pm.items())
     if None not in vm: raise ValueError('ms: its SPH enables no position component')
 
     def entry(name, gl):
@@ -160,6 +208,6 @@ def to_stage(msl, i):
                 f'    for (uint n = {lid}; n < {max_v}u; n += {thr}u)\n    {{\n        uint b = {block("n")};\n        dm_vertex_t v;\n{sets}' +
                 ('        v.position.z = fma(v.position.z, 0.5, v.position.w * 0.5);\n' if gl else '') +
                 '        dm_out.set_vertex(n, v);\n    }\n' +
-                (f'    for (uint n = {lid}; n < np; n += {thr}u)\n    {{\n        uint b = {block("n")};\n        dm_prim_t p;\n{psets}        dm_out.set_primitive(n, p);\n    }}\n' if pm else '') +
+                (f'    for (uint n = {lid}; n < np; n += {thr}u)\n    {{\n        uint b = {pblock("n")};\n        dm_prim_t p;\n{psets}        dm_out.set_primitive(n, p);\n    }}\n' if pm or pb else '') +
                 f'    for (uint n = {lid}; n < np * 3u; n += {thr}u)\n    {{\n        uint at = {prim + 4}u + n;\n        dm_out.set_index(n, ({mem}[at >> 2] >> ((at & 3u) * 8u)) & 0xffu);\n    }}\n}}\n')
     return src + '\n' + head + entry('main0', True) + '\n' + entry('main0_z', False)

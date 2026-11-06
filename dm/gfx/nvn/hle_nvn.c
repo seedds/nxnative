@@ -664,7 +664,7 @@ NVN(nvnProgramFinalize, void, NVNprogram *p) {
     mtl_prog_release((prog_t *)p); ((prog_t *)p)->magic = 0; pk_drop(p);
 }
 // a program's per-stage keys (side table: guest NVNprogram address → host object; bit i of ok = stage i computed)
-typedef struct { uint8_t key[6][8]; uint8_t ok; } prog_keys_t;
+typedef struct { uint8_t key[6][8]; uint8_t ok; uint8_t pw[6]; } prog_keys_t;   // pw: NVN2 control +0xa9 + 1 (0: not an NVN2 section), taken at SetShaders (prog_push0)
 static pthread_mutex_t g_pk_mu = PTHREAD_MUTEX_INITIALIZER; static CFMutableDictionaryRef g_pk;   // a dedicated table (keys not shared with other side tables)
 static prog_keys_t *pk_get(const void *p, int make) {
     pthread_mutex_lock(&g_pk_mu);
@@ -721,6 +721,11 @@ int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
     memcpy(key, k->key[st], 8);
     return 1;
 }
+int prog_push0(const prog_t *p, unsigned st) {
+    if (st >= p->nstage) return -1;
+    pthread_mutex_lock(&g_pk_mu); prog_keys_t *k = g_pk ? (prog_keys_t *)CFDictionaryGetValue(g_pk, p) : NULL; int w = k ? k->pw[st] : 0; pthread_mutex_unlock(&g_pk_mu);
+    return w ? (((w - 1) * 4 + 0xf) & ~0xf) : -1;
+}
 NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData *sd) {
     prog_t *o = (prog_t *)p;
     if (n < 0 || n > 6) { LOG("[RED] ProgramSetShaders stage count %d", n); return 0; }
@@ -733,6 +738,7 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
     k->ok = 0;
     for (int i = 0; i < n; i++) {
         if (keys_hash(&sd[i], 1, k->key[i])) k->ok |= (uint8_t)(1u << i);
+        k->pw[i] = sd[i].control && nvn2_ctl(sd[i].control) ? (uint8_t)(((const uint8_t *)sd[i].control)[0xa9] + 1) : 0;
         // Diagnostic: trace the loader of selected shader keys (comma-separated hex).
         if (trace && (k->ok & (1u << i))) {
             char key[17]; for (int j = 0; j < 8; j++) snprintf(key + j * 2, 3, "%02x", k->key[i][j]);
@@ -754,7 +760,8 @@ NVN(nvnSyncInitialize, NVNboolean, NVNsync *s, NVNdevice *d) { (void)d; *(sync_t
 NVN(nvnSyncFinalize, void, NVNsync *s) { ((sync_t *)s)->magic = 0; }
 NVN(nvnSyncSetDebugLabel, void, NVNsync *s, const char *l) { (void)s; (void)l; }
 // Fence = "all commands previously submitted to the queue have completed": record the fence value of the most recent submit
-NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)q; (void)c; (void)f; ((sync_t *)s)->fenced = 1; ((sync_t *)s)->fence = mtl_last_fence(); }
+// A fence covers its own queue's work. NVN2: as on the console, not the other queues' too: Mario Kart World submits on three, and its main thread waited out each one's work on a sync fenced on another
+NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)c; (void)f; static int api[2] = {-1, -1}; if (api[0] < 0) nvn_api(api); ((sync_t *)s)->fenced = 1; ((sync_t *)s)->fence = api[0] >= 200 ? ((queue_t *)q)->lastf : mtl_last_fence(); }
 // A sync object that was never fenced waits until timeout, as on a real device; a fenced one is released only after the GPU has actually completed up to that fence value
 // A GPU-side wait on a sync: the host has a single Metal queue that executes submissions in order, so commands before the fence are always done first and nothing needs waiting. A sync not fenced yet (fenced later by another thread) is not waited for here; logged once
 NVN(nvnQueueWaitSync, NVNboolean, NVNqueue *q, const NVNsync *s) { (void)q; static int once; if (!((const sync_t *)s)->fenced && !once++) LOG("[nvn] QueueWaitSync: the sync object has no fence yet, the host does not wait"); return 1; }
@@ -771,6 +778,7 @@ NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     int (*w)(uint64_t, uint64_t) = o->fenced == 2 ? mtl_wait_acq : mtl_wait;
     if (w(o->fence, 0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
     uint64_t t0 = now_ns(); int ok = w(o->fence, timeout); atomic_fetch_add(&g_sync_ns, now_ns() - t0);   // the frame's blocked SyncWait time (@sync_ms)
+    if (!ok && timeout >= 1000000000ull) { void mtl_fence_report(uint64_t); mtl_fence_report(o->fence); }   // a wait of a second or more that timed out: the game may abort on it (PRAGMATA)
     return ok ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
 }
 NVN(nvnEventBuilderSetDefaults, void, NVNeventBuilder *b) { memset(b, 0, sizeof(ev_builder_t)); }
@@ -806,6 +814,12 @@ NVN(nvnQueueBuilderGetQueueMemorySize, size_t, const NVNqueueBuilder *b) {
     return (o->cmd_sz + o->comp_sz + o->ctl_sz + 4095) & ~(size_t)4095;
 }
 NVN(nvnQueueBuilderSetQueueMemory, void, NVNqueueBuilder *b, void *m, size_t n) { QB(b)->mem = m; QB(b)->mem_sz = n; }
+// The builder's sizes read back (NVNboolean nvnQueueBuilderGet*MemorySize(const NVNqueueBuilder *, int *size)): PRAGMATA (SDK 20, RE Engine) asks for each after setting them and
+// aborts in its own check (nn::diag at main+0x7169400) when they come back unanswered. The host keeps no ray-tracing queue memory: its size reads 0
+NVN_NOPROTO(nvnQueueBuilderGetCommandMemorySize, NVNboolean, const NVNqueueBuilder *b, int *n) { if (n) *n = (int)QB(b)->cmd_sz; return 1; }
+NVN_NOPROTO(nvnQueueBuilderGetComputeMemorySize, NVNboolean, const NVNqueueBuilder *b, int *n) { if (n) *n = (int)QB(b)->comp_sz; return 1; }
+NVN_NOPROTO(nvnQueueBuilderGetControlMemorySize, NVNboolean, const NVNqueueBuilder *b, int *n) { if (n) *n = (int)QB(b)->ctl_sz; return 1; }
+NVN_NOPROTO(nvnQueueBuilderGetRayTracingMemorySize, NVNboolean, const NVNqueueBuilder *b, int *n) { (void)b; if (n) *n = 0; return 1; }
 NVN(nvnQueueInitialize, NVNboolean, NVNqueue *q, const NVNqueueBuilder *b) {
     NVNdevice *d = ((const queue_builder_t *)b)->dev;
     // NVN emits SET_WINDOW_ORIGIN / FLIP_Y into the queue's initial GPU state.
@@ -1158,7 +1172,10 @@ NVN(nvnCommandBufferDrawArrays, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, 
 // issues a Metal indirect draw from the pool buffer instead of reading it at record or replay time (nvn_mtl.m draw)
 // NVN2 mesh shading: count task workgroups from first, or mesh workgroups in a program with no task shader (nvn_geometry.inc mesh_tasks_draw)
 NVN_NOPROTO(nvnCommandBufferDrawMeshTasks, void, NVNcommandBuffer *c, int first, int count) { rec_draw(c, (p_draw){DM_PRIM_MESH_TASKS, first, count, 1, 0, 0}); }
-// Indirect: the record {count, first} is written by the GPU's culling earlier in the frame (Ocarina of Time: zeros at record time): nvn_geometry.inc mesh_tasks_draw
+// DrawMeshTasksIndirect: as DrawMeshTasks, with a record at ind that GPU culling usually writes earlier in the frame. It was read as DrawArraysIndirect's {count, instances, first,
+// base instance} (Eden's NX2 notes, row 89: the draw's vertex count is the workgroup count), which took PRAGMATA's {c, 1, 1} records as first = 1 and drew its cluster lists one
+// slot late (the title terrain flicker). The host now reads each record type it has proven ({c, 1, 1}, {c, 0, 1}: c workgroups from 0) and keeps the old reading for the others
+// (nvn_geometry.inc mti_run, DM_NVN_MESH_INDIRECT). PRAGMATA draws its whole 3D scene this way and no direct mesh draw at all; Ocarina of Time's culling writes zeros at record time
 NVN_NOPROTO(nvnCommandBufferDrawMeshTasksIndirect, void, NVNcommandBuffer *c, NVNbufferAddress ind) { rec_draw(c, (p_draw){DM_PRIM_MESH_TASKS, 0, 0, 1, 0, ind}); }
 // Variable rate shading: the image, its palettes and their mode ask the hardware to shade some tiles at a coarser rate. Metal's render passes have no per-tile rate (a rasterization rate
 // map resamples the whole target), and shading every pixel is the most a rate can ask, so these change no result but its sharpness: nothing is recorded
@@ -1343,6 +1360,7 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
     for (int i = 0; i < n; i++) { mtl_exec_rest((const uint64_t *)h + i + 1, n - i - 1); mtl_exec((const uint8_t *)h[i]); }
     mtl_exec_rest(NULL, 0);
     mtl_sub_commit();
+    ((queue_t *)q)->lastf = mtl_last_fence();
     pthread_mutex_unlock(&g_sub_mu);
     uint64_t dw = now_ns() - t0;
     atomic_fetch_add(&g_nvn_ns, dw); atomic_fetch_add(&g_sub_wall_ns, dw);
@@ -1407,6 +1425,11 @@ NVN(nvnWindowBuilderSetTextures, void, NVNwindowBuilder *b, int n, NVNtexture *c
 }
 NVN(nvnWindowBuilderSetPresentInterval, void, NVNwindowBuilder *b, int v) { WB(b)->interval = v; }
 NVN(nvnWindowBuilderGetPresentInterval, int, const NVNwindowBuilder *b) { return WB(b)->interval; }   // Yoshi and the Mysterious Book (Unreal Engine 5.4) reads it back
+NVN(nvnWindowBuilderGetNativeWindow, NVNnativeWindow, const NVNwindowBuilder *b) { return ((const win_builder_t *)b)->native; }
+NVN_NOPROTO(nvnWindowBuilderGetDevice, NVNdevice *, const NVNwindowBuilder *b) { return ((const win_builder_t *)b)->dev; }
+NVN_NOPROTO(nvnWindowBuilderGetNumTextures, int, const NVNwindowBuilder *b) { return ((const win_builder_t *)b)->ntex; }
+NVN_NOPROTO(nvnWindowBuilderGetTexture, NVNtexture *, const NVNwindowBuilder *b, int i) { const win_builder_t *w = (const win_builder_t *)b; return i >= 0 && i < w->ntex ? w->tex[i] : NULL; }
+NVN_NOPROTO(nvnWindowBuilderGetNumActiveTextures, int, const NVNwindowBuilder *b) { return ((const win_builder_t *)b)->ntex; }   // the host rotates through all of them (SetNumActiveTextures)
 NVN(nvnWindowInitialize, NVNboolean, NVNwindow *w, const NVNwindowBuilder *b) {
     const win_builder_t *s = (const win_builder_t *)b; win_t *o = (win_t *)w;
     memset(o, 0, sizeof *o); o->magic = MAGIC('W', 'I', 'N', 'D'); o->native = s->native; o->ntex = s->ntex; o->interval = s->interval;
@@ -1483,7 +1506,9 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     // The previous present of this texture has not yet been processed by the present thread (display cannot keep up, a whole swapchain round behind): wait for it to be returned, then hand it to the game to draw
     uint64_t tk = *idx < 4 ? o->ticket[*idx] : 0;
     if (tk) { uint64_t w0 = now_ns(); mtl_present_wait(tk); g_pq_wait_ns += now_ns() - w0; }
-    if (s) { ((sync_t *)s)->fenced = 2; ((sync_t *)s)->fence = mtl_last_fence(); }   // The swapchain texture becomes available once the commits before this point have completed (fenced 2: an acquire sync, for the wait ledger)
+    // The swapchain texture becomes available once the commits before this point have completed (fenced 2: an acquire sync, for the wait ledger). NVN2: once those before its own last present have, as on the console. Waiting for
+    // everything made Mario Kart World's main thread wait out each frame's GPU work before starting the next, and its frame-time controller (main+0x69cbb0) settled at 30 fps
+    if (s) { static int api[2] = {-1, -1}; if (api[0] < 0) nvn_api(api); ((sync_t *)s)->fenced = 2; ((sync_t *)s)->fence = api[0] >= 200 ? (*idx < 4 ? o->pfence[*idx] : 0) : mtl_last_fence(); }
     if (!g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; }   // the frame starts when the first acquire after a present returns: on a display-link tick when on time
     return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
 }
@@ -1982,6 +2007,21 @@ static void fstep_tick(const win_t *o, int c) {
         t0 = t; v0 = vs; memset(held, 0, sizeof held);
     }
 }
+// Without the frame step, the game paces itself by its present interval: every 1800 presents, the vsyncs its frames asked for (the interval of each, 1 in display mode) against
+// real time. 1.000 = each frame was held for its interval on average, as on the Switch; for a game whose time step is its interval (Donkey Kong Bananza: fps = 60 / interval,
+// BotW's VFR: interval / 2) it is the game's speed. Hitches (a frame over 50 ms per vsync it asked for: a screenshot, a load) are counted, and the ratio without their excess given
+static void itv_tick(const win_t *o) {
+    static uint64_t t0, prev, vs, n[4], hitch, hitch_ns;
+    int k = present_itv(o); uint64_t t = now_ns();
+    if (prev && t - prev > 50000000ull * (uint64_t)k) { hitch++; hitch_ns += t - prev - (uint64_t)k * 1000000000ull / 60; }
+    prev = t;
+    if (t0) { vs += (uint64_t)k; n[k < 3 ? k : 3]++; }
+    if (o->presents % 1800) return;
+    if (t0) { double gs = vs / 60.0, w = (t - t0) / 1e9, wh = w - hitch_ns / 1e9;
+        LOG("[nvn] present interval: %.2f s of vsyncs asked in %.2f s (%.3f of real time, %.3f without %llu hitches); frames at interval 1 / 2 / 3+ %llu / %llu / %llu",
+            gs, w, gs / w, wh > 0 ? gs / wh : 0, (unsigned long long)hitch, (unsigned long long)n[1], (unsigned long long)n[2], (unsigned long long)n[3]); }
+    t0 = t; vs = hitch = hitch_ns = 0; memset(n, 0, sizeof n);
+}
 // The crop a present shows: the window's own (nvnWindowSetCrop), else the vi layer's (vi::SetLayerCrop, hle_vi.c); on the Switch both become the crop of the buffer queued to the layer.
 // Link's Awakening crops only its layer: in handheld mode it draws 1280x720 into its 1920x1080 window textures and crops the layer to that. A layer crop that does not fit the
 // texture is reported once and the whole texture shown, as before the layer crop was read here. lc receives the layer crop
@@ -2007,6 +2047,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     dm_fps_lock_tick();   // after the frame step: at 120 fps the target follows the hold just decided
     static uint64_t prev_in, prev_out, prev_pass, prev_draw;
     present_cfg(o);
+    if (!c) itv_tick(o);
     {
         // Test switch DM_TEST_PRESENT_LAG=every N presents,milliseconds[,presents in a row][;…]: sleep that long before the Nth, 2Nth… present (and the ones after it in the run), imitating an occasional slow frame on a phone (Mario 1.2.1 then sets present interval 2; checks that the display link holds frames by interval),
         // or with a run of 3 a hitch that steps the frame step up ("1,10;1200,30,3": 10 ms more on every frame, and 30 more on three in a row every 1,200). Not set in the product
@@ -2029,7 +2070,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     if (idx >= 0 && idx < o->ntex && idx < 4) {   // enqueue only, return immediately
         const tex_t *t = CTX(o->tex[idx]); int lc[4]; const int *crop = present_crop(o->crop, (int)t->d.width, (int)t->d.height, lc);
         nvn_cap_present(t, crop);   // DM_NVN_CAPTURE (nvn_capture.inc)
-        o->ticket[idx] = mtl_present(t, present_period(o) / 1e9, crop);
+        o->ticket[idx] = mtl_present(t, present_period(o) / 1e9, crop); o->pfence[idx] = mtl_last_fence();
     }
     gfx_leave();
     atomic_fetch_add(&g_nvn_ns, now_ns() - t0);
@@ -2138,7 +2179,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
 
 // ---------- State-only interfaces used by newer-SDK games (SMBW): buffer objects, pool / sampler / texture queries, views, color state, device and window ----------
 // They only read and write the object itself and record no commands. Where the host has no matching capability (texture channel swizzle, depth / stencil sampling mode, sampler reduction, virtual mapping) the first occurrence logs one line and the call returns normally.
-#define ONCE_LOG(...) do { static int once_; if (!once_++) LOG("[nvn] " __VA_ARGS__); } while (0)
+#define ONCE_LOG(...) do { static int once_; if (!once_) { once_ = 1; LOG("[nvn] " __VA_ARGS__); } } while (0)   // a set flag: a count overflows on a call made every frame
 
 // Buffer object = pool + offset + size; the GPU address and the CPU mapping are both the pool's host pointer + offset (same convention as MemoryPoolGetBufferAddress)
 typedef struct { NVNdevice *dev; const pool_t *pool; int64_t off; uint64_t size; } buf_builder_t;   FITS(buf_builder_t, NVNbufferBuilder);
@@ -2211,8 +2252,8 @@ _Static_assert(sizeof(map_req) == 0x28, "NVNmappingRequest");
 // sparse. OCTOPATH TRAVELER (Unreal Engine 4) gives each streamed texture a virtual pool of its own (0x20000 to 0x560000 bytes, flags 0x2a1), creates the texture in it, maps its mip
 // tail from a 4 MB physical pool and later the higher mips from other pages of it, after writing their texels there on the CPU: aliased, the texture had no storage (created before any
 // mapping) and the later mappings were refused (`[RED] MapVirtual: non-contiguous mapping`). A pool larger than the application pool is sparse from the start
-enum { NVRUN = 1024, VPT_LEAF = 512 };   // a page-table leaf covers 2 MB
-typedef struct { const uint8_t *phys; uint64_t gen; } vpte;
+enum { NVRUN = 16384, VPT_LEAF = 512 };   // a page-table leaf covers 2 MB. NVRUN: mapped runs per sparse pool (PRAGMATA maps one 1 GB pool in more than 1024 pieces by its title screen)
+typedef struct { const uint8_t *phys; uint64_t gen; uint32_t live; } vpte;   // live (DM_NVN_SPARSE_SAFE): the page has been mapped and may still be under a zero-copy buffer the GPU uses
 struct vpool { const pool_t *pool; uint8_t *base; uint64_t len, size, top; int nrun; struct { uint64_t lo, hi; } run[NVRUN]; vpte **pt; struct vlog_ent *log; _Atomic uint64_t nlog; };   // len: reserved; size: the pool's; top: highest mapped end so far (logged per 128 MB)
 struct vlog_ent { uint64_t off, len; };   // a mapping request: the pool's change log (nvn_sparse_log_read), kept once a placement sparse texture asks for it
 enum { VLOG_N = 4096 };
@@ -2241,28 +2282,64 @@ static uint8_t *vpool_reserve(pool_t *o) {   // → the reserved range, or NULL
     if (o->vmode == 2) LOG("[nvn] virtual pool %p (%#llx bytes, flags %#x): sparse, own address range %p+%#llx, physical pages are remapped into it", (const void *)o, (unsigned long long)o->size, o->flags, a, (unsigned long long)len);
     return a;
 }
+// DM_NVN_SPARSE_SAFE: a dropped pool's reservation is unmapped once the work submitted so far has completed: its runs' buffers leave the residency set only at their deferred
+// release (fence last + 1), and inaccessible pages under a resident buffer are what IOGPU's prepare and the GPU fault on (found by replaying the host's mapping events on the CPU).
+// Caller holds g_vp_mu; worked through with the deferred unmaps (vunmap_run)
+static struct { uint8_t *base; uint64_t len, fence; int64_t up; } g_vmun[256]; static int g_nvmun;
+static void vmunmap_defer(uint8_t *base, uint64_t len) {
+    if (g_nvmun == 256) { mtl_finish(); for (int i = 0; i < g_nvmun; i++) munmap(g_vmun[i].base, g_vmun[i].len); g_nvmun = 0; }   // full: wait and release them all
+    g_vmun[g_nvmun++] = (typeof(g_vmun[0])){base, len, mtl_last_fence() + 1, mtl_up_seq_now()};
+}
+static void vmunmap_run(void) { uint64_t done = mtl_done_fence(); for (int i = 0; i < g_nvmun; ) { if (g_vmun[i].fence <= done && !mtl_up_busy_through(g_vmun[i].up)) { munmap(g_vmun[i].base, g_vmun[i].len); g_vmun[i] = g_vmun[--g_nvmun]; } else i++; } }
 static void vpool_drop(pool_t *o) {   // caller holds g_vp_mu
     struct vpool *v = o->vp; if (!v) return;
     for (int k = 0; k < v->nrun; k++) mtl_pool_del(v->base + v->run[k].lo);
-    munmap(v->base, v->len);
+    if (mtl_sparse_safe()) vmunmap_defer(v->base, v->len); else munmap(v->base, v->len);   // the runs' buffers stay resident until their deferred release, after the next submission
     for (uint64_t l = 0; l < (v->size + (2u << 20) - 1) >> 21; l++) free(v->pt[l]);
     for (int i = 0; i < g_nvp; i++) if (g_vp[i] == v) { g_vp[i] = g_vp[--g_nvp]; break; }
     free(v->pt); free(v->log); free(v); o->vp = NULL;
 }
-static void vpool_release(pool_t *o) { pthread_mutex_lock(&g_vp_mu); vpool_drop(o); pthread_mutex_unlock(&g_vp_mu); }
+static _Atomic uint64_t g_vp_kept, g_vp_waits;   // DM_NVN_SPARSE_SAFE: unmaps that kept their pages; mapping changes that waited for the GPU first
+// Pool finalize: the reservation goes (munmap) with its runs' buffers. With DM_NVN_SPARSE_SAFE the GPU finishes the work submitted so far first: the buffers' deferred release
+// keeps them alive for that work, but not the pages under them
+static void vunmap_run(int all); static int g_nvun;   // the deferred unmaps (below)
+static void vpool_release(pool_t *o) { if (mtl_sparse_safe() && o->vp && o->vp->nrun) { mtl_finish(); atomic_fetch_add(&g_vp_waits, 1); } pthread_mutex_lock(&g_vp_mu); if (g_nvun) vunmap_run(0); vpool_drop(o); pthread_mutex_unlock(&g_vp_mu); }
+static const vpte *vpt_get(const struct vpool *v, uint64_t o);
+// DM_NVN_SPARSE_SAFE: does a mapping request put new pages under pages mapped before (vm_remap overwriting what a live buffer may wrap)? Caller holds g_vp_mu
+static int vpool_overwrites(const struct vpool *v, const map_req *r) {
+    if (!r->phys || r->voff < 0 || (uint64_t)r->voff + r->size > v->size) return 0;
+    for (uint64_t o = 0; o < r->size; o += 0x1000) { const vpte *e = vpt_get(v, (uint64_t)r->voff + o); if (e && e->live) return 1; }
+    return 0;
+}
 // Mapped runs of a sparse pool: [lo, hi) sorted, disjoint, adjacent runs merged. Caller holds g_vp_mu
+// DM_NVN_VRUN_MAX=<n>: a smaller run table (A/B against the 1024 of before). When the table is full, the request changes nothing: before, the runs a new mapping
+// merged with were taken out of the host's pool lookup and the merged run never put back, so buffers in them resolved to another range (PRAGMATA's title terrain
+// read an empty instance buffer through its mesh stage)
+static int vrun_cap(void) { static int c; if (!c) { const char *e = getenv("DM_NVN_VRUN_MAX"); c = e && atoi(e) > 0 && atoi(e) < NVRUN ? atoi(e) : NVRUN; } return c; }
+static void vrun_set_(struct vpool *v, uint64_t lo, uint64_t hi, int mapped);
 static void vrun_set(struct vpool *v, uint64_t lo, uint64_t hi, int mapped) {
-    uint64_t nl[NVRUN][2]; int nn = 0; uint64_t mlo = lo, mhi = hi;
-    for (int k = 0; k < v->nrun; k++) {
+    mtl_pool_update_begin(); vrun_set_(v, lo, hi, mapped); mtl_pool_update_end();   // lookups and the pool table see the runs before or after, never between
+}
+static void vrun_set_(struct vpool *v, uint64_t lo, uint64_t hi, int mapped) {
+    static uint64_t nl[NVRUN + 2][2]; int nn = 0, cap = vrun_cap(); uint64_t mlo = lo, mhi = hi;   // caller holds g_vp_mu
+    for (int k = 0; k < v->nrun; k++) {   // the new list first, with no effect on the lookup
         uint64_t a = v->run[k].lo, b = v->run[k].hi;
-        if (b < lo || a > hi || (!mapped && (b == lo || a == hi))) { if (nn < NVRUN) { nl[nn][0] = a; nl[nn][1] = b; nn++; } continue; }   // untouched (an unmap leaves adjacent runs alone)
-        mtl_pool_del(v->base + a);
+        if (b < lo || a > hi || (!mapped && (b == lo || a == hi))) { if (nn <= cap) { nl[nn][0] = a; nl[nn][1] = b; } nn++; continue; }   // untouched (an unmap leaves adjacent runs alone)
         if (mapped) { if (a < mlo) mlo = a; if (b > mhi) mhi = b; continue; }   // joins the new run
-        if (a < lo && nn < NVRUN) { nl[nn][0] = a; nl[nn][1] = lo; nn++; mtl_pool_add(v->base + a, lo - a); }   // what the unmap leaves on either side
-        if (b > hi && nn < NVRUN) { nl[nn][0] = hi; nl[nn][1] = b; nn++; mtl_pool_add(v->base + hi, b - hi); }
+        if (a < lo) { if (nn <= cap) { nl[nn][0] = a; nl[nn][1] = lo; } nn++; }   // what the unmap leaves on either side
+        if (b > hi) { if (nn <= cap) { nl[nn][0] = hi; nl[nn][1] = b; } nn++; }
     }
-    if (mapped && nn < NVRUN) { nl[nn][0] = mlo; nl[nn][1] = mhi; nn++; mtl_pool_add(v->base + mlo, mhi - mlo); }
-    if (nn == NVRUN) LOG("[RED] virtual pool %p: more than %d separate mapped runs", (const void *)v->pool, NVRUN);
+    if (mapped) { if (nn <= cap) { nl[nn][0] = mlo; nl[nn][1] = mhi; } nn++; }
+    if (nn > cap) { static int lines; if (lines++ < 8) LOG("[RED] virtual pool %p: more than %d separate mapped runs; mapping request [%#llx, %#llx) not tracked", (const void *)v->pool, cap, (unsigned long long)lo, (unsigned long long)hi); return; }
+    int grown = 0;   // the merged run is the run that started at mlo, grown at its end by pages it did not hold (only new pages: a buffer over remapped ones would read the old ones)
+    for (int k = 0; k < v->nrun; k++) {   // then the lookup: old runs out, new ones in
+        uint64_t a = v->run[k].lo, b = v->run[k].hi;
+        if (b < lo || a > hi || (!mapped && (b == lo || a == hi))) continue;
+        if (mapped && a == mlo && lo >= b && mtl_pool_extend(v->base + a, mhi - mlo)) { grown = 1; continue; }
+        mtl_pool_del(v->base + a);
+        if (!mapped) { if (a < lo) mtl_pool_add(v->base + a, lo - a); if (b > hi) mtl_pool_add(v->base + hi, b - hi); }
+    }
+    if (mapped && !grown) mtl_pool_add(v->base + mlo, mhi - mlo);   // a large pool grown at its end keeps its entry (mtl_pool_extend)
     for (int a = 1; a < nn; a++) for (int b = a; b > 0 && nl[b][0] < nl[b - 1][0]; b--) { uint64_t t0 = nl[b][0], t1 = nl[b][1]; nl[b][0] = nl[b - 1][0]; nl[b][1] = nl[b - 1][1]; nl[b - 1][0] = t0; nl[b - 1][1] = t1; }
     v->nrun = nn; for (int k = 0; k < nn; k++) { v->run[k].lo = nl[k][0]; v->run[k].hi = nl[k][1]; }
 }
@@ -2275,7 +2352,35 @@ static void vpt_set(struct vpool *v, uint64_t voff, uint64_t size, const uint8_t
         vpte **l = &v->pt[(voff + o) >> 21];
         if (!*l && !phys) continue;   // never mapped: stays unmapped
         if (!*l && !(*l = calloc(VPT_LEAF, sizeof **l))) die("sparse pool page table allocation failed");
-        (*l)[((voff + o) >> 12) & (VPT_LEAF - 1)] = (vpte){phys ? phys + o : NULL, gen};
+        vpte *e = &(*l)[((voff + o) >> 12) & (VPT_LEAF - 1)]; *e = (vpte){phys ? phys + o : NULL, gen, phys ? 1u : e->live};
+    }
+}
+static const vpte *vpt_get(const struct vpool *v, uint64_t o);
+// DM_NVN_SPARSE_SAFE: a sparse unmap keeps its pages until the work submitted so far has completed (the fence after which the run's zero-copy buffer leaves the residency set, deferred
+// release), then makes them inaccessible as before, unless a newer request has mapped them meanwhile (the page table's generation has moved on). Until then a mapping over them waits for the
+// GPU first (vpool_overwrites); after it, they are plain unmapped pages again (no wait). Caller holds g_vp_mu. The queue is worked through on later MapVirtual calls and at pool finalize
+enum { VUNMAP_N = 4096 };
+static struct { struct vpool *v; uint64_t off, len, gen, fence; int64_t up; } g_vun[VUNMAP_N];   // up: the newest upload batch begun at the unmap (a deswizzle may read the pages through the run's buffer) static int g_nvun;
+static _Atomic uint64_t g_vp_released, g_vp_unmap_lost;
+static void vunmap_defer(struct vpool *v, uint64_t off, uint64_t len) {
+    if (g_nvun == VUNMAP_N) { atomic_fetch_add(&g_vp_unmap_lost, 1); return; }   // full: these pages stay kept (safe; a later mapping over them waits)
+    g_vun[g_nvun++] = (typeof(g_vun[0])){v, off, len, atomic_load(&g_vp_gen), mtl_last_fence() + 1, mtl_up_seq_now()};
+}
+static void vunmap_run(int all) {   // caller holds g_vp_mu; all: the pool is going (the GPU has finished, see vpool_release)
+    uint64_t done = mtl_done_fence(), pg = (uint64_t)getpagesize();
+    for (int i = 0; i < g_nvun; ) {
+        if (!all && (g_vun[i].fence > done || mtl_up_busy_through(g_vun[i].up))) { i++; continue; }   // and the upload batches begun before the unmap
+        struct vpool *v = g_vun[i].v; uint64_t off = g_vun[i].off, len = g_vun[i].len, gen = g_vun[i].gen;
+        int alive = 0; for (int k = 0; k < g_nvp && !alive; k++) alive = g_vp[k] == v;
+        g_vun[i] = g_vun[--g_nvun];
+        if (!alive) continue;
+        for (uint64_t a = (off + pg - 1) & ~(pg - 1); a + pg <= off + len && a + pg <= v->len; a += pg) {   // whole host pages only, none mapped since
+            int ok = 1; for (uint64_t q = 0; q < pg && ok; q += 0x1000) { vpte *e = (vpte *)vpt_get(v, a + q); ok = !e || (!e->phys && e->gen <= gen); }
+            if (!ok) continue;
+            if (mmap(v->base + a, pg, PROT_NONE, MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0) == MAP_FAILED) continue;
+            for (uint64_t q = 0; q < pg; q += 0x1000) { vpte *e = (vpte *)vpt_get(v, a + q); if (e) e->live = 0; }
+            atomic_fetch_add(&g_vp_released, 1);
+        }
     }
 }
 static int vpool_map(struct vpool *v, const map_req *r) {   // caller holds g_vp_mu; → 0 on failure
@@ -2291,6 +2396,13 @@ static int vpool_map(struct vpool *v, const map_req *r) {   // caller holds g_vp
         static _Atomic uint64_t n; if (!atomic_fetch_add(&n, 1)) LOG("[nvn] virtual pool %p: a request %s (%s %#llx+%#llx) is kept in the page table only: textures read it, the GPU cannot address it (later cases are not logged)",
                                                                    (const void *)v->pool, (uint64_t)r->voff + r->size > v->len ? "beyond the reservation" : "not aligned to the host page", r->phys ? "map" : "unmap", (unsigned long long)r->voff, (unsigned long long)r->size);
         return 1;
+    }
+    if (!r->phys && mtl_sparse_safe()) {   // unmap, DM_NVN_SPARSE_SAFE: the pages stay as they are (the page table says unmapped, so textures read 0). A zero-copy buffer made over them
+        // (the run's, a large chunk, an alias) may still be in the residency set or in submitted work until its deferred release; inaccessible pages under it are a GPU page fault, or a
+        // failed IOGPU prepare when it is wired again (PRAGMATA's tower-ring hang and the kernel panic that followed it)
+        atomic_fetch_add(&g_vp_kept, 1);
+        vrun_set(v, (uint64_t)r->voff, (uint64_t)r->voff + r->size, 0);
+        vunmap_defer(v, (uint64_t)r->voff, r->size); return 1;
     }
     if (!r->phys) {   // unmap: inaccessible pages again
         if (mmap((void *)to, r->size, PROT_NONE, MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0) == MAP_FAILED) { LOG("[RED] virtual pool unmap %#lx+%#llx failed (errno %d)", (unsigned long)to, (unsigned long long)r->size, errno); return 0; }
@@ -2315,6 +2427,13 @@ NVN(nvnMemoryPoolMapVirtual, NVNboolean, NVNmemoryPool *p, int n, const NVNmappi
         else o->vmode = 2;
     }
     struct vpool *v = o->vmode == 2 ? vpool_of(o) : NULL; int ok = 1;
+    if (g_nvun) vunmap_run(0);   // DM_NVN_SPARSE_SAFE: pages kept by earlier unmaps whose work has completed
+    if (g_nvmun) vmunmap_run();   // and reservations of dropped pools
+    if (v && mtl_sparse_safe()) {   // new pages over ones mapped before: the GPU may still read the old ones through a buffer made over them, so let the submitted work finish first
+        int over = 0; for (int i = 0; i < n && !over; i++) over = vpool_overwrites(v, &r[i]);
+        if (over) { pthread_mutex_unlock(&g_vp_mu); mtl_finish(); uint64_t w = atomic_fetch_add(&g_vp_waits, 1) + 1; pthread_mutex_lock(&g_vp_mu); v = o->vmode == 2 ? vpool_of(o) : NULL;
+            if (w == 1 || w % 256 == 0) LOG("[nvn] DM_NVN_SPARSE_SAFE: %llu mapping requests over pages that may be under a live buffer waited for the GPU first (%llu unmaps deferred, %llu host pages released after their work, %d still queued, %llu kept for good: queue full)", (unsigned long long)w, (unsigned long long)atomic_load(&g_vp_kept), (unsigned long long)atomic_load(&g_vp_released), g_nvun, (unsigned long long)atomic_load(&g_vp_unmap_lost)); }
+    }
     for (int i = 0; v && i < n && ok; i++) ok = vpool_map(v, &r[i]);
     pthread_mutex_unlock(&g_vp_mu);
     if (v) return (NVNboolean)ok;
@@ -2503,6 +2622,8 @@ NVN(nvnDeviceSetIntermediateShaderCache, void, NVNdevice *d, int n) { (void)d; (
 // Window: number of active swapchain textures (the host rotates through the count given at creation; logged once)
 NVN_NOPROTO(nvnWindowBuilderSetNumActiveTextures, void, NVNwindowBuilder *b, int n) { (void)b; ONCE_LOG("WindowBuilderSetNumActiveTextures %d (the host rotates through the SetTextures count)", n); }
 NVN_NOPROTO(nvnWindowSetNumActiveTextures, void, NVNwindow *w, int n) { (void)w; ONCE_LOG("WindowSetNumActiveTextures %d (the host rotates through the SetTextures count)", n); }
+NVN_NOPROTO(nvnWindowGetNumActiveTextures, int, const NVNwindow *w) { return ((const win_t *)w)->ntex; }   // PRAGMATA; the host rotates through all of them
+NVN_NOPROTO(nvnWindowGetNumTextures, int, const NVNwindow *w) { return ((const win_t *)w)->ntex; }
 
 // Command buffer memory usage: record bytes written in this recording (accumulated across segments; the host does not use control memory, always 0); the memory callback switch is ignored.
 // It used to be cur - begin: once a recording overflowed into a host segment, cur is in host memory (an address below the guest begin) and it returned 0. SMBW asks for this value after recording each material setup handle,
@@ -2662,10 +2783,25 @@ NVN_NOPROTO(nvnCommandBufferEvaluateDlss, void, NVNcommandBuffer *c, const dlss_
 // NVN2 push constants: (command buffer, a word seen 0, byte offset, size, data). The bytes form a constant block of the graphics stages or of compute, which their shaders read
 // as c[24] (DMSH_PUSH_BANK; NVN2 compute's own c0 layout starts with them, which the translator maps there). Donkey Kong Bananza's upscaler pushes (1 / w, 1 / h, w, h) of its
 // target for its graphics passes, and two integer rectangles (source, destination) for its compute network
+// The word before the offset (w) picks the block (NVN2 compute's c0 layout has two, control +0xa9 and +0xaa words, each 16-byte aligned; dmsh_build.py nvn2_cs), and the
+// offset is within it. PRAGMATA pushes its compute shaders' storage buffer tables (the second block) with w = 1 and offsets from 0: stored at the push block's start they
+// landed over the first block, and every shader whose first block is not empty read its addresses from bytes no push had written: eef9b5086c9bcb68 / f0cb7fbfc411f868
+// (+0xa9 = 14, table at c24 + 0x40) read 0 at every dispatch, 0ec5481e336c2ea6 (+0xa9 = 1, a memset) a stale 0x2000000100000 or another shader's buffer. The replay keeps the
+// blocks apart and joins them per shader (nvn_mtl.m push_view). DM_NVN_PUSH_BLOCKS=0: every push at its offset in one block, as before
+static int push_blocks(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PUSH_BLOCKS"); v = !(e && !strcmp(e, "0")); } return v; }
 static void push_const(NVNcommandBuffer *c, int compute, uint64_t w, uint64_t off, uint64_t n, const void *data) {
-    if (w) { static int once; if (!once++) LOG("[RED] push constants with the word before the offset %#llx: its meaning is not known", (unsigned long long)w); }
+    { enum { PCL = 32 }; static struct { uint8_t c, w; uint16_t off; uint32_t n; } seen[PCL]; static int ns; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; int log = 0;
+      pthread_mutex_lock(&mu); int i = 0; for (; i < ns; i++) if (seen[i].c == compute && seen[i].w == w && seen[i].off == off && seen[i].n == n) break;
+      if (i == ns && ns < PCL) { seen[ns].c = (uint8_t)compute; seen[ns].w = (uint8_t)w; seen[ns].off = (uint16_t)off; seen[ns].n = (uint32_t)n; ns++; log = 1; } pthread_mutex_unlock(&mu);
+      if (log) LOG("[nvn] push constants: %s block word %llu, offset %#llx, %llu bytes (first of this shape; %d shapes logged at most)", compute ? "compute" : "graphics", (unsigned long long)w, (unsigned long long)off, (unsigned long long)n, PCL); }
+    // Graphics: block word k = 1..5 is constant bank 24 + k, the storage buffer table of one stage (vertex 25, hull 26 (where PRAGMATA's mesh shaders sit), domain 27, geometry 28,
+    // pixel 29), which the translator reads at c0 + 0x110 + 0x100 (k - 1) (InstEmitAmpere.cs AMapC0) and the replay fills from these bytes (nvn_mtl.m, the c0 fill). PRAGMATA pushes
+    // its pixel shaders' tables with k = 5, its vertex shaders' with 1 and its mesh shaders' with 2, offsets from 0: in the first block they overwrote c24 + 0 .. (an index at 0,
+    // a table address at 8, a count at 0x14, floats from 0x18), so its draws read their storage buffers through sizes taken for addresses (0x40000, 0x2000000, ... at c24 + 8)
+    int block = push_blocks() && w <= (compute ? 1u : 5u) ? (int)w : 0;
+    if (w && !block) { static int once; if (!once++) LOG("[RED] push constants with the word before the offset %#llx (%s): put at the offset in the first block", (unsigned long long)w, compute ? "compute" : "graphics"); }
     if (off + n > DMSH_PUSH_SIZE || !data) { static int k; if (k++ < 8) LOG("[RED] push constants at %#llx + %#llx: beyond the host's %#x-byte block, dropped", (unsigned long long)off, (unsigned long long)n, DMSH_PUSH_SIZE); return; }
-    p_push_const *r = RECN(c, OP_PUSH_CONST, p_push_const, data, n); r->compute = (uint16_t)compute; r->offset = (uint16_t)off; r->size = (uint32_t)n; memcpy(r->data, data, n);
+    p_push_const *r = RECN(c, OP_PUSH_CONST, p_push_const, data, n); r->compute = (uint8_t)compute; r->block = (uint8_t)block; r->offset = (uint16_t)off; r->size = (uint32_t)n; memcpy(r->data, data, n);
 }
 NVN_NOPROTO(nvnCommandBufferPushGraphicsConstants, void, NVNcommandBuffer *c, uint64_t w, uint64_t off, uint64_t n, const void *data) { push_const(c, 0, w, off, n, data); }
 NVN_NOPROTO(nvnCommandBufferPushComputeConstants, void, NVNcommandBuffer *c, uint64_t w, uint64_t off, uint64_t n, const void *data) { push_const(c, 1, w, off, n, data); }
@@ -2755,6 +2891,72 @@ static struct vpool *vpool_at(const void *pool, uint64_t a) {   // caller holds 
 }
 int nvn_sparse_pool(const void *pool) { return pool && ((const pool_t *)pool)->vp; }   // no lock: set at Initialize, cleared at the first mapping (an aliased pool) or Finalize; called per texture lookup
 uint64_t nvn_sparse_gen(void) { return atomic_load(&g_vp_gen); }
+// The physical address behind [a, a + n) of a sparse virtual pool, when every page of it is mapped, contiguously, from one physical range; 0 otherwise (or outside sparse pools).
+// A buffer the GPU reads whole across many separately remapped pieces gets a zero-copy buffer over the virtual range, which on the Mac does not see the pages remapped under it
+// (PRAGMATA's mesh stage instance buffer, 80 MB in a 1 GB sparse pool mapped in 64 KB pieces, read as zeros while the CPU and one-word lookups saw the records): nvn_mtl.m binds
+// the physical pool's own buffer at that offset instead. A one-entry cache per caller thread, keyed by the mapping generation
+// *vrun (may be NULL): the mapped part's length when it is one virtual run from a (any number of physical pieces) with nothing mapped after it, else 0 (nvn_sparse_vrun)
+static uint64_t sparse_phys2(uint64_t a, uint64_t n, uint64_t *mapped, uint64_t *vrun) {
+    if (vrun) *vrun = 0;
+    if (!n || !__atomic_load_n(&g_nvp, __ATOMIC_ACQUIRE)) return 0;
+    // 8 lookups kept per caller thread, valid for one mapping generation: PRAGMATA's submit thread asks for three 32-80 MB ranges in turn at the draws that bind them; with one
+    // entry every call missed and walked the range's page table page by page (8,192-20,480 pages), the host's hottest function in a CPU sample of the New Game opening
+    enum { SPC = 8 }; static __thread uint64_t ca[SPC], cn[SPC], cg[SPC], cp[SPC], cm[SPC], cv[SPC]; static __thread unsigned cnext; uint64_t gen = atomic_load(&g_vp_gen);
+    for (unsigned i = 0; i < SPC; i++) if (ca[i] == a && cn[i] == n && cg[i] == gen) { *mapped = cm[i]; if (vrun) *vrun = cv[i]; return cp[i]; }
+    uint64_t m = 0, vr = 0;
+    uint64_t res = 0; pthread_mutex_lock(&g_vp_mu);
+    for (int k = 0; k < g_nvp; k++) { const struct vpool *v = g_vp[k]; uint64_t base = (uint64_t)(uintptr_t)v->base;
+        if (a < base || a >= base + v->len) continue;
+        uint64_t o = a - base;
+        if (o + n > v->size || (o & 0xFFF)) { static int l1; if (n >= (1u << 20) && l1++ < 6) LOG("[nvn] sparse lookup %#llx+%#llx not redirected: past the pool's size %#llx or unaligned (offset %#llx)", (unsigned long long)a, (unsigned long long)n, (unsigned long long)v->size, (unsigned long long)o); break; }
+        const vpte *t0 = vpt_get(v, o); if (!t0 || !t0->phys) { static int l2; if (n >= (1u << 20) && l2++ < 6) LOG("[nvn] sparse lookup %#llx+%#llx not redirected: its first page is unmapped", (unsigned long long)a, (unsigned long long)n); break; }
+        const uint8_t *p0 = t0->phys; int ok = 1; uint64_t q = 0x1000;   // contiguous while mapped; after the first unmapped page nothing may be mapped (the GPU reads only what is)
+        for (; q < n; q += 0x1000) { const vpte *t = vpt_get(v, o + q); if (!t || !t->phys) break; if (t->phys != p0 + q) { ok = 0; break; } }
+        m = q < n ? q : n;
+        for (uint64_t r = q; ok && r < n; r += 0x1000) { const vpte *t = vpt_get(v, o + r); if (t && t->phys) ok = 0; }
+        if (ok) vr = m;
+        else {   // the virtual run: mapped pages from a on, whatever their physical places, then nothing mapped up to n
+            uint64_t r = q; for (; r < n; r += 0x1000) { const vpte *t = vpt_get(v, o + r); if (!t || !t->phys) break; }
+            uint64_t e = r; int tail = 0; for (; r < n; r += 0x1000) { const vpte *t = vpt_get(v, o + r); if (t && t->phys) { tail = 1; break; } }
+            if (!tail) vr = e < n ? e : n; }
+        if (ok) res = (uint64_t)(uintptr_t)p0;
+        else if (n >= (1u << 20)) { static int lines; static uint64_t seen[16]; int fresh = 1; for (int z = 0; z < 16; z++) if (seen[z] == a) fresh = 0;
+            if (fresh && lines < 16) { seen[lines++] = a;   // why a large lookup is not redirected: its pieces (each address once)
+            int pieces = 1; uint64_t mappedp = 0; const uint8_t *prev = NULL;
+            for (uint64_t r = 0; r < n; r += 0x1000) { const vpte *t = vpt_get(v, o + r); const uint8_t *ph = t ? t->phys : NULL; if (ph) mappedp++;
+                if (r && ph && prev && ph != prev + 0x1000) pieces++; if (r && ph && !prev) pieces++; prev = ph; }
+            LOG("[nvn] sparse lookup %#llx+%#llx not redirected: %llu of %llu pages mapped, %d contiguous pieces, first break at +%#llx (phys %p)", (unsigned long long)a, (unsigned long long)n,
+                (unsigned long long)mappedp, (unsigned long long)(n >> 12), pieces, (unsigned long long)q, (const void *)p0);
+            { char t[1200]; size_t tl = 0; const uint8_t *st = NULL, *pv = NULL; uint64_t so = 0; int np = 0;   // the pieces: virtual offset, length, physical start
+              for (uint64_t r = 0; r <= n && np < 24; r += 0x1000) { const vpte *t2 = r < n ? vpt_get(v, o + r) : NULL; const uint8_t *ph = t2 ? t2->phys : NULL;
+                  if (st && (!ph || ph != pv + 0x1000)) { tl += (size_t)snprintf(t + tl, sizeof t - tl, " +%#llx:%#llx@%p", (unsigned long long)so, (unsigned long long)(r - so), (const void *)st); np++; st = NULL; }
+                  if (ph && !st) { st = ph; so = r; } pv = ph; }
+              LOG("[nvn]   pieces:%s", t); } } }
+        break; }
+    pthread_mutex_unlock(&g_vp_mu);
+    { unsigned i = cnext++ % SPC; ca[i] = a; cn[i] = n; cg[i] = gen; cp[i] = res; cm[i] = m; cv[i] = vr; } *mapped = m; if (vrun) *vrun = vr; return res;
+}
+uint64_t nvn_sparse_phys(uint64_t a, uint64_t n, uint64_t *mapped) { return sparse_phys2(a, n, mapped, NULL); }
+// [a, a + n) of a sparse pool whose mapped part is one run of the pool's virtual range from a, possibly in several physical pieces, with nothing mapped after it: → the run's
+// mapped length (0 otherwise or outside sparse pools), and the physical address when it is also one physical piece (nvn_sparse_phys). The run has a zero-copy buffer of its own,
+// made over the virtual range after its last remap (vrun_set), which does see the physical pages; nvn_mtl.m sparse_redirect looks up only the mapped length so that the lookup
+// lands on it instead of an older, larger entry made before the remaps (PRAGMATA's title terrain: its mesh stage's instance, cluster and vertex buffers in 2 to 9 pieces read zeros)
+// *run: the host address of that run's start, the key of its buffer (0 when the run table does not hold it)
+uint64_t nvn_sparse_vrun(uint64_t a, uint64_t n, uint64_t *phys, uint64_t *run) {
+    uint64_t mp = 0, vr = 0; uint64_t p = sparse_phys2(a, n, &mp, &vr); if (phys) *phys = p; if (run) *run = 0;
+    if (!vr || !run) return vr;
+    static __thread uint64_t ca, cg, cr; uint64_t gen = atomic_load(&g_vp_gen);
+    if (ca == a && cg == gen) { *run = cr; return vr; }
+    uint64_t r = 0; pthread_mutex_lock(&g_vp_mu);
+    for (int k = 0; k < g_nvp; k++) { const struct vpool *v = g_vp[k]; uint64_t base = (uint64_t)(uintptr_t)v->base;
+        if (a < base || a >= base + v->len) continue;
+        uint64_t o = a - base; int lo = 0, hi = v->nrun - 1, hit = -1;   // the last run starting at or before o
+        while (lo <= hi) { int m = (lo + hi) / 2; if (v->run[m].lo <= o) { hit = m; lo = m + 1; } else hi = m - 1; }
+        if (hit >= 0 && o + vr <= v->run[hit].hi) r = base + v->run[hit].lo;
+        break; }
+    pthread_mutex_unlock(&g_vp_mu);
+    ca = a; cg = gen; cr = r; *run = r; return vr;
+}
 uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n) {
     pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); uint64_t miss = 0;
     if (!v) { pthread_mutex_unlock(&g_vp_mu); memset(dst, 0, n); return n; }
@@ -2883,6 +3085,9 @@ NVN(nvnCommandBufferSetViewportSwizzles, void, NVNcommandBuffer *c, int first, i
     for (int i = 0; i < n; i++) for (int k = 0; k < 4; k++) r->sw[i][k] = (uint8_t)((s[4 * i + k] ^ 2 * k) & 7);
 }
 NVN(nvnCommandBufferSetAlphaRef, void, NVNcommandBuffer *c, float r) { REC(c, OP_ALPHA_REF, p_alpha_ref)->ref = r; }
+// Float render targets' blend clamping (SDK 20; PRAGMATA sets it at start): Metal blends float targets unclamped, so it is taken as the unclamped default for now
+NVN_NOPROTO(nvnCommandBufferSetFloatBlendClamp, void, NVNcommandBuffer *c, int on) { (void)c; static int logged; if (on && !logged++) LOG("[nvn] nvnCommandBufferSetFloatBlendClamp(%d): float blending stays unclamped on Metal", on); }
+NVN_NOPROTO(nvnCommandBufferSetProvokingVertexMode, void, NVNcommandBuffer *c, int mode) { (void)c; static int logged; if (mode && !logged++) LOG("[nvn] nvnCommandBufferSetProvokingVertexMode(%d): Metal keeps the first vertex as the provoking one", mode); }   // PRAGMATA
 NVN(nvnCommandBufferSetLineWidth, void, NVNcommandBuffer *c, float w) { (void)c; if (w != 1.0f) ONCE_LOG("SetLineWidth %.2f: Metal has only 1-pixel lines", w); }
 NVN(nvnCommandBufferSetPointSize, void, NVNcommandBuffer *c, float s) { (void)c; (void)s; ONCE_LOG("SetPointSize: the point size comes from the shader"); }
 NVN(nvnCommandBufferSetPrimitiveRestart, void, NVNcommandBuffer *c, uint32_t en, int idx) { *REC(c, OP_PRIM_RESTART, p_prim_restart) = (p_prim_restart){(en & 0xff) != 0, (uint32_t)idx}; }

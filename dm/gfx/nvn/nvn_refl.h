@@ -39,7 +39,7 @@ typedef struct {
     uint16_t soff;           // TEXA / SAMPA: c2 byte of a separate sampler word ORed into every element's handle (handle type 1), 0 = none; TEXU / SAMPU: byte of the other word ORed into the handle (handle type 1) + 1, in uniform slot sreg (DMSH_SREG_C2: SAMPU's sampler is the word at that c2 byte), 0 = none
     uint8_t sreg;
     uint8_t f1d;             // TEX: read by 1D integer fetches as 2D rows of 16384 texels (dmsh_build.py "fetch1d"): a buffer texture here is bound as such rows (nvn_mtl.m tbuf_as_2d)
-    uint8_t atom;            // IMG: the shader runs image atomics on it (dmsh_build.py "atomic"): the texture must allow Metal's texture atomics (nvn_mtl.m dummy_img_atomic)
+    uint8_t atom;            // IMG: the shader runs image atomics on it (dmsh_build.py "atomic"): the texture must allow Metal's texture atomics (nvn_mtl.m dummy_img_atomic); 2: 64-bit ones (texture2d<ulong>, an RG32Uint texture: pf_atomic)
     uint8_t bw;              // SAMP / SAMPT / SAMPU / SAMPI: a twin sampler for border colours (dmsh_build.py border_emu), its bit in the BORDER block + 1; 0 = an ordinary sampler binding
 } nvn_rbind;
 typedef struct {
@@ -51,6 +51,8 @@ typedef struct {
     uint16_t tg[3];          // Compute thread group size (none = 0)
     uint32_t tg_spill;       // Compute: threadgroup memory bytes per workgroup the shader takes from a device buffer at DMSH_TG_SLOT (dmsh_build.py tg_spill; 0 = none)
     struct { uint8_t reg; uint16_t word; uint32_t value; } first[4]; uint8_t nfirst;   // Stores to storage buffer words the host makes before each dispatch (dmsh_build.py first_store)
+    uint8_t loopguard;       // Compute / task: automatic loop-guard sites (dmsh_build.py LOOPGUARD, json "loopguard"; at most 255 counted): the shader reads the debug buffer at index 28,
+                             // so the host binds one there for every dispatch or draw of it, DM_NVN_LOOPCAP's or a zeroed one (off: the guard is loop_guard's plain cap); 0 = none
     uint8_t route_b, has_c1; // Route B; has a c1 constant segment
     uint8_t bindless;        // Has TEXU / SAMPU bindings (which texture is read is known only at replay time)
     uint8_t border;          // index in b of the BORDER binding + 1, 0 = none

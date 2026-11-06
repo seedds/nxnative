@@ -172,7 +172,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
         private static OperationResult GenerateAdd(CodeGenContext context, AstOperation operation)
         {
-            return GenerateBinary(context, operation, context.Delegates.FAdd, context.Delegates.IAdd);
+            return GenerateBinary(context, operation, context.Delegates.FAdd, context.Delegates.IAdd, wrapping: true);
         }
 
         private static OperationResult GenerateAtomicAdd(CodeGenContext context, AstOperation operation)
@@ -644,10 +644,21 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             }
             // Metal's texture atomics (MSL 3.1) cover buffer, 2D, 2D-array and 3D textures of
             // R32Uint / R32Sint; source 1D surfaces arrive here already normalized to 2D.
+            // nxnative: a 64-bit max / min (InstEmitSurface.EmitSuatom, Ampere SURED.U64) on an rg32ui image, value low word then high word. SPIRV-Cross has no 64-bit
+            // atomics ("MSL currently does not support 64-bit atomics"), so it is written as two 32-bit atomics of the same operation on the same texel pointer, low word
+            // first; dmsh_atomic.wide_atomics turns that pair into one texture2d<ulong>::atomic_max / atomic_min on the RG32Uint texture and fails the shader on any other
+            // access of the image. The pair is only ever a marker: it never runs as two 32-bit atomics
+            bool wide = bounded && texOp.Format == TextureFormat.R32G32Uint;
+            if (wide && (!texOp.Flags.HasFlag(TextureFlags.AtomicDiscardResult) ||
+                ((texOp.Flags & TextureFlags.AtomicMask) != TextureFlags.Minimum && (texOp.Flags & TextureFlags.AtomicMask) != TextureFlags.Maximum) ||
+                texOp.Type == SamplerType.TextureBuffer))
+            {
+                throw new NotSupportedException("Metal 64-bit image atomics support a max or min with no result on 2D/2D-array/3D images only.");
+            }
             if (bounded && (declaration.IsIndexed ||
                 (texOp.Type != SamplerType.TextureBuffer && texOp.Type != SamplerType.Texture2D &&
                  texOp.Type != (SamplerType.Texture2D | SamplerType.Array) && texOp.Type != SamplerType.Texture3D) ||
-                (texOp.Format != TextureFormat.R32Uint && texOp.Format != TextureFormat.R32Sint)))
+                (texOp.Format != TextureFormat.R32Uint && texOp.Format != TextureFormat.R32Sint && !wide)))
             {
                 throw new NotSupportedException("Metal image atomics support non-indexed 32-bit buffer/2D/2D-array/3D images only.");
             }
@@ -687,6 +698,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             }
 
             SpvInstruction value = Src(componentType);
+            SpvInstruction valueHigh = wide ? Src(componentType) : null;
 
             SpvInstruction merge = null;
             SpvInstruction valid = null;
@@ -741,6 +753,13 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 TextureFlags.CAS => context.AtomicCompareExchange(resultType, pointer, one, zero, zero, Src(componentType), value),
                 _ => context.AtomicIAdd(resultType, pointer, one, zero, value),
             };
+
+            if (wide)
+            {
+                result = (texOp.Flags & TextureFlags.AtomicMask) == TextureFlags.Minimum
+                    ? context.AtomicUMin(resultType, pointer, one, zero, valueHigh)
+                    : context.AtomicUMax(resultType, pointer, one, zero, valueHigh);
+            }
 
             if (bounded)
             {
@@ -1064,7 +1083,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
         private static OperationResult GenerateMultiply(CodeGenContext context, AstOperation operation)
         {
-            return GenerateBinary(context, operation, context.Delegates.FMul, context.Delegates.IMul);
+            return GenerateBinary(context, operation, context.Delegates.FMul, context.Delegates.IMul, wrapping: true);
         }
 
         private static OperationResult GenerateMultiplyHighS32(CodeGenContext context, AstOperation operation)
@@ -1214,7 +1233,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
         private static OperationResult GenerateSubtract(CodeGenContext context, AstOperation operation)
         {
-            return GenerateBinary(context, operation, context.Delegates.FSub, context.Delegates.ISub);
+            return GenerateBinary(context, operation, context.Delegates.FSub, context.Delegates.ISub, wrapping: true);
         }
 
         private static OperationResult GenerateSwizzleAdd(CodeGenContext context, AstOperation operation)
@@ -1227,8 +1246,11 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             SpvInstruction one = context.Constant(context.TypeFP32(), 1.0f);
             SpvInstruction minusOne = context.Constant(context.TypeFP32(), -1.0f);
             SpvInstruction zero = context.Constant(context.TypeFP32(), 0.0f);
-            SpvInstruction xLut = context.ConstantComposite(v4float, one, minusOne, one, zero);
-            SpvInstruction yLut = context.ConstantComposite(v4float, one, one, minusOne, one);
+            // nxnative: FSWZADD's per-lane operations are ADD = -a - b, SUBR = a - b, SUB = b - a, MOV2 = -b (as Eden's fswzadd_lut_a / _b and nouveau's DFDX lowering,
+            // which passes the SHFL.BFLY partner as a and the lane's own value as b). The old tables were the negation of these, so every quad derivative built from
+            // FSWZADD (Donkey Kong Bananza's TXD gradients, masks 0x99 / 0xa5 after SHFL.BFLY 1 / 2) came out with the wrong sign
+            SpvInstruction xLut = context.ConstantComposite(v4float, minusOne, one, minusOne, zero);
+            SpvInstruction yLut = context.ConstantComposite(v4float, minusOne, minusOne, one, minusOne);
 
             SpvInstruction three = context.Constant(context.TypeU32(), 3);
 
@@ -2176,11 +2198,16 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             return new OperationResult(AggregateType.S32, emitS(context.TypeS32(), context.GetS32(source)));
         }
 
+        // wrapping: an integer add, subtract or multiply, which the guest does modulo 2^32. Emitted on the unsigned type: SPIRV-Cross writes a signed
+        // OpIAdd / OpISub / OpIMul as int arithmetic, and in MSL (C++ rules) signed overflow is undefined, so the Metal compiler may assume it does not
+        // happen. It folded the signed byte extract (x * 256) >> 24 (IMAD.SHL.U32 then SHF.R.S32.HI) into x >> 16: PRAGMATA 50e310abbb05e838 read byte 2
+        // of its snorm8 words with byte 3 in it (found by an offline differential check against a SASS reference model). Unsigned arithmetic wraps
         private static OperationResult GenerateBinary(
             CodeGenContext context,
             AstOperation operation,
             Func<SpvInstruction, SpvInstruction, SpvInstruction, SpvInstruction> emitF,
-            Func<SpvInstruction, SpvInstruction, SpvInstruction, SpvInstruction> emitI)
+            Func<SpvInstruction, SpvInstruction, SpvInstruction, SpvInstruction> emitI,
+            bool wrapping = false)
         {
             IAstNode src1 = operation.GetSource(0);
             IAstNode src2 = operation.GetSource(1);
@@ -2206,6 +2233,10 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 }
 
                 return new OperationResult(AggregateType.FP32, result);
+            }
+            else if (wrapping)
+            {
+                return new OperationResult(AggregateType.U32, emitI(context.TypeU32(), context.GetU32(src1), context.GetU32(src2)));
             }
             else
             {

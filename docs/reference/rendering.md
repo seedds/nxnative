@@ -1057,6 +1057,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** after the scaler's encode, `dlss_eval` draws the input's alpha alone into the output (`copy_t2t_draw_wm` with `MTLColorWriteMaskAlpha`, bilinear when the sizes differ, the destination loaded); the output gets render-target usage for it. Formats without alpha on either side are left as they were.
 - **Found on:** Fast Fusion (040041E0212AE000; a provisional profile, no game note yet): main menu, ship select, pause menu.
 
+### DLSS scalers released under their encoders
+
+- **Symptom:** a Switch 2 game using DLSS crashes after minutes of play, at a moment it makes a DLSS network again (`[nvn] DLSS network …` and a new `DLSS: MetalFX temporal scaler …` line, for example a 1920x972 output), with `*** Terminating app due to uncaught exception 'NSInvalidArgumentException', reason: '-[AGXG17XFamilyMLContext executable]: unrecognized selector sent to instance …'` in `-[_MTL4MachineLearningCommandEncoder encodeToCommandQueue:]` under `rec_commit` / `mtl_sub_commit` (the host exits with 134).
+- **Cause:** `dlss_scaler_for` keeps one MetalFX scaler per network in 4 slots. `nvnDlssNetworkFinalize` tells the host nothing, so the slots are never freed, and the fifth network always took slot 0, dropping its scaler at once (`e->sc = nil`). The same happened when a network's sizes changed. A Metal 4 command buffer does not retain what is encoded into it: when that scaler had been encoded earlier in the same submission, the commit used a freed object. A standalone program that releases a scaler between its encode and the commit crashes the same way every time, and keeping the scaler until completion makes it pass.
+- **Fix:** a replaced scaler is held until the submission completes (`dlss_scaler_drop`, `defer_obj_release`), and a new network takes the slot used least recently. `dm/gfx/tests/t_dlss_scaler.m` checks both.
+- **Found on:** Fast Fusion (040041E0212AE000), at its 8th network, after about 9 minutes of play.
+
 ### A game's own upscaler drawn by MetalFX
 
 - **Symptom:** a Switch 2 game's frame in its heavy scenes is dominated by one compute dispatch between the render-resolution passes and the output-resolution ones: Donkey Kong Bananza's upscaler takes 3.5-5 ms of a 24 ms GPU frame on an M1 in handheld mode (960x540 → 1920x1080, `DM_NVN_GPUPROF`), and the game cannot reach its 60 fps interval there.

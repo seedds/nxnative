@@ -352,7 +352,7 @@ Under a game, "60 fps with 1.2.0" means it runs at 60 fps (30 on the console) wi
 <tr>
 <td align="center" valign="top" width="33%"><img src="docs/images/minecraft-dungeons-ii.jpg" width="256" alt="Minecraft Dungeons II"><br><small><b><a href="dm/games/0100A7C01B792000/README.md">Minecraft Dungeons II</a></b></small></td>
 <td align="center" valign="top" width="33%"><img src="docs/images/sonic-superstars.jpg" width="256" alt="Sonic Superstars"><br><small><b><a href="dm/games/01008F701C074000/README.md">Sonic Superstars</a></b></small></td>
-<td></td>
+<td align="center" valign="top" width="33%"><img src="docs/images/lollipop-chainsaw-repop.png" width="256" alt="LOLLIPOP CHAINSAW RePOP"><br><small><b><a href="dm/games/0100DD301A686000/README.md">LOLLIPOP CHAINSAW RePOP</a></b></small></td>
 </tr>
 </table>
 <!-- end of gallery -->

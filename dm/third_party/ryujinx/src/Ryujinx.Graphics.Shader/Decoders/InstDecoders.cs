@@ -926,6 +926,8 @@ namespace Ryujinx.Graphics.Shader.Decoders
         public int SrcB => (int)((_opcode >> 20) & 0xFF);
         public int Pred => (int)((_opcode >> 16) & 0x7);
         public bool PredInv => (_opcode & 0x80000) != 0;
+        public int Imm20 => (int)((_opcode >> 28) & 0xFFFFF);
+        public bool Size64 => (_opcode & 0x2000000000000) != 0;
         public int BcRz => (int)((_opcode >> 50) & 0x3);
         public bool E => (_opcode & 0x1000000000000) != 0;
     }

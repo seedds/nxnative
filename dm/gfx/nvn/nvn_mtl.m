@@ -721,7 +721,11 @@ typedef struct { uint64_t glo, ghi, cpu; const void *key; } gva_ent;
 static gva_ent *g_gva; static int g_ngva, g_gva_cap; static os_unfair_lock g_gva_lk = OS_UNFAIR_LOCK_INIT;
 static _Atomic uint64_t g_gva_min = ~0ull, g_gva_max;
 static nvn_hmap g_gva_key = {.klen = 8};   // pool start (mtl_pool_add's mem) → its GPU address, under g_gva_lk
-int mtl_gva_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_GPUVA_DIRECT"); v = e && atoi(e) ? 1 : 0; } return v; }
+int mtl_gva_on(void) {
+#ifdef DMSH_RAW_DIRECT
+    return 1;   // this chain's shaders access raw global memory at Metal's addresses: the host must hand them out
+#endif
+    static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_GPUVA_DIRECT"); v = e && atoi(e) ? 1 : 0; } return v; }
 static void gva_add(uint64_t glo, uint64_t len, uint64_t cpu, const void *key, uint64_t key_gpu) {
     os_unfair_lock_lock(&g_gva_lk);
     nvn_hm_put(&g_gva_key, &key, (void *)(uintptr_t)key_gpu);
@@ -746,6 +750,15 @@ int mtl_gva_back(uint64_t g, uint64_t *cpu) {   // a GPU address the game holds 
 }
 uint64_t mtl_pool_gva(const void *mem) { os_unfair_lock_lock(&g_gva_lk); uint64_t g = (uint64_t)(uintptr_t)nvn_hm_get(&g_gva_key, &mem); os_unfair_lock_unlock(&g_gva_lk); return g; }
 void mtl_gva_stats(int *n, uint64_t *lo, uint64_t *hi) { os_unfair_lock_lock(&g_gva_lk); *n = g_ngva; *lo = g_gva_min; *hi = g_gva_max; os_unfair_lock_unlock(&g_gva_lk); }
+// DMSH_RAW_DIRECT's write log: bit k stands for the 2 MiB chunks c with c % bits == k. The CPU ranges of the buffers that meet such a chunk, whole (the host learns pools, not pages)
+static int gva_chunk_ranges(unsigned k, unsigned bits, uint64_t (*r)[2], int max) {
+    int n = 0; os_unfair_lock_lock(&g_gva_lk);
+    for (int i = 0; i < g_ngva && n < max; i++) {
+        uint64_t first = g_gva[i].glo >> 21, last = (g_gva[i].ghi - 1) >> 21, c = first + ((k + bits - first % bits) % bits);
+        if (c <= last) { r[n][0] = g_gva[i].cpu; r[n][1] = g_gva[i].cpu + (g_gva[i].ghi - g_gva[i].glo); n++; }
+    }
+    os_unfair_lock_unlock(&g_gva_lk); return n;
+}
 static int big_key(const void *key) { for (int k = 0; k < g_nbig; k++) if (g_big[k].mem == key) return 1; return 0; }   // caller holds g_mu
 uint64_t mtl_pool_add(const void *mem, uint64_t size) {   // → the GPU address of mem under DM_NVN_GPUVA_DIRECT, else 0
     mtl_init();   // the change is recorded once the pool can be found (reg_bump below): a reader that sees the new generation sees the pool
@@ -9570,6 +9583,9 @@ static void gmem_slot_note(uint64_t *w, void *log) {
 }
 void mtl_gmem_words(uint64_t *words, uint64_t *older, uint64_t *behind) { *words = g_gmem_words; *older = g_gmem_older; *behind = g_gmem_behind; }
 static void gmem_commit_patch(void) {
+#ifdef DMSH_RAW_DIRECT
+    (void)gmem_map();   // no shader binds the table now: the pools raw global memory may reach are made resident here, before the commit, as the table's rebuild does
+#endif
     int n = g_gmem_nslots; g_gmem_nslots = 0; if (!n || !g_gmem_buf) return;
     uint64_t was = g_gmem_buf.gpuAddress; int lag = atomic_load(&g_pool_gen) != g_gmem_gen;
     id<MTLBuffer> map = gmem_map(); uint64_t cur = map.gpuAddress;
@@ -9596,7 +9612,7 @@ static uint64_t g_gml_lo[GML_MAX], g_gml_hi[GML_MAX]; static int g_gml_n, g_gml_
 static uint64_t g_gml_logs, g_gml_miss;
 static NSMutableArray<id<MTLBuffer>> *g_gml_free;
 static void gml_read(id<MTLBuffer> b, id<MTLBuffer> map, int predicted, uint64_t fence) {   // map: the table the shader used, whose entries the bits name
-    const uint32_t *w = (const uint32_t *)b.contents; const uint8_t *t = (const uint8_t *)map.contents;
+    const uint32_t *w = (const uint32_t *)b.contents; const uint8_t *t = (const uint8_t *)map.contents; (void)t;
     int added = 0, shadowed = 0; double age_lo = 1e30, age_hi = -1;
     uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC);
     int nr = 0, unchecked = 0; static uint64_t rlo[GSR_N], rhi[GSR_N];   // the shadows that relied on this submission's writes (completion handlers run one at a time)
@@ -9608,7 +9624,13 @@ static void gml_read(id<MTLBuffer> b, id<MTLBuffer> map, int predicted, uint64_t
     pthread_mutex_lock(&g_gml_mu);
     g_gml_logs++;
     for (int i = 0; i < GML_WORDS && !g_gml_over; i++) for (uint32_t bits = w[i]; bits && !g_gml_over; bits &= bits - 1) {
-        uint64_t e[2]; memcpy(e, t + (size_t)(i * 32 + __builtin_ctz(bits)) * DMSH_GMEM_MAP_ENTRY, sizeof e); { uint64_t d = e[0] - gs_back(e[0]); e[0] -= d; e[1] -= d; }
+        uint64_t er[16][2]; int ne = 1; unsigned bi = (unsigned)(i * 32 + __builtin_ctz(bits));
+#ifdef DMSH_RAW_DIRECT
+        ne = gva_chunk_ranges(bi, GML_WORDS * 32, er, 16);   // the pools whose GPU addresses meet that chunk
+#else
+        memcpy(er[0], t + (size_t)bi * DMSH_GMEM_MAP_ENTRY, sizeof er[0]); { uint64_t d = er[0][0] - gs_back(er[0][0]); er[0][0] -= d; er[0][1] -= d; }
+#endif
+        for (int q = 0; q < ne && !g_gml_over; q++) { uint64_t *e = er[q];
         int known = 0;
         for (int k = 0; k < g_gml_n && !known; k++) known = e[0] >= g_gml_lo[k] && e[1] <= g_gml_hi[k];
         if (known) continue;
@@ -9617,6 +9639,7 @@ static void gml_read(id<MTLBuffer> b, id<MTLBuffer> map, int predicted, uint64_t
         pthread_mutex_lock(&g_mu); int p = pool_find(e[0], 1); double age = p >= 0 ? (double)(now - g_pools[p].born) / 1e6 : -1; pthread_mutex_unlock(&g_mu);
         if (age >= 0) { if (age < age_lo) age_lo = age; if (age > age_hi) age_hi = age; }
         g_gml_lo[g_gml_n] = e[0]; g_gml_hi[g_gml_n++] = e[1]; added++;
+        }
     }
     // Once the prediction has begun, a pool found late is added and the prediction goes on: going back to a write anywhere until more logs agreed (8 then) made every geometry draw
     // after the stores wait for the GPU (geo_cpu_hazard), 400-2,000 ms frames for a second or more after each miss in Donkey Kong Bananza, and bought nothing, as the next late

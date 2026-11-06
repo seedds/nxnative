@@ -85,6 +85,9 @@
 // (Ryujinx GlobalToStorage.GmemLogCbOffset): a bitmap of the entries of the table bound beside it, bit i in 32-bit word i / 32. The host learns the pools from it
 #define DMSH_KIND_GMEM_LOG "gmem_log"    // that write log: the host gives each draw or dispatch its own, cleared (nvn_mtl.m gml_take)
 #define DMSH_GMEM_LOG_CB_OFFSET 1
+// Prototype (branch oot-gpuva-direct): the translator accesses raw global memory at the address itself, which the host makes Metal's own GPU address (nvn_mtl.m mtl_gva_on, DM_NVN_GPUVA_DIRECT).
+// No pool table is read; the write log's bit i stands for the 2 MiB GPU address chunks whose number is i modulo the log's bits (Ryujinx GlobalToStorage.TryGenerateRawDirectOp)
+#define DMSH_RAW_DIRECT 1
 
 // A pool binding points at a buffer the host keeps (nvn_mtl.m pool_gpu): a 32-bit bound n (the highest index the shader may read), then from DMSH_POOL_HEAD one 8-byte resource ID per ID
 #define DMSH_POOL_HEAD 16                // bytes before element 0 of a pool buffer: the bound n, 4 bytes of padding, and the 64-bit GPU address of the read bitmap: bit i in 32-bit word i / 32 is set by a shader that reads texture ID i (dmsh_build.py pool_arrays, nvn_mtl.m pool_seen_scan); 0 in a table of a uniform buffer's handles (htab_gpu), whose reads are not marked

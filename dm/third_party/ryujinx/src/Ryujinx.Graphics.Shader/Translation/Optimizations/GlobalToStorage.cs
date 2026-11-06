@@ -906,6 +906,11 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             out int functionId,
             int vectorCount = 1)
         {
+            if (RawDirect)
+            {
+                return TryGenerateRawDirectOp(gtsContext, resourceManager, gpuAccessor, operation, out functionId, vectorCount);
+            }
+
             functionId = 0;
 
             bool isSmall = IsSmallInt(operation.StorageKind);
@@ -1029,6 +1034,146 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             Operand carry = context.ConditionalSelect(context.ICompareLessUnsigned(hostLow, wordLow), Const(1), Const(0));
             Operand hostHigh = context.IAdd(context.IAdd(addrHigh, MapWord(found, 5)), carry);
 
+            Operand resultValue = EmitRawAccess(context, resourceManager, operation, isSmall, addrLow, hostLow, hostHigh, vectorCount);
+
+            if (resultValue != null)
+            {
+                context.Return(resultValue);
+            }
+            else
+            {
+                context.Return();
+            }
+
+            context.MarkLabel(lblSkip);
+
+            bool returnsValue = operation.Dest != null;
+
+            if (returnsValue)
+            {
+                context.Return(Const(0));
+            }
+            else
+            {
+                context.Return();
+            }
+
+            Function function = new(
+                ControlFlowGraph.Create(context.GetOperations()).Blocks,
+                GetFunctionName(operation, isMultiTarget: true, []) + (vectorCount > 1 ? $"RawV{vectorCount}" : "Raw"),
+                returnsValue,
+                inArgumentsCount,
+                0);
+
+            functionId = vectorCount > 1
+                ? gtsContext.AddRawVectorFunction(vectorCount, function)
+                : gtsContext.AddFunction(operation, isMultiTarget: true, [], function);
+
+            return true;
+        }
+
+        // nxnative (prototype, branch oot-gpuva-direct; dmsh_abi.h DMSH_RAW_DIRECT): the host hands the game Metal's own GPU addresses (nvn_mtl.m mtl_pool_add), so an address the shader
+        // loaded from memory is accessed as it is, with no pool table and no search: the search's registers held Ocarina of Time's raw-memory shaders at 384 threads a threadgroup on an M1 Pro,
+        // a direct access lets them reach 576. A load has no check: an Apple GPU reads 0 at an address nothing is mapped at (null, a stray CPU address), as a lookup that found no pool
+        // returned, and any branch around it (even one that only returns 0) took the 576 back to 384. A store or an atomic outside [0x10_0000_0000, 0x70_0000_0000), the range macOS
+        // keeps for the GPU's addresses, is dropped. Stores and atomics set the bit of their 2 MiB chunk in the write log (GmemLogBits bits: 16 GiB of GPU addresses before two
+        // chunks share a bit, which only makes the host learn one pool too many), which the host maps back to pools (nvn_mtl.m gml_read)
+        private static readonly bool RawDirect = true;
+        private const int GmemLogBits = 1 << GmemMapLog2;
+
+        private static bool TryGenerateRawDirectOp(
+            GtsContext gtsContext,
+            ResourceManager resourceManager,
+            IGpuAccessor gpuAccessor,
+            Operation operation,
+            out int functionId,
+            int vectorCount = 1)
+        {
+            functionId = 0;
+
+            bool isSmall = IsSmallInt(operation.StorageKind);
+
+            if (isSmall && operation.Inst.IsAtomic())
+            {
+                gpuAccessor.Log($"Global memory operation \"{operation.Inst}\" on a small integer traced to no storage buffer: not implemented.");
+                return false;
+            }
+
+            bool writes = operation.Inst == Instruction.Store || operation.Inst.IsAtomic();
+            int logBinding = 0;
+
+            if (writes && !resourceManager.TryGetStorageBufferBinding(GmemMapCbSlot, GmemLogCbOffset, write: true, out logBinding))
+            {
+                return false;
+            }
+
+            resourceManager.Properties.UsesPhysicalPointers = true;
+
+            int inArgumentsCount = operation.Inst == Instruction.AtomicCompareAndSwap ? 4 : writes ? 3 : 2;
+
+            EmitterContext context = new();
+
+            Operand addrLow = Argument(0);
+            Operand addrHigh = Argument(1);
+            Operand lblSkip = Label();
+
+            if (writes)
+            {
+                context.BranchIfFalse(lblSkip, context.ICompareLessUnsigned(context.ISubtract(addrHigh, Const(0x10)), Const(0x60)));
+
+                Operand chunk = context.BitwiseAnd(
+                    context.BitwiseOr(context.ShiftLeft(addrHigh, Const(32 - GmemHintShift)), context.ShiftRightU32(addrLow, Const(GmemHintShift))), Const(GmemLogBits - 1));
+                Operand word = context.ShiftRightU32(chunk, Const(5));
+                Operand bit = context.ShiftLeft(Const(1), context.BitwiseAnd(chunk, Const(31)));
+                Operand lblLogged = Label();
+
+                context.BranchIfTrue(lblLogged, context.ICompareNotEqual(context.BitwiseAnd(context.Load(StorageKind.StorageBuffer, logBinding, Const(0), word), bit), Const(0)));
+                context.AtomicOr(StorageKind.StorageBuffer, logBinding, Const(0), word, bit);
+                context.MarkLabel(lblLogged);
+            }
+
+            Operand hostLow = isSmall ? context.BitwiseAnd(addrLow, Const(~3)) : addrLow;   // a small integer is read or written in its 32-bit word
+            Operand resultValue = EmitRawAccess(context, resourceManager, operation, isSmall, addrLow, hostLow, addrHigh, vectorCount);
+
+            if (resultValue != null)
+            {
+                context.Return(resultValue);
+            }
+            else
+            {
+                context.Return();
+            }
+
+            context.MarkLabel(lblSkip);
+
+            bool returnsValue = operation.Dest != null;
+
+            if (returnsValue)
+            {
+                context.Return(Const(0));
+            }
+            else
+            {
+                context.Return();
+            }
+
+            Function function = new(
+                ControlFlowGraph.Create(context.GetOperations()).Blocks,
+                GetFunctionName(operation, isMultiTarget: true, []) + (vectorCount > 1 ? $"RawV{vectorCount}" : "Raw"),
+                returnsValue,
+                inArgumentsCount,
+                0);
+
+            functionId = vectorCount > 1
+                ? gtsContext.AddRawVectorFunction(vectorCount, function)
+                : gtsContext.AddFunction(operation, isMultiTarget: true, [], function);
+
+            return true;
+        }
+
+        // The access itself, at the host address {hostLow, hostHigh} of the guest address whose low word is addrLow; the value a load or an atomic returns, else null
+        private static Operand EmitRawAccess(EmitterContext context, ResourceManager resourceManager, Operation operation, bool isSmall, Operand addrLow, Operand hostLow, Operand hostHigh, int vectorCount)
+        {
             Operand resultValue = null;
 
             if (operation.Inst == Instruction.Load && vectorCount > 1)
@@ -1089,40 +1234,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 resultValue = context.Add(operation.Inst, StorageKind.GlobalMemory, Local(), hostLow, hostHigh, Argument(2));
             }
 
-            if (resultValue != null)
-            {
-                context.Return(resultValue);
-            }
-            else
-            {
-                context.Return();
-            }
-
-            context.MarkLabel(lblSkip);
-
-            bool returnsValue = operation.Dest != null;
-
-            if (returnsValue)
-            {
-                context.Return(Const(0));
-            }
-            else
-            {
-                context.Return();
-            }
-
-            Function function = new(
-                ControlFlowGraph.Create(context.GetOperations()).Blocks,
-                GetFunctionName(operation, isMultiTarget: true, []) + (vectorCount > 1 ? $"RawV{vectorCount}" : "Raw"),
-                returnsValue,
-                inArgumentsCount,
-                0);
-
-            functionId = vectorCount > 1
-                ? gtsContext.AddRawVectorFunction(vectorCount, function)
-                : gtsContext.AddFunction(operation, isMultiTarget: true, [], function);
-
-            return true;
+            return resultValue;
         }
 
         private static uint PackCbSlotAndOffset(int cbSlot, int cbOffset)

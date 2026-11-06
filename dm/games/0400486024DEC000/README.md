@@ -87,6 +87,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 - [No virtual audio input devices (SDK 22)](../../../docs/reference/audio.md#no-virtual-audio-input-devices-sdk-22)
 - [`nn::ndve`'s movie enhancement file](../../../docs/reference/shaders.md#nnndves-movie-enhancement-file)
 - [Task and mesh shaders in BNSH, and indirect mesh draws](../../../docs/reference/shaders.md#task-and-mesh-shaders-in-bnsh-and-indirect-mesh-draws)
+- [Indirect task / mesh draws on the encode thread](../../../docs/reference/rendering.md#indirect-task--mesh-draws-on-the-encode-thread): the iOS app aborted when a save loaded.
 - [F2IP](../../../docs/reference/shaders.md#f2ip)
 - [A shader that writes a whole frame through raw global memory](../../../docs/reference/frame-rate.md#a-shader-that-writes-a-whole-frame-through-raw-global-memory)
 - [Memory pools nothing gave an address to stay out of the raw pool table](../../../docs/reference/memory.md#memory-pools-nothing-gave-an-address-to-stay-out-of-the-raw-pool-table)

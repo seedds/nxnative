@@ -48,7 +48,7 @@ static void run(int target,unsigned width,unsigned height,unsigned layers,unsign
         CHECK("readback prefix guard",((uint8_t*)readback.contents)[255]==0xcd);CHECK("readback suffix guard",((uint8_t*)readback.contents)[256+bytes]==0xcd);
         uint64_t reuploads=g_pkg_reuploads;mtl_sub_begin();CHECK("unchanged storage reuses its image",tex_mtl(&t)==image);finish();CHECK("unchanged storage is not reuploaded",g_pkg_reuploads==reuploads);
     }
-    mtl_tex_release(&t);mtl_drain();nvn_dirty_remove_range(mem);mtl_pool_del(mem);mtl_drain();free(mem);free(expected);
+    mtl_tex_release(&t);mtl_drain();mtl_alias_drop_pool(&pool);nvn_dirty_remove_range(mem);mtl_pool_del(mem);mtl_drain();free(mem);free(expected);
 }
 int main(void){@autoreleasepool{
     mtl_init();CHECK("direct utility pipeline loads",g_nvn_deswz_gpu&&nvn_deswz_gpu_direct_supported(&(nvn_texdesc){.target=9,.format=NVN_FORMAT_RGBA16F,.width=16,.height=16,.depth=768,.levels=5,.samples=1}));

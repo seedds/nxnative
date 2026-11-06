@@ -133,6 +133,18 @@ class Stage(unittest.TestCase):
         self.assertIn('metal::mesh<dm_vertex_t, dm_prim_t,', src)
         self.assertRegex(src, r'p\.p0 = float4\(as_type<float>\(_23\[b \+ 192u\]\), 0\.0, 0\.0, 1\.0\);')   # after the six vertex components
 
+    def local_word(self):   # a private variable spirv-cross initializes ahead of the stage memory: the last entry of a raw global memory lookup (GlobalToStorage.TryGenerateRawStorageOp)
+        i = ms.info(control(7, payload=128, max_v=128, max_p=64), sph(0xf0, b'\x30'))
+        src = (KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4)).replace('{\n    threadgroup', '{\n    uint _9 = 0u;\n    threadgroup', 1)
+        src = src.replace('kernel void', 'static inline __attribute__((always_inline))\nvoid _5(thread uint& _10) { _10 = _10 + 1u; }\n\nkernel void', 1).replace('    if (gl_', '    _5(_9);\n    if (gl_', 1)
+        return ms.to_stage(src, i)
+
+    def test_thread_variables_stay_in_the_body(self):
+        src = self.local_word()
+        body, entries = src.split('[[mesh]] void main0(')
+        self.assertRegex(body, r'void dm_stage_body\([^)]*\)\n\{\n    uint _9 = 0u;\n    _5\(_9\);')
+        self.assertNotIn('_9', entries)
+
     def test_past_metal_refused(self):
         with self.assertRaises(ValueError): self.mesh(vertices=300)
 
@@ -146,7 +158,7 @@ class Stage(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('xcrun') and subprocess.run(['xcrun', '-sdk', 'macosx', '-f', 'metal'], capture_output=True).returncode == 0, 'no Metal compiler')
     def test_compiles(self):
-        cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0]]
+        cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0], self.local_word()]
         with tempfile.TemporaryDirectory() as d:
             for n, src in enumerate(cases):
                 f = Path(d, f's{n}.metal'); f.write_text(src)

@@ -116,6 +116,17 @@ class Store:
         self._run('PRAGMA incremental_vacuum')
         return len(gone), sum(size.get(d, 0) for d in gone)
 
+    def delete_prefix(self, prefix):
+        """Remove every entry whose name starts with prefix, and the bytes nothing names any more, giving their pages back (dmsh_build.py's staged outputs once its image is written)"""
+        with self.lock:
+            try:
+                with self.batch():
+                    self.db.execute('DELETE FROM entry WHERE name>=? AND name<?', (prefix, prefix + '\U0010ffff'))
+                    self.db.execute('DELETE FROM blob WHERE id NOT IN (SELECT blob FROM entry)')
+            except sqlite3.DatabaseError as e:
+                if not self._damage(e): raise
+        self._run('PRAGMA incremental_vacuum')
+
     def close(self):   # also folds the write-ahead log into the file, so that one file is left
         with self.lock, contextlib.suppress(sqlite3.Error): self.db.close()
 

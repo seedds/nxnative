@@ -156,6 +156,20 @@ The game may also write into an NVN object directly, without an NVN call, throug
 - **Check:** `make -C dm/gfx/tests GAME=<id> run` (`t_cpu_tex` among them). Fortune's Weave's battle map (975 draws a frame, MacBook Pro M1 Pro): pool build 1.9 → 1.2 ms, submit 52.5k → 42.8k instructions per draw.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md).
 
+### Pool tables patched instead of built whole
+
+- **Symptom:** the `[nvn-mtl] pool for handles traced to no slot` line counts thousands of builds while the game streams, and the submit thread spends milliseconds a frame walking the texture pool table again. Ocarina of Time, a seven-minute walk through Kokiri Forest: about 61,000 builds of its 33,025-entry table, 53 s in all.
+- **Cause:** `pool_gpu` walked a table whole at any change of `g_reg_gen` or `g_ser_gen`, though each change reaches only a few of its IDs: a texture or sampler registration (the game registers something between most of its draws), a memory pool added or removed (a game that maps and unmaps virtual pool runs as it streams, `vrun_set`, does so dozens of times a second), and a storage takeover (`alias_take_over`, about 8,400 in six minutes in Kokiri Forest), which bumped `g_ser_gen` with no note and so also sent every texture ID down the slow path. Past 2 ms of walks a submission (`POOL_SUB_MS`) a table stood until the next one, so reads of what had changed found the dummy for the rest of it. A table that held a view of a retired registration (a finalized texture whose descriptor is still registered) was also kept past the submission whose end drops that view (`treg_finish_submission`).
+- **Fix:** in `nvn_mtl.m`, for every game. A table takes again only the IDs a change can reach, by the walk's own rules (`pool_entry`); it is kept when none of their entries changes, and copied and patched otherwise, as draws already encoded read the old one:
+  - A registration records its generation and ID (`g_reg_log`), and a storage change its serial (`g_ser_log`, beside the notes `ser_sync` takes); a table takes again the IDs they name.
+  - A pool change records `REG_POOL` and no ID. It changes no registration, only which storage exists, so a table takes again only the IDs it found without storage (`pool_snap.dead`). `nvnMemoryPoolFinalize` marks a pool's IDs gone before it removes the pool, and `treg_gone` notes each of them. Pool changes come from threads that do not hold `g_rmu`, so a note is a sequence lock: its generation is cleared before what changed is written and stored after it, and a reader takes the note only if the generation matches before and after it reads.
+  - A table keeps the IDs whose entries are views of retired registrations (`pool_snap.trans`), those the read scan writes in place (`pool_seen_scan`) among them; the next submission takes only those again, and such a table does not stand past its submission.
+  - A takeover records a note that names no texture (`ser_note(0)`): it changes no serial's texture, as an entry a live serial holds is not evicted (`serial_table_holds`) and one a finalized serial holds through `g_ghost` is only unref'd. A live sRGB / linear twin holds a view of the shared texture, not the texture, so that texture can go while the twin is live: `tex_mtl_` then finds the view stale and drops it (`serial_del`), a note naming the twin's serial. A retired ID's view goes at the submission's end, and the next submission takes those IDs again.
+  - A patch makes textures within what the frame may still make (`pool_room`), as a walk does; a texture left out counts in the table's `left`, and the walk goes on next frame as before.
+  - Past `POOL_IDS_MAX` IDs on a list, a note the ring has overwritten, a bump without a note, a pool that grew, or a sparse mapping, the table is built whole as before. The log line says why tables were built whole and how many were patched or kept; the power lines gain `[nvn] pool tables up to frame …`.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_pool_notes`: a pool change, a finalized pool, a retired ID across submissions, a takeover, a registration past the budget and a read written in place each patch or keep the table, and the patched tables hold what tables built whole do. The notes and the patching were measured on the host of [PR #1387](https://github.com/seedds/nxnative/pull/1387) (MacBook Pro M5 Pro, a six-minute walk through Kokiri Forest): tables built whole about 9,600 (26 s) with only pool changes noted, 14 (0.3 s) with all three. Open: the counts on this walk, which also has the read bitmap and the budget, are not measured yet. The table patching and the first notes are [PR #1299](https://github.com/seedds/nxnative/pull/1299)'s; the unnoted takeover was found in [issue #1326](https://github.com/seedds/nxnative/issues/1326).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
 ### Memory-pool tracking table grows in blocks
 
 - **Cause:** the memory-pool tracking table had a fixed 4,096 slots; a pool past the end would have its textures re-uploaded at every use.
@@ -206,6 +220,14 @@ The game may also write into an NVN object directly, without an NVN call, throug
 
 ## Command memory
 
+### Bound render targets outlive command recordings
+
+- **Symptom:** `texture object no longer valid`, followed by `CRASH sig=10` in `nvn_sparse_pool` through `sparse_gpu_wrote` and `attach`. In Rhythm Heaven Groove's frog stage, the supposed texture contained a texture handle followed by an `OP_DRAW_IDX` record.
+- **Cause:** `tex_snap` stores a texture description inside the command recording. The queue's `R.rt` kept pointers to those descriptions across submissions, even after the recording had completed and its memory could be reused. A write watch caught `nvnCommandBufferBindTexture` replacing a valid snapshot at the same address; the next render pass read the new command bytes as a texture and memory-pool pointer. Checking the texture's magic in `tex_mtl` did not protect the subsequent sparse-pool lookup.
+- **Fix:** `rt_preserve_bound` copies the still-bound color and depth descriptions into fixed storage owned by the queue after CPU replay, before the submission can publish completion. The standalone replay path has its own storage. Already-owned descriptions are reused; all sources are read before any destination is written, so reordered or aliased targets remain intact. Views and subresource selections stay with `R.rt`. No texels are copied, no texture is reloaded, and Metal objects retain their existing fence-based lifetimes.
+- **Check:** `t_rt_lifetime` reuses completed command memory through the NVN interface and checks real color/depth readback. It covers bindings inherited by a later submission, alternating queues, a nested command list, mip/layer views, depth-only targets and the eighth color attachment, with synchronous and deferred Metal encoding. The inherited-target case crashed before the fix.
+- **Found on:** [Rhythm Heaven Groove](../../dm/games/0100D9F01D474000/README.md#rendering), base 1.0.0, `kaeru` (localized name labels `I_KAERU_00` and `I_KAERU_01`).
+
 ### Control memory capacity queries
 
 - **Symptom:** `[RED] NVN unimplemented function called: nvnCommandBufferGetControlMemoryFree` (or `…GetControlMemorySize`) once, after the game gives a command buffer control memory.
@@ -240,6 +262,14 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** the host now keeps 16 bytes (one JUMP), lets the END take a segment's last bytes, and links only recordings that have records, so a JUMP only stands where a record of 16 bytes or more was to go and never writes past what `GetCommandMemoryUsed` reported (`OP_RESERVE` in `hle_nvn.c`; `t_nvn` "slotted lists").
 - **Note:** to read such a crash, `x8` holds the jump-table target of the previous record's case, and the registers a callee saved below `sp` give the previous replay pointer (`x19`) and payload (`x26`).
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) (1.4.3, GitHub issue #61).
+
+### Copy strides are command buffer state
+
+- **Symptom:** a jump to pc=0 on a worker thread, with the backtrace `0x0` ← `cmd_alloc_keep` ← `h_nvnCommandBufferCopyBufferToTexture` and `lr` in the game's `main`, just after the instruction that called the game's command memory callback.
+- **Cause:** `SetCopyRowStride` and `SetCopyImageStride` were recorded as 24-byte `OP_COPY_STRIDE` commands. In NVN they are command buffer state that a copy reads when it is recorded (`GetCopyRowStride` reads them back), and setting them uses no command memory. A game that sizes one upload's command memory for the driver ran out on the host. nn::gfx's `CommandBuffer` (the NVN backend) always installs its own callback (`main+0x31be0` in Smash) and calls the out-of-command-memory or out-of-control-memory handler the game set (`+0xd0` / `+0xd8` of the object). The game never sets a handler on a command buffer that should never run out, so the callback called address 0. Smash records each texture upload from a stack command buffer with 0x100 bytes of command memory (`main+0x3664960` and `main+0x3794430`): the two strides (48 bytes), then the copy (200 bytes with its texture snapshot, plus 16 kept for a JUMP) came to 264 bytes.
+- **Fix:** the strides are fields of `cmd_t` (`copy_row`, `copy_image`), set and read back by `Set`/`GetCopy*Stride` without a record. A buffer ↔ texture copy carries them after its texture snapshot (`p_copy_strides`, `rec_copy` in `hle_nvn.c`) only when one is set, so a copy with tight strides keeps its size. The replay reads them from the record (`copy_strides` in `nvn_obj.h`); `OP_COPY_STRIDE` is still replayed from older captures, and the capture layout gained a line, so an older replayer refuses a new capture. `t_nvn` (5c) records Smash's sequence in 256 bytes with a callback that counts any call.
+- **Note:** the game's `nu::VirtualAllocHook` / `nu::VirtualFreeHook` are undefined weak imports bound to 0 at boot, as Horizon's rtld binds them. Every one of their 6,155 call sites in Smash's `main` tests the GOT entry first, so they were not the null call.
+- **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md#rendering) 13.0.5 on the iPhone, opening Adventure (World of Light).
 
 ### Recorded commands patched in place by the game (`OP_BIND_TEX1`)
 
@@ -366,6 +396,28 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** `nvn_tex.c` recognizes either flag for linear sizing and excludes both from block-linear level offsets, GOB columns and sparse layout. `nvn_deswizzle_geom` rejects both. `tex_linear` uses the same calculated row pitch, including implicit alignment, as `GetStorageSize`. Render-target rows align to 128 bytes; ordinary linear rows align to 32. Explicit strides are preserved. `t_tex` covers the layout and `t_linear_readback` checks a GPU clear against padded CPU-visible rows.
 - **Found on:** [Persona 5 Royal](../../dm/games/01005CA01580E000/README.md#rendering): a 16x16 RGBA8 target with flags `0x44` and stride 128 needs 2 KB; block-linear sizing returned 1 KB.
 
+### Linear textures a device cannot view on their pool's buffer
+
+- **Symptom:** on an iPhone only, a scene's backgrounds are solid magenta and magenta frames flash, while the Mac is right. The log has `[RED] linear texture offset … / row pitch 32 not aligned to 64 bytes; created as a private texture (CPU writes invisible)`, then `[RED] deswizzle failed format 0x25 target 1`.
+- **Cause:** Metal makes a texture on a buffer only at `minimumLinearTextureAlignmentForPixelFormat`, and the minimum depends on the device: 64 bytes for RGBA8 on an A18 Pro, less on the Macs here. Ordinary linear rows align to 32 bytes ([the entry above](#linear-render-target-storage-without-the-linear-flag)), so an 8×8 RGBA8 linear texture has 32-byte rows. `tex_linear` refused it, and the texture became a private one. Its first fill (`tex_init_fill` → `pkg_upload_`) went through the block-linear deswizzler, which rejects linear storage, so it stayed empty and never saw the CPU's writes.
+- **Fix:** `linear_fit` (`nvn_mtl.m`) tells a linear texture that no view can take apart from one that is not linear. `tex_mtl_` makes such a texture a CPU-written packaged one, uploaded at its first use on the submit thread and again after CPU writes to its pages, when the GPU does not render or store into it (`linear_cpu_only`: `LINEAR` without `LINEAR_RENDER_TARGET` or `IMAGE`). The storage then holds its content, as for the other uploaded textures:
+  - `pkg_upload_` copies it by rows of its stride instead of deswizzling it, with no GPU deswizzle or large-pool staging buffer;
+  - a GPU copy into it is written into the storage too (`tex_storage_dst`; `write_region_linear` in `hle_nvn.c`), so the next upload carries it;
+  - `mtl_read_texels` reads it from the storage by the same rows, on whatever thread asks. So a read before its first use does not make it a private texture of zeros, and a read after a CPU write does not upload it off the submit thread.
+  Textures that a view can take are unchanged.
+- **Limits:** a linear render target or image that no view can take stays a private texture. Its first fill now takes its storage, but the CPU's later writes do not reach it (`[RED] linear texture … rows of 32 bytes no view can take, a private texture the CPU's writes do not reach`).
+- **Check:** on a Mac, `DM_TBUF_ALIGN=64` reproduces the phone's alignment for these textures too. `make -C dm/gfx/tests GAME=<id> check_t_linear_readback` runs with it, on 6×6 RGBA8 textures in a pool made through NVN (write-tracked, as a game's):
+  - a `LINEAR` one with 32-byte rows is not a view. Its first upload and `nvnTextureReadTexels` hold its pixels at the storage's stride. After an NVN copy into it, a read on another thread has the copied rows. After a CPU write, it has that row as well, and the next upload carries both;
+  - the same with 64-byte rows stays a view;
+  - one read on another thread before its first use has its pixels, and is still uploaded at that first use;
+  - an `IMAGE | LINEAR` one with 32-byte rows stays a GPU texture, filled at the stride.
+  Each part is needed:
+  - without the storage read, the reads come back empty;
+  - without `linear_cpu_only`, the image is made CPU-written;
+  - reading the resolved host texture instead uploads it on the reading thread after the CPU write, and `up_owner_check` stops the test.
+  Copying the rows at the pixel pitch fails 5 of 6 rows. Axiom Verge's opening logs `linear texture ser=28 8x8 format 0x25 flags 0x10: offset 0x3f8000 / row pitch 32 not aligned to 64 bytes` and `CPU-written texture ser=28 …`, the same on the Mac with the switch and on both iOS devices without it. On the Mac its picture matches a run without the switch.
+- **Found on:** Axiom Verge 1.0.3 (`0100052004384000`, SDK 4.4.0, MonoGame; its profile is a separate change) on an iPhone 16 Pro Max, iOS 26.0: the opening's sky and mountains are magenta. Its 8×8 RGBA8 linear textures sit in a `CPU_UNCACHED` pool. An iPad Pro with an M4 asks for 64 bytes on iPadOS 26.0 as well, while macOS 27.0 on an M4 Pro asks for 16. With the fix, both iOS devices log the four textures as uploaded, and the iPhone's opening is right.
+
 ### Textures written with `nvnTextureWriteTexels`
 
 - **Symptom:** video frames, or a game's built-in default textures, are all zero.
@@ -463,6 +515,7 @@ Games read this count as a position in their own command memory and size their h
   - [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md): the cave was magenta; the terrain draws sample two 121-layer ASTC 8×8 arrays (42 MB each) filled this way.
   - [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md): the UI reads its textures from `.tex` files the engine loads straight into a `CPU_UNCACHED | GPU_CACHED | COMPRESSIBLE` pool (flags 0xa2): 231 textures by the title screen, no packaged layout, no `WriteTexels`, no copies.
   - [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md): a dialog box sampling 256x256 and 1024x256 textures of format 0x4d; `DM_NVN_TEXINFO=1024x256` showed storage that already held data at first use (226,555 of 262,144 bytes non-zero): no packaged layout, block-linear, in a 1000 MB `CPU_CACHED | GPU_CACHED | COMPRESSIBLE` pool (flags 0xa4). A log of the pool flushes, texture creations and file reads (temporary lines under `DM_NVN_LOG`) showed every `.tex` read into staging buffers (512 KB `ReadFile`s, none into the pool) and the texels copied by the CPU into the texture's storage; only the four linear 1024x64 text textures are flushed, every frame. `main` has no cache maintenance instruction at all.
+  - [Kirby Air Riders](../../dm/games/040077201BE50000/README.md): magenta props and panels in races, one of them a 512x512 ASTC texture all zeros when dumped; with both keys none of the 378 ASTC textures bound on one frame had a zero block.
 
 ### `ReadTexels` from guest memory and textures written after first use
 
@@ -693,3 +746,30 @@ Games read this count as a position in their own command memory and size their h
 ### `nvnPrivate0`, an inlined command-buffer fast path flag
 
 - `nvnPrivate0`, a new SDK 20 import, needs nothing: it is a flag in `sdk`'s bss that enables an inlined command-buffer fast path when the NVN driver sets it (it stays 0). Found on [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0, SDK 20.5.22).
+
+### `nvnTextureBuilderGetViewOffset`, `nvnTextureViewCompare`, `nvnBlendStateSetAdvancedNormalizedDst`
+
+- **Symptom:** `[RED] NVN unimplemented function called` for each.
+- **Fix:** the builder's offset is the texture's (`view_offset`). The compare is true when the two views set the same fields to the same values: that true means equal is taken from the name, as no caller in `main` was found to confirm it. The blend flag is kept for its getter; the fixed-function factors the replay uses read a normalized target as it is.
+- **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md).
+
+### Texture IDs of one storage share one packaged texture
+
+- **Symptom:** a pool walk makes gigabytes of textures from far fewer images: Ocarina of Time's 32,768 IDs name 3,607 storages, and one texture per ID came to 2 GB.
+- **Cause:** a packaged texture belongs to its serial, and the engine registers the same storage under many texture objects.
+- **Fix:** general (`nvn_mtl.m` `g_pkg_share`, `tex_alias_key`, `pkg_shared`). Packaged textures are shared by storage, layout and format through a weak table, so a new serial of the same storage takes the existing one. A pool's removal evicts its keys (`mtl_alias_drop_pool`), and the walk's budget does not count a texture that is already shared.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
+### Finalizing a copy of a texture object
+
+- **Symptom:** thousands of first uploads a frame in a scene whose textures do not change: Ocarina of Time, about 15,000 a frame.
+- **Cause:** the engine copies an `NVNtexture` by value and finalizes the copy, while the original stays in use. The host keyed the texture by serial, so finalizing the copy deleted the host texture of the original, and its next use uploaded it again.
+- **Fix:** general (`nvn_mtl.m` `mtl_tex_release`). The registry keeps the address of the object that was initialized, and a finalize is ignored when that owner still holds the texture's magic and serial (read with `vm_read_overwrite`, as the owner's memory may be gone). `t_cpu_tex` checks both orders.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
+### Freeing a memory pool during a texture ID walk
+
+- **Symptom:** the host stops with `NSInvalidArgumentException: -[NvPkg buffer]: unrecognized selector sent to instance` under `tex_by_id` (via `pool_entry`, `pool_gpu`, `encode_args_`, `draw_`, `mesh_tasks_draw`); not a GPU hang, no `kIOGPU` errors. It came after minutes of play, right after a save or at a scene change.
+- **Cause:** `nvnMemoryPoolFinalize` on a game thread dropped the pool's textures from the CPU-written set (`cpu_tex_drop_pool`) before it marked the pool's texture IDs gone under `g_rmu` (`treg_drop_pool_views`). A pool walk on the submit thread holds `g_rmu` and visits every registered ID; one of that pool's IDs reached in between was not gone, its pool's magic was still set, and its texture was no longer CPU-written, so `tex_mtl_` skipped the packaged path and returned the texture table's entry as it was: the `NvPkg` wrapper of the upload, not an `MTLTexture`. `tex_by_id`'s first message to it threw.
+- **Fix:** general (`nvn_mtl.m` `mtl_alias_drop_pool`). The IDs are marked gone first: a walk holding `g_rmu` either finishes while the classification is still there or finds the ID gone and takes `tex_made`, which unwraps the `NvPkg`. `t_cpu_tex --metal` (`finalize_during_walk`) finalizes a pool on another thread while it holds `g_rmu`: with the old order the classification was gone and `tex_mtl` handed out the `NvPkg`.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), from two players' reports on PR #1299 and PR #1420 (an M3 Max 412 s into Kokiri Forest after a save; an M4 Pro in the Deku Tree after about 40 minutes). PR #1420 found where the `NvPkg` escaped.

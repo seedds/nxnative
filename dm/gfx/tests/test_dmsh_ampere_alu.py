@@ -22,11 +22,49 @@ class Alu(Translated):
         return self.translate(pre + body + inst(*waiting(STORE)) + inst(*EXIT), shared=0x1000)
 
 
+class FloatRed(Translated):
+    """RED.F32.FTZ.RN (0x98e, type 3 at bits 73..76, add): agl's scene analysis sums luminance with it (Ocarina of Time's probe_analyze 6e28359aa3558f61). Dropped with a log line, the exposure the CPU
+    reads back from those buffers was several times too bright. A compare-and-swap loop on the word"""
+    RED = (0x000fe20000000000 | 3 << 9, 0x0000000608ff098e)   # RED.F32.FTZ.RN [R8], R6: (control and type, opcode and registers)
+
+    def test_adds_in_a_loop(self):
+        msl = self.translate(b''.join(inst(*waiting(i)) for i in (s2r_tid(6), s2r_tid(8), s2r_tid(9), self.RED)) + inst(*EXIT))
+        self.assertIn('atomic_compare_exchange_weak_explicit', msl)
+        self.assertNotIn('atomic_fetch_add', msl)
+
+
+class DeadChannel(Translated):
+    """An image read whose .x is dead and whose .y is used: the optimizer's RemoveNode followed the read as if it were removed, so the chain computing its coordinate lost its last use and went, and the
+    shader read an uninitialized variable (Ocarina of Time's wind solver 04942f42cae10d0f, the encodings below are from it: its velocity field oscillated and the grass flickered at 10 Hz)"""
+    Y_MINUS_1 = (0x000fe40007ffe0ff, 0xffffffff01077810)   # IADD R7, R1, -1
+    SULD = (0x000f6200001e0300, 0x6000080006047b97)        # SULD.XY R4, [R6, R7]: R5 is .y
+    STORE_Y = (STORE[0], 0x0000080509008388)               # STS.U32 [R9 * 16 + 8], R5
+
+    def test_coordinate_survives(self):
+        msl = self.translate(b''.join(inst(*waiting(i)) for i in (s2r_tid(1), s2r_tid(6), s2r_tid(9), self.Y_MINUS_1, self.SULD, self.STORE_Y)) + inst(*EXIT), shared=0x1000)
+        self.assertRegex(msl, r'\+ \(-1\)|- 1\b')
+        self.assertNotRegex(msl, r'(?m)^\s+int (_\d+);\n\s+int _\d+ = \1;')
+
+
 class Brev(Alu):
     BREV = (0x001e240000000000, 0x0000001300067301)   # BREV R6, R19 (Pokémon Pokopia 6e8db04c25a53d8c, whose destination is R3)
 
     def test_reverses_the_bits(self):
         self.assertIn('reverse_bits', self.kept(self.BREV, srcs=(19,)))
+
+
+class F2ip(Alu):
+    """F2IP.U8 (0x243): Ocarina of Time's FoliageShader 83df46a0b1b379b4 packs colour with it, its foliage mesh shaders one byte at a time"""
+    PAIR = (0x000fc400000004ff, 0x000000152c067243)   # F2IP.U8 R6, R44, R21
+    ONE = (0x000fe4000000c4ff, 0x00000009ff067243)    # F2IP.U8.TRUNC R6, RZ, R9
+
+    def test_packs_two_bytes(self):
+        msl = self.kept(self.PAIR, srcs=(44, 21))
+        self.assertIn('rint(', msl)
+        self.assertIn('255.0', msl)
+
+    def test_truncates(self):
+        self.assertIn('trunc(', self.kept(self.ONE, srcs=(9,)))
 
 
 class HalfImmediate(Alu):
@@ -44,6 +82,27 @@ class HalfImmediate(Alu):
         msl = self.kept(self.HMUL2, srcs=(6,))
         self.assertIn('spvFMul', msl)
         self.assertRegex(msl, r'\b2\.0\b')
+
+
+class GlobalMemory(Alu):
+    """Global memory. desc[URb][Ra.64] (bit 76 of LDG / STG, bit 71 of ATOMG / RED; nvdisasm): URb is a memory descriptor, not part of the address, which is Ra.64 (plus the offset)
+    alone; [Ra.64+URb] adds it. The descriptor's value was added to the address. ATOMG.CAS (0x3a9) was refused; ATOMG / RED INC and DEC had no case in EmitAtomicOp (the operation
+    vanished). A GPU cross-check of 300 LDG / STG / ATOMG / RED through the host's gmem_map (one-thread compute shaders, production options): 135 identical to 300. Encodings
+    built from the sm_86 oracle corpus and checked with nvdisasm"""
+    R2UR = (0x000fe200000e0000, 0x00000000130473c2)       # R2UR UR4, R19
+    LDG_DESC = (0x000fe2200c1e1900, 0x0000000414067981)   # LDG.E R6, desc[UR4][R20.64]
+    LDG_URZ = (0x000fe2200c1e1900, 0x0000003f14067981)    # LDG.E R6, desc[URZ][R20.64]
+    CAS = (0x000fe200001ee116, 0x00000013140673a9)        # ATOMG.E.CAS.STRONG.GPU PT, R6, [R20], R19, R22
+    INC = (0x000fe200019ee100, 0x00000013140673a8)        # ATOMG.E.INC.STRONG.GPU PT, R6, [R20], R19
+
+    def test_a_descriptor_is_not_an_offset(self):   # the same code whatever the descriptor register holds
+        self.assertEqual(self.kept(self.R2UR, self.LDG_DESC, srcs=(19, 20, 21)), self.kept(self.R2UR, self.LDG_URZ, srcs=(19, 20, 21)))
+
+    def test_atomg_cas_is_translated(self):
+        self.assertIn('atomic_compare_exchange', self.kept(self.CAS, srcs=(19, 20, 21, 22)))
+
+    def test_atomg_inc_is_a_compare_and_swap_loop(self):
+        self.assertIn('atomic_compare_exchange', self.kept(self.INC, srcs=(19, 20, 21)))
 
 
 class CompareFtz(Alu):

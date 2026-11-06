@@ -3077,8 +3077,40 @@ static pthread_mutex_t g_cpu_tex_mu = PTHREAD_MUTEX_INITIALIZER;
 static nvn_hmap g_cpu_tex = {.klen = 8}, g_cpu_tex_retired = {.klen = 8};   // serial → pool (or (void *)1 for a live test texture without a pool)
 static nvn_hmap g_cpu_unc = {.klen = 8};   // serial → pool: the uncompressed 2D textures tex_cpu_content took from their storage, which leave the CPU-written set at their pool's first GPU write
 static _Atomic int g_pool_gpuw_new;   // a pool has had its first GPU write since cpu_unc_drop last looked
+// DM_NVN_GPUW_RANGE (default 1; 0 = the old whole-pool rule): what the GPU writes is kept as address ranges (the storage of the textures it renders, copies, clears, downsamples or
+// image-stores into), and an uncompressed texture stops being taken from its storage only when its own storage overlaps one, not at the first GPU write anywhere in its pool.
+// Ocarina of Time keeps its terrain patches (260x260 R32F heights, RGBA8 / RG8 maps; CPU-written, no flush) in one 200 MB CPU_CACHED pool that also holds textures the GPU writes:
+// with the pool-wide rule every patch was a GPU texture of zeros, the ground a flat plane at its base height under the real ground, and the pond bed and other low ground missing
+// (sky seen through "holes"). Ranges inside a finalized pool are dropped with it (cpu_tex_drop_pool)
+static int gpuw_range_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_GPUW_RANGE"); v = !e || atoi(e) != 0; MLOG("GPU-written texture storage tracked %s (DM_NVN_GPUW_RANGE)", v ? "by address range" : "per pool"); } return v; }
+static os_unfair_lock g_gpuw_mu = OS_UNFAIR_LOCK_INIT; static uintptr_t *g_gpuw; static uint32_t g_ngpuw, g_capgpuw;   // sorted disjoint [lo, hi) pairs
+static uint32_t gpuw_find(uintptr_t a) { uint32_t lo = 0, hi = g_ngpuw; while (lo < hi) { uint32_t m = (lo + hi) / 2; if (g_gpuw[2 * m + 1] <= a) lo = m + 1; else hi = m; } return lo; }   // first range ending after a
+static int gpuw_overlaps(uintptr_t a, uintptr_t b) {
+    os_unfair_lock_lock(&g_gpuw_mu); uint32_t i = gpuw_find(a); int r = i < g_ngpuw && g_gpuw[2 * i] < b; os_unfair_lock_unlock(&g_gpuw_mu); return r;
+}
+static int gpuw_add(uintptr_t a, uintptr_t b) {   // 1 when the set grew
+    if (a >= b) return 0;
+    os_unfair_lock_lock(&g_gpuw_mu);
+    uint32_t i = gpuw_find(a);
+    if (i < g_ngpuw && g_gpuw[2 * i] <= a && g_gpuw[2 * i + 1] >= b) { os_unfair_lock_unlock(&g_gpuw_mu); return 0; }   // already covered (render targets: every frame)
+    uint32_t j = i; while (j < g_ngpuw && g_gpuw[2 * j] <= b) { if (g_gpuw[2 * j] < a) a = g_gpuw[2 * j]; if (g_gpuw[2 * j + 1] > b) b = g_gpuw[2 * j + 1]; j++; }   // ranges i..j-1 touch [a, b): merged
+    uint32_t n = g_ngpuw - (j - i) + 1;
+    if (n > g_capgpuw) { g_capgpuw = n * 2 + 64; uintptr_t *g = realloc(g_gpuw, (size_t)g_capgpuw * 2 * sizeof *g); if (!g) MDIE("gpuw_add: out of memory"); g_gpuw = g; }
+    memmove(g_gpuw + 2 * (i + 1), g_gpuw + 2 * j, (size_t)(g_ngpuw - j) * 2 * sizeof *g_gpuw);
+    g_gpuw[2 * i] = a; g_gpuw[2 * i + 1] = b; g_ngpuw = n;
+    os_unfair_lock_unlock(&g_gpuw_mu); return 1;
+}
+static void gpuw_drop(uintptr_t a, uintptr_t b) {   // a finalized pool's memory
+    os_unfair_lock_lock(&g_gpuw_mu); uint32_t w = 0;
+    for (uint32_t i = 0; i < g_ngpuw; i++) { uintptr_t lo = g_gpuw[2 * i], hi = g_gpuw[2 * i + 1]; if (lo >= a && hi <= b) continue; g_gpuw[2 * w] = lo; g_gpuw[2 * w + 1] = hi; w++; }
+    g_ngpuw = w; os_unfair_lock_unlock(&g_gpuw_mu);
+}
+static nvn_hmap g_cpu_unc_lo = {.klen = 8}, g_cpu_unc_sz = {.klen = 8};   // serial → storage address / size of the g_cpu_unc entries (range mode), under g_cpu_tex_mu
 static void cpu_tex_drop_pool(const void *pool) {
+    { const pool_t *pp = pool; if (pp && pp->mem && pp->size) gpuw_drop((uintptr_t)pp->mem, (uintptr_t)pp->mem + pp->size); }
     pthread_mutex_lock(&g_cpu_tex_mu);
+    for (uint32_t i = 0; i < g_cpu_unc.cap; i++)
+        if (g_cpu_unc.vals[i] == pool) { uint64_t serial; memcpy(&serial, g_cpu_unc.keys + (size_t)i * 8, 8); nvn_hm_del(&g_cpu_unc_lo, &serial); nvn_hm_del(&g_cpu_unc_sz, &serial); }
     nvn_hmap *maps[] = {&g_cpu_tex, &g_cpu_tex_retired, &g_cpu_unc};
     for (unsigned m = 0; m < sizeof maps / sizeof *maps; m++)
         for (uint32_t i = 0; i < maps[m]->cap;)
@@ -3140,7 +3172,7 @@ static int tex_cpu_content(const tex_t *t) {
     if (!on || !t->mem || !t->pool || t->has_layout || t->d.samples > 1 || t->d.target == NVN_TEXTURE_TARGET_BUFFER) return 0;
     int unc = !fmt_compressed(t->d.format) && t->d.target != NVN_TEXTURE_TARGET_3D;
     if (unc) {   // not in a pool the GPU writes; not what only the GPU or the decoder fills (a display or video-decode texture, depth or stencil)
-        if (atomic_load_explicit(&t->pool->gpu_written, memory_order_relaxed) || fmt_depth(t->d.format) || (t->d.flags & (NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_VIDEO_DECODE))) return 0;
+        if ((gpuw_range_on() ? gpuw_overlaps((uintptr_t)t->mem, (uintptr_t)t->mem + t->L.size) : atomic_load_explicit(&t->pool->gpu_written, memory_order_relaxed)) || fmt_depth(t->d.format) || (t->d.flags & (NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_VIDEO_DECODE))) return 0;
     }
     if (t->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL)) return 0;   // the CPU cannot write it (tex_init_fill fills it once) / sparse (tex_from_storage)
     // IMAGE only matters for an uncompressed texture: shaders cannot write a block-compressed one. Pokopia gives nearly every texture IMAGE (flags 0x4), its icons BC1 / BC7 in a
@@ -3148,14 +3180,20 @@ static int tex_cpu_content(const tex_t *t) {
     if ((t->d.flags & (NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE))
         || ((t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && !fmt_compressed(t->d.format))) return 0;
     if (!mem_any(t->mem, t->L.size)) return 0;
-    if (unc) { uint64_t s = t->serial; pthread_mutex_lock(&g_cpu_tex_mu); nvn_hm_put(&g_cpu_unc, &s, (void *)t->pool); pthread_mutex_unlock(&g_cpu_tex_mu); }
+    if (unc) { uint64_t s = t->serial; pthread_mutex_lock(&g_cpu_tex_mu); nvn_hm_put(&g_cpu_unc, &s, (void *)t->pool);
+        nvn_hm_put(&g_cpu_unc_lo, &s, (void *)(uintptr_t)t->mem); nvn_hm_put(&g_cpu_unc_sz, &s, (void *)(uintptr_t)t->L.size); pthread_mutex_unlock(&g_cpu_tex_mu); }
     static uint64_t n[2]; if (n[unc]++ < 4) MLOG("texture written by the CPU before its first use ser=%llu %ux%ux%u format %#x%s pool flags %#x: uploaded from its storage, re-uploaded when it changes (%llu so far)",
                                          (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, unc ? " (uncompressed, in a pool the GPU has not written)" : "", t->pool->flags, (unsigned long long)n[unc]);
     return 1;
 }
 void mtl_pool_gpu_written(const void *pool) {
     pool_t *p = (pool_t *)pool;
-    if (p && !atomic_load_explicit(&p->gpu_written, memory_order_relaxed)) { atomic_store(&p->gpu_written, 1); atomic_store(&g_pool_gpuw_new, 1); }
+    if (p && !atomic_load_explicit(&p->gpu_written, memory_order_relaxed)) { atomic_store(&p->gpu_written, 1); if (!gpuw_range_on()) atomic_store(&g_pool_gpuw_new, 1); }
+}
+void mtl_tex_gpu_written(const void *tex) {   // the GPU writes this texture's storage (render target, copy / clear / downsample destination, image store)
+    const tex_t *t = tex; if (!t) return;
+    mtl_pool_gpu_written(t->pool);
+    if (gpuw_range_on() && t->mem && t->L.size && gpuw_add((uintptr_t)t->mem, (uintptr_t)t->mem + t->L.size)) atomic_store(&g_pool_gpuw_new, 1);
 }
 // A pool's first GPU write: what its storage holds is no longer the whole truth, so the uncompressed textures taken from it become GPU textures with the content they have, and CPU writes
 // to them are no longer uploaded (the rule in a pool the GPU writes). Submit thread, as tex_cpu_content is, so a texture it has just taken is seen here if its pool was marked meanwhile
@@ -3165,10 +3203,12 @@ static void cpu_unc_drop(void) {
     pthread_mutex_lock(&g_cpu_tex_mu);
     for (uint32_t i = 0; i < g_cpu_unc.cap;) {
         const pool_t *p = g_cpu_unc.vals[i];
-        if (!p || !atomic_load_explicit(&p->gpu_written, memory_order_relaxed)) { i++; continue; }
+        if (gpuw_range_on()) { uint64_t s0; memcpy(&s0, g_cpu_unc.keys + (size_t)i * 8, 8); uintptr_t lo = (uintptr_t)nvn_hm_get(&g_cpu_unc_lo, &s0), sz = (uintptr_t)nvn_hm_get(&g_cpu_unc_sz, &s0);
+            if (!p || !sz || !gpuw_overlaps(lo, lo + sz)) { i++; continue; } }
+        else if (!p || !atomic_load_explicit(&p->gpu_written, memory_order_relaxed)) { i++; continue; }
         if (n == cap) { uint64_t *grown = realloc(ser, (cap = cap ? cap * 2 : 64) * sizeof *ser); if (!grown) MDIE("cpu_unc_drop: out of memory"); ser = grown; }
         uint64_t s; memcpy(&s, g_cpu_unc.keys + (size_t)i * 8, 8);
-        ser[n++] = s; nvn_hm_del(&g_cpu_unc, &s); nvn_hm_del(&g_cpu_tex, &s); nvn_hm_del(&g_cpu_tex_retired, &s);
+        ser[n++] = s; nvn_hm_del(&g_cpu_unc, &s); nvn_hm_del(&g_cpu_unc_lo, &s); nvn_hm_del(&g_cpu_unc_sz, &s); nvn_hm_del(&g_cpu_tex, &s); nvn_hm_del(&g_cpu_tex_retired, &s);
     }
     pthread_mutex_unlock(&g_cpu_tex_mu);
     for (uint32_t i = 0; i < n; i++) {
@@ -7918,7 +7958,7 @@ static void image_prepare(NvProg *pr, unsigned stages) {
             os_unfair_lock_lock(&g_rmu);
             if (tid >= g_ntreg || !g_treg[tid].ok || g_treg[tid].gone) { os_unfair_lock_unlock(&g_rmu); continue; }
             // The actual image binding is image intent too: some engines write a descriptor with RegisterTexture and use its handle in an image slot.
-            tex_t image = g_treg[tid].t; image.d.flags |= NVN_TEXTURE_FLAGS_IMAGE; mtl_pool_gpu_written(image.pool);
+            tex_t image = g_treg[tid].t; image.d.flags |= NVN_TEXTURE_FLAGS_IMAGE; mtl_tex_gpu_written(&image);
             id<MTLTexture> base = tex_mtl(&image); sparse_gpu_wrote(&image); while (base.parentTexture) base = base.parentTexture;
             int upgrade = base && !(base.usage & MTLTextureUsageShaderWrite);
             os_unfair_lock_unlock(&g_rmu);

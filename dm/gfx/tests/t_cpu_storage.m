@@ -1,6 +1,6 @@
 // An uncompressed 2D texture the CPU wrote, in a pool the GPU has not written (nvn_mtl.m tex_cpu_content): its storage is its content at first use, flushed or not, and a later CPU write is
-// uploaded. At the pool's first GPU write it becomes a GPU texture with the content it has (cpu_unc_drop), and CPU writes are no longer uploaded. In a pool the GPU already writes it stays a
-// GPU texture. Mario Kart World's terrain patches: R16, RG8, RGBA8, R11G11B10F and RGBA16 in a CPU_CACHED pool, never flushed, were zeros and every patch a flat plane.
+// uploaded. At the first GPU write over its storage it becomes a GPU texture with the content it has (cpu_unc_drop), and CPU writes are no longer uploaded. Over storage the GPU already writes it
+// stays a GPU texture; a GPU write elsewhere in its pool changes nothing (DM_NVN_GPUW_RANGE: Ocarina of Time's terrain shares its pool with render targets). Mario Kart World's terrain patches: R16, RG8, RGBA8, R11G11B10F and RGBA16 in a CPU_CACHED pool, never flushed, were zeros and every patch a flat plane.
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -50,17 +50,24 @@ int main(void) {
         CHECK("at first use the storage is the content", first_red(resolve(&f.t)) == 40);
         dm_guest_write_prepare(f.mem, f.t.L.size); fill(&f.t, f.mem, 80);
         CHECK("a later CPU write is uploaded", first_red(resolve(&f.t)) == 80);
-        mtl_pool_gpu_written(&f.pool);
-        CHECK("at the pool's first GPU write it keeps the content it has", first_red(resolve(&f.t)) == 80);
+        { tex_t rt = f.t; rt.serial = 7101; mtl_tex_gpu_written(&rt); }   // another texture over the same storage, rendered into
+        CHECK("at the first GPU write over its storage it keeps the content it has", first_red(resolve(&f.t)) == 80);
         CHECK("and is no longer CPU-written", !tex_cpu_written(f.t.serial));
         dm_guest_write_prepare(f.mem, f.t.L.size); fill(&f.t, f.mem, 120);
         CHECK("and a CPU write is no longer uploaded", first_red(resolve(&f.t)) == 80);
         teardown(&f);
 
         setup(&f, 7002, CACHED, NVN_FORMAT_RGBA8, 0);
-        mtl_pool_gpu_written(&f.pool);
+        mtl_tex_gpu_written(&f.t);
         fill(&f.t, f.mem, 40);
-        CHECK("in a pool the GPU writes it is not taken from storage", !tex_cpu_content(&f.t));
+        CHECK("over storage the GPU writes it is not taken from storage", !tex_cpu_content(&f.t));
+        teardown(&f);
+
+        setup(&f, 7004, CACHED, NVN_FORMAT_RGBA8, 0);
+        { tex_t rt = f.t; rt.serial = 7104; rt.mem = (uint8_t *)f.mem + POOL / 2; mtl_tex_gpu_written(&rt); }   // a render target in the second half of the pool
+        fill(&f.t, f.mem, 40);
+        mtl_tex_init(&f.t);
+        CHECK("a GPU write elsewhere in its pool leaves its storage the content", first_red(resolve(&f.t)) == 40);
         teardown(&f);
 
         setup(&f, 7003, CACHED, NVN_FORMAT_RGBA8, 0);

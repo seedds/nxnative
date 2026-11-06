@@ -41,6 +41,8 @@
 #   · BERG (Snowdrop, Mario + Rabbids Sparks of Hope): shader objects in the individually zstd-compressed records of its SDF data slices, see snowdrop_shaders
 #   · bnd2 (Criterion's Bundle 2, Need for Speed: Hot Pursuit Remastered): whole GLSLC outputs in the zlib resources of SHADERS.BNDL, see bnd2_resources and bnd2_shaders
 #   · Heaps (Dead Cells): whole GLSLC outputs in base64 after the GLSL of the engine's shader cache (shaders.cache.nx), inside its PAK archive, see heaps_pak_files and heaps_shaders
+#   · PARC (Ryu Ga Gotoku Studio, Yakuza Kiwami): whole GLSLC outputs in the shader objects (GSVS / GSPS / GSFX) of its PARC archives, each file SLLZ-compressed; the archives' other files
+#       are only listed, not decompressed, see par_entries and par_shaders; the engine's own shader objects are SLLZ streams in main, see sllz_main_objects
 #   · Frostbite (EA SPORTS FC 27): the CompiledBytecode resources of the bundles its superbundle tables (.toc) list, in its cas files (Oodle Leviathan, decoded by the game's own decoder in the
 #       Mac host), each a VNVN record with one code area and control section (frostbite.py), see frostbite_jobs and frostbite_shaders
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
@@ -55,7 +57,7 @@
 #   With an update: give RomFS and main as comma-separated lists (base game first, e.g. data/v0/RomFS,data/v327680/RomFS); the output is the union of both versions (see main())
 #   Unity type trees need Unity's common string table, which is taken from the first main
 # Pair table: (vertex key, pixel key) of every BNSH variation (every Unity program); dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
-import base64, collections, concurrent.futures as cf, glob, hashlib, json, os, re, struct, subprocess, sys, time, zlib
+import base64, collections, concurrent.futures as cf, glob, hashlib, io, json, os, re, struct, subprocess, sys, time, zlib
 from typing import NoReturn
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open, is_image
@@ -1750,6 +1752,7 @@ def raw_shaders(d, label, known=()):
         size, _, first, _ = glslc_layout(d, m.start())
         if (0 if first == 0xa8 else 0x760) < size <= len(d) - m.start(): skip.append((m.start(), m.start() + size))
     for m in re.finditer(b'BNSH\0\0\0\0', d): skip.append((m.start(), m.start() + struct.unpack_from('<I', d, m.start() + 0x1c)[0]))
+    skip += sllz_streams(d)   # Ryu Ga Gotoku's SLLZ objects (sllz_main_objects): their literals copy control magics verbatim
     ctls = [c for m in re.finditer(re.escape(CTL_MAGIC), d) if not (c := m.start()) & 3 and not any(a <= c < b for a, b in skip) and d[c:c + struct.unpack_from('<I', d, c + 0x20)[0]] not in known]
     if not ctls: return []
     rel, code_of, cset = rel_targets(d), {}, set(ctls)
@@ -2649,6 +2652,127 @@ def heaps_shaders(d, label):
     if not found: red(f'{label}: no GLSLC output in //BIN= comments')
     return found
 
+PARC, SLLZ = b'PARC', b'SLLZ'
+RGG_OBJECT = re.compile(rb'GS(?:VS|PS|FX|GS|HS|DS|CS)\d')   # Ryu Ga Gotoku's shader objects: GSVS4 (.vso), GSPS4 (.pso), GSFX4 (.fxo, a vertex and a pixel shader)
+
+def sllz(d, label, peek=0):
+    """Ryu Ga Gotoku's SLLZ (the decoder of ParManager's ParLibrary, which credits Rick Gibbed's): a 16-byte header {'SLLZ', u8 byte order of the rest (0 little), u8 version,
+    u16 header size, u32 decoded size, u32 stored size with the header}. Version 1 is LZ77 with a flag byte for every 8 items, most significant bit first (set: a copy, u16 little-endian
+    v: distance 1 + (v >> 4), length 3 + (v & 15)); version 2 is a series of zlib streams, each behind 5 bytes {u24 big-endian chunk size with these 5 bytes (bit 23: stored as it is),
+    u16 big-endian decoded size - 1}. peek: only the first that many bytes, from the stored bytes d holds (fewer when d ends first)"""
+    if len(d) < 16 or d[:4] != SLLZ: red(f'{label}: not an SLLZ stream')
+    e = '<' if d[4] == 0 else '>'
+    ver, (hsz,), (n, stored) = d[5], struct.unpack_from(e + 'H', d, 6), struct.unpack_from(e + 'II', d, 8)
+    if not 16 <= hsz <= stored or n > 1 << 31: red(f'{label}: SLLZ header {hsz:#x}, {n:#x} bytes stored in {stored:#x}')
+    want, src, out, i = min(n, peek) if peek else n, memoryview(d)[hsz:stored], bytearray(), 0
+    try:
+        if ver == 1:
+            flags, left, i = src[0] if len(src) else 0, 8, 1
+            while len(out) < want:
+                copy = flags & 0x80
+                flags, left = flags << 1 & 0xff, left - 1
+                if not left: flags, left, i = src[i] if i < len(src) else 0, 8, i + 1
+                if copy:
+                    v = src[i] | src[i + 1] << 8; i += 2
+                    dist, cnt = 1 + (v >> 4), 3 + (v & 15); at = len(out) - dist
+                    if at < 0: raise ValueError('a copy from before the start')
+                    if dist >= cnt: out += out[at:at + cnt]
+                    else:
+                        for k in range(cnt): out.append(out[at + k])
+                else: out.append(src[i]); i += 1
+        elif ver == 2:
+            while len(out) < want and i < len(src):
+                c, u = int.from_bytes(src[i:i + 3], 'big'), int.from_bytes(src[i + 3:i + 5], 'big') + 1
+                if (c & 0x7fffff) < 5: raise ValueError(f'a chunk of {c & 0x7fffff} bytes at +{hsz + i:#x}')
+                if c & 0x800000: c &= 0x7fffff; out += src[i + 5:i + 5 + u]
+                else:
+                    z = zlib.decompressobj(); got = z.decompress(src[i + 5:i + c], want - len(out) if peek else 0)
+                    if not peek and (len(got) != u or not z.eof): red(f'{label}: the SLLZ chunk at +{hsz + i:#x} does not inflate to {u} bytes')
+                    out += got
+                i += c
+        else: red(f'{label}: SLLZ version {ver}')
+    except (IndexError, ValueError, zlib.error) as x:   # a peek returns what it decoded
+        if not peek: red(f'{label}: the SLLZ stream is damaged ({x or "it ends early"})')
+    if not peek and len(out) < n: red(f'{label}: SLLZ decodes to {len(out)} of {n} bytes')
+    return bytes(out[:want])
+
+def par_entries(f, base, label):
+    """The files of the PARC archive at base in f → [(path, SLLZ-compressed, offset from base, stored length)], or None when it is not one. Ryu Ga Gotoku's PARC (ParLibrary's
+    ParArchiveReader): 'PARC', u8 platform, u8 byte order of the rest (0 little), two u8, then u32 version, data size, folder count, folder table offset, file count, file table
+    offset; the folders' names, then the files', 0x40 bytes each, from +0x20. A folder record (0x20 bytes): {subfolder count, first subfolder, file count, first file, ...}, folder 0
+    the root; a file record (0x20 bytes): {flags (bit 31: SLLZ), length, stored length, offset, attributes, the offset's high bits, u64 time}"""
+    f.seek(base); h = f.read(0x20)
+    if len(h) < 0x20 or h[:4] != PARC: return None
+    e = '<' if h[5] == 0 else '>'
+    _, _, nfo, fo, nfi, fi = struct.unpack_from(e + '6I', h, 8)
+    if not 0 < nfo <= 1 << 20 or nfi > 1 << 22: red(f'{label}: a PARC archive of {nfo} folders and {nfi} files')
+    names = f.read(0x40 * (nfo + nfi)); f.seek(base + fo); folders = f.read(0x20 * nfo); f.seek(base + fi); files = f.read(0x20 * nfi)
+    if len(names) < 0x40 * (nfo + nfi) or len(folders) < 0x20 * nfo or len(files) < 0x20 * nfi: red(f'{label}: PARC tables past the end')
+    def name(i): return names[0x40 * i:0x40 * i + 0x40].split(b'\0')[0].decode('latin-1')
+    where = [''] * nfi
+    def walk(k, path, depth):
+        if depth > 64: red(f'{label}: PARC folders nested more than 64 deep')
+        nsub, sub, n, first = struct.unpack_from(e + '4I', folders, 0x20 * k)
+        for j in range(first, min(first + n, nfi)): where[j] = path
+        for s in range(sub, min(sub + nsub, nfo)):
+            if s != k: walk(s, f'{path}/{name(s)}', depth + 1)
+    walk(0, '', 0)
+    out = []
+    for j in range(nfi):
+        flags, _, stored, lo, _, hi = struct.unpack_from(e + '6I', files, 0x20 * j)
+        out.append((f'{where[j]}/{name(nfo + j)}', bool(flags & 0x80000000), (hi << 32 | lo) & 0xFFFFFFFFFFFFFF, stored))
+    return out
+
+def par_shaders(f, base, label, out, depth=0):
+    """The shaders of the PARC archive at base in f (par_entries), the archives inside it included; False when it is not one. A file is read whole only when its first bytes (decoded,
+    when it is SLLZ) are a Ryu Ga Gotoku shader object (GSVS4 .vso, GSPS4 .pso, GSFX4 .fxo: one vertex and one pixel shader), a GLSLC output or another PARC archive; the GLSLC outputs
+    in it are taken whole (glslc_shaders), one stage each. Yakuza Kiwami: data/shader/*.par, 3,172 objects (SLLZ version 1) with 3,752 outputs, 2,399 shaders; its 2,969 other
+    archives (17 GB of models, textures and motions, and 11,824 archives stored inside them) are only listed"""
+    if depth > NEST: red(f'{label}: archives nested more than {NEST} deep')
+    ents = par_entries(f, base, label)
+    if ents is None: return False
+    for nm, packed, off, stored in ents:
+        where = label + nm
+        try:
+            f.seek(base + off); d = f.read(min(stored, 0x400))
+            head = sllz(d, where, peek=8) if packed and d[:4] == SLLZ else d[:8]
+            if packed and len(head) < 8 and len(d) < stored: f.seek(base + off); d = f.read(stored); head = sllz(d, where, peek=8)
+            if head[:4] == PARC and not packed: par_shaders(f, base + off, where, out, depth + 1); continue
+            if not (head[:4] in (PARC, b'\x91\x68\x86\x19') or RGG_OBJECT.match(head)): continue
+            if len(d) < stored: f.seek(base + off); d = f.read(stored)
+            if packed and d[:4] == SLLZ: d = sllz(d, where)
+            if d[:4] == PARC: par_shaders(io.BytesIO(d), 0, where, out, depth + 1)
+            else: out += glslc_shaders(d, where, need=False)
+        except SystemExit as x: print(f'{x} (its shaders are left out)', flush=True)   # red(): one damaged file, not the whole archive
+    return True
+
+def sllz_streams(d):
+    """The SLLZ streams (sllz) compressed into an image → [(start, end)] of each whose header holds: version 1 or 2, a 16-byte header, the stored size within the image"""
+    out = []
+    for m in re.finditer(SLLZ, d):
+        a = m.start()
+        if a + 16 > len(d) or d[a + 5] not in (1, 2): continue
+        e = '<' if d[a + 4] == 0 else '>'
+        (hsz,), (n, stored) = struct.unpack_from(e + 'H', d, a + 6), struct.unpack_from(e + 'II', d, a + 8)
+        if hsz == 16 and 16 < stored <= len(d) - a and 0 < n <= 1 << 28: out.append((a, a + stored))
+    return out
+
+def sllz_main_objects(d, label):
+    """Ryu Ga Gotoku's shader objects compressed into main with SLLZ: Yakuza Kiwami keeps the engine's own GSVS4 / GSPS4 / GSFX4 objects there, 59 of its 60 streams (the other is a DDS
+    texture), and their literals copy the GLSLC and control magics into main, which raw_shaders therefore leaves out (sllz_streams). Each stream that decodes to a shader object, a GLSLC
+    output or a PARC archive is read as par_shaders reads an archive's files; a damaged one is left out with a red line"""
+    out = []
+    for a, b in sllz_streams(d):
+        where = f'{label}@{a:#x}'
+        try:
+            head = sllz(d[a:b], where, peek=8)
+            if not (head[:4] in (PARC, b'\x91\x68\x86\x19') or RGG_OBJECT.match(head)): continue
+            x = sllz(d[a:b], where)
+            if x[:4] == PARC: par_shaders(io.BytesIO(x), 0, where, out)
+            else: out += glslc_shaders(x, where, need=False)
+        except SystemExit as e: print(f'{e} (left out)', flush=True)
+    return out
+
 UE_TAG ={'SV': 'vs', 'SH': 'hs', 'SD': 'ds', 'SG': 'gs', 'SP': 'ps', 'SC': 'cs'}
 def main_imports(img):   # the names main imports (its dynamic symbols)
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../tools')); import nso_syms
@@ -2759,6 +2883,9 @@ def scan_file_in(args):
                     if nm.endswith('/' + HEAPS_CACHE):
                         f.seek(off); found += heaps_shaders(f.read(n), f'/{rel}{nm}')
                 return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == PARC:   # a Ryu Ga Gotoku PARC archive (Yakuza Kiwami): only its shader objects are decompressed, its models and textures are only listed (par_shaders)
+        with open(path, 'rb') as f: par_shaders(f, 0, '/' + rel, found)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == SPKG or head[:4] == b'\0\0\1\0' and path.endswith('.gz'):   # Three Houses' loose shader packages and chunked zlib files (kt_shaders)
         kt_shaders(open(path, 'rb').read(), '/' + rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -2794,6 +2921,9 @@ def scan_file_in(args):
         with open(path, 'rb') as f: d = f.read()
     if d[:3] == b'\x1f\x8b\x08':   # standard gzip: Skyward Sword HD's Shaders.arc.gz wraps paired GLSLC outputs
         d = ungzip(d, '/' + rel); head = d[:16]   # later format probes inspect decoded bytes, not the gzip timestamp
+    if d[:4] == SLLZ:   # a whole file in SLLZ, which ParLibrary also reads PARC archives from (par_shaders)
+        d = sllz(d, '/' + rel); head = d[:16]   # as after gzip: the later probes see the decoded bytes
+        if par_shaders(io.BytesIO(d), 0, '/' + rel, found): return rel, uniq_keys(found), var_pairs(found), trees
     if head[4:5] == b'\x78' and path.endswith('.gz') and (z := gust_gz(d)) is not None: d = z   # Gust's chunked zlib (gust_gz)
     # Monolith also ships these containers loose, without an ARH/ARD archive
     # (Xenoblade DE). The generic prefilter below otherwise drops even HCPS.
@@ -2877,6 +3007,7 @@ def main():
         found += glslc_shaders(img, 'main' + ('@' + tag if tag else ''), need=False)
         found += tfxo_streams(img, 'main' + ('@' + tag if tag else ''))   # YEBIS's effect file, a zlib stream in main (Pokémon Sword)
         found += retro_main_forms(img, 'main' + ('@' + tag if tag else ''))   # Retro's startup material archive, LZSS in main (Donkey Kong Country: Tropical Freeze)
+        found += sllz_main_objects(img, 'main' + ('@' + tag if tag else ''))   # Ryu Ga Gotoku's own shader objects, SLLZ in main (Yakuza Kiwami)
         found += raw_shaders(img, 'main' + ('@' + tag if tag else ''), {c for _, _, c, _ in found})
         # NROs the game decodes at run time (Mario Tennis Fever: main is a boot stub, and the real code's data holds 11 shaders the game draws its UI and sky with): scanned like main, as no RomFS file holds them
         if not i:

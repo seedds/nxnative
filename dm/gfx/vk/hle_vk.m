@@ -130,6 +130,7 @@ static _Atomic uint64_t g_done;                 // highest value whose command b
 static pthread_mutex_t g_qmu = PTHREAD_MUTEX_INITIALIZER, g_done_mu = PTHREAD_MUTEX_INITIALIZER, g_mem_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_done_cv = PTHREAD_COND_INITIALIZER;
 static _Atomic uint64_t g_n_draw, g_n_pass, g_n_submit, g_n_copy, g_n_pso, g_mem_bytes;
+static _Atomic uint64_t g_gpu_ns;   // the GPU time of the frames since the last frame record, summed over their command buffers: they can overlap, so it is not wall time
 
 // Shader table (<DM_MSL_DIR>/vk/vk_shaders.tsv): resource kind u / b / t / s / c, its (set, binding) in the game's SPIR-V and the Metal slot it was moved to;
 // kind p is the push-constant block (set and binding 0), whose bytes are set straight into its buffer slot
@@ -1618,6 +1619,7 @@ VKB(vkQueueSubmit, VkResult, VkQueue q, uint32_t n, const VkSubmitInfo *si, VkFe
         [cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
             if (c.error) { static int k; if (k++ < 20) LOG("[vk] [RED] command buffer error (submission %llu): %s", (unsigned long long)v, c.error.localizedDescription.UTF8String); }
             g_done_ns[v % DONE_RING] = now_ns();
+            if (c.GPUStartTime > 0 && c.GPUEndTime > 0) atomic_fetch_add(&g_gpu_ns, (uint64_t)((c.GPUEndTime - c.GPUStartTime) * 1e9));   // the frame line's GPU time: this frame's command buffers, summed
             if (sq->nvis) {   // a query that spans several encoders has a slot in each
                 const uint64_t *r = sq->vis.contents;
                 for (uint32_t k = 0; k < sq->nvis; k++) sq->occ[k].q->val[sq->occ[k].idx] = 0;
@@ -1747,10 +1749,13 @@ static uint64_t g_frames;
 static void frame_end(void) {
     static uint64_t pd, pp, ps, pc;
     uint64_t f = ++g_frames, dr = g_n_draw, pa = g_n_pass, su = g_n_submit, co = g_n_copy;
-    if (f <= 3 || f % 300 == 0)
-        VLOG("frame %llu: draws %llu, passes %llu, submits %llu, copies %llu (since the last record, %llu frames); pipelines so far %llu, buffer memory %.1f MB", (unsigned long long)f, (unsigned long long)(dr - pd),
-             (unsigned long long)(pa - pp), (unsigned long long)(su - ps), (unsigned long long)(co - pc), (unsigned long long)(f <= 3 ? 1 : 300), (unsigned long long)g_n_pso, g_mem_bytes / 1048576.0);
-    if (f <= 3 || f % 300 == 0) { pd = dr; pp = pa; ps = su; pc = co; }
+    if (f <= 3 || f % 300 == 0) {
+        uint64_t nf = f <= 3 ? 1 : 300, gpu = atomic_exchange(&g_gpu_ns, 0);   // the frames' command buffers, summed: they can overlap
+        VLOG("frame %llu: draws %llu, passes %llu, submits %llu, copies %llu (since the last record, %llu frames); GPU %.2f ms/frame, pipelines so far %llu, buffer memory %.1f MB",
+             (unsigned long long)f, (unsigned long long)(dr - pd), (unsigned long long)(pa - pp), (unsigned long long)(su - ps), (unsigned long long)(co - pc),
+             (unsigned long long)nf, (double)gpu / 1e6 / (double)nf, (unsigned long long)g_n_pso, g_mem_bytes / 1048576.0);
+        pd = dr; pp = pa; ps = su; pc = co;
+    }
     dm_guest_frame_tick();
 }
 VKB(vkQueuePresentKHR, VkResult, VkQueue q, const VkPresentInfoKHR *pi) {

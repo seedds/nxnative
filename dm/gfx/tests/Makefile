@@ -487,6 +487,10 @@ t_vk_dontcare: t_vk_dontcare.m ../vk/hle_vk.m $(MTL_T_DEP)
 	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_dontcare.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 # The validation layer fills every DontCare load with a pattern, so a DontCare load fails the check whatever the tile memory happens to hold
 check_t_vk_dontcare: RUN_ENV = MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS=1
+# The "[vk] frame" line gives the GPU time of the frames' command buffers (they can overlap, so it is their sum)
+t_vk_gputime: t_vk_gputime.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_gputime.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+check_t_vk_gputime: RUN_ENV = MTL_DEBUG_LAYER=1
 # Float32 missing components retain float padding through integer shader inputs.
 t_float_pad: t_float_pad.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_float_pad.m $(MTL_T_SRC) $(FW)

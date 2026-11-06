@@ -693,3 +693,11 @@ Games read this count as a position in their own command memory and size their h
 ### `nvnPrivate0`, an inlined command-buffer fast path flag
 
 - `nvnPrivate0`, a new SDK 20 import, needs nothing: it is a flag in `sdk`'s bss that enables an inlined command-buffer fast path when the NVN driver sets it (it stays 0). Found on [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0, SDK 20.5.22).
+
+### A packaged texture entry handed out as the texture
+
+- **Symptom:** the host stops with `NSInvalidArgumentException: -[NvPkg buffer]: unrecognized selector sent to instance` under `tex_by_id` (via `pool_entry`, `pool_gpu`, `encode_args_`, `draw_`, `mesh_tasks_draw`); not a GPU hang, no `kIOGPU` errors. Or a `[RED] texture serial N has a packaged entry but is not CPU-written` line.
+- **Cause:** `tex_mtl_` takes the packaged path only when `tex_from_storage` says the texture's storage is CPU-written (`has_layout`, `tex_cpu_written(serial)`, or a virtual sparse pool). Its last step, for a texture with an entry in the texture table, returned that entry as it was. When the entry is an `NvPkg` (the upload's wrapper, not an `MTLTexture`) and the serial has already left the CPU-written set, that is the wrapper itself, and the caller's first message to it (`tex_by_id` asks the base for `.buffer`) throws. `tex_made` and the packaged branches unwrap it (`view`, else `tex`). What takes the serial out of the set first is not known: `cpu_unc_drop` deletes the serials, then puts each entry's texture in the table after it has let go of the set's lock, and `mtl_tex_release` deletes before `serial_del`; the first report came right after a save commit.
+- **Fix:** that last step unwraps an `NvPkg` as `tex_made` does (its `view`, else its `tex`) and prints the `[RED]` line once, naming the serial. The trigger is not fixed.
+- **Found on:** The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, profile in PR #1299), WOB2020's report on PR #1299 (M3 Max, 412 s into Kokiri Forest, right after a save commit).
+- **Check:** `t_cpu_tex --metal` (`packaged_entry_outside_the_set`: a packaged texture whose serial is deleted from the set; without the fix `tex_mtl` returns the `NvPkg` and `-[NvPkg width]` throws).

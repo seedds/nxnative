@@ -201,7 +201,144 @@ static void pro_players_changed(GCController *gone) {
     }
     dm_motion_pro_players(count, player);
 }
-static void pro_devices_changed(void) { pro_players_changed(nil); }
+static void pads_changed(GCController *gone);
+static void pads_changed_now(void) { pads_changed(nil); }
+static void pro_devices_changed(void) { if (g_merge) pro_players_changed(nil); else pads_changed(nil); }
+// Identical pads: GameController can list fewer pads of one model than IOKit has. Two Pro Controllers over USB are listed as one (GitHub issue #1218; their serial numbers
+// match, which may be why). When IOKit has at least two of a model and more than GameController lists, every pad of that model is read here, each a player of its own as a
+// raw HID gamepad is (pad_hid_mac.h): a Switch Pro Controller from its report 0x30 (pad_pro.h), with its gyro, any other model from its HID elements as pad_hid.h reads
+// them (no gyro; buttons in 8BitDo's numbering unless DM_HID_MAP says otherwise). GameController gives a controller no HID identity (motion_pro.h), so it cannot tell which
+// device its controller reads: its controllers of that model are left unread rather than read twice. A pad connected a moment ago may simply not be listed yet, hence the
+// wait before this starts. It stops when GameController lists them all. No rumble or player lights here, and Home does not quit from such a pad. DM_PAD_IDENTICAL=0 turns it off.
+static int g_pro_raw, g_twins_due, g_twins_waiting;
+static int is_pro(GCController *c) { return [c.productCategory isEqualToString:@"Switch Pro Controller"]; }
+static int dupes_off(void) { const char *e = getenv("DM_PAD_IDENTICAL"); return g_merge || (e && !atoi(e)); }
+static void twins_wait(void) {
+    if (g_twins_waiting) return;
+    g_twins_waiting = 1;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ g_twins_waiting = 0; g_twins_due = 1; pads_changed(nil); g_twins_due = 0; });
+}
+static void pro_raw_eval(GCController *gone) {
+    int n = 0, listed = 0;
+    for (pro_device *d = g_pro_devices; d; d = d->next) n++;
+    for (GCController *c in GCController.controllers) if (c != gone && c.extendedGamepad && is_pro(c)) listed++;
+    int want = dupes_off() ? 0 : pad_dupes_want(n, listed, g_pro_raw, g_twins_due);
+    if (want < 0) { twins_wait(); return; }
+    if (want == g_pro_raw) return;
+    LOG("[hid] Pro Controllers: GameController lists %d of %d: %s", listed, n, want ? "reading them all from their HID reports" : "reading them through it again");
+    g_pro_raw = want;
+}
+// Any other model, from the devices pad_hid_mac.h keeps for GameController (g_hidpads_gc) and those read here already; a model is its name, which is GameController's vendorName
+static int same_name(const hid_pad *d, const char *name) { return !strcmp(d->name, name); }
+static int twins_listed(const char *name, GCController *gone) {
+    int n = 0;
+    for (GCController *c in GCController.controllers) if (c != gone && c.extendedGamepad && c.vendorName && !strcmp(c.vendorName.UTF8String, name)) n++;
+    return n;
+}
+static int twins_count(const char *name, int *read) {
+    int n = 0; *read = 0;
+    for (hid_pad *d = g_hidpads_gc; d; d = d->next) if (same_name(d, name)) n++;
+    for (hid_pad *d = g_hidpads; d; d = d->next) if (d->twin && same_name(d, name)) { n++; (*read)++; }
+    return n;
+}
+static int twins_wanted(const char *name) {
+    for (hid_pad *d = g_hidpads_gc; d; d = d->next) if (d->twin_want && same_name(d, name)) return 1;
+    for (hid_pad *d = g_hidpads; d; d = d->next) if (d->twin && d->twin_want && same_name(d, name)) return 1;
+    return 0;
+}
+static void twins_eval(GCController *gone) {
+    int wait = 0;
+    for (int pass = 0; pass < 2; pass++) for (hid_pad *d = pass ? g_hidpads : g_hidpads_gc; d; d = d->next) {
+        if ((pass && !d->twin) || hidpad_own_reader(d)) { d->twin_want = 0; continue; }
+        int read, n = twins_count(d->name, &read), listed = twins_listed(d->name, gone);
+        int want = dupes_off() ? 0 : pad_dupes_want(n, listed, read > 0, g_twins_due);
+        if (want < 0) { want = 0; wait = 1; }
+        d->twin_want = want;
+    }
+    if (wait) twins_wait();
+}
+// Whether a GameController controller is left unread, its pads being read here
+static int pad_is_twin(GCController *c) { return (g_pro_raw && is_pro(c)) || (c.vendorName && twins_wanted(c.vendorName.UTF8String)); }
+// Before GameController's controllers take their slots: the pads of a model GameController lists them all of again leave first
+static void twins_release(void) {
+    for (hid_pad **link = &g_hidpads; *link;) {
+        hid_pad *d = *link; if (!d->twin || d->twin_want) { link = &d->next; continue; }
+        *link = d->next; LOG("[hid] '%s': GameController lists every pad of this model again: read through it", d->name);
+        hidpad_twin_release(d);
+    }
+}
+// After: the pads of a model GameController lists fewer of, by USB location, so the same ports give the same players at the next start
+static void twins_take(GCController *gone) {
+    for (;;) {
+        hid_pad **at = NULL; long loc = 0;
+        for (hid_pad **link = &g_hidpads_gc; *link; link = &(*link)->next) if ((*link)->twin_want) {
+            long l = [(__bridge NSNumber *)IOHIDDeviceGetProperty((*link)->hid, CFSTR(kIOHIDLocationIDKey)) longValue];
+            if (!at || l < loc) { at = link; loc = l; }
+        }
+        if (!at) return;
+        hid_pad *d = *at; *at = d->next; int read, n = twins_count(d->name, &read);
+        LOG("[hid] '%s' (%04x:%04x): GameController lists %d of %d pads of this model: each is read from its HID elements", d->name, d->vid, d->pid, twins_listed(d->name, gone), n + 1);
+        hidpad_twin_read(d);
+    }
+}
+// Its stick calibration, from SPI flash (pad_pro.h): asked when it becomes a player, and twice more a second apart while it has not answered
+static void pro_cal_ask(hid_pad *d, int tries) {
+    uint8_t out[16]; size_t n;
+    n = pad_pro_spi_read(out, (uint8_t)d->pro_counter++, PAD_PRO_SPI_FACTORY, PAD_PRO_SPI_FACTORY_LEN);
+    IOReturn e = IOHIDDeviceSetReport(d->hid, kIOHIDReportTypeOutput, out[0], out, (CFIndex)n);
+    n = pad_pro_spi_read(out, (uint8_t)d->pro_counter++, PAD_PRO_SPI_USER, PAD_PRO_SPI_USER_LEN);
+    if (e == kIOReturnSuccess) e = IOHIDDeviceSetReport(d->hid, kIOHIDReportTypeOutput, out[0], out, (CFIndex)n);
+    if (e != kIOReturnSuccess) { LOG("[hid] Pro Controller '%s': cannot ask its stick calibration (IOReturn 0x%x): its sticks measure themselves", d->name, e); return; }
+    IOHIDDeviceRef hid = d->hid;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        hid_pad *h = g_hidpads; while (h && !(h->is_pro && h->hid == hid)) h = h->next;
+        if (!h || h != d || (h->pro.cal[0] || h->pro.cal[1])) return;   // gone, or answered
+        if (tries > 1) pro_cal_ask(h, tries - 1);
+        else LOG("[hid] Pro Controller '%s': no stick calibration answer: its sticks measure themselves", h->name);
+    });
+}
+static void pro_raw_report(void *pad, const uint8_t *r, size_t len) {
+    hid_pad *d = pad;
+    if (r[0] == 0x21) {
+        int set = pad_pro_spi_reply(&d->pro, r, len);
+        for (int k = 0; k < 2; k++) if (set >> k & 1)
+            LOG("[hid] Pro Controller at USB location 0x%lx: %s stick, %s calibration: rest %d %d, reach %d-%d %d-%d", [(__bridge NSNumber *)IOHIDDeviceGetProperty(d->hid, CFSTR(kIOHIDLocationIDKey)) longValue], k ? "right" : "left", d->pro.cal[k] == 2 ? "user" : "factory",
+                d->pro.rest[2 * k], d->pro.rest[2 * k + 1], d->pro.reach[2 * k][0], d->pro.reach[2 * k][1], d->pro.reach[2 * k + 1][0], d->pro.reach[2 * k + 1][1]);
+        return;
+    }
+    if (!pad_pro_decode(&d->pro, r, len, &d->pro_m, d->pro_s)) return;
+    if (!d->pro_logged) { d->pro_logged = 1; LOG("[hid] Pro Controller at USB location 0x%lx: first report, sticks at rest %d %d, %d %d", [(__bridge NSNumber *)IOHIDDeviceGetProperty(d->hid, CFSTR(kIOHIDLocationIDKey)) longValue], d->pro.rest[0], d->pro.rest[1], d->pro.rest[2], d->pro.rest[3]); }
+    hidpad_read(d);
+    int p = pad_slot_of(&g_slots, d); if (p < 0 || !g_pro_active) return;
+    pro_motion_sample s[3]; int n = pro_motion_decode(&d->motion, r, len, now_ns(), s);
+    for (int i = 0; i < n; i++) dm_motion_set_hid(p, s[i].acc, s[i].rot, s[i].ns);
+}
+static void pro_raw_gone(void *pad) {
+    hid_pad *d = pad, **link = &g_hidpads;
+    while (*link && *link != d) link = &(*link)->next;
+    if (*link) *link = d->next;
+    int p = pad_slot_of(&g_slots, d); if (p >= 0) dm_motion_clear_hid(p);
+    hidpad_detach(d); free(d);
+}
+// Puts the raw players in line with g_pro_raw: by USB location, so the same ports give the same players at the next start
+static void pro_raw_sync(void) {
+    if (!g_pro_raw) { for (pro_device *d = g_pro_devices; d; d = d->next) if (d->pad) { pro_raw_gone(d->pad); d->pad = NULL; } return; }
+    for (;;) {
+        pro_device *next = NULL; long at = 0;
+        for (pro_device *d = g_pro_devices; d; d = d->next) if (!d->pad) {
+            long loc = [(__bridge NSNumber *)IOHIDDeviceGetProperty(d->hid, CFSTR(kIOHIDLocationIDKey)) longValue];
+            if (!next || loc < at) { next = d; at = loc; }
+        }
+        if (!next) return;
+        hid_pad *h = calloc(1, sizeof *h); if (!h) { LOG("[RED] Pro Controller: cannot allocate device state"); return; }
+        pad_hid_init(&h->st, NULL); h->is_pro = 1; h->hid = next->hid;
+        NSString *name = (__bridge NSString *)IOHIDDeviceGetProperty(next->hid, CFSTR(kIOHIDProductKey));
+        snprintf(h->name, sizeof h->name, "%s", name.UTF8String ?: "Pro Controller");
+        h->next = g_hidpads; g_hidpads = h; next->pad = h;
+        hidpad_attach(h);
+        pro_cal_ask(h, 3);
+    }
+}
 // DM_PAD_MERGE: whether a controller still plays player 1 (gone: one just removed, not counted), a GameController one or a raw HID pad (pad_hid_mac.h)
 static int merge_pads_left(GCController *gone) {
     if (g_hidpads) return 1;
@@ -222,8 +359,11 @@ static void pads_changed(GCController *gone) {
         pro_players_changed(gone);
         return;
     }
+    pro_raw_eval(gone); twins_eval(gone);
+    if (!g_pro_raw) pro_raw_sync();   // the raw players leave first: their slots go back to GameController's controllers below
+    twins_release();
     NSArray<GCController *> *now = GCController.controllers; char nb[16];
-    for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p] && (g_held[p] == gone || ![now containsObject:g_held[p]])) {
+    for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p] && (g_held[p] == gone || ![now containsObject:g_held[p]] || pad_is_twin(g_held[p]))) {
         npad_name(p, nb, sizeof nb); LOG("controller '%s' disconnected: player %d (npad %s) is free", pad_name(g_held[p]), p + 1, nb);
         g_held[p].extendedGamepad.valueChangedHandler = nil;
         dm_motion_detach(g_held[p], p);
@@ -232,6 +372,7 @@ static void pads_changed(GCController *gone) {
         dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
     }
     for (GCController *c in now) if (c.extendedGamepad && c != gone && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) {
+        if (pad_is_twin(c)) { pad_keep_system_buttons(c); c.extendedGamepad.valueChangedHandler = nil; continue; }   // Home and Capture still stay out of macOS's hands; no input from it
         int p = pad_slot_take(&g_slots, (__bridge const void *)c, pad_name(c));
         if (p < 0) { LOG("controller '%s' connected: all %d players are taken, not used", pad_name(c), DM_PLAYERS); continue; }
         g_held[p] = c; pad_keep_system_buttons(c);
@@ -240,6 +381,8 @@ static void pads_changed(GCController *gone) {
         npad_name(p, nb, sizeof nb); LOG("controller '%s' connected: player %d (npad %s)%s", pad_name(c), p + 1, nb, c.motion.hasRotationRate ? ", with motion (gyro)" : "");
         pad_read(c.extendedGamepad);
     }
+    if (g_pro_raw) pro_raw_sync();
+    twins_take(gone);
     dm_pad_players(pad_slot_mask(&g_slots));
     pro_players_changed(gone);
 }
@@ -289,6 +432,7 @@ static void input_resume(void) {
 static void hidpad_read(hid_pad *d) {
     if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
     int p = g_merge ? 0 : pad_slot_of(&g_slots, d); if (p < 0) return;
+    if (d->is_pro) { pad_set(p, d->pro_m, d->pro_s[0], d->pro_s[1], d->pro_s[2], d->pro_s[3]); return; }
     int32_t s[4]; pad_hid_sticks(&d->st, s);
     pad_set(p, pad_hid_buttons(&d->st), s[0], s[1], s[2], s[3]);
 }
@@ -417,6 +561,7 @@ static void pads_start(void) {
     hq_start();
     pads_changed(nil);
     hq_log_setting();
+    g_pro_raw_report = pro_raw_report; g_pro_raw_gone = pro_raw_gone; g_hidpad_changed = pads_changed_now;
     dm_motion_pro_start(pro_devices_changed);
     hidpad_start();
 }

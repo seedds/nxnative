@@ -8,12 +8,13 @@
 #include "dm_input.h"
 #include <stdlib.h>
 
-typedef struct pro_device { IOHIDDeviceRef hid; uint8_t report[512]; pro_motion motion; struct pro_device *next; } pro_device;
+typedef struct pro_device { IOHIDDeviceRef hid; uint8_t report[512]; pro_motion motion; void *pad; struct pro_device *next; } pro_device;   // pad: its raw player, when front_mac.m reads it as one
 static IOHIDManagerRef g_pro_manager;
 static pro_device *g_pro_devices, *g_pro_bound;
 static int g_pro_player = -1, g_pro_active = 1, g_pro_controllers, g_pro_slot = -1;
 static int g_pro_seen_devices = -1, g_pro_seen_controllers = -1;
 static void (*g_pro_changed)(void);
+static void (*g_pro_raw_report)(void *pad, const uint8_t *r, size_t len), (*g_pro_raw_gone)(void *pad);   // front_mac.m's, for a device with a pad
 
 static void pro_route(void) {
     int n = 0; for (pro_device *d = g_pro_devices; d; d = d->next) n++;
@@ -36,7 +37,9 @@ static void dm_motion_pro_active(int active) {
 static void pro_report(void *ctx, IOReturn result, void *sender, IOHIDReportType type, uint32_t report_id, uint8_t *r, CFIndex len) {
     (void)sender;
     pro_device *d = ctx;
-    if (result != kIOReturnSuccess || type != kIOHIDReportTypeInput || report_id != 0x30 || len < 0 || !g_pro_active || d != g_pro_bound) return;
+    if (result != kIOReturnSuccess || type != kIOHIDReportTypeInput || len < 0) return;
+    if (d->pad) { if (report_id == 0x30 || report_id == 0x21) g_pro_raw_report(d->pad, r, (size_t)len); return; }   // 0x21: its stick calibration (front_mac.m)
+    if (report_id != 0x30 || !g_pro_active || d != g_pro_bound) return;
     pro_motion_sample samples[3];
     int n = pro_motion_decode(&d->motion, r, (size_t)len, now_ns(), samples);
     for (int i = 0; i < n; i++) dm_motion_set_hid(g_pro_player, samples[i].acc, samples[i].rot, samples[i].ns);
@@ -58,6 +61,7 @@ static void pro_removed(void *ctx, IOReturn result, void *sender, IOHIDDeviceRef
     pro_device *d = *link; *link = d->next;
     // Unregister while its buffer / context still exist. The main run loop serializes removal with report callbacks.
     IOHIDDeviceRegisterInputReportCallback(hid, d->report, sizeof d->report, NULL, NULL);
+    if (d->pad) { g_pro_raw_gone(d->pad); d->pad = NULL; }
     if (g_pro_changed) g_pro_changed(); else pro_route();
     CFRelease(d->hid); free(d);
 }
@@ -70,7 +74,7 @@ static void dm_motion_pro_start(void (*changed)(void)) {
     IOHIDManagerRegisterDeviceMatchingCallback(g_pro_manager, pro_found, NULL);
     IOHIDManagerRegisterDeviceRemovalCallback(g_pro_manager, pro_removed, NULL);
     IOHIDManagerScheduleWithRunLoop(g_pro_manager, CFRunLoopGetMain(), kCFRunLoopCommonModes);
-    IOReturn r = IOHIDManagerOpen(g_pro_manager, kIOHIDOptionsTypeNone);   // nonexclusive, no output / feature reports
+    IOReturn r = IOHIDManagerOpen(g_pro_manager, kIOHIDOptionsTypeNone);   // nonexclusive; the only output report is front_mac.m's read of an identical pad's stick calibration
     if (r != kIOReturnSuccess) {
         LOG("[RED] Pro Controller raw motion: cannot open HID (0x%x); keeping GameController motion", r);
         IOHIDManagerUnscheduleFromRunLoop(g_pro_manager, CFRunLoopGetMain(), kCFRunLoopCommonModes);

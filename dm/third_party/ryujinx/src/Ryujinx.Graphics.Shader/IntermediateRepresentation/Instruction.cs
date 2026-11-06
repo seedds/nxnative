@@ -141,6 +141,12 @@ namespace Ryujinx.Graphics.Shader.IntermediateRepresentation
 
     static class InstructionExtensions
     {
+        // These instructions must execute at their original position even when their result is unused.
+        public static bool HasSideEffects(this Instruction inst)
+        {
+            return inst.IsAtomic() || (inst & Instruction.Mask) is Instruction.ImageAtomic or Instruction.Call;
+        }
+
         public static bool IsAtomic(this Instruction inst)
         {
             switch (inst & Instruction.Mask)

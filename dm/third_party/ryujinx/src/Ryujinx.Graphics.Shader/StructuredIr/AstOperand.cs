@@ -12,6 +12,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
         public OperandType Type { get; }
 
         public AggregateType VarType { get; set; }
+        public bool AddressTaken { get; set; }
 
         public int Value { get; }
 

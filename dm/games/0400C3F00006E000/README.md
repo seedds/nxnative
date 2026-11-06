@@ -76,6 +76,19 @@ Whole groups of trees and bushes vanished or appeared in one frame while the cam
 
 Resolved on the base game, on chain `d5fe9ae8bfba` (M6, 16 GB, another session's game running at the same time): at Crown City the array's `y` stays at or below 0.9 and the sky shots show no panels, and desert scenes checked with an earlier host that remapped the slots show none either. The first race, on the route of `measure.sh`, keeps a frame median of 16.6 to 16.7 ms and a 95th percentile of 17 to 18 ms, with GPU time 7.2 to 7.7 ms and resident memory 11.4 GB. That matches runs from before the fix, so reading real data costs nothing measurable there. One run reached 14 to 15 ms of GPU time and did not repeat. 1.8.0 has not been run here.
 
+## HDR output
+
+With the HDR output setting (`DM_HDR=1`), on the base game to the title screen on the Mac:
+
+- Like [Donkey Kong Bananza](../040074A01BF12000/README.md#hdr-output), the game boots an RGBA8 window (format 0x25), queries `vi::QueryDisplayHdrStatus`, then makes an RGB10A2 window (0x3d). It declares the same luminance ranges, SDR 0 to 203 nits and extended 0 to 1000, and sets no content gamut before the title.
+- The present decodes the window as PQ. A screenshot through `DM_NVN_SHOT_OUT` (decoded to SDR) shows the title with its colours and crop. No new `[RED]` line with it on.
+- It asks for the HDR status every frame (over 1,000 queries in 80 s) and queries the paper white (203 nits). Its window moved to an SDR monitor (a Dell P3424WEB), the next query answered SDR and the game made its SDR window (0x25) again; moved back to the built-in screen, its HDR window (0x3d). Each move between the two screens dropped 6 to 82 frames of 300 around it; told HDR on any screen (`DM_HDR=2`), so that it never rebuilt its window, it dropped as many (7 to 81). The drops come from the move, not the rebuild.
+- On the SDR monitor, its own SDR picture (`DM_HDR=1`) looked less saturated than its HDR picture mapped down by Core Animation (`DM_HDR=2`), by eye side by side. Which is better was left open.
+- Its declared extended range is 0 to 1000 nits while it makes the HDR window, then 0 to 1801 at the title.
+- Brighter than SDR, by the game's own grade: its title logo, the same image in both modes, is about 1.8 times brighter in linear light and more saturated in the decoded screenshot. That fits its SDR colours taken as Display P3 and drawn near 360 nits.
+- The host's own highlight roll-off against Core Animation's mapping by the layer's HDR10 metadata, which replaced it ([the reference entry](../../../docs/reference/rendering.md#the-status-query-and-the-present-for-an-hdr-window)): side by side on the built-in screen they looked alike. In a window on the built-in screen of a MacBook Pro (M4 Pro, macOS 26.7.1), 80 s to the title each, `DM_PRESENT_SHOWN=1`. From the present call to on screen, p50 per 300 frames: SDR 49.58 to 49.68 ms, the host's roll-off 49.53 to 49.61, Core Animation 49.52 to 49.59. Every frame reached the display-link tick it was meant for (p50 within 0.03 ms), and each dropped 0 to 3 of 300 frames. The metadata adds no frame here.
+- On a MacBook Air M5 (macOS 27.0.1, built-in screen), in play: with the RGBA16Float extended-range layer, black blocks with coloured squares in them flashed over the course map's water, now and then and after ⌘-Tab back to the game; the game's frames were clean. The RGB10A2 PQ layer has none, colours the same by eye ([the reference entry](../../../docs/reference/rendering.md#the-status-query-and-the-present-for-an-hdr-window)).
+
 ## Driving it on the Mac
 
 The work folder `0400C3F00006E000-work` beside the dump has `rewrite.sh`, `rebuild.sh` (host copy `build/mkwhost`), `split.sh`, `shaders.sh`, `play.sh` (boots headless with `DM_CTL=run/ctl.txt`), `ctl.sh` (control lines; `wait S`, `snap NAME`), `to_race.sh` and `measure.sh <log>`. From a boot at the title (about 80 s): `to_race.sh` presses L+R, then A nine times with waits (Single Player, Grand Prix, Mario, the kart, the Mushroom Cup, 50cc, "Start Grand Prix?"). The opening and the race's start then take about a minute; `A~40` drives. `measure.sh` does all of this, waits for the race (over 1,500 draws a frame, no movie thread), and writes the timing and the `restop` residency lines to `run/<log>.res`. Control presses run in order, so `A~40` holds up later lines.
@@ -92,6 +105,7 @@ Update 1.8.0 (v917504, SDK 21.4.0) is not on this Mac. Pull request #1116 ported
 - **Mesh draws:** `DrawMeshTasks3D` and the indirect forms are not implemented; no run reached them.
 - `649e36162cad9e79`, a foliage shader with an 8x8 local size, keeps a first-invocation race: its setup loops over a uniform's count, so [the host cannot make it as stores](../../../docs/reference/shaders.md#a-store-only-a-dispatchs-first-invocation-makes). Its list's count read 0 in every one of 7,350 traced title frames, so the race had nothing to act on there; whether that list should be empty is not known.
 - The engine class screen offers 50, 100 and 150cc in this build.
+- **HDR:** only the title was run with HDR on. The window's primaries are taken to be BT.2020, as on Donkey Kong Bananza, but are not measured here. On an EDR screen the picture looked slightly brighter than SDR (by eye, one MacBook Pro). Fullscreen is not timed.
 
 ## Found on this game
 
@@ -105,6 +119,7 @@ Update 1.8.0 (v917504, SDK 21.4.0) is not on this Mac. Pull request #1116 ported
 - [Uncompressed storage the CPU wrote, in a pool the GPU has not written](../../../docs/reference/nvn-objects.md#uncompressed-storage-the-cpu-wrote-in-a-pool-the-gpu-has-not-written)
 - [Comparisons with .FTZ](../../../docs/reference/shaders.md#comparisons-with-ftz)
 - [Variable rate shading ignored](../../../docs/reference/rendering.md#variable-rate-shading-ignored)
+- [The status query and the present for an HDR window](../../../docs/reference/rendering.md#the-status-query-and-the-present-for-an-hdr-window): the same HDR window as Donkey Kong Bananza's
 - [A DualShock 4 that connects after the first stays on Core Haptics](../../../docs/reference/services.md#a-dualshock-4-that-connects-after-the-first-stays-on-core-haptics)
 - [Scaled shared memory addresses](../../../docs/reference/shaders.md#scaled-shared-memory-addresses)
 - [iOS ends the app once the guest's touched pages reach its memory limit](../../../docs/reference/memory.md#ios-ends-the-app-once-the-guests-touched-pages-reach-its-memory-limit)

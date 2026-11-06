@@ -1,6 +1,7 @@
 // nn::vi (display layer): on a real device, the vi service is used to open the display, create a layer and get the native window handle; the handle is passed to NVN's window builder.
 // Host: returns host static objects; when hooking up Metal, the native window corresponds to the front end's CAMetalLayer (front_metal_layer()).
 #include "../host/hle.h"
+#include <math.h>
 #include <stdatomic.h>
 
 static struct { uint32_t magic; } g_display = {0x50534944}, g_layer = {0x5259414c};
@@ -119,13 +120,69 @@ HLE_FORCE("_ZN2nn2vi8FinalizeEv", "display service shutdown; the host has no vi 
 
 // ---------- Switch 2 SDKs: HDR, VRR and extended swap intervals ----------
 // The SDK's versions check the display against its own default display object and forward the layer to vi2, whose layer object the host never made (Donkey Kong Bananza: a call
-// through null from SetLayerNextHdrContentGamutMetadata, main+0x2036f4). The host's output is SDR at a fixed refresh rate: no HDR output, no VRR, and the layer metadata has
-// nothing to apply to. HdrOutputFormat 0 is SDR; paper white is the BT.2408 reference, 203 nits, read only when HDR is on
-HLE_FORCE("_ZN2nn2vi21QueryDisplayHdrStatusEPbPNS0_15HdrOutputFormatEPtPKNS0_7DisplayE", "display HDR status: SDR output (the host presents SDR)", Result, h_vi_HdrStatus,
+// through null from SetLayerNextHdrContentGamutMetadata, main+0x2036f4). No VRR on the host, and SDR unless DM_HDR=1. Paper white is the BT.2408 reference, 203 nits (DM_HDR_PAPER_WHITE overrides it while HDR is on)
+// DM_HDR=1 is the HDR mode (Switch 2 games; the HDR output setting of the Mac and iOS launchers sets it): while the window's screen can show EDR (front_hdr_screen), the display reports HDR on, so the
+// game takes its HDR path (its window becomes HDR10: RGB10A2 with PQ values in BT.2020). On a screen without EDR it reports SDR, and the game keeps its own SDR picture.
+// The HDR layer takes the PQ window as it is (dm_hdr_layer_float below); Core Animation maps it into the screen's headroom by the layer's HDR10 metadata (front_mac.m, front_ios.m)
+// The format is 1 with HDR on and 0 with it off: the SDK's own answer is on = (format == 1), and a format above 1 is an error, 0x272 (Donkey Kong Bananza v458752,
+// nn::vi::detail::DefaultDisplay::QueryHdrStatus, sdk+0x55bd60; found in pull request #1249). The peak (DM_HDR_PEAK, default 1000) is the extended luminance range the game declares (its metadata call, below). Neither it nor the paper white has a launcher setting: they are what a console's HDR calibration would set
+// Donkey Kong Bananza boots its SDR window (0x25), queries the status, then makes an RGB10A2 window (0x3d) of PQ code values with SDR white at 203 nits.
+// Neither it nor Mario Kart World imports the SDK's HDR status event (CreateHdrStatusEvent and the rest), so a game learns of another screen only by asking again: the queries are counted in the log
+// A decimal number, clamped to 16 bits (the answers are 16-bit)
+static uint32_t vi_env_u32(const char *name, uint32_t def) { const char *e = getenv(name); if (!e || !*e) return def; unsigned long v = strtoul(e, NULL, 10); return v > 65535 ? 65535 : (uint32_t)v; }
+// The HDR mode: 0 off, 1 HDR while the window's screen can show EDR, 2 HDR on any screen. DM_HDR is read the way the front ends read it (atoi: 2, or any other non-zero
+// number for 1) when first asked; the front end changes it while the game runs (dm_hdr_set_mode: the iOS in-game menu), and the game, which asks for its status every frame,
+// switches its window on its next query, as when the window moves to another screen. For Switch 2 games only (dm_sdk_ounce): a Switch 1 game answers SDR
+static _Atomic int g_vi_hdr_mode = -1;   // -1 until DM_HDR is read
+static _Atomic int g_vi_hdr_live;        // the mode was changed while the game runs: its SDR answers are logged too
+int dm_hdr_mode(void) {
+    int m = atomic_load(&g_vi_hdr_mode);
+    if (m >= 0) return m;
+    const char *e = getenv("DM_HDR"); int v = e && *e ? atoi(e) : 0, unread = -1;
+    atomic_compare_exchange_strong(&g_vi_hdr_mode, &unread, v == 2 ? 2 : v != 0);   // a mode set meanwhile by the front end wins
+    return atomic_load(&g_vi_hdr_mode);
+}
+void dm_hdr_set_mode(int m) {
+    m = m == 2 ? 2 : m != 0;
+    if (atomic_exchange(&g_vi_hdr_mode, m) != m) { atomic_store(&g_vi_hdr_live, 1); LOG("[nvn2-hdr] HDR output %s while the game runs", m == 2 ? "on any screen" : m ? "on" : "off"); }
+}
+static int vi_hdr_on(void) { return dm_hdr_mode() && dm_sdk_ounce(); }
+// Whether the window's screen can show EDR (its potential headroom is above 1): the front end reads it before the guest starts and whenever the window's screen changes (front_mac.m, front_ios.m).
+// No front end (a windowless run): taken as yes, so DM_HDR alone decides
+__attribute__((weak)) int front_hdr_screen(void) { return 1; }
+// The game's declared extended luminance range in nits, for the HDR layer's HDR10 metadata (front_mac.m and front_ios.m): Core Animation maps the picture into the screen's headroom by it; none without a front end
+__attribute__((weak)) void front_hdr_content_range(unsigned lo, unsigned hi) { (void)lo; (void)hi; }
+// The paper white in nits, read once (the present and the front ends take it from here too; nvn_mtl.m present_paper_white): a number from 1 to 65535, else 203
+static float vi_paper_white_v;
+static void vi_paper_white_read(void) { const char *e = getenv("DM_HDR_PAPER_WHITE"); double v = e && *e ? strtod(e, NULL) : 203.0; vi_paper_white_v = (v >= 1.0 && v <= 65535.0) ? (float)v : 203.0f; }
+float dm_hdr_paper_white(void) { static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, vi_paper_white_read); return vi_paper_white_v; }   // pthread_once: every guest thread sees the value written before
+// The HDR layer of both front ends (front_mac.m, front_ios.m): RGB10A2 in BT.2100 PQ, which takes the game's HDR10 window as it is, unless DM_HDR_LAYER=float: the RGBA16Float extended linear
+// BT.2020 layer it replaced, which showed black blocks over flat areas on a MacBook Air M5 (docs/reference/rendering.md, the status query and the present for an HDR window)
+int dm_hdr_layer_float(void) { const char *e = getenv("DM_HDR_LAYER"); return e && !strcmp(e, "float"); }
+// Set once the game's status query has answered HDR on: its RGB10A2 window then holds PQ code values (present_mode, nvn_mtl.m); an RGB10A2 window of a game that never asked for HDR is not decoded.
+// It stays set when the window later moves to a screen without EDR: the game keeps its HDR window until it asks again, and the present still decodes it
+static _Atomic int g_vi_hdr_answered;
+int vi_hdr_answered(void) { return atomic_load(&g_vi_hdr_answered); }
+HLE_FORCE("_ZN2nn2vi21QueryDisplayHdrStatusEPbPNS0_15HdrOutputFormatEPtPKNS0_7DisplayE", "display HDR status: SDR output, or HDR on with DM_HDR=1 on a screen that can show EDR", Result, h_vi_HdrStatus,
           uint8_t *on, uint32_t *fmt, uint16_t *peak, const void *disp) {
-    (void)disp; if (on) *on = 0; if (fmt) *fmt = 0; if (peak) *peak = 0; return RES_OK; }
-HLE_FORCE("_ZN2nn2vi25QueryDisplayHdrPaperWhiteEPtPKNS0_7DisplayE", "display HDR paper white: 203 nits (BT.2408); HDR is off", Result, h_vi_PaperWhite, uint16_t *nits, const void *disp) {
-    (void)disp; if (nits) *nits = 203; return RES_OK; }
+    (void)disp;
+    int mode = dm_sdk_ounce() ? dm_hdr_mode() : 0;
+    if (!mode && !atomic_load(&g_vi_hdr_live)) { if (on) *on = 0; if (fmt) *fmt = 0; if (peak) *peak = 0; return RES_OK; }   // off from the start: SDR, not logged
+    // DM_HDR=2 answers HDR whatever the screen: on a screen without headroom Core Animation maps the HDR picture down instead of the game drawing its own SDR one (on Mario Kart World, more saturated than its SDR)
+    int forced = mode == 2, hdr = mode && (forced || front_hdr_screen() != 0);
+    uint32_t p = vi_env_u32("DM_HDR_PEAK", 1000);
+    // Logged when the answer changes, and at the 1st, 2nd, 10th, 100th and 1000th query: whether the game asks again (and so can follow the window to another screen)
+    static atomic_int queries, last = -1;
+    int n = atomic_fetch_add(&queries, 1) + 1, was = atomic_exchange(&last, hdr);
+    if (was != hdr || n == 1 || n == 2 || n == 10 || n == 100 || n == 1000)
+        LOG("[nvn2-hdr] vi::QueryDisplayHdrStatus (query %d): %s", n, hdr ? (forced && !front_hdr_screen() ? "HDR on, format 1 (DM_HDR=2: on a screen without EDR)" : "HDR on, format 1")
+            : mode ? "SDR (DM_HDR is on, but the window's screen cannot show EDR)" : "SDR (HDR output turned off while the game runs)");
+    if (hdr) atomic_store(&g_vi_hdr_answered, 1);
+    if (on) *on = (uint8_t)hdr; if (fmt) *fmt = (uint32_t)hdr; if (peak) *peak = hdr ? (uint16_t)p : 0; return RES_OK; }
+HLE_FORCE("_ZN2nn2vi25QueryDisplayHdrPaperWhiteEPtPKNS0_7DisplayE", "display HDR paper white: 203 nits (BT.2408) unless DM_HDR_PAPER_WHITE", Result, h_vi_PaperWhite, uint16_t *nits, const void *disp) {
+    (void)disp; uint16_t v = vi_hdr_on() ? (uint16_t)lroundf(dm_hdr_paper_white()) : 203;   // dm_hdr_paper_white is 1 to 65535, so the cast is in range; 203 while HDR is off, as before
+    static atomic_int n; if (vi_hdr_on() && atomic_fetch_add(&n, 1) < 3) LOG("[nvn2-hdr] vi::QueryDisplayHdrPaperWhite: %u nits", v);
+    if (nits) *nits = v; return RES_OK; }
 HLE_FORCE("_ZN2nn2vi24QueryDisplayVrrSupportedEPbPKNS0_7DisplayE", "display VRR: not supported (fixed refresh rate)", Result, h_vi_VrrSupported, uint8_t *on, const void *disp) {
     (void)disp; if (on) *on = 0; return RES_OK; }
 HLE_FORCE("_ZN2nn2vi23SetDisplayVrrCapabilityEPNS0_7DisplayEb", "display VRR capability: the host has no VRR", Result, h_vi_SetVrr, void *disp, unsigned on) {
@@ -151,14 +208,22 @@ HLE_FORCE("_ZN2nn2vi28SetLayerExtendedSwapIntervalEPNS0_5LayerEii", "layer exten
           void *layer, int a, int b) {
     (void)layer; static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("vi::SetLayerExtendedSwapInterval %d %d: no VRR on the host, the NVN swap interval stays", a, b); return RES_OK; }
 HLE_FORCE("_ZN2nn2vi30ClearLayerExtendedSwapIntervalEPNS0_5LayerE", "layer extended swap interval cleared", Result, h_vi_ExtSwapClear, void *layer) { (void)layer; return RES_OK; }
-HLE_FORCE("_ZN2nn2vi35SetLayerNextHdrContentGamutMetadataEPNS0_5LayerENS0_15HdrContentGamutE", "layer HDR metadata: SDR output, nothing to apply", Result, h_vi_HdrGamut, void *layer, int g) {
-    (void)layer; (void)g; return RES_OK; }
-HLE_FORCE("_ZN2nn2vi39SetLayerNextHdrToSdrToneMappingMetadataEPNS0_5LayerENS0_14HdrToneMappingE", "layer HDR metadata: SDR output, nothing to apply", Result, h_vi_HdrToneMap, void *layer, int m) {
-    (void)layer; (void)m; return RES_OK; }
-HLE_FORCE("_ZN2nn2vi52SetLayerNextHdrExtendedContentLuminanceRangeMetadataEPNS0_5LayerEtt", "layer HDR metadata: SDR output, nothing to apply", Result, h_vi_HdrExtLum,
-          void *layer, uint32_t lo, uint32_t hi) { (void)layer; (void)lo; (void)hi; return RES_OK; }
-HLE_FORCE("_ZN2nn2vi52SetLayerNextHdrStandardContentLuminanceRangeMetadataEPNS0_5LayerEtt", "layer HDR metadata: SDR output, nothing to apply", Result, h_vi_HdrStdLum,
-          void *layer, uint32_t lo, uint32_t hi) { (void)layer; (void)lo; (void)hi; return RES_OK; }
+// The SDK's HDR metadata calls for the layer (the gamut the game declares, its tone mapping to SDR, its luminance ranges): the host sends none of them to the screen but the extended range, which becomes the layer's HDR10 metadata.
+// The first three of each are logged: the game's own statement of the gamut and luminance it targets, as it passed them (the luminance ranges are in nits: 0..203 and 0..1000 on Donkey Kong Bananza and Mario Kart World)
+#define VI_META_LOG(...) do { static atomic_int n_; if (vi_hdr_on() && atomic_fetch_add(&n_, 1) < 3) LOG(__VA_ARGS__); } while (0)   // logged only while HDR is on
+HLE_FORCE("_ZN2nn2vi35SetLayerNextHdrContentGamutMetadataEPNS0_5LayerENS0_15HdrContentGamutE", "layer HDR metadata: dropped (the host sends none); the gamut is logged", Result, h_vi_HdrGamut, void *layer, int g) {
+    (void)layer; VI_META_LOG("[nvn2-hdr] vi::SetLayerNextHdrContentGamutMetadata: gamut %d (dropped)", g); return RES_OK; }
+HLE_FORCE("_ZN2nn2vi39SetLayerNextHdrToSdrToneMappingMetadataEPNS0_5LayerENS0_14HdrToneMappingE", "layer HDR metadata: dropped (the host sends none); the tone mapping is logged", Result, h_vi_HdrToneMap, void *layer, int m) {
+    (void)layer; VI_META_LOG("[nvn2-hdr] vi::SetLayerNextHdrToSdrToneMappingMetadata: tone mapping %d (dropped)", m); return RES_OK; }
+HLE_FORCE("_ZN2nn2vi52SetLayerNextHdrExtendedContentLuminanceRangeMetadataEPNS0_5LayerEtt", "layer HDR metadata: dropped (the host sends none); the luminance range is logged", Result, h_vi_HdrExtLum,
+          void *layer, uint32_t lo, uint32_t hi) {   // passed on to the HDR layer's metadata (front_hdr_content_range)
+    (void)layer; VI_META_LOG("[nvn2-hdr] vi::SetLayerNextHdrExtendedContentLuminanceRangeMetadata: %u..%u", lo & 0xffff, hi & 0xffff);
+    // Each change after that is logged too, the first 20 (Mario Kart World declares 0..1000 nits while it makes its HDR window, then 0..1801 at its title)
+    static _Atomic uint32_t last; static atomic_int changes; uint32_t r = (lo & 0xffff) | (hi & 0xffff) << 16, was = atomic_exchange(&last, r);
+    if (vi_hdr_on() && was && was != r && atomic_fetch_add(&changes, 1) < 20) LOG("[nvn2-hdr] vi::SetLayerNextHdrExtendedContentLuminanceRangeMetadata: now %u..%u (was %u..%u)", r & 0xffff, r >> 16, was & 0xffff, was >> 16);
+    if (vi_hdr_on()) front_hdr_content_range(lo & 0xffff, hi & 0xffff); return RES_OK; }
+HLE_FORCE("_ZN2nn2vi52SetLayerNextHdrStandardContentLuminanceRangeMetadataEPNS0_5LayerEtt", "layer HDR metadata: dropped (the host sends none); the luminance range is logged", Result, h_vi_HdrStdLum,
+          void *layer, uint32_t lo, uint32_t hi) { (void)layer; VI_META_LOG("[nvn2-hdr] vi::SetLayerNextHdrStandardContentLuminanceRangeMetadata: %u..%u (dropped)", lo & 0xffff, hi & 0xffff); return RES_OK; }
 // The rest of SDK 22's layer HDR metadata calls (the Bezier tone curve and the clears): the SDK forwards them through a table its graphics system fills, which is null on the host, so
 // unanswered they call through null (Mario Kart World 1.8.0 sets the curve every frame, by pull request #1116)
 HLE_FORCE("_ZN2nn2vi39SetLayerNextHdrAdjustableBezierMetadataEPNS0_5LayerEfff", "layer HDR metadata: SDR output, nothing to apply", Result, h_vi_HdrBezier,

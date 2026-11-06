@@ -693,3 +693,26 @@ Games read this count as a position in their own command memory and size their h
 ### `nvnPrivate0`, an inlined command-buffer fast path flag
 
 - `nvnPrivate0`, a new SDK 20 import, needs nothing: it is a flag in `sdk`'s bss that enables an inlined command-buffer fast path when the NVN driver sets it (it stays 0). Found on [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0, SDK 20.5.22).
+
+### Cached dirty-range lookups with overlapping pools
+
+- **Symptom:** sparse-texture checks spend substantial submission CPU time searching thousands of memory pools. A cache of any containing live range can also miss writes to a shared host page and leave texture content stale.
+- **Cause:** each sparse physical run calls `nvn_dirty_since`. Its `find_span` first tries the most recently matched descriptor, then scans from slot zero if that shortcut misses. Host-page rounding can make several descriptors contain the same span, but their page generations need not agree: a write stamps the descriptor that was protected, while a never-protected neighbour can still have generation zero. A cache that changes which descriptor wins therefore changes correctness. Reusing an earlier slot can change the first match even when the cached later descriptor remains live.
+- **Fix:** retain eight descriptors per thread, together with the bounds that made every earlier live descriptor fail the original lookup. A hit must satisfy those exclusions as well as the selected descriptor's bounds, preserving the first containing slot. Registration and retirement bracket descriptor changes with an odd/even epoch; every thread rejects cached entries from an older epoch, including on slot reuse. Cleanliness and page generations are always read anew. The fault path takes no new lock. This preserves the existing lifetime assumptions of retained span handles; it does not provide general reclamation for a reader racing a pool's destruction and reuse.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md). Its historical slow-run sample repeatedly reaches this scan through sparse-texture checks. The missed-write bug was reproduced in a CPU fixture, not attributed to a particular gameplay image.
+- **Check:** `t_dirty_slots` covers both orders of adjacent pools sharing a host page, a cached later descriptor superseded by an earlier reused slot on another thread, and retirement of a cached match. After the readability review, the same fixture linked against upstream `02c91cd4` fails five assertions; all assertions pass with this change. `t_dirty_race`, `t_dirty_retire_race` and focused LLVM 23.1.4 lint also pass. The epoch invalidates lookup selections; it does not extend descriptor lifetime or make concurrent pool destruction safe for retained handles.
+
+CPU-only measurement on an Apple M5 Max, macOS 27.0 build 26A428, Apple clang 21.0.0 `-O1` (2026-11-02): the production `nvn_dirty_since` checks 64 KiB runs within 5,000 pools of 1 MiB. Pool storage is reserved without access; the benchmark reads only the tracker's page generations and verifies every dirty result. Each scenario starts on a new thread with an empty TLS cache and a deterministic warmup. Four runs per version use ABBA ordering, background QoS and nice 20; the table gives median **thread CPU nanoseconds per lookup**. The historical baseline is `0a759de7864b8c22bc0d9f596bb6b9a6f1c45486`, before the newer upstream single-entry shortcut; no app or GPU is involved. These numbers were not rerun against current main and do not measure this proposal against that shortcut.
+
+| Lookup sequence | Historical baseline | Corrected cache |
+|---|---:|---:|
+| First pool only | 8.4 | 12.2 |
+| Last pool only, varying offsets | 13,646.6 | 13.6 |
+| Last 4 pools, round robin | 16,055.0 | 16.7 |
+| Last 8 pools, round robin | 13,143.6 | 20.2 |
+| Last 9 pools, round robin | 15,664.3 | 17,526.8 |
+| Last 32 pools, round robin | 16,268.6 | 15,509.6 |
+| All 5,000 pools, sequential | 5,501.1 | 6,362.7 |
+| Untracked span | 14,831.3 | 16,045.2 |
+
+The gain depends on locality: cached late-slot lookups avoid the entire scan, while misses and already-cheap early-slot lookups can cost more. Background scheduling and changing core frequency produce noticeable variation; for the eight-pool case the four runs span 11,736.6–15,415.1 ns on that baseline and 15.6–23.7 ns with the cache. These are synthetic component measurements, not game frame times or FPS, and the game's actual hit rate remains unmeasured. Reproduction artifacts are in the MKW work folder's `analysis/perf-20261102/dirty-range-benchmark`: `run.py`, `bench.c`, both source snapshots, compiler commands and hashes in `identity.json`, individual TSVs and `results.json`. The command is `python3 run.py --base 0a759de7864b8c22bc0d9f596bb6b9a6f1c45486 --cycles 2`; compiling the retained snapshots with the recorded commands preserves the measured source versions after later repository edits.

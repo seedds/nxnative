@@ -77,6 +77,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 
 ## Found on this game
 
+- [Freeing a memory pool during a texture ID walk](../../../docs/reference/nvn-objects.md#freeing-a-memory-pool-during-a-texture-id-walk): the `-[NvPkg buffer]: unrecognized selector` crash after a save or a scene change.
 - [HMMA chains keep their matrices in the SIMD-group](../../../docs/reference/shaders.md#hmma-chains-keep-their-matrices-in-the-simd-group): the NDVE movie networks behind the title and the opening, 14.8 → 11.4 ms of compute a frame on this M6.
 - [Raw global memory lookups that start from their last entry](../../../docs/reference/shaders.md#raw-global-memory-lookups-that-start-from-their-last-entry): the foliage, vertex and compute shaders read structures word by word through loaded addresses; about 2 ms less GPU a frame at the spawn point.
 - [The GPU idles with the next command buffer already committed](../../../docs/reference/frame-rate.md#the-gpu-idles-with-the-next-command-buffer-already-committed): the 25-40 ms frames.

@@ -785,14 +785,16 @@ def const_sampler(name):
 def decode_ubo_tex(name):
     """Bindless texture: the handle is written by the game into its own uniform buffer (fp_t_cb7_2A = c[7] word 0x2A). Returns (texture: (uniform slot, byte offset), sampler: (slot, offset));
     handle type 0 = combined handle (one 32-bit word: low 20 bits texture ID, high 12 bits sampler ID), 1 = the sampler handle is in another word (its slot is the high 16 bits of slots − 1). This game's whole library uses only type 0 (1850 shaders)
-    Type 3: the sampler is a constant ID (Monster Hunter Rise: a texture handle at c[5] word 0x28 with sampler 0x104); the sampler part is then ('id', ID)"""
+    Type 3: the sampler is a constant ID (Monster Hunter Rise: a texture handle at c[5] word 0x28 with sampler 0x104); the sampler part is then ('id', ID).
+    Type 1 with the sampler word in the driver table: the texture handles are the game's, one separate sampler the shader's own (Kirby Air Riders: array<depth2d<float>, 32> fp_t2ds_cb196614_10570000, c[6] and the
+    word at c2 byte 0x570, about 5,700 pixel and compute shaders, its shadows and lights); the sampler part is then ('c2', byte offset)"""
     m = re.match(r'[a-z]+_t\w*?_cb(\d+)_([0-9A-F]+)', name)
     if not m: return None
     slots, h = int(m.group(1)), int(m.group(2), 16)
     tb = slots & 0xffff; sb = (slots >> 16) - 1 if slots >> 16 else tb
     o0, o1, ty = h & 0x3fff, (h >> 14) & 0x3fff, h >> 28
-    if not 3 <= tb <= 16 or ty not in (0, 1, 3) or (ty == 1 and not 3 <= sb <= 16): return None
-    return (tb - 3, o0 * 4), (('id', o1) if ty == 3 else (sb - 3, o1 * 4) if ty else (tb - 3, o0 * 4))
+    if not 3 <= tb <= 16 or ty not in (0, 1, 3) or (ty == 1 and sb != 2 and not 3 <= sb <= 16): return None
+    return (tb - 3, o0 * 4), (('id', o1) if ty == 3 else ('c2', o1 * 4) if ty and sb == 2 else (sb - 3, o1 * 4) if ty else (tb - 3, o0 * 4))
 
 def decode_ubo_img(name):
     """An image whose handle the game keeps in its own uniform buffer (<stage>_i_cb<n>_<word>_<format>: Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]). Returns (uniform slot, byte offset)"""
@@ -821,12 +823,14 @@ def pool_arrays(src):
     of a declared array (AGX IndirectArgumentLayoutGen2::parseArray), and for 2^20 textures that took 57 ms and 66 MB per encoder (9.7 GB in Mario Party Superstars' prewarm);
     the elements are 8-byte resource IDs, so the pointer reaches the rest (checked on the GPU). Mario Party Superstars' characters read their light textures' handles from a
     storage buffer (6,370 pixel shaders). The argument IDs are then renumbered in member order, a pointer taking one and any other array its length, as the host lays the buffer out.
-    Buffer textures and images keep their 32-entry slot arrays (tex_dyn_slots). ValueError on a use of a pool array the rewrite does not cover"""
+    Buffer textures and images keep their 32-entry slot arrays (tex_dyn_slots). ValueError on a use of a pool array the rewrite does not cover.
+    An array of the handles in one of the game's uniform buffers (Ryujinx's texture array from a buffer, as long as a 64 KB buffer's handles, Program.cs QueryTextureArrayLengthFromBuffer) takes
+    the same form: the host keeps a table of that buffer's handles, as long as its last handle (nvn_mtl.m htab_gpu), so the element index is unchanged and only the textures the table names are made"""
     body = re.search(r'struct spvDescriptorSetBuffer0\s*\{(.*?)\};', src, re.S)
     if not body: return src
     pools = {}
     def to_pointer(m):
-        if not m.group(4).endswith('_cb0_40000000') or int(m.group(3)) < POOL_MIN: return m.group(0)
+        if int(m.group(3)) < POOL_MIN or not (m.group(4).endswith('_cb0_40000000') or decode_ubo_tex(m.group(4).removesuffix('Smplr'))): return m.group(0)
         pools[m.group(4)] = (m.group(2), int(m.group(3)))
         return f'{m.group(1)}constant spvPool_{m.group(4)}* {m.group(4)} [[id('
     members = re.sub(r'^(\s*)array<(.+), (\d+)> (\w+) \[\[id\(', to_pointer, body.group(1), flags=re.M)
@@ -874,6 +878,9 @@ def reflect(key, stage, msl, res):
             nm = nm[:-len(abi.BORDER_TWIN)]; e['border_bit'] = sum(1 for b in binds if 'border_bit' in b)
         if nm == abi.BORDER_MEMBER: e.update(kind=abi.KIND_BORDER)
         elif nm in dmsh_geometry.HELPERS: e.update(kind=abi.KIND_GEOMETRY, reg=dmsh_geometry.HELPERS[nm])
+        elif pool and not nm.endswith('_cb0_40000000'):   # a table of a uniform buffer's handles (pool_arrays): reg and off as an array of them, below
+            ut, us = decode_ubo_tex(nm.removesuffix('Smplr'))   # pyright: ignore[reportGeneralTypeIssues]  (not None: pool_arrays made this pool only for a name it decodes)
+            e.update(kind=abi.KIND_SAMP_HTAB if pool.group(1) == 'sampler' else abi.KIND_TEX_HTAB, elem=pool.group(1), reg=ut[0], off=ut[1], **({'soff': us[1], 'sreg': abi.SREG_C2} if us[0] == 'c2' else {}))
         elif pool: e.update(kind=abi.KIND_SAMP_POOL if pool.group(1) == 'sampler' else abi.KIND_TEX_POOL, elem=pool.group(1))   # see pool_arrays
         elif nm == 'support_buffer': e.update(kind=abi.KIND_SUPPORT)
         elif re.fullmatch(r'[a-z]+_c(\d+)', nm):
@@ -883,8 +890,9 @@ def reflect(key, stage, msl, res):
             e.update(kind=abi.KIND_SBUF, index=int(re.fullmatch(r'[a-z]+_s(\d+)', nm).group(1)))
         elif decode_ubo_tex(nm[:-5] if nm.endswith('Smplr') else nm):   # bindless: the handle is in a uniform buffer (reg = uniform slot, off = byte offset)
             ut, us = decode_ubo_tex(nm[:-5] if nm.endswith('Smplr') else nm)
-            other = () if us[0] == 'id' or us == ut else (ut, us)   # handle type 1: the word of the other half, which the host ORs in (the compiler puts texture and sampler words in either order)
-            if nm.endswith('Smplr'): e.update(kind=abi.KIND_SAMP_ID, reg=us[1]) if us[0] == 'id' else e.update(kind=abi.KIND_SAMP_UBO, reg=us[0], off=us[1], **({'soff': ut[1], 'sreg': ut[0]} if other else {}))
+            other = () if us[0] in ('id', 'c2') or us == ut else (ut, us)   # handle type 1: the word of the other half, which the host ORs in (the compiler puts texture and sampler words in either order)
+            if nm.endswith('Smplr') and us[0] == 'c2': e.update(kind=abi.KIND_SAMP_UBO, reg=ut[0], off=ut[1], soff=us[1], sreg=abi.SREG_C2)
+            elif nm.endswith('Smplr'): e.update(kind=abi.KIND_SAMP_ID, reg=us[1]) if us[0] == 'id' else e.update(kind=abi.KIND_SAMP_UBO, reg=us[0], off=us[1], **({'soff': ut[1], 'sreg': ut[0]} if other else {}))
             elif 'texture_buffer' in ty: e.update(kind=abi.KIND_TBUF_UBO, reg=ut[0], off=ut[1])
             else: e.update(kind=abi.KIND_TEX_UBO, reg=ut[0], off=ut[1], **({'soff': us[1], 'sreg': us[0]} if other else {}))
         elif decode_ubo_img(nm):

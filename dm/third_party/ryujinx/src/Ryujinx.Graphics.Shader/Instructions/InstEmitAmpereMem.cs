@@ -47,6 +47,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0xf60, InstName.Tex, ATex, InstProps.Tex);
             x(0xf63, InstName.Tld4, ATex, InstProps.Tex);
             x(0xf6c, InstName.Txd, ATex, InstProps.Tex);
+            x(0xf69, InstName.Tmml, ATex, InstProps.Tex);
+            x(0x36a, InstName.Tmml, ATex, InstProps.Tex);
             x(0xb66, InstName.Tld, ATex, InstProps.Tex);
             x(0xb63, InstName.Tld4, ATex, InstProps.Tex);
             x(0xb69, InstName.Tmml, ATex, InstProps.Tex);
@@ -130,15 +132,16 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (stage != null)
             {
-                // A task or mesh shader's stage input (QueryAmpereStageMemory). Mode 0x78: its workgroup's number; 0x38: a word of the payload its task wrote, [Ra + offset]
+                // A task or mesh shader's stage input (QueryAmpereStageMemory). Mode 0x78: its workgroup's number; 0x38: a word of the payload its task wrote, [Ra + offset];
+                // 0xb8: a word it wrote itself with 0x927's mode 0xb8 (Ocarina of Time's task shader 5d3a096025e375a1 reads its payload back in a later thread)
                 int mode = x.Bits(72, 80);
 
-                if (mode != 0x78 && mode != 0x38)
+                if (mode != 0x78 && mode != 0x38 && mode != 0xb8)
                 {
                     throw AFail(context, $"ISBERD mode {mode:x2} in a task or mesh shader");
                 }
 
-                Operand addr = mode == 0x78 ? Const(stage[0]) : context.IAdd(AGpr(x.Ra), Const(stage[1] + (int)x.SignedField(40, 64)));
+                Operand addr = mode == 0x78 ? Const(stage[0]) : context.IAdd(AGpr(x.Ra), Const(stage[mode == 0xb8 ? 2 : 1] + (int)x.SignedField(40, 64)));
                 EmitLoad(context, StorageKind.SharedMemory, LsSize2.B32, addr, x.Rd, 0);
                 return;
             }
@@ -653,10 +656,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
             // 40..46. 0x361, 0x364 and 0x367 (TEX, TLD4 and TLD, bit 59 set): a register, the first of the second source block,
             // before the LOD (a census of Fire Emblem Fortune's Weave's 3,327: of the sources that an LDC just wrote, always that place, with and without .SCR). Rc stays the second destination in both
             Operand boundHandle = null;
-            bool handleInB = opcode is 0x361 or 0x364 or 0x367;
-            bool bindless = handleInB || opcode is 0xf60 or 0xf63 or 0xf6c;
+            // 0xf69 and 0x36a are TMML the same way (0xb69's other fields; Kirby Air Riders: 4,776 pixel shaders).
+            bool handleInB = opcode is 0x361 or 0x364 or 0x367 or 0x36a;
+            bool bindless = handleInB || opcode is 0xf60 or 0xf63 or 0xf6c or 0xf69;
 
-            if (opcode is 0xf60 or 0xf63 or 0xf6c)
+            if (opcode is 0xf60 or 0xf63 or 0xf6c or 0xf69)
             {
                 int ur = x.Bits(40, 46);
 
@@ -665,7 +669,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (bindless)
             {
-                opcode = opcode is 0xf63 or 0xf6c ? opcode - 0x400 : opcode is 0x364 or 0x367 ? opcode + 0x7ff : 0xb60;
+                opcode = opcode is 0xf63 or 0xf6c or 0xf69 ? opcode - 0x400 : opcode is 0x364 or 0x367 or 0x36a ? opcode + 0x7ff : 0xb60;
             }
 
             TexDim dim = ATexDim(context, x.Bits(61, 64));
@@ -938,7 +942,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (opcode == 0xb69)
             {
-                ATmml(context, type, flags, handle, cbufSlot, mask, results, sources.ToArray());
+                ATmml(context, type, flags, handle, cbufSlot, mask, results, sources.ToArray(), bindless);
             }
             else
             {
@@ -957,9 +961,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
         }
 
         // TMML: the LOD a sample would use, x and y in 8.8 fixed point (as Maxwell's)
-        private static void ATmml(EmitterContext context, SamplerType type, TextureFlags flags, int handle, int cbufSlot, int mask, Operand[] results, Operand[] sources)
+        private static void ATmml(EmitterContext context, SamplerType type, TextureFlags flags, int handle, int cbufSlot, int mask, Operand[] results, Operand[] sources, bool bindless)
         {
-            SetBindingPair setAndBinding = context.ResourceManager.GetTextureOrImageBinding(Instruction.Lod, type, TextureFormat.Unknown, flags, cbufSlot, handle);
+            SetBindingPair setAndBinding = bindless ? default : context.ResourceManager.GetTextureOrImageBinding(Instruction.Lod, type, TextureFormat.Unknown, flags, cbufSlot, handle);
             int r = 0;
 
             for (int comp = 0; comp < 4; comp++)

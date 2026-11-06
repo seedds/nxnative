@@ -366,6 +366,28 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** `nvn_tex.c` recognizes either flag for linear sizing and excludes both from block-linear level offsets, GOB columns and sparse layout. `nvn_deswizzle_geom` rejects both. `tex_linear` uses the same calculated row pitch, including implicit alignment, as `GetStorageSize`. Render-target rows align to 128 bytes; ordinary linear rows align to 32. Explicit strides are preserved. `t_tex` covers the layout and `t_linear_readback` checks a GPU clear against padded CPU-visible rows.
 - **Found on:** [Persona 5 Royal](../../dm/games/01005CA01580E000/README.md#rendering): a 16x16 RGBA8 target with flags `0x44` and stride 128 needs 2 KB; block-linear sizing returned 1 KB.
 
+### Linear textures a device cannot view on their pool's buffer
+
+- **Symptom:** on an iPhone only, a scene's backgrounds are solid magenta and magenta frames flash, while the Mac is right. The log has `[RED] linear texture offset … / row pitch 32 not aligned to 64 bytes; created as a private texture (CPU writes invisible)`, then `[RED] deswizzle failed format 0x25 target 1`.
+- **Cause:** Metal makes a texture on a buffer only at `minimumLinearTextureAlignmentForPixelFormat`, and the minimum depends on the device: 64 bytes for RGBA8 on an A18 Pro, less on the Macs here. Ordinary linear rows align to 32 bytes ([the entry above](#linear-render-target-storage-without-the-linear-flag)), so an 8×8 RGBA8 linear texture has 32-byte rows. `tex_linear` refused it, and the texture became a private one. Its first fill (`tex_init_fill` → `pkg_upload_`) went through the block-linear deswizzler, which rejects linear storage, so it stayed empty and never saw the CPU's writes.
+- **Fix:** `linear_fit` (`nvn_mtl.m`) tells a linear texture that no view can take apart from one that is not linear. `tex_mtl_` makes such a texture a CPU-written packaged one, uploaded at its first use on the submit thread and again after CPU writes to its pages, when the GPU does not render or store into it (`linear_cpu_only`: `LINEAR` without `LINEAR_RENDER_TARGET` or `IMAGE`). The storage then holds its content, as for the other uploaded textures:
+  - `pkg_upload_` copies it by rows of its stride instead of deswizzling it, with no GPU deswizzle or large-pool staging buffer;
+  - a GPU copy into it is written into the storage too (`tex_storage_dst`; `write_region_linear` in `hle_nvn.c`), so the next upload carries it;
+  - `mtl_read_texels` reads it from the storage by the same rows, on whatever thread asks. So a read before its first use does not make it a private texture of zeros, and a read after a CPU write does not upload it off the submit thread.
+  Textures that a view can take are unchanged.
+- **Limits:** a linear render target or image that no view can take stays a private texture. Its first fill now takes its storage, but the CPU's later writes do not reach it (`[RED] linear texture … rows of 32 bytes no view can take, a private texture the CPU's writes do not reach`).
+- **Check:** on a Mac, `DM_TBUF_ALIGN=64` reproduces the phone's alignment for these textures too. `make -C dm/gfx/tests GAME=<id> check_t_linear_readback` runs with it, on 6×6 RGBA8 textures in a pool made through NVN (write-tracked, as a game's):
+  - a `LINEAR` one with 32-byte rows is not a view. Its first upload and `nvnTextureReadTexels` hold its pixels at the storage's stride. After an NVN copy into it, a read on another thread has the copied rows. After a CPU write, it has that row as well, and the next upload carries both;
+  - the same with 64-byte rows stays a view;
+  - one read on another thread before its first use has its pixels, and is still uploaded at that first use;
+  - an `IMAGE | LINEAR` one with 32-byte rows stays a GPU texture, filled at the stride.
+  Each part is needed:
+  - without the storage read, the reads come back empty;
+  - without `linear_cpu_only`, the image is made CPU-written;
+  - reading the resolved host texture instead uploads it on the reading thread after the CPU write, and `up_owner_check` stops the test.
+  Copying the rows at the pixel pitch fails 5 of 6 rows. Axiom Verge's opening logs `linear texture ser=28 8x8 format 0x25 flags 0x10: offset 0x3f8000 / row pitch 32 not aligned to 64 bytes` and `CPU-written texture ser=28 …`, the same on the Mac with the switch and on both iOS devices without it. On the Mac its picture matches a run without the switch.
+- **Found on:** Axiom Verge 1.0.3 (`0100052004384000`, SDK 4.4.0, MonoGame; its profile is a separate change) on an iPhone 16 Pro Max, iOS 26.0: the opening's sky and mountains are magenta. Its 8×8 RGBA8 linear textures sit in a `CPU_UNCACHED` pool. An iPad Pro with an M4 asks for 64 bytes on iPadOS 26.0 as well, while macOS 27.0 on an M4 Pro asks for 16. With the fix, both iOS devices log the four textures as uploaded, and the iPhone's opening is right.
+
 ### Textures written with `nvnTextureWriteTexels`
 
 - **Symptom:** video frames, or a game's built-in default textures, are all zero.
@@ -463,6 +485,7 @@ Games read this count as a position in their own command memory and size their h
   - [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md): the cave was magenta; the terrain draws sample two 121-layer ASTC 8×8 arrays (42 MB each) filled this way.
   - [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md): the UI reads its textures from `.tex` files the engine loads straight into a `CPU_UNCACHED | GPU_CACHED | COMPRESSIBLE` pool (flags 0xa2): 231 textures by the title screen, no packaged layout, no `WriteTexels`, no copies.
   - [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md): a dialog box sampling 256x256 and 1024x256 textures of format 0x4d; `DM_NVN_TEXINFO=1024x256` showed storage that already held data at first use (226,555 of 262,144 bytes non-zero): no packaged layout, block-linear, in a 1000 MB `CPU_CACHED | GPU_CACHED | COMPRESSIBLE` pool (flags 0xa4). A log of the pool flushes, texture creations and file reads (temporary lines under `DM_NVN_LOG`) showed every `.tex` read into staging buffers (512 KB `ReadFile`s, none into the pool) and the texels copied by the CPU into the texture's storage; only the four linear 1024x64 text textures are flushed, every frame. `main` has no cache maintenance instruction at all.
+  - [Kirby Air Riders](../../dm/games/040077201BE50000/README.md): magenta props and panels in races, one of them a 512x512 ASTC texture all zeros when dumped; with both keys none of the 378 ASTC textures bound on one frame had a zero block.
 
 ### `ReadTexels` from guest memory and textures written after first use
 
@@ -693,3 +716,23 @@ Games read this count as a position in their own command memory and size their h
 ### `nvnPrivate0`, an inlined command-buffer fast path flag
 
 - `nvnPrivate0`, a new SDK 20 import, needs nothing: it is a flag in `sdk`'s bss that enables an inlined command-buffer fast path when the NVN driver sets it (it stays 0). Found on [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0, SDK 20.5.22).
+
+### `nvnTextureBuilderGetViewOffset`, `nvnTextureViewCompare`, `nvnBlendStateSetAdvancedNormalizedDst`
+
+- **Symptom:** `[RED] NVN unimplemented function called` for each.
+- **Fix:** the builder's offset is the texture's (`view_offset`). The compare is true when the two views set the same fields to the same values: that true means equal is taken from the name, as no caller in `main` was found to confirm it. The blend flag is kept for its getter; the fixed-function factors the replay uses read a normalized target as it is.
+- **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md).
+
+### Texture IDs of one storage share one packaged texture
+
+- **Symptom:** a pool walk makes gigabytes of textures from far fewer images: Ocarina of Time's 32,768 IDs name 3,607 storages, and one texture per ID came to 2 GB.
+- **Cause:** a packaged texture belongs to its serial, and the engine registers the same storage under many texture objects.
+- **Fix:** general (`nvn_mtl.m` `g_pkg_share`, `tex_alias_key`, `pkg_shared`). Packaged textures are shared by storage, layout and format through a weak table, so a new serial of the same storage takes the existing one. A pool's removal evicts its keys (`mtl_alias_drop_pool`), and the walk's budget does not count a texture that is already shared.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
+### Finalizing a copy of a texture object
+
+- **Symptom:** thousands of first uploads a frame in a scene whose textures do not change: Ocarina of Time, about 15,000 a frame.
+- **Cause:** the engine copies an `NVNtexture` by value and finalizes the copy, while the original stays in use. The host keyed the texture by serial, so finalizing the copy deleted the host texture of the original, and its next use uploaded it again.
+- **Fix:** general (`nvn_mtl.m` `mtl_tex_release`). The registry keeps the address of the object that was initialized, and a finalize is ignored when that owner still holds the texture's magic and serial (read with `vm_read_overwrite`, as the owner's memory may be gone). `t_cpu_tex` checks both orders.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).

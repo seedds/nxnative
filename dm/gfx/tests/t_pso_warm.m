@@ -286,6 +286,9 @@ static void native_mesh(NSString *dir) {
         EXPECT("required and warmed mesh draws match", 1, memcmp(a, b, sizeof a) == 0);
         EXPECT("native mesh draw writes the triangle", 1, a[0] == 128 && a[1] == 64 && a[2] == 255 && a[3] == 128);
     }
+    pso_key depth = {.dfmt = MTLPixelFormatDepth32Float, .samples = 1};
+    NSError *error = nil;
+    EXPECT("depth-only native mesh pipeline uses the empty fragment", 1, mtk_build(&depth, nil, live, nil, &error) != nil);
     g_mtk.ms = nil;
     g_warm_t0 = bp_now(); warm_finish();
 }

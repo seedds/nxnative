@@ -17,6 +17,7 @@ static int geo_cmp_index(const void *a, const void *b) {
     return (x > y) - (x < y);
 }
 enum { GEO_CAPTURE_VERTICES = (256u << 20) / (144 * 4) };
+enum { GEO_COMPACT_MIN = 1u << 20, GEO_COMPACT_RUNS = 64 };   // compact captures (nvn_geometry.h): what one must save, and how many capture draws it may take
 // The capture span is already bounded by its scratch allocation. A bit per
 // vertex gives the same ascending unique list without sorting every reference.
 // Keep an in-place sort fallback for allocation failure or a wider caller.
@@ -641,6 +642,8 @@ typedef struct {
     uint32_t first_instance, groups, emits;
     uint64_t np; size_t unique_count, nu;
     uint64_t input, output, raw, packed, packed_size, cnt, map, capture_ix, info, capture_info, args, job;
+    uint64_t compact_map;   // a compact capture (nvn_geometry.h): the positions the geometry stage reads through, 0 = map
+    const uint32_t *runs; size_t nruns;   // and its runs of IDs, {position, length} pairs in the scratch, each with a capture_info of its own
     geo_access access;
     uint64_t lean_job;
     uint32_t capture_words, direct_count;
@@ -791,23 +794,34 @@ static int geo_prep(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, geo_jo
     int width = nvn_geo_width(topology);
     uint64_t np = words == SIZE_MAX ? 0 : words / width;
     if (!np) { free(order); return 0; }
+    // Vertex IDs far apart: a compact capture when it saves real memory and takes few draws (nvn_geometry.h). nu counts references, so span > nu means holes for certain
+    uint32_t *ids = NULL; size_t id_n = 0, id_runs = 0; uint64_t cspan = span;
+    if (di0 && record && span > nu && (span - nu) * instances * record * 4 >= GEO_COMPACT_MIN) {
+        uint32_t *copy = NULL; ids = malloc(nu * 4);
+        if (ids && cached) { id_n = cached->unique; memcpy(ids, cached->data + raw_n + words * 4, id_n * 4); }
+        else if (ids && (copy = malloc((size_t)count * 4))) { memcpy(copy, order, (size_t)count * 4); id_n = geo_capture_unique(copy, count, restart, restart_index, lo, span, ids, nu); if (id_n == SIZE_MAX) id_n = 0; }
+        free(copy);
+        id_runs = nvn_geo_capture_runs(ids, id_n);
+        if (id_n && id_runs <= GEO_COMPACT_RUNS) cspan = id_n; else { free(ids); ids = NULL; id_runs = 0; }
+    }
     uint64_t groups = np * (uint64_t)instances * gs->geo_invocations;
-    if (groups > UINT32_MAX || span * (uint64_t)instances > (256ull << 20) / (MAX(record, 1u) * 4) ||
+    if (groups > UINT32_MAX || cspan * (uint64_t)instances > (256ull << 20) / (MAX(record, 1u) * 4) ||
         (uint64_t)first_instance + instances > (uint64_t)UINT32_MAX + 1) {
-        free(order);
+        free(order); free(ids);
         if (may_wait && !geo_split(pr, dw0 ? &j->dw : NULL, dw0 ? NULL : &j->di, count, instances, first_instance, primitive_base))
             MLOG("[RED] geometry draw exceeds the capture or invocation bound");
         return may_wait ? 0 : -1;
     }
     uint32_t emits = gs->geo_index_stride ? gs->geo_vertices : 0;   // 0: the GS writes storage buffers only
-    uint64_t input_size = MAX(span * instances * record * 4, 4ull);
+    uint64_t input_size = MAX(cspan * instances * record * 4, 4ull);
     uint64_t output_size = emits ? groups * emits * gs->geo_stride * 4 : 4;
     uint64_t raw_size = emits ? groups * gs->geo_index_stride * 4 : 4;
     uint64_t packed_size = emits ? groups * emits * (gs->geo_output == 7 ? 3 : gs->geo_output == 6 ? 2 : 1) * 4 : 4;
     uint64_t count_size = emits ? (groups + (groups + 63) / 64) * 4 : 4;
-    uint64_t total = input_size + output_size + raw_size + packed_size + count_size + words * 4 + nu * 4 + sizeof(nvn_geo_capture) + sizeof(nvn_geo_pack_job) + sizeof(nvn_geo_lean_job) + 32 + 20 + 12 * 255;
+    uint64_t total = input_size + output_size + raw_size + packed_size + count_size + words * 4 + nu * 4 + sizeof(nvn_geo_capture) + sizeof(nvn_geo_pack_job) + sizeof(nvn_geo_lean_job) + 32 + 20 + 15 * 255
+        + (ids ? words * 4 + id_runs * (sizeof(nvn_geo_capture) + 8) : 0);
     if (groups > UINT32_MAX || total > (256ull << 20) || np > UINT32_MAX) {
-        free(order);
+        free(order); free(ids);
         if (may_wait && !geo_split(pr, dw0 ? &j->dw : NULL, dw0 ? NULL : &j->di, count, instances, first_instance, primitive_base))
             MLOG("[RED] geometry draw needs %llu MiB of scratch, above the 256 MiB bound", (unsigned long long)(total >> 20));
         return may_wait ? 0 : -1;
@@ -821,6 +835,8 @@ static int geo_prep(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, geo_jo
     GEO_ALLOC(words * 4, j->map, pmap); GEO_ALLOC(nu * 4, j->capture_ix, pcapture_ix); GEO_ALLOC(32, j->info, pinfo); GEO_ALLOC(sizeof(nvn_geo_capture), j->capture_info, pcapture_info);
     GEO_ALLOC(20, j->args, pargs); GEO_ALLOC(sizeof(nvn_geo_pack_job), j->job, pjob);
     GEO_ALLOC(sizeof(nvn_geo_lean_job), j->lean_job, plean_job);
+    void *pcompact = NULL, *pruns = NULL; uint64_t run_gpu = 0; j->compact_map = 0; j->runs = NULL; j->nruns = 0;
+    if (ids) { GEO_ALLOC(words * 4, j->compact_map, pcompact); GEO_ALLOC(id_runs * 8, run_gpu, pruns); GEO_ALLOC(id_runs * sizeof(nvn_geo_capture), j->capture_info, pcapture_info); }
     #undef GEO_ALLOC
     (void)pinput; (void)poutput; (void)praw; (void)ppacked; (void)pcnt;
     if (used > total) MDIE("geometry scratch size accounting");
@@ -831,15 +847,24 @@ static int geo_prep(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, geo_jo
       for (size_t i = 0; i < words; i++) ((uint32_t *)pmap)[i] -= lo;
       if (di0) {
         unique_count = geo_capture_unique(order, count, restart, restart_index, lo, span, pcapture_ix, nu);
-        if (unique_count == SIZE_MAX) { free(order); MLOG("[RED] geometry capture indices exceed their range or allocation"); return 0; }
+        if (unique_count == SIZE_MAX) { free(order); free(ids); MLOG("[RED] geometry capture indices exceed their range or allocation"); return 0; }
       }
       if(keep)geo_ix_put(&ixkey,source,raw_n,lo,hi,nu,pmap,words,pcapture_ix,unique_count);
     }
     free(order);
     // geometry_counts.y is the guest primitive base, independent of local maps.
-    uint32_t vi[8] = {(uint32_t)span, (uint32_t)instances, 0, 0, (uint32_t)np, primitive_base, 0, 0}; memcpy(pinfo, vi, 32);
-    nvn_geo_capture capture_info = {j->input, 0, {(uint32_t)first, (uint32_t)span, first_instance, (uint32_t)instances}, MAX(record, 1u), {0}};
+    uint32_t vi[8] = {(uint32_t)cspan, (uint32_t)instances, 0, 0, (uint32_t)np, primitive_base, 0, 0}; memcpy(pinfo, vi, 32);
+    nvn_geo_capture capture_info = {j->input, 0, {(uint32_t)first, (uint32_t)cspan, first_instance, (uint32_t)instances}, MAX(record, 1u), {0}};
     for (int k = 0; k < GEO_CAPTURE_WORDS; k++) capture_info.slot[k] = lean ? gs->geo_slot[k] : (int16_t)k;
+    if (ids) {   // a capture_info per run of IDs: a record's address is (vertex ID - info[0]) words on, so info[0] = the run's first ID less its position (in vertex IDs, with the base vertex)
+        if (!nvn_geo_compact_map(pmap, words, lo, ids, id_n, pcompact)) MDIE("geometry capture: a mapped vertex is not in the unique list");
+        uint32_t *rp = pruns; nvn_geo_capture *cp = pcapture_info; size_t r = 0;
+        for (size_t i = 0; i < id_n; r++) { size_t e = i + 1; while (e < id_n && ids[e] == ids[e - 1] + 1) e++;
+            rp[2 * r] = (uint32_t)i; rp[2 * r + 1] = (uint32_t)(e - i); capture_info.info[0] = (uint32_t)((int64_t)first + (ids[i] - lo) - (int64_t)i); cp[r] = capture_info; i = e; }
+        j->runs = rp; j->nruns = r;
+        static int nl; if (nl++ < 4) MLOG("geometry capture of %zu vertices in %zu runs over a range of %llu: %llu KB instead of %llu MB", id_n, r, (unsigned long long)span, (unsigned long long)(input_size >> 10), (unsigned long long)((span * instances * record * 4) >> 20));
+        free(ids); ids = NULL;
+    } else
     memcpy(pcapture_info, &capture_info, sizeof capture_info);
     memset(pargs, 0, 20);
     nvn_geo_pack_job pj = {j->raw, j->packed, j->args, (uint32_t)groups, gs->geo_index_stride, gs->geo_output, (uint32_t)(packed_size / 4), j->cnt};
@@ -867,12 +892,16 @@ static void geo_capture_one(id<MTL4RenderCommandEncoder> re, const geo_job *j) {
     enc_r_pso(re, j->capture); bind_vbufs(re);
     vconv_bind(re, j->vs, 1, &j->vertex_range, NULL);
     args_dirty_all(); encode_args(re, j->vs, 0, 1); enc_r_vbuf(re, 13, j->capture_info);
-    if (j->has_di) enc_r_draw_indexed(re, MTLPrimitiveTypePoint, j->unique_count, MTLIndexTypeUInt32, j->capture_ix, j->nu * 4, j->di.instances, j->di.base_vertex, j->first_instance);
+    if (j->nruns) for (size_t r = 0; r < j->nruns; r++) {
+        if (r) enc_r_vbuf(re, 13, j->capture_info + r * sizeof(nvn_geo_capture));
+        enc_r_draw_indexed(re, MTLPrimitiveTypePoint, j->runs[2 * r + 1], MTLIndexTypeUInt32, j->capture_ix + (uint64_t)j->runs[2 * r] * 4, (j->nu - j->runs[2 * r]) * 4, j->di.instances, j->di.base_vertex, j->first_instance);
+    }
+    else if (j->has_di) enc_r_draw_indexed(re, MTLPrimitiveTypePoint, j->unique_count, MTLIndexTypeUInt32, j->capture_ix, j->nu * 4, j->di.instances, j->di.base_vertex, j->first_instance);
     else enc_r_draw_instanced(re, MTLPrimitiveTypePoint, j->dw.first, j->dw.count, j->dw.instances, j->first_instance);
 }
 static void geo_gs_one(id<MTL4ComputeCommandEncoder> ce, const geo_job *j) {
     g_draw_binst = j->first_instance;
-    g_geo_bind[0] = j->input; g_geo_bind[1] = j->output; g_geo_bind[2] = j->raw; g_geo_bind[3] = j->info; g_geo_bind[4] = j->map;
+    g_geo_bind[0] = j->input; g_geo_bind[1] = j->output; g_geo_bind[2] = j->raw; g_geo_bind[3] = j->info; g_geo_bind[4] = j->compact_map ? j->compact_map : j->map;
     args_dirty_all(); encode_args(ce, j->gs, 2, 0); enc_c_pso(ce, j->gs->geo_pso);
     enc_c_dispatch(ce, MTLSizeMake((j->np + 31) / 32, j->dw.instances, j->gs->geo_invocations), MTLSizeMake(32, 1, 1));
     if (j->lean) {

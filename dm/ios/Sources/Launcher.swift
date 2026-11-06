@@ -92,7 +92,7 @@ private struct DocumentPicker: UIViewControllerRepresentable {
     }
 }
 
-private struct Switch2ControllerItem: Identifiable, Equatable {
+private struct Switch2ControllerItem: Identifiable {
     var id: String { serial.isEmpty ? "\(player)-\(name)" : serial }
     let name: String
     let serial: String
@@ -112,19 +112,19 @@ private struct PairingGuideView: View {
             VStack(spacing: 24) {
                 Spacer()
                 TabView(selection: $page) {
-                    guidePage(
+                    GuidePage(
                         icon: "gamecontroller.fill",
                         title: "Welcome",
                         description: "Connect a Nintendo Switch 2 Pro Controller to your Apple device over Bluetooth. Joy-Con 2 and the NSO GameCube pad share the Bluetooth protocol but are not supported yet."
                     ).tag(0)
 
-                    guidePage(
+                    GuidePage(
                         icon: "antenna.radiowaves.left.and.right",
                         title: "Pairing a Controller",
                         description: "Hold the Sync button (next to the USB-C port) until the player LEDs sweep. The controller connects automatically and remembers your device — after that, just press any button to wake it.\n\nNote: If iOS Settings > Bluetooth holds the controller, forget it there first so the app can connect."
                     ).tag(1)
 
-                    guidePage(
+                    GuidePage(
                         icon: "slider.horizontal.3",
                         title: "Make It Yours",
                         description: "Configure back buttons (GL/GR) and stick deadzones in launcher settings. Each connected controller is automatically assigned its own player slot."
@@ -161,12 +161,19 @@ private struct PairingGuideView: View {
             }
         }
     }
+}
 
-    private func guidePage(icon: String, title: String, description: String) -> some View {
+private struct GuidePage: View {
+    let icon: String
+    let title: String
+    let description: String
+
+    var body: some View {
         VStack(spacing: 16) {
             Image(systemName: icon)
                 .font(.system(size: 64))
                 .foregroundStyle(.tint)
+                .accessibilityHidden(true)   // the page's title carries the meaning
             Text(title)
                 .font(.title2.weight(.bold))
             Text(description)
@@ -189,6 +196,7 @@ private struct ControllersSection: View {
                 HStack(spacing: 12) {
                     Image(systemName: "gamecontroller")
                         .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
                     Text("No controllers connected")
                         .foregroundStyle(.secondary)
                 }
@@ -197,12 +205,14 @@ private struct ControllersSection: View {
                     HStack(spacing: 12) {
                         Image(systemName: "gamecontroller.fill")
                             .foregroundStyle(.tint)
+                            .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 2) {
                             HStack(spacing: 6) {
                                 Text("P\(c.player): \(c.name)")
                                     .font(.body.weight(.medium))
                                 Circle().fill(c.connected ? Color.green : Color.orange)
                                     .frame(width: 8, height: 8)
+                                    .accessibilityLabel(c.connected ? "Connected" : "Present, not connected")
                             }
                             if !c.serial.isEmpty {
                                 Text(c.serial).font(.caption2).foregroundStyle(.secondary)
@@ -215,6 +225,7 @@ private struct ControllersSection: View {
                                     .font(.subheadline).monospacedDigit().foregroundStyle(.secondary)
                                 Image(systemName: batteryIcon(for: c.batteryPercent))
                                     .foregroundStyle(batteryColor(for: c.batteryPercent))
+                                    .accessibilityHidden(true)   // the percentage next to it carries the value
                             }
                         }
                     }
@@ -240,6 +251,7 @@ private struct ControllersSection: View {
             HStack {
                 if isScanning {
                     ProgressView().controlSize(.small)
+                        .accessibilityHidden(true)
                     Text("Scanning for controllers…")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
@@ -249,8 +261,9 @@ private struct ControllersSection: View {
                         refresh()
                     }
                     .font(.footnote)
+                    .buttonStyle(.bordered)
                 } else {
-                    Text("Bluetooth LE Ready")
+                    Text("Ready to connect")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -259,17 +272,18 @@ private struct ControllersSection: View {
                         refresh()
                     }
                     .font(.footnote)
+                    .buttonStyle(.bordered)
                 }
             }
 
             Button("Pairing Guide…") { showGuide = true }
-                .sheet(isPresented: $showGuide) {
-                    PairingGuideView()
-                }
         } header: {
             Text("Nintendo Switch 2 Controllers")
         } footer: {
             Text("Hold the Sync button on your controller until player LEDs sweep to pair. If already paired, press any button to connect.")
+        }
+        .sheet(isPresented: $showGuide) {
+            PairingGuideView()
         }
         .onAppear {
             dm_switch2_scan_start()

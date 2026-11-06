@@ -4901,6 +4901,7 @@ void mtl_prog_release(prog_t *p) { if (p->serial) serial_del(p->serial); }
 // At registration the whole texture object is snapshotted (NVN semantics: the descriptor has been written into the pool); view: the MTLTexture for that ID (a view or the base texture, held via CFBridgingRetain) and the serial-table / guest-write generations at the time it was obtained
 typedef struct { tex_t t; int ok; view_t v; int has_v; void *view; uint64_t view_id, view_rid, view_ser, view_dirty, view_stamp; const void *view_span; int view_pkg;   // view_pkg: CPU-written (packaged); only those depend on guest writes (view_dirty)
                  void *alt, *alt_of; uint64_t alt_rid; uint8_t alt_type;   // alt: compatible view used when the shader's declared type differs from view (tex_fit), alt_of = the view it was built from
+                 uint8_t tt;   // the Metal texture type tex_by_id gives this registration, + 1 (0: not resolved yet). Fixed by the descriptor (its target, the view's, the layer count), so it outlives the cached view: pool_gpu skips an ID of another type without looking it up
                  void *im, *im_of; uint64_t im_rid;                       // im: the view an image slot reads in the shader's pixel class (img_fit), im_of = the view it was built from
                  int prev, next, retired, gone; uint64_t transient_sub; } treg_t;   // prev / next: descriptor index + 1, by texture serial; gone: its memory pool was finalized (treg_drop_pool_views)
 static treg_t *g_treg; static int g_ntreg;
@@ -5138,7 +5139,7 @@ void mtl_reg_tex(int tid, const tex_t *t, const view_t *v) {
         g_reg_gen++;
         treg_unlink(id_); treg_drop_views(rr);
         rr->ok = t != NULL; if (t) rr->t = *t; rr->has_v = v != NULL; if (v) rr->v = *v;
-        rr->retired = 0; rr->transient_sub = 0;
+        rr->retired = 0; rr->transient_sub = 0; rr->tt = 0;
         if (t && t->serial) {
             pthread_mutex_lock(&g_smu); rr->retired = !nvn_hm_get(&g_tex_live, &t->serial); pthread_mutex_unlock(&g_smu);
             rr->next = (int)(uintptr_t)nvn_hm_get(&g_treg_serial, &t->serial);
@@ -5311,6 +5312,7 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
         g_treg_transient[g_ntreg_transient++] = tid; rp->transient_sub = g_sub_serial;
     }
     rp->view = (void *)CFBridgingRetain(v); rp->view_rid = v.gpuResourceID._impl; rp->view_ser = sg; rp->view_dirty = dg; treg_pkg_stamp(rp, base);
+    rp->tt = (uint8_t)(v.textureType + 1);
     return v;
 }
 // Hot-path object fetch: if the table entry is valid, return the table-held pointer directly (without ARC retain / autorelease), otherwise take the slow path to build / validate. Caller holds g_rmu.
@@ -7829,6 +7831,30 @@ typedef struct { __strong id<MTLBuffer> buf; uint64_t gpu, reg, ser; int samp, d
 static pool_snap g_psnap[POOL_SNAPS]; static unsigned g_psnap_next;
 static uint64_t g_psnap_gen = 1;   // bumped by each rebuild: an argument block holding a pool address is not reused past it (encode_args_)
 static uint64_t g_stat_pool_builds; static double g_stat_pool_ms;
+static uint64_t g_stat_pool_new, g_stat_pool_reused, g_stat_pool_tt_skip;   // table buffers made / taken back from the spares; IDs of another type passed over by their registration's type (treg_t.tt)
+// A replaced table is kept as a spare until the submissions that could read it have completed, then written again for the next rebuild: a game that registers textures or changes
+// their storage every frame rebuilds a table each time (Fire Emblem Fortune's Weave about three a frame, Ocarina of Time about 14 a frame of 33,000 IDs, 264 KB each), and a new buffer
+// for each one was a new allocation, a residency-set addition and, behind the fence, a removal (the residency report's top line). Spares stay in the residency set; one pushed out
+// goes as a replaced table did (defer_obj_release). A spare up to twice the length asked for is taken: shaders read only up to the bound n in its header. There are as many as the
+// rebuilds of the submissions in flight: Ocarina of Time retires about 14 tables a frame, and with 8 the oldest spare was pushed out before it came free and most tables were new again. Caller holds g_rmu
+#define POOL_SPARES 64
+typedef struct { __strong id<MTLBuffer> buf; uint64_t fence; } pool_spare;
+static pool_spare g_pspare[POOL_SPARES];
+static id<MTLBuffer> pool_buf(size_t len) {
+    uint64_t done = atomic_load(&g_done); int best = -1;
+    for (int i = 0; i < POOL_SPARES; i++) { id<MTLBuffer> b = g_pspare[i].buf;
+        if (b && g_pspare[i].fence <= done && b.length >= len && b.length / 2 <= len && (best < 0 || b.length < g_pspare[best].buf.length)) best = i; }
+    if (best >= 0) { id<MTLBuffer> b = g_pspare[best].buf; g_pspare[best].buf = nil; g_stat_pool_reused++; return b; }
+    id<MTLBuffer> b = [g_dev newBufferWithLength:len options:MTLResourceStorageModeShared];
+    if (b) { res_add(b); g_stat_pool_new++; }
+    return b;
+}
+static void pool_buf_retire(id<MTLBuffer> b) {   // reusable once the submission being encoded now (fence g_fence + 1), the last that can hold a draw reading it, has completed
+    int slot = 0;
+    for (int i = 0; i < POOL_SPARES; i++) { if (!g_pspare[i].buf) { slot = i; break; } if (g_pspare[i].fence < g_pspare[slot].fence) slot = i; }
+    if (g_pspare[slot].buf) defer_obj_release(g_pspare[slot].buf);
+    g_pspare[slot] = (pool_spare){b, g_fence + 1};
+}
 // Whether a registered texture's storage still exists, before pool_gpu makes a texture no draw has bound: a game leaves IDs registered after it is done with their textures, and the
 // first pool walk in Mario Party Superstars crashed once in nvn_sparse_protect (pkg_upload ← tex_by_id ← pool_gpu) on a garbage pool->vp, which ID it was was not caught, as FINAL
 // FANTASY RESONANCE did later (GitHub issue #934; treg_gone, tex_mtl_ now stop that on every route). So: its memory pool object is live (nvnMemoryPoolFinalize clears the magic; freed
@@ -7849,7 +7875,8 @@ static uint64_t pool_gpu(int samp, int dtt, int dpf, int base, __unsafe_unretain
     if (!p) p = free_ ? free_ : &g_psnap[g_psnap_next++ % POOL_SNAPS];
     uint64_t t0 = mach_absolute_time();
     int n = (samp ? g_nsreg : g_ntreg) - base; if (n < 1) n = 1;
-    id<MTLBuffer> b = [g_dev newBufferWithLength:DMSH_POOL_HEAD + 8 * (size_t)(n + 1) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> b = pool_buf(DMSH_POOL_HEAD + 8 * (size_t)(n + 1));
+    if (!b) MDIE("pool table allocation failed (%d IDs)", n);
     uint8_t *c = b.contents; *(uint32_t *)c = (uint32_t)n;
     uint64_t *e = (uint64_t *)(c + DMSH_POOL_HEAD), dummy = samp ? dummy_samp_rid() : (dummy_tex(dtt, dpf) ? g_dummy_tex_rid[dtt % DMY_NT][dpf & 3] : 0);
     int real = 0, gone = 0;
@@ -7858,20 +7885,21 @@ static uint64_t pool_gpu(int samp, int dtt, int dpf, int base, __unsafe_unretain
         if (id_ <= 0) {}
         else if (samp) { if (g_sreg_ok[id_] && samp_fast(id_)) r = g_srid[id_]; }
         else if (g_treg[id_].ok && (g_treg[id_].gone || (!g_treg[id_].view && !tex_storage_live(&g_treg[id_].t)))) gone++;
+        else if (g_treg[id_].ok && g_treg[id_].tt && g_treg[id_].tt != (uint8_t)(dtt + 1)) g_stat_pool_tt_skip++;   // a texture of another type: the dummy, without making its view again
         else if (g_treg[id_].ok) { void *tv = NULL; uint64_t tr = tex_fast_rid(id_, &tv); if (tv && ((__bridge id<MTLTexture>)tv).textureType == (MTLTextureType)dtt) r = tr; }
         e[i] = r ? r : dummy; real += r != 0;
     }
     e[n] = dummy;
-    res_add(b);
-    if (p->buf) defer_obj_release(p->buf);
+    if (p->buf) pool_buf_retire(p->buf);
     *p = (pool_snap){b, b.gpuAddress, rg, sg, samp, dtt, dpf, base};
     g_psnap_gen++;
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
     double ms = (double)(mach_absolute_time() - t0) * tb.numer / tb.denom / 1e6; g_stat_pool_ms += ms;
     static int gone_logged; int log_gone = gone && !gone_logged++;
     if (g_stat_pool_builds++ < 16 || g_stat_pool_builds % 1000 == 0 || log_gone)
-        MLOG("pool for handles traced to no slot: %s pool (texture type %d, class %d) at base %d, %d IDs of which %d hold %s and %d have no storage (memory pool finalized or gone), built in %.2f ms (%llu builds, %.0f ms in all)", samp ? "sampler" : "texture",
-             samp ? -1 : dtt, samp ? -1 : dpf, base, n, real, samp ? "samplers" : "textures of the type", gone, ms, (unsigned long long)g_stat_pool_builds, g_stat_pool_ms);
+        MLOG("pool for handles traced to no slot: %s pool (texture type %d, class %d) at base %d, %d IDs of which %d hold %s and %d have no storage (memory pool finalized or gone), built in %.2f ms (%llu builds, %.0f ms in all; table buffers made %llu, reused %llu; IDs of another type passed over %llu)", samp ? "sampler" : "texture",
+             samp ? -1 : dtt, samp ? -1 : dpf, base, n, real, samp ? "samplers" : "textures of the type", gone, ms, (unsigned long long)g_stat_pool_builds, g_stat_pool_ms,
+             (unsigned long long)g_stat_pool_new, (unsigned long long)g_stat_pool_reused, (unsigned long long)g_stat_pool_tt_skip);
     *out = b; return p->gpu;
 }
 static id<MTLBuffer> dummy_buf(void) { static id<MTLBuffer> b; if (!b) { b = [g_dev newBufferWithLength:64 << 10 options:MTLResourceStorageModeShared]; res_add(b); } return b; }

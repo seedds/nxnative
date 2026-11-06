@@ -76,6 +76,17 @@ int main(int argc, char **argv) { @autoreleasepool {
         write_image(mc, 0x55667788);
         CHECK(holds(ma, 0x11223344) && holds(mc, 0x55667788), "writes to storage apart do not reach each other");
 
+        // An image (COMPRESSIBLE|IMAGE) in the pool heap, then another description over its storage: the image family lookup must not take the pool's heap as a family's
+        tex_t img = target(&pool, 995010, 24 << 20, 512, 512, NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_IMAGE);
+        id<MTLTexture> mi = tex_mtl(&img);
+        tex_t img2 = target(&pool, 995011, 24 << 20, 256, 256, NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_IMAGE);
+        id<MTLTexture> mi2 = tex_mtl(&img2);
+        CHECK(mi.heap == ma.heap && mi2.heap == ma.heap, "images of the pool share its heap");
+        CHECK(mi2.heapOffset >= (NSUInteger)((double)(24 << 20) * POOL_HEAP_SCALE) - (1 << 20), "a late image description keeps its scaled pool offset, not the heap's start");
+        write_image(mi2, 0x99aabbcc);
+        CHECK(holds(ma, 0x11223344) && holds(mc, 0x55667788), "a late image's writes do not reach separate pool storage");
+        mtl_tex_release(&img); mtl_tex_release(&img2); mi = nil; mi2 = nil;
+
         tex_t plain = target(&pool, 995003, 16 << 20, 256, 256, 0);
         CHECK(!tex_mtl(&plain).heap, "a texture without COMPRESSIBLE keeps an allocation of its own");
         tex_t sparse = target(&pool, 995004, 20 << 20, 256, 256, NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_SPARSE);

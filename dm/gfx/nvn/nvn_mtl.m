@@ -244,7 +244,7 @@ static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
     g_res_dirty = 1; g_rs_rm++;
     pthread_mutex_unlock(&g_res_mu);
 } }
-@interface NvImageHeap : NSObject { @public id<MTLHeap> heap; } @end
+@interface NvImageHeap : NSObject { @public id<MTLHeap> heap; int pool_heap; } @end   // pool_heap: a GPU-only pool's whole heap (NvPoolHeap), never a resolution family's
 @implementation NvImageHeap
 - (void)dealloc { res_remove(heap); atomic_fetch_sub(&g_image_heap_n, 1); }
 @end
@@ -3343,6 +3343,9 @@ static id<MTLTexture> image_texture(const tex_t *t, MTLTextureDescriptor *d) {
         if (k.pool != (uint64_t)(uintptr_t)t->pool || k.off != t->off || k.d.format != t->d.format) continue;
         id<MTLTexture> other = (__bridge id)g_alias.vals[i];
         NvImageHeap *o = objc_getAssociatedObject(other, &g_image_heap_owner_key);
+        // Storage placed in its pool's heap keeps its scaled offset for every later description (pool_heap_texture): taken as a family heap, a description over it landed at
+        // offset 0, over what the pool placed there (found by jonpage0 on #1453)
+        if (o && o->pool_heap) { pthread_mutex_unlock(&g_smu); return nil; }
         // Metal omits ShaderAtomic from usage; tex_desc gives every writable R32 integer image that capability.
         MTLTextureUsage usage = other.usage | (tex_atomic_capable(other) ? MTLTextureUsageShaderAtomic : 0);
         if (o && o->heap.size >= need.size && usage == d.usage && (!owner || o->heap.size < owner->heap.size)) owner = o;
@@ -3430,7 +3433,7 @@ static id<MTLTexture> pool_heap_texture(const tex_t *t, MTLTextureDescriptor *d)
         MTLHeapDescriptor *hd = [MTLHeapDescriptor new]; hd.type = MTLHeapTypePlacement; hd.size = size;
         hd.storageMode = MTLStorageModePrivate; hd.hazardTrackingMode = d.hazardTrackingMode;
         id<MTLHeap> heap = [g_dev newHeapWithDescriptor:hd];
-        if (heap) { h = [NvPoolHeap new]; h->heap = heap; h->ngrain = size / POOL_HEAP_GRAIN; h->used = calloc(h->ngrain, 1);
+        if (heap) { h = [NvPoolHeap new]; h->heap = heap; h->pool_heap = 1; h->ngrain = size / POOL_HEAP_GRAIN; h->used = calloc(h->ngrain, 1);
             atomic_fetch_add(&g_image_heap_n, 1); nvn_hm_put(&g_pool_heap, &p, (void *)CFBridgingRetain(h)); g_pool_heap_n++; g_pool_heap_bytes += size;
             static int nl; if (nl++ < 8) MLOG("GPU-only pool %p (%llu MB): its render targets share one placement heap of %llu MB", p->mem, (unsigned long long)(p->size >> 20), (unsigned long long)(size >> 20)); }
     }

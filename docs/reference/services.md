@@ -639,6 +639,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `Context::Create` and `Context::Destroy` succeed and connect to nothing (`hle_net.c`). `Connection::Create` and the rest still fail, as they do with no network.
 - **Found on:** [DRAGON QUEST BUILDERS 2](../../dm/games/010042000A986000/README.md) (SDK 5.4.0). 53 of 82 games surveyed import the call.
 
+### `EventFd` needs no network
+
+- **Symptom:** `abort` under `grpc_init` at startup, with no red line: `game called nn::diag abort: Result 0, call site sdk+0xb8fe8`, backtrace `sdk+0xba138 sdk+0x7bd670 sdk+0x777f30 main+0x21f0c80`, just after `fs mount _npln:` (Ocarina of Time).
+- **Cause:** gRPC, which `nn::npln` links, wakes its pollers with `nn::socket::EventFd`. The host failed that with ENETDOWN, so gRPC found no wakeup descriptor, its poll engine's factory (`main+0x21f1280`) returned null and the engine selection called `abort` (`main+0x21f0c7c`). An event descriptor is local to the bsd service, so on Horizon it works with no network; only a connection needs one.
+- **Fix:** `EventFd`, `EventFdRead` and `EventFdWrite` are host counters, `Poll` waits on them with a condition variable and `Close` frees them (`hle_net.c`). `Socket` and the rest still fail, as they do with no network. An endless wait comes back with 0 after 100 ms, as it does with nothing to wait on.
+- **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_net_eventfd`.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (SDK 22.2.8).
+
 ### The local user's profile image
 
 - **Symptom:** `Break#1 reason=0 Result=0` right after the first save is created, then exit 42; the stack has `nn::diag::detail::OnAssertionFailure` under `nn::image::JpegDecoder::Decode` (`sdk+0x394e4`), called from the game (Burnout Paradise Remastered, SDK 9.3).

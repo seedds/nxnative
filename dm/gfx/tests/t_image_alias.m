@@ -72,6 +72,20 @@ static void atomic_pixel(id<MTLTexture> t, uint32_t seed) {
     for (NSUInteger i=1;i<out.length/4;i++) valid &= p[i]==(seed^(uint32_t)i);
     CHECK(valid,"native atomic modifies the heap-backed integer image and preserves every other pixel");
 }
+// A 32-bit colour texture a shader runs image atomics on (Ocarina of Time's d17eefaff4f0bc23 ORs into RGBA8): R32 storage, the same bytes, with its own format as a view for everything else
+static void atomic_colour(pool_t *pool) {
+    tex_t t=image(pool,995000,16,16); mtl_tex_init(&t);
+    id<MTLTexture> base=tex_mtl(&t); uint32_t seed=0x11223344; pixels(base,seed);
+    id<MTLTexture> up=tex_upgrade(&t,base,MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite|MTLTextureUsageShaderAtomic,MTLPixelFormatR32Uint);
+    CHECK(up.pixelFormat==MTLPixelFormatRGBA8Unorm && up.parentTexture.pixelFormat==MTLPixelFormatR32Uint,"a colour texture moves to R32 storage and keeps its format as a view");
+    CHECK(tex_mtl(&t)==up,"the texture's serial now names the view");
+    id<MTLBuffer> copied=read_image(up); CHECK(((uint32_t *)copied.contents)[3]==(seed^3u),"the upgrade copies the pixels into the new storage");
+    id<MTLTexture> raw=up.parentTexture; atomic_pixel(raw,seed);
+    id<MTLBuffer> out=read_image(up); uint32_t *p=out.contents; int valid=p[0]==seed+5;
+    for (NSUInteger i=1;i<out.length/4;i++) valid &= p[i]==(seed^(uint32_t)i);
+    CHECK(valid,"the colour view reads the pixels the copy kept and the atomic changed");
+    mtl_tex_release(&t);
+}
 static void depth_planes(pool_t *pool) {
     tex_t d[2];
     for (int i=0;i<2;i++) { d[i]=image(pool,992000+i,32u<<i,32u<<i); d[i].off=12<<20; d[i].mem=pool->mem+d[i].off;
@@ -157,6 +171,7 @@ int main(void) { @autoreleasepool {
     pixels(big,0x55667788); pixels(tex_mtl(&a[63]),0xa1b2c3d4); pixels(small,0x76543210);
     separate_storage(&pool,small.heap);
     indirect_pixels(small,0x76543210);   // writes to other pools, offsets and formats left it intact
+    atomic_colour(&pool);
     depth_planes(&pool);
     CHECK([g_res_objects containsObject:small.heap],"the parent heap is resident for indirect access");
     CHECK(![g_res_objects containsObject:small],"aliases do not each register a separate allocation");

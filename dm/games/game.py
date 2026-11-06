@@ -116,6 +116,28 @@ def upscaler_keys(g):
     return sorted(keys)
 
 
+# fsr1_upscale <fragment key> size=<off> proj=<off> vp=<off> [vp_prev=<off>]: the game's FSR 1 EASU draw (one full-screen triangle, the render-resolution scene in at texture slot 0,
+# the output-resolution target written) and its camera uniform block, bound to the vertex stage of the draws into the scene's depth: offsets of the render size (two floats),
+# the projection (4x4, row-major; its last row 0, 0, -1, 0), this frame's view-projection and the last frame's (none: the host keeps the last one itself). docs/reference/rendering.md
+FSR1_CAMERA = ('size', 'proj', 'vp', 'vp_prev')
+
+
+def fsr1_upscale(g):
+    """the game's FSR 1 draw and camera block (fsr1_upscale), or None"""
+    v = g.get('fsr1_upscale', '').split()
+    if not v: return None
+    if not re.fullmatch(r'[0-9a-f]{16}', v[0]): sys.exit(f'{g.id}: fsr1_upscale: the first value is the 16-digit fragment shader key: {v[0]}')
+    f = {'key': v[0], 'vp_prev': 0}
+    for kv in v[1:]:
+        k, _, x = kv.partition('=')
+        if k not in FSR1_CAMERA or not re.fullmatch(r'0x[0-9a-fA-F]+', x) or int(x, 16) % 16: sys.exit(f'{g.id}: fsr1_upscale: {kv} is not one of {", ".join(FSR1_CAMERA)}=<16-byte aligned hex offset>')
+        f[k] = int(x, 16)
+    miss = [k for k in ('size', 'proj', 'vp') if k not in f]
+    if miss: sys.exit(f'{g.id}: fsr1_upscale needs {", ".join(miss)}')
+    if max(f[k] for k in FSR1_CAMERA) + 64 > 0x1000: sys.exit(f'{g.id}: fsr1_upscale: offsets past 4 KiB')
+    return f
+
+
 def header(g):
     """game_profile.h of a profile: one profile's constants, or with the key programs (a multi-program application packed as one game: Super Mario 3D All-Stars) a table of its programs' profiles"""
     return header_multi([(0, g)] + [(int(n), load(i)) for n, i in g.pairs('programs')]) if g.get('programs', '') else header_one(g)
@@ -204,6 +226,7 @@ def header_one(g):
     mml = g.get('mem_map_limit', 'off')   # MapPhysicalMemory refused beyond the application pool, as on Horizon (hle_svc.c): on / off
     if mml not in ('on', 'off'): sys.exit(f'{g.id}: mem_map_limit must be on or off: {mml}')
     ups = upscaler_keys(g)   # the game's own upscaler shaders, which DM_UPSCALER=metalfx (the launcher's Game's upscaler) replaces with MetalFX's spatial scaler (nvn_mtl.m up_mfx_encode)
+    f1 = fsr1_upscale(g)   # the game's FSR 1 upscale draw and its camera block, which DM_UPSCALER=metalfx / fsr4 replaces (fsr1_up.inc)
     dbr = g.get('draw_barriers', 'full')   # how draw passes are ordered (nvn_mtl.m barrier_game): full = each waits for all earlier GPU work, game = by the game's own barriers, so vertex work overlaps the previous pass's fragments
     if dbr not in ('full', 'game'): sys.exit(f'{g.id}: draw_barriers must be full or game: {dbr}')
     gts = g.get('gpu_timestamps', 'submission')   # counter timestamps (nvn_mtl.m rep_ticks): submission = one time per submission, segment = the GPU start / end of the segment holding the report
@@ -264,6 +287,10 @@ def header_one(g):
          f'#define DM_GAME_GPU_TS_SEGMENT {int(gts == "segment")}',
          f'#define DM_GAME_DRAW_BARRIERS_GAME {int(dbr == "game")}',
          f'#define DM_GAME_UPSCALER_KEYS {q(",".join(ups))}', f'#define DM_GAME_UPSCALER_N {len(ups)}',
+         f'#define DM_GAME_FSR1_KEY {q(f1["key"] if f1 else "")}', f'#define DM_GAME_FSR1_N {int(bool(f1))}',
+         *(f'#define DM_GAME_FSR1_{k.upper()} {f1[k] if f1 else 0:#x}' for k in FSR1_CAMERA),   # offsets in the camera block of the render size, the projection, the view-projection, the last frame's (0: the host's own copy)
+         f'#define DM_GAME_UPSCALER_ANY {int(bool(ups) or bool(f1))}',   # the launcher's Game's upscaler is shown
+         f'#define DM_GAME_UPSCALER_DEFAULT {q("metalfx" if f1 else "game")}',   # its default: MetalFX over an FSR 1 draw (spatial in, spatial out); the agl network keeps its own look
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)
          '']

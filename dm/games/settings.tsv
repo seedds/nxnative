@@ -7,7 +7,7 @@
 #             toggle: values - (on sets 1, off 0) or <on>/<off>, the two values the variable takes (on/off)
 #   default   a value (a toggle's: 1 on, 0 off); DM_GAME_<NAME>: the host's own default from the game profile (game_profile.h, game.py); build:<VAR>: the IPA build's setting (build_ipa.sh)
 #             <ios>|<mac> selects the platform's default before resolving a profile macro or build variable
-#   shown     always; DM_GAME_<NAME>!=<value> or ==<value>; fixups:<KEY>: main's rewriter table has that key (a stub in the game's build, patch_nso.py); languages>1 (more than one to pick, so also when the control data lists none); gfxapi:<API>: the packer's GFXAPI;
+#   shown     always (conditions joined by & must all hold); DM_GAME_<NAME>!=<value> or ==<value>; fixups:<KEY>: main's rewriter table has that key (a stub in the game's build, patch_nso.py); languages>1 (more than one to pick, so also when the control data lists none); gfxapi:<API>: the packer's GFXAPI;
 #             platform:<ios | mac>: the app's platform (SETTINGS_PLATFORM, ios when unset), for a switch only that platform's front end reads
 #   section   Game, Controls or Performance: a heading on the single settings screen. Rows appear in table order within each section
 #             Reset to tested defaults clears all launcher choices; values fixed by an env file stay
@@ -19,7 +19,9 @@ DM_DYNAMIC_RESOLUTION	toggle	-	0	fixups:DYNAMIC_RESOLUTION	Game	Dynamic resoluti
 DM_RENDER_SCALE	range	0.5:1.0:0.05	1.0	fixups:RENDER_SCALE	Game	Render scale		level=basic
 DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		level=basic
 DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling	Uses more GPU time and can increase heat.
-DM_UPSCALER	choice	game=Game's own,metalfx=MetalFX	game	DM_GAME_UPSCALER_N!=0	Game	Game's upscaler
+DM_UPSCALER	choice	game=Game's own,metalfx=MetalFX,fsr4=FSR 4?DM_GAME_FSR1_N!=0&platform:mac	DM_GAME_UPSCALER_DEFAULT	DM_GAME_UPSCALER_ANY!=0	Game	Game's upscaler
+DM_FSR4_PROFILE	choice	int8-lite=Lite,int8-lite-pixfix=Lite with pixelization fix,exact-fast=Exact	int8-lite	DM_GAME_FSR1_N!=0&platform:mac	Game	FSR 4 model	Exact is the full network and takes about twice Lite's GPU time.	needs=DM_UPSCALER=fsr4
+DM_FSR4_SHARPNESS	range	0:1:0.05	0	DM_GAME_FSR1_N!=0&platform:mac	Game	FSR 4 sharpening		needs=DM_UPSCALER=fsr4
 DM_LANG	choice	languages	build:DM_LANG	languages>1	Game	Game language		level=basic
 DM_FULLSCREEN	choice	0=Window,1=Fullscreen	0	platform:mac	Game	Display mode		level=basic
 DM_PICTURE_FIT	choice	fit=Fit,fill=Fill	fit	platform:ios	Game	Picture	Fill crops the game's 16:9 picture to cover the screen. Health bars, subtitles or maps near the edges can be cut off. A full-screen picture without cropping needs a patch for each game.

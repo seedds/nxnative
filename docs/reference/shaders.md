@@ -1390,6 +1390,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): the cloth solver `6f364b25e417234a`, an outer `do { … } while (--iterations != 0)` with barriers in it and in its batch loop; an iteration count of 0 wraps, and only the guard ends the loop. 367 of its 36,810 shaders then had a barrier inside a loop.
 - **Check:** `test_dmsh_loop_guard.py`.
 
+### A loop whose trip count comes from bad data
+
+- **Symptom:** the GPU watchdog, a `firmware-detected lockup` gpuEvent, or a frame that takes seconds, with a compute kernel or a task shader in the stuck submission. loop_guard ends every loop after 2^18 iterations a thread, but silently, and 2^18 iterations of a heavy body times thousands of threads still holds the GPU for seconds.
+- **Cause:** a loop bounded by data the game had not written yet or that a pool-table miss read as 0: PRAGMATA's particle emitter 6a3750228d1d60b2 (N = a stale float, about 1e9), its software rasterizer 26166d37ed56d6bb (screen-sized triangles), 9af5728334cd12f5 (`i <= N - 8` with N < 8), OoT's agl task shaders (`(n - 1) >> 5` with n = 0, 2^27).
+- **Fix:** the automatic loop guard, a profile key (`shader_loopguard auto`, or `DMSH_LOOPGUARD=auto` for one build). `dmsh_dsl.py` (the checker's `data_sized_loop` rule) finds the loops whose bound or start comes from a load, and `dmsh_loopdiag.py` `auto` gives each one a reporting site on loop_guard's counter, in compute kernels and task functions. The site reads its cap from the debug buffer at index 28. The host binds a zeroed buffer there unless `DM_NVN_LOOPCAP` is set, so by default the shader runs as built: loop_guard's cap and no report. With `DM_NVN_LOOPCAP`, a loop that reaches `DM_NVN_LOOPCAP_AUTO` (default 2^18) prints `[RED] loop cap hit: <key> loop <site>, bound <value>` (the site table is in the reflection's `loopguard`) and raises the abort word, so the other guarded loops leave within 1,024 iterations and the GPU drains. Mesh, vertex and fragment shaders are left out: mesh functions share the vertex argument table, where index 28 is a vertex stream, and the fragment binding at index 30 was a page-fault suspect.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): the tower-ring lockups of 2026-11-05.
+- **Check:** `DMSH_TEST_METAL=1 python3 dm/gfx/tests/test_dmsh_loopdiag.py` (`AutoGuard`).
+
 ### NVN2 compute `c0` with two push blocks
 
 - **Symptom:** NVN2 compute shaders read their uniform, storage or handle words, or the second block of their push constants, from the wrong place in `c0`; `[RED] <key>: NVN2 compute c0 layout does not add up to its size` in the build.

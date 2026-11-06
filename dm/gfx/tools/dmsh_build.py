@@ -10,7 +10,7 @@
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately);
 # a [RED] line per shader that built but lost something (shader_regressions.report_losses), which does not change the exit status
 import atexit, inspect, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, collections, threading, concurrent.futures as cf
-import dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
+import dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_loopdiag, dmsh_dsl, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
@@ -355,6 +355,11 @@ template<typename V, typename T, typename... A> static inline __attribute__((alw
     return r;
 }}
 '''
+# The automatic loop guard (game.tsv shader_loopguard, or DMSH_LOOPGUARD for one build; dmsh_chain.loopguard): auto gives each data-sized loop of a compute kernel or task function
+# (bound or start from loaded data, dmsh_dsl.py) a reporting site on loop_guard's counter (dmsh_loopdiag.auto). With the host's DM_NVN_LOOPCAP off it ends where loop_guard ends
+# it, LOOP_CAP, and records nothing; on, a loop that reaches DM_NVN_LOOPCAP_AUTO names its key, site and bound and the abort word drains the GPU. Every other shader is left byte
+# for byte (PRAGMATA's lockups at the tower ring: 6a375022's N read from stale scratch, 26166d37's screen-sized triangles; OoT's agl task shaders on a pool-table miss)
+LOOPGUARD = dmsh_chain.loopguard(GAME)
 def border_emu(msl):
     """The samples of the argument buffer's textures through its sampler members, T.sample(S, args) → dm_bs(T.sample(S, args), block, bit, T, S_w, args) (see BORDER_HELPERS);
     the source unchanged when it samples through none. Only samples of float textures: an integer texture is not filtered, and its border colour is Maxwell's integer one, which
@@ -1166,7 +1171,7 @@ RULES = []   # MSL rewrite rules attached by shader name (function, applicabilit
 # The library ABI enters as its values (dmsh_abi.VALUES), so a comment in dmsh_abi.h does not change a key either.
 # It covers what runs only when a shader misses the cache, since a hit restores the output and skips it. dmsh_fetch.py is not in it, but for screen_varyings (raster_facts): readable-tile variants get a
 # separate second-stage cache keyed on the generated MSL. Nor are the other side libraries' modules, made again from the restored MSL on every build (test_dmsh_code_fp.py checks this list).
-CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_ampere, abi) + ((ios_metal,) if IOSOUT else ()))
+CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_loopdiag, dmsh_dsl, dmsh_ampere, abi) + ((ios_metal,) if IOSOUT else ()))
                          + b'\0' + inspect.getsource(dmsh_fetch.screen_varyings).encode()
                          + b'\0abi\0' + repr(sorted(abi.VALUES.items())).encode()).hexdigest()
 TOOL_FP = tool_fingerprint().encode()
@@ -1654,6 +1659,14 @@ def finish(key, w, j, c1):
         if pad: open(msl, 'w').write(src)
     lay = None; discard = False
     res = json.load(open(os.path.join(w, key + '.res.json')))
+    loopguard = []
+    lg_stage = 'task' if mesh and mesh.get('kind') == 'ts' else 'compute' if j['stage'] == 'cs' and not mesh else None
+    if LOOPGUARD == 'auto' and lg_stage:   # data-sized loops report through the host's debug buffer (see LOOPGUARD)
+        try: gb = tuple(b['msl_name'] for b in reflect(key, mesh['kind'] if mesh else j['stage'], src, res) if b.get('kind') == abi.KIND_GMEM_MAP)
+        except ValueError: gb = ()
+        try: src, loopguard = dmsh_loopdiag.auto(src, key, lg_stage, gb)
+        except ValueError as e: return 'loop guard failed', str(e)[:160], None
+        if loopguard: open(msl, 'w').write(src)
     if j['stage'] == 'vs':   # the two depth-convention entry points (see vs_depth); the analysis below uses the source with only main0
         capture = dmsh_geometry.capture(src)
         src, full = vs_depth(src)
@@ -1692,6 +1705,7 @@ def finish(key, w, j, c1):
             **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u'} if fu else {}), **({'entry_m': 'main0_m', 'uint_mask_m': fmask} if fu and fmask else {}), **({'entry_d': 'main0_d'} if fd else {}), **({'entries_lost': lost} if lost else {}),
             **({'first_store': [{'reg': next(b['reg'] for b in binds if b['msl_name'] == n), 'word': w, 'value': v} for n, w, v in first]} if first else {}),
             **({'tg_spill': spill} if spill else {}),
+            **({'loopguard': {'buffer': dmsh_loopdiag.BUF_INDEX, 'cap_word': dmsh_loopdiag.AUTO_CAP_WORD, 'sites': loopguard}} if loopguard else {}),   # see LOOPGUARD
             'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr, mesh['kind'] if mesh else j['stage']),
             'bindings': binds,
             'vertex_inputs': [{'location': int(m.group(3)), 'msl_type': m.group(1)} for m in attributes(src)],

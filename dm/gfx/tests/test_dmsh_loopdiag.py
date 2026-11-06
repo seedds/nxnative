@@ -212,5 +212,137 @@ kernel void main0(device B& cp_s2 [[buffer(1)]])
         if os.environ.get('DMSH_TEST_METAL'):
             rc, err = metal(out, 'low'); self.assertEqual(rc, 0, err)
 
+# The automatic guard (dmsh_loopdiag.auto, dmsh_build.py LOOPGUARD=auto): a count read from a storage buffer (data-sized) and a constant count (not), as SPIRV-Cross writes them
+DATA = """#include <metal_stdlib>
+#include <metal_atomic>
+
+using namespace metal;
+struct B { uint _m0[1024]; };
+struct spvDescriptorSetBuffer0 { device B* cp_s0 [[id(0)]]; };
+
+kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]], uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]])
+{
+    uint _10 = (*spvDescriptorSet0.cp_s0)._m0[0];
+    uint _12 = 0u;
+    uint _20 = 0u;
+    bool _22;
+    do
+    {
+        _12 += (*spvDescriptorSet0.cp_s0)._m0[_20 & 1023u];
+        uint _21 = _20 + 1u;
+        _22 = _21 < _10;
+        _20 = _21;
+    } while (_22);
+    int _30 = 0;
+    bool _32;
+    do
+    {
+        _12 += uint(_30);
+        int _31 = _30 + 1;
+        _32 = _31 < 8;
+        _30 = _31;
+    } while (_32);
+    (*spvDescriptorSet0.cp_s0)._m0[1] = _12;
+}
+"""
+CONST = DATA.replace('uint _10 = (*spvDescriptorSet0.cp_s0)._m0[0];', 'uint _10 = 16u;')
+
+
+class AutoGuard(unittest.TestCase):
+    def setUp(self):
+        self.guarded = loop_guard(DATA)
+        self.out, self.table = ld.auto(self.guarded, KEY, 'compute')
+
+    def test_only_the_data_sized_loop(self):
+        self.assertEqual(len(re.findall(r'\+\+dm_lg < 262144u', self.guarded)), 2)
+        self.assertEqual(len(self.table), 1)
+        self.assertIn('} while ((_22) && dm_hgcv(dm_lg, 1u, as_type<uint>(_10), dm_hg, dm_hgcap));', self.out)   # the bound variable is the record's value
+        self.assertIn('} while ((_32) && ++dm_lg < 262144u);', self.out)   # the constant loop keeps loop_guard's test
+        t = self.table[0]
+        self.assertEqual((t['site'], t['counter'], t['fn'], t['why'], t['value']), (1, 'dm_lg', 'main0', 'data', '_10'))
+        self.assertIn('dm_hgcv(dm_lg, 1u,', self.out.split('\n')[t['line'] - 1])
+
+    def test_off_is_loop_guard(self):   # no DM_NVN_LOOPCAP: a zeroed buffer, so the cap is loop_guard's and nothing records
+        self.assertEqual(ld.LOOP_CAP, scope['LOOP_CAP'])
+        self.assertIn('device atomic_uint* dm_hg_buf [[buffer(28)]])', self.out)
+        self.assertIn(f'atomic_load_explicit(&dm_hg[{ld.AUTO_CAP_WORD}], memory_order_relaxed); if (dm_hgcap == 0u) dm_hgcap = atomic_load_explicit(&dm_hg[1], memory_order_relaxed);'
+                      f' if (dm_hgcap == 0u) {{ dm_hg = nullptr; dm_hgcap = {scope["LOOP_CAP"]}u; }}', self.out)
+        body = self.out[self.out.index('bool dm_hgcv('):]
+        body = body[:body.index('\n}\n')]
+        self.assertIn('if ((c & 1023u) != 0u || hg == nullptr) return true;', body)   # off: c < cap is the whole test, as ++c < cap
+        self.assertIn('if (c == cap) dm_hg_rec(site, v, hg);', body)
+        self.assertIn('if (hg == nullptr) return;', ld.PRELUDE_CORE)
+        self.assertNotIn('dm_hg_miss', self.out)   # the automatic mode leaves the pool-table lookups alone
+
+    def test_record_holds_the_value(self):
+        self.assertIn('atomic_store_explicit(&hg[16u + 4u * n + 3u], v, memory_order_relaxed);', self.out)
+
+    def test_no_data_sized_loop_unchanged(self):   # byte for byte: a library rebuilt with the guard keeps every other shader
+        g = loop_guard(CONST)
+        self.assertEqual(ld.auto(g, KEY, 'compute'), (g, []))
+        self.assertEqual(ld.auto(QUEUE, KEY, 'compute'), (QUEUE, []))   # no loop_guard sites at all
+
+    def test_stages(self):
+        for st in ('vertex', 'fragment', 'mesh'):   # not guarded: no binding the host can give them safely (dmsh_loopdiag.py AUTO_STAGES)
+            self.assertEqual(ld.auto(self.guarded, KEY, st), (self.guarded, []), st)
+        task = self.guarded.replace('kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]], uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]])',
+                                    '[[object]] void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]], uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]], constant uint* dm_first [[buffer(29)]])')
+        out, table = ld.auto(task, KEY, ld.stage_of(task))
+        self.assertEqual(ld.stage_of(task), 'task')
+        self.assertEqual(len(table), 1)
+        self.assertIn('constant uint* dm_first [[buffer(29)]], device atomic_uint* dm_hg_buf [[buffer(28)]])', out)
+
+    def test_helper_loop(self):   # a data-sized loop in a helper (the task shaders' dm_stage_body): the helper takes the buffer and cap, its caller passes them
+        helper = self.guarded.replace('kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]], uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]])\n{',
+            'static inline __attribute__((always_inline)) void dm_stage_body(constant spvDescriptorSetBuffer0& spvDescriptorSet0)\n{') + \
+            'kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]])\n{\n    uint dm_lg = 0u; (void)dm_lg;\n    dm_stage_body(spvDescriptorSet0);\n}\n'
+        out, table = ld.auto(helper, KEY, 'compute')
+        self.assertEqual([t['fn'] for t in table], ['dm_stage_body'])
+        self.assertIn('void dm_stage_body(constant spvDescriptorSetBuffer0& spvDescriptorSet0, device atomic_uint* dm_hg, uint dm_hgcap)', out)
+        self.assertIn('    dm_stage_body(spvDescriptorSet0, dm_hg, dm_hgcap);', out)
+        if os.environ.get('DMSH_TEST_METAL'):
+            rc, err = metal(out, 'helper'); self.assertEqual(rc, 0, err)
+
+    def test_value_out_of_scope_is_zero(self):   # a bound declared inside the loop body is not in scope at its `} while`
+        src = self.guarded.replace('    uint _10 = (*spvDescriptorSet0.cp_s0)._m0[0];\n', '').replace('        uint _21 = _20 + 1u;\n',
+                                                                                                   '        uint _21 = _20 + 1u;\n        uint _10 = (*spvDescriptorSet0.cp_s0)._m0[0];\n')
+        out, table = ld.auto(src, KEY, 'compute')
+        self.assertEqual(len(table), 1)
+        self.assertIn('dm_hgcv(dm_lg, 1u, 0u, dm_hg, dm_hgcap)', out)
+
+    def test_over_budget_takes_every_loop(self):
+        found = ld.auto_sites(self.guarded, budget=0.0)
+        self.assertEqual(len(found), 2)
+        self.assertEqual({v['why'] for v in found.values()}, {'budget'})
+
+    def test_build_switch(self):
+        import dmsh_chain
+        class G:
+            rows = [('shader_border_emu', ['0'])]
+            def get(self, k, d=None): return dict((a, b[0]) for a, b in self.rows).get(k, d)
+        from unittest import mock
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('DMSH_LOOPGUARD', None)
+            self.assertEqual(dmsh_chain.loopguard(G()), 'off')
+            self.assertEqual(dmsh_chain.profile_rows(G()), b'shader_border_emu\t0\n')   # unchanged without the switch: no shader's cache key moves
+            os.environ['DMSH_LOOPGUARD'] = 'auto'
+            self.assertEqual(dmsh_chain.loopguard(G()), 'auto')
+            self.assertEqual(dmsh_chain.profile_rows(G()), b'shader_border_emu\t0\nshader_loopguard\tauto\n')
+            os.environ['DMSH_LOOPGUARD'] = 'on'
+            with self.assertRaises(SystemExit): dmsh_chain.loopguard(G())
+
+    @unittest.skipUnless(os.environ.get('DMSH_TEST_METAL'), 'DMSH_TEST_METAL=1 compiles with the Metal compiler')
+    def test_compiles(self):
+        rc, err = metal(self.out, 'auto'); self.assertEqual(rc, 0, err)
+
+    @unittest.skipUnless(os.environ.get('DMSH_TEST_LIB') and os.environ.get('DMSH_TEST_KEYS'), 'DMSH_TEST_LIB + DMSH_TEST_KEYS: library shaders')
+    def test_library_shaders(self):
+        for k in os.environ['DMSH_TEST_KEYS'].split(','):
+            src = (Path(os.environ['DMSH_TEST_LIB']) / f'{k}_b.metal').read_text()
+            out, table = ld.auto(src, k, ld.stage_of(src))
+            if not table: self.assertEqual(out, src, k); continue
+            rc, err = metal(out, k); self.assertEqual(rc, 0, f'{k}: {err[-1500:]}')
+
+
 if __name__ == '__main__':
     unittest.main()

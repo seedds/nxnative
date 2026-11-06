@@ -13381,6 +13381,14 @@ static int up_mfx_uses(const void *code, size_t n, const void *v, size_t w) {
     while (hits < 8 && (p = memmem(p, end - p, v, w))) { hits++; p += w; }
     return hits == 8;
 }
+// Whether the code has a MUFU.EX2 or MUFU.LG2 (Ampere: opcode 0x108 in the low 9 bits, any form; the function at 74..79, EX2 2 and LG2 3), the instructions every power takes
+static int up_mfx_has_pow(const void *code, size_t n) {
+    for (size_t o = 0; o + 16 <= n; o += 16) {
+        uint64_t lo, hi; memcpy(&lo, (const uint8_t *)code + o, 8); memcpy(&hi, (const uint8_t *)code + o + 8, 8);
+        if ((lo & 0x1ff) == 0x108 && ((hi >> 10) & 0x3f) - 2 < 2) return 1;
+    }
+    return 0;
+}
 static int up_mfx_color(const void *code, size_t n) {
 #define UP_F32(x) ({ float f_ = (x); up_mfx_uses(code, n, &f_, 4); })
 #define UP_F16(x) ({ __fp16 f_ = (x); up_mfx_uses(code, n, &f_, 2); })
@@ -13388,6 +13396,11 @@ static int up_mfx_color(const void *code, size_t n) {
     int enc16 = UP_F16(0.41650390625f) || UP_F16(0.416748046875f), dec16 = UP_F16(0.040435791015625f) && UP_F16(2.3984375f) && UP_F16(0.07745361328125f);   // enc16 (1 / 2.4 either way rounded): no pack has it; it must not read as encoded input
 #undef UP_F32
 #undef UP_F16
+    // No curve at all: a variant that neither encodes nor decodes takes and writes one colour space, whichever it is (Ocarina of Time's agl_ndsr_vr.pck: R11G11B10F in and out).
+    // The linear shape converts nothing either, so the colour passes as it is; the washed-out picture came from a decode the shader does and the swap did not. A curve needs a power,
+    // MUFU.EX2 and MUFU.LG2 (Splatoon Raiders' variants take theirs on packed halves): code with neither cannot convert, wherever its constants come from (a constant buffer's are not
+    // in the code)
+    if (!enc32 && !dec32 && !enc16 && !dec16 && !up_mfx_has_pow(code, n)) return UP_COLOR_LINEAR;
     return enc32 && dec32 && !enc16 && !dec16 ? UP_COLOR_LINEAR : dec16 && !enc16 && !enc32 && !dec32 ? UP_COLOR_SRGB : UP_COLOR_KEEP;
 }
 // Whether cs is one of the game's upscaler shaders (DM_GAME_UPSCALER_KEYS: comma-separated 16-digit keys)
@@ -13399,7 +13412,7 @@ static void up_mfx_read_color(NvShader *cs, const NVNshaderData *sd) {
     if (cs->up_color || !DM_GAME_UPSCALER_N || !up_mfx_on() || !up_mfx_named(cs)) return;
     uint32_t nctl, ncode = 0; if (sd->control) nvn_ctl_lens(sd->control, &nctl, &ncode);
     cs->up_color = sd->data && ncode && ncode < (1u << 24) ? up_mfx_color((const void *)(uintptr_t)sd->data, ncode) : UP_COLOR_KEEP;
-    MLOG("upscaler %s: %s", cs->key, cs->up_color == UP_COLOR_LINEAR ? "linear input and output, MetalFX in HDR mode" : cs->up_color == UP_COLOR_SRGB ? "sRGB-encoded input, linear output, MetalFX in perceptual mode" : "neither of the colour shapes MetalFX draws; the game's shader runs");
+    MLOG("upscaler %s: %s", cs->key, cs->up_color == UP_COLOR_LINEAR ? "input and output in one colour space (linear, or no sRGB curve in the code), MetalFX in HDR mode" : cs->up_color == UP_COLOR_SRGB ? "sRGB-encoded input, linear output, MetalFX in perceptual mode" : "neither of the colour shapes MetalFX draws; the game's shader runs");
 }
 // Whether cs is one of the game's upscaler shaders, the player chose MetalFX and its colour is one MetalFX draws
 static int up_mfx_wanted(NvShader *cs) {

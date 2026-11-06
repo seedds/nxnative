@@ -303,7 +303,8 @@ static void res_top(const char *why) { @autoreleasepool {
         else if ([o conformsToProtocol:@protocol(MTLHeap)]) MLOG("  heap: %llu MB", (unsigned long long)(((id<MTLHeap>)o).size >> 20));
         else { id<MTLBuffer> b = o; int sh = b.storageMode == MTLStorageModeShared; MLOG("  buffer %p+%#lx (%s): %llu MB", sh ? b.contents : NULL, (unsigned long)b.length, sh ? "shared" : "private", (unsigned long long)(b.allocatedSize >> 20)); } }
 } }
-void dm_gfx_restop(void) { res_top("DM_CTL restop"); }
+void mem_census(const char *why);
+void dm_gfx_restop(void) { res_top("DM_CTL restop"); mem_census("DM_CTL restop"); }
 // Going on helps nobody once command buffers keep failing: no frame reaches the window, and each attempt asks the driver to wire more. A host left running like that on a 16 GB Mac took the whole
 // system down, hung for hours and then a kernel panic in IOGPUGroupMemory at 14.7 GB wired. So 32 failures within a minute end the game
 static void res_top_once(NSError *err) {
@@ -399,12 +400,13 @@ static want_list g_bf_want = {"DM_NVN_BF_WANT", PTHREAD_MUTEX_INITIALIZER}, g_du
 void bf_want_note(const char *key) { want_note(&g_bf_want, key); }
 
 // ---------- Memory pools ----------
-typedef struct { uintptr_t lo, hi; uintptr_t base; __unsafe_unretained id<MTLBuffer> buf; uint64_t gpu; const void *key; int res; uint64_t born; uintptr_t end; uint64_t unk; } pool_ent;   // res: already in the residency set (on demand, see pool_res); born: when it was added (ns); end, unk: a large pool's chunk (see BIG_MIN)
+typedef struct { uintptr_t lo, hi; uintptr_t base; __unsafe_unretained id<MTLBuffer> buf; uint64_t gpu; const void *key; int res; uint64_t born; uintptr_t end; uint64_t unk; uint32_t n_tex_reads, n_other; } pool_ent;   // res: already in the residency set (on demand, see pool_res); born: when it was added (ns); end, unk: a large pool's chunk (see BIG_MIN); n_tex_reads / n_other: lookups by texture uploads / by anything else (mem_census)
 static pool_ent *g_pools; static int g_npool, g_cap;
 static int g_pidx_ok, g_plast = -1;   // whether the address→pool index is valid, the last hit (pool_find)
 static NSMutableArray *g_keep;                  // Holds the buffer references (pool_ent has non-owning pointers)
 static uint64_t g_pool_adds;
 static int g_pool_res_n;   // registered pools already in the residency set (for the memory readout; under g_mu)
+static __thread int t_tex_upload_lookup;   // set around a texture upload's read of its storage (pool lookups counted apart, mem_census)
 
 #define C1_BANK_SIZE (4u << 20)
 #define C1_DECL_SIZE (64u << 10)
@@ -762,6 +764,7 @@ int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     int ok = 0;
     pthread_mutex_lock(&g_mu);
     int i = pool_find(addr, len);
+    if (i >= 0) { if (t_tex_upload_lookup) g_pools[i].n_tex_reads++; else g_pools[i].n_other++; }
     if (i >= 0) { pool_res(i); pc_put(i, addr); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; ok = 1; }
     pthread_mutex_unlock(&g_mu);
     return ok;
@@ -772,6 +775,7 @@ int mtl_gpu_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_
     int ok = 0;
     pthread_mutex_lock(&g_mu);
     int i = pool_find(addr, len);
+    if (i >= 0) { if (t_tex_upload_lookup) g_pools[i].n_tex_reads++; else g_pools[i].n_other++; }
     if (i >= 0) { pool_res(i); pc_put(i, addr); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; *gpu = g_pools[i].gpu + *off; ok = 1; }
     pthread_mutex_unlock(&g_mu);
     return ok;
@@ -1999,8 +2003,11 @@ static nvn_hmap g_alias_seen = {.klen = sizeof(alias_key)};   // key → g_fence
 // Live GPU-only image descriptions, including those not used yet. A dynamic-resolution family declares its largest image before any particular resolution is used.
 // Keeping only descriptions here lets its first allocation cover that family exactly, without allocating every resolution or rounding to a power of two.
 static nvn_hmap g_image_desc = {.klen = 8};   // serial → malloc'ed tex_t, under g_smu
+// GPU-written compressible images and render targets, with or without the image flag: Ocarina of Time's dynamic-resolution depth buffer (COMPRESSIBLE alone, a VIRTUAL pool) made
+// 15 live Depth32Float descriptions of 1,882-1,920 pixels at one offset, 14.5 MB each, until they shared a heap. Display, video, linear and sparse images keep their own path
+enum { IMAGE_NOT_SHARED = NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_VIDEO_DECODE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET };
 static int image_shape(const tex_t *t) {
-    return t && t->pool && !t->has_layout && t->d.flags == (NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_IMAGE)
+    return t && t->pool && !t->has_layout && (t->d.flags & NVN_TEXTURE_FLAGS_COMPRESSIBLE) && !(t->d.flags & IMAGE_NOT_SHARED)
         && t->d.target == NVN_TEXTURE_TARGET_2D && t->d.depth == 1 && t->d.levels == 1 && t->d.samples <= 1 && !t->d.stride;
 }
 static void image_desc_drop_pool(const void *pool) {   // caller holds g_smu
@@ -2734,7 +2741,9 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     // A texture in a large pool (BIG_MIN) or one that holds only textures is read through a buffer of its own, held by the upload batch: a one-time read must not leave that memory wired for good
     id<MTLBuffer> upsrc = nil;
     if (!linear && !rb_shift && !sparse && g_nvn_deswz_gpu) { up_begin(); upsrc = up_big_src((uint64_t)t->mem, t->L.size, &mo); if (upsrc) mb = (__bridge void *)upsrc; }
+    t_tex_upload_lookup = 1;
     int use_gpu = !linear && !rb_shift && !sparse && g_nvn_deswz_gpu && (upsrc || mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo));   // a sparse pool's texture is gathered through its page table on the CPU
+    t_tex_upload_lookup = 0;
     if (g_nvn_deswz_gpu && !use_gpu && !sparse && !rb_shift && !linear) RED_ONCE(40, "swizzled texture storage is not in a memory pool; falling back to the CPU");
     if (use_gpu) {
         // The GPU reads the memory pool at execution time, which is closer to a real Switch than a snapshot at CPU upload time; the dirty-page stamp is still taken before encoding, and later writes still trigger a re-upload.
@@ -14493,5 +14502,81 @@ void mtl_wait_state_dump(void) {
          (unsigned long long)g_pq_in, (unsigned long long)g_pq_done, g_cb != nil, atomic_load(&g_sub_thread_set));
 }
 void mtl_alloc_stats(uint64_t *waits, uint64_t *grown, int *n) { *waits = g_alloc_waits; *grown = g_alloc_grown; *n = g_alloc_n; }   // Main submit allocator pool: how many times it waited, how many times it grew, how many exist now
+// Memory census for restop (diagnostic): residency-set textures by Metal format; which of them anything still names (serial tables, sharing table, descriptor views) and which only the
+// deferred-release queue or nothing holds; and game textures at one storage address held as several Metal textures. Under no lock of the caller's
+static char census_flags_key;
+static id<MTLTexture> census_base(id in) { id o = [in isKindOfClass:[NvPkg class]] ? ((NvPkg *)in)->tex : in; if (![o conformsToProtocol:@protocol(MTLTexture)]) return nil; id<MTLTexture> t = o; return t.parentTexture ? t.parentTexture : t; }
+void mem_census(const char *why) { @autoreleasepool {
+    NSHashTable *named = [NSHashTable hashTableWithOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality];
+    NSHashTable *named_ret = [NSHashTable hashTableWithOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality];   // named only through retired descriptors (until a live one names it)
+    #define CN_ADD(o) do { id<MTLTexture> b_ = census_base(o); if (b_) [named addObject:(__bridge id)(__bridge void *)b_]; } while (0)
+    pthread_mutex_lock(&g_smu);
+    const nvn_hmap *maps[] = {&g_by_serial, &g_ghost, &g_alias};
+    for (unsigned m = 0; m < sizeof maps / sizeof maps[0]; m++) for (uint32_t i = 0; i < maps[m]->cap; i++) if (maps[m]->vals[i]) { id o = (__bridge id)maps[m]->vals[i]; CN_ADD(o); if ([o isKindOfClass:[NvPkg class]] && ((NvPkg *)o)->spare) CN_ADD(((NvPkg *)o)->spare); }
+    pthread_mutex_unlock(&g_smu);
+    // registered descriptors: their views' bases, and per storage address the distinct bases
+    NSMapTable *by_mem = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality valueOptions:NSPointerFunctionsStrongMemory];
+    NSMapTable *by_flags = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality valueOptions:NSPointerFunctionsStrongMemory];   // texture flags | pool flags << 32
+    os_unfair_lock_lock(&g_rmu);
+    uint64_t nreg = 0, nretired = 0;
+    for (int i = 1; i < g_ntreg; i++) { treg_t *r = &g_treg[i]; if (!r->ok) continue; nreg++; nretired += r->retired;
+        void *vs[3] = {r->view, r->alt, r->im};
+        for (int k = 0; k < 3; k++) if (vs[k]) { id<MTLTexture> b = census_base((__bridge id)vs[k]); if (!b) continue; [r->retired ? named_ret : named addObject:(__bridge id)(__bridge void *)b];
+            if (k == 0 && r->t.mem) { const void *key = r->t.mem; NSHashTable *set = [by_mem objectForKey:(__bridge id)key];
+                if (!set) { set = [NSHashTable hashTableWithOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality]; [by_mem setObject:set forKey:(__bridge id)key]; }
+                [set addObject:(__bridge id)(__bridge void *)b];
+                if (![by_flags objectForKey:(__bridge id)key]) [by_flags setObject:@(((uint64_t)(r->t.pool && r->t.pool->magic == MAGIC('P', 'O', 'O', 'L') ? r->t.pool->flags : 0) << 32) | r->t.d.flags) forKey:(__bridge id)key]; } } }
+    os_unfair_lock_unlock(&g_rmu);
+    NSHashTable *waiting = [NSHashTable hashTableWithOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality];
+    pthread_mutex_lock(&g_deferred_mu); for (NvDeferredRelease *d in g_deferred) { id<MTLTexture> b = census_base(d->object); if (b) [waiting addObject:(__bridge id)(__bridge void *)b]; } pthread_mutex_unlock(&g_deferred_mu);
+    uint64_t small_n[2][2] = {{0}}, small_b[2][2] = {{0}};   // [texture][shared storage]: residency objects of 64 KB or less
+    uint64_t n_ret = 0, b_ret = 0, n_named = 0, b_named = 0, n_wait = 0, b_wait = 0, n_none = 0, b_none = 0, n_buf = 0, b_buf = 0;
+    enum { NF = 24 }; struct { unsigned long pf; uint64_t n, b; } fm[NF] = {{0}}; int nfm = 0;
+    pthread_mutex_lock(&g_res_mu);
+    for (id<MTLAllocation> o in g_res_objects.allObjects) { uint64_t z = o.allocatedSize;
+        if (z <= 65536) { int tx = [(id)o conformsToProtocol:@protocol(MTLTexture)], sh = ((id<MTLResource>)o).storageMode == MTLStorageModeShared; small_n[tx][sh]++; small_b[tx][sh] += z; }
+        if (![(id)o conformsToProtocol:@protocol(MTLTexture)]) { n_buf++; b_buf += z; continue; }
+        id<MTLTexture> t = (id)o; if (t.parentTexture) continue;
+        unsigned long pf = (unsigned long)t.pixelFormat; int i = 0; while (i < nfm && fm[i].pf != pf) i++; if (i == nfm && nfm < NF) fm[nfm++].pf = pf; if (i < NF) { fm[i].n++; fm[i].b += z; }
+        if ([named containsObject:(__bridge id)(__bridge void *)t]) { n_named++; b_named += z; }
+        else if ([named_ret containsObject:(__bridge id)(__bridge void *)t]) { n_ret++; b_ret += z; }
+        else if ([waiting containsObject:(__bridge id)(__bridge void *)t]) { n_wait++; b_wait += z; }
+        else { n_none++; b_none += z; } }
+    pthread_mutex_unlock(&g_res_mu);
+    uint64_t dup_addr = 0, dup_tex = 0, dup_b = 0;
+    for (id key in by_mem) { NSHashTable *set = [by_mem objectForKey:key]; if (set.count < 2) continue; dup_addr++;
+        uint64_t biggest = 0, sum = 0; for (id b in set) { uint64_t z = ((id<MTLTexture>)b).allocatedSize; sum += z; if (z > biggest) biggest = z; } dup_tex += set.count - 1; dup_b += sum - biggest; }
+    {   // the largest groups: each Metal texture over one storage address, so a reader can tell views made as copies from different images that reuse the memory
+        NSMutableArray *groups = [NSMutableArray array];
+        for (id key in by_mem) { NSHashTable *set = [by_mem objectForKey:key]; if (set.count >= 2) { [groups addObject:set]; objc_setAssociatedObject(set, &census_flags_key, [by_flags objectForKey:key], OBJC_ASSOCIATION_RETAIN_NONATOMIC); } }
+        [groups sortUsingComparator:^NSComparisonResult(NSHashTable *x, NSHashTable *y) {
+            uint64_t a_ = 0, b_ = 0; for (id t in x) a_ += ((id<MTLTexture>)t).allocatedSize; for (id t in y) b_ += ((id<MTLTexture>)t).allocatedSize;
+            return a_ > b_ ? NSOrderedAscending : a_ < b_ ? NSOrderedDescending : NSOrderedSame; }];
+        for (NSUInteger g = 0; g < groups.count && g < 8; g++) {
+            char gl[700]; size_t go = 0;
+            for (id<MTLTexture> t in groups[g]) if (go < sizeof gl) go += snprintf(gl + go, sizeof gl - go, "%s[fmt %lu %lux%lux%lu type %lu mips %lu slices %lu usage %#lx %lu KB]", go ? " " : "",
+                (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.depth, (unsigned long)t.textureType, (unsigned long)t.mipmapLevelCount,
+                (unsigned long)t.arrayLength, (unsigned long)t.usage, (unsigned long)(t.allocatedSize >> 10));
+            uint64_t fl = [objc_getAssociatedObject(groups[g], &census_flags_key) unsignedLongLongValue];
+            MLOG("%s census: shared storage group %lu (%lu textures, texture flags %#llx, pool flags %#llx): %s", why, (unsigned long)g, (unsigned long)((NSHashTable *)groups[g]).count, fl & 0xffffffffull, fl >> 32, gl);
+        }
+    }
+    for (int i = 0; i < nfm; i++) for (int j = i + 1; j < nfm; j++) if (fm[j].b > fm[i].b) { __typeof__(fm[0]) x = fm[i]; fm[i] = fm[j]; fm[j] = x; }
+    char line[900]; size_t o = 0; for (int i = 0; i < nfm && i < 12 && o < sizeof line; i++) o += snprintf(line + o, sizeof line - o, "%s%lu: %llu, %llu MB", i ? "; " : "", fm[i].pf, (unsigned long long)fm[i].n, (unsigned long long)(fm[i].b >> 20));
+    MLOG("%s census: textures named by serials, sharing or live descriptors' views %llu, %llu MB; only by retired descriptors' views %llu, %llu MB; only in the deferred-release queue %llu, %llu MB; named by nothing %llu, %llu MB; buffers %llu, %llu MB; descriptors %llu (%llu retired); storage addresses with several Metal textures %llu (%llu extra textures, %llu MB)",
+         why, (unsigned long long)n_named, (unsigned long long)(b_named >> 20), (unsigned long long)n_ret, (unsigned long long)(b_ret >> 20), (unsigned long long)n_wait, (unsigned long long)(b_wait >> 20), (unsigned long long)n_none, (unsigned long long)(b_none >> 20),
+         (unsigned long long)n_buf, (unsigned long long)(b_buf >> 20), (unsigned long long)nreg, (unsigned long long)nretired, (unsigned long long)dup_addr, (unsigned long long)dup_tex, (unsigned long long)(dup_b >> 20));
+    MLOG("%s census: textures by Metal format: %s", why, line);
+    MLOG("%s census: residency objects of 64 KB or less: buffers shared %llu (%llu KB), private %llu (%llu KB); textures shared %llu (%llu KB), private %llu (%llu KB)", why,
+         (unsigned long long)small_n[0][1], (unsigned long long)(small_b[0][1] >> 10), (unsigned long long)small_n[0][0], (unsigned long long)(small_b[0][0] >> 10),
+         (unsigned long long)small_n[1][1], (unsigned long long)(small_b[1][1] >> 10), (unsigned long long)small_n[1][0], (unsigned long long)(small_b[1][0] >> 10));
+    { uint64_t nb[4] = {0}, bb[4] = {0};   // 0: only texture uploads looked it up, 1: anything else did, 2: nothing did, 3: both
+      pthread_mutex_lock(&g_mu);
+      for (int i = 0; i < g_npool; i++) { pool_ent *p = &g_pools[i]; int c = p->n_tex_reads && p->n_other ? 3 : p->n_other ? 1 : p->n_tex_reads ? 0 : 2; nb[c]++; bb[c] += p->hi - p->lo; }
+      pthread_mutex_unlock(&g_mu);
+      MLOG("%s census: memory pools looked up only by texture uploads %llu, %llu MB; by other uses only %llu, %llu MB; by both %llu, %llu MB; by nothing %llu, %llu MB", why,
+           (unsigned long long)nb[0], (unsigned long long)(bb[0] >> 20), (unsigned long long)nb[1], (unsigned long long)(bb[1] >> 20), (unsigned long long)nb[3], (unsigned long long)(bb[3] >> 20), (unsigned long long)nb[2], (unsigned long long)(bb[2] >> 20)); }
+    #undef CN_ADD
+} }
 #include "nvn_capture.inc"   // DM_NVN_CAPTURE (one frame for dm/gfx/tests/nvn_replay)
 #pragma clang attribute pop

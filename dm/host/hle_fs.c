@@ -53,7 +53,8 @@ typedef struct {
     char name[32]; char dir[1024]; char overlay[4096]; char commit[1024];
     romfs_img *img;                  // non-NULL: dir is a RomFS image file
     int ro;
-    int txn_root;                    // canonical mount entry for this backing transaction, or -1
+    int aoc;                         // add-on content: Unmount releases the name (mount_aoc)
+    int txn_root;                   // canonical mount entry for this backing transaction, or -1
     _Atomic int poison;              // failure state belongs to this backing, not to the process
     _Atomic uint64_t first_write_ns;
 } mount_t;
@@ -193,7 +194,7 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
         if (!strcmp(g_mnt[i].name, name)) { pthread_mutex_unlock(&g_lock); return RES_OK; }
     if (g_nmnt >= MAX_MOUNT) die("mount table full");
     strlcpy(g_mnt[g_nmnt].name, name, sizeof g_mnt[0].name);
-    g_mnt[g_nmnt].ro = ro; g_mnt[g_nmnt].overlay[0] = 0; g_mnt[g_nmnt].commit[0] = 0;
+    g_mnt[g_nmnt].ro = ro; g_mnt[g_nmnt].aoc = 0; g_mnt[g_nmnt].overlay[0] = 0; g_mnt[g_nmnt].commit[0] = 0;
     g_mnt[g_nmnt].txn_root = -1;
     atomic_store(&g_mnt[g_nmnt].poison, 0);
     atomic_store(&g_mnt[g_nmnt].first_write_ns, 0);
@@ -241,6 +242,48 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     return RES_OK;
 }
 static Result mount(const char *name, const char *dir, int ro) { return mount_ex(name, dir, ro, 0); }
+
+// Add-on content under a name the game gives back. On Horizon Unmount releases the name and the next mount under it gets the add-on it names: Pokémon Friends'
+// AocVersionCheker mounts each add-on as "AVCtitle", reads its AocVersion/AocVersion_<label>.json and unmounts it. The host's table keeps its entries, as an open
+// image file names its entry by index (IMG_HANDLE): Unmount clears an add-on's name only (aoc_release), and a later mount of the same image takes that entry back,
+// so cycling through the add-ons does not grow the table. A name still in use keeps its target, as mount_ex does for every mount.
+static Result mount_aoc(const char *name, const char *dir) {
+    {
+        PATH_LOCK(); pthread_mutex_lock(&g_lock);
+        int back = -1;
+        for (int i = 0; i < g_nmnt; i++) {
+            if (!strcmp(g_mnt[i].name, name)) { pthread_mutex_unlock(&g_lock); return RES_OK; }
+            if (g_mnt[i].aoc && !g_mnt[i].name[0] && !strcmp(g_mnt[i].dir, dir)) back = i;
+        }
+        if (back >= 0) {
+            strlcpy(g_mnt[back].name, name, sizeof g_mnt[0].name);
+            pthread_mutex_unlock(&g_lock);
+            LOG("fs mount %s: → %s (read-only, the entry it had before its unmount)", name, dir);
+            return RES_OK;
+        }
+        pthread_mutex_unlock(&g_lock);
+    }
+    Result r = mount(name, dir, 1);   // mount_ex logs it
+    if (r == RES_OK) {
+        PATH_LOCK(); pthread_mutex_lock(&g_lock);
+        for (int i = g_nmnt - 1; i >= 0; i--) if (!strcmp(g_mnt[i].name, name)) { g_mnt[i].aoc = 1; break; }
+        pthread_mutex_unlock(&g_lock);
+    }
+    return r;
+}
+// Unmount of an add-on content mount: the name goes, the entry and its image stay (a handle left open still reads the image it opened). 1 if the name was one
+static int aoc_release(const char *name) {
+    PATH_LOCK(); pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < g_nmnt; i++)
+        if (g_mnt[i].aoc && !strcmp(g_mnt[i].name, name)) {
+            g_mnt[i].name[0] = 0;
+            pthread_mutex_unlock(&g_lock);
+            LOG("fs unmount %s: add-on content released (%s)", name, g_mnt[i].dir);
+            return 1;
+        }
+    pthread_mutex_unlock(&g_lock);
+    return 0;
+}
 
 // APFS is case-insensitive by default, Horizon paths are case-sensitive: every component is looked up exactly by guest name.
 // Ordinary host names are unchanged; only when a name collides on the host is a separate physical name chosen, with the guest name stored in an xattr.
@@ -547,7 +590,7 @@ HLE_FORCE("_ZN2nn2fs17MountAddOnContentEPKciPvm", "fsp-srv; add-on content → D
         LOG("fs mount add-on content %s: index %d does not exist (DM_AOC_DIR=%s)", name, index, getenv("DM_AOC_DIR") ? getenv("DM_AOC_DIR") : "unset");
         return RES_TARGET_NOT_FOUND;
     }
-    return mount(name, dir, 1);   // mount_ex logs it
+    return mount_aoc(name, dir);
 }
 // System data archives are firmware content, which the host does not have. The one a game has needed so far is 0100000000000802, MiiModel (Mario Kart 8 Deluxe mounts it as MiiResource: and
 // builds Mii heads from it at boot, for the title screen's demo race): the host writes a stand-in with every part empty (hle_mii.c dm_mii_standin) into <DM_TEMP>_sysdata/<id> and mounts it
@@ -770,12 +813,14 @@ out:
 HLE_FORCE("_ZN2nn2fs6CommitEPKcRKNS0_12CommitOptionE", "fsp-srv; same as Commit (the option only clears the restore flag)", Result, h_fs_CommitOpt, const char *name, const void *opt) { (void)opt; return h_fs_Commit(name); }
 // SDK 11's old name: CommitSaveData(mount name) is the later Commit (Metroid Dread)
 HLE_FORCE("_ZN2nn2fs14CommitSaveDataEPKc", "fsp-srv; same as Commit (SDK 11's old name)", Result, h_fs_CommitSaveData, const char *name) { return h_fs_Commit(name); }
-// The host's mount table is permanent, so unmounting one of its names changes nothing. A mount call the host does not take over runs in the SDK and registers in the SDK's own table
+// The host's mount table is permanent, so unmounting one of its names changes nothing, except an add-on content mount's, whose name is released (aoc_release, mount_aoc:
+// a game may mount the next add-on under it). A mount call the host does not take over runs in the SDK and registers in the SDK's own table
 // (nn::fs::MountRamDisk), and only the SDK can release it. Paper Mario: The Thousand-Year Door unmounts its "cache" RAM disk, frees the buffer and mounts it again, which with the entry left
 // behind failed with MountNameAlreadyExists and aborted (main+0x303b74, GitHub issue #1012). The SDK's Unmount aborts on a name it does not hold, hence its IsMounted first; a name in
 // neither table stays a no-op. No host lock is held across the SDK's calls, which take the SDK's own locks and free guest memory
-HLE_FORCE("_ZN2nn2fs7UnmountEPKc", "fsp-srv; host mounts are permanent, a no-op; a mount in the SDK's own table (RAM disk) is released there", void, h_fs_Unmount, const char *name) {
-    if (!name || host_mounted(name)) return;
+HLE_FORCE("_ZN2nn2fs7UnmountEPKc", "fsp-srv; host mounts are permanent, a no-op, but an add-on content mount releases its name; a mount in the SDK's own table (RAM disk) is released there", void, h_fs_Unmount, const char *name) {
+    if (!name) return;
+    if (host_mounted(name)) { aoc_release(name); return; }
     int (*sdk_is_mounted)(const char *) = guest_sym("_ZN2nn2fs9IsMountedEPKc");
     void (*sdk_unmount)(const char *) = guest_sym("_ZN2nn2fs7UnmountEPKc");
     if (!sdk_is_mounted || !sdk_unmount || !sdk_is_mounted(name)) return;

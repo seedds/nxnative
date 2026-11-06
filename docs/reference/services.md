@@ -268,6 +268,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `aoc::CountAddOnContent` and `ListAddOnContent` run on the big host stack (`HLE_FORCE_BIG`, `hle_misc.c`).
 - **Found on:** [Digimon Story Cyber Sleuth: Complete Edition](../../dm/games/010014E00DB56000/README.md) (SDK 6.4.0; one boot).
 
+### An add-on content mount name used again after Unmount
+
+- **Symptom:** the game shows the add-on content version error (`game asks to show an error: add-on content version mismatch`) after its title screen, with every add-on in `DM_AOC_DIR`; with `DM_FS=1` the first add-on's file opens and the second's is not found under the same mount name (Pokémon Friends: `AVCtitle:/AocVersion/AocVersion_DLC01.json` opens, `AocVersion_DLC02.json` is `fs stat not found`).
+- **Cause:** the game checks each add-on in turn under one mount name: `MountAddOnContent("AVCtitle", index)`, read its version file, `Unmount`. On Horizon Unmount releases the name. The host's mount table is permanent and its Unmount a no-op, and a mount under a name in use answers success with the old target, so the second add-on's mount still showed the first one's files.
+- **Fix:** an add-on content mount releases its name at Unmount (`hle_fs.c` `aoc_release`). The entry and its image stay, as an open image file names its entry by index, and a later mount of the same image under any name takes that entry back (`mount_aoc`), so cycling through the add-ons does not grow the table. Save, RomFS and other mounts keep the permanent table.
+- **Found on:** Pokémon Friends (`010008C01E742000`, update 1.1.5, two add-ons; no profile in the repository yet). Its expected versions are one string, `"3"`, compared for equality (`AocVersionCheker.Check`), which both add-ons hold.
+
 ## Input
 
 ### Controller disconnect between style and player lookup

@@ -255,6 +255,14 @@ Games read this count as a position in their own command memory and size their h
 - **Check:** Super Mario Bros. Wonder and Super Mario Odyssey checked unchanged after the reset.
 - **Found on:** [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) (the count from `AddCommandMemory`); [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (host segments counted).
 
+### Smaller viewport records and optional consecutive uniform-bind pairs
+
+- **Symptom:** An Ounce game's model loader sized its GPU command scratch region from its recordings' `GetCommandMemoryUsed`. The host's fixed 16-viewport record and per-bind 8-byte headers inflated measured command bytes beyond the driver's amounts; at a later BFRES model allocation the guest heap could no longer satisfy a fixed-size model pool. This is an observed contributor, **not yet a proven complete explanation** for the model allocator failure.
+- **Cause:** `SetViewports` recorded all 16 possible 24-byte entries even when a game supplied one viewport, and `SetViewportSwizzles` likewise reserved a 16-element array for one swizzle. Each `BindUniformBuffer` recorded a 24-byte host opcode (8-byte header plus 16-byte payload); pairs of adjacent guest binds to the same recording require 48 bytes, rather than a single 40-byte host record.
+- **Fix:** Record only the supplied viewports and swizzles while preserving their existing element stride; the replay still reads the original structure and older captures remain decodable. Optionally, with `DM_NVN_UBO_PAIR=1`, write two *immediately consecutive* 16-byte `OP_BIND_UBO_SMALL` payloads behind one 8-byte opcode 49 header (`size=40`), saving 8 bytes per pair without adding or renumbering an opcode. A query of `GetCommandMemoryUsed`/`Free`, intervening command, new segment or missing spare bytes prevents pairing. `state_op` replays both in order, including in its lookahead paths, and capture/restore relocates each address; `cap_layout` appends a compatibility marker, so old captures remain readable and old binaries reject paired captures.
+- **Checked:** `t_nvn` (258 assertions) covers exact byte counts, payload fields, intervening queries and other commands; `t_capture` (88 assertions) covers record relocation, capture round-trip and old layout acceptance. Translation and game shaders are unchanged. The UBO pairing remains **opt-in** pending broader game regression; viewports/swizzles compact unconditionally.
+- **Found on:** Super Mario Bros. Wonder Nintendo Switch 2 Edition Program 1 v327680 during new-game model-heap accounting (the separate official Edition profile is under review).
+
 ### Prerecorded lists in slots of their measured size
 
 - **Symptom:** `CRASH sig=10` in `mtl_exec` after minutes of play, the fault address equal to `x19` and shaped like `0x1000000003`.

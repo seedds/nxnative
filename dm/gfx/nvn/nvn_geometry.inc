@@ -953,7 +953,7 @@ static void geo_raster(const geo_job *j, int last_in_run) {
 // Query reports/resets remain at their original places in raster replay. Each
 // queried draw selects a separate visibility slot in the shared depth pass;
 // vertex capture and GS compute do not contribute raster samples to a query.
-static int geo_run_passes(uint32_t op, const void *a) {
+static int geo_run_passes(uint32_t op, const void *a, uint32_t record_size) {
     // Feedback offsets and saved counts change at their original replay point.
     if (op == OP_TF_STATE || op == OP_TF_BIND) return 0;
     if (op == OP_REPORT_COUNTER) {
@@ -963,7 +963,7 @@ static int geo_run_passes(uint32_t op, const void *a) {
     }
     if (op == OP_RESET_COUNTER) { uint64_t t; memcpy(&t, a, 8); return t != NVN_COUNTER_TYPE_SAMPLES_PASSED || geo_query_run(); }
     if (op == OP_SIGNAL_EVENT) return 1;
-    return state_op(op, a);
+    return state_op(op, a, record_size);
 }
 static int geo_run_walk(id<MTL4RenderCommandEncoder> re) {
     int n = 1;
@@ -974,7 +974,7 @@ static int geo_run_walk(id<MTL4RenderCommandEncoder> re) {
     static geo_run_access run;   // 128 KiB: not on the stack
     run.w.n = run.r.n = run.unknown = 0; geo_run_note(&run, &g_geo_run[0].access);
     for (int guard = 0; guard < 10000 && n < GEO_RUN && fz_next(&cur, &p, &h, &a); guard++) {
-        if (geo_run_passes(h.op, a)) continue;
+        if (geo_run_passes(h.op, a, h.size)) continue;
         if (h.op != OP_DRAW && h.op != OP_DRAW_IDX) break;
         p_draw dt; p_draw_idx it;
         const p_draw *dw = h.op == OP_DRAW ? draw_rec(a, h.size, &dt) : NULL;
@@ -1030,7 +1030,7 @@ static void geo_draw_(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint
     for (int i = 0; i < n; i++) {
         if (i) {
             const uint8_t *p; op_hdr h; const void *a;
-            while (fz_next(&cur, &p, &h, &a) && p != g_geo_run[i].op) state_op(h.op, a);
+            while (fz_next(&cur, &p, &h, &a) && p != g_geo_run[i].op) state_op(h.op, a, h.size);
         }
         if (!ce) ce = enc_c_begin(NULL);
         geo_gs_one(ce, &g_geo_run[i]);

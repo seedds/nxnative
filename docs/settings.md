@@ -4,7 +4,7 @@ The screen before the game starts shows the settings the game supports. A settin
 
 - [Tested defaults](#tested-defaults)
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
-- [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
+- [Controls](#controls): [Touch feedback](#touch-feedback), [Left back button](#left-back-button), [Right back button](#right-back-button), [Switch 2 deadzone](#switch-2-deadzone), [Switch 2 motion](#switch-2-motion), [Switch 2 rumble](#switch-2-rumble), [GameCube trigger](#gamecube-trigger), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [In-game menu](#in-game-menu)
@@ -92,6 +92,30 @@ Shows the frames per second at the top left.
 ### Touch feedback
 
 A light tap from the phone when you press an on-screen button.
+
+### Left back button
+
+On a controller with back buttons (such as a Switch 2 Pro Controller over Bluetooth), map the left back button (GL) to duplicate a face button, stick click, or trigger (B, A, Y, X, L3, R3, ZL, ZR). Off (None) by default.
+
+### Right back button
+
+On a controller with back buttons, map the right back button (GR) to duplicate a face button, stick click, or trigger. Off (None) by default.
+
+### Switch 2 deadzone
+
+The centre deadzone of a Switch 2 controller's sticks in raw 12-bit counts (0 to 120, 40 by default). If a character creeps or drifts slightly on its own, raise this until it stops.
+
+### Switch 2 motion
+
+Six-axis motion sensor input (gyroscope and accelerometer) from a Switch 2 controller. The Joy-Con 2's own frame and its pair's and half forms are measured on hardware; the Pro Controller 2's is not, so the input starts off.
+
+### Switch 2 rumble
+
+The vibration of a Switch 2 controller (on by default). A pair of Joy-Con 2 rumbles through both halves, the left the low band and the right the high band like the console's split; the NSO GameCube pad stays silent, because it has no rumble actuator and its motor lane must not be written.
+
+### GameCube trigger
+
+The travel at which the NSO GameCube pad's analog triggers act as pressed, 0 to 255 in report counts (a quarter travel by default).
 
 ### Game rumble
 

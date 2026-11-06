@@ -45,6 +45,41 @@ class DepthSignal(unittest.TestCase):
         self.assertEqual(value, 'zero'); self.assertIn('near = 0', why); self.assertNotIn('\n', why)
 
 
+class HeapSignals(unittest.TestCase):
+    """The heap check's keys must give the heap region the whole request with the alias region the profile keeps (hle_svc.c mem_init: the heap region is mem_reserve less 256 MB, mem_stack and mem_alias)"""
+    STACK = 0x10000000
+
+    def profile(self, **keys):
+        keys = {'mem_stack': f'{self.STACK:#x}', 'app_pool': '0x240000000', 'sys_resource': '0x3000000', **keys}
+        return type('Profile', (), {'get': staticmethod(lambda k, d='': keys.get(k, d))})
+
+    def layout(self, req, reserve, alias):
+        """(heap region, alias region, keys set) after the heap check of a run that asked for req"""
+        sig = pg.heap_signals(f'[dm] SetHeapSize OOM: req {req:#x} > cap 0x8000000\n', self.profile(mem_reserve=f'{reserve:#x}', mem_alias=f'{alias:#x}'))
+        reserve, alias = int(sig.get('mem_reserve', (f'{reserve:#x}',))[0], 0), int(sig.get('mem_alias', (f'{alias:#x}',))[0], 0)
+        return reserve - 0x10000000 - alias - self.STACK, alias, set(sig)
+
+    def test_a_large_guessed_alias_region_is_kept_out_of_the_heap_region(self):
+        """Ocarina of Time (Switch 2, SDK 22.2.8): the 4.375 GB guess and a 5 GB block, then a 6.20 GB request; the heap region was 0xb8000000 (issue #1361)"""
+        heap, alias, keys = self.layout(0x18ce00000, 0x140000000, 0x118000000)
+        self.assertEqual(keys, {'mem_reserve'})
+        self.assertEqual(alias, 0x118000000)
+        self.assertGreaterEqual(heap, 0x18ce00000)
+        self.assertEqual(heap, 0x190000000)   # the request rounded up to 128 MB, nothing more
+
+    def test_a_small_alias_region_is_still_given_1_gb_of_room(self):
+        heap, alias, keys = self.layout(0x18ce00000, 0x140000000, 0x10000000)
+        self.assertEqual(keys, {'mem_reserve'})
+        self.assertEqual(heap + alias, 0x40000000 + 0x190000000)   # as before: the block sized for a 1 GB alias region
+
+    def test_a_block_with_room_shrinks_the_alias_region(self):
+        """Tears of the Kingdom asks for 0x86000000 of a 5 GB block: the alias region takes the rest, 0x98000000"""
+        heap, alias, keys = self.layout(0x86000000, 0x140000000, 0xb8000000)
+        self.assertEqual(keys, {'mem_alias'})
+        self.assertEqual(alias, 0x98000000)
+        self.assertGreaterEqual(heap, 0x86000000)
+
+
 class GlslSources(unittest.TestCase):
     def test_language_preamble_is_not_a_shader(self):
         self.assertEqual(pg.glsl_sources(b'#version 450 core\n#define float4 vec4\n\0void main() {}\0'), 0)

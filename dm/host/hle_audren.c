@@ -4,7 +4,7 @@
 // +0x2c renderingDevice = 1 CPU, +0x30 executionMode = 1 manual). In this mode OpenAudioRenderer goes through the in-process DFC manager (CreateAudioRendererManagerByDfc),
 // RequestUpdate is parsed in-process, and rendering happens on the CPU of whichever thread calls nn::audio::ExecuteAudioRendererRendering, which then signals the renderer event (the renderer's own: ar_open).
 // A game can open more than one renderer, as on Horizon (Mario & Luigi: Brothership: one at 48 kHz and Unreal's mixer at 32 kHz): each gets its own
-// state (ar_t), render thread and output, and the sound card mixes them.
+// state (ar_t), PCM blocks, render thread and output, and the sound card mixes them.
 // The host does three things:
 //   1. Takes over GetAudioRendererWorkBufferSize / OpenAudioRenderer: preserves the DSP service's work-buffer requirement, then runs the SDK's CPU + manual renderer.
 //      The local SDK uses a different command format whose storage can exceed the service's budget; that backend storage is supplied by the host. Explicit CPU renderers keep the SDK contract;
@@ -88,6 +88,7 @@ HLE_FORCE("_ZN2nn5audio30GetAudioRendererWorkBufferSizeERKNS0_22AudioRendererPar
 // One renderer's state. Only the render thread and the updates of this renderer touch it, apart from the one lock over all renderers' rendering (g_render_mu). Until 2026-11-04 this was one set of
 // globals: a second renderer's updates rendered catch-up frames into the first one's output queue, about 10% of its frames (Mario & Luigi: Brothership), and its own frames were never rendered otherwise
 enum { CQ = 4, AR_MAX = 4 };   // AR_MAX as g_rev below
+typedef struct { void *ptr; uint64_t cap, size; } gbuf;       // same as the front of hle_audio.c's AudioOutBuffer
 typedef struct {
     void *handle[2];                         // AudioRendererHandle (renderer object, client state); handle[0] NULL: a free slot
     uint8_t *sys;                            // its AudioRenderSystem, from its first render or update (ar_of_sys)
@@ -100,6 +101,7 @@ typedef struct {
     pthread_mutex_t cq_mu; pthread_cond_t cq_cv;   // the render thread signals each frame it takes off the queue (catch-up pacing)
     int sink_logged;
     int32_t up_buf[2 * (15 + FRAME_MAX)]; uint32_t up_pos;   // up_3_2's last samples and position
+    int16_t pcm[NBUF][FRAME_MAX * 2]; gbuf bufs[NBUF];   // the blocks its output plays from: AudioOut queues only the pointer and copies the samples when the sound card asks (issue #1336)
 } ar_t;
 static ar_t g_ar[AR_MAX];
 static pthread_mutex_t g_ar_mu = PTHREAD_MUTEX_INITIALIZER;   // the slots' handle and sys fields
@@ -120,13 +122,12 @@ static ar_t *ar_of_sys(uint8_t *sys) {
     return found;
 }
 
-typedef struct { void *ptr; uint64_t cap, size; } gbuf;       // same as the front of hle_audio.c's AudioOutBuffer
 static void render_main(void *arg) {
     ar_t *a = arg; t_ar = a;
     void (*exec)(void *, void *) = gsym("_ZN2nn5audio29ExecuteAudioRendererRenderingENS0_19AudioRendererHandleE");
     void *out = dm_pcmout_open(2);
-    static int16_t data[NBUF][FRAME_MAX * 2]; static gbuf bufs[NBUF]; gbuf *free_list[NBUF]; int nfree = NBUF;
-    for (int i = 0; i < NBUF; i++) { bufs[i] = (gbuf){data[i], sizeof data[i], 0}; free_list[i] = &bufs[i]; }
+    gbuf *free_list[NBUF]; int nfree = NBUF;
+    for (int i = 0; i < NBUF; i++) { a->bufs[i] = (gbuf){a->pcm[i], sizeof a->pcm[i], 0}; free_list[i] = &a->bufs[i]; }
     dm_pcmout_start(out);
     LOG("audren: render thread %d started (%d buffers in flight, paced by the output)", ar_index(a), NBUF);
     while (atomic_load(&a->open)) {
@@ -248,7 +249,7 @@ HLE_FORCE("_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleERKNS0_22Au
 HLE_FORCE("_ZN2nn5audio18CloseAudioRendererENS0_19AudioRendererHandleE", "close the renderer: stop the host render thread first, then hand over to the SDK", void, h_ar_Close, void *obj, void *state) {
     static void (*orig)(void *, void *); if (!orig) orig = gsym("_ZN2nn5audio18CloseAudioRendererENS0_19AudioRendererHandleE");
     // Join the render thread first (it checks open every round and at most every 10 ms while waiting for the output): it may be inside exec(), which uses the renderer the SDK is about to free.
-    // A fixed 20 ms sleep used to stand in for this, and a renderer reopened inside that window ran a second thread over the first one's static buffers
+    // A fixed 20 ms sleep used to stand in for this, and a renderer reopened inside that window ran a second thread over the first one's blocks
     ar_t *a = NULL;
     for (int i = 0; i < AR_MAX && !a; i++) if (g_ar[i].handle[0] == obj) a = &g_ar[i];
     if (a && a->render_tt) { atomic_store(&a->open, 0); dm_guest_thread_join(a->render_tt); a->render_tt = NULL; }

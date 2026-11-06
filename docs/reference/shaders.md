@@ -1084,6 +1084,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): 26 such loops around the whole program in its uber shaders: the mid-size shader went from 176 loops to 0, the largest from 364 to 5, and 8 workers stalled for 5 h 40 before that. Three test shaders then compile in 89 s.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_control_flow.py`.
 
+### Ampere carries, PLOP3's second result, POPC / FLO immediates, LEA.SX32 and LEA's negated B
+
+- **Symptom:** none met in a game yet: found by differential testing (single instructions with nvdisasm-checked encodings, run on an Apple GPU and compared with an interpreter on Mesa NAK's hardware-checked folds). A 64-bit three-operand add off by 2^32, `POPC R, 0x800000ff` giving 23, a predicate pair from `PLOP3` that reads its own first result, a negative 32-bit index added to a 64-bit address as if positive.
+- **Cause:** IADD3 set its two carry predicates to the bits of the carry count, where the first is sum >= 2^32 and the second sum >= 2 * 2^32 (the high word's IADD3.X adds both); PLOP3 wrote its first destination before computing the second; POPC and FLO applied bit 63 as a bitwise not in every form, where in the immediate form (4) it is the immediate's top bit; LEA ignored `.SX32` (bit 73: the high word is the sign extension of a); LEA negated B arithmetically with `.X` (the bitwise not there) and without it left the `+ 1` of `~B + 1` out of the carry.
+- **Fix:** `AIadd3`, `APlop3`, `APopc`, `AFlo` and `ALea` in `InstEmitAmpereAlu.cs` follow those meanings.
+- **Found on:** no game; encodings from the CuAssembler sm_86 corpus, nvdisasm-guided fuzzing and variants.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`CarriesAndModifiers`).
+
 ### Ampere jump tables read past their end
 
 - **Symptom:** `BRX with no target`, or code about 20 % larger than it should be.

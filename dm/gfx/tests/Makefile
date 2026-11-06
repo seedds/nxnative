@@ -467,3 +467,14 @@ t_logic: t_logic.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_logic.m $(MTL_T_SRC) $(FW)
 check_t_logic: t_logic
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_logic.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_logic "$$work"
+
+# Bounded timeline storage is CPU-only.
+t_fence_trace: t_fence_trace.c ../nvn/nvn_fence_trace.h
+	clang -std=c11 -O1 -Wall -Wextra -Werror -pthread -o $@ t_fence_trace.c
+
+.PHONY: check_fence_trace_cpu
+check_fence_trace_cpu: t_fence_trace t_perf_order
+	./t_fence_trace
+	DM_NVN_FAST_WAKE=0 ./t_perf_order --trace-cpu
+	DM_NVN_FAST_WAKE=1 ./t_perf_order --trace-cpu
+	./t_perf_order --trace-boundary

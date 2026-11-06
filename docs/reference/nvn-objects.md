@@ -453,6 +453,13 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): terrain tiles (260x260 R16 height, RG8 with 9 levels, RGBA8, R11G11B10F, and 68x68 RGBA16) in a `CPU_CACHED | GPU_CACHED` pool (flags 0x24), 50 to 90% of their bytes non-zero at first use and all zero on Metal, so every tile was a flat plane at its base height. Pull request #1109 found this on update 1.8.0.
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_cpu_storage`.
 
+### Uncompressed storage the CPU wrote, next to storage the GPU writes
+
+- **Symptom:** low ground is missing where no model covers it: the sky shows through holes in the terrain, and plants or pebbles float over them, while the rest of the scene is right. `texraw` of the terrain's height textures reads 0 everywhere while `memdump` of their storage holds the heights.
+- **Cause:** the rule of [Uncompressed storage the CPU wrote, in a pool the GPU has not written](#uncompressed-storage-the-cpu-wrote-in-a-pool-the-gpu-has-not-written) was kept per pool: one GPU write anywhere in a pool (`pool_t.gpu_written`) ended it for every texture in it. A game that keeps its CPU-written terrain maps in the same `CPU_CACHED` pool as textures it renders into got GPU textures of zeros for all of them, so every terrain patch was a flat plane at its base height under the real ground.
+- **Fix:** every game. `mtl_tex_gpu_written` records the storage range of each texture the GPU renders, clears, copies or downsamples into, or writes as an image (a sorted set of merged address ranges, dropped with the pool at finalize), and `tex_cpu_content` and `cpu_unc_drop` test the texture's own storage against it instead of the pool's flag. `DM_NVN_GPUW_RANGE=0` restores the per-pool rule. The log says `GPU-written texture storage tracked by address range`.
+- **Found on:** The Legend of Zelda: Ocarina of Time (Switch 2, 0400486024DEC000; its profile is pull request #1299): TerrainGround patches (260x260 R32F heights, RG8 / RGBA8 and layered RGBA8 maps) in one ~200 MB pool with flags 0x24 that also holds GPU-written textures. With the change the heights read 0.13 to 0.18 instead of 0 and the holes at Kokiri Forest's pond are gone. Mario Kart World's terrain pool is not GPU-written, so it is unchanged.
+
 ### CPU writes with no flush, caught by page protection (`tex_dirty_upload`)
 
 - **Symptom:** magenta surfaces (Metal decodes an all-zero ASTC block as the error colour (1, 0, 1)); a zero BC block decodes black, which looks like missing light; black screen while the UI (or a dialog box) draws in the right places under `HILITE` or in the pass dump; `packaged textures: first uploads 0`.

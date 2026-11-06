@@ -230,6 +230,9 @@ check_t_cpu_storage: RUN_ENV = MTL_DEBUG_LAYER=1
 t_initial_uncached: t_initial_uncached.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_initial_uncached.m $(MTL_T_SRC) $(FW)
 check_t_initial_uncached: RUN_ENV = MTL_DEBUG_LAYER=1
+t_block_alias: t_block_alias.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_block_alias.m $(MTL_T_SRC) $(FW)
+check_t_block_alias: RUN_ENV = MTL_DEBUG_LAYER=1
 t_upload_slots: t_upload_slots.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upload_slots.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_upload_slots
@@ -403,6 +406,11 @@ t_image_attachment_store: t_image_attachment_store.m $(MTL_T_DEP)
 check_t_image_attachment_store: RUN_ENV = MTL_DEBUG_LAYER=1
 t_image_primitive_id: t_image_primitive_id.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_primitive_id.m $(MTL_T_SRC) $(FW)
+t_tbuf_pfv: t_tbuf_pfv.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tbuf_pfv.m $(MTL_T_SRC) $(FW)
+check_t_tbuf_pfv: RUN_ENV = MTL_DEBUG_LAYER=1
+t_pso_intbits: t_pso_intbits.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_intbits.m $(MTL_T_SRC) $(FW)
 t_unwritten_store: t_unwritten_store.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_unwritten_store.m $(MTL_T_SRC) $(FW)
 check_t_unwritten_store: RUN_ENV = MTL_DEBUG_LAYER=1

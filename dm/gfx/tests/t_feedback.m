@@ -215,6 +215,9 @@ static void reuse_case(NvProg *pr) {
       clear(MTLClearColorMake(0, 0, 0, 1)); R.rt.depth = &depth; S.tex[1][0] = 0;
       fb_prepare(pr);
       CHECK(g_enc != nil, "a draw writing depth with no read of it in its pass stays");
+      S.ds.dw = 0; S.tex[1][0] = 651;
+      fb_prepare(pr);
+      CHECK(!g_enc, "a draw reading depth after a write of it in the same pass ends the pass");
       R.rt.depth = NULL; S.ds.dt = S.ds.dw = 0; rp_end(); mtl_tex_release(&output); mtl_tex_release(&depth); }
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "GPU submission completed");
     CHECK(!mtl_last_commit_error(), "GPU submission has no error");

@@ -8,9 +8,9 @@ Stage memory, in shared memory (memory()), all of it zero when the body starts:
   word 0        the workgroup's number (ISBERD mode 0x78): a task's is the draw's first task + its threadgroup, a mesh shader's with no task the draw's first + its threadgroup
   INPUT         the payload a mesh shader's task wrote (ISBERD mode 0x38). Its word 0 is the mesh workgroup's number among its task's launches, which the hardware puts there
   outputs       a task's payload (0xb8): its word 1 is the number of mesh workgroups to launch, its records start at +0x10
-                or a mesh shader's attributes (0xf8): blocks of 32 vertices and 32 primitives, each component 0x80 bytes (a word per vertex or primitive), the vertex components the
-                SPH's OMAP enables first, then the per-primitive SPH's
-  primitives    a mesh shader's primitive bytes: the count at +3 (0x88), three index bytes a triangle from +4 (0x80)
+                or a mesh shader's attributes (0xf8): all blocks of 32 vertices (the components the SPH's OMAP enables, 0x80 bytes each, a word per vertex), followed by all blocks of 32
+                primitives (the components the per-primitive SPH's OMAP enables, 0x80 bytes each, a word per primitive)
+  primitives    a mesh shader's primitive bytes: the count at +3 (0x88), index bytes from +4 (0x80, control +0x5f per primitive: 1 point, 2 line, 3 triangle)
 """
 import re
 import struct
@@ -18,6 +18,7 @@ import dmsh_abi as abi
 
 WORKGROUP, INPUT = 0, 0x10
 BLOCK = 32   # vertices and primitives of an attribute block
+TOPOLOGY = {1: 'point', 2: 'line', 3: 'triangle'}
 METAL_MAX_VERTICES, METAL_MAX_PRIMITIVES = 256, 512   # a Metal mesh's limits
 METAL_MAX_GRID = 1024   # mesh threadgroups an object threadgroup may launch
 METAL_MAX_SHARED = 0x8000   # threadgroup memory of a Metal function
@@ -29,9 +30,9 @@ def is_stage(ctl):
 
 
 def sph_outputs(sph):
-    """The components an SPH's OMAP enables, in the order of the attribute area: [(None, c)] for the position's (byte 0x35, bits 4..7), then [(n, c)] for generic attribute n's
-    (bytes 0x36 on, a nibble an attribute, bit c its component)."""
-    out = [(None, c) for c in range(4) if sph[0x35] >> (4 + c) & 1]
+    """The components an SPH's OMAP enables, in the order of the attribute area: [('psiz', 0)] for the point size (byte 0x35, bit 3), [(None, c)] for the position's (byte 0x35,
+    bits 4..7), then [(n, c)] for generic attribute n's (bytes 0x36 on, a nibble an attribute, bit c its component)."""
+    out = ([('psiz', 0)] if sph[0x35] >> 3 & 1 else []) + [(None, c) for c in range(4) if sph[0x35] >> (4 + c) & 1]
     for n in range(32):
         out += [(n, c) for c in range(4) if sph[0x36 + n // 2] >> (4 * (n % 2) + c) & 1]
     return out
@@ -39,7 +40,8 @@ def sph_outputs(sph):
 
 def info(ctl, area):
     """A task or mesh shader's facts from its control section and its whole code area (the SPH, the instructions, a mesh shader's second SPH): +0x58 its workgroup's threads, +0x5a its
-    payload's bytes, +0x5e whether a mesh shader has a task, +0x60 / +0x62 a mesh shader's most vertices and primitives, +0x64 the offset of its per-primitive SPH where +0x68 bit 7 is set."""
+    payload's bytes, +0x5e whether a mesh shader has a task, +0x5f a primitive's vertices, +0x60 / +0x62 a mesh shader's most vertices and primitives, +0x64 the offset of its per-primitive
+    SPH where +0x68 bit 7 is set."""
     kind = is_stage(ctl)
     threads, payload = struct.unpack_from('<2H', ctl, 0x58)
     out = {'kind': kind, 'threads': threads, 'payload': payload}
@@ -47,7 +49,7 @@ def info(ctl, area):
         max_v, max_p = struct.unpack_from('<2H', ctl, 0x60)
         at = struct.unpack_from('<I', ctl, 0x64)[0] if ctl[0x68] & 0x80 else 0
         prim = sph_outputs(area[at:at + 0x80]) if at else []
-        out.update(task=bool(ctl[0x5e]), max_v=max_v, max_p=max_p, vertex=sph_outputs(area[:0x80]), primitive=[c for c in prim if c[0] is not None])
+        out.update(task=bool(ctl[0x5e]), verts=ctl[0x5f] or 3, max_v=max_v, max_p=max_p, vertex=sph_outputs(area[:0x80]), primitive=[c for c in prim if isinstance(c[0], int)])
     return out
 
 
@@ -56,9 +58,10 @@ def memory(i):
     out = INPUT + (i['payload'] + 15 & ~15)
     if i['kind'] == 'ts':
         return [WORKGROUP, INPUT, out, out + i['payload']], out + (i['payload'] + 3 & ~3)
-    blocks = max(max(i['max_v'], i['max_p'], 1) + BLOCK - 1, 0) // BLOCK
-    prim = out + blocks * max(len(i['vertex']) + len(i['primitive']), 1) * BLOCK * 4
-    return [WORKGROUP, INPUT, out, prim], prim + (4 + 3 * max(i['max_p'], 1) + 3 & ~3)
+    v_blocks = max(max(i['max_v'], 1) + BLOCK - 1, 0) // BLOCK
+    p_blocks = max(max(i['max_p'], 1) + BLOCK - 1, 0) // BLOCK
+    prim = out + max(v_blocks * len(i['vertex']) + p_blocks * len(i['primitive']), 1) * BLOCK * 4
+    return [WORKGROUP, INPUT, out, prim], prim + (4 + i.get('verts', 3) * max(i['max_p'], 1) + 3 & ~3)
 
 
 def own_shared(code):
@@ -136,16 +139,24 @@ def to_stage(msl, i):
             f'    if ({lid} == 0u) dm_grid.set_threadgroups_per_grid(uint3(min({mem}[{out + 1}], {METAL_MAX_GRID}u), 1u, 1u));\n}}\n')
     vertex, primitive = i['vertex'], i['primitive']
     max_v, max_p = i['max_v'], i['max_p']
+    verts = i.get('verts', 3)
+    if verts not in TOPOLOGY: raise ValueError(f'ms: primitive vertex count {verts} is not 1, 2 or 3')
     if max_v > METAL_MAX_VERTICES or max_p > METAL_MAX_PRIMITIVES: raise ValueError(f'ms: {max_v} vertices and {max_p} primitives exceed a Metal mesh')
-    stride = max(len(vertex) + len(primitive), 1) * BLOCK   # words of an attribute block
-    word = lambda comps, n: [f'{mem}[b + {comps[k] * BLOCK}u]' if comps[k] is not None else None for k in range(4)]
-    vm, pm = _members(vertex), {n: [c + len(vertex) if c is not None else None for c in v] for n, v in _members(primitive).items()}
-    head += ('struct dm_vertex_t {\n    float4 position [[position]];\n' + ''.join(f'    float4 a{n} [[user(locn{n})]];\n' for n in vm if n is not None) + '};\n' +
+    v_blocks = max(max(max_v, 1) + BLOCK - 1, 0) // BLOCK
+    v_stride, p_stride = max(len(vertex), 1) * BLOCK, max(len(primitive), 1) * BLOCK   # words of a vertex or primitive attribute block
+    p_out = out + v_blocks * len(vertex) * BLOCK   # per-primitive blocks follow all vertex blocks
+    word = lambda comps: [f'{mem}[b + {comps[k] * BLOCK}u]' if comps[k] is not None else None for k in range(4)]
+    vm, pm = _members(vertex), _members(primitive)
+    head += ('struct dm_vertex_t {\n    float4 position [[position]];\n' +
+             ('    float point_size [[point_size]];\n' if 'psiz' in vm else '') +
+             ''.join(f'    float4 a{n} [[user(locn{n})]];\n' for n in vm if isinstance(n, int)) + '};\n' +
              ('struct dm_prim_t {\n' + ''.join(f'    float4 p{n} [[user(locn{n})]];\n' for n in pm) + '};\n' if pm else '') +
-             f'using dm_mesh_t = metal::mesh<dm_vertex_t, {"dm_prim_t" if pm else "void"}, {max_v}, {max_p}, metal::topology::triangle>;\n')
-    block = lambda v: f'{out}u + ({v} / {BLOCK}u) * {stride}u + {v} % {BLOCK}u'
-    sets = ''.join(f'        v.{"position" if n is None else f"a{n}"} = {_component(True, word(c, n))};\n' for n, c in vm.items())
-    psets = ''.join(f'        p.p{n} = {_component(True, word(c, n))};\n' for n, c in pm.items())
+             f'using dm_mesh_t = metal::mesh<dm_vertex_t, {"dm_prim_t" if pm else "void"}, {max_v}, {max_p}, metal::topology::{TOPOLOGY[verts]}>;\n')
+    v_block = lambda v: f'{out}u + ({v} / {BLOCK}u) * {v_stride}u + {v} % {BLOCK}u'
+    p_block = lambda p: f'{p_out}u + ({p} / {BLOCK}u) * {p_stride}u + {p} % {BLOCK}u'
+    sets = ''.join(f'        v.point_size = as_type<float>({word(c)[0]});\n' if n == 'psiz' else
+                   f'        v.{"position" if n is None else f"a{n}"} = {_component(True, word(c))};\n' for n, c in vm.items())
+    psets = ''.join(f'        p.p{n} = {_component(True, word(c))};\n' for n, c in pm.items())
     if None not in vm: raise ValueError('ms: its SPH enables no position component')
 
     def entry(name, gl):
@@ -157,9 +168,9 @@ def to_stage(msl, i):
                 f'    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {call}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n'
                 f'    uint np = min({mem}[{prim >> 2}] >> 24, {max_p}u);\n'
                 f'    if ({lid} == 0u) dm_out.set_primitive_count(np);\n'
-                f'    for (uint n = {lid}; n < {max_v}u; n += {thr}u)\n    {{\n        uint b = {block("n")};\n        dm_vertex_t v;\n{sets}' +
+                f'    for (uint n = {lid}; n < {max_v}u; n += {thr}u)\n    {{\n        uint b = {v_block("n")};\n        dm_vertex_t v;\n{sets}' +
                 ('        v.position.z = fma(v.position.z, 0.5, v.position.w * 0.5);\n' if gl else '') +
                 '        dm_out.set_vertex(n, v);\n    }\n' +
-                (f'    for (uint n = {lid}; n < np; n += {thr}u)\n    {{\n        uint b = {block("n")};\n        dm_prim_t p;\n{psets}        dm_out.set_primitive(n, p);\n    }}\n' if pm else '') +
-                f'    for (uint n = {lid}; n < np * 3u; n += {thr}u)\n    {{\n        uint at = {prim + 4}u + n;\n        dm_out.set_index(n, ({mem}[at >> 2] >> ((at & 3u) * 8u)) & 0xffu);\n    }}\n}}\n')
+                (f'    for (uint n = {lid}; n < np; n += {thr}u)\n    {{\n        uint b = {p_block("n")};\n        dm_prim_t p;\n{psets}        dm_out.set_primitive(n, p);\n    }}\n' if pm else '') +
+                f'    for (uint n = {lid}; n < np * {verts}u; n += {thr}u)\n    {{\n        uint at = {prim + 4}u + n;\n        dm_out.set_index(n, ({mem}[at >> 2] >> ((at & 3u) * 8u)) & 0xffu);\n    }}\n}}\n')
     return src + '\n' + head + entry('main0', True) + '\n' + entry('main0_z', False)

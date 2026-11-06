@@ -49,6 +49,43 @@ int main(void) { @autoreleasepool {
         if (!j) mtl_sub_begin();
     }
     CHECK(![g_res_objects containsObject:old], "retired base is removed from the residency set after GPU completion");
+    // A retired descriptor whose storage is taken over by another texture must not re-create a texture or force an un-noted pool rebuild.
+    mtl_sub_begin();
+    uint8_t mem_buf[65536];
+    pool_t tpool = {.magic=MAGIC('P','O','O','L'), .flags=NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_GPU_CACHED, .mem=mem_buf, .size=sizeof mem_buf};
+    mtl_pool_add(mem_buf, sizeof mem_buf);
+    tex_t r1 = a, r2 = a;
+    r2.d.width = 2; r2.d.height = 2; nvn_tex_layout(&r2.d, &r2.L);
+    r1.pool = r2.pool = &tpool; r1.off = r2.off = 0; r1.mem = r2.mem = mem_buf;
+    r1.serial = 99601; r2.serial = 99602;
+    mtl_tex_init(&r1); mtl_tex_init(&r2);
+    id<MTLTexture> r1_tex = tex_mtl(&r1);
+    CHECK(r1_tex != nil, "initial pool-backed texture created");
+    mtl_reg_tex(951, &r1, NULL); mtl_reg_tex(952, &r2, NULL);
+    mtl_tex_release(&r1); mtl_tex_release(&r2);
+    os_unfair_lock_lock(&g_rmu);
+    g_seen_done[951 >> 5] |= 1u << (951 & 31);
+    CHECK(tex_by_id(951) == r1_tex && g_treg[951].view != NULL && !g_treg[952].view, "retired descriptor 951 holds a transient view while 952 has none");
+    __unsafe_unretained id<MTLBuffer> pbuf = nil;
+    uint64_t gpu0 = pool_gpu(0, MTLTextureType2D, NVN_DPF_FLOAT, 0, &pbuf);
+    CHECK(gpu0 != 0 && pbuf != nil && !tex_get(r2.serial), "initial bindless pool table built while unread retired descriptor 952 stays un-ghosted");
+    os_unfair_lock_unlock(&g_rmu);
+    treg_finish_submission();
+    CHECK(!g_treg[951].view, "retired descriptor drops its transient view at submission end");
+    g_sub_serial++;
+    g_fence += ALIAS_IDLE + 2;
+    tex_t rep = r1; rep.serial = 99603; rep.d.width = 8; rep.d.height = 8; nvn_tex_layout(&rep.d, &rep.L);
+    mtl_tex_init(&rep);
+    uint64_t nopatch_before = g_stat_pool_nopatch[3];
+    id<MTLTexture> rep_tex = tex_mtl(&rep);
+    CHECK(rep_tex != nil && rep_tex != r1_tex && !alias_has(r1_tex) && alias_has(rep_tex), "new texture takes over storage from the retired one");
+    os_unfair_lock_lock(&g_rmu);
+    uint64_t gpu1 = pool_gpu(0, MTLTextureType2D, NVN_DPF_FLOAT, 0, &pbuf);
+    CHECK(gpu1 != 0 && g_stat_pool_nopatch[3] == nopatch_before, "storage takeover patches the bindless pool without an un-noted rebuild");
+    CHECK(tex_by_id(952) == nil && g_treg[952].gone && alias_has(rep_tex), "un-ghosted retired descriptor over taken storage marks gone and does not evict the replacement");
+    os_unfair_lock_unlock(&g_rmu);
+    mtl_tex_release(&rep); mtl_alias_drop_pool(&tpool); mtl_pool_del(mem_buf);
+    mtl_sub_commit(); mtl_drain();
     printf("texture upgrade aliases: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

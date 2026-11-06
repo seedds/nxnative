@@ -440,6 +440,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_present_rescue` (`thirty`: the link's mode and range at 30 fps in a window, in fixed-rate and variable-refresh fullscreen, and back).
 - **Not checked:** variable-refresh fullscreen at 30 fps, external fixed-rate screens, other games at a 30 fps target, and the power cost of 60 callbacks a second instead of 30.
 
+### The present's upscale is a large share of an iPad's GPU frame
+
+- **Symptom:** on a hot iPad (thermal state 2, serious) frames come at 18 ms p50 while the timing line's GPU time per frame is 15 ms. The main queue's `DM_NVN_GPUPROF` timeline has gaps of 1 to 1.9 ms a frame, one of them 600 µs inside a single segment, which read as idle GPU.
+- **Cause:** the timing line's GPU time covers the frame's main command buffers only. The present command buffer runs on top of them: with [MetalFX upscaling](rendering.md#the-present-upscales-through-metalfx) a copy of the presented texture into the scaler's input, the spatial scaler (1920x1440 to 2752x2064) and a 1:1 present pass, 2.2 ms a frame; the bilinear present takes 0.31-0.42 ms. The log line `present command buffer GPU time over 600 presents` gives it. The gaps in the main queue's timeline are this present work running in between, not idle GPU.
+- **Fix:** in open PRs, not on main. [PR #1541](https://github.com/seedds/nxnative/pull/1541): the scaler reads the swapchain texture in place and writes the drawable when the picture fills it, 1.34 ms against 1.61 ms with the copy and the pass; at a 120 fps target, a higher frame rate in four adjacent pairs (88.3 / 86.5, 78.3 / 74.2, 76.2 / 75.5, 73.6 / 63.9 fps). [PR #1542](https://github.com/seedds/nxnative/pull/1542): an FSR 1 EASU option in the present pass, 1.62 ms against MetalFX's 2.21.
+- **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) 1.9.0 on an iPad Pro 13" M4 (iOS 27), at 120% render scale (1920x1440) with MetalFX to 2752x2064, 60 fps target.
+
 ## CPU cost and pacing
 
 ### Arena buffer ownership on allocation
@@ -576,6 +583,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Cause:** the thread that acquires the window (here the render thread) runs under a time-constraint policy whose computation the host re-declares every 120 frames; it was 1.25 × the 90th percentile of that thread's CPU time per frame. This render thread needs 1.9–2.0 ms a frame with one or two frames in 120 near 4.4 ms, against 2.5 ms declared, and each frame past the declaration stalled the thread. Probes on both threads' waits showed the main thread's waits; adding probes slowed the render thread and the stalls vanished, and `DM_RT=0` or a fixed `DM_RT_COMP=5` / `10` removed them too (99th percentile 18–21 ms) at the same CPU energy.
 - **Fix:** the declaration also covers 1.1 × the window's peak (`rt_comp_tick` in `hle_nvn.c`): 5.6 ms here, 60.0 fps, 99th percentile 21 ms.
 - **Found on:** [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md), in the Asylum cell.
+
+### iOS runs the game on its efficiency cores at thermal state nominal
+
+- **Symptom:** after about 21,000 frames of a session that passed through a few light scenes (the map, menus), the frame rate falls from 60 to 49-58 fps and the translation's CPU time per frame doubles (4.5-5 to 8-10 ms), with thermal state 0 throughout.
+- **Cause:** the system moved the game's threads to the efficiency cores. The `power up to frame` line's share on performance cores (`% of it on performance cores`) fell from 78-85% to 10-20%, and the CPU clock from about 3.1 GHz to 1.5-1.9 GHz. The system did not move them back when the heavy scenes returned. The frame step's probes meet the same thing after a longer hold ([development.md, Power](../development.md#power)).
+- **Fix:** not on main. The frame workgroup (`DM_FRAME_WG`, the launcher's **Deadline boost**, `hle_nvn.c`) has the threads that make a frame join an `os_workgroup` interval with the present period as its deadline. With it on, the share on performance cores stayed at 40-60% in a hot session. Turned on from the in-game menu, it did not reach the encode thread until a later change had that thread join per block. An Auto mode marks frames as intervals only while the acquiring thread's CPU time averages over 42% of the period, 2 of the last 120 frames were late and the scene's GPU time is under 90% of the period, then holds for 60 s, doubling up to 8 minutes. Neither change is on main.
+- **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) 1.9.0, a player's session on an iPad Pro 13" M4 (iOS 27), 60 fps target.
 
 ### A shader that writes a whole frame through raw global memory
 

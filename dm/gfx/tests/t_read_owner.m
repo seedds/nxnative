@@ -49,7 +49,7 @@ static int reads_pattern(const tex_t *t) {
     mtl_read_texels(t, 0, 0, &r, got, W * 4, sizeof got);
     return !memcmp(got, g_want, sizeof got);
 }
-static id resolve_off(const tex_t *t, int *in_storage) { *in_storage = 0; return tex_mtl_(t, in_storage); }
+static id resolve_off(const tex_t *t, int *in_storage) { *in_storage = 0; return (__bridge id)tex_mtl_(t, in_storage); }
 
 static void case_a(void) {
     printf("a: CPU-written, never resolved\n");

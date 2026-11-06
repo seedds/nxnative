@@ -156,15 +156,6 @@ The game may also write into an NVN object directly, without an NVN call, throug
 - **Check:** `make -C dm/gfx/tests GAME=<id> run` (`t_cpu_tex` among them). Fortune's Weave's battle map (975 draws a frame, MacBook Pro M1 Pro): pool build 1.9 → 1.2 ms, submit 52.5k → 42.8k instructions per draw.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md).
 
-### Pool tables rebuilt into new buffers and walked over IDs of another type
-
-- **Symptom:** with shaders that read the texture pool (the `pool for handles traced to no slot` lines), the pool table's source line leads the residency report (`residency set up to frame`): thousands of additions and removals every 300 frames, and hundreds of residency commits.
-- **Cause:** two things in `pool_gpu`. Every rebuild wrote a new buffer, 8 bytes per registered ID (264 KB at Ocarina of Time's 33,000), so each one was an allocation, a residency-set addition and, behind the fence, a removal; a game that registers textures or changes their storage every frame rebuilds tables many times a frame. And a walk looked every registered ID up before it checked the texture's type: a 2D-array table walked every 2D ID, and the views of retired registrations, which go at every submission end ([Finalized textures kept by registered descriptor views](#finalized-textures-kept-by-registered-descriptor-views)), were made again only to be turned away.
-- **Fix:** general, in `nvn_mtl.m`. A replaced table becomes one of 64 spares (`pool_buf_retire`), and a later rebuild writes it again once the submission that could still read it has completed (`pool_buf`, against `g_done`); spares stay in the residency set, and argument blocks holding an old address are not reused past a rebuild (`g_psnap_gen`). A registration keeps the Metal type `tex_by_id` gave it (`treg_t.tt`, cleared when the ID is registered again), and a walk passes over an ID of another type without looking it up. The pool line counts both (`table buffers made`, `reused`, `IDs of another type passed over`).
-- **Check:** `dm/gfx/tests/t_pool_table.m`: a spare is not written again before its submission completes and is after; a 3D ID in a 2D table is passed over without its view being made again; a new registration forgets the type; a walk over 20,000 2D IDs with dropped views in a 2D-array table takes 0.08 ms instead of 3.2 ms (M5 Max).
-- **Found on:** The Legend of Zelda: Ocarina of Time (Switch 2, `0400486024DEC000`, update v131072, with PR #1299), Kokiri Forest, M5 Max, two runs of each host from the same save along the same route (wall clock: the game does not run under `DM_DETCLOCK`). In gameplay, per 300 frames (medians): residency commits 664 and 678 → 56, additions 3,136 and 2,500 → 276, commit time 70 and 46 ms → 11 ms. Table buffers: 1,487 made, 81,333 reused in 12,600 frames (with 8 spares, 41,483 made: the oldest spare was pushed out before it came free). 74 million lookups of IDs of another type passed over (about 5,900 a frame). Frame times and long frames did not change beyond the runs' noise.
-- **Open:** the table still holds a Metal texture for every registered ID of its type, made by the walk whether a shader reads it or not. In about 6 minutes of Ocarina of Time's Kokiri Forest, shaders read 10 to 470 IDs every 600 frames through the pool (three quarters of the pool reads are shadow-map comparisons, the handles taken from a light list in a storage buffer), and about 4,200 textures, 1.56 GB, were made by the walk and read by nothing. Making them only when read needs to know which IDs shaders read: a pool read that marked its ID in a bitmap cost about 22 % of the GPU time even with the bitmap absent (13.1 → 16.0 ms a frame), as a fragment shader that can write memory has its depth test after it ([Early fragment tests from the control section](shaders.md#early-fragment-tests-from-the-control-section)).
-
 ### Memory-pool tracking table grows in blocks
 
 - **Cause:** the memory-pool tracking table had a fixed 4,096 slots; a pool past the end would have its textures re-uploaded at every use.
@@ -472,6 +463,7 @@ Games read this count as a position in their own command memory and size their h
   - [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md): the cave was magenta; the terrain draws sample two 121-layer ASTC 8×8 arrays (42 MB each) filled this way.
   - [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md): the UI reads its textures from `.tex` files the engine loads straight into a `CPU_UNCACHED | GPU_CACHED | COMPRESSIBLE` pool (flags 0xa2): 231 textures by the title screen, no packaged layout, no `WriteTexels`, no copies.
   - [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md): a dialog box sampling 256x256 and 1024x256 textures of format 0x4d; `DM_NVN_TEXINFO=1024x256` showed storage that already held data at first use (226,555 of 262,144 bytes non-zero): no packaged layout, block-linear, in a 1000 MB `CPU_CACHED | GPU_CACHED | COMPRESSIBLE` pool (flags 0xa4). A log of the pool flushes, texture creations and file reads (temporary lines under `DM_NVN_LOG`) showed every `.tex` read into staging buffers (512 KB `ReadFile`s, none into the pool) and the texels copied by the CPU into the texture's storage; only the four linear 1024x64 text textures are flushed, every frame. `main` has no cache maintenance instruction at all.
+  - [Kirby Air Riders](../../dm/games/040077201BE50000/README.md): magenta props and panels in races, one of them a 512x512 ASTC texture all zeros when dumped; with both keys none of the 378 ASTC textures bound on one frame had a zero block.
 
 ### `ReadTexels` from guest memory and textures written after first use
 
@@ -702,3 +694,23 @@ Games read this count as a position in their own command memory and size their h
 ### `nvnPrivate0`, an inlined command-buffer fast path flag
 
 - `nvnPrivate0`, a new SDK 20 import, needs nothing: it is a flag in `sdk`'s bss that enables an inlined command-buffer fast path when the NVN driver sets it (it stays 0). Found on [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0, SDK 20.5.22).
+
+### `nvnTextureBuilderGetViewOffset`, `nvnTextureViewCompare`, `nvnBlendStateSetAdvancedNormalizedDst`
+
+- **Symptom:** `[RED] NVN unimplemented function called` for each.
+- **Fix:** the builder's offset is the texture's (`view_offset`). The compare is true when the two views set the same fields to the same values: that true means equal is taken from the name, as no caller in `main` was found to confirm it. The blend flag is kept for its getter; the fixed-function factors the replay uses read a normalized target as it is.
+- **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md).
+
+### Texture IDs of one storage share one packaged texture
+
+- **Symptom:** a pool walk makes gigabytes of textures from far fewer images: Ocarina of Time's 32,768 IDs name 3,607 storages, and one texture per ID came to 2 GB.
+- **Cause:** a packaged texture belongs to its serial, and the engine registers the same storage under many texture objects.
+- **Fix:** general (`nvn_mtl.m` `g_pkg_share`, `tex_alias_key`, `pkg_shared`). Packaged textures are shared by storage, layout and format through a weak table, so a new serial of the same storage takes the existing one. A pool's removal evicts its keys (`mtl_alias_drop_pool`), and the walk's budget does not count a texture that is already shared.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
+### Finalizing a copy of a texture object
+
+- **Symptom:** thousands of first uploads a frame in a scene whose textures do not change: Ocarina of Time, about 15,000 a frame.
+- **Cause:** the engine copies an `NVNtexture` by value and finalizes the copy, while the original stays in use. The host keyed the texture by serial, so finalizing the copy deleted the host texture of the original, and its next use uploaded it again.
+- **Fix:** general (`nvn_mtl.m` `mtl_tex_release`). The registry keeps the address of the object that was initialized, and a finalize is ignored when that owner still holds the texture's magic and serial (read with `vm_read_overwrite`, as the owner's memory may be gone). `t_cpu_tex` checks both orders.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).

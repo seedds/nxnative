@@ -293,6 +293,8 @@ int main(void) {
     P(nvnCommandBufferSetMemoryCallback)(&cb, mem_cb); P(nvnCommandBufferSetMemoryCallbackData)(&cb, NULL);
     NVNeventBuilder eb; NVNevent ev; P(nvnEventBuilderSetDefaults)(&eb); P(nvnEventBuilderSetStorage)(&eb, &pool, 0x1000);
     P(nvnEventInitialize)(&ev, &eb);
+    EXPECT("EventGetMemoryPool: the storage pool", 1, ((NVNmemoryPool *(*)(const NVNevent *))proc("nvnEventGetMemoryPool"))(&ev) == &pool);
+    EXPECT("EventGetMemoryOffset: the storage offset", 0x1000, ((int64_t (*)(const NVNevent *))proc("nvnEventGetMemoryOffset"))(&ev));
     uint8_t *ub = poolmem + 0x2000, *cnt = poolmem + 0x3000, *src = poolmem + 0x4000, *dst = poolmem + 0x5000;
     for (int i = 0; i < 64; i++) src[i] = (uint8_t)(i * 3 + 1);
     uint32_t data[16];

@@ -24,12 +24,15 @@ static char g_f1_lib[1100];      // DM_FSR4_LIB or its default, from mtl_f1_env
 static id<MTLComputePipelineState> g_f1_mv_pso, g_f1_dbg_pso, g_f1_bil_pso;
 static id<MTL4ArgumentTable> g_f1_tab;
 static id<MTLBuffer> g_f1_cbuf; static unsigned g_f1_cslot;   // reprojection constants, a ring of slots (a recorded block reads its slot when the encoding thread runs it)
-enum { F1_SLOTS = 8, F1_SLOT = 256, F1_REJ = 64, F1_READS = 128 };
+enum { F1_SLOTS = 8, F1_SLOT = 256, F1_SEEN = 2048, F1_READS = 4096 };
 typedef struct { double vp[16], vpp[16]; uint32_t w, h; uint64_t frame; int has_prev; } f1_cam_t;
 static f1_cam_t g_f1c;
 static id<MTLTexture> g_f1_depth;   // the camera frame's depth target
 static double g_f1_last_vp[16]; static uint64_t g_f1_last_vp_frame;   // the last camera seen, for a block without the last frame's view-projection
-static uint64_t g_f1_rej[F1_REJ], g_f1_rej_frame; static int g_f1_nrej, g_f1_reads;   // blocks that are no camera, and block reads, this frame
+static uint64_t g_f1_rej_frame; static int g_f1_reads;   // block reads this frame (f1_seen holds the blocks that are no camera)
+// FSR 1 draws by what drew them since the last report: FSR 4, MetalFX for want of a camera, MetalFX for a second draw in a frame, MetalFX after FSR 4 failed
+enum { F1S_FSR4, F1S_NOCAM, F1S_SECOND, F1S_FAILED, F1S_N };
+static uint64_t g_f1_stat[F1S_N], g_f1_stat_frame;
 static id<MTLTexture> g_f1_mv, g_f1_out; static uint64_t g_f1_last_frame, g_f1_draw_frame; static uint32_t g_f1_key[4];
 static uint64_t g_f1_n;
 
@@ -131,29 +134,44 @@ static int f1_read(uint64_t a, uint32_t n, void *out) {
 }
 
 // Every draw until the frame has one: the frame's camera, the first block bound to the vertex stage of a draw into a Depth32Float target that holds the block's render size
+// A frame's blocks known to be no camera: an open-addressed set stamped with the frame, so a busy frame (thousands of draws, as many
+// uniform blocks) reads each block once and never runs out of room before the draw that holds the camera
+static int f1_seen(uint64_t a, uint64_t fr, int add) {
+    static struct { uint64_t a, fr; } set[F1_SEEN];
+    for (uint32_t i = (uint32_t)(a >> 4) * 2654435761u, n = 0; n < 16; n++, i++) {
+        __typeof__(set[0]) *e = &set[i & (F1_SEEN - 1)];
+        if (e->fr == fr && e->a == a) return 1;
+        if (e->fr != fr) { if (add) { e->a = a; e->fr = fr; } return 0; }
+    }
+    return 0;   // a full probe: read it again, which is only slower
+}
 static void f1_track(void) {
     if (!R.has_rt || !R.rt.depth) return;
     uint64_t fr = atomic_load(&g_cur_frame);
     if (g_f1c.frame == fr) return;
-    if (g_f1_rej_frame != fr) { g_f1_rej_frame = fr; g_f1_nrej = 0; g_f1_reads = 0; }
-    if (g_f1_reads >= F1_READS) return;   // a frame with no camera (menus, loading) stops looking after this many reads
+    if (g_f1_rej_frame != fr) { g_f1_rej_frame = fr; g_f1_reads = 0; }
+    if (g_f1_reads >= F1_READS) return;   // a frame with no camera at all (menus, loading) stops looking after this many reads
     const tex_t *dt = R.rt.depth; uint32_t w = dt->d.width, h = dt->d.height;
+    // Only a draw into a readable single-sample Depth32Float target can carry the camera: decided once per depth target
+    static uint64_t dser; static int dok; static id<MTLTexture> dtex;
+    if (dt->serial != dser) {
+        id<MTLTexture> m = tex_mtl(dt); dser = dt->serial; dtex = m;
+        dok = m && (m.pixelFormat == MTLPixelFormatDepth32Float || m.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) && (m.usage & MTLTextureUsageShaderRead) && m.sampleCount == 1;
+    }
+    if (!dok) return;
     const uint32_t need = MAX(MAX(DM_GAME_FSR1_SIZE + 8, DM_GAME_FSR1_PROJ + 64), MAX(DM_GAME_FSR1_VP + 64, DM_GAME_FSR1_VP_PREV + 64));
     if (need > 0x1000) return;
     for (int r = 0; r < 16; r++) {
         const p_bind_buf *u = &S.ubo[0][r];
-        if (!u->addr || u->size < need) continue;
-        int seen = 0; for (int i = 0; i < g_f1_nrej; i++) if (g_f1_rej[i] == u->addr) { seen = 1; break; }
-        if (seen) continue;
+        if (!u->addr || u->size < need || f1_seen(u->addr, fr, 0)) continue;
         float f[0x1000 / 4];
         g_f1_reads++;
         if (!f1_read(u->addr, need, f)) continue;
         const float *sz = f + DM_GAME_FSR1_SIZE / 4, *px = f + DM_GAME_FSR1_PROJ / 4, *pw = px + 12;
-        if (!(pw[0] == 0 && pw[1] == 0 && pw[2] == -1 && pw[3] == 0 && px[0] > 0)) { if (g_f1_nrej < F1_REJ) g_f1_rej[g_f1_nrej++] = u->addr; continue; }   // no camera, whatever the target
+        if (!(pw[0] == 0 && pw[1] == 0 && pw[2] == -1 && pw[3] == 0 && px[0] > 0)) { f1_seen(u->addr, fr, 1); continue; }   // no camera, whatever the target
         // A camera of another view (a shadow or a smaller pass) stays a candidate for a later draw: only this target's size is checked
         if (!(sz[0] >= 1 && sz[1] >= 1 && sz[0] == (float)(uint32_t)sz[0] && sz[1] == (float)(uint32_t)sz[1] && sz[0] <= w && sz[1] <= h && sz[0] * 2 >= w && sz[1] * 2 >= h)) continue;
-        id<MTLTexture> dm = tex_mtl(dt);
-        if (!dm || (dm.pixelFormat != MTLPixelFormatDepth32Float && dm.pixelFormat != MTLPixelFormatDepth32Float_Stencil8) || !(dm.usage & MTLTextureUsageShaderRead) || dm.sampleCount != 1) return;
+        id<MTLTexture> dm = dtex;
         for (int i = 0; i < 16; i++) g_f1c.vp[i] = f[DM_GAME_FSR1_VP / 4 + i];
         if (DM_GAME_FSR1_VP_PREV) { for (int i = 0; i < 16; i++) g_f1c.vpp[i] = f[DM_GAME_FSR1_VP_PREV / 4 + i]; g_f1c.has_prev = 1; }
         else { g_f1c.has_prev = g_f1_last_vp_frame + 1 == fr; memcpy(g_f1c.vpp, g_f1c.has_prev ? g_f1_last_vp : g_f1c.vp, sizeof g_f1c.vpp); }
@@ -202,7 +220,14 @@ static int f1_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     // The input rectangle: the camera's render size in the top-left corner (dynamic resolution), else the whole texture
     uint32_t rw = cam ? g_f1c.w : (uint32_t)in.width, rh = cam ? g_f1c.h : (uint32_t)in.height, uw = (uint32_t)out.width, uh = (uint32_t)out.height;
     int temporal = (mode == F1_FSR4 && atomic_load(&g_f1_fails) < 3) || g_f1_debug;
-    if (temporal && (!cam || g_f1_draw_frame == fr)) temporal = 0;   // no camera (a loading screen) or a second FSR 1 draw this frame: MetalFX draws it
+    int second = g_f1_draw_frame == fr;
+    if (mode == F1_FSR4) g_f1_stat[atomic_load(&g_f1_fails) >= 3 ? F1S_FAILED : !cam ? F1S_NOCAM : second ? F1S_SECOND : F1S_FSR4]++;
+    if (fr - g_f1_stat_frame >= 600 && mode == F1_FSR4) {   // how the FSR 1 draws went, every 600 frames
+        MLOG("upscaler fsr4 up to frame %llu: %llu by FSR 4, MetalFX %llu without a camera, %llu as a second draw in a frame, %llu after FSR 4 failed; camera search %d block reads in the last frame",
+             (unsigned long long)fr, (unsigned long long)g_f1_stat[F1S_FSR4], (unsigned long long)g_f1_stat[F1S_NOCAM], (unsigned long long)g_f1_stat[F1S_SECOND], (unsigned long long)g_f1_stat[F1S_FAILED], g_f1_reads);
+        memset(g_f1_stat, 0, sizeof g_f1_stat); g_f1_stat_frame = fr;
+    }
+    if (temporal && (!cam || second)) temporal = 0;   // no camera (a loading screen) or a second FSR 1 draw this frame: MetalFX draws it
     g_f1_draw_frame = fr;
     NVNcopyRegion iall = {0, 0, 0, (int)rw, (int)rh, 1}, all = {0, 0, 0, (int)uw, (int)uh, 1};
     zskip_del(R.rt.color[0]->serial);

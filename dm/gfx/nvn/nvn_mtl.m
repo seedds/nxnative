@@ -9410,6 +9410,42 @@ static uint64_t support_gpu(void) { static uint64_t gpu; if (!gpu) gpu = support
 // pool wraps the guest's own pages, so any pool holding an address gives its GPU address), unused entries starting at ~0. Rebuilt when the pools change; the replaced table goes through
 // deferred release, so submissions encoded with it keep it. Only pools something gave an address in are listed (mtl_pool_addressed), each made resident, as the shader may reach any of them
 static id<MTLBuffer> g_gmem_buf; static uint64_t g_gmem_gen;
+// DM_NVN_GPUVA_DIAG=1 (diagnostic, for a design without the lookup): at each rebuild of the table, at most every 10 s, what the raw pool table holds and what two lookup-free schemes would cost.
+// Windows: guest memory cut into fixed windows, each its own no-copy buffer resident when an addressed pool meets it, found by one indexed load; the bytes they cover against the pools' own.
+// Metal GPU addresses: the range Metal gave the pools' buffers, which a scheme handing the game Metal's addresses would expose to it (NVN addresses are 40-bit on the Switch)
+static void gpuva_diag(const uint8_t *t, int n) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_GPUVA_DIAG"); on = e && atoi(e); }
+    if (!on) return;
+    static uint64_t last; uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    if (last && now - last < 10000000000ull) return;
+    last = now;
+    const int shifts[] = {14, 16, 20, 21, 22, 24}; uint64_t cover[6] = {0}, prev[6]; for (int s = 0; s < 6; s++) prev[s] = ~0ull;
+    uint64_t bytes = 0, lo_min = ~0ull, hi_max = 0, small = 0;
+    for (int k = 1; k < n; k++) {
+        const uint64_t *e = (const uint64_t *)(t + (size_t)k * DMSH_GMEM_MAP_ENTRY);
+        bytes += e[1] - e[0]; lo_min = MIN(lo_min, e[0]); hi_max = MAX(hi_max, e[1]); if (e[1] - e[0] < (1u << 21)) small++;
+        for (int s = 0; s < 6; s++) {   // entries are sorted and disjoint: count each window once
+            uint64_t a = e[0] >> shifts[s], z = (e[1] - 1) >> shifts[s];
+            if (prev[s] != ~0ull && a <= prev[s]) a = prev[s] + 1;
+            if (z >= a) cover[s] += z - a + 1;
+            prev[s] = MAX(prev[s] == ~0ull ? 0 : prev[s], z);
+        }
+    }
+    uint64_t gmin = ~0ull, gmax = 0, all = 0, wired = 0;
+    pthread_mutex_lock(&g_mu);
+    for (int k = 0; k < g_npool; k++) { pool_ent *p = &g_pools[k]; if (!p->buf) continue; all++;
+        gmin = MIN(gmin, p->gpu); gmax = MAX(gmax, p->gpu + (uint64_t)(p->hi - p->base));
+        if (addr_meets(p->lo, p->hi)) wired += (uint64_t)(p->hi - p->lo); }
+    pthread_mutex_unlock(&g_mu);
+    MLOG("[gpuva] raw pool table: %d ranges, %llu MB (%llu under 2 MB), guest span %#llx..%#llx (%.1f GB); addressed pools wired as a whole %llu MB", n - 1, (unsigned long long)(bytes >> 20),
+         (unsigned long long)small, (unsigned long long)lo_min, (unsigned long long)hi_max, (hi_max - lo_min) / 1073741824.0, (unsigned long long)(wired >> 20));
+    MLOG("[gpuva] windows covering them: 16 KB %llu MB (%llu), 64 KB %llu MB (%llu), 1 MB %llu MB (%llu), 2 MB %llu MB (%llu), 4 MB %llu MB (%llu), 16 MB %llu MB (%llu); table for 2 MB windows over the span %llu KB",
+         (unsigned long long)((cover[0] << 14) >> 20), (unsigned long long)cover[0], (unsigned long long)((cover[1] << 16) >> 20), (unsigned long long)cover[1], (unsigned long long)cover[2], (unsigned long long)cover[2],
+         (unsigned long long)(cover[3] * 2), (unsigned long long)cover[3], (unsigned long long)(cover[4] * 4), (unsigned long long)cover[4], (unsigned long long)(cover[5] * 16), (unsigned long long)cover[5],
+         (unsigned long long)(((hi_max - lo_min) >> 21) * 8 >> 10));
+    MLOG("[gpuva] Metal GPU addresses of the %llu pool buffers: %#llx..%#llx (highest bit %d; NVN's are 40-bit); this table's own %#llx", (unsigned long long)all,
+         (unsigned long long)gmin, (unsigned long long)gmax, gmax ? 63 - __builtin_clzll(gmax) : -1, (unsigned long long)g_gmem_buf.gpuAddress);
+}
 static id<MTLBuffer> gmem_map(void) {
     uint64_t gen = atomic_load(&g_pool_gen);
     if (g_gmem_buf && g_gmem_gen == gen) return g_gmem_buf;
@@ -9440,6 +9476,7 @@ static id<MTLBuffer> gmem_map(void) {
         }
     }
     if (over) RED_ONCE(140, "raw global memory: %d more memory pools than the %d entries of the pool table; addresses in them are not reached", over, DMSH_GMEM_MAP_ENTRIES - 1);
+    gpuva_diag(t, n);
     res_add(b); res_commit();
     if (g_gmem_buf) defer_obj_release(g_gmem_buf);
     g_gmem_buf = b; g_gmem_gen = gen;

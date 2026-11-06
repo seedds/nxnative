@@ -103,31 +103,50 @@ static id<MTLRenderPipelineState> geo_capture_pso(NvShader *vs) {
 // One diagnostic snapshot through the same native vertex fetch as geometry
 // capture. Refuse shaders with writes: observing them must not run their side
 // effects twice. Records retain the documented 144-word geometry capture ABI.
+// DM_CTL "vsdump <path> <key,…>" arms the same capture for every draw of those vertex shaders in the next frame (at most 64), for a scene the player reaches
+// rather than a frame number known in advance
+static char g_vsd_path[1024], g_vsd_keys[1200]; static _Atomic uint64_t g_vsd_frame;
+void dm_gfx_vsdump_next(const char *path, const char *keys) {
+    strlcpy(g_vsd_path, path, sizeof g_vsd_path); strlcpy(g_vsd_keys, keys, sizeof g_vsd_keys);
+    atomic_store(&g_vsd_frame, atomic_load(&g_cur_frame) + 1);
+}
 static void vertex_dump(NvShader *vs, const p_draw *dw, const p_draw_idx *di) {
-    static const char *key, *path; static int configured, captured, limit; static uint64_t frame;
+    static const char *key, *path; static int configured, captured, limit, nkeys, every; static uint64_t frame, until, armed, taken;   // taken: the listed keys captured once
     if (!configured) { key = getenv("DM_NVN_VSDUMP_KEY"); path = getenv("DM_NVN_VSDUMP");
         const char *f = getenv("DM_NVN_VSDUMP_FROM"), *n = getenv("DM_NVN_VSDUMP_MAX");
-        frame = f ? strtoull(f,NULL,0) : 0; limit = n ? atoi(n) : key && !strcmp(key,"*") ? 256 : 1; configured = 1; }
-    int all = key && !strcmp(key,"*");
-    if (captured >= limit || !key || !path || atomic_load(&g_cur_frame) < frame || !vs || (!all && strncmp(vs->key, key, 16)) || !vs->geo_fn ||
-        (dw ? dw->ind || dw->mdi_cnt : di->ind || di->mdi_cnt) || S.rast_discard) return;
+        frame = f ? strtoull(f,NULL,0) : 0; configured = 1; every = n != NULL;
+        nkeys = key ? (int)(strlen(key) + 1) / 17 : 0;   // one key or a comma-separated list
+        limit = n ? atoi(n) : key && !strcmp(key,"*") ? 256 : nkeys > 1 ? nkeys : 1; }
+    uint64_t a = atomic_load_explicit(&g_vsd_frame, memory_order_relaxed);
+    if (a != armed && a <= atomic_load(&g_cur_frame)) { armed = a; key = g_vsd_keys; path = g_vsd_path; frame = until = a; captured = 0; taken = 0; every = 1; limit = 64;
+        nkeys = (int)(strlen(key) + 1) / 17; MLOG("vertex dump armed for frame %llu: %s → %s", (unsigned long long)a, key, path); }
+    if (until && atomic_load(&g_cur_frame) > until) return;
+    int all = key && !strcmp(key,"*"), listed = 0;
+    if (key && !all && vs) for (int i = 0; i < nkeys && !listed; i++) if (!strncmp(vs->key, key + 17 * i, 16) && (every || !(taken >> i & 1))) listed = i + 1;
+    if (captured >= limit || !key || !path || atomic_load(&g_cur_frame) < frame || !vs || (!all && !listed)) return;
+    if (!vs->geo_fn || (dw ? dw->ind || dw->mdi_cnt : di->ind || di->mdi_cnt) || S.rast_discard) {
+        if (listed) MLOG("vertex dump %s: not captured (%s)", vs->key, !vs->geo_fn ? "no capture function" : S.rast_discard ? "rasterizer discard" : "indirect draw");
+        return; }
     for (int i = 0; i < vs->rf.nb; i++) if (vs->rf.b[i].rw) return;
     int count = dw ? dw->count : di->count, instances = dw ? dw->instances : di->instances;
-    if (count <= 0 || instances > 1 || (di && (di->itype < 0 || di->itype > 2))) return;
+    if (count <= 0 || instances > 1 || (di && (di->itype < 0 || di->itype > 2))) {
+        if (listed) MLOG("vertex dump %s: not captured (count %d, %d instances)", vs->key, count, instances);
+        return; }
+    if (listed) taken |= 1ull << (listed - 1);
     unsigned number = captured++; lc_land(); rp_flush(); mdi_wait();
     uint32_t lo = dw ? (uint32_t)dw->first : UINT32_MAX, hi = dw ? lo + count - 1 : 0;
     if (di) {
         int size = 1 << di->itype;
-        if (!nvn_host_readable(di->ibuf, (uint64_t)count * size)) return;
+        if (!nvn_host_readable(di->ibuf, (uint64_t)count * size)) { MLOG("vertex dump %s: not captured (index buffer not host-readable)", vs->key); return; }
         for (int i = 0; i < count; i++) { uint32_t n = 0; memcpy(&n, (void *)(uintptr_t)(di->ibuf + (uint64_t)i * size), size);
             if (S.restart.on && n == (S.restart.index & (size == 1 ? 255u : size == 2 ? 65535u : UINT32_MAX))) continue;
             lo = MIN(lo, n); hi = MAX(hi, n); }
-        if (lo == UINT32_MAX || (int64_t)lo + di->base_vertex < 0 || (int64_t)hi + di->base_vertex > UINT32_MAX) return;
+        if (lo == UINT32_MAX || (int64_t)lo + di->base_vertex < 0 || (int64_t)hi + di->base_vertex > UINT32_MAX) { MLOG("vertex dump %s: not captured (index range)", vs->key); return; }
         lo += di->base_vertex; hi += di->base_vertex;
     }
     uint64_t span = (uint64_t)hi - lo + 1, bytes = span * 144 * 4;
-    if (!span || bytes > (64u << 20)) return;
-    id<MTLRenderPipelineState> ps = geo_capture_pso(vs); if (!ps) return;
+    if (!span || bytes > (64u << 20)) { MLOG("vertex dump %s: not captured (%llu vertices)", vs->key, (unsigned long long)span); return; }
+    id<MTLRenderPipelineState> ps = geo_capture_pso(vs); if (!ps) return;   // geo_capture_pso reported it
     id<MTLBuffer> output; size_t offset = arena_alloc(bytes + 512, &output);
     uint64_t gpu = output.gpuAddress + offset;
     uint64_t info[4] = {gpu + 512, 0, (uint64_t)lo | span << 32, (uint32_t)(dw ? dw->base_instance : di->base_instance) | 1ull << 32};
@@ -142,11 +161,11 @@ static void vertex_dump(NvShader *vs, const p_draw *dw, const p_draw_idx *di) {
     vconv_bind(en, vs, 1, &range, NULL); args_dirty_all(); encode_args(en, vs, 0, 1); enc_r_vbuf(en, 13, gpu);
     enc_r_draw_instanced(en, MTLPrimitiveTypePoint, lo, span, 1, (uint32_t)info[3]); enc_r_end(en);
     mdi_wait();
-    char filename[1200]; if (all) snprintf(filename,sizeof filename,"%s_%04u_%s.bin",path,number,vs->key); else strlcpy(filename,path,sizeof filename);
+    char filename[1200]; if (all || nkeys > 1 || every) snprintf(filename,sizeof filename,"%s_%04u_%s.bin",path,number,vs->key); else strlcpy(filename,path,sizeof filename);
     FILE *f = fopen(filename, "wb"); if (f) { uint32_t header[4] = {lo, (uint32_t)span, all ? 4u : 144u, (uint32_t)info[3]}; fwrite(header, sizeof header, 1, f);
         if (all) for (uint64_t i=0;i<span;i++) fwrite((uint8_t *)output.contents + offset + 512 + i*144*4,1,16,f);
         else fwrite((uint8_t *)output.contents + offset + 512, 1, bytes, f); fclose(f); }
-    MLOG("vertex dump %s: first %u, count %llu, %s", vs->key, lo, (unsigned long long)span, filename);
+    MLOG("vertex dump %s: first %u, count %llu, %s draw, pass %llu, %s", vs->key, lo, (unsigned long long)span, di ? "indexed" : "non-indexed", g_stat_pass + !g_enc, filename);
     args_dirty_all(); g_enc_pso = nil; g_enc_dss = nil; g_ed.ok = 0;
 }
 static void geo_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint32_t primitive_base);

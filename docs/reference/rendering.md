@@ -269,6 +269,15 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md): the grass bend map, a 256×256 RG8 window that follows Link, advanced by `ff9def5b3c418851` with wrap 5 and border 0.5.
 - **Check:** `t_border` (nvn_border's choices for opaque, translucent and Metal's own colours, and the registry's twins) and `test_dmsh_border.py` (the rewrite, the reflection, the readable-tile variant, the compile for macOS and iOS, and with `make check_t_border` the GPU: corrected samples against Maxwell's bilinear filter with the border colour, and Metal's nearest colour with the mask clear).
 
+### Rectangle textures are addressed in texels
+
+- **Symptom:** an effect that samples a rectangle texture at `gl_FragCoord.xy` reads one texel everywhere. In Fast Fusion the tornadoes were missing: drawn (`DM_NVN_HILITE` showed the funnels), but transparent.
+- **Cause:** NVN's `NVN_TEXTURE_TARGET_RECTANGLE` (7), as a texture's target or a view's (`nvnTextureViewSetTarget`), is addressed in texels, 0..width, not 0..1: the hardware's texture header carries the normalized coordinates bit and scales the coordinates. The shaders are translated before any texture is known, and Ryujinx's translator, asked whether coordinates are normalized (`QueryTextureCoordNormalized`), is answered yes; the host made the view a plain 2D texture (`ttype`). A sample at (480, 270) clamped to the corner texel.
+- **Fix:** a sampler bound with a rectangle texture through a combined handle (texture ID | sampler ID << 20, in a slot or a uniform buffer) is bound as its twin with pixel coordinates, `normalizedCoordinates = NO` (`samp_px`, `tid_rect` in `nvn_mtl.m`): one filter for min and mag (the magnification one), no mips, clamp to the edge, or to the border colour where the game asked for a border. The twin is made once per sampler ID and dropped when the ID is registered again.
+- **Not covered:** separate samplers (a sampler slot whose texture the binding does not name), sampler arrays, and the border-colour correction ([Border colours Metal has no sampler state for](#border-colours-metal-has-no-sampler-state-for)) of a rectangle texture's sampler, which keeps Metal's nearest colour.
+- **Check:** `make -C dm/gfx/tests GAME=0400C3F00006E000 check_t_rect_sampler`: `tid_rect` on a texture's and a view's target, the twin of a linear repeat mipmapped sampler made once and dropped on registration, and on the GPU samples through it from an argument buffer at texel centres, between two texels and past the edge.
+- **Found on:** Fast Fusion (040041E0212AE000): the tornado shader (`tornadofusion.w3d`, fragment `62b3444f82f59ad7`) fades its alpha by the distance to the scene behind it, reading the depth (`fmt` Depth32Float_Stencil8, 960×540) through a rectangle view at `gl_FragCoord.xy` with sampler 256 (linear, mipmapped). The corner's depth faded every funnel out; with the twin they are back, checked in the game.
+
 ### Texture fields Metal refuses
 
 - **Symptom:** the process ends at once (the window vanishes), with `-[MTLTextureDescriptorInternal validateWithDevice:]` failing an assertion such as `requests 9 mipmap levels, but the dimensions (1, 1, 1) can only support 1`, or `sampleCount must be > 1 for multisample textures`.
@@ -1040,6 +1049,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Cause:** NVN2 lets a game resize a DLSS network instead of making a new one. The replay takes each evaluation's sizes from its parameters and textures, so the network keeps nothing of it.
 - **Fix:** `nvnDlssNetworkResize` succeeds, logging the first size (`hle_nvn.c`).
 - **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md): 768x432, once; its evaluations run 768x432 to 768x432.
+
+### DLSS output alpha
+
+- **Symptom:** a Switch 2 game's menus missing while DLSS runs (text, backgrounds, stat bars), with the 3D scene drawn; with the bilinear stand-in they show.
+- **Cause:** MetalFX's temporal scaler writes alpha 1.0 everywhere. NVN2's DLSS hands the input's alpha on to the output (the game builds its network with flags 0x42, no NGX alpha upscaling, and still composites by it): Fast Fusion draws its menu background and text into the target first, then blends the DLSS output over them with `SRC_ALPHA / ONE_MINUS_SRC_ALPHA`, the input's alpha 0 where no 3D was drawn (76% of the main menu). At 1.0 the 3D layer covered the menus.
+- **Fix:** after the scaler's encode, `dlss_eval` draws the input's alpha alone into the output (`copy_t2t_draw_wm` with `MTLColorWriteMaskAlpha`, bilinear when the sizes differ, the destination loaded); the output gets render-target usage for it. Formats without alpha on either side are left as they were.
+- **Found on:** Fast Fusion (040041E0212AE000; a provisional profile, no game note yet): main menu, ship select, pause menu.
 
 ### A game's own upscaler drawn by MetalFX
 

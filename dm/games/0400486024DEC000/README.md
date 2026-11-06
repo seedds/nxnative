@@ -86,6 +86,10 @@ Run headless, `DM_CTL` at a control file. The work folder has `boot.sh <secs> <l
 
 From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. From `save_ref`: at about 58 s `A~0.2`, 5 s later `A~0.2` (Load), 30 s later three `A~0.1` 3 s apart, then 12 s to the bridge outside Link's house. There `LUp~3.5`, `A~0.2` (Climb Down) and `LDown~4` three or four times reach the village floor.
 
+## Ultrawide
+
+The game sizes its output from fixed 2560x1440 (docked) constants, so a 21:9 screen showed a 16:9 picture with bars. Building with `DM_ULTRAWIDE=<width>x<height>` (the screen, e.g. `3440x1440`) registers cuts for main e0f3ccfaf50065ae ([patches.py](patches.py)) that give the output size, the render sizes and the output resolution table widths from the screen's ratio at the game's own heights. The 3D view takes its aspect from the render size, so the view widens (Hor+) and nothing is stretched; the HUD and subtitles stay centred, movies stay 16:9 in the middle. Checked on a CB342CK at 3440x1440 (Mac mini M4 Pro, v131072): swap chain 3440x1440, WindowCrop 2752x1152 (2.389:1), title screen, the opening and Link's house fill the screen. Start it with `DM_FULLSCREEN=1` (and `DM_SCREEN=<name>` when the ultrawide is not the main screen).
+
 ## Open
 
 - Root cause confirmed on M4 Pro (2026-11-08): [ignored event waits](../../../docs/reference/nvn-objects.md#gpu-event-waits-order-work-across-queues) let lighting consumers run before their producers. The game issues about 25 waits and 19 signals per frame. All 297 complete traced frames submit queue 5's ambient-cache consumer `9e6b00b050e30801` before queue 1's SH producer `21d9f83e6027c565`, despite the explicit dependency. Queue 1 also waits for the CPU frame-ready event after the CPU clears the lighting buffer. At frame 3872 the consumer ran at 0.686 ms, the clear at 0.966–0.968 ms, and the producer at 1.282 ms; its release followed at 4.467 ms. Exposure writer `1bba09ec4bc8ff67` has another event dependency. The native SDK's flush/invalidate functions are no-ops for these coherent pools.

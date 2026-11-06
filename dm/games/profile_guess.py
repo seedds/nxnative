@@ -154,7 +154,7 @@ def guess(F, hooks=None):
     G['modules'] = (' '.join(keep), f'not loaded, main takes nothing from them the host does not supply: {", ".join(drop)}' if drop else 'every module main imports from')
 
 
-    # Memory: the guest block is 256 MB in front + alias region + stack region + heap region (hle_svc.c mem_init)
+    # Memory: the guest block is 256 MB in front + heap region + stack region + alias region (hle_svc.c mem_init)
     giant = sum(m['bss'] for n, m in mods.items() if n in keep and m['far'])
     heap_api = HEAP_API in imp
     pool = OUNCE_POOL if F.get('ounce') else APP_POOL

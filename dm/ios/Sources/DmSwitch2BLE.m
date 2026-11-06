@@ -60,10 +60,14 @@ typedef NS_ENUM(NSInteger, DS2Stage) {
 @property (nonatomic) BOOL done;                      // handshake finished: reports drive the pad
 @property (nonatomic, copy) NSString *serial;
 @property (nonatomic) NSUInteger reports;
+@property (nonatomic) uint16_t battery_mv;
+@property (nonatomic) int battery_percent;
+@property (nonatomic) int rssi;
 - (instancetype)initWithPeripheral:(CBPeripheral *)p queue:(dispatch_queue_t)q;
 - (void)beginHandshake;
 - (void)teardown;
 - (void)rumbleFrom:(const dm_haptic_state *)s;         // any thread; stores targets only
+- (void)testRumble;
 @end
 
 static NSLock *gRumbleLock;
@@ -83,6 +87,12 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
 - (void)start;
 - (void)sessionEnded:(DmSwitch2Session *)s;
 - (void)sessionReady:(DmSwitch2Session *)s;
+- (void)startScan;
+- (void)stopScan;
+- (BOOL)isScanning;
+- (int)getControllers:(dm_switch2_controller_info *)out maxCount:(int)maxCount;
+- (void)disconnectPlayer:(int)player;
+- (void)testRumblePlayer:(int)player;
 @end
 
 // ---- One controller ----
@@ -313,6 +323,13 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
     if (!ds2_report_parse(d.bytes, d.length, &r)) return;
     self.reports++;
     _lastReport = ds2_now();
+    self.battery_mv = r.battery_mv;
+    if (r.battery_mv >= 3400) {
+        int pct = (int)(((int)r.battery_mv - 3400) * 100 / (4200 - 3400));
+        self.battery_percent = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
+    } else if (r.battery_mv > 0) {
+        self.battery_percent = 0;
+    }
     if (!self.done) return;
     float lx, ly, rx, ry;
     ds2_cal_apply(&_cal[0], r.lx, r.ly, _deadzone, &lx, &ly);
@@ -331,6 +348,23 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
     if (_verbose && self.reports % 90 == 1)
         LOG("switch2: slot %d reports=%lu buttons=0x%08x sticks=%u,%u %u,%u battery=%umV", self.slot + 1,
             (unsigned long)self.reports, r.buttons, r.lx, r.ly, r.rx, r.ry, r.battery_mv);
+}
+
+- (void)testRumble {
+    dm_haptic_state s = {0};
+    s.player = self.slot >= 0 ? self.slot : 0;
+    s.motor[0].amplitude_low = 0.8f;
+    s.motor[0].frequency_low = 160.0f;
+    s.motor[0].amplitude_high = 0.8f;
+    s.motor[0].frequency_high = 320.0f;
+    s.motor[1] = s.motor[0];
+    [self rumbleFrom:&s];
+    __weak DmSwitch2Session *weak = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dm_haptic_state off = {0};
+        off.player = weak ? (weak.slot >= 0 ? weak.slot : 0) : 0;
+        [weak rumbleFrom:&off];
+    });
 }
 
 // ---- Rumble ----
@@ -538,6 +572,7 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
     LOG("switch2: found %s rssi=%d%s", (p.name ?: @"Pro Controller 2").UTF8String, rssi.intValue,
         a.host ? " (wake)" : " (pairing mode)");
     DmSwitch2Session *s = [[DmSwitch2Session alloc] initWithPeripheral:p queue:_q];
+    s.rssi = rssi.intValue;
     _connecting[p.identifier] = s;
     [central stopScan];   // scanning during a connection hurts the report rate; resumed after the handshake or a failure
     [central connectPeripheral:p options:nil];
@@ -587,8 +622,92 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
     [self updateScanning];
 }
 
+- (void)startScan {
+    [self start];
+    dispatch_async(_q, ^{
+        [self updateScanning];
+    });
+}
+
+- (void)stopScan {
+    dispatch_async(_q, ^{
+        if (self->_central.isScanning) [self->_central stopScan];
+    });
+}
+
+- (BOOL)isScanning {
+    return _central && _central.isScanning;
+}
+
+- (int)getControllers:(dm_switch2_controller_info *)out maxCount:(int)maxCount {
+    if (!out || maxCount <= 0) return 0;
+    __block int count = 0;
+    dispatch_sync(_q, ^{
+        for (DmSwitch2Session *s in self->_sessions.allValues) {
+            if (count >= maxCount) break;
+            dm_switch2_controller_info *info = &out[count++];
+            memset(info, 0, sizeof(*info));
+            const char *name = s.peripheral.name.UTF8String ?: "Pro Controller 2";
+            snprintf(info->name, sizeof(info->name), "%s", name);
+            if (s.serial) snprintf(info->serial, sizeof(info->serial), "%s", s.serial.UTF8String);
+            info->player = s.slot + 1;
+            info->battery_percent = s.battery_percent;
+            info->battery_mv = s.battery_mv;
+            info->rssi = s.rssi;
+            info->connected = s.done;
+        }
+    });
+    return count;
+}
+
+- (void)disconnectPlayer:(int)player {
+    dispatch_async(_q, ^{
+        for (DmSwitch2Session *s in self->_sessions.allValues) {
+            if (s.slot + 1 == player) {
+                [self sessionEnded:s];
+                break;
+            }
+        }
+    });
+}
+
+- (void)testRumblePlayer:(int)player {
+    dispatch_async(_q, ^{
+        for (DmSwitch2Session *s in self->_sessions.allValues) {
+            if (s.slot + 1 == player) {
+                [s testRumble];
+                break;
+            }
+        }
+    });
+}
+
 @end
 
 void dm_switch2_start(void) {
     @autoreleasepool { [[DmSwitch2BLE shared] start]; }
+}
+
+void dm_switch2_scan_start(void) {
+    @autoreleasepool { [[DmSwitch2BLE shared] startScan]; }
+}
+
+void dm_switch2_scan_stop(void) {
+    @autoreleasepool { [[DmSwitch2BLE shared] stopScan]; }
+}
+
+bool dm_switch2_is_scanning(void) {
+    @autoreleasepool { return [[DmSwitch2BLE shared] isScanning]; }
+}
+
+int dm_switch2_get_controllers(dm_switch2_controller_info *out, int max_count) {
+    @autoreleasepool { return [[DmSwitch2BLE shared] getControllers:out maxCount:max_count]; }
+}
+
+void dm_switch2_disconnect(int player) {
+    @autoreleasepool { [[DmSwitch2BLE shared] disconnectPlayer:player]; }
+}
+
+void dm_switch2_test_rumble(int player) {
+    @autoreleasepool { [[DmSwitch2BLE shared] testRumblePlayer:player]; }
 }

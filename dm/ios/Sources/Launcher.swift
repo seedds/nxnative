@@ -92,6 +92,234 @@ private struct DocumentPicker: UIViewControllerRepresentable {
     }
 }
 
+private struct Switch2ControllerItem: Identifiable, Equatable {
+    var id: String { serial.isEmpty ? "\(player)-\(name)" : serial }
+    let name: String
+    let serial: String
+    let player: Int
+    let batteryPercent: Int
+    let batteryMv: Int
+    let rssi: Int
+    let connected: Bool
+}
+
+private struct PairingGuideView: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var page = 0
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 24) {
+                Spacer()
+                TabView(selection: $page) {
+                    guidePage(
+                        icon: "gamecontroller.fill",
+                        title: "Welcome",
+                        description: "Connect a Nintendo Switch 2 Pro Controller to your Apple device over Bluetooth. Joy-Con 2 and the NSO GameCube pad share the Bluetooth protocol but are not supported yet."
+                    ).tag(0)
+
+                    guidePage(
+                        icon: "antenna.radiowaves.left.and.right",
+                        title: "Pairing a Controller",
+                        description: "Hold the Sync button (next to the USB-C port) until the player LEDs sweep. The controller connects automatically and remembers your device — after that, just press any button to wake it.\n\nNote: If iOS Settings > Bluetooth holds the controller, forget it there first so the app can connect."
+                    ).tag(1)
+
+                    guidePage(
+                        icon: "slider.horizontal.3",
+                        title: "Make It Yours",
+                        description: "Configure back buttons (GL/GR) and stick deadzones in launcher settings. Each connected controller is automatically assigned its own player slot."
+                    ).tag(2)
+                }
+                .tabViewStyle(.page(indexDisplayMode: .always))
+                .frame(maxHeight: 320)
+
+                Spacer()
+
+                HStack {
+                    if page > 0 {
+                        Button("Back") { withAnimation { page -= 1 } }
+                            .buttonStyle(.bordered)
+                    }
+                    Spacer()
+                    if page < 2 {
+                        Button("Next") { withAnimation { page += 1 } }
+                            .buttonStyle(.borderedProminent)
+                    } else {
+                        Button("Done") { dismiss() }
+                            .buttonStyle(.borderedProminent)
+                    }
+                }
+                .padding(.horizontal, 32)
+                .padding(.bottom, 24)
+            }
+            .navigationTitle("Switch 2 Controllers")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func guidePage(icon: String, title: String, description: String) -> some View {
+        VStack(spacing: 16) {
+            Image(systemName: icon)
+                .font(.system(size: 64))
+                .foregroundStyle(.tint)
+            Text(title)
+                .font(.title2.weight(.bold))
+            Text(description)
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+        }
+    }
+}
+
+private struct ControllersSection: View {
+    @State private var controllers: [Switch2ControllerItem] = []
+    @State private var isScanning = false
+    @State private var showGuide = false
+
+    var body: some View {
+        Section {
+            if controllers.isEmpty {
+                HStack(spacing: 12) {
+                    Image(systemName: "gamecontroller")
+                        .foregroundStyle(.secondary)
+                    Text("No controllers connected")
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                ForEach(controllers) { c in
+                    HStack(spacing: 12) {
+                        Image(systemName: "gamecontroller.fill")
+                            .foregroundStyle(.tint)
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text("P\(c.player): \(c.name)")
+                                    .font(.body.weight(.medium))
+                                Circle().fill(c.connected ? Color.green : Color.orange)
+                                    .frame(width: 8, height: 8)
+                            }
+                            if !c.serial.isEmpty {
+                                Text(c.serial).font(.caption2).foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer()
+                        if c.batteryPercent >= 0 {
+                            HStack(spacing: 4) {
+                                Text("\(c.batteryPercent)%")
+                                    .font(.subheadline).monospacedDigit().foregroundStyle(.secondary)
+                                Image(systemName: batteryIcon(for: c.batteryPercent))
+                                    .foregroundStyle(batteryColor(for: c.batteryPercent))
+                            }
+                        }
+                    }
+                    HStack {
+                        Button("Test Rumble") {
+                            dm_switch2_test_rumble(Int32(c.player))
+                        }
+                        .font(.footnote)
+                        .buttonStyle(.bordered)
+
+                        Spacer()
+
+                        Button("Disconnect", role: .destructive) {
+                            dm_switch2_disconnect(Int32(c.player))
+                            refresh()
+                        }
+                        .font(.footnote)
+                        .buttonStyle(.bordered)
+                    }
+                }
+            }
+
+            HStack {
+                if isScanning {
+                    ProgressView().controlSize(.small)
+                    Text("Scanning for controllers…")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Stop") {
+                        dm_switch2_scan_stop()
+                        refresh()
+                    }
+                    .font(.footnote)
+                } else {
+                    Text("Bluetooth LE Ready")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Scan") {
+                        dm_switch2_scan_start()
+                        refresh()
+                    }
+                    .font(.footnote)
+                }
+            }
+
+            Button("Pairing Guide…") { showGuide = true }
+                .sheet(isPresented: $showGuide) {
+                    PairingGuideView()
+                }
+        } header: {
+            Text("Nintendo Switch 2 Controllers")
+        } footer: {
+            Text("Hold the Sync button on your controller until player LEDs sweep to pair. If already paired, press any button to connect.")
+        }
+        .onAppear {
+            dm_switch2_scan_start()
+            refresh()
+        }
+        .task {
+            while !Task.isCancelled {
+                refresh()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    private func refresh() {
+        var raw = [dm_switch2_controller_info](repeating: dm_switch2_controller_info(), count: 8)
+        let count = dm_switch2_get_controllers(&raw, 8)
+        var items: [Switch2ControllerItem] = []
+        for i in 0..<Int(count) {
+            let r = raw[i]
+            let name = withUnsafeBytes(of: r.name) { String(cString: $0.baseAddress!.assumingMemoryBound(to: CChar.self)) }
+            let serial = withUnsafeBytes(of: r.serial) { String(cString: $0.baseAddress!.assumingMemoryBound(to: CChar.self)) }
+            items.append(Switch2ControllerItem(
+                name: name.isEmpty ? "Pro Controller 2" : name,
+                serial: serial,
+                player: Int(r.player),
+                batteryPercent: Int(r.battery_percent),
+                batteryMv: Int(r.battery_mv),
+                rssi: Int(r.rssi),
+                connected: r.connected
+            ))
+        }
+        controllers = items
+        isScanning = dm_switch2_is_scanning()
+    }
+
+    private func batteryIcon(for percent: Int) -> String {
+        if percent >= 90 { return "battery.100" }
+        if percent >= 65 { return "battery.75" }
+        if percent >= 40 { return "battery.50" }
+        if percent >= 15 { return "battery.25" }
+        return "battery.0"
+    }
+
+    private func batteryColor(for percent: Int) -> Color {
+        if percent > 20 { return .green }
+        if percent > 10 { return .orange }
+        return .red
+    }
+}
+
 private struct LauncherView: View {
     @ObservedObject var m: LauncherModel
     let play: () -> Void
@@ -123,6 +351,7 @@ private struct LauncherView: View {
                             }
                         }
                     }
+                    ControllersSection()
                     Section {
                         Button("Reset to tested defaults") { m.reset() }
                             .disabled(!m.changed)

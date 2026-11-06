@@ -4,17 +4,17 @@
 # Source of query answers: the answer table in the game profile, dm/games/<id>/shader_facts.tsv (dmsh_facts.py) - texture types, vertex attribute / fragment output component types, compute thread group size and shared memory.
 # Usage: dmsh_build.py <Switch package dir> <output cache dir> [key...] (no keys = all); build output is actually written to <output cache dir>/b-<chain version>/ (same for IOSOUT), for the chain version see dmsh_chain.py.
 # A full build (no keys) also stamps both directories with the game and the digest of its profile inputs (inputs.tsv) and writes the profile's c1_full.tsv and cb_extent.tsv (c1_guard.py, cb_extent.py)
-# from its Mac outputs. One output directory per game: the chain version is the same for every game   Environment: DM_GAME=game profile (required, dm/games/<id>), XLATE=path to the translation tool (default the in-repo dmsh_xlate_bin), DMSH_CAS=content-addressed cache dir (default <output cache dir>/cas), DMSH_PREFILL=Mac library root[=iOS library root] (separated by :, their b-*/ go into the MSL-keyed compile cache first; sibling b-*/ always do), J=concurrency
+# from its Mac outputs. One output directory per game: the chain version is the same for every game   Environment: DM_GAME=game profile (required, dm/games/<id>), XLATE=path to the translation tool (default the in-repo dmsh_xlate_bin), DMSH_CAS=the compile cache, one file (shader_cache.py; default <output cache dir>/cas.db), DMSH_PREFILL=Mac library root[=iOS library root] (separated by :, their b-*/ go into the MSL-keyed compile cache first; sibling b-*/ always do), J=concurrency
 # Build output: <key>_b.metallib, <key>_b.json (replay reflection, including drv_reads, the runtime read offsets into driver segments c0 / c2), <key>_b.metal (MSL)
 # Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately);
 # a [RED] line per shader that built but lost something (shader_regressions.report_losses), which does not change the exit status
-import inspect, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, collections, threading, concurrent.futures as cf
+import atexit, inspect, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, collections, threading, concurrent.futures as cf
 import dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_pch, dmsh_vin, dmsh_pull, dmsh_side, dmsh_mesh, dmsh_ampere, shader_regressions, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_pch, dmsh_vin, dmsh_pull, dmsh_side, dmsh_mesh, dmsh_ampere, shader_regressions, shader_cache, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
 _bad = tool_lock.check_tools()
 if _bad: sys.exit('\n'.join('[RED] translation chain tools do not match the lock file: ' + b for b in _bad) + '\n(if the tools changed, run tool_lock.py --update-lock and commit the lock file; if the translator just was not rebuilt, rebuild it)')
 CHAIN = dmsh_chain.version(); out = os.path.join(out, 'b-' + CHAIN)
@@ -33,6 +33,7 @@ TARGETS = {t.strip() for t in (os.environ.get('DMSH_TARGETS') or ('mac,ios' if I
 if not TARGETS or not TARGETS <= {'mac', 'ios'}: sys.exit(f'[RED] DMSH_TARGETS takes mac and/or ios: {",".join(sorted(TARGETS)) or "empty"}')
 if 'ios' in TARGETS and not IOSOUT: sys.exit('[RED] DMSH_TARGETS asks for iOS libraries without IOSOUT')
 if 'ios' not in TARGETS: IOSOUT = None   # every side library, cache, cleanup and stamp follows the same selection
+IOS_PULL = os.environ.get('DMSH_IOS_PULL') != '0'   # DMSH_IOS_PULL=0: no iOS pulling libraries, when nothing in the app reads them (the NSP script's ios_wants_pulling). The reflection is the same: its 'pull' comes from the variant, not from the compile
 if IOSOUT:
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../ios/tools')); import ios_metal
     IOSOUT = os.path.join(IOSOUT, 'b-' + CHAIN); os.makedirs(IOSOUT, exist_ok=True)
@@ -162,6 +163,37 @@ def tg_spill(msl):
         ln = re.sub(r'(?<!mem_device \| )mem_flags::mem_threadgroup\b', 'mem_flags::mem_device | mem_flags::mem_threadgroup', ln)
         lines[n] = ln
     return '\n'.join(lines), total
+# textureGatherOffsets: spirv-cross's spvGatherConstOffsets passes coffsets[i] from a loop to gather(), whose offset Metal takes only as a constant expression. At -O1 the loop stays and
+# the compiler takes it anyway: the gathers then read texels at offsets that differ between lanes and between runs, with no error. agl's NDSR upscaler builds its input tile this way, so
+# some of its lanes saw zeros and the network drew dotted rows in smooth areas of the picture (the same frame, three pictures). Each call becomes its four gathers, offsets written out
+GATHER4 = 'template<typename T> static inline __attribute__((always_inline)) vec<T, 4> dm_gather4(T a, T b, T c, T d) { return vec<T, 4>(a, b, c, d); }\n'
+def gather_offsets(msl):
+    if not re.search(r'\bspvGather(Compare)?ConstOffsets\(spvDesc|= spvGather(Compare)?ConstOffsets\(', msl): return msl
+    arrays = {}
+    for m in re.finditer(r'\bconstant spvUnsafeArray<int2, 4> (\w+) = spvUnsafeArray<int2, 4>\(\{ (.*?) \}\);', msl):
+        off = re.findall(r'int2\([^()]*\)', m.group(2))
+        if len(off) != 4: raise ValueError('gather offsets: unexpected array ' + m.group(0)[:120])
+        arrays[m.group(1)] = off
+    out, i = [], 0
+    for m in re.finditer(r'\bspvGather(Compare)?ConstOffsets\((?=[^)]*?\w)', msl):
+        if m.start() < i or msl[m.end():m.end() + 6] == 'const ': continue   # the wrappers' own definitions
+        depth, args, cur, j = 1, [], '', m.end()
+        while depth:
+            ch = msl[j]; j += 1
+            depth += {'(': 1, ')': -1}.get(ch, 0)
+            if depth == 0 or (ch == ',' and depth == 1): args.append(cur.strip()); cur = ''
+            else: cur += ch
+        cmp = bool(m.group(1)); base = 3 if cmp else 4
+        if len(args) <= base or args[2] not in arrays: raise ValueError('gather offsets: unexpected call ' + msl[m.start():j][:160])
+        tex, smp, off, rest = args[0], args[1], arrays[args[2]], ', '.join(args[base:])
+        tail = '' if cmp else ', ' + args[3]
+        fn = 'gather_compare' if cmp else 'gather'
+        out += [msl[i:m.start()], 'dm_gather4(' + ', '.join(f'{tex}.{fn}({smp}, {rest}, {o}{tail}).w' for o in off) + ')']
+        i = j
+    out.append(msl[i:])
+    msl = ''.join(out)
+    k = msl.index('\n', msl.index('using namespace metal;')) + 1
+    return msl[:k] + GATHER4 + msl[k:]
 def hmma_msl(msl):
     m = re.search(r'\n(\w+) dmsh_hmma16816_f16\(([^)]*)\)\n\{', msl)
     if not m: return msl
@@ -232,7 +264,8 @@ def border_emu(msl):
         twin = f'spvDescriptorSet0.{m.group(2)}{abi.BORDER_TWIN}'
         msl = msl[:m.start()] + f'dm_bs({msl[m.start():i]}, spvDescriptorSet0.{abi.BORDER_MEMBER}, {bit[m.group(2)]}u, spvDescriptorSet0.{m.group(1)}, {twin}, {args})' + msl[i:]
     return msl.replace('using namespace metal;\n', 'using namespace metal;\n' + BORDER_HELPERS, 1)
-CAS =os.environ.get('DMSH_CAS', os.path.join(cache_root, 'cas'))
+STORE = shader_cache.Store(os.environ.get('DMSH_CAS', os.path.join(cache_root, 'cas.db')))
+atexit.register(STORE.close)   # folds its log into the one file
 CAS_LOCKS, CAS_LOCKS_GUARD = {}, threading.Lock()
 PRE_STATS = collections.Counter()
 # -fpreserve-invariance: vertex positions are marked [[invariant]], but without this flag Metal does not promise that two different shaders compute the same expression to the same value; on Maxwell the same multiply-adds always agree.
@@ -304,8 +337,8 @@ def shader_key(key, name, rec):
 def pair_keyed(digest, pixel_digests):   # a vertex shader's key with its pixel shaders' keys (vs_pad)
     return hashlib.sha256((digest + '\0' + ','.join(pixel_digests)).encode()).hexdigest()
 
-def cache_meta_path(key): return os.path.join(CAS, 'index', key + '.json')
-def cache_path(digest): return os.path.join(CAS, 'shader', digest)
+def cache_meta_path(key): return f'index/{key}.json'
+def cache_path(digest): return f'shader/{digest}'
 CAS_USED = '_b_cas.txt'   # in the Mac library directory b-<V>/: the cache_path digests of its last full build, one per line
 
 def cache_outputs(key, digest, cached=False):
@@ -315,10 +348,10 @@ def cache_outputs(key, digest, cached=False):
         # fin(), paired vertex padding and the profile tables also need these on an iOS-only cache hit.
         required = [key + '_b.json'] + ([key + '_b.metal'] if label == 'mac' else [])
         if label in TARGETS: required.append(key + '_b.metallib')
-        base = os.path.join(root, label) if cached else directory
+        have = STORE.names(f'{root}/{label}/') if cached else set()
         names = required + [key + s + ext for s in ('_bg0', '_bg1', '_bg2', '_bg3', '_bg4', '_bgv', '_bl0', '_bl1', '_bl3') for ext in ('.metallib', '.json', '.metal')
                             if (label == 'mac' or ext != '.metal') and (ext != '.metallib' or label in TARGETS)]
-        found = [n for n in names if os.path.exists(os.path.join(base, n))]
+        found = [n for n in names if (f'{root}/{label}/{n}' in have if cached else os.path.exists(os.path.join(directory, n)))]
         if not all(n in found for n in required): return None
         files[label] = found
     return root, files
@@ -330,19 +363,21 @@ def restore_cache(key, digest):
     for label, names in files.items():
         directory = out if label == 'mac' else IOSOUT
         for name in names:
-            src = os.path.join(root, label, name); dst = os.path.join(directory, name)
+            src = f'{root}/{label}/{name}'; dst = os.path.join(directory, name)
             if name.endswith('.json'):
+                data = STORE.get(src)
+                if data is None: return False   # pruned by another build since the look above: a miss, which builds it
                 tmp = dst + '.tmp-' + str(os.getpid()) + '-' + str(threading.get_ident())
-                with open(tmp, 'wb') as f: f.write(re.sub(rb'("chain"\s*:\s*")[^"]*"', rb'\g<1>' + CHAIN.encode() + b'"', open(src, 'rb').read(), count=1))
+                with open(tmp, 'wb') as f: f.write(re.sub(rb'("chain"\s*:\s*")[^"]*"', rb'\g<1>' + CHAIN.encode() + b'"', data, count=1))
                 os.replace(tmp, dst)
-            else: clone(src, dst)
+            elif not STORE.to_file(src, dst): return False
     return True
 
 def cache_lookup(key, digest, rule_fp, code_fp):
     with CAS_LOCKS_GUARD: lock = CAS_LOCKS.setdefault(('shader', key), threading.Lock())
     with lock:
         if restore_cache(key, digest): PRE_STATS['hit'] += 1; return True, 'hit'
-        old = json.load(open(cache_meta_path(key))) if os.path.exists(cache_meta_path(key)) else None
+        old = json.loads(STORE.get(cache_meta_path(key)) or b'null')
         if old and old.get('code_fp') != code_fp: reason = 'code fingerprint changed: all rebuilt'
         elif old and old.get('rule_fp') != rule_fp: reason = 'rule changed'
         else: reason = 'new key'
@@ -354,15 +389,15 @@ def publish_cache(key, digest, rule_fp, code_fp):
     found = cache_outputs(key, digest)
     if not found: return
     root, files = found
-    for label, names in files.items():
-        d = os.path.join(root, label); os.makedirs(d, exist_ok=True)
-        for name in names: clone(os.path.join(out if label == 'mac' else IOSOUT, name), os.path.join(d, name))
-        for name in names:
-            if name.endswith('.json'):
+    with STORE.batch():   # a stop leaves the whole entry or none of it
+        for label, names in files.items():
+            for name in names:
                 src = os.path.join(out if label == 'mac' else IOSOUT, name)
-                value = json.load(open(src)); value.pop('fetch', None); value.pop('vin', None); value.pop('pull', None); value.pop('alpha', None); value.pop('logic', None)   # the side libraries are made again from the restored MSL (fetch_finish, vin_finish, pull_finish, alpha_finish, logic_finish)
-                atomic_json(os.path.join(d, name), value)
-    atomic_json(cache_meta_path(key), {'digest': digest, 'rule_fp': rule_fp, 'code_fp': code_fp})
+                if name.endswith('.json'):
+                    value = json.load(open(src)); value.pop('fetch', None); value.pop('vin', None); value.pop('pull', None); value.pop('alpha', None); value.pop('logic', None)   # the side libraries are made again from the restored MSL (fetch_finish, vin_finish, pull_finish, alpha_finish, logic_finish)
+                    STORE.put(f'{root}/{label}/{name}', json.dumps(value, ensure_ascii=False, indent=1).encode())
+                else: STORE.put_file(f'{root}/{label}/{name}', src)
+        STORE.put(cache_meta_path(key), json.dumps({'digest': digest, 'rule_fp': rule_fp, 'code_fp': code_fp}).encode())
 
 BF_STATS = collections.Counter()
 
@@ -375,24 +410,25 @@ def bf_digest(msl, key):
     h.update(b'\0bf-want\0' + (b'1' if key in BF_WANT else b'0'))
     return h.hexdigest()
 
-def bf_cache_root(digest): return os.path.join(CAS, 'variant', digest)
+def bf_cache_root(digest): return f'variant/{digest}'
 
 def bf_cache_restore(key, digest, fmeta, fmsl):
     root = bf_cache_root(digest)
     names = ['metal'] + (['mac.metallib'] if 'mac' in TARGETS else []) + (['ios.metallib'] if IOSOUT else [])
-    if not all(os.path.exists(os.path.join(root, n)) for n in names): return False
-    clone(os.path.join(root, 'metal'), fmsl)
-    if 'mac' in TARGETS: clone(os.path.join(root, 'mac.metallib'), os.path.join(out, key + '_bf.metallib'))
-    if IOSOUT: clone(os.path.join(root, 'ios.metallib'), os.path.join(IOSOUT, key + '_bf.metallib'))
+    if not all(STORE.has(f'{root}/{n}') for n in names): return False
+    STORE.to_file(f'{root}/metal', fmsl)
+    if 'mac' in TARGETS: STORE.to_file(f'{root}/mac.metallib', os.path.join(out, key + '_bf.metallib'))
+    if IOSOUT: STORE.to_file(f'{root}/ios.metallib', os.path.join(IOSOUT, key + '_bf.metallib'))
     BF_STATS['hit'] += 1
     return True
 
 def bf_cache_publish(digest, fmsl, maclib, ioslib, fmeta):
-    root = bf_cache_root(digest); os.makedirs(root, exist_ok=True)
-    clone(fmsl, os.path.join(root, 'metal'))
-    if maclib: clone(maclib, os.path.join(root, 'mac.metallib'))
-    if IOSOUT: clone(ioslib, os.path.join(root, 'ios.metallib'))
-    atomic_json(os.path.join(root, 'fetch.json'), fmeta)
+    root = bf_cache_root(digest)
+    with STORE.batch():
+        STORE.put_file(f'{root}/metal', fmsl)
+        if maclib: STORE.put_file(f'{root}/mac.metallib', maclib)
+        if IOSOUT: STORE.put_file(f'{root}/ios.metallib', ioslib)
+        STORE.put(f'{root}/fetch.json', json.dumps(fmeta, ensure_ascii=False, indent=1).encode())
 
 def write_refl(key, refl):
     for target, d in (('mac', out),) + ((('ios', IOSOUT),) if IOSOUT else ()):
@@ -463,7 +499,7 @@ def pull_finish(key, full, refl):
     msl = os.path.join(w, key + '_bp.metal'); open(msl, 'w').write(v)
     try:
         if 'mac' in TARGETS: MTL.compile('mac', msl, libs[0])
-        if IOSOUT: MTL.compile('ios', msl, libs[1])
+        if IOSOUT and IOS_PULL: MTL.compile('ios', msl, libs[1])
     except subprocess.CalledProcessError as e:
         PULL_STATS['failed'] += 1; print(f'[RED] {key}: the pulling library does not compile ({str(e)[:120]}): its pipelines are always built for the draw\'s vertex layout', flush=True)
         drop(); return refl
@@ -776,14 +812,16 @@ def const_sampler(name):
 def decode_ubo_tex(name):
     """Bindless texture: the handle is written by the game into its own uniform buffer (fp_t_cb7_2A = c[7] word 0x2A). Returns (texture: (uniform slot, byte offset), sampler: (slot, offset));
     handle type 0 = combined handle (one 32-bit word: low 20 bits texture ID, high 12 bits sampler ID), 1 = the sampler handle is in another word (its slot is the high 16 bits of slots − 1). This game's whole library uses only type 0 (1850 shaders)
-    Type 3: the sampler is a constant ID (Monster Hunter Rise: a texture handle at c[5] word 0x28 with sampler 0x104); the sampler part is then ('id', ID)"""
+    Type 3: the sampler is a constant ID (Monster Hunter Rise: a texture handle at c[5] word 0x28 with sampler 0x104); the sampler part is then ('id', ID).
+    Type 1 with the sampler word in the driver table: the texture handles are the game's, one separate sampler the shader's own (Kirby Air Riders: array<depth2d<float>, 32> fp_t2ds_cb196614_10570000, c[6] and the
+    word at c2 byte 0x570, about 5,700 pixel and compute shaders, its shadows and lights); the sampler part is then ('c2', byte offset)"""
     m = re.match(r'[a-z]+_t\w*?_cb(\d+)_([0-9A-F]+)', name)
     if not m: return None
     slots, h = int(m.group(1)), int(m.group(2), 16)
     tb = slots & 0xffff; sb = (slots >> 16) - 1 if slots >> 16 else tb
     o0, o1, ty = h & 0x3fff, (h >> 14) & 0x3fff, h >> 28
-    if not 3 <= tb <= 16 or ty not in (0, 1, 3) or (ty == 1 and not 3 <= sb <= 16): return None
-    return (tb - 3, o0 * 4), (('id', o1) if ty == 3 else (sb - 3, o1 * 4) if ty else (tb - 3, o0 * 4))
+    if not 3 <= tb <= 16 or ty not in (0, 1, 3) or (ty == 1 and sb != 2 and not 3 <= sb <= 16): return None
+    return (tb - 3, o0 * 4), (('id', o1) if ty == 3 else ('c2', o1 * 4) if ty and sb == 2 else (sb - 3, o1 * 4) if ty else (tb - 3, o0 * 4))
 
 def decode_ubo_img(name):
     """An image whose handle the game keeps in its own uniform buffer (<stage>_i_cb<n>_<word>_<format>: Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]). Returns (uniform slot, byte offset)"""
@@ -805,19 +843,32 @@ def c2_array(name, ty):
 
 POOL_MIN = 33   # arrays at least this long are pools: Program.cs sizes Ryujinx's handle fallback by the pools, the vendored BindlessElimination keeps 32-entry slot arrays (NvnSlotArrayLength)
 
+POOL_MARK = """template<typename P> static inline __attribute__((always_inline)) uint dm_pool_mark(constant P* p, uint i)
+{
+    device atomic_uint* w = reinterpret_cast<device atomic_uint*>(p->seen) + (i >> 5);
+    uint b = 1u << (i & 31u);
+    if (!(atomic_load_explicit(w, memory_order_relaxed) & b)) atomic_fetch_or_explicit(w, b, memory_order_relaxed);
+    return i;
+}
+
+"""
+
 def pool_arrays(src):
     """Ryujinx's arrays for a texture handle it cannot trace to one slot (<stage>_<t|s>_cb0_40000000, indexed by the handle's texture / sampler ID), sized to the whole ID ranges
-    (Program.cs QueryTextureArrayLengthFromPool, 2^20 and 2^12) → a pointer to a pool the replay keeps per element type (nvn_mtl.m pool_gpu): struct spvPool_<name> { uint n;
-    array<element, 1> e; }, read as (&e[0])[min(index, n)], n being the highest ID the host filled. The struct declares one element: Metal's argument encoder walks every element
+    (Program.cs QueryTextureArrayLengthFromPool, 2^20 and 2^12) → a pointer to a pool the replay keeps per element type (nvn_mtl.m pool_gpu): struct spvPool_<name> { uint n; ulong seen;
+    array<element, 1> e; }, read as (&e[0])[min(index, n)], n being the highest ID the host filled. A read of a texture pool also sets the ID's bit in the bitmap at seen (dm_pool_mark), as which IDs a
+    shader reads is known only here: the host makes those textures instead of all of them. The word is read first: a bit is set once, so nearly every read costs a load, not an atomic. The struct declares one element: Metal's argument encoder walks every element
     of a declared array (AGX IndirectArgumentLayoutGen2::parseArray), and for 2^20 textures that took 57 ms and 66 MB per encoder (9.7 GB in Mario Party Superstars' prewarm);
     the elements are 8-byte resource IDs, so the pointer reaches the rest (checked on the GPU). Mario Party Superstars' characters read their light textures' handles from a
     storage buffer (6,370 pixel shaders). The argument IDs are then renumbered in member order, a pointer taking one and any other array its length, as the host lays the buffer out.
-    Buffer textures and images keep their 32-entry slot arrays (tex_dyn_slots). ValueError on a use of a pool array the rewrite does not cover"""
+    Buffer textures and images keep their 32-entry slot arrays (tex_dyn_slots). ValueError on a use of a pool array the rewrite does not cover.
+    An array of the handles in one of the game's uniform buffers (Ryujinx's texture array from a buffer, as long as a 64 KB buffer's handles, Program.cs QueryTextureArrayLengthFromBuffer) takes
+    the same form: the host keeps a table of that buffer's handles, as long as its last handle (nvn_mtl.m htab_gpu), so the element index is unchanged and only the textures the table names are made"""
     body = re.search(r'struct spvDescriptorSetBuffer0\s*\{(.*?)\};', src, re.S)
     if not body: return src
     pools = {}
     def to_pointer(m):
-        if not m.group(4).endswith('_cb0_40000000') or int(m.group(3)) < POOL_MIN: return m.group(0)
+        if int(m.group(3)) < POOL_MIN or not (m.group(4).endswith('_cb0_40000000') or decode_ubo_tex(m.group(4).removesuffix('Smplr'))): return m.group(0)
         pools[m.group(4)] = (m.group(2), int(m.group(3)))
         return f'{m.group(1)}constant spvPool_{m.group(4)}* {m.group(4)} [[id('
     members = re.sub(r'^(\s*)array<(.+), (\d+)> (\w+) \[\[id\(', to_pointer, body.group(1), flags=re.M)
@@ -830,7 +881,8 @@ def pool_arrays(src):
         aid += int(a.group(1)) if a else 1
         return out
     members = re.sub(r'^(\s*)(.+?)\s+(\w+)\s*\[\[id\((\d+)\)((?:\s*,\s*\w+\(\d+\))*)\]\];', renumber, members, flags=re.M)
-    structs = ''.join(f'struct spvPool_{nm}\n{{\n    uint n;\n    array<{el}, 1> e;\n}};\n\n' for nm, (el, n) in pools.items())
+    structs = ''.join(f'struct spvPool_{nm}\n{{\n    uint n;\n    ulong seen;\n    array<{el}, 1> e;\n}};\n\n' for nm, (el, n) in pools.items())
+    if any(el != 'sampler' for el, _ in pools.values()): structs = POOL_MARK + structs
     i = body.start()
     src = src[:i] + structs + src[i:body.start(1)] + members + src[body.end(1):]
     for nm in pools:   # base.name[index] → (&base.name->e[0])[min(uint(index), base.name->n)], the index taken with its brackets balanced
@@ -842,10 +894,18 @@ def pool_arrays(src):
                 if j >= len(src): raise ValueError(f'{nm}: unbalanced index')
                 depth += {'[': 1, ']': -1}.get(src[j], 0); j += 1
             base = f'{m.group(1)}.{nm}'
-            out.append(src[pos:m.start()] + f'(&{base}->e[0])[min(uint({src[m.end():j - 1]}), {base}->n)]'); pos = j
+            index = f'min(uint({src[m.end():j - 1]}), {base}->n)'
+            out.append(src[pos:m.start()] + f'(&{base}->e[0])[{index if pools[nm][0] == "sampler" else f"dm_pool_mark({base}, {index})"}]'); pos = j
         src = ''.join(out) + src[pos:]
-        left = len(re.findall(r'\b%s\b' % re.escape(nm), src)) - 2 * len(re.findall(r'\.%s->e\[0\]\)\[' % re.escape(nm), src)) - 1   # each read names it twice, the member once (spvPool_<name> is one word)
+        names = 2 if pools[nm][0] == 'sampler' else 3   # each read names it twice, and once more in a texture's mark; the member once (spvPool_<name> is one word)
+        left = len(re.findall(r'\b%s\b' % re.escape(nm), src)) - names * len(re.findall(r'\.%s->e\[0\]\)\[' % re.escape(nm), src)) - 1
         if left: raise ValueError(f'{nm}: {left} uses of the pool array the rewrite does not cover')
+    # The mark stores to memory, so Metal would test this fragment shader against depth after running it: every covered pixel is shaded (no hidden surface removal) and the depth it tests differs by
+    # an ulp from a prepass's, which fails an EQUAL pass along contours. The mark is the host's own, so it must not change when the test runs: early, unless the shader discards or writes depth, which
+    # a test before it would get wrong (then it stays late, and only costs the shading)
+    own = src.replace(POOL_MARK, '')   # what the shader does itself: a store of its own keeps the test where the game's own shader has it
+    if any(el != 'sampler' for el, _ in pools.values()) and not re.search(r'\bdiscard_fragment\b|\[\[\s*depth\(|\[\[\s*sample_mask\s*\]\]|\[\[\s*stencil\s*\]\]|\.write\(|\batomic_\w+_explicit\b|^\s*device\s', own, re.M):
+        src = re.sub(r'^(?<!\]\] )fragment\s', '[[early_fragment_tests]] fragment ', src, flags=re.M)
     return src
 
 def reflect(key, stage, msl, res):
@@ -860,11 +920,14 @@ def reflect(key, stage, msl, res):
     for m in members:
         ty, nm, aid = m.group(1).strip(), m.group(2), int(m.group(3))
         e = {'msl_name': nm, 'msl_type': ty, 'arg_id': aid}
-        pool = re.search(r'struct spvPool_%s\s*\{\s*uint n;\s*array<(.+), \d+> e;' % re.escape(nm), msl) if ty == f'constant spvPool_{nm}*' else None
+        pool = re.search(r'struct spvPool_%s\s*\{\s*uint n;\s*ulong seen;\s*array<(.+), \d+> e;' % re.escape(nm), msl) if ty == f'constant spvPool_{nm}*' else None
         if ty == 'sampler' and nm.endswith('Smplr' + abi.BORDER_TWIN):   # a sampler's twin (border_emu): the same sampler, its bit in the block in the order of the twins
             nm = nm[:-len(abi.BORDER_TWIN)]; e['border_bit'] = sum(1 for b in binds if 'border_bit' in b)
         if nm == abi.BORDER_MEMBER: e.update(kind=abi.KIND_BORDER)
         elif nm in dmsh_geometry.HELPERS: e.update(kind=abi.KIND_GEOMETRY, reg=dmsh_geometry.HELPERS[nm])
+        elif pool and not nm.endswith('_cb0_40000000'):   # a table of a uniform buffer's handles (pool_arrays): reg and off as an array of them, below
+            ut, us = decode_ubo_tex(nm.removesuffix('Smplr'))   # pyright: ignore[reportGeneralTypeIssues]  (not None: pool_arrays made this pool only for a name it decodes)
+            e.update(kind=abi.KIND_SAMP_HTAB if pool.group(1) == 'sampler' else abi.KIND_TEX_HTAB, elem=pool.group(1), reg=ut[0], off=ut[1], **({'soff': us[1], 'sreg': abi.SREG_C2} if us[0] == 'c2' else {}))
         elif pool: e.update(kind=abi.KIND_SAMP_POOL if pool.group(1) == 'sampler' else abi.KIND_TEX_POOL, elem=pool.group(1))   # see pool_arrays
         elif nm == 'support_buffer': e.update(kind=abi.KIND_SUPPORT)
         elif re.fullmatch(r'[a-z]+_c(\d+)', nm):
@@ -874,8 +937,9 @@ def reflect(key, stage, msl, res):
             e.update(kind=abi.KIND_SBUF, index=int(re.fullmatch(r'[a-z]+_s(\d+)', nm).group(1)))
         elif decode_ubo_tex(nm[:-5] if nm.endswith('Smplr') else nm):   # bindless: the handle is in a uniform buffer (reg = uniform slot, off = byte offset)
             ut, us = decode_ubo_tex(nm[:-5] if nm.endswith('Smplr') else nm)
-            other = () if us[0] == 'id' or us == ut else (ut, us)   # handle type 1: the word of the other half, which the host ORs in (the compiler puts texture and sampler words in either order)
-            if nm.endswith('Smplr'): e.update(kind=abi.KIND_SAMP_ID, reg=us[1]) if us[0] == 'id' else e.update(kind=abi.KIND_SAMP_UBO, reg=us[0], off=us[1], **({'soff': ut[1], 'sreg': ut[0]} if other else {}))
+            other = () if us[0] in ('id', 'c2') or us == ut else (ut, us)   # handle type 1: the word of the other half, which the host ORs in (the compiler puts texture and sampler words in either order)
+            if nm.endswith('Smplr') and us[0] == 'c2': e.update(kind=abi.KIND_SAMP_UBO, reg=ut[0], off=ut[1], soff=us[1], sreg=abi.SREG_C2)
+            elif nm.endswith('Smplr'): e.update(kind=abi.KIND_SAMP_ID, reg=us[1]) if us[0] == 'id' else e.update(kind=abi.KIND_SAMP_UBO, reg=us[0], off=us[1], **({'soff': ut[1], 'sreg': ut[0]} if other else {}))
             elif 'texture_buffer' in ty: e.update(kind=abi.KIND_TBUF_UBO, reg=ut[0], off=ut[1])
             else: e.update(kind=abi.KIND_TEX_UBO, reg=ut[0], off=ut[1], **({'soff': us[1], 'sreg': us[0]} if other else {}))
         elif decode_ubo_img(nm):
@@ -1376,6 +1440,8 @@ def finish(key, w, j, c1):
     try: src = dmsh_atomic.check_msl(src)
     except ValueError as e: return 'image atomic MSL failed', str(e), None
     src = precise(src)   # min / max / clamp with Maxwell's NaN results (see precise)
+    try: src = gather_offsets(src)   # four gathers instead of a wrapper's loop over their offsets (see gather_offsets)
+    except ValueError as e: return 'gather offsets rewrite failed', str(e)[:160], None
     try: src = hmma_msl(src)   # Ampere HMMA through simdgroup_matrix (see hmma_msl)
     except ValueError as e: return 'HMMA rewrite failed', str(e)[:160], None
     try: src = pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)
@@ -1465,7 +1531,7 @@ for _d in [out] + ([IOSOUT] if IOSOUT else []):
     if (not want or STAMP_BEFORE != INPUTS) and os.path.exists(os.path.join(_d, dmsh_chain.STAMP)): os.unlink(os.path.join(_d, dmsh_chain.STAMP))
     if not want and os.path.exists(os.path.join(_d, CAS_USED)): os.unlink(os.path.join(_d, CAS_USED))   # written again at the end, with the stamp
 w = tempfile.mkdtemp(prefix='dmsh_', dir=os.environ.get('WORK'))
-MTL = dmsh_mtlcache.Cache(os.path.join(CAS, 'metallib'), {'mac': ('macosx', MAC_RECORD, mac_compile), **({'ios': ('iphoneos', ios_metal.RECORD, ios_metal.compile)} if IOSOUT else {})}, w)
+MTL = dmsh_mtlcache.Cache(STORE, {'mac': ('macosx', MAC_RECORD, mac_compile), **({'ios': ('iphoneos', ios_metal.RECORD, ios_metal.compile)} if IOSOUT else {})}, w)
 # first take the libraries earlier chain versions left on disk: the b-*/ beside the output (iOS: the folder of the same name) and the roots DMSH_PREFILL lists
 for _spec in [cache_root + ('=' + os.path.dirname(IOSOUT) if IOSOUT else '')] + [x for x in os.environ.get('DMSH_PREFILL', '').split(os.pathsep) if x]:
     _mac, _, _ios = _spec.partition('=')

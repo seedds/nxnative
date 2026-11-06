@@ -148,6 +148,11 @@ t_ms_slot: t_ms_slot.m $(MTL_T_DEP)
 .PHONY: check_t_ms_slot
 check_t_ms_slot: t_ms_slot
 	MTL_DEBUG_LAYER=1 ./t_ms_slot
+t_cbs_fault: t_cbs_fault.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_cbs_fault.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_cbs_fault
+check_t_cbs_fault: t_cbs_fault
+	./t_cbs_fault
 t_tex_fit_root: t_tex_fit_root.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_tex_fit_root.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_tex_fit_root
@@ -359,6 +364,9 @@ check_t_linear_readback: t_linear_readback
 	MTL_DEBUG_LAYER=1 ./t_linear_readback
 t_pfv: t_pfv.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pfv.m $(MTL_T_SRC) $(FW)
+t_int_float_view: t_int_float_view.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_int_float_view.m $(MTL_T_SRC) $(FW)
+check_t_int_float_view: RUN_ENV = MTL_DEBUG_LAYER=1
 check_t_pfv: RUN_ENV = MTL_DEBUG_LAYER=1
 t_integer_blend: t_integer_blend.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_integer_blend.m $(MTL_T_SRC) $(FW)

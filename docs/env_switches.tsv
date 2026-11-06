@@ -1,6 +1,6 @@
 name	class	meaning
 DM_AB	diagnostic	`=<frames>` splits the run into phases of that many frames and alternates every switch set to `ab` (on in the odd phases); logs an `[ab]` line per phase with GPU and frame time and attachment traffic
-DM_ALIAS_SIZE	diagnostic	`=<bytes>` gives the guest an alias region of that size instead of the profile's (at least 256 MB, whole host pages; the heap and stacks stay as they are): `0x1000000000`, the Switch's 64 GB, holds what a game reserves unchanged; the NSP script's address region check sets it (Mac only: an iPhone has no room)
+DM_ALIAS_SIZE	diagnostic	`=<bytes>` gives the guest an alias region of that size instead of the platform's, which is at least the Switch's 64 GB on the Mac and the profile's `mem_alias` on an iPhone (at least 256 MB, whole host pages; the heap and stacks stay as they are): the profile's value reproduces an iPhone's address space on the Mac, as the NSP script's heap check does; its address region check sets 64 GB (Mac only: an iPhone has no room)
 DM_ALIAS_WINDOWS	diagnostic	`=<MB>` logs every 30 s how much of each window of that size in the alias region is mapped (windows aligned to their size in absolute addresses)
 DM_ALLOW_OTHER_METAL	switch	`1` lets `own_compilers.py` build the shader libraries with a Metal compiler other than the one in `dmsh_chain.lock` (it stops otherwise, GitHub issue #242); the NSP script sets it for `--allow-other-metal`
 DM_AOC_DIR	path	Folder of add-on content: one numbered subfolder per DLC index holding that DLC's RomFS, reported by `aoc` and mounted read-only; the app, the Mac launcher and the NSP script set it when the build has DLC
@@ -62,6 +62,10 @@ DM_GL_STUBS	diagnostic	`=1` gives every GL function the layer lacks a stub that 
 DM_GPU_CAPTURE	diagnostic	`=<frame>[:<frames>]` or `gpu:<ms>[:<after frame>]` writes a Metal GPU trace of those frames for Xcode's Metal debugger; can be set while running through `DM_CTL`
 DM_GPU_CAPTURE_DIR	path	Folder for `DM_GPU_CAPTURE`'s traces (default `gpu_captures/` in the working directory)
 DM_GPU_CAPTURE_KEEP	diagnostic	Before each GPU capture, prunes the capture folder's `dm_*.gputrace` entries so that the newest `KEEP - 1` stay (default 2)
+DM_GUEST_FILE	switch	`1` puts the guest's memory in sparse, unlinked files mapped shared over the guest block, `0` keeps it anonymous (`hle_svc.c`): file pages are out of `phys_footprint`, the figure iOS ends an app at, and the kernel can write them out when it needs the room. Unset: on iOS when the game's memory pool is larger than the room to the memory limit at start (the log's `[mem] guest memory` line says which), off on the Mac. The guest stays anonymous, with a `[RED]` line, when the files cannot be made, or the disk has less than `DM_GUEST_FILE_MIN_FREE` free (on the Mac that plus 8 GB)
+DM_GUEST_FILE_CHUNK	switch	`=<size>` (whole MB, K / M / G; default 1G, at least 64M, at most 1024 files): the size of each guest file; one file when it is not under the block's size. The stall at the system's periodic flush grows with the file (on a 16 GB M5 Mac up to 148 ms with one 20 GB file, 4 ms with 20 files of 1 GB)
+DM_GUEST_FILE_DIR	path	Folder for `DM_GUEST_FILE`'s files (default the user's temporary folder; the iOS app sets it to `NSTemporaryDirectory()`)
+DM_GUEST_FILE_MIN_FREE	switch	`=<size>` (whole MB, K / M / G; default 5G, `0` never): with `DM_GUEST_FILE=1`, the game is stopped (exit code 87) when the guest files' disk has less free space than that
 DM_GUEST_SPAWN_TEST	diagnostic	`=1` runs a self-test before `nnMain`: a host-started guest thread does SDK malloc / free and locks an `nn::os` mutex, and the result is logged; `=2` also keeps a resident thread
 DM_HID_LOG	diagnostic	`1` logs the HID button usage number of each button pressed on a raw HID gamepad (`pad_hid_mac.h`), to write a `DM_HID_MAP`
 DM_HID_MAP	switch	`=<map>` such as `A=1,B=2,X=4,Y=5`: which HID button usage presses each Switch button on a raw HID gamepad (names A B X Y LS RS L R ZL ZR PLUS MINUS LEFT UP RIGHT DOWN; default 8BitDo's D-input numbering by position, `pad_hid.h`); Mac only
@@ -100,7 +104,7 @@ DM_MOTION_GAIN	switch	`=<gain>`: how fast the orientation is pulled toward the m
 DM_MOTION_HID	switch	On the Mac, `0` disables the passive Switch Pro Controller HID motion fallback (`motion_pro_mac.h`); enabled by default when exactly one physical Pro and one GameController Pro can use the same player slot; usable GameController motion takes priority
 DM_MOTION_LOG	diagnostic	`=1` logs player 1's mapped motion sample once a second per source (phone / GameController / controller HID; acceleration in G, gyro in revolutions/s), for checking the axes: flat and still reads acc 0 0 -1
 DM_MOVIE_TRACE	diagnostic	When set, the movie decoder logs every call with its thread and decoder (by default the first 12 calls, then every 2^k-th)
-DM_MSL_DIR	path	Parent folder of the shader libraries: NVN loads from `b-<chain version>/` beneath it, Vulkan from `vk/`, GL from `gl/`; the app and the Mac launcher set it
+DM_MSL_DIR	path	Parent folder of the shader libraries: NVN loads from `b-<chain version>/` or the one file `b-<chain version>.img` beneath it, Vulkan from `vk/`, GL from `gl/`; the app and the Mac launcher set it
 DM_NICK	switch	The account nickname the game sees (default `Player`)
 DM_NRO	switch	`0` turns off loading of the NRO modules the game's NRR files register (on by default): every `nn::ro::LoadModule` then fails
 DM_NRO_CAPTURE	diagnostic	folder: a `nn::ro::LoadModule` with no rewritten copy writes the image to `<folder>/<SHA-256>.nro` and ends the run (the NSP script's capture of an NRO the game decodes at run time)
@@ -121,6 +125,7 @@ DM_NVN_CPUPROF	diagnostic	1 records CPU wall/time/instruction totals by renderer
 DM_NVN_CSH_PRESCAN	diagnostic	`0` runs the compute-hoist scan at every pass's first draw even when no dispatch follows (as before; for timing)
 DM_NVN_CS_HOIST	switch	`0` makes a compute dispatch between the draws of a pass end it (on by default: the dispatch runs ahead of the pass when that changes nothing the draws before it read)
 DM_NVN_CUT	switch	`=<draws>`: the replay commits its command buffer every that many draws, between passes (default 64; `0` one command buffer per submission, except the cut after a buffer-to-texture copy)
+DM_NVN_CUT_BUSY	switch	`=0`: a segment boundary commits whatever the GPU is doing (the default commits only when earlier work has reported back, keeping the boundary's GPU timestamp otherwise)
 DM_NVN_DEFER	switch	`0` turns off the deferred pass merging of the TBDR optimizations (which run only with `DM_NVN_TBDR=1`)
 DM_NVN_DEFER_AB	diagnostic	`=1` keeps the deferred pass merging (with `DM_NVN_TBDR=1`) off until the second screenshot has been written, then turns it on, to compare the pictures with and without it
 DM_NVN_DEPTHOVR	diagnostic	`=<fragment shader key prefix>,…`: those draws compare depth with `ALWAYS`; with `DM_NVN_HILITE`, tells "the depth test rejects every fragment" from "nothing rasterizes"
@@ -279,11 +284,11 @@ DM_RESOURCE_AOC	path	The add-on content folder the iOS build copies into the app
 DM_RESOURCE_BUILD	switch	Package version (for example `v327680`), written to `Gen/resources.env` by `gen_resources.py`; with `DM_COPY_ROMFS=NO` the copy phase puts it in the `build=` field of the app's `romfs.id`
 DM_RESOURCE_CHAIN_H	path	Path of `dm/gfx/nvn/dmsh_chain.h`, written to `Gen/resources.env` by `build_ipa.sh`; the Xcode copy phase (`stage_resources.sh`) stops when the prepared shaders are not of its chain version
 DM_RESOURCE_MARKER	path	A file under the RomFS, written to `Gen/resources.env` by `build_ipa.sh`, that the Xcode copy phase (`stage_resources.sh`) checks for before copying the game files
-DM_RESOURCE_MSLDIR	path	Name of the shader library folder (`b-<chain>`), written to `Gen/resources.env` by `build_ipa.sh`; the Xcode copy phase copies the shaders to `msl/<name>` in the app
+DM_RESOURCE_MSLDIR	path	Name of the shader library folder (`b-<chain>`), written to `Gen/resources.env` by `build_ipa.sh`; the Xcode copy phase copies the shaders to `msl/<name>` in the app, or `msl/<name>.img` for an NVN game's one file
 DM_RESOURCE_PROGRAMS	path	The table of a game's programs' files for the Xcode build phase (`stage_resources.sh`; `build_ipa.sh` writes it)
 DM_RESOURCE_PSO	path	Folder of the offline Metal pipeline archive (empty for none), written to `Gen/resources.env` by `build_ipa.sh`; the Xcode copy phase copies it to `<App>/pso`
 DM_RESOURCE_ROMFS	path	RomFS folder, written to `Gen/resources.env` by `build_ipa.sh`; the Xcode copy phase (`stage_resources.sh`) copies it into the app's `romfs`
-DM_RESOURCE_SHADERS	path	iOS shader library folder, written to `Gen/resources.env` by `build_ipa.sh`; the Xcode copy phase (`stage_resources.sh`) copies it into the app's `msl/b-<chain>`
+DM_RESOURCE_SHADERS	path	iOS shader library folder or one file, written to `Gen/resources.env` by `build_ipa.sh`; the Xcode copy phase (`stage_resources.sh`) copies it into the app's `msl/b-<chain>` or `msl/b-<chain>.img`
 DM_RESOURCE_TITLE	switch	Game profile title ID, written to `Gen/resources.env` by `gen_resources.py`; with `DM_COPY_ROMFS=NO` the copy phase puts it in the `title=` field of the app's `romfs.id`
 DM_RESOURCE_VERSION	switch	Display version, written to `Gen/resources.env` by `gen_resources.py`; with `DM_COPY_ROMFS=NO` the copy phase puts it in the `version=` field of the app's `romfs.id`
 DM_RES_CHECK	diagnostic	`=1` prints the first 40 textures or buffers a shader reaches through its argument block that are not in the residency set (textures attributed to their parent allocation)
@@ -317,7 +322,7 @@ DM_SPIN_LIST	diagnostic	`=1` makes `patch_nso.py` print every guest poll loop it
 DM_SPIN_POLL	switch	`=<µs>`: how long a spin-gate wait polls before it sleeps with the yield back-off (default 2000; `0` yields on every pass)
 DM_SVC	diagnostic	`=1` logs memory SVCs (`SetHeapSize`, `MapMemory`, `Map`/`UnmapPhysicalMemory`) with their addresses and sizes
 DM_SYMCHECK	diagnostic	`=1` checks every hashed module symbol lookup against a linear search and logs a red line for each mismatch
-DM_TBUF_ALIGN	diagnostic	`=<bytes>` uses that value as the linear-texture alignment for buffer textures when it is larger than the device's `minimumLinearTextureAlignmentForPixelFormat`: a Mac can then reproduce a phone's larger alignment (a 64-byte one fails the buffers a device with 64 bytes cannot view), to check `tbuf_as_2d`'s aligned-row copy
+DM_TBUF_ALIGN	diagnostic	`=<bytes>` uses that value as the linear-texture alignment when it is larger than the device's `minimumLinearTextureAlignmentForPixelFormat`, for buffer textures and for linear textures on a pool's buffer: a Mac can then reproduce a phone's larger alignment (a 64-byte one fails the buffers and linear textures a device with 64 bytes cannot view), to check `tbuf_as_2d`'s aligned-row copy and the upload of unaligned linear textures (`linear_fit`)
 DM_TEAM_ID	switch	Apple team ID for the per-game Xcode project, used when `--team-id` / `TEAM_ID` is not given; `build_ipa.sh` uses the placeholder `0000000000` (unsigned) when unset
 DM_TEMP	path	Temporary storage folder (default `$DM_ROOT/run/platform/temp`); stand-in system data goes in `<DM_TEMP>_sysdata`; the Mac launcher, the iOS app and the NSP script set it
 DM_TEST_ARCHIVE_CONSTANTS	test	Use optional function constants in the synthetic pipeline archive restart fixture

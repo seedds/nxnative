@@ -51,9 +51,9 @@ def entries(src):
     return ents
 
 
-def file_identity(path):
+def file_identity(path):   # not st_dev: macOS numbers a volume when it mounts it, so a reboot moved the Data volume from 16777234 to 16777232 and a 24 GB image was packed again, 8 minutes over SMB
     s = os.stat(path)
-    return [s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns]
+    return [s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns]
 
 
 def source_digest(src, ents):

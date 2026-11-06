@@ -82,6 +82,7 @@ Game-specific findings. The general host changes they led to are listed under [F
 
 ## Found on this game
 
+- [The Mac's alias region is the Switch's 64 GB](../../../docs/reference/memory.md#the-macs-alias-region-is-the-switchs-64-gb) (2026-11-05, #639): the long-session Blood Moon reached +2.25 of the iPhone-sized 2.38 GB. Whether this ends it is open until a long session runs on the larger region.
 - [A work folder holds millions of small files](../../../docs/reference/packing.md#a-work-folder-holds-millions-of-small-files): 8,893,028 files and 509 GB here.
 - [A game file whose extension is in capitals is not found](../../../docs/reference/packing.md#a-game-file-whose-extension-is-in-capitals-is-not-found) (2026-11-04, LNPANDY/NX2Apple#554): its `.NSP` stopped the build on a Mac.
 - [macOS Game Mode holds the GPU at its lowest clock](../../../docs/reference/frame-rate.md#macos-game-mode-holds-the-gpu-at-its-lowest-clock) (2026-11-04, #349): the Mac's fall to 30 fps at 338 MHz; a new Mac app opts out, a re-packed one needs the Game Overlay switch once.

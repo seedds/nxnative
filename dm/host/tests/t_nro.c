@@ -4,6 +4,7 @@ void dm_thread_service_connect(void) {}   // threads started so far have nothing
 #include "../hle_ro.c"
 #include <assert.h>
 #include <stddef.h>
+void mtl_present_screen(uint32_t w, uint32_t h) { (void)w; (void)h; }   // loader.c: a screen taller than 16:9; no renderer here
 
 struct dm_flags g_flag;
 uint64_t now_ns(void) { return 0; }

@@ -76,6 +76,10 @@ class Prereqs(unittest.TestCase):
     def test_glslang_is_a_prerequisite(self):   # README installs it; an OpenGL game would otherwise stop only after its run-time capture
         with self.assertRaisesRegex(nsp.BuildError, r'glslangValidator \(brew install glslang\)'): self.check(which=lambda t, **k: None if t == 'glslangValidator' else '/x')
 
+    def test_zbic_is_a_prerequisite(self):   # README installs it; a game with ZBIC modules would otherwise stop only at the rewrite, after its whole RomFS is unpacked (Ocarina of Time: 23 minutes)
+        with mock.patch.object(nsp, '_importable', lambda m: m != 'zbic'), self.assertRaisesRegex(nsp.BuildError, r'missing modules: zbic \(pip install .*zbic'):
+            nsp.check_prereqs({'PATH': '/usr/bin'}, Path('/nonexistent'), True)
+
     def test_capstone_5_passes(self):
         with mock.patch.dict(sys.modules, capstone=fake_capstone(5)): nsp.check_capstone()
 

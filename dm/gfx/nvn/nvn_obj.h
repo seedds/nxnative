@@ -58,7 +58,7 @@ typedef struct { uint32_t magic, nstage; NVNshaderData sd[6]; uint64_t serial; }
 
 typedef struct { uint32_t magic, fenced; uint64_t fence; } sync_t;   /* fenced 2: by WindowAcquireTexture */                           FITS(sync_t, NVNsync);
 typedef struct { const pool_t *pool; int64_t off; } ev_builder_t;                             FITS(ev_builder_t, NVNeventBuilder);
-typedef struct { uint32_t magic; volatile uint32_t *val; } ev_t;                              FITS(ev_t, NVNevent);
+typedef struct { uint32_t magic; volatile uint32_t *val; const pool_t *pool; int64_t off; } ev_t; FITS(ev_t, NVNevent);   // pool / off: EventGetMemoryPool / Offset
 
 typedef struct { NVNdevice *dev; void *native; int32_t ntex, interval; NVNtexture *tex[4]; } win_builder_t;
 FITS(win_builder_t, NVNwindowBuilder);

@@ -22,11 +22,49 @@ class Alu(Translated):
         return self.translate(pre + body + inst(*waiting(STORE)) + inst(*EXIT), shared=0x1000)
 
 
+class FloatRed(Translated):
+    """RED.F32.FTZ.RN (0x98e, type 3 at bits 73..76, add): agl's scene analysis sums luminance with it (Ocarina of Time's probe_analyze 6e28359aa3558f61). Dropped with a log line, the exposure the CPU
+    reads back from those buffers was several times too bright. A compare-and-swap loop on the word"""
+    RED = (0x000fe20000000000 | 3 << 9, 0x0000000608ff098e)   # RED.F32.FTZ.RN [R8], R6: (control and type, opcode and registers)
+
+    def test_adds_in_a_loop(self):
+        msl = self.translate(b''.join(inst(*waiting(i)) for i in (s2r_tid(6), s2r_tid(8), s2r_tid(9), self.RED)) + inst(*EXIT))
+        self.assertIn('atomic_compare_exchange_weak_explicit', msl)
+        self.assertNotIn('atomic_fetch_add', msl)
+
+
+class DeadChannel(Translated):
+    """An image read whose .x is dead and whose .y is used: the optimizer's RemoveNode followed the read as if it were removed, so the chain computing its coordinate lost its last use and went, and the
+    shader read an uninitialized variable (Ocarina of Time's wind solver 04942f42cae10d0f, the encodings below are from it: its velocity field oscillated and the grass flickered at 10 Hz)"""
+    Y_MINUS_1 = (0x000fe40007ffe0ff, 0xffffffff01077810)   # IADD R7, R1, -1
+    SULD = (0x000f6200001e0300, 0x6000080006047b97)        # SULD.XY R4, [R6, R7]: R5 is .y
+    STORE_Y = (STORE[0], 0x0000080509008388)               # STS.U32 [R9 * 16 + 8], R5
+
+    def test_coordinate_survives(self):
+        msl = self.translate(b''.join(inst(*waiting(i)) for i in (s2r_tid(1), s2r_tid(6), s2r_tid(9), self.Y_MINUS_1, self.SULD, self.STORE_Y)) + inst(*EXIT), shared=0x1000)
+        self.assertRegex(msl, r'\+ \(-1\)|- 1\b')
+        self.assertNotRegex(msl, r'(?m)^\s+int (_\d+);\n\s+int _\d+ = \1;')
+
+
 class Brev(Alu):
     BREV = (0x001e240000000000, 0x0000001300067301)   # BREV R6, R19 (Pokémon Pokopia 6e8db04c25a53d8c, whose destination is R3)
 
     def test_reverses_the_bits(self):
         self.assertIn('reverse_bits', self.kept(self.BREV, srcs=(19,)))
+
+
+class F2ip(Alu):
+    """F2IP.U8 (0x243): Ocarina of Time's FoliageShader 83df46a0b1b379b4 packs colour with it, its foliage mesh shaders one byte at a time"""
+    PAIR = (0x000fc400000004ff, 0x000000152c067243)   # F2IP.U8 R6, R44, R21
+    ONE = (0x000fe4000000c4ff, 0x00000009ff067243)    # F2IP.U8.TRUNC R6, RZ, R9
+
+    def test_packs_two_bytes(self):
+        msl = self.kept(self.PAIR, srcs=(44, 21))
+        self.assertIn('rint(', msl)
+        self.assertIn('255.0', msl)
+
+    def test_truncates(self):
+        self.assertIn('trunc(', self.kept(self.ONE, srcs=(9,)))
 
 
 class HalfImmediate(Alu):

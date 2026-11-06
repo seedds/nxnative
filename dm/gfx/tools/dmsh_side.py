@@ -5,9 +5,9 @@
 # metallib gives every entry point a complete module, whether or not the body is shared, and two things in the host's path grow with what one file holds: metal-tt compiles every unspecialized
 # entry point of a library, so a base library with them made the pipeline archive twice as large, and the base library is what every shader loads. So the compile's one library is
 # cut in two: <key>_b with the plain entry points, <key>_bx with the others, which the host loads on first need (nvn_mtl.m at_fn, lo_fn). <key>_b.metal stays the plain source, which is
-# what every other tool reads. cut() takes functions out of the file as `metallib --function-name` does (byte-identical for one function), and unlike that option takes several. The Metal cache
+# what every other tool reads. cut() takes functions out of the file as `metallib --function-name` does (byte-identical for one function), and unlike that option takes several; a fetch set makes it three libraries (<key>_b, <key>_bx, <key>_bf). The Metal cache
 # keeps the cut libraries, not the whole one: a change to cut() changes what the cache holds, so it needs a new dmsh_mtlcache.FORMAT.
-# Usage: unit(msl) → (the compile unit, {'alpha': entry point names, 'logic': entry point names}), or (None, {'why': why}); cut(library bytes, names of the side library's functions) → (base bytes, side bytes)
+# Usage: unit(msl) → (the compile unit, {'alpha': entry point names, 'logic': entry point names}), or (None, {'why': why}); cut(library bytes, names of the side library's functions, fetch=None) → (base bytes, side bytes) or (base, side, fetch)
 import re, struct
 import dmsh_alpha, dmsh_logic
 
@@ -62,7 +62,14 @@ def unit(msl) -> tuple[str | None, dict]:
     thin = [a for a in alpha.values() if a] + [o[0] for o in logic.values()]; targets = set().union(*(o[1] for o in logic.values()))
     src, at = [], es[0]['start']
     for e in es:
-        src += [msl[at:e['start']], f'static {e["ret"]} dm_body_{e["name"]}({e["decl"]})', msl[e['head']:e['end']]]; at = e['end']
+        already = re.search(
+            r'static(?:\s+__attribute__\(\((?:always_inline)\)\))?\s+' + re.escape(e['ret']) + r'\s+dm_body_' + re.escape(e['name']) + r'\s*\(',
+            msl[:e['start']])
+        if already:
+            src += [msl[at:e['start']]]   # fs_uint already emitted dm_body_main0; keep it and do not extract the thin wrapper again
+        else:
+            src += [msl[at:e['start']], f'static {e["ret"]} dm_body_{e["name"]}({e["decl"]})', msl[e['head']:e['end']]]
+        at = e['end']
     plain = [f'{e["attr"]}fragment {e["ret"]} {e["name"]}({", ".join(e["params"])})\n{{\n    return dm_body_{e["name"]}({e["args"]});\n}}\n' for e in es]
     return msl[:es[0]['start']] + dmsh_alpha.HELPER + dmsh_logic.HELPER + dmsh_logic.constants(targets) + ''.join(src) + msl[at:] + '\n' + ''.join(plain + thin), {'alpha': list(alpha), 'logic': list(logic)}
 
@@ -102,8 +109,10 @@ def _take(b, keep, fns, tail, sections):
     return bytes(head) + listing + tail + newpub + newpriv + code
 
 
-def cut(lib, side):
-    """(the library without the functions named in side, the library of those), from the layout pso_offline.functions reads. Raises ValueError on a file it does not know"""
+def cut(lib, side, fetch=None):
+    """(the library without the functions named in side, the library of those), from the layout pso_offline.functions reads.
+    When fetch is a set of names, a third library of those is returned: (base, side, fetch). Base excludes both side and fetch.
+    Raises ValueError on a file it does not know"""
     try:
         if lib[:4] != b'MTLB' or struct.unpack_from('<Q', lib, 0x10)[0] != len(lib): raise ValueError('not a whole Metal library')
         sections = struct.unpack_from('<QQQQQQQQ', lib, 0x18); fo = sections[0]; po = sections[2]; bo, bs = sections[6:8]
@@ -111,8 +120,16 @@ def cut(lib, side):
         n = struct.unpack_from('<I', lib, fo)[0]; p = fo + 4; fns, names = [], []
         for _ in range(n):
             size = struct.unpack_from('<I', lib, p)[0]; t = _tags(lib, p + 4, p + size); fns.append(t); names.append(dict(t)[b'NAME'].rstrip(b'\0').decode()); p += size
-        missing = set(side) - set(names)
+        side = set(side); fetch = set(fetch) if fetch is not None else None
+        missing = (side | (fetch or set())) - set(names)
         if missing: raise ValueError(f'no function {sorted(missing)[0]}')
+        if fetch is not None and side & fetch: raise ValueError(f'a function in both side and fetch: {sorted(side & fetch)[0]}')
         tail = lib[p:po]   # what lies between the function list and the public metadata stays
-        return tuple(_take(lib, keep, fns, tail, sections) for keep in ([i for i, x in enumerate(names) if x not in side], [i for i, x in enumerate(names) if x in side]))
+        groups = [
+            [i for i, x in enumerate(names) if x not in side and (fetch is None or x not in fetch)],
+            [i for i, x in enumerate(names) if x in side],
+        ]
+        if fetch is not None:
+            groups.append([i for i, x in enumerate(names) if x in fetch])
+        return tuple(_take(lib, keep, fns, tail, sections) for keep in groups)
     except (struct.error, KeyError) as e: raise ValueError(f'an unreadable library ({e})') from e

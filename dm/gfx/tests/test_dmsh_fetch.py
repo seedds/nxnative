@@ -3,7 +3,7 @@ spellings (a product with 1.0 / w either way round, a quotient) and not when a n
 clip → screen varying ((x + w) / 2, (w − y) / 2, ·, w) of gl_Position in every vertex entry point, after branches, and not with a flipped y, another w, an assignment in a branch,
 an early return or a uniform coefficient; a sample at gl_FragCoord.xy [/ render scale] times a uniform is marked 'frag_pos' with its uniform references, and not at another
 position, scale or uniform; the variants compile for the Mac and the iPhone. With --fixture <dir>, writes t_feedback.m's tile-read shaders: fb_vs.metal, fb_fs.metal, the variant
-library fedcba9876543210_bf.metallib and facts.json (the vertex shader's screen varyings and the fragment shader's calls), and the pixel-position shader fb_pos.metal with its
+library fedcba9876543210_bf.metallib (folded form: entry main0_f) and facts.json (the vertex shader's screen varyings and the fragment shader's calls), and the pixel-position shader fb_pos.metal with its
 variant fedcba9876543211_bf.metallib and pos.json"""
 import json, pathlib, subprocess, sys, tempfile, unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'tools'))
@@ -149,6 +149,26 @@ fragment main0_out main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[b
 """
 POS_KEY = 'fedcba9876543211'
 
+# Output-mapping-only: no rewritable sample, but the host still needs a readable-tile version so colour
+# outputs can move (bf_want.tsv / om_only_ok). Magenta on color(0); main0_f remaps it through OM_0_k.
+FS_OM = """#include <metal_stdlib>
+using namespace metal;
+
+struct main0_out
+{
+    float4 m_46 [[color(0)]];
+};
+
+fragment main0_out main0()
+{
+    main0_out out = {};
+    out.m_46 = float4(1.0, 0.0, 1.0, 1.0);
+    return out;
+}
+"""
+OM_KEY = 'fedcba9876543212'
+
+
 
 def compile_lib(src, root, name, sdk='macosx'):   # → the library path; CalledProcessError with the compiler's message
     msl = root / (name + '.metal'); msl.write_text(src); air = root / (name + '.' + sdk + '.air'); lib = root / (name + '.metallib')
@@ -174,6 +194,8 @@ class ProjectiveSample(unittest.TestCase):
         v, _ = dmsh_fetch.variant(FS, BINDINGS)
         self.assertIn('(FX_0 == 0 ? fb0 : ', v)
         self.assertIn('float4 fb0 [[color(0), function_constant(FB_0)]]', v)
+        self.assertIn('fragment main0_out_f main0_f(', v)
+        self.assertIn('static __attribute__((always_inline)) main0_out dm_body_main0(', v)
 
     def test_not_rewritten(self):
         for why, src in (('a name assigned twice', FS.replace('    float2 _309', '    _69 = 0.5;\n    float2 _309')),
@@ -240,16 +262,59 @@ class ScreenVaryings(unittest.TestCase):
         self.assertEqual(dmsh_fetch.screen_varyings(early), [], 'an early return')
 
 
+class OutputMappingOnly(unittest.TestCase):
+    def test_refused_without_the_flag(self):
+        v, meta = dmsh_fetch.variant(FS_OM, [])
+        self.assertIsNone(v)
+        self.assertEqual(meta, 'no rewritable sample')
+
+    def test_folded_with_the_flag(self):
+        v, meta = dmsh_fetch.variant(FS_OM, [], om_only_ok=True)
+        self.assertIsNotNone(v)
+        self.assertEqual(meta['calls'], [])
+        self.assertEqual(meta['outputs'], [{'color': 0, 'type': 'float4'}])
+        self.assertIn('fragment main0_out_f main0_f(', v)
+        self.assertIn('static __attribute__((always_inline)) main0_out dm_body_main0(', v)
+        self.assertIn('constant bool OM_0_0 [[function_constant(64)]]', v)
+        self.assertIn('constant bool OM_0_1 [[function_constant(65)]]', v)
+        self.assertIn('if (OM_0_1) out.m_46_at1 = tmp.m_46;', v)
+        self.assertNotIn('constant int FX_0', v)
+
+    def test_compiles_on_both_platforms(self):
+        v, _ = dmsh_fetch.variant(FS_OM, [], om_only_ok=True)
+        with tempfile.TemporaryDirectory() as d:
+            for sdk in ('macosx', 'iphoneos'):
+                with self.subTest(sdk=sdk):
+                    try: compile_lib(v, pathlib.Path(d), 'om_' + sdk, sdk)
+                    except subprocess.CalledProcessError as e: self.fail(e.stderr)
+
+
+def _check_folded_lib(lib):
+    import pso_offline
+    fns = pso_offline.functions(lib)
+    if 'main0_f' not in fns:
+        raise SystemExit(f'fixture: {lib.name} has no main0_f (entries {sorted(fns)})')
+    if not fns['main0_f']:
+        raise SystemExit(f'fixture: {lib.name} main0_f declares no function constants')
+    if fns.get('main0') is True:
+        raise SystemExit(f'fixture: {lib.name} base main0 unexpectedly declares function constants')
+
+
 def fixture(out):
     out = pathlib.Path(out); out.mkdir(parents=True, exist_ok=True)
     v, meta = dmsh_fetch.variant(FS, BINDINGS)
     (out / 'fb_vs.metal').write_text(VS); (out / 'fb_fs.metal').write_text(FS)
-    compile_lib(v, out, 'v').rename(out / f'{FS_KEY}_bf.metallib')
+    lib = compile_lib(v, out, 'v'); _check_folded_lib(lib); lib.rename(out / f'{FS_KEY}_bf.metallib')
     (out / 'facts.json').write_text(json.dumps({'screen': dmsh_fetch.screen_varyings(VS), 'calls': meta['calls'], 'outputs': meta['outputs']}))
     v, meta = dmsh_fetch.variant(FS_POS, BINDINGS)
     (out / 'fb_pos.metal').write_text(FS_POS)
-    compile_lib(v, out, 'vp').rename(out / f'{POS_KEY}_bf.metallib')
+    lib = compile_lib(v, out, 'vp'); _check_folded_lib(lib); lib.rename(out / f'{POS_KEY}_bf.metallib')
     (out / 'pos.json').write_text(json.dumps({'calls': meta['calls'], 'outputs': meta['outputs']}))
+
+    v, meta = dmsh_fetch.variant(FS_OM, [], om_only_ok=True)
+    (out / 'fb_om.metal').write_text(FS_OM)
+    lib = compile_lib(v, out, 'vom'); _check_folded_lib(lib); lib.rename(out / f'{OM_KEY}_bf.metallib')
+    (out / 'om.json').write_text(json.dumps({'calls': meta['calls'], 'outputs': meta['outputs']}))
 
 
 if __name__ == '__main__':

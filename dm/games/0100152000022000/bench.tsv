@@ -1,0 +1,7 @@
+# Benchmark routes for scripts/bench.py: name, DM_KEYS (seconds or frame times from host start), measuring window start and length (s), description.
+# PROVISIONAL: Mario Kart 8 Deluxe has no previously registered bench.tsv. Keys are taken from the profile README's run/race.sh
+# (a save past the Mii pick: title → 50cc Grand Prix at Mario Kart Stadium, then hold accelerate). Frame-timed at 60 fps as documented.
+# Window starts a few seconds after f4300 (~71.7 s), when the race should be loaded. Adjust after a probe run if load time moved on this Mac.
+# Default save: <id>_build/run/save (must be a save past the Mii pick, as race.sh used).
+title-race-start	f960:L+R~0.3,f1260:A,f1500:A,f1740:A,f2000:A,f2240:A,f2400:A,f2560:A,f2800:A,f3040:A,f4300:A~70	75	55	PROVISIONAL: from a save past the Mii pick, title (L+R) through Grand Prix menus into the race, then hold accelerate. Measuring window after the race should be up.
+probe	f960:L+R~0.3,f1260:A,f1500:A,f1740:A,f2000:A,f2240:A,f2400:A,f2560:A,f2800:A,f3040:A	25	55	PROVISIONAL: title through the Grand Prix menus toward race start, for finding the load time (screenshots)

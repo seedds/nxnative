@@ -327,8 +327,38 @@ PRE_STATS = collections.Counter()
 # -O1: the front end's -O2 (CorrelatedValuePropagation, then SimplifyCFG) folds the translated shaders' repeated tests of one value into switches whose cases jump past their own join.
 # Apple's GPU backend then exceeds its control-flow ID budget ("Max Unstruct ID 758 ... exceeds supported limit", a note, not an error) and falls back to a slower lowering:
 # Odyssey's alRenderMaterialUber took 25 minutes and 17.3 MB of GPU code, 31 s and 1.3 MB at -O1. Ordinary shaders come out within a few percent either way (the backend optimizes again)
-MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance']
-MAC_RECORD = ' '.join(MAC_METAL) + '; xcrun -sdk macosx metallib'
+def _mac_metal_tools():
+    """Resolve metal and metallib once (`xcrun -sdk macosx -f`), and set SDKROOT so an absolute-path launch matches `xcrun -sdk macosx` (otherwise the driver targets the host OS, not the SDK)."""
+    metal = subprocess.run(['xcrun', '-sdk', 'macosx', '-f', 'metal'], capture_output=True, text=True, check=True).stdout.strip()
+    metallib = subprocess.run(['xcrun', '-sdk', 'macosx', '-f', 'metallib'], capture_output=True, text=True, check=True).stdout.strip()
+    if not os.environ.get('SDKROOT'):
+        os.environ['SDKROOT'] = subprocess.run(['xcrun', '-sdk', 'macosx', '--show-sdk-path'], capture_output=True, text=True, check=True).stdout.strip()
+    return metal, metallib
+# DMSH_METAL_DIRECT=air (default): absolute-path metal -c plus absolute-path metallib via posix_spawn, no xcrun per compile.
+#   MAC_RECORD stays the xcrun string so the Metal compile cache still hits when the metallib bytes are unchanged (air is only a launch method).
+# DMSH_METAL_DIRECT=xcrun, 0, or off: the original xcrun metal -c + xcrun metallib path.
+# DMSH_METAL_DIRECT=1 or oneshot: one posix_spawn of metal by absolute path, no -c, writes the metallib (the driver runs air-lld). Changes bytes; not the default.
+_XCRUN_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance']
+_XCRUN_RECORD = ' '.join(_XCRUN_METAL) + '; xcrun -sdk macosx metallib'
+_RAW_DIRECT = os.environ.get('DMSH_METAL_DIRECT', 'air')
+if _RAW_DIRECT in ('0', 'xcrun', 'off'):
+    _METAL_DIRECT = 'xcrun'
+elif _RAW_DIRECT in ('1', 'oneshot'):
+    _METAL_DIRECT = 'oneshot'
+else:
+    _METAL_DIRECT = 'air'
+if _METAL_DIRECT in ('air', 'oneshot'):
+    _METAL_BIN, _METALLIB_BIN = _mac_metal_tools()
+    if _METAL_DIRECT == 'air':
+        MAC_METAL = [_METAL_BIN, '-c', '-O1', '-fpreserve-invariance']
+        MAC_RECORD = _XCRUN_RECORD
+    else:
+        MAC_METAL = [_METAL_BIN, '-O1', '-fpreserve-invariance']
+        MAC_RECORD = ' '.join(MAC_METAL) + '; oneshot-metallib'
+else:
+    _METAL_BIN = _METALLIB_BIN = None
+    MAC_METAL = _XCRUN_METAL
+    MAC_RECORD = _XCRUN_RECORD
 # -fbracket-depth: the front end stops at 256 nested brackets ("bracket nesting level exceeded maximum of 256"). Ocarina of Time's compute shaders 1f78730053feb036 and e172bd7ec218ab8e
 # (3.5 MB of MSL each) nest 259 deep in one expression and were left out. A source within the default limit compiles to the same bytes with it (checked on macOS and iOS), so, like the
 # precompiled header, the records do not name it and the Metal cache keeps its libraries. ios_metal.DEPTH is the same
@@ -337,8 +367,13 @@ METAL_DEPTH = ['-fbracket-depth=1024']
 # before the MSL compile cache can check their compiler. Keep override builds separate there too.
 METAL_FP = dmsh_mtlcache.compiler_id('macosx') + ('\0iphoneos\0' + dmsh_mtlcache.compiler_id('iphoneos') if IOSOUT else '')
 def mac_compile(msl, air, lib):   # same interface as ios_metal.compile; the precompiled header and METAL_DEPTH change no output, so MAC_RECORD does not name them (dmsh_pch.py)
+    if _METAL_DIRECT == 'oneshot':
+        dmsh_pch.compile(MAC_METAL + METAL_DEPTH, msl, lib); return
     dmsh_pch.compile(MAC_METAL + METAL_DEPTH, msl, air)
-    subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', air, '-o', lib], check=True)
+    if _METAL_DIRECT == 'air':
+        dmsh_pch.spawn_run([_METALLIB_BIN, air, '-o', lib], check=True)
+    else:
+        subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', air, '-o', lib], check=True)
 # The NVN driver's constant segments have one layout in every game, which dm/gfx/nvn/dmsh_abi.h holds for the host and this build (through dmsh_abi.py); nvn_mtl.m fills them the same way at run time.
 #   c2 C2_TEX + 8 r: handles bound with nvnCommandBufferBindTexture (combined texture and sampler), slot r. The driver has 32 such slots, but a game may bind higher ones, whose words lie in the
 #     image table (Hades II binds slot 34, and no image), so a texture instruction's handle anywhere below the separate texture table names a combined slot. In the image
@@ -550,44 +585,13 @@ def write_refl(key, refl):
         atomic_json(os.path.join(d, key + '_b.json'), MTL.with_compiler(target, refl))
 
 def fetch_finish(key, src, refl):
+    """Record fetch metadata already produced with the pixel shader's one compile (ps_libraries).
+    The separate _bf compile and variant-cache path are gone: main0_f is cut from the same library as _b / _bx."""
     if refl['stage'] != 'ps': return refl
-    # Those with rewritable samples get variants as before; those without get an output-mapping-only variant, and only for keys in the list (bf_want.tsv, produced by the host planner)
-    fv, fmeta = dmsh_fetch.variant(src, refl['bindings'], om_only_ok=key in BF_WANT)
-    if not fv:
+    if 'fetch' not in refl:
         for path in (os.path.join(out, key + '_bf.metallib'), os.path.join(out, key + '_bf.metal')) + ((os.path.join(IOSOUT, key + '_bf.metallib'),) if IOSOUT else ()):
             try: os.unlink(path)
             except FileNotFoundError: pass
-        write_refl(key, refl)
-        return refl
-    BF_STATS['generated'] += 1
-    fmsl = os.path.join(out, key + '_bf.metal')
-    digest = bf_digest(fv, key)
-    with CAS_LOCKS_GUARD: lock = CAS_LOCKS.setdefault(('variant', digest), threading.Lock())
-    with lock:
-        try:
-            if not bf_cache_restore(key, digest, fmeta, fmsl):
-                BF_STATS['miss'] += 1
-                open(fmsl, 'w').write(fv)
-                fair = fmsl[:-6] + '.air'; flib = os.path.join(out, key + '_bf.metallib') if 'mac' in TARGETS else None
-                try:
-                    if flib:
-                        tmp_flib = flib + '.tmp-' + str(os.getpid())
-                        mac_compile(fmsl, fair, tmp_flib)
-                        os.replace(tmp_flib, flib)
-                    ilib = None
-                    if IOSOUT:
-                        ilib = os.path.join(IOSOUT, key + '_bf.metallib')
-                        ios_metal.compile(fmsl, fmsl[:-6] + '.ios.air', ilib + '.tmp')
-                        os.replace(ilib + '.tmp', ilib)
-                except subprocess.CalledProcessError:
-                    return refl
-                BF_STATS['compile'] += 1
-                bf_cache_publish(digest, fmsl, flib, ilib, fmeta)
-        finally:
-            for path in (fmsl, fmsl[:-6] + '.air', fmsl[:-6] + '.ios.air'):
-                try: os.unlink(path)
-                except FileNotFoundError: pass
-    refl['fetch'] = fmeta
     write_refl(key, refl)
     return refl
 
@@ -654,27 +658,58 @@ def vin_finish(key, full, refl):
     VIN_STATS['inputs'] += len(shadows); VIN_STATS['float only'] += sum(1 for s in shadows if 'sint' not in s and 'uint' not in s)
     return refl
 
-def ps_libraries(key, msl, full):
-    """A pixel shader's libraries: <key>_b, and <key>_bx with its alpha test and logic operation entry points, cut from one compile through the MSL-keyed Metal cache (dmsh_side.py). msl: the file of
-    its plain source, full. A shader none of them apply to, or whose compile unit does not build, gets <key>_b from the plain source and no <key>_bx (a stale one removed): the host draws it
-    without. → what the reflection says of them. Raises CalledProcessError when the plain source does not compile"""
+def ps_libraries(key, msl, full, bindings=None):
+    """A pixel shader's libraries: <key>_b, <key>_bx (alpha test and logic operation entry points) and, when the
+    fetch fold applies, <key>_bf (main0_f), cut from one compile through the MSL-keyed Metal cache (dmsh_side.py).
+    msl: the file of its plain source, full. bindings: reflection bindings used to detect rewritable samples
+    (dmsh_fetch.fold); without them no fold is attempted. A shader none of the side entries apply to, or whose
+    compile unit does not build, gets <key>_b from the plain source (or a folded compile that still yields _bf)
+    and no <key>_bx (a stale one removed): the host draws it without. → what the reflection says of them, plus
+    'fetch' metadata when main0_f was cut. Raises CalledProcessError when the plain source does not compile"""
     targets = [(t, d) for t, d in (('mac', out), ('ios', IOSOUT)) if d and t in TARGETS]
+    def drop(suffix):
+        for _, d in targets:
+            try: os.unlink(os.path.join(d, key + suffix))
+            except FileNotFoundError: pass
+        if suffix == '_bf.metallib':
+            try: os.unlink(os.path.join(out, key + '_bf.metal'))
+            except FileNotFoundError: pass
     src, info = dmsh_side.unit(full)
-    if src:
-        u = os.path.join(w, key + '_bu.metal'); open(u, 'w').write(src)
+    used_unit, compile_src, side_names = bool(src), src, set(info.get('alpha', []) + info.get('logic', [])) if src else set()
+    fmeta: dict | None = None
+    if compile_src and bindings is not None:
+        fv, fm = dmsh_fetch.fold(compile_src, bindings, om_only_ok=key in BF_WANT)
+        if fv and isinstance(fm, dict): compile_src, fmeta = fv, fm
+    if compile_src is None and bindings is not None:
+        fv, fm = dmsh_fetch.fold(full, bindings, om_only_ok=key in BF_WANT)
+        if fv and isinstance(fm, dict): compile_src, fmeta = fv, fm
+    if compile_src is not None and (used_unit or fmeta):
+        u = os.path.join(w, key + '_bu.metal'); open(u, 'w').write(compile_src)
         try:
-            for t, d in targets: MTL.compile_split(t, u, os.path.join(d, key + '_b.metallib'), os.path.join(d, key + '_bx.metallib'), lambda lib: dmsh_side.cut(lib, set(info['alpha'] + info['logic'])))
-            SIDE_STATS['generated'] += 1
-            return {f: {'entries': info[f]} for f in ('alpha', 'logic') if info[f]}
+            for t, d in targets:
+                bpath, xpath, fpath = os.path.join(d, key + '_b.metallib'), os.path.join(d, key + '_bx.metallib'), os.path.join(d, key + '_bf.metallib')
+                if used_unit and fmeta:
+                    MTL.compile_split(t, u, bpath, xpath, lambda lib, sn=side_names: dmsh_side.cut(lib, sn, {'main0_f'}), c=fpath)
+                elif used_unit:
+                    MTL.compile_split(t, u, bpath, xpath, lambda lib, sn=side_names: dmsh_side.cut(lib, sn))
+                    try: os.unlink(fpath)
+                    except FileNotFoundError: pass
+                else:
+                    MTL.compile_split(t, u, bpath, fpath, lambda lib: dmsh_side.cut(lib, {'main0_f'}))
+                    drop('_bx.metallib')
+            if used_unit: SIDE_STATS['generated'] += 1
+            if fmeta: BF_STATS['generated'] += 1
+            result = {f: {'entries': info[f]} for f in ('alpha', 'logic') if used_unit and info.get(f)}
+            if fmeta: result['fetch'] = fmeta
+            return result
         except (subprocess.CalledProcessError, ValueError) as e:
-            SIDE_STATS['failed'] += 1; print(f'[RED] {key}: the alpha test and logic operation entry points do not build ({str(e)[:120]}): its draws go without them', flush=True)
+            if used_unit: SIDE_STATS['failed'] += 1; print(f'[RED] {key}: the alpha test and logic operation entry points do not build ({str(e)[:120]}): its draws go without them', flush=True)
         finally:
             try: os.unlink(u)
             except FileNotFoundError: pass
-    else: SIDE_STATS['not generated'] += 1
+    elif not used_unit: SIDE_STATS['not generated'] += 1
+    drop('_bx.metallib'); drop('_bf.metallib')
     for t, d in targets:
-        try: os.unlink(os.path.join(d, key + '_bx.metallib'))
-        except FileNotFoundError: pass
         MTL.compile(t, msl, os.path.join(d, key + '_b.metallib'))
     return {}
 
@@ -1378,10 +1413,40 @@ def fs_uint(src):
     ints = int_outputs(src, body, cols)
     if not from_int and not ints and not (writes and (all(re.fullmatch(r'-?[0-9.]+f?|float\d\([-0-9., ]*\)', w.strip()) for w in writes) or all(passed(w) for w in writes))): return None, 0
     uty = lambda ty: 'u' + ty.replace('float', 'int')   # float4 → uint4, float → uint
-    def entry(sfx, as_uint):   # main0 again as main0_<sfx>, returning the outputs in as_uint as the unsigned integer vectors of their bits (dmsh_fetch.py cuts the source at main0_out_u)
+    def _match(s, i, o, c):
+        depth = 1
+        for mm in re.compile(re.escape(o) + '|' + re.escape(c)).finditer(s, i):
+            depth += 1 if mm.group() == o else -1
+            if not depth: return mm.end()
+        return -1
+    def _plist(s):
+        out_p, at, depth = [], 0, 0
+        for i, ch in enumerate(s):
+            depth += (ch in '<([') - (ch in '>)]')
+            if ch == ',' and not depth: out_p.append(s[at:i].strip()); at = i + 1
+        return out_p + ([s[at:].strip()] if s[at:].strip() else [])
+    head = _match(src, m.end(), '(', ')')
+    body_brace = src.find('{', head) if head >= 0 else -1
+    end = _match(src, body_brace + 1, '{', '}') if body_brace >= 0 else -1
+    if head < 0 or end < 0: return None, 0
+    params = _plist(src[m.end():head - 1]); decl, args = [], []
+    for pr in params:
+        d = re.sub(r'\s*\[\[.*\]\]$', '', pr); a = re.search(r'(\w+)$', d)
+        if not a: return None, 0
+        decl.append(d); args.append(a.group(1))
+    sig_open, param_str = src[m.start():m.end()], src[m.end():head - 1]
+    # One body for main0 / main0_u / main0_m (dmsh_side.unit already wraps each entry as static dm_body_*).
+    # Fetch later rewrites samples only inside dm_body_main0. marked always_inline so base callers that pass
+    # literals fold the fetch selects away and keep empty functionConstantsDictionary.
+    if not re.search(r'static\s+(?:__attribute__\(\((?:always_inline)\)\)\s+)?main0_out\s+dm_body_main0\s*\(', src):
+        shared = f'static __attribute__((always_inline)) main0_out dm_body_main0({", ".join(decl)})' + src[head:end] + '\n'
+        thin = sig_open + param_str + ')\n{\n    return dm_body_main0(' + ', '.join(args) + ');\n}\n'
+        src = src[:m.start()] + shared + thin + src[end:]
+    def entry(sfx, as_uint):   # thin wrapper around dm_body_main0; dmsh_fetch.py still cuts the source at main0_out_u
         struct = f'struct main0_out_{sfx}\n{{\n' + ''.join(f'    {uty(cols[nm]) if nm in as_uint else ty} {nm} {at};\n' for ty, nm, at in mem) + '};\n\n'
-        ret = f'return main0_out_{sfx}{{' + ', '.join(f'as_type<{uty(cols[nm])}>(out.{nm})' if nm in as_uint else f'out.{nm}' for _, nm, _ in mem) + '};'
-        return '\n' + struct + re.sub(r'\bfragment\s+main0_out\s+main0\s*\(', f'fragment main0_out_{sfx} main0_{sfx}(', src[m.start():], count=1).replace('return out;', ret)
+        conv = f'return main0_out_{sfx}{{' + ', '.join(f'as_type<{uty(cols[nm])}>(out.{nm})' if nm in as_uint else f'out.{nm}' for _, nm, _ in mem) + '};'
+        sig = sig_open.replace('fragment main0_out main0(', f'fragment main0_out_{sfx} main0_{sfx}(', 1)
+        return '\n' + struct + sig + param_str + ')\n{\n    main0_out out = dm_body_main0(' + ', '.join(args) + ');\n    ' + conv + '\n}\n'
     out, mask = src + entry('u', set(cols)), 0
     as_int = ints or from_int
     if as_int and set(cols) - as_int:   # some outputs from integer bits, some not: the mixed entry point
@@ -1594,9 +1659,13 @@ def finish(key, w, j, c1):
     fu, fmask = fs_uint(src) if j['stage'] == 'ps' else (None, 0)   # the integer-output entry points (see fs_uint); the analysis below uses the source with only main0
     fd = fs_dual(src) if j['stage'] == 'ps' and key in DUAL_WANT else None   # the dual-source entry point (see fs_dual), from the source with only main0
     if fu or fd: plain = src; open(msl, 'w').write((fu or src) + (fd or ''))
+    ps_binds = None
+    if j['stage'] == 'ps':
+        try: ps_binds = reflect(key, 'ps', src, res)
+        except ValueError as e: return 'reflection failed', str(e)[:160], None
     side, lost = {}, []
     def compile_targets():   # the selected targets from the same MSL (MSL identical to one compiled before takes that library, dmsh_mtlcache.py)
-        if j['stage'] == 'ps': side.clear(); side.update(ps_libraries(key, msl, open(msl).read())); return
+        if j['stage'] == 'ps': side.clear(); side.update(ps_libraries(key, msl, open(msl).read(), bindings=ps_binds)); return
         if 'mac' in TARGETS: MTL.compile('mac', msl, lib)
         if 'ios' in TARGETS and IOSOUT: MTL.compile('ios', msl, os.path.join(IOSOUT, key + '_b.metallib'))
     try: compile_targets()
@@ -1609,7 +1678,7 @@ def finish(key, w, j, c1):
     clone(msl, os.path.join(out, key + '_b.metal'))
     entry = re.search(r'(vertex|fragment|kernel)\s+\S+\s+(\w+)\s*\(', src)
     dr = drv_reads(src)
-    try: binds = reflect(key, mesh['kind'] if mesh else j['stage'], src, res)
+    try: binds = ps_binds if ps_binds is not None else reflect(key, mesh['kind'] if mesh else j['stage'], src, res)
     except ValueError as e: return 'reflection failed', str(e)[:160], None
     refl = {'key': key + '_b', 'route': 'B', 'chain': CHAIN, 'dm_ctl': key, 'source': f'{name}#{k}', 'pc_paired': pc_of[key], 'stage': mesh['kind'] if mesh else j['stage'],
             **({'mesh_stage': {'kind': mesh['kind'], 'threads': mesh['threads'], 'payload': mesh['payload'], 'task': mesh.get('task', True)}, **({'entry_z': 'main0_z'} if mesh['kind'] == 'ms' else {})} if mesh else {}),
@@ -1747,7 +1816,10 @@ def fin(key, wb):
             refl = json.loads(output_of('mac', key + '_b.json'))
             src = output_of('mac', key + '_b.metal').decode() if refl['stage'] in ('ps', 'vs') else ''
             if refl['stage'] == 'vs': write_refl(key, pull_finish(key, src, vin_finish(key, src, refl)))
-            if refl['stage'] == 'ps': refl.update(ps_libraries(key, os.path.join(out, key + '_b.metal'), src))
+            if refl['stage'] == 'ps':
+                side = ps_libraries(key, os.path.join(out, key + '_b.metal'), src, bindings=refl.get('bindings'))
+                if 'fetch' not in side: refl.pop('fetch', None)
+                refl.update(side)
             return key, 'ok', '', fetch_finish(key, src, refl)
         if key in xerr or not os.path.exists(os.path.join(wb, key + '.spv')): return key, 'translation failed', xerr.get(key, 'no spv'), None
         result = (key,) + finish(key, wb, jobs[key], c1s[key])

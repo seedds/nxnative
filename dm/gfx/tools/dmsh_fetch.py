@@ -12,6 +12,7 @@
 import collections
 import re
 import dmsh_abi as abi
+import dmsh_side
 
 NFB = 8
 
@@ -182,19 +183,28 @@ def screen_varyings(msl):
     for e in entries: got &= _entry_screen(e.group(1), locn)
     return sorted(got)
 
-def variant(msl, bindings, om_only_ok=False):
-    # main0_u (dmsh_build.py int_outputs: integer colour targets) is appended to the source after main0; the host takes it from the shader's own library, never from this variant.
-    # Its body reads main0's output struct, whose members the variant renames, and its samples were rewritten to fb0–fb7, which only main0 declares: 483 of Breath of the
-    # Wild's variants failed to compile once their cached copies were gone (use of undeclared identifier 'fb0'). The variant is built from the source without it
-    cut = msl.find('\nstruct main0_out_u\n')
-    if cut >= 0: msl = msl[:cut + 1]
+def _close(src, i, o, c):
+    return dmsh_side._close(src, i, o, c)
+
+
+def _output_members(msl):
+    om = re.search(r'struct main0_out\s*\{(.*?)\};', msl, re.S)
+    if not om:
+        return None, 'no output struct'
+    outs = [(t, n, int(c)) for t, n, c in re.findall(r'(\w+) (m_\d+) \[\[color\((\d+)\)\]\];', om.group(1))]
+    if not outs or len(outs) > 4 or re.sub(r'\w+ m_\d+ \[\[color\(\d+\)\]\];', '', om.group(1)).strip():
+        return None, 'the output struct is not plain color outputs (or has more than 4)'
+    return outs, None
+
+
+def _rewrites(msl, bindings):
+    """Same detection as the old standalone variant: list of (start, end, replacement) and call metadata."""
     tex = {m.group(1) for m in re.finditer(r'texture2d<float> (\w+) \[\[id\(\d+\)\]\];', msl)}
     locn = {m.group(1): int(m.group(2)) for m in re.finditer(r'float4 (m_\d+) \[\[user\(locn(\d+)\)\]\];', msl.split('struct main0_in', 1)[-1].split('};', 1)[0])}
     reg = {b['msl_name']: b['reg'] for b in bindings if b.get('kind') == abi.KIND_TEX and b.get('msl_name') and b.get('reg') is not None}
-    # A sample the border colour correction wrapped (dmsh_build.py border_emu) is taken whole: a tile read replaces the corrected sample, never feeds the correction
     pat = re.compile(r'(dm_bs\()?spvDescriptorSet0\.(\w+)\.sample\(spvDescriptorSet0\.(\w+)Smplr, select\((_\d+), float2\(0\.0\), isnan\(\4\)\)\)'
-                     r'(?(1), spvDescriptorSet0\.%s, \d+u, spvDescriptorSet0\.\2, spvDescriptorSet0\.\3Smplr%s, select\(\4, float2\(0\.0\), isnan\(\4\)\)\))' % (abi.BORDER_MEMBER, abi.BORDER_TWIN))
-    calls, out_parts, pos = [], [], 0
+                     r'(?(1), spvDescriptorSet0\.%s, \d+u, spvDescriptorSet0\.\2, spvDescriptorSet0\.\3Smplr%s, select\(\4, float2\(0\.0\), isnan\(\4\)\))' % (abi.BORDER_MEMBER, abi.BORDER_TWIN))
+    calls, spans = [], []
     for m in pat.finditer(msl):
         member, var = m.group(2), m.group(4)
         if member not in tex or member != m.group(3) or member not in reg: continue
@@ -210,35 +220,214 @@ def variant(msl, bindings, om_only_ok=False):
         i = len(calls)
         if i >= 32: break
         sel = ''.join(f'FX_{i} == {k} ? fb{k} : ' for k in range(NFB))
-        out_parts.append(msl[pos:m.start()]); out_parts.append(f'({sel}{m.group(0)})'); pos = m.end()
+        spans.append((m.start(), m.end(), f'({sel}{m.group(0)})'))
         calls.append({'fc': i, 'tex_reg': reg[member], **how})
-    if not calls and not om_only_ok:
-        return None, 'no rewritable sample'
-    # Mixed-use slots: the same texture also has other (non-rewritable) uses - at runtime this texture must not be switched to tile reads (the rewritten reads and the unrewritten ones would not see the same data)
     conv = {}
     for c in calls: conv[c['tex_reg']] = conv.get(c['tex_reg'], 0) + 1
     mixed = sorted({reg[mb] for mb in reg if mb in tex and msl.count(f'spvDescriptorSet0.{mb}.') > conv.get(reg[mb], 0)})
-    body = ''.join(out_parts) + msl[pos:]
-    om = re.search(r'struct main0_out\s*\{(.*?)\};', body, re.S)
-    if not om: return None, 'no output struct'
-    outs = [(t, n, int(c)) for t, n, c in re.findall(r'(\w+) (m_\d+) \[\[color\((\d+)\)\]\];', om.group(1))]
-    if not outs or len(outs) > 4 or re.sub(r'\w+ m_\d+ \[\[color\(\d+\)\]\];', '', om.group(1)).strip(): return None, 'the output struct is not plain color outputs (or has more than 4)'
-    members = ''.join(f'    {t} {n}_at{k} [[color({k}), function_constant(OM_{j}_{k})]];\n' for j, (t, n, c) in enumerate(outs) for k in range(NFB))
-    body = body[:om.start(1)] + '\n' + members + body[om.end(1):]
-    consts = ''.join(f'constant int FX_{c["fc"]} [[function_constant({c["fc"]})]];\n' for c in calls) + \
-             ''.join(f'constant bool FB_{k} [[function_constant({32 + k})]];\n' for k in range(NFB)) + \
-             ''.join(f'constant bool OM_{j}_{k} [[function_constant({64 + 8 * j + k})]];\n' for j in range(len(outs)) for k in range(NFB))
-    body = body.replace('using namespace metal;\n', 'using namespace metal;\n\n' + consts, 1)
-    i0 = body.find('fragment main0_out main0(')
-    i1 = body.find(')\n{', i0) if i0 >= 0 else -1   # end of signature: closing parenthesis immediately followed by a newline and an opening brace (parameter attributes contain brackets such as [[buffer(0)]])
-    if i0 < 0 or i1 < 0: return None, 'main function signature not recognized'
-    fbs = ''.join(f', float4 fb{k} [[color({k}), function_constant(FB_{k})]]' for k in range(NFB))
-    if body[i1 - 1] == '(': fbs = fbs[2:]   # main0() with no parameters at all: no leading comma (30 of Breath of the Wild's output-mapping-only variants)
-    body = body[:i1] + fbs + body[i1:]
-    decl = ''.join(f'    {t} spv_o_{n} = {t}(0);\n' for t, n, c in outs)
-    body = body.replace('    main0_out out = {};\n', '    main0_out out = {};\n' + decl, 1)
-    for t, n, c in outs: body = body.replace(f'out.{n}', f'spv_o_{n}')
-    put = ''.join(f'    if (OM_{j}_{k}) out.{n}_at{k} = spv_o_{n};\n' for j, (t, n, c) in enumerate(outs) for k in range(NFB))
-    if body.count('    return out;\n') < 1: return None, 'return out not found'
-    body = body.replace('    return out;\n', put + '    return out;\n')
-    return body, {'calls': calls, 'mixed_regs': mixed, 'outputs': [{'color': c, 'type': t} for t, n, c in outs]}
+    return calls, spans, mixed
+
+
+def _params(s):
+    return dmsh_side._params(s)
+
+
+def _parse_entry(msl, name):
+    """One fragment entry, ignoring siblings (a unit's _a/_l parameters carry function constants, which dmsh_side.entries refuses)."""
+    m = re.search(r'^((?:\[\[[^\]]*\]\]\s*)?)fragment\s+(\w+)\s+' + re.escape(name) + r'\s*\(', msl, re.M)
+    if not m:
+        return None
+    attr, ret = m.group(1), m.group(2)
+    head = _close(msl, m.end(), '(', ')')
+    body = msl.find('{', head) if head >= 0 else -1
+    end = _close(msl, body + 1, '{', '}') if body >= 0 else -1
+    if end < 0:
+        raise ValueError(f'no body for {name}')
+    params = _params(msl[m.end():head - 1])
+    decl, args = [], []
+    for pr in params:
+        d = re.sub(r'\s*\[\[.*\]\]$', '', pr)
+        a = re.search(r'(\w+)$', d)
+        if not a:
+            raise ValueError(f'a parameter of {name}: {pr[:80]}')
+        decl.append(d); args.append(a.group(1))
+    return {'attr': attr, 'ret': ret, 'name': name, 'params': params, 'decl': ', '.join(decl), 'args': ', '.join(args),
+            'start': m.start(), 'head': head, 'end': end}
+
+
+def _find_calls(src, name):
+    """Spans of `name(` ... `)` that are calls, not the definition."""
+    out = []
+    for m in re.finditer(rf'(?<![\w]){re.escape(name)}\(', src):
+        head_before = src[max(0, m.start() - 120):m.start()]
+        if re.search(r'static\s+(?:__attribute__\(\(always_inline\)\)\s+)?\w+\s+$', head_before):
+            continue
+        end = _close(src, m.end(), '(', ')')
+        if end < 0:
+            raise ValueError(f'unclosed call to {name}')
+        out.append((m.start(), end))
+    return out
+
+
+def _cut_extras(msl):
+    """Drop appended integer/dual entries. After fs_uint's shared-body shape the
+    `struct main0_out_u` marker still sits after thin main0, so the shared
+    `dm_body_main0` and main0 stay."""
+    cut = msl.find('\nstruct main0_out_u\n')
+    if cut >= 0:
+        msl = msl[:cut + 1]
+    cut = msl.find('\nstruct main0_out_d\n')
+    if cut >= 0:
+        msl = msl[:cut + 1]
+    return msl
+
+
+def _has_body(msl):
+    return re.search(r'static\s+(?:__attribute__\(\(always_inline\)\)\s+)?main0_out\s+dm_body_main0\s*\(', msl)
+
+
+def _consts(calls, outs):
+    fx_fc = ''.join(f'constant int FX_{c["fc"]} [[function_constant({c["fc"]})]];\n' for c in calls)
+    fb_fc = ''.join(f'constant bool FB_{k} [[function_constant({32 + k})]];\n' for k in range(NFB))
+    om_fc = ''.join(f'constant bool OM_{j}_{k} [[function_constant({64 + 8 * j + k})]];\n' for j in range(len(outs)) for k in range(NFB))
+    return fx_fc + fb_fc + om_fc
+
+
+def _insert_consts(msl, consts):
+    if 'using namespace metal;\n' in msl:
+        return msl.replace('using namespace metal;\n', 'using namespace metal;\n\n' + consts, 1)
+    return consts + msl
+
+
+def _main0_f(main0, calls, outs, n):
+    members = ''.join(
+        f'    {t} {nm}_at{k} [[color({k}), function_constant(OM_{j}_{k})]];\n'
+        for j, (t, nm, c) in enumerate(outs) for k in range(NFB)
+    )
+    struct_f = f'struct main0_out_f\n{{\n{members}}};\n'
+    pcomma = ', ' if main0['params'] else ''
+    fb_params = ', '.join(f'float4 fb{k} [[color({k}), function_constant(FB_{k})]]' for k in range(NFB))
+    load_fbs = '\n'.join(f'    float4 _fb{k} = float4(0.0);\n    if (FB_{k}) _fb{k} = fb{k};' for k in range(NFB))
+    if n:
+        extra = ', '.join([f'FX_{i}' for i in range(n)] + [f'_fb{k}' for k in range(NFB)])
+        ac = ', ' if main0['args'] else ''
+        call = f"dm_body_main0({main0['args']}{ac}{extra})"
+    else:
+        call = f"dm_body_main0({main0['args']})"
+    put = ''.join(
+        f'    if (OM_{j}_{k}) out.{nm}_at{k} = tmp.{nm};\n'
+        for j, (t, nm, c) in enumerate(outs) for k in range(NFB)
+    )
+    thin_f = (
+        f"fragment main0_out_f main0_f({', '.join(main0['params'])}{pcomma}{fb_params})\n"
+        "{\n"
+        f"{load_fbs}\n"
+        f"    main0_out tmp = {call};\n"
+        "    main0_out_f out = {};\n"
+        f"{put}"
+        "    return out;\n"
+        "}\n"
+    )
+    return struct_f + thin_f
+
+
+def _meta(calls, mixed, outs):
+    return {'calls': calls, 'mixed_regs': mixed, 'outputs': [{'color': c, 'type': t} for t, n, c in outs]}
+
+
+def _fold_plain(msl, bindings, om_only_ok=False):
+    """Extract main0 as dm_body_main0 (parameterized when there are samples) and append main0_f."""
+    calls, spans, mixed = _rewrites(msl, bindings)
+    if not calls and not om_only_ok:
+        return None, 'no rewritable sample'
+    outs, err = _output_members(msl)
+    if err:
+        return None, err
+    rewritten = msl
+    for start, end, repl in reversed(spans):
+        rewritten = rewritten[:start] + repl + rewritten[end:]
+    try:
+        main0 = _parse_entry(rewritten, 'main0')
+    except ValueError as e:
+        return None, str(e)
+    if not main0:
+        return None, 'main function signature not recognized'
+    n = len(calls)
+    extra_decl = ', '.join([f'int FX_{i}' for i in range(n)] + [f'float4 fb{k}' for k in range(NFB)]) if n else ''
+    extra_lits = ', '.join(['-1'] * n + ['float4(0.0)'] * NFB) if n else ''
+    decl = main0['decl'] + ((', ' + extra_decl) if extra_decl and main0['decl'] else extra_decl)
+    args = main0['args'] + ((', ' + extra_lits) if extra_lits and main0['args'] else extra_lits)
+    shared = f'static __attribute__((always_inline)) main0_out dm_body_main0({decl})' + rewritten[main0['head']:main0['end']] + '\n'
+    thin_main0 = (
+        f'{main0["attr"]}fragment {main0["ret"]} main0({", ".join(main0["params"])})\n'
+        '{\n'
+        f'    return dm_body_main0({args});\n'
+        '}\n'
+    )
+    preamble = _insert_consts(rewritten[:main0['start']], _consts(calls, outs))
+    tail = rewritten[main0['end']:]
+    new = preamble + shared + thin_main0 + '\n' + _main0_f(main0, calls, outs, n) + tail
+    return new, _meta(calls, mixed, outs)
+
+
+def _fold_unit(msl, bindings, om_only_ok=False):
+    """Parameterize an existing dm_body_main0 and append main0_f. Existing callers pass literals."""
+    calls, spans, mixed = _rewrites(msl, bindings)
+    if not calls and not om_only_ok:
+        return None, 'no rewritable sample'
+    outs, err = _output_members(msl)
+    if err:
+        return None, err
+    rewritten = msl
+    for start, end, repl in reversed(spans):
+        rewritten = rewritten[:start] + repl + rewritten[end:]
+    n = len(calls)
+    defm = _has_body(rewritten)
+    if not defm:
+        return None, 'dm_body_main0 disappeared after rewrite'
+    if n:
+        extra_decl = ', '.join([f'int FX_{i}' for i in range(n)] + [f'float4 fb{k}' for k in range(NFB)])
+        extra_lits = ', '.join(['-1'] * n + ['float4(0.0)'] * NFB)
+        dend = _close(rewritten, defm.end(), '(', ')')
+        if dend < 0:
+            return None, 'unclosed dm_body_main0 definition'
+        inside = rewritten[defm.end():dend - 1].strip()
+        new_inside = (inside + ', ' if inside else '') + extra_decl
+        head = rewritten[defm.start():defm.end()]
+        if 'always_inline' not in head:
+            prefix = 'static __attribute__((always_inline)) main0_out dm_body_main0('
+        else:
+            prefix = head
+        rewritten = rewritten[:defm.start()] + prefix + new_inside + rewritten[dend - 1:]
+        for start, end in reversed(_find_calls(rewritten, 'dm_body_main0')):
+            args = rewritten[start + len('dm_body_main0('):end - 1]
+            new_call = f"dm_body_main0({args}{', ' if args.strip() else ''}{extra_lits})"
+            rewritten = rewritten[:start] + new_call + rewritten[end:]
+    rewritten = _insert_consts(rewritten, _consts(calls, outs))
+    try:
+        main0 = _parse_entry(rewritten, 'main0')
+    except ValueError as e:
+        return None, str(e)
+    if not main0:
+        return None, 'no main0 in unit after edit'
+    rewritten = rewritten + '\n' + _main0_f(main0, calls, outs, n)
+    return rewritten, _meta(calls, mixed, outs)
+
+
+def fold(msl, bindings, om_only_ok=False):
+    """Parameterize the one shared body and append main0_f (replaces a separate _bf compile).
+
+    When `dm_body_main0` already exists (fs_uint and/or unit()), it gains FX/fb
+    parameters and existing callers pass literals that disable fetch. Otherwise
+    main0 is extracted as that body. → (new MSL, metadata) or (None, reason)
+    """
+    if _has_body(msl):
+        return _fold_unit(msl, bindings, om_only_ok)
+    return _fold_plain(msl, bindings, om_only_ok)
+
+
+def variant(msl, bindings, om_only_ok=False):
+    # main0_u (dmsh_build.py int_outputs: integer colour targets) is appended to the source after main0; the host takes it from the shader's own library, never from this variant.
+    # After fs_uint's shared-body shape the integer entries still begin at struct main0_out_u, so the cut keeps dm_body_main0 and thin main0.
+    # The folded form emits a parameterized body + main0_f wrapper instead of rewriting main0 itself (the host looks up @"main0_f" in <key>_bf.metallib).
+    return fold(_cut_extras(msl), bindings, om_only_ok)

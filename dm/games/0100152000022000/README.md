@@ -57,6 +57,7 @@ The game builds Mii heads from the console's MiiModel system data, starting at b
 - The work folder's `run/ctl.sh` drives a run started with `DM_CTL`.
 - `run/race.sh` boots from a copy of a save past the Mii pick into a 50cc Grand Prix (Mario, Mushroom Cup) with frame-timed keys and holds accelerate: `DM_KEYS=f960:L+R~0.3,f1260:A,f1500:A,f1740:A,f2000:A,f2240:A,f2400:A,f2560:A,f2800:A,f3040:A,f4300:A~70`.
 - From a fresh save, L+R at the title opens "Select a Mii" (Right, A takes the first default Mii).
+- `bench.tsv` is provisional and not yet timed: `title-race-start` and `probe`, with the keys from `run/race.sh`.
 - 2P: from a save past the Mii pick, L+R at the title, Down, A (2P), A (Grand Prix), A (50cc) opens the controller applet; 1.5–4 s between presses, or the menu fades drop them. Headless runs report one player; two players need a second controller.
 
 ## Found on this game
@@ -76,6 +77,7 @@ General host changes first needed here; each applies to every game:
 - **The Mii database and the MiiModel stand-in** (`hle_mii.c`, `dm_mii_standin`, `MountSystemData`), **the add-on content cache sized as Horizon's RomFS working memory** (`romfs_work_size`), **device save data as a save of its own** for a game that mounts account save data too (`<DM_SAVE>_device`) and **SDK 4's DeviceSink** (`g_sink4`): [Mii database answered by the host](../../../docs/reference/services.md#mii-database-answered-by-the-host), [System data stand-in for the MiiModel archive](../../../docs/reference/services.md#system-data-stand-in-for-the-miimodel-archive), [Add-on content mount cache sized as RomFS working memory](../../../docs/reference/services.md#add-on-content-mount-cache-sized-as-romfs-working-memory), [Device and account save data as two saves](../../../docs/reference/services.md#device-and-account-save-data-as-two-saves), [SDK 4: DeviceSink is command 0xf of 0x130 bytes](../../../docs/reference/audio.md#sdk-4-devicesink-is-command-0xf-of-0x130-bytes).
 - **The audio renderer's update lock read off each SDK's `Update`** (`update_lock`): [The renderer's update lock (`update_lock`)](../../../docs/reference/audio.md#the-renderers-update-lock-update_lock).
 - **The zero cube for a 2D array of fewer than six layers in a cube slot** (`tex_fit`): [A 2D texture in a cube slot binds the zero cube](../../../docs/reference/rendering.md#a-2d-texture-in-a-cube-slot-binds-the-zero-cube).
+- **Cold Mac Metal shader builds:** [Cold Mac shader builds compile each pixel shader more than once](../../../docs/reference/shaders.md#cold-mac-shader-builds-compile-each-pixel-shader-more-than-once). Apple M2, `J=8`, no keys, `own_compilers`: 22:46 (1366 s) to 14:47 (886.86 s), 1.54×. The next build after this chain is a full cold rebuild.
 
 ## Open
 

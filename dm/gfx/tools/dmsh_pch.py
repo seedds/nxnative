@@ -5,7 +5,7 @@
 # The translated source stays as it was: the header only adds the two includes the sources start with and completes classes, and declares no name. A class left out of CLASSES costs only its
 # time. The output is byte-identical (checked on a shader of every kind in make(), so a compiler that behaves otherwise builds without the header), so -include-pch is not in the compile records
 # (dmsh_build.py MAC_RECORD, ios_metal.RECORD), and like dmsh_mtlcache.py this file is not part of the chain version: it never changes the code in an output, it only makes one faster and keeps the source's name out of it (_run).
-# One header per compile convention, made at the first compile of a process (about 2 s) and removed when it ends. Environment: DMSH_PCH=0 compiles without it.
+# One header per compile convention, made at the first compile of a process (about 2 s) and removed when it ends. Environment: DMSH_PCH=0 compiles without it. A metal command without -c (dmsh_build.py DMSH_METAL_DIRECT=1) still uses this header; make() checks identity on .air.
 import atexit, os, shutil, subprocess, sys, tempfile, threading
 
 SAMPLED = ('texture2d', 'texture2d_array', 'texture3d', 'texturecube', 'texturecube_array', 'depth2d', 'depth2d_array', 'depthcube', 'depthcube_array')
@@ -35,10 +35,14 @@ def make(metal):
     with open(src, 'w') as f: f.write(PROBE)
     r = subprocess.run([*(a for a in metal if a != '-c'), '-x', 'metal-header', h, '-o', pch], capture_output=True, text=True)
     if r.returncode: return None, f'it does not build: {r.stderr.strip()[:200]}'
+    # The header only changes the front end, so the identity check always compiles to .air (with -c).
+    # A one-shot metal command (no -c) writes a metallib, and the linker embeds the output path, so two
+    # probe names would differ even when the IR matches (DMSH_METAL_DIRECT=1 in dmsh_build.py).
+    probe = metal if '-c' in metal else [*metal, '-c']
     outs = []
     for extra, name in (((), 'plain.air'), (('-include-pch', pch), 'header.air')):
         out = os.path.join(d, name)
-        r = subprocess.run([*metal, *extra, src, '-o', out], capture_output=True, text=True)
+        r = subprocess.run([*probe, *extra, src, '-o', out], capture_output=True, text=True)
         if r.returncode: return None, f'a test shader does not compile: {r.stderr.strip()[:200]}'
         with open(out, 'rb') as f: outs.append(f.read())
     if outs[0] != outs[1]: return None, 'a test shader compiled with it differs'
@@ -55,10 +59,39 @@ def header(metal):   # the path of the convention's header, None when it is not 
         return _headers[tuple(metal)]
 
 
+def spawn_run(argv, stdin_path=None, capture_output=False, check=False):
+    """Launch argv[0] with os.posix_spawn (posix_spawnp if the path is not absolute). stdin_path is opened on the child's stdin."""
+    exe = argv[0]
+    actions = []
+    captured = None
+    if stdin_path is not None:
+        actions.append((os.POSIX_SPAWN_OPEN, 0, stdin_path, os.O_RDONLY, 0))
+    if capture_output:
+        captured = (tempfile.TemporaryFile(), tempfile.TemporaryFile())
+        actions.append((os.POSIX_SPAWN_DUP2, captured[0].fileno(), 1))
+        actions.append((os.POSIX_SPAWN_DUP2, captured[1].fileno(), 2))
+    spawn = os.posix_spawn if os.path.isabs(exe) else os.posix_spawnp
+    pid = spawn(exe, argv, dict(os.environ), file_actions=tuple(actions) if actions else None)
+    _, status = os.waitpid(pid, 0)
+    rc = os.waitstatus_to_exitcode(status)
+    stdout = stderr = None
+    if captured is not None:
+        out_f, err_f = captured
+        out_f.seek(0); stdout = out_f.read(); out_f.close()
+        err_f.seek(0); stderr = err_f.read(); err_f.close()
+    if check and rc:
+        raise subprocess.CalledProcessError(rc, argv, output=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(argv, rc, stdout, stderr)
+
+
 def _run(metal, msl, air, **kw):
     # The source on standard input, so no file name reaches the compiler: clang names a source's static initializer after its file (_GLOBAL__sub_I_<name>, which any function constant brings),
     # so the same text under two names gave two libraries, and shaders sharing a source (3,936 of Breath of the Wild's 10,560 pixel shaders, in their _bl) took the bytes of whichever compiled first
-    with open(msl, 'rb') as f: return subprocess.run([*metal, '-x', 'metal', '-', '-o', air], stdin=f, **kw)
+    argv = [*metal, '-x', 'metal', '-', '-o', air]
+    # Absolute-path metal (DMSH_METAL_DIRECT) goes through posix_spawn; the xcrun baseline keeps subprocess.run
+    if os.path.isabs(metal[0]):
+        return spawn_run(argv, stdin_path=msl, capture_output=kw.get('capture_output', False), check=kw.get('check', False))
+    with open(msl, 'rb') as f: return subprocess.run(argv, stdin=f, **kw)
 
 
 def compile(metal, msl, air):

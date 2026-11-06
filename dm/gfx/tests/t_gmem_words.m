@@ -12,7 +12,7 @@ static int checks, failed;
 static int table_has(uint64_t table_gpu, uint64_t guest) {
     if (!g_gmem_buf || g_gmem_buf.gpuAddress != table_gpu) return 0;
     const uint8_t *t = g_gmem_buf.contents;
-    for (unsigned k = 1; k < DMSH_GMEM_MAP_ENTRIES; k++) { uint64_t lo; memcpy(&lo, t + (size_t)k * DMSH_GMEM_MAP_ENTRY, sizeof lo); if (lo == guest) return 1; }
+    for (unsigned k = 1, n = (unsigned)(g_gmem_buf.length / DMSH_GMEM_MAP_ENTRY); k < n; k++) { uint64_t lo; memcpy(&lo, t + (size_t)k * DMSH_GMEM_MAP_ENTRY, sizeof lo); if (lo == guest) return 1; }
     return 0;
 }
 int main(void) { @autoreleasepool {

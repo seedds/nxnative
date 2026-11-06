@@ -429,6 +429,14 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Check:** `t_codec_video` initializes a VP9 decoder by SDK 19's remote memory form and reads a picture's properties through the nine-argument form.
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md)'s base game (SDK 19.3.3 Ounce; its movie player is in `main`), from its imports: the Mushroom Cup's opening (VP9, 2560x1440) decodes with them.
 
+### A buffer's first "free" signal read as a picture after Start
+
+- **Symptom:** `game called nn::diag abort` with Result 0x1c286f (nn::codec 3604) on the game's `VideoDecoderThread`, after a race and before the post-race picture (VP9, 2560x1440, one picture) is decoded; about 1 time in 5.
+- **Cause:** the player registers each output buffer, acquires it and arms a sync point event on that first (generation 0) handle, which the host signals at once (`sync_reached`: generation 0 is "free"). Its worker recycles the buffer on that signal while the player is not started (`main+0x19e6f40`), but once Start has run (player state 3, `main+0x70f154`) it reads every signal as a picture and aborts on any result from the output buffer properties (`main+0x19e8110`). When the worker took the first signal only after Start, the properties call found a buffer that was never released, so never filled, and answered 3604.
+- **Fix:** `hle_codec_video.c` notes a sync point event armed on a buffer's generation 0 handle (`cv_mark_early`). A properties call on such a buffer, never released, after Start, hands it to the decoder as a release would (`fill`, `ready`) and takes a waiting picture if there is one; with none it reads as an empty picture of the stream's size, and the next picture waits for the game's release as usual. `[codec] VP9 decoder N: buffer N's first (free) signal was read as a picture after Start` names it, up to 4 times per decoder.
+- **Check:** `t_codec_video`: before Start the call still answers 3604; after Start it takes a waiting picture, or with none reads as an empty 16x16 picture, and the game's release then fills the buffer and signals its next handle.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.0.0 (SDK 19.3.3; its movie player is in `main`), on an M4 Pro Mac, after every few races.
+
 ## Movie players
 
 ### Unity's video planes and checking the movie path

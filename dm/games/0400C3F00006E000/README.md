@@ -57,6 +57,10 @@ To the race:
 
 4. `CRASH pc=0` from `main+0x19e77a0` when the cup's opening movie starts: `nn::syncpt::sdk::TryWaitSyncPointEvent` went through the SDK's null table, as `CreateSyncPointEvent` did on Donkey Kong Bananza; the host answers it from the event's SystemEvent (`hle_codec_video.c`). The movie player is in `main` and takes SDK 19's decoder forms ([SDK 19's decoder forms](../../../docs/reference/movies.md#sdk-19s-decoder-forms)): VP9 at 2560x1440.
 
+After a race:
+
+5. `game called nn::diag abort` with Result 0x1c286f (nn::codec 3604) on `VideoDecoderThread`, about 1 time in 5, before the post-race picture: the movie worker read a buffer's first "free" signal as a picture after Start ([A buffer's first "free" signal read as a picture after Start](../../../docs/reference/movies.md#a-buffers-first-free-signal-read-as-a-picture-after-start)).
+
 ## Frame rate
 
 The host handles [cube face splitting and pass merging](../../../docs/reference/rendering.md#a-draw-into-the-six-faces-of-a-cube-level-at-once-ran-short-of-threads) and [guest compute dispatch ordering](../../../docs/reference/frame-rate.md#compute-dispatches-that-wait-for-each-other). The shader chain [compares bounded uniform reads by row where it can prove the component is in range](../../../docs/reference/shaders.md#reads-past-a-uniform-bindings-size). The performance measurements are recorded with those mechanisms.

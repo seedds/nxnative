@@ -357,6 +357,31 @@ int main(void) {
     for (int i = 0; i < 6; i++) assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 7000 + i, false));
     assert(!h_cv_vp9fin(dec) && !cv_of(dec) && !g_ev[ev_slot(ev)].bound);
     for (int i = 0; i < 3; i += 2) { h_cv_poolfin(pool[i]); assert(!pool_of(pool[i])); }
+    // Mario Kart World's late "free" signal: a buffer's first handle armed on a sync point event (signalled at once), read as a picture only after Start. Before Start it
+    // still answers 3604; after Start it takes a waiting picture, or with none reads as an empty picture of the stream's size, and the game's release then works as usual
+    {   _Alignas(16) static uint8_t dk[0x400], pk[0x40], mk[16 * 16 * 4], ek[0x80];
+        assert(!h_cv_poolsize(&size, &align, &pref, 1) && !h_cv_pool(pk, mk, size, &pref, 1, 0));
+        for (int pic = 0; pic < 2; pic++) {   // with a picture waiting, then with none
+            assert(!h_cv_vp9init2(dk, 0x10000, 16, 16, 1, 1, 3, NULL, 0)); cv_dec *k = cv_of(dk);
+            assert(!h_spt_create(ek));
+            assert(!h_cv_vp9reg(dk, 0, pk, 0) && !h_cv_vp9acq(&idx, &sync, dk) && idx == 0 && sync.gen == 0);
+            assert(!h_spt_request(ek, &sync) && ev_set(ek) && k->buf[0].early);
+            assert(h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dk, 0) == CV_NONE);   // not started: as before
+            assert(!h_cv_vp9start(dk));
+            if (!pic) { assert(!h_cv_vp9submit(&id, dk, vp9, sizeof vp9, 5000, false)); settle(dk); assert(k->nheld == 1); }
+            w = h = 0; ts = -1;
+            assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dk, 0) && w == 16 && h == 16 && !eos && !k->buf[0].early && k->late_free == 1);
+            if (!pic) assert(ts == 5000 && k->buf[0].filled && k->nheld == 0 && !k->pcount);
+            else assert(ts == 0 && !k->buf[0].filled && !k->pcount);
+            // the game releases the buffer: the next picture goes into it and signals its new handle
+            h_cv_vp9rel(dk, 0, sync); assert(k->pcount == 1 && !h_cv_vp9acq(&idx, &sync, dk) && idx == 0 && sync.gen == 1 && !h_gs_trywait(&sync));
+            assert(!h_cv_vp9submit(&id, dk, vp9, sizeof vp9, 6000, false)); settle(dk); assert(h_gs_trywait(&sync));
+            assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dk, 0) && ts == 6000 && k->late_free == 1);
+            h_spt_destroy(ek);
+            assert(!h_cv_vp9fin(dk));
+        }
+        h_cv_poolfin(pk);
+    }
     // VP8 (libvpx) and H.264 (VideoToolbox) take the same protocol: one released buffer, one key frame, its picture read back red
     {   _Alignas(16) static uint8_t d8[0x400], p8[0x40], m8[16 * 16 * 4];
         assert(!h_cv_poolsize(&size, &align, &pref, 1) && !h_cv_pool(p8, m8, size, &pref, 1, 0));

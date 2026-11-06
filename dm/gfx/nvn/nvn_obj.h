@@ -55,6 +55,8 @@ typedef struct { uint32_t magic; samp_par p; } samp_t;                          
 
 // The per-stage shader keys are not kept in prog_t: the game's real NVNprogram may be smaller than the header's 0xC0 (growing prog_t corrupted the adjacent object in Mario); see prog_keys in hle_nvn.c
 typedef struct { uint32_t magic, nstage; NVNshaderData sd[6]; uint64_t serial; } prog_t;     FITS(prog_t, NVNprogram);   // serial: table key for the replay layer's resolved result
+// NVN2 (Switch 2) keeps programs in 0xa0 bytes: Donkey Kong Bananza initializes them 0xa0 apart (main+0x8aa1cc: programs at +0x18, +0xb8, +0x158)
+_Static_assert(sizeof(prog_t) <= 0xa0, "prog_t exceeds an NVN2 program");
 
 typedef struct { uint32_t magic, fenced; uint64_t fence; } sync_t;   /* fenced 2: by WindowAcquireTexture */                           FITS(sync_t, NVNsync);
 typedef struct { const pool_t *pool; int64_t off; } ev_builder_t;                             FITS(ev_builder_t, NVNeventBuilder);

@@ -25,6 +25,7 @@ static void image_case(int explicit_image) { @autoreleasepool {
     nvn_tex_layout(&texture.d, &texture.L); mtl_tex_init(&texture);
     tex_t alias = texture; alias.serial++; mtl_tex_init(&alias);
     id<MTLTexture> old = tex_mtl(&texture);
+    mtl_tex_zero_cancel(old);   // made before the first submit, so its zeroing waits for the next one (tex_zero_fill): the fixture seeds it behind the host's back below
     CHECK(old && !(old.usage & MTLTextureUsageShaderWrite), "ordinary render target keeps its original usage");
     CHECK(tex_mtl(&alias) == old, "another serial shares the original backing");
     // Seed the smaller mip before the production render pass clears level 0.

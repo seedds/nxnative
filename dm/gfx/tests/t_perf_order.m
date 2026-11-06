@@ -121,13 +121,23 @@ static void slices(id<MTLLibrary> lib) {
     p->sh[1]->rf.nb=1; p->sh[1]->rf.b[0]=(nvn_rbind){.kind=NVN_RB_TEX,.reg=0};
     chain next={0}; rt(&next,&t,1,NULL); triangle(&next); emit(&next,OP_END,NULL,0); g_exec_next=next.p;
     sm_plan(p); CHECK("first draw sampling attachment cannot start slice merge",!g_sm_plan.on);
-    int kinds[]={NVN_RB_TEXU,NVN_RB_TEXD,NVN_RB_TEXA};
+    int kinds[]={NVN_RB_TEXD,NVN_RB_TEXA};
     for(unsigned i=0;i<sizeof kinds/sizeof *kinds;i++) {
         p->sh[1]->rf.b[0].kind=kinds[i];
         CHECK("unknown/bindless attachment reads split merged pass",draw_samples_rt(p));
     }
+    // A handle in a uniform buffer is resolved at the draw, as encode_args resolves it: one that names no attachment (here none: no uniform buffer is bound) does not split the
+    // pass (Unreal's deferred lights stay in one render pass); an array of them is not resolved and still splits
+    p->sh[1]->rf.b[0].kind=NVN_RB_TEXU;
+    CHECK("a uniform-buffer handle that names no attachment keeps the merged pass",!draw_samples_rt(p));
+    p->sh[1]->rf.b[0].n=4;
+    CHECK("an array of uniform-buffer handles splits merged pass",draw_samples_rt(p));
+    p->sh[1]->rf.b[0].n=0;
     p->sh[1]->rf.nb=0; p->sh[1]->rf.bindless=1;
-    CHECK("bindless reflection splits merged pass",draw_samples_rt(p));
+    CHECK("bindless reflection alone keeps the merged pass (each binding is checked)",!draw_samples_rt(p));
+    p->sh[1]->rf.pool=1;
+    CHECK("a shader reading the texture pool splits merged pass",draw_samples_rt(p));
+    p->sh[1]->rf.pool=0;
     p->sh[1]->rf.bindless=0; p->sh[1]->rf.dyn=1;
     CHECK("dynamic reflection splits merged pass",draw_samples_rt(p));
     g_exec_next=NULL; g_sm_plan.on=0;

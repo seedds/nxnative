@@ -1508,3 +1508,38 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
     snprintf(out, out_cap, "%s", text.UTF8String);
     return 1;
 }
+
+// The game stops over a GPU problem. A stopped game in full screen holds the whole screen (GitHub issue #1326: WindowServer froze for 40 s and its watchdog killed it), so the window leaves
+// full screen first and the alert comes once it has, or after 3 s if it has not. Then the app quits as ⌘Q does. Any thread
+static void front_stop_alert(NSString *title, NSString *text) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        __block int told = 0;
+        void (^tell)(void) = ^{
+            if (told++) return;
+            NSAlert *a = [NSAlert new];
+            a.alertStyle = NSAlertStyleCritical;
+            a.messageText = title;
+            a.informativeText = text;
+            [a addButtonWithTitle:@"Quit"];
+            // An app opened in the background would leave the alert behind other apps' windows, and DM_WINDOW_TOP's floating game window would cover it
+            [NSApp activateIgnoringOtherApps:YES];
+            [a layout]; NSWindow *game = g_win; if (game && a.window.level <= game.level) a.window.level = game.level + 1;
+            [a runModal];
+            [NSApp terminate:nil];   // as ⌘Q
+        };
+        NSWindow *win = g_win;
+        if (!(win.styleMask & NSWindowStyleMaskFullScreen)) { tell(); return; }
+        [NSNotificationCenter.defaultCenter addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; tell(); }];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), tell);
+        [win toggleFullScreen:nil];
+    });
+}
+// GPU memory nearly full (front.h). The gate first, off the calling thread: dm_gfx_suspend waits for the submission in progress, which may be the caller, and no more GPU work may grow what is held
+void front_gpu_memory_stop(unsigned long long used_mb, unsigned long long limit_mb) {
+    if (!g_layer) { kill(getpid(), SIGTERM); return; }
+    LOG("front end: GPU memory is nearly full; telling the player and quitting");
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ dm_audio_suspend(1); dm_gfx_suspend(1); });
+    front_stop_alert([@(DM_GAME_NAME) stringByAppendingString:@" stopped: GPU memory is nearly full"],   // @(): the name is UTF-8, which %s would not read as such
+                     [NSString stringWithFormat:@"The game reached %llu MB of the %llu MB macOS can keep in GPU memory. Going on could freeze this Mac, so the game stops here; progress since your last save is lost. The log has the details. "
+                                                 "Please report it on GitHub with python3 scripts/bug_report.py %@, which collects the log.", used_mb, limit_mb, @(DM_GAME_ID)]);
+}

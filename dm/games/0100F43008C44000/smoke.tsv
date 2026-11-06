@@ -1,0 +1,11 @@
+# Station arrival save, facing down the platform; copy a save at this point to saves/station in the NSP folder.
+# No movement: screenshots compare the same camera, allowing idle animation.
+save	saves/station
+keys	20:A*3/4
+secs	100
+quick	65
+reach	1500@80
+window	40	50
+shots	50,80
+hang	20
+capture	2200

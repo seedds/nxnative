@@ -154,6 +154,14 @@ for off, ob, nb, why in cuts:
 KEYS = {'K18': 508, 'KTLS': 509, 'KTLR': 510, 'KGATE': 511}
 KEY_INDEX = {k: i for i, k in enumerate(('K18', 'KTLS', 'KTLR', 'KGATE'))}
 
+# Reserve the frame-state page before emitting any patch-area branches. The
+# ordinary 64 KB alignment often leaves room after the key page, but not when
+# that page ends exactly on the boundary (Z-A 2.0.2). Front layouts already
+# separate code from the key/state pages; modules without a frame step keep
+# their byte-identical layout.
+if not FAR and NAME == 'main' and BUILD_ID in PATCHES['FRAME_STEP']:
+    PATCH_OFF = max(PATCH_OFF, (KEY_PAGE_OFF + 0x8000 + 0xffff) & ~0xffff)
+
 # ---- Unreal console variables in main (dm/tools/ue_cvar.py finds them by their registered names, without a build ID) ----
 # The fixups table names each one's TAutoConsoleVariable (UE_CVAR:<name>); the host writes those the profile decides on (hle_fpslock.c, hle_uecvar.c)
 import ue_cvar
@@ -1417,7 +1425,7 @@ for off, oid, ow, why in region_obs: use_area(off); put_branch(off, site_obs(off
 obs += region_obs
 
 # ---- Frame step in whole vsyncs (the mains whose patch file has FRAME_STEP: The Legend of Zelda: Tears of the Kingdom 1.4.3, Breath of the Wild 1.9.0, Hyrule Warriors: Age of Calamity 1.3.0,
-# Paper Mario: The Thousand-Year Door 1.0.1 and ASTRAL CHAIN 1.0.1; host only) ----
+# Paper Mario: The Thousand-Year Door 1.0.1, ASTRAL CHAIN 1.0.1 and Pokemon Legends: Z-A 2.0.2; host only) ----
 # The games step their game time by a whole number of vsyncs (1/60 s) per frame that their own interval logic picks. With the stubs the host picks it (hle_nvn.c fstep_tick,
 # nvn_fstep.h): the step is the number of vsyncs the host keeps the frame on screen (1 = 60 fps, 2 = 30 when 60 does not hold), plus one while the game is behind real time after
 # a late frame, so motion is even and game time = real time. The steps stay values the games' own logic uses (1 to 3). Age of Calamity's updates are not held by the presents:

@@ -117,6 +117,29 @@ class Plan(unittest.TestCase):
         bases, _, _ = po.plan(self.d, CHAIN, pairs[:2], True)   # near = 0: the entry_z entries
         self.assertEqual(bases, [('pull_bp', 'main0_z', 'fs_b', 'main0'), ('plain_b', 'main0_z', 'fs_b', 'main0')])
 
+    def test_compute_kernels_and_their_descriptors(self):   # every compute shader of the map, whole (no base), left out as the host would not dispatch it
+        self.shader('cs', {'stage': 'cs'}, {'_b': [('main0', False)]})
+        self.shader('csk', {'stage': 'cs', 'entry': 'kmain'}, {'_b': [('kmain', False)]})
+        self.shader('csc', {'stage': 'cs'}, {'_b': [('main0', True)]})   # function constants: the device specializes it
+        self.shader('csx', {'stage': 'cs', 'entry': 'main1'}, {'_b': [('main0', False)]})
+        self.shader('csv', {'stage': 'vs'}, {'_b': [('main0', False)]})   # a vertex shader the map calls compute
+        self.shader('cso', {'stage': 'cs', 'chain': 'fedcba987654'}, {'_b': [('main0', False)]})
+        self.shader('csn', {'stage': 'cs'}, {})   # no library
+        m = self.d.parent / 'shader_map.tsv'
+        m.write_text('# a map\n' + ''.join(f'cs_lib.bin\t{i}\tcompute\t{k}\t/x\n' for i, k in enumerate(['cs', 'csk', 'csc', 'csx', 'csv', 'cso', 'csn', 'cs', 'gone'])) + 'ps_lib.bin\t9\tpixel\tcs\t/x\n')
+        keys = po.compute_keys([str(m), '/nonexistent/map.tsv'])
+        self.assertEqual(keys, ['cs', 'csk', 'csc', 'csx', 'csv', 'cso', 'csn', 'gone'])
+        kernels, left = po.plan_compute(self.d, CHAIN, keys)
+        self.assertEqual(kernels, [('cs_b', 'main0'), ('csk_b', 'kmain')])
+        self.assertEqual(left, {'reflection': 3, 'library': 1, 'entry': 1, 'function constants': 1})
+        j = po.script(self.d, [('v_bp', 'main0', 'f_b', 'main0')] + kernels)
+        self.assertEqual([l['label'] for l in j['libraries']], ['v_bp', 'f_b', 'cs_b', 'csk_b'])
+        self.assertEqual(j['pipeline_descriptors']['compute_pipeline_descriptors'], [{'compute_function_descriptor': 'fnd:cs_b.main0'}, {'compute_function_descriptor': 'fnd:csk_b.kmain'}])
+        self.assertEqual(len(j['pipeline_descriptors']['render_pipeline_descriptors']), 1)
+        self.assertNotIn('compute_pipeline_descriptors', po.script(self.d, [('v_bp', 'main0', 'f_b', 'main0')])['pipeline_descriptors'])   # none: the key as before
+        self.assertEqual(po.library_digest(self.d, kernels), po.library_digest(self.d, kernels))
+        self.assertNotEqual(po.library_digest(self.d, kernels), po.library_digest(self.d, kernels[:1]))
+
     def test_script(self):
         j = po.script(self.d, [('v_bp', 'main0', 'f_b', 'main0'), ('w_bp', 'main0_z', 'f_b', 'main0')])
         self.assertEqual([l['label'] for l in j['libraries']], ['v_bp', 'f_b', 'w_bp'])

@@ -6855,6 +6855,7 @@ static dispatch_queue_t g_arch_q; static _Atomic int g_arch_new, g_arch_new_vd, 
 // n, vd: bases captured, those with a vertex layout
 @implementation ArchEpoch @end
 static ArchEpoch *g_ep; static os_unfair_lock g_ep_lock = OS_UNFAIR_LOCK_INIT;   // the current period
+static _Atomic uint64_t g_cps_archived, g_cps_arch_ns, g_cps_compiled, g_cps_comp_ns;   // compute pipelines taken from the archives / compiled (cps_make)
 static int g_arch_cap;   // compiles are captured (an archive folder, a serializer): immutable after pso4_init
 static dispatch_group_t g_arch_pending;   // periods handed over and not written yet
 static _Atomic uint64_t g_pb_built, g_pb_archived, g_pb_reused, g_pb_spec, g_pb_legacy, g_pb_base_ns;
@@ -6994,6 +6995,33 @@ static id<MTLRenderPipelineState> arch_capture(MTL4RenderPipelineDescriptor *d, 
     if (ps) { atomic_fetch_add(&ep->n, 1); atomic_fetch_add(&g_arch_new, 1); if (vd) { atomic_fetch_add(&ep->vd, 1); atomic_fetch_add(&g_arch_new_vd, 1); } }
     ep_leave(ep);
     return ps;
+}
+// A compute pipeline: from the archives (the bundled one first, then this Mac's files) in about 0.3 ms, else compiled through the current flush period's compiler so the flush
+// writes it (arch_capture's compute form), else the MTLDevice as before. Metal 4 keeps no base for compute: the archive holds the pipeline whole, so a dispatch never meets the
+// compiler when the offline archive has its shader (pso_offline.py --compute). Before this every compute pipeline not in the prewarm lists was built on the submit thread at the
+// shader's first dispatch, with the Metal shader cache the only thing between it and a cold compile: 20-40 ms warm, 100-1,200 ms cold (Ocarina of Time's effects: 20 at a time
+// on a new area, frames of 2-4 s; its title movie's network 72 s on a first start)
+static id<MTLComputePipelineState> cps_make(NvShader *cs, NSError **e) {
+    MTL4FunctionDescriptor *fd = cs && cs->fn && pso4_on() && g_comp4 ? fn4_of(cs->fn) : nil;
+    if (!fd) return cs && cs->fn ? [g_dev newComputePipelineStateWithFunction:cs->fn error:e] : nil;
+    MTL4ComputePipelineDescriptor *d = [MTL4ComputePipelineDescriptor new]; d.computeFunctionDescriptor = fd;
+    uint64_t t0 = bp_now(); id<MTLComputePipelineState> ps = nil; int from_run = 0;
+    for (id<MTL4Archive> a in g_arch4p) if ((ps = [a newComputePipelineStateWithDescriptor:d error:nil])) { from_run = a != g_arch_bundle; break; }
+    if (!ps) for (id<MTL4Archive> a in g_arch4) if ((ps = [a newComputePipelineStateWithDescriptor:d error:nil])) { from_run = a != g_arch_bundle; break; }
+    if (ps) { g_cps_archived++; g_cps_arch_ns += bp_now() - t0;
+        if (from_run && g_compact_enabled && atomic_load(&g_warm_running)) {   // as a render base taken from this Mac's files during a compaction: captured again for the new file
+            if (!g_arch_cap) return ps;
+            ArchEpoch *ep = ep_enter(); id<MTLComputePipelineState> cb = [ep->comp newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:nil];
+            if (cb) { atomic_fetch_add(&ep->n, 1); atomic_fetch_add(&g_arch_new, 1); ps = cb; g_compacted++; }
+            ep_leave(ep); }
+        return ps; }
+    NSError *ce = nil;
+    if (!g_arch_cap) ps = [g_comp4 newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:&ce];
+    else { ArchEpoch *ep = ep_enter(); ps = [ep->comp newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:&ce];
+           if (ps) { atomic_fetch_add(&ep->n, 1); atomic_fetch_add(&g_arch_new, 1); } ep_leave(ep); }
+    if (ps) { g_cps_compiled++; g_cps_comp_ns += bp_now() - t0; return ps; }
+    static int lg = 4; if (lg > 0) { lg--; MLOG("compute pipeline %s: the Metal 4 compiler refused it (%s): built through the device", cs->key, ce.localizedDescription.UTF8String); }
+    return [g_dev newComputePipelineStateWithFunction:cs->fn error:e];
 }
 // Metal opens a pipeline archive through NSData with "mapped if safe", and Foundation takes a file on an external drive as not safe: it reads it into memory, whole and for the whole run (docs/reference/memory.md). newArchiveWithURL has no option for this, so while the host
 // opens its archives the read of a .mtl4a asks for a mapping, as the internal disk gets. The game already runs from that drive; a drive pulled out ends it either way. If a system has no such method, the files are read as before
@@ -7350,6 +7378,7 @@ static id<MTLRenderPipelineState> pso_pend_take(const pso_key *k) {
     pthread_mutex_unlock(&g_pp_mu);
     return ps;
 }
+static int pso_pend_try_state(const pso_key *k) { pthread_mutex_lock(&g_pp_mu); int at = pso_pend_find(k), st = at < 0 ? 0 : g_pp[at].done ? 2 : 1; pthread_mutex_unlock(&g_pp_mu); return st; }   // as pso_pend_try, taking nothing (the event log)
 // Without waiting: 0 = not in the table; 1 = in it, still being built; 2 = built and taken into *out (nil when the build failed)
 static int pso_pend_try(const pso_key *k, id<MTLRenderPipelineState> *out) {
     pthread_mutex_lock(&g_pp_mu);
@@ -7399,14 +7428,18 @@ static __unsafe_unretained id<MTLRenderPipelineState> hybrid_get(const pso_key *
     return ps;
 }
 void mtl_hybrid_stats(uint64_t *draws, uint64_t *made, uint64_t *none) { *draws = g_hy_draws; *made = g_hy_made; *none = g_hy_none; }
+static _Atomic uint64_t g_progpf_cps, g_cps_pf_taken, g_cps_pf_waited, g_cps_pf_wait_ns;   // compute pipelines built at program creation (mtl_prog_prefetch), taken by a dispatch before the claim, waited for
 // The pipeline time line of the timing summary (hle_nvn.c), the difference since the last call
 void mtl_pso_line(char *o, size_t n) {
-    static uint64_t p[18]; uint64_t v[18] = {g_bp_pso_ns, g_bp_lib_ns, g_pt_hit_n, g_pt_hit_ns, g_pt_miss_n, g_pt_miss_ns, g_pb_spec, g_pt_spec_ns, g_pb_built, g_pt_comp_ns, g_pt_pred_n, g_pt_pred_ns, g_hy_draws, g_hy_made, g_pp_kicked, g_pp_done_n, g_pp_stolen, g_hy_none};
-    uint64_t d[18]; for (int i = 0; i < 18; i++) d[i] = v[i] - p[i];
+    static uint64_t p[26]; uint64_t v[26] = {g_bp_pso_ns, g_bp_lib_ns, g_pt_hit_n, g_pt_hit_ns, g_pt_miss_n, g_pt_miss_ns, g_pb_spec, g_pt_spec_ns, g_pb_built, g_pt_comp_ns, g_pt_pred_n, g_pt_pred_ns, g_hy_draws, g_hy_made, g_pp_kicked, g_pp_done_n, g_pp_stolen, g_hy_none,
+                                             g_progpf_cps, g_cps_pf_taken, g_cps_pf_waited, g_cps_pf_wait_ns, g_cps_archived, g_cps_arch_ns, g_cps_compiled, g_cps_comp_ns};
+    uint64_t d[26]; for (int i = 0; i < 26; i++) d[i] = v[i] - p[i];
     snprintf(o, n, "on the submit thread pipelines %.1f ms, shader libraries %.1f ms, predictions %llu / %.1f ms; all threads: archive lookups found %llu / %.1f ms, found none %llu / %.1f ms, "
              "specializations %llu / %.1f ms, bases compiled %llu / %.1f ms; draws with a hybrid pipeline %llu (%llu pulling pipelines made, %llu misses with no pulling base ready); background builds kicked %llu, done %llu, made by the draw %llu, in flight %llu",
              d[0] / 1e6, d[1] / 1e6, (unsigned long long)d[10], d[11] / 1e6, (unsigned long long)d[2], d[3] / 1e6, (unsigned long long)d[4], d[5] / 1e6, (unsigned long long)d[6], d[7] / 1e6,
              (unsigned long long)d[8], d[9] / 1e6, (unsigned long long)d[12], (unsigned long long)d[13], (unsigned long long)d[17], (unsigned long long)d[14], (unsigned long long)d[15], (unsigned long long)d[16], (unsigned long long)(v[14] - v[15] - v[16]));
+    { size_t o1 = strlen(o); snprintf(o + o1, n > o1 ? n - o1 : 0, "; compute pipelines from the archives %llu / %.1f ms, compiled %llu / %.1f ms, built at program creation %llu, taken by a dispatch before the claim %llu, waited for %llu / %.1f ms",
+                                      (unsigned long long)d[22], d[23] / 1e6, (unsigned long long)d[24], d[25] / 1e6, (unsigned long long)d[18], (unsigned long long)d[19], (unsigned long long)d[20], d[21] / 1e6); }
     memcpy(p, v, sizeof p);
     static uint64_t pn[5], pns[5]; size_t o2 = strlen(o);
     o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, "; draws that waited:");
@@ -7714,7 +7747,8 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
         static int lg = -1; if (lg < 0) { const char *ev = getenv("DM_PSO_WAITLOG"); lg = ev && !strcmp(ev, "1") ? 40 : 0; }
         if (lg > 0 && w > 20000000) { lg--; MLOG("pipeline wait %.1f ms (%s): vertex %s fragment %s, %u samples", w / 1e6, g_pw_why[why], vs->key, fs ? fs->key : "-", k.samples); }
     }
-    g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
+    { uint64_t all = bp_now() - bt; g_bp_pso_n++; g_bp_pso_ns += all;   // every render pipeline event on the submit thread, however it was served: the long ones named (the wait log above covers the classified waits only)
+      static int lg = 24; if (lg > 0 && all > 100000000) { lg--; MLOG("pipeline event %.1f ms on the submit thread: vertex %s fragment %s, taken from a background build %d, stand-in %d, pending state %d, prediction %.1f ms", all / 1e6, vs->key, fs ? fs->key : "-", took, g_pso_pull, hybrid_on() ? pso_pend_try_state(&k) : -1, (g_pt_pred_ns - pred0) / 1e6); } }
     if (!ps) { char hint[200]; MLOG("[RED] failed to create render pipeline (vertex %s fragment %s): %s%s", vs->key, fs ? fs->key : "-", e.localizedDescription.UTF8String, pso_fout_hint(fs, g_pass.cfmt, hint, sizeof hint));
                hm_put_id(&g_pso_fail, &k, NSNull.null); return nil; }
     if (!ms_fn) { pso_skey sk; char shex[sizeof sk * 2 + 1]; pso_skey_from(&k, vs, fs, g_pso_lmap != NULL, g_pso_lmap ? &g_pso_fz : NULL, &sk); pso_skey_hex(&sk, shex);
@@ -7828,7 +7862,7 @@ static void warm_task(WarmTask *t) {
             g_warm_done++; return;
         }
         if (t->kind == 2) {
-            NvShader *cs = warm_shader(t->key, 5); NSError *e = nil; id ps = cs ? [g_dev newComputePipelineStateWithFunction:cs->fn error:&e] : nil;
+            NvShader *cs = warm_shader(t->key, 5); NSError *e = nil; id ps = cs ? cps_make(cs, &e) : nil;
             if (cs && !ps) MLOG("[RED] background compute pipeline creation failed: %s", e.localizedDescription.UTF8String);
             if (ps) { WarmItem *item = [WarmItem new]; item->kind = 2; item->key = t->key; item->shader = cs; item->object = ps; warm_enqueue(item); g_warm_cps++; }
             g_warm_done++; return;
@@ -11754,6 +11788,23 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (g_rt_range_pending) { PD("j rt_level_range pass=%llu vc=%u", g_stat_pass, (unsigned)(dw ? dw->count : di->count)); g_rt_range_pending=0; }
 }
 static nvn_hmap g_cps = {.klen = sizeof(void *)};
+// A compute program's pipeline is built there too (DM_NVN_PREFETCH_CPS=0 leaves it to the dispatch): the dispatch path has no stand-in, so a compute pipeline not in the prewarm
+// lists was built on the submit thread at its first dispatch, 100-400 ms each. Ocarina of Time's effects bring new compute shaders with every area, 20 at a time: frames of 2-4 s.
+// Until the next submission claims the item (warm_claim), a dispatch that comes first finds it here, or waits for a build in flight instead of starting its own
+@interface CpsPf : NSObject { @public id ps; NvShader *shader; dispatch_group_t group; int started, taken; } @end   // started: its worker is building it; taken: the dispatch builds it itself
+@implementation CpsPf @end
+static NSMutableDictionary<NSString *, CpsPf *> *g_cps_pf; static os_unfair_lock g_cps_pf_lock = OS_UNFAIR_LOCK_INIT;
+static int prefetch_cps_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PREFETCH_CPS"); v = !(e && !strcmp(e, "0")); } return v; }
+// The pipeline the prefetch built for this compute shader. A build still queued (behind the hundreds a scene load queues: 500 in Ocarina of Time's title, on three serial queues)
+// is taken over and built here, as pso_pend_take does for a draw; only a build that is running is waited for. nil when the prefetch has none
+static id cps_prefetched(NSString *key) {
+    os_unfair_lock_lock(&g_cps_pf_lock); CpsPf *e = g_cps_pf ? g_cps_pf[key] : nil; int build = e && !e->ps && !e->started; if (build) e->taken = 1; os_unfair_lock_unlock(&g_cps_pf_lock);
+    if (!e) return nil;
+    if (build) { NSError *er = nil; id ps = e->shader && e->shader->fn ? cps_make(e->shader, &er) : nil; e->ps = ps; return ps; }
+    if (!e->ps) { uint64_t t0 = bp_now(); dispatch_group_wait(e->group, DISPATCH_TIME_FOREVER); g_cps_pf_waited++; g_cps_pf_wait_ns += bp_now() - t0; }
+    if (e->ps) g_cps_pf_taken++;
+    return e->ps;
+}
 static void warm_claim(void) {
     if (!atomic_exchange_explicit(&g_warm_ready, 0, memory_order_acq_rel)) return;
     os_unfair_lock_lock(&g_warm_lock);
@@ -11776,7 +11827,9 @@ static void warm_claim(void) {
             NvShader *cs = g_shcache[item->key];
             if (!cs) { cs = item->shader; if (!g_shcache) g_shcache = [NSMutableDictionary dictionary]; g_shcache[item->key] = cs; }
             const void *key = (__bridge const void *)cs;
-            if (!hm_get_id(&g_cps, &key)) { hm_put_id(&g_cps, &key, item->object); g_warm_claim_cps++; }
+            if (!hm_get_id(&g_cps, &key)) { hm_put_id(&g_cps, &key, item->object); g_warm_claim_cps++;
+                if (item->record) { pso_record("C\t%s\n", item->key.UTF8String); pso_user_record("C\t%s\n", item->key.UTF8String); } }
+            os_unfair_lock_lock(&g_cps_pf_lock); if (g_cps_pf) [g_cps_pf removeObjectForKey:item->key]; os_unfair_lock_unlock(&g_cps_pf_lock);   // claimed: the dispatch finds it in g_cps
         }
     }
 }
@@ -11796,12 +11849,24 @@ void mtl_prog_prefetch(const prog_t *cp) {
         if (st < 0) continue;   // not in the package: a built-in kernel (prog_get)
         NSString *pc = [k stringByAppendingString:@"_b"];
         if (!progpf_first(pc)) continue;
+        CpsPf *pf = nil;
+        if (st == 5 && prefetch_cps_on()) { pf = [CpsPf new]; pf->group = dispatch_group_create(); dispatch_group_enter(pf->group);   // shader: set by the worker once loaded (a dispatch before that builds nothing here: its shader is not loaded either)
+            os_unfair_lock_lock(&g_cps_pf_lock); if (!g_cps_pf) g_cps_pf = [NSMutableDictionary dictionary]; g_cps_pf[pc] = pf; os_unfair_lock_unlock(&g_cps_pf_lock); }
         dispatch_async(pp_bg_queue(), ^{ @autoreleasepool {
             NvShader *sh = shader_load(pc, st, 0);
             if (sh && st == 0 && sh->has_pull && !sh->layer_out && hybrid_on()) pull_load(sh);   // its pulling entry too, as the prewarm does (warm_shader)
-            if (!sh) return;
+            if (!sh) { if (pf) dispatch_group_leave(pf->group); return; }
             WarmItem *item = [WarmItem new]; item->kind = 0; item->record = 1; item->key = pc; item->shader = sh; warm_enqueue(item);
             if (!g_progpf_loaded++) MLOG("shader prefetch at program creation: first library %s loaded in the background (DM_NVN_PREFETCH=0 turns it off)", pc.UTF8String);
+            if (pf) {   // the compute pipeline as well, as the prewarm's kind 2 (warm_task), unless a dispatch took the build over meanwhile
+                os_unfair_lock_lock(&g_cps_pf_lock); pf->shader = sh; int go = !pf->taken; if (go) pf->started = 1; os_unfair_lock_unlock(&g_cps_pf_lock);
+                if (!go) { dispatch_group_leave(pf->group); return; }
+                NSError *e = nil; id ps = sh->fn ? cps_make(sh, &e) : nil;
+                if (sh->fn && !ps) MLOG("[RED] compute pipeline prefetch at program creation failed for %s: %s", pc.UTF8String, e.localizedDescription.UTF8String);
+                pf->ps = ps; dispatch_group_leave(pf->group);
+                if (ps) { WarmItem *ci = [WarmItem new]; ci->kind = 2; ci->record = 1; ci->key = pc; ci->shader = sh; ci->object = ps; warm_enqueue(ci);
+                    if (!g_progpf_cps++) MLOG("compute pipeline prefetch at program creation: first pipeline %s built in the background (DM_NVN_PREFETCH_CPS=0 turns it off)", pc.UTF8String); }
+            }
         } });
     }
 }
@@ -11836,8 +11901,11 @@ static void dispatch(const p_dispatch *dp) {
     id<MTLComputePipelineState> ps = hm_get_id(&g_cps, &k);
     if (!ps) {
         if (cs->cps_failed) return;   // the same function fails the same way: asked again at every dispatch, Mario Kart World's refused shaders took 3,138 pipeline builds in 60 s
-        NSError *e = nil; uint64_t bt = bp_now(); ps = [g_dev newComputePipelineStateWithFunction:cs->fn error:&e];
-        g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
+        NSError *e = nil; uint64_t bt = bp_now();
+        ps = cs->key[0] ? cps_prefetched([NSString stringWithUTF8String:cs->key]) : nil;   // built at program creation (mtl_prog_prefetch), not claimed yet
+        if (!ps) ps = cps_make(cs, &e);
+        uint64_t w = bp_now() - bt; g_bp_pso_n++; g_bp_pso_ns += w;
+        { static int lg = 8; if (lg > 0 && w > 20000000) { lg--; MLOG("compute pipeline %s: %.1f ms on the submit thread at its first dispatch", cs->key, w / 1e6); } }
         if (!ps) { cs->cps_failed = 1; MLOG("[RED] failed to create compute pipeline for %s: %s (its dispatches are skipped)", cs->key, e.localizedDescription.UTF8String); return; }
         pso_record("C\t%s\n", cs->key);
         if (cs->key[0]) pso_user_record("C\t%s\n", cs->key);

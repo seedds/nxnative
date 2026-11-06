@@ -319,12 +319,15 @@ class Nvn(Base):
             self.build(True); self.assertEqual(len(self.ran), 1)
             self.build(True); self.assertEqual(self.ran, [])
 
-    def test_shader_watch_finishes_extra_pairs_last(self):
-        (self.tmp / 'shader_map.tsv').write_text('p.bin\t0\tvs\ta\tsrc\np.bin\t1\tps\tb\tsrc\np.bin\t2\tvs\tc\tsrc\n')
-        (self.tmp / 'shader_pairs.tsv').write_text('c\tb\n')
-        pso = self.tmp / 'pso_pairs.tsv'; pso.write_text('a\tb\n')
-        watch = nsp.ShaderWatch(self.g, self.tmp, self.tmp, pso)
-        self.assertEqual(list(watch.pos), ['b', 'a', 'c'])
+    def test_shader_watch_reads_the_progress_file(self):   # dmsh_build.py DMSH_PROGRESS
+        p = self.tmp / 'progress.json'; watch = nsp.ShaderWatch(p)
+        self.assertIsNone(watch())   # not written yet
+        p.write_text('{"step": "cache check", "done": 3, "total": 10, "cached": 2}')
+        self.assertEqual(watch(), {'step': 'cache check', 'done': 3, 'total': 10, 'unit': 'shaders', 'note': '2 cached'})
+        p.write_text('{"step": "compiling", "done": 7, "total": 10, "cached": 6, "misses": 4}')
+        self.assertEqual(watch(), {'step': 'compiling', 'done': 7, 'total': 10, 'unit': 'shaders', 'note': '4 not cached'})
+        p.write_text('{"step": "comp')   # half written: no progress this time, not an error
+        self.assertIsNone(watch())
 
 
 class EnvFile(Base):

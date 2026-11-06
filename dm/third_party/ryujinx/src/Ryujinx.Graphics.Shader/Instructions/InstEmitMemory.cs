@@ -200,6 +200,23 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
+        // nxnative: a float atomic add (RED.F32.FTZ.RN and ATOM's float form), as a compare-and-swap loop on the word: neither SPIR-V as the chain uses it nor Metal's texture atomics have one. It was
+        // dropped with a log line, so agl's scene analysis summed nothing: Ocarina of Time's probe_analyze reads the probes' luminance into a buffer the CPU turns into exposure, and at 0 the game took
+        // its full correction, several times too bright. Returns the value before the add
+        private static Operand EmitAtomicAddF32(EmitterContext context, StorageKind storageKind, Operand e0, Operand e1, Operand value)
+        {
+            Operand lblRetry = Label();
+            context.MarkLabel(lblRetry);
+
+            Operand expected = context.Load(storageKind, e0, e1);
+            Operand sum = context.FPAdd(expected, value);
+            Operand found = context.AtomicCompareAndSwap(storageKind, e0, e1, expected, sum);
+
+            context.BranchIfTrue(lblRetry, context.ICompareNotEqual(found, expected));
+
+            return found;
+        }
+
         private static Operand EmitAtomicOp(
             EmitterContext context,
             StorageKind storageKind,
@@ -217,6 +234,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     if (type is AtomSize.S32 or AtomSize.U32)
                     {
                         res = context.AtomicAdd(storageKind, e0, e1, value);
+                    }
+                    else if (type == AtomSize.F32FtzRn)
+                    {
+                        res = EmitAtomicAddF32(context, storageKind, e0, e1, value);
                     }
                     else
                     {

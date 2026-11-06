@@ -37,6 +37,7 @@ DM_EXEC_OUT	path	File `oe::ExecuteProgram` records the next program and its para
 DM_FD_LOG	diagnostic	`=<seconds>` logs, every that many seconds, the number and kinds of file descriptors the process has open
 DM_FIXED_TIME	switch	`=<seconds>`: the user clock always returns that time and the host time zone is pinned to UTC, for deterministic comparison
 DM_FOCUS_KEEP	switch	`1` keeps the game in focus while its Mac window is up, whichever app is active (minimizing still counts); `scripts/regress.py` sets it, so another app taking the key window during a run does not pause a game that stops out of focus
+DM_FOCUS_PAUSE	player	`1` pauses the game while its Mac window is not key (another app or window in front): out of focus then in the background, sound and graphics suspended and the guest clock frozen, as an iPhone app in the background, until the window is key again; `0` or unset, the game runs on out of focus as before. `DM_FOCUS_KEEP=1` wins over it. The Mac settings window's Pause in the background
 DM_FONT_DIR	path	Folder of the shared-font stand-ins (`standard.ttf`, `nintendo_ext.ttf` with the button icons); the app, the Mac launcher and the NSP script set it
 DM_FORCE_STRICT	diagnostic	`=1` makes the loader fail on forced-hook entries no module references, instead of only noting them (for checking a mistyped list)
 DM_FPS	switch	`30` or `60` pins the frame rate the display link and frame pacing aim for; otherwise it follows the game's present interval (60, or 30 when the game asks for 30)

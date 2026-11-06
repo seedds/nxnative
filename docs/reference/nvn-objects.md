@@ -701,3 +701,16 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** the builder's offset is the texture's (`view_offset`). The compare is true when the two views set the same fields to the same values: that true means equal is taken from the name, as no caller in `main` was found to confirm it. The blend flag is kept for its getter; the fixed-function factors the replay uses read a normalized target as it is.
 - **Found on:** [Kirby Air Riders](../../dm/games/040077201BE50000/README.md).
 
+### Texture IDs of one storage share one packaged texture
+
+- **Symptom:** a pool walk makes gigabytes of textures from far fewer images: Ocarina of Time's 32,768 IDs name 3,607 storages, and one texture per ID came to 2 GB.
+- **Cause:** a packaged texture belongs to its serial, and the engine registers the same storage under many texture objects.
+- **Fix:** general (`nvn_mtl.m` `g_pkg_share`, `tex_alias_key`, `pkg_shared`). Packaged textures are shared by storage, layout and format through a weak table, so a new serial of the same storage takes the existing one. A pool's removal evicts its keys (`mtl_alias_drop_pool`), and the walk's budget does not count a texture that is already shared.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
+### Finalizing a copy of a texture object
+
+- **Symptom:** thousands of first uploads a frame in a scene whose textures do not change: Ocarina of Time, about 15,000 a frame.
+- **Cause:** the engine copies an `NVNtexture` by value and finalizes the copy, while the original stays in use. The host keyed the texture by serial, so finalizing the copy deleted the host texture of the original, and its next use uploaded it again.
+- **Fix:** general (`nvn_mtl.m` `mtl_tex_release`). The registry keeps the address of the object that was initialized, and a finalize is ignored when that owner still holds the texture's magic and serial (read with `vm_read_overwrite`, as the owner's memory may be gone). `t_cpu_tex` checks both orders.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).

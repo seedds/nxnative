@@ -78,17 +78,16 @@
 // Raw global memory: the translator reserves that table as a storage buffer under this constant buffer slot, which no game has (Ryujinx GlobalToStorage.GmemMapCbSlot), finds the pool
 // holding an address by a binary search over the table's starts and accesses the address plus the pool's delta through a physical storage buffer pointer
 #define DMSH_GMEM_MAP_CB_SLOT 0xFF
-#define DMSH_GMEM_MAP_ENTRIES 4096       // entries of the table (GlobalToStorage.GmemMapLog2 = 12), sorted by start: entry 0 is empty (start 0, end 0) and unused entries start at ~0
-#define DMSH_GMEM_MAP_ENTRY 32           // bytes of an entry: start, end (exclusive) and delta (the pool's Metal GPU address minus its guest address), 64 bits each, then 8 bytes of padding
-// Where such a store or atomic lands is known only when the GPU runs it, so each one also puts its guest page (address >> 12) in a write log, reserved under the same slot at offset 1
-// (Ryujinx GlobalToStorage.GmemLogCbOffset, GmemLogLog2): 32-bit words, word 0 set when a page found no free slot, then a hash set of 1 << DMSH_GMEM_LOG_LOG2 pages (0 = empty).
-// The host learns the pages from it
+#define DMSH_GMEM_MAP_ENTRIES 8192       // entries of the table (GlobalToStorage.GmemMapLog2 = 13), sorted by start: entry 0 is empty (start 0, end 0) and unused entries start at ~0
+#define DMSH_GMEM_MAP_ENTRY 32           // bytes of an entry: start, end (exclusive) and delta (the pool's Metal GPU address minus its guest address), 64 bits each, then a 32-bit lookup hint and 4 bytes of padding
+#define DMSH_GMEM_HINT_SHIFT 21          // the hint in entry (chunk & (entries - 1)) names the entry that holds all of this 2 MiB guest chunk: chunk in the high bits, entry index in the low 13, 0 = none. Tagged, so a colliding chunk searches
+// Where such a store or atomic lands is known only when the GPU runs it, so each one also sets the bit of its table entry in a write log, reserved under the same slot at offset 1
+// (Ryujinx GlobalToStorage.GmemLogCbOffset): a bitmap of the entries of the table bound beside it, bit i in 32-bit word i / 32. The host learns the pools from it
 #define DMSH_KIND_GMEM_LOG "gmem_log"    // that write log: the host gives each draw or dispatch its own, cleared (nvn_mtl.m gml_take)
 #define DMSH_GMEM_LOG_CB_OFFSET 1
-#define DMSH_GMEM_LOG_LOG2 10
 
 // A pool binding points at a buffer the host keeps (nvn_mtl.m pool_gpu): a 32-bit bound n (the highest index the shader may read), then from DMSH_POOL_HEAD one 8-byte resource ID per ID
-#define DMSH_POOL_HEAD 8                 // bytes before element 0 of a pool buffer
+#define DMSH_POOL_HEAD 16                // bytes before element 0 of a pool buffer: the bound n, 4 bytes of padding, and the 64-bit GPU address of the read bitmap: bit i in 32-bit word i / 32 is set by a shader that reads texture ID i (dmsh_build.py pool_arrays, nvn_mtl.m pool_seen_scan)
 #define DMSH_KIND_UNKNOWN "?"            // a binding the build could not place: the host refuses the shader
 
 // The alpha test's state (dm/gfx/tools/dmsh_alpha.py, the _a entry points of the <key>_bx libraries): uint function (NVN_ALPHA_FUNC_*), float reference, at this fragment buffer index (nvn_mtl.m at_bind)

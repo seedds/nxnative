@@ -4,7 +4,7 @@ The screen before the game starts shows the settings the game supports. A settin
 
 - [Tested defaults](#tested-defaults)
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
-- [Controls](#controls): [Touch feedback](#touch-feedback), [Left back button](#left-back-button), [Right back button](#right-back-button), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
+- [Controls](#controls): [Touch feedback](#touch-feedback), [Left back button](#left-back-button), [Right back button](#right-back-button), [Switch 2 deadzone](#switch-2-deadzone), [Switch 2 motion](#switch-2-motion), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [In-game menu](#in-game-menu)
@@ -100,6 +100,14 @@ On a controller with back buttons (such as a Switch 2 Pro Controller over Blueto
 ### Right back button
 
 On a controller with back buttons, map the right back button (GR) to duplicate a face button, stick click, or trigger. Off (None) by default.
+
+### Switch 2 deadzone
+
+The centre deadzone of a Switch 2 Pro Controller's sticks in raw 12-bit counts (0 to 120, 40 by default). If a character creeps or drifts slightly on its own, raise this until it stops.
+
+### Switch 2 motion
+
+Six-axis motion sensor input (gyroscope and accelerometer) from a Switch 2 Pro Controller. Off by default.
 
 ### Game rumble
 

@@ -103,15 +103,15 @@ On a controller with back buttons, map the right back button (GR) to duplicate a
 
 ### Switch 2 deadzone
 
-The centre deadzone of a Switch 2 Pro Controller's sticks in raw 12-bit counts (0 to 120, 40 by default). If a character creeps or drifts slightly on its own, raise this until it stops.
+The centre deadzone of a Switch 2 controller's sticks in raw 12-bit counts (0 to 120, 40 by default). If a character creeps or drifts slightly on its own, raise this until it stops.
 
 ### Switch 2 motion
 
-Six-axis motion sensor input (gyroscope and accelerometer) from a Switch 2 Pro Controller. Off by default.
+Six-axis motion sensor input (gyroscope and accelerometer) from a Switch 2 controller. The Joy-Con 2's own frame and its pair's and half forms are measured on hardware; the Pro Controller 2's is not, so the input starts off.
 
 ### Switch 2 rumble
 
-The vibration of a Switch 2 Pro Controller (on by default).
+The vibration of a Switch 2 controller (on by default). A pair of Joy-Con 2 rumbles through both halves, the left the low band and the right the high band like the console's split; the NSO GameCube pad stays silent, because it has no rumble actuator and its motor lane must not be written.
 
 ### Game rumble
 

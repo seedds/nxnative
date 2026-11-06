@@ -1,24 +1,31 @@
-// Native Nintendo Switch 2 Pro Controller support for the iOS front end, over CoreBluetooth.
+// Native Nintendo Switch 2 controller support for the iOS front end, over CoreBluetooth: the Pro Controller 2, a left / right Joy-Con 2 (held
+// on its own or together as one pad), and the NSO GameCube pad.
 //
 // iOS has no system-level support for a Switch 2 controller: it is not a HID device and GameController.framework never sees it. The controller
 // speaks Nintendo's proprietary BLE GATT protocol instead, decoded by the Mac bridge "Finally the Controller Works" by Peter Sharma
 // (https://github.com/Peterksharma/switch2mac): input notifications AB7DE9BE…, commands on 649D4AC9…, replies on C765A961…, rumble on
-// CC483F51…. The GATT identifiers, command framing, report layout, calibration and rumble packing are a port of that project's published
-// notes and Swift implementation, which credits the wider Switch 2 reverse-engineering community (ndeadly, trevlars' MIT Linux bridge,
-// Nadeflore/Switch2Connect and others). The installed 0.2.0 binary was checked in Ghidra for the same constants. DmSwitch2BLE is a CoreBluetooth
-// central that performs the handshake, decodes input reports and feeds the same pad/motion/haptics paths as a GameController controller
-// (the slot table in DmGamepad.m, hle_hid.c). The game never learns the difference.
+// CC483F51… (each Joy-Con 2 half has its own vibration characteristic). The GATT identifiers, command framing, report layout, calibration and
+// rumble packing are a port of that project's published notes and Swift implementation, which credits the wider Switch 2 reverse-engineering
+// community (ndeadly, trevlars' MIT Linux bridge, Nadeflore/Switch2Connect and others). The Joy-Con 2 pad rules are JakePre's hardware-verified
+// PR 1346; the recorded reports DmSwitch2BLE's own tests keep proving them. The installed 0.2.0 binary was checked in Ghidra for the constants.
+// DmSwitch2BLE is a CoreBluetooth central that performs the handshake, decodes input reports and feeds the same pad/motion/haptics paths as a
+// GameController controller (the slot table in DmGamepad.m, hle_hid.c). The game never learns the difference.
 //
 // Scope and limits, all observed or explicitly marked as inferred:
-//  * Pro Controller 2 (product id 0x2069) only. Joy-Con 2 halves and the NSO GameCube pad share the protocol but need other stick/trigger rules;
-//    they are logged once and ignored rather than half-supported.
+//  * Pro Controller 2 (0x2069), Joy-Con 2 (0x2067 left, 0x2066 right; one alone is used sideways and a left and right together are one pad) and
+//    the NSO GameCube pad (0x2073). Joy-Con motion and the pair's stick split are measured on hardware (PR 1346); the GameCube's input is from
+//    switch2mac's published protocol and is not yet confirmed on our own hardware, and its analog triggers act as digital holds above a quarter
+//    travel (the Npad interface has no trigger axes; the console itself maps them onto digital ZL / ZR).
+//  * The NSO GameCube pad has no HD-rumble actuator: writing its motor characteristic powers the pad off, so its lane is never written and it
+//    stays silent. Its built-in rumble presets (command 0x0A/0x02) are not used: their payloads are not published yet.
 //  * No SMP and no application-layer bonding: the controller drops links that attempt SMP, and iOS exposes no public host Bluetooth address for
 //    command 0x15. So the controller is not taught to wake toward the iPhone. Hold Sync to advertise in pairing mode, or press a button while the
 //    game is open and scanning. A controller bonded to a Mac/Switch does not wake for the iPhone. DM_SW2_BOND_MAC=aa:bb:cc:dd:ee:ff sends the four
 //    0x15 commands for a host address the caller knows (off by default; there is no public way to read the iPhone's own address).
 //  * A 1 Hz player-LED refresh is the keep-alive: on Apple hosts the link is dropped after ~10-17 s without a host write even while reports arrive.
-//  * Motion is decoded but published only with DM_SW2_MOTION=1: the Switch 2 IMU's raw counts and axis order are not verified on hardware, and a
-//    wrong guess would fight a game's camera. DM_SW2_RUMBLE=0 turns HD rumble off; DM_SW2_DEADZONE=<counts> overrides the 40-count centre deadzone.
+//  * Motion is decoded but published only with DM_SW2_MOTION=1: the Pro Controller 2's own IMU frame is not measured on hardware (the maps of
+//    JakePre's PR 1346, measured on a right Joy-Con 2, are used; they make the pair and half forms right and the Pro's change remains possible).
+//    DM_SW2_RUMBLE=0 turns HD rumble off; DM_SW2_DEADZONE=<counts> overrides the 40-count centre deadzone.
 //  * iOS Bluetooth permission: NSBluetoothAlwaysUsageDescription in project.yml. Without it the system kills the app on the first scan.
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -52,11 +59,34 @@ typedef NS_ENUM(NSInteger, DS2Stage) {
 };
 
 @class DmSwitch2Session;
+@class DmSwitch2BLE;
 
-@interface DmSwitch2Session : NSObject <CBPeripheralDelegate>
+// A player's haptics target: one session (a full pad member) or a DS2Pad driving a grip of two Joy-Con halves.
+@protocol DS2HapticTarget
+- (void)rumbleFrom:(const dm_haptic_state *)s;
+@end
+
+// The pad a player holds: one slot in the gamepad table. A full member (a Pro Controller 2 or an NSO GameCube pad) is a pad on its own; of the
+// Joy-Con 2 halves, a left and a right together share one pad (the pair is a Pro Controller: the left's stick the left stick, the right's the
+// right, motion from the right half), and one half on its own is a sideways pad. The pad owns the slot claim and drives dm_pad_set_player as
+// each member's report arrives, because a member's report carries only its own half.
+@interface DS2Pad : NSObject <DS2HapticTarget>
+@property (nonatomic) int slot;         // 0-based; the player is slot + 1
+- (BOOL)canAccept:(uint16_t)pid;
+- (BOOL)addSession:(DmSwitch2Session *)s;
+- (void)reportFrom:(DmSwitch2Session *)s;
+- (void)sessionLeft:(DmSwitch2Session *)s;
+- (BOOL)isEmpty;
+@property (nonatomic, readonly) NSUInteger memberCount;
+- (void)endAllSessions:(void (^)(DmSwitch2Session *))block;
+@end
+
+@interface DmSwitch2Session : NSObject <CBPeripheralDelegate, DS2HapticTarget>
 @property (nonatomic, readonly) CBPeripheral *peripheral;
+@property (nonatomic) uint16_t pid;
 @property (nonatomic) DS2Stage stage;
-@property (nonatomic) int slot;                       // 0-based; the player is slot + 1
+@property (nonatomic) int slot;                       // 0-based; the player is slot + 1 (a grip half shares its pad's slot)
+@property (nonatomic, weak) DS2Pad *pad;              // set once the pad is joined
 @property (nonatomic) BOOL done;                      // handshake finished: reports drive the pad
 @property (nonatomic, copy) NSString *serial;
 @property (nonatomic) NSUInteger reports;
@@ -66,20 +96,25 @@ typedef NS_ENUM(NSInteger, DS2Stage) {
 - (instancetype)initWithPeripheral:(CBPeripheral *)p queue:(dispatch_queue_t)q;
 - (void)beginHandshake;
 - (void)teardown;
+- (void)rumbleLow:(float)lfA lfHz:(float)lfHz high:(float)hfA hfHz:(float)hfHz;  // store rumble targets; see rumbleFrom
 - (void)rumbleFrom:(const dm_haptic_state *)s;         // any thread; stores targets only
 - (void)testRumble;
+- (NSString *)name;                                    // the model's name for the launcher's list
+- (ds2_dev *)devSnapshot;                              // the handshake's state (calibration included) for the pad to copy
+- (ds2_dev *)devSlot;                                  // the pad's member this session feeds; NULL before joining
+- (void)setDevSlot:(ds2_dev *)dev;
 @end
 
+// The haptics hook is a plain C function pointer with no context, so the target is found through the per-player registry.
+static id<DS2HapticTarget> gRumbleSlot[DM_PLAYERS];
 static NSLock *gRumbleLock;
-static DmSwitch2Session *gRumbleSlot[DM_PLAYERS];
 
-// The haptics hook is a plain C function pointer with no context, so the session is found through the per-player registry.
 static void ds2_rumble_dispatch(const dm_haptic_state *s) {
     if (!s || s->player < 0 || s->player >= DM_PLAYERS) return;
     [gRumbleLock lock];
-    DmSwitch2Session *session = gRumbleSlot[s->player];
+    id<DS2HapticTarget> target = gRumbleSlot[s->player];
     [gRumbleLock unlock];
-    [session rumbleFrom:s];
+    [target rumbleFrom:s];
 }
 
 @interface DmSwitch2BLE : NSObject <CBCentralManagerDelegate>
@@ -87,6 +122,8 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
 - (void)start;
 - (void)sessionEnded:(DmSwitch2Session *)s;
 - (void)sessionReady:(DmSwitch2Session *)s;
+- (DS2Pad *)padForSession:(DmSwitch2Session *)s;
+- (void)padEnded:(DS2Pad *)p;
 - (void)startScan;
 - (void)stopScan;
 - (BOOL)isScanning;
@@ -115,10 +152,9 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
     uint64_t _generation;
     dispatch_source_t _tick;
     NSData *_bondMAC;
-    ds2_cal _cal[2];
-    float _deadzone;
-    BOOL _motion, _rumble, _verbose;
-    uint64_t _glMask, _grMask;
+    ds2_dev _dev;                               // this controller's member slot in its pad: report, calibration, gyro rest learner
+    ds2_dev *_devSlot;                          // the pad's member this session feeds once joined; NULL before the handshake finishes
+    BOOL _rumble, _verbose;
     uint8_t _rumbleSeq;
     uint64_t _lastWrite, _lastReport;
     _Atomic int _lfAmp, _lfHz, _hfAmp, _hfHz;       // written by the haptics thread
@@ -132,14 +168,11 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
         _slot = -1; _stage = DS2StageIdle;
         _chars = [NSMutableDictionary new];
         _commands = [NSMutableArray new];
-        for (int i = 0; i < 2; i++) ds2_cal_default(&_cal[i]);
-        const char *e = getenv("DM_SW2_MOTION"); _motion = e && atoi(e);
-        e = getenv("DM_SW2_RUMBLE"); _rumble = !e || atoi(e);
-        e = getenv("DM_SW2_DEADZONE"); _deadzone = e ? (float)atof(e) : 40.f;
+        memset(&_dev, 0, sizeof _dev);
+        _dev.have = 1;
+        for (int i = 0; i < 2; i++) ds2_cal_default(&_dev.cal[i]);
+        const char *e = getenv("DM_SW2_RUMBLE"); _rumble = !e || atoi(e);
         e = getenv("DM_SW2_VERBOSE"); _verbose = e && atoi(e);
-        e = getenv("DM_PAD_GL"); _glMask = ds2_btn_from_str(e);
-        e = getenv("DM_PAD_GR"); _grMask = ds2_btn_from_str(e);
-        if (_glMask || _grMask) LOG("switch2: back buttons GL=0x%llx GR=0x%llx", (unsigned long long)_glMask, (unsigned long long)_grMask);
         e = getenv("DM_SW2_BOND_MAC");
         if (e && *e) {
             unsigned v[6]; char sep;
@@ -153,6 +186,16 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
 }
 
 - (CBCharacteristic *)ch:(const char *)uuid { return _chars[[NSString stringWithUTF8String:uuid]]; }
+
+// The vibration characteristic of this model: the Pro Controller 2 and the NSO GameCube share one lane (the GameCube's is never written: it
+// powers the pad off), and each Joy-Con 2 half has its own.
+- (const char *)rumbleUUID {
+    switch (self.pid) {
+        case DS2_PID_JOYCON2_L: return DS2_UUID_RUMBLE_JC_L;
+        case DS2_PID_JOYCON2_R: return DS2_UUID_RUMBLE_JC_R;
+        default: return DS2_UUID_RUMBLE;
+    }
+}
 
 - (void)beginHandshake {
     LOG("switch2: %s connected, discovering services", (self.peripheral.name ?: @"controller").UTF8String);
@@ -168,15 +211,27 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
 
 - (void)teardown {
     if (_tick) { dispatch_source_cancel(_tick); _tick = nil; }
-    if (self.slot >= 0) {
-        if (_motion) dm_motion_clear_hid(self.slot);
-        [gRumbleLock lock]; gRumbleSlot[self.slot] = nil; [gRumbleLock unlock];
-        dm_haptics_apple_set_ble(self.slot, NULL);
-        dm_pad_external_release((__bridge const void *)self);
-        self.slot = -1;
+    if (self.pad) {
+        [self.pad sessionLeft:self];
+        self.pad = nil;
     }
+    self.slot = -1;
     self.done = NO;
 }
+
+// The controller's name for the launcher's list, by model.
+- (NSString *)name {
+    switch (self.pid) {
+        case DS2_PID_JOYCON2_L: return @"Joy-Con 2 (L)";
+        case DS2_PID_JOYCON2_R: return @"Joy-Con 2 (R)";
+        case DS2_PID_NSO_GAMECUBE: return @"NSO GameCube pad";
+        default: return @"Pro Controller 2";
+    }
+}
+
+- (ds2_dev *)devSnapshot { return &_dev; }
+- (ds2_dev *)devSlot { return _devSlot; }
+- (void)setDevSlot:(ds2_dev *)dev { _devSlot = dev; }
 
 // ---- Commands ----
 
@@ -232,7 +287,7 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
 }
 
 - (void)setFeature:(uint8_t)sub completion:(void (^)(BOOL))done {
-    uint8_t p[4] = {DS2_FEATURES_PRO, 0, 0, 0};
+    uint8_t p[4] = {DS2_FEATURES, 0, 0, 0};
     [self command:DS2_CMD_FEATURE sub:sub payload:[NSData dataWithBytes:p length:4] completion:^(NSData *r) { if (done) done(r != nil); }];
 }
 
@@ -265,10 +320,10 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
     __weak DmSwitch2Session *weak = self;
     [self readMemory:0x0B at:user completion:^(NSData *d) {
         DmSwitch2Session *s = weak; if (!s) return;
-        if (d && !ds2_cal_blank(d.bytes, d.length)) { ds2_cal_parse(d.bytes, d.length, &s->_cal[which]); done(); return; }
+        if (d && ds2_cal_parse(d.bytes, d.length, &s->_dev.cal[which])) { done(); return; }
         [s readMemory:0x0B at:factory completion:^(NSData *f) {
             DmSwitch2Session *s2 = weak; if (!s2) return;
-            if (f) ds2_cal_parse(f.bytes, f.length, &s2->_cal[which]);
+            if (f) ds2_cal_parse(f.bytes, f.length, &s2->_dev.cal[which]);
             done();
         }];
     }];
@@ -301,11 +356,22 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
         uint16_t vid = ds2_u16(b + 18), pid = ds2_u16(b + 20);
         char serial[15] = {0}; memcpy(serial, b + 2, 14);
         s.serial = [NSString stringWithUTF8String:serial] ?: @"?";
-        if (vid != DS2_VENDOR_ID || pid != DS2_PID_PRO_CONTROLLER_2)
+        s.pid = pid; s->_dev.pid = pid;
+        if (vid != DS2_VENDOR_ID)
             LOG("switch2: unexpected identity vid=0x%04x pid=0x%04x; using the Pro Controller 2 mapping", vid, pid);
+        else if (!ds2_is_controller(pid))
+            LOG("switch2: unknown Nintendo model 0x%04x: using the Pro Controller 2 mapping", pid);
+        // A Joy-Con has no stick-2 calibration; its one stick's slots are stick 1 even when the right unit's data reports in the right field.
+        if (pid == DS2_PID_JOYCON2_L || pid == DS2_PID_JOYCON2_R)
+            LOG("switch2: %s connected: the Sideways hold maps its rail buttons to L / R, or a matching opposite half joins it into one pad",
+                s.pid == DS2_PID_JOYCON2_L ? "Joy-Con 2 (L)" : "Joy-Con 2 (R)");
+        else if (pid == DS2_PID_NSO_GAMECUBE)
+            LOG("switch2: NSO GameCube pad connected: analog triggers act as digital holds, rumble is silent (the pad has no actuator)");
         s.stage = DS2StageCalibration;
         [s readCalibration:0 done:^{
-            [s readCalibration:1 done:^{ [s finishHandshake]; }];
+            DmSwitch2Session *s2 = weak; if (!s2) return;
+            if (s2.pid == DS2_PID_JOYCON2_L || s2.pid == DS2_PID_JOYCON2_R) { [s2 finishHandshake]; return; }
+            [s2 readCalibration:1 done:^{ [s2 finishHandshake]; }];
         }];
     }];
 }
@@ -331,23 +397,13 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
         self.battery_percent = 0;
     }
     if (!self.done) return;
-    float lx, ly, rx, ry;
-    ds2_cal_apply(&_cal[0], r.lx, r.ly, _deadzone, &lx, &ly);
-    ds2_cal_apply(&_cal[1], r.rx, r.ry, _deadzone, &rx, &ry);
-    dm_pad_set_player(self.slot, ds2_buttons_mapped(r.buttons, _glMask, _grMask),
-                      (int32_t)lrintf(lx * 32767.f), (int32_t)lrintf(ly * 32767.f),
-                      (int32_t)lrintf(rx * 32767.f), (int32_t)lrintf(ry * 32767.f));
-    if (_motion) {
-        // The Switch Pro IMU map (motion_pro.h): raw x toward the shoulders, y left, z out of the face; Switch x right, y forward, gravity down.
-        // Inferred for the Switch 2 IMU until it is measured on hardware; that is why it is opt-in.
-        const float g = DS2_ACCEL_G_PER_COUNT, rad = DS2_GYRO_RAD_PER_COUNT;
-        float acc[3] = {r.accel[1] * g, -r.accel[0] * g, -r.accel[2] * g};
-        float rot[3] = {-r.gyro[1] * rad, r.gyro[0] * rad, r.gyro[2] * rad};
-        dm_motion_set_hid(self.slot, acc, rot, ds2_now());
-    }
+    // The member's report lands in its pad, which composes the whole pad from every member and drives the gamepad slot.
+    ds2_dev *dev = _devSlot ?: &_dev;
+    dev->r = r;
     if (_verbose && self.reports % 90 == 1)
         LOG("switch2: slot %d reports=%lu buttons=0x%08x sticks=%u,%u %u,%u battery=%umV", self.slot + 1,
             (unsigned long)self.reports, r.buttons, r.lx, r.ly, r.rx, r.ry, r.battery_mv);
+    [self.pad reportFrom:self];
 }
 
 - (void)testRumble {
@@ -369,17 +425,20 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
 
 // ---- Rumble ----
 
+// Store rumble targets (any thread): amplitudes 0..0x3FF with the frequencies as given. A band at amplitude 0 stays off until the next nonzero write.
+- (void)rumbleLow:(float)lfA lfHz:(float)lfHz high:(float)hfA hfHz:(float)hfHz {
+    atomic_store(&_lfAmp, (int)lrintf(fminf(1.f, fmaxf(0.f, lfA)) * 0x3FF));
+    atomic_store(&_hfAmp, (int)lrintf(fminf(1.f, fmaxf(0.f, hfA)) * 0x3FF));
+    atomic_store(&_lfHz, (int)fminf(511.f, fmaxf(1.f, lfHz)));
+    atomic_store(&_hfHz, (int)fminf(511.f, fmaxf(1.f, hfHz)));
+}
+
 - (void)rumbleFrom:(const dm_haptic_state *)s {
     float lo = fmaxf(s->motor[0].amplitude_low, s->motor[1].amplitude_low);
     float hi = fmaxf(s->motor[0].amplitude_high, s->motor[1].amplitude_high);
     const dm_vibration *l = s->motor[0].amplitude_low >= s->motor[1].amplitude_low ? &s->motor[0] : &s->motor[1];
     const dm_vibration *h = s->motor[0].amplitude_high >= s->motor[1].amplitude_high ? &s->motor[0] : &s->motor[1];
-    int lfA = (int)lrintf(fminf(1.f, fmaxf(0.f, lo)) * 0x3FF);
-    int hfA = (int)lrintf(fminf(1.f, fmaxf(0.f, hi)) * 0x3FF);
-    atomic_store(&_lfAmp, lfA);
-    atomic_store(&_hfAmp, hfA);
-    atomic_store(&_lfHz, (int)fminf(511.f, fmaxf(1.f, l->frequency_low)));
-    atomic_store(&_hfHz, (int)fminf(511.f, fmaxf(1.f, h->frequency_high)));
+    [self rumbleLow:lo lfHz:l->frequency_low high:hi hfHz:h->frequency_high];
 }
 
 // ---- Maintenance ----
@@ -399,11 +458,12 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
     int lfA = atomic_load(&_lfAmp), lfF = atomic_load(&_lfHz);
     int hfA = atomic_load(&_hfAmp), hfF = atomic_load(&_hfHz);
     BOOL active = lfA > 0 || hfA > 0 || t < _rumbleHoldUntil;
-    if (_rumble && active) {
+    // The NSO GameCube pad is never motor-written: its lane powers it off (see the header comment).
+    if (_rumble && active && self.pid != DS2_PID_NSO_GAMECUBE) {
         ds2_vibration v = {(uint16_t)lfF, (uint16_t)lfA, (uint16_t)hfF, (uint16_t)hfA};
         uint8_t packet[40];
-        size_t n = ds2_motor_packet(packet, &v, self->_rumbleSeq++);
-        CBCharacteristic *m = [self ch:DS2_UUID_RUMBLE];
+        size_t n = ds2_motor_packet(packet, &v, self->_rumbleSeq++, self.pid == DS2_PID_PRO_2 ? 2 : 1);
+        CBCharacteristic *m = [self ch:[self rumbleUUID]];
         if (m) {
             [self.peripheral writeValue:[NSData dataWithBytes:packet length:n] forCharacteristic:m type:CBCharacteristicWriteWithoutResponse];
             _lastWrite = t;
@@ -441,16 +501,10 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
     if ([u isEqualToString:@DS2_UUID_CMD_RSP] && self.stage == DS2StageIdle) {
         [self handshakeInfo];
     } else if ([u isEqualToString:@DS2_UUID_INPUT]) {
-        if (self.slot < 0) {
-            int slot = dm_pad_external_claim((__bridge const void *)self, "Pro Controller 2");
-            if (slot < 0) { [self fail:@"all players are taken"]; return; }
-            self.slot = slot;
-            LOG("switch2: Pro Controller 2 ready: player %d%s", slot + 1, _motion ? " (motion on)" : "");
-        }
+        DS2Pad *pad = [[DmSwitch2BLE shared] padForSession:self];
+        if (!pad) { [self fail:@"all players are taken"]; return; }
         self.done = YES;
         self.stage = DS2StageReady;
-        [gRumbleLock lock]; gRumbleSlot[self.slot] = self; [gRumbleLock unlock];
-        dm_haptics_apple_set_ble(self.slot, ds2_rumble_dispatch);   // owns the player even with rumble off, so the phone does not buzz instead
         [self startMaintenance];
         [self bond];
         [[DmSwitch2BLE shared] sessionReady:self];
@@ -479,14 +533,183 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
 
 @end
 
+// ---- The pad a player holds ----
+
+@implementation DS2Pad {
+    ds2_pad_state _state;
+    NSMutableArray<DmSwitch2Session *> *_members;
+    float _deadzone;
+    BOOL _motion;
+    uint64_t _glMask, _grMask;
+    int _slot;   // -1 until the pad claims a player
+}
+
+- (instancetype)init {
+    if ((self = [super init])) {
+        _members = [NSMutableArray new];
+        _slot = -1;
+        memset(&_state, 0, sizeof _state);
+        const char *e = getenv("DM_SW2_DEADZONE"); _deadzone = e ? (float)atof(e) : 40.f;
+        e = getenv("DM_SW2_MOTION"); _motion = e && atoi(e);
+        e = getenv("DM_PAD_GL"); _glMask = ds2_btn_from_str(e);
+        e = getenv("DM_PAD_GR"); _grMask = ds2_btn_from_str(e);
+        if (_glMask || _grMask) LOG("switch2: back buttons GL=0x%llx GR=0x%llx (the Pro Controller 2's back buttons)", (unsigned long long)_glMask, (unsigned long long)_grMask);
+    }
+    return self;
+}
+
+// A full pad member joins a fresh pad only; a half joins a pad of its own side or one holding the opposite half alone.
+- (BOOL)canAccept:(uint16_t)pid {
+    switch (pid) {
+        case DS2_PID_PRO_2: case DS2_PID_NSO_GAMECUBE: return !_state.pro.have;
+        case DS2_PID_JOYCON2_L: return !_state.left.have && !_state.pro.have;
+        case DS2_PID_JOYCON2_R: return !_state.right.have && !_state.pro.have;
+        default: return NO;
+    }
+}
+
+// Whether the pad holds exactly one half a matching opposite half could join (the pair is formed when the second half arrives).
+- (BOOL)isLoneHalf:(uint16_t)pid {
+    if (_state.pro.have || _members.count != 1) return NO;
+    if (pid == DS2_PID_JOYCON2_L) return _state.right.have;
+    if (pid == DS2_PID_JOYCON2_R) return _state.left.have;
+    return NO;
+}
+
+- (ds2_dev *)devForSession:(DmSwitch2Session *)s {
+    switch (s.pid) {
+        case DS2_PID_JOYCON2_L: return &_state.left;
+        case DS2_PID_JOYCON2_R: return &_state.right;
+        default: return &_state.pro;
+    }
+}
+
+- (BOOL)addSession:(DmSwitch2Session *)s {
+    if (self.slot >= 0 && ![self canAccept:s.pid]) return NO;
+    ds2_dev *dev = [self devForSession:s];
+    *dev = *[s devSnapshot];        // copy the handshake's state (calibration included), then the session writes into this member
+    if (![_members containsObject:s]) [_members addObject:s];
+    if (_slot < 0) {
+        _slot = dm_pad_external_claim((__bridge const void *)self, self.name.UTF8String);
+        if (_slot < 0) {
+            memset(dev, 0, sizeof *dev);
+            [_members removeObject:s];
+            return NO;
+        }
+        if (_motion) LOG("switch2: %s is player %d (motion on)", self.name.UTF8String, _slot + 1);
+        else LOG("switch2: %s is player %d", self.name.UTF8String, _slot + 1);
+    } else {
+        LOG("switch2: %s joined %s as player %d: they are one pad now", s.name.UTF8String, self.name.UTF8String, _slot + 1);
+    }
+    s.slot = _slot;
+    [s setDevSlot:dev];
+    [gRumbleLock lock]; gRumbleSlot[_slot] = self; [gRumbleLock unlock];
+    dm_haptics_apple_set_ble(_slot, ds2_rumble_dispatch);   // owns the player even with rumble off, so the phone does not buzz instead
+    [self drive];                   // a surviving half's last report may hold buttons a departed member left set
+    return YES;
+}
+
+- (NSString *)name {
+    if (_state.pro.have) return _state.pro.pid == DS2_PID_NSO_GAMECUBE ? @"NSO GameCube pad" : @"Pro Controller 2";
+    if (_state.left.have && _state.right.have) return @"Joy-Con 2 (L+R)";
+    return _state.left.have ? @"Joy-Con 2 (L)" : @"Joy-Con 2 (R)";
+}
+
+- (BOOL)isEmpty { return _members.count == 0; }
+- (NSUInteger)memberCount { return _members.count; }
+
+// Run block for every member (a copy of the list: the block may remove members).
+- (void)endAllSessions:(void (^)(DmSwitch2Session *))block {
+    for (DmSwitch2Session *s in [_members copy]) block(s);
+}
+
+- (int)slot { return _slot; }
+- (void)setSlot:(int)s { _slot = s; }
+
+- (void)drive {
+    if (_slot < 0 || !_members.count) return;
+    uint64_t buttons; int32_t st[4];
+    if (!ds2_pad_input(&_state, _deadzone, _glMask, _grMask, &buttons, st)) return;
+    dm_pad_set_player(_slot, buttons, st[0], st[1], st[2], st[3]);
+    if (!_motion) return;
+    ds2_dev *dev = ds2_pad_motion_dev(&_state);
+    if (!dev) return;
+    const int8_t *map = ds2_pad_map(&_state, dev);
+    int16_t raw[6] = {dev->r.accel[0], dev->r.accel[1], dev->r.accel[2], dev->r.gyro[0], dev->r.gyro[1], dev->r.gyro[2]};
+    float acc[3], rot[3];
+    ds2_rest_update(&dev->rest, raw);       // a second at rest learns the gyro's own offset (ds2_rest)
+    ds2_motion(raw, map, dev->rest.have ? dev->rest.bias : NULL, acc, rot);
+    dm_motion_set_hid(_slot, acc, rot, ds2_now());
+}
+
+- (void)reportFrom:(DmSwitch2Session *)s {
+    if (s.pad != self) return;
+    [self drive];
+}
+
+- (void)sessionLeft:(DmSwitch2Session *)s {
+    [_members removeObject:s];
+    ds2_dev *dev = [self devForSession:s];
+    if ([s devSlot] == dev) [s setDevSlot:NULL];
+    memset(dev, 0, sizeof *dev);
+    s.slot = -1;
+    if (_members.count) return;   // a grip that lost one half keeps playing as the surviving half's sideways pad
+    if (_slot >= 0) {
+        dm_pad_set_player(_slot, 0, 0, 0, 0, 0);
+        [gRumbleLock lock]; gRumbleSlot[_slot] = nil; [gRumbleLock unlock];
+        dm_haptics_apple_set_ble(_slot, NULL);
+        if (_motion) dm_motion_clear_hid(_slot);
+        dm_pad_external_release((__bridge const void *)self);
+        _slot = -1;
+    }
+    [[DmSwitch2BLE shared] padEnded:self];
+}
+
+// The pad's rumble: a full member takes both bands as they come; a pair follows the console's split, the left half the low band, the right half
+// the high band (say the same tone to both and the actuator answers from its own half). A GameCube pad's member is never motor-written.
+- (void)rumbleFrom:(const dm_haptic_state *)s {
+    if (_state.pro.have || _members.count <= 1) {
+        for (DmSwitch2Session *m in _members) [m rumbleFrom:s];
+        return;
+    }
+    float lo = fmaxf(s->motor[0].amplitude_low, s->motor[1].amplitude_low);
+    float hi = fmaxf(s->motor[0].amplitude_high, s->motor[1].amplitude_high);
+    const dm_vibration *l = s->motor[0].amplitude_low >= s->motor[1].amplitude_low ? &s->motor[0] : &s->motor[1];
+    const dm_vibration *h = s->motor[0].amplitude_high >= s->motor[1].amplitude_high ? &s->motor[0] : &s->motor[1];
+    for (DmSwitch2Session *m in _members) {
+        if ([m devSlot] == &_state.left) [m rumbleLow:lo lfHz:l->frequency_low high:0 hfHz:0];
+        else if ([m devSlot] == &_state.right) [m rumbleLow:0 lfHz:0 high:hi hfHz:h->frequency_high];
+    }
+}
+
+- (void)testRumble {
+    dm_haptic_state s = {0};
+    s.player = _slot >= 0 ? _slot : 0;
+    s.motor[0].amplitude_low = 0.8f;
+    s.motor[0].frequency_low = 160.0f;
+    s.motor[0].amplitude_high = 0.8f;
+    s.motor[0].frequency_high = 320.0f;
+    s.motor[1] = s.motor[0];
+    [self rumbleFrom:&s];
+    __weak DS2Pad *w = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        DS2Pad *p = w; if (!p) return;
+        dm_haptic_state off = {0};
+        off.player = p->_slot >= 0 ? p->_slot : 0;
+        [p rumbleFrom:&off];
+    });
+}
+
+@end
+
 // ---- The central ----
 
 @implementation DmSwitch2BLE {
     dispatch_queue_t _q;
     CBCentralManager *_central;
     NSMutableDictionary<NSUUID *, DmSwitch2Session *> *_sessions;
+    NSMutableArray<DS2Pad *> *_pads;
     NSMutableDictionary<NSUUID *, DmSwitch2Session *> *_connecting;
-    NSMutableSet<NSUUID *> *_ignored;
     BOOL _started;
 }
 
@@ -501,7 +724,7 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
         _q = dispatch_queue_create("com.amesvt.nxnative.switch2", DISPATCH_QUEUE_SERIAL);
         _sessions = [NSMutableDictionary new];
         _connecting = [NSMutableDictionary new];
-        _ignored = [NSMutableSet new];
+        _pads = [NSMutableArray new];
         gRumbleLock = [NSLock new];
     }
     return self;
@@ -522,7 +745,7 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
 
 - (void)updateScanning {
     if (_central.state != CBManagerStatePoweredOn) return;
-    NSUInteger busy = _sessions.count + _connecting.count;
+    NSUInteger busy = _pads.count + _connecting.count;   // a grip's two halves share one pad, so count pads, not sessions
     if (busy < DM_PLAYERS) {
         if (!_central.isScanning) {
             [_central scanForPeripheralsWithServices:nil options:@{CBCentralManagerScanOptionAllowDuplicatesKey: @NO}];
@@ -542,7 +765,7 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20.0 * NSEC_PER_SEC)), _q, ^{
                 DmSwitch2BLE *m = weak; if (!m) return;
                 if (m->_sessions.count + m->_connecting.count == 0)
-                    LOG("switch2: still no Switch 2 Pro Controller; hold Sync until its player LEDs sweep. If iOS Settings > Bluetooth shows it connected, forget it there first: the system link hides it from apps");
+                    LOG("switch2: still no Switch 2 controller; hold Sync until its player LEDs sweep. If iOS Settings > Bluetooth shows it connected, forget it there first: the system link hides it from apps");
             });
             break;
         }
@@ -561,15 +784,8 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
     ds2_advert a;
     if (!ds2_advert_parse(b + 2, manu.length - 2, &a)) return;
     if (_connecting[p.identifier] || _sessions[p.identifier]) return;
-    if (a.pid != DS2_PID_PRO_CONTROLLER_2) {
-        if (![_ignored containsObject:p.identifier]) {
-            [_ignored addObject:p.identifier];
-            LOG("switch2: %s (product 0x%04x) is not a Pro Controller 2: ignored", (p.name ?: @"controller").UTF8String, a.pid);
-        }
-        return;
-    }
     if (_sessions.count + _connecting.count >= DM_PLAYERS) return;
-    LOG("switch2: found %s rssi=%d%s", (p.name ?: @"Pro Controller 2").UTF8String, rssi.intValue,
+    LOG("switch2: found %s rssi=%d%s", (p.name ?: @"a Switch 2 controller").UTF8String, rssi.intValue,
         a.host ? " (wake)" : " (pairing mode)");
     DmSwitch2Session *s = [[DmSwitch2Session alloc] initWithPeripheral:p queue:_q];
     s.rssi = rssi.intValue;
@@ -615,6 +831,30 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
 
 - (void)sessionReady:(DmSwitch2Session *)s { (void)s; [self updateScanning]; }
 
+// Which pad a finished session joins: a half prefers the lone opposite half (they become one pair on the earlier half's slot); a full member makes
+// a pad of its own (a reconnecting controller gets a fresh pad after its old one released the slot on disconnect).
+- (DS2Pad *)padForSession:(DmSwitch2Session *)s {
+    DS2Pad *join = nil;
+    if (s.pid == DS2_PID_JOYCON2_L || s.pid == DS2_PID_JOYCON2_R) {
+        for (DS2Pad *p in _pads)
+            if ([p isLoneHalf:s.pid]) { join = p; break; }
+    }
+    if (!join) {
+        join = [DS2Pad new];
+        [_pads addObject:join];
+    }
+    if (![join addSession:s]) {
+        if (join.memberCount == 0) [_pads removeObject:join];
+        return nil;
+    }
+    return join;
+}
+
+- (void)padEnded:(DS2Pad *)p {
+    [_pads removeObjectIdenticalTo:p];
+    [self updateScanning];
+}
+
 - (void)sessionEnded:(DmSwitch2Session *)s {
     [_connecting removeObjectForKey:s.peripheral.identifier];
     [_sessions removeObjectForKey:s.peripheral.identifier];
@@ -647,8 +887,7 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
             if (count >= maxCount) break;
             dm_switch2_controller_info *info = &out[count++];
             memset(info, 0, sizeof(*info));
-            const char *name = s.peripheral.name.UTF8String ?: "Pro Controller 2";
-            snprintf(info->name, sizeof(info->name), "%s", name);
+            snprintf(info->name, sizeof(info->name), "%s", s.name.UTF8String);
             if (s.serial) snprintf(info->serial, sizeof(info->serial), "%s", s.serial.UTF8String);
             info->player = s.slot + 1;
             info->battery_percent = s.battery_percent;
@@ -662,21 +901,21 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
 
 - (void)disconnectPlayer:(int)player {
     dispatch_async(_q, ^{
-        for (DmSwitch2Session *s in self->_sessions.allValues) {
-            if (s.slot + 1 == player) {
-                [self sessionEnded:s];
-                break;
-            }
+        // Ending a player ends its whole pad: a grip of two halves is one controller to the game.
+        for (DS2Pad *p in [self->_pads copy]) {
+            if (p.slot + 1 != player) continue;
+            [p endAllSessions:^(DmSwitch2Session *s) { [self sessionEnded:s]; }];
+            return;
         }
     });
 }
 
 - (void)testRumblePlayer:(int)player {
     dispatch_async(_q, ^{
-        for (DmSwitch2Session *s in self->_sessions.allValues) {
-            if (s.slot + 1 == player) {
-                [s testRumble];
-                break;
+        for (DS2Pad *p in self->_pads) {
+            if (p.slot + 1 == player) {
+                [p testRumble];
+                return;
             }
         }
     });

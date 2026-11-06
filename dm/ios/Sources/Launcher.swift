@@ -115,7 +115,7 @@ private struct PairingGuideView: View {
                     GuidePage(
                         icon: "gamecontroller.fill",
                         title: "Welcome",
-                        description: "Connect a Nintendo Switch 2 Pro Controller to your Apple device over Bluetooth. Joy-Con 2 and the NSO GameCube pad share the Bluetooth protocol but are not supported yet."
+                        description: "Connect your Nintendo Switch 2 controllers to your Apple device over Bluetooth — the Pro Controller 2, a left and right Joy-Con 2 (held alone or together as one), and the NSO GameCube pad."
                     ).tag(0)
 
                     GuidePage(

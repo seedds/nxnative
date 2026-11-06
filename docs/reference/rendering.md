@@ -442,6 +442,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** lazy clears (`DM_NVN_LAZY_CLEAR`) fold clear-only passes into the pass that follows.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): the four clear-only passes before the G-buffer fold into its first pass (about 30 MB less loaded and stored a frame at 1600x900).
 
+### Adjacent lazy depth/stencil clears share one pass
+
+- **Symptom:** many clear-only render passes remain after lazy-clear folding, with consecutive slices of one shadow array cleared to the same value.
+- **Cause:** `lc_land` opened one pass for each pending group, even when adjacent groups cleared consecutive layers of the same texture through otherwise identical views.
+- **Fix:** opt-in `DM_NVN_LC_BATCH=1` combines such groups within one existing flush, setting `renderTargetArrayLength` to the exact run length. It requires a native, single-sample 2D array with combined depth/stencil format, matching texture snapshots, clear masks/values and views. Only explicit one-layer views qualify; format, swizzle and depth/stencil-mode overrides, nonidentity target overrides, colour clears, cubes and multisampling retain the old path. `0` or unset is off; `ab` uses the existing `DM_AB` alternation. TBDR mode is excluded because its future-store lookahead tracks one slice per attachment. No observer or queue-capacity boundary is crossed, standalone multilayer/oversized clears keep their fallback, and the attachment ledger counts every batched layer.
+- **Found on:** [Super Mario Party Jamboree, Apple TV experiment](../../dm/games/0100965017338000/README.md#apple-tv-lazy-clear-batching-experiment). That note separates prior TVPort measurements from this upstream port; other games remain unmeasured.
+- **Tests:** `make -C dm/gfx/tests GAME=0100965017338000 check_t_clear_batch` replays clears and a copy observer, reads both planes of every mip/layer/sample, and checks actual encoder counts and attachment accounting. It covers enabled, disabled, unset, TBDR, deferred encoding and alternating configurations, incompatible views/values, queue overflow, cube/MSAA fallbacks and standalone clears. No game assets are needed.
+
 ### A channel mask that covers every channel is a whole clear
 
 - **Symptom:** `texture clear case not implemented … mask 0x1`.

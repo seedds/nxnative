@@ -402,6 +402,16 @@ check_t_clear_ds: RUN_ENV = MTL_DEBUG_LAYER=1
 t_clear_layers: t_clear_layers.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_clear_layers.m $(MTL_T_SRC) $(FW)
 check_t_clear_layers: RUN_ENV = MTL_DEBUG_LAYER=1
+t_clear_batch: t_clear_batch.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_clear_batch.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_clear_batch
+check_t_clear_batch: t_clear_batch
+	MTL_DEBUG_LAYER=1 ./t_clear_batch
+	MTL_DEBUG_LAYER=1 ./t_clear_batch --disabled
+	MTL_DEBUG_LAYER=1 ./t_clear_batch --default
+	MTL_DEBUG_LAYER=1 ./t_clear_batch --tbdr
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_clear_batch
+	MTL_DEBUG_LAYER=1 ./t_clear_batch --ab
 t_clear_tex: t_clear_tex.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_clear_tex.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_clear_tex

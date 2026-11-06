@@ -990,6 +990,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `nvn_rec.h` records both copies with their options (`RO_C_COPY_TB_OPT`, `RO_C_COPY_BT_OPT`) and replays them on the Metal 4 compute encoder. Every selector the host's encoder wrappers send now has a stand-in. `check_t_rt_range` also runs with `DM_NVN_ENC_THREAD=1`; `t_rt_range` and `t_unwritten_store` stopped there before.
 - **Found on:** the host's tests. [PR #930](https://github.com/seedds/nxnative/pull/930) added the texture-to-buffer stand-in for [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) on the Mac with the encode thread on (not run here).
 
+### Indirect task / mesh draws on the encode thread
+
+- **Symptom:** `FATAL deferred encoding: DmRecEnc has no stand-in for -drawMeshThreadgroupsWithIndirectBuffer:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:`, then `CRASH sig=6` under `mtk_encode`, with Metal encoding on its own thread (`DM_NVN_ENC_THREAD=1`, the default on iOS), at the first [indirect task / mesh draw](shaders.md#task-and-mesh-shaders-in-bnsh-and-indirect-mesh-draws).
+- **Cause:** `nvn_geometry.inc` encodes an indirect task / mesh draw with `drawMeshThreadgroupsWithIndirectBuffer:…`, and the encode thread's recorder (`DmRecEnc` in `nvn_rec.h`) had a stand-in only for the direct one (`drawMeshThreadgroups:…`). A call it has no stand-in for stops the host.
+- **Fix:** `nvn_rec.h` records the indirect draw (`RO_R_MESH_IND`: the argument buffer's GPU address and the threads per object and mesh threadgroup, as `RO_R_MESH` keeps them) and replays it. `t_rec_draws` checks that the recorder has a stand-in for every draw the NVN layer encodes.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): the iOS app aborted when a save loaded; on the Mac with the encode thread on, 28 s after the title ([issue #1265](https://github.com/seedds/nxnative/issues/1265)).
+
 ### Inline uniform updates as ordered GPU copies
 
 - **Cause:** reading the uniform buffer from the CPU at encode time gives the frame's *last* value, not the draw's.

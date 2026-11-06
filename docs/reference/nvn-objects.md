@@ -241,6 +241,14 @@ Games read this count as a position in their own command memory and size their h
 - **Note:** to read such a crash, `x8` holds the jump-table target of the previous record's case, and the registers a callee saved below `sp` give the previous replay pointer (`x19`) and payload (`x26`).
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) (1.4.3, GitHub issue #61).
 
+### Copy strides are command buffer state
+
+- **Symptom:** a jump to pc=0 on a worker thread, with the backtrace `0x0` ← `cmd_alloc_keep` ← `h_nvnCommandBufferCopyBufferToTexture` and `lr` in the game's `main`, just after the instruction that called the game's command memory callback.
+- **Cause:** `SetCopyRowStride` and `SetCopyImageStride` were recorded as 24-byte `OP_COPY_STRIDE` commands. In NVN they are command buffer state that a copy reads when it is recorded (`GetCopyRowStride` reads them back), and setting them uses no command memory. A game that sizes one upload's command memory for the driver ran out on the host. nn::gfx's `CommandBuffer` (the NVN backend) always installs its own callback (`main+0x31be0` in Smash) and calls the out-of-command-memory or out-of-control-memory handler the game set (`+0xd0` / `+0xd8` of the object). The game never sets a handler on a command buffer that should never run out, so the callback called address 0. Smash records each texture upload from a stack command buffer with 0x100 bytes of command memory (`main+0x3664960` and `main+0x3794430`): the two strides (48 bytes), then the copy (200 bytes with its texture snapshot, plus 16 kept for a JUMP) came to 264 bytes.
+- **Fix:** the strides are fields of `cmd_t` (`copy_row`, `copy_image`), set and read back by `Set`/`GetCopy*Stride` without a record. A buffer ↔ texture copy carries them after its texture snapshot (`p_copy_strides`, `rec_copy` in `hle_nvn.c`) only when one is set, so a copy with tight strides keeps its size. The replay reads them from the record (`copy_strides` in `nvn_obj.h`); `OP_COPY_STRIDE` is still replayed from older captures, and the capture layout gained a line, so an older replayer refuses a new capture. `t_nvn` (5c) records Smash's sequence in 256 bytes with a callback that counts any call.
+- **Note:** the game's `nu::VirtualAllocHook` / `nu::VirtualFreeHook` are undefined weak imports bound to 0 at boot, as Horizon's rtld binds them. Every one of their 6,155 call sites in Smash's `main` tests the GOT entry first, so they were not the null call.
+- **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md#rendering) 13.0.5 on the iPhone, opening Adventure (World of Light).
+
 ### Recorded commands patched in place by the game (`OP_BIND_TEX1`)
 
 - **Symptom:** the title showed one stretched 64×64 icon over the 3D scene, a new game a white screen; post-process passes with stale texture handles; `[RED] bind record … overwritten after recording`.

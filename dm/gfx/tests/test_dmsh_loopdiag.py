@@ -119,16 +119,50 @@ class LoopDiag(unittest.TestCase):
     def test_no_loops_unchanged(self):
         self.assertEqual(ld.transform('kernel void main0()\n{\n}\n', KEY)[0], 'kernel void main0()\n{\n}\n')
 
-    def test_graphics_stage_has_no_buffer(self):
-        frag = self.guarded.replace('kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]], uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]])',
-                                    'fragment void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]])').replace('int(gl_LocalInvocationID.x)', '0').replace(
+    def _graphics(self, kind):
+        return self.guarded.replace('kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]], uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]])',
+                                    kind + ' void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]])').replace('int(gl_LocalInvocationID.x)', '0').replace(
                                     '        threadgroup_barrier(mem_flags::mem_threadgroup);\n', '').replace('threadgroup uint _46[32];', 'uint _46[32] = {};')
+
+    def test_vertex_stage_has_no_buffer(self):
+        vert = self._graphics('vertex')
+        out, sites = ld.transform(vert, KEY, ld.stage_of(vert))
+        self.assertEqual(ld.stage_of(vert), 'vertex')
+        self.assertNotIn('[[buffer(28)]]', out)
+        self.assertIn('device atomic_uint* dm_hg = nullptr;', out)
+
+    def test_fragment_stage_has_buffer_30(self):   # the host binds the debug buffer at fragment index 30 with DM_NVN_LOOPCAP (nvn_mtl.m encode_args_)
+        frag = self._graphics('fragment')
         out, sites = ld.transform(frag, KEY, ld.stage_of(frag))
         self.assertEqual(ld.stage_of(frag), 'fragment')
         self.assertNotIn('[[buffer(28)]]', out)
-        self.assertIn('device atomic_uint* dm_hg = nullptr;', out)
+        self.assertIn('device atomic_uint* dm_hg [[buffer(30)]]', out)
+        self.assertNotIn('device atomic_uint* dm_hg = nullptr;', out)
         if os.environ.get('DMSH_TEST_METAL'):
             rc, err = metal(out, 'frag'); self.assertEqual(rc, 0, err)
+
+    def test_gmem_miss_reported(self):
+        src = QUEUE.replace("static inline __attribute__((always_inline)) uint _58(", """static inline __attribute__((always_inline))
+int _83(thread const int& _7, thread const int& _8, device B& cp_s2)
+{
+    int _9 = int(0u + 2048u);
+    if (cp_s2._m0[_9 & 1023] < uint(_8))
+    {
+        uint _10 = *(reinterpret_cast<device uint*>(as_type<ulong>(uint2(uint(_7), uint(_8)))));
+        return int(_10);
+    }
+    return 0;
+}
+
+static inline __attribute__((always_inline)) uint _58(""").replace("return _56(_2, cp_s1) + 1u;", "return _56(_2, cp_s1) + uint(_83(_2, _2, cp_s1));")
+        out, sites = ld.transform(loop_guard(src), KEY, 'compute')
+        self.assertIn('    dm_hg_miss(uint(_7), uint(_8), dm_hg);\n    return dm_hg_poison(dm_hg);', out)   # DM_NVN_GMEM_POISON: word 9, 0 when unset
+        self.assertIn('hg == nullptr ? 0 : int(atomic_load_explicit(&hg[9], memory_order_relaxed))', out)
+        self.assertEqual(out.count('return dm_hg_poison(dm_hg);'), 2)   # the miss, and the hit path's low-address guard (dm_hg_lowaddr); the hit's own return is untouched
+        self.assertIn('int _83(thread const int& _7, thread const int& _8, device B& cp_s2, device atomic_uint* dm_hg, uint dm_hgcap)', out)
+        self.assertIn('_83(_2, _2, cp_s1, dm_hg, dm_hgcap)', out)
+        if os.environ.get('DMSH_TEST_METAL'):
+            rc, err = metal(out, 'gmem'); self.assertEqual(rc, 0, err)
 
     def test_empty_key_list_refused(self):
         r = subprocess.run([sys.executable, str(TOOLS / 'dmsh_loopdiag.py'), '/nonexistent', tempfile.mkdtemp(), '/dev/null'], capture_output=True, text=True)
@@ -148,6 +182,35 @@ class LoopDiag(unittest.TestCase):
             self.assertEqual(len(sites), len(re.findall(r'\+\+dm_lg\d* < \d+u', src)), k)
             rc, err = metal(out, k); self.assertEqual(rc, 0, f'{k}: {err[-1500:]}')
 
+
+class LowAddr(unittest.TestCase):
+    def test_found_entry_load_is_guarded(self):   # hangguard hg25: a pool-table helper's load of a resolved address below 4 GB reads as a miss
+        src = """#include <metal_stdlib>
+using namespace metal;
+struct B { uint _m0[1]; };
+static inline __attribute__((always_inline))
+int _83(thread const int& _7, thread const int& _8, device B& cp_s2)
+{
+    int _9 = int(0u + 2048u);
+    if (cp_s2._m0[_9 & 1023] < uint(_8))
+    {
+        uint _10 = *(reinterpret_cast<device uint*>(as_type<ulong>(uint2(uint(_7), uint(_8)))));
+        return int(_10);
+    }
+    return 0;
+}
+kernel void main0(device B& cp_s2 [[buffer(1)]])
+{
+    int a = 1, b = 2;
+    cp_s2._m0[0] = uint(_83(a, b, cp_s2));
+}
+"""
+        out, sites = ld.transform(src, KEY, 'compute')
+        self.assertIn('if (dm_hg_lowaddr(uint(_7), uint(_8), dm_hg)) return dm_hg_poison(dm_hg);', out)
+        self.assertIn('dm_hg_miss(uint(_7), uint(_8), dm_hg);', out)
+        self.assertLess(out.index('dm_hg_lowaddr(uint(_7)'), out.index('uint _10 = *(reinterpret_cast'))
+        if os.environ.get('DMSH_TEST_METAL'):
+            rc, err = metal(out, 'low'); self.assertEqual(rc, 0, err)
 
 if __name__ == '__main__':
     unittest.main()

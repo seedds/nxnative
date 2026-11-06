@@ -2046,7 +2046,7 @@ static void gmem_commit_patch(void); static uint64_t g_gmem_patched; static void
 // records (key, loop site) from word 16. Each completed submission (and the watchdog, before it exits) prints new (key, site) pairs as RED lines; with DM_NVN_LOOPCAP_EXIT
 // (default 1) the first hit ends the process, so nothing more is queued behind state the capped kernel left; 0 clears the abort word and keeps running.
 // A site number is a line of <override dir>/<key>_b.sites.tsv. Found for PRAGMATA's intermittent wedge (PRAGMATA_PORT_NOTES.md 2026-11-05, "GPU hang hunt")
-enum { LCAP_SLOTS = 1024, LCAP_BYTES = (16 + 4 * LCAP_SLOTS) * 4 };
+enum { LCAP_SLOTS = 1024, LCAP_MISS = 64, LCAP_BYTES = (16 + 4 * LCAP_SLOTS + 4 * LCAP_MISS) * 4 };   // dmsh_loopdiag.py SLOTS, MISS_SLOTS
 static __strong id<MTLBuffer> g_lcap_buf; static uint32_t g_lcap_cap; static int g_lcap_exit = 1;
 static pthread_mutex_t g_lcap_mu = PTHREAD_MUTEX_INITIALIZER;
 static int lcap_on(void) {
@@ -2057,6 +2057,10 @@ static int lcap_on(void) {
     const char *a = getenv("DM_NVN_LOOPCAP_ABORT"), *x = getenv("DM_NVN_LOOPCAP_EXIT"); g_lcap_exit = !x || strcmp(x, "0");
     g_lcap_buf = [g_dev newBufferWithLength:LCAP_BYTES options:MTLResourceStorageModeShared]; memset(g_lcap_buf.contents, 0, LCAP_BYTES);
     uint32_t *w = (uint32_t *)g_lcap_buf.contents; w[1] = g_lcap_cap; w[2] = !a || strcmp(a, "0");
+    // DM_NVN_GMEM_POISON=1|<value>: what a raw global-memory pool-table lookup that finds no pool reads in the side libraries' kernels (word 9, dmsh_loopdiag.py dm_hg_poison):
+    // 1 = 0x7fc0dead (a quiet NaN as a float, a huge int), so geometry or colour fed by a miss stands out on screen instead of reading as 0. Compute only (other stages read 0)
+    { const char *e = getenv("DM_NVN_GMEM_POISON"); if (e && *e && strcmp(e, "0")) { w[9] = !strcmp(e, "1") ? 0x7fc0deadu : (uint32_t)strtoul(e, NULL, 0);
+        MLOG("DM_NVN_GMEM_POISON: pool-table misses read %#x in the loop-guarded side libraries' kernels (0 before)", w[9]); } }
     res_add(g_lcap_buf); res_commit();
     MLOG("DM_NVN_LOOPCAP: diagnostic loop guard buffer at compute index 28, cap %u iterations, abort %s, %s on the first hit", g_lcap_cap, w[2] ? "on" : "off", g_lcap_exit ? "exit" : "keep running");
     return v;
@@ -2079,6 +2083,18 @@ static void lcap_check(uint64_t fence, const char *when) {
         seen = top;
         if (g_lcap_exit && fresh) { MLOG("[RED] loop cap: exiting at the first hit (DM_NVN_LOOPCAP_EXIT=0 keeps running)"); fflush(stderr); fflush(stdout); _exit(71); }
         w[3] = 0;   // keep running: lower the abort word again (later frames run their loops in full)
+    }
+    {   // raw global-memory lookups that found no pool (they read 0): each key's first miss, and the count (dmsh_loopdiag.py dm_hg_miss)
+        static uint32_t mseen; static uint32_t mk[64][2]; static int nmk; uint32_t mn = w[8], mtop = mn < LCAP_MISS ? mn : LCAP_MISS;
+        for (uint32_t i = mseen; i < mtop; i++) { const volatile uint32_t *r = w + 16 + 4 * LCAP_SLOTS + 4 * i; int k = 0; for (; k < nmk; k++) if (mk[k][0] == r[0] && mk[k][1] == r[1]) break;
+            if (k < nmk) continue; if (nmk < 64) { mk[nmk][0] = r[0]; mk[nmk][1] = r[1]; nmk++; }
+            MLOG("[RED] raw global memory: %08x%08x read an address in no memory pool, %#llx (it reads 0; %s fence %llu)", r[0], r[1], (unsigned long long)r[3] << 32 | r[2], when, (unsigned long long)fence); }
+        static uint32_t mlast; if (mn > mlast && (mn >= 2 * mlast + 16 || mtop > mseen)) { MLOG("[RED] raw global memory: %u lookups found no pool so far", mn); mlast = mn; }
+        mseen = mtop;
+    }
+    {   // pool-table lookups that found an entry but resolved below 4 GB, read as a miss instead (dmsh_loopdiag.py dm_hg_lowaddr): words 10-12
+        static uint32_t la_seen; uint32_t la = w[10];
+        if (la != la_seen) { MLOG("[RED] raw global memory: %u lookups resolved below 4 GB so far, not dereferenced (the first: address %#x, key ....%08x; %s fence %llu)", la, w[11], w[12], when, (unsigned long long)fence); la_seen = la; }
     }
     pthread_mutex_unlock(&g_lcap_mu);
 }
@@ -9351,6 +9367,8 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
     g_enc_key = sh->key; g_enc_stage = nvn_stage;   // named by the binding fallbacks' log lines (tex_fit)
     if (nvn_stage == 1 && !metal_vertex && sh->has_alpha && atest_on()) at_bind(en);   // also for a shader without bindings
     if (nvn_stage == 1 && !metal_vertex && sh->has_logic && lop_on()) lo_bind(en);
+    static int lcfrag = -1; if (lcfrag < 0) { const char *e = getenv("DM_NVN_LOOPCAP_FRAG"); lcfrag = e && *e == '1'; if (lcfrag) MLOG("DM_NVN_LOOPCAP_FRAG=1: the loop guard's buffer is bound at fragment index 30 for every draw"); }
+    if (lcfrag && nvn_stage == 1 && !metal_vertex && g_lcap_buf) enc_r_args((id<MTL4RenderCommandEncoder>)en, MTLRenderStageFragment, g_lcap_buf.gpuAddress, 30);   // DM_NVN_LOOPCAP_FRAG=1: fragment side libraries' dm_hg (dmsh_loopdiag.py FRAG_BUF_INDEX); off by default since hangguard's hg25 page fault
     if (!sh->ae) return 1;
     args_sync_dirty();
     static int noreuse = -1; if (noreuse < 0) { const char *e = getenv("DM_NVN_NO_ARGREUSE"); noreuse = e && atoi(e); if (noreuse) MLOG("DM_NVN_NO_ARGREUSE=1: every draw encodes its arguments (diagnostic)"); }

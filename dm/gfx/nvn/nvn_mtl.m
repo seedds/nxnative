@@ -2040,6 +2040,48 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
 }
 static _Atomic int g_seg_inflight;   // main command buffers committed and not reported back yet (sub_cut)
 static void gmem_commit_patch(void); static uint64_t g_gmem_patched; static void gmem_slot_note(uint64_t *w); static uint64_t gmem_repointed(void);   // pool tables filled again at commit (gmem_commit_patch)
+// Diagnostic DM_NVN_LOOPCAP=<cap>|1: the debug buffer of the diagnostic loop guard (dm/gfx/tools/dmsh_loopdiag.py; side libraries loaded with DM_MSL_OVERRIDE, which need
+// this switch: their kernels read compute buffer 28). One shared buffer, bound at compute index 28 for every dispatch: word 1 = the cap (1 = 65536 iterations a loop counter),
+// word 2 = abort armed (DM_NVN_LOOPCAP_ABORT, default 1: after the first hit every shared-counter loop of every guarded kernel leaves within 1,024 iterations, so the GPU drains),
+// records (key, loop site) from word 16. Each completed submission (and the watchdog, before it exits) prints new (key, site) pairs as RED lines; with DM_NVN_LOOPCAP_EXIT
+// (default 1) the first hit ends the process, so nothing more is queued behind state the capped kernel left; 0 clears the abort word and keeps running.
+// A site number is a line of <override dir>/<key>_b.sites.tsv. Found for PRAGMATA's intermittent wedge (PRAGMATA_PORT_NOTES.md 2026-11-05, "GPU hang hunt")
+enum { LCAP_SLOTS = 1024, LCAP_BYTES = (16 + 4 * LCAP_SLOTS) * 4 };
+static __strong id<MTLBuffer> g_lcap_buf; static uint32_t g_lcap_cap; static int g_lcap_exit = 1;
+static pthread_mutex_t g_lcap_mu = PTHREAD_MUTEX_INITIALIZER;
+static int lcap_on(void) {
+    static int v = -1; if (v >= 0) return v;
+    const char *e = getenv("DM_NVN_LOOPCAP"); v = e && *e && strcmp(e, "0");
+    if (!v) return 0;
+    g_lcap_cap = (uint32_t)strtoul(e, NULL, 0); if (g_lcap_cap <= 1) g_lcap_cap = 65536;
+    const char *a = getenv("DM_NVN_LOOPCAP_ABORT"), *x = getenv("DM_NVN_LOOPCAP_EXIT"); g_lcap_exit = !x || strcmp(x, "0");
+    g_lcap_buf = [g_dev newBufferWithLength:LCAP_BYTES options:MTLResourceStorageModeShared]; memset(g_lcap_buf.contents, 0, LCAP_BYTES);
+    uint32_t *w = (uint32_t *)g_lcap_buf.contents; w[1] = g_lcap_cap; w[2] = !a || strcmp(a, "0");
+    res_add(g_lcap_buf); res_commit();
+    MLOG("DM_NVN_LOOPCAP: diagnostic loop guard buffer at compute index 28, cap %u iterations, abort %s, %s on the first hit", g_lcap_cap, w[2] ? "on" : "off", g_lcap_exit ? "exit" : "keep running");
+    return v;
+}
+static void lcap_check(uint64_t fence, const char *when) {
+    if (!g_lcap_buf) return;
+    static uint32_t seen; static struct { uint32_t hi, lo, site, n; } pairs[64]; static int np;
+    pthread_mutex_lock(&g_lcap_mu);
+    volatile uint32_t *w = (volatile uint32_t *)g_lcap_buf.contents; uint32_t n = w[0], top = n < LCAP_SLOTS ? n : LCAP_SLOTS; int fresh = 0;
+    for (uint32_t i = seen; i < top; i++) {
+        uint32_t hi = w[16 + 4 * i], lo = w[17 + 4 * i], site = w[18 + 4 * i]; int k = 0;
+        for (; k < np; k++) if (pairs[k].hi == hi && pairs[k].lo == lo && pairs[k].site == site) break;
+        if (k < np) { pairs[k].n++; continue; }
+        if (np < 64) { pairs[np].hi = hi; pairs[np].lo = lo; pairs[np].site = site; pairs[np].n = 1; np++; }
+        fresh++;
+        MLOG("[RED] loop cap hit: %08x%08x loop %u (cap %u, %s fence %llu; the site is in <override dir>/%08x%08x_b.sites.tsv)", hi, lo, site, g_lcap_cap, when, (unsigned long long)fence, hi, lo);
+    }
+    if (top > seen) {
+        if (fresh || n > top) MLOG("[RED] loop cap: %u SIMD-group records so far (%u kept), %d distinct loops", n, top, np);
+        seen = top;
+        if (g_lcap_exit && fresh) { MLOG("[RED] loop cap: exiting at the first hit (DM_NVN_LOOPCAP_EXIT=0 keeps running)"); fflush(stderr); fflush(stdout); _exit(71); }
+        w[3] = 0;   // keep running: lower the abort word again (later frames run their loops in full)
+    }
+    pthread_mutex_unlock(&g_lcap_mu);
+}
 // GPU watchdog: a committed command buffer that has not completed within DM_NVN_GPU_WATCHDOG seconds (default 4; 0 turns it off) ends the process at once, before
 // more work is queued behind it. Committed Metal work cannot be cancelled and exiting does not recall it (Apple, developer forums 839155), so this only keeps a hang
 // from growing: PRAGMATA's first real frame left a command buffer that never completed nor reported an error, and twice the Mac's WindowServer stopped minutes later
@@ -2070,6 +2112,7 @@ static void *gpu_watchdog_main(void *arg) {
                  (unsigned long long)(done + 1), (now - t) / 1e9, (unsigned long long)f, (int)atomic_load(&g_last_commit_error));
             wk_dump(done + 1);   // the shaders of the stuck submission (a hang reports no error of its own)
             pool_dump(done + 1);  // and, with DM_NVN_POOLDUMP, where the pools' buffers sit in GPU addresses
+            lcap_check(done + 1, "watchdog,");   // and, with DM_NVN_LOOPCAP, the loops that ran out
             csp_dump(done + 1);  // and, with DM_NVN_BREADCRUMB, the dispatch that did not finish
             fflush(stderr); fflush(stdout); _exit(70);
         }
@@ -2119,6 +2162,7 @@ uint64_t mtl_sub_commit(void) {
         uint64_t c0 = 0, c1 = 0; if (seg_ts()) { c0 = gpu_s_guest_ns(cb.GPUStartTime); c1 = gpu_s_guest_ns(cb.GPUEndTime); }
         if (cb.error) { atomic_store(&g_last_commit_error, 1); res_top_once(cb.error); static int n, nv; int victim = [cb.error.description containsString:@"InnocentVictim"]; if (victim ? nv++ < 1 : n++ < 8) MLOG("[RED] command buffer error details fence=%llu: %s | GPU %.3f→%.3f", (unsigned long long)fence, cb.error.description.UTF8String, cb.GPUStartTime, cb.GPUEndTime); if (!victim) { MLOG("[RED] state of the failed submission fence=%llu: %s", (unsigned long long)fence, cctx.UTF8String); if (n <= 8) wk_dump(fence); { static _Atomic int bc; if (!atomic_exchange(&bc, 1)) { pool_dump(fence); csp_dump(fence); } } }   /* the first guilty error: where the pools sit (DM_NVN_POOLDUMP) and the dispatch in flight (DM_NVN_BREADCRUMB) */ MLOG("[RED] command buffer execution error: %s", cb.error.localizedDescription.UTF8String); }
         char where[64]; snprintf(where, sizeof where, "fence %llu, its last command buffer", (unsigned long long)fence); cbs_feedback(cbs, cb.error, where);
+        lcap_check(fence, "completed");
         post_complete(fence, c0, c1);
         defer_drain();
     }];
@@ -12715,6 +12759,7 @@ static void dispatch(const p_dispatch *dp) {
     g_dispatch_dim[0] = (uint32_t)dp->x; g_dispatch_dim[1] = (uint32_t)dp->y; g_dispatch_dim[2] = (uint32_t)dp->z;   // read back by the driver segment c0 (encode_args_)
     g_c0_dim_buf = nil;
     encode_args(ce, cs, 5, 0);
+    if (lcap_on()) enc_c_args(ce, g_lcap_buf.gpuAddress, 28);   // DM_NVN_LOOPCAP: the diagnostic loop guard's buffer
     if (cs->rf.tg_spill) {   // threadgroup memory past Metal's 32 KB, in a device buffer (dmsh_build.py tg_spill): a slice per workgroup, the workgroup's index modulo DMSH_TG_GROUPS
         uint64_t groups = dp->ind ? DMSH_TG_GROUPS : MIN((uint64_t)dp->x * dp->y * dp->z, (uint64_t)DMSH_TG_GROUPS);
         __strong id<MTLBuffer> tb = nil; size_t to = arena_alloc((size_t)MAX(groups, 1ull) * cs->rf.tg_spill, &tb);

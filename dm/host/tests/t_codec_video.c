@@ -10,7 +10,12 @@
 #include "../hle_movie_av1.c"
 #include <assert.h>
 
-uint64_t now_ns(void) { return 1; }
+static uint64_t g_test_wall = 1, g_test_frames, g_test_focus_in; static int g_test_focus = 1;
+uint64_t now_ns(void) { return g_test_wall; }
+uint64_t guest_ns(void) { return g_test_wall; }
+uint64_t dm_guest_frame(void) { return g_test_frames; }   // hle_os.c: frames presented
+int dm_focus_now(void) { return g_test_focus; }           // hle_oe.c: the window's focus
+uint64_t dm_focus_in_since(void) { return g_test_focus_in; }
 __thread _Atomic int dm_host_work;   // hle_thread.c
 static struct { void *ev; int bound, set; } g_ev[16];
 static int ev_slot(void *e) { for (int i = 0; i < 16; i++) if (g_ev[i].ev == e) return i; for (int i = 0; i < 16; i++) if (!g_ev[i].ev) { g_ev[i].ev = e; return i; } abort(); }
@@ -257,8 +262,21 @@ int main(void) {
         assert(d->skipped == 2);
         g_test_now = 100.1; d->held_eos[0] = 1; cv_skip_late(d); assert(d->nheld == 4);   // a picture that ends the stream is never dropped
         d->held_eos[0] = 0; CLEAR();
-        d->clk_last = 200000000; HOLD(3); g_test_now = 106.0; cv_skip_late(d);   // over a second behind (a load, a pause): the clock starts again, nothing dropped
-        assert(d->nheld == 3 && d->clk_t0 == 106.0 && d->clk_ts0 == d->held_ts[0]);
+        // over a second behind while the game presented frames without taking a picture (a pause menu, a load screen): the clock starts again, nothing dropped
+        d->clk_last = 200000000; HOLD(3); d->take_frame = 10; g_test_frames = 10 + CV_PAUSE_FRAMES; g_test_now = 106.0; cv_skip_late(d);
+        assert(d->nheld == 3 && d->clk_t0 == 106.0 && d->clk_ts0 == d->held_ts[0] && d->restarts == 1 && !d->catching);
+        CLEAR();
+        // 1.5 s behind after the whole game stood still in the host (a pipeline built on first use) with its sound going on: the clock stays, the late pictures go
+        d->clk_last = 300000000; HOLD(5); d->take_frame = g_test_frames - 1; g_test_wall = 50; d->take_wall = 40; g_test_now = 107.6; cv_skip_late(d);
+        assert(d->nheld == 1 && d->held_ts[0] == 380000000 && d->clk_t0 == 106.0 && d->restarts == 1 && d->catching && d->catchups == 1);
+        g_test_now = 107.61; cv_skip_late(d); assert(d->catchups == 1);   // still behind: the same stall, noted once
+        CLEAR();
+        // over a second behind, nothing presented, but the window went out of focus and came back meanwhile (the game may have paused itself): the clock starts again
+        d->clk_last = 400000000; HOLD(3); d->take_frame = g_test_frames; d->take_wall = 60; g_test_focus_in = 70; g_test_now = 110.0; cv_skip_late(d);
+        assert(d->nheld == 3 && d->clk_t0 == 110.0 && d->restarts == 2 && !d->catching);
+        CLEAR(); g_test_focus = 2;   // and out of focus now
+        d->clk_last = 500000000; HOLD(3); d->take_wall = 80; g_test_now = 115.0; cv_skip_late(d); assert(d->nheld == 3 && d->clk_t0 == 115.0 && d->restarts == 3);
+        g_test_focus = 1;
         CLEAR(); d->clk_last = 900000000; d->nheld = 0;
         for (int i = 0; i < 3; i++) { d->held[i] = black_i420(16, 16); d->held_ts[i] = 20000000LL * i; d->held_eos[i] = 0; } d->nheld = 3;   // a timestamp going back (a loop)
         g_test_now = 106.5; cv_skip_late(d); assert(d->nheld == 3 && d->clk_t0 == 106.5 && d->clk_ts0 == 0);

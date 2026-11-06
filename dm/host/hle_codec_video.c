@@ -18,7 +18,6 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <sys/mman.h>
-#include <time.h>
 #include "vpx/vpx_decoder.h"
 #include "vpx/vp8dx.h"
 #include "hle_movie_yuv.h"
@@ -52,7 +51,8 @@ typedef struct {
     pthread_mutex_t dmu;   // AV1's decode, outside mu (lock order: dmu, then mu)
     vpx_image_t *held[CV_HOLD + CV_BURST]; int64_t held_ts[CV_HOLD + CV_BURST]; uint8_t held_eos[CV_HOLD + CV_BURST]; int nheld;
     int eos_pending;
-    int clk_on; int64_t clk_ts0, clk_last; double clk_t0; uint64_t skipped;   // AV1's movie clock (cv_skip_late): a picture's timestamp against the host clock
+    int clk_on, catching; int64_t clk_ts0, clk_last; double clk_t0; uint64_t skipped, restarts, catchups;   // AV1's movie clock (cv_skip_late): a picture's timestamp against the guest clock
+    uint64_t take_frame, take_wall;   // the presented-frame count and now_ns() when the game last took a picture (cv_pause)
 } cv_dec;
 
 static cv_dec *g_cv[16];
@@ -105,16 +105,39 @@ static void pool_native_write(cv_pool *p, uint32_t i, const vpx_image_t *im) {
 }
 // A player that shows one picture a frame plays a 60 fps movie at the game's frame rate. Ocarina of Time's AV1 movies (all 60 fps) ran at 0.44x on an M1 Max whose GPU
 // gives the title 28 frames a second, with the sound running ahead. So a picture is given by the clock, as a video player does: the movie's timestamps (ns) from its first
-// picture against the host clock, and of the waiting pictures the newest one that is due, the late ones before it dropped. A picture is late once the next is 50 ms overdue:
-// with no slack, a game at the movie's rate a frame behind its clock after a hitch skipped every other picture from then on. A stall of over a second (a load, a pause) or a
-// timestamp going back (a loop, a new stream) starts the clock again rather than skipping. A game that keeps up drops nothing. AV1 only (the only timestamps checked);
-// DM_CV_LATE=0 turns it off
-static double cv_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double)t.tv_sec + t.tv_nsec / 1e9; }
+// picture against the guest clock, and of the waiting pictures the newest one that is due, the late ones before it dropped. A picture is late once the next is 50 ms overdue:
+// with no slack, a game at the movie's rate a frame behind its clock after a hitch skipped every other picture from then on. A timestamp going back (a loop, a new stream)
+// starts the clock again. So does a picture over a second late when the game held the movie: it presented frames without taking a picture (a pause menu, a load screen) or
+// its window lost the focus meanwhile (cv_pause). Otherwise the whole game stood still in the host (a pipeline built on first use, a long GPU wait) while its sound went on,
+// and the late pictures are skipped until the movie is back on its clock: starting the clock again there left the picture behind the narration until the next stream (an M2
+// Pro's title movie). The clock is the guest's (guest_ns), which does not run while the Mac sleeps, while an iPhone app is in the background or under DM_DETCLOCK's replay
+// steps, so none of those makes a gap. A game that keeps up drops nothing. AV1 only (the only timestamps checked); DM_CV_LATE=0 turns it off
+static double cv_now(void) { return (double)guest_ns() / 1e9; }
 static double (*cv_clock)(void) = cv_now;   // t_codec_video replaces it
 static int cv_late_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_CV_LATE"); v = !(e && !strcmp(e, "0")); } return v; }
+#define CV_PAUSE_FRAMES 6   // frames presented without a picture taken that make a gap the game's: a stall in the host presents at most the frame it held, plus the frames
+                            // a movie slower than the game skips between pictures
+static const char *cv_pause(const cv_dec *d) {
+    if (dm_guest_frame() - d->take_frame >= CV_PAUSE_FRAMES) return "the game presented frames without taking a picture";
+    if (dm_focus_now() != 1 || dm_focus_in_since() > d->take_wall) return "the window lost the focus";
+    return NULL;
+}
 static void cv_skip_late(cv_dec *d) {   // decoder lock held, at least one picture waiting
     double now = cv_clock(); int64_t ts = d->held_ts[0];
-    if (!d->clk_on || ts < d->clk_last || now - (d->clk_t0 + (double)(ts - d->clk_ts0) / 1e9) > 1.0) { d->clk_on = 1; d->clk_ts0 = ts; d->clk_t0 = now; return; }
+    double late = d->clk_on ? now - (d->clk_t0 + (double)(ts - d->clk_ts0) / 1e9) : 0;
+    const char *why = !d->clk_on ? "" : ts < d->clk_last ? "a timestamp went back (a loop or a new stream)" : late > 1.0 ? cv_pause(d) : NULL;
+    if (why) {
+        if (*why && d->restarts++ < 8) {
+            if (ts < d->clk_last) LOG("[codec] %s decoder %u: the movie clock starts again: %s", k_cv_name[d->codec], d->id, why);
+            else LOG("[codec] %s decoder %u: the movie clock starts again, %.2f s behind: %s", k_cv_name[d->codec], d->id, late, why);
+        }
+        d->clk_on = 1; d->clk_ts0 = ts; d->clk_t0 = now; d->catching = 0; return;
+    }
+    if (late <= 1.0) d->catching = 0;
+    else if (!d->catching) {
+        d->catching = 1;
+        if (d->catchups++ < 8) LOG("[codec] %s decoder %u: %.2f s behind after the game stood still: late pictures skipped to catch up with the movie's clock", k_cv_name[d->codec], d->id, late);
+    }
     while (d->nheld > 1 && !d->held_eos[0] && d->clk_t0 + (double)(d->held_ts[1] - d->clk_ts0) / 1e9 <= now - 0.05) {   // the next one is overdue too: this one is late
         vpx_img_free(d->held[0]); d->nheld--;
         memmove(d->held, d->held + 1, (size_t)d->nheld * sizeof d->held[0]); memmove(d->held_ts, d->held_ts + 1, (size_t)d->nheld * sizeof d->held_ts[0]);
@@ -135,7 +158,7 @@ static void drain(cv_dec *d, int took) {
             vpx_image_t *im = d->held[0]; int64_t ts = d->held_ts[0]; uint8_t eos = d->held_eos[0];
             memmove(d->held, d->held + 1, sizeof d->held[0] * (d->nheld - 1)); memmove(d->held_ts, d->held_ts + 1, sizeof d->held_ts[0] * (d->nheld - 1));
             memmove(d->held_eos, d->held_eos + 1, d->nheld - 1); d->nheld--;
-            b->w = (uint16_t)im->d_w; b->h = (uint16_t)im->d_h; b->ts = ts; b->eos = eos; d->clk_last = ts;
+            b->w = (uint16_t)im->d_w; b->h = (uint16_t)im->d_h; b->ts = ts; b->eos = eos; d->clk_last = ts; d->take_frame = dm_guest_frame(); d->take_wall = now_ns();
             if (b->pool && b->pidx < b->pool->count) { pool_native_write(b->pool, b->pidx, im); if (b->pool->img[b->pidx]) vpx_img_free(b->pool->img[b->pidx]); b->pool->img[b->pidx] = im; } else vpx_img_free(im);
             if (!d->pictures++) LOG("[codec] %s decoder %u: first picture %ux%u into buffer %u", k_cv_name[d->codec], d->id, b->w, b->h, i);
         } else { b->w = b->h = 0; b->ts = 0; b->eos = 1; d->eos_pending = 0; }

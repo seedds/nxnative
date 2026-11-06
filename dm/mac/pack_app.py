@@ -268,7 +268,7 @@ def pack(a):
     except (OSError, ValueError): previous = None
     try:
         a = argparse.Namespace(**vars(a))
-        for name in ('out', 'host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'env_file', 'settings', 'icon', 'html'):
+        for name in ('out', 'host', 'patched', 'romfs', 'romfs_overlay', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'env_file', 'settings', 'icon', 'html'):
             if getattr(a, name): setattr(a, name, str(Path(getattr(a, name)).resolve()))
         mods, msls, pso, tables, pairs, fonts, files = selected_inputs(a)
         # --program: the other programs of a game of several programs (index, rewritten modules, RomFS, shader libraries, tables, offline pages; tab-separated), which go in beside the first's as one app
@@ -288,7 +288,7 @@ def pack(a):
         minos = min_os(a.host)
         sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'tools/romfs.py'] + swift_sources()
         inputs = {'options': vars(a), 'files': [(str(p), p.stat().st_mode, digest(p), os.readlink(p) if p.is_symlink() else None) for p in files + sources],
-                  'trees': [(p, inventory(Path(p))) for p in (a.romfs, a.aoc, a.html, *(str(x[1]) for x in programs), *(str(x[3]) for x in programs)) if p and Path(p).exists()],
+                  'trees': [(p, inventory(Path(p))) for p in (a.romfs, a.romfs_overlay, a.aoc, a.html, *(str(x[1]) for x in programs), *(str(x[3]) for x in programs)) if p and Path(p).exists()],
                   'tools': [[str(c), c.stat().st_mode, c.stat().st_size, c.stat().st_mtime_ns, c.stat().st_ctime_ns, run([c, '--version']).strip()] for c in (clang, swiftc)] + [
                             str(sdk), run(['xcrun', '--sdk', 'macosx', '--show-sdk-version']).strip(),
                             str(codesign), codesign.stat().st_mode, digest(codesign), minos]}
@@ -306,7 +306,9 @@ def pack(a):
     for d in (mac, dm / 'font'): d.mkdir(parents=True)
     romfs, msl, aoc = Path(a.romfs), Path(a.msl), Path(a.aoc) if a.aoc else None
     # each source is probed on its own, as they may lie on different volumes; cp -c copies what it cannot clone, so a probe decides only the free-space check and the step line
-    trees, lists = {'romfs': romfs, 'aoc': aoc}, {'mods': mods, 'msl': msls, 'pso': pso}
+    overlay = Path(a.romfs_overlay) if a.romfs_overlay else None
+    if overlay and not overlay.is_dir(): raise SystemExit(f'--romfs-overlay must be a directory: {overlay}')
+    trees, lists = {'romfs': romfs, 'overlay': overlay, 'aoc': aoc}, {'mods': mods, 'msl': msls, 'pso': pso}
     clone = {k: bool(d) and can_clone(d, res) for k, d in trees.items()} | {k: bool(ps) and can_clone(ps[0], res) for k, ps in lists.items()}
     if is_chain_library(msl): clone['msl'] = False   # copy_msl writes it, which the free-space check below counts
     need = sum(tree_bytes(d) for k, d in trees.items() if d and not clone[k]) + sum(p.stat().st_size for k, ps in lists.items() if not clone[k] for p in ps)
@@ -326,6 +328,9 @@ def pack(a):
     if aoc: step('add-on content'); copy([aoc], res / 'aoc', clone['aoc'])
     if pso: step('pipeline archive'); (res / 'pso').mkdir(); copy(pso, res / 'pso', clone['pso'])
     step('game files'); copy([romfs], res / ('romfs.img' if romfs.is_file() else 'romfs'), clone['romfs'])
+    if overlay:
+        step('game-specific RomFS overlay')
+        copy([overlay], res / 'romfs_overlay', clone['overlay'])
     if a.html and Path(a.html).is_dir(): copy([Path(a.html)], res / 'html', False)   # the offline pages, beside the RomFS where the host looks for them (hle_web.c)
     # The other programs: p<N>/ (RomFS, offline pages), msl/p<N>/<library>, dm/p<N>/ (modules, tables), and the table of them all, which the launcher makes DM_PROGRAMS (launcher.c, hle_oe.c): @R@ Resources, @C@ Contents, @S@ the app's Application Support folder
     if programs:
@@ -371,6 +376,7 @@ def parse(argv):
     ap.add_argument('--host', required=True, help='the Mac host built for the profile')
     ap.add_argument('--patched', required=True, help='the rewritten modules (patch_nso.py output)')
     ap.add_argument('--romfs', required=True, help='the RomFS of the packed version')
+    ap.add_argument('--romfs-overlay', help='optional portable game-specific RomFS overrides, bundled in Contents/Resources/romfs_overlay')
     ap.add_argument('--msl', required=True, help='the Mac shader libraries: <shader>/cache/b-<chain>, or a Vulkan or GL game\'s <shader>/vk or gl')
     ap.add_argument('--msl-name', help='its folder name in the app (default: its own)')
     ap.add_argument('--tables', required=True, help='the game profile folder (shader_map.tsv and the tables beside it)')

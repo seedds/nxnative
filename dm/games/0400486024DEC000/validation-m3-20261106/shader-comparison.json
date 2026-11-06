@@ -1,0 +1,30 @@
+{
+  "game": "0400486024DEC000",
+  "package": "v131072",
+  "baseline_runtime": "6121fd75312cb4d1af404a01921d437741fea91e",
+  "baseline_chain": "adec7d81d970",
+  "candidate_shader_source": "61df0f2",
+  "candidate_host_source": "f66e644",
+  "candidate_chain": "4a7fcd2b71ee",
+  "inputs": "6de3ff8879d6",
+  "baseline_total": 42854,
+  "baseline_ready": 42847,
+  "candidate_total": 42854,
+  "candidate_ready": 42853,
+  "newly_failing_previous_successes": [],
+  "previous_failures_now_ready": [
+    "13002657609092b4",
+    "3b8ecb1aa4207240",
+    "49d003551e7dcaf1",
+    "7d1481cf3458b690",
+    "c144d8f734fbe228",
+    "de5a4f469cb990b2"
+  ],
+  "remaining_failures": [
+    "68bbe98b3bfd9876"
+  ],
+  "original_1299_total": 42851,
+  "original_1299_ready": 42823,
+  "all_original_successes_still_ready": true,
+  "note": "Base-library coverage only; this does not prove numerical equivalence or complete gameplay coverage."
+}

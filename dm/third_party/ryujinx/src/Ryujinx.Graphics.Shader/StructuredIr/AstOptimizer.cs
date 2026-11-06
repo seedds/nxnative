@@ -22,6 +22,13 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                 {
                     if (node is AstAssignment assignment && assignment.Destination is AstOperand propVar)
                     {
+                        // A SPIR-V function argument needs its local storage. An atomic or call must run here,
+                        // even if no expression consumes the value it returns.
+                        if (propVar.AddressTaken || assignment.Source is AstOperation op && op.Inst.HasSideEffects())
+                        {
+                            continue;
+                        }
+
                         bool isWorthPropagating = propVar.Uses.Count == 1 || IsWorthPropagating(assignment.Source);
 
                         if (propVar.Defs.Count == 1 && isWorthPropagating)

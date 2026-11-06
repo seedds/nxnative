@@ -424,27 +424,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
         private static bool HasSideEffects(INode node)
         {
-            if (node is Operation operation)
-            {
-                switch (operation.Inst & Instruction.Mask)
-                {
-                    case Instruction.AtomicAdd:
-                    case Instruction.AtomicAnd:
-                    case Instruction.AtomicCompareAndSwap:
-                    case Instruction.AtomicMaxS32:
-                    case Instruction.AtomicMaxU32:
-                    case Instruction.AtomicMinS32:
-                    case Instruction.AtomicMinU32:
-                    case Instruction.AtomicOr:
-                    case Instruction.AtomicSwap:
-                    case Instruction.AtomicXor:
-                    case Instruction.Call:
-                    case Instruction.ImageAtomic:
-                        return true;
-                }
-            }
-
-            return false;
+            return node is Operation operation && operation.Inst.HasSideEffects();
         }
 
         private static bool DestIsLocalVar(INode node)

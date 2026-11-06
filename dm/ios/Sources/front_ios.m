@@ -229,6 +229,7 @@ static void launcher_done(void) { [g_root startGame]; }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 - (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }   // Edge gestures need two swipes, to avoid accidental exits
 - (BOOL)prefersStatusBarHidden { return YES; }
+- (BOOL)prefersPointerLocked { bool dm_kbm_pointer_lock(void); return dm_kbm_pointer_lock(); }   // DmGamepad.m: Mouse: Camera with a mouse or trackpad connected
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskAll; }
 @end
 UIViewController *front_ios_root(void) { return [DmRootVC new]; }
@@ -285,6 +286,7 @@ bool dm_setting_live(const char *env, const char *value) {
         dm_set_opmode(m); dm_gamepad_opmode_changed(); LOG("front end: console mode %s (in-game menu)", m ? "docked" : "handheld");
         return true;
     }
+    if (!strcmp(env, "DM_MOUSE")) { if (value) { void dm_kbm_set_mouse(int); dm_kbm_set_mouse(atoi(value) != 0); LOG("front end: mouse %s (in-game menu)", atoi(value) ? "camera" : "touch screen"); } return true; }
     if (!strcmp(env, "DM_SHOW_FPS")) { if (value) [g_root showFPS:atoi(value) != 0]; return true; }
     if (!strcmp(env, "DM_TOUCH_HAPTICS")) { if (value) dm_gamepad_touch_feedback(atoi(value) != 0); return true; }
     if (!strcmp(env, "DM_RUMBLE")) { if (value) { dm_haptics_set_enabled(atoi(value) != 0); LOG("front end: game rumble %s (in-game menu)", atoi(value) ? "on" : "off"); } return true; }

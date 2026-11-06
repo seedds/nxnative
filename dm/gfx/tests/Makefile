@@ -159,6 +159,8 @@ t_cbs_fault: t_cbs_fault.m $(MTL_T_DEP)
 .PHONY: check_t_cbs_fault
 check_t_cbs_fault: t_cbs_fault
 	./t_cbs_fault
+t_guard_sys: t_guard_sys.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_guard_sys.m $(MTL_T_SRC) $(FW)
 t_tex_fit_root: t_tex_fit_root.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_tex_fit_root.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_tex_fit_root

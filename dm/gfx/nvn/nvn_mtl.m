@@ -292,7 +292,31 @@ enum { GUARD_OK, GUARD_EVICT, GUARD_STOP, GUARD_WALL, GUARD_EVERY = 30, GUARD_TI
 static struct { uint64_t evict, stop, wall; } g_guard;   // bytes, all 0 with the guard off: the eviction level, the stop level, the size no commit grows past
 static _Atomic int g_guard_lv;   // the highest level met since the submit thread last looked (guard_act)
 static _Atomic uint64_t g_guard_set;   // the residency set's size at the last commit: the timer does not read the set, whose lock a stuck commit holds
-static int guard_level(uint64_t used) { return !g_guard.stop ? GUARD_OK : used >= g_guard.wall ? GUARD_WALL : used >= g_guard.stop ? GUARD_STOP : used >= g_guard.evict ? GUARD_EVICT : GUARD_OK; }
+// The system's side of the guard: GPU memory is wired out of the same RAM as everything else, and on a 16 GB Mac the system can run out before the residency set reaches Metal's
+// working set. Ocarina of Time with every pool resident (DM_NVN_GMEM_ALL=1, M2 Pro, 12,124 MB working set): a kernel panic at 10,463 MB wired with 48 MB free (3 GB compressed),
+// under this guard's 95 % stop. So the 100 ms timer also reads how much memory the system can still give (kern.memorystatus_level: the percentage of memory available, free plus
+// reclaimable) and raises the level when that falls below the margin (stop) or twice the margin (evict). The margin starts at DM_NVN_SYS_MARGIN_MB (default 1024; 0 turns this
+// side off) and grows by 512 MB, up to 4 GB, at each memory-pressure warning the system sends. The working-set side counts as before (guard_used)
+static _Atomic int g_sys_lv;   // GUARD_OK / GUARD_EVICT / GUARD_STOP from the system's available memory, set by guard_tick
+static _Atomic uint64_t g_sys_avail, g_sys_margin;   // bytes the system can still give at the last tick, and the margin
+static int guard_level(uint64_t used) {
+    int lv = !g_guard.stop ? GUARD_OK : used >= g_guard.wall ? GUARD_WALL : used >= g_guard.stop ? GUARD_STOP : used >= g_guard.evict ? GUARD_EVICT : GUARD_OK;
+    int sys = atomic_load_explicit(&g_sys_lv, memory_order_relaxed);
+    return sys > lv ? sys : lv;
+}
+static void guard_sys_tick(void) {
+    static uint64_t mem; static int said;
+    uint64_t margin = atomic_load_explicit(&g_sys_margin, memory_order_relaxed); if (!margin) return;
+    if (!mem) { size_t n = sizeof mem; if (sysctlbyname("hw.memsize", &mem, &n, NULL, 0) || !mem) { atomic_store(&g_sys_margin, 0); return; } }
+    int level = 0; size_t n = sizeof level;
+    if (sysctlbyname("kern.memorystatus_level", &level, &n, NULL, 0)) return;
+    uint64_t avail = mem / 100 * (uint64_t)(level < 0 ? 0 : level);
+    atomic_store_explicit(&g_sys_avail, avail, memory_order_relaxed);
+    int lv = avail < margin ? GUARD_STOP : avail < 2 * margin ? GUARD_EVICT : GUARD_OK;
+    atomic_store_explicit(&g_sys_lv, lv, memory_order_relaxed);
+    if (lv && !said++) MLOG("[RED] GPU memory guard: the system has %llu MB left to give (%d %% available), under %s %llu MB margin", (unsigned long long)(avail >> 20), level,
+                            lv == GUARD_STOP ? "the" : "twice the", (unsigned long long)(margin >> 20));
+}
 // The set's own size: currentAllocatedSize counts each no-copy buffer in full however many cover the same pages
 static uint64_t guard_used(uint64_t set) { return set; }
 static void guard_raise(int lv) { int cur = atomic_load(&g_guard_lv); while (lv > cur && !atomic_compare_exchange_weak(&g_guard_lv, &cur, lv)) {} }
@@ -469,6 +493,9 @@ static void guard_stop(uint64_t used) {
     static _Atomic int once; if (atomic_exchange(&once, 1)) return;
     MLOG("[RED] GPU memory guard: %llu MB allocated, %llu MB in the residency set at its last commit, against Metal's working set of %llu MB (this guard stops at %llu MB): stopping the game before the driver cannot wire more", (unsigned long long)(used >> 20),
          (unsigned long long)(atomic_load(&g_guard_set) >> 20), (unsigned long long)(g_dev.recommendedMaxWorkingSetSize >> 20), (unsigned long long)(g_guard.stop >> 20));
+    MLOG("[RED] GPU memory guard: which side: working set %s (counted %llu MB against the %llu MB stop), system %s (%llu MB left to give against a %llu MB margin)",
+         used >= g_guard.stop ? "over" : "under", (unsigned long long)(used >> 20), (unsigned long long)(g_guard.stop >> 20),
+         atomic_load(&g_sys_lv) >= GUARD_STOP ? "over" : "under", (unsigned long long)(atomic_load(&g_sys_avail) >> 20), (unsigned long long)(atomic_load(&g_sys_margin) >> 20));
     int locked = 1; for (int i = 0; i < 50 && locked; i++) { locked = pthread_mutex_trylock(&g_res_mu) != 0; if (locked) usleep(2000); else pthread_mutex_unlock(&g_res_mu); }
     if (locked) MLOG("[RED] GPU memory guard: the residency set's lock is held, a commit may be stuck in the driver: no report of what the set holds");
     else res_top("[RED] GPU memory guard");
@@ -477,6 +504,7 @@ static void guard_stop(uint64_t used) {
 // The submit thread decides while it comes round (guard_act). Past the working set, or a second over the stop level, it does not
 static void guard_tick(void) {
     static unsigned over;
+    guard_sys_tick();
     uint64_t used = guard_used(atomic_load_explicit(&g_guard_set, memory_order_relaxed)); int lv = guard_level(used);
     if (lv) guard_raise(lv);
     over = lv >= GUARD_STOP ? over + 1 : 0;
@@ -494,6 +522,13 @@ static void guard_init(void) {
     dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), 100 * NSEC_PER_MSEC, 20 * NSEC_PER_MSEC);
     dispatch_source_set_event_handler(timer, ^{ guard_tick(); });
     dispatch_resume(timer);
+    { const char *m = getenv("DM_NVN_SYS_MARGIN_MB"); uint64_t mb = m ? strtoull(m, NULL, 0) : 1024; atomic_store(&g_sys_margin, mb << 20);
+      static dispatch_source_t press;
+      if (mb) { press = dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0, DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+          dispatch_source_set_event_handler(press, ^{ uint64_t cur = atomic_load(&g_sys_margin), nm = cur + (512ull << 20); if (nm > (4096ull << 20)) nm = 4096ull << 20; atomic_store(&g_sys_margin, nm);
+              MLOG("GPU memory guard: the system reports memory pressure (%lu): the margin is now %llu MB", (unsigned long)dispatch_source_get_data(press), (unsigned long long)(nm >> 20)); guard_sys_tick(); });
+          dispatch_resume(press); }
+      MLOG("GPU memory guard: also stops when the system has less than %llu MB left to give (DM_NVN_SYS_MARGIN_MB; evicts below twice that)", (unsigned long long)mb); }
     MLOG("GPU memory guard: lets go of what it can from %llu MB, stops the game at %llu MB (Metal's working set %llu MB)", (unsigned long long)(g_guard.evict >> 20), (unsigned long long)(g_guard.stop >> 20), (unsigned long long)(ws >> 20));
 }
 static void udc_selftest(void) {

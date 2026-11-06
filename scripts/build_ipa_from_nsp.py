@@ -428,6 +428,10 @@ def find_nx_extract(repo, env):
     return nx
 
 
+def nx_extract_sources(repo):   # the source files of the nx_extract a build runs (build_nx_extract builds this repository's): what a stage that reuses its output keys on
+    return sorted(p for p in (repo / 'dm/tools/nx_extract').iterdir() if p.suffix in ('.cs', '.csproj'))
+
+
 def swap_in(tmp, dst):   # swap the new output in as a whole (the old one is untouched on failure)
     rmtree(dst); tmp.rename(dst)
 
@@ -1219,14 +1223,19 @@ def extract(nx, keys, ex, name, base, upd, cmp_dir, logs, g, app):   # the build
     return dst
 
 
-def extract_html(nx, keys, dst, base, upd, logs, app):
+def extract_html(nx, keys, dst, base, upd, logs, app, repo):
     """The offline HTML pages of the packed program (its HtmlDocument NCAs, which the web applet shows: the pause menu of Super Mario 3D All-Stars' games) → <dst>/html/html<n>/, beside the
-    RomFS, where the host looks for them (hle_web.c). Reused; a program without any has an empty folder"""
-    out, tmp = dst / 'html', dst / 'html.partial'
-    if out.is_dir(): return
-    rmtree(tmp); tmp.mkdir(parents=True)
+    RomFS, where the host looks for them (hle_web.c). A program without any has an empty folder. Reused while nx_extract's source, the packages (name and size) and the options are those
+    of the extraction that made the folder (html.key beside it): a folder was reused for as long as it existed, so pages an older nx_extract had read wrongly stayed in every later
+    build. Super Smash Bros. Ultimate 13.0.5's update pages are a patch of the base game's, 1,641 of their 2,798 files failed the hash check before a5c7234e and were left out, and a build
+    with the fixed nx_extract over that build folder kept the 1,157 (its How to Play page then showed white and took no key). A folder with no key, from a build before the key, is read again once"""
+    out, tmp, kf = dst / 'html', dst / 'html.partial', dst / 'html.key'
+    key = fingerprint('html pages', ('files', nx_extract_sources(repo)), [(p.name, p.stat().st_size) for p in (base, upd) if p], extract_flags(app))
+    if out.is_dir() and reused(kf, key) is not None: return
+    rmtree(kf); rmtree(tmp); tmp.mkdir(parents=True)
     run([nx, keys, base, upd or '-', tmp, '--html'] + extract_flags(app), logs / f'extract_html_{dst.name}.log')
     swap_in(tmp, out)
+    kf.write_text(f'{key}\n')
 
 
 def dump_folder(folder):   # a folder of the game's files (pack_dump.py), with no game package beside them: NSPs in the folder are what the player asked for
@@ -3045,7 +3054,7 @@ def main(args=None):
     for ver in versions:   # each merged version streams directly into its own image
         b, u = picks[ver]
         dirs[ver] = extract_nup(ex, ver, u or b, b, app, fam['nup']) if nup else extract_dump(ex, ver, u or b, app) if dump else extract(nx, keys, ex, ver, b, u, None, logs, g, app)
-        if not nup and not dump: extract_html(nx, keys, dirs[ver], b, u, logs, app)
+        if not nup and not dump: extract_html(nx, keys, dirs[ver], b, u, logs, app, repo)
     check_formats(dirs)
     check_versions_aarch64(dirs, logs, g, nacp.name(dirs[versions[0]] / 'control.nacp') or f'{app:016X}')   # before build_mismatch, derive_profile and build_sources read the modules
     bad = [] if derived else [f'{v}: {x}' for v in versions for x in build_mismatch(dirs[v], v, g)]   # every module's build ID must be the one the profile registers for its version

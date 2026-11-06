@@ -11,6 +11,8 @@ static int hid_usleep(useconds_t usec);
 #undef clock_gettime
 #undef usleep
 #include "../pad_slots.h"
+void dm_oe_execute(int index, const void *param, size_t n) { (void)index; (void)param; (void)n; }   // DM_CTL "program", "webshot": not exercised here
+void front_web_shot(const char *path) { (void)path; }
 
 static int checks, fails, g_mode = 1, g_signals;
 static void *g_signalled;
@@ -38,6 +40,7 @@ void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; }
 void hle_signal_system_event(void *g) { g_signalled = g; g_signals++; }
 int hle_signal_bound_system_event(void *g) { g_signalled = g; g_signals++; return 1; }
 void dm_gfx_texlist(int target) { (void)target; }
+void dm_gfx_restop(void) {}
 void dm_gfx_texraw(uint64_t serial, const char *path) { (void)serial; (void)path; }
 void dm_ctl_peek(uint64_t a, int n) { (void)a; (void)n; }
 void crash_dump_now(const char *why) { (void)why; }
@@ -498,6 +501,18 @@ int main(void) {
     t_motion_live();
     t_motion_hid();
     t_rec();
+    {   // Nmouse with no device (SDK 21's forms): the pointer range is kept, the merged handle 0 takes settings, the standard mouse and the handle queries report nothing
+        int w = 0, h = 0; uint64_t std = 7; uint32_t npad = 9;
+        h_hid_NmouseInitT(NULL, 0, 1920, 1080, 1); h_hid_NmouseGetRange(&w, &h);
+        CHECK(w == 1920 && h == 1080, "InitializeNmouse with a pointer type keeps the range");
+        h_hid_NmouseSetRange(1280, 720); h_hid_NmouseGetRange(&w, &h);
+        CHECK(w == 1280 && h == 720, "SetNmousePointerRanges is what GetNmousePointerRanges reads");
+        CHECK(!h_hid_NmouseStd(&std) && std == 7, "no standard mouse handle");
+        uint64_t merged = 1; CHECK(h_hid_NmouseMerged(&merged) && merged == 0, "the merged handle is 0");
+        CHECK(h_hid_NmouseEnable(merged, 0x101) && h_hid_NmousePos(merged, 10, 10), "the merged handle takes the pointer settings (a bool argument's high bits ignored)");
+        CHECK(!h_hid_NmouseEnable(5, 1) && !h_hid_NmousePos(5, 0, 0), "an unknown handle does not");
+        CHECK(!h_hid_NmouseState(NULL, merged) && !h_hid_NmouseNpad(&npad, merged) && npad == 9, "no state and no controller behind the merged handle");
+    }
     printf("hid players: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

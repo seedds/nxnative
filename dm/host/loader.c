@@ -3,6 +3,7 @@
 #include "dm.h"
 #include <TargetConditionals.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -10,6 +11,9 @@
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include "hle.h"
+#if TARGET_OS_IPHONE
+#include <mach/mach.h>
+#endif
 
 module_t *g_mod;
 int g_nmod;
@@ -116,9 +120,10 @@ module_t *module_of(const void *p) {
 }
 
 // Whether main imports a symbol whose name starts with prefix (an undefined dynamic symbol: one main calls but another module defines), for behaviour that follows what the game uses
-int dm_main_imports(const char *prefix) {
+// The NROs count too, loaded or not: main may be only a boot stub that loads the game's code as an NRO (Mario Tennis Fever), and a Source engine game's modules are NROs
+int dm_game_imports(const char *prefix) {
     size_t n = strlen(prefix);
-    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) {
+    for (int i = 0; i < g_nmod; i++) if (g_mod[i].nro || !strcmp(g_mod[i].name, "main")) {
         module_t *m = &g_mod[i];
         for (unsigned k = 1; k < m->nsym; k++) if (!m->symtab[k].st_shndx && !strncmp(m->strtab + m->symtab[k].st_name, prefix, n)) return 1;
     }
@@ -548,6 +553,29 @@ void nro_load(module_t *m) {
     LOG("NRO %s loaded (load %u, base %p): %u imports of the modules loaded before bound to it", m->name, m->loads, m->base, n);
 }
 
+// A JIT plugin (hle_jit.c) runs in the jit service's own process on Horizon, beside the game but not linked with it: it is relocated against itself only (its own definitions,
+// undefined weak symbols 0; Super Mario 64's EmuSystemJITPlugin.nro has only those and relative relocations) and never takes part in the game's symbol lookups
+void nro_load_alone(module_t *m) {
+    pthread_rwlock_wrlock(&g_modules_mu);
+    if (m->loads) memcpy(m->base + m->data_off, m->pristine, m->pristine_len);
+    m->loads++; m->loaded = 1;
+    relocs_t rl = relocs_of(m);
+    unsigned nrel = rl.relr ? relr_apply(m, rl.relr, rl.relrsz, (uint64_t)m->base) : 0, nsym = 0;
+    for (int t = 0; t < 2; t++)
+        for (uint64_t i = 0; i < rl.n[t]; i++) {
+            const Elf64_Rela *r = &rl.tab[t][i];
+            uint64_t *where = (uint64_t *)(m->base + r->r_offset);
+            unsigned type = ELF64_R_TYPE(r->r_info);
+            if (type == R_AARCH64_RELATIVE) { *where = (uint64_t)m->base + r->r_addend; nrel++; continue; }
+            const Elf64_Sym *s = &m->symtab[ELF64_R_SYM(r->r_info)];
+            if (!s->st_shndx && ELF64_ST_BIND(s->st_info) != STB_WEAK) die("%s: %s is not defined in the module, and a module loaded alone binds nothing outside itself", m->name, m->strtab + s->st_name);
+            uint64_t v = s->st_shndx ? (uint64_t)m->base + s->st_value : 0;
+            *where = type == R_AARCH64_JUMP_SLOT ? v : v + r->r_addend; nsym++;
+        }
+    pthread_rwlock_unlock(&g_modules_mu);
+    LOG("NRO %s loaded alone (load %u, base %p): %u relative relocations, %u to its own or undefined weak symbols", m->name, m->loads, m->base, nrel, nsym);
+}
+
 void nro_unload(module_t *m) {
     pthread_rwlock_wrlock(&g_modules_mu);
     if (!svc_nro_deactivate(m)) die("NRO %s: cannot unload while a mapped stack borrows its data", m->name);
@@ -605,6 +633,66 @@ void loader_hash_log(void) {
     }
 }
 
+// ---- A served nn::jit image (hle_jit.c, dm/tools/jit_capture.py) ----
+// A host that runs no code made at run time (iOS; the Mac with DM_JIT_SERVE=<dir>) serves the JIT plugin's output from an image built on the Mac. Its code reaches the modules
+// with PC-relative addresses, so the modules are mapped at the image's canonical layout: one reservation holding the code memory at 0 and every module at the offset jit.tsv gives
+// it (mod rows), the distances the image was built for. Modules the layout does not name are mapped as before
+static uint8_t *g_jit_base; static uint64_t g_jit_span;
+static struct { char name[16]; uint64_t off, size, pre; } g_jit_mod[256]; static int g_njit_mod;
+// Where the image is: DM_JIT_SERVE; on iOS also the folder "jit" beside the RomFS folder (the app's jit/, staged with the RomFS). NULL: the plugin runs (the Mac's default)
+const char *dm_jit_serve_dir(void) {
+    static int init; static char dir[1024];
+    if (!init) {
+        init = 1; const char *e = getenv("DM_JIT_SERVE");
+        if (e && *e) strlcpy(dir, e, sizeof dir);
+#if TARGET_OS_IPHONE
+        else if (getenv("DM_ROMFS")) {
+            snprintf(dir, sizeof dir, "%s", getenv("DM_ROMFS")); char *sl = strrchr(dir, '/'); if (sl) *sl = 0;
+            strlcat(dir, "/jit", sizeof dir);
+            char t[1100]; snprintf(t, sizeof t, "%s/jit.tsv", dir); if (access(t, R_OK)) dir[0] = 0;
+        }
+#endif
+    }
+    return dir[0] ? dir : NULL;
+}
+uint8_t *dm_jit_layout_base(void) { return g_jit_base; }
+static void jit_layout_init(void) {
+    const char *d = dm_jit_serve_dir(); if (!d) return;
+    char path[1100], line[512]; snprintf(path, sizeof path, "%s/jit.tsv", d);
+    FILE *f = fopen(path, "r"); if (!f) die("DM_JIT_SERVE: no %s", path);
+    unsigned long long rx = 0, ro = 0, img = 0;
+    while (fgets(line, sizeof line, f)) {
+        char nm[32]; unsigned long long off, size, pre;
+        if (sscanf(line, "layout	%llx	%llx	%llx", &rx, &ro, &img) == 3) continue;
+        if (sscanf(line, "mod	%31s	%llx	%llx	%llx", nm, &off, &size, &pre) == 4 && g_njit_mod < 256) {
+            strlcpy(g_jit_mod[g_njit_mod].name, nm, 16); g_jit_mod[g_njit_mod].off = off; g_jit_mod[g_njit_mod].size = size; g_jit_mod[g_njit_mod].pre = pre; g_njit_mod++;
+            if (off + size > g_jit_span) g_jit_span = off + size;
+        }
+        if (!strncmp(line, "req	", 4)) break;
+    }
+    fclose(f);
+    if (!rx || !g_njit_mod) die("%s: no layout", path);
+#if TARGET_OS_IPHONE
+    vm_address_t a = 0;
+    if (vm_allocate(mach_task_self(), &a, g_jit_span, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) die("jit layout: cannot reserve %#llx bytes", (unsigned long long)g_jit_span);
+    g_jit_base = (uint8_t *)a;
+#else
+    g_jit_base = mmap(NULL, g_jit_span, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (g_jit_base == MAP_FAILED) die("jit layout: cannot reserve %#llx bytes", (unsigned long long)g_jit_span);
+#endif
+    LOG("jit layout (%s): code memory and %d modules in %#llx bytes at %p", path, g_njit_mod, (unsigned long long)g_jit_span, g_jit_base);
+}
+// The place of module m in the layout (its base), NULL when the layout does not name it. Its size and front patch area must be those the image was built with
+static uint8_t *jit_slot(module_t *m, uint64_t size, uint64_t pre) {
+    for (int i = 0; g_jit_base && i < g_njit_mod; i++) if (!strcmp(g_jit_mod[i].name, m->name)) {
+        if (g_jit_mod[i].size != size || g_jit_mod[i].pre != pre) die("jit layout: %s is %#llx + %#llx bytes here, %#llx + %#llx in the image: rebuild the image (dm/tools/jit_capture.py)", m->name,
+            (unsigned long long)size, (unsigned long long)pre, (unsigned long long)g_jit_mod[i].size, (unsigned long long)g_jit_mod[i].pre);
+        return g_jit_base + g_jit_mod[i].off;
+    }
+    return NULL;
+}
+
+
 #if TARGET_OS_IPHONE
 // iOS does not allow code loaded at run time to execute, and Apple allows an executable only one segment with execute permission (ITMS-90999): the image is compiled into this executable by dm/ios/tools/gen_embed.py --
 // the two code blocks (original text, patch area) are sections in __TEXT, and W (the rest of ro + data + bss) is a separate RW segment. The three blocks are not adjacent in the file; here one contiguous address range is reserved,
@@ -626,10 +714,14 @@ void dm_set_game_image_header(const void *mh) { g_game_image = mh; }
 // take 294. gen_embed.py puts their pieces one after another, each 16K aligned, in __TEXT,__dm_nro_x0 / __DM_NRO_W,__img / __TEXT,__dm_nro_x1, and __DATA,__dm_nro_tab lists them:
 // 32 bytes of name, then the offset and length of its x0, W and x1 pieces in their sections (u64 each). A module name never holds an underscore, so these names meet no module's
 typedef struct { char name[32]; uint64_t off[3][2]; } nro_ent;
+// DM_EMBED_TAG (main.m, an app holding several programs of one game): the running program's sections are tagged (gen_embed.py --tag: __dm<tag><name>x0, …, __dm<tag>_nro_x0)
+static const char *embed_tag(void) { const char *t = getenv("DM_EMBED_TAG"); return t ? t : ""; }
 static int nro_pieces(const char *name, const uint8_t **x0, unsigned long *z0, const uint8_t **w, unsigned long *zw, const uint8_t **x1, unsigned long *z1) {
     unsigned long zt, s0, sw, s1;
-    const nro_ent *t = (const nro_ent *)getsectiondata(IMAGE_MH, "__DATA", "__dm_nro_tab", &zt);
-    const uint8_t *b0 = getsectiondata(IMAGE_MH, "__TEXT", "__dm_nro_x0", &s0), *bw = getsectiondata(IMAGE_MH, "__DM_NRO_W", "__img", &sw), *b1 = getsectiondata(IMAGE_MH, "__TEXT", "__dm_nro_x1", &s1);
+    char st[17], s0n[17], swn[17], s1n[17]; const char *g = embed_tag();
+    snprintf(st, sizeof st, "__dm%s_nro_tab", g); snprintf(s0n, sizeof s0n, "__dm%s_nro_x0", g); snprintf(swn, sizeof swn, "__DM%s_NRO_W", g); snprintf(s1n, sizeof s1n, "__dm%s_nro_x1", g);
+    const nro_ent *t = (const nro_ent *)getsectiondata(IMAGE_MH, "__DATA", st, &zt);
+    const uint8_t *b0 = getsectiondata(IMAGE_MH, "__TEXT", s0n, &s0), *bw = getsectiondata(IMAGE_MH, swn, "__img", &sw), *b1 = getsectiondata(IMAGE_MH, "__TEXT", s1n, &s1);
     if (!t || !b0 || !bw || !b1) return 0;
     for (unsigned long i = 0; i < zt / sizeof *t; i++) if (!strncmp(t[i].name, name, sizeof t[i].name)) {
         *x0 = b0 + t[i].off[0][0]; *z0 = t[i].off[0][1]; *w = bw + t[i].off[1][0]; *zw = t[i].off[1][1]; *x1 = b1 + t[i].off[2][0]; *z1 = t[i].off[2][1];
@@ -639,7 +731,8 @@ static int nro_pieces(const char *name, const uint8_t **x0, unsigned long *z0, c
 }
 static void map_image(module_t *m, const char *dir) {
     (void)dir;
-    char sx0[17], sx1[17], dm[17]; snprintf(sx0, sizeof sx0, "__dm%sx0", m->name); snprintf(sx1, sizeof sx1, "__dm%sx1", m->name); snprintf(dm, sizeof dm, "__DM%sW", m->name);
+    char sx0[17], sx1[17], dm[17]; const char *g = embed_tag();
+    snprintf(sx0, sizeof sx0, "__dm%s%sx0", g, m->name); snprintf(sx1, sizeof sx1, "__dm%s%sx1", g, m->name); snprintf(dm, sizeof dm, "__DM%s%sW", g, m->name);
     unsigned long z0 = 0, zw = 0, z1 = 0;
     const uint8_t *x0 = NULL, *w = NULL, *x1 = NULL;
     if (m->nro) { if (!nro_pieces(m->name, &x0, &z0, &w, &zw, &x1, &z1)) die("NRO %s: not in the embedded NRO table (__DATA,__dm_nro_tab)", m->name); }
@@ -648,7 +741,7 @@ static void map_image(module_t *m, const char *dir) {
     // The back patch area (patch_nso.py TWO) is a fourth section, __dm<name>x2; NROs never have one (nro_pieces holds three pieces)
     unsigned long z2 = 0; const uint8_t *x2 = NULL;
     if (m->back_len) {
-        char sx2[17]; snprintf(sx2, sizeof sx2, "__dm%sx2", m->name);
+        char sx2[17]; snprintf(sx2, sizeof sx2, "__dm%s%sx2", g, m->name);
         if (m->nro || !(x2 = getsectiondata(IMAGE_MH, "__TEXT", sx2, &z2)) || z2 != m->back_len || ((uintptr_t)x2 & 0x3FFF)) die("embedded back patch area %s missing or wrong", sx2);
     }
     // Patch area before the base (patch_off < 0): W ends at the end of data (FILE_IMAGE_LEN); bss and the key page are zero pages from vm_allocate and are not in the executable
@@ -658,8 +751,9 @@ static void map_image(module_t *m, const char *dir) {
     m->size = front ? m->image_size : m->patch_off + z1;
     uint64_t pre = front ? (uint64_t)-m->patch_off : 0;
     if (front) m->patch_len = z1;
-    vm_address_t base = 0;
-    if (vm_allocate(mach_task_self(), &base, pre + m->size, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) die("%s failed to reserve %#llx bytes of address space", m->name, (unsigned long long)(pre + m->size));
+    vm_address_t base = 0; uint8_t *slot = jit_slot(m, m->size, pre);
+    if (slot) base = (vm_address_t)slot - pre;   // inside the jit layout's reservation
+    else if (vm_allocate(mach_task_self(), &base, pre + m->size, VM_FLAGS_ANYWHERE) != KERN_SUCCESS) die("%s failed to reserve %#llx bytes of address space", m->name, (unsigned long long)(pre + m->size));
     base += pre;
     remap_at(m, base, x0, z0, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     remap_at(m, base + z0, w, zw, TRUE, VM_PROT_READ | VM_PROT_WRITE);
@@ -691,7 +785,8 @@ static void map_image(module_t *m, const char *dir) {
         if (sz < fl + bl) die("%s is shorter than FILE_IMAGE_LEN %#llx + BACK_LEN %#llx", path, (unsigned long long)fl, (unsigned long long)bl);
         m->size = m->image_size; m->patch_len = (sz - bl - fl + 0x3FFF) & ~0x3FFFull;
         if (m->patch_len > pre) die("%s patch area of %#llx bytes does not fit in the %#llx before the base", path, (unsigned long long)m->patch_len, (unsigned long long)pre);
-        uint8_t *a = mmap(NULL, pre + m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        uint8_t *slot = jit_slot(m, m->size, pre);
+        uint8_t *a = mmap(slot ? slot - pre : NULL, pre + m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | (slot ? MAP_FIXED : 0), -1, 0);
         if (a == MAP_FAILED) die("%s mmap %#llx", m->name, (unsigned long long)(pre + m->size));
         m->base = a + pre;
         memcpy(m->base, raw, fl); memcpy(a, raw + fl, sz - bl - fl); if (bl) memcpy(m->base + m->back_off, raw + sz - bl, bl);
@@ -704,7 +799,8 @@ static void map_image(module_t *m, const char *dir) {
         return;
     }
     m->size = (sz + 0x3FFF) & ~0x3FFFull;
-    m->base = mmap(NULL, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    uint8_t *slot = jit_slot(m, m->size, 0);
+    m->base = mmap(slot, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | (slot ? MAP_FIXED : 0), -1, 0);
     if (m->base == MAP_FAILED) die("%s mmap", m->name);
     memcpy(m->base, raw, sz); free(raw); install_key_page(m);
     uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
@@ -730,6 +826,7 @@ void load_modules(const char *dir, const char **names, int n) {
         read_layout(m, dir);
     }
     create_keys();
+    jit_layout_init();
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
         t = now_ns(); map_image(m, dir); tm += now_ns() - t;   // On return the code area is already read-only+execute; from here on the loader only writes data

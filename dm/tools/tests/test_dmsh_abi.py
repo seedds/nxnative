@@ -82,7 +82,11 @@ class Header(unittest.TestCase):
         bases = sorted((a.C0_SSBO_VS, a.C0_SSBO_CS, a.C0_SSBO_GS, a.C0_SSBO_PS))
         for lo, hi in zip(bases, bases[1:]): self.assertLessEqual(lo + a.C0_ROW * a.C0_SSBO_SLOTS, hi, 'storage buffer tables overlap')
         self.assertLessEqual(bases[-1] + a.C0_ROW * a.C0_SSBO_SLOTS, a.C0_POINT_SIZE)
-        self.assertLessEqual(a.C0_BASE_INSTANCE + 4, a.DRV_SIZE)
+        # The task and mesh tables sit where Mario Kart World's shaders read them, past the graphics stages' single words (issue #1186: at 0x610 / 0x710 every task and mesh draw read the dummy buffer)
+        self.assertEqual((a.C0_SSBO_TS, a.C0_SSBO_MS), (0x670, 0x770))
+        self.assertLessEqual(a.C0_BASE_INSTANCE + 4, a.C0_SSBO_TS)
+        self.assertEqual(a.C0_SSBO_TS + a.C0_ROW * a.C0_SSBO_SLOTS, a.C0_SSBO_MS)
+        self.assertLessEqual(a.C0_SSBO_MS + a.C0_ROW * a.C0_SSBO_SLOTS, a.DRV_SIZE)
 
 
 class Build(unittest.TestCase):
@@ -95,7 +99,7 @@ class Build(unittest.TestCase):
         exec(compile(ast.Module(body=body, type_ignores=[]), 'dmsh_build.py', 'exec'), ns)
         self.assertEqual((ns['TEX_BASE'], ns['IMG_BASE'], ns['IMG_SLOTS'], ns['SEPTEX_BASE'], ns['SEPTEX_SLOT0'], ns['SAMP_BASE']),
                          (abi.C2_TEX, abi.C2_IMG, abi.C2_IMG_SLOTS, abi.C2_SEPTEX, abi.SEPTEX_SLOT0, abi.C2_SAMP))
-        self.assertEqual(ns['SSBO'], {'vs': abi.C0_SSBO_VS, 'cs': abi.C0_SSBO_CS, 'gs': abi.C0_SSBO_GS, 'ps': abi.C0_SSBO_PS})
+        self.assertEqual(ns['SSBO'], {'vs': abi.C0_SSBO_VS, 'cs': abi.C0_SSBO_CS, 'gs': abi.C0_SSBO_GS, 'ps': abi.C0_SSBO_PS, 'ts': abi.C0_SSBO_TS, 'ms': abi.C0_SSBO_MS})
         self.assertEqual(ns['DRV_FILL'][2][-1], (abi.C2_SAMP, abi.C2_SAMP + abi.C2_ROW * abi.C2_SEP_SLOTS))
 
     def test_every_kind_is_written_by_the_build(self):

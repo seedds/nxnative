@@ -101,6 +101,7 @@ General host changes first needed here; each applies to every game:
 - **Per-stage program binding** (`bind_stages`, composite programs, `Z` lines in pass dumps), **in-place `WriteTexels`** (`write_region_bl`) and the **MSHD reader**: [Programs bound per stage](../../../docs/reference/rendering.md#programs-bound-per-stage), [`WriteTexels` regions written in place by block-linear address](../../../docs/reference/nvn-objects.md#writetexels-regions-written-in-place-by-block-linear-address) and [MSHD in MercurySteam's bshdat files](../../../docs/reference/shaders.md#mshd-in-mercurysteams-bshdat-files).
 - **The submit-thread autorelease leak** (`g_sub_pool`): [05, Memory growth](../../../docs/agents/05-debugging.md#memory-growth).
 - **Inline uniform updates inside a pass** (`DM_NVN_UB_DEFER`): [development.md, Power](../../../docs/development.md#power).
+- **One file for the compile cache and Xcode's data between builds:** [Build folders of many small files](../../../docs/reference/packing.md#a-build-folder-holds-hundreds-of-thousands-of-small-files).
 
 ## Open
 

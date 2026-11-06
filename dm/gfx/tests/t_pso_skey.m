@@ -33,9 +33,24 @@ int main(void) {
         NvShader *vs = [NvShader new]; snprintf(vs->key, sizeof vs->key, "vs-a");
         pso_skey a, b; char hex[sizeof a * 2 + 1];
         pso_skey_from(&k, vs, nil, 0, NULL, &a); pso_skey_hex(&a, hex);
-        size_t old = strlen(hex) - 2 * (sizeof k.atest + sizeof k.logic); hex[old] = 0;
+        size_t old = strlen(hex) - 2 * (sizeof k.attr_hi + sizeof k.atest + sizeof k.logic); hex[old] = 0;
         assert(pso_skey_parse(hex, &b) == 0); assert(b.k.atest == 0 && b.k.logic == 0);
-        a.k.atest = a.k.logic = 0; assert(memcmp(&a, &b, sizeof a) == 0);
+        a.k.atest = a.k.logic = 0; memset(a.k.attr_hi, 0, sizeof a.k.attr_hi); assert(memcmp(&a, &b, sizeof a) == 0);
+    }
+    // A row written before pso_key.attr_hi (NVN2's vertex attributes 16 to 31): they read as 0, the fields before them stay
+    {
+        pso_key k; fill(&k, 11); k.atest = 1; k.logic = 1; pso_key_norm(&k, 0);
+        NvShader *vs = [NvShader new]; snprintf(vs->key, sizeof vs->key, "vs-h");
+        pso_skey a, b; char hex[sizeof a * 2 + 1];
+        pso_skey_from(&k, vs, nil, 0, NULL, &a); pso_skey_hex(&a, hex);
+        hex[strlen(hex) - 2 * sizeof k.attr_hi] = 0;
+        assert(pso_skey_parse(hex, &b) == 0); assert(b.k.atest == 1 && b.k.logic == 1);
+        memset(a.k.attr_hi, 0, sizeof a.k.attr_hi); assert(memcmp(&a, &b, sizeof a) == 0);   // NOLINT(bugprone-suspicious-memory-comparison): the key is defined byte by byte, padding included: pso_skey_from clears it and its hex form is every byte
+    }
+    // pso_key_attr: attribute 16 is the first of the high table
+    {
+        pso_key k; memset(&k, 0, sizeof k); k.attr[3].fmt = 7; k.attr_hi[0].fmt = 9;
+        assert(pso_key_attr(&k, 3).fmt == 7 && pso_key_attr(&k, 16).fmt == 9 && pso_key_attr(&k, 17).fmt == 0);
     }
     // pso_key_norm: blend factors of a target that does not blend, and the mask / blend bit of a target a normal pass lacks, are not part of the key; a merged pass keeps
     // the mask and blend bits (they index logical targets through lmap)

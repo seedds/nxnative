@@ -17,7 +17,7 @@ import dmsh_fetch   # noqa: E402
 import dmsh_geometry   # noqa: E402
 
 tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-names = {'border_emu', 'reflect', 'decode_tex', 'decode_ubo_tex', 'const_sampler', 'c2_array'}
+names = {'border_emu', 'reflect', 'decode_tex', 'decode_ubo_tex', 'decode_ubo_img', 'const_sampler', 'c2_array'}
 selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in names)
             or (isinstance(n, ast.Assign) and any(getattr(e, 'id', None) in ('BORDER_HELPERS', 'SSBO', 'TEX_BASE') for t in n.targets for e in (t.elts if isinstance(t, ast.Tuple) else [t])))]
 scope = {'re': re, 'abi': abi, 'dmsh_geometry': dmsh_geometry}

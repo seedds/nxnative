@@ -1,5 +1,36 @@
 # Packing
 
+## Game packages
+
+### PFS0 file-name table missing its final NUL
+
+- **Symptom:** package identification stops with `ValueError: subsection not found` in `pfs0_names`, or LibHac reports `ResultFsPathNotFound` opening the last file of an NSP.
+- **Cause:** older NSZ writers omitted the final NUL in the PFS0 string table. The final name is bounded by the table length, but the Python scanner required a terminator and LibHac reads names as NUL-terminated strings.
+- **Fix:** the scanner accepts the table boundary as the end of the final name. `nx_extract` supplies LibHac with a virtual header containing the missing NUL followed by the original payload storage. File offsets remain relative to that payload, and the source package and encrypted NCA bytes are unchanged. Truncated tables and out-of-table name offsets still fail. Synthetic package tests cover both readers and payload preservation.
+- **Found on:** Moving Out 2 (`010065D018172000`), base 1.1.254 NSP and update 1.3.315 NSZ. Package reading was checked, not gameplay.
+
+### A NUP with complete standalone updates stops at "no base game"
+
+- **Symptom:** `no base game, only update packages: pack the base game and its update into one NUP`, even when the update carries the complete game's files ([issue #1195](https://github.com/seedds/nxnative/issues/1195)).
+- **Cause:** `pack_nup.scan` required a `base` record. NUP v1 permits a container without one when every update has the `standalone_update` flag (package flags bit 0, [SPEC §3.1.2](https://github.com/a55uka/nup/blob/meow/SPEC.md#312-package-kinds)). The reference packer writes one for a dump with no `base/` folder and, since its commit `92089de3`, for an empty `base/` too; before that an empty `base/` gave an empty base record, which got through the check. The issue was filed before that commit, so its NUP came from a dump with no `base/` folder or from another packer; the file itself was not seen.
+- **Fix:** no base record and a base record with no files are one case: `scan` gives `None` for the base, and only the update versions present are offered. Both packing entry points select the newest update by default; requesting version 0 fails. The selected update must have `exefs/main`, `exefs/main.npdm` and its own RomFS; it cannot borrow another update's RomFS. Control data the update lacks comes from the record that holds application metadata: the empty base record, else the first package ([SPEC §5.1](https://github.com/a55uka/nup/blob/meow/SPEC.md#51-localized-records-types-0x0009--0x000a)). A base with files still supplies the RomFS for an update without one. Program-ID, DLC, content-size and SHA-256 checks apply as before. A version that cannot be packed stops at a `[RED]` line: the disk check reads its RomFS folder before extraction, so `cli()` catches `pack_nup.Error`.
+- **Not known from the file:** whether the update is the whole game. The flag does not promise it (the spec says such an update needs a matching base elsewhere), and an update holding only changed files would pack and then fail at boot, after a full shader build. The scripts print that the update is taken as the whole game. Measured: both NUPs at hand have an update RomFS that holds every path of its base (Age of Imprisonment: 2,065 base files, 2,153 in the update, none missing; Yoshi and the Mysterious Book: 147 and 147, none missing).
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md). Reproduced with its base dump repackaged by the reference tool as a standalone-update fixture; this checks packaging, not the reported 1.8.0's contents or gameplay. Synthetic tests cover both entry points, both forms of no base, multiple versions, control data, DLC and incomplete updates.
+
+### A NUP or a dump of a game with no profile stops before the survey
+
+- **Symptom:** `[RED] a NUP packs only a game with a profile, and <title ID> has none: the survey that makes a provisional profile reads NSPs`, or the same line for a dump folder ([issue #1265](https://github.com/seedds/nxnative/issues/1265)). A folder holding `exefs/` and `romfs/` directly, or only `updates/<version>/`, was not taken for a dump at all: the script asks for `prod.keys`, then stops with `no NSP with a readable title ID`.
+- **Cause:** the survey and the build ID lookup (`same_build`) ran `nx_extract --manifest`, which reads NSPs. `pack_dump.is_dump` asked for `base/exefs/main.npdm`.
+- **Fix:** each source leaves the same files for the survey: `survey_nup` reads the newest version from the container (its ExeFS, a RomFS manifest in `nx_extract`'s format: path, size, first 32 bytes, `Nup.head` inflating only those; the NROs whole and the control data), and `survey_dump` from the folder, whose name names the game, as a dump has no control data. `same_build` reads main from the container or the folder. A dump may have no `base/` when an update's folder holds code and a RomFS, and `exefs/` and `romfs/` directly in the folder, as `nup extract` writes them, count as `base/`: version 0, so a profile that registers another version packs them from a derived profile.
+- **Found on:** Star Fox (`0400E88025B1A000`, update v131072; no profile in the repository then), The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, issue #1265) and [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md), whose dump holds `updates/131072/` alone.
+
+### A provisional profile of a Switch 2 game shows no SDK and a Switch 1 memory pool
+
+- **Symptom:** the survey of a Switch 2 game says `SDK: ?` and `no SDK version string found`, and its provisional profile has `app_pool 0xCD500000`.
+- **Cause:** the SDK version pattern did not take the variant the Switch 2's SDKs name (`NintendoSdk_nnSdk-Generic_21_4_4`), and `guess` had one pool, a 4 GB Switch's.
+- **Fix:** the pattern takes the variant, and an `sdk` built for the Switch 2 (`spec: Ounce`, as `dm_sdk_ounce` reads it) gets the 9 GB pool every Switch 2 profile has. Open: only the pool changes; a game with system resource keeps the 5 GB block (Star Fox's profile has 21 GB with a 16 GB alias region), so a provisional profile may still not fit and needs the bring-up.
+- **Found on:** Star Fox and Kirby Air Riders (`040077201BE50000`; no profile), read from their NUP and extraction; first reported with [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md).
+
 ## Build tools
 
 ### Homebrew .NET is on PATH but apphosts cannot find the runtime
@@ -29,6 +60,13 @@
 - **Cause:** `metallib()` passed every `.air` file as an absolute path in one command. The NSP script runs it with `TMPDIR` set to the work folder, so each path holds that folder's name; a game with thousands of generated modules (Super Mario Galaxy: 3,083 captured shaders, more with the dual-source variants) under a long NSP folder name exceeds macOS's 1 MB `ARG_MAX`.
 - **Fix:** `metallib()` runs from the files' common folder with relative paths and an absolute output path, so the command length no longer depends on the work folder's name.
 - **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md), with its dump in a folder named after both games of the cartridge. Applies to every Vulkan game's shader step.
+
+### The split shader tables differ from a game profile's
+
+- **Symptom:** the shader split stops with `the split shader tables differ from game profile <id>'s`, on the game version the profile registers.
+- **Cause:** the check compares the split's data rows with the profile's byte for byte, so it stops for either of two reasons: other game files, or a change to `shader_split.py` that reads the same files differently. A profile's tables can only be split again where its game files are, so continuous integration cannot catch the second reason.
+- **Fix:** the error shows each differing table's row counts and its first row on each side. For a splitter change, check that the new rows are right, then copy the tables from `shader/pkg.partial/tables` in the build folder into the profile. A change to the splitter's output also needs the other profiles it reaches split again.
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md) ([issue #1263](https://github.com/seedds/nxnative/issues/1263)): [NVN2 task and mesh shaders](shaders.md#nvn2-task-and-mesh-shaders) moved one row from vertex to mesh. Donkey Kong Bananza, Pokemon Pokopia and Hyrule Warriors: Age of Imprisonment were checked and hold no such shader; Fire Emblem Fortune's Weave was not checked, as no dump was at hand.
 
 ## IPA archives
 
@@ -76,6 +114,36 @@
 - **Fix:** the NSP pipeline passes `--romfs-image` to `nx_extract`. LibHac layers the update over the base and checks its integrity while the writer streams file bytes into a temporary `DMROMFS1` image, appends the sorted directory index and publishes by rename. ExeFS remains expanded; RomFS and each DLC remain one physical file. `dm/tools/romfs.py` gives the scanners read-only virtual paths, bounded seeks and archive mappings (Python 3.12+), without changing the process's standard filesystem APIs. The IPA packer maps the physical image to `Payload/DmIOS.app/romfs.img`; iOS and the Mac launcher validate and mount it in place. Neither installation nor startup expands the resource files. Documents overrides and legacy folder inputs remain supported. A source image is uncompressed; the IPA can deflate it, so file-count reduction does not imply a smaller installed byte count. Full images for separate game versions cannot share unchanged individual files through APFS clones as legacy folder extraction did.
 - **Found on:** [ANIMAL WELL](../../dm/games/010020D01AD24000/README.md#files), whose direct image is an empty root (56 bytes); the local Baba Is You provisional build exercises 6,374 files in a 103,473,292-byte image, 131 shaders and an unsigned IPA containing only the single image entry. [Raging Loop](../../dm/games/010020400E1C2000/README.md#files-and-shaders) supplies Unity resources: all 1,473 source manifest entries match the image, and every registered shader remains in the scan. Synthetic integration tests call the actual LibHac writer, read unaligned archive ranges, and exercise IPA mapping, Xcode staging and bundled-image startup.
 
+### A build folder holds hundreds of thousands of small files
+
+- **Symptom:** a game's `<id>_build` folder is slow to count, copy or delete: Metroid Dread's held 160,331 files in 48,782 folders, 84,541 of them in the compile cache.
+- **Cause:** the compile cache (`shader/cache/cas`) keeps a few files per shader, and Xcode's derived data (`ipa/build/ios/pkg/dd`) over a thousand. Both are needed to make the next build fast, and only while a build runs. The cache has since become [one file read in place](#the-compile-cache-was-unpacked-for-each-build), and the tar remains for the derived data.
+- **Fix:** `dm/tools/tree_tar.py` keeps each as one uncompressed tar beside where the folder was. `build_shaders` unpacks the cache only when `dmsh_build.py` will run, and packs it after pruning; the NSP script does the same for the derived data around `build_ipa.sh`. Keeping real folders during the build leaves `dmsh_build.py`, its chain version and Xcode unchanged. A build folder from before this converts by itself. Restored files keep their times, and Xcode's incremental build holds across the round trip (1 file compiled, against 262 for a full build). A build that stops leaves the folder, and a damaged tar costs only the cache it held. `regress.py`'s chain builds share the cache under the same lock. The cost is time on each build that runs the step, and a cache that no longer shares its libraries' blocks through APFS clones. The shader libraries (`b-<chain>`) stay folders: the host reads them one by one.
+- **Found on:** [ANIMAL WELL](../../dm/games/010020D01AD24000/README.md#found-on-this-game) (the round trip) and [Metroid Dread](../../dm/games/010093801237C000/README.md#found-on-this-game) (84,541 cache files: 51 s to pack, 22 s to restore on a T7).
+
+### The compile cache was unpacked for each build
+
+- **Symptom:** a build that runs the shader step writes the compile cache's files back and removes them again, on Skyward Sword HD 24,131 files and 10,150 folders each time, Tears of the Kingdom over 900,000 entries. Removing old entries took up to half an hour on an external drive.
+- **Cause:** the cache was a folder of a few files per shader, read and written by path, so a tar could only hold it between builds.
+- **Fix:** `dm/tools/shader_cache.py` keeps it as one SQLite file, `cas.db`, whose entries go in and out by name, with nothing unpacked. Bytes are stored by their hash, since a library under its MSL's digest and its shader's digest was one APFS clone. `dmsh_build.py` and `dmsh_mtlcache.py` use it directly; a shader's entry is written in one transaction, so a stop leaves all of it or none. Several writers wait for each other: `dmsh_build.py`'s threads share a connection, and `regress.py`'s chain builds and the NSP script share the file. Pruning is a query that gives its pages back. A `cas/` or `cas.tar` from before this moves in by itself at the next shader step, without unpacking a tar: the Metal compile results come along. The per-shader entries do not, as the change of chain they came with means they cannot hit, and neither do the fetch variants, whose older entries hold their source's file name, so that a fresh compile's bytes differ (`regress.py` reports these as changed variants with no change of MSL). A damaged file costs the work it held and is made anew, and a full drive is one `[RED]` line. A revision from before this keeps its own folder, `regress/cas`.
+- **Measured** on Skyward Sword HD: a 281 MB `cas.tar` became a 226 MB `cas.db`, restoring all 2,470 shaders from the cache took 6 s (9 to 13 s with the tar), and the build folder's `shader/` holds 8 files. It also ran on an exFAT volume, with three processes writing at once.
+- **Found on:** [Skyward Sword HD](../../dm/games/01002DA013484000/README.md#found-on-this-game).
+
+### Shader libraries take a file per shader variant
+
+- **Symptom:** a game's shader libraries are slow to copy or delete: Skyward Sword HD's `b-<chain>/` held 12,064 files for 2,470 shaders, a third of its build folder's files, and each `regress.py` chain build held another set. A tar would not do: the host reads these files at every run.
+- **Cause:** `dmsh_build.py` writes each shader's library, reflection, source and side libraries as separate files, and the host opened them by path.
+- **Fix:** `dm/tools/shader_lib.py` packs the folder into one file beside its name, `b-<chain>.img`, in the [RomFS image](#romfs-folder-transfers-fail-or-leave-stale-game-files)'s format, flat, each file's data on 16 bytes. Nothing unpacks it: the host (`dm/gfx/nvn/msl_image.h`) keeps one descriptor and maps only a shader's pages, and the tools read it through `romfs.py`. `dmsh_build.py` still writes a folder, so the chain version does not change. The NSP script packs at the end of the shader step, also on a reused step, so a folder from before this converts without a rebuild, and removes the old image only just before a build that replaces it. `regress.py` packs each chain build once it has read it; a revision from before this keeps a folder, and has a chain key of its own. The Mac app and the IPA carry the one file, without the Mac's sources, as `msl/b-<chain>.img`. An iPhone build neither compiles nor keeps the pulling vertex libraries when nothing in it reads them (`ios_wants_pulling`: no pipeline archive, the profile's `pso_mtl4` off, no `IOS_PULL=1`, no Xcode project; `DMSH_IOS_PULL=0` for `dmsh_build.py`), so `pack_ipa.py` reuses the image between packs. A build that wants them again compiles them, and `pack_ipa.py` refuses an image without them for an app that reads them. Each file comes from a folder beside the image first, so a partial `dmsh_build.py` run (given keys) goes over a packed library, and the next pack takes it in; a host running from a folder goes on when it is packed. Real files remain where a tool needs them: a compile's temporary files, and the libraries `metal-tt` reads, for the length of its run. `shader_lib.py expand` gives an old kept host its folder back.
+- **Measured** on Skyward Sword HD, on an external drive, warm cache: 10,017 files to one: copy 3.72 s to 0.18 s, delete 0.40 s to 0.02 s, 150 MB to 131 MB on disk. Reading all 2,470 shaders' reflection and libraries 100 ms to 28 ms. The map must be `MAP_SHARED`: on a file this size a private mapping costs about 80 µs, against 0.9 µs. A cold read has not been measured, as the cache cannot be emptied without an administrator.
+- **Found on:** [Skyward Sword HD](../../dm/games/01002DA013484000/README.md#found-on-this-game).
+
+### A work folder holds millions of small files
+
+- **Symptom:** a game's `<id>-work` folder is too slow to count: Tears of the Kingdom's held 8,893,028 files and 509 GB, and its count ran past ten minutes.
+- **Cause:** `regress.py` kept one whole shader build per chain version in `regress/chain` (45 there; Breath of the Wild held 57), and agents' investigations leave folders nothing reads again (`build` alone over 351,000 files).
+- **Fix:** `prune_chains` in `scripts/regress.py` removes chain builds after each chain step, beyond the 3 used last, any used within 24 hours and those of the 3 newest stored baselines; a check that needs one builds it again. `tree_tar.pack_quiet` packs each other top-level folder untouched for 14 days, with 100 files or more, into `<name>.tar` at the end of an NSP script or `regress.py` run. These tars keep extended attributes, so a RomFS folder's case-collision names survive, and `tar --xattrs -xf` restores them (plain `tar -xf` does not). A Python virtual environment stays a folder, as scripts run it by its path and nothing writes to it, which made it look untouched. It frees no space beyond the chain builds: a folder of APFS clones can take more as a tar, so each tar must fit with 20 GB to spare. A player's NSP folder has no work folder.
+- **Found on:** [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game).
+
 ### The zstd command given a path inside the image
 
 - **Symptom:** the NSP script stops at the shader split of a registered profile with `[RED] 13744 file(s) could not be read, their shaders are left out (first: AI/FileEntry/FileEntry.Product.100.byml.zs: CalledProcessError: Command ['zstd', '-d', '-c', '-q', '…/extract/v0/RomFS.img/AI/…'] returned non-zero exit status 1.)`.
@@ -93,6 +161,13 @@
 - **Found on:** synthetic startup and transfer fixtures while reviewing [PR #486](https://github.com/seedds/nxnative/pull/486), part of [issue #388](https://github.com/seedds/nxnative/issues/388). The Foundation fixture runs the actual iOS locator; the push-helper fixture models devicectl's documented merge and replacement behavior, including smaller and empty DLC sets and transfer failure. Applies to every game; no device gameplay validation was performed.
 
 ## Launcher metadata
+
+### No Game language row in an app packed from a NUP or a dump
+
+- **Symptom:** the settings of a Mac app or IPA packed from a NUP or a dump folder have no Game language row, while `DM_LANG` in the environment changes the language. Reported on [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) ([NX2Apple#619](https://github.com/LNPANDY/NX2Apple/issues/619), [#659](https://github.com/LNPANDY/NX2Apple/issues/659); the reporters' packed files were not available).
+- **Cause:** `settings.py` shows the row when the game's `control.nacp` lists more than one language, and two cases gave it none. A NUP update may carry no control data: the NSP script's language check fell back to the base game's file, but the Mac settings got only the update's path, and `build_ipa.sh`'s fallback (`$W/data/v0`) is a folder the NSP script does not make. And there may be no NACP at all: the Yoshi and the Mysterious Book and [Age of Imprisonment](../../dm/games/04003F40232DE000/README.md) NUPs carry none in any package, and an FTP dump such as Bananza's has no control data.
+- **Fix:** `languages_control` in `build_ipa_from_nsp.py` picks the file once (the packed version's, else the base game's), for the check, `mac_app` and `build_ipa.sh` (`CONTROL`). With no list, `settings.py` offers every language with a note, as `game_language` and `DM_LANG` already accept any. Age of Imprisonment shows a language it lacks as English (Russian, Portuguese) and has more text languages than its voice folders suggest (Dutch, Simplified Chinese), so a game's list cannot be read from its folders.
+- **Found on:** code reading and the NUP records of the two games above, with [PR #1182](https://github.com/seedds/nxnative/pull/1182); boots of [Age of Imprisonment](../../dm/games/04003F40232DE000/README.md) to its first settings screen. Not confirmed on Bananza by the reporters.
 
 ### A Mac front end's default settings change Metal execution paths
 
@@ -131,6 +206,20 @@
 - **Fix:** `dm/mac/pack_app.py` `detritus()` drops those names from `selected_inputs`, so neither the pack nor `DMModuleFiles` sees them. `copy()` passes `-X` where it copies and not where it clones (`cp` refuses the two together), and the host goes through `shutil.copy` instead of `copy2`, so a copy creates none of them. `strip_detritus()` runs before `codesign` reads the staged bundle, runs again after `xattr -cr` when `codesign` still refuses one, and runs once more after signing. On APFS nothing changes: no sidecar exists there, and the two passes are a stat walk. `dm/tools/tests/test_nsp_mac_app.py` puts a `._` file in every input folder and checks that it is not selected, does not reach the bundle, and is not in `DMModuleFiles`.
 - **Found on:** the NX2Apple fork's users, packing Mac apps on an external drive ([LNPANDY/NX2Apple#486](https://github.com/LNPANDY/NX2Apple/issues/486)); reproduced on an exFAT disk image made with `hdiutil create -fs ExFAT`, where the same inputs pack, sign and pass `codesign --verify --strict` with the change and stop three ways without it. Applies to every game's Mac app.
 
+### A second Mac app build stops with `[Errno 45]` when it replaces the old app
+
+- **Symptom:** with the app on a Mac OS Extended, exFAT or FAT drive, the first build into a folder works and the next one that changes anything stops in `pack_app.py` `replace_app` with `OSError: [Errno 45] Operation not supported: '<app>'`. The old app stays in place.
+- **Cause:** `replace_app` exchanges the new and the old app with `renamex_np(RENAME_SWAP)`, which only APFS offers: the others return `ENOTSUP`. A first build has no old app to exchange, so it takes a plain rename.
+- **Fix:** on `ENOTSUP` or `EOPNOTSUPP`, `swap_by_moves` makes the state the swap leaves with three renames (the old app to `<app>.old`, the new one to `<app>`, the old one to `<app>.partial`), so the key write and its rollback do not change. A rename that fails undoes the ones before it. These volumes cannot make it atomic: a process killed between the first two renames leaves no app at `<app>`, with the old one at `<app>.old` until the next replacement clears it. APFS still swaps. Tests: `dm/tools/tests/test_nsp_mac_app.py` `test_volume_without_atomic_swap_replaces_by_moves`, `test_fallback_restores_the_old_app_when_a_move_fails` and `test_fallback_clears_an_old_app_a_killed_build_left_aside`.
+- **Found on:** a user's rebuild onto an external Mac OS Extended (Journaled) drive ([LNPANDY/NX2Apple#595](https://github.com/LNPANDY/NX2Apple/issues/595), [PR #1190](https://github.com/seedds/nxnative/pull/1190)); reproduced on HFS+ and exFAT disk images made with `hdiutil create`, where the `PackReuse` tests stop with the real errno without the change and reach the fallback with it. Applies to every game's Mac app.
+
+### External shader directories contain AppleDouble metadata
+
+- **Symptom:** on an exFAT or FAT drive, shader splitting stops with `ValueError: not a version 2 shader code archive` or `[RED] /glslc_capture/._…: no GLSLC output`.
+- **Cause:** `shader_split.py` selected captured `.glslc` programs and decoded `.ushaderbytecode` archives by extension alone. macOS AppleDouble sidecars retain that extension, but their `._<name>` files contain metadata rather than shader bytes.
+- **Fix:** exclude `._` names when listing both external shader directories, including `DM_GLSLC_CAPTURE` and `DM_UE_SHADERS` overrides. Other dot-prefixed names remain valid inputs, and malformed real inputs still fail their normal validation.
+- **Found on:** an external-drive build reported in [issue #229's follow-up](https://github.com/seedds/nxnative/issues/229#issuecomment-6563450365). That commenter used a different, unnamed game; this fixes the sidecar failure, not the original Metroid Prime 4 port.
+
 ## Compressed inputs
 
 ### NSZ decompression rejects `--keys`
@@ -148,6 +237,15 @@
 - **Check:** Well Dweller's `main` decodes to 85,370,056 bytes with segments `0x39680d0 / 0x9f7e74 / 0x9b1930`, every SHA-256 matching; `dm/tools/tests/test_nso.py` checks that a flag-bit-7 module whose segments are not ZBIC is an Error naming ZBIC.
 - **Found on:** [Well Dweller](../../dm/games/0100217023F6C000/README.md) (SDK 22.2.0).
 
+## Versions with different modules
+
+### A version without one of the profile's modules stops the host at boot
+
+- **Symptom:** `FATAL open <folder>/subsdk1.fixups.tsv` right after the host starts, or `build_ipa.sh` stops with `no rewritten module …/subsdk1`, for a version that has no such module.
+- **Cause:** a game's versions can differ in modules: Mario Kart World's base game has `main`, `subsdk0` (a Mono runtime) and `sdk`, its update 1.8.0 `main`, `subsdk0` (the movie player), `subsdk1` (a C library) and `sdk`. The host, the rewrite, the IPA and the shader split all took the one `modules` list of the profile.
+- **Fix:** `modules` lists all of them in load order, and each `build` row names its own (`game.py` `build_modules`; a row naming one `modules` lacks is an error). The host loads the modules of the row of `main`'s build, read from the rewriter's `main.fixups.tsv` (`main.c` `profile_modules`, from `DM_GAME_BUILD_MODULES`), and all of `modules` for a build with no row. `build_ipa.sh` takes the same list (`game.py modules <id> <folder>`). The NSP script rewrites, sizes `mem_used` from and splits the modules the packed version's ExeFS holds (`Game.modules_in`), and a derived profile's row names those (`derive_profile`).
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): the base game boots with its three modules from a profile that lists four. Applies to every game. `test_game_profile.py` checks the rows and the list.
+
 ## Package identification
 
 ### An NSP without a ticket or a title ID in its name stops with "no NSP with a readable title ID"
@@ -157,12 +255,26 @@
 - **Fix:** with neither, `title_of` asks the package: `nx_extract <prod.keys> --title <package>` opens it, decrypts the header of each meta NCA with the keys' `header_key` and prints the lowest title ID (the base game's before its update's or a DLC's). It works for NSP, NSZ (the meta NCA is not compressed), XCI and XCZ, and runs only when the ticket and the tag are both missing, so the common cases stay a read of the file name table. `nx_extract` is built into a temporary folder for it, since the build folder is named after the title ID. Key values are never printed.
 - **Found on:** NX2Apple, [LNPANDY/NX2Apple#177](https://github.com/LNPANDY/NX2Apple/issues/177) ([Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), whose base NSP has no ticket). Applies to every game.
 
+### A game file whose extension is in capitals is not found
+
+- **Symptom:** `[RED] no NSP with a readable title ID in <folder>` for a folder holding `Game [0100XXXXXXXXXXXX].NSP`, on any Mac volume; renaming it to `.nsp` makes the build go on. A dump folder beside `Game.NSP` is packed instead of the package, and `Game.NUP` is not found. A `Game.NSZ` stops with `nsz made no Game.nsp`.
+- **Cause:** the script listed the folder with `Path.glob('*.nsp')`, which compares case-sensitively on every POSIX system, a case-insensitive Mac volume included. nsz has the same limit of its own: `PathTools.isCompressedGame` takes only a lowercase extension, and nsz skips anything else and exits 0 with no output. It resolves a symlink before it looks.
+- **Fix:** `files_with_suffix` lists a folder's files by their lowercased extension, for every scan of the inputs, and a package beside a compressed one is found in that listing. A compressed file in capitals goes to nsz as a hard link with a lowercase extension in its temporary folder, or as a copy where there can be none (another volume, exFAT), so the player's file stays as it is.
+- **Found on:** NX2Apple, [LNPANDY/NX2Apple#554](https://github.com/LNPANDY/NX2Apple/issues/554) ([Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md)). Applies to every game.
+
 ### A merged NSP (base game, update and DLC in one file) packs as one title
 
 - **Symptom:** a game folder holding one merged package (`[Base + Update + DLC].nsp`, or a 1G+1U cartridge dump with no update NSP beside it) stops with `no base game NSP found`, or packs the base game alone (v0) without its update and DLC; when the base game's own build cannot be packed (Mario Kart 8 Deluxe 1.0.0's `main` is 32-bit), the build stops there.
 - **Cause:** `scan_nsps` gave each file one title ID: its first ticket's, else its name's tag. A merged package holds a ticket per title in any order, so it counted as the base game or as the update, never as both, and its DLC was never seen. `nx_extract` then read the update from a separate update NSP only.
 - **Fix:** a package whose file table (an NSP's PFS0, an XCI's secure HFS0 partition) holds more than one `*.cnmt.nca` is asked for its content metas, `nx_extract <prod.keys> --contents <package>` (one `content <type> <title ID> <version>` line each), and counts as each Application, Patch and AddOnContent it lists, with the versions from the metas. The one file is then given to `nx_extract` as both the base game and the update: `OpenNsp` keeps the NCAs that the Application content meta lists for the base and the Patch content meta's for the update, both of the application being packed (`--app`), and `--aoc <package> <out> <DLC title ID>` takes one DLC's data NCA by its title ID. The extraction estimate, the progress total and the NSZ conversion count the file once. When the content metas cannot be read, a `[RED]` line says so and the package counts by its ticket as before. A DLC NSP that bundles several DLC is read the same way.
 - **Found on:** Mario Kart 8 Deluxe (0100152000022000, no profile here) from one merged NSP, in NX2Apple ([PR #842](https://github.com/seedds/nxnative/pull/842), [LNPANDY/NX2Apple#376](https://github.com/LNPANDY/NX2Apple/issues/376)). Checked with Balatro's update NSP and base NSP merged into one PFS0: it scans as base v0 and update v851968, and `nx_extract` given it as base and update writes the same ExeFS, control data and RomFS manifest as the two separate NSPs. Applies to every game.
+
+### A derived profile leaves out a module that moved to another slot
+
+- **Symptom:** a version a profile was not brought up on crashes at its first movie: `UNIMPL _ZN5movie9ExtractorC1ENS_13ContainerTypeE`, then `CRASH sig=11` ([issue #1211](https://github.com/seedds/nxnative/issues/1211)). The derived profile's `modules` has only `main sdk`.
+- **Cause:** `derive_profile` could only take modules out of the profile's list, but a module's slot belongs to a build, not to a game: Absolum's movie module is `subsdk2` in 1.1.2, where `subsdk0` is NVIDIA's Vulkan driver, and `subsdk0` in 1.2.1.
+- **Fix:** `derive_profile` adds what `profile_guess.main_modules` finds: a module the list leaves out that exports something `main` imports, which no listed module and no host hook supplies, and never a GPU driver. It shares this with `nro_modules` (`modules_supplying`). The added module goes in the version's `build` row too, since the host loads what the row names. Checked on 9 games' real modules with their registered lists: nothing is added (Super Mario Galaxy 2's GLSLC and `nn::pcm`, which the host supplies, stay out), and each of the 7 subsdks taken out of a list comes back. A registered build keeps its row: the rule runs only when a profile is derived.
+- **Found on:** [Absolum](../../dm/games/0100A83022A22000/README.md) 1.2.1, from the reporter's logs: with the module added by hand the game reached gameplay at 60 fps. No 1.2.1 files on this Mac: not run here.
 
 ### A derived profile loads only the modules its version ships
 
@@ -205,6 +317,13 @@
 - **Cause:** a damaged NSP with more than a few damaged files used up LibHac 0.19's hash cache. `CachedStorage.GetBlock` takes a block off its list before reading into it and does not put it back when the read fails, so the 4 blocks of a filesystem last for 4 failed reads and the next read that misses the cache throws. That exception is no hash error, so `nx_extract` did not catch it. A copy of SteamWorld Dig with 2 flipped bytes listed its 2 files; with 40 it crashed.
 - **Fix:** each hash error gets a new checked filesystem (`Failed` in `dm/tools/nx_extract/Program.cs`, on the image, folder and manifest paths), so a damaged NSP lists every damaged file and stops with exit code 3, or goes on with `--allow-damaged`. The same copy with 40 flipped bytes lists all 36 files. `test_every_damaged_file_is_listed_past_the_hash_cache` in `dm/tools/tests/test_romfs_read.py` puts a real RomFS behind a real `CachedStorage` on all three paths, with no NSP or keys.
 - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game) ([issue #810](https://github.com/seedds/nxnative/issues/810), whose reporter diagnosed the lost cache blocks and carried a local patch that reopens the filesystem). Applies to any game.
+
+### A damaged RomFS's own tables
+
+- **Symptom:** `[RED] the NSP is damaged: a filesystem's own tables fail the NCA's hash check`, exit code 3, right after the build IDs; before 2026-11-04, `[RED] nx_extract exit code -6` with an unhandled `ResultFsNonRealDataVerificationFailed (2002-4604)` under `RomfsHeader`. The ExeFS reads, and the build IDs and name are printed, since only the RomFS is hit.
+- **Cause:** the damage lies in what the RomFS opens from (its header, or the hash levels above it), so no file can be listed, and `--allow-damaged` has no file to write as read. Hashing each NCA tells which one it is: its file name is the first 16 bytes of its SHA-256.
+- **Fix:** `nx_extract` says so and exits with 3, as for damaged files. A good copy of the NSP is the only cure. A base game that is intact packs alone with `--package <its version>`, once it has a profile.
+- **Found on:** [Mario & Luigi: Brothership](../../dm/games/01006D0017F7A000/README.md#versions): update 1.0.1's Program NCA `074db5a4…` (its NSP is also a repack: it holds a `.cnmt.xml`).
 
 ### A crash from a damaged NSP's file looks like a host bug
 

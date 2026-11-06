@@ -22,6 +22,7 @@ dm/games/*/bench.tsv	-	a benchmark route
 dm/games/*/usage.tsv	-	a usage manifest
 dm/games/*	profile	one game's profile
 scripts/build_ipa_from_nsp.py	*:*	packing: every game's build
+scripts/pack_nup.py	*:*	NUP packing: games built from NUP containers
 scripts/bench.py	-	the benchmark
 scripts/push_romfs.sh	*:*	RomFS transfer: every game's iOS build
 scripts/regress.py	-	the regression harness
@@ -69,8 +70,8 @@ dm/gfx/tools/dmsh_build.py	shader:stage:*	the shader build: every NVN game
 dm/gfx/tools/dmsh_vin.py	shader:integer_vertex_inputs	integer vertex inputs
 dm/gfx/tools/dmsh_pull.*	shader:pulling_vertex_inputs	pulling vertex inputs
 dm/gfx/tools/dmsh_fetch.py	shader:readable_tile	readable tiles
-dm/gfx/tools/dmsh_alpha.py	nvn:nvnColorStateSetAlphaTest	the alpha test libraries
-dm/gfx/tools/dmsh_logic.py	nvn:nvnColorStateSetLogicOp	the logic operation libraries
+dm/gfx/tools/dmsh_alpha.py	nvn:nvnColorStateSetAlphaTest	the alpha test entry points
+dm/gfx/tools/dmsh_logic.py	nvn:nvnColorStateSetLogicOp	the logic operation entry points
 dm/gfx/tools/dmsh_geometry.py	shader:stage:gs	geometry shaders
 dm/gfx/tools/dmsh_facts.py	shader:stage:*	the translator's answer table
 dm/gfx/tools/dmsh_chain.*	shader:stage:*	the chain version: every NVN game's libraries are rebuilt
@@ -101,6 +102,10 @@ dm/tools/nso_*.py	*:*	the rewriter: every game's code
 dm/tools/sdk_patches.py	*:*	the SDK modules' patches (by build ID)
 dm/tools/romfs_image.py	*:*	RomFS image packing: every game's files
 dm/tools/romfs.py	*:*	RomFS image input: every game's build tools
+dm/gfx/nvn/msl_image.h	*:*	reads each shader from the one-file library: every NVN game
+dm/tools/shader_lib.py	*:*	the shader libraries as one file: every NVN game build and regress chain
+dm/tools/shader_cache.py	*:*	the compile cache as one file: every NVN game build and regress chain
+dm/tools/tree_tar.py	*:*	one tar in place of Xcode's derived data and quiet work folders: every game build
 dm/tools/nro_collect.py	*:*	NRO discovery from game resources during packing
 dm/tools/nx_extract/*	*:*	NSP extraction: every game's resource inputs
 dm/mac/launcher.c	*:*	Mac app resource discovery and host launch

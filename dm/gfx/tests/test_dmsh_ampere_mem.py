@@ -19,7 +19,7 @@ class Translated(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='ampere_mem_') as d:
             work = Path(d); (work / 'k.bin').write_bytes(code)
             # c0 layout (QueryAmpereComputeC0Layout): no uniform or storage buffers, 3 texture handles from 0x10, image handles from 0x28 (word 12 = image slot 1), 0x40 bytes
-            job = [dict(key='k', stage='cs', arch='sm86', code=str(work / 'k.bin'), tex={}, img={}, attr={}, fout={}, local=[32, 1, 1], debug=True, nvn2_cs=[0, 0, 3, 0x40, 0], **extra)]
+            job = [dict(key='k', stage='cs', arch='sm86', code=str(work / 'k.bin'), tex={}, img={}, attr={}, fout={}, local=[32, 1, 1], debug=True, nvn2_cs=extra.pop('nvn2_cs', [0, 0, 3, 0x40, 0]), **extra)]
             (work / 'jobs.json').write_text(json.dumps(job))
             r = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(work / 'jobs.json'), d], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -32,15 +32,155 @@ class Translated(unittest.TestCase):
             return r.stdout
 
 
+class GuardedWrites(Translated):
+    P0 = (0x000fda0003f06070, 0x00c0060005007a0c)   # P0 = R5 >= c3[0x18], R5 an instruction's own
+    MOV_R5 = (0x000fe20000000f00, 0x0100000000057a02)   # R5 = c4[0]
+
+    def test_a_guarded_load_reads_its_address_before_the_false_guards_zero(self):
+        # UR4 = c3[0x10]; LDG.!P0 R5, [R5 + UR4], Unreal Engine 5.4's bounds-checked read of its scene data: zeroing R5 first read at the table's start, every instance with the first one's data
+        ur4, ldg = (0x000fe20000000a00, 0x00c0040000047ab9), (0x000ea200081e890f, 0x0000000405057981)
+        waits = (0x004ea200001ee000, 0x00000c05050c7593)   # waits for the load's barrier, then atomically adds its result at the address it read: both uses of it
+        msl = self.translate(inst(*self.MOV_R5) + inst(*ur4) + inst(*self.P0) + inst(*ldg) + inst(*waits) + inst(*EXIT))
+        self.assertNotIn('_m0[0]);', msl.split('kernel')[1].replace('_m0[0].x', ''))   # no read of the table's first word
+        self.assertRegex(msl, r'_m0\[(int\()?\w+')   # an index from the register
+
+    def test_a_deferred_write_under_a_false_guard_writes_nothing(self):
+        # MUFU.EX2 R17, R32 under P0 (write barrier 3); R17 = R29 * R29 under !P0; R17 = R36 * R17 after waiting on the barrier: Yoshi and the Mysterious Book's local lights' falloff. The wait copied
+        # the old R17 over !P0's value, whatever the guard had been
+        ex2, other, used = (0x000ee20000000800, 0x0000002000170308), (0x000fe20000410000, 0x0000001d1d178220), (0x008fe20000410000, 0x0000001724177220)
+        msl = self.translate(inst(*self.MOV_R5) + inst(*self.P0) + inst(*ex2) + inst(*other) + inst(*used) + inst(SUATOM[0], 0x00000c17030c7593) + inst(*EXIT))
+        self.assertRegex(msl, r'\? 1065353216 : 0;')   # the guard as it was at issue, a word that keeps its bits through a select
+        self.assertRegex(msl, r'bool \w+ = \w+ != 0;\s+float \w+ = \w+;\s+if \(\w+\)')   # the copy only where it held
+
+    def test_uniform_handle_forms_translate(self):
+        for code in ((0x000f4200081e0f04, 0x3000040702067f63), (0x000142000c1e03ff, 0x2000040400167f6c), (0x00014200001e0f12, 0x3800001002101364)):   # TLD4 and TXD through a uniform register, TLD4 through a register
+            self.translate(inst(*code) + inst(*EXIT))
+
+    def test_gradients_through_a_uniform_register_keep_their_handle(self):
+        # UR4 = c3[0x10]; TXD through UR4 (write barrier 5); after waiting on it, the result atomically added to an image, so it stays. The translator takes its source 0 as the handle: without it, it could not find one and deleted the read
+        ur4, txd, used = (0x000fe20000000a00, 0x00c0040000047ab9), (0x000142000c1e03ff, 0x2000040400167f6c), (0x020ea200001ee000, 0x00000c16030c7593)
+        msl = self.translate(inst(*ur4) + inst(*txd) + inst(*used) + inst(*EXIT))
+        self.assertIn('gradient', msl)
+
+    # A handle built under a guard from two words of the game's uniform buffer, read under a guard the translator cannot tie to it, so that a phi reaches the read with the first word and what the
+    # register held before: Unreal Engine 5.4's single-layer water and a global pixel shader in Yoshi and the Mysterious Book. The read was deleted. Each ends in the result's atomic add, so it stays
+    def test_handle_under_a_uniform_vote_of_the_reads_guard(self):
+        # P0 = c4[0x14] test; UR8 = c3[0x60]; UR4 = c3[0x50]; UP0 = vote.all(P0); if (!UP0) UR4 |= UR8; TEX.!P0 through UR4
+        code = [(0x000fe20003f05070, 0x01000500ff007a0c), (0x000fe20000000800, 0x00c0180000087ab9), (0x000fe20000000800, 0x00c0140000047ab9), (0x000fe40000000000, 0x00000000003f7886),
+                (0x000fe2000f8efc3f, 0x0000000408048292), (0x000f42000c9e0f16, 0xb000042420188f60), (0x020ea200001ee000, 0x00000c16030c7593), EXIT]
+        msl = self.translate(b''.join(inst(*c) for c in code))
+        self.assertIn('.sample(', msl)
+        self.assertIn('cp_t_cb262147_10050018', msl)   # words 0x18 (c3[0x60]) and 0x14 (c3[0x50]), bank 3 twice
+
+    def test_handle_under_a_guard_the_reads_guard_implies(self):
+        # P4 and P1 from comparisons; P5 = P4 && !P1; if (P4) R16 = c3[0x28]; if (P4) R16 |= c3[0x70]; TEX.P5 through R16
+        code = [(0x040fe20003f85070, 0x000000070800780c), (0x000fc40003f25070, 0x000000040800780c), (0x000fe40000fa8170, 0x000000000000781c), (0x000fc60000000f00, 0x00c00a0000104a02),
+                (0x000fc600078efcff, 0x00c01c0010104a12), (0x00014200049e03ff, 0x380000100e125361), (0x020ea200001ee000, 0x00000c12030c7593), EXIT]
+        msl = self.translate(b''.join(inst(*c) for c in code))
+        self.assertIn('.sample(', msl)
+        self.assertIn('cp_t_cb262147_1007000A', msl)
+
+    def test_handle_with_only_its_first_word_under_a_guard(self):
+        # R16 = c3[0x28] under P4; R16 |= c3[0x70]; TEX through R16: Yoshi's two vertex shaders of this form
+        code = [(0x040fe20003f85070, 0x000000070800780c), (0x000fc60000000f00, 0x00c00a0000104a02), (0x000fc600078efcff, 0x00c01c0010107a12), (0x00014200049e03ff, 0x380000100e127361),
+                (0x020ea200001ee000, 0x00000c12030c7593), EXIT]
+        msl = self.translate(b''.join(inst(*c) for c in code))
+        self.assertIn('.sample(', msl)
+        self.assertIn('cp_t_cb262147_1007000A', msl)
+
+    def test_first_word_of_a_handle_is_not_read_as_a_handle_of_its_own(self):
+        # As above in the driver's c2, where a word alone can be a handle: one read, through both words
+        code = [(0x040fe20003f85070, 0x000000070800780c), (0x000fc40003f25070, 0x000000040800780c), (0x000fe40000fa8170, 0x000000000000781c), (0x000fc60000000f00, 0x00800a0000104a02),
+                (0x000fc600078efcff, 0x00801c0010104a12), (0x00014200049e03ff, 0x380000100e125361), (0x020ea200001ee000, 0x00000c12030c7593), EXIT]
+        msl = self.translate(b''.join(inst(*c) for c in code))
+        self.assertEqual(msl.count('.sample('), 1)
+        self.assertRegex(msl, r'_1007000A\b')
+
+    def test_gather_through_a_register_past_a_branch_on_the_guard(self):
+        # P6 from a test; if (P6) R49 = c3[0x18]; if (P6) R49 |= c3[0x68]; BRA.!P6 past the read; TLD4 through R49, the first of the second source block (.SCR)
+        code = [(0x000fe20003fc5070, 0x01000500ff007a0c), (0x000fe20000000f00, 0x00c0060000316a02), (0x000fe200078efcff, 0x00c01a0031316a12), (0x000fea0003800000, 0x000000200000e947),
+                (0x000f4200001e0f0c, 0x38000031020e7364), (0x020ea200001ee000, 0x00000c0c030c7593), EXIT]
+        msl = self.translate(b''.join(inst(*c) for c in code))
+        self.assertIn('.gather(', msl)
+        self.assertIn('cp_t_cb262147_10068006', msl)
+
+
 class Suatom(Translated):
+    def test_handle_in_the_games_uniform_buffer(self):   # Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]: the same word 12, in bank 3
+        msl = self.translate(inst(SUATOM[0], SUATOM[1] | 3 << 54) + inst(*EXIT))
+        self.assertIn('cp_i_cb3_C_r32ui', msl)
+        self.assertIn('atomic_fetch_add', msl)
+
+    def test_sured_takes_its_operation(self):   # SURED.OR.U32 as Yoshi and the Mysterious Book's compute shaders encode it, in bank 3
+        self.assertIn('atomic_fetch_or', self.translate(inst(0x000fe2000310e000, 0xa0c002010800759f) + inst(*EXIT)))
+
+    def test_sured_u64_is_still_refused(self):   # the MAX.U64 of its Nanite shaders: no 64-bit image atomics here yet
+        code = inst(0x000fe2000110e400, 0xa0c002010800759f) + inst(*EXIT)
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / 'k.bin').write_bytes(code)
+            (Path(d) / 'jobs.json').write_text(json.dumps([dict(key='k', stage='cs', arch='sm86', code=str(Path(d) / 'k.bin'), tex={}, img={}, attr={}, fout={}, local=[32, 1, 1], nvn2_cs=[0, 0, 3, 0x40, 0])]))
+            r = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(Path(d) / 'jobs.json'), d], capture_output=True, text=True)
+        self.assertIn('SURED form', r.stdout + r.stderr)
+
     def test_add_u32_on_a_1d_image(self):
         msl = self.translate(inst(*SUATOM) + inst(*EXIT))
         self.assertIn('atomic_fetch_add', msl)   # native (the build's options) or through spirv-cross's buffer alias (these defaults)
         self.assertIn('cp_i_tcb_4A_r32ui', msl)   # image slot 1 (c2 0x128), a 32-bit unsigned image
 
+    def test_images_come_after_the_separate_handles(self):   # 1 texture, 1 separate texture, 1 separate sampler from 0x10: word 12 (0x30) is image slot 1 still, past both tables (Star Fox's 1002069a331ceded)
+        msl = self.translate(inst(*SUATOM) + inst(*EXIT), nvn2_cs=[0, 0, 1, 0x40, 0, 1, 1])
+        self.assertIn('cp_i_tcb_4A_r32ui', msl)
+
     def test_result_kept(self):   # the old value is the shader's (it shuffles it to the warp): the atomic's result is used, not discarded
         msl = self.translate(inst(*SUATOM) + inst(*EXIT))
         self.assertRegex(msl, r'uint \w+ = [^;]*atomic_fetch_add')
+
+
+class Bmsk(Translated):
+    """BMSK (Star Fox's 58046f286de779e1 +0x5a0, on registers the atomic reads): a mask of b bits from bit a. The form with c[4] sources keeps it from folding"""
+    MOVS = inst(0x000fe20000000f00, 0x0100000000037a02) + inst(0x000fe20000000f00, 0x0100010000047a02)   # R3 = c4[0], R4 = c4[4]
+    BMSK = (0x000fe40000000000, 0x000000040303721b)   # BMSK R3, R3, R4: clamping
+    WRAP = (0x000fe40000000800, 0x000000040303721b)   # the same, .W
+
+    def msl(self, op):
+        return self.translate(self.MOVS + inst(*op) + inst(*SUATOM) + inst(*EXIT))
+
+    def test_a_clamping_mask_tests_its_operands(self):
+        self.assertGreaterEqual(self.msl(self.BMSK).count('>= 32u'), 3)   # a + b, a, b
+
+    def test_a_wrapping_mask_tests_only_their_sum(self):
+        self.assertEqual(self.msl(self.WRAP).count('>= 32u'), 1)
+
+
+@unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
+class PixelCovered(unittest.TestCase):
+    """0x925 as Star Fox's quad efficiency views encode it (826168691af2e211 +0x0): 1 for a covered pixel, 0 for a helper invocation"""
+    COVERED = (0x040e0200000e4000, 0x0000000000007925)
+    OTHER = (0x040e0200000e8000, 0x0000000000007925)   # bits 78..80 = 2, not seen
+    SPH = struct.pack('<32I', *([0x000c5482] + [0] * 4 + [0xb0000000] + [0] * 12 + [0xf] + [0] * 13))   # the game's: writes colour 0
+
+    def run_job(self, op):
+        with tempfile.TemporaryDirectory(prefix='ampere_px_') as d:
+            work = Path(d); (work / 'k.bin').write_bytes(self.SPH + inst(*op) + inst(*EXIT))
+            (work / 'jobs.json').write_text(json.dumps([dict(key='k', stage='ps', arch='sm86', code=str(work / 'k.bin'), tex={}, img={}, attr={}, fout={}, debug=True)]))
+            r = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(work / 'jobs.json'), d], capture_output=True, text=True)
+            if not (work / 'k.spv').exists(): return None, r.stdout + r.stderr
+            sys.path.insert(0, str(TOOLS)); import dmsh_geometry
+            dmsh_geometry.flatten_sets(work / 'k.spv')
+            m = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300', '--msl-argument-buffers', str(work / 'k.spv')], capture_output=True, text=True)
+            self.assertEqual(m.returncode, 0, m.stderr)
+            return m.stdout, r.stdout + r.stderr
+
+    def test_reads_the_helper_invocation(self):
+        msl, log = self.run_job(self.COVERED)
+        self.assertIsNotNone(msl, log)
+        self.assertIn('simd_is_helper_thread()', msl)
+        self.assertRegex(msl, r'\? 0 : 1;')   # helper 0, covered 1
+
+    def test_another_form_is_refused(self):
+        msl, log = self.run_job(self.OTHER)
+        self.assertIsNone(msl)
+        self.assertIn('0x925 form 2', log)
 
 
 class MufuF16(Translated):
@@ -61,6 +201,59 @@ class MufuF16(Translated):
 
     def test_low_half_translates_apart(self):   # R12 is a constant here, so the low half folds away; what is left must not read the high one
         self.assertNotRegex(self.msl(self.LOG2_LOW), r'as_type<half2>\(.*\)\)\.y;')
+
+
+class Sured(Translated):
+    """SURED.ADD.U32 [R4], R0 (0x59f) on a 2D image, Mario Kart World's ab77eaee44cfef88: SUATOM's layout with no result"""
+    FORM = (0x000fe2000010e000, 0x60000c000400759f)
+
+    def test_adds_at_the_coordinates(self):
+        msl = self.translate(inst(*self.FORM) + inst(*EXIT))
+        self.assertIn('atomic_fetch_add', msl)
+        self.assertIn('texture2d', msl)
+
+    def test_another_form_is_refused(self):
+        with self.assertRaises(AssertionError) as e: self.translate(inst(0x000fe200001ee000, self.FORM[1]) + inst(*EXIT))
+        self.assertIn('SURED form', str(e.exception))
+
+
+class StageMemory(Translated):
+    """A task or mesh shader's stage memory in shared memory, on the game's encodings (job stage_memory: workgroup 0, input 0x10, outputs 0x120, primitives 0x400)"""
+    MEMORY = dict(stage_memory=[0, 0x10, 0x120, 0x400], shared=0x800)
+    # The game's ISBERDs set a write barrier, which their readers wait on; these set none, so the store after one reads its result
+    WORKGROUP = (0x000fe20000007800, 0x00000000ff007923)   # ISBERD R0, mode 0x78 (b6d76b6fc9dc926f +0)
+    INPUT = (0x000fe20000003800, 0x00002000ff137923)       # ISBERD R19, [RZ + 0x20], mode 0x38 (ddc034e8e009ebfc, its base register made RZ)
+    PAYLOAD = (0x0041e8000000b800, 0x0000100201007927)     # 0x927 [R1 + 0x10], R2, mode 0xb8 (a task's record)
+    KEEP_R0 = (0x0041e8000000b800, 0x00001000ff007927)     # the same with [RZ + 0x10], R0: so what ISBERD read is used
+    KEEP_R19 = (0x0041e8000000b800, 0x00001013ff007927)    # with R19
+    ATTRIBUTE = (0x0001e2000000f800, 0x0000800307007927)   # 0x927 [R7 + 0x80], R3, mode 0xf8 (a vertex's y, b6d76b6fc9dc926f +0x3c0 on another base register)
+    COUNT_ZERO = (0x000fe20000008800, 0x000003ffff007927)  # 0x927 [RZ + 3], RZ, mode 0x88: every thread clears the count first
+    COUNT = (0x0001e20000008800, 0x00000307ff007927)       # 0x927 [RZ + 3], R7, mode 0x88: the thread with the count
+    INDEX = (0x0001e20000008000, 0x0000040605057927)       # 0x927 [R5 + 4], R6, mode 0x80: an index byte
+
+    def msl(self, *code):
+        return self.translate(b''.join(inst(*c) for c in code) + inst(*EXIT), **self.MEMORY)
+
+    def test_workgroup_number_reads_word_0(self):
+        self.assertRegex(self.msl(self.WORKGROUP, self.KEEP_R0), r'as_type<float>\(_\d+\[0\]\)')
+
+    def test_input_is_at_its_offset(self):   # 0x10 + 0x20
+        self.assertRegex(self.msl(self.INPUT, self.KEEP_R19), r'as_type<float>\(_\d+\[12\]\)')
+
+    def test_word_store_goes_to_the_outputs(self):   # 0x120 + 0x80
+        self.assertIn('0 + 416', self.msl(self.ATTRIBUTE))
+
+    def test_the_zero_count_is_left_out(self):   # threads are not in step on Metal: it could land after the real count, and the stage memory starts at zero
+        without = self.msl(self.COUNT)
+        with_zero = self.msl(self.COUNT_ZERO, self.COUNT)
+        self.assertEqual(without.count('atomic_compare_exchange'), with_zero.count('atomic_compare_exchange'))
+
+    def test_a_byte_goes_through_its_word_atomically(self):   # neighbouring threads write neighbouring bytes
+        self.assertIn('atomic_compare_exchange', self.msl(self.INDEX))
+
+    def test_outside_a_task_or_mesh_shader_it_is_refused(self):
+        with self.assertRaises(AssertionError) as e: self.translate(inst(*self.PAYLOAD) + inst(*EXIT))
+        self.assertIn('outside a task or mesh shader', str(e.exception))
 
 
 class BarrierMoves(Translated):
@@ -106,8 +299,8 @@ class Shared(Translated):
     IMAD_HI = 0x000fc80007820008, 0x0000000b07087227        # IMAD.HI R8, R7, R11, {R9:R8} (08faccfa2eaa7e01 +0xa80)
     ATOMS_CAS = 0x000e640001800001, 0x00000400ff01738d      # ATOMS.CAS R1, [RZ + 4], R0, R1 (f4aa178bc67c9793 +0x200)
 
-    def msl(self, *code):
-        msl = self.translate(b''.join(code) + inst(*EXIT), shared=0x400)
+    def msl(self, *code, shared=0x400):
+        msl = self.translate(b''.join(code) + inst(*EXIT), shared=shared)
         return msl[msl.index('kernel void'):]
 
     def test_a_32_bit_access_scales_its_register_by_4(self):   # Element 3, not byte 3 (which is element 0)
@@ -153,6 +346,30 @@ class Shared(Translated):
 
     def test_stride_3_scales_its_register_by_16(self):   # Element 3 of 16 bytes, word 12
         self.assertIn('[12] = 77u', self.msl(mov(2, 3), mov(3, 77), inst(*self.STS_SCALED_16)))
+
+    # The same field on other sizes, with an offset: the stride decides the scale, whatever the access size
+    STS64_SCALED_4 = 0x0009ee0000004a00, 0x000900182c007388     # STS.U64 [R44 * 4 + 0x900], R24:R25 (Donkey Kong Bananza's upscaler 7629d857a0a93833)
+    STS_SCALED_16_AT_8 = 0x000fe8000000c800, 0x0000080609008388   # STS.U32 [R9 * 16 + 8], R6 (agl_common: Mario Kart World f94552a2a2bff505, Donkey Kong Bananza c5c746915e9a3265)
+    STS64_SCALED_16 = 0x000fe8000000ca00, 0x0000000209008388    # STS.U64 [R9 * 16], R2:R3 (the same shaders)
+    STS128_SCALED_16 = 0x0001e2000000cc00, 0x000000ff26007388   # STS.128 [R38 * 16], RZ (Pokemon Pokopia 8987796cd5718078)
+
+    def test_a_64_bit_access_with_stride_1_scales_its_register_by_4(self):   # Byte 3 * 4 + 0x900, word 579
+        msl = self.msl(mov(44, 3), mov(24, 77), mov(25, 88), inst(*self.STS64_SCALED_4), shared=0x1000)
+        self.assertIn('[579] = 77u', msl)
+        self.assertIn('[580] = 88u', msl)
+
+    def test_stride_3_adds_its_offset_after_the_scale(self):   # Byte 3 * 16 + 8, word 14
+        self.assertIn('[14] = 77u', self.msl(mov(9, 3), mov(6, 77), inst(*self.STS_SCALED_16_AT_8)))
+
+    def test_a_64_bit_access_with_stride_3_scales_its_register_by_16(self):   # Element 3 of 16 bytes, word 12
+        msl = self.msl(mov(9, 3), mov(2, 77), mov(3, 88), inst(*self.STS64_SCALED_16))
+        self.assertIn('[12] = 77u', msl)
+        self.assertIn('[13] = 88u', msl)
+
+    def test_a_128_bit_access_with_stride_3_scales_its_register_by_16(self):   # Element 3 of 16 bytes, words 12 to 15
+        msl = self.msl(mov(38, 3), inst(*self.STS128_SCALED_16))
+        self.assertIn('[12] = 0u', msl)
+        self.assertIn('[15] = 0u', msl)
 
     # LDSM keeps its mode at 78..79, where LDS has its stride: 1 is a transposed read (MT88), not a scale. Donkey Kong Bananza's upscaler 7629d857a0a93833 +0x1ce0, on R3: scaled, its picture was garbage
     LDSM_MT88 = 0x000fe20000004200, 0x000000000314783b   # LDSM.16.MT88.4 R20, [R3], with no write barrier for the store to wait on
@@ -251,6 +468,13 @@ class Pokopia(Translated):
     def test_fsel_negates_b(self):
         msl = self.msl(self.MERGE_FIRST, self.MERGE_SECOND, self.FSEL_NEG_B)
         self.assertRegex(msl, r'float _\d+ = -')
+
+    def test_up2ur_takes_any_predicate_by_its_mask_bit(self):   # Mario Kart World's pixel shaders save UP6 or UP3 and test the register against URZ later
+        for mask in (0x40, 0x08): self.msl((0x000fe20008000000, mask << 32 | 0x3f067883))
+
+    def test_up2ur_with_a_merge_source_is_refused(self):
+        with self.assertRaises(AssertionError) as e: self.msl((0x000fe20008000000, 0x40 << 32 | 0x05067883))
+        self.assertIn('UP2UR with a merge source', str(e.exception))
 
     def test_up2ur_reads_up0(self):   # cs_main's encoding: UR6 = UP0 ? 1 : 0
         self.msl((0x000fc60008000000, 0x000000013f067883))

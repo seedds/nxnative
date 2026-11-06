@@ -20,6 +20,9 @@ class MatchError(ValueError):
     pass
 
 
+TRAP_WORD, BRK = 0xe7ffdefe, 0xd4200000  # the word some compilers leave after a call that does not return, which Capstone cannot decode; brk #0
+
+
 def _signed(n, bits):
     return n - (1 << bits) if n & (1 << (bits - 1)) else n
 
@@ -59,9 +62,11 @@ class Image:
         if start in self.bodies: return self.bodies[start]
         end = self.functions[start]
         code = self.image[start:end]
-        ins = list(self.md.disasm(code, start))
+        words = list(struct.unpack('<' + 'I' * (len(code) // 4), code))
+        # Decoded as brk so that the rest of the function can be read; the digest below still covers the word itself
+        decode = struct.pack('<' + 'I' * len(words), *(BRK if w == TRAP_WORD else w for w in words))
+        ins = list(self.md.disasm(decode, start))
         if len(ins) * 4 != len(code): raise MatchError(f'undecodable function at {start:#x}')
-        words = list(struct.unpack('<' + 'I' * len(ins), code))
         normalized, branches = words.copy(), []
         for i, (w, op) in enumerate(zip(words, ins)):
             branch = _relative(w)
@@ -222,7 +227,11 @@ def validate(rule):
         span = set(range(delta, delta + len(ob)))
         if used & span: raise ValueError('overlapping cuts')
         used |= span
-        if any(_pc_relative(w) for w, in struct.iter_unpack('<I', nb)): raise ValueError('replacement must not contain PC-relative instructions')
+        for i, (w,) in enumerate(struct.iter_unpack('<I', nb)):
+            # The fingerprint keeps a function's internal branches exact, so a branch that stays inside it means the same on every build that matches. Anything else depends on an address
+            branch = _relative(w)
+            if _pc_relative(w) and not (branch and 0 <= delta + i * 4 + branch[1] < rule['size']):
+                raise ValueError('replacement must not contain PC-relative instructions, except branches inside the matched function')
 
 
 def resolve(image, text_end, rules, report=print, outcomes=None, red=True):

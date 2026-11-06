@@ -244,3 +244,78 @@ HLE_FORCE("_ZN2nn10streamplay18GetGuestJcmsStatesEPNS0_14GuestJcmsStateEiRKNS0_1
 HLE_FORCE("_ZN2nn4chat10InitializeEv", "GameChat (chat:u): ready, no chat", void, h_chat_Init, void) {}
 HLE_FORCE("_ZN2nn4chat10IsChattingEv", "GameChat: not chatting", unsigned, h_chat_IsChatting, void) { return 0; }
 HLE_FORCE("_ZN2nn4chat20SetScreenSharingModeENS0_17ScreenSharingModeE", "GameChat screen sharing mode: no chat to share with", void, h_chat_ShareMode, int mode) { (void)mode; }
+HLE_FORCE("_ZN2nn4chat28AttachToRoomInfoChangedEventEPNS_2os11SystemEventE", "GameChat room info event: bound, never signaled (no chat room)", Result, h_chat_RoomEvent, void *ev) {
+    hle_bind_system_event(ev, 0); return RES_OK;
+}
+// Camera video storage: the pictures of the player's own camera (local) and of the other members' cameras (remote), each a set of native images the game makes NVN textures on (Mario Kart
+// World 1.8.0 makes three local images of 384x216 at boot, by pull request #1116). SDK 22.2.0 (sdk+0x6b43c0) checks a width of 32 to 1920, a height of 32 to 1080, 1 to 4 images and a
+// page-aligned buffer and size, zeroes the 0xe0-byte storage type, and fills it from the chat service. The host has no camera: each image is a blank native image of the size
+// (hle_codec_video.c), whose handles the storage type keeps; the game's buffer is not used, so it needs only a page
+uint32_t dm_native_image_blank(uint32_t w, uint32_t h);
+void dm_native_image_blank_free(uint32_t handle);
+typedef struct { uint32_t magic, count, image[4]; } chat_video_t;
+_Static_assert(sizeof(chat_video_t) <= 0xe0, "nn::chat::LocalCameraVideoType / RemoteCameraVideoType");
+#define CHAT_VIDEO_MAGIC 0x6d436d44u   // "DmCm"
+static void chat_video_init(void *type, int w, int h, int n) {
+    chat_video_t *v = type; memset(type, 0, 0xe0);
+    if (w < 32 || w > 1920 || h < 32 || h > 1080 || n < 1 || n > 4) { LOG("[RED] chat: camera video storage %dx%d x%d is out of the SDK's range", w, h, n); return; }
+    v->magic = CHAT_VIDEO_MAGIC; v->count = (uint32_t)n;
+    for (int i = 0; i < n; i++) v->image[i] = dm_native_image_blank((uint32_t)w, (uint32_t)h);
+}
+static void chat_video_fini(void *type) {
+    chat_video_t *v = type;
+    if (v->magic == CHAT_VIDEO_MAGIC) for (uint32_t i = 0; i < v->count; i++) dm_native_image_blank_free(v->image[i]);
+    memset(type, 0, 0xe0);
+}
+static uint32_t chat_video_image(const void *type, int i) {
+    const chat_video_t *v = type;
+    return v->magic == CHAT_VIDEO_MAGIC && i >= 0 && (uint32_t)i < v->count ? v->image[i] : 0;
+}
+HLE_FORCE("_ZN2nn4chat35CalculateLocalCameraVideoBufferSizeEiii", "GameChat local camera storage: a page (the host keeps the images)", size_t, h_chat_LocalSize, int w, int h, int n) {
+    (void)w; (void)h; (void)n; return 0x1000; }
+HLE_FORCE("_ZN2nn4chat36CalculateRemoteCameraVideoBufferSizeEiii", "GameChat remote camera storage: a page (the host keeps the images)", size_t, h_chat_RemoteSize, int w, int h, int n) {
+    (void)w; (void)h; (void)n; return 0x1000; }
+HLE_FORCE("_ZN2nn4chat33InitializeLocalCameraVideoStorageEPNS0_20LocalCameraVideoTypeEiiiPvm", "GameChat local camera storage: blank native images (no camera)", void, h_chat_LocalInit,
+          void *type, int w, int h, int n, void *buf, size_t size) { (void)buf; (void)size; chat_video_init(type, w, h, n); }
+HLE_FORCE("_ZN2nn4chat34InitializeRemoteCameraVideoStorageEPNS0_21RemoteCameraVideoTypeEiiiPvm", "GameChat remote camera storage: blank native images (no chat members)", void, h_chat_RemoteInit,
+          void *type, int w, int h, int n, void *buf, size_t size) { (void)buf; (void)size; chat_video_init(type, w, h, n); }
+HLE_FORCE("_ZN2nn4chat31FinalizeLocalCameraVideoStorageEPNS0_20LocalCameraVideoTypeE", "GameChat local camera storage: its images released", void, h_chat_LocalFini, void *type) { chat_video_fini(type); }
+HLE_FORCE("_ZN2nn4chat32FinalizeRemoteCameraVideoStorageEPNS0_21RemoteCameraVideoTypeE", "GameChat remote camera storage: its images released", void, h_chat_RemoteFini, void *type) { chat_video_fini(type); }
+HLE_FORCE("_ZN2nn4chat25GetLocalCameraImageHandleEPKNS0_20LocalCameraVideoTypeEi", "GameChat local camera image: its blank native image", uint32_t, h_chat_LocalImage, const void *type, int i) {
+    return chat_video_image(type, i); }
+HLE_FORCE("_ZN2nn4chat26GetRemoteCameraImageHandleEPKNS0_21RemoteCameraVideoTypeEi", "GameChat remote camera image: its blank native image", uint32_t, h_chat_RemoteImage, const void *type, int i) {
+    return chat_video_image(type, i); }
+// Star Fox (SDK 21.4.4) asks after the chat from its title screen on: who is chatting, the room, the sharing key, the virtual camera (what the game shows the other members instead of its
+// screen), the members' audio levels, the camera streams and the full-screen sections. The SDK's versions go through the service object Initialize would have made: GetChattingUid read a null
+// (sdk+0x6be4d4, from main+0xb57a9d0). No chat here: nobody is chatting (a zero Uid), there is no room (GetRoomInfo fails), the camera and sharing calls succeed and do nothing
+typedef struct { uint64_t a, b; } chat_uid_t;   // nn::account::Uid, returned in two registers
+HLE_FORCE("_ZN2nn4chat14GetChattingUidEv", "GameChat: the chatting user; nobody (a zero Uid)", chat_uid_t, h_chat_ChattingUid, void) { return (chat_uid_t){0, 0}; }
+HLE_FORCE("_ZN2nn4chat11GetRoomInfoEPNS0_8RoomInfoE", "GameChat room: none (fails, the structure is left as it was)", Result, h_chat_RoomInfo, void *info) {
+    (void)info; static int once; if (!once++) LOG("chat: GetRoomInfo with no chat room: fails"); return RES_FAIL;   // the chat library's real result is not known; the game reads any failure as "not in a room"
+}
+HLE_FORCE("_ZN2nn4chat13SetSharingKeyERKNS0_10SharingKeyE", "GameChat sharing key: kept nowhere (no chat)", Result, h_chat_SetKey, const void *key) { (void)key; return RES_OK; }
+HLE_FORCE("_ZN2nn4chat15ClearSharingKeyEv", "GameChat sharing key cleared (no chat)", void, h_chat_ClearKey, void) {}
+HLE_FORCE("_ZN2nn4chat13ShowChatStartERKNS_7account3UidE", "GameChat start applet: not shown (no chat)", Result, h_chat_ShowStart, const void *uid) { (void)uid; return RES_OK; }
+HLE_FORCE("_ZN2nn4chat22ShowCameraSharingGuideEv", "GameChat camera sharing guide: not shown", Result, h_chat_ShowGuide, void) { return RES_OK; }
+HLE_FORCE("_ZN2nn4chat28ShowLocalCameraConfigurationENS0_25CameraImageProcessingModeE", "GameChat camera configuration applet: not shown", Result, h_chat_ShowCamCfg, int mode) { (void)mode; return RES_OK; }
+HLE_FORCE("_ZN2nn4chat44GetCameraImageProcessingModeForVirtualCameraEv", "GameChat camera image processing mode: the default", int, h_chat_CamMode, void) { return 0; }
+HLE_FORCE("_ZN2nn4chat22GetRealtimeAudioLevelsEPNS0_10AudioLevelEiPKNS_7account23NetworkServiceAccountIdEi", "GameChat members' audio levels: no members, none written", int, h_chat_AudioLevels,
+          void *levels, int n, const void *ids, int nids) { (void)levels; (void)n; (void)ids; (void)nids; return 0; }
+HLE_FORCE("_ZN2nn4chat23InitializeVirtualCameraEPNS0_17VirtualCameraTypeE", "GameChat virtual camera: nothing to show it to", Result, h_chat_VcamInit, void *cam) { (void)cam; return RES_OK; }
+HLE_FORCE("_ZN2nn4chat21FinalizeVirtualCameraEPNS0_17VirtualCameraTypeE", "GameChat virtual camera finalized", void, h_chat_VcamFini, void *cam) { (void)cam; }
+HLE_FORCE("_ZN2nn4chat19EnableVirtualCameraEPNS0_17VirtualCameraTypeE", "GameChat virtual camera enabled: nothing to show it to", Result, h_chat_VcamOn, void *cam) { (void)cam; return RES_OK; }
+HLE_FORCE("_ZN2nn4chat20DisableVirtualCameraEPNS0_17VirtualCameraTypeE", "GameChat virtual camera disabled", Result, h_chat_VcamOff, void *cam) { (void)cam; return RES_OK; }
+HLE_FORCE("_ZN2nn4chat43SetVirtualCameraContainPhotographedContentsEPNS0_17VirtualCameraTypeEb", "GameChat virtual camera flag: kept nowhere", void, h_chat_VcamPhoto, void *cam, unsigned on) { (void)cam; (void)on; }
+HLE_FORCE("_ZN2nn4chat34GetVirtualCameraNativeWindowHandleEPKNS0_17VirtualCameraTypeE", "GameChat virtual camera window: none", uint64_t, h_chat_VcamWindow, const void *cam) {
+    (void)cam; static int once; if (!once++) LOG("chat: GetVirtualCameraNativeWindowHandle: no window (0)"); return 0;
+}
+HLE_FORCE("_ZN2nn4chat25StartLocalCameraStreamingEv", "GameChat local camera streaming: no camera, nothing streams", Result, h_chat_LocalStart, void) { return RES_OK; }
+HLE_FORCE("_ZN2nn4chat24StopLocalCameraStreamingEv", "GameChat local camera streaming stopped", Result, h_chat_LocalStop, void) { return RES_OK; }
+HLE_FORCE("_ZN2nn4chat26StartRemoteCameraStreamingERKNS_7account23NetworkServiceAccountIdE", "GameChat remote camera streaming: no members", Result, h_chat_RemoteStart, const void *id) { (void)id; return RES_OK; }
+HLE_FORCE("_ZN2nn4chat25StopRemoteCameraStreamingERKNS_7account23NetworkServiceAccountIdE", "GameChat remote camera streaming stopped", Result, h_chat_RemoteStop, const void *id) { (void)id; return RES_OK; }
+HLE_FORCE("_ZN2nn4chat27RequestNextLocalCameraImageEPNS_2gs16NativeSyncHandleEPNS0_20LocalCameraVideoTypeEiS2_", "GameChat next local camera image: none comes (fails)", Result, h_chat_LocalNext,
+          void *sync, void *type, int i, void *sync2) { (void)sync; (void)type; (void)i; (void)sync2; return RES_FAIL; }
+HLE_FORCE("_ZN2nn4chat28RequestNextRemoteCameraImageEPNS_2gs16NativeSyncHandleEPNS0_21RemoteCameraVideoTypeEiS2_RKNS_7account23NetworkServiceAccountIdE", "GameChat next remote camera image: none comes (fails)",
+          Result, h_chat_RemoteNext, void *sync, void *type, int i, void *sync2, const void *id) { (void)sync; (void)type; (void)i; (void)sync2; (void)id; return RES_FAIL; }
+HLE_FORCE("_ZN2nn4chat46BeginFullScreenWithLocalCameraAvailableSectionEb", "GameChat full-screen section begun: no chat to tell", Result, h_chat_FullBegin, unsigned on) { (void)on; return RES_OK; }
+HLE_FORCE("_ZN2nn4chat44EndFullScreenWithLocalCameraAvailableSectionEv", "GameChat full-screen section ended", void, h_chat_FullEnd, void) {}

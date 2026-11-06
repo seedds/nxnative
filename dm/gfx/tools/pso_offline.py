@@ -18,8 +18,10 @@
 #   archive.tsv      what was built: architectures, OS minimum, toolchain, bases (for people and logs; the host does not read it)
 # Each archive is made again only when its compiler inputs change (key.<arch> in the work folder): the complete pipeline configuration without library locations,
 # the referenced libraries' bytes, architecture, platform, minimum OS and metal-tt version. Chain/profile stamps are validated and refreshed independently.
+# More bases than --batch-size are compiled in sequential groups (batches.<arch>/<index>/ in the work folder, each cached by its own inputs) and merged with metal-pack: one metal-tt on
+# Super Mario Odyssey's 32,864 bases runs an 8 GB Mac out of paging space (docs/reference/shaders.md, Bounded groups for the offline pipeline compiler). The output is the same single file.
 # Usage: pso_offline.py --msl <b-<chain> folder> --out <folder> --work <folder> [--game <id>] [--pairs <shader_pairs.tsv> [--pairs <pso_pairs.tsv>]] [--gpu g18p[,g17p]]
-#          [--depth gl|zero] [--platform ios|macos] [--os-min 27.0] [--script-only]
+#          [--depth gl|zero] [--platform ios|macos] [--os-min 27.0] [--script-only] [--batch-size N]
 #   --game: the profile (DM_GAMES_DIR as for game.py) whose shader_pairs.tsv and pso_pairs.tsv are the pairs, and whose depth_mode key the depth mode, unless --pairs / --depth say;
 #   --gpu: architectures, with or without the applegpu_ prefix (default g18p); --depth: the game's NVN depth mode (gl = near -w, NVN's default; zero = near 0, which the game sets
 #   with nvnDeviceSetDepthMode: the host knows it only at run time, so the profile says it; a wrong one costs the device its own prebuild, as without the archive);
@@ -29,7 +31,11 @@
 import argparse, filecmp, hashlib, json, os, shutil, struct, subprocess, sys, time
 from pathlib import Path
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
+import romfs, shader_lib   # the libraries may be one file (shader_lib.py), read in place; metal-tt alone needs files of its own (real_libraries)
+
 LAYER = b'render_target_array_index'
+BATCH = 1000   # bases per metal-tt run: Odyssey's largest compiler lifetime footprint at this size was 2.065 GiB on an 8 GB M2
 COLOUR = ('pixel_format', 'write_mask', 'blending_state', 'alpha_blend_operation', 'rgb_blend_operation', 'destination_alpha_blend_factor', 'destination_rgb_blend_factor',
           'source_alpha_blend_factor', 'source_rgb_blend_factor')
 
@@ -62,7 +68,7 @@ def stamp(chain, zero, text):
 def functions(path):
     """{entry name: declares function constants} of a .metallib, from its header: the function list (NAME tags) and each function's public metadata (a CNST tag lists its constants).
     Raises ValueError on a file it cannot read"""
-    with open(path, 'rb') as f: b = f.read(1 << 20)
+    with romfs.open(path, 'rb') as f: b = f.read(1 << 20)
     if b[:4] != b'MTLB' or len(b) < 0x58: raise ValueError(f'{path}: not a Metal library')
     fo, _, po, ps = struct.unpack_from('<QQQQ', b, 0x18)
     def tags(p, end):
@@ -86,7 +92,7 @@ def functions(path):
 
 def plan(lib_dir, chain, pairs, zero):
     """The bases the archive holds: [(vertex library, vertex entry, pixel library, pixel entry)], the pairs left to the device (function constants), and counts of the pairs left out"""
-    lib_dir = Path(lib_dir); js, fns, layer = {}, {}, {}
+    lib_dir = romfs.Path(lib_dir); js, fns, layer = {}, {}, {}
     def refl(key):
         if key not in js:
             try: js[key] = json.loads((lib_dir / f'{key}_b.json').read_bytes())
@@ -149,7 +155,7 @@ def library_digest(lib_dir, bases):
     for name in sorted({lib for vl, _, fl, _ in bases for lib in (vl, fl)}):
         h.update(name.encode() + b'\0')
         lib = hashlib.sha256()
-        with open(Path(lib_dir) / f'{name}.metallib', 'rb') as f:
+        with romfs.open(os.path.join(lib_dir, f'{name}.metallib'), 'rb') as f:
             while chunk := f.read(1 << 20): lib.update(chunk)
         h.update(lib.digest())
     return h.hexdigest()
@@ -198,6 +204,83 @@ def os_min_default(platform):
     return v.split('.')[0] + '.0'
 
 
+def compile_archive(js, part, work, arch, platform, osmin, count):
+    """One compiler invocation, with its temporaries on the work volume. Never publish a failed output."""
+    part.unlink(missing_ok=True)
+    clear_temporaries(work)
+    need, free = space_needed(count), shutil.disk_usage(work).free
+    if free < need: sys.exit(f'[RED] pso_offline: {free / 2**30:.1f} GB free on the volume of {work}, metal-tt needs about {need / 2**30:.0f} GB for {count} bases: free some space and run again')
+    cmd = ['xcrun', '-sdk', sdk(platform), 'metal-tt', '-arch', arch, f'-{platform}-version-min', osmin, str(js), '-o', str(part)]
+    log_path = work / f'metal-tt.{arch}.log'
+    with log_path.open('w') as log:
+        r = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, env=dict(os.environ, TMPDIR=str(work)))
+    if r.returncode or not part.is_file() or not part.stat().st_size:
+        free = shutil.disk_usage(work).free
+        clear_temporaries(work); part.unlink(missing_ok=True)
+        full = f' ({free / 2**30:.1f} GB free on the volume of {work} when it failed: likely out of disk space)' if free < 1 << 30 else ''
+        sys.exit(f'[RED] pso_offline: metal-tt failed for {arch} (exit {r.returncode}){full}: {log_path.read_text()[-2000:]}')
+
+
+def real_libraries(lib_dir, bases, work):
+    """Where metal-tt finds the bases' libraries: it takes file paths, so the libraries of one file get a temporary folder of what this compile reads, which clear_real_libraries removes after it.
+    An archive whose key still holds compiles nothing and gets none"""
+    if os.path.isdir(lib_dir): return lib_dir
+    real = Path(work) / 'libraries'; shutil.rmtree(real, ignore_errors=True); real.mkdir(parents=True)
+    for name in sorted({lib for vl, _, fl, _ in bases for lib in (vl, fl)}):
+        with romfs.open(os.path.join(lib_dir, f'{name}.metallib'), 'rb') as f, open(real / f'{name}.metallib', 'wb') as o: shutil.copyfileobj(f, o)
+    return real
+
+
+def clear_real_libraries(work): shutil.rmtree(Path(work) / 'libraries', ignore_errors=True)
+
+
+def compile_batch(lib_dir, bases, work, arch, platform, osmin, toolchain):
+    """Cache one bounded group by its actual libraries and descriptors; also used for an isolated pilot."""
+    work.mkdir(parents=True, exist_ok=True)
+    configuration = script(lib_dir, bases)
+    js = work / 'bases.mtl4-json'; write_script(js, configuration)
+    key = archive_key(configuration, library_digest(lib_dir, bases), arch, platform, osmin, toolchain)
+    del configuration
+    dst, kf = work / f'{arch}.mtl4a', work / f'key.{arch}'
+    if dst.is_file() and dst.stat().st_size and kf.is_file() and kf.read_text().strip() == key: return dst, True
+    kf.unlink(missing_ok=True)
+    part = work / f'{arch}.mtl4a.partial'
+    write_script(js, script(real_libraries(lib_dir, bases, work), bases))
+    compile_archive(js, part, work, arch, platform, osmin, len(bases))
+    clear_real_libraries(work)
+    os.replace(part, dst); kf.write_text(key + '\n')
+    return dst, False
+
+
+def compile_batches(lib_dir, bases, work, part, arch, platform, osmin, toolchain, batch_size):
+    """Limit compiler input size, then combine every completed group into the usual single archive.
+
+    This bounds input count, not memory: a single pipeline can still exceed Apple's compiler resources.
+    On M2, merged archives passed archive-only lookups of two synthetic pipelines and all 32,864 Odyssey bases.
+    Other workloads and compiler versions can have different resource use.
+    """
+    pieces = []; total = (len(bases) + batch_size - 1) // batch_size
+    for old in (work / f'batches.{arch}').glob('[0-9]*'):   # the groups of a longer list than this one
+        if int(old.name) > total: shutil.rmtree(old)
+    for index, start in enumerate(range(0, len(bases), batch_size), 1):
+        group = bases[start:start + batch_size]
+        print(f'pso_offline: {arch}: batch {index}/{total}: {len(group)} bases, compiling or checking cache', flush=True)
+        piece, reused = compile_batch(lib_dir, group, work / f'batches.{arch}' / f'{index:05d}', arch, platform, osmin, toolchain)
+        pieces.append(piece)
+        print(f'pso_offline: {arch}: batch {index}/{total}: ready ({"reused" if reused else "compiled"})', flush=True)
+    part.unlink(missing_ok=True)
+    need, free = max(2 << 30, sum(p.stat().st_size for p in pieces)), shutil.disk_usage(work).free
+    if free < need: sys.exit(f'[RED] pso_offline: {free / 2**30:.1f} GB free before merging; need at least {need / 2**30:.1f} GB')
+    print(f'pso_offline: {arch}: merging {total} batches', flush=True)
+    cmd = ['xcrun', '-sdk', sdk(platform), 'metal-pack', '-nthreads', '1', *map(str, pieces), '-o', str(part)]
+    log_path = work / f'metal-pack.{arch}.log'
+    with log_path.open('w') as log:
+        r = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, env=dict(os.environ, TMPDIR=str(work)))
+    if r.returncode or not part.is_file() or not part.stat().st_size:
+        part.unlink(missing_ok=True)
+        sys.exit(f'[RED] pso_offline: metal-pack failed for {arch} (exit {r.returncode}): {log_path.read_text()[-2000:]}')
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description='Build the pipeline archive of a game\'s shader pairs offline (metal-tt)')
     ap.add_argument('--msl', required=True, help='the shader libraries, b-<chain version> (with their reflection <key>_b.json)')
@@ -210,7 +293,9 @@ def main(argv=None):
     ap.add_argument('--platform', choices=('ios', 'macos'), default='ios')
     ap.add_argument('--os-min', help='minimum OS of the archives (default: iOS, the SDK\'s major version; macOS, this Mac\'s)')
     ap.add_argument('--script-only', action='store_true', help='write the script and the stamp, run no metal-tt')
+    ap.add_argument('--batch-size', type=int, default=BATCH, help=f'compile sequential groups of at most N bases and merge with metal-pack, when there are more (default {BATCH}; 0: one compiler invocation)')
     a = ap.parse_args(argv)
+    if a.batch_size < 0: ap.error('--batch-size must be zero or positive')
     if a.game:
         sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'games')); import game
         g = game.load(a.game)
@@ -219,8 +304,8 @@ def main(argv=None):
         if a.depth not in ('gl', 'zero'): sys.exit(f'[RED] pso_offline: {g.id}: depth_mode must be gl or zero: {a.depth}')
     if not a.pairs: sys.exit('[RED] pso_offline: no pair lists (--pairs or --game)')
     a.depth = a.depth or 'gl'
-    lib_dir, out, work = Path(a.msl), Path(a.out), Path(a.work)
-    chain = lib_dir.name[2:] if lib_dir.name.startswith('b-') else sys.exit(f'[RED] pso_offline: {lib_dir} is not a b-<chain version> folder')
+    lib_dir, out, work = shader_lib.view(a.msl), Path(a.out), Path(a.work)
+    chain = shader_lib.name_of(lib_dir)[2:] if shader_lib.name_of(lib_dir).startswith('b-') else sys.exit(f'[RED] pso_offline: {lib_dir} is not a b-<chain version> folder')
     archs = sorted({arch_name(x) for x in a.gpu.split(',') if x.strip()})
     if not archs: sys.exit('[RED] pso_offline: no GPU architecture (--gpu)')
     text = pair_text(a.pairs)
@@ -249,18 +334,13 @@ def main(argv=None):
         if dst.is_file() and kf.is_file() and kf.read_text().strip() == key: print(f'pso_offline: {arch}: reused ({dst.stat().st_size / 2**20:.0f} MB)'); continue
         kf.unlink(missing_ok=True); dst.unlink(missing_ok=True)
         part = work / f'{arch}.mtl4a.partial'; part.unlink(missing_ok=True)
-        cmd = ['xcrun', '-sdk', sdk(a.platform), 'metal-tt', '-arch', arch, f'-{a.platform}-version-min', osmin, str(js), '-o', str(part)]
-        clear_temporaries(work)
-        need, free = space_needed(len(bases)), shutil.disk_usage(work).free
-        if free < need: sys.exit(f'[RED] pso_offline: {free / 2**30:.1f} GB free on the volume of {work}, metal-tt needs about {need / 2**30:.0f} GB for {len(bases)} bases: free some space and run again')
         t1 = time.time(); print(f'pso_offline: {arch}: metal-tt, {len(bases)} bases (minutes) ...', flush=True)
-        with open(work / f'metal-tt.{arch}.log', 'w') as log:
-            r = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, env=dict(os.environ, TMPDIR=str(work)))   # its temporary files on the work folder's volume
-        if r.returncode or not part.is_file():
-            free = shutil.disk_usage(work).free   # metal-tt says only "applegpu-nt command failed" when the volume fills up. Read before clearing: its temporaries are what filled it
-            clear_temporaries(work); part.unlink(missing_ok=True)
-            full = f' ({free / 2**30:.1f} GB free on the volume of {work} when it failed: likely out of disk space)' if free < 1 << 30 else ''
-            sys.exit(f'[RED] pso_offline: metal-tt failed for {arch} (exit {r.returncode}){full}: {(work / f"metal-tt.{arch}.log").read_text()[-2000:]}')
+        if a.batch_size and len(bases) > a.batch_size:
+            compile_batches(lib_dir, bases, work, part, arch, a.platform, osmin, tv, a.batch_size)
+        else:
+            write_script(js, script(real_libraries(lib_dir, bases, work), bases))
+            compile_archive(js, part, work, arch, a.platform, osmin, len(bases))
+            clear_real_libraries(work)
         os.replace(part, dst); kf.write_text(key + '\n')
         print(f'pso_offline: {arch}: {dst.stat().st_size / 2**20:.0f} MB in {time.time() - t1:.0f} s')
     for f in out.glob('*.mtl4a'):   # architectures no longer asked for

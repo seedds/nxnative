@@ -156,6 +156,9 @@ Shader: string m_Name; SerializedShader m_ParsedForm; vector<data:unsigned int> 
 # and all 214 stripped Shader objects read to their exact ends. Keep the older layout intact: its pass headers still contain those two arrays.
 SHADER_6000_0 = SHADER_2022_3.replace('vector<data:Hash128> m_EditorDataHash; vector<data:UInt8> m_Platforms; ', '').replace(
     'bool! m_ShaderIsBaked\n', 'bool! m_ShaderIsBaked; GUID m_AssetGUID\n') + 'GUID: unsigned int data[0]; unsigned int data[1]; unsigned int data[2]; unsigned int data[3]\n'
+# Unity 6000.3 (Castlevania: Belmont's Curse's Digital Sound & Art Gallery, 01005F4027E94000, 6000.3.6f1): 6000.0's layout with m_AssetLocalIdentifierInFile after the GUID (Shader version 4, from 6000.3.0f1 on).
+# All 2,306 nodes and alignment flags match AssetRipper's 6000.3.0f1, 6000.3.11f1 and 6000.3.20f1 release trees; all 97 of the Gallery's stripped Shader objects read to their exact ends
+SHADER_6000_3 = SHADER_6000_0.replace('GUID m_AssetGUID\n', 'GUID m_AssetGUID; SInt64 m_AssetLocalIdentifierInFile\n')
 # The Unity 2020.3 Shader (Patrick's Parabox, Unity 2020.3.30f1: only Data/*.assets, its shaders the built-in ones in Data/Resources) matches the type tree in Fire Emblem Engage's bundles
 # (Unity 2020.3.18f1), whose hash is the same: global and local keyword indices per subprogram, every subprogram in m_SubPrograms, no parameter blobs, keyword names or stage counts
 SHADER_2020_3 = _SHADER_COMMON + '''SerializedSubProgram: unsigned int m_BlobIndex; ParserBindChannels m_Channels; vector<data:UInt16> m_GlobalKeywordIndices; vector<data:UInt16> m_LocalKeywordIndices; SInt8 m_ShaderHardwareTier; SInt8! m_GpuProgramType; SerializedProgramParameters m_Parameters; int m_ShaderRequirements
@@ -300,11 +303,20 @@ SerializedShader: SerializedProperties m_PropInfo; vector<data:SerializedSubShad
 PPtr<Shader>: int m_FileID; SInt64 m_PathID
 Shader: string m_Name; SerializedShader m_ParsedForm; vector<data:unsigned int>~ platforms; vector<data:unsigned int>~ offsets; vector<data:unsigned int>~ compressedLengths; vector<data:unsigned int>~ decompressedLengths; vector<data:UInt8> compressedBlob; vector<data:PPtr<Shader>>~ m_Dependencies; bool! m_ShaderIsBaked'''
 
+# Unity 2021.3 (Dynablaster, 2021.3.25f1: no bundles, every serialized file stripped): the 2021.2 layout with the player subprograms of 2022.3 in each program and the shader's stageCounts;
+# the keyword state mask stays in the pass. Matches AssetRipper's 2021.3.25f1 release tree node for node (2,304 nodes, alignment flags included)
+SHADER_2021_3 = SHADER_2021_2.replace('SerializedProgram: vector<data:SerializedSubProgram> m_SubPrograms; SerializedProgramParameters m_CommonParameters',
+    'SerializedPlayerSubProgram: unsigned int m_BlobIndex; vector<data:UInt16> m_KeywordIndices; SInt64 m_ShaderRequirements; SInt8! m_GpuProgramType\n'
+    'SerializedProgram: vector<data:SerializedSubProgram> m_SubPrograms; vector<data:vector<data:SerializedPlayerSubProgram>> m_PlayerSubPrograms; vector<data:vector<data:unsigned int>> m_ParameterBlobIndices; SerializedProgramParameters m_CommonParameters'
+    ).replace('vector<data:UInt8> compressedBlob;', 'vector<data:UInt8> compressedBlob; vector<data:unsigned int> stageCounts;')
+
 CLASS_COMPUTE_SHADER = 72
 KNOWN_TREES = {(CLASS_SHADER, bytes.fromhex('4496e93f2179252104401c8dda0a1751')): ('Shader', SHADER_5_5),
+               (CLASS_SHADER, bytes.fromhex('f0c184272a05e54447e36366ec4876a6')): ('Shader', SHADER_2021_3),
                (CLASS_SHADER, bytes.fromhex('ea424a5fc1e48db62144df956f9e1005')): ('Shader', SHADER_2022_3),
                (CLASS_SHADER, bytes.fromhex('d8236c9bd87d85edb203acf352348124')): ('Shader', SHADER_2021_2),
                (CLASS_SHADER, bytes.fromhex('2ec7223dce3af4232b14ae1441bd7999')): ('Shader', SHADER_6000_0),
+               (CLASS_SHADER, bytes.fromhex('57f0dd2d4ef24437b4655529a673a936')): ('Shader', SHADER_6000_3),
                (CLASS_SHADER, bytes.fromhex('a30e3dcf6c6d25153d6f64e5e41caf4e')): ('Shader', SHADER_2020_3),
                (CLASS_SHADER, bytes.fromhex('ed2a06ce7fb8203f6efb5ab5e0ce20d5')): ('Shader', SHADER_2019_4),
                (CLASS_SHADER, bytes.fromhex('8db760073e1392061e4a36995f0735af')): ('Shader', SHADER_2018_3),

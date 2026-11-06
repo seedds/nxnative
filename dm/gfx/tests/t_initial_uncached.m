@@ -54,7 +54,8 @@ static void run(int format, uint64_t serial, uint32_t pool_flags, int c0, uint32
     mtl_pool_del(mem);mtl_drain();free(mem);
 }
 // Each slice z of a 4x4x4 RGBA8 3D texture holds the colour {z*40+1, z*40+2, z*40+3, 255}
-static void run3d(uint64_t serial, uint32_t tex_flags, int want) {
+// touched: the texture's Metal texture is made first, with the shader-write usage an IMAGE texture gets (tex_gpu_touched), as once a shader has written it
+static void run3d(uint64_t serial, uint32_t tex_flags, int touched, int want) {
     void *mem=NULL; if(posix_memalign(&mem,getpagesize(),65536))abort(); memset(mem,0,65536);
     pool_t pool={.magic=MAGIC('P','O','O','L'),.mem=mem,.size=65536,.flags=NVN_MEMORY_POOL_FLAGS_CPU_CACHED|NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
     mtl_pool_add(mem,65536);
@@ -63,8 +64,9 @@ static void run3d(uint64_t serial, uint32_t tex_flags, int want) {
     nvn_tex_layout(&t.d,&t.L);
     uint8_t linear[4*4*4*4];for(int z=0;z<4;z++)for(int i=0;i<16;i++){uint8_t *p=linear+(z*16+i)*4;p[0]=z*40+1;p[1]=z*40+2;p[2]=z*40+3;p[3]=255;}
     CHECK("3D fixture swizzle succeeds",!nvn_swizzle(&t.d,0,0,linear,16,mem));
-    CHECK(want?"an uncompressed 3D texture with no IMAGE flag is taken from its storage":"a 3D image keeps its GPU content",tex_cpu_content(&t)==want);
-    mtl_tex_init(&t);mtl_sub_begin();id<MTLTexture> image=tex_mtl(&t);
+    if(touched){mtl_tex_init(&t);mtl_sub_begin();CHECK("the image texture is made writable",tex_mtl(&t)!=nil);finish();}
+    CHECK(!want?"a 3D image the GPU may have written keeps its GPU content":tex_flags?"a 3D image the GPU has not written is taken from its storage (Orbitals' indirection volume)":"an uncompressed 3D texture with no IMAGE flag is taken from its storage",tex_cpu_content(&t)==want);
+    if(!touched)mtl_tex_init(&t);mtl_sub_begin();id<MTLTexture> image=tex_mtl(&t);
     CHECK("3D texture resolves",image!=nil);finish();
     if(want&&image){
         NSError *error=nil;static id<MTLComputePipelineState> ps;static id<MTLCommandQueue> queue;
@@ -84,5 +86,5 @@ int main(void){@autoreleasepool{mtl_init();
     const uint32_t uncached=NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED|NVN_MEMORY_POOL_FLAGS_GPU_CACHED,cached=NVN_MEMORY_POOL_FLAGS_CPU_CACHED|NVN_MEMORY_POOL_FLAGS_GPU_CACHED;
     run(NVN_FORMAT_RGBA_ASTC_6x6,9750,uncached,0,0);run(NVN_FORMAT_RGBA_ASTC_6x6_SRGB,9751,uncached,0,0);run(NVN_FORMAT_RGBA_ASTC_6x6,9752,cached,3,0);
     run(NVN_FORMAT_RGBA_ASTC_6x6,9753,uncached,1,NVN_TEXTURE_FLAGS_IMAGE);   // IMAGE on a block-compressed format: shaders cannot write it (Pokemon Pokopia's icons)
-    run3d(9760,0,1);run3d(9761,NVN_TEXTURE_FLAGS_IMAGE,0);
+    run3d(9760,0,0,1);run3d(9761,NVN_TEXTURE_FLAGS_IMAGE,0,1);run3d(9762,NVN_TEXTURE_FLAGS_IMAGE,1,0);
     printf("t_initial_uncached: %d checks, %d failed\n",checks,failed);return failed!=0;}}

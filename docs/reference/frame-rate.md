@@ -257,6 +257,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** `DM_TEST_PRESENT_LAG=90,30` (sleep 30 ms before every 90th present) makes Mario do this on the Mac; run it with `DM_WINDOW=1` to get the display link. `DM_NVN_TSV` writes each frame's interval as `@itv`.
 - **Note:** the windowless Mac host was never affected by the acquire: there the acquire sleeps until the interval's slot.
 
+### Display-link counts that read as drops in steady state
+
+- **Symptom:** a game pacing itself by its present interval (no frame step) logs `display link up to tick …: … held for the present interval 0, old frames dropped by merging 2265` in every line, which reads as frames rendered and never shown and the interval not held.
+- **Cause:** the counts in that line were totals since launch (only `ticks 300` was per line, and it counted presents, not ticks). All 2,265 were dropped during boot, while the window was covered and its display link fired about once a second; the later lines had 300 presents in 300 ticks and none dropped. `held … 0` is right at interval 1: the hold applies only to frames of interval 2 or more.
+- **Fix:** the line prints each count over its own 300-present span (ticks too). Without the frame step, every 1800 presents the host logs `present interval: X s of vsyncs asked in Y s (R of real time, R' without N hitches); frames at interval 1 / 2 / 3+ …`: the sum of the frames' intervals against wall time. 1.000 means each frame was held for its interval on average; for a game whose time step is its interval it is the game's speed, as the frame step's `game time` line is.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) with its own controller (`DM_FPS_TARGET=0`), after the guest counter was put at 31.25 MHz: fullscreen at 60 Hz, interval 1 in 1800 of 1800 frames, 300 presents per 300 ticks, 1784 of 1788 frames on screen for 16.67 ms, speed 1.000 (0.987 with two screenshot hitches).
+
 ### Odd present intervals on the 30 Hz display link
 
 - **Symptom:** Donkey Kong Bananza ran its heavy areas at 15 fps where its GPU took about 46 ms a frame: the frames came every 66.7 ms, and the presentation thread spent 85% of its time in `nvnWindowAcquireTexture` waiting for display-link ticks.

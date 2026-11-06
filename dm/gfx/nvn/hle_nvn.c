@@ -2064,6 +2064,21 @@ static void fstep_tick(const win_t *o, int c) {
         t0 = t; v0 = vs; memset(held, 0, sizeof held);
     }
 }
+// Without the frame step, the game paces itself by its present interval: every 1800 presents, the vsyncs its frames asked for (the interval of each, 1 in display mode) against
+// real time. 1.000 = each frame was held for its interval on average, as on the Switch; for a game whose time step is its interval (Donkey Kong Bananza: fps = 60 / interval,
+// BotW's VFR: interval / 2) it is the game's speed. Hitches (a frame over 50 ms per vsync it asked for: a screenshot, a load) are counted, and the ratio without their excess given
+static void itv_tick(const win_t *o) {
+    static uint64_t t0, prev, vs, n[4], hitch, hitch_ns;
+    int k = present_itv(o); uint64_t t = now_ns();
+    if (prev && t - prev > 50000000ull * (uint64_t)k) { hitch++; hitch_ns += t - prev - (uint64_t)k * 1000000000ull / 60; }
+    prev = t;
+    if (t0) { vs += (uint64_t)k; n[k < 3 ? k : 3]++; }
+    if (o->presents % 1800) return;
+    if (t0) { double gs = vs / 60.0, w = (t - t0) / 1e9, wh = w - hitch_ns / 1e9;
+        LOG("[nvn] present interval: %.2f s of vsyncs asked in %.2f s (%.3f of real time, %.3f without %llu hitches); frames at interval 1 / 2 / 3+ %llu / %llu / %llu",
+            gs, w, gs / w, wh > 0 ? gs / wh : 0, (unsigned long long)hitch, (unsigned long long)n[1], (unsigned long long)n[2], (unsigned long long)n[3]); }
+    t0 = t; vs = hitch = hitch_ns = 0; memset(n, 0, sizeof n);
+}
 // The crop a present shows: the window's own (nvnWindowSetCrop), else the vi layer's (vi::SetLayerCrop, hle_vi.c); on the Switch both become the crop of the buffer queued to the layer.
 // Link's Awakening crops only its layer: in handheld mode it draws 1280x720 into its 1920x1080 window textures and crops the layer to that. A layer crop that does not fit the
 // texture is reported once and the whole texture shown, as before the layer crop was read here. lc receives the layer crop
@@ -2089,6 +2104,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     dm_fps_lock_tick();   // after the frame step: at 120 fps the target follows the hold just decided
     static uint64_t prev_in, prev_out, prev_pass, prev_draw;
     present_cfg(o);
+    if (!c) itv_tick(o);
     {
         // Test switch DM_TEST_PRESENT_LAG=every N presents,milliseconds[,presents in a row][;…]: sleep that long before the Nth, 2Nth… present (and the ones after it in the run), imitating an occasional slow frame on a phone (Mario 1.2.1 then sets present interval 2; checks that the display link holds frames by interval),
         // or with a run of 3 a hitch that steps the frame step up ("1,10;1200,30,3": 10 ms more on every frame, and 30 more on three in a row every 1,200). Not set in the product
@@ -2221,7 +2237,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
 
 // ---------- State-only interfaces used by newer-SDK games (SMBW): buffer objects, pool / sampler / texture queries, views, color state, device and window ----------
 // They only read and write the object itself and record no commands. Where the host has no matching capability (texture channel swizzle, depth / stencil sampling mode, sampler reduction, virtual mapping) the first occurrence logs one line and the call returns normally.
-#define ONCE_LOG(...) do { static int once_; if (!once_++) LOG("[nvn] " __VA_ARGS__); } while (0)
+#define ONCE_LOG(...) do { static int once_; if (!once_) { once_ = 1; LOG("[nvn] " __VA_ARGS__); } } while (0)   // a set flag: a count overflows on a call made every frame
 
 // Buffer object = pool + offset + size; the GPU address and the CPU mapping are both the pool's host pointer + offset (same convention as MemoryPoolGetBufferAddress)
 typedef struct { NVNdevice *dev; const pool_t *pool; int64_t off; uint64_t size; } buf_builder_t;   FITS(buf_builder_t, NVNbufferBuilder);

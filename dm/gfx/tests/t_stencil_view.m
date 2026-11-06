@@ -42,6 +42,7 @@ int main(void) { @autoreleasepool {
         if (!base || !dst) continue;
         float dz[W * H]; uint8_t st[W * H];
         for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) { dz[x + y * W] = depth_at(x, y); st[x + y * W] = stencil_at(x, y); }
+        mtl_tex_zero_cancel(base);   // the first one is made before any submit and its zeroing waits for the next one (tex_zero_fill): it would wipe the planes the fixture writes here
         plane_io(base, 0, 1, dz); plane_io(base, 1, 1, st);
 
         mtl_sub_begin();

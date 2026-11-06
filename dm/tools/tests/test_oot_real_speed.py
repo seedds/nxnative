@@ -47,6 +47,7 @@ def float_reg(value):
 
 
 def run(constant, target, seconds):
+    assert unicorn is not None and arm is not None
     machine = unicorn.Uc(unicorn.UC_ARCH_ARM64, unicorn.UC_MODE_ARM)
     machine.mem_map(BASE, 0xa00000)
     machine.reg_write(arm.UC_ARM64_REG_CPACR_EL1, 3 << 20)   # the FP unit is off at reset

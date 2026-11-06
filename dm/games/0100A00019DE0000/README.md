@@ -46,4 +46,5 @@ General host changes first needed here; each applies to every game:
 
 ## Open
 
+- **Crashes at launch on macOS 26.7.3 (25G416) on an M1 Pro** (2026-11-07), although the [Mac route](#mac-routes) above reached Erebus before. No crash log or host log has been captured yet.
 - `game.tsv` says values marked "Mario's" are not measured for this game; none of its rows is marked so.

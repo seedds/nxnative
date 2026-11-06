@@ -460,3 +460,12 @@ t_logic: t_logic.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_logic.m $(MTL_T_SRC) $(FW)
 check_t_logic: t_logic
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_logic.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_logic "$$work"
+
+t_queue_vis: t_queue_vis.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_queue_vis.m $(MTL_T_SRC) $(FW)
+check_t_queue_vis: RUN_ENV = MTL_DEBUG_LAYER=1
+t_queue_alloc: t_queue_alloc.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_queue_alloc.m $(MTL_T_SRC) $(FW)
+check_t_queue_alloc: RUN_ENV = MTL_DEBUG_LAYER=1
+t_queue_schedule: t_queue_schedule.c ../nvn/nvn_queue_schedule.c ../nvn/nvn_queue_schedule.h
+	clang -std=c11 -O2 -g -Wall -Wextra -Werror -o $@ t_queue_schedule.c ../nvn/nvn_queue_schedule.c

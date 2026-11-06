@@ -98,7 +98,7 @@ static int g_classic_ok, g_classic;   // mtl_device_classic was asked / the devi
 static dispatch_queue_t g_feedback_q;
 static _Atomic uint32_t g_present_qos;
 #define ALLOC_MAX 8
-static id<MTL4CommandAllocator> g_alloc4[ALLOC_MAX]; static int g_alloc_n, g_alloc_cur;   // Command allocator pool of the main submission: at start pick one the GPU has finished with, create a new one if there is none (wait only at the cap)
+static id<MTL4CommandAllocator> g_alloc4[ALLOC_MAX]; static int g_alloc_n, g_alloc_cur;   // Bounded pool: logical event chunks append through a lease; reset only after every committed use completes
 static id<MTL4CommandAllocator> g_up_alloc4[3];
 static id<MTL4CommandAllocator> g_present_alloc4[3];
 static id<MTL4CommandBuffer> g_present_cb[3];
@@ -175,9 +175,9 @@ static _Atomic int g_up_pending;
 static pthread_mutex_t g_res_mu = PTHREAD_MUTEX_INITIALIZER;   // Dedicated lock for the residency set: res_add is called on paths that hold g_mu (arena_new), so it cannot share g_mu
 // Wait ledger (DM_NVN_WAITS=1): every place a thread of the host or the game waits on the CPU for the GPU or for the encode thread, counted per frame (calls, calls that blocked,
 // the time they blocked) and logged every 300 frames with the frame's GPU idle. The game's own SyncWait is split by how far its fence is behind the newest one (0: the last submission)
-enum { WS_SYNC, WS_SYNC_NEWEST, WS_SYNC_POLL, WS_ACQ, WS_FINISH, WS_ALLOC, WS_VIS, WS_PG, WS_MDI, WS_READTEX, WS_T2T, WS_DIAG, WS_SNAP, WS_UPZERO, WS_UPALLOC, WS_DRAIN, WS_UBC, WS_OLDQ, WS_N };
+enum { WS_SYNC, WS_SYNC_NEWEST, WS_SYNC_POLL, WS_ACQ, WS_FINISH, WS_ALLOC, WS_VIS, WS_PG, WS_MDI, WS_READTEX, WS_T2T, WS_DIAG, WS_SNAP, WS_UPZERO, WS_UPALLOC, WS_DRAIN, WS_UBC, WS_OLDQ, WS_POST, WS_N };
 static const char *const ws_name[WS_N] = {"SyncWait (game, older fence)", "SyncWait (game, newest fence)", "SyncWait polls", "SyncWait on an acquire sync", "QueueFinish", "allocator", "occlusion ring", "PASSGPU ring",
-    "indirect-count multi-draw", "texture readback", "texture copy t2t", "diagnostics", "snapshot ring", "upload batches", "upload slot", "encode thread drain", "uniform copy worker", "old-queue command buffer"};
+    "indirect-count multi-draw", "texture readback", "texture copy t2t", "diagnostics", "snapshot ring", "upload batches", "upload slot", "encode thread drain", "uniform copy worker", "old-queue command buffer", "completion records"};
 static _Atomic uint64_t g_ws_n[WS_N], g_ws_blk[WS_N], g_ws_ns[WS_N];
 static int ws_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_WAITS"); v = e && atoi(e) > 0; } return v; }
 static inline uint64_t ws_t0(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
@@ -703,6 +703,7 @@ typedef struct { int kind; volatile uint32_t *val; uint32_t mode, v; uint64_t ad
 static void mirror_rb_land(void *m);   // kind 4: a GPU copy's bytes read back into the destination texture's storage (mirror_readback)
 static uint32_t g_seg;   // Index of the segment being encoded in this submission (0 until the first sub_cut)
 typedef struct seg_clk seg_clk; static seg_clk *g_sclk; static void seg_clk_put(seg_clk *c);   // Counter timestamps by segment (see gpu_ticks)
+static mtl_submit_clock *g_submit_clock;   // retained for this host chunk, transferred to its completion record
 // ---------- Conditional rendering (profile render_cond) ----------
 // SetRenderEnableConditional(mode, rec) enables rendering if the 64-bit counter of the report at rec equals (RENDER_IF_EQUAL) or differs from (RENDER_IF_NOT_EQUAL) the one at
 // rec + 16, until the next SetRenderEnable(true). Tears of the Kingdom wraps nearly every ClearColor / ClearDepthStencil this way: rec is set to 1 from the CPU when the target
@@ -751,16 +752,31 @@ typedef struct { __strong id<MTLBuffer> buf; uint64_t fence; } vis_buf;
 enum { VIS_RING = ALLOC_MAX };
 static vis_buf g_vis_ring[VIS_RING]; static int g_vis_ring_n, g_vis_ring_i = -1;
 static id<MTLBuffer> g_vis; static uint32_t g_vis_n;   // This submission's visibility buffer and number of slots used
+static int g_vis_ring_used;   // the ring buffer was bound, even if overflow later replaced g_vis
 static int vis_in_ring(id<MTLBuffer> b) { for (int i = 0; i < g_vis_ring_n; i++) if (g_vis_ring[i].buf == b) return 1; return 0; }
+static int vis_buffer_pinned(id<MTLBuffer> b);   // active or saved queue's cumulative query still reads slots in it
 static int g_vis_on, g_vis_counting, g_vis_cur = -1; static uint64_t g_vis_cur_pass;
 static vis_slot *g_vs; static int g_nvs, g_vscap;      // Slots since the last reset
 static uint64_t g_cnt_report[32], g_cnt_reset[32];       // Report / reset counts per counter type (diagnostics)
 static void vis_clear(void) { for (int i = 0; i < g_nvs; i++) CFRelease(g_vs[i].buf); g_nvs = 0; g_vis_cur = -1; }
 static vis_list *vis_snapshot(void) {
-    vis_list *l = malloc(sizeof *l + g_nvs * sizeof(vis_slot)); l->n = g_nvs;
-    for (int i = 0; i < g_nvs; i++) { l->s[i] = g_vs[i]; CFRetain(g_vs[i].buf); }
+    vis_list *l = malloc(sizeof *l + g_nvs * sizeof(vis_slot));
+    l->n = g_nvs;
+    uint64_t fence = g_fence + 1;
+    for (int i = 0; i < g_nvs; i++) {
+        l->s[i] = g_vs[i];
+        CFRetain(g_vs[i].buf);
+        // A reset can drop the cumulative list before this report completes.
+        // Protect its CPU callback's reads as well as the buffer's GPU writes.
+        for (int k = 0; k < g_vis_ring_n; k++) {
+            if ((__bridge void *)g_vis_ring[k].buf == g_vs[i].buf && g_vis_ring[k].fence < fence) {
+                g_vis_ring[k].fence = fence;
+            }
+        }
+    }
     return l;
 }
+
 // Target ranges of buffer writes (copies / inline uniform updates) already encoded in this submission but not yet executed on the GPU: reading these addresses on the CPU side at encode time yields old values (uv_proof avoids them when reading uniforms)
 // Inline updates keep where their data sits in the update ring (g_pend_upd: index + 1 into g_upd), so a bindless handle they wrote can be read as the GPU will see it (pend_read).
 // Monster Hunter Rise queues more than 256 writes in a submission (the old limit, after which every address counted as written). The writes are indexed by 4 KB page (a chain per hash
@@ -861,8 +877,86 @@ enum { GSR_N = 16384 };
 static struct { uint64_t fence, lo, hi; } g_gsr[GSR_N]; static uint64_t g_gsr_n; static int g_gml_on;
 static pthread_mutex_t g_gsr_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_alloc_fence[ALLOC_MAX]; static uint64_t g_alloc_waits, g_alloc_grown;
+struct mtl_submit_alloc {
+    int slot;
+};
+static mtl_submit_alloc *g_alloc_owner[ALLOC_MAX];
+mtl_submit_alloc *mtl_submit_alloc_new(void) {
+    mtl_submit_alloc *lease = malloc(sizeof *lease);
+    if (!lease) {
+        MDIE("submission allocator lease allocation failed");
+    }
+    lease->slot = -1;
+    return lease;
+}
+void mtl_submit_alloc_close(mtl_submit_alloc *lease) {
+    if (!lease || lease->slot < 0) {
+        return;
+    }
+    if (g_alloc_owner[lease->slot] != lease) {
+        MDIE("submission allocator lease lost its owner");
+    }
+    g_alloc_owner[lease->slot] = NULL;
+    lease->slot = -1;
+}
+void mtl_submit_alloc_release(mtl_submit_alloc *lease) {
+    mtl_submit_alloc_close(lease);
+    free(lease);
+}
 int mtl_wait(uint64_t fence, uint64_t timeout_ns);
 static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site);
+static int alloc_acquire(mtl_submit_alloc *owner) {
+    if (owner && owner->slot >= 0) {
+        int i = owner->slot;
+        if (g_alloc_owner[i] != owner) {
+            MDIE("submission allocator lease lost its slot");
+        }
+        // endCommandBuffer disassociates the previous buffer. Its encoded bytes
+        // remain valid while the next buffer appends, even before GPU completion.
+        return i;
+    }
+    int slot = -1;
+    uint64_t done = g_done;
+    for (int i = 0; i < g_alloc_n; i++) {
+        if (!g_alloc_owner[i] && g_alloc_fence[i] <= done) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0 && g_alloc_n < ALLOC_MAX) {
+        NSError *error = nil;
+        MTL4CommandAllocatorDescriptor *descriptor = [MTL4CommandAllocatorDescriptor new];
+        g_alloc4[g_alloc_n] = [g_dev newCommandAllocatorWithDescriptor:descriptor error:&error];
+        if (!g_alloc4[g_alloc_n]) {
+            MDIE("failed to create a new MTL4CommandAllocator: %s", error.localizedDescription.UTF8String);
+        }
+        slot = g_alloc_n++;
+        g_alloc_grown++;
+    }
+    if (slot < 0) {
+        // A logical submission can remain blocked forever. Revoke only its
+        // completed encoded prefix; future chunks have no allocator bytes yet.
+        // Waiting for logical END here would deadlock a ninth producer queue.
+        slot = 0;
+        for (int i = 1; i < g_alloc_n; i++) {
+            if (g_alloc_fence[i] < g_alloc_fence[slot]) {
+                slot = i;
+            }
+        }
+        if (g_alloc_fence[slot] > done) {
+            g_alloc_waits++;
+            mtl_wait_at(g_alloc_fence[slot], UINT64_MAX, WS_ALLOC);
+        }
+        mtl_submit_alloc_close(g_alloc_owner[slot]);
+    }
+    [g_alloc4[slot] reset];
+    g_alloc_owner[slot] = owner;
+    if (owner) {
+        owner->slot = slot;
+    }
+    return slot;
+}
+
 static void up_flush(void);
 // The upload batch belongs only to the submit thread (the thread that called mtl_sub_begin): the batch's encoder cannot be used across threads. Every entry point asserts current thread == submit thread,
 // and on mismatch prints the stack and aborts on the spot - so that 'another thread touched the batch' is exposed deterministically on Mac too, not by timing (real iOS device stuck at the main menu: the present thread flushed the submit thread's batch via q_cb).
@@ -895,43 +989,104 @@ void mtl_prepare(void) {
     if (!g_warm_started && prepare_on()) { mtl_init(); shmap_load(); }
 }
 static void sub_cut_begin(void);
-void mtl_sub_begin(void) {
-    mtl_init(); g_sub_serial++; g_seg = 0; seg_clk_put(g_sclk); g_sclk = NULL; g_rc_npend = 0; g_rc_skip = 0;
+static void sub_begin(int resume, mtl_submit_alloc *owner) {
+    mtl_init();
+    g_sub_serial++;
+    g_seg = 0;
+    seg_clk_put(g_sclk);
+    g_sclk = NULL;
+    if (!resume) {
+        g_rc_npend = 0;
+        g_rc_skip = 0;
+    }
     sub_cut_begin();
     defer_drain();
     defer_reset();
-    mtl_prepare();   // done by then in the submit entry; the replay tool (nvn_replay) reaches it here
+    mtl_prepare(); // done by then in the submit entry; the replay tool (nvn_replay) reaches it here
     warm_claim();
-    if (g_cb) MDIE("submit re-entered");
-    g_sub_thread = pthread_self(); atomic_store(&g_sub_thread_set, 1);
+    if (g_cb) {
+        MDIE("submit re-entered");
+    }
+    mtl_submit_clock_release(g_submit_clock);
+    g_submit_clock = NULL;
+    g_sub_thread = pthread_self();
+    atomic_store(&g_sub_thread_set, 1);
     atomic_store(&g_last_commit_error, 0);
     g_sub_pool = objc_autoreleasePoolPush();
     g_cb = rec_cb_new();
     // Do not wait for the GPU mid-frame (hot real device: with a fixed rotation of 3, when the GPU cannot keep up every frame blocks here, and the submit thread runs at low frequency after waking, instruction count −18% but CPU time +49%):
     // pick an allocator the GPU has finished with; if all are in use create a new one; only at the cap wait for the oldest one. How far ahead it runs is bounded by the wait where the game acquires the swapchain texture, same as the old interface.
-    int alloc_i = -1; uint64_t done = g_done;
-    for (int i = 0; i < g_alloc_n; i++) if (g_alloc_fence[i] <= done) { alloc_i = i; break; }
-    if (alloc_i < 0 && g_alloc_n < ALLOC_MAX) { NSError *ae = nil; MTL4CommandAllocatorDescriptor *ad = [MTL4CommandAllocatorDescriptor new];
-        g_alloc4[g_alloc_n] = [g_dev newCommandAllocatorWithDescriptor:ad error:&ae]; if (!g_alloc4[g_alloc_n]) MDIE("failed to create a new MTL4CommandAllocator: %s", ae.localizedDescription.UTF8String);
-        alloc_i = g_alloc_n++; g_alloc_grown++; }
-    if (alloc_i < 0) { alloc_i = 0; for (int i = 1; i < g_alloc_n; i++) if (g_alloc_fence[i] < g_alloc_fence[alloc_i]) alloc_i = i; g_alloc_waits++; mtl_wait_at(g_alloc_fence[alloc_i], UINT64_MAX, WS_ALLOC); }
+    int alloc_i = alloc_acquire(owner);
     g_alloc_cur = alloc_i;
-    [g_alloc4[alloc_i] reset];
     [g_cb beginCommandBufferWithAllocator:g_alloc4[alloc_i]];
     g_commit_blocks = [NSMutableArray array];
     // The overflow buffer created when the previous submission ran out of slots (see g_vis_n >= VIS_SLOTS): retire it. It used to be just cleared here and stayed in the residency set for good (from d2r-mobile 2eb575877)
-    if (g_vis && !vis_in_ring(g_vis)) defer_obj_release(g_vis);
-    g_npost = 0; g_vis = nil; g_vis_n = 0; g_vis_cur = -1; pend_reset();
-    zskip_clear(); g_zskip_count = 0;
+    if (g_vis && !vis_in_ring(g_vis)) {
+        defer_obj_release(g_vis);
+    }
+    g_npost = 0;
+    g_vis = nil;
+    g_vis_n = 0;
+    g_vis_ring_used = 0;
+    g_vis_cur = -1;
+    pend_reset();
+    zskip_clear();
+    g_zskip_count = 0;
     int pick = -1;
-    for (int i = 0; i < g_vis_ring_n; i++) if (g_vis_ring[i].fence <= g_done) { pick = i; break; }
-    if (pick < 0 && g_vis_ring_n < VIS_RING) pick = g_vis_ring_n++;
-    if (pick < 0) { uint64_t oldest = UINT64_MAX; for (int i = 0; i < VIS_RING; i++) if (g_vis_ring[i].fence < oldest) { oldest = g_vis_ring[i].fence; pick = i; } if (oldest > g_done) mtl_wait_at(oldest, UINT64_MAX, WS_VIS); }
-    g_vis_ring_i = pick; g_vis_ring[pick].fence = UINT64_MAX;
-    if (!g_vis_ring[pick].buf) { g_vis_ring[pick].buf = [g_dev newBufferWithLength:VIS_SLOTS * 8 options:MTLResourceStorageModeShared]; res_add(g_vis_ring[pick].buf); }
-    g_vis = g_vis_ring[pick].buf;
-    void pg_sub_begin_ext(uint64_t fence); pg_sub_begin_ext(g_fence + 1);
-    void arena_begin(void); arena_begin();
+    for (int i = 0; i < g_vis_ring_n; i++) {
+        if (g_vis_ring[i].fence <= g_done && !vis_buffer_pinned(g_vis_ring[i].buf)) {
+            pick = i;
+            break;
+        }
+    }
+    if (pick < 0 && g_vis_ring_n < VIS_RING) {
+        pick = g_vis_ring_n++;
+    }
+    if (pick < 0) {
+        uint64_t oldest = UINT64_MAX;
+        for (int i = 0; i < g_vis_ring_n; i++) {
+            if (!vis_buffer_pinned(g_vis_ring[i].buf) && g_vis_ring[i].fence < oldest) {
+                oldest = g_vis_ring[i].fence;
+                pick = i;
+            }
+        }
+        if (pick >= 0 && oldest > g_done) {
+            mtl_wait_at(oldest, UINT64_MAX, WS_VIS);
+        }
+    }
+    g_vis_ring_i = pick;
+    if (pick >= 0) {
+        g_vis_ring[pick].fence = UINT64_MAX;
+        if (!g_vis_ring[pick].buf) {
+            g_vis_ring[pick].buf = [g_dev newBufferWithLength:VIS_SLOTS * 8 options:MTLResourceStorageModeShared];
+            res_add(g_vis_ring[pick].buf);
+        }
+        g_vis = g_vis_ring[pick].buf;
+    } else {
+        // Completion alone cannot recycle a cumulative query's slots: another
+        // queue or a resumed segment can report them after this GPU fence. If
+        // every ring buffer is pinned, use an overflow buffer until a reset or
+        // queue finalization releases slots; waiting cannot remove these pins.
+        g_vis = [g_dev newBufferWithLength:VIS_SLOTS * 8 options:MTLResourceStorageModeShared];
+        res_add(g_vis);
+    }
+    if (!g_vis) {
+        MDIE("visibility buffer allocation failed");
+    }
+    void pg_sub_begin_ext(uint64_t fence);
+    pg_sub_begin_ext(g_fence + 1);
+    void arena_begin(void);
+    arena_begin();
+}
+
+void mtl_sub_begin(void) {
+    sub_begin(0, NULL);
+}
+void mtl_sub_resume(void) {
+    sub_begin(1, NULL);
+}
+void mtl_sub_begin_alloc(mtl_submit_alloc *a, int resume) {
+    sub_begin(resume, a);
 }
 
 static void rp_end(void);
@@ -1500,6 +1655,45 @@ void mtl_counter_stats(uint64_t rep[32], uint64_t rst[32]) { memcpy(rep, g_cnt_r
 // They used to come from CLOCK_MONOTONIC, which keeps running while the Mac sleeps while the guest clock (mach_absolute_time) does not, so the two differed by the sleep time; once timestamps were converted to ns, Mario halved its frame rate. In graphics unit tests guest_ns is a weak definition returning 0; fall back to the monotonic clock
 uint64_t guest_ns(void);
 static uint64_t gpu_ticks(void) { uint64_t g = guest_ns(); if (!g) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); g = (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; } return nvn_timestamp_from_ns(g); }
+// Event waits can split one guest submission into several host completions.
+// Keep its configured submission-mode clock scoped to that guest submission,
+// while publishing each report at its own completed point in the event stream.
+struct mtl_submit_clock {
+    _Atomic unsigned refs;
+    _Atomic uint64_t ticks;
+};
+mtl_submit_clock *mtl_submit_clock_new(void) {
+    mtl_submit_clock *clock = calloc(1, sizeof *clock);
+    if (!clock) {
+        MDIE("submission clock allocation failed");
+    }
+    atomic_init(&clock->refs, 1);
+    atomic_init(&clock->ticks, UINT64_MAX);
+    return clock;
+}
+void mtl_submit_clock_release(mtl_submit_clock *clock) {
+    if (clock && atomic_fetch_sub(&clock->refs, 1) == 1) {
+        free(clock);
+    }
+}
+void mtl_sub_set_clock(mtl_submit_clock *clock) {
+    if (clock) {
+        atomic_fetch_add(&clock->refs, 1);
+    }
+    mtl_submit_clock_release(g_submit_clock);
+    g_submit_clock = clock;
+}
+static uint64_t submit_clock_ticks(mtl_submit_clock *clock) {
+    uint64_t ticks = atomic_load(&clock->ticks);
+    if (ticks == UINT64_MAX) {
+        uint64_t now = gpu_ticks();
+        if (atomic_compare_exchange_strong(&clock->ticks, &ticks, now)) {
+            ticks = now;
+        }
+    }
+    return ticks;
+}
+
 // Counter timestamps by segment (profile gpu_timestamps segment; DM_NVN_GPU_TS=segment / submission overrides it). On hardware a timestamp report is written when the GPU reaches it, so two reports of one submission bracket the GPU work between them.
 // The host writes all reports of a submission in its completion handler; with one time for all of them a game that measures its GPU time that way reads 0 (Breath of the Wild: frame-interval controller and dynamic resolution).
 // In segment mode a report takes the GPU time of the segment it was encoded in (sub_cut): TIMESTAMP_TOP (0x10) that segment's GPU start, other types its GPU end. The writes stay in the last segment's handler, before the fence,
@@ -1670,53 +1864,115 @@ static const char *cctx_snap(void);   // What is in this submission (printed int
 static void lc_land(void);
 // A submission's CPU-side writes at its end (events, samples-passed and counter reports): run once, by its feedback handler or, when a game's SyncWait wakes on the
 // GPU's own signal of the fence first, by that waiter (DM_NVN_FAST_WAKE, on by default): the feedback handler comes 0.26 ms after the GPU end on an M2 Max
-typedef struct { _Atomic uint64_t fence; _Atomic int claimed; int n; post_op *ops; seg_clk *sc; uint32_t seg_last; uint64_t t_commit; } post_rec;   // t_commit: guest ns when it was committed
+typedef struct {
+    _Atomic uint64_t fence;
+    _Atomic int claimed;
+    int n;
+    post_op *ops;
+    seg_clk *segment_clock;
+    uint32_t seg_last;
+    uint64_t t_commit;
+    mtl_submit_clock *clock;
+} post_rec; // t_commit: guest ns when it was committed
 #define POST_RING 128
 static post_rec g_postr[POST_RING];
 static pthread_mutex_t g_post_mu = PTHREAD_MUTEX_INITIALIZER;
 // A successful claim holds the lock until post_run finishes. Ownership alone
 // cannot publish completion: another waiter must see the actual writes first.
-static int post_claim(post_rec *r, uint64_t fence) {
+static int post_claim(post_rec *record, uint64_t fence) {
     pthread_mutex_lock(&g_post_mu);
-    if (r->fence != fence || r->claimed) { pthread_mutex_unlock(&g_post_mu); return 0; }
+    if (record->fence != fence || record->claimed) {
+        pthread_mutex_unlock(&g_post_mu);
+        return 0;
+    }
     return 1;
 }
-static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
+static void post_run(post_rec *record, uint64_t c0, uint64_t c1) {
     // A guest SyncWait may run completion on a thread whose outer pool never drains.
     // MTLBuffer.contents may autorelease its receiver; keep that lifetime inside the completed copy.
     @autoreleasepool {
-    int n = r->n; post_op *ops = r->ops; seg_clk *sc = r->sc; uint32_t seg_last = r->seg_last;
-    for (int i = 0; i < n; i++) {
-        if (ops[i].kind == 1) { if (ops[i].mode == 1) *ops[i].val += ops[i].v; else *ops[i].val = ops[i].v; }
-        else if (ops[i].kind == 3) {   // Samples passed: the sum of all slots since the reset
-            vis_list *l = ops[i].vis; uint64_t sum = 0;
-            for (int k = 0; k < l->n; k++) { sum += ((const uint64_t *)((__bridge id<MTLBuffer>)l->s[k].buf).contents)[l->s[k].slot]; CFRelease(l->s[k].buf); }
-            free(l); uint64_t rec[2] = {sum, gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec);
+        int n = record->n;
+        post_op *ops = record->ops;
+        seg_clk *segment_clock = record->segment_clock;
+        uint32_t seg_last = record->seg_last;
+        mtl_submit_clock *clock = record->clock;
+        int shared_time = clock && !seg_ts();
+        for (int i = 0; i < n; i++) {
+            if (ops[i].kind == 1) {
+                if (ops[i].mode == 1) {
+                    *ops[i].val += ops[i].v;
+                } else {
+                    *ops[i].val = ops[i].v;
+                }
+            } else if (ops[i].kind == 3) { // Samples passed: the sum of all slots since the reset
+                vis_list *samples = ops[i].vis;
+                uint64_t sum = 0;
+                for (int k = 0; k < samples->n; k++) {
+                    sum += ((const uint64_t *)((__bridge id<MTLBuffer>)samples->s[k].buf).contents)[samples->s[k].slot];
+                    CFRelease(samples->s[k].buf);
+                }
+                free(samples);
+                uint64_t report[2] = {sum, shared_time ? submit_clock_ticks(clock) : gpu_ticks()};
+                memcpy((void *)ops[i].addr, report, sizeof report);
+            } else if (ops[i].kind == 4) {
+                mirror_rb_land(ops[i].vis);
+            } else {
+                uint64_t ticks = shared_time ? submit_clock_ticks(clock)
+                                            : rep_ticks(&ops[i], segment_clock, seg_last, c0, c1);
+                // render_cond: timestamp reports have a zero counter field,
+                // as on the GPU (see rc_value).
+                int timestamp_counter = (ops[i].type == 0 || ops[i].type == 0x10) && !DM_GAME_RENDER_COND;
+                uint64_t report[2] = {timestamp_counter ? ticks : 0, ticks};
+                memcpy((void *)ops[i].addr, report, sizeof report);
+            }
         }
-        else if (ops[i].kind == 4) mirror_rb_land(ops[i].vis);
-        else { uint64_t t = rep_ticks(&ops[i], sc, seg_last, c0, c1), rec[2] = {(ops[i].type == 0 || ops[i].type == 0x10) && !DM_GAME_RENDER_COND ? t : 0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }   // render_cond: a timestamp report's counter field is 0, as on the GPU (see rc_value)
-    }
-    free(ops); seg_clk_put(sc); r->ops = NULL; r->sc = NULL;
-    atomic_store(&r->claimed, 1);
-    pthread_mutex_unlock(&g_post_mu);
+        free(ops);
+        seg_clk_put(segment_clock);
+        mtl_submit_clock_release(clock);
+        record->ops = NULL;
+        record->segment_clock = NULL;
+        record->clock = NULL;
+        atomic_store(&record->claimed, 1);
+        pthread_mutex_unlock(&g_post_mu);
     }
 }
 // Both GPU feedback and an early waiter complete records in submission order.
 // Delayed callbacks carry their fence, never the identity of a recyclable slot.
 static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
     uint64_t now = guest_ns();
-    for (uint64_t f = g_done + 1; f <= fence; f++) {
-        post_rec *r = &g_postr[f % POST_RING];
-        if (!post_claim(r, f)) continue;
-        uint64_t start = r->t_commit;
-        if (r->sc && r->seg_last > 0 && r->seg_last <= SEG_CLK_N) {
-            uint64_t pe = atomic_load(&r->sc->t[r->seg_last - 1][1]); if (pe > start) start = pe;
+    for (uint64_t completed = g_done + 1; completed <= fence; completed++) {
+        post_rec *record = &g_postr[completed % POST_RING];
+        if (!post_claim(record, completed)) {
+            continue;
         }
-        if (start > now) start = now;
-        post_run(r, f == fence && c1 ? c0 : seg_ts() ? start : 0, f == fence && c1 ? c1 : seg_ts() ? now : 0);
+        uint64_t start = record->t_commit;
+        if (record->segment_clock && record->seg_last > 0 && record->seg_last <= SEG_CLK_N) {
+            uint64_t previous_end = atomic_load(&record->segment_clock->t[record->seg_last - 1][1]);
+            if (previous_end > start) {
+                start = previous_end;
+            }
+        }
+        if (start > now) {
+            start = now;
+        }
+        uint64_t report_start = 0, report_end = 0;
+        if (completed == fence && c1) {
+            report_start = c0;
+            report_end = c1;
+        } else if (seg_ts()) {
+            report_start = start;
+            report_end = now;
+        }
+        post_run(record, report_start, report_end);
     }
-    pthread_mutex_lock(&g_mu); if (fence > g_done) g_done = fence; pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu);
+    pthread_mutex_lock(&g_mu);
+    if (fence > g_done) {
+        g_done = fence;
+    }
+    pthread_cond_broadcast(&g_cv);
+    pthread_mutex_unlock(&g_mu);
 }
+
 uint64_t mtl_sub_commit(void) {
     lc_land();   // clears still waiting (the command list ends with them)
     defer_fallback();   // Deferred merged pass: at the end of the submission there are still P draws not replayed (the normal path never gets here)
@@ -1727,9 +1983,19 @@ uint64_t mtl_sub_commit(void) {
     treg_finish_submission();   // Late descriptor views retire behind this submission's fence.
     uint64_t fence = ++g_fence;
     gw_commit(fence);
-    if (g_vis_ring_i >= 0) g_vis_ring[g_vis_ring_i].fence = fence;
+    // An unused query buffer contains no bytes referenced by this submission.
+    // Event-only chunks must not exhaust the visibility ring behind a busy GPU.
+    if (g_vis_ring_i >= 0) {
+        g_vis_ring[g_vis_ring_i].fence = g_vis_ring_used || g_vis_n ? fence : g_done;
+    }
     // CPU-visible effects after completion: copy the op table into the callback
     int n = g_npost; post_op *ops = n ? malloc(n * sizeof *ops) : NULL; post_rec *pr = &g_postr[fence % POST_RING];
+    // A logical allocator can append more chunks than this bounded callback
+    // table holds. Finish only the already-committed record being reused; do
+    // not overwrite its event/report writes or wait for the logical submission.
+    if (pr->fence && !atomic_load(&pr->claimed)) {
+        mtl_wait_at(pr->fence, UINT64_MAX, WS_POST);
+    }
     if (ws_on()) for (int i = 0; i < n; i++) { int k = g_post[i].kind == 2 ? (g_post[i].type == 0 || g_post[i].type == 0x10 ? 3 : 4) : g_post[i].kind == 3 ? 2 : 1; atomic_fetch_add(&g_ws_post[k], 1); }   // 1 event, 2 samples passed, 3 timestamp, 4 other counter
     if (n) memcpy(ops, g_post, n * sizeof *ops);
     NSArray<dispatch_block_t> *commit_blocks = [g_commit_blocks copy];
@@ -1739,8 +2005,18 @@ uint64_t mtl_sub_commit(void) {
     NSString *cctx = @(cctx_snap());
     seg_clk *sc = g_sclk; uint32_t seg_last = g_seg; g_sclk = NULL;
     pthread_mutex_lock(&g_post_mu);
-    if (!atomic_load(&pr->claimed) && pr->fence) MDIE("post ring: the writes of fence %llu never ran", (unsigned long long)pr->fence);
-    pr->n = n; pr->ops = ops; pr->sc = sc; pr->seg_last = seg_last; pr->t_commit = guest_ns(); atomic_store(&pr->claimed, 0); atomic_store(&pr->fence, fence);
+    if (!atomic_load(&pr->claimed) && pr->fence) {
+        MDIE("post ring: the writes of fence %llu never ran", (unsigned long long)pr->fence);
+    }
+    pr->n = n;
+    pr->ops = ops;
+    pr->segment_clock = sc;
+    pr->seg_last = seg_last;
+    pr->t_commit = guest_ns();
+    pr->clock = g_submit_clock;
+    g_submit_clock = NULL;
+    atomic_store(&pr->claimed, 0);
+    atomic_store(&pr->fence, fence);
     pthread_mutex_unlock(&g_post_mu);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
         gpu_tag_done(gpu_f, cb.GPUStartTime, cb.GPUEndTime);
@@ -1766,6 +2042,9 @@ uint64_t mtl_sub_commit(void) {
 }
 
 uint64_t mtl_last_fence(void) { return g_fence; }
+uint64_t mtl_completed_fence(void) {
+    return atomic_load(&g_done);
+}
 int mtl_last_commit_error(void) { return atomic_load(&g_last_commit_error); }
 
 static int fast_wake(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_FAST_WAKE"); v = !(e && !strcmp(e, "0")); MLOG("game SyncWaits wake on the GPU's signal of the fence%s (DM_NVN_FAST_WAKE)", v ? "" : ": off, on the feedback handler"); } return v; }
@@ -4270,6 +4549,9 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
         // Slots used up (one submission exceeds VIS_SLOTS counting passes): continue in a new overflow buffer. A ring buffer must not be retired (it is still used in rotation, and retiring removes it from the residency set); only a previous overflow buffer is
         if (!g_vis || g_vis_n >= VIS_SLOTS) { if (g_vis && !vis_in_ring(g_vis)) defer_obj_release(g_vis); g_vis = [g_dev newBufferWithLength:VIS_SLOTS * 8 options:MTLResourceStorageModeShared]; res_add(g_vis); g_vis_n = 0; }
         pd.visibilityResultBuffer = g_vis;
+        if (g_vis_ring_i >= 0 && g_vis == g_vis_ring[g_vis_ring_i].buf) {
+            g_vis_ring_used = 1;
+        }
     }
     g_enc_vis = 0; g_enc_has_vis = g_vis_on;
     // Layered rendering: a vertex shader that writes the layer selects the attachment layer per primitive only when the pass has renderTargetArrayLength; without it every layer went to the
@@ -5841,29 +6123,139 @@ static void state_reset(void) {
 
 // GPU bindings belong to a queue, including across submissions. FFX/X-2 destroys its launcher's queue before creating a game's: a global S kept freed launcher programs in S.bst,
 // and X-2's first fragment-only bind dereferenced that stale vertex program in keys_hash. Separate queues also retain their own bindings when submissions alternate (Three Houses).
-typedef struct queue_state { uint64_t serial; typeof(S) s; typeof(R) r; struct queue_state *next; } queue_state;
+typedef struct queue_state {
+    uint64_t serial;
+    typeof(S) s;
+    typeof(R) r;
+    tex_t targets[9];
+    int rc_skip, vis_on, vis_counting, nvs, vscap;
+    uint64_t *rc_pend;
+    uint32_t rc_npend, rc_pcap;
+    vis_slot *vs;
+    struct queue_state *next;
+} queue_state;
 static queue_state *g_queue_states, *g_active_queue;
-void mtl_queue_activate(uint64_t serial) {   // caller holds the submission lock
-    if (g_active_queue && g_active_queue->serial == serial) return;
-    if (g_active_queue) { g_active_queue->s = S; g_active_queue->r = R; }
-    queue_state *q = g_queue_states;
-    while (q && q->serial != serial) q = q->next;
-    if (q) { S = q->s; R = q->r; prog_resolve(); }
-    else {
-        q = calloc(1, sizeof *q); if (!q) MDIE("queue state allocation failed");
-        q->serial = serial; q->next = g_queue_states; g_queue_states = q;
-        state_reset(); memset(&R, 0, sizeof R);
+static int vis_buffer_pinned(id<MTLBuffer> buffer) {
+    if (!buffer) {
+        return 0;
     }
-    g_active_queue = q; g_pso_dirty = g_dss_dirty = 1; args_dirty_all();
+    void *pointer = (__bridge void *)buffer;
+    for (int i = 0; i < g_nvs; i++) {
+        if (g_vs[i].buf == pointer) {
+            return 1;
+        }
+    }
+    for (queue_state *queue = g_queue_states; queue; queue = queue->next) {
+        if (queue != g_active_queue) {
+            for (int i = 0; i < queue->nvs; i++) {
+                if (queue->vs[i].buf == pointer) {
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
 }
-void mtl_queue_forget(uint64_t serial) {   // caller holds the submission lock
+
+void mtl_queue_activate(uint64_t serial) { // caller holds the submission lock
+    if (g_active_queue && g_active_queue->serial == serial) {
+        return;
+    }
+    if (g_active_queue) {
+        queue_state *old = g_active_queue;
+        old->s = S;
+        old->r = R;
+        old->rc_skip = g_rc_skip;
+        old->rc_pend = g_rc_pend;
+        old->rc_npend = g_rc_npend;
+        old->rc_pcap = g_rc_pcap;
+        old->vis_on = g_vis_on;
+        old->vis_counting = g_vis_counting;
+        old->vs = g_vs;
+        old->nvs = g_nvs;
+        old->vscap = g_vscap;
+    }
+    queue_state *q = g_queue_states;
+    while (q && q->serial != serial) {
+        q = q->next;
+    }
+    if (q) {
+        S = q->s;
+        R = q->r;
+        prog_resolve();
+    } else {
+        q = calloc(1, sizeof *q);
+        if (!q) {
+            MDIE("queue state allocation failed");
+        }
+        q->serial = serial;
+        q->next = g_queue_states;
+        g_queue_states = q;
+        state_reset();
+        memset(&R, 0, sizeof R);
+    }
+    g_rc_skip = q->rc_skip;
+    g_rc_pend = q->rc_pend;
+    g_rc_npend = q->rc_npend;
+    g_rc_pcap = q->rc_pcap;
+    g_vis_on = q->vis_on;
+    g_vis_counting = q->vis_counting;
+    g_vs = q->vs;
+    g_nvs = q->nvs;
+    g_vscap = q->vscap;
+    g_vis_cur = -1;
+    g_active_queue = q;
+    g_pso_dirty = g_dss_dirty = 1;
+    args_dirty_all();
+}
+void mtl_queue_seal(void) {
+    if (!g_active_queue || !R.has_rt) {
+        return;
+    }
+    for (int i = 0; i < 8; i++) {
+        if (R.rt.color[i]) {
+            g_active_queue->targets[i] = *R.rt.color[i];
+            R.rt.color[i] = &g_active_queue->targets[i];
+        }
+    }
+    if (R.rt.depth) {
+        g_active_queue->targets[8] = *R.rt.depth;
+        R.rt.depth = &g_active_queue->targets[8];
+    }
+}
+void mtl_queue_forget(uint64_t serial) { // caller holds the submission lock
     queue_state **p = &g_queue_states;
-    while (*p && (*p)->serial != serial) p = &(*p)->next;
-    if (!*p) return;
-    queue_state *q = *p; *p = q->next;
-    if (g_active_queue == q) { g_active_queue = NULL; state_reset(); memset(&R, 0, sizeof R); args_dirty_all(); }
+    while (*p && (*p)->serial != serial) {
+        p = &(*p)->next;
+    }
+    if (!*p) {
+        return;
+    }
+    queue_state *q = *p;
+    *p = q->next;
+    if (g_active_queue == q) {
+        vis_clear();
+        free(g_vs);
+        free(g_rc_pend);
+        g_vs = NULL;
+        g_nvs = g_vscap = g_vis_on = g_vis_counting = 0;
+        g_rc_pend = NULL;
+        g_rc_npend = g_rc_pcap = 0;
+        g_rc_skip = 0;
+        g_active_queue = NULL;
+        state_reset();
+        memset(&R, 0, sizeof R);
+        args_dirty_all();
+    } else {
+        for (int i = 0; i < q->nvs; i++) {
+            CFRelease(q->vs[i].buf);
+        }
+        free(q->vs);
+        free(q->rc_pend);
+    }
     free(q);
 }
+
 // A finalized program leaves the bindings of every queue: NVN reads a program only when it is bound, so a game may finalize one that a queue still has bound and reuse its memory.
 // Fortune's Weave does this when its title screen hands over to the opening demo: the pointer stayed in the active queue's bindings, went into its saved state when another queue submitted,
 // and switching back to that queue combined its stages from the reused memory (keys_hash on float data)
@@ -12250,6 +12642,9 @@ void mtl_exec(const uint8_t *p) {
             case OP_CALL: { uint64_t t; memcpy(&t, a, 8);
                 if (g_ret_n < 16) g_ret[g_ret_n] = p + h.size; g_ret_n++;   // Return stack for lookahead: after a sub-list ends, continue looking at the caller
                 mtl_exec((const uint8_t *)t); g_ret_n--; break; }
+            case OP_WAIT_EVENT: case OP_WAIT_SYNC:
+                MDIE("event/sync waits require the guest queue scheduler; raw capture replay cannot order them");
+                break;
             case OP_SIGNAL_EVENT: { volatile uint32_t *val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, (const uint8_t *)a + 8, 4); memcpy(&v, (const uint8_t *)a + 12, 4);
                 PD("Y signal_event cmd=%p dst=%p mode=%u value=%u", p, val, m, v); mtl_sub_event(val, m, v); break; }
             case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, (const uint8_t *)a + 8, 8); g_cnt_report[t & 31]++;
@@ -12264,7 +12659,7 @@ void mtl_exec(const uint8_t *p) {
                     g_rc_skip = known && (rc->mode ? x == y : x != y);
                     PD("E %llu conditional render %s addr=%#llx values %llu / %llu%s%s", g_stat_pass, rc->mode ? "draw if not equal" : "draw if equal", (unsigned long long)rc->addr, (unsigned long long)x, (unsigned long long)y, known ? "" : " (unknown, drawn)", g_rc_skip ? " → not drawn" : ""); }
                 break; }
-            case OP_FENCE_SYNC: { sync_t *s; memcpy(&s, a, 8); s->fence = g_fence + 1; s->fenced = 1;   // the fence value this submission (segment) commits with
+            case OP_FENCE_SYNC: { sync_t *s; memcpy(&s, a, 8); s->fence = g_fence + 1; s->fenced = NVN_SYNC_FENCE_GPU;   // the fence value this submission (segment) commits with
                 PD("Y fence_sync cmd=%p sync=%p fence=%llu", p, (void *)s, (unsigned long long)s->fence); break; }
             case OP_RESET_COUNTER: { uint64_t t; memcpy(&t, a, 8); g_cnt_reset[t & 31]++; PD("Q reset type=%llu cmd=%p", (unsigned long long)t, p);
                 if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED) {

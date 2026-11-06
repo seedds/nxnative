@@ -693,3 +693,23 @@ Games read this count as a position in their own command memory and size their h
 ### `nvnPrivate0`, an inlined command-buffer fast path flag
 
 - `nvnPrivate0`, a new SDK 20 import, needs nothing: it is a flag in `sdk`'s bss that enables an inlined command-buffer fast path when the NVN driver sets it (it stays 0). Found on [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0, SDK 20.5.22).
+
+### Guest event queue ordering
+
+- **Symptom:** a consumer submitted before another queue's producer uses stale input. In Mario Kart World, water jumps for one frame and the minimap retains fading wave artifacts.
+
+- **Cause:** event and command-buffer sync waits were no-ops. One shared Metal queue orders already submitted work, but cannot satisfy a forward dependency by replaying guest submissions in CPU call order. Handshakes inside submissions require scheduling smaller prefixes.
+
+- **Fix:** record waits and schedule ready prefixes in FIFO order within each guest queue. A blocked queue yields, allowing the same CPU thread to submit its producer later. Committed producers supply projected event values to the scheduler; mapped event storage changes only after GPU completion. Completed projections yield to mapped storage, CPU API resets first complete older queued writes, and a worker observes direct CPU stores while work is pending. Logical tickets retain completion dependencies, including wait-only submissions. Presentation remains queued work, and acquire waits for its present marker to be scheduled.
+
+Copied records relocate embedded snapshots. Render targets, conditional rendering and cumulative visibility queries retain their queue state across event boundaries. Query buffers stay pinned until reset or finalization, and report callbacks retain their inputs through completion.
+
+Submission-mode timestamps share one reference-counted clock across the logical submission's chunks. This preserves the existing approximate clock mode without inserting host scheduling delays between reports. Segment-mode GPU timestamps retain their existing behavior.
+
+Chunks append to a leased command allocator without resetting GPU-owned bytes. The pool remains bounded at eight: under pressure, a completed prefix can release its lease so a later producer can run, and the suspended continuation reacquires an allocator. Reset requires completion of every committed use. The bounded completion-record table also completes its previous occupant before reuse.
+
+Signal location and flags are retained; CPU publication conservatively waits for the producer prefix to complete. Raw capture replay lacks guest queue identities and rejects waits. The updated sync and signal layouts require matching host and replay builds; older captures are rejected.
+
+- **Validation:** scheduler tests cover wrapping comparisons, forward and bidirectional dependencies, FIFO ordering, retirement and fence tickets. Metal fixtures cover CPU signals, wait-only fences, retained render targets, visibility queries, both timestamp modes, allocator pressure with twelve suspended submissions, and completion-record ring reuse. The wait-only fence regression test fails without propagating the producer's completion fence.
+
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md).

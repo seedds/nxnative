@@ -10,7 +10,7 @@ __asm__(".linker_option \"-lcompression\"");   // libcompression (LZFSE) links i
 #define CAP_SIZE(T, n) _Static_assert(sizeof(T) == (n), "nvn_capture.c: " #T " changed size: update cap_rec_fields and cap_layout")
 #define CAP_OFF(T, f, n) _Static_assert(offsetof(T, f) == (n), "nvn_capture.c: " #T "." #f " moved: update cap_rec_fields and cap_layout")
 CAP_SIZE(tex_t, 128); CAP_OFF(tex_t, mem, 88); CAP_OFF(tex_t, pool, 96); CAP_OFF(tex_t, serial, 120);
-CAP_SIZE(pool_t, 40); CAP_SIZE(dpool_t, 24); CAP_SIZE(prog_t, 112); CAP_SIZE(sync_t, 16); CAP_SIZE(samp_par, 40); CAP_SIZE(view_t, 16);
+CAP_SIZE(pool_t, 40); CAP_SIZE(dpool_t, 24); CAP_SIZE(prog_t, 112); CAP_SIZE(sync_t, 24); CAP_SIZE(samp_par, 40); CAP_SIZE(view_t, 16);
 CAP_SIZE(p_set_rt, 240); CAP_OFF(p_set_rt, n, 0); CAP_OFF(p_set_rt, color, 8); CAP_OFF(p_set_rt, depth, 208);
 CAP_SIZE(p_bind_program, 16); CAP_OFF(p_bind_program, prog, 0);
 CAP_SIZE(NVNbufferRange, 16); CAP_SIZE(p_bind_vbuf, 264); CAP_OFF(p_bind_vbuf, n, 4); CAP_OFF(p_bind_vbuf, r, 8);
@@ -33,25 +33,24 @@ CAP_SIZE(p_render_cond, 16); CAP_OFF(p_render_cond, mode, 0); CAP_OFF(p_render_c
 CAP_SIZE(p_multi_draw, 48); CAP_OFF(p_multi_draw, ind, 0); CAP_OFF(p_multi_draw, cnt, 8); CAP_OFF(p_multi_draw, ibuf, 16);
 CAP_OFF(p_multi_draw, stride, 24); CAP_OFF(p_multi_draw, max, 32); CAP_OFF(p_multi_draw, prim, 36); CAP_OFF(p_multi_draw, itype, 40);
 _Static_assert(OP_MULTI_DRAW == 55, "keep existing capture op numbers stable");
-_Static_assert(OP_COUNT_ == 56, "nvn_capture.c: a record op was added or removed: give it a case in cap_rec_fields");
+_Static_assert(OP_COUNT_ == 58, "nvn_capture.c: a record op was added or removed: give it a case in cap_rec_fields");
 
 #define MULTI_DRAW_LAYOUT "op 55 p_multi_draw 48 ind 0 cnt 8 ibuf 16 stride 24 max 32 prim 36 itype 40\n"
 const char *cap_layout(void) {
     // sizes and pointer offsets as the walk knows them (the asserts above hold them to nvn_obj.h); bump this text with any change to the walk
-    return "format 1\nops 54\n"
-           "tex_t 128 mem 88 pool 96 serial 120\npool_t 40\ndpool_t 24\nprog_t 112\nsync_t 16\nsamp_par 40\nview_t 16\n"
+    return "format 1\nops 58\n"
+           "tex_t 128 mem 88 pool 96 serial 120\npool_t 40\ndpool_t 24\nprog_t 112\nsync_t 24\nsamp_par 40\nview_t 16\n"
            "p_set_rt 240 color 8 depth 208\np_bind_program 16\np_bind_vbuf 264 r 8\np_bind_vbuf1 16 addr 8\np_bind_buf 24 addr 8\np_bind_ubo_small 16 addr 8\n"
            "p_bind_handles 280 src 16\np_bind_tex1 24 nobase 0x100 short 16\np_bind_state short\np_draw 48 ind 24 mdi_cnt 32\np_draw_idx 56 ibuf 24 ind 32 mdi_cnt 40\np_dispatch 32 ind 24\np_set_pool 8\n"
            "p_copy_b2t 64 src 0 tex 8\np_copy_t2t 104 src 0 dst 8\np_clear_tex 72 tex 0\np_clear_buf 24 addr 0\np_tf_bind 24 addr 8\np_tf_state 16 ctl 8\np_render_cond 16 addr 8\n"
-           "signal_event 16 val 0\nreport_counter 16 addr 8\ncopy_b2b 24 src 0 dst 8\nupdate_ub dst 0\nfence_sync 8 sync 0\njump 8\ncall 8\n"
+           "signal_event 24 val 0 location 16 flags 20\nwait_event 16 val 0\nwait_sync 8 sync 0\nreport_counter 16 addr 8\ncopy_b2b 24 src 0 dst 8\nupdate_ub dst 0\nfence_sync 8 sync 0\njump 8\ncall 8\n"
            MULTI_DRAW_LAYOUT;
 }
 
 int cap_layout_matches(const char *layout, size_t n) {
-    // The new opcode was appended. Captures with the complete previous layout still use the same op numbers and payloads.
+    // Event scheduling changes the sync-object size and signal payload.
     const char *current = cap_layout();
-    size_t full = strlen(current), previous = full - (sizeof MULTI_DRAW_LAYOUT - 1);
-    return (n == full || n == previous) && !memcmp(layout, current, n);
+    return n == strlen(current) && !memcmp(layout, current, n);
 }
 
 // One 8-byte field at byte offset off of the payload, present only when the record is long enough to hold it
@@ -75,10 +74,12 @@ int cap_rec_fields(uint32_t op, uint8_t *payload, uint32_t size, const cap_ops *
         case OP_DEPTH_CLAMP: case OP_RAST_DISCARD: case OP_VP_SWIZZLE: case OP_PRIM_RESTART: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_DRAW_TEX:   // OP_DRAW_TEX: a texture handle, read through the pools at replay
             return 1;
         case OP_JUMP: case OP_CALL: return HAS(0) && ops->obj(ctx, CAP_K_SEG, F(0), payload, (uint32_t)plen);
+        case OP_WAIT_EVENT:
         case OP_SIGNAL_EVENT: return HAS(0) && ops->addr(ctx, F(0), 4, 1);   // volatile uint32_t *val, mode, value
         case OP_REPORT_COUNTER: return HAS(8) && ops->addr(ctx, F(8), 16, 1);  // type, address of the 16-byte report
         case OP_COPY_B2B: { if (!HAS(16)) return 0; uint64_t n = u64_at(payload + 16); return ops->addr(ctx, F(0), n, 0) & ops->addr(ctx, F(8), n, 1); }
         case OP_UPDATE_UB: { if (!HAS(8)) return 0; return ops->addr(ctx, F(0), u64_at(payload + 8), 1); }   // dst, n, inline data
+        case OP_WAIT_SYNC:
         case OP_FENCE_SYNC: return HAS(0) && ops->obj(ctx, CAP_K_SYNC, F(0), payload, (uint32_t)plen);
         case OP_SET_RT: {
             int32_t n = HAS(0) ? i32_at(payload) : -1; if (n < 0 || n > 8 || !HAS(offsetof(p_set_rt, depth))) return 0;

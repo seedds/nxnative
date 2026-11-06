@@ -34,6 +34,7 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         UILaunchScreen: {}
         UIFileSharingEnabled: true          # Documents (log.txt, saves) visible in the Files app
+        NSMicrophoneUsageDescription: This game uses the microphone for its audio input features.
         LSSupportsOpeningDocumentsInPlace: true
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationLandscapeRight

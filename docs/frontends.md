@@ -107,6 +107,12 @@ An app that links the host and the front end's game view into its own process (a
 - **`front_progress_hook`**: draws the prepare step's progress ("Preparing shaders", "Preparing pipelines") instead of the front end's screen. With a window, it gets each call's title, done and total on the main thread; the title is `NULL` when the step ends.
 - **`dm_set_game_image_header`** (iOS): names the image that carries the game's rewritten modules, when the app links them into a framework it `dlopen`s from its signed bundle instead of into its executable. Call it with that image's mach header before `dm_host_preload_start`. Only the module sections are read from it.
 
+## Microphone capture
+
+Games using `audsmx:u` can capture the default microphone. A front end's app bundle must include `NSMicrophoneUsageDescription`; the supplied Mac packer and iOS project do so, and the command-line host embeds it. Capture requests OS permission when the game starts its input stream. It does not save a recording itself.
+
+Build `capture_apple.m` and link AVFAudio as well as AudioToolbox. On iPhone, use `dm_capture_audio_session()` to configure the shared audio session, call `dm_capture_suspend()` with the combined background/interruption state, and call `dm_capture_reset()` after microphone route changes or a media-services reset. The bundled iOS front end implements these hooks. The session keeps playback active while switching to PlayAndRecord for live microphone streams.
+
 ## Following main
 
 nxnative has no releases or tags: a front end pins a commit and moves it forward. Between the commit it has (`A`) and the one it moves to (`B`), two things say what changed for it.

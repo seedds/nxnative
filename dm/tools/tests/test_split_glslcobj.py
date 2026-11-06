@@ -54,7 +54,7 @@ class Glslcobj(unittest.TestCase):
         for name in 'PGRM_BLACKISH_LIGHT', 'PGRM_BLUR_MIX', 'PGRM_BLUR_VSM_HORIZONTAL':   # names ending at 0x2c, 0x26, 0x31: records at 0x30, 0x28, 0x38
             d = glslcobj(name, [(1, code(1, 0x200), 0x9f8, 0), (0, code(0, 0x200), 0xab8, 0)])
             got = ss.glslcobj_shaders(d, f'/glsl/compiled/{name}.glslcobj')
-            self.assertIsNotNone(got, name)
+            assert got is not None, name
             self.assertEqual([st for _, st, _, _ in got], ['ps', 'vs'])
             self.assertEqual([(len(c), len(k)) for _, _, c, k in got], [(0x9f8, 0x200), (0xab8, 0x200)])
             self.assertEqual(len(ss.var_pairs(got)), 1)
@@ -62,6 +62,7 @@ class Glslcobj(unittest.TestCase):
     def test_padding_after_the_control_section_is_left_out(self):
         d = glslcobj('PGRM_OLD_TV', [(1, code(1, 0x2300), 0x43c0, 0x80), (0, code(0), 0x970, 0)])
         got = ss.glslcobj_shaders(d, '/glsl/compiled/PGRM_OLD_TV.glslcobj')
+        assert got is not None
         self.assertEqual(len(got[0][2]), 0x43c0)
         self.assertNotIn(b'\xee', got[0][2])
 

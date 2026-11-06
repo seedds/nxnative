@@ -27,6 +27,7 @@ zip_store	.zs:.bwav:.webm:.metallib
 # nninitStartup asks SetHeapSize 0x18ce00000 (6.2 GB) with the 9 GB pool, as Mario Kart World. 256 MB in front + 4 GB alias region + 256 MB stack region + 8 GB heap region: a starting split, to be measured
 mem_reserve	0x320000000
 mem_alias	0x100000000
+mem_map_limit	on
 mem_stack	0x10000000
 app_pool	0x240000000
 sys_resource	0x3000000

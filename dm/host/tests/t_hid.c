@@ -491,7 +491,23 @@ static void t_motion_hid(void) {
     dm_pad_players(1); g_phone_mode = -1;
 }
 
+static void t_keys_only(void) {
+    atomic_store(&g_keys_only, 1);
+    dm_input_set(DM_BTN_X, 30000, 0, 0, 0);
+    dm_pad_set(DM_BTN_B, -30000, 0, 0, 0);
+    dm_pad_set_player(1, DM_BTN_Y, 25000, 0, 0, 0);
+    script_set(DM_BTN_A, 100, 0, 0, 0);
+    CHECK(buttons_of(0, STYLE_FULLKEY) == DM_BTN_A && lx_of(0) == 100, "script-only mode rejects physical buttons and sticks but preserves scripted input");
+    CHECK(!atomic_load(&g_pad_btn[1]) && !atomic_load(&g_pad_axes[1]), "script-only mode ignores further controllers too");
+    uint64_t b; int32_t axes[4]; dm_input_peek(&b, axes);
+    CHECK(b == DM_BTN_A && axes[0] == 100, "applet input also sees only the script");
+    script_set(0, 0, 0, 0, 0); buttons_of(0, STYLE_FULLKEY); dm_input_peek(&b, axes);
+    CHECK(!b && !axes[0], "scripted release is preserved");
+    atomic_store(&g_keys_only, 0);
+}
+
 int main(void) {
+    t_keys_only();
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
     t_slots();
     t_npads();

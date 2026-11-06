@@ -73,3 +73,437 @@ def wide_loads(msl):
         indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
         lines[i] = ''.join(indent + d + '\n' for d in pre) + ln
     return '\n'.join(lines)
+
+
+# Unlike a bound storage word, each raw word independently selects a guest-memory
+# range. Only reuse that selection when all four accesses choose the same range.
+_RAW_ID = r'_\d+'
+_RAW_FUNCTION = re.compile(
+    r'(?m)^static inline __attribute__\(\(always_inline\)\)\n'
+    rf'int (?P<name>{_RAW_ID})\(thread const int& (?P<lo>{_RAW_ID}), '
+    rf'thread const int& (?P<hi>{_RAW_ID}), device (?P<type>{_RAW_ID})& (?P<table>{_BUF})\)\n'
+    r'\{\n(?P<body>.*?)^\}', re.S)
+
+
+def _raw_search(body, low, high, table, entries, stride):
+    """Verify a fixed or dynamic hinted scalar helper and return its unchanged search prefix."""
+    ident = _RAW_ID
+    lines = iter(body.splitlines())
+    prefix = []
+    names = {'lo': low, 'hi': high, 'table': table, 'stride': str(stride), 'previous': '0'}
+
+    def match(template, *, search=False):
+        line = next(lines, '')
+        pattern = re.sub(r'@([a-z_]+)', lambda m: re.escape(names[m[1]]) if m[1] in names else
+                         rf'(?P<{m[1]}>{ident})', template)
+        result = re.fullmatch(pattern, line.strip())
+        if not result:
+            return False
+        names.update(result.groupdict())
+        if search:
+            prefix.append(line)
+        return True
+
+    step_lines = (
+        r'int @probe = @previous \+ @step;',
+        r'int @row = @probe \* @stride;',
+        r'int @lindex = @row \+ 0;',
+        r'float @lbits = as_type<float>\(@table\._m0\[@lindex\]\);',
+        r'int @hindex = @row \+ 1;',
+        r'float @hbits = as_type<float>\(@table\._m0\[@hindex\]\);',
+        r'bool @lower = as_type<uint>\(@hbits\) < uint\(@hi\);',
+        r'bool @equal = as_type<int>\(@hbits\) == @hi;',
+        r'bool @low_le = as_type<uint>\(@lbits\) <= uint\(@lo\);',
+        r'bool @same = @equal && @low_le;',
+        r'bool @take = @lower \|\| @same;',
+        r'int @index = @take \? @probe : @previous;',
+    )
+    dynamic = ' << ' in body.splitlines()[0]
+    if dynamic:
+        # Exact shape of the translator's hint plus dynamic-size search. Retain
+        # its prefix verbatim; unknown helpers remain scalar.
+        hint_lines = (
+            r'int @shifted_hi = @hi << 11;',
+            r'uint @low_chunk = uint\(int\(uint\(@lo\) >> uint\(21\)\)\);',
+            r'int @chunk = @shifted_hi \| int\(@low_chunk\);',
+            rf'int @hash = @chunk & {entries - 1};',
+            r'int @hint_row = @hash \* @stride;',
+            r'int @hint_index = @hint_row \+ 7;',
+            r'float @hint_bits = as_type<float>\(@table\._m0\[@hint_index\]\);',
+            r'bool @nonzero = as_type<int>\(@hint_bits\) != 0;',
+            r'int @tag_index = @hint_row \+ 6;',
+            r'float @tag_bits = as_type<float>\(@table\._m0\[@tag_index\]\);',
+            r'bool @tag_matches = as_type<int>\(@tag_bits\) == @chunk;',
+            r'bool @tag_ok = @nonzero && @tag_matches;',
+            r'bool @tag_fits = uint\(@hi\) < 2097152u;',
+            r'bool @hint_ok = @tag_ok && @tag_fits;',
+            r'int @selected = as_type<int>\(@hint_bits\);',
+            r'if \(!@hint_ok\)', r'\{',
+            r'int @current = 0;',
+            r'int @count_index = 0 \+ 4;',
+            r'float @count_bits = as_type<float>\(@table\._m0\[@count_index\]\);',
+            r'uint @half_count = uint\(int\(uint\(as_type<int>\(@count_bits\)\) >> uint\(1\)\)\);',
+            r'int @step = int\(@half_count\);',
+            r'bool @again;', r'do', r'\{',
+        )
+        if not all(match(line, search=True) for line in hint_lines):
+            return None
+        names['previous'] = names['current']
+        if not all(match(line, search=True) for line in step_lines):
+            return None
+        loop_tail = (
+            r'@current = @index;',
+            r'uint @half_step = uint\(int\(uint\(@step\) >> uint\(1\)\)\);',
+            r'@step = int\(@half_step\);',
+            r'@again = @step != 0;',
+            r'\} while \(@again\);',
+            r'@selected = @current;', r'\}',
+        )
+        if not all(match(line, search=True) for line in loop_tail):
+            return None
+        names['index'] = names['selected']
+    else:
+        step = entries // 2
+        while step:
+            for name in ('probe', 'row', 'lindex', 'lbits', 'hindex', 'hbits',
+                         'lower', 'equal', 'low_le', 'same', 'take', 'index'):
+                names.pop(name, None)
+            names['step'] = str(step)
+            if not all(match(line, search=True) for line in step_lines):
+                return None
+            names['previous'] = names['index']
+            step //= 2
+    del names['row']
+    tail = (
+        r'int @row = @index \* @stride;',
+        r'int @end_l = @row \+ 2;',
+        r'float @end_lb = as_type<float>\(@table\._m0\[@end_l\]\);',
+        r'int @end_h = @row \+ 3;',
+        r'float @end_hb = as_type<float>\(@table\._m0\[@end_h\]\);',
+        r'bool @end_high = uint\(@hi\) < as_type<uint>\(@end_hb\);',
+        r'bool @end_equal = @hi == as_type<int>\(@end_hb\);',
+        r'bool @end_low = uint\(@lo\) < as_type<uint>\(@end_lb\);',
+        r'bool @end_same = @end_equal && @end_low;',
+        r'bool @inside = @end_high \|\| @end_same;',
+        r'if \(@inside\)',
+        r'\{',
+        r'int @delta_l = @row \+ 4;',
+        r'float @delta_lb = as_type<float>\(@table\._m0\[@delta_l\]\);',
+        r'int @host_l = @lo \+ as_type<int>\(@delta_lb\);',
+        r'bool @wrap = uint\(@host_l\) < uint\(@lo\);',
+        r'int @carry = int\(@wrap\);',
+        r'int @delta_h = @row \+ 5;',
+        r'float @delta_hb = as_type<float>\(@table\._m0\[@delta_h\]\);',
+        r'int @high_sum = @hi \+ as_type<int>\(@delta_hb\);',
+        r'int @host_h = @high_sum \+ @carry;',
+        r'uint @word = \*\(reinterpret_cast<(?:const )?device uint\*>\(as_type<ulong>\(uint2\(uint\(@host_l\), uint\(@host_h\)\)\)\)\);',
+        r'float @bits = as_type<float>\(@word\);',
+        r'return as_type<int>\(@bits\);',
+        r'\}',
+        r'return 0;',
+    )
+    if not all(match(line) for line in tail) or next(lines, None) is not None:
+        return None
+    return '\n'.join(prefix), names['index'], dynamic
+
+
+def _raw_address(lines, low, high):
+    """Find the inputs of the two plain address copies immediately before a read."""
+    low_alias, high_alias = lines
+    low_alias = re.fullmatch(rf'\s*int {low} = ({_RAW_ID});', low_alias)
+    high_alias = re.fullmatch(rf'\s*int {high} = ({_RAW_ID});', high_alias)
+    if low_alias and high_alias:
+        return low_alias[1], high_alias[1]
+    return None
+
+
+def _raw_quads(msl, helper, table):
+    call = re.compile(rf'^(?P<indent> +)int (?P<out>{_RAW_ID}) = {helper}\('
+                      rf'(?P<lo>{_RAW_ID}), (?P<hi>{_RAW_ID}), \(\*spvDescriptorSet0\.{table}\)\);$')
+    lines = msl.split('\n')
+    assignments = {}
+    changed = set()
+    safe_line = []
+    builtin = re.compile(r'\b(?:as_type<(?:float|int|uint)>|int|uint|float|fma|extract_bits|precise::clamp|spvMulExtended<_\d+, uint>)\(')
+    call_token = re.compile(r'\b\w+\s*(?:<[^;]+>)?\(')
+    for i, line in enumerate(lines):
+        declaration = re.fullmatch(rf'\s*(int|bool|uint|float) ({_RAW_ID}) = ([^;]+);', line)
+        expression = declaration[3] if declaration else line
+        pure = declaration and not call_token.search(builtin.sub('(', expression)) and not re.search(r'(?<![=!<>])' + _OP, expression)
+        safe_line.append(bool(pure or call.fullmatch(line)))
+        if declaration:
+            typ, name, _ = declaration.groups()
+            if name in assignments:
+                changed.add(name)
+            assignments[name] = (i, expression, typ)
+        for write in re.finditer(rf'({_RAW_ID})\s*{_OP}|(?:\+\+|--)\s*({_RAW_ID})|({_RAW_ID})\s*(?:\+\+|--)', expression):
+            changed.add(next(name for name in write.groups() if name))
+        changed.update(re.findall(rf'(?<!\w)&\s*({_RAW_ID})\b', line))
+
+    def expr(name):
+        return assignments.get(name, (-1, '', ''))[1] if name not in changed else ''
+
+    def same_address(pair, base, offset, line):
+        low, high = pair
+        base_low, base_high = base
+        addition = re.fullmatch(rf'{base_high} \+ ({_RAW_ID})', expr(high))
+        carry = re.fullmatch(rf'int\(({_RAW_ID})\)', expr(addition[1])) if addition else None
+        names = (low, high, base_low, base_high)
+        if not carry or not addition:
+            return False
+        names += (carry[1], addition[1])
+        declarations = [assignments.get(name, (-1, '', '')) for name in names]
+        indices = [entry[0] for entry in declarations]
+        types = [entry[2] for entry in declarations]
+        return (types == ['int', 'int', 'int', 'int', 'bool', 'int']
+                and not any(name in changed for name in names) and min(indices) >= 0
+                and max(indices) < line and expr(low) == f'{base_low} + {offset}'
+                and expr(carry[1]) == f'uint({low}) < uint({base_low})'
+                and all(safe_line[min(indices):line]))
+
+    edits = []
+    for start in range(2, len(lines) - 9):
+        first = call.fullmatch(lines[start])
+        if not first:
+            continue
+        calls = [first]
+        base = _raw_address(lines[start - 2:start], first['lo'], first['hi']) or (first['lo'], first['hi'])
+        for i in range(1, 4):
+            pos = start + i * 3
+            next_call = call.fullmatch(lines[pos])
+            if next_call is None or next_call['indent'] != first['indent']:
+                break
+            pair = _raw_address(lines[pos - 2:pos], next_call['lo'], next_call['hi'])
+            if pair is None or not same_address(pair, base, 4 * i, pos):
+                break
+            calls.append(next_call)
+        else:
+            edits.append((start, calls))
+    for start, calls in edits:
+        first = calls[0]
+        result = f'{first["out"]}_words'
+        load = f'dm_raw_load4({first["lo"]}, {first["hi"]}, (*spvDescriptorSet0.{table}))'
+        for i, c in enumerate(calls):
+            lines[start + 3 * i] = f'{c["indent"]}int {c["out"]} = {result}.{"xyzw"[i]};'
+        lines[start] = f'{first["indent"]}int4 {result} = {load};\n{lines[start]}'
+    return '\n'.join(lines) if edits else msl
+
+
+def raw_load_quads(msl, table_slot, entries, entry_bytes):
+    """Share the raw pool lookup for adjacent, independently resolved 32-bit loads."""
+    if entry_bytes != 32 or entries < 2 or entries & (entries - 1):
+        return msl
+    table = f'cp_s{table_slot}'
+    for scalar in _RAW_FUNCTION.finditer(msl):
+        # The spelling of the table is verified again at the call sites. The
+        # caller supplies its slot from the translator's raw-map reflection.
+        if scalar['table'] != table:
+            continue
+        typ = scalar['type']
+        struct = rf'struct {typ}\s*\{{\s*uint _m0\[1\];\s*\}};'
+        member = rf'(?m)^\s*device {typ}\* {table} \[\[id\(\d+\)\]\];'
+        if not re.search(struct, msl) or not re.search(member, msl):
+            continue
+        stride = entry_bytes // 4
+        search = _raw_search(scalar['body'], scalar['lo'], scalar['hi'], table, entries, stride)
+        if not search:
+            continue
+        following = msl[scalar.end():]
+        output = _raw_quads(following, scalar['name'], table)
+        if output == following:
+            continue
+        prefix, index, dynamic = search
+        return msl[:scalar.end()] + _raw_quad_helper(scalar, prefix, index, stride, entries, dynamic) + output
+    return msl
+
+
+def _raw_quad_helper(scalar, search, index, stride, entries, dynamic=False):
+    table, typ, name, low, high = (scalar[k] for k in ('table', 'type', 'name', 'lo', 'hi'))
+    last = '(table._m0[4] - 1u)' if dynamic else f'{entries - 1}u'
+    return f'''
+
+static inline __attribute__((always_inline))
+int dm_raw_find(int {low}, int {high}, device {typ}& {table})
+{{
+{search}
+    return {index};
+}}
+
+static inline __attribute__((always_inline))
+ulong dm_raw_word_pair(device {typ}& table, uint word)
+{{
+    return as_type<ulong>(uint2(table._m0[word], table._m0[word + 1u]));
+}}
+
+static inline __attribute__((always_inline))
+int dm_raw_load_word(ulong address, device {typ}& table)
+{{
+    uint2 words = as_type<uint2>(address);
+    int low = as_type<int>(words.x);
+    int high = as_type<int>(words.y);
+    return {name}(low, high, table);
+}}
+
+static inline __attribute__((always_inline))
+int4 dm_raw_load4(int low, int high, device {typ}& table)
+{{
+    const ulong limit = ~0ul - 15ul;
+    const ulong address = as_type<ulong>(uint2(as_type<uint>(low), as_type<uint>(high)));
+    if (!(address & 3ul) && address <= limit) {{
+        const uint index = uint(dm_raw_find(low, high, table));
+        const uint word = {stride}u * index;
+        const ulong end = dm_raw_word_pair(table, word + 2u);
+        // The scalar search prefers the nearest preceding start, even in an overlap.
+        const ulong next = index < {last} ? dm_raw_word_pair(table, word + {stride}u) : ~0ul;
+        if (end >= address && end - address >= 16ul && next > address + 15ul) {{
+            const ulong gpu_address = address + dm_raw_word_pair(table, word + 4u);
+            if (!(gpu_address & 3ul) && gpu_address <= limit) {{
+                const device uint* data = reinterpret_cast<const device uint*>(gpu_address);
+                const int x = as_type<int>(data[0]);
+                const int y = as_type<int>(data[1]);
+                const int z = as_type<int>(data[2]);
+                const int w = as_type<int>(data[3]);
+                return int4(x, y, z, w);
+            }}
+        }}
+    }}
+    const int x = dm_raw_load_word(address, table);
+    const int y = dm_raw_load_word(address + 4ul, table);
+    const int z = dm_raw_load_word(address + 8ul, table);
+    const int w = dm_raw_load_word(address + 12ul, table);
+    return int4(x, y, z, w);
+}}
+'''
+
+
+# Adapted from seedds/nxnative PR #1464 (360ab21f): keep a per-invocation
+# range cache around the translator's raw-memory lookup. Our translator uses
+# the newer dynamic-size, tagged-hint search, so reuse its strict recognizer
+# above rather than assume the older helper's assignment shape. Only reflected
+# GMEM tables qualify: the host snapshots sorted, disjoint ranges per submission.
+_RAW_RANGE_HELPER = re.compile(
+    r'(?m)^static inline __attribute__\(\(always_inline\)\)\n'
+    r'int (_\d+)\(thread const int& (_\d+), thread const int& (_\d+), '
+    r'((?:const )?device (_\d+)& ([a-z]p_s\d+))\)\n\{\n')
+_RAW_RANGE_CACHE = 'struct dm_raw_range { ulong s; ulong e; int i; };\n\n'
+
+
+def _range_close(s, start, left, right):
+    depth = 0
+    for at in range(start, len(s)):
+        depth += (s[at] == left) - (s[at] == right)
+        if depth == 0: return at
+    return None
+
+
+def raw_ranges(msl, tables, entries, entry_bytes):
+    """Reuse the last disjoint GMEM range within one function invocation.
+
+    This caches address translation, never memory values: intervening stores or
+    atomics still execute, and every call still loads its word. Unknown helper
+    bodies or call sites leave the shader unchanged, including all its variants.
+    """
+    if not tables or entry_bytes != 32 or entries < 2 or entries & (entries - 1): return msl
+    if 'dm_raw_load4(' in msl: return _cache_raw_quads(msl, tables, entries, entry_bytes)
+    if 'struct dm_raw_range {' in msl or 'reinterpret_cast<' not in msl: return msl
+    helpers, out, pos = [], [], 0
+    for m in _RAW_RANGE_HELPER.finditer(msl):
+        name, lo, hi, param, typ, table = m.groups()
+        if table not in tables: continue
+        if not re.search(r'struct ' + typ + r'\s*\{\s*uint _m0\[1\];\s*\};', msl): return msl
+        end = _range_close(msl, m.end() - 2, '{', '}')
+        if end is None: return msl
+        body = msl[m.end():end].rstrip('\n')
+        matched = _raw_search(body, lo, hi, table, entries, 8)
+        if not matched: return msl
+        prefix, sel, _ = matched
+        # The recognizer gives the exact search prefix, with original indentation.
+        # Keep the selected index in outer scope, and the remaining helper intact.
+        search, n = re.subn(r'\bint ' + sel + r' = ', sel + ' = ', prefix, count=1)
+        if n != 1 or not body.startswith(prefix): return msl
+        head = msl[m.start():m.end()].replace(f'{param})\n{{\n', f'{param}, thread dm_raw_range& _rr)\n{{\n')
+        cached = (f'    ulong _ra = as_type<ulong>(uint2(uint({lo}), uint({hi})));\n'
+                  f'    int {sel};\n    if (_ra - _rr.s < _rr.e - _rr.s) {sel} = _rr.i;\n'
+                  '    else\n    {\n' + '\n'.join('    ' + ln for ln in search.splitlines()) + '\n'
+                  f'        int _rw = {sel} * 8;\n'
+                  f'        _rr.s = as_type<ulong>(uint2({table}._m0[_rw], {table}._m0[_rw + 1]));\n'
+                  f'        _rr.e = as_type<ulong>(uint2({table}._m0[_rw + 2], {table}._m0[_rw + 3]));\n'
+                  f'        _rr.i = {sel};\n    }}')
+        out += [msl[pos:m.start()], head + cached + body[len(prefix):] + '\n']; pos = end
+        helpers.append((name, table))
+    if not helpers: return msl
+    src = ''.join(out) + msl[pos:]
+    # Generated MSL functions open at column zero, following their signature.
+    bodies = []
+    for m in re.finditer(r'(?m)^\{$', src):
+        before = src[:m.start()].rstrip()
+        if not before.endswith(')'): continue
+        close = _range_close(src, m.start(), '{', '}')
+        if close is None: return msl
+        bodies.append((m.start(), close))
+    edits, declarations = [], {}
+    for name, table in helpers:
+        for m in re.finditer(r'(?<![\w.])' + name + r'\(', src):
+            if src.startswith('int ' + name + '(', src.rfind('\n', 0, m.start()) + 1): continue
+            end = _range_close(src, m.end() - 1, '(', ')')
+            if end is None: return msl
+            args = src[m.end():end]
+            # Each cache must refer to the same reflected table at every call.
+            if not re.fullmatch(r'_\d+, _\d+, \(\*spvDescriptorSet0\.' + table + r'\)', args): return msl
+            owner = next((a for a, b in bodies if a < m.start() < b), None)
+            if owner is None: return msl
+            edits.append((end, f', _rr{name}'))
+            declarations.setdefault(owner, set()).add(name)
+    if not edits: return msl
+    for at, names in declarations.items():
+        edits.append((at + 2, ''.join(f'    dm_raw_range _rr{n} = {{0ul, 0ul, 0}};\n' for n in sorted(names))))
+    for at, text in sorted(edits, key=lambda e: -e[0]): src = src[:at] + text + src[at:]
+    first = src.index('static inline __attribute__((always_inline))\nint ' + helpers[0][0] + '(')
+    return src[:first] + _RAW_RANGE_CACHE + src[first:]
+
+
+def _cache_raw_quads(msl, tables, entries, entry_bytes):
+    """Cache the selected range for generated quad loads, retaining every load.
+
+    Only our exact generated helper and reflected, immutable GMEM table qualify.
+    Clip the cached interval at the next start so a later overlapping range still
+    wins. Quad alignment, wraparound and boundary fallbacks remain unchanged.
+    """
+    for scalar in _RAW_FUNCTION.finditer(msl):
+        table = scalar['table']
+        if table not in tables: continue
+        search = _raw_search(scalar['body'], scalar['lo'], scalar['hi'], table, entries, entry_bytes // 4)
+        if not search: continue
+        prefix, index, dynamic = search
+        original = _raw_quad_helper(scalar, prefix, index, 8, entries, dynamic)
+        if msl.count(original) != 1: continue
+        changed = original.replace('int4 dm_raw_load4(int low, int high, device ' + scalar['type'] + '& table)',
+                                   'int4 dm_raw_load4(int low, int high, device ' + scalar['type'] + '& table, thread dm_raw_quad_range& cache)')
+        changed = changed.replace('const uint index = uint(dm_raw_find(low, high, table));',
+                                  'const uint index = address - cache.s < cache.e - cache.s ? cache.i : uint(dm_raw_find(low, high, table));')
+        changed = changed.replace('        if (end >= address',
+                                  '        cache.s = dm_raw_word_pair(table, word);\n'
+                                  '        cache.e = min(end, next);\n'
+                                  '        cache.i = index;\n'
+                                  '        if (end >= address')
+        # Find every call outside the helper, and give each owning function its
+        # own zero-initialized cache. An unknown call form rejects the transform.
+        before, after = msl.split(original)
+        bodies = []
+        for m in re.finditer(r'(?m)^\{$', after):
+            if not after[:m.start()].rstrip().endswith(')'): continue
+            close = _range_close(after, m.start(), '{', '}')
+            if close is None: return msl
+            bodies.append((m.start(), close))
+        edits, owners = [], set()
+        for m in re.finditer(r'\bdm_raw_load4\(', after):
+            end = _range_close(after, m.end() - 1, '(', ')')
+            if end is None or not re.fullmatch(r'_\d+, _\d+, \(\*spvDescriptorSet0\.' + table + r'\)', after[m.end():end]): return msl
+            owner = next((a for a, b in bodies if a < m.start() < b), None)
+            if owner is None: return msl
+            owners.add(owner); edits.append((end, ', _rquad'))
+        if not edits or 'dm_raw_load4(' in before: return msl
+        for owner in owners: edits.append((owner + 2, '    dm_raw_quad_range _rquad = {0ul, 0ul, 0u};\n'))
+        for at, text in sorted(edits, reverse=True): after = after[:at] + text + after[at:]
+        return before + '\nstruct dm_raw_quad_range { ulong s; ulong e; uint i; };\n' + changed + after
+    return msl

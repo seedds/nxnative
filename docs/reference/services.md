@@ -726,8 +726,15 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** `[RED] sf: the game connects to service bsd:u itself, which the host does not serve` (and bsd:s, bsd:a) at the game's first socket call, then the game's own abort: Star Fox's `vsocket.nintendo.cpp:148` logs `socket: 4` and stops. With only the connection cut, the game's HTTP thread aborted a few seconds in: its event loop's `poll` returned -1 with errno 14 (EFAULT), and the loop tolerates only EINTR (`main+0xbe2efc4`).
 - **Cause:** SDK 21 inlines `nn::socket::Initialize(const Config &)` into the game and connects to the bsd services from `nn::socket::internal::Initialize(int)`, past the host's cut. nnmusl's `poll` then has no socket state and fails. Its socket functions also come in overloads with plain `sockaddr`, `ShutdownMethod`, `Read` / `Write`, a `GetHostEntByName(const char *)` without options and `SetAllocator(MemoryResource *)`, and `nifm::GetCurrentIpConfig` takes IPv4 and IPv6 configurations with their counts.
 - **Fix:** `internal::Initialize` is cut as the plain `Initialize` is, the C library's `poll` goes to the host's `Poll`, the overloads fail as the others do (`hle_net.c`), and `GetCurrentIpConfig` reports no configuration (`hle_offline.c`). `Poll` no longer fails on a descriptor the host never made, which only a garbage value can be: it reports nothing ready at the timeout, as a console's does for a socket with nothing to say. The game logs `socket: No error information` and goes on offline.
-- **Open:** the host refuses `nn::socket::EventFd`, so the HTTP thread polls without a wake-up, and with a garbage descriptor beside it. Harmless offline.
+- **Resolved:** the host refused `nn::socket::EventFd`, so the HTTP thread polled without a wake-up, and with a garbage descriptor beside it; [eventfds are served offline](#eventfds-served-offline) now.
 - **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md).
+
+### An asynchronous play report opens prepo:u
+
+- **Symptom:** `[RED] sf: the game connects to service prepo:u itself, which the host does not serve`, then `nn::diag` aborts with Result `0xe15` at the gameplay transition.
+- **Cause:** `PlayReport::Send(Uid const&)` gets a service session. Its nontrivial `AsyncContext` return uses the caller's result address in `x8`. The caller waits on the returned context's completion event, then reads its result and destroys it.
+- **Fix:** `hle_offline.c` calls the guest SDK's `AsyncContext(Result)` constructor in that storage with success. The SDK provides an already-signalled completion event for this context and destroys it without an IPC object. Report submission follows the existing offline policy.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (`sdk+0x5aae10` in `PlayReportImpl::Send`).
 
 ### Bluetooth LE at boot
 
@@ -735,6 +742,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** `main` calls `nn::bluetooth::InitializeBle` at boot (`main+0xa0b030`; the Pokémon GO Plus + support of the 3.0.1 update), which runs `bluetooth::hal::user::InitializeBluetoothUserInterface` and `btm::user::InitializeBtmUserInterface` and aborts when they fail. Zeroed answers are not enough: the BTM setup expects real objects or handles back.
 - **Fix:** `hle_offline.c` takes over the BLE calls the game reaches without a device: `InitializeBle` connects to nothing, the five `AcquireBle…Event` calls bind an event that never fires, scan parameter, scan start and `ConnectToGattServer` fail, scan stop succeeds, and the scan result and connection lists are empty. The GATT calls after a connect are never reached.
 - **Found on:** [Pokémon Violet](../../dm/games/01008F6008C5E000/README.md) 3.0.1 (`v720896`, a derived profile), on an M3, macOS 27.2: the opening plays through. Not checked: 1.0.0 (the registered build), Pokémon Scarlet 3.0.1.
+
+### Eventfds served offline
+
+- **Symptom:** at boot, `game called nn::diag abort: Result 0, call site sdk+0xb8fe8` from `__assert_fail`, under a function of the game's that reads a comma-separated list of names (`"all"`) and compares each with a table holding `poll` and `none`: gRPC's event engine choice (`grpc_event_engine_init`), in Nintendo's online library (NPLN). Threads `npln-grpc default-executor` and `nn.npln.Worker` exist.
+- **Cause:** the host failed every `nn::socket` call with ENETDOWN, `EventFd` included. An eventfd is not networking: a 64-bit counter that a write adds to and a read takes, which wakes a thread; Horizon's bsd service serves it with no network. gRPC's poll engine needs one as its wakeup descriptor: its check (`EventFd(0, 0)`, then close) failed, `grpc_has_wakeup_fd` read 0, every engine's initializer returned null, and gRPC asserted.
+- **Fix:** `hle_net.c` serves eventfds: descriptors 512–575 (under select's 1024; the host makes no other descriptor), Linux's semantics (a read takes the counter, or 1 with the semaphore flag; an empty nonblocking read fails with EAGAIN; a write past 2^64−2 waits or fails), Horizon's flags (1 semaphore, 4 nonblocking; gRPC passes 6), `Poll` / `Select` readiness with waits in slices of at most 100 ms, `Fcntl`'s `F_GETFL` / `F_SETFL` with `O_NONBLOCK`, and `Close`. A failure sets the socket error code (FreeBSD numbers) and the C library's `errno` through the guest's `__errno_location` (Linux numbers: gRPC compares with 11 and 4). Every other socket call still fails as offline.
+- **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_net_eventfd`: the counter, the semaphore flag, EAGAIN in both error numbers, poll and select readiness, a poll woken by another thread's write, `O_NONBLOCK`, close, and other descriptors still failing.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): with the fix it boots to its title screen.
 
 ### Network requests stay on hold before they settle
 
@@ -752,6 +767,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** it calls `nn::socket::Poll(fds, 0, 33)`: no descriptors and a 33 ms timeout, which on hardware is a 33 ms sleep. The host failed every socket call at once, so the thread spun 11,000 times a second (88,000 hits of a probe in 8 s).
 - **Fix:** `Poll` and `Select` with nothing to wait on (no descriptors, or only negative ones, which POSIX ignores) now wait out their timeout and return 0, in every mangling the host takes over, including SDK 4's `Select(int, fd_set*, …, timeval*)`; an endless timeout returns 0 after 100 ms, since a thread inside a host hook pauses for IL2CPP's collector only once the hook returns (`hle_net.c`, `dm_guest_sleep_ns` in `hle_thread.c`).
 - **Found on:** [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) (SDK 4.5.0; one boot). Guest CPU fell from 1,030 to 60 ms per second.
+
+### Local BSD event counters during gRPC initialization
+
+- **Symptom:** startup aborts while selecting gRPC's polling engine, with saved return addresses apparently naming `__nnmusl_TimerCreate` and `__assert_fail`.
+- **Cause:** `nn::socket::EventFd(0, 0)` was cut with the network calls and returned -1/ENETDOWN. This is a local synchronization descriptor, so it must work offline. gRPC's capability check rejects its poll backend after that failure and aborts when no backend can be selected. The apparent timer failure occurs while selecting a polling backend; the missing local descriptor is the cause.
+- **Fix:** `hle_socket_eventfd.c` implements the BSD counter, semaphore/nonblocking flags, blocking reads and writes, overflow handling, close and descriptor readiness. `hle_net.c` exposes both SDK C and C++ entry points, byte reads/writes, `Poll` and `Select`. Errors update the guest's own `__errno_location` as well as the host socket-error slot; gRPC's wakeup drain reads that guest errno and expects EAGAIN (11). Waits release the guest scheduler's core, and descriptor identities prevent close/reuse from redirecting an existing waiter. The pthread backend is shared by Mac and iPhone; no guest address or game-specific cut enters the implementation.
+- **Found on:** Ocarina (`0400486024DEC000`), using an external provisional profile: gRPC rejected its polling backend when the local event-counter capability check failed.
+- **Check:** `t_eventfd` passes 46 checks of exported hook names, guest errno, counter/semaphore behavior, overflow, byte I/O, readiness, blocking producer/consumer threads, timeout and close/reuse, normally and under ASan/UBSan and TSan. The fixed Mac diagnostic returns descriptor 3 at the capability check, takes neither backend-failure branch and reaches frame 681 before its planned 30-second watchdog stop. Its shader build is incomplete, so this does not validate the picture or gameplay. The host and graphics test suites pass. The selected cross-game check also names Dark Souls (empty polling) and Hades (network initialization), but neither has a local Mac build; that check exits 2. The sources compile for iPhoneOS, and the generated iOS source list includes the backend; device validation remains open.
 
 ## Settings, languages and fonts
 

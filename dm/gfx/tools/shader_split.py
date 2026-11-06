@@ -71,6 +71,9 @@ KEY_SKIP = tuple(int(x, 0) for x in GAME.get('shader_key_skip', '0+0').split('+'
 
 CTL_MAGIC, GFX_MAGIC, CS_MAGIC = bytes.fromhex('34127698'), bytes.fromhex('78563412'), bytes.fromhex('79563412')
 STAGES = ['vs', 'hs', 'ds', 'gs', 'ps', 'cs']
+# An NVN2 BNSH program has stage slots past those six: 7 holds the task shader and 8 the mesh shader (The Legend of Zelda: Ocarina of Time's Model and Foliage .bfsha,
+# 1,699 task and 1,739 mesh shaders; read from the six slots alone, every mesh-shaded draw was missing from the map and dropped). Slot 6 has not been seen used
+NVN2_SLOTS = [None, None, None]
 SPH_STAGE = {1: 'vs', 2: 'hs', 3: 'ds', 4: 'gs', 5: 'ps'}
 def sph_stage(code):
     """A graphics code area's stage from its SPH word 0: shader type in bits 10..13. Catherine: Full Body's GLSLC (SDK 8.2.1, GPU code version 1.15) writes 0 there in every vertex shader
@@ -153,10 +156,18 @@ def bnsh_shaders(d, base, label):
     for v in range(nvar):
         prog = field(d, '<Q', base + pvar + 0x40 * v + 0x10, f'{where} variation {v}')[0]
         if not prog: continue
-        for si, st in enumerate(STAGES):
+        for si in range(len(STAGES) + len(NVN2_SLOTS)):
+            st = STAGES[si] if si < len(STAGES) else NVN2_SLOTS[si - len(STAGES)]
             sc = field(d, '<Q', base + prog + 8 + 8 * si, f'{where} variation {v} program')[0]
             if not sc: continue
-            pctl, pcode, ncode, nctl = field(d, '<QQII', base + sc + 8, f'{where} variation {v} {st}')
+            if st is not None:
+                pctl, pcode, ncode, nctl = field(d, '<QQII', base + sc + 8, f'{where} variation {v} {st}')
+            else:   # past the six NVN stages: a slot only an NVN2 program has, taken when it holds an NVN2 control section (an NVN program's words there are not stage records)
+                if base + sc + 0x20 > len(d): continue
+                pctl, pcode, ncode, nctl = struct.unpack_from('<QQII', d, base + sc + 8)
+                if not (0x48 <= nctl < 0x10000 and base + pctl + nctl <= len(d) and base + pcode + ncode <= len(d)) or not nvn2_ctl(d[base + pctl:base + pctl + nctl]): continue
+                st = nvn2_stage(d[base + pctl:base + pctl + nctl], d[base + pcode:base + pcode + ncode])
+                if st not in ('ts', 'ms'): red(f'{where} variation {v}: NVN2 stage slot {si} holds a {st} shader, not a task or mesh shader')
             ctl, code = span(d, base + pctl, nctl, f'{where} variation {v} {st} control section'), span(d, base + pcode, ncode, f'{where} variation {v} {st} code area')
             why = check(label, st, ctl, code)
             if why: red(f'{label} BNSH @{base:#x} variation {v} {st}: {why}')
@@ -196,14 +207,12 @@ def bahs_shaders(d, label):
         code, ctl = d[region + off:region + off + n], d[c:c + csz]
         st = nvn2_stage(ctl, code) if nvn2 else 'cs' if code[:4] == CS_MAGIC else sph_stage(code) if code[:4] == GFX_MAGIC else None
         if not st or check(label, st, ctl, code): continue
-        found.append((a, c, (f'{label}#BAHS@{a:#x}', st, ctl, code)))
-    # A program entry never lies inside a control section. An NVN2 section's +0x38..+0x47 (instruction length, c1 start and end, code length: 0x1100, 0, 0x1100, 0x1100) reads as
-    # an entry whose offset, control length and control distance are all that length: Ocarina of Time's agl_common.sharcb@0x357f0 paired compute shader 30's control with a vertex
-    # shader's code, a shader the game never loads, and its SPH came to the translator as an instruction ("Ampere instruction 481 at 0x0"). Each section counts with its own
-    # length (ctl_len), not the length an entry gives it, which for such a false entry covers real entries after it
-    spans = {(c, c + ctl_len(s[2])) for _, c, s in found}
-    out = [s for a, _, s in found if not any(lo <= a < hi for lo, hi in spans)]
-    bahs_variations(d, label, [o[0] for o in out])
+        out.append((f'{label}#BAHS@{a:#x}', st, ctl, code))
+    records = bahs_variations(d, label, [o[0] for o in out])
+    # The scan can match words inside a control section. Once both arrays validate,
+    # only their binary records name programs; a stray match can join unrelated code
+    # and control sections (Ocarina of Time's agl_common, 1,683 records plus one stray).
+    if records is not None: out = [o for o in out if int(o[0].rsplit('@', 1)[1], 16) in records]
     return out
 
 def sead_prim_shaders(d, label):
@@ -224,23 +233,21 @@ def sead_prim_shaders(d, label):
 
 def ndsr_shaders(d, label):
     """agl's NDSR pack (Lib/agl/agl_resource.*.sarc.zs agl_ndsr.pck, Donkey Kong Bananza: the dynamic super-resolution upscaler that writes the frame's output): 'NDSR', then from +0x10
-    16-byte records up to a zero one: u32 control section offset, u32 (control length << 4 | type), u32 code area offset, u32 (code length / 16 << 8 | type). Records whose first word
-    is an NVN2 control section are shaders (types 0 / 3 graphics, 6 compute; a vertex record is followed by its pixel record); the others (type 0xb, 0x50c) hold constant data.
-    The control section's stage byte (+0x56) and its code length (+0x44) decide the stage and the code area, as for BNSH.
-    The records start at +0x14 in Splatoon Raiders' pack, whose header has another word and other values (+4 0x40100, against 0x300 in Bananza's), so the start is the one whose first
-    records point at control sections. Read from +0x10 the same pack gave no shader, the upscaler's draws were skipped and every 3D frame reached the window black"""
+    8-byte entries up to a zero one: u32 offset, u32 (length << 4 | type). Types 0 / 3 / 6 are a vertex, pixel or compute control section, and the entry after one is its code area (1 / 4 / 7);
+    a vertex program is followed by its pixel program. The others hold constant data: 4 bytes of it (type 9) between two programs of the variable-ratio packs put the next program
+    on an odd entry, which a walk of two entries at a time stepped over (Ocarina of Time's d17eefaff4f0bc23, 1fdc85178b60f6ce, 92918e9b7e2f89a4: the first is the SMAA blending weights of the
+    upscaler). The control section's stage byte (+0x56) and its code length (+0x44) decide the stage and the code area, as for BNSH.
+    The entries start at +0x14 in Splatoon Raiders' pack, whose header has another word and other values (+4 0x40100, against 0x300 in Bananza's), so the start is the one whose first
+    entries point at control sections. Read from +0x10 the same pack gave no shader, the upscaler's draws were skipped and every 3D frame reached the window black"""
     if d[:4] != b'NDSR' or len(d) < 0x20: return []
-    def records_from(o):   # how many of the first records point at an NVN2 control section
-        count = min(16, (len(d) - o) // 16)
-        records = struct.iter_unpack('<4I', d[o:o + 16 * count])
-        return sum(1 for c, _, _, _ in records if c + 0x48 <= len(d) and nvn2_ctl(d[c:c + 0x48]))
-    out = []; o = max((0x10, 0x14), key=records_from); prog = None
+    def entries_from(o):   # how many of the first entries point at an NVN2 control section
+        return sum(1 for c, _ in struct.iter_unpack('<2I', d[o:o + 16 * 16]) if c + 0x48 <= len(d) and nvn2_ctl(d[c:c + 0x48]))
+    out = []; o = max((0x10, 0x14), key=entries_from); prog = None
     while o + 16 <= len(d):
         c, cl, k, _ = struct.unpack_from('<4I', d, o)
-        if not (c or cl or k or _): break
-        # Entries are 8 bytes, a shader's control and code areas two of them, so data entries can shift the next shader by 8 (the second network of Ocarina of Time's NDVE file: u32 offset, u32 length << 4 | type)
-        if not (c + 0x48 <= len(d) and nvn2_ctl(d[c:c + 0x48])): o += 8; continue
-        o += 16
+        if not c and not cl: break
+        o += 8
+        if not (cl & 15 in (0, 3, 6) and c + 0x48 <= len(d) and nvn2_ctl(d[c:c + 0x48])): continue
         ctl = d[c:c + max(cl >> 4, 0x48)]
         code = d[k:k + struct.unpack_from('<I', ctl, 0x44)[0]]
         st = nvn2_stage(ctl, code)
@@ -252,21 +259,35 @@ def ndsr_shaders(d, label):
     return out
 
 def ndve_shaders(d, label):
-    """nn::ndve's movie enhancement file (Ocarina of Time's Movie/Ndve/Ndve-Nvn2-vid_seq5.dat.zs: the roulibr compute networks that upscale its AV1 movies). 'NDVE', +0xc u32 length of the NDSR pack,
-    +0x14 u32 count, count 8-byte model records (a kind, a float scale), then the NDSR pack, whose offsets count from its own start, then the networks: their tables (u32 count, 1, u32 table
-    length, u32, then per shader u32 control offset, control length, code length, 0) give the same shaders as the control sections themselves, each naming its own length (+0x30) and its code
-    area's (+0x44), the code area right behind it. Without this file the movies' dispatches had no compute shader"""
-    if len(d) < 0x18: return []
-    pack = 0x18 + 8 * struct.unpack_from('<I', d, 0x14)[0]; nets = pack + struct.unpack_from('<I', d, 0xc)[0]
-    out = ndsr_shaders(d[pack:nets], label)
-    c = d.find(CTL_MAGIC, nets)
-    while c >= 0:
-        if not c & 3 and c + 0x48 <= len(d) and nvn2_ctl(d[c:c + 0x48]):
-            own, n = struct.unpack_from('<I', d, c + 0x30)[0], struct.unpack_from('<I', d, c + 0x44)[0]
-            ctl, code = d[c:c + own], d[c + own:c + own + n]
-            st = nvn2_stage(ctl, code)
-            if st and len(code) == n and not check(label, st, ctl, code): out.append((f'{label}#NDVE@{c:#x}', st, ctl, code))
-        c = d.find(CTL_MAGIC, c + 4)
+    """The movie library's video engine pack (Movie/Ndve/Ndve-Nvn2-vid_seq5.dat.zs, The Legend of Zelda: Ocarina of Time, SDK 22: 'NDVE'): NVN2 programs laid out raw, each a 0x48-byte
+    control section (version 0x14 at +8; the key takes its first 0x48 bytes) whose code area lies at the section plus +0x30 and is +0x44 bytes long; sections with 0x11 at +8 have no
+    code area of their own (+0x30 0). The section runs up to its code area and has the NVN2 layout: stage byte +0x56 (5: compute), thread group +0x58, shared memory +0x64. All 20 are
+    compute shaders, the decoder's colour conversion among them (the title movie's dispatch found no shader, and the title screen stood on black behind its logo).
+    The sections are found by their magic and checked like any NVN2 section. Two more programs (0x11 at +8, compute, one dispatched at the title) are named only by the 'NDSR' record
+    table in the header (at +0x28): records as in agl's pack (ndsr_shaders: control offset, control length << 4 | type, code offset, code length / 16 << 8 | type; offsets from the 'NDSR'),
+    but among other records of other sizes, so the table is read word by word for records that point at an NVN2 control section and whose code length matches the section's +0x44"""
+    if d[:4] != b'NDVE': return []
+    out = []
+    t = d.find(b'NDSR', 0, 0x100)
+    for o in range(t + 4 if t >= 0 else len(d), min(len(d) - 16, t + 0x1000) if t >= 0 else 0, 4):
+        c, cl, k, kl = struct.unpack_from('<4I', d, o)
+        if cl & 0xf not in (0, 3, 6) or kl & 0xff != 7 or not 0x48 <= cl >> 4 < 0x10000: continue
+        c, k, n = t + c, t + k, (kl >> 8) * 16
+        if c + (cl >> 4) > len(d) or k + n > len(d) or not nvn2_ctl(d[c:c + NVN2_KEY_CTL]) or struct.unpack_from('<I', d, c + 0x44)[0] != n: continue
+        ctl, code = d[c:c + (cl >> 4)], d[k:k + n]
+        st = nvn2_stage(ctl, code)
+        if st is None or check(label, st, ctl, code): continue
+        out.append((f'{label}#NDVE#NDSR@{c:#x}', st, ctl, code))
+    for m in re.finditer(re.escape(CTL_MAGIC), d):
+        c = m.start()
+        if c + NVN2_KEY_CTL > len(d) or not nvn2_ctl(d[c:c + NVN2_KEY_CTL]) or struct.unpack_from('<I', d, c + 8)[0] != 0x14: continue
+        rel, n = struct.unpack_from('<Q', d, c + 0x30)[0], struct.unpack_from('<I', d, c + 0x44)[0]
+        if not rel or c + rel + n > len(d) or not n: continue
+        if rel < 0x68: continue   # the section must reach its thread group and shared memory
+        ctl, code = d[c:c + rel], d[c + rel:c + rel + n]
+        st = nvn2_stage(ctl, code)
+        if st is None or check(label, st, ctl, code): continue
+        out.append((f'{label}#NDVE@{c:#x}', st, ctl, code))
     return out
 
 BAHS_VAR = {}   # BAHS entry label → the program variation it belongs to (bahs_variations; var_pairs pairs by it)
@@ -275,7 +296,7 @@ def bahs_variations(d, label, entries):
     (0 vertex, 1 fragment, 3 compute), two u32, the 16-byte entry bahs_shaders reads) and right after it a program array (u32 byte size, u32 count, then per program: u32 record size,
     u32 name length, u32 stage mask, u32 index of its first binary, its name, its macros). A program's binaries run from its first index to the next program's; the n-th vertex binary
     and the n-th fragment binary in that range are one variation. Breath of the Wild: 109 of the 543 pairs drawn on a cold start in Zora's Domain came from these files, and none was in
-    shader_pairs.tsv, which paired only BNSH variations. A file whose arrays do not read back (another layout, or an entry bahs_shaders took that no record holds) gives no pairs"""
+    shader_pairs.tsv, which paired only BNSH variations. A file whose arrays do not read back (another layout, or an entry bahs_shaders took that no record holds) gives no pairs. Returns the verified binary entry addresses, or None for an unrecognized layout"""
     if not entries: return
     taken = {int(e.rsplit('@', 1)[1], 16) for e in entries}
     arr = min(taken) - 0x18
@@ -308,6 +329,7 @@ def bahs_variations(d, label, entries):
             if k > 1: continue   # compute and the other kinds pair with nothing
             if a in taken: BAHS_VAR[f'{label}#BAHS@{a:#x}'] = f'{label}#BAHS#prog{p}#var{seen[k]}'
             seen[k] += 1
+    return {a for a, _ in recs}
 
 def mshd_shaders(d, label):
     out, c = [], d.find(CTL_MAGIC)
@@ -3043,7 +3065,7 @@ def scan_file_in(args):
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), 'defer'
         return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
-    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
+    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NARC' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d and d[:4] != b'NDVE': return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
     else:
         scan_blob(d, '/' + rel, found)
         # whole GLSLC outputs in a file no other reader takes (FINAL FANTASY TACTICS - The Ivalice Chronicles: its engine's technique files, resources_nx/…/shader/*.tec, 261 outputs beside

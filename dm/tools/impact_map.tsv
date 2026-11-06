@@ -41,6 +41,7 @@ dm/gfx/nvn/nvn_mtl.m:warm_|prepare|prebuild|front_progress	present:pipeline_prep
 dm/gfx/nvn/nvn_mtl.m:pso_arch|arch_|pso_bundle	present:pipeline_archive	the pipeline archive
 dm/gfx/nvn/nvn_mtl.m:^tf_|xfb	shader:transform_feedback	transform feedback
 dm/gfx/nvn/nvn_mtl.m:^geo_|^gs_	shader:stage:gs	geometry shaders
+dm/gfx/nvn/nvn_geometry.inc:^mtk_	nvn:nvnCommandBufferDrawMeshTasks*	native task and mesh pipelines
 dm/gfx/nvn/nvn_mtl.m:^lo_|^lop_	nvn:nvnColorStateSetLogicOp	logic operations
 dm/gfx/nvn/nvn_mtl.m:prog_swrites|swrite_note	nvn:nvnCommandBufferBarrier	ordering barriers and shader writes in a draw pass
 dm/gfx/nvn/nvn_mtl.m:^at_|^atest_	nvn:nvnColorStateSetAlphaTest	the alpha test
@@ -124,6 +125,9 @@ dm/host/romfs_image.h	hle:*fs*	RomFS image index validation shared by mounts and
 dm/host/romfs_identity.h	*:*	RomFS identity checks at iOS startup for every game's separate deployment
 dm/host/hle_fs.c	hle:*fs*	filesystem mounts, paths and file operations
 dm/host/hle_audio.c:(notify_release|event_notify)	hle:*AudioOutE*	guest AudioOut buffer-release notifications; the host renderer uses rel_sem
+dm/host/hle_socket_eventfd.c	hle:*socket*	BSD event counters and descriptor readiness used for local thread wakeups
+dm/host/socket_eventfd.h	hle:*socket*	BSD event-counter API shared by the socket hooks
+dm/host/hle_offline.c:^h_sk_	hle:*socket*	older socket ABI aliases, including descriptor polling
 dm/host/save_sync.*	hle:*fs*	cloud saves: the first save mount and every Commit (hle_fs.c)
 dm/host/Makefile	*:*	the shared host build
 dm/host/hle_thread.c	svc:*	threads and synchronization

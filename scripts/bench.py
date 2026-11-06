@@ -65,7 +65,7 @@ def frames(tsv, t0, t1):
 
 
 def summary(ft, shown, gpu, dropped, n, secs, budget):
-    d = {'frames': n, 'fps': round(n / secs, 1) if secs else None, 'dropped': dropped}
+    d = {'frames': n, 'fps': round(n / secs, 1) if secs else None, 'dropped': dropped, 'shown_samples': len(shown)}
     for name, xs in (('frame', ft), ('shown', shown), ('gpu', gpu)):
         for p in (50, 95, 99): d[f'{name}_p{p}'] = round(pct(xs, p), 2) if xs else None
         d[f'{name}_max'] = round(max(xs), 2) if xs else None
@@ -95,6 +95,7 @@ def run_one(a, gid, build, var, route, out, lock):
     if a.fps: env['DM_FPS_TARGET'] = str(a.fps)
     if a.fps and a.fps > 60: env.update(DM_PRESENT_HZ=str(a.fps), DM_PRESENT_LINK='2')   # the display link at the screen's rate for the variable frame step; at 60 or 30 the host matches the screen to the cap itself
     if a.scale: env['DM_RENDER_SCALE'] = str(a.scale)
+    if getattr(a, 'script_only', False): env['DM_KEYS_ONLY'] = '1'
     for kv in a.env: k, _, v = kv.partition('='); env[k] = v
     for k, v in var.items():
         if k not in ('host', 'msl', 'shmap', 'patched', 'pso'): env[k] = v
@@ -125,6 +126,8 @@ def run_one(a, gid, build, var, route, out, lock):
     log_text = (out / 'log.txt').read_text(errors='replace')
     m = re.findall(r'frame step: game time [\d.]+ s in [\d.]+ s \(([\d.]+) of real time\)', log_text)
     if m: s['game_speed'] = float(m[-1])
+    if s.get('frames') and not s.get('shown_samples'):
+        s['timing_warning'] = 'No on-screen timing samples: fps measures rendered throughput only. Check that the Mac is unlocked and the game window is visible.'
     s['red_lines'] = sum(1 for ln in log_text.splitlines() if '[RED]' in ln)
     return s
 
@@ -181,6 +184,7 @@ def main():
     ap.add_argument('--lock', default='', help='a lock file to hold while a game runs, shared with other measuring runs on this Mac')
     ap.add_argument('--shots', type=lambda v: [float(x) for x in v.split(',')], help='screenshot times in seconds from host start, comma-separated (default: after the measurement window; in-window captures perturb timing)')
     ap.add_argument('--no-hud', action='store_true', help='no Metal performance HUD')
+    ap.add_argument('--script-only', action='store_true', help='ignore physical buttons/sticks during the route (requires a host with DM_KEYS_ONLY)')
     ap.add_argument('--out', help='the output folder (default <id>_build/bench/<date-time>)')
     a = ap.parse_args()
     build = Path(a.build).expanduser().resolve()
@@ -206,9 +210,12 @@ def main():
             d = out / f'{label}-{i + 1}'
             s = run_one(a, gid, build, var, route, d, lock); results[label].append(s)
             print(f'  {label} run {i + 1}: ' + (f'{s["fps"]} fps, frame p50 {s["frame_p50"]} / p99 {s["frame_p99"]} / max {s["frame_max"]} ms, GPU p50 {s["gpu_p50"]} ms' if s.get('frames') else f'no frames (see {d / "log.txt"})'), flush=True)
-    keys = ['fps', 'frame_p50', 'frame_p95', 'frame_p99', 'frame_max', 'shown_p99', 'shown_max', 'dropped', 'over_budget', 'gpu_p50', 'gpu_p95', 'game_speed', 'red_lines']
+            if s.get('timing_warning'): print(f'    WARNING: {s["timing_warning"]}', flush=True)
+    keys = ['fps', 'shown_samples', 'frame_p50', 'frame_p95', 'frame_p99', 'frame_max', 'shown_p99', 'shown_max', 'dropped', 'over_budget', 'gpu_p50', 'gpu_p95', 'game_speed', 'red_lines']
     md = (f'{gid}, route `{a.route}` ({route["about"]}), window {route["secs"]:g} s, fps target {a.fps or "profile"}, render scale {a.scale or "profile"}; '
           f'medians over runs (range); times in ms; over_budget = frames longer than 1.5 frame times\n\n' + table(results, keys) + '\n')
+    warnings = [f'{label} run {i + 1}: {r["timing_warning"]}' for label, runs in results.items() for i, r in enumerate(runs) if r.get('timing_warning')]
+    if warnings: md += '\n' + '\n'.join('WARNING: ' + w for w in warnings) + '\n'
     (out / 'results.md').write_text(md); (out / 'results.json').write_text(json.dumps({'game': gid, 'route': a.route, **{k: v for k, v in vars(a).items() if k != 'build' and k != 'save'}, 'save': str(a.save), 'variants': variants, 'results': results}, indent=1, default=str))
     print('\n' + md)
     sys.exit(0 if all(r.get('frames') for rs_ in results.values() for r in rs_) else 1)

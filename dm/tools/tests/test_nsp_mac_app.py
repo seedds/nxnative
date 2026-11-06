@@ -115,7 +115,7 @@ class PackReuse(unittest.TestCase):
             'dmhost': b'host', 'patched/main.patched.bin': b'code', 'patched/main.fixups.tsv': b'fixups',
             'patched/main.gates.tsv': b'gates', 'patched/main.cuts.tsv': b'cuts', 'patched/main.obs.tsv': b'obs', 'patched/nro.tsv': b'nro',
             'romfs/marker': b'game', 'msl/k.metallib': b'lib', 'msl/k.json': b'{}', 'msl/inputs.tsv': b'stamp',
-            'font/nintendo_ext.ttf': b'font', 'aoc/1/data': b'dlc', 'pso/gpu.mtl4a': b'archive',
+            'font/nintendo_ext.ttf': b'font', 'aoc/1/data': b'dlc', 'pso/applegpu_g16s.mtl4a': b'archive',
             'pso/prebuilt.tsv': b'prebuilt', 'pso/rest_pairs.tsv': b'rest', 'pso/archive.tsv': b'index',
             'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'source/launcher.c': b'launcher',
             'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader',
@@ -197,7 +197,7 @@ class PackReuse(unittest.TestCase):
         self.pack()
         names = ['dmhost', 'patched/main.patched.bin', 'patched/main.fixups.tsv', 'patched/main.gates.tsv', 'patched/main.cuts.tsv',
                  'patched/main.obs.tsv', 'patched/nro.tsv', 'msl/k.metallib', 'msl/k.json', 'msl/inputs.tsv', 'font/nintendo_ext.ttf',
-                 'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/archive.tsv', 'env.txt', 'icon.jpg', 'source/launcher.c',
+                 'pso/applegpu_g16s.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/archive.tsv', 'env.txt', 'icon.jpg', 'source/launcher.c',
                  'source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift',   # the settings window's sources
                  'host/save_sync.c', 'host/save_sync.h']   # the cloud-save code the launcher links (its send after the host exits)
         names += ['profile/' + n for n in pack_app.TABLES]
@@ -276,7 +276,7 @@ class PackReuse(unittest.TestCase):
     def test_finder_detritus_is_not_an_input_and_never_reaches_the_bundle(self):
         # An exFAT build folder (an external drive) keeps a file's extended attributes in a "._name" file beside it: taken as an input they would be packed as a module or a
         # shader, and left in the bundle they fail codesign ("code object is not signed at all", In subcomponent: Contents/MacOS/._nxnative).
-        for name in ('patched/._main.patched.bin', 'msl/._k.metallib', 'font/._nintendo_ext.ttf', 'pso/._gpu.mtl4a', 'romfs/._marker'):
+        for name in ('patched/._main.patched.bin', 'msl/._k.metallib', 'font/._nintendo_ext.ttf', 'pso/._applegpu_g16s.mtl4a', 'romfs/._marker'):
             (self.tmp / name).write_bytes(b'appledouble')
         (self.tmp / 'romfs/.DS_Store').write_bytes(b'finder')
         self.pack()
@@ -286,7 +286,7 @@ class PackReuse(unittest.TestCase):
         info = plistlib.loads((out / 'Contents/Info.plist').read_bytes())
         self.assertEqual(info['DMModuleFiles'], ['main.cuts.tsv', 'main.fixups.tsv', 'main.gates.tsv', 'main.obs.tsv', 'main.patched.bin', 'nro.tsv'])
         self.assertEqual(sorted(p.name for p in (out / 'Contents/Resources/dm/font').iterdir()), ['nintendo_ext.ttf'])
-        self.assertEqual(sorted(p.name for p in (out / 'Contents/Resources/pso').iterdir()), ['archive.tsv', 'gpu.mtl4a', 'prebuilt.tsv', 'rest_pairs.tsv'])
+        self.assertEqual(sorted(p.name for p in (out / 'Contents/Resources/pso').iterdir()), ['applegpu_g16s.mtl4a', 'archive.tsv', 'prebuilt.tsv', 'rest_pairs.tsv'])
         self.assert_reused()
 
     def test_output_path_and_optional_inputs_invalidate(self):
@@ -341,6 +341,16 @@ class PackReuse(unittest.TestCase):
                     self.assertFalse(Path(self.args.out + '.partial').exists())
                 finally: hidden.rename(p)
                 self.pack()
+
+    def test_runtime_cache_is_not_a_bundle_archive(self):
+        # Runtime caches have numbered shards and a stamp, but pso_bundle_open
+        # only opens the file named after the GPU architecture.
+        archive = self.tmp / 'pso/applegpu_g16s.mtl4a'
+        archive.rename(archive.with_name('p00000.mtl4a'))
+        with self.assertRaisesRegex(SystemExit, 'not the device runtime cache'):
+            self.pack()
+        self.assertFalse(Path(self.args.out).exists())
+        self.assertFalse(Path(self.args.out + '.partial').exists())
 
     def test_failed_repack_drops_key_and_keeps_old_app(self):
         self.pack()

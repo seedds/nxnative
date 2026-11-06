@@ -100,6 +100,19 @@ int main(int argc, char **argv) { @autoreleasepool {
     acquire_ticks(120, 0, 2, 4, "game mode keeps interval 2 in 60 Hz vsyncs");
     acquire_ticks(60, 1, 2, 2, "display 60 Hz ignores the game's interval");
     acquire_ticks(240, 1, 1, 1, "a rate above the link's waits one tick");
+    // The production VRR branch must keep 100/45 Hz fractional ticks even when
+    // the game leaves interval 2 set; changing or clearing the rate restores pacing.
+    setenv("DM_VRR", "1", 1);
+    CHECK(nvn_vrr_available(), "VRR explicitly enabled for controlled-clock test");
+    nvn_vrr_set(100);
+    acquire_ticks(60, 0, 2, 1.2, "VRR 100 Hz carries fractional ticks on a 120 Hz link");
+    nvn_vrr_set(45);
+    acquire_ticks(60, 0, 2, 8. / 3, "VRR 45 Hz replaces interval 2");
+    nvn_vrr_set(60);
+    acquire_ticks(60, 0, 2, 2, "VRR 60 Hz updates the rate");
+    nvn_vrr_set(0);
+    acquire_ticks(60, 0, 2, 4, "cleared VRR restores game interval 2");
+    unsetenv("DM_VRR");
     setenv("DM_FPS_TARGET", "30", 1); g_present_cap = -1;
     acquire_ticks(120, 1, 1, 4, "native 30 fps cap waits four 120 Hz ticks");
     CHECK(nvn_game_fps() == 30, "native 30 fps cap configures the display link");

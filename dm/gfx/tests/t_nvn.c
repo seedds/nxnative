@@ -89,6 +89,30 @@ int main(void) {
       EXPECT("the state page's movie flag is the host's copy, not read for the cap",60,fps_present_cap());
       dm_fps_state=NULL;unsetenv("DM_FPS_TARGET");g_present_cap=-1;nvn_present_config(0,0);
     }
+    // VRR (profile vrr, DM_VRR): the rate of vi::SetLayerExtendedSwapInterval replaces the present interval the game left set
+    // (Donkey Kong Bananza stays at interval 2 when it steps from 30 fps up into VRR), and clearing it gives the interval back.
+    { win_t w={.interval=2};nvn_present_config(60,0);dm_fps_state=NULL;setenv("DM_VRR","1",1);setenv("DM_FPS_TARGET","0",1);g_present_cap=-1;
+      EXPECT("DM_VRR=1: VRR answered without a 120 Hz screen",1,nvn_vrr_available());
+      present_period(&w);g_itv2_since=(now_ns()-2000000000ull)|1;
+      EXPECT("interval 2 held a second: 30 Hz link",30,nvn_game_fps());
+      nvn_vrr_set(45);
+      EXPECT("VRR 45: period ns",22222222,present_period(&w));
+      EXPECT("VRR 45: one vsync, the interval not held",1,present_itv(&w));
+      EXPECT("VRR 45: no 30 Hz link",60,nvn_game_fps());
+      nvn_vrr_set(60);
+      EXPECT("VRR 60: period ns",16666666,present_period(&w));
+      nvn_vrr_set(100);
+      EXPECT("VRR 100: period ns",10000000,present_period(&w));
+      nvn_vrr_set(500);
+      EXPECT("VRR above 120 is 120",8333333,present_period(&w));
+      nvn_vrr_set(0);
+      EXPECT("VRR cleared: the game's interval again",2,present_itv(&w));
+      EXPECT("VRR cleared: its period",33333333,present_period(&w));
+      _Alignas(8) uint8_t state[64]={0};float cap=60;memcpy(state,&cap,4);dm_fps_state=state;nvn_vrr_set(45);
+      EXPECT("a frame step page: no VRR",0,nvn_vrr_available());
+      EXPECT("a frame step page: its own step, not the VRR rate",16666666,present_period(&w));
+      nvn_vrr_set(0);dm_fps_state=NULL;unsetenv("DM_VRR");unsetenv("DM_FPS_TARGET");g_present_cap=-1;nvn_present_config(0,0);
+    }
     // No frame step page and no engine limiter the host writes (a main the profile's
     // stubs or limiter rows do not know): nothing makes the game follow the cap, so
     // presentation keeps the game's own interval (Tears of the Kingdom 1.4.2 at 2x).

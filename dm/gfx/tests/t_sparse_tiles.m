@@ -143,7 +143,10 @@ int main(void) { @autoreleasepool {
     CHECK("its tile is mapped", g_sp_live == live1 + 1);
     CHECK("nothing uploaded", g_bp_up_bytes == nblit);
     map_at((1ull << 30) + 3 * TILE, TILE, 20 * TILE, 0); (void)resolve(&gx);
-    NvSparse *gs = objc_getAssociatedObject(g, &g_sp_key);
+    // CPU-upload profiles can keep a render-capable texture in NvPkg until it is actually written.
+    id holder = tex_get(((const tex_t *)&gx)->serial);
+    NvPkg *gp = [holder isKindOfClass:[NvPkg class]] ? holder : nil;
+    NvSparse *gs = gp ? gp->ps : objc_getAssociatedObject(g, &g_sp_key);
     CHECK("and unmapped, not drawn: its heap tile goes back", gs && !gs->slot[3] && g_sp_live == live1);
     // The CPU filled a page; a GPU-written place of it is looked at first, then a packaged one, which reads the memory
     dm_guest_write_prepare(phys + 24 * TILE, TILE); memcpy(phys + 24 * TILE, store, TILE);
@@ -193,5 +196,13 @@ int main(void) { @autoreleasepool {
     CHECK("the pool again", h_nvnMemoryPoolInitialize((NVNmemoryPool *)&g_phys, (const NVNmemoryPoolBuilder *)&again));
     map_at(11 * TILE, TILE, 32 * TILE, 1); (void)resolve(&tx);
     CHECK("the new pool's content, not the old one's", same_at(m, 11 * TW, 0, TW, TW, lin[0], W, TW, 0));
+    // Material-handle proofs cannot use guest-range write tracking to exclude a
+    // GPU write through a sparse alias, even when reading the physical address.
+    uint32_t handle = 0;
+    CHECK("sparse mappings recorded", nvn_sparse_gen() != 0);
+    S.ubo[1][0] = (p_bind_buf){.addr=(uint64_t)phys,.size=16};
+    CHECK("physical handle with sparse aliases stays unknown", !fb_handle_word(NULL,1,0,0,&handle));
+    S.ubo[1][0] = (p_bind_buf){.addr=(uint64_t)g_sparse.mem,.size=16};
+    CHECK("virtual handle stays unknown", !fb_handle_word(NULL,1,0,0,&handle));
     printf("t_sparse_tiles: %d checks, %d failed\n", checks, failed); return failed != 0;
 }}

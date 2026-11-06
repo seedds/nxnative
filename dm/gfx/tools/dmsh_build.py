@@ -13,11 +13,11 @@
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately);
 # a [RED] line per shader that built but lost something (shader_regressions.report_losses), which does not change the exit status
 import atexit, inspect, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, time, collections, threading, concurrent.futures as cf
-import dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
+import dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_handles, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_pch, dmsh_vin, dmsh_pull, dmsh_side, dmsh_mesh, dmsh_ampere, shader_regressions, shader_cache, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_vin, dmsh_pull, dmsh_side, dmsh_mesh, dmsh_ampere, shader_regressions, shader_cache, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
 _bad = tool_lock.check_tools()
 if _bad: sys.exit('\n'.join('[RED] translation chain tools do not match the lock file: ' + b for b in _bad) + '\n(if the tools changed, run tool_lock.py --update-lock and commit the lock file; if the translator just was not rebuilt, rebuild it)')
 CHAIN = dmsh_chain.version(); out = os.path.join(out, 'b-' + CHAIN)
@@ -37,8 +37,8 @@ if not TARGETS or not TARGETS <= {'mac', 'ios'}: sys.exit(f'[RED] DMSH_TARGETS t
 if 'ios' in TARGETS and not IOSOUT: sys.exit('[RED] DMSH_TARGETS asks for iOS libraries without IOSOUT')
 if 'ios' not in TARGETS: IOSOUT = None   # every side library, cache, cleanup and stamp follows the same selection
 IOS_PULL = os.environ.get('DMSH_IOS_PULL') != '0'   # DMSH_IOS_PULL=0: no iOS pulling libraries, when nothing in the app reads them (the NSP script's ios_wants_pulling). The reflection is the same: its 'pull' comes from the variant, not from the compile
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../ios/tools')); import ios_metal
 if IOSOUT:
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../ios/tools')); import ios_metal
     IOSOUT = os.path.join(IOSOUT, 'b-' + CHAIN); os.makedirs(IOSOUT, exist_ok=True)
 import shader_lib, romfs   # dm/tools (on the path shader_regressions puts it): the library's image, which this build writes (publish_library)
 for _d in [out] + ([IOSOUT] if IOSOUT else []):   # one chain version serves every game, so b-<V>/ alone does not keep two games' libraries apart
@@ -363,23 +363,18 @@ PRE_STATS = collections.Counter()
 # -O1: the front end's -O2 (CorrelatedValuePropagation, then SimplifyCFG) folds the translated shaders' repeated tests of one value into switches whose cases jump past their own join.
 # Apple's GPU backend then exceeds its control-flow ID budget ("Max Unstruct ID 758 ... exceeds supported limit", a note, not an error) and falls back to a slower lowering:
 # Odyssey's alRenderMaterialUber took 25 minutes and 17.3 MB of GPU code, 31 s and 1.3 MB at -O1. Ordinary shaders come out within a few percent either way (the backend optimizes again)
-MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance']
-MAC_RECORD = ' '.join(MAC_METAL) + '; xcrun -sdk macosx metallib'
-# The compiles run the tools xcrun names, found once: each xcrun launch looks them up again, about 4 ms of a compile's two launches (8 ms a shader). -isysroot is what xcrun -sdk passes
-# (as SDKROOT), and the outputs are the same bytes (.air and .metallib, checked on Odyssey's shaders); without it the driver targets the running macOS, not the SDK, and they differ.
-# MAC_RECORD names the xcrun command, which runs the same compiler
-def xcrun_out(*args): return subprocess.run(['xcrun', '-sdk', 'macosx', *args], capture_output=True, text=True, check=True).stdout.strip()
-MAC_RUN = [xcrun_out('-f', 'metal'), '-isysroot', xcrun_out('--show-sdk-path'), *MAC_METAL[4:]]
-MAC_LINK = [xcrun_out('-f', 'metallib')]
+# PR #556: run O3 with the switch-forming CVP passes removed, then late vector cleanup.
+MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O3', '-fpreserve-invariance', '-Xclang', '-disable-llvm-passes']
+MAC_RECORD = ' '.join(MAC_METAL) + '; xcrun -sdk macosx metallib' + ios_metal.OPT_RECORD
 # -fbracket-depth: the front end stops at 256 nested brackets ("bracket nesting level exceeded maximum of 256"). Ocarina of Time's compute shaders 1f78730053feb036 and e172bd7ec218ab8e
 # (3.5 MB of MSL each) nest 259 deep in one expression and were left out. A source within the default limit compiles to the same bytes with it (checked on macOS and iOS), so, like the
 # precompiled header, the records do not name it and the Metal cache keeps its libraries. ios_metal.DEPTH is the same
 METAL_DEPTH = ['-fbracket-depth=1024']
-# The outer shader cache restores compiled libraries directly, before the MSL compile cache can check their compiler. Keep override builds separate there too.
+# The outer shader and fetch-variant caches restore compiled libraries directly,
+# before the MSL compile cache can check their compiler. Keep override builds separate there too.
 METAL_FP = dmsh_mtlcache.compiler_id('macosx') + ('\0iphoneos\0' + dmsh_mtlcache.compiler_id('iphoneos') if IOSOUT else '')
 def mac_compile(msl, air, lib):   # same interface as ios_metal.compile; the precompiled header and METAL_DEPTH change no output, so MAC_RECORD does not name them (dmsh_pch.py)
-    dmsh_pch.compile(MAC_RUN + METAL_DEPTH, msl, air)
-    subprocess.run([*MAC_LINK, air, '-o', lib], check=True)
+    ios_metal.compile(msl, air, lib, MAC_METAL)
 # The NVN driver's constant segments have one layout in every game, which dm/gfx/nvn/dmsh_abi.h holds for the host and this build (through dmsh_abi.py); nvn_mtl.m fills them the same way at run time.
 #   c2 C2_TEX + 8 r: handles bound with nvnCommandBufferBindTexture (combined texture and sampler), slot r. The driver has 32 such slots, but a game may bind higher ones, whose words lie in the
 #     image table (Hades II binds slot 34, and no image), so a texture instruction's handle anywhere below the separate texture table names a combined slot. In the image
@@ -1077,6 +1072,14 @@ def reflect(key, stage, msl, res):
             e['rw'] = bool(b and b['flags'] & 1)   # BufferUsageFlags.Write; Program.cs serializes the translator enum unchanged (atomics count as writes too)
     return binds
 
+def raw_log_opt(key, stage, src, res):
+    if not any(b['cb_slot'] == abi.GMEM_MAP_CB_SLOT and b['cb_offset'] == abi.GMEM_LOG_CB_OFFSET for b in res['sbufs']):
+        return src
+    for b in reflect(key, stage, src, res):
+        if b['kind'] == abi.KIND_GMEM_LOG:
+            return dmsh_atomic.raw_log_or(src, b['msl_name'])
+    return src
+
 DRV_FILL = {0: [(b, b + abi.C0_ROW * abi.C0_SSBO_SLOTS) for k, b in sorted(SSBO.items(), key=lambda kv: kv[1]) if k not in ('ts', 'ms')],   # c0: storage buffer address tables (vertex / compute / geometry / pixel; a task or mesh stage's: unfillable())
             2: [(TEX_BASE, SEPTEX_BASE), (IMG_BASE, IMG_BASE + abi.C2_ROW * IMG_SLOTS), (SEPTEX_BASE, SAMP_BASE), (SAMP_BASE, SAMP_BASE + abi.C2_ROW * abi.C2_SEP_SLOTS)]}   # c2: the handle tables above, all filled by the replay layer
 
@@ -1111,10 +1114,9 @@ def unfillable(dr, stage):
 RULES = []   # MSL rewrite rules attached by shader name (function, applicability test); the former dark-range remap toe has been removed (back to the original Switch brightness)
 # CODE_FP hashes the code form of this file and its helper modules (dmsh_chain.code_form): editing a comment, a docstring or the layout does not change any shader's key.
 # The library ABI enters as its values (dmsh_abi.VALUES), so a comment in dmsh_abi.h does not change a key either.
-# It covers what runs only when a shader misses the cache, since a hit restores the output and skips it. dmsh_side.py is in it: fs_uint and fs_dual write main0's shared body (shared_body).
-# dmsh_fetch.py is not, but for screen_varyings (raster_facts), nor are the other side libraries' modules: they are made again from the restored MSL on every build (ps_libraries;
-# test_dmsh_code_fp.py checks this list).
-CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_ampere, dmsh_side, abi) + ((ios_metal,) if IOSOUT else ()))
+# It covers what runs only when a shader misses the cache, since a hit restores the output and skips it. dmsh_fetch.py is not in it, but for screen_varyings (raster_facts): readable-tile variants get a
+# separate second-stage cache keyed on the generated MSL. Nor are the other side libraries' modules, made again from the restored MSL on every build (test_dmsh_code_fp.py checks this list).
+CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_handles, dmsh_ampere, dmsh_side, abi, ios_metal))
                          + b'\0' + inspect.getsource(dmsh_fetch.screen_varyings).encode()
                          + b'\0abi\0' + repr(sorted(abi.VALUES.items())).encode()).hexdigest()
 TOOL_FP = tool_fingerprint().encode()
@@ -1491,8 +1493,9 @@ def geometry_finish(key, w, j, c1):
         r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
         if r.returncode: return 'geometry MSL failed', r.stderr.strip()[:160], None
         plain = dmsh_geometry.topology_pointer(pool_arrays(precise(dmsh_atomic.check_msl(r.stdout))))
-        src = dmsh_geometry.capture_input(plain)
         res = json.load(open(os.path.join(w, k + '.res.json')))
+        plain = raw_log_opt(key, 'gs', plain, res)
+        src = dmsh_geometry.capture_input(plain)
         refl = {'key': key + '_bg' + str(t), 'route': 'B', 'chain': CHAIN, 'dm_ctl': key,
                 'source': f'{loc[key][0]}#{loc[key][1]}', 'pc_paired': pc_of[key], 'stage': 'gs',
                 'entry': 'main0', 'msl_entry_kind': 'kernel', 'threadgroup_size': [32, 1, 1],
@@ -1570,7 +1573,17 @@ def finish(key, w, j, c1):
     except ValueError as e: return 'shared store rewrite failed', str(e)[:160], None
     try: src = pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)
     except ValueError as e: return 'pool rewrite failed', str(e)[:160], None
+    res = json.load(open(os.path.join(w, key + '.res.json')))
+    try: src = raw_log_opt(key, j['stage'], src, res)
+    except ValueError as e: return 'reflection failed', str(e)[:160], None
     src = dmsh_wide.wide_loads(src)   # storage words the translator split, read whole again (see dmsh_wide.py)
+    # Reuse the raw address lookup only for read-only ordinary Ampere compute.
+    # A second synthetic binding is the write log: keep those kernels scalar.
+    if dmsh_chain.raw_load_quads() and j['stage'] == 'cs' and j.get('arch') == 'sm86' and not j.get('mesh_stage'):
+        sbufs = sorted(res['sbufs'], key=lambda b: b['binding'])
+        raw = [(i, b) for i, b in enumerate(sbufs) if b['cb_slot'] == abi.GMEM_MAP_CB_SLOT]
+        if len(raw) == 1 and raw[0][1]['cb_offset'] == 0 and not raw[0][1]['flags'] & 1:
+            src = dmsh_wide.raw_load_quads(src, raw[0][0], abi.GMEM_MAP_ENTRIES, abi.GMEM_MAP_ENTRY)
     src = border_emu(src); open(msl, 'w').write(src)   # border colours Metal lacks (see border_emu)
     first, spill = [], 0
     mesh = j.get('mesh_stage')
@@ -1591,7 +1604,6 @@ def finish(key, w, j, c1):
         src, pad = vs_pad(key, src)
         if pad: open(msl, 'w').write(src)
     lay = None; discard = False
-    res = json.load(open(os.path.join(w, key + '.res.json')))
     if j['stage'] == 'vs':   # the two depth-convention entry points (see vs_depth); the analysis below uses the source with only main0
         capture = dmsh_geometry.capture(src)
         src, full = vs_depth(src)
@@ -1609,6 +1621,11 @@ def finish(key, w, j, c1):
     else: fu = fd = None
     try: binds = reflect(key, mesh['kind'] if mesh else j['stage'], src, res)   # before the compile: a pixel shader's readable-tile version needs its texture slots (ps_libraries)
     except ValueError as e: return 'reflection failed', str(e)[:160], None
+    range_tables = {b['msl_name'] for b in binds if b['kind'] == abi.KIND_GMEM_MAP}
+    def raw_ranges(text):
+        return dmsh_wide.raw_ranges(text, range_tables, abi.GMEM_MAP_ENTRIES, abi.GMEM_MAP_ENTRY)
+    final = open(msl).read(); cached = raw_ranges(final)
+    if cached is not final: open(msl, 'w').write(cached)
     side, lost = {}, []
     def compile_targets():   # the selected targets from the same MSL (MSL identical to one compiled before takes that library, dmsh_mtlcache.py)
         if j['stage'] == 'ps': side.clear(); side.update(ps_libraries(key, msl, open(msl).read(), binds)); return
@@ -1618,7 +1635,7 @@ def finish(key, w, j, c1):
     except subprocess.CalledProcessError as e:
         if not lay and not fu and not fd: return 'metal failed', str(e)[:160], None
         lost = [name for name, extra in (('layer', lay), ('integer output', fu), ('dual source', fd)) if extra]   # kept in the reflection, as a cache hit compiles nothing: every build reports it (shader_regressions.report_losses)
-        open(msl, 'w').write(plain); lay = fu = fd = None   # the layer, integer-output and dual-source entry points are extras: a library that does not build with them is built without
+        open(msl, 'w').write(raw_ranges(plain)); lay = fu = fd = None   # the layer, integer-output and dual-source entry points are extras: a library that does not build with them is built without
         try: compile_targets()
         except subprocess.CalledProcessError as e: return 'metal failed', str(e)[:160], None
     clone(msl, os.path.join(out, key + '_b.metal'))
@@ -1636,6 +1653,9 @@ def finish(key, w, j, c1):
             'bindings': binds,
             'vertex_inputs': [{'location': int(m.group(3)), 'msl_type': m.group(1)} for m in attributes(src)],
             'raster': raster_facts(j['stage'], src), 'vs_pad': pad}
+    if j['stage'] == 'ps':
+        handles = dmsh_handles.reflection(src, binds)
+        if handles: refl['pool_handles'] = handles
     if j['stage'] == 'vs': full = open(msl).read(); vin_finish(key, full, refl); pull_finish(key, full, refl)   # the shadow-input and pulling libraries (dmsh_vin.py, dmsh_pull.py), from the source with every entry point
     refl.update(side)   # the alpha test and logic operation entry points and the readable-tile version (ps_libraries)
     write_refl(key, refl)

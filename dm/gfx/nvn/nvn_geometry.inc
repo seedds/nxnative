@@ -550,13 +550,32 @@ static void geo_mesh_encode(id<MTLRenderCommandEncoder> en_) {
 // A program's task and mesh shaders are Metal object and mesh functions (dmsh_meshstage.py), kept in the tessellation stages' places (sh[3], sh[4]). The draw goes through draw() with its
 // pixel stage alone, a program of its own as a geometry draw's raster stage is, so it takes the render pass and the pixel stage's state like any draw; mtk_pso gives its pipeline and
 // mtk_encode binds the two stages and draws. The mesh stage shares the vertex stage's table, as geo_mesh_encode's does, and a task shader has the object stage's; both read the
-// draw's first workgroup at buffer 29. A pipeline is built in the background and its draws are left out until it is ready, as for a geometry mesh pipeline
-static struct { int on, miss; NvShader *ts, *ms; uint32_t first, count; uint64_t ind, ind_first; } g_mtk;   // ind: an indirect draw's threadgroups, ind_first: where the GPU finds its first
+// draw's first workgroup at buffer 29. Native meshes have no equivalent stand-in: build required misses before encoding the draw, and prewarm the recorded state next time.
+static struct { int on, miss; NvShader *ts, *ms; uint32_t first, count; uint64_t ind; } g_mtk;
 static void draw_(const p_draw *dw, const p_draw_idx *di);
-static uint64_t g_mtk_n, g_mtk_wait;
-static nvn_hmap g_pso_mtk = {.klen = sizeof(pso_key)}; static os_unfair_lock g_pso_mtk_lock = OS_UNFAIR_LOCK_INIT;
-static NSObject *g_pso_mtk_building;
-// A mesh pipeline must have a fragment function, where a vertex one need not (validateWithDevice). A task / mesh program with no pixel shader draws depth only (Ocarina of Time's foliage shadows)
+static uint64_t g_mtk_n;
+static nvn_hmap g_pso_mtk = {.klen = sizeof(pso_key)};   // demand and warm results are installed on the submit thread
+static id<MTLFunction> mtk_nop_fragment(void);
+static id<MTLRenderPipelineState> mtk_build(const pso_key *k, NvShader *ts, NvShader *ms, NvShader *fs, NSError **error) {
+    MTLRenderPipelineDescriptor *d = pso_desc(k, nil, fs, nil, 0);
+    if (!pso_ds_valid((uint32_t)d.depthAttachmentPixelFormat, (uint32_t)d.stencilAttachmentPixelFormat)) return nil;
+    MTLMeshRenderPipelineDescriptor *m = [MTLMeshRenderPipelineDescriptor new];
+    m.meshFunction = ms->fn; m.fragmentFunction = d.fragmentFunction ?: mtk_nop_fragment(); m.maxTotalThreadsPerMeshThreadgroup = ms->mesh_threads;
+    if (ts) { m.objectFunction = ts->fn; m.payloadMemoryLength = (ts->mesh_payload + 15u) & ~15u; m.maxTotalThreadsPerObjectThreadgroup = ts->mesh_threads; }
+    m.rasterSampleCount = d.rasterSampleCount; m.alphaToCoverageEnabled = d.alphaToCoverageEnabled;
+    for (int i = 0; i < 8; i++) m.colorAttachments[i] = d.colorAttachments[i];
+    m.depthAttachmentPixelFormat = d.depthAttachmentPixelFormat; m.stencilAttachmentPixelFormat = d.stencilAttachmentPixelFormat;
+    return [g_dev newRenderPipelineStateWithMeshDescriptor:m options:MTLPipelineOptionNone reflection:nil error:error];
+}
+static void mtk_bind_key(pso_key *k, NvShader *ts, NvShader *ms, NvShader *fs) {
+    k->vs = (__bridge void *)ms; k->fs = (__bridge void *)fs;
+    k->fsfn = (__bridge void *)(ts ? ts->fn : ms->fn);   // the third function, distinct from a specialized fragment
+}
+static void mtk_claim(pso_key *k, NvShader *ts, NvShader *ms, NvShader *fs, id<MTLRenderPipelineState> ps) {
+    mtk_bind_key(k, ts, ms, fs);
+    id current = hm_get_id(&g_pso_mtk, k);
+    if (!current || current == NSNull.null) hm_put_id(&g_pso_mtk, k, ps);
+}
 static id<MTLFunction> mtk_nop_fragment(void) {
     static id<MTLFunction> fn; static dispatch_once_t once;
     dispatch_once(&once, ^{ NSError *e = nil; id<MTLLibrary> l = [g_dev newLibraryWithSource:@"fragment void dm_mesh_nop() {}" options:nil error:&e];
@@ -567,53 +586,62 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     NvShader *ts = g_mtk.ts, *ms = g_mtk.ms, *fs = raster->sh[1];
     pso_key k; pso_key_fill(&k, ms, fs, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, 0);
     memset(k.attr, 0, sizeof k.attr); memset(k.attr_hi, 0, sizeof k.attr_hi); memset(k.stream, 0, sizeof k.stream);
-    k.fsfn = (__bridge void *)(ts ? ts->fn : ms->fn);   // with ms in the key's vertex place: the task shader is the third of the pipeline's functions
-    os_unfair_lock_lock(&g_pso_mtk_lock); id ps = hm_get_id(&g_pso_mtk, &k);
-    if (!ps) { if (!g_pso_mtk_building) g_pso_mtk_building = [NSObject new]; hm_put_id(&g_pso_mtk, &k, g_pso_mtk_building); }
-    os_unfair_lock_unlock(&g_pso_mtk_lock);
-    if (ps) return ps == NSNull.null || ps == g_pso_mtk_building ? nil : ps;
-    MTLRenderPipelineDescriptor *d = pso_desc(&k, ms, fs, nil, 0);
-    MTLMeshRenderPipelineDescriptor *m = [MTLMeshRenderPipelineDescriptor new];
-    m.meshFunction = ms->fn; m.fragmentFunction = d.fragmentFunction ?: mtk_nop_fragment(); m.maxTotalThreadsPerMeshThreadgroup = ms->mesh_threads;
-    if (ts) { m.objectFunction = ts->fn; m.payloadMemoryLength = (ts->mesh_payload + 15u) & ~15u; m.maxTotalThreadsPerObjectThreadgroup = ts->mesh_threads; }
-    m.rasterSampleCount = d.rasterSampleCount; m.alphaToCoverageEnabled = d.alphaToCoverageEnabled;
-    for (int i = 0; i < 8; i++) m.colorAttachments[i] = d.colorAttachments[i];
-    m.depthAttachmentPixelFormat = d.depthAttachmentPixelFormat; m.stencilAttachmentPixelFormat = d.stencilAttachmentPixelFormat;
-    const char *tk = ts ? ts->key : "-", *mk = ms->key, *fk = fs ? fs->key : "-"; pso_key kk = k;
-    dispatch_async(pp_bg_queue(), ^{
-        NSError *e = nil; uint64_t t0 = bp_now();
-        id<MTLRenderPipelineState> p = [g_dev newRenderPipelineStateWithMeshDescriptor:m options:MTLPipelineOptionNone reflection:nil error:&e];
-        MLOG("%stask / mesh pipeline: task %s mesh %s fragment %s, %.1f ms in the background%s%s", p ? "" : "[RED] ", tk, mk, fk, (bp_now() - t0) / 1e6, p ? "" : ": ", p ? "" : e.localizedDescription.UTF8String);
-        os_unfair_lock_lock(&g_pso_mtk_lock); hm_put_id(&g_pso_mtk, &kk, p ?: NSNull.null); os_unfair_lock_unlock(&g_pso_mtk_lock);
-    });
-    return nil;
+    mtk_bind_key(&k, ts, ms, fs);
+    id ps = hm_get_id(&g_pso_mtk, &k);
+    if (ps) return ps == NSNull.null ? nil : ps;
+    NSError *error = nil; uint64_t start = bp_now();
+    ps = mtk_build(&k, ts, ms, fs, &error);
+    uint64_t elapsed = bp_now() - start;
+    g_bp_pso_n++; g_bp_pso_ns += elapsed;
+    const char *task = ts ? ts->key : "-";
+    if (!ps) {
+        MLOG("[RED] task / mesh pipeline failed: task %s mesh %s fragment %s: %s", task, ms->key, fs ? fs->key : "-",
+             error ? error.localizedDescription.UTF8String : "invalid depth/stencil formats");
+        hm_put_id(&g_pso_mtk, &k, NSNull.null); return nil;
+    }
+    hm_put_id(&g_pso_mtk, &k, ps);
+    k.fsfn = NULL;   // The third function has its own key column; this is not a specialized fragment.
+    pso_skey sk; char hex[sizeof sk * 2 + 1];
+    pso_skey_from(&k, ms, fs, 0, NULL, &sk); pso_skey_hex(&sk, hex);
+    pso_record("M\t%s\t%s\n", task, hex); pso_user_record("M\t%s\t%s\n", task, hex);
+    MLOG("task / mesh pipeline: task %s mesh %s fragment %s, %.1f ms required at frame %llu", task, ms->key, fs ? fs->key : "-",
+         elapsed / 1e6, (unsigned long long)atomic_load(&g_cur_frame));
+    return ps;
 }
 static void mtk_encode(id<MTLRenderCommandEncoder> en_) {
     id<MTL4RenderCommandEncoder> en = (id<MTL4RenderCommandEncoder>)en_; NvShader *ts = g_mtk.ts, *ms = g_mtk.ms;
     [en setArgumentTable:g_vt atStages:MTLRenderStageMesh];
-    uint64_t first_gpu = g_mtk.ind_first;
-    if (!g_mtk.ind) { id<MTLBuffer> b; size_t o = arena_alloc(16, &b); memcpy((uint8_t *)b.contents + o, &g_mtk.first, 4); first_gpu = b.gpuAddress + o; }
+    uint64_t first = g_mtk.ind + 16;
+    if (!g_mtk.ind) { id<MTLBuffer> b; size_t o = arena_alloc(16, &b); memcpy((uint8_t *)b.contents + o, &g_mtk.first, 4); first = b.gpuAddress + o; }
     if (ts) { [en setArgumentTable:g_ot atStages:MTLRenderStageObject]; g_args_dirty[3] = 1; encode_args(en, ts, 3, 0);
-              if (rec_on()) rec_table_op(RO_T_ADDR, g_ot, first_gpu, DMSH_MESH_FIRST_SLOT); else [g_ot setAddress:first_gpu atIndex:DMSH_MESH_FIRST_SLOT]; }
+              if (rec_on()) rec_table_op(RO_T_ADDR, g_ot, first, DMSH_MESH_FIRST_SLOT); else [g_ot setAddress:first atIndex:DMSH_MESH_FIRST_SLOT]; }
     g_args_dirty[4] = 1; encode_args(en, ms, 4, 1);
-    enc_r_vbuf(en, DMSH_MESH_FIRST_SLOT, first_gpu);
-    if (g_mtk.ind) [en drawMeshThreadgroupsWithIndirectBuffer:g_mtk.ind threadsPerObjectThreadgroup:MTLSizeMake(ts ? ts->mesh_threads : 1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(ms->mesh_threads, 1, 1)];
-    else [en drawMeshThreadgroups:MTLSizeMake(g_mtk.count, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(ts ? ts->mesh_threads : 1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(ms->mesh_threads, 1, 1)];
+    enc_r_vbuf(en, DMSH_MESH_FIRST_SLOT, first);
+    MTLSize ot = MTLSizeMake(ts ? ts->mesh_threads : 1, 1, 1), mt = MTLSizeMake(ms->mesh_threads, 1, 1);
+    if (g_mtk.ind) [en drawMeshThreadgroupsWithIndirectBuffer:g_mtk.ind threadsPerObjectThreadgroup:ot threadsPerMeshThreadgroup:mt];
+    else [en drawMeshThreadgroups:MTLSizeMake(g_mtk.count, 1, 1) threadsPerObjectThreadgroup:ot threadsPerMeshThreadgroup:mt];
 }
 // DrawMeshTasksIndirect: {count, first}, which the game's culling writes earlier in the submission, while Metal's indirect mesh draw takes {x, y, z}. mdx_run copies the count to a {count, 1, 1} on the
 // GPU, before the render pass and for every such draw up to the next write, and the shader reads first from the record. Reading the record on the CPU instead took a wait for the GPU at each hazard:
 // 73 % of the submit thread in Ocarina of Time's Kokiri Forest, frames of 90 ms and more against 25 ms of GPU work
 static void mesh_tasks_draw(const p_draw *dw) {
     if (!S.prog || (!dw->ind && dw->count <= 0)) return;
-    // Diagnostic DM_NVN_SKIP_MESH=1 (off by default): drops every task / mesh draw, as DM_NVN_SKIP_FS drops draws by fragment shader, to measure what they cost in all (the picture is wrong)
-    { static int skip = -1; if (skip < 0) { const char *e = getenv("DM_NVN_SKIP_MESH"); skip = e && atoi(e); if (skip) MLOG("DM_NVN_SKIP_MESH: task / mesh draws dropped (diagnostic; the picture is wrong)"); } if (skip) return; }
     __unsafe_unretained NvProg *pr = prog_get(S.prog);
     NvShader *ts = pr ? pr->sh[3] : nil, *ms = pr ? pr->sh[4] : nil;
     if (ts && ts->mesh_kind != 1) ts = nil;
     if (!ms || ms->mesh_kind != 2 || !ms->fn || (ts ? !ts->fn : !ms->mesh_notask)) {
         RED_ONCE(150, "DrawMeshTasks without its task and mesh shaders (task %s mesh %s): draw skipped", ts ? ts->key : "-", ms ? ms->key : "-"); return; }
     image_prepare(pr, 1u << 3 | 1u << 4);
-    if (g_nubd && (g_enc || ubd_lazy()) && ((ts && ubd_conflict_sh(ts, 3)) || ubd_conflict_sh(ms, 4))) { g_ubd_conflicts++; rp_end(); ubd_land(); }   // as draw_ does for its stages
+    if (g_nubd && ((dw->ind && ubd_hits(dw->ind, dw->ind + 8)) || (ts && ubd_conflict_sh(ts, 3)) || ubd_conflict_sh(ms, 4))) {
+        g_ubd_conflicts++; rp_end(); ubd_land();
+    }
+    uint64_t indirect = 0;
+    if (dw->ind) {
+        const ixc_ent *ix = ixc_find(dw, NULL);
+        if (!ix) { ixc_run(dw, NULL); ix = ixc_find(dw, NULL); }
+        if (!ix || !ix->args) { RED_ONCE(88, "indirect mesh draw skipped: argument address %#llx cannot be converted", (unsigned long long)dw->ind); return; }
+        indirect = ix->args;
+    }
     NvProg *raster = pr->geo_lean_raster;   // the pixel stage alone
     if (!raster || raster->sh[1] != pr->sh[1] || raster->sh[0]) { raster = [NvProg new]; raster->sh[1] = pr->sh[1]; pr->geo_lean_raster = raster; }
     uint64_t ind = 0, ind_first = 0;
@@ -622,14 +650,14 @@ static void mesh_tasks_draw(const p_draw *dw) {
         if (!ind || !mtl_gpu_addr(dw->ind, 8, &mb, &mo, &ind_first)) { RED_ONCE(154, "DrawMeshTasksIndirect record at %#llx is in no memory pool: draw skipped", (unsigned long long)dw->ind); return; }
         ind_first += 4; }
     g_mtk.on = 1; g_mtk.miss = 0; g_mtk.ts = ts; g_mtk.ms = ms; g_mtk.first = (uint32_t)dw->first; g_mtk.count = (uint32_t)dw->count;
-    g_mtk.ind = ind; g_mtk.ind_first = ind_first;
+    g_mtk.ind = indirect;
     g_geo_program = raster;
     p_draw triangle = {.prim = 4, .count = 3, .instances = 1};
     draw_(&triangle, NULL);
     g_geo_program = nil; g_mtk.on = 0; args_dirty_all();
-    if (g_mtk.miss) { g_mtk_wait++; return; }
-    swrite_note(pr); g_wr_epoch++;
-    if (!g_mtk_n++) MLOG("task / mesh: first draw, task %s mesh %s fragment %s, %u workgroups from %u%s", ts ? ts->key : "-", ms->key, pr->sh[1] ? pr->sh[1]->key : "-", g_mtk.count, g_mtk.first, ind ? " (indirect)" : "");
+    if (g_mtk.miss) return;
+    swrite_note(pr); if (prog_swrites(pr)) g_wr_epoch++;
+    if (!g_mtk_n++) MLOG("task / mesh: first %s draw, task %s mesh %s fragment %s", indirect ? "indirect" : "direct", ts ? ts->key : "-", ms->key, pr->sh[1] ? pr->sh[1]->key : "-");
 }
 static uint64_t g_geo_mesh_n, g_geo_mesh_wait;   // mesh draws; draws the compute path drew while their mesh pipeline was built
 static int geo_mesh_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
@@ -920,6 +948,7 @@ static void geo_capture_one(id<MTL4RenderCommandEncoder> re, const geo_job *j) {
     else enc_r_draw_instanced(re, MTLPrimitiveTypePoint, j->dw.first, j->dw.count, j->dw.instances, j->first_instance);
 }
 static void geo_gs_one(id<MTL4ComputeCommandEncoder> ce, const geo_job *j) {
+    cbn_prog(j->pr);   // the draw's own stages: a run is encoded after its draws, and its raster draw has only the output reader and the pixel stage
     g_draw_binst = j->first_instance;
     g_geo_bind[0] = j->input; g_geo_bind[1] = j->output; g_geo_bind[2] = j->raw; g_geo_bind[3] = j->info; g_geo_bind[4] = j->compact_map ? j->compact_map : j->map;
     args_dirty_all(); encode_args(ce, j->gs, 2, 0); enc_c_pso(ce, j->gs->geo_pso);

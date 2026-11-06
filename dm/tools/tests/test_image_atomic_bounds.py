@@ -21,6 +21,7 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -325,14 +326,14 @@ class Compiler(unittest.TestCase):
         self.assertTrue(metal_sdks and all(sdk in ('macosx', 'iphoneos') for sdk in metal_sdks),
                         'DMSH_TEST_METAL_SDKS must be macosx, iphoneos or macosx,iphoneos')
         for sdk in metal_sdks:
-            # Match dmsh_build.MAC_METAL and ios_metal.METAL;
-            # the latter needs relaxed NaN-aware arithmetic.
-            flags = ['-fpreserve-invariance'] if sdk == 'macosx' else [
-                '-mios-version-min=18.0', '-fmetal-math-mode=relaxed', '-fpreserve-invariance']
+            # Use the production AIR optimizer as well as its platform flags.
+            sys.path.insert(0, str(ROOT / 'dm/ios/tools')); import ios_metal
+            tree = ast.parse((ROOT / 'dm/gfx/tools/dmsh_build.py').read_text())
+            metal = next(ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign)
+                         and any(isinstance(t, ast.Name) and t.id == 'MAC_METAL' for t in n.targets)) if sdk == 'macosx' else ios_metal.METAL
             air = work / (key + '.' + sdk + '.air')
             library = work / (key + '.' + sdk + '.metallib')
-            subprocess.run(['xcrun','-sdk',sdk,'metal','-c',*flags,str(msl),'-o',str(air)],check=True)
-            subprocess.run(['xcrun','-sdk',sdk,'metallib',str(air),'-o',str(library)],check=True)
+            ios_metal.compile(msl, air, library, metal)
             self.assertGreater(air.stat().st_size, 0)
             self.assertGreater(library.stat().st_size, 0)
             print('synthetic Metal compile/link passed:', key, sdk, library.stat().st_size, 'bytes')

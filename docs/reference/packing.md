@@ -398,3 +398,14 @@
 - **Cause:** the base game's HtmlDocument NCA can be sparse too (16 KB, beside the sparse Program NCA). `--html` reads the update's HtmlDocument NCAs, each over a base one when it is a patch, and then every base HtmlDocument NCA on its own; a sparse one read alone fails the hash check while its tables open.
 - **Fix:** `dm/tools/nx_extract/Program.cs` reads no sparse base HtmlDocument NCA on its own (`a sparse HtmlDocument NCA of the base game (… bytes): read only through the update's patch, not alone`), as Horizon mounts it only through its patch.
 - **Found on:** [Minecraft Dungeons II](../../dm/games/0100A7C01B792000/README.md), base v0 with update v131072: the update's patch (`accessible-urls`) and its full legal information NCA are read, the base's legal information NCA too.
+- **Found on:** Minecraft Dungeons II (`0100A7C01B792000`, no profile yet), base v0 (SDK 22.2.0) with update v131072 (1.1.3.0). Applies to any game whose base Program NCA is sparse.
+
+### Runtime pipeline cache shards packed as a bundled archive
+
+- **Symptom:** a Mac app contains several numbered `.mtl4a` files and `prebuilt.tsv`, but logs `pipeline archive bundled with the app: none for this GPU`; its first start builds bases on the device.
+- **Cause:** `pack_app.py --pso` accepted any `.mtl4a` plus a stamp. The runtime cache uses numbered shards, while `pso_bundle_open` selects exactly `<device architecture>.mtl4a`, such as `applegpu_g16s.mtl4a`. A signed bundle with cache shards therefore passes structural packaging checks but supplies no usable bundled archive.
+- **Fix:** pass the output of `dm/gfx/tools/pso_offline.py`, with the target GPU architecture and system version. The packer now requires an `applegpu_<architecture>.mtl4a` and its stamp before copying files; a numbered runtime cache is rejected with an actionable error. This checks the bundle format, not archive compatibility with every device: the host still validates and probes the selected archive.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#open), while preparing the experimental Mac app from campaign artifacts. The runtime-cache folder was incorrectly supplied to the packer; the offline archive and repack are tracked separately from gameplay validation.
+- **Check:** `test_nsp_mac_app.py` exercises the real packing entry point with a numbered cache and stamp and requires rejection before bundle creation; valid architecture archives continue through packing and reuse tests.
+
+Front-ends: `pack_app.py --pso` must point to the offline archive output, not `DM_PSO_ARCHIVE`'s runtime cache directory.

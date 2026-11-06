@@ -127,7 +127,7 @@ Under a game, "60 fps with 1.2.0" means it runs at 60 fps (30 on the console) wi
 <tr>
 <td align="center" valign="top" width="33%"><img src="docs/images/mario-tennis-fever.jpg" width="256" alt="Mario Tennis Fever"><br><small><b><a href="dm/games/0400D4201C6EA000/README.md">Mario Tennis Fever</a></b><br>Switch 2, Mac only, from a dump</small></td>
 <td align="center" valign="top" width="33%"><img src="docs/images/yoshi-and-the-mysterious-book.jpg" width="256" alt="Yoshi and the Mysterious Book"><br><small><b><a href="dm/games/0400245021D2C000/README.md">Yoshi and the Mysterious Book</a></b><br>Switch 2, Mac only</small></td>
-<td align="center" valign="top" width="33%"><img src="docs/images/zelda-ocarina-of-time.jpg" width="256" alt="The Legend of Zelda: Ocarina of Time"><br><small><b><a href="dm/games/0400486024DEC000/README.md">The Legend of Zelda: Ocarina of Time</a></b><br>Switch 2, Mac only, from a NUP</small></td>
+<td align="center" valign="top" width="33%"><img src="docs/images/zelda-ocarina-of-time.jpg" width="256" alt="The Legend of Zelda: Ocarina of Time"><br><small><b><a href="dm/games/0400486024DEC000/README.md">The Legend of Zelda: Ocarina of Time</a></b></small></td>
 </tr>
 <tr>
 <td align="center" valign="top" width="33%"><img src="docs/images/mario-kart-8-deluxe.jpg" width="256" alt="Mario Kart 8 Deluxe"><br><small><b><a href="dm/games/0100152000022000/README.md">Mario Kart 8 Deluxe</a></b><br>no Mii heads</small></td>

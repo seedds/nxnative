@@ -262,17 +262,39 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand g = compute ? null : context.ShiftRightU32(lane, Const(2));
             Operand t = compute ? null : context.BitwiseAnd(lane, Const(3));
 
-            // nxnative: LDSM reads rows that other lanes of the warp stored (STS) just before, often with no BAR between them (Ocarina of Time's NDVE movie networks and its
-            // scene's compute). On the Switch a warp's shared memory accesses are in order; Metal orders another lane's threadgroup store and this lane's load only through a
-            // barrier, and its compiler moves them past each other: dotted rows, every other pixel of a few rows wrong (the high halves of packed pairs), in other places each run.
-            // LDSM is warp-collective (the whole warp runs it), so a subgroup barrier before its reads (the stores have landed) and one after (no lane's next store reaches the
-            // rows before every lane has read them) is safe. In a compute shader the barriers bracket the MatrixLoads, so they bracket the per-lane code TensorPass puts in their
-            // place; TensorPass does not count a subgroup barrier as a shared memory write, so an HMMA still reads its A straight from where the LDSM read it
+            // nxnative: LDSM reads rows that other lanes of the warp stored (STS) just before, with no BAR between (the agl networks of Ocarina of Time's movie
+            // filter); the warp's shared memory accesses are in order on the Switch, while Metal orders another lane's threadgroup store and this load only through
+            // a barrier, and the compiler moved them past each other: every other pixel of a few rows wrong (the high halves). LDSM is warp-collective (the whole warp
+            // runs it), so a subgroup barrier before its loads and one after (no lane's next store over the rows before all have read them) is safe
             context.SubgroupBarrier();
 
-            // nxnative: in a compute shader, one MatrixLoad a matrix (sources: shared memory id, mode, row address, matrix), which TensorPass lowers to the same per-lane code
-            // (LdsmLane) once it knows whether the HMMAs it feeds read their A straight from where it reads (Ampere HMMA through simdgroup_matrix). One destination each:
-            // the optimizer's dead code removal takes an operation whose destination nothing reads as dead, sources included
+            for (int m = 0; m < count; m++)
+            {
+                if (mode == 0)
+                {
+                    Operand rowAddr = context.Shuffle(addr, context.IAdd(g, Const(8 * m)));
+                    Operand byteOffset = context.IAdd(rowAddr, context.ShiftLeft(t, Const(2)));
+                    results[m] = context.Load(StorageKind.SharedMemory, id, context.ShiftRightU32(byteOffset, Const(2)));
+                }
+                else
+                {
+                    Operand[] h = new Operand[2];
+
+                    for (int j = 0; j < 2; j++)
+                    {
+                        Operand row = context.IAdd(context.ShiftLeft(t, Const(1)), Const(j));
+                        Operand rowAddr = context.Shuffle(addr, context.IAdd(row, Const(8 * m)));
+                        Operand byteOffset = context.IAdd(rowAddr, context.ShiftLeft(g, Const(1)));
+                        Operand word = context.Load(StorageKind.SharedMemory, id, context.ShiftRightU32(byteOffset, Const(2)));
+                        h[j] = context.BitfieldExtractU32(word, context.ShiftLeft(context.BitwiseAnd(byteOffset, Const(2)), Const(3)), Const(16));
+                    }
+
+                    results[m] = context.BitwiseOr(h[0], context.ShiftLeft(h[1], Const(16)));
+                }
+            }
+
+            context.SubgroupBarrier();
+
             for (int m = 0; m < count && x.Rd + m < RegisterConsts.RegisterZeroIndex; m++)
             {
                 Operand result = compute ? context.Add(Instruction.MatrixLoad, Local(), Const(id), Const(mode), addr, Const(m)) : LdsmLane(context, g, t, addr, id, m, mode);

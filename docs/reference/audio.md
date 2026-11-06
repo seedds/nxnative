@@ -184,6 +184,14 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Cause:** the Span layout took the lock at a fixed +0x2d0, which holds for SDK 19.3 to 21.4. SDK 22 moved it: `UpdateImpl` in 22.2.8 (`sdk+0x238530`) and 22.2.5 locks the `SdkMutexType` at +0x2d8 (`add x19, x0, #0x2d8; …; mov x0, x19; bl SdkMutexType::Lock`), as `SendCommandToDsp`, `Start`, `Stop` and `FinalizeImpl` do. Locked at +0x2d0, the render excluded nothing, and the game's `RequestUpdate` rewrote a voice while its commands were being generated. From SDK 19 `Update` reads the system tick first and calls `UpdateImpl`, so a scan of `Update` finds no lock.
 - **Fix:** `update_lock` (`hle_audren.c`) reads `Update`, then `UpdateImpl`, whatever the layout, and a miss in both is a red line. The start-up line names what it took: `update lock SdkMutexType at +0x2d8`. Test: `t_audren_layout`.
 - **Found on:** The Legend of Zelda: Ocarina of Time (Switch 2, `0400486024DEC000`, update v131072; its profile is in pull request #1299): the second run through its opening movie crashed, and the run with the offset read off `UpdateImpl` played the opening through to Kokiri Forest with sound. Checked statically on the `sdk` builds on hand: SDK 19.3 to 21.4 read +0x2d0, as before. SDK 22.2.0 (Fortune's Weave, EA SPORTS FC 27) is not on hand.
+- **Note:** the render thread's call takes another route in this SDK too: see [The render thread's route through the public `ExecuteAudioRendererRendering` (SDK 20)](#the-render-threads-route-through-the-public-executeaudiorendererrendering-sdk-20); the update lock at +0x2d0 is in [The renderer's update lock (`update_lock`)](#the-renderers-update-lock-update_lock), and SDK 22 moved it ([The update lock read off `UpdateImpl` (SDK 22)](#the-update-lock-read-off-updateimpl-sdk-22)).
+
+### The update lock read off `UpdateImpl` (SDK 22)
+
+- **Symptom:** `CRASH sig=11 addr=0x20` at `nn::audio::server::AddressInfo::GetReference` (`sdk+0x249874`) on the render thread, under `CommandGenerator::GenerateDataSourceCommand` and `render_once`, minutes into a movie. The `AddressInfo` the crash register points at is all zeros, though the function had just read a non-null memory pool pointer from it.
+- **Cause:** the Span layout took the lock at a fixed +0x2d0. SDK 22.2.8's `UpdateImpl` (`sdk+0x238530`) locks the `SdkMutexType` at +0x2d8 (`add x19, x0, #0x2d8; …; mov x0, x19; bl SdkMutexType::Lock`). Locked at +0x2d0, the render excluded nothing and wrote a lock word into the field before the mutex. The game's `RequestUpdate` then rewrote a voice while its commands were being generated. `Update` itself reads the system tick first and calls `UpdateImpl`, so `update_lock` found no lock there.
+- **Fix:** for the Span layout `update_lock` reads the offset off `UpdateImpl` (`hle_audren.c`) and keeps +0x2d0 only when it finds no `SdkMutexType::Lock`. The start-up line names it: `update lock SdkMutexType at +0x2d8`.
+- **Found on:** The Legend of Zelda: Ocarina of Time (Switch 2, `0400486024DEC000`, update v131072; its profile is in pull request #1299): the second run through its opening movie crashed; the run after the fix played the opening through and Kokiri Forest ran with sound.
 
 ### SDK 21 DSP command header without a magic
 
@@ -325,6 +333,10 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Cause:** the game lists the virtual input devices when its audio starts (`main+0xf48124`) and opens the first with `audio::OpenInputStream` if there is one. The list goes through a service the host does not serve.
 - **Fix:** `ListVirtualInputDevices` reports none (`hle_audio.c` `h_is_List`), and the game skips its input stream.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (SDK 22.2.8); Star Fox imports the same calls.
+- **Symptom:** at boot, `[RED] sf: the game connects to service auddmg:u itself, which the host does not serve`, then `game called nn::diag abort: Result 0xa99` in the sdk (`nn::audio::detail::ListVirtualInputDevices`).
+- **Cause:** SDK 22's virtual input devices (the Switch 2's microphone routing) are listed through the `auddmg:u` service, which the SDK's own client connects to ([services the game connects to itself](../../dm/host/hle_sf.c)). `nn::audio::ListVirtualInputDevices` had no hook, so the SDK's code ran and aborted on the refused connection.
+- **Fix:** `hle_audio.c` answers `ListVirtualInputDevices` with no devices, as `ListAudioIns` ([above](#no-audio-input-devices)): the host has no microphone.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), which lists them at boot.
 
 ### `OpenAudioOut` without a release event (SDK 22)
 

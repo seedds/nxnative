@@ -51,11 +51,21 @@ static void shake_note(void) {
     if (on) { if (t >= atomic_load(&g_shake_end)) atomic_store(&g_shake_t0, t); atomic_store(&g_shake_end, UINT64_MAX); }
     else { uint64_t t0 = atomic_load(&g_shake_t0); atomic_store(&g_shake_end, t0 + ((t - t0) / SHAKE_CYCLE_NS + 1) * SHAKE_CYCLE_NS); }
 }
+// Diagnostic benchmark isolation: physical buttons/sticks must not alter a scripted route.
+// Normal play retains the merged paths. The value is fixed on first physical publication.
+static _Atomic int g_keys_only = -1;
+static int keys_only(void) {
+    int v = atomic_load_explicit(&g_keys_only, memory_order_relaxed);
+    if (v < 0) { const char *e = getenv("DM_KEYS_ONLY"); v = e && atoi(e) != 0; atomic_store_explicit(&g_keys_only, v, memory_order_relaxed); }
+    return v;
+}
 void dm_input_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
+    if (keys_only()) return;
     uint64_t old = atomic_exchange(&g_btn, buttons); atomic_fetch_or(&g_latch, buttons & ~old); atomic_fetch_or(&g_peek_latch, buttons & ~old); atomic_store(&g_axes, pack(lx, ly, rx, ry));
     shake_note();
 }
 void dm_pad_set_player(int p, uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
+    if (keys_only()) return;
     if (p < 0 || p >= DM_PLAYERS) return;
     uint64_t old = atomic_exchange(&g_pad_btn[p], buttons); atomic_fetch_or(&g_pad_latch[p], buttons & ~old); atomic_fetch_or(&g_peek_latch, buttons & ~old); atomic_store(&g_pad_axes[p], pack(lx, ly, rx, ry));
     if (!p) shake_note();

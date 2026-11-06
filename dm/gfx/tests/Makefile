@@ -73,7 +73,12 @@ t_deswz_gpu: t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../
 	clang $(CFLAGS) -fobjc-arc -o $@ t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../nvn/nvn_tex.c ../nvn/host_msl.m -framework Metal -framework Foundation
 t_tex_layout: t_tex_layout.c ../nvn/nvn_tex.c ../nvn/nvn_tex.h
 	clang -O1 -Wall -o $@ t_tex_layout.c ../nvn/nvn_tex.c
-t_refl: t_refl.m ../nvn/nvn_refl.m ../nvn/nvn_refl.h ../nvn/dmsh_chain.h
+t_handle_expr: t_handle_expr.m ../nvn/nvn_refl.m ../nvn/nvn_refl.h ../nvn/nvn_handle_expr.h
+	clang $(CFLAGS) -fobjc-arc -o $@ t_handle_expr.m ../nvn/nvn_refl.m $(FW)
+t_handle_pool: t_handle_pool.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_handle_pool.m $(MTL_T_SRC) $(FW)
+check_t_handle_pool: RUN_ENV = MTL_DEBUG_LAYER=1
+t_refl: t_refl.m ../nvn/nvn_refl.m ../nvn/nvn_refl.h ../nvn/nvn_handle_expr.h ../nvn/dmsh_chain.h
 	clang -O1 -g -Wall -I../nvn -fobjc-arc -o $@ t_refl.m ../nvn/nvn_refl.m -framework Metal -framework Foundation
 t_hmap: t_hmap.c ../nvn/nvn_hmap.h
 	clang -O1 -Wall -o $@ t_hmap.c
@@ -115,10 +120,33 @@ check_t_perf_order: t_perf_order
 	MTL_DEBUG_LAYER=1 ./t_perf_order
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_perf_order
 	DM_NVN_FAST_WAKE=0 DM_NVN_SLICE_MERGE=0 DM_NVN_CS_HOIST=0 MTL_DEBUG_LAYER=1 ./t_perf_order
+# Failed GPU work named (DM_TEST_GPU_HANG, set by the test): the segment that hung, its shader keys and the segment before it; with the encode thread too, which labels through its record
+t_gpu_hang_names: t_gpu_hang_names.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_gpu_hang_names.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_gpu_hang_names
+check_t_gpu_hang_names: t_gpu_hang_names
+	MTL_DEBUG_LAYER=1 ./t_gpu_hang_names
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_gpu_hang_names
 t_link_ticks: t_link_ticks.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_link_ticks.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 t_cpu_tex: t_cpu_tex.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_cpu_tex.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+t_retired_pool: t_retired_pool.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_retired_pool.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_retired_pool: RUN_ENV = MTL_DEBUG_LAYER=1
+t_alias_pool_delta: t_alias_pool_delta.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_alias_pool_delta.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_alias_pool_delta: RUN_ENV = MTL_DEBUG_LAYER=1
+t_pool_registration_delta: t_pool_registration_delta.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_registration_delta.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_pool_registration_delta: RUN_ENV = MTL_DEBUG_LAYER=1
+t_transient_pool_delta: t_transient_pool_delta.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_transient_pool_delta.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_transient_pool_delta: RUN_ENV = MTL_DEBUG_LAYER=1
+t_deferred_release: t_deferred_release.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_deferred_release.m $(MTL_T_SRC) $(FW)
+t_mesh_indirect: t_mesh_indirect.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_mesh_indirect.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_cpu_tex
 check_t_cpu_tex: t_cpu_tex
 	MTL_DEBUG_LAYER=1 ./t_cpu_tex --metal
@@ -170,6 +198,17 @@ check_t_gmem_words: t_gmem_words
 t_pool_notes: t_pool_notes.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_notes.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 check_t_pool_notes: RUN_ENV = MTL_DEBUG_LAYER=1
+# Raw global memory on the GPU through the host's pool table (t_gmem_raw.m), with the shader test_dmsh_ampere_mem.py translates (DMSH_TEST_XLATE, default the in-repo translator);
+# skipped only when the translator does not run (its exit code 77)
+t_gmem_commit: t_gmem_commit.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_gmem_commit.m $(MTL_T_SRC) $(FW)
+check_t_gmem_commit: RUN_ENV = MTL_DEBUG_LAYER=1
+t_gmem_raw: t_gmem_raw.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_gmem_raw.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_gmem_raw
+check_t_gmem_raw: t_gmem_raw
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; rc=0; DMSH_TEST_XLATE=$${DMSH_TEST_XLATE:-$(CURDIR)/../tools/dmsh_xlate_bin/dmsh_xlate} python3 test_dmsh_ampere_mem.py --fixture "$$work" || rc=$$?; \
+	if [ $$rc = 77 ]; then echo "t_gmem_raw: skipped, the translator does not run"; elif [ $$rc != 0 ]; then exit $$rc; else MTL_DEBUG_LAYER=1 ./t_gmem_raw "$$work/raw.metallib"; fi
 t_sparse_tiles: t_sparse_tiles.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_tiles.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 t_readback: t_readback.m $(MTL_T_DEP)
@@ -210,6 +249,9 @@ check_t_reorder_chain: RUN_ENV = MTL_DEBUG_LAYER=1
 t_defer_chain: t_defer_chain.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_defer_chain.m $(MTL_T_SRC) $(FW)
 check_t_defer_chain: RUN_ENV = MTL_DEBUG_LAYER=1
+t_tbdr_ubd: t_tbdr_ubd.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_tbdr_ubd.m $(MTL_T_SRC) $(FW)
+check_t_tbdr_ubd: RUN_ENV = MTL_DEBUG_LAYER=1
 t_zskip: t_zskip.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_zskip.m $(MTL_T_SRC) $(FW)
 t_xv: t_xv.m $(MTL_T_DEP)
@@ -244,6 +286,12 @@ check_t_rt_lifetime: t_rt_lifetime
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_rt_lifetime
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_rt_lifetime
 check_t_rast_discard: RUN_ENV = MTL_DEBUG_LAYER=1
+t_idle_pool: t_idle_pool.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_idle_pool.m $(MTL_T_SRC) $(FW)
+check_t_idle_pool: RUN_ENV = MTL_DEBUG_LAYER=1
+t_gmem_marks: t_gmem_marks.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_gmem_marks.m $(MTL_T_SRC) $(FW)
+check_t_gmem_marks: RUN_ENV = MTL_DEBUG_LAYER=1
 t_cpu_storage: t_cpu_storage.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_cpu_storage.m $(MTL_T_SRC) $(FW)
 check_t_cpu_storage: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -425,6 +473,8 @@ t_image_attachment_store: t_image_attachment_store.m $(MTL_T_DEP)
 check_t_image_attachment_store: RUN_ENV = MTL_DEBUG_LAYER=1
 t_image_primitive_id: t_image_primitive_id.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_primitive_id.m $(MTL_T_SRC) $(FW)
+t_lookahead_bindless: t_lookahead_bindless.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_lookahead_bindless.m $(MTL_T_SRC) $(FW)
 t_unwritten_store: t_unwritten_store.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_unwritten_store.m $(MTL_T_SRC) $(FW)
 check_t_unwritten_store: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -493,3 +543,45 @@ check_t_logic: t_logic
 # MUFU.SIN / COS lowered from turns through the fraction (InstEmitAmpereAlu.cs ATurnsToRadians), on the GPU against a double-precision reference
 t_mufu_turns: t_mufu_turns.m
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_mufu_turns.m -framework Metal -framework Foundation
+
+t_late_texture: t_late_texture.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_late_texture.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_late_texture: RUN_ENV = MTL_DEBUG_LAYER=1
+
+t_present_finalize: t_present_finalize.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_present_finalize.m $(MTL_T_SRC) $(FW)
+check_t_present_finalize: RUN_ENV = MTL_DEBUG_LAYER=1
+
+# Scalar and quad raw reads against a CPU oracle, using the translator's synthetic helper.
+t_raw_quad: t_raw_quad.m
+	clang $(CFLAGS) -fobjc-arc -o $@ $< -framework Foundation -framework Metal
+.PHONY: check_t_raw_quad
+check_t_raw_quad: t_raw_quad
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; rc=0; DMSH_TEST_XLATE=$${DMSH_TEST_XLATE:-$(CURDIR)/../tools/dmsh_xlate_bin/dmsh_xlate} python3 test_dmsh_raw_quads_dynamic.py --fixture "$$work" || rc=$$?; \
+	if [ $$rc = 77 ]; then echo "t_raw_quad: skipped, the translator does not run"; elif [ $$rc != 0 ]; then exit $$rc; else MTL_DEBUG_LAYER=1 ./t_raw_quad "$$work/scalar.metallib" "$$work/quads.metallib"; fi
+
+t_registered_pkg: t_registered_pkg.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_registered_pkg.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_registered_pkg: RUN_ENV = MTL_DEBUG_LAYER=1
+
+t_pool_table: t_pool_table.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_table.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_pool_table: RUN_ENV = MTL_DEBUG_LAYER=1
+
+t_shared_pkg: t_shared_pkg.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_shared_pkg.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_shared_pkg: RUN_ENV = MTL_DEBUG_LAYER=1
+
+t_alias_takeover: t_alias_takeover.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_alias_takeover.m $(MTL_T_SRC) $(FW)
+check_t_alias_takeover: RUN_ENV = MTL_DEBUG_LAYER=1
+
+t_pool_index: t_pool_index.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_index.m $(MTL_T_SRC) $(FW)
+
+t_cut_busy: t_cut_busy.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_cut_busy.m $(MTL_T_SRC) $(FW)
+check_t_cut_busy: t_cut_busy
+	DM_NVN_CUT_BUSY=0 DM_NVN_GPU_TS=submission MTL_DEBUG_LAYER=1 ./t_cut_busy
+	DM_NVN_CUT_BUSY=1 DM_NVN_GPU_TS=submission MTL_DEBUG_LAYER=1 ./t_cut_busy
+	DM_NVN_CUT_BUSY=1 DM_NVN_GPU_TS=segment MTL_DEBUG_LAYER=1 ./t_cut_busy

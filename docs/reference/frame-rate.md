@@ -209,6 +209,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** `make -C dm/gfx/tests GAME=010015100B514000 check_t_present_alloc` holds the Metal 4 queue behind a shared event and calls the display-link callback by hand, each present with a drawable of its own offscreen layer. It covers a dropped frame (tickets 1, 3, then 4 on allocator 1 again) and one frame per tick (5, 6, 7, then 8 on allocator 2 again). Before the fix, in both cases the reusing present returns while the earlier one is held and the earlier drawable reads back 0 in all 64 pixels (4 of 13 checks fail; on an M6 every run also logs the GPU page fault); with it the reusing present waits until the gate opens, and all 13 checks pass with Metal validation.
 - **Not checked:** a game run hitting it, the iPhone, and the not-submitted path, which the test does not exercise.
 
+### Queued presents retain their resolved texture version
+
+- **Symptom:** `upload batches belong to the submit thread only: up_begin called on thread 'nvn-present'`; or a frame uses a texture created after the game finalized its original window texture.
+- **Cause:** the queue retained a guest descriptor, then resolved its serial on the display thread. A later CPU write can make that resolution upload new pixels, although upload batches belong to the serialized command producer. Finalization can also remove the original backing before presentation. `QueuePresentTexture` may run on a different thread from the last command submission.
+- **Fix:** reuse [PR #1239](https://github.com/seedds/nxnative/pull/1239)'s finalization ticket/GPU completion wait and deferred-encoder upload ordering. Additionally, serialize the NVN present producer with command submission, transfer upload ownership to it, resolve before enqueue and retain that exact Metal texture in the queue item. Display callbacks consume the retained version without inspecting changing CPU storage. The next present resolves any subsequent CPU update. External Vulkan/GL producers retain their existing event ordering; snapshot presents retain the snapshot's backing.
+- **Check:** `t_nvn` reproduced the upload-owner abort with the Ocarina dirty-upload profile; it passes all 234 checks after the fix. `t_present_finalize` passes 31 checks with Metal validation: delayed finalization, first-use zeroing, CPU-filled pixels, and a queued frame retaining its pixels after a later CPU write while the next frame sees the update. The write happens after the upload consumes its source, avoiding an undefined CPU/GPU data race.
+- **Found on:** integration tests for [Ocarina of Time](../../dm/games/0400486024DEC000/README.md); the upstream finalization diagnosis was Axiom Verge. Full gameplay and iOS coverage of this general change remain open.
+
 ### Frames of a dynamic present interval held on screen and at the acquire
 
 - **Symptom:** "sometimes the speed increases when jumping" (Mario 1.2.1 on the iPhone): in `display` mode interval-2 frames were shown for 16.7 ms and the game visibly jumped ahead. "When pressing B, Link's move pace is speeding up" (Breath of the Wild on the iPhone); `old frames dropped by merging`.
@@ -227,6 +235,15 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** only an even interval counts toward the 30 Hz link; an odd one returns to the 60 Hz link at once, as interval 1 does, and takes its own 3 ticks (`present_period` in `hle_nvn.c`). The one-second test no longer wraps: the run's start is stored with `| 1` and could be 1 ns after the next clock read, which made `now - start` huge and asked for 30 Hz at once.
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md): the slow area on an M1, frame time p50 66.7 → 50.2 ms at interval 3 (`DM_NVN_TSV` `@frame_ms`, `@itv`, `@link_gap_ms` 33.3 → 16.7).
 - **Check:** `t_nvn` (`interval 3: 60 Hz link`, `back to 2 from 3 waits a second again`).
+
+### A Switch 2 game's VRR rate paces presentation
+
+- **Symptom:** a game asks VI for variable-rate presentation but the host reports it unavailable and ignores its extended swap interval, leaving only whole 60 Hz intervals.
+- **Cause:** `QueryDisplayVrrSupported` always answered false, and the extended swap interval never reached NVN pacing.
+- **Fix, experimental:** reuse upstream PR #1389 (`c4204db6`): `vrr on` or `DM_VRR=1` enables the VI capability on Mac; the profile setting requires a screen of at least 120 Hz. The rate from `SetLayerExtendedSwapInterval(layer, 1, fps)` replaces the fixed interval, with fractional display ticks carried across frames. Clearing the interval or capability restores the game interval. Frame-step state and the separate high-FPS controller take precedence; iOS remains disabled. The default is off. This does not raise a game's own rate limits or prove that its simulation keeps real time.
+- **Checks:** upstream `t_nvn` assertions cover replacement, clearing, 45/60/120 Hz periods and frame-step precedence; local tests pass 246 NVN checks and 49 display-link checks, including a 100 Hz acquire rate on a controlled 120 Hz link. Game timing validation is still pending. This support is not enabled in Ocarina's profile or installed app.
+- **Front-ends:** no new default; expose an option only after verifying that the game's simulation speed follows its requested rate.
+- **Found on:** upstream [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md); being evaluated for [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game).
 
 ### One frame per tick of a 120 Hz display link
 
@@ -337,6 +354,28 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Not checked:** variable-refresh fullscreen at 30 fps, external fixed-rate screens, other games at a 30 fps target, and the power cost of 60 callbacks a second instead of 30.
 
 ## CPU cost and pacing
+
+### A full-frame shader overflows the raw write log
+
+- **Symptom:** `[RED] raw global memory: a write log ran out of slots` while the AV1 title movie plays at about 21 fps. A relaxed GPU timestamp may put part of the movie dispatches' time before the compute encoder's reported start.
+- **Cause:** the movie shaders write through loaded pointers across full image planes. The page log repeatedly probes occupied slots with atomic compare-and-swap, and every raw pointer access searches the pool table. A Metal System Trace shows sustained compute activity through the apparent idle interval.
+- **Fix:** [Raw global memory uses tagged lookup hints and a pool bitmap](shaders.md#global-memory-at-an-address-loaded-from-memory). The bitmap fits every entry, and the GPU only issues the atomic OR when its bit is still clear.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
+### A bindless pool table rebuilt for every registration
+
+- **Symptom:** a 3D scene whose `NVN submit+present` time is most of the frame while the GPU time is far lower; in a `sample` of the process the submitting thread spends most of its time in `pool_gpu` → `pool_entry` → `tex_by_id`, much of it in `newTextureViewWithPixelFormat`. The `pool for handles traced to no slot` line counts tens of thousands of builds, and the memory line shows a ghost table with millions of puts (`finalized textures still referenced 512 (small table, … put in total)`).
+- **Cause:** two loops fed each other.
+  - The table of a texture pool that shaders index with handles (`pool_gpu`) was built whole, every ID resolved, whenever `g_reg_gen` or `g_ser_gen` had moved since the last build. The game's other threads register descriptors for later frames while the replay draws, so nearly every draw that read the 33,025-entry pool rebuilt it.
+  - A third of those IDs held descriptors whose texture object the game had finalized, each at the storage of a live texture. Their textures resolved through the 512-entry ghost ring, so a walk put each through it and evicted another. Every put and eviction is a storage note (`g_ser_gen`), and their views lasted one submission and were never cached (the serial is not live).
+- **Fix:**
+  - Texture and sampler registrations (`reg_bump`) and noted storage changes (`ser_note`) are logged by generation. When every generation since a table was built is in those logs, `pool_gpu` resolves only the IDs they name: the table is kept when none changes, otherwise copied and patched, so draws already encoded keep reading their own. Any unjournaled bump, a sparse texture, a resized pool or a ring overrun still builds it whole.
+  - A finalized serial whose storage the sharing table holds resolves to that shared texture without a ghost entry (`tex_mtl_`), and a retired ID's view of such a texture lasts across submissions; `alias_sweep` drops those views once the texture leaves the sharing table, so they pin nothing past it.
+  - Pool finalization records each evicted sharing-table key with `ser_note_alias`, retaining conservative view-cache invalidation while allowing descriptor tables to patch only those storage families. An unannotated global generation bump previously forced unrelated pools through full resolution. Range notes from pool removal still cover mapped storage; sparse mappings and journal overruns keep their full rebuild fallback.
+  - A non-packaged usage upgrade journals every serial and sharing-table family whose backing it replaces. Its former global generation bump made an otherwise ordinary first-use image-write upgrade resolve every registered texture again. Family notes retain conservative view-cache invalidation; upgrades without an indexed shared family keep full invalidation.
+  - The `pool for handles traced to no slot` line counts the builds by cause and the tables patched or kept.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): in Kokiri Forest on an Apple M5 the frame went from a 46–49 ms median (submit 45 ms, GPU 14–18 ms) to 16–21 ms (submit 5–8 ms); the GPU is now the limit. Whole builds fell from about 94,000 to about 1,000 in a 90 s run, ghost puts from about 10,000 a frame to none. Resident memory holds at 13–14.3 GB over 160 s (11.8–11.9 GB before, with 22,000 objects waiting in the deferred-release queue that are now about 100). Not yet rerun on other games: no prepared Mac builds were on the machine for `regress.py`.
+- **Check:** `make -C dm/gfx/tests run` (`t_upgrade_alias` checks that a finalized serial sees an upgraded shared texture).
 
 ### Arena buffer ownership on allocation
 
@@ -479,3 +518,29 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** `dmsh_build.py` `pool_arrays`: a fragment shader whose only store is the mark gets `[[early_fragment_tests]]`. One that discards, writes depth, stencil or a sample mask, or stores anything itself keeps its test where it was; there the mark costs the shading. A chain change.
 - **Check:** `python3 dm/tools/tests/test_dmsh_pool_arrays.py`. On the same route, the game's own controller then held its main pass at 1536x864, four times the pixels, at the same GPU time.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): 56 of the 258 fragment programs of a frame in Kokiri Forest carry the mark, 3 of them with a discard.
+### A failed GPU event holds a completed fence wait
+
+- **Symptom:** rendering freezes after GPU command errors, with the main thread in `IOSurfaceSharedEvent waitUntilSignaledValue:timeoutMS:` although commit feedback has completed its fence.
+- **Cause:** the fast fence wait could block for one hour on a GPU event. A rejected command buffer can complete through its feedback handler without signaling the event, so that wait cannot see the published completion.
+- **Fix:** reuse [PR #1409](https://github.com/seedds/nxnative/pull/1409): bound the initial event wait to 100 ms before rechecking completion and using the feedback condition variable. Finite waits retain their original total timeout budget. This handles the platform's missing event signal; it does not prevent the GPU error.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md), in the upstream GPU memory-fault investigation. Locally reproduced with an unsignaled synthetic event; no normal-frame FPS benefit is claimed.
+- **Check:** `make -C dm/gfx/tests GAME=0400486024DEC000 perf-order-cpu check_t_perf_order` checks completion without an event signal, finite timeout budgets, completion ownership and callback ordering.
+
+### Benchmark frames without on-screen timing
+
+- **Symptom:** `scripts/bench.py` reports rendered FPS while every displayed interval is missing or marked dropped. Display-link rescue may repeatedly add a 100 ms present-queue wait, even though an internal screenshot shows a correctly rendered game.
+
+- **Cause:** Rendering can continue while the Mac is locked or the game is covered. An internal render-target screenshot does not prove that frames reached the screen. In the confirmed locked-Mac case, the display link stopped delivering callbacks and the fallback kept rendering between periodic retries.
+
+- **Fix:** The benchmark reports `shown_samples` and prints a warning in its console, Markdown and JSON results when a nonempty run has no positive on-screen timing samples. Its FPS remains rendered throughput for diagnostic use; it must not be reported as playable on-screen FPS. Unlock the Mac and keep the game visible before measuring again. Positive timing samples alone do not prove the route loaded correctly: compare the scene screenshots and check startup compilation too.
+
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#open), during the short O3 compiler comparison.
+
+### Submitting segments while earlier GPU work is in flight
+
+- **Symptom:** many small command buffers are committed while the GPU is still executing earlier work; upstream reported queue overhead and idle gaps despite queued work.
+- **Cause:** `sub_cut` committed each eligible draw-count boundary without considering outstanding main-queue submissions. The purpose of an early commit is to overlap GPU execution with remaining CPU encoding; another queued segment does not help an already busy GPU.
+- **Fix, experimental:** adapt the admission rule and completion count from upstream `6121fd75`. `DM_NVN_CUT_BUSY=1` defers ordinary cuts while the count is nonzero, advancing the draw-count boundary and leaving the work in the current command buffer. Copy cuts still commit because the game may reuse their source. This branch derives segment-mode timestamps from real commits, so segment mode keeps every boundary; upstream's separate timestamp-heap implementation is not imported. The default remains off pending local performance validation. The final submission and its fence always commit.
+- **Checks:** `t_cut_busy` executes ordered GPU copies and final fences in idle, busy and copy-cut cases, with the option off/on and with segment timestamps (72 checks). It verifies callback accounting and preserved output bytes. Existing copy-alias and performance-ordering configurations and the full graphics suite pass. Static shader/interface regression on the available Ocarina assets passes; local gameplay comparison remains pending.
+- **Found on:** upstream Ocarina measurements; local evaluation in [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game).
+- **Front-ends:** experimental, default off; no player setting change or shader rebuild is required.

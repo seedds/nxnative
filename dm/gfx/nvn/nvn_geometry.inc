@@ -594,7 +594,8 @@ static void mtk_encode(id<MTLRenderCommandEncoder> en_) {
     uint64_t fa = g_mtk.args;   // an indirect draw: its first workgroup is the converted record's first word, written on the GPU (mti_run)
     if (!fa) { id<MTLBuffer> b; size_t o = arena_alloc(16, &b); memcpy((uint8_t *)b.contents + o, &g_mtk.first, 4); fa = b.gpuAddress + o; }
     if (ts) { [en setArgumentTable:g_ot atStages:MTLRenderStageObject]; g_args_dirty[3] = 1; encode_args(en, ts, 3, 0);
-              if (rec_on()) rec_table_op(RO_T_ADDR, g_ot, fa, DMSH_MESH_FIRST_SLOT); else [g_ot setAddress:fa atIndex:DMSH_MESH_FIRST_SLOT]; }
+              if (rec_on()) rec_table_op(RO_T_ADDR, g_ot, fa, DMSH_MESH_FIRST_SLOT); else [g_ot setAddress:fa atIndex:DMSH_MESH_FIRST_SLOT];
+              uint64_t lb = lcap_bind(&ts->rf); if (lb) { if (rec_on()) rec_table_op(RO_T_ADDR, g_ot, lb, 28); else [g_ot setAddress:lb atIndex:28]; } }   // the loop guard's buffer for the task function (lcap_bind)
     g_args_dirty[4] = 1; encode_args(en, ms, 4, 1);
     enc_r_vbuf(en, DMSH_MESH_FIRST_SLOT, fa);
     MTLSize to = MTLSizeMake(ts ? ts->mesh_threads : 1, 1, 1), tm = MTLSizeMake(ms->mesh_threads, 1, 1);

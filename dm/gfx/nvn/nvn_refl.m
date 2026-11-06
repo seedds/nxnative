@@ -195,6 +195,9 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
         for (NSDictionary *u in j[@"first_store"]) { if (o->nfirst >= 4) FAIL("more than 4 first-invocation stores");
             int reg = [u[@"reg"] intValue]; if (reg < 0 || reg >= 16) FAIL("first-invocation store to storage slot %d", reg);
             o->first[o->nfirst].reg = (uint8_t)reg; o->first[o->nfirst].word = (uint16_t)[u[@"word"] intValue]; o->first[o->nfirst++].value = (uint32_t)[u[@"value"] unsignedIntValue]; }
+        NSDictionary *lg = j[@"loopguard"];   // dmsh_build.py LOOPGUARD: data-sized loops that read the debug buffer at index 28 (nvn_mtl.m lcap_bind)
+        if ([lg isKindOfClass:[NSDictionary class]]) { NSArray *ls = lg[@"sites"]; if ([lg[@"buffer"] intValue] != 28) FAIL("loop guard buffer %d, the host binds 28", [lg[@"buffer"] intValue]);
+            o->loopguard = [ls isKindOfClass:[NSArray class]] ? (uint8_t)MIN(ls.count, 255u) : 1; if (!o->loopguard) o->loopguard = 1; }
         return 0;
     }
     #undef FAIL

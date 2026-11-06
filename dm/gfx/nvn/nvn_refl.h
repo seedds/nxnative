@@ -51,6 +51,8 @@ typedef struct {
     uint16_t tg[3];          // Compute thread group size (none = 0)
     uint32_t tg_spill;       // Compute: threadgroup memory bytes per workgroup the shader takes from a device buffer at DMSH_TG_SLOT (dmsh_build.py tg_spill; 0 = none)
     struct { uint8_t reg; uint16_t word; uint32_t value; } first[4]; uint8_t nfirst;   // Stores to storage buffer words the host makes before each dispatch (dmsh_build.py first_store)
+    uint8_t loopguard;       // Compute / task: automatic loop-guard sites (dmsh_build.py LOOPGUARD, json "loopguard"; at most 255 counted): the shader reads the debug buffer at index 28,
+                             // so the host binds one there for every dispatch or draw of it, DM_NVN_LOOPCAP's or a zeroed one (off: the guard is loop_guard's plain cap); 0 = none
     uint8_t route_b, has_c1; // Route B; has a c1 constant segment
     uint8_t bindless;        // Has TEXU / SAMPU bindings (which texture is read is known only at replay time)
     uint8_t border;          // index in b of the BORDER binding + 1, 0 = none

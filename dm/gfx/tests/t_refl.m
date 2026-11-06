@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "dmsh_chain.h"   // dm/gfx/nvn (-I from the Makefile)
+#include "dmsh_abi.h"     // DMSH_GPTR_MAX
 
 enum { C = NVN_RB_CBUF, S = NVN_RB_SAMP, T = NVN_RB_TEX, I = NVN_RB_IMG, TB = NVN_RB_TBUF };
 enum { F = NVN_DPF_FLOAT, U = NVN_DPF_UINT, D = NVN_DPF_DEPTH };
@@ -111,6 +112,21 @@ int main(void) { @autoreleasepool {
         check("B uniform handles: buffer texture kind", NVN_RB_TBUFU, r.b[1].kind); check("B uniform handles: buffer texture slot", 1, r.b[1].reg); check("B uniform handles: bindless", 1, r.bindless);
         check("B uniform handles: other word at byte 0 of slot 2", 1, r.b[2].soff); check("B uniform handles: its slot", 2, r.b[2].sreg); check("B uniform handles: one word has no other", 0, r.b[3].soff);
         printf("%-60s %s\n", "B images, buffer textures and two-word handles in uniform slots", fail == f1 ? "✓" : "✗");
+    }
+    {   int f1 = fail;   // bind-time pointer sites (dmsh_build.py gptr_sites): Ocarina of Time's model pixel shaders read five pointers at bytes 0x0-0x20 of storage slot 1
+        NSDictionary *j = @{@"route": @"B", @"bindings": @[
+            @{@"kind": @"gmem_map", @"arg_id": @0, @"msl_name": @"fp_s1", @"msl_type": @"const device _31*", @"rw": @NO},
+            @{@"kind": @"gptr", @"arg_id": @1, @"msl_name": @"fp_s2", @"msl_type": @"const device _31*", @"rw": @NO, @"sites": @[@[@1, @8], @[@1, @0], @[@-1, @16]]}]};
+        check("B pointer sites: conversion succeeds", 0, nvn_refl_from_json(j, &r, err, sizeof err));
+        check("B pointer sites: kind", NVN_RB_GPTR, r.b[1].kind); check("B pointer sites: count", 3, r.ngptr);
+        check("B pointer sites: first slot", 1, r.gptr[0].reg); check("B pointer sites: first byte", 8, r.gptr[0].off);
+        check("B pointer sites: second byte", 0, r.gptr[1].off); check("B pointer sites: not taken by slot", -1, r.gptr[2].reg);
+        NSMutableArray *many = [NSMutableArray array]; for (int k = 0; k <= DMSH_GPTR_MAX; k++) [many addObject:@[@1, @(8 * k)]];
+        NSDictionary *over = @{@"route": @"B", @"bindings": @[@{@"kind": @"gptr", @"arg_id": @0, @"msl_name": @"fp_s2", @"msl_type": @"const device _31*", @"sites": many}]};
+        NSDictionary *bad = @{@"route": @"B", @"bindings": @[@{@"kind": @"gptr", @"arg_id": @0, @"msl_name": @"fp_s2", @"msl_type": @"const device _31*", @"sites": @[@[@16, @0]]}]};
+        check("B pointer sites: more than DMSH_GPTR_MAX are refused", 1, nvn_refl_from_json(over, &r, err, sizeof err) != 0);
+        check("B pointer sites: a slot out of range is refused", 1, nvn_refl_from_json(bad, &r, err, sizeof err) != 0);
+        printf("%-60s %s\n", "B bind-time pointer sites", fail == f1 ? "✓" : "✗");
     }
     {   int f1 = fail;
         NSDictionary *b1 = @{@"route": @"B", @"bindings": @[@{@"kind": @"foo", @"arg_id": @0, @"msl_name": @"x", @"msl_type": @"constant _16*"}]};

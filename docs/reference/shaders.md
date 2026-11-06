@@ -1531,6 +1531,33 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Open:** over the walk the frame time p95 went 19 → 26 ms. The runs ended in different places (the route is timed and the game moves at its frame rate), the new side's render target loads were higher (the game's dynamic resolution taking the headroom), and the Mac had 8 GB of swap in use, so this is not settled. Keeping the range itself in registers (PR #1464's form, no table reads on a hit) has not been compared on the same Mac.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md); the diagnosis, the cache and the first measurements in [PR 1464](https://github.com/seedds/nxnative/pull/1464) and [PR 1405](https://github.com/seedds/nxnative/pull/1405#issuecomment-6678379920).
 
+### Raw global memory through a pointer read when the draw is bound
+
+- **Symptom:**
+  - **A GPU hang** (`kIOGPUCommandBufferCallbackErrorHang`) in a buffer with Ocarina of Time's culling task shaders, `f75708d176bb6591`, `47f9b38490dcf9a2`, `99280b7b8aae78df` and five more of `Model.Product.110`, whenever the pool their range pointer names is not in the raw pool table.
+  - **Wrong reads** of any raw load whose pool the table leaves out: the load reads 0.
+- **Cause:**
+  - These shaders read both ends of a range through a pointer loaded from a storage buffer, and loop `(min(end - start, 256) - 1) >> 5` times. A table miss reads both ends as 0, so the count is `uint(-1) >> 5`, 134,217,727 iterations.
+  - The table lists only the pools the game was handed a GPU address for ([Memory pools nothing gave an address to stay out of the raw pool table](memory.md#memory-pools-nothing-gave-an-address-to-stay-out-of-the-raw-pool-table), from [PR 1394](https://github.com/seedds/nxnative/pull/1394)). On Ocarina it leaves out 172 pools (3.7 GB), so a pointer into one of them misses.
+  - 99.5% of the raw-table accesses Ocarina's 2,247 raw shaders make take their pointer from a fixed byte offset of a bound storage buffer: every model shader reads five pointers at bytes 0x0-0x20 of one storage slot. The CPU can read such a pointer before the draw.
+- **Fix:** general, in the chain and the host.
+  - **Translator** (`GlobalToStorage.FindPointerSite`): a raw load is a *site* when its address's low word is a storage-buffer word at a constant offset plus index terms, and its high word is the next word of the same buffer. Sites are numbered per shader (at most `DMSH_GPTR_MAX`, 64) and noted `gptr site k: c<slot>[<word>] +<byte>`. The raw load helper takes its site as an argument and tests the site's entry `{start, end, delta}` (`DMSH_KIND_GPTR`, the sentinel slot's offset 2) before the last-entry check, the hint and the search. Stores and atomics are unchanged, since the write log is kept per table entry.
+  - **Build** (`dmsh_build.py` `gptr_sites`): each site becomes `[NVN storage slot, byte]`. A pointer whose buffer is not a c0 storage slot gets slot -1, so its entry stays empty.
+  - **Host** (`NVN_RB_GPTR` in `encode_args`): before each draw or dispatch, reads each site's 8-byte word from the bound storage buffer and fills the entry from `mtl_gpu_addr`, which also makes the pool resident as a storage buffer binding's is.
+  - **Safe by construction:** the shader checks the address against the entry, so an entry that is stale (a word the GPU rewrites later in the submission) or empty only costs the table search it would have done anyway.
+  - **Counters:** follow the memory line: `bind-time pointers up to frame N`.
+- **Not taken:** [PR 1444](https://github.com/seedds/nxnative/pull/1444)'s 262,144-iteration loop guard ends the same loop, but is a workaround: the loop still runs on a count read as 0. Lichii (github.com/Frizti/Lichii) resolves loaded pointers at bind time too (`indirect_offset`); this keeps the table as the fallback instead of dropping the access.
+- **Checks:**
+  - Translating the 4,680 raw-table jobs of Ocarina's 2,247 raw-table shaders gives sites to 2,173 of them. Model shaders get 5 each, the eight hanging task shaders one each (storage slot 0, byte 0).
+  - On the GPU, the generated helper of `0031f9442b11b682` was called on chosen addresses against an 8,191-entry table built as the host builds it, with a buffer reachable only through a site to tell the paths apart. All 11 cases came out right: the site path inside the entry; the table outside it, for an empty entry or no site; the range ends; 0 for no pool; the last-entry cache after another pool.
+  - The eight task shaders were run on their own on an M3: a pool in the table, completes; left out with no site, GPU hang every time (about 22 ms of GPU time); left out with the site filled, completes.
+  - In the game (M2 Pro 16 GB, the route through Kokiri Forest): 1,091,044 sites by frame 2,700, every one naming a pool; 16,250 of 258,329 raw-load bindings with no site. Mesh `3439aaa071d868ae`: 48,685 sites by frame 6,000, all filled.
+  - `test_dmsh_reflect.py` (gptr sites) and `t_refl` (52 checks).
+- **Open:**
+  - The GPU cost of the site check against the table walk it skips is not measured. The CPU cost is about 200 pool lookups a frame on Ocarina.
+  - Only Ocarina of Time was run with this chain.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
 ### Bindless handles through a loop phi
 
 - **Symptom:** `no resolved slot number`, the shader does not load; the translation has a 32-entry texture-pool array (`fp_t2d_cb0_40000000`, handle type Direct).

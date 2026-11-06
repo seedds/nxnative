@@ -152,6 +152,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Portal 2](0100ABD01785C000/README.md) | `0100ABD01785C000` | 1.0.3 | 13.3.0 | Valve's Source engine (21 NROs) | NVN |
 | [Princess Peach: Showtime!](01007A3009184000/README.md) | `01007A3009184000` | 1.0.0 | 15.3.2 | Unreal Engine 4.27 (Good-Feel), Wwise | NVN |
 | [Raging Loop](010020400E1C2000/README.md) | `010020400E1C2000` | 1.0.0 (base) | 7.3.2 | Unity 2018.3.10f1 IL2CPP | NVN |
+| [Rayman Legends: Definitive Edition](01005FF002E2A000/README.md) | `01005FF002E2A000` | 1.2 | 1.3.1 | Ubisoft's UbiArt Framework | NVN |
 | [Red Dead Redemption](01007820196A6000/README.md) | `01007820196A6000` | 1.0.7 | 15.3.2 | Rockstar's RAGE (Double Eleven port) | NVN |
 | [Return of the Obra Dinn](010032E00E6E2000/README.md) | `010032E00E6E2000` | 1.0.1 | 8.2.0 | Unity 2017.4.28f1 IL2CPP | NVN |
 | [Rhythm Heaven Groove](0100D9F01D474000/README.md) | `0100D9F01D474000` | 1.0.0 (base) | 21.4.0 | Nintendo's own 2D engine | NVN |

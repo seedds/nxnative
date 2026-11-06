@@ -111,6 +111,19 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Found on:** [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md).
 - **Check:** `make -C dm/host/tests GAME=<id> audren-work` checks independently obtained Horizon sizing fixtures, both public parameter layouts, uninitialized padding, unsupported revisions, nested opens, undersized buffers, failure cleanup, caller-owned storage and close lifetime. The sizing implementation also matched 360 seeded parameter sets executed through Horizon's original machine code across REV1–REV15. The game note records the original-heap reproduction and audio check.
 
+### SDK 1: no audio renderer in the process
+
+- **Symptom:** at boot, `[RED] sf: the game connects to service audren:u itself, which the host does not serve`, then `Break#1 reason=0 Result=0 svc at sdk+0x9e79c` with `h_ar_WorkSize` in the backtrace, and the host exits with 42.
+- **Cause:** SDK 1.3.1's `sdk` carries no `AudioRenderSystem`: it does not export `ExecuteAudioRendererRendering`, and `GetAudioRendererWorkBufferSize`, `OpenAudioRenderer`, `StartAudioRenderer`, `StopAudioRenderer` and `RequestUpdateAudioRenderer` go to the `audren:u` service. So [running the SDK's own renderer on the CPU](#running-the-sdks-own-renderer-on-the-cpu) has nothing to run. Its `AudioRendererParameter` keeps the revision at +0x30.
+- **Fix:** when the `sdk` does not export `ExecuteAudioRendererRendering` (`ar_has_local_cpu`), `hle_audren.c` is the renderer, after the patch in [issue #960](https://github.com/seedds/nxnative/issues/960):
+  - the work buffer size is the service's, read with the revision at +0x30 (`ar_service_work_size`);
+  - the open takes an `ar_t` and starts its render thread, as for the other SDKs; Start and Stop succeed;
+  - `RequestUpdateAudioRenderer` keeps the game's `AudioRendererConfig` and answers in it: memory pools attached (2 → 3) and detached (4 → 5), effects enabled or disabled, wave buffers sent;
+  - each 5 ms frame mixes the PCM16 and ADPCM voices to stereo at 48 kHz, fills the Aux effects' send buffers with the mix and adds their return buffers back, then signals the game's event (`sdk1_render_frame`).
+
+  Biquad filters, reverb and delay are not applied, and the host renders one SDK 1 renderer at a time (a second open is a red line). Every other SDK keeps its path: the three new hooks call the SDK's own Start, Stop and RequestUpdate.
+- **Found on:** [Rayman Legends: Definitive Edition](../../dm/games/01005FF002E2A000/README.md) (SDK 1.3.1: menus, galleries and the first level with music); the patch was written for [Ultra Street Fighter II: The Final Challengers (#960)](https://github.com/seedds/nxnative/issues/960).
+
 ## Command lists by SDK
 
 ### Incomplete startup lists must not select the command layout
@@ -355,6 +368,13 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
   - the multi-stream C interface, including the SDK 12+ overload with an option argument, goes to the `sdk`'s software `OpusMultiStreamDecoder` C interface, with a host-held state per game object as for the single-stream decoder. `GetHardwareOpusMultiStreamDecoderProcessingTime` reports 0.
   - the two-argument `GetHardwareOpusDecoderWorkBufferSize` is hooked beside the three-argument one.
 - **Found on:** [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) (SDK 9.6: only the `HardwareOpusMultiStreamDecoder` class and the four-argument size); [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) (1.4.3, the single-stream C interface); [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3, the two-argument size); [Unicorn Overlord](../../dm/games/010069401ADB8000/README.md) (SDK 16.2.4, the multi-stream C interface; one boot).
+
+### SDK 1 calls the `HardwareOpusDecoder` members directly
+
+- **Symptom:** `[RED] sf: the game connects to service hwopus itself, which the host does not serve`, then `Break#1 reason=0 Result=0 svc at sdk+0x9e79c` under `sdk+0x100f18` (`HardwareOpusDecoder::GetWorkBufferSize`), and the host exits with 42; about 4 s after boot.
+- **Cause:** the constructor hook makes the object a software `OpusDecoder` ([Hardware Opus decoders built on the SDK's software decoders](#hardware-opus-decoders-built-on-the-sdks-software-decoders)), which is enough for a game that calls it through the vtable. SDK 1.3.1's game code calls the `HardwareOpusDecoder` members by name instead (`GetWorkBufferSize`, `Initialize`, `DecodeInterleaved`, …), and each of them asks `hwopus`.
+- **Fix:** `hle_codec.c` forwards each member to the `OpusDecoder` member of the same name: the object is already one (SDK 1's software decoder writes 0x28 of the class's 0x30 bytes). Both classes' destructors are a bare `ret`.
+- **Found on:** [Rayman Legends: Definitive Edition](../../dm/games/01005FF002E2A000/README.md) (SDK 1.3.1).
 
 ### SDK 21's hardware Opus decoder manager
 

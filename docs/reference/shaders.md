@@ -691,7 +691,7 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 ### Dead-code removal dropped the inputs of atomics
 
 - **Cause:** Ryujinx's `Optimizer.RemoveNode` removes a dead node, then follows each source whose last use went away into the node that produced it. It did so even when that producer has side effects, such as an atomic or a call whose result is unused. Such a producer stays in the block, but its sources lost their uses, so the next dead-code pass deleted the chain that feeds it, and the atomic read undefined values.
-- **Fix:** general: `RemoveNode` follows only into producers without side effects (`HasSideEffects`). This follows MacNativeGames' translator patch 0002.
+- **Fix:** general: `RemoveNode` follows only into producers without side effects (`HasSideEffects`). This follows MacNativeGames' translator patch 0002; since upstream #1343 the test is `IsUnused`, the dead-code pass's own (no side effects, a local destination, no uses), and `SurfaceLoadLiveness` in `test_dmsh_ampere_mem.py` checks image loads with one or all results dead and an atomic with an unused result.
 - **Found on:** no game on hand so far. Rebuilding the chain changed no shader for this reason in Tears of the Kingdom, Breath of the Wild, Wonder, Scarlet or ANIMAL WELL (94,717 shaders); every MSL change was the early fragment tests attribute.
 
 ### Dead-code removal dropped a coordinate of a multi-output instruction

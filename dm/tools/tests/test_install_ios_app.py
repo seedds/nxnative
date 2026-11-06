@@ -42,6 +42,7 @@ class InstallIOSAppTests(unittest.TestCase):
         self.team = "FIXTURETEAM"
         self.udid = "00000000-0000-0000-0000-000000000001"
         self.now = datetime(2026, 10, 29, 12, 0, tzinfo=timezone.utc)
+        self.valid_until = datetime.now(timezone.utc) + timedelta(days=1)  # clock-relative: check_for_device compares against the real clock
         self.profile = {
             "ExpirationDate": self.now + timedelta(days=30),
             "ProvisionedDevices": [self.udid],
@@ -134,9 +135,9 @@ class InstallIOSAppTests(unittest.TestCase):
 
     def test_check_for_device_rejects_unprovisioned_and_expired_builds(self):
         device = installer.Device("First", self.udid, "iPhone", True)
-        ready = installer.App(self.app_path, "com.example.fixture", "Fixture", "1.0", self.now + timedelta(days=1), frozenset({self.udid}))
+        ready = installer.App(self.app_path, "com.example.fixture", "Fixture", "1.0", self.valid_until, frozenset({self.udid}))
         installer.check_for_device(ready, device)
-        other = installer.App(self.app_path, "com.example.fixture", "Fixture", "1.0", self.now + timedelta(days=1), frozenset({"other"}))
+        other = installer.App(self.app_path, "com.example.fixture", "Fixture", "1.0", self.valid_until, frozenset({"other"}))
         with self.assertRaisesRegex(ValueError, "not provisioned"):
             installer.check_for_device(other, device)
         expired = installer.App(self.app_path, "com.example.fixture", "Fixture", "1.0", self.now - timedelta(seconds=1), frozenset({self.udid}))
@@ -144,7 +145,7 @@ class InstallIOSAppTests(unittest.TestCase):
             installer.check_for_device(expired, device)
 
     def test_install_failure_never_launches_and_launch_failure_is_returned(self):
-        app = installer.App(self.app_path, "com.example.fixture", "Fixture", "1.0", self.now + timedelta(days=1), frozenset({self.udid}))
+        app = installer.App(self.app_path, "com.example.fixture", "Fixture", "1.0", self.valid_until, frozenset({self.udid}))
         device = installer.Device("First", self.udid, "iPhone", True)
         with patch.object(installer.subprocess, "run", return_value=subprocess.CompletedProcess([], 9)) as run:
             self.assertNotEqual(installer.install_and_launch(app, device), 0)
@@ -156,7 +157,7 @@ class InstallIOSAppTests(unittest.TestCase):
             self.assertEqual(run.call_count, 2)
 
     def test_list_does_not_install(self):
-        app = installer.App(self.app_path, "com.example.fixture", "Fixture", "1.0", self.now + timedelta(days=1), frozenset({self.udid}))
+        app = installer.App(self.app_path, "com.example.fixture", "Fixture", "1.0", self.valid_until, frozenset({self.udid}))
         with patch.object(installer, "inspect_app", return_value=app), \
                 patch.object(installer, "discover_devices", return_value=[installer.Device("First", self.udid, "iPhone", True)]), \
                 patch.object(installer.subprocess, "run", side_effect=AssertionError("--list must not install")), \
@@ -165,7 +166,7 @@ class InstallIOSAppTests(unittest.TestCase):
         self.assertIn("com.example.fixture", output.getvalue())
 
     def test_yes_installs_then_launches(self):
-        app = installer.App(self.app_path, "com.example.fixture", "Fixture", "1.0", self.now + timedelta(days=1), frozenset({self.udid}))
+        app = installer.App(self.app_path, "com.example.fixture", "Fixture", "1.0", self.valid_until, frozenset({self.udid}))
         device = installer.Device("First", self.udid, "iPhone", True)
         commands = []
 
@@ -183,7 +184,7 @@ class InstallIOSAppTests(unittest.TestCase):
         self.assertIn("Installed and launched", output.getvalue())
 
     def test_no_launch_and_cancelled_confirmation_do_not_launch(self):
-        app = installer.App(self.app_path, "com.example.fixture", "Fixture", "1.0", self.now + timedelta(days=1), frozenset({self.udid}))
+        app = installer.App(self.app_path, "com.example.fixture", "Fixture", "1.0", self.valid_until, frozenset({self.udid}))
         device = installer.Device("First", self.udid, "iPhone", True)
         commands = []
 

@@ -355,6 +355,7 @@ static void alias_query(uint64_t addr, uint64_t *base, uint64_t *size, int *mapp
 // With the guest in files (DM_GUEST_FILE), an anonymous mapping over the range would turn it into anonymous memory, which phys_footprint charges again as soon as the game maps
 // it back, so the files' range only goes PROT_NONE: its pages stay file pages, out of the footprint, which the kernel writes out when it needs the room;
 // they keep their old bytes, so the call returns 0 and alias_initialize zeroes them when they are mapped again
+int dm_guest_in_files(void) { return g_gf_n != 0; }   // nvn_dirty_discard: an anonymous mapping over the files' range would undo them
 static int guest_release(uintptr_t lo, uintptr_t hi) {
     if (g_gf_n) {
         if (mprotect((void *)lo, hi - lo, PROT_NONE)) die("guest_release mprotect %#lx+%#lx errno=%d", (unsigned long)lo, (unsigned long)(hi - lo), errno);

@@ -242,3 +242,44 @@ void nvn_dirty_mp_stats(uint64_t *calls, uint64_t *pages, uint64_t *ns) {
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
     *calls = atomic_load(&g_mp_calls); *pages = atomic_load(&g_mp_pages); *ns = atomic_load(&g_mp_ticks) * tb.numer / tb.denom;
 }
+
+// Discard the content of whole pages the host no longer needs (a texture's guest storage after its upload, see nvn_mtl.m rel_*): the pages are replaced with fresh zero pages (method 0, mmap) or
+// freed in place (method 1, MADV_FREE_REUSABLE), so a footprint of dirty / compressed guest memory the GPU copy makes redundant is returned. tracked = 1: only pages that are still protected (nobody has written
+// them since the upload), which are protected again afterwards; tracked = 0: unprotected, never-written pages (memory of a CPU_NO_ACCESS pool). A page another thread is changing, or one that does not
+// match, is left alone. Returns the bytes discarded. Same BUSY protocol as protect / unprotect: the page state is BUSY while the mapping changes
+static _Atomic uint64_t g_disc_bytes, g_disc_calls, g_disc_skipped;
+static int discard_run(uintptr_t a, size_t len, int prot, int method) {
+    if (method == 0) return mmap((void *)a, len, prot, MAP_FIXED | MAP_ANON | MAP_PRIVATE, -1, 0) != MAP_FAILED;
+    if (!(prot & PROT_WRITE)) mprotect((void *)a, len, PROT_READ | PROT_WRITE);
+    int ok = madvise((void *)a, len, MADV_FREE_REUSABLE) == 0;
+    if (!(prot & PROT_WRITE)) mprotect((void *)a, len, prot);
+    return ok;
+}
+__attribute__((weak)) int dm_guest_in_files(void) { return 0; }   // hle_svc.c's answers in the host; tests that link no host have none
+size_t nvn_dirty_discard(const void *addr, size_t len, int tracked, int method) {
+    if (dm_guest_in_files()) return 0;   // the guest in files: fresh anonymous pages would be charged to the footprint again, as guest_release says
+    uintptr_t a = ((uintptr_t)addr + getpagesize() - 1) & ~(uintptr_t)(getpagesize() - 1), b = ((uintptr_t)addr + len) & ~(uintptr_t)(getpagesize() - 1);
+    if (!len || a >= b) return 0;
+    int prot = tracked ? PROT_READ : PROT_READ | PROT_WRITE; size_t done = 0;
+    pthread_mutex_lock(&g_slot_mu);
+    range_t *r = find_span(a, b - a);
+    if (!r) {
+        if (!tracked && discard_run(a, b - a, prot, method)) done = b - a;
+    } else {
+        uint8_t want = tracked ? PG_PROT : PG_NONE; uintptr_t run = 0; int open = 0;
+        for (uintptr_t p = (a - r->base) >> g_shift, q = (b - 1 - r->base) >> g_shift, i = p; i <= q + 1; i++) {
+            uint8_t st = want; int took = i <= q && atomic_compare_exchange_strong(&r->state[i], &st, PG_BUSY);
+            if (took) { if (!open) { run = i; open = 1; } continue; }
+            if (i <= q) atomic_fetch_add(&g_disc_skipped, 1);
+            if (open) {
+                size_t n = (i - run) << g_shift;
+                if (discard_run(r->base + (run << g_shift), n, prot, method)) done += n;
+                for (uintptr_t k = run; k < i; k++) atomic_store(&r->state[k], want);
+                open = 0;
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_slot_mu);
+    atomic_fetch_add(&g_disc_bytes, done); atomic_fetch_add(&g_disc_calls, 1);
+    return done;
+}

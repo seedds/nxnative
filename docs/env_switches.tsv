@@ -344,6 +344,9 @@ DM_TEST_SWKBD_LAG_MS	diagnostic	`=<ms>` sleeps that long between the keyboard ha
 DM_TEST_TRANSFORM_FEEDBACK	test	Path to the native t_transform_feedback executable used by the Python feedback tests
 DM_TEST_UP_LEAK	diagnostic	`=1` keeps the old upload staging block instead of retiring it, as before the fix, to measure the leak
 DM_TEST_UP_LOST	diagnostic	`=<batch index>` treats that batch of uploads as dropped, to exercise the re-upload path
+DM_TEX_RELEASE	switch	`1` gives back the guest copy of a texture's storage in a `CPU_NO_ACCESS` pool once its upload (or its creation, for a GPU-only texture) has completed on the GPU: its whole pages become zero pages; `2` also releases still-protected pages of CPU-visible textures uploaded by the tracked path (a later CPU write faults and re-uploads as before); `probe` only counts; off by default ([memory](reference/memory.md#the-guest-copy-of-uploaded-textures-given-back))
+DM_TEX_RELEASE_METHOD	diagnostic	`free` releases with `madvise(MADV_FREE_REUSABLE)` instead of fresh zero pages (`DM_TEX_RELEASE`)
+DM_TEX_REL_DONOR	switch	`0` lets a texture made again over storage `DM_TEX_RELEASE` gave back read its zero pages; by default it is a GPU copy of the texture released there when that one has the same description, still has its host texture and its storage was not written since ([memory](reference/memory.md#the-guest-copy-of-uploaded-textures-given-back))
 DM_THERMAL_CAP	switch	`0` turns off the thermal cap, which holds the frame step at 30 fps while iOS reports a serious or critical thermal state (on by default)
 DM_THR	diagnostic	`=1` logs each SVC (except `SleepThread`) with its first four arguments, and each `CreateThread` with entry, stack, priority and core
 DM_THRCPU	diagnostic	`=<tsv path>[,<seconds>]` writes each thread's CPU time (100% = one core) and the total every interval (default 10 s); on iOS a relative path is under `Documents`

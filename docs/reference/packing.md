@@ -169,6 +169,14 @@
 
 ## Launcher metadata
 
+### A game packed from a NUP or a dump shows "Ver. ?" for a build its profile registers
+
+- **Symptom:** the game shows `?` where it shows its version (Super Mario Bros. Wonder's title screen: `Ver. ?`), and the build's lines name the version as `v327680 (?)`.
+- **Cause:** a package with no control data (a NUP update, a dump) packed from a derived profile, here because the folder had no base game for the shader tables. `derive_profile` took the display version of the build row it writes from the package's `control.nacp` alone and wrote `?` without one, and the host answers `nn::oe::GetDisplayVersion` from that row by `main`'s build ID (`hle_sdk16.c`). The profile it derives from registered that very build, with its display version.
+- **Fix:** `derive_profile` takes the package's control data first, then the display version the profile registers for this `main` build, and `?` only for a build no row names.
+- **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (1.2.1, v327680, an update-only NUP; `main` ff773e90…, the registered build): `Ver. ?` before, `Ver. 1.2.1` after, one Mac boot each to the title screen.
+- **Check:** `dm/tools/tests/test_nsp_alias.py` `test_derived_profile_keeps_the_display_version_the_profile_registers_for_the_build`.
+
 ### No Game language row in an app packed from a NUP or a dump
 
 - **Symptom:** the settings of a Mac app or IPA packed from a NUP or a dump folder have no Game language row, while `DM_LANG` in the environment changes the language. Reported on [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) ([NX2Apple#619](https://github.com/LNPANDY/NX2Apple/issues/619), [#659](https://github.com/LNPANDY/NX2Apple/issues/659); the reporters' packed files were not available).

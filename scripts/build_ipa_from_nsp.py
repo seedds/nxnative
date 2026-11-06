@@ -1032,7 +1032,12 @@ def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False):
     only the shader tables change with installed DLC or newly decoded compute kernels. The modules are the profile's that this version ships and those main imports from that the list leaves out. A profile with frame step stubs (FRAME_STEP) for other builds only gets fps_target 0 for this version:
     its main has no state page, so a cap of 30 or 60 would present every vsync while the game steps 1/30 s per frame (double speed). Returns the version's display version"""
     src = sorted(p for p in g.dir.iterdir() if p.is_file() and (p.name not in DERIVED_SKIP or shader_only and p.name == 'patches.py'))
-    T, disp = '\t', nacp.version(d / 'control.nacp') or '?'
+    # The display version: the package's control data, else the one the profile registers for this main build. A NUP update or a dump carries no control data, and the game asks
+    # the host for the version by its main's build ID (hle_sdk16.c GetDisplayVersion, the build rows): a row with ? is what the game then shows (Super Mario Bros. Wonder 1.2.1
+    # from an update-only NUP: "Ver. ?" on its title screen, though the profile registers that build as 1.2.1)
+    main = d / 'ExeFS/main'; bid = build_id(main) if main.exists() else None
+    known = next((b['display'] for b in g.builds().values() if bid and b.get('main') == bid and b.get('display') not in (None, '', '?')), None)
+    T, disp = '\t', nacp.version(d / 'control.nacp') or known or '?'
     add = pg.main_modules(d / 'ExeFS', mods) if not shader_only and (d / 'ExeFS/main').exists() else {}   # a module's slot can change between versions: what main imports and the profile's list leaves out (Absolum 1.2.1's movie module). The host loads what the row names
     mods = sorted({*mods, *add}, key=pg.load_order) if add else mods
     row = T.join(['build', ver, disp] + [f'{m}={build_id(d / "ExeFS" / m)}' for m in mods if (d / 'ExeFS' / m).exists()])

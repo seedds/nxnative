@@ -71,6 +71,26 @@ flowchart LR
 - **Cost:** none in GPU time (it saves 2.5-4 ms a frame in that case); the picture is Apple's scaler's rather than the game's. Frames where the game renders at its output size are not upscaled and keep the game's shader either way. Devices without MetalFX keep the game's upscaler.
 - **Not the same as [Upscaling](#upscaling):** that one scales the finished picture, HUD included, to the screen; this one replaces the game's own step inside the frame. Both can be on.
 
+#### Games that upscale with FSR 1
+
+Also shown for games that end their 3D picture with AMD's FSR 1 (a spatial upscaler), when their profile names that step: Tears of the Kingdom (1600x896 → 1920x1080 docked). The choices are **Game's own** (FSR 1), **MetalFX**, the default for these games, and on the Mac **FSR 4**.
+
+```mermaid
+flowchart LR
+    R["Game's 3D render<br/>1600x896"] --> U{Game's upscaler}
+    U -->|Game's own| F["FSR 1"]
+    U -->|MetalFX, default| M["MetalFX spatial scaler"]
+    U -->|FSR 4, Mac| T["FSR 4: depth and<br/>motion from the camera"]
+    F --> O["1920x1080<br/>then the game draws its HUD"]
+    M --> O
+    T --> O
+```
+
+- **FSR 4** is AMD's machine-learning upscaler, from the [fsr4-native-macos](https://github.com/UzenUPoZiTiV4ik/fsr4-native-macos) port, which you install yourself: NX2Apple ships none of it. It is temporal: it builds each picture from the last ones, so it needs to know how each pixel moved. These games have no motion vectors, so the app makes them from the game's depth and camera: camera motion is exact, and what moves by itself (characters, horses, objects you carry) has none of its own, which FSR 4's own checks take care of. Two settings appear under it: **FSR 4 model** (`Lite`, the default; `Lite with pixelization fix`; `Exact`, the full network, about twice Lite's GPU time) and **FSR 4 sharpening** (off by default).
+- **Installing FSR 4:** the app looks in `~/Library/Application Support/fsr4-native-macos` (where the FSR4 Installer keeps its files; `DM_FSR4_ROOT` in the game's `env.txt` names another folder) for the model and for `dist-arm64/libfsr4live.dylib`, the port's live encoder built for Apple silicon. Without them the game uses MetalFX and the log says `FSR 4 not found`.
+- **Cost:** FSR 4 Lite takes about 2.5 ms of GPU time a frame at 1600x896 → 1920x1080 on an M4 Max (2.4-3.1 ms, standalone); MetalFX about 1 ms. Frames with no 3D scene (loading screens) use MetalFX.
+- **Checking it:** the log says `first FSR 1 draw of … drawn by FSR 4` (or `by MetalFX`). `DM_FSR4_DEBUG=mv` in `env.txt` shows the motion vectors instead of the picture: grey where nothing moves, red for motion to the right, green for motion down.
+
 ### Game language
 
 The game's own languages. The app was packed with one of them; pick another here without repacking. A game packed from a dump or a NUP may come without its list: every language is offered then, with a note, and a game that lacks the one you pick may show another.
@@ -265,7 +285,9 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
 | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |
 | Upscaling | `DM_PRESENT_UPSCALE` | `off`, `metalfx` |
-| Game's upscaler | `DM_UPSCALER` | `game`, `metalfx` |
+| Game's upscaler | `DM_UPSCALER` | `game`, `metalfx`, `fsr4` (Mac, games with FSR 1) |
+| FSR 4 model | `DM_FSR4_PROFILE` | `int8-lite`, `int8-lite-pixfix`, `exact-fast` |
+| FSR 4 sharpening | `DM_FSR4_SHARPNESS` | `0` to `1` |
 | Frame buffering | `DM_PRESENT_SNAP` | `1`, `0` |
 | Metal 4 pipelines | `DM_PSO_MTL4` | `1`, `0` |
 | Pipeline prebuild | `DM_PSO_PREBUILD` | `1`, `0` |

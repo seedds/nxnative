@@ -61,10 +61,43 @@ def macros(shader_map):
 
 class UpscalerKeys(unittest.TestCase):
     def test_from_shader_map(self):
-        none = ['#define DM_GAME_UPSCALER_KEYS ""', '#define DM_GAME_UPSCALER_N 0']   # the launcher hides the setting
+        none = ['#define DM_GAME_UPSCALER_KEYS ""', '#define DM_GAME_UPSCALER_N 0', '#define DM_GAME_UPSCALER_ANY 0', '#define DM_GAME_UPSCALER_DEFAULT "game"']   # the launcher hides the setting
         self.assertEqual(macros(None), none)
         self.assertEqual(macros(MAP.split('cs_other.bin')[0]), none)
-        self.assertEqual(macros(MAP), ['#define DM_GAME_UPSCALER_KEYS "7629d857a0a93833,c56db3d5a0f1b5af"', '#define DM_GAME_UPSCALER_N 2'])
+        self.assertEqual(macros(MAP), ['#define DM_GAME_UPSCALER_KEYS "7629d857a0a93833,c56db3d5a0f1b5af"', '#define DM_GAME_UPSCALER_N 2',
+                                       '#define DM_GAME_UPSCALER_ANY 1', '#define DM_GAME_UPSCALER_DEFAULT "game"'])   # the agl network keeps its own look by default
+
+
+def fsr1_macros(rows):
+    """The FSR 1 and upscaler-choice macros of a synthetic profile with these rows: (exit code, macros or the error)"""
+    with tempfile.TemporaryDirectory() as d:
+        Path(d, ID).mkdir()
+        (Path(d, ID) / 'game.tsv').write_text(TSV + rows)
+        r = subprocess.run([sys.executable, str(GAME), 'header', ID, str(Path(d, ID) / 'game.h')], env={**os.environ, 'DM_GAMES_DIR': d}, capture_output=True, text=True)
+        if r.returncode: return r.returncode, (r.stderr + r.stdout).strip()
+        return 0, [l for l in (Path(d, ID) / 'game.h').read_text().splitlines() if 'FSR1' in l or 'UPSCALER_ANY' in l or 'UPSCALER_DEFAULT' in l]
+
+
+class Fsr1Upscale(unittest.TestCase):
+    """fsr1_upscale: a game's FSR 1 draw and its camera block, which DM_UPSCALER=metalfx / fsr4 replaces (fsr1_up.inc); MetalFX by default where a profile has one"""
+    def test_none(self):
+        self.assertEqual(fsr1_macros(''), (0, ['#define DM_GAME_FSR1_KEY ""', '#define DM_GAME_FSR1_N 0', '#define DM_GAME_FSR1_SIZE 0x0', '#define DM_GAME_FSR1_PROJ 0x0',
+                                               '#define DM_GAME_FSR1_VP 0x0', '#define DM_GAME_FSR1_VP_PREV 0x0', '#define DM_GAME_UPSCALER_ANY 0', '#define DM_GAME_UPSCALER_DEFAULT "game"']))
+
+    def test_offsets(self):   # Tears of the Kingdom's row; without vp_prev the host keeps the last frame's camera itself (0)
+        for rows, prev in (('fsr1_upscale\tac58fc18eda5f387\tsize=0x120\tproj=0x70\tvp=0x30\tvp_prev=0x180\n', '0x180'), ('fsr1_upscale\tac58fc18eda5f387 size=0x120 proj=0x70 vp=0x30\n', '0x0')):
+            self.assertEqual(fsr1_macros(rows), (0, ['#define DM_GAME_FSR1_KEY "ac58fc18eda5f387"', '#define DM_GAME_FSR1_N 1', '#define DM_GAME_FSR1_SIZE 0x120', '#define DM_GAME_FSR1_PROJ 0x70',
+                                                     '#define DM_GAME_FSR1_VP 0x30', f'#define DM_GAME_FSR1_VP_PREV {prev}', '#define DM_GAME_UPSCALER_ANY 1', '#define DM_GAME_UPSCALER_DEFAULT "metalfx"']), rows)
+
+    def test_rejected(self):
+        for rows, why in (('fsr1_upscale\tAC58FC18EDA5F387\tsize=0x120\tproj=0x70\tvp=0x30\n', '16-digit fragment shader key'),
+                          ('fsr1_upscale\tac58fc18eda5f387\tsize=0x120\tvp=0x30\n', 'needs proj'),
+                          ('fsr1_upscale\tac58fc18eda5f387\tsize=0x124\tproj=0x70\tvp=0x30\n', '16-byte aligned'),
+                          ('fsr1_upscale\tac58fc18eda5f387\tsize=0x120\tproj=0x70\tvp=0x30\tview=0x0\n', 'is not one of'),
+                          ('fsr1_upscale\tac58fc18eda5f387\tsize=0x120\tproj=0x70\tvp=0x2000\n', 'past 4 KiB')):
+            rc, out = fsr1_macros(rows)
+            self.assertNotEqual(rc, 0, rows)
+            self.assertIn(why, out, rows)
 
 
 if __name__ == '__main__':

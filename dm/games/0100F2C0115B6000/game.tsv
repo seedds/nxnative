@@ -45,6 +45,9 @@ tex_dirty_upload	on
 # 30 when 60 does not hold, game time = real time. DM_FPS_TARGET=30 (Documents/env.txt on the iPhone) saves power, 0 = the game's own step. Until the host has decided a step
 # (the first frames) the stub steps by the measured frame time
 fps_target	60
+# agl's FSR 1 EASU (1600x896 → 1920x1080 docked) and the camera block bound to the G-buffer draws' vertex stage (0x940 bytes: render size, projection, this frame's and
+# last frame's view-projection), for DM_UPSCALER=metalfx / fsr4 (fsr1_up.inc; README.md, Upscaling)
+fsr1_upscale	ac58fc18eda5f387	size=0x120	proj=0x70	vp=0x30	vp_prev=0x180
 
 # ---- Shader split (shader_split.py) ----
 shader_groups	/Shader/ApplicationPackage=layout /Shader/=shader /Effect/=effect /UI/=layout

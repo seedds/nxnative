@@ -421,3 +421,33 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Cause:** the thread that acquires the window (here the render thread) runs under a time-constraint policy whose computation the host re-declares every 120 frames; it was 1.25 × the 90th percentile of that thread's CPU time per frame. This render thread needs 1.9–2.0 ms a frame with one or two frames in 120 near 4.4 ms, against 2.5 ms declared, and each frame past the declaration stalled the thread. Probes on both threads' waits showed the main thread's waits; adding probes slowed the render thread and the stalls vanished, and `DM_RT=0` or a fixed `DM_RT_COMP=5` / `10` removed them too (99th percentile 18–21 ms) at the same CPU energy.
 - **Fix:** the declaration also covers 1.1 × the window's peak (`rt_comp_tick` in `hle_nvn.c`): 5.6 ms here, 60.0 fps, 99th percentile 21 ms.
 - **Found on:** [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md), in the Asylum cell.
+
+### A shader that writes a whole frame through raw global memory
+
+- **Symptom:** a movie or full-screen compute pass far slower than the same work should be, nearly all of it GPU time: `GPU p50` near the frame time with `submit+present` under 1 ms. `[RED] raw global memory: a write log ran out of slots` on older chains. With `DM_NVN_GPUPROF` a relaxed timestamp can put the time before the compute encoder's reported start, so the encoder itself looks short and the gap before it is what is long.
+- **Cause:** every store through a loaded pointer searched the pool table in 12 steps, then logged its page in a hash set with compare-and-swap. Atomics from every lane contended even on a page the set already held, and a full frame holds more pages than the set's 1,024 slots.
+- **Fix:** [the log became a bitmap of table entries, read before the atomic, and a tagged hint skips the search](shaders.md#global-memory-at-an-address-loaded-from-memory). Ocarina of Time's menu with its movie background, on an M6 Mac with 16 GB: frame time 42 ms → 16.67 ms, GPU 42 → 12.6 ms. The hint alone is 3.5 ms of that (16.1 ms without it).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md); the diagnosis and this design first in [PR 1299](https://github.com/seedds/nxnative/pull/1299).
+
+### Dynamic resolution that never moves, and draw passes that wait for each other
+
+- **Symptom:** a game with dynamic resolution stays at its full size while the GPU runs far over budget: `GPU p50` above the frame time target, frame times locked to 2 vsyncs, and the same pass sizes frame after frame in `DM_NVN_GPUPROF`.
+- **Cause:** the game decides from GPU timestamps. With the default `gpu_timestamps submission` every report of a submission holds the same time, so the game measures almost no GPU time and never lowers its resolution. Separately, with the default `DM_NVN_BARRIER=full` each draw pass waits for all earlier GPU work, about 180 full barriers a frame on Ocarina of Time, which NVN does not ask for.
+- **Fix:** profile keys, the same mechanism as Breath of the Wild: [`gpu_timestamps segment`](../../dm/games/README.md) and `draw_barriers game`. On Ocarina of Time, on the bridge and in the village on an M6 Mac with 16 GB, p50 28 → about 17 ms and attachments moved per frame 300 → about 120 MB; its main pass goes from 1536x864 to about 763x429. Both are what hardware does, so each could become the default after a regression run on the games with no such key.
+- **Open:** the main pass at about 763x429 is a low resolution, and the GPU at about 17 ms is still a little over budget, so the frame rate is not locked.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
+### A full table of running GPU writes ends passes for nothing
+
+- **Symptom:** many passes a frame on the same attachments, with the residency set line showing `passes ended to land them for a read` in the thousands and `refused …: earlier submission running` matching it. Ocarina of Time: 10,463 per 300 frames, each ending the pass over a uniform block no GPU write touched.
+- **Cause:** a uniform shadow asks a table of the pages GPU writes of running submissions touch (`gw_live_in`). It had 4,096 slots, a colliding slot meaning any page, and a game with this many writes kept all of them live, about 400 as wildcards, so a block whose page hashes onto a wildcard was refused.
+- **Fix:** general: 65,536 slots (`GW_N`, about 2 MB). The refusals fell to 291 per 300 frames, and the worst frames from about 45 to about 35 ms.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
+### A host's own store in a fragment shader moves its depth test
+
+- **Symptom:** a game that reads textures through a pool ([Shaders report which textures they read through a pool](memory.md#shaders-report-which-textures-they-read-through-a-pool)) renders far below its maximum dynamic resolution: Ocarina of Time's main pass at 763x429 with the GPU at 17 ms a frame.
+- **Cause:** that report is an atomic store in the fragment shader (`dm_pool_mark`), and Metal tests a shader that stores to memory against depth after running it. So every covered pixel was shaded, with no hidden surface removal. It also risks wrong pictures: the late depth differs by an ulp from a prepass's, which fails an `EQUAL` pass along contours ([Early fragment tests from the control section](shaders.md#early-fragment-tests-from-the-control-section)).
+- **Fix:** `dmsh_build.py` `pool_arrays`: a fragment shader whose only store is the mark gets `[[early_fragment_tests]]`. One that discards, writes depth, stencil or a sample mask, or stores anything itself keeps its test where it was; there the mark costs the shading. A chain change.
+- **Check:** `python3 dm/tools/tests/test_dmsh_pool_arrays.py`. On the same route, the game's own controller then held its main pass at 1536x864, four times the pixels, at the same GPU time.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): 56 of the 258 fragment programs of a frame in Kokiri Forest carry the mark, 3 of them with a discard.

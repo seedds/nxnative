@@ -31,7 +31,7 @@ One [NUP container](../../../docs/development.md#the-packing-script-in-detail) o
 Measured on an M6 Mac with 16 GB, headless, on one walk with camera turns (`walk.sh` in the work folder).
 
 - Current: the title and menu, a movie behind them, are a locked 60 fps (p50 16.67 ms, GPU span 15.6 ms).
-- Current: walking the village at the game's top internal resolution, 1536x864: a locked 60 fps, mean 16.67 ms over each settled window. Per 2,700 frames: 0-7 frames over 25 ms and 0-1 over 33 ms. Frame p95 18.1-18.8 ms with no window, as the game's own loop moves around its fence wait; in a window p95 17.2 ms, and over 18 ms 0-5 frames per 600. GPU span p50 16.5 ms, summed GPU 15.8 ms, CPU 6 ms, about 101 passes a frame. The heavy stretch where the village opens (about 1,560 draws) holds 16.65-16.8 ms by lowering its resolution, then returns to full. The main pass used to sit at 763x429 at the same GPU time: [marked shaders tested depth late](../../../docs/reference/frame-rate.md#a-hosts-own-store-in-a-fragment-shader-moves-its-depth-test).
+- Current: walking the village at the game's top internal resolution, 1536x864: a locked 60 fps, mean 16.67 ms over each settled window. Per 2,700 frames: 0-8 frames over 25 ms and 0-2 over 33 ms. Frame p95 17.8-18.9 ms with no window, as the game's own loop moves around its fence wait; in a window p95 17.8 ms, 3 over 25 ms and 5-16 over 18 ms per 600. GPU span p50 16.5 ms, summed GPU 15.8 ms, CPU 6 ms, about 101 passes a frame. The heavy stretch where the village opens (about 1,560 draws) holds 16.65-16.8 ms by lowering its resolution, then returns to full. The main pass used to sit at 763x429 at the same GPU time: [marked shaders tested depth late](../../../docs/reference/frame-rate.md#a-hosts-own-store-in-a-fragment-shader-moves-its-depth-test).
 - Before [pool shaders stopped counting as depth readers](../../../docs/reference/rendering.md#pool-shaders-taken-as-depth-readers): passes 118, 104, 219, 224 in a four-frame cycle, frame times 15, 15, 18, 18.5 ms, mean 16.9 ms. Half the frames rendered the reflection probe's faces with one draw a pass.
 - The host's GPU figure adds up command buffers, which overlap, so it reads above the real span: 17.5 ms was never a frame's real time. The real span is `@gpu_end_ms − @gpu_beg_ms` in `DM_NVN_TSV`, or the `first start to last end` of `DM_NVN_GPUPROF`.
 - The roughly 1 ms the [wind fix](../../../docs/reference/shaders.md#dead-code-removal-dropped-a-coordinate-of-a-multi-output-instruction) seemed to add: 0.66 ms of it is the upscaler, 416 → 1076 µs, because its variants then read what they had lost. It is doing its real work.
@@ -42,6 +42,7 @@ Measured on an M6 Mac with 16 GB, headless, on one walk with camera turns (`walk
 - Open: frames of 100–650 ms when an area first loads (640 first uploads, 321 MB, in one frame of 294 ms; another 640 ms of submit with 68 MB).
 - `DM_NVN_TBDR=1` was tried and does not help: p95 19 ms on the same walk, against 17.8.
 - The first long run on a new chain is slower (p50 60–114 ms), while `MTLCompilerService` compiles pipelines; the next run is not.
+- With a window, the first start on a new chain runs the pipeline prebuild first: 33,190 shader pairs, 691 s on this Mac. A run with no window skips it.
 - The opening movie runs at the movie's own 24 fps pace during the story section and cannot be skipped: about 8 minutes on a new file.
 
 ## Memory
@@ -63,6 +64,8 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 
 ## Open
 
+- Open: 2 of about 42,850 shaders do not compile (`1f78730053feb036`, `e172bd7ec218ab8e`: `bracket nesting level exceeded maximum of 256`). Neither has shown up in a run so far.
+- Open: [the movie network](https://github.com/seedds/nxnative/issues/1375) takes 35 ms a frame on an M1 Max, so movies and the title run at about 28 fps there. It fits on this M6, with about 1 ms to spare.
 - Current: against a frame of console video of Navi's close-up the picture matches: hair and sign within 1–2 % in red and green. The causes, each general: [float atomics](../../../docs/reference/shaders.md#float-atomics-in-storage-memory) (too bright, yellow skin, a pale veil: the exposure read back from buffers that stayed 0), the terrain's CPU-written maps (holes, wrong materials; the profile keys above), [the gather offsets](../../../docs/reference/shaders.md#texturegatheroffsets-and-a-loop-over-its-offsets) (the dotted rows in blurred areas, born in the NDSR upscaler, three pictures from one input), and [image atomics on RGBA8](../../../docs/reference/shaders.md#image-atomics-on-a-32-bit-colour-texture) (the anti-aliasing's blend weights).
 - Current: the grass no longer flickers. Its blades shifted at 10 Hz because the wind's pressure solve read one neighbour at an undefined row ([dead-code removal](../../../docs/reference/shaders.md#dead-code-removal-dropped-a-coordinate-of-a-multi-output-instruction)), so the velocity field (512x512 RGBA16F, a two-buffer ring) held strong stripes up to ±11 with a 6-frame cycle. In the moss on the bridge, the mean difference between adjacent frames fell from 5.97 to 0.70 of 255, and it now grows smoothly with the lag.
 - Open, small differences from that same console frame: Navi's core has a harder edge and a narrower glow here (the bloom texture peaks at 0.44; the ball's HDR is about 0.9 with a tiny spot at 45); shadows are less blue, and the far grass about 1.4 times brighter. One frame of compressed video is weak evidence for either. The falling leaves look dark near the camera, not compared.
@@ -74,6 +77,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 
 ## Found on this game
 
+- [Raw global memory lookups that start from their last entry](../../../docs/reference/shaders.md#raw-global-memory-lookups-that-start-from-their-last-entry): the foliage, vertex and compute shaders read structures word by word through loaded addresses; about 2 ms less GPU a frame at the spawn point.
 - [The GPU idles with the next command buffer already committed](../../../docs/reference/frame-rate.md#the-gpu-idles-with-the-next-command-buffer-already-committed): the 25-40 ms frames.
 - [Pool tables and readback buffers made anew each frame](../../../docs/reference/memory.md#pool-tables-and-readback-buffers-made-anew-each-frame): about 1,500 residency changes per 300 frames.
 - [Pool shaders taken as depth readers](../../../docs/reference/rendering.md#pool-shaders-taken-as-depth-readers): about 80 extra passes a frame, and half the frames over budget.

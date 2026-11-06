@@ -206,6 +206,14 @@ The game may also write into an NVN object directly, without an NVN call, throug
 
 ## Command memory
 
+### Bound render targets outlive command recordings
+
+- **Symptom:** `texture object no longer valid`, followed by `CRASH sig=10` in `nvn_sparse_pool` through `sparse_gpu_wrote` and `attach`. In Rhythm Heaven Groove's frog stage, the supposed texture contained a texture handle followed by an `OP_DRAW_IDX` record.
+- **Cause:** `tex_snap` stores a texture description inside the command recording. The queue's `R.rt` kept pointers to those descriptions across submissions, even after the recording had completed and its memory could be reused. A write watch caught `nvnCommandBufferBindTexture` replacing a valid snapshot at the same address; the next render pass read the new command bytes as a texture and memory-pool pointer. Checking the texture's magic in `tex_mtl` did not protect the subsequent sparse-pool lookup.
+- **Fix:** `rt_preserve_bound` copies the still-bound color and depth descriptions into fixed storage owned by the queue after CPU replay, before the submission can publish completion. The standalone replay path has its own storage. Already-owned descriptions are reused; all sources are read before any destination is written, so reordered or aliased targets remain intact. Views and subresource selections stay with `R.rt`. No texels are copied, no texture is reloaded, and Metal objects retain their existing fence-based lifetimes.
+- **Check:** `t_rt_lifetime` reuses completed command memory through the NVN interface and checks real color/depth readback. It covers bindings inherited by a later submission, alternating queues, a nested command list, mip/layer views, depth-only targets and the eighth color attachment, with synchronous and deferred Metal encoding. The inherited-target case crashed before the fix.
+- **Found on:** [Rhythm Heaven Groove](../../dm/games/0100D9F01D474000/README.md#rendering), base 1.0.0, `kaeru` (localized name labels `I_KAERU_00` and `I_KAERU_01`).
+
 ### Control memory capacity queries
 
 - **Symptom:** `[RED] NVN unimplemented function called: nvnCommandBufferGetControlMemoryFree` (or `…GetControlMemorySize`) once, after the game gives a command buffer control memory.

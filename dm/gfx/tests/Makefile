@@ -218,6 +218,12 @@ t_queue_origin: t_queue_origin.m $(MTL_T_DEP)
 check_t_queue_origin: t_queue_origin
 	MTL_DEBUG_LAYER=1 ./t_queue_origin
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_queue_origin
+t_rt_lifetime: t_rt_lifetime.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_lifetime.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_rt_lifetime
+check_t_rt_lifetime: t_rt_lifetime
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_rt_lifetime
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_rt_lifetime
 check_t_rast_discard: RUN_ENV = MTL_DEBUG_LAYER=1
 t_cpu_storage: t_cpu_storage.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_cpu_storage.m $(MTL_T_SRC) $(FW)

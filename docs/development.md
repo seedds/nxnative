@@ -386,7 +386,7 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/BreathOfTheWild -k ~/keys/prod.key
 # a diagnostic build with environment switches baked in (one KEY=VALUE per line)
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --env-file diag_env.txt
 
-# a damaged NSP (files failing the NCA's hash check) stops the build after listing them; this packs those files as read
+# a damaged NSP (files failing the NCA's hash check), or a NUP or dump whose .zs files are not zstd streams, stops the build after listing them; this packs those files as read
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioGalaxy -k ~/keys/prod.keys --allow-damaged
 
 # a game without a profile: survey, provisional profile (a heap check on the Mac when the game needs one), best-effort IPA

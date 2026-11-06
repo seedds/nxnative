@@ -411,6 +411,32 @@ static void shape_case(void) {
     CHECK(a2 == a && !fresh, "the live snapshot is reused until the next barrier");
     for (int i = 0; i < 8; i++) { g_fbc[i] = (fb_cache_t){0}; } g_fbc_use = 0;
 }
+// A pool shader may read the depth attachment, so the next draw that writes depth ends the pass; not when the pool draw writes depth itself, which would be a feedback loop.
+// Only serials matter to the rule: the attachment is named after the pass opens, as in reuse_case
+static void depth_self_case(NvProg *pr) {
+    NvShader *fs = pr->sh[1]; int nb = fs->rf.nb, before = failed;
+    tex_t output, depth; target(&output, 99910); target(&depth, 99911);
+    fs->rf.nb = 0; fs->rf.pool = fs->rf.bindless = 1;
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &output; S.chmask.mask = 0xffffffffu; S.ds.dt = 1; S.ds.dw = 1;
+    uint64_t splits = g_fb_split;
+    clear(MTLClearColorMake(0, 0, 0, 1)); R.rt.depth = &depth;
+    fb_prepare(pr); fb_prepare(pr); fb_prepare(pr);
+    CHECK(g_enc && g_fb_split == splits && !g_fb_dread, "pool draws that write depth stay in one pass");
+    S.ds.dw = 0; fb_prepare(pr);
+    CHECK(g_enc && g_fb_dread, "a pool draw that leaves depth alone counts as reading it");
+    S.ds.dw = 1; fb_prepare(pr);
+    CHECK(!g_enc && g_fb_split == splits + 1, "and the next draw that writes depth ends the pass");
+    R.rt.depth = NULL; clear(MTLClearColorMake(0, 0, 0, 1)); R.rt.depth = &depth; g_fb_dself_m = 0; splits = g_fb_split;
+    fb_prepare(pr);
+    CHECK(g_enc && g_fb_dread, "with the rule off a pool draw that writes depth counts as a reader");
+    fb_prepare(pr);
+    CHECK(!g_enc && g_fb_split == splits + 1, "and the next one ends the pass, as before");
+    g_fb_dself_m = 1; R.rt.depth = NULL; S.ds.dt = S.ds.dw = 0; rp_end();
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "depth reader submission completed without error");
+    fs->rf.nb = nb; fs->rf.pool = fs->rf.bindless = 0; mtl_tex_release(&output); mtl_tex_release(&depth);
+    printf("depth reader: %s\n", before == failed ? "PASS" : "FAIL");
+}
 int main(int argc, char **argv) { @autoreleasepool {
     setenv("DM_NVN_TBDR", "0", 1);
     mtl_init(); NSError *error = nil;
@@ -436,6 +462,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     const int slots[] = {0, 128, 255};
     for (int i = 0; i < 3; i++) slot_case(pr, pipeline, slots[i], i);
     reuse_case(pr);
+    depth_self_case(pr);
     shape_case();
     mip_chain_case(pr);
     fs->fn = [lib newFunctionWithName:@"mask"];

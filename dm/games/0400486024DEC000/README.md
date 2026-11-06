@@ -74,6 +74,8 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 
 ## Found on this game
 
+- [ATOMG.CAS: a global compare-and-swap](../../../docs/reference/shaders.md#atomgcas-a-global-compare-and-swap): the full landing-revision build omitted six foliage compute libraries on opcode `0x3a9`.
+
 - [The GPU idles with the next command buffer already committed](../../../docs/reference/frame-rate.md#the-gpu-idles-with-the-next-command-buffer-already-committed): the 25-40 ms frames.
 - [Pool tables and readback buffers made anew each frame](../../../docs/reference/memory.md#pool-tables-and-readback-buffers-made-anew-each-frame): about 1,500 residency changes per 300 frames.
 - [Pool shaders taken as depth readers](../../../docs/reference/rendering.md#pool-shaders-taken-as-depth-readers): about 80 extra passes a frame, and half the frames over budget.

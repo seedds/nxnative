@@ -29,6 +29,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x98e, InstName.Red, ARed, N, writesRd: false);
             x(0x9a8, InstName.Atom, AAtomg, N);
             x(0x3a8, InstName.Atom, AAtomg, N);
+            x(0x3a9, InstName.Atom, AAtomgCas, N);
             x(AmpereOpcodes.Ldl, InstName.Ldl, ALdLocalShared, N);
             x(0x984, InstName.Lds, ALdLocalShared, N);
             x(0x387, InstName.Stl, AStLocalShared, N, writesRd: false);
@@ -348,6 +349,32 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                 context.Store(storageKind, lo, hi, value);
             }
+        }
+
+        // ATOMG.CAS Rd, [Ra + offset], Rb, Rc (0x3a9): the old word to Rd, the new one Rc (64..72) where the word equals Rb, Ra a pair with bit 72, size 73..76, and whether it swapped to the predicate
+        // at 81..84 (PT here). Ocarina of Time's foliage compute shaders (FoliageShader.sharcb) claim a hash slot with it, CAS(slot, 0, index + 1), and take the old value's index when it was taken
+        public static void AAtomgCas(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            AtomSize size = (AtomSize)x.Bits(73, 76);
+
+            if (size is not (AtomSize.U32 or AtomSize.S32))
+            {
+                throw AFail(context, $"ATOMG.CAS size {size}");
+            }
+
+            if (x.Bit(91))
+            {
+                throw AFail(context, "ATOMG.CAS in the uniform form");
+            }
+
+            (Operand lo, Operand hi) = AGlobalAddress(context, x, 72, 64, 0);
+            Operand expected = context.Copy(x.Rb >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rb, RegisterType.Gpr));
+            Operand value = x.Rc >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rc, RegisterType.Gpr);
+            Operand old = context.AtomicCompareAndSwap(StorageKind.GlobalMemory, lo, hi, expected, value);
+
+            ASetPred(context, x.Bits(81, 84), context.ICompareEqual(old, expected));
+            ASet(context, x, old);
         }
 
         // RED [Ra + UR + offset], Rb: type 73..76, operation 87..90

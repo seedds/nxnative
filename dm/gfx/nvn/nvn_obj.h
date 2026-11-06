@@ -80,6 +80,7 @@ typedef struct {
     uint64_t used;                       // Bytes written since the game last added command memory, across recordings and host segments, including segment-switch JUMPs (returned by GetCommandMemoryUsed)
     int32_t tex_base, samp_base;         // Host-table bases of the texture / sampler pool this command buffer last bound (hle_nvn.c dpool_add; 0 = the first pool of its kind)
     size_t ctl_size;                     // Bytes in the last control memory block supplied by the game (the host records no control commands)
+    int64_t copy_row, copy_image;        // SetCopyRowStride / SetCopyImageStride: state of the command buffer, written into each buffer <-> texture copy (p_copy_strides), not recorded
 } cmd_t;                                                                                   FITS(cmd_t, NVNcommandBuffer);
 
 // ---------- State objects (defaults follow the NVN / GL defaults) ----------
@@ -188,7 +189,16 @@ typedef struct { uint64_t src; const tex_t *tex; view_t view; uint8_t has_view; 
 #define DM_COPY_RESOLVE 0x40000000
 typedef struct { const tex_t *src, *dst; view_t sv, dv; uint8_t has_sv, has_dv; NVNcopyRegion sr, dr; int32_t flags; } p_copy_t2t;   // Reused for T2B: src stores the destination buffer address
 typedef struct { const tex_t *tex; view_t view; uint8_t has_view, is_uint; NVNcopyRegion r; int32_t mask; union { float f[4]; uint32_t u[4]; } c; } p_clear_tex;
-typedef struct { int64_t stride; int image; } p_copy_stride;   // image: SetCopyImageStride (bytes per layer / depth slice) instead of SetCopyRowStride
+typedef struct { int64_t stride; int image; } p_copy_stride;   // image: SetCopyImageStride (bytes per layer / depth slice) instead of SetCopyRowStride. Replayed from older captures only: the recorder no longer writes it
+// The copy strides of a buffer <-> texture copy. In NVN they are command buffer state that a copy reads when it is recorded, and setting them takes no command memory
+// (GetCopyRowStride reads them back). A copy record carries them after its texture snapshot only when one is set, so a copy with the default (tight) strides keeps its size.
+// Super Smash Bros. Ultimate records one upload in 256 bytes of command memory: SetCopyRowStride, SetCopyImageStride, CopyBufferToTexture, as two 24-byte records before the copy,
+// went past them and called the game's out-of-memory callback, which that command buffer never set (a jump to 0, docs/reference/nvn-objects.md "Copy strides are command buffer state")
+typedef struct { int64_t row, image; } p_copy_strides;
+#define COPY_STRIDES_OFF ((((sizeof(p_copy_b2t) + 7) & ~(size_t)7)) + sizeof(tex_t))   // payload offset: after the record and its one texture snapshot (REC_SNAP)
+static inline const p_copy_strides *copy_strides(const void *a, uint32_t size) {
+    return size >= 8 && size - 8 >= COPY_STRIDES_OFF + sizeof(p_copy_strides) ? (const p_copy_strides *)((const uint8_t *)a + COPY_STRIDES_OFF) : NULL;
+}
 // NVN2's DLSS evaluation: the parameters at the time of the call, each texture snapped after the record (hle_nvn.c "NVN2's DLSS", nvn_mtl.m dlss_eval)
 enum { DLSS_COLOR, DLSS_DEPTH, DLSS_MOTION, DLSS_OUTPUT, DLSS_BIAS, DLSS_EXPOSURE, DLSS_TEXTURES };
 typedef struct { const tex_t *tex[DLSS_TEXTURES]; uint64_t net; int32_t iw, ih, ow, oh, base[DLSS_TEXTURES][2]; float mv[2], jitter[2], pre_exposure; uint32_t flags, reset; } p_dlss;

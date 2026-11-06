@@ -63,9 +63,42 @@ uint64_t dm_nvn_frame_count(void);
 HLE_FORCE("_ZN2nn2vi20GetLatestFrameNumberEPmPKNS0_5LayerE", "the layer's latest frame number: the frames presented so far", Result, h_vi_FrameNo, uint64_t *out, const void *layer) {
     (void)layer; *out = dm_nvn_frame_count(); return RES_OK;
 }
-HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the layer's frame history: none kept, 0 entries", int, h_vi_FrameHist, void *out, int n, const void *layer) {
-    (void)out; (void)layer; static int once; if (!once++) LOG("vi::ListFrameHistory (%d entries asked): the host keeps no frame history, 0 returned", n);
-    return 0;
+// The layer's frame history: the last 8 frames presented, newest first, each with whether it reached the screen. Unreal Engine 5's Switch RHI tracks its flips by it: its
+// "Viewport Thread" (Minecraft Dungeons II main+0x142afb0) waits for each vsync, asks how many entries there are (a null buffer: the SDK answers 8, the history's size), reads them and
+// takes the first one shown as the latest flip, which completes the frame-end fences that wait for the swap chain (r.GTSyncType 2). With no history no flip ever came, and the first
+// FlushRenderingCommands, which waits for every fence (FFrameEndSync, main+0x15015f0), waited for ever right after the opening movie: the game thread polled its fence each ms, nothing
+// was presented again. FrameInfo is 40 bytes, as the SDK's ListFrameHistory (sdk 20.5.15, sdk+0x4510a0) fills it from the compositor's records: status (2 shown with a present
+// time, 1 queued and not shown yet), frame number (the numbering of GetLatestFrameNumber), the queue tick and the present tick twice; sorted by frame number, newest first.
+// A frame is shown once the present queue has handed it on (nvn_mtl.m g_pq_done) and the system did not drop it; its present time is the drawable's presented time when Metal
+// reports one, else (headless, or before the handler runs) the time it was first seen handed on
+#define VFH 8
+typedef struct { uint64_t frame, ticket, queued_ns, seen_ns; } vfh_ent;
+static vfh_ent g_vfh[VFH]; static pthread_mutex_t g_vfh_mu = PTHREAD_MUTEX_INITIALIZER;
+void mtl_present_progress(uint64_t *queued, uint64_t *done);   // nvn_mtl.m
+double mtl_presented_time(uint64_t n);                         // nvn_mtl.m: CACurrentMediaTime seconds (the now_ns clock), 0 not yet, -1 dropped by the system
+void dm_vi_frame_queued(uint64_t frame) {   // hle_nvn.c, at each present the game queues: frame = GetLatestFrameNumber's count with it
+    uint64_t q, d; mtl_present_progress(&q, &d);
+    pthread_mutex_lock(&g_vfh_mu); g_vfh[frame % VFH] = (vfh_ent){frame, q, guest_ns(), 0}; pthread_mutex_unlock(&g_vfh_mu);
+}
+static uint64_t vfh_ticks(uint64_t ns) { return dm_sdk_ounce() ? ns / 32 : ns * 12 / 625; }   // as guest_ticks (hle_os.c)
+HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the layer's frame history: the last 8 presents, newest first, shown once the present queue handed them on", int, h_vi_FrameHist, void *out, int n, const void *layer) {
+    (void)layer;
+    if (!out || n <= 0) return VFH;
+    uint64_t q, d; mtl_present_progress(&q, &d); (void)q;
+    uint64_t gnow = guest_ns(), hnow = now_ns(), latest = dm_nvn_frame_count();
+    int k = 0;
+    pthread_mutex_lock(&g_vfh_mu);
+    for (uint64_t f = latest; f > 0 && latest - f < VFH && k < n; f--) {
+        vfh_ent *e = &g_vfh[f % VFH]; if (e->frame != f) continue;
+        uint64_t *o = (uint64_t *)out + 5 * k++, shown = 0;
+        double pt = e->ticket <= d ? mtl_presented_time(e->ticket) : -1;
+        if (pt > 0) { uint64_t ago = hnow > (uint64_t)(pt * 1e9) ? hnow - (uint64_t)(pt * 1e9) : 0; shown = gnow > ago ? gnow - ago : 1; }
+        else if (pt == 0) { if (!e->seen_ns) e->seen_ns = gnow; shown = e->seen_ns; }
+        o[0] = shown ? 2 : 1; o[1] = f; o[2] = vfh_ticks(e->queued_ns); o[3] = o[4] = shown ? vfh_ticks(shown) : 0;
+    }
+    pthread_mutex_unlock(&g_vfh_mu);
+    static int once; if (k && !once++) LOG("vi::ListFrameHistory: %d of the last %d presents returned (up to frame %llu, the present queue at %llu)", k, VFH, (unsigned long long)latest, (unsigned long long)d);
+    return k;
 }
 // Rhythm Heaven Groove (SDK 21) asks for the built-in panel's identity at start (main+0xa9a4); the SDK's version calls through the vi service object the host never made (SIGSEGV at +0x20).
 //   The game reads a u32 kind and, when it is 2 or more, 0x14 more bytes that it hands on; any other answer makes it hand on zeros. The host has no panel: an all-zero identifier, kind 0

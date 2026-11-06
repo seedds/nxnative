@@ -40,6 +40,7 @@ The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots i
 - An IPA: the 16 GB alias region is over iOS's limit until the SDK 21 cuts are ported.
 - A crash dump once hung in `flockfile` under `shader_load`, with the log contended.
 - `dm/games/profile_guess.py` does not recognise `Generic_21_4_4`. `pl::IsRunningOnOunce` answers false.
+- The shader tables need splitting again: `shader_map.tsv` holds rows that are no shaders ([A control section's words read as a BAHS entry](../../../docs/reference/shaders.md#a-control-sections-words-read-as-a-bahs-entry); at least the agl keys `68bbe98b3bfd9876`, `18be578dfdaaffa0`, `7a4936fccf82094e`, as in Ocarina of Time), and the NSP script stops at the table check until the split's tables replace them.
 
 ## Found on this game
 

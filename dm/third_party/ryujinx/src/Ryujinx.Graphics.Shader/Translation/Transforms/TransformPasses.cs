@@ -7,6 +7,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
     {
         public static void RunPass(TransformContext context)
         {
+            TensorPass.Prepare(context);   // nxnative: on the optimised IR, before any lowering
             RunPass<DrawParametersReplace>(context);
             RunPass<ForcePreciseEnable>(context);
             RunPass<VectorComponentSelect>(context);

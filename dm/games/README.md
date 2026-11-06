@@ -119,6 +119,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Mario vs. Donkey Kong](0100B99019412000/README.md) | `0100B99019412000` | 1.0.1 (cartridge base) | 15.3.0 | Nintendo (sead / agl / gsys) | NVN |
 | [Metroid Dread](010093801237C000/README.md) | `010093801237C000` | 2.1.0 | 11.4.3 | MercurySteam's engine | NVN |
 | [Metroid Prime Remastered](010012101468C000/README.md) | `010012101468C000` | 1.0.0 (base) | 12.3.1 | Retro Studios' engine | NVN |
+| [Minecraft Dungeons II](0100A7C01B792000/README.md) | `0100A7C01B792000` | 1.1.3.0 | 20.5.15 | Unreal Engine 5, Wwise, Havok | NVN |
 | [Monster Hunter Rise](0100B04011742000/README.md) | `0100B04011742000` | 16.0.2 | 11.4.3 | Capcom's RE Engine | NVN |
 | [Monster Train 2](010051701FB46000/README.md) | `010051701FB46000` | 1.1.1 | 18.3.5 | Unity 2022.3.54f1 IL2CPP | NVN |
 | [Need for Speed: Hot Pursuit Remastered](010029B0118E8000/README.md) | `010029B0118E8000` | 1.0.3 | 10.4.1 | Criterion's engine (Stellar Entertainment port) | NVN |
@@ -127,6 +128,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [OCTOPATH TRAVELER](010057D006492000/README.md) | `010057D006492000` | 1.0.5 | 3.5.1 | Unreal Engine 4.18 | NVN |
 | [Octopath Traveler 0](01005270232F2000/README.md) | `01005270232F2000` | 1.0.5 | 19.3.13 | Unreal Engine 5 | NVN |
 | [OCTOPATH TRAVELER II](0100A3501946E000/README.md) | `0100A3501946E000` | 1.1.1 | 12.3.2 | Unreal Engine 4.27 | NVN |
+| [ŌKAMI HD](0100276009872000/README.md) | `0100276009872000` | 1.0.0 (base) | 4.5.0 | Clover Studio's PS2 engine, remastered; CRIWARE | NVN |
 | [Paper Mario: The Origami King](0100A3900C3E2000/README.md) | `0100A3900C3E2000` | 1.0.1 | 8.3.1 | Intelligent Systems' engine on NintendoWare | NVN |
 | [Paper Mario: The Thousand-Year Door](0100ECD018EBE000/README.md) | `0100ECD018EBE000` | 1.0.1 | 15.3.2 | Intelligent Systems' engine on NintendoWare | NVN |
 | [Patrick's Parabox](0100E44016C22000/README.md) | `0100E44016C22000` | 1.0.1 | 13.3.7 | Unity 2020.3.30f1 IL2CPP | NVN |

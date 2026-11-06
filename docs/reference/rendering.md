@@ -482,6 +482,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** recorded as a float clear; both replay paths convert the value to the attachment's integer type.
 - **Found on:** [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) (an integer target cleared once Mario stands on Rogueport's docks, about frame 12,300 of a new file).
 
+### Sampling the depth attachment of the same pass
+
+- **Symptom:** large rectangles or small squares flicker over the background from frame to frame, with no red line. The picture is right with lossless compression off on that one depth buffer, at a cost in frame rate (Donkey Kong Country: Tropical Freeze: about 50 fps instead of 60 at a boss).
+- **Cause:** a draw samples the depth buffer attached to its own pass. `fb_prepare` covered colour attachments only. With Apple's lossless compression the read gave wrong values in whole tiles, whether or not the pass wrote depth. Keeping the store of unwritten depth (`DM_NVN_UNWRITTEN_DC=0`) did not help.
+- **Fix:** `fb_prepare` gives such a draw a copy of the depth buffer, from the same snapshot cache as colour attachments, for a single-level, single-layer 2D view. It is on by default only in Donkey Kong Country: Tropical Freeze: the copy ends the pass, and elsewhere a draw that only reads depth stays in its pass and reads it in place (`t_feedback` checks both). `DM_NVN_FB_DEPTH=1` or `0` turns it on or off for any game.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_feedback` still passes; it does not cover depth. Played in Donkey Kong Country: Tropical Freeze.
+- **Found on:** [Donkey Kong Country: Tropical Freeze](../../dm/games/0100C1F0051B6000/README.md) (`976bc74475e9443b`, `dbd64ad1611ed4c9`, 1920×1080 Depth32Float, [#676](https://github.com/seedds/nxnative/issues/676)).
+
 ### Same-pass feedback read through a snapshot
 
 - **Symptom:** solid magenta blocks, exactly (255, 0, 255), hard-edged and aligned to the 16-pixel grid (16×16, sometimes two stacked): Super Mario 3D World and Super Mario Odyssey showed them only on the iPhone; Captain Toad and Origami King on a Mac, Apple M6, Captain Toad in about half the frames of the opening course, moving with the falling leaves. On an RG11B10F target (no alpha) the blocks are pure black or neon green, (0, 252, 0), and flicker, sometimes only part of a tile: Super Mario Bros. Wonder on an Apple M6 and an M1, most visible on the speech bubbles of dialogue; or non-finite pixels that bloom spreads into green blobs (NieR:Automata on the Mac). A rendered cutscene alternates brightness every game frame, with blocky bands of light and shadow switching on and off: each lighting-zone bit flips every frame (Xenoblade Chronicles 3, a read-only image load).

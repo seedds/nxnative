@@ -73,9 +73,11 @@ int main(void) {
         pso_key k = {.cfmt = {80, 0, 92}, .dfmt = 252, .samples = 4, .blend_en = 1, .chmask = 0xf0f, .a2c = 1};
         k.blend[0].src_rgb = 1; k.blend[0].dst_rgb = 2;
         pso_key_norm(&k, 0);
-        pso_skey stable, parsed; char hex[sizeof stable * 2 + 1];
+        pso_skey stable, parsed; char hex[sizeof stable * 2 + 1], roundtrip[sizeof parsed * 2 + 1];
         pso_skey_from(&k, ms, fs, 0, NULL, &stable); pso_skey_hex(&stable, hex);
-        assert(pso_mesh_skey_parse(hex, &parsed) == 0 && !memcmp(&parsed, &stable, sizeof stable));
+        assert(pso_mesh_skey_parse(hex, &parsed) == 0);
+        pso_skey_hex(&parsed, roundtrip);
+        assert(!strcmp(hex, roundtrip));
         stable.k.attr_hi[0].fmt = 7; pso_skey_hex(&stable, hex);
         assert(pso_mesh_skey_parse(hex, &parsed) == 0 && !parsed.k.attr_hi[0].fmt);
         stable.k.attr_hi[0].fmt = 0;

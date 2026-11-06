@@ -718,6 +718,21 @@ class Script(unittest.TestCase):
         self.assertEqual(nsp.mac_app_name('The Legend of Zelda: Echoes of Wisdom'), 'The Legend of Zelda - Echoes of Wisdom')
         self.assertEqual(nsp.mac_app_name('AC/DC'), 'AC - DC'); self.assertEqual(nsp.mac_app_name(':'), 'nxnative')
 
+    def test_extracted_program_has_its_own_mac_save_and_pipeline_cache(self):
+        app, edition = 0x010015100B514000, 0x040015100B514001
+        saved = {'PRODUCT_BUNDLE_IDENTIFIER': 'org.nxnative.010015100b514000'}
+        for source, profile_id, expected in (('folder', edition, edition), ('folder', app, app),
+                                             ('nup', edition, app), (None, edition, app)):
+            with self.subTest(source=source, profile=f'{profile_id:016X}'):
+                launch_id = nsp.mac_app_title_id(app, types.SimpleNamespace(title_id=profile_id), source)
+                self.assertEqual(launch_id, expected)
+                another_extracted_program = source == 'folder' and launch_id != app
+                default = f'org.nxnative.{edition:016x}' if another_extracted_program else saved['PRODUCT_BUNDLE_IDENTIFIER']
+                self.assertEqual(nsp.build_bundle_id(launch_id, None, saved, another_extracted_program), default)
+        self.assertEqual(nsp.build_bundle_id(edition, None, {}, selected_extracted_mac_program=True), 'org.nxnative.040015100b514001')
+        self.assertEqual(nsp.build_bundle_id(edition, 'org.example.custom', saved, selected_extracted_mac_program=True), 'org.example.custom')
+        self.assertEqual(nsp.build_bundle_id(edition, 'org.example.custom', saved), 'org.example.custom')
+
     def pack_cmd(self, gfx, **kw):
         ran, tmp = [], Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp); self.said = []; self.settings_env = {}
         if kw.get('work'): tmp = kw['work']

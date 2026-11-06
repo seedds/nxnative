@@ -42,6 +42,7 @@ Measured on an M6 Mac with 16 GB, headless, on one walk with camera turns (`walk
 - Open: frames of 100–650 ms when an area first loads (640 first uploads, 321 MB, in one frame of 294 ms; another 640 ms of submit with 68 MB).
 - `DM_NVN_TBDR=1` was tried and does not help: p95 19 ms on the same walk, against 17.8.
 - The first long run on a new chain is slower (p50 60–114 ms), while `MTLCompilerService` compiles pipelines; the next run is not.
+- Resolved: a first start on a Mac with no `pso_user.tsv` and a cold Metal shader cache showed a black picture with the title music for minutes: the first title frame built 11 pipelines and loaded 12 shader libraries in one submission, 252.6 s on an M3 Pro (macOS 27.2) with `MTLCompilerService` at 100 %, while the window kept the last presented frame ([issue 1477](https://github.com/seedds/nxnative/issues/1477)). `pso_manifest.tsv` now seeds that start (9,620 lines recorded on that Mac over boot, the title, a new game, the opening, Link's house, Kokiri Forest and a save load), so the prepare step builds them behind the Preparing-shaders screen before the first frame.
 - With a window, the first start on a new chain runs the pipeline prebuild first: 33,190 shader pairs, 691 s on this Mac. A run with no window skips it.
 - The opening movie runs at the movie's own 24 fps pace during the story section and cannot be skipped: about 8 minutes on a new file.
 

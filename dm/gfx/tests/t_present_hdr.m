@@ -93,6 +93,7 @@ static int near(double a, double b, double rel, double abs_) { return fabs(a - b
 int main(void) { @autoreleasepool {
     setenv("DM_HDR", "1", 1); unsetenv("DM_HDR_PAPER_WHITE"); unsetenv("DM_HDR_PEAK");
     mtl_init();
+    mtl_present_layer(N, 1);   // a layer of the fixtures' N x 1 shape, so each source texel lands on its own target texel: left to the display's 16:9, the picture is a bar in the middle (present_shape)
     status_fn status = (status_fn)hle_fn("_ZN2nn2vi21QueryDisplayHdrStatusEPbPNS0_15HdrOutputFormatEPtPKNS0_7DisplayE");
     paper_fn paper = (paper_fn)hle_fn("_ZN2nn2vi25QueryDisplayHdrPaperWhiteEPtPKNS0_7DisplayE");
     range_fn range = (range_fn)hle_fn("_ZN2nn2vi52SetLayerNextHdrExtendedContentLuminanceRangeMetadataEPNS0_5LayerEtt");

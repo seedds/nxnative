@@ -103,6 +103,7 @@ Game-specific findings; the general host changes they led to are listed under [F
 - [Offline pipeline archive missing for the device GPU](../../../docs/reference/shaders.md#offline-pipeline-archive-missing-for-the-device-gpu): archive targets can follow profile metadata while iOS Metal 4 remains opt-in; [the probe above](#offline-pipeline-archive-probe) records the build evidence and open device checks.
 General host changes first needed here; each applies to every game:
 
+- **Resolved: Polish and Thai can be chosen**: [Polish and Thai, and a Switch 2 SDK's own language list](../../../docs/reference/services.md#polish-and-thai-and-a-switch-2-sdks-own-language-list). 1.2.1 ships both (`Mals/EUpl`, `Mals/THth`, `Font/Font_THth`); the tools did not know their codes. One Mac boot each to the title screen.
 - **Resolved: Mac launcher metadata matches native defaults**: [A Mac front end's default settings change Metal execution paths](../../../docs/reference/packing.md#a-mac-front-ends-default-settings-change-metal-execution-paths), found by metadata generation and source inspection; no gameplay measurement.
 - [A capture refused after a change to the reflection structs](../../../docs/reference/nvn-objects.md#a-capture-refused-after-a-change-to-the-reflection-structs).
 - **zstd files inside a RomFS image** (`shader_split.py` `unzs`): [The zstd command given a path inside the image](../../../docs/reference/packing.md#the-zstd-command-given-a-path-inside-the-image).

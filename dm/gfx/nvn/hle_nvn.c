@@ -27,6 +27,8 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <errno.h>
+#include <signal.h>
+#include <sys/ucontext.h>
 #if TARGET_OS_OSX
 #define DM_MEM_CAP_DEFAULT_GB 24
 #else
@@ -125,6 +127,100 @@ HLE_FORCE("nvnBootstrapLoader", "the NVN graphics API is replaced wholesale with
 #include "nvn_obj.h"
 #include "nvn_queue.h"
 #include "nvn_capture.h"   // DM_NVN_CAPTURE hooks
+
+// ---------- DM_NVN_GPUVA_SHIFT=1 (diagnostic) ----------
+// For a design that would hand the game Metal's GPU addresses instead of its CPU ones: does the game's CPU code use a GPU address as a pointer, or hand a CPU address where NVN takes a GPU
+// one? Today the two are equal, so neither shows. With this on, every GPU address NVN hands out (memory pool, buffer, texture) in the guest block is moved by a fixed shift into a reserved
+// range nothing is mapped in (the shadow), and the host moves each address it is handed back (GA). What a shader sees is moved as well, as a GPU would see the game's addresses: the raw pool
+// table and the driver constants' buffer tables (nvn_mtl.m). A CPU access through a moved address faults: the handler counts it by pc, moves the base register back and lets the instruction
+// run again, so play goes on. A CPU address handed where a GPU one belongs is counted by caller. Reported every 10 s as [gpushift] lines. Off: nothing changes
+extern uint64_t nvn_gs_lo, nvn_gs_len, nvn_gs_shift;   // nvn_mtl.m: the shadow [lo, lo + len) = the guest block moved by shift; len 0 = off
+__attribute__((weak)) int dm_guest_as_contains(uintptr_t a);           // hle_svc.c (weak: the graphics unit tests have no guest block and never turn the shift on)
+__attribute__((weak)) void svc_guest_range(uint8_t **base, size_t *size);
+enum { GS_N = 128 };
+static struct { _Atomic uint64_t pc; _Atomic uint64_t n; _Atomic uint64_t addr; uint64_t said; } g_gs_fault[GS_N], g_gs_cpu[GS_N];   // by pc: CPU accesses through a moved address; CPU addresses handed in
+static _Atomic uint64_t g_gs_out, g_gs_outside, g_gs_fault_lost, g_gs_cpu_lost;
+static void gs_count(__typeof__(g_gs_fault[0]) *t, _Atomic uint64_t *lost, uint64_t pc, uint64_t addr) {   // signal-safe: atomics only
+    unsigned k = (unsigned)((pc * 0x9E3779B97F4A7C15ull) >> 57) & (GS_N - 1);
+    for (int i = 0; i < GS_N; i++, k = (k + 1) & (GS_N - 1)) {
+        uint64_t z = 0;
+        if (atomic_load(&t[k].pc) == pc || atomic_compare_exchange_strong(&t[k].pc, &z, pc) || z == pc) { atomic_fetch_add(&t[k].n, 1); atomic_store(&t[k].addr, addr); return; }
+    }
+    atomic_fetch_add(lost, 1);
+}
+static inline uint64_t *gs_reg(ucontext_t *uc, int r) { return r < 29 ? &uc->uc_mcontext->__ss.__x[r] : r == 29 ? &uc->uc_mcontext->__ss.__fp : &uc->uc_mcontext->__ss.__lr; }
+// Moves the register holding the moved address back, so the faulting instruction runs again on the real one (tested on loads, stores, pairs, libc's SIMD memcpy / memmove / memset and atomics)
+static int gs_repair(ucontext_t *uc) {
+    uint32_t insn = *(const uint32_t *)(uintptr_t)uc->uc_mcontext->__ss.__pc;
+    if ((insn & 0xfff80000u) == 0xd5080000u) { int r = (int)(insn & 31); uint64_t *x = gs_reg(uc, r); if (r == 31 || *x - nvn_gs_lo >= nvn_gs_len) return 0; *x -= nvn_gs_shift; return 1; }   // DC (SYS): the address in bits 0-4
+    int rn = (int)(insn >> 5 & 31);   // loads, stores, pairs, SIMD, exclusives and atomics: the base register in bits 5-9
+    if (rn != 31) { uint64_t *x = gs_reg(uc, rn); if (*x - nvn_gs_lo < nvn_gs_len) { *x -= nvn_gs_shift; return 1; } }
+    if ((insn & 0x3b200c00u) == 0x38200800u) {   // register offset [Xn, Xm{, LSL #s}]: the moved part is in Xm (an index, or the distance between two buffers as libc's memmove keeps it)
+        int rm = (int)(insn >> 16 & 31), opt = (int)(insn >> 13 & 7), scale = (int)(insn >> 30), sc = (int)(insn >> 12 & 1);
+        if ((insn >> 26 & 1) && scale == 0 && (insn >> 23 & 1)) scale = 4;   // a 128-bit SIMD register
+        if (rm == 31 || (opt != 3 && opt != 7)) return 0;   // a 32-bit index cannot hold the shift
+        *gs_reg(uc, rm) -= sc ? nvn_gs_shift >> scale : nvn_gs_shift; return 1;
+    }
+    return 0;
+}
+static int gs_fault(void *addr, int is_write, void *uc_) {   // signal context: atomics only
+    (void)is_write;
+    uint64_t a = (uint64_t)(uintptr_t)addr; if (!nvn_gs_len || a - nvn_gs_lo >= nvn_gs_len) return 0;
+    ucontext_t *uc = uc_;
+    if (!gs_repair(uc)) return 0;   // left to the crash report, which shows the instruction and registers
+    gs_count(g_gs_fault, &g_gs_fault_lost, uc->uc_mcontext->__ss.__pc, a);
+    return 1;
+}
+static void gs_report_table(__typeof__(g_gs_fault[0]) *t, const char *what) {
+    for (int k = 0; k < GS_N; k++) {
+        uint64_t pc = atomic_load(&t[k].pc), n = atomic_load(&t[k].n); if (!pc || n == t[k].said) continue;
+        module_t *m = module_of((void *)(uintptr_t)pc); char at[48];
+        if (m) snprintf(at, sizeof at, "%s+%#llx", m->name, (unsigned long long)(pc - (uint64_t)(uintptr_t)m->base)); else snprintf(at, sizeof at, "host %#llx", (unsigned long long)pc);
+        LOG("[gpushift] %s at %s: %llu (+%llu), last address %#llx", what, at, (unsigned long long)n, (unsigned long long)(n - t[k].said), (unsigned long long)atomic_load(&t[k].addr));
+        t[k].said = n;
+    }
+}
+static void *gs_report(void *arg) {
+    (void)arg;
+    for (;;) {
+        sleep(10);
+        gs_report_table(g_gs_fault, "CPU access through a GPU address");
+        gs_report_table(g_gs_cpu, "CPU address handed where NVN takes a GPU address");
+        LOG("[gpushift] so far: %llu GPU addresses handed out, %llu of them outside the guest block (not moved); untracked pcs %llu / %llu", (unsigned long long)g_gs_out,
+            (unsigned long long)g_gs_outside, (unsigned long long)g_gs_fault_lost, (unsigned long long)g_gs_cpu_lost);
+    }
+    return NULL;
+}
+static void gs_init_once(void) {
+    const char *e = getenv("DM_NVN_GPUVA_SHIFT"); if (!e || !atoi(e)) return;
+    uint8_t *as = NULL; size_t n = 0; if (svc_guest_range && dm_guest_as_contains) svc_guest_range(&as, &n);
+    if (!as || !n) { LOG("[RED] [gpushift] no guest block yet: off"); return; }
+    // The shadow goes right past the guest block if it is free there, so moved addresses stay below 2^40 (NVN's reach, and the raw pool table's hints)
+    uintptr_t want = ((uintptr_t)as + n + (2u << 20) - 1) & ~(uintptr_t)((2u << 20) - 1);
+    void *s = mmap((void *)want, n, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+    if (s == MAP_FAILED) { LOG("[RED] [gpushift] could not reserve the shadow: off"); return; }
+    if ((uintptr_t)s + n > (1ull << 40)) LOG("[RED] [gpushift] the shadow %p +%#zx reaches past 2^40: raw pool table hints miss there (slower, still correct)", s, n);
+    nvn_gs_shift = (uint64_t)(uintptr_t)s - (uint64_t)(uintptr_t)as; nvn_gs_lo = (uint64_t)(uintptr_t)s; nvn_gs_len = n;
+    dm_fault_hook_register(gs_fault);
+    pthread_t th; if (!pthread_create(&th, NULL, gs_report, NULL)) pthread_detach(th);
+    LOG("[gpushift] on: guest block %p +%#zx is handed out as %p (shift %#llx)", as, n, s, (unsigned long long)nvn_gs_shift);
+}
+static inline void gs_init(void) { static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, gs_init_once); }
+static uint64_t gs_out(uint64_t a) {   // a GPU address NVN hands the game
+    gs_init(); if (!nvn_gs_len || !a) return a;
+    atomic_fetch_add(&g_gs_out, 1);
+    if (!dm_guest_as_contains((uintptr_t)a)) { atomic_fetch_add(&g_gs_outside, 1); return a; }
+    return a + nvn_gs_shift;
+}
+static uint64_t gs_in(uint64_t a, void *caller) {   // a GPU address the game hands NVN
+    if (!nvn_gs_len) return a;
+    if (a - nvn_gs_lo < nvn_gs_len) return a - nvn_gs_shift;
+    if (a && dm_guest_as_contains((uintptr_t)a)) gs_count(g_gs_cpu, &g_gs_cpu_lost, (uint64_t)(uintptr_t)caller, a);
+    return a;
+}
+#define GA(a) gs_in((a), __builtin_return_address(0))
+#define GA_RANGES(rg, n, tmp) const NVNbufferRange *rg##_in = (rg); NVNbufferRange tmp[(n) > 0 && (n) <= 64 ? (n) : 1]; \
+    if (nvn_gs_len && (n) > 0 && (n) <= 64) { for (int k_ = 0; k_ < (n); k_++) { tmp[k_] = rg##_in[k_]; tmp[k_].address = GA(rg##_in[k_].address); } rg = tmp; }
 
 // ---------- Device ----------
 NVN(nvnDeviceBuilderSetDefaults, void, NVNdeviceBuilder *b) { memset(b, 0, sizeof(dev_builder_t)); }
@@ -276,7 +372,7 @@ NVN(nvnMemoryPoolFlushMappedRange, void, const NVNmemoryPool *p, ptrdiff_t off, 
 }
 // A GPU address exists only once the driver has given one: here, by a buffer (nvnBufferInitialize) or by a texture (nvnTextureGetTextureAddress). Raw global memory can reach only what these name (mtl_pool_addressed)
 static void pool_mark_addressed(const pool_t *o) { static __thread const uint8_t *last; if (o->mem && o->mem != last) { last = o->mem; mtl_pool_addressed(o->mem, o->size); } }
-NVN(nvnMemoryPoolGetBufferAddress, NVNbufferAddress, const NVNmemoryPool *p) { pool_mark_addressed((const pool_t *)p); return (NVNbufferAddress)((const pool_t *)p)->mem; }
+NVN(nvnMemoryPoolGetBufferAddress, NVNbufferAddress, const NVNmemoryPool *p) { pool_mark_addressed((const pool_t *)p); return (NVNbufferAddress)gs_out((uint64_t)(uintptr_t)((const pool_t *)p)->mem); }
 
 // ---------- Descriptor pools ----------
 // One ID space per pool. In NVN a texture or sampler ID indexes the pool the command buffer has bound (SetTexturePool / SetSamplerPool), and two pools may use the same IDs. The replay keeps
@@ -618,7 +714,7 @@ NVN(nvnTextureGetSamples, int, const NVNtexture *t) { return CTX(t)->d.samples; 
 NVN(nvnTextureGetMemoryPool, NVNmemoryPool *, const NVNtexture *t) { return (NVNmemoryPool *)CTX(t)->pool; }
 NVN(nvnTextureGetMemoryOffset, ptrdiff_t, const NVNtexture *t) { return (ptrdiff_t)CTX(t)->off; }
 // The GPU address of the texture's storage (DRAGON QUEST XI S, Unreal Engine 4.18, asks for it at start): pool address + offset, the same address space as nvnMemoryPoolGetBufferAddress
-NVN(nvnTextureGetTextureAddress, NVNtextureAddress, const NVNtexture *t) { const tex_t *o = CTX(t); if (o->pool) mtl_pool_addressed(o->pool->mem + o->off, o->L.size ? o->L.size : 1); return o->pool ? (NVNtextureAddress)(o->pool->mem + o->off) : 0; }
+NVN(nvnTextureGetTextureAddress, NVNtextureAddress, const NVNtexture *t) { const tex_t *o = CTX(t); if (o->pool) mtl_pool_addressed(o->pool->mem + o->off, o->L.size ? o->L.size : 1); return o->pool ? (NVNtextureAddress)gs_out((uint64_t)(uintptr_t)(o->pool->mem + o->off)) : 0; }
 // The size of a texture's ZCull save area (SaveZCullData / RestoreZCullData). The host does no ZCull and never touches the area, but games allocate it from their own pools, and NVN
 // does not report 0. Cuphead (Unity 2017.4) allocates one per depth target (main+0x1948060) from its pool allocator, which gives a zero-size request the offset of a live block; its
 // map of allocations then loses that block (the zero-size one's size overwrites it, and freeing the zero-size one deletes it), and the block's own free later pushes a garbage-sized
@@ -791,6 +887,7 @@ int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
 NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData *sd) {
     prog_t *o = (prog_t *)p;
     if (n < 0 || n > 6) { LOG("[RED] ProgramSetShaders stage count %d", n); return 0; }
+    NVNshaderData sd_gs[6]; if (nvn_gs_len) { for (int i = 0; i < n; i++) { sd_gs[i] = sd[i]; sd_gs[i].data = GA(sd[i].data); } sd = sd_gs; }   // DM_NVN_GPUVA_SHIFT
     pthread_mutex_lock(&g_sub_mu); mtl_prog_release(o); pthread_mutex_unlock(&g_sub_mu);
     o->nstage = n; memcpy(o->sd, sd, n * sizeof *sd); o->serial = nvn_new_serial();
     // The keys are computed here (see prog_key in nvn_obj.h): the control section is only guaranteed valid during this call; the code area lives in a memory pool and stays valid while the program is in use
@@ -1066,16 +1163,16 @@ NVN(nvnCommandBufferFenceSync, void, NVNcommandBuffer *c, NVNsync *s, NVNsyncCon
 NVN(nvnCommandBufferResetCounter, void, NVNcommandBuffer *c, NVNcounterType t) {
     uint8_t *p = cmd_alloc(CB(c), 16); put_hdr(p, OP_RESET_COUNTER, 16); uint64_t tt = t; memcpy(p + 8, &tt, 8);
 }
-NVN(nvnCommandBufferReportCounter, void, NVNcommandBuffer *c, NVNcounterType t, NVNbufferAddress a) {
+NVN(nvnCommandBufferReportCounter, void, NVNcommandBuffer *c, NVNcounterType t, NVNbufferAddress a) { a = GA(a);
     uint8_t *p = cmd_alloc(CB(c), 24); put_hdr(p, OP_REPORT_COUNTER, 24); uint64_t tt = t; memcpy(p + 8, &tt, 8); memcpy(p + 16, &a, 8);
 }
-NVN(nvnCommandBufferCopyBufferToBuffer, void, NVNcommandBuffer *c, NVNbufferAddress src, NVNbufferAddress dst, size_t n, int flags) {
+NVN(nvnCommandBufferCopyBufferToBuffer, void, NVNcommandBuffer *c, NVNbufferAddress src, NVNbufferAddress dst, size_t n, int flags) { src = GA(src); dst = GA(dst);
     (void)flags;
     uint8_t *p = cmd_alloc(CB(c), 32); put_hdr(p, OP_COPY_B2B, 32); uint64_t nn = n;
     memcpy(p + 8, &src, 8); memcpy(p + 16, &dst, 8); memcpy(p + 24, &nn, 8);
 }
 // uniform update: the data is copied into command memory at record time (NVN semantics: the caller may modify the original data after recording) and written into the buffer at submit
-NVN(nvnCommandBufferUpdateUniformBuffer, void, NVNcommandBuffer *c, NVNbufferAddress buf, size_t bufsz, ptrdiff_t off, size_t n, const void *data) {
+NVN(nvnCommandBufferUpdateUniformBuffer, void, NVNcommandBuffer *c, NVNbufferAddress buf, size_t bufsz, ptrdiff_t off, size_t n, const void *data) { buf = GA(buf);
     (void)bufsz;
     uint32_t sz = (uint32_t)(24 + n);
     uint8_t *p = cmd_alloc(CB(c), sz); put_hdr(p, OP_UPDATE_UB, (sz + 7) & ~7u);
@@ -1167,7 +1264,7 @@ NVN(nvnCommandBufferBindVertexStreamState, void, NVNcommandBuffer *c, int n, con
     if (n < 0 || n > 16) { LOG("[RED] BindVertexStreamState n=%d", n); return; }
     p_bind_vstream *r = RECN(c, OP_BIND_VSTREAM, p_bind_vstream, st, n); r->first = 0; r->n = n; memcpy(r->st, st, 8 * n);
 }
-NVN(nvnCommandBufferBindVertexBuffers, void, NVNcommandBuffer *c, int first, int n, const NVNbufferRange *rg) {
+NVN(nvnCommandBufferBindVertexBuffers, void, NVNcommandBuffer *c, int first, int n, const NVNbufferRange *rg) { GA_RANGES(rg, n, rg_gs)
     // NVN has 16 streams. Mario Tennis Fever clears 32 before each model (first = 16 to 31 with a null range, thousands of times a run): nothing can read those, so only a real range past the limit is wrong
     if (first >= 16 && n == 1 && !rg[0].address && !rg[0].size) return;
     if (n < 0 || first + n > 16) { static int red; if (red++ < 8) LOG("[RED] BindVertexBuffers first=%d n=%d", first, n); return; }
@@ -1178,7 +1275,7 @@ NVN(nvnCommandBufferBindVertexBuffers, void, NVNcommandBuffer *c, int first, int
 }
 // NVN2's task and mesh stages (6, 7) keep their bindings in the tessellation stages' places (3, 4): a program has mesh shaders or tessellation, never both, and the replay keeps six stages
 static inline NVNshaderStage st_host(NVNshaderStage st) { return (unsigned)st == 6 ? 3 : (unsigned)st == 7 ? 4 : st; }
-NVN(nvnCommandBufferBindUniformBuffer, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNbufferAddress a, size_t n) { st = st_host(st);
+NVN(nvnCommandBufferBindUniformBuffer, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNbufferAddress a, size_t n) { a = GA(a); st = st_host(st);
     if ((unsigned)st < 6 && (unsigned)i < 16 && n <= UINT32_MAX) {
         *REC(c, OP_BIND_UBO_SMALL, p_bind_ubo_small) = (p_bind_ubo_small){(uint16_t)st, (uint16_t)i, (uint32_t)n, a}; return;
     }
@@ -1190,11 +1287,11 @@ NVN(nvnCommandBufferBindUniformBuffers, void, NVNcommandBuffer *c, NVNshaderStag
 static void ssbo_slot_check(int st, int i) {   // the replay keeps 16 storage buffer slots a stage (NVN's limit); a higher one is not bound
     if (i >= 16) { static int n; if (n++ < 8) LOG("[RED] storage buffer bound at slot %d of stage %d: the host keeps 16 a stage, the bind is dropped", i, st); }
 }
-NVN(nvnCommandBufferBindStorageBuffer, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNbufferAddress a, size_t n) { st = st_host(st);
+NVN(nvnCommandBufferBindStorageBuffer, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNbufferAddress a, size_t n) { a = GA(a); st = st_host(st);
     ssbo_slot_check(st, i);
     *REC(c, OP_BIND_SSBO, p_bind_buf) = (p_bind_buf){st, i, a, n};
 }
-NVN(nvnCommandBufferBindStorageBuffers, void, NVNcommandBuffer *c, NVNshaderStage st, int first, int n, const NVNbufferRange *rg) { st = st_host(st);
+NVN(nvnCommandBufferBindStorageBuffers, void, NVNcommandBuffer *c, NVNshaderStage st, int first, int n, const NVNbufferRange *rg) { GA_RANGES(rg, n, rg_gs) st = st_host(st);
     for (int i = 0; i < n; i++) { ssbo_slot_check(st, first + i); *REC(c, OP_BIND_SSBO, p_bind_buf) = (p_bind_buf){st, first + i, rg[i].address, rg[i].size}; }
 }
 static p_bind_handles *bind_handles(NVNcommandBuffer *c, int op, int st, int first, int n, const uint64_t *h) {
@@ -1240,15 +1337,15 @@ NVN(nvnCommandBufferDrawArrays, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, 
 // NVN2 mesh shading: count task workgroups from first, or mesh workgroups in a program with no task shader (nvn_geometry.inc mesh_tasks_draw)
 NVN_NOPROTO(nvnCommandBufferDrawMeshTasks, void, NVNcommandBuffer *c, int first, int count) { rec_draw(c, (p_draw){DM_PRIM_MESH_TASKS, first, count, 1, 0, 0}); }
 // Indirect: the record {count, first} is written by the GPU's culling earlier in the frame (Ocarina of Time: zeros at record time): nvn_geometry.inc mesh_tasks_draw
-NVN_NOPROTO(nvnCommandBufferDrawMeshTasksIndirect, void, NVNcommandBuffer *c, NVNbufferAddress ind) { rec_draw(c, (p_draw){DM_PRIM_MESH_TASKS, 0, 0, 1, 0, ind}); }
+NVN_NOPROTO(nvnCommandBufferDrawMeshTasksIndirect, void, NVNcommandBuffer *c, NVNbufferAddress ind) { ind = GA(ind); rec_draw(c, (p_draw){DM_PRIM_MESH_TASKS, 0, 0, 1, 0, ind}); }
 // Variable rate shading: the image, its palettes and their mode ask the hardware to shade some tiles at a coarser rate. Metal's render passes have no per-tile rate (a rasterization rate
 // map resamples the whole target), and shading every pixel is the most a rate can ask, so these change no result but its sharpness: nothing is recorded
 NVN_NOPROTO(nvnCommandBufferBindShadingRateImage, void, NVNcommandBuffer *c, const void *view, const void *tex) { (void)c; (void)view; (void)tex; }
 NVN_NOPROTO(nvnCommandBufferShadingRateImagePalette, void, NVNcommandBuffer *c, int first, int n, const void *entries) { (void)c; (void)first; (void)n; (void)entries; }
 NVN_NOPROTO(nvnCommandBufferSetShadingRatePaletteMode, void, NVNcommandBuffer *c, int mode) { (void)c; (void)mode; }
-NVN(nvnCommandBufferDrawArraysIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNbufferAddress ind) { rec_draw(c, (p_draw){pr, 0, 0, 1, 0, ind}); }
+NVN(nvnCommandBufferDrawArraysIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNbufferAddress ind) { ind = GA(ind); rec_draw(c, (p_draw){pr, 0, 0, 1, 0, ind}); }
 NVN(nvnCommandBufferDrawElementsInstanced, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib,
-    int bv, int bi, int inst) {
+    int bv, int bi, int inst) { ib = GA(ib);
     rec_draw_idx(c, (p_draw_idx){pr, it, n, bv, bi, inst, ib});
 }
 NVN(nvnCommandBufferDispatchCompute, void, NVNcommandBuffer *c, int x, int y, int z) {
@@ -1256,7 +1353,7 @@ NVN(nvnCommandBufferDispatchCompute, void, NVNcommandBuffer *c, int x, int y, in
     *REC(c, OP_DISPATCH, p_dispatch) = (p_dispatch){x, y, z, (uint64_t)__builtin_return_address(0)};
 }
 // Indirect: the three group counts at ind are read by the GPU when the dispatch runs (nvn_mtl.m dispatch)
-NVN(nvnCommandBufferDispatchComputeIndirect, void, NVNcommandBuffer *c, NVNbufferAddress ind) {
+NVN(nvnCommandBufferDispatchComputeIndirect, void, NVNcommandBuffer *c, NVNbufferAddress ind) { ind = GA(ind);
     *REC(c, OP_DISPATCH, p_dispatch) = (p_dispatch){0, 0, 0, (uint64_t)__builtin_return_address(0), ind};
 }
 NVN(nvnCommandBufferBarrier, void, NVNcommandBuffer *c, int bits) { *(int32_t *)rec(c, OP_BARRIER, 8) = bits; }
@@ -1271,12 +1368,12 @@ static p_copy_b2t *rec_copy(NVNcommandBuffer *c, uint32_t op) {
     return r;
 }
 NVN(nvnCommandBufferCopyBufferToTexture, void, NVNcommandBuffer *c, NVNbufferAddress src, const NVNtexture *t, const NVNtextureView *v,
-    const NVNcopyRegion *r, int flags) {
+    const NVNcopyRegion *r, int flags) { src = GA(src);
     p_copy_b2t *o = rec_copy(c, OP_COPY_B2T); o->src = src; o->tex = tex_snap(o, SNAP_OFF(p_copy_b2t), 0, t, (uint64_t)__builtin_return_address(0)); copy_view(&o->view, &o->has_view, v); o->r = *r; o->flags = flags;
     if (o->tex) mtl_tex_gpu_written(o->tex);
 }
 NVN(nvnCommandBufferCopyTextureToBuffer, void, NVNcommandBuffer *c, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r,
-    NVNbufferAddress dst, int flags) {
+    NVNbufferAddress dst, int flags) { dst = GA(dst);
     p_copy_b2t *o = rec_copy(c, OP_COPY_T2B); o->src = dst; o->tex = tex_snap(o, SNAP_OFF(p_copy_b2t), 0, t, (uint64_t)__builtin_return_address(0)); copy_view(&o->view, &o->has_view, v); o->r = *r; o->flags = flags;
 }
 // Clear a texture region with the given value (float / unsigned integer versions; mask = channel write mask)
@@ -2254,7 +2351,7 @@ NVN(nvnBufferInitialize, NVNboolean, NVNbuffer *buf, const NVNbufferBuilder *b) 
 }
 NVN(nvnBufferFinalize, void, NVNbuffer *buf) { ((buf_t *)buf)->magic = 0; }
 NVN(nvnBufferSetDebugLabel, void, NVNbuffer *buf, const char *s) { (void)buf; (void)s; }
-NVN(nvnBufferGetAddress, NVNbufferAddress, const NVNbuffer *buf) { return (NVNbufferAddress)(BF(buf)->pool->mem + BF(buf)->off); }
+NVN(nvnBufferGetAddress, NVNbufferAddress, const NVNbuffer *buf) { return (NVNbufferAddress)gs_out((uint64_t)(uintptr_t)(BF(buf)->pool->mem + BF(buf)->off)); }
 // A buffer or pool the CPU has no access to (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) maps to NULL, as in NVN, though the host's storage is CPU memory: EA SPORTS FC 27's Frostbite
 // renderer takes a buffer's GPU address as GetAddress + (its data pointer − Map), with a null data pointer for such a buffer (OpcodeCopySubresource), so a real pointer made the
 // copy's destination address 0 (FATAL buffer copy address is in no memory pool)
@@ -2562,15 +2659,15 @@ NVN_NOPROTO(nvnSetExternalDebuggerEnabledNVX, void, NVNboolean enable) { (void)e
 // Transform feedback (vertex outputs captured into buffers): Pokémon Legends: Z-A skins its characters this way. A vertex-only program writes skinned positions and packed normals / tangents
 // under rasterizer discard, and the character draws read those buffers as vertex streams. Recorded here and run at replay by the shader's main0_tf entry point, a vertex function that stores the
 // captured outputs into the bound buffers (dmsh_build.py vs_tf, the layout from the program's control section; nvn_mtl.m tf_* for the replay)
-NVN(nvnCommandBufferBindTransformFeedbackBuffer, void, NVNcommandBuffer *c, int i, NVNbufferAddress a, size_t n) { *REC(c, OP_TF_BIND, p_tf_bind) = (p_tf_bind){i, 0, a, n}; }
-NVN(nvnCommandBufferBindTransformFeedbackBuffers, void, NVNcommandBuffer *c, int first, int n, const NVNbufferRange *r) {
+NVN(nvnCommandBufferBindTransformFeedbackBuffer, void, NVNcommandBuffer *c, int i, NVNbufferAddress a, size_t n) { a = GA(a); *REC(c, OP_TF_BIND, p_tf_bind) = (p_tf_bind){i, 0, a, n}; }
+NVN(nvnCommandBufferBindTransformFeedbackBuffers, void, NVNcommandBuffer *c, int first, int n, const NVNbufferRange *r) { GA_RANGES(r, n, r_gs)
     for (int i = 0; i < n; i++) *REC(c, OP_TF_BIND, p_tf_bind) = (p_tf_bind){first + i, 0, r[i].address, r[i].size};
 }
-NVN(nvnCommandBufferBeginTransformFeedback, void, NVNcommandBuffer *c, NVNbufferAddress a) { *REC(c, OP_TF_STATE, p_tf_state) = (p_tf_state){0, 0, a}; }
-NVN(nvnCommandBufferEndTransformFeedback, void, NVNcommandBuffer *c, NVNbufferAddress a) { *REC(c, OP_TF_STATE, p_tf_state) = (p_tf_state){1, 0, a}; }
-NVN(nvnCommandBufferPauseTransformFeedback, void, NVNcommandBuffer *c, NVNbufferAddress a) { *REC(c, OP_TF_STATE, p_tf_state) = (p_tf_state){2, 0, a}; }
-NVN(nvnCommandBufferResumeTransformFeedback, void, NVNcommandBuffer *c, NVNbufferAddress a) { *REC(c, OP_TF_STATE, p_tf_state) = (p_tf_state){3, 0, a}; }
-NVN(nvnCommandBufferDrawTransformFeedback, void, NVNcommandBuffer *c, NVNdrawPrimitive m, NVNbufferAddress a) {
+NVN(nvnCommandBufferBeginTransformFeedback, void, NVNcommandBuffer *c, NVNbufferAddress a) { a = GA(a); *REC(c, OP_TF_STATE, p_tf_state) = (p_tf_state){0, 0, a}; }
+NVN(nvnCommandBufferEndTransformFeedback, void, NVNcommandBuffer *c, NVNbufferAddress a) { a = GA(a); *REC(c, OP_TF_STATE, p_tf_state) = (p_tf_state){1, 0, a}; }
+NVN(nvnCommandBufferPauseTransformFeedback, void, NVNcommandBuffer *c, NVNbufferAddress a) { a = GA(a); *REC(c, OP_TF_STATE, p_tf_state) = (p_tf_state){2, 0, a}; }
+NVN(nvnCommandBufferResumeTransformFeedback, void, NVNcommandBuffer *c, NVNbufferAddress a) { a = GA(a); *REC(c, OP_TF_STATE, p_tf_state) = (p_tf_state){3, 0, a}; }
+NVN(nvnCommandBufferDrawTransformFeedback, void, NVNcommandBuffer *c, NVNdrawPrimitive m, NVNbufferAddress a) { a = GA(a);
     *REC(c, OP_DRAW, p_draw) = (p_draw){.prim=m,.instances=1,.ind=a+16};
 }
 
@@ -2806,11 +2903,11 @@ NVN(nvnCommandBufferDrawArraysInstanced, void, NVNcommandBuffer *c, NVNdrawPrimi
 // stride 20, the records and counts in its sparse virtual pool). Metal has no draw count read by the GPU, so small multi-draws become max ordinary indirect draws that carry the count's address
 // and their index. A large call records the range once. Replay masks the argument records on the GPU, zeros past the count (nvn_mtl.m mdx_run). Both used to be empty, and the whole scene stayed undrawn
 enum { MDI_INLINE = 1024 };  // larger calls keep the range in a single record
-NVN(nvnCommandBufferMultiDrawElementsIndirectCount, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, NVNbufferAddress ib, NVNbufferAddress ind, NVNbufferAddress cnt, int max, ptrdiff_t stride) {
+NVN(nvnCommandBufferMultiDrawElementsIndirectCount, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, NVNbufferAddress ib, NVNbufferAddress ind, NVNbufferAddress cnt, int max, ptrdiff_t stride) { ib = GA(ib); ind = GA(ind); cnt = GA(cnt);
     if (max > MDI_INLINE) { *REC(c, OP_MULTI_DRAW, p_multi_draw) = (p_multi_draw){ind, cnt, ib, stride, max, pr, it}; return; }
     for (int i = 0; i < max; i++) rec_draw_idx(c, (p_draw_idx){pr, it, 0, 0, 0, 1, ib, ind + (uint64_t)i * (uint64_t)stride, cnt, i});
 }
-NVN(nvnCommandBufferMultiDrawArraysIndirectCount, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNbufferAddress ind, NVNbufferAddress cnt, int max, ptrdiff_t stride) {
+NVN(nvnCommandBufferMultiDrawArraysIndirectCount, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNbufferAddress ind, NVNbufferAddress cnt, int max, ptrdiff_t stride) { ind = GA(ind); cnt = GA(cnt);
     if (max > MDI_INLINE) { *REC(c, OP_MULTI_DRAW, p_multi_draw) = (p_multi_draw){ind, cnt, 0, stride, max, pr, -1}; return; }
     for (int i = 0; i < max; i++) rec_draw(c, (p_draw){pr, 0, 0, 1, 0, ind + (uint64_t)i * (uint64_t)stride, cnt, i});
 }
@@ -2927,7 +3024,7 @@ int nvn_sparse_tile_state(const void *pool, uint64_t a, uint64_t n, uint64_t gen
     if (rs && !chg) chg = nvn_dirty_since(rs, (uint64_t)(re - rs), stamp);
     pthread_mutex_unlock(&g_vp_mu); return all | chg << 1;
 }
-NVN(nvnCommandBufferDrawElementsIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, NVNbufferAddress ib, NVNbufferAddress ind) {
+NVN(nvnCommandBufferDrawElementsIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, NVNbufferAddress ib, NVNbufferAddress ind) { ib = GA(ib); ind = GA(ind);
     rec_draw_idx(c, (p_draw_idx){pr, it, 0, 0, 0, 1, ib, ind});
 }
 
@@ -2943,13 +3040,13 @@ NVN(nvnCommandBufferSetDepthRanges, void, NVNcommandBuffer *c, int first, int n,
 }
 
 // GPU value write: ReportValue = write a 32-bit value to the address when this point is reached (the replay layer's event write, applied on completion)
-NVN(nvnCommandBufferReportValue, void, NVNcommandBuffer *c, uint32_t v, NVNbufferAddress a) {
+NVN(nvnCommandBufferReportValue, void, NVNcommandBuffer *c, uint32_t v, NVNbufferAddress a) { a = GA(a);
     uint8_t *p = cmd_alloc(CB(c), 24); put_hdr(p, OP_SIGNAL_EVENT, 24);
     volatile uint32_t *val = (volatile uint32_t *)(uintptr_t)a; uint32_t mm = NVN_EVENT_SIGNAL_MODE_WRITE;
     memcpy(p + 8, &val, 8); memcpy(p + 16, &mm, 4); memcpy(p + 20, &v, 4);
 }
 // Clear a buffer to a 32-bit value: one OP_CLEAR_BUF record, filled in order within the submission at replay (fillBuffer when all bytes match, otherwise copied from a pattern buffer)
-NVN(nvnCommandBufferClearBuffer, void, NVNcommandBuffer *c, NVNbufferAddress a, size_t n, uint32_t v) { *REC(c, OP_CLEAR_BUF, p_clear_buf) = (p_clear_buf){a, n, v, 0}; }
+NVN(nvnCommandBufferClearBuffer, void, NVNcommandBuffer *c, NVNbufferAddress a, size_t n, uint32_t v) { a = GA(a); *REC(c, OP_CLEAR_BUF, p_clear_buf) = (p_clear_buf){a, n, v, 0}; }
 
 // State the replay layer does not have yet: logged once (conditional rendering is treated as "always draw")
 // Render enable (profile render_cond, see OP_RENDER_COND in nvn_mtl.m): recorded and evaluated at replay; without the key everything draws, as before
@@ -2957,7 +3054,7 @@ NVN(nvnCommandBufferSetRenderEnable, void, NVNcommandBuffer *c, uint32_t en) {
     if (DM_GAME_RENDER_COND) *REC(c, OP_RENDER_COND, p_render_cond) = (p_render_cond){(en & 0xff) ? 2 : 3, 0, 0};
     else if (!(en & 0xff)) ONCE_LOG("[RED] SetRenderEnable(false): the host draws anyway for now");
 }
-NVN(nvnCommandBufferSetRenderEnableConditional, void, NVNcommandBuffer *c, NVNconditionalRenderMode m, NVNbufferAddress a) {
+NVN(nvnCommandBufferSetRenderEnableConditional, void, NVNcommandBuffer *c, NVNconditionalRenderMode m, NVNbufferAddress a) { a = GA(a);
     if (DM_GAME_RENDER_COND) *REC(c, OP_RENDER_COND, p_render_cond) = (p_render_cond){(int)m & 1, 0, a};
     else ONCE_LOG("[RED] SetRenderEnableConditional: the host draws anyway for now");
 }

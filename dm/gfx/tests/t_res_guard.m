@@ -30,14 +30,14 @@ static void levels(void) {
     CHECK(g_guard.stop == 950ull << 20 && g_guard.evict == 800ull << 20 && g_guard.wall == g_dev.recommendedMaxWorkingSetSize, "DM_NVN_RES_LIMIT_MB sets the stop and the eviction level under it");
     setenv("DM_NVN_RES_LIMIT_MB", "0", 1); memset(&g_guard, 0, sizeof g_guard);
 }
-// The set's own size leaves out what was never committed: the device's counts it from its creation, and that is what the check before the commit needs
+// The guard reads the set's own size, so an addition counts from its commit
 static void commits(void) {
     id<MTLBuffer> a = [g_dev newBufferWithLength:64 << 20 options:MTLResourceStorageModePrivate], b = [g_dev newBufferWithLength:64 << 20 options:MTLResourceStorageModePrivate];
     res_add(a); res_commit();
-    uint64_t now = g_dev.currentAllocatedSize, set = g_res.allocatedSize;
+    uint64_t set = g_res.allocatedSize;
     res_add(b);
     CHECK(g_res.allocatedSize == set, "an addition is not in the set's size before its commit");
-    CHECK(guard_used(g_res.allocatedSize) >= now, "the device's size counts it already");
+    CHECK(guard_used(g_res.allocatedSize) == set, "the guard reads the set's size, not the device's");
     g_guard.evict = 1; g_guard.stop = 2; g_guard.wall = 3;   // anything is past these
     res_commit();
     CHECK(g_res_dirty && g_res_grew && g_res.allocatedSize == set, "a commit that adds is not made past the working set");
@@ -92,6 +92,7 @@ static void stop(void) {
 // A submit thread stuck in the driver holds the residency lock: the timer takes the game down without it. Run in a process of its own, as the stop happens once
 static void stuck(void) {
     g_guard.evict = 1; g_guard.stop = 2; g_guard.wall = UINT64_MAX;
+    atomic_store(&g_guard_set, 3);
     pthread_mutex_lock(&g_res_mu);
     for (int i = 0; i < GUARD_TICKS - 1; i++) guard_tick();
     CHECK(!stops, "the submit thread gets its time");

@@ -337,3 +337,45 @@ void nvn_dirty_mp_stats(uint64_t *calls, uint64_t *pages, uint64_t *ns) {
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
     *calls = atomic_load(&g_mp_calls); *pages = atomic_load(&g_mp_pages); *ns = atomic_load(&g_mp_ticks) * tb.numer / tb.denom;
 }
+
+// Give back the memory of the whole host pages of [addr, addr+len) whose bytes the host now keeps elsewhere (a texture's tiles on the GPU; expect: those bytes, len long, or NULL to
+// take them from the page itself while it is still read-only). Only pages still protected since the upload are given (a page the game wrote since holds what the host has not taken
+// yet), and only those of a single tracked range (a page shared by two pools is left). The page is BUSY meanwhile, so a fault waits; it is writable only for madvise (which refuses
+// read-only pages) and read-only again before it is looked at: a byte that changed in between was a game write, which keeps the page and dirties it as a fault would, or the system
+// reclaiming it at once (all zeros), which gets the host's copy back. The memory goes at the system's next need: until then the page still reads as before. A write later faults
+// (it is read-only) and madvises the page's bytes back (MADV_FREE_REUSE). (Ported from the kartnative/plumber-racer-2 line's same-named path, credited there; the locking and the
+// descriptor lifetime follow this file's own rules.)
+__attribute__((weak)) int dm_guest_file_backed(void) { return 0; }   // hle_svc.c: guest memory in a file (DM_GUEST_FILE_BACKED) is not the process's: nothing to give back
+static _Atomic uint64_t g_released;
+size_t nvn_dirty_release(const void *addr, size_t len, const void *expect) {
+    uintptr_t a = (uintptr_t)addr; size_t freed = 0;
+    if (!len || !g_pg || dm_guest_file_backed()) return 0;
+    pthread_mutex_lock(&g_slot_mu);   // the descriptor must stay live through the last mprotect, as in nvn_dirty_protect
+    range_t *r = len ? find_span((uintptr_t)addr, len) : NULL;
+    if (!r) { pthread_mutex_unlock(&g_slot_mu); return 0; }
+    uintptr_t lo = (a + g_pg - 1) & ~(g_pg - 1), hi = (a + len) & ~(g_pg - 1);
+    uintptr_t p0 = lo <= hi && lo >= r->base && hi <= r->end ? (lo - r->base) >> g_shift : 0, q0 = hi <= r->end ? (hi - 1 - r->base) >> g_shift : 0;
+    if (lo < r->base || hi > r->end) { pthread_mutex_unlock(&g_slot_mu); return freed; }   // a page shared with the outside of this one range is left (find_span_ may return one whose end covers more than [addr, addr+len))
+    for (uintptr_t p = p0; p <= q0; p++) {
+        uint8_t st = PG_PROT;
+        if (!atomic_compare_exchange_strong(&r->state[p], &st, PG_BUSY)) continue;
+        static _Thread_local uint8_t snap[65536];   // no expected bytes: the page as it is now (it is read-only, so nothing changes it until the window below)
+        const uint8_t *e = expect ? (const uint8_t *)expect + ((r->base + (p << g_shift)) - a) : snap;
+        if (g_pg > sizeof snap) { atomic_store(&r->state[p], PG_PROT); continue; }
+        if (!expect) memcpy(snap, (const void *)(r->base + (p << g_shift)), g_pg);
+        uintptr_t pa = r->base + (p << g_shift);
+        mp(pa, g_pg, PROT_READ | PROT_WRITE); madvise((void *)pa, g_pg, MADV_FREE_REUSABLE); mp(pa, g_pg, PROT_READ);
+        if (memcmp((const void *)pa, e, g_pg)) {
+            int zero = 1; for (size_t k = 0; k < g_pg && zero; k += 8) zero = !*(const uint64_t *)(pa + k);
+            mp(pa, g_pg, PROT_READ | PROT_WRITE); madvise((void *)pa, g_pg, MADV_FREE_REUSE);
+            if (zero) { memcpy((void *)pa, e, g_pg); mp(pa, g_pg, PROT_READ); atomic_store(&r->state[p], PG_PROT); }
+            else { stamp_page(r, p); atomic_store(&r->state[p], PG_NONE); }
+            continue;
+        }
+        atomic_store(&r->state[p], PG_PROT); freed += g_pg;
+    }
+    pthread_mutex_unlock(&g_slot_mu);
+    atomic_fetch_add(&g_released, freed);
+    return freed;
+}
+uint64_t nvn_dirty_released(void) { return atomic_load(&g_released); }

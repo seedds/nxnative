@@ -105,6 +105,7 @@ Game-specific findings; the general host changes they led to are listed under [F
 General host changes first needed here; each applies to every game:
 
 - **Resolved: `Ver. ?` on the title screen of a build packed from an update-only NUP**: [A game packed from a NUP or a dump shows "Ver. ?" for a build its profile registers](../../../docs/reference/packing.md#a-game-packed-from-a-nup-or-a-dump-shows-ver--for-a-build-its-profile-registers). One Mac boot before and after.
+- **Resolved: Polish and Thai can be chosen**: [Polish and Thai, and a Switch 2 SDK's own language list](../../../docs/reference/services.md#polish-and-thai-and-a-switch-2-sdks-own-language-list). 1.2.1 ships both (`Mals/EUpl`, `Mals/THth`, `Font/Font_THth`); the tools did not know their codes. One Mac boot each to the title screen.
 - **Resolved: Mac launcher metadata matches native defaults**: [A Mac front end's default settings change Metal execution paths](../../../docs/reference/packing.md#a-mac-front-ends-default-settings-change-metal-execution-paths), found by metadata generation and source inspection; no gameplay measurement.
 - [A capture refused after a change to the reflection structs](../../../docs/reference/nvn-objects.md#a-capture-refused-after-a-change-to-the-reflection-structs).
 - **zstd files inside a RomFS image** (`shader_split.py` `unzs`): [The zstd command given a path inside the image](../../../docs/reference/packing.md#the-zstd-command-given-a-path-inside-the-image).

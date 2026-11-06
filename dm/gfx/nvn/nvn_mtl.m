@@ -1899,7 +1899,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[156];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[157];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -5076,6 +5076,11 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
             // DM_NVN_SHDUMP=directory: shaders missing from the map are saved as <key>.ctl (the control section's key bytes) and <key>.code (code area, nvn_ctl_lens), to trace their source / add them to the map offline
             static const char *shd; static int shd_init; if (!shd_init) { shd = getenv("DM_NVN_SHDUMP"); shd_init = 1; if (shd && *shd) mkdir(shd, 0777); }   // create the dump folder: a missing one made every fopen fail silently
             if (shd) { char path[1024]; FILE *f; uint32_t ncode, nctl; nvn_ctl_lens(p->sd[i].control, &nctl, &ncode);   // with SHDUMP set the control section is the host's copy
+                {   // save the whole NVN2 section, not just the key window: the stage byte (+0x56), the task/mesh facts and a compute shader's thread group (+0x58..+0x68) and the compute c0 layout (+0xa9..+0xba) name the shader's job
+                    uint32_t magic, ver, own; memcpy(&magic, p->sd[i].control, 4); memcpy(&ver, p->sd[i].control + 4, 4);
+                    if (magic == 0x98761234u && ver == 0xc9) { memcpy(&own, (const uint8_t *)p->sd[i].control + 0x30, 4);
+                        if (own >= 0x48 && own <= 0x880) nctl = own; else nctl = 0xe0; }
+                }
                 snprintf(path, sizeof path, "%s/%s.ctl", shd, k.UTF8String); if ((f = fopen(path, "wb"))) { fwrite(p->sd[i].control, 1, nctl, f); fclose(f); }
                 snprintf(path, sizeof path, "%s/%s.code", shd, k.UTF8String);
                 if (p->sd[i].data && ncode && ncode < (1u << 24) && (f = fopen(path, "wb"))) { fwrite((const void *)(uintptr_t)p->sd[i].data, 1, ncode, f); fclose(f); } }
@@ -12146,7 +12151,8 @@ static int fmt_int_or_ds(MTLPixelFormat f) {
         default: return 0;
     }
 }
-static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds, const NVNcopyRegion *sr, const NVNcopyRegion *dr, int linear, int mirror) {
+// wm: the colour channels written (MTLColorWriteMaskAll for a copy; dlss_eval writes alpha alone). With fewer than all, the destination is always loaded
+static int copy_t2t_draw_wm(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds, const NVNcopyRegion *sr, const NVNcopyRegion *dr, int linear, int mirror, MTLColorWriteMask wm) {
     static NSMutableDictionary<NSNumber *, id<MTLRenderPipelineState>> *pso; static id<MTLFunction> vf, ff, fd, fds; static id<MTLSamplerState> samp[2]; static id<MTL4ArgumentTable> at; static id<MTLDepthStencilState> dss, dss_s; static int failed;
     if (failed || sr->width <= 0 || sr->height <= 0 || dr->width <= 0 || dr->height <= 0) return 0;
     int depth = (s.pixelFormat == MTLPixelFormatDepth32Float || s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 || s.pixelFormat == MTLPixelFormatDepth16Unorm) && d.pixelFormat == s.pixelFormat, stencil = depth && d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8;
@@ -12167,11 +12173,12 @@ static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsign
     // Stencil: read through a stencil-only view of the source (one per layer below); without one it is cleared to 0
     id<MTLTexture> stv0 = stencil && s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ? [s newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8 textureType:MTLTextureType2D levels:NSMakeRange(sl, 1) slices:NSMakeRange(ss + sr->zoffset, 1)] : nil;
     int scopy = stv0 != nil;
-    NSNumber *pk = @(d.pixelFormat * 2 + scopy);
+    if (depth) wm = MTLColorWriteMaskAll;
+    NSNumber *pk = @(((d.pixelFormat * 2 + scopy) << 4) | (wm & 0xf));
     id<MTLRenderPipelineState> ps = pso[pk];
     if (!ps) {
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = vf; pd.fragmentFunction = depth ? (scopy ? fds : fd) : ff;
-        if (depth) { pd.depthAttachmentPixelFormat = d.pixelFormat; if (stencil) pd.stencilAttachmentPixelFormat = d.pixelFormat; } else pd.colorAttachments[0].pixelFormat = d.pixelFormat;
+        if (depth) { pd.depthAttachmentPixelFormat = d.pixelFormat; if (stencil) pd.stencilAttachmentPixelFormat = d.pixelFormat; } else { pd.colorAttachments[0].pixelFormat = d.pixelFormat; pd.colorAttachments[0].writeMask = wm; }
         NSError *e = nil; ps = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
         if (!ps) { RED_ONCE(83, "format-converting / scaling texture copy: cannot create the pipeline for destination format %lu: %s", (unsigned long)d.pixelFormat, e.localizedDescription.UTF8String); return 0; }
         pso[pk] = ps;
@@ -12190,7 +12197,7 @@ static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsign
         p[4] = dr->xoffset; p[5] = dr->yoffset; p[6] = sw; p[7] = sh;
         MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
         MTLRenderPassAttachmentDescriptor *a = depth ? (MTLRenderPassAttachmentDescriptor *)rp.depthAttachment : (MTLRenderPassAttachmentDescriptor *)rp.colorAttachments[0];
-        int whole = !dr->xoffset && !dr->yoffset && (unsigned)dr->width == dw && (unsigned)dr->height == dh;   // the copy draws every pixel of the level (no blending, no discard): its old content is not loaded (Link's Awakening copies its scene this way every frame)
+        int whole = wm == MTLColorWriteMaskAll && !dr->xoffset && !dr->yoffset && (unsigned)dr->width == dw && (unsigned)dr->height == dh;   // the copy draws every pixel of the level (no blending, no discard): its old content is not loaded (Link's Awakening copies its scene this way every frame)
         a.texture = d; a.level = dl; a.slice = ds + dr->zoffset + z; a.loadAction = whole ? MTLLoadActionDontCare : MTLLoadActionLoad; a.storeAction = MTLStoreActionStore;
         id<MTLTexture> stv = scopy ? (z ? [s newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8 textureType:MTLTextureType2D levels:NSMakeRange(sl, 1) slices:NSMakeRange(ss + sr->zoffset + z, 1)] : stv0) : nil;
         if (stencil) { MTLRenderPassStencilAttachmentDescriptor *st = rp.stencilAttachment; st.texture = d; st.level = dl; st.slice = a.slice; st.loadAction = scopy ? (whole ? MTLLoadActionDontCare : MTLLoadActionLoad) : MTLLoadActionClear; st.clearStencil = 0; st.storeAction = MTLStoreActionStore; }
@@ -12207,6 +12214,9 @@ static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsign
     { static int once[2]; if (!once[depth]++) MLOG("format-converting / scaling texture copy: first case %dx%d format %lu → %dx%d format %lu%s%s", sr->width, sr->height, (unsigned long)s.pixelFormat, dr->width, dr->height, (unsigned long)d.pixelFormat,
                                                     linear && !depth ? " (bilinear)" : "", stencil ? (scopy ? " (depth + stencil)" : " (no stencil view possible, cleared to 0)") : ""); }
     return 1;
+}
+static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds, const NVNcopyRegion *sr, const NVNcopyRegion *dr, int linear, int mirror) {
+    return copy_t2t_draw_wm(s, d, sl, ss, dl, ds, sr, dr, linear, mirror, MTLColorWriteMaskAll);
 }
 // nvnCommandBufferDrawTexture: the source region of a texture (texels, through the handle's sampler) drawn into the destination region of each bound colour target (pixels in the window's
 // coordinates, which are the targets' own rows in either window origin, since the host keeps the Switch's memory layout). Streets of Rage 4 draws each movie frame (the intro, the
@@ -12437,7 +12447,10 @@ static void dlss_eval(const p_dlss *c) {
     if ((col.usage & sc.colorTextureUsage) != sc.colorTextureUsage) col = tex_upgrade(c->tex[DLSS_COLOR], col, sc.colorTextureUsage, col.pixelFormat);
     if ((dep.usage & sc.depthTextureUsage) != sc.depthTextureUsage) dep = tex_upgrade(c->tex[DLSS_DEPTH], dep, sc.depthTextureUsage, dep.pixelFormat);
     if ((mot.usage & sc.motionTextureUsage) != sc.motionTextureUsage) mot = tex_upgrade(c->tex[DLSS_MOTION], mot, sc.motionTextureUsage, mot.pixelFormat);
-    if ((out.usage & sc.outputTextureUsage) != sc.outputTextureUsage) out = tex_upgrade(c->tex[DLSS_OUTPUT], out, sc.outputTextureUsage, out.pixelFormat);
+    // The input's alpha goes to the output (below): MetalFX writes 1.0 there. A draw writes it, so the output also needs render-target usage
+    const int alpha = (mtl_pf_chmask(col.pixelFormat) & 8) && (mtl_pf_chmask(out.pixelFormat) & 8) && !mtl_fmt_block(out.pixelFormat) && !fmt_int_or_ds(out.pixelFormat);
+    const MTLTextureUsage ou = sc.outputTextureUsage | (alpha ? MTLTextureUsageRenderTarget : 0);
+    if ((out.usage & ou) != ou) out = tex_upgrade(c->tex[DLSS_OUTPUT], out, ou, out.pixelFormat);
     id<MTLTexture> expo = c->tex[DLSS_EXPOSURE] ? tex_mtl(c->tex[DLSS_EXPOSURE]) : nil;
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }   // a usage upgrade copies through it
     ubd_land_compute();
@@ -12467,6 +12480,13 @@ static void dlss_eval(const p_dlss *c) {
         sc.reset = reset;
         [sc encodeToCommandBuffer:cb];
     });
+    // NVN2's DLSS hands the input's alpha on to the output; MetalFX's scaler writes 1.0. Fast Fusion draws its menus into the target first and then blends the DLSS output over them by that
+    // alpha (0 where no 3D was drawn): with 1.0 the 3D layer covered every menu (the bilinear stand-in, a plain copy, kept them). The alpha is drawn alone, scaled bilinearly as that
+    // stand-in does; the render pass's barrier orders it after the scaler's encoders
+    if (alpha) {
+        NVNcopyRegion sr = {c->base[DLSS_COLOR][0], c->base[DLSS_COLOR][1], 0, (int)iw, (int)ih, 1}, dr = {c->base[DLSS_OUTPUT][0], c->base[DLSS_OUTPUT][1], 0, (int)out.width - c->base[DLSS_OUTPUT][0], (int)out.height - c->base[DLSS_OUTPUT][1], 1};
+        if (!copy_t2t_draw_wm(col, out, 0, 0, 0, 0, &sr, &dr, 1, 0, MTLColorWriteMaskAlpha)) RED_ONCE(156, "DLSS: the input's alpha could not be drawn into the output (format %lu → %lu): the output keeps MetalFX's 1.0", (unsigned long)col.pixelFormat, (unsigned long)out.pixelFormat);
+    }
     if (c->tex[DLSS_BIAS]) { static int once; if (!once++) MLOG("[RED] DLSS: the game's bias mask (a reactive mask for MetalFX) is not passed on"); }
 }
 

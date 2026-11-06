@@ -17,6 +17,40 @@ HLE_FORCE("_ZN2nn5codec19HardwareOpusDecoderC1Ei", "hwopus service; replaced by 
 // game's HardwareOpusDecoderType does not matter; the game's work buffer is sized by GetOpusDecoderWorkBufferSize and handed to the software decoder as is.
 #define SOFT_OPUS_STATE 0x200   // bytes for the software OpusDecoderType (larger than the SDK's)
 static void *opus_fn(const char *name) { void *f = guest_sym(name); if (!f) die("sdk lacks %s", name); return f; }
+// SDK 1 (nnSdk 1.3.1, Rayman Legends) calls the HardwareOpusDecoder members directly, not through the vtable, and each one asks hwopus (GetWorkBufferSize at sdk+0x100ef8 first).
+// The constructor above made the object a software OpusDecoder (SDK 1: 0x28 bytes written, inside the class's 0x30), so each member goes to the software member of the same name.
+// The destructors are a bare ret in both classes
+HLE_FORCE("_ZNK2nn5codec19HardwareOpusDecoder17GetWorkBufferSizeEii", "hwopus service (SDK 1 member); the software OpusDecoder's size", size_t, h_codec_HwOpusMWork, const void *self, int rate, int ch) {
+    size_t (*f)(const void *, int, int) = opus_fn("_ZNK2nn5codec11OpusDecoder17GetWorkBufferSizeEii"); return f(self, rate, ch);
+}
+HLE_FORCE("_ZN2nn5codec19HardwareOpusDecoder10InitializeEiiPvm", "hwopus service (SDK 1 member); the software OpusDecoder", Result, h_codec_HwOpusMInit, void *self, int rate, int ch, void *buf, size_t size) {
+    Result (*f)(void *, int, int, void *, size_t) = opus_fn("_ZN2nn5codec11OpusDecoder10InitializeEiiPvm"); return f(self, rate, ch, buf, size);
+}
+HLE_FORCE("_ZN2nn5codec19HardwareOpusDecoder8FinalizeEv", "hwopus service (SDK 1 member); the software OpusDecoder", void, h_codec_HwOpusMFini, void *self) {
+    void (*f)(void *) = opus_fn("_ZN2nn5codec11OpusDecoder8FinalizeEv"); f(self);
+}
+HLE_FORCE("_ZN2nn5codec19HardwareOpusDecoder17DecodeInterleavedEPmPiPsmPKvm", "hwopus service (SDK 1 member); the software OpusDecoder", Result, h_codec_HwOpusMDecI,
+          void *self, size_t *consumed, int *samples, int16_t *out, size_t out_size, const void *in, size_t in_size) {
+    Result (*f)(void *, size_t *, int *, int16_t *, size_t, const void *, size_t) = opus_fn("_ZN2nn5codec11OpusDecoder17DecodeInterleavedEPmPiPsmPKvm");
+    return f(self, consumed, samples, out, out_size, in, in_size);
+}
+HLE_FORCE("_ZN2nn5codec19HardwareOpusDecoder6DecodeEPmPiPPsimPKvm", "hwopus service (SDK 1 member); the software OpusDecoder", Result, h_codec_HwOpusMDec,
+          void *self, size_t *consumed, int *samples, int16_t **out, int nout, size_t out_size, const void *in, size_t in_size) {
+    Result (*f)(void *, size_t *, int *, int16_t **, int, size_t, const void *, size_t) = opus_fn("_ZN2nn5codec11OpusDecoder6DecodeEPmPiPPsimPKvm");
+    return f(self, consumed, samples, out, nout, out_size, in, in_size);
+}
+HLE_FORCE("_ZN2nn5codec19HardwareOpusDecoder10SetContextEPKvm", "hwopus service (SDK 1 member); the software OpusDecoder", Result, h_codec_HwOpusMCtx, void *self, const void *ctx, size_t n) {
+    Result (*f)(void *, const void *, size_t) = opus_fn("_ZN2nn5codec11OpusDecoder10SetContextEPKvm"); return f(self, ctx, n);
+}
+HLE_FORCE("_ZNK2nn5codec19HardwareOpusDecoder13GetSampleRateEv", "SDK 1 member; the software OpusDecoder", int, h_codec_HwOpusMRate, const void *self) {
+    int (*f)(const void *) = opus_fn("_ZNK2nn5codec11OpusDecoder13GetSampleRateEv"); return f(self);
+}
+HLE_FORCE("_ZNK2nn5codec19HardwareOpusDecoder15GetChannelCountEv", "SDK 1 member; the software OpusDecoder", int, h_codec_HwOpusMCh, const void *self) {
+    int (*f)(const void *) = opus_fn("_ZNK2nn5codec11OpusDecoder15GetChannelCountEv"); return f(self);
+}
+HLE_FORCE("_ZNK2nn5codec19HardwareOpusDecoder13IsInitializedEv", "SDK 1 member; the software OpusDecoder", int, h_codec_HwOpusMInited, const void *self) {
+    int (*f)(const void *) = opus_fn("_ZNK2nn5codec11OpusDecoder13IsInitializedEv"); return f(self) & 1;
+}
 // A decoder of a manager (SDK 21's form, below) is kept in objmap under gd + 1, the older interface's software state under gd: one key for both made the manager's calls read a software state as an opus_dec
 // whenever its +0x10 (the work buffer's size in Kirby Air Riders, SDK 20) was not 0, and FinalizeHardwareOpusDecoder crashed on a null decoder list
 #define OPUS_MGR_KEY(gd) ((const char *)(gd) + 1)

@@ -107,3 +107,4 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 - [Image atomics on a 32-bit colour texture](../../../docs/reference/shaders.md#image-atomics-on-a-32-bit-colour-texture)
 - [A host's own store in a fragment shader moves its depth test](../../../docs/reference/frame-rate.md#a-hosts-own-store-in-a-fragment-shader-moves-its-depth-test)
 - [Dead-code removal dropped a coordinate of a multi-output instruction](../../../docs/reference/shaders.md#dead-code-removal-dropped-a-coordinate-of-a-multi-output-instruction)
+- [The alias flush on every encoder's end barrier](../../../docs/reference/frame-rate.md#the-alias-flush-on-every-encoders-end-barrier): the main submission's 8 command allocators at 36-80 MB each and 6-15 ms a frame in scenes of about 150 passes before main's Ocarina fixes; on main at 2eb71820, CPU-visible Metal memory 392 → 298 MB and no measurable frame-time change (M3 Pro, 18 GB).

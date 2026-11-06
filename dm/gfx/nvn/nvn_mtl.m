@@ -138,7 +138,21 @@ static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
 static _Atomic uint64_t g_done;                 // GPU complete and all CPU-visible effects through this fence published
 static uint64_t g_arena_made;
+static uint64_t g_cm_mdraws;
+static uint64_t g_cm_enc, g_cm_enc0, g_cm_mdraws0, g_cm_hist[7], g_cm_big_enc, g_cm_big_draws, g_cm_big_z;   // per submission: encoders begun and Metal draws, by size, the largest (DM_NVN_ALLOCPROF=2)
 static int g_allocprof = -1; static uint64_t g_ap_bytes[64], g_ap_fn[8];
+static uint64_t g_md_masked_calls, g_md_masked, g_md_counted_calls, g_md_counted;   // indirect-count multi-draws: masked (every record up to the maximum encoded) and counted, with the draws each encoded
+static uint64_t g_cm_in[4], g_cm_out, g_cm_inn[4]; static int g_cm_kind = -1;   // DM_NVN_ALLOCPROF=2: command memory added inside render [0] / compute [1] encoders, and between encoders
+static void cm_enc_mark(int kind) {   // kind 0 / 1: an encoder begins; -1: it ends
+    if (g_allocprof != 2 || !g_alloc4[g_alloc_cur]) return;
+    static __unsafe_unretained id last; static uint64_t lz; id a = g_alloc4[g_alloc_cur]; uint64_t z = ((id<MTL4CommandAllocator>)a).allocatedSize;
+    if (a == last && z >= lz) { if (g_cm_kind >= 0) g_cm_in[g_cm_kind] += z - lz; else g_cm_out += z - lz; }   // kinds 2 / 3: a render / compute encoder being made
+    last = a; lz = z; g_cm_kind = kind; if (kind >= 0) g_cm_inn[kind]++;
+}
+// DM_NVN_ALLOCPROF=2: command memory. Each main submission takes a fresh command allocator (an allocator keeps its high-water size across resets), so its size is what that submission
+// encoded; its growth (in chunks of about 2 MB) is charged to the replayed operation that caused it
+static uint64_t g_cm_op[64], g_cm_opn[64], g_cm_sub_n, g_cm_sub_sum, g_cm_sub_max, g_cm_last;
+static int allocprof_level(void) { if (g_allocprof < 0) { const char *e = getenv("DM_NVN_ALLOCPROF"); g_allocprof = e ? (atoi(e) > 1 ? 2 : 1) : 0; } return g_allocprof; }
 // Diagnostic only: inclusive wall/CPU time on the replay thread. No GPU waits
 // are added, and no clocks are read when DM_NVN_CPUPROF is absent or zero.
 typedef struct { uint64_t wall, cpu; } cp_stamp;
@@ -996,6 +1010,13 @@ void mtl_sub_begin(void) {
         g_alloc4[g_alloc_n] = [g_dev newCommandAllocatorWithDescriptor:ad error:&ae]; if (!g_alloc4[g_alloc_n]) MDIE("failed to create a new MTL4CommandAllocator: %s", ae.localizedDescription.UTF8String);
         alloc_i = g_alloc_n++; g_alloc_grown++; }
     if (alloc_i < 0) { alloc_i = 0; for (int i = 1; i < g_alloc_n; i++) if (g_alloc_fence[i] < g_alloc_fence[alloc_i]) alloc_i = i; g_alloc_waits++; mtl_wait_at(g_alloc_fence[alloc_i], UINT64_MAX, WS_ALLOC); }
+    if (allocprof_level() == 2) {   // the GPU is done with this allocator (picked free, or waited for): what it holds is the last submission encoded with it
+        if (g_alloc4[alloc_i].allocatedSize) { uint64_t z = g_alloc4[alloc_i].allocatedSize; g_cm_sub_n++; g_cm_sub_sum += z; if (z > g_cm_sub_max) g_cm_sub_max = z;
+            int hb = 0; while (hb < 6 && z >= (4ull << 20) << hb) hb++; g_cm_hist[hb]++; }
+        { uint64_t ne = g_cm_enc - g_cm_enc0, nd = g_cm_mdraws - g_cm_mdraws0, zz = g_alloc4[g_alloc_cur].allocatedSize;   // the submission just ended was encoded with g_alloc_cur
+          if (zz > g_cm_big_z) { g_cm_big_z = zz; g_cm_big_enc = ne; g_cm_big_draws = nd; } g_cm_enc0 = g_cm_enc; g_cm_mdraws0 = g_cm_mdraws; }
+        g_alloc4[alloc_i] = [g_dev newCommandAllocatorWithDescriptor:[MTL4CommandAllocatorDescriptor new] error:nil]; g_cm_last = 0;
+    }
     g_alloc_cur = alloc_i;
     [g_alloc4[alloc_i] reset];
     [g_cb beginCommandBufferWithAllocator:g_alloc4[alloc_i]];
@@ -1036,11 +1057,20 @@ static void img_fit_upgrade(void); static int g_imfit_npend;   // textures an im
 static int g_last_end_relaxed, g_game_barrier;   // the last encoder ended was a draw pass with the relaxed end barrier (nothing else since); the game issued nvnCommandBufferBarrier since the last draw pass began
 static uint64_t g_bar_skip, g_bar_full;            // draw passes begun without / with the consumer barrier (DM_NVN_BARRIER=game)
 static void gp_end(id e);
+// An encoder's end barrier flushes to the device coherence point only. MTL4VisibilityOptionResourceAlias (aliased virtual addresses: overlapping large-pool chunks, image family heaps,
+// resource_vis) costs a command allocator about 100 KB per encoder on the end barrier (barrierAfterStages:beforeQueueStages:) and nothing on the start barrier, measured on an M3 Pro:
+// 600 render passes took 88.5 MB with it on both, 27.7 MB with it on the start barrier alone. Ocarina of Time's forest submissions of 600-1,400 encoders took 35-85 MB each, and the
+// main submission's 8 allocators kept 36-80 MB each. Every encoder this host opens on the main command buffer starts with a barrier carrying resource_vis() (the draw passes, enc_r_begin,
+// enc_c_begin, blit_open, and the scaler's own before MetalFX), which waits for all earlier work and then flushes the aliases, so the flush for an encoder's writes still comes before
+// any later encoder reads them. A copy encoder that wrote through an aliased buffer address (g_blit_alias) keeps the alias flush on its end barrier as well
+// DM_NVN_END_ALIAS=1 puts the alias flush back on every end barrier (ab: alternated with the DM_AB phases, for measuring)
+static int sw_mode(const char *name, int dflt); static inline int sw_on(int m);
 static inline void m4_end(id e) {
     gp_end(e);
-    MTL4VisibilityOptions vis = e == g_blit ? blit_vis() : resource_vis(); if (e == g_blit) g_blit_alias = 0;
+    static int end_alias = -1; if (end_alias < 0) end_alias = sw_mode("DM_NVN_END_ALIAS", 0);
+    MTL4VisibilityOptions vis = e == g_blit && g_blit_alias ? blit_vis() : end_alias && sw_on(end_alias) ? resource_vis() : MTL4VisibilityOptionDevice; if (e == g_blit) g_blit_alias = 0;
     if ([e conformsToProtocol:@protocol(MTL4CommandEncoder)]) [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageAll beforeQueueStages:MTLStageAll visibilityOptions:vis];
-    [e endEncoding]; g_last_end_relaxed = 0;
+    [e endEncoding]; g_last_end_relaxed = 0; cm_enc_mark(-1);
 }
 // DM_NVN_BARRIER=game (default the profile's draw_barriers, full unless it says game): draw passes are ordered by the game's own barriers. A draw pass ends with a barrier from its vertex and fragment stages to the fragment, compute and copy stages of
 // later work, so the next pass's vertex work can overlap this pass's fragments (with the full barriers every pass waited for the previous one to finish completely: about 350 passes a frame in Breath of
@@ -1128,8 +1158,8 @@ static void gp_report(int n, gp_lab *lab, uint64_t frame) {   // the frame's las
     MLOG("[gpuprof] frame %llu: render %.2f ms, compute / copy %.2f ms over %d encoders (%d render passes, attachments load %.1f MB store %.1f MB), first start to last end %.2f ms", (unsigned long long)frame, tot[0] / 1e3, tot[1] / 1e3, n, np, ld / 1024.0, st / 1024.0, span / 1e3);
     free(lab); atomic_store(&g_gp_busy, 0);
 }
-static inline id<MTL4RenderCommandEncoder> enc_r_begin_pass(MTL4RenderPassDescriptor *d) {   // the draw passes (rp_begin_ex); see barrier_game
-    id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d];
+static inline id<MTL4RenderCommandEncoder> enc_r_begin_pass(MTL4RenderPassDescriptor *d) { g_cm_enc++; cm_enc_mark(2);   // the draw passes (rp_begin_ex); see barrier_game
+    id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; cm_enc_mark(0);
     if (g_last_end_relaxed && !g_game_barrier && barrier_game() && !g_image_heap_n) g_bar_skip++;
     else { [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; g_bar_full++; }
     g_game_barrier = 0;
@@ -1140,7 +1170,7 @@ static inline void enc_r_end_pass(id e) {
     gp_end(e); [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageVertex | MTLStageMesh | MTLStageFragment beforeQueueStages:MTLStageFragment | MTLStageDispatch | MTLStageBlit visibilityOptions:resource_vis()];
     [e endEncoding]; g_last_end_relaxed = 1;
 }
-static inline id<MTL4RenderCommandEncoder> enc_r_begin(MTL4RenderPassDescriptor *d) { id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [e setArgumentTable:g_ft atStages:MTLRenderStageFragment]; gp_begin(e, 'R', d); return e; }
+static inline id<MTL4RenderCommandEncoder> enc_r_begin(MTL4RenderPassDescriptor *d) { g_cm_enc++; cm_enc_mark(2); id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; cm_enc_mark(0); [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [e setArgumentTable:g_ft atStages:MTLRenderStageFragment]; gp_begin(e, 'R', d); return e; }
 static inline void enc_r_end(id e) { m4_end(e); }
 static inline void enc_r_pso(id<MTL4RenderCommandEncoder> e, id<MTLRenderPipelineState> p) { [e setRenderPipelineState:p]; }
 static inline void enc_r_dss(id<MTL4RenderCommandEncoder> e, id<MTLDepthStencilState> s) { [e setDepthStencilState:s]; }
@@ -1165,20 +1195,24 @@ static inline void enc_r_vbuf(id<MTL4RenderCommandEncoder> e, NSUInteger i, uint
 static inline void enc_r_args(id<MTL4RenderCommandEncoder> e, MTLRenderStages s, uint64_t gpu, NSUInteger i) {
     if (s == MTLRenderStageVertex) enc_r_vbuf(e, i, gpu); else if (rec_on()) rec_table_op(RO_T_ADDR, g_ft, gpu, i); else [g_ft setAddress:gpu atIndex:i];
 }
-static inline void enc_r_draw(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger v, NSUInteger n) { [e drawPrimitives:p vertexStart:v vertexCount:n]; }
-static inline void enc_r_draw_instanced(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger v, NSUInteger n, NSUInteger i, NSUInteger b) { [e drawPrimitives:p vertexStart:v vertexCount:n instanceCount:i baseInstance:b]; }
-static inline void enc_r_draw_indirect(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, uint64_t gpu) { [e drawPrimitives:p indirectBuffer:gpu]; }
-static inline void enc_r_draw_indexed(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger n, MTLIndexType t, uint64_t gpu, NSUInteger len, NSUInteger i, NSInteger bv, NSUInteger bi) { [e drawIndexedPrimitives:p indexCount:n indexType:t indexBuffer:gpu indexBufferLength:len instanceCount:i baseVertex:bv baseInstance:bi]; }
-static inline void enc_r_draw_indexed_indirect(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, MTLIndexType t, uint64_t gpu, NSUInteger len, uint64_t ind) { [e drawIndexedPrimitives:p indexType:t indexBuffer:gpu indexBufferLength:len indirectBuffer:ind]; }
+static inline void enc_r_draw(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger v, NSUInteger n) { g_cm_mdraws++; [e drawPrimitives:p vertexStart:v vertexCount:n]; }
+static inline void enc_r_draw_instanced(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger v, NSUInteger n, NSUInteger i, NSUInteger b) { g_cm_mdraws++; [e drawPrimitives:p vertexStart:v vertexCount:n instanceCount:i baseInstance:b]; }
+static inline void enc_r_draw_indirect(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, uint64_t gpu) { g_cm_mdraws++; [e drawPrimitives:p indirectBuffer:gpu]; }
+static inline void enc_r_draw_indexed(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger n, MTLIndexType t, uint64_t gpu, NSUInteger len, NSUInteger i, NSInteger bv, NSUInteger bi) { g_cm_mdraws++; [e drawIndexedPrimitives:p indexCount:n indexType:t indexBuffer:gpu indexBufferLength:len instanceCount:i baseVertex:bv baseInstance:bi]; }
+static inline void enc_r_draw_indexed_indirect(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, MTLIndexType t, uint64_t gpu, NSUInteger len, uint64_t ind) { g_cm_mdraws++; [e drawIndexedPrimitives:p indexType:t indexBuffer:gpu indexBufferLength:len indirectBuffer:ind]; }
 static void ubd_land_compute(void);
-static inline id<MTL4ComputeCommandEncoder> enc_c_begin(MTLComputePassDescriptor *d) { (void)d; ubd_land_compute(); id<MTL4ComputeCommandEncoder> e = [g_cb computeCommandEncoder]; [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_ct]; gp_begin(e, 'C', nil); return e; }
+static inline id<MTL4ComputeCommandEncoder> enc_c_begin(MTLComputePassDescriptor *d) { g_cm_enc++; (void)d; ubd_land_compute(); cm_enc_mark(3); id<MTL4ComputeCommandEncoder> e = [g_cb computeCommandEncoder]; cm_enc_mark(1); [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_ct]; gp_begin(e, 'C', nil); return e; }
 static inline id<MTLComputeCommandEncoder> enc_c_begin_concurrent(id<MTLCommandBuffer> cb) { return [cb computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent]; }
 static inline void enc_c_end(id e) { m4_end(e); }
 static inline void enc_c_pso(id e, id<MTLComputePipelineState> p) { [e setComputePipelineState:p]; }
 static inline void enc_c_args(id e, uint64_t gpu, NSUInteger i) { (void)e; if (rec_on()) rec_table_op(RO_T_ADDR, g_ct, gpu, i); else [g_ct setAddress:gpu atIndex:i]; }
 static inline void enc_c_dispatch(id e, MTLSize n, MTLSize t) { [e dispatchThreadgroups:n threadsPerThreadgroup:t]; }
 static inline void enc_c_dispatch_indirect(id e, uint64_t ind, MTLSize t) { [(id<MTL4ComputeCommandEncoder>)e dispatchThreadgroupsWithIndirectBuffer:ind threadsPerThreadgroup:t]; }
-static inline id enc_b_begin(id cb) { return [cb respondsToSelector:@selector(beginCommandBufferWithAllocator:)] ? [cb computeCommandEncoder] : [cb blitCommandEncoder]; }
+static inline id enc_b_begin(id cb) {
+    if (cb == g_cb) { g_cm_enc++; cm_enc_mark(3); }
+    id e = [cb respondsToSelector:@selector(beginCommandBufferWithAllocator:)] ? [cb computeCommandEncoder] : [cb blitCommandEncoder];
+    if (cb == g_cb) cm_enc_mark(1);
+    return e; }
 static inline void enc_b_end(id e) { m4_end(e); }
 static inline void enc_b_copy_buffer(id e, id<MTLBuffer> s, NSUInteger so, id<MTLBuffer> d, NSUInteger doff, NSUInteger n) { [e copyFromBuffer:s sourceOffset:so toBuffer:d destinationOffset:doff size:n]; }
 static inline void enc_b_copy_buffer_texture(id e, id<MTLBuffer> s, NSUInteger so, NSUInteger row, NSUInteger img, MTLSize z, id<MTLTexture> d, NSUInteger sl, NSUInteger lv, MTLOrigin o) { [e copyFromBuffer:s sourceOffset:so sourceBytesPerRow:row sourceBytesPerImage:img sourceSize:z toTexture:d destinationSlice:sl destinationLevel:lv destinationOrigin:o]; }
@@ -3673,6 +3707,19 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     if (g_allocprof > 0) { char ab[256]; int o = 0; for (int i = 0; i < g_alloc_n && o < 200; i++) o += snprintf(ab + o, sizeof ab - o, " #%d %llu MB", i, (unsigned long long)(g_alloc4[i].allocatedSize >> 20));
         for (int i = 0; i < 3 && o < 240; i++) o += snprintf(ab + o, sizeof ab - o, " up%d %llu pres%d %llu", i, (unsigned long long)(g_up_alloc4[i].allocatedSize >> 20), i, (unsigned long long)(g_present_alloc4[i].allocatedSize >> 20));
         MLOG("command allocator usage:%s", ab);
+        if (g_allocprof == 2 && g_cm_sub_n) { int top[6] = {-1, -1, -1, -1, -1, -1}; char cl[400]; int co = 0;
+            for (int op = 0; op < 64; op++) for (int k = 0; k < 6; k++) if (top[k] < 0 || g_cm_op[op] > g_cm_op[top[k]]) { for (int j = 5; j > k; j--) top[j] = top[j - 1]; top[k] = op; break; }
+            for (int k = 0; k < 6 && co < 380; k++) if (top[k] >= 0 && g_cm_op[top[k]]) co += snprintf(cl + co, sizeof cl - co, "%sop%d %llu MB over %llu ops", k ? ", " : "", top[k], (unsigned long long)(g_cm_op[top[k]] >> 20), (unsigned long long)g_cm_opn[top[k]]);
+            MLOG("command memory (DM_NVN_ALLOCPROF=2, a fresh allocator per submission): %llu submissions, %llu KB on average, %llu KB at most; by operation %s",
+                 (unsigned long long)g_cm_sub_n, (unsigned long long)(g_cm_sub_sum / g_cm_sub_n >> 10), (unsigned long long)(g_cm_sub_max >> 10), cl);
+            MLOG("command memory by submission: under 4 MB %llu, 4-8 %llu, 8-16 %llu, 16-32 %llu, 32-64 %llu, 64-128 %llu, 128 MB or more %llu; the largest (%llu KB) began %llu encoders and %llu Metal draws",
+                 (unsigned long long)g_cm_hist[0], (unsigned long long)g_cm_hist[1], (unsigned long long)g_cm_hist[2], (unsigned long long)g_cm_hist[3], (unsigned long long)g_cm_hist[4], (unsigned long long)g_cm_hist[5], (unsigned long long)g_cm_hist[6],
+                 (unsigned long long)(g_cm_big_z >> 10), (unsigned long long)g_cm_big_enc, (unsigned long long)g_cm_big_draws);
+            MLOG("command memory by encoder: making %llu render encoders %llu MB, inside them %llu MB; making %llu compute encoders %llu MB, inside them %llu MB; between encoders %llu MB (chunks of about 2 MB are charged to the encoder that crosses into one)",
+                 (unsigned long long)g_cm_inn[2], (unsigned long long)(g_cm_in[2] >> 20), (unsigned long long)(g_cm_in[0] >> 20), (unsigned long long)g_cm_inn[3], (unsigned long long)(g_cm_in[3] >> 20),
+                 (unsigned long long)(g_cm_in[1] >> 20), (unsigned long long)(g_cm_out >> 20));
+            MLOG("indirect-count multi-draws: masked %llu calls encoding %llu draws (every record up to the call's maximum), counted %llu calls encoding %llu draws",
+                 (unsigned long long)g_md_masked_calls, (unsigned long long)g_md_masked, (unsigned long long)g_md_counted_calls, (unsigned long long)g_md_counted); }
         MLOG("GPU allocation growth by function: pass end %llu MB, pass begin %llu MB, pipeline fetch %llu MB, argument buffers %llu MB, texture fetch %llu MB", g_ap_fn[0] >> 20, g_ap_fn[1] >> 20, g_ap_fn[2] >> 20, g_ap_fn[3] >> 20, g_ap_fn[4] >> 20); }
     if (g_allocprof > 0) { int top[4] = {-1, -1, -1, -1}; for (int o = 0; o < 64; o++) for (int k = 0; k < 4; k++) if (top[k] < 0 || g_ap_bytes[o] > g_ap_bytes[top[k]]) { for (int j = 3; j > k; j--) top[j] = top[j - 1]; top[k] = o; break; }
         MLOG("GPU allocation growth by op: op%d %llu MB, op%d %llu MB, op%d %llu MB, op%d %llu MB", top[0], g_ap_bytes[top[0]] >> 20, top[1], g_ap_bytes[top[1]] >> 20, top[2], g_ap_bytes[top[2]] >> 20, top[3], g_ap_bytes[top[3]] >> 20); }
@@ -11603,10 +11650,10 @@ static void draw_multi(const p_multi_draw *m) {
     p_draw_idx *di = dw ? NULL : &idx;
     uint32_t n = (uint32_t)m->max;
     if (n <= MDX_SLOTS && m->stride && mdx_wanted(dw, di)) {
-        g_mdx_range = m;
+        g_mdx_range = m; g_md_masked_calls++; g_md_masked += n;
     } else {
         n = MIN(n, mdi_count(m->cnt));
-        arr.mdi_cnt = idx.mdi_cnt = 0;
+        arr.mdi_cnt = idx.mdi_cnt = 0; g_md_counted_calls++; g_md_counted += n;
     }
     for (uint32_t i = 0; i < n; i++) {
         arr.mdi_i = idx.mdi_i = (int32_t)i;
@@ -12998,7 +13045,8 @@ void mtl_exec(const uint8_t *p) {
         sdx_seq(p);
         if (trace) PD("o cmd=%p pass=%llu op=%u size=%u", p, g_stat_pass, (unsigned)h.op, (unsigned)h.size);
         // Diagnostic DM_NVN_ALLOCPROF=1: growth of the GPU allocated size is charged to the previous operation's type (rough: allocations on other threads are counted too); the memory report line appends the top 4
-        if (g_allocprof < 0) g_allocprof = getenv("DM_NVN_ALLOCPROF") != NULL;
+        allocprof_level();
+        if (g_allocprof == 2) { static int prev = -1; uint64_t now = g_alloc4[g_alloc_cur].allocatedSize; if (prev >= 0 && prev < 64 && now > g_cm_last) g_cm_op[prev] += now - g_cm_last; g_cm_last = now; prev = (int)h.op; if (h.op < 64) g_cm_opn[h.op]++; }
         if (g_allocprof) { static uint64_t last; static int prev = -1; uint64_t now = g_dev.currentAllocatedSize; if (prev >= 0 && prev < 64 && now > last) g_ap_bytes[prev] += now - last; last = now; prev = h.op; }
         if (g_hoist_n && hoist_take(p)) { if (g_fz.active && p == g_fz.rt2_op) { g_fz.phase = 2; g_rt_merged = 0; PD("F %llu merged pass enters the later pass's draws", g_stat_pass); } p += h.size; continue; }   // A pure-clear render pass already executed early / the start of a later pass already merged in   // Entering the later pass: the same-target continuation of the earlier pass ends here; the later pass reading the earlier pass's attachment is proven to be same-pixel by fz_p2_draw, and is no longer split by the continuation rule
         const void *a = p + 8;

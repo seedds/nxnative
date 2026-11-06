@@ -36,6 +36,9 @@ int main(void) {
     unsigned (*available)(void) = hook("_ZN2nn4pctl28IsFreeCommunicationAvailableEv");
     void (*end)(void) = hook("_ZN2nn4pctl20EndFreeCommunicationEv");
     unsigned (*stereo)(unsigned) = hook("_ZN2nn4pctl27CheckStereoVisionPermissionEb");
+    unsigned (*agc)(const void *) = hook("_ZN2nn4pctl33CheckAgcPermissionUnderMinimumAgeERKNS_7account3UidE");
+    const uint64_t agc_uid[2] = {1, 2};
+    CHECK(agc(agc_uid) == 0, "a user under the minimum age: not permitted, as the free communication queries answer");
     const unsigned args[] = {0, 1, 0x100, 0x101, ~0u};
     if (available) CHECK(available() == 0, "communication unavailable before any permission query");
     for (size_t i = 0; i < sizeof args / sizeof *args; i++) {

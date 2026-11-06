@@ -1,0 +1,42 @@
+# Kirby Air Riders (Switch 2, update v458752, display version 1.3.3). Plays on the Mac: see README.md
+# The engine's namespace is phx, its platform layer Aurora (WindApplication), SDK 20.5.26 built for the Switch 2 (Ounce), NVN2. PhysX 5.2, an own sound engine (Sygnus), NPLN for online play.
+# Modules main, subsdk0 (CUDA, which main imports 49 functions from), sdk; subsdk1 (NGX, DLSS through Vulkan) is not imported by main.
+# Packed from a NUP with scripts/pack_nup.py: a base package and an update package, each a whole RomFS. Shaders: 27,540 NVN2 programs in PMAP records of Asset/assets_a000.dat (shader_split.py pdat_shaders), 28 in Bin/Nvn2-upper_left.ndsr.
+
+# ---- Identity ----
+title_id	040077201BE50000
+program_id	040077201BE50000
+
+# ---- App ----
+name	Kirby Air Riders
+ipa	KirbyAirRiders.ipa
+app_category	public.app-category.racing-games
+pad_layout	full
+
+# ---- Versions ----
+build	v458752	1.3.3	main=9ede03836568bcd34434dfc29bc61e04	subsdk0=11a5672eeabf787e8e510902825606d4	sdk=89ea3537110354e8427004a0266744c8
+package	v458752
+shader_versions	v458752
+
+# ---- Files ----
+modules	main subsdk0 sdk
+romfs_marker	Asset/assets.cat
+zip_store	.dat:.bin:.cat:.soundstream:.metallib
+
+# ---- Memory ----
+# The Switch 2's 9 GB. The NPDM declares 32 MB of system resource, so virtual address memory is on. Measured through a race: the alias region mapped up to +13.78 GB of its 16 GB, 5.0 GB at most at once
+mem_reserve	0x550000000
+mem_alias	0x400000000
+mem_stack	0x10000000
+app_pool	0x240000000
+sys_resource	0x2000000
+
+# ---- Shader split ----
+# every shader is in /Asset/assets_a000.dat or /Bin/Nvn2-upper_left.ndsr
+shader_groups	/Asset/=shader /Bin/=shader
+shader_note	Kirby Air Riders shaders
+
+# ---- Textures ----
+# The game fills textures from the CPU in place while it plays, with no NVN call over the texels: without both keys some props and panels stay all-zero ASTC, which Metal decodes as magenta
+tex_flush_upload	on
+tex_dirty_upload	on

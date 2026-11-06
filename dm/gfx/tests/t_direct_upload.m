@@ -37,7 +37,7 @@ static void run(int target,unsigned width,unsigned height,unsigned layers,unsign
         if(!round&&direct){
             tex_t initial=t;initial.has_layout=0;initial.serial+=100000;
             id<MTLTexture> control=[g_dev newTextureWithDescriptor:tex_desc(&initial,0)];res_add(control);uint64_t n=g_direct_uploads;
-            mtl_sub_begin();CHECK("initial fill retains its original texture",tex_init_fill(&initial,control));finish();CHECK("initial fill does not require new write/view usage",g_direct_uploads==n);defer_obj_release(control);
+            mtl_sub_begin();CHECK("initial fill retains its original texture",tex_init_fill(&initial,control,0));finish();CHECK("initial fill does not require new write/view usage",g_direct_uploads==n);defer_obj_release(control);
         }
         memset(readback.contents,0xcd,readback.length);id<MTLCommandBuffer> cb=q_cb();id<MTLBlitCommandEncoder> ce=[cb blitCommandEncoder];off=0;
         for(unsigned l=0;l<levels;l++)for(unsigned a=0;a<layers;a++) {

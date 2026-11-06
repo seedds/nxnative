@@ -120,7 +120,7 @@ static void init_fill_case(int tid, int format, int pool_flags) {
     CHECK(nvn_swizzle(&t.d, 0, 0, pixels, 4, t.mem) == 0, "guest texels swizzled");
     g_sub_thread = pthread_self(); atomic_store(&g_sub_thread_set, 1);
     id<MTLTexture> base = [g_dev newTextureWithDescriptor:tex_desc(&t, 0)];
-    CHECK(tex_init_fill(&t, base), "initial fill from the pool");
+    CHECK(tex_init_fill(&t, base, 0), "initial fill from the pool");
     up_flush(); mtl_finish_gpu();
     serial_put(t.serial, base); mtl_reg_tex(tid, &t, NULL);
     os_unfair_lock_lock(&g_rmu); id<MTLTexture> view = tex_by_id(tid); os_unfair_lock_unlock(&g_rmu);

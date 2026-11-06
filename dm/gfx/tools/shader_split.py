@@ -408,17 +408,113 @@ def snowdrop_shaders(d, label, wrapped=True):
         stored = d[h + 20:h + 20 + nstored]
         raw = zstd_mod().decompress(stored) if zstd else zlib.decompress(stored)
         if len(raw) != nraw: red(f'{label} Snowdrop record @{h:#x}: expected {nraw} raw bytes, got {len(raw)}')
-        for cm in re.finditer(re.escape(CTL_MAGIC), raw):
-            c = cm.start()
-            if c + 0x708 > len(raw): continue
-            nc, nk = struct.unpack_from('<I', raw, c + 0x20)[0], struct.unpack_from('<I', raw, c + 0x704)[0]
-            if nc < 0x760 or nc & 3 or nk < 0x34 or c + nc + nk > len(raw): continue
-            ctl, code = raw[c:c + nc], raw[c + nc:c + nc + nk]
-            st = glslc_stage(ctl, code)
-            if st and not check(label, st, ctl, code): out.append((f'{label}#SNOWDROP@{h:#x}:{c:#x}', st, ctl, code))
+        out += snowdrop_sections(raw, label, h)
     for h, _, raw in chunks:
         out += snowdrop_shaders(raw, f'{label}#SDFZSTD@{h:#x}', wrapped=False)
     return out
+
+def snowdrop_sections(raw, label, h):
+    """The stages of one decoded Snowdrop shader object: each control section immediately before its code area, their lengths at control +0x20 and +0x704, byte-packed"""
+    out = []
+    for cm in re.finditer(re.escape(CTL_MAGIC), raw):
+        c = cm.start()
+        if c + 0x708 > len(raw): continue
+        nc, nk = struct.unpack_from('<I', raw, c + 0x20)[0], struct.unpack_from('<I', raw, c + 0x704)[0]
+        if nc < 0x760 or nc & 3 or nk < 0x34 or c + nc + nk > len(raw): continue
+        ctl, code = raw[c:c + nc], raw[c + nc:c + nc + nk]
+        st = glslc_stage(ctl, code)
+        if st and not check(label, st, ctl, code): out.append((f'{label}#SNOWDROP@{h:#x}:{c:#x}', st, ctl, code))
+    return out
+
+# Snowdrop's SDF slices of BERG version 23 (Starlink: Battle for Atlas) hold no record headers. Each entry is a stream of LZ4 sequences whose matches may reach back into the entries before
+# it in the same block, and whose last match may run past the entry's size (it is cut there); standard LZ4 decoders reject both. The entries are found through the part lists the game ships
+# beside its slices (_DataPartList.txt: stored and raw size, C / U, slice index, part, offset, part offset, block, in an update's list an id, then the asset type and path). The shader
+# objects are its 'mcache' assets (onward/shadercache/nvn/*.mcache), with the sections snowdrop_sections reads. An update's folder (diffNNN) has no slices of its own: its list describes
+# the base folder's slices it rewrote, so a slice's entries come from the newest list that names it. Each entry must use exactly its stored bytes, which catches a list that does not match
+SDF_LIST = '_DataPartList.txt'
+SDF_LIST_HEAD = b'  CompSize       Size Compressed/Uncompressed'
+SDF_LIST_ROW = re.compile(r'\s*(\d+)\s+(\d+)\s+([CU])\s+(\d+)\(\d+\)\s+\d+\s+(\d+)\s+\d+\s+(\d+)\(\d+\)\s+(?:0x[0-9a-f]+\s+)?(\S+)\s+(.+?)\s*')
+SDF_LZ4 = b'SDFLZ4'
+
+def sdf_lz4(b, n, hist, label):
+    """One entry of an SDF block: LZ4 sequences decoded after hist (the block's output so far, of which the last 64 KB is reachable), n bytes in pieces of 64 KB. Each piece's last match
+    is cut at the piece's end (the next piece starts with a new sequence), and its matches may reach into the pieces and entries before it (_shaderpackagecache.bin: 1 MB in 17 pieces)"""
+    o = bytearray(hist); base = len(o); i = 0
+    try:
+        while len(o) < base + n:
+            end = min(len(o) + 0x10000, base + n)
+            while len(o) < end:
+                t = b[i]; i += 1; lit = t >> 4
+                if lit == 15:
+                    while True:
+                        x = b[i]; i += 1; lit += x
+                        if x != 255: break
+                if i + lit > len(b): raise IndexError
+                if len(o) + lit > end: red(f'{label}: literals past the {n} bytes (the part list does not match the slice)')   # only a last match is cut
+                o += b[i:i + lit]; i += lit
+                if len(o) >= end: break
+                off = b[i] | b[i + 1] << 8; i += 2; m = t & 15
+                if m == 15:
+                    while True:
+                        x = b[i]; i += 1; m += x
+                        if x != 255: break
+                m = min(m + 4, end - len(o))
+                if not off or off > len(o): red(f'{label}: LZ4 match offset {off} before the block')
+                s = len(o) - off
+                if off >= m: o += o[s:s + m]
+                else:
+                    for _ in range(m): o.append(o[-off])
+            del o[end:]
+    except IndexError: red(f'{label}: the LZ4 stream ends before {n} bytes')
+    if i != len(b): red(f'{label}: {len(b) - i} stored bytes left after {n} bytes (the part list does not match the slice)')
+    return bytes(o[base:])
+
+def sdf_list_jobs(files):
+    """One job per slice that holds shader objects, by the part lists: the blocks that hold 'mcache' assets, every entry of them (a shader package cache shares their blocks).
+    → ([(slice path, rel, (SDF_LZ4, entries)), …], set())"""
+    lists = []
+    for p, r in files:
+        if os.path.basename(p) != SDF_LIST: continue
+        with open(p, 'rb') as f:
+            if f.read(len(SDF_LIST_HEAD)) != SDF_LIST_HEAD: continue
+        m = re.fullmatch(r'diff(\d+)', os.path.basename(os.path.dirname(p)))
+        lists.append((int(m.group(1)) if m else -1, p, r))
+    slices = {(os.path.dirname(p), os.path.basename(p)): (p, r) for p, r in files if p.endswith('.sdfdata')}
+    def slice_of(folder, idx):   # the list's own folder first (an update's rewritten slices), then the base folder beside it
+        for d in (folder, os.path.join(os.path.dirname(folder), 'data')):
+            for nm in (f'sdf-A-{idx:04d}.sdfdata', f'sdf_A_{idx:04d}.sdfdata'):
+                if (d, nm) in slices: return slices[(d, nm)]
+    ents = {}   # (folder, slice index) → (slice path, rel, {offset: (stored, raw, compressed, block, type)}), from the newest list naming that slice index
+    for _, p, r in sorted(lists):
+        mine = {}
+        with open(p, encoding='latin-1') as f:
+            for line in f:
+                m = SDF_LIST_ROW.fullmatch(line.rstrip('\r\n'))
+                if not m: continue
+                stored, raw, comp, idx, off, blk, kind, _ = m.groups()
+                key = (os.path.dirname(os.path.dirname(p)), int(idx))
+                if key not in mine:
+                    sl = slice_of(os.path.dirname(p), int(idx))
+                    if not sl: continue
+                    mine[key] = (*sl, {})
+                mine[key][2][int(off)] = (int(stored), int(raw), comp == 'C', int(blk), kind)
+        ents.update(mine)   # an update rewrites whole slices, and the extraction's base folder holds the rewritten copies too: an older list no longer describes them
+    jobs = []
+    for p, r, es in sorted(ents.values()):
+        blks = {e[3] for e in es.values() if e[4] == 'mcache'}
+        if blks: jobs.append((p, r, (SDF_LZ4, tuple((off, *e[:4]) for off, e in sorted(es.items()) if e[3] in blks))))
+    return jobs, set()
+
+def sdf_list_shaders(path, rel, ents, out):
+    """The shader objects of one slice (sdf_list_jobs): every entry of their blocks is decoded in offset order, since an entry's matches reach into the ones before it"""
+    with open(path, 'rb') as f: d = f.read()
+    hist = b''; blk = None
+    for off, stored, n, comp, b in ents:
+        if b != blk: hist, blk = b'', b
+        if off + stored > len(d) or not comp and stored != n: red(f'/{rel} entry @{off:#x}: {stored} stored bytes for {n} past the slice or not the size')
+        raw = sdf_lz4(d[off:off + stored], n, hist, f'/{rel} entry @{off:#x}') if comp else d[off:off + n]
+        hist = (hist + raw)[-0x10000:]
+        out += snowdrop_sections(raw, f'/{rel}', off)
 
 NEEDLE = b'HNSHV002'
 def needle_shaders(d, label):
@@ -2723,6 +2819,8 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and args[2][0] == UE_IO:   # export bundles of an IoStore container beside such a pak (ue_legacy_jobs)
         ue_io_shaders(path, rel, args[2][1], found)
+    if len(args) > 2 and args[2][0] == SDF_LZ4:   # shader objects of a Snowdrop slice, by its part list (sdf_list_jobs)
+        sdf_list_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and args[2][0] == FB_CAS:   # CompiledBytecode resources of a Frostbite cas file (frostbite_jobs)
         frostbite_shaders(path, rel, args[2][1], found)
@@ -2915,7 +3013,8 @@ def main():
     zp_jobs, zips = zip_jobs(files)   # Portal's game.zip (Deflate members)
     ah_jobs, arhs = arh_jobs(files)   # Monolith's ARH1/ARD archives and embedded XBC1/HCPS programs
     fb_jobs, fbs = frostbite_jobs(files)   # EA SPORTS FC 27's Frostbite bundles, Oodle Leviathan decoded by the game's own decoder in the Mac host
-    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs
+    sd_jobs, _ = sdf_list_jobs(files)   # Starlink's SDF slices: shader objects in chained LZ4 entries, by the part lists (the slices are still scanned loosely for BERG records too)
+    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + sd_jobs
     files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in cras and p not in zips and p not in arhs and p not in fbs]
     with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
         n = len(big) + len(files)

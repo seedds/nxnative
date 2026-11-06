@@ -112,7 +112,7 @@ int main(void) { @autoreleasepool {
     }
     EXPECT("every base in the files", 4, found);
     // a base whose period is written and gone still specializes (the draws keep bases for the whole run)
-    MTL4RenderPipelineDescriptor *s = (MTL4RenderPipelineDescriptor *)[drawn newRenderPipelineDescriptorForSpecialization];
+    MTL4RenderPipelineDescriptor *s = spec_desc(drawn, &g_spec_own);
     s.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm; s.colorAttachments[0].writeMask = MTLColorWriteMaskAll; s.colorAttachments[0].blendingState = MTL4BlendStateDisabled;
     NSError *se = nil;
     EXPECT("a base of a written period specializes", 1, [g_comp4 newRenderPipelineStateBySpecializationWithDescriptor:s pipeline:drawn error:&se] != nil);

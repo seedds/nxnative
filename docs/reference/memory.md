@@ -483,6 +483,13 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Reading the numbers:** `currentAllocatedSize` ("GPU allocated") read 16 GB on this game while `vmmap` showed 3.9 GB of Metal textures and targets. Use `vmmap -summary` (`owned unmapped (graphics)`, `IOAccelerator (graphics)`) for what memory holds.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
 
+### Pools that hold shader code made resident to key the shaders
+
+- **Symptom:** the residency set holds every memory pool a program's shader code lies in: in Ocarina of Time, 222 pools and 334 MB added through `mtl_addr` as the game sets its programs (the residency line's additions by source line).
+- **Cause:** `keys_hash` (`hle_nvn.c`) checks that a shader's code is mapped in a pool before it hashes it, and asked `mtl_addr`, which also makes the pool resident. The GPU never reads that code: the shaders run translated.
+- **Fix:** general (`nvn_mtl.m` `mtl_pool_holds`): the same pool lookup as `mtl_addr`, without the residency. A pool the GPU does read through a binding or an address is made resident there, as before. `t_pool_holds` checks it.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), whose GPU working set is over an iPad's 8 GB.
+
 ### Repeated GPU out-of-memory failures end the game
 
 - **Symptom:** the Mac grows unresponsive for hours, then panics, with the host still submitting work that fails.

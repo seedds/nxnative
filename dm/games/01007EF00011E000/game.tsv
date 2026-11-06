@@ -20,6 +20,10 @@ pad_layout	full
 # ---- Graphics ----
 # The frame-interval controller (60 fps cuts in patches.py) and dynamic resolution read the GPU time between the frame's two timestamp reports: each report takes its segment's GPU start / end
 gpu_timestamps	segment
+# Draw passes ordered by the game's own barriers (nvn_mtl.m barrier_game, bar_frag_only): about 150 of its barriers a frame order only fragments (bits 0x12), so the next pass's
+# vertex work may overlap; full consumer barriers at pass starts fell from about 150 to about 33 a frame. Same picture on the Mac at the usual spot; iPad Pro 13" M4 at a 120 fps
+# target, four adjacent pairs: 90.3/89.6, 81.7/76.5, 68.3/69.9, 72.8/65.4 fps (game / full; the device warmed over the runs)
+draw_barriers	game
 # 60 fps (30 on the Switch): the host decides each frame's step in whole vsyncs and holds the frame that long (rewriter stubs at setWaitVsyncInterval and VFR::updateInterval,
 # patches.py FRAME_STEP); 30 when 60 does not hold, game time = real time. DM_FPS_TARGET=30 (Documents/env.txt on the iPhone) saves power; 0 runs the game's own
 # interval controller (with the 60 fps cuts, which also serve while the game's VFR override is set)

@@ -1255,7 +1255,30 @@ static void resume_rp(rs_t *s) {
 // the copy the pass before wrote into the same image, both opened with DONT_CARE; a DontCare load starts Apple's tiles empty, and the 3D world came out black. Its particle
 // pass reopens the half-res depth with DONT_CARE and STORE, draws nothing, and the pfx pass samples that depth: a DontCare load stores whatever the tiles held
 // (t_vk_dontcare; docs/reference/rendering.md, "Attachments opened with LOAD_OP_DONT_CARE")
-static MTLLoadAction load_a(VkAttachmentLoadOp o) { return o == VK_ATTACHMENT_LOAD_OP_CLEAR ? MTLLoadActionClear : MTLLoadActionLoad; }
+// DM_VK_DONTCARE=colour loads colour only, depth and stencil start undefined; =none maps every DONT_CARE back to DontCare, colour included, the mapping before colour
+// loaded (A/B and oracle runs). Unset is all. CLEAR and LOAD are never affected.
+// Read once at the first pass; -1 means not read, so a test can set the mode before one (t_vk_dontcare resets it to DC_ALL between cases)
+enum { DC_NONE, DC_COLOUR, DC_ALL };
+static int g_vk_dontcare = -1;
+static int dontcare_mode(void) {
+    if (g_vk_dontcare < 0) {
+        g_vk_dontcare = DC_ALL;
+        const char *v = getenv("DM_VK_DONTCARE");
+        if (v) {
+            if (!strcmp(v, "all")) g_vk_dontcare = DC_ALL;
+            else if (!strcmp(v, "colour")) g_vk_dontcare = DC_COLOUR;
+            else if (!strcmp(v, "none")) g_vk_dontcare = DC_NONE;
+            else RED1("DM_VK_DONTCARE=%s: expected all, colour or none; using the default", v);
+        }
+    }
+    return g_vk_dontcare;
+}
+static MTLLoadAction dc_load(VkAttachmentLoadOp o, int colour) {
+    if (o == VK_ATTACHMENT_LOAD_OP_CLEAR) return MTLLoadActionClear;
+    if (o == VK_ATTACHMENT_LOAD_OP_LOAD) return MTLLoadActionLoad;
+    int m = dontcare_mode();
+    return (colour ? m != DC_NONE : m == DC_ALL) ? MTLLoadActionLoad : MTLLoadActionDontCare;
+}
 static MTLStoreAction store_a(VkAttachmentStoreOp o) { return o == VK_ATTACHMENT_STORE_OP_DONT_CARE ? MTLStoreActionDontCare : MTLStoreActionStore; }
 static void begin_rp(rs_t *s, const c_brp *c) {
     end_blit(s);
@@ -1267,7 +1290,7 @@ static void begin_rp(rs_t *s, const c_brp *c) {
         int a = rp->col[i]; if (a < 0 || (uint32_t)a >= fb->n) continue;
         const ratt *at = &rp->att[a]; MTLRenderPassColorAttachmentDescriptor *ca = d.colorAttachments[i];
         ca.texture = fb->v[a]->tex; w = umin(w, (uint32_t)ca.texture.width); h = umin(h, (uint32_t)ca.texture.height);
-        ca.loadAction = load_a(at->load);
+        ca.loadAction = dc_load(at->load, 1);
         s->st_col[i] = store_a(at->store); ca.storeAction = MTLStoreActionUnknown;
         if (at->load == VK_ATTACHMENT_LOAD_OP_CLEAR && (uint32_t)a < c->nclear) { const float *f = c->clear[a].color.float32; ca.clearColor = MTLClearColorMake(f[0], f[1], f[2], f[3]); }
         int r = rp->res[i];
@@ -1277,11 +1300,11 @@ static void begin_rp(rs_t *s, const c_brp *c) {
         int a = rp->depth; const ratt *at = &rp->att[a]; const fmt_t *f = fmt_of(at->fmt); id<MTLTexture> t = fb->v[a]->tex;
         w = umin(w, (uint32_t)t.width); h = umin(h, (uint32_t)t.height);
         if (fmt_has_depth(f)) {
-            d.depthAttachment.texture = t; d.depthAttachment.loadAction = load_a(at->load); s->st_d = store_a(at->store); d.depthAttachment.storeAction = MTLStoreActionUnknown;
+            d.depthAttachment.texture = t; d.depthAttachment.loadAction = dc_load(at->load, 0); s->st_d = store_a(at->store); d.depthAttachment.storeAction = MTLStoreActionUnknown;
             if ((uint32_t)a < c->nclear) d.depthAttachment.clearDepth = c->clear[a].depthStencil.depth;
         }
         if (fmt_has_stencil(f)) {
-            d.stencilAttachment.texture = t; d.stencilAttachment.loadAction = load_a(at->sload); s->st_s = store_a(at->sstore); d.stencilAttachment.storeAction = MTLStoreActionUnknown;
+            d.stencilAttachment.texture = t; d.stencilAttachment.loadAction = dc_load(at->sload, 0); s->st_s = store_a(at->sstore); d.stencilAttachment.storeAction = MTLStoreActionUnknown;
             if ((uint32_t)a < c->nclear) d.stencilAttachment.clearStencil = c->clear[a].depthStencil.stencil;
         }
     }

@@ -5,7 +5,9 @@
 // On Apple's tile memory a DontCare load starts the tiles empty and the stored image lost the copy (the 3D world black). Here an image is cleared to red, then a pass
 // opens it and blends a transparent full-screen triangle over it (ONE, ONE_MINUS_SRC_ALPHA, as pfx's premultiplied layer): with DONT_CARE and LOAD the image must still
 // be red, with CLEAR to green it must be green. A depth-stencil image cleared to 0.25 / 0x5a and reopened with DONT_CARE by a pass that draws nothing must store 0.25 / 0x5a.
-// The run fills every DontCare load with a pattern (MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS), so no case leans on tile memory
+// The run fills every DontCare load with a pattern (MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS), so no case leans on tile memory.
+// These test this layer's policy and its reference switch, not Vulkan: with DM_VK_DONTCARE=none the colour DONT_CARE case must read that fill pattern instead of red, and
+// with =colour the depth-stencil case must store the fill pattern instead of 0.25 / 0x5a
 #include "../vk/hle_vk.m"
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
 void *front_metal_layer(void) { return NULL; }
@@ -38,12 +40,16 @@ int main(void) {
         VkCommandPoolCreateInfo cpi = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
         VkCommandPool cp; h_vkCreateCommandPool(dev, &cpi, NULL, &cp);
 
-        static const struct { VkAttachmentLoadOp load; uint8_t want[4]; const char *what; } cases[] = {
-            {VK_ATTACHMENT_LOAD_OP_DONT_CARE, {255, 0, 0, 255}, "a DONT_CARE colour attachment keeps the image's contents"},
-            {VK_ATTACHMENT_LOAD_OP_LOAD, {255, 0, 0, 255}, "a LOAD colour attachment keeps the image's contents"},
-            {VK_ATTACHMENT_LOAD_OP_CLEAR, {0, 255, 0, 255}, "a CLEAR colour attachment is cleared to the pass's clear value"},
+        // mode: g_vk_dontcare for the case; fill: the run's DontCare fill pattern, uniform in the image and neither what the pass wrote before it nor the clear value
+        static const struct { VkAttachmentLoadOp load; int mode; uint8_t want[4]; int fill; const char *what; } cases[] = {
+            {VK_ATTACHMENT_LOAD_OP_DONT_CARE, DC_ALL, {255, 0, 0, 255}, 0, "a DONT_CARE colour attachment keeps the image's contents"},
+            {VK_ATTACHMENT_LOAD_OP_LOAD, DC_ALL, {255, 0, 0, 255}, 0, "a LOAD colour attachment keeps the image's contents"},
+            {VK_ATTACHMENT_LOAD_OP_CLEAR, DC_ALL, {0, 255, 0, 255}, 0, "a CLEAR colour attachment is cleared to the pass's clear value"},
+            {VK_ATTACHMENT_LOAD_OP_DONT_CARE, DC_COLOUR, {255, 0, 0, 255}, 0, "DM_VK_DONTCARE=colour: a DONT_CARE colour attachment keeps the image's contents"},
+            {VK_ATTACHMENT_LOAD_OP_DONT_CARE, DC_NONE, {0, 0, 0, 0}, 1, "DM_VK_DONTCARE=none: a DONT_CARE colour attachment reads the fill pattern"},
         };
         for (size_t k = 0; k < sizeof cases / sizeof *cases; k++) {
+            g_vk_dontcare = cases[k].mode;
             VkImageCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = {W, H, 1},
                                      .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
                                      .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
@@ -87,15 +93,30 @@ int main(void) {
                 destinationBytesPerRow:W * 4 destinationBytesPerImage:W * H * 4];
             [be endEncoding]; [rs.cb commit]; [rs.cb waitUntilCompleted];
             CHECK(rs.cb.status == MTLCommandBufferStatusCompleted, "the replay completed");
-            const uint8_t *px = out.contents, *want = cases[k].want; int ok = 0;
-            for (int i = 0; i < W * H; i++) ok += !memcmp(px + 4 * i, want, 4);
-            CHECK(ok == W * H, cases[k].what);
-            if (ok != W * H) fprintf(stderr, "  %d of %d texels as expected; first texel %02x %02x %02x %02x\n", ok, W * H, px[0], px[1], px[2], px[3]);
+            const uint8_t *px = out.contents; int pass = 0;
+            if (cases[k].fill) {
+                static const uint8_t red_px[4] = {255, 0, 0, 255}, green_px[4] = {0, 255, 0, 255}, empty_px[4] = {0, 0, 0, 0};
+                pass = 1;
+                for (int i = 0; i < W * H; i++)
+                    pass &= !memcmp(px + 4 * i, px, 4) && memcmp(px + 4 * i, red_px, 4) && memcmp(px + 4 * i, green_px, 4) && memcmp(px + 4 * i, empty_px, 4);
+                if (!pass) fprintf(stderr, "  first texel %02x %02x %02x %02x\n", px[0], px[1], px[2], px[3]);
+            } else {
+                for (int i = 0; i < W * H; i++) pass += !memcmp(px + 4 * i, cases[k].want, 4);
+                if (pass != W * H) fprintf(stderr, "  %d of %d texels as expected; first texel %02x %02x %02x %02x\n", pass, W * H, px[0], px[1], px[2], px[3]);
+                pass = pass == W * H;
+            }
+            CHECK(pass, cases[k].what);
             h_vkDestroyFramebuffer(dev, fb, NULL); h_vkDestroyRenderPass(dev, rp, NULL); h_vkDestroyImageView(dev, view, NULL); h_vkDestroyImage(dev, im, NULL);
         }
 
-        // Depth and stencil: the particle pass's shape, an image with contents reopened with DONT_CARE and STORE by a pass without draws
-        {
+        // Depth and stencil: the particle pass's shape, an image with contents reopened with DONT_CARE and STORE by a pass without draws. Unset (all) keeps the contents;
+        // DM_VK_DONTCARE=colour stores the fill pattern, uniform in the image and neither 0.25 nor 0x5a
+        static const struct { int mode, fill; const char *depth, *stencil; } dcases[] = {
+            {DC_ALL, 0, "a DONT_CARE depth attachment keeps the image's contents", "a DONT_CARE stencil attachment keeps the image's contents"},
+            {DC_COLOUR, 1, "DM_VK_DONTCARE=colour: a DONT_CARE depth attachment stores the fill pattern",
+             "DM_VK_DONTCARE=colour: a DONT_CARE stencil attachment stores the fill pattern"},
+        };
+        for (size_t k = 0; k < sizeof dcases / sizeof *dcases; k++) {
             VkImageCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_D32_SFLOAT_S8_UINT, .extent = {W, H, 1},
                                      .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
                                      .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
@@ -127,7 +148,9 @@ int main(void) {
             h_vkCmdEndRenderPass(cb);
             h_vkEndCommandBuffer(cb);
 
+            g_vk_dontcare = dcases[k].mode;
             rs_t rs = {0}; subq_t sq = {0}; rs.cb = [g_q commandBuffer]; rs.sq = &sq; replay(&rs, cb);
+            g_vk_dontcare = DC_ALL;
             id<MTLBuffer> dout = [g_dev newBufferWithLength:W * H * 4 options:MTLResourceStorageModeShared], sout = [g_dev newBufferWithLength:W * H options:MTLResourceStorageModeShared];
             if (!dout || !sout) { printf("no readback buffer\n"); abort(); }
             id<MTLBlitCommandEncoder> be = [rs.cb blitCommandEncoder];
@@ -137,11 +160,14 @@ int main(void) {
                 destinationBytesPerRow:W destinationBytesPerImage:W * H options:MTLBlitOptionStencilFromDepthStencil];
             [be endEncoding]; [rs.cb commit]; [rs.cb waitUntilCompleted];
             CHECK(rs.cb.status == MTLCommandBufferStatusCompleted, "the depth replay completed");
-            const float *dp = dout.contents; const uint8_t *sp = sout.contents; int dok = 0, sok = 0;
-            for (int i = 0; i < W * H; i++) { dok += dp[i] == 0.25f; sok += sp[i] == 0x5a; }
-            CHECK(dok == W * H, "a DONT_CARE depth attachment keeps the image's contents");
-            CHECK(sok == W * H, "a DONT_CARE stencil attachment keeps the image's contents");
-            if (dok != W * H || sok != W * H) fprintf(stderr, "  depth %d, stencil %d of %d texels as expected; first texel %g / %02x\n", dok, sok, W * H, dp[0], sp[0]);
+            const float *dp = dout.contents; const uint8_t *sp = sout.contents; int dok = 1, sok = 1;
+            for (int i = 0; i < W * H; i++) {
+                if (dcases[k].fill) { dok &= dp[i] == dp[0] && dp[i] != 0.25f; sok &= sp[i] == sp[0] && sp[i] != 0x5a; }
+                else { dok &= dp[i] == 0.25f; sok &= sp[i] == 0x5a; }
+            }
+            CHECK(dok, dcases[k].depth);
+            CHECK(sok, dcases[k].stencil);
+            if (!dok || !sok) fprintf(stderr, "  first texel %g / %02x\n", dp[0], sp[0]);
             h_vkDestroyFramebuffer(dev, fb, NULL); h_vkDestroyRenderPass(dev, rp, NULL); h_vkDestroyImageView(dev, view, NULL); h_vkDestroyImage(dev, im, NULL);
         }
     }

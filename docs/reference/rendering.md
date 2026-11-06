@@ -598,6 +598,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** `t_present_crop`: the window's crop wins, the layer crop is used without one, one larger than the texture is ignored, and a real `nvnQueuePresentTexture` queues the layer crop (that check fails with the old call). On an iPhone 15 Pro in handheld mode Link's Awakening's picture fills the screen's height.
 - **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md#rendering) (1.1.0, handheld mode on the iPhone).
 
+### A crop only picks texels; the picture has the layer's shape
+
+- **Symptom:** a scene turns narrow, with black bars at its sides, while the swapchain or window textures keep their size; circles come out as tall ovals. The log has `vi::SetLayerCrop 0,0 1200x960` and `present upscaling: ... 1200x960 → 1800x1440` in a 2560x1440 window.
+- **Cause:** the present used one rectangle for two things: which texels to read and the shape to show them in. On the Switch the compositor stretches a buffer's crop to the layer, so a game can draw an anamorphic picture into a crop of another shape: 1200x960 of a 1920x1080 swapchain docked, 800x640 handheld. The host fitted the crop's own 5:4 into the canvas, and reported 5:4 to the front ends.
+- **Fix:** the crop still selects the source texels, for every graphics API, and `present_shape` (`nvn_mtl.m`) gives the shape: the display's 16:9, or a sized layer's (`vi::CreateLayer` with a size, `mtl_present_layer`). A screen taller than 16:9 (`DM_SCREEN_ASPECT`, `mtl_present_screen`) counts only for a texture of its shape, since only builds with screen-shape stubs render it. Both encoders, MetalFX, the screen-sized captures and the shape reported to the front ends (`front_picture_shape`) use it, so a canvas of another shape still gets bars around a 16:9 picture and clicks map onto the picture as drawn. `vi::SetLayerScalingMode` stays ignored: the games seen set mode 2 or none.
+- **Check:** `t_present_crop`: a 5:4 crop fills a 16:9 canvas and keeps bars on a 16:10 one on the classic and Metal 4 presents, a sized layer's shape, both `DM_SCREEN_ASPECT` cases and the shape a real present reports.
+- **Found on:** [Super Mario Galaxy 2](../../dm/games/0100FD8022DAA000/README.md#rendering) ([issue #949](https://github.com/seedds/nxnative/issues/949)).
+
 ### Setting the same targets again continues the pass
 
 - **Symptom:** one-draw passes on one target, hundreds of times a frame, with the same attachments each time (a `DM_NVN_GPUPROF` frame: `load` and `store` of the whole target in every line); a low frame rate that follows the target's size.
@@ -1241,7 +1249,7 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 
 - **Symptom:** an assert (a stripped trap, `main+0x4d26e0`) when the surface does not list `preTransform` INHERIT.
 - **Cause:** the game asks for `preTransform` INHERIT. In handheld mode it keeps a 1920x1080 swapchain, draws into the top-left 1280x720 and calls `vi::SetLayerCrop` every frame.
-- **Fix:** the surface lists INHERIT; the host keeps the crop (`hle_vi.c`) and the Vulkan present shows only that rectangle.
+- **Fix:** the surface lists INHERIT; the host keeps the crop (`hle_vi.c`) and the Vulkan present shows only that rectangle, in [the layer's shape](#a-crop-only-picks-texels-the-picture-has-the-layers-shape).
 - **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md).
 
 ### Linear images alias their memory
@@ -1454,6 +1462,6 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 
 - **Symptom:** with *Picture shape* at 1.43:1 (`DM_SCREEN_ASPECT`) the game renders 1920x1344, but on an iPhone Duo in Fit (the default) the picture comes out smaller than the 16:9 one, with black bars on all four sides; it fills the screen only in Fill. On the Mac a click lands off the point under the pointer (it was mapped on a 16:9 rectangle of the window).
 - **Cause:** the front ends assumed a 16:9 picture. iOS sized the game's view to the largest 16:9 rectangle (`DmLayout.h` `dm_aspect_fit`, `dm_aspect_fill`) and the present then fitted the 1.43:1 frame inside that 16:9 drawable (`present_viewport`), so the picture was fitted twice; the Mac's mouse-to-touch mapping (`front_mac.m`) used the same 16:9 rectangle.
-- **Fix:** the present reports the shape of the frame it draws, the valid rectangle of the presented texture, whenever its width / height changes (`nvn_mtl.m` `present_now` → `front.h` `front_picture_shape`; every graphics API presents there). The iOS front end lays the game's view out in that shape (`DmLayout.h` takes it as a parameter: the overlay, the split, Fill and the TV alike), so a 1.43:1 picture fills a 1.43:1 screen in Fit and touches are normalized on the picture as drawn; the Mac maps the mouse on the picture's own rectangle. A 16:9 game reports 16:9 and keeps its layout, and a size change of the same shape (1280x720 handheld, 1920x1080 docked) is not reported.
+- **Fix:** the present reports the shape of the frame it draws ([the layer's](#a-crop-only-picks-texels-the-picture-has-the-layers-shape)) whenever its width / height changes (`nvn_mtl.m` `present_now` → `front.h` `front_picture_shape`; every graphics API presents there). The iOS front end lays the game's view out in that shape (`DmLayout.h` takes it as a parameter: the overlay, the split, Fill and the TV alike), so a 1.43:1 picture fills a 1.43:1 screen in Fit and touches are normalized on the picture as drawn; the Mac maps the mouse on the picture's own rectangle. A 16:9 game reports 16:9 and keeps its layout, and a size change of the same shape (1280x720 handheld, 1920x1080 docked) is not reported.
 - **Check:** the [Duo harness](../../dm/ios/tests/duo/README.md) tests the taller picture in Fit, in Fill and on a wider screen, and the production root view following a reported shape and returning to 16:9. Not yet run on a device.
 - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#screen-shape-dm_screen_aspect-current) and [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md#screen-shape-dm_screen_aspect-current) with `DM_SCREEN_ASPECT=1.43`.

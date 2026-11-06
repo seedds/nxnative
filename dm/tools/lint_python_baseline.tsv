@@ -142,7 +142,6 @@ pyright	dm/tools/tests/test_nro_graphics.py	reportArgumentType	2	Argument of typ
 pyright	dm/tools/tests/test_nro_pack.py	reportArgumentType	1	Argument of type "ModuleSpec | None" cannot be assigned to parameter "spec" of type "ModuleSpec" in function "module_from_spec" Type "ModuleSpec | None" is not assignable to type "ModuleSpec" "None" is not assignable to "ModuleSpec"
 pyright	dm/tools/tests/test_nro_pack.py	reportOptionalMemberAccess	1	"exec_module" is not a known attribute of "None"
 pyright	dm/tools/tests/test_nro_pack.py	reportOptionalMemberAccess	1	"loader" is not a known attribute of "None"
-pyright	dm/tools/tests/test_nso_match.py	reportIndexIssue	3	"__setitem__" method not defined on type "str"
 pyright	dm/tools/tests/test_nsp_alias.py	reportArgumentType	1	Argument of type "ModuleSpec | None" cannot be assigned to parameter "spec" of type "ModuleSpec" in function "module_from_spec" Type "ModuleSpec | None" is not assignable to type "ModuleSpec" "None" is not assignable to "ModuleSpec"
 pyright	dm/tools/tests/test_nsp_alias.py	reportAttributeAccessIssue	1	Cannot assign to attribute "nacp" for class "ModuleType" Attribute "nacp" is unknown
 pyright	dm/tools/tests/test_nsp_alias.py	reportAttributeAccessIssue	1	Cannot assign to attribute "pg" for class "ModuleType" Attribute "pg" is unknown

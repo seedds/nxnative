@@ -90,6 +90,8 @@ int main(void) {
     pair[1] = (p_bind_ubo_small){1, 7, 128, (uint64_t)(uintptr_t)pool_a + 0x1800};
     p_bind_handles *bh = emit(&s0, OP_BIND_TEX, offsetof(p_bind_handles, h) + 4 * 8); bh->stage = 1; bh->n = 4; bh->defer = 1; bh->src = (uint64_t)(uintptr_t)heap_handles;
     p_draw_idx *di = emit(&s0, OP_DRAW_IDX, sizeof *di); di->prim = 4; di->count = 3; di->ibuf = (uint64_t)(uintptr_t)pool_a + 0x3000; di->ind = (uint64_t)(uintptr_t)pool_a + 0x3100;
+    p_draw_idx_one *di1 = emit(&s0, OP_DRAW_IDX, sizeof *di1);
+    *di1 = (p_draw_idx_one){.prim = 4, .itype = 2, .count = 36, .base_vertex = 7, .ibuf = (uint64_t)(uintptr_t)pool_a + 0x3200};
     p_multi_draw *multi = emit(&s0, OP_MULTI_DRAW, sizeof *multi);
     *multi = (p_multi_draw){(uint64_t)(uintptr_t)pool_a + 0xf000, (uint64_t)(uintptr_t)pool_b, di->ibuf, -20, 1025, 4, 2};
     p_draw *dr = emit(&s0, OP_DRAW, offsetof(p_draw, ind)); dr->count = 3;   // a plain draw stops before ind (hle_nvn.c rec_draw)
@@ -178,6 +180,11 @@ int main(void) {
           "paired compact uniform buffers both relocate, retaining order and sizes");
     CHECK(AT(0, bh, p_bind_handles).src == (uint64_t)(uintptr_t)new_base[2] && !memcmp(new_base[2], heap_handles, sizeof heap_handles), "deferred handles: their own region, relocated");
     CHECK(AT(0, di, p_draw_idx).ibuf == (uint64_t)(uintptr_t)new_base[0] + 0x3000 && AT(0, di, p_draw_idx).ind == (uint64_t)(uintptr_t)new_base[0] + 0x3100, "index buffer and indirect arguments");
+    p_draw_idx_one moved_one = AT(0, di1, p_draw_idx_one);
+    p_draw_idx full_one; const p_draw_idx *single = draw_idx_rec(&moved_one, 8 + sizeof moved_one, &full_one);
+    CHECK(moved_one.ibuf == (uint64_t)(uintptr_t)new_base[0] + 0x3200 && single->count == 36 &&
+          single->base_vertex == 7 && single->instances == 1 && single->base_instance == 0 && !single->ind,
+          "single-instance 32-byte indexed draw relocates and replays without breaking legacy full records");
     p_multi_draw moved = AT(0, multi, p_multi_draw);
     CHECK(moved.ind == (uint64_t)(uintptr_t)new_base[0] + 0xf000 && moved.cnt == (uint64_t)(uintptr_t)new_base[1] &&
           moved.ibuf == (uint64_t)(uintptr_t)new_base[0] + 0x3000 && moved.stride == -20 && moved.max == 1025, "multi-draw relocation keeps the first record and the signed stride");

@@ -263,7 +263,14 @@ Games read this count as a position in their own command memory and size their h
 - **Checked:** `t_nvn` (258 assertions) covers exact byte counts, payload fields, intervening queries and other commands; `t_capture` (88 assertions) covers record relocation, capture round-trip and old layout acceptance. Translation and game shaders are unchanged. The UBO pairing remains **opt-in** pending broader game regression; viewports/swizzles compact unconditionally.
 - **Found on:** Super Mario Bros. Wonder Nintendo Switch 2 Edition Program 1 v327680 during new-game model-heap accounting (the separate official Edition profile is under review).
 
+### Direct single-instance indexed draw records
+
+With `DM_NVN_DRAW_ONE=1`, the ordinary single-instance `DrawElements` / `DrawElementsBaseVertex` record also has a lossless 32-byte form: an 8-byte header and a 24-byte payload with primitive, index type, count, base vertex and full 64-bit index-buffer address. It omits only the instance and base-instance fields known to be 1 and 0; explicit instanced, indirect and multi-draw calls retain their existing full layouts. The default is the original 40-byte direct record until compatibility with games that patch draw commands in place is established. Replay reconstructs the omitted defaults, and capture relocation selects the 32-byte index-buffer offset for the new form while continuing to read the older 40-byte direct and 56-byte indirect forms. `GetCommandMemoryUsed` reports the actual 8-byte reduction per qualifying draw, not a guessed native count.
+
+**Limit:** In Wonder Switch 2 Edition's NpcCommonerA setup, 30 such draws reduce the guest model scratch request from `0x5424` to `0x5334` (**240 actual bytes**). It **still fails** on the original RESTBL and is not the permanent fix for [#1580](https://github.com/seedds/nxnative/issues/1580); the original page-boundary case requires a greater, separately demonstrated reduction. Synthetic NVN and capture tests cover new/old layouts and address relocation.
+
 ### Prerecorded lists in slots of their measured size
+
 
 - **Symptom:** `CRASH sig=10` in `mtl_exec` after minutes of play, the fault address equal to `x19` and shaped like `0x1000000003`.
 - **Cause:** the fault is the record-header load at the top of `mtl_exec`'s loop, `x19` is the replay pointer, and the address is itself a record header (`{op 3 = OP_CALL, size 16}`): a JUMP's target had been overwritten by the next recording. Tears of the Kingdom gives each model's prerecorded lists fixed slots of the size a recording of that list measured (`GetCommandMemoryUsed`), slot k at base + size × k, and passes `AddCommandMemory` max(size, 512) (`main+0xbb120`); its memory callback is empty. The host kept 24 bytes free after every record for "a JUMP or an END", so a 496-byte list's END went to a host segment and the 16-byte JUMP at 488 reached 8 bytes into the next slot.

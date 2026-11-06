@@ -135,7 +135,13 @@ int cap_rec_fields(uint32_t op, uint8_t *payload, uint32_t size, const cap_ops *
             return ok;
         }
         case OP_DRAW: if (HAS(24)) ok &= ops->addr(ctx, F(24), 16, 0); if (HAS(32)) ok &= ops->addr(ctx, F(32), 4, 0); return ok;
-        case OP_DRAW_IDX: if (!HAS(24)) return 0; ok &= ops->addr(ctx, F(24), 0, 0); if (HAS(32)) ok &= ops->addr(ctx, F(32), 20, 0); if (HAS(40)) ok &= ops->addr(ctx, F(40), 4, 0); return ok;
+        case OP_DRAW_IDX:
+            if (size == 8 + sizeof(p_draw_idx_one)) return ops->addr(ctx, F(offsetof(p_draw_idx_one, ibuf)), 0, 0);
+            if (!HAS(24)) return 0;
+            ok &= ops->addr(ctx, F(24), 0, 0);
+            if (HAS(32)) ok &= ops->addr(ctx, F(32), 20, 0);
+            if (HAS(40)) ok &= ops->addr(ctx, F(40), 4, 0);
+            return ok;
         case OP_DISPATCH: return !HAS(24) || ops->addr(ctx, F(24), 12, 0);   // caller (+8) is a code address, kept as it is
         case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: return HAS(0) && ops->obj(ctx, CAP_K_DPOOL, F(0), payload, (uint32_t)plen);
         case OP_COPY_B2T: case OP_COPY_T2B: {   // src: the buffer address (the destination for T2B)

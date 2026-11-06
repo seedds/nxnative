@@ -1026,7 +1026,19 @@ static void *rec(NVNcommandBuffer *c, uint32_t op, size_t payload) {
 #define RECN(c, OP, T, ARR, N) ((T *)rec((c), (OP), offsetof(T, ARR) + sizeof(((T *)0)->ARR[0]) * (size_t)(N)))
 // Draws carry the indirect / multi-draw fields (ind onwards) only when they use them: a plain indexed draw record is 0x28 bytes instead of 0x40 (nvn_obj.h draw_rec)
 static void rec_draw(NVNcommandBuffer *c, p_draw d) { size_t n = d.ind || d.mdi_cnt ? sizeof d : offsetof(p_draw, ind); memcpy(rec(c, OP_DRAW, n), &d, n); }
-static void rec_draw_idx(NVNcommandBuffer *c, p_draw_idx d) { size_t n = d.ind || d.mdi_cnt ? sizeof d : offsetof(p_draw_idx, ind); memcpy(rec(c, OP_DRAW_IDX, n), &d, n); }
+static void rec_draw_idx(NVNcommandBuffer *c, p_draw_idx d) {
+    // Opt-in until other games' direct recorded-command patching is surveyed.
+    // The default retains the exact old offsets; GetUsed always counts the
+    // real record bytes with either format.
+    const char *compact = getenv("DM_NVN_DRAW_ONE");
+    if (compact && !strcmp(compact, "1") && !d.ind && !d.mdi_cnt && !d.base_instance && d.instances == 1) {
+        p_draw_idx_one s = {d.prim, d.itype, d.count, d.base_vertex, d.ibuf};
+        memcpy(rec(c, OP_DRAW_IDX, sizeof s), &s, sizeof s);
+    } else {
+        size_t n = d.ind || d.mdi_cnt ? sizeof d : offsetof(p_draw_idx, ind);
+        memcpy(rec(c, OP_DRAW_IDX, n), &d, n);
+    }
+}
 static void copy_view(view_t *dst, uint8_t *has, const NVNtextureView *v) { *has = v != NULL; if (v) *dst = *(const view_t *)v; }
 // Records with textures snapshot the texture objects (0x80 bytes each, after the record struct) and replay reads the snapshots: an NVN command no longer depends on the API object once recorded, and the game may finalize, free or reuse it before submitting.
 // Unity (Engage) does so when it changes scenes; only the object pointer used to be recorded, and replay read other data (a texture 1869367126 high, a Metal assertion abort).

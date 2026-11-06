@@ -1,5 +1,6 @@
 // Synthetic modules exercise real relocation and nn::ro calls; no game files or executable guest code required.
 #include "../loader.c"
+void mtl_present_screen(uint32_t w, uint32_t h) { (void)w; (void)h; }   // a taller screen for the present: nothing here presents
 void dm_thread_service_connect(void) {}   // threads started so far have nothing to wait for here
 #include "../hle_ro.c"
 #include <assert.h>

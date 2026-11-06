@@ -83,8 +83,10 @@ static class SwshXlate
         // arrays into pointers to the pools the replay keeps (pool_arrays), with a run-time bound, so the lengths are the whole ID ranges
         public int QuerySamplerArrayLengthFromPool() => 1 << 12;
         // c[2]: every handle word (C2HandleWords). EA SPORTS FC 27's lights index separate texture i as element 45 + i (c2 byte 0x168 + 8 i), which 32 elements clamped to element 31.
-        // Other buffers (the game's own uniform buffers, read through the handles' byte offsets as well) keep 32
-        public int QueryTextureArrayLengthFromBuffer(int slot) => slot == 2 ? C2HandleWords : 32;
+        // The game's own uniform buffers, read through the handles' byte offsets as well: as many 8-byte handles as a uniform buffer of 64 KB holds. Kirby Air Riders' light probes read their
+        // atlases at element 390 of c[4], which 32 elements clamped to element 31, and characters got no ambient light. dmsh_build.py pool_arrays turns these arrays into pointers to tables
+        // the replay builds from the buffer (nvn_mtl.m htab_gpu), with a run-time bound
+        public int QueryTextureArrayLengthFromBuffer(int slot) => slot == 2 ? C2HandleWords : 8192;
         public int QueryTextureArrayLengthFromPool() => 1 << 20;
 
         string Get(string table, int slot) => _job[table] is JsonObject t && t[slot.ToString()] is JsonNode n ? (n is JsonObject o ? (string)o["type"] : (string)n) : null;

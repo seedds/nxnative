@@ -999,8 +999,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 lo = sum;
             }
 
-            // The carry out of the 64-bit addition, to the predicate at 81..84: the 64-bit division in Fire Emblem Fortune's Weave's Lighting compute shaders chains it into its next addition
-            ASetPred(context, x.Bits(81, 84), context.ICompareNotEqual(carryOut, Const(0)));
+            // The carry out of the 64-bit addition, to the predicate at 81..84: the 64-bit division in Fire Emblem Fortune's Weave's Lighting compute shaders chains it into its next addition.
+            // UIMAD.WIDE (0x0a5) writes it to the uniform predicate UPd, as it reads its carry in from one (AImadCarryIn): written to the lane predicate, UPd stayed unwritten (false)
+            ASetPred(context, x.Bits(81, 84), context.ICompareNotEqual(carryOut, Const(0)), u);
 
             int rd = ARd(x, u);
             int zero = u ? RegisterConsts.UniformZeroIndex : RegisterConsts.RegisterZeroIndex;

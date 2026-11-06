@@ -151,5 +151,33 @@ class Vote(Alu):
         self.assertIn('simd_any', self.kept(self.FSETP, self.VOTE, self.MOV_P0, srcs=(6, 19, 20)))
 
 
+class ImadWideCarry(Alu):
+    """The carry out of IMAD.WIDE's 64-bit addition (Pd at 81..84): UIMAD.WIDE (0x0a5) writes the uniform predicate UPd, as it reads its carry in from one, and leaves the lane
+    predicate of that number alone; IMAD.WIDE (0x025) writes the lane predicate. Like VOTEU (class Vote), the uniform form wrote the lane predicate: UPd stayed unwritten and
+    read false. No game met so far uses the uniform form's carry (Hyrule Warriors: Age of Imprisonment and Ocarina of Time have UIMAD.WIDE only with PT there), so the encodings
+    are built from the fields the translator decodes: form 1 (0x2a5 / 0x225), a 24, b 32, c 64 (the pair c, c + 1), carry in off (bit 74 clear, !PT at 87..90)"""
+    R2UR_4 = GlobalMemory.R2UR                           # R2UR UR4, R19: uniform sources the translator cannot fold
+    R2UR_5 = (0x000fe200000e0000, 0x00000000140573c2)    # R2UR UR5, R20
+    UIMAD = (0x000fe20007800004, 0x00000005040672a5)     # UIMAD.WIDE.U32 UR6, UP0, UR4, UR5, UR4 (c = UR5:UR4)
+    IMAD = (0x000fe20007800013, 0x00000014130a7225)      # IMAD.WIDE.U32 R10, P0, R19, R20, R19 (c = R20:R19)
+    FSETP = CompareFtz.FSETP                             # P0 from R19 and R20
+    MOV_P0 = Vote.MOV_P0                                 # @P0 MOV R6, R19: a lane guard
+    UR8_0 = (0x000fe20000000000, 0x0000003f00087c82)     # UMOV UR8, URZ
+    UR8_UP0 = (0x000fe20000000000, 0x0000123400080882)   # @UP0 UMOV UR8, 0x1234: a uniform guard
+    MOV_UR8 = (0x000fe20000000f00, 0x0000000800067c02)   # MOV R6, UR8
+    HIGH = 'mulhi('                                      # the high word of the multiply, which only the carry needs here
+
+    def test_uimad_wide_writes_the_uniform_predicate(self):
+        msl = self.kept(self.R2UR_4, self.R2UR_5, self.UIMAD, self.UR8_0, self.UR8_UP0, self.MOV_UR8, srcs=(19, 20))
+        self.assertIn(self.HIGH, msl)
+        self.assertNotIn('if (false)', msl)   # an unwritten predicate reads false, so the uniform guard never held
+
+    def test_uimad_wide_leaves_the_lane_predicate(self):   # nothing reads UP0: the guard reads the comparison, and the multiply is dead
+        self.assertNotIn(self.HIGH, self.kept(self.FSETP, self.R2UR_4, self.R2UR_5, self.UIMAD, self.MOV_P0, srcs=(6, 19, 20)))
+
+    def test_imad_wide_writes_the_lane_predicate(self):
+        self.assertIn(self.HIGH, self.kept(self.FSETP, self.IMAD, self.MOV_P0, srcs=(6, 19, 20)))
+
+
 if __name__ == '__main__':
     unittest.main()

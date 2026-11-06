@@ -13,6 +13,8 @@ void nvn_dirty_protect(const void *addr, size_t len);              // Set the co
 void nvn_dirty_protect_sparse(const void *addr, size_t len);       // The same, for the pages behind a placement sparse tile: a later write to one moves nvn_dirty_sparse_writes
 uint64_t nvn_dirty_sparse_writes(void);                            // Writes so far to pages protected that way
 uint64_t nvn_dirty_now(void);                                      // Current generation: take the content's stamp before nvn_dirty_protect and before reading it
+size_t nvn_dirty_release(const void *addr, size_t len, const void *expect);   // give back whole protected host pages whose bytes (expect) the host keeps elsewhere; → bytes given
+uint64_t nvn_dirty_released(void);                                 // bytes given back so far
 int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp); // Covered pages were written after the stamp -> 1
 const void *nvn_dirty_span(const void *addr, size_t len);          // The tracked range holding the span (a handle to keep; NULL = untracked)
 int nvn_dirty_since_cached(const void **span, const void *addr, size_t len, uint64_t stamp);   // nvn_dirty_since keeping the last range found in *span

@@ -56,6 +56,10 @@ class GuardedWrites(Translated):
         for code in ((0x000f4200081e0f04, 0x3000040702067f63), (0x000142000c1e03ff, 0x2000040400167f6c), (0x00014200001e0f12, 0x3800001002101364)):   # TLD4 and TXD through a uniform register, TLD4 through a register
             self.translate(inst(*code) + inst(*EXIT))
 
+    def test_lod_query_handle_forms_translate(self):   # TMML through a uniform register and a register (Kirby Air Riders' 4,776 pixel shaders, as encoded there)
+        for code in ((0x000f4200080002ff, 0x600004ff20277f69), (0x000f4200000002ff, 0x68000018141d736a)):
+            self.translate(inst(*code) + inst(*EXIT))
+
     def test_gradients_through_a_uniform_register_keep_their_handle(self):
         # UR4 = c3[0x10]; TXD through UR4 (write barrier 5); after waiting on it, the result atomically added to an image, so it stays. The translator takes its source 0 as the handle: without it, it could not find one and deleted the read
         ur4, txd, used = (0x000fe20000000a00, 0x00c0040000047ab9), (0x000142000c1e03ff, 0x2000040400167f6c), (0x020ea200001ee000, 0x00000c16030c7593)

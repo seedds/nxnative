@@ -120,6 +120,8 @@ int main(void) {
     const char *lay = cap_layout();
     const char *multi_layout = strstr(lay, "op 55 p_multi_draw");
     CHECK(multi_layout && cap_layout_matches(lay, (size_t)(multi_layout - lay)), "the complete legacy record layout remains readable");
+    const char *strides_layout = strstr(lay, "p_copy_strides");
+    CHECK(strides_layout && cap_layout_matches(lay, (size_t)(strides_layout - lay)), "the layout before the copy strides' tail remains readable");
     CHECK(cap_layout_matches(lay, strlen(lay)) && !cap_layout_matches(lay, strlen(lay) - 1), "accept the current layout, reject a truncated extension");
     cap_put(&w, CAP_LAYT, 0, lay, strlen(lay), 0);
     for (int r = 0; r < nregs; r++) { uint8_t b[sizeof(cap_regn) + 65536]; cap_regn h = {(uint32_t)r, r == 2, regs[r].lo, regs[r].size};

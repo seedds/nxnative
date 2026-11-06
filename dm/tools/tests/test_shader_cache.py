@@ -34,6 +34,14 @@ class Entries(Base):
         for n in ('shader/a/mac/x', 'shader/a/ios/x', 'shader/ab/mac/x', 'shader0'): self.store.put(n, b'1')
         self.assertEqual(self.store.names('shader/a/'), {'shader/a/mac/x', 'shader/a/ios/x'})
 
+    def test_delete_prefix_takes_only_its_names_and_bytes_shared_stay(self):   # dmsh_build.py's staged outputs, once its image is written
+        self.store.put('stage/x/mac/k_b.metallib', b'shared'); self.store.put('stage/x/mac/k_b.json', b'staged only')
+        self.store.put('shader/d/mac/k_b.metallib', b'shared'); self.store.put('stage/xy', b'another stage')
+        self.store.delete_prefix('stage/x/')
+        self.assertEqual(self.store.names('stage/'), {'stage/xy'})
+        self.assertEqual(self.store.get('shader/d/mac/k_b.metallib'), b'shared')
+        self.assertEqual(self.blobs(), 2)   # 'staged only' gave its bytes back; 'shared' is still named
+
     def test_the_same_bytes_are_stored_once(self):   # a library under its MSL's digest and its shader's digest was one APFS clone
         self.store.put('metallib/mac/d.metallib', b'L' * 100000); self.store.put('shader/d/mac/k_b.metallib', b'L' * 100000)
         self.assertEqual(self.blobs(), 1)

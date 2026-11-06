@@ -60,8 +60,9 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         {
             foreach ((int id, MemoryDefinition memory) in memories)
             {
-                SpvInstruction pointerType = context.TypePointer(storage, context.GetType(memory.Type, memory.ArrayLength));
-                SpvInstruction variable = context.Variable(pointerType, storage);
+                SpvInstruction type = context.GetType(memory.Type, memory.ArrayLength);
+                SpvInstruction pointerType = context.TypePointer(storage, type);
+                SpvInstruction variable = context.Variable(pointerType, storage, memory.ZeroInit ? context.ConstantNull(type) : null);
 
                 context.AddGlobalVariable(variable);
 

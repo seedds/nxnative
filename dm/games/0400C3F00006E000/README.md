@@ -86,6 +86,7 @@ Update 1.8.0 (v917504, SDK 21.4.0) is not on this Mac. Pull request #1116 ported
 
 ## Open
 
+- **Shader tables:** split them again with this game's files and compare: `shader_map.tsv` may hold agl rows that are no shaders ([A control section's words read as a BAHS entry](../../../docs/reference/shaders.md#a-control-sections-words-read-as-a-bahs-entry)), and if so the NSP script stops at the table check until the split's tables replace them.
 - **Long frames:** first-use pipeline compiles (no `pso_manifest.tsv` yet).
 - **Shading rate:** the calls are accepted and ignored ([Variable rate shading ignored](../../../docs/reference/rendering.md#variable-rate-shading-ignored)), so every pixel is shaded where the game meant to save GPU time.
 - **Mesh draws:** `DrawMeshTasks3D` and the indirect forms are not implemented; no run reached them.

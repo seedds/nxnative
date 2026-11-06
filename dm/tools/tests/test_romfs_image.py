@@ -57,6 +57,21 @@ class Images(unittest.TestCase):
         self.assertEqual(self.content('data/z'), b'')
         self.assertTrue(image.read_index(self.dst)['data/empty'][0])
 
+    def test_format_mismatches_name_zs_files_that_are_not_zstd(self):
+        tex = self.src / 'Tex'; tex.mkdir()
+        (tex / 'ok.bntx.zs').write_bytes(b'\x28\xb5\x2f\xfd' + b'frame')
+        (tex / 'skip.bntx.zs').write_bytes(b'\x53\x2a\x4d\x18' + b'\0' * 8)   # a skippable frame (any of 0x184d2a50..5f)
+        (tex / 'UPPER.ZS').write_bytes(b'\x28\xb5\x2f\xfd')
+        (tex / 'zeros.bntx.zs').write_bytes(b'\0' * 12288 + b'\x28\xb5\x2f\xfd')   # as on a damaged NUP of Ocarina of Time
+        (tex / 'short.zs').write_bytes(b'\x28\xb5')
+        (tex / 'empty.zs').write_bytes(b'')   # no bytes, no promise broken: left out
+        (tex / 'plain.bntx').write_bytes(b'\0' * 16)   # no format promised by the name
+        image.pack(self.src, self.dst)
+        seen = []
+        bad = image.format_mismatches(self.dst, lambda done, total: seen.append((done, total)))
+        self.assertEqual(sorted((p, size, head) for p, size, head in bad), [('Tex/short.zs', 2, b'\x28\xb5'), ('Tex/zeros.bntx.zs', 12292, b'\0\0\0\0')])
+        self.assertEqual(seen, [(0, 5)])
+
     def test_reuse_rebuilds_changed_added_removed_and_renamed_files(self):
         (self.src / 'a').write_bytes(b'old')
         image.pack(self.src, self.dst, reuse=True)

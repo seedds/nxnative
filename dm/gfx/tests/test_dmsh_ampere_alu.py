@@ -84,6 +84,27 @@ class HalfImmediate(Alu):
         self.assertRegex(msl, r'\b2\.0\b')
 
 
+class GlobalMemory(Alu):
+    """Global memory. desc[URb][Ra.64] (bit 76 of LDG / STG, bit 71 of ATOMG / RED; nvdisasm): URb is a memory descriptor, not part of the address, which is Ra.64 (plus the offset)
+    alone; [Ra.64+URb] adds it. The descriptor's value was added to the address. ATOMG.CAS (0x3a9) was refused; ATOMG / RED INC and DEC had no case in EmitAtomicOp (the operation
+    vanished). A GPU cross-check of 300 LDG / STG / ATOMG / RED through the host's gmem_map (one-thread compute shaders, production options): 135 identical to 300. Encodings
+    built from the sm_86 oracle corpus and checked with nvdisasm"""
+    R2UR = (0x000fe200000e0000, 0x00000000130473c2)       # R2UR UR4, R19
+    LDG_DESC = (0x000fe2200c1e1900, 0x0000000414067981)   # LDG.E R6, desc[UR4][R20.64]
+    LDG_URZ = (0x000fe2200c1e1900, 0x0000003f14067981)    # LDG.E R6, desc[URZ][R20.64]
+    CAS = (0x000fe200001ee116, 0x00000013140673a9)        # ATOMG.E.CAS.STRONG.GPU PT, R6, [R20], R19, R22
+    INC = (0x000fe200019ee100, 0x00000013140673a8)        # ATOMG.E.INC.STRONG.GPU PT, R6, [R20], R19
+
+    def test_a_descriptor_is_not_an_offset(self):   # the same code whatever the descriptor register holds
+        self.assertEqual(self.kept(self.R2UR, self.LDG_DESC, srcs=(19, 20, 21)), self.kept(self.R2UR, self.LDG_URZ, srcs=(19, 20, 21)))
+
+    def test_atomg_cas_is_translated(self):
+        self.assertIn('atomic_compare_exchange', self.kept(self.CAS, srcs=(19, 20, 21, 22)))
+
+    def test_atomg_inc_is_a_compare_and_swap_loop(self):
+        self.assertIn('atomic_compare_exchange', self.kept(self.INC, srcs=(19, 20, 21)))
+
+
 class CompareFtz(Alu):
     """FSETP / FSET .FTZ (bit 80): a denormal operand compares as zero, as on NVIDIA; Apple's GPUs keep denormals. Mario Kart World's deferred lighting 635061c90d75a8d1
     normalises its four depth-weighted samples by 1 / sum only where FSETP.NEU.FTZ says sum != 0: a denormal sum passed, its reciprocal overflowed, and the NaN came out

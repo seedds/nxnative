@@ -12,6 +12,7 @@ A Switch 2 game: v131072, SDK 22.2.0 built for the Switch 2 (`Ounce`), NVN2 API 
 | `zip_store .zst:.mp4:.webm:.metallib` | `game.tsv` | the RomFS's files are compressed already |
 | `fps_target 60` | `game.tsv` | the host writes 60 into the game's target frame rate, which the rewriter finds by its readers in any build; see [Frame rate](#frame-rate) |
 | `fps_max 120` | `game.tsv` | **Frame rate** offers 120 on the Mac: speed measured below; see [Frame rate](#frame-rate) |
+| `depth_mode zero` | `game.tsv` | the game selects near-zero NVN depth; offline pipeline bases must use the matching vertex entry. Without it the app's bundled archive (661.6 MB on an M1 Pro) was refused at every start and the Mac built 872 MB of bases of its own in the background |
 
 No `render_cond`: not tried, and nothing has called for it so far.
 

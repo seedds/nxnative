@@ -5369,6 +5369,11 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     }
     if (stage == 2 && !j) return nil;   // missing geometry translation: the caller's red line says so
     NSString *lp = [NSString stringWithFormat:@"%@/%@.metallib", g_msl_dir, pc];
+    // Diagnostic DM_MSL_OVERRIDE=<dir>: a library <dir>/<key>.metallib takes the place of the cache's (a hand-edited shader tried without a rebuild; its reflection json stays the cache's).
+    // <dir> is a plain folder; the cache itself may be a folder or a packed image (lib_from_file)
+    { static NSString *od; static dispatch_once_t once; dispatch_once(&once, ^{ const char *v = getenv("DM_MSL_OVERRIDE"); if (v && *v) { od = @(v); MLOG("DM_MSL_OVERRIDE: libraries in %s replace the cache's", v); } });
+      NSString *op = od ? [NSString stringWithFormat:@"%@/%@.metallib", od, pc] : nil;
+      if (op && [NSFileManager.defaultManager fileExistsAtPath:op]) { MLOG("DM_MSL_OVERRIDE: shader %s loaded from %s", pc.UTF8String, op.UTF8String); lp = op; } }
     id<MTLLibrary> lib = lib_from_file(lp, &e);
     if (!lib || !j) { MLOG("[RED] failed to load shader %s: %s", pc.UTF8String, e ? e.localizedDescription.UTF8String : "no reflection json"); return nil; }
     if (![j[@"chain"] isEqual:@DMSH_CHAIN]) { MLOG("[RED] shader %s has translation chain version %s, but this host expects %s", pc.UTF8String, [[j[@"chain"] description] UTF8String], DMSH_CHAIN); return nil; }

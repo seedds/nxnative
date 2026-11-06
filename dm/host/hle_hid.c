@@ -282,8 +282,11 @@ uint32_t dm_player_npad(int p) { return p <= 0 ? connected_id() : (uint32_t)p; }
 // The players with a controller (bit p = player p + 1, from the front end's dm_pad_players; player 1 always) and the npads the game supports (bit id for No1..No8, bit 8
 // Handheld, bit 9 Other: all of them until SetSupportedNpadIdType, as the hid service starts)
 static _Atomic uint32_t g_players = 1, g_ids_supported = 0x3ff;
+static _Atomic uint32_t g_pad_style[DM_PLAYERS];
+static void six_calibration_invalidate(int p);
 static uint32_t id_bit(uint32_t id) { return id < DM_PLAYERS ? 1u << id : id == NPAD_HANDHELD ? 1u << 8 : id == 0x10 ? 1u << 9 : 0; }
 static int reported(int p) { return p == 0 || (atomic_load(&g_players) >> p & 1 && atomic_load(&g_ids_supported) & id_bit((uint32_t)p)); }
+
 // Players with a controller whose npad the game does not support. A one-player game (no npad past No1 supported) gets them as player 1, so any controller plays it; in a game for
 // fewer players than are connected (a fifth controller in a four-player game) they are not used, as on the Switch, where the system does not connect them
 static uint32_t unsupported_players(void) {
@@ -296,7 +299,11 @@ static int player_of(uint32_t id) {   // the reported player on npad id; -1 when
     if (id == connected_id()) return 0;
     return id > 0 && id < DM_PLAYERS && reported((int)id) ? (int)id : -1;
 }
-static uint32_t style_for_player(uint32_t id, int p) { return p < 0 ? 0 : id == NPAD_HANDHELD ? STYLE_HANDHELD : STYLE_FULLKEY; }
+static uint32_t style_for_player(uint32_t id, int p) {
+    if (p < 0) return 0;
+    uint32_t style = atomic_load(&g_pad_style[p]);
+    return id == NPAD_HANDHELD ? STYLE_HANDHELD : style ? style : STYLE_FULLKEY;
+}
 static uint32_t style_of(uint32_t id) { return style_for_player(id, player_of(id)); }
 static int32_t ax(uint64_t v, int i) { return (int16_t)(v >> (16 * i)); }
 static int32_t pick(int32_t a, int32_t b) { return (a < 0 ? -a : a) >= (b < 0 ? -b : b) ? a : b; }   // whichever of two sources is deflected more
@@ -305,6 +312,11 @@ static int32_t pick(int32_t a, int32_t b) { return (a < 0 ? -a : a) >= (b < 0 ? 
 // service does. The front end reports from its own thread, where an event cannot be bound, so only a bound one is signalled (one the game destroyed is not bound any more)
 static void *_Atomic g_style_ev[DM_PLAYERS];
 static void style_changed(uint32_t id) { void *ev = id < DM_PLAYERS ? atomic_load(&g_style_ev[id]) : NULL; if (ev) hle_signal_bound_system_event(ev); }
+void dm_pad_style(int p, uint32_t style) {
+    if (p < 0 || p >= DM_PLAYERS) return;
+    if (style != STYLE_FULLKEY && style != STYLE_JOYDUAL && style != STYLE_JOYLEFT && style != STYLE_JOYRIGHT) style = 0;
+    if (atomic_exchange(&g_pad_style[p], style) != style) { six_calibration_invalidate(p); style_changed(dm_player_npad(p)); }
+}
 static void note_merged(void) {   // logs the players whose npad the game does not support, when that changes
     static _Atomic uint32_t last; uint32_t m = unsupported_players(), one = (uint32_t)one_player();
     if (atomic_exchange(&last, m | one << 31) == (m | one << 31)) return;
@@ -462,6 +474,7 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
     if (s->ry < -STICK_THRESH) b |= 1u << 23;
     s->buttons = b;
     s->attributes = ATTR_CONNECTED | (id == NPAD_HANDHELD ? ATTR_WIRED | ATTR_LEFT_CONN | ATTR_LEFT_WIRED | ATTR_RIGHT_CONN | ATTR_RIGHT_WIRED : ATTR_LEFT_CONN | ATTR_RIGHT_CONN);
+
 }
 // The cheat VM's key mask (hle_cheats.c "all keys of the mask held"): the OR of every player's controller buttons
 // (the keyboard / touch source's bits included) plus the eight stick-direction pseudo buttons of the merged axes —
@@ -517,13 +530,12 @@ HLE_FORCE("_ZN2nn3hid24SetSupportedNpadStyleSetENS_4util10BitFlagSetILi32ENS0_12
 HLE_FORCE("_ZN2nn3hid15GetNpadStyleSetERKj", "controller style query; follows DM_OPMODE", uint32_t, h_hid_GetStyle, const uint32_t *id) { return style_of(*id); }
 HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadFullKeyStateEiRKj", "full-key controller states", int, h_hid_StatesFullKey, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_FULLKEY); }
 HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadHandheldStateEiRKj", "handheld controller states", int, h_hid_StatesHandheld, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_HANDHELD); }
-HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyDualStateEiRKj", "dual Joy-Con states (not connected on the host)", int, h_hid_StatesJoyDual, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_JOYDUAL); }
-HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyLeftStateEiRKj", "left Joy-Con states (not connected on the host)", int, h_hid_StatesJoyLeft, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_JOYLEFT); }
-HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadJoyRightStateEiRKj", "right Joy-Con states (not connected on the host)", int, h_hid_StatesJoyRight, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_JOYRIGHT); }
+HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyDualStateEiRKj", "dual Joy-Con states", int, h_hid_StatesJoyDual, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_JOYDUAL); }
+HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyLeftStateEiRKj", "left Joy-Con states", int, h_hid_StatesJoyLeft, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_JOYLEFT); }
+HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadJoyRightStateEiRKj", "right Joy-Con states", int, h_hid_StatesJoyRight, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_JOYRIGHT); }
 HLE_FORCE("_ZN2nn3hid14DisconnectNpadERKj", "disconnect a controller; ignored by the host", void, h_hid_Disconnect, const uint32_t *id) { (void)id; }
 static uint32_t g_hold_type;
 HLE_FORCE("_ZN2nn3hid18SetNpadJoyHoldTypeENS0_15NpadJoyHoldTypeE", "Joy-Con hold orientation; the host only records it", void, h_hid_HoldType, int t) { g_hold_type = (uint32_t)t; }
-HLE_FORCE("_ZN2nn3hid20GetNpadJoyAssignmentERKj", "Joy-Con assignment: dual", int, h_hid_GetJoyAssign, const uint32_t *id) { (void)id; return 0; }
 HLE_FORCE("_ZN2nn3hid30SetNpadJoyAssignmentModeSingleERKj", "Joy-Con single assignment; ignored by the host", void, h_hid_JoySingle, const uint32_t *id) { (void)id; }
 HLE_FORCE("_ZN2nn3hid18SwapNpadAssignmentERKjS2_", "swap controller ids; ignored by the host", void, h_hid_Swap, const uint32_t *a, const uint32_t *b) { (void)a; (void)b; }
 HLE_FORCE("_ZN2nn3hid21StartLrAssignmentModeEv", "L/R assignment mode; ignored by the host", void, h_hid_LrStart, void) {}
@@ -567,6 +579,7 @@ enum { MOTION_STALE_NS = 300000000 };
 typedef struct { pthread_mutex_t mu; motion_state st; uint64_t last_ns, received_ns, logged; } live_motion;
 static live_motion g_motion[DM_PLAYERS] = {[0 ... DM_PLAYERS - 1] = {.mu = PTHREAD_MUTEX_INITIALIZER}};
 static live_motion g_hid_motion[DM_PLAYERS] = {[0 ... DM_PLAYERS - 1] = {.mu = PTHREAD_MUTEX_INITIALIZER}};
+static live_motion g_joy_motion[DM_PLAYERS][2] = {[0 ... DM_PLAYERS - 1] = {[0 ... 1] = {.mu = PTHREAD_MUTEX_INITIALIZER}}};
 static live_motion g_phone_motion = {.mu = PTHREAD_MUTEX_INITIALIZER};
 static pthread_once_t g_motion_once = PTHREAD_ONCE_INIT;
 static motion_map g_motion_map; static float g_motion_gain = 0.5f; static int g_motion_off, g_motion_log, g_phone_mode;
@@ -583,7 +596,7 @@ static void motion_set(int p, const float acc[3], const float rot[3], int source
     pthread_once(&g_motion_once, motion_env); if (g_motion_off) return;
     static motion_map identity = {{0, 1, 2}, {1, 1, 1}, 1, 1};
     // Each transport owns its orientation. HID batches carry three sample times; arrival time controls freshness, never their integration intervals.
-    live_motion *m = source == 1 ? &g_phone_motion : source == 2 ? &g_hid_motion[p] : &g_motion[p];
+    live_motion *m = source >= 3 ? &g_joy_motion[p][source - 3] : source == 1 ? &g_phone_motion : source == 2 ? &g_hid_motion[p] : &g_motion[p];
     uint64_t now = now_ns(), t = sample_ns ? sample_ns : now;
     if (!t || t > now || now - t > MOTION_STALE_NS) return;
     pthread_mutex_lock(&m->mu);
@@ -594,7 +607,7 @@ static void motion_set(int p, const float acc[3], const float rot[3], int source
     if (g_motion_log && !p && t - m->logged > 1000000000ull) {
         m->logged = t;
         LOG("[hid] motion player 1 (%s): acc %+.2f %+.2f %+.2f G, gyro %+.3f %+.3f %+.3f rev/s (flat and still should read acc 0 0 -1)",
-            source == 1 ? "phone" : source == 2 ? "controller HID" : "controller", m->st.acc[0], m->st.acc[1], m->st.acc[2], m->st.gyro[0], m->st.gyro[1], m->st.gyro[2]);
+            source == 1 ? "phone" : source == 2 ? "controller HID" : source == 3 ? "Joy-Con left HID" : source == 4 ? "Joy-Con right HID" : "controller", m->st.acc[0], m->st.acc[1], m->st.acc[2], m->st.gyro[0], m->st.gyro[1], m->st.gyro[2]);
     }
     m->last_ns = t; m->received_ns = now;
     pthread_mutex_unlock(&m->mu);
@@ -602,6 +615,14 @@ static void motion_set(int p, const float acc[3], const float rot[3], int source
 void dm_motion_set(int p, const float acc[3], const float rot[3]) { motion_set(p, acc, rot, 0, 0); }
 void dm_motion_set_switch(int p, const float acc[3], const float rot[3]) { motion_set(p, acc, rot, 1, 0); }
 void dm_motion_set_hid(int p, const float acc[3], const float rot[3], uint64_t t) { if (t) motion_set(p, acc, rot, 2, t); }
+void dm_motion_set_joycon(int p, int side, const float acc[3], const float rot[3], uint64_t t) {
+    if (side >= 0 && side < 2 && t) motion_set(p, acc, rot, 3 + side, t);
+}
+void dm_motion_clear_joycon(int p, int side) {
+    if (p < 0 || p >= DM_PLAYERS || side < 0 || side > 1) return;
+    live_motion *m = &g_joy_motion[p][side];
+    pthread_mutex_lock(&m->mu); m->last_ns = 0; pthread_mutex_unlock(&m->mu);
+}
 void dm_motion_clear(int p) {
     if (p < 0 || p >= DM_PLAYERS) return;
     pthread_mutex_lock(&g_motion[p].mu); g_motion[p].last_ns = 0; pthread_mutex_unlock(&g_motion[p].mu);
@@ -654,25 +675,128 @@ static void six_sample(SixAxisState *s, int64_t samp, int shakes) {
     float c = (float)cos(2 * M_PI * yaw), sn = (float)sin(2 * M_PI * yaw);
     s->dir[0] = c; s->dir[1] = sn; s->dir[3] = -sn; s->dir[4] = c; s->dir[8] = 1;
 }
-// SixAxisSensorHandle: byte 0 the style's bit number, byte 1 the npad id, byte 2 the device (left / right Joy-Con of a pair). The styles made of two Joy-Cons (handheld, dual) have
-// two sensors, the others one. A handle reads as connected while its controller is connected in that style; otherwise its entries are zero (not connected) and the count 0.
-// Only player 1's controller shakes (DM_BTN_SHAKE comes from the keyboard, the iPhone and DM_KEYS, all player 1)
-static int six_connected(uint32_t h) { return (h & 0xff) < 32 && (style_of(h >> 8 & 0xff) >> (h & 0xff) & 1); }
+// Horizon SixAxisSensorHandle ABI: byte 0 = SDK NpadStyleIndex (FullKey 3,
+// Handheld 4, JoyDual 5, JoyLeft 6, JoyRight 7), byte 1 = npad id, byte 2 =
+// device (left 0, right 1, combined sensor 2). The SDK's utility functions
+// subtract 3 from the style byte; style-bit indices here break nn::imu lookup.
+static int six_style(uint32_t h) { return (int)(h & 0xff) - 3; }
+static int six_side(uint32_t h) { return six_style(h) == 4 ? 1 : (int)(h >> 16 & 1); }
+static int six_valid(uint32_t h) {
+    int style = six_style(h), device = h >> 16 & 0xff;
+    if ((h >> 24) || style < 0 || style > 4) return 0;
+    return style < 2 ? device == 2 : style == 2 ? device < 2 : device == (style == 4);
+}
+// Passthrough requests unaltered acceleration and angular velocity. motion_update
+// already retains those separately from the orientation correction, and motion_fill
+// publishes them directly: no additional filtering needs to be bypassed here.
+// Keep the requested mode independently for each controller style and physical sensor.
+static _Atomic unsigned char g_six_passthrough[DM_PLAYERS][5][2];
+static _Atomic unsigned char *six_passthrough(uint32_t h) {
+    int p = player_of(h >> 8 & 0xff), style = six_style(h);
+    return p >= 0 && p < DM_PLAYERS && six_valid(h) ? &g_six_passthrough[p][style][six_side(h)] : NULL;
+}
+HLE_FORCE("_ZN2nn3hid30EnableSixAxisSensorPassthroughERKNS0_19SixAxisSensorHandleEb", "six-axis unaltered acceleration and gyro passthrough mode", void, h_hid_SixPassthrough, const uint32_t *h, unsigned on) {
+    _Atomic unsigned char *mode = six_passthrough(*h); if (mode) atomic_store(mode, !!on);
+}
+HLE_FORCE("_ZN2nn3hid33IsSixAxisSensorPassthroughEnabledERKNS0_19SixAxisSensorHandleE", "six-axis passthrough mode for the requested sensor", unsigned, h_hid_SixPassthroughQ, const uint32_t *h) {
+    _Atomic unsigned char *mode = six_passthrough(*h); return mode ? atomic_load(mode) : 0;
+}
+static int six_connected(uint32_t h) {
+    if (!six_valid(h) || !(style_of(h >> 8 & 0xff) >> six_style(h) & 1)) return 0;
+    return 1;
+}
+// IC information describes bounds, not factory correction coefficients. nn::imu
+// initializes its sensitivity estimates from the midpoint of these matrices:
+// zero-filled bounds therefore initialize a zero gain and prevent calibration.
+// Standard controller bounds, also described by Ryujinx's SixAxisSensorIcInformation:
+// https://github.com/NextendoNetwork/Ryujinx-Nextendo/blob/main/src/Ryujinx.HLE/HOS/Services/Hid/Types/SixAxisSensorIcInformation.cs
+// ABI: 25 gyro floats followed by 25 accelerometer floats, 0xc8 bytes total.
+// Switch Sports passes these ranges to nn::imu's own fusion initialization.
+HLE_FORCE("_ZN2nn3hid6detail29GetSixAxisSensorIcInformationEPNS0_26SixAxisSensorIcInformationERKNS0_19SixAxisSensorHandleE", "six-axis sensor offset and sensitivity bounds for normalized host motion", Result, h_hid_SixIcInfo, float *out, const uint32_t *h) {
+    if (!six_connected(*h)) return 202u | 710u << 9; // HID: no device connected
+    for (int sensor = 0; sensor < 2; sensor++) {
+        float *p = out + 25 * sensor;
+        p[0] = sensor ? 8.f : 2000.f;
+        float bias = sensor ? .0612f : 10.f;
+        float cross = sensor ? .016f : .003f;
+        for (int i = 0; i < 3; i++) { p[1+i] = -bias; p[4+i] = bias; }
+        for (int i = 0; i < 9; i++) {
+            p[7+i] = i % 4 == 0 ? .95f : -cross;
+            p[16+i] = i % 4 == 0 ? 1.05f : cross;
+        }
+    }
+    return RES_OK;
+}
+// nn::imu creates this opaque 0x744-byte calibration and asks HID to retain it
+// for the sensor. This is runtime calibration, not the chip's SPI factory data.
+// Keep the exact bytes for the current controller; never reuse them after a
+// controller/style replacement. No hardware calibration writes are required.
+typedef struct { unsigned char data[0x744]; int valid, assignment_seen; } six_calibration;
+static six_calibration g_six_calibration[DM_PLAYERS][5][2];
+static pthread_mutex_t g_six_calibration_mu = PTHREAD_MUTEX_INITIALIZER;
+static void six_calibration_invalidate(int p) {
+    pthread_mutex_lock(&g_six_calibration_mu);
+    memset(g_six_calibration[p], 0, sizeof g_six_calibration[p]);
+    pthread_mutex_unlock(&g_six_calibration_mu);
+}
+static six_calibration *six_calibration_for(uint32_t h) {
+    int p = player_of(h >> 8 & 0xff), style = six_style(h);
+    return p >= 0 && p < DM_PLAYERS && six_connected(h) ? &g_six_calibration[p][style][six_side(h)] : NULL;
+}
+HLE_FORCE("_ZN2nn3hid6detail37LoadSixAxisSensorCalibrationParameterEPNS0_33SixAxisSensorCalibrationParameterERKNS0_19SixAxisSensorHandleE", "load the current sensor's runtime motion calibration", Result, h_hid_SixCalibrationLoad, void *out, const uint32_t *h) {
+    pthread_mutex_lock(&g_six_calibration_mu);
+    six_calibration *c = six_calibration_for(*h);
+    Result r = !c ? 202u | 710u << 9 : !c->valid ? 0xd8cau : RES_OK;
+    if (!r) memcpy(out, c->data, sizeof c->data);
+    pthread_mutex_unlock(&g_six_calibration_mu);
+    return r;
+}
+HLE_FORCE("_ZN2nn3hid6detail38StoreSixAxisSensorCalibrationParameterERKNS0_19SixAxisSensorHandleERKNS0_33SixAxisSensorCalibrationParameterE", "retain the current sensor's runtime motion calibration", Result, h_hid_SixCalibrationStore, const uint32_t *h, const void *data) {
+    pthread_mutex_lock(&g_six_calibration_mu);
+    six_calibration *c = six_calibration_for(*h);
+    if (c) { memcpy(c->data, data, sizeof c->data); c->valid = 1; }
+    pthread_mutex_unlock(&g_six_calibration_mu);
+    pthread_once(&g_motion_once, motion_env);
+    if (g_motion_log) LOG("[hid] runtime calibration store: sensor %#x, %s", *h, c ? "retained 0x744 bytes" : "not connected");
+    return c ? RES_OK : 202u | 710u << 9;
+}
+HLE_FORCE("_ZN2nn3hid6detail34IsSixAxisSensorDeviceNewlyAssignedEPbRKNS0_19SixAxisSensorHandleE", "six-axis assignment state for the connected sensor", Result, h_hid_SixNewlyAssigned, unsigned char *out, const uint32_t *h) {
+    pthread_mutex_lock(&g_six_calibration_mu);
+    six_calibration *c = six_calibration_for(*h);
+    if (c) *out = !c->assignment_seen;
+    pthread_mutex_unlock(&g_six_calibration_mu);
+    return c ? RES_OK : 202u | 710u << 9;
+}
+HLE_FORCE("_ZN2nn3hid6detail39ResetIsSixAxisSensorDeviceNewlyAssignedERKNS0_19SixAxisSensorHandleE", "acknowledge the connected sensor's assignment", Result, h_hid_SixAssignmentReset, const uint32_t *h) {
+    pthread_mutex_lock(&g_six_calibration_mu);
+    six_calibration *c = six_calibration_for(*h); if (c) c->assignment_seen = 1;
+    pthread_mutex_unlock(&g_six_calibration_mu);
+    return c ? RES_OK : 202u | 710u << 9;
+}
+static int motion_for_sensor(int pl, uint32_t h, motion_state *ms) {
+    int style = six_style(h), side = six_side(h);
+    if (pl >= 0 && (style == 2 || style == 3 || style == 4) && motion_copy(&g_joy_motion[pl][side], ms)) return 1;
+    return motion_live(pl, ms);
+}
 static int six_states(SixAxisState *out, int n, uint32_t h) {
     if (n <= 0) return 0;
     if (!six_connected(h)) { memset(out, 0, sizeof *out * (size_t)n); return 0; }
     int64_t samp = (int64_t)(guest_ns() / SIX_PERIOD_NS);
     int pl = player_of(h >> 8 & 0xff), shakes = pl == 0;
     motion_state ms;
-    if (motion_live(pl, &ms)) { for (int i = 0; i < n; i++) six_sample_live(&out[i], samp - i, &ms, shakes); return n; }
+    if (motion_for_sensor(pl, h, &ms)) { for (int i = 0; i < n; i++) six_sample_live(&out[i], samp - i, &ms, shakes); return n; }
     for (int i = 0; i < n; i++) six_sample(&out[i], samp - i, shakes);
     return n;
 }
-HLE_FORCE("_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "six-axis sensor handles: two for handheld / dual Joy-Cons, one otherwise",
+HLE_FORCE("_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "six-axis sensor handles in the SDK ABI: two for dual Joy-Cons, one otherwise",
           int, h_hid_SixHandles, uint32_t *h, int n, const uint32_t *id, uint32_t style) {
-    int k = style & (STYLE_HANDHELD | STYLE_JOYDUAL) ? 2 : 1; if (k > n) k = n;
-    for (int i = 0; i < k; i++) h[i] = (uint32_t)(style ? __builtin_ctz(style) : 0) | (*id & 0xff) << 8 | (uint32_t)i << 16;
-    return k > 0 ? k : 0;
+    if (!h || !id || n <= 0 || !(style & 0x1f)) return 0;
+    int bit = __builtin_ctz(style & 0x1f), k = bit == 2 && n > 1 ? 2 : 1;
+    for (int i = 0; i < k; i++) {
+        int device = bit < 2 ? 2 : bit == 4 ? 1 : i;
+        h[i] = (uint32_t)(bit + 3) | (*id & 0xff) << 8 | (uint32_t)device << 16;
+    }
+    return k;
 }
 HLE_FORCE("_ZN2nn3hid18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE", "six-axis sensor; always sampling on the host", void, h_hid_SixStart, const uint32_t *h) { (void)h; }
 // Merged mouse pointer (Nmouse, Switch 2 SDKs; Pokemon Pokopia, main+0x11251dc). The SDK opens the hid service itself in InitializeNmouse, which the host does not serve (abort 0xe15). No device
@@ -868,7 +992,7 @@ HLE_FORCE("_ZN2nn3hid17StopSixAxisSensorERKNS0_19SixAxisSensorHandleE", "six-axi
 HLE_FORCE("_ZN2nn3hid21GetSixAxisSensorStateEPNS0_18SixAxisSensorStateERKNS0_19SixAxisSensorHandleE", "six-axis sensor current state", void, h_hid_SixState, SixAxisState *s, const uint32_t *h) { six_states(s, 1, *h); }
 HLE_FORCE("_ZN2nn3hid21IsSixAxisSensorAtRestERKNS0_19SixAxisSensorHandleE", "six-axis sensor at rest: yes unless player 1's is shaking or a live controller is turning", unsigned, h_hid_SixRest, const uint32_t *h) {
     int pl = player_of(*h >> 8 & 0xff); motion_state ms;
-    if (motion_live(pl, &ms)) return fabsf(ms.gyro[0]) + fabsf(ms.gyro[1]) + fabsf(ms.gyro[2]) < 0.01f && !(pl == 0 && shaking(guest_ns()));
+    if (motion_for_sensor(pl, *h, &ms)) return fabsf(ms.gyro[0]) + fabsf(ms.gyro[1]) + fabsf(ms.gyro[2]) < 0.01f && !(pl == 0 && shaking(guest_ns()));
     return pl != 0 || !shaking(guest_ns());
 }
 // The console's own six-axis sensor (SevenSixAxisSensor, the body's orientation in handheld mode; The Legend of Zelda: Breath of the Wild): takes a work buffer and is switched through the hid service. The host provides none: switching succeeds, 0 states

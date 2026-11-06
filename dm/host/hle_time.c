@@ -22,6 +22,12 @@ HLE_FORCE("_ZN2nn4time19StandardSteadyClock19GetCurrentTimePointEPNS0_20SteadyCl
     int64_t s = (int64_t)(clock_gettime_nsec_np(CLOCK_MONOTONIC) / 1000000000ull);
     memcpy(out, &s, 8); memcpy(out + 8, "dmhost-steady-01", 16); return RES_OK;
 }
+// The chrono convenience entry reads the SDK's own initialization flag and
+// otherwise returns zero, even when GetCurrentTimePoint is taken over. Its
+// time_point stores seconds (the same representation as SteadyClockTimePoint).
+HLE_FORCE("_ZN2nn4time19StandardSteadyClock3nowEv", "steady chrono clock uses the same host monotonic seconds as GetCurrentTimePoint", int64_t, h_time_SteadyChronoNow, void) {
+    uint8_t tp[0x18]; h_time_SteadyNow(tp); int64_t seconds; memcpy(&seconds, tp, 8); return seconds;
+}
 HLE_FORCE("_ZN2nn4time38GetStandardSteadyClockCurrentTimePointEPNS0_20SteadyClockTimePointE", "steady clock (the free function form, SDK 20) → host monotonic clock", Result, h_time_SteadyNowFn, uint8_t *out) { return h_time_SteadyNow(out); }
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "user clock → host time()", Result, h_time_GetCurrentTime, int64_t *out) {
     int64_t ft = fixed_time(); *out = ft >= 0 ? ft : time(NULL); return RES_OK;

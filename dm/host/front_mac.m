@@ -21,6 +21,7 @@
 #include "haptics_apple.h"
 #include "motion_apple.h"
 #include "motion_pro_mac.h"
+#include "motion_joy_mac.h"
 #include "pad_apple.h"
 #include "pad_hid_mac.h"
 #include "home_quit.h"
@@ -177,6 +178,11 @@ static void pad_read(GCExtendedGamepad *g) {
     if (!g_input_on) return;
     hq_poll(); if (hq_blocks_input(g_hq.phase)) return;
     int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0) return;
+    NSString *category = g.controller.productCategory;
+    uint32_t style = [category isEqualToString:@"Nintendo Switch Joy-Con (L/R)"] ? 4 :
+        [category isEqualToString:@"Nintendo Switch Joy-Con (L)"] ? 8 :
+        [category isEqualToString:@"Nintendo Switch Joy-Con (R)"] ? 16 : 1;
+    dm_pad_style(p, style);
     dm_haptics_apple_controller(p, g.controller);
     uint64_t m = dm_pad_face(g);   // by position, a Nintendo pad by its labels
     #define K(btn, bit) if (btn.isPressed) m |= bit
@@ -200,6 +206,11 @@ static void pro_players_changed(GCController *gone) {
         count++; player = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)c);
     }
     dm_motion_pro_players(count, player);
+    count = 0; player = -1;
+    for (GCController *c in GCController.controllers) if (c != gone && c.extendedGamepad && [c.productCategory isEqualToString:@"Nintendo Switch Joy-Con (L/R)"]) {
+        count++; player = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)c);
+    }
+    dm_motion_joy_players(count, player);
 }
 static void pro_devices_changed(void) { pro_players_changed(nil); }
 // DM_PAD_MERGE: whether a controller still plays player 1 (gone: one just removed, not counted), a GameController one or a raw HID pad (pad_hid_mac.h)
@@ -227,6 +238,7 @@ static void pads_changed(GCController *gone) {
         npad_name(p, nb, sizeof nb); LOG("controller '%s' disconnected: player %d (npad %s) is free", pad_name(g_held[p]), p + 1, nb);
         g_held[p].extendedGamepad.valueChangedHandler = nil;
         dm_motion_detach(g_held[p], p);
+        dm_pad_style(p, 0);
         dm_haptics_apple_controller(p, nil);
         pad_slot_free(&g_slots, (__bridge const void *)g_held[p]); g_held[p] = nil;
         dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
@@ -275,6 +287,7 @@ static void input_release(void) {
     display_awake(0);
     g_input_on = 0;
     dm_motion_pro_active(0);
+    dm_motion_joy_active(0);
     g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
     pads_release();
@@ -283,6 +296,7 @@ static void input_resume(void) {
     display_awake(1);
     g_input_on = 1;
     dm_motion_pro_active(1);
+    dm_motion_joy_active(1);
     pads_reread();
 }
 // Raw HID gamepads (pad_hid_mac.h): a player slot each, as a GameController controller, named by the device's product name
@@ -418,7 +432,17 @@ static void pads_start(void) {
     pads_changed(nil);
     hq_log_setting();
     dm_motion_pro_start(pro_devices_changed);
+    dm_motion_joy_start(pro_devices_changed);
+    [[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationWillTerminateNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+        (void)n; dm_motion_joy_active(0);
+    }];
     hidpad_start();
+}
+
+void front_controller_shutdown(void) {
+    if (!g_joy_manager) return;
+    if (NSThread.isMainThread) dm_motion_joy_active(0);
+    else dispatch_sync(dispatch_get_main_queue(), ^{ dm_motion_joy_active(0); });
 }
 
 // Mouse as a single-point touchscreen (front.h dm_touch_set): left button down / drag = finger 0, release = lifted. The content view takes the clicks,

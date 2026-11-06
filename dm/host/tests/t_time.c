@@ -23,6 +23,10 @@ int main(void) {
     unsigned (*span)(int64_t *, const uint8_t *, const uint8_t *) = hook("_ZN2nn4time20CalculateSpanBetweenEPNS_8TimeSpanERKNS0_13ClockSnapshotES5_");
     int64_t (*udiff)(const uint8_t *, const uint8_t *) = hook("_ZN2nn4time48CalculateStandardUserSystemClockDifferenceByUserERKNS0_13ClockSnapshotES3_");
     if (!snap || !adj_snap || !span || !udiff) { printf("time: %d checks, %d failed\n", checks, fails); return 1; }
+    int64_t (*steady_now)(void) = hook("_ZN2nn4time19StandardSteadyClock3nowEv");
+    uint8_t before[0x18], after[0x18]; h_time_SteadyNow(before);
+    int64_t chrono_now = steady_now ? steady_now() : 0; h_time_SteadyNow(after);
+    CHECK(chrono_now > 0 && chrono_now >= get64(before, 0) && chrono_now <= get64(after, 0), "steady chrono now shares the monotonic seconds epoch and does not stay zero");
     uint8_t a[0xd0], b[0xd0], c[0xd0]; int64_t ts = -1;
     // Before the first snapshot: h_time_GetCurrentTime reads DM_FIXED_TIME once and caches it
     setenv("DM_FIXED_TIME", "1700000000", 1);

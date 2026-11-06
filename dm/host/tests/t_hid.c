@@ -112,7 +112,7 @@ static void t_npads(void) {
     CHECK(h_hid_Strap() == RES_OK && h_hid_StrapArg(arg) == RES_OK, "both strap guide overloads answer as the player closing the guide");
     CHECK(applet_opens == 7 && applet_depth == 0, "every answer opened and closed its applet");
     arg[0] = 1;
-    CHECK(six_connected(0x0100 | 0) && !six_connected(0x0200 | 0), "player 2 has a six-axis sensor, No3 none");
+    CHECK(six_connected(0x20103) && !six_connected(0x20203), "player 2 has a six-axis sensor, No3 none");
 
     // A one-player game ({No1, Handheld}): player 2's controller plays as player 1, No2 reads as not connected
     g_signals = 0; ids((const uint32_t[]){0, NPAD_HANDHELD}, 2);
@@ -410,6 +410,7 @@ static void t_motion_live(void) {
 
     uint32_t h; uint32_t id = 0;
     CHECK(h_hid_SixHandles(&h, 1, &id, STYLE_FULLKEY) == 1, "one six-axis handle for player 1");
+    CHECK(h == 0x20003, "FullKey uses SDK style 3 and combined device 2");
     SixAxisState st[2];
     CHECK(h_hid_SixStates(st, 2, &h) == 2 && st[0].acc[2] == -1 && st[0].acc[0] == 0, "no live motion: flat");
     float a[3] = {0.5f, 0, -0.8660254f}, w[3] = {0, 0, 3.14159265f};
@@ -460,7 +461,7 @@ static void t_motion_live(void) {
 }
 static void t_motion_hid(void) {
     g_mode = 1; dm_pad_players(3); ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3); g_phone_mode = 0;
-    uint32_t h = 0; SixAxisState st;   // SixAxisSensorHandle uses the style bit index (FullKey = 0), unlike VibrationDeviceHandle's SDK style = 3.
+    uint32_t h = 0x20003; SixAxisState st;   // FullKey SDK style 3, combined sensor 2.
     float flat[3] = {0, 0, -1}, tilted[3] = {.5f, 0, -.8660254f}, turn[3] = {0, 0, 2 * (float)M_PI};
     motion_now += 1000000000;
     dm_motion_clear(0);
@@ -491,6 +492,65 @@ static void t_motion_hid(void) {
     dm_pad_players(1); g_phone_mode = -1;
 }
 
+static void t_joycon(void) {
+    g_mode = 1; dm_pad_players(1); dm_pad_style(0, STYLE_JOYDUAL);
+    atomic_store(&g_shake_end, 0);
+    uint32_t id = 0, handles[2]; NpadState pad; SixAxisState left, right;
+    CHECK(h_hid_GetStyle(&id) == STYLE_JOYDUAL, "Joy-Con pair reports its real style");
+    dm_pad_set_player(0, DM_BTN_A, 0, 0, 0, 0);
+    h_hid_StatesJoyDual(&pad, 1, &id);
+    CHECK((pad.buttons & DM_BTN_A) && (pad.attributes & ATTR_CONNECTED), "paired buttons reach JoyDual reads");
+    h_hid_StatesFullKey(&pad, 1, &id);
+    CHECK(!pad.attributes, "Joy-Con pair is not also a Pro Controller");
+    CHECK(h_hid_SixHandles(handles, 2, &id, STYLE_JOYDUAL) == 2, "pair exposes two sensor handles");
+    CHECK(handles[0] == 5 && handles[1] == 0x10005, "JoyDual SDK handles work with nn::imu style-minus-three lookup");
+    CHECK(!six_connected(2) && !six_valid(0x20005), "old bit-index and invalid dual-device handles are rejected");
+    uint32_t abi[2];
+    CHECK(h_hid_SixHandles(abi, 2, &id, STYLE_HANDHELD) == 1 && abi[0] == 0x20004, "handheld has one combined SDK sensor");
+    CHECK(h_hid_SixHandles(abi, 2, &id, STYLE_JOYLEFT) == 1 && abi[0] == 6, "left SDK handle has device zero");
+    CHECK(h_hid_SixHandles(abi, 2, &id, STYLE_JOYRIGHT) == 1 && abi[0] == 0x10007, "right SDK handle has device one");
+    unsigned char assigned = 0;
+    CHECK(h_hid_SixNewlyAssigned(&assigned, &handles[0]) == RES_OK && assigned, "connected sensor starts newly assigned");
+    CHECK(h_hid_SixAssignmentReset(&handles[0]) == RES_OK && h_hid_SixNewlyAssigned(&assigned, &handles[0]) == RES_OK && !assigned, "assignment reset is retained");
+    CHECK(h_hid_SixNewlyAssigned(&assigned, &handles[1]) == RES_OK && assigned, "assignment acknowledgement does not affect other sensor");
+    unsigned char calibration[0x744]; memset(calibration, 0x5a, sizeof calibration);
+    CHECK(h_hid_SixCalibrationLoad(calibration, &handles[0]) != RES_OK && calibration[0] == 0x5a && calibration[sizeof calibration - 1] == 0x5a, "unsaved calibration fails without fabricated data");
+    CHECK(h_hid_SixCalibrationStore(&handles[0], calibration) == RES_OK, "runtime calibration is retained for a connected sensor");
+    unsigned char loaded[0x744]; memset(loaded, 0, sizeof loaded);
+    CHECK(h_hid_SixCalibrationLoad(loaded, &handles[0]) == RES_OK && !memcmp(loaded, calibration, sizeof loaded), "runtime calibration round-trips all bytes");
+    CHECK(h_hid_SixCalibrationLoad(loaded, &handles[1]) != RES_OK, "left calibration is not used for the right sensor");
+    float info[51]; for (int i = 0; i < 51; i++) info[i] = -1;
+    CHECK(h_hid_SixIcInfo(info, &handles[0]) == RES_OK && info[0] == 2000 && info[25] == 8 && info[50] == -1, "sensor info reports ranges within its ABI buffer");
+    for (int sensor = 0; sensor < 2; sensor++) {
+        float *p = info + 25 * sensor;
+        CHECK(p[1] < 0 && p[4] > 0, "sensor bias bounds contain zero");
+        int valid = 1;
+        for (int i = 0; i < 9; i++) {
+            float midpoint = (p[7+i] + p[16+i]) * .5f;
+            if (fabsf(midpoint - (i % 4 == 0 ? 1.f : 0.f)) > .00001f || p[7+i] >= p[16+i]) valid = 0;
+        }
+        CHECK(valid, "sensor sensitivity bounds initialize an identity gain with nonzero uncertainty");
+    }
+    CHECK(!h_hid_SixPassthroughQ(&handles[0]), "passthrough initially disabled");
+    h_hid_SixPassthrough(&handles[0], 1);
+    CHECK(h_hid_SixPassthroughQ(&handles[0]) && !h_hid_SixPassthroughQ(&handles[1]), "passthrough mode belongs to one sensor");
+    h_hid_SixPassthrough(&handles[0], 0);
+    CHECK(!h_hid_SixPassthroughQ(&handles[0]), "passthrough can be disabled");
+    motion_now += MOTION_STALE_NS + 1;
+    dm_motion_set_joycon(0, 0, (float[]){0, 0, -1}, (float[]){0, 0, 0}, motion_now);
+    dm_motion_set_joycon(0, 1, (float[]){0, -1, 0}, (float[]){0, 0, 1}, motion_now);
+    CHECK(h_hid_SixStates(&left, 1, &handles[0]) == 1 && h_hid_SixStates(&right, 1, &handles[1]) == 1, "both Joy-Con sensors are connected");
+    CHECK(left.acc[2] == -1 && right.acc[1] == -1, "left and right sensor readings stay separate");
+    CHECK(h_hid_SixRest(&handles[0]) && !h_hid_SixRest(&handles[1]), "at-rest query reads the requested sensor");
+    dm_motion_clear_joycon(0, 1); h_hid_SixStates(&left, 1, &handles[0]);
+    CHECK(left.acc[2] == -1, "clearing right sensor does not clear left");
+    dm_motion_clear_joycon(0, 0); dm_pad_style(0, 0); dm_pad_set_player(0, 0, 0, 0, 0, 0);
+    CHECK(h_hid_GetStyle(&id) == STYLE_FULLKEY, "disconnect restores default keyboard controller");
+    dm_pad_style(0, STYLE_JOYDUAL);
+    CHECK(h_hid_SixCalibrationLoad(loaded, &handles[0]) != RES_OK, "replacement controller cannot inherit old calibration");
+    dm_pad_style(0, 0);
+}
+
 int main(void) {
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
     t_slots();
@@ -514,6 +574,7 @@ int main(void) {
         CHECK(!h_hid_NmouseEnable(5, 1) && !h_hid_NmousePos(5, 0, 0), "an unknown handle does not");
         CHECK(!h_hid_NmouseState(NULL, merged) && !h_hid_NmouseNpad(&npad, merged) && npad == 9, "no state and no controller behind the merged handle");
     }
+    t_joycon();
     printf("hid players: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

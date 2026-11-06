@@ -229,6 +229,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - a non-finite accelerometer or gyro sample corrupts the six-axis fields; later valid samples do not restore the previous fusion state. → [Non-finite motion samples](../reference/services.md#non-finite-motion-samples)
 - on iPhone Duo's inner display the phone's gyro is turned a quarter turn: tilting up and down moves the pointer left and right, and the other way round (GitHub issue #569); the outer display is right. → [The phone's motion in the picture's frame](../reference/services.md#the-phones-motion-in-the-pictures-frame)
 - a Pro Controller's buttons work on the Mac, but its gyro pointer never moves; `GCMotion` callbacks arrive with acceleration and rotation all zero. → [Switch Pro Controller advertises motion but sends zeroes](../reference/services.md#switch-pro-controller-advertises-motion-but-sends-zeroes)
+- a GameController `Joy-Con (L/R)` supplies buttons but no `GCMotion`; motion-dependent games receive flat sensor states. Reporting the pair as FullKey also hides JoyDual from games that require it. → [Paired Joy-Con motion on macOS](../reference/services.md#paired-joy-con-motion-on-macos)
 - SDK 20 calls that reach a service; `nfp`'s `AttachActivateEvent` / `AttachDeactivateEvent` crashed in the SDK at `sdk+0x3f2a78`. → [SDK 20 six-axis sensor and amiibo (`nfp`) calls](../reference/services.md#sdk-20-six-axis-sensor-and-amiibo-nfp-calls)
 - `[RED] sf: the game connects to service nfp:user itself`, then `game called nn::diag abort: Result 0xe15` under the game's own initialization (`main+0x115deb0`). → [`nfp`'s extended application area](../reference/services.md#nfps-extended-application-area)
 - selecting amiibo initializes `nfp`, then the game connects to the unserved `nfc:user` service and aborts in `nn::nfc::Initialize`. → [NFC initialization beside the amiibo library](../reference/services.md#nfc-initialization-beside-the-amiibo-library)
@@ -324,6 +325,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - a Switch 2 game presents at 720p, with its upscaler at the matching low size. → [The display's largest buffer](../reference/services.md#the-displays-largest-buffer)
 - `registered NROs not found` from `nro_collect.py` in a game whose RomFS has an NRR, or `[RED] ro::LoadModule: no rewritten NRO with SHA-256 …`. `main` is small (about 600 KB of code) beside a data segment of random-looking bytes. → [A game that decodes its code at run time](../reference/services.md#a-game-that-decodes-its-code-at-run-time)
 - a crash in `ro::RegisterModuleInfo`, or an NRR that seems to register millions of hashes: the words at +0x340 and +0x344 are random. → [NRR version 1](../reference/services.md#nrr-version-1)
+- `nn::time::StandardSteadyClock::now()` returns zero although `GetCurrentTimePoint` works; motion calibration bookkeeping receives no steady timestamp. → [Steady chrono clock returns zero](../reference/services.md#steady-chrono-clock-returns-zero)
 
 ## Movies
 

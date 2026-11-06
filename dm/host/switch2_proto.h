@@ -29,6 +29,10 @@ enum { S2_SUB_MEMORY_READ = 0x04, S2_SUB_LEDS_SET = 0x07, S2_SUB_FEATURE_SET = 0
        S2_SUB_PAIR_HOST = 0x01, S2_SUB_PAIR_KEY1 = 0x04, S2_SUB_PAIR_KEY2 = 0x02, S2_SUB_PAIR_DONE = 0x03 };
 // Features to switch on: buttons, sticks, motion, battery current and the magnetometer (the mask the console uses; all bits makes a Joy-Con 2 report phantom ZL / ZR)
 #define S2_FEATURES (0x01 | 0x02 | 0x04 | 0x20 | 0x80)
+// The Joy-Con 2's mouse sensor (on its rail side): its own feature bit; the console sets it while a game reads the sensor. Measured on a right Joy-Con 2 slid on a desk: report 0x10 and
+// 0x12 are int16 position counters that wrap (x right, y toward the player), 0x14 and 0x16 jump from about 1,600 and 150 on a surface to about 4,600 and 3,200 when lifted
+#define S2_FEATURE_MOUSE 0x10
+#define S2_MOUSE_SURFACE_MAX 1000   // 0x16 below this: on a surface
 enum { S2_ADDR_INFO = 0x00013000u, S2_ADDR_FACTORY_STICK1 = 0x000130A8u, S2_ADDR_FACTORY_STICK2 = 0x000130E8u, S2_ADDR_USER_STICK1 = 0x001FC042u, S2_ADDR_USER_STICK2 = 0x001FC062u };
 
 // Raw button bits (32-bit little endian at report offset 4; the top three bits are always set). The right Joy-Con's rail buttons are 0x10 / 0x20 and the left's 0x100000 / 0x200000
@@ -44,7 +48,7 @@ static inline uint16_t s2_u16(const uint8_t *p) { return (uint16_t)(p[0] | (uint
 static inline uint32_t s2_u32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
 static inline int16_t s2_s16(const uint8_t *p) { return (int16_t)s2_u16(p); }
 
-typedef struct { uint32_t buttons; uint16_t lx, ly, rx, ry; int16_t raw[6]; uint16_t battery_mv; } s2_report;   // raw: accel xyz, gyro xyz in counts
+typedef struct { uint32_t buttons; uint16_t lx, ly, rx, ry; int16_t raw[6]; uint16_t battery_mv; int16_t mouse_x, mouse_y; uint16_t mouse_q, mouse_s; } s2_report;   // raw: accel xyz, gyro xyz in counts; mouse_*: S2_FEATURE_MOUSE
 
 // A 63-byte input notification (the same characteristic also carries longer audio packets; the length tells them apart)
 static inline int s2_report_parse(const uint8_t *d, size_t n, s2_report *r) {
@@ -55,8 +59,12 @@ static inline int s2_report_parse(const uint8_t *d, size_t n, s2_report *r) {
     r->lx = (uint16_t)(a & 0xFFF); r->ly = (uint16_t)(a >> 12); r->rx = (uint16_t)(b & 0xFFF); r->ry = (uint16_t)(b >> 12);
     r->battery_mv = s2_u16(d + 0x1F);
     for (int i = 0; i < 6; i++) r->raw[i] = s2_s16(d + 0x30 + 2 * i);
+    r->mouse_x = s2_s16(d + 0x10); r->mouse_y = s2_s16(d + 0x12); r->mouse_q = s2_u16(d + 0x14); r->mouse_s = s2_u16(d + 0x16);
     return 1;
 }
+// The movement between two counter readings (they wrap at 16 bits), and whether the sensor sees a surface
+static inline int32_t s2_mouse_delta(int16_t now, int16_t before) { return (int16_t)(uint16_t)((uint16_t)now - (uint16_t)before); }
+static inline int s2_mouse_on_surface(const s2_report *r) { return r->mouse_s < S2_MOUSE_SURFACE_MAX; }
 
 // Command frame: cmd, 0x91, transport 0x01 (Bluetooth), subcommand, 0, payload length, 0, 0, payload. Returns the frame length, 0 when it does not fit.
 static inline size_t s2_command(uint8_t *out, size_t cap, uint8_t cmd, uint8_t sub, const uint8_t *payload, size_t n) {

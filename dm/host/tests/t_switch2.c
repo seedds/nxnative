@@ -196,6 +196,10 @@ int main(void) {
     CHECK(!s2_hold_update(&hold, S2_GESTURE_NONE, t0 + 3100000000ull) && !s2_hold_update(&hold, S2_GESTURE_SPLIT, t0 + 3200000000ull));   // let go: it starts again
     CHECK(!s2_hold_update(&hold, S2_GESTURE_SPLIT, t0 + 6100000000ull) && s2_hold_update(&hold, S2_GESTURE_SPLIT, t0 + 6200000000ull));
 
+    // The mouse sensor's counters wrap at 16 bits; lifted, the sensor sees no surface
+    CHECK(s2_mouse_delta(10, 5) == 5 && s2_mouse_delta(-32760, 32760) == 16 && s2_mouse_delta(32760, -32760) == -16);
+    { s2_report mr = {0}; mr.mouse_s = 150; CHECK(s2_mouse_on_surface(&mr)); mr.mouse_s = 3200; CHECK(!s2_mouse_on_surface(&mr)); }
+
     // Home, A and B for the Home hold-to-quit prompt: Home from any of the pad's controllers, A and B from the right side
     memset(&pad, 0, sizeof pad); int ha = 0, hb = 0;
     pad.left.have = pad.right.have = 1; pad.left.r.buttons = 0xE0000000u; pad.right.r.buttons = 0xE0000000u | S2_HOME | S2_A;

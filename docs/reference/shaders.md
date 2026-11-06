@@ -1036,6 +1036,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
   - A benchmark on an M1 with Donkey Kong Bananza's pair (`f9c807930abd1234` / `5d537f7630ec3671`): 480 draws of the prepass's sizes 1.50 → 0.67–0.72 ms, 480 one-triangle draws 1.24–1.32 → 0.28 ms, 2,100 draws of 32 triangles 4.37 → 0.66 ms.
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game): the 960x540 depth prepass of its heavy areas in handheld mode, 420–550 geometry draws a frame, 1.0–2.0 ms of idle GPU before the pass.
 
+### Mesh stage memory reserves the primitive index bytes for every block
+
+- **Symptom:** white blotches over Kokiri Forest's foliage, walkway and ground in Ocarina of Time, which are the house light tiles. The light-tile pass of task `a5288d0a6c4971fd` with meshes `e8c667282ba7bd9b` and `d4171cf9adf0504b` writes constant white through fragment `ea1bf96b72e72476`, and its triangles were corrupt.
+- **Cause:** the guest writes the U8 index bytes of primitive `t = min(count - 1, lane + 32k)` for every block. A meshlet count of 0 wraps `count - 1`, so all 128 lanes write. With `max_p` 126 the index area was `4 + 378` bytes, so lanes 126 and 127 wrote bytes 2,702 to 2,707: word 676, past the 676-word threadgroup array, into neighbouring workgroups' memory. Meshes whose `max_p` is a multiple of 32 were never affected.
+- **Fix:** `dmsh_meshstage.memory` reserves `4 + 3 * blocks * 32` bytes (rounded to a word) for the index bytes, for every block the threads write. All 500 of Ocarina's mesh shaders were run standalone on zeroed inputs, each with a guard band past its stage array (Metal shader validation does not check static threadgroup arrays): 387 meshes wrote past the array before the fix, every `max_p` 126 mesh, and none after. In the game on an M2 Pro the blotches are gone and the house doorways and windows glow as intended. This does not fix the intermittent GPU hangs seen in buffers with these meshes; those are a separate open issue.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md). The other mesh-shader games in the games table (Yoshi and the Mysterious Book, Mario Kart World, Splatoon Raiders) rebuild their shaders with the chain change; none was checked in the game.
+
 ### Tessellation stages are not drawn
 
 - **Symptom:** `primitive type 14 not implemented`; patch draws skipped.

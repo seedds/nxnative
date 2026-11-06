@@ -67,7 +67,12 @@ class Facts(unittest.TestCase):
     def test_mesh_memory(self):   # 128 vertices: four blocks of 32. Six components a block, 0x80 bytes each; the primitive bytes follow, 3 a triangle after the count's word
         i = ms.info(control(7, payload=128, max_v=128, max_p=64), sph(0xf0, b'\x30'))
         lay, size = ms.memory(i)
-        self.assertEqual(lay[2], 0x10 + 0x80); self.assertEqual(lay[3], lay[2] + 4 * 6 * 0x80); self.assertEqual(size, lay[3] + 4 + 3 * 64)
+        self.assertEqual(lay[2], 0x10 + 0x80); self.assertEqual(lay[3], lay[2] + 4 * 6 * 0x80); self.assertEqual(size, lay[3] + 4 + 3 * 4 * 32)   # every lane of every block writes its primitive's bytes, whatever max_p
+
+    def test_mesh_memory_126_primitives(self):   # lanes 126 and 127 of the fourth block write too (a count of 0 wraps count - 1)
+        i = ms.info(control(7, max_v=128, max_p=126), sph(0xf0, b'\x30'))
+        lay, size = ms.memory(i)
+        self.assertEqual(size, lay[3] + 4 + 3 * 4 * 32)
 
     def test_largest_of_the_game_fits_metal(self):   # c34e01565dac1124: 256 vertices, 192 primitives
         i = ms.info(control(7, max_v=256, max_p=192), sph(0xf0, b'\x00\x0f'))

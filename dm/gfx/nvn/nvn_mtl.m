@@ -919,6 +919,7 @@ static uint64_t g_alloc_fence[ALLOC_MAX]; static uint64_t g_alloc_waits, g_alloc
 int mtl_wait(uint64_t fence, uint64_t timeout_ns);
 static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site);
 static void up_flush(void);
+static void up_idle_release(void);
 // The upload batch belongs only to the submit thread (the thread that called mtl_sub_begin): the batch's encoder cannot be used across threads. Every entry point asserts current thread == submit thread,
 // and on mismatch prints the stack and aborts on the spot - so that 'another thread touched the batch' is exposed deterministically on Mac too, not by timing (real iOS device stuck at the main menu: the present thread flushed the submit thread's batch via q_cb).
 static pthread_t g_sub_thread; static _Atomic int g_sub_thread_set;
@@ -959,6 +960,7 @@ void mtl_sub_begin(void) {
     warm_claim();
     if (g_cb) MDIE("submit re-entered");
     g_sub_thread = pthread_self(); atomic_store(&g_sub_thread_set, 1);
+    up_idle_release();
     atomic_store(&g_last_commit_error, 0);
     g_sub_pool = objc_autoreleasePoolPush();
     g_cb = rec_cb_new();
@@ -2369,6 +2371,47 @@ static __strong id<MTLBuffer> g_up_slot_blk[3], g_up_slot_over[3]; static unsign
 static size_t g_up_slot_want[3], g_up_batch_bytes; static int g_up_over_used;
 static int up_reuse(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_UPLOAD_REUSE"); on = !e || atoi(e); } return on; }
 static int up_retained(id<MTLBuffer> b, unsigned slot) { return b && (b == g_up_slot_blk[slot] || b == g_up_slot_over[slot]); }
+// A slot's retained blocks shrink back when they sit idle (DM_NVN_UPLOAD_IDLE_MS, default 2000 on iOS, 0 = never, the Mac's default): in steady play they held up to 192 MB of private GPU
+// memory (the iPad's OOM report: "private buffers 8, 224 MB"), sized by the largest batch since the start (a scene load). Checked at each submission's start on the submit thread, which owns
+// them; a slot whose batch is still running (g_up_alloc_busy) is left alone, and defer_obj_release holds a block until the GPU is done. Per slot:
+//   no batch for that long: both blocks go (the next batch makes them again: one 4-32 MB allocation each);
+//   its overflow block unused for that long: the overflow goes;
+//   every such window: a primary block larger than the window's largest batch needs (rounded up to a power of two, at least 4 MB) goes, and the slot's demand drops to that batch,
+//   so the next batch makes it at the smaller size
+static uint64_t g_up_slot_used_ns[3], g_up_over_ns[3], g_up_win_ns[3], g_up_idle_n, g_up_idle_bytes; static size_t g_up_win_max[3];
+static void up_idle_release(void) {
+    static int64_t idle_ns = -1;
+    if (idle_ns < 0) { const char *e = getenv("DM_NVN_UPLOAD_IDLE_MS");
+#if TARGET_OS_IPHONE
+        idle_ns = (e && *e ? atoll(e) : 2000) * 1000000ll;
+#else
+        idle_ns = (e && *e ? atoll(e) : 0) * 1000000ll;
+#endif
+        if (idle_ns < 0) idle_ns = 0; }
+    uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    for (unsigned s = 0; idle_ns && !g_up_cb && s < 3; s++) {
+        if ((!g_up_slot_blk[s] && !g_up_slot_over[s]) || atomic_load(&g_up_alloc_busy[s])) continue;
+        uint64_t b = 0; const char *why = NULL;
+        if (now - g_up_slot_used_ns[s] >= (uint64_t)idle_ns) {
+            b = (g_up_slot_blk[s] ? g_up_slot_blk[s].length : 0) + (g_up_slot_over[s] ? g_up_slot_over[s].length : 0);
+            defer_obj_release(g_up_slot_blk[s]); defer_obj_release(g_up_slot_over[s]); g_up_slot_blk[s] = g_up_slot_over[s] = nil; why = "idle";
+        } else {
+            if (g_up_slot_over[s] && now - g_up_over_ns[s] >= (uint64_t)idle_ns) { b += g_up_slot_over[s].length; defer_obj_release(g_up_slot_over[s]); g_up_slot_over[s] = nil; why = "overflow unused"; }
+            if (now - g_up_win_ns[s] >= (uint64_t)idle_ns) {
+                size_t want = UP_SLOT_BLOCK; while (want < g_up_win_max[s]) want <<= 1;
+                if (g_up_slot_blk[s] && g_up_slot_blk[s].length > want) { b += g_up_slot_blk[s].length; defer_obj_release(g_up_slot_blk[s]); g_up_slot_blk[s] = nil; why = why ? "overflow unused, primary larger than recent batches" : "primary larger than recent batches"; }
+                g_up_slot_want[s] = g_up_win_max[s]; g_up_win_max[s] = 0; g_up_win_ns[s] = now;
+            }
+        }
+        if (!why) continue;
+        g_up_idle_n++; g_up_idle_bytes += b;
+        if (g_up_idle_n <= 8) MLOG("upload staging: slot %u (%s): %llu MB released; %llu releases, %llu MB in total", s, why, (unsigned long long)(b >> 20), (unsigned long long)g_up_idle_n, (unsigned long long)(g_up_idle_bytes >> 20));
+    }
+    static uint64_t said_ns;   // every 30 s: what the slots hold now
+    if (now - said_ns >= 30000000000ull) { said_ns = now; uint64_t held = 0;
+        for (unsigned s = 0; s < 3; s++) held += (g_up_slot_blk[s] ? g_up_slot_blk[s].length : 0) + (g_up_slot_over[s] ? g_up_slot_over[s].length : 0);
+        MLOG("upload staging: the slots hold %llu MB now; %llu releases, %llu MB in total", (unsigned long long)(held >> 20), (unsigned long long)g_up_idle_n, (unsigned long long)(g_up_idle_bytes >> 20)); }
+}
 typedef struct {
     __unsafe_unretained id<MTLBuffer> src;
     size_t off, row, image;
@@ -2450,6 +2493,7 @@ static void up_flush(void) {
     // (nvnQueueFinish on any thread, up_begin on another) waited for that submission: hand it over now (from PR #141, which found the nvnQueueFinish half)
     if (!g_cb) rec_publish();
     if (up_reuse()) g_up_slot_want[slot] = MAX(g_up_slot_want[slot], g_up_batch_bytes);
+    g_up_win_max[slot] = MAX(g_up_win_max[slot], g_up_batch_bytes);
     g_up_cb = nil;
     up_diag();
     g_nup_blits = 0;
@@ -2465,7 +2509,7 @@ static void up_begin(void) {
     // block, and its RHI thread waited for good inside nvnQueueSubmitCommands (q_cb drains before it waits for the same reason)
     if (atomic_load(&g_up_alloc_busy[slot])) rec_publish();
     up_wait_zero(&g_up_alloc_busy[slot], WS_UPALLOC);
-    atomic_store(&g_up_alloc_busy[slot], 1); g_up_cur_slot = slot;
+    atomic_store(&g_up_alloc_busy[slot], 1); g_up_cur_slot = slot; g_up_slot_used_ns[slot] = clock_gettime_nsec_np(CLOCK_MONOTONIC);
     g_up_batch_bytes = 0; g_up_over_used = 0;
     [g_up_alloc4[slot] reset];
     g_up_cb = [g_dev newCommandBuffer];
@@ -2522,7 +2566,7 @@ static id<MTLBuffer> up_alloc(size_t n, size_t *off) {
         if (up_reuse() && need <= UP_BLOCK_SIZE && !g_up_over_used) {
             __strong id<MTLBuffer> *sb = &g_up_slot_over[g_up_cur_slot];
             if (!*sb) { *sb = [g_dev newBufferWithLength:UP_BLOCK_SIZE options:MTLResourceStorageModePrivate]; if (!*sb) MDIE("failed to create the overflow staging block"); res_add(*sb); g_up_blocks_new++; }
-            g_up_block = *sb; g_up_block_size = (*sb).length; g_up_over_used = 1;
+            g_up_block = *sb; g_up_block_size = (*sb).length; g_up_over_used = 1; g_up_over_ns[g_up_cur_slot] = clock_gettime_nsec_np(CLOCK_MONOTONIC);
         } else {
             g_up_block_size = n > UP_BLOCK_SIZE ? need : UP_BLOCK_SIZE;
             g_up_block = [g_dev newBufferWithLength:g_up_block_size options:MTLResourceStorageModePrivate];

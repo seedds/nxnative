@@ -888,6 +888,7 @@ HLE_FORCE("_ZN2nn3hid17GetDebugPadStatesEPNS0_13DebugPadStateEi", "debug pad sta
     for (int i = 0; i < n; i++) { memset(s + 32 * i, 0, 32); *(int64_t *)(s + 32 * i) = top - i; }
     return n > 0 ? n : 0;
 }
+HLE_FORCE("_ZN2nn3hid20FinalizeSensorFusionEv", "end of sensor fusion (SDK 22): the host keeps no IMU state to disable", void, h_hid_FusionFin, void) {}
 HLE_FORCE("_ZN2nn3hid25EnableSixAxisSensorFusionERKNS0_19SixAxisSensorHandleEb", "six-axis sensor fusion; ignored by the host", void, h_hid_SixFusionOn, const uint32_t *h, uint32_t on) { (void)h; (void)on; }
 HLE_FORCE("_ZN2nn3hid28IsSixAxisSensorFusionEnabledERKNS0_19SixAxisSensorHandleE", "six-axis sensor fusion: off", unsigned, h_hid_SixFusionQ, const uint32_t *h) { (void)h; return 0; }
 HLE_FORCE("_ZN2nn3hid25GetGyroscopeZeroDriftModeERKNS0_19SixAxisSensorHandleE", "gyroscope zero-drift mode: standard", int, h_hid_GyroGet, const uint32_t *h) { (void)h; return 1; }
@@ -903,6 +904,10 @@ HLE_FORCE("_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_2
 // The SDK's own call reaches the hid service (a null read in hid::detail::IsVibrationDeviceMounted; Super Mario Odyssey asks for each handle of a controller).
 // On Horizon a device is mounted when the npad's connected controller has that style and an actuator on that side: here, when the channel has an output, as GetVibrationDeviceInfo reports it
 HLE_FORCE("_ZN2nn3hid24IsVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration: device mounted when the channel has an output", unsigned, h_hid_VibMounted, const uint32_t *h) {
+    return h && vib_targets(*h);
+}
+// The Switch 2's form of the same question (Kirby Air Riders asks soon after boot in a run with a window, main+0x10709b0; its SDK's call reads the same null service object)
+HLE_FORCE("_ZN2nn3hid29IsOunceVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", "vibration (Switch 2): device mounted when the channel has an output", unsigned, h_hid_VibMountedOunce, const uint32_t *h) {
     return h && vib_targets(*h);
 }
 HLE_FORCE("_ZN2nn3hid23GetActualVibrationValueEPNS0_14VibrationValueERKNS0_21VibrationDeviceHandleE", "vibration: last accepted channel value", void, h_hid_VibActual, dm_vibration *v, const uint32_t *h) {

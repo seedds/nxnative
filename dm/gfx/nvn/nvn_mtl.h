@@ -14,6 +14,7 @@ void bf_want_note(const char *key);
 
 // Memory pool: [mem, mem+size) is expanded outward to page boundaries to build a zero-copy buffer; look up the buffer and offset by GPU address (= CPU address)
 void mtl_pool_add(const void *mem, uint64_t size);
+void mtl_pool_addressed(const void *mem, uint64_t size);   // the game holds a GPU address in this range, so raw global memory may reach it
 void mtl_pool_del(const void *mem);
 // memory pool Finalize: evict the textures built on this pool (pool object address) from the storage-sharing table
 void mtl_alias_drop_pool(const void *pool);
@@ -53,4 +54,6 @@ void *mtl_device(void);
 void *mtl_device_classic(void);   // the same for a layer that draws only on classic queues: a device without Metal 4 (a virtual Mac) starts too, and its presents are dropped
 uint64_t mtl_ext_tex(void *tex);
 uint64_t mtl_present_ext(uint64_t serial, double period, void *ev, uint64_t ev_val, const int crop[4]);   // crop: x, y, w, h of the texture to show (NULL = all of it)
+void mtl_present_layer(uint32_t w, uint32_t h);   // a sized vi layer (hle_vi.c): the picture's shape instead of the display's 16:9
+void mtl_present_screen(uint32_t w, uint32_t h);   // a screen taller than 16:9 (loader.c, DM_SCREEN_ASPECT): the picture's shape for a texture of that shape
 void mtl_present_wait(uint64_t ticket);   // as in nvn_obj.h: wait until that present has been handed to the GPU

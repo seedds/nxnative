@@ -76,6 +76,46 @@ class F2ip(Alu):
         self.assertIn('trunc(', self.kept(self.ONE, srcs=(9,)))
 
 
+class CarriesAndModifiers(Alu):
+    """Constant inputs the translator folds, the result stored: IADD3's two carry predicates (sum >= 2^32 and sum >= 2 * 2^32, Mesa NAK's OpIAdd3 fold, checked on
+    hardware), PLOP3's second table on the sources as they were, POPC / FLO with an immediate whose top bit (63) is no bitwise not, LEA.HI.SX32's sign-extended high
+    word and LEA's negated B (~B + 1 with its carry; with .X the bitwise not). Encodings built for the test, each checked with nvdisasm 13.5 (sm_86)"""
+    SEL_P0 = (0x000fc200040000ff, 0x00000001ff067807)   # SEL R6, RZ, 0x1, !P0: R6 = P0 ? 1 : 0
+
+    def stored(self, *code):
+        m = re.findall(r'\] = (\w+);', self.kept(*code))
+        return m[-1] if m else None
+
+    def test_popc_immediate_top_bit_is_no_not(self):
+        self.assertEqual(self.stored((0x000fc20000000000, 0x800000ffff067909)), '9u')    # POPC R6, 0x800000ff
+
+    def test_flo_immediate_top_bit_is_no_not(self):
+        msl = self.kept((0x000fc200000e0000, 0x800400ffff067900))                         # FLO.U32 R6, 0x800400ff
+        self.assertIn('spvFindUMSB(2147746047u)', msl)                                    # 0x800400ff itself, not its bitwise not
+
+    def test_iadd3_carry_of_two_sets_both_predicates(self):
+        iadd3 = (0x000fc2000791e9ff, 0xffffffffff077810)                                  # IADD3 R7, P0, P1, -RZ, -0x1, -RZ: 2^32 + 0xffffffff + 2^32
+        self.assertEqual(self.stored(iadd3, self.SEL_P0), '1u')
+
+    def test_plop3_second_table_reads_the_old_source(self):
+        isetp = (0x000fc20003f42070, 0x000000ffff00720c)                                  # ISETP.EQ.U32.AND P2, PT, RZ, RZ, PT: P2 = true
+        plop3 = (0x000fc2000104e070, 0x0000000000f0781c)                                  # PLOP3.LUT P2, P0, P2, PT, PT, 0x0, 0xf0: P2 = false, P0 = the old P2
+        self.assertEqual(self.stored(isetp, plop3, self.SEL_P0), '1u')
+
+    def test_lea_hi_sx32_sign_extends(self):
+        mov = (0x000fc20000000fff, 0x80000000ff057802)                                    # MOV R5, 0x80000000
+        lea = (0x000fc200078f0aff, 0x000000ff05067211)                                    # LEA.HI.SX32 R6, R5, RZ, 0x1: (0xffffffff:R5) >> 31
+        self.assertEqual(self.stored(mov, lea), '4294967295u')
+
+    def test_lea_negated_zero_b_carries(self):
+        lea = (0x000fc200078000ff, 0x800000ffff067211)                                    # LEA R6, P0, RZ, -RZ, 0x0: ~0 + 1 carries out
+        self.assertEqual(self.stored(lea, self.SEL_P0), '1u')
+
+    def test_lea_x_not_b(self):
+        lea = (0x000fc200038e04ff, 0x800000ffff067211)                                    # LEA.X R6, RZ, ~RZ, 0x0, PT: 0 + 0xffffffff + 1
+        self.assertEqual(self.stored(lea), '0u')
+
+
 class HalfImmediate(Alu):
     """HADD2 / HMUL2 Rd, Ra, imm (form 2): the second source is the immediate at bits 32..63, not the register field at 64 that HFMA2's B uses in that form. Pokopia's
     blur 85446a6753300fc8 steps its loop with HADD2 R6, R6, 2.0h; reading R0 there, the loop never ended and the GPU hung"""

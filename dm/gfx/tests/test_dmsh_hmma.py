@@ -2,7 +2,7 @@
 writes it, its arguments and scratch array, the matrices and shared memory it gives the functions that call it, the compile with the chain's Metal flags, and on this Mac's
 GPU the rewritten body against a CPU reference of PTX mma.m16n8k16 (f16 sources and accumulator): one call on random fragments, four SIMD-groups a threadgroup, and a run
 of calls with TensorPass's flags (an accumulator kept in its slot between calls, A kept from the call before, C = 0, A loaded from shared memory where an LDSM read it,
-plain and transposed). With DMSH_TEST_XLATE (the translator), the flags it gives two chained HMMAs on an LDSM's matrices."""
+plain and transposed), and chains waiting in their slots while calls of no chain run, at four and six SIMD-groups a threadgroup. With DMSH_TEST_XLATE (the translator), the flags it gives two chained HMMAs on an LDSM's matrices."""
 import ast
 import json
 import os
@@ -113,6 +113,44 @@ kernel void check_seq(device const ushort *in [[buffer(0)]], device uint *out [[
 }
 '''
 # Call 4 is given A0's registers on purpose: A1 must come from shared memory (FlagADirect), transposed (FlagATrans)
+# Two chains waiting in their slots while calls of no chain run, as calls 4 to 9 of Ocarina of Time's network fa3033d05c0a41d6 (flags 12, 269, 8, 9, 2, 259), with that shader's shared memory:
+# its 1408 words and a scratch block a SIMD-group. A plain call must not touch a slot: in slot 0, it left its own D as the C of the chain's end
+#   1. A0 B0           C = 0, D left in slot 0         (8 | 4)
+#   2. A0 B1           A kept, C = 0, D left in slot 1 (1 | 8 | 4 | 1 << 8)
+#   3. A1 B2           C = 0: E2                       (8)
+#   4. A1 B3           A kept, C = 0: E3               (1 | 8)
+#   5. A2 B4 + slot 0  E0                              (2)
+#   6. A2 B5 + slot 1  A kept: E1                      (1 | 2 | 1 << 8)
+# Input a SIMD-group: halves A0..A2 (16 x 16, row-major), B0..B5 (16 x 8, k-major): 1536 halves
+CHAIN_KERNEL = '''
+static uint pk(device const ushort* p, int i, int j) { return uint(p[i]) | uint(p[j]) << 16; }
+static int fa(device const ushort* m, int r, int k) { return int(pk(m, r * 16 + k, r * 16 + k + 1)); }
+static int fb(device const ushort* m, int k, int n) { return int(pk(m, k * 8 + n, (k + 1) * 8 + n)); }
+kernel void check_chain(device const ushort *in [[buffer(0)]], device uint *out [[buffer(1)]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]],
+                        uint gid [[thread_position_in_grid]])
+{
+    threadgroup spvUnsafeArray<uint, 1408> shm;
+    threadgroup spvUnsafeArray<uint, SCRATCH> scr;
+    device const ushort* x = in + (gid / 32) * 1536;
+    device const ushort *A0 = x, *A1 = x + 256, *A2 = x + 512, *B0 = x + 768, *B1 = x + 896, *B2 = x + 1024, *B3 = x + 1152, *B4 = x + 1280, *B5 = x + 1408;
+    int l = int(lane), g = l / 4, t = l % 4, blk = int(sg) * 256, z = 0;
+    int a00 = fa(A0, g, 2 * t), a01 = fa(A0, g + 8, 2 * t), a02 = fa(A0, g, 8 + 2 * t), a03 = fa(A0, g + 8, 8 + 2 * t);
+    int a10 = fa(A1, g, 2 * t), a11 = fa(A1, g + 8, 2 * t), a12 = fa(A1, g, 8 + 2 * t), a13 = fa(A1, g + 8, 8 + 2 * t);
+    int a20 = fa(A2, g, 2 * t), a21 = fa(A2, g + 8, 2 * t), a22 = fa(A2, g, 8 + 2 * t), a23 = fa(A2, g + 8, 8 + 2 * t);
+    int b00 = fb(B0, 2 * t, g), b01 = fb(B0, 8 + 2 * t, g), b10 = fb(B1, 2 * t, g), b11 = fb(B1, 8 + 2 * t, g), b20 = fb(B2, 2 * t, g), b21 = fb(B2, 8 + 2 * t, g);
+    int b30 = fb(B3, 2 * t, g), b31 = fb(B3, 8 + 2 * t, g), b40 = fb(B4, 2 * t, g), b41 = fb(B4, 8 + 2 * t, g), b50 = fb(B5, 2 * t, g), b51 = fb(B5, 8 + 2 * t, g);
+    int f1 = 8 | 4, f2 = 1 | 8 | 4 | 1 << 8, f3 = 8, f4 = 1 | 8, f5 = 2, f6 = 1 | 2 | 1 << 8;
+    int e1, e2, e3, e4, e5, e6;
+    int d1 = dmsh_hmma16816_f16(l, blk, a00, a01, a02, a03, b00, b01, z, z, f1, z, z, z, z, z, z, e1, scr);
+    int d2 = dmsh_hmma16816_f16(l, blk, a00, a01, a02, a03, b10, b11, z, z, f2, z, z, z, z, z, z, e2, scr);
+    int d3 = dmsh_hmma16816_f16(l, blk, a10, a11, a12, a13, b20, b21, z, z, f3, z, z, z, z, z, z, e3, scr);
+    int d4 = dmsh_hmma16816_f16(l, blk, a10, a11, a12, a13, b30, b31, z, z, f4, z, z, z, z, z, z, e4, scr);
+    int d5 = dmsh_hmma16816_f16(l, blk, a20, a21, a22, a23, b40, b41, d1, e1, f5, z, z, z, z, z, z, e5, scr);
+    int d6 = dmsh_hmma16816_f16(l, blk, a20, a21, a22, a23, b50, b51, d2, e2, f6, z, z, z, z, z, z, e6, scr);
+    device uint* o = out + gid * 8;
+    o[0] = uint(d5); o[1] = uint(e5); o[2] = uint(d6); o[3] = uint(e6); o[4] = uint(d3); o[5] = uint(e3); o[6] = uint(d4); o[7] = uint(e4);
+}
+'''
 HALF = r'''#import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 static float h2f(uint16_t h) { __fp16 v; memcpy(&v, &h, 2); return (float)v; }
@@ -125,10 +163,10 @@ static id<MTLComputePipelineState> pipeline(id<MTLDevice> dev, const char *path,
     if (!ps) { printf("pipeline: %s\n", e.localizedDescription.UTF8String); exit(1); }
     return ps;
 }
-static void run(id<MTLDevice> dev, id<MTLComputePipelineState> ps, id<MTLBuffer> in, id<MTLBuffer> out, int groups) {
+static void run(id<MTLDevice> dev, id<MTLComputePipelineState> ps, id<MTLBuffer> in, id<MTLBuffer> out, int groups, int threads) {
     id<MTLCommandQueue> q = [dev newCommandQueue]; id<MTLCommandBuffer> cb = [q commandBuffer]; id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
     [ce setComputePipelineState:ps]; [ce setBuffer:in offset:0 atIndex:0]; [ce setBuffer:out offset:0 atIndex:1];
-    [ce dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)]; [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    [ce dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)]; [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
 }
 '''
 # The GPU check: 64 threadgroups of 128 lanes, random halves in [-1, 1]; the reference sums in float and rounds once; the matrix hardware rounds the f16 accumulator as
@@ -143,7 +181,7 @@ int main(int argc, char **argv) {
         id<MTLBuffer> in = [dev newBufferWithLength:n * 32 options:MTLResourceStorageModeShared], out = [dev newBufferWithLength:n * 8 options:MTLResourceStorageModeShared];
         uint32_t *w = in.contents; srand(11);
         for (int i = 0; i < n * 8; i++) w[i] = f2h((rand() % 2001 - 1000) / 1000.0f) | (uint32_t)f2h((rand() % 2001 - 1000) / 1000.0f) << 16;
-        run(dev, ps, in, out, groups);
+        run(dev, ps, in, out, groups, tg);
         uint32_t *o = out.contents; long bad = 0; double worst = 0;
         for (int warp = 0; warp < n / 32; warp++) {
             float A[16][16], B[16][8], C[16][8];
@@ -180,7 +218,7 @@ int main(int argc, char **argv) {
         id<MTLBuffer> in = [dev newBufferWithLength:warps * 1152 * 2 options:MTLResourceStorageModeShared], out = [dev newBufferWithLength:warps * 32 * 16 options:MTLResourceStorageModeShared];
         uint16_t *h = in.contents; srand(7);
         for (int i = 0; i < warps * 1152; i++) h[i] = f2h((rand() % 2001 - 1000) / 1000.0f);
-        run(dev, ps, in, out, groups);
+        run(dev, ps, in, out, groups, 128);
         uint32_t *o = out.contents; long bad = 0; double worst = 0;
         for (int w = 0; w < warps; w++) {
             const uint16_t *x = h + w * 1152;
@@ -191,6 +229,41 @@ int main(int argc, char **argv) {
                     const uint16_t *A = x + 256 * e, *Ba = x + 512 + 256 * e, *Bb = Ba + 128;
                     float ref = e == 0 ? h2f(x[1024 + row * 8 + col]) : 0;
                     for (int k = 0; k < 16; k++) ref += h2f(A[row * 16 + k]) * (h2f(Ba[k * 8 + col]) + h2f(Bb[k * 8 + col]));
+                    double d = fabs(h2f((r[e * 2 + q2] >> (16 * j)) & 0xffff) - ref);
+                    if (d > worst) worst = d;
+                    bad += d > 0.02 + fabs(ref) * 0.008;
+                }
+            }
+        }
+        printf("%d SIMD-groups, max abs error %.4g, %ld outputs over tolerance\n", warps, worst, bad);
+        return bad != 0;
+    }
+}
+'''
+# The chains across plain calls: E0 = A0 B0 + A2 B4, E1 = A0 B1 + A2 B5, E2 = A1 B2, E3 = A1 B3; the tolerance is the run of calls' above
+CHAIN_RUNNER = HALF + r'''
+int main(int argc, char **argv) {
+    @autoreleasepool {
+        id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+        if (!dev) { printf("no Metal device\n"); return 2; }
+        id<MTLComputePipelineState> ps = pipeline(dev, argv[1], @"check_chain");
+        const int sgs = SIMD_GROUPS, groups = 16, warps = groups * sgs;
+        id<MTLBuffer> in = [dev newBufferWithLength:warps * 1536 * 2 options:MTLResourceStorageModeShared], out = [dev newBufferWithLength:warps * 32 * 32 options:MTLResourceStorageModeShared];
+        uint16_t *h = in.contents; srand(5);
+        for (int i = 0; i < warps * 1536; i++) h[i] = f2h((rand() % 2001 - 1000) / 1000.0f);
+        run(dev, ps, in, out, groups, sgs * 32);
+        uint32_t *o = out.contents; long bad = 0; double worst = 0;
+        for (int w = 0; w < warps; w++) {
+            const uint16_t *x = h + w * 1536;
+            const int first[4][2] = { { 0, 0 }, { 0, 1 }, { 1, 2 }, { 1, 3 } }, second[4][2] = { { 2, 4 }, { 2, 5 }, { -1, 0 }, { -1, 0 } };
+            for (int L = 0; L < 32; L++) {
+                int g = L / 4, t = L % 4; const uint32_t *r = o + (w * 32 + L) * 8;
+                for (int e = 0; e < 4; e++) for (int q2 = 0; q2 < 2; q2++) for (int j = 0; j < 2; j++) {
+                    int row = g + 8 * q2, col = 2 * t + j; float ref = 0;
+                    for (int k = 0; k < 16; k++) {
+                        ref += h2f(x[256 * first[e][0] + row * 16 + k]) * h2f(x[768 + 128 * first[e][1] + k * 8 + col]);
+                        if (second[e][0] >= 0) ref += h2f(x[256 * second[e][0] + row * 16 + k]) * h2f(x[768 + 128 * second[e][1] + k * 8 + col]);
+                    }
                     double d = fabs(h2f((r[e * 2 + q2] >> (16 * j)) & 0xffff) - ref);
                     if (d > worst) worst = d;
                     bad += d > 0.02 + fabs(ref) * 0.008;
@@ -235,9 +308,9 @@ class HmmaRewrite(unittest.TestCase):
     def test_callers_get_their_matrices_and_shared_memory(self):
         out = hmma_msl(HEAD + HELPER + SEQ_KERNEL)
         kernel = out[out.index('kernel void check_seq'):]
-        self.assertIn('{\n    simdgroup_half8x8 dm_acc[16], dm_am[4];\n', kernel)   # first in the body
+        self.assertIn('{\n    simdgroup_half8x8 dm_acc[18], dm_am[4];\n', kernel)   # first in the body
         self.assertEqual(kernel.count(', scr, dm_acc, dm_am, shm)'), 4)              # every call: the matrices, then the one other threadgroup array
-        self.assertIn('thread simdgroup_half8x8 (&acc)[16], thread simdgroup_half8x8 (&am)[4], threadgroup spvUnsafeArray<uint, 1280>& dm_shm)', out)
+        self.assertIn('thread simdgroup_half8x8 (&acc)[18], thread simdgroup_half8x8 (&am)[4], threadgroup spvUnsafeArray<uint, 1280>& dm_shm)', out)
         self.assertIn('adirect = (f & 16) != 0', out)
 
     def test_two_other_arrays_load_a_through_the_scratch(self):
@@ -249,7 +322,7 @@ class HmmaRewrite(unittest.TestCase):
 
     def test_kernel_unchanged_but_its_calls(self):
         out = hmma_msl(HEAD + HELPER + KERNEL)
-        self.assertIn(KERNEL.strip().replace('d1, scr)', 'd1, scr, dm_acc, dm_am)').replace('{\n    threadgroup', '{\n    simdgroup_half8x8 dm_acc[16], dm_am[4];\n    threadgroup', 1), out)
+        self.assertIn(KERNEL.strip().replace('d1, scr)', 'd1, scr, dm_acc, dm_am)').replace('{\n    threadgroup', '{\n    simdgroup_half8x8 dm_acc[18], dm_am[4];\n    threadgroup', 1), out)
 
     def test_other_shaders_unchanged(self):
         src = HEAD + KERNEL.replace('dmsh_hmma16816_f16(l, blk, a0, a1, a2, a3, b0, b1, c0, c1, z, z, z, z, z, z, z, d1, scr)', 'a0')
@@ -267,6 +340,14 @@ class HmmaOnGpu(unittest.TestCase):
 
     def test_flagged_run_matches_reference(self):
         compile_and_run(self, hmma_msl(HEAD + HELPER + SEQ_KERNEL), SEQ_RUNNER)
+
+    def test_chains_survive_plain_calls(self):
+        for groups in (4, 6):
+            with self.subTest(simd_groups=groups):
+                scratch = str(groups * 256)
+                msl = hmma_msl(HEAD + HELPER.replace('1024', scratch) + CHAIN_KERNEL.replace('SCRATCH', scratch))
+                self.assertEqual(msl.count(', scr, dm_acc, dm_am, shm)'), 6)   # every call rewritten, or the helper's stand-in body is what runs
+                compile_and_run(self, msl, CHAIN_RUNNER.replace('SIMD_GROUPS', str(groups)))
 
 
 def inst(hi, lo): return struct.pack('<QQ', lo, hi)

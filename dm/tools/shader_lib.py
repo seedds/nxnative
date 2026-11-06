@@ -71,7 +71,7 @@ def _names(folder):
 
 
 def write(files, dst):
-    """files: {name: path to read (a romfs path may name a file inside an image) or the bytes} → the image dst, by way of dst.part. A stopped write leaves only the .part, and an image is whole or absent"""
+    """files: {name: path to read (a romfs path may name a file inside an image), the bytes, or a callable returning bytes} → the image dst, by way of dst.part. A stopped write leaves only the .part, and an image is whole or absent"""
     part = dst + '.part'
     names = sorted((n.encode() for n in files))
     ents, off = [], romfs.HEAD.size
@@ -82,6 +82,10 @@ def write(files, dst):
             out.seek(off)
             n, source = 0, files[name.decode()]
             if isinstance(source, bytes): out.write(source); n = len(source)
+            elif callable(source):
+                b = source()
+                if b is None: raise ValueError(f'missing content for {name.decode()}')
+                out.write(b); n = len(b)
             else:
                 with romfs.open(source, 'rb') as f:
                     while b := f.read(8 << 20): out.write(b); n += len(b)
@@ -96,20 +100,22 @@ def write(files, dst):
     os.replace(part, dst)
 
 
-def pack(lib, say=print, leave_out=False):
+def pack(lib, say=print, leave_out=False, cached=None):
     """The folder into the image, and the folder removed. Returns whether an image now stands for the library. Without a folder there is nothing to do, unless leave_out finds pulling libraries in the
-    image to take out: leave_out is the iPhone build's when nothing will read them"""
+    image to take out (leave_out is the iPhone build's when nothing will read them), or cached provides entries to stream directly into the image"""
     folder, image = folder_of(lib), image_of(lib)
     try:
         before = _names(folder) if os.path.isdir(folder) else None
         if before is not None and not before: os.rmdir(folder); before = None
-        if before is None and not os.path.isfile(image): return False
+        if before is None and not os.path.isfile(image) and not cached: return False
         files = {n: os.path.join(folder, n) for n in before or ()}
+        if cached:
+            for n, src in cached.items(): files.setdefault(n, src)
         if os.path.isfile(image) and (before is None or STAMP not in before):   # a partial build over a packed library, or the image alone
             with romfs.scandir(image) as it:
                 for e in it: files.setdefault(e.name, e.path)
         pulling = [n for n in files if n.endswith(PULLING)]
-        if before is None and not (leave_out and pulling): return True
+        if before is None and not (leave_out and pulling) and not cached: return True
         if leave_out:
             for n in pulling: del files[n]
             files[PULLING_LEFT_OUT] = b'the pulling vertex libraries are left out: nothing in this build reads them (dm/tools/shader_lib.py)\n'

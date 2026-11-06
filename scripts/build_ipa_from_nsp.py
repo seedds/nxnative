@@ -2282,6 +2282,18 @@ class ShaderWatch:
             self.w = max((d for d in self.tmp.glob('dmsh_*') if d.stat().st_birthtime >= self.t0 - 2), key=lambda d: d.stat().st_birthtime, default=None)
         try: ext = collections.Counter(os.path.splitext(x)[1] for x in os.listdir(self.w)) if self.w else collections.Counter()
         except OSError: ext = collections.Counter()
+        if self.w:
+            pf = self.w / '.progress'
+            try:
+                prog = json.loads(pf.read_text())
+                step = prog.get('step')
+                done = prog.get('done')
+                total = prog.get('total')
+                note = prog.get('note', '')
+                if step and done is not None and total:
+                    if step in ('compiling', 'finishing'): self.t1 = self.t1 or time.time()
+                    return {'step': step, 'done': done, 'total': total, 'unit': 'shaders', 'note': note}
+            except (OSError, ValueError, json.JSONDecodeError): pass
         if self.t1 is None:
             self.hits |= self.written(self.pos.keys() - self.hits, self.t0 - 2)
             if len(self.hits) + ext['.bin'] < self.n and not ext['.spv'] and not ext['.metal']:
@@ -2455,10 +2467,10 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     PROG.watch(None)
     if not seen and not chain_tables(py, repo, sh, env, logs, g, chain): raise BuildError(f'no stamped Mac shader outputs in {sh / "cache" / f"b-{chain}"} (inputs.tsv): dmsh_build.py did not finish a full build')
     what = 'Mac' if mac else 'iOS'
-    n = sum(1 for _ in libs.glob('*_b.metallib')) if libs.is_dir() else 0
+    n = sum(1 for _ in shader_lib.view(libs).glob('*_b.metallib'))
     if n == 0: raise BuildError(f'no {what} shader libraries in {libs}')
     say(f'{n} {what} shader libraries ({libs})')
-    if keep_mac: say(f'{sum(1 for _ in (sh / "cache" / f"b-{chain}").glob("*_b.metallib"))} Mac shader libraries kept for the Mac run command ({sh / "cache" / f"b-{chain}"})')
+    if keep_mac: say(f'{sum(1 for _ in shader_lib.view(sh / "cache" / f"b-{chain}").glob("*_b.metallib"))} Mac shader libraries kept for the Mac run command ({sh / "cache" / f"b-{chain}"})')
     t = log.read_text(errors='replace')
     if own := re.search(r'^note: (built with this Mac\'s compilers.*)$', t, re.M): say(own.group(1))
     if lost := re.search(r'^\[RED\] lost without failing: .*$', t, re.M): say(f'{lost.group(0)}; each is named in {log}, and the build goes on: a shader the game never reaches costs nothing')

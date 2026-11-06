@@ -9,7 +9,7 @@
 # Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately);
 # a [RED] line per shader that built but lost something (shader_regressions.report_losses), which does not change the exit status
-import atexit, inspect, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, collections, threading, concurrent.futures as cf
+import atexit, inspect, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, time, collections, threading, concurrent.futures as cf
 import dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
@@ -268,6 +268,13 @@ STORE = shader_cache.Store(os.environ.get('DMSH_CAS', os.path.join(cache_root, '
 atexit.register(STORE.close)   # folds its log into the one file
 CAS_LOCKS, CAS_LOCKS_GUARD = {}, threading.Lock()
 PRE_STATS = collections.Counter()
+DIRECT_STREAM = os.environ.get('DMSH_DIRECT_STREAM', '1') == '1'
+CACHED_STREAM = {'mac': {}, 'ios': {}}
+CACHED_STREAM_LOCK = threading.Lock()
+
+def sink_entry(target, filename, data_or_fn):
+    with CACHED_STREAM_LOCK:
+        CACHED_STREAM[target][filename] = data_or_fn
 # -fpreserve-invariance: vertex positions are marked [[invariant]], but without this flag Metal does not promise that two different shaders compute the same expression to the same value; on Maxwell the same multiply-adds always agree.
 # Super Mario Odyssey draws a depth pre-pass with alRenderDepthOnly, then the G-buffer with another vertex shader and depth test less-or-equal: a hair off and the test failed, leaving those pixels with old content (Cap Kingdom's ground in 32x32 blocks)
 # -O1: the front end's -O2 (CorrelatedValuePropagation, then SimplifyCFG) folds the translated shaders' repeated tests of one value into switches whose cases jump past their own join.
@@ -343,15 +350,17 @@ CAS_USED = '_b_cas.txt'   # in the Mac library directory b-<V>/: the cache_path 
 
 def cache_outputs(key, digest, cached=False):
     root = cache_path(digest); files = {}
+    stream = globals().get('CACHED_STREAM') if not cached else None
     for label, directory in (('mac', out), ('ios', IOSOUT)):
         if not directory: continue
         # fin(), paired vertex padding and the profile tables also need these on an iOS-only cache hit.
         required = [key + '_b.json'] + ([key + '_b.metal'] if label == 'mac' else [])
         if label in TARGETS: required.append(key + '_b.metallib')
         have = STORE.names(f'{root}/{label}/') if cached else set()
+        in_stream = set(stream.get(label, ())) if stream is not None else set()
         names = required + [key + s + ext for s in ('_bg0', '_bg1', '_bg2', '_bg3', '_bg4', '_bgv', '_bl0', '_bl1', '_bl3') for ext in ('.metallib', '.json', '.metal')
                             if (label == 'mac' or ext != '.metal') and (ext != '.metallib' or label in TARGETS)]
-        found = [n for n in names if (f'{root}/{label}/{n}' in have if cached else os.path.exists(os.path.join(directory, n)))]
+        found = [n for n in names if (f'{root}/{label}/{n}' in have if cached else (n in in_stream or os.path.exists(os.path.join(directory, n))))]
         if not all(n in found for n in required): return None
         files[label] = found
     return root, files
@@ -360,6 +369,7 @@ def restore_cache(key, digest):
     found = cache_outputs(key, digest, cached=True)
     if not found: return False
     root, files = found
+    stream = globals().get('CACHED_STREAM')
     for label, names in files.items():
         directory = out if label == 'mac' else IOSOUT
         for name in names:
@@ -367,9 +377,20 @@ def restore_cache(key, digest):
             if name.endswith('.json'):
                 data = STORE.get(src)
                 if data is None: return False   # pruned by another build since the look above: a miss, which builds it
-                tmp = dst + '.tmp-' + str(os.getpid()) + '-' + str(threading.get_ident())
-                with open(tmp, 'wb') as f: f.write(re.sub(rb'("chain"\s*:\s*")[^"]*"', rb'\g<1>' + CHAIN.encode() + b'"', data, count=1))
-                os.replace(tmp, dst)
+                adjusted = re.sub(rb'("chain"\s*:\s*")[^"]*"', rb'\g<1>' + CHAIN.encode() + b'"', data, count=1)
+                if stream is not None:
+                    with CACHED_STREAM_LOCK: stream[label][name] = adjusted
+                else:
+                    tmp = dst + '.tmp-' + str(os.getpid()) + '-' + str(threading.get_ident())
+                    with open(tmp, 'wb') as f: f.write(adjusted)
+                    os.replace(tmp, dst)
+            elif stream is not None:
+                if name.endswith('.metal'):
+                    data = STORE.get(src)
+                    if data is None: return False
+                    with CACHED_STREAM_LOCK: stream[label][name] = data
+                else:
+                    with CACHED_STREAM_LOCK: stream[label][name] = (lambda s=src: STORE.get(s))
             elif not STORE.to_file(src, dst): return False
     return True
 
@@ -384,18 +405,26 @@ def cache_lookup(key, digest, rule_fp, code_fp):
         PRE_STATS['miss'] += 1; PRE_STATS[reason] += 1; return False, reason
 
 def publish_cache(key, digest, rule_fp, code_fp):
+    stream = globals().get('CACHED_STREAM')
+    mac_stream = stream.get('mac', {}) if stream is not None else {}
     # Paired pixel MSL is an input to vs_pad; a diagnostic build without it must not cache an incomplete vertex shader under a complete dependency key.
-    if any(not os.path.isfile(os.path.join(out, ps + '_b.metal')) for ps in PAIRS.get(key, ())): return
+    if any(not (ps + '_b.metal' in mac_stream or os.path.isfile(os.path.join(out, ps + '_b.metal'))) for ps in PAIRS.get(key, ())): return
     found = cache_outputs(key, digest)
     if not found: return
     root, files = found
     with STORE.batch():   # a stop leaves the whole entry or none of it
         for label, names in files.items():
+            t_stream = stream.get(label, {}) if stream is not None else {}
             for name in names:
                 src = os.path.join(out if label == 'mac' else IOSOUT, name)
+                in_mem = t_stream.get(name)
                 if name.endswith('.json'):
-                    value = json.load(open(src)); value.pop('fetch', None); value.pop('vin', None); value.pop('pull', None); value.pop('alpha', None); value.pop('logic', None)   # the side libraries are made again from the restored MSL (fetch_finish, vin_finish, pull_finish, alpha_finish, logic_finish)
+                    raw = (in_mem() if callable(in_mem) else in_mem) if in_mem is not None else open(src, 'rb').read()
+                    value = json.loads(raw); value.pop('fetch', None); value.pop('vin', None); value.pop('pull', None); value.pop('alpha', None); value.pop('logic', None)   # the side libraries are made again from the restored MSL (fetch_finish, vin_finish, pull_finish, alpha_finish, logic_finish)
                     STORE.put(f'{root}/{label}/{name}', json.dumps(value, ensure_ascii=False, indent=1).encode())
+                elif in_mem is not None:
+                    raw = in_mem() if callable(in_mem) else in_mem
+                    STORE.put(f'{root}/{label}/{name}', raw.encode('utf-8') if isinstance(raw, str) else raw)
                 else: STORE.put_file(f'{root}/{label}/{name}', src)
         STORE.put(cache_meta_path(key), json.dumps({'digest': digest, 'rule_fp': rule_fp, 'code_fp': code_fp}).encode())
 
@@ -416,9 +445,15 @@ def bf_cache_restore(key, digest, fmeta, fmsl):
     root = bf_cache_root(digest)
     names = ['metal'] + (['mac.metallib'] if 'mac' in TARGETS else []) + (['ios.metallib'] if IOSOUT else [])
     if not all(STORE.has(f'{root}/{n}') for n in names): return False
-    STORE.to_file(f'{root}/metal', fmsl)
-    if 'mac' in TARGETS: STORE.to_file(f'{root}/mac.metallib', os.path.join(out, key + '_bf.metallib'))
-    if IOSOUT: STORE.to_file(f'{root}/ios.metallib', os.path.join(IOSOUT, key + '_bf.metallib'))
+    stream = globals().get('CACHED_STREAM')
+    if stream is not None:
+        with CACHED_STREAM_LOCK:
+            if 'mac' in TARGETS: stream['mac'][key + '_bf.metallib'] = (lambda s=f'{root}/mac.metallib': STORE.get(s))
+            if IOSOUT: stream['ios'][key + '_bf.metallib'] = (lambda s=f'{root}/ios.metallib': STORE.get(s))
+    else:
+        STORE.to_file(f'{root}/metal', fmsl)
+        if 'mac' in TARGETS: STORE.to_file(f'{root}/mac.metallib', os.path.join(out, key + '_bf.metallib'))
+        if IOSOUT: STORE.to_file(f'{root}/ios.metallib', os.path.join(IOSOUT, key + '_bf.metallib'))
     BF_STATS['hit'] += 1
     return True
 
@@ -431,8 +466,14 @@ def bf_cache_publish(digest, fmsl, maclib, ioslib, fmeta):
         STORE.put(f'{root}/fetch.json', json.dumps(fmeta, ensure_ascii=False, indent=1).encode())
 
 def write_refl(key, refl):
+    stream = globals().get('CACHED_STREAM')
     for target, d in (('mac', out),) + ((('ios', IOSOUT),) if IOSOUT else ()):
-        atomic_json(os.path.join(d, key + '_b.json'), MTL.with_compiler(target, refl))
+        compiled_refl = MTL.with_compiler(target, refl)
+        if stream is not None:
+            with CACHED_STREAM_LOCK:
+                stream[target][key + '_b.json'] = json.dumps(compiled_refl, ensure_ascii=False, indent=1).encode()
+        else:
+            atomic_json(os.path.join(d, key + '_b.json'), compiled_refl)
 
 def fetch_finish(key, src, refl):
     if refl['stage'] != 'ps': return refl
@@ -1074,10 +1115,16 @@ def vs_pad(key, src):
     offline on its own without knowing what the next stage reads, and Metal requires every pixel shader input to be a vertex output: 331 of 9043 pairs failed to link and their draws were skipped
     (over 10,000 "Fragment input(s) user(locnN) ... not written by vertex shader" in one iPhone session after the opening course). Returns (new source, padded locations); pairs whose pixel MSL cannot be read are skipped."""
     want = set()
+    stream = globals().get('CACHED_STREAM')
+    mac_stream = stream.get('mac', {}) if stream is not None else {}
     for ps in PAIRS.get(key, ()):
         fn = os.path.join(out, ps + '_b.metal')
         if os.path.exists(fn):
             with open(fn) as f: want |= {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', f.read())}
+        elif ps + '_b.metal' in mac_stream:
+            m = mac_stream[ps + '_b.metal']
+            text = m if isinstance(m, str) else m.decode('utf-8')
+            want |= {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', text)}
     miss = sorted(want - {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', src)})
     i = src.find('struct main0_out\n{\n'); j = src.find('\n};', i); k = src.find('main0_out out = {};')
     if not miss or i < 0 or j < 0 or k < 0: return src, []
@@ -1531,7 +1578,7 @@ for _d in [out] + ([IOSOUT] if IOSOUT else []):
     if (not want or STAMP_BEFORE != INPUTS) and os.path.exists(os.path.join(_d, dmsh_chain.STAMP)): os.unlink(os.path.join(_d, dmsh_chain.STAMP))
     if not want and os.path.exists(os.path.join(_d, CAS_USED)): os.unlink(os.path.join(_d, CAS_USED))   # written again at the end, with the stamp
 w = tempfile.mkdtemp(prefix='dmsh_', dir=os.environ.get('WORK'))
-MTL = dmsh_mtlcache.Cache(STORE, {'mac': ('macosx', MAC_RECORD, mac_compile), **({'ios': ('iphoneos', ios_metal.RECORD, ios_metal.compile)} if IOSOUT else {})}, w)
+MTL = dmsh_mtlcache.Cache(STORE, {'mac': ('macosx', MAC_RECORD, mac_compile), **({'ios': ('iphoneos', ios_metal.RECORD, ios_metal.compile)} if IOSOUT else {})}, w, sink=sink_entry if DIRECT_STREAM else None)
 # first take the libraries earlier chain versions left on disk: the b-*/ beside the output (iOS: the folder of the same name) and the roots DMSH_PREFILL lists
 for _spec in [cache_root + ('=' + os.path.dirname(IOSOUT) if IOSOUT else '')] + [x for x in os.environ.get('DMSH_PREFILL', '').split(os.pathsep) if x]:
     _mac, _, _ios = _spec.partition('=')
@@ -1551,13 +1598,26 @@ def plain_digest(k):   # a paired pixel shader's key, also when it is not built 
     return shader_key(k, *rec_of(k)) if k in loc else 'missing'
 for key in keys:
     if PAIRS.get(key): digests[key] = pair_keyed(digests[key], [plain_digest(p) for p in sorted(PAIRS[key])])
-for key in keys:
+def report_progress(step, done, total, note=''):
+    try:
+        tmp = os.path.join(w, '.progress.tmp')
+        with open(tmp, 'w') as f:
+            json.dump({'step': step, 'done': done, 'total': total, 'note': note}, f)
+        os.replace(tmp, os.path.join(w, '.progress'))
+    except OSError: pass
+
+for i, key in enumerate(keys, 1):
     name = loc[key][0]
     rule_fps[key] = hashlib.sha256(shader_rule_source(name) + ','.join(sorted(PAIRS.get(key, ()))).encode()).hexdigest()   # the vertex shader must be rebuilt when its pairs change (vs_pad)
     hit, cache_reasons[key] = cache_lookup(key, digests[key], rule_fps[key], CODE_FP)
     if hit: cache_hits.add(key)
     else: jobs[key], c1s[key] = job_for(key, name, rec_of(key)[1], w)
+    if i % 250 == 0 or i == len(keys):
+        report_progress('cache check', i, len(keys), note=f'{len(cache_hits):,} cached')
 misses = [key for key in keys if key not in cache_hits]
+if misses:
+    try: os.unlink(os.path.join(w, '.progress'))
+    except OSError: pass
 chunks = [misses[i::NJ] for i in range(NJ)]
 def xl(ch):
     jp = os.path.join(w, f'job_{abs(hash(ch[0]))}.json'); json.dump([jobs[k] for k in ch], open(jp, 'w'))
@@ -1568,17 +1628,45 @@ for r in xr:
     for ln in r.stderr.splitlines():
         m = re.match(r'\[RED\] (\w+): (.*)', ln)
         if m: xerr[m.group(1)] = m.group(2)[:160]
+FIN_LOCK = threading.Lock()
+FIN_DONE = 0
+FIN_T0 = 0.0
+
+def report_fin():
+    global FIN_DONE, FIN_T0
+    with FIN_LOCK:
+        FIN_DONE += 1
+        d = FIN_DONE
+        now = time.monotonic()
+        if d % 50 == 0 or now - FIN_T0 >= 0.25 or d == len(keys):
+            FIN_T0 = now
+            report_progress('compiling' if misses else 'finishing', d, len(keys),
+                            note=f'{len(misses):,} not cached' if misses else '')
+
 def fin(key):
-    if key in cache_hits:
-        refl = json.load(open(os.path.join(out, key + '_b.json')))
-        src = open(os.path.join(out, key + '_b.metal')).read() if refl['stage'] in ('ps', 'vs') else ''
-        if refl['stage'] == 'vs': write_refl(key, pull_finish(key, src, vin_finish(key, src, refl)))
-        if refl['stage'] == 'ps': refl.update(ps_libraries(key, os.path.join(out, key + '_b.metal'), src))
-        return key, 'ok', '', fetch_finish(key, src, refl)
-    if key in xerr or not os.path.exists(os.path.join(w, key + '.spv')): return key, 'translation failed', xerr.get(key, 'no spv'), None
-    result = (key,) + finish(key, w, jobs[key], c1s[key])
-    if result[1] == 'ok': publish_cache(key, digests[key], rule_fps[key], CODE_FP)
-    return result
+    try:
+        if key in cache_hits:
+            if DIRECT_STREAM:
+                refl = json.loads(CACHED_STREAM['mac'][key + '_b.json'])
+                m = CACHED_STREAM['mac'].get(key + '_b.metal')
+                src = (m if isinstance(m, str) else m.decode('utf-8')) if refl['stage'] in ('ps', 'vs') and m else ''
+            else:
+                refl = json.load(open(os.path.join(out, key + '_b.json')))
+                src = open(os.path.join(out, key + '_b.metal')).read() if refl['stage'] in ('ps', 'vs') else ''
+            if refl['stage'] == 'vs': write_refl(key, pull_finish(key, src, vin_finish(key, src, refl)))
+            if refl['stage'] == 'ps':
+                metal_path = os.path.join(out, key + '_b.metal')
+                if DIRECT_STREAM and not os.path.exists(metal_path):
+                    metal_path = os.path.join(w, key + '_b.metal')
+                    open(metal_path, 'w').write(src)
+                refl.update(ps_libraries(key, metal_path, src))
+            return key, 'ok', '', fetch_finish(key, src, refl)
+        if key in xerr or not os.path.exists(os.path.join(w, key + '.spv')): return key, 'translation failed', xerr.get(key, 'no spv'), None
+        result = (key,) + finish(key, w, jobs[key], c1s[key])
+        if result[1] == 'ok': publish_cache(key, digests[key], rule_fps[key], CODE_FP)
+        return result
+    finally:
+        report_fin()
 with cf.ThreadPoolExecutor(NJ) as ex:   # two phases: paired vertex shaders read their pixel shaders' MSL (vs_pad), so they go last
     res = list(ex.map(fin, [k for k in keys if k not in PAIRS])) + list(ex.map(fin, [k for k in keys if k in PAIRS]))
 # Passthrough geometry as mesh shaders (dmsh_mesh.py): <vertex key>_<geometry key>_m3 for each pair in the profile's geo_mesh.tsv whose two libraries exist; the host
@@ -1641,8 +1729,21 @@ if not want:   # a full build: the stamp, then the c1 guard and uniform read ext
     os.replace(os.path.join(out, CAS_USED + '.tmp'), os.path.join(out, CAS_USED))
     for _d in [out] + ([IOSOUT] if IOSOUT else []): dmsh_chain.write_stamp(_d, GAME.id, INPUTS)
     print(f'library stamp: game {GAME.id}, inputs {INPUTS}', flush=True)
+    if DIRECT_STREAM:
+        import shader_lib
+        shader_lib.pack(out, cached=CACHED_STREAM['mac'])
+        if IOSOUT: shader_lib.pack(IOSOUT, cached=CACHED_STREAM['ios'])
     for _tool, _table in (('c1_guard.py', 'c1_full.tsv'), ('cb_extent.py', 'cb_extent.tsv')):
         _r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), _tool), out, str(GAME.table(_table))], capture_output=True, text=True)
         if _r.returncode: sys.exit(f'[RED] {_tool} failed ({_r.returncode}): {_r.stderr.strip()[-500:]}')
         print(f'{_table}: {(_r.stdout.strip().splitlines() or [""])[-1]}', flush=True)
-elif STAMP_BEFORE != INPUTS: print(f'no library stamp: the profile\'s inputs changed since the last full build ({STAMP_BEFORE} → {INPUTS}), and a partial build does not rebuild the rest', flush=True)
+elif STAMP_BEFORE != INPUTS:
+    if DIRECT_STREAM:
+        import shader_lib
+        shader_lib.pack(out, cached=CACHED_STREAM['mac'])
+        if IOSOUT: shader_lib.pack(IOSOUT, cached=CACHED_STREAM['ios'])
+    print(f'no library stamp: the profile\'s inputs changed since the last full build ({STAMP_BEFORE} → {INPUTS}), and a partial build does not rebuild the rest', flush=True)
+elif DIRECT_STREAM:
+    import shader_lib
+    shader_lib.pack(out, cached=CACHED_STREAM['mac'])
+    if IOSOUT: shader_lib.pack(IOSOUT, cached=CACHED_STREAM['ios'])

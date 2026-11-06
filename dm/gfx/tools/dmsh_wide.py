@@ -85,10 +85,11 @@ _RAW_FUNCTION = re.compile(
     r'\{\n(?P<body>.*?)^\}', re.S)
 
 
-def _raw_search(body, low, high, table, entries, stride):
+def _raw_search(body, low, high, table, entries, stride, hint_shift):
     """Verify the fixed-table scalar helper and return its unmodified search prefix."""
     ident = _RAW_ID
-    lines = iter(body.splitlines())
+    body_lines = body.splitlines()
+    lines = iter(body_lines)
     prefix = []
     names = {'lo': low, 'hi': high, 'table': table, 'stride': str(stride), 'previous': '0'}
 
@@ -103,6 +104,33 @@ def _raw_search(body, low, high, table, entries, stride):
         if search:
             prefix.append(line)
         return True
+
+    # A hinted helper chooses the same range as its fallback search. Match the
+    # complete tag and address bounds before copying that choice to the fast path.
+    hinted = hint_shift and body_lines and ' << ' in body_lines[0]
+    if hinted:
+        log = entries.bit_length() - 1
+        hint_lines = (
+            rf'int @chunk_hi = @hi << {32 - hint_shift};',
+            rf'uint @chunk_lo = uint\(int\(uint\(@lo\) >> uint\({hint_shift}\)\)\);',
+            r'int @chunk = @chunk_hi \| int\(@chunk_lo\);',
+            rf'int @hint_slot = @chunk & {entries - 1};',
+            r'int @hint_row = @hint_slot \* @stride;',
+            r'int @hint_word = @hint_row \+ 6;',
+            r'float @hint = as_type<float>\(@table\._m0\[@hint_word\]\);',
+            rf'int @hint_index = as_type<int>\(@hint\) & {entries - 1};',
+            r'bool @hint_nonzero = @hint_index != 0;',
+            rf'uint @hint_tag = uint\(int\(uint\(as_type<int>\(@hint\)\) >> uint\({log}\)\)\);',
+            r'bool @hint_matches = int\(@hint_tag\) == @chunk;',
+            r'bool @hint_valid = @hint_nonzero && @hint_matches;',
+            rf'bool @hint_address = uint\(@hi\) < {1 << (hint_shift - log)}u;',
+            r'bool @hint_fits = @hint_valid && @hint_address;',
+            r'int @selected = @hint_index;',
+            r'if \(!@hint_fits\)',
+            r'\{',
+        )
+        if not all(match(line, search=True) for line in hint_lines):
+            return None
 
     step_lines = (
         r'int @probe = @previous \+ @step;',
@@ -128,6 +156,10 @@ def _raw_search(body, low, high, table, entries, stride):
             return None
         names['previous'] = names['index']
         step //= 2
+    if hinted:
+        if not match(r'@selected = @index;', search=True) or not match(r'\}', search=True):
+            return None
+        names['index'] = names['selected']
     del names['row']
     tail = (
         r'int @row = @index \* @stride;',
@@ -244,9 +276,11 @@ def _raw_quads(msl, helper, table):
     return '\n'.join(lines) if edits else msl
 
 
-def raw_load_quads(msl, table_slot, entries, entry_bytes):
+def raw_load_quads(msl, table_slot, entries, entry_bytes, hint_shift=0):
     """Share the raw pool lookup for adjacent, independently resolved 32-bit loads."""
     if entry_bytes != 32 or entries < 2 or entries & (entries - 1):
+        return msl
+    if hint_shift and not entries.bit_length() - 1 <= hint_shift < 32:
         return msl
     table = f'cp_s{table_slot}'
     for scalar in _RAW_FUNCTION.finditer(msl):
@@ -260,7 +294,7 @@ def raw_load_quads(msl, table_slot, entries, entry_bytes):
         if not re.search(struct, msl) or not re.search(member, msl):
             continue
         stride = entry_bytes // 4
-        search = _raw_search(scalar['body'], scalar['lo'], scalar['hi'], table, entries, stride)
+        search = _raw_search(scalar['body'], scalar['lo'], scalar['hi'], table, entries, stride, hint_shift)
         if not search:
             continue
         following = msl[scalar.end():]

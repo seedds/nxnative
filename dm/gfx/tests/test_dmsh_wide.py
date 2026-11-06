@@ -130,7 +130,7 @@ class WideLoads(unittest.TestCase):
                 self.assertEqual(r.returncode, 0, r.stderr)
 
 
-def raw_source(entries):
+def raw_source(entries, hint_shift=0):
     """Synthetic fixed-table helper and four words of a raw 128-bit load."""
     prefix = '''
 struct _10 { uint _m0[1]; };
@@ -141,6 +141,26 @@ struct spvDescriptorSetBuffer0
 static inline __attribute__((always_inline))
 int _900(thread const int& _1, thread const int& _2, device _10& cp_s5)
 {
+'''
+    if hint_shift:
+        log = entries.bit_length() - 1
+        prefix += f'''    int _400 = _2 << {32 - hint_shift};
+    uint _401 = uint(int(uint(_1) >> uint({hint_shift})));
+    int _402 = _400 | int(_401);
+    int _403 = _402 & {entries - 1};
+    int _404 = _403 * 8;
+    int _405 = _404 + 6;
+    float _406 = as_type<float>(cp_s5._m0[_405]);
+    int _407 = as_type<int>(_406) & {entries - 1};
+    bool _408 = _407 != 0;
+    uint _409 = uint(int(uint(as_type<int>(_406)) >> uint({log})));
+    bool _410 = int(_409) == _402;
+    bool _411 = _408 && _410;
+    bool _412 = uint(_2) < {1 << (hint_shift - log)}u;
+    bool _413 = _411 && _412;
+    int _414 = _407;
+    if (!_413)
+    {{
 '''
     next_id = 100
     previous = '0'
@@ -162,6 +182,11 @@ int _900(thread const int& _1, thread const int& _2, device _10& cp_s5)
 '''
         previous = index
         next_id += 12
+    if hint_shift:
+        prefix += f'''        _414 = {previous};
+    }}
+'''
+        previous = '_414'
     prefix += f'''    int _310 = {previous} * 8;
     int _311 = _310 + 2;
     float _312 = as_type<float>(cp_s5._m0[_311]);
@@ -247,6 +272,24 @@ class RawLoadQuads(unittest.TestCase):
             bad = stock.replace(old, new, 1)
             self.assertNotEqual(bad, stock)
             self.assertEqual(raw_load_quads(bad, 5, 4096, 32), bad)
+
+    def test_hinted_lookup_preserves_selection(self):
+        stock = raw_source(8192, 21)
+        result = raw_load_quads(stock, 5, 8192, 32, 21)
+        search = result.split('int dm_raw_find(', 1)[1].split('ulong dm_raw_word_pair(', 1)[0]
+        self.assertIn('bool _410 = int(_409) == _402;', search)
+        self.assertIn('if (!_413)', search)
+        self.assertIn('return _414;', search)
+        self.assertIn('return _900(low, high, table);', result)
+        self.assertIn('dm_raw_load4(_600, _601, (*spvDescriptorSet0.cp_s5))', result)
+        for old, new in (('_404 + 6;', '_404 + 7;'),
+                         ('int(_409) == _402', 'int(_409) != _402'),
+                         ('uint(_2) < 256u', 'uint(_2) <= 256u'),
+                         ('_414 = _255;', '_414 = _407;')):
+            bad = stock.replace(old, new, 1)
+            with self.subTest(change=new):
+                self.assertNotEqual(bad, stock)
+                self.assertEqual(raw_load_quads(bad, 5, 8192, 32, 21), bad)
 
     def test_unproven_words_stay_scalar(self):
         stock = raw_source(4096)

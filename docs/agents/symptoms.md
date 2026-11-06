@@ -532,6 +532,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - red stub lines for NVN calls. → [NVN calls that were red stubs](../reference/nvn-objects.md#nvn-calls-that-were-red-stubs)
 - `nvnWindowGetPresentInterval`, `nvnCommandBufferSetCopyImageStride` missing. → [SDK 8 window and copy-stride entry points](../reference/nvn-objects.md#sdk-8-window-and-copy-stride-entry-points)
 - `[RED] texture bound to an image slot lacks the shader-write usage`, and compute image writes go to a dummy texture. → [Image bindings supply shader-write intent](../reference/nvn-objects.md#image-bindings-supply-shader-write-intent)
+- many small NVN submissions per frame exhaust the Metal 4 allocator pool; the guest thread waits repeatedly even though shader compilation is absent. Mario Party Superstars' What Goes Up… showed roughly 16–20 FPS on an M4 Mac. → [Bounded allocator and visibility recycling experiment](../reference/nvn-objects.md#bounded-allocator-and-visibility-recycling-experiment)
 
 ## Rendering
 

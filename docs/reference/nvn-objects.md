@@ -693,3 +693,12 @@ Games read this count as a position in their own command memory and size their h
 ### `nvnPrivate0`, an inlined command-buffer fast path flag
 
 - `nvnPrivate0`, a new SDK 20 import, needs nothing: it is a flag in `sdk`'s bss that enables an inlined command-buffer fast path when the NVN driver sets it (it stays 0). Found on [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0, SDK 20.5.22).
+
+
+### Bounded allocator and visibility recycling experiment
+
+- **Symptom:** many small NVN submissions per frame exhaust the Metal 4 allocator pool; the guest thread waits repeatedly even though shader compilation is absent. Mario Party Superstars' What Goes Up… showed roughly 16–20 FPS on an M4 Mac.
+- **Finding:** allocator reuse and visibility-buffer reuse are coupled. Raising only the allocator ceiling from 8 to 64 moved the observed wait to the visibility ring, still at 8. Extending the existing queue-event early-completion path to allocator and visibility waits, with both lazy pools capped at 64, gave a partial improvement to roughly 40–43 FPS. Ordered `post_complete` still publishes CPU reports before advancing `g_done`; no resource is reset before its completion fence.
+- **Experimental workaround:** this draft raises `ALLOC_MAX` (also `VIS_RING`) to 64 and extends early wake only when `DM_NVN_ALLOC_FAST_WAKE` is present. Pools still grow lazily. The gate checks presence, not a parsed boolean; leave it unset to disable. The larger ceiling itself is global in this draft and needs review before adoption. It can increase memory usage. This does not establish that all remaining gaps have the same cause and is not proposed as an unconditional merge-ready optimization.
+- **Checked:** the existing CPU and Metal completion-order tests passed during the investigation. These checks establish ordered, exactly-once completion behavior for their cases, not exhaustive pool-exhaustion coverage or full-game performance. Cross-game gameplay comparison remains unavailable locally. Shared tests and a regression preflight are recorded in the submission; a blocked preflight is not a pass.
+- **Found on:** [Mario Party Superstars](../../dm/games/01006FE013472000/README.md#apple-m4-mac-packaging-and-performance-follow-up-2026-11-02). Its note records the rejected follow-up experiments, save verification and measurement limitations.

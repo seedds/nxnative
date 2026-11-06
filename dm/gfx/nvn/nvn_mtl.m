@@ -97,7 +97,7 @@ static id<MTL4CommandQueue> g_q4;
 static int g_classic_ok, g_classic;   // mtl_device_classic was asked / the device has no Metal 4 and only the classic part started (mtl_init)
 static dispatch_queue_t g_feedback_q;
 static _Atomic uint32_t g_present_qos;
-#define ALLOC_MAX 8
+#define ALLOC_MAX 64
 static id<MTL4CommandAllocator> g_alloc4[ALLOC_MAX]; static int g_alloc_n, g_alloc_cur;   // Command allocator pool of the main submission: at start pick one the GPU has finished with, create a new one if there is none (wait only at the cap)
 static id<MTL4CommandAllocator> g_up_alloc4[3];
 static id<MTL4CommandAllocator> g_present_alloc4[3];
@@ -1777,7 +1777,7 @@ static void post_early(uint64_t fence) {
 static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
     if (g_done >= fence) { if (ws_on()) ws_put(site, 0, 0); return 1; }
     uint64_t w0 = ws_t0();
-    if ((site == WS_SYNC || site == WS_SYNC_NEWEST || site == WS_ACQ) && fast_wake() && g_ev && fence <= g_fence) {   // the game's own wait: wake on the GPU's signal (rec_signal(g_ev, fence) after each submission)
+    if ((site == WS_SYNC || site == WS_SYNC_NEWEST || site == WS_ACQ || ((site == WS_ALLOC || site == WS_VIS) && getenv("DM_NVN_ALLOC_FAST_WAKE"))) && fast_wake() && g_ev && fence <= g_fence) {   // guest waits, and opt-in allocator/visibility waits: wake on the queue signal after submission
         uint64_t ms = timeout_ns / 1000000ull; if (ms > 3600000ull) ms = 3600000ull;
         if ([g_ev waitUntilSignaledValue:fence timeoutMS:ms]) post_early(fence);
         int ok = g_done >= fence;

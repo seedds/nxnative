@@ -94,6 +94,7 @@ Update 1.8.0 (v917504, SDK 21.4.0) is not on this Mac. Pull request #1116 ported
 
 ## Found on this game
 
+- [A control section's own lengths taken for a BAHS entry](../../../docs/reference/shaders.md#a-control-sections-own-lengths-taken-for-a-bahs-entry): resolved, 1 shader that did not exist (`797e77c2ec4341c5`, in `agl_common`).
 - [A NUP with complete standalone updates stops at "no base game"](../../../docs/reference/packing.md#a-nup-with-complete-standalone-updates-stops-at-no-base-game) (packing reproduced with the base dump; 1.8.0 gameplay remains untested)
 - [Large sparse textures as Metal placement sparse textures](../../../docs/reference/nvn-objects.md#large-sparse-textures-as-metal-placement-sparse-textures)
 - [Physical pages mapped at several places of a placement sparse texture](../../../docs/reference/nvn-objects.md#physical-pages-mapped-at-several-places-of-a-placement-sparse-texture)

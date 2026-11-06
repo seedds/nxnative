@@ -74,6 +74,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Pairing:** control sections are shared between programs, so pair by entry, never by searching for code near a control.
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (BAHS version 9).
 
+### A control section's own lengths taken for a BAHS entry
+
+- **Symptom:** `NotSupportedException: Ampere instruction 481 at 0x0 (000000000000000000000000020c0481) is not implemented` for one compute shader of `agl_common.sharcb`. `0x020c0481` is word 0 of a vertex shader's SPH, not an instruction. A BAHS file also gives no rows in `pso_pairs.tsv` although it has vertex and pixel programs.
+- **Cause:** `bahs_shaders` scans the table area in steps of 4 bytes for 16-byte entries. An NVN2 control section holds `{instructions, 0, rounded, code area}` at +0x38. When the instructions fill the code area, those words are `{n, 0, n, n}`, which read as an entry `{code offset n, 0, control size n, offset n}`, and when `n` from there lands on another control section, every check passes. That control is paired with the code at region +`n`, whatever it is: a shader that does not exist. Where the stages agree it translates with no error and goes unnoticed. In `bahs_variations` these entries belong to no binary record, and more than 1 % of a file's entries outside the records drops all of that file's pairs: 3 of `tera_common.sharcb`'s 130.
+- **Fix:** `bahs_shaders` skips a slot at +0x38 of an NVN2 control section. Each control keeps its real entry, which the file also holds. No shader is lost, as none of these keys was paired or seen at run time. A profile's tables take the change from a new split.
+- **Check:** `dm/gfx/tests/test_bahs_control_lengths.py` fails without the rule. Split again with it, [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) loses 6 of its 42,854 shaders and gains none, `shader_pairs.tsv` is unchanged and `pso_pairs.tsv` gains 175 pairs, all from the terrain's files; [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) loses 1 of 11,561 and no pairs change. Open: [Splatoon Raiders](../../dm/games/0400380020056000/README.md) (the same key, `68bbe98b3bfd9876`) and [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) have BAHS rows and were not split again: their tables still list what the rule drops, so the split's check against the profile stops until someone with the game files commits new ones.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) and [Mario Kart World](../../dm/games/0400C3F00006E000/README.md).
+
 ### Zstd files recognised by their magic
 
 - **Symptom:** `shader_split.py` finds 0 shaders in a RomFS of zstd files named `.zst`.

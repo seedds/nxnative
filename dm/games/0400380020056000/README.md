@@ -43,6 +43,7 @@ The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots i
 
 ## Found on this game
 
+- [A control section's own lengths taken for a BAHS entry](../../../docs/reference/shaders.md#a-control-sections-own-lengths-taken-for-a-bahs-entry): the instruction 0x481 failure above. Open: the rule drops at least `68bbe98b3bfd9876`, and this profile's tables need a new split on the game files.
 - [Naming the shaders of a GPU fault](../../../docs/reference/rendering.md#naming-the-shaders-of-a-gpu-fault): added for the address fault above, which names no pass.
 - [Compatible views for a mismatched declared texture type](../../../docs/reference/rendering.md#compatible-views-for-a-mismatched-declared-texture-type): resolved, a cube in a cube array slot. `d0ce73e71074df85_b` (NigoProc, layer index a literal 0) read texture ID 428 as `texture type mismatch … declares slot 0 as Metal type 6, … is type 5`, 180 binds at frame 0 and none after. With the view the count is 0. The opening looks the same, though the two runs are not frame-aligned, so no pixel comparison was possible.
 - [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles): NigoProc's `800215a0f8d0c44d` is a mesh shader, and every pack stopped until its row was split again ([issue #1263](https://github.com/seedds/nxnative/issues/1263)).

@@ -185,6 +185,8 @@ def bahs_shaders(d, label):
     if region + rsz > len(d): red(f'{label} BAHS code region out of bounds')
     out = []
     for a in range(0, region - 16, 4):
+        # An NVN2 control section's own lengths at +0x38 read as an entry when its instructions fill the code area (n, 0, n, n), and a + n may land on another control section: not a table slot
+        if a >= 0x38 and nvn2_ctl(d[a - 0x38:a + 0x10]): continue
         off, z, csz, rel = struct.unpack_from('<IIIi', d, a)
         nvn2 = 0x48 <= csz < 0x10000 and 0 <= a + rel and a + rel + csz <= region and nvn2_ctl(d[a + rel:a + rel + csz])
         # control length: Mario 0x880 / 0x88c, 3D World's BAHS version 9 0x848; NVN2 (Donkey Kong Bananza's agl resources) 0xd8

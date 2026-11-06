@@ -37,7 +37,10 @@ static void commits(void) {
     uint64_t set = g_res.allocatedSize;
     CHECK(atomic_load(&g_guard_set) == set, "after a commit the guard has the set's size");
     uint64_t before = guard_used(); id<MTLBuffer> outside = [g_dev newBufferWithLength:256 << 20 options:MTLResourceStorageModePrivate];
-    CHECK(atomic_load(&g_guard_set) == set && guard_used() >= before + (256 << 20) && outside, "the device's size counts what no set holds");
+    CHECK(atomic_load(&g_guard_set) == set && guard_used() == before && outside, "by default a buffer no set holds does not count (overlapping no-copy buffers would)");
+    setenv("DM_NVN_GUARD_DEVICE", "1", 1); guard_init();
+    CHECK(guard_used() >= before + (256 << 20), "DM_NVN_GUARD_DEVICE=1: the device's size counts what no set holds");
+    unsetenv("DM_NVN_GUARD_DEVICE"); guard_init();
     res_add(b);
     CHECK(g_res.allocatedSize == set, "an addition is not in the set's size before its commit");
     CHECK(atomic_load(&g_guard_set) >= set + (64 << 20), "the guard has it already");

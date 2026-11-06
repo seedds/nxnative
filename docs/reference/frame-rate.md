@@ -52,6 +52,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) 1.9.0 on the Mac ([issue #636](https://github.com/seedds/nxnative/issues/636)). It also replaces [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md)'s movie stubs.
 - **Check:** `make -C dm/host/tests GAME=01007EF00011E000 run` (`t_movie_vpx`: a video picture raises the signal for 0.5 s, an audio output does not); `make -C dm/gfx/tests GAME=01007EF00011E000 check_t_thermal thermal-tsan` (movies against the thermal cap); `t_nvn` (the state page's flag is the host's copy). Open: no game run with the fix yet, in Breath of the Wild or Tears of the Kingdom (the movie at its own speed, `frame step cap 60 → 30 … (movie playing)` at its start and back to 60 after it); Tears of the Kingdom's `main` rewrites with 9 frame-step sites instead of 11.
 
+### A fixed step per frame runs slowly below the target
+
+- **Symptom:** below 60 fps a game plays in slow motion rather than dropping frames: walking, animations and cutscenes slow together, and the sound drifts from the picture.
+- **Cause:** Ocarina of Time's frame loop computes each frame's step as a constant over its target rate and never reads the clock, so one frame is one step however long it took. Found by gunvalk in [zortos293/Lichii PR #216](https://github.com/zortos293/Lichii/pull/216).
+- **Fix:** a stub after the division takes the larger of the game's step and the constant × the measured frame time, from the frame step state page (`nvn_fdelta_next`, written at each present). Under 1.1 frames of 60 fps the game keeps its own step; a stall counts at most 0.1 s, and the frame time stops at 4 frames. `DM_FRAME_DELTA=0` turns it off. The frame rate does not change, and code that uses 1/60 directly still runs slowly.
+- **Check:** `make -C dm/gfx/tests GAME=0400486024DEC000 t_fstep`, then `./dm/gfx/tests/t_fstep`.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (1.1.1).
+
 ### The frame step after a 30 fps cap ends
 
 - **Symptom:** after a 30 fps cap ends (a prerendered movie, the thermal cap), a GPU-bound game stays at 30 fps in a scene that held 60 before the cap; the log shows `frame step cap 30 → 60 fps` and a few frames later `frame step: hold 1 → 2 vsyncs at present … (3 late frames; …)`, with no probe after it.

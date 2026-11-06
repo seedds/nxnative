@@ -360,6 +360,18 @@ int main(void) {
             check(first_len == want[c] && m.s.k == 2 && m.s.failed == 1, b);
         }
     }
+    {   // the frame time a game steps by (nvn_fdelta_next)
+        nvn_fdelta f = {0}; uint64_t t = 1000; float v = 1;
+        check(nvn_fdelta_next(&f, t) == 0, "frame time: the first present has none");
+        for (int i = 0; i < 20; i++) v = nvn_fdelta_next(&f, t += 16666667);
+        check(v == 0, "frame time: 0 at 60 fps, the game's own step");
+        for (int i = 0; i < 20; i++) v = nvn_fdelta_next(&f, t += 50000000);
+        check(fabsf(v - 0.05f) < 0.0001f, "frame time: 50 ms at 20 fps");
+        v = nvn_fdelta_next(&f, t += 2000000000);
+        check(v > 0.05f && v < 0.0625f, "frame time: a 2 s stall counts 0.1 s in the mean");
+        for (int i = 0; i < 20; i++) v = nvn_fdelta_next(&f, t += 200000000);
+        check(fabsf(v - 4.0f / 60) < 0.0001f, "frame time: stops at 4 frames of 60 fps");
+    }
     printf("== %d checks, %d failed ==\n", checks, fail);
     return fail != 0;
 }

@@ -1,0 +1,33 @@
+# Super Mario Bros. Wonder – Nintendo Switch 2 Edition + Meetup in Bellabel Park
+
+Nintendo Switch 2 Edition, **Program 1** (`040015100B514001`) of the Switch 1 application `010015100B514000`, **v327680**, display version **1.2.1**, SDK **21 (Ounce)**, **NVN2**, Nintendo EPD (sead / agl / gsys). The Bellabel Park add-on content uses DLC `010015100B515001`, update **v131072**. This is a *different* executable and shader set from the original Switch 1 [Wonder](../010015100B514000/README.md); the existing Switch 1 profile and its builds must not be changed.
+
+## What the profile needs
+
+- The Edition executable's Program 1 has `main=ec47e6f8846d2a7b6892e2682845c725`, `subsdk0=3fddebac0ad5c3f9e018dcadca9e55ed` and `sdk=31945f745022d0232d2562252641b3d3`. `modules main subsdk0 sdk` follows its own imports. This profile registers **only** that build. Other Edition builds need a fresh binary survey and new shader facts.
+- `mem_reserve 0x278000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0x240000000`, and `sys_resource 0x1000000` reflect the Edition's large memory layout. Its SDK requested a roughly 4.94 GiB heap, and the NPDM declares a 16 MiB system resource. Do not reuse Switch 1's memory partition.
+- `render_cond on` is **required**. The Edition uses NVN conditional rendering to suppress a second shadow-mask clear. Without it, the host performs the later zero clear even when the predicate forbids it: the R8 mask subsequently downscales black instead of white, making the fountain and ground incorrectly dark. A/B GPU pass captures found the earliest mismatch in the first shadow-mask producers, and the profile's conditional-render setting restored the Switch 1 reference coloring.
+- `shader_versions v327680`, the 30,633-entry Program 1 shader map, `pso_pairs.tsv` and the game's own shader facts are separate from the Switch 1 title. The build must translate them for the **current** `DMSH_CHAIN`; older experimental Mac shader libraries cannot be reused after a chain update.
+
+## Input and dependencies
+
+The source is the owner's **extracted** update-only folder, `updates/327680/program/0/{exefs,...}` and `updates/327680/program/1/{exefs,romfs,control}`, with Program 1 selected; the new Bellabel DLC lives under `dlc/010015100b515001/0/updates/131072/program/0/romfs`. The original official Edition title and 384-pixel icon are in `program/1/control/Acd_1/`. Do not commit those game files, any decrypted executable, shaders or extracted resources to nxnative.
+
+- **Prerequisite:** upstream [PR #1253](https://github.com/seedds/nxnative/pull/1253), or its equivalent, makes the dump packer understand `program/<n>` and an update-only Edition layout. Until that change lands, an unmodified upstream builder cannot pack this folder, even though the profile is present.
+- SDK 21's movie output additionally calls `GetVirtualOutputDeviceProperties` and an `OpenOutputStream` overload without flags. The separate [draft PR #1561](https://github.com/seedds/nxnative/pull/1561) supplies the missing general host hooks.
+- [Draft PR #1562](https://github.com/seedds/nxnative/pull/1562) imports the Nintendo Control NCA and Acd_1 Edition title/icon automatically once Program 1's extracted folder can be selected; this is preferable to a manually entered app label or the Switch 1 icon.
+- Offline Mac packaging and the resource-size-table issue below are distinct from recognizing the game: signing or successful packing does not establish a fresh save boot.
+
+## Mac bring-up and what was checked
+
+On a **Mac mini M6, macOS 27.0.1**, the owner's prior *isolated* experimental Edition port (`671c68e1` plus local host/packer modifications, shader chain `adec7d81d970`) displayed the title, reached in-game scenes, and was playtested by the owner through several Wonder courses and Bellabel Park; controller and rumble worked. A later user-confirmed metadata-only patch replaced its provisional window title/icon with the official Edition Control data. **These are historical tests of that older experimental host, not tests of this upstream PR branch.**
+
+A fresh new-game save on the experimental host initially crashed while creating several BFRES models: its guest allocator returned a null pool after a model scratch allocation. A local diagnostic override raised 1,243 non-animation geometry-model sizes by 16 KiB in a runtime resource-size table, without changing the original ROM. Together with host audio hooks and bounded command-memory experiments, this got through Course900 and the online-selection movie and rendered at least 4,200 frames. **The root cause of the native-vs-host allocator discrepancy is still open**; the mass resource-size-table override is diagnostic, not a correct general fix, and is **not** in this repository profile. Do not treat the old app's successful menu/course tests as proof that a clean PR build can create a new save without it.
+
+### Reproduce and validate
+
+After the extracted-dump prerequisite is available, choose **Program 1**, `v327680`, the **v131072** Bellabel DLC, and this `040015100B514001` profile. Test an existing save and a fresh isolated save separately, with the original source game files unchanged. Check the first shadow-mask R8 pass, the new-game movie and audio route, BFRES model allocation, and an in-course rendering screenshot. Capture the Mac log and GPU timings. Re-test on the current shader chain rather than relying on old `adec7d81d970` shader output.
+
+## Open
+
+The root of fresh-New-Game BFRES resource-heap underallocation is not established; the local diagnostic RESTBL override must not be upstreamed as a game-data patch. The Edition dump layout awaits PR #1253 or a replacement. The current PR's **fresh independent build and playtest** are still pending.

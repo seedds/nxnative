@@ -166,6 +166,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Super Mario 3D All-Stars](010049900F546000/README.md) | `010049900F546000` | 1.1.4 | 10.8.1, 9.5.1 | a launcher (sead / agl), [Super Mario 64](010049900F546001/README.md) (Nintendo's N64 layer), [Super Mario Sunshine](010049900F546002/README.md) (NERD's Hagi); Galaxy is 32-bit ARM | NVN, Vulkan |
 | [Super Mario 3D World + Bowser's Fury](010028600EBDA000/README.md) | `010028600EBDA000` | 1.2.2 | 10.4.0 | Nintendo EPD (sead / agl, NintendoWare) | NVN |
 | [Super Mario Bros. Wonder](010015100B514000/README.md) | `010015100B514000` | 1.2.1 (and 1.0.0) | 16.2.12 (1.0.0: 16.2.0) | Nintendo EPD (sead / agl) | NVN |
+| [Super Mario Bros. Wonder – Nintendo Switch 2 Edition + Meetup in Bellabel Park](040015100B514001/README.md) | `040015100B514001` | 1.2.1 (Edition Program 1, v327680) | 21 (Ounce) | Nintendo EPD (sead / agl / gsys) | NVN2 |
 | [Super Mario Galaxy](010099C022B96000/README.md) | `010099C022B96000` | 1.3.1 | 18.3.5 | NERD's Hagi Wii layer (recompiled PowerPC) | Vulkan |
 | [Super Mario Galaxy 2](0100FD8022DAA000/README.md) | `0100FD8022DAA000` | 1.4.0 | 18.3.5 | NERD's Hagi Wii layer (recompiled PowerPC) | Vulkan |
 | [Super Mario Odyssey](0100000000010000/README.md) | `0100000000010000` | 1.4.1 | 7.3.2 | Nintendo EPD (sead / agl, NintendoWare) | NVN |

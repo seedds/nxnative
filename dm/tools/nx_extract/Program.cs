@@ -78,17 +78,24 @@ static class P {
         }
         Fit(new[] { MissingKey(ks, basePkg, a[1]), updPkg == null ? null : MissingKey(ks, updPkg, a[2]) });
         Nca baseProg = Pick(basePkg, NcaContentType.Program, progId) ?? throw new Exception(progId == null ? "no Program NCA in the base NSP" : $"no Program NCA {progId:x16} in the base NSP");
-        if (html) {   // an update's NCA may be a patch of a base game's, which of the program's it does not say: the one it reads with passes the hash check
+        if (html) {   // an update's NCA is read alone, or over a base game's NCA when its header marks the data section a patch (a relocation table); which base NCA it patches the
+                      // header does not say: the one it reads with passes the hash check
             int k = 0; ulong tid = baseProg.Header.TitleId; var bases = basePkg.FindAll(n => n.Header.ContentType == NcaContentType.Manual && n.Header.TitleId == tid);
-            bool Try(Func<IFileSystem> open, string dst) {
-                try { Copy(open, dst, null); return true; }
-                catch (Exception e) when (e is not KeysMissing) { if (Directory.Exists(dst)) Directory.Delete(dst, true); return false; }
+            bool Try(Func<IFileSystem> open, string dst) {   // a read over the wrong base does not throw: each file fails the hash check, which Copy lists and goes on; such a read is undone
+                int damaged = g_damaged.Count;
+                try { Copy(open, dst, null); if (g_damaged.Count == damaged) return true; }
+                catch (Exception e) when (e is not KeysMissing) { }
+                g_damaged.RemoveRange(damaged, g_damaged.Count - damaged);
+                if (Directory.Exists(dst)) Directory.Delete(dst, true);
+                return false;
             }
             foreach (Nca u in updPkg ?? new List<Nca>()) {
                 if (u.Header.ContentType != NcaContentType.Manual || u.Header.TitleId != tid) continue;
                 string dst = Path.Combine(a[3], $"html{k}");
-                if (Try(() => u.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid), dst) || bases.Exists(b => Try(() => b.OpenFileSystemWithPatch(u, NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid), dst))) k++;
-                else Console.WriteLine($"[RED] an HtmlDocument NCA of the update could not be read");
+                bool patch = u.Header.GetFsHeader(Nca.GetSectionIndexFromType(NcaSectionType.Data, u.Header.ContentType)).IsPatchSection();
+                if (!patch) { Copy(() => u.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid), dst, null); k++; }   // a full NCA: its damage is the NSP's
+                else if (bases.Exists(b => Try(() => b.OpenFileSystemWithPatch(u, NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid), dst))) { Console.WriteLine($"{dst}: a patch of the base game's NCA"); k++; }
+                else Console.WriteLine($"[RED] an HtmlDocument NCA of the update patches none of the base game's: read over each, it fails the hash check");
             }
             foreach (Nca b in bases) Copy(() => b.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid), Path.Combine(a[3], $"html{k++}"), null);
             Console.WriteLine($"{k} HtmlDocument NCAs");

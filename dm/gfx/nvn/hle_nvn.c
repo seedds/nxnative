@@ -135,8 +135,9 @@ HLE_FORCE("nvnBootstrapLoader", "the NVN graphics API is replaced wholesale with
 // table and the driver constants' buffer tables (nvn_mtl.m). A CPU access through a moved address faults: the handler counts it by pc, moves the base register back and lets the instruction
 // run again, so play goes on. A CPU address handed where a GPU one belongs is counted by caller. Reported every 10 s as [gpushift] lines. Off: nothing changes
 extern uint64_t nvn_gs_lo, nvn_gs_len, nvn_gs_shift;   // nvn_mtl.m: the shadow [lo, lo + len) = the guest block moved by shift; len 0 = off
-__attribute__((weak)) int dm_guest_as_contains(uintptr_t a);           // hle_svc.c (weak: the graphics unit tests have no guest block and never turn the shift on)
-__attribute__((weak)) void svc_guest_range(uint8_t **base, size_t *size);
+// hle_svc.c's; these weak stand-ins serve the graphics unit tests, which have no guest block
+__attribute__((weak)) int dm_guest_as_contains(uintptr_t a) { (void)a; return 0; }
+__attribute__((weak)) void svc_guest_range(uint8_t **base, size_t *size) { *base = NULL; *size = 0; }
 enum { GS_N = 128 };
 static struct { _Atomic uint64_t pc; _Atomic uint64_t n; _Atomic uint64_t addr; uint64_t said; } g_gs_fault[GS_N], g_gs_cpu[GS_N];   // by pc: CPU accesses through a moved address; CPU addresses handed in
 static _Atomic uint64_t g_gs_out, g_gs_outside, g_gs_fault_lost, g_gs_cpu_lost;
@@ -186,14 +187,19 @@ static void *gs_report(void *arg) {
         sleep(10);
         gs_report_table(g_gs_fault, "CPU access through a GPU address");
         gs_report_table(g_gs_cpu, "CPU address handed where NVN takes a GPU address");
-        LOG("[gpushift] so far: %llu GPU addresses handed out, %llu of them outside the guest block (not moved); untracked pcs %llu / %llu", (unsigned long long)g_gs_out,
-            (unsigned long long)g_gs_outside, (unsigned long long)g_gs_fault_lost, (unsigned long long)g_gs_cpu_lost);
+        LOG("[gpushift] so far: %llu GPU addresses handed out, %llu of them %s; untracked pcs %llu / %llu", (unsigned long long)g_gs_out,
+            (unsigned long long)g_gs_outside, mtl_gva_on() ? "CPU addresses (a pool with no GPU address: sparse)" : "outside the guest block (not moved)", (unsigned long long)g_gs_fault_lost, (unsigned long long)g_gs_cpu_lost);
+        if (mtl_gva_on()) { int n; uint64_t lo, hi; mtl_gva_stats(&n, &lo, &hi); LOG("[gpushift] GPU address table: %d buffers, %#llx..%#llx", n, (unsigned long long)lo, (unsigned long long)hi); }
     }
     return NULL;
 }
 static void gs_init_once(void) {
+    if (mtl_gva_on()) {   // DM_NVN_GPUVA_DIRECT: the counts and the report only (Metal's addresses are not mapped on the CPU: a CPU access through one is a crash, whose report shows it)
+        pthread_t th; if (!pthread_create(&th, NULL, gs_report, NULL)) pthread_detach(th);
+        LOG("[gpushift] DM_NVN_GPUVA_DIRECT: NVN hands out Metal's GPU addresses"); return;
+    }
     const char *e = getenv("DM_NVN_GPUVA_SHIFT"); if (!e || !atoi(e)) return;
-    uint8_t *as = NULL; size_t n = 0; if (svc_guest_range && dm_guest_as_contains) svc_guest_range(&as, &n);
+    uint8_t *as = NULL; size_t n = 0; svc_guest_range(&as, &n);
     if (!as || !n) { LOG("[RED] [gpushift] no guest block yet: off"); return; }
     // The shadow goes right past the guest block if it is free there, so moved addresses stay below 2^40 (NVN's reach, and the raw pool table's hints)
     uintptr_t want = ((uintptr_t)as + n + (2u << 20) - 1) & ~(uintptr_t)((2u << 20) - 1);
@@ -213,14 +219,26 @@ static uint64_t gs_out(uint64_t a) {   // a GPU address NVN hands the game
     return a + nvn_gs_shift;
 }
 static uint64_t gs_in(uint64_t a, void *caller) {   // a GPU address the game hands NVN
+    if (mtl_gva_on()) { uint64_t c; if (mtl_gva_back(a, &c)) return c;
+        if (a && dm_guest_as_contains((uintptr_t)a)) gs_count(g_gs_cpu, &g_gs_cpu_lost, (uint64_t)(uintptr_t)caller, a);
+        return a; }
     if (!nvn_gs_len) return a;
     if (a - nvn_gs_lo < nvn_gs_len) return a - nvn_gs_shift;
     if (a && dm_guest_as_contains((uintptr_t)a)) gs_count(g_gs_cpu, &g_gs_cpu_lost, (uint64_t)(uintptr_t)caller, a);
     return a;
 }
+static uint64_t pool_addr(const pool_t *p, uint64_t off) {   // the GPU address of a pool's byte off, as NVN hands it out
+    if (!mtl_gva_on()) return gs_out((uint64_t)(uintptr_t)(p->mem + off));
+    gs_init(); atomic_fetch_add(&g_gs_out, 1);
+    if (!p->mem) return 0;
+    uint64_t g = mtl_pool_gva(p->mem); if (g) return g + off;   // the pool's own buffer, so the game's offsets from it stay in it
+    uint64_t c = (uint64_t)(uintptr_t)(p->mem + off); g = mtl_gva_fwd(c);   // a virtual pool aliased into a physical one, or a sparse one's run: the buffer holding that byte
+    if (g == c) { atomic_fetch_add(&g_gs_outside, 1); static int once; if (!once++) LOG("[RED] [gpushift] DM_NVN_GPUVA_DIRECT: pool %p at %p has no GPU address (a sparse virtual pool not mapped there?): its CPU address is handed out", (const void *)p, (void *)p->mem); }
+    return g;
+}
 #define GA(a) gs_in((a), __builtin_return_address(0))
 #define GA_RANGES(rg, n, tmp) const NVNbufferRange *rg##_in = (rg); NVNbufferRange tmp[(n) > 0 && (n) <= 64 ? (n) : 1]; \
-    if (nvn_gs_len && (n) > 0 && (n) <= 64) { for (int k_ = 0; k_ < (n); k_++) { tmp[k_] = rg##_in[k_]; tmp[k_].address = GA(rg##_in[k_].address); } rg = tmp; }
+    if ((nvn_gs_len || mtl_gva_on()) && (n) > 0 && (n) <= 64) { for (int k_ = 0; k_ < (n); k_++) { tmp[k_] = rg##_in[k_]; tmp[k_].address = GA(rg##_in[k_].address); } rg = tmp; }
 
 // ---------- Device ----------
 NVN(nvnDeviceBuilderSetDefaults, void, NVNdeviceBuilder *b) { memset(b, 0, sizeof(dev_builder_t)); }
@@ -372,7 +390,7 @@ NVN(nvnMemoryPoolFlushMappedRange, void, const NVNmemoryPool *p, ptrdiff_t off, 
 }
 // A GPU address exists only once the driver has given one: here, by a buffer (nvnBufferInitialize) or by a texture (nvnTextureGetTextureAddress). Raw global memory can reach only what these name (mtl_pool_addressed)
 static void pool_mark_addressed(const pool_t *o) { static __thread const uint8_t *last; if (o->mem && o->mem != last) { last = o->mem; mtl_pool_addressed(o->mem, o->size); } }
-NVN(nvnMemoryPoolGetBufferAddress, NVNbufferAddress, const NVNmemoryPool *p) { pool_mark_addressed((const pool_t *)p); return (NVNbufferAddress)gs_out((uint64_t)(uintptr_t)((const pool_t *)p)->mem); }
+NVN(nvnMemoryPoolGetBufferAddress, NVNbufferAddress, const NVNmemoryPool *p) { pool_mark_addressed((const pool_t *)p); return (NVNbufferAddress)pool_addr((const pool_t *)p, 0); }
 
 // ---------- Descriptor pools ----------
 // One ID space per pool. In NVN a texture or sampler ID indexes the pool the command buffer has bound (SetTexturePool / SetSamplerPool), and two pools may use the same IDs. The replay keeps
@@ -714,7 +732,7 @@ NVN(nvnTextureGetSamples, int, const NVNtexture *t) { return CTX(t)->d.samples; 
 NVN(nvnTextureGetMemoryPool, NVNmemoryPool *, const NVNtexture *t) { return (NVNmemoryPool *)CTX(t)->pool; }
 NVN(nvnTextureGetMemoryOffset, ptrdiff_t, const NVNtexture *t) { return (ptrdiff_t)CTX(t)->off; }
 // The GPU address of the texture's storage (DRAGON QUEST XI S, Unreal Engine 4.18, asks for it at start): pool address + offset, the same address space as nvnMemoryPoolGetBufferAddress
-NVN(nvnTextureGetTextureAddress, NVNtextureAddress, const NVNtexture *t) { const tex_t *o = CTX(t); if (o->pool) mtl_pool_addressed(o->pool->mem + o->off, o->L.size ? o->L.size : 1); return o->pool ? (NVNtextureAddress)gs_out((uint64_t)(uintptr_t)(o->pool->mem + o->off)) : 0; }
+NVN(nvnTextureGetTextureAddress, NVNtextureAddress, const NVNtexture *t) { const tex_t *o = CTX(t); if (o->pool) mtl_pool_addressed(o->pool->mem + o->off, o->L.size ? o->L.size : 1); return o->pool ? (NVNtextureAddress)pool_addr(o->pool, (uint64_t)o->off) : 0; }
 // The size of a texture's ZCull save area (SaveZCullData / RestoreZCullData). The host does no ZCull and never touches the area, but games allocate it from their own pools, and NVN
 // does not report 0. Cuphead (Unity 2017.4) allocates one per depth target (main+0x1948060) from its pool allocator, which gives a zero-size request the offset of a live block; its
 // map of allocations then loses that block (the zero-size one's size overwrites it, and freeing the zero-size one deletes it), and the block's own free later pushes a garbage-sized
@@ -887,7 +905,7 @@ int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
 NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData *sd) {
     prog_t *o = (prog_t *)p;
     if (n < 0 || n > 6) { LOG("[RED] ProgramSetShaders stage count %d", n); return 0; }
-    NVNshaderData sd_gs[6]; if (nvn_gs_len) { for (int i = 0; i < n; i++) { sd_gs[i] = sd[i]; sd_gs[i].data = GA(sd[i].data); } sd = sd_gs; }   // DM_NVN_GPUVA_SHIFT
+    NVNshaderData sd_gs[6]; if (nvn_gs_len || mtl_gva_on()) { for (int i = 0; i < n; i++) { sd_gs[i] = sd[i]; sd_gs[i].data = GA(sd[i].data); } sd = sd_gs; }   // DM_NVN_GPUVA_SHIFT
     pthread_mutex_lock(&g_sub_mu); mtl_prog_release(o); pthread_mutex_unlock(&g_sub_mu);
     o->nstage = n; memcpy(o->sd, sd, n * sizeof *sd); o->serial = nvn_new_serial();
     // The keys are computed here (see prog_key in nvn_obj.h): the control section is only guaranteed valid during this call; the code area lives in a memory pool and stays valid while the program is in use
@@ -2351,7 +2369,7 @@ NVN(nvnBufferInitialize, NVNboolean, NVNbuffer *buf, const NVNbufferBuilder *b) 
 }
 NVN(nvnBufferFinalize, void, NVNbuffer *buf) { ((buf_t *)buf)->magic = 0; }
 NVN(nvnBufferSetDebugLabel, void, NVNbuffer *buf, const char *s) { (void)buf; (void)s; }
-NVN(nvnBufferGetAddress, NVNbufferAddress, const NVNbuffer *buf) { return (NVNbufferAddress)gs_out((uint64_t)(uintptr_t)(BF(buf)->pool->mem + BF(buf)->off)); }
+NVN(nvnBufferGetAddress, NVNbufferAddress, const NVNbuffer *buf) { return (NVNbufferAddress)pool_addr(BF(buf)->pool, (uint64_t)BF(buf)->off); }
 // A buffer or pool the CPU has no access to (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) maps to NULL, as in NVN, though the host's storage is CPU memory: EA SPORTS FC 27's Frostbite
 // renderer takes a buffer's GPU address as GetAddress + (its data pointer − Map), with a null data pointer for such a buffer (OpcodeCopySubresource), so a real pointer made the
 // copy's destination address 0 (FATAL buffer copy address is in no memory pool)

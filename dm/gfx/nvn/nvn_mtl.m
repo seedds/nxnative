@@ -709,21 +709,59 @@ static void pool_res(int i) {
 // pools' buffers do at shared pages; GPU addresses are not contiguous across them, so a lookup must say how far it reads. One that does not know (length 1: an indirect draw's index buffer, a raw storage
 // address) gets BIG_UNKNOWN past its address. Raw global memory, whose pool table the shader walks by itself, takes the whole pool: big_full
 enum { BIG_MIN = 512u << 20, BIG_S = 16u << 20, BIG_UNKNOWN = 64u << 20, BIG_MAX = 32 };
-typedef struct { uintptr_t lo, hi, a, b; const void *mem; int *chunk, full; NSMutableArray *old; } big_pool;   // chunk: stride → g_pools index + 1; full: the whole pool's entry + 1; old: buffers a longer chunk replaced, alive with the pool
+typedef struct { uintptr_t lo, hi, a, b; const void *mem; int *chunk, full; NSMutableArray *old; id<MTLBuffer> va; int va_res; } big_pool;   // va, va_res: DM_NVN_GPUVA_DIRECT's buffer over the whole pool, resident only once raw global memory may reach it   // chunk: stride → g_pools index + 1; full: the whole pool's entry + 1; old: buffers a longer chunk replaced, alive with the pool
 static big_pool g_big[BIG_MAX]; static int g_nbig;
 static id<MTLBuffer> pool_buf(uintptr_t a, uintptr_t b);   // a pool's zero-copy buffer over [a, b), made over writable pages (beside the GPU-written storage spans below)
 static int big_of(uint64_t addr) { for (int i = 0; i < g_nbig; i++) if (addr >= g_big[i].lo && addr < g_big[i].hi) return i; return -1; }
-void mtl_pool_add(const void *mem, uint64_t size) {
+// ---------- DM_NVN_GPUVA_DIRECT=1 (prototype): NVN hands the game Metal's own GPU addresses ----------
+// A pool's GPU address is its no-copy buffer's (a large pool's: a buffer over all of it that only gives the addresses, resident only once raw global memory may reach the pool, as big_full
+// did; its chunks still serve the bindings). An address the game hands back is mapped to the CPU through this table, sorted by GPU address (Metal's ranges never overlap). Meant for shaders
+// that read raw global memory through the address itself, without the pool table's search; with the old shaders the table holds GPU ranges with a delta of 0
+typedef struct { uint64_t glo, ghi, cpu; const void *key; } gva_ent;
+static gva_ent *g_gva; static int g_ngva, g_gva_cap; static os_unfair_lock g_gva_lk = OS_UNFAIR_LOCK_INIT;
+static _Atomic uint64_t g_gva_min = ~0ull, g_gva_max;
+static nvn_hmap g_gva_key = {.klen = 8};   // pool start (mtl_pool_add's mem) → its GPU address, under g_gva_lk
+int mtl_gva_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_GPUVA_DIRECT"); v = e && atoi(e) ? 1 : 0; } return v; }
+static void gva_add(uint64_t glo, uint64_t len, uint64_t cpu, const void *key, uint64_t key_gpu) {
+    os_unfair_lock_lock(&g_gva_lk);
+    nvn_hm_put(&g_gva_key, &key, (void *)(uintptr_t)key_gpu);
+    if (g_ngva == g_gva_cap) { g_gva_cap = g_gva_cap ? g_gva_cap * 2 : 256; g_gva = realloc_or_die(g_gva, (size_t)g_gva_cap * sizeof *g_gva, "the GPU address table"); }
+    int a = 0, b = g_ngva; while (a < b) { int m = (a + b) / 2; if (g_gva[m].glo < glo) a = m + 1; else b = m; }
+    memmove(g_gva + a + 1, g_gva + a, (size_t)(g_ngva - a) * sizeof *g_gva); g_gva[a] = (gva_ent){glo, glo + len, cpu, key}; g_ngva++;
+    if (glo < g_gva_min) g_gva_min = glo; if (glo + len > g_gva_max) g_gva_max = glo + len;
+    os_unfair_lock_unlock(&g_gva_lk);
+}
+static void gva_del(const void *key) {
+    os_unfair_lock_lock(&g_gva_lk);
+    nvn_hm_del(&g_gva_key, &key);
+    int n = 0; for (int i = 0; i < g_ngva; i++) if (g_gva[i].key != key) g_gva[n++] = g_gva[i];
+    g_ngva = n; os_unfair_lock_unlock(&g_gva_lk);
+}
+int mtl_gva_back(uint64_t g, uint64_t *cpu) {   // a GPU address the game holds → the CPU address; 0 when it is none of the pools'
+    if (g < g_gva_min || g >= g_gva_max) return 0;
+    int hit = 0; os_unfair_lock_lock(&g_gva_lk);
+    int a = 0, b = g_ngva; while (a < b) { int m = (a + b) / 2; if (g_gva[m].glo <= g) a = m + 1; else b = m; }
+    if (a > 0 && g < g_gva[a - 1].ghi) { *cpu = g_gva[a - 1].cpu + (g - g_gva[a - 1].glo); hit = 1; }
+    os_unfair_lock_unlock(&g_gva_lk); return hit;
+}
+uint64_t mtl_pool_gva(const void *mem) { os_unfair_lock_lock(&g_gva_lk); uint64_t g = (uint64_t)(uintptr_t)nvn_hm_get(&g_gva_key, &mem); os_unfair_lock_unlock(&g_gva_lk); return g; }
+void mtl_gva_stats(int *n, uint64_t *lo, uint64_t *hi) { os_unfair_lock_lock(&g_gva_lk); *n = g_ngva; *lo = g_gva_min; *hi = g_gva_max; os_unfair_lock_unlock(&g_gva_lk); }
+static int big_key(const void *key) { for (int k = 0; k < g_nbig; k++) if (g_big[k].mem == key) return 1; return 0; }   // caller holds g_mu
+uint64_t mtl_pool_add(const void *mem, uint64_t size) {   // → the GPU address of mem under DM_NVN_GPUVA_DIRECT, else 0
     mtl_init();   // the change is recorded once the pool can be found (reg_bump below): a reader that sees the new generation sees the pool
     uintptr_t pg = (uintptr_t)getpagesize(), lo = (uintptr_t)mem, hi = lo + size;
     uintptr_t a = lo & ~(pg - 1), b = (hi + pg - 1) & ~(pg - 1);
     static int chunks = -1; if (chunks < 0) { const char *e = getenv("DM_NVN_POOL_CHUNKS"); chunks = !e || atoi(e); }
     if (size >= BIG_MIN && chunks) {
         pthread_mutex_lock(&g_mu); int k = g_nbig < BIG_MAX ? g_nbig : -1;
-        if (k >= 0) { int *ch = calloc(((b - a) >> 24) + 1, sizeof *ch); if (!ch) MDIE("pool chunk table"); g_big[g_nbig++] = (big_pool){lo, hi, a, b, mem, ch, 0, [NSMutableArray array]};
+        id<MTLBuffer> va = nil;
+        if (k >= 0 && mtl_gva_on()) { va = [g_dev newBufferWithBytesNoCopy:(void *)a length:b - a options:MTLResourceStorageModeShared deallocator:nil]; if (!va) MLOG("[RED] memory pool %p: the buffer for its GPU addresses was refused", mem); }
+        if (k >= 0) { int *ch = calloc(((b - a) >> 24) + 1, sizeof *ch); if (!ch) MDIE("pool chunk table"); g_big[g_nbig++] = (big_pool){lo, hi, a, b, mem, ch, 0, [NSMutableArray array], va, 0};
             g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1); g_pool_adds++; atomic_fetch_add(&g_big_n, 1); }
         pthread_mutex_unlock(&g_mu);
-        if (k >= 0) { reg_bump(-1, REG_POOL); static int nl; if (nl++ < 8) MLOG("memory pool %p+%llu MB: in chunks, wired as far as lookups reach", mem, (unsigned long long)(size >> 20)); return; }
+        if (k >= 0) { reg_bump(-1, REG_POOL); static int nl; if (nl++ < 8) MLOG("memory pool %p+%llu MB: in chunks, wired as far as lookups reach", mem, (unsigned long long)(size >> 20));
+            if (!va) return 0;
+            gva_add(va.gpuAddress, b - a, a, mem, va.gpuAddress + (lo - a)); return va.gpuAddress + (lo - a); }
     }
     id<MTLBuffer> buf = pool_buf(a, b);
     // Pokémon Legends: Z-A: twice on the Mac a small pool's buffer was refused although its pages were one read-write VM region, both times while another heavy job (a shader compile,
@@ -750,6 +788,8 @@ void mtl_pool_add(const void *mem, uint64_t size) {
     [g_keep addObject:buf];
     pthread_mutex_unlock(&g_mu);
     reg_bump(-1, REG_POOL);
+    if (!mtl_gva_on()) return 0;
+    gva_add(buf.gpuAddress, b - a, a, mem, buf.gpuAddress + (lo - a)); return buf.gpuAddress + (lo - a);
 }
 
 static void big_moved(int i) {   // caller holds g_mu: entry i has a new index
@@ -776,10 +816,12 @@ void mtl_pool_del(const void *mem) {
             i--; }
     if (bg >= 0) {
         for (id<MTLBuffer> b in g_big[bg].old) defer_obj_release(b);
+        if (g_big[bg].va) { if (g_big[bg].va_res) g_pool_res_n--; defer_obj_release(g_big[bg].va); g_big[bg].va = nil; }
         free(g_big[bg].chunk); g_big[bg] = g_big[--g_nbig]; g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1); atomic_fetch_sub(&g_big_n, 1);
     }
     }
     pthread_mutex_unlock(&g_mu);
+    if (mtl_gva_on()) gva_del(mem);
 }
 
 // Address → pool: the last hit first, then a binary search over indices sorted by start address, and a full linear scan only when that fails (pools overlapping).
@@ -9413,10 +9455,17 @@ static id<MTLBuffer> g_gmem_buf; static uint64_t g_gmem_gen;
 // DM_NVN_GPUVA_SHIFT (hle_nvn.c): the game sees guest-block addresses moved by nvn_gs_shift. What a shader reads is the game's view: the pool table's ranges and the driver constants'
 // buffer tables are moved forward (gs_fwd); an address the host reads from the game's memory is moved back (gs_back)
 uint64_t nvn_gs_lo, nvn_gs_len, nvn_gs_shift;   // set by hle_nvn.c gs_init; 0 = off
-__attribute__((weak)) int dm_guest_as_contains(uintptr_t a);   // hle_svc.c (absent from the graphics unit tests, which never turn the shift on)
+int dm_guest_as_contains(uintptr_t a);   // hle_svc.c (hle_nvn.c has a weak stand-in for the graphics unit tests)
 static int gs_row_cmp(const void *a, const void *b) { uint64_t x, y; memcpy(&x, a, 8); memcpy(&y, b, 8); return x < y ? -1 : x > y; }
-static inline uint64_t gs_fwd(uint64_t a) { return nvn_gs_len && a && dm_guest_as_contains((uintptr_t)a) ? a + nvn_gs_shift : a; }
-static inline uint64_t gs_back(uint64_t a) { return nvn_gs_len && a - nvn_gs_lo < nvn_gs_len ? a - nvn_gs_shift : a; }
+uint64_t mtl_gva_fwd(uint64_t cpu) {   // DM_NVN_GPUVA_DIRECT: the GPU address the game holds for a CPU one (a large pool's from its address buffer)
+    uint64_t g = 0; pthread_mutex_lock(&g_mu);
+    int b = big_of(cpu);
+    if (b >= 0) { if (g_big[b].va) g = g_big[b].va.gpuAddress + (cpu - g_big[b].a); }
+    else { int i = pool_find(cpu, 1); if (i >= 0) g = g_pools[i].gpu + (cpu - g_pools[i].base); }
+    pthread_mutex_unlock(&g_mu); return g ? g : cpu;
+}
+static inline uint64_t gs_fwd(uint64_t a) { if (!a) return a; if (mtl_gva_on()) return mtl_gva_fwd(a); return nvn_gs_len && dm_guest_as_contains((uintptr_t)a) ? a + nvn_gs_shift : a; }
+static inline uint64_t gs_back(uint64_t a) { uint64_t c; if (mtl_gva_on()) return mtl_gva_back(a, &c) ? c : a; return nvn_gs_len && a - nvn_gs_lo < nvn_gs_len ? a - nvn_gs_shift : a; }
 // DM_NVN_GPUVA_DIAG=1 (diagnostic, for a design without the lookup): at each rebuild of the table, at most every 10 s, what the raw pool table holds and what two lookup-free schemes would cost.
 // Windows: guest memory cut into fixed windows, each its own no-copy buffer resident when an addressed pool meets it, found by one indexed load; the bytes they cover against the pools' own.
 // Metal GPU addresses: the range Metal gave the pools' buffers, which a scheme handing the game Metal's addresses would expose to it (NVN addresses are 40-bit on the Switch)
@@ -9461,19 +9510,31 @@ static id<MTLBuffer> gmem_map(void) {
     for (int k = 1; k < DMSH_GMEM_MAP_ENTRIES; k++) memset(t + (size_t)k * DMSH_GMEM_MAP_ENTRY, 0xff, 8);
     int n = 1, over = 0; uint64_t end = 0;
     pthread_mutex_lock(&g_mu);
-    for (int k = 0; k < g_nbig; k++) if (!g_big[k].full && addr_meets(g_big[k].lo, g_big[k].hi)) { int n = big_new(&g_big[k], g_big[k].a, g_big[k].b, g_big[k].b, 0); if (n >= 0) g_big[k].full = n + 1; }   // the pool table reaches all of a large pool
+    const int gva = mtl_gva_on();
+    for (int k = 0; gva && k < g_nbig; k++) if (g_big[k].va && addr_meets(g_big[k].lo, g_big[k].hi)) {   // DM_NVN_GPUVA_DIRECT: its address buffer, resident from now on
+        big_pool *bp = &g_big[k];
+        if (!bp->va_res) { res_add(bp->va); bp->va_res = 1; g_pool_res_n++; }
+        if (n == DMSH_GMEM_MAP_ENTRIES) { over++; continue; }
+        uint64_t e[3] = {bp->va.gpuAddress + (bp->lo - bp->a), bp->va.gpuAddress + (bp->hi - bp->a), 0}; memcpy(t + (size_t)n++ * DMSH_GMEM_MAP_ENTRY, e, sizeof e);
+    }
+    for (int k = 0; k < g_nbig && !gva; k++) if (!g_big[k].full && addr_meets(g_big[k].lo, g_big[k].hi)) { int n = big_new(&g_big[k], g_big[k].a, g_big[k].b, g_big[k].b, 0); if (n >= 0) g_big[k].full = n + 1; }   // the pool table reaches all of a large pool
     gen = atomic_load(&g_pool_gen); pidx_sort();
     for (int k = 0; k < g_npool; k++) {
         pool_ent *p = &g_pools[g_pidx[k]];
         if (!addr_meets(p->lo, p->hi)) continue;
+        if (gva && big_key(p->key)) continue;   // a large pool's chunks: its address buffer is in the table
         if (!p->res) { res_add(p->buf); p->res = 1; g_pool_res_n++; }
+        if (gva) {   // the pool's own GPU range: Metal's ranges never overlap, so nothing is cut
+            if (n == DMSH_GMEM_MAP_ENTRIES) { over++; continue; }
+            uint64_t e[3] = {p->gpu + (p->lo - p->base), p->gpu + (p->hi - p->base), 0}; memcpy(t + (size_t)n++ * DMSH_GMEM_MAP_ENTRY, e, sizeof e); continue;
+        }
         uint64_t lo = MAX((uint64_t)p->lo, end), hi = p->hi;
         if (lo >= hi) continue;
         if (n == DMSH_GMEM_MAP_ENTRIES) { over++; continue; }
         uint64_t e[3] = {gs_fwd(lo), gs_fwd(lo) + (hi - lo), p->gpu - p->base - (gs_fwd(lo) - lo)}; memcpy(t + (size_t)n++ * DMSH_GMEM_MAP_ENTRY, e, sizeof e); end = hi;
     }
     pthread_mutex_unlock(&g_mu);
-    if (nvn_gs_len && n > 2) qsort(t + DMSH_GMEM_MAP_ENTRY, (size_t)n - 1, DMSH_GMEM_MAP_ENTRY, gs_row_cmp);   // a pool outside the guest block is not moved: keep the table sorted
+    if ((nvn_gs_len || gva) && n > 2) qsort(t + DMSH_GMEM_MAP_ENTRY, (size_t)n - 1, DMSH_GMEM_MAP_ENTRY, gs_row_cmp);   // a pool outside the guest block is not moved: keep the table sorted
     // Each 2 MiB chunk wholly inside an entry gets a hint, so most accesses skip the binary search. A colliding chunk replaces the hint and the shader's tag check sends the other to the search
     for (int k = 1; k < n; k++) {
         const uint64_t *e = (const uint64_t *)(t + (size_t)k * DMSH_GMEM_MAP_ENTRY);

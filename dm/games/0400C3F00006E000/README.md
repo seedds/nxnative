@@ -1,6 +1,6 @@
 # Mario Kart World (`0400C3F00006E000`)
 
-A Switch 2 game. Brought up on the base game (v0), SDK 19.3.3 built for the Switch 2 (`sdk` names its spec `Ounce`), NVN2 API 231.16. Nintendo EPD's engine (sead / agl / gsys, Phive, Havok, Pia), modules `main`, `subsdk0` (a Mono runtime, `nn::ecli`) and `sdk`. **Reaches a race on the Mac** (M6, 16 GB): the title, the main menu, the Single Player and Grand Prix menus, character, kart, cup and class selection, the Mushroom Cup's opening and the first race of Mario Bros. Circuit at 50cc, driven with items, at 60 fps on that Mac (see [Frame rate](#frame-rate)). Update 1.8.0 is packed from a profile derived from this one; it is not on this Mac and has not been run (see [1.8.0](#180)). iOS is not tested.
+A Switch 2 game. Brought up on the base game (v0), SDK 19.3.3 built for the Switch 2 (`sdk` names its spec `Ounce`), NVN2 API 231.16. Nintendo EPD's engine (sead / agl / gsys, Phive, Havok, Pia), modules `main`, `subsdk0` (a Mono runtime, `nn::ecli`) and `sdk`. **Reaches a race on the Mac** (M6, 16 GB): the title, the main menu, the Single Player and Grand Prix menus, character, kart, cup and class selection, the Mushroom Cup's opening and the first race of Mario Bros. Circuit at 50cc, driven with items, at 60 fps on that Mac (see [Frame rate](#frame-rate)). Update 1.8.0 is also registered and is the default package (see [1.8.0](#180) for its validation and companion fixes). iOS gameplay has not been validated in this contribution.
 
 ## What it needs
 
@@ -10,17 +10,18 @@ A Switch 2 game. Brought up on the base game (v0), SDK 19.3.3 built for the Swit
 | `app_pool 0x240000000`, `mem_reserve 0x320000000`, `mem_alias 0x100000000` | `game.tsv` | the Switch 2's 9 GB, as Donkey Kong Bananza's. `SetHeapSize` asks for 0x1dbc00000 (7.43 GB; 1.8.0 asks 0x1de400000 by pull request #1116), and with a 7.5 GB heap region the first boot stopped there (`SetHeapSize OOM`): an 8 GB heap region. The alias region is mapped up to +1.75 GB by the title |
 | `modules main subsdk0 subsdk1 sdk` | `game.tsv` | the base game has no `subsdk1`; each build row names its own modules ([A version without one of the profile's modules](../../../docs/reference/packing.md#a-version-without-one-of-the-profiles-modules-stops-the-host-at-boot)) |
 | `render_cond on` | `game.tsv` | agl wraps its clears in render conditions, as in Donkey Kong Bananza and Splatoon Raiders; not tried without it here |
+| `tex_flush_upload on`, `tex_dirty_upload on` | `game.tsv` | upload CPU-written terrain and water textures, including writes before initialization and later writes without an NVN flush; the retained-texture handling is in [#1238](https://github.com/seedds/nxnative/pull/1238) |
 | `romfs_marker Movie/StaffRoll_00.webm` | `game.tsv` | a file of both versions' RomFS |
 
 ## Files
 
-- Packed from a dump folder (`base/` only) with [`scripts/pack_dump.py`](../../../scripts/pack_dump.py): 205,902 RomFS entries, 21.7 GB.
-- Shaders: 11,561 in [`shader_map.tsv`](shader_map.tsv) (compute 727, domain 12, pixel 7,261, vertex 3,561), from `Shader/` (bfsha, `Drive.Nin_Ounce_NVN2.release.sarc.zs`), `Lib/` (agl, gsys), `Effect/`, `Layout/` and 40 in `main`.
-- The rewriter (`dm/tools/patch_nso.py`) rewrites the three modules with no cut. The SDK-wide address region rules of `dm/tools/sdk_patches.py` match no function of this `sdk`.
+- Base-game bring-up: packed from a dump folder (`base/` only) with [`scripts/pack_dump.py`](../../../scripts/pack_dump.py): 205,902 RomFS entries, 21.7 GB.
+- The committed 1.8.0 [`shader_map.tsv`](shader_map.tsv) contains 11,601 shaders: 7,301 pixel, 3,546 vertex, 728 compute, 7 task and 19 mesh. Sources include `Shader/`, `Lib/`, `Effect/`, `Layout/` and `main`; the facts and pairing tables describe the same corpus.
+- For v0, the rewriter (`dm/tools/patch_nso.py`) rewrites the three modules with no cut. The SDK-wide address region rules of `dm/tools/sdk_patches.py` match no function of this `sdk`.
 
 ## Shaders
 
-The full Mac build translates all 11,561. Getting there took four things, all general:
+The base-game Mac build translates all 11,561 shaders. Its bring-up needed four general fixes:
 
 - 25 are task and mesh shaders (7 task, 18 mesh), which the split used to file as vertex and domain: [NVN2 task and mesh shaders](../../../docs/reference/shaders.md#nvn2-task-and-mesh-shaders). They draw the bushes and grass tufts beside the track.
 - 8 pixel shaders use UP2UR with masks 8 and 0x40, and one compute shader (`ab77eaee44cfef88`) SURED: [Ampere shader code](../../../docs/reference/shaders.md#ampere-shader-code-switch-2).
@@ -74,7 +75,7 @@ Whole groups of trees and bushes vanished or appeared in one frame while the cam
 
 [Issue #1186](https://github.com/seedds/nxnative/issues/1186): large flat panels in front of the sky on many courses, on the base game and 1.8.0. The vertex shader `90a9a728715fd08b` (`DriveRefreshUber.Procedural`) moves its vertices by a 128x128x5 RGBA16F array, whose `y` reached 1,064 in layer 4 and 1,085 in layer 3 here (14,416 in the report), and stayed under 1 elsewhere. It is not a simulation running away: `8f3581eb40d8ce71` adds to a second array that is cleared every frame, and the large values are drawn into that one. They come from the per-layer task and mesh draws, which read [the dummy buffer](../../../docs/reference/shaders.md#task-and-mesh-draws-reading-the-dummy-buffer) instead of the game's data.
 
-Resolved on the base game, on chain `d5fe9ae8bfba` (M6, 16 GB, another session's game running at the same time): at Crown City the array's `y` stays at or below 0.9 and the sky shots show no panels, and desert scenes checked with an earlier host that remapped the slots show none either. The first race, on the route of `measure.sh`, keeps a frame median of 16.6 to 16.7 ms and a 95th percentile of 17 to 18 ms, with GPU time 7.2 to 7.7 ms and resident memory 11.4 GB. That matches runs from before the fix, so reading real data costs nothing measurable there. One run reached 14 to 15 ms of GPU time and did not repeat. 1.8.0 has not been run here.
+Resolved on the base game, on chain `d5fe9ae8bfba` (M6, 16 GB, another session's game running at the same time): at Crown City the array's `y` stays at or below 0.9 and the sky shots show no panels, and desert scenes checked with an earlier host that remapped the slots show none either. The first race, on the route of `measure.sh`, keeps a frame median of 16.6 to 16.7 ms and a 95th percentile of 17 to 18 ms, with GPU time 7.2 to 7.7 ms and resident memory 11.4 GB. That matches runs from before the fix, so reading real data costs nothing measurable there. One run reached 14 to 15 ms of GPU time and did not repeat. That measurement covers v0; see [1.8.0](#180) for the update.
 
 ## Driving it on the Mac
 
@@ -82,19 +83,37 @@ The work folder `0400C3F00006E000-work` beside the dump has `rewrite.sh`, `rebui
 
 ## 1.8.0
 
-Update 1.8.0 (v917504, SDK 21.4.0) is not on this Mac. Pull request #1116 ported it, and its facts (not its code) went into the host for this profile: the packing of a version with a `subsdk1`, and the Switch 2 services 1.8.0 calls at boot, which the base game does not import (the Nmouse pointer, GameChat's room event and camera storage, the camera context, the graphics system check, the HDR Bezier metadata and its clears; [services.md](../../../docs/reference/services.md#the-camera-through-the-graphics-system)). The NSP script packs it from a profile derived from this one, with its own shader tables. None of it has been run on 1.8.0.
+The profile registers update 1.8.0 (`v917504`, SDK 21.4.0) by the build IDs of `main`, `subsdk0`, `subsdk1` and `sdk`. The default package and shader corpus are `v917504`, so this update uses the repository profile directly. No game-specific runtime patch is added.
 
-## Open
+The v0 build row remains registered with its three-module load order. Selecting v0 makes the packer derive shader tables from v0's own files, even when 1.8.0 is also present: the two shader corpora differ. The committed tables contain hashes, source locations, translation facts and shader pairs, without shader bytecode or game assets.
+
+The combined implementation was tested on M5 Max at 60 fps, with HDR, maximum resolution and Game Mode enabled. Driving through rivers and waterfalls no longer produced the reported one-frame water jumps or fading minimap waves, and the image stayed sharp in motion. The profile depends on the accompanying host and translator fixes; registering the build alone does not provide those rendering corrections.
+
+Companion changes:
+
+- [#1227](https://github.com/seedds/nxnative/pull/1227): dirty-range lookup caching.
+- [#1228](https://github.com/seedds/nxnative/pull/1228): multi-result image-load liveness.
+- [#1232](https://github.com/seedds/nxnative/pull/1232): Ampere memory operations and integer fragment outputs.
+- [#1238](https://github.com/seedds/nxnative/pull/1238): CPU-written and sparse texture coherency.
+- [#1242](https://github.com/seedds/nxnative/pull/1242): compute shared-memory storage.
+- [#1245](https://github.com/seedds/nxnative/pull/1245): queue dependencies, timestamps and resource lifetimes.
+- [#1247](https://github.com/seedds/nxnative/pull/1247): NVN2 task/mesh bindings and packed outputs.
+- [#1249](https://github.com/seedds/nxnative/pull/1249): HDR presentation on macOS and iOS, and restored macOS Game Mode eligibility.
+
+All 11,601 shaders compiled in the integrated 1.8.0 build. The profile checks verify the four module IDs, generated module lists and table consistency. Synthetic packaging tests cover native 1.8.0 selection and v0 shader derivation; a new v0 gameplay run and iOS gameplay are not part of this validation.
+
+## Base-game observations
 
 - **Long frames:** first-use pipeline compiles (no `pso_manifest.tsv` yet).
 - **Shading rate:** the calls are accepted and ignored ([Variable rate shading ignored](../../../docs/reference/rendering.md#variable-rate-shading-ignored)), so every pixel is shaded where the game meant to save GPU time.
-- **Mesh draws:** `DrawMeshTasks3D` and the indirect forms are not implemented; no run reached them.
+- **Mesh draws:** the original v0 bring-up did not reach `DrawMeshTasks3D` or its indirect forms. Their implementation and tests are in [#1247](https://github.com/seedds/nxnative/pull/1247).
 - `649e36162cad9e79`, a foliage shader with an 8x8 local size, keeps a first-invocation race: its setup loops over a uniform's count, so [the host cannot make it as stores](../../../docs/reference/shaders.md#a-store-only-a-dispatchs-first-invocation-makes). Its list's count read 0 in every one of 7,350 traced title frames, so the race had nothing to act on there; whether that list should be empty is not known.
 - The engine class screen offers 50, 100 and 150cc in this build.
 
 ## Found on this game
 
-- [A NUP with complete standalone updates stops at "no base game"](../../../docs/reference/packing.md#a-nup-with-complete-standalone-updates-stops-at-no-base-game) (packing reproduced with the base dump; 1.8.0 gameplay remains untested)
+- [A registered version is outside the committed shader corpus](../../../docs/reference/packing.md#a-registered-version-is-outside-the-committed-shader-corpus)
+- [A NUP with complete standalone updates stops at "no base game"](../../../docs/reference/packing.md#a-nup-with-complete-standalone-updates-stops-at-no-base-game) (base dump and standalone-update packaging)
 - [Large sparse textures as Metal placement sparse textures](../../../docs/reference/nvn-objects.md#large-sparse-textures-as-metal-placement-sparse-textures)
 - [Physical pages mapped at several places of a placement sparse texture](../../../docs/reference/nvn-objects.md#physical-pages-mapped-at-several-places-of-a-placement-sparse-texture)
 - [Large pools wrapped in chunks](../../../docs/reference/nvn-objects.md#large-pools-wrapped-in-chunks)

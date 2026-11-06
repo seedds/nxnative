@@ -1,4 +1,5 @@
-# Mario Kart World (Switch 2). In bring-up: the base game (SDK 19.3.3 built for the Switch 2, Ounce); update 1.8.0 (SDK 21.4.0) is packed from a profile derived from this one
+# Mario Kart World (Switch 2): base v0 (SDK 19.3.3) and update 1.8.0 (SDK 21.4.0).
+# The default package and committed shader tables are for 1.8.0.
 # Nintendo EPD's engine (sead / agl / gsys, Phive, Havok, Pia), NVN2 (Ampere shaders).
 # Packed from a dump folder (base/, updates/<version>/) with scripts/pack_dump.py. Shaders: Shader/*.Nin_Ounce_NVN2.bfsha.zs (BNSH with Ampere code).
 
@@ -14,11 +15,12 @@ pad_layout	full
 
 # ---- Versions ----
 build	v0	v0	main=9e244438c3d8ef1c703a6a85ef99c4f0	subsdk0=d39a7a3d44530bb61b35690e5b0383d5	sdk=90ebba182862b9ecdc21fcb87b999012
-package	v0
-shader_versions	v0
+build	v917504	1.8.0	main=d00e4f399e411d0613aa8d26b1c02fef	subsdk0=746302f49f095cfca3d2188423c2bd77	subsdk1=8dec9c0b1bed821364e77b10a07b9a28	sdk=7a68b13d88183767fb9c7babffe89f3d
+package	v917504
+shader_versions	v917504
 
 # ---- Files ----
-# The base game's subsdk0 is a Mono runtime (nn::ecli); 1.8.0's subsdk0 is the movie player and its subsdk1 a C library (build IDs from pull request #1116, not checked here).
+# The base game's subsdk0 is a Mono runtime (nn::ecli). In 1.8.0, subsdk0 is the movie player and subsdk1 a C library.
 # Each build row names its own modules, and the host loads those of main's build (main.c profile_modules)
 modules	main subsdk0 subsdk1 sdk
 romfs_marker	Movie/StaffRoll_00.webm
@@ -35,9 +37,14 @@ app_pool	0x240000000
 sys_resource	0x4000000
 
 # ---- Shader split (shader_split.py) ----
-shader_groups	/Shader/=shader /Effect/=effect /Lib/=lib /Layout/=layout
+# Lib/ shaders use the default "other" package group in the 1.8.0 tables.
+shader_groups	/Shader/=shader /Effect/=effect /Layout/=layout
 shader_note	Mario Kart World shaders
 
 # ---- Graphics ----
 # agl wraps its clears in render conditions on Donkey Kong Bananza and Splatoon Raiders; the same library here, to be confirmed on this game
 render_cond	on
+
+# Unflushed CPU height/normal tiles, including initial data and late streamed writes.
+tex_flush_upload	on
+tex_dirty_upload	on

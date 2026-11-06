@@ -253,6 +253,13 @@
 - **Fix:** `modules` lists all of them in load order, and each `build` row names its own (`game.py` `build_modules`; a row naming one `modules` lacks is an error). The host loads the modules of the row of `main`'s build, read from the rewriter's `main.fixups.tsv` (`main.c` `profile_modules`, from `DM_GAME_BUILD_MODULES`), and all of `modules` for a build with no row. `build_ipa.sh` takes the same list (`game.py modules <id> <folder>`). The NSP script rewrites, sizes `mem_used` from and splits the modules the packed version's ExeFS holds (`Game.modules_in`), and a derived profile's row names those (`derive_profile`).
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): the base game boots with its three modules from a profile that lists four. Applies to every game. `test_game_profile.py` checks the rows and the list.
 
+### A registered version is outside the committed shader corpus
+
+- **Symptom:** selecting a registered older version while an update is also present stops with `the split shader tables differ from game profile`.
+- **Cause:** the packer checked that all `shader_versions` were available, but not that the selected version belonged to that corpus. Mario Kart World's v0 has 112 shader keys absent from its 1.8.0 tables.
+- **Fix:** when the selected version is outside `shader_versions`, derive tables from that version alone. Its build ID and module list remain registered; 1.8.0 uses its committed tables directly.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md), while registering 1.8.0. `test_nsp_nup.py` covers both versions with and without the other version present, using synthetic packages.
+
 ## Package identification
 
 ### An NSP without a ticket or a title ID in its name stops with "no NSP with a readable title ID"

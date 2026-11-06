@@ -162,6 +162,18 @@ class Nup:
             write = bytearray.extend
         b = Buf(); self.copy(i, b); return bytes(b)
 
+    def head(self, i, n=32):   # file i's first n bytes (fewer for a shorter file), for a survey's RomFS manifest; not checked against the SHA-256, which covers the whole file
+        name, size, sha, eoff, esz, codec = self.files[i]
+        if codec == 0 or not size: return bytes(self.mm[eoff:eoff + min(n, size)])
+        if zstd is None: raise Error('reading a NUP needs the zstd module: compression.zstd (Python 3.14+) or pip install backports.zstd')
+        d, out, p = zstd.ZstdDecompressor(), b'', eoff
+        try:
+            while len(out) < min(n, size) and p < eoff + esz and not d.eof:
+                out += d.decompress(self.mm[p:min(p + (64 << 10), eoff + esz)], max_length=n - len(out)); p += 64 << 10
+                while len(out) < min(n, size) and not d.needs_input and not d.eof: out += d.decompress(b'', max_length=n - len(out))
+        except zstd.ZstdError as e: raise Error(f'{self.path}: {name.decode(errors="replace")}: {e}') from e
+        return out[:n]
+
 
 def program_id(npdm, where):   # the ACI0 program ID of an NPDM
     if npdm[:4] != b'META': raise Error(f'{where}: not an NPDM')

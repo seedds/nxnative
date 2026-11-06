@@ -1488,7 +1488,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             return res;
         }
 
-        // VOTE / VOTEU Rd, Pd, P: Pd = the vote (72..74: all, any, equal) of P (87..90); Rd (a uniform register for VOTEU) the ballot
+        // VOTE Rd, Pd, P / VOTEU URd, UPd, P: Pd (81..84) = the vote (72..74: all, any, equal) of P (87..90), Rd the ballot; VOTEU writes the uniform register and the
+        // uniform predicate. P and the guard are lane predicates in both.
         public static void AVote(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
@@ -1499,7 +1500,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (vote != null)
             {
-                ASetPred(context, x.Bits(81, 84), vote);
+                ASetPred(context, x.Bits(81, 84), vote, toUniform);
             }
 
             int rd = ARd(x, toUniform);

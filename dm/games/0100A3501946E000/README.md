@@ -64,6 +64,7 @@ General changes first needed here; each applies to every game:
 - **Thread stacks from the host's Unreal heap accepted by `MapMemory`** (`dm_ue_heap_owns`): [Thread stacks from the host's Unreal heap](../../../docs/reference/memory.md#thread-stacks-from-the-hosts-unreal-heap).
 - **The SDK-wide 2 MB alignment checked on SDK 12.3.2** (`sdk_patches.py` `MATCH_CUTS`; this build's row removed): [1 GB alignment of regions of 1 GB and more](../../../docs/reference/memory.md#1-gb-alignment-of-regions-of-1-gb-and-more).
 - **Partly tilted sticks in scripted input** (`L<x>/<y>`, `hle_hid.c`) and the host Makefile rebuilding on a change to `dm/gfx/nvn/*.inc` alone.
+- [Handles built under a guard the read's guard cannot be tied to](../../../docs/reference/shaders.md#handles-built-under-a-guard-the-reads-guard-cannot-be-tied-to): 16 of its 13,980 shaders lose a read chosen at run time that was never chosen. Not run.
 
 ## Open
 

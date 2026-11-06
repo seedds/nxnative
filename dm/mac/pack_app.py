@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Pack a self-contained, double-clickable Mac app of a game (the NSP script's --platform mac-app): the launcher (dm/mac/launcher.c, linked here with its settings window,
 # dm/mac/Launcher.swift, and the iOS launcher's model and rows) as CFBundleExecutable, the Mac host beside it,
-# and in Contents/Resources what the IPA carries (dm/ios/tools/build_ipa.sh): romfs.img (the RomFS image), msl/<b-chain | vk | gl>/ (the Mac shader libraries, the folder named as in the IPA),
+# and in Contents/Resources what the IPA carries (dm/ios/tools/build_ipa.sh): romfs.img (the RomFS image), msl/<b-chain.img | vk | gl> (the Mac shader libraries, named as in the IPA),
 # aoc/<index>/ (DLC), pso/ (an NVN game's pipeline archive made offline for this Mac's GPU, dm/gfx/tools/pso_offline.py: the launcher hands it to the host as DM_PSO_BUNDLE),
 # and dm/ (the rewritten modules and their rewriter tables, nro.tsv, the profile's shader_map.tsv / pso_manifest.tsv / c1_full.tsv / cb_extent.tsv / shader_pairs.tsv / pso_pairs.tsv, font/, env.txt,
 # launcher.json: the game's launcher settings, dm/games/settings.py, which the settings window and Mac front ends show),
@@ -18,8 +18,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / 'tools'))
 import romfs as rfs
+import shader_lib
 MODULE_FILES = ('*.patched.bin', '*.fixups.tsv', '*.gates.tsv', '*.cuts.tsv', '*.obs.tsv', '*.changed.tsv', 'nro.tsv')   # what the host reads from the module folder (build_ipa.sh copies the same tables but changed.tsv: the iPhone's cheats never write code)
-MSL_FILES = ('*.metallib', '*.json', '*.tsv')   # what the host reads from msl/ (not the Mac build's .metal sources or _b_build.json)
+MSL_FILES = ('*.metallib', '*.json', '*.tsv')   # what the host reads from msl/ (not the Mac build's .metal sources or _b_build.json); an NVN game's b-<chain> goes in as one file of them (shader_lib.py)
 # read beside DM_NVN_SHMAP; any of them may be absent (a Vulkan or GL game has no c1_full.tsv). The shader pairs are the pipeline prebuild's (nvn_mtl.m pso_prebuild): without them the
 # app makes no pulling bases, a hybrid draw has no stand-in and a new pipeline compiles on the submit thread (build_ipa.sh copies them into the IPA the same way)
 TABLES = ('shader_map.tsv', 'pso_manifest.tsv', 'c1_full.tsv', 'cb_extent.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv')
@@ -183,19 +184,35 @@ def inventory(root):
     return rows
 
 
+def is_chain_library(msl): return shader_lib.name_of(msl).startswith('b-')   # not a Vulkan or GL game's vk / gl, one Metal library with its table
+
+
+def msl_inputs(msl):
+    """The input files of the shader libraries, which the reuse key follows: the library's one file, or the folder's files that go in. [] when no library is among them"""
+    if is_chain_library(msl) and str(shader_lib.view(msl)).endswith('.img'): return [Path(shader_lib.image_of(msl))] if any(n.endswith('.metallib') for n in shader_lib.app_files(msl)) else []
+    files = sorted(p for pat in MSL_FILES for p in Path(msl).glob(pat) if p.is_file() and p.name != '_b_build.json' and not detritus(p.name))
+    return files if any(p.suffix == '.metallib' for p in files) else []
+
+
+def copy_msl(msl, msls, dst, clone):
+    """The shader libraries to dst, msl/<their name> in the app: an NVN game's as the one file dst.img, of what the host reads. Writing it costs the space of a copy, not a clone, as it leaves out the Mac build's sources"""
+    if is_chain_library(msl): shader_lib.subset(msl, f'{dst}.img'); return
+    dst.mkdir(parents=True); copy(msls, dst, clone)
+
+
 def selected_inputs(a):
     """Resolve once: these same lists supply both the reuse key and the copies."""
     for name in ('patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso'):
         p = getattr(a, name)
-        if p and not (rfs.Path(p).is_dir() if name == 'romfs' else Path(p).is_dir()): raise SystemExit(f'no {name} directory at {p}')
+        if p and not (rfs.Path(p).is_dir() if name == 'romfs' else shader_lib.exists(p) if name == 'msl' else Path(p).is_dir()): raise SystemExit(f'no {name} directory at {p}')
     if a.marker and not (rfs.Path(a.romfs) / a.marker).exists(): raise SystemExit(f'no RomFS at {a.romfs} (missing {a.marker})')
     mods = sorted({p for pat in MODULE_FILES for p in Path(a.patched).glob(pat) if not detritus(p.name)})
     if not any(p.name.endswith('.patched.bin') for p in mods): raise SystemExit(f'no rewritten module in {a.patched}')
     for p in mods:
         if p.name.endswith('.patched.bin') and not p.with_name(p.name.removesuffix('.patched.bin') + '.fixups.tsv').is_file():
             raise SystemExit(f'no rewriter fixups for {p}')
-    msls = sorted(p for pat in MSL_FILES for p in Path(a.msl).glob(pat) if p.is_file() and p.name != '_b_build.json' and not detritus(p.name))
-    if not any(p.suffix == '.metallib' for p in msls): raise SystemExit(f'no shader libraries at {a.msl}')
+    msls = msl_inputs(a.msl)
+    if not msls: raise SystemExit(f'no shader libraries at {a.msl}')
     pso = sorted({p for pat in PSO_FILES for p in Path(a.pso).glob(pat) if not detritus(p.name)}) if a.pso else []
     if a.pso and (not any(p.suffix == '.mtl4a' for p in pso) or not (Path(a.pso) / 'prebuilt.tsv').is_file()):
         raise SystemExit(f'no pipeline archive with its prebuilt.tsv in {a.pso}')
@@ -291,6 +308,7 @@ def pack(a):
     # each source is probed on its own, as they may lie on different volumes; cp -c copies what it cannot clone, so a probe decides only the free-space check and the step line
     trees, lists = {'romfs': romfs, 'aoc': aoc}, {'mods': mods, 'msl': msls, 'pso': pso}
     clone = {k: bool(d) and can_clone(d, res) for k, d in trees.items()} | {k: bool(ps) and can_clone(ps[0], res) for k, ps in lists.items()}
+    if is_chain_library(msl): clone['msl'] = False   # copy_msl writes it, which the free-space check below counts
     need = sum(tree_bytes(d) for k, d in trees.items() if d and not clone[k]) + sum(p.stat().st_size for k, ps in lists.items() if not clone[k] for p in ps)
     if need:
         free = shutil.disk_usage(res).free
@@ -304,7 +322,7 @@ def pack(a):
     if fonts: copy(fonts, dm / 'font', False)
     if a.env_file: shutil.copyfile(a.env_file, dm / 'env.txt')
     if a.settings: shutil.copyfile(a.settings, dm / 'launcher.json')
-    step('shader libraries'); msl_dst = res / 'msl' / (a.msl_name or msl.name); msl_dst.mkdir(parents=True); copy(msls, msl_dst, clone['msl'])
+    step('shader libraries'); msl_dst = res / 'msl' / (a.msl_name or msl.name); msl_dst.parent.mkdir(exist_ok=True); copy_msl(msl, msls, msl_dst, clone['msl'])
     if aoc: step('add-on content'); copy([aoc], res / 'aoc', clone['aoc'])
     if pso: step('pipeline archive'); (res / 'pso').mkdir(); copy(pso, res / 'pso', clone['pso'])
     step('game files'); copy([romfs], res / ('romfs.img' if romfs.is_file() else 'romfs'), clone['romfs'])
@@ -315,8 +333,8 @@ def pack(a):
                 '\t'.join(['0', 'exe=@C@/MacOS/dmhost', 'arg=@R@/dm', 'cwd=@S@', f'DM_ROMFS=@R@/{"romfs.img" if romfs.is_file() else "romfs"}', 'DM_MSL_DIR=@R@/msl'] + (['DM_NVN_SHMAP=@R@/dm/shader_map.tsv'] if (dm / 'shader_map.tsv').is_file() else []) + (['DM_PSO_BUNDLE=@R@/pso'] if pso else []))]
         for n, prom, pmsl, phtml, pmods, pmsls, ptables in programs:
             step(f'program {n}'); pdm, pres, pm = dm / f'p{n}', res / f'p{n}', res / 'msl' / f'p{n}' / pmsl.name
-            for d in (pdm, pres, pm): d.mkdir(parents=True)
-            copy(pmods, pdm, can_clone(pmods[0], res)); copy(ptables, pdm, False); copy(pmsls, pm, can_clone(pmsls[0], res))
+            for d in (pdm, pres, pm.parent): d.mkdir(parents=True)
+            copy(pmods, pdm, can_clone(pmods[0], res)); copy(ptables, pdm, False); copy_msl(pmsl, pmsls, pm, can_clone(pmsls[0], res))
             copy([prom], pres / ('romfs.img' if prom.is_file() else 'romfs'), can_clone(prom, res))
             if phtml.is_dir(): copy([phtml], pres / 'html', False)
             rows.append('\t'.join([n, 'exe=@C@/MacOS/dmhost', f'arg=@R@/dm/p{n}', 'cwd=@S@', f'DM_ROMFS=@R@/p{n}/{"romfs.img" if prom.is_file() else "romfs"}', f'DM_MSL_DIR=@R@/msl/p{n}', f'DM_NVN_SHMAP=@R@/dm/p{n}/shader_map.tsv', f'DM_PROGRAM={n}']))

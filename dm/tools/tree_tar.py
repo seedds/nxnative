@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# One uncompressed tar in place of a folder of many small files that only a build reads: the Metal and shader compile cache (shader/cache/cas, Metroid Dread's 84,541 files) and
-# Xcode's derived data (ipa/build/ios/pkg/dd). A build unpacks the folder, uses it with ordinary paths and packs it at the end, so the tools that read it do not change. The tar sits
+# One uncompressed tar in place of a folder of many small files that only a build reads: Xcode's derived data (ipa/build/ios/pkg/dd), which Xcode wants as a folder. A build unpacks the folder, uses it with ordinary paths and packs it at the end, so the tools that read it do not change. The tar sits
 # beside the folder as <folder>.tar. A build that stops leaves the folder as it is, and the next one takes it. Times are kept: Xcode's incremental build and prune_shader_cache go by them.
 # Every state a stop can leave is handled by unpack:
 #   folder alone                a stopped build, or a build folder from before this: used as it is
@@ -99,16 +98,17 @@ def _quiet_size(folder, since):   # (files, bytes) under folder; None as soon as
     return n, size
 
 
-def pack_quiet(work, say=print, days=QUIET_DAYS, min_files=QUIET_MIN_FILES):
+def pack_quiet(work, say=print, days: float = QUIET_DAYS, min_files=QUIET_MIN_FILES):
     """Each top-level folder of a game's work folder (<NSP folder>/<id>-work) untouched for days becomes <name>.tar, `tar --xattrs -xf <name>.tar -C <name>` in a new folder bringing it back:
-    what agents and investigations leave there, hundreds of thousands of files nothing reads again. regress/ is regress.py's own, and a folder of few files is left readable.
+    what agents and investigations leave there, hundreds of thousands of files nothing reads again. regress/ is regress.py's own, a folder of few files is left readable, and a Python virtual
+    environment (pyvenv.cfg) stays, however long it goes unchanged: its files are read and not written, and scripts run it by its path.
     An existing <name>.tar is never overwritten. The tar must fit on the drive beside the folder, with QUIET_FREE to spare. Returns the names packed"""
     done, since = [], time.time() - days * 86400
     try:
         with os.scandir(work) as it: entries = sorted((e for e in it if e.is_dir(follow_symlinks=False)), key=lambda e: e.name)
     except OSError: return done
     for e in entries:
-        if e.name == 'regress' or e.name.endswith(('.gone', '.unpack')) or tar_of(e.path).exists(): continue
+        if e.name == 'regress' or e.name.endswith(('.gone', '.unpack')) or tar_of(e.path).exists() or os.path.isfile(os.path.join(e.path, 'pyvenv.cfg')): continue
         try:
             if os.stat(e.path).st_ctime >= since or not (size := _quiet_size(e.path, since)) or size[0] < min_files: continue
             if shutil.disk_usage(work).free < size[1] + QUIET_FREE:

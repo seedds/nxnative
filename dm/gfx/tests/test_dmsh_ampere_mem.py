@@ -62,6 +62,48 @@ class GuardedWrites(Translated):
         msl = self.translate(inst(*ur4) + inst(*txd) + inst(*used) + inst(*EXIT))
         self.assertIn('gradient', msl)
 
+    # A handle built under a guard from two words of the game's uniform buffer, read under a guard the translator cannot tie to it, so that a phi reaches the read with the first word and what the
+    # register held before: Unreal Engine 5.4's single-layer water and a global pixel shader in Yoshi and the Mysterious Book. The read was deleted. Each ends in the result's atomic add, so it stays
+    def test_handle_under_a_uniform_vote_of_the_reads_guard(self):
+        # P0 = c4[0x14] test; UR8 = c3[0x60]; UR4 = c3[0x50]; UP0 = vote.all(P0); if (!UP0) UR4 |= UR8; TEX.!P0 through UR4
+        code = [(0x000fe20003f05070, 0x01000500ff007a0c), (0x000fe20000000800, 0x00c0180000087ab9), (0x000fe20000000800, 0x00c0140000047ab9), (0x000fe40000000000, 0x00000000003f7886),
+                (0x000fe2000f8efc3f, 0x0000000408048292), (0x000f42000c9e0f16, 0xb000042420188f60), (0x020ea200001ee000, 0x00000c16030c7593), EXIT]
+        msl = self.translate(b''.join(inst(*c) for c in code))
+        self.assertIn('.sample(', msl)
+        self.assertIn('cp_t_cb262147_10050018', msl)   # words 0x18 (c3[0x60]) and 0x14 (c3[0x50]), bank 3 twice
+
+    def test_handle_under_a_guard_the_reads_guard_implies(self):
+        # P4 and P1 from comparisons; P5 = P4 && !P1; if (P4) R16 = c3[0x28]; if (P4) R16 |= c3[0x70]; TEX.P5 through R16
+        code = [(0x040fe20003f85070, 0x000000070800780c), (0x000fc40003f25070, 0x000000040800780c), (0x000fe40000fa8170, 0x000000000000781c), (0x000fc60000000f00, 0x00c00a0000104a02),
+                (0x000fc600078efcff, 0x00c01c0010104a12), (0x00014200049e03ff, 0x380000100e125361), (0x020ea200001ee000, 0x00000c12030c7593), EXIT]
+        msl = self.translate(b''.join(inst(*c) for c in code))
+        self.assertIn('.sample(', msl)
+        self.assertIn('cp_t_cb262147_1007000A', msl)
+
+    def test_handle_with_only_its_first_word_under_a_guard(self):
+        # R16 = c3[0x28] under P4; R16 |= c3[0x70]; TEX through R16: Yoshi's two vertex shaders of this form
+        code = [(0x040fe20003f85070, 0x000000070800780c), (0x000fc60000000f00, 0x00c00a0000104a02), (0x000fc600078efcff, 0x00c01c0010107a12), (0x00014200049e03ff, 0x380000100e127361),
+                (0x020ea200001ee000, 0x00000c12030c7593), EXIT]
+        msl = self.translate(b''.join(inst(*c) for c in code))
+        self.assertIn('.sample(', msl)
+        self.assertIn('cp_t_cb262147_1007000A', msl)
+
+    def test_first_word_of_a_handle_is_not_read_as_a_handle_of_its_own(self):
+        # As above in the driver's c2, where a word alone can be a handle: one read, through both words
+        code = [(0x040fe20003f85070, 0x000000070800780c), (0x000fc40003f25070, 0x000000040800780c), (0x000fe40000fa8170, 0x000000000000781c), (0x000fc60000000f00, 0x00800a0000104a02),
+                (0x000fc600078efcff, 0x00801c0010104a12), (0x00014200049e03ff, 0x380000100e125361), (0x020ea200001ee000, 0x00000c12030c7593), EXIT]
+        msl = self.translate(b''.join(inst(*c) for c in code))
+        self.assertEqual(msl.count('.sample('), 1)
+        self.assertRegex(msl, r'_1007000A\b')
+
+    def test_gather_through_a_register_past_a_branch_on_the_guard(self):
+        # P6 from a test; if (P6) R49 = c3[0x18]; if (P6) R49 |= c3[0x68]; BRA.!P6 past the read; TLD4 through R49, the first of the second source block (.SCR)
+        code = [(0x000fe20003fc5070, 0x01000500ff007a0c), (0x000fe20000000f00, 0x00c0060000316a02), (0x000fe200078efcff, 0x00c01a0031316a12), (0x000fea0003800000, 0x000000200000e947),
+                (0x000f4200001e0f0c, 0x38000031020e7364), (0x020ea200001ee000, 0x00000c0c030c7593), EXIT]
+        msl = self.translate(b''.join(inst(*c) for c in code))
+        self.assertIn('.gather(', msl)
+        self.assertIn('cp_t_cb262147_10068006', msl)
+
 
 class Suatom(Translated):
     def test_handle_in_the_games_uniform_buffer(self):   # Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]: the same word 12, in bank 3

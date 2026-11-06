@@ -170,6 +170,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `tbuf_as_2d` (`nvn_mtl.m`) views a 32-bit integer buffer in a slot declared float as the float format of the same size (`tbuf_view_format`), so the shader reads the stored bits.
 - **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md). No visible change in its tutorial area.
 
+### Integer textures read through float slots
+
+- **Symptom:** none visible on an M6, where at most 0.23 % of pixels differ between paired runs. GitHub issue #783 reports wrong light offsets on an M2.
+- **Cause:** as for [buffer textures](#integer-buffer-textures-read-through-float-slots), but for a 2D texture: with no type answer the translator declares it float, and the shader takes the fetched bits back with `as_type<int>`. The answer table cannot say otherwise, because the format is known only at bind time.
+- **Fix:** `tex_float_fit` (`nvn_mtl.m`) binds the float view of the same size (`tbuf_view_format`) in a slot declared float. A texture made without the format-view usage is upgraded before the next draw pass (`img_fit_upgrade`). 32-bit formats only: a smaller integer format has no float view that keeps its bits.
+- **Found on:** [Metroid Prime Remastered](../../dm/games/010012101468C000/README.md): the clustered lighting's R32Uint light grid (`fde1a3e769219a77` and the other world materials). Reported and fixed by nobz226.
+- **Check:** `t_int_float_view` reads small integers (denormal floats), NaN patterns and negatives through the R32Float view in a compute shader and takes back every bit.
+
 ### Buffer textures at offsets below 16 bytes
 
 - **Symptom:** particle effects drawn at the wrong scale or place, or flickering, where the particle data is a buffer texture at a pool offset that is not a multiple of 16; log line `buffer texture at pool offset …, below Metal's 16-byte alignment`.
@@ -209,6 +217,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `nvn_tex.c` `sparse_tile_h` gives such a texture its tile's block height; a packaged layout still wins.
 - **Found on:** [OCTOPATH TRAVELER](../../dm/games/010057D006492000/README.md) (Unreal Engine 4.18 flags its streamed and CPU-loaded textures sparse).
 - **Check:** the map's guest bytes deswizzled in Python at 1 to 32 GOBs read right only at 8; a 512×512 RGBA8 sprite sheet only at 16; [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md)'s packaged ASTC 6×6 textures (16 bytes per block) carry 8 in their layout. The 1- and 2-byte heights follow the same tile shapes and were not seen.
+
+### Sparse 3D textures take the standard 3D tile
+
+- **Symptom:** none visible on an M6 on the Frigate Orpheon's deck. Laid out 1 GOB high, the mapped tiles of a streamed 3D texture fall in scattered places, so lookups read zero in the holes; GitHub issue #783 reports a black gunship hull in the opening on an M2.
+- **Cause:** a sparse 3D texture without a packaged layout took the automatic layout (1 GOB high, 32 GOBs deep). Its 64 KB tile is the standard 3D shape: 64x32x32, 32x32x32, 32x32x16, 32x16x16 and 16x16x16 blocks for 1, 2, 4, 8 and 16 bytes per block.
+- **Fix:** `nvn_tex.c` `sparse_tile_h3`, `sparse_tile_d3` give such a texture its tile's block height and depth when level 0 is at least one tile in each direction; a packaged layout still wins, and a smaller texture keeps the automatic layout. `nvnTextureBuilderGetSparseTileLayout` answers the same shape.
+- **Found on:** [Metroid Prime Remastered](../../dm/games/010012101468C000/README.md): its six 512x256x368 lighting volumes map the same tile indices whichever shape the host reports (256x32x16 or 128x64x16 texels for BC1), so the game's layout is fixed. With this shape BC1's tiles 5-7 and 9-11 of a 16-slice slab and BC6H's 10-15 and 18-23 are the same texels, 128..512 x 64..192. With 1-GOB blocks they were two different patchworks. Reported and fixed by nobz226.
+- **Check:** `t_sparse_layout` fills those tiles of both formats and decodes exactly that box, in exactly that slab, plus the tile shapes of 1, 2, 4 and 8 bytes per block. Only 8 and 16 bytes per block were seen in a game; the others follow the same table. Metal cannot confirm the shape: `sparseTileSizeWithTextureType:` gives a 3D texture the 2D tile with depth 1.
 
 ### Sparse textures of 8- and 16-byte blocks: blocks at most 8 GOBs high
 
@@ -582,6 +598,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** `t_present_crop`: the window's crop wins, the layer crop is used without one, one larger than the texture is ignored, and a real `nvnQueuePresentTexture` queues the layer crop (that check fails with the old call). On an iPhone 15 Pro in handheld mode Link's Awakening's picture fills the screen's height.
 - **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md#rendering) (1.1.0, handheld mode on the iPhone).
 
+### A crop only picks texels; the picture has the layer's shape
+
+- **Symptom:** a scene turns narrow, with black bars at its sides, while the swapchain or window textures keep their size; circles come out as tall ovals. The log has `vi::SetLayerCrop 0,0 1200x960` and `present upscaling: ... 1200x960 → 1800x1440` in a 2560x1440 window.
+- **Cause:** the present used one rectangle for two things: which texels to read and the shape to show them in. On the Switch the compositor stretches a buffer's crop to the layer, so a game can draw an anamorphic picture into a crop of another shape: 1200x960 of a 1920x1080 swapchain docked, 800x640 handheld. The host fitted the crop's own 5:4 into the canvas, and reported 5:4 to the front ends.
+- **Fix:** the crop still selects the source texels, for every graphics API, and `present_shape` (`nvn_mtl.m`) gives the shape: the display's 16:9, or a sized layer's (`vi::CreateLayer` with a size, `mtl_present_layer`). A screen taller than 16:9 (`DM_SCREEN_ASPECT`, `mtl_present_screen`) counts only for a texture of its shape, since only builds with screen-shape stubs render it. Both encoders, MetalFX, the screen-sized captures and the shape reported to the front ends (`front_picture_shape`) use it, so a canvas of another shape still gets bars around a 16:9 picture and clicks map onto the picture as drawn. `vi::SetLayerScalingMode` stays ignored: the games seen set mode 2 or none.
+- **Check:** `t_present_crop`: a 5:4 crop fills a 16:9 canvas and keeps bars on a 16:10 one on the classic and Metal 4 presents, a sized layer's shape, both `DM_SCREEN_ASPECT` cases and the shape a real present reports.
+- **Found on:** [Super Mario Galaxy 2](../../dm/games/0100FD8022DAA000/README.md#rendering) ([issue #949](https://github.com/seedds/nxnative/issues/949)).
+
 ### Setting the same targets again continues the pass
 
 - **Symptom:** one-draw passes on one target, hundreds of times a frame, with the same attachments each time (a `DM_NVN_GPUPROF` frame: `load` and `store` of the whole target in every line); a low frame rate that follows the target's size.
@@ -915,6 +939,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** the swizzle is recorded (`OP_VP_SWIZZLE`) and applied at the draw as a viewport flipped about its centre, the same mapping. Facing is decided after the swizzle on the GPU as in Metal, so the winding stays. Other swizzles (axis exchanges, negated x / z / w) give a red line and are drawn unswizzled.
 - **Found on:** [Absolum](../../dm/games/0100A83022A22000/README.md) (FNA3D's NVN driver, `FNA3D_Driver_NVN.cpp`).
 
+### Black shapes on sprites when Unreal's GPU work runs late
+
+- **Symptom:** on an Unreal Engine game with a full GPU, moving sprites flicker black for a frame: cut straight across, or a whole silhouette in the sprite's outline. It follows GPU time against the frame budget, and goes away at 30 fps or with GPU time to spare. The black is already in the scene colour the base pass writes.
+- **Cause:** a race in the engine's NVN code. A dynamic buffer keeps `nvn.NumBufferedFrames` copies (3), and each write lock moves to the next one with no fence. The render thread can come round to a copy while draws queued for the GPU still read it. If that lands between a sprite's depth prepass and its base pass, the two see different vertices: the base pass tests depth `EQUAL`, draws nothing where they differ, and the cleared black stays.
+- **Fix:** a workaround, since the missing fence is in the game's code: the rewriter gives each dynamic buffer a fourth copy (`dm/tools/ue_ring.py`, called by `patch_nso.py`), with no build ID, on any main where its chain holds. A buffer has room for exactly 4. The variable itself cannot be set to 4: its other readers size fixed tables, and the deferred-delete table has room for 3, so only the constructor's load changes. Open: this adds one lock of margin and no fence, so a GPU further behind, or a buffer locked more than once a frame, can still reach a queued copy. A single comparison has been run (5 black frames against 0 at equal load), and hit counts vary between runs. The fallback is copying small vertex streams at encode, which gave 0 against 10 and 14 in a diagnostic build; it costs every game a copy per draw and does not cover index buffers.
+- **Found on:** [TRIANGLE STRATEGY](../../dm/games/0100CC80140F8000/README.md), [issue #1040](https://github.com/seedds/nxnative/issues/1040).
+
 ## Uniforms, copies and ordering
 
 ### Bindless handles read from guest memory directly
@@ -1218,7 +1249,7 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 
 - **Symptom:** an assert (a stripped trap, `main+0x4d26e0`) when the surface does not list `preTransform` INHERIT.
 - **Cause:** the game asks for `preTransform` INHERIT. In handheld mode it keeps a 1920x1080 swapchain, draws into the top-left 1280x720 and calls `vi::SetLayerCrop` every frame.
-- **Fix:** the surface lists INHERIT; the host keeps the crop (`hle_vi.c`) and the Vulkan present shows only that rectangle.
+- **Fix:** the surface lists INHERIT; the host keeps the crop (`hle_vi.c`) and the Vulkan present shows only that rectangle, in [the layer's shape](#a-crop-only-picks-texels-the-picture-has-the-layers-shape).
 - **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md).
 
 ### Linear images alias their memory
@@ -1431,6 +1462,6 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 
 - **Symptom:** with *Picture shape* at 1.43:1 (`DM_SCREEN_ASPECT`) the game renders 1920x1344, but on an iPhone Duo in Fit (the default) the picture comes out smaller than the 16:9 one, with black bars on all four sides; it fills the screen only in Fill. On the Mac a click lands off the point under the pointer (it was mapped on a 16:9 rectangle of the window).
 - **Cause:** the front ends assumed a 16:9 picture. iOS sized the game's view to the largest 16:9 rectangle (`DmLayout.h` `dm_aspect_fit`, `dm_aspect_fill`) and the present then fitted the 1.43:1 frame inside that 16:9 drawable (`present_viewport`), so the picture was fitted twice; the Mac's mouse-to-touch mapping (`front_mac.m`) used the same 16:9 rectangle.
-- **Fix:** the present reports the shape of the frame it draws, the valid rectangle of the presented texture, whenever its width / height changes (`nvn_mtl.m` `present_now` → `front.h` `front_picture_shape`; every graphics API presents there). The iOS front end lays the game's view out in that shape (`DmLayout.h` takes it as a parameter: the overlay, the split, Fill and the TV alike), so a 1.43:1 picture fills a 1.43:1 screen in Fit and touches are normalized on the picture as drawn; the Mac maps the mouse on the picture's own rectangle. A 16:9 game reports 16:9 and keeps its layout, and a size change of the same shape (1280x720 handheld, 1920x1080 docked) is not reported.
+- **Fix:** the present reports the shape of the frame it draws ([the layer's](#a-crop-only-picks-texels-the-picture-has-the-layers-shape)) whenever its width / height changes (`nvn_mtl.m` `present_now` → `front.h` `front_picture_shape`; every graphics API presents there). The iOS front end lays the game's view out in that shape (`DmLayout.h` takes it as a parameter: the overlay, the split, Fill and the TV alike), so a 1.43:1 picture fills a 1.43:1 screen in Fit and touches are normalized on the picture as drawn; the Mac maps the mouse on the picture's own rectangle. A 16:9 game reports 16:9 and keeps its layout, and a size change of the same shape (1280x720 handheld, 1920x1080 docked) is not reported.
 - **Check:** the [Duo harness](../../dm/ios/tests/duo/README.md) tests the taller picture in Fit, in Fill and on a wider screen, and the production root view following a reported shape and returning to 16:9. Not yet run on a device.
 - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#screen-shape-dm_screen_aspect-current) and [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md#screen-shape-dm_screen_aspect-current) with `DM_SCREEN_ASPECT=1.43`.

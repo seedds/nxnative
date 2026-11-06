@@ -1529,11 +1529,26 @@ static uint64_t seg_gap_before(seg_clk *sc, uint32_t seg, uint32_t last, uint64_
     }
     return gap;
 }
+// DM_NVN_GPU_TS_PAD=<factor> (1.0 to 2.0, default 1): GPU headroom for a game's dynamic resolution. A submission's report times are stretched by the factor from its first segment's
+// start, so the game measures its GPU work that much longer and lowers its resolution until the padded time fits its budget: the real GPU time then stays under the frame by about
+// 1 - 1/factor (1.10: about 9 %), room for the host's own GPU work and for spikes. Splatoon Raiders, once the gap-free timestamps let it see the real GPU time, filled the frame
+// (GPU median 18.7 ms against 16.7) and dropped frames. A tuning switch, off by default
+static double ts_pad(void) {
+    static double v = -1;
+    if (v < 0) { const char *e = getenv("DM_NVN_GPU_TS_PAD"); double f = e && *e ? atof(e) : 1.0; v = f >= 1.0 && f <= 2.0 ? f : 1.0;
+        if (v != 1.0) MLOG("counter timestamps: GPU times reported %.2fx (DM_NVN_GPU_TS_PAD): headroom for the game's dynamic resolution", v); }
+    return v;
+}
 static uint64_t rep_ticks(const post_op *o, seg_clk *sc, uint32_t last, uint64_t c0, uint64_t c1) {   // the time a counter report records (614.4 MHz); c0 / c1: the last segment's GPU start / end on the guest clock
     int top = o->type == 0x10; uint64_t ns = 0;
     if (sc && o->seg < last && o->seg < SEG_CLK_N) ns = atomic_load(&sc->t[o->seg][!top]);
     if (!ns) ns = top ? c0 : c1;
     if (ns && sc && !g_seg_gaps) { uint64_t gap = seg_gap_before(sc, o->seg < last ? o->seg : last, last, c0); if (gap < ns) ns -= gap; }
+    double pad = ts_pad();
+    if (ns && pad != 1.0) {   // stretched from the submission's start: its first segment's GPU start (gaps come only after it), or the last segment's when it has one
+        uint64_t base = sc && last ? atomic_load(&sc->t[0][0]) : c0;
+        if (base && ns > base) ns = base + (uint64_t)((double)(ns - base) * pad);
+    }
     return ns ? nvn_timestamp_from_ns(ns) : gpu_ticks();
 }
 

@@ -40,10 +40,15 @@ void dm_motion_clear_hid(int player);
 // Joy-Cons as devices of their own (a front end that reads Joy-Cons one by one: Switch 2 Joy-Cons, pad_switch2_apple.m): pad p (the same index as dm_pad_set_player's player) holds a left Joy-Con (sides bit 0), a right one (bit 1) or both;
 // sides 0 is a Pro-style pad again. Each Joy-Con reports its own buttons (NpadButton bits, including the rail buttons) and stick, and its own sensor; the pad's merged state of dm_pad_set_player
 // stays the fallback for a game that supports no Joy-Con style. The game decides how the Joy-Cons of a pair are used (dual: one npad with two sensors; single: two npads, hle_hid.c)
-void dm_joy_attach(int pad, uint32_t sides);
+void dm_joy_attach(int pad, uint32_t sides);   // sides | DM_JOY_2: they are Joy-Con 2s (the Switch 2 styles, the mouse sensor)
+#define DM_JOY_2 4u
 void dm_joy_set(int pad, int side, uint64_t buttons, int32_t sx, int32_t sy);   // side 0 left, 1 right
 void dm_motion_set_joy(int pad, int side, const float acc[3], const float rot[3], uint64_t sample_ns);   // like dm_motion_set_hid, for one Joy-Con's sensor
 void dm_motion_clear_joy(int pad, int side);
+// A Joy-Con's mouse sensor (the Joy-Con 2's, on its rail side): the movement since the last report, in sensor counts (x right, y toward the player), and its state (DM_JOYMOUSE_*).
+// The game reads it as that Joy-Con's JcmsState ring (hle_hid.c); nothing is reported for a Joy-Con that never calls this
+enum { DM_JOYMOUSE_CONNECTED = 1u << 0, DM_JOYMOUSE_ON_SURFACE = 1u << 1 };
+void dm_joy_mouse(int pad, int side, int32_t dx, int32_t dy, uint32_t state);
 uint32_t dm_player_npad(int player);  // the npad id the game reads player p + 1 on: Handheld (0x20) or No1 (0) for player 1, No n (id n - 1) for player n
 // A library applet in front of the game (the offline web page, hle_web.c / web_apple.m): while held, the game reads no buttons and centred sticks on every npad, as an application
 // out of focus does, and presses made meanwhile are dropped when the hold ends. dm_input_peek reads what the applet sees: every path ORed (any controller drives it), each stick

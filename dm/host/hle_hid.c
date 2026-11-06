@@ -19,6 +19,10 @@
 
 enum { NPAD_NO1 = 0, NPAD_HANDHELD = 0x20 };
 enum { STYLE_FULLKEY = 1u << 0, STYLE_HANDHELD = 1u << 1, STYLE_JOYDUAL = 1u << 2, STYLE_JOYLEFT = 1u << 3, STYLE_JOYRIGHT = 1u << 4 };
+// The Joy-Con 2 forms of the Joy-Con styles (Switch 2 SDKs; inferred, not documented: Nintendo Switch 2 Welcome Tour's mouse exhibits support only 0x1000 and test a controller's style
+// set with 0x1004 for a pair, 0x2008 for a left and 0x4000 beside JoyRight for a right one). A Joy-Con 2 pad (dm_joy_attach with DM_JOY_2) reports them beside the plain ones, to a game
+// that supports them
+enum { STYLE_JOYDUAL2 = 1u << 12, STYLE_JOYLEFT2 = 1u << 13, STYLE_JOYRIGHT2 = 1u << 14 };
 enum { ATTR_CONNECTED = 1u << 0, ATTR_WIRED = 1u << 1, ATTR_LEFT_CONN = 1u << 2, ATTR_LEFT_WIRED = 1u << 3, ATTR_RIGHT_CONN = 1u << 4, ATTR_RIGHT_WIRED = 1u << 5 };
 // Stick direction pseudo-buttons (NpadButton 16..23): derived from the stick values, threshold about half travel
 enum { STICK_THRESH = 0x4000 };
@@ -303,12 +307,15 @@ static int player_of(uint32_t id) {   // the reported player on npad id; -1 when
 enum { KIND_NONE = 0, KIND_PAD, KIND_DUAL, KIND_LEFT, KIND_RIGHT };
 typedef struct { int pad, kind; } npad_ref;
 static _Atomic uint32_t g_joy_sides[DM_PLAYERS];
+static _Atomic uint32_t g_joy_two[DM_PLAYERS];   // the pad's Joy-Cons are Joy-Con 2s (DM_JOY_2)
 static _Atomic uint64_t g_joy_btn[DM_PLAYERS][2], g_joy_latch[DM_PLAYERS][2], g_joy_axes[DM_PLAYERS][2];
 static _Atomic uint32_t g_single_mask;               // bit id: the game asked for single assignment on npad No(id + 1)
 static _Atomic uint32_t g_single_keep[DM_PLAYERS];   // 1: the left Joy-Con stays on that npad, 2: the right one, 0: either (the left)
 static uint32_t g_styles_supported = 0xffffffffu;
+// The styles the game supports for pad p's Joy-Cons: a Joy-Con 2 style counts as its plain one
+static uint32_t joy_supported(int p) { uint32_t s = g_styles_supported; if (p >= 0 && p < DM_PLAYERS && atomic_load(&g_joy_two[p])) s |= (s >> 10 & (STYLE_JOYDUAL | STYLE_JOYLEFT | STYLE_JOYRIGHT)); return s; }
 static int joy_active(int p) { return p >= 0 && p < DM_PLAYERS && atomic_load(&g_joy_sides[p]) && !(p == 0 && dm_opmode() == 0); }
-static int joy_split(int p) { return atomic_load(&g_joy_sides[p]) == 3 && (atomic_load(&g_single_mask) >> p & 1) && (g_styles_supported & (STYLE_JOYLEFT | STYLE_JOYRIGHT)) == (STYLE_JOYLEFT | STYLE_JOYRIGHT); }
+static int joy_split(int p) { return atomic_load(&g_joy_sides[p]) == 3 && (atomic_load(&g_single_mask) >> p & 1) && (joy_supported(p) & (STYLE_JOYLEFT | STYLE_JOYRIGHT)) == (STYLE_JOYLEFT | STYLE_JOYRIGHT); }
 // The npad the other Joy-Con of pad p takes when the pair is split: the lowest supported npad No2..No8 that has no player of its own and is not another split's; -1 for none
 static int split_target(int p) {
     uint32_t taken = atomic_load(&g_players) | 1u; int mine = -1;
@@ -326,10 +333,10 @@ static npad_ref npad_resolve(uint32_t id) {
         r.pad = pl; r.kind = KIND_PAD;
         if (joy_active(pl)) {
             uint32_t s = atomic_load(&g_joy_sides[pl]);
-            if (s == 3) r.kind = joy_split(pl) ? (atomic_load(&g_single_keep[pl]) == 2 ? KIND_RIGHT : KIND_LEFT) : (g_styles_supported & STYLE_JOYDUAL ? KIND_DUAL : KIND_PAD);
+            if (s == 3) r.kind = joy_split(pl) ? (atomic_load(&g_single_keep[pl]) == 2 ? KIND_RIGHT : KIND_LEFT) : (joy_supported(pl) & STYLE_JOYDUAL ? KIND_DUAL : KIND_PAD);
             else r.kind = s == 1 ? KIND_LEFT : KIND_RIGHT;
-            if (r.kind == KIND_LEFT && !(g_styles_supported & STYLE_JOYLEFT)) r.kind = KIND_PAD;
-            if (r.kind == KIND_RIGHT && !(g_styles_supported & STYLE_JOYRIGHT)) r.kind = KIND_PAD;
+            if (r.kind == KIND_LEFT && !(joy_supported(pl) & STYLE_JOYLEFT)) r.kind = KIND_PAD;
+            if (r.kind == KIND_RIGHT && !(joy_supported(pl) & STYLE_JOYRIGHT)) r.kind = KIND_PAD;
         }
     } else if (id > 0 && id < DM_PLAYERS) {   // the other half of a split pair
         for (int p = 0; p < DM_PLAYERS; p++) if (joy_active(p) && joy_split(p) && split_target(p) == (int)id) { r.pad = p; r.kind = atomic_load(&g_single_keep[p]) == 2 ? KIND_LEFT : KIND_RIGHT; break; }
@@ -337,11 +344,12 @@ static npad_ref npad_resolve(uint32_t id) {
     return r;
 }
 static uint32_t kind_style(npad_ref r, uint32_t id) {
+    uint32_t two = r.pad >= 0 && r.pad < DM_PLAYERS && atomic_load(&g_joy_two[r.pad]) ? g_styles_supported : 0;
     switch (r.kind) {
     case KIND_PAD: return id == NPAD_HANDHELD ? STYLE_HANDHELD : STYLE_FULLKEY;
-    case KIND_DUAL: return STYLE_JOYDUAL;
-    case KIND_LEFT: return STYLE_JOYLEFT;
-    case KIND_RIGHT: return STYLE_JOYRIGHT;
+    case KIND_DUAL: return STYLE_JOYDUAL | (two & STYLE_JOYDUAL2);
+    case KIND_LEFT: return STYLE_JOYLEFT | (two & STYLE_JOYLEFT2);
+    case KIND_RIGHT: return STYLE_JOYRIGHT | (two & STYLE_JOYRIGHT2);
     default: return 0;
     }
 }
@@ -356,6 +364,7 @@ static void style_changed(uint32_t id) { void *ev = id < DM_PLAYERS ? atomic_loa
 // Joy-Cons as devices (dm_input.h): which a pad holds, then each one's buttons and stick. The style events tell the game that its npads changed
 void dm_joy_attach(int p, uint32_t sides) {
     if (p < 0 || p >= DM_PLAYERS) return;
+    atomic_store(&g_joy_two[p], (sides & DM_JOY_2) && (sides & 3) ? 1u : 0u);
     sides &= 3;
     if (atomic_exchange(&g_joy_sides[p], sides) == sides) return;
     if (!sides) for (int s = 0; s < 2; s++) { atomic_store(&g_joy_btn[p][s], 0); atomic_store(&g_joy_axes[p][s], 0); }
@@ -516,7 +525,7 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
     memset(s, 0, sizeof *s);
     s->sampling = atomic_fetch_add(&g_sampling, 1) + 1;
     npad_ref ref = npad_resolve(id);
-    if (!(kind_style(ref, id) & style)) return;   // no controller of this id / style: attributes = 0
+    if (!(kind_style(ref, id) & style) || ref.pad < 0 || ref.pad >= DM_PLAYERS) return;   // no controller of this id / style: attributes = 0
     if (ref.kind >= KIND_DUAL) { fill_joy(s, ref); return; }
     int pl = ref.pad;
     // Player 1: keyboard / touch, script, its controller and the players merged into it; another player: its own controller path
@@ -825,20 +834,89 @@ HLE_FORCE("_ZN2nn3hid14InitializeJcmsEPvm", "Joy-Con mouse sensor: no hid servic
 HLE_FORCE("_ZN2nn3hid12FinalizeJcmsEv", "Joy-Con mouse sensor: nothing to release", void, h_hid_JcmsFini, void) {}
 HLE_FORCE("_ZN2nn3hid13GetJcmsHandleERKjRKNS0_8JcmsTypeE", "Joy-Con mouse sensor handle: npad id | type << 8, as the SDK makes it",
           uint32_t, h_hid_JcmsHandle, const uint32_t *id, const uint32_t *type) { return (*id & 0xff) | (*type & 0xff) << 8; }
+// The sensor's states, from a front end that reads Joy-Con mouse sensors (dm_joy_mouse): a ring of 16 per player and Joy-Con. A JcmsState as Nintendo Switch 2 Welcome Tour reads it
+// (main+0x253540, bex::InputModule::GetLastJcmsStateRight at main+0x2279a0): 8 bytes it does not read, the sampling number at 8 (states newest first; a state with a sampling
+// number above 0 is a sample), the movement x and y at 0x10 and 0x14 (summed into its pointer), attributes at 0x18 (it keeps the low two bits: connected, on a surface). A JcmsType
+// is 0 for the left Joy-Con and 1 for the right (sdk hid::utility::GetJcmsIndex: npad * 2 + type)
+typedef struct { int64_t unk0, sampling; int32_t dx, dy; uint32_t attributes, pad; } JcmsState;
+_Static_assert(sizeof(JcmsState) == 32, "JcmsState");
+#define JCMS_RING 16
+static pthread_mutex_t g_jcms_mu = PTHREAD_MUTEX_INITIALIZER;
+static JcmsState g_jcms[DM_PLAYERS][2][JCMS_RING];
+static int64_t g_jcms_n[DM_PLAYERS][2];   // samples so far (the newest is g_jcms[...][(n - 1) % JCMS_RING])
+// The pointer each Joy-Con's sensor moves (Nmouse, below): its position on the game's pointer range, the movement and the state of the last sample
+static float g_nm_pos[DM_PLAYERS][2][2]; static int32_t g_nm_d[DM_PLAYERS][2][2]; static uint32_t g_nm_state[DM_PLAYERS][2];
+static int g_nm_last[DM_PLAYERS] = {[0 ... DM_PLAYERS - 1] = -1};   // the Joy-Con last used on a surface: the player's pointer, also while it is lifted
+static int g_nmouse_range[2];
+#define NMOUSE_SCALE 0.25f   // pointer pixels per sensor count (a slow 10 cm slide is about 6,000 counts: about 1,500 pixels)
+void dm_joy_mouse(int p, int side, int32_t dx, int32_t dy, uint32_t state) {
+    if (p < 0 || p >= DM_PLAYERS || (side != 0 && side != 1)) return;
+    pthread_mutex_lock(&g_jcms_mu);
+    int64_t n = ++g_jcms_n[p][side];
+    g_jcms[p][side][(n - 1) % JCMS_RING] = (JcmsState){.sampling = n, .dx = dx, .dy = dy, .attributes = state & 3};
+    int w = g_nmouse_range[0] > 0 ? g_nmouse_range[0] : 1920, hgt = g_nmouse_range[1] > 0 ? g_nmouse_range[1] : 1080;
+    if (n == 1) { g_nm_pos[p][side][0] = w / 2.f; g_nm_pos[p][side][1] = hgt / 2.f; }
+    float *xy = g_nm_pos[p][side];
+    xy[0] = fminf((float)(w - 1), fmaxf(0.f, xy[0] + dx * NMOUSE_SCALE)); xy[1] = fminf((float)(hgt - 1), fmaxf(0.f, xy[1] + dy * NMOUSE_SCALE));
+    g_nm_d[p][side][0] = (int32_t)lrintf(dx * NMOUSE_SCALE); g_nm_d[p][side][1] = (int32_t)lrintf(dy * NMOUSE_SCALE); g_nm_state[p][side] = state;
+    if (state & DM_JOYMOUSE_ON_SURFACE) g_nm_last[p] = side;
+    pthread_mutex_unlock(&g_jcms_mu);
+}
+// A handle's player and Joy-Con: the player the npad shows (a split pair's other half included), its Joy-Con of the handle's side
+static int jcms_target(uint32_t h, int *side) {
+    uint32_t id = h & 0xff, type = h >> 8 & 0xff; if (type > 1 || id >= DM_PLAYERS) return -1;
+    npad_ref r = npad_resolve(id); if (r.pad < 0) return -1;
+    *side = (int)type; return r.pad;
+}
+// DM_JCMS_LOG=1: the game's mouse sensor and pointer calls, at most once a second each kind
+static int jcms_log_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_JCMS_LOG"); on = e && atoi(e); } return on; }
+static int jcms_log_due(int kind) { static uint64_t last[8]; uint64_t t = now_ns(); if (!jcms_log_on() || kind < 0 || kind > 7 || t - last[kind] < 1000000000ull) return 0; last[kind] = t; return 1; }
+static int jcms_copy(JcmsState *out, int n, uint32_t h) {
+    int side, p = jcms_target(h, &side);
+    if (p < 0 || !out || n <= 0) return 0;
+    pthread_mutex_lock(&g_jcms_mu);
+    int64_t have = g_jcms_n[p][side]; int k = 0;
+    for (; k < n && k < JCMS_RING && have - k > 0; k++) out[k] = g_jcms[p][side][(have - 1 - k) % JCMS_RING];
+    pthread_mutex_unlock(&g_jcms_mu);
+    if (jcms_log_due(side)) LOG("hid jcms: handle %#x player %d: %d states, newest #%lld d %d,%d attr %u", h, p + 1, k, k ? (long long)out[0].sampling : 0ll, k ? out[0].dx : 0, k ? out[0].dy : 0, k ? out[0].attributes : 0);
+    return k;
+}
 HLE_FORCE("_ZN2nn3hid9StartJcmsERKNS0_10JcmsHandleE", "Joy-Con mouse sensor: no sensor on the host", void, h_hid_JcmsStart, const uint32_t *h) { (void)h; }
 HLE_FORCE("_ZN2nn3hid8StopJcmsERKNS0_10JcmsHandleE", "Joy-Con mouse sensor: no sensor on the host", void, h_hid_JcmsStop, const uint32_t *h) { (void)h; }
-HLE_FORCE("_ZN2nn3hid13GetJcmsStatesEPNS0_9JcmsStateEiRKNS0_10JcmsHandleE", "Joy-Con mouse sensor states: none (no sensor on the host)",
-          int, h_hid_JcmsStates, void *out, int n, const uint32_t *h) { (void)out; (void)n; (void)h; return 0; }
+HLE_FORCE("_ZN2nn3hid13GetJcmsStatesEPNS0_9JcmsStateEiRKNS0_10JcmsHandleE", "Joy-Con mouse sensor states, newest first (none until a front end reports the sensor)",
+          int, h_hid_JcmsStates, void *out, int n, const uint32_t *h) { return h ? jcms_copy(out, n, *h) : 0; }
+// The newest state alone (Nintendo Switch 2 Welcome Tour reads it each frame; the SDK's own reads the hid service's ring, which the host does not map: a null read in
+// hid::detail::GetJcmsState): with no sensor, a cleared state (sampling number 0, no movement, attributes 0: not connected)
+HLE_FORCE("_ZN2nn3hid12GetJcmsStateEPNS0_9JcmsStateERKNS0_10JcmsHandleE", "Joy-Con mouse sensor state: the newest (cleared until a front end reports the sensor)",
+          void, h_hid_JcmsState, void *out, const uint32_t *h) { if (out) { memset(out, 0, 32); if (h) jcms_copy(out, 1, *h); } }
+// The system setting for the mouse pointer's speed (System Settings, Mouse): the default, 1
+HLE_FORCE("_ZN2nn3hid25GetMousePointerSpeedScaleEv", "mouse pointer speed setting: the default, 1.0", float, h_hid_MouseSpeed, void) { return 1.0f; }
 // The Switch 2's pointer on top of those sensors (Nmouse; Fire Emblem Fortune's Weave initializes it at boot with the 1920x1080 screen it maps the pointer to, main+0x650a24). InitializeNmouse opens the
 // hid service as InitializeJcms does (its Result aborts: sdk+0x6d5340). No controller of the host has the sensor, so there are no handles, and the calls on a handle have nothing to do
 HLE_FORCE("_ZN2nn3hid16InitializeNmouseEPvmii", "Joy-Con mouse pointer: no hid service; no sensor on the host", void, h_hid_NmouseInit, void *work, uint64_t size, int w, int h) { (void)work; (void)size; (void)w; (void)h; }
-HLE_FORCE("_ZN2nn3hid16GetNmouseHandlesEPNS0_12NmouseHandleEij", "Joy-Con mouse pointer handles: none (no sensor on the host)", int, h_hid_NmouseHandles, void *out, int n, uint32_t id) { (void)out; (void)n; (void)id; return 0; }
+// A Joy-Con whose sensor reports (dm_joy_mouse) has a pointer handle on its npad: NMOUSE_TAG | npad id << 8 | side (the merged handle 0 stays the one without a device)
+#define NMOUSE_TAG 0x4e4d0000ull
+static int nmouse_of(uint64_t h, int *side) {
+    if ((h & ~0xffffull) != NMOUSE_TAG) return -1;
+    int p = jcms_target((uint32_t)(h >> 8 & 0xff) | (uint32_t)(h & 1) << 8, side);
+    return p >= 0 && g_jcms_n[p][*side] ? p : -1;
+}
+HLE_FORCE("_ZN2nn3hid16GetNmouseHandlesEPNS0_12NmouseHandleEij", "Joy-Con mouse pointer handles: one per Joy-Con of the npad whose sensor reports", int, h_hid_NmouseHandles, void *out, int n, uint32_t id) {
+    // The Joy-Con last used on a surface first, and it stays first while lifted (to press a button): Nintendo Switch 2 Welcome Tour moves its pointer by the first handle only
+    uint64_t *o = out; int k = 0;
+    for (int pass = 0; pass < 2; pass++)
+        for (int side = 0; side < 2 && o && k < n; side++) {
+            uint64_t h = NMOUSE_TAG | (uint64_t)(id & 0xff) << 8 | (uint64_t)side; int sd, p = nmouse_of(h, &sd); if (p < 0) continue;
+            pthread_mutex_lock(&g_jcms_mu); int first = g_nm_last[p] < 0 ? sd == 1 : g_nm_last[p] == sd; pthread_mutex_unlock(&g_jcms_mu);
+            if (first == !pass) o[k++] = h;
+        }
+    if (jcms_log_due(2 + (id & 1))) LOG("hid nmouse: GetNmouseHandles npad %u (up to %d): %d", id, n, k);
+    return k; }
 HLE_FORCE("_ZN2nn3hid32SetNmouseButtonConfigJoyLeftJcmsERKNS0_29NmouseButtonConfigJoyLeftJcmsE", "Joy-Con mouse pointer: no sensor on the host", void, h_hid_NmouseCfgL, const void *c) { (void)c; }
 HLE_FORCE("_ZN2nn3hid33SetNmouseButtonConfigJoyRightJcmsERKNS0_30NmouseButtonConfigJoyRightJcmsE", "Joy-Con mouse pointer: no sensor on the host", void, h_hid_NmouseCfgR, const void *c) { (void)c; }
 // SDK 21's forms (Mario Kart World 1.8.0 at boot, by pull request #1116: InitializeNmouse with a pointer type aborted on the hid service). The pointer settings are kept or dropped, with no
 // device to apply them to. The calls on a handle return the SDK's bool (its Result is success: SDK 22.2.0 sdk+0x6d5510 and +0x6d5530): the merged handle 0 above is known, and with no device
 // its pointer takes the settings and reports nothing (no state, no controller); the standard mouse has no handle, as no USB mouse is connected
-static int g_nmouse_range[2];
 HLE_FORCE("_ZN2nn3hid16InitializeNmouseEPvmiiNS0_17NmousePointerTypeE", "Joy-Con mouse pointer (with a pointer type): no hid service; no sensor on the host", void, h_hid_NmouseInitT,
           void *work, uint64_t size, int w, int h, int type) { (void)work; (void)size; (void)type; g_nmouse_range[0] = w; g_nmouse_range[1] = h; }
 HLE_FORCE("_ZN2nn3hid22SetNmousePointerRangesEii", "Joy-Con mouse pointer range: kept", void, h_hid_NmouseSetRange, int w, int h) { g_nmouse_range[0] = w; g_nmouse_range[1] = h; }
@@ -847,10 +925,33 @@ HLE_FORCE("_ZN2nn3hid28SetNmousePointerMovementAreaEiiii", "Joy-Con mouse pointe
 HLE_FORCE("_ZN2nn3hid21RestrictNmousePointerEffff", "Joy-Con mouse pointer restriction: no device to apply it to", void, h_hid_NmouseRestrict, float a, float b, float c, float d) { (void)a; (void)b; (void)c; (void)d; }
 HLE_FORCE("_ZN2nn3hid34SetNmouseButtonConfigStandardMouseERKNS0_31NmouseButtonConfigStandardMouseE", "USB mouse buttons: no mouse on the host", void, h_hid_NmouseCfgM, const void *c) { (void)c; }
 HLE_FORCE("_ZN2nn3hid28GetStandardMouseNmouseHandleEPNS0_12NmouseHandleE", "USB mouse handle: none (no mouse on the host)", bool, h_hid_NmouseStd, uint64_t *out) { (void)out; return false; }
-HLE_FORCE("_ZN2nn3hid19EnableNmousePointerENS0_12NmouseHandleEb", "mouse pointer on / off: the merged handle takes it, with no device", bool, h_hid_NmouseEnable, uint64_t h, unsigned on) { (void)on; return h == 0; }
-HLE_FORCE("_ZN2nn3hid24SetNmousePointerPositionENS0_12NmouseHandleEii", "mouse pointer position: the merged handle takes it, with no device", bool, h_hid_NmousePos, uint64_t h, int x, int y) {
-    (void)x; (void)y; return h == 0; }
-HLE_FORCE("_ZN2nn3hid14GetNmouseStateEPNS0_11NmouseStateENS0_12NmouseHandleE", "mouse state: none (no device)", bool, h_hid_NmouseState, void *out, uint64_t h) { (void)out; (void)h; return false; }
+HLE_FORCE("_ZN2nn3hid19EnableNmousePointerENS0_12NmouseHandleEb", "mouse pointer on / off: the merged handle and a Joy-Con's take it", bool, h_hid_NmouseEnable, uint64_t h, unsigned on) { (void)on; int sd; return h == 0 || nmouse_of(h, &sd) >= 0; }
+HLE_FORCE("_ZN2nn3hid24SetNmousePointerPositionENS0_12NmouseHandleEii", "mouse pointer position: a Joy-Con's pointer moves there; the merged handle takes it, with no device", bool, h_hid_NmousePos, uint64_t h, int x, int y) {
+    int side, p = nmouse_of(h, &side);
+    if (jcms_log_due(5)) LOG("hid nmouse: SetNmousePointerPosition %#llx %d,%d (%s)", (unsigned long long)h, x, y, p >= 0 ? "a Joy-Con's" : "no device");
+    if (p < 0) return h == 0;
+    pthread_mutex_lock(&g_jcms_mu); g_nm_pos[p][side][0] = (float)x; g_nm_pos[p][side][1] = (float)y; pthread_mutex_unlock(&g_jcms_mu);
+    return true; }
+// An NmouseState as Nintendo Switch 2 Welcome Tour reads it (main+0x253b2c): 48 bytes, 8 bytes first as in a JcmsState, then the Switch's MouseState fields (sampling number,
+// position, movement, wheel), buttons at 0x28 (left 1, right 2: R / ZR on a right Joy-Con, L / ZL on a left one) and attributes at 0x2c (bit 1 connected, which the game
+// requires; bit 0 here: on a surface)
+typedef struct { int64_t unk0, sampling; int32_t x, y, dx, dy, wheel_x, wheel_y; uint32_t buttons, attributes; } NmouseState;
+_Static_assert(sizeof(NmouseState) == 48, "NmouseState");
+HLE_FORCE("_ZN2nn3hid14GetNmouseStateEPNS0_11NmouseStateENS0_12NmouseHandleE", "mouse state: a Joy-Con's pointer; none for the merged handle (no device)", bool, h_hid_NmouseState, void *out, uint64_t h) {
+    int side, p = nmouse_of(h, &side);
+    if (p < 0 && jcms_log_due(6)) LOG("hid nmouse: state %#llx: no device", (unsigned long long)h);
+    if (p < 0 || !out) return false;
+    NmouseState st = {0};
+    uint64_t b = atomic_load(&g_joy_btn[p][side]);
+    st.buttons = side ? ((b & DM_BTN_R) ? 1u : 0u) | ((b & DM_BTN_ZR) ? 2u : 0u) : ((b & DM_BTN_L) ? 1u : 0u) | ((b & DM_BTN_ZL) ? 2u : 0u);
+    pthread_mutex_lock(&g_jcms_mu);
+    st.sampling = g_jcms_n[p][side]; st.x = (int32_t)lrintf(g_nm_pos[p][side][0]); st.y = (int32_t)lrintf(g_nm_pos[p][side][1]);
+    st.dx = g_nm_d[p][side][0]; st.dy = g_nm_d[p][side][1];
+    st.attributes = 2u | ((g_nm_state[p][side] & DM_JOYMOUSE_ON_SURFACE) ? 1u : 0u);
+    pthread_mutex_unlock(&g_jcms_mu);
+    memcpy(out, &st, sizeof st);
+    if (jcms_log_due(4)) LOG("hid nmouse: state %#llx: #%lld at %d,%d d %d,%d buttons %u attr %u", (unsigned long long)h, (long long)st.sampling, st.x, st.y, st.dx, st.dy, st.buttons, st.attributes);
+    return true; }
 HLE_FORCE("_ZN2nn3hid13GetNpadIdTypeEPjNS0_12NmouseHandleE", "mouse's controller: none (no device)", bool, h_hid_NmouseNpad, uint32_t *out, uint64_t h) { (void)out; (void)h; return false; }
 HLE_FORCE("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE", "six-axis sensor states: every requested entry, newest first",
           int, h_hid_SixStates, SixAxisState *out, int n, const uint32_t *h) { return six_states(out, n, *h); }

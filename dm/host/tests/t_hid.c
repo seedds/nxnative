@@ -219,6 +219,33 @@ static void t_joycons(void) {
     dm_haptics_route(0, 0); dm_pad_players(1); h_hid_SetStyles(0xffffffffu);
 }
 
+// A Joy-Con's mouse sensor (dm_joy_mouse): its JcmsState ring by handle (npad id, JcmsType 0 left / 1 right), newest first; none for a Joy-Con that never reported
+static void t_jcms(void) {
+    g_mode = 1; ids((uint32_t[]){0, 1}, 2); dm_pad_players(1); dm_joy_attach(0, 3);
+    JcmsState st[4]; uint32_t hl = h_hid_JcmsHandle(&(uint32_t){0}, &(uint32_t){0}), hr = h_hid_JcmsHandle(&(uint32_t){0}, &(uint32_t){1});
+    CHECK(hl == 0x000 && hr == 0x100 && h_hid_JcmsStates(st, 4, &hr) == 0, "no mouse samples before a front end reports them");
+    dm_joy_mouse(0, 1, 5, -3, DM_JOYMOUSE_CONNECTED | DM_JOYMOUSE_ON_SURFACE); dm_joy_mouse(0, 1, 7, 2, DM_JOYMOUSE_CONNECTED | DM_JOYMOUSE_ON_SURFACE);
+    CHECK(h_hid_JcmsStates(st, 4, &hr) == 2 && st[0].sampling == 2 && st[0].dx == 7 && st[1].dy == -3 && st[0].attributes == 3, "the right Joy-Con's samples, newest first");
+    CHECK(h_hid_JcmsStates(st, 4, &hl) == 0, "the left Joy-Con has reported none");
+    memset(st, 0xff, sizeof st); h_hid_JcmsState(st, &hr);
+    CHECK(st[0].sampling == 2 && st[0].dx == 7 && st[0].unk0 == 0, "GetJcmsState: the newest");
+    for (int i = 0; i < 40; i++) dm_joy_mouse(0, 1, i, 0, 1);
+    CHECK(h_hid_JcmsStates(st, 4, &hr) == 4 && st[0].dx == 39 && st[3].dx == 36, "a full ring keeps the newest");
+    uint32_t bad = 0x200; CHECK(h_hid_JcmsStates(st, 4, &bad) == 0, "a JcmsType past 1 has no states");
+    // The pointer: a handle per Joy-Con whose sensor reports, the one last used on a surface first, kept first while lifted
+    uint64_t nh[4]; CHECK(h_hid_NmouseHandles(nh, 4, 0) == 1 && (nh[0] & 0xffff) == 0x0001, "one pointer handle: the right Joy-Con, the only one that reported");
+    dm_joy_mouse(0, 0, 1, 1, DM_JOYMOUSE_CONNECTED | DM_JOYMOUSE_ON_SURFACE);
+    CHECK(h_hid_NmouseHandles(nh, 4, 0) == 2 && (nh[0] & 1) == 0 && (nh[1] & 1) == 1, "the left Joy-Con, last on a surface, comes first");
+    dm_joy_mouse(0, 0, 0, 0, DM_JOYMOUSE_CONNECTED);
+    CHECK(h_hid_NmouseHandles(nh, 4, 0) == 2 && (nh[0] & 1) == 0, "it stays first while lifted");
+    NmouseState ns; CHECK(h_hid_NmouseState(&ns, nh[0]) && (ns.attributes & 2) && !(ns.attributes & 1) && !h_hid_NmouseState(&ns, 0), "its state: connected, off the surface; the merged handle has none");
+    // The Joy-Con 2 styles: a Joy-Con 2 pair shows JoyDual's Joy-Con 2 form to a game that supports only that
+    h_hid_SetStyles(STYLE_JOYDUAL2); dm_joy_attach(0, 3 | DM_JOY_2);
+    CHECK((h_hid_GetStyle(&(uint32_t){0}) & (STYLE_JOYDUAL | STYLE_JOYDUAL2)) == (STYLE_JOYDUAL | STYLE_JOYDUAL2), "a Joy-Con 2 pair: JoyDual with its Joy-Con 2 bit");
+    dm_joy_attach(0, 3); CHECK(!(h_hid_GetStyle(&(uint32_t){0}) & STYLE_JOYDUAL2), "a plain pair: no Joy-Con 2 bit");
+    h_hid_SetStyles(0xffffffffu); dm_joy_attach(0, 0);
+}
+
 static dm_haptic_state vibration[DM_PLAYERS];
 static int vibration_calls;
 static void vibration_sink(dm_haptic_state s) { vibration[s.player] = s; vibration_calls++; }
@@ -574,6 +601,7 @@ int main(void) {
     t_script();
     t_vibration();
     t_joycons();
+    t_jcms();
     t_rumble_log();
     t_motion_threads();
     t_motion_live();

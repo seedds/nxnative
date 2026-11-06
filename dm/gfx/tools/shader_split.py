@@ -45,6 +45,7 @@
 #       Mac host), each a VNVN record with one code area and control section (frostbite.py), see frostbite_jobs and frostbite_shaders
 #   · PDAT (the engine with the namespace phx, Kirby Air Riders): flatbuffer records tagged PMAP, zstd frames in the .dat archives, each holding a program's control sections and code areas, see pdat_jobs and pdat_shaders
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
+#   · Shin'en's SHN!D files (Fast Fusion's .shdr and .w3d): every NVN2 control section of the LZ4 metadata block, each with its code area from the LZ4 code pool in turn, see shn_shaders
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -179,6 +180,35 @@ def bnsh_shaders(d, base, label):
 def nvn2_stage(ctl, code):   # an NVN2 shader's stage: compute, task and mesh by the control section's stage byte (+0x56: 5, 6, 7; a task or mesh shader's SPH reads as vertex or domain), else the SPH at the code area's start (no code header)
     if len(ctl) > 0x56 and ctl[0x56] in (5, 6, 7): return {5: 'cs', 6: 'ts', 7: 'ms'}[ctl[0x56]]
     return sph_stage(bytes(0x30) + code[:4]) if len(code) >= 4 else None
+
+SHN_D = b'SHN!D\0\0\0'
+def shn_shaders(d, label):
+    """A Shin'en SHN!D file (Fast Fusion: the .shdr post effects and the .w3d scenes, objects and particles; 554 of its 2,593 such files hold shaders). Its 0x44-byte header gives a metadata
+    block (+0x08 its stored length, +0x0c its length; stored as is when the two are equal, else one LZ4 block from +0x44) and a code pool (+0x24 its offset, +0x28 its stored length,
+    +0x2c its length; LZ4 the same way). The metadata holds each shader's NVN2 control section whole, as the game hands it to NVN (+0x30 its own length, +0x44 its code length), and the
+    pool holds their code areas back to back in the same order (each a multiple of 0x100; some pools have more data after the last). A file's shaders are as many as its control sections:
+    one .shdr holds every variant of its effect, one track .w3d up to 159"""
+    if len(d) < 0x44: return []
+    mstored, mlen = struct.unpack_from('<2I', d, 0x08)
+    co, cstored, clen = struct.unpack_from('<3I', d, 0x24)
+    where = f'{label} SHN!D'
+    def block(off, stored, n, what):
+        if off + stored > len(d): red(f'{where}: its {what} ({stored:#x} bytes at {off:#x}) runs past the {len(d):#x}-byte file')
+        if stored == n: return d[off:off + n]
+        import lz4.block
+        try: return lz4.block.decompress(d[off:off + stored], uncompressed_size=n)
+        except lz4.block.LZ4BlockError as e: red(f'{where}: its {what} does not decompress ({e})')
+    meta = block(0x44, mstored, mlen, 'metadata')
+    if CTL_MAGIC + b'\xc9\0\0\0' not in meta: return []   # fonts, textures, light probes, localisation, most particles: no shader
+    pool, out, off, i = block(co, cstored, clen, 'code pool'), [], 0, 0
+    while (i := meta.find(CTL_MAGIC + b'\xc9\0\0\0', i)) >= 0:
+        own, ncode = struct.unpack_from('<I', meta, i + 0x30)[0], struct.unpack_from('<I', meta, i + 0x44)[0]
+        if not NVN2_KEY_CTL <= own <= 0x880 or i + own > len(meta): red(f'{where}: the control section at {i:#x} of its metadata says it is {own:#x} bytes')
+        if off + ncode > len(pool): red(f'{where}: the control section at {i:#x} of its metadata wants {ncode:#x} bytes of code at {off:#x} of a {len(pool):#x}-byte pool')
+        ctl, code = meta[i:i + own], pool[off:off + ncode]
+        out.append((f'{label}#SHN#{len(out)}', nvn2_stage(ctl, code) or 'cs', ctl, code))
+        off, i = off + ncode, i + own
+    return out
 
 def bahs_shaders(d, label):
     rsz, region = field(d, '<II', 0x18, f'{label} BAHS header')
@@ -2722,6 +2752,7 @@ def scan_blob(d, label, out, depth=0, left=None):
         import cra
         for i, m in enumerate(cra.narc_members(d, label)): scan_blob(cra.undo(m), f'{label}/{i}', out, depth + 1)
         return
+    if d[:8] == SHN_D: out.extend(shn_shaders(d, label)); return
     if d[:4] == b'BAHS': out.extend(bahs_shaders(d, label)); return
     if d[:4] == b'NDSR': out.extend(ndsr_shaders(d, label)); return
     if d[:4] == b'NDVE': out.extend(ndve_shaders(d, label)); return
@@ -3034,7 +3065,7 @@ def scan_file_in(args):
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), 'defer'
         return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
-    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
+    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d and d[:8] != SHN_D: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
     else:
         scan_blob(d, '/' + rel, found)
         # whole GLSLC outputs in a file no other reader takes (FINAL FANTASY TACTICS - The Ivalice Chronicles: its engine's technique files, resources_nx/…/shader/*.tec, 261 outputs beside

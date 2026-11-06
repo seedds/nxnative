@@ -364,6 +364,9 @@ check_t_linear_readback: t_linear_readback
 	MTL_DEBUG_LAYER=1 ./t_linear_readback
 t_pfv: t_pfv.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pfv.m $(MTL_T_SRC) $(FW)
+t_rect_sampler: t_rect_sampler.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_rect_sampler.m $(MTL_T_SRC) $(FW)
+check_t_rect_sampler: RUN_ENV = MTL_DEBUG_LAYER=1
 t_int_float_view: t_int_float_view.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_int_float_view.m $(MTL_T_SRC) $(FW)
 check_t_int_float_view: RUN_ENV = MTL_DEBUG_LAYER=1

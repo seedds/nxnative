@@ -1899,7 +1899,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[157];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[158];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -5384,6 +5384,7 @@ void mtl_reg_image(int tid, const tex_t *t, const view_t *v) {
     tex_t image = *t; image.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
     mtl_reg_tex(tid, &image, v);
 }
+static NSMutableDictionary<NSNumber *, id<MTLSamplerState>> *g_samp_px;   // sampler ID → its pixel-coordinate twin; samp_px; dropped when the ID is registered again
 void mtl_reg_samp(int sid, const samp_par *sp) {
     int id_ = sid; if (id_ < 0) return;
     os_unfair_lock_lock(&g_rmu);
@@ -5393,6 +5394,7 @@ void mtl_reg_samp(int sid, const samp_par *sp) {
         memset(g_sview_w + g_nsreg, 0, (n - g_nsreg) * sizeof *g_sview_w); memset(g_srid_w + g_nsreg, 0, (n - g_nsreg) * sizeof *g_srid_w); g_nsreg = n; }
     if (g_sview[id_]) { CFRelease(g_sview[id_]); g_sview[id_] = NULL; g_srid[id_] = 0; }
     if (g_sview_w[id_]) { CFRelease(g_sview_w[id_]); g_sview_w[id_] = NULL; g_srid_w[id_] = 0; }
+    if (g_samp_px) [g_samp_px removeObjectForKey:@(id_)];
     g_reg_gen++;
     g_sreg[id_] = *sp; g_sreg_ok[id_] = 1;
     os_unfair_lock_unlock(&g_rmu);
@@ -5719,6 +5721,37 @@ static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
         if (t) { g_sview_w[sid] = (void *)CFBridgingRetain(t); g_srid_w[sid] = t.gpuResourceID._impl; memcpy(g_sbk[sid], k, sizeof k); }
         static int nlog; if (nlog++ < 16) MLOG("sampler ID %d: border colour %g,%g,%g,%g, which Metal lacks: Metal colour %d, corrected in the shaders through a twin of colour %d", sid, p.border[0], p.border[1], p.border[2], p.border[3], bn, bw);
     }
+    return s;
+}
+// A rectangle texture (NVN_TEXTURE_TARGET_RECTANGLE, as the texture's target or a view's) is addressed in texels, not in 0..1: Maxwell's texture header says so (the normalized
+// coordinates bit) and the hardware scales the coordinates, so a shader samples it at gl_FragCoord.xy as it is. The shaders are translated before any texture is known (a
+// translator asked whether coordinates are normalized answers yes), and Metal's view of it is a 2D texture: such a sample read the corner texel. Fast Fusion's tornadoes
+// (tornadofusion.w3d 62b3444f82f59ad7) read the depth through a rectangle view to fade into the scene, and with the corner's depth they faded out entirely. A sampler with
+// pixel coordinates (normalizedCoordinates = NO) does what the header does; it has no mips and no anisotropy, as a rectangle texture has neither
+static int tid_rect(int tid) {   // Caller holds g_rmu
+    if (tid <= 0 || tid >= g_ntreg || !g_treg[tid].ok) return 0;
+    const treg_t *r = &g_treg[tid];
+    return (r->has_v && r->v.set_target ? (int)r->v.target : (int)r->t.d.target) == NVN_TEXTURE_TARGET_RECTANGLE;
+}
+static id<MTLSamplerState> samp_px(int sid) {   // Caller holds g_rmu
+    if (sid <= 0 || sid >= g_nsreg || !g_sreg_ok[sid]) return nil;
+    id<MTLSamplerState> s = g_samp_px[@(sid)]; if (s) return s;
+    samp_par p = g_sreg[sid];
+    MTLSamplerDescriptor *d = [MTLSamplerDescriptor new];
+    d.normalizedCoordinates = NO;
+    d.minFilter = d.magFilter = p.magf ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;   // pixel coordinates take one filter for both
+    d.mipFilter = MTLSamplerMipFilterNotMipmapped; d.lodMinClamp = d.lodMaxClamp = 0;
+    int bn, bw; float k[4]; const uint8_t wrap[3] = { p.ws, p.wt, p.wr }; nvn_border(p.border, wrap, p.reduction, &bn, &bw, k);
+    MTLSamplerAddressMode m[2] = { wrapm(p.ws), wrapm(p.wt) };   // pixel coordinates clamp: to the edge, or to the border colour where the game asked for a border
+    for (int i = 0; i < 2; i++) if (m[i] != MTLSamplerAddressModeClampToBorderColor) m[i] = MTLSamplerAddressModeClampToEdge;
+    d.sAddressMode = m[0]; d.tAddressMode = m[1]; d.borderColor = (MTLSamplerBorderColor)bn;
+    if (p.cmp_mode) d.compareFunction = (MTLCompareFunction)(p.cmp_func - 1);
+    d.supportArgumentBuffers = YES;
+    s = [g_dev newSamplerStateWithDescriptor:d];
+    if (!s) { RED_ONCE(157, "no pixel-coordinate sampler for sampler ID %d (a rectangle texture's): sampled as normalized", sid); return nil; }
+    if (!g_samp_px) g_samp_px = [NSMutableDictionary dictionary];
+    g_samp_px[@(sid)] = s;
+    static int nlog; if (nlog++ < 8) MLOG("sampler ID %d reads a rectangle texture: its twin with pixel coordinates is bound", sid);
     return s;
 }
 static inline __attribute__((always_inline)) void *samp_fast(int sid) {
@@ -8725,7 +8758,11 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             int sid = b->kind == NVN_RB_SAMPU ? sampu_id(nvn_stage, b, -1) :
                       b->kind == NVN_RB_SAMPI ? (int)reg : b->kind == NVN_RB_SAMPT ? (reg < NTEX ? (int)(S.tex[nvn_stage][reg] >> 20) : 0) : reg < 128 ? (int)(S.samp[nvn_stage][reg] >> 20) : 0;   // SAMPI: a sampler ID the shader names as a constant
             __unsafe_unretained id<MTLSamplerState> ss = sid ? (__bridge id<MTLSamplerState>)samp_fast(sid) : nil;
-            if (b->bw && ss && g_sview_w[sid]) {   // a twin (dmsh_build.py border_emu) of a sampler whose border colour Metal lacks: the shader corrects its samples
+            // the texture of a combined handle is known here: a rectangle one takes the sampler's pixel-coordinate twin (samp_px)
+            int htid = b->kind == NVN_RB_SAMPU ? ubo_tex_id(ubo_bind_handle(nvn_stage, b)) : b->kind == NVN_RB_SAMPT && reg < NTEX ? (int)(S.tex[nvn_stage][reg] & 0xfffff) : 0;
+            id<MTLSamplerState> px = ss && tid_rect(htid) ? samp_px(sid) : nil;
+            if (px) { ss = px; slots[aid] = px.gpuResourceID._impl; }
+            else if (b->bw && ss && g_sview_w[sid]) {   // a twin (dmsh_build.py border_emu) of a sampler whose border colour Metal lacks: the shader corrects its samples
                 ss = (__bridge id<MTLSamplerState>)g_sview_w[sid]; slots[aid] = g_srid_w[sid];
                 bmask |= 1u << (b->bw - 1); memcpy(bk[b->bw - 1], g_sbk[sid], sizeof bk[0]);
             } else slots[aid] = sid && sid < g_nsreg && g_srid[sid] ? g_srid[sid] : dummy_samp_rid();   // a twin of any other sampler is never sampled

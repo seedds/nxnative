@@ -2950,7 +2950,7 @@ def main(args=None):
     lang_in = args.language or LANGUAGE   # checked against the game's languages once its control data is extracted
     want_lang = language_code(lang_in) if lang_in else 'en-US'
     if not want_lang: raise BuildError(f'unknown game language {lang_in!r}; give one of {language_list([c for c, _ in nacp.LANGUAGES])}, by code or by name')
-    env = dict(os.environ, PATH=os.pathsep.join(TOOL_PATHS + [os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')]))
+    env = dict(os.environ, PATH=os.pathsep.join([os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')] + TOOL_PATHS))
     env.setdefault('USER', getpass.getuser())   # xcodegen fails without USER (Couldn't find current username)
     configure_dotnet(env)
     env.setdefault('J', str(os.cpu_count() or 8))   # shader_split.py's and dmsh_build.py's workers (their default is 8)

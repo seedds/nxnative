@@ -2,7 +2,9 @@
 with the .NET it is given, a missing glslangValidator, and a Python under Rosetta each stop the build at once instead of at a shader step minutes later.
 Every input (xcrun, xcode-select, sysctl, the translator, PATH) is mocked: no Xcode, .NET, glslang or Rosetta needed."""
 import importlib.util
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -35,6 +37,30 @@ def fake_run(sdk_rc=0, devdir='/Applications/Xcode.app/Contents/Developer', xlat
 
 def fake_capstone(major):   # the installed capstone's version does not matter to these tests
     return types.SimpleNamespace(__version__=f'{major}.0.0', cs_version=lambda: (major, 0, major << 8))
+
+
+class ToolPath(unittest.TestCase):
+    def test_caller_tools_win_and_gui_fallbacks_remain_available(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            caller, fallback = root / 'Project Tools', root / 'fallback'
+            caller.mkdir(); fallback.mkdir()
+            for directory, names in ((caller, ('zstd', 'dotnet')), (fallback, ('zstd', 'dotnet', 'xcodegen'))):
+                for name in names:
+                    tool = directory / name; tool.write_text('#!/bin/sh\nexit 0\n'); tool.chmod(0o755)
+            for incoming in (str(caller), None):
+                with self.subTest(incoming=incoming), mock.patch.dict(os.environ, {}, clear=True), \
+                        mock.patch.object(nsp, 'TOOL_PATHS', [str(fallback)]), mock.patch.object(nsp, 'check_native_python'), \
+                        mock.patch.object(nsp, 'NSP_FOLDER', nsp.NSP_FOLDER), \
+                        mock.patch.object(nsp, 'configure_dotnet', side_effect=RuntimeError('environment captured')) as configure:
+                    if incoming is not None: os.environ['PATH'] = incoming
+                    args = nsp.parse_args([str(root), '-k', __file__])
+                    with self.assertRaisesRegex(RuntimeError, 'environment captured'): nsp.main(args)
+                    path = configure.call_args.args[0]['PATH']
+                    expected = caller if incoming is not None else fallback
+                    for name in ('zstd', 'dotnet'): self.assertEqual(shutil.which(name, path=path), str(expected / name))
+                    self.assertEqual(shutil.which('xcodegen', path=path), str(fallback / 'xcodegen'))
+                    if incoming is None: self.assertEqual(path.split(os.pathsep)[:4], ['/usr/bin', '/bin', '/usr/sbin', '/sbin'])
 
 
 class Prereqs(unittest.TestCase):

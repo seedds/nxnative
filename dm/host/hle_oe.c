@@ -320,6 +320,12 @@ HLE_FORCE("_ZN2nn2oe24IsInStoreDemoModeEnabledEv", "retail store demo mode (thro
 HLE_FORCE("_ZN2nn2oe27SetPerformanceConfigurationENS0_15PerformanceModeEi", "set the CPU/GPU clock config; the host does not scale clocks", void, h_oe_SetPerfCfg, int mode, int cfg) {
     LOG("oe::SetPerformanceConfiguration mode=%d cfg=%#x (ignored)", mode, cfg);
 }
+// The one-argument overload asks apm for the current performance mode. Tunic calls it when it
+// switches to handheld mode; without this hook the SDK reads the host's absent apm manager
+// (null at sdk+0x1c4fac, nn::apm::SetPerformanceConfiguration) and the game crashes.
+HLE_FORCE("_ZN2nn2oe27SetPerformanceConfigurationEi", "set the CPU/GPU clock config through the one-argument overload; the host does not scale clocks", void, h_oe_SetPerfCfg1, int cfg) {
+    LOG("oe::SetPerformanceConfiguration cfg=%#x (ignored)", cfg);
+}
 
 // Scripted state changes (verify lifecycle / overheat downgrade without a window): DM_OE_SCRIPT="focus=3@10,focus=1@20,opmode=0@30" (second N); bg=1 / bg=0 run the whole background round trip (see script_bg)
 // Time counts from the game's first notification fetch. Coexists with front end calls.

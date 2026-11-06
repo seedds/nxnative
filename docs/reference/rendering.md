@@ -310,6 +310,15 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [STEINS;GATE RE:BOOT](../../dm/games/01008BC024FDE000/README.md) (ASTC 4x4 images up to 4096 wide, RGBA8 render targets, R8 masks): from a quick save, 297 entries and 1.29 GB of GPU memory at frame 6,600; 468 entries and 1.58 GB 24,000 frames into a new game. With the fix: 97 entries and 0.93 GB at frame 6,600; 15 minutes of story from the quick save (53,700 frames) stayed at 1.08–1.15 GB of GPU memory and 1.02–1.13 GB resident, and a new game from boot stays at 0.97–1.03 GB from its first story scene to frame 27,300 (with the 16-submission guard).
 - **Check:** Captain Toad: Treasure Tracker's opening course, rendered with agl's transient targets, keeps its 26 entries and takes none over, with the same memory and frame times as before.
 
+### A storage takeover walked the serial table for each entry
+
+- **Symptom:** while the game makes many textures (Ocarina of Time's cutscenes), frames of hundreds of milliseconds up to a second, all of it in `submit+present` (the `[longframe]` lines); `sample` of the process names `alias_take_over` the submit thread's hottest function.
+- **Cause:** for each entry a takeover could remove, `alias_take_over` asked whether a live texture object still resolves to it through `serial_holds(&g_by_serial, …)`, a walk over the serial table's whole capacity. With about 7,500 serials and thousands of shared textures, every new shared texture walked the table once per entry of its pool that overlapped its storage, and the texture pool's walks (`pool_gpu`, which makes a texture for every registered ID of the table's type) make hundreds of textures in one submission.
+- **Fix:** general, in `nvn_mtl.m`: a count per object of the serial-table entries holding it (`g_by_serial_held`), kept by every writer of the serial table (`serial_put`, `serial_del`, `tex_put` and the upgrade's in-place replacement); `alias_take_over` asks it in one lookup. The count answers only what it counts: a change that lets a live object hold a shared texture some other way (a view's parent, a packaged texture's members, as PR #1404 proposes) must count those holds too, or a takeover retires a texture still read.
+- **Check:** `dm/gfx/tests/t_alias_takeover.m`: an entry a live object resolves to stays and one nothing resolves to goes after `ALIAS_IDLE` submissions, two serials naming one object keep it held until both go, and a takeover past 1,000 held entries with 20,000 serials in the table takes 0.025 ms instead of 4.3 ms (M5 Max). In the game, a host that asked both the count and the walk (Ocarina of Time, loading a Kokiri Forest save, Saria's dialogue and a walk through the village, M4 Pro) compared them 393,216 times and they never differed, so the takeover makes the same choices as before; on the same route the `[longframe]` lines went from 332 to 212.
+- **Found on:** The Legend of Zelda: Ocarina of Time (Switch 2, `0400486024DEC000`, update v131072, with PR #1299), Saria's cutscene in Kokiri Forest, M5 Max. In 60 s `sample` captures of the submit thread over the cutscene, `alias_take_over` took 2,277 of the 3,711 samples spent making textures (`tex_mtl_`), 61 %; with the fix 38 of 618, 6 %. Game runs on the wall clock (the game does not run under `DM_DETCLOCK`) put the cutscene's heaviest part in or out of the run, so frame counts moved within their noise.
+- **Open:** the same captures and the memory line show the textures themselves being made again and again: 84,000 to 103,000 storage takeovers in about 200 s of play with 1,400 to 1,900 shared textures alive.
+
 ### Live resolution variants share physical image storage
 
 - **Symptom:** GPU memory grows as resolution changes or rooms load, although almost every retained texture still has a live NVN descriptor; reclaiming unused sharing-table entries cannot recover it.
@@ -990,6 +999,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `nvn_rec.h` records both copies with their options (`RO_C_COPY_TB_OPT`, `RO_C_COPY_BT_OPT`) and replays them on the Metal 4 compute encoder. Every selector the host's encoder wrappers send now has a stand-in. `check_t_rt_range` also runs with `DM_NVN_ENC_THREAD=1`; `t_rt_range` and `t_unwritten_store` stopped there before.
 - **Found on:** the host's tests. [PR #930](https://github.com/seedds/nxnative/pull/930) added the texture-to-buffer stand-in for [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) on the Mac with the encode thread on (not run here).
 
+### Indirect task / mesh draws on the encode thread
+
+- **Symptom:** `FATAL deferred encoding: DmRecEnc has no stand-in for -drawMeshThreadgroupsWithIndirectBuffer:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:`, then `CRASH sig=6` under `mtk_encode`, with Metal encoding on its own thread (`DM_NVN_ENC_THREAD=1`, the default on iOS), at the first [indirect task / mesh draw](shaders.md#task-and-mesh-shaders-in-bnsh-and-indirect-mesh-draws).
+- **Cause:** `nvn_geometry.inc` encodes an indirect task / mesh draw with `drawMeshThreadgroupsWithIndirectBuffer:…`, and the encode thread's recorder (`DmRecEnc` in `nvn_rec.h`) had a stand-in only for the direct one (`drawMeshThreadgroups:…`). A call it has no stand-in for stops the host.
+- **Fix:** `nvn_rec.h` records the indirect draw (`RO_R_MESH_IND`: the argument buffer's GPU address and the threads per object and mesh threadgroup, as `RO_R_MESH` keeps them) and replays it. `t_rec_draws` checks that the recorder has a stand-in for every draw the NVN layer encodes.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): the iOS app aborted when a save loaded; on the Mac with the encode thread on, 28 s after the title ([issue #1265](https://github.com/seedds/nxnative/issues/1265)).
+
 ### Inline uniform updates as ordered GPU copies
 
 - **Cause:** reading the uniform buffer from the CPU at encode time gives the frame's *last* value, not the draw's.
@@ -1011,6 +1027,19 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Prebuild:** `pre_desc` (the prebuild of a game's shader pairs) and `pso_offline.py` (the offline archive) leave pairs with such a fragment shader out, as no draw uses their base.
 - **Check:** `t_image_primitive_id` draws four full-screen triangles that store into the layer of their primitive ID through the host's draw path (an attachment-less pass, a metallib loaded as game shaders are). Each of the four layers holds its own primitive's value; without the flag, layers 1 to 3 stay empty (macOS 27.0.1, M3 Pro). `test_pso_offline.py` checks that such a pair is left out.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): `b6726be4afc44691`.
+
+### A specialization descriptor iOS 26.0 returns autoreleased
+
+- **Symptom:** with Metal 4 pipelines on (`DM_PSO_MTL4=1`), the iOS app crashes before its first frame, right after `pipeline prewarm list … lines`: `CRASH sig=11 pc=objc_release+0x10`, `bt: objc_autoreleasePoolPop warm_task __warm_prepare_block_invoke`, on several prepare workers at once. The Mac runs the same pipelines.
+- **Cause:** `newRenderPipelineDescriptorForSpecialization` promises a +1 object by its name, so ARC releases it once at the end of `pso_build_ex`. On iOS 26.0 (23A341) the driver returns it autoreleased. On an iPad Pro M4 the method is `-[AGXG16GFamilyRenderPipeline newRenderPipelineDescriptorForSpecialization]` in `AGXMetalG16G_B0`. So ARC's release freed it, and the warm task's pool released it again. Under LLDB on the iPad:
+  - the descriptor sits in the autorelease pool when the call returns (`_objc_autoreleasePoolPrint`);
+  - `NSZombieEnabled=YES` reports `-[MTL4RenderPipelineDescriptor release]: message sent to deallocated instance`.
+  That one release freed it, so the driver keeps no reference of its own. macOS 27.0 (26A428, M4 Pro) returns it retained. There, the direct call made the same prewarm's 34 specializations without a crash.
+- **Fix:** `spec_desc` (`nvn_mtl.m`) finds out on its first call how the driver returns the descriptor. A weak reference survives the call's own autorelease pool only if the caller owns the descriptor. After that it takes the descriptor the way the driver gives it, so the caller owns exactly one reference either way. The answer holds for the process: every base comes from the one device's compiler or its archives. The `pipeline bases so far` line names it: `their descriptors returned retained` or `returned autoreleased`. `t_pso_stall` specializes through it too.
+- **Check:** `make -C dm/gfx/tests GAME=01005CA01580E000 check_t_pso_archive` runs `spec_desc` against two stand-in bases, one that returns the descriptor retained and one that returns it autoreleased. On the first call and on later ones, the descriptor outlives every pool and is freed once dropped. The previous direct call dies on the autoreleased stand-in. Axiom Verge with `DM_PSO_MTL4=1`:
+  - on the iPad, it crashed on every start before the fix. Now it runs at 60 fps: the cold start compiled 18 bases and made 25 specializations, and later starts take the bases from the archive. The log says `returned autoreleased`;
+  - on the Mac, it says `returned retained`.
+- **Found on:** Axiom Verge 1.0.3 (`0100052004384000`, its profile a separate change) with the launcher's **Metal 4 pipelines** on: an iPhone 16 Pro Max (iOS 26.0, LiveContainer) and an iPad Pro 11-inch (M4, iPadOS 26.0, from Xcode and in LiveContainer) crashed the same way.
 
 ### NVN2's DLSS on MetalFX
 

@@ -559,8 +559,15 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** SIGSEGV in `android::Surface::getQueuedFrameNumber` under `nn::vi::GetLatestFrameNumber`.
 - **Cause:** Unreal paces frames by the layer's frame number (`main+0x10140e8`); the SDK reads the vi service's surface, which the host never made.
-- **Fix:** `hle_vi.c` answers with the frames presented so far; `ListFrameHistory` returns no entries.
+- **Fix:** `hle_vi.c` answers with the frames presented so far; `ListFrameHistory` lists them, as the next entry says.
 - **Found on:** [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md).
+
+### Layer frame history
+
+- **Symptom:** right after the opening logo movie nothing is presented again, with no red line; the watchdog reports `no progress … stage present frame`. The game thread is in Unreal's `FlushRenderingCommands`, waking each millisecond from a condition variable whose event is never triggered, while the render, RHI, frame-flip and interrupt threads all wait idle.
+- **Cause:** Unreal's Switch RHI learns which frames reached the screen only from `nn::vi::ListFrameHistory`: its "Viewport Thread" waits for each vsync, asks for the entry count (a null buffer: the SDK answers 8, the history's size), reads the 40-byte `FrameInfo` entries and takes the first one shown as the latest flip. Those flips complete the frame-end fences that wait for the swap chain (`r.GTSyncType` 2, `FFrameEndSync`), and the first full `FlushRenderingCommands` waits for every fence in that ring. The host returned no entries, so no flip ever came and the flush waited for ever.
+- **Fix:** `dm/gfx/hle_vi.c` keeps the last 8 presents (recorded at each NVN present, numbered as `GetLatestFrameNumber`, with the present queue's ticket) and answers as the SDK fills `FrameInfo` (`sdk+0x4510a0` in SDK 20.5.15): status (2 shown with a present time, 1 queued and not shown yet), frame number, queue tick and present tick twice, newest first. A frame is shown once the present queue has handed it on (`mtl_present_progress`) and the system did not drop it. Its present time is the drawable's presented time when Metal reports one, else (headless, or before the handler runs) the time it was first seen handed on.
+- **Found on:** [Minecraft Dungeons II](../../dm/games/0100A7C01B792000/README.md); [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md) and [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md) call it from the same RHI code (`main+0x1014994`, `main+0x32b408c`) and got no entries before.
 
 ### Default display panel identifier
 

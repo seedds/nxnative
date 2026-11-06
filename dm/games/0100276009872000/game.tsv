@@ -1,0 +1,38 @@
+# ŌKAMI HD (Capcom's 2017 remaster of the PS2 game, Switch base game 1.0.0), SDK 4.5.0, NVN, CRIWARE sound (ADX2), CRI USM movies through the SDK's movie library (subsdk0).
+# Started from the NSP script's provisional profile; brought up on the Mac with no change to it but its names (README.md).
+
+# ---- Identity ----
+title_id	0100276009872000
+program_id	0100276009872000
+
+# ---- App ----
+name	ŌKAMI HD
+ipa	OkamiHD.ipa
+app_category	public.app-category.adventure-games
+# a third-person 3D game: the right stick turns the camera
+pad_layout	full
+
+# ---- Versions ----
+build	v0	1.0.0	main=a4fddc7fd35b30cb763bf70c3213dcb7	subsdk0=303578054faefc2198114b62e408c498	sdk=e01ad5381c948c4ec3b0bb210b08d5c8
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	data/privilege/IllustPrivilege.dat
+zip_store	.adx:.afs2:.dat:.dds:.idd:.pac:.usm:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region (the game asks for 2 GB of it)
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+# 126 shaders, one BNSH per file: 35 in RomFS (shader/), 91 in main
+shader_groups	/data/=data /shader/=shader
+shader_note	ŌKAMI HD shaders

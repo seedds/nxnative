@@ -174,15 +174,15 @@ def flatten_sets(path):
 
 
 def topology_pointer(src):
-    """Topology remap uses uint words; avoid allocating a texture view per draw."""
+    """Topology remap uses uint words; avoid allocating a texture view per draw. The table may also be passed to a helper function SPIRV-Cross made of a block the shader reaches from several places
+    (Kirby Air Riders: 26 of its 76 geometry shaders), so a parameter of that name is one more place to rewrite, and its reads have no descriptor set in front."""
     src, n = re.subn(r'texture_buffer<float> trb_data', 'device const uint* trb_data', src)
-    if n != 1:
+    if not n or 'trb_data [[id(' not in src:
         raise ValueError('missing geometry topology buffer')
     # Match the balanced read argument rather than relying on expression shape.
-    prefix = 'spvDescriptorSet0.trb_data.read('
-    while prefix in src:
-        start = src.index(prefix)
-        at, depth = start + len(prefix), 1
+    read = re.compile(r'(?:spvDescriptorSet0\.)?trb_data\.read\(')
+    while m := read.search(src):
+        at, depth = m.end(), 1
         end = at
         while depth:
             if src[end] == '(': depth += 1
@@ -190,9 +190,8 @@ def topology_pointer(src):
             end += 1
         if src[end:end + 2] != '.x':
             raise ValueError('unexpected topology read')
-        src = src[:start] + 'as_type<float>(spvDescriptorSet0.trb_data[' + src[at:end - 1] + '])' + src[end + 2:]
-    if 'trb_data.read' in src:
-        raise ValueError('unconverted geometry topology read')
+        table = src[m.start():m.end() - len('.read(')]
+        src = src[:m.start()] + f'as_type<float>({table}[' + src[at:end - 1] + '])' + src[end + 2:]
     return src
 
 

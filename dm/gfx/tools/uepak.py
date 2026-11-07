@@ -20,6 +20,10 @@
 # Encoded entry: u32 bits (0-5 compression block size >> 11, 0x3f = a u32 follows; 6-21 block count; 22 encrypted; 23-28 compression method, 1-based; 29 stored size fits 32 bits; 30 raw size fits
 #   32 bits; 31 offset fits 32 bits), then offset, raw size, stored size (compressed entries only) and, for several blocks or an encrypted one, each block's u32 stored size. The data starts after
 #   the FPakEntry the pak repeats in front of it (53 bytes, + 4 + 16 per block when compressed); blocks follow each other, 16-aligned when encrypted.
+# Version 9 paks (PakFile_Version_FrozenIndex, UE 4.25: DRAGON QUEST TREASURES, DarwinGame/Content/Paks/pakchunk0-Switch.pak, 2.1 GB / 97,689 files, index not encrypted, Zlib blocks)
+#   have a 1-byte frozen-index flag (1) between the index SHA-1 and the five 32-byte compression method names in the footer (magic 0xcd from the end), and the index is a frozen FMemoryImage
+#   (FPakIndex: MountPoint at +0, TMemoryImageArray<FPakEntry> at +0x10 of 0x50-byte entries, DirectoryIndex at +0x20 of 0x50-byte directory elements with 0x20-byte {FMemoryImageString, i32}
+#   file entries; every pointer is an i64 with bit 0 = 1 and p >> 1 the byte offset from the pointer field itself, strings UTF-16LE with the NUL).
 # Version 8 paks (UE 4.22 to 4.25: DRAGON BALL Z: KAKAROT, pakchunk0-Switch.pak 4.5 GB / 126,978 files and pakchunk1-Switch.pak 1.9 GB / 41,080 files, index not encrypted,
 #   Zlib blocks) read like version 4 below, except that the footer is version 11's and an FPakEntry's compression method is an index (from 1) into its names.
 # Older paks (version 4, UE 4.18: DRAGON QUEST XI S, pakchunk0-Switch.pak 6.6 GB / 264,844 files and pakchunk1-Switch.pak 7.2 GB / 147,824 files, the update's *_0_P.pak beside them) keep the
@@ -162,10 +166,11 @@ LEGACY = (4, 8)   # legacy pak versions read (the per-file index); 11 has the en
 LEGACY_METHODS = {1: 'Zlib', 2: 'Gzip', 3: 'LZ5', 4: 'Custom'}   # compression flags of a legacy pak (3: DRAGON QUEST XI S's engine, see the header)
 
 def magic_back(f):
-    """(how far from the end the footer's magic is, the pak version): a legacy footer is the last 0x2d bytes (magic 0x2c from the end); version 11's magic is 0xc8 from the end in
+    """(how far from the end the footer's magic is, the pak version): a legacy footer is the last 0x2d bytes (magic 0x2c from the end); version 9 (Unreal Engine 4.25, DRAGON QUEST TREASURES:
+    a 1-byte frozen-index flag between the SHA-1 and five 32-byte compression method names) has its magic 0xcd from the end; version 11's magic is 0xc8 from the end in
     Octopath Traveler 0 (UE5) and 0xcc in Unreal Engine 4.27 (DRAGON QUEST VII Reimagined: five whole 32-byte compression method names after the SHA-1)"""
     size = f.seek(0, 2)
-    for back, foot in ((0x2c, 0x2d), (0xc8, 0xc8 + 21), (0xcc, 0xcc + 21)):
+    for back, foot in ((0x2c, 0x2d), (0xc8, 0xc8 + 21), (0xcc, 0xcc + 21), (0xcd, 0xcd + 21)):
         if size < foot: continue   # shorter than this footer
         f.seek(-back, 2); m, ver = struct.unpack('<II', f.read(8))
         if m == PAK_MAGIC: return back, ver
@@ -177,17 +182,51 @@ def pak_version(f):
 def footer(f):
     """(encrypted index, index offset, index size, compression method names by number from 1, version); ValueError when the index does not lie inside the file"""
     back, ver = magic_back(f)
-    if ver in (4, 11) and (ver == 4) != (back == 0x2c) or ver == 8 and back == 0x2c: raise ValueError(f'a version {ver} pak footer with its magic {back:#x} bytes from the end, where that version has none')
+    if (ver == 4 and back != 0x2c) or (ver in (8, 11) and back not in (0xc8, 0xcc)) or (ver == 9 and back != 0xcd):
+        raise ValueError(f'a version {ver} pak footer with its magic {back:#x} bytes from the end, where that version has none')
     if ver == 4:
         f.seek(-0x2d, 2); ft = f.read(0x2d); ioff, isz = struct.unpack_from('<QQ', ft, 9)
         enc, methods = ft[0], [LEGACY_METHODS.get(i, f'flags {i}') for i in range(1, 8)]
-    elif ver not in (8, 11): raise ValueError(f'pak version {ver}, only {", ".join(map(str, LEGACY))} and 11 are read')
+    elif ver not in (8, 9, 11): raise ValueError(f'pak version {ver}, only {", ".join(map(str, (*LEGACY, 9, 11)))} are read')
     else:
         f.seek(-(back + 21), 2); ft = f.read(back + 21); k = 21
         ioff, isz = struct.unpack_from('<QQ', ft, k + 8)
-        enc, methods = ft[k - 1], [ft[k + 44 + 32 * i:k + 76 + 32 * i].rstrip(b'\0').decode('latin1') for i in range(5)]
+        if ver == 9 and ft[k + 44] != 1: raise ValueError('a version 9 pak whose index is not a frozen memory image')
+        m = k + 44 + (ver == 9)
+        enc, methods = ft[k - 1], [ft[m + 32 * i:m + 32 * (i + 1)].rstrip(b'\0').decode('latin1') for i in range(5)]
     if ioff + isz > f.seek(0, 2): raise ValueError(f'the index ({isz:#x} bytes at {ioff:#x}) runs past the end of the pak')
     return enc, ioff, isz, methods, ver
+
+def frozen_index(b, methods, what='index'):
+    """A version 9 pak's frozen memory image (PakFile_Version_FrozenIndex, Unreal Engine 4.25: DRAGON QUEST TREASURES): MountPoint (+0), TMemoryImageArray<FPakEntry> (+0x10, 0x50 bytes
+    each) and DirectoryIndex (+0x20, 0x50 bytes per directory, each with a TMemoryImageArray of 0x20-byte {FMemoryImageString, i32 entry index} pairs). Every pointer is a signed
+    64-bit value whose bit 0 is 1 and whose upper 63 bits are the byte offset from the pointer field itself; strings are UTF-16LE with the trailing NUL in the character count"""
+    if len(b) < 0x58: raise ValueError(f'{what}: {len(b):#x} bytes, shorter than a frozen pak index header')
+    def arr(at, esz):
+        if not 0 <= at <= len(b) - 16: raise ValueError(f'{what}: array header at {at:#x} lies outside {len(b):#x}')
+        p, n, _ = struct.unpack_from('<qII', b, at)
+        if not n: return 0, 0
+        off = at + (p >> 1)
+        if not (p & 1) or not 0 <= off <= len(b) - n * esz: raise ValueError(f'{what}: {n} elements of {esz:#x} bytes at {off:#x} do not fit in {len(b):#x}')
+        return off, n
+    def fstr(at):
+        off, n = arr(at, 2)
+        return b[off:off + 2 * (n - 1)].decode('utf-16-le', 'replace') if n else ''
+    mount = fstr(0); e_at, e_n = arr(0x10, 0x50); d_at, d_n = arr(0x20, 0x50); files, seen = {}, set()
+    for d in range(d_n):
+        doff = d_at + d * 0x50; dn = fstr(doff); f_at, f_n = arr(doff + 0x10, 0x20)
+        for j in range(f_n):
+            foff = f_at + j * 0x20; ei = struct.unpack_from('<i', b, foff + 0x10)[0]
+            if not 0 <= ei < e_n or ei in seen: raise ValueError(f'{what}: file entry {ei} is outside 0..{e_n} or repeated')
+            seen.add(ei); fn = fstr(foff); eoff = e_at + ei * 0x50; off, size, raw = struct.unpack_from('<qqq', b, eoff)
+            if min(off, size, raw) < 0: raise ValueError(f'{what}: negative offset or size in entry {ei}')
+            b_at, b_n = arr(eoff + 0x30, 16); bsz, meth, flags = struct.unpack_from('<IIB', b, eoff + 0x40)
+            if meth > len(methods) or meth and not methods[meth - 1] or bool(b_n) != bool(meth):
+                raise ValueError(f'{what}: {dn + fn} names compression method {meth} with {b_n} blocks')
+            head = 53 + (4 + 16 * b_n if meth else 0)
+            blocks = [(s, t - s) for s, t in (struct.unpack_from('<qq', b, b_at + 16 * k) for k in range(b_n))] if meth else [(head, size)]
+            files[(dn + fn).lstrip('/')] = dict(off=off, raw=raw, size=size, method=methods[meth - 1] if meth else '', encrypted=flags & 1, block_size=bsz or raw, blocks=blocks)
+    return mount, files
 
 def read_range(f, off, n, what):
     """n bytes of the file at off, after checking that they lie inside it: a size from a damaged pak would otherwise be allocated by f.read first (up to 2^64)"""
@@ -235,7 +274,10 @@ class Pak:
         self.path, self.key = path, key; self.f = open(path, 'rb')
         enc, ioff, isz, self.methods, self.version = footer(self.f)
         if enc and not key: raise ValueError(f'{path}: the index is encrypted and no key was given')
-        r = R(self.read_at(ioff, isz, enc), what=f'{path}: the index')
+        ib = self.read_at(ioff, isz, enc)
+        if self.version == 9:
+            self.mount, self.files = frozen_index(ib, self.methods, what=f'{path}: the index'); self.count = len(self.files); return
+        r = R(ib, what=f'{path}: the index')
         self.mount = r.fstr(); self.count = r.take('<i')
         if self.version in LEGACY:   # one FPakEntry per file, kept as parsed
             self.files = {}
@@ -262,7 +304,7 @@ class Pak:
         b = read_range(self.f, off, (n + 15) & ~15 if enc else n, self.path)
         return aes_decrypt(self.key, b)[:n] if enc else b
     def entry(self, path):
-        if self.version in LEGACY: return self.files[path]
+        if self.version in (*LEGACY, 9): return self.files[path]
         r = R(self.enc, self.files[path], what=f'{self.path}: the entry of {path}'); v = r.take('<I')
         bsz = (v & 0x3f) << 11
         if v & 0x3f == 0x3f: bsz = r.take('<I')
@@ -510,14 +552,17 @@ def inline_in_containers(path):
     return any(t.export_bundles() for t in tocs) and not any(t.of_type(IO_SHADER_LIBRARY) for t in tocs)
 
 def inline_shaders(path):
-    """Whether a pak keeps its shaders inline in its cooked packages rather than in shader code archives: every legacy pak (DRAGON QUEST XI S), and a version 11 pak whose directory index
-    names no .ushaderbytecode and either cooked packages (.uexp; OCTOPATH TRAVELER II: bShareMaterialShaderCode off) or the global shader cache with the cooked packages in the containers beside the pak
-    (inline_in_containers; Mario & Luigi: Brothership and Yoshi and the Mysterious Book: the same setting with IoStore on). FINAL FANTASY RESONANCE's pak names the global shader cache too, but its
-    shaders are in its container's shader libraries, and Octopath Traveler 0's index is encrypted (reading it takes main's key; it holds the archives): neither counts"""
+    """Whether a pak keeps its shaders inline in its cooked packages rather than in shader code archives: every legacy pak (DRAGON QUEST XI S), and a version 9 (DRAGON QUEST TREASURES) or
+    version 11 pak whose directory index names no .ushaderbytecode and either cooked packages (.uexp; OCTOPATH TRAVELER II: bShareMaterialShaderCode off) or the global shader cache with the cooked
+    packages in the containers beside the pak (inline_in_containers; Mario & Luigi: Brothership and Yoshi and the Mysterious Book: the same setting with IoStore on). FINAL FANTASY RESONANCE's pak
+    names the global shader cache too, but its shaders are in its container's shader libraries, and Octopath Traveler 0's index is encrypted (reading it takes main's key; it holds the archives): neither counts"""
     with open(path, 'rb') as f:
-        enc, ioff, isz, _, ver = footer(f)
+        enc, ioff, isz, methods, ver = footer(f)
         if ver in LEGACY: return True
         if enc: return False
+        if ver == 9:
+            _, files = frozen_index(read_range(f, ioff, isz, path), methods, what=f'{path}: the index')
+            return not any(x.endswith('.ushaderbytecode') for x in files) and (any(x.endswith('.uexp') for x in files) or (any('GlobalShaderCache-' in x for x in files) and inline_in_containers(path)))
         r = R(read_range(f, ioff, isz, path), what=f'{path}: the index'); r.fstr(); r.take('<iQ')
         if r.take('<i'): r.take('<QQ'); r.raw(20)
         if not r.take('<i'): return False

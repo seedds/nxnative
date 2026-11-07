@@ -69,9 +69,35 @@ def pak4(files):
     return bytes(data) + index + b'\0' + struct.pack('<IIQQ', uepak.PAK_MAGIC, 4, len(data), len(index)) + bytes(20)
 
 
+def pak9(files):
+    """Version 9 frozen-index pak: the data, the frozen FMemoryImage index, and the 0xe2-byte footer (magic 0xcd from the end, frozen flag = 1)"""
+    data, idx = bytearray(), bytearray(0x58)
+    def put_arr(at, elem_bytes, n):
+        off = len(idx); idx.extend(elem_bytes)
+        struct.pack_into('<qII', idx, at, ((off - at) << 1) | 1, n, n)
+        return off
+    def put_str(at, s): u = (s + '\0').encode('utf-16-le'); put_arr(at, u, len(s) + 1)
+    put_str(0, '../../../')
+    e_at = put_arr(0x10, bytes(0x50 * len(files)), len(files))
+    d_at = put_arr(0x20, bytes(0x50 * len(files)), len(files))
+    for i, (dn, fn, raw, meth) in enumerate(files):
+        stored = zlib.compress(raw) if meth else raw
+        at = len(data); head = 53 + (4 + 16 if meth else 0); data += bytes(head) + stored
+        eoff = e_at + i * 0x50; struct.pack_into('<qqq', idx, eoff, at, len(stored), len(raw))
+        if meth:
+            put_arr(eoff + 0x30, struct.pack('<qq', head, head + len(stored)), 1)
+            struct.pack_into('<IIB', idx, eoff + 0x40, 0x10000, meth, 0)
+        doff = d_at + i * 0x50; put_str(doff, dn)
+        foff = put_arr(doff + 0x10, bytes(0x20), 1); put_str(foff, fn); struct.pack_into('<i', idx, foff + 0x10, i)
+    methods = b''.join(m.ljust(32, b'\0') for m in (b'Zlib', b'LZ4', b'', b'', b''))
+    foot = bytes(16) + b'\0' + struct.pack('<IIQQ', uepak.PAK_MAGIC, 9, len(data), len(idx)) + bytes(20) + b'\x01' + methods
+    return bytes(data) + bytes(idx) + foot
+
+
 def seeds():
     body = b'fuzz file body ' * 20
     return {'pak11': pak11([('Content/a.txt', body, 0), ('Content/z.bin', body * 3, 1), ('Content/l.bin', body * 2, 2)]),
+            'pak9': pak9([('Content/', 'a.txt', body, 0), ('Content/', 'z.bin', body * 2, 1)]),
             'pak4': pak4([('Engine/a.txt', body, 0), ('Engine/b.bin', body * 2, 1)]), 'archive': archive(), 'lslg': lslg()}
 
 

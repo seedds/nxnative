@@ -307,10 +307,34 @@ static BOOL ds4_route(int p, GCController *controller) {
 }
 #endif
 
+// Two rotating motors the front end sets itself (dm_haptics_apple_motors), mixed from the game's bands as the DualShock 4 report is (ds4_apply)
+static dm_haptics_motors_fn motors_fn[DM_PLAYERS];
+static uint8_t motors_set[DM_PLAYERS][2];
+@interface DmMotorsChannel : DmRumbleChannel
+@end
+@implementation DmMotorsChannel
+- (void)apply:(dm_haptic_level)level { (void)level; }
+- (void)stop {
+    int p = self.player;
+    if (motors_fn[p] && (motors_set[p][0] || motors_set[p][1])) motors_fn[p](p, 0, 0);
+    motors_set[p][0] = motors_set[p][1] = 0;
+}
+@end
+static void motors_apply(dm_haptic_state s) {
+    int p = s.player; if (!motors_fn[p]) return;
+    const dm_vibration *l = &s.motor[0], *r = &s.motor[1];
+    uint8_t strong = (uint8_t)lrintf(controller_level((0.85f * l->amplitude_low + 0.15f * r->amplitude_low) * gain) * 255);
+    uint8_t weak = (uint8_t)lrintf(controller_level((0.15f * l->amplitude_high + 0.85f * r->amplitude_high) * gain) * 255);
+    if (strong == motors_set[p][0] && weak == motors_set[p][1]) return;
+    motors_set[p][0] = strong; motors_set[p][1] = weak;
+    motors_fn[p](p, strong, weak);
+}
+
 static void apply(dm_haptic_state s) {
     dispatch_async(queue, ^{ @autoreleasepool {
         if (s.epoch != dm_haptics_epoch(s.player)) return;
         NSArray<DmRumbleChannel *> *out = channels[s.player];
+        if ([out.firstObject isKindOfClass:DmMotorsChannel.class]) { motors_apply(s); return; }
 #if !TARGET_OS_IPHONE
         if ([out.firstObject isKindOfClass:DmDs4Channel.class]) { ds4_apply(s); return; }
 #endif
@@ -333,6 +357,7 @@ static void default_controller(int p, GCDeviceHaptics *h, NSTimeInterval retryAf
 static void configure(int p, GCController *controller) {
     for (DmRumbleChannel *c in channels[p]) [c stop];
     channels[p] = [NSMutableArray new];
+    motors_fn[p] = NULL;
 #if !TARGET_OS_IPHONE
     ds4_release(p);
     if (controller && ds4_route(p, controller)) { dm_haptics_route(p, 1); return; }   // the report first, as SDL drives it
@@ -386,6 +411,21 @@ void dm_haptics_apple_controller(int p, GCController *controller) {
         dm_haptics_route(p, 0);   // invalidate queued work before changing hardware
         dispatch_sync(queue, ^{ configure(p, controller); });
     }
+    pthread_mutex_unlock(&routeLock);
+}
+void dm_haptics_apple_motors(int p, dm_haptics_motors_fn motors) {
+    if (!queue || p < 0 || p >= DM_PLAYERS) return;
+    pthread_mutex_lock(&routeLock);
+    controllers[p] = nil;
+    dm_haptics_route(p, 0);   // invalidate queued work before changing hardware
+    dispatch_sync(queue, ^{
+        configure(p, nil);
+        if (!motors) return;
+        motors_fn[p] = motors;
+        DmMotorsChannel *c = [DmMotorsChannel new]; c.player = p; c.motor = -1; c.target = @"front end motors"; [channels[p] addObject:c];
+        dm_haptics_route(p, 1);
+        fprintf(stderr, "haptics: player %d rumble through the front end's motors\n", p + 1);
+    });
     pthread_mutex_unlock(&routeLock);
 }
 static void suspend(unsigned reason, BOOL on) {

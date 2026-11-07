@@ -11,6 +11,7 @@
 #include <strings.h>
 #include "dm_input.h"
 
+#define PAD_HID_DEAD 0.12f   // a stick's default dead zone
 #define PAD_HID_DEFAULT_VENDOR 0x2DC8   // 8BitDo, whose numbering the default map is (another vendor's pad gets a log line saying so, pad_hid_mac.h)
 enum { PH_X, PH_Y, PH_Z, PH_RX, PH_RY, PH_RZ, PH_BRAKE, PH_ACCEL, PH_AXES };
 typedef struct {
@@ -19,6 +20,7 @@ typedef struct {
     float axis[PH_AXES];       // -1..1 (a trigger rests at -1)
     uint8_t has[PH_AXES];      // the device has the axis
     uint8_t map[16];           // Switch button bit (dm_input.h order) -> HID button usage, 0 none
+    float dead[2];             // the left and right stick's dead zone, of full deflection (PAD_HID_DEAD unless the reader sets its own)
 } pad_hid;
 
 static const char *const pad_hid_names[16] = {"A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "PLUS", "MINUS", "LEFT", "UP", "RIGHT", "DOWN"};
@@ -26,7 +28,7 @@ static const char *const pad_hid_names[16] = {"A", "B", "X", "Y", "LS", "RS", "L
 // DM_HID_MAP: comma-separated NAME=usage entries over the default map (an unknown name or a usage past 32 is skipped)
 static void pad_hid_init(pad_hid *h, const char *map) {
     static const uint8_t def[16] = {2, 1, 5, 4, 14, 15, 7, 8, 9, 10, 12, 11};
-    memset(h, 0, sizeof *h); h->hat = -1; memcpy(h->map, def, sizeof def);
+    memset(h, 0, sizeof *h); h->hat = -1; memcpy(h->map, def, sizeof def); h->dead[0] = h->dead[1] = PAD_HID_DEAD;
     for (int a = 0; a < PH_AXES; a++) h->axis[a] = a >= PH_BRAKE ? -1 : 0;
     for (const char *s = map; s && *s; s = strchr(s, ',') ? strchr(s, ',') + 1 : "") {
         const char *eq = strchr(s, '='), *end = strchr(s, ','); if (!eq || (end && eq > end)) continue;
@@ -42,13 +44,12 @@ static int pad_hid_axis_of(uint32_t page, uint32_t usage) {   // -1: not a gamep
 }
 static float pad_hid_norm(long v, long min, long max) { return max > min ? (float)(2.0 * (v - min) / (max - min) - 1) : 0; }
 static int pad_hid_hat(long v, long min, long max) { return v >= min && v <= max && v - min < 8 ? (int)(v - min) : -1; }   // past the 8 directions: centered
-// One stick: a round dead zone against drift (PAD_HID_DEAD of full deflection), and past it the deflection scaled back to start at 0, so the stick neither jumps to the dead zone's
+// One stick: a round dead zone against drift (dead of full deflection, PAD_HID_DEAD by default), and past it the deflection scaled back to start at 0, so the stick neither jumps to the dead zone's
 // edge nor loses a small x while y is deflected. Each axis is clamped after the scale: a square-gated stick still reaches full x and y in its corners.
-#define PAD_HID_DEAD 0.12f
-static void pad_hid_stick(float x, float y, int32_t *ox, int32_t *oy) {
+static void pad_hid_stick(float x, float y, float dead, int32_t *ox, int32_t *oy) {
     float r = sqrtf(x * x + y * y);
-    if (r <= PAD_HID_DEAD) { *ox = *oy = 0; return; }
-    float k = (r - PAD_HID_DEAD) / (1 - PAD_HID_DEAD) / r; x *= k; y *= k;
+    if (r <= dead) { *ox = *oy = 0; return; }
+    float k = (r - dead) / (1 - dead) / r; x *= k; y *= k;
     *ox = (int32_t)((x < -1 ? -1 : x > 1 ? 1 : x) * DM_STICK_MAX); *oy = (int32_t)((y < -1 ? -1 : y > 1 ? 1 : y) * DM_STICK_MAX);
 }
 
@@ -63,6 +64,6 @@ static uint64_t pad_hid_buttons(const pad_hid *h) {
 }
 static void pad_hid_sticks(const pad_hid *h, int32_t s[4]) {   // lx, ly, rx, ry; HID's Y grows downward, the Switch's upward
     int z = h->has[PH_Z];
-    pad_hid_stick(h->axis[PH_X], -h->axis[PH_Y], &s[0], &s[1]);
-    pad_hid_stick(h->axis[z ? PH_Z : PH_RX], -h->axis[z ? PH_RZ : PH_RY], &s[2], &s[3]);
+    pad_hid_stick(h->axis[PH_X], -h->axis[PH_Y], h->dead[0], &s[0], &s[1]);
+    pad_hid_stick(h->axis[z ? PH_Z : PH_RX], -h->axis[z ? PH_RZ : PH_RY], h->dead[1], &s[2], &s[3]);
 }

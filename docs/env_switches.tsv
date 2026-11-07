@@ -365,6 +365,8 @@ DM_WATCH_STALL	diagnostic	`=<s>`: when the frame loop makes no progress for that
 DM_WEB_LOG	diagnostic	`1` logs each key an offline HTML page is given and where the focus is after it
 DM_WINDOW	switch	When set (to any value, `0` included) opens a Mac window with keyboard and controller input; unset runs headless with the guest on the current thread; the Mac launcher sets it
 DM_WINDOW_TOP	diagnostic	`1` (Mac, with `DM_WINDOW`) orders the game window in front without activating it and keeps it above other apps' windows, so a covered window does not slow the run; `regress.py` sets it
+DM_X360	switch	`0` stops reading the Xbox 360 Wireless Gaming Receiver's controllers over USB (`pad_x360_mac.h`), so another program such as a user-space driver can hold the receiver; Mac only
+DM_X360_DEAD	switch	`=<fraction>` sets both sticks' dead zone of an Xbox 360 wireless controller (default XInput's 0.24 left, 0.265 right; `pad_x360_mac.h`), for an old pad whose sticks drift past it
 DM_XCODE_DERIVED_DATA	path	Xcode derived data folder for `build_ipa.sh` (default `$W/build/ios/xcode-dd`); the NSP script points it into the game's build folder
 DM_XCODE_PROJECT_DIR	path	Folder of the per-game Xcode project that `build_ipa.sh --prepare-xcode` makes (default `$W/xcode`); the NSP script sets it
 DM_XV_FILE	path	File where the attachment validity ledger keeps the keys it disabled after a violation, read at the next launch

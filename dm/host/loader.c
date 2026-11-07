@@ -850,10 +850,13 @@ void load_modules(const char *dir, const char **names, int n) {
                              tm / 1e6, tp / 1e6, tg / 1e6, tr / 1e6, (now_ns() - t0) / 1e6);
 }
 
-// Plays the role of rtld's InitModules (rtld+0x830): call each module's DT_INIT in forward order of the load list.
+// Plays the role of rtld's InitModules (rtld+0x830, SDK 18 rtld+0x1190): call each module's DT_INIT in reverse order of the load list
+// (InitModules walks the doubly-linked module list by ->prev at +0, tail to head: sdk → subsdk* → main; FiniModules walks ->next at +8).
+// Running main's DT_INIT before sdk's left sdk's static constructors (e.g. init_array[3] sdk+0x58bbb0 → ios_base::Init::Init() for std::__1::cout
+// at sdk+0xc13fc8) unrun when main's static constructors wrote to std::cout (Stella of The End: CRASH sig=11 addr=0xffffffffffffffe8 at sdk+0x580b4c).
 // The timing is decided by nn::init::Start: after nninitStartup and _init_libc2, before nnMain (the 4th argument callback of Start).
 void run_module_inits(void) {
-    for (int i = 0; i < g_nmod; i++) {
+    for (int i = g_nmod - 1; i >= 0; i--) {
         module_t *m = &g_mod[i];
         if (!m->init || m->nro) continue;   // an NRO's init runs when the game loads it (hle_ro.c)
         LOG("%s: DT_INIT +%#llx (init_array %llu entries)", m->name, m->init, m->init_arraysz / 8);

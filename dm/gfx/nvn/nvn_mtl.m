@@ -6489,6 +6489,20 @@ static void udc_note_draw(NvProg *pr, uint32_t raster_mask) {
 // NVN2's task and mesh bits (0x40, 0x80) of a program bind: stages 3 and 4, where those shaders are kept (hle_nvn.c st_host)
 static inline int gfx_stage_bits(int stages) { return (stages & 0x1f) | (stages & 0x40 ? 8 : 0) | (stages & 0x80 ? 16 : 0); }
 static const prog_t *bind_stages(const prog_t *p, int stages) {
+    // When a BNSH archive stores each shader stage in its own ResShaderProgram without setting Flag_SeparationEnable (bit 0 = 0, flags = 0x02), nn::gfx::ShaderImpl<nvn>::Initialize
+    // (Stella of The End main+0x33ee28..0x33ee48: ldrb w8,[x20]; tbnz w8,#0,#0x33ee4c; mov w8,#0x1f; str w8,[x19,#4]) stores 0x1f (NVN_SHADER_STAGE_ALL_GRAPHICS_BITS) in
+    // pShader->nvnStageBits, and nn::gfx::CommandBufferImpl<nvn>::SetShader (main+0x339370: ldrb w8,[x1,#1]; tbnz w8,#0,#0x33939c; ldr w2,[x1,#4]) ignores the caller's stage argument
+    // and passes stages = 0x1f to nvnCommandBufferBindProgram for both SetShader(cb, vs, Stage_Vertex) and SetShader(cb, ps, Stage_Pixel) (main+0x21eae4..0x21eb14). On Maxwell 3D
+    // (NVB197), Vertex B (SP_START_ID(1)) has no stage-disable bit in an NVNprogram without a vertex shader, so binding a non-null program that lacks a vertex (or mesh) shader only
+    // updates the stages present in that program and does not unbind the vertex stage.
+    if (p) {
+        __unsafe_unretained NvProg *pr = prog_get(p);
+        if (pr && !pr->sh[0] && !pr->sh[4]) {
+            unsigned have = 0;
+            for (unsigned st = 1; st < 5; st++) if (pr->sh[st]) have |= 1u << st;
+            if (have) stages &= (int)have;
+        }
+    }
     for (int st = 0; st < 5; st++) if (stages >> st & 1) S.bst[st] = p;
     const prog_t *v = S.bst[0] ? S.bst[0] : S.bst[4];   // a mesh program has no vertex stage
     if (!v) return NULL;

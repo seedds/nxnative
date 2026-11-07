@@ -513,8 +513,10 @@ int main(void) {
         uint32_t new_token; memcpy(&new_token, (const void *)(uintptr_t)reborn, 4);
         EXPECT("reused handle address gets a fresh generation", 1, reborn == cached && new_token != old_token && nvn_ctl_draw_target((const void *)(uintptr_t)reborn) != NULL);
         P(nvnCommandBufferFinalize)(&copy);
-        unsetenv("DM_NVN_DRAW_CTL");
-        nvn_draw_ctl_init(); // Restore the default-off profile for remaining tests.
+        // The following legacy recorder checks require canonical DRAW_IDX+END;
+        // explicitly disable tickets even when this game's profile opts in.
+        setenv("DM_NVN_DRAW_CTL", "0", 1);
+        nvn_draw_ctl_init();
         P(nvnCommandBufferFinalize)(&cb); P(nvnMemoryPoolFinalize)(&pool);
     }
 

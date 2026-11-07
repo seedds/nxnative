@@ -423,6 +423,7 @@ static void defer_pool_release(id obj) {
 // Its own autorelease pool: mtl_sub_begin drains before it pushes the submission's pool, on the guest submit thread, whose implicit pool is never drained. The weak-table lookups and the residency-set removal
 // autorelease the retired object, so whatever that thread drained (instead of the completion handler, which wins the race only when the CPU is idle) stayed alive for good: in Metroid Dread every
 // re-upload of its map mask kept the old texture and its 32 MB upload staging block, and GPU memory grew by several GB within minutes under CPU load.
+static int alias_has(id o);
 static void defer_drain(void) { @autoreleasepool {
     NSMutableArray<NvDeferredRelease *> *ready = [NSMutableArray array];
     pthread_mutex_lock(&g_deferred_mu);
@@ -436,7 +437,7 @@ static void defer_drain(void) { @autoreleasepool {
     NSMutableArray<NvDeferredRelease *> *res_ready = nil;
     for (NvDeferredRelease *d in ready) if (!d->keep_resident && [d->object conformsToProtocol:@protocol(MTLResource)]) { if (!res_ready) res_ready = [NSMutableArray array]; [res_ready addObject:d]; }
     if (res_ready && !pthread_mutex_trylock(&g_smu)) {
-        for (NvDeferredRelease *d in res_ready) if (entry_holds((__bridge void *)d->object)) { retire_wait(d->object); d->keep_resident = 1; }
+        for (NvDeferredRelease *d in res_ready) if (alias_has(d->object)) d->keep_resident = 1; else if (entry_holds((__bridge void *)d->object)) { retire_wait(d->object); d->keep_resident = 1; }
         pthread_mutex_unlock(&g_smu);
     } else if (res_ready) {
         pthread_mutex_lock(&g_deferred_mu); [g_deferred addObjectsFromArray:res_ready]; pthread_mutex_unlock(&g_deferred_mu);
@@ -2263,7 +2264,6 @@ static void ser_note_alias(const alias_key *key) {
     os_unfair_lock_unlock(&g_snote_lk);
 }
 static nvn_hmap g_alias = {.klen = sizeof(alias_key)};
-static nvn_hmap g_pkg_share = {.klen = sizeof(alias_key)};   // see NvPkgRef
 // How many entries of g_by_serial hold each object (key: its address), kept by every writer of g_by_serial (serial_put, serial_del, tex_put, the upgrade's in-place
 // replacement), so alias_take_over asks whether a live texture object still resolves to a shared texture in one lookup. It walked the serial table's whole capacity for
 // each candidate instead: in Ocarina of Time's cutscenes, with about 7,500 serials and thousands of shared textures, that walk was the submit thread's hottest function and
@@ -2457,40 +2457,52 @@ static void reg_pkg_ref(uint64_t serial, int add) {
     else if (n) {
         nvn_hm_del(&g_reg_pkg_refs, &serial);
         id pk = hm_get_id(&g_reg_pkg, &serial);
-        if (pk) { defer_obj_unref(pk); hm_del_id(&g_reg_pkg, &serial); ser_note(serial); }
+        if (pk) { ghost_held_add((__bridge void *)pk, -1); defer_obj_unref(pk); hm_del_id(&g_reg_pkg, &serial); ser_note(serial); }
     }
     pthread_mutex_unlock(&g_smu);
+}
+static void ghost_active_put(uint64_t k, id o) { // g_smu held
+    id old = hm_get_id(&g_ghost_active, &k);
+    if (old == o) return;
+    ghost_held_add((__bridge void *)o, 1);
+    if (old) ghost_held_add((__bridge void *)old, -1);
+    hm_put_id(&g_ghost_active, &k, o);
 }
 static __unsafe_unretained id tex_get(uint64_t k) {
     pthread_mutex_lock(&g_smu);
     __unsafe_unretained id o = hm_get_id(&g_by_serial, &k);
     if (!o) o = hm_get_id(&g_reg_pkg, &k);
     if (!o && g_ghost_active.n) o = hm_get_id(&g_ghost_active, &k);
-    if (!o && g_ghost.n && (o = hm_get_id(&g_ghost, &k)) && on_sub_thread() && g_cb) hm_put_id(&g_ghost_active, &k, o);
+    if (!o && g_ghost.n && (o = hm_get_id(&g_ghost, &k)) && on_sub_thread() && g_cb) ghost_active_put(k, o);
     pthread_mutex_unlock(&g_smu);
     return o;
 }
 static void tex_put(uint64_t k, id o) {   // serials from 2^62 up are external textures (mtl_ext_tex), never initialized by the game
     pthread_mutex_lock(&g_smu);
     int live = k >= (1ull << 62) || nvn_hm_get(&g_tex_live, &k);
+    if (!tex_is_pkg(o)) {
+        id package = hm_get_id(&g_reg_pkg, &k);
+        if (package) { ghost_held_add((__bridge void *)package, -1); defer_obj_unref(package); hm_del_id(&g_reg_pkg, &k); }
+    }
     id active = live ? nil : hm_get_id(&g_ghost_active, &k);
     nvn_hmap *m = live ? &g_by_serial : (tex_is_pkg(o) && nvn_hm_get(&g_reg_pkg_refs, &k) ? &g_reg_pkg : &g_ghost);
     if (m == &g_ghost && active && !hm_get_id(&g_ghost, &k)) m = &g_ghost_active;
     id old = hm_get_id(m, &k);
-    if (old && m == &g_by_serial) held_add((__bridge void *)old, -1);
+    if (old) count_add(m == &g_by_serial ? &g_by_serial_held : &g_ghost_held, (__bridge void *)old, -1);
     if (old) { if (old != o) obj_drop(old); }
     else if (m == &g_ghost) {
         uint64_t *slot = &g_ghost_ring[g_ghost_next++ % NGHOST];
         if (*slot) {
             id ev = hm_get_id(&g_ghost, slot);
+            if (ev) ghost_held_add((__bridge void *)ev, -1);
             if (ev != hm_get_id(&g_ghost_active, slot)) { obj_drop(ev); ser_note(*slot); }
             hm_del_id(&g_ghost, slot);
         }
         *slot = k; g_ghost_puts++;
     }
     hm_put_id(m, &k, o); ser_note(k);
-    if (m == &g_by_serial) held_add((__bridge void *)o, 1);
-    if (m == &g_ghost && (active || (on_sub_thread() && g_cb))) hm_put_id(&g_ghost_active, &k, o);
+    count_add(m == &g_by_serial ? &g_by_serial_held : &g_ghost_held, (__bridge void *)o, 1);
+    if (m == &g_ghost && (active || (on_sub_thread() && g_cb))) ghost_active_put(k, o);
     pthread_mutex_unlock(&g_smu);
 }
 // A bindless pool can resolve more finalized textures than the small ghost ring holds, many times within one submission.
@@ -2501,7 +2513,7 @@ static void ghost_finish_submission(void) {
         void *v = g_ghost_active.vals[i]; if (!v) continue;
         const void *key = g_ghost_active.keys + (size_t)i * g_ghost_active.klen;
         if (nvn_hm_get(&g_ghost, key) != v) { obj_drop((__bridge id)v); uint64_t serial; memcpy(&serial, key, sizeof serial); ser_note(serial); }
-        CFRelease(v);
+        ghost_held_add(v, -1); CFRelease(v);
     }
     if (g_ghost_active.n) nvn_hm_clear(&g_ghost_active, NULL);
     pthread_mutex_unlock(&g_smu);
@@ -2565,7 +2577,20 @@ static void pkg_storage_drop_pool(const void *pool) { // caller holds g_smu
 }
 // Updating a shared package changes every serial naming it. A full epoch is
 // needed here: a note for only the serial doing the upload leaves other views stale.
-static void pkg_changed(NvPkg *pk, uint64_t serial) { if (pk->shared) atomic_fetch_add(&g_ser_gen, 1); else ser_note(serial); }
+static void pkg_changed(NvPkg *pk, uint64_t serial) {
+    if (!pk->shared) { ser_note(serial); return; }
+    // A shared upload can have several live or retired serials. Publish each
+    // owner rather than an unexplained generation bump that rebuilds every table.
+    pthread_mutex_lock(&g_smu);
+    nvn_hmap *maps[] = {&g_by_serial, &g_ghost, &g_ghost_active, &g_reg_pkg};
+    for (unsigned m = 0; m < sizeof maps / sizeof *maps; m++) {
+        nvn_hmap *map = maps[m];
+        for (uint32_t i = 0; i < map->cap; i++) if (map->vals[i] == (__bridge void *)pk) {
+            uint64_t owner; memcpy(&owner, map->keys + (size_t)i * map->klen, sizeof owner); ser_note(owner);
+        }
+    }
+    pthread_mutex_unlock(&g_smu);
+}
 // A sparse texture's CPU-write check walks its page table (nvn_sparse_since). A submission sees the CPU writes and the mappings made before it (as NVN's: a map is a CPU call,
 // not a command), so the replay checks each one once a submission (sub: the submission, g_sub_serial, of its last check). Games remap streamed pages all the time, so the
 // mapping generation alone rarely let the check be skipped: Mario Kart World's terrain targets walked theirs at nearly every lookup
@@ -2800,6 +2825,7 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextu
     } else upgraded = backing ? [backing newTextureWithDescriptor:d offset:base.bufferOffset bytesPerRow:base.bufferBytesPerRow] : [g_dev newTextureWithDescriptor:d];
     if (!upgraded) { RED_ONCE(45, "texture upgrade failed ser=%llu format %lu → %lu usage %#lx", t->serial, (unsigned long)base.pixelFormat, (unsigned long)view_pf, (unsigned long)d.usage); return base; }
     if (!reinterpret) res_add(upgraded);
+    if (tex_gpu_written(base)) tex_gpu_write(upgraded);
     id<MTLTexture> upgraded_view = nil;
     id<MTL4ComputeCommandEncoder> b = backing ? nil : blit();   // shared backing already contains the pixels; copying it onto itself would overlap
     NSUInteger slices = base.textureType == MTLTextureType3D ? 1 : base.arrayLength * (base.textureType == MTLTextureTypeCube || base.textureType == MTLTextureTypeCubeArray ? 6 : 1);
@@ -3777,7 +3803,7 @@ static id<MTLTexture> tex_linear(const tex_t *t) {
 static pthread_mutex_t g_cpu_tex_mu = PTHREAD_MUTEX_INITIALIZER;
 static nvn_hmap g_cpu_tex = {.klen = 8}, g_cpu_tex_retired = {.klen = 8};   // serial → pool (or (void *)1 for a live test texture without a pool)
 // The uncompressed 2D textures tex_cpu_content took from their storage, which leave the CPU-written set once the GPU writes that storage (cpu_unc_drop)
-typedef struct { const void *pool; uintptr_t lo, hi; } cpu_unc;
+typedef struct { const void *pool; uintptr_t lo, hi; alias_key key; } cpu_unc;
 static nvn_hmap g_cpu_unc = {.klen = 8};   // serial → malloc'ed cpu_unc
 static void hm_drop_pool(nvn_hmap *m, const void *pool, int owned) {   // owned: the values are malloc'ed cpu_unc records; g_cpu_tex_mu held
     for (uint32_t i = 0; i < m->cap;) {
@@ -3980,7 +4006,7 @@ static void gws_drop_pool(const pool_t *p) {   // the pool goes: its spans with 
 int mtl_tex_gpu_owned(uint64_t serial) {
     __unsafe_unretained id o = tex_get(serial);
     if (!o || ![o conformsToProtocol:@protocol(MTLTexture)]) return 0;
-    return (((id<MTLTexture>)o).usage & (MTLTextureUsageRenderTarget | MTLTextureUsageShaderWrite)) != 0;
+    return tex_gpu_written(o) || (((id<MTLTexture>)o).usage & MTLTextureUsageShaderWrite) != 0;
 }
 void mtl_tex_cpu_written(const tex_t *t) {
     uint64_t serial = t->serial;
@@ -4045,7 +4071,7 @@ static void cpu_unc_take(const tex_t *t) {   // an uncompressed texture is taken
     if (!u) {
         MDIE("cpu_unc_take: out of memory");
     }
-    *u = (cpu_unc){t->pool, lo, hi};
+    *u = (cpu_unc){t->pool, lo, hi, tex_alias_key(t)};
 
     uint64_t s = t->serial;
     pthread_mutex_lock(&g_cpu_tex_mu);
@@ -4092,7 +4118,8 @@ int mtl_tex_cpu_rewritten(const tex_t *t) {
 // CPU writes to it are no longer uploaded. Submit thread, as tex_cpu_content is, so a texture it has just taken is seen here if its storage was written meanwhile
 static void cpu_unc_drop(void) {
     if (!atomic_load_explicit(&g_gws_new, memory_order_relaxed) || !atomic_exchange(&g_gws_new, 0)) return;
-    uint64_t *ser = NULL; uint32_t n = 0, cap = 0;
+    typedef struct { uint64_t serial; alias_key key; } promoted;
+    promoted *ser = NULL; uint32_t n = 0, cap = 0;
     pthread_mutex_lock(&g_cpu_tex_mu);
     for (uint32_t i = 0; i < g_cpu_unc.cap;) {
         cpu_unc *u = g_cpu_unc.vals[i];
@@ -4101,16 +4128,28 @@ static void cpu_unc_drop(void) {
             continue;
         }
 
-        if (n == cap) { uint64_t *grown = realloc(ser, (cap = cap ? cap * 2 : 64) * sizeof *ser); if (!grown) MDIE("cpu_unc_drop: out of memory"); ser = grown; }
+        if (n == cap) { promoted *grown = realloc(ser, (cap = cap ? cap * 2 : 64) * sizeof *ser); if (!grown) MDIE("cpu_unc_drop: out of memory"); ser = grown; }
         uint64_t s; memcpy(&s, g_cpu_unc.keys + (size_t)i * 8, 8);
-        ser[n++] = s; nvn_hm_del(&g_cpu_unc, &s); nvn_hm_del(&g_cpu_tex, &s); nvn_hm_del(&g_cpu_tex_retired, &s);   // deletion shifts entries: examine this slot again
+        ser[n++] = (promoted){s, u->key}; nvn_hm_del(&g_cpu_unc, &s); nvn_hm_del(&g_cpu_tex, &s); nvn_hm_del(&g_cpu_tex_retired, &s);   // deletion shifts entries: examine this slot again
         free(u);
     }
     pthread_mutex_unlock(&g_cpu_tex_mu);
     for (uint32_t i = 0; i < n; i++) {
-        __unsafe_unretained id o = tex_get(ser[i]);
-        if ([o isKindOfClass:[NvPkg class]]) { NvPkg *pk = o; id<MTLTexture> mt = pk->view ? pk->view : pk->tex; if (mt) tex_put(ser[i], mt); }
-        ser_note(ser[i]);
+        __unsafe_unretained id o = tex_get(ser[i].serial);
+        if ([o isKindOfClass:[NvPkg class]]) { NvPkg *pk = o; id<MTLTexture> mt = pk->view ? pk->view : pk->tex; if (mt) {
+            // A descriptor created later must see the GPU-owned backing too,
+            // rather than upload the old CPU seed under a new serial.
+            pthread_mutex_lock(&g_smu);
+            if (!g_alias_set) g_alias_set = CFSetCreateMutable(NULL, 0, NULL);
+            if (!hm_get_id(&g_alias, &ser[i].key)) {
+                hm_put_id(&g_alias, &ser[i].key, mt);
+                CFSetAddValue(g_alias_set, (__bridge const void *)mt);
+                ser_note_alias(&ser[i].key);
+            }
+            pthread_mutex_unlock(&g_smu);
+            tex_put(ser[i].serial, mt);
+        } }
+        ser_note(ser[i].serial);
     }
     if (n) { static int nl; if (nl++ < 8) MLOG("storage the GPU writes: %u uncompressed textures taken from it are GPU textures from now on", n); }
     free(ser);
@@ -4352,7 +4391,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct, int allow_empty) {
             mtl_tex_cpu_written(t);
             return tex_mtl_(t, allow_empty);
         }
-        if (live) tex_put(t->serial, shared);
+        tex_put(t->serial, shared);
         g_stat_ghost_skip += !live;
         return shared;
     }
@@ -4470,10 +4509,23 @@ void mtl_tex_release(tex_t *t) {
     if (!t->serial) return;
     { pthread_mutex_lock(&g_smu); int live = nvn_hm_get(&g_tex_live, &t->serial) != NULL; pthread_mutex_unlock(&g_smu);
       if (live) mtl_present_wait_tex(t->serial); }   // its queued presents run first, with this texture (a copy's finalize after the first finds it not live)
-    pthread_mutex_lock(&g_smu); int was_live = nvn_hm_del(&g_tex_live, &t->serial) != NULL; free(nvn_hm_del(&g_image_desc, &t->serial));
+    pthread_mutex_lock(&g_smu);
+    const tex_t *own = nvn_hm_get(&g_tex_live, &t->serial);
+    if (own && own != t) {
+        tex_t seen; vm_size_t got = 0;
+        if (vm_read_overwrite(mach_task_self(), (vm_address_t)(uintptr_t)own, sizeof seen, (vm_address_t)(uintptr_t)&seen, &got) == KERN_SUCCESS && got == sizeof seen && seen.magic == MAGIC('T', 'E', 'X', 0) && seen.serial == t->serial) { pthread_mutex_unlock(&g_smu); return; }
+    }
+    int was_live = nvn_hm_del(&g_tex_live, &t->serial) != NULL; free(nvn_hm_del(&g_image_desc, &t->serial));
     // Preserve an already uploaded package when its API object is finalized.
     id registered = hm_get_id(&g_by_serial, &t->serial);
-    if (tex_is_pkg(registered) && nvn_hm_get(&g_reg_pkg_refs, &t->serial)) hm_put_id(&g_reg_pkg, &t->serial, registered);
+    if (tex_is_pkg(registered) && nvn_hm_get(&g_reg_pkg_refs, &t->serial)) {
+        id old = hm_get_id(&g_reg_pkg, &t->serial);
+        if (old != registered) {
+            ghost_held_add((__bridge void *)registered, 1);
+            if (old) ghost_held_add((__bridge void *)old, -1);
+            hm_put_id(&g_reg_pkg, &t->serial, registered);
+        }
+    }
     pthread_mutex_lock(&g_cpu_tex_mu);
     void *pool = nvn_hm_del(&g_cpu_tex, &t->serial);
     if (pool && t->pool && t->mem) nvn_hm_put(&g_cpu_tex_retired, &t->serial, pool);
@@ -5973,11 +6025,22 @@ static alias_key treg_alias_key(const treg_t *r) {
 // Once any sparse mapping exists (nvn_sparse_gen) every change starts a new epoch, as before: a sparse texture's page-table changes bump no generation the ID cache follows. Under g_rmu
 static uint64_t g_treg_ep = 1, g_ser_synced = 1;
 static void ser_sync(void) {
-    uint64_t s[SER_NOTES];
-    os_unfair_lock_lock(&g_snote_lk); uint64_t sg = g_ser_gen; unsigned n = g_nsnote; memcpy(s, g_snote, n * sizeof *s); g_nsnote = 0; os_unfair_lock_unlock(&g_snote_lk);
-    if (sg - g_ser_synced != n || nvn_sparse_gen()) g_treg_ep++;
-    else for (unsigned i = 0; i < n; i++) for (int k = (int)(uintptr_t)nvn_hm_get(&g_treg_serial, &s[i]); k; k = g_treg[k - 1].next) g_treg[k - 1].view_ser = 0;
-    g_ser_synced = sg;
+    os_unfair_lock_lock(&g_snote_lk);
+    uint64_t sg = g_ser_gen;
+    int known = sg - g_ser_synced < SER_LOG && !nvn_sparse_gen();
+    for (uint64_t g = g_ser_synced + 1; known && g <= sg; g++) {
+        const ser_lnote *note = &g_ser_log[g % SER_LOG];
+        if (note->gen != g) { known = 0; break; }
+        if (note->serial) {
+            for (int k = (int)(uintptr_t)nvn_hm_get(&g_treg_serial, &note->serial); k; k = g_treg[k - 1].next) g_treg[k - 1].view_ser = 0;
+        } else {
+            alias_key key = g_ser_alias[g % SER_LOG]; alias_family_key(&key);
+            for (int k = (int)(uintptr_t)nvn_hm_get(&g_treg_alias, &key); k; k = g_treg[k - 1].alias_next) g_treg[k - 1].view_ser = 0;
+        }
+    }
+    if (!known) g_treg_ep++;
+    g_nsnote = 0; g_ser_synced = sg;
+    os_unfair_lock_unlock(&g_snote_lk);
 }
 static inline uint64_t treg_ep(void) { if (g_ser_gen != g_ser_synced) ser_sync(); return g_treg_ep; }
 static int *g_treg_transient; static size_t g_ntreg_transient, g_treg_transient_cap;
@@ -6023,30 +6086,12 @@ static void treg_retire_serial(uint64_t ser) {
     }
     os_unfair_lock_unlock(&g_rmu);
 }
-// Retired IDs keep views of shared textures across submissions (tex_by_id): once a shared texture has left the sharing table (another texture took its storage, its pool went),
-// those views go, so they pin no texture past it. Under g_rmu
-static uint64_t g_alias_swept;
-static void alias_sweep(void) {
-    pthread_mutex_lock(&g_smu); uint64_t now = g_alias_taken + g_alias_evicted; pthread_mutex_unlock(&g_smu);
-    if (now == g_alias_swept) return;
-    g_alias_swept = now;
-    for (int i = 1; i < g_ntreg; i++) { treg_t *r = &g_treg[i]; if (!r->ok || !r->retired || !r->view) continue;
-        id<MTLTexture> v = (__bridge id<MTLTexture>)r->view;
-        pthread_mutex_lock(&g_smu); int held = alias_has(v) || alias_has(v.parentTexture); pthread_mutex_unlock(&g_smu);
-        if (!held) { treg_drop_views(r); r->view_ser = 0; } }
-}
 static void treg_finish_submission(void) {
-    os_unfair_lock_lock(&g_rmu); alias_sweep(); os_unfair_lock_unlock(&g_rmu);
     if (!g_ntreg_transient) return;
     os_unfair_lock_lock(&g_rmu);
     for (size_t i = 0; i < g_ntreg_transient; i++) {
         treg_t *r = &g_treg[g_treg_transient[i]];
-        if (r->retired && r->transient_sub == g_sub_serial) {
-            treg_drop_views(r);
-            // The next submission must resolve this ID again. Journal expiry
-            // so bindless tables refresh these entries without a full scan.
-            reg_bump(g_treg_transient[i], 0);
-        }
+        if (r->retired && r->transient_sub == g_sub_serial) treg_drop_views(r);
     }
     g_ntreg_transient = 0;
     os_unfair_lock_unlock(&g_rmu);
@@ -6313,7 +6358,7 @@ void mtl_set_origin_lower_left(int on) { if (atomic_exchange(&g_origin_ll, on) !
 static int g_queue_origin_ll;   // SET_WINDOW_ORIGIN's raster flip is queue state, independent of later device-origin changes.
 void mtl_set_queue_origin_lower_left(int on) { g_queue_origin_ll = on != 0; }
 void mtl_set_tex_pool_n(int n) { g_tpool_n = n; }
-static id<MTLTexture> treg_tex(const treg_t *r) { return r->gone ? tex_made(&r->t) : tex_resolve(&r->t, !r->retired); }   // Caller holds g_rmu
+static id<MTLTexture> treg_tex(const treg_t *r) { return r->gone ? tex_made(&r->t) : tex_resolve(&r->t, !r->retired || pool_seen((int)(r - g_treg))); }   // Caller holds g_rmu
 // The upload stamp of the packaged texture an ID's view was made from (tex_by_id's guest-write shortcut); none for sparse ones (their page table changes too) or another base. Caller holds g_rmu
 static void treg_pkg_stamp(treg_t *rp, id<MTLTexture> base) {
     rp->view_span = NULL; if (!rp->view_pkg) return;
@@ -6417,10 +6462,8 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
             else vc_put(rp->t.serial, rp->t.pool, &k, v);
         }
     }
-    // A retired ID's view pins its texture, so it lasts one submission (treg_finish_submission); not one on a texture the sharing table holds anyway, which alias_sweep drops when
-    // that texture leaves the table
-    int held = 0; if (rp->retired) { pthread_mutex_lock(&g_smu); held = alias_has(base) || alias_has(base.parentTexture); pthread_mutex_unlock(&g_smu); }
-    if (rp->retired && !held && rp->transient_sub != g_sub_serial) {
+    // The upstream incremental table retains retired IDs per submission.
+    if (rp->retired && rp->transient_sub != g_sub_serial) {
         if (g_ntreg_transient == g_treg_transient_cap) {
             g_treg_transient_cap = g_treg_transient_cap ? g_treg_transient_cap * 2 : 64;
             g_treg_transient = realloc_or_die(g_treg_transient, g_treg_transient_cap * sizeof *g_treg_transient, "the transient texture registrations");
@@ -9290,14 +9333,19 @@ static uint64_t pool_gpu(int samp, int dtt, int dpf, int base, __unsafe_unretain
         for (uint64_t g = p->reg + 1; g <= rg && known; g++) {
             int nid_, nsamp; known = reg_read(g, &nid_, &nsamp);
             if (!known) break;
-            if (nsamp == REG_POOL) pools = !samp;
+            if (nsamp == REG_POOL) { if (!samp && nvn_sparse_gen()) { known = 0; break; } pools = !samp; }
             else if (nsamp == (samp != 0)) POOL_ID(nid_);
         }
         if (known && p->ser != sg) {
             os_unfair_lock_lock(&g_snote_lk);
             for (uint64_t g = p->ser + 1; g <= sg && known; g++) {
                 const ser_lnote *sn = &g_ser_log[g % SER_LOG]; known = sn->gen == g;
-                if (known) for (int k = (int)(uintptr_t)nvn_hm_get(&g_treg_serial, &sn->serial); k && nid < 8192; k = g_treg[k - 1].next) POOL_ID(k - 1);
+                if (known && sn->serial) {
+                    for (int k = (int)(uintptr_t)nvn_hm_get(&g_treg_serial, &sn->serial); k && nid < 8192; k = g_treg[k - 1].next) POOL_ID(k - 1);
+                } else if (known) {
+                    alias_key key = g_ser_alias[g % SER_LOG]; alias_family_key(&key);
+                    for (int k = (int)(uintptr_t)nvn_hm_get(&g_treg_alias, &key); k && nid < 8192; k = g_treg[k - 1].alias_next) POOL_ID(k - 1);
+                }
             }
             os_unfair_lock_unlock(&g_snote_lk);
         }

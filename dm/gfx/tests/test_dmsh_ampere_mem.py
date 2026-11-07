@@ -462,7 +462,7 @@ class AtomgCas(Translated):
 
     def test_another_form_is_refused(self):   # 64-bit (type 2 at 73..76)
         with self.assertRaises(AssertionError) as e: self.msl((self.CAS[0] | 2 << 9, self.CAS[1]))
-        self.assertIn('ATOMG.CAS type 2', str(e.exception))
+        self.assertIn('ATOMG.CAS size 2', str(e.exception))
 
 
 class Shared(Translated):

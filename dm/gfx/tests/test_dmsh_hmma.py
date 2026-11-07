@@ -16,11 +16,13 @@ import tempfile
 import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
+NAMES = {'hmma_msl', 'split_params', 'block_end', 'HMMA_BODY', 'HMMA_ARGS', 'HMMA_CALL', 'TG_ARRAY'}
 sys.path.insert(0, str(TOOLS.parents[1] / 'ios/tools'))
-import ios_metal  # noqa: E402
+import ios_metal
+NAMES.add('MAC_METAL')
 tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name == 'hmma_msl')
-            or (isinstance(n, ast.Assign) and any(getattr(t, 'id', None) in ('HMMA_BODY', 'MAC_METAL') for t in n.targets))]
+selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in NAMES)
+            or (isinstance(n, ast.Assign) and any(getattr(t, 'id', None) in NAMES for t in n.targets))]
 scope = {'re': re}
 exec(compile(ast.Module(body=selected, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), scope)
 hmma_msl = scope['hmma_msl']
@@ -245,8 +247,7 @@ def compile_and_run(test, msl, runner):
     with tempfile.TemporaryDirectory() as d:
         d = Path(d)
         (d / 'h.metal').write_text(msl)
-        subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', str(d / 'h.metal'), '-o', str(d / 'h.air')], check=True)
-        subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(d / 'h.air'), '-o', str(d / 'h.metallib')], check=True)
+        ios_metal.compile(d / 'h.metal', d / 'h.air', d / 'h.metallib', scope['MAC_METAL'])
         (d / 'run.m').write_text(runner)
         subprocess.run(['clang', '-fobjc-arc', '-O1', str(d / 'run.m'), '-framework', 'Metal', '-framework', 'Foundation', '-o', str(d / 'run')], check=True)
         r = subprocess.run([str(d / 'run'), str(d / 'h.metallib')], capture_output=True, text=True)
@@ -300,14 +301,40 @@ class HmmaRewrite(unittest.TestCase):
 @unittest.skipUnless(shutil.which('xcrun') and shutil.which('clang'), 'needs Xcode')
 class HmmaOnGpu(unittest.TestCase):
     def test_matches_reference(self):
-        with tempfile.TemporaryDirectory() as d:
-            d = Path(d)
-            (d / 'h.metal').write_text(hmma_msl(HEAD + HELPER + KERNEL))
-            ios_metal.compile(d / 'h.metal', d / 'h.air', d / 'h.metallib', scope['MAC_METAL'])
-            (d / 'run.m').write_text(RUNNER)
-            subprocess.run(['clang', '-fobjc-arc', '-O1', str(d / 'run.m'), '-framework', 'Metal', '-framework', 'Foundation', '-o', str(d / 'run')], check=True)
-            r = subprocess.run([str(d / 'run'), str(d / 'h.metallib')], capture_output=True, text=True)
-            if r.returncode == 2: self.skipTest(r.stdout.strip())
+        compile_and_run(self, hmma_msl(HEAD + HELPER + KERNEL), RUNNER)
+
+    def test_flagged_run_matches_reference(self):
+        compile_and_run(self, hmma_msl(HEAD + HELPER + SEQ_KERNEL), SEQ_RUNNER)
+
+    def test_calls_outside_a_chain_leave_its_slot_alone(self):
+        compile_and_run(self, hmma_msl(HEAD + HELPER + CLOBBER_KERNEL), SEQ_RUNNER)
+
+
+def inst(hi, lo): return struct.pack('<QQ', lo, hi)
+def waiting(i): return (i[0] | 0x3f << 52, i[1])   # waits on every scoreboard (control bits 116..121)
+
+
+@unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
+class TranslatorFlags(unittest.TestCase):
+    """R2 = thread x * 16 (local size 32: the lane), LDSM.16.M88.4 R36, [R2]: rows 16 bytes apart, matrix m at 128 m. HMMA R46 = R36..39 x R4 + 0, then HMMA R46 = R36..39 x R6 +
+    R46, whose result is stored: the first gets C = 0, A from where the LDSM read it, D left in slot 0; the second A kept, C from slot 0, D to the registers.
+    Encodings: Ocarina of Time's NDVE network (cs_movie.bin), with the registers changed"""
+    S2R = (0x000e260000002100, 0x0000000000097919)    # S2R R9, SR_TID.X
+    IMAD = (0x000fe200078e02ff, 0x0000001009027824)   # IMAD R2, R9, 16, RZ
+    LDSM = (0x000e220000000200, 0x000000000224783b)   # LDSM.16.M88.4 R36, [R2]
+    HMMA0 = (0x041ff000000008ff, 0x00000004242e723c)  # HMMA.16816.F16 R46, R36, R4, RZ
+    HMMA1 = (0x000fe2000000082e, 0x00000006242e723c)  # HMMA.16816.F16 R46, R36, R6, R46
+    STS = (0x000fe8000000c800, 0x0000082e09008388)    # STS.U32 [R9 * 16 + 8], R46
+    STS1 = (0x000fe8000000c800, 0x00000c2f09008388)   # STS.U32 [R9 * 16 + 12], R47: D's two words, as a network stores them
+    EXIT = (0x000fea0003800000, 0x000000000000794d)
+
+    def test_chain_reuse_and_direct_a(self):
+        code = b''.join(inst(*waiting(i)) for i in (self.S2R, self.IMAD, self.LDSM, self.HMMA0, self.HMMA1, self.STS, self.STS1)) + inst(*self.EXIT)
+        with tempfile.TemporaryDirectory(prefix='tensor_') as d:
+            work = Path(d); (work / 'k.bin').write_bytes(code)
+            job = [dict(key='k', stage='cs', arch='sm86', code=str(work / 'k.bin'), tex={}, img={}, attr={}, fout={}, local=[32, 1, 1], debug=True, nvn2_cs=[0, 0, 3, 0x40, 0], shared=0x1000)]
+            (work / 'jobs.json').write_text(json.dumps(job))
+            r = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(work / 'jobs.json'), d], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             sys.path.insert(0, str(TOOLS)); import dmsh_geometry
             dmsh_geometry.flatten_sets(work / 'k.spv')

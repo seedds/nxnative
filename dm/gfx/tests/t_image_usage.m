@@ -94,7 +94,7 @@ static void atomic_alias_case(void) { @autoreleasepool {
     CHECK(rgba.pixelFormat == MTLPixelFormatRGBA8Unorm && rgba.parentTexture.pixelFormat == MTLPixelFormatR32Uint, "RGBA8 rendering kept on atomic storage");
     CHECK(real && img_atomic_ok(atomic, &shader->rf.b[0]), "R32 view is a real atomic image");
     CHECK(!rgba.heap && !rgba.parentTexture.heap, "atomic backing needs no placement heap");
-    CHECK([g_res_objects containsObject:rgba] && ![g_res_objects containsObject:rgba.parentTexture], "residency follows the exported color view retired by the alias table");
+    CHECK(![g_res_objects containsObject:rgba] && [g_res_objects containsObject:rgba.parentTexture], "upstream atomic owner retains the raw allocation in residency");
     mtl_sub_commit(); mtl_drain();
     if (!real || !img_atomic_ok(atomic, &shader->rf.b[0])) return;
     NSError *error = nil; MTLCompileOptions *options = [MTLCompileOptions new]; options.languageVersion = MTLLanguageVersion3_1;
@@ -144,7 +144,7 @@ static void atomic_alias_case(void) { @autoreleasepool {
     // GPU completion publishes the fence before feedback retires allocations.
     // Match t_image_alias: wait for that handler before checking CPU residency.
     dispatch_sync(g_feedback_q, ^{}); defer_drain();
-    CHECK(![g_res_objects containsObject:rgba] && ![g_res_objects containsObject:rgba.parentTexture], "retiring the pool removes atomic storage from residency");
+    CHECK(![g_res_objects containsObject:rgba] && [g_res_objects containsObject:rgba.parentTexture], "held atomic view keeps its raw storage resident after pool retirement");
 } }
 int main(void) { @autoreleasepool {
     mtl_init(); image_case(0); image_case(1); atomic_alias_case();

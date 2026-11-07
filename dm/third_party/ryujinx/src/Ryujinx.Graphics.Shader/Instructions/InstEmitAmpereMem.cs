@@ -432,21 +432,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         // uniform form; type 73..76; predicate result 81..84). Star Fox's character compute shader 9ac392648752d3d2 takes slots from a counter in a storage buffer up to a bound with
         // ATOMG.E.CAS.STRONG.GPU PT, R2, [R2.64], R4, R5 (000ea400001ee10500000004020273a9), retrying while Rd differs from the R4 it expected: the old value, not the success flag of
         // ATOMS.CAS (AAtomsCas), which has 3 in the operation field 87..91 where this one has 0. Only the 32-bit form with no predicate result is taken
-        public static void AAtomgCas(EmitterContext context)
-        {
-            AmpereOp x = new(context.CurrOp);
 
-            if (x.Bits(73, 76) > 1 || x.Bits(87, 91) != 0 || x.Bit(91) || x.Bits(81, 84) != RegisterConsts.PredicateTrueIndex)
-            {
-                throw AFail(context, $"ATOMG.CAS type {x.Bits(73, 76)}, operation {x.Bits(87, 91)}, predicate result {x.Bits(81, 84)}");
-            }
-
-            (Operand lo, Operand hi) = AGlobalAddress(context, x, 72, 64, 0);
-            Operand expected = AGpr(x.Rb);
-            Operand value = x.Rc >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rc, RegisterType.Gpr);
-
-            ASet(context, x, context.AtomicCompareAndSwap(StorageKind.GlobalMemory, lo, hi, expected, value));
-        }
 
         // ATOMS.CAS Rd, [Ra + offset], Rb (expected), Rc (new value): Rd = 1 when the swap happened, not the old value (Fire Emblem Fortune's Weave's only use is a retry loop for a float add that repeats until Rd == 1).
         // Only the 32-bit form (operation 3 at 87..91, size 0) occurs

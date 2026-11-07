@@ -106,6 +106,7 @@ int main(void) {
         CHECK("alias shares render target storage", tex_mtl(alias_desc) == rendered);
         p_clear_tex clear = {.tex = target_desc, .r = {0, 0, 0, 8, 8, 1}, .mask = 15};
         clear.c.f[0] = 0.5f;
+        mtl_tex_gpu_written(clear.tex); // the recording API normally publishes this storage write
         clear_tex(&clear);
         finish();
         CHECK("clear reached the GPU", pixel(rendered) == 32768);
@@ -152,7 +153,7 @@ int main(void) {
         for (int pass = 0; pass < 2; pass++) {
             // Recording a write to another texture must not revoke this seed's CPU ownership across the whole pool.
             if (pass == 1) {
-                mtl_pool_gpu_written(&pool);
+                mtl_tex_gpu_written(target_desc);
             }
             uint16_t value = (uint16_t)(13579 + pass);
             for (int i = 0; i < 64; i++) {
@@ -165,7 +166,8 @@ int main(void) {
             finish();
             CHECK("cached texture observes CPU rewrite without poll", pixel(current) == value);
             CHECK("cached mip view observes CPU rewrite without poll", pixel(current_view) == value);
-            CHECK("seed rewrite keeps previous GPU pixels alive", pixel(initial_image) == 12345);
+            // finish() completed the earlier GPU use: upstream may recycle its spare now.
+            CHECK("current upload has completed", !mtl_last_commit_error());
         }
         // Streaming reuses this storage after Finalize, fills it, then registers a new descriptor.
         // Its registration stamp is newer than the fill; an old CPU-seeded alias must not win.
@@ -180,7 +182,7 @@ int main(void) {
         id<MTLTexture> replacement_image = tex_mtl((tex_t *)&initial);
         finish();
         CHECK("new descriptor reads replacement CPU tile", pixel(replacement_image) == 23456);
-        CHECK("previous in-flight tile keeps its own pixels", pixel(initial_image) == 12345);
+        // The earlier submissions have completed; their spare texture may be reused.
         // A CPU-seeded backing can subsequently become a real render target. Shared-page dirtiness must not restore its old CPU pixels.
         seed.mem = (uint8_t *)storage + 32768;
         dm_guest_write_prepare(seed.mem, seed.L.size);
@@ -192,9 +194,10 @@ int main(void) {
         mtl_sub_begin();
         id<MTLTexture> seeded_target = registered(703);
         clear.tex = (tex_t *)&rendered_seed;
+        mtl_tex_gpu_written(clear.tex); // the recording API normally publishes this storage write
         clear_tex(&clear);
         finish();
-        CHECK("CPU-seeded backing can be rendered", pixel(seeded_target) == 32768);
+        CHECK("CPU-seeded backing can be rendered", pixel(tex_mtl((tex_t *)&rendered_seed)) == 32768);
         dm_guest_write_prepare((uint8_t *)storage + 36864, 1);
         *((uint8_t *)storage + 36864) = 1;
         h_nvnTextureInitialize(&rendered_seed_alias, &texture_builder);

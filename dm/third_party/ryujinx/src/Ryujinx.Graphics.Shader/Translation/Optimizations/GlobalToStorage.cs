@@ -895,11 +895,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 context.BitwiseAnd(context.ICompareEqual(addrHigh, endHigh), context.ICompareLessUnsigned(addrLow, endLow)));
 
             Operand lblSkip = Label();
-            context.BranchIfFalse(lblSkip, Below(MapWord(found, 3), MapWord(found, 2)));   // an address in no pool: the entry below it ends below it
-
-            // The last entry's range held it, or the hint's or the search's entry does
-            context.MarkLabel(lblChosen);
-            found = context.IMultiply(selected, Const(GmemMapEntryWords));
+            context.BranchIfFalse(lblSkip, inPool);
 
             if (writes)
             {

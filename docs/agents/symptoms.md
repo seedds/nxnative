@@ -611,6 +611,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - a covered game window accumulates thousands of uploads that land in one submission when it becomes visible. Ocarina's ten-second hide/resume probe uploaded 5,853 textures (2,831.7 MB) in 345.5 ms. Even visible gameplay uploaded about eight textures per frame. → [New texture serials upload identical packaged storage again](../reference/nvn-objects.md#new-texture-serials-upload-identical-packaged-storage-again)
 - CPU submission takes 18–24 ms while GPU work takes 15–18 ms; samples contain `pool_gpu` and sorting inside `gmem_map`. → [Texture-table allocation and repeated address sorting](../reference/nvn-objects.md#texture-table-allocation-and-repeated-address-sorting)
 - CPU samples contain `pidx_sort` and `_qsort` beneath buffer address lookups and texture-table construction while pools are created and destroyed. → [Pool churn repeatedly sorts the address index](../reference/nvn-objects.md#pool-churn-repeatedly-sorts-the-address-index)
+- after clearing an initially CPU-uploaded texture, a new descriptor over the same storage reads the old CPU pixels. The rebase fixture observed 23456 rather than the cleared R16 value 32768. → [A later descriptor restores a stale CPU seed after GPU promotion](../reference/nvn-objects.md#a-later-descriptor-restores-a-stale-cpu-seed-after-gpu-promotion)
 
 ## Rendering
 

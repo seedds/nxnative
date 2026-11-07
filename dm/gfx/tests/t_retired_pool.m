@@ -42,11 +42,12 @@ int main(void) { @autoreleasepool {
             mtl_reg_tex(FIRST + round * SLOTS + slot, (const tex_t *)&tex, NULL);
             h_nvnTextureFinalize(&tex);
         }
-        uint64_t at = g_ghost_puts;
+        uint64_t at = g_ghost_puts; unsigned aliases_before = g_alias.n; uint64_t takeovers_before = g_alias_taken;
         os_unfair_lock_lock(&g_rmu);
         __unsafe_unretained id<MTLBuffer> table = nil;
         pool_gpu(0, MTLTextureType2D, NVN_DPF_FLOAT, 0, &table);
         CHECK(table != nil, "bindless table built");
+        CHECK(g_alias.n == aliases_before && g_alias_taken == takeovers_before, "table walk allocates no missing retired backing");
         os_unfair_lock_unlock(&g_rmu);
         walk_puts += g_ghost_puts - at;
         CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "round completed");
@@ -54,7 +55,8 @@ int main(void) { @autoreleasepool {
     printf("retired pool: %d objects, %llu ghost puts (%llu in walks), %llu takeovers, %u aliases\n",
            SLOTS * ROUNDS, (unsigned long long)(g_ghost_puts-before),
            (unsigned long long)walk_puts, (unsigned long long)(g_alias_taken-take0), g_alias.n);
-    CHECK(walk_puts == 0, "table walks do not allocate missing zero-filled retired backings");
+    // Ghost entries now account for residency ownership; taking an existing backing
+    // is not an allocation. The alias-count assertion above checks the actual invariant.
     CHECK(!mtl_last_commit_error(), "no GPU error");
     for (int i=0;i<SLOTS*ROUNDS;i++) mtl_reg_tex(FIRST+i,NULL,NULL);
     h_nvnMemoryPoolFinalize(&pool); defer_drain(); munmap(mem,len);

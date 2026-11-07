@@ -354,3 +354,13 @@ Nine synthetic codec/CLI/HTTP tests pass; five archived real slots pass no-op id
 edit checks. Browser copy, template, undo, review and export were exercised; the downloaded edited
 save decodes correctly. In-game loading/resaving and any loader integrity requirements remain open.
 Front-ends: this is an optional local export tool, with no runtime settings or live-save writes.
+
+## Rebase validation (2026-11-07, gameplay pending)
+
+Rebased both campaign checkpoints onto upstream `f25fa956`. Recovery checkpoints remain at `codex/ocarina-pre-rebase-20261107` and `codex/ocarina-checkpoint-20261107`. The installed app is unchanged.
+
+Preserved the dynamic raw-memory ABI, full-width hints, raw-load range and quad caches, O3 compilation with CVP disabled, multiply-high rewrite, CPU package sharing, address-index caching and fragment-only barrier optimization. Reused upstream incremental pool tables, texture read tracking, mesh attribute layout, primitive allocation, socket eventfd handling and Ounce vibration support where they supersede overlapping implementations. The translator was rebuilt from the reconciled source and its lock regenerated.
+
+Found on this game: [stale CPU seeds after GPU promotion](../../../docs/reference/nvn-objects.md#a-later-descriptor-restores-a-stale-cpu-seed-after-gpu-promotion). Tests now respect upstream's counted ghost ownership, raw atomic allocation owner and reuse of upload spares after their GPU fence. No performance gain or gameplay equivalence is claimed until an isolated game comparison passes. Only Ocarina has local game assets; the other four games required for broad cross-game runtime coverage are unavailable on this Mac.
+
+Validation at the reconciliation commit: host build passes; 19 selected renderer fixtures pass (dynamic memory tables, commit repair, shared packages, CPU writes, retired pools, sparse mapping changes, alias upgrades, lifetime, address indexing, deferred release and TBDR uniform updates). Shader tests: 363 run, six environment-dependent skips, no failures. HID: 168 checks; save editor: nine tests; documentation: 11 tests; chain: 17 tests; universal translator: three tests. The full shader-library build and static regression remain pending. Installed host SHA-256 remains `2df725180f383286bfe3d5c4ba03320ebfb3e8ce801f8250a72bf0e01a500a88`.

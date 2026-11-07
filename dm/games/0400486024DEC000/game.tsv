@@ -44,3 +44,9 @@ draw_barriers	game
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on
 tex_dirty_upload	on
+
+# ---- Frame rate ----
+# 60 fps (one game tick a frame; the game never changes its present interval): the host decides each frame's step in whole vsyncs and holds the frame that long
+# (patches.py FRAME_STEP: stubs at the framework's frame-rate tick and interval controller); 30 when 60 does not hold, game time = real time. DM_FPS_TARGET=30 forces 30,
+# 0 keeps the game's fixed interval 1 as shipped (slow motion below 60 fps)
+fps_target	60

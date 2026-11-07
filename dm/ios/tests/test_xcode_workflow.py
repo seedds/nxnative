@@ -55,6 +55,7 @@ class XcodePipelineTests(unittest.TestCase):
             mocks = {}
             for name, value in {
                 'scan_nsps': (int(registered.id, 16), fam), 'check_prereqs': None, 'check_metal': None,
+                'check_formats': None,   # synthetic extraction has no RomFS.img; image integrity has separate tests
                 'free_gb': 10000, 'build_nx_extract': root / 'nx_extract',
                 'extract': extraction, 'can_clone': False, 'build_mismatch': [],
                 'extract_aoc': None, 'rewrite': profile, 'split_shaders': 'fixture-key',
@@ -84,6 +85,7 @@ class XcodePipelineTests(unittest.TestCase):
             finally:
                 progress.close()
             self.assertEqual(code, 0)
+            mocks['check_formats'].assert_called_once_with({version: extraction})
             events = [json.loads(line) for line in output.getvalue().splitlines()]
             self.assertTrue(any(event.get('name') == 'prepare Xcode' for event in events))
             self.assertFalse(any(event.get('name') == 'app build' for event in events))

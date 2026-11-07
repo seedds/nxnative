@@ -572,6 +572,12 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     if (!ps) { if (!g_pso_mtk_building) g_pso_mtk_building = [NSObject new]; hm_put_id(&g_pso_mtk, &k, g_pso_mtk_building); }
     os_unfair_lock_unlock(&g_pso_mtk_lock);
     if (ps) return ps == NSNull.null || ps == g_pso_mtk_building ? nil : ps;
+    if (ms->fn.functionType != MTLFunctionTypeMesh || (ts && ts->fn.functionType != MTLFunctionTypeObject)) {
+        MLOG("[RED] task / mesh pipeline: function is not an object / mesh function (task %s type %lu, mesh %s type %lu)",
+             ts ? ts->key : "-", (unsigned long)(ts ? ts->fn.functionType : 0), ms->key, (unsigned long)ms->fn.functionType);
+        os_unfair_lock_lock(&g_pso_mtk_lock); hm_put_id(&g_pso_mtk, &k, NSNull.null); os_unfair_lock_unlock(&g_pso_mtk_lock);
+        return nil;
+    }
     MTLRenderPipelineDescriptor *d = pso_desc(&k, ms, fs, nil, 0);
     MTLMeshRenderPipelineDescriptor *m = [MTLMeshRenderPipelineDescriptor new];
     m.meshFunction = ms->fn; m.fragmentFunction = d.fragmentFunction ?: mtk_nop_fragment(); m.maxTotalThreadsPerMeshThreadgroup = ms->mesh_threads;
@@ -580,7 +586,8 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     for (int i = 0; i < 8; i++) m.colorAttachments[i] = d.colorAttachments[i];
     m.depthAttachmentPixelFormat = d.depthAttachmentPixelFormat; m.stencilAttachmentPixelFormat = d.stencilAttachmentPixelFormat;
     const char *tk = ts ? ts->key : "-", *mk = ms->key, *fk = fs ? fs->key : "-"; pso_key kk = k;
-    dispatch_async(pp_bg_queue(), ^{
+    // A task / mesh draw has no pulling stand-in while its pipeline builds, so it runs at user-initiated QoS outside pp_bg_queue's serial utility backlog.
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSError *e = nil; uint64_t t0 = bp_now();
         id<MTLRenderPipelineState> p = [g_dev newRenderPipelineStateWithMeshDescriptor:m options:MTLPipelineOptionNone reflection:nil error:&e];
         MLOG("%stask / mesh pipeline: task %s mesh %s fragment %s, %.1f ms in the background%s%s", p ? "" : "[RED] ", tk, mk, fk, (bp_now() - t0) / 1e6, p ? "" : ": ", p ? "" : e.localizedDescription.UTF8String);
@@ -593,9 +600,9 @@ static void mtk_encode(id<MTLRenderCommandEncoder> en_) {
     [en setArgumentTable:g_vt atStages:MTLRenderStageMesh];
     uint64_t first_gpu = g_mtk.ind_first;
     if (!g_mtk.ind) { id<MTLBuffer> b; size_t o = arena_alloc(16, &b); memcpy((uint8_t *)b.contents + o, &g_mtk.first, 4); first_gpu = b.gpuAddress + o; }
-    if (ts) { [en setArgumentTable:g_ot atStages:MTLRenderStageObject]; g_args_dirty[3] = 1; encode_args(en, ts, 3, 0);
+    if (ts) { [en setArgumentTable:g_ot atStages:MTLRenderStageObject]; g_args_dirty[3] = 1; encode_args(en, ts, 3, 0); if (g_enc != en) return;
               if (rec_on()) rec_table_op(RO_T_ADDR, g_ot, first_gpu, DMSH_MESH_FIRST_SLOT); else [g_ot setAddress:first_gpu atIndex:DMSH_MESH_FIRST_SLOT]; }
-    g_args_dirty[4] = 1; encode_args(en, ms, 4, 1);
+    g_args_dirty[4] = 1; encode_args(en, ms, 4, 1); if (g_enc != en) return;
     enc_r_vbuf(en, DMSH_MESH_FIRST_SLOT, first_gpu);
     if (g_mtk.ind) [en drawMeshThreadgroupsWithIndirectBuffer:g_mtk.ind threadsPerObjectThreadgroup:MTLSizeMake(ts ? ts->mesh_threads : 1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(ms->mesh_threads, 1, 1)];
     else [en drawMeshThreadgroups:MTLSizeMake(g_mtk.count, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(ts ? ts->mesh_threads : 1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(ms->mesh_threads, 1, 1)];
@@ -613,10 +620,11 @@ static void mesh_tasks_draw(const p_draw *dw) {
     if (!ms || ms->mesh_kind != 2 || !ms->fn || (ts ? !ts->fn : !ms->mesh_notask)) {
         RED_ONCE(150, "DrawMeshTasks without its task and mesh shaders (task %s mesh %s): draw skipped", ts ? ts->key : "-", ms ? ms->key : "-"); return; }
     image_prepare(pr, 1u << 3 | 1u << 4);
-    if (g_nubd && (g_enc || ubd_lazy()) && ((ts && ubd_conflict_sh(ts, 3)) || ubd_conflict_sh(ms, 4))) { g_ubd_conflicts++; rp_end(); ubd_land(); }   // as draw_ does for its stages
+    if (g_nubd && (g_enc || ubd_lazy()) && ((ts && ubd_conflict_sh(ts, 3)) || ubd_conflict_sh(ms, 4) || (dw->ind && ubd_hits(dw->ind, dw->ind + 8)))) { g_ubd_conflicts++; rp_end(); ubd_land(); }   // as draw_ does for its stages
     NvProg *raster = pr->geo_lean_raster;   // the pixel stage alone
     if (!raster || raster->sh[1] != pr->sh[1] || raster->sh[0]) { raster = [NvProg new]; raster->sh[1] = pr->sh[1]; pr->geo_lean_raster = raster; }
     uint64_t ind = 0, ind_first = 0;
+    if (!g_enc && (g_mdx_ep != g_mdx_epoch || g_mdx_sub != g_sub_serial)) mdx_run(dw->ind ? dw : NULL, NULL);
     if (dw->ind) { void *mb; uint64_t mo;
         if (!mdx_find(dw->ind, dw->ind, &ind)) { mdx_run(dw, NULL); if (!mdx_find(dw->ind, dw->ind, &ind)) ind = 0; }
         if (!ind || !mtl_gpu_addr(dw->ind, 8, &mb, &mo, &ind_first)) { RED_ONCE(154, "DrawMeshTasksIndirect record at %#llx is in no memory pool: draw skipped", (unsigned long long)dw->ind); return; }
@@ -628,7 +636,7 @@ static void mesh_tasks_draw(const p_draw *dw) {
     draw_(&triangle, NULL);
     g_geo_program = nil; g_mtk.on = 0; args_dirty_all();
     if (g_mtk.miss) { g_mtk_wait++; return; }
-    swrite_note(pr); g_wr_epoch++;
+    swrite_note(pr); if (prog_swrites(pr)) g_wr_epoch++;
     if (!g_mtk_n++) MLOG("task / mesh: first draw, task %s mesh %s fragment %s, %u workgroups from %u%s", ts ? ts->key : "-", ms->key, pr->sh[1] ? pr->sh[1]->key : "-", g_mtk.count, g_mtk.first, ind ? " (indirect)" : "");
 }
 static uint64_t g_geo_mesh_n, g_geo_mesh_wait;   // mesh draws; draws the compute path drew while their mesh pipeline was built
@@ -650,7 +658,7 @@ static int geo_mesh_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     g_geo_program = nil; g_geo_mesh.on = 0; args_dirty_all();
     if (g_geo_mesh.miss) { g_geo_mesh_wait++; return 0; }
     // the kernel's storage writes, noted as its arguments were encoded (always: geo_mesh_encode), so a drain's list of later writes holds them (g_wr_geo, drw_valid)
-    swrite_note(pr); udc_note_draw(pr, 0); g_wr_epoch++; g_wr_geo++; g_mdx_epoch++;
+    swrite_note(pr); udc_note_draw(pr, 0); g_wr_epoch++; g_wr_geo++; if (prog_swrites(pr)) g_mdx_epoch++;
     if (!g_geo_mesh_n++) MLOG("geometry mesh: first mesh draw, vertex %s kernel %s, %u triangles", pr->sh[0]->key, g_geo_mesh.lean->key, g_geo_mesh.a.count / 3);
     return 1;
 }
@@ -930,7 +938,7 @@ static void geo_gs_one(id<MTL4ComputeCommandEncoder> ce, const geo_job *j) {
         enc_c_dispatch(ce, MTLSizeMake((j->groups + 63) / 64, 1, 1), MTLSizeMake(64, 1, 1));
     }
     // its guest storage writes are noted (geo_prep, encode_args), so a drain's list of later writes holds them (g_wr_geo, drw_valid)
-    swrite_note(j->pr); udc_note_draw(j->pr, 0); g_wr_epoch++; g_wr_geo++; g_mdx_epoch++;
+    swrite_note(j->pr); udc_note_draw(j->pr, 0); g_wr_epoch++; g_wr_geo++; if (prog_swrites(j->pr)) g_mdx_epoch++;
 }
 static void geo_raster(const geo_job *j, int last_in_run) {
     g_geo_bind[1] = j->output;
@@ -964,7 +972,7 @@ static int geo_run_passes(uint32_t op, const void *a) {
         sbw_note(ad, 16, SBW_REPORT); return 1;
     }
     if (op == OP_RESET_COUNTER) { uint64_t t; memcpy(&t, a, 8); return t != NVN_COUNTER_TYPE_SAMPLES_PASSED || geo_query_run(); }
-    if (op == OP_SIGNAL_EVENT) return 1;
+    if (op == OP_SIGNAL_EVENT) { uint32_t m; memcpy(&m, (const uint8_t *)a + 8, 4); return !(m & 2); }
     return state_op(op, a);
 }
 static int geo_run_walk(id<MTL4RenderCommandEncoder> re) {

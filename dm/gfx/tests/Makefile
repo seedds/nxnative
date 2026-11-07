@@ -11,7 +11,7 @@ GAME_H = ../../host/gen/$(GAME)/game_profile.h
 
 # The host's shaders compiled for the Mac (host_msl_gen.h, made by the host Makefile from dm/gfx/msl; nvn/host_msl.m loads them)
 MSL_H = ../../host/gen/msl-macosx/host_msl_gen.h
-CFLAGS=-O1 -g -Wall -Wno-unused-function -I../nvn/include -I$(dir $(GAME_H)) -I$(dir $(MSL_H))
+CFLAGS=-O1 -g -Wall -Wno-unused-function -I../nvn/include -I../../third_party/maxmetal/include -I$(dir $(GAME_H)) -I$(dir $(MSL_H))
 GFX=$(filter-out ../nvn/hle_nvn.c,$(sort $(wildcard ../nvn/*.c ../nvn/*.m ../nvn/*.S ../tex/*.c ../tex/*.m)))
 GFX_H=$(wildcard ../nvn/*.h ../nvn/*.inc ../nvn/include/*.h ../tex/*.h) $(GAME_H) $(MSL_H)
 .DEFAULT_GOAL := t_nvn   # the profile header rule comes first, so keep the default goal as before
@@ -75,6 +75,8 @@ t_tex_layout: t_tex_layout.c ../nvn/nvn_tex.c ../nvn/nvn_tex.h
 	clang -O1 -Wall -o $@ t_tex_layout.c ../nvn/nvn_tex.c
 t_refl: t_refl.m ../nvn/nvn_refl.m ../nvn/nvn_refl.h ../nvn/dmsh_chain.h
 	clang -O1 -g -Wall -I../nvn -fobjc-arc -o $@ t_refl.m ../nvn/nvn_refl.m -framework Metal -framework Foundation
+t_maxmetal: t_maxmetal.m ../nvn/nvn_maxmetal.m ../nvn/nvn_maxmetal.h ../nvn/nvn_maxmetal_lib.c ../nvn/nvn_refl.m ../nvn/nvn_refl.h ../nvn/dmsh_chain.h ../../third_party/maxmetal/src/translate.c
+	clang -O1 -g -Wall -I../nvn -I../../third_party/maxmetal/include -fobjc-arc -o $@ t_maxmetal.m ../nvn/nvn_maxmetal.m ../nvn/nvn_refl.m ../nvn/nvn_maxmetal_lib.c -framework Metal -framework Foundation
 t_hmap: t_hmap.c ../nvn/nvn_hmap.h
 	clang -O1 -Wall -o $@ t_hmap.c
 t_cover: t_cover.c ../nvn/nvn_cover.h

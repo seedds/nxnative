@@ -41,3 +41,7 @@ shader_note	Mario Kart World shaders
 # ---- Graphics ----
 # agl wraps its clears in render conditions on Donkey Kong Bananza and Splatoon Raiders; the same library here, to be confirmed on this game
 render_cond	on
+# Dynamic resolution reads the GPU time between the frame's timestamp reports, as on Donkey Kong Bananza (same engine): with one time for the whole submission it reads about 0 and
+# keeps 2048x1152 however long the GPU takes. Each report takes its segment's GPU start / end: on an M1 Pro the first race's scene steps down to 1328x748 and the
+# race goes from 33.4–33.6 to 42.2–42.3 fps docked (main 777a5f6c); a faster GPU stays at full size
+gpu_timestamps	segment

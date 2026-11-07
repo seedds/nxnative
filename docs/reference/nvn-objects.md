@@ -582,6 +582,14 @@ Games read this count as a position in their own command memory and size their h
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_readback`: a landed buffer serves the next readback of its size, a larger one takes the next size, no more than 16 MB is kept, and a landed buffer is held only by the kept set ([Completion readbacks survive a guest waiter's pool](memory.md#completion-readbacks-survive-a-guest-waiters-pool)).
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game): its four CPU-written render targets (256×256, 192×192, 96×96, 500×400) are read back every frame. On the Mac (Apple M4 Pro, 2026-11-03, the regression route) 390-418 buffers every 300 frames on `main` at `12915a31`, none with the fix; the residency numbers of both fixes together are under [Snapshot textures taken by format and size](rendering.md#snapshot-textures-taken-by-format-and-size).
 
+### Cached bindings after sparse page-table changes
+
+- **Symptom:** a sampled texture keeps its old pixels after a sparse mapping changes, while unrelated program changes can rebuild its whole resource-ID table even when no mapping changed.
+- **Cause:** a 4 KiB mapping on a 16 KiB-page Mac can update only the sparse page table, with no registration, serial or CPU-write note. Texture ID views, resource-ID tables, tables of handles in uniform buffers and reused shader arguments did not all follow that generation. Conversely, `ser_sync` and the pool patch path treated a nonzero sparse generation as a reason to invalidate on every serial change.
+- **Fix:** those caches follow the actual `nvn_sparse_gen()` value. A changed mapping invalidates views and shader arguments, and refreshes texture tables even after the ordinary per-submission walk budget is spent; an unchanged mapping permits the existing noted-ID patch path. Sampler tables have no sparse dependency.
+- **Check:** `t_sparse_pool_cache` uses real NVN mapping requests. It checks table reuse through 128 unrelated program changes, page-table-only invalidation and GPU pixel readback through both pool and uniform-buffer handle tables after remapping. The fixture's literal pixels come from synthetic physical pages; no game data is needed.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) host-cache audit; reproduced by the native fixture on current upstream. A new gameplay comparison on this base is not claimed.
+
 ### Sampled textures in a sparse pool uploaded through the page table
 
 - **Symptom:** textures that should hold CPU-written data come out magenta (ASTC's error colour) or black.

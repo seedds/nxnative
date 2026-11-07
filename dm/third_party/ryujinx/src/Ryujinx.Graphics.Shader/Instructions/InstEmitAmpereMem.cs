@@ -427,8 +427,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
         }
 
-        // ATOMS.CAS Rd, [Ra + offset], Rb (expected), Rc (new value): Rd = 1 when the swap happened, not the old value (Fire Emblem Fortune's Weave's only use is a retry loop for a float add that repeats until Rd == 1).
-        // Only the 32-bit form (operation 3 at 87..91, size 0) occurs
+        // ATOMS.CAS Rd, [Ra + offset], Rb (expected), Rc (new value). nvdisasm names the forms by bit 87: clear, CAS, CUDA's atomicCAS, Rd the old value; set, CAST, and CAST.SPIN with
+        // bit 88 too (the compiler's retry loop for a float add on shared memory, which repeats until Rd == 1: Fire Emblem Fortune's Weave's only use), Rd 1 when the swap happened.
+        // Only the 32-bit size (73..76 = 0) is taken
         public static void AAtomsCas(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
@@ -438,7 +439,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand value = x.Rc >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rc, RegisterType.Gpr);
             Operand old = context.AtomicCompareAndSwap(StorageKind.SharedMemory, Const(context.ResourceManager.SharedMemoryId), offset, expected, value);
 
-            ASet(context, x, context.ConditionalSelect(context.ICompareEqual(old, expected), Const(1), Const(0)));
+            ASet(context, x, !x.Bit(87) ? old : context.ConditionalSelect(context.ICompareEqual(old, expected), Const(1), Const(0)));
         }
 
         // ---- local and shared memory ----
@@ -509,7 +510,25 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             Operand value = x.Rb >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rb, RegisterType.Gpr);
-            Operand res = EmitAtomicOp(context, StorageKind.SharedMemory, (AtomOp)x.Bits(87, 91), (AtomSize)x.Bits(73, 76), id, offset, value);
+            AtomOp op = (AtomOp)x.Bits(87, 91);
+
+            // INC (3) and DEC (4), CUDA's atomicInc / atomicDec: EmitAtomicOp has no case for them and gave 0 with no access. A compare-and-swap loop: the new value from the old one,
+            // INC: old >= b ? 0 : old + 1; DEC: old == 0 || old > b ? b : old - 1 (unsigned), retried until the word did not change meanwhile; Rd the old value
+            if (op is AtomOp.Inc or AtomOp.Dec && x.Bits(73, 75) is 0 or 1)
+            {
+                Operand loop = Label();
+                context.MarkLabel(loop);
+                Operand cur = context.Load(StorageKind.SharedMemory, id, offset);
+                Operand next = op == AtomOp.Inc
+                    ? context.ConditionalSelect(context.ICompareGreaterOrEqualUnsigned(cur, value), Const(0), context.IAdd(cur, Const(1)))
+                    : context.ConditionalSelect(context.BitwiseOr(context.ICompareEqual(cur, Const(0)), context.ICompareGreaterUnsigned(cur, value)), value, context.IAdd(cur, Const(-1)));
+                Operand prev = context.AtomicCompareAndSwap(StorageKind.SharedMemory, id, offset, cur, next);
+                context.BranchIfFalse(loop, context.ICompareEqual(prev, cur));
+                ASet(context, x, cur);
+                return;
+            }
+
+            Operand res = EmitAtomicOp(context, StorageKind.SharedMemory, op, (AtomSize)x.Bits(73, 76), id, offset, value);
 
             ASet(context, x, res);
         }

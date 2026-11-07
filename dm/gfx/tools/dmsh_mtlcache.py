@@ -62,21 +62,26 @@ class Cache:
         os.replace(tmp, lib)
         self.store.put_file(p, lib); self.count((target, 'compiled'))
 
-    def compile_split(self, target, msl, a, b, split):
-        """msl → two libraries cut from its one compile, split(the library's bytes) → (a's bytes, b's bytes): clones of what the same source gave before, or a compile (then both kept, not the whole
-        library, so an output stays a clone as compile's are). Raises CalledProcessError as the compile does, and what split raises"""
-        p = self.path(target, open(msl, 'rb').read()); q = p[:-len('.metallib')] + '_x.metallib'
-        if self.store.has(p) and self.store.has(q):
-            self.store.to_file(p, a); self.store.to_file(q, b); self.count((target, 'reused')); return
-        whole = f'{a}.tmp-{os.getpid()}-{threading.get_ident()}'
+    def compile_split(self, target, msl, libs, split):
+        """msl → the libraries libs cut from its one compile, split(the library's bytes) → their bytes, in order: clones of what the same source gave before, or a compile (then the pieces
+        kept, not the whole library, so an output stays a clone as compile's are). The pieces are cached by their place (<digest>.metallib, <digest>_x.metallib, <digest>_x2.metallib):
+        one source always splits the same way. Raises CalledProcessError as the compile does, and what split raises"""
+        p = self.path(target, open(msl, 'rb').read())
+        paths = [p] + [f'{p[:-len(".metallib")]}_x{i if i > 1 else ""}.metallib' for i in range(1, len(libs))]
+        if all(self.store.has(x) for x in paths):
+            for src, dst in zip(paths, libs): self.store.to_file(src, dst)
+            self.count((target, 'reused')); return
+        whole = f'{libs[0]}.tmp-{os.getpid()}-{threading.get_ident()}'
         self._compile(target, msl, whole)
         try:
             with open(whole, 'rb') as f: pieces = split(f.read())
         finally: os.unlink(whole)
-        for lib, data in zip((a, b), pieces):
+        if len(pieces) != len(libs): raise ValueError(f'the split gave {len(pieces)} libraries, not {len(libs)}')
+        for lib, data in zip(libs, pieces):
             with open(whole, 'wb') as f: f.write(data)
             os.replace(whole, lib)
-        with self.store.batch(): self.store.put_file(q, b); self.store.put_file(p, a)
+        with self.store.batch():
+            for path, lib in zip(paths, libs): self.store.put_file(path, lib)
         self.count((target, 'compiled'))
 
     def _check(self, target, d, stems, mac_dir):
@@ -109,8 +114,8 @@ class Cache:
         if not romfs.os.path.isdir(mac_dir): return []   # a stopped pack's .part beside the libraries
         try: stamps = json.loads(self.store.get(STAMPS) or b'{}')
         except ValueError: stamps = {}
-        names = set(romfs.os.listdir(mac_dir))   # a library with a side library was cut from another source than its .metal (compile_split, dmsh_side.py), and a compile of that source is never asked for
-        stems = sorted(n[:-6] for n in names if OUTPUT.fullmatch(n) and n[:-6] + 'x.metallib' not in names)   # not an AppleDouble ._<name> (exFAT / FAT drives)
+        names = set(romfs.os.listdir(mac_dir))   # a library with a side or readable-tile library was cut from another source than its .metal (compile_split, dmsh_side.py), and a compile of that source is never asked for
+        stems = sorted(n[:-6] for n in names if OUTPUT.fullmatch(n) and n[:-6] + 'x.metallib' not in names and n[:-6] + 'f.metallib' not in names)   # not an AppleDouble ._<name> (exFAT / FAT drives)
         todo, notes = {}, []
         for target, d in (('mac', mac_dir), ('ios', ios_dir)):
             if targets is not None and target not in targets: continue   # checking an earlier build compiles samples too

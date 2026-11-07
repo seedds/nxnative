@@ -4,7 +4,7 @@
 // Metal 4 descriptor keeps the MTLDevice path; pso_key_norm drops what no pipeline depends on; compaction merges the files the prewarm took bases from into one despite a
 // mid-prewarm flush, and a compaction that did not finish is not tried again on the same system build; depth-only draws write depth; concurrent colour variants compile
 // one base; archive flushes preserve unrelated compiler state; a function with function constants is specialized by its pipeline's descriptor, not through its library,
-// and an MTLDevice pipeline gets it specialized; the descriptor for a specialization is the caller's whether the driver returns it retained or autoreleased
+// and an MTLDevice pipeline gets it specialized; the descriptor for a specialization is the caller's whether the driver returns it retained or autoreleased; a compute pipeline is captured into a plain file and taken from it later, one without a Metal 4 descriptor never looked up
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -93,6 +93,76 @@ static void concurrent_functions(id<MTLLibrary> library) {
     return [compiler newRenderPipelineStateWithDescriptor:d compilerTaskOptions:opts error:error];
 }
 @end
+// Counts the compute pipeline lookups in an archive file
+@interface LookupCountArchive : NSObject { @public id<MTL4Archive> archive; _Atomic int lookups; } @end
+@implementation LookupCountArchive
+- (id)forwardingTargetForSelector:(SEL)selector { return archive; }
+- (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTL4ComputePipelineDescriptor *)d error:(NSError **)error {
+    atomic_fetch_add(&lookups, 1); return [archive newComputePipelineStateWithDescriptor:d error:error];
+}
+@end
+// Runs kernel k of compute_pipelines over 64 threads: 1 when every o[i] is i * 3 + 1
+static int run_kernel(id<MTLComputePipelineState> ps) {
+    if (!ps) return 0;
+    id<MTLBuffer> b = [g_dev newBufferWithLength:64 * 4 options:MTLResourceStorageModeShared]; memset(b.contents, 0, 64 * 4);
+    id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+    [ce setComputePipelineState:ps]; [ce setBuffer:b offset:0 atIndex:0]; [ce dispatchThreads:MTLSizeMake(64, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)]; [ce endEncoding];
+    [cb commit]; [cb waitUntilCompleted];
+    const uint32_t *o = b.contents; for (uint32_t i = 0; i < 64; i++) if (o[i] != i * 3 + 1) return 0;
+    return 1;
+}
+// Compute pipelines (cps_new) beside the bases: one the bundle does not hold is built through the MTLDevice and compiled into the flush period in the background, written to a
+// plain file (never a p<seq> one), and a later start takes it from that file without building it; compaction captures it again; a function without a Metal 4 descriptor
+// (constants, the embedded kernels) is built through the MTLDevice, not captured and never looked up
+static void compute_pipelines(void) {
+    char kdir[] = "/tmp/t_pso_compute.XXXXXX"; if (!mkdtemp(kdir)) abort();
+    NSString *saved = g_arch_dir; g_arch_dir = @(kdir); g_arch4 = @[]; g_arch4p = @[]; NSError *err = nil;
+    arch_flush_wait();   // from an empty period
+    NSString *src = @"#include <metal_stdlib>\nusing namespace metal;\nkernel void k(device uint *o [[buffer(0)]], uint i [[thread_position_in_grid]]) { o[i] = i * 3 + 1; }\n";
+    id<MTLLibrary> kl = [g_dev newLibraryWithSource:src options:nil error:&err], ul = [g_dev newLibraryWithSource:[src stringByAppendingString:@"// unregistered\n"] options:nil error:&err];
+    id<MTLFunction> kf = fn4_note([kl newFunctionWithName:@"k"], kl, @"k", nil), uf = [ul newFunctionWithName:@"k"];
+    uint64_t built = g_cps_built, run = g_cps_run, arch = g_cps_arch; int pending = g_arch_new;
+    id<MTLComputePipelineState> kp = cps_new(kf, &err);
+    EXPECT("compute: a pipeline", 1, kp != nil);
+    EXPECT("compute: built", built + 1, g_cps_built);
+    dispatch_sync(cps_harvest_q(), ^{});   // its capture, in the background
+    EXPECT("compute: captured for the archive", pending + 1, g_arch_new);
+    EXPECT("compute: its dispatch writes", 1, run_kernel(kp));
+    arch_flush_wait();
+    NSArray<NSString *> *names = [NSFileManager.defaultManager contentsOfDirectoryAtPath:@(kdir) error:nil];
+    EXPECT("compute: one file written", 1, names.count);
+    EXPECT("compute: a plain file, not a p file", 1, names.count == 1 && ![names[0] hasPrefix:@"p"]);
+    EXPECT("compute: nothing left to write", 0, g_arch_new);
+    LookupCountArchive *la = [LookupCountArchive new];
+    la->archive = names.count ? [g_dev newArchiveWithURL:[NSURL fileURLWithPath:[@(kdir) stringByAppendingPathComponent:names[0]]] error:&err] : nil;
+    g_arch4 = @[(id<MTL4Archive>)la];   // as a new start with that file
+    built = g_cps_built; pending = g_arch_new;
+    id<MTLComputePipelineState> kp2 = cps_new(kf, &err);
+    EXPECT("compute again: from this device's archive", run + 1, g_cps_run);
+    EXPECT("compute again: not built", built, g_cps_built);
+    EXPECT("compute again: not from a bundle", arch, g_cps_arch);
+    EXPECT("compute again: nothing captured", pending, g_arch_new);
+    EXPECT("compute again: its dispatch writes", 1, run_kernel(kp2));
+    // compaction during the prewarm: captured again from its function, for the file that replaces the old ones
+    g_compact_enabled = 1; g_compacted = 0; atomic_store(&g_warm_running, 1);
+    EXPECT("compute, compaction: a pipeline", 1, cps_new(kf, &err) != nil);
+    EXPECT("compute, compaction: from the archive", run + 2, g_cps_run);
+    dispatch_sync(cps_harvest_q(), ^{});
+    EXPECT("compute, compaction: captured again", 1, g_compacted);
+    EXPECT("compute, compaction: waits for the flush", pending + 1, g_arch_new);
+    atomic_store(&g_warm_running, 0); g_compact_enabled = 0; g_compacted = 0;
+    arch_flush_wait();
+    // no Metal 4 descriptor: built through the MTLDevice, no lookup, nothing captured
+    int looked = la->lookups; built = g_cps_built; pending = g_arch_new;
+    id<MTLComputePipelineState> up = cps_new(uf, &err);
+    EXPECT("compute without a descriptor: a pipeline", 1, up != nil);
+    EXPECT("compute without a descriptor: never looked up", looked, la->lookups);
+    EXPECT("compute without a descriptor: built", built + 1, g_cps_built);
+    dispatch_sync(cps_harvest_q(), ^{});
+    EXPECT("compute without a descriptor: not captured", pending, g_arch_new);
+    EXPECT("compute without a descriptor: its dispatch writes", 1, run_kernel(up));
+    [NSFileManager.defaultManager removeItemAtPath:@(kdir) error:nil]; g_arch_dir = saved; g_arch4 = @[];
+}
 // Notes whether the compaction marker exists while the serializer writes (issue #342: a flush that does not return leaves it)
 @interface MarkerSerializer : NSObject { @public id<MTL4PipelineDataSetSerializer> ser; int calls, marked; } @end
 @implementation MarkerSerializer
@@ -444,6 +514,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         EXPECT("compaction: none compiled from the new file", built0, g_pb_built);
         [NSFileManager.defaultManager removeItemAtPath:@(cdir) error:nil]; g_arch_dir = saved; g_arch4 = @[];
     }
+    compute_pipelines();
     // a function with no Metal 4 descriptor: the MTLDevice path
     uint64_t legacy = g_pb_legacy;
     id<MTLRenderPipelineState> l = pso_build(desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 0), &err);

@@ -40,6 +40,9 @@ shader_note	Ocarina of Time shaders
 # The game steps its time by a frame ratio, its base rate / its frame rate, whatever the frame took: frames longer than a vsync played in slow motion. The ratio takes the host's
 # frame step instead (MATCH_FRAME_STEP in patches.py, found by its function on any build that keeps it): 1 vsync at 60 fps, 2 when 60 does not hold, so game time = real time
 fps_target	60
+# A late frame is shown late rather than held a second vsync (the game still steps by the vsyncs that passed, so its speed stays right): on a MacBook Air M4 the bridge in Kokiri
+# Forest runs at about 52 fps this way (frame p50 19.5 ms), against a steady 30 with the hold; the launcher's Hold frames when late turns it back on
+fps_hold	off
 
 # ---- Graphics ----
 # agl wraps its clears in render conditions on Donkey Kong Bananza and Splatoon Raiders; the same library here

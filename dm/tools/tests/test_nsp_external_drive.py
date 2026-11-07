@@ -4,6 +4,7 @@ import errno
 import importlib.util
 import os
 from pathlib import Path
+import re
 import shutil
 import struct
 import tempfile
@@ -18,10 +19,19 @@ nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
 APP = 0x010020D01AD24000
 
 
-def pfs0(path, names):   # a PFS0 holding empty files with these names (enough for title_of)
+def pfs0(path, names):   # a PFS0 holding empty files with these names
     strs = b''.join(n.encode() + b'\0' for n in names); ent, o = b'', 0
     for n in names: ent += struct.pack('<QQII', 0, 0, o, 0); o += len(n) + 1
     path.write_bytes(b'PFS0' + struct.pack('<III', len(names), len(strs), 0) + ent + strs)
+
+def meta(tid, ver=0):   # the name of a stand-in meta NCA that says what the package's content meta says: fake_contents reads it back
+    kind = 'Application' if tid & 0xFFF == 0 else 'Patch' if tid & 0xFFF == 0x800 else 'AddOnContent'
+    return f'{kind}-{tid:016x}-{ver}.cnmt.nca'
+
+
+def fake_contents(paths):   # stands in for package_reader's contents (nx_extract --contents): the content metas its stand-in meta NCAs name
+    return {p: [(k, int(t, 16), int(v)) for k, t, v in re.findall(r'(\w+)-([0-9a-f]{16})-(\d+)\.cnmt\.nca', p.read_bytes().decode('latin-1'))] for p in paths}
+
 
 
 class ExternalDrive(unittest.TestCase):
@@ -30,11 +40,11 @@ class ExternalDrive(unittest.TestCase):
         cm = mock.patch.object(nsp, 'say', lambda m: None); cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
 
     def test_scan_skips_appledouble(self):
-        base = self.tmp / f'Game [{APP:016X}][v0].nsp'; pfs0(base, [f'{APP:016x}0000000000000011.tik'])
-        upd = self.tmp / f'Update [{APP | 0x800:016X}].nsp'; pfs0(upd, [])
+        base = self.tmp / f'Game [{APP:016X}][v0].nsp'; pfs0(base, [meta(APP)])
+        upd = self.tmp / f'Update [{APP | 0x800:016X}].nsp'; pfs0(upd, [meta(APP | 0x800, 65536)])
         for p in (base, upd): (self.tmp / ('._' + p.name)).write_bytes(b'\0\x05\x16\x07' + b'\0' * 4092)   # what macOS writes: 4 KB, no PFS0
         for ext in ('xci', 'nsz', 'xcz'): (self.tmp / f'._Other [{APP | 0x800:016X}].{ext}').write_bytes(b'\0' * 4096)
-        app, fam = nsp.scan_nsps(self.tmp)   # with the `._` copies this raised (more than one game) or listed them as updates
+        app, fam = nsp.scan_nsps(self.tmp, fake_contents)   # with the `._` copies this raised (more than one game) or listed them as updates
         self.assertEqual(app, APP)
         self.assertEqual(fam['base'], base)
         self.assertEqual([p for _, p in fam['updates']], [upd])

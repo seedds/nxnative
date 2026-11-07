@@ -102,7 +102,7 @@ def _members(comps):
 
 def to_stage(msl, i):
     """The translated kernel as the object function main0 (kind 'ts'), or the mesh functions main0 and main0_z (kind 'ms': the two depth conventions, as dmsh_build.py vs_depth gives a
-    vertex shader, near = -w and near = 0)."""
+    vertex shader, near = -w and near = 0). i['pad'] names vertex output locations the SPH does not enable, written as (0, 0, 0, 1) for the pixel shader that reads them."""
     kind = i['kind']
     m = _KERNEL.search(msl)
     if not m: raise ValueError(f'{kind}: no kernel main0 starting with its stage memory')
@@ -140,6 +140,7 @@ def to_stage(msl, i):
     stride = max(len(vertex) + len(primitive), 1) * BLOCK   # words of an attribute block
     word = lambda comps, n: [f'{mem}[b + {comps[k] * BLOCK}u]' if comps[k] is not None else None for k in range(4)]
     vm, pm = _members(vertex), {n: [c + len(vertex) if c is not None else None for c in v] for n, v in _members(primitive).items()}
+    for n in i.get('pad', ()): vm.setdefault(n, [None] * 4)   # locations its pixel shader reads and the SPH does not enable: (0, 0, 0, 1), as vs_pad gives a vertex shader (dmsh_build.py ms_pad)
     head += ('struct dm_vertex_t {\n    float4 position [[position]];\n' + ''.join(f'    float4 a{n} [[user(locn{n})]];\n' for n in vm if n is not None) + '};\n' +
              ('struct dm_prim_t {\n' + ''.join(f'    float4 p{n} [[user(locn{n})]];\n' for n in pm) + '};\n' if pm else '') +
              f'using dm_mesh_t = metal::mesh<dm_vertex_t, {"dm_prim_t" if pm else "void"}, {max_v}, {max_p}, metal::topology::triangle>;\n')

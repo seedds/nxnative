@@ -88,6 +88,13 @@ class Stage(unittest.TestCase):
         i = ms.info(control(7, payload=128, task=int(task), max_v=vertices, max_p=primitives, prim_at=0x80 if primitive else 0), area)
         return ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4), i), i
 
+    def test_padded_outputs(self):   # locations the pixel shader reads and the SPH does not enable (dmsh_build.py ms_pad): (0, 0, 0, 1), as vs_pad gives a vertex shader
+        area = sph(0xf0, b'\x30')
+        i = ms.info(control(7, payload=128, max_v=32, max_p=32), area); i['pad'] = [5]
+        src = ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4), i)
+        self.assertIn('    float4 a1 [[user(locn1)]];\n    float4 a5 [[user(locn5)]];\n', src)
+        self.assertEqual(src.count('v.a5 = float4(0.0, 0.0, 0.0, 1.0);'), 2)   # main0 and main0_z
+
     def test_task_launches_what_it_wrote(self):
         src, i = self.task(); out = ms.memory(i)[0][2] // 4
         self.assertIn('[[object]] void main0(', src)

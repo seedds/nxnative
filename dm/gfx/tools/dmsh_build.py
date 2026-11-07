@@ -714,7 +714,7 @@ def ps_libraries(key, msl, full):
         MTL.compile(t, msl, os.path.join(d, key + '_b.metallib'))
     return {}
 
-pc_of, loc = {}, {}
+pc_of, loc, stage_of = {}, {}, {}
 MAP_ROWS, MAP_CONFLICT_ROWS = {}, {}
 for raw in open(MAP, 'rb'):
     c = raw.rstrip(b'\n').split(b'\t')
@@ -724,7 +724,7 @@ for raw in open(MAP + '.conflicts.tsv', 'rb'):
     if len(c) > 1 and not raw.startswith((b'#', b'dm_')): MAP_CONFLICT_ROWS.setdefault(c[0].decode(), raw)
 for ln in open(MAP):
     c = ln.rstrip('\n').split('\t')
-    if len(c) > 4 and c[0].endswith('.bin'): pc_of.setdefault(c[3], c[4]); loc.setdefault(c[3], (c[0], int(c[1])))
+    if len(c) > 4 and c[0].endswith('.bin'): pc_of.setdefault(c[3], c[4]); loc.setdefault(c[3], (c[0], int(c[1]))); stage_of.setdefault(c[3], c[2])
 for ln in open(MAP + '.conflicts.tsv'):
     c = ln.rstrip('\n').split('\t')
     if len(c) > 1 and not ln.startswith('#') and not ln.startswith('dm_') and c[0] in pc_of: pc_of[c[0]] = c[1]
@@ -1215,6 +1215,17 @@ def load_pairs(game, package):
 
 PAIRS = load_pairs(GAME, dm_dir)
 
+def mesh_pairs(stage_of, pc_of):
+    """Mesh key → the pixel keys of its BNSH variation, from the map's source column (the '#varN' the split pairs a vertex shader with its pixel shader by): the pair tables hold vertex / pixel
+    pairs only, so a mesh shader never had its pixel shader's inputs padded (ms_pad). Ocarina of Time's foliage mesh shaders a203347bb7bdbd03 and 3a6340a04bf09797 enable the position alone
+    while their pixel shaders read locn5: Metal refused the pipelines and every draw of theirs was skipped"""
+    by_var = collections.defaultdict(lambda: collections.defaultdict(set))
+    for k, st in stage_of.items():
+        if st in ('mesh', 'pixel') and '#var' in pc_of.get(k, ''): by_var[pc_of[k]][st].add(k)
+    return {m: set(v['pixel']) for v in by_var.values() if v['mesh'] and v['pixel'] for m in v['mesh']}
+MESH_PAIRS = mesh_pairs(stage_of, pc_of)
+for m, ps in MESH_PAIRS.items(): PAIRS[m] |= ps   # built after their pixel shaders, keyed with them (shader_key, pair_keyed), as vertex shaders with pairs are
+
 def build_keys(want, locations, pairs):
     """A partial vertex build needs its available paired pixel shaders before padding; a full build keeps every shader."""
     return sorted(set(want) | {ps for vs in want for ps in pairs.get(vs, ()) if ps in locations}) if want else sorted(locations)
@@ -1234,6 +1245,16 @@ def vs_pad(key, src):
     src = src[:j] + ''.join(f'\n    float4 dm_pad{l} [[user(locn{l})]];' for l in miss) + src[j:]
     k = src.find('main0_out out = {};') + len('main0_out out = {};')
     return src[:k] + ''.join(f'\n    out.dm_pad{l} = float4(0.0, 0.0, 0.0, 1.0);' for l in miss) + src[k:], miss
+
+def ms_pad(key, mesh):
+    """The vertex output locations a mesh shader's pixel shaders read and its SPH does not enable, for dmsh_meshstage.to_stage to write as (0,0,0,1): Metal links a mesh pipeline as it does a
+    vertex one, every pixel shader input an output of the stage before (vs_pad). Pairs whose pixel MSL cannot be read are skipped"""
+    want = set()
+    for ps in PAIRS.get(key, ()):
+        data = output('mac', ps + '_b.metal')
+        if data is not None: want |= {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', data.decode())}
+    written = {n for n, _ in mesh['vertex'] if n is not None} | {n for n, _ in mesh['primitive']}
+    return sorted(want - written)
 
 def vs_init(src):
     """Every vertex shader output starts as (0,0,0,1) before the translated body runs: on the hardware that is what an unwritten component reads. The translator's source starts with out = {}, all zeros;
@@ -1604,6 +1625,7 @@ def finish(key, w, j, c1):
     mesh = j.get('mesh_stage')
     if mesh:   # the kernel as the Metal object or mesh function (dmsh_meshstage.py)
         if mesh.get('refused'): return 'mesh stage failed', mesh['refused'], None
+        if mesh['kind'] == 'ms' and PAIRS.get(key): mesh['pad'] = ms_pad(key, mesh)   # outputs its pixel shader reads but the SPH does not enable get (0,0,0,1) (see ms_pad)
         try: src = dmsh_meshstage.to_stage(src, mesh); open(msl, 'w').write(src)
         except ValueError as e: return 'mesh stage failed', str(e)[:160], None
     elif j['stage'] == 'cs':
@@ -1611,7 +1633,7 @@ def finish(key, w, j, c1):
         try: src, spill = tg_spill(src)   # shared memory past Metal's 32 KB in a device buffer (see tg_spill)
         except ValueError as e: return 'shared memory rewrite failed', str(e)[:160], None
         if spill: open(msl, 'w').write(src)
-    pad = []
+    pad = list(mesh.get('pad', [])) if mesh else []
     if j['stage'] == 'vs':   # outputs start as (0,0,0,1) (see vs_init); no point size beside a layer output (see vs_layer); the base instance from Metal (see vs_base_instance)
         src = vs_base_instance(vs_layer(vs_init(src))); open(msl, 'w').write(src)
     if j['stage'] == 'vs' and PAIRS.get(key):   # outputs the pixel shader reads but the vertex shader does not write get (0,0,0,1) (see vs_pad)

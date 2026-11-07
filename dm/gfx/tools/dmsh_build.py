@@ -436,6 +436,9 @@ def mac_compile(msl, air, lib):   # same interface as ios_metal.compile; the pre
 #   c0 base + 0x10 r: storage buffer r (64-bit address, 32-bit size), base C0_SSBO_<stage> (the hull / domain stages' bases were never seen)
 TEX_BASE, IMG_BASE, IMG_SLOTS, SEPTEX_BASE, SEPTEX_SLOT0, SAMP_BASE = abi.C2_TEX, abi.C2_IMG, abi.C2_IMG_SLOTS, abi.C2_SEPTEX, abi.SEPTEX_SLOT0, abi.C2_SAMP
 SSBO = {'vs': abi.C0_SSBO_VS, 'cs': abi.C0_SSBO_CS, 'gs': abi.C0_SSBO_GS, 'ps': abi.C0_SSBO_PS, 'ts': abi.C0_SSBO_TS, 'ms': abi.C0_SSBO_MS}
+# A mesh shader's table is where its compiler put it, by the slot the shader was compiled for: 0x710 for the mesh stage's own, 0x210 (C0_SSBO_MS_HULL) for the hull stage's, which
+# NVN2 gives a mesh shader in an RE Engine program (PRAGMATA's 539 mesh shaders: SDF hull slot, control +0x56 = 7, storage reads at 0x210..0x280; read at 0x710, all of them had no
+# slot on every storage buffer and the host bound slot 0 for each). reflect takes the one the shader reads; the host fills both for the mesh stage (nvn_mtl.m, the c0 fill)
 
 def record_index(path):   # → (an open descriptor, the offsets of the package's records and its end): record k is bytes offsets[k]..offsets[k + 1]
     # Scanned through a read-only mapping that is closed again, so no package stays in this process. Pokopia's ps_rdb.bin (4.25 GB) read and cut into its 105,118
@@ -1116,6 +1119,9 @@ def reflect(key, stage, msl, res):
     # Storage buffers: SPIR-V binding number → c0 offset → NVN storage buffer slot (c0 base SSBO[stage], C0_ROW bytes per slot)
     base = SSBO.get(stage)   # storage buffer base for the hull / domain stages has not been measured: a storage buffer there is reported with no slot
     sb_sorted = sorted(res['sbufs'], key=lambda b: b['binding'])
+    offs = [b['cb_offset'] * 4 for b in sb_sorted if b['cb_slot'] == 0]
+    hull = abi.C0_SSBO_MS_HULL; ms_hull = stage == 'ms' and offs and all(hull <= o < hull + abi.C0_ROW * abi.C0_SSBO_SLOTS for o in offs)
+    base = hull if ms_hull else SSBO.get(stage)   # storage buffer base for the hull / domain stages has not been measured: a storage buffer there is reported with no slot
     for e in binds:
         if e['kind'] == abi.KIND_SBUF:
             b = sb_sorted[e['index']] if e['index'] < len(sb_sorted) else None
@@ -1152,7 +1158,7 @@ SAMPLE_ROWS = [(abi.C0_SAMPLE_TABLE, abi.C0_SAMPLE_TABLE + abi.C0_SAMPLE_BYTES),
 def unfillable(dr, stage):
     bad = []
     for bank, d in dr.items():
-        fill = DRV_FILL[int(bank)] + (SAMPLE_ROWS if bank == '0' and stage == 'ps' else []) + ([(SSBO[stage], SSBO[stage] + abi.C0_ROW * abi.C0_SSBO_SLOTS)] if bank == '0' and stage in ('ts', 'ms') else [])
+        fill = DRV_FILL[int(bank)] + (SAMPLE_ROWS if bank == '0' and stage == 'ps' else []) + ([(b, b + abi.C0_ROW * abi.C0_SSBO_SLOTS) for b in ((SSBO[stage], abi.C0_SSBO_MS_HULL) if stage == 'ms' else (SSBO[stage],))] if bank == '0' and stage in ('ts', 'ms') else [])
         # a computed index into c2 reads one of its handle tables, which the replay layer fills whole (nvn_mtl.m DRV2: EA SPORTS FC 27's lights read the separate texture words
         # at 0x168 + 8i to test each light's handle); c0 is filled only in its tables and words above, so a computed index there may read what the replay does not write.
         # The one computed c0 index known is GLSLC's sample position lookup in a pixel shader: a byte of the table at 0x620, at an index made of the sample index (PIXLD.MYINDEX)

@@ -289,6 +289,13 @@ class StageMemory(Translated):
     def test_a_byte_goes_through_its_word_atomically(self):   # neighbouring threads write neighbouring bytes; the shader build makes the helper's loop one byte store (test_dmsh_shared_store.py)
         self.assertIn('atomic_compare_exchange', self.msl(self.INDEX))
 
+    def test_vertex_records_go_to_their_soa_word(self):   # a mesh shader's mode 0xb8 (PRAGMATA 6adf14e9a4100082): records of 6 words from 0x200, 128 vertices
+        mesh = self.translate(inst(*self.PAYLOAD) + inst(*EXIT), stage_memory=[0, 0x10, 0x120, 0x400, 0x200, 6, 128 * 24], shared=0x800)
+        self.assertRegex(mesh, r'< 3072u')       # inside the 128 * 24 bytes of records only
+        self.assertRegex(mesh, r'\* 43691u?\b')   # v = w * ceil(2^18 / 6) >> 18
+        self.assertRegex(mesh, r'\* 768u?\b')     # a block of 32 vertices: 6 components of 0x80 bytes
+        self.assertNotRegex(self.msl(self.PAYLOAD), r'43691')   # a task's mode 0xb8 is its payload, as before
+
     def test_outside_a_task_or_mesh_shader_it_is_refused(self):
         with self.assertRaises(AssertionError) as e: self.translate(inst(*self.PAYLOAD) + inst(*EXIT))
         self.assertIn('outside a task or mesh shader', str(e.exception))

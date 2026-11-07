@@ -9934,7 +9934,9 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
                 if (bank == 0) {
                     int base = c0_ssbo_base(nvn_stage);
                     if (base < 0) RED_ONCE(45, "stage %d shader reads driver segment c0; the storage buffer table base was never measured", nvn_stage);
-                    else for (int r = 0; r < DMSH_C0_SSBO_SLOTS; r++) { uint64_t a = S.ssbo[nvn_stage][r].addr; uint32_t n = (uint32_t)S.ssbo[nvn_stage][r].size; memcpy(d + base + DMSH_C0_ROW * r, &a, 8); memcpy(d + base + DMSH_C0_ROW * r + 8, &n, 4); }
+                    else for (int r = 0; r < DMSH_C0_SSBO_SLOTS; r++) { uint64_t a = S.ssbo[nvn_stage][r].addr; uint32_t n = (uint32_t)S.ssbo[nvn_stage][r].size; memcpy(d + base + DMSH_C0_ROW * r, &a, 8); memcpy(d + base + DMSH_C0_ROW * r + 8, &n, 4);
+                        // a mesh shader compiled for the hull stage's slot reads its table at the hull stage's place (PRAGMATA; dmsh_build.py ssbo_base): the mesh stage's c0 is its own, so both are filled
+                        if (nvn_stage == 4) { memcpy(d + DMSH_C0_SSBO_MS_HULL + DMSH_C0_ROW * r, &a, 8); memcpy(d + DMSH_C0_SSBO_MS_HULL + DMSH_C0_ROW * r + 8, &n, 4); } }
                     // Compute also has the dispatch size at 0x200 (x, y, z) and the uniform buffer table at 0x210 + 16 r (address 64 bits, size 32 bits), ending where the storage buffer table
                     // starts (0x310). Measured on Link's Awakening's light culling (light_culling_compute.bfsha): tile index = workgroup y × c0[0x200] + workgroup x, and c0[0x280] is
                     // the address of uniform buffer 7 (the light parameters, 144 bytes per light); Breath of the Wild's compute shaders read 0x280 / 0x290 / 0x2d0 of the same table

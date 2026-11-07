@@ -2,6 +2,7 @@
 and the script asks for no keys. The NUPs are written here (SPEC v1, https://github.com/a55uka/nup). The run stops at the prerequisite check; no game files, keys or Xcode needed."""
 import hashlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import struct
@@ -226,7 +227,7 @@ class Survey(Base):
         with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), mock.patch.object(nsp, 'WORK_DIR', ''), mock.patch.object(nsp, 'PROD_KEYS', ''), \
              mock.patch.object(nsp, 'survey', side_effect=survey), mock.patch.object(nsp, 'check_capstone'), mock.patch.object(nsp.shutil, 'which', return_value='/usr/bin/dotnet'), \
              mock.patch.object(nsp, 'say'), mock.patch.object(nsp, 'build_nx_extract', side_effect=AssertionError('built nx_extract')), \
-             mock.patch.object(nsp, 'ask', side_effect=AssertionError('asked for something')), mock.patch.object(nsp, 'package_title_reader', side_effect=AssertionError('read a package')):
+             mock.patch.object(nsp, 'ask', side_effect=AssertionError('asked for something')), mock.patch.object(nsp, 'package_reader', side_effect=AssertionError('read a package')):
             with self.assertRaises(Stop): nsp.main(nsp.parse_args([str(self.path), '--survey-only']))
         self.assertEqual(seen['app'], NEW)
         self.assertIsNone(seen['base'])
@@ -243,6 +244,101 @@ class Survey(Base):
         self.assertEqual(seen, ['cd' * 16, 'ab' * 16])
 
 
+class ImageReuse(Base):
+    def cached(self):
+        n = self.open()
+        _, base, versions, _ = pack_nup.scan(n)
+        directory = pack_nup.romfs_of(versions[VER], base)
+        img = self.dir / 'cached.img'
+        pack_nup.pack(n, directory, img, say=lambda s: None)
+        return n, directory, img
+
+    def invalidate(self, img):
+        stamp = Path(str(img) + '.inputs.json')
+        row = json.loads(stamp.read_text())
+        row['source'] = 'previous-packer'
+        row['image'] = [999] + row['image']
+        stamp.write_text(json.dumps(row))
+
+    def test_old_five_field_stamp_is_verified_and_migrated_without_unpacking(self):
+        n, d, img = self.cached()
+        self.invalidate(img)
+        before = romfs_image.file_identity(img)
+        with mock.patch.object(n, 'copy', side_effect=AssertionError('unpacked')), \
+             mock.patch.object(romfs_image, 'write', side_effect=AssertionError('rewrote image')):
+            self.assertEqual(pack_nup.pack(n, d, img, say=lambda s: None), 'verified')
+        self.assertEqual(romfs_image.file_identity(img), before)
+        row = json.loads(Path(str(img) + '.inputs.json').read_text())
+        self.assertEqual(row['image'], before)
+        with mock.patch.object(pack_nup, 'verified', side_effect=AssertionError('verified twice')):
+            self.assertEqual(pack_nup.pack(n, d, img, say=lambda s: None), 'kept')
+
+    def test_image_of_an_older_layout_is_packed_again(self):   # the check compares romfs_image.layout's bytes, so a format change still repacks
+        n, d, img = self.cached()
+        self.invalidate(img)
+        layout = romfs_image.layout
+        def newer(ents, end):
+            head, idx = layout(ents, end)
+            return head, idx + b'\0'
+        with mock.patch.object(romfs_image, 'layout', newer):
+            self.assertIsNone(pack_nup.verified(n, pack_nup.entries(n, d), str(img)))
+            self.assertEqual(pack_nup.pack(n, d, img, say=lambda s: None), 'packed')
+
+    def test_ctime_only_change_reuses_after_payload_verification(self):
+        n, d, img = self.cached()
+        before = img.read_bytes()
+        os.chmod(img, 0o600)
+        with mock.patch.object(n, 'copy', side_effect=AssertionError('unpacked')):
+            pack_nup.pack(n, d, img, say=lambda s: None)
+        self.assertEqual(img.read_bytes(), before)
+
+    def test_bad_payload_rejected_even_if_size_and_mtime_match(self):
+        n, d, img = self.cached()
+        good = img.read_bytes()
+        st = img.stat()
+        with img.open('r+b') as f:
+            f.seek(romfs_image.HEAD.size)
+            b = f.read(1)
+            f.seek(romfs_image.HEAD.size)
+            f.write(bytes([b[0] ^ 1]))
+        os.utime(img, ns=(st.st_atime_ns, st.st_mtime_ns))
+        self.invalidate(img)
+        self.assertIsNone(pack_nup.verified(n, pack_nup.entries(n, d), str(img)))
+        with mock.patch.object(n, 'copy', wraps=n.copy) as copy:
+            self.assertEqual(pack_nup.pack(n, d, img, say=lambda s: None), 'packed')
+        self.assertGreater(copy.call_count, 0)
+        self.assertEqual(img.read_bytes(), good)
+
+    def test_wrong_index_or_truncated_image_is_not_reused(self):
+        n, d, img = self.cached()
+        good = img.read_bytes()
+        for data in [good[:-1], good[:-1] + bytes([good[-1] ^ 1])]:
+            with self.subTest(size=len(data)):
+                img.write_bytes(data)
+                self.assertIsNone(pack_nup.verified(n, pack_nup.entries(n, d), str(img)))
+
+    def test_image_changed_during_verification_is_rejected(self):
+        n, d, img = self.cached()
+        before = romfs_image.file_identity(img)
+        after = before.copy()
+        after[-1] += 1
+        with mock.patch.object(romfs_image, 'file_identity', side_effect=[before, after]):
+            self.assertIsNone(pack_nup.verified(n, pack_nup.entries(n, d), str(img)))
+
+    def test_extract_stage_reports_verified_reuse(self):
+        n = self.open()
+        app, base, versions, _ = pack_nup.scan(n)
+        ex = self.dir / 'extract'
+        version = 'v' + str(VER)
+        dst = ex / version
+        pack_nup.pack_version(n, versions[VER], base, app, dst, say=lambda s: None)
+        self.invalidate(dst / 'RomFS.img')
+        with mock.patch.object(nsp, 'PROG') as progress, \
+             mock.patch.object(romfs_image, 'write', side_effect=AssertionError('rewrote image')):
+            self.assertEqual(nsp.extract_nup(ex, version, versions[VER], base, app, n), dst)
+        self.assertIn('reused (image checked)', progress.end.call_args.args[0])
+
+
 class Pack(Base):
     def out(self): return self.dir / 'out'
 
@@ -254,7 +350,7 @@ class Pack(Base):
         self.assertIsNone(base)
         self.assertEqual((app, sorted(vers), sorted(dlc)), (TID, [VER, VER + 1], [TID + 0x1001]))
         app, fam = nsp.scan_nup(self.path); self.addCleanup(fam['nup'].close)
-        have = nsp.nsp_versions(fam, {})
+        have = nsp.nsp_versions(fam)
         self.assertEqual(set(have), {f'v{VER}', f'v{VER + 1}'})
         with mock.patch.object(nsp, 'say'):
             picks = nsp.pick_nsps(fam, have, sorted(have))
@@ -296,7 +392,7 @@ class Pack(Base):
                     app, base, vers, _ = pack_nup.scan(n)
                     self.assertIsNone(base)
                     self.assertEqual(app, TID)
-                    self.assertEqual(set(nsp.nsp_versions({'base': base, 'updates': sorted(vers.items())}, {})), {f'v{VER}'})
+                    self.assertEqual(set(nsp.nsp_versions({'base': base, 'updates': sorted(vers.items())})), {f'v{VER}'})
                     pack_nup.pack_version(n, vers[VER], base, app, self.out(), say=lambda s: None)
                     self.assertIn('dir/marker', romfs_image.read_index(self.out() / 'RomFS.img'))
                     self.assertEqual((self.out() / 'ExeFS/main').read_bytes(), b'code')
@@ -416,7 +512,7 @@ class Pack(Base):
         runs = []
         def extract(argv, log, **kw): runs.append(argv); Path(argv[4]).parent.mkdir(parents=True, exist_ok=True); Path(argv[4]).write_bytes(b'from the NSP')
         nsp_fam, nup_fam = {'dlc': [(TID + 0x1001, 0, p)]}, {'dlc': [(t, None, k) for t, k in dlc.items()], 'nup': n}
-        with mock.patch.object(nsp, 'run', side_effect=extract), mock.patch.object(nsp, 'is_merged', return_value=False):
+        with mock.patch.object(nsp, 'run', side_effect=extract):
             for fam in (nsp_fam, nsp_fam, nup_fam): aoc = nsp.extract_aoc('nx', 'keys', REPO, work, app, fam, logs)
             self.assertEqual(len(runs), 1)   # reused while the NSPs and aoc/ are unchanged
             self.assertIn('dlcfile', romfs_image.read_index(aoc / '1.img'))
@@ -456,7 +552,7 @@ class Main(Base):
         with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), mock.patch.object(nsp, 'WORK_DIR', ''), mock.patch.object(nsp, 'PROD_KEYS', ''), \
              mock.patch.object(nsp, 'check_prereqs', side_effect=stop), mock.patch.object(nsp, 'say', side_effect=said.append), \
              mock.patch.object(nsp, 'check_versions_aarch64', side_effect=Stop), \
-             mock.patch.object(nsp, 'ask', side_effect=AssertionError('asked for something')), mock.patch.object(nsp, 'package_title_reader', side_effect=AssertionError('read a package')):
+             mock.patch.object(nsp, 'ask', side_effect=AssertionError('asked for something')), mock.patch.object(nsp, 'package_reader', side_effect=AssertionError('read a package')):
             with self.assertRaises(Stop): nsp.main(nsp.parse_args([str(target)] + (['--package', package] if package else [])))
         return Path(seen['DM_ROOT']), said
 

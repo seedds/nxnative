@@ -44,13 +44,13 @@ class ShaderCache(unittest.TestCase):
                        XC=['--msl'], MAC_RECORD='mac flags', IOSOUT=None, TARGETS={'mac'},
                        ios_metal=types.SimpleNamespace(RECORD='ios flags'), METAL_FP='tested Metal and SDK',
                        FACTS={}, MAP_ROWS={}, MAP_CONFLICT_ROWS={}, CODE_FP='source', PROFILE_ROWS=b'', PAIRS={},
-                       DUAL_WANT=set(), BF_WANT=set(), BF_STATS=collections.Counter(), STORE=shader_cache.Store(root / 'cas.db'), out=str(root / 'out'),
+                       DUAL_WANT=set(), BF_WANT=set(), STORE=shader_cache.Store(root / 'cas.db'), out=str(root / 'out'),
                        CHAIN='test-chain', clone=shutil.copyfile, shader_rule_source=lambda name: b'',
                        STAGE='stage/test', want=set(), OUT_KEY=re.compile(r'([0-9a-f]{16})_b'), OLD_IMAGE={}, shader_lib=shader_lib, romfs=romfs, shutil=shutil,
                        STAMP_BEFORE=None, INPUTS='inputs')
         (root / 'out').mkdir()
         names = {'tool_fingerprint', 'shader_key', 'cache_path', 'cache_outputs', 'restore_cache', 'publish_cache', 'atomic_json', 'cache_meta_path',
-                 'bf_digest', 'bf_cache_root', 'bf_cache_restore', 'vs_pad', 'label_dir', 'output', 'commit', 'publish_library'}
+                 'vs_pad', 'partner_inputs', 'label_dir', 'output', 'commit', 'publish_library'}
         tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
         self.tree = tree
         nodes: list[ast.stmt] = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
@@ -115,15 +115,6 @@ class ShaderCache(unittest.TestCase):
         self.assertEqual(self.digest(), listed)
         self.ns['DUAL_WANT'] = set()
         self.assertEqual(self.digest(), original)
-
-    def test_fetch_variants_do_not_restore_override_libraries(self):
-        self.ns['METAL_FP'] = 'override Metal and SDK'
-        old = self.ns['bf_digest']('same fetch MSL', 'key')
-        d = self.ns['bf_cache_root'](old)
-        self.ns['STORE'].put(d + '/metal', b'same fetch MSL'); self.ns['STORE'].put(d + '/mac.metallib', b'untested variant')
-        self.ns['METAL_FP'] = 'tested Metal and SDK'
-        current = self.ns['bf_digest']('same fetch MSL', 'key')
-        self.assertFalse(self.ns['bf_cache_restore']('key', current, {}, str(Path(self.tmp.name) / 'fetch.metal')))
 
     def test_unchanged_compiler_reuses_key(self):
         self.assertEqual(self.digest(), self.digest())
@@ -440,21 +431,33 @@ class MetalPrefill(unittest.TestCase):
         notes = self.cache.fill(str(self.old))
         self.assertEqual(self.cache.stats['mac', 'filled'], 2, notes)
 
-    def test_compile_split_keeps_both_pieces(self):
+    def test_a_library_cut_with_a_readable_tile_version_does_not_prefill(self):   # main0_f came from the same compile as its base (dmsh_fetch.fold)
+        self.earlier_libraries(self.cache.ident['mac'].hex())
+        (self.old / f'{2:016x}_b.metallib').write_bytes(b'CUT FROM ANOTHER SOURCE'); (self.old / f'{2:016x}_bf.metallib').write_bytes(b'TILE')
+        notes = self.cache.fill(str(self.old))
+        self.assertEqual(self.cache.stats['mac', 'filled'], 2, notes)
+
+    def test_compile_split_keeps_every_piece(self):
         msl = self.root / 'unit.metal'; msl.write_bytes(b'UNIT'); a, b = self.root / 'a.metallib', self.root / 'b.metallib'
         split = lambda lib: (lib[:6], lib[6:])
-        self.cache.compile_split('mac', str(msl), str(a), str(b), split)
+        self.cache.compile_split('mac', str(msl), [str(a), str(b)], split)
         self.assertEqual((a.read_bytes(), b.read_bytes()), (b'TESTED', b' UNIT'))
         self.assertEqual(self.cache.stats['mac', 'compiled'], 1)
         a.unlink(); b.unlink()
-        self.cache.compile_split('mac', str(msl), str(a), str(b), lambda lib: self.fail('a second compile'))
+        self.cache.compile_split('mac', str(msl), [str(a), str(b)], lambda lib: self.fail('a second compile'))
         self.assertEqual((a.read_bytes(), b.read_bytes()), (b'TESTED', b' UNIT'))
         self.assertEqual(self.cache.stats['mac', 'reused'], 1)
+        c = self.root / 'c.metallib'; msl.write_bytes(b'FOLDED UNIT')   # three pieces: base, side and readable-tile libraries
+        self.cache.compile_split('mac', str(msl), [str(a), str(b), str(c)], lambda lib: (lib[:6], lib[6:13], lib[13:]))
+        a.unlink(); b.unlink(); c.unlink()
+        self.cache.compile_split('mac', str(msl), [str(a), str(b), str(c)], lambda lib: self.fail('a second compile'))
+        self.assertEqual((a.read_bytes(), b.read_bytes(), c.read_bytes()), (b'TESTED', b' FOLDED', b' UNIT'))
 
     def test_compile_split_failure_leaves_nothing(self):
         msl = self.root / 'unit.metal'; msl.write_bytes(b'UNIT'); a, b = self.root / 'a.metallib', self.root / 'b.metallib'
         def refuse(lib): raise ValueError('not a library')
-        with self.assertRaises(ValueError): self.cache.compile_split('mac', str(msl), str(a), str(b), refuse)
+        with self.assertRaises(ValueError): self.cache.compile_split('mac', str(msl), [str(a), str(b)], refuse)
+        with self.assertRaises(ValueError): self.cache.compile_split('mac', str(msl), [str(a), str(b)], lambda lib: (lib,))   # fewer pieces than libraries
         self.assertEqual(sorted(p.name for p in self.root.glob('a.metallib*')), [])
         self.assertFalse(b.exists()); self.assertEqual(self.cache.stats['mac', 'compiled'], 0)
 

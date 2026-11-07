@@ -90,13 +90,32 @@ def frame_step(ctx):
         emit(w)
     emit(B(here(), 0x166dc6c))
     fs_put(0x166dc60, [B(0x166dc60, start)], 'KIDS frame task: the frame-rate object\'s steps × its fps × vsyncs per update / 60 (state page target fps; 0 = as the game sets them)')
+    # In-engine cutscenes (events) count whole 30 fps frames, one per update. While an event plays, the scene's update (main+0x857510, called from the scene update's
+    # caller at main+0x8c39a8) keeps the cutscene's frame ([sp,#0x14]: property 0x91a41ad2, which the event timeline reads at main+0xb0be68 as its target frame) and
+    # its frames left ([sp,#0x10], counting down from the cutscene's length; the frame advances only while two or more are left). Each update adds 1 to the frame
+    # (main+0x857d7c) and takes 1 from the frames left (main+0x857da0), whatever the update's length, so at a 60 fps cap the cameras and animations ran at twice
+    # their speed while voices and subtitles kept real time. Both counters now move on every other update at a 60 fps cap (the state page's vsyncs per update = 1,
+    # on even counted vsyncs, +0x30, which the stub at main+0x166dc60 steps once per update); at a 30 fps cap or with the frame step off they move on every update,
+    # as the game does. Moving only the frame froze the cutscene halfway: its frames left ran out first. x16, x17 and the flags are dead at both sites
+    fs_site(0x857d7c, '4a050011'); fs_site(0x857da0, '4a050051')
+    for site, step, what in ((0x857d7c, 0x1100054a, 'frame'), (0x857da0, 0x5100054a, 'frames left')):
+        start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
+        for w in (0xb9402a11,   # ldr w17,[x16,#0x28]    vsyncs per update (1 at a 60 fps cap, 2 at 30, 0 off)
+                  0x7100063f,   # cmp w17,#1
+                  0x54000061,   # b.ne step (+3)
+                  0xf9401a11,   # ldr x17,[x16,#0x30]    vsyncs counted
+                  0x37000051,   # tbnz w17,#0,back (+2)  odd: not on this update
+                  step):        # step: add / sub w10,w10,#1 (the original)
+            emit(w)
+        emit(B(here(), site + 4))                        # back
+        fs_put(site, [B(site, start)], f"event cutscene's {what}: stepped on every other update at a 60 fps cap (state page vsyncs per update; 30 fps frames, as on the Switch)")
 
 FRAME_STEP = {'c3cf52bf2b05d7310884971b50bcccb8': frame_step}
 
 # How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
 # purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
 BINDING = [
-    {'what': '60 fps frame step: the KIDS frame task and frame-rate block', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
+    {'what': '60 fps frame step: the KIDS frame task, frame-rate block and event cutscene counters', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
      'why': "the game's own frame code; only the host's frame-step state page is shared. Fire Emblem: Three Houses and Taiko Risshiden V DX run on KTGL too, with other frame code",
      'blocked': 'frame-step stubs have no function-matched form yet'},
 ]

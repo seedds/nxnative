@@ -97,10 +97,10 @@ class Stage(unittest.TestCase):
         i = ms.info(control(6), bytes(0x80))
         return ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][2] // 4 + 1), i), i
 
-    def mesh(self, task=False, primitive=False, vertices=128, primitives=64, pos=0xf0, verts=0, pad=()):
+    def mesh(self, task=False, primitive=False, vertices=128, primitives=64, pos=0xf0, verts=0, reads=None):
         area = sph(pos, b'\x30') + (sph(0, b'\x01') if primitive else b'')
         i = ms.info(control(7, payload=128, task=int(task), max_v=vertices, max_p=primitives, prim_at=0x80 if primitive else 0, verts=verts), area)
-        return ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4), i, pad), i
+        return ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4), i, reads), i
 
     def test_task_launches_what_it_wrote(self):
         src, i = self.task(); out = ms.memory(i)[0][2] // 4
@@ -158,11 +158,27 @@ class Stage(unittest.TestCase):
         self.assertIn('for (uint n = gl_LocalInvocationID.x; n < np * 1u; n += 32u)', src)
 
     def test_pad_unwritten_pixel_inputs(self):   # Ocarina of Time's foliage point mesh 3a6340a04bf09797 writes no generic output, its pixel shader 2a7c48d595feaaeb reads locn5
-        src = self.mesh(primitive=True, pad={0, 1, 5})[0]   # 1 is a vertex output and 0 a primitive output: only 5 is padded, as (0,0,0,1)
+        src = self.mesh(primitive=True, reads={0: 1, 1: 1, 5: 0xf})[0]   # 1 is a vertex output and 0 a primitive output: only 5 is padded, as (0,0,0,1)
         self.assertIn('    float4 dm_pad5 [[user(locn5)]];\n};', src)
         self.assertIn('        v.dm_pad5 = float4(0.0, 0.0, 0.0, 1.0);\n', src)
         self.assertEqual(src.count('[[user(locn1)]]'), 1); self.assertEqual(src.count('[[user(locn0)]]'), 1)
         self.assertNotIn('dm_pad', self.mesh(primitive=True)[0])
+
+    def test_outputs_as_wide_as_read(self):   # Ocarina of Time's 626fbf48041cb82b: 160 vertices, its float4s came to 35,840 bytes, past a Metal mesh's 32 KB
+        src = self.mesh(primitive=True, reads={0: 1, 1: 1, 5: 0x7})[0]
+        self.assertIn('    float2 a1 [[user(locn1)]];', src)   # x and y written, x read: what it writes
+        self.assertIn('v.a1 = float2(as_type<float>(_23[b + 128u]), as_type<float>(_23[b + 160u]));', src)
+        self.assertIn('    float dm_pad5 [[user(locn5)]];', src)   # no w read: Metal gives the missing y, z, w 0, the hardware's default for x, y and z
+        self.assertIn('v.dm_pad5 = 0.0;', src)
+        self.assertIn('    float p0 [[user(locn0)]];', src)
+        self.assertIn('    float4 a1 [[user(locn1)]];', self.mesh(primitive=True, reads={1: 0xf})[0])   # w read and not written: it must hold 1
+        self.assertIn('v.a1 = float4(as_type<float>(_23[b + 128u]), as_type<float>(_23[b + 160u]), 0.0, 1.0);', self.mesh(primitive=True, reads={1: 0xf})[0])
+        full = self.mesh(primitive=True)[0]   # partners not known: every output a float4, as the hardware starts it
+        self.assertIn('    float4 a1 [[user(locn1)]];', full); self.assertIn('    float4 p0 [[user(locn0)]];', full)
+
+    def test_pixel_reads(self):   # c5eb985e769e317f's input map: locn0 x (linear), 3 xyzw, 4 xyz
+        s = bytearray(0x80); s[0x18] = 0x03; s[0x18 + 3] = 0xaa; s[0x18 + 4] = 0x2a
+        self.assertEqual(ms.pixel_reads(bytes(s)), {0: 1, 3: 0xf, 4: 0x7})
 
     def local_word(self):   # a private variable spirv-cross initializes ahead of the stage memory: the last entry of a raw global memory lookup (GlobalToStorage.TryGenerateRawStorageOp)
         i = ms.info(control(7, payload=128, max_v=128, max_p=64), sph(0xf0, b'\x30'))
@@ -189,7 +205,7 @@ class Stage(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('xcrun') and subprocess.run(['xcrun', '-sdk', 'macosx', '-f', 'metal'], capture_output=True).returncode == 0, 'no Metal compiler')
     def test_compiles(self):
-        cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0], self.mesh(vertices=32, primitives=32, pos=0xf8, verts=1, pad={5})[0], self.local_word()]
+        cases = [self.task()[0], self.mesh()[0], self.mesh(task=True)[0], self.mesh(primitive=True)[0], self.mesh(vertices=32, primitives=32, pos=0xf8, verts=1, reads={5: 0x7})[0], self.mesh(primitive=True, reads={0: 1, 1: 0xf, 5: 0xf})[0], self.local_word()]
         with tempfile.TemporaryDirectory() as d:
             for n, src in enumerate(cases):
                 f = Path(d, f's{n}.metal'); f.write_text(src)

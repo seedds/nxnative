@@ -1,7 +1,10 @@
-// An uncompressed 2D texture the CPU wrote, over storage the GPU has not written (nvn_mtl.m tex_cpu_content): its storage is its content at first use, flushed or not, and a later CPU
-// write is uploaded. Once the GPU writes its storage it becomes a GPU texture with the content it has (cpu_unc_drop), and CPU writes are no longer uploaded. Over storage the GPU already
-// writes it stays a GPU texture, unless the CPU has rewritten that storage since. Mario Kart World's terrain patches: R16, RG8, RGBA8, R11G11B10F and RGBA16 in a CPU_CACHED pool, never
-// flushed, were zeros and every patch a flat plane. Ocarina of Time's terrain height and blend maps lie in the pool its normal maps are drawn into: zeros, and holes in the ground.
+// An uncompressed 2D texture the CPU wrote, in a pool the GPU has not written (nvn_mtl.m tex_cpu_content): its storage is its content at first use, flushed or not, and a later CPU write is
+// uploaded. At the pool's first GPU write it becomes a GPU texture with the content it has (cpu_unc_drop), and CPU writes are no longer uploaded. In a pool the GPU already writes it stays a
+// GPU texture. Mario Kart World's terrain patches: R16, RG8, RGBA8, R11G11B10F and RGBA16 in a CPU_CACHED pool, never flushed, were zeros and every patch a flat plane.
+// Exercise the pool-wide fallback. The richer dirty-upload profile path is covered by t_late_texture.
+#include "game_profile.h"
+#undef DM_GAME_TEX_DIRTY_UPLOAD
+#define DM_GAME_TEX_DIRTY_UPLOAD 0
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -26,6 +29,7 @@ static void fill(tex_t *t, void *mem, uint8_t v) {
     free(linear);
 }
 static uint8_t first_red(id<MTLTexture> image) {   // the red of texel (3, 5), read through a blit: the texture is private
+    CHECK("readback texture exists", image != nil); if (!image) return 0;
     static id<MTLCommandQueue> queue; if (!queue) queue = [g_dev newCommandQueue];
     id<MTLBuffer> out = [g_dev newBufferWithLength:4 options:MTLResourceStorageModeShared];
     if (!image || !out) { fprintf(stderr, "nothing to read back\n"); return 0; }

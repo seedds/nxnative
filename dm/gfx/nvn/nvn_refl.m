@@ -35,6 +35,51 @@ static int arr_len(NSString *ty, NSString **el) {
 
 // Whether a storage buffer binding may be written: current B reflection carries the translator's write flag ("rw"); old samples without it fall back to SPIRV-Cross's const device qualifier.
 static int sbuf_rw(NSDictionary *b) { id rw = b[@"rw"]; if (rw) return [rw boolValue]; id ty = b[@"msl_type"]; return !([ty isKindOfClass:[NSString class]] && [ty hasPrefix:@"const "]); }
+
+static int hp_uint(id x, uint32_t *out) {
+    if (![x isKindOfClass:[NSNumber class]] || CFGetTypeID((__bridge CFTypeRef)x) == CFBooleanGetTypeID() ||
+        CFNumberIsFloatType((__bridge CFNumberRef)x) || [x longLongValue] < 0 || [x unsignedLongLongValue] > UINT32_MAX) return 0;
+    *out = [x unsignedIntValue]; return 1;
+}
+static int hp_json(id j, nvn_refl *rf) {
+    nvn_hp_prog p = {0}; uint32_t version;
+    if (![j isKindOfClass:[NSDictionary class]] || !hp_uint(j[@"version"], &version) || version != NVN_HP_VERSION) return 0;
+    NSArray *nodes = j[@"nodes"], *pools = j[@"pools"];
+    if (![nodes isKindOfClass:[NSArray class]] || !nodes.count || nodes.count > NVN_HP_MAX_NODES ||
+        ![pools isKindOfClass:[NSArray class]] || !pools.count || pools.count > NVN_REFL_MAXB) return 0;
+    static NSString *const names[NVN_HP_OPS] = {@"const", @"cb", @"sb", @"neg_i", @"and", @"ne", @"not", @"add_i", @"add_u", @"select", @"shl_i", @"shr_u", @"min_u"};
+    static const unsigned arity[NVN_HP_OPS] = {1, 3, 3, 1, 2, 2, 1, 2, 2, 3, 2, 2, 2};
+    for (id a in nodes) {
+        if (![a isKindOfClass:[NSArray class]] || ![a count] || ![a[0] isKindOfClass:[NSString class]]) return 0;
+        unsigned op = 0; while (op < NVN_HP_OPS && ![a[0] isEqual:names[op]]) op++;
+        if (op == NVN_HP_OPS || [a count] != arity[op] + 1) return 0;
+        uint32_t args[3] = {0};
+        for (unsigned k = 0; k < arity[op]; k++) if (!hp_uint(a[k + 1], &args[k])) return 0;
+        if (op == NVN_HP_CB || op == NVN_HP_SB) {
+            int found = 0;
+            for (int k = 0; k < rf->nb; k++) if (rf->b[k].reg == args[0] && !rf->b[k].rw &&
+                rf->b[k].kind == (op == NVN_HP_CB ? NVN_RB_CBUF : NVN_RB_SBUFP)) found = 1;
+            if (!found) return 0;
+        }
+        p.nodes[p.n++] = (nvn_hp_node){op, args[0], args[1], args[2]};
+    }
+    uint8_t seen[NVN_REFL_MAXB] = {0};
+    for (id pool in pools) {
+        uint32_t aid;
+        if (![pool isKindOfClass:[NSDictionary class]] || !hp_uint(pool[@"binding"], &aid)) return 0;
+        int k = 0; while (k < rf->nb && (rf->b[k].kind != NVN_RB_TEXP || rf->b[k].aid != aid)) k++;
+        if (k == rf->nb || seen[k]) return 0;
+        seen[k] = 1;
+        NSArray *roots = pool[@"roots"];
+        if (![roots isKindOfClass:[NSArray class]] || !roots.count || roots.count > NVN_HP_MAX_ROOTS - p.nroots) return 0;
+        for (id root in roots) { uint32_t n; if (!hp_uint(root, &n) || n >= p.n) return 0; p.roots[p.nroots++] = (uint16_t)n; }
+    }
+    for (int k = 0; k < rf->nb; k++) if (rf->b[k].kind == NVN_RB_TEXP && !seen[k]) return 0;
+    if (!nvn_hp_valid(&p)) return 0;
+    rf->handles = malloc(sizeof p);
+    if (!rf->handles) return 0;
+    *rf->handles = p; return 1;
+}
 int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
     memset(o, 0, sizeof *o);
     #define FAIL(...) do { free(o->c1); o->c1 = NULL; snprintf(err, errlen, __VA_ARGS__); return 1; } while (0)
@@ -190,6 +235,7 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
         for (NSDictionary *u in j[@"first_store"]) { if (o->nfirst >= 4) FAIL("more than 4 first-invocation stores");
             int reg = [u[@"reg"] intValue]; if (reg < 0 || reg >= 16) FAIL("first-invocation store to storage slot %d", reg);
             o->first[o->nfirst].reg = (uint8_t)reg; o->first[o->nfirst].word = (uint16_t)[u[@"word"] intValue]; o->first[o->nfirst++].value = (uint32_t)[u[@"value"] unsignedIntValue]; }
+        hp_json(j[@"pool_handles"], o);   // optional proof: absent, malformed or newer stays conservative
         return 0;
     }
     #undef FAIL

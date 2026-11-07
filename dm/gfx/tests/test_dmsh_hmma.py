@@ -17,6 +17,9 @@ import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 NAMES = {'hmma_msl', 'split_params', 'block_end', 'HMMA_BODY', 'HMMA_ARGS', 'HMMA_CALL', 'TG_ARRAY'}
+sys.path.insert(0, str(TOOLS.parents[1] / 'ios/tools'))
+import ios_metal
+NAMES.add('MAC_METAL')
 tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
 selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in NAMES)
             or (isinstance(n, ast.Assign) and any(getattr(t, 'id', None) in NAMES for t in n.targets))]
@@ -244,8 +247,7 @@ def compile_and_run(test, msl, runner):
     with tempfile.TemporaryDirectory() as d:
         d = Path(d)
         (d / 'h.metal').write_text(msl)
-        subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', str(d / 'h.metal'), '-o', str(d / 'h.air')], check=True)
-        subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(d / 'h.air'), '-o', str(d / 'h.metallib')], check=True)
+        ios_metal.compile(d / 'h.metal', d / 'h.air', d / 'h.metallib', scope['MAC_METAL'])
         (d / 'run.m').write_text(runner)
         subprocess.run(['clang', '-fobjc-arc', '-O1', str(d / 'run.m'), '-framework', 'Metal', '-framework', 'Foundation', '-o', str(d / 'run')], check=True)
         r = subprocess.run([str(d / 'run'), str(d / 'h.metallib')], capture_output=True, text=True)

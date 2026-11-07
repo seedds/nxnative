@@ -332,7 +332,7 @@ class TargetSelection(unittest.TestCase):
         tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
         start = next(i for i, n in enumerate(tree.body) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'IOSOUT' for t in n.targets))
         end = next(i for i, n in enumerate(tree.body) if i > start and isinstance(n, ast.If) and isinstance(n.test, ast.Name) and n.test.id == 'IOSOUT')
-        ns = dict(os=os, sys=sys)
+        ns = dict(os=os, sys=sys, __file__=str(TOOLS / 'dmsh_build.py'))
         with mock.patch.dict(os.environ, env, clear=True):
             exec(compile(ast.Module(body=tree.body[start:end], type_ignores=[]), '<target selection>', 'exec'), ns)
         return ns['TARGETS'], ns['IOSOUT']

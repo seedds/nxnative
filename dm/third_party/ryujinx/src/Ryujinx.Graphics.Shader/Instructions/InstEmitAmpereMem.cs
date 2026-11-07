@@ -134,7 +134,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             if (stage != null)
             {
                 // A task or mesh shader's stage input (QueryAmpereStageMemory). Mode 0x78: its workgroup's number; 0x38: a word of the payload its task wrote, [Ra + offset];
-                // 0xb8: a word it wrote itself with 0x927's mode 0xb8 (Ocarina of Time's task shader 5d3a096025e375a1 reads its payload back in a later thread)
+                // 0xb8 (the payload store's mode, 0x927): a word of the payload this task writes, read back. The Legend of Zelda: Ocarina of Time's agl task shader
+                // 5d3a096025e375a1 stores a word at payload + 0x10 (+0x70) and reads it at +0x80
                 int mode = x.Bits(72, 80);
 
                 if (mode != 0x78 && mode != 0x38 && mode != 0xb8)
@@ -142,7 +143,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     throw AFail(context, $"ISBERD mode {mode:x2} in a task or mesh shader");
                 }
 
-                Operand addr = mode == 0x78 ? Const(stage[0]) : context.IAdd(AGpr(x.Ra), Const(stage[mode == 0xb8 ? 2 : 1] + (int)x.SignedField(40, 64)));
+                Operand addr = mode == 0x78 ? Const(stage[0]) : context.IAdd(AGpr(x.Ra), Const((mode == 0xb8 ? stage[2] : stage[1]) + (int)x.SignedField(40, 64)));
                 EmitLoad(context, StorageKind.SharedMemory, LsSize2.B32, addr, x.Rd, 0);
                 return;
             }
@@ -427,9 +428,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
         }
 
-        // ATOMS.CAS Rd, [Ra + offset], Rb (expected), Rc (new value). nvdisasm names the forms by bit 87: clear, CAS, CUDA's atomicCAS, Rd the old value; set, CAST, and CAST.SPIN with
-        // bit 88 too (the compiler's retry loop for a float add on shared memory, which repeats until Rd == 1: Fire Emblem Fortune's Weave's only use), Rd 1 when the swap happened.
-        // Only the 32-bit size (73..76 = 0) is taken
+        // ATOMG.CAS Rd, [Ra + offset], Rb (expected), Rc (new value): Rd = the old value, as PTX atom.cas (Mesa NAK OpAtom: Ra a pair with .E, 72; Rb 32..40; Rc 64..72, so there is no
+        // uniform form; type 73..76; predicate result 81..84). Star Fox's character compute shader 9ac392648752d3d2 takes slots from a counter in a storage buffer up to a bound with
+        // ATOMG.E.CAS.STRONG.GPU PT, R2, [R2.64], R4, R5 (000ea400001ee10500000004020273a9), retrying while Rd differs from the R4 it expected: the old value, not the success flag of
+        // ATOMS.CAS (AAtomsCas), which has 3 in the operation field 87..91 where this one has 0. Only the 32-bit form with no predicate result is taken
+
+
+        // ATOMS.CAS Rd, [Ra + offset], Rb (expected), Rc (new value): Rd = 1 when the swap happened, not the old value (Fire Emblem Fortune's Weave's only use is a retry loop for a float add that repeats until Rd == 1).
+        // Only the 32-bit form (operation 3 at 87..91, size 0) occurs
         public static void AAtomsCas(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);

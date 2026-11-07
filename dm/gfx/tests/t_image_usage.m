@@ -62,7 +62,7 @@ static void image_case(int explicit_image) { @autoreleasepool {
     CHECK(rid == image.gpuResourceID._impl, "image argument names the real view");
     os_unfair_lock_unlock(&g_rmu);
     mtl_sub_commit(); mtl_drain();
-    uint16_t pixels[64]; read_level(upgraded, 0, pixels);
+    uint16_t pixels[64] = {0}; read_level(upgraded, 0, pixels);
     int same = 1; for (int i = 0; i < 64; i++) same &= pixels[i] == 0x3800; CHECK(same, "upgrade preserves the clear from the pass it ended");
     read_level(upgraded, 1, pixels); same = 1; for (int i = 0; i < 16; i++) same &= pixels[i] == 0x3a00; CHECK(same, "upgrade preserves the other mip");
     NSError *error = nil;
@@ -76,8 +76,78 @@ static void image_case(int explicit_image) { @autoreleasepool {
     read_level(tex_mtl(&alias), 1, pixels); same = 1; for (int i = 0; i < 16; i++) same &= pixels[i] == (i == 5 ? 0x3400 : 0x3a00);
     CHECK(same, "sampled alias sees the image write and untouched pixels");
 } }
+static void atomic_alias_case(void) { @autoreleasepool {
+    pool_t pool = {.magic=MAGIC('P','O','O','L'), .size=8u<<20};
+    tex_t t = {.magic=MAGIC('T','E','X',0), .serial=99600, .pool=&pool, .off=4u<<20,
+               .d={.target=NVN_TEXTURE_TARGET_2D, .format=NVN_FORMAT_RGBA8, .flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE,
+                   .width=4, .height=4, .depth=1, .levels=1, .samples=1}};
+    nvn_tex_layout(&t.d, &t.L); mtl_tex_init(&t);
+    id<MTLTexture> original = tex_mtl(&t); CHECK(original.pixelFormat == MTLPixelFormatRGBA8Unorm, "original has a color format");
+    mtl_sub_begin(); memset(&R, 0, sizeof R); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &t;
+    R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(4/255.0, 3/255.0, 2/255.0, 1/255.0);
+    CHECK(rp_begin() != nil, "clear the original RGBA8 surface");
+    NvProg *program = [NvProg new]; NvShader *shader = [NvShader new]; program->sh[5] = shader;
+    shader->rf.nb = 1; shader->rf.b[0] = (nvn_rbind){.kind=NVN_RB_IMG, .dtt=MTLTextureType2D, .dpf=NVN_DPF_UINT, .reg=0, .rw=1, .atom=1};
+    mtl_reg_image(603, &t, NULL); S.img[5][0] = 603; image_prepare(program, 0x20);
+    id<MTLTexture> rgba = tex_mtl(&t); uint64_t rid; int real;
+    os_unfair_lock_lock(&g_rmu); id<MTLTexture> atomic = img_binding(603, &shader->rf.b[0], &rid, &real); os_unfair_lock_unlock(&g_rmu);
+    CHECK(rgba.pixelFormat == MTLPixelFormatRGBA8Unorm && rgba.parentTexture.pixelFormat == MTLPixelFormatR32Uint, "RGBA8 rendering kept on atomic storage");
+    CHECK(real && img_atomic_ok(atomic, &shader->rf.b[0]), "R32 view is a real atomic image");
+    CHECK(!rgba.heap && !rgba.parentTexture.heap, "atomic backing needs no placement heap");
+    CHECK(![g_res_objects containsObject:rgba] && [g_res_objects containsObject:rgba.parentTexture], "upstream atomic owner retains the raw allocation in residency");
+    mtl_sub_commit(); mtl_drain();
+    if (!real || !img_atomic_ok(atomic, &shader->rf.b[0])) return;
+    NSError *error = nil; MTLCompileOptions *options = [MTLCompileOptions new]; options.languageVersion = MTLLanguageVersion3_1;
+    id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nkernel void stamp(texture2d<uint, access::read_write> t [[texture(0)]]) { t.atomic_fetch_or(uint2(0), 0x10203040u); }" options:options error:&error];
+    id<MTLComputePipelineState> pipeline = lib ? [g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"stamp"] error:&error] : nil;
+    CHECK(pipeline != nil, "native atomic shader compiled"); if (!pipeline) return;
+    id<MTLBuffer> result = [g_dev newBufferWithLength:4 options:MTLResourceStorageModeShared];
+    id<MTLFence> stamped = [g_dev newFence];
+    id<MTLCommandBuffer> cb = q_cb(); id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:pipeline]; [enc setTexture:atomic atIndex:0];
+    [enc dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
+    // This standalone Metal 3 probe writes the integer view and reads the color
+    // view. Explicitly order those aliases: without the fence, its readback can
+    // contain the pre-atomic clear even though the command buffer completes.
+    // The loop below separately checks the production Metal 4 alias barriers.
+    [enc updateFence:stamped]; [enc endEncoding];
+    id<MTLBlitCommandEncoder> copy = [cb blitCommandEncoder];
+    [copy waitForFence:stamped];
+    [copy copyFromTexture:rgba sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(1,1,1)
+                  toBuffer:result destinationOffset:0 destinationBytesPerRow:4 destinationBytesPerImage:4];
+    [copy endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    CHECK(cb.status == MTLCommandBufferStatusCompleted && *(uint32_t *)result.contents == 0x11223344u, "RGBA8 read sees preserved clear bits and the atomic OR");
+    // Exercise the production Metal 4 barriers across the color and integer
+    // views, with different values each iteration and no intermediate CPU wait.
+    enum { N = 32 };
+    uint32_t seeds[N]; for (unsigned i = 0; i < N; i++) seeds[i] = 0x01020304u * (i + 1);
+    id<MTLBuffer> inputs = [g_dev newBufferWithBytes:seeds length:sizeof seeds options:MTLResourceStorageModeShared];
+    id<MTLBuffer> outputs = [g_dev newBufferWithLength:sizeof seeds options:MTLResourceStorageModeShared];
+    res_add(inputs); res_add(outputs);
+    MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount = 1;
+    id<MTL4ArgumentTable> at = rec_table([g_dev newArgumentTableWithDescriptor:ad error:&error]);
+    [at setTexture:atomic.gpuResourceID atIndex:0];
+    mtl_sub_begin();
+    for (unsigned i = 0; i < N; i++) {
+        enc_b_copy_buffer_texture(blit(), inputs, i * 4, 4, 4, MTLSizeMake(1,1,1), rgba, 0, 0, MTLOriginMake(0,0,0));
+        enc_b_end(g_blit); g_blit = nil;
+        id<MTL4ComputeCommandEncoder> e = enc_c_begin(nil); [e setArgumentTable:at]; enc_c_pso(e, pipeline);
+        enc_c_dispatch(e, MTLSizeMake(1,1,1), MTLSizeMake(1,1,1)); enc_c_end(e);
+        enc_b_copy_texture_buffer(blit(), rgba, 0, 0, MTLOriginMake(0,0,0), MTLSizeMake(1,1,1), outputs, i * 4, 4, 4);
+        enc_b_end(g_blit); g_blit = nil;
+    }
+    mtl_sub_commit(); mtl_drain();
+    CHECK(!mtl_last_commit_error(), "Metal 4 color/atomic view transitions complete");
+    for (unsigned i = 0; i < N; i++) CHECK(((uint32_t *)outputs.contents)[i] == (seeds[i] | 0x10203040u), "Metal 4 barriers preserve each color-write/atomic-write/color-read result");
+    res_remove(inputs); res_remove(outputs);
+    mtl_sub_begin(); mtl_alias_drop_pool(&pool); mtl_sub_commit(); mtl_drain();
+    // GPU completion publishes the fence before feedback retires allocations.
+    // Match t_image_alias: wait for that handler before checking CPU residency.
+    dispatch_sync(g_feedback_q, ^{}); defer_drain();
+    CHECK(![g_res_objects containsObject:rgba] && [g_res_objects containsObject:rgba.parentTexture], "held atomic view keeps its raw storage resident after pool retirement");
+} }
 int main(void) { @autoreleasepool {
-    mtl_init(); image_case(0); image_case(1);
+    mtl_init(); image_case(0); image_case(1); atomic_alias_case();
     printf("explicit image usage: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

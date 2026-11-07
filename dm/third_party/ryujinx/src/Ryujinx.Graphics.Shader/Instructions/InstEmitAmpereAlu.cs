@@ -32,10 +32,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
             alu(0x111, InstName.F2i, AF2i64);
             alu(0x112, InstName.I2f, AI2f64);
             alu(0x045, InstName.I2f, AI2fp);
+            alu(0x043, InstName.F2i, AF2ip);
             alu(0x107, InstName.F2f, AFrnd);
             alu(0x104, InstName.F2f, AF2f);
             alu(0x03e, InstName.F2f, AF2fp);
-            alu(0x043, InstName.F2i, AF2ip);
             alu(0x030, InstName.Hadd2, AHadd2);
             alu(0x032, InstName.Hmul2, AHmul2);
             alu(0x031, InstName.Hfma2, AHfma2);
@@ -426,6 +426,42 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, x.Bit(74) ? context.IConvertS32ToFP32(src) : context.IConvertU32ToFP32(src));
         }
 
+        // F2IP.U8.F32.NTZ Rd, a, b, RZ (sm_86's float to integer convert and pack): a and b each rounded to an integer by F2I's mode (78..79: nearest even, floor, ceiling,
+        // truncation) and saturated to 0..255, NaN to 0, b in byte 0 and a in byte 1, the upper half zero; a = RZ leaves b alone in byte 0. The other fields follow F2I's:
+        // unsigned (72 clear), 8 bits (75..77 clear); 74 is set in every one met, the form NVIDIA prints .NTZ. The Legend of Zelda: Ocarina of Time's colour converters
+        // (99951da6e5cd38f5 +0x530 and nine others) quantize a block of BT.709 Y and CbCr values times 255 to the nearest, then join two results into four bytes with
+        // PRMT 0x5410 and store them: the pixels' bytes come out in x order only with b low. Its foliage mesh shaders (740e2b04db624fb1 +0x370 and seven others) convert one
+        // colour channel times 255 at a time with a = RZ and truncation (.TRUNC, 78..79 = 3), then shift the result by 16 or 24 into an RGBA8 word: b is in byte 0 there too.
+        // Any other encoding (a second form, C not RZ, other bits from 72 on) is refused rather than guessed
+        public static void AF2ip(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+
+            if (x.Form != 1 || x.Bits(40, 64) != 0 || x.Rc != RegisterConsts.RegisterZeroIndex || (x.Field(72, 96) & ~(3ul << 6)) != 1 << 2)
+            {
+                throw AFail(context, "F2IP other than .U8.F32.NTZ of two registers with RZ");
+            }
+
+            int round = x.Bits(78, 80);
+
+            Operand Byte(int reg)
+            {
+                Operand f = AGpr(reg);
+                Operand r = round switch
+                {
+                    0 => context.FPRound(f),
+                    1 => context.FPFloor(f),
+                    2 => context.FPCeiling(f),
+                    _ => context.FPTruncate(f),
+                };
+                Operand v = context.FPMinimum(context.FPMaximum(r, ConstF(0f)), ConstF(255f));
+
+                return context.ConditionalSelect(context.IsNan(f), Const(0), context.FP32ConvertToU32(v));
+            }
+
+            ASet(context, x, x.Ra == RegisterConsts.RegisterZeroIndex ? Byte(x.Rb) : context.BitwiseOr(context.ShiftLeft(Byte(x.Ra), Const(8)), Byte(x.Rb)));
+        }
+
         // FRND: a float rounded to an integer value (78..80: nearest even, floor, ceiling, truncation)
         public static void AFrnd(EmitterContext context)
         {
@@ -519,33 +555,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         // F2IP.U8 Rd, a, b: a and b to saturated bytes, a in byte 1 and b in byte 0, like F2FP's halves; bits 78..79 the rounding, as F2I's. Ocarina of Time's FoliageShader writes colour with it
         // (x * 255 for two pairs, then PRMT.5410 into one word), and its foliage mesh shaders take one byte at a time (RZ, x, truncating), then shift it into place. Bits 72..77 other than 4 and a
         // register in c have not been met
-        public static void AF2ip(EmitterContext context)
-        {
-            AmpereOp x = new(context.CurrOp);
 
-            if (x.Bits(72, 78) != 4 || x.Rc != RegisterConsts.RegisterZeroIndex)
-            {
-                throw AFail(context, "F2IP form");
-            }
-
-            (ASrc a, ASrc b) = ASecond(context, x, abs: false);
-            RoundMode2 mode = (RoundMode2)x.Bits(78, 80);
-
-            Operand Byte(Operand f)
-            {
-                f = mode switch
-                {
-                    RoundMode2.Round => context.FPRound(f, Instruction.FP32),
-                    RoundMode2.Floor => context.FPFloor(f, Instruction.FP32),
-                    RoundMode2.Ceil => context.FPCeiling(f, Instruction.FP32),
-                    _ => context.FPTruncate(f, Instruction.FP32),
-                };
-
-                return context.FP32ConvertToU32(context.FPMinimum(context.FPMaximum(f, ConstF(0f)), ConstF(255f)));
-            }
-
-            ASet(context, x, context.BitwiseOr(context.ShiftLeft(Byte(AFloat(context, a)), Const(8)), Byte(AFloat(context, b))), AUniform(context));
-        }
 
         // ---- packed halves ----
 

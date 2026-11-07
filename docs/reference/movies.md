@@ -303,6 +303,14 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_codec_video` (AddressSanitizer and UBSan), which covers the AV1 and SDK 22 forms, native images and the av1C record, and decodes a 64x64 AV1 key frame (SVT-AV1) on each backend the Mac has, read back as NV12.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): 82 movies in WebM at 2560x1440; the opening's 3,301 pictures play. On #957's branch, VideoToolbox and dav1d gave the same pictures, bit for bit, over the opening's first 600 (about 450 pictures a second each on an M3 Pro), and a tester's M1 Pro played the first two movies through dav1d, smooth and in sync ([seedds/nxnative#927](https://github.com/seedds/nxnative/issues/927)).
 
+### AV1 movies fall behind the playback clock
+
+- **Symptom:** a 60 FPS movie plays slowly when rendering cannot present 60 frames per second; its sound advances ahead of the picture.
+- **Cause:** handing out exactly one decoded picture for each rendered frame ties playback time to rendering throughput. Software AV1 decoding additionally ran one frame at a time while holding the decoder lock.
+- **Fix:** reuse PR #1377's timestamp-preserving dav1d frame parallelism and separate decode lock, and PR #1379's AV1 playback clock. The decoder skips superseded late pictures with 50 ms slack, retains the end-of-stream picture and restarts its clock after a long stall, reset or backwards timestamp. `DM_CV_LATE=0` is the comparison switch. This changes temporal delivery, not picture resolution or effects.
+- **Check:** `t_codec_video` passes real AV1 decoding on VideoToolbox and dav1d, picture timestamp/order checks and deterministic clock tests. Local in-game playback-rate validation remains pending.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), reported and fixed upstream in [PR #1377](https://github.com/seedds/nxnative/pull/1377) and [PR #1379](https://github.com/seedds/nxnative/pull/1379).
+
 ### SDK 19's decoder forms
 
 - **Symptom:** an abort in `nn::codec` (the SDK's own decoder client, which opens a service the host does not have) when a movie starts in a game built with SDK 19 for the Switch 2.

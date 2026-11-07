@@ -1,0 +1,7 @@
+# Routes start from the Kokiri Forest autosave beside Saria, after exiting Link's house.
+# name, DM_KEYS, measurement start and duration in seconds, description
+kokiri-stand	25:A,30:A,35:A,40:A	70	60	Reload the Kokiri Forest autosave and stand beside Saria; check the screenshot before accepting timing.
+kokiri-walk	25:A,30:A,35:A,40:A,75:LLeft~1,80:LUp~2,90:LUp~4,105:RRight~2,115:RLeft~2	70	60	The same save: step around Saria, walk through the village and turn the camera.
+kokiri-camera	25:A,30:A,35:A,40:A,75:RRight~2,85:RLeft~2,95:RRight~2,105:RLeft~2,115:RRight~2,125:RLeft~2	70	60	Keep Link at the loaded save position and turn the camera repeatedly; compare first and repeat turns, and check the screenshots before accepting timing.
+kokiri-vines-camera	25:A,30:A,35:A,40:A,65:RRight~1,75:RLeft~1,85:RRight~1	60	30	Latest manual save at the Kokiri vines: stand in place and turn the camera; compare screenshots and display samples.
+kokiri-vines-climb	25:A,30:A,35:A,40:A,65:LUp~6	60	30	Latest manual save at the Kokiri vines: climb to the upper ledge; verify progress and uploads, not identical-position performance.

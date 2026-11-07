@@ -22,6 +22,7 @@ DM_CHEATS_WINDOW	switch	`1` opens the Mac Cheats panel beside the game from the 
 DM_COPY_GAME_RESOURCES	switch	`NO` skips the Xcode build phase that copies the game's resources into the app (`stage_resources.sh`, on by default); `build_ipa.sh` sets it for its unsigned build, which packs them itself
 DM_COPY_ROMFS	switch	`NO` keeps the game files out of the app, in the Xcode build phase (`stage_resources.sh`) and in the unsigned IPA of `build_ipa.sh` (on by default): `main.m` takes the validated `Documents/romfs.img` copied by `scripts/push_romfs.sh`, then a `Documents/romfs` folder; the build writes the image's identity as `romfs.id` into the app, and `main.m` uses only a matching image (`--romfs separate` of the NSP script sets this)
 DM_CTL	diagnostic	`=<file>` (Mac): the host polls the file every 100 ms and runs each appended line: button presses, `shot`, `passdump`, `texdump`, `env KEY=VALUE`, `peek`, `memdump`, `drag` and more
+DM_CV_LATE	switch	`0` disables AV1 playback-clock catch-up; by default superseded late pictures are skipped, with 50 ms slack and clock restart after long stalls or backwards timestamps
 DM_DBG	diagnostic	When set, prints the guest's `svcOutputDebugString` text to stderr as `[guest]` lines
 DM_DBG_AU_FRAMES	diagnostic	`=<frames>` asks the Mac's Core Audio output for that many frames per callback instead of about 5 ms (1024 reproduces the iOS default that caused crackling)
 DM_DETCLOCK	switch	`=<step ns>`: from the first present on, the guest clock advances a fixed step per present instead of following the wall clock, and the random source becomes a fixed-seed stream (replay and test runs)
@@ -85,6 +86,7 @@ DM_JIT_SERVE	path	Folder of a `nn::jit` image (`jit.img`, `jit.tsv`, `jit.out`):
 DM_KBD	switch	`=<text>`: the system keyboard returns that text as OK without showing an input box; unset with no window, it returns cancel
 DM_KBD_PLAYER	switch	`own` makes the Mac keyboard player 1 on its own, with controllers from player 2 on (by default the first controller shares player 1 with the keyboard)
 DM_KEYS	switch	Scripted input: `<seconds or f<frame>>:<key>[+key][~hold or ~f<frames>][*count/interval],…` presses buttons, sticks, touches and `Shake` at those times; `=@<file>` reads the steps from the file
+DM_KEYS_ONLY	diagnostic	`1` ignores physical keyboard/controller buttons and sticks while keeping `DM_KEYS`/`DM_CTL` input, for isolated benchmark routes; does not disable motion or touch
 DM_LANG	player	Game language as a language code (default `en-US`; the iOS app sets the one the IPA was packed with)
 DM_LAUNCHER	switch	`0` skips the iOS settings screen or the Mac settings window and starts the game at once, with the saved choices (on the Mac also `--no-launcher`)
 DM_LAUNCH_PARAM	path	File whose bytes `oe::TryPopLaunchParameter` returns once; `oe::ExecuteProgram` sets it for the program it starts
@@ -112,6 +114,7 @@ DM_NRO_DIR	path	folder of NROs the shader split reads like `main`, and in which 
 DM_NVN_ALLOCPROF	diagnostic	`=1` charges Metal allocation growth to each replayed op type and function, and logs command allocator sizes and each new texture (serial, size, format, storage); `=2` also gives each main submission a fresh command allocator and reports command memory by operation, by encoder, by submission size and the indirect-count multi-draws encoded
 DM_NVN_API	switch	`=<major>.<minor>` overrides the NVN API version `nvnDeviceGetInteger` reports (by default decided by the SDK version or the profile's `device_api`: 55.15 for SDK 11 and later, 53.313 before)
 DM_NVN_BARRIER	switch	How draw passes are ordered: `full` (default) waits for all earlier GPU work, `game` only for the previous pass's fragment stage unless the game set a barrier, `ab` alternates with the `DM_AB` phases
+DM_NVN_BARRIER_FRAG	switch	`0` gives a draw pass the full consumer barrier after any game barrier; by default (with DM_NVN_BARRIER=game) a barrier that orders only fragments (ORDER_FRAGMENTS / _TILED, INVALIDATE_TEXTURE) leaves it out, as the last pass's relaxed end orders fragments already
 DM_NVN_BF_WANT	path	`=<file>`: appends the key of each fragment shader whose passes could not be merged for lack of a readable-tile version to that file, once per key
 DM_NVN_BLIT_ORDER	diagnostic	`0` drops the barriers between dependent operations in the copy encoder, which reproduces the fountain's vertical stripes in Mario Wonder
 DM_NVN_CAPTURE	diagnostic	`=<frame>:1:<path>` writes that frame (from its first submit to its present) to one file: pool bytes, registries, program keys, the textures whose content lives only in Metal, each submission's records with pointers relocatable, and the presented frame's SHA-256 and pixels; `dm/gfx/tests/nvn_replay` replays it ([development.md](development.md#frame-capture-and-replay))
@@ -125,7 +128,7 @@ DM_NVN_CPUPROF	diagnostic	1 records CPU wall/time/instruction totals by renderer
 DM_NVN_CSH_PRESCAN	diagnostic	`0` runs the compute-hoist scan at every pass's first draw even when no dispatch follows (as before; for timing)
 DM_NVN_CS_HOIST	switch	`0` makes a compute dispatch between the draws of a pass end it (on by default: the dispatch runs ahead of the pass when that changes nothing the draws before it read)
 DM_NVN_CUT	switch	`=<draws>`: the replay commits its command buffer every that many draws, between passes (default 64; `0` one command buffer per submission, except the cut after a buffer-to-texture copy)
-DM_NVN_CUT_BUSY	switch	`=0`: a segment boundary commits whatever the GPU is doing (the default commits only when earlier work has reported back, keeping the boundary's GPU timestamp otherwise)
+DM_NVN_CUT_BUSY	switch	`=1`: experimentally defer a normal segment commit while earlier main-queue work is in flight; default `0`. Copy cuts and segment-timestamp mode retain their commits.
 DM_NVN_DEFER	switch	`0` turns off the deferred pass merging of the TBDR optimizations (which run only with `DM_NVN_TBDR=1`)
 DM_NVN_DEFER_AB	diagnostic	`=1` keeps the deferred pass merging (with `DM_NVN_TBDR=1`) off until the second screenshot has been written, then turns it on, to compare the pictures with and without it
 DM_NVN_DEPTHOVR	diagnostic	`=<fragment shader key prefix>,…`: those draws compare depth with `ALWAYS`; with `DM_NVN_HILITE`, tells "the depth test rejects every fragment" from "nothing rasterizes"
@@ -153,8 +156,10 @@ DM_NVN_GEO_HOIST	switch	`0` draws each geometry draw's capture and kernel at its
 DM_NVN_GEO_LEAN	switch	`0` draws passthrough geometry shaders through their full kernel and reader, as before; by default a lean kernel culls and the program's own vertex shader draws (`nvn_geometry.inc`)
 DM_NVN_GEO_MESH	switch	`0` draws passthrough geometry pairs that have a mesh library (`geo_mesh.tsv`) through the compute path; by default they are mesh draws in the render pass (`geo_mesh_draw`)
 DM_NVN_GEO_MESH_RUN	switch	`0` dispatches every mesh geometry draw on its own; by default consecutive mesh draws of one pair whose result does not depend on their order are drawn as one dispatch (`geo_mesh_take`)
+DM_NVN_GMEM_ALL	diagnostic	`=1` lists every memory pool in raw global memory's pool table, and so in the residency set, as before; by default a pool the game took no buffer address in (`nvnMemoryPoolGetBufferAddress`, `nvnBufferInitialize`, `nvnTextureGetTextureAddress`) is left out
 DM_NVN_GPUPROF	diagnostic	`=<f>`, `<f1>-<f2>` or `every:<n>`: logs the GPU start and duration of every encoder of those frames (`[gpuprof]` lines from Metal 4 counter heap timestamps)
 DM_NVN_GPU_TS	switch	`segment` or `submission`: what timestamp reports record (GPU start / end of the segment holding each report, or one time for the whole submission), instead of the profile's `gpu_timestamps`
+DM_NVN_HANDLE_PROOF	switch	`0` disables uniform/material texture-pool handle proofs for depth-feedback ordering; by default complete shader proofs may exclude depth storage, while missing proofs and uncertain GPU-written values stay conservative
 DM_NVN_HILITE	diagnostic	`=<fragment shader key>,…`: those draws use a solid colour instead (magenta, green, cyan, yellow, blue, white in order), to tell wrong geometry from wrong shading
 DM_NVN_INDLOG	diagnostic	`=<n>`: the first n indirect draws (and those of pass-dumped frames) log their arguments at encode and as the GPU left them once the submission completed, with the first indices
 DM_NVN_IXCLOG	diagnostic	`=<n>` logs the first n indirect draw and dispatch conversions (record to arguments) once the GPU has run them
@@ -204,7 +209,7 @@ DM_NVN_UBD_MEMO	diagnostic	`0` scans the deferred uniform update list for every 
 DM_NVN_UBP_CHECK	diagnostic	`=1` checks every uniform shadow made from memory: the pass ends, the updates land, the replay waits for the GPU and compares (a difference is a red line; slow)
 DM_NVN_UBP_RUNNING	switch	`0` refuses a uniform shadow partly covered by inline updates of a running submission, as before; by default those updates are remembered by byte, each with its fence, and laid over memory in the shadow
 DM_NVN_UB_COPY_THREAD	switch	`0` copies uniform shadows of 512 bytes or more on the submit thread, as before (by default a worker copies them)
-DM_NVN_UB_DEFER	switch	`0` ends the render pass at every inline uniform update, as before; by default an update inside an open pass is deferred to the pass end and later draws read a shadow (off in TBDR mode)
+DM_NVN_UB_DEFER	switch	`0` ends the render pass at every inline uniform update, as before; by default an update inside an open pass is deferred to the pass end and later draws read a shadow (in TBDR mode too)
 DM_NVN_UB_LAZY	switch	`=<n>`: the most deferred inline uniform updates kept across a render pass end (default 160); they land before the next copy, a conflicting draw or dispatch, or the submission end; `0` lands them at every pass end
 DM_NVN_UB_N	diagnostic	`=<frames>`: the length of each phase of the same-process alternating measurement `DM_NVN_UB` (default 180, minimum 60)
 DM_NVN_UB_PARTIAL	switch	`0`: a uniform block the deferred updates cover only in part ends the pass, as before; by default its shadow starts from memory and takes the submission's queued updates (on by default)
@@ -338,6 +343,7 @@ DM_TEST_FS_FAIL	diagnostic	`=write:<n>[:<errno>]` makes the nth save write fail 
 DM_TEST_FS_FAILAT	diagnostic	`=<point>[:<count>][,…]` makes steps of the save transaction (`mountclone`, `reclone`, `guestname`, `renameback`) fail with ENOSPC
 DM_TEST_GEOMETRY	test	Path of the native `t_geometry` executable; `test_dmsh_geometry.py` runs its native geometry emitter checks only when it is set
 DM_TEST_GEOMETRY_PRIMITIVE_ID	test	Path to the native t_geometry_primitive_id replay executable used by test_dmsh_geometry.py with DMSH_TEST_GPU=1.
+DM_TEST_GPU_HANG	diagnostic	`=<n>` makes the nth main command buffer (segments, last segments and count waits counted together from 1: the `#n` of the `[RED] failed GPU work` lines) report a GPU hang in its feedback while its work runs as usual, so the lines that name its frame, passes and shader keys can be checked without a hang
 DM_TEST_GPU_LOST	diagnostic	`=<n>` imitates the GPU access macOS revoked from the nth submission on: each submission's feedback reports `MTL4CommandQueueErrorAccessRevoked` and the GPU does not signal its fence, so the host stops presenting and the front end ends the game
 DM_TEST_KEYRACE	diagnostic	`=<n>` creates up to n (at most 512) pthread keys on a thread of its own while the host starts up
 DM_TEST_KILL_AT	diagnostic	`=write:<n>` exits the process (`_exit(9)`) at the nth save write, imitating a kill mid-write
@@ -361,6 +367,7 @@ DM_UE_TEXTURE_POOL	switch	Megabytes Unreal's texture streaming pool (`r.Streamin
 DM_UPSCALER	player	`metalfx` draws the game's own upscaler shaders (agl's NDSR network, found by the shader map) with MetalFX's spatial scaler; `game` (the default) runs them
 DM_VK_CAPTURE	path	`=<dir>` (Mac) writes every SPIR-V module the game creates to `<dir>/<key>.spv`; the NSP script's Vulkan shader capture stage sets it
 DM_VK_LOG	diagnostic	`=1` logs Vulkan object creation in the Vulkan-on-Metal layer
+DM_VRR	switch	`0` answers no VRR for a profile with `vrr on`, so the game keeps its whole present intervals (60, 30, 20 fps); `1` answers VRR for it on any screen, also below 120 Hz (by default only when the window is on a screen of 120 Hz or more). Mac only: iOS never answers VRR. A profile without the key is unaffected
 DM_VSYNC_HZ	switch	`=<Hz>`: rate at which a host thread fires the vi vsync event when the display link does not drive it (default 60)
 DM_WATCH	diagnostic	`=<s>` dumps all threads after that many seconds (SIGALRM) and turns on the stall watchdog; off unless set
 DM_WATCH_SAMPLE	diagnostic	`=<path>` (Mac): when the stall watchdog fires, samples the process for 1 s with `/usr/bin/sample` and writes the thread stacks to that path

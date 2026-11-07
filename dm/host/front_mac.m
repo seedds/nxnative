@@ -1554,9 +1554,7 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
 }
 
 // GPU lost (front.h): macOS runs none of the game's GPU work any more and nothing is drawn again. In full screen the frozen game held the whole screen (#1326: WindowServer froze for 40 s
-// and its watchdog killed it), so the window leaves full screen first and the alert comes once it has, or after 3 s if it has not. Then the app quits with exit status 70
-// (EX_SOFTWARE), so a launcher or script that runs it sees a failed run: exit() runs the same atexit handlers as ⌘Q's terminate (the one will-terminate
-// observer, haptics_apple.m's, is an atexit handler too), whose exit status is 0
+// and its watchdog killed it), so the window leaves full screen first and the alert comes once it has, or after 3 s if it has not. Then the app quits as ⌘Q does
 void front_gpu_lost(void) {
     if (!g_layer) die("GPU access revoked: macOS runs none of this process's GPU work any more");
     LOG("front end: the GPU no longer runs the game's work; telling the player and quitting");
@@ -1570,11 +1568,8 @@ void front_gpu_lost(void) {
             a.informativeText = [NSString stringWithFormat:@"After a GPU error, macOS stopped running the game's GPU work, so nothing more can be drawn and the game quits. The log has the details. "
                                                            "Please report it on GitHub with python3 scripts/bug_report.py %@, which collects the log.", @(DM_GAME_ID)];
             [a addButtonWithTitle:@"Quit"];
-            // An app opened in the background would leave the alert behind other apps' windows, and DM_WINDOW_TOP's floating game window would cover it
-            [NSApp activateIgnoringOtherApps:YES];
-            [a layout]; NSWindow *game = g_win; if (game && a.window.level <= game.level) a.window.level = game.level + 1;
             [a runModal];
-            exit(70);
+            [NSApp terminate:nil];   // as ⌘Q
         };
         NSWindow *win = g_win;
         if (!(win.styleMask & NSWindowStyleMaskFullScreen)) { tell(); return; }

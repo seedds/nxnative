@@ -23,6 +23,7 @@ class Bench(unittest.TestCase):
             self.assertEqual(n, 100); self.assertEqual(len(ft), 100); self.assertEqual(dropped, 1); self.assertEqual(len(shown), 99); self.assertEqual(len(gpu), 99)
             s = bench.summary(ft, shown, gpu, dropped, n, 1.0, 1000 / 120)
             self.assertEqual(s['fps'], 100.0); self.assertEqual(s['frame_p50'], 10.0); self.assertEqual(s['frame_p99'], 10.0); self.assertEqual(s['frame_max'], 50.0)
+            self.assertEqual(s['shown_samples'], 99)
             self.assertEqual(s['over_budget'], 1)   # only the 50 ms frame is longer than 1.5 × 8.33 ms
 
     def test_percentile(self):
@@ -81,6 +82,9 @@ pathlib.Path('paths.json').write_text(json.dumps(paths))
                     self.assertEqual(ex.exception.code, 0, (root / 'relative-results/base-1/log.txt').read_text())
                     results = json.loads((root / 'relative-results/results.json').read_text())
                     self.assertEqual(results['results']['base'][0]['frames'], 1)
+                    self.assertEqual(results['results']['base'][0]['shown_samples'], 0)
+                    self.assertIn('rendered throughput only', results['results']['base'][0]['timing_warning'])
+                    self.assertIn('WARNING:', (root / 'relative-results/results.md').read_text())
                     self.assertTrue((root / 'relative-results/results.md').is_file())
                     self.assertEqual((build / 'run/save/sentinel').read_text(), 'original')
             finally:

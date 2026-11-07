@@ -214,8 +214,8 @@ def selected_inputs(a):
     msls = msl_inputs(a.msl)
     if not msls: raise SystemExit(f'no shader libraries at {a.msl}')
     pso = sorted({p for pat in PSO_FILES for p in Path(a.pso).glob(pat) if not detritus(p.name)}) if a.pso else []
-    if a.pso and (not any(p.suffix == '.mtl4a' for p in pso) or not (Path(a.pso) / 'prebuilt.tsv').is_file()):
-        raise SystemExit(f'no pipeline archive with its prebuilt.tsv in {a.pso}')
+    if a.pso and (not any(re.fullmatch(r'applegpu_[A-Za-z0-9_]+\.mtl4a', p.name) for p in pso) or not (Path(a.pso) / 'prebuilt.tsv').is_file()):
+        raise SystemExit(f'no pipeline archive with its prebuilt.tsv in {a.pso}: use pso_offline.py output (applegpu_<architecture>.mtl4a), not the device runtime cache')
     tables = [Path(a.tables) / n for n in TABLES if (Path(a.tables) / n).is_file()]
     pairs = Path(a.pso_pairs) if a.pso_pairs and not any(p.name == 'pso_pairs.tsv' for p in tables) else None
     fonts = sorted(p for p in Path(a.font).glob('*.ttf') if not detritus(p.name))

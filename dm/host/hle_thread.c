@@ -17,6 +17,7 @@
 #include <sys/mman.h>
 #include <time.h>
 #include <mach/mach.h>
+#include <mach/mach_time.h>
 #include <pthread/qos.h>
 #include <dlfcn.h>
 #include <stdatomic.h>
@@ -78,6 +79,7 @@ typedef struct thr {
     uint64_t nspin, nspin_seen, spin_site; const char *spin_mod;   // Spin wait passes (dm_spin_wait; those that yield count in nyield too) and where the last one was
     uint64_t srun_svc, srun_t0, spin_ret;     // Current spin wait: nsvc at its passes, when it began, when the last pass returned
     uint64_t cpu_seen_us;                     // CPU time (µs) at the last power report (dm_thread_cpu)
+    uint8_t pcore;                            // DM_PCORE: its time-constraint declaration was considered (pcore_declare)
     uint64_t yrun_svc, yrun_t0, yrun_sig, yrun_sig2, poll_ret;   // Current run of yields: nsvc of the last yield, when the run began, and the caller's x19–x28 at the last two yields (a run lasts while no other SVC comes between two yields and those registers match one of the last two, thr_yield); when the last yield or short timed-out wait returned (poll_wait_begin)
     uint64_t yrun_clk;                        // dm_clock_reads at the last yield: a pass that read the clock since makes the yield a clock wait (thr_yield)
     uint64_t cw_sig, cw_run, cw_last, cw_end, cw_per, cw_per2, cw_wake, ncwpred, ncwpred_seen;   // The clock wait followed (clock_wait): its x19–x28, the run it was last seen in, when its last yield returned,
@@ -950,6 +952,26 @@ void dm_yield_top(char *out, size_t n) {
     pthread_mutex_unlock(&G);
     if (!o && n) snprintf(out, n, "none");
 }
+// DM_PCORE=1: keep the busiest guest threads on the performance cores. iOS has no core affinity, and every guest thread already runs at user-interactive QoS, yet a Mario Kart World
+// run on the iPhone fell off the performance cores about a minute in (mean clock 3.8 -> 1.65 GHz, 55% -> 12% of CPU time on performance cores, thermal state 0, Low Power Mode off, the
+// main thread's real-time declaration still in effect). A thread with a time-constraint declaration is what the scheduler places on a fast core and what the performance controller
+// raises the clock for, so the three busiest threads that have none (the main and acquire threads declare their own) get one: a 60 Hz period and 1.5x their measured per-frame CPU.
+// Declared once per thread, from the CPU sampler's window (dm_thread_cpu, every 300 frames). Off by default until a phone A/B shows the run holds its clock
+static int pcore_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_PCORE"); v = e && atoi(e) != 0; if (v) LOG("DM_PCORE=1: the busiest guest threads get a time-constraint declaration"); } return v; }
+static void pcore_declare(thr_t *t, double ms_per_s) {   // holding G
+    if (!pcore_on() || t->pcore || ms_per_s < 60) return;
+    thread_time_constraint_policy_data_t p; mach_msg_type_number_t n = THREAD_TIME_CONSTRAINT_POLICY_COUNT; boolean_t def = 1;
+    if (thread_policy_get(t->mport, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&p, &n, &def) != KERN_SUCCESS) return;
+    t->pcore = 1;
+    if (!def) return;   // it declares its own
+    static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
+    double comp_ms = ms_per_s / 60.0 * 1.5; if (comp_ms < 1) comp_ms = 1; if (comp_ms > 6) comp_ms = 6;
+    uint64_t period = 16666667ull;
+    p.period = (uint32_t)(period * tb.denom / tb.numer); p.constraint = p.period; p.preemptible = 1;
+    p.computation = (uint32_t)((uint64_t)(comp_ms * 1e6) * tb.denom / tb.numer);
+    kern_return_t kr = thread_policy_set(t->mport, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&p, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+    LOG("DM_PCORE: thread %#x declared %.2f ms per 16.67 ms (%.0f ms/s measured) %s", t->handle, comp_ms, ms_per_s, kr == KERN_SUCCESS ? "set" : "failed");
+}
 // CPU time of the guest threads since the last call, by Switch priority band (<= 44: the main thread's level and above; 45-59; >= 60) and the three busiest threads with their priority.
 // For the power line (hle_nvn.c power_line): it shows which threads a priority-to-QoS mapping would move and how much CPU they use. secs = the window length
 void dm_thread_cpu(char *out, size_t n, double secs) {
@@ -968,6 +990,7 @@ void dm_thread_cpu(char *out, size_t n, double secs) {
     for (int i = 0; i < 3 && top[i] && o < n; i++)
         o += (size_t)snprintf(out + o, n - o, "%s%#x '%s' priority %d %.0f ms/s%s", i ? ", " : "", top[i]->handle, thr_name(top[i], nb, sizeof nb), top[i]->prio, d[i], top[i]->host_owned ? " (host-created)" : "");
     if (!top[0] && o < n) snprintf(out + o, n - o, "none");
+    for (int i = 0; i < 3 && top[i]; i++) pcore_declare(top[i], d[i]);
     pthread_mutex_unlock(&G);
 }
 // Sleep until dl (host monotonic ns) on time: macOS nanosleep / mach_wait_until carry timer slack; measured, 33 ms sleeps take about 36.4 ms, 5 ms take 6.1 ms, 1 ms take 1.26 ms (the same at any QoS).

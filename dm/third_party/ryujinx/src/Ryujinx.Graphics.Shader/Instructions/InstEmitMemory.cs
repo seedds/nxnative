@@ -209,13 +209,16 @@ namespace Ryujinx.Graphics.Shader.Instructions
         private static Operand EmitAtomicAddF32(EmitterContext context, StorageKind storageKind, Operand e0, Operand e1, Operand value)
         {
             Operand lblRetry = Label();
+            Operand expected = Local();
+            context.Copy(expected, context.Load(storageKind, e0, e1));
             context.MarkLabel(lblRetry);
 
-            Operand expected = context.Load(storageKind, e0, e1);
             Operand sum = context.FPAdd(expected, value);
             Operand found = context.AtomicCompareAndSwap(storageKind, e0, e1, expected, sum);
+            Operand retry = context.ICompareNotEqual(found, expected);
+            context.Copy(expected, found);   // retried with the value the exchange returned, not a new plain load (nemyu 4fe22c860 + 942d01bd2: a plain reload can hit a stale line, the exchange never matches and the loop spins)
 
-            context.BranchIfTrue(lblRetry, context.ICompareNotEqual(found, expected));
+            context.BranchIfTrue(lblRetry, retry);
 
             return found;
         }

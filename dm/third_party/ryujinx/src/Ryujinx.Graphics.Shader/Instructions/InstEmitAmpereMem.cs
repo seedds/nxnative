@@ -483,13 +483,16 @@ namespace Ryujinx.Graphics.Shader.Instructions
         private static Operand AGlobalIncDec(EmitterContext context, AtomOp op, Operand lo, Operand hi, Operand value)
         {
             Operand loop = Label();
+            Operand cur = Local();
+            context.Copy(cur, context.Load(StorageKind.GlobalMemory, lo, hi));
             context.MarkLabel(loop);
-            Operand cur = context.Load(StorageKind.GlobalMemory, lo, hi);
             Operand next = op == AtomOp.Inc
                 ? context.ConditionalSelect(context.ICompareGreaterOrEqualUnsigned(cur, value), Const(0), context.IAdd(cur, Const(1)))
                 : context.ConditionalSelect(context.BitwiseOr(context.ICompareEqual(cur, Const(0)), context.ICompareGreaterUnsigned(cur, value)), value, context.IAdd(cur, Const(-1)));
             Operand prev = context.AtomicCompareAndSwap(StorageKind.GlobalMemory, lo, hi, cur, next);
-            context.BranchIfFalse(loop, context.ICompareEqual(prev, cur));
+            Operand same = context.ICompareEqual(prev, cur);
+            context.Copy(cur, prev);   // retried with the value the exchange returned, not a new plain load (nemyu 4fe22c860 + 942d01bd2: a plain reload can hit a stale line, the exchange never matches and the loop spins)
+            context.BranchIfFalse(loop, same);
 
             return cur;
         }
@@ -602,13 +605,16 @@ namespace Ryujinx.Graphics.Shader.Instructions
             if (op is AtomOp.Inc or AtomOp.Dec && x.Bits(73, 75) is 0 or 1)
             {
                 Operand loop = Label();
+                Operand cur = Local();
+                context.Copy(cur, context.Load(StorageKind.SharedMemory, id, offset));
                 context.MarkLabel(loop);
-                Operand cur = context.Load(StorageKind.SharedMemory, id, offset);
                 Operand next = op == AtomOp.Inc
                     ? context.ConditionalSelect(context.ICompareGreaterOrEqualUnsigned(cur, value), Const(0), context.IAdd(cur, Const(1)))
                     : context.ConditionalSelect(context.BitwiseOr(context.ICompareEqual(cur, Const(0)), context.ICompareGreaterUnsigned(cur, value)), value, context.IAdd(cur, Const(-1)));
                 Operand prev = context.AtomicCompareAndSwap(StorageKind.SharedMemory, id, offset, cur, next);
-                context.BranchIfFalse(loop, context.ICompareEqual(prev, cur));
+                Operand same = context.ICompareEqual(prev, cur);
+                context.Copy(cur, prev);   // retried with the value the exchange returned, not a new plain load (nemyu 4fe22c860 + 942d01bd2: a plain reload can hit a stale line, the exchange never matches and the loop spins)
+                context.BranchIfFalse(loop, same);
                 ASet(context, x, cur);
                 return;
             }

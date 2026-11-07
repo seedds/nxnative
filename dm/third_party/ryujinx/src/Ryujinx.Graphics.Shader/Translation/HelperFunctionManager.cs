@@ -532,15 +532,17 @@ namespace Ryujinx.Graphics.Shader.Translation
         private static Operand GenerateSharedAtomicCasLoop(EmitterContext context, Operand wordOffset, int id, Func<Operand, Operand> opCallback)
         {
             Operand lblLoopHead = Label();
+            Operand oldValue = Local();
+            context.Copy(oldValue, context.Load(StorageKind.SharedMemory, id, wordOffset));
 
             context.MarkLabel(lblLoopHead);
 
-            Operand oldValue = context.Load(StorageKind.SharedMemory, id, wordOffset);
             Operand newValue = opCallback(oldValue);
 
             Operand casResult = context.AtomicCompareAndSwap(StorageKind.SharedMemory, id, wordOffset, oldValue, newValue);
 
             Operand casFail = context.ICompareNotEqual(casResult, oldValue);
+            context.Copy(oldValue, casResult);   // retried with the value the exchange returned, not a new plain load (nemyu 4fe22c860 + 942d01bd2: a plain reload can hit a stale line, the exchange never matches and the loop spins)
 
             context.BranchIfTrue(lblLoopHead, casFail);
 

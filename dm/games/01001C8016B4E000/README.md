@@ -24,7 +24,8 @@ for every device. Audio downmix and general memory/resource loading use upstream
 - SDK: `43211771ed39e7fcef03d88e27091831`.
 - Validated source candidate: `55d30a5d052c1d9ef50e8e540acedde2eba3520a`, based on
   upstream `d365496da3fac6133fa9654a60ac9afb4f63eb39`.
-- Shader Chain: `337c3caedaa7`; profile inputs: `f3827e6db64f`.
+- Historically validated Shader Chain: `337c3caedaa7`; profile inputs: `f3827e6db64f`.
+- Current profile inputs after empty-table normalization: `a95ce55a38c6`.
 
 A fresh upstream split finds 386 unique programs (187 vertex, 187 pixel, 12
 compute), 12 compute-query rows and 187 single-stage cover pairs. These structural
@@ -32,6 +33,29 @@ tables were regenerated for upstream, not taken from old Touchline23 libraries.
 The cover supplies pixel inputs through the normal pipeline; historical runtime
 pairs and old PSO seeds are not imported. Mac and unsigned iOS builds completed.
 No generated shader instructions, control sections, constants or libraries ship.
+
+## Empty conflict table normalization
+
+The conflict table now contains only the five-column TSV header and no records.
+The actual `dmsh_build.py` map-reader block produces identical maps, locations and
+zero conflict rulings before and after normalization, covering all 386 programs.
+`dmsh_chain.py --inputs` hashes raw table bytes: the old comment-only table gives
+`f3827e6db64f`, the requested header alone gives `a95ce55a38c6`, and the previously
+proposed comment-plus-header template gives `e0dd990e4d16`.
+
+The aggregate input digest is not in `shader_key`; only parsed conflict rows are.
+No per-shader inputs, translation code or chain changed, so this formatting change
+requires no shader extraction, translation or Metal recompilation. The digest is
+also a freshness stamp: `inputs.tsv` and the generated `c1_full.tsv` / `cb_extent.tsv`
+headers must agree, and IPA packaging checks the current profile digest. Existing
+private libraries and the previously built IPA retain their historical stamp;
+none was restamped or rebuilt here. Before packaging this normalized profile,
+refresh library/table metadata through the normal cached build publication flow.
+Do not relabel the old IPA or claim a new-digest build has passed.
+
+The historical manual results below remain evidence for equivalent shader/runtime
+semantics, not a device test of the normalized fingerprint. This correction ran
+only byte-format, actual-reader and input-digest checks; no game or device test.
 
 ## Validation
 

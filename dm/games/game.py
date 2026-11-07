@@ -102,7 +102,9 @@ def by_build(main_id):   # the profile whose build rows register this main build
 
 
 # agl's upscaler network (NDSR), by where the shader map found each key: the compute shaders of agl_ndsr.pck (Donkey Kong Bananza's 24 in its release library, Splatoon Raiders' 20 in its debug one)
-UPSCALER_SOURCE = re.compile(r'/agl_ndsr\.pck#')
+# and of its variants agl_ndsr_vr.pck and agl_ndsr_vr_light.pck: The Legend of Zelda: Ocarina of Time (Switch 2) upscales with agl_ndsr_vr.pck's, so DM_UPSCALER=metalfx left its network
+# running. A variant the host cannot draw (its colour, its rectangles) is refused there and runs as the game's (nvn_mtl.m up_mfx_wanted, up_mfx_encode)
+UPSCALER_SOURCE = re.compile(r'/agl_ndsr(?:_vr(?:_light)?)?\.pck#')
 
 
 def upscaler_keys(g):

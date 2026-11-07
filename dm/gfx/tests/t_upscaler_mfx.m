@@ -62,10 +62,35 @@ int main(void) { @autoreleasepool {
     CHECK(color_of(both, 4, NULL, 0) == UP_COLOR_LINEAR, "an encode and a decode in floats: linear input and output (Bananza)");
     CHECK(color_of(NULL, 0, dec16, 3) == UP_COLOR_SRGB, "only a decode, in half floats: sRGB input, linear output (Splatoon Raiders)");
     CHECK(color_of(enc, 2, NULL, 0) == UP_COLOR_KEEP, "an encode with no decode: the output stays encoded, the shader runs");
-    CHECK(color_of(NULL, 0, NULL, 0) == UP_COLOR_KEEP, "no curve: the output stays encoded, the shader runs");
+    CHECK(color_of(NULL, 0, NULL, 0) == UP_COLOR_LINEAR, "no curve and no power: input and output in one colour space, drawn with no conversion (Ocarina of Time's agl_ndsr_vr.pck)");
+    {   // no curve constant, but a MUFU.LG2 / MUFU.EX2: its curves may take their constants from a constant buffer
+        uint8_t code[4096] = {0};
+        for (int f = 2; f <= 3; f++) {
+            memset(code, 0, sizeof code);
+            uint64_t lo = 0x308, hi = (uint64_t)f << 10; memcpy(code + 256, &lo, 8); memcpy(code + 264, &hi, 8);   // MUFU (register form), function EX2 / LG2
+            CHECK(up_mfx_color(code, sizeof code) == UP_COLOR_KEEP, "no curve constant but a power (MUFU.EX2 / MUFU.LG2): the shader runs");
+        }
+        uint64_t lo = 0x308, hi = (uint64_t)4 << 10; memset(code, 0, sizeof code); memcpy(code + 256, &lo, 8); memcpy(code + 264, &hi, 8);   // MUFU.RCP: no power
+        CHECK(up_mfx_color(code, sizeof code) == UP_COLOR_LINEAR, "a MUFU that is no power (RCP) does not count as a curve");
+        // HMUL2 R4, R2, |R2| (register form, |Rb| at bit 62): the square agl_ndsr_vr's networks take of their output (Ocarina of Time)
+        uint64_t sq = 0x232 | (uint64_t)4 << 16 | (uint64_t)2 << 24 | (uint64_t)2 << 32 | 1ull << 62;
+        memset(code, 0, sizeof code); for (int i = 0; i < 8; i++) memcpy(code + 512 + 16 * i, &sq, 8);
+        CHECK(up_mfx_color(code, sizeof code) == UP_COLOR_SQ, "no curve, eight x * |x| squares: square-root-encoded input, linear output (Ocarina of Time's agl_ndsr_vr.pck)");
+        memset(code + 512 + 16 * 7, 0, 16);
+        CHECK(up_mfx_color(code, sizeof code) == UP_COLOR_LINEAR, "seven squares are chance, not the network's output");
+        uint64_t plain = sq & ~(1ull << 62), other = (sq & ~(0xffull << 32)) | (uint64_t)3 << 32, rz = (sq & ~(0xffull << 24 | 0xffull << 32)) | 0xffull << 24 | 0xffull << 32;
+        const uint64_t not_sq[3] = {plain, other, rz}; const char *why[3] = {"x * x with no |x| is not the signed square", "x * |y| of two registers is not a square", "RZ * |RZ| is not a square"};
+        for (int k = 0; k < 3; k++) {
+            memset(code, 0, sizeof code); for (int i = 0; i < 8; i++) memcpy(code + 512 + 16 * i, &not_sq[k], 8);
+            CHECK(up_mfx_color(code, sizeof code) == UP_COLOR_LINEAR, why[k]);
+        }
+        memset(code, 0, sizeof code); for (int i = 0; i < 8; i++) memcpy(code + 512 + 16 * i, &sq, 8);
+        uint64_t lo2 = 0x308, hi2 = (uint64_t)2 << 10; memcpy(code + 256, &lo2, 8); memcpy(code + 264, &hi2, 8);
+        CHECK(up_mfx_color(code, sizeof code) == UP_COLOR_KEEP, "squares beside a power: a curve may be there, the shader runs");
+    }
     CHECK(color_of(dec, 2, NULL, 0) == UP_COLOR_KEEP, "a shape no pack has shown (a decode in floats, no encode): the shader runs");
     CHECK(color_of(NULL, 0, (const float[4]){0.040435791015625f, 2.3984375f, 0.07745361328125f, enc16[0]}, 4) == UP_COLOR_KEEP, "a half float encode must not read as encoded input: the shader runs");
-    CHECK(up_mfx_color(rare, sizeof rare) == UP_COLOR_KEEP, "a constant used once is chance, not a curve");
+    CHECK(up_mfx_color(rare, sizeof rare) != UP_COLOR_SRGB, "a constant used once is chance, not a curve");
     const char *up = getenv("DM_UPSCALER"); int on = up && !strcmp(up, "metalfx");
     tex_t in = texture(77, 960, 540, NVN_FORMAT_RGBA16F), out = texture(78, 1920, 1080, NVN_FORMAT_RGBA16F), same = texture(79, 960, 540, NVN_FORMAT_RGBA16F);
     out.d.flags |= NVN_TEXTURE_FLAGS_IMAGE; same.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
@@ -128,6 +153,20 @@ int main(void) { @autoreleasepool {
         CHECK(up_mfx_encode(named), "linear input after sRGB at the same sizes");
         CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the second linear submission completes");
         CHECK(matches(written, colour, MTLRegionMake2D(0, 0, 1920, 1080), black), "the same sizes in linear colour are not decoded: each colour has its own scaler");
+        // Square-root-encoded input, linear output (Ocarina of Time): the colour comes out squared, from the full texture and from a packed subrectangle
+        NvShader *rooted = upscaler(key); rooted->up_color = UP_COLOR_SQ;
+        CHECK(up_mfx_wanted(rooted), "a named shader that squares its colour is swapped");
+        const float squared[4] = {0.25f, 0.0625f, 0.5625f, 1.0f};   // 0.5, 0.25, 0.75 squared, alpha kept
+        fill(written, MTLClearColorMake(0, 0, 0, 1)); mtl_sub_begin();
+        CHECK(up_mfx_encode(rooted), "MetalFX takes square-root-encoded input");
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the square-root submission completes");
+        CHECK(matches(written, squared, MTLRegionMake2D(0, 0, 1920, 1080), black), "the square-root-encoded input comes out squared, not as it is: through the scaler's input even when MetalFX could take the textures straight");
+        fill(tex_mtl(&packed), MTLClearColorMake(colour[0], colour[1], colour[2], colour[3])); fill(written, MTLClearColorMake(0, 0, 0, 1));
+        { const uint32_t r[8] = {7, 3, 959, 539, 13, 9, 1899, 1059}; memcpy(S.push[1], r, sizeof r); } S.tex[5][0] = 704; mtl_sub_begin();
+        CHECK(up_mfx_encode(rooted), "MetalFX takes a packed square-root-encoded subrectangle");
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the packed square-root submission completes");
+        CHECK(matches(written, squared, MTLRegionMake2D(13, 9, 1900, 1060), black), "the packed square-root input comes out squared, in its destination rectangle only");
+        { const uint32_t rects[8] = {0, 0, 959, 539, 0, 0, 1919, 1079}; memcpy(S.push[1], rects, sizeof rects); }
         NvShader *encoded_out = upscaler(key); encoded_out->up_color = UP_COLOR_KEEP;
         CHECK(!up_mfx_wanted(encoded_out), "a named shader whose output stays encoded is left to its shader");
         S.tex[5][0] = 701;

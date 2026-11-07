@@ -158,6 +158,8 @@ t_tex_fit_root: t_tex_fit_root.m $(MTL_T_DEP)
 .PHONY: check_t_tex_fit_root
 check_t_tex_fit_root: t_tex_fit_root
 	MTL_DEBUG_LAYER=1 ./t_tex_fit_root
+t_pool_holds: t_pool_holds.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_holds.m $(MTL_T_SRC) $(FW)
 t_pool_chunks: t_pool_chunks.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_chunks.m $(MTL_T_SRC) $(FW)
 t_gmem_words: t_gmem_words.m $(MTL_T_DEP)

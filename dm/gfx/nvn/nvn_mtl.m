@@ -756,6 +756,9 @@ static int mtl_addr_known(uint64_t addr, uint64_t len) {
     pthread_mutex_lock(&g_mu); int ok = big_of(addr) >= 0 || pool_find(addr, len) >= 0; pthread_mutex_unlock(&g_mu);
     return ok;
 }
+// Whether [addr, addr + len) lies in one memory pool, as mtl_addr finds it, without making the pool resident. hle_nvn.c keys_hash checks this way that a shader's code is mapped:
+// through mtl_addr it made every pool holding shader code resident, which the GPU never reads, since the shaders run translated (Ocarina of Time: 222 pools, 334 MB)
+int mtl_pool_holds(uint64_t addr, uint64_t len) { pthread_mutex_lock(&g_mu); int i = pool_find(addr, len); pthread_mutex_unlock(&g_mu); return i >= 0; }
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     const pc_ent *c = pc_get(addr, len);
     if (c) { *buf = (__bridge void *)c->buf; *off = addr - c->base; return 1; }

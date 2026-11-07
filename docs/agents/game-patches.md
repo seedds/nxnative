@@ -57,6 +57,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | 60 fps frame step: the KIDS frame task, frame-rate block and event cutscene counters | frame rate | blocked: a function-matched frame step (MATCH_FRAME_STEP) covers one function; these stubs span several | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the game's own frame code; only the host's frame-step state page is shared. Fire Emblem: Three Houses and Taiko Risshiden V DX run on KTGL too, with other frame code |
 | `build` → `game` | screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) | the output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code |
 | `build` → `game` | Hagi coroutine stack region 1 GB → 64 MB | memory | kept: 1.1.4 is the last update; a match over Hagi would serve no other build of this game | checked: the final build 1.1.4 (the only one the profile packs), 2026-11-04 | 1 | [Super Mario 3D All-Stars: Super Mario Sunshine](../../dm/games/010049900F546002/README.md) | a size inside Hagi's own code: nothing the host sees tells a 1 GB reservation it can shrink from one it cannot |
+| `build` → `game` | three prologue cuts of main (DT_INIT null-vtable crash) | runtime | kept: permanent for 1.0.2; a new update needs its own build ID and its own check | judgement | 1 | [Godzilla: Destroy All Monsters Melee Remastered](../../dm/games/0100A00026D70000/README.md) | the offsets are this build's, but they are the shipped image's own bytes: any build of this title needs them, and a rebuild from the same update reproduces them |
 
 ## Summary
 
@@ -71,6 +72,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](#final-fantasy-tactics---the-ivalice-chronicles) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Fire Emblem Engage](#fire-emblem-engage) | 1 | 0 | 0 | 0 | 0 | `build` → `engine` |
 | [Fire Emblem: Three Houses](#fire-emblem-three-houses) | 12 | 0 | 0 | 0 | 0 | `build` → `game`, `build` → `host` |
+| [Godzilla: Destroy All Monsters Melee Remastered](#godzilla-destroy-all-monsters-melee-remastered) | 3 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Hyrule Warriors: Age of Calamity](#hyrule-warriors-age-of-calamity) | 0 | 0 | 5 | 0 | 0 | `build` → `game` |
 | [Luigi's Mansion 3](#luigis-mansion-3) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [Mario + Rabbids® Sparks of Hope](#mario--rabbids-sparks-of-hope) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -339,6 +341,17 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x50f8ec`: render thread wait timeout: fdiv s0,s1,s0 → ldr s8,[x8,#0xb50] (1000.0)
   - cut `+0x50f8f0`: render thread wait timeout: adrp x8,#0xcb7000 → fdiv s0,s8,s0 (1000/fps; the fmul by s8 that follows makes it µs)
   - cut `+0x50f8f4`: render thread wait timeout: ldr s8,[x8,#0xb50] → nop (moved up)
+
+### Godzilla: Destroy All Monsters Melee Remastered
+
+[Godzilla: Destroy All Monsters Melee Remastered](../../dm/games/0100A00026D70000/README.md), `0100A00026D70000`, [patches.py](../../dm/games/0100A00026D70000/patches.py).
+
+- **`build` → `game`**, runtime, kept: permanent for 1.0.2; a new update needs its own build ID and its own check, judgement: three prologue cuts of main (DT_INIT null-vtable crash). The offsets are this build's, but they are the shipped image's own bytes: any build of this title needs them, and a rebuild from the same update reproduces them
+
+- **1.0.2 `main`** `b28a1cc0…` ([patches.py:10](../../dm/games/0100A00026D70000/patches.py#L10))
+  - cut `+0xb7f20`: the shipped image forwards this function to this->vtable[3] instead of running it: its body crashes at main+0xbc584 (a null vtable read) during nninitStartup DT_INIT
+  - cut `+0xb8530`: the shipped image forwards this function to this->vtable[5] instead of running it (same DT_INIT crash)
+  - cut `+0x1ffa2c`: the shipped image stores a pointer here instead of calling the two functions (same DT_INIT crash)
 
 ### Hyrule Warriors: Age of Calamity
 

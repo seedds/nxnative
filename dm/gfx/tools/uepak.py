@@ -165,7 +165,7 @@ def magic_back(f):
     """(how far from the end the footer's magic is, the pak version): a legacy footer is the last 0x2d bytes (magic 0x2c from the end); version 11's magic is 0xc8 from the end in
     Octopath Traveler 0 (UE5) and 0xcc in Unreal Engine 4.27 (DRAGON QUEST VII Reimagined: five whole 32-byte compression method names after the SHA-1)"""
     size = f.seek(0, 2)
-    for back, foot in ((0x2c, 0x2d), (0xc8, 0xc8 + 21), (0xcc, 0xcc + 21)):
+    for back, foot in ((0x2c, 0x2d), (0xac, 0xac + 21), (0xc8, 0xc8 + 21), (0xcc, 0xcc + 21)):
         if size < foot: continue   # shorter than this footer
         f.seek(-back, 2); m, ver = struct.unpack('<II', f.read(8))
         if m == PAK_MAGIC: return back, ver
@@ -239,13 +239,14 @@ class Pak:
         self.mount = r.fstr(); self.count = r.take('<i')
         if self.version in LEGACY:   # one FPakEntry per file, kept as parsed
             self.files = {}
+            mw = 1 if self.version == 8 and magic_back(self.f)[0] == 0xac else 4   # entry method field: 1 byte in Minecraft Dungeons' paks (UE 4.22)
             for _ in range(self.count):
-                name = r.fstr(); off, size, raw, meth = r.take('<qqqi'); r.raw(20)
+                name = r.fstr(); off, size, raw = r.take('<qqq'); meth = int.from_bytes(r.raw(mw), 'little'); r.raw(20)
                 blocks = [r.take('<qq') for _ in range(r.take('<i'))] if meth else []
-                e, bsz = r.take('<BI'); head = 53 + (4 + 16 * len(blocks) if meth else 0)
+                e, bsz = r.take('<BI'); head = 49 + mw + (4 + 16 * len(blocks) if meth else 0)
                 if self.version < 5: blocks = [(s - off, t - s) for s, t in blocks]
                 else: blocks = [(s, t - s) for s, t in blocks]
-                self.files[name] = dict(off=off, raw=raw, size=size, method=(LEGACY_METHODS.get(meth, f'flags {meth}') if self.version < 8 else self.methods[meth - 1] if 0 < meth <= len(self.methods) else f'method {meth}') if meth else '', encrypted=e, block_size=bsz, blocks=blocks or [(head, size)])
+                self.files[name] = dict(off=off, raw=raw, size=size, method=(LEGACY_METHODS.get(meth, f'flags {meth}') if self.version < 8 else self.methods[meth - 1] if 0 < meth <= len(self.methods) else f'method {meth}') if meth else '', encrypted=e, block_size=bsz, blocks=blocks or [(head, size)], head=head)
             return
         r.take('<Q')
         if r.take('<i'): r.take('<QQ'); r.raw(20)   # path hash index (not needed with the full directory index)
@@ -280,7 +281,7 @@ class Pak:
         """A file's bytes, block by block (each block holds block_size raw bytes, the last one the rest). Zlib and LZ4 blocks are decoded here (OCTOPATH TRAVELER II: Zlib); any other
         method needs decode(block bytes, raw length) → bytes: the game's own decoder in the Mac host (shader_split.py oodle); Octopath Traveler 0's archives go through the Oodle job instead"""
         e = self.entry(path)
-        if not e['method']: return self.read_at(e['off'] + 53, e['size'], e['encrypted'])
+        if not e['method']: return self.read_at(e['off'] + e.get('head', 53), e['size'], e['encrypted'])
         import zlib
         bad = (zlib.error,)   # a block its decoder refuses
         if e['method'] == 'Zlib': decode = zlib_block
@@ -305,18 +306,30 @@ def zlib_block(b, k):
 def archive(b, what='shader code archive') -> dict:
     """A shader code archive's tables: {'maps': [(first index, count)], 'shaders': [(offset, size, raw size, frequency)], 'indices': [...], 'code': start of the code}; what names it in errors"""
     r = R(b, what=what)
-    if r.take('<I') != ARCHIVE_VERSION: raise ValueError('not a version 2 shader code archive')
+    ver = r.take('<I')
+    if ver == 1:   # Unreal Engine 4.22 (Minecraft Dungeons): the version, a count, then per shader its SHA-1, offset (u64), size and raw size (u32 each) and frequency (u8); the code follows at once, no map tables
+        shaders = []
+        for _ in range(r.take('<I')): r.raw(20); shaders.append(r.take('<QIIB'))
+        return dict(maps=[], shaders=shaders, indices=[], code=r.o, version=1)
+    if ver != ARCHIVE_VERSION: raise ValueError('not a version 1 or 2 shader code archive')
     nmap = r.take('<I'); r.raw(20 * nmap); nsh = r.take('<I'); r.raw(20 * nsh)
     maps = [r.take('<IIII')[:2] for _ in range(r.take('<I'))]
     shaders = [r.take('<QIIB') for _ in range(r.take('<I'))]
     r.raw(16 * r.take('<I'))
     indices = list(r.array('I', r.take('<I')))
-    return dict(maps=maps, shaders=shaders, indices=indices, code=r.o)
+    return dict(maps=maps, shaders=shaders, indices=indices, code=r.o, version=ARCHIVE_VERSION)
 
 def decoded_archive(b, raws):
     """The archive with every shader replaced by its decoded bytes (raws, in entry order): the same tables, each entry's size = its raw size, the code laid out again
     (the preload entries keep their old file ranges; only the shader tools read these copies)"""
-    a = archive(b); r = R(b, what='shader code archive'); r.take('<I')
+    a = archive(b)
+    if a['version'] == 1:   # the same table with each entry's size = its raw size and the offsets laid out again; the SHA-1s stay
+        ents, off = bytearray(), 0
+        for i, ((_, _, raw, fr), d) in enumerate(zip(a['shaders'], raws)):
+            if len(d) != raw: raise ValueError(f'decoded shader of {len(d)} bytes, the archive says {raw}')
+            ents += b[8 + 37 * i:28 + 37 * i] + struct.pack('<QIIB', off, raw, raw, fr); off += raw
+        return b[:8] + bytes(ents) + b''.join(raws)
+    r = R(b, what='shader code archive'); r.take('<I')
     for elem in (20, 20, 16): r.raw(elem * r.take('<I'))
     head, ents_at = b[:r.o + 4], r.o + 4; n = len(a['shaders']); tail_at = ents_at + 17 * n
     ents, off = bytearray(), 0
@@ -343,6 +356,23 @@ def lz4_shaders(b, a):
         try: d = lz4.block.decompress(c, uncompressed_size=raw)
         except Exception: return None
         if len(d) != raw or d[:4] != b'LSLG': return None
+        out.append(d)
+    return out
+
+def zlib_shaders(b, a, where='shader code archive'):
+    """Every shader of a version 1 archive (Unreal Engine 4.22: zlib) decoded, each checked to be an LSLG record of its raw size; None when one is no zlib stream of that size.
+    A shader that decodes to something else raises with its first bytes"""
+    import zlib
+    out = []
+    for i, (off, size, raw, _) in enumerate(a['shaders']):
+        c = b[a['code'] + off:a['code'] + off + size]
+        if size == raw: out.append(c); continue
+        if raw > 1032 * len(c) + 64: return None   # more than deflate can expand to
+        z = zlib.decompressobj()
+        try: d = z.decompress(c, raw + 1)
+        except zlib.error: return None
+        if len(d) != raw or not z.eof: return None
+        if d[:4] != b'LSLG': raise ValueError(f'{where}: shader {i} decodes to a record that starts {d[:8].hex()}, not LSLG')
         out.append(d)
     return out
 
@@ -516,6 +546,8 @@ def inline_shaders(path):
     shaders are in its container's shader libraries, and Octopath Traveler 0's index is encrypted (reading it takes main's key; it holds the archives): neither counts"""
     with open(path, 'rb') as f:
         enc, ioff, isz, _, ver = footer(f)
+        if ver == 8 and not enc:   # UE 4.22 and later: shader code archives in the pak (bShareMaterialShaderCode on: Minecraft Dungeons' pakchunk0) go the archive route, not file by file
+            return not any(n.endswith('.ushaderbytecode') for n in Pak(path).files)
         if ver in LEGACY: return True
         if enc: return False
         r = R(read_range(f, ioff, isz, path), what=f'{path}: the index'); r.fstr(); r.take('<iQ')
@@ -565,8 +597,8 @@ def job(romfs, main_nso, work, decode=None):
         for path in sorted(x for x in p.files if x.endswith('.ushaderbytecode')):
             b = p.read(path); a = archive(b, f'{pak}: {path}'); name = os.path.basename(path)
             comp = [i for i, (_, size, raw, _) in enumerate(a['shaders']) if size != raw]
-            raws = lz4_shaders(b, a)
-            if comp and raws: b = decoded_archive(b, raws); comp, how = [], 'LZ4'   # decoded here: the Oodle job gets none of them
+            raws = zlib_shaders(b, a, f'{pak}: {path}') if a['version'] == 1 else lz4_shaders(b, a)
+            if comp and raws: b = decoded_archive(b, raws); comp, how = [], ('Zlib' if a['version'] == 1 else 'LZ4')   # decoded here: the Oodle job gets none of them
             else: how = 'Oodle' if comp else ''
             open(os.path.join(work, 'archives', name), 'wb').write(b)
             for i in comp:

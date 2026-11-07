@@ -1,0 +1,85 @@
+# Version-independent cheats for nxnative (scripts/cheat_anchor.py, format 1).
+# Imported from E0F3CCFAF50065AE.txt on 2026-11-07 with the code of build E0F3CCFAF50065AE. Compile it for a build with
+#   cheat_anchor.py compile <this file> --nso <that build's ExeFS/main> -o <cheats folder>
+# This source has no anchors: heap addresses cannot be anchored, so its entries compile only for build E0F3CCFAF50065AE
+# (update v131072).
+#
+# The codes are rainbowkittypaw's, posted on GBAtemp on 2026-11-06 for the Lichii emulator:
+#   https://gbatemp.net/threads/cheat-codes-ams-and-sx-os-add-and-request.520293/page-3738#post-10942642
+# Each sets one of the game's s32 game-data flags to 9999. This host keeps those flags 0x2000 bytes higher in the heap
+# than Lichii does, so every address here is the post's plus 0x2000, and each write is gated on the flag's hash being in
+# its slot of the game-data table (README.md, "Cheats").
+
+format = 1
+title = "0400486024DEC000"
+authored = "E0F3CCFAF50065AE"
+
+[[cheats]]
+name = "GBAtemp codes by rainbowkittypaw 2026-11-06, ported (+0x2000)"
+label = true
+
+[[cheats]]
+name = "Infinite Rupees"
+note = "By rainbowkittypaw (GBAtemp, 2026-11-06), address +0x2000 for this host; gated on flag a77921d7's slot"
+code = """
+40000000 00000000 00000000
+14150000 7F370FC0 A77921D7
+04100000 7F37E134 0000270F
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Infinite Deku Nuts"
+note = "By rainbowkittypaw (GBAtemp, 2026-11-06), address +0x2000 for this host; gated on flag f30d9f54's slot"
+code = """
+40000000 00000000 00000000
+14150000 7F372460 F30D9F54
+04100000 7F37EA1C 0000270F
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Infinite Deku Sticks"
+note = "By rainbowkittypaw (GBAtemp, 2026-11-06), address +0x2000 for this host; gated on flag b9494411's slot"
+code = """
+40000000 00000000 00000000
+14150000 7F374100 B9494411
+04100000 7F37EA6C 0000270F
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Infinite Seeds"
+note = "By rainbowkittypaw (GBAtemp, 2026-11-06), address +0x2000 for this host; gated on flag 5fadf7fc's slot"
+code = """
+40000000 00000000 00000000
+14150000 7F372FF8 5FADF7FC
+04100000 7F37EA44 0000270F
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Infinite Bombs"
+note = "By rainbowkittypaw (GBAtemp, 2026-11-06), address +0x2000 for this host; gated on flag db1bcd4f's slot"
+code = """
+40000000 00000000 00000000
+14150000 7F372EA8 DB1BCD4F
+04100000 7F37E83C 0000270F
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]
+
+[[cheats]]
+name = "Infinite Bombchus"
+note = "By rainbowkittypaw (GBAtemp, 2026-11-06), address +0x2000 for this host; gated on flag df7c517a's slot"
+code = """
+40000000 00000000 00000000
+14150000 7F3715E8 DF7C517A
+04100000 7F37E8DC 0000270F
+20000000
+"""
+builds = ["E0F3CCFAF50065AE"]

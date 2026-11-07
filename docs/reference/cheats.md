@@ -58,6 +58,8 @@ At attach dmnt records the process's regions (`svc::GetInfo`) in its metadata; a
 
 The bases are fixed for the life of the attach. Games with virtual address memory map their memory with `svcMapPhysicalMemory`, which the kernel accepts only inside the alias region (`R_UNLESS(page_table.IsInAliasRegion(address, size), ...)`, `kern_svc_physical_memory.cpp`), so their objects are found through type 2 or through pointers, not through `heap+` ([memory.md, the alias region](memory.md#virtual-address-memory-and-the-alias-region)). There is no stack selector: a stack is reached by an absolute address or a register.
 
+A heap offset belongs to one layout of the game's own allocations, which another host or emulator can change: a heap code shared for one may name other data on another. Ocarina of Time's game data lies 0x2000 bytes higher on this host than under Lichii ([its page](../../dm/games/0400486024DEC000/README.md#cheats)).
+
 What a read or write can reach is the kernel's rule, not the region (`KPageTableBase::ReadDebugMemory` / `WriteDebugMemory`, `CanReadWriteDebugMemory`): a **read** succeeds on any mapped, user-readable page anywhere in the process; a **write** on any mapped user-read-write page, or on debuggable memory that is user-readable, which includes main's code and read-only data (so code patches work without changing protection). Unmapped pages fail. A region's size is never checked by the VM.
 
 ### Cadence

@@ -94,6 +94,7 @@ void nro_load_alone(module_t *m);   // relocate an NRO against itself only: a JI
 const char *dm_jit_serve_dir(void); uint8_t *dm_jit_layout_base(void);   // a served nn::jit image and the layout the modules are mapped in for it (loader.c, hle_jit.c)
 void nro_unload(module_t *m);   // take an NRO out of the lookups and bind the imports that pointed into it again
 int svc_nro_deactivate(module_t *m);   // mark inactive under the memory map lock, refusing while a stack borrows its data
+void dm_device_share(const void *p, uint64_t size, int share);   // guest memory a device maps (share 1) or no longer maps (0): Horizon's DeviceShared attribute, which refuses unmapping it (hle_svc.c)
 void *module_sym(module_t *m, const char *name);
 int dm_sdk_major(void);   // SDK major version from the sdk module's version string (loader.c); 0 = unknown
 int dm_sdk_ounce(void);   // 1 when the sdk module was built for the Switch 2 (its spec string "spec: Ounce", loader.c)

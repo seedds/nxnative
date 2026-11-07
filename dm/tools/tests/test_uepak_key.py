@@ -5,6 +5,7 @@ import struct
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
@@ -24,11 +25,11 @@ STP_Q0_Q1_X0, RET = 0xAD000400, 0xD65F03C0
 
 
 def pak(path, key, mount=b'../../../\0'):
-    """A version 11 pak footer whose index starts with the mount point, encrypted with key (the 0xcc footer of Unreal Engine 4.27)"""
+    """A version 11 pak footer whose index starts with the mount point, encrypted with key (the 0xcc footer of Unreal Engine 4.27; key None: in the clear)"""
     index = struct.pack('<i', len(mount)) + mount
     index += bytes(-len(index) % 16)
-    enc = aes_encrypt(key, index)
-    foot = bytes(16) + b'\x01' + struct.pack('<IIQQ', uepak.PAK_MAGIC, 11, 0, len(enc)) + bytes(20) + bytes(32 * 5)
+    enc = aes_encrypt(key, index) if key else index
+    foot = bytes(16) + (b'\x01' if key else b'\x00') + struct.pack('<IIQQ', uepak.PAK_MAGIC, 11, 0, len(enc)) + bytes(20) + bytes(32 * 5)
     path.write_bytes(enc + foot)
 
 
@@ -75,6 +76,25 @@ class KeySearch(unittest.TestCase):
         w = list(struct.unpack_from('<6I', img, 0x40)); w.insert(2, 0xD2800008)   # mov x8, #0
         img = img[:0x40] + struct.pack('<7I', *w) + img[0x40 + 28:]
         self.assertEqual(uepak.code_keys(img, lo), [])
+
+    def test_the_keys_of_a_game(self):
+        """uepak.Keys: no main is loaded for a pak in the clear; the base game's main opens the first pak, the update's is never loaded, and the key found opens the next pak
+        before any search of main"""
+        img, lo, hi = self.image(False)
+        d = Path(self.tmp.name); plain, a, b = d / 'plain.pak', d / 'a.pak', d / 'b.pak'
+        pak(plain, None); pak(a, self.key); pak(b, self.key)
+        keys = uepak.Keys(['base', 'update'])
+        with patch.object(uepak, 'nso_image', return_value=(img, lo, hi)) as load:
+            self.assertIsNone(keys(str(plain))); load.assert_not_called()
+            self.assertEqual(keys(str(a)), self.key)
+            with patch.object(uepak, 'code_keys', side_effect=AssertionError('main searched again')):
+                self.assertEqual(keys(str(b)), self.key)
+        self.assertEqual([c.args for c in load.call_args_list], [('base',)])
+
+    def test_no_main_holds_the_key(self):
+        p = Path(self.tmp.name) / 'a.pak'; pak(p, self.key)
+        with patch.object(uepak, 'nso_image', return_value=(bytes(0x3000), 0x1000, 0x3000)):
+            with self.assertRaisesRegex(ValueError, f'{p}: the index is encrypted and no key in main'): uepak.Keys(['base', 'update'])(str(p))
 
 
 if __name__ == '__main__':

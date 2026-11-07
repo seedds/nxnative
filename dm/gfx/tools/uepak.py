@@ -215,20 +215,39 @@ def code_keys(img, lo):
         if a is not None and b is not None and a + 16 <= len(img) and b + 16 <= len(img): out.append(img[a:a + 16] + img[b:b + 16])
     return out
 
-def find_key(img, lo, hi, pak):
-    """The AES key that decrypts the index start to a short mount point: one main's code stores from two 16-byte literals (code_keys), else one of main's 32-byte windows
-    (read-only and data segments, 4-aligned, at least 20 distinct bytes)"""
+def find_key(img, lo, hi, pak, first=()):
+    """The AES key that decrypts the index start to a short mount point: one of first (a key another pak of the game opened with), one main's code stores from two 16-byte literals
+    (code_keys), else one of main's 32-byte windows (read-only and data segments, 4-aligned, at least 20 distinct bytes)"""
     with open(pak, 'rb') as f:
         _, ioff, _, _, _ = footer(f); f.seek(ioff); blk = f.read(16)
     def opens(k):
         d = aes_decrypt(k, blk)
         return 0 < struct.unpack_from('<i', d)[0] < 512 and d[4:7] == b'../'
+    for k in first:   # before code_keys, which reads all of main's code
+        if opens(k): return k
     for k in code_keys(img, lo):
         if opens(k): return k
     for a in range(lo, hi - 32, 4):
         w = img[a:a + 32]
         if len(set(w)) >= 20 and opens(w): return w
     return None
+
+class Keys:
+    """The AES keys of a game's paks, from its mains (the ExeFS main of each version, base game first): keys(pak) → None for a pak whose index is not encrypted, else the key find_key finds,
+    trying each main in turn; ValueError when none opens it. Each main is loaded once, at the first encrypted pak, and a key found is tried first on the next pak, so a game's
+    second pak or version does not search main again (the shader code archives, job; the paks with the shaders inline, shader_split.py ue_legacy_jobs)"""
+    def __init__(self, mains):
+        self.mains, self.imgs, self.found = list(mains), {}, []
+    def __call__(self, pak):
+        with open(pak, 'rb') as f: enc = footer(f)[0]
+        if not enc: return None
+        for m in self.mains:
+            if m not in self.imgs: self.imgs[m] = nso_image(m)
+            k = find_key(*self.imgs[m], pak, first=self.found)
+            if k:
+                if k not in self.found: self.found.append(k)
+                return k
+        raise ValueError(f'{pak}: the index is encrypted and no key in main (a 32-byte window or two 16-byte literals its code stores together) decrypts it')
 
 class Pak:
     def __init__(self, path, key=None):
@@ -539,7 +558,7 @@ def job(romfs, main_nso, work, decode=None):
     The shader libraries of IoStore containers (Unreal Engine 5.6, FINAL FANTASY RESONANCE: no archive in the pak) go there already decoded: their container blocks and shader groups are
     Oodle-compressed, two layers, so they need decode (OodleHost: the game's decoder over a pipe) rather than the job"""
     os.makedirs(os.path.join(work, 'archives'), exist_ok=True)
-    img, lo, hi = nso_image(main_nso); key = None; listing, recs = [], []
+    keys = Keys([main_nso]); listing, recs = [], []
     tocs = io_tocs(romfs)
     libs = [t for t in tocs if t.of_type(IO_SHADER_LIBRARY)]
     if libs and not decode: raise ValueError(f'{libs[0].path}: IoStore shader libraries need the game\'s decoder (decode)')
@@ -557,11 +576,7 @@ def job(romfs, main_nso, work, decode=None):
             open(os.path.join(work, 'archives', name), 'wb').write(b)
             listing.append(dict(name=name, pak=os.path.relpath(t.path, romfs), path=f'chunk {t.ids[i].hex()}', shaders=len(archive(b)['shaders']), compressed=0, compression='IoStore, decoded'))
     for pak in unreal_paks(romfs, inline=False):
-        with open(pak, 'rb') as f: enc = footer(f)[0]
-        if enc and key is None:
-            key = find_key(img, lo, hi, pak)
-            if key is None: raise ValueError(f'{pak}: the index is encrypted and no key in main (a 32-byte window or two 16-byte literals its code stores together) decrypts it')
-        p = Pak(pak, key)
+        p = Pak(pak, keys(pak))
         for path in sorted(x for x in p.files if x.endswith('.ushaderbytecode')):
             b = p.read(path); a = archive(b, f'{pak}: {path}'); name = os.path.basename(path)
             comp = [i for i, (_, size, raw, _) in enumerate(a['shaders']) if size != raw]
@@ -646,9 +661,7 @@ if __name__ == '__main__':
     try:
         cmd = sys.argv[1] if len(sys.argv) > 1 else ''
         if cmd == 'list':
-            img, lo, hi = nso_image(sys.argv[3])
-            with open(sys.argv[2], 'rb') as f: enc = footer(f)[0]
-            p = Pak(sys.argv[2], find_key(img, lo, hi, sys.argv[2]) if enc else None)
+            p = Pak(sys.argv[2], Keys([sys.argv[3]])(sys.argv[2]))
             with open(sys.argv[4], 'w') as f:
                 f.write('path\traw\tstored\tmethod\tencrypted\tblocks\n')
                 for path in sorted(p.files):

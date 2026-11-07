@@ -1393,6 +1393,15 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
   A 64-bit SURED is refused, not faked.
 - **Found on:** Orbitals (`040004F027560000`): 3,712 of 23,432 shaders translated on the translator of 2026-11-01, 23,432 with these.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` and `test_dmsh_ampere_alu.py`.
+### Compute threads that return before a barrier
+
+- **Symptom:** the GPU stays at 100% after a dispatch, and `[RED] SyncWait timed out on fence N` follows. The Mac's WindowServer stops minutes later, because a Metal command buffer that never completes is not reclaimed when the process exits.
+- **Cause:** Ampere lets a thread that has exited leave the workgroup's barriers; Metal requires every thread of a threadgroup at each `threadgroup_barrier`. Separately, a loop whose bound comes from GPU data that went wrong does not end.
+- **Fix:**
+  - `BarrierExits.cs`: a compute thread that returns before a barrier keeps arriving at the later barriers instead.
+  - `dmsh_build.py` `loop_guard`: every loop also ends once its function has run 2^18 iterations in all (the longest bounded loop seen: 255). A loop with a barrier in its body counts on a counter of its own, so the cap ends it on the same iteration for every thread of the threadgroup.
+- **Found on:** Orbitals (`040004F027560000`) and PRAGMATA (not in the games table): GPU hangs that needed a restart.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_barrier_exits.py` and `python3 dm/gfx/tests/test_dmsh_loop_guard.py`.
 
 ### Barrier moves around warp shuffles
 

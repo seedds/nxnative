@@ -1,0 +1,40 @@
+# Game profile of Katamari Damacy REROLL (Switch, update 1.2 = v131072). Plays on the Mac
+# Format: see dm/games/README.md
+# Unity 2018.1.2f1 (IL2CPP) with CRIWARE and FMOD, SDK 5.4.0, NVN.
+
+# ---- Identity ----
+title_id	0100D7000C2C6000
+program_id	0100D7000C2C6000
+
+# ---- App ----
+name	Katamari Damacy REROLL
+ipa	KatamariDamacyReroll.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.2	main=b528b17ad9c71f4186a02a34622397b7	subsdk0=2e8d3a967b3539eb77f50d1647380378	sdk=f7c7b7a90ecdc2d41c97508cc7236b8a
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/Movies/event_op.usm
+zip_store	.assets:.dat:.resource:.ress:.usm:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	Katamari Damacy REROLL shaders (provisional profile)
+
+# ---- After the rewrite ----
+# used memory for the current rewritten modules, at least the default 64 MB
+mem_used	0x6600000

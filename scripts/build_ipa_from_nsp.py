@@ -1943,9 +1943,10 @@ def refine_after_rewrite(g, ex_dir, patched, reg=None):
                 computed = section == '# ---- After the rewrite ----' and reason.startswith(('# used memory for the rewritten modules', '# used memory for the current rewritten modules', '# the rewritten modules are larger than the default 64 MB'))
                 if not computed: return g
             reason = line
-    if pg.npdm(ex_dir / 'ExeFS/main.npdm')[0]: return g
     used = pg.mem_used(patched, g.modules_in(patched)) or 0x4000000
     if int(g.get('mem_used', '0x4000000'), 0) == used: return g
+    exefs = ex_dir / 'ExeFS'
+    if pg.has_va(exefs) and not pg.heap_check_needed(exefs): return g
     say(f'mem_used {used:#x}: from the current rewritten modules (64 MB when the default covers them)')
     return set_keys(g, {'mem_used': (f'{used:#x}', 'used memory for the current rewritten modules, at least the default 64 MB')}, 'After the rewrite')
 

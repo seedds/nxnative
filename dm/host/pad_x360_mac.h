@@ -18,6 +18,7 @@ static int hidpad_player(hid_pad *d);   // the player a raw pad holds, -1 none (
     IOUSBHostPipe *in, *out;
     NSMutableData *buf;
     hid_pad *pad;   // on g_hidpads while a controller is present
+    int rumble_p;   // the player its rumble route is set for, -1 none: with DM_PAD_PRESS_TO_JOIN a pad has no player until its first button
     int slot;       // 0..3, the receiver's slot (its LED quadrant)
     int gone;
 }
@@ -47,6 +48,10 @@ static void x360_rumble(int p, uint8_t strong, uint8_t weak) {
     });
 }
 
+static void x360_rumble_route(DmX360Slot *s) {   // the rumble route for the player its controller holds, once it holds one
+    int p = hidpad_player(s->pad); if (p < 0) return;
+    s->rumble_p = p; dm_haptics_apple_motors(p, x360_rumble);
+}
 static void x360_present(DmX360Slot *s) {
     if (s->pad) return;
     hid_pad *d = calloc(1, sizeof *d); if (!d) { LOG("[RED] Xbox 360 receiver: cannot allocate the controller's state"); return; }
@@ -55,11 +60,12 @@ static void x360_present(DmX360Slot *s) {
     d->next = g_hidpads; g_hidpads = d; s->pad = d;
     hidpad_attach(d);
     x360_led(s, 1);
-    int p = hidpad_player(d); if (p >= 0) dm_haptics_apple_motors(p, x360_rumble);
+    s->rumble_p = -1; x360_rumble_route(s);
 }
 static void x360_absent(DmX360Slot *s) {
     hid_pad *d = s->pad; if (!d) return;
-    int p = hidpad_player(d); if (p >= 0) dm_haptics_apple_motors(p, NULL);
+    if (s->rumble_p >= 0) dm_haptics_apple_motors(s->rumble_p, NULL);
+    s->rumble_p = -1;
     x360_motors(s, 0, 0);
     s->pad = NULL;
     hid_pad **link = &g_hidpads;
@@ -77,6 +83,7 @@ static void x360_packet(DmX360Slot *s, const uint8_t *d, NSUInteger n) {
     pad_hid *h = &s->pad->st;
     h->buttons = st.buttons; h->hat = st.hat; memcpy(h->axis, st.axis, sizeof h->axis);
     hidpad_read(s->pad);
+    if (s->pad && s->rumble_p < 0) x360_rumble_route(s);   // it joined at this press (DM_PAD_PRESS_TO_JOIN)
 }
 static void x360_close(DmX360Slot *s) {
     if (s->gone) return;

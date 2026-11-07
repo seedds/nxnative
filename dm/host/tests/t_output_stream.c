@@ -32,7 +32,9 @@ int main(void) {
     if (h_os_Props(props, "UnrecognizedDevice") == RES_OK) FAIL("unknown virtual output device succeeded");
     if (h_os_Open(stream, ev, NULL, 0, name, fmt, CAP, CAP - FRAMES, 0)) FAIL("open");
     if (h_os_State(stream) != OS_STOPPED || h_os_Free(stream) != CAP) FAIL("after open: state %d, free %d", h_os_State(stream), h_os_Free(stream));
-    char noflags[0x350] = {0};
+    // The test's object map can keep the passed key address; use stable
+    // storage so no local stack address escapes through that map.
+    static char noflags[0x350];
     if (h_os_OpenEvent(noflags, ev, NULL, 0, name, fmt, CAP, CAP - FRAMES)) FAIL("open event/no-flags");
     if (h_os_State(noflags) != OS_STOPPED || h_os_Free(noflags) != CAP) FAIL("event/no-flags stream state or capacity");
     h_os_Close(noflags);

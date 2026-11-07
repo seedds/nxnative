@@ -607,7 +607,10 @@ HLE_FORCE("_ZN2nn5audio29GetDefaultVirtualOutputDeviceEPNS0_15AudioDeviceNameE",
 // it connects to auddmg:u, which the host does not serve, and aborts (0xa99).
 // The SDK's output structure is a 0x100-byte name followed by 12 property bytes.
 HLE_FORCE("_ZN2nn5audio32GetVirtualOutputDevicePropertiesEPNS0_23VirtualDevicePropertiesERKNS0_15AudioDeviceNameE", "the host's virtual output properties", Result, h_os_Props, void *props, const char *dev) {
-    if (!props || !dev || strncmp(dev, "AudioVirtualOutput", 0x100)) return RES_FAIL;
+    // The API's device name is a 0x100-byte field, but the known host name
+    // needs only its literal bytes (including NUL) compared. Reading farther
+    // is unnecessary and can be unsafe for other callers.
+    if (!props || !dev || memcmp(dev, "AudioVirtualOutput", sizeof "AudioVirtualOutput")) return RES_FAIL;
     memset(props, 0, 0x10c);
     memcpy(props, dev, 0x100);
     return RES_OK;

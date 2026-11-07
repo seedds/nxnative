@@ -2272,7 +2272,18 @@ static uint64_t present_period(const win_t *o) {
 // The period the acquire thread declares to the scheduler (set_time_constraint): the present period, except that a hold the frame step raised for late frames keeps the cap's deadline.
 // Declaring the longer hold let the performance controller move the game to the efficiency cores at half the clock (TOTK on an iPhone: 3.4 → 1.5 GHz and 65% → 5% on performance
 // cores within 10 frames of a step to 30), where 60 fps no longer fits and every trial back to it fails. A step the game fixes itself (BotW's VFR override) is declared as it is
+// DM_RT60=1 (opt-in): the declaration always uses the base vsync period (1 / g_hz). A game that flips its own present interval between 1 and 2 (Mario Kart World 1.8.0, where the frame step
+// stub is not placed, after a late frame: about 350 flips in 20 s on an iPhone) re-declared 16.7 / 33.3 ms at each flip, and around those flips the process left the performance cores (mean clock 3.5 → 1.6 GHz, 56% → 8%
+// on performance cores, thermal fair): the same demotion the frame-step comment above this function describes. On Mario Kart World 1.8.0 on an iPhone 19,4 it made no visible difference to the
+// slowdown (2026-11-07)
+static int rt60_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_RT60"); v = e && atoi(e) != 0; if (v) LOG("[nvn] DM_RT60=1: the scheduler declaration keeps the base vsync period"); } return v; }
+static uint64_t rt_period_step(const win_t *o, uint64_t period);
 static uint64_t rt_period_ns(const win_t *o, uint64_t period) {
+    uint64_t r = rt_period_step(o, period);
+    if (rt60_on() && g_hz > 0 && r > 1000000000ull / (uint64_t)g_hz) r = 1000000000ull / (uint64_t)g_hz;
+    return r;
+}
+static uint64_t rt_period_step(const win_t *o, uint64_t period) {
     int c = fps_step_cap();
     if (!period || !c || !fstep_on() || (dm_fps_state && __atomic_load_n((uint32_t *)(dm_fps_state + 0x24), __ATOMIC_RELAXED))) return period;
     int kmin = fstep_hz() / c;

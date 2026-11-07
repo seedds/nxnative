@@ -10,7 +10,12 @@
 #include "../hle_movie_av1.c"
 #include <assert.h>
 
-uint64_t now_ns(void) { return 1; }
+static uint64_t g_test_wall = 1, g_test_frames, g_test_focus_in; static int g_test_focus = 1;
+uint64_t now_ns(void) { return g_test_wall; }
+uint64_t guest_ns(void) { return g_test_wall; }
+uint64_t dm_guest_frame(void) { return g_test_frames; }   // hle_os.c: frames presented
+int dm_focus_now(void) { return g_test_focus; }           // hle_oe.c: the window's focus
+uint64_t dm_focus_in_since(void) { return g_test_focus_in; }
 __thread _Atomic int dm_host_work;   // hle_thread.c
 static struct { void *ev; int bound, set; } g_ev[16];
 static int ev_slot(void *e) { for (int i = 0; i < 16; i++) if (g_ev[i].ev == e) return i; for (int i = 0; i < 16; i++) if (!g_ev[i].ev) { g_ev[i].ev = e; return i; } abort(); }
@@ -47,6 +52,9 @@ static const uint8_t vp9[] = {
     0x00,0x30,0x60,0x00,0x00,0x10,0xbf,0xff,0xf7,0x1d,0xaf,0xff,0xff,0xff,0x5f,0xdf,
     0xff,0xff,0xff,0xf2,0x2a,0xc0,0x00,
 };
+
+static double g_test_now;
+static double test_clock(void) { return g_test_now; }
 
 int main(void) {
     _Alignas(16) static uint8_t dec[0x400], pool[3][0x40], spt[0x80], mem[16 * 16 * 4];
@@ -195,10 +203,20 @@ int main(void) {
         for (int soft = VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1) ? 0 : 1; soft < 2; soft++) {
             setenv("DM_AV1_DAV1D", soft ? "1" : "0", 1);
             mav1 *a = mav1_new(); assert(!strcmp(mav1_backend(a), soft ? "dav1d" : "VideoToolbox"));
-            mav1_picture pic; assert(mav1_decode(a, av1, sizeof av1, &pic) == 1 && pic.w == 64 && pic.h == 64 && pic.matrix == 1 && !pic.full_range);   // no matrix in the stream: BT.601 at 64 lines
+            mav1_picture pic; assert((mav1_decode(a, av1, sizeof av1, &pic) == 1 || mav1_drain(a, &pic)) && pic.w == 64 && pic.h == 64 && pic.matrix == 1 && !pic.full_range);   // no matrix in the stream: BT.601 at 64 lines; dav1d's frame threads give a lone frame's picture at the end of the stream
             for (int y = 0; y < 64; y++) for (int x = 0; x < 64; x++) assert(abs(pic.y[(size_t)y * pic.ystride + x] - 81) <= 4);
             for (int y = 0; y < 32; y++) for (int x = 0; x < 64; x += 2) { assert(abs(pic.uv[(size_t)y * pic.uvstride + x] - 90) <= 6); assert(abs(pic.uv[(size_t)y * pic.uvstride + x + 1] - 240) <= 6); }
             mav1_reset(a); assert(mav1_decode(a, delimiter, sizeof delimiter, &pic) == 0);   // a new stream: nothing until its sequence header
+            mav1_free(a);
+        }
+        {   // dav1d decodes frames in parallel: a picture can come some packets after its own and two can come together, the end of the stream gives the rest, and each keeps its
+            // packet's timestamp, in order
+            setenv("DM_AV1_DAV1D", "1", 1);
+            mav1 *a = mav1_new(); mav1_picture pic; int64_t seen[24]; int ns = 0;
+            for (int i = 0; i < 20; i++)
+                if (mav1_decode_ts(a, av1, sizeof av1, 1000 * (int64_t)i, &pic) == 1) do { assert(ns < 24 && pic.w == 64); seen[ns++] = pic.ts; } while (mav1_next(a, &pic));
+            while (mav1_drain(a, &pic)) { assert(ns < 24 && pic.w == 64); seen[ns++] = pic.ts; }
+            assert(ns == 20); for (int i = 0; i < 20; i++) assert(seen[i] == 1000 * (int64_t)i);
             mav1_free(a);
         }
         unsetenv("DM_AV1_DAV1D");
@@ -232,6 +250,39 @@ int main(void) {
         uint32_t k[BLANK_MAX + 1]; for (int i = 0; i < BLANK_MAX; i++) assert((k[i] = dm_native_image_blank(32, 32)));
         assert(!(k[BLANK_MAX] = dm_native_image_blank(32, 32)));   // full
         for (int i = 0; i < BLANK_MAX; i++) dm_native_image_blank_free(k[i]);
+    }
+
+    {   // AV1 pictures by the movie's clock (cv_skip_late), on a clock the test sets: 50 fps timestamps (20 ms apart), host seconds from 100
+        cv_dec *d = calloc(1, sizeof *d); d->codec = CV_AV1; double (*real)(void) = cv_clock; cv_clock = test_clock;
+        #define HOLD(n) do { d->nheld = 0; for (int i_ = 0; i_ < (n); i_++) { d->held[i_] = black_i420(16, 16); d->held_ts[i_] = 20000000LL * (i_ + d->clk_last / 20000000LL); d->held_eos[i_] = 0; } d->nheld = (n); } while (0)
+        #define CLEAR() do { for (int i_ = 0; i_ < d->nheld; i_++) vpx_img_free(d->held[i_]); d->nheld = 0; } while (0)
+        g_test_now = 100.0; HOLD(6); cv_skip_late(d); assert(d->clk_on && d->nheld == 6 && d->clk_t0 == 100.0);   // the first picture starts the clock: nothing dropped
+        g_test_now = 100.1; cv_skip_late(d);   // 100 ms on: pictures at 0..100 ms are due; the next must be 50 ms overdue for one to go
+        assert(d->nheld == 4 && d->held_ts[0] == 40000000);   // 0 and 20 ms dropped (20 and 40 ms over 50 ms overdue), 40 kept: its next (60) is only 40 ms overdue
+        assert(d->skipped == 2);
+        g_test_now = 100.1; d->held_eos[0] = 1; cv_skip_late(d); assert(d->nheld == 4);   // a picture that ends the stream is never dropped
+        d->held_eos[0] = 0; CLEAR();
+        // over a second behind while the game presented frames without taking a picture (a pause menu, a load screen): the clock starts again, nothing dropped
+        d->clk_last = 200000000; HOLD(3); d->take_frame = 10; g_test_frames = 10 + CV_PAUSE_FRAMES; g_test_now = 106.0; cv_skip_late(d);
+        assert(d->nheld == 3 && d->clk_t0 == 106.0 && d->clk_ts0 == d->held_ts[0] && d->restarts == 1 && !d->catching);
+        CLEAR();
+        // 1.5 s behind after the whole game stood still in the host (a pipeline built on first use) with its sound going on: the clock stays, the late pictures go
+        d->clk_last = 300000000; HOLD(5); d->take_frame = g_test_frames - 1; g_test_wall = 50; d->take_wall = 40; g_test_now = 107.6; cv_skip_late(d);
+        assert(d->nheld == 1 && d->held_ts[0] == 380000000 && d->clk_t0 == 106.0 && d->restarts == 1 && d->catching && d->catchups == 1);
+        g_test_now = 107.61; cv_skip_late(d); assert(d->catchups == 1);   // still behind: the same stall, noted once
+        CLEAR();
+        // over a second behind, nothing presented, but the window went out of focus and came back meanwhile (the game may have paused itself): the clock starts again
+        d->clk_last = 400000000; HOLD(3); d->take_frame = g_test_frames; d->take_wall = 60; g_test_focus_in = 70; g_test_now = 110.0; cv_skip_late(d);
+        assert(d->nheld == 3 && d->clk_t0 == 110.0 && d->restarts == 2 && !d->catching);
+        CLEAR(); g_test_focus = 2;   // and out of focus now
+        d->clk_last = 500000000; HOLD(3); d->take_wall = 80; g_test_now = 115.0; cv_skip_late(d); assert(d->nheld == 3 && d->clk_t0 == 115.0 && d->restarts == 3);
+        g_test_focus = 1;
+        CLEAR(); d->clk_last = 900000000; d->nheld = 0;
+        for (int i = 0; i < 3; i++) { d->held[i] = black_i420(16, 16); d->held_ts[i] = 20000000LL * i; d->held_eos[i] = 0; } d->nheld = 3;   // a timestamp going back (a loop)
+        g_test_now = 106.5; cv_skip_late(d); assert(d->nheld == 3 && d->clk_t0 == 106.5 && d->clk_ts0 == 0);
+        CLEAR(); cv_clock = real; free(d);
+        #undef HOLD
+        #undef CLEAR
     }
     printf("t_codec_video: all passed\n");
     return 0;

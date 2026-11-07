@@ -303,6 +303,14 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_codec_video` (AddressSanitizer and UBSan), which covers the AV1 and SDK 22 forms, native images and the av1C record, and decodes a 64x64 AV1 key frame (SVT-AV1) on each backend the Mac has, read back as NV12.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): 82 movies in WebM at 2560x1440; the opening's 3,301 pictures play. On #957's branch, VideoToolbox and dav1d gave the same pictures, bit for bit, over the opening's first 600 (about 450 pictures a second each on an M3 Pro), and a tester's M1 Pro played the first two movies through dav1d, smooth and in sync ([seedds/nxnative#927](https://github.com/seedds/nxnative/issues/927)).
 
+### A game slower than its movie plays it by the movie's clock
+
+- **Symptom:** a 60 fps movie plays slowly in a game that shows fewer frames a second than the movie has, with its sound ahead of the picture and then silence where a scene's sound has already ended (Ocarina of Time's AV1 title movie at 0.44x on an Apple M1 Max, whose GPU gives it 28 frames a second; 22 on an M2 Pro).
+- **Cause:** the game's player shows one picture a frame, and the host handed the pictures out in decode order, so the movie ran at the game's frame rate.
+- **Fix:** `cv_skip_late` (`hle_codec_video.c`, AV1) hands out pictures by the movie's timestamps against the guest clock: of the waiting pictures, the newest one that is due, the late ones before it dropped (a picture is late once the next is 50 ms overdue). A timestamp going back (a loop, a new stream) starts the clock again. So does a picture over a second late when the game held the movie: it presented frames without taking a picture (`CV_PAUSE_FRAMES`, a pause menu or a load screen), or its window lost the focus. After a stall in the host with no frames presented (a pipeline built on first use, a long GPU wait) the late pictures are skipped instead, so the picture catches up with the sound, which went on. The guest clock does not run while the Mac sleeps, an iPhone app is in the background or `DM_DETCLOCK` steps it, so none of those is a gap. The log says when the clock starts again and why, and when a stall is caught up. `DM_CV_LATE=0` turns it off.
+- **Check:** `t_codec_video` covers the slack, a picture that ends the stream, a pause, a stall, a focus change and a loop, on a clock the test sets.
+- **Found on:** The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, v131072, with #1299's profile), on an M1 Max and an M2 Pro.
+
 ### SDK 19's decoder forms
 
 - **Symptom:** an abort in `nn::codec` (the SDK's own decoder client, which opens a service the host does not have) when a movie starts in a game built with SDK 19 for the Switch 2.

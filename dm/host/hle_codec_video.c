@@ -30,6 +30,7 @@
 #define CV_READY 4                  // decoded pictures waiting for a released buffer at which the submission-ready event goes down
 #define CV_HOLD 12                  // and at which packets are refused. Mario Tennis Fever's player sends one packet per signal and ignores the result (nro0+0xd16130), so a signal in flight when the
                                     // event goes down must still find room: refused at 4, a packet about 6 s into the title movie was lost, and libvpx found every frame after it corrupt
+#define CV_BURST 8                  // pictures past CV_HOLD a packet may add: dav1d's frame threads finish several frames together (packets are still refused at CV_HOLD)
 #define CV_EVENT_OFF 0x100          // the submission-ready SystemEventType inside the decoder type
 #define CV_R(desc) ((Result)(0x6f | ((desc) << 9)))   // nn::codec results (module 111)
 #define CV_BUSY CV_R(3603)          // the decoder cannot take the packet now
@@ -47,8 +48,11 @@ typedef struct {
     struct { cv_pool *pool; uint32_t pidx; int reg, filled; uint32_t gen, filled_gen; uint16_t w, h; int64_t ts; uint8_t eos; } buf[CV_BUFS];
     uint32_t fifo[8], fhead, fcount;          // acquirable indices
     uint32_t pend[CV_BUFS], phead, pcount;    // released, waiting for a picture
-    vpx_image_t *held[CV_HOLD]; int64_t held_ts[CV_HOLD]; uint8_t held_eos[CV_HOLD]; int nheld;
+    pthread_mutex_t dmu;   // AV1's decode, outside mu (lock order: dmu, then mu)
+    vpx_image_t *held[CV_HOLD + CV_BURST]; int64_t held_ts[CV_HOLD + CV_BURST]; uint8_t held_eos[CV_HOLD + CV_BURST]; int nheld;
     int eos_pending;
+    int clk_on, catching; int64_t clk_ts0, clk_last; double clk_t0; uint64_t skipped, restarts, catchups;   // AV1's movie clock (cv_skip_late): a picture's timestamp against the guest clock
+    uint64_t take_frame, take_wall;   // the presented-frame count and now_ns() when the game last took a picture (cv_pause)
 } cv_dec;
 
 static cv_dec *g_cv[16];
@@ -99,6 +103,48 @@ static void pool_native_write(cv_pool *p, uint32_t i, const vpx_image_t *im) {
     for (uint32_t y = 0; y < p->h; y++) memcpy(dst + (size_t)y * stride, tmp + (size_t)y * p->w * 4, (size_t)p->w * 4);
     free(tmp);
 }
+// A player that shows one picture a frame plays a 60 fps movie at the game's frame rate. Ocarina of Time's AV1 movies (all 60 fps) ran at 0.44x on an M1 Max whose GPU
+// gives the title 28 frames a second, with the sound running ahead. So a picture is given by the clock, as a video player does: the movie's timestamps (ns) from its first
+// picture against the guest clock, and of the waiting pictures the newest one that is due, the late ones before it dropped. A picture is late once the next is 50 ms overdue:
+// with no slack, a game at the movie's rate a frame behind its clock after a hitch skipped every other picture from then on. A timestamp going back (a loop, a new stream)
+// starts the clock again. So does a picture over a second late when the game held the movie: it presented frames without taking a picture (a pause menu, a load screen) or
+// its window lost the focus meanwhile (cv_pause). Otherwise the whole game stood still in the host (a pipeline built on first use, a long GPU wait) while its sound went on,
+// and the late pictures are skipped until the movie is back on its clock: starting the clock again there left the picture behind the narration until the next stream (an M2
+// Pro's title movie). The clock is the guest's (guest_ns), which does not run while the Mac sleeps, while an iPhone app is in the background or under DM_DETCLOCK's replay
+// steps, so none of those makes a gap. A game that keeps up drops nothing. AV1 only (the only timestamps checked); DM_CV_LATE=0 turns it off
+static double cv_now(void) { return (double)guest_ns() / 1e9; }
+static double (*cv_clock)(void) = cv_now;   // t_codec_video replaces it
+static int cv_late_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_CV_LATE"); v = !(e && !strcmp(e, "0")); } return v; }
+#define CV_PAUSE_FRAMES 6   // frames presented without a picture taken that make a gap the game's: a stall in the host presents at most the frame it held, plus the frames
+                            // a movie slower than the game skips between pictures
+static const char *cv_pause(const cv_dec *d) {
+    if (dm_guest_frame() - d->take_frame >= CV_PAUSE_FRAMES) return "the game presented frames without taking a picture";
+    if (dm_focus_now() != 1 || dm_focus_in_since() > d->take_wall) return "the window lost the focus";
+    return NULL;
+}
+static void cv_skip_late(cv_dec *d) {   // decoder lock held, at least one picture waiting
+    double now = cv_clock(); int64_t ts = d->held_ts[0];
+    double late = d->clk_on ? now - (d->clk_t0 + (double)(ts - d->clk_ts0) / 1e9) : 0;
+    const char *why = !d->clk_on ? "" : ts < d->clk_last ? "a timestamp went back (a loop or a new stream)" : late > 1.0 ? cv_pause(d) : NULL;
+    if (why) {
+        if (*why && d->restarts++ < 8) {
+            if (ts < d->clk_last) LOG("[codec] %s decoder %u: the movie clock starts again: %s", k_cv_name[d->codec], d->id, why);
+            else LOG("[codec] %s decoder %u: the movie clock starts again, %.2f s behind: %s", k_cv_name[d->codec], d->id, late, why);
+        }
+        d->clk_on = 1; d->clk_ts0 = ts; d->clk_t0 = now; d->catching = 0; return;
+    }
+    if (late <= 1.0) d->catching = 0;
+    else if (!d->catching) {
+        d->catching = 1;
+        if (d->catchups++ < 8) LOG("[codec] %s decoder %u: %.2f s behind after the game stood still: late pictures skipped to catch up with the movie's clock", k_cv_name[d->codec], d->id, late);
+    }
+    while (d->nheld > 1 && !d->held_eos[0] && d->clk_t0 + (double)(d->held_ts[1] - d->clk_ts0) / 1e9 <= now - 0.05) {   // the next one is overdue too: this one is late
+        vpx_img_free(d->held[0]); d->nheld--;
+        memmove(d->held, d->held + 1, (size_t)d->nheld * sizeof d->held[0]); memmove(d->held_ts, d->held_ts + 1, (size_t)d->nheld * sizeof d->held_ts[0]);
+        memmove(d->held_eos, d->held_eos + 1, (size_t)d->nheld * sizeof d->held_eos[0]);
+        if (!d->skipped++) LOG("[codec] %s decoder %u: late pictures skipped to keep the movie on its clock (the game shows fewer pictures a second than the movie has)", k_cv_name[d->codec], d->id);
+    }
+}
 // Pictures and end of stream into the released buffers, in order (decoder lock held). The event says a packet can come: it rises when one was taken (took) or room came back, not at every release.
 // Mario Tennis Fever's player counts each signal as one packet it may send: raised at every release, its count grew while a seek held back the samples (a skipped cutscene),
 // and the packets it then sent overran CV_HOLD
@@ -107,11 +153,12 @@ static void drain(cv_dec *d, int took) {
     while (d->pcount && (d->nheld || d->eos_pending)) {
         uint32_t i = d->pend[d->phead]; d->phead = (d->phead + 1) % CV_BUFS; d->pcount--;
         typeof(d->buf[0]) *b = &d->buf[i];
+        if (d->nheld && d->codec == CV_AV1 && cv_late_on()) cv_skip_late(d);
         if (d->nheld) {
             vpx_image_t *im = d->held[0]; int64_t ts = d->held_ts[0]; uint8_t eos = d->held_eos[0];
-            memmove(d->held, d->held + 1, sizeof d->held[0] * (CV_HOLD - 1)); memmove(d->held_ts, d->held_ts + 1, sizeof d->held_ts[0] * (CV_HOLD - 1));
-            memmove(d->held_eos, d->held_eos + 1, CV_HOLD - 1); d->nheld--;
-            b->w = (uint16_t)im->d_w; b->h = (uint16_t)im->d_h; b->ts = ts; b->eos = eos;
+            memmove(d->held, d->held + 1, sizeof d->held[0] * (d->nheld - 1)); memmove(d->held_ts, d->held_ts + 1, sizeof d->held_ts[0] * (d->nheld - 1));
+            memmove(d->held_eos, d->held_eos + 1, d->nheld - 1); d->nheld--;
+            b->w = (uint16_t)im->d_w; b->h = (uint16_t)im->d_h; b->ts = ts; b->eos = eos; d->clk_last = ts; d->take_frame = dm_guest_frame(); d->take_wall = now_ns();
             if (b->pool && b->pidx < b->pool->count) { pool_native_write(b->pool, b->pidx, im); if (b->pool->img[b->pidx]) vpx_img_free(b->pool->img[b->pidx]); b->pool->img[b->pidx] = im; } else vpx_img_free(im);
             if (!d->pictures++) LOG("[codec] %s decoder %u: first picture %ux%u into buffer %u", k_cv_name[d->codec], d->id, b->w, b->h, i);
         } else { b->w = b->h = 0; b->ts = 0; b->eos = 1; d->eos_pending = 0; }
@@ -250,7 +297,7 @@ static void cv_open(cv_dec *d) {   // (re)creates the codec state: a new stream 
 }
 static Result cv_dec_init(void *t, int codec, uint16_t w, uint16_t h, uint32_t in, uint32_t out, const void *csd, uint64_t csd_n) {
     cv_dec *d = calloc(1, sizeof *d);
-    d->magic = CV_MAGIC; d->codec = codec; d->w = w; d->h = h; pthread_mutex_init(&d->mu, NULL);
+    d->magic = CV_MAGIC; d->codec = codec; d->w = w; d->h = h; pthread_mutex_init(&d->mu, NULL); pthread_mutex_init(&d->dmu, NULL);
     if (csd && csd_n && csd_n < (1u << 20)) { d->csd = malloc((size_t)csd_n); memcpy(d->csd, csd, (size_t)csd_n); d->csd_n = (size_t)csd_n; }
     cv_open(d);
     pthread_mutex_lock(&g_cv_mu);
@@ -265,7 +312,7 @@ static Result cv_dec_init(void *t, int codec, uint16_t w, uint16_t h, uint32_t i
 }
 static Result cv_dec_fin(void *t) {
     cv_dec *d = cv_of(t); if (!d) return 0;
-    pthread_mutex_lock(&g_cv_mu); g_cv[d->id - 1] = NULL; pthread_mutex_lock(&d->mu); pthread_mutex_unlock(&d->mu); pthread_mutex_unlock(&g_cv_mu);   // no sync handle lookup is still inside
+    pthread_mutex_lock(&g_cv_mu); g_cv[d->id - 1] = NULL; pthread_mutex_lock(&d->dmu); pthread_mutex_lock(&d->mu); pthread_mutex_unlock(&d->mu); pthread_mutex_unlock(&d->dmu); pthread_mutex_unlock(&g_cv_mu);   // no sync handle lookup is still inside
     if (d->codec != CV_H264 && d->codec != CV_AV1 && d->vpx_ok) vpx_codec_destroy(&d->vpx);
     if (d->avc) mavc_free(d->avc);
     if (d->av1) mav1_free(d->av1);
@@ -275,7 +322,7 @@ static Result cv_dec_fin(void *t) {
     // event "bound" and was not given one: the game had cleared that memory, and nn::os aborted on the uninitialised event (Donkey Kong Bananza, its second movie)
     static void (*destroy)(void *); if (!destroy && !(destroy = guest_sym("_ZN2nn2os18DestroySystemEventEPNS0_15SystemEventTypeE"))) die("nn::os::DestroySystemEvent missing");
     destroy(d->event);
-    pthread_mutex_destroy(&d->mu); free(d); *(cv_dec **)t = NULL;
+    pthread_mutex_destroy(&d->mu); pthread_mutex_destroy(&d->dmu); free(d); *(cv_dec **)t = NULL;
     return 0;
 }
 static Result cv_dec_reg(void *t, uint32_t i, void *pool, uint32_t pidx) {
@@ -302,12 +349,12 @@ static Result cv_dec_unreg(void *t, uint32_t i) {   // the buffer leaves the dec
 }
 static Result cv_dec_reset(void *t) {   // Stop / Flush: pictures not yet given to a buffer and a pending end of stream are dropped, the decoder starts over at the next key frame
     cv_dec *d = cv_of(t); if (!d) return 0;
-    pthread_mutex_lock(&d->mu);
+    pthread_mutex_lock(&d->dmu); pthread_mutex_lock(&d->mu);   // after a decode in progress
     for (int i = 0; i < d->nheld; i++) vpx_img_free(d->held[i]);
-    d->nheld = 0; d->eos_pending = 0;
+    d->nheld = 0; d->eos_pending = 0; d->clk_on = 0;
     cv_open(d);
     if (d->event) hle_signal_system_event(d->event);
-    pthread_mutex_unlock(&d->mu);
+    pthread_mutex_unlock(&d->mu); pthread_mutex_unlock(&d->dmu);
     return 0;
 }
 // A started decoder that has room takes packets, whatever became of the signal Initialize gave. Mario Tennis Fever's player (nro0+0xd19d18) clears that one and drops it while it is not yet started,
@@ -321,7 +368,7 @@ static Result cv_dec_start(void *t) {
 }
 static Result cv_dec_event(void **out, void *t) { cv_dec *d = cv_of(t); *out = d ? d->event : NULL; return d ? 0 : CV_R(2004); }
 static int cv_hold(cv_dec *d, vpx_image_t *c, int64_t ts) {   // a decoded picture waits for a released buffer (decoder lock held); 0 when the host holds no more
-    if (d->nheld >= CV_HOLD) { static int n; if (n++ < 4) LOG("[RED] nn::codec %s: a packet gave more pictures than the host holds: one dropped", k_cv_name[d->codec]); vpx_img_free(c); return 0; }
+    if (d->nheld >= CV_HOLD + CV_BURST) { static int n; if (n++ < 4) LOG("[RED] nn::codec %s: a packet gave more pictures than the host holds: one dropped", k_cv_name[d->codec]); vpx_img_free(c); return 0; }
     d->held[d->nheld] = c; d->held_ts[d->nheld] = ts; d->held_eos[d->nheld] = 0; d->nheld++; return 1;
 }
 static vpx_image_t *nv12_to_i420(const uint8_t *nv12, unsigned w, unsigned h) {   // VideoToolbox's NV12 as the I420 the pool keeps
@@ -358,10 +405,16 @@ static Result cv_dec_submit(uint64_t *out, void *t, const void *data, uint64_t s
         while (nv12 && d->nheld < CV_HOLD && mavc_take(d->avc, eos, nv12, d->w, d->h, &pts) == 1) { vpx_image_t *c = nv12_to_i420(nv12, d->w, d->h); if (c) got += cv_hold(d, c, pts * 1000); }
         free(nv12);
     } else if (d->codec == CV_AV1) {
-        if (size) {
-            mav1_picture pic;
-            if (mav1_decode(d->av1, data, (size_t)size, &pic) == 1) { vpx_image_t *c = av1_to_i420(&pic); if (c) got += cv_hold(d, c, ts); }
-        }
+        // Decoded without the decoder lock: dav1d's frame threads can keep a packet waiting tens of milliseconds for a free frame, and under the lock the game's Release and
+        // Acquire would wait as long. The decode lock keeps a reset or Finalize from running beside it. A packet can give more than one picture (frames finished together), and
+        // the end of the stream gives the frames still decoding
+        pthread_mutex_unlock(&d->mu); pthread_mutex_lock(&d->dmu);
+        vpx_image_t *pics[CV_BURST + 24]; int64_t pts[CV_BURST + 24]; int np = 0; mav1_picture pic;
+        if (size && mav1_decode_ts(d->av1, data, (size_t)size, ts, &pic) == 1)
+            do { vpx_image_t *c = av1_to_i420(&pic); if (c && np < (int)(sizeof pics / sizeof pics[0])) { pics[np] = c; pts[np++] = pic.ts; } else if (c) vpx_img_free(c); } while (mav1_next(d->av1, &pic));
+        if (eos) while (mav1_drain(d->av1, &pic)) { vpx_image_t *c = av1_to_i420(&pic); if (c && np < (int)(sizeof pics / sizeof pics[0])) { pics[np] = c; pts[np++] = pic.ts; } else if (c) vpx_img_free(c); }
+        pthread_mutex_lock(&d->mu); pthread_mutex_unlock(&d->dmu);
+        for (int i = 0; i < np; i++) got += cv_hold(d, pics[i], pts[i]);
     } else if (size && d->vpx_ok) {
         if (vpx_codec_decode(&d->vpx, data, (unsigned)size, NULL, 0) != VPX_CODEC_OK) { static int n; if (n++ < 4) LOG("[RED] nn::codec %s: %s (%s)", k_cv_name[d->codec], vpx_codec_error(&d->vpx), vpx_codec_error_detail(&d->vpx) ? vpx_codec_error_detail(&d->vpx) : ""); }
         vpx_codec_iter_t it = NULL; const vpx_image_t *im;

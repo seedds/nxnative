@@ -1,0 +1,44 @@
+# Super Mario Bros. Wonder: Nintendo Switch 2 Edition, Program 1 (v327680), SDK 21.
+# Its separate 0400 program profile must not replace the Switch 1 game profile 010015100B514000.
+# Shader keys and build IDs were surveyed from the user-owned Edition Program 1 dump.
+
+# ---- Identity ----
+title_id	040015100B514001
+program_id	040015100B514001
+
+# ---- App ----
+name	Super Mario Bros. Wonder – Nintendo Switch 2 Edition + Meetup in Bellabel Park
+ipa	SuperMarioBrosWonderNintendoSwitch2EditionMeetup.ipa
+app_category	public.app-category.action-games
+
+# ---- Versions ----
+build	v327680	1.2.1	main=ec47e6f8846d2a7b6892e2682845c725	subsdk0=3fddebac0ad5c3f9e018dcadca9e55ed	sdk=31945f745022d0232d2562252641b3d3
+package	v327680
+shader_versions	v327680
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	System/RegionLangMask.txt
+zip_store	.metallib
+
+# ---- Memory ----
+mem_alias	0x118000000
+mem_stack	0x10000000
+# Ounce game pool is 9 GiB (observed in SDK 21 startup)
+app_pool	0x240000000
+# Program 1 NPDM declares 16 MiB of system resource
+sys_resource	0x1000000
+
+# ---- Shader split ----
+shader_groups	/System/=system
+shader_note	Super Mario Bros. Wonder Nintendo Switch 2 Edition shaders
+
+# ---- Guest heap ----
+# SDK 21 requested about 4.94 GiB; the provisional bring-up needed this 10 GiB reservation.
+mem_reserve	0x278000000
+
+# ---- Rendering ----
+# NVN conditional rendering gates AG L shadow-mask clears. Without this, a
+# depth-masked R8 pass clears to black and the world/fountain grade is wrong.
+render_cond	on

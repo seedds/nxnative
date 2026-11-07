@@ -620,6 +620,8 @@ class Regress(unittest.TestCase):
             capture = romfs.parent / 'vk_capture'; capture.mkdir()
             g = regress.Game(root, build)
             self.assertEqual(g.shader_roots(), [romfs, capture])
+            main = romfs.parent / 'ExeFS/main'; main.parent.mkdir(); main.write_bytes(b'NSO0')   # RenderDragon's bgfx shaders are in main, as the NSP script reads them
+            self.assertEqual(g.shader_roots(), [romfs, main, capture])
 
     def test_rewriter_uses_original_registered_profile_and_keeps_provisional(self):
         with tempfile.TemporaryDirectory() as td:

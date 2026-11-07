@@ -287,6 +287,8 @@ class Game:
 
     def shader_roots(self):
         roots = [self.romfs()]
+        main = self.build / 'extract' / self.ver / 'ExeFS/main'   # the NSP script's roots: RenderDragon's built-in bgfx shaders are in main (an older vk_shaders.py walks no file root)
+        if main.is_file(): roots.append(main)
         capture = self.build / 'extract' / self.ver / 'vk_capture'
         if capture.is_dir(): roots.append(capture)
         return roots

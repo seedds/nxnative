@@ -1294,14 +1294,27 @@ def scan_nup(path, want=None):   # a NUP as scan_nsps gives a folder of NSPs, wi
 
 def extract_nup(ex, name, k, base, app, n):   # one version of a NUP (k: its base or an update package) into the layout extract makes; the code modules and the image are kept while unchanged
     dst = ex / name; part = dst / 'RomFS.img.part'
+    reuse_note = ''
+
+    def packed(message):
+        nonlocal reuse_note
+        if message.startswith('reusing verified cached image:'):
+            reuse_note = ', reused (verified image)'
+        elif message.startswith('reusing cached image:'):
+            reuse_note = ', reused (inputs unchanged)'
+        elif message.startswith('verifying cached image against NUP file hashes:'):
+            PROG.set(step='verifying cached image')
+        elif message.startswith('packing '):
+            PROG.set(step='unpacking')
+
     def poll():
         try: return {'done': part.stat().st_size}
         except OSError: return None
     try:
         PROG.stage(f'unpack {name}', poll=poll, unit='B', total=n.tree_bytes(pack_nup.romfs_of(k, base)), est=True)
-        pack_nup.pack_version(n, k, base, app, dst, say=lambda s: None)
+        pack_nup.pack_version(n, k, base, app, dst, say=packed)
     except pack_nup.Error as e: raise BuildError(str(e)) from e
-    PROG.end(amount((dst / 'RomFS.img').stat().st_size, 'B'))
+    PROG.end(amount((dst / 'RomFS.img').stat().st_size, 'B') + reuse_note)
     return dst
 
 

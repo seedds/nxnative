@@ -97,8 +97,15 @@
 
 - **Symptom:** the first build after restarting the Mac spends minutes in `unpack` (`[1/5] unpack v131072: 5%, 1.2/~24.4 GB`) although the game, the packer and the image are as they were: 8 minutes for a 24.4 GB image from a NUP on a network share.
 - **Cause:** the stamp beside an image (`RomFS.img.inputs.json`) held `st_dev` in the image's identity, and macOS numbers a volume when it mounts it. Across one reboot the Data volume went from 16777234 to 16777232 while inode, size and both times stayed, so `reusable()` refused every game's image at once.
-- **Fix:** `file_identity` leaves `st_dev` out, as the IPA and app packers' stamps already did. Inode, size, modification and change times still catch an image replaced or written over. Every image is packed once more after this change, as after any change to the packer, since its bytes are in each stamp's digest.
+- **Fix:** `file_identity` leaves `st_dev` out, as the IPA and app packers' stamps already did. Inode, size, modification and change times still catch an image replaced or written over. An old stamp still misses the fast check, so the [NUP packer verifies the existing image](#an-old-nup-cache-stamp-makes-the-build-unpack-again) before repacking.
 - **Found on:** Ocarina of Time (Switch 2, `0400486024DEC000`, packed from a NUP; PR #1299); the stamps of Star Fox and Mario Kart World show the same two numbers. `dm/tools/tests/test_romfs_image.py` remounts an image under another device number.
+
+### An old NUP cache stamp makes the build unpack again
+
+- **Symptom:** the next build spends minutes unpacking a NUP after a packer update even though its complete `RomFS.img` is still present.
+- **Cause:** a change in the packer source digest or the image identity format invalidates the fast stamp check. Neither mismatch establishes that the image bytes changed.
+- **Fix:** on a stamp miss, check the existing image's header, index and each payload's SHA-256 against the current NUP's table of contents. If the image stays unchanged during the check, update its stamp atomically. An image that fails verification is packed again. Later builds with matching inputs use the fast stamp check.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) v131072. The 26.25 GB image took 21.6 seconds to verify and 0.11 seconds to reuse on the next call, measured with the NX2Apple build of the fix on an Apple M1.
 
 ### A stale `DM_ROMFS` path crashes the game soon after `nnMain`
 

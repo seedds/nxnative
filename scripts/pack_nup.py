@@ -17,7 +17,7 @@
 # Every file read is checked against its SHA-256. A repeat run keeps code modules whose content is the same and an image made from the same container tree by the same packer.
 # Needs the zstd module: compression.zstd (Python 3.14+) or backports.zstd, as the NSP script.
 # Usage: pack_nup.py <game.nup> [--version N] [--work-dir DIR]   (exit 1 on error)
-import argparse, hashlib, mmap, os, shutil, struct, sys
+import argparse, hashlib, json, mmap, os, shutil, struct, sys, tempfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'dm/tools'))
 import romfs_image
@@ -250,11 +250,65 @@ def entries(n, d):   # romfs_image.entries for a folder of the container: [name,
     return ents
 
 
+def verified_image(n, ents, dst):
+    """Validate the complete existing image against the current NUP TOC without unpacking it.
+
+    file_identity is opaque: newer packers no longer include st_dev. Check the
+    size through stat rather than interpreting an old identity tuple position.
+    """
+    layout = [e.copy() for e in ents]
+    off = romfs_image.HEAD.size
+    for e in layout:
+        if not e[2]:
+            e[3], e[4] = off, n.files[e[1]][1]
+            off += e[4]
+    pool, index = bytearray(), bytearray()
+    for name, _, isdir, a, b in layout:
+        index += romfs_image.ENT.pack(a, b, len(pool), len(name), 0 if isdir else 1, 0)
+        pool += name
+    index += pool
+    head = romfs_image.HEAD.pack(romfs_image.MAGIC, off, len(index), len(layout))
+    try:
+        before = romfs_image.file_identity(dst)
+        if os.stat(dst).st_size != off + len(index): return None
+        with open(dst, 'rb') as f:
+            if f.read(len(head)) != head: return None
+            f.seek(off)
+            if f.read(len(index)) != index: return None
+            f.seek(len(head))
+            for _, i, isdir, _, size in layout:
+                if isdir: continue
+                h, left = hashlib.sha256(), size
+                while left:
+                    chunk = f.read(min(left, 8 << 20))
+                    if not chunk: return None
+                    h.update(chunk); left -= len(chunk)
+                if h.digest() != n.files[i][2]: return None
+        return before if romfs_image.file_identity(dst) == before else None
+    except OSError:
+        return None
+
+
 def pack(n, d, img, say=print):   # the RomFS folder d of the container → img, kept while the container tree and the packers are the same
     img.parent.mkdir(parents=True, exist_ok=True)
     ents, dst = entries(n, d), os.fspath(img)
     digest = hashlib.sha256(Path(romfs_image.__file__).read_bytes() + Path(__file__).read_bytes() + n.toc_sha + struct.pack('<I', d)).hexdigest()   # the TOC hash covers every name and file hash
-    if romfs_image.reusable(dst, digest): return len(ents)
+    if romfs_image.reusable(dst, digest):
+        say(f'reusing cached image: {img} (inputs unchanged)')
+        return len(ents)
+    if img.is_file():
+        say(f'verifying cached image against NUP file hashes: {img}')
+        if identity := verified_image(n, ents, dst):
+            stamp = Path(dst + '.inputs.json')
+            fd, part_stamp = tempfile.mkstemp(prefix=stamp.name + '.', dir=stamp.parent)
+            try:
+                with os.fdopen(fd, 'w') as f:
+                    json.dump({'source': digest, 'image': identity}, f)
+                os.replace(part_stamp, stamp)
+            finally:
+                Path(part_stamp).unlink(missing_ok=True)
+            say(f'reusing verified cached image: {img} (no unpacking)')
+            return len(ents)
     say(f'packing {n.path.name} folder {d} → {img}')
     part = dst + '.part'
     try: romfs_image.publish(romfs_image.write(ents, dst, n.copy), dst, digest)

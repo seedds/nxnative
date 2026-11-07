@@ -222,7 +222,7 @@ def shared_store_msl(msl):
         params = split_params(m.group(3))
         scalar = [re.fullmatch(r'thread const u?int& (\w+)', p) for p in params[:2]]
         arr = re.fullmatch(r'(threadgroup|device) spvUnsafeArray<uint, \d+>& (\w+)', params[2]) if len(params) == 3 else None
-        if not arr or not all(scalar): raise ValueError('dmsh_shared_store: unexpected parameters ' + m.group(3)[:160])
+        if not arr or not scalar[0] or not scalar[1]: raise ValueError('dmsh_shared_store: unexpected parameters ' + m.group(3)[:160])
         off, val = scalar[0].group(1), scalar[1].group(1)
         space, mem = arr.groups()
         store = (f'(({space} uchar*)&{mem}[0])[uint({off})] = uchar(uint({val}));' if m.group(2) == '8' else

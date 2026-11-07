@@ -2,7 +2,9 @@
 with the .NET it is given, a missing glslangValidator, and a Python under Rosetta each stop the build at once instead of at a shader step minutes later.
 Every input (xcrun, xcode-select, sysctl, the translator, PATH) is mocked: no Xcode, .NET, glslang or Rosetta needed."""
 import importlib.util
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -35,6 +37,25 @@ def fake_run(sdk_rc=0, devdir='/Applications/Xcode.app/Contents/Developer', xlat
 
 def fake_capstone(major):   # the installed capstone's version does not matter to these tests
     return types.SimpleNamespace(__version__=f'{major}.0.0', cs_version=lambda: (major, 0, major << 8))
+
+
+class ToolPath(unittest.TestCase):   # issue #1474: TOOL_PATHS are fallbacks, so the tools the caller's PATH selects are the ones that run
+    def test_caller_tools_win_and_fallbacks_find_the_rest(self):
+        with tempfile.TemporaryDirectory() as folder:
+            caller, fallback = Path(folder) / 'Project Tools', Path(folder) / 'fallback'   # a space in the caller's folder
+            for directory, names in ((caller, ('zstd', 'dotnet')), (fallback, ('zstd', 'dotnet', 'xcodegen'))):
+                directory.mkdir()
+                for name in names: tool = directory / name; tool.write_text('#!/bin/sh\n'); tool.chmod(0o755)
+            with mock.patch.object(nsp, 'TOOL_PATHS', [str(fallback)]):
+                env = nsp.tool_env({'PATH': str(caller), 'HOME': '/h'})
+            self.assertEqual(env, {'PATH': os.pathsep.join([str(caller), str(fallback)]), 'HOME': '/h'})
+            for name in ('zstd', 'dotnet'): self.assertEqual(shutil.which(name, path=env['PATH']), str(caller / name))
+            self.assertEqual(shutil.which('xcodegen', path=env['PATH']), str(fallback / 'xcodegen'))
+
+    def test_no_path_takes_the_system_path(self):   # unset or empty: an empty PATH entry would search the current folder
+        for environ in ({}, {'PATH': ''}):
+            with self.subTest(environ=environ), mock.patch.object(nsp, 'TOOL_PATHS', ['/fallback']):
+                self.assertEqual(nsp.tool_env(environ)['PATH'], '/usr/bin:/bin:/usr/sbin:/sbin:/fallback')
 
 
 class Prereqs(unittest.TestCase):

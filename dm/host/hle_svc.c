@@ -419,6 +419,41 @@ static int map_source_busy(uint64_t addr, uint64_t size) { // g_map_lock held; n
         if (addr < g_map[i].src + g_map[i].size && g_map[i].src < addr + size) return 1;
     return 0;
 }
+// Device-shared memory. On Horizon, NVN gives a memory pool's storage to the GPU through nvmap, whose device mapping (svcMapDeviceAddressSpaceAligned, KPageTableBase::LockForMapDeviceAddressSpace)
+// sets KMemoryAttribute_DeviceShared on those pages and counts each mapping. UnmapPhysicalMemory and a SetHeapSize that shrinks refuse any page with an attribute set (ResultInvalidCurrentMemory,
+// 0xD401; Atmosphère's KPageTableBase::UnmapPhysicalMemory and SetHeapSize), so the pages stay mapped until the pool is finalized. Without this, the host gave such pages back (guest_release put
+// fresh pages under them) while the pool's zero-copy Metal buffer still held the old ones: the CPU then wrote one copy and the GPU read the other. PR #1616 found that on Monster Jam Steel Titans 2,
+// whose light-grid compute shaders read stale counts from the pool and hung the GPU. hle_nvn.c registers each pool's storage at nvnMemoryPoolInitialize and removes it at nvnMemoryPoolFinalize;
+// a range registered twice (two pools over the same storage) stays shared until both are gone
+typedef struct { uint64_t lo, hi; uint32_t n; } dshare_t;
+static dshare_t *g_dshare; static int g_ndshare, g_cdshare;
+static pthread_mutex_t g_dshare_mu = PTHREAD_MUTEX_INITIALIZER;   // a leaf: taken under g_map_lock by the checks, alone by dm_device_share
+void dm_device_share(const void *p, uint64_t size, int share) {
+    uint64_t lo = (uintptr_t)p, hi = lo + size;
+    if (!size || hi < lo) return;
+    pthread_mutex_lock(&g_dshare_mu);
+    int i = 0; while (i < g_ndshare && (g_dshare[i].lo != lo || g_dshare[i].hi != hi)) i++;
+    if (share) {
+        if (i == g_ndshare) {
+            if (g_ndshare == g_cdshare) { g_cdshare = g_cdshare ? 2 * g_cdshare : 64; if (!(g_dshare = realloc(g_dshare, (size_t)g_cdshare * sizeof *g_dshare))) die("device-shared range table"); }
+            g_dshare[g_ndshare++] = (dshare_t){lo, hi, 0};
+        }
+        g_dshare[i].n++;
+    } else if (i < g_ndshare) { if (!--g_dshare[i].n) g_dshare[i] = g_dshare[--g_ndshare]; }
+    else { static int nred; if (nred++ < 8) LOG("[RED] device-shared memory %#llx+%#llx removed but never registered", (unsigned long long)lo, (unsigned long long)size); }
+    pthread_mutex_unlock(&g_dshare_mu);
+}
+// Whether [addr, addr + size) holds a device-shared page; says which (and what refused it) the first few times
+static int device_shared(uint64_t addr, uint64_t size, const char *what) {
+    uint64_t lo = 0, hi = 0;
+    pthread_mutex_lock(&g_dshare_mu);
+    for (int i = 0; i < g_ndshare && !hi; i++) if (addr < g_dshare[i].hi && g_dshare[i].lo < addr + size) { lo = g_dshare[i].lo; hi = g_dshare[i].hi; }
+    pthread_mutex_unlock(&g_dshare_mu);
+    static _Atomic int nlog;
+    if (hi && atomic_fetch_add(&nlog, 1) < 8) LOG("[mem] %s %#llx+%#llx refused: it holds device-shared memory (an NVN memory pool's storage %#llx..%#llx), ResultInvalidCurrentMemory as on Horizon",
+                                                  what, (unsigned long long)addr, (unsigned long long)size, (unsigned long long)lo, (unsigned long long)hi);
+    return hi != 0;
+}
 // Loader text/patch seals use 16 KiB boundaries, independently of host page size.
 static void module_readonly_run(uint64_t off, uint64_t start, uint64_t end,
                                 uint64_t *lo, uint64_t *hi, uint64_t *perm) {
@@ -648,7 +683,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         if (size > g_heap_cap) { LOG("SetHeapSize OOM: req %#zx > cap %#zx", size, g_heap_cap); regs[0] = 0xD001; return 0; }
         pthread_mutex_lock(&g_map_lock);
         size_t previous = g_heap_cur, image = image_bytes();
-        if (size < previous && map_source_busy((uintptr_t)g_heap + size, previous - size)) {
+        if (size < previous && (map_source_busy((uintptr_t)g_heap + size, previous - size) || device_shared((uintptr_t)g_heap + size, previous - size, "SetHeapSize shrinking over"))) {
             pthread_mutex_unlock(&g_map_lock); regs[0] = 0xD401; return 0;
         }
         if (image > APP_POOL || size > APP_POOL - image) {   // ResultLimitReached; games retry in 2 MB decrements
@@ -798,7 +833,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         // The SDK extends committed windows across borrowed stack sources
         // (Raging Loop, StandardAllocator). Recommit preserves every live byte;
         // only decommit can invalidate backing required for eventual copyback.
-        if (num == 0x2D && map_source_busy(a, size)) { pthread_mutex_unlock(&g_map_lock); regs[0] = 0xD401; return 0; }
+        if (num == 0x2D && (map_source_busy(a, size) || device_shared(a, size, "UnmapPhysicalMemory"))) { pthread_mutex_unlock(&g_map_lock); regs[0] = 0xD401; return 0; }
         uint64_t off = a - (uintptr_t)g_alias;
         int64_t need = alias_unmapped(off, size) * 4096;
         // Profile mem_map_limit: a map that would take the process past the application pool fails with ResultLimitReached, as on Horizon (the pool less the used memory GetInfo reports).

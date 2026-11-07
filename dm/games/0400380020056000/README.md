@@ -30,6 +30,19 @@ A Switch 2 game: update v65536 over the base game, SDK 21.4.4 built for the Swit
 - Frame and GPU time, M4 Pro, windows of 300 frames: the still beach about 15 ms of GPU at 60 fps (150-190 ms, about 6 fps, before the fixes below). The last play session: a median frame of 16.6-16.9 ms; the slowest 5 % at 17.1-17.5 ms in its last stretch and up to 22 ms in the heavier moments; GPU median 10-16 ms, slowest 5 % 13-22 ms. So 60 fps is not held everywhere (current), and that session shared the Mac with a regression run. The ink map's passes are a large part in inked scenes: 0.32 ms each ([A render area for passes on very large targets](../../../docs/reference/rendering.md#a-render-area-for-passes-on-very-large-targets)). Each stamp also took a whole-map snapshot (0.76 ms) and a pass of its own; it now reads its pixel of the map from the tile (resolved, [#1063](https://github.com/seedds/nxnative/issues/1063)): on the route to the first beach, 4.2 → 0.6 snapshots a frame and GPU p50 12.8 → 9.5 ms, M4 Pro. Inked stages are not measured here (the reporter's M2: 22–26 → 13–16 ms with their first patch). A few single frames take 130-535 ms; the worst show little submit time and no new pipelines, and one of 373 ms is nearly all submit time; not traced (open).
 - Focus: the game stops drawing its 3D scene when the window loses focus (10 passes, GPU 2 ms), so a frame rate read then says nothing.
 
+### Dynamic resolution in inked stages
+
+The game reads 29 `TIMESTAMP_TOP` reports per frame. When every report in a submission had the same time, its controller held the 3D view at 1440 pixels wide even on frames taking 22–26 ms. Segment times let the game lower its resolution under load. The render-scale setting sets the upper limit.
+
+| Timestamp mode | Render scale | 3D view width (pixels) | Frame time (p50) |
+|---|---|---|---|
+| Submission, before tile reads for ink stamps | 0.75 | 1440 | 22–26 ms |
+| Segment, before tile reads for ink stamps | 0.75 | 755–1440 | 18–21 ms |
+| Segment, with tile reads for ink stamps | 0.75 | 855–1440 | 16.3–16.8 ms |
+| Segment, with tile reads for ink stamps | 1.0 | 960–1706 | 16.1–16.9 ms |
+
+The M2 MacBook Air measurements cover about ten sampled frames per setting in the inklet stage. The first two rows isolate the timestamp change. The last two include the reduction in ink-map snapshots. [Measurements from dpadr](https://github.com/seedds/nxnative/issues/1064)
+
 ## Driving it on the Mac
 
 The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots in a window with the HUD, raises it and appends control lines (`A~0.1`, `LUp~4`, `shot <path>`, `passdump 1`, `texdump <path with %d>`). With the save at the start of the dialogue, four presses of A get to the beach at about 75 s. `DM_NVN_SHOT=<frames>:<relative path>` takes consecutive frames: the path must have no space, as the driver's environment is split on them.
@@ -47,6 +60,7 @@ The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots i
 - [Naming the shaders of a GPU fault](../../../docs/reference/rendering.md#naming-the-shaders-of-a-gpu-fault): added for the address fault above, which names no pass.
 - [Compatible views for a mismatched declared texture type](../../../docs/reference/rendering.md#compatible-views-for-a-mismatched-declared-texture-type): resolved, a cube in a cube array slot. `d0ce73e71074df85_b` (NigoProc, layer index a literal 0) read texture ID 428 as `texture type mismatch … declares slot 0 as Metal type 6, … is type 5`, 180 binds at frame 0 and none after. With the view the count is 0. The opening looks the same, though the two runs are not frame-aligned, so no pixel comparison was possible.
 - [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles): NigoProc's `800215a0f8d0c44d` is a mesh shader, and every pack stopped until its row was split again ([issue #1263](https://github.com/seedds/nxnative/issues/1263)).
+- [GPU timestamps per submission segment](../../../docs/reference/frame-rate.md#gpu-timestamps-per-submission-segment) for the dynamic resolution controller.
 - [Storage words read one by one](../../../docs/reference/shaders.md#storage-words-read-one-by-one): the lit pass on an M1, 70 → 16 ms.
 - [A blocked audio device start freezes the game](../../../docs/reference/audio.md#a-blocked-audio-device-start-freezes-the-game) when the selected HDMI device refuses to play.
 

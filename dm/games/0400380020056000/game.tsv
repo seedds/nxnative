@@ -38,3 +38,5 @@ shader_note	Splatoon Raiders shaders
 # ---- Graphics ----
 # agl wraps its clears in render conditions on Donkey Kong Bananza; the same library here, to be confirmed on this game
 render_cond	on
+# The dynamic resolution controller subtracts timestamp reports recorded in different segments of one submission.
+gpu_timestamps	segment

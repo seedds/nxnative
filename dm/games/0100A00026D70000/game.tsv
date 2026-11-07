@@ -36,10 +36,15 @@ app_pool	0xCD500000
 sys_resource	0x1400000
 
 # ---- Frame rate ----
-# 60 fps: the game sets present interval 1 and then 2 (30 fps) itself, which it applies again on level loads. At 30 fps a frame's budget is 33.33 ms and the measured frame time
-# is 33.4-33.8 ms, so every frame misses the budget a little and one is dropped now and then (19 of 300 frames, p99 66.67 ms -- the hitch on camera cuts); rendering costs 5.4 ms
-# of GPU and 1.6 ms of CPU, so 60 fps has room. It also fixes the sound running ahead of the picture: audio keeps real time, and a frame time 1.2% over budget made the picture
-# fall behind it by about 0.7 s a minute. At 60 fps: frame time p50 16.69 ms, 0 frames dropped of 300, p99 16.67 ms
+# 60 fps, the host's Unreal mechanism: it writes the engine's rhi.SyncInterval (the game sets 2, i.e. 30 fps, and applies it again on level loads) and t.MaxFPS through
+# the offsets the rewriter finds by name (hle_fpslock.c ue_rows). At 30 fps a frame's budget is 33.33 ms and the measured frame time is 33.4-33.8 ms, so every frame misses
+# by a hair and one is dropped now and then (10-19 of 300, p99 66.67 ms -- the hitch on camera cuts); rendering costs 5.4 ms of GPU and 1.6 ms of CPU, so 60 fps has room.
+# It also settles the sound running ahead of the picture: audio keeps real time, and a frame time 1.2% over budget made the picture fall behind it by about 0.7 s a minute.
+# At 60 fps: frame time p50 16.67 ms, 0 frames dropped of 300, p99 16.67 ms.
+#
+# On UE 5.8 the rewriter cannot name those variables yet (its TAutoConsoleVariable constructor takes the name in x2, dm/tools/ue_cvar.py looks for x1), so a clean tree
+# writes nothing, keeps the game's own interval and logs no red line: this key is right and starts working when the rewriter does (README, "60 fps is blocked on the
+# rewriter"). present_interval display was measured as a substitute and does not work (900 frames in 30 s, i.e. every frame shown twice), so it is not set here.
 fps_target	60
 
 # ---- Shaders ----

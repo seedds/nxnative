@@ -184,6 +184,25 @@ namespace Ryujinx.Graphics.Shader.Translation
             return setAndBinding.Binding;
         }
 
+        // nxnative: the constant buffer word that holds the address of a storage buffer binding (the NVN descriptor the host reads it from), for bind-time pointer sites
+        public bool TryGetStorageBufferDescriptor(int binding, out int sbCbSlot, out int sbCbOffset)
+        {
+            for (int slot = 0; slot < _sbSlotToBindingMap.Length; slot++)
+            {
+                if (_sbSlotToBindingMap[slot].Binding == binding && _sbSlotsReverse.TryGetValue(slot, out int key))
+                {
+                    (sbCbSlot, sbCbOffset) = UnpackSbCbInfo(key);
+                    return true;
+                }
+            }
+
+            sbCbSlot = sbCbOffset = 0;
+            return false;
+        }
+
+        // nxnative: the shader's bind-time pointer sites (GlobalToStorage.FindPointerSite), by (storage buffer cb slot, cb word, byte offset of the pointer word); the value is the site number
+        public readonly Dictionary<(int, int, int), int> PointerSites = new();
+
         public bool TryGetStorageBufferBinding(int sbCbSlot, int sbCbOffset, bool write, out int binding)
         {
             if (!TryGetSbSlot((byte)sbCbSlot, (ushort)sbCbOffset, out int slot))

@@ -100,6 +100,18 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             else if ([k isEqualToString:@DMSH_KIND_SUPPORT]) r->kind = NVN_RB_SUPPORT;
             else if ([k isEqualToString:@DMSH_KIND_GMEM_MAP]) { r->kind = NVN_RB_GMEM; r->rw = [b[@"rw"] boolValue]; }
             else if ([k isEqualToString:@DMSH_KIND_GMEM_LOG]) { r->kind = NVN_RB_GMEML; r->rw = 1; }
+            else if ([k isEqualToString:@DMSH_KIND_GPTR]) {   // the sites' pointer words, by storage buffer slot and byte offset
+                _Static_assert(DMSH_GPTR_MAX == sizeof o->gptr / sizeof o->gptr[0], "nvn_refl.gptr must hold DMSH_GPTR_MAX sites");
+                NSArray *ss = b[@"sites"];
+                if (![ss isKindOfClass:[NSArray class]] || ss.count > DMSH_GPTR_MAX || o->ngptr) FAIL("B binding %s: gptr sites missing, over %d or given twice", nm.UTF8String, DMSH_GPTR_MAX);
+                for (NSArray *e in ss) {
+                    if (![e isKindOfClass:[NSArray class]] || e.count != 2) FAIL("B binding %s: a gptr site is not [slot, byte]", nm.UTF8String);
+                    int sreg = [e[0] intValue], soff = [e[1] intValue];
+                    if (sreg < -1 || sreg >= 16 || soff < 0 || soff > 0xfff8) FAIL("B binding %s: gptr site slot %d byte %d out of range", nm.UTF8String, sreg, soff);
+                    o->gptr[o->ngptr].reg = (int8_t)sreg; o->gptr[o->ngptr].off = (uint16_t)soff; o->ngptr++;
+                }
+                r->kind = NVN_RB_GPTR;
+            }
             else if ([k isEqualToString:@DMSH_KIND_C1]) r->kind = NVN_RB_C1;
             else if ([k isEqualToString:@DMSH_KIND_DRVCB]) r->kind = [b[@"bank"] intValue] == DMSH_PUSH_BANK ? NVN_RB_PUSH : [b[@"bank"] intValue] == 2 ? NVN_RB_DRV2 : NVN_RB_DRV0;
             else if ([k isEqualToString:@DMSH_KIND_BORDER]) { if (o->border) FAIL("two border colour blocks"); r->kind = NVN_RB_BORDER; o->border = (uint8_t)(o->nb + 1); }

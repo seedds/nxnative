@@ -144,10 +144,24 @@ static void metal_lifecycle(void) {
     CHECK("present thread can take a real drawable after rescue", drawable != nil);
     [drawable present]; g_link_started = 0;
 }
+static void acquire_lease(void) {
+    reset(); g_pq_done = 5; g_present_gpu_ticket[5 % 3] = 5;
+    CHECK("retired present with GPU-owned source is not acquirable", !mtl_present_ready(5));
+    atomic_store(&g_present_discard, 1);
+    CHECK("discard cannot release a source still read by the GPU", !mtl_present_ready(5));
+    atomic_store(&g_present_discard, 0);
+    CHECK("no present ticket needs no GPU wait", mtl_present_ready(0));
+    g_present_gpu_ticket[5 % 3] = 0;
+    CHECK("GPU completion releases the retired source", mtl_present_ready(5));
+    CHECK("a future present remains unavailable", !mtl_present_ready(6));
+    g_present_gpu_ticket[5 % 3] = 8;
+    CHECK("a reused allocator slot does not retain an older source", mtl_present_ready(5));
+    g_present_gpu_ticket[5 % 3] = 0; g_pq_done = 0;
+}
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(10); setbuf(stdout, NULL);
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "--metal"))) return 2;
-    thresholds(); backoff(); settings(); lifecycle(); latency();
+    thresholds(); backoff(); settings(); lifecycle(); latency(); acquire_lease();
     if (argc == 2) metal_lifecycle();
     printf("present rescue: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

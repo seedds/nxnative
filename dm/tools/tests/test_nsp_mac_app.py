@@ -176,6 +176,20 @@ class PackReuse(unittest.TestCase):
         self.assertTrue(any('--sign' in c for c in self.commands))
         self.assertTrue(self.key.is_file())
 
+    def test_indexed_romfs_and_raw_dlc_links_are_portable_and_invalidate(self):
+        shared = self.tmp / 'primary'; shared.mkdir(); (shared / 'marker').write_text('primary')
+        self.args.romfs_program = [f'0\t{shared}']
+        (self.tmp / 'romfs/marker').unlink()   # the game's marker belongs to the indexed primary, not the companion
+        target = self.tmp / 'dlc'; (self.tmp / 'aoc/1').rename(target)
+        (self.tmp / 'aoc/1').symlink_to(target, target_is_directory=True)
+        self.pack(); self.assert_reused()
+        resources = Path(self.args.out) / 'Contents/Resources'
+        self.assertEqual((resources / 'romfs_programs/0/marker').read_text(), 'primary')
+        self.assertFalse((resources / 'aoc/1').is_symlink())
+        self.assertEqual((resources / 'aoc/1/data').read_bytes(), b'dlc')
+        (shared / 'marker').write_text('changed'); self.assert_repacked()
+        (target / 'data').write_text('updated DLC'); self.assert_repacked()
+
     def test_retargeted_input_symlink_repacks(self):
         msl = self.tmp / 'msl'
         for name in ('left.metallib', 'right.metallib'): (msl / name).write_bytes(b'same library')
@@ -446,7 +460,7 @@ class App(unittest.TestCase):
         cls.args = pack_app.parse([str(cls.app), '--host', str(t / 'dmhost'), '--patched', str(t / 'patched'), '--romfs', str(t / 'romfs'), '--msl', str(t / 'cache/b-0123456789ab'),
                                    '--tables', str(t / 'profile'), '--font', str(t / 'font'), '--aoc', str(t / 'aoc'), '--pso', str(t / 'pso'), '--env-file', str(t / 'env.txt'), '--settings', str(t / 'launcher.json'), '--title-id', TID.lower(),
                                    '--name', 'Game: Test', '--version', '1.0.1', '--lang', 'fr', '--marker', 'region_common/audio/edward.bfsar', '--icon', str(t / 'icon.jpg'),
-                                   '--category', 'public.app-category.games'])
+                                   '--category', 'public.app-category.games', '--romfs-program', f'0\t{t / "romfs"}'])
         with contextlib.redirect_stdout(io.StringIO()): pack_app.pack(cls.args)
 
     @classmethod
@@ -480,6 +494,15 @@ class App(unittest.TestCase):
         self.assertTrue((c / 'Resources/aoc/1/x').is_file()); self.assertTrue((c / 'Resources/dm/font/nintendo_ext.ttf').is_file())
         self.assertEqual(sorted(p.name for p in (c / 'Resources/pso').iterdir()), ['applegpu_g14s.mtl4a', 'prebuilt.tsv'])   # the pipeline archive and its stamp only
         self.assertEqual((c / 'Resources/AppIcon.icns').read_bytes()[:4], b'icns')
+
+    def test_launcher_accepts_marker_in_indexed_primary(self):
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as folder:
+            app = Path(folder) / 'Companion.app'; shutil.copytree(self.app, app)
+            (app / 'Contents/Resources/romfs/region_common/audio/edward.bfsar').unlink()
+            pack_app.sign(app, '-', shutil.which('codesign'))
+            p = self.launch(app=app); p.communicate(timeout=30)
+            self.assertEqual(p.returncode, 7)
+            self.assertEqual(self.host_run()['DM_ROMFS_PROGRAM_0'], str(app.resolve() / 'Contents/Resources/romfs_programs/0'))
 
     def test_pipeline_pair_tables(self):   # the pipeline prebuild reads them beside DM_NVN_SHMAP: without them it builds nothing, though every shader library is there
         dm = self.app / 'Contents/Resources/dm'
@@ -586,6 +609,7 @@ class App(unittest.TestCase):
         self.assertEqual(p.returncode, 7)   # the host's exit code
         r, res = self.host_run(), self.app / 'Contents/Resources'
         self.assertEqual(r['argv0'], str(self.app / 'Contents/MacOS/dmhost')); self.assertEqual(r['argv1'], str(res / 'dm'))
+        self.assertEqual(r['DM_ROMFS_PROGRAM_0'], str(res / 'romfs_programs/0'))
         self.assertEqual((r['DM_ROMFS'], r['DM_MSL_DIR'], r['DM_NVN_SHMAP'], r['DM_FONT_DIR'], r['DM_AOC_DIR']),
                          (str(res / 'romfs'), str(res / 'msl'), str(res / 'dm/shader_map.tsv'), str(res / 'dm/font'), str(res / 'aoc')))
         self.assertEqual(r['DM_PSO_BUNDLE'], str(res / 'pso'))   # the pipeline archive made offline, as the iOS app's main.m sets it
@@ -698,7 +722,7 @@ class App(unittest.TestCase):
         with mock.patch.object(pack_app, 'can_clone', can_clone), mock.patch.object(pack_app, 'tree_bytes', tree_bytes), \
              mock.patch.object(shutil, 'disk_usage', lambda p: types.SimpleNamespace(free=(1 << 30) + lists - 1)), contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaisesRegex(SystemExit, 'the app needs'): pack_app.pack(a)
-        self.assertEqual(len(probed), 5); self.assertEqual(counted, [(self.tmp / 'aoc').resolve()])
+        self.assertEqual(len(probed), 6); self.assertEqual(counted, [(self.tmp / 'aoc/1').resolve()])
 
     def test_copies(self):   # another volume (no APFS clone): plain copies, the same layout; a new app replaces the old one whole
         with mock.patch.object(pack_app, 'can_clone', lambda *a: False), mock.patch.object(pack_app, 'sign', lambda *a: None), mock.patch('sys.stdout'):

@@ -329,6 +329,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 
 ## CPU cost and pacing
 
+### Acquire fences keep pacing out of frame-cost samples
+
+- **Symptom:** Wonder's Switch 2 title/menu stays near 30 fps with about 5 ms of GPU work. Its dynamic interval controller allows intervals 1–2 but holds 2.
+- **Cause:** the host slept for presentation inside `nvnWindowAcquireTexture`, before the engine finished its CPU timing sample. The engine then waited on the returned acquire sync after taking that sample. The measured CPU cost included the host's vsync sleep, so the controller kept requesting 30 fps even with spare CPU/GPU capacity. The system-tick frequency was correct; GPU-segment timestamps and a 60 Hz display-link override did not resolve it.
+- **Fix:** normal sync-returning acquires publish a pending buffer lease. `nvnSyncWait` consumes it with the caller's timeout, retaining it after a timeout; queue and command-buffer waits resolve it before the inline interpreter uses the texture. A poll requires the slot deadline, retired present ticket and completion of any GPU read of that ticket's source. Atomic ownership allows concurrent waiters. Acquires without a sync, snapshot-ring mode and deterministic test mode retain their synchronous path. Capture layout records the larger sync object; live acquire pointers are not serialized.
+- **Check:** `t_nvn.c` covers pending polls, finite expiration, later readiness, two waiters, both GPU-wait APIs, replacement and reinitialization. `t_present_rescue.m` covers a retired ticket whose source is still GPU-owned. A visible-window 20-second title benchmark, warm pipelines and no screenshots within the measurement window, changed from 29.7 fps / 33.34 ms median frame time to 59.9 fps / 16.70 ms, without a frame-rate override. Full DLC gameplay and other games remain unmeasured.
+- **Found on:** [Wonder's raw Switch 2 companion](../../dm/games/010015100B514000/README.md#raw-switch-2-companion), main build `ec47e6f8846d2a7b6892e2682845c725`: the CPU timing sample at `main+0x1bbb58`, acquire-fence wait from `main+0x184708`, and frame-cost publication at `main+0x90a20` were checked by disassembly, sampling and a write watch. Logs and benchmarks are in the raw dump's `040015100B514001_build/fps-check/`.
+
 ### Arena buffer ownership on allocation
 
 - **Symptom:** autorelease work takes a measurable share of replay time, with temporary arena-buffer ownership traffic a few times per draw.

@@ -19,6 +19,11 @@ static int g_fail, g_n;
     printf("%-44s expected %-12lld → got %-12lld %s\n", name, w_, g_, w_ == g_ ? "✓" : "✗"); if (w_ != g_) g_fail++; } while (0)
 
 #define P(name) ((NVNT_##name)proc(#name))
+typedef struct { NVNsync *sync; int result; uint64_t returned; } acquire_wait_test;
+static void *acquire_wait_thread(void *arg) {
+    acquire_wait_test *t = arg;
+    t->result = h_nvnSyncWait(t->sync, UINT64_MAX); t->returned = now_ns(); return NULL;
+}
 static PFNNVNDEVICEGETPROCADDRESSPROC gpa; static NVNdevice dev;
 static void *proc(const char *n) { void *p = (void *)gpa(&dev, n); if (!p) { printf("address lookup failed %s\n", n); exit(1); } return p; }
 
@@ -662,11 +667,44 @@ int main(void) {
     int idx[4];
     for (int f = 0; f < 4; f++) {
         P(nvnWindowAcquireTexture)(&win, &s2, &idx[f]);
+        P(nvnSyncWait)(&s2, UINT64_MAX);   // consume the acquired buffer's fence before reusing it
         for (int b = 0; b < 5; b++) P(nvnCommandBufferBarrier)(&cb, 0);
         P(nvnQueuePresentTexture)(&q, &win, idx[f]);
     }
     EXPECT("swapchain rotates 0,1,0,1", 0x0101, idx[0] << 12 | idx[1] << 8 | idx[2] << 4 | idx[3]);
     EXPECT("sync signaled after acquire (0)", 0, P(nvnSyncWait)(&s2, 0));
+    // A buffer not yet available is acquired asynchronously. Polling / finite waits must not consume its fence or overrun the timeout; later consumers still see the dependency.
+    {
+        NVNwindowBuilder awb; NVNwindow aw; NVNsync as;
+        P(nvnWindowBuilderSetDevice)(&awb, &dev); P(nvnWindowBuilderSetDefaults)(&awb); P(nvnWindowBuilderSetTextures)(&awb, 2, scp); P(nvnWindowInitialize)(&aw, &awb);
+        P(nvnSyncInitialize)(&as, &dev); win_t *a = (win_t *)&aw; int ix;
+        a->avail[0] = UINT64_MAX;
+        P(nvnWindowAcquireTexture)(&aw, &as, &ix);
+        EXPECT("acquire returns the buffer before its fence signals", 0, ix);
+        EXPECT("acquire fence poll is not ready", NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED, P(nvnSyncWait)(&as, 0));
+        EXPECT("finite acquire wait expires", NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED, P(nvnSyncWait)(&as, 1000000));
+        EXPECT("timeout preserves the pending acquire", NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED, P(nvnSyncWait)(&as, 0));
+        a->avail[0] = 0;
+        EXPECT("the same fence becomes signaled when the buffer is ready", NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED, P(nvnSyncWait)(&as, 0));
+        a->avail[1] = now_ns() + 20000000;
+        P(nvnWindowAcquireTexture)(&aw, &as, &ix);
+        acquire_wait_test wa = {&as, -1, 0}, wb = {&as, -1, 0}; pthread_t ta, tb;
+        pthread_create(&ta, NULL, acquire_wait_thread, &wa); pthread_create(&tb, NULL, acquire_wait_thread, &wb);
+        pthread_join(ta, NULL); pthread_join(tb, NULL);
+        EXPECT("both acquire waiters observe success", 1, wa.result <= 1 && wb.result <= 1 && wa.result >= 0 && wb.result >= 0);
+        EXPECT("neither waiter returns before buffer availability", 1, wa.returned >= a->avail[1] && wb.returned >= a->avail[1]);
+        a->avail[0] = now_ns() + 2000000;
+        P(nvnWindowAcquireTexture)(&aw, &as, &ix); P(nvnQueueWaitSync)(&q, &as);
+        EXPECT("queue wait resolves acquire ownership before GPU use", NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED, P(nvnSyncWait)(&as, 0));
+        a->avail[1] = now_ns() + 2000000;
+        P(nvnWindowAcquireTexture)(&aw, &as, &ix); P(nvnCommandBufferWaitSync)(&cb, &as);
+        EXPECT("command-buffer wait resolves acquire ownership", NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED, P(nvnSyncWait)(&as, 0));
+        a->avail[0] = UINT64_MAX;
+        P(nvnWindowAcquireTexture)(&aw, &as, &ix); P(nvnQueueFenceSync)(&q, &as, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
+        EXPECT("a new queue fence replaces the old acquire dependency", NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED, P(nvnSyncWait)(&as, 0));
+        P(nvnSyncFinalize)(&as); P(nvnSyncInitialize)(&as, &dev);
+        EXPECT("reinitialized sync has no stale acquire", NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED, P(nvnSyncWait)(&as, 0));
+    }
     unsigned bi = 0; while (strcmp(nvn_names[bi], "nvnCommandBufferBarrier")) bi++;
     EXPECT("Barrier count = 4 frames × 5", 20, nvn_slot[bi].cnt);
 

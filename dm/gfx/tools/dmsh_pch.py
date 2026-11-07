@@ -24,6 +24,9 @@ fragment float4 main0(main0_in in [[stage_in]], constant set0& t [[buffer(0)]])
 }
 '''
 _lock, _headers = threading.Lock(), {}
+# A translated control-flow tree can exceed clang's default 256 bracket levels (Wonder's agl pfx compute shaders). This only raises a parser acceptance limit;
+# it changes neither the source nor code generation, as the byte-identity tests verify, so existing successful compile-cache entries remain valid.
+PARSER = ['-fbracket-depth=4096']
 
 
 def make(metal):
@@ -58,7 +61,7 @@ def header(metal):   # the path of the convention's header, None when it is not 
 def _run(metal, msl, air, **kw):
     # The source on standard input, so no file name reaches the compiler: clang names a source's static initializer after its file (_GLOBAL__sub_I_<name>, which any function constant brings),
     # so the same text under two names gave two libraries, and shaders sharing a source (3,936 of Breath of the Wild's 10,560 pixel shaders, in their _bl) took the bytes of whichever compiled first
-    with open(msl, 'rb') as f: return subprocess.run([*metal, '-x', 'metal', '-', '-o', air], stdin=f, **kw)
+    with open(msl, 'rb') as f: return subprocess.run([*metal, *PARSER, '-x', 'metal', '-', '-o', air], stdin=f, **kw)
 
 
 def compile(metal, msl, air):

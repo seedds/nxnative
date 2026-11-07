@@ -17,10 +17,15 @@
 #     whose blend factors read source 1
 # Super Mario Galaxy generates its GX shaders at run time; they come from a capture folder (the Mac host's DM_VK_CAPTURE), read like a RomFS: every input folder is
 # searched for SPIR-V files by their magic
+# Minecraft (RenderDragon, Mojang's bgfx fork) keeps its shaders inside compiled materials (renderer/materials/*.material.bin, magic 0x0A11DA1A): each pass variant holds a bgfx
+# shader binary (VSH / FSH / CSH, version 5) whose code is SPIR-V after a u32 byte count; bgfx's Vulkan renderer passes those bytes to vkCreateShaderModule unchanged
+# (material_modules). The same module recurs across variants and materials (12,286 modules, 1,323 different ones in 1.21.120): each key is translated once.
+# An input that is an NSO (the game's main) is read for the same bgfx shader binaries: bgfx's built-in shaders (its clear shaders fs_clear0-7, vs_clear, the debug text) are
+# compiled into main (11 in Minecraft 1.21.120), and without them every vkCmdClearAttachments-style clear bgfx draws had no shader
 # Output: <out>/vk/vk_shaders.metallib and <out>/vk/vk_shaders.tsv; --ios <dir> also writes <dir>/vk/ with an iPhone library (same table)
 # Table rows: key <TAB> stage (vert / frag) <TAB> resources, space-separated kind:set.binding=slot[*count] (count: an array of descriptors in consecutive slots; u uniform buffer, b storage buffer, t image, s sampler, c combined image sampler = texture and sampler slot n,
 #   p push constants)
-# Usage: vk_shaders.py <SPIR-V dir>... <out dir> [--ios <dir>]   (SPIR-V dirs: the RomFS, capture folders)
+# Usage: vk_shaders.py <SPIR-V dir | NSO>... <out dir> [--ios <dir>]   (SPIR-V dirs: the RomFS, capture folders; an NSO: the game's main)
 import concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open
@@ -40,12 +45,57 @@ PRECISE = re.compile(r'\bfast::(min|max|clamp)\(')
 
 def red(msg): sys.exit('[RED] ' + msg)
 
-def spirv_files(root):
+RD_MAGIC = struct.pack('<Q', 0x0A11DA1A)   # a RenderDragon compiled material (Minecraft's renderer/materials/*.material.bin)
+
+def whole_module(data, at, n):
+    """Whether data[at:at + n] is exactly one SPIR-V module: the magic, schema 0, then instructions whose word counts end at n bytes, not before or after"""
+    if n < 20 or n % 4 or at + n > len(data) or struct.unpack_from('<I', data, at)[0] != MAGIC or struct.unpack_from('<I', data, at + 16)[0]: return False
+    i, end = at + 20, at + n
+    while i < end:
+        w = struct.unpack_from('<I', data, i)[0] >> 16
+        if not w: return False
+        i += 4 * w
+    return i == end
+
+def material_modules(data):
+    """(offset, SPIR-V) of every module in a RenderDragon compiled material: a bgfx shader binary keeps its code after its u32 size (bgfx shader format 5: magic, hash,
+    uniforms, size, code); the size before the magic must cover a whole module, so a magic inside other data is not taken"""
+    head, i = struct.pack('<I', MAGIC), 4
+    while (i := data.find(head, i)) >= 4:
+        n = struct.unpack_from('<I', data, i - 4)[0]
+        if whole_module(data, i, n): yield i, data[i:i + n]; i += n
+        else: i += 4
+
+def nso_modules(path):   # (offset in the image, SPIR-V) of the bgfx shader binaries in an NSO (dm/tools/nso.py; nso.Error, a ValueError, on a damaged file)
+    import nso
+    with open(path, 'rb') as f: return list(material_modules(bytes(nso.load(f.read(), path).image)))
+
+def is_nso(path):
+    with open(path, 'rb') as f: return f.read(4) == b'NSO0'
+
+def spirv_sources(root):
+    """(path, offset or None, SPIR-V bytes) of every shader under root: whole SPIR-V files (offset None), the modules inside RenderDragon materials, and those in an NSO given as root"""
+    if os.path.isfile(root):
+        if is_nso(root): yield from ((root, at, spv) for at, spv in nso_modules(root))
+        return
     for d, _, fs in os.walk(root):
         for f in sorted(fs):
             p = os.path.join(d, f)
-            with open(p, 'rb') as fh: head = fh.read(4)
-            if len(head) == 4 and struct.unpack('<I', head)[0] == MAGIC: yield p
+            with open(p, 'rb') as fh: head = fh.read(8)
+            if len(head) >= 4 and struct.unpack('<I', head[:4])[0] == MAGIC: yield p, None, open(p, 'rb').read()
+            elif head == RD_MAGIC:   # some hold no pass, only samplers and uniforms other materials take (Minecraft's PBR/BRDF.material.bin, 277 bytes)
+                for at, spv in material_modules(open(p, 'rb').read()): yield p, at, spv
+
+def spirv_files(root):   # the paths spirv_sources reads shaders from (a whole SPIR-V file by its magic alone)
+    if os.path.isfile(root):
+        if is_nso(root) and nso_modules(root): yield root
+        return
+    for d, _, fs in os.walk(root):
+        for f in sorted(fs):
+            p = os.path.join(d, f)
+            with open(p, 'rb') as fh: head = fh.read(8)
+            if len(head) >= 4 and struct.unpack('<I', head[:4])[0] == MAGIC: yield p
+            elif head == RD_MAGIC and next(material_modules(open(p, 'rb').read()), None): yield p
 
 def decorations(words):
     """variable id → {'set': n, 'binding': n, 'binding_at': word index of the binding value}"""
@@ -79,11 +129,25 @@ def fix_strides(words):
     if not add: return words
     return words[:at] + [w for t, s in add.items() for w in ((4 << 16) | OP_DECORATE, t, DEC_ARRAY_STRIDE, s)] + words[at:]
 
-def one(path, tmp, root):
-    data = open(path, 'rb').read()
+def default_bindings(words):
+    """A resource with a DescriptorSet decoration and no Binding gets Binding 0, the decoration's default, inserted after its DescriptorSet decoration: bgfx's built-in clear
+    shaders in Minecraft's main (fs_clear0-7) declare their uniform block so; bgfx's Vulkan renderer clears with vkCmdClearAttachments and only creates them"""
+    dec, i = {}, 5
+    while i < len(words):
+        op, n = words[i] & 0xffff, words[i] >> 16
+        if n == 0: red('SPIR-V instruction length 0')
+        if op == OP_DECORATE and n >= 3 and words[i + 2] in (DEC_SET, DEC_BINDING): dec.setdefault(words[i + 1], {})[words[i + 2]] = i + n
+        i += n
+    add = sorted((d[DEC_SET], v) for v, d in dec.items() if DEC_SET in d and DEC_BINDING not in d)
+    for at, v in reversed(add): words = words[:at] + [(4 << 16) | OP_DECORATE, v, DEC_BINDING, 0] + words[at:]
+    return words
+
+def one(src, tmp, root):
+    path, at, data = src
+    if at is not None: path = f'{path}@{at:#x}'   # a module inside a RenderDragon material: the table names its offset
     if len(data) % 4: red(f'{path}: SPIR-V length {len(data)} is not a multiple of 4')
     key = hashlib.sha256(data).hexdigest()[:16]   # of the game's words, which the host hashes
-    words = fix_strides(list(struct.unpack(f'<{len(data) // 4}I', data)))
+    words = default_bindings(fix_strides(list(struct.unpack(f'<{len(data) // 4}I', data))))
     src_spv = os.path.join(tmp, key + '.in.spv'); open(src_spv, 'wb').write(struct.pack(f'<{len(words)}I', *words))
     refl = json.loads(subprocess.run([SPIRV_CROSS, src_spv, '--reflect'], capture_output=True, text=True, check=True).stdout)
     eps = refl.get('entryPoints', [])
@@ -140,7 +204,7 @@ def one(path, tmp, root):
     if stage == 'frag' and '[[color(1)]]' in src:   # dual-source variant vk_<key>_d: the output at location 1 becomes the second blend source of attachment 0
         msl_d = os.path.join(tmp, key + '_d.metal'); msls.append(msl_d)
         open(msl_d, 'w').write(src.replace(f'vk_{key}', f'vk_{key}_d').replace('[[color(1)]]', '[[color(0), index(1)]]'))
-    return key, stage, res, msls, '/' + os.path.relpath(path, root)
+    return key, stage, res, msls, '/' + os.path.relpath(path, root) if root != path.split('@')[0] else os.path.basename(path)
 
 def metallib(msls, out, sdk, extra):
     os.makedirs(out, exist_ok=True)
@@ -163,7 +227,12 @@ def main():
     if '--ios' in a: i = a.index('--ios'); ios = a[i + 1]; del a[i:i + 2]
     if len(a) < 2: sys.exit('usage: vk_shaders.py <SPIR-V dir>... <out dir> [--ios <dir>]')
     roots, out = a[:-1], a[-1]
-    files = [(p, r) for r in roots for p in spirv_files(r)]
+    files, keys = [], set()
+    for r in roots:
+        if not os.path.exists(r): red(f'{r}: no such file or folder')
+        for src in spirv_sources(r):   # one module per key: the same SPIR-V in several files or material variants is translated once (the first, in root and path order)
+            k = hashlib.sha256(src[2]).hexdigest()[:16]
+            if k not in keys: keys.add(k); files.append((src, r))
     if not files: red(f'no SPIR-V files in {" ".join(roots)}')
     with tempfile.TemporaryDirectory() as tmp:
         with cf.ThreadPoolExecutor(os.cpu_count()) as ex: rows = list(ex.map(lambda pr: one(pr[0], tmp, pr[1]), files))
@@ -187,4 +256,7 @@ def main():
             open(os.path.join(d, 'vk_shaders.tsv'), 'w').write('\n'.join(tsv) + '\n')
             print(f'{sdk}: {len(seen)} shaders → {lib}')
 
-if __name__ == '__main__': main()
+if __name__ == '__main__':
+    import nso
+    try: main()
+    except nso.Error as e: red(str(e))   # a damaged main

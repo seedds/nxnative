@@ -217,6 +217,13 @@ The yield back-off (`DM_YIELD_BACKOFF`) and the rewriter's spin waits (`patch_ns
 
 ## Events and notifications
 
+### Synchronization waits retain objects and completed notifications
+
+- **Symptom:** a wait times out after its event was signaled and cleared; closing and reusing a handle redirects a blocked wait to an unrelated event, or a wait on an exiting thread never completes. A signaled first entry also hides an invalid later handle. `ResetSignal` on a thread handle returns `0xfa01` (invalid state) instead of `0xe401` (invalid handle).
+- **Cause:** `WaitSynchronization` kept the caller's handle array and looked up its numbers again after waking. It neither retained the original objects nor recorded which signal completed the wait. Event and thread destruction followed handle ownership alone. The event SVCs treated a thread handle given to `ResetSignal` as a resettable object in the wrong state; the kernel accepts only a readable event (or a process) there, and invalid state means a readable event that is already clear.
+- **Fix:** as Horizon's `KSynchronizationObject::Wait`: reject more than 64 handles (`0xee01`), copy the handles and resolve every one (any invalid handle, the current-thread pseudo-handle and an event's write end included, is `0xe401`), and retain each event or thread until the wait returns, in the thread's own record (`thr_t.wobjs`, as the kernel's per-thread sync object buffer). Notification records the first matching index under `G`; later clearing or closing cannot undo completion. Thread reclamation waits for outstanding wait references. Ready objects, then a zero-time poll, precede a pending cancellation, and `CancelSynchronization` completes a blocked wait at once or else marks the next one. `ResetSignal` returns invalid handle for anything but a readable event. The short-poll back-off and deterministic-clock waits are unchanged.
+- **Found on:** synthetic host regressions in [`t_sync_wait.c`](../../dm/host/tests/t_sync_wait.c); six of its seven groups fail on the host before the fix (all but cancel-release). No game failure is known.
+
 ### Service-event producers follow the binding lifetime
 
 - **Symptom:** a host helper thread aborts when signalling a destroyed `SystemEvent`; repeated `vi::GetDisplayVsyncEvent` calls double the event's tick rate. Rapid replacement can abort with `too many vsync events`, or a retired vsync worker can signal another service's event at reused storage.

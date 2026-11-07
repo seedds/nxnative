@@ -84,11 +84,12 @@ void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stac
     (void)fn; (void)arg; (void)prio; (void)stack; starts++; return (void *)1;
 }
 void dm_guest_thread_join(void *tt) {
-    assert(tt == (void *)1 && !atomic_load(&g_open));
+    assert(tt == (void *)1 && !atomic_load(&g_ar[0].open));
     assert(((uint8_t *)sdk_work)[SDK_WORK - 1] == 0x5a);   // storage also survives the render thread
     joins++;
 }
 uint64_t now_ns(void) { return 0; }
+module_t *module_of(const void *p) { (void)p; return NULL; }
 void *dm_pcmout_open(int ch) { (void)ch; return NULL; }
 void dm_pcmout_close(void *k) { (void)k; }
 void dm_pcmout_start(void *k) { (void)k; }
@@ -148,7 +149,7 @@ int main(void) {
         assert(!memcmp(param, saved, sizeof param));
         if (route) {
             assert((uint8_t *)sdk_event >= (uint8_t *)g_rev && (uint8_t *)sdk_event < (uint8_t *)(g_rev + 4));
-            assert(g_handle[1] == (event_in_handle ? sdk_event : (uint8_t *)sdk_work + 0x80));
+            assert(g_ar[0].handle[1] == (event_in_handle ? sdk_event : (uint8_t *)sdk_work + 0x80));
             memset(event, 0xee, sizeof event);   // the game may reuse its object at once (LEGO Star Wars: on its stack; Little Nightmares): nothing refers to it
         }
         int d = event_destroys;

@@ -14,6 +14,7 @@ Status: brought up on the Mac on 2026-11-02: the update notice, the title and it
 | Engine region given what the alias region has room for, 2.81 GB: gate `OBS_UE_REGION` on the store of its size, `main+0xd18fd0`, and `main+0xd18fdc` made `mov x1, x8` | the rewriter's engine-wide rule (`dm/tools/ue_region.py`), no build ID; the host's room (`hle_svc.c`) | Unreal's `nninitStartup` reserves 62 GB by default; see [Memory](#memory) |
 | Node area cut 1 GB → 62 MB, regions aligned to 2 MB | `dm/tools/sdk_patches.py`, the SDK-wide rules on `sdk` build `5bcf525f…` | the same `sdk` as OCTOPATH TRAVELER II |
 | 3.75 GB guest block: `mem_reserve 0xF0000000`, `mem_alias 0xC8000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | `game.tsv` | the layout of the other Unreal 4.27 games: alias region = node area + the engine region + 256 MB for regions made later |
+| Dynamic buffers keep 4 copies, not 3: `main+0x33866f0` made `mov w8, #4` | the rewriter's engine-wide rule (`dm/tools/ue_ring.py`), no build ID | a workaround for the black sprite shapes; see [Black sprites](#black-sprites) |
 | `sys_resource 0x5000000` | `game.tsv` | the NPDM declares 80 MB of system resource |
 | `pad_layout full` | `game.tsv` | the 3D layout: the right stick turns the battle camera. It plays with the controller, so it stays docked (1920x1080) |
 | `shader_groups ShaderArchive-Global-=global ShaderArchive-=game` | `game.tsv` | the two shader code archives: the engine's global shaders and the game's material shaders |
@@ -22,6 +23,13 @@ Status: brought up on the Mac on 2026-11-02: the update notice, the title and it
 
 - **Current:** 60 fps (30 on the Switch). The game sets `rhi.SyncInterval` to 2; the host writes 1 whenever it does (`main: Unreal rhi.SyncInterval … 2 → 1 vsyncs`).
 - The same scripted route at 30 and at 60 fps (`run/ab.sh`, frame time p50 33.3 → 16.7 ms) showed the opening narration's map at the same stage in shots at 70, 80, 90 and 100 s: the game steps by the time that really passed. Battles were played at 60 fps but not compared with 30. `DM_FPS_TARGET=30` keeps the game's 30.
+
+## Black sprites
+
+- **Current: a fourth copy of each dynamic buffer, not fully proven** ([issue #1040](https://github.com/seedds/nxnative/issues/1040)). Moving sprites flickered black with the GPU near its frame budget: from about 13 ms of GPU time at 60 fps on a user's M1, and on an M6 slowed by a separate GPU load. `DM_FPS_TARGET=30` was always clean. The one comparison at equal load gave 5 black frames with 3 copies and 0 with 4, and counts vary between runs (1 to 16 before). It has not run on an M1.
+- **Cause:** the render thread rewrites sprite vertices at `main+0x3f7acc`, which looks like Paper2D's vertex commit (the game has `UNeweraPaperFlipbookComponent`), and its lock at `main+0x3386ea8` rotates the copies with no fence. In the frames looked at, the base pass left at the cleared black what the depth prepass had drawn: [Black shapes on sprites when Unreal's GPU work runs late](../../../docs/reference/rendering.md#black-shapes-on-sprites-when-unreals-gpu-work-runs-late).
+- **Ruled out:** uniform buffers changing in flight, GPU overlap between submissions, occlusion query results, texture re-uploads.
+- **Open:** why the copies sometimes advance twice per encoded frame. The cost of the fourth copy in memory has not been measured.
 
 ## Memory
 
@@ -49,4 +57,5 @@ The work folder's `run/` has `host.sh` (copies a host to `build/tshost`), `boot.
 General changes first needed here; each applies to every game:
 
 - **The engine region's size set again after its store** (`dm/tools/ue_region.py`, `patch_nso.py`): [Unreal's engine address region and its options](../../../docs/reference/memory.md#unreals-engine-address-region-and-its-options).
+- **A fourth copy of Unreal's dynamic buffers** (`dm/tools/ue_ring.py`, `patch_nso.py`): [Black shapes on sprites when Unreal's GPU work runs late](../../../docs/reference/rendering.md#black-shapes-on-sprites-when-unreals-gpu-work-runs-late).
 - **Movies into BGRA8 client textures** (`hle_movie.c`, `md_out_tex`): [A BGRA8 client texture gets its movie with red and blue swapped](../../../docs/reference/movies.md#a-bgra8-client-texture-gets-its-movie-with-red-and-blue-swapped). The title's great hall had blue torches and a blue floor circle before it, warm ones after.

@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/games'))
@@ -42,6 +43,41 @@ class DepthSignal(unittest.TestCase):
     def test_the_reason_is_one_comment_line(self):
         value, why = pg.depth_signal(self.ZERO, self.profile())['depth_mode']
         self.assertEqual(value, 'zero'); self.assertIn('near = 0', why); self.assertNotIn('\n', why)
+
+
+class HeapSignals(unittest.TestCase):
+    """The heap check's keys must give the heap region the whole request with the alias region the profile keeps (hle_svc.c mem_init: the heap region is mem_reserve less 256 MB, mem_stack and mem_alias)"""
+    STACK = 0x10000000
+
+    def profile(self, **keys):
+        keys = {'mem_stack': f'{self.STACK:#x}', 'app_pool': '0x240000000', 'sys_resource': '0x3000000', **keys}
+        return type('Profile', (), {'get': staticmethod(lambda k, d='': keys.get(k, d))})
+
+    def layout(self, req, reserve, alias):
+        """(heap region, alias region, keys set) after the heap check of a run that asked for req"""
+        sig = pg.heap_signals(f'[dm] SetHeapSize OOM: req {req:#x} > cap 0x8000000\n', self.profile(mem_reserve=f'{reserve:#x}', mem_alias=f'{alias:#x}'))
+        reserve, alias = int(sig.get('mem_reserve', (f'{reserve:#x}',))[0], 0), int(sig.get('mem_alias', (f'{alias:#x}',))[0], 0)
+        return reserve - 0x10000000 - alias - self.STACK, alias, set(sig)
+
+    def test_a_large_guessed_alias_region_is_kept_out_of_the_heap_region(self):
+        """Ocarina of Time (Switch 2, SDK 22.2.8): the 4.375 GB guess and a 5 GB block, then a 6.20 GB request; the heap region was 0xb8000000 (issue #1361)"""
+        heap, alias, keys = self.layout(0x18ce00000, 0x140000000, 0x118000000)
+        self.assertEqual(keys, {'mem_reserve'})
+        self.assertEqual(alias, 0x118000000)
+        self.assertGreaterEqual(heap, 0x18ce00000)
+        self.assertEqual(heap, 0x190000000)   # the request rounded up to 128 MB, nothing more
+
+    def test_a_small_alias_region_is_still_given_1_gb_of_room(self):
+        heap, alias, keys = self.layout(0x18ce00000, 0x140000000, 0x10000000)
+        self.assertEqual(keys, {'mem_reserve'})
+        self.assertEqual(heap + alias, 0x40000000 + 0x190000000)   # as before: the block sized for a 1 GB alias region
+
+    def test_a_block_with_room_shrinks_the_alias_region(self):
+        """Tears of the Kingdom asks for 0x86000000 of a 5 GB block: the alias region takes the rest, 0x98000000"""
+        heap, alias, keys = self.layout(0x86000000, 0x140000000, 0xb8000000)
+        self.assertEqual(keys, {'mem_alias'})
+        self.assertEqual(alias, 0x98000000)
+        self.assertGreaterEqual(heap, 0x86000000)
 
 
 class GlslSources(unittest.TestCase):
@@ -96,6 +132,65 @@ class UnrealMemory(unittest.TestCase):
         # mem_init puts the modules before the alias region, then stacks and the heap.
         heap = reserve - 0x10000000 - alias - stack
         self.assertGreaterEqual(heap, 128 * pg.MiB)
+
+
+class ModulesLeftOut(unittest.TestCase):
+    """main_modules and nro_modules: which modules a list leaves out are needed, read from each module's symbols (a symbol: (name, defined, bind))"""
+    def setUp(self):
+        td = tempfile.TemporaryDirectory(); self.addCleanup(td.cleanup)
+        self.dir = Path(td.name)
+        self.syms = {}
+        for cm in (mock.patch.object(pg, 'nso', lambda p: (self.syms[Path(p).name][0], '', [], 0)), mock.patch.object(pg.nso_syms, 'dynsyms', lambda img: next((s for i, s in self.syms.values() if i == img), []))):
+            cm.start(); self.addCleanup(cm.stop)
+
+    def module(self, name, imports=(), exports=(), comp=b''):
+        self.syms[name] = (name.encode() + b'\0' + comp, [(s, False, 1) for s in imports] + [(s, True, 1) for s in exports])
+        (self.dir / name).write_bytes(b'NSO0')
+
+    def test_a_module_main_imports_from_is_added(self):   # Absolum 1.2.1: the movie module moved to subsdk0
+        self.module('main', ['_ZN5movie9ExtractorC1Ev', 'nvnBootstrapLoader'])
+        self.module('sdk', exports=['nvnBootstrapLoader'])
+        self.module('subsdk0', exports=['_ZN5movie9ExtractorC1Ev'], comp=b'NintendoSDK_movie-20_5_29')
+        self.assertEqual(pg.main_modules(self.dir, ['main', 'sdk'], hooks=set()), {'subsdk0': 'NintendoSDK_movie'})
+        self.assertEqual(pg.main_modules(self.dir, ['main', 'subsdk0', 'sdk'], hooks=set()), {})   # listed already
+
+    def test_what_is_supplied_adds_nothing(self):
+        self.module('main', ['f', 'g'])
+        self.module('sdk', exports=['f'])
+        self.module('subsdk0', exports=['f', 'g'], comp=b'NintendoSDK_movie-20_5_29')
+        self.assertEqual(pg.main_modules(self.dir, ['main', 'sdk'], hooks={'g'}), {})   # sdk has f, the host g (GLSLC and nn::pcm under Super Mario Galaxy 2)
+
+    def test_gpu_drivers_and_rtld_stay_out(self):
+        self.module('main', ['eglGetDisplay', 'rtld_f'])
+        self.module('rtld', exports=['rtld_f'])
+        self.module('sdk')
+        self.module('subsdk1', exports=['eglGetDisplay'], comp=b'NintendoSDK_OpenGL-20_5_29')
+        self.assertEqual(pg.main_modules(self.dir, ['main', 'sdk'], hooks=set()), {})
+
+    def test_no_other_module_reads_nothing(self):   # the common case: a profile that lists every module, read no further than the first bytes
+        (self.dir / 'main').write_bytes(b'NSO0'); (self.dir / 'main.npdm').write_bytes(b'META')
+        self.assertEqual(pg.main_modules(self.dir, ['main'], hooks=set()), {})
+
+    def test_nro_modules_still_adds_what_an_nro_imports(self):   # Portal's video_nx.nro and the movie module; a symbol another NRO defines needs nothing
+        self.module('main'); self.module('sdk')
+        self.module('subsdk2', exports=['m'], comp=b'NintendoSDK_movie-20_5_29')
+        self.module('subsdk3', exports=['n'], comp=b'NintendoSDK_movie-20_5_29')
+        for name, syms in (('a.nro', [('m', False, 1), ('n', False, 1)]), ('b.nro', [('n', True, 1)])):
+            self.syms[name] = (name.encode(), syms); (self.dir / name).write_bytes(name.encode())
+        nros = {n: self.dir / n for n in ('a.nro', 'b.nro')}
+        self.assertEqual(pg.nro_modules(self.dir, nros, ['main', 'sdk'], hooks=set()), {'subsdk2': 'NintendoSDK_movie'})
+
+
+class Switch2(unittest.TestCase):
+    FACTS = {'mods': {'main': {'imports': {pg.HEAP_API}, 'bss': 0, 'far': False}}, 'romfs': {'root': set(), 'exts': {}}, 'sysres': 0}
+
+    def test_pool(self):   # Donkey Kong Bananza's profile: a 9 GB pool, and a heap region that holds it
+        keys = pg.guess(dict(self.FACTS, ounce=True), hooks=set())
+        self.assertEqual((keys['app_pool'][0], keys['mem_reserve'][0]), ('0x240000000', '0x270000000'))
+        self.assertEqual(pg.guess(self.FACTS, hooks=set())['app_pool'][0], '0xCD500000')
+
+    def test_sdk_variant(self):   # nnSdk-Generic_22_2_0 (Fire Emblem Fortune's Weave)
+        self.assertEqual(pg.SDK_VERSION.findall(b'NintendoSdk_nnSdk-Generic_22_2_0\0NintendoSDK_nnSdk-16_2_0\0'), [b'22_2_0', b'16_2_0'])
 
 
 

@@ -161,6 +161,16 @@ static void launcher_done(void) { [g_root startGame]; }
     UIScreen *scr = self.view.window.screen ?: UIScreen.mainScreen;
     const char *he = getenv("DM_HDR");
     if (scr.potentialEDRHeadroom <= 1.0 && !(he && atoi(he) == 2)) { setenv("DM_HDR", "0", 1); LOG("front end: this screen has no EDR headroom (potential %.2f): HDR output off", scr.potentialEDRHeadroom); }
+    {   // Picture shape "auto" (the launcher's Match screen): the app window's own shape when it is taller than 16:9 (an iPad's 4:3, an unfolded iPhone Duo's 1.43:1; loader.c
+        // takes 1.3 to 1.77), else 16:9. The window's, not the screen's: on an iPad under Stage Manager or Split View the app does not fill the screen. Resolved here, before the
+        // host writes the state page (main.c dm_fps_state_apply)
+        const char *a = getenv("DM_SCREEN_ASPECT");
+        if (a && !strcmp(a, "auto")) {
+            CGSize sz = self.view.window ? self.view.window.bounds.size : UIScreen.mainScreen.bounds.size; double r = MAX(sz.width, sz.height) / MAX(MIN(sz.width, sz.height), 1);
+            char v[16]; if (r >= 1.3 && r < 1.77) snprintf(v, sizeof v, "%.3f", r); else strcpy(v, "0");
+            setenv("DM_SCREEN_ASPECT", v, 1); LOG("front end: picture shape auto: window %.0fx%.0f points (%.3f:1) → DM_SCREEN_ASPECT=%s", sz.width, sz.height, r, v);
+        }
+    }
     self.fill = dm_picture_fill(getenv("DM_PICTURE_FIT"));
     if (self.fill) LOG("front end: picture Fill (DM_PICTURE_FIT=fill), the 16:9 picture covers the screen in landscape and its edges are cropped");
     self.view.clipsToBounds = YES;   // with Fill the game view is larger than the screen

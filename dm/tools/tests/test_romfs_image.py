@@ -7,6 +7,7 @@ import shlex
 import struct
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -56,6 +57,21 @@ class Images(unittest.TestCase):
         self.assertEqual(self.content('data/z'), b'')
         self.assertTrue(image.read_index(self.dst)['data/empty'][0])
 
+    def test_format_mismatches_name_zs_files_that_are_not_zstd(self):
+        tex = self.src / 'Tex'; tex.mkdir()
+        (tex / 'ok.bntx.zs').write_bytes(b'\x28\xb5\x2f\xfd' + b'frame')
+        (tex / 'skip.bntx.zs').write_bytes(b'\x53\x2a\x4d\x18' + b'\0' * 8)   # a skippable frame (any of 0x184d2a50..5f)
+        (tex / 'UPPER.ZS').write_bytes(b'\x28\xb5\x2f\xfd')
+        (tex / 'zeros.bntx.zs').write_bytes(b'\0' * 12288 + b'\x28\xb5\x2f\xfd')   # as on a damaged NUP of Ocarina of Time
+        (tex / 'short.zs').write_bytes(b'\x28\xb5')
+        (tex / 'empty.zs').write_bytes(b'')   # no bytes, no promise broken: left out
+        (tex / 'plain.bntx').write_bytes(b'\0' * 16)   # no format promised by the name
+        image.pack(self.src, self.dst)
+        seen = []
+        bad = image.format_mismatches(self.dst, lambda done, total: seen.append((done, total)))
+        self.assertEqual(sorted((p, size, head) for p, size, head in bad), [('Tex/short.zs', 2, b'\x28\xb5'), ('Tex/zeros.bntx.zs', 12292, b'\0\0\0\0')])
+        self.assertEqual(seen, [(0, 5)])
+
     def test_reuse_rebuilds_changed_added_removed_and_renamed_files(self):
         (self.src / 'a').write_bytes(b'old')
         image.pack(self.src, self.dst, reuse=True)
@@ -81,6 +97,19 @@ class Images(unittest.TestCase):
         identity = image.file_identity(self.dst)
         image.pack(self.src, self.dst)
         self.assertNotEqual(image.file_identity(self.dst), identity)
+
+    def test_reuse_survives_a_new_device_number(self):   # macOS numbers a volume at each mount: the Data volume went from 16777234 to 16777232 across a reboot, with the same inode, size and times
+        (self.src / 'a').write_bytes(b'data')
+        image.pack(self.src, self.dst, reuse=True)
+        digest, identity = image.source_digest(self.src, image.entries(self.src)), image.file_identity(self.dst)
+        real = os.stat
+        def remounted(path, *args, **kw):
+            s = real(path, *args, **kw)
+            return SimpleNamespace(st_dev=s.st_dev + 2, st_ino=s.st_ino, st_size=s.st_size, st_mtime_ns=s.st_mtime_ns, st_ctime_ns=s.st_ctime_ns)
+        with patch.object(image.os, 'stat', remounted):
+            self.assertEqual(image.file_identity(self.dst), identity)
+            self.assertEqual(image.source_digest(self.src, image.entries(self.src)), digest)
+            self.assertTrue(image.reusable(str(self.dst), digest))
 
     def test_changed_source_during_pack_preserves_previous_image(self):
         (self.src / 'a').write_bytes(b'old'); image.pack(self.src, self.dst)

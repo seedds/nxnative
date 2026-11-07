@@ -58,7 +58,9 @@ class Base(unittest.TestCase):
         self.ex = self.tmp / 'extract/v65536'; nso(self.ex / 'ExeFS/main', BID2); control(self.ex / 'control.nacp', '1.1.0')
         (self.ex / 'RomFS').mkdir(); (self.ex / 'RomFS/a.bin').write_bytes(b'romfs')
         self.pdir = self.tmp / 'derived' / f'{TID:016X}'
-        for cm in (mock.patch.dict(os.environ, {'DM_GAMES_DIR': str(self.tmp / 'games')}), mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'say', lambda m: None)):
+        self.imported = {}   # what main imports from modules the list leaves out (profile_guess.main_modules, with its own tests: these NSOs are headers only)
+        for cm in (mock.patch.dict(os.environ, {'DM_GAMES_DIR': str(self.tmp / 'games')}), mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'say', lambda m: None),
+                   mock.patch.object(nsp.pg, 'main_modules', lambda exefs, mods: self.imported)):
             cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
 
     def derive(self, ver='v65536', mods=('main',), app=None):
@@ -100,6 +102,33 @@ class DeriveProfile(Base):
         self.assertNotIn('subsdk1', g.builds()['v65536'])
         nso(self.ex / 'ExeFS/subsdk1', BID2); self.derive(mods=('main', 'subsdk1', 'sdk'))   # a version that ships it keeps the profile's list
         self.assertEqual(game.Game(self.pdir).words('modules'), ['main', 'subsdk1', 'sdk'])
+
+    def test_a_module_main_imports_that_the_list_leaves_out_is_added(self):   # Absolum: subsdk2 was the movie module in 1.1.2; 1.2.1 ships it as subsdk0, and no subsdk2 (issue #1211)
+        (self.src / 'game.tsv').write_text((self.src / 'game.tsv').read_text().replace('modules\tmain\n', 'modules\tmain subsdk2 sdk\n'))
+        nso(self.ex / 'ExeFS/sdk', BID); nso(self.ex / 'ExeFS/subsdk0', 'ee' * 16); nso(self.ex / 'ExeFS/subsdk1', 'ff' * 16)
+        self.imported = {'subsdk0': 'NintendoSDK_movie'}
+        self.derive(mods=('main', 'subsdk2', 'sdk'))
+        g = game.Game(self.pdir); text = (self.pdir / 'game.tsv').read_text()
+        self.assertEqual(g.words('modules'), ['main', 'subsdk0', 'sdk'])
+        self.assertEqual(g.build_modules()[BID2], ['main', 'subsdk0', 'sdk'])   # the host loads what the row names; subsdk1 stays out
+        self.assertIn('# this version ships no subsdk2', text)
+        self.assertIn('# main imports from subsdk0 (NintendoSDK_movie), which the profile does not list', text)
+        self.assertEqual(g.builds()['v65536']['subsdk0'], 'ee' * 16)
+        self.assertNotIn('subsdk1', g.builds()['v65536'])
+
+    def test_nothing_imported_keeps_the_list(self):
+        (self.src / 'game.tsv').write_text((self.src / 'game.tsv').read_text().replace('modules\tmain\n', 'modules\tmain sdk\n'))
+        nso(self.ex / 'ExeFS/sdk', BID); nso(self.ex / 'ExeFS/subsdk0', 'ee' * 16)
+        self.derive(mods=('main', 'sdk'))
+        g = game.Game(self.pdir)
+        self.assertEqual(g.words('modules'), ['main', 'sdk'])
+        self.assertNotIn('# main imports', (self.pdir / 'game.tsv').read_text())
+        self.assertNotIn('subsdk0', g.builds()['v65536'])
+
+    def test_shader_tables_alone_add_no_module(self):
+        self.imported = {'subsdk0': 'NintendoSDK_movie'}
+        nsp.derive_profile(game.Game(self.src), self.pdir, 'v65536', self.ex, ['main'], shader_only=True)
+        self.assertEqual(game.Game(self.pdir).words('modules'), ['main'])
 
     def test_the_same_profile_in_another_checkout_keeps_later_stages(self):
         self.derive(); self.later_stages()
@@ -238,7 +267,7 @@ class DeriveProfile(Base):
         self.assertEqual(sorted(p.name for p in self.pdir.iterdir() if p.name.startswith('.game.tsv')), [])
 
     def test_heap_stamp_replace_failure_preserves_original(self):
-        self.derive(); g = game.Game(self.pdir); before = g.table('game.tsv').read_bytes()
+        self.derive(); nsp.set_keys(game.Game(self.pdir), {'mem_alias': ('0x80000000', '')}, 'A profile'); g = game.Game(self.pdir); before = g.table('game.tsv').read_bytes()
         logs = self.tmp / 'logs'; logs.mkdir()
         def boot(*args): (logs / 'heap_check.log').write_text('>>> nnMain\n'); return 0
         with mock.patch.object(nsp, 'build_mac_host'), mock.patch.object(nsp, 'boot_mac', side_effect=boot), \
@@ -246,6 +275,25 @@ class DeriveProfile(Base):
             with self.assertRaisesRegex(OSError, 'interrupted replace'):
                 nsp.heap_check(REPO, self.ex, self.tmp / 'patched', self.tmp / 'work', {}, logs, g)
         self.assertEqual(g.table('game.tsv').read_bytes(), before)
+
+    def test_heap_check_runs_on_the_profiles_alias_region(self):   # its keys are for that layout, the iPhone's, not the Mac host's 64 GB
+        self.derive(); nsp.set_keys(game.Game(self.pdir), {'mem_alias': ('0x80000000', '')}, 'A profile'); g = game.Game(self.pdir)
+        logs = self.tmp / 'logs'; logs.mkdir(); seen = {}
+        def boot(host, patched, henv, *args): seen.update(henv); (logs / 'heap_check.log').write_text('>>> nnMain\n'); return 0
+        with mock.patch.object(nsp, 'build_mac_host'), mock.patch.object(nsp, 'boot_mac', side_effect=boot), mock.patch.object(nsp.pg, 'heap_signals', return_value={}):
+            nsp.heap_check(REPO, self.ex, self.tmp / 'patched', self.tmp / 'work', {}, logs, g)
+        self.assertEqual(seen['DM_ALIAS_SIZE'], '0x80000000')
+
+    def test_heap_check_boots_again_after_it_resizes_the_heap_region(self):   # Pokemon FireRed / LeafGreen: the app pool check behind the heap request sets mem_used on the second boot
+        with (self.src / 'game.tsv').open('a') as f: f.write('mem_alias\t0x80000000\nmem_reserve\t0x140000000\nmem_stack\t0x10000000\napp_pool\t0xc8000000\n')
+        self.derive(); logs = self.tmp / 'logs'; logs.mkdir(); aliases = []
+        runs = iter(['>>> nnMain\n[dm] SetHeapSize OOM: req 0xc9000000 > cap 0x8000000\n', '>>> nnMain\n[mem] SetHeapSize 0xc9000000 + modules 0x6600000 > app pool 0xc8000000\n'])
+        def boot(host, patched, henv, *args): aliases.append(henv['DM_ALIAS_SIZE']); (logs / 'heap_check.log').write_text(next(runs)); return 0
+        with mock.patch.object(nsp, 'build_mac_host'), mock.patch.object(nsp, 'boot_mac', side_effect=boot):
+            g = nsp.heap_check(REPO, self.ex, self.tmp / 'work/patched_v65536', self.tmp / 'work', {}, logs, game.Game(self.pdir))
+        self.assertEqual(aliases, ['0x80000000', '0x50000000'])   # the second boot runs on the resized layout, and there is no third
+        self.assertEqual((g.get('mem_alias'), g.get('mem_used')), ('0x50000000', '0x6a00000'))
+        self.assertIn('the heap request did not fit, then the heap and the modules did not fit the app pool; set mem_alias, mem_used', g.table('game.tsv').read_text())
 
     def check_boot(self, name, log):   # a check on the derived profile, whose boot writes this log; the profile after it
         logs = self.tmp / 'logs'; logs.mkdir(exist_ok=True); patched = self.tmp / 'work/patched_v65536'
@@ -904,6 +952,23 @@ class GlslcCacheCoverage(Base):
         for observed, msg in (({self.KEY}, 'observed shaders absent'), (set(), 'no submitted shader keys')):
             with self.subTest(observed=observed), self.assertRaisesRegex(nsp.BuildError, msg):
                 nsp.check_glslc_coverage(observed, game.Game(self.src))
+
+
+class JitBootDone(unittest.TestCase):
+    def test_needs_the_boot_code_and_ten_seconds_with_nothing_new(self):
+        with tempfile.TemporaryDirectory() as t, mock.patch.object(nsp.time, 'time', return_value=100.0) as now:
+            part = Path(t); done = nsp.jit_boot_done(part)
+            self.assertFalse(done())   # nothing captured yet
+            (part / 'small.jit').write_bytes(b'x'); now.return_value = 200.0
+            self.assertFalse(done())   # a request, but not the boot code
+            (part / 'boot.jit').write_bytes(bytes((1 << 20) + 1)); now.return_value = 201.0
+            self.assertFalse(done())   # the boot code, just now
+            now.return_value = 211.0
+            self.assertFalse(done())
+            now.return_value = 211.5
+            self.assertTrue(done())
+            (part / 'late.jit').write_bytes(b'x')
+            self.assertFalse(done())   # something new starts the wait again
 
 
 if __name__ == '__main__': unittest.main()

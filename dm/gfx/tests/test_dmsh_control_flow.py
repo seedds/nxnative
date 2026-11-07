@@ -96,6 +96,14 @@ class ControlFlow(unittest.TestCase):
         msl = self.translate(program, struct.pack('<2i', *words))
         self.assertEqual(len(re.findall(r'== (?:\w+\()?\d+', msl)), 1, msl)
 
+    def test_word_past_the_code_ends_the_table(self):
+        # What follows a table in c1 is data, and may lead past the code's end: the translator took that as a failure (ArgumentOutOfRangeException, two compute shaders of Yoshi and the Mysterious Book)
+        anchor = 2 * SIZE
+        program = [ldc(1, 2, 0), branch(0x949, 0, ra=1), bra(2, 4), WORK, EXIT]
+        words = [t * SIZE - anchor for t in (2, 3)] + [0x100000]
+        msl = self.translate(program, struct.pack('<3i', *words))
+        self.assertEqual(len(re.findall(r'== (?:\w+\()?\d+', msl)), 1, msl)
+
     def test_entry_for_program_start_is_no_target(self):
         # Words that lead to address 0 fill a table's unused cases: taken as targets, they put the whole program in a loop
         msl = self.translate(*self.two_switches(second_extra=(0, 0, 0)))

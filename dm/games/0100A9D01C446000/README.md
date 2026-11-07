@@ -85,6 +85,7 @@ General host changes first needed here; each applies to every game:
 
 ## Open
 
+- **Current (2026-11-05):** the translator deletes 95 bindless accesses in 3 shaders (3 compute; textureBuffer 95), whose results read 0: `0fbcff5628f8a60e` `959f9329e7a27dd9` `da6cd22fe7620c06`. The cause is not traced, and whether a route reaches them is not known. [Losses a shader build reports](../../../docs/reference/shaders.md#losses-a-shader-build-reports).
 - The engine region's gate (2.81 GB instead of the 2 GB `game_args` gave) has not been run on this game yet: the `[mem] Unreal's engine region` line in a boot's log shows it.
 - 60 fps on the iPhone: held for 3 minutes in an iPhone log of 2026-10-23 (GPU 13–15 ms mid-session, compile hitches up to 0.66 s). The same log had red lines for 7 point-light geometry shaders (missing shadows) and 1 texture type mismatch.
 - 62 of the 63 geometry shaders do not build, so point light shadows are not drawn.

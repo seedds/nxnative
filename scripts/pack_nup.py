@@ -4,14 +4,18 @@
 # A NUP holds the same packages as a dump folder (scripts/pack_dump.py): the base game, updates by version and DLC by title ID, each an exefs/ and romfs/ tree, its files stored raw or as one zstd
 # frame each, with a SHA-256 per file. Its files are not encrypted, so it needs no keys. Unlike a dump it may carry control data in each package's meta block: the NACP and the icon. Its name,
 # publisher and display version records are labels the packer typed (Hyrule Warriors: Age of Imprisonment's says "HWAoI"), not the console's: without a NACP the name comes from the profile.
-# The base package may be an empty placeholder (no code, title ID 0) when an update holds the whole game (Pokemon Pokopia's v655360): the title ID is the program ID of the code present.
+# A container may hold no base game, in two forms that mean the same: no base record, with standalone_update on every update (SPEC §3.1.2), or a base record with no files (title ID 0), as packers
+# leave when an update holds the whole game (Pokemon Pokopia's v655360). The title ID is then the program ID of the code present, there is no version 0, and the selected update needs its own ExeFS
+# and RomFS, taken as the whole game. The flag does not promise that (the spec says such an update needs a matching base elsewhere), and nothing in a container can prove it, so the scripts say so
+# (NO_BASE). What was measured: the update RomFS of both NUPs at hand holds every path of its base (Hyrule Warriors: Age of Imprisonment, Yoshi and the Mysterious Book).
 # Writes, under the build folder (<folder of the .nup>/<title ID>_build unless --work-dir names another):
 #   extract/v<version>/ExeFS/   the version's code modules
 #   extract/v<version>/RomFS.img   its RomFS as one image (dm/tools/romfs_image.py), written straight from the container: the RomFS is never unpacked into loose files
 #   extract/v<version>/control.nacp, icon.jpg   the package's NACP and its icon, when it carries them (sips reads a PNG icon by its content)
 #   aoc/<index>.img   each DLC's RomFS (index = DLC title ID − base title ID − 0x1000), the host's DM_AOC_DIR
 # An update's RomFS is packed on its own, never laid over the base: the dumps NUPs are packed from hold the patched RomFS of an update (pack_dump.py); an update with no romfs/ uses the base's.
-# Every file read is checked against its SHA-256. A repeat run keeps code modules whose content is the same and an image made from the same container tree by the same packer.
+# Every file read is checked against its SHA-256. A repeat run keeps code modules whose content is the same and an image made from the same container tree by the same packer,
+# or, after a packer update, an image whose bytes check against the container's hashes.
 # Needs the zstd module: compression.zstd (Python 3.14+) or backports.zstd, as the NSP script.
 # Usage: pack_nup.py <game.nup> [--version N] [--work-dir DIR]   (exit 1 on error)
 import argparse, hashlib, mmap, os, shutil, struct, sys
@@ -39,6 +43,7 @@ KINDS = ('base', 'update', 'addon', 'addon_update', 'system')
 STANDALONE = 1   # package flags bit 0: an update in a container without a base
 T_NACP, T_ICON, T_LICONS = 2, 3, 10
 ARTIFACTS = {b'.listing'}   # dump-tool files a producer may have kept (SPEC §6.3): not game files
+NO_BASE = 'no base game in this NUP: its update is taken as the whole game (if the game then stops on missing files, the update holds only what changed: pack a NUP with the base game)'
 
 
 class Package:
@@ -158,6 +163,18 @@ class Nup:
             write = bytearray.extend
         b = Buf(); self.copy(i, b); return bytes(b)
 
+    def head(self, i, n=32):   # file i's first n bytes (fewer for a shorter file), for a survey's RomFS manifest; not checked against the SHA-256, which covers the whole file
+        name, size, sha, eoff, esz, codec = self.files[i]
+        if codec == 0 or not size: return bytes(self.mm[eoff:eoff + min(n, size)])
+        if zstd is None: raise Error('reading a NUP needs the zstd module: compression.zstd (Python 3.14+) or pip install backports.zstd')
+        d, out, p = zstd.ZstdDecompressor(), b'', eoff
+        try:
+            while len(out) < min(n, size) and p < eoff + esz and not d.eof:
+                out += d.decompress(self.mm[p:min(p + (64 << 10), eoff + esz)], max_length=n - len(out)); p += 64 << 10
+                while len(out) < min(n, size) and not d.needs_input and not d.eof: out += d.decompress(b'', max_length=n - len(out))
+        except zstd.ZstdError as e: raise Error(f'{self.path}: {name.decode(errors="replace")}: {e}') from e
+        return out[:n]
+
 
 def program_id(npdm, where):   # the ACI0 program ID of an NPDM
     if npdm[:4] != b'META': raise Error(f'{where}: not an NPDM')
@@ -173,15 +190,15 @@ def is_nup(path):
 
 
 def scan(n):
-    """What a NUP holds: (title ID, base package, {update version: package}, {DLC title ID: package}), with the checks pack_dump.scan makes"""
+    """What a NUP holds: (title ID, base package or None, {update version: package}, {DLC title ID: package}), with the checks pack_dump.scan makes"""
     bases = [k for k in n.packages if k.kind == BASE]
-    if not bases:
-        raise Error(f'{n.path}: no base game, only ' + (', '.join(sorted({KINDS[k.kind] for k in n.packages}))) + ' packages: pack the base game and its update into one NUP')
-    base = bases[0]
     if len(bases) > 1: raise Error(f'{n.path}: {len(bases)} base packages')
-    # Dumps can leave an empty base placeholder and put the complete game in an update.
-    # Identify it from the code actually present; each selected version is checked by pack_version.
-    ids = {program_id(n.read(i), f'{k.name} exefs/main.npdm') for k in n.packages if k.kind in (BASE, UPDATE) and k.exefs != NO_DIR
+    updates = [k for k in n.packages if k.kind == UPDATE]
+    if not bases and (not updates or any(not k.flags & STANDALONE for k in updates)):
+        raise Error(f'{n.path}: no base game: pack the base game and its update into one NUP, or use updates marked standalone_update with complete exefs/ and romfs/')
+    base = bases[0] if bases and n.tree_bytes(bases[0].root) else None   # a base record with no files is no base game
+    # With no base the game is identified from the code actually present; each selected version is checked by pack_version.
+    ids ={program_id(n.read(i), f'{k.name} exefs/main.npdm') for k in n.packages if k.kind in (BASE, UPDATE) and k.exefs != NO_DIR
            if (i := n.child(k.exefs, b'main.npdm')) is not None}
     if not ids: raise Error(f'{n.path}: no exefs/main.npdm in the base or updates')
     if len(ids) != 1: raise Error(f'{n.path}: base and updates have different program IDs: ' + ', '.join(f'{pid:016X}' for pid in sorted(ids)))
@@ -234,18 +251,55 @@ def entries(n, d):   # romfs_image.entries for a folder of the container: [name,
     return ents
 
 
-def pack(n, d, img, say=print):   # the RomFS folder d of the container → img, kept while the container tree and the packers are the same
+def verified(n, ents, dst):
+    """The identity of the image at dst when it is, byte for byte, what write() makes of ents now (romfs_image.layout's header and index, and each file's bytes
+    with the container's SHA-256), and it stayed the same while being read; else None. Reads the image, not the container's file data: 21.6 s for Ocarina's 26.25 GB image."""
+    ents = [e.copy() for e in ents]
+    off = romfs_image.HEAD.size
+    for e in ents:
+        if not e[2]: e[3], e[4] = off, n.files[e[1]][1]; off += e[4]
+    head, idx = romfs_image.layout(ents, off)
+    try:
+        before = romfs_image.file_identity(dst)
+        if before[1] != off + len(idx): return None   # [inode, size, mtime, ctime]
+        with open(dst, 'rb') as f:
+            if f.read(len(head)) != head: return None
+            f.seek(off)
+            if f.read(len(idx)) != idx: return None
+            f.seek(len(head))
+            for _, i, isdir, _, size in ents:   # the data in entry order, one pass forward
+                if isdir: continue
+                h, left = hashlib.sha256(), size
+                while left:
+                    chunk = f.read(min(left, 8 << 20))
+                    if not chunk: return None
+                    h.update(chunk); left -= len(chunk)
+                if h.digest() != n.files[i][2]: return None
+        return before if romfs_image.file_identity(dst) == before else None
+    except OSError:
+        return None
+
+
+def pack(n, d, img, say=print, step=lambda s: None):
+    """The RomFS folder d of the container → img. Returns how: 'kept' (the stamp says the container tree and the packers are the same), 'verified' (the stamp is
+    from another packer, but the image checks against the container's hashes: its stamp is renewed) or 'packed'. step(name): the step it is in, for a progress line"""
     img.parent.mkdir(parents=True, exist_ok=True)
     ents, dst = entries(n, d), os.fspath(img)
     digest = hashlib.sha256(Path(romfs_image.__file__).read_bytes() + Path(__file__).read_bytes() + n.toc_sha + struct.pack('<I', d)).hexdigest()   # the TOC hash covers every name and file hash
-    if romfs_image.reusable(dst, digest): return len(ents)
-    say(f'packing {n.path.name} folder {d} → {img}')
+    if romfs_image.reusable(dst, digest): return 'kept'
+    if img.is_file():   # a packer update changes the digest, not the image: check its bytes before unpacking minutes of data again
+        step('checking the image'); say(f'checking {img} against {n.path.name}')
+        if identity := verified(n, ents, dst):
+            romfs_image.stamp(dst, digest, identity)
+            say('  kept: the image matches the container')
+            return 'verified'
+    step('unpacking'); say(f'packing {n.path.name} folder {d} → {img}')
     part = dst + '.part'
     try: romfs_image.publish(romfs_image.write(ents, dst, n.copy), dst, digest)
     except BaseException:
         Path(part).unlink(missing_ok=True); raise
     say(f'  {len(ents):,} entries, {img.stat().st_size / 2**30:.2f} GB')
-    return len(ents)
+    return 'packed'
 
 
 def localized(payload):   # the localized icons record (TLV 0x000A) → {lowercase language tag: image bytes}
@@ -263,8 +317,13 @@ def pick(tags, code):   # the record for a language code: the exact tag, then it
     return tags.get(code) or tags.get(code.split('-')[0])
 
 
-def control(k, out):   # the package's control data beside its ExeFS, as nx_extract saves it: control.nacp and icon.jpg (none of either when the package has none)
-    meta = k.meta()
+def app_package(n):   # the record that holds application metadata when no base game is there (SPEC §5.1): a base record with no files, as packers attach it there, else the first package
+    return next((k for k in n.packages if k.kind == BASE), n.packages[0])
+
+
+def control(k, out, fallback=None):   # the package's control data beside its ExeFS; what it lacks comes from fallback
+    meta = fallback.meta() if fallback is not None else {}
+    meta.update(k.meta())
     nacp_bytes = meta.get(T_NACP)
     icons = localized(meta.get(T_LICONS, b''))
     icon = meta.get(T_ICON) or pick(icons, 'en-US') or next(iter(icons.values()), None)
@@ -274,19 +333,20 @@ def control(k, out):   # the package's control data beside its ExeFS, as nx_extr
 
 
 def romfs_of(k, base):   # the RomFS folder a version runs with: its own, or the base game's for an update without one
-    d = k.romfs if k.romfs != NO_DIR else base.romfs
+    d = k.romfs if k.romfs != NO_DIR else base.romfs if base is not None else NO_DIR
     if d == NO_DIR: raise Error(f'{k.name}: no romfs/ in this package or the base game')
     return d
 
 
-def pack_version(n, k, base, app, out, say=print):   # one version (the base package, or an update package) → out/ExeFS, out/RomFS.img and its control data
+def pack_version(n, k, base, app, out, say=print, step=lambda s: None):   # one version (the base package, or an update package) → out/ExeFS, out/RomFS.img and its control data; returns how pack() got the image
     if k.exefs == NO_DIR or n.child(k.exefs, b'main') is None or n.child(k.exefs, b'main.npdm') is None: raise Error(f'{k.name}: no exefs/main and exefs/main.npdm')
     if (pid := program_id(n.read(n.child(k.exefs, b'main.npdm')), f'{k.name} exefs/main.npdm')) != app: raise Error(f'{k.name}: program ID {pid:016X}, the base is {app:016X}')
     d = romfs_of(k, base)
     out.mkdir(parents=True, exist_ok=True)
     exefs(n, k, out / 'ExeFS')
-    pack(n, d, out / 'RomFS.img', say)
-    control(k, out)
+    how = pack(n, d, out / 'RomFS.img', say, step)
+    control(k, out, app_package(n) if base is None else None)
+    return how
 
 
 def pack_dlc(n, app, dlc, aoc, say=print):   # {DLC title ID: package} → aoc/<index>.img; images of DLC no longer in the container go
@@ -309,11 +369,14 @@ def main():
             app, base, vers, dlc = scan(n)
             ver = a.version if a.version is not None else max(vers, default=0)
             if ver and ver not in vers: raise Error(f'no update {ver} in {path.name} (have: {", ".join(map(str, sorted(vers))) or "none"})')
-            work = (a.work_dir or path.parent / f'{app:016X}_build').resolve()
+            k = vers[ver] if ver else base
+            if k is None: raise Error(f'{path.name}: no base game (version 0); choose a standalone update version')
+            if base is None: print(NO_BASE, flush=True)
+            work =(a.work_dir or path.parent / f'{app:016X}_build').resolve()
             out = work / 'extract' / f'v{ver}'
-            print(f'{app:016X} version {ver}: {(vers[ver] if ver else base).name}', flush=True)
+            print(f'{app:016X} version {ver}: {k.name}', flush=True)
             say = lambda s: print(s, flush=True)
-            pack_version(n, vers[ver] if ver else base, base, app, out, say)
+            pack_version(n, k, base, app, out, say)
             pack_dlc(n, app, dlc, work / 'aoc', say)
     except (Error, OSError) as e: sys.exit(f'[RED] {e}')
     print(f'done: {out}' + (f', {len(dlc)} DLC in {work / "aoc"}' if dlc else ''))

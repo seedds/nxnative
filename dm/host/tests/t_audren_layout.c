@@ -5,25 +5,41 @@
 #include "../hle.h"
 #include <assert.h>
 #include <sys/wait.h>
+#include <unistd.h>
 #include "../hle_audren.c"
 
-void *guest_sym(const char *name) { (void)name; return NULL; }
+enum { SAMPLES = 240, NMIX = 8, NCMD = 6 };
+// test_renderer_blocks: the renderer each appended block came from; the output holds what it is given and plays none of it
+static int blocks_on; static gbuf *blocks[AR_MAX][NBUF]; static int blocks_n[AR_MAX];
+static void blocks_exec(void *obj, void *state);
+// test_update_lock: the module's functions by name
+static struct { const char *name; void *p; } lock_syms[4];
+void *guest_sym(const char *name) {
+    for (size_t i = 0; i < sizeof lock_syms / sizeof *lock_syms; i++) if (lock_syms[i].name && !strcmp(lock_syms[i].name, name)) return lock_syms[i].p;
+    return blocks_on && strstr(name, "ExecuteAudioRendererRendering") ? (void *)blocks_exec : NULL;
+}
 void *objmap_get(const void *key) { (void)key; return NULL; }
 void objmap_put(const void *key, void *value) { (void)key; (void)value; }
 void *objmap_del(const void *key) { (void)key; return NULL; }
 void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stack) { (void)fn; (void)arg; (void)prio; (void)stack; return NULL; }
 void dm_guest_thread_join(void *tt) { (void)tt; }
 uint64_t now_ns(void) { return 0; }
+module_t *module_of(const void *p) { (void)p; return NULL; }
 void *dm_pcmout_open(int ch) { (void)ch; return NULL; }
 void dm_pcmout_close(void *k) { (void)k; }
 void dm_pcmout_start(void *k) { (void)k; }
-int dm_pcmout_append(void *k, void *b) { (void)k; (void)b; return 0; }
+int dm_pcmout_append(void *k, void *b) {
+    (void)k;
+    if (!blocks_on) return 0;
+    int r = ar_index(t_ar); blocks[r][blocks_n[r]++] = b;
+    if (blocks_n[r] == NBUF) atomic_store(&t_ar->open, 0);
+    return 1;
+}
 void *dm_pcmout_released(void *k) { (void)k; return NULL; }
 void dm_pcmout_wait(void *k, int ms) { (void)k; (void)ms; }
 void hle_bind_system_event(void *ev, int ac) { (void)ev; (void)ac; }
 uint32_t hle_dup_readable_handle(uint32_t h) { return h; }
 
-enum { SAMPLES = 240, NMIX = 8, NCMD = 6 };
 static int32_t mix[NMIX * SAMPLES];
 _Alignas(8) static uint8_t list[0x20 + NCMD * 0x148];
 static uint8_t *put(uint8_t *q, int sdk, int id, int size) {
@@ -69,7 +85,7 @@ static void test_headers(void) {
     }
     g_hdr6 = g_hdr21 = 0;
     int16_t out[FRAME_MAX * 2];
-    for (size_t n = 0; n < 0x20; n++) assert(capture(list, n, out) == 0);
+    for (size_t n = 0; n < 0x20; n++) assert(capture(&g_ar[0], list, n, out) == 0);
 }
 
 static void test(int sdk, int incomplete) {
@@ -81,12 +97,12 @@ static void test(int sdk, int incomplete) {
     // An empty startup list must not choose a layout either.
     size_t n = build(sdk, NCMD);
     *(uint32_t *)(list + 4) = 0;
-    assert(capture(list, 0x20, out) == 0);
+    assert(capture(&g_ar[0], list, 0x20, out) == 0);
     if (incomplete) {
         // The third command is zeroed, as Mario Kart 8 Deluxe's first list was. Several such frames must leave detection open.
         n = build(sdk, NCMD);
         memset(list + 0x20 + 2 * 0x40, 0, 0x40);
-        for (int i = 0; i < 3; i++) assert(capture(list, n, out) == 0);
+        for (int i = 0; i < 3; i++) assert(capture(&g_ar[0], list, n, out) == 0);
         assert(!g_hdr6 && !g_hdr21 && !g_sink4);
     }
     if (sdk == 5) {
@@ -94,19 +110,19 @@ static void test(int sdk, int incomplete) {
         memset(list, 0, sizeof list);
         *(uint32_t *)(list + 4) = 2; *(const int32_t **)(list + 8) = mix; *(uint32_t *)(list + 0x14) = SAMPLES; *(uint32_t *)(list + 0x18) = 48000;
         uint8_t *q = put(list + 0x20, 5, 0x14, 0x14); q = put(q, 5, 0xa, 0x28);
-        assert(capture(list, (size_t)(q - list), out) == 0);
+        assert(capture(&g_ar[0], list, (size_t)(q - list), out) == 0);
         assert(!g_hdr6 && !g_hdr21 && !g_sink4);
     }
 
     // SDK 21 starts with short valid lists: detect its header before the first full list's sink scan.
     n = build(sdk, sdk == 21 ? 2 : NCMD);
-    int got = capture(list, n, out);
+    int got = capture(&g_ar[0], list, n, out);
     assert(g_hdr6 == (sdk <= 6) && g_hdr21 == (sdk == 21) && g_sink4 == (sdk <= 5) && g_sink5 == (sdk == 5));
     assert(g_sink_id == (sdk <= 5 ? 0xf : sdk == 6 ? 0x10 : sdk == 21 ? 0x14 : 0x13));
     assert(got == SAMPLES);
     for (int s = 0; s < SAMPLES; s++) assert(out[2 * s] == 1000 && out[2 * s + 1] == -1000);
     n = build(sdk, NCMD);
-    assert(capture(list, n, out) == SAMPLES);   // detection stays valid for later full frames
+    assert(capture(&g_ar[0], list, n, out) == SAMPLES);   // detection stays valid for later full frames
 }
 
 // Malformed lists after layout selection must leave the histogram/sink scan pending
@@ -116,7 +132,7 @@ static void test_malformed(int sdk, int bad) {
     int16_t out[FRAME_MAX * 2];
     size_t n = build(sdk, NCMD);
     *(uint32_t *)(list + 4) = 1;
-    assert(capture(list, 0x20 + 0x40, out) == 0);   // select the layout without a sink or histogram
+    assert(capture(&g_ar[0], list, 0x20 + 0x40, out) == 0);   // select the layout without a sink or histogram
     int sink_id = g_sink_id;
     n = build(sdk, NCMD);
     if (bad < 2) memset(list + 0x20 + (size_t)bad * 0x40, 0, 0x40);
@@ -126,7 +142,7 @@ static void test_malformed(int sdk, int bad) {
     FILE *log = tmpfile(); assert(log);
     fflush(stderr); int saved = dup(STDERR_FILENO); assert(saved >= 0);
     assert(dup2(fileno(log), STDERR_FILENO) >= 0);
-    int got = capture(list, n, out);
+    int got = capture(&g_ar[0], list, n, out);
     fflush(stderr); assert(dup2(saved, STDERR_FILENO) >= 0); close(saved);
     char text[2048]; assert(fseek(log, 0, SEEK_SET) == 0); size_t bytes = fread(text, 1, sizeof text - 1, log); text[bytes] = 0; fclose(log);
     assert(got == 0);
@@ -138,11 +154,11 @@ static void test_malformed(int sdk, int bad) {
     // A subsequent valid full list still discovers the SDK 4/5 sink and yields stereo.
     n = build(sdk, NCMD);
     for (int i = 0; i < SAMPLES; i++) { mix[i] = 700; mix[SAMPLES + i] = -900; }
-    assert(capture(list, n, out) == SAMPLES);
+    assert(capture(&g_ar[0], list, n, out) == SAMPLES);
     for (int i = 0; i < SAMPLES; i++) assert(out[2 * i] == 700 && out[2 * i + 1] == -900);
     // Validation also applies after the histogram has already been logged.
     *(uint32_t *)(list + 4) = NCMD + 1; memset(list + n, 0, 0x40);
-    assert(capture(list, n + 0x40, out) == 0);
+    assert(capture(&g_ar[0], list, n + 0x40, out) == 0);
 }
 
 static void test_histogram(void) {
@@ -156,7 +172,7 @@ static void test_histogram(void) {
     FILE *log = tmpfile(); assert(log);
     fflush(stderr); int saved = dup(STDERR_FILENO); assert(saved >= 0);
     assert(dup2(fileno(log), STDERR_FILENO) >= 0);
-    int16_t out[FRAME_MAX * 2]; assert(capture(cl, len, out) == 0);
+    int16_t out[FRAME_MAX * 2]; assert(capture(&g_ar[0], cl, len, out) == 0);
     fflush(stderr); assert(dup2(saved, STDERR_FILENO) >= 0); close(saved);
     char text[2048]; assert(fseek(log, 0, SEEK_SET) == 0); size_t bytes = fread(text, 1, sizeof text - 1, log); text[bytes] = 0; fclose(log);
     const char *hist = strstr(text, "by command ID:"); assert(hist);
@@ -166,7 +182,99 @@ static void test_histogram(void) {
     free(cl);
 }
 
+// Two renderers open at once: an SDK call that names only the system finds its own renderer, and a system not seen yet is the one open renderer whose system is not known
+static void test_two_renderers(void) {
+    uint8_t x, y, z; memset(g_ar, 0, sizeof g_ar);
+    g_ar[0].handle[0] = &x; g_ar[1].handle[0] = &y;
+    assert(ar_of_sys(&z) == NULL);   // two unknown: not a guess
+    g_ar[0].sys = &x;
+    assert(ar_of_sys(&x) == &g_ar[0]);
+    assert(ar_of_sys(&y) == &g_ar[1] && g_ar[1].sys == &y);
+    assert(ar_of_sys(&y) == &g_ar[1]);
+    assert(ar_of_sys(&z) == NULL);   // no renderer left to be it
+    // The 3:2 upsampler's history is each renderer's own: frames of one do not reach the other's output
+    int32_t quiet[2 * 160] = {0}, loud[2 * 160], out[2 * 240];
+    for (int i = 0; i < 2 * 160; i++) loud[i] = 20000;
+    memset(g_ar, 0, sizeof g_ar);
+    assert(up_3_2(&g_ar[0], loud, 160, out) == 240);
+    assert(up_3_2(&g_ar[1], quiet, 160, out) == 240);
+    for (int i = 0; i < 2 * 240; i++) assert(out[i] == 0);
+    memset(g_ar, 0, sizeof g_ar);
+}
+
+// Issue #1336: AudioOut queues a block's pointer and copies its samples when the sound card asks, so a block is the renderer's own until it comes back released.
+// Renderer 0 queues all its blocks and none plays; renderer 1 then renders (blocks_exec marks each frame with its renderer) and renderer 0's blocks must still hold its samples
+static void blocks_exec(void *obj, void *state) {
+    (void)obj; (void)state;
+    for (int i = 0; i < SAMPLES * 2; i++) t_ar->frame[i] = (int16_t)(ar_index(t_ar) + 1);
+    t_ar->frame_n = SAMPLES;
+}
+static void test_renderer_blocks(void) {
+    blocks_on = 1;
+    for (int r = 0; r < 2; r++) { atomic_store(&g_ar[r].open, 1); render_main(&g_ar[r]); }
+    blocks_on = 0;
+    for (int r = 0; r < 2; r++) {
+        assert(blocks_n[r] == NBUF);
+        for (int i = 0; i < NBUF; i++) {
+            const int16_t *s = blocks[r][i]->ptr;
+            assert(blocks[r][i]->size == SAMPLES * 4);
+            for (int j = 0; j < SAMPLES * 2; j++) assert(s[j] == r + 1);
+        }
+    }
+    memset(g_ar, 0, sizeof g_ar);
+}
+
+// The update lock is read off Update, else off UpdateImpl; a miss keeps the caller's offset and is a red line. Built from prologues of the forms the SDKs have (`bl` into a PLT stub or straight to the function)
+enum { F_UPDATE, F_IMPL = 16, F_STUB = 32, F_TICK = 36, F_SDK_LOCK, F_OS_LOCK, F_CODE };
+static uint32_t lock_code[F_CODE];
+static void *lock_got __attribute__((aligned(8)));
+static void lock_fn(int at, int off, int target) {   // pacibsp; add x19, x0, #off; mov x20, x0; mov x0, x19; bl target (no add: bl target first, as the tick call of SDK 19's Update)
+    uint32_t *f = lock_code + at; int n = 0;
+    f[n++] = 0xd503237fu;
+    if (off >= 0) { f[n++] = 0x91000000u | (uint32_t)off << 10 | 19; f[n++] = 0xaa0003e0u | 20; f[n++] = 0xaa0003e0u | 19u << 16; }
+    f[n] = 0x94000000u | ((uint32_t)(target - at - n) & 0x3ffffffu);
+}
+static int lock_read(size_t *off, int *os_mutex, const char **red) {   // update_lock with its log caught in *red: NULL when it printed none
+    static char log[256]; memset(log, 0, sizeof log);
+    fflush(stderr); int saved = dup(2); FILE *t = tmpfile(); assert(saved >= 0 && t); dup2(fileno(t), 2);
+    int r = update_lock(off, os_mutex);
+    fflush(stderr); dup2(saved, 2); close(saved); assert(!fseek(t, 0, SEEK_SET)); assert(fread(log, 1, sizeof log - 1, t) < sizeof log); fclose(t);
+    *red = strstr(log, "[RED] audren: no update lock"); return r;
+}
+static void test_update_lock(void) {
+    const uint64_t got = (uint64_t)&lock_got, stub = (uint64_t)(lock_code + F_STUB);
+    const uint64_t pages = ((got & ~0xfffull) - (stub & ~0xfffull)) >> 12;
+    lock_code[F_STUB] = 0x90000010u | (uint32_t)(pages & 3) << 29 | (uint32_t)((pages >> 2) & 0x7ffff) << 5;   // adrp x16, the GOT's page
+    lock_code[F_STUB + 1] = 0xf9400211u | (uint32_t)(got & 0xfff) / 8 << 10;   // ldr x17, [x16, #the slot]
+    lock_got = lock_code + F_SDK_LOCK;
+    lock_syms[0].name = "_ZN2nn2os12SdkMutexType4LockEv"; lock_syms[0].p = lock_code + F_SDK_LOCK;
+    lock_syms[1].name = "_ZN2nn2os9LockMutexEPNS0_9MutexTypeE"; lock_syms[1].p = lock_code + F_OS_LOCK;
+    lock_syms[2].name = "_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm"; lock_syms[2].p = lock_code + F_UPDATE;
+    lock_syms[3].name = "_ZN2nn5audio6server17AudioRenderSystem10UpdateImplEPvmS3_mPKvm"; lock_syms[3].p = lock_code + F_IMPL;
+    size_t off; int os; const char *red;
+    // before SDK 19: Update locks, through the PLT, and it wins over a lock in UpdateImpl
+    lock_fn(F_UPDATE, 0x1f0, F_STUB); lock_fn(F_IMPL, 0x2d8, F_STUB);
+    off = 1; os = 1; assert(lock_read(&off, &os, &red) && off == 0x1f0 && !os && !red);
+    lock_got = lock_code + F_OS_LOCK;   // nn::os::LockMutex
+    off = 1; os = 0; assert(lock_read(&off, &os, &red) && off == 0x1f0 && os == 1 && !red);
+    lock_got = lock_code + F_SDK_LOCK;
+    // from SDK 19: Update's first call is the tick, and UpdateImpl has the lock: +0x2d8 in SDK 22, whatever the caller guessed
+    lock_fn(F_UPDATE, -1, F_TICK);
+    off = 0x2d0; os = 0; assert(lock_read(&off, &os, &red) && off == 0x2d8 && !os && !red);
+    lock_fn(F_IMPL, 0x2d0, F_SDK_LOCK);   // SDK 19–21, a straight bl
+    off = 1; os = 0; assert(lock_read(&off, &os, &red) && off == 0x2d0 && !os && !red);
+    // neither locks first, or an SDK without UpdateImpl: the guess stays and the log says so
+    lock_fn(F_IMPL, 0x2d8, F_TICK);
+    off = 0x2d0; os = 0; assert(!lock_read(&off, &os, &red) && off == 0x2d0 && !os && red);
+    memset(&lock_syms[3], 0, sizeof lock_syms[3]);
+    off = 0x1f0; os = 0; assert(!lock_read(&off, &os, &red) && off == 0x1f0 && !os && red);
+    memset(lock_syms, 0, sizeof lock_syms);
+}
+
 int main(int argc, char **argv) {
+    test_update_lock();
+    test_two_renderers();
+    test_renderer_blocks();
     if (argc == 2 && !strcmp(argv[1], "--histogram")) { test_histogram(); return 0; }
     if (argc == 2 && !strcmp(argv[1], "--malformed")) { test_malformed(16, 0); return 0; }
     test_headers();
@@ -183,6 +291,6 @@ int main(int argc, char **argv) {
         assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
     test_histogram();
-    puts("audren layout: bounded histograms, malformed-list rejection, unaligned and truncated headers, SDK 4/5/6/16/21 stereo PCM and empty/incomplete startup recovery passed");
+    puts("audren layout: update lock read off Update or UpdateImpl, renderers' own blocks, bounded histograms, malformed-list rejection, unaligned and truncated headers, SDK 4/5/6/16/21 stereo PCM and empty/incomplete startup recovery passed");
     return 0;
 }

@@ -1,0 +1,45 @@
+# Yoshi and the Mysterious Book (Switch 2, update v131072, version 1.0.2)
+# Unreal Engine 5.4.4 (SDK MW+EpicGames+UnrealEngine-5_4_4 in main; the deferred renderer, SP_GLSL_SAGE shaders), SDK 20.5.15 built for the Switch 2 (Ounce), NVN2. Modules main + subsdk2 (NintendoSDK_movie) + sdk.
+# Packed from a NUP container (scripts/pack_nup.py). subsdk0 (NVIDIA's DLSS library) and subsdk1 (CUDA) are not loaded: main takes nothing from them that the host does not supply
+# Format: see dm/games/README.md
+
+# ---- Identity ----
+title_id	0400245021D2C000
+program_id	0400245021D2C000
+
+# ---- App ----
+name	Yoshi and the Mysterious Book
+ipa	YoshiAndTheMysteriousBook.ipa
+app_category	public.app-category.action-games
+# a 3D field the left stick walks through, with both triggers in use
+pad_layout	full
+
+# ---- Versions ----
+# v131072 is the update's title version, the title screen says Ver. 1.0.2 (the NUP carries no display version)
+build	v131072	1.0.2	main=893c30e75521afb8b23326eb6aa0e2dc	subsdk2=2f1ad4154aecbb0c128030906af67685	sdk=820cd7d096aac448693f504400cc2375
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+modules	main subsdk2 sdk
+romfs_marker	PJ045/Content/Paks/PJ045-Sage.ucas
+zip_store	.pak:.ucas:.utoc:.mp4:.webm:.txt:.metallib
+
+# ---- Graphics ----
+# The game sets near-zero NVN depth (nvnDeviceSetDepthMode); offline pipeline bases use main0_z.
+depth_mode	zero
+
+# ---- Memory ----
+# Unreal Engine 5.4: nninitStartup reserves one 62 GB region for the engine; the rewriter's engine-wide rules cut the FMallocBinned3 constructor call (the host runs Unreal's heap on a malloc zone, dm/tools/ue_malloc.py,
+# hle_uemalloc.c) and give the region what the alias region has room for, 4.06 GB (dm/tools/ue_region.py, hle_svc.c); the SDK's node area is cut to 62 MB (dm/tools/sdk_patches.py, the SDK-wide rule). Engage's 5 GB block:
+# 256 MB in front + 4.375 GB alias region + 256 MB stacks + 128 MB heap. Mapped up to +3.00 GB in the alias region in the first habitat. The NPDM declares 20 MB of system resource, so virtual address memory is on
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0x240000000
+sys_resource	0x1400000
+
+# ---- Shader split ----
+# Each material's shaders inline in its cooked package, the packages in the IoStore container (PJ045-Sage.utoc), the global shaders in the pak: shader_split.py ue_legacy_jobs, uepak.shader_map_entries, uepak.sage_record
+shader_groups	GlobalShaderCache=global #Engine/=engine #pj045/=game
+shader_note	Yoshi and the Mysterious Book shaders

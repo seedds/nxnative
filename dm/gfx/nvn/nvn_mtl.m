@@ -5772,7 +5772,10 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
     rp->view_pkg = (rp->t.has_layout || tex_cpu_written(rp->t.serial)) && rp->t.mem;
     if (v) {   // The serial table or guest memory has changed: check whether the base texture was re-uploaded and replaced; if so the view is invalidated
         id<MTLTexture> cur = treg_tex(rp);
-        if (cur == v || v.parentTexture == cur) { rp->view_ser = sg; rp->view_dirty = dg; treg_pkg_stamp(rp, cur); return v; }
+        // cur is nil when the ID has no texture now (a gone texture not made again, a texture that could not be made): a cached base texture has no parent either, so nil == nil
+        // used to keep the cached texture and mark it valid again, and the fast paths (tex_fast_rid) gave the pool tables its resource ID after the host had released it and dropped
+        // its residency: GPU page faults in the shaders that sample it (docs/reference/rendering.md, "A texture ID with no texture kept its cached view")
+        if (cur && (cur == v || v.parentTexture == cur)) { rp->view_ser = sg; rp->view_dirty = dg; treg_pkg_stamp(rp, cur); return v; }
         defer_obj_unref(v); CFRelease(rp->view); rp->view = NULL; rp->view_rid = 0; v = nil;
     }
     treg_t r = *rp;

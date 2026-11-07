@@ -75,6 +75,12 @@ class Pairing(unittest.TestCase):
         self.extra.write_text('# BAHS\nv\tf1\nv\tf6\nv\tf1\n\n')
         self.ns = builder()
         self.ns.update(out=str(self.root), PAIRS=self.ns['load_pairs'](self.g, self.package))
+        # vs_pad reads finished pixel stages through the builder's output() helper;
+        # the AST harness imports functions without their module-level dependencies.
+        def output(label, name):
+            file = self.root / name
+            return file.read_bytes() if label == 'mac' and file.is_file() else None
+        self.ns['output'] = output
         for key, loc in [('f0', 0), ('f1', 1), ('f6', 6)]:
             src = pixel(loc)
             if not loc: src = src.replace('    float4 missing [[user(locn0)]];\n', '').replace('in.v0 + in.missing', 'in.v0')
@@ -89,6 +95,13 @@ class Pairing(unittest.TestCase):
             self.assertIn(f'out.dm_pad{loc} = float4(0.0, 0.0, 0.0, 1.0);', src)
         self.assertEqual(src.count('float4 v0 [[user(locn0)]];'), 1)
         self.assertEqual(self.ns['vs_pad']('v', src), (src, []))
+
+    def test_missing_pixel_output_is_ignored_when_padding(self):
+        (self.root / 'f6_b.metal').unlink()  # an unbuilt or absent pair has no pixel interface to inspect
+        src, pad = self.ns['vs_pad']('v', VS)
+        self.assertEqual(pad, [1])
+        self.assertIn('dm_pad1', src)
+        self.assertNotIn('dm_pad6', src)
 
     def test_profile_table_wins_and_optional_table(self):
         self.g.table('pso_pairs.tsv').write_text('v\tf6\n')

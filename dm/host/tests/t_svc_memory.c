@@ -556,6 +556,7 @@ static void layout_order(void) {
     assert(info(I_AliasAddr) == info(I_StackAddr) + info(I_StackSize));
     assert(info(I_AliasAddr) + info(I_AliasSize) == info(I_AslrAddr) + info(I_AslrSize));
     assert(info(I_AslrAddr) == (uint64_t)(uintptr_t)g_as && info(I_AslrSize) == g_reserve);
+}
 static uint32_t transfer(uintptr_t addr, size_t size, unsigned permission, uint32_t expected) {
     uint64_t regs[32] = {0, addr, size, permission};
     svc_dispatch(0x15, regs, 0); assert(regs[0] == expected);

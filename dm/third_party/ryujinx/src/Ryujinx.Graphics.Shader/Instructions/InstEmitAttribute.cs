@@ -189,6 +189,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
                         res = context.FPMultiply(res, context.Load(StorageKind.Input, IoVariable.FragmentCoord, null, Const(3)));
                     }
                 }
+                else if (imm10 is >= 0x3b4 and < 0x3c0)
+                {
+                    // nxnative: the perspective barycentric coordinates are read divided by w like a perspective attribute (the shader multiplies by 1 / a[0x7c] itself)
+                    res = context.FPMultiply(res, context.Load(StorageKind.Input, IoVariable.FragmentCoord, null, Const(3)));
+                }
                 else if (imm10 is AttributeConsts.PositionX or AttributeConsts.PositionY)
                 {
                     // FragCoord X/Y must be divided by the render target scale, if resolution scaling is active,

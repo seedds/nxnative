@@ -239,12 +239,13 @@ def lean(src, out_stride):
         m = _DEF.match(ln)
         if m: defs.setdefault(m[1], (i, m[2]))
     def base(var, stride):   # var = _X * stride -> _X
-        m = re.fullmatch(r'(_\d+) \* ' + str(stride), defs.get(var, (0, ''))[1])
-        return m[1] if m else None
+        # either spelling: signed (_X * 144) or the wrapping multiply of xcheck-fixes 5eba12cf (int(uint(_X) * 144u))
+        m = re.fullmatch(r'(_\d+) \* %d|int\(uint\((_\d+)\) \* %du\)' % (stride, stride), defs.get(var, (0, ''))[1])
+        return (m[1] or m[2]) if m else None
     def offset(var, stride):   # var = _B + K with _B = _X * stride (or var itself) -> (_B, K)
         e = defs.get(var, (0, ''))[1]
-        m = re.fullmatch(r'(_\d+) \+ (\d+)', e)
-        if m and base(m[1], stride): return m[1], int(m[2])
+        m = re.fullmatch(r'(_\d+) \+ (\d+)|int\(uint\((_\d+)\) \+ (\d+)u\)', e)
+        if m and base(m[1] or m[3], stride): return m[1] or m[3], int(m[2] or m[4])
         if base(var, stride): return var, 0
         return None, None
     store = re.compile(r'^\s*\(\*spvDescriptorSet0\.geometry_vb_output\)\._m0\[(_\d+)\] = (_\d+);$')
@@ -307,7 +308,8 @@ def lean(src, out_stride):
             raise ValueError('lean geometry: record base used elsewhere')
     for n, b, k in found:
         if n != b:
-            j, _ = defs[n]; lines[j] = re.sub(r'\+ \d+;$', f'+ {slot[k]};', lines[j])
+            j, _ = defs[n]; lines[j] = re.sub(r'\+ \d+(u\))?;$', lambda m, s=slot[k]: f'+ {s}{m[1] or ""};', lines[j])
+    stride = max(len(reads), 1)
     for b in bases:
-        j, _ = defs[b]; lines[j] = re.sub(r'\* 144;$', f'* {max(len(reads), 1)};', lines[j])
+        j, _ = defs[b]; lines[j] = re.sub(r'\* 144(u\))?;$', lambda m, s=stride: f'* {s}{m[1] or ""};', lines[j])
     return '\n'.join(l for l in lines if l != '' or True), reads

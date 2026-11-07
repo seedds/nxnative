@@ -6359,9 +6359,20 @@ static void img_fit_upgrade(void) {
 // The view also takes the type the shader declares, with the layers fit_layers gives, as tex_fit does for sampling: Metal drops the stores to a 2D array bound to a texture2d argument.
 // Mario Kart World's blob shadows (GitHub issue #1648): a compute pass writes the mips of each layer of two R8 2D arrays through one-layer array views in image slots its shader declares
 // 2D; levels 1 and 2 stayed zero, and the decal that samples them drew a dark box around each kart's shadow
+// A float slot (sampled or image) on an integer texture of 4, 8 or 16 bytes a texel: Maxwell reads and writes the bits through a float view of the same texture (the descriptor's format), and Metal,
+// given the integer texture itself, converts or reads undefined. PRAGMATA's occlusion pyramid (ser 329, NVN R32UI, 384x216, 9 levels) is written with float min depths by 95656724c5b02299
+// (texture2d<float, access::write>) and sampled as float by the instance cull 5318516d206dba46, which then let none of 8,192 instances through. Those get an R32Float / RG32Float /
+// RGBA32Float view of the same bytes (img_fit). 1- and 2-byte formats are left alone: a float written to them would convert, not keep its bits. DM_NVN_FLOAT_VIEW=0 binds them as before
+static int float_view_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_FLOAT_VIEW"); v = !(e && !strcmp(e, "0")); } return v; }
+static int float_view_wanted(id<MTLTexture> t, int dpf) {
+    if (!t || dpf != NVN_DPF_FLOAT || !float_view_on()) return 0;
+    int c = mtl_pf_dpf(t.pixelFormat); size_t n = mtl_pf_bytes(t.pixelFormat);
+    return (c == NVN_DPF_UINT || c == NVN_DPF_SINT) && (n == 4 || n == 8 || n == 16);
+}
 static id<MTLTexture> img_fit(int tid, id<MTLTexture> t, int dpf, MTLTextureType want, uint64_t *rid) {
-    size_t n = mtl_pf_bytes(t.pixelFormat); int u = dpf == NVN_DPF_UINT, cls = dpf != NVN_DPF_FLOAT && mtl_pf_dpf(t.pixelFormat) != dpf;
-    MTLPixelFormat pf = !cls ? t.pixelFormat : n == 1 ? (u ? MTLPixelFormatR8Uint : MTLPixelFormatR8Sint) : n == 2 ? (u ? MTLPixelFormatR16Uint : MTLPixelFormatR16Sint) : n == 4 ? (u ? MTLPixelFormatR32Uint : MTLPixelFormatR32Sint)
+    size_t n = mtl_pf_bytes(t.pixelFormat); int u = dpf == NVN_DPF_UINT, fv = float_view_wanted(t, dpf), cls = fv || (dpf != NVN_DPF_FLOAT && mtl_pf_dpf(t.pixelFormat) != dpf);
+    MTLPixelFormat pf = !cls ? t.pixelFormat : fv ? (n == 4 ? MTLPixelFormatR32Float : n == 8 ? MTLPixelFormatRG32Float : MTLPixelFormatRGBA32Float)
+                      : n == 1 ? (u ? MTLPixelFormatR8Uint : MTLPixelFormatR8Sint) : n == 2 ? (u ? MTLPixelFormatR16Uint : MTLPixelFormatR16Sint) : n == 4 ? (u ? MTLPixelFormatR32Uint : MTLPixelFormatR32Sint)
                       : n == 8 ? (u ? MTLPixelFormatRG32Uint : MTLPixelFormatRG32Sint) : n == 16 ? (u ? MTLPixelFormatRGBA32Uint : MTLPixelFormatRGBA32Sint) : MTLPixelFormatInvalid;
     id<MTLTexture> base = t; NSUInteger l0 = 0, s0 = 0;
     while (base.parentTexture) { l0 += base.parentRelativeLevel; s0 += base.parentRelativeSlice; base = base.parentTexture; }
@@ -6382,6 +6393,7 @@ static id<MTLTexture> img_fit(int tid, id<MTLTexture> t, int dpf, MTLTextureType
     if (!v) { RED_ONCE(107, "cannot create the image view of class %s, Metal type %lu (texture ID %d, Metal format %lu, type %lu)", !cls ? "unchanged" : u ? "uint" : "int", (unsigned long)want, tid, (unsigned long)t.pixelFormat, (unsigned long)t.textureType); return nil; }
     { static int once; if (cls && !once++) MLOG("image read in another class than its texture: first case texture ID %d Metal format %lu → %lu", tid, (unsigned long)t.pixelFormat, (unsigned long)pf); }
     { static int once; if (t.textureType != want && !once++) MLOG("image slot of another type than its texture: first case texture ID %d, Metal type %lu → %lu, %lu layers", tid, (unsigned long)t.textureType, (unsigned long)want, (unsigned long)ns); }
+    { static int once; if (fv && !once++) MLOG("float view of an integer texture (DM_NVN_FLOAT_VIEW): first case texture ID %d serial %llu Metal format %lu → %lu", tid, (unsigned long long)g_treg[tid].t.serial, (unsigned long)t.pixelFormat, (unsigned long)pf); }
     r->im = (void *)CFBridgingRetain(v); r->im_of = (__bridge void *)t; r->im_rid = v.gpuResourceID._impl;
     *rid = r->im_rid; return v;
 }

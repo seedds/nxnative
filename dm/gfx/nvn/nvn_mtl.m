@@ -1,5 +1,5 @@
 // Metal execution layer of the NVN null device, see nvn_mtl.h.
-// DM_UPSCALE=1|1.5|2: resolution upscaling, the game's render targets at that multiple of its size (see the section before tex_desc; the Mac's Upscaling menu saves the same choice).
+// DM_UPSCALE=1|1.5|2: resolution upscaling, the game's render targets at that multiple of its size (see the section before tex_desc; the Mac's Render resolution setting saves the choice).
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <QuartzCore/CAMetalDisplayLink.h>
@@ -2746,7 +2746,7 @@ static int tex_atomic_alias(id<MTLTexture> base) {
         || pf == MTLPixelFormatRG16Unorm || pf == MTLPixelFormatRG16Snorm || pf == MTLPixelFormatRG16Uint || pf == MTLPixelFormatRG16Sint || pf == MTLPixelFormatRG16Float || pf == MTLPixelFormatR32Float;
     return bytes32 && (base.textureType == MTLTextureType2D || base.textureType == MTLTextureType2DArray) && base.sampleCount == 1 && base.storageMode == MTLStorageModePrivate && !base.buffer && !base.isSparse;
 }
-// ---------- Resolution upscaling (DM_UPSCALE; the Mac window's Upscaling menu) ----------
+// ---------- Resolution upscaling (DM_UPSCALE; the Mac's Render resolution setting) ----------
 // The game's 3D is rendered at a multiple of its own resolution (1×, 1.5× or 2×) and presented to the window sharper, after Ryujinx's resolution scaling: a texture the game renders
 // into whose size is screen-like is allocated at its size × the factor (ups_pick, at its first resolution in tex_mtl_), and everything that addresses it in the game's pixels converts:
 // a render pass on scaled attachments multiplies viewports and scissors (g_pass.ups, draw / clears), shaders that read gl_FragCoord divide it by render_scale[0] of the support buffer
@@ -2776,7 +2776,7 @@ static int tex_atomic_alias(id<MTLTexture> base) {
 // into it (ups_promote), so data keeps its texels and render targets without the usual flags still scale; shader-written images are made scaled when they look like render
 // targets and demoted at their first written binding.
 // The factor is fixed for the run (textures already made keep their size): DM_UPSCALE=1|1.5|2, else 1. A Mac app's launcher sets DM_UPSCALE from the player's saved choice
-// (launcher.DM_UPSCALE, the Render Resolution menu in front_mac.m and the settings window write it; docs/frontends.md, Saved choices). At 1 none of this runs: ups_pick and the conversions are gated on g_ups > 1, so allocations and passes are as without it.
+// (launcher.DM_UPSCALE, which the settings window writes; docs/frontends.md, Saved choices). At 1 none of this runs: ups_pick and the conversions are gated on g_ups > 1, so allocations and passes are as without it.
 // The log names the first 24 scaled textures and every 200th after them, the demotions the same way, and once per shader the ranks at which it binds scaled textures (ups_vec_build)
 static float g_ups = 1;   // the factor of this run (1 = off), set once by ups_init
 static pthread_once_t g_ups_once = PTHREAD_ONCE_INIT;
@@ -2795,7 +2795,6 @@ static void ups_init(void) {
     if (g_ups > 1) MLOG("resolution upscaling: render targets at %gx the game's size (DM_UPSCALE)", g_ups);
 }
 static inline float ups_factor(void) { pthread_once(&g_ups_once, ups_init); return g_ups; }
-float dm_gfx_upscale(void) { return ups_factor(); }
 // A scaled dimension: the game's size × the factor, rounded (1.5 × 1080 = 1620)
 static inline NSUInteger ups_dim(NSUInteger n) { return (NSUInteger)MAX(lround((double)n * g_ups), 1L); }
 // Textures demoted to the game's size (ups_demote): serial → 1, under g_smu. A demoted texture is made unscaled at every later resolution too (a rebuilt object over the same

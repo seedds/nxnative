@@ -93,7 +93,7 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertIn('DM_UPSCALE', build(BOTW, 'nvn', 'mac'))
         self.assertNotIn('DM_UPSCALE', build(BOTW, 'vulkan', 'mac')); self.assertNotIn('DM_UPSCALE', build(BOTW, 'nvn', 'ios'))
         s = build(BOTW, 'nvn', 'mac')['DM_UPSCALE']
-        self.assertEqual((s['kind'], s['default'], [o[0] for o in s['options']], s['level']), ('choice', '1', ['1', '1.5', '2'], 'basic'))   # the values the Render Resolution menu writes
+        self.assertEqual((s['kind'], s['default'], [o[0] for o in s['options']], s['level']), ('choice', '1', ['1', '1.5', '2'], 'basic'))   # the values the launcher accepts for launcher.DM_UPSCALEs
 
     def test_unknown_platform_is_rejected(self):
         with self.assertRaisesRegex(SystemExit, 'SETTINGS_PLATFORM must be ios or mac'):

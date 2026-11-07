@@ -231,7 +231,7 @@ Turn off **Show this window at launch** to start the game at once with your choi
 
 ### Render resolution
 
-**1×**, **1.5×** or **2×** (NVN games): the game draws its 3D at that multiple of its own size, so edges are sharper on a Retina or 4K screen, for more GPU time and memory. It is not [Upscaling](#upscaling), which scales the finished picture to the screen. The game's **Render Resolution** menu changes the same choice while you play; it applies at the next launch. In an `env.txt`: `DM_UPSCALE=1.5` or `2`.
+**1×**, **1.5×** or **2×** (NVN games): the game draws its 3D at that multiple of its own size, so edges are sharper on a Retina or 4K screen, for more GPU time and memory. It is not [Upscaling](#upscaling), which scales the finished picture to the screen. Textures keep the size they were made at, so a change applies at the next launch. In an `env.txt`: `DM_UPSCALE=1.5` or `2`.
 
 ### Upscaler at higher render resolutions
 

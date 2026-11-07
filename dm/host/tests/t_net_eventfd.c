@@ -41,6 +41,21 @@ int main(void) {
     sk_pollfd w = {fd, SK_POLLOUT, 0};   // writable whenever it is open
     assert(h_sk_Poll(&w, 1, 0) == 1 && w.revents == SK_POLLOUT);
 
+    // Select: the descriptor fits a 1024-bit fd_set (Minecraft's NetherNet sets its bit in one on the stack), waits like Poll and returns the ready sets
+    assert(fd < 1024);
+    uint64_t rs[16] = {0}, ws[16] = {0}; int64_t tv[2] = {0, 20000};
+    rs[fd >> 6] |= 1ull << (fd & 63);
+    t0 = guest_ns();
+    assert(h_sk_Select(fd + 1, rs, NULL, NULL, tv) == 0 && !(rs[fd >> 6] >> (fd & 63) & 1));   // nothing written: the timeout passes and the set comes back empty
+    assert(guest_ns() - t0 >= 15000000);
+    assert(h_sk_EventFdWrite(fd, 1) == 0);
+    rs[fd >> 6] |= 1ull << (fd & 63); ws[fd >> 6] |= 1ull << (fd & 63); ws[0] |= 1 << 5;   // with a descriptor the host never made beside it: not ready
+    assert(h_sk_Select(fd + 1, rs, ws, NULL, tv) == 2 && rs[fd >> 6] >> (fd & 63) & 1 && ws[fd >> 6] >> (fd & 63) & 1 && !(ws[0] & 1 << 5));
+    assert(h_sk_EventFdRead(fd, &v) == 0 && v == 1);
+    uint64_t only[16] = {1 << 5};
+    assert(h_sk_Select(6, only, NULL, NULL, tv) == -1 && h_sk_GetLastError() == SK_ENETDOWN);   // only descriptors the host never made: fails, as before
+    assert(h_sk_Select(0, NULL, NULL, NULL, tv) == 0);
+
     int sem = h_sk_EventFd(2, 1 | 2);   // one at a time
     assert(sem > 0 && sem != fd);
     assert(h_sk_EventFdRead(sem, &v) == 0 && v == 1 && h_sk_EventFdRead(sem, &v) == 0 && v == 1 && h_sk_EventFdRead(sem, &v) == -1);

@@ -49,8 +49,10 @@ static int sk_idle(int64_t ms) { dm_guest_sleep_ns((ms < 0 ? 100 : ms) * 1000000
 typedef struct { int32_t fd; int16_t events, revents; } sk_pollfd;
 // EventFd is a local descriptor of the bsd service and works with no network, so it is real here: gRPC (nn::npln, Ocarina of Time at startup) wakes its pollers with one, and with no
 // wakeup descriptor its poll engine's factory (main+0x21f1280) returns null and grpc_init calls abort (main+0x21f0c7c). The descriptors are the host's only ones: Socket still fails.
-// The flags are Horizon's: gRPC creates its descriptor with 6 and consumes after a poll says it is ready. A descriptor with bit 0 reads one at a time; bits 1 and 2 never block
-enum { EFD_BASE = 0x4000, EFD_MAX = 64, SK_POLLIN = 1, SK_POLLOUT = 4, SK_POLLRDNORM = 0x40, SK_POLLWRNORM = 4, SK_EBADF = 9, SK_EAGAIN = 35 };
+// The flags are Horizon's: gRPC creates its descriptor with 6 and consumes after a poll says it is ready. A descriptor with bit 0 reads one at a time; bits 1 and 2 never block.
+// The numbers stay inside a 1024-bit fd_set, as the bsd service's small descriptors do: Minecraft's NetherNet threads put theirs in an fd_set on the stack for Select (FD_SET at
+// main+0x18b2ae8 in 1.21.120), and from 0x4000 the bit landed 2 KB past the set and the thread crashed (SIGBUS). 960 + 64 ends at 1023
+enum { EFD_BASE = 960, EFD_MAX = 64, SK_POLLIN = 1, SK_POLLOUT = 4, SK_POLLRDNORM = 0x40, SK_POLLWRNORM = 4, SK_EBADF = 9, SK_EAGAIN = 35 };
 static struct { uint64_t count; int used, flags; } g_efd[EFD_MAX];
 static pthread_mutex_t g_efd_m = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_efd_c = PTHREAD_COND_INITIALIZER;
@@ -131,10 +133,30 @@ int dm_sk_poll(void *fds, uint64_t n, int ms) {   // also hle_offline.c's plain 
     pthread_mutex_unlock(&g_efd_m);
     return ready;
 }
-int dm_sk_select(int nfds, const uint64_t *r, const uint64_t *w, const uint64_t *e, const int64_t *tv) {   // fd_set: 1024 bits; timeval: {i64 seconds, i64 microseconds}
-    const uint64_t *sets[3] = {r, w, e};
-    for (int k = 0; k < 3; k++) for (int fd = 0; sets[k] && fd < nfds && fd < 1024; fd++) if (sets[k][fd >> 6] >> (fd & 63) & 1) return sk_fail();
-    return sk_idle(tv ? tv[0] * 1000 + tv[1] / 1000 : -1);
+// Select waits on the event descriptors in its sets as Poll does (Minecraft's NetherNet threads wait on theirs this way) and gives back the sets of those that are ready; with only
+// descriptors the host never made in them it fails as before, and with none it waits out the timeout
+int dm_sk_select(int nfds, uint64_t *r, uint64_t *w, uint64_t *e, const int64_t *tv) {   // fd_set: 1024 bits; timeval: {i64 seconds, i64 microseconds}
+    uint64_t *sets[3] = {r, w, e};
+    sk_pollfd p[EFD_MAX]; int np = 0, other = 0;
+    if (nfds > 1024) nfds = 1024;
+    pthread_mutex_lock(&g_efd_m);
+    for (int fd = 0; fd < nfds; fd++) {
+        int in = 0; int16_t ev = 0;
+        for (int k = 0; k < 3; k++) if (sets[k] && sets[k][fd >> 6] >> (fd & 63) & 1) { in = 1; ev |= k == 0 ? SK_POLLIN : k == 1 ? SK_POLLOUT : 0; }
+        if (!in) continue;
+        if (efd_used(fd) && np < EFD_MAX) p[np++] = (sk_pollfd){fd, ev, 0}; else other = 1;
+    }
+    pthread_mutex_unlock(&g_efd_m);
+    int ms = tv ? (int)(tv[0] * 1000 + tv[1] / 1000) : -1;
+    if (!np) return other ? sk_fail() : sk_idle(ms);
+    dm_sk_poll(p, (uint64_t)np, ms);
+    for (int k = 0; k < 3; k++) for (int fd = 0; sets[k] && fd < nfds; fd++) sets[k][fd >> 6] &= ~(1ull << (fd & 63));
+    int n = 0;
+    for (int i = 0; i < np; i++) {
+        if (p[i].revents & (SK_POLLIN | SK_POLLRDNORM) && r) { r[p[i].fd >> 6] |= 1ull << (p[i].fd & 63); n++; }
+        if (p[i].revents & SK_POLLOUT && w) { w[p[i].fd >> 6] |= 1ull << (p[i].fd & 63); n++; }
+    }
+    return n;
 }
 SKF("_ZN2nn6socket6SocketENS0_6FamilyENS0_4TypeENS0_8ProtocolE", h_sk_Socket, int a, int b, int c) { (void)a; (void)b; (void)c; return sk_fail(); }
 SKF("_ZN2nn6socket4BindEiPKNS0_8SockAddrEj", h_sk_Bind, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return sk_fail(); }

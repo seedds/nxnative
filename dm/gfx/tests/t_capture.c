@@ -87,6 +87,8 @@ int main(void) {
     p_bind_ubo_small *us = emit(&s0, OP_BIND_UBO_SMALL, sizeof *us); *us = (p_bind_ubo_small){0, 2, 64, (uint64_t)(uintptr_t)pool_b + 0x1000};
     p_bind_handles *bh = emit(&s0, OP_BIND_TEX, offsetof(p_bind_handles, h) + 4 * 8); bh->stage = 1; bh->n = 4; bh->defer = 1; bh->src = (uint64_t)(uintptr_t)heap_handles;
     p_draw_idx *di = emit(&s0, OP_DRAW_IDX, sizeof *di); di->prim = 4; di->count = 3; di->ibuf = (uint64_t)(uintptr_t)pool_a + 0x3000; di->ind = (uint64_t)(uintptr_t)pool_a + 0x3100;
+    p_multi_draw *multi = emit(&s0, OP_MULTI_DRAW, sizeof *multi);
+    *multi = (p_multi_draw){(uint64_t)(uintptr_t)pool_a + 0xf000, (uint64_t)(uintptr_t)pool_b, di->ibuf, -20, 1025, 4, 2};
     p_draw *dr = emit(&s0, OP_DRAW, offsetof(p_draw, ind)); dr->count = 3;   // a plain draw stops before ind (hle_nvn.c rec_draw)
     uint64_t *ev = emit(&s0, OP_SIGNAL_EVENT, 16); ev[0] = (uint64_t)(uintptr_t)pool_b + 0x10; ev[1] = 0x0000000700000001ull;
     uint64_t *ext = emit(&s0, OP_REPORT_COUNTER, 16); ext[0] = 2; ext[1] = 0x12345678;   // an address outside every pool: kept as it is
@@ -115,7 +117,13 @@ int main(void) {
     CHECK(!host_ptrs, "no host pointer left in the encoded records");
 
     cap_writer w; CHECK(cap_open(&w, path), "open for writing");
-    const char *lay = cap_layout(); cap_put(&w, CAP_LAYT, 0, lay, strlen(lay), 0);
+    const char *lay = cap_layout();
+    const char *multi_layout = strstr(lay, "op 55 p_multi_draw");
+    CHECK(multi_layout && cap_layout_matches(lay, (size_t)(multi_layout - lay)), "the complete legacy record layout remains readable");
+    const char *strides_layout = strstr(lay, "p_copy_strides");
+    CHECK(strides_layout && cap_layout_matches(lay, (size_t)(strides_layout - lay)), "the layout before the copy strides' tail remains readable");
+    CHECK(cap_layout_matches(lay, strlen(lay)) && !cap_layout_matches(lay, strlen(lay) - 1), "accept the current layout, reject a truncated extension");
+    cap_put(&w, CAP_LAYT, 0, lay, strlen(lay), 0);
     for (int r = 0; r < nregs; r++) { uint8_t b[sizeof(cap_regn) + 65536]; cap_regn h = {(uint32_t)r, r == 2, regs[r].lo, regs[r].size};
         memcpy(b, &h, sizeof h); memcpy(b + sizeof h, (const void *)(uintptr_t)regs[r].lo, (size_t)regs[r].size); cap_put(&w, CAP_REGN, 1, b, sizeof h + regs[r].size, 1); }
     for (int i = 0; i < 3; i++) { uint8_t b[8 + 4096]; uint32_t hd[2] = {(uint32_t)i, (uint32_t)all[i]->n}; memcpy(b, hd, 8); memcpy(b + 8, enc_bytes[i], all[i]->n); cap_put(&w, CAP_SEGM, 1, b, 8 + all[i]->n, 1); }
@@ -157,6 +165,9 @@ int main(void) {
     CHECK(AT(0, us, p_bind_ubo_small).addr == (uint64_t)(uintptr_t)new_base[1] + 0x1000, "compact uniform buffer relocated");
     CHECK(AT(0, bh, p_bind_handles).src == (uint64_t)(uintptr_t)new_base[2] && !memcmp(new_base[2], heap_handles, sizeof heap_handles), "deferred handles: their own region, relocated");
     CHECK(AT(0, di, p_draw_idx).ibuf == (uint64_t)(uintptr_t)new_base[0] + 0x3000 && AT(0, di, p_draw_idx).ind == (uint64_t)(uintptr_t)new_base[0] + 0x3100, "index buffer and indirect arguments");
+    p_multi_draw moved = AT(0, multi, p_multi_draw);
+    CHECK(moved.ind == (uint64_t)(uintptr_t)new_base[0] + 0xf000 && moved.cnt == (uint64_t)(uintptr_t)new_base[1] &&
+          moved.ibuf == (uint64_t)(uintptr_t)new_base[0] + 0x3000 && moved.stride == -20 && moved.max == 1025, "multi-draw relocation keeps the first record and the signed stride");
     CHECK(AT(0, ev, uint64_t) == (uint64_t)(uintptr_t)new_base[1] + 0x10, "event word relocated");
     CHECK(AT(0, ct, p_copy_t2t).dst == &new_tex && AT(0, ct, p_copy_t2t).src->serial == 80 && AT(0, ct, p_copy_t2t).src->mem == new_base[0] + 0x2000, "texture copy ends");
     CHECK(AT(0, call, uint64_t) == (uint64_t)(uintptr_t)segbuf[1] && AT(0, jump, uint64_t) == (uint64_t)(uintptr_t)segbuf[2], "call and jump → the copied segments");

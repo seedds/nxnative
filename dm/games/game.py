@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Game profiles: dm/games/<base game title ID>/game.tsv (key <TAB> values..., lines starting with # are comments) + the shader tables (and patches.py, the rewriter's patches of the game's builds) in the same folder. The shader tools, the host build, iOS packaging and the NSP script take each game's constants from here.
 # Usage: game.py list (list all profiles); game.py <id> <key> [<default>] (print that key's value, for shell; without a default a missing key is an error); game.py header <id> <out.h> (generate the host's game_profile.h);
+#   game.py modules <id> <folder of rewritten modules> (the modules to load from it: the build row of its main's build, else the profile's modules);
 #   game.py dir <id> (print the profile folder); game.py link <id> <link> (point a symlink at the profile folder: make cannot take paths with spaces)
 #   From Python: import game; g = game.load() (takes DM_GAME; there is no default game: unset is an error that lists the profiles); game.by_title(title ID); g.get / g.words / g.int / g.builds() / g.table(file name)
 # DM_GAMES_DIR (folders separated by ':') adds profile folders outside the repository, searched after dm/games: the NSP script writes a provisional profile for a game without one into
@@ -41,6 +42,18 @@ class Game:
         for ver, disp, *mods in self.values('build'):
             out[ver] = dict([('display', disp)] + [tuple(m.split('=', 1)) for m in mods])
         return out
+
+    def build_modules(self):
+        """{main build ID: [modules]} for each build row with a main: the modules that build has, in the load order of modules (Mario Kart World: the base game's main subsdk0 sdk,
+        1.8.0's main subsdk0 subsdk1 sdk). A row may name modules the profile does not load (Hades' subsdk0 and subsdk1): they stay unloaded"""
+        order, out = self.words('modules'), {}
+        for b in self.builds().values():
+            if 'main' in b: out[b['main']] = [m for m in order if m in b]
+        return out
+
+    def modules_in(self, folder):   # the modules of the profile a version's ExeFS (or its rewritten modules' folder) holds, in load order: a game's versions may differ in modules
+        folder = Path(folder)
+        return [m for m in self.words('modules', 'main') if (folder / m).is_file() or (folder / f'{m}.patched.bin').is_file()]
 
     def pairs(self, key):   # "a=b c=d" → [(a, b), (c, d)]
         return [tuple(w.split('=', 1)) for w in self.words(key)]
@@ -88,7 +101,58 @@ def by_build(main_id):   # the profile whose build rows register this main build
     return next((g for g in all_games() if any(b.get('main') == main_id for b in g.builds().values())), None)
 
 
+# agl's upscaler network (NDSR), by where the shader map found each key: the compute shaders of agl_ndsr.pck (Donkey Kong Bananza's 24 in its release library, Splatoon Raiders' 20 in its debug one)
+UPSCALER_SOURCE = re.compile(r'/agl_ndsr\.pck#')
+
+
+def upscaler_keys(g):
+    """the game's own upscaler shaders, from its shader map (shader_split.py's source column): sorted 16-digit keys, none without a map"""
+    p = g.table('shader_map.tsv')
+    if not p.exists(): return []
+    keys = set()
+    for line in p.read_text(encoding='utf-8').splitlines():
+        c = line.split('\t')
+        if len(c) >= 5 and c[2] == 'compute' and UPSCALER_SOURCE.search(c[4]) and re.fullmatch(r'[0-9a-f]{16}', c[3]): keys.add(c[3])
+    return sorted(keys)
+
+
 def header(g):
+    """game_profile.h of a profile: one profile's constants, or with the key programs (a multi-program application packed as one game: Super Mario 3D All-Stars) a table of its programs' profiles"""
+    return header_multi([(0, g)] + [(int(n), load(i)) for n, i in g.pairs('programs')]) if g.get('programs', '') else header_one(g)
+
+
+def header_multi(progs):
+    """One host over the programs of a multi-program application: every program's constants in one table, dm_games, and DM_GAME_* macros that read the entry of the running program
+    (dm_game_cur, main.c: DM_PROGRAM, program 0 without it). progs: [(program index, profile)], program 0 first. A host switches programs by starting again (hle_oe.c), so the entry never changes in a run"""
+    rows, keys = [], []
+    for n, g in progs:
+        d = {m[1]: m[2] for m in (re.match(r'#define (DM_GAME_\w+) (.*)$', ln) for ln in header_one(g).splitlines()) if m}
+        rows.append((n, g, d)); keys += [k for k in d if k not in keys]
+    ARR = {'DM_GAME_MODULES': 0, 'DM_GAME_BUILD_MODULES': 2, 'DM_GAME_DISPLAY_VERSIONS': 2}   # brace lists, of strings (their entries in rows of 2 for the two), each padded with NULLs in the table
+    for k in ('DM_GAME_SHARED_FONT_TTF', 'DM_GAME_NVN_API_MAJOR', 'DM_GAME_NVN_API_MINOR'):
+        if k in keys: sys.exit(f'{k}: a key behind this macro (shared_font, device_api) is tested by the preprocessor and cannot differ per program; not supported with programs')
+    typ = lambda v: 'const char *' if v.startswith('"') else 'uint64_t ' if v.endswith('ull') else 'int '
+    fld = lambda k: k[len('DM_GAME_'):].lower()
+    # A macro's size in the table: the longest list among the programs
+    strs = lambda v: re.findall(r'"(?:[^"\\]|\\.)*"', v)
+    sz = {k: max(len(strs(d.get(k, ''))) for _, _, d in rows) for k in ARR}
+    scalars = [k for k in keys if k not in ARR]
+    for k in scalars:
+        vs = {typ(d[k]) for _, _, d in rows if k in d}
+        if len(vs) > 1: sys.exit(f'{k}: different types among the programs')
+    L = [f'// Generated by dm/games/game.py from the profiles of programs {", ".join(f"{n} ({g.id})" for n, g, _ in rows)}; do not edit', '#pragma once', '#include <stdint.h>', '#include <stddef.h>', '#define DM_GAME_MULTI 1',
+         'typedef struct { int program; ' + ' '.join(f'{typ(next(d[k] for _, _, d in rows if k in d))}{fld(k)};' for k in scalars) + ' ' + ' '.join(f'const char *{fld(k)}[{sz[k] or 1}];' for k in ARR) + ' } dm_game_t;']
+    ents = []
+    for n, g, d in rows:
+        ents.append('    {' + f'.program = {n}, ' + ', '.join(f'.{fld(k)} = {d[k]}' for k in scalars if k in d) + ', ' + ', '.join(f'.{fld(k)} = {{{", ".join(strs(d.get(k, "")))}}}' for k in ARR) + '},')
+    L += ['static const dm_game_t dm_games[] __attribute__((unused)) = {', *ents, '};',
+          'const dm_game_t *dm_game_cur(void);   // main.c: the entry of the program DM_PROGRAM names']
+    L += [f'#define {k} (dm_game_cur()->{fld(k)})' for k in scalars]
+    L += [f'#define {k} {{' + ', '.join(f'dm_game_cur()->{fld(k)}[{i}]' for i in range(sz[k])) + '}' for k in ARR]
+    return '\n'.join(L + [''])
+
+
+def header_one(g):
     """the host's game_profile.h: the profile constants the host uses, as macros"""
     q = lambda s: '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
     mods = g.words('modules')
@@ -97,6 +161,8 @@ def header(g):
     if pi not in ('game', 'display'): sys.exit(f'{g.id}: present_interval must be game or display: {pi}')
     ft = g.get('fps_target', '0')   # frame rate cap of the rewriter's frame step (FRAME_STEP in the profile's patches.py: Tears of the Kingdom 1.4.3, Breath of the Wild 1.9.0) or of the engine's own frame limit (hle_fpslock.c): 0 = the game's own step, 30 / 60
     if ft not in ('0', '30', '60'): sys.exit(f'{g.id}: fps_target must be 0, 30 or 60: {ft}')
+    fm = g.get('fps_max', '60')   # the highest rate fps_target and the player's Frame rate may take: 120 only for a game checked at that speed (hle_nvn.c fps_high)
+    if fm not in ('60', '120'): sys.exit(f'{g.id}: fps_max must be 60 or 120: {fm}')
     fh = g.get('fps_hold', 'on')   # whether the frame step may hold a frame longer than the cap's vsyncs when frames come late (hle_nvn.c fstep_tick): on / off
     if fh not in ('on', 'off'): sys.exit(f'{g.id}: fps_hold must be on or off: {fh}')
     utp = g.get('ue_texture_pool', '0')   # Unreal's r.Streaming.PoolSize in MB, raised to this on the Mac (hle_uecvar.c; DM_UE_TEXTURE_POOL overrides, and turns it on for iOS): 0 = the game's own pool
@@ -137,6 +203,9 @@ def header(g):
     if vcr not in ('on', 'off'): sys.exit(f'{g.id}: vconv_range must be on or off: {vcr}')
     mml = g.get('mem_map_limit', 'off')   # MapPhysicalMemory refused beyond the application pool, as on Horizon (hle_svc.c): on / off
     if mml not in ('on', 'off'): sys.exit(f'{g.id}: mem_map_limit must be on or off: {mml}')
+    ups = upscaler_keys(g)   # the game's own upscaler shaders, which DM_UPSCALER=metalfx (the launcher's Game's upscaler) replaces with MetalFX's spatial scaler (nvn_mtl.m up_mfx_encode)
+    dbr = g.get('draw_barriers', 'full')   # how draw passes are ordered (nvn_mtl.m barrier_game): full = each waits for all earlier GPU work, game = by the game's own barriers, so vertex work overlaps the previous pass's fragments
+    if dbr not in ('full', 'game'): sys.exit(f'{g.id}: draw_barriers must be full or game: {dbr}')
     gts = g.get('gpu_timestamps', 'submission')   # counter timestamps (nvn_mtl.m rep_ticks): submission = one time per submission, segment = the GPU start / end of the segment holding the report
     if gts not in ('submission', 'segment'): sys.exit(f'{g.id}: gpu_timestamps must be submission or segment: {gts}')
     om = g.get('op_mode', 'console')   # the operation mode reported at start (hle_oe.c dm_opmode; DM_OPMODE overrides): console = docked, handheld = touch screen in use (Super Mario Galaxy's pointer)
@@ -156,6 +225,8 @@ def header(g):
          f'#define DM_GAME_PROGRAM_ID 0x{int(g.get("program_id"), 16):016X}ull',
          f'#define DM_GAME_MODULES {{{", ".join(map(q, mods))}}}',
          f'#define DM_GAME_NMOD {len(mods)}',
+         # each build's own modules (main.c picks the row of main's build ID, else DM_GAME_MODULES): a version may lack a module another has
+         f'#define DM_GAME_BUILD_MODULES {", ".join("{" + q(bid) + ", " + q(" ".join(ms)) + "}" for bid, ms in g.build_modules().items()) or "{0}"}',
          f'#define DM_GAME_ROMFS_MARKER {q(g.get("romfs_marker"))}',
          f'#define DM_GAME_MEM_RESERVE {g.int("mem_reserve"):#x}ull',
          f'#define DM_GAME_MEM_ALIAS {g.int("mem_alias"):#x}ull',
@@ -165,13 +236,16 @@ def header(g):
          f'#define DM_GAME_SYS_RESOURCE {int(g.get("sys_resource", "0x2000000"), 0):#x}ull',   # the NPDM's system resource size (hle_svc.c GetInfo TotalSystemResourceSize; 0 = no virtual address memory)
          f'#define DM_GAME_ARGS {q(g.get("game_args", ""))}',   # game arguments when the command line gives none (main.c; Octopath Traveler 0: Unreal's -SwitchVirtualAddressSpaceSize=)
          f'#define DM_GAME_ENV {q(g.get("game_env", ""))}',   # KEY=VALUE pairs getenv answers (hle_os.c; Absolum: .NET's DOTNET_GCRegionRange)
+         f'#define DM_GAME_LAUNCH_PARAM {q(g.get("launch_param", ""))}',   # what oe::TryPopLaunchParameter hands over once (hle_oe.c; a program another program of the application launches: Super Mario 3D All-Stars)
          f'#define DM_GAME_MEM_MAP_LIMIT {int(mml == "on")}',
          f'#define DM_GAME_STDALLOC_CAP {int(g.get("stdalloc_cap", "0"), 0):#x}ull',   # StandardAllocator's address space with virtual address memory (hle_svc.c); 0 = what the alias region has room for
+         f'#define DM_GAME_SCREEN_ASPECT {("off", "on").index(g.get("screen_aspect", "off"))}',   # stubs that follow a screen taller than 16:9 (DM_SCREEN_ASPECT): off / on
          f'#define DM_GAME_DISPLAY_VERSIONS {vers}',
          f'#define DM_GAME_PRESENT_DISPLAY {int(pi == "display")}',
          f'#define DM_GAME_CORE_PREEMPT {int(cp == "on")}',
          f'#define DM_GAME_ALLOC_BIG_ALIGN {int(aba == "on")}',
          f'#define DM_GAME_FPS_TARGET {int(ft)}',
+         f'#define DM_GAME_FPS_MAX {int(fm)}',
          f'#define DM_GAME_FPS_HOLD {int(fh == "on")}',
          f'#define DM_GAME_UE_TEXTURE_POOL {int(utp)}',
          f'#define DM_GAME_UE_FPS_CVAR {q(ufc)}',
@@ -188,6 +262,8 @@ def header(g):
          f'#define DM_GAME_TEX_DIRTY_UPLOAD {int(tdu == "on")}',
          f'#define DM_GAME_TEX_DYN_SLOTS {int(tds == "on")}',
          f'#define DM_GAME_GPU_TS_SEGMENT {int(gts == "segment")}',
+         f'#define DM_GAME_DRAW_BARRIERS_GAME {int(dbr == "game")}',
+         f'#define DM_GAME_UPSCALER_KEYS {q(",".join(ups))}', f'#define DM_GAME_UPSCALER_N {len(ups)}',
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)
          '']
@@ -202,6 +278,9 @@ if __name__ == '__main__':
         out, text = Path(a[2]), header(load(a[1])); out.parent.mkdir(parents=True, exist_ok=True)
         if not (out.exists() and out.read_text() == text):   # written only when it changes: make runs this every time (the profile folder can change under the same GAME), and an unchanged header must not rebuild the host
             tmp = out.with_name(out.name + '.tmp'); tmp.write_text(text); tmp.replace(out)
+    elif len(a) == 3 and a[0] == 'modules':   # the modules to load from a folder of rewritten modules: its main build's row, else all the profile's (main.c profile_modules)
+        g, bid = load(a[1]), re.search(r'^# BUILD_ID\s+(\w+)', (Path(a[2]) / 'main.fixups.tsv').read_text(errors='replace'), re.M)
+        print(' '.join(g.build_modules().get(bid.group(1) if bid else '', g.words('modules'))))
     elif len(a) == 2 and a[0] == 'dir':
         print(load(a[1]).dir)
     elif len(a) == 3 and a[0] == 'link':   # link → the profile folder (replaced when it points elsewhere)
@@ -212,4 +291,4 @@ if __name__ == '__main__':
     elif len(a) in (2, 3):
         print(load(a[0]).get(*a[1:]))
     else:
-        sys.exit(__doc__ or 'usage: game.py list | game.py <id> <key> [<default>] | game.py header <id> <out.h> | game.py dir <id> | game.py link <id> <link>')
+        sys.exit(__doc__ or 'usage: game.py list | game.py <id> <key> [<default>] | game.py header <id> <out.h> | game.py modules <id> <rewritten modules> | game.py dir <id> | game.py link <id> <link>')

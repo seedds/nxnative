@@ -57,6 +57,42 @@ static uint64_t proc_start_mono_ns(void) {
     return age > 0 ? mono - (uint64_t)age : mono;
 }
 
+#ifdef DM_GAME_MULTI
+// A host over the programs of a multi-program application (game.py header_multi): the profile of the program DM_PROGRAM names, program 0 without it. One run is one program (hle_oe.c)
+const dm_game_t *dm_game_cur(void) {
+    static const dm_game_t *g;
+    if (!g) {
+        const char *e = getenv("DM_PROGRAM"); int p = e ? atoi(e) : 0; g = &dm_games[0];
+        for (size_t i = 0; i < sizeof dm_games / sizeof *dm_games; i++) if (dm_games[i].program == p) g = &dm_games[i];
+    }
+    return g;
+}
+#endif
+// The modules to load when the command line names none: those of the profile's build row for main's build (its build ID from the rewriter's main.fixups.tsv), else all the profile's
+// modules. A game's versions may differ in modules: Mario Kart World's base game has main subsdk0 (a Mono runtime) sdk, its update 1.8.0 main subsdk0 (the movie player) subsdk1 sdk
+static int profile_modules(const char *dir, const char **names) {
+    const char *all[] = DM_GAME_MODULES;
+    const struct { const char *build, *mods; } rows[] = {DM_GAME_BUILD_MODULES};
+    char path[1024], line[256], bid[33] = "";
+    snprintf(path, sizeof path, "%s/main.fixups.tsv", dir);
+    FILE *f = fopen(path, "r");
+    while (f && fgets(line, sizeof line, f)) if (sscanf(line, "# BUILD_ID %32s", bid) == 1) break;
+    if (f) fclose(f);
+    for (size_t r = 0; *bid && r < sizeof rows / sizeof *rows; r++) {
+        if (!rows[r].build || strcmp(rows[r].build, bid)) continue;
+        int n = 0;
+        for (int k = 0; k < DM_GAME_NMOD; k++) {   // in the profile's load order; build_modules (game.py) made the row from it
+            const char *s = strstr(rows[r].mods, all[k]); size_t l = strlen(all[k]);
+            while (s && !((s == rows[r].mods || s[-1] == ' ') && (!s[l] || s[l] == ' '))) s = strstr(s + 1, all[k]);
+            if (s) names[n++] = all[k];
+        }
+        if (n < DM_GAME_NMOD) LOG("modules of main's build %.16s: %s (the profile lists %d)", bid, rows[r].mods, DM_GAME_NMOD);
+        return n;
+    }
+    for (int k = 0; k < DM_GAME_NMOD; k++) names[k] = all[k];
+    return DM_GAME_NMOD;
+}
+
 // Host loading (independent of UIKit / Metal): read the NSO, relocate, forced take-over, probes / tick gate / keys, start prefetch. By default it runs synchronously in main;
 // the iOS front end can call dm_host_preload_start(same arguments) at the very start of the App's main() so that it runs first on a background thread, in parallel with the UIKit startup chain (⓪ + ① ≈ max(UIKit chain, host loading)).
 static pthread_key_t g_race_keys[512];
@@ -100,7 +136,7 @@ static void host_preload(int argc, char **argv) {
         for (char *t = strtok(s, " "); t && g_argc < 63; t = strtok(NULL, " ")) g_argv[g_argc++] = t;
         LOG("game arguments from the game profile: %s", DM_GAME_ARGS);
     }
-    if (!n) { static const char *def[] = DM_GAME_MODULES; for (int k = 0; k < DM_GAME_NMOD; k++) names[n++] = def[k]; }   // default module list from the game profile's modules (Mario: main sdk)
+    if (!n) n = profile_modules(argv[1], names);
     load_modules(argv[1], names, n);
     dm_cheats_init();   // the Atmosphère cheat files for this build (hle_cheats.c): picked by first 16 hex digits of main's build ID, which the loader knows now
     dm_sdk_major();   // logs the SDK version, which SDK-dependent behaviour follows (loader.c)

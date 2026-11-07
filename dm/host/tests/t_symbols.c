@@ -20,12 +20,14 @@ static uint8_t *test_section(const struct mach_header_64 *mh, const char *seg, c
 #define getsectiondata test_section
 #include "../hle.c"
 #include "../loader.c"
+void mtl_present_screen(uint32_t w, uint32_t h) { (void)w; (void)h; }   // loader.c: a screen taller than 16:9; no renderer here
 #undef getsectiondata
 
 struct dm_flags g_flag;
 uint64_t unimpl_stubs[MAX_STUB];
 uint64_t now_ns(void) { return 0; }
 uint64_t guest_ns(void) { return 0; }
+uint64_t guest_ticks(void) { return 0; }
 void guest_clock_read_wait(void) {}
 void hlecount_seal(void) {}
 int svc_nro_deactivate(module_t *m) { m->loaded = 0; return 1; }   // no memory mappings in this fixture

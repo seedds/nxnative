@@ -15,6 +15,7 @@ On the Mac (2026-10-29): the accessibility settings, the EA SPORTS and FC 27 log
 | [`dual_want.tsv`](dual_want.tsv) | profile | the six pixel shaders a match blends with their output 1 as the second source (dual-source blending), noted with `DM_NVN_DUAL_WANT` |
 | `fps_target 60`, `present_interval display` | `game.tsv` | 60 fps: the host sets Frostbite's simulation rate and the game's frame regulator ([Frame rate](#frame-rate)); the game's present interval 2 is ignored |
 | the node-area cut on `sdk` `fed212d6…` | [`dm/tools/sdk_patches.py`](../../tools/sdk_patches.py) SDK-wide rules | SDK 22's AddressRegionManager takes 1 GB of the alias region as its node area ([The SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area)); the SDK-wide rule's implementation 6 gives this build the cut (its row was removed on 2026-10-30, as the rule gives the same cuts) |
+| `depth_mode zero` | `game.tsv` | the game selects near-zero NVN depth (the NSP script's region check on the registered build); offline pipeline bases must use the matching vertex entry |
 
 ## Files
 
@@ -27,7 +28,7 @@ On the Mac (2026-10-29): the accessibility settings, the EA SPORTS and FC 27 log
 - **The control-block cache:** `fb::ShaderPlatformDataNvn` (renderer NRO) copies each shader's code into its pool and keeps one copy of each control section in a cache keyed by a hash that leaves out GLSLC's compile information (`s_controlBlockCacheMutex`), so a program gets the control section of the first shader with the same rest: at run time +0x7d0..+0x7e7 name another shader. Without `shader_key_skip`, 10 of the first menus' programs were not in the map (their code areas were the files', their control sections another resource's); with it the 10,342 keys are 7,873 shaders ([Control sections shared among shaders that differ only in their compile information](../../../docs/reference/shaders.md#control-sections-shared-among-shaders-that-differ-only-in-their-compile-information)).
 - **Open:** the resources name no vertex / pixel pairs (Frostbite pairs them in its pipeline data), so there is no pipeline prebuild list; the prewarm list (`pso_manifest.tsv`) is empty.
 - **Resolved:** `dc446d7f52c14ea6` (pixel; `[RED] … B binding fp_t2d_cb196610_10570000 has no resolved slot number`), met in a match, did not load. Its loop over separate texture slots i = 1, 2, … reads each handle word at c2 byte 0x168 + 8i and samples an array of c2 handles at element 45 + i (the handle's byte offset ÷ 8), with one separate sampler word (c2 byte 0x570) ORed into every handle; the translator's 32-element array clamped every index to 31, the build did not decode the sampler word, and it refused the loop's own read of each handle word at a computed c2 index → [Arrays of c2 handles cover the whole table, with a separate sampler word](../../../docs/reference/shaders.md#arrays-of-c2-handles-cover-the-whole-table-with-a-separate-sampler-word).
-- **Open:** five shaders have a binding whose slot the build does not decode, and the translator leaves out seven (two with a bindless `texture2D` whose handle source it cannot find, four with `PrmtI`, one with `AtomCas`); none was met in the menus or a match.
+- **Open:** five shaders have a binding whose slot the build does not decode, and the translator leaves out seven (two compute shaders, `b4f2c3223681dc02` and `d02731c7f3de095b`, with 39 bindless `texture2D` accesses each whose handle source it cannot find: [Losses a shader build reports](../../../docs/reference/shaders.md#losses-a-shader-build-reports); four with `PrmtI`, one with `AtomCas`); none was met in the menus or a match.
 
 ## Memory
 
@@ -50,6 +51,7 @@ On the Mac (2026-10-29): the accessibility settings, the EA SPORTS and FC 27 log
 
 ## Found on this game
 
+- **Offline depth metadata:** [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree). The key was missing until the check boots began reading it; the archive at this mode has not been rebuilt or measured here.
 General changes first needed here; each applies to every game on the same path:
 
 - **Resolved: a text longer than a branch reaches** (185.6 MB): the rewriter splits the patch area in two → [Two patch areas for a text longer than a branch reaches](../../../docs/reference/rewriter.md#two-patch-areas-for-a-text-longer-than-a-branch-reaches).

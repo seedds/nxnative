@@ -28,14 +28,10 @@ static int observed_mutex_lock(pthread_mutex_t *mutex);
 #undef mtl_exec_rest
 #undef mtl_drain
 
-uint64_t g_t0_ns;
-_Atomic uint64_t dm_present_ns;
 module_t *g_mod; int g_nmod;
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 void svc_thread_dump(void) {}
-int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
-void dm_vi_layer_crop(int c[4]) { memset(c, 0, 4 * sizeof *c); }
 uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
 
 static dispatch_semaphore_t preparing, second_waiting, finish_prepare, prepared, suspended, returned;

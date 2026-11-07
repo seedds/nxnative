@@ -22,6 +22,7 @@ dm/games/*/bench.tsv	-	a benchmark route
 dm/games/*/usage.tsv	-	a usage manifest
 dm/games/*	profile	one game's profile
 scripts/build_ipa_from_nsp.py	*:*	packing: every game's build
+scripts/pack_nup.py	*:*	NUP packing: games built from NUP containers
 scripts/bench.py	-	the benchmark
 scripts/push_romfs.sh	*:*	RomFS transfer: every game's iOS build
 scripts/regress.py	-	the regression harness
@@ -52,13 +53,14 @@ dm/gfx/tex/*	api:*	texture layouts: every game
 dm/gfx/vk/*	api:vulkan	Vulkan on Metal
 dm/gfx/gl/*	api:gl	OpenGL on Metal
 dm/gfx/tools/dmsh_atomic.py	shader:image_atomic*	image atomics in the MSL
+dm/gfx/tools/dmsh_wide.py	shader:stage:*	storage buffer reads in the MSL: every NVN game
 dm/gfx/tools/dmsh_build.py:vs_tf|tf_layout	shader:transform_feedback	transform feedback capture
 dm/gfx/tools/dmsh_build.py:gs_slice|geometry_finish|vs_layer|_ep_drop	shader:stage:gs	geometry shaders
 dm/gfx/tools/dmsh_build.py:vs_layer|vs_layer_entry	shader:layer_output	layer output
 dm/gfx/tools/dmsh_build.py:fs_uint	shader:integer_outputs	integer fragment outputs
 dm/gfx/tools/dmsh_build.py:int_inputs|vin_finish	shader:integer_vertex_inputs	integer vertex inputs
 dm/gfx/tools/dmsh_build.py:pull_finish	shader:pulling_vertex_inputs	pulling vertex inputs
-dm/gfx/tools/dmsh_build.py:fetch_finish|bf_	shader:readable_tile	readable tiles
+dm/gfx/tools/dmsh_build.py:ps_libraries	shader:readable_tile	readable tiles (cut from the pixel shader's one compile)
 dm/gfx/tools/dmsh_build.py:vs_pad	shader:vs_pad	padded vertex outputs
 dm/gfx/tools/dmsh_build.py:drv_reads|unfillable|DRV_FILL	shader:driver_read_*	driver constant segments
 dm/gfx/tools/dmsh_build.py:spv_single_lane|SG_	shader:simd	subgroup operations
@@ -68,8 +70,9 @@ dm/gfx/tools/dmsh_build.py	shader:stage:*	the shader build: every NVN game
 dm/gfx/tools/dmsh_vin.py	shader:integer_vertex_inputs	integer vertex inputs
 dm/gfx/tools/dmsh_pull.*	shader:pulling_vertex_inputs	pulling vertex inputs
 dm/gfx/tools/dmsh_fetch.py	shader:readable_tile	readable tiles
-dm/gfx/tools/dmsh_alpha.py	nvn:nvnColorStateSetAlphaTest	the alpha test libraries
-dm/gfx/tools/dmsh_logic.py	nvn:nvnColorStateSetLogicOp	the logic operation libraries
+dm/gfx/tools/dmsh_alpha.py	nvn:nvnColorStateSetAlphaTest	the alpha test entry points
+dm/gfx/tools/dmsh_logic.py	nvn:nvnColorStateSetLogicOp	the logic operation entry points
+dm/gfx/tools/dmsh_side.py	shader:stage:ps	every pixel shader's compile unit and main0's shared body (side, integer, dual-source and readable-tile entry points)
 dm/gfx/tools/dmsh_geometry.py	shader:stage:gs	geometry shaders
 dm/gfx/tools/dmsh_facts.py	shader:stage:*	the translator's answer table
 dm/gfx/tools/dmsh_chain.*	shader:stage:*	the chain version: every NVN game's libraries are rebuilt
@@ -100,6 +103,10 @@ dm/tools/nso_*.py	*:*	the rewriter: every game's code
 dm/tools/sdk_patches.py	*:*	the SDK modules' patches (by build ID)
 dm/tools/romfs_image.py	*:*	RomFS image packing: every game's files
 dm/tools/romfs.py	*:*	RomFS image input: every game's build tools
+dm/gfx/nvn/msl_image.h	*:*	reads each shader from the one-file library: every NVN game
+dm/tools/shader_lib.py	*:*	the shader libraries as one file: every NVN game build and regress chain
+dm/tools/shader_cache.py	*:*	the compile cache as one file: every NVN game build and regress chain
+dm/tools/tree_tar.py	*:*	one tar in place of Xcode's derived data and quiet work folders: every game build
 dm/tools/nro_collect.py	*:*	NRO discovery from game resources during packing
 dm/tools/nx_extract/*	*:*	NSP extraction: every game's resource inputs
 dm/mac/launcher.c	*:*	Mac app resource discovery and host launch
@@ -116,6 +123,7 @@ dm/gfx/tools/uepak.py	shader:stage:*	Unreal archive input to shader scanning
 dm/host/romfs_image.h	hle:*fs*	RomFS image index validation shared by mounts and iOS startup
 dm/host/romfs_identity.h	*:*	RomFS identity checks at iOS startup for every game's separate deployment
 dm/host/hle_fs.c	hle:*fs*	filesystem mounts, paths and file operations
+dm/host/hle_audio.c:(notify_release|event_notify)	hle:*AudioOutE*	guest AudioOut buffer-release notifications; the host renderer uses rel_sem
 dm/host/save_sync.*	hle:*fs*	cloud saves: the first save mount and every Commit (hle_fs.c)
 dm/host/Makefile	*:*	the shared host build
 dm/host/hle_thread.c	svc:*	threads and synchronization

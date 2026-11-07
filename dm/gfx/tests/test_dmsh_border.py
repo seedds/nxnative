@@ -17,7 +17,7 @@ import dmsh_fetch   # noqa: E402
 import dmsh_geometry   # noqa: E402
 
 tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-names = {'border_emu', 'reflect', 'decode_tex', 'decode_ubo_tex', 'const_sampler', 'c2_array'}
+names = {'border_emu', 'reflect', 'decode_tex', 'decode_ubo_tex', 'decode_ubo_img', 'const_sampler', 'c2_array'}
 selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in names)
             or (isinstance(n, ast.Assign) and any(getattr(e, 'id', None) in ('BORDER_HELPERS', 'SSBO', 'TEX_BASE') for t in n.targets for e in (t.elts if isinstance(t, ast.Tuple) else [t])))]
 scope = {'re': re, 'abi': abi, 'dmsh_geometry': dmsh_geometry}
@@ -148,11 +148,11 @@ class Rewrite(unittest.TestCase):
         plain = re.sub(r'    float4 _50 = .*\n', '    float4 _50 = float4(0.0);\n', GRASS.replace(', center_no_perspective', ''))   # a plain interpolated input, one sample left
         src = border_emu(plain)
         refl = reflect('k', 'ps', src, {'sbufs': []})
-        fv, meta = dmsh_fetch.variant(src, refl)
+        fv, meta = dmsh_fetch.fold(src, refl)
         self.assertIsNotNone(fv, meta)
         self.assertEqual(len(meta['calls']), 1)
         self.assertEqual(meta['mixed_regs'], [])
-        self.assertRegex(fv, r'\(FX_0 == 0 \? fb0 : [^;]*FX_0 == 7 \? fb7 : dm_bs\(spvDescriptorSet0\.fp_t_tcb_8\.sample\(', 'a tile read replaces the corrected sample')
+        self.assertRegex(fv, r'\(fx0 == 0 \? fb0 : [^;]*fx0 == 7 \? fb7 : dm_bs\(spvDescriptorSet0\.fp_t_tcb_8\.sample\(','a tile read replaces the corrected sample')
 
     @unittest.skipUnless(shutil.which('xcrun'), 'requires Metal compilers')
     def test_compiles(self):

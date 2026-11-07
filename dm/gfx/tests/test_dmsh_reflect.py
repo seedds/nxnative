@@ -14,7 +14,7 @@ import dmsh_geometry
 def builder_reflection():
     # Isolate pure reflection code from the builder's CLI/profile initialization.
     tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-    names = {'reflect', 'decode_tex', 'decode_ubo_tex', 'const_sampler', 'c2_array'}
+    names = {'reflect', 'decode_tex', 'decode_ubo_tex', 'decode_ubo_img', 'const_sampler', 'c2_array'}
     selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in names)
                 or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'SSBO' for t in n.targets))
                 or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Tuple) and any(isinstance(e, ast.Name) and e.id == 'TEX_BASE' for e in t.elts) for t in n.targets))]
@@ -61,6 +61,37 @@ class StorageBuffers(unittest.TestCase):
         self.assertIsNone(bindings('hs', [0x410], [1])[0]['reg'])
 
 
+class PoolTable(unittest.TestCase):
+    # Global memory traced to no storage buffer (Donkey Kong Bananza's gsys vertex shader c9a56f796ea4a4cd): the translator reserves the host's pool table as a storage buffer
+    # under the sentinel cb slot; it is not a game buffer, and it writes when one of the notes is a store or an atomic
+    def reflect(self, notes):
+        source = 'struct spvDescriptorSetBuffer0\n{\n    device uint* vp_s0 [[id(0)]];\n    device uint* vp_s1 [[id(1)]];\n};\n'
+        res = {'sbufs': [{'binding': 40, 'slot': 0, 'cb_slot': 0, 'cb_offset': 0x110 // 4, 'flags': 0},
+                         {'binding': 41, 'slot': 1, 'cb_slot': dmsh_abi.GMEM_MAP_CB_SLOT, 'cb_offset': 0, 'flags': 0}],
+               'notes': notes}
+        return REFLECT('synthetic', 'vs', source, res)
+
+    def test_stores_make_it_writable(self):
+        got = self.reflect(['Global memory operation "Store" traced to no storage buffer: it goes through the memory pool table.'])
+        self.assertEqual([(b['kind'], b.get('reg'), b['rw']) for b in got], [('sbuf', 0, False), ('gmem_map', None, True)])
+
+    def test_atomics_make_it_writable(self):
+        got = self.reflect(['Global memory operation "AtomicAdd" traced to no storage buffer: it goes through the memory pool table.'])
+        self.assertTrue(got[1]['rw'])
+
+    def test_loads_only_read(self):
+        got = self.reflect(['Global memory operation "Load" traced to no storage buffer: it goes through the memory pool table.'])
+        self.assertEqual((got[1]['kind'], got[1]['rw']), ('gmem_map', False))
+
+    def test_write_log(self):   # the stores also log their pages in a host buffer reserved at offset 1 of the sentinel slot
+        source = 'struct spvDescriptorSetBuffer0\n{\n    device uint* vp_s0 [[id(0)]];\n    device uint* vp_s1 [[id(1)]];\n};\n'
+        res = {'sbufs': [{'binding': 40, 'slot': 0, 'cb_slot': dmsh_abi.GMEM_MAP_CB_SLOT, 'cb_offset': 0, 'flags': 0},
+                         {'binding': 41, 'slot': 1, 'cb_slot': dmsh_abi.GMEM_MAP_CB_SLOT, 'cb_offset': dmsh_abi.GMEM_LOG_CB_OFFSET, 'flags': 1}],
+               'notes': ['Global memory operation "Store" traced to no storage buffer: it goes through the memory pool table.']}
+        got = REFLECT('synthetic', 'vs', source, res)
+        self.assertEqual([(b['kind'], b['rw']) for b in got], [('gmem_map', True), ('gmem_log', True)])
+
+
 class DriverTableArrays(unittest.TestCase):
     def reflect(self, members):
         source = 'struct spvDescriptorSetBuffer0\n{\n' + ''.join(f'    {t} {n} [[id({i})]];\n' for t, n, i in members) + '};\n'
@@ -77,6 +108,14 @@ class DriverTableArrays(unittest.TestCase):
     def test_sampler_word_in_another_buffer_is_not_a_driver_table_array(self):   # the sampler word in c3 (slots 0x40002): not this form
         got = self.reflect([('array<texture2d<float>, 301>', 'fp_t2d_cb262146_10570000', 0)])
         self.assertNotEqual(got[0]['kind'], 'tex_c2a')
+
+
+class UniformArraysWithDriverSampler(unittest.TestCase):
+    def test_sampler_word_in_c2(self):   # Kirby Air Riders' shadows: texture handles in c[6], the separate sampler word at c2 byte 0x570
+        source = 'struct spvDescriptorSetBuffer0\n{\n    array<depth2d<float>, 32> fp_t2ds_cb196614_10570000 [[id(0)]];\n    array<sampler, 32> fp_t2ds_cb196614_10570000Smplr [[id(32)]];\n};\n'
+        tex, samp = REFLECT('synthetic', 'ps', source, {'sbufs': []})
+        self.assertEqual((tex['kind'], tex['reg'], tex['off'], tex.get('soff')), ('tex_ubo', 3, 0, None))
+        self.assertEqual((samp['kind'], samp['reg'], samp['off'], samp['soff'], samp['sreg']), ('samp_ubo', 3, 0, 0x570, dmsh_abi.SREG_C2))
 
 
 def builder_unfillable():

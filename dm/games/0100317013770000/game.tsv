@@ -29,6 +29,8 @@ mem_stack	0x10000000
 app_pool	0xCD500000
 # the NPDM declares 16 MB of system resource
 sys_resource	0x1000000
+# Snowdrop's large, 512 KB and 64 KB page ranges in MB (the rewriter's snowdrop_pools.py). The first planet's battle needs more than 512 MB of 64 KB pages (GitHub issue #1010); see README.md.
+snowdrop_pools	2048	512	1280
 
 # ---- Shader split ----
 shader_groups	/moria/=moria

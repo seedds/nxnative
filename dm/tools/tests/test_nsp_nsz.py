@@ -1,8 +1,9 @@
-"""NSP script: NSZ / XCZ files in the NSP folder are listed by their ticket like NSPs (scan_nsps) and converted once with nsz -D into <build folder>/nsp/ (decompress_nsz):
+"""NSP script: NSZ / XCZ files in the NSP folder are listed by their content metas like NSPs (scan_nsps) and converted once with nsz -D into <build folder>/nsp/ (decompress_nsz):
 a conversion is moved in only when nsz exits 0 and made the file, and reused while its source is unchanged. nsz itself is stood in for (no game files, keys or nsz needed)."""
 import importlib.util
 import os
 from pathlib import Path
+import re
 import shutil
 import struct
 import subprocess
@@ -18,17 +19,26 @@ nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
 APP = 0x010020D01AD24000
 
 
-def pfs0(path, names):   # a PFS0 holding empty files with these names (enough for title_of)
+def pfs0(path, names):   # a PFS0 holding empty files with these names
     strs = b''.join(n.encode() + b'\0' for n in names); ent, o = b'', 0
     for n in names: ent += struct.pack('<QQII', 0, 0, o, 0); o += len(n) + 1
     path.write_bytes(b'PFS0' + struct.pack('<III', len(names), len(strs), 0) + ent + strs)
+
+def meta(tid, ver=0):   # the name of a stand-in meta NCA that says what the package's content meta says: fake_contents reads it back
+    kind = 'Application' if tid & 0xFFF == 0 else 'Patch' if tid & 0xFFF == 0x800 else 'AddOnContent'
+    return f'{kind}-{tid:016x}-{ver}.cnmt.nca'
+
+
+def fake_contents(paths):   # stands in for package_reader's contents (nx_extract --contents): the content metas its stand-in meta NCAs name
+    return {p: [(k, int(t, 16), int(v)) for k, t, v in re.findall(r'(\w+)-([0-9a-f]{16})-(\d+)\.cnmt\.nca', p.read_bytes().decode('latin-1'))] for p in paths}
+
 
 
 class Nsz(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp)
-        self.base = self.tmp / 'Game [v0].nsz'; pfs0(self.base, [f'{APP:016x}0000000000000011.tik', 'a.ncz'])
-        self.upd = self.tmp / 'Game [v65536].nsz'; pfs0(self.upd, [f'{APP | 0x800:016x}0000000000000011.tik', 'b.ncz'])
+        self.base = self.tmp / 'Game [v0].nsz'; pfs0(self.base, [meta(APP), 'a.ncz'])
+        self.upd = self.tmp / 'Game [v65536].nsz'; pfs0(self.upd, [meta(APP | 0x800, 65536), 'b.ncz'])
         self.keys = self.tmp / 'custom keys' / 'console.keys'; self.keys.parent.mkdir(); self.keys.write_text('test keys\n')
         self.runs, self.fail_conversion = [], False
         for cm in (mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'say', lambda m: None), mock.patch.object(nsp, 'run', self.fake_nsz),
@@ -49,25 +59,27 @@ class Nsz(unittest.TestCase):
         self.assertEqual(staged.resolve(), self.keys.resolve())
         self.assertEqual(staged.read_text(), 'test keys\n')
         self.runs.append(src.name)
+        if src.suffix not in nsp.COMPRESSED: return   # the real nsz: PathTools.isCompressedGame takes a lowercase extension only, skips anything else and exits 0 with no output
+        self.assertEqual(src, src.resolve())   # and it resolves a symlink before it looks at the extension
         (out / (src.stem + nsp.COMPRESSED[src.suffix])).write_bytes(b'partial' if self.fail_conversion else b'nsp of ' + src.name.encode())
         if self.fail_conversion: raise nsp.BuildError('nsz exit code 1')
 
     def test_scan_and_convert(self):
-        app, fam = nsp.scan_nsps(self.tmp)
+        app, fam = nsp.scan_nsps(self.tmp, fake_contents)
         self.assertEqual((app, fam['base'], fam['updates']), (APP, self.base, [(65536, self.upd)]))
         fam = nsp.decompress_nsz(self.tmp, app, fam, self.keys, {})
         out = self.tmp / f'{APP:016X}_build' / 'nsp'
         self.assertEqual((fam['base'], fam['updates']), (out / 'Game [v0].nsp', [(65536, out / 'Game [v65536].nsp')]))
         self.assertEqual(fam['base'].read_bytes(), b'nsp of Game [v0].nsz')
         self.assertFalse((out / 'partial').exists())
-        nsp.decompress_nsz(self.tmp, app, nsp.scan_nsps(self.tmp)[1], self.keys, {})   # unchanged sources: reused
+        nsp.decompress_nsz(self.tmp, app, nsp.scan_nsps(self.tmp, fake_contents)[1], self.keys, {})   # unchanged sources: reused
         self.assertEqual(len(self.runs), 2)
         os.utime(self.upd, ns=(0, 0))   # a changed source: converted again
-        nsp.decompress_nsz(self.tmp, app, nsp.scan_nsps(self.tmp)[1], self.keys, {})
+        nsp.decompress_nsz(self.tmp, app, nsp.scan_nsps(self.tmp, fake_contents)[1], self.keys, {})
         self.assertEqual(self.runs[2:], [self.upd.name])
 
     def test_work_dir(self):   # --work-dir: the conversions go to the build folder named, nothing to the NSP folder
-        app, fam = nsp.scan_nsps(self.tmp)
+        app, fam = nsp.scan_nsps(self.tmp, fake_contents)
         work = self.tmp / 'builds' / 'game'
         fam = nsp.decompress_nsz(self.tmp, app, fam, self.keys, {}, work)
         self.assertEqual(fam['base'], work / 'nsp' / 'Game [v0].nsp')
@@ -76,21 +88,49 @@ class Nsz(unittest.TestCase):
 
     def test_relative_paths(self):
         previous_cwd = Path.cwd(); self.addCleanup(os.chdir, previous_cwd); os.chdir(self.tmp)
-        app, fam = nsp.scan_nsps(Path('.'))
+        app, fam = nsp.scan_nsps(Path('.'), fake_contents)
         fam = nsp.decompress_nsz(Path('.'), app, fam, self.keys.relative_to(self.tmp), {})
         self.assertEqual(fam['base'].resolve(), (self.tmp / f'{APP:016X}_build/nsp/Game [v0].nsp').resolve())
         self.assertFalse((fam['base'].parent / 'partial').exists())
 
     def test_xcz_uses_the_selected_keys(self):
         self.base.rename(self.base.with_suffix('.xcz')); self.upd.unlink()
-        app, fam = nsp.scan_nsps(self.tmp)
+        app, fam = nsp.scan_nsps(self.tmp, fake_contents)
         fam = nsp.decompress_nsz(self.tmp, app, fam, self.keys, {})
         self.assertEqual(fam['base'].suffix, '.xci')
         self.assertEqual(fam['base'].read_bytes(), b'nsp of Game [v0].xcz')
         self.assertFalse((fam['base'].parent / 'partial').exists())
 
+    def test_extension_in_capitals_is_converted(self):
+        self.upd.unlink()
+        for capitals, lower, made in (('.NSZ', '.nsz', '.nsp'), ('.XCZ', '.xcz', '.xci')):
+            with self.subTest(capitals=capitals):
+                src = self.base.with_suffix(capitals); self.base.rename(src); content = src.read_bytes()
+                app, fam = nsp.scan_nsps(self.tmp, fake_contents)
+                self.assertEqual(fam['base'], src)
+                fam = nsp.decompress_nsz(self.tmp, app, fam, self.keys, {})
+                self.assertEqual(fam['base'], self.tmp / f'{APP:016X}_build' / 'nsp' / f'Game [v0]{made}')
+                self.assertEqual(fam['base'].read_bytes(), f'nsp of Game [v0]{lower}'.encode())
+                self.assertEqual((sorted(p.name for p in self.tmp.iterdir() if p.is_file()), src.read_bytes()), ([src.name], content))   # the player's file stays as it was
+                self.assertFalse((fam['base'].parent / 'partial').exists())
+                src.rename(self.base)
+
+    def test_extension_in_capitals_without_a_hard_link(self):   # another volume, exFAT
+        self.upd.unlink(); src = self.base.with_suffix('.NSZ'); self.base.rename(src)
+        app, fam = nsp.scan_nsps(self.tmp, fake_contents)
+        with mock.patch.object(os, 'link', side_effect=OSError('no hard links')):
+            fam = nsp.decompress_nsz(self.tmp, app, fam, self.keys, {})
+        self.assertEqual(fam['base'].read_bytes(), b'nsp of Game [v0].nsz')
+        self.assertTrue(src.is_file())
+
+    def test_lowercase_extension_is_given_as_it_is(self):
+        self.upd.unlink()
+        with mock.patch.object(os, 'link') as link: nsp.decompress_nsz(self.tmp, *nsp.scan_nsps(self.tmp, fake_contents), self.keys, {})
+        link.assert_not_called()
+        self.assertEqual(self.runs, [self.base.name])
+
     def test_failed_conversion_is_not_kept(self):
-        app, fam = nsp.scan_nsps(self.tmp); self.fail_conversion = True
+        app, fam = nsp.scan_nsps(self.tmp, fake_contents); self.fail_conversion = True
         with self.assertRaises(nsp.BuildError): nsp.decompress_nsz(self.tmp, app, fam, self.keys, {})
         out = self.tmp / f'{APP:016X}_build' / 'nsp'
         self.assertEqual(sorted(p.name for p in out.iterdir()), [])   # neither the partial file nor a key
@@ -99,14 +139,14 @@ class Nsz(unittest.TestCase):
         self.assertEqual((out / 'Game [v0].nsp').read_bytes(), b'nsp of Game [v0].nsz')
 
     def test_an_nsp_beside_wins_and_nsps_need_no_nsz(self):
-        pfs0(self.tmp / 'Game [v0].nsp', [f'{APP:016x}0000000000000011.tik']); self.upd.unlink()
-        app, fam = nsp.scan_nsps(self.tmp)
+        pfs0(self.tmp / 'Game [v0].nsp', [meta(APP)]); self.upd.unlink()
+        app, fam = nsp.scan_nsps(self.tmp, fake_contents)
         self.assertEqual((fam['base'], fam['updates']), (self.tmp / 'Game [v0].nsp', []))
         with mock.patch.object(importlib.util, 'find_spec', lambda m, *a: None):
             self.assertIs(nsp.decompress_nsz(self.tmp, app, fam, self.tmp / 'prod.keys', {}), fam)
 
     def test_missing_nsz(self):
-        app, fam = nsp.scan_nsps(self.tmp)
+        app, fam = nsp.scan_nsps(self.tmp, fake_contents)
         with mock.patch.object(importlib.util, 'find_spec', lambda m, *a: None), mock.patch.object(shutil, 'which', lambda *a, **k: None), self.assertRaisesRegex(nsp.BuildError, 'pip install nsz'):
             nsp.decompress_nsz(self.tmp, app, fam, self.tmp / 'prod.keys', {'PATH': '/nowhere'})
 
@@ -116,7 +156,7 @@ class Nsz(unittest.TestCase):
                 mock.patch.object(subprocess, 'run', lambda *a, **k: done))
 
     def test_nsz_executable_on_path(self):   # no nsz module: a standalone nsz 5 executable on PATH converts instead, its keys given by --keys
-        app, fam = nsp.scan_nsps(self.tmp); cmds = []
+        app, fam = nsp.scan_nsps(self.tmp, fake_contents); cmds = []
         fake = lambda cmd, log, env=None, cwd=None, on_line=None: (cmds.append(cmd), self.fake_nsz(cmd, log, env, cwd))
         a, b, c = self.standalone('usage: nsz [-D] ... --keys KEYS')
         with a, b, c, mock.patch.object(nsp, 'run', fake):
@@ -125,13 +165,13 @@ class Nsz(unittest.TestCase):
         self.assertEqual(fam['base'].read_bytes(), b'nsp of Game [v0].nsz')
 
     def test_nsz_executable_without_keys_option(self):   # an nsz before 5.0 on PATH: it would find no keys, so the build stops and says why
-        app, fam = nsp.scan_nsps(self.tmp)
+        app, fam = nsp.scan_nsps(self.tmp, fake_contents)
         a, b, c = self.standalone('usage: nsz [-D] ...')
         with a, b, c, self.assertRaisesRegex(nsp.BuildError, 'no --keys option'):
             nsp.decompress_nsz(self.tmp, app, fam, self.keys, {'PATH': '/tools'})
 
     def test_old_nsz_does_not_hide_the_release_binary(self):
-        app, fam = nsp.scan_nsps(self.tmp)
+        app, fam = nsp.scan_nsps(self.tmp, fake_contents)
         old, release = '/tools/nsz', '/tools/nsz-cli-macos-arm64'
         with mock.patch.object(importlib.util, 'find_spec', return_value=None), mock.patch.object(shutil, 'which', side_effect=[old, release]), \
              mock.patch.object(subprocess, 'run', side_effect=[subprocess.CompletedProcess([], 0, stdout='usage: nsz [-D]'),
@@ -155,7 +195,7 @@ class Nsz(unittest.TestCase):
                        '[ "$1" = "--keys" ] && [ -f "$2" ] || exit 1\nshift 2\n[ "$1" = "-D" ] && [ "$2" = "-o" ] || exit 1\n'
                        'out=$3; src=$4; name=${src##*/}; name=${name%.nsz}.nsp\nprintf "converted" > "$out/$name"\n')
         exe.chmod(0o755)
-        app, fam = nsp.scan_nsps(self.tmp)
+        app, fam = nsp.scan_nsps(self.tmp, fake_contents)
         with mock.patch.object(importlib.util, 'find_spec', return_value=None), mock.patch.object(nsp, 'run', side_effect=lambda cmd, log, **kw: subprocess.run(cmd, check=True, env=kw['env'], cwd=kw['cwd'])):
             fam = nsp.decompress_nsz(self.tmp, app, fam, self.keys, {'PATH': 'tools'})
         self.assertEqual(fam['base'].read_bytes(), b'converted')

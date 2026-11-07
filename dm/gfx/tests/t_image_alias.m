@@ -72,6 +72,20 @@ static void atomic_pixel(id<MTLTexture> t, uint32_t seed) {
     for (NSUInteger i=1;i<out.length/4;i++) valid &= p[i]==(seed^(uint32_t)i);
     CHECK(valid,"native atomic modifies the heap-backed integer image and preserves every other pixel");
 }
+// A 32-bit colour texture a shader runs image atomics on (Ocarina of Time's d17eefaff4f0bc23 ORs into RGBA8): R32 storage, the same bytes, with its own format as a view for everything else
+static void atomic_colour(pool_t *pool) {
+    tex_t t=image(pool,995000,16,16); mtl_tex_init(&t);
+    id<MTLTexture> base=tex_mtl(&t); uint32_t seed=0x11223344; pixels(base,seed);
+    id<MTLTexture> up=tex_upgrade(&t,base,MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite|MTLTextureUsageShaderAtomic,MTLPixelFormatR32Uint);
+    CHECK(up.pixelFormat==MTLPixelFormatRGBA8Unorm && up.parentTexture.pixelFormat==MTLPixelFormatR32Uint,"a colour texture moves to R32 storage and keeps its format as a view");
+    CHECK(tex_mtl(&t)==up,"the texture's serial now names the view");
+    id<MTLBuffer> copied=read_image(up); CHECK(((uint32_t *)copied.contents)[3]==(seed^3u),"the upgrade copies the pixels into the new storage");
+    id<MTLTexture> raw=up.parentTexture; atomic_pixel(raw,seed);
+    id<MTLBuffer> out=read_image(up); uint32_t *p=out.contents; int valid=p[0]==seed+5;
+    for (NSUInteger i=1;i<out.length/4;i++) valid &= p[i]==(seed^(uint32_t)i);
+    CHECK(valid,"the colour view reads the pixels the copy kept and the atomic changed");
+    mtl_tex_release(&t);
+}
 static void depth_planes(pool_t *pool) {
     tex_t d[2];
     for (int i=0;i<2;i++) { d[i]=image(pool,992000+i,32u<<i,32u<<i); d[i].off=12<<20; d[i].mem=pool->mem+d[i].off;
@@ -157,6 +171,7 @@ int main(void) { @autoreleasepool {
     pixels(big,0x55667788); pixels(tex_mtl(&a[63]),0xa1b2c3d4); pixels(small,0x76543210);
     separate_storage(&pool,small.heap);
     indirect_pixels(small,0x76543210);   // writes to other pools, offsets and formats left it intact
+    atomic_colour(&pool);
     depth_planes(&pool);
     CHECK([g_res_objects containsObject:small.heap],"the parent heap is resident for indirect access");
     CHECK(![g_res_objects containsObject:small],"aliases do not each register a separate allocation");
@@ -165,9 +180,18 @@ int main(void) { @autoreleasepool {
     CHECK(!tex_mtl(&other).heap,"single-description storage stays an ordinary texture");
     tex_t sparse=image(&pool,991001,128,64); sparse.d.flags|=NVN_TEXTURE_FLAGS_SPARSE; mtl_tex_init(&sparse);
     CHECK(!tex_mtl(&sparse).heap,"sparse images stay outside physical image sharing");
+    // A dynamic-resolution depth buffer has no image flag (Ocarina of Time: COMPRESSIBLE alone); its sizes share one allocation. A linear image keeps its own
+    tex_t dz[3]; for (int i=0;i<3;i++) { dz[i]=image(&pool,992000+i,1882+i*19,1882+i*19); dz[i].off=12<<20; dz[i].mem=pool.mem+dz[i].off; dz[i].d.format=NVN_FORMAT_DEPTH32F;
+        dz[i].d.flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE; nvn_tex_layout(&dz[i].d,&dz[i].L); mtl_tex_init(&dz[i]); }
+    id<MTLTexture> dz0=tex_mtl(&dz[0]), dz2=tex_mtl(&dz[2]);
+    CHECK(dz0.heap!=nil && dz0.heap==dz2.heap,"depth sizes without the image flag share one allocation");
+    CHECK(dz0.width==1882 && dz2.width==1920,"each depth size keeps its own dimensions");
+    tex_t lin=image(&pool,992010,128,64); lin.off=14<<20; lin.mem=pool.mem+lin.off; lin.d.flags|=NVN_TEXTURE_FLAGS_LINEAR; mtl_tex_init(&lin);
+    tex_t lin2=lin; lin2.serial=992011; lin2.d.width=256; mtl_tex_init(&lin2);
+    CHECK(!tex_mtl(&lin).heap,"linear images stay outside physical image sharing");
     weak_heap=small.heap;
     for (int i=0;i<N;i++) mtl_tex_release(&a[i]);
-    mtl_tex_release(&other); mtl_tex_release(&sparse); mtl_alias_drop_pool(&pool);
+    mtl_tex_release(&other); mtl_tex_release(&sparse); for (int i=0;i<3;i++) mtl_tex_release(&dz[i]); mtl_tex_release(&lin); mtl_tex_release(&lin2); dz0=nil; dz2=nil; mtl_alias_drop_pool(&pool);
     small=nil; big=nil; saved=nil;
     mtl_sub_commit(); mtl_drain();
     // Finish a second submission: release calls are deferred to the next fence.
@@ -180,7 +204,7 @@ int main(void) { @autoreleasepool {
     CHECK(g_image_heap_n==0,"every family heap is released after its textures and views go");
     uint64_t settled=g_dev.currentAllocatedSize;
     for (int i=0;i<8;i++) { @autoreleasepool {
-        pool_t pool={.flags=NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS|NVN_MEMORY_POOL_FLAGS_GPU_CACHED|NVN_MEMORY_POOL_FLAGS_COMPRESSIBLE,.mem=mem,.size=16<<20};
+        pool_t pool={.magic=MAGIC('P','O','O','L'),.flags=NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS|NVN_MEMORY_POOL_FLAGS_GPU_CACHED|NVN_MEMORY_POOL_FLAGS_COMPRESSIBLE,.mem=mem,.size=16<<20};
         tex_t a=image(&pool,993000+i*2,512,512), b=image(&pool,993001+i*2,1024,512);
         mtl_tex_init(&a); mtl_tex_init(&b); mtl_sub_begin();
         CHECK(tex_mtl(&a).heap!=nil,"a recreated family allocates its backing");

@@ -156,6 +156,7 @@ static int g_any;              // DM_CHEATS_ANY_BUILD
 static module_t *g_main_mod;   // the "main" module of the profile (not an NRO), found at init; its loaded fields come from loader.c
 int dm_guest_as_contains(uintptr_t a);              // hle_svc.c: the address lies in the reserved guest address block
 void svc_guest_range(uint8_t **base, size_t *size); // hle_svc.c: that block (the aslr region of GetInfo), NULL before mem_init
+void svc_alias_range(uint8_t **base, size_t *size); // hle_svc.c: the alias region in it, NULL before mem_init
 
 // A second mapping of main's memory (same physical pages, mach_vm_remap with copy = false), protected read+write for the
 // whole process: a cheat's write to a code page goes through it while the game's own mapping stays executable. Toggling
@@ -619,7 +620,8 @@ static void addr_name(uint64_t addr, char *out, size_t n) {
     where_t w;
     uint64_t ab = region_base(2);
     if (where_get(addr, 1, &w) || w.kind == WH_GUEST) {
-        if (ab && addr >= ab && addr - ab < (uint64_t)DM_GAME_MEM_ALIAS) snprintf(out, n, "alias+0x%llX", (unsigned long long)(addr - ab));
+        uint8_t *ap = NULL; size_t an = 0; svc_alias_range(&ap, &an);
+        if (ab && addr >= ab && addr - ab < (uint64_t)an) snprintf(out, n, "alias+0x%llX", (unsigned long long)(addr - ab));
         else snprintf(out, n, "0x%llX", (unsigned long long)addr);
     } else snprintf(out, n, "%s+0x%llX", w.kind == WH_MAIN ? "main" : w.kind == WH_HEAP ? "heap" : w.mod->name, (unsigned long long)(addr - w.base));
 }
@@ -710,16 +712,14 @@ static uint64_t g_static[256];              // the reference's static registers 
 // Region base for the memory-type nybble m, the reference's GetCheatProcessAddress table (docs/reference/cheats.md,
 // Memory regions): 0 main NSO, 1 heap, 2 alias, 3 aslr, 4 non-relative (the offset is an absolute address), 5..F main
 // (the reference's default case). The bases come from the host's own layout: main from the loader, the heap and the
-// block from hle_svc.c (dm_guest_heap_range, svc_guest_range), and the alias region from that file's fixed partition
-// (mem_init_once: alias, then the profile's stack region, then the heap, so alias = heap - stack - alias sizes); the
-// aslr base check in region_ready keeps a changed partition from silently misplacing region 2. The caller checks
+// block and the alias region from hle_svc.c (dm_guest_heap_range, svc_guest_range, svc_alias_range). The caller checks
 // region_ready(m) first: with no span open the base is 0, and a cheat resolved against 0 could by luck fall inside
 // main's mapped span, which a failed-access line then does not explain
 static uint64_t region_base(int m) {
     uint64_t hb; size_t hopen;
     switch (m) {
         case 1: dm_guest_heap_range(&hb, &hopen); return hb && hopen ? hb : 0;
-        case 2: dm_guest_heap_range(&hb, &hopen); return hb ? hb - (uint64_t)DM_GAME_MEM_STACK - (uint64_t)DM_GAME_MEM_ALIAS : 0;
+        case 2: { uint8_t *ap = NULL; size_t an = 0; svc_alias_range(&ap, &an); return (uint64_t)(uintptr_t)ap; }
         case 3: { uint8_t *as = NULL; size_t n = 0; svc_guest_range(&as, &n); return (uint64_t)(uintptr_t)as; }
         case 4: return 0;
         default: return g_main_mod ? (uint64_t)(uintptr_t)g_main_mod->base : 0;
@@ -729,8 +729,8 @@ static uint64_t region_base(int m) {
 // The named region must have its base right now: a cheat that names the heap (region 1) before the game's first
 // SetHeapSize would compute its addresses from base 0, so its pass stops here and it waits (logged once): a cheat turned
 // on from <build>.enabled at launch runs as soon as the game opens its heap instead of failing its accesses before that.
-// The alias region (2) is ready as soon as the block is reserved, which is before any cheat runs; its base must agree
-// with the block's partition (alias = block + 256 MB in hle_svc.c mem_init_once), else region 2 stays refused, logged once
+// The alias region (2) is ready as soon as the block is reserved, which is before any cheat runs; its base must lie in
+// the block, else region 2 stays refused, logged once
 static int region_ready(cheat_t *c, int m) {
     if (m == 1) {
         uint64_t hb; size_t hopen; dm_guest_heap_range(&hb, &hopen);
@@ -746,9 +746,9 @@ static int region_ready(cheat_t *c, int m) {
             if (g_dry) dry_line("waits: region 2 (alias) is not reserved yet");
             return 0;
         }
-        if (ab == as + 0x10000000ull) return 1;
-        if (g_dry) dry_line("stops: region 2 (alias) is not where the host's layout puts it");
-        else if (!warned++) LOG("[RED] cheat \"%s\": region 2 (alias) refused: its base 0x%llx is not the guest block 0x%llx + 256 MB (hle_svc.c mem_init_once changed its partition)", c->name, (unsigned long long)ab, (unsigned long long)as);
+        if (dm_guest_as_contains((uintptr_t)ab)) return 1;
+        if (g_dry) dry_line("stops: region 2 (alias) is not in the guest block");
+        else if (!warned++) LOG("[RED] cheat \"%s\": region 2 (alias) refused: its base 0x%llx is not in the guest block at 0x%llx", c->name, (unsigned long long)ab, (unsigned long long)as);
         return 0;
     }
     if (m == 3) return region_base(3) != 0;
@@ -1732,9 +1732,9 @@ static void report_build(void) {
 // This build's display version from the profile's build rows (by the whole main build ID), as GetDisplayVersion answers it
 static void profile_version(void) {
 #ifdef DM_GAME_DISPLAY_VERSIONS
-    static const struct { const char *build, *ver; } k[] = {DM_GAME_DISPLAY_VERSIONS};
+    const struct { const char *build, *ver; } k[] = {DM_GAME_DISPLAY_VERSIONS};
     const char *bid = dm_main_build();
-    for (unsigned j = 0; j < sizeof k / sizeof *k; j++) if (!strcasecmp(bid, k[j].build)) snprintf(g_version, sizeof g_version, "%s", k[j].ver);
+    for (unsigned j = 0; j < sizeof k / sizeof *k; j++) if (k[j].build && !strcasecmp(bid, k[j].build)) snprintf(g_version, sizeof g_version, "%s", k[j].ver);
 #endif
 }
 

@@ -22,7 +22,7 @@ import pso_offline
 
 def builder():
     # Use production functions without the CLI's translator/profile initialization.
-    names = {'load_pairs', 'vs_pad', 'vs_depth', 'shader_key', 'pair_keyed'}
+    names = {'load_pairs', 'partner_inputs', 'vs_pad', 'vs_depth', 'shader_key', 'pair_keyed'}
     tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
     ns = dict(collections=collections, os=os, re=re, sys=sys, hashlib=hashlib)
     exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names],
@@ -74,7 +74,9 @@ class Pairing(unittest.TestCase):
         self.extra = self.package.parent / 'pso_pairs.tsv'
         self.extra.write_text('# BAHS\nv\tf1\nv\tf6\nv\tf1\n\n')
         self.ns = builder()
-        self.ns.update(out=str(self.root), PAIRS=self.ns['load_pairs'](self.g, self.package))
+        # output(): a finished shader's file as dmsh_build.py reads it back (from the compile cache there; from the folder here)
+        self.ns.update(out=str(self.root), PAIRS=self.ns['load_pairs'](self.g, self.package),
+                       output=lambda target, name: (self.root / name).read_bytes() if (self.root / name).is_file() else None)
         for key, loc in [('f0', 0), ('f1', 1), ('f6', 6)]:
             src = pixel(loc)
             if not loc: src = src.replace('    float4 missing [[user(locn0)]];\n', '').replace('in.v0 + in.missing', 'in.v0')
@@ -107,13 +109,16 @@ class Pairing(unittest.TestCase):
 
     def test_vertex_cache_depends_on_extra_pairs_and_pixel_code(self):
         self.ns.update(FACTS={}, MAP_ROWS={}, MAP_CONFLICT_ROWS={}, TOOL_FP=b'tools', CODE_FP='code',
-                       PROFILE_ROWS=b'', shader_rule_source=lambda name: b'')
+                       PROFILE_ROWS=b'', DUAL_WANT=set(), shader_rule_source=lambda name: b'')
         key = self.ns['shader_key']
         v1 = key('v', 'pkg.bin', b'vertex')
         self.ns['PAIRS']['v'].remove('f6')
         self.assertNotEqual(v1, key('v', 'pkg.bin', b'vertex'))
         f1, f2 = key('f1', 'pkg.bin', b'pixel'), key('f1', 'pkg.bin', b'changed pixel')
         self.assertNotEqual(self.ns['pair_keyed'](v1, [f1]), self.ns['pair_keyed'](v1, [f2]))
+        self.ns['DUAL_WANT'].add('f1')
+        dual = key('f1', 'pkg.bin', b'pixel')
+        self.assertNotEqual(self.ns['pair_keyed'](v1, [f1]), self.ns['pair_keyed'](v1, [dual]))
 
     @unittest.skipUnless(shutil.which('xcrun'), 'needs the Metal compiler')
     def test_metal_archive_with_padded_regular_and_pulling_entries(self):
@@ -144,6 +149,17 @@ class Pairing(unittest.TestCase):
                            env=dict(os.environ, TMPDIR=str(self.root)), capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertTrue(archive.is_file())
+
+
+class VariationPairs(unittest.TestCase):
+    def test_mesh_pairs_with_its_pixel_shader(self):   # NVN2: Ocarina of Time's foliage variations hold a mesh and a pixel shader, no vertex shader
+        import shader_split as split
+        sh = lambda tag: (bytes([tag]) * 0x40, bytes([tag]) * 0x40)
+        found = [('a.bfsha#BNSH@0x10#var0', 'vs', *sh(1)), ('a.bfsha#BNSH@0x10#var0', 'ps', *sh(2)),
+                 ('a.bfsha#BNSH@0x10#var1', 'ms', *sh(3)), ('a.bfsha#BNSH@0x10#var1', 'ps', *sh(4)),
+                 ('a.bfsha#BNSH@0x10#var2', 'ms', *sh(5))]   # no pixel shader: no pair
+        k = lambda tag: split.skey(*sh(tag))
+        self.assertEqual(split.var_pairs(found), {(k(1), k(2)), (k(3), k(4))})
 
 
 if __name__ == '__main__': unittest.main()

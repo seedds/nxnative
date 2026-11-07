@@ -227,6 +227,18 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
   and gameplay validation.
 - The supplied DLC is a licence-only NSP, with no data to extract.
 
+## Threads
+
+- **Current: the picture stops while audio plays** ([issue #1250](https://github.com/seedds/nxnative/issues/1250)):
+  seven reproductions on 4.0.0, frame 3,000 to 51,300, in Trinity's per-frame
+  rendezvous. Addresses in 1.0.0: the submit loop reads the release flag at
+  `main+0x9a41a4`, the park is `main+0x9a4604`, and the completer at
+  `main+0x28f872c` sets the flag (+0x14) and reads the state word (+0x28). The
+  rewriter now puts a barrier between those two
+  ([the mechanism](../../../docs/reference/threads.md#trinitys-rendezvous-loses-its-release-on-apple-cores)).
+  Checked by disassembly and a standalone test, not in the game: no base NSP or
+  4.0.0 files are on the drive. Open until long clean runs of a build that froze.
+
 ## Open
 
 - [Conservative rasterization](../../../docs/reference/rendering.md#conservative-rasterization-remains-unimplemented)
@@ -243,9 +255,11 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
 - [StandardAllocators over 12 to 62 GB of address space](../../../docs/reference/memory.md#standardallocators-over-12-to-62-gb-of-address-space).
 - [1 GB alignment of regions of 1 GB and more](../../../docs/reference/memory.md#1-gb-alignment-of-regions-of-1-gb-and-more).
 - [Maps past the application pool fail as on Horizon](../../../docs/reference/memory.md#maps-past-the-application-pool-fail-as-on-horizon).
+- [Unmapped guest memory stays resident](../../../docs/reference/memory.md#unmapped-guest-memory-stays-resident).
 - [A replay's own objects take serials above a capture's](../../../docs/reference/nvn-objects.md#a-replays-own-objects-take-serials-above-a-captures).
 - [A captured texture ID whose memory pool was finalized](../../../docs/reference/nvn-objects.md#a-captured-texture-id-whose-memory-pool-was-finalized).
 - [A frame capture runs under the standard thread policy](../../../docs/reference/nvn-objects.md#a-frame-capture-runs-under-the-standard-thread-policy).
 - [A capture refused after a change to the reflection structs](../../../docs/reference/nvn-objects.md#a-capture-refused-after-a-change-to-the-reflection-structs).
 - [Conservative rasterization remains unimplemented](../../../docs/reference/rendering.md#conservative-rasterization-remains-unimplemented).
+- [Trinity's rendezvous loses its release on Apple cores](../../../docs/reference/threads.md#trinitys-rendezvous-loses-its-release-on-apple-cores).
 - [Metal's build folders left by pipeline archive flushes](../../../docs/reference/shaders.md#metals-build-folders-left-by-pipeline-archive-flushes).

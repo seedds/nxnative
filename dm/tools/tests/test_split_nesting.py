@@ -2,6 +2,7 @@
 one layout archive that expands 9 times, was left out), while members that overlap and Yaz0 members that expand without end are still stopped early. No game files needed."""
 import struct
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -72,6 +73,15 @@ class Nesting(unittest.TestCase):
         with mock.patch.object(ss, 'yaz0', wraps=ss.yaz0) as dec, self.assertRaisesRegex(SystemExit, 'Yaz0 archive members expand to more than 16 times the file'):
             ss.scan_blob(d, '/bomb.sarc', [])
         self.assertEqual(dec.call_count, 0)
+
+
+class MemberNames(unittest.TestCase):
+    def test_names_and_time(self):   # each name ends at its own NUL; splitting the rest of the archive per member made Fire Emblem Fortune's Weave's 9.8 MB layout SARC take 6 minutes
+        members = [(b'tex%04d.bntx' % i, bytes(0x4000)) for i in range(800)]
+        archive = fz.sarc(members)   # built outside the timing: only the member reading is measured (about 1 ms here, 47 s with the per-member split)
+        t = time.monotonic(); got = list(ss.sarc_members(archive)); took = time.monotonic() - t
+        self.assertEqual(got, [(n.decode(), m) for n, m in members])
+        self.assertLess(took, 1.0)
 
 
 if __name__ == '__main__':

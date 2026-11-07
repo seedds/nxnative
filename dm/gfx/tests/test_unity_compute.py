@@ -1,4 +1,4 @@
-"""Stripped ComputeShader objects: legacy kernels and Unity 2021.3 keyword variants."""
+"""Stripped ComputeShader objects: legacy kernels, Unity 2021.3 keyword variants and Unity 6000.3 resource types."""
 from pathlib import Path
 import contextlib
 import io
@@ -6,6 +6,7 @@ import json
 import struct
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 import shader_split
@@ -55,6 +56,18 @@ class LegacyComputeTests(unittest.TestCase):
         shaders = shader_split.unity_compute(data, 'fixture', trees)
         self.assertEqual(shaders, [('fixture#LegacySkinning#SkinVertices.0', 'cs', control, code)])
 
+    def test_kernel_with_no_code_is_skipped_and_the_others_are_read(self):
+        # DAVE THE DIVER's Data/resources.assets: an empty code raised, and the file lost its 1,815 programs.
+        data, type_hash, control, code = legacy_compute()
+        trees = {(72, type_hash): unityfs.known_tree(72, type_hash)}
+        program = list(unityfs.serialized_objects(data, {}, {72}, trees))[0][2]['variants'][0]['kernels'][0]['code']
+        shader = {'m_Name': 'Fluid', 'variants': [{'kernels': [
+            {'name': 'Empty', 'uniqueVariants': [{'code': b''}]},
+            {'name': 'Kept', 'uniqueVariants': [{'code': b''}, {'code': program}]}]}]}
+        with mock.patch.object(unityfs, 'serialized_objects', return_value=[(72, 1, shader)]), contextlib.redirect_stdout(io.StringIO()):
+            shaders = shader_split.unity_compute(data, 'fixture', trees)
+        self.assertEqual(shaders, [('fixture#Fluid#Kept.1', 'cs', control, code)])
+
     def test_stripped_2017_counters_and_kernel_reach_shader_split(self):
         data, old_hash, control, code = legacy_compute()
         type_hash = bytes.fromhex('20291e020d10074c35d8286f5191593f')
@@ -83,7 +96,7 @@ class LegacyComputeTests(unittest.TestCase):
                          [shader_split.skey(control, code), 'fixture#LegacySkinning#SkinVertices.0'])
 
 
-def compute_2021_3(platforms=1, code_padding=0):
+def compute_2021_3(platforms=1, code_padding=0, version='2021.3'):
     # Independent wire fixture from the 2021.3.18f1 release dump (PR #440).
     # Several platforms expose the alignment after each resourcesResolved bool;
     # odd-sized code exposes the byte vector's padding before threadGroupSize.
@@ -101,7 +114,8 @@ def compute_2021_3(platforms=1, code_padding=0):
               + struct.pack('<i', 1) + resource              # cbs
               + struct.pack('<4i', 0, 0, 0, 0)               # textures, samplers, in/out buffers
               + struct.pack('<i', len(program)) + program + bytes(-len(program) % 4)
-              + struct.pack('<4Iq', 3, 64, 1, 1, -0x123456789ab))
+              + (struct.pack('<4Iq', 3, 64, 1, 1, -0x123456789ab) if version == '2021.3'
+                 else struct.pack('<4I', 3, 64, 1, 1)))   # 2020.3 kernels end at threadGroupSize: no requirements
     parent = (string('SkinVertices') + struct.pack('<i', 2)
               + string('') + kernel + string('SKIN_NORMALS') + kernel
               + struct.pack('<i', 1) + string('GLOBAL')
@@ -111,8 +125,10 @@ def compute_2021_3(platforms=1, code_padding=0):
     variants = [struct.pack('<iii', 38 + i, 50, 1) + parent
                 + struct.pack('<i', 1) + cb + b'\1\0\0\0' for i in range(platforms)]
     payload = string('Skinning2021') + struct.pack('<i', platforms) + b''.join(variants)
-    type_hash = bytes.fromhex('abd9135b8ce83d043fef4e9ec7f53366')
-    metadata = (b'2021.3.18f1\0' + struct.pack('<i?iiBh', 38, False, 1, 72, 0, -1)
+    type_hash, unity = {'2021.3': ('abd9135b8ce83d043fef4e9ec7f53366', b'2021.3.18f1'),
+                        '2020.3': ('d0171b849bb064b2424893e7d4809be5', b'2020.3.27f1')}[version]
+    type_hash = bytes.fromhex(type_hash)
+    metadata = (unity + b'\0' + struct.pack('<i?iiBh', 38, False, 1, 72, 0, -1)
                 + type_hash + struct.pack('<i', 1))
     metadata += bytes(-(20 + len(metadata)) % 4)
     metadata += struct.pack('<qIII', 1, 0, len(payload), 0)
@@ -160,6 +176,96 @@ class Compute2021Tests(unittest.TestCase):
                 reader = unityfs.Reader(data[doff + start:doff + start + size], le)
                 unityfs._read(reader, types[ti][2])
                 self.assertEqual(reader.p, size)
+
+
+def compute_6000_3():
+    # Wire fixture written from the 6000.3 release dumps: 2022.3's unique variants and variant indices,
+    # each resource with a resource type after its texture dimension.
+    code = shader_split.CS_MAGIC + bytes(60)
+    control = bytearray(0x880)
+    control[:4] = shader_split.CTL_MAGIC
+    struct.pack_into('<I', control, 0x20, len(control))
+    struct.pack_into('<I', control, 0x704, len(code))
+    struct.pack_into('<III', control, 0x748, 8, 8, 1)
+    header = [0] * 6 + [-1] * 6 + [0] * 12
+    header[11], header[17], header[23] = 0, len(control), len(code)
+    program = struct.pack('<24i', *header) + control + code
+    resource = string('_Source') + string('_Source') + struct.pack('<iiii', 0, -1, 2, 5)
+    kernel = (struct.pack('<iI', 1, 0)                       # cbVariantIndices
+              + struct.pack('<i', 0)                         # cbs
+              + struct.pack('<i', 1) + resource              # textures
+              + struct.pack('<3i', 0, 0, 0)                  # samplers, in/out buffers
+              + struct.pack('<i', len(program)) + program
+              + struct.pack('<4Iq', 3, 8, 8, 1, 0))
+    parent = (string('TextureCopy') + struct.pack('<i', 1) + kernel
+              + struct.pack('<i', 1) + string('') + struct.pack('<I', 0)
+              + struct.pack('<3i', 0, 0, 0))
+    variant = struct.pack('<iii', 38, 50, 1) + parent + struct.pack('<i', 0) + b'\1\0\0\0'
+    payload = string('VrsTexture') + struct.pack('<i', 1) + variant
+    type_hash = bytes.fromhex('43a0948a3f403068c0b31bff90ba0c9a')
+    metadata = (b'6000.3.0b4\0' + struct.pack('<i?iiBh', 38, False, 1, 72, 0, -1)
+                + type_hash + struct.pack('<i', 1))
+    metadata += bytes(-(20 + len(metadata)) % 4)
+    metadata += struct.pack('<qIII', 1, 0, len(payload), 0)
+    data = (struct.pack('>IIII', len(metadata), 0x100 + len(payload), 17, 0x100)
+            + bytes(4) + metadata).ljust(0x100, b'\0') + payload
+    return data, type_hash, bytes(control), code
+
+
+class Unity6000_3Tests(unittest.TestCase):
+    def test_stripped_compute_resource_type_reaches_shader_split(self):
+        data, type_hash, control, code = compute_6000_3()
+        trees = {(72, type_hash): unityfs.known_tree(72, type_hash)}
+        obj, = unityfs.serialized_objects(data, {}, {72}, trees)
+        kernel = obj[2]['variants'][0]['kernels'][0]['uniqueVariants'][0]
+        self.assertEqual(kernel['textures'][0]['resType'], 5)
+        self.assertEqual(kernel['threadGroupSize'], [8, 8, 1])
+        self.assertTrue(obj[2]['variants'][0]['resourcesResolved'])
+        le, doff, types, entries = unityfs._tables(data, {}, {72}, trees)
+        _, start, size, ti = entries[0]
+        reader = unityfs.Reader(data[doff + start:doff + start + size], le)
+        unityfs._read(reader, types[ti][2])
+        self.assertEqual(reader.p, size)
+        with contextlib.redirect_stdout(io.StringIO()): shaders = shader_split.unity_compute(data, 'fixture', trees)
+        self.assertEqual(shaders, [('fixture#VrsTexture#TextureCopy.0', 'cs', control, code)])
+
+
+class Shader6000_3Tests(unittest.TestCase):
+    def test_shader_appends_local_identifier_to_6000_0(self):
+        old = unityfs.known_tree(48, bytes.fromhex('2ec7223dce3af4232b14ae1441bd7999'))
+        new = unityfs.known_tree(48, bytes.fromhex('57f0dd2d4ef24437b4655529a673a936'))
+        self.assertEqual([k.name for k in new.kids], [k.name for k in old.kids] + ['m_AssetLocalIdentifierInFile'])
+        self.assertEqual((new.kids[-1].type, new.kids[-1].flags), ('SInt64', 0))
+
+
+class Compute2020Tests(unittest.TestCase):
+    """Unity 2020.3.27f1 (MADiSON): the 2021.3 kernel without its trailing SInt64 requirements."""
+    def test_stripped_2020_kernel_variants_reach_shader_split(self):
+        data, type_hash, control, code = compute_2021_3(version='2020.3')
+        with self.assertRaises(unityfs.NoTree):
+            list(unityfs.serialized_objects(data, {}, {72}, {}))
+        trees = {(72, type_hash): unityfs.known_tree(72, type_hash)}
+        log = io.StringIO()
+        with contextlib.redirect_stdout(log): shaders = shader_split.unity_compute(data, 'fixture', trees)
+        sources = [f'fixture#Skinning2021#SkinVertices.{i}' for i in range(2)]
+        self.assertEqual(shaders, [(source, 'cs', control, code) for source in sources])
+
+    def test_platform_alignment_and_byte_code_padding(self):
+        for padding in range(4):
+            with self.subTest(padding=padding):
+                data, type_hash, _, _ = compute_2021_3(platforms=2, code_padding=padding, version='2020.3')
+                trees = {(72, type_hash): unityfs.known_tree(72, type_hash)}
+                obj, = unityfs.serialized_objects(data, {}, {72}, trees)
+                variants = obj[2]['variants']
+                self.assertEqual([v['targetRenderer'] for v in variants], [38, 39])
+                for variant in variants:
+                    self.assertTrue(variant['resourcesResolved'])
+                    parent, = variant['kernels']
+                    for pair in parent['variantMap']:
+                        kernel = pair['second']
+                        self.assertEqual(kernel['threadGroupSize'], [64, 1, 1])
+                        self.assertNotIn('requirements', kernel)
+                    self.assertEqual(variant['constantBuffers'][0]['params'][0]['colCount'], 4)
 
 
 if __name__ == '__main__':

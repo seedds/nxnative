@@ -1,0 +1,38 @@
+# Game profile of DRAGON QUEST BUILDERS 2 (Switch, base game v0 + update 1.7.3d = v393216): played on the Mac through character creation and the ship prologue, see README.md
+# Format: see dm/games/README.md
+# Koei Tecmo's (Omega Force) KTGL engine on NVN, SDK 5.4.0; modules main + subsdk0 (GLSLC, NVN's runtime shader compiler) + subsdk1 (the movie library, NintendoSDK_movie) + sdk
+# RomFS: the LINKDATA archive LINKDATA.IDX (index of 32-byte entries) + LINKDATA.BIN (1.1 GB, 59,193 entries), sound banks in binary/sound, two MP4 movies in movie/. Compressed entries are Koei Tecmo's chunked zlib; the shaders are GLSLC outputs in those entries
+
+# ---- Identity ----
+title_id	010042000A986000
+program_id	010042000A986000
+
+# ---- App ----
+name	DRAGON QUEST BUILDERS 2
+ipa	DragonQuestBuilders2.ipa
+app_category	public.app-category.role-playing-games
+# camera on the right stick
+pad_layout	full
+
+# ---- Versions ----
+build	v393216	1.7.3d	main=4f3d7e03666af9b8aa848afac78cb7f7	subsdk0=2fa6e9856f72565f0b1c0bdbcc2b2c22	subsdk1=2e8d3a967b3539eb77f50d1647380378	sdk=f7c7b7a90ecdc2d41c97508cc7236b8a
+package	v393216
+shader_versions	v393216
+
+# ---- Files ----
+modules	main subsdk0 subsdk1 sdk
+romfs_marker	LINKDATA.BIN
+zip_store	.bin:.idx:.mp4:.nx:.metallib
+
+# ---- Memory ----
+# The NPDM declares no system resource (META +0x14 = 0): the game uses SetHeapSize. The guessed 4 GB partition held through the play test: 2.5 GB footprint on the ship
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# ---- Shader split (shader_split.py) ----
+shader_groups	/LINKDATA.BIN=linkdata /binary/=binary /movie/=movie /glslc_capture/=runtime
+shader_note	DRAGON QUEST BUILDERS 2 shaders
+# KTGL compiles 6 built-in GLSL shaders at boot with the game's own GLSLC (subsdk0; sources in main): the NSP script captures them once on the Mac (hle_glslc.c), as for any game whose main holds GLSL sources and imports glslcCompile

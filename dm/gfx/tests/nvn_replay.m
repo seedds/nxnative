@@ -139,7 +139,7 @@ static void add_pools(const uint8_t *d, size_t n) {   // the replay layer's pool
         cap_padd a; memcpy(&a, d + o, sizeof a);
         if (!dec_addr(NULL, &a.mem, 0, 0) || !a.mem) RFAIL("a pool lies in no captured region");
         static nvn_hmap seen = {.klen = 8}; if (nvn_hm_get(&seen, &a.mem)) continue; nvn_hm_put(&seen, &a.mem, (void *)1);
-        mtl_pool_add((void *)(uintptr_t)a.mem, a.size); nvn_dirty_add_range((void *)(uintptr_t)a.mem, a.size); rp_pools_added++;
+        mtl_pool_add((void *)(uintptr_t)a.mem, a.size); mtl_pool_addressed((void *)(uintptr_t)a.mem, a.size); nvn_dirty_add_range((void *)(uintptr_t)a.mem, a.size); rp_pools_added++;
     }
 }
 
@@ -237,7 +237,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     head_get(head, hn, "frame", frame, sizeof frame); head_get(head, hn, "build", build, sizeof build);
     uint64_t mtl_frame = head_get(head, hn, "mtl_frame", v, sizeof v) ? strtoull(v, NULL, 10) : 0;
     if (strcmp(title, DM_GAME_ID)) RFAIL("the capture is of %s, this replayer is built for %s (make GAME=%s nvn_replay)", title, DM_GAME_ID, title);
-    if (ln != strlen(cap_layout()) || memcmp(lay, cap_layout(), ln)) RFAIL("the capture's record layout differs from this build's (nvn_obj.h changed since the capture): capture again");
+    if (!cap_layout_matches(lay, ln)) RFAIL("the capture's record layout differs from this build's (nvn_obj.h changed since the capture): capture again");
     if (!head_get(head, hn, "iface", v, sizeof v) || atoi(v) != CAP_IFACE)   // the shader interface hashes check_programs compares (nvn_capture.inc cap_iface)
         RFAIL("the capture's shader interface hashes are of another kind (%s, this build %d: before 2 they hashed nvn_refl.h's struct bytes): capture again", head_get(head, hn, "iface", v, sizeof v) ? v : "none", CAP_IFACE);
     printf("capture %s: %s frame %s, build %s, host %s, chain %s (this build: chain %s)\n", path, title, frame, build, commit, chain, DMSH_CHAIN);

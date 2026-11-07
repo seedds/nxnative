@@ -2228,7 +2228,21 @@ static void present_cfg(const win_t *o) {
     LOG("[nvn] present tick %d Hz, interval mode %s (%s; present interval set by the game %d; %s)", g_hz, g_display_mode ? "display (one frame per tick, a cut)" : "game (original semantics)",
         m ? "DM_PRESENT_INTERVAL" : "game profile present_interval", o->interval, scr > 0 ? "window" : "no window");
 }
-static int present_itv(const win_t *o) { int c = fps_present_cap(), k = atomic_load(&g_fs_k); return c ? (k && fstep_on() ? k : fstep_hz() / c) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; }   // vsyncs per frame that presentation follows
+// DM_ITV_LATCH=1 (opt-in): a game that flips its present interval between 1 and 2 every few frames (Mario Kart World 1.8.0, where the frame step stub is not placed, on an iPhone: 350 flips in 20 s around its 60 → 30 fps step, 258 in one
+// 10 s window) was shown at alternating 16.7 / 33.3 ms periods, a judder, while each flip also moved the display link and the scheduler declaration. The latch holds interval 2 until the game has
+// asked for 1 continuously for DM_ITV_LATCH_MS (3000), so the screen runs one steady 30 fps instead. On Mario Kart World 1.8.0 on an iPhone 19,4 it cut the interval flips (12 against 58 in
+// comparable stretches) and did not change the GPU's slowdown (2026-11-07)
+static int itv_latch_ms(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_ITV_LATCH_MS"); v = e && atoi(e) > 0 ? atoi(e) : 3000; } return v; }
+static _Atomic uint64_t g_itv_latch_until;   // now_ns until which the interval stays >= 2 (0 = no latch)
+static int itv_latch_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_ITV_LATCH"); v = e && atoi(e) != 0; if (v) LOG("[nvn] DM_ITV_LATCH=1: interval 2 is held until the game asks for 1 for %d ms", itv_latch_ms()); } return v; }
+static int present_itv(const win_t *o) {
+    int c = fps_present_cap(), k = atomic_load(&g_fs_k);
+    if (c) return k && fstep_on() ? k : fstep_hz() / c;
+    if (g_display_mode) return 1;
+    int itv = o->interval > 0 ? o->interval : 1;
+    if (itv < 2 && itv_latch_on() && now_ns() < atomic_load(&g_itv_latch_until)) return 2;
+    return itv;
+}   // vsyncs per frame that presentation follows
 // Present interval 0 swaps without waiting for a vsync on Horizon: the window's acquire waits only for a texture the display has let go of, the display shows the newest frame at each
 // vsync, and the game paces itself (or runs as fast as it can; the Switch's unlocked-frame-rate mods set interval 0 to go past 60). The acquire took it as 1 and waited a display
 // tick each frame. Ori and the Blind Forest: Definitive Edition sets Unity's vSyncCount to 0 only for its shader prewarm behind the first loading screen and back to 1 after it: the
@@ -2261,9 +2275,10 @@ static int link_wait(const win_t *o, uint64_t timeout_ns) {
 static uint64_t present_period(const win_t *o) {
     present_cfg(o);
     int was = atomic_load(&g_game_itv), want = o->interval > 0 ? o->interval : 1;
+    if (want == 2 && itv_latch_on()) atomic_store(&g_itv_latch_until, now_ns() + (uint64_t)itv_latch_ms() * 1000000ull);
     if (want != was) {
         atomic_store(&g_game_itv, want);
-        if (want < 2 || want % 2) atomic_store(&g_itv2_since, 0);   // an odd interval needs the 60 Hz link: 3 vsyncs on a 30 Hz link were 2 ticks, 15 fps for 20
+        if ((want < 2 && !(itv_latch_on() && now_ns() < atomic_load(&g_itv_latch_until))) || (want >= 2 && want % 2)) atomic_store(&g_itv2_since, 0);   // an odd interval needs the 60 Hz link: 3 vsyncs on a 30 Hz link were 2 ticks, 15 fps for 20
         else if (was < 2 || was % 2) atomic_store(&g_itv2_since, now_ns() | 1);   // | 1: the start is never 0
     }
     int itv = present_itv(o), hz = g_hz;

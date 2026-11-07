@@ -1713,6 +1713,8 @@ def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g):
         except ValueError as e: raise BuildError(str(e)) from e   # a damaged pak, archive or main (uepak's errors name it)
         finally:
             if dec: dec.close()
+        if not listing and uepak.io_inline_tocs(str(rfs.source(d))):   # Unreal Engine 4.27 IoStore packages with their shaders inline (Tetris Effect: Connected): the split reads them
+            say(f'{v}: no shader code archive; the shaders are inline in the IoStore packages and the global shader cache, which the shader split reads'); rmtree(jd); rmtree(rd); continue
         if not listing: raise BuildError(f'the RomFS has Unreal paks, but none under {rfs.source(d)} holds a shader code archive: where the shaders are has to be found first')
         say(f'{v}: ' + '; '.join(f'{x["name"]} {x["shaders"]:,} shaders' + (f' ({x["compression"]})' if x.get('compression') else '') for x in listing)
             + (f'; decoding {n:,} with the game\'s Oodle in the Mac host' if n else ''))

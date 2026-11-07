@@ -489,6 +489,19 @@ def io_shader_tocs(romfs):
     """The IoStore containers under the RomFS that hold Unreal Engine 5 shader libraries"""
     return [t.path for t in io_tocs(romfs) if t.of_type(IO_SHADER_LIBRARY)]
 
+def io_inline_tocs(romfs):
+    """The Unreal Engine 4 IoStore containers (TOC version 3 and earlier) under the RomFS whose cooked packages keep their shaders inline (bShareMaterialShaderCode off): Tetris Effect: Connected's
+    TetrisEffect-Switch.utoc (UE 4.27, Zlib blocks, not encrypted; 25,499 LSLG records, 10,353 shaders in 2.0.2), each material's FShaderMapResourceCode entries LZ4 blocks of LSLG records as in
+    OCTOPATH TRAVELER II's paks (shader_split.py ue_inline_shaders). Its pak holds no package and no shader code archive, only the engine's global shader cache. A container counts when a chunk
+    holds an LSLG record; reading stops at the first one"""
+    out = []
+    for t in io_tocs(romfs):
+        if t.version >= 4 or t.encrypted: continue   # Unreal Engine 5 keeps shader libraries (io_shader_tocs); an encrypted container needs a key
+        try:
+            if any(b'LSLG' in t.read(i) for i in range(len(t.ids))): out.append(t.path)
+        except (OSError, ValueError, struct.error): pass   # a method this module does not read (Oodle): not this layout
+    return out
+
 def archive_names(romfs):
     """The shader code archive names ("ShaderArchive-<library>-<format>") the RomFS's manifests list (Unreal's Manifest_UFSFiles_<platform>.txt)"""
     import re

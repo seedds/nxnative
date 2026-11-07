@@ -14,6 +14,8 @@
 //   The virtual gamepad (all but the menu button) hides while a physical controller is connected and comes back when it is removed; unclaimed touches go to the game only when a local game viewport exists. Physical controllers keep every button (D-pad and right stick included) and map by position: bottom = B, right = A, left = Y, top = X (same positions as on a Switch controller); a Nintendo pad maps by its labels (pad_apple.h).
 //   Each physical controller is a player of its own (local co-op), as on the Mac: the first one connected is player 1, together with the touch gamepad, the next player 2, and so on up to 8; see "Physical controllers" below.
 //   Shaking the phone shakes the controller (DM_BTN_SHAKE: its six-axis sensor, hle_hid.c), whichever controls are in use; see "Shaking the phone" below.
+//   A hardware keyboard (Magic Keyboard, Smart Keyboard, Bluetooth) plays with the Mac's key map, and a mouse or trackpad turns the camera with the pointer locked (Mouse: Camera);
+//   the touch controls hide while either is used and come back at the next finger touch; see "Keyboard, mouse and trackpad" below.
 #import <UIKit/UIKit.h>
 #import <GameController/GameController.h>
 #import <CoreMotion/CoreMotion.h>
@@ -27,6 +29,7 @@
 #include "motion_apple.h"
 #include "motion_fusion.h"
 #include "pad_apple.h"
+#include "mouse_look.h"
 #include "pad_slots.h"
 #include <stdatomic.h>
 #import "DmLayout.h"
@@ -38,9 +41,13 @@ enum { C_NONE = 0, C_STICK, C_DPAD, C_FACE, C_BTN, C_GAME };   // which control 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_touch_btn, g_shake_btn;
 static int32_t g_touch_lx, g_touch_ly, g_touch_rx, g_touch_ry;
-static void publish(void) {   // the touch gamepad and the shake; the host ORs them with player 1's controller and takes whichever stick is deflected more (hle_hid.c)
+static uint64_t g_kb_btn, g_ms_btn;      // the keyboard's and the mouse's buttons (main thread)
+static int32_t g_kb_lx, g_kb_ly, g_kb_rx, g_kb_ry, g_ms_rx, g_ms_ry;
+static int32_t stick_pick(int32_t a, int32_t b) { return abs(a) >= abs(b) ? a : b; }
+static void publish(void) {   // the touch gamepad, the keyboard, the mouse and the shake; the host ORs them with player 1's controller and takes whichever stick is deflected more (hle_hid.c)
     pthread_mutex_lock(&g_mu);
-    dm_input_set(g_touch_btn | g_shake_btn, g_touch_lx, g_touch_ly, g_touch_rx, g_touch_ry);
+    int32_t rx = g_kb_rx || g_kb_ry ? g_kb_rx : stick_pick(g_ms_rx, g_touch_rx), ry = g_kb_rx || g_kb_ry ? g_kb_ry : stick_pick(g_ms_ry, g_touch_ry);
+    dm_input_set(g_touch_btn | g_shake_btn | g_kb_btn | g_ms_btn, stick_pick(g_kb_lx, g_touch_lx), stick_pick(g_kb_ly, g_touch_ly), rx, ry);
     pthread_mutex_unlock(&g_mu);
 }
 
@@ -135,6 +142,7 @@ int dm_opmode(void);   // hle_oe.c: 0 = handheld
 @interface DmGamepad : UIView
 - (void)arrange:(DmLayout)layout;
 - (BOOL)menuTakes:(CGPoint)p;
+- (void)kbmUsed;
 @end
 // The menu button: a UIButton whose menu is the in-game menu (UIKit draws it and takes the touches while it is open). Its hit circle is larger than the drawn one, and a key nearer
 // to the touch wins (− / + sit beside it), so it asks the pad
@@ -145,6 +153,9 @@ int dm_opmode(void);   // hle_oe.c: 0 = handheld
 @end
 static __weak DmGamepad *g_view;
 static void pads_start(void);   // Physical controllers, below
+static void kbm_start(void);   // Keyboard, mouse and trackpad, below
+static void kbm_free_pointer(void);
+static BOOL kbm_pointer_click(void);
 
 @implementation DmGamepad {
     NSMapTable<UITouch *, NSNumber *> *_owner;     // touch → control (with the key for C_BTN or the stick for C_STICK, << 8)
@@ -161,6 +172,7 @@ static void pads_start(void);   // Physical controllers, below
     BOOL _full, _tap;                              // the 3D layout / the Tap layout is current
     CALayer *_controls;                            // holds every control layer: hidden while a physical controller is connected (the view itself stays, for game touches)
     BOOL _padOff;                                  // a physical controller is connected: every touch goes to the game
+    BOOL _kbmOff;                                  // the keyboard or the mouse is in use: the controls hide until the next finger touch
     DmLayout _layout;
     UITouch *_game[16];                            // touches on the game's touch screen by finger slot
 }
@@ -214,7 +226,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         _menu.tintColor = k_text; _menu.accessibilityLabel = @"Menu";
         _menu.menu = CFBridgingRelease(dm_game_menu()); _menu.showsMenuAsPrimaryAction = YES;
         __weak DmGamepad *weakSelf = self;
-        [_menu addAction:[UIAction actionWithHandler:^(UIAction *a) { (void)a; [weakSelf reset]; }] forControlEvents:UIControlEventMenuActionTriggered];   // the menu opens: release every key and touch first
+        [_menu addAction:[UIAction actionWithHandler:^(UIAction *a) { (void)a; [weakSelf reset]; kbm_free_pointer(); }] forControlEvents:UIControlEventMenuActionTriggered];   // the menu opens: release every key and touch first, and the pointer
         [self addSubview:_menu];
         NSNumber *saved = [NSUserDefaults.standardUserDefaults objectForKey:k_layout_key];
         int l = saved ? (int)saved.integerValue : DM_GAME_PAD_LAYOUT;
@@ -228,9 +240,11 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         [self padsChanged:nil];
         motion_start();
         phone_motion_start(self);
+        kbm_start();
     }
     return self;
 }
+- (void)kbmUsed { if (_kbmOff) return; _kbmOff = YES; [CATransaction begin]; [CATransaction setDisableActions:YES]; _controls.hidden = YES; [CATransaction commit]; }
 - (void)applyLayout {   // show / hide the controls for the current layout
     [CATransaction begin]; [CATransaction setDisableActions:YES];
     for (int b = 0; b < B_N; b++) _key[b].hidden = _tap || (fullOnly(b) && !_full);
@@ -431,6 +445,8 @@ int front_web_touch(void);
 - (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
     BOOL game = NO;
     for (UITouch *t in ts) {
+        if (t.type == UITouchTypeIndirectPointer && kbm_pointer_click()) continue;   // Mouse: Camera takes the pointer's clicks (kbm_pointer_click)
+        if (_kbmOff && t.type == UITouchTypeDirect) { _kbmOff = NO; [CATransaction begin]; [CATransaction setDisableActions:YES]; _controls.hidden = _padOff; [CATransaction commit]; }
         if (_padOff) { game |= [self gameBegin:t]; continue; }
         CGPoint p = [t locationInView:self];
         if (_layout.separated && !CGRectContainsPoint(_layout.controls, p)) { game |= [self gameBegin:t]; continue; }
@@ -555,6 +571,112 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
     [CATransaction commit];
 }
 
+// ---- Keyboard, mouse and trackpad ----
+// A hardware keyboard (GCKeyboard) plays player 1 with the Mac's key map (front_mac.m): WASD the left stick, the arrow keys the D-pad (with Shift held: the right stick),
+// J K U I = A B X Y, Q E = L R, Z C = ZL ZR, F G = L3 R3, Return = +, Tab = −, Space shakes the controller. Keys pressed with ⌘ held are the system's.
+// Mouse: Camera (DM_MOUSE=1, the profile's mouse: camera in 3D games; mouse_look.h): the scene's pointer is locked (the root view controller's prefersPointerLocked,
+// dm_kbm_pointer_lock), a mouse's or the trackpad's movement (GCMouse) is the right stick and its buttons the profile's mouse_buttons. Esc (or `) frees the pointer, and so does
+// opening the in-game menu; a click on the picture locks it again. iPadOS locks it only while the app fills the screen (not in Split View or a Stage Manager window): there,
+// and with Mouse: Touch screen, the pointer is a finger on the touch screen, as before
+static int g_mouse_cam;                 // DM_MOUSE
+static BOOL g_ptr_freed;                // Esc or the menu freed the pointer: no lock until a click on the picture
+static BOOL g_ptr_locked;               // the scene's pointer lock state
+static uint64_t g_mbits[3];             // the mouse's left, right and middle buttons (ml_buttons)
+static int g_kb_w, g_kb_a, g_kb_s, g_kb_d, g_kb_rl, g_kb_ru, g_kb_rr, g_kb_rd;
+static int g_mouse_n;                   // mice and trackpads connected
+static void kbm_lock_update(void) {
+    UIViewController *vc = g_view.window.rootViewController;
+    if (vc) [vc setNeedsUpdateOfPrefersPointerLocked];
+}
+bool dm_kbm_pointer_lock(void) { return g_mouse_cam && g_mouse_n > 0 && !g_ptr_freed; }   // front_ios.m DmRootVC prefersPointerLocked
+static void kbm_mouse_release(void) { g_ms_btn = 0; ml_stop(); }
+static void kbm_free_pointer(void) { if (g_ptr_freed || !g_mouse_cam) return; g_ptr_freed = YES; kbm_mouse_release(); publish(); kbm_lock_update(); }
+static BOOL kbm_pointer_click(void) {   // a pointer touch on the view (not the menu button): locks the pointer again, never reaches a control or the game
+    if (!g_mouse_cam || !g_mouse_n) return NO;
+    if (g_ptr_freed) { g_ptr_freed = NO; kbm_lock_update(); }
+    return YES;
+}
+static void ms_stick(int32_t rx, int32_t ry) { g_ms_rx = rx; g_ms_ry = ry; publish(); }
+static int kb_bit(GCKeyCode k) {
+    if (k == GCKeyCodeKeyJ) return B_A; if (k == GCKeyCodeKeyK) return B_B; if (k == GCKeyCodeKeyU) return B_X; if (k == GCKeyCodeKeyI) return B_Y;
+    if (k == GCKeyCodeKeyF) return B_LS; if (k == GCKeyCodeKeyG) return B_RS;
+    if (k == GCKeyCodeKeyQ) return B_L; if (k == GCKeyCodeKeyE) return B_R; if (k == GCKeyCodeKeyZ) return B_ZL; if (k == GCKeyCodeKeyC) return B_ZR;
+    if (k == GCKeyCodeReturnOrEnter || k == GCKeyCodeKeypadEnter) return B_PLUS; if (k == GCKeyCodeTab) return B_MINUS;
+    if (k == GCKeyCodeLeftArrow) return B_LEFT; if (k == GCKeyCodeUpArrow) return B_UP; if (k == GCKeyCodeRightArrow) return B_RIGHT; if (k == GCKeyCodeDownArrow) return B_DOWN;
+    return -1;
+}
+static void kb_key(GCKeyboardInput *kb, GCKeyCode k, BOOL down) {
+    if (down && ([kb buttonForKeyCode:GCKeyCodeLeftGUI].isPressed || [kb buttonForKeyCode:GCKeyCodeRightGUI].isPressed)) return;   // ⌘ shortcuts are the system's
+    if (k == GCKeyCodeEscape || k == GCKeyCodeGraveAccentAndTilde) { if (down) kbm_free_pointer(); return; }
+    int *ax = k == GCKeyCodeKeyW ? &g_kb_w : k == GCKeyCodeKeyA ? &g_kb_a : k == GCKeyCodeKeyS ? &g_kb_s : k == GCKeyCodeKeyD ? &g_kb_d : NULL;
+    // an arrow pressed with Shift held is the right stick until it is released, as on the Mac
+    int *rs = k == GCKeyCodeLeftArrow ? &g_kb_rl : k == GCKeyCodeUpArrow ? &g_kb_ru : k == GCKeyCodeRightArrow ? &g_kb_rr : k == GCKeyCodeDownArrow ? &g_kb_rd : NULL;
+    BOOL shift = [kb buttonForKeyCode:GCKeyCodeLeftShift].isPressed || [kb buttonForKeyCode:GCKeyCodeRightShift].isPressed;
+    uint64_t m = 0;
+    if (ax) *ax = down;
+    else if (rs && (down ? shift : *rs)) *rs = down;
+    else { int b = kb_bit(k); m = b >= 0 ? 1ull << b : k == GCKeyCodeSpacebar ? DM_BTN_SHAKE : 0; if (!m) return; }
+    g_kb_btn = down ? g_kb_btn | m : g_kb_btn & ~m;
+    g_kb_lx = (g_kb_d - g_kb_a) * DM_STICK_MAX; g_kb_ly = (g_kb_w - g_kb_s) * DM_STICK_MAX;
+    g_kb_rx = (g_kb_rr - g_kb_rl) * DM_STICK_MAX; g_kb_ry = (g_kb_ru - g_kb_rd) * DM_STICK_MAX;
+    publish();
+    if (down) [g_view kbmUsed];
+}
+static void kb_attach(GCKeyboard *kb) {
+    if (!kb) return;
+    kb.keyboardInput.keyChangedHandler = ^(GCKeyboardInput *in, GCControllerButtonInput *key, GCKeyCode code, BOOL pressed) { (void)key; kb_key(in, code, pressed); };
+}
+static void kb_release(void) {
+    g_kb_btn = 0; g_kb_w = g_kb_a = g_kb_s = g_kb_d = g_kb_rl = g_kb_ru = g_kb_rr = g_kb_rd = 0; g_kb_lx = g_kb_ly = g_kb_rx = g_kb_ry = 0;
+}
+static void ms_button(int i, BOOL down) {
+    if (!g_ptr_locked) return;   // a free pointer's clicks are touches (or lock it again, kbm_pointer_click)
+    g_ms_btn = down ? g_ms_btn | g_mbits[i] : g_ms_btn & ~g_mbits[i]; publish();
+    if (down) [g_view kbmUsed];
+}
+static void ms_attach(GCMouse *m) {
+    GCMouseInput *in = m.mouseInput; if (!in) return;
+    in.mouseMovedHandler = ^(GCMouseInput *mi, float dx, float dy) { (void)mi;
+        if (!g_ptr_locked) return;
+        static int logged; if (logged < 3 && (fabsf(dx) > 2 || fabsf(dy) > 2)) { logged++; LOG("front end: mouse movement %.1f %.1f (y > 0: up)", dx, dy); }
+        ml_move(dx, dy); [g_view kbmUsed]; };   // GameController's mouse movement grows upwards
+    in.leftButton.pressedChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL p) { (void)b; (void)v; ms_button(0, p); };
+    in.rightButton.pressedChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL p) { (void)b; (void)v; ms_button(1, p); };
+    in.middleButton.pressedChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL p) { (void)b; (void)v; ms_button(2, p); };
+}
+static void kbm_lock_changed(UIPointerLockState *st) {
+    BOOL l = st.isLocked; if (l == g_ptr_locked) return;
+    g_ptr_locked = l; if (!l) { kbm_mouse_release(); publish(); }
+    LOG("front end: pointer %s", l ? "locked: the mouse or trackpad turns the camera (Esc frees it)" : "free");
+}
+void dm_kbm_set_mouse(int camera) {   // the in-game menu's Mouse
+    if (camera == g_mouse_cam) return;
+    g_mouse_cam = camera; g_ptr_freed = NO; kbm_mouse_release(); publish(); kbm_lock_update();
+}
+static void kbm_start(void) {
+    const char *e = getenv("DM_MOUSE"); g_mouse_cam = e && *e ? atoi(e) != 0 : DM_GAME_MOUSE;
+    ml_buttons(DM_GAME_MOUSE_BUTTONS, g_mbits); ml_init(ms_stick);
+    NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
+    kb_attach(GCKeyboard.coalescedKeyboard);
+    [nc addObserverForName:GCKeyboardDidConnectNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+        LOG("front end: keyboard connected"); kb_attach(n.object); }];
+    [nc addObserverForName:GCKeyboardDidDisconnectNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+        (void)n; LOG("front end: keyboard disconnected"); kb_release(); publish(); }];
+    for (GCMouse *m in GCMouse.mice) { ms_attach(m); g_mouse_n++; }
+    [nc addObserverForName:GCMouseDidConnectNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+        g_mouse_n++; LOG("front end: mouse or trackpad connected (%d)", g_mouse_n); ms_attach(n.object); kbm_lock_update(); }];
+    [nc addObserverForName:GCMouseDidDisconnectNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+        (void)n; if (g_mouse_n > 0) g_mouse_n--; LOG("front end: mouse or trackpad disconnected (%d left)", g_mouse_n); kbm_mouse_release(); publish(); kbm_lock_update(); }];
+    [nc addObserverForName:UIPointerLockStateDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+        UIWindowScene *ws = g_view.window.windowScene; UIScene *sc = n.userInfo[UIPointerLockStateSceneUserInfoKey];
+        if (!ws || (sc && sc != ws)) return;
+        kbm_lock_changed(ws.pointerLockState); }];
+    LOG("front end: keyboard plays player 1; mouse %s (DM_MOUSE; buttons %#llx %#llx %#llx), %d connected", g_mouse_cam ? "turns the camera with the pointer locked" : "is the touch screen",
+        g_mbits[0], g_mbits[1], g_mbits[2], (int)GCMouse.mice.count);
+    dispatch_async(dispatch_get_main_queue(), ^{ kbm_lock_update(); });   // once the view is in its window
+}
+static void kbm_reset(void) { kb_release(); kbm_mouse_release(); }
+
 // ---- Physical controllers ----
 // Each controller with an extended gamepad profile is a player of its own, as on the Mac (front_mac.m): it holds a slot (pad_slots.h: player 1 first, a reconnected controller
 // gets its player back) and goes to dm_pad_set_player, and hle_hid.c reports player n on its own npad while the slot is held (dm_pad_players). Player 1's controller is ORed
@@ -638,7 +760,7 @@ bool dm_pad_layout_offered(int layout) { return layout == 0 || layout == 1 || (l
 void dm_pad_layout_set(int layout) { [g_view setPadLayout:layout]; }
 void dm_gamepad_active(void) { dispatch_async(dispatch_get_main_queue(), ^{ for (GCController *c in GCController.controllers) dm_motion_rearm(c); }); }   // On become active: motion_apple.h
 void dm_gamepad_reset(void) {   // On resign active: release everything (a key held while switching away and released in background gets no "release")
-    dispatch_async(dispatch_get_main_queue(), ^{ [g_view reset]; });
+    dispatch_async(dispatch_get_main_queue(), ^{ [g_view reset]; kbm_reset(); publish(); });
     pthread_mutex_lock(&g_mu); g_shake_btn = 0; pthread_mutex_unlock(&g_mu); publish();
     if (g_merge) dm_pad_set(0, 0, 0, 0, 0);
     else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);

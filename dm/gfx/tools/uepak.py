@@ -243,7 +243,8 @@ class Keys:
         if not enc: return None
         for m in self.mains:
             if m not in self.imgs: self.imgs[m] = nso_image(m)
-            k = find_key(*self.imgs[m], pak, first=self.found)
+            img, lo, hi = self.imgs[m]
+            k = find_key(img, lo, hi, pak, first=self.found)
             if k:
                 if k not in self.found: self.found.append(k)
                 return k

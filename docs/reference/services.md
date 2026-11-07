@@ -677,6 +677,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_net_eventfd`.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (SDK 22.2.8).
 
+### Event descriptors in an `fd_set`
+
+- **Symptom:** `CRASH sig=10` (SIGBUS) in a network thread right after start (Minecraft's `NetherNet Network`, `main+0x18b2ae8`, `x0=0x4000`), at a load from its own stack.
+- **Cause:** the host numbered its event descriptors from `0x4000`. NetherNet puts its event descriptor in an `fd_set` on the stack for `Select` (1024 bits, as the bsd service's descriptors are small numbers), and `FD_SET(0x4000)` reads and writes 2 KB past the set. `Select` also failed whenever a descriptor was set, so it could never wait on one.
+- **Fix:** the event descriptors are 960-1023, inside an `fd_set`. `Select` (`dm_sk_select`, both overloads) waits on the event descriptors in its sets as `Poll` does and returns the ready ones in the sets; with only descriptors the host never made it fails as before, with none it waits out the timeout.
+- **Check:** `t_net_eventfd` (`make -C dm/host/tests GAME=<id> run`).
+- **Found on:** Minecraft (Bedrock Edition, 1.21.120).
+
 ### The local user's profile image
 
 - **Symptom:** `Break#1 reason=0 Result=0` right after the first save is created, then exit 42; the stack has `nn::diag::detail::OnAssertionFailure` under `nn::image::JpegDecoder::Decode` (`sdk+0x394e4`), called from the game (Burnout Paradise Remastered, SDK 9.3).

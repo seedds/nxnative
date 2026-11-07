@@ -13403,10 +13403,14 @@ static void td_dump(void) {
         FILE *f = fopen(path, "wb"); if (f) { fprintf(f, "%lu %lu %lu %lu %zu\n", (unsigned long)w, (unsigned long)h, (unsigned long)dz, (unsigned long)t.pixelFormat, row); fwrite(buf.contents, 1, img * dz, f); fclose(f); }
         MLOG("[texraw] ser=%llu %lux%lux%lu format %lu → %s", ser, (unsigned long)w, (unsigned long)h, (unsigned long)dz, (unsigned long)t.pixelFormat, path);
     }
+    // DM_NVN_TEXDUMP_MINW=<n>: only targets whose dumped level is at least n wide. A frame's full set can be many PNGs, a lot for a phone's storage and a pull over the network
+    // when only the full-size targets matter; read at each dump, so a DM_CTL "env" line can set it before a "texdump"
+    const char *mw = getenv("DM_NVN_TEXDUMP_MINW"); long minw = mw ? atol(mw) : 0; unsigned long skipped = 0;
     for (NSArray *e in g_td_list) {
         id<MTLTexture> t = e[0]; uint64_t ser = [e[1] unsignedLongLongValue]; NSUInteger lv = [e[2] unsignedIntegerValue], sl = [e[3] unsignedIntegerValue];
         // 2D arrays are saved by the attached layer (file index ser*100 + layer*10 + level; layer 0 is named like 2D)
         if (t.textureType != MTLTextureType2D && t.textureType != MTLTextureType2DArray) { MLOG("[texdump] ser=%llu type %lu skipped", ser, (unsigned long)t.textureType); continue; }
+        if (minw && (long)MAX(t.width >> lv, 1ul) < minw) { skipped++; continue; }
         if (getenv("DM_NVN_SNAPRAW")) {   // Also save the raw bytes (converting an HDR target to an 8-bit image truncates; first-line text header: width height format bytes-per-row)
             NSUInteger rw = MAX(t.width >> lv, 1u), rh = MAX(t.height >> lv, 1u);
             size_t bpp = t.pixelFormat == MTLPixelFormatRGBA16Float ? 8 : t.pixelFormat == MTLPixelFormatRGBA32Float ? 16 : t.pixelFormat == MTLPixelFormatR16Float || t.pixelFormat == MTLPixelFormatR16Unorm ? 2 : 4;
@@ -13436,6 +13440,7 @@ static void td_dump(void) {
         MLOG("[texdump] ser=%llu lv=%lu layer %lu format %lu %lux%lu", ser, (unsigned long)lv, (unsigned long)sl, (unsigned long)t.pixelFormat, (unsigned long)w, (unsigned long)h);
         shot(o, path, 0, NULL);
     }
+    if (skipped) MLOG("[texdump] %lu targets narrower than %ld left out (DM_NVN_TEXDUMP_MINW)", skipped, minw);
     [g_td_list removeAllObjects];
 }
 // DM_NVN_TEXSNAP=in-frame index,... (together with the frame number and path of DM_NVN_TEXDUMP): as soon as these render passes end, copy their color attachments and save them together with the end-of-frame dump

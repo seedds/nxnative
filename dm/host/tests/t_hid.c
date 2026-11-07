@@ -514,6 +514,14 @@ int main(void) {
         CHECK(!h_hid_NmouseEnable(5, 1) && !h_hid_NmousePos(5, 0, 0), "an unknown handle does not");
         CHECK(!h_hid_NmouseState(NULL, merged) && !h_hid_NmouseNpad(&npad, merged) && npad == 9, "no state and no controller behind the merged handle");
     }
+    {   // DM_CTL paths: "~/" is under $HOME (the iOS app's data container moves between launches), anything else as written
+        char buf[64]; const char *home = getenv("HOME"); char *saved = home ? strdup(home) : NULL;
+        setenv("HOME", "/var/app", 1);
+        CHECK(!strcmp(ctl_home("~/Documents/ctl.txt", buf, sizeof buf), "/var/app/Documents/ctl.txt"), "a ~/ path is under $HOME");
+        CHECK(!strcmp(ctl_home("/tmp/ctl.txt", buf, sizeof buf), "/tmp/ctl.txt") && !strcmp(ctl_home("~ctl.txt", buf, sizeof buf), "~ctl.txt"), "other paths stay as written");
+        unsetenv("HOME"); CHECK(!strcmp(ctl_home("~/a", buf, sizeof buf), "~/a"), "without $HOME a ~/ path stays as written");
+        if (saved) { setenv("HOME", saved, 1); free(saved); }
+    }
     printf("hid players: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

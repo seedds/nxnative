@@ -10,7 +10,8 @@
 #include "../hle_movie_av1.c"
 #include <assert.h>
 
-uint64_t now_ns(void) { return 1; }
+static uint64_t g_clock = 1;   // the host clock the decoder sees (paced(): pictures read at a game's frame rate)
+uint64_t now_ns(void) { return g_clock; }
 __thread _Atomic int dm_host_work;   // hle_thread.c
 static struct { void *ev; int bound, set; } g_ev[16];
 static int ev_slot(void *e) { for (int i = 0; i < 16; i++) if (g_ev[i].ev == e) return i; for (int i = 0; i < 16; i++) if (!g_ev[i].ev) { g_ev[i].ev = e; return i; } abort(); }
@@ -48,7 +49,38 @@ static const uint8_t vp9[] = {
     0xff,0xff,0xff,0xf2,0x2a,0xc0,0x00,
 };
 
+// A player that reads one picture per game frame (Ocarina of Time's title movie, 60 fps, through the AV1 decoder): with two buffers, packets topped up as the decoder takes them,
+// one picture read every read_ns of host clock; times step 16 / 17 ms (the stream's milliseconds, in ns) or, with unit 1000, the same in µs. Returns the movie time the last
+// of n reads showed and counts the reads whose picture was not the one after the previous (skips)
+static int64_t paced(uint64_t read_ns, int n, int64_t unit, uint64_t pause_at, int *skips) {
+    _Alignas(16) static uint8_t dec[0x400], pool[2][0x40], mem[2][16 * 16 * 4]; uint64_t size, align, id; uint32_t idx; cv_sync sync; uint16_t w, h, cw, ch; int64_t ts = 0, prev = -1; bool eos;
+    cv_pref pref = h_cv_pref(16, 16, 3, 0); assert(!h_cv_poolsize(&size, &align, &pref, 1));
+    for (int i = 0; i < 2; i++) assert(!h_cv_pool(pool[i], mem[i], size, &pref, 1, 0));
+    assert(!h_cv_vp9init2(dec, 0x10000, 16, 16, 1, 1, 3)); cv_dec *d = cv_of(dec);
+    for (uint32_t i = 0; i < 2; i++) { assert(!h_cv_vp9reg(dec, i, pool[i], 0)); assert(!h_cv_vp9acq(&idx, &sync, dec)); }
+    int sent = 0; *skips = 0; g_clock = 1000000000ull;
+    for (int r = 0; r < n; r++) {
+        while (d->nheld < CV_HOLD) { int64_t t = (sent * 50 + 1) / 3; assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, t * unit * 1000, false)); sent++; }   // t: 16 or 17 ms
+        uint32_t b = (uint32_t)(r & 1); h_cv_vp9rel(dec, b, sync); assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == b);
+        assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, b));
+        if (prev >= 0 && ts - prev > 17 * unit * 1000) (*skips)++;
+        prev = ts; g_clock += read_ns; if (pause_at && r == (int)pause_at) g_clock += 500000000ull;
+    }
+    assert(!h_cv_vp9fin(dec)); for (int i = 0; i < 2; i++) h_cv_poolfin(pool[i]);
+    g_clock = 1; return ts;
+}
+
 int main(void) {
+    {   // the movie follows its clock when the player reads slower than the movie's rate, and loses nothing when it keeps up
+        int skips; int64_t t;
+        t = paced(16666667, 300, 1000, 0, &skips); assert(skips == 0); assert(t >= 4900000000ll && t <= 5000000000ll);   // 60 reads a second: every picture, 5 s of movie in 5 s
+        t = paced(33333333, 300, 1000, 0, &skips); assert(skips >= 290); assert(t >= 9700000000ll && t <= 10000000000ll);   // 30 a second: every other picture, 10 s of movie in 10 s
+        t = paced(50000000, 300, 1000, 0, &skips); assert(t >= 14500000000ll && t <= 15000000000ll);   // 20 a second (hold 3): 15 s in 15 s
+        t = paced(33333333, 300, 1, 0, &skips); assert(skips == 0);   // times in µs: the unit is not known for certain, nothing is dropped
+        t = paced(33333333, 300, 1000, 150, &skips); assert(t >= 9700000000ll && t <= 10000000000ll);   // a 500 ms pause: the clock starts again from the picture after it, no catch-up
+        printf("t_codec_video: the movie clock passed\n");
+    }
+
     _Alignas(16) static uint8_t dec[0x400], pool[3][0x40], spt[0x80], mem[16 * 16 * 4];
     uint64_t size, align, id; uint32_t idx; cv_sync sync; uint16_t w, h, cw, ch; int64_t ts; bool eos;
 

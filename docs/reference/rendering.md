@@ -1357,6 +1357,15 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 - **Fix:** the layer reports nothing. The callback object is a token that is never called.
 - **Found on:** [Super Mario 64 (Super Mario 3D All-Stars)](../../dm/games/010049900F546001/README.md).
 
+### Colour attachments opened with `LOAD_OP_DONT_CARE`
+
+- **Symptom:** the 3D world black, the HUD drawn over it; the scene's own colour target, read back, holds the whole scene.
+- **Cause:** Vulkan leaves an attachment opened with `VK_ATTACHMENT_LOAD_OP_DONT_CARE` undefined; the Switch keeps what the image held, so a game can draw over it. NVIDIA's Vulkan driver, which the game ships (`subsdk1`, 421.03), has no explicit colour discard on the path examined: render-pass begin and end do nothing for a colour DONT_CARE, and for depth they only drop the ZCULL hints. The macro the driver runs at every begin (MME `0xB2`) and its submit-time processing are not decoded, so this is what the driver does, not a promise, and no claim about every side effect in the hardware. Re:ZERO's post chain copies the scene into a target, then blends its effects layer over it in the next pass, and draws the HUD over the frame in the swap chain image, each pass opening its colour target with DONT_CARE (its engine's render-target wrapper can only ask for CLEAR or DONT_CARE). The layer opened them with `MTLLoadActionDontCare`, which starts Apple's tile memory undefined (empty in practice), so the copy and the frame were lost. Switch emulators (Ryujinx, yuzu, Eden, Hydra) never see a load op and always load the game's render targets.
+- **Fix:** colour attachments opened with DONT_CARE are loaded (`begin_rp` in `hle_vk.m`), as on the Switch.
+- **Limit:** depth and stencil opened with DONT_CARE still start undefined, unlike on the Switch, because no game has been seen to need their contents. Re:ZERO's particle pass reopens the half-res depth with DONT_CARE and STORE and stores it again for the composite to sample. A pass shaped like it, with no draws, stores the validation layer's fill pattern under `MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS=1` and the old depth without it; no wrong pixel in the game has been traced to it. Load depth and stencil too if one is.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_vk_dontcare` clears an image to red, then blends a transparent triangle over it in a pass that opens it with DONT_CARE, LOAD or CLEAR to green: red, red and green. It tests this layer's policy, not Vulkan, which promises nothing for DONT_CARE. The check runs with `MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS=1`, which fills every DontCare load with a pattern (before the fix the DONT_CARE case read back magenta), so it does not depend on what the tile memory happens to hold.
+- **Found on:** Re:ZERO -Starting Life in Another World- The Prophecy of the Throne: its map scenes, found from a dump of the frame's Vulkan commands and readbacks of its targets.
+
 ### Not translated in the Vulkan layer: geometry shaders
 
 - **Symptom:** GX points and lines drawn as one-pixel points and lines.

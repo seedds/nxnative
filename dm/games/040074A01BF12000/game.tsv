@@ -36,3 +36,8 @@ sys_resource	0x0
 # ---- Shader split (shader_split.py) ----
 shader_groups	/Shader/=shader /Effect/=effect /UI/=layout
 shader_note	Donkey Kong Bananza shaders
+
+# ---- Graphics ----
+# Metal encoding on its own thread on the Mac too (nvn_rec.h): the frame-rate controller measures each frame up to its submission and GPU end, so the submit thread's translation is in it.
+# 2026-11-07, the second world's dialog close-ups (about 23,000 draws a frame): translation on the submit thread 15.6 → 12.6 ms, 55-57 fps with the controller held at interval 1; on by default on iOS already
+enc_thread	on

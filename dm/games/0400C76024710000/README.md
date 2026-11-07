@@ -50,6 +50,7 @@ Through `DM_CTL`, silent (`DM_AUDIO=0`) and with `DM_FOCUS_KEEP=1`: press `A` ab
 
 ## Found on this game
 
+- [Large pools held twice in the residency set](../../../docs/reference/memory.md#large-pools-held-twice-in-the-residency-set-lookup-chunks-table-segments-and-a-pool-that-grows): the GPU memory guard stopped the opening load on an 8 GB Mac.
 - [SDF definitions in RE Engine PAKs](../../../docs/reference/shaders.md#sdf-definitions-in-re-engine-paks): KPKA 4.2 and the Switch 2 SDF form.
 - [Colour management shaders in RE Engine OCIO resources](../../../docs/reference/shaders.md#colour-management-shaders-in-re-engine-ocio-resources): every frame black under the UI.
 - [Indirect mesh draws (`DrawMeshTasksIndirect`)](../../../docs/reference/rendering.md#indirect-mesh-draws-drawmeshtasksindirect): no 3D at all, then the title's moon terrain flicker (the record read per type).

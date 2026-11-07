@@ -32,6 +32,8 @@ mem_reserve	0x320000000
 mem_alias	0x100000000
 mem_stack	0x10000000
 app_pool	0x240000000
+# MapPhysicalMemory past the application pool fails, as on Horizon (hle_svc.c): the game's streaming frees its own blocks instead of mapping more (README, Memory in free roam)
+mem_map_limit	on
 sys_resource	0x4000000
 
 # ---- Shader split (shader_split.py) ----

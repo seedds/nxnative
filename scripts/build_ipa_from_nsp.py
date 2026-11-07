@@ -950,6 +950,15 @@ def work_dir(args):   # the build folder --work-dir / WORK_DIR names, used as gi
     return Path(os.path.expanduser(w)).resolve() if w else None
 
 
+def build_folder(args, nsp_dir, gid):
+    """The build folder of the game profile gid: --work-dir / WORK_DIR as given, else <NSP folder>/<gid>_build. A program packed with the application's first (in_programs, Super
+    Mario 3D All-Stars' games) gets <work dir>/programs/<gid>_build under --work-dir, as it gets its own <gid>_build without: in the one folder each program's extract/<version>/RomFS.img
+    replaced the one before, and the package took the last program's image for the first's ("missing RomFS marker", docs/reference/packing.md)"""
+    work = work_dir(args)
+    if not work: return nsp_dir / f'{gid}_build'
+    return work / 'programs' / f'{gid}_build' if getattr(args, 'in_programs', None) is not None else work
+
+
 def profile_folder(args, nsp_dir, app):
     """Where the provisional (or derived) profile goes: --profile-out / PROFILE_OUT, else <build folder>/profile, the build folder being --work-dir / WORK_DIR or <NSP folder>/<title ID>_build.
     A build folder of its own that has no profile yet gets a copy of the one in the default place (kept there), so a game surveyed before --work-dir is not surveyed again."""
@@ -3011,7 +3020,7 @@ def main(args=None):
         if alias and not derived: derived = f'title {app:016X} is not game profile {g.id}\'s title {g.title_id:016X}'
         if derived: say(f'{derived}: packing {pkg_ver} from a profile derived from it')
     versions = [pkg_ver] if derived else need + ([pkg_ver] if pkg_ver not in need else [])
-    work = work_dir(args) or nsp_dir / f'{g.id}_build'
+    work = build_folder(args, nsp_dir, g.id)
     out_ipa = Path(os.path.expanduser(args.out or OUT_IPA)).resolve() if (args.out or OUT_IPA) else work.parent / g.get('ipa')   # by default next to the build folder (the NSP folder, beside the NSPs and <id>_build/, unless --work-dir moved it)
     if shadowed and not (args.out or OUT_IPA): out_ipa = out_ipa.with_name(out_ipa.stem + '-provisional.ipa')   # never over the IPA of the game's real profile
     if mac_pack and (args.out or OUT_IPA) and out_ipa.suffix != '.app': raise BuildError(f'the Mac app (-o / OUT_IPA) must end in .app: {out_ipa}')

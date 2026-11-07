@@ -1,3 +1,8 @@
 # The games gallery's table (dm/tools/docs_gallery.py writes README.md's gallery from it): a new game is a row at its end. README.md itself is not merged this way; after a
 # conflict in its gallery, run docs_gallery.py. test_docs fails on a game in the table twice
 docs/images/gallery.tsv merge=union
+# Findings are added as new entries, mostly at the end of a reference file, and the symptom index is generated from them line for line. Two pull requests that each add an
+# entry to the same file conflicted there and in docs/agents/symptoms.md every time. The union merge keeps both sides' new lines instead. Where both sides change the same
+# line, it keeps both versions without a conflict: dm/tools/tests/test_docs.py fails on an entry with a bullet twice, and docs_symptoms.py --check on an index out of order.
+docs/reference/*.md merge=union
+docs/agents/symptoms.md merge=union

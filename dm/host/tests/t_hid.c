@@ -514,6 +514,18 @@ int main(void) {
         CHECK(!h_hid_NmouseEnable(5, 1) && !h_hid_NmousePos(5, 0, 0), "an unknown handle does not");
         CHECK(!h_hid_NmouseState(NULL, merged) && !h_hid_NmouseNpad(&npad, merged) && npad == 9, "no state and no controller behind the merged handle");
     }
+    {   // DM_PAD_PRESS_TO_JOIN=1: the lowest free slot at the first press, not the slot a controller of that name held before
+        pad_slots q = {0}; static char x, y, z;   // distinct addresses
+        CHECK(pad_slot_take_lowest(&q, &x, "Pro Controller") == 0, "press: the first to press is player 1");
+        CHECK(pad_slot_take_lowest(&q, &y, "Pro Controller") == 1, "press: the next is player 2, even of the same model");
+        CHECK(pad_slot_take_lowest(&q, &x, "Pro Controller") == 0, "press: pressing again keeps the slot");
+        pad_slot_free(&q, &x);
+        CHECK(pad_slot_take_lowest(&q, &z, "Xbox Wireless Controller") == 0, "press: a freed player 1 goes to whoever presses next, whatever its name");
+        pad_slots f = {0}; static char o[DM_PLAYERS + 1];
+        for (int i = 0; i < DM_PLAYERS; i++) pad_slot_take_lowest(&f, &o[i], "pad");
+        CHECK(pad_slot_take_lowest(&f, &o[DM_PLAYERS], "pad") == -1, "press: none left when every player is held");
+        CHECK(pad_slot_take_lowest(&f, NULL, "pad") == -1, "press: no owner, no slot");
+    }
     printf("hid players: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

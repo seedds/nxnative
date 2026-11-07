@@ -203,6 +203,38 @@ def first_store(msl, local):
     rest = msl[at:]
     if not stores or len(stores) > 4 or re.search(r'if \(%s\)' % guard, rest): return msl, []
     return out + rest, stores
+# Shared memory byte and half-word stores (STS.U8 / STS.U16, and the bytes a task or mesh shader writes to its stage memory: its primitive indices and count) reach the MSL as calls of
+# dmsh_shared_store8_<id> / dmsh_shared_store16_<id>(byte offset, value, the shared memory array) (HelperFunctionManager.GenerateSharedStore). The translator's body is upstream Ryujinx's
+# compare-and-swap loop on the word, as SPIR-V has no narrower store into a uint array; Metal's threadgroup memory takes byte stores, so the body becomes one store of the byte or half-word.
+# That is the console's store: no atomic, and two lanes writing the same byte leave one of their values. In the loop, the 32 lanes of a mesh shader writing neighbouring bytes contended four
+# to a word and retried; Ocarina of Time's foliage mesh shaders (ten such stores a lane) took 8.3-8.6 ms of GPU a frame on an M3 Pro (shaders.md, Stage memory byte stores through a
+# compare-and-swap loop). The narrow pointer aliases the uint array for the compiler's type-based alias analysis (uchar, and the may_alias ushort, are "omnipotent char"), so the word loads
+# around the store keep their order. tg_spill later turns the address space to device with the rest of the function
+SHARED_STORE = re.compile(r'\nvoid (dmsh_shared_store(8|16)_\d+)\(([^)]*)\)\n\{')
+SHARED_ALIAS = 'typedef ushort __attribute__((may_alias)) dm_ushort_alias;   // a half-word that may alias the shared memory\'s words (see shared_store_msl)\n'
+def shared_store_msl(msl):
+    if 'dmsh_shared_store' not in msl: return msl
+    found = list(SHARED_STORE.finditer(msl))
+    if not found: raise ValueError('dmsh_shared_store: no definition of the expected form')
+    out, at = [], 0
+    for m in found:
+        params = split_params(m.group(3))
+        scalar = [re.fullmatch(r'thread const u?int& (\w+)', p) for p in params[:2]]
+        arr = re.fullmatch(r'(threadgroup|device) spvUnsafeArray<uint, \d+>& (\w+)', params[2]) if len(params) == 3 else None
+        if not arr or not scalar[0] or not scalar[1]: raise ValueError('dmsh_shared_store: unexpected parameters ' + m.group(3)[:160])
+        off, val = scalar[0].group(1), scalar[1].group(1)
+        space, mem = arr.groups()
+        store = (f'(({space} uchar*)&{mem}[0])[uint({off})] = uchar(uint({val}));' if m.group(2) == '8' else
+                 f'(({space} dm_ushort_alias*)&{mem}[0])[uint({off}) >> 1u] = ushort(uint({val}));')   # a half-word store is aligned (Maxwell faults on a misaligned one)
+        out.append(msl[at:m.end()] + '\n    ' + store + '\n')
+        at = block_end(msl, m.end() - 1)
+    out.append(msl[at:])
+    src = ''.join(out)
+    if any(m.group(2) == '16' for m in found):
+        u = src.find('using namespace metal;\n')
+        if u < 0: raise ValueError('dmsh_shared_store: no using namespace metal')
+        u += len('using namespace metal;\n'); src = src[:u] + SHARED_ALIAS + src[u:]
+    return src
 # Compute shared memory past Metal's limit: Apple's GPUs give a kernel 32 KB of threadgroup memory (maxThreadgroupMemoryLength), and Metal refuses a pipeline that declares more, while Ampere
 # gives up to 100 KB. Mario Kart World's DrivePassShaderDefault has 168 compute shaders of 48 KB (spvUnsafeArray<uint, 12288>), seven of them run on the way to the first race; refused, their
 # dispatches were skipped. Such a kernel takes its threadgroup arrays from a device buffer the host binds (abi.TG_SLOT): one slice of the arrays' total per workgroup, at the workgroup's index in
@@ -1187,16 +1219,35 @@ def build_keys(want, locations, pairs):
     """A partial vertex build needs its available paired pixel shaders before padding; a full build keeps every shader."""
     return sorted(set(want) | {ps for vs in want for ps in pairs.get(vs, ()) if ps in locations}) if want else sorted(locations)
 
+def partner_inputs(key):
+    """The user(locnN) locations the pixel shaders paired with a vertex shader read (vs_pad); pairs whose pixel MSL cannot be read are skipped."""
+    want = set()
+    for ps in PAIRS.get(key, ()):
+        data = output('mac', ps + '_b.metal')   # finished before this shader (fin's phases), so staged in the cache by now
+        if data is not None: want |= {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', data.decode())}
+    return want
+
+def partner_reads(key):
+    """{location: component mask} the pixel shaders paired with a mesh shader read (dmsh_meshstage.to_stage's reads), from their SPH input maps (dmsh_meshstage.pixel_reads), None without
+    pairs. A location a partner's MSL declares that its input map does not name (a record not found, a fixed-function input the translator moved to a user location) counts as all four."""
+    if not PAIRS.get(key): return None
+    reads = collections.defaultdict(int)
+    for ps in PAIRS[key]:
+        got = {}
+        if ps in loc:
+            rec = rec_of(ps)[1]; ci = rec.find(bytes.fromhex('34127698')); code = rec[0x38:ci]
+            got = dmsh_meshstage.pixel_reads(code[:0x80] if dmsh_ampere.is_nvn2(rec[ci:]) else code[0x30:0x80])   # an Ampere SPH leads the code, a Maxwell one follows its 0x30 header
+        data = output('mac', ps + '_b.metal')
+        for n in ({int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', data.decode())} if data is not None else set()) - got.keys(): got[n] = 0xf
+        for n, m in got.items(): reads[n] |= m
+    return dict(reads)
+
 def vs_pad(key, src):
     """Give a vertex shader the outputs its paired pixel shaders read but it does not write, with the value (0,0,0,1).
     Maxwell attributes are untyped 32-bit slots, and a pixel shader reading a location the vertex shader did not write only gets a default; Ryujinx also fills them with (0,0,0,1) when it links stages. Here every shader is translated
     offline on its own without knowing what the next stage reads, and Metal requires every pixel shader input to be a vertex output: 331 of 9043 pairs failed to link and their draws were skipped
     (over 10,000 "Fragment input(s) user(locnN) ... not written by vertex shader" in one iPhone session after the opening course). Returns (new source, padded locations); pairs whose pixel MSL cannot be read are skipped."""
-    want = set()
-    for ps in PAIRS.get(key, ()):
-        data = output('mac', ps + '_b.metal')   # finished before this vertex shader (fin's phases), so staged in the cache by now
-        if data is not None: want |= {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', data.decode())}
-    miss = sorted(want - {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', src)})
+    miss = sorted(partner_inputs(key) - {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', src)})
     i = src.find('struct main0_out\n{\n'); j = src.find('\n};', i); k = src.find('main0_out out = {};')
     if not miss or i < 0 or j < 0 or k < 0: return src, []
     src = src[:j] + ''.join(f'\n    float4 dm_pad{l} [[user(locn{l})]];' for l in miss) + src[j:]
@@ -1562,6 +1613,8 @@ def finish(key, w, j, c1):
     except ValueError as e: return 'gather offsets rewrite failed', str(e)[:160], None
     try: src = hmma_msl(src)   # Ampere HMMA through simdgroup_matrix (see hmma_msl)
     except ValueError as e: return 'HMMA rewrite failed', str(e)[:160], None
+    try: src = shared_store_msl(src)   # shared memory byte and half-word stores as Metal byte stores (see shared_store_msl)
+    except ValueError as e: return 'shared store rewrite failed', str(e)[:160], None
     try: src = pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)
     except ValueError as e: return 'pool rewrite failed', str(e)[:160], None
     src = dmsh_wide.wide_loads(src)   # storage words the translator split, read whole again (see dmsh_wide.py)
@@ -1570,7 +1623,8 @@ def finish(key, w, j, c1):
     mesh = j.get('mesh_stage')
     if mesh:   # the kernel as the Metal object or mesh function (dmsh_meshstage.py)
         if mesh.get('refused'): return 'mesh stage failed', mesh['refused'], None
-        try: src = dmsh_meshstage.to_stage(src, mesh); open(msl, 'w').write(src)
+        # outputs its paired pixel shaders read but its SPHs do not enable get (0,0,0,1), as vs_pad gives a vertex shader's (Ocarina of Time's foliage meshes); each output as wide as they read
+        try: src = dmsh_meshstage.to_stage(src, mesh, partner_reads(key)); open(msl, 'w').write(src)
         except ValueError as e: return 'mesh stage failed', str(e)[:160], None
     elif j['stage'] == 'cs':
         src, first = first_store(src, j.get('local')); open(msl, 'w').write(src)   # the first invocation's store, for the host (see first_store)

@@ -180,9 +180,18 @@ int main(void) { @autoreleasepool {
     CHECK(!tex_mtl(&other).heap,"single-description storage stays an ordinary texture");
     tex_t sparse=image(&pool,991001,128,64); sparse.d.flags|=NVN_TEXTURE_FLAGS_SPARSE; mtl_tex_init(&sparse);
     CHECK(!tex_mtl(&sparse).heap,"sparse images stay outside physical image sharing");
+    // A dynamic-resolution depth buffer has no image flag (Ocarina of Time: COMPRESSIBLE alone); its sizes share one allocation. A linear image keeps its own
+    tex_t dz[3]; for (int i=0;i<3;i++) { dz[i]=image(&pool,992000+i,1882+i*19,1882+i*19); dz[i].off=12<<20; dz[i].mem=pool.mem+dz[i].off; dz[i].d.format=NVN_FORMAT_DEPTH32F;
+        dz[i].d.flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE; nvn_tex_layout(&dz[i].d,&dz[i].L); mtl_tex_init(&dz[i]); }
+    id<MTLTexture> dz0=tex_mtl(&dz[0]), dz2=tex_mtl(&dz[2]);
+    CHECK(dz0.heap!=nil && dz0.heap==dz2.heap,"depth sizes without the image flag share one allocation");
+    CHECK(dz0.width==1882 && dz2.width==1920,"each depth size keeps its own dimensions");
+    tex_t lin=image(&pool,992010,128,64); lin.off=14<<20; lin.mem=pool.mem+lin.off; lin.d.flags|=NVN_TEXTURE_FLAGS_LINEAR; mtl_tex_init(&lin);
+    tex_t lin2=lin; lin2.serial=992011; lin2.d.width=256; mtl_tex_init(&lin2);
+    CHECK(!tex_mtl(&lin).heap,"linear images stay outside physical image sharing");
     weak_heap=small.heap;
     for (int i=0;i<N;i++) mtl_tex_release(&a[i]);
-    mtl_tex_release(&other); mtl_tex_release(&sparse); mtl_alias_drop_pool(&pool);
+    mtl_tex_release(&other); mtl_tex_release(&sparse); for (int i=0;i<3;i++) mtl_tex_release(&dz[i]); mtl_tex_release(&lin); mtl_tex_release(&lin2); dz0=nil; dz2=nil; mtl_alias_drop_pool(&pool);
     small=nil; big=nil; saved=nil;
     mtl_sub_commit(); mtl_drain();
     // Finish a second submission: release calls are deferred to the next fence.

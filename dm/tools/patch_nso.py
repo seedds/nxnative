@@ -485,7 +485,31 @@ def window_adrp(x, S, pc):
     rd = num(x.reg_name(x.operands[0].reg))
     return ADRP(S if rd == 18 else rd, pc, x.operands[1].imm)
 
+def check_window_branches(seg):
+    """For windows with a B, reject exits that carry a reservation through a stub's store."""
+    if not any(x.mnemonic == 'b' for x in seg): return
+    assert all(b.address == a.address + 4 for a, b in zip(seg, seg[1:])), f'noncontiguous window {seg[0].address:x}'
+    by_addr = {x.address: x for x in seg}
+    pending, seen = [(seg[0].address, False)], set()
+    while pending:
+        addr, live = pending.pop()
+        if addr not in by_addr:
+            assert not live, f'branch leaves window with live reservation {addr:x}'
+            continue
+        if (addr, live) in seen: continue
+        seen.add((addr, live))
+        x = by_addr[addr]; m = x.mnemonic
+        if m in EXCL_LD: live = True
+        elif m in EXCL_ST or m == 'clrex': live = False
+        if m == 'b':
+            tgt = x.operands[-1].imm
+            pending.append((tgt, live))
+        elif m in ('cbz', 'cbnz', 'tbz', 'tbnz') or m.startswith('b.'):
+            pending.extend(((x.operands[-1].imm, live), (addr + 4, live)))
+        else: pending.append((addr + 4, live))
+
 def site_window(seg):
+    check_window_branches(seg)
     used = set()
     for x in seg: used |= regs_in(x)
     S, T = pick(used)
@@ -502,12 +526,13 @@ def site_window(seg):
         w = struct.unpack('<I', x.bytes)[0]
         if has18(x): w = subst(x, S)
         m = x.mnemonic
-        if m in ('cbz', 'cbnz', 'tbz', 'tbnz') or m.startswith('b.'):
+        if m in ('b', 'cbz', 'cbnz', 'tbz', 'tbnz') or m.startswith('b.'):
             tgt = x.operands[-1].imm
             if lo <= tgt < hi: newt = copy0 + (tgt - lo)
             else: ex_targets.append(tgt); newt = exits + 16 * (len(ex_targets) - 1)
             pc = copy0 + 4 * k; off = (newt - pc) >> 2
-            if m in ('tbz', 'tbnz'): w = (w & 0xFFF8001F) | ((off & 0x3FFF) << 5)
+            if m == 'b': w = B(pc, newt)
+            elif m in ('tbz', 'tbnz'): w = (w & 0xFFF8001F) | ((off & 0x3FFF) << 5)
             else: w = (w & 0xFF00001F) | ((off & 0x7FFFF) << 5)
             dd = dis(w, pc); assert dd.operands[-1].imm == newt and dd.mnemonic == m
         elif m == 'adrp': w = window_adrp(x, S, copy0 + 4 * k)
@@ -1297,7 +1322,7 @@ def pieces(fa, fb):
     b = [0] + cuts + [n]
     return [(fa + 4 * p, fa + 4 * q) for p, q in zip(b, b[1:])], far
 funcs = sorted({func_of(a) for a, (k, _) in kinds.items() if k == 'x18'})
-far_into, rmid_all = [], set()
+far_into, rmid_all, newly_accepted = [], set(), set()
 if any(fb - fa > BIG_FN for fa, fb in funcs):
     sites18 = sorted(a for a, (k, _) in kinds.items() if k == 'x18'); split = []
     for fa, fb in funcs:
@@ -1311,6 +1336,7 @@ for fa, fb in funcs:
     ws = find_windows(insl)
     for wseg in ws:
         windows.append(wseg); done |= {x.address for x in wseg}
+        if any(x.mnemonic == 'b' for x in wseg): newly_accepted.add(wseg[0].address)
     for j, ins in enumerate(insl):
         if ins.mnemonic == 'br' and ins.op_str == 'x18':
             base = width = None
@@ -1347,9 +1373,17 @@ for fa, fb in funcs:
             t = x.operands[-1].imm
             if t in inwin and t not in heads:
                 wseg = next(w for w in ws if any(y.address == t for y in w))
+                if x.mnemonic != 'bl' and any(y.address == x.address for y in wseg):
+                    newly_accepted.add(wseg[0].address)
+                    continue
                 rb = retry_block(insl, k, wseg) if x.mnemonic not in ('b', 'bl') else None
                 assert rb, f'branch into window {x.address:x}'
                 assert not any(y.address in done for y in rb[0]), f'retry block overlaps a window {rb[0][0].address:x}'
+                tail_addrs = {y.address for y in rb[1]}
+                for y in rb[1]:
+                    if y.mnemonic in ('cbz', 'cbnz', 'tbz', 'tbnz') or y.mnemonic.startswith('b.'):
+                        dest = y.operands[-1].imm
+                        assert dest not in inwin or dest in heads or dest in tail_addrs, f'retry copy branches into window {y.address:x}'
                 retries.append([(rb[0], x.address + 4), (rb[1], wseg[-1].address + 4)])
                 done |= {y.address for y in rb[0]}; rmid |= {y.address for y in rb[0][1:]}
     for x in insl:
@@ -1362,6 +1396,22 @@ if far_into:   # functions analysed in pieces (pieces above): their far b / bl, 
     win_mid = {x.address for wseg in windows for x in wseg[1:]}
     for at, to in far_into: assert to not in win_mid and to not in rmid_all, f'far branch into a window or retry block {at:x}'
     for at, tgt in tabjumps.items(): assert not any(t in win_mid or t in rmid_all for t in tgt), f'jump table target into a window or retry block {at:x}'
+
+# Direct branches from other functions were not part of the per-function entry check above.
+for w in windows:
+    if w[0].address in newly_accepted:
+        assert all(b.address == a.address + 4 for a, b in zip(w, w[1:])), f'noncontiguous window {w[0].address:x}'
+new_mid = {x.address for w in windows if w[0].address in newly_accepted for x in w[1:]}
+if new_mid:
+    for start, end in CODE_RANGES:
+        for at in range(start, end - 3, 4):
+            w = struct.unpack_from('<I', IMG, at)[0]; t = w >> 24
+            if t == 0x54 and not w & 0x10 or t & 0x7E == 0x34: d = (w >> 5) & 0x7FFFF; d -= (d & 0x40000) << 1
+            elif t & 0x7E == 0x36: d = (w >> 5) & 0x3FFF; d -= (d & 0x2000) << 1
+            elif t & 0x7C == 0x14: d = w & 0x3FFFFFF; d -= (d & 0x2000000) << 1
+            else: continue
+            dest = at + 4 * d
+            if dest in new_mid: assert func_of(at) == func_of(dest), f'branch into window from another function {at:x}'
 
 def put_branch(at, to): struct.pack_into('<I', IMG, at, B(at, to))
 for wseg in windows:

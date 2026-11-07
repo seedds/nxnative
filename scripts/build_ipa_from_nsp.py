@@ -87,6 +87,7 @@ PROVISIONAL = False                     # build from a provisional profile even 
 HEAP_CHECK = True                       # a provisional profile whose game has virtual address memory and sets a heap: boot it on the Mac until its heap request (a few seconds) to size the heap region; with virtual address memory, the address region check too (also for a derived profile)
 HEAP_CHECK_SECS = 30                    # the longest heap check (it stops at the first heap request, or HEAP_CHECK_NNMAIN_SECS into nnMain without one)
 HEAP_CHECK_NNMAIN_SECS = 5
+HEAP_CHECK_ROUNDS = 3                   # boots of the heap check: each fix of the heap region lets the next boot reach the checks behind it
 REGION_CHECK_NNMAIN_SECS = 15           # the address region check: the regions a game takes in nninitStartup and its first seconds in nnMain
 SWITCH_ALIAS = 0x1000000000             # the Switch's alias region (64 GB), which holds what a game reserves unchanged
 
@@ -950,6 +951,15 @@ def work_dir(args):   # the build folder --work-dir / WORK_DIR names, used as gi
     return Path(os.path.expanduser(w)).resolve() if w else None
 
 
+def build_folder(args, nsp_dir, gid):
+    """The build folder of the game profile gid: --work-dir / WORK_DIR as given, else <NSP folder>/<gid>_build. A program packed with the application's first (in_programs, Super
+    Mario 3D All-Stars' games) gets <work dir>/programs/<gid>_build under --work-dir, as it gets its own <gid>_build without: in the one folder each program's extract/<version>/RomFS.img
+    replaced the one before, and the package took the last program's image for the first's ("missing RomFS marker", docs/reference/packing.md)"""
+    work = work_dir(args)
+    if not work: return nsp_dir / f'{gid}_build'
+    return work / 'programs' / f'{gid}_build' if getattr(args, 'in_programs', None) is not None else work
+
+
 def profile_folder(args, nsp_dir, app):
     """Where the provisional (or derived) profile goes: --profile-out / PROFILE_OUT, else <build folder>/profile, the build folder being --work-dir / WORK_DIR or <NSP folder>/<title ID>_build.
     A build folder of its own that has no profile yet gets a copy of the one in the default place (kept there), so a game surveyed before --work-dir is not surveyed again."""
@@ -1032,7 +1042,12 @@ def derive_profile(g, pdir, ver, d, mods, app=None, shader_only=False):
     only the shader tables change with installed DLC or newly decoded compute kernels. The modules are the profile's that this version ships and those main imports from that the list leaves out. A profile with frame step stubs (FRAME_STEP) for other builds only gets fps_target 0 for this version:
     its main has no state page, so a cap of 30 or 60 would present every vsync while the game steps 1/30 s per frame (double speed). Returns the version's display version"""
     src = sorted(p for p in g.dir.iterdir() if p.is_file() and (p.name not in DERIVED_SKIP or shader_only and p.name == 'patches.py'))
-    T, disp = '\t', nacp.version(d / 'control.nacp') or '?'
+    # The display version: the package's control data, else the one the profile registers for this main build. A NUP update or a dump carries no control data, and the game asks
+    # the host for the version by its main's build ID (hle_sdk16.c GetDisplayVersion, the build rows): a row with ? is what the game then shows (Super Mario Bros. Wonder 1.2.1
+    # from an update-only NUP: "Ver. ?" on its title screen, though the profile registers that build as 1.2.1)
+    main = d / 'ExeFS/main'; bid = build_id(main) if main.exists() else None
+    known = next((b['display'] for b in g.builds().values() if bid and b.get('main') == bid and b.get('display') not in (None, '', '?')), None)
+    T, disp = '\t', nacp.version(d / 'control.nacp') or known or '?'
     add = pg.main_modules(d / 'ExeFS', mods) if not shader_only and (d / 'ExeFS/main').exists() else {}   # a module's slot can change between versions: what main imports and the profile's list leaves out (Absolum 1.2.1's movie module). The host loads what the row names
     mods = sorted({*mods, *add}, key=pg.load_order) if add else mods
     row = T.join(['build', ver, disp] + [f'{m}={build_id(d / "ExeFS" / m)}' for m in mods if (d / 'ExeFS' / m).exists()])
@@ -1285,9 +1300,9 @@ def extract_nup(ex, name, k, base, app, n):   # one version of a NUP (k: its bas
         except OSError: return None
     try:
         PROG.stage(f'unpack {name}', poll=poll, unit='B', total=n.tree_bytes(pack_nup.romfs_of(k, base)), est=True)
-        pack_nup.pack_version(n, k, base, app, dst, say=lambda s: None)
+        how = pack_nup.pack_version(n, k, base, app, dst, say=lambda s: None, step=lambda s: PROG.set(step=s))
     except pack_nup.Error as e: raise BuildError(str(e)) from e
-    PROG.end(amount((dst / 'RomFS.img').stat().st_size, 'B'))
+    PROG.end(amount((dst / 'RomFS.img').stat().st_size, 'B') + {'kept': ', reused (inputs unchanged)', 'verified': ', reused (image checked)'}.get(how, ''))
     return dst
 
 
@@ -1958,34 +1973,43 @@ def heap_check(repo, d, patched, work, env, logs, g):
     """The heap check of a provisional profile whose game has virtual address memory (an NPDM system resource) and sets a heap (dm/games/profile_guess.py heap_check_needed):
     its heap request decides the alias / heap split of the guest block, and only a run shows it (Wonder asks for 1.44 GB, Tears of the Kingdom for 2.09 GB, which Engage's split
     has no room for). The game boots in the Mac host (headless and silent, no shader libraries) until its first heap request is answered or fails, or until it has run
-    HEAP_CHECK_NNMAIN_SECS in nnMain without one (Engage sets none): a few seconds. The keys go into the profile (profile_guess.py heap_signals), which is stamped"""
+    HEAP_CHECK_NNMAIN_SECS in nnMain without one (Engage sets none): a few seconds. A boot that resized the heap region (mem_alias / mem_reserve) is followed by another on the new
+    layout, up to HEAP_CHECK_ROUNDS, since the checks behind the request (the app pool's, mem_used) run only once it fits. The keys go into the profile (profile_guess.py heap_signals), which is stamped"""
     PROG.stage('heap check')
     host, rd, log = work / 'tools/dmhost', work / 'tmp/heap_run', logs / 'heap_check.log'
-    PROG.set(step='building the Mac host'); build_mac_host(repo, host, env, logs, g)
-    rmtree(rd)
-    for x in ('save', 'temp', 'msl'): (rd / x).mkdir(parents=True)
-    # a fresh save and temporary storage, no shader libraries (only the heap request matters), the profile's shader map, and the profile's alias region: the keys are for that layout, which is the iPhone's, not the Mac's 64 GB
-    henv = dict(env, DM_ROMFS=str(rfs.source(d)), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_MSL_DIR=str(rd / 'msl'), DM_NVN_SHMAP=str(g.table('shader_map.tsv')), DM_ALIAS_SIZE=g.get('mem_alias'))
-    PROG.set(step='booting the game')
-    t0, seen = time.time(), {}
-    def done():   # the first heap request answered (or refused for good), or nnMain running for a while without one
-        try: text = log.read_text(errors='replace')
-        except OSError: return False
-        if 'SetHeapSize OOM' in text or '[mem] heap ' in text: return True
-        if '>>> nnMain' in text: seen.setdefault('nnmain', time.time())
-        return time.time() - seen.get('nnmain', time.time()) > HEAP_CHECK_NNMAIN_SECS
-    rc = boot_mac(host, patched, henv, rd, log, HEAP_CHECK_SECS, done)
-    text = log.read_text(errors='replace'); rmtree(rd)
-    sig = {k: v for k, v in pg.heap_signals(text, g).items() if g.get(k, '') != v[0]} | pg.depth_signal(text, g)   # the boot often passes the game's depth mode call too
-    for k, (v, why) in sig.items(): say(f'heap check: {k} {v}: {why}')
-    m = re.search(r'\[mem\] heap ([0-9.]+ GB)', text)
-    how = ('the heap request did not fit' if 'SetHeapSize OOM' in text else f'heap {m.group(1)}' if m else 'no heap set' if '>>> nnMain' in text
-           else f'the host stopped before nnMain (exit {rc})' if rc is not None else 'no nnMain within the time limit')
-    if sig: g = set_keys(g, sig, 'Heap check on the Mac')
-    p = g.dir / 'game.tsv'; atomic_text(p, p.read_text(encoding='utf-8') + f'\n# heap check: {time.strftime("%Y-%m-%d")}, {how}' + (f'; set {", ".join(sig)}' if sig else '') + '\n')
-    if not m and '>>> nnMain' not in text and 'SetHeapSize OOM' not in text:   # stopped before any heap request: worth a look before the IPA is tried
+    # Up to HEAP_CHECK_ROUNDS boots: a heap request that did not fit the heap region stops the first one there (mem_alias / mem_reserve set), and only the next boot reaches the app pool
+    # check behind it (Pokémon FireRed / LeafGreen 2026: a 3.15 GB heap plus 102 MB of modules over the 3.2 GB pool, which mem_used then covers)
+    set_all, hows, t0 = {}, [], time.time()
+    for rnd in range(HEAP_CHECK_ROUNDS):
+        PROG.set(step='building the Mac host'); build_mac_host(repo, host, env, logs, g)
+        rmtree(rd)
+        for x in ('save', 'temp', 'msl'): (rd / x).mkdir(parents=True)
+        # a fresh save and temporary storage, no shader libraries (only the heap request matters), the profile's shader map, and the profile's alias region: the keys are for that layout, which is the iPhone's, not the Mac's 64 GB
+        henv = dict(env, DM_ROMFS=str(rfs.source(d)), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_MSL_DIR=str(rd / 'msl'), DM_NVN_SHMAP=str(g.table('shader_map.tsv')), DM_ALIAS_SIZE=g.get('mem_alias'))
+        PROG.set(step='booting the game')
+        seen = {}
+        def done(seen=seen):   # the first heap request answered (or refused for good), or nnMain running for a while without one
+            try: text = log.read_text(errors='replace')
+            except OSError: return False
+            if 'SetHeapSize OOM' in text or '[mem] heap ' in text: return True
+            if '>>> nnMain' in text: seen.setdefault('nnmain', time.time())
+            return time.time() - seen.get('nnmain', time.time()) > HEAP_CHECK_NNMAIN_SECS
+        rc = boot_mac(host, patched, henv, rd, log, HEAP_CHECK_SECS, done)
+        text = log.read_text(errors='replace'); rmtree(rd)
+        sig = {k: v for k, v in pg.heap_signals(text, g).items() if g.get(k, '') != v[0]} | pg.depth_signal(text, g)   # the boot often passes the game's depth mode call too
+        for k, (v, why) in sig.items(): say(f'heap check: {k} {v}: {why}')
+        m = re.search(r'\[mem\] heap ([0-9.]+ GB)', text)
+        how = ('the heap request did not fit' if 'SetHeapSize OOM' in text else 'the heap and the modules did not fit the app pool' if re.search(r'\[mem\] SetHeapSize \S+ \+ modules \S+ > app pool', text)
+               else f'heap {m.group(1)}' if m else 'no heap set' if '>>> nnMain' in text
+               else f'the host stopped before nnMain (exit {rc})' if rc is not None else 'no nnMain within the time limit')
+        hows.append(how)
+        if sig: g = set_keys(g, sig, 'Heap check on the Mac'); set_all.update(sig)
+        if not sig.keys() & {'mem_alias', 'mem_reserve'}: break   # the heap region as it was: another boot would stop where this one did
+    how = ', then '.join(hows)
+    p = g.dir / 'game.tsv'; atomic_text(p, p.read_text(encoding='utf-8') + f'\n# heap check: {time.strftime("%Y-%m-%d")}, {how}' + (f'; set {", ".join(set_all)}' if set_all else '') + '\n')
+    if not m and '>>> nnMain' not in text and 'SetHeapSize OOM' not in text and 'mem_used' not in set_all:   # stopped before any heap request: worth a look before the IPA is tried
         PROG.say(f'[RED] heap check: {how}; ---- last lines of {log} ----\n' + ''.join(collections.deque(open(log, errors='replace'), maxlen=20)).rstrip('\n'))
-    PROG.end(f'{how} in {hms(time.time() - t0)}' + (f'; set {", ".join(sig)}' if sig else ''))
+    PROG.end(f'{how} in {hms(time.time() - t0)}' + (f'; set {", ".join(set_all)}' if set_all else ''))
     return type(g)(g.dir)
 
 
@@ -3011,7 +3035,7 @@ def main(args=None):
         if alias and not derived: derived = f'title {app:016X} is not game profile {g.id}\'s title {g.title_id:016X}'
         if derived: say(f'{derived}: packing {pkg_ver} from a profile derived from it')
     versions = [pkg_ver] if derived else need + ([pkg_ver] if pkg_ver not in need else [])
-    work = work_dir(args) or nsp_dir / f'{g.id}_build'
+    work = build_folder(args, nsp_dir, g.id)
     out_ipa = Path(os.path.expanduser(args.out or OUT_IPA)).resolve() if (args.out or OUT_IPA) else work.parent / g.get('ipa')   # by default next to the build folder (the NSP folder, beside the NSPs and <id>_build/, unless --work-dir moved it)
     if shadowed and not (args.out or OUT_IPA): out_ipa = out_ipa.with_name(out_ipa.stem + '-provisional.ipa')   # never over the IPA of the game's real profile
     if mac_pack and (args.out or OUT_IPA) and out_ipa.suffix != '.app': raise BuildError(f'the Mac app (-o / OUT_IPA) must end in .app: {out_ipa}')

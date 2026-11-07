@@ -2341,7 +2341,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[159];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[160];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -2771,8 +2771,10 @@ static int tex_atomic_alias(id<MTLTexture> base) {
 // compressed, 3D, other flags: ups_demote_copy), so no copy case is left unimplemented by a mismatch alone.
 // Not scaled: textures with mip levels, arrays of more than 8 layers (shorter 2D arrays scale: KTGL's G-buffer layers; nvn_ups_shape_ok), 3D, cubes, multisample ones (they cannot be drawn down for a demotion, so they and their resolve destinations stay at the game's
 // size together), compressed / linear / sparse / video-decode ones, square ones (shadow maps), sizes under 320x180 or not of a screen's aspect (1.4 to 1.9: lookup tables,
-// atlases, small effect buffers), sizes whose scaled size would pass 3840x2160 (a Switch 2 swap chain already at 4K), and textures that are neither COMPRESSIBLE, DISPLAY nor depth
-// (uploaded data rather than render targets); shader-written images are made scaled when they look like render targets and demoted at their first written binding.
+// atlases, small effect buffers), and sizes whose scaled size would pass 3840x2160 (a Switch 2 swap chain already at 4K). A colour texture that is neither COMPRESSIBLE nor
+// DISPLAY, or whose storage in a CPU-visible pool holds bytes, may be data the game wrote: it is held at the game's size (g_ups_held) and made scaled only when a pass first draws
+// into it (ups_promote), so data keeps its texels and render targets without the usual flags still scale; shader-written images are made scaled when they look like render
+// targets and demoted at their first written binding.
 // The factor is fixed for the run (textures already made keep their size): DM_UPSCALE=1|1.5|2, else 1. A Mac app's launcher sets DM_UPSCALE from the player's saved choice
 // (launcher.DM_UPSCALE, the Render Resolution menu in front_mac.m and the settings window write it; docs/frontends.md, Saved choices). At 1 none of this runs: ups_pick and the conversions are gated on g_ups > 1, so allocations and passes are as without it.
 // The log names the first 24 scaled textures and every 200th after them, the demotions the same way, and once per shader the ranks at which it binds scaled textures (ups_vec_build)
@@ -2799,6 +2801,9 @@ static inline NSUInteger ups_dim(NSUInteger n) { return (NSUInteger)MAX(lround((
 // Textures demoted to the game's size (ups_demote): serial → 1, under g_smu. A demoted texture is made unscaled at every later resolution too (a rebuilt object over the same
 // storage keeps the serial, as does a texture whose Metal texture is remade), as Ryujinx's blacklist does
 static nvn_hmap g_ups_demoted = {.klen = 8};
+// Textures left at the game's size only because nothing yet shows they are render targets (ups_pick: NVN_UPS_HOLD, or bytes in CPU-visible storage): serial → 1, under g_smu.
+// The first pass that draws into one makes it scaled after all (ups_promote, the reverse of a demotion); one that is only ever read stays as it was, with its data
+static nvn_hmap g_ups_held = {.klen = 8};
 // The same by storage (pool + offset), under g_smu: a game that registers a new object with another description over a demoted texture's memory (the alias key differs) would
 // otherwise get a fresh scaled texture and another demotion at each registration. Entries of a pool go with it (mtl_alias_drop_pool); while a pool lives, a later unrelated
 // texture at the same offset stays unscaled too, the price of not demoting again
@@ -2830,15 +2835,32 @@ static int ups_family(const tex_t *t) {
     pthread_mutex_unlock(&g_smu);
     return fam;
 }
+static int mem_any(const uint8_t *p, uint64_t n);
 static int ups_pick(const tex_t *t, MTLTextureDescriptor *d) {
     if (ups_factor() <= 1) return 0;
     if (!nvn_ups_shape_ok(t->d.target, (uint32_t)d.mipmapLevelCount, (uint32_t)d.arrayLength, (uint32_t)d.sampleCount)) return 0;   // 2D, or a short 2D array (nvn_ups.h)
-    if ((g_ups_demoted.n || g_ups_demoted_mem.n) && ups_demoted(t)) return 0;   // demoted once: stays at the game's size
     if (d.depth > 1 || !(d.usage & MTLTextureUsageRenderTarget)) return 0;
+    if (!nvn_ups_screen_ok((uint32_t)d.width, (uint32_t)d.height, g_ups)) return 0;   // not screen-like (lookup tables, atlases, small buffers) or past the 4K ceiling: not logged
     int depth = (int)d.pixelFormat >= 250 && (int)d.pixelFormat <= 262;   // Depth16Unorm … X24_Stencil8, as tex_init_fill
-    // Flags, screen-like size and the 4K ceiling (nvn_ups.h, unit-tested in tests/t_ups.c): a render target is COMPRESSIBLE (or DISPLAY: the window's), a plain one is data copied in
-    if (!nvn_ups_size_flags_ok((uint32_t)d.width, (uint32_t)d.height, t->d.flags, depth, g_ups)) return 0;
-    return !ups_family(t);   // last: it scans the live image descriptions
+    const char *no = NULL; int hold = 0;
+    if ((g_ups_demoted.n || g_ups_demoted_mem.n) && ups_demoted(t)) no = "demoted earlier";   // demoted once: stays at the game's size
+    else switch (nvn_ups_classify((uint32_t)d.width, (uint32_t)d.height, t->d.flags, depth, g_ups)) {   // flags and size (nvn_ups.h, unit-tested in tests/t_ups.c)
+        case NVN_UPS_LEAVE: no = "linear, sparse or video-decode flags"; break;
+        case NVN_UPS_HOLD: no = "neither COMPRESSIBLE, DISPLAY nor depth: held until a pass draws into it"; hold = 1; break;
+        default: break;
+    }
+    if (!no && ups_family(t)) no = "a member of an image alias family";   // it scans the live image descriptions
+    // COMPRESSIBLE is only a memory-compression hint (tex_init_fill): a COMPRESSIBLE texture whose storage in a pool the CPU can write already holds bytes may be data the game wrote
+    // (SD GUNDAM G GENERATION CROSS RAYS sets it on every texture it creates). A scaled texture is not filled from its storage, so that data would be lost: it stays at the game's size.
+    // Bytes alone do not make it data, though: the GPU's rendering never reaches guest memory here, so a render target in such a pool finds whatever an earlier resource left at its
+    // address (Unreal's targets in Pikmin 4), and the first resolution of a texture is often its descriptor's, before any use. So it is only held, as NVN_UPS_HOLD is
+    if (!no && !depth && !(t->d.flags & NVN_TEXTURE_FLAGS_DISPLAY) && t->mem && t->pool && !t->has_layout
+        && !(t->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL)) && mem_any(t->mem, t->L.size)) {
+        no = "its storage in a CPU-visible pool holds bytes: held until a pass draws into it"; hold = 1; }
+    if (hold) { pthread_mutex_lock(&g_smu); nvn_hm_put(&g_ups_held, &t->serial, (void *)1); pthread_mutex_unlock(&g_smu); }
+    if (no) { static int n; if (n++ < 40) MLOG("resolution upscaling: ser=%llu %ux%u format %#x flags %#x target %d stays at the game's size: %s", (unsigned long long)t->serial,
+                                              t->d.width, t->d.height, t->d.format, t->d.flags, t->d.target, no); }
+    return !no;
 }
 // The factor a texture was made at: g_ups for one ups_pick took (its Metal texture is wider than the game's), else 1. mt may be a view of it (views keep the size)
 // (a texture description with no size, as the Vulkan / GL presents pass, counts as unscaled: those layers never scale)
@@ -13400,6 +13422,29 @@ static void ups_demote(const tex_t *t, id<MTLTexture> scaled, const char *why) {
         MLOG("resolution upscaling: ser=%llu %ux%u format %#x samples %d demoted to the game's size: %s (content %s; %llu demoted so far)", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, t->d.samples,
              why, copied ? "drawn down" : old.sampleCount > 1 ? "not carried: multisample" : "not carried: the format cannot be drawn", (unsigned long long)g_ups_demotions);
 }
+// Resolution upscaling: a texture held at the game's size (g_ups_held) that a pass is about to draw into is a render target: a scaled texture takes its place under every name,
+// with its content drawn up (every layer of an array). The reverse of ups_demote, at the same point (before the pass opens, from the vote), so the pass then sees it scaled.
+// Not for a texture that has joined an image alias family since it was held (ups_family). Returns whether it was replaced
+static int ups_promote(const tex_t *t, id<MTLTexture> cur) {
+    pthread_mutex_lock(&g_smu); int held = nvn_hm_get(&g_ups_held, &t->serial) != NULL; if (held) nvn_hm_del(&g_ups_held, &t->serial); pthread_mutex_unlock(&g_smu);
+    if (!held || !cur || ups_of(t, cur) > 1 || ups_family(t)) return 0;
+    id<MTLTexture> view = tex_held_view(t, cur);   // an sRGB / linear view this serial holds is made again on the scaled texture (tex_replace)
+    id<MTLTexture> old = view ? view.parentTexture : cur.parentTexture ?: cur;
+    MTLTextureDescriptor *d = tex_desc(t, 0); if (!d) return 0;
+    d.pixelFormat = old.pixelFormat; d.usage = old.usage; d.width = ups_dim(old.width); d.height = ups_dim(old.height);
+    id<MTLTexture> nt = [g_dev newTextureWithDescriptor:d];
+    if (!nt) { RED_ONCE(159, "resolution upscaling: cannot make the scaled texture of a render target (ser=%llu %ux%u format %#x); it stays at the game's size", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format); return 0; }
+    res_add(nt);
+    int layers = (int)MAX(old.arrayLength, 1u);
+    NVNcopyRegion sr = {0, 0, 0, (int)old.width, (int)old.height, layers}, dr = {0, 0, 0, (int)nt.width, (int)nt.height, layers};
+    int copied = old.sampleCount == 1 && copy_t2t_draw(old, nt, 0, 0, 0, 0, &sr, &dr, !fmt_int_or_ds(old.pixelFormat), 0);
+    if (!copied) tex_zero_fill(nt, (double)g_ups * g_ups);
+    tex_replace(t, old, nt, view);
+    args_dirty_all();   // as after a demotion
+    if (g_ups_made++ < 24 || g_ups_made % 200 == 0) MLOG("resolution upscaling: ser=%llu %ux%u format %#x flags %#x made %lux%lu when first drawn into (%llu scaled so far)", (unsigned long long)t->serial,
+                                                         t->d.width, t->d.height, t->d.format, t->d.flags, (unsigned long)nt.width, (unsigned long)nt.height, (unsigned long long)g_ups_made);
+    return 1;
+}
 // Resolution upscaling: the attachments R.rt is about to open a pass on must agree on the factor (a pass covers the smaller extent while viewports and scissors are multiplied by
 // its factor: a scaled colour beside an unscaled depth drew only the top-left part of the scaled one). When they disagree the scaled ones are demoted. Compressed attachments are
 // drawn through shadows (bcrt_attach) and do not vote, nor do the slots rt_dup_slot leaves out, nor an attachment the pass does not take in this open mode (rp_begin_ex_: a
@@ -13413,6 +13458,7 @@ static void ups_demote_pass(int mode) {
         if (!t || (i < R.rt.n && rt_dup_slot(&R.rt, i))) continue;
         if (i < R.rt.n ? ((mode == 1 || g_geo_omit_colors) && !R.clear_c[i]) : (mode == 2 || (mode == 1 && !R.clear_d && !R.clear_s))) continue;   // not attached in this mode
         id<MTLTexture> m = tex_mtl(t); if (!m || mtl_fmt_block(m.pixelFormat)) continue;
+        if (g_ups_held.n && ups_promote(t, m)) { m = tex_mtl(t); if (!m) continue; }   // held at the game's size until now: being drawn into, it is a render target
         ts[n] = t; ms[n] = m; if (ups_of(t, m) > 1) scaled++; else unscaled++; n++;
     }
     if (!scaled || !unscaled) return;

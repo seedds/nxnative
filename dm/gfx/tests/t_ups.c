@@ -75,7 +75,17 @@ int main(void) {
     CHECK(nvn_ups_size_flags_ok(1920, 1080, 0x8, 0, 2), "a COMPRESSIBLE 1920x1080 target scales at 2x (FINAL FANTASY CRYSTAL CHRONICLES)");
     CHECK(nvn_ups_size_flags_ok(1600, 900, 0xc, 0, 2) && nvn_ups_size_flags_ok(1920, 1080, 0xc, 0, 1.5), "IMAGE | COMPRESSIBLE targets scale (KTGL flags every one: Hyrule Warriors' 1600x900 scene)");
     CHECK(nvn_ups_size_flags_ok(1600, 900, 0x4, 1, 2), "an IMAGE depth target scales (depth needs no COMPRESSIBLE)");
-    CHECK(!nvn_ups_size_flags_ok(1920, 1080, 0x4, 0, 2), "an IMAGE colour texture without COMPRESSIBLE or DISPLAY is data (the movie planes), not a render target");
+    CHECK(!nvn_ups_size_flags_ok(1920, 1080, 0x4, 0, 2), "an IMAGE colour texture without COMPRESSIBLE or DISPLAY is not scaled when made (the movie planes are data)");
+    // Held until a pass draws into it (nvn_ups_classify): scale, leave or hold
+    CHECK(nvn_ups_classify(1920, 1080, 0x0, 0, 2) == NVN_UPS_HOLD && nvn_ups_classify(1920, 1080, 0x4, 0, 1.5) == NVN_UPS_HOLD,
+          "a colour texture with neither COMPRESSIBLE nor DISPLAY is held (Super Mario Bros. Wonder's scene colour; a movie plane no pass draws into stays as it is)");
+    CHECK(nvn_ups_classify(1920, 1080, 0x8, 0, 2) == NVN_UPS_SCALE && nvn_ups_classify(1920, 1080, 0x1, 0, 2) == NVN_UPS_SCALE && nvn_ups_classify(1920, 1080, 0x0, 1, 2) == NVN_UPS_SCALE,
+          "COMPRESSIBLE, DISPLAY and depth targets scale when made");
+    CHECK(nvn_ups_classify(1920, 1080, 0x10, 0, 2) == NVN_UPS_LEAVE && nvn_ups_classify(1920, 1080, 0x2, 0, 2) == NVN_UPS_LEAVE && nvn_ups_classify(256, 256, 0x0, 0, 2) == NVN_UPS_LEAVE
+          && nvn_ups_classify(3840, 2160, 0x0, 0, 2) == NVN_UPS_LEAVE && nvn_ups_classify(1920, 1080, 0x8, 0, 1) == NVN_UPS_LEAVE,
+          "linear and video-decode textures, sizes that are not screen-like or pass 4K, and factor 1 are left, not held");
+    CHECK(nvn_ups_screen_ok(320, 180, 2) && !nvn_ups_screen_ok(319, 180, 2) && !nvn_ups_screen_ok(1024, 1024, 2) && nvn_ups_screen_ok(2560, 1440, 1.5) && !nvn_ups_screen_ok(2560, 1440, 2),
+          "screen-like: at least 320x180, an aspect of 1.4 to 1.9, within 4K scaled");
     CHECK(!nvn_ups_size_flags_ok(1920, 1080, 0x8 | 0x10, 0, 2) && !nvn_ups_size_flags_ok(1920, 1080, 0x8 | 0x40, 0, 2) && !nvn_ups_size_flags_ok(1920, 1080, 0x8 | 0x20, 0, 2)
           && !nvn_ups_size_flags_ok(1920, 1080, 0x8 | 0x2, 0, 2), "linear, linear render target, sparse and video-decode textures stay");
     CHECK(!nvn_ups_size_flags_ok(3840, 2160, 0xd, 0, 2) && !nvn_ups_size_flags_ok(3840, 2160, 0xd, 0, 1.5), "a 4K swap chain (DISPLAY | IMAGE | COMPRESSIBLE) stays: past the 4K ceiling");

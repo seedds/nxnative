@@ -1,7 +1,7 @@
 // Resolution upscaling (DM_UPSCALE): the pure arithmetic of nvn_mtl.m's upscaling section, kept apart from Metal so a CPU-only unit test (tests/t_ups.c) can check it:
 // regions of the game's pixels mapped into a scaled texture's, occlusion-query sample counts brought back to the game's pixels, the present crop of a scaled window texture, and
 // which reflection bindings count as texture and image descriptors of the shader translator (whose render_scale entries the host fills per bound texture); also which
-// render targets are scaled by their flags and size (IMAGE included, a 4K ceiling) and which image bindings write their texture, so a scaled one is demoted first; and which
+// render targets are scaled by their flags and size (IMAGE included, a 4K ceiling), or held until a pass draws into them, and which image bindings write their texture, so a scaled one is demoted first; and which
 // compute dispatch is the game's own spatial upscaler reading a scaled scene, whose output the host resolves itself (nvn_ups_bypass_shape, nvn_ups_fsr_rect, nvn_ups_bypass_ok).
 #pragma once
 #include <stdint.h>
@@ -31,17 +31,26 @@ static inline int nvn_ups_shape_ok(int target, uint32_t levels, uint32_t layers,
     return target == NVN_TEXTURE_TARGET_2D_ARRAY && layers >= 1 && layers <= NVN_UPS_MAX_LAYERS;
 }
 
-// Whether a single-level 2D texture (or 2D array: nvn_ups_shape_ok) of the game's size w x h with these NVN flags is a render target to scale by f (the size and flag part of
-// nvn_mtl.m ups_pick; the caller checks the shape and the render-target usage). depth: a depth / stencil format (a render target without COMPRESSIBLE or DISPLAY). Screen-like means at least 320x180
-// and an aspect of 1.4 to 1.9 (lookup tables, atlases, shadow maps and small effect buffers are not), and the scaled size must stay within NVN_UPS_MAX_W x NVN_UPS_MAX_H.
-// A colour texture without COMPRESSIBLE or DISPLAY is data copied in rather than a render target
-static inline int nvn_ups_size_flags_ok(uint32_t w, uint32_t h, uint32_t flags, int depth, double f) {
-    if (f <= 1 || (flags & NVN_UPS_FLAGS_UNSCALED)) return 0;
-    if (!depth && !(flags & (NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_DISPLAY))) return 0;
-    if (w < 320 || h < 180 || (double)w / h < 1.4 || (double)w / h > 1.9) return 0;
-    long sw = lround(w * f), sh = lround(h * f);
-    return sw <= NVN_UPS_MAX_W && sh <= NVN_UPS_MAX_H;
+// Whether a texture of the game's size w x h is screen-like for factor f: at least 320x180 and of a screen's aspect, 1.4 to 1.9 (lookup tables, atlases, shadow maps and small
+// effect buffers are not), with its scaled size within NVN_UPS_MAX_W x NVN_UPS_MAX_H
+static inline int nvn_ups_screen_ok(uint32_t w, uint32_t h, double f) {
+    if (f <= 1 || w < 320 || h < 180 || (double)w / h < 1.4 || (double)w / h > 1.9) return 0;
+    return lround(w * f) <= NVN_UPS_MAX_W && lround(h * f) <= NVN_UPS_MAX_H;
 }
+
+// The verdicts of nvn_ups_classify
+enum { NVN_UPS_LEAVE = 0, NVN_UPS_SCALE = 1, NVN_UPS_HOLD = 2 };
+// What becomes of a single-level 2D texture (or 2D array: nvn_ups_shape_ok) of the game's size w x h with these NVN flags at factor f (the size and flag part of nvn_mtl.m
+// ups_pick; the caller checks the shape and the render-target usage). depth: a depth / stencil format (a render target without COMPRESSIBLE or DISPLAY). A colour render target
+// is usually made COMPRESSIBLE (or DISPLAY: the window's), and a colour texture with neither is usually data copied in, but not always: Super Mario Bros. Wonder's scene colour has
+// neither flag. Such a texture is held at the game's size (NVN_UPS_HOLD) until a pass draws into it, which shows it is a render target (ups_promote); one that is only ever read
+// stays as it was. Left at the game's size (NVN_UPS_LEAVE): factor 1, the flags of NVN_UPS_FLAGS_UNSCALED, a size that is not screen-like (nvn_ups_screen_ok)
+static inline int nvn_ups_classify(uint32_t w, uint32_t h, uint32_t flags, int depth, double f) {
+    if ((flags & NVN_UPS_FLAGS_UNSCALED) || !nvn_ups_screen_ok(w, h, f)) return NVN_UPS_LEAVE;
+    return depth || (flags & (NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_DISPLAY)) ? NVN_UPS_SCALE : NVN_UPS_HOLD;
+}
+// Whether such a texture is scaled when it is made (nvn_ups_classify's NVN_UPS_SCALE)
+static inline int nvn_ups_size_flags_ok(uint32_t w, uint32_t h, uint32_t flags, int depth, double f) { return nvn_ups_classify(w, h, flags, depth, f) == NVN_UPS_SCALE; }
 
 // Whether a reflection binding writes the texture bound to it as an image (an image slot declared write / read_write, or one the shader runs atomics on; the slot's handle either
 // bound as an NVN image, IMG, or kept by the game in a uniform buffer, IMGU, as Unreal Engine 5.4 does). A dispatch or draw keeps the game's thread-group counts and

@@ -2,7 +2,7 @@
 
 Base game with update 1.2, SDK 1.3.1, the oldest SDK in the games table. Ubisoft's UbiArt Framework on NVN, with Pia 5.2.10 for its network play. Modules `main`, `subsdk0` (the SDK's NVN), `subsdk1` (`nn::sf`), `subsdk2` (libcurl), `subsdk3` (the SDK's movie library) and `sdk`. The profile is the NSP script's provisional one, unchanged apart from its names. The game needed three general changes, all for its SDK or its engine: the [audio renderer](#audio), the [Opus decoder](#audio) and its [shader archive](#files-and-shaders).
 
-On the Mac (2026-11-06, M1, 16 GB, macOS 26.7), from a fresh save: the Ubisoft logo movie, the leaderboard country, the title, New game, the intro movie, the in-engine prologue and first control in the first level, running and jumping, with music and sound effects; a 5-minute run with no crash, no missing shader and one `[RED]` line ([Rendering](#rendering)). An earlier build of the same changes also reached the Main Gallery and the first world's gallery ("Teensies in Trouble"). The title runs at 54 to 58 fps, the first level at 42 to 45 (GPU 10 to 30 ms a frame at 1080p: the M1's GPU is the limit; CPU about 25% of one core); the footprint is 1.5 to 1.9 GB. The IPA is not built.
+On the Mac (2026-11-06, M1, 16 GB, macOS 26.7), from a fresh save: the Ubisoft logo movie, the leaderboard country, the title, New game, the intro movie, the in-engine prologue and first control in the first level, running and jumping, with music and sound effects; a 5-minute run with no crash, no missing shader and one `[RED]` line ([Rendering](#rendering)). An earlier build of the same changes also reached the Main Gallery and the first world's gallery ("Teensies in Trouble"). The title runs at 54 to 58 fps, the first level at 42 to 45 (GPU 10 to 30 ms a frame at 1080p: the M1's GPU is the limit; CPU about 25% of one core); the footprint is 1.5 to 1.9 GB. The IPA was not built here; [a report on this change](https://github.com/seedds/nxnative/pull/1540#issuecomment-6696939812) has the game at 60 fps on an iPhone 17 Pro Max ([iPhone](#iphone)).
 
 ## What it needs
 
@@ -30,7 +30,7 @@ On the Mac (2026-11-06, M1, 16 GB, macOS 26.7), from a fresh save: the Ubisoft l
 ## Rendering
 
 - **Current:** `[RED] NVN address lookup of an unknown name: nvnDeviceWaitForError`, twice at boot: SDK 1's NVN asks for a function the host does not have, and the game runs on without it.
-- **Open:** the frame rate on the M1 ([On the Mac](#on-the-mac)): GPU time per pass has not been looked at, nor a faster Mac.
+- **Open:** the frame rate on the M1 ([On the Mac](#on-the-mac)): GPU time per pass has not been looked at, nor a faster Mac. An iPhone 17 Pro Max runs it at 60 fps ([iPhone](#iphone)).
 
 ## Input
 
@@ -43,6 +43,10 @@ On the Mac (2026-11-06, M1, 16 GB, macOS 26.7), from a fresh save: the Ubisoft l
 - `DM_SAVE` must be on an APFS volume (the host says so in a red line otherwise).
 - From a fresh save: A on the title, A for the leaderboard country, A on New game; the intro movie (about a minute) and the prologue play by themselves, then A wakes the heroes and the first level starts.
 
+## iPhone
+
+- Plays at 60 fps with the touch screen working, on an iPhone 17 Pro Max ([a report on this change](https://github.com/seedds/nxnative/pull/1540#issuecomment-6696939812), 2026-11-06, with three screenshots). The report does not give the iOS version, the console mode or how far the game was played. The IPA was not built or run here.
+
 ## Found on this game
 
 - **SDK 1's audio renderer** in the host (`hle_audren.c`): [SDK 1: no audio renderer in the process](../../../docs/reference/audio.md#sdk-1-no-audio-renderer-in-the-process).
@@ -52,6 +56,6 @@ On the Mac (2026-11-06, M1, 16 GB, macOS 26.7), from a fresh save: the Ubisoft l
 ## Open
 
 - The frame rate on the M1 ([Rendering](#rendering)).
-- iPhone: no IPA built yet.
+- iPhone: one report so far ([iPhone](#iphone)); its iOS version, its console mode and the later levels are not known.
 - The grey screen after skipping the intro movie ([Input](#input)).
 - Only the start was played: the other worlds, the four-player mode, the Murfy touch levels and the online challenges are untested.

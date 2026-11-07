@@ -632,6 +632,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `oe::IsCpuOverclockEnabled` is hooked; for `SetCpuOverclockEnabled` the host keeps the flag and the query reports it (`hle_oe.c`); it does not scale clocks.
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) (SDK 11: `IsCpuOverclockEnabled`); [Taiko Risshiden V DX](../../dm/games/0100346017304000/README.md) (SDK 12.3.3: `SetCpuOverclockEnabled`).
 
+### Handheld mode asks apm for the performance configuration
+
+- **Symptom:** the game closes as soon as it switches to handheld mode, with `CRASH sig=11 addr=0 pc=sdk+0x1c4fac lr=sdk+0x1c4f68`; the backtrace starts `sdk+0x3a56c4 main+…`. Console mode is unaffected.
+- **Cause:** Tunic calls the one-argument `nn::oe::SetPerformanceConfiguration(int)` overload on the handheld transition. The host hooked only `nn::oe::SetPerformanceConfiguration(PerformanceMode, int)`, so the SDK's one-argument implementation read the current mode and called `nn::apm::SetPerformanceConfiguration`; the host never opens an apm session, so the SDK dereferenced a null manager at `sdk+0x1c4fac`.
+- **Fix:** the one-argument overload is hooked as well (`hle_oe.c`): it logs the requested configuration and ignores it, as the host does not scale clocks.
+- **Found on:** [Tunic](../../dm/games/0100DA801624E000/README.md) (1.0.3, SDK 14.3.0).
+
 ### Focus handling mode decides whether focus changes are notified
 
 - **Symptom:** the game freezes after switching apps and back, picture still, sound on; the main loop waits in its pause handshake (`main+0x5d10d4` / `main+0x5cea68`). Mac repro `DM_OE_SCRIPT=bg=1@20,bg=0@25`.

@@ -1,0 +1,45 @@
+# Game profile of Tunic (Switch, update 1.0.3 = v196608 over the base game). Plays on the Mac: boot,
+# title, menus and gameplay with sound at 30 fps (the game's native rate); handheld mode works through
+# the one-argument oe::SetPerformanceConfiguration hook. Unity 2020.3.36f1 IL2CPP with FMOD on NVN.
+# Started from the provisional profile of build_ipa_from_nsp.py; the heap check set app_pool and depth_mode.
+# Notes, shader sources and what is open: README.md.
+
+# ---- Identity ----
+title_id	0100DA801624E000
+program_id	0100DA801624E000
+
+# ---- App ----
+name	Tunic
+ipa	Tunic.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v196608	1.0.3	main=0909b4ac280d9d77ecd1fae840e4b295	subsdk0=c781dd63daf0ddcdb9975da50a198f93	sdk=2aef2cffb104ee7c9e212fd2f4c731e9
+package	v196608
+shader_versions	v196608
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Data/resources.assets.resS
+zip_store	.assets:.bank:.dat:.png:.resource:.ress:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource (virtual address memory) and main sets a heap. The heap
+# check found no heap set in the first 5 s and the alias region at +4.26 GB of 4.38 GB; a 1 GB pool
+# leaves StandardAllocator room for its own regions.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0x40000000
+sys_resource	0x1000000
+# the game calls nvnDeviceSetDepthMode with near = 0 in the check boot
+depth_mode	zero
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	Tunic shaders (Unity Shader objects and GLSLC outputs in the bundles and main)
+
+# heap check: 2026-11-06, no heap set; set app_pool, depth_mode
+# address regions: 2026-11-06, in its first 15 s in nnMain the game's regions reach alias +2.29 GB, within the
+# profile's 4.38 GB alias region (what it takes later in play is not measured here)

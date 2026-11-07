@@ -1,0 +1,38 @@
+# Game profile of Fire Emblem: Shadow Dragon and the Blade of Light (Switch, base game 1.0.0 = v0, no update). On the Mac it boots from the Nintendo logo through the intro text to the title screen and the attract mode (see README.md); it needs the GL layer's separate vertex format and binding
+# Format: see dm/games/README.md
+# The RomFS is empty: the NES game is inside main (the Japanese Famicom ROM, its 256 KB PRG at main+0xd721c, run by an emulator in main). SDK 10.4.0, on NVIDIA's desktop OpenGL through EGL (subsdk0, not loaded): main gets its GL functions from a glad loader
+# (eglGetProcAddress, 2,956 names) and calls 45 of them, which the host's GL layer implements on Metal (dm/gfx/gl/hle_gl.m). Its two shaders are GLSL strings in main, which dm/gfx/tools/gl_shaders.py translates offline; the host finds each by the hash of its text
+
+# ---- Identity ----
+title_id	0100A12011CC8000
+program_id	0100A12011CC8000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Fire Emblem: Shadow Dragon and the Blade of Light
+ipa	FireEmblemShadowDragonAndTheBladeOfLight.ipa
+app_category	public.app-category.role-playing-games
+
+# ---- Versions ----
+build	v0	1.0.0	main=48ae6247612601f71baf63410aa3f606	sdk=204eaef83fe5e5617d0787c8ef01a080
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk. subsdk0 is NVIDIA's OpenGL driver, which programs the GPU through NvRm: never loaded, the GL layer answers main's EGL imports
+modules	main sdk
+# no RomFS, so no marker file
+romfs_marker	
+zip_store	.metallib
+
+# ---- Memory ----
+# The NPDM declares no system resource, so the game has no virtual address memory: main sets a heap of at most the pool − 64 MB, a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# ---- Shader split ----
+# no NVN shaders: the NVN tables stay empty (gl_shaders.py writes the GL library and its table, not the profile)
+shader_note	Fire Emblem: Shadow Dragon and the Blade of Light has no NVN shaders (its GLSL shaders go through the GL layer)

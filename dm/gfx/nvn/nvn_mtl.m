@@ -439,7 +439,9 @@ static want_list g_bf_want = {"DM_NVN_BF_WANT", PTHREAD_MUTEX_INITIALIZER}, g_du
 void bf_want_note(const char *key) { want_note(&g_bf_want, key); }
 
 // ---------- Memory pools ----------
-typedef struct { uintptr_t lo, hi; uintptr_t base; __unsafe_unretained id<MTLBuffer> buf; uint64_t gpu; const void *key; int res; uint64_t born; uintptr_t end; uint64_t unk; } pool_ent;   // res: already in the residency set (on demand, see pool_res); born: when it was added (ns); end, unk: a large pool's chunk (see BIG_MIN)
+typedef struct { uintptr_t lo, hi; uintptr_t base; __unsafe_unretained id<MTLBuffer> buf; uint64_t gpu; const void *key; int res; uint64_t born; uintptr_t end; uint64_t unk; uintptr_t slo, shi; } pool_ent;   // res: already in the residency set (on demand, see pool_res); born: when it was added (ns); end, unk: a large pool's chunk (see BIG_MIN);
+// slo..shi: the stale span, guest pages of the pool given back (hle_svc.c guest_release) since its buffer was made: the buffer still wires their old pages, so addresses there are refused
+// until all of the span is mapped again and the buffer is made anew (mtl_pool_remapped); shi 0 = none. A refresh is pending while it is set
 static pool_ent *g_pools; static int g_npool, g_cap;
 static int g_pidx_ok, g_plast = -1;   // whether the address→pool index is valid, the last hit (pool_find)
 static NSMutableArray *g_keep;                  // Holds the buffer references (pool_ent has non-owning pointers)
@@ -796,13 +798,25 @@ static int mtl_addr_known(uint64_t addr, uint64_t len) {
     pthread_mutex_lock(&g_mu); int ok = big_of(addr) >= 0 || pool_find(addr, len) >= 0; pthread_mutex_unlock(&g_mu);
     return ok;
 }
+// A pool with a refresh pending (stale span set) is never put into the per-thread caches, whose entries cover the whole pool: every lookup in it comes here and is checked against the span.
+// Addresses in the span are refused rather than given the buffer's old pages; the rest of the pool is served from the buffer, whose pages there are still the guest's own. Caller holds g_mu
+static _Atomic uint64_t g_pool_refused;
+static int pool_ok(int i, uint64_t addr, uint64_t len) {
+    if (i < 0) return 0;
+    const pool_ent *p = &g_pools[i];
+    if (!p->shi || addr + len <= p->slo || addr >= p->shi) return 1;
+    uint64_t n = atomic_fetch_add(&g_pool_refused, 1);
+    if (n < 8 || n % 1000 == 0) MLOG("[RED] memory pool %#lx..%#lx: %#llx+%#llx is in its pages given back (%#lx..%#lx) and not mapped again yet: refused, not served from the buffer's old pages (%llu so far)",
+                                     (unsigned long)p->lo, (unsigned long)p->hi, (unsigned long long)addr, (unsigned long long)len, (unsigned long)p->slo, (unsigned long)p->shi, (unsigned long long)n + 1);
+    return 0;
+}
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     const pc_ent *c = pc_get(addr, len);
     if (c) { *buf = (__bridge void *)c->buf; *off = addr - c->base; return 1; }
     int ok = 0;
     pthread_mutex_lock(&g_mu);
     int i = pool_find(addr, len);
-    if (i >= 0) { pool_res(i); pc_put(i, addr); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; ok = 1; }
+    if (pool_ok(i, addr, len)) { pool_res(i); if (!g_pools[i].shi) pc_put(i, addr); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; ok = 1; }
     pthread_mutex_unlock(&g_mu);
     return ok;
 }
@@ -812,9 +826,17 @@ int mtl_gpu_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_
     int ok = 0;
     pthread_mutex_lock(&g_mu);
     int i = pool_find(addr, len);
-    if (i >= 0) { pool_res(i); pc_put(i, addr); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; *gpu = g_pools[i].gpu + *off; ok = 1; }
+    if (pool_ok(i, addr, len)) { pool_res(i); if (!g_pools[i].shi) pc_put(i, addr); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; *gpu = g_pools[i].gpu + *off; ok = 1; }
     pthread_mutex_unlock(&g_mu);
     return ok;
+}
+// A live memory pool overlaps [lo, hi) (hle_svc.c: whether a map or unmap takes the submission lock)
+int mtl_pool_overlaps(uintptr_t lo, uintptr_t hi) {
+    int hit = 0;
+    pthread_mutex_lock(&g_mu);
+    for (int i = 0; i < g_npool && !hit; i++) hit = lo < g_pools[i].hi && g_pools[i].lo < hi;
+    pthread_mutex_unlock(&g_mu);
+    return hit;
 }
 
 // ---------- Submission ----------
@@ -1971,7 +1993,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[156];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[157];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -8821,10 +8843,14 @@ static id<MTLBuffer> gmem_map(void) {
         pool_ent *p = &g_pools[g_pidx[k]];
         if (!addr_meets(p->lo, p->hi)) continue;
         if (!p->res) { res_add(p->buf); p->res = 1; g_pool_res_n++; }
-        uint64_t lo = MAX((uint64_t)p->lo, end), hi = p->hi;
-        if (lo >= hi) continue;
-        if (n == DMSH_GMEM_MAP_ENTRIES) { over++; continue; }
-        uint64_t e[3] = {lo, hi, p->gpu - p->base}; memcpy(t + (size_t)n++ * DMSH_GMEM_MAP_ENTRY, e, sizeof e); end = hi;
+        // a pool with a refresh pending: the parts before and after its stale span (pool_ok), the span itself left out
+        uint64_t part[2][2] = {{p->lo, p->shi ? p->slo : p->hi}, {p->shi ? p->shi : p->hi, p->hi}};
+        for (int q = 0; q < 2; q++) {
+            uint64_t lo = MAX(part[q][0], end), hi = part[q][1];
+            if (lo >= hi) continue;
+            if (n == DMSH_GMEM_MAP_ENTRIES) { over++; continue; }
+            uint64_t e[3] = {lo, hi, p->gpu - p->base}; memcpy(t + (size_t)n++ * DMSH_GMEM_MAP_ENTRY, e, sizeof e); end = hi;
+        }
     }
     pthread_mutex_unlock(&g_mu);
     // Each 2 MiB chunk wholly inside an entry gets a hint, so most accesses skip the binary search. A colliding chunk replaces the hint and the shader's tag check sends the other to the search
@@ -14724,3 +14750,71 @@ void mtl_wait_state_dump(void) {
 void mtl_alloc_stats(uint64_t *waits, uint64_t *grown, int *n) { *waits = g_alloc_waits; *grown = g_alloc_grown; *n = g_alloc_n; }   // Main submit allocator pool: how many times it waited, how many times it grew, how many exist now
 #include "nvn_capture.inc"   // DM_NVN_CAPTURE (one frame for dm/gfx/tests/nvn_replay)
 #pragma clang attribute pop
+
+// Guest physical memory mapped again under a live memory pool (hle_svc.c: UnmapPhysicalMemory, then MapPhysicalMemory, over the pool's range). guest_release put fresh pages under
+// the guest addresses, but the pool's no-copy buffer still wires the old ones: from then on the CPU wrote the new pages and the GPU read what the old ones held before the unmap.
+// Monster Jam Steel Titans 2: the SDK unmaps and maps again the 2 MB pool holding Unreal's ForwardLightData ring at frame 6; the light-grid compute shaders (global 34bb66804eef93b0 /
+// b48d5875b5aaefd2) then read stale light counts (0xff000000) and looped until the GPU hung (Mac: silent stall after the title; iPhone: GPU hang errors from the tutorial on). About ten
+// other pools of that game go through the same.
+// Two steps, both called by hle_svc.c under the submission lock (hle_nvn.c nvn_sub_lock), so no submission is encoded in between and each one binds one buffer of a pool throughout:
+//   released (UnmapPhysicalMemory gave [lo, hi) back): the overlapping pools' stale span grows by it, and a refresh is pending: lookups there are refused (pool_ok), the raw-memory map
+//     leaves it out (gmem_map_gpu), and textures made on the buffer are dropped (made again on it outside the span, or refused inside it);
+//   mapped again (MapPhysicalMemory): a pool whose whole stale span is mapped (mapped(), hle_svc.c) gets a new no-copy buffer over the current pages and its span is cleared; a part
+//     still unmapped keeps it pending. The old buffer goes through deferred release (submitted work still reads it), and the textures made directly on it (buffer and linear textures,
+//     tex_linear / tbuf) are dropped, to be made again on the new one
+void mtl_pool_remapped(uintptr_t lo, uintptr_t hi, int released, int (*mapped)(uintptr_t lo, uintptr_t hi)) {
+    if (!g_dev) return;
+    enum { MAXOLD = 32 }; __unsafe_unretained id<MTLBuffer> olds[MAXOLD]; int nold = 0; static uint64_t nfix, npend, nwait;
+    pthread_mutex_lock(&g_mu);
+    @autoreleasepool {
+        for (int i = 0; i < g_npool && nold < MAXOLD; i++) {
+            pool_ent *p = &g_pools[i];
+            uintptr_t bl = p->base, bh = p->end > p->hi ? p->end : p->hi;   // what the buffer wires: a large pool's chunk (BIG_MIN) reaches past its lookup range [lo, hi)
+            if (!(lo < bh && bl < hi)) continue;
+            if (released) {
+                uintptr_t s0 = MAX(lo, bl), s1 = MIN(hi, bh);
+                if (p->shi) { s0 = MIN(s0, p->slo); s1 = MAX(s1, p->shi); }
+                p->slo = s0; p->shi = s1; olds[nold++] = p->buf;   // still the pool's buffer: only the textures made on it are dropped
+                if (npend++ < 16 || npend % 100 == 0) MLOG("memory pool %#lx..%#lx: pages %#lx..%#lx given back, its buffer keeps their old ones: refresh pending (%llu so far)",
+                                                           (unsigned long)p->lo, (unsigned long)p->hi, (unsigned long)s0, (unsigned long)s1, (unsigned long long)npend);
+                continue;
+            }
+            if (!p->shi) continue;   // nothing given back under it since its buffer was made: the buffer wires the current pages
+            if (mapped && !mapped(p->slo, p->shi)) { if (nwait++ < 8) MLOG("memory pool %#lx..%#lx mapped again only in part: refresh still pending until the rest of %#lx..%#lx is mapped", (unsigned long)p->lo, (unsigned long)p->hi, (unsigned long)p->slo, (unsigned long)p->shi); continue; }
+            uintptr_t a = p->base; NSUInteger len = p->buf.length;
+            id<MTLBuffer> nb = [g_dev newBufferWithBytesNoCopy:(void *)a length:len options:MTLResourceStorageModeShared deallocator:nil];
+            if (!nb) { RED_ONCE(156, "memory pool %#lx..%#lx mapped again: no new zero-copy buffer (refresh stays pending: addresses in %#lx..%#lx are refused)", (unsigned long)p->lo, (unsigned long)p->hi, (unsigned long)p->slo, (unsigned long)p->shi); continue; }
+            id<MTLBuffer> ob = p->buf; olds[nold++] = ob;
+            if (nfix++ < 16 || nfix % 100 == 0) MLOG("memory pool %#lx..%#lx: its pages were mapped again, new zero-copy buffer (GPU base %#llx → %#llx, %llu so far; lookups refused while pending %llu)", (unsigned long)p->lo, (unsigned long)p->hi,
+                                                     (unsigned long long)p->gpu, (unsigned long long)nb.gpuAddress, (unsigned long long)nfix, (unsigned long long)atomic_load(&g_pool_refused));
+            if (p->res) g_pool_res_n--;
+            p->buf = nb; p->gpu = nb.gpuAddress; p->res = 0; p->slo = p->shi = 0;   // into the residency set the first time it is addressed (pool_res); no refresh pending
+            [g_keep addObject:nb];
+            defer_obj_release(ob); [g_keep removeObject:ob];   // the deferred release holds it until the submitted work is done
+        }
+        if (nold) { g_plast = -1; atomic_fetch_add(&g_pool_gen, 1); }   // per-thread address caches (pc_get), the raw-memory map (gmem_map_gpu)
+    }
+    pthread_mutex_unlock(&g_mu);
+    if (!nold) return;
+    atomic_fetch_add(&g_reg_gen, 1);   // argument blocks holding the old addresses are not reused
+    int ndrop = 0;
+    pthread_mutex_lock(&g_smu);
+    @autoreleasepool {
+        uint64_t *ks = NULL; uint32_t nk = 0, ck = 0;
+        for (uint32_t i = 0; i < g_by_serial.cap; i++) {
+            void *v = g_by_serial.vals ? g_by_serial.vals[i] : NULL; if (!v) continue;
+            id o = (__bridge id)v; if (![o conformsToProtocol:@protocol(MTLTexture)]) continue;
+            id<MTLTexture> t = o; while (t.parentTexture) t = t.parentTexture;
+            id<MTLBuffer> tb = t.buffer; if (!tb) continue;
+            int hit = 0; for (int k = 0; k < nold; k++) hit |= tb == olds[k];
+            if (!hit) continue;
+            if (nk == ck) { uint32_t nc = ck ? ck * 2 : 64; uint64_t *more = realloc(ks, nc * sizeof *ks); if (!more) break; ks = more; ck = nc; }   // out of memory: drop those found so far
+            memcpy(&ks[nk++], g_by_serial.keys + (size_t)i * g_by_serial.klen, 8);
+        }
+        for (uint32_t k = 0; k < nk; k++) { id o = hm_get_id(&g_by_serial, &ks[k]); if (o) { obj_drop(o); hm_del_id(&g_by_serial, &ks[k]); ndrop++; } }
+        free(ks);
+        if (ndrop) g_ser_gen++;
+    }
+    pthread_mutex_unlock(&g_smu);
+    if (ndrop && (nfix <= 16 || nfix % 100 == 0)) MLOG("memory pool mapped again: %d textures made on its old buffer dropped, made again on the new one when next used", ndrop);
+}

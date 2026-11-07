@@ -85,6 +85,11 @@ typedef struct { const char *name; void *fn; } nvn_impl;
 
 static int g_log;
 static pthread_mutex_t g_sub_mu = PTHREAD_MUTEX_INITIALIZER;
+// Guest pages released or mapped again under a live memory pool (hle_svc.c Map/UnmapPhysicalMemory, nvn_mtl.m mtl_pool_remapped) change the pool's buffer only between submissions:
+// every pool address a submission binds is resolved on the submit thread under this lock (the encode thread replays records already resolved, and mtl_sub_commit drains it before
+// returning), so a submission is encoded and committed against one buffer of each pool, never the old one for some bindings and the new one for others. Lock order: this, then hle_svc.c's g_map_lock
+void nvn_sub_lock(void) { dm_host_mutex_lock(&g_sub_mu); }
+void nvn_sub_unlock(void) { pthread_mutex_unlock(&g_sub_mu); }
 static _Atomic uint64_t g_serial;
 uint64_t nvn_new_serial(void) { return ++g_serial; }
 void nvn_serial_floor(uint64_t s) { uint64_t c = atomic_load(&g_serial); while (c < s && !atomic_compare_exchange_weak(&g_serial, &c, s)) {} }

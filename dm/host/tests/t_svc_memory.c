@@ -45,6 +45,16 @@ int thr_limit_used(void) { return 0; }
 int dm_ue_heap_owns(uint64_t a, uint64_t n) { (void)a; (void)n; return 0; } // No Unreal allocator is installed in this fixture.
 // This fixture calls the SVC dispatcher directly, without rewritten guest gates.
 void gate_obs_set(int id, void (*fn)(uint64_t *, int)) { (void)id; (void)fn; }
+// The graphics layer's side of a remap under a live memory pool (nvn_mtl.m mtl_pool_overlaps / mtl_pool_remapped, hle_nvn.c nvn_sub_lock): one pretend pool
+// [g_pool_lo, g_pool_hi), every call recorded, the submission lock counted (pool_remap checks the calls and that the lock is held around them and released after)
+static uintptr_t g_pool_lo, g_pool_hi; static int g_sub_depth, g_remap_n, g_remap_released, g_remap_mapped; static uintptr_t g_remap_lo, g_remap_hi;
+int mtl_pool_overlaps(uintptr_t lo, uintptr_t hi) { return lo < g_pool_hi && g_pool_lo < hi; }
+void mtl_pool_remapped(uintptr_t lo, uintptr_t hi, int released, int (*mapped)(uintptr_t lo, uintptr_t hi)) {
+    assert(g_sub_depth == 1);
+    g_remap_n++; g_remap_lo = lo; g_remap_hi = hi; g_remap_released = released; g_remap_mapped = mapped(lo, hi);
+}
+void nvn_sub_lock(void) { assert(g_sub_depth == 0); g_sub_depth++; }
+void nvn_sub_unlock(void) { assert(g_sub_depth == 1); g_sub_depth--; }
 module_t *module_of(const void *p) {
     uintptr_t a = (uintptr_t)p;
     for (int i = 0; i < g_nmod; ++i) {
@@ -530,6 +540,24 @@ static void layout_order(void) {
     assert(info(I_AliasAddr) + info(I_AliasSize) == info(I_AslrAddr) + info(I_AslrSize));
     assert(info(I_AslrAddr) == (uint64_t)(uintptr_t)g_as && info(I_AslrSize) == g_reserve);
 }
+// Map and Unmap over a live memory pool: the pool's no-copy buffer still wires the old pages after an unmap gives them back, so the graphics layer has to hear of
+// every release and of the map that follows, with the submission lock held (Monster Jam Steel Titans 2's light-grid hang, docs/reference/rendering.md)
+static void pool_remap(void) {
+    size_t pg = memory_getpagesize(); uintptr_t base = alias + 32 * P;   // 32 guest pages: a multiple of every host page size the host runs with
+    assert(!(base & (pg - 1)));
+    g_pool_lo = base; g_pool_hi = base + 16 * P;
+    g_remap_n = 0; assert(!pages(1, base, 16 * P));
+    assert(g_remap_n == 1 && !g_remap_released && g_remap_mapped && g_sub_depth == 0);   // pages mapped under the pool: a pending refresh may now complete
+    g_remap_n = 0; assert(!pages(0, base + pg, pg));                                     // one whole host page given back
+    if (g_gf_n) assert(!g_remap_n && g_sub_depth == 0);   // guest in files: the range keeps its file pages (only PROT_NONE), so the buffer and the guest still share them
+    else assert(g_remap_n == 1 && g_remap_released && g_remap_lo == base + pg && g_remap_hi == base + 2 * pg && !g_remap_mapped && g_sub_depth == 0);
+    g_remap_n = 0; assert(!pages(1, base + pg, pg));                                     // and mapped again
+    assert(g_remap_n == 1 && !g_remap_released && g_remap_lo == base + pg && g_remap_hi == base + 2 * pg && g_remap_mapped && g_sub_depth == 0);
+    g_remap_n = 0; assert(!pages(1, alias + 64 * P, P) && !g_remap_n);                   // no pool there: nothing to tell, no lock taken
+    assert(!pages(0, base, 16 * P) && !pages(0, alias + 64 * P, P));
+    g_pool_lo = g_pool_hi = 0;
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--heap-probe")) {
         mem_init();
@@ -552,7 +580,7 @@ int main(int argc, char **argv) {
     if (!getenv("DM_ALIAS_SIZE")) assert(info(I_AliasSize) == SWITCH_ALIAS);   // the Mac's alias region is a Switch's, whatever the profile can give an iPhone; DM_ALIAS_SIZE=<mem_alias> runs these tests on an iPhone's
 #endif
     layout_order();
-    lazy_commit(); alias_lifecycle(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); file_rule(); heap_regrow(); concurrency(); fragmented_queries();
+    lazy_commit(); alias_lifecycle(); pool_remap(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); file_rule(); heap_regrow(); concurrency(); fragmented_queries();
     guest_helper();
     if (!DM_GAME_MEM_MAP_LIMIT) metadata_limit();
 #ifdef TEST_REAL_DIRTY

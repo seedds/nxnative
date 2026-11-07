@@ -38,6 +38,11 @@ int dm_ue_heap_owns(uint64_t a, uint64_t n) { (void)a; (void)n; return 0; } // N
 void dm_guest_write_prepare(void *addr, size_t size) { (void)addr; (void)size; }
 // This fixture calls the SVC dispatcher directly, without rewritten guest gates.
 void gate_obs_set(int id, void (*fn)(uint64_t *, int)) { (void)id; (void)fn; }
+// No graphics layer in this fixture: no memory pool lies under a Map / Unmap, so the submission lock and the pool remap are never needed (nvn_mtl.m, hle_nvn.c)
+int mtl_pool_overlaps(uintptr_t lo, uintptr_t hi) { (void)lo; (void)hi; return 0; }
+void mtl_pool_remapped(uintptr_t lo, uintptr_t hi, int released, int (*mapped)(uintptr_t lo, uintptr_t hi)) { (void)lo; (void)hi; (void)released; (void)mapped; }
+void nvn_sub_lock(void) {}
+void nvn_sub_unlock(void) {}
 
 static size_t page, old_size, requested;
 static int calls, map_calls, injected_error, injected_map_error, last_prot;

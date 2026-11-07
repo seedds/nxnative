@@ -321,6 +321,11 @@ static int64_t alias_unmapped(uint64_t off, uint64_t n) {
     }
     return c;
 }
+// Every 4 KB page of [lo, hi) is mapped (for mtl_pool_remapped); a range outside the alias region counts as mapped (it is never unmapped there)
+static int alias_range_mapped(uintptr_t lo, uintptr_t hi) {
+    if (lo < (uintptr_t)g_alias || hi > (uintptr_t)g_alias + g_alias_cap) return 1;
+    return alias_unmapped(lo - (uintptr_t)g_alias, hi - lo) == 0;
+}
 static _Atomic int64_t g_alias_mapped;   // bytes mapped in the alias region (page bitmap)
 
 // Word-at-a-time boundaries of the bitmap run containing p (guest page index).
@@ -794,11 +799,16 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         if (!size || ((a | size) & 0xfff) || !memory_contains((uintptr_t)g_alias, g_alias_cap, a, size)) {
             LOG("SVC %#x outside the alias region %p+%#zx", num, (void *)a, size); regs[0] = 0xD401; return 0;
         }
+        // A live memory pool under the range: no submission is encoded while its pages change and its buffer is marked or made anew (hle_nvn.c nvn_sub_lock, nvn_mtl.m mtl_pool_remapped).
+        // Taken before g_map_lock (the submit thread never takes g_map_lock); other maps do not wait for submissions
+        int mtl_pool_overlaps(uintptr_t lo, uintptr_t hi); void nvn_sub_lock(void); void nvn_sub_unlock(void);
+        int sublock = mtl_pool_overlaps(a, a + size);
+        if (sublock) nvn_sub_lock();
         pthread_mutex_lock(&g_map_lock);
         // The SDK extends committed windows across borrowed stack sources
         // (Raging Loop, StandardAllocator). Recommit preserves every live byte;
         // only decommit can invalidate backing required for eventual copyback.
-        if (num == 0x2D && map_source_busy(a, size)) { pthread_mutex_unlock(&g_map_lock); regs[0] = 0xD401; return 0; }
+        if (num == 0x2D && map_source_busy(a, size)) { pthread_mutex_unlock(&g_map_lock); if (sublock) nvn_sub_unlock(); regs[0] = 0xD401; return 0; }
         uint64_t off = a - (uintptr_t)g_alias;
         int64_t need = alias_unmapped(off, size) * 4096;
         // Profile mem_map_limit: a map that would take the process past the application pool fails with ResultLimitReached, as on Horizon (the pool less the used memory GetInfo reports).
@@ -809,7 +819,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         if (DM_GAME_MEM_MAP_LIMIT && num == 0x2C) {
             int64_t room = (int64_t)APP_POOL - (int64_t)(g_heap_cur + DM_GAME_MEM_USED + big_bss_bytes()) - atomic_load(&g_alias_mapped);
             if (need && need > room) {
-                pthread_mutex_unlock(&g_map_lock);
+                pthread_mutex_unlock(&g_map_lock); if (sublock) nvn_sub_unlock();
                 static _Atomic int nref; if (atomic_fetch_add(&nref, 1) < 8) LOG("[mem] MapPhysicalMemory +%#zx refused: %.2f GB mapped, the application pool is full (ResultLimitReached, the SDK frees cached pages and retries)",
                                                                        size, atomic_load(&g_alias_mapped) / 1073741824.0);
                 regs[0] = 0x10801; return 0;
@@ -819,7 +829,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         // An edge host page is reclaimed only when no live logical neighbor remains.
         uintptr_t pg = (uintptr_t)getpagesize(), lo = (uintptr_t)a, hi = (uintptr_t)a + size;
         uintptr_t mlo = lo & ~(pg - 1), mhi = (hi + pg - 1) & ~(pg - 1);
-        int commit = num == 0x2C;
+        int commit = num == 0x2C, released = 0;
         int64_t changed = commit ? need : (int64_t)size - need;
         if (!commit) {
             if ((lo - mlo) / 4096 != (uint64_t)alias_unmapped(mlo - (uintptr_t)g_alias, lo - mlo)) mlo += pg;
@@ -831,6 +841,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
                     die("SVC %#x mprotect %p+%#zx errno=%d", num, (void *)a, size, errno);
                 dm_guest_write_prepare((void *)mlo, mhi - mlo);
             } else if (guest_release(mlo, mhi)) {   // fresh zero pages: alias_initialize has nothing to clear when they are mapped again
+                released = 1;   // a memory pool's no-copy buffer over them keeps the old pages (mtl_pool_remapped below)
                 for (uint64_t h = (mlo - (uintptr_t)g_alias) / pg, last = (mhi - 1 - (uintptr_t)g_alias) / pg; h <= last; ++h)
                     g_alias_exposed[h >> 6] &= ~(UINT64_C(1) << (h & 63));
             }
@@ -846,6 +857,11 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         { int64_t d = alias_pages(off, size, commit) * 4096, before = atomic_fetch_add(&g_alias_mapped, d), after = before + d;
           pthread_mutex_unlock(&g_map_lock);
           if (before >> 28 != after >> 28) LOG("[mem] alias region mapped %.2f GB (application pool %.2f GB)", after / 1073741824.0, APP_POOL / 1073741824.0); }
+        // Pages given back under a live memory pool (guest_release): its no-copy buffer still wires the old ones there, so that span of the pool is pending; once all of it is mapped
+        // again the graphics layer makes the buffer anew (nvn_mtl.m mtl_pool_remapped). Only with a pool under the range, still under the submission lock taken above
+        if (sublock && (released || (commit && changed > 0))) { void mtl_pool_remapped(uintptr_t lo, uintptr_t hi, int released, int (*mapped)(uintptr_t lo, uintptr_t hi));
+            mtl_pool_remapped(released ? mlo : a, released ? mhi : a + size, released, alias_range_mapped); }
+        if (sublock) nvn_sub_unlock();
         regs[0] = 0; return 0;
     }
     case 0x26: {  // Break(reason, ptr, size): SDK fatal abort

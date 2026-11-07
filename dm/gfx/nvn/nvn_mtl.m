@@ -15469,7 +15469,7 @@ static void clear_tex(const p_clear_tex *c) {
     // ~3.1 ms of the frame (encoder start/end ~22 us each, pm2 GPUPROF). Zero bits = the clear value for every non-block colour format the copy covers (uint, float +0, unorm, snorm).
     if (nz > 1 && !depth && !stencil && clear_blit_on() && t.sampleCount == 1 && !mtl_fmt_block(pf) && t.textureType != MTLTextureTypeCube && t.textureType != MTLTextureTypeCubeArray) {
         size_t bpp = mtl_pf_bytes(pf); int zero = 1;
-        for (int i = 0; i < 4; i++) if (c->c.u[i]) zero = 0;   // a bit test (uint or float): -0.0f is not taken as zero
+        int chm = mtl_pf_chmask(pf); for (int i = 0; i < 4; i++) if ((chm >> i & 1) && c->c.u[i]) zero = 0;   // a bit test (uint or float) of the format's channels only (PRAGMATA's R32Uint clear leaves junk in g/b/a); -0.0f is not taken as zero
         size_t row = bpp * w, img = row * h, need = is3d ? img * (size_t)nz : img;
         id<MTLBuffer> zb = bpp && zero && need <= ((size_t)64 << 20) ? zero_buf(need) : nil;
         if (zb) {

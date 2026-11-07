@@ -70,6 +70,16 @@ class KeySearch(unittest.TestCase):
         p = Path(self.tmp.name) / 'a.pak'; pak(p, self.key)
         self.assertEqual(uepak.find_key(img, lo, hi, str(p)), self.key)
 
+    def test_root_mount_point(self):
+        """The empty pak beside an IoStore container mounts at "/" (DRAGON BALL Sparking! ZERO's pakchunk1-17): the key that opens the game's first pak opens it too;
+        a mount point that is no path does not count as opened"""
+        img, lo, hi = self.image(False)
+        d = Path(self.tmp.name); a, b, c = d / 'a.pak', d / 'b.pak', d / 'c.pak'
+        pak(a, self.key); pak(b, self.key, mount=b'/\0'); pak(c, self.key, mount=b'x\x01\x02\0')
+        self.assertEqual(uepak.find_key(img, lo, hi, str(b)), self.key)
+        self.assertEqual(uepak.find_key(img, lo, hi, str(b), first=[self.key]), self.key)
+        self.assertIsNone(uepak.find_key(img, lo, hi, str(c)))
+
     def test_clobbered_base(self):
         """A register written between the adrp and the load holds no page any more"""
         img, lo, hi = self.image(True)

@@ -208,6 +208,7 @@ DM_NVN_UB_N	diagnostic	`=<frames>`: the length of each phase of the same-process
 DM_NVN_UB_PARTIAL	switch	`0`: a uniform block the deferred updates cover only in part ends the pass, as before; by default its shadow starts from memory and takes the submission's queued updates (on by default)
 DM_NVN_UDC_AB	diagnostic	`=1` starts with the DontCare store for unwritten attachments off and turns it on after the second screenshot, for an on/off picture comparison in one run
 DM_NVN_UNWRITTEN_DC	switch	`0` disables optional stores elided for loaded, unchanged attachments (on by default, independent of TBDR lookahead), for equivalence comparisons; mandatory image-write preservation stays active
+DM_NVN_UPLOAD_IDLE_MS	switch	`=<ms>`: an upload slot's retained staging blocks (up to 64 MB a slot) shrink back when they sit idle that long: both when no batch used the slot, the overflow block when no batch needed it, the primary block to what the window's largest batch needed (default 2000 on iOS; `0` never, the Mac's default)
 DM_NVN_UPLOAD_REUSE	switch	0 keeps the original one-block upload-slot policy; default retains bounded demand-sized primary and overflow buffers after completion.
 DM_NVN_VBUF_CACHE	switch	`0` turns off the cache of resolved vertex stream addresses and vertex argument table writes across draws (on by default), for A/B runs
 DM_NVN_VCONV_CHECK	diagnostic	`=1` scans the indices again at every reuse of a cached vertex conversion range (`vconv_range`) and reports differences

@@ -245,6 +245,10 @@ static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
     [g_res removeAllocation:(id<MTLAllocation>)r];
     [g_res_objects removeObject:r];
     g_res_dirty = 1; g_rs_rm++;
+    // what the set holds after its next commit (guard_used) leaves this out, as res_add_at counts what it adds: a load that retires and replaces buffers in one burst counted
+    // only the additions, and PRAGMATA's guard stopped the game at 5,555 MB with the committed set never past 4,220 MB (8 GB Mac)
+    { uint64_t was = atomic_load_explicit(&g_guard_set, memory_order_relaxed), sz = r.allocatedSize;
+      while (!atomic_compare_exchange_weak_explicit(&g_guard_set, &was, was > sz ? was - sz : 0, memory_order_relaxed, memory_order_relaxed)) {} }
     pthread_mutex_unlock(&g_res_mu);
 } }
 @interface NvImageHeap : NSObject { @public id<MTLHeap> heap; } @end

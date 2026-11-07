@@ -44,6 +44,8 @@ static void commits(void) {
     res_add(b);
     CHECK(g_res.allocatedSize == set, "an addition is not in the set's size before its commit");
     CHECK(atomic_load(&g_guard_set) >= set + (64 << 20), "the guard has it already");
+    { uint64_t g1 = atomic_load(&g_guard_set); res_remove(a); CHECK(atomic_load(&g_guard_set) + (64 << 20) <= g1, "and a pending removal comes off it");
+      res_add(a); }
     g_guard.evict = 1; g_guard.stop = 2; g_guard.wall = 3;   // anything is past these
     res_commit();
     CHECK(g_res_dirty && g_res_grew && g_res.allocatedSize == set, "a commit that adds is not made past the working set");

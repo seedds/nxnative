@@ -1,6 +1,6 @@
 # The Legend of Zelda: Ocarina of Time (`0400486024DEC000`)
 
-A Switch 2 game: update v131072, SDK 22.2.8 (`Ounce`). Nintendo EPD's engine (sead, agl, gsys, Havok, CRIWARE; project `Owl`, with Tears of the Kingdom's file layout) on NVN2. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`, no rewriter patches. Status: plays on the Mac through the title, the opening, a new file's first scene, Link's house and Kokiri Forest, with saves, at about 59 fps with the picture close to console video. Mac only so far.
+A Switch 2 game: update v131072, SDK 22.2.8 (`Ounce`). Nintendo EPD's engine (sead, agl, gsys, Havok, CRIWARE; project `Owl`, with Tears of the Kingdom's file layout) on NVN2. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`, with an opt-in [simulation step](#simulation-speed-below-60-fps). Status: plays on the Mac through the title, the opening, a new file's first scene, Link's house and Kokiri Forest, with saves, at about 59 fps with the picture close to console video. Mac only so far.
 
 ## What it needs
 
@@ -45,6 +45,12 @@ Measured on an M6 Mac with 16 GB, headless, on one walk with camera turns (`walk
 - [`pso_manifest.tsv`](pso_manifest.tsv) seeds the [prepare step](../../../docs/development.md#the-prepare-step) of a first start: 9,625 rows (8,376 shaders, 1,112 render and 137 compute pipelines) recorded on an M3 Pro Mac (macOS 27.2) with no lists present, over boot, the title and its movie, a new game and the opening, Link's house, Kokiri Forest and a save load ([PR 1493](https://github.com/seedds/nxnative/pull/1493)), and five compute pipelines Saria's greeting builds (Deku Scrub, Business Scrub, Deku Baba), found in [PR 1488](https://github.com/seedds/nxnative/pull/1488). With the list empty, a first start with a cold Metal shader cache showed a black picture with the title music for minutes: one title frame built 11 pipelines and loaded 12 shader libraries in 252.6 s on that Mac ([issue 1477](https://github.com/seedds/nxnative/issues/1477)). Before compute pipelines were in the offline archive, a true first start with the list prepared for 134.7 s on an M4 MacBook Air and then had no frame over 0.25 s to a save load. Open: the first start has not been measured with the archive's compute pipelines, nor on iOS, where this game has no bundled archive (no `pso_mtl4`) and the list is all a first start has; the render bases the `R` rows need are not in the offline archive. A longer list from hours of iPad play (PR 1488, 9,789 rows) prepared 16 s longer on that MacBook and avoided only 7 render builds that made no frame over 100 ms.
 - With a window, the first start on a new chain runs the pipeline prebuild first: 33,190 shader pairs, 691 s on this Mac. A run with no window skips it.
 - The opening movie runs at the movie's own 24 fps pace during the story section and cannot be skipped: about 8 minutes on a new file.
+
+### Simulation speed below 60 fps
+
+The v131072 game update reads the framework's integer FPS at `main+0x6e6c98`. At about 44 updates per second in docked Kokiri Forest, the time manager still advanced 16.667 ms per update. A probe measured 3.000 seconds of game time in 4.093 seconds of wall time on an M3 Max.
+
+[`patches.py`](patches.py) uses the existing host frame step at that FPS load. It checks the main build ID and the original instruction, keeps the game's time-manager conversion and uses the original framework FPS when the target is zero. After repacking the module, `DM_FPS_TARGET=60` with `DM_FPS_HOLD=off` gave 4.133 seconds of game time in 4.120 seconds of wall time at about 44 updates per second in the same saved scene. A separate run with experimental event replay at 2560 × 1440 output advanced 3.700 seconds in 3.698 seconds at 48.672 updates per second. The profile keeps the native target by default. These measurements cover the gameplay clock in Kokiri Forest. Movie playback and other scenes still need testing.
 
 ## Memory
 

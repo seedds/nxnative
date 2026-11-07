@@ -23,6 +23,7 @@
 #include "motion_pro_mac.h"
 #include "pad_apple.h"
 #include "pad_hid_mac.h"
+#include "pad_x360_mac.h"
 #include "home_quit.h"
 #include "home_quit_mac.h"
 #include <signal.h>
@@ -317,6 +318,7 @@ static void input_resume(void) {
 }
 // Raw HID gamepads (pad_hid_mac.h): a player slot each, as a GameController controller, named by the device's product name. Identical pads that GameController lists
 // fewer of are read the same way, an identical Pro Controller from its report 0x30
+static int hidpad_player(hid_pad *d) { return g_merge ? 0 : pad_slot_of(&g_slots, d); }
 static void hidpad_read(hid_pad *d) {
     if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
     int p = g_merge ? 0 : pad_slot_of(&g_slots, d);
@@ -462,6 +464,7 @@ static void pads_start(void) {
     hq_log_setting();
     dm_motion_pro_start(pro_devices_changed);
     hidpad_start();
+    x360_start();
 }
 
 // Mouse as a single-point touchscreen (front.h dm_touch_set): left button down / drag = finger 0, release = lifted. The content view takes the clicks,

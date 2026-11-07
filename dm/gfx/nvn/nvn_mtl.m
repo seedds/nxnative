@@ -2745,7 +2745,7 @@ static uint64_t lcap_bind(const nvn_refl *rf) {
     if (lcap_on()) return g_lcap_buf.gpuAddress;
     if (!rf->loopguard) return 0;
     static __strong id<MTLBuffer> zero; static dispatch_once_t once;
-    dispatch_once(&once, ^{ zero = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared]; memset(zero.contents, 0, 256); res_add(zero); res_commit();
+    dispatch_once(&once, ^{ zero = [g_dev newBufferWithLength:LCAP_BYTES options:MTLResourceStorageModeShared]; memset(zero.contents, 0, LCAP_BYTES); res_add(zero); res_commit();   // r9: the whole record area, as library kernels built with shader_loopguard all write their records into it
         MLOG("loop guard: library shaders with automatic sites get a zeroed buffer at index 28 (DM_NVN_LOOPCAP off: they run as built, loop_guard's cap, no report)"); });
     return zero.gpuAddress;
 }
@@ -6297,7 +6297,7 @@ static void shmap_read(void) {
 }
 
 @interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, discard_fn, fn_u, fn_m, fn_d, geo_fn; uint8_t mask_m;   // fn_u: the integer-output entry point (dmsh_build.py fs_uint), for pipelines whose colour attachments are all unsigned integer (pso_desc); fn_m: the mixed one, its outputs in mask_m unsigned integer; fn_d: the dual-source one (dmsh_build.py fs_dual)
-    uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, layer_out; const char *builtin; uint64_t logged; int16_t push0p1; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
+    uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, layer_out; const char *builtin; uint64_t logged; int16_t push0p1; uint8_t ovr_refl, push_handles; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
     uint32_t geo_vertices, geo_invocations, geo_output, geo_stride, geo_index_stride;
     uint8_t mesh_kind, mesh_notask; uint16_t mesh_threads, mesh_payload;   // an NVN2 task (1) or mesh (2) shader, a mesh shader with no task, its workgroup's threads, its payload's bytes (dmsh_meshstage.py)
     id<MTLComputePipelineState> geo_pso; int geo_pso_failed, cps_failed;   // cps_failed: Metal refused this compute shader's pipeline (dispatch): its dispatches are skipped without asking again
@@ -6521,12 +6521,19 @@ static id<MTLFunction> fn_dev(id<MTLFunction> f) {
         return dev->fn;
     }
 }
+// The side library <name> (<key>_bx / _bv / _bp) of sh: for a shader loaded with an override reflection (ovr_refl) <DM_MSL_OVERRIDE>/<name> when it exists, as its argument layout
+// is the override's; the cache's otherwise (every other shader, as before)
+static NSString *side_lib_path(const NvShader *sh, NSString *name) {
+    const char *ov = sh && sh->ovr_refl ? getenv("DM_MSL_OVERRIDE") : NULL;
+    if (ov && *ov) { NSString *op = [NSString stringWithFormat:@"%s/%@", ov, name]; if ([NSFileManager.defaultManager fileExistsAtPath:op]) return op; }
+    return [NSString stringWithFormat:@"%@/%@", g_msl_dir, name];
+}
 static id<MTLComputePipelineState> cps_new(id<MTLFunction> f, NSError **e);   // a compute shader's pipeline: from the archive bundled with the app, else built
 // layer: a vertex shader's layer entry points (entry_layer / entry_layer_z, which also write the layer) instead of main0 / main0_z, for a program whose geometry shader is a slice writer (prog_fold_gs)
 static NvShader *shader_load(NSString *pc, int stage, int layer) {
     NSError *e = nil;
     NSData *jd = msl_data([NSString stringWithFormat:@"%@/%@.json", g_msl_dir, pc]);
-    NSDictionary *j = jd ? [NSJSONSerialization JSONObjectWithData:jd options:0 error:nil] : nil;
+    NSDictionary *j = jd ? [NSJSONSerialization JSONObjectWithData:jd options:0 error:nil] : nil; int ovr_refl = 0;
     if (j && stage == 2 && [j[@"gs_slice"] isKindOfClass:[NSDictionary class]] && [j[@"chain"] isEqual:@DMSH_CHAIN]) {   // a slice-writing geometry shader has no library: a stub prog_fold_gs replaces
         NvShader *o = [NvShader new]; o->stage = 2; o->lay_loc = -1; strlcpy(o->key, pc.UTF8String, sizeof o->key);
         o->gs_loc = [j[@"gs_slice"][@"loc"] intValue]; o->gs_comp = [[j[@"gs_slice"][@"comp"] description] UTF8String][0];
@@ -6538,12 +6545,20 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     // <dir> is a plain folder; the cache itself may be a folder or a packed image (lib_from_file)
     { static NSString *od; static dispatch_once_t once; dispatch_once(&once, ^{ const char *v = getenv("DM_MSL_OVERRIDE"); if (v && *v) { od = @(v); MLOG("DM_MSL_OVERRIDE: libraries in %s replace the cache's", v); } });
       NSString *op = od ? [NSString stringWithFormat:@"%@/%@.metallib", od, pc] : nil;
-      if (op && [NSFileManager.defaultManager fileExistsAtPath:op]) { MLOG("DM_MSL_OVERRIDE: shader %s loaded from %s", pc.UTF8String, op.UTF8String); lp = op; } }
+      if (op && [NSFileManager.defaultManager fileExistsAtPath:op]) { MLOG("DM_MSL_OVERRIDE: shader %s loaded from %s", pc.UTF8String, op.UTF8String); lp = op; }
+      // <dir>/<key>.ovr.json: a fix that changes the shader's bindings (argument layout) brings its reflection, and then <dir>/<key>.ovr.metallib, its library built with
+      // it (c24regen-2026-11-07.md: the translator's refused stale phi pick, dmsh_build.py ubo_bank). Named .ovr so a host without this reads neither, and keeps the cache's
+      // matching pair. The pair is all or nothing: a json without its library is ignored. push_handles (in that json only) turns on the c[24] handle reads of ubo_read
+      if (od) { NSString *oj = [NSString stringWithFormat:@"%@/%@.ovr.json", od, pc], *ol = [NSString stringWithFormat:@"%@/%@.ovr.metallib", od, pc];
+        NSData *ojd = [NSFileManager.defaultManager fileExistsAtPath:ol] ? [NSData dataWithContentsOfFile:oj] : nil;
+        NSDictionary *ojj = ojd ? [NSJSONSerialization JSONObjectWithData:ojd options:0 error:nil] : nil;
+        if ([ojj isKindOfClass:[NSDictionary class]]) { j = ojj; lp = ol; ovr_refl = 1; MLOG("DM_MSL_OVERRIDE: shader %s and its reflection loaded from %s%s", pc.UTF8String, od.UTF8String, [ojj[@"push_handles"] boolValue] ? " (pushed handles)" : ""); }
+        else if (ojd) MLOG("[RED] DM_MSL_OVERRIDE: %s is not a reflection json: ignored", oj.UTF8String); } }
     id<MTLLibrary> lib = lib_from_file(lp, &e);
     if (!lib || !j) { MLOG("[RED] failed to load shader %s: %s", pc.UTF8String, e ? e.localizedDescription.UTF8String : "no reflection json"); return nil; }
     if (![j[@"chain"] isEqual:@DMSH_CHAIN]) { MLOG("[RED] shader %s has translation chain version %s, but this host expects %s", pc.UTF8String, [[j[@"chain"] description] UTF8String], DMSH_CHAIN); return nil; }
     if (layer && !j[@"entry_layer"]) { MLOG("[RED] vertex shader %s has no layer entry points", pc.UTF8String); return nil; }
-    NvShader *o = [NvShader new]; o->gs_loc = o->lay_loc = -1;
+    NvShader *o = [NvShader new]; o->gs_loc = o->lay_loc = -1; o->ovr_refl = (uint8_t)ovr_refl; o->push_handles = [j[@"push_handles"] boolValue];   // the library json (r9 dmsh_build.py: a compute shader with a pushed-handle binding) or an override json
     if (stage == 0 && [j[@"layer_from"] isKindOfClass:[NSDictionary class]]) { o->lay_loc = [j[@"layer_from"][@"loc"] intValue]; o->lay_comp = [[j[@"layer_from"][@"comp"] description] UTF8String][0]; }
     char err[160];
     if (nvn_refl_from_json(j, &o->rf, err, sizeof err)) { MLOG("[RED] shader %s reflection conversion failed: %s", pc.UTF8String, err); return nil; }
@@ -8324,7 +8339,7 @@ static id<MTLFunction> vin_fn(NvShader *vs) {   // the shadow-input entry point,
     os_unfair_lock_lock(&g_vin_lock);
     if (!vs->vfn_state) {
         vs->vfn_state = 2;
-        size_t kl = strlen(vs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bv.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), vs->key];
+        size_t kl = strlen(vs->key); NSString *path = side_lib_path(vs, [NSString stringWithFormat:@"%.*s_bv.metallib", (int)(kl > 2 ? kl - 2 : kl), vs->key]);
         NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = lib && vs->ventry ? fn4_note([lib newFunctionWithName:vs->ventry], lib, vs->ventry, nil) : nil;
         if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, vs->ventry, [MTLFunctionConstantValues new], &e);   // as shader_load
         const char *why = !lib ? "no library" : !f ? "no entry point" : NULL;
@@ -8343,7 +8358,7 @@ static os_unfair_lock g_pull_lock = OS_UNFAIR_LOCK_INIT;
 static void pull_load(NvShader *vs) {
     {
         vs->pfn_state = 2;
-        size_t kl = strlen(vs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bp.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), vs->key];
+        size_t kl = strlen(vs->key); NSString *path = side_lib_path(vs, [NSString stringWithFormat:@"%.*s_bp.metallib", (int)(kl > 2 ? kl - 2 : kl), vs->key]);
         NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = lib && vs->ventry ? fn4_note([lib newFunctionWithName:vs->ventry], lib, vs->ventry, nil) : nil;
         if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, vs->ventry, [MTLFunctionConstantValues new], &e);
         const char *why = !lib ? "no library" : !f ? "no entry point" : NULL;
@@ -8649,7 +8664,7 @@ static id<MTLFunction> at_fn(NvShader *fs, id<MTLFunction> base) {   // the side
     os_unfair_lock_lock(&g_at_lock);
     if (!fs->afn_state) {
         fs->afn_state = 2;
-        size_t kl = strlen(fs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bx.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), fs->key];
+        size_t kl = strlen(fs->key); NSString *path = side_lib_path(fs, [NSString stringWithFormat:@"%.*s_bx.metallib", (int)(kl > 2 ? kl - 2 : kl), fs->key]);
         NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); const char *why = lib ? NULL : "no library";
         id<MTLFunction> own[4] = {fs->fn, fs->fn_u, fs->fn_m, fs->fn_d};
         for (int i = 0; i < 4 && !why; i++) {
@@ -8722,7 +8737,7 @@ static id<MTLFunction> lo_fn(NvShader *fs, id<MTLFunction> base, uint32_t target
     NSError *e = nil; const char *why = NULL;
     if (!fs->lfn_state) {
         fs->lfn_state = 2;
-        size_t kl = strlen(fs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bx.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), fs->key];
+        size_t kl = strlen(fs->key); NSString *path = side_lib_path(fs, [NSString stringWithFormat:@"%.*s_bx.metallib", (int)(kl > 2 ? kl - 2 : kl), fs->key]);
         if ((fs->llib = lib_from_file(path, &e))) { fs->lfn_state = 1; fs->lfn = [NSMutableDictionary dictionary]; static int n; if (++n <= 3 || !(n & (n - 1))) MLOG("logic operation: side library of %s loaded (%d shaders so far)", fs->key, n); }
         else why = "no library";
     }
@@ -10585,6 +10600,7 @@ static id<MTLTexture> img_binding(int tid, const nvn_rbind *b, uint64_t *rid, in
 // An image bind may follow rendering into a texture created without IMAGE; upgrading it inside encode_args would
 // copy out of an attachment while its render pass was still open. Close that pass first, then replace the shared backing (all registered sampled views follow g_ser_gen).
 static uint32_t ubo_handle(int stage, int reg, int off); static int ubo_tex_id(uint32_t h);
+static __unsafe_unretained NvShader *g_push_sh;   // the shader whose bindings ubo_read reads now (encode_args_, image_prepare): its push_handles opt-in and push_view
 static void image_prepare(NvProg *pr, unsigned stages) {
     if (!pr) return;
     if (!pr->c_img) { int any = 0;   // no written or atomic image slot in any stage: nothing to resolve, every draw
@@ -10597,7 +10613,7 @@ static void image_prepare(NvProg *pr, unsigned stages) {
         NvShader *sh = pr->sh[st]; if (!sh) continue;
         for (int i = 0; i < sh->rf.nb; i++) {
             const nvn_rbind *b = &sh->rf.b[i]; if ((b->kind != NVN_RB_IMGU && (b->kind != NVN_RB_IMG || b->reg >= 32)) || (!b->rw && !b->atom)) continue;
-            int tid = b->kind == NVN_RB_IMGU ? ubo_tex_id(ubo_handle(st, b->reg, b->off)) : (int)(S.img[st][b->reg] & 0xfffff); if (tid <= 0) continue;
+            g_push_sh = sh; int tid = b->kind == NVN_RB_IMGU ? ubo_tex_id(ubo_handle(st, b->reg, b->off)) : (int)(S.img[st][b->reg] & 0xfffff); g_push_sh = nil; if (tid <= 0) continue;
             os_unfair_lock_lock(&g_rmu);
             if (tid >= g_ntreg || !g_treg[tid].ok || g_treg[tid].gone) { os_unfair_lock_unlock(&g_rmu); continue; }
             // The actual image binding is image intent too: some engines write a descriptor with RegisterTexture and use its handle in an image slot.
@@ -10860,8 +10876,12 @@ static uint64_t zero_bank_gpu(void) { static uint64_t gpu; if (!gpu) gpu = zero_
 // for every one they searched the deferred updates, the queued GPU writes and the pools: about a sixth of the submit thread. ubm keeps, per binding, whether its whole range has none
 // of those (clean: memory is what the GPU reads, read in place) until the binding or any of them changes; a binding they touch takes the per-read path as before
 static struct { uint64_t addr, size, ubd, nubd, npend, pgen, pool; const uint8_t *base; } g_ubm[6][16];
+static const uint8_t *push_view(int stage, const NvShader *sh, uint8_t tmp[DMSH_PUSH_SIZE]);
 static void ubo_read(int stage, int reg, int off, size_t n, void *out) {
     memset(out, 0, n);
+    // Handles the game pushes (c[24], "slot" DMSH_PUSH_BANK - 3: dmsh_build.py ubo_bank), read from the pushed bytes as the shader sees them. Scoped: only for a compute shader whose
+    // override reflection asks for it (push_handles; PRAGMATA's 8 depth-pyramid kernels, c24regen-2026-11-07.md). Any other read of that slot stays zeros, as before
+    if (reg == DMSH_PUSH_BANK - 3) { const NvShader *ps = g_push_sh; if (stage == 5 && ps && ps->push_handles && off >= 0 && (size_t)off + n <= DMSH_PUSH_SIZE) { uint8_t tmp[DMSH_PUSH_SIZE]; memcpy(out, push_view(stage, ps, tmp) + off, n); } return; }
     if (stage < 0 || stage >= 6 || reg < 0 || reg >= 16) return;
     const p_bind_buf *u = &S.ubo[stage][reg];
     if (!u->addr || (uint64_t)off + n > u->size) return;
@@ -11146,7 +11166,7 @@ static void cbs_feedback(cbs_list *l, NSError *err, const char *where) {   // fr
 static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex);
 static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) { cbs_note(sh); AP_B; int r = encode_args_(en, sh, nvn_stage, metal_vertex); AP_E(3); return r; }
 static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) {
-    g_enc_key = sh->key; g_enc_stage = nvn_stage;   // named by the binding fallbacks' log lines (tex_fit)
+    g_enc_key = sh->key; g_enc_stage = nvn_stage; g_push_sh = sh;   // named by the binding fallbacks' log lines (tex_fit)
     if (nvn_stage == 5) safk_note(sh->key);   // DM_NVN_SUBMIT_AT_FLUSH_KEYS
     if (nvn_stage == 5) { g_eb_n = 0; g_fr_nt = 0; }   // DM_NVN_WATCHDOG_DIAG / DM_NVN_FLIGHTREC: this dispatch's buffer bindings (EB_NOTE) and handles (FR_TEX)
     if (nvn_stage == 1 && !metal_vertex && sh->has_alpha && atest_on()) at_bind(en);   // also for a shader without bindings

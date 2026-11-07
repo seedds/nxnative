@@ -42,6 +42,8 @@ shader_note	Ocarina of Time shaders
 fps_target	60
 
 # ---- Graphics ----
+# The game turns the difference of two raw counter reports into its wind and particle time step at the Switch 2's system counter rate. At NVN's 614.4 MHz the step was 19.66 times too large: foliage, leaves and hanging plants moved about 20 times too fast
+gpu_ts_hz	31250000
 draw_barriers	game
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on

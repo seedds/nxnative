@@ -28,6 +28,8 @@ One [NUP container](../../../docs/development.md#the-packing-script-in-detail) o
 
 ## Frame rate
 
+The game's frame loop steps a constant per frame, so it played in slow motion below 60 fps. A stub now takes the measured frame time when that is longer ([A fixed step per frame runs slowly below the target](../../../docs/reference/frame-rate.md#a-fixed-step-per-frame-runs-slowly-below-the-target)); `DM_FRAME_DELTA=0` turns it off. Found by gunvalk in [Lichii PR #216](https://github.com/zortos293/Lichii/pull/216).
+
 Measured on an M6 Mac with 16 GB, headless, on one walk with camera turns (`walk.sh` in the work folder).
 
 - Current: the title and menu, a movie behind them, are a locked 60 fps (p50 16.67 ms, GPU span 15.6 ms).

@@ -22,6 +22,20 @@
 #include <math.h>
 #include <stdint.h>
 
+// Frame time for a game that steps by it (Ocarina of Time's patches.py): the mean of the last NVN_FDELTA_N present intervals in seconds, or 0 at the target rate. A stall counts at most
+// 0.1 s, so a load does not jump the game forward, and the result stops at 4 frames of 60 fps; under 1.1 frames the game's own fixed step is smoother than a noisy measured one
+#define NVN_FDELTA_N 8
+typedef struct { uint64_t last; double t[NVN_FDELTA_N]; int n, i; } nvn_fdelta;
+static inline float nvn_fdelta_next(nvn_fdelta *f, uint64_t now_ns) {
+    uint64_t was = f->last; f->last = now_ns;
+    if (!was) return 0;
+    double s = (double)(now_ns - was) / 1e9, sum = 0;
+    f->t[f->i] = s > 0.1 ? 0.1 : s; f->i = (f->i + 1) % NVN_FDELTA_N; if (f->n < NVN_FDELTA_N) f->n++;
+    for (int i = 0; i < f->n; i++) sum += f->t[i];
+    double mean = sum / f->n;
+    return mean * 60 < 1.1 ? 0.0f : (float)fmin(mean, 4.0 / 60);
+}
+
 #define FSTEP_MAX 3           // the largest step: both games' own interval logic uses 1–3 (BotW clamps to [2, 3], TOTK picks 2 or 3), so their integer readers never see 4
 #define FSTEP_LATE 0.1        // a frame is late when it or its GPU work took this many vsyncs (1.7 ms) more than k: 53 fps is not 60 (start-to-start jitter on time is well below)
 #define FSTEP_FIT 0.85        // a frame would fit k − 1 when its cost is at most this share of it

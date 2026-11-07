@@ -227,6 +227,27 @@ class TableTools(unittest.TestCase):
         header.write_text(text.replace('#define DMSH_KIND_CBUF "cbuf"', '#define DMSH_KIND_CBUF "cbuf_renamed"'))   # the reflection's "cbuf" is no longer a uniform buffer
         self.assertEqual(rows(), [])
 
+    def test_unchanged_tables_keep_their_bytes_and_new_ones_carry_no_clock_time(self):   # every full shader build rewrote both with the time in the header, so the packed data changed
+        lib = Path(tempfile.mkdtemp()) / 'b-0123456789ab'; lib.mkdir(); self.addCleanup(shutil.rmtree, lib.parent)
+        (lib / 'inputs.tsv').write_text('game\tfixture\ninputs\taaaaaaaaaaaa\n')
+        key = '00112233aabbccdd'
+        (lib / f'{key}_b.metal').write_text('fragment float4 main0(constant cb& fp_c1) { int _5 = in.v; return (fp_c1)._m0[_5]; }\n')
+        (lib / f'{key}_b.json').write_text(json.dumps({'bindings': [{'kind': 'cbuf', 'reg': 0, 'msl_name': 'fp_c1'}]}))
+        for tool, table in (('c1_guard.py', 'c1_full.tsv'), ('cb_extent.py', 'cb_extent.tsv')):
+            with self.subTest(tool=tool):
+                path = lib.parent / table
+                def run(tool=tool, path=path):
+                    r = subprocess.run([sys.executable, REPO / 'dm/gfx/tools' / tool, lib, path], capture_output=True, text=True)
+                    self.assertEqual(r.returncode, 0, r.stderr)
+                run(); made = path.read_bytes()
+                self.assertEqual(made.splitlines()[0], b'# chain b-0123456789ab inputs aaaaaaaaaaaa generated')
+                run(); self.assertEqual(path.read_bytes(), made)   # the same again: reproducible
+                older = made.replace(b' generated\n', b' 2026-11-01T21:36:26+00:00\n', 1)   # one written before this, with the same rows: kept, time and all
+                path.write_bytes(older); os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+                run(); self.assertEqual(path.read_bytes(), older); self.assertEqual(path.stat().st_mtime_ns, 1_000_000_000)
+                path.write_bytes(older + b'stale row\n'); run(); self.assertEqual(path.read_bytes(), made)   # other rows: written again
+                path.write_bytes(older.replace(b'aaaaaaaaaaaa', b'bbbbbbbbbbbb', 1)); run(); self.assertEqual(path.read_bytes(), made)   # another library's inputs: written again
+
 
 class TableDifference(unittest.TestCase):   # the row the build error names when a split table differs from the profile's (GitHub issue #1263)
     HEAD = b'# header\n'

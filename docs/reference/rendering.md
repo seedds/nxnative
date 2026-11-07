@@ -1044,6 +1044,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `nvn_rec.h` records the indirect draw (`RO_R_MESH_IND`: the argument buffer's GPU address and the threads per object and mesh threadgroup, as `RO_R_MESH` keeps them) and replays it. `t_rec_draws` checks that the recorder has a stand-in for every draw the NVN layer encodes.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): the iOS app aborted when a save loaded; on the Mac with the encode thread on, 28 s after the title ([issue #1265](https://github.com/seedds/nxnative/issues/1265)).
 
+### Mesh draws with no task shader above 1024 workgroups
+
+- **Symptom:** a GPU page fault (`kIOGPUCommandBufferCallbackErrorPageFault`) 30 to 40 s after a save loads, then the game hangs or [stops](#a-gpu-whose-access-macos-revoked-stops-the-game). `DM_NVN_SKIP_MESH=1` makes it go away.
+- **Cause:** Metal allows at most 1024 threadgroups in a mesh grid. The object grid has no such limit. A mesh draw with no task shader has no object function, so its workgroup count becomes the mesh grid. Indirect mesh draws reached 1,771 workgroups, direct ones at most 32. A mesh grid above 1024 reads out of bounds. Draws with a task shader are safe: `dmsh_meshstage.py` clamps the grid they emit to `METAL_MAX_GRID`.
+- **Fix:** `mtk_encode` in `nvn_geometry.inc` splits a mesh draw with no task shader into parts of at most 1024 workgroups. The mesh shader takes its workgroup as `dm_first[0]` plus the threadgroup ID, so each part binds its own `first` at buffer 29. A direct draw is split on the CPU. For an indirect draw, the `mdx_mask` kernel writes 8 part records (`MDX_MESH_PARTS`) with count and first. A count above 8,192 draws only the first 8,192 and reports `[RED] an indirect mesh draw with no task shader asked for more than 8192 workgroups` once.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on an M2 Max ([issue #1326](https://github.com/seedds/nxnative/issues/1326)): the foliage's mesh draws. With a pipeline archive state that faulted every time at about frame 1,930, the game ran 14 minutes (frame 30,600) without a fault.
+
 ### Inline uniform updates as ordered GPU copies
 
 - **Cause:** reading the uniform buffer from the CPU at encode time gives the frame's *last* value, not the draw's.

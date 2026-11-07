@@ -101,6 +101,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 - [`nn::ndve`'s movie enhancement file](../../../docs/reference/shaders.md#nnndves-movie-enhancement-file)
 - [Task and mesh shaders in BNSH, and indirect mesh draws](../../../docs/reference/shaders.md#task-and-mesh-shaders-in-bnsh-and-indirect-mesh-draws)
 - [Indirect task / mesh draws on the encode thread](../../../docs/reference/rendering.md#indirect-task--mesh-draws-on-the-encode-thread): the iOS app aborted when a save loaded.
+- [Mesh draws with no task shader above 1024 workgroups](../../../docs/reference/rendering.md#mesh-draws-with-no-task-shader-above-1024-workgroups): GPU page faults 30-40 s after a save loaded (issue #1326), from foliage mesh draws of up to 1,771 workgroups.
 - [F2IP](../../../docs/reference/shaders.md#f2ip)
 - [A pixel shader's depth after a partly written target](../../../docs/reference/shaders.md#a-pixel-shaders-depth-after-a-partly-written-target): 46 depth-writing pixel shaders read their depth from the wrong register, agl_common's depth pass among them.
 - [An HMMA outside a chain overwrote the chain's accumulator](../../../docs/reference/shaders.md#an-hmma-outside-a-chain-overwrote-the-chains-accumulator): dotted rows across fog and light in play.

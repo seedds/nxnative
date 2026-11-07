@@ -65,6 +65,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md) (SDK 11 names).
 - **Note:** overloads change too: SDK 18's `nn::hid::InitializeTouchScreen(int, int)` ([Super Mario Galaxy](../../dm/games/010099C022B96000/README.md), [SDK calls that open a system service through sm](#sdk-calls-that-open-a-system-service-through-sm)), SDK 19's `LoadModule` with one more bool ([`nn::ro` and its port](#nnro-and-its-port)), and `vi::CreateLayer` with the layer's size ([Absolum](../../dm/games/0100A83022A22000/README.md), [`vi::CreateLayer` with the layer's size](#vicreatelayer-with-the-layers-size)). SDK 19's `fs::MountRom(const char *, int, void *, size_t)` and `fs::QueryMountRomCacheSize(size_t *, int)` take a program index (Metroid Prime 4: Beyond's boot, `[RED] sf: the game connects to service fsp-srv itself`): the host has one RomFS, so index 0 mounts it and any other index logs a red line.
 
+### The player's own presence offline
+
+- **Symptom:** `game called nn::diag abort: Result 0` at startup, its caller testing the result of `nn::friends::UserPresence::Initialize` (Core Keeper: `main+0x1089ac2c` in the file's module, through a linker thunk to a wrapper at `main+0x550`), right after `oe::SetFocusHandlingMode`.
+- **Cause:** the host answered `UserPresence::Initialize`, `SetDescription` and `Commit` with a failure, like the friends calls that need the network. The player's own presence is the friends service's local state: a console keeps it and sends it once it goes online, so with no network the three still succeed on Horizon. Core Keeper treats the failure as fatal.
+- **Fix:** the three succeed (`hle_friends.c`); the host keeps no presence, since nothing the game calls reads it back.
+- **Found on:** [Core Keeper](../../dm/games/010070201D1BA000/README.md) (SDK 20.5.21, Unity 2022.3 IL2CPP).
+
 ### SDK 4's `friends::GetBlockedUserList` without a `Uid`
 
 - **Symptom:** abort in `sm::Initialize` under `nn::friends::GetBlockedUserList` after the opening movie.

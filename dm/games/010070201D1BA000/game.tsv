@@ -1,0 +1,41 @@
+# Game profile of Core Keeper (Switch, update 1.2.1.5 = v1). SDK 20.5.21, Unity 2022.3.50f1 IL2CPP with FMOD. Reaches its world on the Mac (title, world and character creation, walking) at 30 fps.
+# main's 302 MB of text takes a middle patch area (docs/reference/rewriter.md "A middle patch area for a text that neither end reaches"); see README.md
+
+# ---- Identity ----
+title_id	010070201D1BA000
+program_id	010070201D1BA000
+
+# ---- App ----
+name	Core Keeper
+ipa	CoreKeeper.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v1	1.2.1.5	main=82349360c21dd1014a5b61909ba2c1e5	subsdk0=a870a783a09f57256d3630b73485398e	sdk=c668ae02ea221e429677aa61d3dab7c6
+package	v1
+shader_versions	v1
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Data/resources.assets.resS
+zip_store	.assets:.bundle:.dat:.gzip:.nro:.png:.resource:.ress:.metallib
+
+# ---- Memory ----
+# the NPDM declares 16 MB of system resource (virtual address memory) and main never sets a heap: a 5 GB block with a 4.375 GB alias region, where the game maps its memory itself
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 16 MB of system resource
+sys_resource	0x1000000
+
+# ---- Shader split ----
+shader_groups	/Data/=data /.nrr/=nrr /Plugins/=plugins
+shader_note	Core Keeper shaders
+
+# ---- Address region check ----
+# the game calls nvnDeviceSetDepthMode with near = 0 in the check boot: the pipeline bases made before it runs are made for that mode
+depth_mode	zero
+
+# address regions: 2026-11-05, no address regions (rewrite 285e777731f3)

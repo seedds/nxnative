@@ -34,6 +34,37 @@ src, outdir, NAME = sys.argv[1], sys.argv[2], sys.argv[3]
 # An NSO, or an NRO (a module the game loads at run time with nn::ro, Super Smash Bros. Ultimate's fighter code), rewritten as an NSO of the same layout would be. nso.py checks the file
 # against its header before anything is allocated (a damaged module stops here with a [RED] line)
 MOD = nso.cli_read(src)
+# A text so long that the front and back patch areas below leave sites between them that no B reaches (Core Keeper's main: 302 MB of text, and ro, data and bss after it, so the back
+# area reaches no site below 272 MB and the front one none above 111 MB) gets a third, middle area (MID): nso_shift.py opens a gap of MID_LEN bytes at a function start F between those
+# reaches, moving everything from F on up by MID_LEN and fixing what refers across it; the gap is part of the text from then on, so the module is rewritten as if it had that text.
+# Branches that no longer reach across the gap go through veneers at its ends; the middle area is the rest of it, and takes the sites from MID_SPLIT (the lowest that reaches its top)
+# up to the back area's BACK_MIN. F lies where both hold, as near the middle of that range as nso_shift.choose_split finds a function start it may split at. The first pass opens
+# 16 MB; when the middle sites need more, the rewriter runs again with that size (DM_PATCH_MID). Offsets in this module's outputs (sites, cuts, gates, crash reports) are those of
+# the shifted image; the fixups table names the split (SHIFT_AT, SHIFT_LEN) to map them back. Registered CUTS and OBS (offsets in the file's module) are mapped through the shift
+MID = None
+_back_min = lambda m: ((((len(m.image) + m.bss + 0x3FFF) & ~0x3FFF) + 0x8000 + 0xFFFF) & ~0xFFFF) - 0x8000000 + 0x100000
+if MOD.text_end > 0x8000000 - 0x10000 and _back_min(MOD) >= 0x8000000 - 0x200000:
+    import nso_code, nso_shift
+    from capstone import Cs as _Cs, CS_ARCH_ARM64 as _A64, CS_MODE_ARM as _ARM
+    MID_LEN = int(os.environ.get('DM_PATCH_MID', '0'), 0) or 0x1000000
+    _front = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or 0x1000000
+    _lo, _hi = _back_min(MOD) + MID_LEN - 0x7F00000, 0x8000000 - _front - 0x100000 + 0x7F00000 - MID_LEN
+    assert _lo <= _hi, f'no split reaches: the back patch area reaches no site below {_back_min(MOD):#x}, and a middle area of {MID_LEN:#x} leaves sites out of every area\'s reach'
+    _md = _Cs(_A64, _ARM); _starts, _last = [], 0
+    for _s, _e in nso_code.fde_ranges(MOD.image):
+        if _s >= _last: _starts.append(_s)
+        _last = max(_last, _e)
+    _words = nso_shift.pcrel_words(MOD.image, nso_shift.code_ranges(MOD.image, MOD.text_end, _md))
+    try:
+        SHIFT_AT = nso_shift.choose_split(MOD.image, MOD.text_end, _lo, _hi, _words, _starts)
+        _img, _segs, _st = nso_shift.shift(MOD.image, MOD.segments, SHIFT_AT, MID_LEN, _md, _words)
+    except nso_shift.Error as e: sys.exit(f'[RED] {NAME}: the text cannot be split for a middle patch area: {e}')
+    MID = (SHIFT_AT + _st['VL'], SHIFT_AT + MID_LEN - _st['VH'])   # the middle area: the gap less its veneers
+    MID_SPLIT = SHIFT_AT + MID_LEN - 0x7F00000
+    print(f'{NAME}: {MOD.text_end / 2**20:.1f} MB of text: a gap of {MID_LEN:#x} at {SHIFT_AT:#x} for a middle patch area (nso_shift.py); {_st["far"]} branches across it through {_st["low"] + _st["high"]} veneers', flush=True)
+    MOD = nso.Module(_img, _segs, MOD.bss, MOD.build_id)
+    del _img, _words
+shifted = (lambda a: a + MID_LEN if a >= SHIFT_AT else a) if MID else (lambda a: a)
 bss = MOD.bss
 # Every jump between the patch area and the code is a B (±128 MB). A patch area appended after the image (with bss) cannot reach the code when it would start beyond 112 MB (leaving 16 MB for the patch area): Metroid Dread's main has about 1.8 GB of bss (the engine's static heap); Engage's main starts its patch area at about 103 MB and keeps it after the image.
 # The patch area then sits FRONT bytes before the module base (PATCH_OFF is negative), and the output file holds only text + ro + data (FILE_IMAGE_LEN) followed by the patch area; the loader supplies zero pages for bss and the key page (IMAGE_SIZE is the whole image).
@@ -54,10 +85,10 @@ TWO = BIG_TEXT and MOD.text_end > 0x8000000 - 0x10000
 BACK_MIN = 0   # TWO: BACK_OFF (set below) less the reach, plus the margin
 if TWO:
     BACK_MIN = ((((len(MOD.image) + bss + 0x3FFF) & ~0x3FFF) + 0x8000 + 0xFFFF) & ~0xFFFF) - 0x8000000 + 0x100000
-    assert BACK_MIN < 0x8000000 - 0x200000, f'no split reaches: the back patch area reaches no site below {BACK_MIN:#x}, too close to the front area\'s reach'
-    FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or min(0x1000000, (0x8000000 - 0x100000 - BACK_MIN) & ~0xFFFF)
+    assert MID or BACK_MIN < 0x8000000 - 0x200000, f'no split reaches: the back patch area reaches no site below {BACK_MIN:#x}, too close to the front area\'s reach'
+    FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or (0x1000000 if MID else min(0x1000000, (0x8000000 - 0x100000 - BACK_MIN) & ~0xFFFF))
 elif BIG_TEXT: FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or (0x8000000 - 0x10000 - MOD.text_end) & ~0xFFFF
-SPLIT = max(0x8000000 - FRONT - 0x100000, BACK_MIN) if TWO else None
+SPLIT = (MID_SPLIT if MID else max(0x8000000 - FRONT - 0x100000, BACK_MIN)) if TWO else None
 IMG = MOD.image
 ORIG_TEXT = bytes(IMG[:MOD.text_end])   # the text as the file has it, before any cut or site: <name>.changed.tsv compares against it
 if not FAR: IMG.extend(bytes(bss))
@@ -120,7 +151,7 @@ def load_patches():
     return tables, where
 PATCHES, PATCH_WHERE = load_patches()
 BUILD_ID = MOD.build_id[:0x10].hex()
-cuts = list(PATCHES['CUTS'].get(BUILD_ID, []))
+cuts = [(shifted(o), ob, nb, why) for o, ob, nb, why in PATCHES['CUTS'].get(BUILD_ID, [])]
 if BUILD_ID not in PATCHES['CUTS']:
     from nso_match import resolve
     profile = os.path.basename(os.environ.get('DM_GAME', '').rstrip('/'))
@@ -212,11 +243,12 @@ elif ue_ring_why.startswith('[RED] '): print(f'[RED] {NAME}: {ue_ring_why[6:]}: 
 
 md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
 patch = bytearray(); fix = []; gates = []; stats = {}
-patch_front, patch_back, PATCH_BASE = patch, bytearray(), PATCH_OFF   # the area emit() writes into and its offset: the front one unless TWO puts a site in the back one
+patch_front, patch_back, patch_mid, PATCH_BASE = patch, bytearray(), bytearray(), PATCH_OFF   # the area emit() writes into and its offset: the front one unless TWO puts a site in another
 def use_area(a):
-    """Emit what follows into the patch area that reaches the code at offset a (TWO: the back area from SPLIT on)"""
+    """Emit what follows into the patch area that reaches the code at offset a (TWO: the back area from SPLIT on; MID: the middle one from SPLIT to BACK_MIN, the back one from there)"""
     global patch, PATCH_BASE
-    patch, PATCH_BASE = (patch_back, BACK_OFF) if TWO and a >= SPLIT else (patch_front, PATCH_OFF)
+    if MID and SPLIT <= a < BACK_MIN: patch, PATCH_BASE = patch_mid, MID[0]
+    else: patch, PATCH_BASE = (patch_back, BACK_OFF) if TWO and a >= SPLIT else (patch_front, PATCH_OFF)
 def stat(k): stats[k] = stats.get(k, 0) + 1
 def here(): return PATCH_BASE + len(patch)
 def emit(w, kind=None):
@@ -1444,7 +1476,7 @@ for a in sorted(kinds):
         struct.pack_into('<I', IMG, a, 0xD2A00080 | arg); stat(k); continue
     put_branch(a, st)
 
-obs = list(PATCHES['OBS'].get(BUILD_ID, []))
+obs = [(shifted(o), oid, ow, why) for o, oid, ow, why in PATCHES['OBS'].get(BUILD_ID, [])]
 for off, oid, ow, why in obs:
     w = struct.unpack_from('<I', IMG, off)[0]
     assert f'{w:08x}' == ow, f'observation gate original instruction mismatch {off:#x}: {w:08x}'
@@ -1523,6 +1555,7 @@ FRAME_STEP = PATCHES['FRAME_STEP']
 FS_STATE_OFF = 0
 RENDER_SCALE = 0   # 1 = the build has a render-scale stub (state +0x10): the fixups table says so (RENDER_SCALE), and the iOS launcher offers the setting (dm/games/settings.tsv)
 if BUILD_ID in FRAME_STEP and NAME == 'main':
+    if MID: sys.exit(f'[RED] {NAME}: frame step stubs name offsets of the file\'s module, which a middle patch area shifts; not supported yet')
     FS_STATE_OFF = KEY_PAGE_OFF + 0x4000
     if FAR:
         # The loader supplies zero-filled BSS/key pages for a front patch area.
@@ -1848,11 +1881,18 @@ os.makedirs(outdir, exist_ok=True)
 P = lambda ext: os.path.join(outdir, f'{NAME}.{ext}')
 patch = patch_front
 BACK_LEN = (len(patch_back) + 0x3FFF) & ~0x3FFF
+if MID:   # the middle area goes into the gap, which is text: sealed read-only and executable with the rest of it
+    if len(patch_mid) > MID[1] - MID[0]:
+        assert 'DM_PATCH_MID' not in os.environ, f'middle patch area of {len(patch_mid):#x} bytes does not fit the {MID[1] - MID[0]:#x} of its gap'
+        need = (MID_LEN - (MID[1] - MID[0]) + len(patch_mid) * 9 // 8 + 0xFFFFF) & ~0xFFFFF   # veneers, the stubs and room for the veneers a longer gap adds
+        print(f'{NAME}: middle patch area of {len(patch_mid):#x} bytes does not fit the {MID[1] - MID[0]:#x} of its gap; rewriting again with a gap of {need:#x}', flush=True)
+        os.execve(sys.executable, [sys.executable] + sys.argv, dict(os.environ, DM_PATCH_MID=hex(need)))
+    IMG[MID[0]:MID[0] + len(patch_mid)] = patch_mid
 if FAR:   # patch area before the base: file = text + ro + data (padded to 16K) + patch area (TWO: the front area padded to 16K, then the back area, padded to 16K)
     if BIG_TEXT and len(patch) > FRONT - 0x4000 and 'DM_PATCH_FRONT' not in os.environ:
         need = (len(patch) + 0x4000 + 0xFFFF) & ~0xFFFF
         print(f'{NAME}: patch area of {len(patch):#x} bytes does not fit in {FRONT:#x} before the base; rewriting again with {need:#x}', flush=True)
-        os.execve(sys.executable, [sys.executable] + sys.argv, dict(os.environ, DM_PATCH_FRONT=hex(need)))
+        os.execve(sys.executable, [sys.executable] + sys.argv, dict(os.environ, DM_PATCH_FRONT=hex(need)))   # keeps DM_PATCH_MID
     assert len(patch) <= FRONT - 0x4000, f'patch area of {len(patch):#x} bytes does not fit in the {FRONT:#x} before the base'
     if TWO:
         assert IMAGE_SIZE <= BACK_OFF, 'back patch area overlaps the key page or the frame step page'
@@ -1863,11 +1903,12 @@ else:
     open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
 import hashlib
 with open(os.path.join(outdir, 'build_src.sha256'), 'w') as f:   # the same for every module: the rewriter and every patch file, by path from dm/tools
-    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, ue_cvar.__file__, ue_malloc.__file__, fps_target.__file__, ue_region.__file__, ue_ring.__file__, snowdrop_pools.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
+    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, os.path.join(os.path.dirname(nso_code.__file__), 'nso_shift.py'), nso_asm.__file__, ue_cvar.__file__, ue_malloc.__file__, fps_target.__file__, ue_region.__file__, ue_ring.__file__, snowdrop_pools.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
 with open(P('fixups.tsv'), 'w') as f:
     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
     if FAR: f.write(f'# IMAGE_SIZE\t{IMAGE_SIZE:#x}\n# FILE_IMAGE_LEN\t{FILE_IMAGE_LEN:#x}\n')   # patch area before the base (negative PATCH_OFF): whole image size, length of the image part of the file
     if TWO: f.write(f'# BACK_OFF\t{BACK_OFF:#x}\n# BACK_LEN\t{BACK_LEN:#x}\n')   # the back patch area (TWO): its offset in the image, and its length, the last bytes of the file
+    if MID: f.write(f'# SHIFT_AT\t{SHIFT_AT:#x}\n# SHIFT_LEN\t{MID_LEN:#x}\n# MID_OFF\t{MID[0]:#x}\n# MID_LEN\t{len(patch_mid):#x}\n')   # MID: the gap nso_shift.py opened (offsets from SHIFT_AT on are SHIFT_LEN higher than the file's module) and the middle area in it
     for k in KEY_INDEX: f.write(f'# KEY_{k}_IDX\t{KEY_INDEX[k]}\n')
     if FS_STATE_OFF: f.write(f'# FPS_STATE_OFF\t{FS_STATE_OFF:#x}\n')   # frame step state page (FRAME_STEP): the loader writes the target fps there
     if UE_CALL is not None: f.write(f'# UE_MALLOC_VT\t{UE_VT:#x}\n# UE_MALLOC_SLOT\t{UE_SLOT:#x}\n')   # Unreal's FMallocBinned3 (ue_malloc.py): its vtable and the slot of its name getter, which names the slot layout
@@ -1916,5 +1957,5 @@ with open(P('changed.tsv'), 'w') as f:
 with open(P('obs.tsv'), 'w') as f:
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')
     for off, oid, ow, why in obs: f.write(f'{off:#x}\t{oid}\t{ow}\t{why}\n')
-print(NAME, stats, 'cuts', len(cuts), 'obs', len(obs), 'patch', len(patch_front) + len(patch_back), 'PATCH_OFF', hex(PATCH_OFF), *(('BACK_OFF', hex(BACK_OFF), 'back', len(patch_back)) if TWO else ()), 'slot_refs', len(fix), 'gates', len(gates))
+print(NAME, stats, 'cuts', len(cuts), 'obs', len(obs), 'patch', len(patch_front) + len(patch_back) + len(patch_mid), 'PATCH_OFF', hex(PATCH_OFF), *(('BACK_OFF', hex(BACK_OFF), 'back', len(patch_back)) if TWO else ()), *(('MID_OFF', hex(MID[0]), 'mid', len(patch_mid)) if MID else ()), 'slot_refs', len(fix), 'gates', len(gates))
 if DATA_BLOCKS: print(NAME, 'data blocks left alone:', ', '.join(f'{s:#x}..{e:#x}' for s, e in DATA_BLOCKS))

@@ -1365,6 +1365,8 @@ static int ubd_lazy(void) { static int v = -1; if (v < 0) { const char *e = gete
 enum { UBD_PF = 1024 };
 static uint64_t g_ubd_pf[UBD_PF];   // pages (address >> 12, +1) the deferred updates touch, open addressing; cleared when the list is landed
 static int g_ubd_wide;              // an update spans more than 16 pages: the filter is skipped
+static uint64_t g_ubd_env_lo = UINT64_MAX, g_ubd_env_hi;   // the span of every update listed since the list was last emptied: a range outside it hits none (vertex, index and
+                                                          // storage buffers in other pools, most of each draw's lookups), answered before the page filter
 static inline unsigned ubd_pf_slot(uint64_t pg) { return (unsigned)((pg * 0x9E3779B97F4A7C15ull) >> 54) & (UBD_PF - 1); }
 // Pages inside the guest address space (0x70_0000_0000, 8 GB here on the Mac and on iOS) are kept in a bitmap as well: one load per page instead of probing the table, which was
 // most of the filter's cost (each draw asks for every buffer it binds). Pages outside it use the table only
@@ -1373,6 +1375,7 @@ static const uint64_t UBD_BM_BASE = 0x7000000000ull;
 static uint64_t g_ubd_bm[(1u << UBD_BM_SHIFT) / 64];
 static inline int ubd_bm_in(uint64_t lo, uint64_t hi) { return lo >= UBD_BM_BASE && ((hi - 1 - UBD_BM_BASE) >> 12) < (1u << UBD_BM_SHIFT); }
 static void ubd_pf_add(uint64_t lo, uint64_t hi) {
+    if (lo < g_ubd_env_lo) g_ubd_env_lo = lo; if (hi > g_ubd_env_hi) g_ubd_env_hi = hi;
     if (((hi - 1) >> 12) - (lo >> 12) > 16) { g_ubd_wide = 1; return; }
     for (uint64_t a = lo >> 12; a <= (hi - 1) >> 12; a++) if (a >= UBD_BM_BASE >> 12 && a - (UBD_BM_BASE >> 12) < (1u << UBD_BM_SHIFT)) { uint64_t pg = a - (UBD_BM_BASE >> 12); g_ubd_bm[pg >> 6] |= 1ull << (pg & 63); }   // a range across the window's edge too: a lookup inside the window asks only the bitmap
     for (uint64_t pg = lo >> 12; pg <= (hi - 1) >> 12; pg++) { unsigned k = ubd_pf_slot(pg);
@@ -1380,6 +1383,7 @@ static void ubd_pf_add(uint64_t lo, uint64_t hi) {
         g_ubd_pf[k] = pg + 1; }
 }
 static inline int ubd_pf_hit(uint64_t lo, uint64_t hi) {
+    if (hi <= g_ubd_env_lo || lo >= g_ubd_env_hi) return 0;
     if (g_ubd_wide || ((hi - 1) >> 12) - (lo >> 12) > 16) return 1;
     if (ubd_bm_in(lo, hi)) { for (uint64_t pg = (lo - UBD_BM_BASE) >> 12; pg <= (hi - 1 - UBD_BM_BASE) >> 12; pg++) if (g_ubd_bm[pg >> 6] >> (pg & 63) & 1) return 1; return 0; }
     for (uint64_t pg = lo >> 12; pg <= (hi - 1) >> 12; pg++) { unsigned k = ubd_pf_slot(pg);
@@ -1444,7 +1448,7 @@ static uint64_t ubd_shadow_(uint64_t lo, uint64_t hi) {
 }
 // Encode the deferred copies in order (rp_end, once the pass has ended)
 static void ubd_flush(void) {
-    ubd_bm_clear(); int n = g_nubd; g_nubd = 0; g_ubd_ver++; memset(g_ubd_pf, 0, sizeof g_ubd_pf); g_ubd_wide = 0;
+    ubd_bm_clear(); int n = g_nubd; g_nubd = 0; g_ubd_ver++; memset(g_ubd_pf, 0, sizeof g_ubd_pf); g_ubd_wide = 0; g_ubd_env_lo = UINT64_MAX; g_ubd_env_hi = 0;
     for (int i = 0; i < n; i++) { const ubd_ent *e = &g_ubd[i]; void *db; uint64_t dof;
         if (!mtl_addr(e->lo, e->hi - e->lo, &db, &dof)) continue;
         enc_b_copy_buffer(blit_buf(0, 0, e->lo, e->hi), e->buf, e->off, (__bridge id<MTLBuffer>)db, dof, e->hi - e->lo); g_gp_ubd++; }

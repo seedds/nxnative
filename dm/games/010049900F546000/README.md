@@ -41,6 +41,7 @@ General host changes first needed here; each applies to every game:
 - [Every undrawn extension code point is a ring](../../../docs/reference/services.md#every-undrawn-extension-code-point-is-a-ring): the crash at boot, `main+0x63780` on 1.1.4, U+E06B, which issue #206 reported at `main+0x62d20` on 1.0.0.
 - [Multi-program applications: `oe::ExecuteProgram`](../../../docs/reference/services.md#multi-program-applications-oeexecuteprogram).
 - [Offline HTML pages in a web view](../../../docs/reference/services.md#offline-html-pages-in-a-web-view).
+- [Under `--work-dir` the programs of one game overwrote each other's RomFS](../../../docs/reference/packing.md#under---work-dir-the-programs-of-one-game-overwrote-each-others-romfs): the app build stopped at the launcher's RomFS marker.
 
 Not needed here: the same-pass gamma draw over each movie tile (agl's `021631192bc452b6`) that earlier patches gave a `feedback_snap` for: main's general snapshot of an attachment a draw samples (`fb_prepare`, `nvn_mtl.m`) already handles it.
 

@@ -247,6 +247,14 @@ def written_w(p):
 def writes_reg(p, reg):
     """Whether p changes the general-purpose register reg (xN or wN): a write of wN clears the upper half of xN too, and a compare only sets the flags"""
     return p.mnemonic not in ('cmp', 'cmn', 'tst') and 'w' + reg[1:] in written_w(p)
+def null_base(p, n):
+    """Whether p sets a table base to a constant inside page zero, so that a table load of n entries through it reads that page. Horizon never maps page zero, so the load would fault on the
+    console too: no path of a working game carries such a write to the load, and a walk back for the base's writer chain goes past it. Cuphead 1.3.7 main+0x59dc90 (Unity 2017.4) interleaves
+    four dispatch loops that share registers: x12 is the base of one (adrp + add at +0x59dba4) and the constant 1 of another (mov w12,#1 at +0x59dbdc, whose block leaves by b to its own
+    dispatch), kept apart only by the value of w8. Since the walks see a write of wN (e5620b1a), that mov ended the chain and the site stopped at the jump table assertion (issue #1532)"""
+    if p.mnemonic != 'mov' or len(p.operands) != 2: return False
+    v = 0 if p.op_str.endswith(('wzr', 'xzr')) else p.operands[1].imm if p.operands[1].type == ARM64_OP_IMM else None
+    return v is not None and 0 <= v and v + 4 * n <= 0x1000
 def writes_reg_any(p, regs):
     """writes_reg for a set of wN names"""
     return p.mnemonic not in ('cmp', 'cmn', 'tst') and bool(written_w(p) & regs)
@@ -477,7 +485,31 @@ def window_adrp(x, S, pc):
     rd = num(x.reg_name(x.operands[0].reg))
     return ADRP(S if rd == 18 else rd, pc, x.operands[1].imm)
 
+def check_window_branches(seg):
+    """For windows with a B, reject exits that carry a reservation through a stub's store."""
+    if not any(x.mnemonic == 'b' for x in seg): return
+    assert all(b.address == a.address + 4 for a, b in zip(seg, seg[1:])), f'noncontiguous window {seg[0].address:x}'
+    by_addr = {x.address: x for x in seg}
+    pending, seen = [(seg[0].address, False)], set()
+    while pending:
+        addr, live = pending.pop()
+        if addr not in by_addr:
+            assert not live, f'branch leaves window with live reservation {addr:x}'
+            continue
+        if (addr, live) in seen: continue
+        seen.add((addr, live))
+        x = by_addr[addr]; m = x.mnemonic
+        if m in EXCL_LD: live = True
+        elif m in EXCL_ST or m == 'clrex': live = False
+        if m == 'b':
+            tgt = x.operands[-1].imm
+            pending.append((tgt, live))
+        elif m in ('cbz', 'cbnz', 'tbz', 'tbnz') or m.startswith('b.'):
+            pending.extend(((x.operands[-1].imm, live), (addr + 4, live)))
+        else: pending.append((addr + 4, live))
+
 def site_window(seg):
+    check_window_branches(seg)
     used = set()
     for x in seg: used |= regs_in(x)
     S, T = pick(used)
@@ -494,12 +526,13 @@ def site_window(seg):
         w = struct.unpack('<I', x.bytes)[0]
         if has18(x): w = subst(x, S)
         m = x.mnemonic
-        if m in ('cbz', 'cbnz', 'tbz', 'tbnz') or m.startswith('b.'):
+        if m in ('b', 'cbz', 'cbnz', 'tbz', 'tbnz') or m.startswith('b.'):
             tgt = x.operands[-1].imm
             if lo <= tgt < hi: newt = copy0 + (tgt - lo)
             else: ex_targets.append(tgt); newt = exits + 16 * (len(ex_targets) - 1)
             pc = copy0 + 4 * k; off = (newt - pc) >> 2
-            if m in ('tbz', 'tbnz'): w = (w & 0xFFF8001F) | ((off & 0x3FFF) << 5)
+            if m == 'b': w = B(pc, newt)
+            elif m in ('tbz', 'tbnz'): w = (w & 0xFFF8001F) | ((off & 0x3FFF) << 5)
             else: w = (w & 0xFF00001F) | ((off & 0x7FFFF) << 5)
             dd = dis(w, pc); assert dd.operands[-1].imm == newt and dd.mnemonic == m
         elif m == 'adrp': w = window_adrp(x, S, copy0 + 4 * k)
@@ -726,6 +759,27 @@ def func_of(a):
     if i >= 0: return (starts[i], starts[i + 1] if i + 1 < len(starts) else TEXT_END)
     return (max((e for s, e in DATA_BLOCKS if e <= a), default=0), starts[0]) if starts else (a, a + 4)
 done = set(); windows = []; jumps = {}; tabjumps = {}; tailcalls = set(); retries = []
+def guarded_count(ctx, kc, kl):
+    """How many entries the compare ctx[kc] (cmp index,#N) lets the table load ctx[kl] read, or None when no branch on its flags guards the load. A compare bounds the index only
+    through the branch that acts on it: cmp w18,#4; b.hi exit; cmp w18,#1; ldrsw x18,[x4,x18,lsl #2] has a nearer compare that bounds nothing, and taking it read 2 entries of a table of 5
+    with no error (GitHub issue #977). Between the compare and the load, the first branch on an unsigned condition decides, with the flags still the compare's (no instruction that sets
+    them, and no call, in between; one that only reads them, or a cbz / tbz, changes nothing):
+      b.hi out → N + 1 entries, b.hs / b.cs out → N: the dispatch is the fall-through, and the branch leaves it (its target is not between itself and the load);
+      b.ls in → N + 1, b.lo / b.cc in → N: the branch enters the dispatch (its target is after itself, at or before the load) and the instruction before that target is a b, br or ret,
+      so the path that failed the check does not fall into it.
+    Any other branch on the flags (b.eq, b.ge, ...) is no bounds check, and so is a compare with none.
+    Of the 165 sites of the 27 modules scanned for #977 (6 games), every one is cmp; b.hi, one of them with a store between the two (Super Smash Bros. Ultimate 13.0.5 main+0x39be740)"""
+    n, ld = int(ctx[kc].op_str.split('#')[1], 0), ctx[kl]
+    sets_flags = ('cmp', 'cmn', 'tst', 'ccmp', 'ccmn', 'fcmp', 'fcmpe', 'fccmp', 'fccmpe', 'adds', 'subs', 'ands', 'bics', 'adcs', 'sbcs', 'negs', 'ngcs', 'msr', 'bl', 'blr')
+    for q in range(kc + 1, kl):
+        p = ctx[q]
+        if p.mnemonic in ('b.hi', 'b.hs', 'b.cs', 'b.ls', 'b.lo', 'b.cc'):
+            t = p.operands[0].imm; inside = p.address < t <= ld.address
+            if p.mnemonic in ('b.hi', 'b.hs', 'b.cs'): return None if inside else n + (p.mnemonic == 'b.hi')
+            before = next((x for x in ctx[q + 1:kl + 1] if x.address == t - 4), None)
+            return n + (p.mnemonic == 'b.ls') if inside and before is not None and before.mnemonic in ('b', 'br', 'ret') else None
+        if p.mnemonic in sets_flags or p.mnemonic.startswith('b.') or p.mnemonic in ('b', 'br', 'ret'): return None
+    return None
 def check_before_copy(insl, ctx, ld, idx):
     """The index copied from the checked register before the check, far back (DRAGON QUEST XI S main+0x2dd8cd0: mov w0,w18, then 41 instructions with two other jump tables on x0, then
     cmp w18,#4; b.hi; ldrsw x18,[x11,x0,lsl #2]; add x18,x18,x11; br x18). Accepted when the cmp and its b.hi come right before the load and the mov is the last writer of the index and of the
@@ -768,7 +822,7 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
     # GLSLC subsdk0+0x2f403c checks a masked copy instead: and w16,w18,#0x3f; cmp w16,#0xe; b.hi; ...; and x18,x18,#0x3f; ldrsw x18,[x15,x18,lsl #2]
     idx = {'w' + re.fullmatch(rf'{t}, \[{rb}, x(\d+), lsl #2\]', ld.op_str).group(1)}   # pyright: ignore[reportOptionalMemberAccess]  # ld was chosen by this match
     masked = None   # (source, mask, position) when the index is "source & mask"
-    k0 = ctx.index(ld); cmp = None; copies = set(); changed = False
+    k0 = ctx.index(ld); cmp = None; n = 0; copies = set(); changed = False
     def wname(r): return 'w' + r[1:]
     for i in range(k0 - 1, -1, -1):   # walk back from the load: follow register copies into the index, stop at the bounds check
         p = ctx[i]
@@ -783,23 +837,30 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
             # Capstone lists only x30 as a call's write, so a call counts for the caller-saved registers
             if writes_reg_any(p, idx) or (p.mnemonic in ('bl', 'blr') and any(int(r[1:]) <= 18 for r in idx)): changed = True
             continue
-        if wname(m.group(1)) in idx: cmp = p; break
+        # Only a compare a branch acts on bounds the index (guarded_count): one that guards nothing only sets the flags, and the walk goes on to the check before it
+        if wname(m.group(1)) in idx:
+            g = guarded_count(ctx, i, k0)
+            if g is None: continue
+            cmp = p; n = g; break
         if masked:   # the checked register must be "the same source & the same mask", with the source unchanged up to the index's and
             for q in range(i - 1, -1, -1):
                 if wname(m.group(1)) not in written_w(ctx[q]): continue
                 mm = re.fullmatch(r'([wx]\d+), ([wx]\d+), #(0x[0-9a-f]+|\d+)', ctx[q].op_str) if ctx[q].mnemonic == 'and' else None
                 if mm and wname(mm.group(2)) == masked[0] and int(mm.group(3), 0) == masked[1] and \
                    not any(masked[0] in written_w(ctx[z]) for z in range(q + 1, masked[2])):
-                    cmp = p
+                    g = guarded_count(ctx, i, k0)
+                    if g is not None: cmp = p; n = g
                 break
             if cmp: break
     if cmp and changed: return None   # the index changes after the check. Before a check it does not matter, so this waits for the walk to find one
-    if not cmp and copy_first: cmp = check_before_copy(insl, ctx, ld, idx | copies)
+    if not cmp and copy_first:
+        cmp = check_before_copy(insl, ctx, ld, idx | copies)   # cmp; b.hi right before the load
+        if cmp: n = int(cmp.op_str.split('#')[1], 0) + 1
     if not cmp: return None
-    n = int(cmp.op_str.split('#')[1], 0) + 1
     k = insl.index(ld); lo = page = None
     for p in reversed(insl[max(0, k - 256):k]):   # the writer chain of the table base
         if not writes_reg(p, rb): continue
+        if lo is None and null_base(p, n): continue   # page zero as the base: it reaches no load of a working game
         if lo is None and p.mnemonic == 'add' and re.fullmatch(rf'{rb}, {rb}, #(0x[0-9a-f]+|\d+)', p.op_str): lo = int(p.op_str.split('#')[1], 0); continue
         if lo is not None and p.mnemonic == 'adrp' and p.op_str.startswith(rb + ','): page = p.operands[1].imm
         break
@@ -977,16 +1038,21 @@ def jump_adr_offsets(insl, j):
         wa = next((p for p in reversed(ctx[:ka]) if writes_reg(p, a)), None)   # the nearest writer of a
         if not ld or not wa or wa.mnemonic != 'adr': continue
         tb_reg, ix = re.fullmatch(rf'{e}, \[(x\d+), x(\d+), lsl #2\]', ld.op_str).groups()
-        idx, cmp = {'w' + ix}, None   # the index and the registers copied into it (main+0x596d30: cmp w15,#8; b.hi; mov w16,w15; ...; ldrsw x0,[x17,x16,lsl #2])
-        for p in reversed(ctx[:ctx.index(ld)]):   # walk back from the load to the bounds check
+        idx, cmp, n, kl = {'w' + ix}, None, 0, ctx.index(ld)   # the index and the registers copied into it (main+0x596d30: cmp w15,#8; b.hi; mov w16,w15; ...; ldrsw x0,[x17,x16,lsl #2])
+        for i in range(kl - 1, -1, -1):   # walk back from the load to the bounds check
+            p = ctx[i]
             m = re.fullmatch(r'(w\d+), (w\d+)', p.op_str) if p.mnemonic == 'mov' else None
             if m and m.group(1) in idx: idx.remove(m.group(1)); idx.add(m.group(2)); continue
-            # A check of the full xN index bounds the same table (DRAGON QUEST I & II main+0x30ee50c: cmp x9,#4).
+            # A check of the full xN index bounds the same table (DRAGON QUEST I & II main+0x30ee50c: cmp x9,#4). As in jump_offsets, only a compare a branch acts on
+            # bounds the index (guarded_count); one that guards nothing only sets the flags, and the walk goes on to the check before it
             m = re.fullmatch(r'([wx]\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'cmp' else None
-            if m and 'w' + m.group(1)[1:] in idx: cmp = p; break
+            if m and 'w' + m.group(1)[1:] in idx:
+                g = guarded_count(ctx, i, kl)
+                if g is None: continue
+                cmp = p; n = g; break
             if written_w(p) & idx: return None   # the index changes after the check
         if cmp is None: return None
-        n, at = int(cmp.op_str.split('#')[1], 0) + 1, wa.operands[1].imm
+        at = wa.operands[1].imm
         def targets(tb): return [at + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)] if 0 <= tb and tb + 4 * n <= len(IMG) else None
         tb = table_base(insl, insl.index(ld), tb_reg)
         if tb is not None: return targets(tb)
@@ -1256,7 +1322,7 @@ def pieces(fa, fb):
     b = [0] + cuts + [n]
     return [(fa + 4 * p, fa + 4 * q) for p, q in zip(b, b[1:])], far
 funcs = sorted({func_of(a) for a, (k, _) in kinds.items() if k == 'x18'})
-far_into, rmid_all = [], set()
+far_into, rmid_all, newly_accepted = [], set(), set()
 if any(fb - fa > BIG_FN for fa, fb in funcs):
     sites18 = sorted(a for a, (k, _) in kinds.items() if k == 'x18'); split = []
     for fa, fb in funcs:
@@ -1270,6 +1336,7 @@ for fa, fb in funcs:
     ws = find_windows(insl)
     for wseg in ws:
         windows.append(wseg); done |= {x.address for x in wseg}
+        if any(x.mnemonic == 'b' for x in wseg): newly_accepted.add(wseg[0].address)
     for j, ins in enumerate(insl):
         if ins.mnemonic == 'br' and ins.op_str == 'x18':
             base = width = None
@@ -1306,9 +1373,17 @@ for fa, fb in funcs:
             t = x.operands[-1].imm
             if t in inwin and t not in heads:
                 wseg = next(w for w in ws if any(y.address == t for y in w))
+                if x.mnemonic != 'bl' and any(y.address == x.address for y in wseg):
+                    newly_accepted.add(wseg[0].address)
+                    continue
                 rb = retry_block(insl, k, wseg) if x.mnemonic not in ('b', 'bl') else None
                 assert rb, f'branch into window {x.address:x}'
                 assert not any(y.address in done for y in rb[0]), f'retry block overlaps a window {rb[0][0].address:x}'
+                tail_addrs = {y.address for y in rb[1]}
+                for y in rb[1]:
+                    if y.mnemonic in ('cbz', 'cbnz', 'tbz', 'tbnz') or y.mnemonic.startswith('b.'):
+                        dest = y.operands[-1].imm
+                        assert dest not in inwin or dest in heads or dest in tail_addrs, f'retry copy branches into window {y.address:x}'
                 retries.append([(rb[0], x.address + 4), (rb[1], wseg[-1].address + 4)])
                 done |= {y.address for y in rb[0]}; rmid |= {y.address for y in rb[0][1:]}
     for x in insl:
@@ -1321,6 +1396,22 @@ if far_into:   # functions analysed in pieces (pieces above): their far b / bl, 
     win_mid = {x.address for wseg in windows for x in wseg[1:]}
     for at, to in far_into: assert to not in win_mid and to not in rmid_all, f'far branch into a window or retry block {at:x}'
     for at, tgt in tabjumps.items(): assert not any(t in win_mid or t in rmid_all for t in tgt), f'jump table target into a window or retry block {at:x}'
+
+# Direct branches from other functions were not part of the per-function entry check above.
+for w in windows:
+    if w[0].address in newly_accepted:
+        assert all(b.address == a.address + 4 for a, b in zip(w, w[1:])), f'noncontiguous window {w[0].address:x}'
+new_mid = {x.address for w in windows if w[0].address in newly_accepted for x in w[1:]}
+if new_mid:
+    for start, end in CODE_RANGES:
+        for at in range(start, end - 3, 4):
+            w = struct.unpack_from('<I', IMG, at)[0]; t = w >> 24
+            if t == 0x54 and not w & 0x10 or t & 0x7E == 0x34: d = (w >> 5) & 0x7FFFF; d -= (d & 0x40000) << 1
+            elif t & 0x7E == 0x36: d = (w >> 5) & 0x3FFF; d -= (d & 0x2000) << 1
+            elif t & 0x7C == 0x14: d = w & 0x3FFFFFF; d -= (d & 0x2000000) << 1
+            else: continue
+            dest = at + 4 * d
+            if dest in new_mid: assert func_of(at) == func_of(dest), f'branch into window from another function {at:x}'
 
 def put_branch(at, to): struct.pack_into('<I', IMG, at, B(at, to))
 for wseg in windows:

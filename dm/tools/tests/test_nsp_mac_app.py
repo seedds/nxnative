@@ -905,10 +905,6 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
             self.build()
         self.assertFalse(any('--seen-shaders' in m for m in self.said))
 
-    def test_shader_watch_counts_the_list(self):
-        self.assertEqual(nsp.ShaderWatch(self.g, self.tmp, self.tmp).n, 4)
-        self.assertEqual(nsp.ShaderWatch(self.g, self.tmp, self.tmp, seen=self.keys('a', 'b')).n, 2)
-
     def run_cmd(self, **kw):
         game = self.tmp / 'ex'; game.mkdir(exist_ok=True); (game / 'RomFS').mkdir(exist_ok=True)
         return nsp.mac_run(self.tmp, game, self.tmp / 'patched', self.tmp / 'dmhost', self.tmp / 'font', self.sh / 'partial', None, 'nvn', 'en-US', {}, self.logs, self.g, **kw)

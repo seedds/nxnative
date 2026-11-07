@@ -217,6 +217,20 @@ The yield back-off (`DM_YIELD_BACKOFF`) and the rewriter's spin waits (`patch_ns
 
 ## Events and notifications
 
+### ResetSignal distinguishes an invalid handle from a cleared event
+
+- **Symptom:** `ResetSignal` on a thread handle returns `0xfa01` (invalid state) instead of `0xe401` (invalid handle).
+- **Cause:** the event SVC handler special-cased thread objects as resettable objects in the wrong state. Thread handles are not accepted by the kernel's `ResetSignal`; a valid readable event that is already clear is the invalid-state case.
+- **Fix:** return invalid handle for unsupported object types. `t_sync_wait.c` checks both thread-handle forms, read/write endpoint permissions, non-clearing waits, reset-after-clear, and readable-event lifetime after a producer signals and closes its writable endpoint.
+- **Found on:** the endpoint regression in `t_sync_wait.c`, which fails before the correction; no game failure is claimed.
+
+### Synchronization waits retain objects and completed notifications
+
+- **Symptom:** a wait times out after its event was signaled and cleared; closing and reusing a handle redirects a blocked wait to an unrelated event, or a wait on an exiting thread never completes. A signaled first entry also hides an invalid later handle.
+- **Cause:** `WaitSynchronization` kept the caller's handle array and looked up its numbers again after waking. It neither retained the original objects nor recorded which signal completed the wait. Event and thread destruction followed handle ownership alone.
+- **Fix:** validate the whole list, snapshot up to 64 handles, and retain each resolved event or thread until the wait returns. Notification records the first matching index under the synchronization lock; later clearing or closing cannot undo completion. Thread reclamation waits for outstanding wait references. Ready objects and zero-time polls precede pending cancellation. The current short-poll backoff and deterministic-clock waits remain in use.
+- **Found on:** synthetic host regressions in [`t_sync_wait.c`](../../dm/host/tests/t_sync_wait.c); five of its six groups reproduce on the current host before the fix. No game-specific failure is claimed.
+
 ### Service-event producers follow the binding lifetime
 
 - **Symptom:** a host helper thread aborts when signalling a destroyed `SystemEvent`; repeated `vi::GetDisplayVsyncEvent` calls double the event's tick rate. Rapid replacement can abort with `too many vsync events`, or a retired vsync worker can signal another service's event at reused storage.

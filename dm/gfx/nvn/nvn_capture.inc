@@ -216,10 +216,21 @@ static int cap_pf_bpp(MTLPixelFormat f, int plane) {   // bytes per pixel of a p
     if (f >= MTLPixelFormatRGBA32Uint && f <= MTLPixelFormatRGBA32Float) return 16;
     return 0;
 }
-// bytes per block of a plane and the block's size in texels (1x1 for plain texels; BC formats 4x4); 0 = a format the capture cannot read back
+// ASTC formats come in three runs (sRGB from 186, LDR from 204, HDR from 222), one per block footprint, 16 bytes a block. The 8x5 and larger footprints sit one value above the
+// order below: the 5th entry (value +5) names no format. Returns 0 for any other format
+static int cap_astc_block(MTLPixelFormat f, uint32_t *bw, uint32_t *bh) {
+    static const uint8_t dim[15][2] = {{4, 4}, {5, 4}, {5, 5}, {6, 5}, {6, 6}, {0, 0}, {8, 5}, {8, 6}, {8, 8}, {10, 5}, {10, 6}, {10, 8}, {10, 10}, {12, 10}, {12, 12}};
+    int base = f >= MTLPixelFormatASTC_4x4_sRGB && f <= MTLPixelFormatASTC_12x12_sRGB ? MTLPixelFormatASTC_4x4_sRGB
+             : f >= MTLPixelFormatASTC_4x4_LDR && f <= MTLPixelFormatASTC_12x12_LDR ? MTLPixelFormatASTC_4x4_LDR
+             : f >= MTLPixelFormatASTC_4x4_HDR && f <= MTLPixelFormatASTC_12x12_HDR ? MTLPixelFormatASTC_4x4_HDR : 0;
+    if (!base || !dim[f - base][0]) return 0;
+    *bw = dim[f - base][0]; *bh = dim[f - base][1]; return 16;
+}
+// bytes per block of a plane and the block's size in texels (1x1 for plain texels; BC formats 4x4; ASTC their footprint); 0 = a format the capture cannot read back
 static int cap_pf_block(MTLPixelFormat f, int plane, uint32_t *bw, uint32_t *bh) {
     *bw = *bh = 1;
     int b = cap_pf_bpp(f, plane); if (b || plane) return b;
+    if ((b = cap_astc_block(f, bw, bh))) return b;
     *bw = *bh = 4;
     if (f == MTLPixelFormatBC1_RGBA || f == MTLPixelFormatBC1_RGBA_sRGB || f == MTLPixelFormatBC4_RUnorm || f == MTLPixelFormatBC4_RSnorm) return 8;
     if ((f >= MTLPixelFormatBC2_RGBA && f <= MTLPixelFormatBC3_RGBA_sRGB) || f == MTLPixelFormatBC5_RGUnorm || f == MTLPixelFormatBC5_RGSnorm
@@ -335,7 +346,11 @@ static void cap_head(void) {
 #undef KV
     cap_put(&g_cap_w, CAP_HEAD, 0, h.p, h.n, 0); cap_buf_free(&h);
     const char *lay = cap_layout(); cap_put(&g_cap_w, CAP_LAYT, 0, lay, strlen(lay), 0);
-    snprintf(line, sizeof line, "tex_pool_n\t%d\norigin_ll\t%d\nqueue_origin_ll\t%d\ndepth_zero\t%d\n", g_tpool_n, atomic_load(&g_origin_ll), g_queue_origin_ll, atomic_load(&g_depth_zero));
+    // sdk_ounce and gob_switch2: the Switch 2's NVN2 (dm_sdk_ounce, from the game's sdk module) and the Switch 2's order inside a GOB (nvn_gob_switch2, set from it at nvnDeviceInitialize).
+    // The replayer runs no guest code and no nvnDeviceInitialize, so without them it untiled the game's own textures in the Tegra X1's order (a lattice of misplaced blocks) and left the
+    // group counts NVN2's compute shaders read at c0 + 4 at 0
+    snprintf(line, sizeof line, "tex_pool_n\t%d\norigin_ll\t%d\nqueue_origin_ll\t%d\ndepth_zero\t%d\nsdk_ounce\t%d\ngob_switch2\t%d\n", g_tpool_n, atomic_load(&g_origin_ll), g_queue_origin_ll, atomic_load(&g_depth_zero),
+             dm_sdk_ounce() != 0, nvn_gob_switch2 != 0);
     cap_put(&g_cap_w, CAP_STAT, 0, line, strlen(line), 0);
 }
 static void cap_pools(uint32_t submit) {   // regions for pools not covered yet (all of them at submit 1), and the replay layer's pool list

@@ -1,0 +1,36 @@
+# Ori and the Blind Forest: Definitive Edition (010061D00DB74000)
+# Unity IL2CPP, SDK 8.2.0
+
+# ---- Identity ----
+title_id	010061D00DB74000
+program_id	010061D00DB74000
+
+# ---- App ----
+name	Ori and the Blind Forest: Definitive Edition
+ipa	Ori.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.0.2	main=9c4f2a47916b6a5478548adc62a3a87c	subsdk0=8df876f80ce4ceee62360b31405c452f	sdk=3ae34e689d7a35f13cbf42bfd672af8b
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+modules	main subsdk0 sdk
+romfs_marker	Data/data.unity3d
+zip_store	.opus:.metallib
+
+# ---- Memory ----
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xcd500000
+mem_used	0x4000000
+sys_resource	0x1000000
+
+# ---- Controls / Mode ----
+op_mode	console
+pad_layout	simple
+
+# ---- Graphics & Presentation ----
+present_interval_zero	on

@@ -929,6 +929,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) and [MIO: Memories in Orbit, issue #941](https://github.com/seedds/nxnative/issues/941). The visibility-buffer shading issue in MIO is still open.
 - **Note:** the replay used to commit its work and wait for the GPU before the first such draw after each GPU write, then read the count on the CPU (`mdi_wait`; still used when a CPU count is needed, including quads, fans and 8-bit indices). In Kamura Village that wait held the submitting thread 14 of its 20 ms a frame on an iPhone (36–54 fps). On the Mac the same scene's submit took 20 ms of wall time for 6.1 ms of work, and now 5.1 ms, all of it work.
 
+### Pre-pass indirect draw conversion and indirect dispatch clamping
+
+- **Symptom:** indirect draws that need vertex or index conversion inside an open render pass split the pass (`rp_end()`), losing tile state, and uninitialized indirect compute dispatch or mesh task records dispatch unbounded threadgroup grids.
+- **Cause:** `draw_()` dispatched compute indirect conversions (`ixc_run`, `mdx_run`) on demand inside the active render pass, and indirect compute dispatches (`DispatchComputeIndirect`) and mesh draws (`DrawMeshTasksIndirect`) passed guest indirect buffers directly to Metal without clamping out-of-range grid dimensions.
+- **Fix:** `ixc_run` and `mdx_run` convert indirect records ahead of the render pass before `rp_begin()`, and `ixc_clamp` / `mdx_clamp` clamp indirect dispatch and mesh grid counts on the GPU (`DM_NVN_IND_CLAMP=0` disables clamping).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (`0400486024DEC000`, `v131072`).
+
 ### CPU reads after a drain wait only for later writes
 
 - **Symptom:** a hitch of a second or more as a level opens: a few frames of 330–540 ms whose submission takes 2–3 times its CPU time, and the wait ledger (`DM_NVN_WAITS=1`) shows thousands of indirect-count multi-draw waits for those frames only.

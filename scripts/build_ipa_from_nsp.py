@@ -93,7 +93,7 @@ SWITCH_ALIAS = 0x1000000000             # the Switch's alias region (64 GB), whi
 
 PROGRESS = 'auto'                       # stage lines on the console: 'bar' (one line per stage, redrawn in place), 'lines' (a plain line every BEAT seconds), 'off' (only each stage's start and end); 'auto' = bar in a terminal or Spyder, lines when the output goes to a file; 'json' = one JSON event per line, for a program that shows the build
 BEAT = 30                               # seconds between progress lines in 'lines' mode
-TOOL_PATHS = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/local/share/dotnet', os.path.expanduser('~/.dotnet')]   # GUI apps such as Spyder do not get the shell's PATH
+TOOL_PATHS = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/local/share/dotnet', os.path.expanduser('~/.dotnet')]   # searched after the caller's PATH (tool_env): GUI apps such as Spyder do not get the shell's PATH
 
 
 class BuildError(Exception):
@@ -424,6 +424,12 @@ def swap_in(tmp, dst):   # swap the new output in as a whole (the old one is unt
 def free_gb(p):
     while not p.exists(): p = p.parent
     return shutil.disk_usage(p).free / 2**30
+
+
+def tool_env(environ=os.environ):
+    """The environment the build's tools run in: the caller's PATH first, so the tools it selects (a venv's python3, mise's zstd or dotnet) are the ones that run,
+    then TOOL_PATHS for the tools it lacks (a GUI app such as Spyder gets only the system PATH, or none)."""
+    return dict(environ, PATH=os.pathsep.join([environ.get('PATH') or '/usr/bin:/bin:/usr/sbin:/sbin'] + TOOL_PATHS))
 
 
 def configure_dotnet(env):
@@ -2970,7 +2976,7 @@ def main(args=None):
     lang_in = args.language or LANGUAGE   # checked against the game's languages once its control data is extracted
     want_lang = language_code(lang_in) if lang_in else 'en-US'
     if not want_lang: raise BuildError(f'unknown game language {lang_in!r}; give one of {language_list([c for c, _ in nacp.LANGUAGES])}, by code or by name')
-    env = dict(os.environ, PATH=os.pathsep.join(TOOL_PATHS + [os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')]))
+    env = tool_env()
     env.setdefault('USER', getpass.getuser())   # xcodegen fails without USER (Couldn't find current username)
     configure_dotnet(env)
     env.setdefault('J', str(os.cpu_count() or 8))   # shader_split.py's and dmsh_build.py's workers (their default is 8)

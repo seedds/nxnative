@@ -35,6 +35,8 @@ sys_resource	0x3000000
 # ---- Shader split (shader_split.py) ----
 shader_groups	/Shader/=shader /Effect/=effect /Lib/=lib /UI/=layout
 shader_note	Ocarina of Time shaders
+# Mac shader libraries without fast math (dmsh_build.py SHADER_MATH; p****6 oot2 5ab5b107): with fast or relaxed maths single grass blades went pure white for a frame (Hyrule Field, the castle moat)
+shader_math	safe
 
 # ---- Frame rate ----
 # The game steps its time by a frame ratio, its base rate / its frame rate, whatever the frame took: frames longer than a vsync played in slow motion. The ratio takes the host's

@@ -60,11 +60,29 @@ PRE_STATS = collections.Counter()
 # -O1: the front end's -O2 (CorrelatedValuePropagation, then SimplifyCFG) folds the translated shaders' repeated tests of one value into switches whose cases jump past their own join.
 # Apple's GPU backend then exceeds its control-flow ID budget ("Max Unstruct ID 758 ... exceeds supported limit", a note, not an error) and falls back to a slower lowering:
 # Odyssey's alRenderMaterialUber took 25 minutes and 17.3 MB of GPU code, 31 s and 1.3 MB at -O1. Ordinary shaders come out within a few percent either way (the backend optimizes again)
+# Profile shader_math (fast by default, relaxed, safe; p****6 oot2 5ab5b107): Metal's maths mode for this game's Mac libraries. Fast lets the compiler assume no NaN / infinity, so the
+# translated shaders' isnan selects (Maxwell's NaN semantics) can fold away, and it approximates and reorders. Ocarina of Time's grass showed single blades pure white for a frame with
+# fast and with relaxed, not with safe (-fno-fast-math). One mode for every library: [[invariant]] positions only agree between shaders compiled alike
+SHADER_MATH = {'fast': [], 'relaxed': ['-fmetal-math-mode=relaxed'], 'safe': ['-fno-fast-math']}
+_math = GAME.get('shader_math', 'fast') if GAME else 'fast'
+if _math not in SHADER_MATH: sys.exit(f'[RED] game.tsv shader_math: {_math} (fast, relaxed or safe)')
+# Profile shader_nofm <key> ...: those shaders' MSL starts with Metal's safe maths pragma (#pragma METAL fp math_mode(safe), what -fno-fast-math gives: x != x and ordered compares are
+# kept), every other shader keeps shader_math. Compute keys only by intent (positions of shaders compiled alike agree). PRAGMATA: its SDF-GI / voxel flare chain (41eaf0a7 ef4ad011
+# c08db9c9 bfc21183 08886f11 and the voxel keys), which the side libraries compiled with -fno-fast-math
+SHADER_NOFM = {k[:16] for row in (GAME.rows if GAME else []) if row[0] == 'shader_nofm' for v in row[1] for k in v.split()} if GAME else set()
+NOFM_PRAGMA = '#pragma METAL fp math_mode(safe)   // dmsh_build.py shader_nofm\n'
+def nofm_msl(key, src):
+    """src with the safe maths pragma after the first `using namespace metal;` for a key the profile's shader_nofm lists, else src"""
+    if key[:16] not in SHADER_NOFM or NOFM_PRAGMA in src: return src
+    i = src.find('using namespace metal;\n')
+    if i < 0: raise ValueError('shader_nofm: no `using namespace metal;` line')
+    i += len('using namespace metal;\n'); return src[:i] + NOFM_PRAGMA + src[i:]
 # -fwrapv: signed integer overflow wraps, as SPIR-V's integer arithmetic and the Switch's GPUs do; in MSL it is undefined, and the front end folds around it. Ocarina of Time's mesh shader
 # 35785cddc971290c sign-extends a packed 16-bit vertex field as a = w * 65536, then (a >> 31) << 16 | uint(a) >> 16; without the flag the compiler took the sign bits from bits 15-30 of w,
 # so the lightmap / probe UV's x came out far too large and models drawn with mesh shaders took their ambient light from the wrong texels (the bright band on the Deku Tree's walls).
 # The flag also drops inbounds from pointer arithmetic (Metal's clang has no -fwrapv-pointer) and keeps loop bounds that may wrap (test_dmsh_wrapv.py)
 MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance', '-fwrapv']
+MAC_METAL += SHADER_MATH[_math]   # its own statement: tests read the base line alone (test_dmsh_raw_last)
 MAC_RECORD = ' '.join(MAC_METAL) + '; xcrun -sdk macosx metallib'
 # The compiles run the tools xcrun names, found once: each xcrun launch looks them up again, about 4 ms of a compile's two launches (8 ms a shader). -isysroot is what xcrun -sdk passes
 # (as SDKROOT), and the outputs are the same bytes (.air and .metallib, checked on Odyssey's shaders); without it the driver targets the running macOS, not the SDK, and they differ.
@@ -784,6 +802,10 @@ def finish(key, w, j, c1):
         if pad: open(msl, 'w').write(src)
     lay = None; discard = False
     res = json.load(open(os.path.join(w, key + '.res.json')))
+    if key[:16] in SHADER_NOFM:   # profile shader_nofm: Metal's safe maths for this shader only
+        try: src = nofm_msl(key, src)
+        except ValueError as e: return 'shader_nofm failed', str(e)[:160], None
+        open(msl, 'w').write(src)
     if j['stage'] == 'vs':   # the two depth-convention entry points (see vs_depth); the analysis below uses the source with only main0
         capture = dmsh_geometry.capture(src)
         src, full = dmsh_entry.vs_depth(src)

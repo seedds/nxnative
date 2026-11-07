@@ -78,6 +78,22 @@ int main(void) { @autoreleasepool {
         const uint32_t *got = made_shadow(other, 12);
         CHECK(!got || got[0] == 0xa6, "a slot collision refuses or shows the update"); commit_as_running(); }
 
+    // Splatoon Raiders' third boss stage: about 1,550 queries in one submission, 7 updates of the block before each (about 11,000 writes). Past the pending list's old 8,192 entries the
+    // submission counted as writing everywhere, and every partly covered shadow was refused while it ran
+    for (int q = 0; q < 1550; q++) for (int k = 0; k < 7; k++) update(0x1c000 + 16 * k, (uint32_t)q, 4);
+    CHECK(!g_pend_over, "a submission of 10,850 inline updates fits the pending list");
+    commit_as_running();
+    update(0x1c004, 0xb5, 4);
+    { const uint32_t want[] = {1549, 0xb5}; words(made_shadow(0x1c000, 8), want, 2, "after it, a shadow of the block shows its last update while it runs"); }
+    CHECK(made_shadow(0x10000, 32) != NULL || (update(0x10004, 0xb6, 4), made_shadow(0x10000, 32) != NULL), "and another block's shadow is not refused");
+    commit_as_running();
+
+    // The list has no fixed size: four times that (43,400 updates, past the 32,768 a fixed list would have held next) still fits, and the shadow after it shows the last update
+    for (int q = 0; q < 6200; q++) for (int k = 0; k < 7; k++) update(0x1c000 + 16 * k, (uint32_t)q, 4);
+    CHECK(!g_pend_over, "a submission of 43,400 inline updates fits the pending list");
+    { const uint32_t want[] = {6199}; words(made_shadow(0x1c000, 4), want, 1, "and a shadow in it shows the last one"); }
+    commit_as_running();
+
     pend_reset(); g_nubd = 0;
     printf("t_ubp_running: %d checks, %d failed\n", checks, failed); fflush(stdout);
     _exit(failed != 0);

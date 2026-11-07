@@ -21,7 +21,7 @@ from nso_asm import ADRP, ADDI, ADDR, B, BEQ, BLR, BR, NOP
 tree = ast.parse((TOOLS / 'patch_nso.py').read_text())
 IMG = bytearray(0x5000); tabjumps = {}; jumps = {}   # the globals the recognizers read: the module image and the jump tables resolved so far in the function
 scope = {'re': re, 'struct': struct, 'ARM64_OP_IMM': ARM64_OP_IMM, 'IMG': IMG, 'tabjumps': tabjumps, 'jumps': jumps}
-exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'written_w', 'writes_reg', 'writes_reg_any', 'half_count', 'copied_base', 'table_base', 'table_cands', 'forward_table_base', 'check_before_copy', 'jump_offsets', 'jump_adr_offsets', 'jump_zero_extended', 'jump_masked_pred', 'jump_masked_not')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
+exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'written_w', 'writes_reg', 'null_base', 'writes_reg_any', 'half_count', 'copied_base', 'table_base', 'table_cands', 'forward_table_base', 'guarded_count', 'check_before_copy', 'jump_offsets', 'jump_adr_offsets', 'jump_zero_extended', 'jump_masked_pred', 'jump_masked_not')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
 
 
 def mov(dst, src, wide=True): return (0xaa0003e0 if wide else 0x2a0003e0) | src << 16 | dst
@@ -219,6 +219,116 @@ class IndexChangedAfterCheck(unittest.TestCase):
         md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
         ins = list(md.disasm(struct.pack('<' + 'I' * len(words), *words), 0))
         self.assertEqual(scope['jump_offsets'](ins, 8, copy_first=True), targets)
+
+
+class NullPageBase(unittest.TestCase):
+    """A write of a page-zero constant into the table base reaches no load of a working game: the walk for the base's writers goes past it (Cuphead 1.3.7 main+0x59dc90, issue #1532)"""
+    TABLE = 0x4040
+    TARGETS = [36 + i * 4 for i in range(5)]
+
+    def run_site(self, other, before_add=False):
+        # adrp/add x4; <other> (a block of another loop: <write of w4>; b exit); cmp w18,#4; b.hi; ldrsw x18,[x4,x18,lsl #2]; add x18,x18,x4; br x18
+        base = [ADRP(4, 0, self.TABLE), other, ADDI(4, 4, self.TABLE & 0xfff)] if before_add else [ADRP(4, 0, self.TABLE), ADDI(4, 4, self.TABLE & 0xfff), other]
+        words = base + [B(12, 36), 0x7100001f | 4 << 10 | 18 << 5, bhi(20, 36), 0xb8a07800 | 18 << 16 | 4 << 5 | 18, ADDR(18, 18, 4), BR(18)] + [RET] * 5
+        for i, target in enumerate(self.TARGETS): struct.pack_into('<i', IMG, self.TABLE + 4 * i, target - self.TABLE)
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
+        ins = list(md.disasm(struct.pack('<' + 'I' * len(words), *words), 0))
+        self.assertEqual(len(ins), len(words))
+        return scope['jump_offsets'](ins, 8)
+
+    def test_page_zero_constants_are_passed(self):
+        for word in (0x52800024, 0xd2800004, 0x2a1f03e4, 0x52800000 | 0xfec << 5 | 4):   # mov w4,#1; mov x4,#0; mov w4,wzr; mov w4,#0xfec (the 5 entries end at 0x1000)
+            with self.subTest(word=hex(word)):
+                self.assertEqual(self.run_site(word), self.TARGETS)
+
+    def test_other_writes_still_end_the_chain(self):
+        for word in (0x52800000 | 0xff0 << 5 | 4, 0x52840004, mov(4, 0, False), 0x12800004):   # mov w4,#0xff0 (past the page); mov w4,#0x2000; mov w4,w0; mov w4,#-1
+            with self.subTest(word=hex(word)):
+                self.assertIsNone(self.run_site(word))
+
+    def test_a_constant_the_add_reads_is_the_base(self):
+        self.assertIsNone(self.run_site(0x52800024, before_add=True))   # adrp x4; mov w4,#1; add x4,x4,#lo: the add builds the base from the 1
+def bcond(cond, frm, to): return 0x54000000 | (((to - frm) >> 2) & 0x7ffff) << 5 | cond   # b.<cond>: eq 0, hs / cs 2, lo / cc 3, hi 8, ls 9, ge 10
+def cmp_w(reg, n): return 0x7100001f | n << 10 | reg << 5
+
+
+class GuardedCheck(unittest.TestCase):
+    """Only a compare a branch acts on bounds the index (GitHub issue #977)."""
+    TABLE = 0x4040
+
+    def site(self, words, j, entries=5, fn='jump_offsets'):
+        # words: the instructions from offset 8 on, after adrp/add x4; the table's entries are the instructions after them (5 by default, as cmp #4; b.hi allows)
+        words = [ADRP(4, 0, self.TABLE), ADDI(4, 4, self.TABLE & 0xfff)] + words + [RET] * 8
+        targets = [4 * (len(words) - 8 + i) for i in range(8)]
+        for i, target in enumerate(targets): struct.pack_into('<i', IMG, self.TABLE + 4 * i, target - self.TABLE)
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
+        ins = list(md.disasm(struct.pack('<' + 'I' * len(words), *words), 0))
+        self.assertEqual(len(ins), len(words))
+        got = scope[fn](ins, j)
+        return got if got is None else (got, targets[:entries])
+
+    LOAD = [0xb8a07800 | 18 << 16 | 4 << 5 | 18, ADDR(18, 18, 4), BR(18)]   # ldrsw x18,[x4,x18,lsl #2]; add x18,x18,x4; br x18
+
+    def check(self, words, entries):
+        j = next(i for i, w in enumerate(words) if w == BR(18)) + 2
+        got = self.site(words, j, entries)
+        assert got is not None
+        self.assertEqual(*got)
+
+    def refused(self, words):
+        j = next(i for i, w in enumerate(words) if w == BR(18)) + 2
+        self.assertIsNone(self.site(words, j))
+
+    def test_a_nearer_compare_that_guards_nothing_is_not_the_bound(self):
+        # the issue's site: cmp w18,#4; b.hi exit; cmp w18,#1; ldrsw ...: 5 entries, where the nearest compare gave 2
+        self.check([cmp_w(18, 4), bhi(12, 80), cmp_w(18, 1)] + self.LOAD, 5)
+        # the nearer compare feeds a branch that is no bounds check
+        self.check([cmp_w(18, 4), bhi(12, 80), cmp_w(18, 1), bcond(0, 20, 80)] + self.LOAD, 5)
+
+    def test_a_nearer_compare_with_its_own_guard_is_the_bound(self):
+        self.check([cmp_w(18, 4), bhi(12, 80), cmp_w(18, 1), bhi(20, 80)] + self.LOAD, 2)
+
+    def test_a_compare_with_no_branch_is_refused(self):
+        self.refused([cmp_w(18, 4), NOP] + self.LOAD)
+        self.refused([cmp_w(18, 4), bcond(0, 12, 80)] + self.LOAD)    # b.eq
+        self.refused([cmp_w(18, 4), bcond(10, 12, 80)] + self.LOAD)   # b.ge: a signed check lets a negative index through
+
+    def test_the_flags_must_still_be_the_compares(self):
+        self.refused([cmp_w(18, 4), cmp_w(0, 1), bhi(16, 80)] + self.LOAD)        # another compare set them
+        self.refused([cmp_w(19, 4), 0x94000040, bhi(16, 80), 0xb8a07800 | 19 << 16 | 4 << 5 | 18] + self.LOAD[1:])   # a call in between; the index, w19, survives it, the flags do not
+        self.check([cmp_w(19, 4), bhi(12, 80), 0x94000040, 0xb8a07800 | 19 << 16 | 4 << 5 | 18] + self.LOAD[1:], 5)        # the same call after the branch
+        self.check([cmp_w(18, 4), 0xf9000be0, bhi(16, 80)] + self.LOAD, 5)        # str x0,[sp,#16] between, as Super Smash Bros. Ultimate 13.0.5 main+0x39be740 has a store there
+        self.check([cmp_w(18, 4), cbz_w18(12, 80), bhi(16, 80)] + self.LOAD, 5)   # a cbz reads no flags
+
+    def test_b_hs_allows_one_entry_fewer_than_b_hi(self):
+        self.check([cmp_w(18, 5), bcond(2, 12, 80)] + self.LOAD, 5)   # cmp #5; b.hs: 0 to 4
+        self.check([cmp_w(18, 4), bhi(12, 80)] + self.LOAD, 5)        # cmp #4; b.hi: 0 to 4
+
+    def test_a_branch_into_the_dispatch_guards_it(self):
+        # cmp w18,#4; b.ls L; b default; L: ldrsw ...
+        self.check([cmp_w(18, 4), bcond(9, 12, 20), B(16, 80)] + self.LOAD, 5)
+        self.check([cmp_w(18, 5), bcond(3, 12, 20), B(16, 80)] + self.LOAD, 5)   # b.lo: 0 to 4
+        self.refused([cmp_w(18, 4), bcond(9, 12, 20), NOP] + self.LOAD)          # the failed check falls into the dispatch
+        self.refused([cmp_w(18, 4), bcond(9, 12, 80), NOP] + self.LOAD)          # b.ls away: the fall-through is the unchecked path
+
+    def test_a_b_hi_into_the_dispatch_is_no_guard(self):
+        self.refused([cmp_w(18, 4), bhi(12, 20), NOP] + self.LOAD)
+
+    def test_adr_relative_tables_take_the_same_rule(self):
+        # adrp/add x15; <check>; adr x18,.; ldrsw x0,[x15,x9,lsl #2]; add x18,x18,x0; br x18, entries relative to the adr
+        def run(check, entries):
+            words = [ADRP(15, 0, self.TABLE), ADDI(15, 15, self.TABLE & 0xfff)] + check
+            at = 4 * len(words)
+            words += [0x10000012, 0xb8a07800 | 9 << 16 | 15 << 5, ADDR(18, 18, 0), BR(18)] + [RET] * 8
+            targets = [4 * (len(words) - 8 + i) for i in range(8)]
+            for i, target in enumerate(targets): struct.pack_into('<i', IMG, self.TABLE + 4 * i, target - at)
+            md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
+            ins = list(md.disasm(struct.pack('<' + 'I' * len(words), *words), 0))
+            return scope['jump_adr_offsets'](ins, len(words) - 9), targets[:entries]
+        got, want = run([cmp_w(9, 4), bhi(12, 80), cmp_w(9, 1)], 5); self.assertEqual(got, want)
+        got, want = run([cmp_w(9, 5), bcond(2, 12, 80)], 5); self.assertEqual(got, want)
+        self.assertIsNone(run([cmp_w(9, 4), NOP], 5)[0])
+        self.assertIsNone(run([cmp_w(9, 4), bcond(0, 12, 80)], 5)[0])
 
 
 class ForwardBase(unittest.TestCase):

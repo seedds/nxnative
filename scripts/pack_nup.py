@@ -14,7 +14,8 @@
 #   extract/v<version>/control.nacp, icon.jpg   the package's NACP and its icon, when it carries them (sips reads a PNG icon by its content)
 #   aoc/<index>.img   each DLC's RomFS (index = DLC title ID − base title ID − 0x1000), the host's DM_AOC_DIR
 # An update's RomFS is packed on its own, never laid over the base: the dumps NUPs are packed from hold the patched RomFS of an update (pack_dump.py); an update with no romfs/ uses the base's.
-# Every file read is checked against its SHA-256. A repeat run keeps code modules whose content is the same and an image made from the same container tree by the same packer.
+# Every file read is checked against its SHA-256. A repeat run keeps code modules whose content is the same and an image made from the same container tree by the same packer,
+# or, after a packer update, an image whose bytes check against the container's hashes.
 # Needs the zstd module: compression.zstd (Python 3.14+) or backports.zstd, as the NSP script.
 # Usage: pack_nup.py <game.nup> [--version N] [--work-dir DIR]   (exit 1 on error)
 import argparse, hashlib, mmap, os, shutil, struct, sys
@@ -250,18 +251,55 @@ def entries(n, d):   # romfs_image.entries for a folder of the container: [name,
     return ents
 
 
-def pack(n, d, img, say=print):   # the RomFS folder d of the container → img, kept while the container tree and the packers are the same
+def verified(n, ents, dst):
+    """The identity of the image at dst when it is, byte for byte, what write() makes of ents now (romfs_image.layout's header and index, and each file's bytes
+    with the container's SHA-256), and it stayed the same while being read; else None. Reads the image, not the container's file data: 21.6 s for Ocarina's 26.25 GB image."""
+    ents = [e.copy() for e in ents]
+    off = romfs_image.HEAD.size
+    for e in ents:
+        if not e[2]: e[3], e[4] = off, n.files[e[1]][1]; off += e[4]
+    head, idx = romfs_image.layout(ents, off)
+    try:
+        before = romfs_image.file_identity(dst)
+        if before[1] != off + len(idx): return None   # [inode, size, mtime, ctime]
+        with open(dst, 'rb') as f:
+            if f.read(len(head)) != head: return None
+            f.seek(off)
+            if f.read(len(idx)) != idx: return None
+            f.seek(len(head))
+            for _, i, isdir, _, size in ents:   # the data in entry order, one pass forward
+                if isdir: continue
+                h, left = hashlib.sha256(), size
+                while left:
+                    chunk = f.read(min(left, 8 << 20))
+                    if not chunk: return None
+                    h.update(chunk); left -= len(chunk)
+                if h.digest() != n.files[i][2]: return None
+        return before if romfs_image.file_identity(dst) == before else None
+    except OSError:
+        return None
+
+
+def pack(n, d, img, say=print, step=lambda s: None):
+    """The RomFS folder d of the container → img. Returns how: 'kept' (the stamp says the container tree and the packers are the same), 'verified' (the stamp is
+    from another packer, but the image checks against the container's hashes: its stamp is renewed) or 'packed'. step(name): the step it is in, for a progress line"""
     img.parent.mkdir(parents=True, exist_ok=True)
     ents, dst = entries(n, d), os.fspath(img)
     digest = hashlib.sha256(Path(romfs_image.__file__).read_bytes() + Path(__file__).read_bytes() + n.toc_sha + struct.pack('<I', d)).hexdigest()   # the TOC hash covers every name and file hash
-    if romfs_image.reusable(dst, digest): return len(ents)
-    say(f'packing {n.path.name} folder {d} → {img}')
+    if romfs_image.reusable(dst, digest): return 'kept'
+    if img.is_file():   # a packer update changes the digest, not the image: check its bytes before unpacking minutes of data again
+        step('checking the image'); say(f'checking {img} against {n.path.name}')
+        if identity := verified(n, ents, dst):
+            romfs_image.stamp(dst, digest, identity)
+            say('  kept: the image matches the container')
+            return 'verified'
+    step('unpacking'); say(f'packing {n.path.name} folder {d} → {img}')
     part = dst + '.part'
     try: romfs_image.publish(romfs_image.write(ents, dst, n.copy), dst, digest)
     except BaseException:
         Path(part).unlink(missing_ok=True); raise
     say(f'  {len(ents):,} entries, {img.stat().st_size / 2**30:.2f} GB')
-    return len(ents)
+    return 'packed'
 
 
 def localized(payload):   # the localized icons record (TLV 0x000A) → {lowercase language tag: image bytes}
@@ -300,14 +338,15 @@ def romfs_of(k, base):   # the RomFS folder a version runs with: its own, or the
     return d
 
 
-def pack_version(n, k, base, app, out, say=print):   # one version (the base package, or an update package) → out/ExeFS, out/RomFS.img and its control data
+def pack_version(n, k, base, app, out, say=print, step=lambda s: None):   # one version (the base package, or an update package) → out/ExeFS, out/RomFS.img and its control data; returns how pack() got the image
     if k.exefs == NO_DIR or n.child(k.exefs, b'main') is None or n.child(k.exefs, b'main.npdm') is None: raise Error(f'{k.name}: no exefs/main and exefs/main.npdm')
     if (pid := program_id(n.read(n.child(k.exefs, b'main.npdm')), f'{k.name} exefs/main.npdm')) != app: raise Error(f'{k.name}: program ID {pid:016X}, the base is {app:016X}')
     d = romfs_of(k, base)
     out.mkdir(parents=True, exist_ok=True)
     exefs(n, k, out / 'ExeFS')
-    pack(n, d, out / 'RomFS.img', say)
+    how = pack(n, d, out / 'RomFS.img', say, step)
     control(k, out, app_package(n) if base is None else None)
+    return how
 
 
 def pack_dlc(n, app, dlc, aoc, say=print):   # {DLC title ID: package} → aoc/<index>.img; images of DLC no longer in the container go

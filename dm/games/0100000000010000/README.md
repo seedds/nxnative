@@ -83,6 +83,7 @@ General host and tool changes first needed here; each applies to every game:
 - **Small host segments for small grants** (`hostseg_size`): [Host-lent command memory segments](../../../docs/reference/nvn-objects.md#host-lent-command-memory-segments).
 - **Shorter state and single texture bind records** (`bind_state`, `p_bind_tex1`): [Model heaps sized by the host's command record sizes](../../../docs/reference/memory.md#model-heaps-sized-by-the-hosts-command-record-sizes); the null-pool grants they caused: [Host-lent command memory segments](../../../docs/reference/nvn-objects.md#host-lent-command-memory-segments).
 - **Same-pass feedback snapshots without a per-game list** (a draw that writes the attachment it samples; one snapshot until the game's next barrier): [Same-pass feedback read through a snapshot](../../../docs/reference/rendering.md#same-pass-feedback-read-through-a-snapshot).
+- **Cold Mac Metal shader builds:** [Cold Mac shader builds compile each pixel shader more than once](../../../docs/reference/shaders.md#cold-mac-shader-builds-compile-each-pixel-shader-more-than-once). Apple M2, `J=8`, no keys, `own_compilers`: 30:02 (1802 s) to 22:23 (1343.26 s), 1.34×.
 
 ## Open
 

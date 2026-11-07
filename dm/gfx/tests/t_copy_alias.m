@@ -83,7 +83,36 @@ static void sparse_copies(void) {
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&sparse); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&physical); mtl_pool_del(io);
     defer_drain(); munmap(mem, len); munmap(io, len);
 }
+// A shader's writes through one no-copy buffer, read by the next encoder's shader through another over the same memory, while overlapping buffers exist (g_big_n): the end
+// barrier of the writing encoder flushes to the device only (m4_end), and the reading encoder's start barrier (enc_c_begin, resource_vis) carries the alias flush
+static void shader_alias(void) {
+    size_t pg = getpagesize(); NSError *e = nil;
+    void *mem = mmap(NULL, pg, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (mem == MAP_FAILED) abort();
+    id<MTLBuffer> a = [g_dev newBufferWithBytesNoCopy:mem length:pg options:MTLResourceStorageModeShared deallocator:nil];
+    id<MTLBuffer> b = [g_dev newBufferWithBytesNoCopy:mem length:pg options:MTLResourceStorageModeShared deallocator:nil];
+    id<MTLBuffer> io = [g_dev newBufferWithLength:pg options:MTLResourceStorageModeShared];
+    id<MTLLibrary> l = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+        "kernel void w(device uint *a [[buffer(0)]], constant uint &s [[buffer(2)]], uint i [[thread_position_in_grid]]) { a[i] = s + i; }\n"
+        "kernel void r(device const uint *b [[buffer(0)]], device uint *o [[buffer(1)]], uint i [[thread_position_in_grid]]) { o[i] = b[i]; }\n" options:nil error:&e];
+    if (!l || !a || !b || !io) { fprintf(stderr, "%s\n", e.localizedDescription.UTF8String); abort(); }
+    id<MTLComputePipelineState> pw = [g_dev newComputePipelineStateWithFunction:[l newFunctionWithName:@"w"] error:&e], pr = [g_dev newComputePipelineStateWithFunction:[l newFunctionWithName:@"r"] error:&e];
+    id<MTLBuffer> seed = [g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared];
+    res_add(a); res_add(b); res_add(io); res_add(seed); atomic_fetch_add(&g_big_n, 1);
+    CHECK(resource_vis() & MTL4VisibilityOptionResourceAlias, "overlapping buffers turn on the alias flush");
+    for (int round = 0; round < 8; round++) {
+        uint32_t s = 0x5a000000u + (uint32_t)round * 0x10000u; *(uint32_t *)seed.contents = s; memset(io.contents, 0, pg);
+        mtl_sub_begin();
+        id<MTL4ComputeCommandEncoder> c = enc_c_begin(NULL); enc_c_args(c, a.gpuAddress, 0); enc_c_args(c, seed.gpuAddress, 2);
+        enc_c_pso(c, pw); enc_c_dispatch(c, MTLSizeMake(pg / 4 / 64, 1, 1), MTLSizeMake(64, 1, 1)); enc_c_end(c);
+        c = enc_c_begin(NULL); enc_c_args(c, b.gpuAddress, 0); enc_c_args(c, io.gpuAddress, 1);
+        enc_c_pso(c, pr); enc_c_dispatch(c, MTLSizeMake(pg / 4 / 64, 1, 1), MTLSizeMake(64, 1, 1)); enc_c_end(c);
+        finish();
+        int ok = 1; const uint32_t *o = io.contents; for (size_t i = 0; i < pg / 4; i++) ok &= o[i] == s + (uint32_t)i;
+        CHECK(ok, "the next encoder's shader reads a shader's writes through a second no-copy buffer");
+    }
+    atomic_fetch_sub(&g_big_n, 1); res_remove(a); res_remove(b); res_remove(io); res_remove(seed); a = b = nil; munmap(mem, pg);
+}
 int main(void) { @autoreleasepool {
-    mtl_init(); separate_buffers(); sparse_copies();
+    mtl_init(); separate_buffers(); sparse_copies(); shader_alias();
     printf("t_copy_alias: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

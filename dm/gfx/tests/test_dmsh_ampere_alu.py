@@ -2,7 +2,7 @@
 """Ampere ALU instructions through the offline translator (dmsh_xlate, arch sm86), on registers the translator cannot fold, their result stored to shared memory so
 that it is kept: BREV, and HADD2 / HMUL2 with an immediate (test_dmsh_ampere_mem.py's Pokopia class has those two on constants, a negative immediate's sign, F2FP.MERGE_C,
 F2I from a half, UP2UR, MEMBAR and ERRBAR). Needs DMSH_TEST_XLATE (the translator) like the other translator tests."""
-import sys, unittest
+import re, sys, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_dmsh_ampere_mem import EXIT, Translated, inst
@@ -67,6 +67,46 @@ class F2ip(Alu):
         self.assertIn('trunc(', self.kept(self.ONE, srcs=(9,)))
 
 
+class CarriesAndModifiers(Alu):
+    """Constant inputs the translator folds, the result stored: IADD3's two carry predicates (sum >= 2^32 and sum >= 2 * 2^32, Mesa NAK's OpIAdd3 fold, checked on
+    hardware), PLOP3's second table on the sources as they were, POPC / FLO with an immediate whose top bit (63) is no bitwise not, LEA.HI.SX32's sign-extended high
+    word and LEA's negated B (~B + 1 with its carry; with .X the bitwise not). Encodings built for the test, each checked with nvdisasm 13.5 (sm_86)"""
+    SEL_P0 = (0x000fc200040000ff, 0x00000001ff067807)   # SEL R6, RZ, 0x1, !P0: R6 = P0 ? 1 : 0
+
+    def stored(self, *code):
+        m = re.findall(r'\] = (\w+);', self.kept(*code))
+        return m[-1] if m else None
+
+    def test_popc_immediate_top_bit_is_no_not(self):
+        self.assertEqual(self.stored((0x000fc20000000000, 0x800000ffff067909)), '9u')    # POPC R6, 0x800000ff
+
+    def test_flo_immediate_top_bit_is_no_not(self):
+        msl = self.kept((0x000fc200000e0000, 0x800400ffff067900))                         # FLO.U32 R6, 0x800400ff
+        self.assertIn('spvFindUMSB(2147746047u)', msl)                                    # 0x800400ff itself, not its bitwise not
+
+    def test_iadd3_carry_of_two_sets_both_predicates(self):
+        iadd3 = (0x000fc2000791e9ff, 0xffffffffff077810)                                  # IADD3 R7, P0, P1, -RZ, -0x1, -RZ: 2^32 + 0xffffffff + 2^32
+        self.assertEqual(self.stored(iadd3, self.SEL_P0), '1u')
+
+    def test_plop3_second_table_reads_the_old_source(self):
+        isetp = (0x000fc20003f42070, 0x000000ffff00720c)                                  # ISETP.EQ.U32.AND P2, PT, RZ, RZ, PT: P2 = true
+        plop3 = (0x000fc2000104e070, 0x0000000000f0781c)                                  # PLOP3.LUT P2, P0, P2, PT, PT, 0x0, 0xf0: P2 = false, P0 = the old P2
+        self.assertEqual(self.stored(isetp, plop3, self.SEL_P0), '1u')
+
+    def test_lea_hi_sx32_sign_extends(self):
+        mov = (0x000fc20000000fff, 0x80000000ff057802)                                    # MOV R5, 0x80000000
+        lea = (0x000fc200078f0aff, 0x000000ff05067211)                                    # LEA.HI.SX32 R6, R5, RZ, 0x1: (0xffffffff:R5) >> 31
+        self.assertEqual(self.stored(mov, lea), '4294967295u')
+
+    def test_lea_negated_zero_b_carries(self):
+        lea = (0x000fc200078000ff, 0x800000ffff067211)                                    # LEA R6, P0, RZ, -RZ, 0x0: ~0 + 1 carries out
+        self.assertEqual(self.stored(lea, self.SEL_P0), '1u')
+
+    def test_lea_x_not_b(self):
+        lea = (0x000fc200038e04ff, 0x800000ffff067211)                                    # LEA.X R6, RZ, ~RZ, 0x0, PT: 0 + 0xffffffff + 1
+        self.assertEqual(self.stored(lea), '0u')
+
+
 class HalfImmediate(Alu):
     """HADD2 / HMUL2 Rd, Ra, imm (form 2): the second source is the immediate at bits 32..63, not the register field at 64 that HFMA2's B uses in that form. Pokopia's
     blur 85446a6753300fc8 steps its loop with HADD2 R6, R6, 2.0h; reading R0 there, the loop never ended and the GPU hung"""
@@ -103,6 +143,101 @@ class GlobalMemory(Alu):
 
     def test_atomg_inc_is_a_compare_and_swap_loop(self):
         self.assertIn('atomic_compare_exchange', self.kept(self.INC, srcs=(19, 20, 21)))
+
+
+
+class SharedAtomics(Alu):
+    """ATOMS.INC / ATOMS.DEC (operations 3 and 4) had no case in EmitAtomicOp: the result was the constant 0 and shared memory was not touched. They are a compare-and-swap loop.
+    ATOMS.CAS with bit 87 clear is CUDA's atomicCAS: Rd is the old value; CAST (87) and CAST.SPIN (87, 88) keep Rd = 1 when the swap happened. A GPU cross-check of 400 shared
+    accesses against a reference (one thread, production options): INC / DEC / CAS 84 mismatches, none with the fix. Encodings built from the sm_86 oracle corpus, checked with nvdisasm"""
+    INC = (0x000fe20001800000, 0x000000141306738c)    # ATOMS.INC R6, [R19], R20
+    DEC = (0x000fe20002000000, 0x000000141306738c)    # ATOMS.DEC R6, [R19], R20
+    CAS = (0x000fe20000000015, 0x000000141306738d)    # ATOMS.CAS R6, [R19], R20, R21
+    SPIN = (0x000fe20001800015, 0x000000141306738d)   # ATOMS.CAST.SPIN R6, [R19], R20, R21
+
+    def test_inc_is_a_compare_and_swap_loop(self):
+        self.assertIn('atomic_compare_exchange', self.kept(self.INC, srcs=(19, 20)))
+
+    def test_dec_is_a_compare_and_swap_loop(self):
+        self.assertIn('atomic_compare_exchange', self.kept(self.DEC, srcs=(19, 20)))
+
+    def test_cas_gives_the_old_value(self):   # the success test of CAST.SPIN is not there
+        cas, spin = self.kept(self.CAS, srcs=(19, 20, 21)), self.kept(self.SPIN, srcs=(19, 20, 21))
+        self.assertIn('atomic_compare_exchange', cas)
+        success = r'bool _\d+ = int\(_\d+\) =='   # the old value compared with the expected one (not the swap loop's own test)
+        self.assertRegex(spin, success)
+        self.assertNotRegex(cas, success)
+
+
+class HalfSwizzle(Alu):
+    """A half-pair operand's swizzle (A 74..75, the 32 slot 60..61, the 64 slot 81..82: 0 as is, 1 .F32, 2 .H0_H0, 3 .H1_H1) applies to a constant too: nvdisasm prints
+    HMUL2 R37, R37.H0_H0, c[0x0] [0x168].H0_H0 (bits 60..61 = 2), a half scaled by one half of a uniform. Read as is, the high lane took the constant's other half.
+    Value 1 is .F32, the 32-bit float itself in both lanes (nvdisasm: R20.F32), not .H1_H1. Encodings from the sm_86 oracle corpus, registers renamed"""
+    C_H0 = (0x000fe20000000800, 0x20005a0013067a32)    # HMUL2 R6, R19.H0_H0, c[0x0] [0x168].H0_H0
+    C_H1 = (0x000fe20000000c00, 0x30005a0013067a32)    # HMUL2 R6, R19.H1_H1, c[0x0] [0x168].H1_H1
+    F32 = (0x000fe20000000800, 0x1000001413067232)     # HMUL2 R6, R19.H0_H0, R20.F32
+    LANE = re.compile(r'float2\(as_type<half2>\([^;]*?\)\)\.([xy])')
+
+    def lanes(self, *code, srcs=(19,)):
+        msl = self.kept(*code, srcs=srcs)
+        return msl, set(self.LANE.findall(msl))
+
+    def test_constant_low_half_in_both_lanes(self):
+        msl, read = self.lanes(self.C_H0)
+        self.assertEqual(read, {'x'}, msl)   # A and the constant: their low halves only
+
+    def test_constant_high_half_in_both_lanes(self):
+        msl, read = self.lanes(self.C_H1)
+        self.assertEqual(read, {'y'}, msl)
+
+    def test_f32_operand_is_the_float(self):
+        msl, read = self.lanes(self.F32, srcs=(19, 20))
+        self.assertEqual(msl.count('as_type<half2>'), 1, msl)   # A's unpack alone: R20 is used as a float, not split into halves
+        self.assertEqual(read, {'x'}, msl)
+
+
+class HalfCompareFtz(Alu):
+    """HSETP2 / HSET2 .FTZ (bit 80): a subnormal half compares as zero, as FSETP.FTZ's float does (CompareFtz). The lanes are unpacked to 32-bit floats, where a half's
+    subnormals are normal, so the half's own bound (2^-14) flushes them. Encodings built from the sm_86 oracle corpus and checked with nvdisasm"""
+    HSETP2 = (0x000fca0003f14000, 0x0000001413007234)      # HSETP2.GT.FTZ.AND P0, PT, R19, R20, PT
+    HSETP2_NO = (0x000fca0003f04000, 0x0000001413007234)   # HSETP2.GT.AND P0, PT, R19, R20, PT
+    HSET2 = (0x000fe20003814080, 0x0000001413067233)       # HSET2.BF.GT.FTZ.AND R6, R19, R20, PT
+    BOUND = re.compile(r'6\.10351\d*e-05')
+
+    def test_hsetp2_flushes_both_operands(self):   # only P0 (the low lanes) is read: the high lanes' comparison goes to PT and is dropped with its flushes
+        msl = self.kept(self.HSETP2, (0x000fe40000000000, 0x0000001413067208), srcs=(19, 20))
+        self.assertEqual(len(self.BOUND.findall(msl)), 2, msl)
+
+    def test_hset2_flushes_both_lanes_of_both_operands(self):
+        msl = self.kept(self.HSET2, srcs=(19, 20))
+        self.assertEqual(len(self.BOUND.findall(msl)), 4, msl)
+
+    def test_without_ftz_compares_as_is(self):
+        self.assertFalse(self.BOUND.search(self.kept(self.HSETP2_NO, (0x000fe40000000000, 0x0000001413067208), srcs=(19, 20))))
+
+
+class DirectedRounding(Alu):
+    """I2F (32-bit source, 32-bit float) and F2F.F16.F32 with .RM / .RP / .RZ (78..79): the result rounded to nearest is compared with the exact value and stepped to
+    its neighbour. The compiler's 32-bit division starts with I2F.U32.RP; rounded to nearest, a value above 2^24 came out one ulp off in about half the cases (a GPU
+    cross-check against an exact reference: 45 mismatches in 300 I2F, none with the fix). Encodings built from the sm_86 oracle corpus and checked with nvdisasm"""
+    I2F_RP = (0x000fe20000209000, 0x0000001300067306)     # I2F.U32.RP R6, R19
+    I2F_RN = (0x000fe20000201000, 0x0000001300067306)     # I2F.U32 R6, R19
+    F2F_RP = (0x000fe20000208800, 0x0000001300067304)     # F2F.F16.F32.RP R6, R19
+    F2F_RN = (0x000fe20000200800, 0x0000001300067304)     # F2F.F16.F32 R6, R19
+
+    def test_i2f_rp_checks_against_the_integer(self):
+        msl = self.kept(self.I2F_RP, srcs=(19,))
+        self.assertIn('4294967296', msl)                     # the bound above which the rounded float is above every u32
+        self.assertRegex(msl, r'as_type<int>\(_\d+\) \+ 1\b')   # the float's bits stepped up
+
+    def test_i2f_to_nearest_is_plain(self):
+        self.assertNotIn('4294967296', self.kept(self.I2F_RN, srcs=(19,)))
+
+    def test_f2f_rp_reads_the_half_back(self):   # through a mask: an unpack of the pack would be folded into the float itself (PropagatePack)
+        self.assertIn('& 65535', self.kept(self.F2F_RP, srcs=(19,)))
+
+    def test_f2f_to_nearest_is_plain(self):
+        self.assertNotIn('& 65535', self.kept(self.F2F_RN, srcs=(19,)))
 
 
 class CompareFtz(Alu):

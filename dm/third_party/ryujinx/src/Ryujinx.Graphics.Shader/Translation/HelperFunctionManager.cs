@@ -298,7 +298,9 @@ namespace Ryujinx.Graphics.Shader.Translation
 
             context.Return();
 
-            return new Function(ControlFlowGraph.Create(context.GetOperations()).Blocks, $"SharedStore{bitSize}_{id}", false, 2, 0);
+            // nxnative: the dmsh_ name keeps the helper's name in the SPIR-V, and the shader build replaces this compare-and-swap loop in the Metal source with a store of the byte or
+            // half-word (dmsh_build.py, shared_store_msl), which Metal's threadgroup memory takes: the name, the arguments (byte offset, value) and the array are the contract
+            return new Function(ControlFlowGraph.Create(context.GetOperations()).Blocks, $"dmsh_shared_store{bitSize}_{id}", false, 2, 0);
         }
 
         private static Function GenerateShuffleFunction(HelperFunctionName functionName, int subgroupSize)

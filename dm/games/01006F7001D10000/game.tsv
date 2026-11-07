@@ -1,0 +1,35 @@
+# Monster Boy and the Cursed Kingdom (Game Atelier; FDG Entertainment), SDK 8.3.1, NVN.
+# Started from the NSP script's provisional profile; brought up on the Mac with no change to it once the shader split read the .glslcobj programs (README.md).
+
+# ---- Identity ----
+title_id	01006F7001D10000
+program_id	01006F7001D10000
+
+# ---- App ----
+name	Monster Boy and the Cursed Kingdom
+ipa	MonsterBoyAndTheCursedKingdom.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v327680	1.0.5	main=7dd8afc6a77afbb3426305bc0916cfe2	subsdk0=a4b620d9c140a4ac6e010251afd5cb11	sdk=86a2afd863c99062d666226a9e7aa764
+package	v327680
+shader_versions	v327680
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	DATA/PACK121.T
+zip_store	.mp4:.opus:.t:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB − 134 MB of bss (counted as used memory): a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/DATA/=data /glsl/=glsl /bgm/=bgm /vib/=vib /video/=video
+shader_note	Monster Boy and the Cursed Kingdom shaders

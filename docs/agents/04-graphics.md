@@ -104,3 +104,7 @@ What earlier titles needed beyond sections 1–5 is filed by mechanism: textures
 | `MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_ERROR_MODE=nslog` | Metal validation without aborting |
 
 A first-frame bring-up that worked for Mario: screenshot is black → `TEXDUMP` shows which targets have content → `PASSDUMP` the pass that writes the window → `HILITE` its fragment shader → `CBDUMP` its uniforms → read the translated `.metal` of its vertex shader.
+
+## 8. Standalone Metal probes
+
+[dm/gfx/tests/probes](../../dm/gfx/tests/probes/README.md) has small programs that test one Metal or translator behaviour without the game: placement-heap aliasing, render-target allocation sizes, mesh index ranges, mesh pipelines in a Metal 4 archive, a mesh and task shader sweep under shader validation, and the task-shader hang. Run them before a long game run when the question is about Metal itself.

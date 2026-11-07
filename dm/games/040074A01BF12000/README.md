@@ -67,6 +67,7 @@ Each step below stopped the boot before its fix:
 
 ## Found on this game
 
+- [A local patch file breaks the published patch index](../../../docs/reference/packing.md#a-local-patch-file-breaks-the-published-patch-index): ignored bring-up metadata was included in the documentation scan (resolved).
 - [A prebuild pool sized from the Super cores](../../../docs/reference/shaders.md#a-prebuild-pool-sized-from-the-super-cores): the pipeline prebuild of its 21,225 shader pairs, M5 Pro, 393-452 s on 4 workers against 187-272 s on Metal's 14 (resolved).
 - [A depth clear over the whole target with a partial stencil mask](../../../docs/reference/rendering.md#a-depth-clear-over-the-whole-target-with-a-partial-stencil-mask): 22.8 MB of depth and stencil loaded a frame for a stencil mask of 1 (resolved).
 - [No Game language row in an app packed from a NUP or a dump](../../../docs/reference/packing.md#no-game-language-row-in-an-app-packed-from-a-nup-or-a-dump): reported by testers; this folder's dump has no control data.

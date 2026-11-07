@@ -176,7 +176,15 @@ int main(int argc, char **argv) {
     if (!stat(p, &st)) {
         romfs_img *image = romfs_image_open(p); valid_romfs = image != NULL;
         romfs_image_close(image); snprintf(romfs, sizeof romfs, "%s", p);
-    } else { snprintf(p, sizeof p, "%s/%s", romfs, marker); valid_romfs = !stat(p, &st); }
+    } else {
+        snprintf(p, sizeof p, "%s/%s", romfs, marker); valid_romfs = !stat(p, &st);
+        if (!valid_romfs && !stat(romfs, &st) && S_ISDIR(st.st_mode)) {
+            for (unsigned i = 0; i < 256 && !valid_romfs; i++) {
+                snprintf(p, sizeof p, "%s/romfs_programs/%u/%s", res, i, marker);
+                valid_romfs = !stat(p, &st);
+            }
+        }
+    }
     if (access(host, X_OK) || !valid_romfs || !modules_present(dm)) {
         alert(name, "The game data inside this app is missing or incomplete (Contents/Resources/romfs.img, Contents/Resources/dm or Contents/MacOS/dmhost): pack it again with build_ipa_from_nsp.py --platform mac-app.");
         return 1;
@@ -206,6 +214,11 @@ int main(int argc, char **argv) {
     if (shown == 2) saved_choices();
     cloud_saves_folder();
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_SAVE", save, 0); setenv("DM_TEMP", temp, 0);
+    for (unsigned i = 0; i < 256; i++) {
+        char key[64]; snprintf(key, sizeof key, "DM_ROMFS_PROGRAM_%u", i);
+        snprintf(p, sizeof p, "%s/romfs_programs/%u", res, i);
+        if (!stat(p, &st) && S_ISDIR(st.st_mode)) setenv(key, p, 0);
+    }
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);
     snprintf(p, sizeof p, "%s/font", dm); setenv("DM_FONT_DIR", p, 0);
     snprintf(p, sizeof p, "%s/shader_map.tsv", dm); if (!stat(p, &st)) setenv("DM_NVN_SHMAP", p, 0);

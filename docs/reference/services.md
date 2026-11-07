@@ -1100,3 +1100,11 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** an NRR with 1 in the byte at +5 (the Switch 2's) has a header 0x180 bytes longer. The same fields follow it: program ID +0x4b0, size +0x4b8, hash table +0x4c0, its count +0x4c4.
 - **Fix:** `hle_ro.c` and `nro_collect.py` read the table by that byte.
 - **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md).
+
+
+### Raw Switch 2 companion fonts and indexed game files
+
+- **Symptom:** a raw upgrade dump is rejected as missing DLC, or its companion reads its own small RomFS when requesting program 0. Built-in font lookups can receive a BFTTF header instead of a TTF.
+- **Cause:** the dump scanner understood only flat DLC trees and one program. The indexed MountRom overload ignored its index. BuiltInFontData reused the older shared-font Decode address convention.
+- **Fix:** `pack_dump.py` discovers `programN` / `program/N`, and the newest complete numeric DLC snapshot under `<instance>/updates/<version>/program/0/romfs` (falling back to base). Mac development builds link raw directories; Mac apps copy them into the bundle. `DM_ROMFS_PROGRAM_<index>` selects an indexed read-only filesystem, bundled in `Resources/romfs_programs/<index>`. Built-in font getters always return the plain TTF after the 8-byte header; RequestLoadNxFont prepares the host-owned fonts. The console-generation query follows the loaded SDK build spec.
+- **Found on:** [Wonder's Switch 2 companion](../../dm/games/010015100B514000/README.md#raw-switch-2-companion). This adds Mac bring-up support; it does not establish iOS or all DLC gameplay compatibility.

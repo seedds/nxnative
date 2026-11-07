@@ -1,5 +1,14 @@
 # Packing
 
+## Documentation inputs
+
+### A local patch file breaks the published patch index
+
+- **Symptom:** the documentation test or `docs_patches.py --check` stops at a local `patches.py: no BINDING` even though that file is git-ignored.
+- **Cause:** the patch index scanned every patch file on disk, including local bring-up files absent from a clean checkout.
+- **Fix:** `docs_patches.py` selects tracked profile and patch files with `git ls-files`, as it does for host sources. Tracked patches still require valid `BINDING` metadata. The documentation tests cover ignored and untracked files and retain the missing-metadata error for tracked patches.
+- **Found on:** an ignored local [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game) VRR patch.
+
 ## Game packages
 
 ### PFS0 file-name table missing its final NUL

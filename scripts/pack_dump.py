@@ -13,7 +13,7 @@
 #   extract/v<version>/ExeFS/   the newest version's code modules (APFS clones, or copies on another volume)
 #   extract/v<version>/RomFS.img   its RomFS as one image (dm/tools/romfs_image.py: the host's DM_ROMFS, the IPA's romfs.img)
 #   aoc/<index>.img   each DLC's RomFS (index = DLC title ID − base title ID − 0x1000), the host's DM_AOC_DIR
-# A dump has no control data, so there is no control.nacp or icon.jpg beside them, as there is after nx_extract.
+# Optional control/control.nacp is preserved beside the code modules; no icon is synthesized.
 # The title ID is the program ID in main.npdm. A repeat run keeps code modules that are the same and an image whose source tree, packer and image are unchanged (romfs_image.py --reuse).
 # Usage: pack_dump.py <dump folder> [--version N] [--work-dir DIR]   (exit 1 on error)
 import argparse, filecmp, shutil, struct, subprocess, sys
@@ -78,8 +78,39 @@ def is_dump(folder):   # whether a folder has the layout above: a base game's co
     return any(is_version(p) for p in ups)
 
 
-def scan(dump):
-    """What a dump folder holds: (title ID, {update version: its folder}, {DLC title ID: its RomFS folder}). The title ID is the base game's program ID, else the newest whole update's"""
+def program_dir(snapshot, index):
+    if not index: return snapshot
+    return next((p for p in (snapshot / f'program{index}', snapshot / 'program' / str(index)) if has_code(p)), snapshot / f'program{index}')
+
+
+def default_program(dump):
+    snapshots = [p for _, p in sorted(updates(dump).items(), reverse=True)]
+    if (base := base_of(dump)): snapshots.append(base)
+    for snapshot in snapshots:
+        if not is_version(snapshot): continue
+        p = program_dir(snapshot, 1)
+        return 1 if is_version(p) and program_id(p / 'exefs/main.npdm') >> 56 == 4 else 0
+    return 0
+
+
+def dlc_romfs(content):
+    candidates = [content / 'romfs'] if (content / 'romfs').is_dir() else []
+    for instance in sorted(p for p in content.iterdir() if p.is_dir() and p.name != 'romfs'):
+        snapshots = [p for _, p in sorted(updates(instance).items(), reverse=True)] + [instance / 'base', instance]
+        for snapshot in snapshots:
+            rom = next((p for p in (snapshot / 'program/0/romfs', snapshot / 'program0/romfs', snapshot / 'romfs') if p.is_dir()), None)
+            if rom: candidates.append(rom); break
+    if len(candidates) != 1: raise Error(f'{content}: expected one <n>/romfs folder or extracted DLC snapshot, found {len(candidates)}')
+    return candidates[0]
+
+
+def dlc_index(app, tid):
+    # The platform byte and program index may differ between a Switch 2 companion and its Switch 1 DLC.
+    return (tid & 0x00FFFFFFFFFFFFFF) - (app & 0x00FFFFFFFFFFF000) - 0x1000
+
+
+def scan(dump, program=0):
+    """What a dump folder holds: (title ID, {update version: its folder}, {DLC title ID: its RomFS folder}). The title ID is the selected program's ID (program 0 by default)"""
     if not is_dump(dump): raise Error(f'{dump}: no base/exefs/main.npdm with a RomFS in base/ or updates/<version>/, nor exefs/main.npdm and romfs in the folder or in updates/<version>/')
     vers = updates(dump)
     app = program_id((base_of(dump) or max((p for p in vers.values() if is_version(p)), key=lambda p: int(p.name))) / 'exefs/main.npdm')
@@ -88,26 +119,50 @@ def scan(dump):
     for d in sorted(p for p in (dump / 'dlc').iterdir() if p.is_dir()) if (dump / 'dlc').is_dir() else []:
         try: tid = int(d.name, 16)
         except ValueError: raise Error(f'{d}: not a DLC title ID') from None
-        if not 0 < tid - app - 0x1000 <= 2000: raise Error(f'{d}: {tid:016X} is not a DLC of {app:016X}')
-        roms = sorted(d.glob('*/romfs')) or ([d / 'romfs'] if (d / 'romfs').is_dir() else [])
-        if len(roms) != 1: raise Error(f'{d}: expected one <n>/romfs folder, found {len(roms)}')
-        dlc[tid] = roms[0]
+        if not 0 < dlc_index(app, tid) <= 2000: raise Error(f'{d}: {tid:016X} is not a DLC of {app:016X}')
+        dlc[tid] = dlc_romfs(d)
+    if program:
+        base = program_dir(base_of(dump), program) if base_of(dump) else None
+        vers = {v: program_dir(p, program) for v, p in vers.items() if is_version(program_dir(p, program))}
+        candidates = [p for _, p in sorted(vers.items(), reverse=True)] + ([base] if base and has_code(base) else [])
+        if not candidates: raise Error(f'{dump}: no complete program {program}')
+        pid = program_id(candidates[0] / 'exefs/main.npdm')
+        if (pid & 0x00FFFFFFFFFFFFFF) != (app & 0x00FFFFFFFFFFFFFF) + program:
+            raise Error(f'{candidates[0]}: program ID {pid:016X} is not program {program} of {app:016X}')
+        app = pid
     return app, vers, dlc
 
 
-def pack_version(src, app, out, say=print):   # one version's folder (base/ or updates/<version>/) → out/ExeFS and out/RomFS.img
+def link_directory(src, dst):
+    if dst.is_symlink() and dst.resolve() == src.resolve(): return
+    if dst.is_symlink() or dst.is_file(): dst.unlink()
+    elif dst.exists(): shutil.rmtree(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.symlink_to(src.resolve(), target_is_directory=True)
+
+
+def pack_version(src, app, out, say=print, raw=False):   # one version's folder (base/ or updates/<version>/) → out/ExeFS and out/RomFS.img
     if not (src / 'exefs/main').is_file() or not (src / 'exefs/main.npdm').is_file() or not (src / 'romfs').is_dir(): raise Error(f'{src}: no exefs/main, exefs/main.npdm and romfs')
     if (pid := program_id(src / 'exefs/main.npdm')) != app: raise Error(f'{src}: program ID {pid:016X}, the base is {app:016X}')
     exefs(src / 'exefs', out / 'ExeFS')
-    pack(src / 'romfs', out / 'RomFS.img', say)
+    if raw:
+        for name in ('RomFS.img', 'RomFS.img.inputs.json'): (out / name).unlink(missing_ok=True)
+        link_directory(src / 'romfs', out / 'RomFS')
+    else: pack(src / 'romfs', out / 'RomFS.img', say)
+    control = src / 'control/control.nacp'
+    if control.is_file(): clone(control, out / 'control.nacp')
 
 
-def pack_dlc(app, dlc, aoc, say=print):   # {DLC title ID: its RomFS folder} → aoc/<index>.img; images of DLC no longer in the folder go
-    want = {f'{tid - app - 0x1000}.img': roms for tid, roms in dlc.items()}
+def pack_dlc(app, dlc, aoc, say=print, raw=False):   # {DLC title ID: its RomFS folder} → aoc/<index>.img; images of DLC no longer in the folder go
+    want = {f'{dlc_index(app, tid)}' + ('' if raw else '.img'): roms for tid, roms in dlc.items()}
     if aoc.is_dir():
         for f in aoc.iterdir():
-            if f.name.removesuffix('.inputs.json') not in want: f.unlink()
-    for name, roms in want.items(): pack(roms, aoc / name, say)
+            if f.name.removesuffix('.inputs.json') not in want:
+                if f.is_dir() and not f.is_symlink(): shutil.rmtree(f)
+                else: f.unlink()
+    for name, roms in want.items():
+        if raw: link_directory(roms, aoc / name)
+        else: pack(roms, aoc / name, say)
 
 
 def main():

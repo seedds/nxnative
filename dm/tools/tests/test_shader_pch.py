@@ -53,12 +53,12 @@ class Choice(Tmp):
         with mock.patch.object(dmsh_pch, 'make', return_value=('/p.pch', None)) as make, mock.patch.object(subprocess, 'run', return_value=self.result()) as run:
             dmsh_pch.compile(['metal', '-c'], 'a.metal', 'a.air'); dmsh_pch.compile(['metal', '-c'], 'b.metal', 'b.air')
         make.assert_called_once()   # one header per convention
-        self.assertEqual([c.args[0] for c in run.call_args_list], [['metal', '-c', '-include-pch', '/p.pch', '-x', 'metal', '-', '-o', n + '.air'] for n in 'ab'])
+        self.assertEqual([c.args[0] for c in run.call_args_list], [['metal', '-c', '-include-pch', '/p.pch', *dmsh_pch.PARSER, '-x', 'metal', '-', '-o', n + '.air'] for n in 'ab'])
 
     def test_a_failure_with_the_header_runs_the_plain_compile(self):
         with mock.patch.object(dmsh_pch, 'make', return_value=('/p.pch', None)), mock.patch.object(subprocess, 'run', side_effect=[self.result(1), self.result()]) as run:
             dmsh_pch.compile(['metal', '-c'], 'a.metal', 'a.air')
-        self.assertEqual(run.call_args_list[1].args[0], ['metal', '-c', '-x', 'metal', '-', '-o', 'a.air'])
+        self.assertEqual(run.call_args_list[1].args[0], ['metal', '-c', *dmsh_pch.PARSER, '-x', 'metal', '-', '-o', 'a.air'])
         self.assertTrue(run.call_args_list[1].kwargs.get('check'))
 
     def test_a_header_that_cannot_be_used_is_said_once_and_compiles_stay_plain(self):
@@ -72,7 +72,7 @@ class Choice(Tmp):
         with mock.patch.dict(os.environ, {'DMSH_PCH': '0'}), mock.patch.object(dmsh_pch, 'make') as make, mock.patch.object(subprocess, 'run', return_value=self.result()) as run:
             dmsh_pch.compile(['metal', '-c'], 'a.metal', 'a.air')
         make.assert_not_called()
-        self.assertEqual(run.call_args.args[0], ['metal', '-c', '-x', 'metal', '-', '-o', 'a.air'])
+        self.assertEqual(run.call_args.args[0], ['metal', '-c', *dmsh_pch.PARSER, '-x', 'metal', '-', '-o', 'a.air'])
 
     def test_each_run_reads_the_source_from_its_start(self):
         read = []
@@ -115,6 +115,24 @@ class RealCompiler(Tmp):
     @unittest.skipUnless(has_sdk('iphoneos'), 'no iOS Metal compiler')
     def test_ios_output_is_byte_identical(self):
         self.check_identical(ios_metal.METAL)
+
+    def check_deep_nesting(self, metal):
+        src = self.tmp / 'deep.metal'
+        src.write_text('#include <metal_stdlib>\nusing namespace metal;\nfragment float4 main0(float4 p [[position]]) {' +
+                       ''.join(f'if (p.x > {i}.0f) {{' for i in range(300)) + 'return p;' + '}' * 300 + 'return float4(0);}')
+        plain = subprocess.run([*metal, '-x', 'metal', str(src), '-o', str(self.tmp / 'plain.air')], capture_output=True)
+        self.assertNotEqual(plain.returncode, 0)
+        self.assertIn(b'bracket nesting level exceeded', plain.stderr)
+        dmsh_pch.compile(metal, str(src), str(self.tmp / 'deep.air'))
+        self.assertTrue((self.tmp / 'deep.air').is_file())
+
+    @unittest.skipUnless(has_sdk('macosx'), 'no macOS Metal compiler')
+    def test_mac_deep_control_flow_compiles(self):
+        self.check_deep_nesting(MAC)
+
+    @unittest.skipUnless(has_sdk('iphoneos'), 'no iOS Metal compiler')
+    def test_ios_deep_control_flow_compiles(self):
+        self.check_deep_nesting(ios_metal.METAL)
 
     def check_no_name(self, metal, header):
         pch = dmsh_pch.make(metal)[0] if header else None

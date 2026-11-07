@@ -159,8 +159,18 @@ def load(path, n):
     return m
 
 
+def tracked_files(*paths):
+    names = subprocess.run(['git', 'ls-files', '-z', '--', *paths], cwd=REPO, capture_output=True, text=True, check=True).stdout.split('\0')
+    return sorted(REPO / f for f in set(names) if f)   # a set: merge conflicts list a file once per stage
+
+
 def games():
-    return [game.Game(d) for d in sorted((REPO / 'dm/games').iterdir()) if (d / 'game.tsv').is_file()]
+    return [game.Game(p.parent) for p in tracked_files('dm/games/*/game.tsv')]
+
+
+def patch_files():
+    # Local bring-up patches may be ignored or untracked, and need not carry the published index's BINDING metadata.
+    return {p.parent.name: p for p in tracked_files('dm/games/*/patches.py')}
 
 
 def build_rows(gs):   # {build ID: [(game, display version, module)]}
@@ -181,8 +191,7 @@ def frame_step_sites(fn):   # (offset, reason) of each site a FRAME_STEP functio
 
 
 def host_files():   # the host's tracked sources without its tests: what the build-ID scan below and the title-ID check (test_architecture.py) read
-    tracked = subprocess.run(['git', 'ls-files', *HOST], cwd=REPO, capture_output=True, text=True, check=True).stdout.split('\n')
-    files = sorted(REPO / f for f in set(tracked) if f)   # a set: ls-files lists a file in a merge conflict once per stage
+    files = tracked_files(*HOST)
     return [p for p in files if p.suffix in HOST_EXT and 'tests' not in p.relative_to(REPO).parts[2:]]
 
 
@@ -250,7 +259,7 @@ def version(builds, bid, owner=None):   # "1.4.3 main" from the build rows (of t
 def page():
     gs = games(); names = [g.get('name', g.id) for g in gs]; DUP.update(g.id for g in gs if names.count(g.get('name', g.id)) > 1)
     gs.sort(key=lambda g: name(g).casefold()); builds = build_rows(gs); host = host_rows(builds)
-    files = {p.parent.name: p for p in sorted((REPO / 'dm/games').glob('*/patches.py'))}
+    files = patch_files()
     mods = {gid: load(p, n) for n, (gid, p) in enumerate(files.items())}
     sdk = load(SDK, 'sdk'); sdk_text = SDK.read_text()
     host_games = {}

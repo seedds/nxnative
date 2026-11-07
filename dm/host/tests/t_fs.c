@@ -75,6 +75,13 @@ int main(void) {
     setenv("DM_ROMFS", rom, 1); setenv("DM_ROMFS_OVERLAY", overlay, 1); CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK, "mount RomFS with two layers (base + overlay)");
     size_t rom_cache = 0; CHECK(h_fs_QueryRomCacheIdx(&rom_cache, 0) == RES_OK && rom_cache == 0x1000, "SDK 19: the cache size overload with a program index");
     CHECK(h_fs_MountRomIdx("rom2", 0, NULL, 0) == RES_OK && read_fs("rom2:/data/base", got, sizeof got) && !strcmp(got, "only-base"), "SDK 19: MountRom with a program index mounts the RomFS");
+    uint64_t ih;
+    setenv("DM_ROMFS_PROGRAM_0", overlay, 1);
+    CHECK(h_fs_MountRomIdx("other", 0, NULL, 0) == RES_OK && read_fs("other:/data/over", got, sizeof got) && !strcmp(got, "only-overlay"), "indexed mount selects the mapped program, not the current RomFS");
+    CHECK(h_fs_OpenFile(&ih, "other:/data/over", MODE_WRITE) == RES_FAIL, "indexed RomFS is read-only");
+    CHECK(h_fs_OpenFile(&ih, "other:/data/base", MODE_READ) != RES_OK, "indexed program does not fall back to the current program");
+    CHECK(h_fs_MountRomIdx("missing", 7, NULL, 0) == RES_TARGET_NOT_FOUND, "missing program index fails instead of mounting the wrong program");
+    unsetenv("DM_ROMFS_PROGRAM_0");
     CHECK(read_fs("rom:/data/same", got, sizeof got) && !strcmp(got, "overlay"), "the overlay file wins"); CHECK(read_fs("rom:/data/base", got, sizeof got) && !strcmp(got, "only-base"), "falls back to the base when the overlay lacks the file");
     uint64_t rh; CHECK(h_fs_OpenFile(&rh, "rom:/data/same", MODE_WRITE) == RES_FAIL, "the two-layer mount refuses writes");
     CHECK(read_fs("rom:\\data\\over", got, sizeof got) && !strcmp(got, "only-overlay") && read_fs("rom:\\data\\base", got, sizeof got) && !strcmp(got, "only-base"), "backslashes separate as slashes do, in both layers");

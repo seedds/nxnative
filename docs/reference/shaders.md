@@ -80,7 +80,8 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Cause:** `bahs_shaders` finds the entries by scanning the table area 4 bytes at a time. An NVN2 control section's +0x38..+0x47 (instruction length, c1 start and end, code length: `L, 0, L, L`) reads as an entry `{code offset L, 0, control size L, control L bytes on}`. When L is a multiple of 0x100 and a later program's control section lies L bytes on, every check passes: the shader pairs that control with whatever code lies at L in the code region. `bahs_variations` finds the binary array at the lowest entry taken minus 0x18, so such an entry below the real ones also hid that file's variation pairs.
 - **Fix:** an entry that lies inside a control section another entry names, measured by that section's own length (`ctl_len`, 0x48 key bytes for NVN2) rather than the length an entry claims, is dropped. Whether a false entry's section is genuine does not matter, as its first 0x48 bytes are a real control section.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): six such shaders in `agl_common`, `agl_technique`, `agl_technique_pfx` and `tera_common`, none of them ever loaded; one failed the build. `tera_common` gave 175 variation pairs once its false entry was gone. [Splatoon Raiders](../../dm/games/0400380020056000/README.md)' map holds the same three agl keys (`68bbe98b3bfd9876`, `18be578dfdaaffa0`, `7a4936fccf82094e`); it and Donkey Kong Bananza need their tables split again. [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): one compute shader in `agl_common` (`797e77c2ec4341c5`), dropped from its tables ([issue #1592](https://github.com/seedds/nxnative/issues/1592)).
-- **Check:** `dm/tools/tests/test_split_bahs_entries.py` (two programs and the false entry between them, taken on `main`).
+- **Also found on:** [Super Mario Bros. Wonder's raw Switch 2 companion](../../dm/games/010015100B514000/README.md#raw-switch-2-companion): `agl_common`, false entry `0x35428` (key `68bbe98b3bfd9876`), one compute shader failing on Ampere instruction `481` at address 0.
+- **Check:** `dm/tools/tests/test_split_bahs_entries.py` (two programs and the false entry between them, taken on `main`); `dm/tools/tests/test_split_bahs_control.py` (a false descriptor pointing into another real control, then entries sharing a control section).
 
 ### Zstd files recognised by their magic
 
@@ -620,6 +621,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md): in all 1,244 vertex shaders A writes no generic output, A ends in an `EXIT` predicated on CC FCSM_TR (which Ryujinx never takes; left as it is), an unconditional `EXIT` and a `BRA` to itself, and neither part has an absolute or table jump, so moving B keeps every branch; c1 (what follows part B) is zero padding in all of them. A census of the other games' packages and of every `main` on hand found no other type-0 vertex shader.
 
 ## Translation
+
+### Metal's parser rejects deeply nested control flow
+
+- **Symptom:** `metal` reports `bracket nesting level exceeded maximum of 256` on otherwise translated compute shaders.
+- **Cause:** the generated structured control flow exceeds clang's default parser nesting budget. This is a parser limit, not an unsupported GPU instruction.
+- **Fix:** the shared Mac/iOS compile runner in `dmsh_pch.py` passes `-fbracket-depth=4096`. It changes only parser acceptance, leaving source and code generation unchanged; successful existing cache entries remain usable. `test_shader_pch.py` checks byte-identical AIR for ordinary shaders and a 300-level shader that fails at the default limit but compiles with the increased budget, on both SDKs.
+- **Found on:** [Wonder's raw Switch 2 companion](../../dm/games/010015100B514000/README.md#raw-switch-2-companion), `agl_technique_pfx` compute keys `441c6cb49521c923` and `5bfc92350157b3d0`.
 
 ### Tested tools and compiler-specific shader caches
 

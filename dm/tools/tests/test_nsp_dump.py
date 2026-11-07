@@ -139,6 +139,56 @@ class Pack(Base):
         self.assertIn('dlcfile', romfs_image.read_index(aoc / '1.img'))
 
 
+class Companion(Base):
+    def test_nested_dlc_uses_numeric_newest_complete_snapshot(self):
+        d = self.dump / 'dlc/040074a01bf13001/0'
+        # A retained flat/base tree must not hide a newer extracted update.
+        for v in (9, 100):
+            p = d / f'updates/{v}/program/0/romfs'; p.mkdir(parents=True)
+            (p / 'data').write_text(str(v))
+        (d / 'updates/200/program/0').mkdir(parents=True)
+        self.assertEqual(pack_dump.scan(self.dump)[2][TID + 0x1001], d / 'updates/100/program/0/romfs')
+
+    def test_companion_identity_and_cross_platform_dlc_index(self):
+        root = self.dump / f'updates/{VER}'
+        primary = TID & 0x00FFFFFFFFFFFFFF | 0x0100000000000000
+        for p in (self.dump / 'base', root): (p / 'exefs/main.npdm').write_bytes(npdm(primary))
+        version(root / 'program1', tid=TID + 1)
+        self.assertEqual(pack_dump.default_program(self.dump), 1)
+        app, vers, dlc = pack_dump.scan(self.dump, 1)
+        self.assertEqual(app, TID + 1)
+        self.assertEqual(vers, {VER: root / 'program1'})
+        self.assertEqual(pack_dump.dlc_index(app, next(iter(dlc))), 1)
+        self.assertEqual(pack_dump.scan(self.dump, 0)[0], primary)
+        app, fam = nsp.scan_dump(self.dump, want=primary, program=1)
+        self.assertIsNone(fam['base'])
+        self.assertEqual(fam['shared_romfs'], root / 'romfs')
+        with self.assertRaisesRegex(pack_dump.Error, 'no complete program 2'): pack_dump.scan(self.dump, 2)
+        (root / 'program1/exefs/main.npdm').write_bytes(npdm(TID + 3))
+        with self.assertRaisesRegex(pack_dump.Error, 'is not program 1'): pack_dump.scan(self.dump, 1)
+
+    def test_primary_update_without_companion_does_not_launch_an_old_companion(self):
+        root = self.dump / f'updates/{VER}'
+        version(root / 'program1', tid=TID + 1)
+        version(self.dump / f'updates/{VER + 1}', tid=TID)
+        self.assertEqual(pack_dump.default_program(self.dump), 0)
+
+    def test_raw_links_keep_game_files_unpacked(self):
+        out = self.dump / 'raw'
+        pack_dump.pack_version(self.dump / f'updates/{VER}', TID, out)
+        self.assertTrue((out / 'RomFS.img').is_file())
+        pack_dump.pack_version(self.dump / f'updates/{VER}', TID, out, raw=True)
+        self.assertTrue((out / 'RomFS').is_symlink())
+        self.assertEqual((out / 'RomFS/dir/new').read_text(), 'data')
+        self.assertFalse((out / 'RomFS.img').exists())
+        _, _, dlc = pack_dump.scan(self.dump)
+        pack_dump.pack_dlc(TID, dlc, out / 'aoc', raw=True)
+        self.assertEqual((out / 'aoc/1/dlcfile').read_text(), 'dlc')
+        self.assertFalse((out / 'aoc/1.img').exists())
+        pack_dump.pack_dlc(TID, {}, out / 'aoc', raw=True)
+        self.assertTrue(next(iter(dlc.values())).is_dir())
+
+
 class Stop(Exception): pass
 
 
@@ -193,6 +243,13 @@ class Survey(Base):
         self.assertEqual(rows[0], nsp.MANIFEST_HEAD.rstrip('\n'))
         self.assertEqual(sorted(rows[1:]), sorted([f'/dir/a.bin\t4\t{b"data".hex()}', f'/nro/m.NRO\t{len(nro)}\t{nro[:32].hex()}']))
         self.assertEqual((out / 'romfs_nro/nro/m.NRO').read_bytes(), nro)
+
+    def test_survey_preserves_supplied_control_metadata(self):
+        src = self.dump / f'updates/{VER}'
+        (src / 'control').mkdir(); (src / 'control/control.nacp').write_bytes(b'original control')
+        out = self.dump.parent / 'control-survey'
+        nsp.survey_dump(src, out)
+        self.assertEqual((out / 'control.nacp').read_bytes(), b'original control')
 
     def test_a_version_without_code_or_romfs_stops(self):
         src = self.dump.parent / 'v'; (src / 'romfs').mkdir(parents=True)

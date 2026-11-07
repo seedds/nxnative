@@ -1136,10 +1136,14 @@ HLE_FORCE("_ZN2nn2fs14CloseDirectoryENS0_15DirectoryHandleE", "fsp-srv → close
 
 // ---------- Overloads from newer SDKs (SDK 16: MountRom without a cache, ReadFile without the bytes-read output / with read options, directory entry count) ----------
 HLE_FORCE("_ZN2nn2fs8MountRomEPKc", "fsp-srv; rom → host RomFS directory (overload without the cache arguments)", Result, h_fs_MountRom1, const char *name) { return h_fs_MountRom(name, NULL, 0); }
-// SDK 19 (Metroid Prime 4: Beyond): MountRom and QueryMountRomCacheSize with an int after the first argument (the program index); the host has one RomFS, so it is ignored
+// Indexed RomFS: a companion can read another program through DM_ROMFS_PROGRAM_<index>. Without a mapping, index 0 keeps the historical single-program mount.
 HLE_FORCE("_ZN2nn2fs8MountRomEPKciPvm", "fsp-srv; rom → host RomFS directory (SDK 19 overload with an index)", Result, h_fs_MountRomIdx, const char *name, int idx, void *cache, size_t sz) {
-    if (idx) LOG("[RED] fs::MountRom(%s, program index %d): the host has one RomFS, this program's", name, idx);
-    return h_fs_MountRom(name, cache, sz);
+    char key[64]; snprintf(key, sizeof key, "DM_ROMFS_PROGRAM_%d", idx);
+    const char *dir = getenv(key);
+    if (dir && *dir) { dm_thread_service_request(); return mount(name, dir, 1); }
+    if (!idx) return h_fs_MountRom(name, cache, sz);
+    LOG("[RED] fs::MountRom(%s, program index %d): %s is unset", name, idx, key);
+    return RES_TARGET_NOT_FOUND;
 }
 HLE_FORCE("_ZN2nn2fs22QueryMountRomCacheSizeEPmi", "fsp-srv; the cache gets only the minimum size (SDK 19 overload with an index)", Result, h_fs_QueryRomCacheIdx, size_t *out, int idx) { (void)idx; return h_fs_QueryRomCache(out); }
 // ReadFile without the bytes-read output: the read must be complete; a short read (past the end of file) is returned as a failure

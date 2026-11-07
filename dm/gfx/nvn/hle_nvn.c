@@ -776,14 +776,19 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
 }
 
 // ---------- Sync / events ----------
-NVN(nvnSyncInitialize, NVNboolean, NVNsync *s, NVNdevice *d) { (void)d; *(sync_t *)s = (sync_t){MAGIC('S', 'Y', 'N', 'C'), 0, 0}; return 1; }
-NVN(nvnSyncFinalize, void, NVNsync *s) { ((sync_t *)s)->magic = 0; }
+static void window_acquire_wait(win_t *o, int idx, int mark_frame);
+static int sync_acquire_wait(sync_t *s, uint64_t timeout);
+NVN(nvnSyncInitialize, NVNboolean, NVNsync *s, NVNdevice *d) { (void)d; *(sync_t *)s = (sync_t){.magic = MAGIC('S', 'Y', 'N', 'C')}; return 1; }
+NVN(nvnSyncFinalize, void, NVNsync *s) { ((sync_t *)s)->magic = 0; atomic_store(&((sync_t *)s)->acquire_win, NULL); }
 NVN(nvnSyncSetDebugLabel, void, NVNsync *s, const char *l) { (void)s; (void)l; }
 // Fence = "all commands previously submitted to the queue have completed": record the fence value of the most recent submit
-NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)q; (void)c; (void)f; ((sync_t *)s)->fenced = 1; ((sync_t *)s)->fence = mtl_last_fence(); }
+NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)q; (void)c; (void)f; ((sync_t *)s)->fenced = 1; ((sync_t *)s)->fence = mtl_last_fence(); atomic_store(&((sync_t *)s)->acquire_win, NULL); }
 // A sync object that was never fenced waits until timeout, as on a real device; a fenced one is released only after the GPU has actually completed up to that fence value
-// A GPU-side wait on a sync: the host has a single Metal queue that executes submissions in order, so commands before the fence are always done first and nothing needs waiting. A sync not fenced yet (fenced later by another thread) is not waited for here; logged once
-NVN(nvnQueueWaitSync, NVNboolean, NVNqueue *q, const NVNsync *s) { (void)q; static int once; if (!((const sync_t *)s)->fenced && !once++) LOG("[nvn] QueueWaitSync: the sync object has no fence yet, the host does not wait"); return 1; }
+// GPU command fences are ordered by the Metal queue. Acquire leases also depend on the host presenter, so the inline interpreter resolves those before using the texture.
+// A sync not fenced yet (fenced later by another thread) is not waited for here; logged once.
+NVN(nvnQueueWaitSync, NVNboolean, NVNqueue *q, const NVNsync *s) { (void)q; (void)sync_acquire_wait((sync_t *)s, UINT64_MAX); static int once; if (!((const sync_t *)s)->fenced && !once++) LOG("[nvn] QueueWaitSync: the sync object has no fence yet, the host does not wait"); return 1; }
+// The CPU interpreter cannot submit a draw against a texture still owned by the presenter. Resolve an acquire dependency before recording / submitting that draw.
+NVN(nvnCommandBufferWaitSync, void, NVNcommandBuffer *c, const NVNsync *s) { (void)c; (void)sync_acquire_wait((sync_t *)s, UINT64_MAX); }
 // ZCull data: the host does no ZCull, so there is nothing to save / restore
 NVN(nvnCommandBufferRestoreZCullData, void, NVNcommandBuffer *c, NVNbufferAddress a, size_t n) { (void)c; (void)a; (void)n; }
 NVN(nvnCommandBufferSaveZCullData, void, NVNcommandBuffer *c, NVNbufferAddress a, size_t n) { (void)c; (void)a; (void)n; }
@@ -793,11 +798,18 @@ NVN_NOPROTO(nvnCommandBufferSetStencilCullCriteria, void, NVNcommandBuffer *c, i
 static _Atomic uint64_t g_sync_ns;
 NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     const sync_t *o = (const sync_t *)s;
-    if (!o->fenced) return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
+    uint64_t begin = now_ns(); int waited = !sync_acquire_wait((sync_t *)s, 0); NVNsyncWaitResult result;
+    uint64_t left = timeout;
+    if (waited && timeout != UINT64_MAX) { uint64_t spent = now_ns() - begin; left = spent < timeout ? timeout - spent : 0; }
+    if (waited && (!left || !sync_acquire_wait((sync_t *)s, left))) { result = NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED; goto done; }
+    if (!o->fenced) { result = NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED; goto done; }
     int (*w)(uint64_t, uint64_t) = o->fenced == 2 ? mtl_wait_acq : mtl_wait;
-    if (w(o->fence, 0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
-    uint64_t t0 = now_ns(); int ok = w(o->fence, timeout); atomic_fetch_add(&g_sync_ns, now_ns() - t0);   // the frame's blocked SyncWait time (@sync_ms)
-    return ok ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
+    if (w(o->fence, 0)) { result = waited ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED; goto done; }
+    if (timeout != UINT64_MAX) { uint64_t spent = now_ns() - begin; timeout = spent < timeout ? timeout - spent : 0; }
+    result = w(o->fence, timeout) ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
+done:
+    atomic_fetch_add(&g_sync_ns, now_ns() - begin);   // includes the acquire fence, within the same caller timeout
+    return result;
 }
 NVN(nvnEventBuilderSetDefaults, void, NVNeventBuilder *b) { memset(b, 0, sizeof(ev_builder_t)); }
 NVN(nvnEventBuilderSetStorage, void, NVNeventBuilder *b, const NVNmemoryPool *p, int64_t off) { *(ev_builder_t *)b = (ev_builder_t){(const pool_t *)p, off}; }
@@ -1394,7 +1406,6 @@ static void nvn_nop(void) {}
 static const char *const g_nops[] = {
     "nvnCommandBufferSetPatchSize",
     "nvnCommandBufferSetDepthBounds",
-    "nvnCommandBufferWaitSync",
     "nvnCommandBufferSetShaderScratchMemory",
     "nvnCommandBufferPushDebugGroupDynamic",
     "nvnCommandBufferPopDebugGroup",
@@ -1491,11 +1502,9 @@ static uint64_t g_acq_wait_ns, g_pq_wait_ns;   // Accumulated display-link wait 
 static uint64_t g_fs_start, g_fs_wait;   // frame step (fstep_tick): when the first acquire after a present returned (the frame's start, 0 = none yet), and its pacing wait
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
 extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
-NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
-    win_t *o = (win_t *)w;
-    *idx = o->ntex ? o->next++ % o->ntex : 0;
+static void window_acquire_wait(win_t *o, int idx, int mark_frame) {
     // Vsync blocks here (real-device NVN: when all textures in the swapchain are waiting for display, wait for the next one to be released), not in present -- the game often calls present while holding a lock
-    uint64_t at = *idx < 4 ? o->avail[*idx] : 0, now = dm_detclock_enabled() ? guest_ns() : now_ns(), wait = at > now ? at - now : 0, pace_ns = 0;
+    uint64_t at = idx < 4 ? o->avail[idx] : 0, now = dm_detclock_enabled() ? guest_ns() : now_ns(), wait = at > now ? at - now : 0, pace_ns = 0;
     if (!dm_detclock_enabled()) {   // Register the acquire thread as a time-constraint thread (no longer registered only when it "arrived early": it must also declare itself when it is constantly behind in the hot state)
         static uint64_t rt_period; uint64_t period = present_period(o), rtp = rt_period_ns(o, period);
         if (rtp && rt_period != rtp) { rt_period = rtp; set_time_constraint(rtp); }
@@ -1517,10 +1526,48 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     pace_ns += mtl_snap_acquire_wait();   // ring capacity is waited for at acquire, where the game does not hold its present lock
     g_acq_wait_ns += wait; trow(g_frame, "@late_ms", wait ? (now_ns() - at) / 1e6 : 0);
     // The previous present of this texture has not yet been processed by the present thread (display cannot keep up, a whole swapchain round behind): wait for it to be returned, then hand it to the game to draw
-    uint64_t tk = *idx < 4 ? o->ticket[*idx] : 0;
+    uint64_t tk = idx < 4 ? o->ticket[idx] : 0;
     if (tk) { uint64_t w0 = now_ns(); mtl_present_wait(tk); g_pq_wait_ns += now_ns() - w0; }
-    if (s) { ((sync_t *)s)->fenced = 2; ((sync_t *)s)->fence = mtl_last_fence(); }   // The swapchain texture becomes available once the commits before this point have completed (fenced 2: an acquire sync, for the wait ledger)
-    if (!g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; }   // the frame starts when the first acquire after a present returns: on a display-link tick when on time
+    if (mark_frame && !g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; }
+}
+static int window_acquire_ready(const win_t *o, int idx) {
+    uint64_t at = idx < 4 ? o->avail[idx] : 0, tk = idx < 4 ? o->ticket[idx] : 0;
+    return at <= now_ns() && (!tk || mtl_present_ready(tk));
+}
+// Acquisition publishes a fence; its consumer waits for the buffer. Blocking in AcquireTexture itself makes sead count the vsync sleep as CPU work and hold interval 2.
+// Infinite waits keep the present watchdog and display-link pacing; finite waits poll the same buffer ownership / deadline conditions within the caller's budget.
+static int sync_acquire_wait(sync_t *s, uint64_t timeout) {
+    if (!s || !atomic_load(&s->acquire_win)) return 1;
+    uint64_t begin = now_ns(), end = timeout > UINT64_MAX - begin ? UINT64_MAX : begin + timeout;
+    for (;;) {
+        if (!atomic_load(&s->acquire_win)) return 1;
+        int idle = 0;
+        if (atomic_compare_exchange_strong(&s->acquire_busy, &idle, 1)) break;
+        uint64_t now = now_ns(); if (!timeout || now >= end) return 0;
+        sleep_until_ns(end - now < 1000000 ? end : now + 1000000);
+    }
+    win_t *o = atomic_load(&s->acquire_win); int ready = !o || window_acquire_ready(o, s->acquire_idx);
+    if (!ready && timeout == UINT64_MAX) { window_acquire_wait(o, s->acquire_idx, 0); ready = window_acquire_ready(o, s->acquire_idx); }
+    while (!ready && timeout) {
+        uint64_t now = now_ns(); if (now >= end) break;
+        uint64_t wake = end - now < 1000000 ? end : now + 1000000, at = o->avail[s->acquire_idx];
+        if (at > now && at < wake) wake = at;
+        sleep_until_ns(wake);
+        ready = window_acquire_ready(o, s->acquire_idx);
+    }
+    if (ready) {
+        atomic_store(&s->acquire_win, NULL);
+        if (o && !g_fs_start) { g_fs_start = now_ns(); g_fs_wait = g_fs_start - begin; }
+    }
+    atomic_store(&s->acquire_busy, 0);
+    return ready;
+}
+NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
+    win_t *o = (win_t *)w;
+    *idx = o->ntex ? o->next++ % o->ntex : 0;
+    int defer = s && !mtl_snap_on() && !dm_detclock_enabled();   // snapshot-ring and deterministic test modes retain their synchronous acquire path
+    if (!defer) window_acquire_wait(o, *idx, 1);
+    if (s) { sync_t *a = (sync_t *)s; a->fenced = 2; a->fence = mtl_last_fence(); a->acquire_idx = *idx; atomic_store(&a->acquire_win, defer ? o : NULL); }
     return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
 }
 // The older API (NVN 53, Super Mario 3D World + Bowser's Fury): the queue waits for the texture on the GPU and no sync object is handed out. The host replays in submission order, so later commands already come after earlier presents; the same as WindowAcquireTexture without a sync object
@@ -3072,6 +3119,6 @@ int nvn_host_write_texture(const void *nvntex, const void *src, int w, int h, si
 int nvn_host_signal_sync(void *nvnsync) {
     sync_t *o = nvnsync;
     if (!o || o->magic != MAGIC('S', 'Y', 'N', 'C')) return -1;
-    o->fence = 0; o->fenced = 1; return 0;
+    o->fence = 0; o->fenced = 1; atomic_store(&o->acquire_win, NULL); return 0;
 }
 NVN(nvnTextureFlushTexels, void, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r) { (void)t; (void)v; (void)r; }   // unified memory + dirty page tracking: nothing to flush

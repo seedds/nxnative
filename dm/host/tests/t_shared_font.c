@@ -28,6 +28,7 @@ int g_nmod;
 uint64_t g_t0_ns;
 uint64_t now_ns(void) { return 0; }
 int dm_sdk_major(void) { return 20; }
+int dm_sdk_ounce(void) { return 1; }
 int dm_game_imports(const char *prefix) { (void)prefix; return 1; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 void dm_backtrace(uint64_t fp) { (void)fp; }
@@ -65,6 +66,19 @@ int main(void) {
         CHECK(load(&self, name, before[i], 17, sizeof name) == status, "uninitialized fonts preserve result");
         CHECK(calls == n + 1 && seen_data == before[i], "uninitialized fonts leave all data unchanged");
     }
+    char path[] = "/tmp/nxnative-font-XXXXXX";
+    int fd = mkstemp(path);
+    CHECK(fd >= 0, "temporary font source created");
+    CHECK(write(fd, standard, sizeof standard) == sizeof standard, "font source written");
+    close(fd); setenv("DM_SHARED_FONT", path, 1); setenv("DM_SHARED_FONT_EXT", path, 1);
+    pl_builtin_font_t builtin = {0};
+    CHECK(h_pl_BuiltInNx(&builtin, 5, 0) == 1, "Switch 1 built-in font available");
+    CHECK(builtin.address == ext_f.p + 8 && builtin.size == sizeof extension, "built-in Nx descriptor excludes Decode header even when main imports Decode");
+    CHECK(h_pl_BuiltInOunce(&builtin, 0, 0) == 1, "Switch 2 built-in font available");
+    CHECK(builtin.address == std_f.p + 8 && builtin.size == sizeof standard, "built-in Ounce descriptor starts at TTF");
+    h_pl_LoadNxFont(NULL, 0);
+    CHECK(h_pl_IsOunce() == 1, "console query follows SDK generation");
+    unlink(path); munmap(std_f.p, std_f.n); munmap(ext_f.p, ext_f.n);
     std_f = (font_t){standard, sizeof standard}; ext_f = (font_t){extension, sizeof extension};
     const void *input[] = {standard, extension, standard + 8, extension + 8, standard + 1, extension + 9, unrelated, NULL};
     const void *expect[] = {standard + 8, extension + 8, standard + 8, extension + 8, standard + 1, extension + 9, unrelated, NULL};

@@ -343,6 +343,13 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Focus:** Star Fox closes its stream when its window loses focus and opens a new one when it regains it; 14 rounds went by with the sound intact.
 - **Found on:** Xenoblade Chronicles 2, Nintendo Switch 2 Edition (`0400E95004038001`) (SDK 21.4.4, one or two 2-channel streams at 48 kHz, 10 ms periods, 40 ms capacity; the second when the active device is `AudioExternalOutput`); [Star Fox](../../dm/games/0400E88025B1A000/README.md) (Wwise 2024.1, SDK 21.4.4).
 
+### SDK 21 virtual output properties and the event/no-flags overload
+
+- **Symptom:** Super Mario Bros. Wonder Nintendo Switch 2 Edition's Program 1 (v327680) called `audio::GetVirtualOutputDeviceProperties` while opening its online-selection movie and connected to the unsupported `auddmg:u` service, aborting with `0xa99` at `main+0x2298684` (the later stream-open call was at `main+0x2298728`).
+- **Cause:** The host's SDK 21 `GetDefaultVirtualOutputDevice` and `OpenOutputStream` hooks did not include the separate `GetVirtualOutputDeviceProperties` export or the event-taking `OpenOutputStream` overload without `OutputStreamFlag`; the SDK's default implementation thus called `auddmg:u` itself.
+- **Fix:** Answer the properties call for the host's one named virtual output (`AudioVirtualOutput`) in the SDK's 0x10c-byte result structure, with a zeroed 12-byte property tail, and route the alternate event/no-flags stream-open overload through the same AudioOut path as the flags overload. Unknown names fail instead of inventing output devices. `t_output_stream` checks both exports, capacity/state and the exact property write length.
+- **Found on:** Super Mario Bros. Wonder Nintendo Switch 2 Edition (the separately proposed Program 1 game profile) (Program 1, SDK 21), opening movie after New Game.
+
 ## Codecs
 
 ### Hardware Opus decoders built on the SDK's software decoders

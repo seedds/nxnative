@@ -93,6 +93,27 @@ class PatchIndex(unittest.TestCase):
     def test_index_is_current(self):
         self.assertEqual(docs_patches.OUT.read_text(), docs_patches.page(), 'docs/agents/game-patches.md is out of date: run dm/tools/docs_patches.py')
 
+    def test_only_tracked_profiles_and_patches_are_documented(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            def git(*args):
+                subprocess.run(['git', *args], cwd=root, check=True, capture_output=True)
+            git('init', '-q')
+            ids = ['0100000000000000', '0100000000000001', '0100000000000002']
+            for gid in ids:
+                d = root / 'dm/games' / gid; d.mkdir(parents=True)
+                (d / 'game.tsv').write_text('name\tSynthetic\n')
+                (d / 'patches.py').write_text('CUTS = {}\n')   # deliberately lacks BINDING
+            (root / '.gitignore').write_text(f'dm/games/{ids[1]}/\n')
+            git('add', '.gitignore', f'dm/games/{ids[0]}', f'dm/games/{ids[2]}/game.tsv')
+            with patch.object(docs_patches, 'REPO', root):
+                self.assertEqual([g.id for g in docs_patches.games()], [ids[0], ids[2]])
+                self.assertEqual(docs_patches.patch_files(), {ids[0]: root / 'dm/games' / ids[0] / 'patches.py'})
+                # A tracked patch still needs real metadata; filtering local files must not relax that validation.
+                with patch.object(docs_patches, 'host_rows', return_value={}):
+                    with self.assertRaisesRegex(SystemExit, f'{ids[0]}/patches.py: no BINDING'):
+                        docs_patches.page()
+
 
 class Gallery(unittest.TestCase):
     def test_gallery_is_current(self):

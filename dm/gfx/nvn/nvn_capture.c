@@ -10,7 +10,8 @@ __asm__(".linker_option \"-lcompression\"");   // libcompression (LZFSE) links i
 #define CAP_SIZE(T, n) _Static_assert(sizeof(T) == (n), "nvn_capture.c: " #T " changed size: update cap_rec_fields and cap_layout")
 #define CAP_OFF(T, f, n) _Static_assert(offsetof(T, f) == (n), "nvn_capture.c: " #T "." #f " moved: update cap_rec_fields and cap_layout")
 CAP_SIZE(tex_t, 128); CAP_OFF(tex_t, mem, 88); CAP_OFF(tex_t, pool, 96); CAP_OFF(tex_t, serial, 120);
-CAP_SIZE(pool_t, 40); CAP_SIZE(dpool_t, 24); CAP_SIZE(prog_t, 112); CAP_SIZE(sync_t, 16); CAP_SIZE(samp_par, 40); CAP_SIZE(view_t, 16);
+// CAP_SYNC serializes only an object count; replay initializes syncs to zero, so their live acquire pointers are never written to a capture.
+CAP_SIZE(pool_t, 40); CAP_SIZE(dpool_t, 24); CAP_SIZE(prog_t, 112); CAP_SIZE(sync_t, 32); CAP_SIZE(samp_par, 40); CAP_SIZE(view_t, 16);
 CAP_SIZE(p_set_rt, 240); CAP_OFF(p_set_rt, n, 0); CAP_OFF(p_set_rt, color, 8); CAP_OFF(p_set_rt, depth, 208);
 CAP_SIZE(p_bind_program, 16); CAP_OFF(p_bind_program, prog, 0);
 CAP_SIZE(NVNbufferRange, 16); CAP_SIZE(p_bind_vbuf, 264); CAP_OFF(p_bind_vbuf, n, 4); CAP_OFF(p_bind_vbuf, r, 8);
@@ -42,7 +43,7 @@ _Static_assert(sizeof(p_copy_strides) == 16 && COPY_STRIDES_OFF == 192, "nvn_cap
 const char *cap_layout(void) {
     // sizes and pointer offsets as the walk knows them (the asserts above hold them to nvn_obj.h); bump this text with any change to the walk
     return "format 1\nops 54\n"
-           "tex_t 128 mem 88 pool 96 serial 120\npool_t 40\ndpool_t 24\nprog_t 112\nsync_t 16\nsamp_par 40\nview_t 16\n"
+           "tex_t 128 mem 88 pool 96 serial 120\npool_t 40\ndpool_t 24\nprog_t 112\nsync_t 32\nsamp_par 40\nview_t 16\n"
            "p_set_rt 240 color 8 depth 208\np_bind_program 16\np_bind_vbuf 264 r 8\np_bind_vbuf1 16 addr 8\np_bind_buf 24 addr 8\np_bind_ubo_small 16 addr 8\n"
            "p_bind_handles 280 src 16\np_bind_tex1 24 nobase 0x100 short 16\np_bind_state short\np_draw 48 ind 24 mdi_cnt 32\np_draw_idx 56 ibuf 24 ind 32 mdi_cnt 40\np_dispatch 32 ind 24\np_set_pool 8\n"
            "p_copy_b2t 64 src 0 tex 8\np_copy_t2t 104 src 0 dst 8\np_clear_tex 72 tex 0\np_clear_buf 24 addr 0\np_tf_bind 24 addr 8\np_tf_state 16 ctl 8\np_render_cond 16 addr 8\n"

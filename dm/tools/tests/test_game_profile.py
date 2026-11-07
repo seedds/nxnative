@@ -50,13 +50,13 @@ MAP = ('# kind: evidence  Test shaders\n# column 5 records where each key first 
 
 
 def macros(shader_map):
-    """The upscaler macros of a synthetic profile's header, with this shader map (None: none)"""
+    """The upscaler keys and count of a synthetic profile's header, with this shader map (None: none)"""
     with tempfile.TemporaryDirectory() as d:
         Path(d, ID).mkdir()
         (Path(d, ID) / 'game.tsv').write_text(TSV)
         if shader_map is not None: (Path(d, ID) / 'shader_map.tsv').write_text(shader_map)
         subprocess.run([sys.executable, str(GAME), 'header', ID, str(Path(d, ID) / 'game.h')], env={**os.environ, 'DM_GAMES_DIR': d}, check=True, capture_output=True)
-        return [l for l in (Path(d, ID) / 'game.h').read_text().splitlines() if 'UPSCALER' in l]
+        return [l for l in (Path(d, ID) / 'game.h').read_text().splitlines() if 'UPSCALER' in l and 'DEFAULT' not in l]
 
 
 class UpscalerKeys(unittest.TestCase):
@@ -65,6 +65,18 @@ class UpscalerKeys(unittest.TestCase):
         self.assertEqual(macros(None), none)
         self.assertEqual(macros(MAP.split('cs_other.bin')[0]), none)
         self.assertEqual(macros(MAP), ['#define DM_GAME_UPSCALER_KEYS "7629d857a0a93833,c56db3d5a0f1b5af"', '#define DM_GAME_UPSCALER_N 2'])
+
+    def test_launcher_default(self):
+        """upscaler_default (the iOS launcher's default for Game's upscaler): game without the key, game or metalfx with it, nothing else"""
+        for rows, want in (('', 'game'), ('upscaler_default\tgame\n', 'game'), ('upscaler_default\tmetalfx\n', 'metalfx')):
+            with tempfile.TemporaryDirectory() as d:
+                Path(d, ID).mkdir()
+                (Path(d, ID) / 'game.tsv').write_text(TSV + rows)
+                subprocess.run([sys.executable, str(GAME), 'header', ID, str(Path(d, ID) / 'game.h')], env={**os.environ, 'DM_GAMES_DIR': d}, check=True, capture_output=True)
+                self.assertEqual([l for l in (Path(d, ID) / 'game.h').read_text().splitlines() if 'UPSCALER_DEFAULT' in l], ['#define DM_GAME_UPSCALER_DEFAULT "%s"' % want])
+        rc, out = header('upscaler_default\tdlss\n')
+        self.assertNotEqual(rc, 0)
+        self.assertIn('upscaler_default must be game or metalfx', out)
 
 
 if __name__ == '__main__':

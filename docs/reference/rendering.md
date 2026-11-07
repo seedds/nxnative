@@ -319,6 +319,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** The Legend of Zelda: Ocarina of Time (Switch 2, `0400486024DEC000`, update v131072, with PR #1299), Saria's cutscene in Kokiri Forest, M5 Max. In 60 s `sample` captures of the submit thread over the cutscene, `alias_take_over` took 2,277 of the 3,711 samples spent making textures (`tex_mtl_`), 61 %; with the fix 38 of 618, 6 %. Game runs on the wall clock (the game does not run under `DM_DETCLOCK`) put the cutscene's heaviest part in or out of the run, so frame counts moved within their noise.
 - **Open:** the same captures and the memory line show the textures themselves being made again and again: 84,000 to 103,000 storage takeovers in about 200 s of play with 1,400 to 1,900 shared textures alive.
 
+### A texture ID with no texture kept its cached view
+
+- **Symptom:** a command buffer fails with a GPU page fault on the same frames in every run, in a compute or draw command buffer whose shaders sample through the texture pool. Ocarina of Time with `DM_NVN_RT_RECLAIM=1` (PR #1588): f3,677 and f4,851, compute shader 9e6b00b050e30801, each run.
+- **Cause:** `tex_by_id` (`nvn_mtl.m`) keeps an ID's cached view when the slow path finds the same texture behind it: `cur == v || v.parentTexture == cur`. When the ID has no texture now, `treg_tex` returns nil as `cur`. That happens for a texture that went and was not made again, a texture that could not be made, or a reclaimed render target. A cached view that is the base texture itself has no parent either, so nil == nil kept it and marked it valid again. The pool tables' fast path (`tex_fast_rid`) then wrote its resource ID after the host had released the texture and dropped its residency. With the reclaim it happened about 60 times in a 5,000-frame run.
+- **Fix:** general, in `tex_by_id`: the cached view is kept only when `cur` is non-nil. An ID with no texture drops its view, and its slot takes the typed zero texture an empty slot of that type gets.
+- **Check:** Ocarina of Time on an M2 Pro 16 GB with `DM_NVN_RT_RECLAIM=1`, to f5,241 and f7,750. The f3,677 and f4,851 faults are gone, with no trimmed texture handed back (checked by marking every texture the reclaim's trim released). Pace is the same (7,750 frames in 202.5 s against 7,731 in 202.75 s), and reclaim counts are alike. A fault at f786 has another cause and is there without the reclaim too. The picture there was not compared: a dead ID now reads the typed zero texture instead of the released one.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (Switch 2, `0400486024DEC000`, v131072).
+
 ### Live resolution variants share physical image storage
 
 - **Symptom:** GPU memory grows as resolution changes or rooms load, although almost every retained texture still has a live NVN descriptor; reclaiming unused sharing-table entries cannot recover it.

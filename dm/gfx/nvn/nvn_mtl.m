@@ -1036,6 +1036,9 @@ void mtl_prepare(void) {
     if (!g_warm_started && prepare_on()) { mtl_init(); shmap_load(); }
 }
 static void sub_cut_begin(void); static void ts_sub_begin(void), ts_boundary(void); static int ts_on(void);
+static void fail_cb_begin(void);   // the pass range of the command buffer about to be encoded (fail_dump, issue #1326)
+static void fail_dump(const char *what, uint64_t fence, uint64_t frame, uint32_t seg, uint64_t p0, uint64_t p1);
+static uint64_t g_cb_pass0 = 1;   // first pass encoded into the command buffer being built (read by both commit paths)
 static void gmem_commit_patch(void);   // the raw pool table words of the arguments encoded so far follow the pools (gmem_slot_note)
 void mtl_sub_begin(void) {
     mtl_init(); g_sub_serial++; g_seg = 0; seg_clk_put(g_sclk); g_sclk = NULL; g_rc_npend = 0; g_rc_skip = 0;
@@ -1060,6 +1063,7 @@ void mtl_sub_begin(void) {
     g_alloc_cur = alloc_i;
     [g_alloc4[alloc_i] reset];
     [g_cb beginCommandBufferWithAllocator:g_alloc4[alloc_i]];
+    fail_cb_begin();
     ts_sub_begin();
     g_commit_blocks = [NSMutableArray array];
     // The overflow buffer created when the previous submission ran out of slots (see g_vis_n >= VIS_SLOTS): retire it. It used to be just cleared here and stayed in the residency set for good (from d2r-mobile 2eb575877)
@@ -1904,6 +1908,7 @@ uint64_t mtl_sub_commit(void) {
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; atomic_fetch_sub(&g_seg_inflight, 1); for (dispatch_block_t block in commit_blocks) block(); }];
     uint64_t gpu_f = atomic_load(&g_cur_frame); gpu_tag_begin(gpu_f);
     NSString *cctx = @(cctx_snap());
+    uint64_t fail_p0 = g_cb_pass0, fail_p1 = g_stat_pass;
     cbs_list *cbs = cbs_take();
     seg_clk *sc = g_sclk; uint32_t seg_last = g_seg; g_sclk = NULL;
     pthread_mutex_lock(&g_post_mu);
@@ -1915,7 +1920,8 @@ uint64_t mtl_sub_commit(void) {
         gpu_tag_done(gpu_f, cb.GPUStartTime, cb.GPUEndTime);
         if (ws_on()) ws_fb(fence, cb.GPUEndTime);
         uint64_t c0 = 0, c1 = 0; if (seg_ts()) { c0 = gpu_s_guest_ns(cb.GPUStartTime); c1 = gpu_s_guest_ns(cb.GPUEndTime); }
-        if (cb.error) { atomic_store(&g_last_commit_error, 1); res_top_once(cb.error); static int n, nv; int victim = [cb.error.description containsString:@"InnocentVictim"]; if (victim ? nv++ < 1 : n++ < 8) MLOG("[RED] command buffer error details fence=%llu: %s | GPU %.3f→%.3f", (unsigned long long)fence, cb.error.description.UTF8String, cb.GPUStartTime, cb.GPUEndTime); if (!victim) MLOG("[RED] state of the failed submission fence=%llu: %s", (unsigned long long)fence, cctx.UTF8String); MLOG("[RED] command buffer execution error: %s", cb.error.localizedDescription.UTF8String); }
+        if (cb.error) { atomic_store(&g_last_commit_error, 1); res_top_once(cb.error); static int n, nv; int victim = [cb.error.description containsString:@"InnocentVictim"]; if (victim ? nv++ < 1 : n++ < 8) MLOG("[RED] command buffer error details fence=%llu: %s | GPU %.3f→%.3f", (unsigned long long)fence, cb.error.description.UTF8String, cb.GPUStartTime, cb.GPUEndTime); if (!victim) MLOG("[RED] state of the failed submission fence=%llu: %s", (unsigned long long)fence, cctx.UTF8String); MLOG("[RED] command buffer execution error: %s", cb.error.localizedDescription.UTF8String);
+            { static int fd; if (!victim && fd++ < 4) fail_dump("submission command buffer", fence, gpu_f, seg_last, fail_p0, fail_p1); } }
         char where[64]; snprintf(where, sizeof where, "fence %llu, its last command buffer", (unsigned long long)fence); cbs_feedback(cbs, cb.error, where);
         gpu_lost_check(lost_test ? gpu_lost_test_error() : cb.error, "submission");
         post_complete(fence, c0, c1);
@@ -4421,6 +4427,41 @@ static void defer_fallback(void);
 // the encoder track and the GPU interval table carry this name directly, and shader_map.tsv maps it back to the shader; off by default (one string allocation per pass)
 static int g_el_w, g_el_h, g_el_draws; static char g_el_key[12];
 static int enc_label_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_ENC_LABEL"); v = e && atoi(e); } return v; }
+// What the GPU was running when a command buffer fails. A hang, a page fault or a revoked access used to print the fence, the error and a few counters (cctx_snap)
+// and nothing else: three reports in issue #1326 agree on the shape of the failure and none can say which pass or which shader the GPU died in. So every command buffer
+// records the passes encoded into it (fail_cb_begin to g_stat_pass at commit) and its failure handler prints the ring entries in that range. Always on: a pass costs a few
+// stores and its first attachment's size, a draw one compare, and nothing is formatted until something fails. The submit thread writes it and a feedback thread reads it
+// without a lock: a torn entry would misname one pass in a report the host is about to stop after, which is worth more than a lock on every pass.
+#define FAIL_RING 256
+typedef struct { uint64_t pass, frame; uint32_t seg; uint16_t w, h, draws; uint8_t nc, depth; char fs[9]; } fail_pass;
+static fail_pass g_fail_ring[FAIL_RING]; static uint64_t g_fail_n;   // entries written; the newest is (g_fail_n - 1) % FAIL_RING
+static void fail_cb_begin(void) { g_cb_pass0 = g_stat_pass + 1; }
+static void fail_note_pass(MTL4RenderPassDescriptor *pd, unsigned nc) {
+    fail_pass *p = &g_fail_ring[g_fail_n++ % FAIL_RING];
+    p->pass = g_stat_pass; p->frame = atomic_load(&g_cur_frame); p->seg = g_seg; p->draws = 0; p->fs[0] = 0; p->nc = (uint8_t)nc;
+    id<MTLTexture> t = pd.colorAttachments[0].texture; p->depth = 0;
+    if (!t) { t = pd.depthAttachment.texture ?: pd.stencilAttachment.texture; p->depth = t != nil; }
+    p->w = (uint16_t)(t ? t.width : 0); p->h = (uint16_t)(t ? t.height : 0);
+}
+static void fail_note_draw(const char *fskey) {   // the open pass takes the fragment key of its first draw, as the encoder label does
+    if (!g_fail_n) return;
+    fail_pass *p = &g_fail_ring[(g_fail_n - 1) % FAIL_RING];
+    if (!p->draws && fskey) { memcpy(p->fs, fskey, 8); p->fs[8] = 0; }
+    if (p->draws < 0xffff) p->draws++;
+}
+static void fail_dump(const char *what, uint64_t fence, uint64_t frame, uint32_t seg, uint64_t p0, uint64_t p1) {
+    MLOG("[RED] the %s that failed: fence %llu, frame %llu, segment %u, passes %llu..%llu (%llu passes)", what, (unsigned long long)fence, (unsigned long long)frame, seg,
+         (unsigned long long)p0, (unsigned long long)p1, (unsigned long long)(p1 >= p0 ? p1 - p0 + 1 : 0));
+    if (p1 < p0) { MLOG("[RED]   no render pass was encoded into it: its work was uploads, copies or compute"); return; }
+    uint64_t n = g_fail_n, first = n > FAIL_RING ? n - FAIL_RING : 0; int shown = 0;
+    for (uint64_t i = first; i < n && shown < 24; i++) {
+        const fail_pass *p = &g_fail_ring[i % FAIL_RING];
+        if (p->pass < p0 || p->pass > p1) continue;
+        MLOG("[RED]   pass %llu %ux%u colors %u depth %u draws %u first fragment shader %s", (unsigned long long)p->pass, p->w, p->h, p->nc, p->depth, p->draws, p->fs[0] ? p->fs : "-");
+        shown++;
+    }
+    if (!shown) MLOG("[RED]   none of its passes is still in the ring of the last %d: %llu passes were encoded after it", FAIL_RING, (unsigned long long)(g_stat_pass > p1 ? g_stat_pass - p1 : 0));
+}
 static int g_nbcrt; static void bcrt_flush(void);   // shadows of block-compressed render targets used by the open pass (see bcrt_attach)
 // A pass that draws into a texture the host uploads from its storage (tex_storage_dst) writes that storage on the hardware, as a GPU copy does (mirror_readback): what the pass drew is
 // read back into the storage when it ends, so that a later upload from the storage, or the CPU reading or copying it, carries the drawing. Tears of the Kingdom draws the normal maps of
@@ -4817,6 +4858,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }   // the copy encoder the shadows' blocks were moved in with (bcrt_attach)
     ser_gate();
     g_stat_pass++;   // gp_begin records this pass; match the attachment and draw dump labels
+    fail_note_pass(pd, (unsigned)R.rt.n);
     g_enc = enc_r_begin_pass(pd);
     args_dirty_all();
     if (enc_label_on()) { id<MTLTexture> lt = pd.colorAttachments[0].texture ?: pd.depthAttachment.texture ?: pd.stencilAttachment.texture; g_el_w = (int)lt.width; g_el_h = (int)lt.height; g_el_draws = 0; g_el_key[0] = 0; }
@@ -11518,6 +11560,7 @@ static void mdi_wait(void) {
     else drw_drained();
     g_cb = rec_cb_new();
     [g_cb beginCommandBufferWithAllocator:g_alloc4[g_alloc_cur]];
+    fail_cb_begin();
     if (!g_mdi_waits++) MLOG("indirect-count multi-draw: first wait for the GPU-written count at frame %llu pass %llu", (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass);
 }
 static uint32_t mdi_count(uint64_t cnt) {
@@ -12118,6 +12161,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     }
     g_stat_draw++;
     if (enc_label_on() && !g_el_draws++ && pr->sh[1]) { memcpy(g_el_key, pr->sh[1]->key, 8); g_el_key[8] = 0; }
+    fail_note_draw(pr->sh[1] ? pr->sh[1]->key : NULL);
     if (passdump()) {   // Characteristics of a render pass's first draw (to judge whether the load can be omitted: full screen, no blending, writes all channels, does not depend on depth); with DM_NVN_PASSDUMP_ALL every draw is recorded
         static uint64_t last_pass = ~0ull; static int all = -1; if (all < 0) all = getenv("DM_NVN_PASSDUMP_ALL") != NULL;
         if (all || g_kd_force) PD("d %llu bv=%d bi=%d first=%d vs=%s fs=%s vc=%d inst=%d blend=%#x b0=%#llx dt=%d dw=%d df=%d cull=%d st=%d sf=%d,%d sop=%d,%d,%d/%d,%d,%d smask=%#x,%#x/%#x,%#x sref=%#x,%#x ib=%#llx it=%d cmask=%#x b1=%#llx b2=%#llx b3=%#llx po=%d/%g,%g,%g dc=%d", g_stat_pass, di ? di->base_vertex : 0, di ? di->base_instance : 0, dw ? dw->first : 0, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-",
@@ -13089,6 +13133,7 @@ static void sub_cut(void) {
     uint32_t k = g_seg++; seg_clk *sc = NULL;   // reports encoded so far keep this segment's GPU times (seg_ts)
     if (seg_ts()) { if (!g_sclk) { g_sclk = calloc(1, sizeof *g_sclk); atomic_store(&g_sclk->refs, 1); } sc = g_sclk; atomic_fetch_add(&sc->refs, 1); }
     cbs_list *cbs = cbs_take(); uint64_t cbs_fence = g_fence + 1;
+    uint64_t fail_p0 = g_cb_pass0, fail_p1 = g_stat_pass;
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     atomic_fetch_add(&g_seg_inflight, 1);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
@@ -13096,6 +13141,7 @@ static void sub_cut(void) {
         gpu_tag_done(f, cb.GPUStartTime, cb.GPUEndTime);
         if (sc) { if (k < SEG_CLK_N) { atomic_store(&sc->t[k][0], gpu_s_guest_ns(cb.GPUStartTime)); atomic_store(&sc->t[k][1], gpu_s_guest_ns(cb.GPUEndTime)); } seg_clk_put(sc); }
         if (cb.error) { atomic_store(&g_last_commit_error, 1); static int k; if (k++ < 8) MLOG("[RED] segment command buffer execution error: %s", cb.error.description.UTF8String); res_top_once(cb.error); }
+        if (cb.error) { static int fd; if (fd++ < 4) fail_dump("segment command buffer", cbs_fence, f, k, fail_p0, fail_p1); }
         char where[64]; snprintf(where, sizeof where, "fence %llu, segment %u", (unsigned long long)cbs_fence, k); cbs_feedback(cbs, cb.error, where);
         gpu_lost_check(cb.error, "segment");
     }];
@@ -13106,6 +13152,7 @@ static void sub_cut(void) {
     if (rec_on()) rec_publish();   // the segment reaches the encode thread now, not when its block of records fills
     g_cb = rec_cb_new();
     [g_cb beginCommandBufferWithAllocator:g_alloc4[g_alloc_cur]];   // one allocator encodes several command buffers in sequence; it is reset only once its fence (the last segment) has passed, when a later submission starts
+    fail_cb_begin();
     g_cut_draw0 = g_stat_draw;
     if (!g_cuts++) MLOG("segmented submission: first segment submitted at frame %llu pass %llu", (unsigned long long)f, (unsigned long long)g_stat_pass);
 }

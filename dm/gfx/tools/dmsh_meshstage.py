@@ -97,20 +97,39 @@ def _name(param):
     return m[1]
 
 
-def _component(c, base):
-    """A vector of 4 from the attribute area's components: base[c] is the word's expression, or None for a component the shader does not write (0, 0, 0, 1 as a vertex output starts)."""
-    return 'float4(' + ', '.join(f'as_type<float>({base[k]})' if base[k] else ('1.0' if k == 3 else '0.0') for k in range(4)) + ')' if c else ''
-
-
 def _members(comps):
     """{n: [the component's index in comps, or None, for x, y, z, w]} per attribute (None for the position)."""
     return {n: [comps.index((n, c)) if (n, c) in comps else None for c in range(4)] for n in dict.fromkeys(n for n, _ in comps)}
 
 
-def to_stage(msl, i, pad=()):
+def pixel_reads(sph):
+    """{generic attribute n: the mask of its components (bit c) a pixel shader reads} from its SPH's input map: byte 0x18 + n, two bits a component (0 unused, 1 constant,
+    2 perspective, 3 linear; Ryujinx ShaderHeader ImapTypes), the same place in a Maxwell and an Ampere pixel SPH."""
+    return {n: sum(1 << c for c in range(4) if sph[0x18 + n] >> (2 * c) & 3) for n in range(32) if sph[0x18 + n]}
+
+
+def _width(written, read):
+    """The components an output needs: those the shader writes, and a w its pixel shaders read (read: component mask, None = not known, every component) that it does not write,
+    which must hold the hardware's 1. A Metal fragment input wider than the output it links to reads 0 in the components the output lacks, the hardware's default for x, y and z."""
+    hi = max((c + 1 for c in range(4) if written[c] is not None), default=0)
+    return max(hi, 4 if (0xf if read is None else read) & 8 and written[3] is None else 0, 1)
+
+
+def _value(width, base):
+    """The output's value of width components: base[c] is the word's expression, or None for a component the shader does not write (0, 0, 0, 1 as a vertex output starts)."""
+    parts = [f'as_type<float>({base[k]})' if base[k] else ('1.0' if k == 3 else '0.0') for k in range(width)]
+    return parts[0] if width == 1 else f'float{width}(' + ', '.join(parts) + ')'
+
+
+def _type(width):
+    return 'float' if width == 1 else f'float{width}'
+
+
+def to_stage(msl, i, reads=None):
     """The translated kernel as the object function main0 (kind 'ts'), or the mesh functions main0 and main0_z (kind 'ms': the two depth conventions, as dmsh_build.py vs_depth gives a
-    vertex shader, near = -w and near = 0). pad: the user(locnN) locations a mesh shader's paired pixel shaders read; those its SPHs do not enable become vertex outputs of (0,0,0,1),
-    what the hardware gives a pixel shader input no stage wrote (dmsh_build.py vs_pad does the same for a vertex shader), since Metal links no pixel input the mesh stage does not write."""
+    vertex shader, near = -w and near = 0). reads: {user(locnN) location: component mask} of what a mesh shader's paired pixel shaders read (pixel_reads), None when not known.
+    A location its SPHs do not enable becomes a vertex output of (0,0,0,1), what the hardware gives a pixel shader input no stage wrote (dmsh_build.py vs_pad does the same for a
+    vertex shader), since Metal links no pixel input the mesh stage does not write; each output is declared as wide as those readers can see (_width)."""
     kind = i['kind']
     m = _KERNEL.search(msl)
     if not m: raise ValueError(f'{kind}: no kernel main0 starting with its stage memory')
@@ -152,19 +171,26 @@ def to_stage(msl, i, pad=()):
     p_out = out + v_blocks * len(vertex) * BLOCK   # per-primitive blocks follow all vertex blocks
     word = lambda comps: [f'{mem}[b + {comps[k] * BLOCK}u]' if comps[k] is not None else None for k in range(4)]
     vm, pm = _members(vertex), _members(primitive)
-    miss = sorted(set(pad) - {n for n in vm if isinstance(n, int)} - set(pm))
+    # Each output as wide as its pixel shaders can see (_width): what Metal counts against a mesh's 32 KB is the declared outputs, and the float4 of every attribute the SPH names
+    # put Ocarina of Time's foliage mesh 626fbf48041cb82b (160 vertices, 26 components written) at 35,840 bytes. A location they read that no SPH enables is padded (0,0,0,1)
+    read = (lambda n: reads.get(n, 0)) if reads is not None else (lambda n: None)
+    miss = sorted(set(reads or ()) - {n for n in vm if isinstance(n, int)} - set(pm))
+    vw = {n: _width(c, read(n)) for n, c in vm.items() if isinstance(n, int)}
+    pw = {n: _width(c, read(n)) for n, c in pm.items()}
+    mw = {n: _width([None] * 4, read(n)) for n in miss}
     head += ('struct dm_vertex_t {\n    float4 position [[position]];\n' +
              ('    float point_size [[point_size]];\n' if 'psiz' in vm else '') +
-             ''.join(f'    float4 a{n} [[user(locn{n})]];\n' for n in vm if isinstance(n, int)) +
-             ''.join(f'    float4 dm_pad{n} [[user(locn{n})]];\n' for n in miss) + '};\n' +
-             ('struct dm_prim_t {\n' + ''.join(f'    float4 p{n} [[user(locn{n})]];\n' for n in pm) + '};\n' if pm else '') +
+             ''.join(f'    {_type(w)} a{n} [[user(locn{n})]];\n' for n, w in vw.items()) +
+             ''.join(f'    {_type(w)} dm_pad{n} [[user(locn{n})]];\n' for n, w in mw.items()) + '};\n' +
+             ('struct dm_prim_t {\n' + ''.join(f'    {_type(w)} p{n} [[user(locn{n})]];\n' for n, w in pw.items()) + '};\n' if pm else '') +
              f'using dm_mesh_t = metal::mesh<dm_vertex_t, {"dm_prim_t" if pm else "void"}, {max_v}, {max_p}, metal::topology::{TOPOLOGY[verts]}>;\n')
     v_block = lambda v: f'{out}u + ({v} / {BLOCK}u) * {v_stride}u + {v} % {BLOCK}u'
     p_block = lambda p: f'{p_out}u + ({p} / {BLOCK}u) * {p_stride}u + {p} % {BLOCK}u'
     sets = ''.join(f'        v.point_size = as_type<float>({word(c)[0]});\n' if n == 'psiz' else
-                   f'        v.{"position" if n is None else f"a{n}"} = {_component(True, word(c))};\n' for n, c in vm.items()) + \
-        ''.join(f'        v.dm_pad{n} = float4(0.0, 0.0, 0.0, 1.0);\n' for n in miss)
-    psets = ''.join(f'        p.p{n} = {_component(True, word(c))};\n' for n, c in pm.items())
+                   f'        v.position = {_value(4, word(c))};\n' if n is None else
+                   f'        v.a{n} = {_value(vw[n], word(c))};\n' for n, c in vm.items()) + \
+        ''.join(f'        v.dm_pad{n} = {_value(w, [None] * 4)};\n' for n, w in mw.items())
+    psets = ''.join(f'        p.p{n} = {_value(pw[n], word(c))};\n' for n, c in pm.items())
     if None not in vm: raise ValueError('ms: its SPH enables no position component')
 
     def entry(name, gl):

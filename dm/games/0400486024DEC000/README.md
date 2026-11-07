@@ -86,6 +86,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 - [A damaged file in a NUP or a dump has no hash to fail](../../../docs/reference/packing.md#a-damaged-file-in-a-nup-or-a-dump-has-no-hash-to-fail): a contributor's NUP held three `.zs` textures beginning with zeros, and the background loader reloaded the fairy fountain model for ever (412% CPU); this repository's copy has none.
 - [A control section's words read as a BAHS entry](../../../docs/reference/shaders.md#a-control-sections-words-read-as-a-bahs-entry): six map rows that were no shaders, one of them failing the build; `tera_common` gave its variation pairs once its row was gone.
 - [Freeing a memory pool during a texture ID walk](../../../docs/reference/nvn-objects.md#freeing-a-memory-pool-during-a-texture-id-walk): the `-[NvPkg buffer]: unrecognized selector` crash after a save or a scene change.
+- [Constant unsigned extended multiplication without the optnone mulhi wrapper](../../../docs/reference/shaders.md#constant-unsigned-extended-multiplication-without-the-optnone-mulhi-wrapper): scalar non-power-of-two address multipliers in the NDVE title movie.
 - [HMMA chains keep their matrices in the SIMD-group](../../../docs/reference/shaders.md#hmma-chains-keep-their-matrices-in-the-simd-group): the NDVE movie networks behind the title and the opening, 14.8 → 11.4 ms of compute a frame on this M6.
 - [Raw global memory lookups that start from their last entry](../../../docs/reference/shaders.md#raw-global-memory-lookups-that-start-from-their-last-entry): the foliage, vertex and compute shaders read structures word by word through loaded addresses; about 2 ms less GPU a frame at the spawn point.
 - [The GPU idles with the next command buffer already committed](../../../docs/reference/frame-rate.md#the-gpu-idles-with-the-next-command-buffer-already-committed): the 25-40 ms frames.
@@ -131,3 +132,23 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 - [Live resolution variants share physical image storage](../../../docs/reference/rendering.md#live-resolution-variants-share-physical-image-storage): the dynamic-resolution depth buffer (`COMPRESSIBLE` alone) kept 15-16 live sizes at one offset, 14.5 MB each, as separate Metal textures (GPU allocation 7,710 → 7,520 MB in Kokiri Forest before main's Ocarina fixes; the 17 sizes still form on main at 2eb71820, where all Depth32Float textures take 225 MB with them shared).
 - [Pixel shader inputs the mesh shader does not write](../../../docs/reference/shaders.md#pixel-shader-inputs-the-mesh-shader-does-not-write): the foliage point meshes' pipelines (pixel shaders reading generic attribute 5 that no mesh output writes).
 - [Mesh outputs as wide as their pixel shaders read](../../../docs/reference/shaders.md#mesh-outputs-as-wide-as-their-pixel-shaders-read): the foliage mesh `626fbf48041cb82b`, padded to 35,840 bytes of mesh output, past Metal's 32 KB.
+
+## Scalar extended multiplication
+
+The non-power-of-two constant unsigned extended-product rewrite is independent of HMMA changes, tiling, render scale and movie decoding. It preserves the game's original NDVE enhancement. The general mechanism and synthetic tests are described in [Constant unsigned extended multiplication without the optnone mulhi wrapper](../../../docs/reference/shaders.md#constant-unsigned-extended-multiplication-without-the-optnone-mulhi-wrapper).
+
+The `title-movie` benchmark route starts from an empty save with a neutral stick, keeps original NDVE quality, and measures seconds 20–50 after launch. Use matching host/shader chains, docked mode (`DM_OPMODE=1`), the game's upscaler (`DM_UPSCALER=game`), and `DM_PRESENT_UPSCALE=off`. Set `DM_FOCUS_KEEP=1` for both variants so switching apps does not pause the game (minimizing still does). Compare baseline and candidate as variants of one `scripts/bench.py` invocation. Give each variant its own `host`, `msl`, `shmap` and `pso` paths: the map's adjacent `c1_full.tsv` and `cb_extent.tsv` must match that variant's library stamp. Other games and iOS device execution remain unchecked.
+
+Measured on an M1 Pro (16 GPU cores), macOS 27.2 (26B123), Xcode 27.2 (27B52), game v131072: baseline `51ecd693` / chain `094f939bfef9` versus this isolated rewrite / chain `042a6036306a`. Three alternating baseline/candidate pairs used the same empty save, warmed separate device pipeline archives, `DM_PSO_PREBUILD=0`, `DM_PSO_BUNDLE=off`, the default display link and the Metal HUD. No builds ran during measurement. The desktop was unlocked; startup preparation took 0.83–1.37 s, with all 916 pipeline bases loaded from the archive, before the 20–50 s window. All six runs had no red lines, focus pauses or display-link rescue messages.
+
+| Metric (median of three runs) | Baseline | Constant product |
+| --- | ---: | ---: |
+| Rendered frames/s (range) | 26.57 (26.53–26.60) | 28.40 (28.27–28.40) |
+| GPU frame p50, ms | 37.51 | 35.01 |
+| Frame p99, ms | 38.69 | 36.43 |
+| Screen presentations/s (range) | 23.17 (23.10–23.60) | 27.13 (26.47–27.27) |
+| Discarded presentations per 30 s, as reported by bench.py | 100 | 37 |
+
+Rendered throughput improved 6.9%; paired gains were 7.0%, 6.3% and 6.9%. GPU frame p50 fell 6.7%. Screen presentations are counted separately from distinct `@pres_at_ms` timestamps inside the same time window, on a 144 Hz display; they are not the benchmark's rendered-frame FPS. The presentation interval p99 remained 76.39 ms, so this is not a frame-pacing fix. Screenshots at 50.5 s cover different movie/animation phases and are not a pixel-equivalence proof. Integer-result equivalence is covered by the synthetic GPU tests. This title-movie result does not establish gameplay performance or 50 FPS.
+
+The full shader regression on this pair was `CHANGED`: 42,848/42,848 built on both sides, zero newly failing shaders, zero interface issues, 1,173 changed MSL sources, zero reflection changes and 43 changed variants. The profile has no `smoke.tsv`, so that report covers the chain only; the six benchmark launches provide the runtime evidence. Other games and iOS device execution remain unchecked.

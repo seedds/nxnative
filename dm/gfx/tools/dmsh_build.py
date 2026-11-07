@@ -55,6 +55,22 @@ XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-textur
 # GX lighting takes max(0, NaN) from light directions left at zero, and the half of Mario its fill light faces came out white on the iPhone (GitHub issue 72; vk_shaders.py PRECISE)
 def precise(msl): return re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', msl)
 
+# Keep SPIRV-Cross's mulhi workaround, but allow constant folding for scalar uint products with a non-power-of-two literal multiplier.
+# Power-of-two high-word products have a separate shift identity; vector, signed and dynamic products retain the original helper.
+def extended_multiply_msl(msl):
+    if 'spvMulExtended<' not in msl or 'using namespace metal;\n' not in msl: return msl
+    helper = r'template<typename T, typename U, typename V>\s*\[\[clang::optnone\]\] T spvMulExtended\(V l, V r\)\s*\{\s*return T\{U\(l \* r\), U\(mulhi\(l, r\)\)\};\s*\}'
+    if len(re.findall(helper, msl)) != 1 or len(re.findall(r'\bT spvMulExtended\(', msl)) != 1: return msl
+    call = r'\bspvMulExtended<(\w+), uint>\(((?:uint|as_type<uint>)\([^()]*\)), ([0-9]+)u\)'
+    def replace(m):
+        n = int(m[3])
+        if n <= 1 or n > 0xffffffff or n & (n - 1) == 0: return m[0]
+        return f'dmsh_mul_extended_uint<{m[1]}>({m[2]}, {m[3]}u)'
+    changed = re.sub(call, replace, msl)
+    if changed == msl: return msl
+    body = 'template<typename T> static inline __attribute__((always_inline)) T dmsh_mul_extended_uint(uint l, uint r) { ulong p = ulong(l) * ulong(r); return T{uint(p), uint(p >> 32)}; }\n'
+    return changed.replace('using namespace metal;\n', 'using namespace metal;\n' + body, 1)
+
 # Ampere HMMA.16816 with an f16 accumulator (agl's upscaler networks, the NDVE video networks) reaches the MSL as calls of dmsh_hmma16816_f16(lane, block, A0..A3, B0, B1, C0, C1,
 # flags, A's LDSM address, A0..A3's offsets, A's row stride, out D1) → D0, the subgroup's 256-word block of the scratch shared memory as the last argument (InstEmitAmpereTensor.AHmma,
 # TensorPass, HelperFunctionManager.GenerateHmma16816F16). The translator's body computes D lane by lane from the block; here it becomes simdgroup_matrix code over the same block:
@@ -1569,6 +1585,7 @@ def finish(key, w, j, c1):
     try: src = dmsh_atomic.check_msl(src)
     except ValueError as e: return 'image atomic MSL failed', str(e), None
     src = precise(src)   # min / max / clamp with Maxwell's NaN results (see precise)
+    src = extended_multiply_msl(src)   # exact scalar products without the unoptimized mulhi wrapper
     try: src = gather_offsets(src)   # four gathers instead of a wrapper's loop over their offsets (see gather_offsets)
     except ValueError as e: return 'gather offsets rewrite failed', str(e)[:160], None
     try: src = hmma_msl(src)   # Ampere HMMA through simdgroup_matrix (see hmma_msl)

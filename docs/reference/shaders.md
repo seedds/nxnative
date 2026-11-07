@@ -2162,3 +2162,17 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** the words are noted as they are encoded (`gmem_slot_note`) and, at each commit of the command buffer, whole or segment, pointed at a table of the pools as they are then (`gmem_commit_patch`). A new table is built when the pools changed, not refilled in place, as earlier segments may be reading the old one; the replaced one goes through the deferred release. The write log of a block is a bitmap of the entries of the table its shader searches, so the log follows its table (`NvGmlLog`): `gml_read` decodes its bits against the table the block holds at the commit, not the one it was encoded with. The idea is #1407's, which rewrites the words at commit in its own stack.
 - **Found on:** The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, profile in PR #1299): on the author's stack, loading the outdoor save, 5,729 of 154,107 words held an older table than the current one by frame 5,100 and 2,582 held the current one behind the pools. Whether this is what is left of the hang in issue #1326, minutes after a clean table growth, is open.
 - **Check:** `t_gmem_words` (words noted, a pool made after them, an older table, a table that lags, a commit with no words).
+
+### Constant unsigned extended multiplication without the optnone mulhi wrapper
+
+- **Symptom:** Non-power-of-two constants used for address division remain inside SPIRV-Cross's unoptimized scalar `spvMulExtended` helper. Found while measuring Ocarina of Time's original-quality NDVE title movie on an M1 Pro.
+
+- **Cause:** SPIRV-Cross emits an `optnone` template around the low product and `mulhi`. This prevents normal optimization of its body. [SPIRV-Cross documents an internal compiler error involving mulhi](https://github.com/KhronosGroup/SPIRV-Cross/blob/main/spirv_msl.cpp#L7819); simply removing the attribute would also discard that workaround.
+
+- **Fix:** `dmsh_build.py` recognizes the unchanged helper and scalar unsigned calls with an explicit `uint`/`as_type<uint>` operand and a decimal uint literal multiplier other than zero, one or a power of two. An inline helper forms a 64-bit unsigned product and extracts its low and high halves without `mulhi`. All other calls retain the original helper. Signed, vector and dynamic products are unchanged. Missing/ambiguous helpers or a missing namespace insertion point leave the source unchanged; applying the pass again has no effect.
+
+This complements the power-of-two high-word shift identity proposed in [PR #1663](https://github.com/seedds/nxnative/pull/1663); it deliberately leaves those calls intact. No shader key or game-specific switch selects the rewrite.
+
+- **Validation:** `test_dmsh_extended_multiply.py` compares both result halves against a CPU reference on 65,536 input pairs for each of three pairs of literal multipliers, including large division constants, a small odd constant, a non-power-of-two even constant and UINT_MAX. Inputs include zero, unsigned and signed-boundary bit patterns and deterministic pseudorandom values. The synthetic shaders compile for Mac and iOS; device execution is checked on the Mac only. Tests also cover rejection cases and idempotence. Game measurements and their scope are in the [Ocarina note](../../dm/games/0400486024DEC000/README.md#scalar-extended-multiplication).
+
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#scalar-extended-multiplication).

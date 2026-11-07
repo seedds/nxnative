@@ -1,4 +1,6 @@
 """IoStore shader resolution using synthetic TOCs, libraries and shader groups; no game files or keys."""
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -189,9 +191,41 @@ class IoStore(unittest.TestCase):
         self.assertEqual(t.export_bundles(), [0, 1])
         self.assertEqual(t.names(), paths)
 
-    def test_ue5_numbering_has_no_export_bundles(self):
-        t = uepak.Toc(str(container(self.romfs, 'Game.utoc', [(chunk_id(1, uepak.IO_EXPORT_BUNDLE_427), b'a')], version=4)))
-        self.assertEqual((t.export_bundles(), t.names()), ([], {}))
+    def test_ue5_numbers_export_bundles_as_type_1(self):
+        chunks = [(chunk_id(1, uepak.IO_EXPORT_BUNDLE), b'a'), (chunk_id(2, 2), b'bulk')]
+        t = uepak.Toc(str(container(self.romfs, 'Game.utoc', chunks, version=6)))
+        self.assertEqual((t.export_bundles(), t.names()), ([0], {}))
+
+    def sage(self, name=b'Global/FShader/0:/Engine/Private/X.usf|MainPS\0', code=b'\x11' * 0x40):
+        ctl = uepak.CTL_NVN2 + bytes(0x3c) + struct.pack('<I', len(code)) + bytes(0x98)
+        return bytes(0x3e) + struct.pack('<I', len(name)) + name + struct.pack('<I', len(code)) + code + struct.pack('<I', len(ctl)) + ctl + bytes(12), ctl, code
+
+    def test_a_switch_2_record_gives_its_name_control_and_code(self):
+        rec, ctl, code = self.sage()
+        self.assertEqual(uepak.sage_record(rec), ('Global/FShader/0:/Engine/Private/X.usf|MainPS', ctl, code))
+
+    def test_a_record_whose_lengths_disagree_is_refused(self):
+        rec, ctl, code = self.sage()
+        self.assertIsNone(uepak.sage_record(rec.replace(struct.pack('<I', len(code)) + code, struct.pack('<I', len(code) + 4) + code, 1)))
+        self.assertIsNone(uepak.sage_record(b'no record here' * 8))
+
+    @staticmethod
+    def table(streams):   # FShaderMapResourceCode: hashes, then {i32 length, code, i32 raw size, u8 frequency}
+        out = struct.pack('<I', len(streams)) + bytes(20 * len(streams)) + struct.pack('<I', len(streams))
+        for b, raw, f in streams: out += struct.pack('<I', len(b)) + b + struct.pack('<IB', raw, f)
+        return out
+
+    def test_shader_map_tables_are_walked_whole(self):
+        a, b = b'\x8c\x0a' + b'A' * 10, b'\x8c\x0a' + b'B' * 20
+        d = b'\x8c\x0a stray stream bytes ' + self.table([(a, 40, 3), (b, 80, 5)]) + b'tail'
+        at = d.index(a)
+        self.assertEqual(uepak.shader_map_entries(d), [(at, len(a), 40, 3), (at + len(a) + 5 + 4, len(b), 80, 5)])
+
+    def test_a_table_that_does_not_hold_is_not_taken(self):
+        a = b'\x8c\x0a' + b'A' * 10
+        t = self.table([(a, 40, 3), (a, 40, 3)])
+        self.assertEqual(uepak.shader_map_entries(t[:-30]), [])   # its second entry runs past the end
+        self.assertEqual(uepak.shader_map_entries(struct.pack('<I', 9) + t[4:]), [])   # the two counts differ
 
     def inline_pak(self, names=('Engine/GlobalShaderCache-SF_GLSL_SWITCH.bin',)):
         pak11(self.romfs / 'Game.pak', names)
@@ -199,7 +233,37 @@ class IoStore(unittest.TestCase):
         return str(self.romfs / 'Game.pak')
 
     def test_inline_shaders_with_the_cooked_packages_in_a_container(self):
+        container(self.romfs, 'Game.utoc', [(chunk_id(1, uepak.IO_EXPORT_BUNDLE_427), b'b'), (chunk_id(2, 3), b'bulk')], version=3)   # Mario & Luigi: Brothership
         self.assertTrue(uepak.inline_shaders(self.inline_pak()))
+        container(self.romfs, 'Game.utoc', [(chunk_id(1, uepak.IO_EXPORT_BUNDLE), b'b'), (chunk_id(2, 2), b'bulk')], version=6)   # Yoshi and the Mysterious Book
+        self.assertTrue(uepak.inline_shaders(self.inline_pak()))
+
+    def resonance(self, *patch_chunks):
+        """FINAL FANTASY RESONANCE's layout: the pak names the global shader cache, the container has export bundles and the shader libraries, global.utoc only script objects"""
+        bundle = (chunk_id(1, uepak.IO_EXPORT_BUNDLE), b'b')
+        container(self.romfs, 'Game.utoc', [bundle] if patch_chunks else [bundle, (LIB, b'l'), (GROUP, b'g')], version=8)
+        container(self.romfs, 'global.utoc', [(chunk_id(4, 5), b's')], version=8)
+        if patch_chunks: container(self.romfs, 'Game_0_P.utoc', list(patch_chunks), version=8)
+        return self.inline_pak()
+
+    def test_a_pak_beside_shader_libraries_is_not_inline(self):
+        pak = self.resonance()
+        self.assertFalse(uepak.inline_shaders(pak))
+        self.assertEqual(uepak.unreal_paks(str(self.romfs), inline=False), [pak])   # the NSP script's decode step runs (profile_guess.build_sources: ue_decode)
+        self.assertEqual(uepak.unreal_paks(str(self.romfs), inline=True), [])   # and its ue_legacy does not
+        self.assertEqual(ss.ue_legacy_jobs([(pak, 'Game.pak'), (str(self.romfs / 'Game.utoc'), 'Game.utoc')]), ([], set()))
+
+    def test_a_pak_beside_shader_libraries_in_a_patch_container_is_not_inline(self):
+        self.assertFalse(uepak.inline_shaders(self.resonance((LIB, b'l'))))
+
+    def test_a_global_cache_with_no_export_bundles_the_split_reads_is_not_inline(self):
+        """Taken as inline, the split would read the global shaders alone and report no loss; not inline, the NSP script stops at "none … holds a shader code archive\""""
+        pak = self.inline_pak()
+        self.assertFalse(uepak.inline_shaders(pak))   # no container
+        container(self.romfs / 'Other', 'Game.utoc', [(chunk_id(1, uepak.IO_EXPORT_BUNDLE), b'b')], version=8)
+        self.assertFalse(uepak.inline_shaders(pak))   # one in another folder: ue_legacy_jobs reads only the pak's own
+        container(self.romfs, 'Game.utoc', [(chunk_id(4, 5), b's')], version=8)
+        self.assertFalse(uepak.inline_shaders(pak))   # one without export bundles
 
     def test_a_pak_with_an_archive_or_only_configs_is_not_inline(self):
         self.assertFalse(uepak.inline_shaders(self.inline_pak(('Engine/GlobalShaderCache-X.bin', 'ShaderArchive-Global-X.ushaderbytecode'))))
@@ -233,6 +297,135 @@ class IoStore(unittest.TestCase):
         with patch.object(ss, 'ue_inline_shaders', side_effect=lambda d, label, out: seen.append((d, label))):
             ss.ue_io_shaders(str(toc), 'Game.utoc', (0,), [])
         self.assertEqual(seen, [(raw, '/Game.utoc#Game/M_A.uasset')])
+
+
+FAKE_HOST = """#!{python} -I
+import struct, sys, zlib
+sys.stderr.write({say!r}); sys.stderr.flush()
+if {gone!r}: sys.exit(1)
+i, o = sys.stdin.buffer, sys.stdout.buffer
+while h := i.read(16):
+    c, n = struct.unpack('<QQ', h); b = i.read(c)
+    try: s = zlib.decompress(b[2:])
+    except zlib.error: s = b''
+    o.write(struct.pack('<Q', n if len(s) == n else 0) + (s if len(s) == n else b'')); o.flush()
+"""
+
+
+class OodleTables(unittest.TestCase):
+    """shader_map_entries's tables in ue_inline_shaders, through a stand-in for the Mac host's DM_OODLE_SERVE: an Oodle stream here is its two first bytes and zlib"""
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(__import__('shutil').rmtree, self.tmp)
+        self.addCleanup(self.stop)
+        self.host()
+
+    def stop(self):
+        if ss._OODLE:
+            p = ss._OODLE[0]; assert p.stdin
+            p.stdin.close(); p.wait(); ss._OODLE = None
+
+    def host(self, say='', gone=False):
+        self.stop()
+        p = self.tmp / 'host'; p.write_text(FAKE_HOST.format(python=sys.executable, say=say, gone=gone)); p.chmod(0o755)
+        env = patch.dict(os.environ, {'DM_OODLE_HOST': str(p), 'DM_OODLE_MODULES': 'unused'}); env.start(); self.addCleanup(env.stop)
+
+    @staticmethod
+    def record():
+        code = struct.pack('<I', 0x0461) + bytes(0x7c)
+        name = b'Global/FShader/0:/Engine/Private/X.usf|MainVS\0'
+        ctl = uepak.CTL_NVN2 + bytes(0x3c) + struct.pack('<I', len(code)) + bytes(0x98)
+        return bytes(0x3e) + struct.pack('<I', len(name)) + name + struct.pack('<I', len(code)) + code + struct.pack('<I', len(ctl)) + ctl + bytes(12)
+
+    @staticmethod
+    def table(streams):
+        out = struct.pack('<I', len(streams)) + bytes(20 * len(streams)) + struct.pack('<I', len(streams))
+        for b, raw, f in streams: out += struct.pack('<I', len(b)) + b + struct.pack('<IB', raw, f)
+        return out
+
+    def real(self):
+        rec = self.record()
+        return b'\x8c\x0a' + zlib.compress(rec), len(rec), 1
+
+    def export(self):   # an entry of a split package's export list: name number 1, flags 8, size 0xb8c, offset 30650 (OCTOPATH TRAVELER II)
+        return self.table([(struct.pack('<q', 0xb8c), 30650, 0)])
+
+    def scan(self, d):
+        out = []
+        ss.ue_inline_shaders(d, '/Game.pak#M', out)
+        return out
+
+    def test_an_export_entry_is_taken_for_a_table_by_the_walk(self):
+        self.assertEqual(len(uepak.shader_map_entries(bytes(16) + self.export())), 1)
+        self.assertEqual(uepak.shader_map_entries(bytes(16) + self.export(), lambda row: False), [])
+
+    def test_a_stream_the_decoder_refuses_is_no_table(self):
+        out = self.scan(bytes(16) + self.export() + self.table([self.real()]))
+        self.assertEqual([st for _, st, _, _ in out], ['vs'])
+
+    def test_every_entry_of_a_proved_table_is_read(self):
+        self.assertEqual(len(self.scan(bytes(16) + self.table([self.real(), self.real(), self.real()]))), 3)
+
+    def test_a_refused_table_hides_nothing_inside_it(self):
+        inner = self.table([self.real()])
+        self.assertEqual(len(self.scan(bytes(16) + self.table([(b'\x8c\x0b' + inner, 1 << 20, 0)]))), 1)
+
+    def test_a_stored_stream_that_is_no_record_is_no_table(self):
+        self.assertEqual(self.scan(bytes(16) + self.table([(b'\x8c\x0a' + bytes(10), 12, 0)])), [])
+
+    def test_a_stored_record_is_a_table(self):
+        rec = b'\x8c\x0a' + self.record()
+        self.assertEqual(len(self.scan(bytes(16) + self.table([(rec, len(rec), 1)]))), 1)
+
+    def test_a_later_entry_the_decoder_refuses_is_red(self):
+        with self.assertRaisesRegex(SystemExit, r"^\[RED\] the game's decoder in the Mac host failed on a 8 → 30650 byte stream"):
+            self.scan(bytes(16) + self.table([self.real(), (struct.pack('<q', 0xb8c), 30650, 0)]))
+
+    def test_a_stream_that_decodes_to_another_layout_is_red(self):
+        other = zlib.compress(b'no record of this layout' * 4)
+        with self.assertRaisesRegex(SystemExit, r"^\[RED\] /Game\.pak#M: the shader record at .* is not a record of the known layout"):
+            self.scan(bytes(16) + self.table([(b'\x8c\x0a' + other, 96, 1)]))
+
+    def test_a_host_that_is_gone_is_red(self):
+        self.host(say='crashed', gone=True)
+        with self.assertRaisesRegex(SystemExit, r"^\[RED\] the game's decoder in the Mac host failed.*\n.*crashed"):
+            self.scan(bytes(16) + self.export())
+
+    def test_a_game_with_no_decoder_has_no_table(self):
+        self.host(say='DM_OODLE_JOB: main has no "OodleLZ_Decompress" name and no streaming decoder to find (0 functions)', gone=True)
+        self.assertEqual(self.scan(bytes(16) + self.export()), [])
+
+    def test_a_package_that_does_not_read_costs_only_itself(self):
+        bad = bytes(16) + self.table([self.real(), (struct.pack('<q', 0xb8c), 30650, 0)])
+        good = bytes(16) + self.table([self.real()])
+        out, said = [], io.StringIO()
+        with contextlib.redirect_stdout(said):
+            extra = ss.ue_packages([('/Game.pak#A', lambda: bad), ('/Game.pak#B', lambda: good)], out)
+        self.assertEqual({w.split('#')[1] for w, *_ in out}, {'A', 'B'})   # the first entry of A was read before its second failed
+        assert extra
+        self.assertEqual((extra[0], extra[2]), ('unreadable', 1))
+        self.assertTrue(extra[1].startswith("/Game.pak#A: the game's decoder"), extra[1])
+        self.assertEqual(said.getvalue().count('[RED] /Game.pak#A: '), 1)
+
+    def test_only_the_first_failures_of_a_job_get_a_line(self):
+        def fail(): raise ValueError('cut short')
+        said = io.StringIO()
+        with contextlib.redirect_stdout(said):
+            extra = ss.ue_packages([(f'/Game.pak#{i}', fail) for i in range(20)], [])
+        self.assertEqual(extra, ('unreadable', '/Game.pak#0: ValueError: cut short', 20))
+        self.assertEqual(said.getvalue().count('\n'), 8)
+
+    def test_nothing_lost_gives_no_extra(self):
+        self.assertIsNone(ss.ue_packages([('/Game.pak#A', lambda: b'')], []))
+
+    def test_a_job_keeps_what_it_read_and_says_how_many_it_lost(self):
+        p = self.tmp / 'Game.pak'; p.write_bytes(bytes(16))
+        ctl = uepak.sage_record(self.record()); assert ctl
+        def job(path, rel, names, out):
+            out.append(('/Game.pak#B', 'vs', ctl[1], ctl[2]))
+            return ('unreadable', '/Game.pak#A: why', 3)
+        with patch.object(ss, 'ue_legacy_shaders', side_effect=job):
+            rel, keys, _, extra = ss.scan_file((str(p), 'Game.pak', (ss.UE_LEGACY, ('A', 'B'))))
+        self.assertEqual((rel, len(keys), extra), ('Game.pak', 1, ('unreadable', '/Game.pak#A: why', 3)))
 
 
 if __name__ == '__main__': unittest.main()

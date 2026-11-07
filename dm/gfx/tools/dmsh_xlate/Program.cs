@@ -77,13 +77,16 @@ static class SwshXlate
         public SetBindingPair CreateImageBinding(int count, bool isBuffer) { int b = _binding; _binding += count; return new(0, b); }
         public SetBindingPair CreateStorageBufferBinding(int index) => new(0, _binding++);
         public SetBindingPair CreateTextureBinding(int count, bool isBuffer) { int b = _binding; _binding += count; return new(0, b); }
-        public ReadOnlySpan<ulong> GetCode(ulong address, int minimumSize) => MemoryMarshal.Cast<byte, ulong>(new ReadOnlySpan<byte>(_code)[(int)address..]);
+        // An address past the code is no code: FindBrxTargetsAmpere ends a jump table on it when the words after the table are not code offsets (Yoshi and the Mysterious Book's 23e73eaf528c9c0b, whose slice threw)
+        public ReadOnlySpan<ulong> GetCode(ulong address, int minimumSize) => address >= (ulong)_code.Length ? default : MemoryMarshal.Cast<byte, ulong>(new ReadOnlySpan<byte>(_code)[(int)address..]);
         // A texture read whose handle the translator cannot trace to one slot indexes the texture and sampler pools by the handle's IDs (20 and 12 bits); dmsh_build.py turns these
         // arrays into pointers to the pools the replay keeps (pool_arrays), with a run-time bound, so the lengths are the whole ID ranges
         public int QuerySamplerArrayLengthFromPool() => 1 << 12;
         // c[2]: every handle word (C2HandleWords). EA SPORTS FC 27's lights index separate texture i as element 45 + i (c2 byte 0x168 + 8 i), which 32 elements clamped to element 31.
-        // Other buffers (the game's own uniform buffers, read through the handles' byte offsets as well) keep 32
-        public int QueryTextureArrayLengthFromBuffer(int slot) => slot == 2 ? C2HandleWords : 32;
+        // The game's own uniform buffers, read through the handles' byte offsets as well: as many 8-byte handles as a uniform buffer of 64 KB holds. Kirby Air Riders' light probes read their
+        // atlases at element 390 of c[4], which 32 elements clamped to element 31, and characters got no ambient light. dmsh_build.py pool_arrays turns these arrays into pointers to tables
+        // the replay builds from the buffer (nvn_mtl.m htab_gpu), with a run-time bound
+        public int QueryTextureArrayLengthFromBuffer(int slot) => slot == 2 ? C2HandleWords : 8192;
         public int QueryTextureArrayLengthFromPool() => 1 << 20;
 
         string Get(string table, int slot) => _job[table] is JsonObject t && t[slot.ToString()] is JsonNode n ? (n is JsonObject o ? (string)o["type"] : (string)n) : null;

@@ -51,9 +51,9 @@ def entries(src):
     return ents
 
 
-def file_identity(path):
+def file_identity(path):   # not st_dev: macOS numbers a volume when it mounts it, so a reboot moved the Data volume from 16777234 to 16777232 and a 24 GB image was packed again, 8 minutes over SMB
     s = os.stat(path)
-    return [s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns]
+    return [s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns]
 
 
 def source_digest(src, ents):
@@ -130,6 +130,24 @@ def read_index(img):   # for tests and checks: {guest path: (is dir, offset, siz
             todo.extend((c, (path + '/' if path else '') + pool[e[c][2]:e[c][2] + e[c][3]].decode()) for c in range(a, a + b))
         else: out[path] = (False, a, b)
     return out
+
+
+# File names that promise a format, and the first bytes that format starts with. A file whose name promises one and whose bytes start with none of its heads is damaged:
+# a NUP or a dump folder carries no NCA hashes, so this is the check its extraction has. A zstd stream starts with a frame (28 b5 2f fd) or a skippable frame (5? 2a 4d 18).
+# Found on a NUP of Ocarina of Time whose three .zs textures began with 12,288 zero bytes: the game asked for one again on every pass of its background loader (PR #1530).
+FORMAT_HEADS = {'.zs': ((b'\x28\xb5\x2f\xfd', b'\xff\xff\xff\xff'), (b'\x50\x2a\x4d\x18', b'\xf0\xff\xff\xff'))}   # suffix: ((bytes, mask), ...)
+
+
+def format_mismatches(img, progress=None):   # [(guest path, size, first 4 bytes)] of the image's files whose bytes do not start as their name promises (FORMAT_HEADS); empty files are left out. progress(done, total): every 4,096 files
+    files = sorted((off, size, p) for p, (d, off, size) in read_index(img).items() if not d and size and os.path.splitext(p)[1].lower() in FORMAT_HEADS)
+    bad = []
+    with open(img, 'rb') as f:
+        for k, (off, size, p) in enumerate(files):   # in image order: one pass forward over the disk
+            if progress and not k % 4096: progress(k, len(files))
+            f.seek(off); head = f.read(min(size, 4))   # not into the next file's bytes
+            if not any(len(head) == 4 and all(h & m == w & m for h, w, m in zip(head, want, mask)) for want, mask in FORMAT_HEADS[os.path.splitext(p)[1].lower()]):
+                bad.append((p, size, head))
+    return bad
 
 
 ID_MAGIC = 'DMROMFSID1'

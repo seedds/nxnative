@@ -29,6 +29,8 @@ zip_store	.bk2:.pak:.ucas:.utoc:.metallib
 depth_mode	zero
 # The game's Switch device profile sets rhi.syncinterval=2 (30 fps), and the same route at 30 and at 60 fps reaches the same stages at the same times
 fps_target	60
+# Speed measured at 120 against 60 over the same inputs (README.md, Frame rate)
+fps_max	120
 
 # ---- Memory ----
 # Unreal Engine 4.27: as OCTOPATH TRAVELER II (0100A3501946E000/game.tsv), nninitStartup needs virtual address memory and reserves a 62 GB region for the engine. The rewriter's engine-wide rules cut the

@@ -14,7 +14,7 @@ import dmsh_geometry
 def builder_reflection():
     # Isolate pure reflection code from the builder's CLI/profile initialization.
     tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-    names = {'reflect', 'decode_tex', 'decode_ubo_tex', 'const_sampler', 'c2_array'}
+    names = {'reflect', 'decode_tex', 'decode_ubo_tex', 'decode_ubo_img', 'const_sampler', 'c2_array'}
     selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in names)
                 or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'SSBO' for t in n.targets))
                 or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Tuple) and any(isinstance(e, ast.Name) and e.id == 'TEX_BASE' for e in t.elts) for t in n.targets))]
@@ -108,6 +108,14 @@ class DriverTableArrays(unittest.TestCase):
     def test_sampler_word_in_another_buffer_is_not_a_driver_table_array(self):   # the sampler word in c3 (slots 0x40002): not this form
         got = self.reflect([('array<texture2d<float>, 301>', 'fp_t2d_cb262146_10570000', 0)])
         self.assertNotEqual(got[0]['kind'], 'tex_c2a')
+
+
+class UniformArraysWithDriverSampler(unittest.TestCase):
+    def test_sampler_word_in_c2(self):   # Kirby Air Riders' shadows: texture handles in c[6], the separate sampler word at c2 byte 0x570
+        source = 'struct spvDescriptorSetBuffer0\n{\n    array<depth2d<float>, 32> fp_t2ds_cb196614_10570000 [[id(0)]];\n    array<sampler, 32> fp_t2ds_cb196614_10570000Smplr [[id(32)]];\n};\n'
+        tex, samp = REFLECT('synthetic', 'ps', source, {'sbufs': []})
+        self.assertEqual((tex['kind'], tex['reg'], tex['off'], tex.get('soff')), ('tex_ubo', 3, 0, None))
+        self.assertEqual((samp['kind'], samp['reg'], samp['off'], samp['soff'], samp['sreg']), ('samp_ubo', 3, 0, 0x570, dmsh_abi.SREG_C2))
 
 
 def builder_unfillable():

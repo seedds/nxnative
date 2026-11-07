@@ -29,6 +29,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x98e, InstName.Red, ARed, N, writesRd: false);
             x(0x9a8, InstName.Atom, AAtomg, N);
             x(0x3a8, InstName.Atom, AAtomg, N);
+            x(0x3a9, InstName.Atom, AAtomgCas, N);
             x(AmpereOpcodes.Ldl, InstName.Ldl, ALdLocalShared, N);
             x(0x984, InstName.Lds, ALdLocalShared, N);
             x(0x387, InstName.Stl, AStLocalShared, N, writesRd: false);
@@ -42,7 +43,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             x(0xb60, InstName.Tex, ATex, InstProps.Tex);
             x(0x361, InstName.Tex, ATex, InstProps.Tex);
+            x(0x364, InstName.Tld4, ATex, InstProps.Tex);
+            x(0x367, InstName.Tld, ATex, InstProps.Tex);
             x(0xf60, InstName.Tex, ATex, InstProps.Tex);
+            x(0xf63, InstName.Tld4, ATex, InstProps.Tex);
+            x(0xf6c, InstName.Txd, ATex, InstProps.Tex);
+            x(0xf69, InstName.Tmml, ATex, InstProps.Tex);
+            x(0x36a, InstName.Tmml, ATex, InstProps.Tex);
             x(0xb66, InstName.Tld, ATex, InstProps.Tex);
             x(0xb63, InstName.Tld4, ATex, InstProps.Tex);
             x(0xb69, InstName.Tmml, ATex, InstProps.Tex);
@@ -126,15 +133,16 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (stage != null)
             {
-                // A task or mesh shader's stage input (QueryAmpereStageMemory). Mode 0x78: its workgroup's number; 0x38: a word of the payload its task wrote, [Ra + offset]
+                // A task or mesh shader's stage input (QueryAmpereStageMemory). Mode 0x78: its workgroup's number; 0x38: a word of the payload its task wrote, [Ra + offset];
+                // 0xb8: a word it wrote itself with 0x927's mode 0xb8 (Ocarina of Time's task shader 5d3a096025e375a1 reads its payload back in a later thread)
                 int mode = x.Bits(72, 80);
 
-                if (mode != 0x78 && mode != 0x38)
+                if (mode != 0x78 && mode != 0x38 && mode != 0xb8)
                 {
                     throw AFail(context, $"ISBERD mode {mode:x2} in a task or mesh shader");
                 }
 
-                Operand addr = mode == 0x78 ? Const(stage[0]) : context.IAdd(AGpr(x.Ra), Const(stage[1] + (int)x.SignedField(40, 64)));
+                Operand addr = mode == 0x78 ? Const(stage[0]) : context.IAdd(AGpr(x.Ra), Const(stage[mode == 0xb8 ? 2 : 1] + (int)x.SignedField(40, 64)));
                 EmitLoad(context, StorageKind.SharedMemory, LsSize2.B32, addr, x.Rd, 0);
                 return;
             }
@@ -217,7 +225,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         // The 64-bit address of a global access: Ra (a pair with bit raPairBit, else 32 bits) plus a uniform register pair at urLo (a pair with bit 72) in
         // the uniform form (bit 91), plus the signed offset (40..64). The low word stays (UR + Ra + offset), the form Ryujinx's global-to-storage pass
         // traces back to a storage buffer table entry in c[0].
-        private static (Operand Low, Operand High) AGlobalAddress(EmitterContext context, AmpereOp x, int raPairBit, int urLo, int extraOffset)
+        private static (Operand Low, Operand High) AGlobalAddress(EmitterContext context, AmpereOp x, int raPairBit, int urLo, int extraOffset, int descBit)
         {
             bool uniformForm = x.Bit(91);
             bool raPair = uniformForm ? x.Bit(raPairBit) : x.Bit(72);
@@ -226,7 +234,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand lo = Register(x.Ra, RegisterType.Gpr);
             Operand hi = raPair && x.Ra != RegisterConsts.RegisterZeroIndex ? Register(x.Ra + 1, RegisterType.Gpr) : Const(0);
 
-            if (uniformForm)
+            // desc[URb][Ra.64] (descBit: 76 in LDG / STG, 71 in ATOMG / RED; nvdisasm): URb is a memory descriptor (the compiler's cache policy), not part of the address
+            if (uniformForm && !x.Bit(descBit))
             {
                 int ur = x.Bits(urLo, urLo + 6);
 
@@ -279,6 +288,16 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 }
             }
 
+            // The address is read once, before any result is written, the zeros of a false predicate too: the destination may be the address register (LDG.128 R0, [R0.64]; Unreal Engine 5.4's bounds-checked
+            // reads of its scene data, LDG.P R5, [R5 + UR4], which read at the table's start when R5 was zeroed first: every instance at the first one's transform, and a black scene)
+            (Operand[] los, Operand[] his) = (new Operand[count], new Operand[count]);
+
+            for (int index = 0; index < count; index++)
+            {
+                (Operand lo, Operand hi) = AGlobalAddress(context, x, 90, 32, index * 4, 76);
+                (los[index], his[index]) = (context.Copy(lo), context.Copy(hi));
+            }
+
             Operand lblSkip = null;
 
             if (pred != null)
@@ -290,14 +309,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                 lblSkip = Label();
                 context.BranchIfFalse(lblSkip, pred);
-            }
-
-            // The address is read once, before any result is written (the destination may be the address register: LDG.128 R0, [R0.64])
-            (Operand[] los, Operand[] his) = (new Operand[count], new Operand[count]);
-
-            for (int index = 0; index < count; index++)
-            {
-                (los[index], his[index]) = AGlobalAddress(context, x, 90, 32, index * 4);
             }
 
             for (int index = 0; index < count; index++)
@@ -335,7 +346,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 bool isRz = x.Rb + index >= RegisterConsts.RegisterZeroIndex;
                 Operand value = isRz ? Const(0) : Register(x.Rb + index, RegisterType.Gpr);
 
-                (Operand lo, Operand hi) = AGlobalAddress(context, x, 90, 64, index * 4);
+                (Operand lo, Operand hi) = AGlobalAddress(context, x, 90, 64, index * 4, 76);
 
                 context.Store(storageKind, lo, hi, value);
             }
@@ -345,20 +356,64 @@ namespace Ryujinx.Graphics.Shader.Instructions
         public static void ARed(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (Operand lo, Operand hi) = AGlobalAddress(context, x, 90, 64, 0);
+            (Operand lo, Operand hi) = AGlobalAddress(context, x, 90, 64, 0, 71);
+            AtomOp op = (AtomOp)x.Bits(87, 90);
 
-            EmitAtomicOp(context, StorageKind.GlobalMemory, (AtomOp)x.Bits(87, 90), (AtomSize)x.Bits(73, 76), lo, hi, Register(x.Rb, RegisterType.Gpr));
+            if (op is AtomOp.Inc or AtomOp.Dec && x.Bits(73, 75) is 0 or 1)
+            {
+                AGlobalIncDec(context, op, lo, hi, Register(x.Rb, RegisterType.Gpr));
+                return;
+            }
+
+            EmitAtomicOp(context, StorageKind.GlobalMemory, op, (AtomSize)x.Bits(73, 76), lo, hi, Register(x.Rb, RegisterType.Gpr));
         }
 
         // ATOMG Rd, [Ra + UR + offset], Rb: operation 87..91; the uniform form keeps Ra's pair bit at 70
         public static void AAtomg(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (Operand lo, Operand hi) = AGlobalAddress(context, x, 70, 64, 0);
+            (Operand lo, Operand hi) = AGlobalAddress(context, x, 70, 64, 0, 71);
+            AtomOp op = (AtomOp)x.Bits(87, 91);
+            Operand value = x.Rb >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rb, RegisterType.Gpr);
 
-            Operand res = EmitAtomicOp(context, StorageKind.GlobalMemory, (AtomOp)x.Bits(87, 91), (AtomSize)x.Bits(73, 76), lo, hi, Register(x.Rb, RegisterType.Gpr));
+            Operand res = op is AtomOp.Inc or AtomOp.Dec && x.Bits(73, 75) is 0 or 1
+                ? AGlobalIncDec(context, op, lo, hi, value)
+                : EmitAtomicOp(context, StorageKind.GlobalMemory, op, (AtomSize)x.Bits(73, 76), lo, hi, value);
 
             ASet(context, x, res);
+        }
+
+        // INC (3) / DEC (4) on global memory, CUDA's atomicInc / atomicDec: EmitAtomicOp has no case for them (the operation vanished, its result 0). A compare-and-swap loop, as ATOMS's:
+        // INC: old >= b ? 0 : old + 1; DEC: old == 0 || old > b ? b : old - 1 (unsigned), retried until the word did not change meanwhile; the old value
+        private static Operand AGlobalIncDec(EmitterContext context, AtomOp op, Operand lo, Operand hi, Operand value)
+        {
+            Operand loop = Label();
+            context.MarkLabel(loop);
+            Operand cur = context.Load(StorageKind.GlobalMemory, lo, hi);
+            Operand next = op == AtomOp.Inc
+                ? context.ConditionalSelect(context.ICompareGreaterOrEqualUnsigned(cur, value), Const(0), context.IAdd(cur, Const(1)))
+                : context.ConditionalSelect(context.BitwiseOr(context.ICompareEqual(cur, Const(0)), context.ICompareGreaterUnsigned(cur, value)), value, context.IAdd(cur, Const(-1)));
+            Operand prev = context.AtomicCompareAndSwap(StorageKind.GlobalMemory, lo, hi, cur, next);
+            context.BranchIfFalse(loop, context.ICompareEqual(prev, cur));
+
+            return cur;
+        }
+
+        // ATOMG.CAS Rd, [Ra + offset], Rb (expected), Rc (new value, 64..71) (0x3a9; refused until now): PTX atom.cas, Rd the old value. 32 bits only (73..76 = 0)
+        public static void AAtomgCas(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+
+            if (x.Bits(73, 76) != 0)
+            {
+                throw AFail(context, $"ATOMG.CAS size {x.Bits(73, 76)}");
+            }
+
+            (Operand lo, Operand hi) = AGlobalAddress(context, x, 70, 64, 0, 71);
+            Operand expected = context.Copy(x.Rb >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rb, RegisterType.Gpr));
+            Operand value = x.Bits(64, 72) >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Bits(64, 72), RegisterType.Gpr);
+
+            ASet(context, x, context.AtomicCompareAndSwap(StorageKind.GlobalMemory, lo, hi, expected, value));
         }
 
         // MEMBAR: the order of this thread's memory operations
@@ -372,8 +427,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
         }
 
-        // ATOMS.CAS Rd, [Ra + offset], Rb (expected), Rc (new value): Rd = 1 when the swap happened, not the old value (Fire Emblem Fortune's Weave's only use is a retry loop for a float add that repeats until Rd == 1).
-        // Only the 32-bit form (operation 3 at 87..91, size 0) occurs
+        // ATOMS.CAS Rd, [Ra + offset], Rb (expected), Rc (new value). nvdisasm names the forms by bit 87: clear, CAS, CUDA's atomicCAS, Rd the old value; set, CAST, and CAST.SPIN with
+        // bit 88 too (the compiler's retry loop for a float add on shared memory, which repeats until Rd == 1: Fire Emblem Fortune's Weave's only use), Rd 1 when the swap happened.
+        // Only the 32-bit size (73..76 = 0) is taken
         public static void AAtomsCas(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
@@ -383,7 +439,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand value = x.Rc >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rc, RegisterType.Gpr);
             Operand old = context.AtomicCompareAndSwap(StorageKind.SharedMemory, Const(context.ResourceManager.SharedMemoryId), offset, expected, value);
 
-            ASet(context, x, context.ConditionalSelect(context.ICompareEqual(old, expected), Const(1), Const(0)));
+            ASet(context, x, !x.Bit(87) ? old : context.ConditionalSelect(context.ICompareEqual(old, expected), Const(1), Const(0)));
         }
 
         // ---- local and shared memory ----
@@ -454,7 +510,25 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             Operand value = x.Rb >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rb, RegisterType.Gpr);
-            Operand res = EmitAtomicOp(context, StorageKind.SharedMemory, (AtomOp)x.Bits(87, 91), (AtomSize)x.Bits(73, 76), id, offset, value);
+            AtomOp op = (AtomOp)x.Bits(87, 91);
+
+            // INC (3) and DEC (4), CUDA's atomicInc / atomicDec: EmitAtomicOp has no case for them and gave 0 with no access. A compare-and-swap loop: the new value from the old one,
+            // INC: old >= b ? 0 : old + 1; DEC: old == 0 || old > b ? b : old - 1 (unsigned), retried until the word did not change meanwhile; Rd the old value
+            if (op is AtomOp.Inc or AtomOp.Dec && x.Bits(73, 75) is 0 or 1)
+            {
+                Operand loop = Label();
+                context.MarkLabel(loop);
+                Operand cur = context.Load(StorageKind.SharedMemory, id, offset);
+                Operand next = op == AtomOp.Inc
+                    ? context.ConditionalSelect(context.ICompareGreaterOrEqualUnsigned(cur, value), Const(0), context.IAdd(cur, Const(1)))
+                    : context.ConditionalSelect(context.BitwiseOr(context.ICompareEqual(cur, Const(0)), context.ICompareGreaterUnsigned(cur, value)), value, context.IAdd(cur, Const(-1)));
+                Operand prev = context.AtomicCompareAndSwap(StorageKind.SharedMemory, id, offset, cur, next);
+                context.BranchIfFalse(loop, context.ICompareEqual(prev, cur));
+                ASet(context, x, cur);
+                return;
+            }
+
+            Operand res = EmitAtomicOp(context, StorageKind.SharedMemory, op, (AtomSize)x.Bits(73, 76), id, offset, value);
 
             ASet(context, x, res);
         }
@@ -484,45 +558,36 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
         // SURED [Ra], Rb (0x59f): an image reduction through a handle, laid out as SUATOM with no result: the coordinates from Ra, the value in Rb, the handle at 40..59, the dimension
         // at 61..64, the size at 73..76 and the operation at 87..91 (Eglantine's lowering to Maxwell names the fields). Mario Kart World's compute shader adds 1 at (R4, R5) of a 2D
-        // image; its word 2 is SUATOM's in Donkey Kong Bananza's encoding less the predicate result. Only that form has been seen, so another is refused
+        // image; its word 2 is SUATOM's in Donkey Kong Bananza's encoding less the predicate result. Yoshi and the Mysterious Book's compute shaders take other operations in SUATOM's field (MAX, OR, MIN on
+        // 32 bits); a size other than 32 bits (its Nanite shaders' MAX.U64) or another form is refused
         public static void ASured(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
 
-            if (x.Bits(64, 96) != 0x0010e000 || x.Bits(59, 61) != 0)
+            if ((x.Bits(64, 96) & ~(0xf << 23)) != 0x0010e000 || x.Bits(59, 61) != 0)
             {
                 throw AFail(context, $"SURED form {x.Bits(64, 96):x8}");
             }
 
             (int handle, int cbufSlot) = ATexHandle(context, x);
 
-            if (cbufSlot != TextureOperation.DefaultCbufSlot)
-            {
-                throw AFail(context, $"SURED handle in bank {cbufSlot}");
-            }
-
-            EmitSured(context, (SuDim)x.Bits(61, 64), 0, RedOp.Add, SuatomSize.U32, handle, x.Ra, x.Rb, 0, false, isBindless: false);
+            EmitSured(context, (SuDim)x.Bits(61, 64), 0, (RedOp)x.Bits(87, 91), SuatomSize.U32, handle, x.Ra, x.Rb, 0, false, isBindless: false, cbufSlot: cbufSlot);
         }
 
         // SUATOM Rd, [Ra], Rb (0x593): an atomic on an image through a handle, laid out as SUST's (handle 40..59, dimension 61..64) and as ATOMG's (operation
         // 87..91, size 73..76, Pu 81..83). Donkey Kong Bananza's append compute shaders take a counter with it (SUATOM.ADD.U32 on a 1D image, the old value
-        // shuffled to the warp) before their SUST. Another handle bank or a predicate result is not met in a game: refused.
+        // shuffled to the warp) before their SUST. The handle may be in the game's own uniform buffer, as a texture's. A predicate result is not met in a game: refused.
         public static void ASuatom(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
             (int handle, int cbufSlot) = ATexHandle(context, x);
-
-            if (cbufSlot != TextureOperation.DefaultCbufSlot)
-            {
-                throw AFail(context, $"SUATOM handle in bank {cbufSlot}");
-            }
 
             if (x.Bits(81, 84) != 7)
             {
                 throw AFail(context, "SUATOM with a predicate result");
             }
 
-            EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, (SuatomOp)x.Bits(87, 91), (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, 0, x.Rd, false, isBindless: false, compareAndSwap: false);
+            EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, (SuatomOp)x.Bits(87, 91), (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, 0, x.Rd, false, isBindless: false, compareAndSwap: false, cbufSlot: cbufSlot);
         }
 
         // BAR.SYNC: the workgroup barrier
@@ -652,13 +717,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
             int opcode = x.Opcode;
 
             // TEX through a handle in a register, not named by its offset: the compiler's form for a handle it read itself, usually from a table at a computed offset. BindlessElimination takes the
-            // handle from there, as for Maxwell's TEX.B. The other fields are 0xb60's. 0xf60: a uniform register at 40..46. 0x361 (bit 59 set): a register, the first of the second source block,
+            // handle from there, as for Maxwell's TEX.B. The other fields are 0xb60's. 0xf60, 0xf63 and 0xf6c (TEX, TLD4 and TXD, whose other fields are 0xb60's, 0xb63's and 0xb6c's): a uniform register at
+            // 40..46. 0x361, 0x364 and 0x367 (TEX, TLD4 and TLD, bit 59 set): a register, the first of the second source block,
             // before the LOD (a census of Fire Emblem Fortune's Weave's 3,327: of the sources that an LDC just wrote, always that place, with and without .SCR). Rc stays the second destination in both
             Operand boundHandle = null;
-            bool handleInB = opcode == 0x361;
-            bool bindless = handleInB || opcode == 0xf60;
+            // 0xf69 and 0x36a are TMML the same way (0xb69's other fields; Kirby Air Riders: 4,776 pixel shaders).
+            bool handleInB = opcode is 0x361 or 0x364 or 0x367 or 0x36a;
+            bool bindless = handleInB || opcode is 0xf60 or 0xf63 or 0xf6c or 0xf69;
 
-            if (opcode == 0xf60)
+            if (opcode is 0xf60 or 0xf63 or 0xf6c or 0xf69)
             {
                 int ur = x.Bits(40, 46);
 
@@ -667,7 +734,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (bindless)
             {
-                opcode = 0xb60;
+                opcode = opcode is 0xf63 or 0xf6c or 0xf69 ? opcode - 0x400 : opcode is 0x364 or 0x367 or 0x36a ? opcode + 0x7ff : 0xb60;
             }
 
             TexDim dim = ATexDim(context, x.Bits(61, 64));
@@ -745,6 +812,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
             {
                 int n0 = coords + (isArray || offset ? 1 : 0);
                 (List<Operand> a, List<Operand> b) = ATexBlocks(context, x, n0, 2 * coords);
+
+                if (bindless)
+                {
+                    sources.Add(boundHandle);
+                }
 
                 sources.AddRange(a.GetRange(0, coords));
 
@@ -935,7 +1007,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (opcode == 0xb69)
             {
-                ATmml(context, type, flags, handle, cbufSlot, mask, results, sources.ToArray());
+                ATmml(context, type, flags, handle, cbufSlot, mask, results, sources.ToArray(), bindless);
             }
             else
             {
@@ -954,9 +1026,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
         }
 
         // TMML: the LOD a sample would use, x and y in 8.8 fixed point (as Maxwell's)
-        private static void ATmml(EmitterContext context, SamplerType type, TextureFlags flags, int handle, int cbufSlot, int mask, Operand[] results, Operand[] sources)
+        private static void ATmml(EmitterContext context, SamplerType type, TextureFlags flags, int handle, int cbufSlot, int mask, Operand[] results, Operand[] sources, bool bindless)
         {
-            SetBindingPair setAndBinding = context.ResourceManager.GetTextureOrImageBinding(Instruction.Lod, type, TextureFormat.Unknown, flags, cbufSlot, handle);
+            SetBindingPair setAndBinding = bindless ? default : context.ResourceManager.GetTextureOrImageBinding(Instruction.Lod, type, TextureFormat.Unknown, flags, cbufSlot, handle);
             int r = 0;
 
             for (int comp = 0; comp < 4; comp++)

@@ -100,6 +100,18 @@ int main(void) { @autoreleasepool {
         check("B handle array: sampler kind", NVN_RB_SAMPU, r.b[3].kind); check("B handle array: sampler n", 32, r.b[3].n); check("B handle array: bindless", 1, r.bindless);
         printf("%-60s %s\n", "B array of 32 handles in uniform slot 11 (texture + sampler)", fail == f1 ? "✓" : "✗");
     }
+    {   int f1 = fail;   // handles in a uniform buffer beyond textures: Unreal Engine 5.4 on the Switch 2 keeps images and buffer textures there, and ORs a texture and a sampler word in either order
+        NSDictionary *j = @{@"route": @"B", @"bindings": @[
+            @{@"kind": @"img_ubo", @"reg": @0, @"off": @8, @"arg_id": @0, @"msl_name": @"cp_i_cb3_2_", @"msl_type": @"texture_buffer<float, access::write>", @"atomic": @YES},
+            @{@"kind": @"tbuf_ubo", @"reg": @1, @"off": @16, @"arg_id": @1, @"msl_name": @"cp_tb_cb4_4", @"msl_type": @"texture_buffer<uint>"},
+            @{@"kind": @"tex_ubo", @"reg": @0, @"off": @88, @"soff": @0, @"sreg": @2, @"arg_id": @2, @"msl_name": @"fp_t_cb262147_10000016", @"msl_type": @"texture2d<float>"},
+            @{@"kind": @"tex_ubo", @"reg": @0, @"off": @24, @"arg_id": @3, @"msl_name": @"fp_t_cb3_6", @"msl_type": @"texture2d<float>"}]};
+        check("B uniform handles: conversion succeeds", 0, nvn_refl_from_json(j, &r, err, sizeof err));
+        check("B uniform handles: image kind", NVN_RB_IMGU, r.b[0].kind); check("B uniform handles: image offset", 8, r.b[0].off); check("B uniform handles: image written", 1, r.b[0].rw); check("B uniform handles: image atomic", 1, r.b[0].atom);
+        check("B uniform handles: buffer texture kind", NVN_RB_TBUFU, r.b[1].kind); check("B uniform handles: buffer texture slot", 1, r.b[1].reg); check("B uniform handles: bindless", 1, r.bindless);
+        check("B uniform handles: other word at byte 0 of slot 2", 1, r.b[2].soff); check("B uniform handles: its slot", 2, r.b[2].sreg); check("B uniform handles: one word has no other", 0, r.b[3].soff);
+        printf("%-60s %s\n", "B images, buffer textures and two-word handles in uniform slots", fail == f1 ? "✓" : "✗");
+    }
     {   int f1 = fail;
         NSDictionary *b1 = @{@"route": @"B", @"bindings": @[@{@"kind": @"foo", @"arg_id": @0, @"msl_name": @"x", @"msl_type": @"constant _16*"}]};
         NSDictionary *b2 = @{@"route": @"B", @"bindings": @[@{@"kind": @"tex", @"reg": [NSNull null], @"arg_id": @0, @"msl_name": @"fp_t_x", @"msl_type": @"texture2d<float>"}]};

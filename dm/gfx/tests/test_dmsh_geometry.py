@@ -158,6 +158,22 @@ def geometry_header(passthrough=True, vertices=1, topology=7, invocations=1):
     return struct.pack('<5I', int(passthrough) << 24, 0, invocations << 24, topology << 24, vertices)
 
 
+class TopologyPointer(unittest.TestCase):
+    def test_a_helper_function_gets_the_table_as_a_pointer(self):   # Kirby Air Riders: SPIRV-Cross makes a helper of a block the shader reaches from several places, and passes the table to it
+        src = ('struct spvDescriptorSetBuffer0 { texture_buffer<float> trb_data [[id(16)]]; };\n'
+               'void _97(texture_buffer<float> trb_data) { float a = trb_data.read(uint(1)).x; }\n'
+               'kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0) { float b = spvDescriptorSet0.trb_data.read(uint(f(2))).x; _97(spvDescriptorSet0.trb_data); }\n')
+        out = dmsh_geometry.topology_pointer(src)
+        self.assertNotIn('texture_buffer', out)
+        self.assertIn('device const uint* trb_data [[id(16)]]', out)
+        self.assertIn('void _97(device const uint* trb_data)', out)
+        self.assertIn('as_type<float>(trb_data[uint(1)])', out)
+        self.assertIn('as_type<float>(spvDescriptorSet0.trb_data[uint(f(2))])', out)
+
+    def test_no_table_stops_the_shader(self):
+        with self.assertRaises(ValueError): dmsh_geometry.topology_pointer('struct spvDescriptorSetBuffer0 { };')
+
+
 class GeometryOutputLayout(unittest.TestCase):
     def test_passthrough_uses_input_primitive_vertex_count(self):
         layouts = [dmsh_geometry.output_layout(geometry_header(), t) for t in range(5)]
@@ -568,6 +584,26 @@ def mesh_fixture(out):
         subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-w', '-fmodules-cache-path=' + out + '/modules', str(path), '-o', str(path.with_suffix('.air'))], check=True)
         subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(path.with_suffix('.air')), '-o', str(path.with_suffix('.metallib'))], check=True)
     Path(out, 'reads.json').write_text(json.dumps(reads))
+
+
+class PointSize(unittest.TestCase):
+    def drop(self, src):
+        builder = Path(dmsh_geometry.__file__).with_name('dmsh_build.py').read_text()
+        node = next(n for n in ast.parse(builder).body if isinstance(n, ast.FunctionDef) and n.name == 'drop_point_size')
+        ns = {'re': re, 'sys': sys}
+        exec(ast.get_source_segment(builder, node), ns)
+        return ns['drop_point_size'](src)
+
+    def test_a_write_goes(self):
+        self.assertNotIn('PointSize', self.drop('vertex main0l_out main0_l(uint i [[vertex_id]])\n{\n    main0l_out out = {};\n    out.gl_PointSize = 1.0;\n    return out;\n}\n'))
+
+    def test_a_reference_takes_a_local(self):
+        # The translated body is a function of its own, which writes the output through its argument: that argument has no member to name in an entry point without the point size
+        out = self.drop('vertex main0l_out main0_l(uint i [[vertex_id]])\n{\n    main0l_out out = {};\n    _88(out.gl_Position, out.gl_PointSize);\n    return out;\n}\n'
+                        'vertex main0l_out main0_lz(uint i [[vertex_id]])\n{\n    main0l_out out = {};\n    _88(out.gl_Position, out.gl_PointSize);\n    return out;\n}\n')
+        self.assertNotIn('out.gl_PointSize', out)
+        self.assertEqual(out.count('float dmsh_point_size = 1.0;'), 2)
+        self.assertEqual(out.count('_88(out.gl_Position, dmsh_point_size);'), 2)
 
 
 if __name__ == '__main__':

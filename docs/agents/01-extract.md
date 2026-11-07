@@ -45,12 +45,14 @@ The work folder `$W` sits in the game's NSP folder, beside the NSP script's `<ti
   census/               survey tables (imports, svc, NVN slots)
   build/patched_v0/     rewriter output (what the host loads)
   shader/               shader package directory + map + facts produced by shader_split.py
-  build/cache/metal_shader_cache/b-<chain version>/   translated metallibs
+  build/cache/metal_shader_cache/b-<chain version>/   translated metallibs (from the NSP script: one file, shader/cache/b-<chain version>.img, dm/tools/shader_lib.py)
   build/gfx/dmsh_xlate/ the shader translator build
   ghidra/proj           persistent Ghidra project (analysis takes ~35 min for a 28 MB main)
   run/                  boot.sh, logs, saves, screenshots
   dbg/                  lldb scripts
 ```
+
+A top-level folder of `$W` untouched for 14 days, with 100 files or more, becomes `<name>.tar` at the end of the next NSP script or `regress.py` run (`dm/tools/tree_tar.py`). `regress/` stays. To bring one back: `mkdir <name> && tar --xattrs -xf <name>.tar -C <name> && rm <name>.tar`.
 
 ## Compressed RomFS content
 

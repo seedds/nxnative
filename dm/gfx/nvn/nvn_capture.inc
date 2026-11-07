@@ -101,7 +101,7 @@ static void cap_iface(NvProg *o, uint64_t out[6]) {
         cap_iface_put(&c, 1, (uint64_t)nb + 1); cap_iface_put(&c, 2, (uint64_t)nv + 1);
         for (int i = 0; i < 3; i++) cap_iface_put(&c, 3 + i, r->tg[i]);
         for (int i = 0; i < nb; i++) { const nvn_rbind *b = &r->b[i]; uint32_t t = 1u << 24 | (uint32_t)i << 8;   // binding i, field f: tag t + f
-            const uint64_t f[] = {b->kind, b->rw, b->dtt, b->dpf, b->reg, b->aid, b->off, b->n, b->soff, b->f1d, b->atom};
+            const uint64_t f[] = {b->kind, b->rw, b->dtt, b->dpf, b->reg, b->aid, b->off, b->n, b->soff, b->f1d, b->atom, b->sreg};
             for (uint32_t k = 0; k < sizeof f / sizeof *f; k++) cap_iface_put(&c, t + k, f[k]); }
         for (int i = 0; i < nv; i++) { uint32_t t = 2u << 24 | (uint32_t)i << 8;
             const uint64_t f[] = {r->v[i].loc, r->v[i].ct, r->v[i].nvn, r->v[i].sh[0], r->v[i].sh[1], r->v[i].sh[2]};

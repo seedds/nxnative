@@ -86,6 +86,8 @@ The work folder `0400C3F00006E000-work` beside the dump has `rewrite.sh`, `rebui
 
 Update 1.8.0 (v917504, SDK 21.4.0) is not on this Mac. Pull request #1116 ported it, and its facts (not its code) went into the host for this profile: the packing of a version with a `subsdk1`, and the Switch 2 services 1.8.0 calls at boot, which the base game does not import (the Nmouse pointer, GameChat's room event and camera storage, the camera context, the graphics system check, the HDR Bezier metadata and its clears; [services.md](../../../docs/reference/services.md#the-camera-through-the-graphics-system)). The NSP script packs it from a profile derived from this one, with its own shader tables. None of it has been run on 1.8.0.
 
+GPU clock (2026-11-07, an iPhone 19,4, 1.8.0, handheld, HDR off): about 30 s into a race the GPU clock falls to about a third. `DM_GPU_CANARY=1`'s fixed dispatch went from 4.3 to 4.8 ms to 13.8 to 17.9 ms and the game's GPU time from 7.5 to 8.9 ms to 29 to 31 ms at the same moment, so frames that fit 60 fps then take about 30 ms; the thermal state stayed 1 and the CPU at a full clock. HDR, the interval flips and the scheduler declarations were ruled out as causes; the open question is what the app can do about it (less GPU work per frame, or a lower sustained load: a 30 fps cap from the start is the next test).
+
 ## Open
 
 - **Long frames:** first-use pipeline compiles (no `pso_manifest.tsv` yet).

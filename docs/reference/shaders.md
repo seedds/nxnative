@@ -1345,7 +1345,8 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Cause:** the compiler builds a handle in a register under a guard (`R = word`; `R |= sampler word`) and reads through it under a guard of its own. The register's phi then merges the handle, its first word and what the register held before. `Utils.FindLastOperation` picks the phi's input only when both guards are the same operand in the same branch form, which misses `!UP0` with UP0 the vote of `P0` against a read under `!P0`, `P4` against a read under `P5 = P4 && !P1`, and `P6` against a read past `BRA.!P6`. `TryTableHandle` then took only c2 words, so a handle in another bank was deleted. In a register with no earlier value the first word's phi is (undefined, word): `FindLastOperation`'s rule that the one defined source of such a phi is its value was also applied to that phi inside the outer phi, so the first word came back as the whole handle.
 - **Fix:** in the vendored translator. `TryTableHandle` also takes a texture word ORed with a sampler word of the same bank or a constant sampler from any constant buffer, including when only the OR's source is a phi and the handle is not. A word of a game's uniform buffer alone is no candidate, as it may be other data, so the first word and a float left in the register drop out without a look at the guards. A c2 word alone that an ORed candidate also takes is that handle on its way, not a second candidate, which also saves a read chosen at run time. `FindLastOperation` applies the undefined rule only to the phi it was asked about. Proving the guards equal instead would take a boolean prover over predicate logic and the vote's meaning. A chain change.
 - **Found on:** [Yoshi and the Mysterious Book](../../dm/games/0400245021D2C000/README.md): of 128,113 translated shaders, 130 reads in 78 were deleted (the pool's water surface on Chapter 1's page) and 189 reads in 152 bound the texture word alone. SPIR-V of every shader against the translator before: those 230 change there; 364 of 22,072 in [DAVE THE DIVER](../../dm/games/010097F018538000/README.md) and 2,633 of 69,924 in [DRAGON QUEST I & II HD-2D Remake](../../dm/games/0100D7C01F254000/README.md), of which 319 and 1,780 bound the texture word alone and the others lose a second read; 16 of 13,980 in [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md), a second read. None of Fire Emblem Fortune's Weave's 16,888, nor of Blasphemous, NieR:Automata, Return of the Obra Dinn, Catherine: Full Body and FINAL FANTASY X/X-2. Only Yoshi's water was compared in a picture. FINAL FANTASY RESONANCE's 26 reads with [no c2 word](#bindless-reads-whose-handle-phi-also-carries-other-values) may be this form, not checked: its shaders are not split on disk.
-- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (the three guard forms, an unguarded OR, and a c2 handle read once).
+- **Note:** when these rules find no candidate, a second pass takes a word of any constant buffer alone, or a texture word ORed with a sampler word of another bank, since the read is deleted otherwise. Unreal Engine 5.6 on the Switch 2 builds such handles (Orbitals (`040004F027560000`)). A shader the first pass finds a handle in translates as with these rules alone.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (the three guard forms, an unguarded OR, a c2 handle read once, and the second pass's two forms).
 
 ### Layer entry points with the point size passed by reference
 
@@ -1402,6 +1403,26 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Limit:** measured on an M6 only. M1 to M5 have not run it. A failure of `t_barrier_exit` on one of them would bring the pass back for those GPUs.
 - **Found on:** PRAGMATA (no profile; 156 of its compute shaders return before a barrier) and Orbitals ([PR #1783](https://github.com/seedds/nxnative/pull/1783)), as PR #1774 reports; neither game's files were run here. Not [Ocarina of Time](../../dm/games/0400486024DEC000/README.md)'s GPU hang: none of its 520 task and mesh shaders has a barrier in its body. Only 12 of its compute kernels return before a barrier, none of them in the pass that hangs.
 - **Check:** `make -C dm/gfx/tests GAME=<id> t_barrier_exit && dm/gfx/tests/t_barrier_exit`.
+
+### Ampere instructions of Unreal Engine 5.6's Switch 2 shaders
+
+- **Symptom:** most of a game's shaders are left out of the build: `Ampere instruction f60 at 0x… is not implemented`, then 361, 593 (`SUATOM` with its handle in bank 3), 2be, 364, 301, 925, 59f, 394 and others. The game draws black backgrounds and missing effects.
+- **Cause:** Unreal Engine 5.6's Switch 2 shaders use Ampere forms the translator had no entry for:
+  - TEX / TLD / TLD4 / TXD / TXQ with the handle in a uniform register (bit 91, opcodes with 0x400) or in a register after the operands (`.B`, bit 59);
+  - SUATOM and SURED with the handle in another bank or a register, SUST.B;
+  - images whose handle is in the game's own uniform buffer (`cp_i_cb3_*`);
+  - BREV / UBREV, FRND.F16, MUFU.TANH, LDGSTS / LDGDEPBAR, F2FP.MERGE_C, PIXLD.MY_INDEX;
+  - NVN2's per-stage storage buffer banks 25..29;
+  - bindless constant buffers.
+- **Fix:** each form in `InstEmitAmpere*.cs`, with its encoding taken from a game and checked against Eden's Ampere frontend and NAK's encoder where they have it. Also:
+  - the TXD derivative order, I2F / I2FP `.RZ`, the FSWZADD sign and the SHFL.UP clamp;
+  - IMAD.WIDE's carry out, the MEMBAR scope, and LDL / STL without the shared stride;
+  - Ampere results kept on predicated paths;
+  - a bindless 1D integer fetch read as 2D rows (`fetch1d` on a `tex_ubo` binding, `nvn_mtl.m` `tbuf_as_2d`).
+
+  A 64-bit SURED is refused, not faked.
+- **Found on:** Orbitals (`040004F027560000`): 3,712 of 23,432 shaders translated on the translator of 2026-11-01, 23,432 with these.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` and `test_dmsh_ampere_alu.py`.
 
 ### Barrier moves around warp shuffles
 

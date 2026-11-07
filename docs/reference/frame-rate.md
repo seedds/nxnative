@@ -489,6 +489,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** they try the last hit, then a binary search over pools sorted by start address (`pool_find`, rebuilt when pools are added or removed).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): about 1,760 memory pools alive; a CPU sample of the submit thread had about 1,000 of its samples under those scans. Host submit time in the shrine went from 21 ms to 7 ms per frame (p50), the median frame from 38 ms to 21 ms.
 
+### Argument blocks encoded again when only a uniform buffer moved
+
+- **Symptom:** a submit thread busy in `encode_args` with few blocks reused: the per-frame TSV's `@args_enc` close to `@draws`, though most draws keep their textures and samplers.
+- **Cause:** binding a uniform buffer marked the stage's arguments dirty (`g_args_dirty`), and a dirty stage encodes its whole block again: every texture, sampler, image and storage slot, though only the CBUF slots moved. A game that binds a new uniform buffer between most draws paid for a full encode at nearly every draw.
+- **Fix:** in `nvn_mtl.m`, for every NVN game. `OP_BIND_UBO` sets its own flag (`g_args_ubo`). When nothing else is dirty, the block of the same pass is still reusable, and the shader's other bindings do not depend on the bound buffers (`args_cbuf_only`: an allow-list of binding kinds, decided once per shader), the old block is copied to a new arena slot and only its CBUF slots are written again (`cbuf_slot`, shared with the full encode). Any other binding kind, the resource check, a pass dump and stage 5 keep the full encode. `@args_patch` counts patched blocks.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game): 7,094 full encodes a frame fell to 1,489 (5,645 patched); submit-thread instructions per draw 14.4k to 13.6k, GPU time p95 14.0 to 12.0 ms, 60 fps on both (M3 Pro, `scripts/bench.py`, 3 runs each). The reuse was measured first in issue #1290.
+
 ### Main guest thread keeps inherited default QoS
 
 - **Symptom:** gameplay has low CPU clocks, large render submission wall time compared with thread CPU time, and default QoS (`0x15`) on the main guest thread while workers report user-interactive (`0x21`).

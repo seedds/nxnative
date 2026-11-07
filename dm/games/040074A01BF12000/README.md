@@ -75,6 +75,7 @@ Each step below stopped the boot before its fix:
 
 ## Found on this game
 
+- [Argument blocks encoded again when only a uniform buffer moved](../../../docs/reference/frame-rate.md#argument-blocks-encoded-again-when-only-a-uniform-buffer-moved): 7,094 full argument encodes a frame, 5,645 of them now patched (resolved).
 - [A prebuild pool sized from the Super cores](../../../docs/reference/shaders.md#a-prebuild-pool-sized-from-the-super-cores): the pipeline prebuild of its 21,225 shader pairs, M5 Pro, 393-452 s on 4 workers against 187-272 s on Metal's 14 (resolved).
 - [A depth clear over the whole target with a partial stencil mask](../../../docs/reference/rendering.md#a-depth-clear-over-the-whole-target-with-a-partial-stencil-mask): 22.8 MB of depth and stencil loaded a frame for a stencil mask of 1 (resolved).
 - [No Game language row in an app packed from a NUP or a dump](../../../docs/reference/packing.md#no-game-language-row-in-an-app-packed-from-a-nup-or-a-dump): reported by testers; this folder's dump has no control data.

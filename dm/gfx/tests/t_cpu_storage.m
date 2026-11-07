@@ -118,6 +118,16 @@ int main(void) {
         mtl_tex_release(&upper);
         teardown(&f);
 
+        setup(&f, 7030, CACHED, NVN_FORMAT_RGBA8, 0);   // nvn_ft_poll's question of a registered texture the CPU wrote after its first use (mtl_tex_storage_gpu_owned)
+        large = texture_at(&f, 7031, 0x40000, LARGE, NVN_FORMAT_RGBA8, 0);
+        CHECK("storage the GPU never wrote is the CPU's", !mtl_tex_storage_gpu_owned(&large));
+        mtl_tex_gpu_written(&large);
+        CHECK("storage the GPU wrote is the GPU's", mtl_tex_storage_gpu_owned(&large));
+        dm_guest_write_prepare(large.mem, large.L.size); fill(&large, large.mem, 40);
+        CHECK("and the CPU's again once it rewrites it", !mtl_tex_storage_gpu_owned(&large));
+        mtl_tex_release(&large);
+        teardown(&f);
+
         setup(&f, 7022, NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_GPU_CACHED, NVN_FORMAT_RGBA8, 0);
         size_t spans = g_ngws;
         mtl_tex_gpu_written(&f.t);

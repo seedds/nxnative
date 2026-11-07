@@ -268,6 +268,7 @@ void mtl_reg_image(int id, const tex_t *t, const view_t *v);   // RegisterImage 
 void mtl_tex_cpu_written(const tex_t *t);
 void mtl_tex_gpu_written(const tex_t *t);   // a GPU write into the texture's storage is recorded: uncompressed textures over it are no longer taken from storage (tex_cpu_content)
 int mtl_tex_gpu_owned(uint64_t serial);                                  // its host texture is a render target or shader-writable: GPU content, never re-uploaded from guest memory
+int mtl_tex_storage_gpu_owned(const tex_t *t);                           // the GPU wrote its storage and the CPU has not rewritten it since (nvn_ft_poll: not re-uploaded from guest memory)
 // hle_nvn.c: a texture tex_flush_upload / tex_dirty_upload registered and has not resolved yet; GPU copies written into the destination texture's storage as well (see there)
 int nvn_ft_tracked(uint64_t serial);
 int nvn_tex_mirror_b2t(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img);

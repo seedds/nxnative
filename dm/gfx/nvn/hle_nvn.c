@@ -428,8 +428,9 @@ int nvn_ft_tracked(uint64_t serial) {   // registered and not resolved yet: its 
 // Later writes (tex_dirty_upload): a texture first resolved before the CPU filled it stays a GPU-only texture, and the first-use check above never runs for it again.
 // Once per submission, when guest memory has changed since the last look, the registered textures whose pages were written since registration become CPU-written
 // (tex_mtl_ in nvn_mtl.m then drops the GPU-only texture and uploads it). Tears of the Kingdom fills its 5120x5120 BC4 roughness atlas from the CPU after first binding it,
-// as tiles stream in. A texture the GPU writes (render target, shader-written image) may share pages with data the CPU writes: it leaves the list without an upload, which would
-// replace the GPU's content
+// as tiles stream in. A texture whose storage the GPU wrote after the CPU's write (mtl_tex_storage_gpu_owned: the storage spans tex_cpu_content asks) leaves the list without an upload,
+// which would replace the GPU's content; one the GPU never wrote, or wrote before the CPU's write, is uploaded. The host texture's usage cannot tell: a texture made without a CPU fill
+// has render-target use from the start (tex_desc), and with the usage as the test every such rewrite was dropped (Ocarina of Time's terrain tiles)
 // Each poll looks at no more than FT_POLL_BYTES of registered textures, going on where the last one stopped; any guest write starts another pass over the whole list.
 // Checking every texture at every submission cost TOTK 0.4 ms of submit CPU per frame on the Mac; this way a texture is picked up a few submissions later at most
 enum { FT_POLL_BYTES = 128 << 20 };
@@ -449,7 +450,16 @@ void nvn_ft_poll(void) {
         } else cur++;
     }
     pthread_mutex_unlock(&g_ft_mu);
-    for (size_t i = 0; i < nhit; i++) if (!mtl_tex_gpu_owned(hit[i].serial)) mtl_tex_cpu_written(&hit[i]);   // outside g_ft_mu: the ownership check takes the replay's serial table lock
+    for (size_t i = 0; i < nhit; i++) {   // outside g_ft_mu: the ownership check takes the storage spans' lock
+        static uint64_t up, kept;
+        if (!mtl_tex_storage_gpu_owned(&hit[i])) { mtl_tex_cpu_written(&hit[i]); up++;
+            if (up <= 4) LOG("[nvn] registered texture written by the CPU after its first use: uploaded from its storage (ser=%llu %ux%ux%u format %#x levels %u, %llu bytes; %llu so far)",
+                             (unsigned long long)hit[i].serial, hit[i].d.width, hit[i].d.height, hit[i].d.depth, hit[i].d.format, hit[i].d.levels, (unsigned long long)hit[i].L.size, (unsigned long long)up);
+            continue; }
+        kept++;
+        if (kept <= 4 || kept % 100 == 0) LOG("[nvn] registered texture written by the CPU after its first use, kept as the GPU's (the GPU wrote its storage after the CPU): ser=%llu %ux%ux%u format %#x levels %u, %llu bytes (%llu kept, %llu uploaded so far)",
+                                              (unsigned long long)hit[i].serial, hit[i].d.width, hit[i].d.height, hit[i].d.depth, hit[i].d.format, hit[i].d.levels, (unsigned long long)hit[i].L.size, (unsigned long long)kept, (unsigned long long)up);
+    }
 }
 static void ft_flush(const uint8_t *a, uint64_t n) {
     if (!DM_GAME_TEX_FLUSH_UPLOAD || !a || !n) return;

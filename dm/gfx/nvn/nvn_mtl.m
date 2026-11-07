@@ -3510,6 +3510,14 @@ static int gws_owned(uintptr_t lo, uintptr_t hi) {   // the GPU wrote some of [l
     pthread_mutex_unlock(&g_gws_mu);
     return owned;
 }
+// The texture's storage is the GPU's: the GPU wrote some of it and the CPU has not rewritten it since (gws_owned). nvn_ft_poll (hle_nvn.c) asks this of a registered texture whose pages the
+// CPU wrote after its first use. Its host texture's usage cannot say: a texture made without a CPU fill has render-target use from the start (tex_desc), and with the usage as the test every
+// such rewrite was dropped. Ocarina of Time rewrites its terrain tiles' height (260x260 R32F) and blend / hole (260x260 RGBA8, two layers) maps from the CPU as tile slots are reused while
+// the player walks: the tiles kept what they held before, flat blue holes in the ground after an hour. Its normal maps, which the CPU zeroes and the GPU then draws, stay the GPU's
+int mtl_tex_storage_gpu_owned(const tex_t *t) {
+    if (!t->mem || !t->L.size) return 0;
+    return gws_owned((uintptr_t)t->mem, (uintptr_t)t->mem + t->L.size);
+}
 static void gws_take(uintptr_t lo, uintptr_t hi) {   // a texture over [lo, hi) is taken from its storage: the next GPU write there makes it a GPU texture (gws_rewritten, gws_set)
     pthread_mutex_lock(&g_gws_mu);
     for (size_t i = gws_find(lo); i < g_ngws && g_gws[i].lo < hi; i++) {

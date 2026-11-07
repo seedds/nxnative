@@ -73,6 +73,40 @@ The game may also write into an NVN object directly, without an NVN call, throug
 - **Fix:** such a pool gets an address range of its own at `MemoryPoolInitialize` (reserved, inaccessible: 64 GB on the Mac, at most 1 GB on iOS), and each mapping request `vm_remap`s the physical pages over its part of the range, so virtual addresses read and write the same memory, as the GPU's page table does. Each run of mapped pages is registered with the replay like a pool of its own and rebuilt when a request joins or splits runs (`vpool_*` in `hle_nvn.c`). Mario's 128 MB pool, mapped whole onto one physical pool, keeps the alias. The log reports the mapped high-water mark per 128 MB.
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md).
 
+### Buffers in sparse pools bound through their physical pages
+
+- **Symptom:** a draw or dispatch reads zeros from a buffer in a sparse pool, though the CPU and one-word lookups see the data; for a mesh draw, nothing drawn (instance records of id 0 and size 0).
+- **Cause:** a zero-copy Metal buffer made over a sparse pool's virtual range ([Sparse virtual pools built from separate physical pools](#sparse-virtual-pools-built-from-separate-physical-pools)) does not see the physical pages `vm_remap` later puts under it. A lookup larger than one page bound that buffer, or, where the mapped part was one virtual run in more than one physical piece, an older and larger pool entry. Also, the pool's run table held 1,024 runs, and when it was full `vrun_set` took the runs a new mapping merged with out of the lookup and never put the merged run back.
+- **Fix:**
+  - A lookup of more than one page inside a sparse pool binds the physical pool's own buffer at the matching offset when the mapped part of the range is one contiguous physical piece (unmapped pages may follow); `DM_NVN_SPARSE_PHYS=0` turns it off.
+  - When it is one virtual run in several pieces, the lookup is cut to the mapped length and bound through the run's own zero-copy buffer, which `vrun_set` makes after the run's last remap; `DM_NVN_SPARSE_RUN=0` turns it off. A large lookup that is not redirected logs its pieces, once per address.
+  - The run table holds 16,384 runs, and a full one leaves the lookup untouched (`DM_NVN_VRUN_MAX` sets a smaller cap for A/B runs).
+  - Lookups of one page or less are never redirected, so the redirect needs the binding's size: graphics storage buffers from push constants carry theirs ([NVN2 push constants: the block word picks the block](#nvn2-push-constants-the-block-word-picks-the-block)).
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): the title's Earth read an 80 MB buffer of zeros, and the terrain's mesh shader its 80 MB instance buffer (448 KB mapped, in two pieces).
+- **Check:** `t_sparse_buf` (1,500 separate runs, a contiguous redirect, a two-piece run read by a GPU blit, a piece after a hole that is not taken as a run); it fails with `DM_NVN_VRUN_MAX=1024` or `DM_NVN_SPARSE_RUN=0`.
+
+### Pages and pool tables changed under live GPU work (sparse safe mode)
+
+- **Symptom:** a GPU page fault (`gpuEvent-*.ips` in `/Library/Logs/DiagnosticReports` with a `bif0_fault` read, `[RED] command buffer execution error` with `PageFault`, macOS restarting the GPU minutes later) or a kernel panic in IOGPUFamily's memory descriptor prepare (`kIOReturnNoMemory`, then a NULL dereference), in a game that maps sparse pages while it runs. Before it, the residency set and the Mac's wired memory may grow by tens of gigabytes.
+- **Cause:** the host changed memory that submitted GPU work could still reach:
+  - a sparse unmap made the pages inaccessible at once, while a zero-copy buffer over them (the run's own, a large pool's chunk, an alias) stayed in the residency set until its deferred release; a mapping over live pages, or a pool's finalize, did the same;
+  - a sparse run's pool entries were replaced in steps, and a lookup or a pool table built in between saw the run missing;
+  - the raw global-memory pool table, a snapshot taken when a dispatch was encoded, missed pages mapped during the encode, and once it was filled again in place at the end of the submission, under segments the GPU was already running (a lookup that lands on a half-written row resolves to a wrong address);
+  - retired objects waited for the submission's fence, but an upload batch reads pool buffers it looked up without holding them and may complete later;
+  - large pools wired new whole-pool or chunk buffers each time a run grew, and re-uploaded textures and their staging piled up faster than the GPU released them.
+- **Fix** (`DM_NVN_SPARSE_SAFE`, default on; `hle_nvn.c` `vpool_*` / `vrun_set`, `nvn_mtl.m` `nocopy_buf`, `gmem_map_gpu`, `gmem_commit_patch`, `gmem_segment_commit`):
+  - an unmap keeps its pages until the work submitted before it, and the upload batches begun before it, have completed; a mapping over pages a live buffer may wrap waits for the GPU first; a dropped pool's reservation is unmapped after its runs' buffers have left the residency set;
+  - every zero-copy buffer is checked first: a range with a hole or an unreadable page is refused with a `[RED]` line instead of reaching IOGPU, and write-protected pages are made writable;
+  - a run's update holds a lock the lookups' slow path and the table rebuild take too, so they see the runs before or after it;
+  - at commit, a pool table built in the submission is filled again if the pools changed, or a new one is built and every argument word of the submission that holds a table address is pointed at it; before each segment commit the table is brought up to date and then counts as in flight, so it is never rewritten under the GPU (`DM_NVN_GMEM_SEG=0` is the old behaviour);
+  - retired objects also wait for every upload batch begun before them;
+  - a large pool grown at its end keeps its entry (`mtl_pool_extend`), the table reaches it through 64 MB segments kept across growth, and superseded chunks are retired;
+  - a re-uploaded texture waits, bounded, for its spare (`DM_NVN_REUP_WAIT_MS`, default 100), and the CPU upload staging is pooled and bounded (`DM_NVN_CSTG_MB`, default 512);
+  - the GPU deswizzle checks each job's ranges before the dispatch and in the kernels;
+  - test guards, off unless set: `DM_NVN_RES_LIMIT_MB` and `DM_NVN_WIRED_LIMIT_MB` end the process before a commit would pass them; `DM_NVN_POOLDUMP=<file>` writes where the pools sit in GPU addresses, so a fault address from a gpuEvent report can be placed.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): the tower-ring cutscene of the opening (page faults, a kernel panic, a residency set of 45 GB; the table made 71 whole-pool buffers of one growing run resident in 300 frames, and the re-uploads added 40 GB of textures).
+- **Check:** `t_sparse_safe` (CPU only, no command buffer committed): kept and deferred unmaps, refused zero-copy ranges, retired chunks, pooled staging, pool entries through joins, holes, growth and unmap + map, upload-batch waits, the table refilled and re-pointed at commit and kept under a committed segment, deswizzle bounds. Open: [PRAGMATA](../../dm/games/0400C76024710000/README.md#open) still meets intermittent compute page faults near the tower ring.
+
 ### Virtual pools of one texture each, mapped before and after the texture
 
 - **Symptom:** `[RED] MapVirtual: non-contiguous mapping (true sparse) not implemented`, on small virtual pools; streamed textures black or missing (OCTOPATH TRAVELER's village ground and plants).
@@ -312,6 +346,13 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** a record (`OP_FENCE_SYNC`) fences the sync at replay with the fence value of the submission segment being encoded, so it signals once everything before it has completed (the replay fences the sync with the submission that reaches it).
 - **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md) (19.3.11; one boot); [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md) (new with Unreal).
 
+### NVN2 fence and acquire syncs cover their own queue
+
+- **Symptom:** a game that submits on several queues runs at the pace of all of them: Mario Kart World's main thread waited out each queue's work, and its frame-time controller settled at 30 fps.
+- **Cause:** a fence sync waited for every queue's submissions and an acquire sync for everything submitted. On NVN2 (API 200 and up) a fence covers its own queue, and an acquire its texture's last present.
+- **Fix:** `hle_nvn.c` and `nvn_mtl.m` track each fence's queue and each window texture's last present.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md); [Orbitals](../../dm/games/040004F027560000/README.md#found-on-this-game) submits on more than one queue too.
+
 ### Submissions from two queues on two threads
 
 - **Symptom:** `FATAL submit re-entered` in the first frames.
@@ -333,6 +374,19 @@ Games read this count as a position in their own command memory and size their h
 - **Cause:** a GPU command buffer never completes.
 - **Check:** GPU load from outside: `ioreg -r -d 1 -c IOAccelerator | grep 'Device Utilization'` at 100 % means a shader is looping forever. Find the shaders first used in the last frames (`DM_NVN_PASSDUMP`, compare the `K` keys) and look at their `.metal` for an empty `do {} while (true);` with no `return` (one such case: [Exact program start for the decoder](shaders.md#exact-program-start-for-the-decoder)).
 - **Found on:** no game named in the source (general).
+
+### The GPU watchdog and GPU-written dispatch counts
+
+- **Symptom:** the Mac's WindowServer freezes minutes after a game stalls; the GPU stays at 100% with no game process alive.
+- **Cause:** a Metal command buffer that never completes is not reclaimed at exit. The ways in seen:
+  - an indirect dispatch whose GPU-written counts were garbage (billions of threadgroups);
+  - a kernel that never ends.
+- **Fix:**
+  - `DM_NVN_GPU_WATCHDOG` (seconds, default 4) ends the process when a command buffer has not completed, before more work queues behind it. A ring of (fence, kind, shader key) per draw and dispatch (`wk_note`) lets the watchdog and a failed command buffer name that submission's shaders (`wk_dump`).
+  - GPU-written dispatch counts are clamped (65535 per dimension, 2^22 threadgroups in all; `DM_NVN_DISPATCH_CLAMP=0` turns it off).
+  - A SyncWait of a second or more prints `[RED] SyncWait timed out on fence N: committed M, completed K` (fence ≤ committed: the GPU did not finish).
+  - To name the kernel of a fault or hang in a compute-only submission (where `wk_dump` names a dozen): `DM_NVN_BREADCRUMB=1` (diagnostic, off) writes a GPU-written sequence number after every compute dispatch (an encoder's dispatches serialized, so not for timing); at the first command-buffer error that is not an innocent victim, and at the watchdog, `[RED] breadcrumb fence=N: the dispatch in flight when the GPU stopped` names the first dispatch without its mark, then the ones after it. `DM_NVN_POOLDUMP=<file>` writes where the memory pools sit in GPU addresses at the same moments, to place a fault address from a gpuEvent report. Check: `t_sparse_safe` case 15.
+- **Found on:** [Orbitals](../../dm/games/040004F027560000/README.md#found-on-this-game) and [PRAGMATA](../../dm/games/0400C76024710000/README.md).
 
 ### The game's SyncWait wakes on the GPU's own signal of its fence
 
@@ -363,6 +417,14 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** hoist slice and row offsets, express power-of-two block dimensions as shifts/masks, and use the four fixed x offsets and eight fixed y offsets within a GOB. Full segments use constant-size 16-byte copies; byte counts not divisible by 16 retain a tail copy. ASTC blocks are always 16 bytes irrespective of their texel dimensions. Both copy directions preserve the layout, sparse row padding and mip/layer offsets.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game), reported in [PR #261](https://github.com/seedds/nxnative/pull/261).
 - **Check:** `t_tex` compares both directions against the byte-address formula for 1,029 deterministic layouts, including 1D/2D/3D, arrays/cubes, packaged block dimensions, sparse mip tails, 1/2/3/4/6/8/12/16-byte formats, padded pitches and partial segments. All 5,334 checks pass, including under AddressSanitizer and UBSan. A local arm64 Mac comparison against the old implementation, Apple clang 21 at the host's `-O1`, measured 7.4–7.7 GB/s before and 35.1–37.6 GB/s after (4.6–5.1x) across 1024x1024 sparse ASTC 6x6, 2048x2048 BC7, 1920x1080 RGBA8 and 1280x720 RGBA16F. Each result is the median of seven runs copying about 128 MiB, with implementation order alternated. This is a CPU microbenchmark; no new gameplay run here.
+
+### Swizzled uploads deswizzled on the CPU by default
+
+- **Symptom:** a GPU hang or page fault inside an upload command buffer (`[RED] upload command buffer execution error`, a CDM kill in the gpuEvent report, macOS restarting the GPU), with the game's own submissions idle; with `DM_NVN_DESWZ_GPU=0` the same scene runs through.
+- **Cause:** open. The host's GPU deswizzle jobs (`dm/gfx/tex/nvn_deswizzle_gpu.m`, `deswz.metal`) run in the upload batches; one of them hung or faulted the GPU at the same scene in several runs. The range checks before the dispatch and in the kernels ([Pages and pool tables changed under live GPU work](#pages-and-pool-tables-changed-under-live-gpu-work-sparse-safe-mode)) did not catch it, and the job is not named yet.
+- **Fix** (a workaround while the cause is open): swizzled textures are deswizzled on the CPU unless `DM_NVN_DESWZ_GPU=1`; textures in sparse pools always were. This costs CPU time per upload in every game that uploads swizzled textures (not measured on games other than the one below).
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): the tower-ring cutscene of the opening (three runs hung or faulted in upload batches with the GPU path; none since with the CPU path).
+- **Check:** the Metal tests still cover the GPU path: `t_deswz_gpu` runs the kernels directly and `t_direct_upload` sets the switch.
 
 ### The Switch 2's order inside a GOB
 
@@ -564,6 +626,14 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** a copy into a texture whose storage the host uploads from (a packaged layout, CPU-written, or registered by `tex_flush_upload` / `tex_dirty_upload` and not resolved yet) is written into the storage as well, as the hardware's copy would (`nvn_tex_mirror_t2t` / `nvn_tex_mirror_b2t` in `hle_nvn.c`, from `copy_t2t` / `copy_b2t` in `nvn_mtl.m`), when its source is a buffer or a texture whose storage holds its content; the write marks the pages, so the next upload carries the levels. When the source is the GPU's (a texture whose host texture, or the one its packaged record holds, can be rendered into or written by shaders, `tex_gpu_touched`; a buffer a copy, fill or update queued in the submission, a shader or a copy of a submission still running wrote, `pend_hits` / `sbw_hits` / `gw_live`), when a readback into the source or the destination is still pending (`mrb_pending`: the storage lacks those bytes until it lands, and the later copy must land after it), or when the CPU mirror cannot do the copy (a format change, a scaled or flipped copy drawn by `copy_t2t_draw`), the destination region is read back after the copy on the GPU into a shared buffer and written into the storage in the submission's completion handler, before its fence is published (`mirror_readback` / `mirror_rb_land`, a kind 4 post-op). Depth and stencil formats, multisample textures and 3D destinations are left out and reported red.
 - **Check:** `t_nvn` 6c3 checks region and whole-level copies between textures of different block heights (RGBA8, BC1) and from a strided buffer, byte for byte against a level round trip; `t_readback` copies a cleared render target into a packaged texture and reads the clear colour back from its storage. In the log, `texture→texture copy into ser=… written into the storage as well` or `… read back into the storage when the GPU completes`.
 - **Found on:** [Yoshi's Crafted World](../../dm/games/01006000040C2000/README.md): the Yoshis' 1024² DXT1 base colour and BC5 normal textures, 11 levels; level 4 of one held a pink felt texture, of the others zeros; the speckles began when the opening went dark.
+
+### Block-encoder copies into a pool the CPU cannot access
+
+- **Symptom:** surfaces textured with something the game builds at run time are black, or show a scrambled mix of colours, while textures loaded from files are right. `texraw` of the sampled BC texture is all zeros, and so is its storage (`memdump`); the game's allocator header just before the storage is there, so the block was allocated and never written from the CPU. A pass dump of the frames that build the texture shows compute dispatches writing an `RGBA32Uint` texture (Metal format 123) through an image binding, then `t src=… lv<n> dst=… lv<n>` copies into other `RGBA32Uint` textures a quarter of the BC texture's size.
+- **Cause:** a GPU block encoder. The game renders the picture, encodes BC3 blocks by compute into an integer texture (one 16-byte texel per 4×4 block), and copies each level with `nvnCommandBufferCopyTextureToTexture` into a second integer texture at offset 0 of the BC texture's own pool (`CPU_NO_ACCESS | GPU_CACHED`), whose description the BC texture over the same storage shares but for the format and a 4× size: on NVN the two are the same bytes (both block-linear with 16-byte elements). The host made them two Metal textures, Metal can view neither as the other, and a copy into a texture in a pool the CPU cannot access was not written into its storage ([previous entry](#gpu-copies-into-textures-uploaded-from-their-storage)), so the BC texture, filled from that storage at its first use, held zeros.
+- **Fix:** a copy into a single-sample 2D texture of 64- or 128-bit unsigned texels (`RG32Uint`, `RGBA16Uint`, `RGBA32Uint`) in a `CPU_NO_ACCESS` pool is read back into its storage when the GPU completes (`tex_block_alias_dst` in `nvn_mtl.m`, through `mirror_readback`), and the BC texture over that storage takes the blocks from there at its first use (`tex_init_fill`); `DM_NVN_BLOCK_ALIAS=0` turns this off for an A/B. Other copies into such pools are not read back. Not covered: a BC texture first used before the readback lands (in the same submission as the copy, or one encoded before it completes) is filled from the old storage, and one already in use does not see blocks copied later, since `tex_init_fill` runs once. In Cricket 24 the kits drew, so its readbacks landed before their first use.
+- **Check:** `t_block_alias` (Metal validation): an encoder's `RGBA32Uint` output copied into an 8×8 `RGBA32Uint` texture reaches that texture's storage, a 32×32 BC3 texture over the same storage holds the blocks at its first use, and an `RGBA8` copy into such a pool leaves the storage zero. Without the fix the first two fail. In the log, `texture→texture copy into ser=… format 0x2f … read back into the storage when the GPU completes`.
+- **Found on:** Cricket 24 (`010026501B4C6000`, 1.0.0): the players' kits (512×512 BC3 with 10 levels, a 0x56000-byte pool each, written through a 128×128 `RGBA32Uint` texture) were all zero, and the players drew black with speckled clothing; with the fix the kits draw (white Test kits, helmets and pads at the SCG). The two smallest levels of each kit are still not copied (`[RED] texture copy destination at level 8 of a texture with 8 levels: skipped`): the integer texture declares 10 levels, which a 128×128 texture cannot hold, and Metal makes it with 8.
 
 ### Render passes into textures uploaded from their storage
 
@@ -812,3 +882,31 @@ Games read this count as a position in their own command memory and size their h
 - **Cause:** `nvnMemoryPoolFinalize` on a game thread dropped the pool's textures from the CPU-written set (`cpu_tex_drop_pool`) before it marked the pool's texture IDs gone under `g_rmu` (`treg_drop_pool_views`). A pool walk on the submit thread holds `g_rmu` and visits every registered ID; one of that pool's IDs reached in between was not gone, its pool's magic was still set, and its texture was no longer CPU-written, so `tex_mtl_` skipped the packaged path and returned the texture table's entry as it was: the `NvPkg` wrapper of the upload, not an `MTLTexture`. `tex_by_id`'s first message to it threw.
 - **Fix:** general (`nvn_mtl.m` `mtl_alias_drop_pool`). The IDs are marked gone first: a walk holding `g_rmu` either finishes while the classification is still there or finds the ID gone and takes `tex_made`, which unwraps the `NvPkg`. `t_cpu_tex --metal` (`finalize_during_walk`) finalizes a pool on another thread while it holds `g_rmu`: with the old order the classification was gone and `tex_mtl` handed out the `NvPkg`.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), from two players' reports on PR #1299 and PR #1420 (an M3 Max 412 s into Kokiri Forest after a save; an M4 Pro in the Deku Tree after about 40 minutes). PR #1420 found where the `NvPkg` escaped.
+### NVN2 push constants: the block word picks the block
+
+- **Symptom:** compute shaders read their storage buffer addresses as 0 and write into the dummy buffer, a GPU memset writes into another shader's buffer, draws read buffer sizes as addresses (`[RED]` lines with addresses such as 0x40000 or 0x2000000 at push + 0x8), and pixel shaders' storage buffers stay on the dummy.
+- **Cause:** `nvnCommandBufferPush*Constants` takes a block word before the offset, which the host ignored: every push was stored at its offset in one block. The offsets count from the start of the named block.
+  - Compute: NVN2 lays out two push blocks in `c0` ([NVN2 compute `c0` with two push blocks](shaders.md#nvn2-compute-c0-with-two-push-blocks)); the second, the storage buffer table, is pushed with word 1, and was stored over the first.
+  - Graphics: block k (1..5) is constant bank 24 + k, one stage's storage buffer table (vertex 25, hull 26, domain 27, geometry 28, pixel 29), which the translator reads at `c0 + 0x110 + 0x100 (k − 1)` (`AMapC0`). Stored in the first block, these tables overwrote the push constants.
+- **Fix:** compute block 1 is kept apart: each shader's first-block size is taken from its control section at `SetShaders` (`prog_push0`), and its `c[24]` view (`push_view`) is the first block followed by the second; the `c[24]` binding and the storage buffer addresses kept in push constants (`sbufu_addr`) read through it. A pushed graphics table's rows {address, size} become that stage's storage buffer bindings, as `nvnCommandBufferBindStorageBuffer` sets them (hull goes to the mesh stage, where RE Engine's mesh shaders read it; domain has no host stage), so the bindings, the `c0` fill and hazard tracking all see address and size. `DM_NVN_PUSH_BLOCKS=0` restores the old placement; the first 32 distinct push shapes (stage group, block, offset, size) are logged.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): block words 0..5 (compute 0 and 1, graphics 0, 1, 2 and 5); `eef9b5086c9bcb68` and `f0cb7fbfc411f868` read address 0 at every dispatch, and the memset `0ec5481e336c2ea6` wrote to a stale address.
+
+### Guest event queue ordering
+
+- **Symptom:** a consumer submitted before another queue's producer uses stale input. In Mario Kart World, water jumps for one frame and the minimap retains fading wave artifacts.
+
+- **Cause:** event and command-buffer sync waits were no-ops. One shared Metal queue orders already submitted work, but cannot satisfy a forward dependency by replaying guest submissions in CPU call order. Handshakes inside submissions require scheduling smaller prefixes.
+
+- **Fix:** record waits and schedule ready prefixes in FIFO order within each guest queue. A blocked queue yields, allowing the same CPU thread to submit its producer later. Committed producers supply projected event values to the scheduler; mapped event storage changes only after GPU completion. Completed projections yield to mapped storage, CPU API resets first complete older queued writes, and a worker observes direct CPU stores while work is pending. Logical tickets retain completion dependencies, including wait-only submissions. Presentation remains queued work, and acquire waits for its present marker to be scheduled.
+
+Copied records relocate embedded snapshots. Render targets, conditional rendering and cumulative visibility queries retain their queue state across event boundaries. Query buffers stay pinned until reset or finalization, and report callbacks retain their inputs through completion.
+
+Submission-mode timestamps share one reference-counted clock across the logical submission's chunks. This preserves the existing approximate clock mode without inserting host scheduling delays between reports. Segment-mode GPU timestamps retain their existing behavior.
+
+Chunks append to a leased command allocator without resetting GPU-owned bytes. The pool remains bounded at eight: under pressure, a completed prefix can release its lease so a later producer can run, and the suspended continuation reacquires an allocator. Reset requires completion of every committed use. The bounded completion-record table also completes its previous occupant before reuse.
+
+Signal location and flags are retained; CPU publication conservatively waits for the producer prefix to complete. Raw capture replay lacks guest queue identities and rejects waits. The updated sync and signal layouts require matching host and replay builds; older captures are rejected.
+
+- **Validation:** scheduler tests cover wrapping comparisons, forward and bidirectional dependencies, FIFO ordering, retirement and fence tickets. Metal fixtures cover CPU signals, wait-only fences, retained render targets, visibility queries, both timestamp modes, allocator pressure with twelve suspended submissions, and completion-record ring reuse. The wait-only fence regression test fails without propagating the producer's completion fence.
+
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md).

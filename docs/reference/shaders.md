@@ -35,6 +35,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [FINAL FANTASY X/X-2 HD Remaster](../../dm/games/0100BC300CB48000/README.md); base and both supplied DLC packs yield 5,752 unique shaders.
 - **Check:** `test_vbf.py` covers raw and zlib blocks, shared/missing members, truncation, unaligned effects, loose shader keys and inconsistent lengths. All 5,752 programs translate on the Mac.
 
+### Firaxis's CIVBSF shader file
+
+- **Symptom:** the NSP script stops at the shader split with `the shader split found no shaders in main or the RomFS` (`shaders: 0` in `shader_split.log`), while the Mac boot asks for shaders that are not in the shader map. The RomFS root holds `ShaderAutoGen_Linux_NVN_FinalRelease.bs`; the rest is Firaxis BLP packages, Coherent Gameface UI files and XML.
+- **Cause:** the shaders are in that one file, magic `CIVBSF\0\0` (u32 version 0x1218, u32 the file's length, tables whose counts start at +0x68 with the shader count), uncompressed. Each shader is a record `{00 ff 00 ff, u32 code length, u32 stored control length, u32 flags}`, then its code area, then its control section, at unaligned offsets after the entry's name (and, for some, a pragma list from the engine's other platforms). No reader took it.
+- **Fix:** `civbsf_shaders` finds each record from its control section: the code area is the control's code length (+0x704) right before it, the record header right before that, and both of the header's lengths must agree (the stored control length may run past the section's own length, +0x20: 15 of 801, by 0x80 to 0xa00 bytes). Records must not overlap and their number must be the header's shader count; a file that breaks either is left out with its red line. The program tables are not read, so the shaders are single-stage programs with the pixel-input cover. `test_civbsf.py` covers records of every stage at unaligned offsets, a stored control length longer than the section, the single-stage pairing, recognition by magic, and the length, count and overlap checks.
+- **Found on:** Sid Meier's Civilization VII (`0100C3601518C000`, 1.5.0.1, provisional profile, no game note yet): 801 records, 481 keys (127 vertex, 254 pixel, 100 compute), against zero before; the 12 shaders its first 15 s on the Mac asked for are all among them, and a 14-minute Mac session (49,800 frames) logged `shader keys not in the shader map … 0`.
+
 ### A file no reader reads
 
 - **Symptom:** the shader split stops on one archive with a Python traceback (an `IndexError` or `struct.error` naming no file), or a reader's `[RED]` line about a format it does not know, and nothing is written; the NSP script loses the build at the split.

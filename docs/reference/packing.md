@@ -75,6 +75,15 @@
 - **Fix:** the error shows each differing table's row counts and its first row on each side. For a splitter change, check that the new rows are right, then copy the tables from `shader/pkg.partial/tables` in the build folder into the profile. A change to the splitter's output also needs the other profiles it reaches split again.
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md) ([issue #1263](https://github.com/seedds/nxnative/issues/1263)): [NVN2 task and mesh shaders](shaders.md#nvn2-task-and-mesh-shaders) moved one row from vertex to mesh. Donkey Kong Bananza, Pokemon Pokopia and Hyrule Warriors: Age of Imprisonment were checked and hold no such shader; Fire Emblem Fortune's Weave was not checked, as no dump was at hand.
 
+## Launcher text
+
+### Launcher buttons and settings cannot be translated
+
+- **Symptom:** the iOS and Mac launchers show English settings and buttons regardless of the app's language, and contributors must edit source code to translate them.
+- **Cause:** UI literals have no bundled string table; dynamic labels from `launcher.json` are rendered verbatim and have no translation keys.
+- **Fix:** both launchers look up a shared `Launcher.strings` table. The settings generator adds optional stable keys while retaining English fallbacks and the original values. Both app packers include the locale resources. The translation and compatibility contract is in [Translating the built-in launchers](../frontends.md#translating-the-built-in-launchers).
+- **Found on:** [issue #775](https://github.com/seedds/nxnative/issues/775), covering both launchers.
+
 ## IPA archives
 
 ### A streamed file changes size and the IPA fails its CRC check

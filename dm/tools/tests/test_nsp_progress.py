@@ -39,6 +39,24 @@ class Json(unittest.TestCase):
         e = self.events('stage_end')
         self.assertEqual([(x['ok'], x.get('warn')) for x in e], [(True, True), (True, None)])
 
+    def test_pso_offline_batches(self):
+        self.prog.plan(1)
+        self.prog.stage('Pipeline archive', step='applegpu_g14s (metal-tt, minutes when its inputs changed)')
+        self.assertTrue(nsp.pso_line('pso_offline: applegpu_g14s: batch 1/4: 1000 bases, compiling or checking cache'))
+        self.now += 1
+        self.assertTrue(nsp.pso_line('pso_offline: applegpu_g14s: batch 1/4: ready (compiled)'))
+        self.now += 1
+        self.assertTrue(nsp.pso_line('pso_offline: applegpu_g14s: merging 4 batches'))
+        self.assertFalse(nsp.pso_line('pso_offline: applegpu_g14s: 12 MB in 5 s'))
+        self.prog.end('applegpu_g14s, 12.0 MB')
+        es = self.events('progress')
+        self.assertEqual([(e['done'], e['total'], e['unit'], e['note'], e['frac']) for e in es], [
+            (None, None, '', '', None),
+            (0, 4, 'batches', '', 0.0),
+            (1, 4, 'batches', '', 0.25),
+            (4, 4, 'batches', 'merging', 0.99),
+        ])
+
     def test_events(self):
         self.prog.plan(2)
         self.prog.stage('extract Pokémon', step='reading', done=0, total=10, unit='files', est=True)

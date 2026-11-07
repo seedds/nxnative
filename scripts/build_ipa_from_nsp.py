@@ -1988,7 +1988,7 @@ def heap_check(repo, d, patched, work, env, logs, g):
         henv = dict(env, DM_ROMFS=str(rfs.source(d)), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_MSL_DIR=str(rd / 'msl'), DM_NVN_SHMAP=str(g.table('shader_map.tsv')), DM_ALIAS_SIZE=g.get('mem_alias'))
         PROG.set(step='booting the game')
         seen = {}
-        def done():   # the first heap request answered (or refused for good), or nnMain running for a while without one
+        def done(seen=seen):   # the first heap request answered (or refused for good), or nnMain running for a while without one
             try: text = log.read_text(errors='replace')
             except OSError: return False
             if 'SetHeapSize OOM' in text or '[mem] heap ' in text: return True

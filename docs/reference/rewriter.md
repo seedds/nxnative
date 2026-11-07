@@ -233,6 +233,13 @@ To enroll a cut for any game's own module:
 
 ## Exclusive windows
 
+### Branches within an exclusive window
+
+- **Symptom:** `AssertionError: retry block overlaps a window 34b790` while rewriting Trails in the Sky 2nd Chapter 1.0.4 `main`.
+- **Cause:** a conditional branch to the store inside its own exclusive window was mistaken for an out-of-line retry. The same window also contains an unconditional branch, which the window copier did not relocate.
+- **Fix:** branches within the same window stay in its copy. Unconditional branches are relocated to the copy or an exit stub; for windows containing one, a control-flow check rejects exits with a live reservation. Direct entries into newly accepted windows from another function are rejected. A retry copy cannot branch into the uncopied middle of a window. Indirect entries outside the existing jump-table checks are not proven absent.
+- **Found on:** Trails in the Sky 2nd Chapter 1.0.4 (01007A2027548000). Its `main` rewrites with the fix; gameplay remains unverified.
+
 ### Exit stub order in exclusive windows
 
 - **Symptom:** job system hangs; a queue claims thousands of tasks but every slot is empty.

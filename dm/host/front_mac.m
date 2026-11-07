@@ -223,8 +223,9 @@ static void pads_changed(GCController *gone) {
         pro_players_changed(gone);
         return;
     }
+    hidpad_twins_eval(gone); hidpad_twins_release();   // identical pads (pad_hid_mac.h): those GameController lists them all of again go back to it first
     NSArray<GCController *> *now = GCController.controllers; char nb[16];
-    for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p] && (g_held[p] == gone || ![now containsObject:g_held[p]])) {
+    for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p] && (g_held[p] == gone || ![now containsObject:g_held[p]] || hidpad_gc_unread(g_held[p]))) {
         npad_name(p, nb, sizeof nb); LOG("controller '%s' disconnected: player %d (npad %s) is free", pad_name(g_held[p]), p + 1, nb);
         g_held[p].extendedGamepad.valueChangedHandler = nil;
         dm_motion_detach(g_held[p], p);
@@ -233,6 +234,7 @@ static void pads_changed(GCController *gone) {
         dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
     }
     for (GCController *c in now) if (c.extendedGamepad && c != gone && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) {
+        if (hidpad_gc_unread(c)) { pad_keep_system_buttons(c); c.extendedGamepad.valueChangedHandler = nil; continue; }   // its model's pads are read from IOKit; Home and Capture stay out of macOS's hands
         int p = pad_slot_take(&g_slots, (__bridge const void *)c, pad_name(c));
         if (p < 0) { LOG("controller '%s' connected: all %d players are taken, not used", pad_name(c), DM_PLAYERS); continue; }
         g_held[p] = c; pad_keep_system_buttons(c);
@@ -241,6 +243,7 @@ static void pads_changed(GCController *gone) {
         npad_name(p, nb, sizeof nb); LOG("controller '%s' connected: player %d (npad %s)%s", pad_name(c), p + 1, nb, c.motion.hasRotationRate ? ", with motion (gyro)" : "");
         pad_read(c.extendedGamepad);
     }
+    hidpad_twins_take(gone);   // the pads of a model GameController lists fewer of, a player each
     dm_pad_players(pad_slot_mask(&g_slots));
     pro_players_changed(gone);
 }
@@ -263,6 +266,9 @@ static void pads_release(void) {
     for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
     for (hid_pad *d = g_hidpads; d; d = d->next) { int p = pad_slot_of(&g_slots, d); if (p >= 0) dm_pad_set_player(p, 0, 0, 0, 0, 0); }
 }
+static void hidpad_motion_clear(void) {   // the gyro of identical Pro Controllers read from IOKit (pad_hid_mac.h)
+    for (hid_pad *d = g_hidpads; d; d = d->next) { int p = d->twin && hidpad_is_pro(d) ? pad_slot_of(&g_slots, d) : -1; if (p >= 0) dm_motion_clear_hid(p); }
+}
 // Each controller read as it is now (focus back, the Home quit prompt closed)
 static void pads_reread(void) {
     if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) pad_read(c.extendedGamepad); }
@@ -275,7 +281,7 @@ static void input_release(void) {
     [NSCursor setHiddenUntilMouseMoves:NO];
     display_awake(0);
     g_input_on = 0;
-    dm_motion_pro_active(0);
+    dm_motion_pro_active(0); hidpad_motion_clear();
     g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
     pads_release();
@@ -286,11 +292,13 @@ static void input_resume(void) {
     dm_motion_pro_active(1);
     pads_reread();
 }
-// Raw HID gamepads (pad_hid_mac.h): a player slot each, as a GameController controller, named by the device's product name
+// Raw HID gamepads (pad_hid_mac.h): a player slot each, as a GameController controller, named by the device's product name. Identical pads that GameController lists
+// fewer of are read the same way, an identical Pro Controller from its report 0x30
 static int hidpad_player(hid_pad *d) { return g_merge ? 0 : pad_slot_of(&g_slots, d); }
 static void hidpad_read(hid_pad *d) {
     if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
     int p = g_merge ? 0 : pad_slot_of(&g_slots, d); if (p < 0) return;
+    if (d->twin && hidpad_is_pro(d)) { pad_set(p, d->pro_m, d->pro_s[0], d->pro_s[1], d->pro_s[2], d->pro_s[3]); return; }
     int32_t s[4]; pad_hid_sticks(&d->st, s);
     pad_set(p, pad_hid_buttons(&d->st), s[0], s[1], s[2], s[3]);
 }
@@ -301,6 +309,11 @@ static void hidpad_attach(hid_pad *d) {
     if (!g_merge) dm_pad_players(pad_slot_mask(&g_slots));   // merged, every controller is player 1, as pads_changed has it
     hidpad_read(d);
 }
+static void hidpad_motion(hid_pad *d, const pro_motion_sample *s, int n) {
+    int p = g_input_on && !g_merge ? pad_slot_of(&g_slots, d) : -1; if (p < 0) return;
+    for (int i = 0; i < n; i++) dm_motion_set_hid(p, s[i].acc, s[i].rot, s[i].ns);
+}
+static void hidpad_models_changed(void) { pads_changed(nil); }
 static void hidpad_detach(hid_pad *d) {   // d is already off g_hidpads
     if (g_merge) {   // as pads_changed: released when the last controller goes away
         LOG("controller '%s' (HID) disconnected", d->name);
@@ -308,6 +321,7 @@ static void hidpad_detach(hid_pad *d) {   // d is already off g_hidpads
         return;
     }
     int p = pad_slot_free(&g_slots, d); char nb[16]; if (p < 0) return;
+    if (d->twin && hidpad_is_pro(d)) dm_motion_clear_hid(p);
     npad_name(p, nb, sizeof nb); LOG("controller '%s' (HID) disconnected: player %d (npad %s) is free", d->name, p + 1, nb);
     dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
     dm_pad_players(pad_slot_mask(&g_slots));
@@ -1402,6 +1416,7 @@ void front_run(void (*guest)(void)) {
             [NSNotificationCenter.defaultCenter addObserverForName:nm object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
                 GCController *c = n.object; int conn = n.name == GCControllerDidConnectNotification;
                 if (!c.extendedGamepad || g_merge) LOG("controller %s: %s%s", conn ? "connected" : "disconnected", pad_name(c), c.extendedGamepad ? "" : " (no extended gamepad profile: not used)");
+                if (conn) hidpad_gc_connected(c);   // a HID pad of its name that only waited for it (pad_hid_mac.h)
                 pads_changed(conn ? nil : c);
                 if (conn) hq_log_setting(); }];
         dm_haptics_apple_init();

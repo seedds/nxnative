@@ -141,6 +141,33 @@ static void finalize_during_walk(void) {
     mtl_reg_tex(1,NULL,NULL); h_nvnTextureFinalize(&tex);
     defer_drain(); munmap(mem,len);
 }
+#if DM_GAME_TEX_DIRTY_UPLOAD
+// nvn_ft_poll: a registered texture whose storage the GPU wrote after the CPU's rewrite is left to the GPU and stays registered, so the CPU's next rewrite is still uploaded
+static void poll_asks_again(void) {
+    const size_t len = 1 << 20;
+    uint8_t *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED) abort();
+    pool_t pool = {0}; pool_builder_t pb = {.mem=mem, .size=len, .flags=NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+    CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&pool, (const NVNmemoryPoolBuilder *)&pb), "CPU-cached pool initialized");
+    NVNtextureBuilder tb; NVNtexture tex = {0}; h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetWidth(&tb, 256); h_nvnTextureBuilderSetHeight(&tb, 256); h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&pool, 65536);
+    CHECK(h_nvnTextureInitialize(&tex, &tb), "texture initialized");
+    tex_t *t = (tex_t *)&tex;
+    CHECK(nvn_ft_tracked(t->serial), "the texture is registered");
+    dm_guest_write_prepare(t->mem, t->L.size); memset(t->mem, 0x40, t->L.size);
+    mtl_tex_gpu_written(t);
+    nvn_ft_poll();
+    CHECK(!tex_cpu_written(t->serial) && nvn_ft_tracked(t->serial), "a rewrite the GPU wrote over afterwards is left to the GPU, and the texture stays registered");
+    dm_guest_write_prepare(t->mem, t->L.size); memset(t->mem, 0x80, t->L.size);
+    nvn_ft_poll();
+    CHECK(tex_cpu_written(t->serial) && !nvn_ft_tracked(t->serial), "the CPU's next rewrite is uploaded");
+    h_nvnTextureFinalize(&tex); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool);
+    defer_drain(); munmap(mem, len);
+}
+#else
+static void poll_asks_again(void) { printf("poll_asks_again: skipped, the profile has no tex_dirty_upload\n"); }
+#endif
 int main(int argc, const char **argv) { @autoreleasepool {
     enum { N = 6442, BASE = 1000 };
     static tex_t t[N];
@@ -175,6 +202,6 @@ int main(int argc, const char **argv) { @autoreleasepool {
     own.serial = 900002; mtl_tex_init(&own); moved = own; own.magic = 0; mtl_tex_release(&moved);
     CHECK(!nvn_hm_get(&g_tex_live, &moved.serial), "a copy outliving the object it was initialized in ends the texture");
     retired_classification(); descriptor_replacement();
-    if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); finalized_upload(0); finalized_upload(1); finalize_during_walk(); }
+    if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); finalized_upload(0); finalized_upload(1); finalize_during_walk(); poll_asks_again(); }
     printf("t_cpu_tex: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

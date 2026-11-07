@@ -1023,6 +1023,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** `make -C dm/gfx/tests GAME=<id> run`. Fortune's Weave's battle map (MacBook Pro M1 Pro): submit 42.8k → 39.2k instructions per draw.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md).
 
+### Contiguous gmem pool run merging and pulling-base archive retention
+
+- **Symptom:** games with many adjacent NVN memory pools spend extra cycles binary-searching the raw `gmem` pool table or overflow its 512-entry limit, and vertex-pulling pipelines (`pull=1`) recompile on startup even when prewarmed into a `.mtl4a` archive.
+- **Cause:** `pool_gpu_raw` emitted one `gmem` entry per NVN pool even when adjacent pools were contiguous in both guest and Metal GPU virtual space, and `arch_save_base` did not retain the unspecialized pulling base descriptor alongside the derived state.
+- **Fix:** `pool_gpu_raw` merges contiguous `(lo, hi)` pool runs whose Metal `gpuAddress` spans are equally contiguous, and `pso4` retains pulling base descriptors in `.mtl4a` archives with a fallback when an archive entry cannot be materialized (`DM_NVN_PSO_PULL_BASE=0` disables pulling-base archive retention).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (`0400486024DEC000`, `v131072`).
+
 ### Depth plane copies between depth formats
 
 - **Symptom:** `[RED] texture→texture copy case not implemented: 1920x1080x1→1920x1080x1 flags 0 format 260→252 3D 0→0`.

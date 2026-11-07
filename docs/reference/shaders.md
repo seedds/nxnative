@@ -556,9 +556,9 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ### The NDSR pack's record start
 
-- **Symptom:** `draw skipped: no render pipeline (vertex - fragment -)` in a game's final passes; shaders "not in the shader map", all from `agl_ndsr.pck`.
+- **Symptom:** `draw skipped: no render pipeline (vertex - fragment -)` in a game's final passes; shaders "not in the shader map", all from `agl_ndsr.pck`. A short synthetic pack found by fuzzing raised `struct.error: iterative unpacking requires a buffer of a multiple of 16 bytes` while choosing the record start.
 - **Cause:** the pack's records start at +0x10 in one SDK's version and +0x14 in another's, by the words in its header (Donkey Kong Bananza 0x300, 0x6efeff, 0xc0000; [Splatoon Raiders](../../dm/games/0400380020056000/README.md) 0x40100, 0x80300, 0x90, 0x20c00).
-- **Fix:** `ndsr_shaders` in `shader_split.py` takes the start at which more of the first 16 records point at an NVN2 control section.
+- **Fix:** `ndsr_shaders` in `shader_split.py` scores up to 16 complete records at each start and takes the start with more pointers to NVN2 control sections. The two starts can leave different numbers of trailing bytes in a short pack; those partial records are excluded from the score, as from the subsequent record walk.
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md).
 
 ## Control sections and code

@@ -82,6 +82,7 @@ DM_JIT_CAPTURE	path	Folder the Mac host writes what a game's `nn::jit` plugin ma
 DM_JIT_LOG	diagnostic	`1` logs every `nn::jit` `GenerateCode` request
 DM_JIT_MISS_DUMP	diagnostic	Folder for the input of each `nn::jit` request a served image lacks
 DM_JIT_SERVE	path	Folder of a `nn::jit` image (`jit.img`, `jit.tsv`, `jit.out`): the Mac serves requests from it as the iOS app does, and the plugin does not run
+DM_JOYCON_SPLIT	player	macOS: split a paired Bluetooth Joy-Con into two sideways controllers (Joy-Con (L) as Player 1 and Joy-Con (R) as Player 2) over IOHIDManager 0x30 reports (requires Input Monitoring permission), with 90-degree stick and 6-axis IMU rotation, SL/SR mapped to L/R, and per-handle Core Haptics rumble (GCHapticsLocalityLeftHandle and GCHapticsLocalityRightHandle).	dm/host/front_mac.m
 DM_KBD	switch	`=<text>`: the system keyboard returns that text as OK without showing an input box; unset with no window, it returns cancel
 DM_KBD_PLAYER	switch	`own` makes the Mac keyboard player 1 on its own, with controllers from player 2 on (by default the first controller shares player 1 with the keyboard)
 DM_KEYS	switch	Scripted input: `<seconds or f<frame>>:<key>[+key][~hold or ~f<frames>][*count/interval],…` presses buttons, sticks, touches and `Shake` at those times; `=@<file>` reads the steps from the file

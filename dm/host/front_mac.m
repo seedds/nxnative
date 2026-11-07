@@ -23,6 +23,7 @@
 #include "motion_pro_mac.h"
 #include "pad_apple.h"
 #include "pad_hid_mac.h"
+#include "pad_joycon_mac.h"
 #include "home_quit.h"
 #include "home_quit_mac.h"
 #include <signal.h>
@@ -202,28 +203,43 @@ static void pro_players_changed(GCController *gone) {
     dm_motion_pro_players(count, player);
 }
 static void pro_devices_changed(void) { pro_players_changed(nil); }
-// DM_PAD_MERGE: whether a controller still plays player 1 (gone: one just removed, not counted), a GameController one or a raw HID pad (pad_hid_mac.h)
+static int gc_pad_used(GCController *c) {
+    return c && c.extendedGamepad && !(g_joycon_split && joycon_is_gc_controller(c));
+}
+static void joycon_haptics_sync(GCController *gone) {
+    if (!g_joycon_split) return;
+    GCController *jc = nil;
+    for (GCController *c in GCController.controllers) if (c != gone && joycon_is_gc_controller(c) && c.haptics) { jc = c; break; }
+    if (g_merge) { if (g_joycons && jc) dm_haptics_apple_controller(0, jc); return; }
+    for (joycon_pad *d = g_joycons; d; d = d->next) {
+        int p = pad_slot_of(&g_slots, d); if (p < 0) continue;
+        GCHapticsLocality loc = d->st.pid == JOYCON_PID_L ? GCHapticsLocalityLeftHandle : GCHapticsLocalityRightHandle;
+        dm_haptics_apple_controller_locality(p, jc, loc);
+    }
+}
+// DM_PAD_MERGE: whether a controller still plays player 1 (gone: one just removed, not counted), a GameController one or a raw HID pad (pad_hid_mac.h, pad_joycon_mac.h)
 static int merge_pads_left(GCController *gone) {
-    if (g_hidpads) return 1;
-    for (GCController *c in GCController.controllers) if (c.extendedGamepad && c != gone) return 1;
+    if (g_hidpads || g_joycons) return 1;
+    for (GCController *c in GCController.controllers) if (gc_pad_used(c) && c != gone) return 1;
     return 0;
 }
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil on a connect)
 static void pads_changed(GCController *gone) {
     if (g_merge) {
         int any = 0;
-        for (GCController *c in GCController.controllers) if (c.extendedGamepad && c != gone) {
+        for (GCController *c in GCController.controllers) if (gc_pad_used(c) && c != gone) {
             any = 1; pad_keep_system_buttons(c); c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; pad_read(g); };
             dm_motion_attach(c, 0);   // every controller is player 1: the last one moved drives its six-axis sensor
             pad_read(c.extendedGamepad);
         }
         if (gone) dm_motion_detach(gone, 0);
-        if (!any) { if (!g_hidpads) dm_pad_set(0, 0, 0, 0, 0); dm_haptics_apple_controller(0, nil); }   // a raw HID pad still plays player 1 (pad_hid_mac.h)
+        if (!any) { if (!g_hidpads && !g_joycons) dm_pad_set(0, 0, 0, 0, 0); if (!g_joycons) dm_haptics_apple_controller(0, nil); }   // a raw HID pad still plays player 1 (pad_hid_mac.h)
+        joycon_haptics_sync(gone);
         pro_players_changed(gone);
         return;
     }
     NSArray<GCController *> *now = GCController.controllers; char nb[16];
-    for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p] && (g_held[p] == gone || ![now containsObject:g_held[p]])) {
+    for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p] && (g_held[p] == gone || ![now containsObject:g_held[p]] || !gc_pad_used(g_held[p]))) {
         npad_name(p, nb, sizeof nb); LOG("controller '%s' disconnected: player %d (npad %s) is free", pad_name(g_held[p]), p + 1, nb);
         g_held[p].extendedGamepad.valueChangedHandler = nil;
         dm_motion_detach(g_held[p], p);
@@ -231,7 +247,7 @@ static void pads_changed(GCController *gone) {
         pad_slot_free(&g_slots, (__bridge const void *)g_held[p]); g_held[p] = nil;
         dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
     }
-    for (GCController *c in now) if (c.extendedGamepad && c != gone && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) {
+    for (GCController *c in now) if (gc_pad_used(c) && c != gone && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) {
         int p = pad_slot_take(&g_slots, (__bridge const void *)c, pad_name(c));
         if (p < 0) { LOG("controller '%s' connected: all %d players are taken, not used", pad_name(c), DM_PLAYERS); continue; }
         g_held[p] = c; pad_keep_system_buttons(c);
@@ -241,6 +257,7 @@ static void pads_changed(GCController *gone) {
         pad_read(c.extendedGamepad);
     }
     dm_pad_players(pad_slot_mask(&g_slots));
+    joycon_haptics_sync(gone);
     pro_players_changed(gone);
 }
 // Display sleep: macOS counts keyboard and mouse input as user activity, not a controller's, so in controller-only play the display dims and locks; the latency
@@ -261,12 +278,14 @@ static void pads_release(void) {
     if (g_merge) { if (merge_pads_left(nil)) dm_pad_set(0, 0, 0, 0, 0); return; }
     for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
     for (hid_pad *d = g_hidpads; d; d = d->next) { int p = pad_slot_of(&g_slots, d); if (p >= 0) dm_pad_set_player(p, 0, 0, 0, 0, 0); }
+    for (joycon_pad *d = g_joycons; d; d = d->next) { int p = pad_slot_of(&g_slots, d); if (p >= 0) dm_pad_set_player(p, 0, 0, 0, 0, 0); }
 }
 // Each controller read as it is now (focus back, the Home quit prompt closed)
 static void pads_reread(void) {
-    if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) pad_read(c.extendedGamepad); }
+    if (g_merge) { for (GCController *c in GCController.controllers) if (gc_pad_used(c)) pad_read(c.extendedGamepad); }
     else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p].extendedGamepad) pad_read(g_held[p].extendedGamepad);
     for (hid_pad *d = g_hidpads; d; d = d->next) hidpad_read(d);
+    for (joycon_pad *d = g_joycons; d; d = d->next) joycon_read(d);
 }
 static void hq_close(void);
 static void input_release(void) {
@@ -275,6 +294,11 @@ static void input_release(void) {
     display_awake(0);
     g_input_on = 0;
     dm_motion_pro_active(0);
+    for (joycon_pad *d = g_joycons; d; d = d->next) {
+        d->motion = (pro_motion){0};
+        int p = g_merge ? 0 : pad_slot_of(&g_slots, d);
+        if (p >= 0) dm_motion_clear_hid(p);
+    }
     g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
     pads_release();
@@ -310,6 +334,43 @@ static void hidpad_detach(hid_pad *d) {   // d is already off g_hidpads
     dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
     dm_pad_players(pad_slot_mask(&g_slots));
 }
+// Split Joy-Con sideways controllers (pad_joycon_mac.h, DM_JOYCON_SPLIT=1): each half takes a player slot of its own
+static void joycon_read(joycon_pad *d) {
+    if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
+    int p = g_merge ? 0 : pad_slot_of(&g_slots, d); if (p < 0) return;
+    pad_set(p, d->st.buttons, pad_axis(d->st.sx), pad_axis(d->st.sy), 0, 0);
+}
+static void joycon_read_motion(joycon_pad *d, const uint8_t *rep, size_t len) {
+    if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
+    const char *e = getenv("DM_MOTION"); if (e && !atoi(e)) return;
+    int p = g_merge ? 0 : pad_slot_of(&g_slots, d); if (p < 0) return;
+    pro_motion_sample samples[3];
+    int n = joycon_motion_decode(&d->motion, d->st.pid, rep, len, now_ns(), samples);
+    for (int i = 0; i < n; i++) dm_motion_set_hid(p, samples[i].acc, samples[i].rot, samples[i].ns);
+}
+static void joycon_attach(joycon_pad *d) {
+    int p = g_merge ? 0 : pad_slot_take(&g_slots, d, d->name); char nb[16];
+    if (p < 0) { LOG("controller '%s' (split Joy-Con) connected: all %d players are taken, not used", d->name, DM_PLAYERS); return; }
+    npad_name(p, nb, sizeof nb); LOG("controller '%s' (split Joy-Con) connected: player %d (npad %s), with motion (gyro) and rumble", d->name, p + 1, nb);
+    if (!g_merge) dm_pad_players(pad_slot_mask(&g_slots));
+    joycon_haptics_sync(nil);
+    joycon_read(d);
+}
+static void joycon_detach(joycon_pad *d) {
+    if (g_merge) {
+        LOG("controller '%s' (split Joy-Con) disconnected", d->name);
+        if (!g_joycons) { dm_motion_clear_hid(0); dm_haptics_apple_controller(0, nil); }
+        if (!merge_pads_left(nil)) dm_pad_set(0, 0, 0, 0, 0);
+        return;
+    }
+    int p = pad_slot_free(&g_slots, d); char nb[16]; if (p < 0) return;
+    npad_name(p, nb, sizeof nb); LOG("controller '%s' (split Joy-Con) disconnected: player %d (npad %s) is free", d->name, p + 1, nb);
+    dm_motion_clear_hid(p);
+    dm_haptics_apple_controller(p, nil);
+    dm_pad_set_player(p, 0, 0, 0, 0, 0);
+    dm_pad_players(pad_slot_mask(&g_slots));
+}
+static void joycon_home_changed(void) { if (g_input_on) hq_poll(); }
 // Quit with the Home button (home_quit.h, LNPANDY/NX2Apple#336): held for 2 s it opens the prompt (home_quit_mac.h) over the game's view, A quits through the same path as ⌘Q
 // (NSApp terminate, so the save writer and the other exit handlers run as there), B or Home closes it. While the prompt is open the game is told it lost the focus, as the
 // Switch's HOME menu does, and gets no controller input or touch; the keyboard and ⌘Q work as always. DM_HOME_QUIT=0 turns it off
@@ -344,9 +405,15 @@ static void hq_log_setting(void) {
 static void hq_buttons(int *home, int *a, int *b, GCController **holder) {
     *home = *a = *b = 0;
     for (GCController *c in GCController.controllers) {
+        if (!gc_pad_used(c)) continue;
         GCExtendedGamepad *g = c.extendedGamepad; if (!g) continue;
         if (g.buttonHome.isPressed) { *home = 1; if (!*holder) *holder = c; }
         *a |= g.buttonA.isPressed; *b |= g.buttonB.isPressed;
+    }
+    for (joycon_pad *d = g_joycons; d; d = d->next) {
+        if (d->st.home) *home = 1;
+        if (d->st.buttons & DM_BTN_A) *a = 1;
+        if (d->st.buttons & DM_BTN_B) *b = 1;
     }
 }
 static void hq_fade(NSView *v, int in) {
@@ -415,6 +482,7 @@ static void pads_start(void) {
     LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : g_kbd_own ? "the keyboard is player 1, each controller a player of its own from player 2 on (DM_KBD_PLAYER=own)"
                                                                            : "each controller is a player of its own, the keyboard plays with player 1");
     hq_start();
+    joycon_start();
     pads_changed(nil);
     hq_log_setting();
     dm_motion_pro_start(pro_devices_changed);
@@ -1398,6 +1466,7 @@ void front_run(void (*guest)(void)) {
         for (NSNotificationName nm in @[GCControllerDidConnectNotification, GCControllerDidDisconnectNotification])
             [NSNotificationCenter.defaultCenter addObserverForName:nm object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
                 GCController *c = n.object; int conn = n.name == GCControllerDidConnectNotification;
+                if (g_joycon_split && joycon_is_gc_controller(c)) return;
                 if (!c.extendedGamepad || g_merge) LOG("controller %s: %s%s", conn ? "connected" : "disconnected", pad_name(c), c.extendedGamepad ? "" : " (no extended gamepad profile: not used)");
                 pads_changed(conn ? nil : c);
                 if (conn) hq_log_setting(); }];

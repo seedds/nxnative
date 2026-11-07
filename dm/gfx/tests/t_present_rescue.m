@@ -28,6 +28,7 @@
 static uint64_t test_now;
 int test_focus = 1;
 int test_fullscreen;
+int test_covered;
 int test_variable_refresh;
 uint64_t test_focus_since;
 void *front_metal_layer(void) { return NULL; }
@@ -38,7 +39,7 @@ uint64_t now_ns(void) { return test_now; }
 static int checks, failed;
 #define CHECK(name, ok) do { int pass = !!(ok); checks++; failed += !pass; printf("%s: %s\n", name, pass ? "PASS" : "FAIL"); } while (0)
 static void reset(void) {
-    test_now = 10000000000ull; test_focus = 1; test_focus_since = 0;
+    test_now = 10000000000ull; test_focus = 1; test_focus_since = 0; test_covered = 0; g_covered = 0;
     g_dm_present_link = 1; g_rescue_mode = 0; g_rescue_back_ns = 3000000000ull; g_rescue_n = 0;
     g_link_tick_ns = test_now - 1000000000ull; g_stall_t0 = g_link_tick_ns;
     g_stall_logged = g_stall_red = 0; g_stall_drop = 0;
@@ -96,6 +97,30 @@ static void lifecycle(void) {
     CHECK("rescue invalidates the link before releasing the layer", link.invalidated && !g_link && !g_link_owns_layer);
     g_link_started = 0;
 }
+static void covered(void) {   // A covered window: the host's clock paces (mode 0) until it is visible, then the requested link again; the link's silence meanwhile is no stall
+    reset(); SilentDisplayLink *link = [SilentDisplayLink new];
+    g_link = link; g_link_started = 1; g_link_rl = CFRunLoopGetCurrent();
+    link_sync(); CHECK("a visible window keeps the display link", mtl_link_active() && g_link_mode == 1);
+    test_covered = 1; link_sync();
+    CHECK("a covered window stops display-link pacing at once", !mtl_link_active() && !mtl_link_wait_tick(1, 1000));
+    CHECK("covered keeps the requested mode and is no rescue", g_dm_present_link == 1 && !g_rescue_mode && g_link_mode == 0);
+    g_stall_t0 = g_link_tick_ns = test_now - 1000000000ull; wait_frame();
+    CHECK("a covered window's silent link does not trigger rescue", !g_rescue_mode);
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, false);
+    CHECK("covered invalidates the link and releases the layer to the present thread", link.invalidated && !g_link && !g_link_owns_layer);
+    g_link_started = 0;
+    for (int frame = 0; frame < 3; frame++) link_sync();
+    CHECK("no link while the window stays covered", g_link_mode == 0 && !g_link_started && !mtl_link_active());
+    g_stall_t0 = test_now - 2000000000ull; g_link_tick_ns = test_now - 2000000000ull; test_now += 1000;
+    test_covered = 0; link_sync();
+    CHECK("visible again wants the requested link", g_link_mode == 1 && g_dm_present_link == 1);
+    CHECK("visible again starts a fresh stall clock", !g_stall_t0 && g_link_tick_ns == test_now);
+    g_link = [SilentDisplayLink new]; g_link_owns_layer = 1;   // as link_main does once the new link exists
+    CHECK("the new link paces again", mtl_link_active());
+    g_link = nil; g_link_started = 0;
+    reset(); g_dm_present_link = 0; test_covered = 1; link_sync(); test_covered = 0; link_sync();
+    CHECK("DM_PRESENT_LINK=0 stays without the link either way", !mtl_link_active() && !g_link_started);
+}
 static void latency(void) {   // Only variable-refresh fullscreen needs the latency-2 workaround; a new link takes the current policy as link_main does.
     reset(); test_fullscreen = 0; test_variable_refresh = 1; g_present_latency = 0;
     SilentDisplayLink *link = [SilentDisplayLink new]; link.preferredFrameLatency = link_latency();
@@ -147,7 +172,7 @@ static void metal_lifecycle(void) {
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(10); setbuf(stdout, NULL);
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "--metal"))) return 2;
-    thresholds(); backoff(); settings(); lifecycle(); latency();
+    thresholds(); backoff(); settings(); lifecycle(); covered(); latency();
     if (argc == 2) metal_lifecycle();
     printf("present rescue: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

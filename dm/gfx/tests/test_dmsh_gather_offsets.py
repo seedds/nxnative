@@ -93,6 +93,10 @@ class Rewrite(unittest.TestCase):
         with self.assertRaises(ValueError):
             gather_offsets(HEAD + 'float4 f(texture2d<float> t, sampler s, float2 c, int2 o) { float4 a = spvGatherConstOffsets(t, s, o, component::z, c); return a; }\n')
 
+    def test_truncated_call_refused(self):   # corrupted input leaves the call open: the scan stops at the end of the text as a ValueError, not an IndexError past it (finish() catches only the ValueError)
+        with self.assertRaises(ValueError):
+            gather_offsets(HEAD + 'float4 f(texture2d<float> t, sampler s, float2 c) { float4 a = spvGatherConstOffsets(t, s, _9, compo')
+
 
 @unittest.skipUnless(shutil.which('xcrun'), 'needs Metal')
 class OnGpu(unittest.TestCase):

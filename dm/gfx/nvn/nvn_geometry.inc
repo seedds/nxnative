@@ -18,6 +18,7 @@ static int geo_cmp_index(const void *a, const void *b) {
 }
 enum { GEO_CAPTURE_VERTICES = (256u << 20) / (144 * 4) };
 enum { GEO_COMPACT_MIN = 1u << 20, GEO_COMPACT_RUNS = 64 };   // compact captures (nvn_geometry.h): what one must save, and how many capture draws it may take
+enum { GEO_REGIONS_MAX = 15 };   // regions one draw's scratch may hold (twelve, three more when the capture is compact): the total reserves each region's worst-case 256-byte alignment slack
 // The capture span is already bounded by its scratch allocation. A bit per
 // vertex gives the same ascending unique list without sorting every reference.
 // Keep an in-place sort fallback for allocation failure or a wider caller.
@@ -789,6 +790,7 @@ static int geo_prep(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, geo_jo
     size_t raw_n=(size_t)count*isz;
     geo_ix_key ixkey={.address=j->di.ibuf,.count=count,.type=j->di.itype,.prim=prim,.restart=restart,.restart_index=restart?restart_index:0};
     geo_ix_ent *cached=di0?geo_ix_get(&ixkey,(const void *)(uintptr_t)j->di.ibuf,raw_n):NULL;
+    if (cached && cached->unique > cached->nu) cached = NULL;   // an entry's unique count must fit its reference count (nu, the capture_ix copy's size): the two copies below trust that contract, so one that breaks it is dropped and everything is rebuilt as on a miss (geo_ix_put stores the healed entry)
     uint32_t *order=NULL;const uint8_t *source=(const uint8_t *)(uintptr_t)j->di.ibuf;
     int keep=di0&&geo_ix_on();
     if(cached){lo=cached->lo;hi=cached->hi;nu=cached->nu;}
@@ -838,7 +840,7 @@ static int geo_prep(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, geo_jo
     uint64_t raw_size = emits ? groups * gs->geo_index_stride * 4 : 4;
     uint64_t packed_size = emits ? groups * emits * (gs->geo_output == 7 ? 3 : gs->geo_output == 6 ? 2 : 1) * 4 : 4;
     uint64_t count_size = emits ? (groups + (groups + 63) / 64) * 4 : 4;
-    uint64_t total = input_size + output_size + raw_size + packed_size + count_size + words * 4 + nu * 4 + sizeof(nvn_geo_capture) + sizeof(nvn_geo_pack_job) + sizeof(nvn_geo_lean_job) + 32 + 20 + 15 * 255
+    uint64_t total = input_size + output_size + raw_size + packed_size + count_size + words * 4 + nu * 4 + sizeof(nvn_geo_capture) + sizeof(nvn_geo_pack_job) + sizeof(nvn_geo_lean_job) + 32 + 20 + GEO_REGIONS_MAX * 255
         + (ids ? words * 4 + id_runs * (sizeof(nvn_geo_capture) + 8) : 0);
     if (groups > UINT32_MAX || total > (256ull << 20) || np > UINT32_MAX) {
         free(order); free(ids);

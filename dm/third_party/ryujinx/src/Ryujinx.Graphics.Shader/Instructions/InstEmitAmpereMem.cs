@@ -133,6 +133,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (stage != null)
             {
+                // The job's stage memory table is [workgroup's number, input's base, output's base, ...] (dmsh_meshstage.py memory); a shorter one would read past it below
+                if (stage.Length < 3)
+                {
+                    throw AFail(context, $"stage memory table of {stage.Length} entries, three needed (workgroup, input, outputs)");
+                }
+
                 // A task or mesh shader's stage input (QueryAmpereStageMemory). Mode 0x78: its workgroup's number; 0x38: a word of the payload its task wrote, [Ra + offset];
                 // 0xb8: a word it wrote itself with 0x927's mode 0xb8 (Ocarina of Time's task shader 5d3a096025e375a1 reads its payload back in a later thread)
                 int mode = x.Bits(72, 80);

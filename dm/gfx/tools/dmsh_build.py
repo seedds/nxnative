@@ -294,6 +294,7 @@ def gather_offsets(msl):
         if m.start() < i or msl[m.end():m.end() + 6] == 'const ': continue   # the wrappers' own definitions
         depth, args, cur, j = 1, [], '', m.end()
         while depth:
+            if j >= len(msl): raise ValueError('gather offsets: call not closed ' + msl[m.start():j][:160])   # corrupted input can leave the call open; reading past the end would be an IndexError, which finish() does not catch
             ch = msl[j]; j += 1
             depth += {'(': 1, ')': -1}.get(ch, 0)
             if depth == 0 or (ch == ',' and depth == 1): args.append(cur.strip()); cur = ''

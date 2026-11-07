@@ -13,7 +13,7 @@ def sha16(p): return hashlib.sha256(open(p, 'rb').read()).hexdigest()[:16]
 def tools_now():
     """Actual tool fingerprints: translator dll (including the Ryujinx shader library), spirv-cross, metal compiler (macOS / iOS)"""
     t = {}
-    for dll in ('dmsh_xlate.dll', 'Ryujinx.Graphics.Shader.dll', 'Ryujinx.Common.dll'): t[dll] = sha16(os.path.join(XLATE_DIR, dll))
+    for dll in ('dmsh_xlate.dll', 'Ryujinx.Graphics.Shader.dll', 'Ryujinx.Common.dll', 'Spv.Generator.dll'): t[dll] = sha16(os.path.join(XLATE_DIR, dll))
     t['xlate_source'] = xlate_embedded()
     sc = shutil.which(SPIRV_CROSS)
     t['spirv-cross'] = sha16(sc) if sc else 'missing'

@@ -2411,7 +2411,11 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextu
     // A linear texture aliases the guest pool. Adding usage must keep that backing: a new standalone texture copies the old pixels once, but later GPU writes never reach the CPU map.
     id<MTLBuffer> backing = base.buffer;
     int reinterpret = (add & MTLTextureUsageShaderAtomic) && !pf_r32i(base.pixelFormat);
-    if (reinterpret && (!tex_atomic_alias(base) || !pf_r32i(view_pf) || [holder isKindOfClass:[NvPkg class]])) return asked;
+    // The three reinterpret rejects below keep the texture as it is, so an image a shader atomics on stays without the shader-atomic usage: Metal validates that binding at draw time and
+    // the draw fails (the binding reports it, RED_ONCE 93). Each says once which of the three stopped the upgrade
+    if (reinterpret && !tex_atomic_alias(base)) { RED_ONCE(49, "image atomics want the texture's bytes reinterpreted as R32 storage, but its shape cannot alias (Metal format %lu type %lu, ser=%llu): kept as it is, its atomic binding fails Metal's draw-time validation", (unsigned long)base.pixelFormat, (unsigned long)base.textureType, (unsigned long long)t->serial); return asked; }
+    if (reinterpret && !pf_r32i(view_pf)) { RED_ONCE(50, "image atomics want the texture's bytes reinterpreted as R32 storage, but the view asked for is Metal format %lu, not R32Uint / R32Sint (ser=%llu, base format %lu): kept as it is", (unsigned long)view_pf, (unsigned long long)t->serial, (unsigned long)base.pixelFormat); return asked; }
+    if (reinterpret && [holder isKindOfClass:[NvPkg class]]) { RED_ONCE(51, "image atomics want the texture's bytes reinterpreted as R32 storage, but it is a packaged texture (holder NvPkg, ser=%llu format %lu): its bytes stay the guest's upload, kept as it is", (unsigned long long)t->serial, (unsigned long)base.pixelFormat); return asked; }
     id<MTLTexture> upgraded;
     if (reinterpret) {
         d.pixelFormat = view_pf; d.usage |= MTLTextureUsagePixelFormatView;
@@ -7344,6 +7348,8 @@ static id arch_read_mapped(id self, SEL cmd, NSString *path, NSUInteger options,
     return g_ns_read(self, cmd, path, options, max, err);
 }
 static Method arch_read_method(void) { return class_getInstanceMethod([NSData class], sel_registerName("initWithContentsOfFile:options:maxLength:error:")); }
+// The swap below is process-wide: any other thread's NSData read inside the window takes the mapped-always path too, harmlessly (a non-archive path gets an option NSData accepts). It runs
+// once at startup, before other threads read files, and method_setImplementation is not thread-safe against a concurrent first call of the same method — neither happens in this window, so it is not guarded
 static void arch_open_begin(void) { Method m = arch_read_method(); if (m) g_ns_read = (ns_read_fn)method_setImplementation(m, (IMP)arch_read_mapped); }
 static void arch_open_end(void) { Method m = arch_read_method(); if (m && g_ns_read) method_setImplementation(m, (IMP)g_ns_read); }
 static void pso4_init(void) {
@@ -8440,7 +8446,7 @@ static uint64_t g_stat_pool_why[5];   // why a table was built whole: no table o
 // Tables patched or kept on noted changes alone; why not: [0] too many changes or a sparse texture, [1] a memory pool change over more than POOL_IDS_MAX IDs without storage,
 // [2] resized, [3] a change without a note, [4] a new submission over more than POOL_IDS_MAX retired IDs. pchg / schg: of those patched or kept, the ones over memory pool changes
 // and over a new submission
-static uint64_t g_stat_pool_patched, g_stat_pool_kept, g_stat_pool_nopatch[5], g_stat_pool_pchg, g_stat_pool_schg;
+static uint64_t g_stat_pool_patched, g_stat_pool_kept, g_stat_pool_nopatch[6], g_stat_pool_pchg, g_stat_pool_schg;
 void mtl_pool_stats(uint64_t s[6]) { s[0] = g_stat_pool_builds; s[1] = (uint64_t)(g_stat_pool_ms * 1000); s[2] = g_stat_pool_patched; s[3] = g_stat_pool_kept; s[4] = g_stat_pool_pchg; s[5] = g_stat_pool_schg; }   // the power line's pool table counts (hle_nvn.c)
 static void ids_push(pool_ids *l, int id_) {   // past POOL_IDS_MAX the list is dropped (n -1)
     if (l->n < 0) return;
@@ -8550,6 +8556,8 @@ static void pool_seen_scan(void) {
             MTLTextureType tt = ((__bridge id<MTLTexture>)tv).textureType; int trans = g_treg[id_].retired && g_treg[id_].transient_sub == g_sub_serial;
             for (int k = 0; k < POOL_SNAPS; k++) { pool_snap *q = &g_psnap[k]; int at = id_ - q->base;
                 if (!q->buf || q->samp || at < 0 || (uint32_t)at >= *(uint32_t *)q->buf.contents || (MTLTextureType)q->dtt != tt) continue;
+                // This writes a table a submission in flight may still read, and that is safe by three facts: an arm64 aligned 8-byte store is atomic, so no half-written rid is seen;
+                // any rid the table can hold, a walk's dummy or this real one, is an entry the shader treats the same; and a submission reads the table at its draw, taking whatever stands there
                 ((uint64_t *)((uint8_t *)q->buf.contents + DMSH_POOL_HEAD))[at] = tr;
                 if (trans) { ids_push(&q->trans, id_); if (!q->sub) q->sub = g_sub_serial; } }   // a view of a retired registration goes at this submission's end, so the next one takes it again (pool_gpu)
         }
@@ -8641,7 +8649,7 @@ static uint64_t pool_gpu(int samp, int dtt, int dpf, int base, __unsafe_unretain
         if (!known) { g_stat_pool_nopatch[3]++; break; }
         if (nid >= 8192) { g_stat_pool_nopatch[0]++; break; }
         uint64_t *e = (uint64_t *)((uint8_t *)p->buf.contents + DMSH_POOL_HEAD), dummy = e[nn], room = samp ? UINT64_MAX : pool_room(), spent = g_walk_spent;
-        int gone = 0, left = 0, left_req = 0; id<MTLBuffer> b = nil; uint64_t *be = NULL;
+        int gone = 0, left = 0, left_req = 0; id<MTLBuffer> b = nil; uint64_t *be = NULL; int no_table = 0;
         pool_ids nd = {0}, nt = {0}; ids_begin(0); ids_begin(1);
         if (!pools) ids_keep(0, &nd, &p->dead);    // not taken again: they stay on the list for the next pool change
         if (!stale) ids_keep(1, &nt, &p->trans);   // this submission's views, still good
@@ -8652,9 +8660,11 @@ static uint64_t pool_gpu(int samp, int dtt, int dpf, int base, __unsafe_unretain
             if (d) ids_add(0, &nd, ids[k]);
             if (t) ids_add(1, &nt, ids[k]);
             if (r == (be ? be[i] : e[i])) continue;
-            if (!b) { b = pool_table_take(p->buf.length); memcpy(b.contents, p->buf.contents, p->buf.length); be = (uint64_t *)((uint8_t *)b.contents + DMSH_POOL_HEAD); }
+            if (!b) { b = pool_table_take(p->buf.length); if (!b) { no_table = 1; g_stat_pool_nopatch[5]++; break; }   // Metal gave no table: the patch is dropped, the lists die with the do-block below and the snapshot stands untouched for the walk
+                memcpy(b.contents, p->buf.contents, p->buf.length); be = (uint64_t *)((uint8_t *)b.contents + DMSH_POOL_HEAD); }
             be[i] = r;
         }
+        if (no_table) { free(nd.v); free(nt.v); break; }   // out of the do-block, not just the loop: the kept-table lines below would hand the freed lists to p->dead / p->trans and mark an unpatched table current
         g_stat_pool_pchg += pools; g_stat_pool_schg += stale; free(p->dead.v); free(p->trans.v);
         p->reg = rg; p->ser = sg; p->sub = nt.n ? g_sub_serial : 0; p->dead = nd; p->trans = nt;
         if (left) { p->left += left; p->left_req += left_req; p->frame = atomic_load(&g_cur_frame); }   // textures past this frame's room: the walk goes on next frame, as for its own
@@ -8670,10 +8680,16 @@ static uint64_t pool_gpu(int samp, int dtt, int dpf, int base, __unsafe_unretain
     if (g_walk_sub != g_sub_serial) { g_walk_sub = g_sub_serial; g_walk_ms = 0; }
     if (p && p->buf && g_walk_ms >= POOL_SUB_MS && !stale) { *out = p->buf; return p->gpu; }
     g_stat_pool_why[!p ? 0 : p->ser != sg ? 2 : p->reg != rg ? 1 : stale ? 3 : 4]++;
+    pool_snap *was = p;   // a failed take stands down to this table of the same kind, if there is one
     if (!p) p = free_ ? free_ : &g_psnap[g_psnap_next++ % POOL_SNAPS];
     uint64_t t0 = mach_absolute_time();
     int n = (samp ? g_nsreg : g_ntreg) - base; if (n < 1) n = 1;
     id<MTLBuffer> b = pool_table_take(DMSH_POOL_HEAD + 8 * (size_t)(n + 1));
+    if (!b) {   // Metal gave no table: this build fails and reports once, and a draw reads what it can — the matched table of the same kind stands when it is one this submission may
+        // still read (not stale: the POOL_SUB_MS throttle holds the same line), or the never-written all-zero dummy buffer stands in (a bound n of 0 makes every ID read the dummy)
+        RED_ONCE(53, "no memory for a pool table of %d IDs at base %d (%s): the previous table stands, or the dummy", n, base, samp ? "samplers" : "textures");
+        if (was && was->buf && !stale) { *out = was->buf; return was->gpu; }
+        *out = dummy_buf(); return dummy_buf().gpuAddress; }
     uint8_t *c = b.contents; *(uint32_t *)c = (uint32_t)n; if (!samp) *(uint64_t *)(c + 8) = pool_seen_gpu();
     uint64_t *e = (uint64_t *)(c + DMSH_POOL_HEAD), dummy = samp ? dummy_samp_rid() : (dummy_tex(dtt, dpf) ? g_dummy_tex_rid[dtt % DMY_NT][dpf & 3] : 0);
     int real = 0, gone = 0, left = 0, left_req = 0; uint64_t limit = samp ? UINT64_MAX : pool_walk_limit(base, n);
@@ -8707,11 +8723,11 @@ static uint64_t pool_gpu(int samp, int dtt, int dpf, int base, __unsafe_unretain
     if (g_stat_pool_builds++ < 16 || g_stat_pool_builds % 1000 == 0 || log_gone)
         MLOG("pool for handles traced to no slot: %s pool (texture type %d, class %d) at base %d, %d IDs of which %d hold %s and %d have no storage (memory pool finalized or gone), built in %.2f ms (%llu builds, %.0f ms in all; "
              "built because new %llu, registration %llu, storage %llu, retired IDs %llu, textures left out %llu; taken alone: %llu tables patched, %llu kept (%llu over memory pool changes, %llu over a new submission); "
-             "not: too many or sparse %llu, a pool change over too many IDs without storage %llu, a new submission over too many retired IDs %llu, resized %llu, a change without a note %llu)", samp ? "sampler" : "texture",
+             "not: too many or sparse %llu, a pool change over too many IDs without storage %llu, a new submission over too many retired IDs %llu, resized %llu, a change without a note %llu, the patch took no table %llu)", samp ? "sampler" : "texture",
              samp ? -1 : dtt, samp ? -1 : dpf, base, n, real, samp ? "samplers" : "textures of the type", gone, ms, (unsigned long long)g_stat_pool_builds, g_stat_pool_ms,
              (unsigned long long)g_stat_pool_why[0], (unsigned long long)g_stat_pool_why[1], (unsigned long long)g_stat_pool_why[2], (unsigned long long)g_stat_pool_why[3], (unsigned long long)g_stat_pool_why[4],
              (unsigned long long)g_stat_pool_patched, (unsigned long long)g_stat_pool_kept, (unsigned long long)g_stat_pool_pchg, (unsigned long long)g_stat_pool_schg,
-             (unsigned long long)g_stat_pool_nopatch[0], (unsigned long long)g_stat_pool_nopatch[1], (unsigned long long)g_stat_pool_nopatch[4], (unsigned long long)g_stat_pool_nopatch[2], (unsigned long long)g_stat_pool_nopatch[3]);
+             (unsigned long long)g_stat_pool_nopatch[0], (unsigned long long)g_stat_pool_nopatch[1], (unsigned long long)g_stat_pool_nopatch[4], (unsigned long long)g_stat_pool_nopatch[2], (unsigned long long)g_stat_pool_nopatch[3], (unsigned long long)g_stat_pool_nopatch[5]);
     *out = b; return p->gpu;
 }
 static id<MTLBuffer> dummy_buf(void) { static id<MTLBuffer> b; if (!b) { b = [g_dev newBufferWithLength:64 << 10 options:MTLResourceStorageModeShared]; res_add(b); } return b; }
@@ -9034,7 +9050,7 @@ static uint64_t htab_gpu(int stage, const nvn_rbind *b, __unsafe_unretained id<M
     int samp = b->kind == NVN_RB_SAMPH, reg = b->reg;
     const p_bind_buf *u = reg < 16 ? &S.ubo[stage][reg] : NULL;
     uint64_t addr = u ? u->addr + b->off : 0, rg = atomic_load(&g_reg_gen), sg = atomic_load(&g_ser_gen);
-    uint32_t bytes = u && u->addr && u->size > b->off ? (uint32_t)MIN(u->size - b->off, 65536u) : 0;
+    uint32_t bytes = u && u->addr && u->size > b->off ? (uint32_t)MIN(u->size - b->off, 65536u) & ~7u : 0;   // masked here: the entries are 8 bytes, and the reuse checks below compare this against p->bytes, so an unmasked size would never hit them
     int c2s = samp && b->soff && b->sreg == DMSH_SREG_C2 ? sampu_id(stage, b, 0) : -1;
     htab_snap *p = NULL, *free_ = NULL;
     for (int i = 0; i < HTAB_SNAPS && !p; i++) { htab_snap *q = &g_htab[i];
@@ -9042,14 +9058,18 @@ static uint64_t htab_gpu(int stage, const nvn_rbind *b, __unsafe_unretained id<M
         else if (q->addr == addr && q->samp == samp && q->dtt == b->dtt && q->dpf == b->dpf && q->tb == S.tex_base && q->sb == S.samp_base && q->c2s == c2s) p = q; }
     if (p && p->pass == g_pass.serial && p->reg == rg && p->sgen == sg && p->bytes == bytes) { g_htab_last = p; *out = p->buf; return p->gpu; }
     static uint8_t now[65536];
-    bytes &= ~7u; memset(now, 0, bytes); for (uint32_t i = 0; i < bytes; i += 4096) ubo_read(stage, reg, b->off + i, MIN(bytes - i, 4096u), now + i);
+    memset(now, 0, bytes); for (uint32_t i = 0; i < bytes; i += 4096) ubo_read(stage, reg, b->off + i, MIN(bytes - i, 4096u), now + i);
     if (p && p->reg == rg && p->sgen == sg && p->bytes == bytes && !memcmp(p->copy, now, bytes)) { p->pass = g_pass.serial; g_htab_last = p; *out = p->buf; return p->gpu; }
     uint64_t t0 = mach_absolute_time();
     if (!p) { p = free_ ? free_ : &g_htab[g_htab_next++ % HTAB_SNAPS]; if (p->buf) defer_obj_release(p->buf); uint8_t *keep = p->copy; uint64_t *ks = p->ser; uint32_t cap = p->cap; *p = (htab_snap){0}; p->copy = keep; p->ser = ks; p->cap = cap; }
     uint32_t n = 0; const uint32_t *w = (const uint32_t *)now;
     for (uint32_t k = bytes / 8; k > 0 && !n; k--) if (w[(k - 1) * 2]) n = k;
     uint64_t dummy = samp ? dummy_samp_rid() : (dummy_tex(b->dtt, b->dpf) ? g_dummy_tex_rid[b->dtt % DMY_NT][b->dpf & 3] : 0);
-    if (p->cap < bytes) { free(p->copy); free(p->ser); p->copy = malloc(bytes ? bytes : 8); p->ser = malloc(bytes ? bytes : 8); p->cap = bytes; }
+    if (p->cap < bytes) { free(p->copy); free(p->ser); uint8_t *c = malloc(bytes ? bytes : 8); uint64_t *s = malloc(bytes ? bytes : 8);
+        if (!c || !s) { free(c); free(s); p->copy = NULL; p->ser = NULL; p->cap = 0; p->bytes = 0; p->n = 0; g_htab_last = p;   // no half-grown snapshot: the next pass rebuilds it, and fb_texu_reads's walk over g_htab_last->n reads none of the freed serials
+            RED_ONCE(52, "no memory for the handle table of uniform slot %d +%#x (%u bytes, stage %d): the table is not built, its handles all read the dummy", reg, b->off, bytes, stage);
+            *out = zero_bank(); return zero_bank_gpu(); }   // this table build fails (a table of handles the shader misses reads the dummy), not MDIE: unlike the host's bookkeeping tables nothing holds a pointer into it
+        p->copy = c; p->ser = s; p->cap = bytes; }
     static uint64_t e[8193];
     for (uint32_t k = 0; k < n; k++) { uint64_t r = 0; p->ser[k] = 0;
         if (samp) { int sid = c2s >= 0 ? c2s : ubo_samp_id(w[k * 2]); if (sid > 0 && sid < g_nsreg && g_sreg_ok[sid] && samp_fast(sid)) r = g_srid[sid]; }
@@ -13077,6 +13097,8 @@ static void sub_cut(void) {
     // The cut is there so that the GPU does not sit idle while the host encodes. With earlier work still running a commit gains nothing and queues one more command buffer: each is a call into the kernel on Metal's one submission queue, and with buffers queued behind running work
     // the GPU waited 5-40 ms with the next one already committed (docs/reference/frame-rate.md). So it stays a boundary for the game's timestamps (ts_boundary), with the commit left for when the GPU has run out. A copy still commits, as its data must land. DM_NVN_CUT_BUSY=0: every cut commits
     static int busy = -1; if (busy < 0) { const char *e = getenv("DM_NVN_CUT_BUSY"); busy = !e || atoi(e) != 0; }
+    // Skipped here: this segment encodes on without committing, and the shaders it drew stay noted for the next commit's cbs_take, so a failure the next frame may also name them in its
+    // suspicion list — the conservative direction, a suspect list that is too long, and acceptable
     if (busy && !g_cut_copy && (!seg_ts() || ts_on()) && atomic_load_explicit(&g_seg_inflight, memory_order_relaxed) > 0) {
         if (ts_on()) { ts_boundary(); g_seg++; }
         g_cut_draw0 = g_stat_draw; return; }

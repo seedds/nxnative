@@ -2,6 +2,7 @@ using Ryujinx.Graphics.Shader.Decoders;
 using Ryujinx.Graphics.Shader.IntermediateRepresentation;
 using Ryujinx.Graphics.Shader.Translation;
 using System.Numerics;
+using static Ryujinx.Graphics.Shader.Instructions.InstEmitAluHelper;
 using static Ryujinx.Graphics.Shader.Instructions.InstEmitHelper;
 using static Ryujinx.Graphics.Shader.IntermediateRepresentation.OperandHelper;
 
@@ -209,7 +210,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
             context.MarkLabel(lblRetry);
 
             Operand expected = context.Load(storageKind, e0, e1);
-            Operand sum = context.FPAdd(expected, value);
+            // The hardware's add is the FTZ form (RED.F32.FTZ.RN, ATOM's F32FtzRn): Metal's keeps a denormal, so the stored sum is flushed, or a game's later sum != 0 guard passes
+            // on a denormal and its reciprocal overflows (AFtz's case, Mario Kart World 635061c90d75a8d1)
+            Operand sum = FlushDenormal(context, context.FPAdd(expected, value));
             Operand found = context.AtomicCompareAndSwap(storageKind, e0, e1, expected, sum);
 
             context.BranchIfTrue(lblRetry, context.ICompareNotEqual(found, expected));

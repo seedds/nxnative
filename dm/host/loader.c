@@ -318,7 +318,12 @@ void dm_fps_state_apply(void) {
     const char *as = getenv("DM_SCREEN_ASPECT");
     if (as && *as && strcmp(as, "0")) {   // 0: 16:9
         char *end; float a = strtof(as, &end);
-        if (end == as || *end || !(a >= 1.3f && a < 1.77f)) LOG("[RED] DM_SCREEN_ASPECT=%s: a width / height from 1.3 to 1.77; keeping 16:9", as);
+        if (end == as || *end || !(a >= 1.3f && a < 1.77f)) {
+            LOG("[RED] DM_SCREEN_ASPECT=%s: a width / height from 1.3 to 1.77; keeping 16:9", as);
+            // 16:9, said and meant: the shape fields stay 0 (= 16:9, this page starts zeroed) and the Metal side is told the same, so the log's promise does not rest on the page's initialization
+            uint32_t zero = 0; memcpy(dm_fps_state + 0x48, &zero, 4); memcpy(dm_fps_state + 0x4c, &zero, 4); memcpy(dm_fps_state + 0x50, &zero, 4);
+            extern void mtl_present_screen(uint32_t w, uint32_t h); mtl_present_screen(1920, 1080);   // nvn_mtl.m present_shape
+        }
         else {
             uint32_t oh = (uint32_t)(1920.0f / a / 48.0f + 0.5f) * 48, lh = oh * 2 / 3; float lf = (float)lh;
             memcpy(dm_fps_state + 0x48, &oh, 4); memcpy(dm_fps_state + 0x4c, &lh, 4); memcpy(dm_fps_state + 0x50, &lf, 4);

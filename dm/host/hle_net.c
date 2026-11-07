@@ -51,13 +51,14 @@ typedef struct { int32_t fd; int16_t events, revents; } sk_pollfd;
 // wakeup descriptor its poll engine's factory (main+0x21f1280) returns null and grpc_init calls abort (main+0x21f0c7c). The descriptors are the host's only ones: Socket still fails.
 // The flags are Horizon's: gRPC creates its descriptor with 6 and consumes after a poll says it is ready. A descriptor with bit 0 reads one at a time; bits 1 and 2 never block
 enum { EFD_BASE = 0x4000, EFD_MAX = 64, SK_POLLIN = 1, SK_POLLOUT = 4, SK_POLLRDNORM = 0x40, SK_POLLWRNORM = 4, SK_EBADF = 9, SK_EAGAIN = 35 };
-static struct { uint64_t count; int used, flags; } g_efd[EFD_MAX];
+static struct { uint64_t count; int used, made, flags; } g_efd[EFD_MAX];
 static pthread_mutex_t g_efd_m = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_efd_c = PTHREAD_COND_INITIALIZER;
 static int efd_used(int fd) { return fd >= EFD_BASE && fd < EFD_BASE + EFD_MAX && g_efd[fd - EFD_BASE].used; }   // with g_efd_m held
+static int efd_made(int fd) { return fd >= EFD_BASE && fd < EFD_BASE + EFD_MAX && g_efd[fd - EFD_BASE].made; }   // with g_efd_m held: the host made it once, closed or not
 static int efd_create(uint64_t v, int flags) {
     pthread_mutex_lock(&g_efd_m);
-    for (int i = 0; i < EFD_MAX; i++) if (!g_efd[i].used) { g_efd[i].used = 1; g_efd[i].count = v; g_efd[i].flags = flags; pthread_mutex_unlock(&g_efd_m); return EFD_BASE + i; }
+    for (int i = 0; i < EFD_MAX; i++) if (!g_efd[i].used) { g_efd[i].used = 1; g_efd[i].made = 1; g_efd[i].count = v; g_efd[i].flags = flags; pthread_mutex_unlock(&g_efd_m); return EFD_BASE + i; }
     pthread_mutex_unlock(&g_efd_m);
     LOG("[RED] net: more than %d event descriptors", EFD_MAX);
     t_skerr = 24; return -1;   // EMFILE
@@ -72,24 +73,37 @@ static int efd_close(int fd) {
 }
 static int efd_read(int fd, uint64_t *out) {
     pthread_mutex_lock(&g_efd_m);
-    int r = -1;
+    int r = -1; uint64_t start = guest_ns();   // the bound below is wall time: every wake on this shared condvar (any descriptor's write, close or drain) counts, so counting wakes would cut a quiet descriptor's wait short
     for (;;) {
         if (!efd_used(fd)) { t_skerr = SK_EBADF; break; }
         uint64_t *c = &g_efd[fd - EFD_BASE].count; int f = g_efd[fd - EFD_BASE].flags;
-        if (*c) { if (f & 1) { *out = 1; *c -= 1; } else { *out = *c; *c = 0; } r = 0; break; }
+        if (*c) { if (f & 1) { *out = 1; *c -= 1; } else { *out = *c; *c = 0; } pthread_cond_broadcast(&g_efd_c); r = 0; break; }   // room again: a blocked write and a poller's POLLOUT wake
         if (f & 6) { t_skerr = SK_EAGAIN; break; }
-        dm_guest_cond_wait_ns(&g_efd_c, &g_efd_m, dm_detclock_enabled() ? 1000000 : 100000000);
+        int64_t left = 100000000 - (int64_t)(guest_ns() - start);
+        if (left <= 0) { t_skerr = SK_EAGAIN; break; }   // as sk_idle: an endless wait (no writer ever) comes back after 100 ms, so the caller can see a shutdown
+        dm_guest_cond_wait_ns(&g_efd_c, &g_efd_m, dm_detclock_enabled() && left > 1000000 ? 1000000 : left);
     }
     pthread_mutex_unlock(&g_efd_m);
     return r;
 }
+// Linux's write: the counter tops at 0xfffffffffffffffe (EFD_TOP), a value of 0 is a valid empty write (it wakes the pollers, adds nothing), and more than the room left blocks a
+// blocking descriptor (bits 1 or 2 never block: EAGAIN). Before this, count += v grew past the top: a game that writes more than its readers drain would wrap the counter to 0
+// and lose every waiter's wakeup. A count already past the top (the create value is taken as given) never fits a write, Linux's answer to it too
+#define EFD_TOP 0xfffffffffffffffeULL
 static int efd_write(int fd, uint64_t v) {
     pthread_mutex_lock(&g_efd_m);
-    int ok = efd_used(fd);
-    if (ok) { g_efd[fd - EFD_BASE].count += v; pthread_cond_broadcast(&g_efd_c); }
+    int r = -1; uint64_t start = guest_ns();
+    for (;;) {
+        if (!efd_used(fd)) { t_skerr = SK_EBADF; break; }
+        uint64_t *c = &g_efd[fd - EFD_BASE].count; int f = g_efd[fd - EFD_BASE].flags;
+        if (*c <= EFD_TOP && v <= EFD_TOP - *c) { *c += v; pthread_cond_broadcast(&g_efd_c); r = 0; break; }   // a value of 0: nothing to add, still a write and a wake, Linux's too; the first test keeps EFD_TOP - *c from wrapping up when the count was created past the top
+        if (f & 6) { t_skerr = SK_EAGAIN; break; }
+        int64_t left = 100000000 - (int64_t)(guest_ns() - start);
+        if (left <= 0) { t_skerr = SK_EAGAIN; break; }   // as efd_read: the reader stopped, the 100 ms bound lets the caller see a shutdown
+        dm_guest_cond_wait_ns(&g_efd_c, &g_efd_m, dm_detclock_enabled() && left > 1000000 ? 1000000 : left);
+    }
     pthread_mutex_unlock(&g_efd_m);
-    if (!ok) { t_skerr = SK_EBADF; return -1; }
-    return 0;
+    return r;
 }
 static int efd_ready(sk_pollfd *p, uint64_t n) {   // with g_efd_m held: fills revents, returns how many descriptors have any
     int ready = 0;
@@ -99,7 +113,7 @@ static int efd_ready(sk_pollfd *p, uint64_t n) {   // with g_efd_m held: fills r
         if (p[i].fd < EFD_BASE || p[i].fd >= EFD_BASE + EFD_MAX) continue;   // one the host never made: nothing to say (see dm_sk_poll)
         if (!efd_used(p[i].fd)) { p[i].revents = 0x20; ready++; continue; }   // POLLNVAL: closed while waiting
         if (g_efd[p[i].fd - EFD_BASE].count) p[i].revents |= p[i].events & (SK_POLLIN | SK_POLLRDNORM);
-        p[i].revents |= p[i].events & (SK_POLLOUT | SK_POLLWRNORM);
+        if (g_efd[p[i].fd - EFD_BASE].count < EFD_TOP) p[i].revents |= p[i].events & (SK_POLLOUT | SK_POLLWRNORM);   // POLLOUT while a write still fits (Linux's); the old unconditional form kept saying writable at a full counter
         if (p[i].revents) ready++;
     }
     return ready;
@@ -112,7 +126,7 @@ int dm_sk_poll(void *fds, uint64_t n, int ms) {   // also hle_offline.c's plain 
     int any = 0;
     pthread_mutex_lock(&g_efd_m);
     for (uint64_t i = 0; i < n; i++) if (p[i].fd >= 0) {
-        if (efd_used(p[i].fd)) { any = 1; continue; }
+        if (efd_used(p[i].fd) || efd_made(p[i].fd)) { any = 1; continue; }   // a made but closed one joins the real wait: efd_ready says POLLNVAL (0x20) for it, as a poll of a closed descriptor does on Linux
         static int once; if (!once++) LOG("socket: Poll of %llu descriptors with one the host never made (fd %d, events %#x; %d ms): nothing ready at the timeout", (unsigned long long)n, p[i].fd, p[i].events, ms);
     }
     pthread_mutex_unlock(&g_efd_m);

@@ -41,6 +41,20 @@ int main(void) {
     sk_pollfd w = {fd, SK_POLLOUT, 0};   // writable whenever it is open
     assert(h_sk_Poll(&w, 1, 0) == 1 && w.revents == SK_POLLOUT);
 
+    // Linux's answers at the edges: the counter tops at 0xfffffffffffffffe, a full one is no longer writable, a write past the room of a blocking descriptor comes back EAGAIN
+    // after the 100 ms bound, a zero write fits and adds nothing, and a poll of a made-then-closed descriptor reports POLLNVAL
+    int blk = h_sk_EventFd(0, 0);   // blocks
+    assert(blk > 0 && blk != fd);
+    assert(h_sk_EventFdWrite(blk, 0xfffffffffffffffeull) == 0);   // to the top exactly
+    sk_pollfd full = {blk, SK_POLLOUT, 0};
+    assert(h_sk_Poll(&full, 1, 0) == 0 && full.revents == 0);   // no room left: not writable
+    assert(h_sk_EventFdWrite(blk, 1) == -1 && h_sk_GetLastError() == SK_EAGAIN);   // the bound ends the wait
+    assert(h_sk_EventFdWrite(blk, 0) == 0);   // a legal nothing
+    assert(h_sk_EventFdRead(blk, &v) == 0 && v == 0xfffffffffffffffeull);
+    assert(h_nsk_Close(blk) == 0);
+    sk_pollfd gone = {blk, SK_POLLIN, 0};
+    assert(h_sk_Poll(&gone, 1, 0) == 1 && gone.revents == 0x20);   // POLLNVAL: the host made it once
+
     int sem = h_sk_EventFd(2, 1 | 2);   // one at a time
     assert(sem > 0 && sem != fd);
     assert(h_sk_EventFdRead(sem, &v) == 0 && v == 1 && h_sk_EventFdRead(sem, &v) == 0 && v == 1 && h_sk_EventFdRead(sem, &v) == -1);

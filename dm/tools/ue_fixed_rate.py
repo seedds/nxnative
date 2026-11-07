@@ -9,7 +9,9 @@ The chain, each link unique or nothing is written:
 - the property's reflection entry: the data word holding the address of its UTF-8 name "FixedFrameRate" (the module's relative relocations applied; the linker may share the string with the
   tail of "bUseFixedFrameRate"), whose generated-property kind is Float (0x0A at +24) and whose array size is 1 (+32). The offset follows the array size (+36, Unreal Engine 4.22 to 5.0)
   or, from Unreal Engine 5.1 on, a setter and a getter pointer after it (+56): Sparking! ZERO's is 0x9c8, at +56;
-- GEngine: the one global through which main's code loads or stores a float at that offset (ldr / str sT, [xB, #field], xB loaded from the global: fps_target.globals_of).
+- GEngine: the one global through which main's code stores a float at that offset (str sT, [xB, #field], xB loaded from the global: fps_target.globals_of), the engine or the game
+  setting the rate (Sparking! ZERO's frame pace, main+0x1e1ea04). A load alone proves nothing: Pikmin 4 (UE 4.26, the property at +0x7a8) has one through main+0x9350560, whose object
+  holds -980 there (a gravity), not its engine's 30; the offset only coincides. Such a main gets no fixups, and the host writes nothing.
 Usage on its own: ue_fixed_rate.py <module>... (what it finds in each)"""
 import struct, sys, os
 
@@ -35,8 +37,8 @@ def fields(img, ro_off, data_off, rel):
     return out
 
 def find(img, text_end, ro_off, data_off):
-    """(GEngine's offset in main, FixedFrameRate's offset in UEngine, reason), or (None, None, why not); why starts '[RED] ' when more than one global reaches the property. A main whose
-    code never reaches it through a global (Princess Peach: Showtime!) leaves the fixed frame rate to the config, and the host has nothing to write"""
+    """(GEngine's offset in main, FixedFrameRate's offset in UEngine, reason), or (None, None, why not); why starts '[RED] ' when more than one global stores the property. A main whose
+    code stores it through no global (Princess Peach: Showtime!, Pikmin 4) gets no fixups, and the host has nothing to write"""
     rel = relocated(img)
     fs = fields(img, ro_off, data_off, rel)
     if not fs: return None, None, 'no UEngine::FixedFrameRate'
@@ -47,15 +49,15 @@ def find(img, text_end, ro_off, data_off):
     users = {}
     for i in range(0, text_end, 4):
         u = word(i)
-        if (u & 0xFFC00000) not in (0xBD400000, 0xBD000000): continue   # ldr / str sT, [xB, #imm * 4]
+        if (u & 0xFFC00000) != 0xBD000000: continue   # str sT, [xB, #imm * 4]
         f = ((u >> 10) & 0xFFF) * 4
         if f not in want: continue
         g = global_of(i, (u >> 5) & 31)
         if g is not None and g >= data_off: users.setdefault((g, f), []).append(i)
-    if not users: return None, None, f'UEngine::FixedFrameRate at +{min(want):#x}: no code reaches it through a global (GEngine), so the game does not change it'
-    if len(users) > 1: return None, None, '[RED] UEngine::FixedFrameRate: ' + ', '.join(f'[{g:#x}]+{f:#x} ({len(a)})' for (g, f), a in sorted(users.items())) + ': more than one global'
+    if not users: return None, None, f'UEngine::FixedFrameRate at +{min(want):#x}: no code stores it through a global (GEngine), so the object is not known'
+    if len(users) > 1: return None, None, '[RED] UEngine::FixedFrameRate: ' + ', '.join(f'[{g:#x}]+{f:#x} ({len(a)})' for (g, f), a in sorted(users.items())) + ': stored through more than one global'
     (g, f), at = users.popitem()
-    return g, f, f'UEngine::FixedFrameRate at [{g:#x}]+{f:#x} (GEngine; reflection entry {min(o for o, v in fs.items() if v == f):#x}; reached at ' + ', '.join(f'{a:#x}' for a in at[:4]) + ')'
+    return g, f, f'UEngine::FixedFrameRate at [{g:#x}]+{f:#x} (GEngine; reflection entry {min(o for o, v in fs.items() if v == f):#x}; stored at ' + ', '.join(f'{a:#x}' for a in at[:4]) + ')'
 
 if __name__ == '__main__':
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

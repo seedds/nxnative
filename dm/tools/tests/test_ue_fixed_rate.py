@@ -1,6 +1,6 @@
 """Unreal's UEngine::FixedFrameRate found by its reflection entry and GEngine by the code that reaches it (dm/tools/ue_fixed_rate.py), on synthetic images, no game files: the offset after
 the array size (UE 4.22-5.0) and after a setter and a getter (UE 5.1+, DRAGON BALL: Sparking! ZERO), the name shared with bUseFixedFrameRate's tail, GEngine through its GOT slot, no code
-reaching it (nothing, no red line), two globals (red), and an entry of another kind (not taken)."""
+reaching it (nothing, no red line), two globals (red), and an entry of another kind (not taken), and a load alone (no proof: Pikmin 4's coincides with another object's field)."""
 import struct
 import sys
 import unittest
@@ -45,8 +45,13 @@ class FindTest(unittest.TestCase):
         self.assertEqual((g, f), (GENGINE, FIELD), why)
 
     def test_ue4_layout(self):
-        g, f, why = find(image(ue51=False, store=False))
+        g, f, why = find(image(ue51=False))
         self.assertEqual((g, f), (GENGINE, FIELD), why)
+
+    def test_a_load_alone_is_no_proof(self):   # Pikmin 4: a load at the offset through another object's global (a gravity of -980 there)
+        g, f, why = find(image(store=False))
+        self.assertIsNone(g)
+        self.assertFalse(why.startswith('[RED] '), why)
 
     def test_no_code_reaches_it(self):   # Princess Peach: Showtime!: the fixed frame rate stays the config's, and that is no red line
         g, f, why = find(image(users=()))

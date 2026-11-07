@@ -1,6 +1,7 @@
-// An uncompressed 2D texture the CPU wrote, in a pool the GPU has not written (nvn_mtl.m tex_cpu_content): its storage is its content at first use, flushed or not, and a later CPU write is
-// uploaded. At the pool's first GPU write it becomes a GPU texture with the content it has (cpu_unc_drop), and CPU writes are no longer uploaded. In a pool the GPU already writes it stays a
-// GPU texture. Mario Kart World's terrain patches: R16, RG8, RGBA8, R11G11B10F and RGBA16 in a CPU_CACHED pool, never flushed, were zeros and every patch a flat plane.
+// An uncompressed 2D texture the CPU wrote, over storage the GPU has not written (nvn_mtl.m tex_cpu_content): its storage is its content at first use, flushed or not, and a later CPU
+// write is uploaded. Once the GPU writes its storage it becomes a GPU texture with the content it has (cpu_unc_drop), and CPU writes are no longer uploaded. Over storage the GPU already
+// writes it stays a GPU texture, unless the CPU has rewritten that storage since. Mario Kart World's terrain patches: R16, RG8, RGBA8, R11G11B10F and RGBA16 in a CPU_CACHED pool, never
+// flushed, were zeros and every patch a flat plane. Ocarina of Time's terrain height and blend maps lie in the pool its normal maps are drawn into: zeros, and holes in the ground.
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -10,11 +11,19 @@ uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(label, c) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
 static void finish(void) { CHECK("submission completes", mtl_wait(mtl_sub_commit(), 5000000000ull)); CHECK("GPU has no error", !mtl_last_commit_error()); }
-enum { SIZE = 16, POOL = 65536 };
+enum { SIZE = 16, LARGE = 256, POOL = 1 << 20 };
 static void fill(tex_t *t, void *mem, uint8_t v) {
-    uint8_t linear[SIZE * SIZE * 4];
-    for (int i = 0; i < SIZE * SIZE; i++) { linear[i * 4] = v; linear[i * 4 + 1] = v + 1; linear[i * 4 + 2] = v + 2; linear[i * 4 + 3] = 255; }
-    CHECK("fixture swizzle succeeds", !nvn_swizzle(&t->d, 0, 0, linear, SIZE * 4, mem));
+    uint32_t w = t->d.width, h = t->d.height;
+    uint8_t *linear = malloc((size_t)w * h * 4);
+    for (uint32_t i = 0; i < w * h; i++) {
+        linear[i * 4] = v;
+        linear[i * 4 + 1] = v + 1;
+        linear[i * 4 + 2] = v + 2;
+        linear[i * 4 + 3] = 255;
+    }
+
+    CHECK("fixture swizzle succeeds", !nvn_swizzle(&t->d, 0, 0, linear, w * 4, mem));
+    free(linear);
 }
 static uint8_t first_red(id<MTLTexture> image) {   // the red of texel (3, 5), read through a blit: the texture is private
     static id<MTLCommandQueue> queue; if (!queue) queue = [g_dev newCommandQueue];
@@ -28,16 +37,31 @@ static uint8_t first_red(id<MTLTexture> image) {   // the red of texel (3, 5), r
 }
 static id<MTLTexture> resolve(tex_t *t) { mtl_sub_begin(); id<MTLTexture> image = tex_mtl(t); CHECK("texture resolves", image != nil); finish(); return image; }
 typedef struct { void *mem; pool_t pool; tex_t t; } fixture;
+static tex_t texture_at(fixture *f, uint64_t serial, uint64_t off, uint32_t size, int format, uint32_t tex_flags) {
+    tex_t t = {.magic = MAGIC('T', 'E', 'X', 0), .serial = serial, .pool = &f->pool, .off = off, .mem = (uint8_t *)f->mem + off};
+    t.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D, .format = format, .width = size, .height = size, .depth = 1, .levels = 1, .samples = 1, .flags = tex_flags};
+    nvn_tex_layout(&t.d, &t.L);
+    return t;
+}
 static void setup(fixture *f, uint64_t serial, uint32_t pool_flags, int format, uint32_t tex_flags) {
-    if (posix_memalign(&f->mem, getpagesize(), POOL)) abort();
+    if (posix_memalign(&f->mem, getpagesize(), POOL)) {
+        abort();
+    }
+
     memset(f->mem, 0, POOL);
     f->pool = (pool_t){.magic = MAGIC('P', 'O', 'O', 'L'), .mem = f->mem, .size = POOL, .flags = pool_flags};
     mtl_pool_add(f->mem, POOL);
-    f->t = (tex_t){.magic = MAGIC('T', 'E', 'X', 0), .serial = serial, .pool = &f->pool, .mem = f->mem};
-    f->t.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D, .format = format, .width = SIZE, .height = SIZE, .depth = 1, .levels = 1, .samples = 1, .flags = tex_flags};
-    nvn_tex_layout(&f->t.d, &f->t.L);
+    nvn_dirty_add_range(f->mem, POOL);
+    f->t = texture_at(f, serial, 0, SIZE, format, tex_flags);
 }
-static void teardown(fixture *f) { mtl_tex_release(&f->t); mtl_alias_drop_pool(&f->pool); mtl_pool_del(f->mem); mtl_drain(); free(f->mem); }
+static void teardown(fixture *f) {
+    mtl_tex_release(&f->t);
+    mtl_alias_drop_pool(&f->pool);
+    nvn_dirty_remove_range(f->mem);
+    mtl_pool_del(f->mem);
+    mtl_drain();
+    free(f->mem);
+}
 static const uint32_t CACHED = NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED;
 
 int main(void) {
@@ -50,17 +74,36 @@ int main(void) {
         CHECK("at first use the storage is the content", first_red(resolve(&f.t)) == 40);
         dm_guest_write_prepare(f.mem, f.t.L.size); fill(&f.t, f.mem, 80);
         CHECK("a later CPU write is uploaded", first_red(resolve(&f.t)) == 80);
-        mtl_pool_gpu_written(&f.pool);
-        CHECK("at the pool's first GPU write it keeps the content it has", first_red(resolve(&f.t)) == 80);
+        mtl_tex_gpu_written(&f.t);
+        CHECK("once the GPU writes its storage it keeps the content it has", first_red(resolve(&f.t)) == 80);
         CHECK("and is no longer CPU-written", !tex_cpu_written(f.t.serial));
         dm_guest_write_prepare(f.mem, f.t.L.size); fill(&f.t, f.mem, 120);
         CHECK("and a CPU write is no longer uploaded", first_red(resolve(&f.t)) == 80);
         teardown(&f);
 
         setup(&f, 7002, CACHED, NVN_FORMAT_RGBA8, 0);
-        mtl_pool_gpu_written(&f.pool);
+        mtl_tex_gpu_written(&f.t);
         fill(&f.t, f.mem, 40);
-        CHECK("in a pool the GPU writes it is not taken from storage", !tex_cpu_content(&f.t));
+        CHECK("over storage the GPU writes it is not taken from storage", !tex_cpu_content(&f.t));
+        teardown(&f);
+
+        setup(&f, 7004, CACHED, NVN_FORMAT_RGBA8, 0);
+        tex_t target = texture_at(&f, 7005, 0x40000, SIZE, NVN_FORMAT_RGBA8, 0);
+        mtl_tex_gpu_written(&target);
+        fill(&f.t, f.mem, 40);
+        CHECK("beside storage the GPU writes, in the same pool, it is taken from storage", tex_cpu_content(&f.t));
+        teardown(&f);
+
+        setup(&f, 7006, CACHED, NVN_FORMAT_RGBA8, 0);
+        tex_t large = texture_at(&f, 7007, 0x40000, LARGE, NVN_FORMAT_RGBA8, 0);
+        mtl_tex_gpu_written(&large);
+        dm_guest_write_prepare(large.mem, large.L.size); fill(&large, large.mem, 40);
+        CHECK("over storage the GPU wrote, then the CPU rewrote, it is taken from storage", tex_cpu_content(&large));
+        mtl_tex_gpu_written(&large);
+        mtl_sub_begin(); cpu_unc_drop(); finish();
+        CHECK("and the GPU's next write there makes it a GPU texture", !tex_cpu_written(large.serial));
+        CHECK("which then is not taken from storage again", !tex_cpu_content(&large));
+        mtl_tex_release(&large);
         teardown(&f);
 
         setup(&f, 7003, CACHED, NVN_FORMAT_RGBA8, 0);

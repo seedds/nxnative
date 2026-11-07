@@ -663,21 +663,29 @@ NVN(nvnProgramFinalize, void, NVNprogram *p) {
     pthread_mutex_lock(&g_sub_mu); mtl_prog_forget((const prog_t *)p); pthread_mutex_unlock(&g_sub_mu);
     mtl_prog_release((prog_t *)p); ((prog_t *)p)->magic = 0; pk_drop(p);
 }
-// a program's per-stage keys (side table: guest NVNprogram address → host object; bit i of ok = stage i computed)
-typedef struct { uint8_t key[6][8]; uint8_t ok; } prog_keys_t;
-static pthread_mutex_t g_pk_mu = PTHREAD_MUTEX_INITIALIZER; static CFMutableDictionaryRef g_pk;   // a dedicated table (keys not shared with other side tables)
-static prog_keys_t *pk_get(const void *p, int make) {
+// A program's per-stage keys, one record per SetShaders (prog_t.serial; bit i of ok = stage i computed). Games may copy an NVNprogram after SetShaders and draw with the copy:
+// Unity does (Ori and the Will of the Wisps: 135 single-stage programs a boot), and the copy carries the serial but not the address. Looked up by address only, a copy had no
+// record, so its stages were keyed at the first draw from the control section, which the game had freed by then: random keys, "not in the shader map", draws skipped and a
+// picture of noise. So the record belongs to the serial and stays as long as the process (about 0x40 bytes a SetShaders; a copy can outlive the program it was made from);
+// the address table is a cache in front of it. ctl[i]: the host's copy of stage i's control section, when prog_t.sd[i].control points at it (a stage keyed after SetShaders
+// returns, or every stage under DM_NVN_SHDUMP), kept with the record because copies of the program point at it too
+typedef struct { uint64_t serial; uint8_t key[6][8]; uint8_t ok; void *ctl[6]; } prog_keys_t;
+static pthread_mutex_t g_pk_mu = PTHREAD_MUTEX_INITIALIZER; static CFMutableDictionaryRef g_pk, g_pk_ser;   // NVNprogram address → record (not owned); serial → record (owned)
+static prog_keys_t *pk_get(const prog_t *p, int make) {
     pthread_mutex_lock(&g_pk_mu);
-    if (!g_pk) g_pk = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
+    if (!g_pk) { g_pk = CFDictionaryCreateMutable(NULL, 0, NULL, NULL); g_pk_ser = CFDictionaryCreateMutable(NULL, 0, NULL, NULL); }
     prog_keys_t *k = (prog_keys_t *)CFDictionaryGetValue(g_pk, p);
-    if (!k && make) { k = calloc(1, sizeof *k); CFDictionarySetValue(g_pk, p, k); }
+    if (!k || k->serial != p->serial) {
+        k = p->serial ? (prog_keys_t *)CFDictionaryGetValue(g_pk_ser, (const void *)(uintptr_t)p->serial) : NULL;
+        if (!k && make) { k = calloc(1, sizeof *k); k->serial = p->serial; if (p->serial) CFDictionarySetValue(g_pk_ser, (const void *)(uintptr_t)p->serial, k); }
+        if (k) CFDictionarySetValue(g_pk, p, k);
+    }
     pthread_mutex_unlock(&g_pk_mu);
     return k;
 }
 static void pk_drop(const void *p) {
     pthread_mutex_lock(&g_pk_mu);
-    prog_keys_t *k = g_pk ? (prog_keys_t *)CFDictionaryGetValue(g_pk, p) : NULL;
-    if (k) { CFDictionaryRemoveValue(g_pk, p); free(k); }
+    if (g_pk) CFDictionaryRemoveValue(g_pk, p);
     pthread_mutex_unlock(&g_pk_mu);
 }
 // mapped = 1: computed only when the code area is in a registered memory pool (at SetShaders: Mario sets some programs with an unmapped address first and fills it in before the first draw)
@@ -729,10 +737,16 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
     static int dump = -1; if (dump < 0) dump = getenv("DM_NVN_SHDUMP") != NULL;
     static const char *trace; static int trace_init;
     if (!trace_init) { trace = getenv("DM_NVN_PROGTRACE"); trace_init = 1; }
-    prog_keys_t *k = pk_get(p, 1);
-    k->ok = 0;
+    prog_keys_t *k = pk_get(o, 1);   // a new serial: a new record
     for (int i = 0; i < n; i++) {
         if (keys_hash(&sd[i], 1, k->key[i])) k->ok |= (uint8_t)(1u << i);
+        // A stage keyed later (its code area is in no memory pool yet) is keyed from the host's copy of its control section, as NVN lets the game free the game's own
+        // once this call returns; DM_NVN_SHDUMP keeps a copy of every stage, for the replay layer to save shaders missing from the map
+        if (sd[i].control && (dump || !(k->ok >> i & 1))) {
+            uint32_t nctl, ncode; nvn_ctl_lens(sd[i].control, &nctl, &ncode);
+            void *c = calloc(1, 0x880); memcpy(c, sd[i].control, dump ? 0x880 : nvn2_ctl(sd[i].control) ? NVN2_KEY_CTL : nctl);   // NVN: nctl holds +0x20 and +0x704; NVN2: 0x48 bytes hold +0x44
+            k->ctl[i] = c; o->sd[i].control = c;
+        }
         // Diagnostic: trace the loader of selected shader keys (comma-separated hex).
         if (trace && (k->ok & (1u << i))) {
             char key[17]; for (int j = 0; j < 8; j++) snprintf(key + j * 2, 3, "%02x", k->key[i][j]);
@@ -741,8 +755,6 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
                 dm_backtrace((uint64_t)__builtin_frame_address(0));
             }
         }
-        // DM_NVN_SHDUMP (debugging): keep a copy of the control section so the replay layer can save shaders missing from the map (never freed)
-        if (dump && sd[i].control) { void *c = malloc(0x880); memcpy(c, sd[i].control, 0x880); o->sd[i].control = c; }
     }
     OLOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)p, n, n ? (unsigned long long)sd[0].data : 0ull);
     mtl_prog_prefetch(o);   // its libraries load in the background now, not at its first draw

@@ -740,6 +740,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (agl's BC4 encoder `8e2cc2671cae6020` and its twin for a 2D source `93aa5e22a8202409`, whose failure showed up in an iPhone run); [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) (the BC4 encoder `0544282c162305db` and the Ultrahand mask `e3fb0bb58a691e10`, R8Uint, found by PR #11; the Mac route does not reach it); [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md) (two system pixel shaders write an ID into an `R8_UI` target on the character creation screen); [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (one global shader writing an `R8Uint` target, [Unreal Engine 4.27 shader code archives](#unreal-engine-427-shader-code-archives-lz4)).
 - **Note:** the compressed render target side is in [Compressed textures as render targets through an uncompressed shadow](rendering.md#compressed-textures-as-render-targets-through-an-uncompressed-shadow).
 
+### A pixel shader's depth after a partly written target
+
+- **Symptom:** a pixel shader that writes depth and only some components of a colour target writes the wrong depth: in the translated MSL, `gl_FragDepth` takes a value the shader computes a step before its last one, or a colour.
+- **Cause:** the colours are read four registers per render target with any component enabled (component c of the n-th such target in R(4n + c)), then comes the sample mask register, then the depth. `TranslatorContext.GetDepthRegister` counted enabled components instead, which agrees only when each enabled target has all four. With OmapTargets 0x10f (RT0 RGBA, RT2 R) the shader computes its depth into R9, `R6 = 1 / -(z * a + b)` then two constant adds, and R6 was read.
+- **Fix:** `GetDepthRegister` returns 4 × the enabled targets + 1. A chain change.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py DepthRegister` (R6 0.25, R9 0.75: the old translator writes 0.25).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): 46 of the 126 depth-writing pixel shaders in its shader package (mask 0x10f ×24, 0x100 ×16, 0x3f ×4, 0x30 ×2), 16 of them in its seen shaders, among them agl_common's depth pass `3a4a0270fc35b848`, whose depth now takes the step after R6 too, `(R6 * c3[32].z + 1) * c3[32].w`. Its effect on the picture has not been compared. No other local game has such a shader: the 1,105 depth-writing pixel shaders of seven Switch 1 games enable whole targets. Found by the flaviopz fork.
+
 ### Integer entry points for integer colour outputs
 
 - **Symptom:** `failed to create render pipeline … output of type float4 is not compatible with a MTLPixelFormatR32Uint color attachment` (or `MTLPixelFormatRGBA16Uint`); every draw into the target skipped.

@@ -903,7 +903,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             // The entry this helper chose last in this invocation, if it holds the address: a shader reads a structure word after word from one pool, so all but the first access of a run
             // choose the entry the first one chose (Ocarina of Time's foliage mesh shader 73dc0b90c4082e43, 135 reads, took 10.9 ms of a 683x384 frame). The table's ranges are disjoint
             // (nvn_mtl.m gmem_map), so the search below would choose the same entry, and the host binds one table for a whole draw or dispatch. The word starts at 0, the empty entry
-            // The entry's range and delta are kept in private words beside its index (as penis6 oot2 6951110c, and as PR #1464 kept them in registers): a hit takes two compares
+            // The entry's range and delta are kept in private words beside its index (as p****6 oot2 6951110c, and as PR #1464 kept them in registers): a hit takes two compares
             // and no read of the table. PRAGMATA's G-buffer vertex shader 53df0ac0 calls this about 110 times a vertex, its material pixel shaders up to 137 times a pixel; the
             // side-library form of this (sw2_tools/pr/scratch/gm_memo.py, loads only) took 3.65 ms off its frame. Words: [0] the entry, [1..2] its start, [3..4] its end,
             // [5..6] its delta; all 0 at the start: the range [0, 0) holds no address. The index stays for the write log

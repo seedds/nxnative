@@ -437,7 +437,7 @@ PRE_STATS = collections.Counter()
 # -O1: the front end's -O2 (CorrelatedValuePropagation, then SimplifyCFG) folds the translated shaders' repeated tests of one value into switches whose cases jump past their own join.
 # Apple's GPU backend then exceeds its control-flow ID budget ("Max Unstruct ID 758 ... exceeds supported limit", a note, not an error) and falls back to a slower lowering:
 # Odyssey's alRenderMaterialUber took 25 minutes and 17.3 MB of GPU code, 31 s and 1.3 MB at -O1. Ordinary shaders come out within a few percent either way (the backend optimizes again)
-# Profile shader_math (fast by default, relaxed, safe; penis6 oot2 5ab5b107): Metal's maths mode for this game's Mac libraries. Fast lets the compiler assume no NaN / infinity, so the
+# Profile shader_math (fast by default, relaxed, safe; p****6 oot2 5ab5b107): Metal's maths mode for this game's Mac libraries. Fast lets the compiler assume no NaN / infinity, so the
 # translated shaders' isnan selects (Maxwell's NaN semantics) can fold away, and it approximates and reorders. Ocarina of Time's grass showed single blades pure white for a frame with
 # fast and with relaxed, not with safe (-fno-fast-math). One mode for every library: [[invariant]] positions only agree between shaders compiled alike
 SHADER_MATH = {'fast': [], 'relaxed': ['-fmetal-math-mode=relaxed'], 'safe': ['-fno-fast-math']}
@@ -1765,7 +1765,7 @@ def finish(key, w, j, c1):
     lg_stage = 'task' if mesh and mesh.get('kind') == 'ts' else 'compute' if j['stage'] == 'cs' and not mesh else None
     if LOOPGUARD == 'all' and lg_stage == 'compute':   # every loop and raw lookup of a compute kernel guarded on the host's debug buffer (see LOOPGUARD; the wedge rule: playbook golden rule 1)
         try: src, sites = dmsh_loopdiag.all_loops(src, key, 'compute')
-        except (ValueError, AssertionError) as e: return 'loop guard failed', str(e)[:160], None
+        except (ValueError, AssertionError) as e: sites = []; print(f'{key}: loop guard all not applied ({str(e)[:120]}); loop_guard\'s own cap stays', flush=True)   # as 'off' (r9 review)
         loopguard = [{'site': st, 'counter': c, 'fn': fn, 'line': ln} for st, c, fn, ln in sites]
         if loopguard or 'dm_hg' in src: open(msl, 'w').write(src)
         if not loopguard and 'dm_hg' in src: loopguard = [{'site': -1, 'counter': None, 'fn': None, 'line': None}]   # pool lookups only: the host still binds the buffer
@@ -1821,7 +1821,7 @@ def finish(key, w, j, c1):
             **({'tg_spill': spill} if spill else {}),
             # a compute shader that reads texture or image handles the game pushed (c[24], uniform "slot" PUSH_BANK - 3, ubo_bank): the host reads them from the pushed bytes for it only
             # (nvn_mtl.m ubo_read, push_handles; PRAGMATA's depth-pyramid kernels, c24regen-2026-11-07.md)
-            **({'push_handles': True} if j['stage'] == 'cs' and any(b.get('kind') in (abi.KIND_TEX_UBO, abi.KIND_IMG_UBO) and b.get('reg') == abi.PUSH_BANK - 3 for b in binds) else {}),
+            **({'push_handles': True} if j['stage'] == 'cs' and any(b.get('kind') in (abi.KIND_TEX_UBO, abi.KIND_IMG_UBO) and abi.PUSH_BANK - 3 in (b.get('reg'), b.get('sreg')) for b in binds) else {}),
             **({'loopguard': {'buffer': dmsh_loopdiag.BUF_INDEX, 'cap_word': 1 if LOOPGUARD == 'all' and lg_stage == 'compute' else dmsh_loopdiag.AUTO_CAP_WORD, 'sites': loopguard,
                               **({'mode': 'all'} if LOOPGUARD == 'all' and lg_stage == 'compute' else {})}} if loopguard else {}),   # see LOOPGUARD
             'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr, mesh['kind'] if mesh else j['stage']),

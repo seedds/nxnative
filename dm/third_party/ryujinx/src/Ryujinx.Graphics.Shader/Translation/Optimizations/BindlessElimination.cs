@@ -3,6 +3,7 @@ using Ryujinx.Graphics.Shader.IntermediateRepresentation;
 using Ryujinx.Graphics.Shader.StructuredIr;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 {
@@ -117,11 +118,15 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             // held a push constant before: the high word of a storage buffer address (c24 + 0x34) or a float (c24 + 0x1c). Taken as the handle, that word named no texture the host
             // could bind (cp_t_cb65560_3041000D, fp_t_cb24_7: no resolved slot, the shaders did not load), and would have named a wrong one. GenerateBindlessAccess indexes the pools by
             // the value at run time instead, which is the loaded handle wherever the read runs
-            foreach (Operand leaf in PhiLeaves(handle))
+            // Only when no input is a c[2] handle word: a choice among c[2] words with a loaded input stays the dynamic handle array GenerateBindlessAccess builds below (r9 review)
+            if (!PhiLeaves(handle).Any(l => IsHandleWord(l, false)))
             {
-                if (!IsHandleWord(leaf, true) && BuiltFromMemory(leaf, 0))
+                foreach (Operand leaf in PhiLeaves(handle))
                 {
-                    return TableHandle.None;
+                    if (!IsHandleWord(leaf, true) && BuiltFromMemory(leaf, 0))
+                    {
+                        return TableHandle.None;
+                    }
                 }
             }
 

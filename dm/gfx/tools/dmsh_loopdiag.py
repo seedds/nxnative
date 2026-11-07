@@ -346,8 +346,8 @@ def auto(msl, key, stage, gmem_bufs=()):
 
 def all_loops(msl, key, stage):
     """The generic guard in the library (dmsh_build.py shader_loopguard all, r9 2026-11-07; the allloops side libraries' v1 rewrite, --all-loops): every loop of a COMPUTE kernel, spin and
-    flag waits included, on the cap of word 1 (LOOP_CAP while the host binds its zeroed buffer, DM_NVN_LOOPCAP off) and the abort word, plus the raw global-memory lookups' miss and
-    below-4 GB guard (log-only, never the strict address window). Other stages are left as built. Returns (msl, sites) as transform"""
+    flag waits included, on the cap of word 1 (LOOP_CAP while the host binds its zeroed buffer, DM_NVN_LOOPCAP off) and the abort word, plus the raw global-memory lookups' miss report and
+    below-4 GB guard (a resolved address below 4 GB reads as a miss, as in every allloops library; never the strict address window). Other stages are left as built. Returns (msl, sites) as transform"""
     if stage != 'compute': return msl, []
     return transform(msl, key, 'compute', default_cap=LOOP_CAP)
 

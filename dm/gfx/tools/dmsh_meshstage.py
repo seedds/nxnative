@@ -72,6 +72,8 @@ def memory(i):
     # ee4ef51a4fddc28e, 128 vertices of 6 components and 64 primitives of 4, writes vertex v at (v / 32) * 768 + (v % 32) * 4 and primitive p at 3072 + (p / 32) * 512 + (p % 32) * 4)
     # A primitive block holds the per-primitive SPH's system values first, then its generic attributes (per_primitive)
     v_blocks, p_blocks = blocks_of(i['max_v']), blocks_of(i['max_p'])
+    # (r9 review) with no per-primitive component this is smaller than r6's blocks_of(max(max_v, max_p)) when max_p > max_v; PRAGMATA's three record meshes (6adf14e9 4fcffc73 c0e44513:
+    # 128/64, 128/128, 128/128) have max_p <= max_v, so their records' base (AosToSoa, words 4..6) is unchanged
     prim = out + max(v_blocks * len(i['vertex']) + p_blocks * per_primitive(i), 1) * BLOCK * 4
     # The guest writes the index bytes of primitive min(count - 1, lane + 32k) in each of its primitive blocks, and a meshlet count of 0 wraps count - 1, so every lane of every primitive
     # block writes: the bytes are reserved for whole blocks of 32 primitives, a primitive's vertices each (a mesh with max_p 126 wrote past 4 + 3 * 126, into the next workgroup's memory)

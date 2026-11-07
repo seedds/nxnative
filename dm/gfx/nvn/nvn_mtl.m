@@ -11164,7 +11164,7 @@ static void cbs_feedback(cbs_list *l, NSError *err, const char *where) {   // fr
     free(l);
 }
 static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex);
-static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) { cbs_note(sh); AP_B; int r = encode_args_(en, sh, nvn_stage, metal_vertex); AP_E(3); return r; }
+static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) { cbs_note(sh); AP_B; int r = encode_args_(en, sh, nvn_stage, metal_vertex); g_push_sh = nil; AP_E(3); return r; }   // g_push_sh: only for this encode's ubo_read (r9 review)
 static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) {
     g_enc_key = sh->key; g_enc_stage = nvn_stage; g_push_sh = sh;   // named by the binding fallbacks' log lines (tex_fit)
     if (nvn_stage == 5) safk_note(sh->key);   // DM_NVN_SUBMIT_AT_FLUSH_KEYS

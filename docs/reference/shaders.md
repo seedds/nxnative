@@ -1367,6 +1367,16 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): its deferred lighting `635061c90d75a8d1` normalises four depth-weighted half-resolution samples by `1 / sum` only where `FSETP.NEU.FTZ` says the sum is not zero. No Switch 1 game has shown the symptom; Maxwell's comparisons follow for the same semantics (the flag is on all of them in the 8 Switch 1 games counted).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`CompareFtz`, on the game's encoding) and `test_dmsh_maxwell_ftz.py`.
 
+### Compute threads that return before a barrier
+
+- **Symptom:** the GPU stays at 100% after a dispatch, and `[RED] SyncWait timed out on fence N` follows. The Mac's WindowServer stops minutes later, because a Metal command buffer that never completes is not reclaimed when the process exits.
+- **Cause:** Ampere lets a thread that has exited leave the workgroup's barriers; Metal requires every thread of a threadgroup at each `threadgroup_barrier`. Separately, a loop whose bound comes from GPU data that went wrong does not end.
+- **Fix:**
+  - `BarrierExits.cs`: a compute thread that returns before a barrier keeps arriving at the later barriers instead.
+  - `dmsh_build.py` `loop_guard`: every loop also ends once its function has run 2^18 iterations in all (the longest bounded loop seen: 255). A loop with a barrier in its body counts on a counter of its own, so the cap ends it on the same iteration for every thread of the threadgroup.
+- **Found on:** Orbitals (`040004F027560000`) and PRAGMATA (not in the games table): GPU hangs that needed a restart.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_barrier_exits.py` and `python3 dm/gfx/tests/test_dmsh_loop_guard.py`.
+
 ### Barrier moves around warp shuffles
 
 - **Symptom:** `Ampere instruction f55 at 0x… (000fe20000000000000000001a0f7f55) is not implemented` in the shader build; those shaders are left out.

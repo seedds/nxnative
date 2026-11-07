@@ -97,11 +97,11 @@ static void image_case(int tid) {
     os_unfair_lock_lock(&g_rmu);
     id<MTLTexture> view = tex_by_id(tid); uint64_t rid = 0, rid2 = 0;
     CHECK(view != base && !(view.usage & MTLTextureUsageShaderWrite), "the sampled view is swizzled and read-only");
-    id<MTLTexture> img = img_fit(tid, view, NVN_DPF_FLOAT, &rid);
+    id<MTLTexture> img = img_fit(tid, view, NVN_DPF_FLOAT, view.textureType, &rid);
     MTLTextureSwizzleChannels s = img.swizzle;
     CHECK(img && (img.usage & MTLTextureUsageShaderWrite) && rid == img.gpuResourceID._impl, "the image slot gets a writable view");
     CHECK(s.red == MTLTextureSwizzleRed && s.green == MTLTextureSwizzleGreen && s.blue == MTLTextureSwizzleBlue && s.alpha == MTLTextureSwizzleAlpha, "the image view has no channel mapping");
-    CHECK(img_fit(tid, view, NVN_DPF_FLOAT, &rid2) == img && rid2 == rid, "the image view is kept for the next bind");
+    CHECK(img_fit(tid, view, NVN_DPF_FLOAT, view.textureType, &rid2) == img && rid2 == rid, "the image view is kept for the next bind");
     os_unfair_lock_unlock(&g_rmu);
     run2(pipe_of(@"#include <metal_stdlib>\nusing namespace metal;\nkernel void store(texture2d<float, access::write> t [[texture(0)]], uint i [[thread_position_in_grid]]) { t.write(float4(0.25, 0.5, 0.75, 0.125), uint2(i, 0)); }\n", @"store"), img, nil);
     uint8_t px[8]; [base getBytes:px bytesPerRow:8 fromRegion:MTLRegionMake2D(0, 0, 2, 1) mipmapLevel:0];

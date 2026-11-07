@@ -46,6 +46,7 @@ Update 1.1.0 (v65536) over the base game, SDK 19.3.16. Unity 2022.3.62f2 IL2CPP 
 
 ## Found on this game
 
+- A base NSZ of this game tagged `[v0]` is 1.1.0 (v65536) by its content meta, as the eShop now serves it: the NSP script names a package's version from its content meta, so that base alone is this profile's `v65536` ([An update is taken for the version in its file name](../../../docs/reference/packing.md#an-update-is-taken-for-the-version-in-its-file-name)).
 - Existing [Function-matched cuts](../../../docs/reference/rewriter.md#function-matched-cuts-for-unregistered-builds) work on this `sdk` build without a row of its own.
 
 ## Open

@@ -148,11 +148,11 @@ class Rewrite(unittest.TestCase):
         plain = re.sub(r'    float4 _50 = .*\n', '    float4 _50 = float4(0.0);\n', GRASS.replace(', center_no_perspective', ''))   # a plain interpolated input, one sample left
         src = border_emu(plain)
         refl = reflect('k', 'ps', src, {'sbufs': []})
-        fv, meta = dmsh_fetch.variant(src, refl)
+        fv, meta = dmsh_fetch.fold(src, refl)
         self.assertIsNotNone(fv, meta)
         self.assertEqual(len(meta['calls']), 1)
         self.assertEqual(meta['mixed_regs'], [])
-        self.assertRegex(fv, r'\(FX_0 == 0 \? fb0 : [^;]*FX_0 == 7 \? fb7 : dm_bs\(spvDescriptorSet0\.fp_t_tcb_8\.sample\(', 'a tile read replaces the corrected sample')
+        self.assertRegex(fv, r'\(fx0 == 0 \? fb0 : [^;]*fx0 == 7 \? fb7 : dm_bs\(spvDescriptorSet0\.fp_t_tcb_8\.sample\(','a tile read replaces the corrected sample')
 
     @unittest.skipUnless(shutil.which('xcrun'), 'requires Metal compilers')
     def test_compiles(self):

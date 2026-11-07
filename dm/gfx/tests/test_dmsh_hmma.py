@@ -113,6 +113,42 @@ kernel void check_seq(device const ushort *in [[buffer(0)]], device uint *out [[
 }
 '''
 # Call 4 is given A0's registers on purpose: A1 must come from shared memory (FlagADirect), transposed (FlagATrans)
+# A chain held in slot 0 while calls outside every chain run (Ocarina of Time's agl_ndsr_vr networks, GitHub issue #1537): such a call has slot 0 in its flags
+# and must leave slot 0's accumulator alone. E0 = A0 B0 + C kept in slot 0 (flags 4), then E1 = A1 B2 (C = 0, 8) and + A1 B3 (C through the registers, 0), both outside
+# every chain, then E0 += A0 B1 from slot 0 (2). The same outputs and reference as the run above
+CLOBBER_KERNEL = '''
+static uint pk(device const ushort* p, int i, int j) { return uint(p[i]) | uint(p[j]) << 16; }
+kernel void check_seq(device const ushort *in [[buffer(0)]], device uint *out [[buffer(1)]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]],
+                      uint gid [[thread_position_in_grid]])
+{
+    threadgroup spvUnsafeArray<uint, 1280> shm;
+    threadgroup spvUnsafeArray<uint, 1024> scr;
+    device const ushort* x = in + sg * 1152 + (gid / 128) * 4 * 1152;
+    device const ushort *A0 = x, *A1 = x + 256, *B0 = x + 512, *B1 = x + 640, *B2 = x + 768, *B3 = x + 896, *C = x + 1024;
+    threadgroup ushort* sh = (threadgroup ushort*)&shm[0];
+    int base0 = int(sg) * 1280, base1 = base0 + 768;   // bytes: 16 rows of 48, then 16 rows of 32
+    for (int i = int(lane); i < 256; i += 32) { int r = i / 16, c = i % 16; sh[base0 / 2 + r * 24 + c] = A0[i]; sh[base1 / 2 + c * 16 + r] = A1[i]; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    int l = int(lane), g = l / 4, t = l % 4, blk = int(sg) * 256;
+    int a00 = int(pk(A0, g * 16 + 2 * t, g * 16 + 2 * t + 1)), a01 = int(pk(A0, (g + 8) * 16 + 2 * t, (g + 8) * 16 + 2 * t + 1));
+    int a02 = int(pk(A0, g * 16 + 8 + 2 * t, g * 16 + 9 + 2 * t)), a03 = int(pk(A0, (g + 8) * 16 + 8 + 2 * t, (g + 8) * 16 + 9 + 2 * t));
+    int a10 = int(pk(A1, g * 16 + 2 * t, g * 16 + 2 * t + 1)), a11 = int(pk(A1, (g + 8) * 16 + 2 * t, (g + 8) * 16 + 2 * t + 1));
+    int a12 = int(pk(A1, g * 16 + 8 + 2 * t, g * 16 + 9 + 2 * t)), a13 = int(pk(A1, (g + 8) * 16 + 8 + 2 * t, (g + 8) * 16 + 9 + 2 * t));
+    int b00 = int(pk(B0, (2 * t) * 8 + g, (2 * t + 1) * 8 + g)), b01 = int(pk(B0, (2 * t + 8) * 8 + g, (2 * t + 9) * 8 + g));
+    int b10 = int(pk(B1, (2 * t) * 8 + g, (2 * t + 1) * 8 + g)), b11 = int(pk(B1, (2 * t + 8) * 8 + g, (2 * t + 9) * 8 + g));
+    int b20 = int(pk(B2, (2 * t) * 8 + g, (2 * t + 1) * 8 + g)), b21 = int(pk(B2, (2 * t + 8) * 8 + g, (2 * t + 9) * 8 + g));
+    int b30 = int(pk(B3, (2 * t) * 8 + g, (2 * t + 1) * 8 + g)), b31 = int(pk(B3, (2 * t + 8) * 8 + g, (2 * t + 9) * 8 + g));
+    int c0 = int(pk(C, g * 8 + 2 * t, g * 8 + 2 * t + 1)), c1 = int(pk(C, (g + 8) * 8 + 2 * t, (g + 8) * 8 + 2 * t + 1));
+    int addr0 = base0 + ((l & 7) + 8 * ((l >> 3) & 1)) * 48 + 16 * (l >> 4), addr1 = base1 + (l & 7) * 32 + ((l >> 3) & 1) * 16 + (l >> 4) * 256;
+    int f1 = 4, f2 = 8, f3 = 0, f4 = 2, z = 0;
+    int e1, e2, e3, e4;
+    int d1 = dmsh_hmma16816_f16(l, blk, a00, a01, a02, a03, b00, b01, c0, c1, f1, z, z, z, z, z, z, e1, scr);
+    int d2 = dmsh_hmma16816_f16(l, blk, a10, a11, a12, a13, b20, b21, z, z, f2, z, z, z, z, z, z, e2, scr);
+    int d3 = dmsh_hmma16816_f16(l, blk, a10, a11, a12, a13, b30, b31, d2, e2, f3, z, z, z, z, z, z, e3, scr);
+    int d4 = dmsh_hmma16816_f16(l, blk, a00, a01, a02, a03, b10, b11, d1, e1, f4, z, z, z, z, z, z, e4, scr);
+    out[gid * 4] = uint(d4); out[gid * 4 + 1] = uint(e4); out[gid * 4 + 2] = uint(d3); out[gid * 4 + 3] = uint(e3);
+}
+'''
 HALF = r'''#import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 static float h2f(uint16_t h) { __fp16 v; memcpy(&v, &h, 2); return (float)v; }
@@ -267,6 +303,9 @@ class HmmaOnGpu(unittest.TestCase):
 
     def test_flagged_run_matches_reference(self):
         compile_and_run(self, hmma_msl(HEAD + HELPER + SEQ_KERNEL), SEQ_RUNNER)
+
+    def test_calls_outside_a_chain_leave_its_slot_alone(self):
+        compile_and_run(self, hmma_msl(HEAD + HELPER + CLOBBER_KERNEL), SEQ_RUNNER)
 
 
 def inst(hi, lo): return struct.pack('<QQ', lo, hi)

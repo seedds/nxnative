@@ -357,6 +357,9 @@ GH_TOKEN=$(gh auth token) python3 dm/tools/triage_report.py --fetch origin > rep
 # written to the Desktop with your own home-screen name
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys -o ~/Desktop/Mario.ipa --app-name "Mario Wonder"
 
+# your own app icon instead of the game's, for the IPA or the Mac app (a square PNG, JPEG or HEIC; 1024x1024 looks best)
+python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --icon ~/Pictures/mario-icon.png
+
 # pack Mario 1.0.0 instead of 1.2.1 (the folder still needs both NSPs: the shader tables cover both versions)
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys -p v0
 
@@ -566,7 +569,7 @@ What step 1 does not cover yet (GitHub issue #402): a replay that equals the liv
 
 ### A Mac app
 
-`--platform mac-app` (`PLATFORM = 'mac-app'` in Spyder) builds everything `--platform mac` builds, then packs a Mac app of the game with `dm/mac/pack_app.py`. The app is `<NSP folder>/<game name>.app` (a `:` or `/` in the name becomes ` - `); `-o` names another path ending in `.app`. Open it from Finder, from any folder: it does not need the build folder or the drive it is on. Like the Mac host, it needs a Mac with Apple silicon. Its name, version and bundle ID are the IPA's: the game name and display version from the control data, and `org.nxnative.<title ID>`. Its icon is the game's icon as `AppIcon.icns` (`sips`, `iconutil`).
+`--platform mac-app` (`PLATFORM = 'mac-app'` in Spyder) builds everything `--platform mac` builds, then packs a Mac app of the game with `dm/mac/pack_app.py`. The app is `<NSP folder>/<game name>.app` (a `:` or `/` in the name becomes ` - `); `-o` names another path ending in `.app`. Open it from Finder, from any folder: it does not need the build folder or the drive it is on. Like the Mac host, it needs a Mac with Apple silicon. Its name, version and bundle ID are the IPA's: the game name and display version from the control data, and `org.nxnative.<title ID>`. Its icon is the game's icon as `AppIcon.icns` (`sips`, `iconutil`), or the picture `--icon` names (PNG, JPEG or HEIC, square, 1024x1024 at best).
 
 The bundle holds what the IPA holds, with the Mac's shader libraries:
 
@@ -694,7 +697,7 @@ Notes on these steps:
 - Each shader's cache key (`shader_key`) includes `CODE_FP`, a hash of the *code form* (`dmsh_chain.code_form`: the AST, with docstrings and the rule functions' bodies removed) of `dmsh_build.py` and its helper modules. An edit that cannot change the output (a comment, a docstring, blank lines, formatting) keeps every shader's key, so the next build restores them all instead of translating them again; any change to code, a constant, a string literal or a default argument still rebuilds all of them. The chain version is not touched by this: it still hashes whole files.
 - `build_ipa.sh` takes the rewritten modules from `$W/build/patched_<package>` and the RomFS image from `$W/data/<package>/RomFS.img` (legacy folders are also accepted); `PATCHED` and `ROMFS` override them. In unsigned IPA mode, `pack_ipa.py` packs the shader libraries, RomFS and add-on content beside the app Xcode built, as `DmIOS.app/msl/b-<chain version>`, `romfs` and `aoc`. Prepared Xcode projects instead sync these resources into the app before signing.
 - It also bundles a standard font (macOS's Arial Unicode, `STD_FONT=` overrides it) and the generated `nintendo_ext.ttf`.
-- The icon is the `icon.jpg` that `nx_extract` saves next to `RomFS.img`; `DM_ICON=` points at another image.
+- The icon is the `icon.jpg` that `nx_extract` saves next to `RomFS.img`; `DM_ICON=` points at another image. The NSP script's `--icon` sets it for the IPA and the Mac app alike.
 - `DM_ENV_FILE=` bakes environment switches into the app, and `DM_DISPLAY_NAME=` renames it.
 - The optional compiler definition `DM_PLAYER_BUILD=1` makes the iOS app ignore saved NVN diagnostic/renderer overrides, test switches, Metal validation switches and scripted input/capture controls from environment files. It also ignores a saved shader-library path so the app uses the new bundle's libraries. FPS and Metal HUD switches, frame rate, console mode, language and controller settings remain available. `DM_NVN_ENC_THREAD` is also retained: it selects direct/deferred encoding without enabling profiling, validation or dumps. Normal builds keep the existing environment-file behavior. This allows a player IPA to update a previously profiled installation without deleting its saved environment file or saves.
 - In that player build, settings declared in `dm/launcher.json` are controlled by the launcher and its saved choices; environment files cannot lock those rows. The raw `MTL_HUD_ENABLED` override is ignored when the launcher offers the Metal HUD control. `DM_METAL_HUD` supplied to the build sets its initial launcher default, while the control stays editable.

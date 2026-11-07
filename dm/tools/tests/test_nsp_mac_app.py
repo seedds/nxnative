@@ -714,6 +714,20 @@ class Script(unittest.TestCase):
         a = nsp.parse_args(['--platform', 'mac-app', '--mac-sign', 'Developer ID Application: X (T)', '-o', '/tmp/x.app'])
         self.assertEqual((a.platform, a.mac_sign, a.out), ('mac-app', 'Developer ID Application: X (T)', '/tmp/x.app'))
 
+    def test_icon_option(self):
+        self.assertIsNone(nsp.parse_args([]).icon)
+        self.assertEqual(nsp.parse_args(['--icon', '/x/icon.png']).icon, '/x/icon.png')
+
+    def test_app_icon(self):   # --icon wins over the game's icon.jpg; without it the packed version's icon, then the base game's
+        tmp = Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp)
+        game, base = tmp / 'game', tmp / 'base'; game.mkdir(); base.mkdir()
+        self.assertIsNone(nsp.app_icon(None, game, base))
+        (base / 'icon.jpg').write_bytes(b'base'); self.assertEqual(nsp.app_icon(None, game, base), base / 'icon.jpg')
+        (game / 'icon.jpg').write_bytes(b'game'); self.assertEqual(nsp.app_icon('', game, base), game / 'icon.jpg')
+        (tmp / 'mine.png').write_bytes(b'png')
+        with mock.patch.object(nsp, 'say'): self.assertEqual(nsp.app_icon(str(tmp / 'mine.png'), game, base), (tmp / 'mine.png').resolve())
+        with self.assertRaises(nsp.BuildError): nsp.app_icon(str(tmp / 'missing.png'), game, base)
+
     def test_app_name(self):
         self.assertEqual(nsp.mac_app_name('The Legend of Zelda: Echoes of Wisdom'), 'The Legend of Zelda - Echoes of Wisdom')
         self.assertEqual(nsp.mac_app_name('AC/DC'), 'AC - DC'); self.assertEqual(nsp.mac_app_name(':'), 'nxnative')

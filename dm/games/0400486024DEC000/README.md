@@ -11,6 +11,7 @@ A Switch 2 game: update v131072, SDK 22.2.8 (`Ounce`). Nintendo EPD's engine (se
 | `sys_resource 0x3000000` | `game.tsv` | 48 MB, as the NPDM declares |
 | `render_cond on` | `game.tsv` | agl clears a copy of the prepass depth again under a render condition the console skips. Run unconditionally, the opaque pass's `EQUAL` test fails everywhere ([PR 1299](https://github.com/seedds/nxnative/pull/1299)'s finding) |
 | `gpu_timestamps segment` | `game.tsv` | the game's dynamic resolution decides from GPU timestamps, and with one time per submission it never lowers its resolution ([why](../../../docs/reference/frame-rate.md#dynamic-resolution-that-never-moves-and-draw-passes-that-wait-for-each-other)) |
+| `gpu_ts_hz 31250000` | `game.tsv` | the game turns the difference of two raw counter reports into its wind and particle time step at the Switch 2's system counter rate: at NVN's 614.4 MHz its foliage, falling leaves and hanging plants moved 19.66 times too fast ([why](../../../docs/reference/frame-rate.md#a-game-that-reads-raw-timestamp-reports-at-another-rate)) |
 | `draw_barriers game` | `game.tsv` | about 180 full barriers a frame NVN does not ask for: GPU 25 → 18 ms at full resolution |
 | `tex_flush_upload on`, `tex_dirty_upload on` | `game.tsv` | as Tears of the Kingdom: the CPU writes the terrain tiles' height (R32F), blend and hole (RGBA8) maps into textures after creating them. Without the keys those textures stay zero: flat blue holes in the ground around the path with grass floating in them, and grey stone where the console shows dirt |
 | `shader_groups`, `shader_note` | `game.tsv` | shaders grouped as `/Shader/`, `/Effect/`, `/Lib/`, `/UI/` |
@@ -80,6 +81,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 
 ## Found on this game
 
+- [A game that reads raw timestamp reports at another rate](../../../docs/reference/frame-rate.md#a-game-that-reads-raw-timestamp-reports-at-another-rate): foliage, falling leaves and hanging plants moving about 20 times too fast ("heavy wind on all moving elements", issue #1326).
 - [Position invariance across shaders](../../../docs/reference/shaders.md#position-invariance-across-shaders): white shapes on plants and bushes for single frames in Kokiri Forest, from the foliage's mesh pre-pass and mesh colour pass rounding the position apart.
 - [An old NUP cache stamp makes the build unpack again](../../../docs/reference/packing.md#an-old-nup-cache-stamp-makes-the-build-unpack-again): after a packer update the v131072 image is checked against the NUP in 21.6 s and kept, instead of unpacked again.
 - [Uncompressed storage beside storage the GPU writes](../../../docs/reference/nvn-objects.md#uncompressed-storage-beside-storage-the-gpu-writes): resolved, the ground opening in holes after walking out of a cave and back (the terrain's height and blend maps came out as zeros once the first normal map had been drawn into their pool); a reload had hidden it.

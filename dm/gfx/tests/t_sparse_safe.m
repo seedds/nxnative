@@ -178,16 +178,15 @@ int main(void) { @autoreleasepool {
       int k9; @autoreleasepool { k9 = wb != nil; } CHECK("9 kept while the batch is open", k9);
       atomic_store(&g_up_alloc_busy[seq0 % 3], 0); @autoreleasepool { defer_drain(); res_commit(); }
       int g9; @autoreleasepool { g9 = wb == nil; } CHECK("9 released after the batch completed", g9); }
-    // 10. the pool table built in this submission is filled again at commit when pools changed meanwhile (a MapVirtual on another thread during the encode): the new pages are in it
-    { (void)gmem_map_gpu(); id<MTLBuffer> t0 = g_gmem_buf; uint64_t p0 = g_gmem_patched;
+    // 10. pools changed after the table was built (a MapVirtual on another thread during the encode): at commit the submission's argument words are pointed at a new table that has
+    // the new pages; the old table, which an earlier segment may be reading, is not filled again in place (main's gmem_commit_patch, 339d9f23)
+    { (void)gmem_map_gpu(); id<MTLBuffer> t0 = g_gmem_buf; uint64_t word = t0.gpuAddress; gmem_slot_note(&word, NULL);
       CHECK("map pages after the table was built", map_at(200u << 20, 0x40000, 6u << 20));
       gmem_commit_patch();
-      CHECK("filled again in place", g_gmem_buf == t0 && g_gmem_patched == p0 + 1);
-      const uint8_t *tb = (const uint8_t *)g_gmem_buf.contents; uint64_t want = (uint64_t)(uintptr_t)(base + (200u << 20) + 0x100); int hit = 0;
+      CHECK("10 a new table, the word pointed at it", g_gmem_buf != t0 && word == g_gmem_buf.gpuAddress);
+      const uint8_t *tb = (const uint8_t *)g_gmem_buf.contents; uint64_t want = (uint64_t)(uintptr_t)(base + ((200u << 20) + 0x100)); int hit = 0;
       for (int k = 1; k < DMSH_GMEM_MAP_ENTRIES; k++) { const uint64_t *e = (const uint64_t *)(tb + (size_t)k * DMSH_GMEM_MAP_ENTRY); if (e[0] == ~0ull) break; if (want >= e[0] && want < e[1]) { hit = 1; break; } }
-      CHECK("the new pages are in the table", hit);
-      g_gmem_first_fence = 0; CHECK("map more", map_at(208u << 20, 0x10000, 7u << 20)); uint64_t p1 = g_gmem_patched; gmem_commit_patch();
-      CHECK("a table an earlier submission binds is left alone", g_gmem_patched == p1); }
+      CHECK("the new pages are in the table", hit); }
     // 11. a deferred sparse unmap also waits for the upload batches begun before it (a deswizzle may read the pages through the run's buffer)
     { CHECK("11 map", map_at(300u << 20, 0x40000, 8u << 20));
       unsigned sq = g_up_seq; g_up_seq = sq + 1; atomic_store(&g_up_slot_seq[sq % 3], (int64_t)sq); atomic_store(&g_up_alloc_busy[sq % 3], 1);
@@ -206,27 +205,29 @@ int main(void) { @autoreleasepool {
       CHECK("12 destination too short refused", nvn_deswz_check(&dd, 0, 0, 0, 0, lay.size, 0, 1024, 256 * 4) == -2);
       dd.width = 1u << 20; dd.height = 1u << 20; CHECK("12 absurd grid refused", nvn_deswz_check(&dd, 0, 0, 0, 0, ~0ull >> 8, 0, ~0ull >> 8, (1u << 20) * 4u) == -2); }
     // 13. a table built in an earlier submission and reused in this one: at commit this submission's argument words are pointed at a new table that has the pages mapped meanwhile
-    { (void)gmem_map_gpu(); g_gmem_first_fence = 0; uint64_t word = g_gmem_buf.gpuAddress, old = word; gmem_slot_note(&word);
+    { (void)gmem_map_gpu(); uint64_t word = g_gmem_buf.gpuAddress, old = word; gmem_slot_note(&word, NULL);
       CHECK("13 map after the encode", map_at(400u << 20, 0x40000, 11u << 20));
       gmem_commit_patch();
       CHECK("13 the word points at a new table", word != old && word == g_gmem_buf.gpuAddress);
-      const uint8_t *tb = (const uint8_t *)g_gmem_buf.contents; uint64_t want = (uint64_t)(uintptr_t)(base + (400u << 20) + 0x80); int hit = 0;
+      const uint8_t *tb = (const uint8_t *)g_gmem_buf.contents; uint64_t want = (uint64_t)(uintptr_t)(base + ((400u << 20) + 0x80)); int hit = 0;
       for (int k = 1; k < DMSH_GMEM_MAP_ENTRIES; k++) { const uint64_t *e = (const uint64_t *)(tb + (size_t)k * DMSH_GMEM_MAP_ENTRY); if (e[0] == ~0ull) break; if (want >= e[0] && want < e[1]) { hit = 1; break; } }
       CHECK("13 the new table has the pages", hit);
-      uint64_t w2 = 0x1234; gmem_slot_note(&w2); gmem_commit_patch(); CHECK("13 an up-to-date table: words pointed at it", w2 == g_gmem_buf.gpuAddress); }
-    // 14. a segment of this submission committed (sub_cut / an indirect-count wait): the table it may read is brought up to date first, then never filled again in place: a pool
-    // change after it gives a new table, and the segment's table stays as it was (PRAGMATA: rows rewritten under a running binary search)
-    { (void)gmem_map_gpu(); id<MTLBuffer> t0 = g_gmem_buf; uint64_t word = t0.gpuAddress; gmem_slot_note(&word);
+      uint64_t w2 = 0x1234; gmem_slot_note(&w2, NULL); gmem_commit_patch(); CHECK("13 an up-to-date table: words pointed at it", w2 == g_gmem_buf.gpuAddress); }
+    // 14. a segment of this submission committed (sub_cut / an indirect-count wait, mdi_wait): its words are pointed at an up-to-date table before the GPU sees it, and a pool change
+    // after it gives a new table: the segment's table is never rewritten (PRAGMATA: rows rewritten under a running binary search)
+    { (void)gmem_map_gpu(); id<MTLBuffer> t0 = g_gmem_buf; uint64_t word = t0.gpuAddress; gmem_slot_note(&word, NULL);
       CHECK("14 map before the segment", map_at(500u << 20, 0x40000, 12u << 20));
-      uint64_t p0 = g_gmem_patched; gmem_segment_commit();
-      CHECK("14 the segment's table brought up to date in place (built in this submission, not yet on the GPU)", g_gmem_buf == t0 && g_gmem_patched == p0 + 1 && word == t0.gpuAddress);
-      CHECK("14 then it counts as in flight", g_gmem_first_fence == 0);
-      uint8_t snap[64]; memcpy(snap, t0.contents, sizeof snap);
-      uint64_t w2 = 0; gmem_slot_note(&w2);
+      uint8_t snap0[64]; memcpy(snap0, t0.contents, sizeof snap0);
+      gmem_commit_patch();
+      id<MTLBuffer> t1 = g_gmem_buf;
+      CHECK("14 the segment's words point at a new table", t1 != t0 && word == t1.gpuAddress);
+      CHECK("14 the old table is untouched", !memcmp(snap0, t0.contents, sizeof snap0));
+      uint8_t snap[64]; memcpy(snap, t1.contents, sizeof snap);
+      uint64_t w2 = 0; gmem_slot_note(&w2, NULL);
       CHECK("14 map after the segment", map_at(508u << 20, 0x10000, 13u << 20));
-      uint64_t p1 = g_gmem_patched; gmem_commit_patch();
-      CHECK("14 the end of the submission makes a new table", g_gmem_buf != t0 && g_gmem_patched == p1 && w2 == g_gmem_buf.gpuAddress);
-      CHECK("14 the segment's table is untouched", !memcmp(snap, t0.contents, sizeof snap));
+      gmem_commit_patch();
+      CHECK("14 the end of the submission makes a new table", g_gmem_buf != t1 && w2 == g_gmem_buf.gpuAddress);
+      CHECK("14 the segment's table is untouched", !memcmp(snap, t1.contents, sizeof snap));
     }
     // 15. breadcrumbs (DM_NVN_BREADCRUMB): the first dispatch of the failed fence without its GPU-written mark is the one in flight
     { g_csp_buf = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared]; memset(g_csp_buf.contents, 0, 256);

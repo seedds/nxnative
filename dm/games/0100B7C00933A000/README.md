@@ -63,7 +63,7 @@ Status: on the Mac, the boot, the title (a VP9 movie behind the logo), the main 
   | Frames held a second vertical sync, of 300 | 0–2 | 0–2 | 35–47 |
   | Footprint | 3,421 MiB | 3,538 MiB | 3,996 MiB |
 
-  1.5x holds 60 fps on that Mac; 2x needs more GPU time than one vertical sync and runs at about 52–55. Not run: outdoor missions with many Pikmin, caves, long sessions, fullscreen on a 4K screen.
+  1.5x holds 60 fps on that Mac with the mod; 2x with it needs more GPU time than one vertical sync and runs at about 52–55. **Without the mod, 2x holds 60 fps** on the same route: GPU p50 14.6–15.9 ms (p95 at most 17.1), 0–3 of 300 frames held a second vertical sync, 4,049 MiB, two buffers demoted (640x360 and 533x300, both written as images). Not run: outdoor missions with many Pikmin, caves, long sessions, fullscreen on a 4K screen.
 - **RomFS mods.** The community "HQ Graphics" mod is one file, `Carrot4/Content/Paks/Carrot4-Switch_0_P.pak`, which Unreal mounts over the game's paks: `DefaultEngine.ini` (shadows at 4096, `r.ViewDistanceScale=5`, ambient occlusion, no anti-aliasing; `bUseFixedFrameRate` stays `True`) and `SwitchDeviceProfiles.ini`. It loads with `DM_ROMFS_OVERLAY=<mod folder>/romfs` in the player's `env.txt` (the overlay merges directory listings, so a pak the game does not ship is found; update 1.1.1 ships none of that name). With the fixed frame rate kept, the host's writer steps the game at 60 fps (`Unreal fixed frame rate … 30 → 60 fps` in the log). The mod's "60 FPS" variants set `bUseFixedFrameRate=False`, so the host leaves the engine alone and it steps by the time that passed: with the host's rate they are not needed.
 
 ## Mac routes

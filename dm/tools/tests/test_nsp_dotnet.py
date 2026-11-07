@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -65,6 +66,47 @@ class Dotnet(unittest.TestCase):
                     nsp.configure_dotnet(env)
                 self.assertNotIn('DOTNET_ROOT', env)
                 self.assertNotIn('DOTNET_ROOT', os.environ)
+
+
+class Sdk10First(unittest.TestCase):
+    """An older .NET earlier on PATH (an installer's /usr/local/share/dotnet before ~/.dotnet) gives way to the first dotnet with an SDK 10."""
+    def setUp(self):
+        t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup); self.tmp = Path(t.name)
+        self.tools = str(self.tmp / 'tools'); os.mkdir(self.tools)   # a PATH entry without dotnet
+
+    def dotnet(self, name, sdks, code=0):
+        d = self.tmp / name; d.mkdir()
+        (d / 'dotnet').write_text(f'#!/bin/sh\nprintf "{sdks}"\nexit {code}\n'); (d / 'dotnet').chmod(0o755)
+        return str(d)
+
+    def path_after(self, *dirs):
+        env = {'PATH': os.pathsep.join(dirs)}
+        with mock.patch.object(nsp, 'say') as say: nsp.dotnet_sdk10_first(env)
+        self.said = say.call_args
+        return env['PATH'].split(os.pathsep)
+
+    def test_older_sdk_in_front_gives_way(self):
+        old, home = self.dotnet('share', '7.0.402 [/s/sdk]\\n'), self.dotnet('home', '9.0.100 [/h/sdk]\\n10.0.403 [/h/sdk]\\n')
+        self.assertEqual(self.path_after(self.tools, old, home, '/usr/bin'), [home, self.tools, old, '/usr/bin'])
+        self.assertIn(old, self.said.args[0])
+
+    def test_preview_counts(self):
+        old, new = self.dotnet('share', '8.0.318 [/s/sdk]\\n'), self.dotnet('home', '11.0.100-preview.1 [/h/sdk]\\n')
+        self.assertEqual(self.path_after(old, new), [new, old])
+
+    def test_first_with_sdk10_keeps_the_order(self):
+        local, home = self.dotnet('local', '10.0.403 [/l/sdk]\\n'), self.dotnet('home', '10.0.100 [/h/sdk]\\n')
+        dirs = [self.tools, local, home]
+        self.assertEqual(self.path_after(*dirs), dirs)
+        self.assertIsNone(self.said)
+
+    def test_no_sdk10_keeps_the_order(self):
+        dirs = [self.dotnet('share', '7.0.402 [/s/sdk]\\n'), self.dotnet('home', '8.0.318 [/h/sdk]\\n9.0.100 [/h/sdk]\\n')]
+        self.assertEqual(self.path_after(*dirs), dirs)
+
+    def test_failing_dotnet_is_skipped(self):
+        broken, home = self.dotnet('broken', '', code=1), self.dotnet('home', '10.0.403 [/h/sdk]\\n')
+        self.assertEqual(self.path_after(broken, home, broken), [home, broken, broken])
 
 
 if __name__ == '__main__': unittest.main()

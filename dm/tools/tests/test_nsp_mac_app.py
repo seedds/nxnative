@@ -1060,6 +1060,23 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
             self.build()
         self.assertFalse(any('--seen-shaders' in m for m in self.said))
 
+    def test_shader_watch_reads_full_and_partial_build_progress(self):
+        path = self.tmp / 'progress.json'
+        watch = nsp.ShaderWatch(path)
+        for total in (4, 2):  # a full build and a --seen-shaders build report their own totals
+            with self.subTest(total=total):
+                path.write_text(json.dumps({'step': 'cache check', 'done': 1, 'total': total, 'cached': 1}))
+                self.assertEqual(watch(), {'step': 'cache check', 'done': 1, 'total': total, 'unit': 'shaders', 'note': '1 cached'})
+                path.write_text(json.dumps({'step': 'compiling', 'done': total, 'total': total, 'misses': 1}))
+                self.assertEqual(watch(), {'step': 'compiling', 'done': total, 'total': total, 'unit': 'shaders', 'note': '1 not cached'})
+
+    def test_shader_watch_waits_for_readable_progress(self):
+        path = self.tmp / 'progress.json'
+        watch = nsp.ShaderWatch(path)
+        self.assertIsNone(watch())
+        path.write_text('{')
+        self.assertIsNone(watch())
+
     def run_cmd(self, **kw):
         game = self.tmp / 'ex'; game.mkdir(exist_ok=True); (game / 'RomFS').mkdir(exist_ok=True)
         return nsp.mac_run(self.tmp, game, self.tmp / 'patched', self.tmp / 'dmhost', self.tmp / 'font', self.sh / 'partial', None, 'nvn', 'en-US', {}, self.logs, self.g, **kw)

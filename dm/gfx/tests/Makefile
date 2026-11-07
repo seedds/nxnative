@@ -153,6 +153,8 @@ check_t_ms_slot: t_ms_slot
 	MTL_DEBUG_LAYER=1 ./t_ms_slot
 t_cbs_fault: t_cbs_fault.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_cbs_fault.m $(MTL_T_SRC) $(FW)
+t_gpu_watchdog: t_gpu_watchdog.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_gpu_watchdog.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_cbs_fault
 check_t_cbs_fault: t_cbs_fault
 	./t_cbs_fault

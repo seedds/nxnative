@@ -16,8 +16,14 @@ static pthread_mutex_t g_ro_mu = PTHREAD_MUTEX_INITIALIZER;   // the SDK holds g
 
 HLE_FORCE("_ZN2nn2ro10InitializeEv", "connect to the ldr:ro service; the host has none, symbol lookups search the loaded modules directly", Result, h_ro_Initialize, void) { LOG("init takeover: ro::Initialize (no-op)"); dm_thread_service_connect(); return 0; }
 
+uint64_t resolve_import(module_t *m, const char *name);   // hle.c
+int hle_implements(const char *name);
+
+// The host stands in for NVIDIA's Vulkan driver (subsdk0, never loaded: dm/gfx/vk/hle_vk.m), so its Vulkan functions count as definitions of a loaded module. Minecraft (RenderDragon)
+// imports no Vulkan function: it looks up vkGetInstanceProcAddr here and gets the rest through it; without this the lookup failed and the game had no renderer
 HLE_FORCE("_ZN2nn2ro12LookupSymbolEPmPKc", "look up a definition by name in the loaded modules", Result, h_ro_LookupSymbol, uintptr_t *out, const char *name) {
     void *p = name ? guest_sym(name) : NULL;
+    if (!p && name && !strncmp(name, "vk", 2) && hle_implements(name)) p = (void *)resolve_import(NULL, name);
     static int n; if (n++ < 40) LOG("ro::LookupSymbol %s → %p", name ? name : "(null)", p);
     if (!p) { static int red; if (!red++) LOG("[RED] ro::LookupSymbol cannot find %s (first case)", name ? name : "(null)"); return RO_FAIL; }
     if (out) *out = (uintptr_t)p;

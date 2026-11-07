@@ -116,6 +116,9 @@ enum { OBS_UE_MALLOC = 21,                                       // Unreal's FMa
 void gate_obs_set(int id, void (*fn)(uint64_t *regs, int param));
 int gate_obs_present(int id);
 uint64_t now_ns(void);
+// Start once, after environment / launcher settings and host loading, before the guest.
+void memstat_start(void);
+void thrcpu_start(void);
 uint64_t guest_ns(void);              // Guest clock (hle_os.c; does not advance while frozen, guest_clock_freeze)
 uint64_t guest_ticks(void);           // The guest's system counter on that clock: 19.2 MHz, or 31.25 MHz for the Switch 2 (hle_os.c)
 int dm_detclock_enabled(void);

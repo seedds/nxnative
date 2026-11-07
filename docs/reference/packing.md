@@ -24,6 +24,13 @@
 - **Fix:** each source leaves the same files for the survey: `survey_nup` reads the newest version from the container (its ExeFS, a RomFS manifest in `nx_extract`'s format: path, size, first 32 bytes, `Nup.head` inflating only those; the NROs whole and the control data), and `survey_dump` from the folder, whose name names the game, as a dump has no control data. `same_build` reads main from the container or the folder. A dump may have no `base/` when an update's folder holds code and a RomFS, and `exefs/` and `romfs/` directly in the folder, as `nup extract` writes them, count as `base/`: version 0, so a profile that registers another version packs them from a derived profile.
 - **Found on:** Star Fox (`0400E88025B1A000`, update v131072; no profile in the repository then), The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, issue #1265) and [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md), whose dump holds `updates/131072/` alone.
 
+### A damaged file in a NUP or a dump has no hash to fail
+
+- **Symptom:** the game reloads one asset for ever: a background loader takes about a core and the process several (Ocarina of Time: 412% CPU on the Mac, `OptimizeChangeBanc` and `ParallelDecompThread` busy all session, one model and its texture opened about 22 times a second). Or, from the NSP script: `vN: K file(s) whose bytes do not start as their names promise (a .zs file that is not a zstd stream), so the game files are damaged`, then the files.
+- **Cause:** the game files themselves. An NSP's files are checked against the NCA's hashes at extraction, so a damaged one stops the build ([`--allow-damaged`](../development.md#the-packing-script-in-detail)). A NUP or a dump folder carries no such hashes: whatever bytes it holds are packed. On one NUP of Ocarina of Time three `.zs` textures began with 12,288 zero bytes, so no zstd frame: the game could not decompress them, and its loader asked for them again on every pass ([PR #1530](https://github.com/seedds/nxnative/pull/1530)). The container's own SHA-256 of each file matched, so the bytes were like this when the NUP was packed. Another NUP of the same version holds all three as zstd streams, and none of its 102,185 `.zs` files fails the check.
+- **Fix:** the NSP script reads the first bytes of every file whose name promises a format (`romfs_image.FORMAT_HEADS`: `.zs` starts with a zstd frame or a skippable frame) once per extracted image (`check_formats`, after extraction; the result is kept in `RomFS.img.formats` beside the image until the image changes: Ocarina of Time 16 s from a USB SSD) and stops naming the damaged files: pack again from a good copy of the game. `--allow-damaged` lists them and packs them as they are. The host serves a game's files as they are: substituting other files for damaged ones would hide the damage and change what the game draws.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), a contributor's NUP of v131072.
+
 ### A provisional profile of a Switch 2 game shows no SDK and a Switch 1 memory pool
 
 - **Symptom:** the survey of a Switch 2 game says `SDK: ?` and `no SDK version string found`, and its provisional profile has `app_pool 0xCD500000`.
@@ -90,8 +97,15 @@
 
 - **Symptom:** the first build after restarting the Mac spends minutes in `unpack` (`[1/5] unpack v131072: 5%, 1.2/~24.4 GB`) although the game, the packer and the image are as they were: 8 minutes for a 24.4 GB image from a NUP on a network share.
 - **Cause:** the stamp beside an image (`RomFS.img.inputs.json`) held `st_dev` in the image's identity, and macOS numbers a volume when it mounts it. Across one reboot the Data volume went from 16777234 to 16777232 while inode, size and both times stayed, so `reusable()` refused every game's image at once.
-- **Fix:** `file_identity` leaves `st_dev` out, as the IPA and app packers' stamps already did. Inode, size, modification and change times still catch an image replaced or written over. Every image is packed once more after this change, as after any change to the packer, since its bytes are in each stamp's digest.
+- **Fix:** `file_identity` leaves `st_dev` out, as the IPA and app packers' stamps already did. Inode, size, modification and change times still catch an image replaced or written over. An old stamp still misses the fast check, so the [NUP packer verifies the existing image](#an-old-nup-cache-stamp-makes-the-build-unpack-again) before repacking.
 - **Found on:** Ocarina of Time (Switch 2, `0400486024DEC000`, packed from a NUP; PR #1299); the stamps of Star Fox and Mario Kart World show the same two numbers. `dm/tools/tests/test_romfs_image.py` remounts an image under another device number.
+
+### An old NUP cache stamp makes the build unpack again
+
+- **Symptom:** the next build spends minutes unpacking a NUP after a packer update even though its complete `RomFS.img` is still present.
+- **Cause:** the stamp's digest holds the packers' source (`romfs_image.py` and `pack_nup.py`), and its identity has the fields `file_identity` gives; a change to either misses the fast check for every image, though neither says the image's bytes changed.
+- **Fix:** on a stamp miss, `pack_nup.verified` compares the existing image with what the packer would write now: its size, its header and index as `romfs_image.layout` makes them (the bytes `write` writes, so a change of format still packs again), and each file's bytes against the SHA-256 in the NUP's table of contents. Only the image is read, not the NUP's file data. If the image is the same before and after the check, its stamp is renewed and later builds take the fast check; otherwise it is packed again. The build's unpack line ends in `reused (image checked)`.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) v131072 (PR #1630): the 26.25 GB image took 21.6 s to check on an Apple M1 and 0.1 s to reuse on the next build, against minutes to unpack. `dm/tools/tests/test_nsp_nup.py` (`ImageReuse`) covers an old stamp, a damaged file, a wrong index, a cut-off image, an image changed during the check and an older layout.
 
 ### A stale `DM_ROMFS` path crashes the game soon after `nnMain`
 
@@ -144,6 +158,14 @@
 - **Measured** on Skyward Sword HD, on an external drive, warm cache: 10,017 files to one: copy 3.72 s to 0.18 s, delete 0.40 s to 0.02 s, 150 MB to 131 MB on disk. Reading all 2,470 shaders' reflection and libraries 100 ms to 28 ms. The map must be `MAP_SHARED`: on a file this size a private mapping costs about 80 µs, against 0.9 µs. A cold read has not been measured, as the cache cannot be emptied without an administrator.
 - **Found on:** [Skyward Sword HD](../../dm/games/01002DA013484000/README.md#found-on-this-game).
 
+### A shader build leaves a file per shader output while it runs or after a stop
+
+- **Symptom:** a game's build folder holds tens of thousands of small files while its shaders build, and keeps them when the build stops: Octopath Traveler 0's `_build`, stopped in its compile, held 68,230 files (38,376 in `tmp/dmsh_*`, 29,757 in `shader/cache/b-<chain>/`), against 105 once a build finished. Every later build made another `tmp/dmsh_*` beside the old one.
+- **Cause:** `dmsh_build.py` wrote each shader's outputs into `b-<chain>/` and packed them into the image only at the end ([the entry above](#shader-libraries-take-a-file-per-shader-variant)); its cache check restored every cache hit into that folder before anything was translated; the translator wrote every missed shader's working files (`.bin`, `.spv`, `.res.json`, `.metal`) into one temporary folder before any was finished; and that folder went only when the build ended normally.
+- **Fix:** `dm/gfx/tools/dmsh_build.py`. A finished shader's files go into the compile cache (`cas.db`, under `stage/<output folder>/`) and leave the disk (`commit`); reads of another shader's outputs (a vertex shader's paired pixel MSL for `vs_pad`, the mesh step) take them from there (`output`). At the end the image is written from the staged outputs (`publish_library`, through `shader_lib.write`), with a partial build's image under it less the keys it built, and the folder and the staged entries go; when the image cannot be written, the staged outputs go back into the folder. Cache hits are restored when their shader is finished, not at the look. The shaders are translated and finished in batches of 4 × `J` (the next batch is translated while this one is finished), each in a folder of its own, and a shader's working files go as soon as it is finished. Each build's working folder holds its process ID; a later build removes a `dmsh_*` folder whose process is gone (one without the ID after a day). The NSP script's progress comes from a small file the build rewrites (`DMSH_PROGRESS`), no longer from counting its files. The outputs are the same: chain `cfcc3a82c78b` against the new one, Minecraft Dungeons II's 61,655 library files and Octopath Traveler 0's 41,880 are byte for byte the same (reflection without its `chain` field), apart from `_b_cas.txt`, which lists the new chain's cache digests.
+- **Measured** on an M4 Pro, every shader translated again (the chain changed), the Metal libraries from the cache: Octopath Traveler 0, 10,324 shaders, at most 405 files under `shader/` and `tmp/` (12 outside a build), 2:48 for the step (2:55 with batches of 4 × 128); Minecraft Dungeons II, 15,826 shaders, at most 3,279 with batches of 256 removed whole. Stopped with SIGKILL near the end of a compile: 40 files in `b-<chain>/` and 7 in `tmp/dmsh_*`; the next run cleared them and wrote the same library from the cache in 59 s. A partial build of 42 shaders for the Mac and the iPhone leaves one image each, also when run again over them.
+- **Found on:** [Minecraft Dungeons II](../../dm/games/0100A7C01B792000/README.md#found-on-this-game) and [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md#found-on-this-game) builds, reported by the user.
+
 ### A work folder holds millions of small files
 
 - **Symptom:** a game's `<id>-work` folder is too slow to count: Tears of the Kingdom's held 8,893,028 files and 509 GB, and its count ran past ten minutes.
@@ -158,6 +180,13 @@
 - **Fix:** `unzs` feeds the command the bytes it read (`input=`). No other tool hands an external command a path inside the image. Test: `test_romfs_read.py` `test_zstd_file_inside_an_image`.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md#shaders): every file of its RomFS is zstd-compressed, 13,744 left out in both versions; the first image-backed build after the folder extraction.
 
+### Under `--work-dir` the programs of one game overwrote each other's RomFS
+
+- **Symptom:** an iPhone build of Super Mario 3D All-Stars with `--work-dir` (as NX2Apple runs the script) builds every program, then stops at the app build with `[RED] missing RomFS marker 'MovieData/BgMovieGalaxy.mp4' in <work dir>/extract/v393216/RomFS.img` and `FAIL: no RomFS at …`.
+- **Cause:** the first program's build packs each of the others from its own profile ([`oe::ExecuteProgram`](services.md#multi-program-applications-oeexecuteprogram)), each in its own build folder, `<NSP folder>/<id>_build`. `--work-dir` named one folder for all of them, so each program's `extract/<version>/RomFS.img` replaced the one before, and the package found Sunshine's image where the launcher's should be. Without `--work-dir` the folders were already apart.
+- **Fix:** `build_folder` in `scripts/build_ipa_from_nsp.py` gives a program packed with the first `<work dir>/programs/<id>_build` under `--work-dir`; the first program, a game of one program and `--program N` alone keep the folder as named. Test: `test_nsp_build_folder.py`.
+- **Found on:** [Super Mario 3D All-Stars](../../dm/games/010049900F546000/README.md#found-on-this-game), 1.1.4, built by NX2Apple 1.2.1 as one IPA.
+
 ## Add-on content
 
 ### DLC in Documents is ignored or removed DLC remains installed
@@ -168,6 +197,14 @@
 - **Found on:** synthetic startup and transfer fixtures while reviewing [PR #486](https://github.com/seedds/nxnative/pull/486), part of [issue #388](https://github.com/seedds/nxnative/issues/388). The Foundation fixture runs the actual iOS locator; the push-helper fixture models devicectl's documented merge and replacement behavior, including smaller and empty DLC sets and transfer failure. Applies to every game; no device gameplay validation was performed.
 
 ## Launcher metadata
+
+### A game packed from a NUP or a dump shows "Ver. ?" for a build its profile registers
+
+- **Symptom:** the game shows `?` where it shows its version (Super Mario Bros. Wonder's title screen: `Ver. ?`), and the build's lines name the version as `v327680 (?)`.
+- **Cause:** a package with no control data (a NUP update, a dump) packed from a derived profile, here because the folder had no base game for the shader tables. `derive_profile` took the display version of the build row it writes from the package's `control.nacp` alone and wrote `?` without one, and the host answers `nn::oe::GetDisplayVersion` from that row by `main`'s build ID (`hle_sdk16.c`). The profile it derives from registered that very build, with its display version.
+- **Fix:** `derive_profile` takes the package's control data first, then the display version the profile registers for this `main` build, and `?` only for a build no row names.
+- **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (1.2.1, v327680, an update-only NUP; `main` ff773e90…, the registered build): `Ver. ?` before, `Ver. 1.2.1` after, one Mac boot each to the title screen.
+- **Check:** `dm/tools/tests/test_nsp_alias.py` `test_derived_profile_keeps_the_display_version_the_profile_registers_for_the_build`.
 
 ### No Game language row in an app packed from a NUP or a dump
 
@@ -240,7 +277,7 @@
 
 - **Symptom:** the NSP script or any module tool stops on `main`: `compressed with zstd (NSO flag bit 7), which this loader does not decode yet`; with the decoder but without its package, `ZBIC (zstd) segments need the zbic package (python3 -m pip install zbic)`.
 - **Cause:** from system 22.0.0, an NSO may store its segments as **ZBIC**, NSO flag bit 7 for the whole module (the per-segment compression and check-hash bits keep their meaning). ZBIC is Nintendo's variant of zstd, not a container around standard frames: its frames start with the magic `ZBIC` and its FSE tables are written with binary interpolative coding, so neither `compression.zstd` nor the `zstd` command can read them.
-- **Fix:** `dm/tools/nso.py` decodes such segments with the [`zbic`](https://pypi.org/project/zbic/) package (Kinnay's, zstd with Atmosphère's ZBIC changes), imported only for a flag-bit-7 module, so an LZ4 title needs nothing new; every segment is still held to the header's size and SHA-256. zstd has no fixed ratio bound, so a ZBIC segment is held only to its own size, where an LZ4 one is also held to 255 bytes per stored byte. Install it with the other tools (README, step 1).
+- **Fix:** `dm/tools/nso.py` decodes such segments with the [`zbic`](https://pypi.org/project/zbic/) package (Kinnay's, zstd with Atmosphère's ZBIC changes), imported only for a flag-bit-7 module; every segment is still held to the header's size and SHA-256. zstd has no fixed ratio bound, so a ZBIC segment is held only to its own size, where an LZ4 one is also held to 255 bytes per stored byte. Install it with the other tools (README, step 1). The NSP script checks for it before it extracts anything, as it does for its other modules, because it first reads a module at the rewrite, after the whole RomFS is unpacked.
 - **Check:** Well Dweller's `main` decodes to 85,370,056 bytes with segments `0x39680d0 / 0x9f7e74 / 0x9b1930`, every SHA-256 matching; `dm/tools/tests/test_nso.py` checks that a flag-bit-7 module whose segments are not ZBIC is an Error naming ZBIC.
 - **Found on:** [Well Dweller](../../dm/games/0100217023F6C000/README.md) (SDK 22.2.0).
 
@@ -353,4 +390,11 @@
 - **Symptom:** for a game with no profile, the NSP script stops at `build ID lookup · main of the base game` with `[RED] nx_extract exit code -6`; `<title ID>_survey/logs/exefs.log` ends in `ResultFsNonRealDataVerificationFailed (2002-4604): Hash error!` from `PartitionFileSystemMetaCore.QueryMetaDataSize` under `Nca.OpenFileSystem`, although every NCA in both NSPs matches its content ID (the SHA-256 that names it) and the base game with its update extracts cleanly.
 - **Cause:** the base game's Program NCA is sparse: its code and data sections carry a sparse layer and leave out data that the update supplies, so the base is smaller than its update (1.6 GB against 2.9 GB). Horizon mounts such an NCA only through its patch; read alone, the left-out ranges fail the hash check from the first block of the ExeFS. The lookup (`same_build`) tries main's build ID of the newest update first, then of the base game alone, and `run` stopped the build on the second attempt's failure.
 - **Fix:** `dm/tools/nx_extract/Program.cs` stops with exit code 4 and `[RED] the base game's program is sparse: it can be read only with its update NSP` when it is given a sparse base without an update (any enabled section of the Program NCA with a sparse layer). `scripts/build_ipa_from_nsp.py` `run` takes the exit codes a caller accepts (`ok`), and `same_build` accepts 4: the base game alone then has no main of its own and the lookup goes on. The base game with its update reads as before (LibHac layers the update over the sparse base; the whole 4.2 GB merged RomFS of the game below reads with every hash check on).
-- **Found on:** Minecraft Dungeons II (`0100A7C01B792000`, no profile yet), base v0 (SDK 22.2.0) with update v131072 (1.1.3.0). Applies to any game whose base Program NCA is sparse.
+- **Found on:** [Minecraft Dungeons II](../../dm/games/0100A7C01B792000/README.md), base v0 (SDK 22.2.0) with update v131072 (1.1.3.0). Applies to any game whose base Program NCA is sparse.
+
+### The offline pages of a sparse base game stop the build as a damaged NSP
+
+- **Symptom:** the NSP script stops right after `extract v<version>` with `[RED] the NSP is damaged: a filesystem's own tables fail the NCA's hash check` and `nx_extract exit code 3` from `logs/extract_html_<version>.log`, although every NCA's SHA-256 matches its name.
+- **Cause:** the base game's HtmlDocument NCA can be sparse too (16 KB, beside the sparse Program NCA). `--html` reads the update's HtmlDocument NCAs, each over a base one when it is a patch, and then every base HtmlDocument NCA on its own; a sparse one read alone fails the hash check while its tables open.
+- **Fix:** `dm/tools/nx_extract/Program.cs` reads no sparse base HtmlDocument NCA on its own (`a sparse HtmlDocument NCA of the base game (… bytes): read only through the update's patch, not alone`), as Horizon mounts it only through its patch.
+- **Found on:** [Minecraft Dungeons II](../../dm/games/0100A7C01B792000/README.md), base v0 with update v131072: the update's patch (`accessible-urls`) and its full legal information NCA are read, the base's legal information NCA too.

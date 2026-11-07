@@ -162,7 +162,7 @@ DM_NVN_LAZY_CLEAR	switch	`0` makes clears with no draw after them open a pass of
 DM_NVN_LOADPROBE	diagnostic	`=1`, `2` or `3`: attachments whose load is skipped are cleared to a sentinel colour (`3` NaN; `1` NaN for float formats) and the sentinel pixels left at pass end are counted (should be 0)
 DM_NVN_LOG	diagnostic	`=1` logs the creation of NVN objects
 DM_NVN_MAGSCAN	diagnostic	`=<fs key>[:every[:phase]]`: device self-check that reads each pass's colour attachments every `every` frames (default 30) and logs `[mag]` lines for solid magenta 16×16 blocks or non-finite pixels
-DM_NVN_PASSDUMP	diagnostic	`=<f>`, `<f1>-<f2>` or `every:<n>`: logs every render pass of those frames (attachments, clears, shader keys, bindings, draw state, presents) for the `tbdr_*.py` tools
+DM_NVN_PASSDUMP	diagnostic	`=<f>`, `<f1>-<f2>` or `every:<n>`: logs every render pass of those frames (attachments, clears, shader keys, bindings, draw state, presents, and the host function and line that ended each pass) for the `tbdr_*.py` tools
 DM_NVN_PASSDUMP_ALL	diagnostic	`=1` makes `DM_NVN_PASSDUMP` record every draw and binding change, not only the first per pass and stage, including copies and inline uniform updates
 DM_NVN_PASSGPU	diagnostic	`=<file>` writes the GPU time of each render and compute pass from stage-boundary timestamp counters (off under Metal 4); also gives each dispatch its own encoder
 DM_NVN_PASSGPU_SERIAL	diagnostic	`=1` makes each encoder on the main command buffer wait until all earlier work has finished, so `DM_NVN_PASSGPU` times read each pass's exclusive time (totals read high)
@@ -182,6 +182,7 @@ DM_NVN_SHMAP	path	The shader map (`shader_map.tsv`); `c1_full.tsv` and `pso_mani
 DM_NVN_SHOT	diagnostic	`=<frame>[,<frame>…]:<path>` saves the swapchain texture as an image at those frames (`%d` in the path = frame number)
 DM_NVN_SHOT_OUT	diagnostic	`=<W>x<H>` makes `DM_NVN_SHOT` capture the picture as the present pass upscales it to that size, the crop included, instead of the raw swapchain texture
 DM_NVN_SKIP_FS	diagnostic	`=<fragment key>[,…]` (up to 16) drops all draws of those fragment shaders, to measure their GPU cost or bisect a wrong draw; the picture is wrong
+DM_NVN_SKIP_MESH	diagnostic	`=1` drops every task and mesh draw, to measure what they cost in all; the picture is wrong
 DM_NVN_SKIP_SMALL	diagnostic	`=<width>` drops all draws whose target width is at most that, to measure the cost of tiny render passes; the picture is wrong
 DM_NVN_SLICE_MERGE	switch	`0` keeps passes into other layers of one array or cube texture level apart (on by default: they run as one layered pass)
 DM_NVN_SNAPRAW	diagnostic	`=1` makes `DM_NVN_TEXDUMP` also save each target's raw bytes, with a text header line, since converting an HDR target to an 8-bit image truncates
@@ -246,6 +247,7 @@ DM_PREV_PROGRAM	switch	What `oe::GetPreviousProgramIndex` answers (default -1, s
 DM_PROBE	diagnostic	`=module:offset,…` (Mac only): puts a `brk` at each guest address and on every hit prints the thread, registers, strings they point to and a backtrace, then runs the original instruction
 DM_PROBE_ALL	diagnostic	Set: probe hits (`DM_PROBE`) also print x8–x18
 DM_PROBE_DUMP	diagnostic	`=module:offset:length[:file]`: on the first hit of any probe, writes that range of guest memory to a file (default `run/<platform>/probe_dump.bin`)
+DM_PROBE_EVERY	diagnostic	`=N`: every guest probe hit inside `DM_PROBE_FRAMES` counts, every N-th prints (its `#` is then the true hit count, for rates); `DM_PROBE_LIMIT` caps the printed ones
 DM_PROBE_FRAMES	diagnostic	Presented frame or inclusive `start-end` range in which guest probes print observations
 DM_PROBE_HEAP	diagnostic	`=<name>,<start>,<size>,<free list>,<used list>`: hex offsets of the sead heap layout the probes' `!xN` heap walk uses (default Mario's `0,28,30,b0,c8`)
 DM_PROBE_HEAPFRAME	diagnostic	`=<vtable offset in main>` (hex): the probes' heap walk treats heaps of that class as frame heaps (head +0xe0, tail +0xe8)
@@ -307,7 +309,7 @@ DM_SAVE	path	This run's save folder (must be set); the device save is `<DM_SAVE>
 DM_SAVED_CHOICES	switch	`0` ignores the player's saved choices (launcher.<VAR> in the app's preferences) and leaves them saved; the Mac launcher and the iOS settings screen
 DM_SAVE_SYNC	player	Cloud saves: the folder whose `<title ID>/save.dmsync` the save is synced through, `icloud` for iCloud Drive/nxnative Saves (the Mac); `0` or unset, off. The Mac launcher sets the folder chosen in its settings window's Cloud saves, the iPhone app the one picked in its launcher (dm/host/save_sync.h)
 DM_SCHEME_NAME	switch	Set by `build_ipa.sh` itself for xcodegen's `project.yml`: the Xcode scheme name, `DmIOS`, or `<display name> (<title ID>)` for a project prepared with `--prepare-xcode`
-DM_SCREEN_ASPECT	player	`=<width/height>` (1.3 to 1.77, e.g. `1.43` for the iPhone Duo) renders a game whose profile has `screen_aspect on` in that shape: output 1920 wide, 1280-wide layout space, the HUD at the taller edges and 16:9's sides in view; `0` or unset is 16:9; launcher setting
+DM_SCREEN_ASPECT	player	`=<width/height>` (1.3 to 1.77, e.g. `1.43` for the iPhone Duo) renders a game whose profile has `screen_aspect on` in that shape: output 1920 wide, 1280-wide layout space, the HUD at the taller edges and 16:9's sides in view; `auto` (iOS) the app window's own shape when it is taller than 16:9, else 16:9; `0` or unset is 16:9; launcher setting
 DM_SCREEN_ASPECT_SITES	diagnostic	`=<mask>` with DM_SCREEN_ASPECT: which of the profile's layout-size conversion stubs follow the taller layout, one bit each (default all)
 DM_SCREEN_FOV	diagnostic	`off` with DM_SCREEN_ASPECT: the scene keeps the game's vertical angle (narrower sides) instead of 16:9's sides with more above and below
 DM_SCREEN_HUD	diagnostic	`=<edge>,<listed>,<full width>,<full height>[,<tallest>]` with DM_SCREEN_ASPECT: the layout rules' distances and sizes in the 1280x720 space (default 280,100,1270,710,1300)
@@ -323,7 +325,7 @@ DM_SPIN_LIST	diagnostic	`=1` makes `patch_nso.py` print every guest poll loop it
 DM_SPIN_POLL	switch	`=<µs>`: how long a spin-gate wait polls before it sleeps with the yield back-off (default 2000; `0` yields on every pass)
 DM_SVC	diagnostic	`=1` logs memory SVCs (`SetHeapSize`, `MapMemory`, `Map`/`UnmapPhysicalMemory`) with their addresses and sizes
 DM_SYMCHECK	diagnostic	`=1` checks every hashed module symbol lookup against a linear search and logs a red line for each mismatch
-DM_TBUF_ALIGN	diagnostic	`=<bytes>` uses that value as the linear-texture alignment for buffer textures when it is larger than the device's `minimumLinearTextureAlignmentForPixelFormat`: a Mac can then reproduce a phone's larger alignment (a 64-byte one fails the buffers a device with 64 bytes cannot view), to check `tbuf_as_2d`'s aligned-row copy
+DM_TBUF_ALIGN	diagnostic	`=<bytes>` uses that value as the linear-texture alignment when it is larger than the device's `minimumLinearTextureAlignmentForPixelFormat`, for buffer textures and for linear textures on a pool's buffer: a Mac can then reproduce a phone's larger alignment (a 64-byte one fails the buffers and linear textures a device with 64 bytes cannot view), to check `tbuf_as_2d`'s aligned-row copy and the upload of unaligned linear textures (`linear_fit`)
 DM_TEAM_ID	switch	Apple team ID for the per-game Xcode project, used when `--team-id` / `TEAM_ID` is not given; `build_ipa.sh` uses the placeholder `0000000000` (unsigned) when unset
 DM_TEMP	path	Temporary storage folder (default `$DM_ROOT/run/platform/temp`); stand-in system data goes in `<DM_TEMP>_sysdata`; the Mac launcher, the iOS app and the NSP script set it
 DM_TEST_ARCHIVE_CONSTANTS	test	Use optional function constants in the synthetic pipeline archive restart fixture
@@ -334,6 +336,7 @@ DM_TEST_FS_FAIL	diagnostic	`=write:<n>[:<errno>]` makes the nth save write fail 
 DM_TEST_FS_FAILAT	diagnostic	`=<point>[:<count>][,…]` makes steps of the save transaction (`mountclone`, `reclone`, `guestname`, `renameback`) fail with ENOSPC
 DM_TEST_GEOMETRY	test	Path of the native `t_geometry` executable; `test_dmsh_geometry.py` runs its native geometry emitter checks only when it is set
 DM_TEST_GEOMETRY_PRIMITIVE_ID	test	Path to the native t_geometry_primitive_id replay executable used by test_dmsh_geometry.py with DMSH_TEST_GPU=1.
+DM_TEST_GPU_LOST	diagnostic	`=<n>` imitates the GPU access macOS revoked from the nth submission on: each submission's feedback reports `MTL4CommandQueueErrorAccessRevoked` and the GPU does not signal its fence, so the host stops presenting and the front end ends the game
 DM_TEST_KEYRACE	diagnostic	`=<n>` creates up to n (at most 512) pthread keys on a thread of its own while the host starts up
 DM_TEST_KILL_AT	diagnostic	`=write:<n>` exits the process (`_exit(9)`) at the nth save write, imitating a kill mid-write
 DM_TEST_LEAK_GPU	diagnostic	`=1` allocates and keeps a 1 MB shared Metal buffer every 100 ticks: a GPU memory leak on demand

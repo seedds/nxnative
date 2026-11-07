@@ -183,7 +183,7 @@ def nvn2_stage(ctl, code):   # an NVN2 shader's stage: compute, task and mesh by
 def bahs_shaders(d, label):
     rsz, region = field(d, '<II', 0x18, f'{label} BAHS header')
     if region + rsz > len(d): red(f'{label} BAHS code region out of bounds')
-    out = []
+    found = []
     for a in range(0, region - 16, 4):
         off, z, csz, rel = struct.unpack_from('<IIIi', d, a)
         nvn2 = 0x48 <= csz < 0x10000 and 0 <= a + rel and a + rel + csz <= region and nvn2_ctl(d[a + rel:a + rel + csz])
@@ -196,7 +196,13 @@ def bahs_shaders(d, label):
         code, ctl = d[region + off:region + off + n], d[c:c + csz]
         st = nvn2_stage(ctl, code) if nvn2 else 'cs' if code[:4] == CS_MAGIC else sph_stage(code) if code[:4] == GFX_MAGIC else None
         if not st or check(label, st, ctl, code): continue
-        out.append((f'{label}#BAHS@{a:#x}', st, ctl, code))
+        found.append((a, c, (f'{label}#BAHS@{a:#x}', st, ctl, code)))
+    # A program entry never lies inside a control section. An NVN2 section's +0x38..+0x47 (instruction length, c1 start and end, code length: 0x1100, 0, 0x1100, 0x1100) reads as
+    # an entry whose offset, control length and control distance are all that length: Ocarina of Time's agl_common.sharcb@0x357f0 paired compute shader 30's control with a vertex
+    # shader's code, a shader the game never loads, and its SPH came to the translator as an instruction ("Ampere instruction 481 at 0x0"). Each section counts with its own
+    # length (ctl_len), not the length an entry gives it, which for such a false entry covers real entries after it
+    spans = {(c, c + ctl_len(s[2])) for _, c, s in found}
+    out = [s for a, _, s in found if not any(lo <= a < hi for lo, hi in spans)]
     bahs_variations(d, label, [o[0] for o in out])
     return out
 

@@ -97,7 +97,12 @@ static class P {
                 else if (bases.Exists(b => Try(() => b.OpenFileSystemWithPatch(u, NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid), dst))) { Console.WriteLine($"{dst}: a patch of the base game's NCA"); k++; }
                 else Console.WriteLine($"[RED] an HtmlDocument NCA of the update patches none of the base game's: read over each, it fails the hash check");
             }
-            foreach (Nca b in bases) Copy(() => b.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid), Path.Combine(a[3], $"html{k++}"), null);
+            foreach (Nca b in bases) {
+                // Horizon mounts a sparse NCA only through its patch; read alone, the left-out ranges fail the hash check while its tables open (exit code 3, "the NSP is damaged").
+                // Minecraft Dungeons II's base has one (16 KB, the HtmlDocument its update patches), beside its sparse Program NCA
+                if (Sparse(b)) { Console.WriteLine($"a sparse HtmlDocument NCA of the base game ({b.Header.NcaSize} bytes): read only through the update's patch, not alone"); continue; }
+                Copy(() => b.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid), Path.Combine(a[3], $"html{k++}"), null);
+            }
             Console.WriteLine($"{k} HtmlDocument NCAs");
             return Damaged();
         }

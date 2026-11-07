@@ -62,6 +62,12 @@ void dm_touch_script(const dm_touch *t, int n);   // scripted touches (DM_KEYS, 
 // the next transaction that succeeds commits as usual, and the front end need not do any recovery. err = the first failing errno (ENOSPC = 28 means out of space). Called on the game thread; the front end switches to the main thread itself and must not block
 void front_save_failed(int err);
 
+// GPU lost (called by the graphics backend's nvn_mtl.m gpu_lost_check, once): the first command buffer came back MTL4CommandQueueErrorAccessRevoked, so macOS runs none of the process's GPU work
+// any more and nothing is drawn again. By then presents have stopped and the game's waits for the GPU are released, so the game runs on with nothing on screen until the front end ends it.
+// The Mac front end leaves full screen, says why in an alert and quits with exit status 70; without a window it ends the run as the default weak implementation (nvn_mtl.m) does, which the iOS
+// front end keeps: a FATAL line and an abort. Called on Metal's feedback queue; the front end switches to the main thread itself and must not block
+void front_gpu_lost(void);
+
 // Offline HTML pages (the web applet's offline pages; hle_web.c): a web view over the game picture (web_apple.m, Mac and iPhone). Called from guest threads; the front end works on its main
 // thread. front_web_open: dir = the folder the document path is relative to (an HtmlDocument's html-document), path = the document path with its query, callback = the URL prefix whose
 // loading ends the page (exit reason 3, the URL as the last URL), hidden = loaded without being shown until front_web_show. 0 = opened; -1 = no web view (no window): the caller's

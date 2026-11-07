@@ -1056,7 +1056,7 @@ static void up_owner_check(const char *where) {
 // wait for the upload to complete after flushing it, and only then can the old queue read the upload result (mtl_read_texels waited first and flushed afterwards, the readback beat the upload, 4 failures on t_nvn upload content)
 static void up_wait_zero(_Atomic int *v, int site);
 static id<MTLCommandBuffer> q_cb(void) { if (on_sub_thread()) { up_flush(); rec_drain(); up_wait_zero(&g_up_pending, WS_OLDQ); } return [g_q commandBuffer]; }
-static post_op *g_post; static int g_npost, g_postcap;
+static post_op *g_post; static int g_npost, g_postcap, g_queue_post_base;
 // One autorelease pool per submission: submissions run on a guest thread (long-lived, no run loop, never drains the implicit pool), so objects autoreleased in the Metal replay
 // (command buffers, encoders, pass descriptors, etc.) are never released unless put in a pool. Measured on the character select screen of a real iOS device: the host heap grows by about 47 objects per frame, 0.22 MiB/s.
 void *objc_autoreleasePoolPush(void); void objc_autoreleasePoolPop(void *);
@@ -1105,7 +1105,7 @@ void mtl_sub_begin(void) {
     g_commit_blocks = [NSMutableArray array];
     // The overflow buffer created when the previous submission ran out of slots (see g_vis_n >= VIS_SLOTS): retire it. It used to be just cleared here and stayed in the residency set for good (from d2r-mobile 2eb575877)
     if (g_vis && !vis_in_ring(g_vis)) defer_obj_release(g_vis);
-    g_npost = 0; g_vis = nil; g_vis_n = 0; g_vis_cur = -1; pend_reset();
+    g_npost = g_queue_post_base = 0; g_vis = nil; g_vis_n = 0; g_vis_cur = -1; pend_reset();
     zskip_clear(); g_zskip_count = 0;
     int pick = -1;
     for (int i = 0; i < g_vis_ring_n; i++) if (g_vis_ring[i].fence <= g_done) { pick = i; break; }
@@ -1695,11 +1695,53 @@ void mtl_sub_fill(uint64_t dst, uint64_t n, uint32_t value) {
     for (uint64_t off = 0; off < n; off += PAT) { uint64_t k = n - off < PAT ? n - off : PAT; enc_b_copy_buffer(blit_buf(0, 0, dst + off, dst + off + k), pat, 0, (__bridge id<MTLBuffer>)db, dof + off, k); }
 }
 
+static pthread_mutex_t g_post_mu = PTHREAD_MUTEX_INITIALIZER;
+typedef struct { volatile uint32_t *val; uint32_t v; int pending; } ev_gpu_t;
+static ev_gpu_t g_ev_gpu[256];
+static int g_nev_gpu;
+static ev_gpu_t *ev_gpu_slot(volatile uint32_t *val, int create) {
+    for (int i = 0; i < g_nev_gpu; i++) if (g_ev_gpu[i].val == val) return &g_ev_gpu[i];
+    if (!create) return NULL;
+    if (g_nev_gpu < 256) { g_ev_gpu[g_nev_gpu] = (ev_gpu_t){val, *val, 0}; return &g_ev_gpu[g_nev_gpu++]; }
+    for (int i = 0; i < g_nev_gpu; i++) if (!g_ev_gpu[i].pending) { g_ev_gpu[i] = (ev_gpu_t){val, *val, 0}; return &g_ev_gpu[i]; }
+    return &g_ev_gpu[0];
+}
+static void ev_gpu_set(volatile uint32_t *val, uint32_t mode, uint32_t v) {
+    pthread_mutex_lock(&g_post_mu);
+    ev_gpu_t *e = ev_gpu_slot(val, 1);
+    uint32_t base = e->pending > 0 ? e->v : *val;
+    e->v = (mode & 1) ? base + v : v;
+    e->pending++;
+    pthread_mutex_unlock(&g_post_mu);
+}
+void mtl_cpu_event_signal(volatile uint32_t *val, uint32_t mode, uint32_t v) {
+    pthread_mutex_lock(&g_post_mu);
+    if (mode & 1) *val += v; else *val = v;
+    ev_gpu_t *e = ev_gpu_slot(val, 0);
+    if (e && e->pending > 0) e->v = (mode & 1) ? e->v + v : v;
+    pthread_mutex_unlock(&g_post_mu);
+}
+static void ev_gpu_land(volatile uint32_t *val) {   // caller holds g_post_mu
+    ev_gpu_t *e = ev_gpu_slot(val, 0);
+    if (e && e->pending > 0) e->pending--;
+}
+static uint32_t ev_gpu_get(volatile uint32_t *val) {
+    pthread_mutex_lock(&g_post_mu);
+    ev_gpu_t *e = ev_gpu_slot(val, 0);
+    uint32_t v = e && e->pending > 0 ? e->v : *val;
+    pthread_mutex_unlock(&g_post_mu);
+    return v;
+}
+static int ev_wait_ready(volatile uint32_t *val, uint32_t wait_mode, uint32_t v) {
+    uint32_t cur = ev_gpu_get(val);
+    return (wait_mode & 1) ? (int32_t)(cur - v) >= 0 : cur == v;
+}
+static int g_unparking, g_flushing_parked;
 static void post(post_op o) {
     if (g_npost == g_postcap) { g_postcap = g_postcap ? g_postcap * 2 : 64; g_post = realloc_or_die(g_post, g_postcap * sizeof *g_post, "the deferred operations"); }
     g_post[g_npost++] = o;
 }
-void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v) { post((post_op){1, val, mode, v, 0, 0, NULL}); }
+void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v) { ev_gpu_set(val, mode, v); post((post_op){1, val, mode, v, 0, 0, NULL}); }
 static int seg_ts(void); static void ts_clk(void);
 void mtl_sub_counter(uint64_t addr, uint32_t type) { sbw_note(addr, 16, SBW_REPORT); post((post_op){2, NULL, 0, 0, addr, type, NULL, g_seg}); ts_clk(); }
 void mtl_counter_stats(uint64_t rep[32], uint64_t rst[32]) { memcpy(rep, g_cnt_report, sizeof g_cnt_report); memcpy(rst, g_cnt_reset, sizeof g_cnt_reset); }
@@ -1892,7 +1934,6 @@ static void lc_land(void);
 typedef struct { _Atomic uint64_t fence; _Atomic int claimed; int n; post_op *ops; seg_clk *sc; uint32_t seg_last; uint64_t t_commit; } post_rec;   // t_commit: guest ns when it was committed
 #define POST_RING 128
 static post_rec g_postr[POST_RING];
-static pthread_mutex_t g_post_mu = PTHREAD_MUTEX_INITIALIZER;
 // A successful claim holds the lock until post_run finishes. Ownership alone
 // cannot publish completion: another waiter must see the actual writes first.
 static int post_claim(post_rec *r, uint64_t fence) {
@@ -1906,7 +1947,7 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
     @autoreleasepool {
     int n = r->n; post_op *ops = r->ops; seg_clk *sc = r->sc; uint32_t seg_last = r->seg_last;
     for (int i = 0; i < n; i++) {
-        if (ops[i].kind == 1) { if (ops[i].mode == 1) *ops[i].val += ops[i].v; else *ops[i].val = ops[i].v; }
+        if (ops[i].kind == 1) { if (ops[i].mode == 1) *ops[i].val += ops[i].v; else *ops[i].val = ops[i].v; ev_gpu_land(ops[i].val); }
         else if (ops[i].kind == 3) {   // Samples passed: the sum of all slots since the reset
             vis_list *l = ops[i].vis; uint64_t sum = 0;
             for (int k = 0; k < l->n; k++) { sum += ((const uint64_t *)((__bridge id<MTLBuffer>)l->s[k].buf).contents)[l->s[k].slot]; CFRelease(l->s[k].buf); }
@@ -1938,6 +1979,7 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
 }
 static _Atomic int g_seg_inflight;   // main command buffers committed and not reported back yet (sub_cut)
 static void rt_preserve_bound(void);
+static void mtl_parked_note_commit(uint64_t fence);
 uint64_t mtl_sub_commit(void) {
     lc_land();   // clears still waiting (the command list ends with them)
     defer_fallback();   // Deferred merged pass: at the end of the submission there are still P draws not replayed (the normal path never gets here)
@@ -1951,6 +1993,7 @@ uint64_t mtl_sub_commit(void) {
     rt_preserve_bound();   // The game may reuse completed command memory; queue bindings must not point into its texture snapshots.
     uint64_t fence = ++g_fence;
     gw_commit(fence);
+    mtl_parked_note_commit(fence);
     if (g_vis_ring_i >= 0) g_vis_ring[g_vis_ring_i].fence = fence;
     // CPU-visible effects after completion: copy the op table into the callback
     int n = g_npost; post_op *ops = n ? malloc(n * sizeof *ops) : NULL; post_rec *pr = &g_postr[fence % POST_RING];
@@ -6568,7 +6611,9 @@ void mtl_queue_activate(uint64_t serial) {   // caller holds the submission lock
     }
     g_active_queue = q; g_pso_dirty = g_dss_dirty = 1; args_dirty_all();
 }
+static void mtl_parked_forget(uint64_t serial);
 void mtl_queue_forget(uint64_t serial) {   // caller holds the submission lock
+    mtl_parked_forget(serial);
     queue_state **p = &g_queue_states;
     while (*p && (*p)->serial != serial) p = &(*p)->next;
     if (!*p) return;
@@ -9686,7 +9731,7 @@ static uint64_t g_stat_s_only, g_stat_d_only;   // Of those, the number of passe
 #define HOIST_MAX 40   // At most 4 groups × (1 set-target op + 8 clears)
 static const uint8_t *g_hoist_skip[HOIST_MAX]; static int g_hoist_n; static uint64_t g_hoist_groups;
 static int hoist_skipped(const uint8_t *p) { for (int i = 0; i < g_hoist_n; i++) if (g_hoist_skip[i] == p) return 1; return 0; }
-typedef struct { const uint8_t *p, *ret[8]; int ret_n, rest_i, bad; } fz_cursor;
+typedef struct { const uint8_t *p, *ret[16]; int ret_n, rest_i, bad; } fz_cursor;
 static int fz_next(fz_cursor *c, const uint8_t **out, op_hdr *oh, const void **oa) {
     for (int guard = 0; guard < 1000000; guard++) {
         if (!c->p) return 0;
@@ -9694,13 +9739,14 @@ static int fz_next(fz_cursor *c, const uint8_t **out, op_hdr *oh, const void **o
         switch (h.op) {
             // The live draws and their argument addresses are resolved at replay. A speculative scan cannot move work across this range.
             case OP_MULTI_DRAW: c->bad = 1; return 0;
+            case OP_SIGNAL_EVENT: { volatile uint32_t *val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, (const uint8_t *)a + 8, 4); memcpy(&v, (const uint8_t *)a + 12, 4); if ((m & 2) && !g_flushing_parked && !ev_wait_ready(val, m & 1, v)) { c->bad = 1; return 0; } break; }
             case OP_END:
                 if (c->ret_n) c->p = c->ret[--c->ret_n];
                 else if (c->rest_i < g_nrest) c->p = (const uint8_t *)g_rest[c->rest_i++];
                 else { c->p = NULL; return 0; }
                 continue;
             case OP_JUMP: memcpy(&c->p, a, 8); continue;
-            case OP_CALL: { uint64_t t; memcpy(&t, a, 8); if (c->ret_n >= 8) { c->bad = 1; return 0; }
+            case OP_CALL: { uint64_t t; memcpy(&t, a, 8); if (c->ret_n >= 16) { c->bad = 1; return 0; }
                 c->ret[c->ret_n++] = c->p + h.size; c->p = (const uint8_t *)t; continue; }
             default: break;
         }
@@ -9771,6 +9817,7 @@ static int ds_scan(const uint8_t *p, ds_st *ds, int depth) {
             case OP_CALL: { uint64_t t; memcpy(&t, a, 8); if (depth >= 8) return DS_USED;
                 int r = ds_scan((const uint8_t *)t, ds, depth + 1); if (r != DS_RET) return r; break; }
             case OP_SET_RT: case OP_COPY_B2B: case OP_CLEAR_BUF: case OP_UPDATE_UB: case OP_COPY_B2T: case OP_COPY_T2B: case OP_COPY_T2T: case OP_DRAW_TEX: case OP_CLEAR_TEX: case OP_DISPATCH: return DS_FREE;
+            case OP_SIGNAL_EVENT: { volatile uint32_t *val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, (const uint8_t *)a + 8, 4); memcpy(&v, (const uint8_t *)a + 12, 4); if ((m & 2) && !g_flushing_parked && !ev_wait_ready(val, m & 1, v)) return DS_USED; break; }
             case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_DLSS: g_ds_why = h.op; return DS_USED;
             case OP_BIND_STATE: { const p_bind_state *b = a; if (b->kind == 5) memcpy(ds, b->bytes, sizeof *ds); break; }
             case OP_DRAW: case OP_DRAW_IDX: case OP_MULTI_DRAW:   // Depth test / write → depth needed; stencil test → stencil needed; can stop once both are needed
@@ -10279,15 +10326,16 @@ static uint64_t h_ser(uint64_t h) { int tid = (int)(h & 0xfffff); return tid ? a
 typedef struct { uint32_t seq, rtseq; uint64_t ser; const uint8_t *op; uint16_t lv, sl; uint8_t kind, plane, anyls, why; } sdx_ev;   // plane 0 color 8 depth-stencil (ATT) 1 depth 2 stencil (CLEAR)
 enum { SDX_READ = 1, SDX_NEED, SDX_ATT, SDX_CLEAR };
 #define SDX_NONE 0xffffffffu
-static sdx_ev *g_sdx, *g_sdx_tmp; static uint32_t g_sdx_n, g_sdx_cap; static int g_sdx_ok;   // Index valid
+static sdx_ev *g_sdx, *g_sdx_tmp; static uint32_t g_sdx_n, g_sdx_cap; static int g_sdx_ok, g_sdx_parked;   // Index valid
 // Candidate textures (those that have been attachments) -> buckets: open addressing; a texture that has not yet been an attachment when an event occurs is irrelevant to any render pass that ended before then, so it is not recorded
 #define SDX_HB 2048
 static uint64_t g_sdx_hk[SDX_HB]; static uint16_t g_sdx_hb[SDX_HB]; static uint32_t g_sdx_nb, g_sdx_bcnt[SDX_HB + 1], g_sdx_bst[SDX_HB + 1];
+static uint64_t g_sdx_keys[SDX_HB / 2];   // the candidates in the order they joined: what a draw that may read any texture (a bindless handle) is noted as needing
 static int sdx_bucket(uint64_t ser, int add) {   // Returns the bucket number; returns -1 if not in the set (and not adding); invalidates the index when full
     if (!ser) return -1;
     for (uint32_t i = (uint32_t)(ser * 0x9E3779B97F4A7C15ull >> 53), n = 0; n < SDX_HB; i = (i + 1) & (SDX_HB - 1), n++) {
         if (g_sdx_hk[i] == ser) return g_sdx_hb[i];
-        if (!g_sdx_hk[i]) { if (!add) return -1; if (g_sdx_nb >= SDX_HB / 2) { g_sdx_ok = 0; return -1; } g_sdx_hk[i] = ser; g_sdx_hb[i] = (uint16_t)g_sdx_nb; return (int)g_sdx_nb++; }
+        if (!g_sdx_hk[i]) { if (!add) return -1; if (g_sdx_nb >= SDX_HB / 2) { g_sdx_ok = 0; return -1; } g_sdx_hk[i] = ser; g_sdx_hb[i] = (uint16_t)g_sdx_nb; g_sdx_keys[g_sdx_nb] = ser; return (int)g_sdx_nb++; }
     }
     return -1;
 }
@@ -10348,6 +10396,14 @@ static void sdx_walk(const uint8_t *p, int depth) {
                 break; }
             case OP_CLEAR_TEX: { const p_clear_tex *c = a; if (c->tex) sdx_ev_add((sdx_ev){seq, 0, c->tex->serial, p, 0, 0, SDX_NEED, 0, 0, 4}); break; }
             case OP_DLSS: { const p_dlss *c = a; for (int k = 0; k < DLSS_TEXTURES; k++) if (c->tex[k]) sdx_ev_add((sdx_ev){seq, 0, c->tex[k]->serial, p, 0, 0, SDX_NEED, 0, 0, 3}); break; }
+            case OP_SIGNAL_EVENT: {
+                volatile uint32_t *val; uint32_t m, v;
+                memcpy(&val, a, 8); memcpy(&m, (const uint8_t *)a + 8, 4); memcpy(&v, (const uint8_t *)a + 12, 4);
+                if ((m & 2) && !g_flushing_parked && !ev_wait_ready(val, m & 1, v)) {
+                    for (uint32_t k = 0; k < g_sdx_nb; k++) sdx_ev_add((sdx_ev){seq, 0, g_sdx_keys[k], p, 0, 0, SDX_NEED, 0, 0, 3});
+                    g_sdx_parked = 1; return;
+                }
+                break; }
             default: break;
         }
         p += h.size;
@@ -10356,7 +10412,7 @@ static void sdx_walk(const uint8_t *p, int depth) {
 static void mtl_sub_index_(const uint64_t *h, int n);
 void mtl_sub_index(const uint64_t *h, int n) { cp_stamp start = cp_begin(); mtl_sub_index_(h, n); cp_end(7, start); }
 static void mtl_sub_index_(const uint64_t *h, int n) {   // Start of submit (hle_nvn.c QueueSubmitCommands): build this submit's store lookahead index
-    g_xv_ntouch = 0; g_sdx_n = g_sdx_nop = 0; g_rtx_n = g_drx_n = 0; g_exec_seq = 0; g_sdx_ok = tbdr_on();
+    g_xv_ntouch = 0; g_sdx_n = g_sdx_nop = 0; g_rtx_n = g_drx_n = 0; g_exec_seq = 0; g_sdx_parked = 0; g_sdx_ok = tbdr_on();
     if (!g_sdx_ok) { g_xv_n = 0; g_xv_block = 1; return; }   // Index unavailable: clear the ledger and add nothing in this submit (the next touch cannot be verified)
     g_xv_block = 0;
     memset(g_sdx_hk, 0, sizeof g_sdx_hk); g_sdx_nb = 0;
@@ -10365,7 +10421,7 @@ static void mtl_sub_index_(const uint64_t *h, int n) {   // Start of submit (hle
     g_pp_prog = S.prog; g_pp_cprog = S.cprog; g_pp_rt = NULL; g_pp_rtseq = SDX_NONE;
     for (int st = 0; st < 6; st++) { for (int k = 0; k < NTEX; k++) g_pp_slot[st][k] = S.tex[st][k] ? h_ser(S.tex[st][k]) : 0;
                                      for (int k = 0; k < 32; k++) g_pp_slot[st][NTEX + k] = S.img[st][k] ? h_ser(S.img[st][k]) : 0; }
-    for (int i = 0; i < n && g_sdx_ok; i++) sdx_walk((const uint8_t *)h[i], 0);
+    for (int i = 0; i < n && g_sdx_ok && !g_sdx_parked; i++) sdx_walk((const uint8_t *)h[i], 0);
     if (!g_sdx_ok) return;
     // Counting sort into buckets: events are appended in sequence-number order, and within the same sequence number READ precedes ATT (the same draw is judged for reads first, then attachments), so after a stable scatter each bucket is ordered
     memset(g_sdx_bcnt, 0, (g_sdx_nb + 1) * sizeof *g_sdx_bcnt);
@@ -10378,7 +10434,11 @@ static void mtl_sub_index_(const uint64_t *h, int n) {   // Start of submit (hle
 }
 static void sdx_seq(const uint8_t *p) {   // Every operation in mtl_exec: check the sequence number against the index (on mismatch invalidate, and store everything for the rest)
     if (!g_sdx_ok) return;
-    if (g_exec_seq >= g_sdx_nop || g_sdx_op[g_exec_seq] != p) { RED_ONCE(40, "store lookahead index does not match the replay order (index %u / %u); the remaining passes of this submission all store", g_exec_seq, g_sdx_nop); g_sdx_ok = 0; return; }
+    if (g_exec_seq >= g_sdx_nop || g_sdx_op[g_exec_seq] != p) {
+        if (!(g_exec_seq == g_sdx_nop && g_sdx_parked))
+            RED_ONCE(40, "store lookahead index does not match the replay order (index %u / %u); the remaining passes of this submission all store", g_exec_seq, g_sdx_nop);
+        g_sdx_ok = 0; return;
+    }
     g_exec_seq++;
 }
 static int sdx_decide(uint8_t st[SD_ATT_MAX]) {   // st[i]: 2 redundant; otherwise why << 2 (the reason it is needed, same as sd_need). Returns 0 = index unavailable
@@ -10429,7 +10489,7 @@ static void hoist_try(void) {
     for (int guard = 0; guard < 200000; guard++) {
         op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
         switch (h.op) {
-            case OP_END: case OP_CALL: case OP_COPY_T2T: case OP_DRAW_TEX: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DLSS: case OP_DISPATCH: case OP_RENDER_COND: return;
+            case OP_END: case OP_CALL: case OP_COPY_T2T: case OP_DRAW_TEX: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DLSS: case OP_DISPATCH: case OP_RENDER_COND: case OP_SIGNAL_EVENT: return;
             case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
             case OP_MULTI_DRAW: return;
             case OP_DRAW: case OP_DRAW_IDX: if (in_grp) return; break;
@@ -10738,7 +10798,7 @@ static void defer_try(const p_draw *dw, const p_draw_idx *di) {
                 for (int k = 0; k < g_defer.nreads && !bad; k++) if (h_ser(g_defer.p_reads[k]) == ds_) bad = 1;
                 if (g_defer.nreads > 512) bad = 1;
                 if (bad) { g_defer.reason = 3; g_defer.reason_op = h.op; goto fail; } break; }
-            case OP_MULTI_DRAW: case OP_REPORT_COUNTER: case OP_RENDER_COND: case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DLSS: case OP_DISPATCH: case OP_DRAW_TEX: g_defer.reason = 3; g_defer.reason_op = h.op; goto fail;
+            case OP_MULTI_DRAW: case OP_REPORT_COUNTER: case OP_RENDER_COND: case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DLSS: case OP_DISPATCH: case OP_DRAW_TEX: case OP_SIGNAL_EVENT: g_defer.reason = 3; g_defer.reason_op = h.op; goto fail;
             case OP_CLEAR_COLOR: { const p_clear_color *c = a; if (!p_end) { g_defer.reason = 16; goto fail; }   // A clear inside P's continuation segment: do not defer
                 if (c->index >= 0 && c->index < scan_rt.n && (defer_rt_hits_reads(&scan_rt, c->index) || (scan_rt.color[c->index] && defer_rt_hits_reads(&g_defer.p_rt, c->index)))) { g_defer.reason = 5; goto fail; } break; }
             case OP_CLEAR_DS: if (!p_end) { g_defer.reason = 16; goto fail; } break;
@@ -10773,7 +10833,7 @@ q_found:
         // After Q's SetRenderTargets and before its first draw and any clear, another SetRenderTargets arrives (the game sets targets repeatedly, the previous one being an empty render pass): if the new targets still cover P take it as Q, otherwise do not defer
         if (!q_body && h.op == OP_SET_RT && !q_clears) { const p_set_rt *r2 = a; if (!defer_q_superset(r2)) { g_defer.reason = 15; goto fail; } q = r2; qop = p; p += h.size; continue; }
         if (h.op == OP_CLEAR_COLOR || h.op == OP_CLEAR_DS) q_clears = 1;
-        if (!q_body && (h.op == OP_END || h.op == OP_SET_RT || h.op == OP_UPDATE_UB || h.op == OP_COPY_B2B || h.op == OP_CLEAR_BUF || h.op == OP_DISPATCH)) { g_defer.reason = 9; g_defer.reason_op = h.op; goto fail; }
+        if (!q_body && (h.op == OP_END || h.op == OP_SET_RT || h.op == OP_UPDATE_UB || h.op == OP_COPY_B2B || h.op == OP_CLEAR_BUF || h.op == OP_DISPATCH || h.op == OP_SIGNAL_EVENT)) { g_defer.reason = 9; g_defer.reason_op = h.op; goto fail; }
         if (h.op == OP_BIND_PROGRAM) pg = ((const p_bind_program *)a)->prog; else if (h.op == OP_BIND_TEX || h.op == OP_BIND_TEX1 || h.op == OP_BIND_IMG) { p_bind_handles t1; const p_bind_handles *b = bind_rec(h.op, a, &t1); bh_fresh(b); int lim = h.op == OP_BIND_IMG ? 32 : NTEX; if (b->stage >= 0 && b->stage < 6 && b->first >= 0 && b->first + b->n <= lim) for (int k = 0; k < b->n; k++) { if (h.op == OP_BIND_IMG) img[b->stage][b->first + k] = b->h[k]; else tex[b->stage][b->first + k] = b->h[k]; } }
         else if (h.op == OP_CLEAR_COLOR) { const p_clear_color *c = a; if (c->index >= 0 && c->index < q->n && q->color[c->index]) for (int i = 0; i < g_defer.p_rt.n; i++) if (g_defer.p_rt.color[i] && sub_eq(q, c->index, &g_defer.p_rt, i)) { g_defer.reason = 10; goto fail; } }
         p += h.size;
@@ -13521,6 +13581,209 @@ static void clear_ds_tri(const p_clear_ds *c) {
        (unsigned long)sc.x, (unsigned long)sc.y, (unsigned long)sc.width, (unsigned long)sc.height);
 }
 
+typedef struct {
+    int active, origin_ll, ret_n, nrest, nfences, npost;
+    uint64_t serial;
+    volatile uint32_t *wait_val;
+    uint32_t wait_mode, wait_v;
+    const uint8_t *p, *ret[16];
+    uint64_t rest[1024];
+    uint64_t *fences[32];
+    post_op post[64];
+} parked_queue_t;
+static parked_queue_t g_parked[8];
+
+int mtl_any_parked(void) {
+    for (int i = 0; i < 8; i++) if (g_parked[i].active) return 1;
+    return 0;
+}
+int mtl_any_parked_ready(void) {
+    for (int i = 0; i < 8; i++) {
+        parked_queue_t *pq = &g_parked[i];
+        if (pq->active && ev_wait_ready(pq->wait_val, pq->wait_mode, pq->wait_v)) return 1;
+    }
+    return 0;
+}
+static void mtl_queue_boundary_land(void) {
+    lc_land(); defer_fallback(); rp_flush(); ubd_land();
+    if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    rt_preserve_bound();
+    g_mdx_epoch++; g_mdx_stop = NULL;
+}
+static void mtl_park_current(const uint8_t *resume_p, volatile uint32_t *val, uint32_t wait_mode, uint32_t v) {
+    if (!g_active_queue) return;
+    mtl_queue_boundary_land();
+    uint64_t ser = g_active_queue->serial;
+    parked_queue_t *pq = NULL;
+    for (int i = 0; i < 8; i++) if (g_parked[i].active && g_parked[i].serial == ser) { pq = &g_parked[i]; break; }
+    if (!pq) for (int i = 0; i < 8; i++) if (!g_parked[i].active && g_parked[i].serial == ser) { pq = &g_parked[i]; break; }
+    if (!pq) for (int i = 0; i < 8; i++) if (!g_parked[i].active && !g_parked[i].nfences) { pq = &g_parked[i]; memset(pq, 0, sizeof *pq); break; }
+    if (!pq) for (int i = 0; i < 8; i++) if (!g_parked[i].active) { pq = &g_parked[i]; break; }
+    if (!pq) return;
+    pq->active = 1; pq->serial = ser; pq->origin_ll = g_queue_origin_ll;
+    pq->wait_val = val; pq->wait_mode = wait_mode; pq->wait_v = v;
+    pq->p = resume_p;
+    pq->ret_n = g_ret_n; memcpy(pq->ret, g_ret, (size_t)g_ret_n * sizeof(const uint8_t *)); g_ret_n = 0;
+    int nr = g_nrest < 1024 ? g_nrest : 1024;
+    pq->nrest = nr; if (nr > 0 && g_rest) memcpy(pq->rest, g_rest, (size_t)nr * sizeof(uint64_t));
+    g_rest = NULL; g_nrest = 0;
+    if (g_queue_post_base < g_npost) {
+        int dst = g_queue_post_base;
+        for (int k = g_queue_post_base; k < g_npost; k++) {
+            if (g_post[k].kind == 2 && pq->npost < 64) pq->post[pq->npost++] = g_post[k];
+            else g_post[dst++] = g_post[k];
+        }
+        g_npost = dst;
+        int any_counter = 0;
+        for (int k = 0; k < g_npost; k++) if (g_post[k].kind == 2) { any_counter = 1; break; }
+        if (!any_counter && g_seg == 0 && g_sclk) { seg_clk_put(g_sclk); g_sclk = NULL; }
+    }
+}
+void mtl_try_unpark(void) {
+    if (g_unparking || !mtl_any_parked()) return;
+    g_unparking = 1;
+    for (int progress = 1; progress;) {
+        progress = 0;
+        for (int i = 0; i < 8; i++) {
+            parked_queue_t *pq = &g_parked[i];
+            if (!pq->active || !ev_wait_ready(pq->wait_val, pq->wait_mode, pq->wait_v)) continue;
+            progress = 1;
+            mtl_queue_boundary_land();
+            if (ts_on() && (g_stat_draw > g_cut_draw0 || g_sclk)) { ts_boundary(); g_seg++; }
+            uint64_t save_q = g_active_queue ? g_active_queue->serial : 0;
+            int save_orig = g_queue_origin_ll;
+            int save_post_base = g_queue_post_base;
+            const uint8_t *save_ret[16]; int save_ret_n = g_ret_n;
+            memcpy(save_ret, g_ret, (size_t)g_ret_n * sizeof(const uint8_t *));
+            const uint64_t *save_rest = g_rest; int save_nrest = g_nrest;
+
+            uint64_t qser = pq->serial;
+            int orig_ll = pq->origin_ll;
+            const uint8_t *resume_p = pq->p;
+            g_ret_n = pq->ret_n; memcpy(g_ret, pq->ret, (size_t)pq->ret_n * sizeof(const uint8_t *));
+            uint64_t local_rest[1024]; int nrest = pq->nrest;
+            memcpy(local_rest, pq->rest, (size_t)nrest * sizeof(uint64_t));
+            post_op local_post[64]; int npost = pq->npost;
+            if (npost > 0) memcpy(local_post, pq->post, (size_t)npost * sizeof(post_op));
+            pq->active = 0; pq->p = NULL; pq->ret_n = 0; pq->nrest = 0; pq->npost = 0;
+
+            mtl_queue_activate(qser);
+            mtl_set_queue_origin_lower_left(orig_ll);
+            g_queue_post_base = g_npost;
+            for (int k = 0; k < npost; k++) {
+                if (ts_on()) ts_clk();
+                local_post[k].seg = g_seg;
+                post(local_post[k]);
+            }
+            PD("Y unpark_queue serial=%llu dst=%p value=%u", (unsigned long long)qser, pq->wait_val, pq->wait_v);
+            uint64_t idx_h[1 + 16 + 1024]; int idx_n = 0;
+            if (resume_p) idx_h[idx_n++] = (uint64_t)(uintptr_t)resume_p;
+            for (int r = g_ret_n - 1; r >= 0; r--) idx_h[idx_n++] = (uint64_t)(uintptr_t)g_ret[r];
+            for (int r = 0; r < nrest; r++) idx_h[idx_n++] = local_rest[r];
+            mtl_sub_index(idx_h, idx_n);
+            mtl_exec_rest(local_rest, nrest);
+            mtl_exec(resume_p);
+            for (int k = 0; k < nrest && !pq->active; k++) {
+                mtl_exec_rest(local_rest + k + 1, nrest - k - 1);
+                mtl_exec((const uint8_t *)local_rest[k]);
+            }
+            mtl_exec_rest(NULL, 0);
+            mtl_queue_boundary_land();
+
+            g_sdx_ok = 0; g_exec_seq = 0; g_exec_cur = NULL;
+            g_queue_post_base = save_post_base < g_npost ? save_post_base : g_npost;
+            g_ret_n = save_ret_n; memcpy(g_ret, save_ret, (size_t)save_ret_n * sizeof(const uint8_t *));
+            g_rest = save_rest; g_nrest = save_nrest;
+            if (save_q) { mtl_queue_activate(save_q); mtl_set_queue_origin_lower_left(save_orig); }
+        }
+    }
+    g_unparking = 0;
+}
+int mtl_queue_append_if_parked(uint64_t serial, int origin_ll, const uint64_t *h, int n) {
+    for (int i = 0; i < 8; i++) {
+        parked_queue_t *pq = &g_parked[i];
+        if (!pq->active || pq->serial != serial) continue;
+        pq->origin_ll = origin_ll;
+        for (int k = 0; k < n && pq->nrest < 1024; k++) pq->rest[pq->nrest++] = h[k];
+        return 1;
+    }
+    return 0;
+}
+int mtl_queue_is_parked(uint64_t serial) {
+    for (int i = 0; i < 8; i++) if (g_parked[i].active && g_parked[i].serial == serial) return 1;
+    return 0;
+}
+void mtl_queue_fence_sync(uint64_t serial, uint64_t *fence_out) {
+    for (int i = 0; i < 8; i++) {
+        parked_queue_t *pq = &g_parked[i];
+        if ((pq->active || pq->nfences > 0) && pq->serial == serial) {
+            if (pq->nfences < 32) { *fence_out = UINT64_MAX; pq->fences[pq->nfences++] = fence_out; }
+            return;
+        }
+    }
+}
+static void mtl_parked_note_commit(uint64_t fence) {
+    for (int i = 0; i < 8; i++) {
+        parked_queue_t *pq = &g_parked[i];
+        if (!pq->active && pq->nfences > 0) {
+            for (int k = 0; k < pq->nfences; k++) if (pq->fences[k]) *pq->fences[k] = fence;
+            pq->nfences = 0;
+        }
+    }
+}
+static void mtl_parked_forget(uint64_t serial) {
+    for (int i = 0; i < 8; i++) if (g_parked[i].serial == serial) {
+        for (int k = 0; k < g_parked[i].nfences; k++) if (g_parked[i].fences[k]) *g_parked[i].fences[k] = g_fence;
+        memset(&g_parked[i], 0, sizeof g_parked[i]);
+    }
+}
+void mtl_flush_parked(void) {
+    if (!mtl_any_parked()) return;
+    uint64_t save_q = g_active_queue ? g_active_queue->serial : 0;
+    int save_orig = g_queue_origin_ll;
+    mtl_sub_begin();
+    g_sdx_ok = 0;
+    mtl_try_unpark();
+    g_flushing_parked = 1;
+    while (mtl_any_parked()) {
+        for (int i = 0; i < 8; i++) {
+            parked_queue_t *pq = &g_parked[i];
+            if (!pq->active) continue;
+            if (ts_on() && (g_stat_draw > g_cut_draw0 || g_sclk)) { ts_boundary(); g_seg++; }
+            uint64_t qser = pq->serial;
+            int orig_ll = pq->origin_ll;
+            const uint8_t *resume_p = pq->p;
+            g_ret_n = pq->ret_n; memcpy(g_ret, pq->ret, (size_t)pq->ret_n * sizeof(const uint8_t *));
+            uint64_t local_rest[1024]; int nrest = pq->nrest;
+            memcpy(local_rest, pq->rest, (size_t)nrest * sizeof(uint64_t));
+            post_op local_post[64]; int npost = pq->npost;
+            if (npost > 0) memcpy(local_post, pq->post, (size_t)npost * sizeof(post_op));
+            pq->active = 0; pq->p = NULL; pq->ret_n = 0; pq->nrest = 0; pq->npost = 0;
+
+            mtl_queue_activate(qser);
+            mtl_set_queue_origin_lower_left(orig_ll);
+            g_queue_post_base = g_npost;
+            for (int k = 0; k < npost; k++) {
+                if (ts_on()) ts_clk();
+                local_post[k].seg = g_seg;
+                post(local_post[k]);
+            }
+            PD("Y flush_parked serial=%llu dst=%p value=%u", (unsigned long long)qser, pq->wait_val, pq->wait_v);
+            mtl_exec_rest(local_rest, nrest);
+            mtl_exec(resume_p);
+            for (int k = 0; k < nrest && !pq->active; k++) {
+                mtl_exec_rest(local_rest + k + 1, nrest - k - 1);
+                mtl_exec((const uint8_t *)local_rest[k]);
+            }
+            mtl_queue_boundary_land();
+        }
+    }
+    g_flushing_parked = 0;
+    mtl_exec_rest(NULL, 0);
+    mtl_sub_commit();
+    if (save_q) { mtl_queue_activate(save_q); mtl_set_queue_origin_lower_left(save_orig); }
+}
+
 void mtl_exec(const uint8_t *p) {
     if (!g_state_inited) state_reset();
     static int dump_all = -1; if (dump_all < 0) dump_all = getenv("DM_NVN_PASSDUMP_ALL") != NULL;
@@ -13537,10 +13800,11 @@ void mtl_exec(const uint8_t *p) {
         if (g_allocprof) { static uint64_t last; static int prev = -1; uint64_t now = g_dev.currentAllocatedSize; if (prev >= 0 && prev < 64 && now > last) g_ap_bytes[prev] += now - last; last = now; prev = h.op; }
         if (g_hoist_n && hoist_take(p)) { if (g_fz.active && p == g_fz.rt2_op) { g_fz.phase = 2; g_rt_merged = 0; PD("F %llu merged pass enters the later pass's draws", g_stat_pass); } p += h.size; continue; }   // A pure-clear render pass already executed early / the start of a later pass already merged in   // Entering the later pass: the same-target continuation of the earlier pass ends here; the later pass reading the earlier pass's attachment is proven to be same-pixel by fz_p2_draw, and is no longer split by the continuation rule
         const void *a = p + 8;
-        if (g_nlc && !lc_keeps(h.op) && !(h.op == OP_END && g_ret_n)) lc_land();   // see lc_keeps (a sub-list's end returns to its caller)
-        if (g_mrun.n && !geo_mesh_keeps(h.op) && !(h.op == OP_END && g_ret_n)) geo_mesh_flush();   // see geo_mesh_keeps
+        if (g_nlc && !lc_keeps(h.op) && !(h.op == OP_END && (g_ret_n || g_nrest))) lc_land();   // see lc_keeps (a sub-list's end returns to its caller)
+        if (g_mrun.n && !geo_mesh_keeps(h.op) && !(h.op == OP_END && (g_ret_n || g_nrest))) geo_mesh_flush();   // see geo_mesh_keeps
         switch (h.op) {
             case OP_END: g_exec_cur = NULL;
+                if (g_ret_n > 0) { p = g_ret[--g_ret_n]; continue; }
                 if (g_hoist_n && !g_ret_n && !g_nrest) {
                     if (g_fz.active) fz_unskip();
                     if (g_hoist_n) { MLOG("[RED] pure-clear pass hoisting: %d hoisted operations were not reached by the end of the submission; cleared (should not happen)", g_hoist_n); g_hoist_n = 0; }
@@ -13549,10 +13813,22 @@ void mtl_exec(const uint8_t *p) {
             case OP_BEGIN: break;
             case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
             case OP_CALL: { uint64_t t; memcpy(&t, a, 8);
-                if (g_ret_n < 16) g_ret[g_ret_n] = p + h.size; g_ret_n++;   // Return stack for lookahead: after a sub-list ends, continue looking at the caller
-                mtl_exec((const uint8_t *)t); g_ret_n--; break; }
+                if (g_ret_n < 16) { g_ret[g_ret_n++] = p + h.size; p = (const uint8_t *)t; continue; }
+                mtl_exec((const uint8_t *)t); break; }
             case OP_SIGNAL_EVENT: { volatile uint32_t *val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, (const uint8_t *)a + 8, 4); memcpy(&v, (const uint8_t *)a + 12, 4);
-                PD("Y signal_event cmd=%p dst=%p mode=%u value=%u", p, val, m, v); mtl_sub_event(val, m, v); break; }
+                if (m & 2) {
+                    uint32_t wm = m & 1;
+                    PD("Y wait_event cmd=%p dst=%p mode=%u value=%u cur=%u", p, val, wm, v, ev_gpu_get(val));
+                    if (!g_flushing_parked && !ev_wait_ready(val, wm, v)) {
+                        PD("Y park_queue serial=%llu dst=%p mode=%u value=%u cur=%u", g_active_queue ? (unsigned long long)g_active_queue->serial : 0ull, val, wm, v, ev_gpu_get(val));
+                        mtl_park_current(p + h.size, val, wm, v);
+                        return;
+                    }
+                    break;
+                }
+                PD("Y signal_event cmd=%p dst=%p mode=%u value=%u", p, val, m, v);
+                mtl_sub_event(val, m, v);
+                break; }
             case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, (const uint8_t *)a + 8, 8); g_cnt_report[t & 31]++;
                 PD("Q report type=%llu cmd=%p dst=%#llx", (unsigned long long)t, p, (unsigned long long)ad);
                 if (DM_GAME_RENDER_COND) rc_note(ad, t == 0 || t == 0x10 ? 1 : 2);

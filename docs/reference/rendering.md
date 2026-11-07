@@ -1218,6 +1218,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** the copy now carries the stencil.
 - **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md): the occlusion pass (`aa05724ffa62cb82`, a 480×270 R8 target cleared to 1.0) only writes where stencil bit 1 of the quarter-size depth-stencil copy is clear, so on the Mac the mask kept 1.0 everywhere.
 
+### Cross-queue NVNevent waits and per-queue command parking
+
+- **Symptom:** dynamic skinned meshes or objects updated on a secondary compute/transfer `NVNqueue` flicker or draw with stale vertices when synchronized with the main graphics queue through `nvnCommandBufferWaitEvent` and `nvnCommandBufferSignalEvent`.
+- **Cause:** `nvnCommandBufferWaitEvent` was a no-op stub, and `SubmitCommands` drained a secondary queue immediately on the calling thread instead of parking its submissions until the signaled `NVNevent` value was reached.
+- **Fix:** `nvnCommandBufferWaitEvent` and `nvnCommandBufferSignalEvent` record `P_WAIT_EVENT` and `P_SIGNAL_EVENT` commands; `q_submit_or_park` parks secondary-queue command handles behind unsatisfied event waits and `q_drain_parked` drains them once the matching `SignalEvent` or CPU write completes.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (`0400486024DEC000`, `v131072`).
+
 ### Periodic GPU profiles close at frame boundaries
 
 - **Symptom:** `DM_NVN_GPUPROF=every:1` prints no per-frame reports and fills its timestamp heap across frames.

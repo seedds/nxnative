@@ -213,6 +213,13 @@ typedef struct { int32_t on; } p_rast_discard;
 void mtl_exec(const uint8_t *handle);
 void mtl_sub_fill(uint64_t dst, uint64_t n, uint32_t value);   // in-order buffer fill within the submission (OP_CLEAR_BUF)
 void mtl_exec_rest(const uint64_t *handles, int n);   // Tells which handles in this submission still follow the current handle (used by the pass lookahead across handles)
+int mtl_queue_append_if_parked(uint64_t serial, int origin_ll, const uint64_t *h, int n);
+int mtl_queue_is_parked(uint64_t serial);
+int mtl_any_parked_ready(void);
+void mtl_try_unpark(void);
+void mtl_queue_fence_sync(uint64_t serial, uint64_t *fence_out);
+void mtl_flush_parked(void);
+void mtl_cpu_event_signal(volatile uint32_t *val, uint32_t mode, uint32_t v);
 // Present: draw the swapchain texture to the front-end CAMetalLayer (only counts when there is no window)
 uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]);   // Enqueue a present and return the ticket immediately; period_s: minimum time this image is displayed (= present period, 0 = unlimited)
 void mtl_present_wait(uint64_t ticket);                    // Wait until the present with this ticket has been processed (blit committed to the GPU queue)

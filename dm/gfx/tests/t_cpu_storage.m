@@ -118,6 +118,39 @@ int main(void) {
         mtl_tex_release(&upper);
         teardown(&f);
 
+        // nvn_ft_poll's question of a registered texture the CPU wrote after its first use (mtl_tex_cpu_rewritten)
+        setup(&f, 7030, CACHED, NVN_FORMAT_RGBA8, 0);
+        large = texture_at(&f, 7031, 0x40000, LARGE, NVN_FORMAT_RGBA8, 0);
+        dm_guest_write_prepare(large.mem, large.L.size); fill(&large, large.mem, 40);
+        CHECK("a rewrite of storage the GPU never wrote is uploaded", mtl_tex_cpu_rewritten(&large) == MTL_REWRITE_UPLOADED && tex_cpu_written(large.serial));
+        mtl_tex_gpu_written(&large);
+        mtl_sub_begin(); cpu_unc_drop(); finish();
+        CHECK("and the GPU's next write there makes it a GPU texture again", !tex_cpu_written(large.serial));
+        dm_guest_write_prepare(large.mem, large.L.size); fill(&large, large.mem, 80);
+        mtl_tex_gpu_written(&large);
+        CHECK("a rewrite the GPU wrote over afterwards is the GPU's until the CPU rewrites it", mtl_tex_cpu_rewritten(&large) == MTL_REWRITE_GPU_NOW && !tex_cpu_written(large.serial));
+        dm_guest_write_prepare(large.mem, large.L.size); fill(&large, large.mem, 120);
+        CHECK("and the CPU's next rewrite is uploaded", mtl_tex_cpu_rewritten(&large) == MTL_REWRITE_UPLOADED && tex_cpu_written(large.serial));
+        mtl_tex_release(&large);
+        teardown(&f);
+
+        setup(&f, 7032, CACHED, NVN_FORMAT_RGBA8, 0);   // a block-compressed texture: a GPU copy into it while registered lands in its storage too (tex_storage_dst)
+        tex_t bc = texture_at(&f, 7033, 0x40000, LARGE, NVN_FORMAT_RGBA_DXT1, 0);
+        dm_guest_write_prepare(bc.mem, bc.L.size); memset(bc.mem, 0x5a, bc.L.size);
+        mtl_tex_gpu_written(&bc);
+        CHECK("a block-compressed rewrite is uploaded though a GPU copy into it followed", mtl_tex_cpu_rewritten(&bc) == MTL_REWRITE_UPLOADED && tex_cpu_written(bc.serial));
+        mtl_tex_release(&bc);
+        teardown(&f);
+
+        setup(&f, 7034, CACHED, NVN_FORMAT_RGBA8, 0);   // a second texture object over storage the GPU wrote through the first (the spans are by address)
+        large = texture_at(&f, 7035, 0x40000, LARGE, NVN_FORMAT_RGBA8, 0);
+        tex_t again = texture_at(&f, 7036, 0x40000, LARGE, NVN_FORMAT_RGBA8, 0);
+        dm_guest_write_prepare(large.mem, large.L.size); fill(&large, large.mem, 40);
+        mtl_tex_gpu_written(&large);
+        CHECK("another texture over storage the GPU wrote after the CPU is the GPU's too", mtl_tex_cpu_rewritten(&again) == MTL_REWRITE_GPU_NOW);
+        mtl_tex_release(&again); mtl_tex_release(&large);
+        teardown(&f);
+
         setup(&f, 7022, NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_GPU_CACHED, NVN_FORMAT_RGBA8, 0);
         size_t spans = g_ngws;
         mtl_tex_gpu_written(&f.t);

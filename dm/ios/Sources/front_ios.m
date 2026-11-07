@@ -31,6 +31,8 @@ static void front_ios_notify_ask(void);
 static void front_ios_power_watch(void);
 static void front_ios_audio_watch(void);
 static UILabel *front_ios_fps_label(void);
+int mtl_hdr_on(void);   // nvn_mtl.m: HDR output (the profile's hdr, DM_HDR)
+void mtl_hdr_headroom(float h);
 
 @interface DmGameView : UIView
 @property (nonatomic) CGFloat maxPixelWidth;   // 0: the screen's own pixels; a TV caps the drawable at 1920 across (tv_attach)
@@ -44,6 +46,10 @@ static UILabel *front_ios_fps_label(void);
         }];
         CAMetalLayer *l = (CAMetalLayer *)self.layer;
         l.device = MTLCreateSystemDefaultDevice(); l.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        if (mtl_hdr_on()) {   // HDR output (nvn_mtl.m, HDR output): an extended-range layer, 1.0 = SDR white; values above it light the screen's EDR headroom
+            l.pixelFormat = MTLPixelFormatRGBA16Float; l.wantsExtendedDynamicRangeContent = YES;
+            CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB); l.colorspace = cs; CGColorSpaceRelease(cs);
+        }
         l.contentsScale = MAX(self.traitCollection.displayScale, 1); l.framebufferOnly = NO; l.opaque = YES;
         self.backgroundColor = UIColor.blackColor;
     }
@@ -150,6 +156,11 @@ static void launcher_done(void) { [g_root startGame]; }
     front_hud_env();   // before the process's first Metal device, which reads MTL_HUD_ENABLED (an env file's DM_METAL_HUD sets it in main.m already; GitHub issue #840)
     const char *dev = front_ios_device_check();   // that first device: a GPU without BC textures is refused here, not at launch, so the launcher's HUD switch counts
     if (dev) { [self showHint:[NSString stringWithFormat:@"This device is not supported.\n%s", dev]]; return; }   // the host does not start
+    // HDR output needs a screen with EDR headroom: without it the game keeps its SDR targets, whatever the launcher says (DM_HDR=2 keeps it on, to test the layer). Decided before the
+    // game view, whose layer follows it, and before the host's graphics start (mtl_hdr_on reads it once)
+    UIScreen *scr = self.view.window.screen ?: UIScreen.mainScreen;
+    const char *he = getenv("DM_HDR");
+    if (scr.potentialEDRHeadroom <= 1.0 && !(he && atoi(he) == 2)) { setenv("DM_HDR", "0", 1); LOG("front end: this screen has no EDR headroom (potential %.2f): HDR output off", scr.potentialEDRHeadroom); }
     {   // Picture shape "auto" (the launcher's Match screen): the app window's own shape when it is taller than 16:9 (an iPad's 4:3, an unfolded iPhone Duo's 1.43:1; loader.c
         // takes 1.3 to 1.77), else 16:9. The window's, not the screen's: on an iPad under Stage Manager or Split View the app does not fill the screen. Resolved here, before the
         // host writes the state page (main.c dm_fps_state_apply)
@@ -165,6 +176,12 @@ static void launcher_done(void) { [g_root startGame]; }
     self.view.clipsToBounds = YES;   // with Fill the game view is larger than the screen
     self.view.window.traitOverrides.preferredContentSizeCategory = UIContentSizeCategorySmall;   // UIKit draws the in-game menu (GameMenu.swift) in this window: it keeps one compact text size over the game, whatever the system's text size
     self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
+    if (mtl_hdr_on()) {   // the tone mapping's peak follows the headroom the screen has now (it changes with the brightness), read four times a second
+        LOG("front end: HDR layer (RGBA16Float, extended linear sRGB); EDR headroom now %.2f, at most %.2f", scr.currentEDRHeadroom, scr.potentialEDRHeadroom);
+        __weak DmRootVC *ws = self;
+        [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) { DmRootVC *vc = ws; if (!vc) { [t invalidate]; return; }
+            mtl_hdr_headroom((float)(vc.view.window.screen ?: UIScreen.mainScreen).currentEDRHeadroom); }];
+    }
     [self.view addSubview:self.game];
     g_layer = (CAMetalLayer *)self.game.layer;
     if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) { g_layer.developerHUDProperties = @{@"mode": @"default"}; LOG("front end: Metal performance HUD on (DM_METAL_HUD)"); }   // Apple's HUD over the game: frame rate, frame and GPU time, memory

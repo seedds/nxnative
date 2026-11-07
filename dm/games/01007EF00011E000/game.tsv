@@ -18,6 +18,11 @@ app_category	public.app-category.adventure-games
 pad_layout	full
 
 # ---- Graphics ----
+# HDR output (nvn_mtl.m, HDR output; DM_HDR): the scene is RG11B10 float up to the tone mapping pass (uking_pass_shader, pixel shader f7ee6fe10b925543), which writes
+# 1 - exp(-x) into an RGB10A2 target; the AA / upscale pass, the HUD and the copy into the RGBA8 swapchain's sRGB view all work on those linear values. hdr_tonemap.metal is
+# that pass again: it writes the game's result unchanged and, beside it, how much brighter each pixel gets with the curve's top raised from 1 to the screen's headroom (the
+# game's curve up to 0.6), which the host adds in the present where the 3D picture still shows, so the HUD and the menus stay the game's own
+hdr	f7ee6fe10b925543	hdr_tonemap.metal
 # The frame-interval controller (60 fps cuts in patches.py) and dynamic resolution read the GPU time between the frame's two timestamp reports: each report takes its segment's GPU start / end
 gpu_timestamps	segment
 # 60 fps (30 on the Switch): the host decides each frame's step in whole vsyncs and holds the frame that long (rewriter stubs at setWaitVsyncInterval and VFR::updateInterval,

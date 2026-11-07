@@ -307,9 +307,16 @@ static BOOL ds4_route(int p, GCController *controller) {
 }
 #endif
 
+static void (*sinks[DM_PLAYERS])(const dm_haptic_state *);   // a player's own output instead of engines (dm_haptics_apple_set_sink)
+static void sink_apply(dm_haptic_state s) {   // on the queue: Rumble strength and cutoff, as the engines get them
+    for (int m = 0; m < 2; m++) { s.motor[m].amplitude_low = controller_level(s.motor[m].amplitude_low * gain); s.motor[m].amplitude_high = controller_level(s.motor[m].amplitude_high * gain); }
+    sinks[s.player](&s);
+}
+static void sink_silence(int p) { dm_haptic_state z = {0}; z.player = p; if (sinks[p]) sinks[p](&z); }
 static void apply(dm_haptic_state s) {
     dispatch_async(queue, ^{ @autoreleasepool {
         if (s.epoch != dm_haptics_epoch(s.player)) return;
+        if (sinks[s.player]) { sink_apply(s); return; }   // the player is in range, as channels[] below assumes (hle_haptics.c)
         NSArray<DmRumbleChannel *> *out = channels[s.player];
 #if !TARGET_OS_IPHONE
         if ([out.firstObject isKindOfClass:DmDs4Channel.class]) { ds4_apply(s); return; }
@@ -333,6 +340,7 @@ static void default_controller(int p, GCDeviceHaptics *h, NSTimeInterval retryAf
 static void configure(int p, GCController *controller) {
     for (DmRumbleChannel *c in channels[p]) [c stop];
     channels[p] = [NSMutableArray new];
+    if (sinks[p]) { sink_silence(p); dm_haptics_route(p, 1); return; }
 #if !TARGET_OS_IPHONE
     ds4_release(p);
     if (controller && ds4_route(p, controller)) { dm_haptics_route(p, 1); return; }   // the report first, as SDL drives it
@@ -378,6 +386,13 @@ static void configure(int p, GCController *controller) {
 #endif
     dm_haptics_route(p, channels[p].count != 0);
 }
+void dm_haptics_apple_set_sink(int p, void (*sink)(const dm_haptic_state *)) {
+    if (!queue || p < 0 || p >= DM_PLAYERS) return;
+    pthread_mutex_lock(&routeLock);
+    dm_haptics_route(p, 0);   // invalidate queued work before changing the output
+    dispatch_sync(queue, ^{ sink_silence(p); sinks[p] = sink; configure(p, controllers[p]); });
+    pthread_mutex_unlock(&routeLock);
+}
 void dm_haptics_apple_controller(int p, GCController *controller) {
     if (!queue || p < 0 || p >= DM_PLAYERS) return;
     pthread_mutex_lock(&routeLock);
@@ -391,7 +406,7 @@ void dm_haptics_apple_controller(int p, GCController *controller) {
 static void suspend(unsigned reason, BOOL on) {
     dm_haptics_suspend(reason, on);
     void (^stop)(void) = ^{
-        for (int p = 0; p < DM_PLAYERS; p++) for (DmRumbleChannel *c in channels[p]) [c stop];
+        for (int p = 0; p < DM_PLAYERS; p++) { for (DmRumbleChannel *c in channels[p]) [c stop]; sink_silence(p); }
     };
     if (on) { if (dispatch_get_specific(&queue)) stop(); else dispatch_sync(queue, stop); }
 }

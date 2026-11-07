@@ -232,6 +232,68 @@ Generated projects and Xcode build products stay in that folder; the host profil
 header is generated under `dm/host/gen/` as usual. CI uploads failure logs.
 GPU regression tests still run locally with `make -C dm/gfx/tests GAME=<id> run`.
 
+For graphics regression fixtures on a physical iPhone, use
+`dm/ios/tools/test_gfx_on_iphone.py`. It compiles the selected fixture unchanged
+in a Debug/O1 app, calls it on a background thread, and collects its checks and log.
+Xcode, the iPhoneOS SDK, Metal tools, XcodeGen and a development signing team are
+required. No game files or keys are used. Choose exactly one mode:
+`--generate-only` writes the project and headers, `--build-only` also builds and
+signs, and `--run` additionally installs and launches on the named device.
+
+```sh
+python3 dm/ios/tools/test_gfx_on_iphone.py --run \
+    --profile 040074A01BF12000 --team YOUR_TEAM_ID \
+    --bundle-id YOUR_REGISTERED_BUNDLE_ID --device YOUR_DEVICE_UDID \
+    --output-dir /path/to/new/scratch/clear-ds
+```
+
+The default fixture is `--fixture clear_ds` (`t_clear_ds.m`). The runner also
+accepts `--fixture window_copy` and `--fixture push_capture` when their fixture
+sources are present in the selected checkout. These are supplied by
+[the window-copy PR](https://github.com/seedds/nxnative/pull/1140) and
+[the push-constant capture PR](https://github.com/seedds/nxnative/pull/1160),
+respectively. Use `--tree /path/to/checkout` to select that source tree; the
+runner reports a missing source before generating or installing anything.
+Window-copy checks exercise synthetic rendering and ownership paths;
+push-capture checks inspect host argument data and do not execute a GPU shader.
+Neither establishes actual game behavior or physical-screen output.
+
+For a raw RG11B10Float conversion measurement, select `--measurement metal_conversion`
+instead of `--fixture` and omit `--profile`. The selected `--tree` must contain
+[the standalone conversion probe](https://github.com/seedds/nxnative/pull/1168).
+Only that probe and the app wrapper compile; no game or renderer sources are used.
+For example, prepare without installing:
+
+```sh
+python3 dm/ios/tools/test_gfx_on_iphone.py --build-only \
+    --measurement metal_conversion --tree /path/to/conversion-checkout \
+    --team YOUR_TEAM_ID --bundle-id YOUR_REGISTERED_BUNDLE_ID \
+    --output-dir /path/to/new/scratch/conversion
+```
+
+The measurement report preserves all 95 ordered input and raw packed output words,
+input identity, source provenance, run ID, GPU and OS. Completion means the raw
+measurement was captured; it is not a rounding pass/fail assertion. The collector
+rejects stale, incomplete or malformed reports and keeps `gfx-fixture.log` for
+execution errors. No iPhone conversion result is established by a successful build.
+Measurement mode does not request Metal validation; fixture mode retains its
+existing validation request and test pass criteria.
+
+Reserve the device before running; the tool replaces the app with the selected
+bundle ID and terminates an existing instance of that app. It does not manage
+other games or device ownership. The default deployment target is iOS 26.0.
+`--slot-run /path/to/slot-run.sh` optionally wraps the build, with `--slot-dir`
+and `--slot-name` for shared build coordination; no wrapper is needed otherwise.
+All generated files stay in the new output directory. `receipt.json` records
+source hashes, signing verification and whether the tree changed during the
+build. `results.json` is accepted only when its run ID matches this build and
+the report is complete; fixture passing requires a zero exit status, no failures and at
+least one check. Device operations have timeouts and copy diagnostics remain in
+`device-copy.log`. The fixture requests Metal validation; confirm the log's
+`Metal API Validation Enabled` message rather than inferring it from the
+environment value. Results apply to the selected fixture and recorded source
+hashes; they do not establish Release gameplay or sustained frame pacing.
+
 `.github/workflows/lint-python.yml` lints `scripts/` and the Python tools under
 `dm/` with ruff (rules for bugs, never reformatting) and type-checks them with
 pyright in basic mode (`pyproject.toml`). It is a ratchet: today's findings are

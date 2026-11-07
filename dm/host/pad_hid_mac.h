@@ -1,7 +1,7 @@
 // Mac: raw HID gamepads that GameController does not list (pad_hid.h, GitHub issue #637), read on the main run loop alongside front_mac.m's GameController players.
 // Each device takes a player slot as a GameController controller does; front_mac.m defines the slot side (hidpad_attach / hidpad_detach / hidpad_read).
-// Skipped, so no controller is read twice: GameController's synthetic devices, and every device GameController says it will list itself (+[GCController supportsHIDDevice:]:
-// Xbox, PlayStation, Switch and MFi pads of any vendor). DM_HID_PADS=0 turns this off.
+// Skipped, so no controller is read twice: GameController's synthetic devices, and Microsoft, Sony and Nintendo pads that GameController says it lists itself
+// (+[GCController supportsHIDDevice:]). That call alone is not enough: it answers YES for the 8BitDo Ultimate 2C (2dc8:301b), which GameController then never lists. DM_HID_PADS=0 turns this off.
 #pragma once
 #import <IOKit/hid/IOHIDManager.h>
 #import <GameController/GameController.h>
@@ -10,7 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-typedef struct hid_pad { IOHIDDeviceRef hid; pad_hid st; char name[64]; struct hid_pad *next; } hid_pad;
+typedef struct hid_pad { IOHIDDeviceRef hid; pad_hid st; char name[64]; uint8_t nintendo; struct hid_pad *next; } hid_pad;   // nintendo: buttons in report 0x3F
 static IOHIDManagerRef g_hidpad_manager;
 static hid_pad *g_hidpads;
 static int g_hidpad_log;
@@ -32,7 +32,8 @@ static void hidpad_value(void *ctx, IOReturn result, void *sender, IOHIDValueRef
         d->st.hat = pad_hid_hat(x, min, max);
     } else {
         int a = pad_hid_axis_of(page, usage); if (a < 0) return;
-        d->st.axis[a] = pad_hid_norm(x, min, max);
+        float n = pad_hid_norm(x, min, max);
+        d->st.axis[a] = d->st.raw ? pad_hid_raw_axis(&d->st, a, n) : n;
     }
     hidpad_read(d);
 }
@@ -40,21 +41,33 @@ static void hidpad_found(void *ctx, IOReturn result, void *sender, IOHIDDeviceRe
     (void)ctx; (void)sender;
     if (result != kIOReturnSuccess || IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDGCSyntheticDeviceKey)) == kCFBooleanTrue) return;
     for (hid_pad *d = g_hidpads; d; d = d->next) if (d->hid == hid) return;
-    if ([GCController supportsHIDDevice:hid]) return;   // front_mac.m reads it through its GCController (once per device: the call is not cheap)
     NSNumber *vendor = (__bridge NSNumber *)IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDVendorIDKey)), *product = (__bridge NSNumber *)IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDProductIDKey));
     int vid = vendor.intValue, pid = product.intValue;
+    // front_mac.m reads these through their GCController. supportsHIDDevice: is checked only for them (the call is not cheap, and it says YES for pads it never lists, such as the 8BitDo Ultimate 2C)
+    if ((vid == 0x045E || vid == 0x054C || vid == 0x057E) && [GCController supportsHIDDevice:hid]) return;
     hid_pad *d = calloc(1, sizeof *d); if (!d) { LOG("[RED] HID gamepad: cannot allocate device state"); return; }
-    pad_hid_init(&d->st, getenv("DM_HID_MAP"));
     NSString *name = (__bridge NSString *)IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDProductKey));
     snprintf(d->name, sizeof d->name, "%s", name.UTF8String ?: "HID gamepad");
+    uint8_t has[PH_AXES] = {0}; int nintendo = 0;
     NSArray *els = CFBridgingRelease(IOHIDDeviceCopyMatchingElements(hid, NULL, kIOHIDOptionsTypeNone));
-    for (id o in els) { IOHIDElementRef e = (__bridge IOHIDElementRef)o; int a = pad_hid_axis_of(IOHIDElementGetUsagePage(e), IOHIDElementGetUsage(e)); if (a >= 0) d->st.has[a] = 1; }
+    for (id o in els) {
+        IOHIDElementRef e = (__bridge IOHIDElementRef)o; int a = pad_hid_axis_of(IOHIDElementGetUsagePage(e), IOHIDElementGetUsage(e));
+        if (a >= 0) has[a] = 1;
+        if (IOHIDElementGetUsagePage(e) == kHIDPage_Button && IOHIDElementGetReportID(e) == PAD_HID_NINTENDO_REPORT) nintendo = 1;
+    }
+    pad_hid_init(&d->st, getenv("DM_HID_MAP"), nintendo); memcpy(d->st.has, has, sizeof has); d->nintendo = (uint8_t)nintendo;
     d->hid = (IOHIDDeviceRef)CFRetain(hid); d->next = g_hidpads; g_hidpads = d;
     IOHIDDeviceRegisterInputValueCallback(hid, hidpad_value, d);
     hidpad_attach(d);
     // HID has no standard button numbering: the default map is 8BitDo's, so another vendor's pad may have its buttons in other places
-    if (vid != PAD_HID_DEFAULT_VENDOR && !getenv("DM_HID_MAP"))
+    if (vid != PAD_HID_DEFAULT_VENDOR && !nintendo && !getenv("DM_HID_MAP"))
         LOG("controller '%s' (HID, %04x:%04x): buttons use 8BitDo's numbering; if they are in the wrong places, DM_HID_LOG=1 logs each button's number for a DM_HID_MAP", d->name, vid, pid);
+}
+static void hidpad_show_player(hid_pad *d, int p) {   // front_mac.m, once the pad has its player
+    if (!d->nintendo) return;
+    uint8_t r[PAD_HID_LIGHTS_SIZE]; pad_hid_lights(r, p);
+    IOReturn e = IOHIDDeviceSetReport(d->hid, kIOHIDReportTypeOutput, r[0], r, sizeof r);
+    if (e != kIOReturnSuccess) LOG("[RED] controller '%s': cannot set its player lights (0x%x)", d->name, e);
 }
 static void hidpad_removed(void *ctx, IOReturn result, void *sender, IOHIDDeviceRef hid) {
     (void)ctx; (void)result; (void)sender;

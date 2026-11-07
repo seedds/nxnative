@@ -296,6 +296,7 @@ static void hidpad_attach(hid_pad *d) {
     int p = g_merge ? 0 : pad_slot_take(&g_slots, d, d->name); char nb[16];
     if (p < 0) { LOG("controller '%s' (HID) connected: all %d players are taken, not used", d->name, DM_PLAYERS); return; }
     npad_name(p, nb, sizeof nb); LOG("controller '%s' (HID) connected: player %d (npad %s)", d->name, p + 1, nb);
+    hidpad_show_player(d, p);
     if (!g_merge) dm_pad_players(pad_slot_mask(&g_slots));   // merged, every controller is player 1, as pads_changed has it
     hidpad_read(d);
 }

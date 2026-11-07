@@ -3084,7 +3084,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[165];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[167];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 static int copycheck_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_COPYCHECK"); on = e && atoi(e) != 0; } return on; }
 // DM_NVN_COPYCHECK=1: each NVN texture's Metal texture is labelled with what it is, so a copy copy_fit cuts names it
@@ -3133,7 +3133,7 @@ static int copy_fit_t2t(id<MTLTexture> s, NSUInteger sl, NSUInteger lv, MTLOrigi
     if (!copy_fit(s, sl, lv, so, z, "texture→texture source") || !copy_fit(d, dl, dv, doo, z, "texture→texture")) return 0;
     if (mtl_tgtfix_on() && d && mtl_fmt_block(d.pixelFormat) && (z->width != z0.width || z->height != z0.height)
         && ((z->width != z0.width && doo.x + z->width < MAX(d.width >> dv, 1ul)) || (z->height != z0.height && doo.y + z->height < MAX(d.height >> dv, 1ul)))) {
-        RED_ONCE(164, "block-compressed texture copy cut to the source level (%lux%lu) does not end at the destination's edge: skipped", (unsigned long)z->width, (unsigned long)z->height);
+        RED_ONCE(165, "block-compressed texture copy cut to the source level (%lux%lu) does not end at the destination's edge: skipped", (unsigned long)z->width, (unsigned long)z->height);
         copycheck_log("texture→texture (block-compressed cut)", "edge", d, dl, dv, doo, *z, MAX(d.width >> dv, 1ul)); return 0; }
     return 1;
 }
@@ -15246,7 +15246,7 @@ static void copy_t2t(const p_copy_t2t *c) {
     if (mtl_tgtfix_on() && (c->src->d.target == 3 || c->dst->d.target == 3)) {
         size_t im;
         if (c->src->d.target == 3 && c->dst->d.target == 3) { sr = region_1d(c->src, sr, 0, &im); dr = region_1d(c->dst, dr, 0, &im); nz = sr.depth; }
-        else RED_ONCE(163, "texture copy between a 1D array (target 3) and NVN target %d: rows taken as rows (copy_fit cuts them to the one-row slice)", c->src->d.target == 3 ? c->dst->d.target : c->src->d.target);
+        else RED_ONCE(166, "texture copy between a 1D array (target 3) and NVN target %d: rows taken as rows (copy_fit cuts them to the one-row slice)", c->src->d.target == 3 ? c->dst->d.target : c->src->d.target);
     }
     // The copy's bytes belong in the destination's storage: written there now from the source's storage when that holds its content and the copy is a plain one (the same Metal format: a
     // format change is drawn below and converts the bytes), else read back after the copy (decided before the draw path gives the destination render-target use, which makes it GPU-owned from then on)

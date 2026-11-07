@@ -220,9 +220,12 @@ def find_key(img, lo, hi, pak, first=()):
     (code_keys), else one of main's 32-byte windows (read-only and data segments, 4-aligned, at least 20 distinct bytes)"""
     with open(pak, 'rb') as f:
         _, ioff, _, _, _ = footer(f); f.seek(ioff); blk = f.read(16)
-    def opens(k):
-        d = aes_decrypt(k, blk)
-        return 0 < struct.unpack_from('<i', d)[0] < 512 and d[4:7] == b'../'
+    def opens(k):   # the index starts with its mount point, an FString: length with the NUL (< 512), then a path from "." or "/": "../../../", or "/" in the empty paks beside
+        d = aes_decrypt(k, blk)   # IoStore containers (DRAGON BALL Sparking! ZERO's pakchunk1-17); the 12 bytes the block holds are printable up to the NUL
+        n = struct.unpack_from('<i', d)[0]
+        if not 1 < n < 512 or d[4] not in b'./': return False
+        s = d[4:min(4 + n, 16)]
+        return all(0x20 <= c < 0x7F for c in s[:n - 1]) and (len(s) < n or s[n - 1] == 0)
     for k in first:   # before code_keys, which reads all of main's code
         if opens(k): return k
     for k in code_keys(img, lo):
@@ -243,7 +246,8 @@ class Keys:
         if not enc: return None
         for m in self.mains:
             if m not in self.imgs: self.imgs[m] = nso_image(m)
-            k = find_key(*self.imgs[m], pak, first=self.found)
+            img, lo, hi = self.imgs[m]
+            k = find_key(img, lo, hi, pak, first=self.found)
             if k:
                 if k not in self.found: self.found.append(k)
                 return k
@@ -394,7 +398,9 @@ class Toc:
         o += 12 * nblk
         self.methods = [b[o + mlen * i:o + mlen * (i + 1)].rstrip(b'\0').decode('latin1') for i in range(nmeth)]
         o += mlen * nmeth
-        self.dir_index = b[o:o + dsz] if b[80] & 8 and not b[80] & 6 else b''   # the directory index follows unless a signature comes first (flag 4) or it is encrypted (flag 2)
+        # the directory index follows unless a signature comes first (flag 4); an encrypted container's (flag 2) is encrypted with the data's key (DRAGON BALL Sparking! ZERO), b'' without it
+        d = b[o:o + dsz] if b[80] & 8 and not b[80] & 4 else b''
+        self.dir_index = (aes_decrypt(key, d + bytes(-len(d) % 16))[:len(d)] if key else b'') if d and self.encrypted else d
         self.index = {c: i for i, c in enumerate(self.ids)}; self.files = {}
     def of_type(self, t):
         """Indices of the chunks of one EIoChunkType (Unreal Engine 5 numbering: TOC version 4 and later)"""
@@ -407,9 +413,10 @@ class Toc:
         return [self.path[:-5] + ('.ucas' if not k else f'_s{k}.ucas') for k in range(max(self.parts, 1))]
     def names(self):
         """{chunk index: file path} from the directory index (FIoDirectoryIndexResource: mount point, directories {name, first child, next sibling, first file}, files {name, next file,
-        chunk index}, string table; 0xffffffff ends a list), relative to the mount point; {} when the container has none"""
+        chunk index}, string table; 0xffffffff ends a list), joined to the mount point with its leading ../ removed, as shader_split.py labels a pak's files (DRAGON BALL Sparking! ZERO's
+        pakchunk2-17 mount at ../../../SparkingZERO/Content/L10N/<language>/…, the others at ../../../); {} when the container has none"""
         if not self.dir_index: return {}
-        r = R(self.dir_index, what=f'{self.path}: the directory index'); r.fstr()
+        r = R(self.dir_index, what=f'{self.path}: the directory index'); mount = r.fstr()
         dirs = [r.take('<4I') for _ in range(r.count())]; files = [r.take('<3I') for _ in range(r.count())]
         strs = [r.fstr() for _ in range(r.count())]
         out, none = {}, 0xffffffff; todo = [(0, '')] if dirs else []
@@ -419,7 +426,7 @@ class Toc:
             if sib != none: todo.append((sib, at))
             if child != none: todo.append((child, here))
             while f != none: nm, f, chunk = files[f]; out[chunk] = here + strs[nm]
-        return out
+        return {c: re.sub(r'^(\.\./)+', '', os.path.normpath(mount + v)) for c, v in out.items()}
     def ucas(self, part):
         if part not in self.files: self.files[part] = open(self.path[:-5] + ('.ucas' if not part else f'_s{part}.ucas'), 'rb')
         return self.files[part]
@@ -528,27 +535,36 @@ def inline_in_containers(path):
     tocs = [t for t in io_tocs(folder) if os.path.dirname(t.path) == folder]
     return any(t.export_bundles() for t in tocs) and not any(t.of_type(IO_SHADER_LIBRARY) for t in tocs)
 
-def inline_shaders(path):
+def inline_shaders(path, key=None):
     """Whether a pak keeps its shaders inline in its cooked packages rather than in shader code archives: every legacy pak (DRAGON QUEST XI S), and a version 11 pak whose directory index
     names no .ushaderbytecode and either cooked packages (.uexp; OCTOPATH TRAVELER II: bShareMaterialShaderCode off) or the global shader cache with the cooked packages in the containers beside the pak
     (inline_in_containers; Mario & Luigi: Brothership and Yoshi and the Mysterious Book: the same setting with IoStore on). FINAL FANTASY RESONANCE's pak names the global shader cache too, but its
-    shaders are in its container's shader libraries, and Octopath Traveler 0's index is encrypted (reading it takes main's key; it holds the archives): neither counts"""
+    shaders are in its container's shader libraries (neither counts). An encrypted index is read with key, main's (Keys; Octopath Traveler 0's holds the archives, DRAGON BALL Sparking! ZERO's
+    pakchunk0-Switch.pak the global shader cache, its cooked packages in the encrypted containers beside it); without a key it counts as one with archives, as before keys were tried here.
+    None: the pak names no file, so it holds neither (the empty pakchunk1-17-Switch.pak beside Sparking! ZERO's containers, mount point "/")"""
     with open(path, 'rb') as f:
         enc, ioff, isz, _, ver = footer(f)
         if ver in LEGACY: return True
-        if enc: return False
-        r = R(read_range(f, ioff, isz, path), what=f'{path}: the index'); r.fstr(); r.take('<iQ')
+        if enc and not key: return False
+        def at(off, n):   # the index and the full directory index are encrypted alike (Pak.read_at)
+            b = read_range(f, off, (n + 15) & ~15 if enc else n, path)
+            return aes_decrypt(key, b)[:n] if enc else b
+        r = R(at(ioff, isz), what=f'{path}: the index'); r.fstr(); count, _ = r.take('<iQ')
+        if not count: return None
         if r.take('<i'): r.take('<QQ'); r.raw(20)
         if not r.take('<i'): return False
-        doff, dsz = r.take('<QQ'); d = read_range(f, doff, dsz, path)
+        doff, dsz = r.take('<QQ'); d = at(doff, dsz)
     return b'.ushaderbytecode\0' not in d and (b'.uexp\0' in d or (b'GlobalShaderCache-' in d and inline_in_containers(path)))
 
-def unreal_paks(romfs, inline=None):
-    """The paks under the RomFS that Unreal wrote (its magic in the footer; inline None = any, True = those whose shaders are inline in the cooked packages, False = the others, inline_shaders):
-    the NSP script decodes the shader code archives of the others (decode_ue_shaders); shader_split.py reads the inline ones file by file (ue_legacy_jobs)"""
-    out = []
+def unreal_paks(romfs, inline=None, mains=()):
+    """The paks under the RomFS that Unreal wrote (its magic in the footer; inline None = any, True = those whose shaders are inline in the cooked packages, False = those with shader code
+    archives, inline_shaders; a pak that names no file is neither): the NSP script decodes the shader code archives (decode_ue_shaders); shader_split.py reads the inline ones file by file
+    (ue_legacy_jobs). mains: the ExeFS mains whose key opens an encrypted index (Keys); a pak no key opens is read as inline_shaders reads one without a key"""
+    out, keys = [], Keys(mains)
     for p in paks(romfs):
-        try: inl = inline_shaders(p)
+        try: k = keys(p) if mains else None
+        except (OSError, ValueError, struct.error): k = None
+        try: inl = inline_shaders(p, k)
         except (OSError, ValueError, struct.error): continue   # shorter than a footer, or no Unreal pak
         if inline is None or inl == inline: out.append(p)
     return out
@@ -575,7 +591,7 @@ def job(romfs, main_nso, work, decode=None):
             name = io_library_name(t, i, names) + '.ushaderbytecode'; b = io_archive(t, i, decode, chunk.get)
             open(os.path.join(work, 'archives', name), 'wb').write(b)
             listing.append(dict(name=name, pak=os.path.relpath(t.path, romfs), path=f'chunk {t.ids[i].hex()}', shaders=len(archive(b)['shaders']), compressed=0, compression='IoStore, decoded'))
-    for pak in unreal_paks(romfs, inline=False):
+    for pak in unreal_paks(romfs, inline=False, mains=[main_nso]):
         p = Pak(pak, keys(pak))
         for path in sorted(x for x in p.files if x.endswith('.ushaderbytecode')):
             b = p.read(path); a = archive(b, f'{pak}: {path}'); name = os.path.basename(path)

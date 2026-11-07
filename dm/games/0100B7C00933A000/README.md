@@ -19,6 +19,8 @@ Status: on the Mac, the boot, the title (a VP9 movie behind the logo), the main 
 
 - **Current:** 30 fps, as on the Switch. The game steps a fixed frame time (`bUseFixedFrameRate=True` in `DefaultEngine.ini`, Unreal's default `FixedFrameRate` of 30) and asks for present interval 2 (`rhi.SyncInterval=2` in `SwitchDeviceProfiles.ini`, `r.VSync=1`), so a faster present rate would speed the game up, not smooth it. No `fps_target`.
 
+- **Open: 60 fps.** [Unreal's fixed frame rate](../../../docs/reference/frame-rate.md#unreals-fixed-frame-rate-found-by-its-reflection-entry) is the way, but the rule cannot reach this game's engine object. The property is at `UEngine+0x7a8` (its reflection entry at `main+0x90ccc10`, `MinDesiredFrameRate` at `+0x908`), and no code stores it through a global. The one load at that offset through a global (`main+0x1689a70`, through `main+0x9350560`) reads another object, which held -980 there in a run on 2026-11-08; the next four globals by hits on `UEngine`'s offsets held no frame rate there either. With `fps_target 60` and only `rhi.SyncInterval` written (1), the game stayed at 30 fps on the Mac (the user, in a window at 120). Finding `GEngine` (for one, through the object `FEngineLoop` stores after making the engine) is the next step.
+
 ## Memory
 
 - `nninitStartup` needs virtual address memory, sets a 6 MB heap for the C library's malloc and reserves one address region for the engine, 62 GB.

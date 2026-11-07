@@ -178,7 +178,9 @@ def to_stage(msl, i, reads=None):
     vw = {n: _width(c, read(n)) for n, c in vm.items() if isinstance(n, int)}
     pw = {n: _width(c, read(n)) for n, c in pm.items()}
     mw = {n: _width([None] * 4, read(n)) for n in miss}
-    head += ('struct dm_vertex_t {\n    float4 position [[position]];\n' +
+    # The position is invariant, as a vertex shader's: a game may draw the same geometry with two mesh shaders and test the second for depth equality
+    # (Ocarina of Time draws its foliage with a mesh depth pre-pass and a mesh colour pass with depth EQUAL)
+    head += ('struct dm_vertex_t {\n    float4 position [[position, invariant]];\n' +
              ('    float point_size [[point_size]];\n' if 'psiz' in vm else '') +
              ''.join(f'    {_type(w)} a{n} [[user(locn{n})]];\n' for n, w in vw.items()) +
              ''.join(f'    {_type(w)} dm_pad{n} [[user(locn{n})]];\n' for n, w in mw.items()) + '};\n' +

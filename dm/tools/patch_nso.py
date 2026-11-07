@@ -169,10 +169,10 @@ FPS_TARGET_PTR, FPS_TARGET_FIELD, fps_target_why = fps_target.find(bytes(IMG), T
 if FPS_TARGET_PTR is not None: print(f'{NAME}: {fps_target_why} (fps_target.py)')
 elif fps_target_why.startswith('[RED] '): print(f'[RED] {NAME}: {fps_target_why[6:]}: the host cannot write it')
 
-# ---- Unreal's fixed frame rate (main: dm/tools/ue_fixed_rate.py finds UEngine::FixedFrameRate by its reflection entry and GEngine by the code that reaches it, without a build ID) ----
-# The fixups table names GEngine's offset and the property's (UE_FIXED_RATE_PTR, UE_FIXED_RATE_FIELD); the host writes the profile's fps_target there (hle_fpslock.c)
+# ---- Unreal's fixed frame rate (main: dm/tools/ue_fixed_rate.py finds UEngine::FixedFrameRate and bUseFixedFrameRate by their reflection entries and GEngine where the engine is made, without a build ID) ----
+# The fixups table names GEngine's offset, the property's and the flag's (UE_FIXED_RATE_PTR, UE_FIXED_RATE_FIELD, UE_FIXED_RATE_FLAG); the host writes the profile's fps_target there while the flag is set (hle_fpslock.c)
 import ue_fixed_rate
-UE_FIXED_PTR, UE_FIXED_FIELD, ue_fixed_why = ue_fixed_rate.find(bytes(IMG), TEXT_END, RO_OFF, DATA_OFF) if NAME == 'main' and UE_CVARS else (None, None, '')
+UE_FIXED_PTR, UE_FIXED_FIELD, UE_FIXED_FLAG, ue_fixed_why = ue_fixed_rate.find(bytes(IMG), TEXT_END, RO_OFF, DATA_OFF) if NAME == 'main' and UE_CVARS else (None, None, None, '')
 if UE_FIXED_PTR is not None: print(f'{NAME}: {ue_fixed_why} (ue_fixed_rate.py)')
 elif ue_fixed_why.startswith('[RED] '): print(f'[RED] {NAME}: {ue_fixed_why[6:]}: the host cannot write it')
 
@@ -1879,7 +1879,7 @@ with open(P('fixups.tsv'), 'w') as f:
     if FS_STATE_OFF: f.write(f'# FPS_STATE_OFF\t{FS_STATE_OFF:#x}\n')   # frame step state page (FRAME_STEP): the loader writes the target fps there
     if UE_CALLS: f.write(f'# UE_MALLOC_VT\t{UE_VT:#x}\n# UE_MALLOC_SLOT\t{UE_SLOT:#x}\n')   # Unreal's FMallocBinned3 (ue_malloc.py): its vtable and the slot of its name getter, which names the slot layout
     if FPS_TARGET_PTR is not None: f.write(f'# FPS_TARGET_PTR\t{FPS_TARGET_PTR:#x}\n# FPS_TARGET_FIELD\t{FPS_TARGET_FIELD:#x}\n')   # a target frame rate the game steps by (fps_target.py)
-    if UE_FIXED_PTR is not None: f.write(f'# UE_FIXED_RATE_PTR\t{UE_FIXED_PTR:#x}\n# UE_FIXED_RATE_FIELD\t{UE_FIXED_FIELD:#x}\n')   # Unreal's GEngine and UEngine::FixedFrameRate (ue_fixed_rate.py)
+    if UE_FIXED_PTR is not None: f.write(f'# UE_FIXED_RATE_PTR\t{UE_FIXED_PTR:#x}\n# UE_FIXED_RATE_FIELD\t{UE_FIXED_FIELD:#x}\n# UE_FIXED_RATE_FLAG\t{UE_FIXED_FLAG:#x}\n')   # Unreal's GEngine, UEngine::FixedFrameRate and bUseFixedFrameRate (ue_fixed_rate.py)
     for n, o in UE_CVARS.items(): f.write(f'# UE_CVAR:{n}\t{o:#x}\n')   # Unreal console variables (ue_cvar.py): the TAutoConsoleVariable registered under each name
     if RENDER_SCALE: f.write('# RENDER_SCALE\t1\n')   # a render-scale stub reads state +0x10 (the loader ignores the key; dm/games/settings.py offers the setting by it)
     if NAME == 'main':

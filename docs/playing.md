@@ -46,6 +46,8 @@ A controller macOS pairs but Apple's controller support does not list, such as a
 
 To quit with a controller, hold its Home button (the logo button on an Xbox or PlayStation controller) for 2 seconds, then press A to quit or B to go back to the game. Quitting this way is the same as ⌘Q: progress the game has not saved is lost. If holding Home opens the Games app instead, macOS keeps the Home button for itself: its controller settings for the Home button decide whether apps may use it. `DM_HOME_QUIT=0` in `env.txt` turns the hold off.
 
+The keyboard plays too, as player 1 beside the first controller: WASD the left stick, the arrow keys the D-pad (with Shift held: the right stick), J K U I are A B X Y, Q E are L R, Z C are ZL ZR, F and G press the sticks, Return and Tab are + and −, and Space shakes the controller. `DM_KBD_MAP` in `env.txt` moves any of them, and gives the right stick keys of its own for a camera game: `DM_KBD_MAP=A=C,B=X,X=V,Y=Z,RSTICK_UP=I,RSTICK_DOWN=K,RSTICK_LEFT=J,RSTICK_RIGHT=L` ([pad_kbd.h](../dm/host/pad_kbd.h) names every action and key).
+
 The mouse pointer hides when you press a key or a controller button, or move a stick, while it is over the game picture. Moving the mouse shows it again, as does switching to another window or app.
 
 ## Shaders on first sight

@@ -6,6 +6,7 @@
 // Window" (⌘⇧C, or DM_CHEATS_WINDOW=1 at launch) opens a Cheats panel beside the game: sections, search, the master switch,
 // safe mode, values, details and the import of cheat files (see the code below).
 // Key map (Nintendo layout): WASD left stick, arrow keys D-pad (with Shift held: the right stick, for the camera), J=A K=B U=X I=Y, Q=L E=R, Z=ZL C=ZR, F=press left stick G=press right stick, Return=+ Tab=−, Space=shake the controller.
+// DM_KBD_MAP moves any of them, and gives the right stick keys of its own (pad_kbd.h); it is read from env.txt (`DM_KBD_MAP=A=C,B=X,…`).
 // Controllers: face buttons as on the iPhone, by position (right A, bottom B, top X, left Y) or on a Nintendo pad by its labels (pad_apple.h), shoulders L R, triggers ZL ZR, Menu + Options −, both sticks and their presses.
 // Each controller is a player of its own (local co-op): the first one connected is player 1, together with the keyboard, the next player 2, and so on up to 8 (pad_slots.h);
 // DM_PAD_MERGE=1 merges every controller into player 1 instead, DM_KBD_PLAYER=own makes the keyboard player 1 on its own, with the controllers from player 2 on.
@@ -23,6 +24,7 @@
 #include "motion_pro_mac.h"
 #include "pad_apple.h"
 #include "pad_hid_mac.h"
+#include "pad_kbd.h"
 #include "home_quit.h"
 #include "home_quit_mac.h"
 #include <signal.h>
@@ -30,9 +32,9 @@
 #include <sys/stat.h>
 
 static CAMetalLayer *g_layer;
-static uint64_t g_btn;
-static int g_w, g_a, g_s, g_d;
-static int g_rl, g_ru, g_rr, g_rd;   // arrow keys pressed with Shift held: the right stick (each goes back up as it went down, whatever Shift does meanwhile)
+static pad_kbd g_kbd;                // the keyboard's map (pad_kbd.h): DM_KBD_MAP over the default
+static uint64_t g_kheld;             // one bit per pad_kbd action held now (g_held below is the controllers)
+static uint8_t g_krole[256];         // the action each key code went down as, +1 (0: none), so an arrow with Shift comes back up as it went down, whatever Shift does meanwhile
 static int g_input_on = 1;   // main thread: the game window is key, so its keyboard, mouse and controllers reach the game (input_release / input_resume)
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
@@ -121,21 +123,24 @@ static void cursor_hide_for_input(void) {
     NSView *v = g_win.contentView;
     if (NSPointInRect([v convertPoint:g_win.mouseLocationOutsideOfEventStream fromView:nil], v.bounds)) [NSCursor setHiddenUntilMouseMoves:YES];
 }
+// DM_KBD_MAP (pad_kbd.h): read once, on the first key the game window sees, so the map the app started with is the one used
+static void kbd_init(void) {
+    static int done;
+    if (done) return;
+    done = 1;
+    const char *map = getenv("DM_KBD_MAP");
+    pad_kbd_init(&g_kbd, map);
+    if (map && *map) LOG("front end: keyboard map from DM_KBD_MAP");
+}
+static int32_t kbd_axis(uint64_t h, int pos, int neg) { return (int32_t)(((h >> pos) & 1) - ((h >> neg) & 1)) * DM_STICK_MAX; }
 static void push(void) {
-    int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767;
-    int32_t rx = (g_rr - g_rl) * 32767, ry = (g_ru - g_rd) * 32767;
-    dm_input_set(g_btn, lx, ly, rx, ry);
+    const uint64_t h = g_kheld;   // PK_A..PK_DOWN are dm_input.h's button bits in that order, so the low 16 are the buttons as they are
+    dm_input_set((h & 0xFFFF) | (((h >> PK_SHAKE) & 1) ? DM_BTN_SHAKE : 0),
+                 kbd_axis(h, PK_LRIGHT, PK_LLEFT), kbd_axis(h, PK_LUP, PK_LDOWN),
+                 kbd_axis(h, PK_RRIGHT, PK_RLEFT), kbd_axis(h, PK_RUP, PK_RDOWN));
 }
-static int key_bit(unsigned short code) {
-    switch (code) {
-        case 38: return 0;  case 40: return 1;  case 32: return 2;  case 34: return 3;    // J K U I → A B X Y
-        case 3: return 4;   case 5: return 5;                                            // F G → press stick
-        case 12: return 6;  case 14: return 7;  case 6: return 8;   case 8: return 9;    // Q E Z C → L R ZL ZR
-        case 36: return 10; case 48: return 11;                                          // Return Tab → + −
-        case 123: return 12; case 126: return 13; case 124: return 14; case 125: return 15; // ← ↑ → ↓
-    }
-    return -1;
-}
+// Whatever the keyboard held goes up (the window lost focus, a text box took it, the guest asked for input)
+static void kbd_release_all(void) { g_kheld = 0; memset(g_krole, 0, sizeof g_krole); push(); }
 // fn held with a letter: the arrow and function keys carry the same modifier flag, so the key must be a letter for this to be a Globe shortcut
 static int fn_shortcut(NSEvent *e) {
     NSString *s = e.charactersIgnoringModifiers;
@@ -143,16 +148,23 @@ static int fn_shortcut(NSEvent *e) {
 }
 static void on_key(NSEvent *e, int down) {
     if (!g_input_on) return;
+    kbd_init();
     unsigned short c = e.keyCode;
-    switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
+    int a = pad_kbd_action(&g_kbd, c);
+    if (a < 0 || c > 0xFF) return;
     // An arrow key pressed with Shift held is the right stick until it is released; without Shift, the D-pad. The keyboard had no right stick: a 3D game's camera
-    // could be turned only with a controller (Donkey Kong Bananza)
-    int *rs = c == 123 ? &g_rl : c == 126 ? &g_ru : c == 124 ? &g_rr : c == 125 ? &g_rd : NULL;
-    if (rs && (down ? (e.modifierFlags & NSEventModifierFlagShift) != 0 : *rs)) { *rs = down; push(); return; }
-    int b = key_bit(c);
-    uint64_t m = b >= 0 ? 1ull << b : c == 49 ? DM_BTN_SHAKE : 0;   // Space: shaken while held
-    g_btn = down ? (g_btn | m) : (g_btn & ~m);
-    if (down && (m || c == 13 || c == 0 || c == 1 || c == 2)) cursor_hide_for_input();   // a key the game takes (WASD: the left stick)
+    // could be turned only with a controller (Donkey Kong Bananza). Only a D-pad action moves: a right stick given keys of its own (DM_KBD_MAP) keeps them
+    if (down) {
+        if ((e.modifierFlags & NSEventModifierFlagShift) != 0) a = pad_kbd_as_right_stick(a);
+        g_krole[c] = (uint8_t)(a + 1);
+        g_kheld |= 1ull << a;
+        cursor_hide_for_input();   // a key the game takes
+    } else {
+        int was = g_krole[c];
+        if (!was) return;           // went down before this window had the keyboard: nothing to release
+        g_krole[c] = 0;
+        g_kheld &= ~(1ull << (was - 1));
+    }
     push();
 }
 
@@ -275,7 +287,7 @@ static void input_release(void) {
     display_awake(0);
     g_input_on = 0;
     dm_motion_pro_active(0);
-    g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
+    kbd_release_all();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
     pads_release();
 }
@@ -1483,7 +1495,7 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
     dispatch_sync(dispatch_get_main_queue(), ^{
         // The box takes the keyboard and the mouse, so the game window never sees the key-up of the button or the touch-up of the click that opened it: nothing may stay pressed
         // while it is up, or the game reads the stuck button / touch the moment the box closes (Stardew Valley's character creation re-opened the keyboard endlessly)
-        g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
+        kbd_release_all();
         dm_touch_set(NULL, 0);
         int min_chars = g_swkbd_min_chars > 0 ? g_swkbd_min_chars : 0;
         NSString *info = [NSString stringWithFormat:@"%s%s%s", sub ? sub : "", sub && *sub && guide && *guide ? "\n" : "", guide ? guide : ""];

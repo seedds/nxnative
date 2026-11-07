@@ -1,13 +1,13 @@
 # A pixel shader's alpha test and logic operation entry points from one Metal compile (GitHub issue #1036). Every pixel shader needs them, since which shaders draw with either shows only in play,
 # and few ever do: compiling each as a library of its own was 57% of Pokopia's 366,805 compiles. So the compile unit holds each entry point's body once, as a static function, with thin
 # entry points around it: main0 (and main0_u / main0_m / main0_d), and the <entry>_a (dmsh_alpha.py) and <entry>_l (dmsh_logic.py) that test or combine what the body returned.
-# A pixel shader then costs about what its base alone cost: 34-36% of the Metal CPU of three compiles, on the Mac's flags and the iPhone's, over 125 shaders of six games (dm/games/0400A3A01EE4C000/README.md).
-# metallib gives every entry point a complete module, whether or not the body is shared, and two things in the host's path grow with what one file holds: metal-tt compiles every unspecialized
-# entry point of a library, so a base library with them made the pipeline archive twice as large, and the base library is what every shader loads. So the compile's one library is
-# cut in two: <key>_b with the plain entry points, <key>_bx with the others, which the host loads on first need (nvn_mtl.m at_fn, lo_fn). <key>_b.metal stays the plain source, which is
-# what every other tool reads. cut() takes functions out of the file as `metallib --function-name` does (byte-identical for one function), and unlike that option takes several, in groups:
-# the readable-tile version main0_f (dmsh_fetch.fold) is a third library, <key>_bf, of the same compile. The Metal cache keeps the cut libraries, not the whole one: a change to what cut()
-# gives for the same groups changes what the cache holds, so it needs a new dmsh_mtlcache.FORMAT.
+# Compiled as one unit, a pixel shader costs about what its base alone cost: 34-36% of the Metal CPU of three compiles, on the Mac's flags and the iPhone's, over 125 shaders of six games
+# (dm/games/0400A3A01EE4C000/README.md). The build compiles none of it: it writes the unit as MSL, <key>_bx.metal beside the Mac and iOS libraries (dmsh_build.py ps_libraries), and the
+# host compiles it when a draw first needs an alpha test or a logic operation (nvn_mtl.m side_lib, from at_fn and lo_fn), so a pixel shader costs the build only its base (and its
+# readable-tile version main0_f, dmsh_fetch.fold, cut from the same compile as <key>_bf). <key>_b.metal stays the plain source, which is what every other tool reads. cut() takes
+# functions out of a compiled library as `metallib --function-name` does (byte-identical for one function), and unlike that option takes several, in groups: the build cuts <key>_bf
+# from <key>_b's compile with it, and a build that compiled the unit offline would cut <key>_b and <key>_bx (dmsh_mtlcache.compile_split). The Metal cache keeps the cut libraries, not the
+# whole one: a change to what cut() gives for the same groups changes what the cache holds, so it needs a new dmsh_mtlcache.FORMAT.
 # Usage: unit(msl) → (the compile unit, {'alpha': entry point names, 'logic': entry point names}), or (None, {'why': why}); cut(library bytes, names of each further library's functions...)
 # → (base bytes, each further library's bytes...); shared_body(msl) → msl with main0's body as dm_body_main0 (None on an unknown shape), calling(e, name, ret, tail) → an entry point calling it
 import re, struct

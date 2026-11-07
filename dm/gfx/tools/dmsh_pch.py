@@ -26,30 +26,30 @@ fragment float4 main0(main0_in in [[stage_in]], constant set0& t [[buffer(0)]])
 _lock, _headers = threading.Lock(), {}
 
 
-def make(metal):
-    """The header for a compile convention (the metal command up to its source, with -c), checked on PROBE. Returns its path, or (None, why it is not used)"""
+def make(metal, env=None):
+    """The header for a compile convention (the metal command up to its source, with -c, run with env), checked on PROBE. Returns its path, or (None, why it is not used)"""
     d = tempfile.mkdtemp(prefix='pch_', dir=os.environ.get('WORK'))   # not dmsh_*: that is the build's own temporary folder, which the NSP script's progress looks for
     atexit.register(shutil.rmtree, d, ignore_errors=True)
     h, pch, src = os.path.join(d, 'prefix.h'), os.path.join(d, 'prefix.pch'), os.path.join(d, 'probe.metal')
     with open(h, 'w') as f: f.write(HEADER)
     with open(src, 'w') as f: f.write(PROBE)
-    r = subprocess.run([*(a for a in metal if a != '-c'), '-x', 'metal-header', h, '-o', pch], capture_output=True, text=True)
+    r = subprocess.run([*(a for a in metal if a != '-c'), '-x', 'metal-header', h, '-o', pch], capture_output=True, text=True, env=env)
     if r.returncode: return None, f'it does not build: {r.stderr.strip()[:200]}'
     outs = []
     for extra, name in (((), 'plain.air'), (('-include-pch', pch), 'header.air')):
         out = os.path.join(d, name)
-        r = subprocess.run([*metal, *extra, src, '-o', out], capture_output=True, text=True)
+        r = subprocess.run([*metal, *extra, src, '-o', out], capture_output=True, text=True, env=env)
         if r.returncode: return None, f'a test shader does not compile: {r.stderr.strip()[:200]}'
         with open(out, 'rb') as f: outs.append(f.read())
     if outs[0] != outs[1]: return None, 'a test shader compiled with it differs'
     return pch, None
 
 
-def header(metal):   # the path of the convention's header, None when it is not used (said once)
+def header(metal, env=None):   # the path of the convention's header, None when it is not used (said once)
     if os.environ.get('DMSH_PCH') == '0': return None
     with _lock:   # the other workers wait for it: compiling without it would be slower than the wait
         if tuple(metal) not in _headers:
-            pch, why = make(metal)
+            pch, why = make(metal, env)
             if why: print(f'note: no precompiled Metal header for {" ".join(metal)}, so each compile takes longer: {why}', flush=True)
             _headers[tuple(metal)] = pch
         return _headers[tuple(metal)]
@@ -61,13 +61,13 @@ def _run(metal, msl, air, **kw):
     with open(msl, 'rb') as f: return subprocess.run([*metal, '-x', 'metal', '-', '-o', air], stdin=f, **kw)
 
 
-def compile(metal, msl, air):
-    """metal (the command up to its source, with -c) on msl → air. A compile that fails with the header runs again without it, so what a failure reports and raises (CalledProcessError) is the plain compile's"""
-    pch = header(metal)
+def compile(metal, msl, air, env=None):
+    """metal (the command up to its source, with -c, run with env: ios_metal.metal gives the tool's own path and xcrun's SDKROOT) on msl → air. A compile that fails with the header runs again without it, so what a failure reports and raises (CalledProcessError) is the plain compile's"""
+    pch = header(metal, env)
     if pch:
-        r = _run([*metal, '-include-pch', pch], msl, air, capture_output=True)
+        r = _run([*metal, '-include-pch', pch], msl, air, capture_output=True, env=env)
         if not r.returncode:
             sys.stderr.buffer.write(r.stderr); sys.stderr.flush()
             return
-    try: _run(metal, msl, air, check=True)
+    try: _run(metal, msl, air, check=True, env=env)
     except subprocess.CalledProcessError: print(f'{msl}: does not compile (the messages above say <stdin>)', file=sys.stderr, flush=True); raise

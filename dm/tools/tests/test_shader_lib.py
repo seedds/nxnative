@@ -150,13 +150,14 @@ class LeaveOutPulling(Base):
 
 class AppSubset(Base):
     def test_only_what_the_host_reads(self):
-        self.folder(k_b__metallib=b'lib', k_b__json=b'{}', k_b__metal=b'src', k_bp__metallib=b'pull', _b_build__json=b'[]', _b_cas__txt=b'd')
+        # k_bx.metal is the side library's source, which the host compiles (nvn_mtl.m side_lib): an app carries it, and not the other sources
+        self.folder(k_b__metallib=b'lib', k_b__json=b'{}', k_b__metal=b'src', k_bx__metal=b'side', k_bp__metallib=b'pull', _b_build__json=b'[]', _b_cas__txt=b'd')
         for packed in (False, True):
             if packed: self.pack()
             out = self.root / f'app{packed}.img'
-            self.assertEqual(shader_lib.subset(self.lib, out), 4)
-            self.assertEqual(sorted(romfs.Path(out).iterdir()), sorted(romfs.Path(out) / n for n in ('inputs.tsv', 'k_b.json', 'k_b.metallib', 'k_bp.metallib')))
-            self.assertEqual(shader_lib.subset(self.lib, out, ('_bp.metallib',)), 3)
+            self.assertEqual(shader_lib.subset(self.lib, out), 5)
+            self.assertEqual(sorted(romfs.Path(out).iterdir()), sorted(romfs.Path(out) / n for n in ('inputs.tsv', 'k_b.json', 'k_b.metallib', 'k_bp.metallib', 'k_bx.metal')))
+            self.assertEqual(shader_lib.subset(self.lib, out, ('_bp.metallib',)), 4)
 
     def test_refuses_a_library_with_no_shaders(self):
         self.folder(k_b__json=b'{}')

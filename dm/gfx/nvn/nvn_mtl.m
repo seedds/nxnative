@@ -5077,7 +5077,8 @@ static void shmap_read(void) {
     NSString *ventry; id<MTLFunction> vfn; int vfn_state;
     id<MTLFunction> pfn; int pfn_state, has_pull;
     id<MTLFunction> afn[4]; int afn_state, has_alpha;
-    id<MTLLibrary> llib; NSMutableDictionary<NSNumber *, id<MTLFunction>> *lfn; int lfn_state, has_logic; } @end   // llib: the side library <key>_bx for logic operations, lfn: its fn_u / fn_m specialized per set of targets (lo_fn; lfn_state as afn_state; has_logic: the reflection names its entry points, dmsh_logic.py)   // afn: the alpha test entry points of fn, fn_u, fn_m, fn_d in the side library <key>_bx (at_fn; afn_state 0 untried, 1 loaded, 2 failed; has_alpha: the reflection names them, dmsh_alpha.py)   // pfn: the same entry of the pulling library <key>_bp (pull_fn; has_pull: the reflection names one, dmsh_pull.py)   // vertex: the entry point loaded (by the depth mode); vfn: the same entry of the shadow-input library <key>_bv (vin_fn; state 0 untried, 1 loaded, 2 failed)
+    id<MTLLibrary> xlib; int xlib_state;
+    id<MTLLibrary> llib; NSMutableDictionary<NSNumber *, id<MTLFunction>> *lfn; int lfn_state, has_logic; } @end   // xlib: the side library <key>_bx compiled from its source (side_lib; xlib_state as afn_state); llib: that library for logic operations, lfn: its fn_u / fn_m specialized per set of targets (lo_fn; lfn_state as afn_state; has_logic: the reflection names its entry points, dmsh_logic.py)   // afn: the alpha test entry points of fn, fn_u, fn_m, fn_d in the side library <key>_bx (at_fn; afn_state 0 untried, 1 loaded, 2 failed; has_alpha: the reflection names them, dmsh_alpha.py)   // pfn: the same entry of the pulling library <key>_bp (pull_fn; has_pull: the reflection names one, dmsh_pull.py)   // vertex: the entry point loaded (by the depth mode); vfn: the same entry of the shadow-input library <key>_bv (vin_fn; state 0 untried, 1 loaded, 2 failed)
 @implementation NvShader
 - (void)dealloc { free(rf.c1); free(geo_slot); }
 @end
@@ -6990,6 +6991,38 @@ static uint32_t atest_key(NvShader *fs, const uint32_t cfmt[8], const uint8_t *l
     if (!fs->has_alpha) { RED_ONCE(128, "shader %s draws with alpha function %u but has no alpha test entry point (its colour 0 has no float alpha): drawn without the test", fs->key, S.color.alpha_func); return 0; }
     return 1;
 }
+// A pixel shader's side library <key>_bx (its alpha test and logic operation entry points, dmsh_side.py), compiled here from <key>_bx.metal: the build writes the side compile unit as
+// MSL only (dmsh_build.py ps_libraries), since few shaders ever draw with either and compiling it for every pixel shader was most of a build's Metal compiles. The options follow the
+// chain's offline compiles (dmsh_build.py MAC_METAL, ios_metal.py): preserved invariance, relaxed math on the iPhone; the run-time compiler has no -O1 (see the reference entry
+// "Alpha test and logic operation variants compiled on first need"). The system's Metal shader cache keeps the result for later runs. Compiled once per shader for both at_fn and
+// lo_fn (a failure is final); the draw that first needs it waits for the compile (logged)
+static os_unfair_lock g_side_lock = OS_UNFAIR_LOCK_INIT;
+static id<MTLLibrary> side_lib(NvShader *fs, NSError **e) {
+    os_unfair_lock_lock(&g_side_lock);
+    if (!fs->xlib_state) {
+        fs->xlib_state = 2;
+        size_t kl = strlen(fs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bx.metal", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), fs->key];
+        NSData *sd = msl_data(path);   // from the folder, or the library's image (msl_image_file)
+        NSString *src = sd ? [[NSString alloc] initWithData:sd encoding:NSUTF8StringEncoding] : nil;
+        if (!sd && e) *e = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOENT userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"cannot read %@", path]}];
+        static MTLCompileOptions *opt; static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            opt = [MTLCompileOptions new]; opt.preserveInvariance = YES;
+#if TARGET_OS_IPHONE
+            opt.mathMode = MTLMathModeRelaxed;
+#endif
+        });
+        uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+        if (src && (fs->xlib = [g_dev newLibraryWithSource:src options:opt error:e])) {
+            fs->xlib_state = 1;
+            static int n; static uint64_t ns; uint64_t dt = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0; ns += dt;
+            if (++n <= 3 || !(n & (n - 1))) MLOG("side library %.*s_bx compiled from source in %.1f ms (%d so far, %.1f ms in all)", (int)(kl > 2 ? kl - 2 : kl), fs->key, dt / 1e6, n, ns / 1e6);
+        }
+    }
+    id<MTLLibrary> lib = fs->xlib;
+    os_unfair_lock_unlock(&g_side_lock);
+    return lib;
+}
 static os_unfair_lock g_at_lock = OS_UNFAIR_LOCK_INIT;
 static id<MTLFunction> at_fn(NvShader *fs, id<MTLFunction> base) {   // the side library's alpha test entry point of base (one of fs's own), loaded on first need; a failure is final for the shader
     int w = !base ? -1 : base == fs->fn ? 0 : base == fs->fn_u ? 1 : base == fs->fn_m ? 2 : base == fs->fn_d ? 3 : -1;
@@ -6997,8 +7030,7 @@ static id<MTLFunction> at_fn(NvShader *fs, id<MTLFunction> base) {   // the side
     os_unfair_lock_lock(&g_at_lock);
     if (!fs->afn_state) {
         fs->afn_state = 2;
-        size_t kl = strlen(fs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bx.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), fs->key];
-        NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); const char *why = lib ? NULL : "no library";
+        NSError *e = nil; id<MTLLibrary> lib = side_lib(fs, &e); const char *why = lib ? NULL : "no library";
         id<MTLFunction> own[4] = {fs->fn, fs->fn_u, fs->fn_m, fs->fn_d};
         for (int i = 0; i < 4 && !why; i++) {
             if (!own[i]) continue;
@@ -7070,8 +7102,7 @@ static id<MTLFunction> lo_fn(NvShader *fs, id<MTLFunction> base, uint32_t target
     NSError *e = nil; const char *why = NULL;
     if (!fs->lfn_state) {
         fs->lfn_state = 2;
-        size_t kl = strlen(fs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bx.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), fs->key];
-        if ((fs->llib = lib_from_file(path, &e))) { fs->lfn_state = 1; fs->lfn = [NSMutableDictionary dictionary]; static int n; if (++n <= 3 || !(n & (n - 1))) MLOG("logic operation: side library of %s loaded (%d shaders so far)", fs->key, n); }
+        if ((fs->llib = side_lib(fs, &e))) { fs->lfn_state = 1; fs->lfn = [NSMutableDictionary dictionary]; static int n; if (++n <= 3 || !(n & (n - 1))) MLOG("logic operation: side library of %s loaded (%d shaders so far)", fs->key, n); }
         else why = "no library";
     }
     id<MTLFunction> f = nil; NSNumber *k = @(w << 8 | (targets & 0xff));

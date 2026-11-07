@@ -428,7 +428,7 @@ class App(unittest.TestCase):
             (t / 'patched' / n).write_bytes(b)
         (t / 'romfs/region_common/audio/edward.bfsar').write_bytes(b'snd')
         (t / 'cache/b-0123456789ab/k_b.metallib').write_bytes(b'lib'); (t / 'cache/b-0123456789ab/inputs.tsv').write_text('# stamp\n')
-        (t / 'cache/b-0123456789ab/k_b.json').write_text('{}'); (t / 'cache/b-0123456789ab/k_b.metal').write_text('msl'); (t / 'cache/b-0123456789ab/_b_build.json').write_text('[]')
+        (t / 'cache/b-0123456789ab/k_b.json').write_text('{}'); (t / 'cache/b-0123456789ab/k_b.metal').write_text('msl'); (t / 'cache/b-0123456789ab/_b_build.json').write_text('[]'); (t / 'cache/b-0123456789ab/k_bx.metal').write_text('side')
         (t / 'cache/cas').mkdir()   # the Metal compile cache: not for the app
         for n in ('shader_map.tsv', 'pso_manifest.tsv', 'c1_full.tsv', 'game.tsv'): (t / 'profile' / n).write_text(n)
         (t / 'profile/shader_pairs.tsv').write_text('vertex-key\tpixel-key\n'); (t / 'profile/pso_pairs.tsv').write_text('other-vertex\tother-pixel\n')
@@ -474,7 +474,7 @@ class App(unittest.TestCase):
         self.assertEqual([p.name for p in (c / 'Resources/msl').iterdir()], ['b-0123456789ab.img'])   # the libraries only, as one file, not the compile cache
         sys.path.insert(0, str(Path(__file__).resolve().parents[1])); import romfs
         msl = romfs.Path(c / 'Resources/msl/b-0123456789ab.img')
-        self.assertEqual(sorted(p.name for p in msl.iterdir()), ['inputs.tsv', 'k_b.json', 'k_b.metallib'])
+        self.assertEqual(sorted(p.name for p in msl.iterdir()), ['inputs.tsv', 'k_b.json', 'k_b.metallib', 'k_bx.metal'])
         self.assertEqual((msl / 'k_b.metallib').read_bytes(), b'lib')
         self.assertTrue((c / 'Resources/romfs/region_common/audio/edward.bfsar').is_file())
         self.assertTrue((c / 'Resources/aoc/1/x').is_file()); self.assertTrue((c / 'Resources/dm/font/nintendo_ext.ttf').is_file())

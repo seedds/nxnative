@@ -109,13 +109,11 @@ class AlphaVariant(unittest.TestCase):
                         except subprocess.CalledProcessError as e: self.fail(e.stderr)
 
 
-def fixture(out):   # t_alpha.m's shaders: <name>.metal (the base, compiled by the test) and <key>_bx.metallib (the side library the host loads), for key 0 and 1
+def fixture(out):   # t_alpha.m's shaders: <name>.metal (the base, compiled by the test) and <key>_bx.metal (the side compile unit the host compiles, as dmsh_build.py writes it), for key 0 and 1
     out = pathlib.Path(out); out.mkdir(parents=True, exist_ok=True)
     for i, src in enumerate((BASE.split('\nstruct main0_out_u')[0] + '\n', ARGS)):
         (out / f'base{i}.metal').write_text(src + VERTEX)
-        u, info = dmsh_side.unit(src)
-        lib = compile_lib(u + VERTEX, out, f'a{i}')
-        (out / f'{str(i) * 16}_bx.metallib').write_bytes(dmsh_side.cut(lib.read_bytes(), set(info['alpha'] + info['logic']))[1])
+        (out / f'{str(i) * 16}_bx.metal').write_text(dmsh_side.unit(src)[0] + VERTEX)
 
 
 if __name__ == '__main__':

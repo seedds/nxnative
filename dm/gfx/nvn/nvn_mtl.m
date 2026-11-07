@@ -2914,11 +2914,18 @@ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
 // Count: across the 4 screens character select / camp / wilderness / combat, 17473 textures needed a different-format view 0 times, so this is a fallback and does not rely on predicting which textures need it
 // The same upgrade adds render-target usage for a whole-level clear (clear_tex) of a texture made without it: Monster Hunter Rise clears a 32x80 packaged one
 static int tex_rename_all(const tex_t *t, id<MTLTexture> base, id<MTLTexture> nt);   // every name of base moves to nt; returns whether t's own serial named base (the caller puts nt, or a view of it, under the serial otherwise)
+static id<MTLTexture> tex_replace(const tex_t *t, id<MTLTexture> base, id<MTLTexture> nt, id<MTLTexture> view);   // tex_rename_all, then the serial's own name (its view made again on nt)
+// The sRGB / linear view (tex_mtl_) this serial holds when `asked` is that view or its parent, else nil. Whoever replaces the parent (tex_upgrade, ups_demote, ups_promote) makes
+// the view again on the replacement (tex_replace), so the pair keeps sharing its bytes
+static id<MTLTexture> tex_held_view(const tex_t *t, id<MTLTexture> asked) {
+    id holder = tex_get(t->serial);
+    return ![holder isKindOfClass:[NvPkg class]] && [holder conformsToProtocol:@protocol(MTLTexture)] && ((id<MTLTexture>)holder).parentTexture
+        && (holder == asked || ((id<MTLTexture>)holder).parentTexture == asked) ? holder : nil;
+}
 static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextureUsage add, MTLPixelFormat view_pf) {
     id holder = tex_get(t->serial);   // NOLINT(clang-analyzer-core.NullDereference): every caller resolved t's Metal texture first (tex_mtl returns nil for a NULL t); the analyzer's path takes clear_tex's `if (c->tex)` trace test as NULL and tex_mtl as opaque
     // The serial holds an sRGB / linear view (tex_mtl_) of the asked texture, or the asked texture is that view: the parent is upgraded and the view made again on it, so the pair keeps sharing its bytes
-    id<MTLTexture> view = ![holder isKindOfClass:[NvPkg class]] && [holder conformsToProtocol:@protocol(MTLTexture)] && ((id<MTLTexture>)holder).parentTexture
-        && (holder == asked || ((id<MTLTexture>)holder).parentTexture == asked) ? holder : nil;
+    id<MTLTexture> view = tex_held_view(t, asked);
     id<MTLTexture> base = view ? view.parentTexture : asked;
     if (base.isSparse) { RED_ONCE(149, "a placement sparse texture needs usage %#lx it was not made with (ser=%llu format %#x): kept as it is, not remade whole", (unsigned long)add, (unsigned long long)t->serial, t->d.format); return base; }
     MTLTextureDescriptor *d = [MTLTextureDescriptor new];
@@ -2952,13 +2959,9 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextu
     if ([holder isKindOfClass:[NvPkg class]]) { id<MTLTexture> old = ((NvPkg *)holder)->tex; ((NvPkg *)holder)->tex = upgraded; defer_obj_release(old); g_ser_gen++;
         if (((NvPkg *)holder)->view) { defer_obj_unref(((NvPkg *)holder)->view); ((NvPkg *)holder)->view = nil; ((NvPkg *)holder)->vbase = 0; } }   // a sparse texture's view of the old one: bound whole until its next upload
     else {
-        // Every name of the old texture moves to the upgraded one (tex_rename_all, the comment above it; shared with ups_demote); the serial that held an sRGB / linear view gets the view made again on the upgraded parent
-        int named = tex_rename_all(t, base, upgraded);
-        if (view) {
-            id<MTLTexture> nv = [upgraded newTextureViewWithPixelFormat:view.pixelFormat textureType:view.textureType levels:NSMakeRange(0, upgraded.mipmapLevelCount) slices:NSMakeRange(0, upgraded.arrayLength) swizzle:view.swizzle];
-            static int nview; if (nview++ < 4) MLOG("sRGB / linear view ser=%llu made again on its upgraded parent (%d so far)", (unsigned long long)t->serial, nview);
-            if (nv) { tex_put(t->serial, nv); upgraded_view = nv; } else RED_ONCE(151, "cannot make the sRGB / linear view ser=%llu again on its upgraded parent: it keeps the old storage", (unsigned long long)t->serial);
-        } else if (!named) tex_put(t->serial, upgraded);
+        // Every name of the old texture moves to the upgraded one (tex_rename_all, the comment above it; shared with ups_demote and ups_promote); the serial that held an sRGB / linear
+        // view gets the view made again on the upgraded parent (tex_replace)
+        upgraded_view = tex_replace(t, base, upgraded, view);
     }
     MLOG("texture upgraded to allow %s ser=%llu base format %lu → view format %lu (upgrades=%llu)", add & MTLTextureUsageShaderWrite ? "image writes" : add & MTLTextureUsageRenderTarget ? "render-target use" : "format views", t->serial, (unsigned long)base.pixelFormat, (unsigned long)view_pf, ++g_pfv_upgrades);
     return upgraded_view ? upgraded_view : upgraded;
@@ -2988,6 +2991,16 @@ static int tex_rename_all(const tex_t *t, id<MTLTexture> base, id<MTLTexture> nt
     pthread_mutex_unlock(&g_smu);
     defer_obj_release(base);
     return named;   // the caller puts nt (or, in tex_upgrade, the view made again on it) under t's serial when base was not named by it
+}
+// tex_rename_all, then the serial's own name: when it held an sRGB / linear view of base (tex_held_view, passed as view), the view is made again on nt and put under it, so the
+// pair keeps sharing its bytes (twin views); else nt goes under it when no other name did. Returns the new view, or nil
+static id<MTLTexture> tex_replace(const tex_t *t, id<MTLTexture> base, id<MTLTexture> nt, id<MTLTexture> view) {
+    int named = tex_rename_all(t, base, nt);
+    if (!view) { if (!named) tex_put(t->serial, nt); return nil; }
+    id<MTLTexture> nv = [nt newTextureViewWithPixelFormat:view.pixelFormat textureType:view.textureType levels:NSMakeRange(0, nt.mipmapLevelCount) slices:NSMakeRange(0, nt.arrayLength) swizzle:view.swizzle];
+    static int nview; if (nview++ < 4) MLOG("sRGB / linear view ser=%llu made again on its parent's replacement (%d so far)", (unsigned long long)t->serial, nview);
+    if (nv) tex_put(t->serial, nv); else RED_ONCE(151, "cannot make the sRGB / linear view ser=%llu again on its parent's replacement: it keeps the old storage", (unsigned long long)t->serial);
+    return nv;
 }
 static id<MTLTexture> tex_upgrade_pfv(const tex_t *t, id<MTLTexture> base, MTLPixelFormat view_pf) { return tex_upgrade(t, base, MTLTextureUsagePixelFormatView, view_pf); }
 // Packaged texture upload: first take the stamp, then set read-only, then read the pool memory and deswizzle into a staging buffer, and blit into a new private texture.
@@ -13366,10 +13379,12 @@ static uint64_t g_ups_demotions;   // textures demoted so far (log)
 // as the caller resolved it (a view of it names its base)
 static void ups_demote(const tex_t *t, id<MTLTexture> scaled, const char *why) {
     if (!t || !scaled || ups_of(t, scaled) <= 1) return;
-    id<MTLTexture> old = scaled.parentTexture ?: scaled;
+    id<MTLTexture> view = tex_held_view(t, scaled);   // this serial may hold an sRGB / linear view of the scaled texture (tex_mtl_): it is made again on the replacement
+    id<MTLTexture> old = view ? view.parentTexture : scaled.parentTexture ?: scaled;
     ups_mem_key mk = {(uint64_t)(uintptr_t)t->pool, t->off};
     pthread_mutex_lock(&g_smu); nvn_hm_put(&g_ups_demoted, &t->serial, (void *)1); if (t->pool) nvn_hm_put(&g_ups_demoted_mem, &mk, (void *)1); pthread_mutex_unlock(&g_smu);
     MTLTextureDescriptor *d = tex_desc(t, 0); if (!d) return;
+    d.pixelFormat = old.pixelFormat;   // the replacement takes the base's names; through a view this serial's own format is the base's twin (tex_desc gives the serial's)
     d.usage = old.usage;   // what the scaled one had grown (tex_upgrade's format views), so the views made of it keep working
     id<MTLTexture> nt = [g_dev newTextureWithDescriptor:d];
     if (!nt) { RED_ONCE(158, "resolution upscaling: cannot make the game-size texture of a demotion (ser=%llu %ux%u format %#x); the scaled one stays", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format); return; }
@@ -13378,7 +13393,7 @@ static void ups_demote(const tex_t *t, id<MTLTexture> scaled, const char *why) {
     NVNcopyRegion sr = {0, 0, 0, (int)old.width, (int)old.height, layers}, dr = {0, 0, 0, (int)nt.width, (int)nt.height, layers};
     int copied = old.sampleCount == 1 && copy_t2t_draw(old, nt, 0, 0, 0, 0, &sr, &dr, !fmt_int_or_ds(old.pixelFormat), 0);
     if (!copied) tex_zero_fill(nt, 1);   // what can be cleared is (not depth, stencil or multisample formats): the game's next clear or full draw settles the rest
-    if (!tex_rename_all(t, old, nt)) tex_put(t->serial, nt);
+    tex_replace(t, old, nt, view);
     args_dirty_all();   // argument tables holding the scaled texture are rebuilt (tex_fast_rid follows g_ser_gen; the next pass has a new serial)
     g_ups_demotions++;
     if (g_ups_demotions <= 24 || g_ups_demotions % 200 == 0)

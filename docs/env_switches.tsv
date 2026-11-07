@@ -79,6 +79,8 @@ DM_HOME_QUIT_TEXT	switch	The texts of the Home button's quit prompt in the playe
 DM_HTML	path	Folder of the offline HTML pages (default: `html` beside the RomFS)
 DM_ICON	path	`=<image>` gives `build_ipa.sh` another app icon (default the `icon.jpg` beside the RomFS)
 DM_IMPORTS	diagnostic	When set, logs each import the loader binds to a host function and each forced takeover
+DM_ITV_LATCH	diagnostic	`=1` (off by default, effect not measured): present interval 2 is held until the game has asked for 1 continuously for `DM_ITV_LATCH_MS`, so a game that flips between 1 and 2 every few frames runs one steady 30 fps instead of alternating 16.7 and 33.3 ms periods (`present_itv` in `hle_nvn.c`).
+DM_ITV_LATCH_MS	diagnostic	`=<ms>` how long the game must ask for interval 1 before `DM_ITV_LATCH` lets go of interval 2 (default 3000).
 DM_JIT_CAPTURE	path	Folder the Mac host writes what a game's `nn::jit` plugin makes to, one `<key>.jit` per request, for `dm/tools/jit_capture.py`; the NSP script sets it
 DM_JIT_LOG	diagnostic	`1` logs every `nn::jit` `GenerateCode` request
 DM_JIT_MISS_DUMP	diagnostic	Folder for the input of each `nn::jit` request a served image lacks

@@ -413,7 +413,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** the game opens the controller applet again and again (Orbitals' lobby with a third controller connected).
 - **Cause:** the applet returned with more controllers connected than its maximum; a game checks the count and opens it again.
 - **Fix:** `hle_hid.c` disconnects the controllers past the applet's maximum when it returns.
-- **Found on:** Orbitals (`040004F027560000`).
+- **Found on:** [Orbitals](../../dm/games/040004F027560000/README.md#driving-it-on-the-mac).
 
 ### Controller haptic engines without advanced players
 
@@ -626,7 +626,7 @@ Most service calls can be found before they crash, before the first boot or the 
   - `hle_nvn.c`: the builder getters.
 
   Its vsync thread's `nn::vi::ListFrameHistory` is the [Layer frame history](#layer-frame-history) above.
-- **Found on:** Orbitals (`040004F027560000`).
+- **Found on:** [Orbitals](../../dm/games/040004F027560000/README.md#found-on-this-game).
 
 ### oe calls answered without an applet proxy
 
@@ -889,6 +889,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Super Mario 3D All-Stars: Super Mario 64](../../dm/games/010049900F546001/README.md): command 4's request struct leaves 4 padding bytes uninitialised, which differed once the plugin no longer ran; the image is about 14 MB, and the JIT layout a second reservation of 0.96 GB on the iPhone.
 - **Check:** `test_jit_capture.py` (`dm/tools/tests`).
 - **Note:** a request the image lacks stops the app there: play that part on the Mac and pack again. Not run on a device yet.
+
 ### Nintendo-extension glyphs for button icons
 
 - **Symptom:** controller-button icons in text show as `?`.
@@ -1012,6 +1013,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (13.0.5): it loads six NROs in its first 30 s and calls none of the stubs. Played on an iPhone.
 
 - **`.nrolz`:** NERD's Hagi keeps a recompiled game as an NRO packed as a big-endian u32 size, then one LZ4 block ([Super Mario Sunshine (Super Mario 3D All-Stars)](../../dm/games/010049900F546002/README.md): `data/gekko/MarioSunshine/nx/MarioSunshine.nrolz`), which it unpacks and hands to `ro::LoadModule`, so its SHA-256 is the unpacked image's. `dm/tools/nro_collect.py` unpacks such files too and matches them against the NRRs.
+
 ### NRO tables sized from the manifest and snapshots taken on demand
 
 - **Symptom:** `FATAL .../nro.tsv: more NROs than module slots (MAX_MOD 128)` before `nnMain` (GitHub issue [#372](https://github.com/seedds/nxnative/issues/372)); after increasing the capacity, startup eagerly copies several GB of inactive NRO data and bss.

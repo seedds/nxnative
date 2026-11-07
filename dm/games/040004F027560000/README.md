@@ -4,6 +4,9 @@ A Switch 2 game: v327680, SDK 21.4.2 built for the Switch 2 (`Ounce`), NVN2 (Amp
 
 ## What it needs
 
+SDK 21's audio, which came with Star Fox (#1259): Wwise 2024.1 uses SDK 21's queued `HardwareOpusDecoderManager` and `nn::audio` OutputStream ([SDK 21's hardware Opus decoder manager](../../../docs/reference/audio.md#sdk-21s-hardware-opus-decoder-manager), [SDK 21's OutputStream on a virtual output device](../../../docs/reference/audio.md#sdk-21s-outputstream-on-a-virtual-output-device)). Without them the game aborts at boot (`nn::diag abort: Result 0xe15`, sdk+0x322660). With them it plays to stage 2 with sound: 0 underruns after the first seconds.
+
+
 | Setting | Where | Why |
 |---|---|---|
 | `mem_alias 0x1000000000`, `mem_reserve 0x1028000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | [`game.tsv`](game.tsv) | Unreal's 62 GB address region in `nninitStartup` and FMallocBinned3's 37 GB of it: a 64 GB alias region on the Mac ([memory](../../../docs/reference/memory.md)) |
@@ -21,13 +24,13 @@ A Switch 2 game: v327680, SDK 21.4.2 built for the Switch 2 (`Ounce`), NVN2 (Amp
 
 ## Shaders
 
-- 23,432 in [`shader_map.tsv`](shader_map.tsv) (3,415 compute, 3,556 vertex, 16,459 pixel, 2 geometry), from the two IoStore shader libraries `ShaderArchive-{Global,Orbitals}-SF_GLSL_SWITCH2-SP_GLSL_SWITCH2` (Oodle). All 23,432 translate (chain 85c751370308, current).
+- 23,432 in [`shader_map.tsv`](shader_map.tsv) (3,415 compute, 3,556 vertex, 16,459 pixel, 2 geometry), from the two IoStore shader libraries `ShaderArchive-{Global,Orbitals}-SF_GLSL_SWITCH2-SP_GLSL_SWITCH2` (Oodle). All 23,432 translate (current; checked with this tree's translator on 2026-11-05).
 - Shader keys map to Unreal shader names: a key's `#UE<n>` in `shader_map.tsv` is line n of the archive's `.usf|` strings. For example `a958e514cc3f4431` is `FBuildInstanceIdBufferAndCommandsFromPrimitiveIdsCs`, `d032ce5090303e01` the GPU radix sort's downsweep, `e97d65cf4844ecdb` the player ship's base pass (`M_Cel_Base_PlayerShip`), `2dab9fff04ddd58a` the homing missile's thruster mesh.
 - The prewarm seed list, [`pso_manifest.tsv`](pso_manifest.tsv) (3,078 lines: 1,344 shaders, 1,523 render pipelines, 211 compute pipelines), is the Mac's device list of the play sessions of 2026-11-04.
 
 ## Rendering
 
-- Frame time in stage 2 with both players flying and firing: 33.3 ms at 30 fps, GPU about 21 ms, submit and present about 10 ms (M4 Pro, chain 85c751370308, 2026-11-04).
+- Frame time in stage 2 with both players flying and firing: 33.3 ms at 30 fps, GPU about 21 ms, submit and present about 10 ms (M4 Pro, 2026-11-04 and 2026-11-05).
 - What the Switch 2 shows was checked against a published co-op walkthrough (YouTube `-a5HMPJueu8`, chapter 2 at 944 s): the stage 2 start matches, with the vertical light columns on the right.
 - One `[RED]` line a run: `vertex attribute format 0x27 (8 / 8-bit integer) feeds a float input`, converted on the CPU, with no visible effect.
 
@@ -56,3 +59,10 @@ Both players are needed: `DM_CTL` lines `p2:<keys>` drive player 2. Pressing `A`
 - [Integer bits in a float colour output in a specialized Metal 4 pipeline](../../../docs/reference/rendering.md#integer-bits-in-a-float-colour-output-in-a-specialized-metal-4-pipeline): the player ship dark while engaging, loading dark then popping in.
 - [32-bit integer buffer and linear textures re-created every frame](../../../docs/reference/rendering.md#32-bit-integer-buffer-and-linear-textures-re-created-every-frame): a texture upgrade every frame.
 - [A rescue's display link is made only once the window is visible](../../../docs/reference/frame-rate.md#a-rescues-display-link-is-made-only-once-the-window-is-visible).
+- [Ampere instructions of Unreal Engine 5.6's Switch 2 shaders](../../../docs/reference/shaders.md#ampere-instructions-of-unreal-engine-56s-switch-2-shaders): 19,720 of 23,432 shaders left out at first; black backgrounds.
+- [A scalar storage-buffer load that lost its index](../../../docs/reference/shaders.md#a-scalar-storage-buffer-load-that-lost-its-index): the title's black 3D background.
+- [Compute threads that return before a barrier](../../../docs/reference/shaders.md#compute-threads-that-return-before-a-barrier): GPU hangs.
+- [NVN2 compute `c0` with two push blocks](../../../docs/reference/shaders.md#nvn2-compute-c0-with-two-push-blocks).
+- [The GPU watchdog and GPU-written dispatch counts](../../../docs/reference/nvn-objects.md#the-gpu-watchdog-and-gpu-written-dispatch-counts).
+- [More controllers than the controller applet's maximum](../../../docs/reference/services.md#more-controllers-than-the-controller-applets-maximum): the lobby reopened the applet forever.
+- [Unreal Engine 5.6's Switch 2 platform layer at start](../../../docs/reference/services.md#unreal-engine-56s-switch-2-platform-layer-at-start): the abort after `nn::chat::Initialize`. Its three frames then a wait in `FFrameEndSync` are main's [Layer frame history](../../../docs/reference/services.md#layer-frame-history).

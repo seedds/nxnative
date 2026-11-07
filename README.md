@@ -28,7 +28,6 @@ Community projects build on nxnative with Mac apps that turn your games into app
 
 - [NX2Apple](https://github.com/LNPANDY/NX2Apple)
 - [NX Play](https://github.com/varyform/nx-native-wrapper)
-- [NxNative Launcher](https://github.com/rennan101/nxnative_Launcher)
 - [LumaNX](https://github.com/Xc1Ym/LumaNX)
 
 ### Build from the command line
